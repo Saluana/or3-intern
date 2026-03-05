@@ -271,7 +271,7 @@ func (s *Service) armJobLocked(job CronJob) {
 	case KindEvery:
 		sec := int64(job.Schedule.EveryMS / 1000)
 		if sec <= 0 { sec = 60 }
-		spec := "@every " + time.Duration(sec)*time.Second.String()
+		spec := "@every " + (time.Duration(sec) * time.Second).String()
 		eid, err := s.c.AddFunc(spec, func() {
 			if e := s.runner(context.Background(), job); e != nil {
 				log.Printf("cron runner error: id=%s err=%v", job.ID, e)

@@ -1,0 +1,516 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"or3-intern/internal/artifacts"
+	"or3-intern/internal/bus"
+	"or3-intern/internal/db"
+	"or3-intern/internal/providers"
+	"or3-intern/internal/tools"
+)
+
+// mockDeliverer captures delivered messages
+type mockDeliverer struct {
+	messages []string
+	err      error
+}
+
+func (m *mockDeliverer) Deliver(ctx context.Context, channel, to, text string) error {
+	m.messages = append(m.messages, text)
+	return m.err
+}
+
+// buildChatServer creates a test HTTP server that responds to /chat/completions
+func buildChatServer(t *testing.T, response providers.ChatCompletionResponse) (*httptest.Server, *providers.Client) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+	}))
+	t.Cleanup(srv.Close)
+	c := providers.New(srv.URL, "test-key", 10*time.Second)
+	c.HTTP = srv.Client()
+	return srv, c
+}
+
+func openRuntimeTestDB(t *testing.T) *db.DB {
+	t.Helper()
+	d, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+	return d
+}
+
+func buildSimpleRuntime(t *testing.T, provider *providers.Client, d *db.DB, deliver *mockDeliverer) *Runtime {
+	t.Helper()
+	reg := tools.NewRegistry()
+	b := &Builder{
+		DB:         d,
+		HistoryMax: 10,
+	}
+	return &Runtime{
+		DB:           d,
+		Provider:     provider,
+		Model:        "gpt-4",
+		Tools:        reg,
+		Builder:      b,
+		MaxToolLoops: 2,
+		Deliver:      deliver,
+	}
+}
+
+func TestRuntime_Handle_UserMessage(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	response := providers.ChatCompletionResponse{
+		Choices: []struct {
+			Message struct {
+				Role      string              `json:"role"`
+				Content   any                 `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			} `json:"message"`
+		}{{
+			Message: struct {
+				Role      string              `json:"role"`
+				Content   any                 `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			}{Role: "assistant", Content: "Hello there!"},
+		}},
+	}
+	_, provider := buildChatServer(t, response)
+	deliver := &mockDeliverer{}
+	rt := buildSimpleRuntime(t, provider, d, deliver)
+
+	ev := bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess1",
+		Channel:    "cli",
+		From:       "user",
+		Message:    "hello",
+	}
+
+	err := rt.Handle(context.Background(), ev)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(deliver.messages) == 0 {
+		t.Error("expected at least one delivered message")
+	}
+	if deliver.messages[0] != "Hello there!" {
+		t.Errorf("expected 'Hello there!', got %q", deliver.messages[0])
+	}
+}
+
+func TestRuntime_Handle_CronEvent(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	response := providers.ChatCompletionResponse{
+		Choices: []struct {
+			Message struct {
+				Role      string              `json:"role"`
+				Content   any                 `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			} `json:"message"`
+		}{{
+			Message: struct {
+				Role      string              `json:"role"`
+				Content   any                 `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			}{Role: "assistant", Content: "Cron response"},
+		}},
+	}
+	_, provider := buildChatServer(t, response)
+	deliver := &mockDeliverer{}
+	rt := buildSimpleRuntime(t, provider, d, deliver)
+
+	err := rt.Handle(context.Background(), bus.Event{
+		Type:       bus.EventCron,
+		SessionKey: "sess1",
+		Message:    "cron task",
+	})
+	if err != nil {
+		t.Fatalf("Handle cron: %v", err)
+	}
+}
+
+func TestRuntime_Handle_UnknownEvent(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	_, provider := buildChatServer(t, providers.ChatCompletionResponse{})
+	rt := buildSimpleRuntime(t, provider, d, &mockDeliverer{})
+
+	// Unknown event type should return nil without processing
+	err := rt.Handle(context.Background(), bus.Event{
+		Type:       "unknown_type",
+		SessionKey: "sess1",
+	})
+	if err != nil {
+		t.Fatalf("expected no error for unknown event type, got: %v", err)
+	}
+}
+
+func TestRuntime_Handle_NoBuilder(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	_, provider := buildChatServer(t, providers.ChatCompletionResponse{})
+	rt := &Runtime{
+		DB:       d,
+		Provider: provider,
+		Model:    "gpt-4",
+		Tools:    tools.NewRegistry(),
+		Builder:  nil, // no builder
+	}
+
+	err := rt.Handle(context.Background(), bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess1",
+		Message:    "hello",
+	})
+	if err == nil {
+		t.Fatal("expected error when builder is nil")
+	}
+}
+
+func TestRuntime_Handle_NoChoices(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	// Return empty choices
+	response := providers.ChatCompletionResponse{Choices: nil}
+	_, provider := buildChatServer(t, response)
+	b := &Builder{DB: d, HistoryMax: 10}
+	rt := &Runtime{
+		DB:           d,
+		Provider:     provider,
+		Model:        "gpt-4",
+		Tools:        tools.NewRegistry(),
+		Builder:      b,
+		MaxToolLoops: 2,
+	}
+
+	err := rt.Handle(context.Background(), bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess1",
+		Message:    "hello",
+	})
+	if err == nil {
+		t.Fatal("expected error when no choices returned")
+	}
+}
+
+func TestRuntime_Handle_WithToolCall(t *testing.T) {
+	d := openRuntimeTestDB(t)
+
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		var resp providers.ChatCompletionResponse
+		if callCount == 1 {
+			// First call returns tool call
+			resp = providers.ChatCompletionResponse{
+				Choices: []struct {
+					Message struct {
+						Role      string              `json:"role"`
+						Content   any                 `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					} `json:"message"`
+				}{{
+					Message: struct {
+						Role      string              `json:"role"`
+						Content   any                 `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					}{
+						Role: "assistant",
+						ToolCalls: []providers.ToolCall{{
+							ID:   "tc1",
+							Type: "function",
+							Function: struct {
+								Name      string `json:"name"`
+								Arguments string `json:"arguments"`
+							}{Name: "echo_tool", Arguments: `{}`},
+						}},
+					},
+				}},
+			}
+		} else {
+			// Second call returns final text
+			resp = providers.ChatCompletionResponse{
+				Choices: []struct {
+					Message struct {
+						Role      string              `json:"role"`
+						Content   any                 `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					} `json:"message"`
+				}{{
+					Message: struct {
+						Role      string              `json:"role"`
+						Content   any                 `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					}{Role: "assistant", Content: "Final answer"},
+				}},
+			}
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	provider := providers.New(srv.URL, "key", 10*time.Second)
+	provider.HTTP = srv.Client()
+
+	reg := tools.NewRegistry()
+	// Register a simple echo tool
+	reg.Register(&echoTool{})
+
+	deliver := &mockDeliverer{}
+	b := &Builder{DB: d, HistoryMax: 10}
+	rt := &Runtime{
+		DB:           d,
+		Provider:     provider,
+		Model:        "gpt-4",
+		Tools:        reg,
+		Builder:      b,
+		MaxToolLoops: 6,
+		Deliver:      deliver,
+	}
+
+	err := rt.Handle(context.Background(), bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess-tool",
+		Message:    "do tool call",
+	})
+	if err != nil {
+		t.Fatalf("Handle with tool call: %v", err)
+	}
+	if len(deliver.messages) == 0 || deliver.messages[0] != "Final answer" {
+		t.Errorf("expected 'Final answer', got %v", deliver.messages)
+	}
+}
+
+// echoTool is a simple test tool for agent tests
+type echoTool struct{ tools.Base }
+
+func (e *echoTool) Name() string        { return "echo_tool" }
+func (e *echoTool) Description() string { return "echoes input" }
+func (e *echoTool) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{}}
+}
+func (e *echoTool) Execute(ctx context.Context, params map[string]any) (string, error) {
+	return "echo result", nil
+}
+func (e *echoTool) Schema() map[string]any {
+	return e.SchemaFor(e.Name(), e.Description(), e.Parameters())
+}
+
+func TestRuntime_Handle_ArtifactSave(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	artifactsDir := t.TempDir()
+
+	// First call: return tool call that generates large output
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		var resp providers.ChatCompletionResponse
+		if callCount == 1 {
+			resp = providers.ChatCompletionResponse{
+				Choices: []struct {
+					Message struct {
+						Role      string              `json:"role"`
+						Content   any                 `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					} `json:"message"`
+				}{{
+					Message: struct {
+						Role      string              `json:"role"`
+						Content   any                 `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					}{
+						Role: "assistant",
+						ToolCalls: []providers.ToolCall{{
+							ID:   "tc-large",
+							Type: "function",
+							Function: struct {
+								Name      string `json:"name"`
+								Arguments string `json:"arguments"`
+							}{Name: "large_output_tool", Arguments: `{}`},
+						}},
+					},
+				}},
+			}
+		} else {
+			resp = providers.ChatCompletionResponse{
+				Choices: []struct {
+					Message struct {
+						Role      string              `json:"role"`
+						Content   any                 `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					} `json:"message"`
+				}{{
+					Message: struct {
+						Role      string              `json:"role"`
+						Content   any                 `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					}{Role: "assistant", Content: "done"},
+				}},
+			}
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	provider := providers.New(srv.URL, "key", 10*time.Second)
+	provider.HTTP = srv.Client()
+
+	d.EnsureSession(context.Background(), "sess-artifact")
+
+	reg := tools.NewRegistry()
+	reg.Register(&largeOutputTool{})
+
+	deliver := &mockDeliverer{}
+	b := &Builder{DB: d, HistoryMax: 10}
+	rt := &Runtime{
+		DB:               d,
+		Provider:         provider,
+		Model:            "gpt-4",
+		Tools:            reg,
+		Builder:          b,
+		MaxToolLoops:     6,
+		Deliver:          deliver,
+		MaxToolBytes:     10, // small limit to trigger artifact save
+		ToolPreviewBytes: 5,
+		Artifacts:        &artifacts.Store{Dir: artifactsDir, DB: d},
+	}
+
+	err := rt.Handle(context.Background(), bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess-artifact",
+		Message:    "large output",
+	})
+	if err != nil {
+		t.Fatalf("Handle artifact: %v", err)
+	}
+}
+
+// largeOutputTool generates output larger than MaxToolBytes
+type largeOutputTool struct{ tools.Base }
+
+func (e *largeOutputTool) Name() string        { return "large_output_tool" }
+func (e *largeOutputTool) Description() string { return "generates large output" }
+func (e *largeOutputTool) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{}}
+}
+func (e *largeOutputTool) Execute(ctx context.Context, params map[string]any) (string, error) {
+	// Generate output that exceeds MaxToolBytes
+	return fmt.Sprintf("%s", string(make([]byte, 100))), nil
+}
+func (e *largeOutputTool) Schema() map[string]any {
+	return e.SchemaFor(e.Name(), e.Description(), e.Parameters())
+}
+
+func TestRuntime_Handle_NoMaxLoops_Defaults(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	response := providers.ChatCompletionResponse{
+		Choices: []struct {
+			Message struct {
+				Role      string              `json:"role"`
+				Content   any                 `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			} `json:"message"`
+		}{{
+			Message: struct {
+				Role      string              `json:"role"`
+				Content   any                 `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			}{Role: "assistant", Content: "response"},
+		}},
+	}
+	_, provider := buildChatServer(t, response)
+	b := &Builder{DB: d, HistoryMax: 10}
+	rt := &Runtime{
+		DB:           d,
+		Provider:     provider,
+		Model:        "gpt-4",
+		Tools:        tools.NewRegistry(),
+		Builder:      b,
+		MaxToolLoops: 0, // should default to 6
+	}
+
+	err := rt.Handle(context.Background(), bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess-default-loops",
+		Message:    "hello",
+	})
+	if err != nil {
+		t.Fatalf("Handle with default max loops: %v", err)
+	}
+}
+
+func TestRuntime_Handle_SystemEvent(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	response := providers.ChatCompletionResponse{
+		Choices: []struct {
+			Message struct {
+				Role      string              `json:"role"`
+				Content   any                 `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			} `json:"message"`
+		}{{
+			Message: struct {
+				Role      string              `json:"role"`
+				Content   any                 `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			}{Role: "assistant", Content: "sys response"},
+		}},
+	}
+	_, provider := buildChatServer(t, response)
+	deliver := &mockDeliverer{}
+	rt := buildSimpleRuntime(t, provider, d, deliver)
+
+	err := rt.Handle(context.Background(), bus.Event{
+		Type:       bus.EventSystem,
+		SessionKey: "sess-sys",
+		Message:    "system message",
+	})
+	if err != nil {
+		t.Fatalf("Handle system: %v", err)
+	}
+}
+
+func TestToToolDefs_WithRegistry(t *testing.T) {
+	reg := tools.NewRegistry()
+	reg.Register(&echoTool{})
+
+	defs := toToolDefs(reg)
+	if len(defs) != 1 {
+		t.Errorf("expected 1 tool def, got %d", len(defs))
+	}
+	if defs[0].Type != "function" {
+		t.Errorf("expected type 'function', got %q", defs[0].Type)
+	}
+	if defs[0].Function.Name != "echo_tool" {
+		t.Errorf("expected name 'echo_tool', got %q", defs[0].Function.Name)
+	}
+}
+
+func TestRuntime_LockFor_SameKey(t *testing.T) {
+	rt := &Runtime{}
+	mu1 := rt.lockFor("key1")
+	mu2 := rt.lockFor("key1")
+	if mu1 != mu2 {
+		t.Error("expected same mutex for same key")
+	}
+}
+
+func TestRuntime_LockFor_DifferentKeys(t *testing.T) {
+	rt := &Runtime{}
+	mu1 := rt.lockFor("key1")
+	mu2 := rt.lockFor("key2")
+	if mu1 == mu2 {
+		t.Error("expected different mutexes for different keys")
+	}
+}

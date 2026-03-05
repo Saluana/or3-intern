@@ -61,8 +61,8 @@ func (h *candMinHeap) Pop() any {
 	return x
 }
 
-func VectorSearch(ctx context.Context, d *db.DB, queryVec []float32, k int) ([]VecCandidate, error) {
-	rows, err := d.StreamMemoryNotes(ctx)
+func VectorSearch(ctx context.Context, d *db.DB, queryVec []float32, k int, scanLimit int) ([]VecCandidate, error) {
+	rows, err := d.StreamMemoryNotesLimit(ctx, scanLimit)
 	if err != nil { return nil, err }
 	defer rows.Close()
 

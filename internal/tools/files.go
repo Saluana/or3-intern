@@ -15,6 +15,11 @@ type FileTool struct {
 	Root string // allowed root (optional)
 }
 
+const (
+	defaultReadFileMaxBytes = 200000
+	defaultListDirMaxEntries = 200
+)
+
 func (t *FileTool) safePath(p string) (string, error) {
 	if strings.TrimSpace(p) == "" { return "", errors.New("missing path") }
 	abs, err := filepath.Abs(p)
@@ -42,7 +47,7 @@ func (t *ReadFile) Schema() map[string]any { return t.SchemaFor(t.Name(), t.Desc
 func (t *ReadFile) Execute(ctx context.Context, params map[string]any) (string, error) {
 	p, err := t.safePath(fmt.Sprint(params["path"]))
 	if err != nil { return "", err }
-	max := 200000
+	max := defaultReadFileMaxBytes
 	if v, ok := params["maxBytes"].(float64); ok && int(v) > 0 { max = int(v) }
 	b, err := os.ReadFile(p)
 	if err != nil { return "", err }
@@ -66,7 +71,9 @@ func (t *WriteFile) Execute(ctx context.Context, params map[string]any) (string,
 	if err != nil { return "", err }
 	content := fmt.Sprint(params["content"])
 	mkdirs, _ := params["mkdirs"].(bool)
-	if mkdirs { _ = os.MkdirAll(filepath.Dir(p), 0o755) }
+	if mkdirs {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil { return "", err }
+	}
 	if err := os.WriteFile(p, []byte(content), 0o644); err != nil { return "", err }
 	return "ok", nil
 }
@@ -129,7 +136,7 @@ func (t *ListDir) Execute(ctx context.Context, params map[string]any) (string, e
 	if err != nil { return "", err }
 	ents, err := os.ReadDir(p)
 	if err != nil { return "", err }
-	max := 200
+	max := defaultListDirMaxEntries
 	if v, ok := params["max"].(float64); ok && int(v) > 0 { max = int(v) }
 	type entry struct{ Name string `json:"name"`; IsDir bool `json:"isDir"`; Size int64 `json:"size"` }
 	out := []entry{}

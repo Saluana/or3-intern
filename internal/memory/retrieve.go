@@ -19,14 +19,15 @@ type Retriever struct {
 	DB *db.DB
 	VectorWeight float64
 	FTSWeight float64
+	VectorScanLimit int
 }
 
 func NewRetriever(d *db.DB) *Retriever {
-	return &Retriever{DB: d, VectorWeight: 0.7, FTSWeight: 0.3}
+	return &Retriever{DB: d, VectorWeight: 0.7, FTSWeight: 0.3, VectorScanLimit: 2000}
 }
 
 func (r *Retriever) Retrieve(ctx context.Context, query string, queryVec []float32, vectorK, ftsK, topK int) ([]Retrieved, error) {
-	vecs, err := VectorSearch(ctx, r.DB, queryVec, vectorK)
+	vecs, err := VectorSearch(ctx, r.DB, queryVec, vectorK, r.VectorScanLimit)
 	if err != nil { return nil, err }
 	fts, _ := r.DB.SearchFTS(ctx, normalizeFTSQuery(query), ftsK)
 

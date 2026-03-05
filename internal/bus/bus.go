@@ -32,5 +32,12 @@ func New(buffer int) *Bus {
 	return &Bus{ch: make(chan Event, buffer)}
 }
 
-func (b *Bus) Publish(ev Event) { b.ch <- ev }
+func (b *Bus) Publish(ev Event) bool {
+	select {
+	case b.ch <- ev:
+		return true
+	default:
+		return false
+	}
+}
 func (b *Bus) Channel() <-chan Event { return b.ch }

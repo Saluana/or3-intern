@@ -16,7 +16,7 @@ type Channel struct {
 }
 
 func (c *Channel) Run(ctx context.Context) error {
-	if c.SessionKey == "" { c.SessionKey = "cli:default" }
+	if c.SessionKey == "" { c.SessionKey = "default" }
 	in := bufio.NewScanner(os.Stdin)
 	fmt.Println("or3-intern CLI. Type /exit to quit.")
 	for {
@@ -25,6 +25,9 @@ func (c *Channel) Run(ctx context.Context) error {
 		line := strings.TrimSpace(in.Text())
 		if line == "" { continue }
 		if line == "/exit" { return nil }
-		c.Bus.Publish(bus.Event{Type: bus.EventUserMessage, SessionKey: c.SessionKey, Channel: "cli", From: "local", Message: line})
+		ok := c.Bus.Publish(bus.Event{Type: bus.EventUserMessage, SessionKey: c.SessionKey, Channel: "cli", From: "local", Message: line})
+		if !ok {
+			fmt.Println("[warn] queue is full; message dropped")
+		}
 	}
 }

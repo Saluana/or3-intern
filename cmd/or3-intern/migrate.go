@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 
 	"or3-intern/internal/db"
@@ -24,7 +25,9 @@ func migrateJSONL(ctx context.Context, d *db.DB, path, sessionKey string) error 
 		var obj map[string]any
 		if err := json.Unmarshal([]byte(line), &obj); err != nil {
 			// tolerate non-json line
-			_, _ = d.AppendMessage(ctx, sessionKey, "user", line, map[string]any{"migrated_line": lineNo})
+			if _, err := d.AppendMessage(ctx, sessionKey, "user", line, map[string]any{"migrated_line": lineNo}); err != nil {
+				return fmt.Errorf("line %d: %w", lineNo, err)
+			}
 			continue
 		}
 		// detect metadata
@@ -35,8 +38,12 @@ func migrateJSONL(ctx context.Context, d *db.DB, path, sessionKey string) error 
 			// store as session metadata_json if it looks like metadata
 			if obj["role"] == nil && obj["content"] == nil {
 				b, _ := json.Marshal(obj)
-				_ = d.EnsureSession(ctx, sessionKey)
-				_, _ = d.SQL.ExecContext(ctx, `UPDATE sessions SET metadata_json=? WHERE key=?`, string(b), sessionKey)
+				if err := d.EnsureSession(ctx, sessionKey); err != nil {
+					log.Printf("ensure session failed during migration: %v", err)
+				}
+				if _, err := d.SQL.ExecContext(ctx, `UPDATE sessions SET metadata_json=? WHERE key=?`, string(b), sessionKey); err != nil {
+					log.Printf("session metadata update failed during migration: %v", err)
+				}
 				continue
 			}
 		}

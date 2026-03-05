@@ -26,9 +26,10 @@ func New(apiBase, apiKey string, timeout time.Duration) *Client {
 
 type ChatMessage struct {
 	Role string `json:"role"`
-	Content any `json:"content,omitempty"` // string or array for tool results (keep simple)
+	Content any `json:"content,omitempty"` // string|null
 	Name string `json:"name,omitempty"`
 	ToolCallID string `json:"tool_call_id,omitempty"`
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 }
 
 type ToolDef struct {
@@ -62,7 +63,7 @@ type ChatCompletionResponse struct {
 	Choices []struct{
 		Message struct{
 			Role string `json:"role"`
-			Content string `json:"content"`
+			Content any `json:"content"`
 			ToolCalls []ToolCall `json:"tool_calls"`
 		} `json:"message"`
 	} `json:"choices"`

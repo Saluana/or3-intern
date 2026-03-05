@@ -15,7 +15,16 @@ import (
 type WebFetch struct{
 	Base
 	HTTP *http.Client
+	Timeout time.Duration
+	DefaultMaxBytes int
 }
+
+const (
+	defaultWebTimeout = 20 * time.Second
+	defaultWebFetchMaxBytes = 200000
+	defaultWebSearchMaxCount = 10
+	defaultWebSearchReadMaxBytes = 1 << 20
+)
 
 func (t *WebFetch) Name() string { return "web_fetch" }
 func (t *WebFetch) Description() string { return "Fetch a URL (GET) and return text (truncated)." }
@@ -31,9 +40,14 @@ func (t *WebFetch) Execute(ctx context.Context, params map[string]any) (string, 
 	if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
 		return "", fmt.Errorf("invalid url")
 	}
-	max := 200000
+	max := t.DefaultMaxBytes
+	if max <= 0 { max = defaultWebFetchMaxBytes }
 	if v, ok := params["maxBytes"].(float64); ok && int(v) > 0 { max = int(v) }
-	if t.HTTP == nil { t.HTTP = &http.Client{Timeout: 20*time.Second} }
+	if t.HTTP == nil {
+		to := t.Timeout
+		if to <= 0 { to = defaultWebTimeout }
+		t.HTTP = &http.Client{Timeout: to}
+	}
 	r, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil { return "", err }
 	resp, err := t.HTTP.Do(r)
@@ -47,6 +61,8 @@ type WebSearch struct{
 	Base
 	APIKey string
 	HTTP *http.Client
+	Timeout time.Duration
+	ReadMaxBytes int
 }
 
 func (t *WebSearch) Name() string { return "web_search" }
@@ -68,8 +84,12 @@ func (t *WebSearch) Execute(ctx context.Context, params map[string]any) (string,
 	q := fmt.Sprint(params["query"])
 	count := 5
 	if v, ok := params["count"].(float64); ok && int(v) > 0 { count = int(v) }
-	if count > 10 { count = 10 }
-	if t.HTTP == nil { t.HTTP = &http.Client{Timeout: 20*time.Second} }
+	if count > defaultWebSearchMaxCount { count = defaultWebSearchMaxCount }
+	if t.HTTP == nil {
+		to := t.Timeout
+		if to <= 0 { to = defaultWebTimeout }
+		t.HTTP = &http.Client{Timeout: to}
+	}
 
 	endpoint := "https://api.search.brave.com/res/v1/web/search?q=" + url.QueryEscape(q) + "&count=" + fmt.Sprint(count)
 	r, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
@@ -80,7 +100,9 @@ func (t *WebSearch) Execute(ctx context.Context, params map[string]any) (string,
 	resp, err := t.HTTP.Do(r)
 	if err != nil { return "", err }
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	maxRead := t.ReadMaxBytes
+	if maxRead <= 0 { maxRead = defaultWebSearchReadMaxBytes }
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, int64(maxRead)))
 	if resp.StatusCode >= 300 {
 		return "", fmt.Errorf("search error %s: %s", resp.Status, string(body))
 	}

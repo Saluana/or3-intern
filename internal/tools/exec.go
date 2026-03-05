@@ -17,7 +17,11 @@ type ExecTool struct {
 	Timeout time.Duration
 	RestrictDir string // if non-empty, cwd must be inside
 	PathAppend string
+	OutputMaxBytes int
+	BlockedPatterns []string
 }
+
+const defaultExecOutputMaxBytes = 10000
 
 func (t *ExecTool) Name() string { return "exec" }
 func (t *ExecTool) Description() string {
@@ -36,7 +40,7 @@ func (t *ExecTool) Parameters() map[string]any {
 }
 func (t *ExecTool) Schema() map[string]any { return t.SchemaFor(t.Name(), t.Description(), t.Parameters()) }
 
-var blocked = []string{
+var defaultBlockedPatterns = []string{
 	"rm -rf", "mkfs", "dd ", "shutdown", "reboot", "poweroff", ":(){", ">|", "chown -R /", "chmod -R 777 /",
 }
 
@@ -44,7 +48,9 @@ func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, 
 	cmdS, _ := params["command"].(string)
 	if strings.TrimSpace(cmdS) == "" { return "", errors.New("missing command") }
 	lc := strings.ToLower(cmdS)
-	for _, b := range blocked {
+	patterns := t.BlockedPatterns
+	if len(patterns) == 0 { patterns = defaultBlockedPatterns }
+	for _, b := range patterns {
 		if strings.Contains(lc, b) {
 			return "", fmt.Errorf("blocked command pattern: %q", b)
 		}
@@ -80,7 +86,8 @@ func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, 
 	err := c.Run()
 	out := stdout.String()
 	er := stderr.String()
-	max := 10000
+	max := t.OutputMaxBytes
+	if max <= 0 { max = defaultExecOutputMaxBytes }
 	if len(out) > max { out = out[:max] + "\n...[truncated]\n" }
 	if len(er) > max { er = er[:max] + "\n...[truncated]\n" }
 	if err != nil {

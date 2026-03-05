@@ -74,6 +74,7 @@ type MemorySearch struct {
 	VectorK int
 	FTSK int
 	TopK int
+	VectorScanLimit int
 }
 func (t *MemorySearch) Name() string { return "memory_search" }
 func (t *MemorySearch) Description() string { return "Search long-term memory (hybrid semantic + keyword) and return top results." }
@@ -85,6 +86,7 @@ func (t *MemorySearch) Parameters() map[string]any {
 }
 func (t *MemorySearch) Schema() map[string]any { return t.SchemaFor(t.Name(), t.Description(), t.Parameters()) }
 func (t *MemorySearch) Execute(ctx context.Context, params map[string]any) (string, error) {
+	if t.DB == nil || t.Provider == nil { return "", fmt.Errorf("missing deps") }
 	q := strings.TrimSpace(fmt.Sprint(params["query"]))
 	if q == "" { return "", fmt.Errorf("empty query") }
 	topK := t.TopK
@@ -92,6 +94,7 @@ func (t *MemorySearch) Execute(ctx context.Context, params map[string]any) (stri
 	vec, err := t.Provider.Embed(ctx, t.EmbedModel, q)
 	if err != nil { return "", err }
 	r := memory.NewRetriever(t.DB)
+	r.VectorScanLimit = t.VectorScanLimit
 	got, err := r.Retrieve(ctx, q, vec, t.VectorK, t.FTSK, topK)
 	if err != nil { return "", err }
 	var b strings.Builder

@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,8 +37,26 @@ func main() {
 		fmt.Fprintln(os.Stderr, "config error:", err)
 		os.Exit(1)
 	}
-	_ = os.MkdirAll(filepath.Dir(cfg.DBPath), 0o755)
-	_ = os.MkdirAll(cfg.ArtifactsDir, 0o755)
+	if err := os.MkdirAll(filepath.Dir(cfg.DBPath), 0o755); err != nil {
+		fmt.Fprintln(os.Stderr, "mkdir db dir error:", err)
+		os.Exit(1)
+	}
+	if err := os.MkdirAll(cfg.ArtifactsDir, 0o755); err != nil {
+		fmt.Fprintln(os.Stderr, "mkdir artifacts dir error:", err)
+		os.Exit(1)
+	}
+	if err := ensureFileIfMissing(cfg.SoulFile, agent.DefaultSoul); err != nil {
+		fmt.Fprintln(os.Stderr, "bootstrap soul file error:", err)
+		os.Exit(1)
+	}
+	if err := ensureFileIfMissing(cfg.AgentsFile, agent.DefaultAgentInstructions); err != nil {
+		fmt.Fprintln(os.Stderr, "bootstrap agents file error:", err)
+		os.Exit(1)
+	}
+	if err := ensureFileIfMissing(cfg.ToolsFile, agent.DefaultToolNotes); err != nil {
+		fmt.Fprintln(os.Stderr, "bootstrap tools file error:", err)
+		os.Exit(1)
+	}
 
 	d, err := db.Open(cfg.DBPath)
 	if err != nil {
@@ -68,7 +87,7 @@ func main() {
 	// memory tools
 	reg.Register(&tools.MemorySetPinned{DB: d})
 	reg.Register(&tools.MemoryAddNote{DB: d, Provider: prov, EmbedModel: cfg.Provider.EmbedModel})
-	reg.Register(&tools.MemorySearch{DB: d, Provider: prov, EmbedModel: cfg.Provider.EmbedModel, VectorK: cfg.VectorK, FTSK: cfg.FTSK, TopK: cfg.MemoryRetrieve})
+	reg.Register(&tools.MemorySearch{DB: d, Provider: prov, EmbedModel: cfg.Provider.EmbedModel, VectorK: cfg.VectorK, FTSK: cfg.FTSK, TopK: cfg.MemoryRetrieve, VectorScanLimit: cfg.VectorScanLimit})
 
 	// send_message tool
 	reg.Register(&tools.SendMessage{Deliver: del.Deliver})
@@ -77,19 +96,28 @@ func main() {
 	builtin := filepath.Join(filepath.Dir(cfgPathOrDefault(cfgPath)), "builtin_skills")
 	workspace := filepath.Join(cfg.WorkspaceDir, "workspace_skills")
 	inv := skills.Scan([]string{builtin, workspace})
+	reg.Register(&tools.ReadSkill{Inventory: &inv})
+
+	ret := memory.NewRetriever(d)
+	ret.VectorScanLimit = cfg.VectorScanLimit
 
 	rt := &agent.Runtime{
 		DB: d,
 		Provider: prov,
 		Model: cfg.Provider.Model,
-		EmbedModel: cfg.Provider.EmbedModel,
+		Temperature: cfg.Provider.Temperature,
 		Tools: reg,
 		Builder: &agent.Builder{
 			DB: d,
 			Skills: inv,
-			Mem: memory.NewRetriever(d),
+			Mem: ret,
 			Provider: prov,
 			EmbedModel: cfg.Provider.EmbedModel,
+			Soul: loadBootstrapFile(cfg.SoulFile, cfg.WorkspaceDir, "SOUL.md", agent.DefaultSoul),
+			AgentInstructions: loadBootstrapFile(cfg.AgentsFile, cfg.WorkspaceDir, "AGENTS.md", agent.DefaultAgentInstructions),
+			ToolNotes: loadBootstrapFile(cfg.ToolsFile, cfg.WorkspaceDir, "TOOLS.md", agent.DefaultToolNotes),
+			BootstrapMaxChars: cfg.BootstrapMaxChars,
+			BootstrapTotalMaxChars: cfg.BootstrapTotalMaxChars,
 			HistoryMax: cfg.HistoryMax,
 			VectorK: cfg.VectorK,
 			FTSK: cfg.FTSK,
@@ -97,25 +125,25 @@ func main() {
 		},
 		Artifacts: art,
 		MaxToolBytes: cfg.MaxToolBytes,
-		HistoryMax: cfg.HistoryMax,
-		VectorK: cfg.VectorK,
-		FTSK: cfg.FTSK,
-		TopK: cfg.MemoryRetrieve,
+		MaxToolLoops: cfg.MaxToolLoops,
 		Deliver: del,
 	}
 
 	// cron service + tool
 	var cronSvc *cron.Service
 	if cfg.Cron.Enabled {
-		cronSvc = cron.New(cfg.Cron.StorePath, agent.CronRunner(b, "cli:default"))
-		_ = cronSvc.Start()
+		cronSvc = cron.New(cfg.Cron.StorePath, agent.CronRunner(b, cfg.DefaultSessionKey))
+		if err := cronSvc.Start(); err != nil {
+			fmt.Fprintln(os.Stderr, "cron start error:", err)
+			os.Exit(1)
+		}
 		reg.Register(&tools.CronTool{Svc: cronSvc})
 	}
 
 	switch cmd {
 	case "chat":
 		runWorkers(ctx, b, rt, cfg.WorkerCount)
-		ch := &cli.Channel{Bus: b, SessionKey: "cli:default"}
+		ch := &cli.Channel{Bus: b, SessionKey: cfg.DefaultSessionKey}
 		if err := ch.Run(ctx); err != nil {
 			fmt.Fprintln(os.Stderr, "cli error:", err)
 		}
@@ -125,15 +153,16 @@ func main() {
 		var msg string
 		var session string
 		fs.StringVar(&msg, "m", "", "message")
-		fs.StringVar(&session, "s", "cli:default", "session key")
+		fs.StringVar(&session, "s", cfg.DefaultSessionKey, "session key")
 		_ = fs.Parse(args[1:])
 		if strings.TrimSpace(msg) == "" {
 			fmt.Fprintln(os.Stderr, "missing -m message")
 			os.Exit(2)
 		}
-		runWorkers(ctx, b, rt, 1)
-		b.Publish(bus.Event{Type: bus.EventUserMessage, SessionKey: session, Channel: "cli", From: "local", Message: msg})
-		time.Sleep(2 * time.Second)
+		if err := rt.Handle(ctx, bus.Event{Type: bus.EventUserMessage, SessionKey: session, Channel: "cli", From: "local", Message: msg}); err != nil {
+			fmt.Fprintln(os.Stderr, "agent error:", err)
+			os.Exit(1)
+		}
 	case "migrate-jsonl":
 		// or3-intern migrate-jsonl /path/to/session.jsonl cli:default
 		if len(args) < 2 {
@@ -177,9 +206,42 @@ func runWorkers(ctx context.Context, b *bus.Bus, rt *agent.Runtime, n int) {
 		go func() {
 			for ev := range b.Channel() {
 				cctx, cancel := agent.WithTimeout(ctx, 120)
-				_ = rt.Handle(cctx, ev)
+				if err := rt.Handle(cctx, ev); err != nil {
+					log.Printf("handle event failed: type=%s session=%s err=%v", ev.Type, ev.SessionKey, err)
+				}
 				cancel()
 			}
 		}()
 	}
+}
+
+func loadBootstrapFile(configPath, workspaceDir, baseName, fallback string) string {
+	paths := []string{}
+	if strings.TrimSpace(workspaceDir) != "" {
+		paths = append(paths,
+			filepath.Join(workspaceDir, baseName),
+			filepath.Join(workspaceDir, strings.ToLower(baseName)),
+		)
+	}
+	if strings.TrimSpace(configPath) != "" {
+		paths = append(paths, configPath)
+	}
+	for _, p := range paths {
+		b, err := os.ReadFile(p)
+		if err == nil {
+			return strings.TrimSpace(string(b))
+		}
+	}
+	return fallback
+}
+
+func ensureFileIfMissing(path, content string) error {
+	if strings.TrimSpace(path) == "" { return nil }
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil { return err }
+	return os.WriteFile(path, []byte(strings.TrimSpace(content)+"\n"), 0o644)
 }

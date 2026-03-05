@@ -32,6 +32,8 @@ func (s *Store) Save(ctx context.Context, sessionKey, mime string, data []byte) 
 
 func randID() string {
 	var b [16]byte
-	_, _ = rand.Read(b[:])
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
 	return hex.EncodeToString(b[:])
 }

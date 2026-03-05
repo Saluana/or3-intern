@@ -13,12 +13,20 @@ type Config struct {
 	ArtifactsDir   string `json:"artifactsDir"`
 	WorkspaceDir   string `json:"workspaceDir"`
 	AllowedDir     string `json:"allowedDir"`
+	DefaultSessionKey string `json:"defaultSessionKey"`
+	SoulFile string `json:"soulFile"`
+	AgentsFile string `json:"agentsFile"`
+	ToolsFile string `json:"toolsFile"`
+	BootstrapMaxChars int `json:"bootstrapMaxChars"`
+	BootstrapTotalMaxChars int `json:"bootstrapTotalMaxChars"`
 	SessionCache   int    `json:"sessionCacheLimit"`
 	HistoryMax     int    `json:"historyMaxMessages"`
 	MaxToolBytes   int    `json:"maxToolBytes"`
+	MaxToolLoops   int    `json:"maxToolLoops"`
 	MemoryRetrieve int    `json:"memoryRetrieveLimit"`
 	VectorK        int    `json:"vectorSearchK"`
 	FTSK           int    `json:"ftsSearchK"`
+	VectorScanLimit int   `json:"vectorScanLimit"`
 	WorkerCount    int    `json:"workerCount"`
 
 	Provider ProviderConfig `json:"provider"`
@@ -31,6 +39,7 @@ type ProviderConfig struct {
 	APIBase string `json:"apiBase"`
 	APIKey  string `json:"apiKey"`
 	Model   string `json:"model"`
+	Temperature float64 `json:"temperature"`
 	EmbedModel string `json:"embedModel"`
 	TimeoutSeconds int `json:"timeoutSeconds"`
 }
@@ -62,17 +71,26 @@ func Default() Config {
 		ArtifactsDir: filepath.Join(root, "artifacts"),
 		WorkspaceDir: "",
 		AllowedDir: "",
+		DefaultSessionKey: "cli:default",
+		SoulFile: filepath.Join(root, "SOUL.md"),
+		AgentsFile: filepath.Join(root, "AGENTS.md"),
+		ToolsFile: filepath.Join(root, "TOOLS.md"),
+		BootstrapMaxChars: 20000,
+		BootstrapTotalMaxChars: 150000,
 		SessionCache: 64,
 		HistoryMax: 40,
 		MaxToolBytes: 24 * 1024,
+		MaxToolLoops: 6,
 		MemoryRetrieve: 8,
 		VectorK: 8,
 		FTSK: 8,
+		VectorScanLimit: 2000,
 		WorkerCount: 4,
 		Provider: ProviderConfig{
 			APIBase: "https://api.openai.com/v1",
 			APIKey: os.Getenv("OPENAI_API_KEY"),
 			Model: "gpt-4.1-mini",
+			Temperature: 0,
 			EmbedModel: "text-embedding-3-small",
 			TimeoutSeconds: 60,
 		},
@@ -117,8 +135,13 @@ func Load(path string) (Config, error) {
 	if v := os.Getenv("OR3_EMBED_MODEL"); v != "" { cfg.Provider.EmbedModel = v }
 
 	if cfg.Provider.TimeoutSeconds <= 0 { cfg.Provider.TimeoutSeconds = int((60*time.Second).Seconds()) }
+	if cfg.DefaultSessionKey == "" { cfg.DefaultSessionKey = "cli:default" }
+	if cfg.BootstrapMaxChars <= 0 { cfg.BootstrapMaxChars = 20000 }
+	if cfg.BootstrapTotalMaxChars <= 0 { cfg.BootstrapTotalMaxChars = 150000 }
 	if cfg.HistoryMax <= 0 { cfg.HistoryMax = 40 }
 	if cfg.MaxToolBytes <= 0 { cfg.MaxToolBytes = 24*1024 }
+	if cfg.MaxToolLoops <= 0 { cfg.MaxToolLoops = 6 }
+	if cfg.VectorScanLimit <= 0 { cfg.VectorScanLimit = 2000 }
 	if cfg.WorkerCount <= 0 { cfg.WorkerCount = 4 }
 	return cfg, nil
 }

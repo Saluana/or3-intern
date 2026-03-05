@@ -33,7 +33,9 @@ func (d *DB) AppendMessage(ctx context.Context, sessionKey, role, content string
 		sessionKey, role, content, string(pb), now)
 	if err != nil { return 0, err }
 	id, _ := res.LastInsertId()
-	_, _ = d.SQL.ExecContext(ctx, `UPDATE sessions SET updated_at=? WHERE key=?`, now, sessionKey)
+	if _, err := d.SQL.ExecContext(ctx, `UPDATE sessions SET updated_at=? WHERE key=?`, now, sessionKey); err != nil {
+		return id, err
+	}
 	return id, nil
 }
 
@@ -101,6 +103,15 @@ type MemoryNoteRow struct {
 
 func (d *DB) StreamMemoryNotes(ctx context.Context) (*sql.Rows, error) {
 	return d.SQL.QueryContext(ctx, `SELECT id, text, embedding, source_message_id, tags, created_at FROM memory_notes`)
+}
+
+func (d *DB) StreamMemoryNotesLimit(ctx context.Context, limit int) (*sql.Rows, error) {
+	if limit <= 0 {
+		return d.StreamMemoryNotes(ctx)
+	}
+	return d.SQL.QueryContext(ctx,
+		`SELECT id, text, embedding, source_message_id, tags, created_at
+		 FROM memory_notes ORDER BY id DESC LIMIT ?`, limit)
 }
 
 type FTSCandidate struct {

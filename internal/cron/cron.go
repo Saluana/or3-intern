@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"log"
 	"os"
 	"sync"
 	"time"
@@ -95,7 +96,7 @@ func (s *Service) load() (Store, error) {
 }
 
 func (s *Service) save(st Store) error {
-	_ = os.MkdirAll(filepathDir(s.path), 0o755)
+	if err := os.MkdirAll(filepathDir(s.path), 0o755); err != nil { return err }
 	b, _ := json.MarshalIndent(st, "", "  ")
 	return os.WriteFile(s.path, b, 0o644)
 }
@@ -208,7 +209,11 @@ func (s *Service) RunNow(ctx context.Context, id string, force bool) (bool, erro
 			err := s.runner(ctx, j)
 			s.mu.Lock()
 			defer s.mu.Unlock()
-			st2, _ := s.load()
+			st2, loadErr := s.load()
+			if loadErr != nil {
+				return true, err
+			}
+			shouldDelete := false
 			for i := range st2.Jobs {
 				if st2.Jobs[i].ID == id {
 					now := time.Now().UnixMilli()
@@ -221,12 +226,26 @@ func (s *Service) RunNow(ctx context.Context, id string, force bool) (bool, erro
 						st2.Jobs[i].State.LastError = ""
 					}
 					if st2.Jobs[i].DeleteAfterRun {
-						_, _ = s.Remove(id)
-						return true, nil
+						shouldDelete = true
+						break
 					}
-					_ = s.save(st2)
 					break
 				}
+			}
+			if shouldDelete {
+				next := make([]CronJob, 0, len(st2.Jobs))
+				for _, jj := range st2.Jobs {
+					if jj.ID == id { continue }
+					next = append(next, jj)
+				}
+				st2.Jobs = next
+				if eid, ok := s.entries[id]; ok && s.c != nil {
+					s.c.Remove(eid)
+					delete(s.entries, id)
+				}
+			}
+			if saveErr := s.save(st2); saveErr != nil {
+				log.Printf("cron save failed: %v", saveErr)
 			}
 			return true, err
 		}
@@ -242,29 +261,47 @@ func (s *Service) armJobLocked(job CronJob) {
 		at := time.UnixMilli(job.Schedule.AtMS)
 		if time.Now().After(at) { return }
 		delay := time.Until(at)
-		eid, _ := s.c.AddFunc("@every 1s", func() {}) // placeholder to reserve id
-		s.c.Remove(eid)
 		// schedule using timer goroutine
 		go func(id string, d time.Duration) {
 			time.Sleep(d)
-			_ = s.runner(context.Background(), job)
+			if err := s.runner(context.Background(), job); err != nil {
+				log.Printf("cron runner error: id=%s err=%v", id, err)
+			}
 		}(job.ID, delay)
 	case KindEvery:
 		sec := int64(job.Schedule.EveryMS / 1000)
 		if sec <= 0 { sec = 60 }
 		spec := "@every " + time.Duration(sec)*time.Second.String()
-		eid, err := s.c.AddFunc(spec, func() { _ = s.runner(context.Background(), job) })
-		if err == nil { s.entries[job.ID] = eid }
+		eid, err := s.c.AddFunc(spec, func() {
+			if e := s.runner(context.Background(), job); e != nil {
+				log.Printf("cron runner error: id=%s err=%v", job.ID, e)
+			}
+		})
+		if err == nil {
+			s.entries[job.ID] = eid
+		} else {
+			log.Printf("cron schedule add failed: id=%s spec=%s err=%v", job.ID, spec, err)
+		}
 	case KindCron:
 		spec := job.Schedule.Expr
-		eid, err := s.c.AddFunc(spec, func() { _ = s.runner(context.Background(), job) })
-		if err == nil { s.entries[job.ID] = eid }
+		eid, err := s.c.AddFunc(spec, func() {
+			if e := s.runner(context.Background(), job); e != nil {
+				log.Printf("cron runner error: id=%s err=%v", job.ID, e)
+			}
+		})
+		if err == nil {
+			s.entries[job.ID] = eid
+		} else {
+			log.Printf("cron schedule add failed: id=%s spec=%s err=%v", job.ID, spec, err)
+		}
 	}
 }
 
 func randUint() uint64 {
 	var b [8]byte
-	_, _ = rand.Read(b[:])
+	if _, err := rand.Read(b[:]); err != nil {
+		return uint64(time.Now().UnixNano())
+	}
 	return binary.LittleEndian.Uint64(b[:])
 }
 

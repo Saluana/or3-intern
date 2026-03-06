@@ -4,24 +4,21 @@ Go rewrite of nanobot with SQLite persistence + hybrid long-term memory retrieva
 
 ## Quick start
 
-1) Create config (auto-created on first run):
+1) Run guided setup:
 ```bash
-or3-intern -config ~/.or3-intern/config.json version
+go run ./cmd/or3-intern init
 ```
 
-2) Set provider key:
+2) Start interactive chat:
 ```bash
-export OR3_API_KEY="..."
-# or OPENAI_API_KEY if using default config
+go run ./cmd/or3-intern chat
 ```
 
-3) Run interactive chat:
-```bash
-or3-intern chat
-```
+The `init` command can store your provider settings in `~/.or3-intern/config.json`, so you do not need to manually manage env vars unless you want to.
 
 ## Commands
 
+- `or3-intern init` guided first-run setup
 - `or3-intern chat` interactive CLI
 - `or3-intern agent -m "hello"` one-shot
 - `or3-intern migrate-jsonl /path/to/session.jsonl [session_key]`

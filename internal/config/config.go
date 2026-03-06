@@ -106,33 +106,54 @@ func Default() Config {
 	}
 }
 
-func Load(path string) (Config, error) {
-	cfg := Default()
-	if path == "" {
-		home, _ := os.UserHomeDir()
-		path = filepath.Join(home, ".or3-intern", "config.json")
-	}
+func DefaultPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".or3-intern", "config.json")
+}
 
-	b, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			// Create parent and write default file for convenience.
-			_ = os.MkdirAll(filepath.Dir(path), 0o755)
-			_ = os.WriteFile(path, mustJSON(cfg), 0o644)
-			return cfg, nil
-		}
-		return cfg, err
+func ApplyEnvOverrides(cfg *Config) {
+	if cfg == nil {
+		return
 	}
-	if err := json.Unmarshal(b, &cfg); err != nil {
-		return cfg, err
-	}
-	// env overrides
 	if v := os.Getenv("OR3_DB_PATH"); v != "" { cfg.DBPath = v }
 	if v := os.Getenv("OR3_ARTIFACTS_DIR"); v != "" { cfg.ArtifactsDir = v }
 	if v := os.Getenv("OR3_API_BASE"); v != "" { cfg.Provider.APIBase = v }
 	if v := os.Getenv("OR3_API_KEY"); v != "" { cfg.Provider.APIKey = v }
 	if v := os.Getenv("OR3_MODEL"); v != "" { cfg.Provider.Model = v }
 	if v := os.Getenv("OR3_EMBED_MODEL"); v != "" { cfg.Provider.EmbedModel = v }
+}
+
+func Save(path string, cfg Config) error {
+	if path == "" {
+		path = DefaultPath()
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, mustJSON(cfg), 0o644)
+}
+
+func Load(path string) (Config, error) {
+	cfg := Default()
+	if path == "" {
+		path = DefaultPath()
+	}
+
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			if err := Save(path, cfg); err != nil {
+				return cfg, err
+			}
+		} else {
+			return cfg, err
+		}
+	} else {
+		if err := json.Unmarshal(b, &cfg); err != nil {
+			return cfg, err
+		}
+	}
+	ApplyEnvOverrides(&cfg)
 
 	if cfg.Provider.TimeoutSeconds <= 0 { cfg.Provider.TimeoutSeconds = int((60*time.Second).Seconds()) }
 	if cfg.DefaultSessionKey == "" { cfg.DefaultSessionKey = "cli:default" }

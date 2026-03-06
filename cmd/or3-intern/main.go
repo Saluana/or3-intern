@@ -31,6 +31,13 @@ func main() {
 	args := flag.Args()
 	cmd := "chat"
 	if len(args) > 0 { cmd = args[0] }
+	if cmd == "init" {
+		if err := runInit(cfgPath); err != nil {
+			fmt.Fprintln(os.Stderr, "init error:", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	cfg, err := config.Load(cfgPath)
 	if err != nil {

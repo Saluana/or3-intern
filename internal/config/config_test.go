@@ -7,7 +7,24 @@ import (
 	"testing"
 )
 
+func clearConfigEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"OPENAI_API_KEY",
+		"BRAVE_API_KEY",
+		"OR3_DB_PATH",
+		"OR3_ARTIFACTS_DIR",
+		"OR3_API_BASE",
+		"OR3_API_KEY",
+		"OR3_MODEL",
+		"OR3_EMBED_MODEL",
+	} {
+		t.Setenv(key, "")
+	}
+}
+
 func TestDefault_Values(t *testing.T) {
+	clearConfigEnv(t)
 	cfg := Default()
 
 	if cfg.DefaultSessionKey != "cli:default" {
@@ -55,6 +72,7 @@ func TestDefault_Values(t *testing.T) {
 }
 
 func TestLoad_FileNotExist_CreatesDefault(t *testing.T) {
+	clearConfigEnv(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 
@@ -71,7 +89,42 @@ func TestLoad_FileNotExist_CreatesDefault(t *testing.T) {
 	}
 }
 
+func TestLoad_FileNotExist_AppliesEnvOverrides(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	t.Setenv("OR3_API_BASE", "https://openrouter.ai/api/v1")
+	t.Setenv("OR3_API_KEY", "env-key")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Provider.APIBase != "https://openrouter.ai/api/v1" {
+		t.Fatalf("expected env API base override, got %q", cfg.Provider.APIBase)
+	}
+	if cfg.Provider.APIKey != "env-key" {
+		t.Fatalf("expected env API key override, got %q", cfg.Provider.APIKey)
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		t.Fatal("expected config file to be created")
+	}
+	stored, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read stored config: %v", err)
+	}
+	var saved Config
+	if err := json.Unmarshal(stored, &saved); err != nil {
+		t.Fatalf("unmarshal stored config: %v", err)
+	}
+	if saved.Provider.APIBase != Default().Provider.APIBase {
+		t.Fatalf("expected on-disk config to keep default API base, got %q", saved.Provider.APIBase)
+	}
+}
+
 func TestLoad_ValidFile(t *testing.T) {
+	clearConfigEnv(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 
@@ -104,6 +157,7 @@ func TestLoad_ValidFile(t *testing.T) {
 }
 
 func TestLoad_InvalidJSON(t *testing.T) {
+	clearConfigEnv(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	os.WriteFile(path, []byte("{invalid json"), 0o644)
@@ -115,6 +169,7 @@ func TestLoad_InvalidJSON(t *testing.T) {
 }
 
 func TestLoad_EnvOverrides(t *testing.T) {
+	clearConfigEnv(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 
@@ -123,18 +178,11 @@ func TestLoad_EnvOverrides(t *testing.T) {
 	os.WriteFile(path, b, 0o644)
 
 	// Set env vars
-	os.Setenv("OR3_DB_PATH", "/env/test.db")
-	os.Setenv("OR3_API_KEY", "env-key")
-	os.Setenv("OR3_MODEL", "env-model")
-	os.Setenv("OR3_EMBED_MODEL", "env-embed")
-	os.Setenv("OR3_API_BASE", "https://env.api")
-	defer func() {
-		os.Unsetenv("OR3_DB_PATH")
-		os.Unsetenv("OR3_API_KEY")
-		os.Unsetenv("OR3_MODEL")
-		os.Unsetenv("OR3_EMBED_MODEL")
-		os.Unsetenv("OR3_API_BASE")
-	}()
+	t.Setenv("OR3_DB_PATH", "/env/test.db")
+	t.Setenv("OR3_API_KEY", "env-key")
+	t.Setenv("OR3_MODEL", "env-model")
+	t.Setenv("OR3_EMBED_MODEL", "env-embed")
+	t.Setenv("OR3_API_BASE", "https://env.api")
 
 	cfg, err := Load(path)
 	if err != nil {
@@ -158,13 +206,13 @@ func TestLoad_EnvOverrides(t *testing.T) {
 }
 
 func TestLoad_ArtifactsDirEnvOverride(t *testing.T) {
+	clearConfigEnv(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	b, _ := json.MarshalIndent(Default(), "", "  ")
 	os.WriteFile(path, b, 0o644)
 
-	os.Setenv("OR3_ARTIFACTS_DIR", "/env/artifacts")
-	defer os.Unsetenv("OR3_ARTIFACTS_DIR")
+	t.Setenv("OR3_ARTIFACTS_DIR", "/env/artifacts")
 
 	cfg, err := Load(path)
 	if err != nil {
@@ -176,6 +224,7 @@ func TestLoad_ArtifactsDirEnvOverride(t *testing.T) {
 }
 
 func TestLoad_ZeroValues_GetDefaults(t *testing.T) {
+	clearConfigEnv(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 
@@ -212,10 +261,10 @@ func TestLoad_ZeroValues_GetDefaults(t *testing.T) {
 }
 
 func TestLoad_EmptyPath_UsesDefault(t *testing.T) {
+	clearConfigEnv(t)
 	// Use a temp home dir to avoid touching real home
 	dir := t.TempDir()
-	os.Setenv("HOME", dir)
-	defer os.Unsetenv("HOME")
+	t.Setenv("HOME", dir)
 
 	cfg, err := Load("")
 	if err != nil {
@@ -227,6 +276,7 @@ func TestLoad_EmptyPath_UsesDefault(t *testing.T) {
 }
 
 func TestMustJSON(t *testing.T) {
+	clearConfigEnv(t)
 	cfg := Default()
 	b := mustJSON(cfg)
 	if len(b) == 0 {

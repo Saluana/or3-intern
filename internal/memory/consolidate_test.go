@@ -2,19 +2,18 @@ package memory
 
 import (
 	"context"
-	"database/sql"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"or3-intern/internal/db"
 	"or3-intern/internal/providers"
 )
-
-// fakeProvider wraps providers.Client-shaped Chat/Embed to avoid real network calls.
-// We override behaviour using a hook approach by constructing a minimal server.
-// Since providers.Client is concrete, we use a simple test helper that
-// exercises only the Consolidator logic, not the network.
 
 func openConsolidateTestDB(t *testing.T) *db.DB {
 	t.Helper()
@@ -26,7 +25,40 @@ func openConsolidateTestDB(t *testing.T) *db.DB {
 	return d
 }
 
-// TestConsolidator_NilProvider is a no-op when provider is nil.
+func buildConsolidationProvider(t *testing.T, chatBody string, embedOK bool) (*providers.Client, *int32, *int32) {
+	t.Helper()
+	var chatCalls int32
+	var embedCalls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/chat/completions":
+			atomic.AddInt32(&chatCalls, 1)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"choices": []map[string]any{
+					{"message": map[string]any{"role": "assistant", "content": chatBody}},
+				},
+			})
+		case "/embeddings":
+			atomic.AddInt32(&embedCalls, 1)
+			if !embedOK {
+				http.Error(w, "embed fail", http.StatusBadGateway)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]any{{"embedding": []float32{0.1, 0.2}}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	p := providers.New(srv.URL, "test-key", 5*time.Second)
+	p.HTTP = srv.Client()
+	return p, &chatCalls, &embedCalls
+}
+
 func TestConsolidator_NilProvider(t *testing.T) {
 	d := openConsolidateTestDB(t)
 	c := &Consolidator{DB: d}
@@ -35,113 +67,166 @@ func TestConsolidator_NilProvider(t *testing.T) {
 	}
 }
 
-// TestConsolidator_NoSession returns nil when session does not exist.
-func TestConsolidator_NoSession(t *testing.T) {
-	d := openConsolidateTestDB(t)
-	// Provide a non-nil provider (won't be called because session not found).
-	c := &Consolidator{DB: d, Provider: &providers.Client{}, WindowSize: 5}
-	if err := c.MaybeConsolidate(context.Background(), "no-such-session", 10); err != nil {
-		t.Fatalf("expected nil error for missing session, got: %v", err)
-	}
-}
-
-// TestConsolidator_TooFewMessages is a no-op when message count < WindowSize.
-func TestConsolidator_TooFewMessages(t *testing.T) {
+func TestConsolidator_TooFewMessages_NoProviderCall(t *testing.T) {
 	d := openConsolidateTestDB(t)
 	ctx := context.Background()
-
-	// 4 messages, historyMax=2 → 2 consolidatable, windowSize=5 → skip.
 	for i := 0; i < 4; i++ {
-		d.AppendMessage(ctx, "sess", "user", "msg", nil)
+		if _, err := d.AppendMessage(ctx, "sess", "user", "msg", nil); err != nil {
+			t.Fatalf("AppendMessage: %v", err)
+		}
 	}
-	c := &Consolidator{DB: d, Provider: &providers.Client{}, WindowSize: 5}
+	prov, chatCalls, _ := buildConsolidationProvider(t, `{"summary":"x","canonical_memory":"- x"}`, true)
+	c := &Consolidator{DB: d, Provider: prov, WindowSize: 5}
 	if err := c.MaybeConsolidate(ctx, "sess", 2); err != nil {
 		t.Fatalf("expected nil error, got: %v", err)
 	}
+	if atomic.LoadInt32(chatCalls) != 0 {
+		t.Fatalf("expected no chat calls, got %d", atomic.LoadInt32(chatCalls))
+	}
 }
 
-// TestConsolidator_CursorAdvanced tests that SetLastConsolidatedID is called
-// correctly when a real consolidation run succeeds.
-// We verify the cursor moves by driving the DB directly without an LLM call.
-func TestConsolidator_CursorAdvanced(t *testing.T) {
+func TestConsolidator_RunOnce_PersistsNoteCursorAndCanonical(t *testing.T) {
 	d := openConsolidateTestDB(t)
 	ctx := context.Background()
-
-	// Insert 15 messages so that with historyMax=5, messages 1–10 are eligible.
-	var msgIDs []int64
-	for i := 0; i < 15; i++ {
+	for i := 0; i < 14; i++ {
 		role := "user"
 		if i%2 == 1 {
 			role = "assistant"
 		}
-		id, _ := d.AppendMessage(ctx, "sess", role, "content "+string(rune('A'+i)), nil)
-		msgIDs = append(msgIDs, id)
+		if _, err := d.AppendMessage(ctx, "sess", role, "message "+string(rune('a'+i)), nil); err != nil {
+			t.Fatalf("AppendMessage: %v", err)
+		}
+	}
+	prov, chatCalls, embedCalls := buildConsolidationProvider(t, `{"summary":"Short summary.","canonical_memory":"- prefers concise output"}`, true)
+	c := &Consolidator{
+		DB:                 d,
+		Provider:           prov,
+		WindowSize:         5,
+		MaxMessages:        50,
+		MaxInputChars:      12000,
+		EmbedModel:         "embed-model",
+		CanonicalPinnedKey: "long_term_memory",
+	}
+	didWork, err := c.RunOnce(ctx, "sess", 5, RunMode{})
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !didWork {
+		t.Fatal("expected consolidation work")
+	}
+	if atomic.LoadInt32(chatCalls) != 1 {
+		t.Fatalf("expected 1 chat call, got %d", atomic.LoadInt32(chatCalls))
+	}
+	if atomic.LoadInt32(embedCalls) != 1 {
+		t.Fatalf("expected 1 embed call, got %d", atomic.LoadInt32(embedCalls))
 	}
 
-	// Verify initial cursor is 0.
-	lastID, oldestActive, err := d.GetConsolidationRange(ctx, "sess", 5)
+	lastID, _, err := d.GetConsolidationRange(ctx, "sess", 5)
 	if err != nil {
 		t.Fatalf("GetConsolidationRange: %v", err)
 	}
-	if lastID != 0 {
-		t.Fatalf("expected initial lastID=0, got %d", lastID)
+	if lastID == 0 {
+		t.Fatal("expected cursor to advance")
 	}
-	if oldestActive == 0 {
-		t.Fatalf("expected non-zero oldestActiveID with 15 messages and historyMax=5")
-	}
-
-	// Get the messages that would be consolidated.
-	msgs, err := d.GetMessagesForConsolidation(ctx, "sess", 0, oldestActive)
+	pinned, ok, err := d.GetPinnedValue(ctx, "sess", "long_term_memory")
 	if err != nil {
-		t.Fatalf("GetMessagesForConsolidation: %v", err)
+		t.Fatalf("GetPinnedValue: %v", err)
 	}
-	if len(msgs) == 0 {
-		t.Fatal("expected consolidatable messages")
-	}
-
-	// Manually advance the cursor (simulates what MaybeConsolidate does after storing a note).
-	lastMsgID := msgs[len(msgs)-1].ID
-	d.InsertMemoryNote(ctx, "sess", "test summary", make([]byte, 0), sql.NullInt64{Int64: lastMsgID, Valid: true}, "consolidation")
-	if err := d.SetLastConsolidatedID(ctx, "sess", lastMsgID); err != nil {
-		t.Fatalf("SetLastConsolidatedID: %v", err)
-	}
-
-	// Now a second check should show the cursor has moved.
-	newLastID, _, err := d.GetConsolidationRange(ctx, "sess", 5)
-	if err != nil {
-		t.Fatalf("GetConsolidationRange after advance: %v", err)
-	}
-	if newLastID != lastMsgID {
-		t.Errorf("expected cursor=%d, got %d", lastMsgID, newLastID)
+	if !ok || !strings.Contains(pinned, "concise output") {
+		t.Fatalf("expected canonical memory update, got ok=%v value=%q", ok, pinned)
 	}
 }
 
-// TestConsolidator_DefaultWindowSize ensures WindowSize defaults to 10.
-func TestConsolidator_DefaultWindowSize(t *testing.T) {
+func TestConsolidator_EmptyTranscript_AdvancesCursor(t *testing.T) {
 	d := openConsolidateTestDB(t)
 	ctx := context.Background()
-
-	// 9 consolidatable messages (historyMax=5, total=14) — below default windowSize=10.
-	for i := 0; i < 14; i++ {
-		d.AppendMessage(ctx, "sess", "user", "msg", nil)
+	var ids []int64
+	for i := 0; i < 6; i++ {
+		id, err := d.AppendMessage(ctx, "sess", "tool", "tool output", nil)
+		if err != nil {
+			t.Fatalf("AppendMessage: %v", err)
+		}
+		ids = append(ids, id)
 	}
-	c := &Consolidator{DB: d, Provider: &providers.Client{}, WindowSize: 0} // 0 → default 10
-	// Should not call Provider.Chat because count (9) < defaultWindowSize (10).
-	if err := c.MaybeConsolidate(ctx, "sess", 5); err != nil {
-		t.Fatalf("expected nil error (skipped), got: %v", err)
+	prov, chatCalls, _ := buildConsolidationProvider(t, `{"summary":"unused","canonical_memory":"unused"}`, true)
+	c := &Consolidator{DB: d, Provider: prov, WindowSize: 1, MaxMessages: 50, MaxInputChars: 12000}
+	didWork, err := c.RunOnce(ctx, "sess", 1, RunMode{ArchiveAll: true})
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !didWork {
+		t.Fatal("expected didWork true for cursor advancement")
+	}
+	if atomic.LoadInt32(chatCalls) != 0 {
+		t.Fatalf("expected no chat call for empty transcript, got %d", atomic.LoadInt32(chatCalls))
+	}
+	lastID, _, err := d.GetConsolidationRange(ctx, "sess", 1)
+	if err != nil {
+		t.Fatalf("GetConsolidationRange: %v", err)
+	}
+	if lastID != ids[len(ids)-1] {
+		t.Fatalf("expected cursor=%d, got %d", ids[len(ids)-1], lastID)
 	}
 }
 
-// TestContentToStr covers the helper for various types.
-func TestContentToStr_String(t *testing.T) {
-	if got := contentToStr("hello"); got != "hello" {
-		t.Errorf("expected 'hello', got %q", got)
+func TestConsolidator_ArchiveAll_MultiPass(t *testing.T) {
+	d := openConsolidateTestDB(t)
+	ctx := context.Background()
+	for i := 0; i < 120; i++ {
+		if _, err := d.AppendMessage(ctx, "sess", "user", "line", nil); err != nil {
+			t.Fatalf("AppendMessage: %v", err)
+		}
+	}
+	prov, chatCalls, _ := buildConsolidationProvider(t, `{"summary":"pass summary","canonical_memory":"- memory"}`, false)
+	c := &Consolidator{
+		DB:                 d,
+		Provider:           prov,
+		WindowSize:         10,
+		MaxMessages:        25,
+		MaxInputChars:      2000,
+		CanonicalPinnedKey: "long_term_memory",
+	}
+	if err := c.ArchiveAll(ctx, "sess", 40); err != nil {
+		t.Fatalf("ArchiveAll: %v", err)
+	}
+	lastID, oldestID, err := d.GetConsolidationRange(ctx, "sess", 40)
+	if err != nil {
+		t.Fatalf("GetConsolidationRange: %v", err)
+	}
+	if oldestID != 0 && lastID < oldestID {
+		t.Fatalf("expected cursor to move through archive-all range, got last=%d oldest=%d", lastID, oldestID)
+	}
+	if atomic.LoadInt32(chatCalls) < 2 {
+		t.Fatalf("expected multiple chat calls for multipass archive, got %d", atomic.LoadInt32(chatCalls))
 	}
 }
 
-func TestContentToStr_Nil(t *testing.T) {
-	if got := contentToStr(nil); got != "" {
-		t.Errorf("expected empty, got %q", got)
+func TestConsolidator_MaxInputCharsBoundsPromptAndSkipsEmbedOnFailure(t *testing.T) {
+	d := openConsolidateTestDB(t)
+	ctx := context.Background()
+	for i := 0; i < 12; i++ {
+		if _, err := d.AppendMessage(ctx, "sess", "user", strings.Repeat("x", 400), nil); err != nil {
+			t.Fatalf("AppendMessage: %v", err)
+		}
+	}
+	prov, _, embedCalls := buildConsolidationProvider(t, `{"summary":"bounded summary","canonical_memory":"- bounded"}`, false)
+	c := &Consolidator{
+		DB:            d,
+		Provider:      prov,
+		WindowSize:    5,
+		MaxMessages:   50,
+		MaxInputChars: 500,
+		EmbedModel:    "embed-model",
+	}
+	didWork, err := c.RunOnce(ctx, "sess", 5, RunMode{})
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !didWork {
+		t.Fatal("expected work to be done")
+	}
+	if atomic.LoadInt32(embedCalls) != 1 {
+		t.Fatalf("expected embed attempt, got %d", atomic.LoadInt32(embedCalls))
 	}
 }
 

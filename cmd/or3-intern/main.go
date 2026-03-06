@@ -35,7 +35,9 @@ func main() {
 
 	args := flag.Args()
 	cmd := "chat"
-	if len(args) > 0 { cmd = args[0] }
+	if len(args) > 0 {
+		cmd = args[0]
+	}
 	if cmd == "init" {
 		if err := runInit(cfgPath); err != nil {
 			fmt.Fprintln(os.Stderr, "init error:", err)
@@ -126,40 +128,55 @@ func main() {
 	ret.VectorScanLimit = cfg.VectorScanLimit
 
 	rt := &agent.Runtime{
-		DB: d,
-		Provider: prov,
-		Model: cfg.Provider.Model,
+		DB:          d,
+		Provider:    prov,
+		Model:       cfg.Provider.Model,
 		Temperature: cfg.Provider.Temperature,
-		Tools: reg,
+		Tools:       reg,
 		Builder: &agent.Builder{
-			DB: d,
-			Skills: inv,
-			Mem: ret,
-			Provider: prov,
-			EmbedModel: cfg.Provider.EmbedModel,
-			Soul: loadBootstrapFile(cfg.SoulFile, cfg.WorkspaceDir, "SOUL.md", agent.DefaultSoul),
-			AgentInstructions: loadBootstrapFile(cfg.AgentsFile, cfg.WorkspaceDir, "AGENTS.md", agent.DefaultAgentInstructions),
-			ToolNotes: loadBootstrapFile(cfg.ToolsFile, cfg.WorkspaceDir, "TOOLS.md", agent.DefaultToolNotes),
-			BootstrapMaxChars: cfg.BootstrapMaxChars,
+			DB:                     d,
+			Skills:                 inv,
+			Mem:                    ret,
+			Provider:               prov,
+			EmbedModel:             cfg.Provider.EmbedModel,
+			Soul:                   loadBootstrapFile(cfg.SoulFile, cfg.WorkspaceDir, "SOUL.md", agent.DefaultSoul),
+			AgentInstructions:      loadBootstrapFile(cfg.AgentsFile, cfg.WorkspaceDir, "AGENTS.md", agent.DefaultAgentInstructions),
+			ToolNotes:              loadBootstrapFile(cfg.ToolsFile, cfg.WorkspaceDir, "TOOLS.md", agent.DefaultToolNotes),
+			BootstrapMaxChars:      cfg.BootstrapMaxChars,
 			BootstrapTotalMaxChars: cfg.BootstrapTotalMaxChars,
-			HistoryMax: cfg.HistoryMax,
-			VectorK: cfg.VectorK,
-			FTSK: cfg.FTSK,
-			TopK: cfg.MemoryRetrieve,
+			HistoryMax:             cfg.HistoryMax,
+			VectorK:                cfg.VectorK,
+			FTSK:                   cfg.FTSK,
+			TopK:                   cfg.MemoryRetrieve,
 		},
-		Artifacts: art,
+		Artifacts:    art,
 		MaxToolBytes: cfg.MaxToolBytes,
 		MaxToolLoops: cfg.MaxToolLoops,
-		Deliver: delivererFunc(channelManager.Deliver),
+		Deliver:      delivererFunc(channelManager.Deliver),
 	}
 	if cfg.ConsolidationEnabled {
 		rt.Consolidator = &memory.Consolidator{
-			DB:         d,
-			Provider:   prov,
-			EmbedModel: cfg.Provider.EmbedModel,
-			ChatModel:  cfg.Provider.Model,
-			WindowSize: cfg.ConsolidationWindowSize,
+			DB:                 d,
+			Provider:           prov,
+			EmbedModel:         cfg.Provider.EmbedModel,
+			ChatModel:          cfg.Provider.Model,
+			WindowSize:         cfg.ConsolidationWindowSize,
+			MaxMessages:        cfg.ConsolidationMaxMessages,
+			MaxInputChars:      cfg.ConsolidationMaxInputChars,
+			CanonicalPinnedKey: "long_term_memory",
 		}
+		rt.ConsolidationScheduler = memory.NewScheduler(
+			time.Duration(cfg.ConsolidationAsyncTimeoutSeconds)*time.Second,
+			func(runCtx context.Context, sessionKey string) {
+				historyMax := cfg.HistoryMax
+				if historyMax <= 0 {
+					historyMax = 40
+				}
+				if _, err := rt.Consolidator.RunOnce(runCtx, sessionKey, historyMax, memory.RunMode{}); err != nil {
+					log.Printf("consolidation failed: session=%s err=%v", sessionKey, err)
+				}
+			},
+		)
 	}
 
 	// cron service + tool
@@ -212,7 +229,9 @@ func main() {
 			os.Exit(2)
 		}
 		sessionKey := "migrated:default"
-		if len(args) >= 3 { sessionKey = args[2] }
+		if len(args) >= 3 {
+			sessionKey = args[2]
+		}
 		if err := migrateJSONL(ctx, d, args[1], sessionKey); err != nil {
 			fmt.Fprintln(os.Stderr, "migration error:", err)
 			os.Exit(1)
@@ -225,13 +244,17 @@ func main() {
 		os.Exit(2)
 	}
 
-	if cronSvc != nil { cronSvc.Stop() }
+	if cronSvc != nil {
+		cronSvc.Stop()
+	}
 	_ = channelManager.StopAll(context.Background())
 }
 
 type delivererFunc func(ctx context.Context, channel, to, text string) error
 
-func (f delivererFunc) Deliver(ctx context.Context, channel, to, text string) error { return f(ctx, channel, to, text) }
+func (f delivererFunc) Deliver(ctx context.Context, channel, to, text string) error {
+	return f(ctx, channel, to, text)
+}
 
 func buildChannelManager(cfg config.Config, cliDeliverer cli.Deliverer) (*rootchannels.Manager, error) {
 	mgr := rootchannels.NewManager()
@@ -239,37 +262,53 @@ func buildChannelManager(cfg config.Config, cliDeliverer cli.Deliverer) (*rootch
 		return nil, err
 	}
 	if cfg.Channels.Telegram.Enabled {
-		if err := mgr.Register(&telegram.Channel{Config: cfg.Channels.Telegram}); err != nil { return nil, err }
+		if err := mgr.Register(&telegram.Channel{Config: cfg.Channels.Telegram}); err != nil {
+			return nil, err
+		}
 	}
 	if cfg.Channels.Slack.Enabled {
-		if err := mgr.Register(&slack.Channel{Config: cfg.Channels.Slack}); err != nil { return nil, err }
+		if err := mgr.Register(&slack.Channel{Config: cfg.Channels.Slack}); err != nil {
+			return nil, err
+		}
 	}
 	if cfg.Channels.Discord.Enabled {
-		if err := mgr.Register(&discord.Channel{Config: cfg.Channels.Discord}); err != nil { return nil, err }
+		if err := mgr.Register(&discord.Channel{Config: cfg.Channels.Discord}); err != nil {
+			return nil, err
+		}
 	}
 	if cfg.Channels.WhatsApp.Enabled {
 		cfg.Channels.WhatsApp.BridgeURL = whatsapp.BridgeURL(cfg.Channels.WhatsApp.BridgeURL)
-		if err := mgr.Register(&whatsapp.Channel{Config: cfg.Channels.WhatsApp}); err != nil { return nil, err }
+		if err := mgr.Register(&whatsapp.Channel{Config: cfg.Channels.WhatsApp}); err != nil {
+			return nil, err
+		}
 	}
 	return mgr, nil
 }
 
 func cfgPathOrDefault(p string) string {
-	if p != "" { return p }
+	if p != "" {
+		return p
+	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".or3-intern", "config.json")
 }
 
 func allowedRoot(cfg config.Config) string {
 	if cfg.Tools.RestrictToWorkspace {
-		if cfg.WorkspaceDir != "" { return cfg.WorkspaceDir }
+		if cfg.WorkspaceDir != "" {
+			return cfg.WorkspaceDir
+		}
 	}
-	if cfg.AllowedDir != "" { return cfg.AllowedDir }
+	if cfg.AllowedDir != "" {
+		return cfg.AllowedDir
+	}
 	return ""
 }
 
 func runWorkers(ctx context.Context, b *bus.Bus, rt *agent.Runtime, n int) {
-	if n <= 0 { n = 4 }
+	if n <= 0 {
+		n = 4
+	}
 	for i := 0; i < n; i++ {
 		go func() {
 			for ev := range b.Channel() {
@@ -304,12 +343,16 @@ func loadBootstrapFile(configPath, workspaceDir, baseName, fallback string) stri
 }
 
 func ensureFileIfMissing(path, content string) error {
-	if strings.TrimSpace(path) == "" { return nil }
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
 	if _, err := os.Stat(path); err == nil {
 		return nil
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil { return err }
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
 	return os.WriteFile(path, []byte(strings.TrimSpace(content)+"\n"), 0o644)
 }

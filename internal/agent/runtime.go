@@ -103,7 +103,8 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 
 		// execute tools sequentially
 		for _, tc := range msg.ToolCalls {
-			out, err := r.Tools.Execute(ctx, tc.Function.Name, tc.Function.Arguments)
+			toolCtx := tools.ContextWithSession(ctx, ev.SessionKey)
+			out, err := r.Tools.Execute(toolCtx, tc.Function.Name, tc.Function.Arguments)
 			if err != nil { out = "tool error: " + err.Error() }
 
 			payload := map[string]any{

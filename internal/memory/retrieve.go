@@ -26,10 +26,10 @@ func NewRetriever(d *db.DB) *Retriever {
 	return &Retriever{DB: d, VectorWeight: 0.7, FTSWeight: 0.3, VectorScanLimit: 2000}
 }
 
-func (r *Retriever) Retrieve(ctx context.Context, query string, queryVec []float32, vectorK, ftsK, topK int) ([]Retrieved, error) {
-	vecs, err := VectorSearch(ctx, r.DB, queryVec, vectorK, r.VectorScanLimit)
+func (r *Retriever) Retrieve(ctx context.Context, sessionKey, query string, queryVec []float32, vectorK, ftsK, topK int) ([]Retrieved, error) {
+	vecs, err := VectorSearch(ctx, r.DB, sessionKey, queryVec, vectorK, r.VectorScanLimit)
 	if err != nil { return nil, err }
-	fts, _ := r.DB.SearchFTS(ctx, normalizeFTSQuery(query), ftsK)
+	fts, _ := r.DB.SearchFTS(ctx, sessionKey, normalizeFTSQuery(query), ftsK)
 
 	type agg struct {
 		id int64

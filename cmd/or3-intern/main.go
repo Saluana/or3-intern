@@ -13,7 +13,12 @@ import (
 	"or3-intern/internal/agent"
 	"or3-intern/internal/artifacts"
 	"or3-intern/internal/bus"
+	rootchannels "or3-intern/internal/channels"
 	"or3-intern/internal/channels/cli"
+	"or3-intern/internal/channels/discord"
+	"or3-intern/internal/channels/slack"
+	"or3-intern/internal/channels/telegram"
+	"or3-intern/internal/channels/whatsapp"
 	"or3-intern/internal/config"
 	"or3-intern/internal/cron"
 	"or3-intern/internal/db"
@@ -31,11 +36,23 @@ func main() {
 	args := flag.Args()
 	cmd := "chat"
 	if len(args) > 0 { cmd = args[0] }
+	if cmd == "init" {
+		if err := runInit(cfgPath); err != nil {
+			fmt.Fprintln(os.Stderr, "init error:", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "config error:", err)
 		os.Exit(1)
+	}
+	if cfg.Tools.RestrictToWorkspace && strings.TrimSpace(cfg.WorkspaceDir) == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			cfg.WorkspaceDir = cwd
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(cfg.DBPath), 0o755); err != nil {
 		fmt.Fprintln(os.Stderr, "mkdir db dir error:", err)
@@ -71,6 +88,11 @@ func main() {
 
 	b := bus.New(256)
 	del := cli.Deliverer{}
+	channelManager, err := buildChannelManager(cfg, del)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "channel config error:", err)
+		os.Exit(1)
+	}
 
 	art := &artifacts.Store{Dir: cfg.ArtifactsDir, DB: d}
 
@@ -90,7 +112,9 @@ func main() {
 	reg.Register(&tools.MemorySearch{DB: d, Provider: prov, EmbedModel: cfg.Provider.EmbedModel, VectorK: cfg.VectorK, FTSK: cfg.FTSK, TopK: cfg.MemoryRetrieve, VectorScanLimit: cfg.VectorScanLimit})
 
 	// send_message tool
-	reg.Register(&tools.SendMessage{Deliver: del.Deliver})
+	reg.Register(&tools.SendMessage{Deliver: func(ctx context.Context, channel, to, text string) error {
+		return channelManager.Deliver(ctx, channel, to, text)
+	}})
 
 	// skills
 	builtin := filepath.Join(filepath.Dir(cfgPathOrDefault(cfgPath)), "builtin_skills")
@@ -126,7 +150,7 @@ func main() {
 		Artifacts: art,
 		MaxToolBytes: cfg.MaxToolBytes,
 		MaxToolLoops: cfg.MaxToolLoops,
-		Deliver: del,
+		Deliver: delivererFunc(channelManager.Deliver),
 	}
 
 	// cron service + tool
@@ -142,11 +166,20 @@ func main() {
 
 	switch cmd {
 	case "chat":
+		_ = channelManager.Start(ctx, "cli", b)
 		runWorkers(ctx, b, rt, cfg.WorkerCount)
 		ch := &cli.Channel{Bus: b, SessionKey: cfg.DefaultSessionKey}
 		if err := ch.Run(ctx); err != nil {
 			fmt.Fprintln(os.Stderr, "cli error:", err)
 		}
+	case "serve":
+		runWorkers(ctx, b, rt, cfg.WorkerCount)
+		if err := channelManager.StartAll(ctx, b); err != nil {
+			fmt.Fprintln(os.Stderr, "channel start error:", err)
+			os.Exit(1)
+		}
+		fmt.Println("or3-intern serve: channels running. Ctrl+C to stop.")
+		select {}
 	case "agent":
 		// one-shot: or3-intern agent -m "hello"
 		fs := flag.NewFlagSet("agent", flag.ExitOnError)
@@ -184,6 +217,32 @@ func main() {
 	}
 
 	if cronSvc != nil { cronSvc.Stop() }
+	_ = channelManager.StopAll(context.Background())
+}
+
+type delivererFunc func(ctx context.Context, channel, to, text string) error
+
+func (f delivererFunc) Deliver(ctx context.Context, channel, to, text string) error { return f(ctx, channel, to, text) }
+
+func buildChannelManager(cfg config.Config, cliDeliverer cli.Deliverer) (*rootchannels.Manager, error) {
+	mgr := rootchannels.NewManager()
+	if err := mgr.Register(cli.Service{Deliverer: cliDeliverer}); err != nil {
+		return nil, err
+	}
+	if cfg.Channels.Telegram.Enabled {
+		if err := mgr.Register(&telegram.Channel{Config: cfg.Channels.Telegram}); err != nil { return nil, err }
+	}
+	if cfg.Channels.Slack.Enabled {
+		if err := mgr.Register(&slack.Channel{Config: cfg.Channels.Slack}); err != nil { return nil, err }
+	}
+	if cfg.Channels.Discord.Enabled {
+		if err := mgr.Register(&discord.Channel{Config: cfg.Channels.Discord}); err != nil { return nil, err }
+	}
+	if cfg.Channels.WhatsApp.Enabled {
+		cfg.Channels.WhatsApp.BridgeURL = whatsapp.BridgeURL(cfg.Channels.WhatsApp.BridgeURL)
+		if err := mgr.Register(&whatsapp.Channel{Config: cfg.Channels.WhatsApp}); err != nil { return nil, err }
+	}
+	return mgr, nil
 }
 
 func cfgPathOrDefault(p string) string {

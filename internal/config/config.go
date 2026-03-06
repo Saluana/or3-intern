@@ -29,6 +29,9 @@ type Config struct {
 	VectorScanLimit int   `json:"vectorScanLimit"`
 	WorkerCount    int    `json:"workerCount"`
 
+	ConsolidationEnabled    bool `json:"consolidationEnabled"`
+	ConsolidationWindowSize int  `json:"consolidationWindowSize"`
+
 	Provider ProviderConfig `json:"provider"`
 	Tools    ToolsConfig    `json:"tools"`
 	Cron     CronConfig     `json:"cron"`
@@ -132,6 +135,8 @@ func Default() Config {
 		FTSK: 8,
 		VectorScanLimit: 2000,
 		WorkerCount: 4,
+		ConsolidationEnabled:    true,
+		ConsolidationWindowSize: 10,
 		Provider: ProviderConfig{
 			APIBase: "https://api.openai.com/v1",
 			APIKey: os.Getenv("OPENAI_API_KEY"),
@@ -225,6 +230,7 @@ func Load(path string) (Config, error) {
 	if cfg.MaxToolLoops <= 0 { cfg.MaxToolLoops = 6 }
 	if cfg.VectorScanLimit <= 0 { cfg.VectorScanLimit = 2000 }
 	if cfg.WorkerCount <= 0 { cfg.WorkerCount = 4 }
+	if cfg.ConsolidationWindowSize <= 0 { cfg.ConsolidationWindowSize = 10 }
 	if cfg.Channels.Telegram.APIBase == "" { cfg.Channels.Telegram.APIBase = "https://api.telegram.org" }
 	if cfg.Channels.Telegram.PollSeconds <= 0 { cfg.Channels.Telegram.PollSeconds = 2 }
 	if cfg.Channels.Slack.APIBase == "" { cfg.Channels.Slack.APIBase = "https://slack.com/api" }

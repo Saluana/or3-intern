@@ -152,6 +152,15 @@ func main() {
 		MaxToolLoops: cfg.MaxToolLoops,
 		Deliver: delivererFunc(channelManager.Deliver),
 	}
+	if cfg.ConsolidationEnabled {
+		rt.Consolidator = &memory.Consolidator{
+			DB:         d,
+			Provider:   prov,
+			EmbedModel: cfg.Provider.EmbedModel,
+			ChatModel:  cfg.Provider.Model,
+			WindowSize: cfg.ConsolidationWindowSize,
+		}
+	}
 
 	// cron service + tool
 	var cronSvc *cron.Service

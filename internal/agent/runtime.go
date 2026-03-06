@@ -13,6 +13,7 @@ import (
 	"or3-intern/internal/bus"
 	"or3-intern/internal/cron"
 	"or3-intern/internal/db"
+	"or3-intern/internal/memory"
 	"or3-intern/internal/providers"
 	"or3-intern/internal/tools"
 )
@@ -34,6 +35,8 @@ type Runtime struct {
 	ToolPreviewBytes int
 
 	Deliver Deliverer
+
+	Consolidator *memory.Consolidator
 
 	locks sync.Map // sessionKey -> *sync.Mutex
 }
@@ -145,6 +148,18 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 			log.Printf("deliver failed: %v", err)
 		}
 	}
+
+	// best-effort rolling consolidation of old messages into memory notes
+	if r.Consolidator != nil && r.Builder != nil {
+		historyMax := r.Builder.HistoryMax
+		if historyMax <= 0 {
+			historyMax = 40
+		}
+		if err := r.Consolidator.MaybeConsolidate(ctx, ev.SessionKey, historyMax); err != nil {
+			log.Printf("consolidation failed: session=%s err=%v", ev.SessionKey, err)
+		}
+	}
+
 	return nil
 }
 

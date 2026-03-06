@@ -173,6 +173,62 @@ func (d *DB) SearchFTS(ctx context.Context, sessionKey, query string, k int) ([]
 	return out, rows.Err()
 }
 
+// GetConsolidationRange returns (lastConsolidatedID, oldestActiveID).
+// oldestActiveID is the minimum ID among the last historyMax messages,
+// or 0 if there are fewer than historyMax messages in the session.
+// A non-zero oldestActiveID means there are messages older than the active
+// window that may be eligible for consolidation.
+func (d *DB) GetConsolidationRange(ctx context.Context, sessionKey string, historyMax int) (lastConsolidatedID int64, oldestActiveID int64, err error) {
+	row := d.SQL.QueryRowContext(ctx,
+		`SELECT last_consolidated_msg_id FROM sessions WHERE key=?`, sessionKey)
+	if scanErr := row.Scan(&lastConsolidatedID); scanErr != nil {
+		// Session row not found yet → nothing to consolidate.
+		return 0, 0, nil
+	}
+
+	// Oldest ID in the active window (last historyMax messages).
+	// If the total number of messages is < historyMax, MIN returns NULL → 0.
+	activeRow := d.SQL.QueryRowContext(ctx,
+		`SELECT COALESCE(MIN(id), 0) FROM
+		 (SELECT id FROM messages WHERE session_key=? ORDER BY id DESC LIMIT ?)`,
+		sessionKey, historyMax)
+	if scanErr := activeRow.Scan(&oldestActiveID); scanErr != nil {
+		return lastConsolidatedID, 0, scanErr
+	}
+	return lastConsolidatedID, oldestActiveID, nil
+}
+
+// GetMessagesForConsolidation returns messages with afterID < id < beforeID
+// in chronological order. Used to build the window to summarize.
+func (d *DB) GetMessagesForConsolidation(ctx context.Context, sessionKey string, afterID, beforeID int64) ([]Message, error) {
+	rows, err := d.SQL.QueryContext(ctx,
+		`SELECT id, session_key, role, content, payload_json, created_at
+		 FROM messages WHERE session_key=? AND id > ? AND id < ?
+		 ORDER BY id ASC`,
+		sessionKey, afterID, beforeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Message
+	for rows.Next() {
+		var m Message
+		if err := rows.Scan(&m.ID, &m.SessionKey, &m.Role, &m.Content, &m.PayloadJSON, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// SetLastConsolidatedID records the highest message ID that has been
+// consolidated into memory notes for this session.
+func (d *DB) SetLastConsolidatedID(ctx context.Context, sessionKey string, id int64) error {
+	_, err := d.SQL.ExecContext(ctx,
+		`UPDATE sessions SET last_consolidated_msg_id=? WHERE key=?`, id, sessionKey)
+	return err
+}
+
 func normalizeMemorySession(sessionKey string) string {
 	sessionKey = strings.TrimSpace(sessionKey)
 	if sessionKey == "" {

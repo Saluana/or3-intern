@@ -172,8 +172,15 @@ func main() {
 				if historyMax <= 0 {
 					historyMax = 40
 				}
-				if _, err := rt.Consolidator.RunOnce(runCtx, sessionKey, historyMax, memory.RunMode{}); err != nil {
-					log.Printf("consolidation failed: session=%s err=%v", sessionKey, err)
+				for i := 0; i < 3; i++ {
+					didWork, err := rt.Consolidator.RunOnce(runCtx, sessionKey, historyMax, memory.RunMode{})
+					if err != nil {
+						log.Printf("consolidation failed: session=%s err=%v", sessionKey, err)
+						return
+					}
+					if !didWork {
+						return
+					}
 				}
 			},
 		)

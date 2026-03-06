@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ---- StripHTML ----
@@ -70,9 +71,9 @@ func TestWebFetch_Success(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tool := &WebFetch{HTTP: srv.Client()}
+	tool := &WebFetch{HTTP: &http.Client{Transport: &urlRewriteTransport{base: srv.URL}}}
 	out, err := tool.Execute(context.Background(), map[string]any{
-		"url": srv.URL,
+		"url": "https://example.com/test",
 	})
 	if err != nil {
 		t.Fatalf("WebFetch: %v", err)
@@ -91,9 +92,9 @@ func TestWebFetch_MaxBytes(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tool := &WebFetch{HTTP: srv.Client()}
+	tool := &WebFetch{HTTP: &http.Client{Transport: &urlRewriteTransport{base: srv.URL}}}
 	out, err := tool.Execute(context.Background(), map[string]any{
-		"url":      srv.URL,
+		"url":      "https://example.com/large",
 		"maxBytes": float64(50),
 	})
 	if err != nil {
@@ -101,6 +102,33 @@ func TestWebFetch_MaxBytes(t *testing.T) {
 	}
 	// Body should be limited to 50 bytes
 	_ = out
+}
+
+func TestWebFetch_BlocksLocalhost(t *testing.T) {
+	tool := &WebFetch{}
+	_, err := tool.Execute(context.Background(), map[string]any{"url": "http://127.0.0.1:8080"})
+	if err == nil {
+		t.Fatal("expected localhost fetch to be blocked")
+	}
+}
+
+func TestWebFetch_StopsAfterDefaultRedirectLimit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "https://example.com/loop", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	tool := &WebFetch{
+		HTTP:    &http.Client{Transport: &urlRewriteTransport{base: srv.URL}},
+		Timeout: 2 * time.Second,
+	}
+	_, err := tool.Execute(context.Background(), map[string]any{"url": "https://example.com/loop"})
+	if err == nil {
+		t.Fatal("expected redirect loop to fail")
+	}
+	if !strings.Contains(err.Error(), "stopped after 10 redirects") {
+		t.Fatalf("expected redirect limit error, got %v", err)
+	}
 }
 
 func TestWebFetch_Name(t *testing.T) {

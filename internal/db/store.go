@@ -4,6 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"strings"
+
+	"or3-intern/internal/scope"
 )
 
 type Message struct {
@@ -62,8 +65,13 @@ func (d *DB) GetLastMessages(ctx context.Context, sessionKey string, limit int) 
 	return out, rows.Err()
 }
 
-func (d *DB) GetPinned(ctx context.Context) (map[string]string, error) {
-	rows, err := d.SQL.QueryContext(ctx, `SELECT key, content FROM memory_pinned ORDER BY key`)
+func (d *DB) GetPinned(ctx context.Context, sessionKey string) (map[string]string, error) {
+	sessionKey = normalizeMemorySession(sessionKey)
+	rows, err := d.SQL.QueryContext(ctx,
+		`SELECT key, content FROM memory_pinned
+		 WHERE session_key IN (?, ?)
+		 ORDER BY CASE WHEN session_key=? THEN 1 ELSE 0 END, key`,
+		scope.GlobalMemoryScope, sessionKey, sessionKey)
 	if err != nil { return nil, err }
 	defer rows.Close()
 	out := map[string]string{}
@@ -75,18 +83,20 @@ func (d *DB) GetPinned(ctx context.Context) (map[string]string, error) {
 	return out, rows.Err()
 }
 
-func (d *DB) UpsertPinned(ctx context.Context, key, content string) error {
+func (d *DB) UpsertPinned(ctx context.Context, sessionKey, key, content string) error {
+	sessionKey = normalizeMemorySession(sessionKey)
 	_, err := d.SQL.ExecContext(ctx,
-		`INSERT INTO memory_pinned(key, content, updated_at) VALUES(?,?,?)
-		 ON CONFLICT(key) DO UPDATE SET content=excluded.content, updated_at=excluded.updated_at`,
-		key, content, NowMS())
+		`INSERT INTO memory_pinned(session_key, key, content, updated_at) VALUES(?,?,?,?)
+		 ON CONFLICT(session_key, key) DO UPDATE SET content=excluded.content, updated_at=excluded.updated_at`,
+		sessionKey, key, content, NowMS())
 	return err
 }
 
-func (d *DB) InsertMemoryNote(ctx context.Context, text string, embedding []byte, sourceMsgID sql.NullInt64, tags string) (int64, error) {
+func (d *DB) InsertMemoryNote(ctx context.Context, sessionKey, text string, embedding []byte, sourceMsgID sql.NullInt64, tags string) (int64, error) {
+	sessionKey = normalizeMemorySession(sessionKey)
 	res, err := d.SQL.ExecContext(ctx,
-		`INSERT INTO memory_notes(text, embedding, source_message_id, tags, created_at) VALUES(?,?,?,?,?)`,
-		text, embedding, sourceMsgID, tags, NowMS())
+		`INSERT INTO memory_notes(session_key, text, embedding, source_message_id, tags, created_at) VALUES(?,?,?,?,?,?)`,
+		sessionKey, text, embedding, sourceMsgID, tags, NowMS())
 	if err != nil { return 0, err }
 	id, _ := res.LastInsertId()
 	return id, nil
@@ -101,17 +111,37 @@ type MemoryNoteRow struct {
 	CreatedAt int64
 }
 
-func (d *DB) StreamMemoryNotes(ctx context.Context) (*sql.Rows, error) {
-	return d.SQL.QueryContext(ctx, `SELECT id, text, embedding, source_message_id, tags, created_at FROM memory_notes`)
+func (d *DB) StreamMemoryNotes(ctx context.Context, sessionKey string) (*sql.Rows, error) {
+	sessionKey = normalizeMemorySession(sessionKey)
+	return d.SQL.QueryContext(ctx,
+		`SELECT id, text, embedding, source_message_id, tags, created_at FROM memory_notes
+		 WHERE session_key IN (?, ?)`,
+		scope.GlobalMemoryScope, sessionKey)
 }
 
-func (d *DB) StreamMemoryNotesLimit(ctx context.Context, limit int) (*sql.Rows, error) {
+func (d *DB) StreamMemoryNotesScopeLimit(ctx context.Context, sessionKey string, limit int) (*sql.Rows, error) {
+	sessionKey = normalizeMemorySession(sessionKey)
 	if limit <= 0 {
-		return d.StreamMemoryNotes(ctx)
+		return d.SQL.QueryContext(ctx,
+			`SELECT id, text, embedding, source_message_id, tags, created_at
+			 FROM memory_notes WHERE session_key=?`,
+			sessionKey)
 	}
 	return d.SQL.QueryContext(ctx,
 		`SELECT id, text, embedding, source_message_id, tags, created_at
-		 FROM memory_notes ORDER BY id DESC LIMIT ?`, limit)
+		 FROM memory_notes WHERE session_key=? ORDER BY id DESC LIMIT ?`,
+		sessionKey, limit)
+}
+
+func (d *DB) StreamMemoryNotesLimit(ctx context.Context, sessionKey string, limit int) (*sql.Rows, error) {
+	sessionKey = normalizeMemorySession(sessionKey)
+	if limit <= 0 {
+		return d.StreamMemoryNotes(ctx, sessionKey)
+	}
+	return d.SQL.QueryContext(ctx,
+		`SELECT id, text, embedding, source_message_id, tags, created_at
+		 FROM memory_notes WHERE session_key IN (?, ?) ORDER BY id DESC LIMIT ?`,
+		scope.GlobalMemoryScope, sessionKey, limit)
 }
 
 type FTSCandidate struct {
@@ -120,10 +150,16 @@ type FTSCandidate struct {
 	Rank float64
 }
 
-func (d *DB) SearchFTS(ctx context.Context, query string, k int) ([]FTSCandidate, error) {
+func (d *DB) SearchFTS(ctx context.Context, sessionKey, query string, k int) ([]FTSCandidate, error) {
+	sessionKey = normalizeMemorySession(sessionKey)
 	// bm25 lower is better; invert
 	rows, err := d.SQL.QueryContext(ctx,
-		`SELECT rowid, text, bm25(memory_fts) as rank FROM memory_fts WHERE memory_fts MATCH ? ORDER BY rank LIMIT ?`, query, k)
+		`SELECT memory_fts.rowid, memory_fts.text, bm25(memory_fts) as rank
+		 FROM memory_fts
+		 JOIN memory_notes ON memory_notes.id = memory_fts.rowid
+		 WHERE memory_fts MATCH ? AND memory_notes.session_key IN (?, ?)
+		 ORDER BY rank LIMIT ?`,
+		query, scope.GlobalMemoryScope, sessionKey, k)
 	if err != nil { return nil, err }
 	defer rows.Close()
 	var out []FTSCandidate
@@ -135,4 +171,12 @@ func (d *DB) SearchFTS(ctx context.Context, query string, k int) ([]FTSCandidate
 		out = append(out, FTSCandidate{ID: id, Text: text, Rank: rank})
 	}
 	return out, rows.Err()
+}
+
+func normalizeMemorySession(sessionKey string) string {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return scope.GlobalMemoryScope
+	}
+	return sessionKey
 }

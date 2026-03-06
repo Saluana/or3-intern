@@ -70,7 +70,7 @@ type Builder struct {
 }
 
 func (b *Builder) Build(ctx context.Context, sessionKey string, userMessage string) (PromptParts, []memory.Retrieved, error) {
-	pinned, err := b.DB.GetPinned(ctx)
+	pinned, err := b.DB.GetPinned(ctx, sessionKey)
 	if err != nil { return PromptParts{}, nil, err }
 	pinnedText := formatPinned(pinned)
 
@@ -79,7 +79,7 @@ func (b *Builder) Build(ctx context.Context, sessionKey string, userMessage stri
 	if b.Mem != nil && b.Provider != nil && strings.TrimSpace(userMessage) != "" {
 		vec, err := b.Provider.Embed(ctx, b.EmbedModel, userMessage)
 		if err == nil {
-			retrieved, _ = b.Mem.Retrieve(ctx, userMessage, vec, b.VectorK, b.FTSK, b.TopK)
+			retrieved, _ = b.Mem.Retrieve(ctx, sessionKey, userMessage, vec, b.VectorK, b.FTSK, b.TopK)
 		}
 	}
 	memText := formatRetrieved(retrieved)

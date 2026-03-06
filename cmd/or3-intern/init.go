@@ -79,7 +79,7 @@ func runInitWithIO(in io.Reader, out io.Writer, cfgPath, cwd string) error {
 		return err
 	}
 
-	saveKey, err := promptBool(reader, out, "Save API key in config.json so chat works immediately?", strings.TrimSpace(cfg.Provider.APIKey) != "")
+	saveKey, err := promptBool(reader, out, "Save API key in config.json (stored locally with restricted permissions; env vars are safer)?", strings.TrimSpace(cfg.Provider.APIKey) != "")
 	if err != nil {
 		return err
 	}

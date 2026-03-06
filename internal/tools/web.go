@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -22,6 +24,7 @@ type WebFetch struct{
 const (
 	defaultWebTimeout = 20 * time.Second
 	defaultWebFetchMaxBytes = 200000
+	defaultWebFetchMaxRedirects = 10
 	defaultWebSearchMaxCount = 10
 	defaultWebSearchReadMaxBytes = 1 << 20
 )
@@ -40,21 +43,91 @@ func (t *WebFetch) Execute(ctx context.Context, params map[string]any) (string, 
 	if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
 		return "", fmt.Errorf("invalid url")
 	}
+	parsed, err := url.Parse(u)
+	if err != nil { return "", err }
+	if err := validateFetchURL(ctx, parsed); err != nil { return "", err }
 	max := t.DefaultMaxBytes
 	if max <= 0 { max = defaultWebFetchMaxBytes }
 	if v, ok := params["maxBytes"].(float64); ok && int(v) > 0 { max = int(v) }
+	client := t.HTTP
 	if t.HTTP == nil {
 		to := t.Timeout
 		if to <= 0 { to = defaultWebTimeout }
-		t.HTTP = &http.Client{Timeout: to}
+		client = &http.Client{Timeout: to}
+	} else {
+		copyClient := *t.HTTP
+		client = &copyClient
 	}
-	r, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	prevCheckRedirect := client.CheckRedirect
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= defaultWebFetchMaxRedirects {
+			return fmt.Errorf("stopped after %d redirects", defaultWebFetchMaxRedirects)
+		}
+		if prevCheckRedirect != nil {
+			if err := prevCheckRedirect(req, via); err != nil {
+				return err
+			}
+		}
+		return validateFetchURL(req.Context(), req.URL)
+	}
+	r, err := http.NewRequestWithContext(ctx, "GET", parsed.String(), nil)
 	if err != nil { return "", err }
-	resp, err := t.HTTP.Do(r)
+	resp, err := client.Do(r)
 	if err != nil { return "", err }
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, int64(max)))
 	return fmt.Sprintf("status: %s\n\n%s", resp.Status, string(body)), nil
+}
+
+func validateFetchURL(ctx context.Context, target *url.URL) error {
+	if target == nil {
+		return fmt.Errorf("invalid url")
+	}
+	hostname := strings.TrimSpace(strings.ToLower(target.Hostname()))
+	if hostname == "" {
+		return fmt.Errorf("missing host")
+	}
+	if isBlockedFetchHostname(hostname) {
+		return fmt.Errorf("blocked fetch target")
+	}
+	if ip, err := netip.ParseAddr(hostname); err == nil {
+		if isBlockedFetchAddr(ip.Unmap()) {
+			return fmt.Errorf("blocked fetch target")
+		}
+		return nil
+	}
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, hostname)
+	if err != nil {
+		return err
+	}
+	if len(addrs) == 0 {
+		return fmt.Errorf("host did not resolve")
+	}
+	for _, addr := range addrs {
+		if ip, ok := netip.AddrFromSlice(addr.IP); ok && isBlockedFetchAddr(ip.Unmap()) {
+			return fmt.Errorf("blocked fetch target")
+		}
+	}
+	return nil
+}
+
+func isBlockedFetchHostname(hostname string) bool {
+	switch hostname {
+	case "localhost", "ip6-localhost", "metadata.google.internal":
+		return true
+	default:
+		return false
+	}
+}
+
+func isBlockedFetchAddr(addr netip.Addr) bool {
+	if !addr.IsValid() {
+		return true
+	}
+	if addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() || addr.IsMulticast() || addr.IsUnspecified() {
+		return true
+	}
+	return addr.String() == "169.254.169.254"
 }
 
 type WebSearch struct{

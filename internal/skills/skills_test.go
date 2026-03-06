@@ -94,6 +94,21 @@ func TestScan_MultipleDirs(t *testing.T) {
 	}
 }
 
+func TestScan_SkipsSymlinkedSkill(t *testing.T) {
+	dir := t.TempDir()
+	targetDir := t.TempDir()
+	target := filepath.Join(targetDir, "outside.md")
+	os.WriteFile(target, []byte("outside"), 0o644)
+	link := filepath.Join(dir, "outside.md")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	inv := Scan([]string{dir})
+	if len(inv.Skills) != 0 {
+		t.Fatalf("expected symlinked skill to be skipped, got %#v", inv.Skills)
+	}
+}
+
 func TestInventory_Get_Found(t *testing.T) {
 	dir := makeSkillsDir(t)
 	inv := Scan([]string{dir})

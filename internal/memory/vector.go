@@ -2,13 +2,15 @@ package memory
 
 import (
 	"bytes"
-	"context"
 	"container/heap"
+	"context"
 	"encoding/binary"
 	"errors"
 	"math"
+	"strings"
 
 	"or3-intern/internal/db"
+	"or3-intern/internal/scope"
 )
 
 func PackFloat32(vec []float32) []byte {
@@ -61,35 +63,25 @@ func (h *candMinHeap) Pop() any {
 	return x
 }
 
-func VectorSearch(ctx context.Context, d *db.DB, queryVec []float32, k int, scanLimit int) ([]VecCandidate, error) {
-	rows, err := d.StreamMemoryNotesLimit(ctx, scanLimit)
-	if err != nil { return nil, err }
-	defer rows.Close()
-
+func VectorSearch(ctx context.Context, d *db.DB, sessionKey string, queryVec []float32, k int, scanLimit int) ([]VecCandidate, error) {
 	h := &candMinHeap{}
 	heap.Init(h)
 
-	for rows.Next() {
-		var id int64
-		var text string
-		var emb []byte
-		var src any
-		var tags string
-		var created int64
-		if err := rows.Scan(&id, &text, &emb, &src, &tags, &created); err != nil {
+	scopes := []string{scope.GlobalMemoryScope}
+	if trimmedSessionKey := strings.TrimSpace(sessionKey); trimmedSessionKey != "" && trimmedSessionKey != scope.GlobalMemoryScope {
+		scopes = append(scopes, sessionKey)
+	}
+	for _, memoryScope := range scopes {
+		rows, err := d.StreamMemoryNotesScopeLimit(ctx, memoryScope, scanLimit)
+		if err != nil { return nil, err }
+		if err := addVectorCandidates(rows, queryVec, k, h); err != nil {
+			_ = rows.Close()
 			return nil, err
 		}
-		v, err := UnpackFloat32(emb)
-		if err != nil { continue }
-		score := Cosine(queryVec, v)
-		if h.Len() < k {
-			heap.Push(h, VecCandidate{ID: id, Text: text, Score: score})
-		} else if (*h)[0].Score < score {
-			(*h)[0] = VecCandidate{ID: id, Text: text, Score: score}
-			heap.Fix(h, 0)
+		if err := rows.Close(); err != nil {
+			return nil, err
 		}
 	}
-	if err := rows.Err(); err != nil { return nil, err }
 
 	// pop into descending slice
 	out := make([]VecCandidate, h.Len())
@@ -99,4 +91,34 @@ func VectorSearch(ctx context.Context, d *db.DB, queryVec []float32, k int, scan
 	// now out ascending (min->max). reverse to max->min
 	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 { out[i], out[j] = out[j], out[i] }
 	return out, nil
+}
+
+func addVectorCandidates(rows interface {
+	Next() bool
+	Scan(dest ...any) error
+	Err() error
+}, queryVec []float32, k int, h *candMinHeap) error {
+	for rows.Next() {
+		var id int64
+		var text string
+		var emb []byte
+		var src any
+		var tags string
+		var created int64
+		if err := rows.Scan(&id, &text, &emb, &src, &tags, &created); err != nil {
+			return err
+		}
+		v, err := UnpackFloat32(emb)
+		if err != nil {
+			continue
+		}
+		score := Cosine(queryVec, v)
+		if h.Len() < k {
+			heap.Push(h, VecCandidate{ID: id, Text: text, Score: score})
+		} else if (*h)[0].Score < score {
+			(*h)[0] = VecCandidate{ID: id, Text: text, Score: score}
+			heap.Fix(h, 0)
+		}
+	}
+	return rows.Err()
 }

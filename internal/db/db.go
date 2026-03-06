@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"or3-intern/internal/scope"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -59,18 +61,22 @@ func (d *DB) migrate(ctx context.Context) error {
 			FOREIGN KEY(session_key) REFERENCES sessions(key) ON DELETE CASCADE
 		);`,
 		`CREATE TABLE IF NOT EXISTS memory_pinned(
-			key TEXT PRIMARY KEY,
+			session_key TEXT NOT NULL DEFAULT '` + scope.GlobalMemoryScope + `',
+			key TEXT NOT NULL,
 			content TEXT NOT NULL,
-			updated_at INTEGER NOT NULL
+			updated_at INTEGER NOT NULL,
+			PRIMARY KEY(session_key, key)
 		);`,
 		`CREATE TABLE IF NOT EXISTS memory_notes(
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_key TEXT NOT NULL DEFAULT '` + scope.GlobalMemoryScope + `',
 			text TEXT NOT NULL,
 			embedding BLOB NOT NULL,
 			source_message_id INTEGER,
 			tags TEXT NOT NULL DEFAULT '',
 			created_at INTEGER NOT NULL
 		);`,
+		`CREATE INDEX IF NOT EXISTS memory_notes_session_id ON memory_notes(session_key, id);`,
 		// FTS5
 		`CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(text, content='memory_notes', content_rowid='id');`,
 		`CREATE TRIGGER IF NOT EXISTS memory_notes_ai AFTER INSERT ON memory_notes BEGIN
@@ -89,7 +95,100 @@ func (d *DB) migrate(ctx context.Context) error {
 			return err
 		}
 	}
+	if err := d.migrateMemoryPinned(ctx); err != nil {
+		return err
+	}
+	if err := d.ensureMemoryNotesSessionColumn(ctx); err != nil {
+		return err
+	}
+	if err := d.migrateLegacyGlobalMemoryScope(ctx); err != nil {
+		return err
+	}
 	return nil
 }
 
 func NowMS() int64 { return time.Now().UnixMilli() }
+
+func (d *DB) migrateMemoryPinned(ctx context.Context) error {
+	hasSession, err := d.tableHasColumn(ctx, "memory_pinned", "session_key")
+	if err != nil {
+		return err
+	}
+	if hasSession {
+		_, err = d.SQL.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS memory_pinned_session_key_key ON memory_pinned(session_key, key);`)
+		return err
+	}
+	stmts := []string{
+		`ALTER TABLE memory_pinned RENAME TO memory_pinned_legacy;`,
+		`CREATE TABLE memory_pinned(
+			session_key TEXT NOT NULL DEFAULT '` + scope.GlobalMemoryScope + `',
+			key TEXT NOT NULL,
+			content TEXT NOT NULL,
+			updated_at INTEGER NOT NULL,
+			PRIMARY KEY(session_key, key)
+		);`,
+		`INSERT INTO memory_pinned(session_key, key, content, updated_at)
+		 SELECT '` + scope.GlobalMemoryScope + `', key, content, updated_at FROM memory_pinned_legacy;`,
+		`DROP TABLE memory_pinned_legacy;`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS memory_pinned_session_key_key ON memory_pinned(session_key, key);`,
+	}
+	for _, stmt := range stmts {
+		if _, err := d.SQL.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *DB) ensureMemoryNotesSessionColumn(ctx context.Context) error {
+	hasSession, err := d.tableHasColumn(ctx, "memory_notes", "session_key")
+	if err != nil {
+		return err
+	}
+	if !hasSession {
+		if _, err := d.SQL.ExecContext(ctx, `ALTER TABLE memory_notes ADD COLUMN session_key TEXT NOT NULL DEFAULT '`+scope.GlobalMemoryScope+`';`); err != nil {
+			return err
+		}
+	}
+	_, err = d.SQL.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS memory_notes_session_id ON memory_notes(session_key, id);`)
+	return err
+}
+
+func (d *DB) migrateLegacyGlobalMemoryScope(ctx context.Context) error {
+	if scope.GlobalMemoryScope == scope.GlobalScopeAlias {
+		return nil
+	}
+	if _, err := d.SQL.ExecContext(ctx,
+		`INSERT INTO memory_pinned(session_key, key, content, updated_at)
+		 SELECT ?, key, content, updated_at FROM memory_pinned WHERE session_key=?
+		 ON CONFLICT(session_key, key) DO UPDATE SET content=excluded.content, updated_at=excluded.updated_at`,
+		scope.GlobalMemoryScope, scope.GlobalScopeAlias); err != nil {
+		return err
+	}
+	if _, err := d.SQL.ExecContext(ctx, `DELETE FROM memory_pinned WHERE session_key=?`, scope.GlobalScopeAlias); err != nil {
+		return err
+	}
+	_, err := d.SQL.ExecContext(ctx, `UPDATE memory_notes SET session_key=? WHERE session_key=?`, scope.GlobalMemoryScope, scope.GlobalScopeAlias)
+	return err
+}
+
+func (d *DB) tableHasColumn(ctx context.Context, tableName, columnName string) (bool, error) {
+	rows, err := d.SQL.QueryContext(ctx, `PRAGMA table_info(`+tableName+`)`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notNull, pk int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &defaultValue, &pk); err != nil {
+			return false, err
+		}
+		if name == columnName {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}

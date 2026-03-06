@@ -24,14 +24,53 @@ func (t *FileTool) safePath(p string) (string, error) {
 	if strings.TrimSpace(p) == "" { return "", errors.New("missing path") }
 	abs, err := filepath.Abs(p)
 	if err != nil { return "", err }
+	abs, err = canonicalizePath(abs)
+	if err != nil { return "", err }
 	if t.Root != "" {
-		root, _ := filepath.Abs(t.Root)
+		root, err := filepath.Abs(t.Root)
+		if err != nil { return "", err }
+		root, err = canonicalizeRoot(root)
+		if err != nil { return "", err }
 		rel, err := filepath.Rel(root, abs)
-		if err != nil || strings.HasPrefix(rel, "..") {
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return "", fmt.Errorf("path outside allowed root")
 		}
 	}
 	return abs, nil
+}
+
+func canonicalizeRoot(root string) (string, error) {
+	if _, err := os.Stat(root); err != nil { return "", err }
+	return filepath.EvalSymlinks(root)
+}
+
+func canonicalizePath(abs string) (string, error) {
+	if _, err := os.Lstat(abs); err == nil {
+		return filepath.EvalSymlinks(abs)
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+	existing := abs
+	missingParts := make([]string, 0, 4)
+	for {
+		if _, err := os.Lstat(existing); err == nil {
+			break
+		} else if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(existing)
+		if parent == existing {
+			return "", os.ErrNotExist
+		}
+		missingParts = append(missingParts, filepath.Base(existing))
+		existing = parent
+	}
+	realExisting, err := filepath.EvalSymlinks(existing)
+	if err != nil { return "", err }
+	for i := len(missingParts) - 1; i >= 0; i-- {
+		realExisting = filepath.Join(realExisting, missingParts[i])
+	}
+	return realExisting, nil
 }
 
 type ReadFile struct{ FileTool }

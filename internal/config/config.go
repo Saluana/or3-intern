@@ -98,7 +98,7 @@ func Default() Config {
 			BraveAPIKey: os.Getenv("BRAVE_API_KEY"),
 			WebProxy: "",
 			ExecTimeoutSeconds: 60,
-			RestrictToWorkspace: false,
+			RestrictToWorkspace: true,
 			PathAppend: "",
 		},
 		Cron: CronConfig{Enabled: true, StorePath: filepath.Join(root, "cron.json")},
@@ -130,7 +130,10 @@ func Save(path string, cfg Config) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(path, mustJSON(cfg), 0o644)
+	if err := os.WriteFile(path, mustJSON(cfg), 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
 }
 
 func Load(path string) (Config, error) {

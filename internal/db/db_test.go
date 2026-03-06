@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"or3-intern/internal/scope"
 )
 
 func openTestDB(t *testing.T) *DB {
@@ -179,7 +181,7 @@ func TestGetPinned_Empty(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
 
-	pinned, err := d.GetPinned(ctx)
+	pinned, err := d.GetPinned(ctx, "session1")
 	if err != nil {
 		t.Fatalf("GetPinned: %v", err)
 	}
@@ -192,12 +194,12 @@ func TestUpsertPinned_And_GetPinned(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
 
-	err := d.UpsertPinned(ctx, "name", "Alice")
+	err := d.UpsertPinned(ctx, "session1", "name", "Alice")
 	if err != nil {
 		t.Fatalf("UpsertPinned: %v", err)
 	}
 
-	pinned, err := d.GetPinned(ctx)
+	pinned, err := d.GetPinned(ctx, "session1")
 	if err != nil {
 		t.Fatalf("GetPinned: %v", err)
 	}
@@ -210,12 +212,74 @@ func TestUpsertPinned_Overwrites(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
 
-	d.UpsertPinned(ctx, "key", "first")
-	d.UpsertPinned(ctx, "key", "second")
+	d.UpsertPinned(ctx, "session1", "key", "first")
+	d.UpsertPinned(ctx, "session1", "key", "second")
 
-	pinned, _ := d.GetPinned(ctx)
+	pinned, _ := d.GetPinned(ctx, "session1")
 	if pinned["key"] != "second" {
 		t.Errorf("expected 'second', got %q", pinned["key"])
+	}
+}
+
+func TestGetPinned_IncludesGlobalAndSession(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	if err := d.UpsertPinned(ctx, scope.GlobalMemoryScope, "shared", "all"); err != nil {
+		t.Fatalf("UpsertPinned global: %v", err)
+	}
+	if err := d.UpsertPinned(ctx, "session-a", "local", "only-a"); err != nil {
+		t.Fatalf("UpsertPinned session: %v", err)
+	}
+
+	pinned, err := d.GetPinned(ctx, "session-a")
+	if err != nil {
+		t.Fatalf("GetPinned: %v", err)
+	}
+	if pinned["shared"] != "all" || pinned["local"] != "only-a" {
+		t.Fatalf("expected global and session pinned values, got %#v", pinned)
+	}
+
+	pinnedB, err := d.GetPinned(ctx, "session-b")
+	if err != nil {
+		t.Fatalf("GetPinned: %v", err)
+	}
+	if pinnedB["shared"] != "all" {
+		t.Fatalf("expected shared global entry, got %#v", pinnedB)
+	}
+	if _, ok := pinnedB["local"]; ok {
+		t.Fatalf("did not expect session-a entry in session-b view: %#v", pinnedB)
+	}
+}
+
+func TestGetPinned_SessionNamedGlobalDoesNotLeak(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	if err := d.UpsertPinned(ctx, scope.GlobalMemoryScope, "shared", "all"); err != nil {
+		t.Fatalf("UpsertPinned global: %v", err)
+	}
+	if err := d.UpsertPinned(ctx, scope.GlobalScopeAlias, "local", "only-global-session"); err != nil {
+		t.Fatalf("UpsertPinned session: %v", err)
+	}
+
+	pinnedOther, err := d.GetPinned(ctx, "session-b")
+	if err != nil {
+		t.Fatalf("GetPinned other: %v", err)
+	}
+	if pinnedOther["shared"] != "all" {
+		t.Fatalf("expected shared global entry, got %#v", pinnedOther)
+	}
+	if _, ok := pinnedOther["local"]; ok {
+		t.Fatalf("did not expect session named global to leak, got %#v", pinnedOther)
+	}
+
+	pinnedGlobal, err := d.GetPinned(ctx, scope.GlobalScopeAlias)
+	if err != nil {
+		t.Fatalf("GetPinned global session: %v", err)
+	}
+	if pinnedGlobal["local"] != "only-global-session" {
+		t.Fatalf("expected session-global entry, got %#v", pinnedGlobal)
 	}
 }
 
@@ -224,7 +288,7 @@ func TestInsertMemoryNote(t *testing.T) {
 	ctx := context.Background()
 
 	embedding := make([]byte, 4*3)
-	id, err := d.InsertMemoryNote(ctx, "test text", embedding, sql.NullInt64{}, "tag1,tag2")
+	id, err := d.InsertMemoryNote(ctx, "session1", "test text", embedding, sql.NullInt64{}, "tag1,tag2")
 	if err != nil {
 		t.Fatalf("InsertMemoryNote: %v", err)
 	}
@@ -237,10 +301,10 @@ func TestStreamMemoryNotesLimit_NoLimit(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
 
-	d.InsertMemoryNote(ctx, "note1", make([]byte, 4), sql.NullInt64{}, "")
-	d.InsertMemoryNote(ctx, "note2", make([]byte, 4), sql.NullInt64{}, "")
+	d.InsertMemoryNote(ctx, "session1", "note1", make([]byte, 4), sql.NullInt64{}, "")
+	d.InsertMemoryNote(ctx, "session1", "note2", make([]byte, 4), sql.NullInt64{}, "")
 
-	rows, err := d.StreamMemoryNotesLimit(ctx, 0)
+	rows, err := d.StreamMemoryNotesLimit(ctx, "session1", 0)
 	if err != nil {
 		t.Fatalf("StreamMemoryNotesLimit: %v", err)
 	}
@@ -266,10 +330,10 @@ func TestStreamMemoryNotesLimit_WithLimit(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < 5; i++ {
-		d.InsertMemoryNote(ctx, "note", make([]byte, 4), sql.NullInt64{}, "")
+		d.InsertMemoryNote(ctx, "session1", "note", make([]byte, 4), sql.NullInt64{}, "")
 	}
 
-	rows, err := d.StreamMemoryNotesLimit(ctx, 2)
+	rows, err := d.StreamMemoryNotesLimit(ctx, "session1", 2)
 	if err != nil {
 		t.Fatalf("StreamMemoryNotesLimit: %v", err)
 	}
@@ -295,10 +359,10 @@ func TestSearchFTS(t *testing.T) {
 	ctx := context.Background()
 
 	// Insert notes to trigger FTS
-	d.InsertMemoryNote(ctx, "the quick brown fox", make([]byte, 4), sql.NullInt64{}, "")
-	d.InsertMemoryNote(ctx, "lazy dog sits", make([]byte, 4), sql.NullInt64{}, "")
+	d.InsertMemoryNote(ctx, "session1", "the quick brown fox", make([]byte, 4), sql.NullInt64{}, "")
+	d.InsertMemoryNote(ctx, "session1", "lazy dog sits", make([]byte, 4), sql.NullInt64{}, "")
 
-	results, err := d.SearchFTS(ctx, "quick fox", 5)
+	results, err := d.SearchFTS(ctx, "session1", "quick fox", 5)
 	if err != nil {
 		t.Fatalf("SearchFTS: %v", err)
 	}
@@ -314,12 +378,28 @@ func TestSearchFTS_Empty(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
 
-	results, err := d.SearchFTS(ctx, "anything", 5)
+	results, err := d.SearchFTS(ctx, "session1", "anything", 5)
 	if err != nil {
 		t.Fatalf("SearchFTS: %v", err)
 	}
 	if len(results) != 0 {
 		t.Errorf("expected empty results, got %d", len(results))
+	}
+}
+
+func TestSearchFTS_SessionIsolation(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	d.InsertMemoryNote(ctx, "session-a", "private fox", make([]byte, 4), sql.NullInt64{}, "")
+	d.InsertMemoryNote(ctx, scope.GlobalMemoryScope, "shared fox", make([]byte, 4), sql.NullInt64{}, "")
+
+	results, err := d.SearchFTS(ctx, "session-b", "fox", 10)
+	if err != nil {
+		t.Fatalf("SearchFTS: %v", err)
+	}
+	if len(results) != 1 || results[0].Text != "shared fox" {
+		t.Fatalf("expected only shared result, got %#v", results)
 	}
 }
 

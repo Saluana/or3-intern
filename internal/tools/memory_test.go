@@ -13,6 +13,7 @@ import (
 
 	"or3-intern/internal/db"
 	"or3-intern/internal/providers"
+	"or3-intern/internal/scope"
 )
 
 func makeMemoryTestDB(t *testing.T) *db.DB {
@@ -82,7 +83,8 @@ func TestMemorySetPinned_EmptyContent(t *testing.T) {
 func TestMemorySetPinned_Success(t *testing.T) {
 	d := makeMemoryTestDB(t)
 	tool := &MemorySetPinned{DB: d}
-	out, err := tool.Execute(context.Background(), map[string]any{
+	ctx := ContextWithSession(context.Background(), "session-a")
+	out, err := tool.Execute(ctx, map[string]any{
 		"key":     "name",
 		"content": "Alice",
 	})
@@ -94,7 +96,7 @@ func TestMemorySetPinned_Success(t *testing.T) {
 	}
 
 	// Verify pinned memory was stored
-	pinned, _ := d.GetPinned(context.Background())
+	pinned, _ := d.GetPinned(context.Background(), "session-a")
 	if pinned["name"] != "Alice" {
 		t.Errorf("expected pinned['name']='Alice', got %q", pinned["name"])
 	}
@@ -104,12 +106,25 @@ func TestMemorySetPinned_Overwrite(t *testing.T) {
 	d := makeMemoryTestDB(t)
 	tool := &MemorySetPinned{DB: d}
 
-	tool.Execute(context.Background(), map[string]any{"key": "k", "content": "first"})
-	tool.Execute(context.Background(), map[string]any{"key": "k", "content": "second"})
+	ctx := ContextWithSession(context.Background(), "session-a")
+	tool.Execute(ctx, map[string]any{"key": "k", "content": "first"})
+	tool.Execute(ctx, map[string]any{"key": "k", "content": "second"})
 
-	pinned, _ := d.GetPinned(context.Background())
+	pinned, _ := d.GetPinned(context.Background(), "session-a")
 	if pinned["k"] != "second" {
 		t.Errorf("expected 'second', got %q", pinned["k"])
+	}
+}
+
+func TestMemorySetPinned_GlobalScope(t *testing.T) {
+	d := makeMemoryTestDB(t)
+	tool := &MemorySetPinned{DB: d}
+	if _, err := tool.Execute(context.Background(), map[string]any{"key": "shared", "content": "value", "scope": scope.GlobalScopeAlias}); err != nil {
+		t.Fatalf("MemorySetPinned: %v", err)
+	}
+	pinned, _ := d.GetPinned(context.Background(), "other-session")
+	if pinned["shared"] != "value" {
+		t.Fatalf("expected global pinned memory, got %#v", pinned)
 	}
 }
 

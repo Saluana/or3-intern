@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"or3-intern/internal/db"
+	"or3-intern/internal/scope"
 )
 
 // ---- PackFloat32 / UnpackFloat32 ----
@@ -150,7 +151,7 @@ func TestVectorSearch_Empty(t *testing.T) {
 	ctx := context.Background()
 
 	query := []float32{0.5, 0.5}
-	results, err := VectorSearch(ctx, d, query, 5, 100)
+	results, err := VectorSearch(ctx, d, "session1", query, 5, 100)
 	if err != nil {
 		t.Fatalf("VectorSearch: %v", err)
 	}
@@ -171,11 +172,11 @@ func TestVectorSearch_Results(t *testing.T) {
 	}
 	for i, v := range vecs {
 		blob := PackFloat32(v)
-		d.InsertMemoryNote(ctx, []string{"first", "second", "third"}[i], blob, sql.NullInt64{}, "")
+		d.InsertMemoryNote(ctx, "session1", []string{"first", "second", "third"}[i], blob, sql.NullInt64{}, "")
 	}
 
 	// Query similar to {1, 0}
-	results, err := VectorSearch(ctx, d, []float32{1, 0}, 3, 100)
+	results, err := VectorSearch(ctx, d, "session1", []float32{1, 0}, 3, 100)
 	if err != nil {
 		t.Fatalf("VectorSearch: %v", err)
 	}
@@ -205,12 +206,12 @@ func TestVectorSearch_InvalidEmbeddingSkipped(t *testing.T) {
 	ctx := context.Background()
 
 	// Insert a note with invalid embedding
-	d.InsertMemoryNote(ctx, "bad note", []byte{1, 2, 3}, sql.NullInt64{}, "")
+	d.InsertMemoryNote(ctx, "session1", "bad note", []byte{1, 2, 3}, sql.NullInt64{}, "")
 	// Insert a good one
 	blob := PackFloat32([]float32{1, 0})
-	d.InsertMemoryNote(ctx, "good note", blob, sql.NullInt64{}, "")
+	d.InsertMemoryNote(ctx, "session1", "good note", blob, sql.NullInt64{}, "")
 
-	results, err := VectorSearch(ctx, d, []float32{1, 0}, 5, 100)
+	results, err := VectorSearch(ctx, d, "session1", []float32{1, 0}, 5, 100)
 	if err != nil {
 		t.Fatalf("VectorSearch: %v", err)
 	}
@@ -229,14 +230,43 @@ func TestVectorSearch_KLimit(t *testing.T) {
 	// Insert 5 notes
 	for i := 0; i < 5; i++ {
 		blob := PackFloat32([]float32{float32(i), 0})
-		d.InsertMemoryNote(ctx, "note", blob, sql.NullInt64{}, "")
+		d.InsertMemoryNote(ctx, "session1", "note", blob, sql.NullInt64{}, "")
 	}
 
-	results, err := VectorSearch(ctx, d, []float32{4, 0}, 3, 100)
+	results, err := VectorSearch(ctx, d, "session1", []float32{4, 0}, 3, 100)
 	if err != nil {
 		t.Fatalf("VectorSearch: %v", err)
 	}
 	if len(results) > 3 {
 		t.Errorf("expected at most 3 results, got %d", len(results))
+	}
+}
+
+func TestVectorSearch_PreservesSessionRowsWhenGlobalCorpusIsNewer(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	if _, err := d.InsertMemoryNote(ctx, "session-a", "session match", PackFloat32([]float32{1, 0}), sql.NullInt64{}, ""); err != nil {
+		t.Fatalf("InsertMemoryNote session: %v", err)
+	}
+	for i := 0; i < 5; i++ {
+		if _, err := d.InsertMemoryNote(ctx, scope.GlobalMemoryScope, "shared note", PackFloat32([]float32{0, 1}), sql.NullInt64{}, ""); err != nil {
+			t.Fatalf("InsertMemoryNote shared: %v", err)
+		}
+	}
+
+	results, err := VectorSearch(ctx, d, "session-a", []float32{1, 0}, 3, 2)
+	if err != nil {
+		t.Fatalf("VectorSearch: %v", err)
+	}
+	found := false
+	for _, result := range results {
+		if result.Text == "session match" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected session-scoped note to remain searchable, got %#v", results)
 	}
 }

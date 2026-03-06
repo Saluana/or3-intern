@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"or3-intern/internal/db"
+	"or3-intern/internal/scope"
 )
 
 func openRetrieveTestDB(t *testing.T) *db.DB {
@@ -42,7 +43,7 @@ func TestRetrieve_Empty(t *testing.T) {
 	r := NewRetriever(d)
 	ctx := context.Background()
 
-	results, err := r.Retrieve(ctx, "hello", []float32{0.5, 0.5}, 5, 5, 10)
+	results, err := r.Retrieve(ctx, "session1", "hello", []float32{0.5, 0.5}, 5, 5, 10)
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
@@ -56,10 +57,10 @@ func TestRetrieve_WithVectorResults(t *testing.T) {
 	ctx := context.Background()
 
 	blob := PackFloat32([]float32{1.0, 0.0})
-	d.InsertMemoryNote(ctx, "vector match", blob, sql.NullInt64{}, "")
+	d.InsertMemoryNote(ctx, "session1", "vector match", blob, sql.NullInt64{}, "")
 
 	r := NewRetriever(d)
-	results, err := r.Retrieve(ctx, "query", []float32{1.0, 0.0}, 5, 5, 10)
+	results, err := r.Retrieve(ctx, "session1", "query", []float32{1.0, 0.0}, 5, 5, 10)
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
@@ -84,11 +85,11 @@ func TestRetrieve_SourceLabels(t *testing.T) {
 
 	// Insert note with known embedding
 	blob := PackFloat32([]float32{1.0, 0.0})
-	d.InsertMemoryNote(ctx, "fox quick jump", blob, sql.NullInt64{}, "")
+	d.InsertMemoryNote(ctx, "session1", "fox quick jump", blob, sql.NullInt64{}, "")
 
 	r := NewRetriever(d)
 	// Exact vector match, also FTS match
-	results, err := r.Retrieve(ctx, "fox quick jump", []float32{1.0, 0.0}, 5, 5, 10)
+	results, err := r.Retrieve(ctx, "session1", "fox quick jump", []float32{1.0, 0.0}, 5, 5, 10)
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
@@ -111,11 +112,11 @@ func TestRetrieve_TopKLimit(t *testing.T) {
 
 	for i := 0; i < 10; i++ {
 		blob := PackFloat32([]float32{float32(i), 0.0})
-		d.InsertMemoryNote(ctx, "note", blob, sql.NullInt64{}, "")
+		d.InsertMemoryNote(ctx, "session1", "note", blob, sql.NullInt64{}, "")
 	}
 
 	r := NewRetriever(d)
-	results, err := r.Retrieve(ctx, "note", []float32{5.0, 0.0}, 10, 10, 3)
+	results, err := r.Retrieve(ctx, "session1", "note", []float32{5.0, 0.0}, 10, 10, 3)
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
@@ -131,17 +132,39 @@ func TestRetrieve_SortedByScore(t *testing.T) {
 	blobs := [][]float32{{1, 0}, {0, 1}, {0.7071, 0.7071}}
 	texts := []string{"alpha", "beta", "gamma"}
 	for i, v := range blobs {
-		d.InsertMemoryNote(ctx, texts[i], PackFloat32(v), sql.NullInt64{}, "")
+		d.InsertMemoryNote(ctx, "session1", texts[i], PackFloat32(v), sql.NullInt64{}, "")
 	}
 
 	r := NewRetriever(d)
-	results, err := r.Retrieve(ctx, "alpha", []float32{1, 0}, 5, 5, 10)
+	results, err := r.Retrieve(ctx, "session1", "alpha", []float32{1, 0}, 5, 5, 10)
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
 	for i := 1; i < len(results); i++ {
 		if results[i].Score > results[i-1].Score {
 			t.Errorf("results not sorted descending: [%d]=%v > [%d]=%v", i, results[i].Score, i-1, results[i-1].Score)
+		}
+	}
+}
+
+func TestRetrieve_RespectsSessionScope(t *testing.T) {
+	d := openRetrieveTestDB(t)
+	ctx := context.Background()
+
+	d.InsertMemoryNote(ctx, "session-a", "private note", PackFloat32([]float32{1, 0}), sql.NullInt64{}, "")
+	d.InsertMemoryNote(ctx, scope.GlobalMemoryScope, "shared note", PackFloat32([]float32{1, 0}), sql.NullInt64{}, "")
+
+	r := NewRetriever(d)
+	results, err := r.Retrieve(ctx, "session-b", "note", []float32{1, 0}, 5, 5, 10)
+	if err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+	if len(results) == 0 || results[0].Text != "shared note" {
+		t.Fatalf("expected shared note only, got %#v", results)
+	}
+	for _, result := range results {
+		if result.Text == "private note" {
+			t.Fatalf("unexpected cross-session result: %#v", results)
 		}
 	}
 }

@@ -44,6 +44,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, "config error:", err)
 		os.Exit(1)
 	}
+	if cfg.Tools.RestrictToWorkspace && strings.TrimSpace(cfg.WorkspaceDir) == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			cfg.WorkspaceDir = cwd
+		}
+	}
 	if err := os.MkdirAll(filepath.Dir(cfg.DBPath), 0o755); err != nil {
 		fmt.Fprintln(os.Stderr, "mkdir db dir error:", err)
 		os.Exit(1)

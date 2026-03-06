@@ -63,6 +63,20 @@ func TestSafePath_InsideRoot(t *testing.T) {
 	}
 }
 
+func TestSafePath_BlocksSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	link := filepath.Join(root, "escape")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	tool := &FileTool{Root: root}
+	_, err := tool.safePath(filepath.Join(link, "secret.txt"))
+	if err == nil {
+		t.Fatal("expected symlink escape to be blocked")
+	}
+}
+
 // ---- ReadFile ----
 
 func TestReadFile_OK(t *testing.T) {

@@ -69,6 +69,9 @@ func TestDefault_Values(t *testing.T) {
 	if cfg.BootstrapTotalMaxChars != 150000 {
 		t.Errorf("expected BootstrapTotalMaxChars=150000, got %d", cfg.BootstrapTotalMaxChars)
 	}
+	if !cfg.Tools.RestrictToWorkspace {
+		t.Error("expected RestrictToWorkspace=true by default")
+	}
 }
 
 func TestLoad_FileNotExist_CreatesDefault(t *testing.T) {
@@ -86,6 +89,13 @@ func TestLoad_FileNotExist_CreatesDefault(t *testing.T) {
 	// should have created the file
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		t.Error("expected config file to be created")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat config: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("expected config permissions 0600, got %o", info.Mode().Perm())
 	}
 }
 
@@ -120,6 +130,26 @@ func TestLoad_FileNotExist_AppliesEnvOverrides(t *testing.T) {
 	}
 	if saved.Provider.APIBase != Default().Provider.APIBase {
 		t.Fatalf("expected on-disk config to keep default API base, got %q", saved.Provider.APIBase)
+	}
+}
+
+func TestSave_ExistingFilePermissionsAreTightened(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, mustJSON(Default()), 0o644); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	if err := Save(path, Default()); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat config: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("expected config permissions 0600 after save, got %o", info.Mode().Perm())
 	}
 }
 

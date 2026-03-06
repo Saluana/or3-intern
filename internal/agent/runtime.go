@@ -18,6 +18,8 @@ import (
 	"or3-intern/internal/tools"
 )
 
+const commandNewSession = "/new"
+
 type Deliverer interface {
 	Deliver(ctx context.Context, channel, to, text string) error
 }
@@ -60,7 +62,7 @@ func (r *Runtime) Handle(ctx context.Context, ev bus.Event) error {
 }
 
 func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
-	if ev.Type == bus.EventUserMessage && strings.EqualFold(strings.TrimSpace(ev.Message), "/new") {
+	if ev.Type == bus.EventUserMessage && strings.EqualFold(strings.TrimSpace(ev.Message), commandNewSession) {
 		return r.handleNewSession(ctx, ev)
 	}
 

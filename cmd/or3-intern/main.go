@@ -28,6 +28,8 @@ import (
 	"or3-intern/internal/tools"
 )
 
+const schedulerMaxConsolidationPasses = 3
+
 func main() {
 	var cfgPath string
 	flag.StringVar(&cfgPath, "config", "", "path to config.json")
@@ -172,7 +174,7 @@ func main() {
 				if historyMax <= 0 {
 					historyMax = 40
 				}
-				for i := 0; i < 3; i++ {
+				for i := 0; i < schedulerMaxConsolidationPasses; i++ {
 					didWork, err := rt.Consolidator.RunOnce(runCtx, sessionKey, historyMax, memory.RunMode{})
 					if err != nil {
 						log.Printf("consolidation failed: session=%s err=%v", sessionKey, err)

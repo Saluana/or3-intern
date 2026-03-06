@@ -25,7 +25,12 @@ func openConsolidateTestDB(t *testing.T) *db.DB {
 	return d
 }
 
-func buildConsolidationProvider(t *testing.T, chatBody string, embedOK bool) (*providers.Client, *int32, *int32) {
+type callCounts struct {
+	Chat  *int32
+	Embed *int32
+}
+
+func buildConsolidationProvider(t *testing.T, chatBody string, embedOK bool) (*providers.Client, callCounts) {
 	t.Helper()
 	var chatCalls int32
 	var embedCalls int32
@@ -56,7 +61,7 @@ func buildConsolidationProvider(t *testing.T, chatBody string, embedOK bool) (*p
 	t.Cleanup(srv.Close)
 	p := providers.New(srv.URL, "test-key", 5*time.Second)
 	p.HTTP = srv.Client()
-	return p, &chatCalls, &embedCalls
+	return p, callCounts{Chat: &chatCalls, Embed: &embedCalls}
 }
 
 func TestConsolidator_NilProvider(t *testing.T) {
@@ -75,13 +80,13 @@ func TestConsolidator_TooFewMessages_NoProviderCall(t *testing.T) {
 			t.Fatalf("AppendMessage: %v", err)
 		}
 	}
-	prov, chatCalls, _ := buildConsolidationProvider(t, `{"summary":"x","canonical_memory":"- x"}`, true)
+	prov, calls := buildConsolidationProvider(t, `{"summary":"x","canonical_memory":"- x"}`, true)
 	c := &Consolidator{DB: d, Provider: prov, WindowSize: 5}
 	if err := c.MaybeConsolidate(ctx, "sess", 2); err != nil {
 		t.Fatalf("expected nil error, got: %v", err)
 	}
-	if atomic.LoadInt32(chatCalls) != 0 {
-		t.Fatalf("expected no chat calls, got %d", atomic.LoadInt32(chatCalls))
+	if atomic.LoadInt32(calls.Chat) != 0 {
+		t.Fatalf("expected no chat calls, got %d", atomic.LoadInt32(calls.Chat))
 	}
 }
 
@@ -97,7 +102,7 @@ func TestConsolidator_RunOnce_PersistsNoteCursorAndCanonical(t *testing.T) {
 			t.Fatalf("AppendMessage: %v", err)
 		}
 	}
-	prov, chatCalls, embedCalls := buildConsolidationProvider(t, `{"summary":"Short summary.","canonical_memory":"- prefers concise output"}`, true)
+	prov, calls := buildConsolidationProvider(t, `{"summary":"Short summary.","canonical_memory":"- prefers concise output"}`, true)
 	c := &Consolidator{
 		DB:                 d,
 		Provider:           prov,
@@ -114,11 +119,11 @@ func TestConsolidator_RunOnce_PersistsNoteCursorAndCanonical(t *testing.T) {
 	if !didWork {
 		t.Fatal("expected consolidation work")
 	}
-	if atomic.LoadInt32(chatCalls) != 1 {
-		t.Fatalf("expected 1 chat call, got %d", atomic.LoadInt32(chatCalls))
+	if atomic.LoadInt32(calls.Chat) != 1 {
+		t.Fatalf("expected 1 chat call, got %d", atomic.LoadInt32(calls.Chat))
 	}
-	if atomic.LoadInt32(embedCalls) != 1 {
-		t.Fatalf("expected 1 embed call, got %d", atomic.LoadInt32(embedCalls))
+	if atomic.LoadInt32(calls.Embed) != 1 {
+		t.Fatalf("expected 1 embed call, got %d", atomic.LoadInt32(calls.Embed))
 	}
 
 	lastID, _, err := d.GetConsolidationRange(ctx, "sess", 5)
@@ -148,7 +153,7 @@ func TestConsolidator_EmptyTranscript_AdvancesCursor(t *testing.T) {
 		}
 		ids = append(ids, id)
 	}
-	prov, chatCalls, _ := buildConsolidationProvider(t, `{"summary":"unused","canonical_memory":"unused"}`, true)
+	prov, calls := buildConsolidationProvider(t, `{"summary":"unused","canonical_memory":"unused"}`, true)
 	c := &Consolidator{DB: d, Provider: prov, WindowSize: 1, MaxMessages: 50, MaxInputChars: 12000}
 	didWork, err := c.RunOnce(ctx, "sess", 1, RunMode{ArchiveAll: true})
 	if err != nil {
@@ -157,8 +162,8 @@ func TestConsolidator_EmptyTranscript_AdvancesCursor(t *testing.T) {
 	if !didWork {
 		t.Fatal("expected didWork true for cursor advancement")
 	}
-	if atomic.LoadInt32(chatCalls) != 0 {
-		t.Fatalf("expected no chat call for empty transcript, got %d", atomic.LoadInt32(chatCalls))
+	if atomic.LoadInt32(calls.Chat) != 0 {
+		t.Fatalf("expected no chat call for empty transcript, got %d", atomic.LoadInt32(calls.Chat))
 	}
 	lastID, _, err := d.GetConsolidationRange(ctx, "sess", 1)
 	if err != nil {
@@ -177,7 +182,7 @@ func TestConsolidator_ArchiveAll_MultiPass(t *testing.T) {
 			t.Fatalf("AppendMessage: %v", err)
 		}
 	}
-	prov, chatCalls, _ := buildConsolidationProvider(t, `{"summary":"pass summary","canonical_memory":"- memory"}`, false)
+	prov, calls := buildConsolidationProvider(t, `{"summary":"pass summary","canonical_memory":"- memory"}`, false)
 	c := &Consolidator{
 		DB:                 d,
 		Provider:           prov,
@@ -196,8 +201,8 @@ func TestConsolidator_ArchiveAll_MultiPass(t *testing.T) {
 	if oldestID != 0 && lastID < oldestID {
 		t.Fatalf("expected cursor to move through archive-all range, got last=%d oldest=%d", lastID, oldestID)
 	}
-	if atomic.LoadInt32(chatCalls) < 2 {
-		t.Fatalf("expected multiple chat calls for multipass archive, got %d", atomic.LoadInt32(chatCalls))
+	if atomic.LoadInt32(calls.Chat) < 2 {
+		t.Fatalf("expected multiple chat calls for multipass archive, got %d", atomic.LoadInt32(calls.Chat))
 	}
 }
 
@@ -209,7 +214,7 @@ func TestConsolidator_MaxInputCharsBoundsPromptAndSkipsEmbedOnFailure(t *testing
 			t.Fatalf("AppendMessage: %v", err)
 		}
 	}
-	prov, _, embedCalls := buildConsolidationProvider(t, `{"summary":"bounded summary","canonical_memory":"- bounded"}`, false)
+	prov, calls := buildConsolidationProvider(t, `{"summary":"bounded summary","canonical_memory":"- bounded"}`, false)
 	c := &Consolidator{
 		DB:            d,
 		Provider:      prov,
@@ -225,8 +230,8 @@ func TestConsolidator_MaxInputCharsBoundsPromptAndSkipsEmbedOnFailure(t *testing
 	if !didWork {
 		t.Fatal("expected work to be done")
 	}
-	if atomic.LoadInt32(embedCalls) != 1 {
-		t.Fatalf("expected embed attempt, got %d", atomic.LoadInt32(embedCalls))
+	if atomic.LoadInt32(calls.Embed) != 1 {
+		t.Fatalf("expected embed attempt, got %d", atomic.LoadInt32(calls.Embed))
 	}
 }
 

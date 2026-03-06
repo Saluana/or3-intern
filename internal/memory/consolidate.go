@@ -14,6 +14,7 @@ import (
 )
 
 const defaultCanonicalMemoryKey = "long_term_memory"
+const canonicalMemoryInputDivisor = 2
 
 const consolidationPrompt = `You are consolidating chat memory.
 
@@ -165,7 +166,7 @@ func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMa
 	if err != nil {
 		return false, fmt.Errorf("consolidation get canonical memory: %w", err)
 	}
-	currentCanonical = trimTo(currentCanonical, maxInputChars/2)
+	currentCanonical = trimTo(currentCanonical, maxInputChars/canonicalMemoryInputDivisor)
 
 	model := c.ChatModel
 	if model == "" {
@@ -186,7 +187,7 @@ func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMa
 		return false, fmt.Errorf("consolidation: no choices returned")
 	}
 	summary, canonical := parseConsolidationOutput(contentToStr(resp.Choices[0].Message.Content))
-	summary = trimTo(summary, maxInputChars/2)
+	summary = trimTo(summary, maxInputChars/canonicalMemoryInputDivisor)
 	canonical = trimTo(canonical, maxInputChars)
 	if canonical == "" {
 		canonical = currentCanonical

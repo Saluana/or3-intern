@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"math"
 	"strings"
 
 	"or3-intern/internal/scope"
@@ -274,7 +275,7 @@ func (d *DB) GetMessagesForConsolidation(ctx context.Context, sessionKey string,
 
 func (d *DB) GetConsolidationMessages(ctx context.Context, sessionKey string, afterID, beforeID int64, limit int) ([]ConsolidationMessage, error) {
 	if beforeID <= 0 {
-		beforeID = int64(^uint64(0) >> 1)
+		beforeID = math.MaxInt64
 	}
 	if limit <= 0 {
 		limit = 50

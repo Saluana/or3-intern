@@ -9,6 +9,7 @@ import (
 type Scheduler struct {
 	timeout time.Duration
 	run     func(context.Context, string)
+	baseCtx context.Context
 
 	mu       sync.Mutex
 	sessions map[string]*schedulerState
@@ -20,12 +21,20 @@ type schedulerState struct {
 }
 
 func NewScheduler(timeout time.Duration, run func(context.Context, string)) *Scheduler {
+	return NewSchedulerWithContext(context.Background(), timeout, run)
+}
+
+func NewSchedulerWithContext(baseCtx context.Context, timeout time.Duration, run func(context.Context, string)) *Scheduler {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
+	}
+	if baseCtx == nil {
+		baseCtx = context.Background()
 	}
 	return &Scheduler{
 		timeout:  timeout,
 		run:      run,
+		baseCtx:  baseCtx,
 		sessions: map[string]*schedulerState{},
 	}
 }
@@ -54,7 +63,11 @@ func (s *Scheduler) Trigger(sessionKey string) {
 
 func (s *Scheduler) runLoop(sessionKey string) {
 	for {
-		ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+		base := s.baseCtx
+		if base == nil {
+			base = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(base, s.timeout)
 		s.run(ctx, sessionKey)
 		cancel()
 

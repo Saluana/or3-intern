@@ -3,6 +3,7 @@ module or3-intern
 go 1.22
 
 require (
+	github.com/gorilla/websocket v1.5.3
 	github.com/robfig/cron/v3 v3.0.1
 	modernc.org/sqlite v1.33.1
 )

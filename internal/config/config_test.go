@@ -18,6 +18,12 @@ func clearConfigEnv(t *testing.T) {
 		"OR3_API_KEY",
 		"OR3_MODEL",
 		"OR3_EMBED_MODEL",
+		"OR3_TELEGRAM_TOKEN",
+		"OR3_SLACK_APP_TOKEN",
+		"OR3_SLACK_BOT_TOKEN",
+		"OR3_DISCORD_TOKEN",
+		"OR3_WHATSAPP_BRIDGE_URL",
+		"OR3_WHATSAPP_BRIDGE_TOKEN",
 	} {
 		t.Setenv(key, "")
 	}
@@ -250,6 +256,29 @@ func TestLoad_ArtifactsDirEnvOverride(t *testing.T) {
 	}
 	if cfg.ArtifactsDir != "/env/artifacts" {
 		t.Errorf("expected ArtifactsDir='/env/artifacts', got %q", cfg.ArtifactsDir)
+	}
+}
+
+func TestLoad_ChannelEnvOverrides(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	b, _ := json.MarshalIndent(Default(), "", "  ")
+	os.WriteFile(path, b, 0o644)
+
+	t.Setenv("OR3_TELEGRAM_TOKEN", "telegram-token")
+	t.Setenv("OR3_SLACK_APP_TOKEN", "slack-app")
+	t.Setenv("OR3_SLACK_BOT_TOKEN", "slack-bot")
+	t.Setenv("OR3_DISCORD_TOKEN", "discord-token")
+	t.Setenv("OR3_WHATSAPP_BRIDGE_URL", "ws://127.0.0.1:3001/ws")
+	t.Setenv("OR3_WHATSAPP_BRIDGE_TOKEN", "bridge-token")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Channels.Telegram.Token != "telegram-token" || cfg.Channels.Slack.AppToken != "slack-app" || cfg.Channels.Slack.BotToken != "slack-bot" || cfg.Channels.Discord.Token != "discord-token" || cfg.Channels.WhatsApp.BridgeToken != "bridge-token" {
+		t.Fatalf("unexpected channel env overrides: %#v", cfg.Channels)
 	}
 }
 

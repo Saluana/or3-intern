@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"or3-intern/internal/channels/cli"
 	"or3-intern/internal/config"
 )
 
@@ -84,5 +85,23 @@ func TestRunInitWithIO_WritesConfig(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "go run ./cmd/or3-intern chat") {
 		t.Fatalf("expected next-step instructions, got %q", out.String())
+	}
+}
+
+func TestBuildChannelManager_RegistersEnabledChannels(t *testing.T) {
+	cfg := config.Default()
+	cfg.Channels.Telegram.Enabled = true
+	cfg.Channels.Telegram.Token = "test-token"
+	cfg.Channels.Slack.Enabled = true
+	cfg.Channels.Slack.AppToken = "app"
+	cfg.Channels.Slack.BotToken = "bot"
+
+	mgr, err := buildChannelManager(cfg, cli.Deliverer{})
+	if err != nil {
+		 t.Fatalf("buildChannelManager: %v", err)
+	}
+	names := strings.Join(mgr.Names(), ",")
+	if !strings.Contains(names, "cli") || !strings.Contains(names, "telegram") || !strings.Contains(names, "slack") {
+		t.Fatalf("expected registered channels, got %q", names)
 	}
 }

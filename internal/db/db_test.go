@@ -37,6 +37,99 @@ func TestOpen_CreatesDB(t *testing.T) {
 	}
 }
 
+func TestOpen_MigratesLegacyMemorySchema(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "legacy.db")
+
+	sqlDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open legacy db: %v", err)
+	}
+	defer sqlDB.Close()
+
+	legacyStmts := []string{
+		`CREATE TABLE sessions(
+			key TEXT PRIMARY KEY,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			metadata_json TEXT NOT NULL DEFAULT '{}',
+			last_consolidated_msg_id INTEGER NOT NULL DEFAULT 0
+		);`,
+		`CREATE TABLE messages(
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_key TEXT NOT NULL,
+			role TEXT NOT NULL,
+			content TEXT NOT NULL,
+			payload_json TEXT NOT NULL DEFAULT '{}',
+			created_at INTEGER NOT NULL
+		);`,
+		`CREATE TABLE memory_pinned(
+			key TEXT PRIMARY KEY,
+			content TEXT NOT NULL,
+			updated_at INTEGER NOT NULL
+		);`,
+		`CREATE TABLE memory_notes(
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			text TEXT NOT NULL,
+			embedding BLOB NOT NULL,
+			source_message_id INTEGER,
+			tags TEXT NOT NULL DEFAULT '',
+			created_at INTEGER NOT NULL
+		);`,
+		`CREATE VIRTUAL TABLE memory_fts USING fts5(text, content='memory_notes', content_rowid='id');`,
+		`CREATE TRIGGER memory_notes_ai AFTER INSERT ON memory_notes BEGIN
+			INSERT INTO memory_fts(rowid, text) VALUES (new.id, new.text);
+		END;`,
+	}
+	for _, stmt := range legacyStmts {
+		if _, err := sqlDB.Exec(stmt); err != nil {
+			t.Fatalf("exec legacy schema: %v", err)
+		}
+	}
+	if _, err := sqlDB.Exec(`INSERT INTO memory_notes(text, embedding, tags, created_at) VALUES('legacy note', x'00000000', '', 1)`); err != nil {
+		t.Fatalf("seed legacy note: %v", err)
+	}
+	if _, err := sqlDB.Exec(`INSERT INTO memory_pinned(key, content, updated_at) VALUES('name', 'legacy', 1)`); err != nil {
+		t.Fatalf("seed legacy pinned: %v", err)
+	}
+	_ = sqlDB.Close()
+
+	d, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open migrated db: %v", err)
+	}
+	defer d.Close()
+
+	pinned, err := d.GetPinned(context.Background(), "session1")
+	if err != nil {
+		t.Fatalf("GetPinned after migration: %v", err)
+	}
+	if pinned["name"] != "legacy" {
+		t.Fatalf("expected legacy pinned data after migration, got %#v", pinned)
+	}
+
+	rows, err := d.StreamMemoryNotesLimit(context.Background(), "session1", 10)
+	if err != nil {
+		t.Fatalf("StreamMemoryNotesLimit after migration: %v", err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		t.Fatal("expected migrated memory note row")
+	}
+	var id int64
+	var text string
+	var emb []byte
+	var sourceID any
+	var tags string
+	var createdAt int64
+	if err := rows.Scan(&id, &text, &emb, &sourceID, &tags, &createdAt); err != nil {
+		t.Fatalf("scan migrated memory note: %v", err)
+	}
+	if text != "legacy note" {
+		t.Fatalf("expected migrated memory note, got %q", text)
+	}
+}
+
 func TestOpen_InvalidPath(t *testing.T) {
 	// A path inside a non-existent directory shouldn't cause Open to fail
 	// because SQLite creates the file. But an invalid path format should fail.

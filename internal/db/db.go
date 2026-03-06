@@ -76,7 +76,6 @@ func (d *DB) migrate(ctx context.Context) error {
 			tags TEXT NOT NULL DEFAULT '',
 			created_at INTEGER NOT NULL
 		);`,
-		`CREATE INDEX IF NOT EXISTS memory_notes_session_id ON memory_notes(session_key, id);`,
 		// FTS5
 		`CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(text, content='memory_notes', content_rowid='id');`,
 		`CREATE TRIGGER IF NOT EXISTS memory_notes_ai AFTER INSERT ON memory_notes BEGIN

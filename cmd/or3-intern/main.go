@@ -26,6 +26,7 @@ import (
 	"or3-intern/internal/providers"
 	"or3-intern/internal/skills"
 	"or3-intern/internal/tools"
+	"or3-intern/internal/triggers"
 )
 
 const schedulerMaxConsolidationPasses = 3
@@ -226,6 +227,17 @@ func main() {
 			fmt.Fprintln(os.Stderr, "channel start error:", err)
 			os.Exit(1)
 		}
+		// start webhook server if configured
+		webhookSrv := triggers.NewWebhookServer(cfg.Triggers.Webhook, b, cfg.DefaultSessionKey)
+		if err := webhookSrv.Start(ctx); err != nil {
+			fmt.Fprintln(os.Stderr, "webhook start error:", err)
+			os.Exit(1)
+		}
+		defer webhookSrv.Stop(context.Background())
+		// start file watcher if configured
+		fileWatcher := triggers.NewFileWatcher(cfg.Triggers.FileWatch, b, cfg.DefaultSessionKey)
+		fileWatcher.Start(ctx)
+		defer fileWatcher.Stop()
 		fmt.Println("or3-intern serve: channels running. Ctrl+C to stop.")
 		select {}
 	case "agent":
@@ -361,6 +373,14 @@ func buildToolRegistry(cfg config.Config, d *db.DB, prov *providers.Client, chan
 	})
 	if inv != nil {
 		reg.Register(&tools.ReadSkill{Inventory: inv})
+	}
+	if inv != nil && cfg.Skills.EnableExec {
+		reg.Register(&tools.RunSkill{
+			Inventory:      inv,
+			DefaultTimeout: time.Duration(cfg.Skills.MaxRunSeconds) * time.Second,
+			RestrictDir:    fileRoot,
+			OutputMaxBytes: cfg.MaxToolBytes,
+		})
 	}
 	if cronSvc != nil {
 		reg.Register(&tools.CronTool{Svc: cronSvc})

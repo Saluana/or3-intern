@@ -393,12 +393,17 @@ func toToolDefs(reg *tools.Registry) []providers.ToolDef {
 }
 
 // Cron runner helper: turns a job into a bus event message
-func CronRunner(b *bus.Bus, sessionKey string) cron.Runner {
+func CronRunner(b *bus.Bus, defaultSessionKey string) cron.Runner {
 	return func(ctx context.Context, job cron.CronJob) error {
 		_ = ctx
 		msg := job.Payload.Message
 		if strings.TrimSpace(msg) == "" {
 			msg = "cron job: " + job.Name
+		}
+		// prefer per-job session key over the default
+		sessionKey := job.Payload.SessionKey
+		if strings.TrimSpace(sessionKey) == "" {
+			sessionKey = defaultSessionKey
 		}
 		ev := bus.Event{Type: bus.EventCron, SessionKey: sessionKey, Channel: job.Payload.Channel, From: job.Payload.To, Message: msg, Meta: map[string]any{"job_id": job.ID}}
 		if ok := b.Publish(ev); !ok {

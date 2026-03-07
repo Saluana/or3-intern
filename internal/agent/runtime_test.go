@@ -7,12 +7,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"or3-intern/internal/artifacts"
 	"or3-intern/internal/bus"
 	"or3-intern/internal/db"
+	"or3-intern/internal/memory"
 	"or3-intern/internal/providers"
 	"or3-intern/internal/tools"
 )
@@ -74,14 +77,14 @@ func TestRuntime_Handle_UserMessage(t *testing.T) {
 	response := providers.ChatCompletionResponse{
 		Choices: []struct {
 			Message struct {
-				Role      string              `json:"role"`
-				Content   any                 `json:"content"`
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
 				ToolCalls []providers.ToolCall `json:"tool_calls"`
 			} `json:"message"`
 		}{{
 			Message: struct {
-				Role      string              `json:"role"`
-				Content   any                 `json:"content"`
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
 				ToolCalls []providers.ToolCall `json:"tool_calls"`
 			}{Role: "assistant", Content: "Hello there!"},
 		}},
@@ -115,14 +118,14 @@ func TestRuntime_Handle_CronEvent(t *testing.T) {
 	response := providers.ChatCompletionResponse{
 		Choices: []struct {
 			Message struct {
-				Role      string              `json:"role"`
-				Content   any                 `json:"content"`
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
 				ToolCalls []providers.ToolCall `json:"tool_calls"`
 			} `json:"message"`
 		}{{
 			Message: struct {
-				Role      string              `json:"role"`
-				Content   any                 `json:"content"`
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
 				ToolCalls []providers.ToolCall `json:"tool_calls"`
 			}{Role: "assistant", Content: "Cron response"},
 		}},
@@ -215,14 +218,14 @@ func TestRuntime_Handle_WithToolCall(t *testing.T) {
 			resp = providers.ChatCompletionResponse{
 				Choices: []struct {
 					Message struct {
-						Role      string              `json:"role"`
-						Content   any                 `json:"content"`
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
 						ToolCalls []providers.ToolCall `json:"tool_calls"`
 					} `json:"message"`
 				}{{
 					Message: struct {
-						Role      string              `json:"role"`
-						Content   any                 `json:"content"`
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
 						ToolCalls []providers.ToolCall `json:"tool_calls"`
 					}{
 						Role: "assistant",
@@ -242,14 +245,14 @@ func TestRuntime_Handle_WithToolCall(t *testing.T) {
 			resp = providers.ChatCompletionResponse{
 				Choices: []struct {
 					Message struct {
-						Role      string              `json:"role"`
-						Content   any                 `json:"content"`
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
 						ToolCalls []providers.ToolCall `json:"tool_calls"`
 					} `json:"message"`
 				}{{
 					Message: struct {
-						Role      string              `json:"role"`
-						Content   any                 `json:"content"`
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
 						ToolCalls []providers.ToolCall `json:"tool_calls"`
 					}{Role: "assistant", Content: "Final answer"},
 				}},
@@ -320,14 +323,14 @@ func TestRuntime_Handle_ArtifactSave(t *testing.T) {
 			resp = providers.ChatCompletionResponse{
 				Choices: []struct {
 					Message struct {
-						Role      string              `json:"role"`
-						Content   any                 `json:"content"`
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
 						ToolCalls []providers.ToolCall `json:"tool_calls"`
 					} `json:"message"`
 				}{{
 					Message: struct {
-						Role      string              `json:"role"`
-						Content   any                 `json:"content"`
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
 						ToolCalls []providers.ToolCall `json:"tool_calls"`
 					}{
 						Role: "assistant",
@@ -346,14 +349,14 @@ func TestRuntime_Handle_ArtifactSave(t *testing.T) {
 			resp = providers.ChatCompletionResponse{
 				Choices: []struct {
 					Message struct {
-						Role      string              `json:"role"`
-						Content   any                 `json:"content"`
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
 						ToolCalls []providers.ToolCall `json:"tool_calls"`
 					} `json:"message"`
 				}{{
 					Message: struct {
-						Role      string              `json:"role"`
-						Content   any                 `json:"content"`
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
 						ToolCalls []providers.ToolCall `json:"tool_calls"`
 					}{Role: "assistant", Content: "done"},
 				}},
@@ -417,14 +420,14 @@ func TestRuntime_Handle_NoMaxLoops_Defaults(t *testing.T) {
 	response := providers.ChatCompletionResponse{
 		Choices: []struct {
 			Message struct {
-				Role      string              `json:"role"`
-				Content   any                 `json:"content"`
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
 				ToolCalls []providers.ToolCall `json:"tool_calls"`
 			} `json:"message"`
 		}{{
 			Message: struct {
-				Role      string              `json:"role"`
-				Content   any                 `json:"content"`
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
 				ToolCalls []providers.ToolCall `json:"tool_calls"`
 			}{Role: "assistant", Content: "response"},
 		}},
@@ -455,14 +458,14 @@ func TestRuntime_Handle_SystemEvent(t *testing.T) {
 	response := providers.ChatCompletionResponse{
 		Choices: []struct {
 			Message struct {
-				Role      string              `json:"role"`
-				Content   any                 `json:"content"`
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
 				ToolCalls []providers.ToolCall `json:"tool_calls"`
 			} `json:"message"`
 		}{{
 			Message: struct {
-				Role      string              `json:"role"`
-				Content   any                 `json:"content"`
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
 				ToolCalls []providers.ToolCall `json:"tool_calls"`
 			}{Role: "assistant", Content: "sys response"},
 		}},
@@ -512,5 +515,223 @@ func TestRuntime_LockFor_DifferentKeys(t *testing.T) {
 	mu2 := rt.lockFor("key2")
 	if mu1 == mu2 {
 		t.Error("expected different mutexes for different keys")
+	}
+}
+
+func TestRuntime_ConsolidationScheduler_DoesNotBlockTurn(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	response := providers.ChatCompletionResponse{
+		Choices: []struct {
+			Message struct {
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			} `json:"message"`
+		}{{
+			Message: struct {
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			}{Role: "assistant", Content: "ok"},
+		}},
+	}
+	_, provider := buildChatServer(t, response)
+	deliver := &mockDeliverer{}
+	rt := buildSimpleRuntime(t, provider, d, deliver)
+
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	rt.Consolidator = &memory.Consolidator{Provider: &providers.Client{}}
+	rt.ConsolidationScheduler = memory.NewScheduler(2*time.Second, func(ctx context.Context, sessionKey string) {
+		started <- struct{}{}
+		<-release
+	})
+
+	start := time.Now()
+	err := rt.Handle(context.Background(), bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess-non-blocking",
+		Channel:    "cli",
+		From:       "user",
+		Message:    "hello",
+	})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if elapsed > 300*time.Millisecond {
+		t.Fatalf("expected non-blocking turn, elapsed=%v", elapsed)
+	}
+	select {
+	case <-started:
+	case <-time.After(1 * time.Second):
+		t.Fatal("expected scheduler run")
+	}
+	close(release)
+}
+
+func TestRuntime_HandleNewSession_Success(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	ctx := context.Background()
+	for i := 0; i < 6; i++ {
+		if _, err := d.AppendMessage(ctx, "sess-new", "user", "hello", nil); err != nil {
+			t.Fatalf("AppendMessage: %v", err)
+		}
+	}
+	provServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/chat/completions":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": `{"summary":"done","canonical_memory":"- fact"}`}}},
+			})
+		case "/embeddings":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"embedding": []float32{0.1}}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer provServer.Close()
+	prov := providers.New(provServer.URL, "k", 5*time.Second)
+	prov.HTTP = provServer.Client()
+
+	deliver := &mockDeliverer{}
+	rt := &Runtime{
+		DB:       d,
+		Provider: prov,
+		Model:    "gpt-4.1-mini",
+		Tools:    tools.NewRegistry(),
+		Builder:  &Builder{DB: d, HistoryMax: 40},
+		Deliver:  deliver,
+		Consolidator: &memory.Consolidator{
+			DB:                 d,
+			Provider:           prov,
+			WindowSize:         1,
+			MaxMessages:        50,
+			MaxInputChars:      4000,
+			CanonicalPinnedKey: "long_term_memory",
+		},
+	}
+	if err := rt.Handle(ctx, bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess-new",
+		Channel:    "cli",
+		From:       "user",
+		Message:    "/new",
+	}); err != nil {
+		t.Fatalf("Handle /new: %v", err)
+	}
+	msgs, err := d.GetLastMessages(ctx, "sess-new", 20)
+	if err != nil {
+		t.Fatalf("GetLastMessages: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("expected messages cleared, got %d", len(msgs))
+	}
+	if len(deliver.messages) == 0 || deliver.messages[0] != "New session started." {
+		t.Fatalf("unexpected deliver messages: %#v", deliver.messages)
+	}
+}
+
+func TestRuntime_HandleNewSession_FailurePreservesHistory(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	ctx := context.Background()
+	for i := 0; i < 4; i++ {
+		if _, err := d.AppendMessage(ctx, "sess-new-fail", "user", "hello", nil); err != nil {
+			t.Fatalf("AppendMessage: %v", err)
+		}
+	}
+	provServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "bad gateway", http.StatusBadGateway)
+	}))
+	defer provServer.Close()
+	prov := providers.New(provServer.URL, "k", 5*time.Second)
+	prov.HTTP = provServer.Client()
+
+	deliver := &mockDeliverer{}
+	rt := &Runtime{
+		DB:       d,
+		Provider: prov,
+		Model:    "gpt-4.1-mini",
+		Tools:    tools.NewRegistry(),
+		Builder:  &Builder{DB: d, HistoryMax: 40},
+		Deliver:  deliver,
+		Consolidator: &memory.Consolidator{
+			DB:            d,
+			Provider:      prov,
+			WindowSize:    1,
+			MaxMessages:   50,
+			MaxInputChars: 4000,
+		},
+	}
+	if err := rt.Handle(ctx, bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess-new-fail",
+		Channel:    "cli",
+		From:       "user",
+		Message:    "/new",
+	}); err != nil {
+		t.Fatalf("Handle /new: %v", err)
+	}
+	msgs, err := d.GetLastMessages(ctx, "sess-new-fail", 20)
+	if err != nil {
+		t.Fatalf("GetLastMessages: %v", err)
+	}
+	if len(msgs) == 0 {
+		t.Fatal("expected history preserved on archive failure")
+	}
+	if len(deliver.messages) == 0 || !strings.Contains(deliver.messages[0], "Memory archival failed") {
+		t.Fatalf("expected archival failure message, got %#v", deliver.messages)
+	}
+}
+
+func TestRuntime_ConsolidationScheduler_SingleFlightCoalesces(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	response := providers.ChatCompletionResponse{
+		Choices: []struct {
+			Message struct {
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			} `json:"message"`
+		}{{
+			Message: struct {
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			}{Role: "assistant", Content: "ok"},
+		}},
+	}
+	_, provider := buildChatServer(t, response)
+	deliver := &mockDeliverer{}
+	rt := buildSimpleRuntime(t, provider, d, deliver)
+
+	var runs int32
+	firstRelease := make(chan struct{})
+	secondSeen := make(chan struct{}, 1)
+	rt.Consolidator = &memory.Consolidator{Provider: &providers.Client{}}
+	rt.ConsolidationScheduler = memory.NewScheduler(2*time.Second, func(ctx context.Context, sessionKey string) {
+		n := atomic.AddInt32(&runs, 1)
+		if n == 1 {
+			<-firstRelease
+			return
+		}
+		if n == 2 {
+			secondSeen <- struct{}{}
+		}
+	})
+
+	if err := rt.Handle(context.Background(), bus.Event{Type: bus.EventUserMessage, SessionKey: "sess-c", Channel: "cli", From: "u", Message: "a"}); err != nil {
+		t.Fatalf("first handle: %v", err)
+	}
+	if err := rt.Handle(context.Background(), bus.Event{Type: bus.EventUserMessage, SessionKey: "sess-c", Channel: "cli", From: "u", Message: "b"}); err != nil {
+		t.Fatalf("second handle: %v", err)
+	}
+	close(firstRelease)
+	select {
+	case <-secondSeen:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected coalesced second scheduler pass")
 	}
 }

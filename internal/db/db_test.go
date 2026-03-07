@@ -654,3 +654,127 @@ func TestSetLastConsolidatedID(t *testing.T) {
 		t.Errorf("expected lastConsolidatedID=42, got %d", lastID)
 	}
 }
+
+func TestWriteConsolidation_Atomic(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	var lastMsgID int64
+	for i := 0; i < 3; i++ {
+		id, err := d.AppendMessage(ctx, "sess", "user", "msg", nil)
+		if err != nil {
+			t.Fatalf("AppendMessage: %v", err)
+		}
+		lastMsgID = id
+	}
+
+	noteID, err := d.WriteConsolidation(ctx, ConsolidationWrite{
+		SessionKey:    "sess",
+		ScopeKey:      "sess",
+		NoteText:      "summary",
+		Embedding:     []byte{},
+		SourceMsgID:   sql.NullInt64{Int64: lastMsgID, Valid: true},
+		NoteTags:      "consolidation",
+		CanonicalKey:  "long_term_memory",
+		CanonicalText: "- stable fact",
+		CursorMsgID:   lastMsgID,
+	})
+	if err != nil {
+		t.Fatalf("WriteConsolidation: %v", err)
+	}
+	if noteID == 0 {
+		t.Fatal("expected non-zero note id")
+	}
+
+	lastID, _, err := d.GetConsolidationRange(ctx, "sess", 10)
+	if err != nil {
+		t.Fatalf("GetConsolidationRange: %v", err)
+	}
+	if lastID != lastMsgID {
+		t.Fatalf("expected last consolidated id %d, got %d", lastMsgID, lastID)
+	}
+
+	rows, err := d.StreamMemoryNotesScopeLimit(ctx, "sess", 10)
+	if err != nil {
+		t.Fatalf("StreamMemoryNotesScopeLimit: %v", err)
+	}
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		count++
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 note, got %d", count)
+	}
+
+	pinned, ok, err := d.GetPinnedValue(ctx, "sess", "long_term_memory")
+	if err != nil {
+		t.Fatalf("GetPinnedValue: %v", err)
+	}
+	if !ok || pinned != "- stable fact" {
+		t.Fatalf("expected canonical memory to be updated, got ok=%v value=%q", ok, pinned)
+	}
+}
+
+func TestWriteConsolidation_RollbackOnFailure(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	if err := d.EnsureSession(ctx, "sess"); err != nil {
+		t.Fatalf("EnsureSession: %v", err)
+	}
+
+	// Empty canonical key and source message id is valid, but we intentionally fail on cursor update
+	// by writing to a missing session key.
+	_, err := d.WriteConsolidation(ctx, ConsolidationWrite{
+		SessionKey:  "missing-session",
+		ScopeKey:    "sess",
+		NoteText:    "summary",
+		Embedding:   []byte{},
+		NoteTags:    "consolidation",
+		CursorMsgID: 999,
+	})
+	if err == nil {
+		t.Fatal("expected write error for missing session")
+	}
+
+	rows, err := d.StreamMemoryNotesScopeLimit(ctx, "sess", 10)
+	if err != nil {
+		t.Fatalf("StreamMemoryNotesScopeLimit: %v", err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		t.Fatal("expected no note due to rollback")
+	}
+}
+
+func TestResetSessionHistory(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		if _, err := d.AppendMessage(ctx, "sess", "user", "msg", nil); err != nil {
+			t.Fatalf("AppendMessage: %v", err)
+		}
+	}
+	if err := d.SetLastConsolidatedID(ctx, "sess", 2); err != nil {
+		t.Fatalf("SetLastConsolidatedID: %v", err)
+	}
+
+	if err := d.ResetSessionHistory(ctx, "sess"); err != nil {
+		t.Fatalf("ResetSessionHistory: %v", err)
+	}
+
+	msgs, err := d.GetLastMessages(ctx, "sess", 10)
+	if err != nil {
+		t.Fatalf("GetLastMessages: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("expected no messages after reset, got %d", len(msgs))
+	}
+	lastID, _, err := d.GetConsolidationRange(ctx, "sess", 10)
+	if err != nil {
+		t.Fatalf("GetConsolidationRange: %v", err)
+	}
+	if lastID != 0 {
+		t.Fatalf("expected cursor reset to 0, got %d", lastID)
+	}
+}

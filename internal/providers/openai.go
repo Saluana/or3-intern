@@ -222,7 +222,9 @@ func mergeStreamToolCalls(existing []ToolCall, delta []ToolCall) []ToolCall {
 			existing = append(existing, ToolCall{})
 		}
 		existing[idx].Function.Arguments += d.Function.Arguments
-		existing[idx].Function.Name += d.Function.Name
+		if d.Function.Name != "" {
+			existing[idx].Function.Name += d.Function.Name
+		}
 		if d.ID != "" {
 			existing[idx].ID = d.ID
 		}

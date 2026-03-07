@@ -120,6 +120,47 @@ func main() {
 	ret := memory.NewRetriever(d)
 	ret.VectorScanLimit = cfg.VectorScanLimit
 
+	var docIndexer *memory.DocIndexer
+	var docRetriever *memory.DocRetriever
+	if cfg.DocIndex.Enabled && len(cfg.DocIndex.Roots) > 0 {
+		docIndexer = &memory.DocIndexer{
+			DB:         d,
+			Provider:   prov,
+			EmbedModel: cfg.Provider.EmbedModel,
+			Config: memory.DocIndexConfig{
+				Roots:          cfg.DocIndex.Roots,
+				MaxFiles:       cfg.DocIndex.MaxFiles,
+				MaxFileBytes:   cfg.DocIndex.MaxFileBytes,
+				MaxChunks:      cfg.DocIndex.MaxChunks,
+				EmbedMaxBytes:  cfg.DocIndex.EmbedMaxBytes,
+				RefreshSeconds: cfg.DocIndex.RefreshSeconds,
+				RetrieveLimit:  cfg.DocIndex.RetrieveLimit,
+			},
+		}
+		docRetriever = &memory.DocRetriever{DB: d}
+		// Initial sync in background (don't block startup)
+		go func() {
+			syncCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			if err := docIndexer.SyncRoots(syncCtx, cfg.DefaultSessionKey); err != nil {
+				log.Printf("doc index sync failed: %v", err)
+			}
+		}()
+	}
+	if docIndexer != nil && cfg.DocIndex.RefreshSeconds > 0 {
+		go func() {
+			ticker := time.NewTicker(time.Duration(cfg.DocIndex.RefreshSeconds) * time.Second)
+			defer ticker.Stop()
+			for range ticker.C {
+				syncCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+				if err := docIndexer.SyncRoots(syncCtx, cfg.DefaultSessionKey); err != nil {
+					log.Printf("doc index refresh failed: %v", err)
+				}
+				cancel()
+			}
+		}()
+	}
+
 	rt := &agent.Runtime{
 		DB:          d,
 		Provider:    prov,
@@ -146,6 +187,9 @@ func main() {
 			VectorK:                cfg.VectorK,
 			FTSK:                   cfg.FTSK,
 			TopK:                   cfg.MemoryRetrieve,
+			DocRetriever:           docRetriever,
+			DocScopeKey:            cfg.DefaultSessionKey,
+			DocRetrieveLimit:       cfg.DocIndex.RetrieveLimit,
 		},
 		Artifacts:    art,
 		MaxToolBytes: cfg.MaxToolBytes,

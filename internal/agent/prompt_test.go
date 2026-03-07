@@ -200,7 +200,13 @@ func TestStaticMemoryAfterAgents(t *testing.T) {
 // TestEmptyOptionalSectionsOmitted verifies that empty optional sections are not rendered.
 func TestEmptyOptionalSectionsOmitted(t *testing.T) {
 	b := &Builder{}
-	got := b.composeSystemPrompt("(none)", "(none)", "", "", "", "")
+	pinned := "(none)"
+	retrieved := "(none)"
+	noIdentity := ""
+	noStaticMem := ""
+	noHeartbeat := ""
+	noDocContext := ""
+	got := b.composeSystemPrompt(pinned, retrieved, noIdentity, noStaticMem, noHeartbeat, noDocContext)
 	if strings.Contains(got, "Identity") {
 		t.Error("expected 'Identity' section to be omitted when IdentityText is empty")
 	}

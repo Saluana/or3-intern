@@ -54,10 +54,13 @@ func loadManifest(dir string) (skillManifest, bool) {
 	return m, true
 }
 
+// maxFrontMatterLines is the maximum number of lines scanned for YAML front matter.
+const maxFrontMatterLines = 20
+
 // extractFrontMatterSummary parses the first YAML front matter block (--- ... ---)
 // and returns the value of the "summary:" field if present.
 func extractFrontMatterSummary(content string) string {
-	lines := strings.SplitN(content, "\n", 20)
+	lines := strings.SplitN(content, "\n", maxFrontMatterLines)
 	if len(lines) == 0 {
 		return ""
 	}

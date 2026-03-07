@@ -8,8 +8,10 @@ type EventType string
 
 const (
 	EventUserMessage EventType = "user_message"
-	EventCron EventType = "cron"
-	EventSystem EventType = "system"
+	EventCron        EventType = "cron"
+	EventSystem      EventType = "system"
+	EventWebhook     EventType = "webhook"
+	EventFileChange  EventType = "file_change"
 )
 
 type Event struct {

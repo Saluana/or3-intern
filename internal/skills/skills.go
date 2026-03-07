@@ -3,6 +3,7 @@ package skills
 import (
 	"crypto/sha1"
 	"encoding/hex"
+	"encoding/json"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -11,12 +12,22 @@ import (
 	"time"
 )
 
+// SkillEntry describes a declared executable entrypoint from a skill manifest.
+type SkillEntry struct {
+	Name           string   `json:"name"`
+	Command        []string `json:"command"`
+	TimeoutSeconds int      `json:"timeoutSeconds"`
+	AcceptsStdin   bool     `json:"acceptsStdin"`
+}
+
 type SkillMeta struct {
-	Name string
-	Path string
-	ModTime time.Time
-	Size int64
-	ID string
+	Name        string
+	Path        string
+	ModTime     time.Time
+	Size        int64
+	ID          string
+	Summary     string       // short capability description
+	Entrypoints []SkillEntry // declared executable entrypoints from manifest
 }
 
 type Inventory struct {
@@ -24,36 +35,152 @@ type Inventory struct {
 	byName map[string]SkillMeta
 }
 
+// skillManifest is the JSON structure of skill.json.
+type skillManifest struct {
+	Summary     string       `json:"summary"`
+	Entrypoints []SkillEntry `json:"entrypoints"`
+}
+
+// loadManifest tries to load a skill.json from the same directory as path.
+func loadManifest(dir string) (skillManifest, bool) {
+	data, err := os.ReadFile(filepath.Join(dir, "skill.json"))
+	if err != nil {
+		return skillManifest{}, false
+	}
+	var m skillManifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		return skillManifest{}, false
+	}
+	return m, true
+}
+
+// maxFrontMatterLines is the maximum number of lines scanned for YAML front matter.
+const maxFrontMatterLines = 20
+
+// extractFrontMatterSummary parses the first YAML front matter block (--- ... ---)
+// and returns the value of the "summary:" field if present.
+func extractFrontMatterSummary(content string) string {
+	lines := strings.SplitN(content, "\n", maxFrontMatterLines)
+	if len(lines) == 0 {
+		return ""
+	}
+	if strings.TrimSpace(lines[0]) != "---" {
+		return ""
+	}
+	for _, line := range lines[1:] {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "---" {
+			break
+		}
+		if strings.HasPrefix(trimmed, "summary:") {
+			val := strings.TrimSpace(strings.TrimPrefix(trimmed, "summary:"))
+			// Strip optional quotes
+			val = strings.Trim(val, `"'`)
+			return val
+		}
+	}
+	return ""
+}
+
+func skillFileInDir(dir string) (string, bool) {
+	for _, name := range []string{"SKILL.md", "skill.md"} {
+		path := filepath.Join(dir, name)
+		info, err := os.Lstat(path)
+		if err != nil {
+			continue
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			continue
+		}
+		return path, true
+	}
+	return "", false
+}
+
+func appendSkill(metaByName map[string]SkillMeta, path, name string, info fs.FileInfo) {
+	if strings.TrimSpace(name) == "" {
+		return
+	}
+	meta := SkillMeta{
+		Name: name,
+		Path: path,
+		ID:   hash(path),
+	}
+	if info != nil {
+		meta.ModTime = info.ModTime()
+		meta.Size = info.Size()
+	}
+	if man, ok := loadManifest(filepath.Dir(path)); ok {
+		meta.Summary = man.Summary
+		meta.Entrypoints = man.Entrypoints
+	}
+	if meta.Summary == "" {
+		if data, readErr := os.ReadFile(path); readErr == nil {
+			meta.Summary = extractFrontMatterSummary(string(data))
+		}
+	}
+	metaByName[name] = meta
+}
+
 func Scan(dirs []string) Inventory {
-	var skills []SkillMeta
+	metaByName := map[string]SkillMeta{}
 	for _, dir := range dirs {
-		if strings.TrimSpace(dir) == "" { continue }
+		if strings.TrimSpace(dir) == "" {
+			continue
+		}
 		root, err := filepath.Abs(dir)
-		if err != nil { continue }
+		if err != nil {
+			continue
+		}
 		root, err = filepath.EvalSymlinks(root)
-		if err != nil { continue }
-		_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-			if err != nil { return nil }
-			if d.Type()&os.ModeSymlink != 0 { return nil }
-			if d.IsDir() { return nil }
-			ext := strings.ToLower(filepath.Ext(path))
-			if ext != ".md" && ext != ".txt" { return nil }
+		if err != nil {
+			continue
+		}
+		_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if d.Type()&os.ModeSymlink != 0 {
+				return nil
+			}
+			if !d.IsDir() {
+				return nil
+			}
+			if path == root {
+				return nil
+			}
 			realPath, err := filepath.EvalSymlinks(path)
-			if err != nil { return nil }
+			if err != nil {
+				return filepath.SkipDir
+			}
 			rel, err := filepath.Rel(root, realPath)
-			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) { return nil }
-			info, _ := d.Info()
-			mt := time.Time{}
-			sz := int64(0)
-			if info != nil { mt = info.ModTime(); sz = info.Size() }
-			name := strings.TrimSuffix(filepath.Base(realPath), ext)
-			skills = append(skills, SkillMeta{Name: name, Path: realPath, ModTime: mt, Size: sz, ID: hash(realPath)})
-			return nil
+			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				return filepath.SkipDir
+			}
+			skillPath, ok := skillFileInDir(realPath)
+			if !ok {
+				return nil
+			}
+			info, _ := os.Stat(skillPath)
+			appendSkill(metaByName, skillPath, filepath.Base(realPath), info)
+			return filepath.SkipDir
 		})
 	}
-	sort.Slice(skills, func(i, j int) bool { return skills[i].Name < skills[j].Name })
+
+	skills := make([]SkillMeta, 0, len(metaByName))
+	for _, s := range metaByName {
+		skills = append(skills, s)
+	}
+	sort.Slice(skills, func(i, j int) bool {
+		if skills[i].Name == skills[j].Name {
+			return skills[i].Path < skills[j].Path
+		}
+		return skills[i].Name < skills[j].Name
+	})
 	by := map[string]SkillMeta{}
-	for _, s := range skills { by[s.Name] = s }
+	for _, s := range skills {
+		by[s.Name] = s
+	}
 	return Inventory{Skills: skills, byName: by}
 }
 
@@ -63,13 +190,24 @@ func (inv Inventory) Get(name string) (SkillMeta, bool) {
 }
 
 func (inv Inventory) Summary(max int) string {
-	if max <= 0 { max = 50 }
+	if max <= 0 {
+		max = 50
+	}
 	lines := []string{}
 	for i, s := range inv.Skills {
-		if i >= max { lines = append(lines, "…"); break }
-		lines = append(lines, "- "+s.Name)
+		if i >= max {
+			lines = append(lines, "…")
+			break
+		}
+		if s.Summary != "" {
+			lines = append(lines, "- "+s.Name+": "+s.Summary)
+		} else {
+			lines = append(lines, "- "+s.Name)
+		}
 	}
-	if len(lines) == 0 { return "(no skills found)" }
+	if len(lines) == 0 {
+		return "(no skills found)"
+	}
 	return strings.Join(lines, "\n")
 }
 

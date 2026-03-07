@@ -16,6 +16,7 @@ import (
 	"or3-intern/internal/db"
 	"or3-intern/internal/memory"
 	"or3-intern/internal/providers"
+	"or3-intern/internal/scope"
 	"or3-intern/internal/skills"
 )
 
@@ -58,6 +59,13 @@ type PromptParts struct {
 	History []providers.ChatMessage
 }
 
+// BuildOptions holds options for building a prompt.
+type BuildOptions struct {
+	SessionKey  string
+	UserMessage string
+	Autonomous  bool // true for cron/webhook/file-change events
+}
+
 type Builder struct {
 	DB           *db.DB
 	Artifacts    *artifacts.Store
@@ -78,10 +86,29 @@ type Builder struct {
 	VectorK    int
 	FTSK       int
 	TopK       int
+
+	// New fields for lightweight OpenClaw parity
+	IdentityText     string // content of IDENTITY.md
+	StaticMemory     string // content of MEMORY.md
+	HeartbeatText    string // content of HEARTBEAT.md – injected only for autonomous turns
+	DocRetriever     *memory.DocRetriever // for indexed file context
+	DocRetrieveLimit int                  // max docs to retrieve
 }
 
+// Build builds a prompt snapshot. It is a convenience wrapper around BuildWithOptions.
 func (b *Builder) Build(ctx context.Context, sessionKey string, userMessage string) (PromptParts, []memory.Retrieved, error) {
-	pinned, err := b.DB.GetPinned(ctx, sessionKey)
+	return b.BuildWithOptions(ctx, BuildOptions{SessionKey: sessionKey, UserMessage: userMessage})
+}
+
+// BuildWithOptions builds a prompt snapshot using the provided options.
+func (b *Builder) BuildWithOptions(ctx context.Context, opts BuildOptions) (PromptParts, []memory.Retrieved, error) {
+	scopeKey := opts.SessionKey
+	if b.DB != nil && strings.TrimSpace(opts.SessionKey) != "" {
+		if resolved, err := b.DB.ResolveScopeKey(ctx, opts.SessionKey); err == nil && strings.TrimSpace(resolved) != "" {
+			scopeKey = resolved
+		}
+	}
+	pinned, err := b.DB.GetPinned(ctx, scopeKey)
 	if err != nil {
 		return PromptParts{}, nil, err
 	}
@@ -89,15 +116,32 @@ func (b *Builder) Build(ctx context.Context, sessionKey string, userMessage stri
 
 	// embed and retrieve
 	var retrieved []memory.Retrieved
-	if b.Mem != nil && b.Provider != nil && strings.TrimSpace(userMessage) != "" {
-		vec, err := b.Provider.Embed(ctx, b.EmbedModel, userMessage)
+	if b.Mem != nil && b.Provider != nil && strings.TrimSpace(opts.UserMessage) != "" {
+		vec, err := b.Provider.Embed(ctx, b.EmbedModel, opts.UserMessage)
 		if err == nil {
-			retrieved, _ = b.Mem.Retrieve(ctx, sessionKey, userMessage, vec, b.VectorK, b.FTSK, b.TopK)
+			retrieved, _ = b.Mem.Retrieve(ctx, scopeKey, opts.UserMessage, vec, b.VectorK, b.FTSK, b.TopK)
 		}
 	}
 	memText := formatRetrieved(retrieved)
 
-	histRows, err := b.DB.GetLastMessages(ctx, sessionKey, b.HistoryMax)
+	// indexed doc context
+	var docContextText string
+	if b.DocRetriever != nil && strings.TrimSpace(opts.UserMessage) != "" {
+		limit := b.DocRetrieveLimit
+		if limit <= 0 {
+			limit = 5
+		}
+		docs, _ := b.DocRetriever.RetrieveDocs(ctx, scope.GlobalMemoryScope, opts.UserMessage, limit)
+		if len(docs) > 0 {
+			var sb strings.Builder
+			for i, d := range docs {
+				sb.WriteString(fmt.Sprintf("%d) [%s] %s\n", i+1, d.Path, d.Excerpt))
+			}
+			docContextText = strings.TrimSpace(sb.String())
+		}
+	}
+
+	histRows, err := b.DB.GetLastMessagesScoped(ctx, opts.SessionKey, b.HistoryMax)
 	if err != nil {
 		return PromptParts{}, nil, err
 	}
@@ -123,7 +167,11 @@ func (b *Builder) Build(ctx context.Context, sessionKey string, userMessage stri
 		hist = append(hist, msg)
 	}
 
-	sysText := b.composeSystemPrompt(pinnedText, memText)
+	heartbeat := ""
+	if opts.Autonomous {
+		heartbeat = b.HeartbeatText
+	}
+	sysText := b.composeSystemPrompt(pinnedText, memText, b.IdentityText, b.StaticMemory, heartbeat, docContextText)
 	sys := []providers.ChatMessage{
 		{Role: "system", Content: sysText},
 	}
@@ -267,7 +315,7 @@ func readCappedFile(path string, maxBytes int64) ([]byte, error) {
 	return data, nil
 }
 
-func (b *Builder) composeSystemPrompt(pinnedText, memText string) string {
+func (b *Builder) composeSystemPrompt(pinnedText, memText, identityText, staticMemoryText, heartbeatText, docContextText string) string {
 	maxEach := b.BootstrapMaxChars
 	if maxEach <= 0 {
 		maxEach = defaultBootstrapMaxChars
@@ -294,17 +342,31 @@ func (b *Builder) composeSystemPrompt(pinnedText, memText string) string {
 		notes = DefaultToolNotes
 	}
 
-	sections := []struct {
+	type section struct {
 		title string
 		text  string
-	}{
-		{title: "SOUL.md", text: truncateText(soul, maxEach)},
-		{title: "AGENTS.md", text: truncateText(inst, maxEach)},
-		{title: "TOOLS.md", text: truncateText(notes, maxEach)},
-		{title: "Pinned Memory", text: pinnedText},
-		{title: "Retrieved Memory", text: memText},
-		{title: "Skills Inventory", text: b.Skills.Summary(skillsMax)},
 	}
+	// Build sections in order, omitting optional ones when empty.
+	sections := []section{
+		{title: "SOUL.md", text: truncateText(soul, maxEach)},
+	}
+	if t := strings.TrimSpace(identityText); t != "" {
+		sections = append(sections, section{title: "Identity", text: truncateText(t, maxEach)})
+	}
+	sections = append(sections, section{title: "AGENTS.md", text: truncateText(inst, maxEach)})
+	if t := strings.TrimSpace(staticMemoryText); t != "" {
+		sections = append(sections, section{title: "Static Memory", text: truncateText(t, maxEach)})
+	}
+	sections = append(sections, section{title: "TOOLS.md", text: truncateText(notes, maxEach)})
+	if t := strings.TrimSpace(heartbeatText); t != "" {
+		sections = append(sections, section{title: "Heartbeat", text: truncateText(t, maxEach)})
+	}
+	sections = append(sections, section{title: "Pinned Memory", text: pinnedText})
+	sections = append(sections, section{title: "Retrieved Memory", text: memText})
+	if t := strings.TrimSpace(docContextText); t != "" {
+		sections = append(sections, section{title: "Indexed File Context", text: truncateText(t, maxEach)})
+	}
+	sections = append(sections, section{title: "Skills Inventory", text: b.Skills.Summary(skillsMax)})
 
 	var out strings.Builder
 	out.WriteString("# System Prompt\n")

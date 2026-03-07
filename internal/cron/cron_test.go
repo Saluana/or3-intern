@@ -2,8 +2,10 @@ package cron
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -646,5 +648,97 @@ t.Fatalf("RunNow: %v", err)
 }
 if !found {
 t.Error("expected found=true")
+}
+}
+
+func TestCronPayloadSessionKey(t *testing.T) {
+payload := CronPayload{
+Kind:       "agent_turn",
+Message:    "hello from cron",
+SessionKey: "custom-session-123",
+Channel:    "telegram",
+To:         "user456",
+}
+
+// Serialize
+data, err := json.Marshal(payload)
+if err != nil {
+t.Fatalf("Marshal: %v", err)
+}
+
+// Deserialize
+var decoded CronPayload
+if err := json.Unmarshal(data, &decoded); err != nil {
+t.Fatalf("Unmarshal: %v", err)
+}
+
+if decoded.SessionKey != "custom-session-123" {
+t.Errorf("expected SessionKey %q, got %q", "custom-session-123", decoded.SessionKey)
+}
+if decoded.Kind != "agent_turn" {
+t.Errorf("expected Kind %q, got %q", "agent_turn", decoded.Kind)
+}
+if decoded.Message != "hello from cron" {
+t.Errorf("expected Message %q, got %q", "hello from cron", decoded.Message)
+}
+}
+
+func TestCronPayloadSessionKey_OmitEmpty(t *testing.T) {
+// SessionKey should be omitted when empty (json:"session_key,omitempty")
+payload := CronPayload{
+Kind:    "agent_turn",
+Message: "no session key",
+}
+data, err := json.Marshal(payload)
+if err != nil {
+t.Fatalf("Marshal: %v", err)
+}
+if strings.Contains(string(data), "session_key") {
+t.Errorf("expected session_key to be omitted when empty, got: %s", string(data))
+}
+}
+
+func TestCronRunnerPerJobSession(t *testing.T) {
+svc, _ := makeService(t)
+if err := svc.Start(); err != nil {
+t.Fatalf("Start: %v", err)
+}
+defer svc.Stop()
+
+// Track which session key the runner sees
+var capturedSessionKey string
+var runnerCalled bool
+svc2 := &Service{
+path: svc.path,
+runner: func(ctx context.Context, job CronJob) error {
+capturedSessionKey = job.Payload.SessionKey
+runnerCalled = true
+return nil
+},
+}
+
+// Simulate a job with per-job SessionKey
+job := CronJob{
+ID:      "per-job-session",
+Name:    "Per Job Session Test",
+Enabled: true,
+Schedule: CronSchedule{Kind: KindEvery, EveryMS: 60000},
+Payload: CronPayload{
+Kind:       "agent_turn",
+Message:    "per-job message",
+SessionKey: "per-job-session-key",
+},
+}
+
+// Directly call the runner with the job
+if err := svc2.runner(context.Background(), job); err != nil {
+t.Fatalf("runner: %v", err)
+}
+
+if !runnerCalled {
+t.Fatal("expected runner to be called")
+}
+if capturedSessionKey != "per-job-session-key" {
+t.Errorf("expected SessionKey %q, got %q", "per-job-session-key", capturedSessionKey)
 }
 }

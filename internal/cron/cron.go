@@ -30,11 +30,12 @@ type CronSchedule struct {
 }
 
 type CronPayload struct {
-	Kind string `json:"kind"` // "agent_turn"|"system_event"
-	Message string `json:"message"`
-	Deliver bool `json:"deliver"`
-	Channel string `json:"channel,omitempty"`
-	To string `json:"to,omitempty"`
+	Kind       string `json:"kind"` // "agent_turn"|"system_event"
+	Message    string `json:"message"`
+	Deliver    bool   `json:"deliver"`
+	Channel    string `json:"channel,omitempty"`
+	To         string `json:"to,omitempty"`
+	SessionKey string `json:"session_key,omitempty"` // optional per-job session key override
 }
 
 type CronJobState struct {

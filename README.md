@@ -178,3 +178,138 @@ External channels automatically namespace session keys by platform, for example:
 - `whatsapp:<chat-id>`
 
 This keeps chat history and long-term memory isolated by channel/session.
+
+## New Features
+
+### Bootstrap Files
+
+Three markdown files configure the agent's identity and persistent context:
+
+- **IDENTITY.md** – Loaded once at startup; defines who the agent is (name, role, personality traits). Injects into every system prompt.
+- **MEMORY.md** – Static knowledge the agent always has access to (facts, preferences, standing instructions). Injects into every system prompt.
+- **HEARTBEAT.md** – Autonomous task list injected only during scheduled (cron/webhook/file-watch) turns, not user-initiated chats. Useful for periodic background tasks.
+
+Configure file paths in `config.json`:
+
+```json
+{
+  "identityFile": "/path/to/IDENTITY.md",
+  "memoryFile":   "/path/to/MEMORY.md",
+  "heartbeat": { "tasksFile": "/path/to/HEARTBEAT.md" }
+}
+```
+
+### Document Index
+
+Opt-in file indexing allows the agent to retrieve relevant file excerpts as context for each query.
+
+```json
+{
+  "docIndex": {
+    "enabled": true,
+    "roots": ["/path/to/docs", "/path/to/notes"],
+    "maxFiles": 200,
+    "maxFileBytes": 65536,
+    "refreshSeconds": 300,
+    "retrieveLimit": 5
+  }
+}
+```
+
+- Files are indexed at startup and re-synced every `refreshSeconds`.
+- Retrieval uses full-text search (FTS5) to find relevant excerpts.
+- Only non-empty matches are injected into the system prompt.
+- Supported file types: `.md`, `.txt`, `.go`, `.py`, `.js`, `.ts`, `.json`, `.yaml`, `.toml`, `.sh`.
+
+### Session Scopes
+
+Link multiple session keys to a shared scope for cross-channel continuity. Sessions in the same scope share conversation history.
+
+```bash
+# Link a Telegram session and a Discord session to one scope
+or3-intern scope link telegram:12345 my-project
+or3-intern scope link discord:67890 my-project
+
+# List all sessions in a scope
+or3-intern scope list my-project
+
+# Resolve the scope for a session
+or3-intern scope resolve telegram:12345
+```
+
+### Skill Manifests
+
+Skills can include a `skill.json` manifest for rich metadata:
+
+```json
+{
+  "summary": "Does something useful",
+  "entrypoints": [
+    {
+      "name": "run",
+      "command": ["./run.sh", "--mode", "fast"],
+      "timeoutSeconds": 30,
+      "acceptsStdin": false
+    }
+  ]
+}
+```
+
+Place skills in `builtin_skills/` (bundled) or `workspace_skills/` (user-defined). Enable execution with `skills.enableExec=true`.
+
+### Triggers
+
+**Webhook server** – receives POST requests and dispatches them as agent events:
+
+```json
+{
+  "triggers": {
+    "webhook": {
+      "enabled": true,
+      "addr": ":8080",
+      "secret": "my-secret-token"
+    }
+  }
+}
+```
+
+The webhook server listens at `/webhook` (fixed path).
+
+**File watcher** – polls configured paths for new/changed files:
+
+```json
+{
+  "triggers": {
+    "fileWatch": {
+      "enabled": true,
+      "paths": ["/path/to/watch", "/another/path"],
+      "pollSeconds": 10,
+      "debounceSeconds": 2
+    }
+  }
+}
+```
+
+Both trigger types use `HEARTBEAT.md` instructions when dispatching autonomous turns.
+
+### Streaming
+
+CLI (`chat` command) supports live streamed output. The assistant's response is printed token-by-token as it arrives from the provider. No additional configuration required.
+
+### Cron Jobs with Per-Job Session Keys
+
+Scheduled jobs can target a specific session (and thus its history/memory) independently of the default session:
+
+```json
+{
+  "payload": {
+    "kind": "agent_turn",
+    "message": "Daily standup summary",
+    "session_key": "slack:standup-channel",
+    "channel": "slack",
+    "to": "standup-channel"
+  }
+}
+```
+
+When `session_key` is set on a job payload, it overrides the global `defaultSessionKey` for that job.

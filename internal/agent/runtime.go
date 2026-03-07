@@ -11,6 +11,7 @@ import (
 
 	"or3-intern/internal/artifacts"
 	"or3-intern/internal/bus"
+	"or3-intern/internal/channels"
 	"or3-intern/internal/cron"
 	"or3-intern/internal/db"
 	"or3-intern/internal/memory"
@@ -36,7 +37,8 @@ type Runtime struct {
 	MaxToolLoops     int
 	ToolPreviewBytes int
 
-	Deliver Deliverer
+	Deliver  Deliverer
+	Streamer channels.StreamingChannel
 
 	Consolidator           *memory.Consolidator
 	ConsolidationScheduler *memory.Scheduler
@@ -71,7 +73,7 @@ func (r *Runtime) Handle(ctx context.Context, ev bus.Event) error {
 	mu.Lock()
 	defer mu.Unlock()
 	switch ev.Type {
-	case bus.EventUserMessage, bus.EventCron, bus.EventSystem:
+	case bus.EventUserMessage, bus.EventCron, bus.EventSystem, bus.EventWebhook, bus.EventFileChange:
 		return r.turn(ctx, ev)
 	default:
 		return nil
@@ -95,13 +97,18 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 	if r.Builder == nil {
 		return fmt.Errorf("runtime builder not configured")
 	}
-	messages, err := r.BuildPromptSnapshot(ctx, ev.SessionKey, ev.Message)
+	isAutonomous := ev.Type == bus.EventCron || ev.Type == bus.EventWebhook || ev.Type == bus.EventFileChange
+	messages, err := r.BuildPromptSnapshotWithOptions(ctx, BuildOptions{
+		SessionKey:  ev.SessionKey,
+		UserMessage: ev.Message,
+		Autonomous:  isAutonomous,
+	})
 	if err != nil {
 		return err
 	}
 
 	replyTarget := deliveryTarget(ev)
-	finalText, err := r.executeConversation(ctx, ev.SessionKey, messages, r.Tools, ev.Channel, replyTarget)
+	finalText, streamed, err := r.executeConversation(ctx, ev.SessionKey, messages, r.Tools, ev.Channel, replyTarget)
 	if err != nil {
 		return err
 	}
@@ -113,8 +120,8 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 		log.Printf("append assistant(final) failed: %v", err)
 	}
 
-	// deliver
-	if r.Deliver != nil {
+	// deliver only when the response was not already streamed to the channel
+	if !streamed && r.Deliver != nil {
 		if err := r.Deliver.Deliver(ctx, ev.Channel, replyTarget, finalText); err != nil {
 			log.Printf("deliver failed: %v", err)
 		}
@@ -152,6 +159,22 @@ func (r *Runtime) BuildPromptSnapshot(ctx context.Context, sessionKey string, us
 	return messages, nil
 }
 
+func (r *Runtime) BuildPromptSnapshotWithOptions(ctx context.Context, opts BuildOptions) ([]providers.ChatMessage, error) {
+	if r.Builder == nil {
+		return nil, fmt.Errorf("runtime builder not configured")
+	}
+	pp, _, err := r.Builder.BuildWithOptions(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	messages := append([]providers.ChatMessage{}, pp.System...)
+	messages = append(messages, pp.History...)
+	if len(pp.History) == 0 || pp.History[len(pp.History)-1].Role != "user" {
+		messages = append(messages, providers.ChatMessage{Role: "user", Content: opts.UserMessage})
+	}
+	return messages, nil
+}
+
 func (r *Runtime) RunBackground(ctx context.Context, input BackgroundRunInput) (BackgroundRunResult, error) {
 	mu := r.lockFor(input.SessionKey)
 	mu.Lock()
@@ -170,7 +193,7 @@ func (r *Runtime) RunBackground(ctx context.Context, input BackgroundRunInput) (
 	if reg == nil {
 		reg = r.Tools
 	}
-	finalText, err := r.executeConversation(ctx, input.SessionKey, append([]providers.ChatMessage{}, input.PromptSnapshot...), reg, input.Channel, input.ReplyTo)
+	finalText, _, err := r.executeConversation(ctx, input.SessionKey, append([]providers.ChatMessage{}, input.PromptSnapshot...), reg, input.Channel, input.ReplyTo)
 	if err != nil {
 		return BackgroundRunResult{}, err
 	}
@@ -234,9 +257,15 @@ func contentToString(v any) string {
 	return string(b)
 }
 
-func (r *Runtime) executeConversation(ctx context.Context, sessionKey string, messages []providers.ChatMessage, reg *tools.Registry, channel string, replyTo string) (string, error) {
+func (r *Runtime) executeConversation(ctx context.Context, sessionKey string, messages []providers.ChatMessage, reg *tools.Registry, channel string, replyTo string) (string, bool, error) {
 	if reg == nil {
 		reg = tools.NewRegistry()
+	}
+	scopeKey := sessionKey
+	if r.DB != nil && strings.TrimSpace(sessionKey) != "" {
+		if resolved, err := r.DB.ResolveScopeKey(ctx, sessionKey); err == nil && strings.TrimSpace(resolved) != "" {
+			scopeKey = resolved
+		}
 	}
 	maxLoops := r.MaxToolLoops
 	if maxLoops <= 0 {
@@ -249,26 +278,46 @@ func (r *Runtime) executeConversation(ctx context.Context, sessionKey string, me
 			Tools:       toToolDefs(reg),
 			Temperature: r.Temperature,
 		}
-		resp, err := r.Provider.Chat(ctx, req)
+
+		var resp providers.ChatCompletionResponse
+		var err error
+		var bufferedDeltas []string
+		if r.Streamer != nil {
+			resp, err = r.Provider.ChatStream(ctx, req, func(text string) {
+				bufferedDeltas = append(bufferedDeltas, text)
+			})
+		} else {
+			resp, err = r.Provider.Chat(ctx, req)
+		}
 		if err != nil {
-			return "", err
+			return "", false, err
 		}
 		if len(resp.Choices) == 0 {
-			return "", fmt.Errorf("no choices")
+			return "", false, fmt.Errorf("no choices")
 		}
 		msg := resp.Choices[0].Message
 		if len(msg.ToolCalls) == 0 {
 			finalText := strings.TrimSpace(contentToString(msg.Content))
 			messages = append(messages, providers.ChatMessage{Role: "assistant", Content: finalText})
-			return finalText, nil
+			if r.Streamer != nil && len(bufferedDeltas) > 0 {
+				if sw, err := r.Streamer.BeginStream(ctx, replyTo, map[string]any{"channel": channel}); err == nil {
+					for _, delta := range bufferedDeltas {
+						_ = sw.WriteDelta(ctx, delta)
+					}
+					_ = sw.Close(ctx, finalText)
+					return finalText, true, nil
+				}
+			}
+			return finalText, false, nil
 		}
+
 		messages = append(messages, providers.ChatMessage{Role: "assistant", Content: msg.Content, ToolCalls: msg.ToolCalls})
 		if _, err := r.DB.AppendMessage(ctx, sessionKey, "assistant", contentToString(msg.Content), map[string]any{"tool_calls": msg.ToolCalls}); err != nil {
 			log.Printf("append assistant(tool_calls) failed: %v", err)
 		}
 
 		for _, tc := range msg.ToolCalls {
-			toolCtx := tools.ContextWithSession(ctx, sessionKey)
+			toolCtx := tools.ContextWithSession(ctx, scopeKey)
 			toolCtx = tools.ContextWithDelivery(toolCtx, channel, replyTo)
 			out, err := reg.Execute(toolCtx, tc.Function.Name, tc.Function.Arguments)
 			if err != nil {
@@ -290,7 +339,7 @@ func (r *Runtime) executeConversation(ctx context.Context, sessionKey string, me
 			messages = append(messages, providers.ChatMessage{Role: "tool", ToolCallID: tc.ID, Content: sendOut})
 		}
 	}
-	return "(no response)", nil
+	return "(no response)", false, nil
 }
 
 func (r *Runtime) boundTextResult(ctx context.Context, sessionKey string, text string) (stored string, preview string, artifactID string) {
@@ -372,12 +421,17 @@ func toToolDefs(reg *tools.Registry) []providers.ToolDef {
 }
 
 // Cron runner helper: turns a job into a bus event message
-func CronRunner(b *bus.Bus, sessionKey string) cron.Runner {
+func CronRunner(b *bus.Bus, defaultSessionKey string) cron.Runner {
 	return func(ctx context.Context, job cron.CronJob) error {
 		_ = ctx
 		msg := job.Payload.Message
 		if strings.TrimSpace(msg) == "" {
 			msg = "cron job: " + job.Name
+		}
+		// prefer per-job session key over the default
+		sessionKey := job.Payload.SessionKey
+		if strings.TrimSpace(sessionKey) == "" {
+			sessionKey = defaultSessionKey
 		}
 		ev := bus.Event{Type: bus.EventCron, SessionKey: sessionKey, Channel: job.Payload.Channel, From: job.Payload.To, Message: msg, Meta: map[string]any{"job_id": job.ID}}
 		if ok := b.Publish(ev); !ok {

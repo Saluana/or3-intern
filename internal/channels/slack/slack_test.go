@@ -63,7 +63,7 @@ func TestChannel_StartReceivesEventAndAcks(t *testing.T) {
 	defer apiServer.Close()
 
 	b := bus.New(1)
-	ch := &Channel{Config: config.SlackChannelConfig{AppToken: "app", BotToken: "bot", APIBase: apiServer.URL, RequireMention: true}}
+	ch := &Channel{Config: config.SlackChannelConfig{AppToken: "app", BotToken: "bot", APIBase: apiServer.URL, RequireMention: true, OpenAccess: true}}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := ch.Start(ctx, b); err != nil {
@@ -100,7 +100,7 @@ func TestChannel_DeliverPostsMessage(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	}))
 	defer apiServer.Close()
-	ch := &Channel{Config: config.SlackChannelConfig{BotToken: "bot", APIBase: apiServer.URL, DefaultChannelID: "C1"}}
+	ch := &Channel{Config: config.SlackChannelConfig{BotToken: "bot", APIBase: apiServer.URL, DefaultChannelID: "C1", OpenAccess: true}}
 	if err := ch.Deliver(context.Background(), "", "hello", map[string]any{"thread_ts": "123.45"}); err != nil {
 		t.Fatalf("Deliver: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestChannel_StartReceivesFileShare(t *testing.T) {
 
 	b := bus.New(1)
 	ch := &Channel{
-		Config:        config.SlackChannelConfig{AppToken: "app", BotToken: "bot", APIBase: apiServer.URL, RequireMention: false},
+		Config:        config.SlackChannelConfig{AppToken: "app", BotToken: "bot", APIBase: apiServer.URL, RequireMention: false, OpenAccess: true},
 		Artifacts:     store,
 		MaxMediaBytes: 1024,
 	}
@@ -252,7 +252,7 @@ func TestChannel_StartReceivesFileShareWhenMentionRequired(t *testing.T) {
 
 	b := bus.New(1)
 	ch := &Channel{
-		Config:        config.SlackChannelConfig{AppToken: "app", BotToken: "bot", APIBase: apiServer.URL, RequireMention: true},
+		Config:        config.SlackChannelConfig{AppToken: "app", BotToken: "bot", APIBase: apiServer.URL, RequireMention: true, OpenAccess: true},
 		Artifacts:     store,
 		MaxMediaBytes: 1024,
 	}
@@ -303,7 +303,7 @@ func TestChannel_DeliverUploadsMedia(t *testing.T) {
 	}))
 	defer apiServer.Close()
 
-	ch := &Channel{Config: config.SlackChannelConfig{BotToken: "bot", APIBase: apiServer.URL, DefaultChannelID: "C1"}, MaxMediaBytes: 1024}
+	ch := &Channel{Config: config.SlackChannelConfig{BotToken: "bot", APIBase: apiServer.URL, DefaultChannelID: "C1", OpenAccess: true}, MaxMediaBytes: 1024}
 	if err := ch.Deliver(context.Background(), "", "hello", map[string]any{"media_paths": []string{mediaPath}, "thread_ts": "123.45"}); err != nil {
 		t.Fatalf("Deliver: %v", err)
 	}

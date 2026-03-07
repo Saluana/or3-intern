@@ -369,7 +369,7 @@ func (c *Channel) attachFilePart(writer *multipart.Writer, index int, mediaPath 
 
 func (c *Channel) allowedUser(user string) bool {
 	if len(c.Config.AllowedUserIDs) == 0 {
-		return true
+		return c.Config.OpenAccess
 	}
 	for _, allowed := range c.Config.AllowedUserIDs {
 		if strings.TrimSpace(allowed) == user {

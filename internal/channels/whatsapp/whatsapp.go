@@ -171,7 +171,7 @@ func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
 
 func (c *Channel) allowedFrom(from string) bool {
 	if len(c.Config.AllowedFrom) == 0 {
-		return true
+		return c.Config.OpenAccess
 	}
 	for _, allowed := range c.Config.AllowedFrom {
 		if strings.TrimSpace(allowed) == strings.TrimSpace(from) {

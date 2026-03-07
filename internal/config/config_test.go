@@ -109,6 +109,51 @@ func TestDefault_Values(t *testing.T) {
 	if cfg.Subagents.TaskTimeoutSeconds != 300 {
 		t.Errorf("expected Subagents.TaskTimeoutSeconds=300, got %d", cfg.Subagents.TaskTimeoutSeconds)
 	}
+	if cfg.Channels.Telegram.OpenAccess || cfg.Channels.Slack.OpenAccess || cfg.Channels.Discord.OpenAccess || cfg.Channels.WhatsApp.OpenAccess {
+		t.Error("expected external channels to default to closed access")
+	}
+}
+
+func TestLoad_EnabledExternalChannelRequiresAllowlistOrOpenAccess(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	cfg := Default()
+	cfg.Channels.Telegram.Enabled = true
+
+	b, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error when telegram is enabled without allowlist or openAccess")
+	}
+}
+
+func TestLoad_EnabledExternalChannelAllowsExplicitOpenAccess(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	cfg := Default()
+	cfg.Channels.Telegram.Enabled = true
+	cfg.Channels.Telegram.OpenAccess = true
+
+	b, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !loaded.Channels.Telegram.OpenAccess {
+		t.Fatal("expected telegram openAccess to remain true")
+	}
 }
 
 func TestLoad_FileNotExist_CreatesDefault(t *testing.T) {

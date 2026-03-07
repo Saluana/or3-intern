@@ -41,7 +41,7 @@ func TestChannel_StartPublishesInboundMessage(t *testing.T) {
 	}))
 	defer server.Close()
 	b := bus.New(1)
-	ch := &Channel{Config: config.WhatsAppBridgeConfig{BridgeURL: "ws" + server.URL[len("http"):]}}
+	ch := &Channel{Config: config.WhatsAppBridgeConfig{BridgeURL: "ws" + server.URL[len("http"):], OpenAccess: true}}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := ch.Start(ctx, b); err != nil {
@@ -74,7 +74,7 @@ func TestChannel_DeliverWritesSendCommand(t *testing.T) {
 		got <- msg
 	}))
 	defer server.Close()
-	ch := &Channel{Config: config.WhatsAppBridgeConfig{BridgeURL: "ws" + server.URL[len("http"):], DefaultTo: "123"}}
+	ch := &Channel{Config: config.WhatsAppBridgeConfig{BridgeURL: "ws" + server.URL[len("http"):], DefaultTo: "123", OpenAccess: true}}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := ch.Start(ctx, bus.New(1)); err != nil {
@@ -124,7 +124,7 @@ func TestChannel_StartPublishesInboundAttachmentMessage(t *testing.T) {
 	defer server.Close()
 	b := bus.New(1)
 	ch := &Channel{
-		Config:        config.WhatsAppBridgeConfig{BridgeURL: "ws" + server.URL[len("http"):]},
+		Config:        config.WhatsAppBridgeConfig{BridgeURL: "ws" + server.URL[len("http"):], OpenAccess: true},
 		Artifacts:     store,
 		MaxMediaBytes: 1024,
 	}
@@ -170,7 +170,7 @@ func TestChannel_DeliverWritesSendCommandWithAttachments(t *testing.T) {
 		got <- msg
 	}))
 	defer server.Close()
-	ch := &Channel{Config: config.WhatsAppBridgeConfig{BridgeURL: "ws" + server.URL[len("http"):], DefaultTo: "123"}, MaxMediaBytes: 1024}
+	ch := &Channel{Config: config.WhatsAppBridgeConfig{BridgeURL: "ws" + server.URL[len("http"):], DefaultTo: "123", OpenAccess: true}, MaxMediaBytes: 1024}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := ch.Start(ctx, bus.New(1)); err != nil {
@@ -232,7 +232,7 @@ func TestChannel_StartRejectsPathOnlyInboundAttachment(t *testing.T) {
 	defer server.Close()
 	b := bus.New(1)
 	ch := &Channel{
-		Config:        config.WhatsAppBridgeConfig{BridgeURL: "ws" + server.URL[len("http"):]},
+		Config:        config.WhatsAppBridgeConfig{BridgeURL: "ws" + server.URL[len("http"):], OpenAccess: true},
 		Artifacts:     store,
 		MaxMediaBytes: 1024,
 	}

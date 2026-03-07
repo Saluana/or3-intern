@@ -48,7 +48,7 @@ func TestChannel_FetchUpdatesPublishesMessage(t *testing.T) {
 	}))
 	defer server.Close()
 
-	ch := &Channel{Config: config.TelegramChannelConfig{Token: "token", APIBase: server.URL, PollSeconds: 1}}
+	ch := &Channel{Config: config.TelegramChannelConfig{Token: "token", APIBase: server.URL, PollSeconds: 1, OpenAccess: true}}
 	b := bus.New(1)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -80,7 +80,7 @@ func TestChannel_DeliverSendsMessage(t *testing.T) {
 	}))
 	defer server.Close()
 
-	ch := &Channel{Config: config.TelegramChannelConfig{Token: "token", APIBase: server.URL, DefaultChatID: "123"}}
+	ch := &Channel{Config: config.TelegramChannelConfig{Token: "token", APIBase: server.URL, DefaultChatID: "123", OpenAccess: true}}
 	if err := ch.Deliver(context.Background(), "", "hello", map[string]any{"reply_to_message_id": int64(44)}); err != nil {
 		t.Fatalf("Deliver: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestChannel_FetchUpdatesPublishesPhotoAttachment(t *testing.T) {
 	defer server.Close()
 
 	ch := &Channel{
-		Config:        config.TelegramChannelConfig{Token: "token", APIBase: server.URL, PollSeconds: 1},
+		Config:        config.TelegramChannelConfig{Token: "token", APIBase: server.URL, PollSeconds: 1, OpenAccess: true},
 		Artifacts:     store,
 		MaxMediaBytes: 1024,
 	}
@@ -175,7 +175,7 @@ func TestChannel_DeliverSendsPhotoUpload(t *testing.T) {
 	}))
 	defer server.Close()
 
-	ch := &Channel{Config: config.TelegramChannelConfig{Token: "token", APIBase: server.URL, DefaultChatID: "123"}, MaxMediaBytes: 1024}
+	ch := &Channel{Config: config.TelegramChannelConfig{Token: "token", APIBase: server.URL, DefaultChatID: "123", OpenAccess: true}, MaxMediaBytes: 1024}
 	if err := ch.Deliver(context.Background(), "", "hello", map[string]any{"media_paths": []string{mediaPath}}); err != nil {
 		t.Fatalf("Deliver: %v", err)
 	}

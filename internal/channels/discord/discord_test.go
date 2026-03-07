@@ -52,7 +52,7 @@ func TestChannel_StartReceivesMessage(t *testing.T) {
 	}))
 	defer wsServer.Close()
 	b := bus.New(1)
-	ch := &Channel{Config: config.DiscordChannelConfig{Token: "token", GatewayURL: "ws" + strings.TrimPrefix(wsServer.URL, "http"), RequireMention: true}}
+	ch := &Channel{Config: config.DiscordChannelConfig{Token: "token", GatewayURL: "ws" + strings.TrimPrefix(wsServer.URL, "http"), RequireMention: true, OpenAccess: true}}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := ch.Start(ctx, b); err != nil {
@@ -87,7 +87,7 @@ func TestChannel_DeliverPostsMessage(t *testing.T) {
 		_, _ = w.Write([]byte(`{"id":"1"}`))
 	}))
 	defer apiServer.Close()
-	ch := &Channel{Config: config.DiscordChannelConfig{Token: "token", APIBase: apiServer.URL, DefaultChannelID: "C1"}}
+	ch := &Channel{Config: config.DiscordChannelConfig{Token: "token", APIBase: apiServer.URL, DefaultChannelID: "C1", OpenAccess: true}}
 	if err := ch.Deliver(context.Background(), "", "hello", map[string]any{"message_reference": "m1"}); err != nil {
 		t.Fatalf("Deliver: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestChannel_StartReceivesAttachmentMessage(t *testing.T) {
 
 	b := bus.New(1)
 	ch := &Channel{
-		Config:        config.DiscordChannelConfig{Token: "token", GatewayURL: "ws" + strings.TrimPrefix(wsServer.URL, "http"), RequireMention: false},
+		Config:        config.DiscordChannelConfig{Token: "token", GatewayURL: "ws" + strings.TrimPrefix(wsServer.URL, "http"), RequireMention: false, OpenAccess: true},
 		Artifacts:     store,
 		MaxMediaBytes: 1024,
 	}
@@ -182,7 +182,7 @@ func TestChannel_DeliverPostsMultipartWithMedia(t *testing.T) {
 	}))
 	defer apiServer.Close()
 
-	ch := &Channel{Config: config.DiscordChannelConfig{Token: "token", APIBase: apiServer.URL, DefaultChannelID: "C1"}, MaxMediaBytes: 1024}
+	ch := &Channel{Config: config.DiscordChannelConfig{Token: "token", APIBase: apiServer.URL, DefaultChannelID: "C1", OpenAccess: true}, MaxMediaBytes: 1024}
 	if err := ch.Deliver(context.Background(), "", "hello", map[string]any{"media_paths": []string{mediaPath}}); err != nil {
 		t.Fatalf("Deliver: %v", err)
 	}

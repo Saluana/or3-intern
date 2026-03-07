@@ -168,7 +168,7 @@ func (c *Channel) fetchUpdates(ctx context.Context, eventBus *bus.Bus) error {
 
 func (c *Channel) allowedChat(chatID string) bool {
 	if len(c.Config.AllowedChatIDs) == 0 {
-		return true
+		return c.Config.OpenAccess
 	}
 	for _, allowed := range c.Config.AllowedChatIDs {
 		if strings.TrimSpace(allowed) == chatID {

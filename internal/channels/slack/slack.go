@@ -386,7 +386,7 @@ func firstNonEmpty(values ...string) string {
 
 func (c *Channel) allowedUser(user string) bool {
 	if len(c.Config.AllowedUserIDs) == 0 {
-		return true
+		return c.Config.OpenAccess
 	}
 	for _, allowed := range c.Config.AllowedUserIDs {
 		if strings.TrimSpace(allowed) == user {

@@ -89,6 +89,7 @@ type SubagentsConfig struct {
 
 type TelegramChannelConfig struct {
 	Enabled        bool     `json:"enabled"`
+	OpenAccess     bool     `json:"openAccess"`
 	Token          string   `json:"token"`
 	APIBase        string   `json:"apiBase"`
 	PollSeconds    int      `json:"pollSeconds"`
@@ -98,6 +99,7 @@ type TelegramChannelConfig struct {
 
 type SlackChannelConfig struct {
 	Enabled          bool     `json:"enabled"`
+	OpenAccess       bool     `json:"openAccess"`
 	AppToken         string   `json:"appToken"`
 	BotToken         string   `json:"botToken"`
 	APIBase          string   `json:"apiBase"`
@@ -109,6 +111,7 @@ type SlackChannelConfig struct {
 
 type DiscordChannelConfig struct {
 	Enabled          bool     `json:"enabled"`
+	OpenAccess       bool     `json:"openAccess"`
 	Token            string   `json:"token"`
 	APIBase          string   `json:"apiBase"`
 	GatewayURL       string   `json:"gatewayUrl"`
@@ -119,6 +122,7 @@ type DiscordChannelConfig struct {
 
 type WhatsAppBridgeConfig struct {
 	Enabled     bool     `json:"enabled"`
+	OpenAccess  bool     `json:"openAccess"`
 	BridgeURL   string   `json:"bridgeUrl"`
 	BridgeToken string   `json:"bridgeToken"`
 	DefaultTo   string   `json:"defaultTo"`
@@ -456,10 +460,38 @@ func Load(path string) (Config, error) {
 	if cfg.Triggers.FileWatch.DebounceSeconds <= 0 {
 		cfg.Triggers.FileWatch.DebounceSeconds = 2
 	}
+	if err := validateChannelAccess(cfg); err != nil {
+		return cfg, err
+	}
 	return cfg, nil
 }
 
 func mustJSON(v any) []byte {
 	b, _ := json.MarshalIndent(v, "", "  ")
 	return b
+}
+
+func validateChannelAccess(cfg Config) error {
+	if cfg.Channels.Telegram.Enabled && !cfg.Channels.Telegram.OpenAccess && !hasNonEmpty(cfg.Channels.Telegram.AllowedChatIDs) {
+		return errors.New("telegram enabled: set channels.telegram.allowedChatIds or channels.telegram.openAccess=true")
+	}
+	if cfg.Channels.Slack.Enabled && !cfg.Channels.Slack.OpenAccess && !hasNonEmpty(cfg.Channels.Slack.AllowedUserIDs) {
+		return errors.New("slack enabled: set channels.slack.allowedUserIds or channels.slack.openAccess=true")
+	}
+	if cfg.Channels.Discord.Enabled && !cfg.Channels.Discord.OpenAccess && !hasNonEmpty(cfg.Channels.Discord.AllowedUserIDs) {
+		return errors.New("discord enabled: set channels.discord.allowedUserIds or channels.discord.openAccess=true")
+	}
+	if cfg.Channels.WhatsApp.Enabled && !cfg.Channels.WhatsApp.OpenAccess && !hasNonEmpty(cfg.Channels.WhatsApp.AllowedFrom) {
+		return errors.New("whatsApp enabled: set channels.whatsApp.allowedFrom or channels.whatsApp.openAccess=true")
+	}
+	return nil
+}
+
+func hasNonEmpty(values []string) bool {
+	for _, value := range values {
+		if value != "" {
+			return true
+		}
+	}
+	return false
 }

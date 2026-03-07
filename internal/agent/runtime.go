@@ -71,7 +71,7 @@ func (r *Runtime) Handle(ctx context.Context, ev bus.Event) error {
 	mu.Lock()
 	defer mu.Unlock()
 	switch ev.Type {
-	case bus.EventUserMessage, bus.EventCron, bus.EventSystem:
+	case bus.EventUserMessage, bus.EventCron, bus.EventSystem, bus.EventWebhook, bus.EventFileChange:
 		return r.turn(ctx, ev)
 	default:
 		return nil
@@ -95,7 +95,12 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 	if r.Builder == nil {
 		return fmt.Errorf("runtime builder not configured")
 	}
-	messages, err := r.BuildPromptSnapshot(ctx, ev.SessionKey, ev.Message)
+	isAutonomous := ev.Type == bus.EventCron || ev.Type == bus.EventWebhook || ev.Type == bus.EventFileChange
+	messages, err := r.BuildPromptSnapshotWithOptions(ctx, BuildOptions{
+		SessionKey:  ev.SessionKey,
+		UserMessage: ev.Message,
+		Autonomous:  isAutonomous,
+	})
 	if err != nil {
 		return err
 	}
@@ -148,6 +153,22 @@ func (r *Runtime) BuildPromptSnapshot(ctx context.Context, sessionKey string, us
 	messages = append(messages, pp.History...)
 	if len(pp.History) == 0 || pp.History[len(pp.History)-1].Role != "user" {
 		messages = append(messages, providers.ChatMessage{Role: "user", Content: userMessage})
+	}
+	return messages, nil
+}
+
+func (r *Runtime) BuildPromptSnapshotWithOptions(ctx context.Context, opts BuildOptions) ([]providers.ChatMessage, error) {
+	if r.Builder == nil {
+		return nil, fmt.Errorf("runtime builder not configured")
+	}
+	pp, _, err := r.Builder.BuildWithOptions(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	messages := append([]providers.ChatMessage{}, pp.System...)
+	messages = append(messages, pp.History...)
+	if len(pp.History) == 0 || pp.History[len(pp.History)-1].Role != "user" {
+		messages = append(messages, providers.ChatMessage{Role: "user", Content: opts.UserMessage})
 	}
 	return messages, nil
 }

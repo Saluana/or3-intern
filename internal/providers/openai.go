@@ -1,12 +1,14 @@
 package providers
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -43,8 +45,9 @@ type ToolFunc struct {
 }
 
 type ToolCall struct {
-	ID string `json:"id"`
-	Type string `json:"type"`
+	ID    string `json:"id"`
+	Index int    `json:"index"`
+	Type  string `json:"type"`
 	Function struct{
 		Name string `json:"name"`
 		Arguments string `json:"arguments"`
@@ -88,6 +91,147 @@ func (c *Client) Chat(ctx context.Context, req ChatCompletionRequest) (ChatCompl
 		return out, err
 	}
 	return out, nil
+}
+
+// ChatCompletionStreamRequest is sent when stream=true.
+type ChatCompletionStreamRequest struct {
+	Model       string        `json:"model"`
+	Messages    []ChatMessage `json:"messages"`
+	Tools       []ToolDef     `json:"tools,omitempty"`
+	ToolChoice  any           `json:"tool_choice,omitempty"`
+	Temperature float64       `json:"temperature,omitempty"`
+	Stream      bool          `json:"stream"`
+}
+
+type ChatStreamDelta struct {
+	Role      string     `json:"role"`
+	Content   string     `json:"content"`
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+}
+
+type ChatStreamChoice struct {
+	Index        int             `json:"index"`
+	Delta        ChatStreamDelta `json:"delta"`
+	FinishReason string          `json:"finish_reason"`
+}
+
+type ChatStreamChunk struct {
+	ID      string             `json:"id"`
+	Choices []ChatStreamChoice `json:"choices"`
+}
+
+// ChatStream sends the request with stream:true, calls onDelta for each text
+// delta, and returns the fully-accumulated ChatCompletionResponse.
+func (c *Client) ChatStream(ctx context.Context, req ChatCompletionRequest, onDelta func(text string)) (ChatCompletionResponse, error) {
+	streamReq := ChatCompletionStreamRequest{
+		Model:       req.Model,
+		Messages:    req.Messages,
+		Tools:       req.Tools,
+		ToolChoice:  req.ToolChoice,
+		Temperature: req.Temperature,
+		Stream:      true,
+	}
+	b, _ := json.Marshal(streamReq)
+	r, err := http.NewRequestWithContext(ctx, "POST", c.APIBase+"/chat/completions", bytes.NewReader(b))
+	if err != nil {
+		return ChatCompletionResponse{}, err
+	}
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Accept", "text/event-stream")
+	if c.APIKey != "" {
+		r.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
+
+	resp, err := c.HTTP.Do(r)
+	if err != nil {
+		return ChatCompletionResponse{}, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		return ChatCompletionResponse{}, fmt.Errorf("provider error %s: %s", resp.Status, string(body))
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	var contentBuilder strings.Builder
+	var finalToolCalls []ToolCall
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			break
+		}
+		var chunk ChatStreamChunk
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			continue
+		}
+		if len(chunk.Choices) == 0 {
+			continue
+		}
+		delta := chunk.Choices[0].Delta
+		if delta.Content != "" {
+			contentBuilder.WriteString(delta.Content)
+			if onDelta != nil {
+				onDelta(delta.Content)
+			}
+		}
+		if len(delta.ToolCalls) > 0 {
+			finalToolCalls = mergeStreamToolCalls(finalToolCalls, delta.ToolCalls)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return ChatCompletionResponse{}, err
+	}
+
+	out := ChatCompletionResponse{
+		Choices: []struct {
+			Message struct {
+				Role      string     `json:"role"`
+				Content   any        `json:"content"`
+				ToolCalls []ToolCall `json:"tool_calls"`
+			} `json:"message"`
+		}{
+			{
+				Message: struct {
+					Role      string     `json:"role"`
+					Content   any        `json:"content"`
+					ToolCalls []ToolCall `json:"tool_calls"`
+				}{
+					Role:      "assistant",
+					Content:   contentBuilder.String(),
+					ToolCalls: finalToolCalls,
+				},
+			},
+		},
+	}
+	return out, nil
+}
+
+// mergeStreamToolCalls accumulates tool-call deltas arriving over SSE.
+// OpenAI streaming sends each piece as {index, partial args}; we expand the
+// slice to the required index and concatenate name/arguments incrementally.
+func mergeStreamToolCalls(existing []ToolCall, delta []ToolCall) []ToolCall {
+	for _, d := range delta {
+		idx := d.Index
+		for len(existing) <= idx {
+			existing = append(existing, ToolCall{})
+		}
+		existing[idx].Function.Arguments += d.Function.Arguments
+		existing[idx].Function.Name += d.Function.Name
+		if d.ID != "" {
+			existing[idx].ID = d.ID
+		}
+		if d.Type != "" {
+			existing[idx].Type = d.Type
+		}
+		existing[idx].Index = idx
+	}
+	return existing
 }
 
 type EmbeddingRequest struct {

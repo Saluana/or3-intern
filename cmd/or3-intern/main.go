@@ -215,6 +215,7 @@ func main() {
 
 	switch cmd {
 	case "chat":
+		rt.Streamer = del
 		_ = channelManager.Start(ctx, "cli", b)
 		runWorkers(ctx, b, rt, cfg.WorkerCount)
 		ch := &cli.Channel{Bus: b, SessionKey: cfg.DefaultSessionKey}

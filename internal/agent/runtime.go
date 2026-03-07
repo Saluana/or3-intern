@@ -11,6 +11,7 @@ import (
 
 	"or3-intern/internal/artifacts"
 	"or3-intern/internal/bus"
+	"or3-intern/internal/channels"
 	"or3-intern/internal/cron"
 	"or3-intern/internal/db"
 	"or3-intern/internal/memory"
@@ -36,7 +37,8 @@ type Runtime struct {
 	MaxToolLoops     int
 	ToolPreviewBytes int
 
-	Deliver Deliverer
+	Deliver  Deliverer
+	Streamer channels.StreamingChannel
 
 	Consolidator           *memory.Consolidator
 	ConsolidationScheduler *memory.Scheduler
@@ -106,7 +108,7 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 	}
 
 	replyTarget := deliveryTarget(ev)
-	finalText, err := r.executeConversation(ctx, ev.SessionKey, messages, r.Tools, ev.Channel, replyTarget)
+	finalText, streamed, err := r.executeConversation(ctx, ev.SessionKey, messages, r.Tools, ev.Channel, replyTarget)
 	if err != nil {
 		return err
 	}
@@ -118,8 +120,8 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 		log.Printf("append assistant(final) failed: %v", err)
 	}
 
-	// deliver
-	if r.Deliver != nil {
+	// deliver only when the response was not already streamed to the channel
+	if !streamed && r.Deliver != nil {
 		if err := r.Deliver.Deliver(ctx, ev.Channel, replyTarget, finalText); err != nil {
 			log.Printf("deliver failed: %v", err)
 		}
@@ -191,7 +193,7 @@ func (r *Runtime) RunBackground(ctx context.Context, input BackgroundRunInput) (
 	if reg == nil {
 		reg = r.Tools
 	}
-	finalText, err := r.executeConversation(ctx, input.SessionKey, append([]providers.ChatMessage{}, input.PromptSnapshot...), reg, input.Channel, input.ReplyTo)
+	finalText, _, err := r.executeConversation(ctx, input.SessionKey, append([]providers.ChatMessage{}, input.PromptSnapshot...), reg, input.Channel, input.ReplyTo)
 	if err != nil {
 		return BackgroundRunResult{}, err
 	}
@@ -255,7 +257,7 @@ func contentToString(v any) string {
 	return string(b)
 }
 
-func (r *Runtime) executeConversation(ctx context.Context, sessionKey string, messages []providers.ChatMessage, reg *tools.Registry, channel string, replyTo string) (string, error) {
+func (r *Runtime) executeConversation(ctx context.Context, sessionKey string, messages []providers.ChatMessage, reg *tools.Registry, channel string, replyTo string) (string, bool, error) {
 	if reg == nil {
 		reg = tools.NewRegistry()
 	}
@@ -270,19 +272,52 @@ func (r *Runtime) executeConversation(ctx context.Context, sessionKey string, me
 			Tools:       toToolDefs(reg),
 			Temperature: r.Temperature,
 		}
-		resp, err := r.Provider.Chat(ctx, req)
+
+		// Begin a stream for this turn if a streamer is configured.
+		var sw channels.StreamWriter
+		var onDelta func(string)
+		if r.Streamer != nil {
+			if writer, err := r.Streamer.BeginStream(ctx, replyTo, map[string]any{"channel": channel}); err == nil {
+				sw = writer
+				onDelta = func(text string) { _ = sw.WriteDelta(ctx, text) }
+			}
+		}
+
+		var resp providers.ChatCompletionResponse
+		var err error
+		if onDelta != nil {
+			resp, err = r.Provider.ChatStream(ctx, req, onDelta)
+		} else {
+			resp, err = r.Provider.Chat(ctx, req)
+		}
 		if err != nil {
-			return "", err
+			if sw != nil {
+				_ = sw.Abort(ctx)
+			}
+			return "", false, err
 		}
 		if len(resp.Choices) == 0 {
-			return "", fmt.Errorf("no choices")
+			if sw != nil {
+				_ = sw.Abort(ctx)
+			}
+			return "", false, fmt.Errorf("no choices")
 		}
 		msg := resp.Choices[0].Message
 		if len(msg.ToolCalls) == 0 {
 			finalText := strings.TrimSpace(contentToString(msg.Content))
 			messages = append(messages, providers.ChatMessage{Role: "assistant", Content: finalText})
-			return finalText, nil
+			if sw != nil {
+				_ = sw.Close(ctx, finalText)
+				return finalText, true, nil
+			}
+			return finalText, false, nil
 		}
+
+		// This turn has tool calls — abort any in-progress stream.
+		if sw != nil {
+			_ = sw.Abort(ctx)
+		}
+
 		messages = append(messages, providers.ChatMessage{Role: "assistant", Content: msg.Content, ToolCalls: msg.ToolCalls})
 		if _, err := r.DB.AppendMessage(ctx, sessionKey, "assistant", contentToString(msg.Content), map[string]any{"tool_calls": msg.ToolCalls}); err != nil {
 			log.Printf("append assistant(tool_calls) failed: %v", err)
@@ -311,7 +346,7 @@ func (r *Runtime) executeConversation(ctx context.Context, sessionKey string, me
 			messages = append(messages, providers.ChatMessage{Role: "tool", ToolCallID: tc.ID, Content: sendOut})
 		}
 	}
-	return "(no response)", nil
+	return "(no response)", false, nil
 }
 
 func (r *Runtime) boundTextResult(ctx context.Context, sessionKey string, text string) (stored string, preview string, artifactID string) {

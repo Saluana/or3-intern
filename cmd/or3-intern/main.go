@@ -24,6 +24,7 @@ import (
 	"or3-intern/internal/db"
 	"or3-intern/internal/memory"
 	"or3-intern/internal/providers"
+	"or3-intern/internal/scope"
 	"or3-intern/internal/skills"
 	"or3-intern/internal/tools"
 	"or3-intern/internal/triggers"
@@ -139,26 +140,26 @@ func main() {
 		}
 		docRetriever = &memory.DocRetriever{DB: d}
 		// Initial sync in background (don't block startup)
-		go func() {
-			syncCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-			defer cancel()
-			if err := docIndexer.SyncRoots(syncCtx, cfg.DefaultSessionKey); err != nil {
-				log.Printf("doc index sync failed: %v", err)
-			}
-		}()
-	}
-	if docIndexer != nil && cfg.DocIndex.RefreshSeconds > 0 {
-		go func() {
-			ticker := time.NewTicker(time.Duration(cfg.DocIndex.RefreshSeconds) * time.Second)
-			defer ticker.Stop()
-			for range ticker.C {
+			go func() {
 				syncCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-				if err := docIndexer.SyncRoots(syncCtx, cfg.DefaultSessionKey); err != nil {
-					log.Printf("doc index refresh failed: %v", err)
+				defer cancel()
+				if err := docIndexer.SyncRoots(syncCtx, scope.GlobalMemoryScope); err != nil {
+					log.Printf("doc index sync failed: %v", err)
 				}
-				cancel()
-			}
-		}()
+			}()
+		}
+	if docIndexer != nil && cfg.DocIndex.RefreshSeconds > 0 {
+			go func() {
+				ticker := time.NewTicker(time.Duration(cfg.DocIndex.RefreshSeconds) * time.Second)
+				defer ticker.Stop()
+				for range ticker.C {
+					syncCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+					if err := docIndexer.SyncRoots(syncCtx, scope.GlobalMemoryScope); err != nil {
+						log.Printf("doc index refresh failed: %v", err)
+					}
+					cancel()
+				}
+			}()
 	}
 
 	rt := &agent.Runtime{
@@ -184,13 +185,12 @@ func main() {
 			BootstrapMaxChars:      cfg.BootstrapMaxChars,
 			BootstrapTotalMaxChars: cfg.BootstrapTotalMaxChars,
 			HistoryMax:             cfg.HistoryMax,
-			VectorK:                cfg.VectorK,
-			FTSK:                   cfg.FTSK,
-			TopK:                   cfg.MemoryRetrieve,
-			DocRetriever:           docRetriever,
-			DocScopeKey:            cfg.DefaultSessionKey,
-			DocRetrieveLimit:       cfg.DocIndex.RetrieveLimit,
-		},
+				VectorK:                cfg.VectorK,
+				FTSK:                   cfg.FTSK,
+				TopK:                   cfg.MemoryRetrieve,
+				DocRetriever:           docRetriever,
+				DocRetrieveLimit:       cfg.DocIndex.RetrieveLimit,
+			},
 		Artifacts:    art,
 		MaxToolBytes: cfg.MaxToolBytes,
 		MaxToolLoops: cfg.MaxToolLoops,
@@ -418,14 +418,6 @@ func buildToolRegistry(cfg config.Config, d *db.DB, prov *providers.Client, chan
 	})
 	if inv != nil {
 		reg.Register(&tools.ReadSkill{Inventory: inv})
-	}
-	if inv != nil && cfg.Skills.EnableExec {
-		reg.Register(&tools.RunSkill{
-			Inventory:      inv,
-			DefaultTimeout: time.Duration(cfg.Skills.MaxRunSeconds) * time.Second,
-			RestrictDir:    fileRoot,
-			OutputMaxBytes: cfg.MaxToolBytes,
-		})
 	}
 	if cronSvc != nil {
 		reg.Register(&tools.CronTool{Svc: cronSvc})

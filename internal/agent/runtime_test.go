@@ -18,6 +18,7 @@ import (
 	"or3-intern/internal/db"
 	"or3-intern/internal/memory"
 	"or3-intern/internal/providers"
+	"or3-intern/internal/scope"
 	"or3-intern/internal/tools"
 )
 
@@ -939,7 +940,7 @@ t.Fatalf("write doc file: %v", err)
 }
 
 // Insert the doc directly via UpsertDoc (no real embedding server needed)
-if err := memory.UpsertDoc(ctx, d, "test-scope", docPath, "markdown", "Penguin Facts", "", docContent, nil, "testhash", 0, int64(len(docContent))); err != nil {
+if err := memory.UpsertDoc(ctx, d, scope.GlobalMemoryScope, docPath, "markdown", "Penguin Facts", "", docContent, nil, "testhash", 0, int64(len(docContent))); err != nil {
 t.Fatalf("UpsertDoc: %v", err)
 }
 
@@ -967,7 +968,6 @@ b := &Builder{
 DB:               d,
 HistoryMax:       10,
 DocRetriever:     docRetriever,
-DocScopeKey:      "test-scope",
 DocRetrieveLimit: 5,
 }
 

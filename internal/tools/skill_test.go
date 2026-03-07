@@ -13,7 +13,13 @@ import (
 func makeTestSkillsInventory(t *testing.T) *skills.Inventory {
 	t.Helper()
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "my_skill.md"), []byte("# My Skill\nDo stuff"), 0o644)
+	skillDir := filepath.Join(dir, "my_skill")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# My Skill\nDo stuff"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	inv := skills.Scan([]string{dir})
 	return &inv
@@ -74,8 +80,14 @@ func TestReadSkill_Success(t *testing.T) {
 
 func TestReadSkill_MaxBytes(t *testing.T) {
 	dir := t.TempDir()
+	skillDir := filepath.Join(dir, "big_skill")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	content := strings.Repeat("x", 1000)
-	os.WriteFile(filepath.Join(dir, "big_skill.md"), []byte(content), 0o644)
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	inv := skills.Scan([]string{dir})
 	tool := &ReadSkill{Inventory: &inv, MaxBytes: 100}
 

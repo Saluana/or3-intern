@@ -261,6 +261,12 @@ func (r *Runtime) executeConversation(ctx context.Context, sessionKey string, me
 	if reg == nil {
 		reg = tools.NewRegistry()
 	}
+	scopeKey := sessionKey
+	if r.DB != nil && strings.TrimSpace(sessionKey) != "" {
+		if resolved, err := r.DB.ResolveScopeKey(ctx, sessionKey); err == nil && strings.TrimSpace(resolved) != "" {
+			scopeKey = resolved
+		}
+	}
 	maxLoops := r.MaxToolLoops
 	if maxLoops <= 0 {
 		maxLoops = 6
@@ -273,49 +279,36 @@ func (r *Runtime) executeConversation(ctx context.Context, sessionKey string, me
 			Temperature: r.Temperature,
 		}
 
-		// Begin a stream for this turn if a streamer is configured.
-		var sw channels.StreamWriter
-		var onDelta func(string)
-		if r.Streamer != nil {
-			if writer, err := r.Streamer.BeginStream(ctx, replyTo, map[string]any{"channel": channel}); err == nil {
-				sw = writer
-				onDelta = func(text string) { _ = sw.WriteDelta(ctx, text) }
-			}
-		}
-
 		var resp providers.ChatCompletionResponse
 		var err error
-		if onDelta != nil {
-			resp, err = r.Provider.ChatStream(ctx, req, onDelta)
+		var bufferedDeltas []string
+		if r.Streamer != nil {
+			resp, err = r.Provider.ChatStream(ctx, req, func(text string) {
+				bufferedDeltas = append(bufferedDeltas, text)
+			})
 		} else {
 			resp, err = r.Provider.Chat(ctx, req)
 		}
 		if err != nil {
-			if sw != nil {
-				_ = sw.Abort(ctx)
-			}
 			return "", false, err
 		}
 		if len(resp.Choices) == 0 {
-			if sw != nil {
-				_ = sw.Abort(ctx)
-			}
 			return "", false, fmt.Errorf("no choices")
 		}
 		msg := resp.Choices[0].Message
 		if len(msg.ToolCalls) == 0 {
 			finalText := strings.TrimSpace(contentToString(msg.Content))
 			messages = append(messages, providers.ChatMessage{Role: "assistant", Content: finalText})
-			if sw != nil {
-				_ = sw.Close(ctx, finalText)
-				return finalText, true, nil
+			if r.Streamer != nil && len(bufferedDeltas) > 0 {
+				if sw, err := r.Streamer.BeginStream(ctx, replyTo, map[string]any{"channel": channel}); err == nil {
+					for _, delta := range bufferedDeltas {
+						_ = sw.WriteDelta(ctx, delta)
+					}
+					_ = sw.Close(ctx, finalText)
+					return finalText, true, nil
+				}
 			}
 			return finalText, false, nil
-		}
-
-		// This turn has tool calls — abort any in-progress stream.
-		if sw != nil {
-			_ = sw.Abort(ctx)
 		}
 
 		messages = append(messages, providers.ChatMessage{Role: "assistant", Content: msg.Content, ToolCalls: msg.ToolCalls})
@@ -324,7 +317,7 @@ func (r *Runtime) executeConversation(ctx context.Context, sessionKey string, me
 		}
 
 		for _, tc := range msg.ToolCalls {
-			toolCtx := tools.ContextWithSession(ctx, sessionKey)
+			toolCtx := tools.ContextWithSession(ctx, scopeKey)
 			toolCtx = tools.ContextWithDelivery(toolCtx, channel, replyTo)
 			out, err := reg.Execute(toolCtx, tc.Function.Name, tc.Function.Arguments)
 			if err != nil {

@@ -65,8 +65,8 @@ func TestSyncRoots(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(got) != 2 {
-		t.Fatalf("expected 2 docs, got %d: %v", len(got), got)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 indexed doc, got %d: %v", len(got), got)
 	}
 	for _, r := range got {
 		if r.active != 1 {
@@ -82,8 +82,8 @@ func TestSyncRoots(t *testing.T) {
 	if kinds["readme.md"] != "markdown" {
 		t.Errorf("expected markdown, got %q", kinds["readme.md"])
 	}
-	if kinds["main.go"] != "go" {
-		t.Errorf("expected go, got %q", kinds["main.go"])
+	if _, ok := kinds["main.go"]; ok {
+		t.Errorf("did not expect code files to be indexed by default")
 	}
 }
 
@@ -146,6 +146,10 @@ func TestSyncRootsDeactivation(t *testing.T) {
 	if err := os.WriteFile(filePath, []byte("important note content"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	canonicalPath, err := filepath.EvalSymlinks(filePath)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
 
 	indexer := &DocIndexer{
 		DB:     d,
@@ -158,7 +162,7 @@ func TestSyncRootsDeactivation(t *testing.T) {
 	}
 	var active int
 	if err := d.SQL.QueryRowContext(ctx,
-		`SELECT active FROM memory_docs WHERE scope_key='scope1' AND path=?`, filePath,
+		`SELECT active FROM memory_docs WHERE scope_key='scope1' AND path=?`, canonicalPath,
 	).Scan(&active); err != nil {
 		t.Fatalf("query after first sync: %v", err)
 	}
@@ -175,7 +179,7 @@ func TestSyncRootsDeactivation(t *testing.T) {
 	}
 
 	if err := d.SQL.QueryRowContext(ctx,
-		`SELECT active FROM memory_docs WHERE scope_key='scope1' AND path=?`, filePath,
+		`SELECT active FROM memory_docs WHERE scope_key='scope1' AND path=?`, canonicalPath,
 	).Scan(&active); err != nil {
 		t.Fatalf("query after second sync: %v", err)
 	}
@@ -235,6 +239,9 @@ func TestSyncRoots_Idempotent(t *testing.T) {
 
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "config.toml"), []byte("key = \"value\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("hello\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

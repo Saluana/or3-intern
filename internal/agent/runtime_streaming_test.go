@@ -196,17 +196,14 @@ func TestRuntime_Streaming_AbortOnToolCalls(t *testing.T) {
 		t.Fatalf("Handle: %v", err)
 	}
 
-	if len(writers) < 2 {
-		t.Fatalf("expected at least 2 stream writers (one per loop), got %d", len(writers))
+	if len(writers) != 1 {
+		t.Fatalf("expected exactly 1 stream writer for the final answer, got %d", len(writers))
 	}
-	// First writer should have been aborted (tool call turn)
-	if !writers[0].aborted {
-		t.Error("expected first stream writer to be aborted (tool call turn)")
+	if writers[0].aborted {
+		t.Error("did not expect aborted stream output on tool-call turn")
 	}
-	// Last writer should be closed (final answer)
-	last := writers[len(writers)-1]
-	if !last.closed {
-		t.Error("expected last stream writer to be closed (final answer)")
+	if !writers[0].closed {
+		t.Error("expected final stream writer to be closed")
 	}
 }
 

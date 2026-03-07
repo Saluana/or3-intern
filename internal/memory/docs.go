@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -72,6 +73,9 @@ func (x *DocIndexer) defaults() DocIndexConfig {
 // It enforces caps on file count and file size, skips symlinks, and
 // deactivates docs for files that have disappeared.
 func (x *DocIndexer) SyncRoots(ctx context.Context, scopeKey string) error {
+	if x == nil || x.DB == nil {
+		return fmt.Errorf("doc indexer not configured")
+	}
 	cfg := x.defaults()
 	if len(cfg.Roots) == 0 {
 		return nil
@@ -94,30 +98,30 @@ func (x *DocIndexer) SyncRoots(ctx context.Context, scopeKey string) error {
 			continue
 		}
 
-		err = filepath.WalkDir(absRoot, func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return nil
-			}
-			if d.Type()&os.ModeSymlink != 0 {
-				return nil
-			}
-			if d.IsDir() {
+			err = filepath.WalkDir(absRoot, func(path string, d fs.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				if d.Type()&os.ModeSymlink != 0 {
+					return nil
+				}
+				if d.IsDir() {
 				if strings.HasPrefix(d.Name(), ".") && path != absRoot {
 					return filepath.SkipDir
 				}
 				return nil
-			}
-			ext := strings.ToLower(filepath.Ext(path))
-			switch ext {
-			case ".md", ".txt", ".go", ".py", ".js", ".ts", ".json", ".yaml", ".yml", ".toml", ".sh", ".rs", ".java", ".c", ".cpp", ".h":
-			default:
-				return nil
-			}
+				}
+				ext := strings.ToLower(filepath.Ext(path))
+				switch ext {
+				case ".md", ".txt":
+				default:
+					return nil
+				}
 
-			realPath, err := filepath.EvalSymlinks(path)
-			if err != nil {
-				return nil
-			}
+				realPath, err := filepath.EvalSymlinks(path)
+				if err != nil {
+					return err
+				}
 			rel, err := filepath.Rel(absRoot, realPath)
 			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 				return nil
@@ -130,21 +134,21 @@ func (x *DocIndexer) SyncRoots(ctx context.Context, scopeKey string) error {
 				return filepath.SkipAll
 			}
 
-			info, err := os.Lstat(realPath)
-			if err != nil {
-				return nil
-			}
-			if info.Size() > int64(cfg.MaxFileBytes) {
-				return nil
-			}
+				info, err := os.Lstat(realPath)
+				if err != nil {
+					return err
+				}
+				if info.Size() > int64(cfg.MaxFileBytes) {
+					return nil
+				}
 
 			seen[realPath] = true
 			fileCount++
 
-			data, err := os.ReadFile(realPath)
-			if err != nil {
-				return nil
-			}
+				data, err := os.ReadFile(realPath)
+				if err != nil {
+					return err
+				}
 			if len(data) > cfg.MaxFileBytes {
 				data = data[:cfg.MaxFileBytes]
 			}
@@ -172,23 +176,25 @@ func (x *DocIndexer) SyncRoots(ctx context.Context, scopeKey string) error {
 			}
 
 			now := db.NowMS()
-			_, err = x.DB.SQL.ExecContext(ctx,
-				`INSERT INTO memory_docs(scope_key, path, kind, title, summary, text, embedding, hash, mtime_ms, size_bytes, active, updated_at)
+				_, err = x.DB.SQL.ExecContext(ctx,
+					`INSERT INTO memory_docs(scope_key, path, kind, title, summary, text, embedding, hash, mtime_ms, size_bytes, active, updated_at)
                  VALUES(?,?,?,?,?,?,?,?,?,?,1,?)
                  ON CONFLICT(scope_key, path) DO UPDATE SET
                    kind=excluded.kind, title=excluded.title, summary=excluded.summary,
                    text=excluded.text, embedding=excluded.embedding,
                    hash=excluded.hash, mtime_ms=excluded.mtime_ms,
                    size_bytes=excluded.size_bytes, active=1, updated_at=excluded.updated_at`,
-				scopeKey, realPath, kind, title, summary, text, nullBytes(embedding), h, mtimeMS, sizeBytes, now)
-			if err != nil {
+					scopeKey, realPath, kind, title, summary, text, nullBytes(embedding), h, mtimeMS, sizeBytes, now)
+				if err != nil {
+					return fmt.Errorf("upsert indexed doc %s: %w", realPath, err)
+				}
+				chunkCount++
 				return nil
+			})
+			if err != nil {
+				return err
 			}
-			chunkCount++
-			return nil
-		})
-		_ = err
-	}
+		}
 
 	// deactivate docs no longer on disk
 	rows, err := x.DB.SQL.QueryContext(ctx,
@@ -302,22 +308,6 @@ func extKind(ext string) string {
 		return "markdown"
 	case ".txt":
 		return "text"
-	case ".go":
-		return "go"
-	case ".py":
-		return "python"
-	case ".js":
-		return "javascript"
-	case ".ts":
-		return "typescript"
-	case ".json":
-		return "json"
-	case ".yaml", ".yml":
-		return "yaml"
-	case ".toml":
-		return "toml"
-	case ".sh":
-		return "shell"
 	default:
 		return "text"
 	}

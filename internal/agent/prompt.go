@@ -16,6 +16,7 @@ import (
 	"or3-intern/internal/db"
 	"or3-intern/internal/memory"
 	"or3-intern/internal/providers"
+	"or3-intern/internal/scope"
 	"or3-intern/internal/skills"
 )
 
@@ -91,7 +92,6 @@ type Builder struct {
 	StaticMemory     string // content of MEMORY.md
 	HeartbeatText    string // content of HEARTBEAT.md – injected only for autonomous turns
 	DocRetriever     *memory.DocRetriever // for indexed file context
-	DocScopeKey      string               // scope key for doc retrieval
 	DocRetrieveLimit int                  // max docs to retrieve
 }
 
@@ -102,7 +102,13 @@ func (b *Builder) Build(ctx context.Context, sessionKey string, userMessage stri
 
 // BuildWithOptions builds a prompt snapshot using the provided options.
 func (b *Builder) BuildWithOptions(ctx context.Context, opts BuildOptions) (PromptParts, []memory.Retrieved, error) {
-	pinned, err := b.DB.GetPinned(ctx, opts.SessionKey)
+	scopeKey := opts.SessionKey
+	if b.DB != nil && strings.TrimSpace(opts.SessionKey) != "" {
+		if resolved, err := b.DB.ResolveScopeKey(ctx, opts.SessionKey); err == nil && strings.TrimSpace(resolved) != "" {
+			scopeKey = resolved
+		}
+	}
+	pinned, err := b.DB.GetPinned(ctx, scopeKey)
 	if err != nil {
 		return PromptParts{}, nil, err
 	}
@@ -113,7 +119,7 @@ func (b *Builder) BuildWithOptions(ctx context.Context, opts BuildOptions) (Prom
 	if b.Mem != nil && b.Provider != nil && strings.TrimSpace(opts.UserMessage) != "" {
 		vec, err := b.Provider.Embed(ctx, b.EmbedModel, opts.UserMessage)
 		if err == nil {
-			retrieved, _ = b.Mem.Retrieve(ctx, opts.SessionKey, opts.UserMessage, vec, b.VectorK, b.FTSK, b.TopK)
+			retrieved, _ = b.Mem.Retrieve(ctx, scopeKey, opts.UserMessage, vec, b.VectorK, b.FTSK, b.TopK)
 		}
 	}
 	memText := formatRetrieved(retrieved)
@@ -125,7 +131,7 @@ func (b *Builder) BuildWithOptions(ctx context.Context, opts BuildOptions) (Prom
 		if limit <= 0 {
 			limit = 5
 		}
-		docs, _ := b.DocRetriever.RetrieveDocs(ctx, b.DocScopeKey, opts.UserMessage, limit)
+		docs, _ := b.DocRetriever.RetrieveDocs(ctx, scope.GlobalMemoryScope, opts.UserMessage, limit)
 		if len(docs) > 0 {
 			var sb strings.Builder
 			for i, d := range docs {
@@ -135,7 +141,7 @@ func (b *Builder) BuildWithOptions(ctx context.Context, opts BuildOptions) (Prom
 		}
 	}
 
-	histRows, err := b.DB.GetLastMessages(ctx, opts.SessionKey, b.HistoryMax)
+	histRows, err := b.DB.GetLastMessagesScoped(ctx, opts.SessionKey, b.HistoryMax)
 	if err != nil {
 		return PromptParts{}, nil, err
 	}

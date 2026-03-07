@@ -82,8 +82,48 @@ func extractFrontMatterSummary(content string) string {
 	return ""
 }
 
+func skillFileInDir(dir string) (string, bool) {
+	for _, name := range []string{"SKILL.md", "skill.md"} {
+		path := filepath.Join(dir, name)
+		info, err := os.Lstat(path)
+		if err != nil {
+			continue
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			continue
+		}
+		return path, true
+	}
+	return "", false
+}
+
+func appendSkill(metaByName map[string]SkillMeta, path, name string, info fs.FileInfo) {
+	if strings.TrimSpace(name) == "" {
+		return
+	}
+	meta := SkillMeta{
+		Name: name,
+		Path: path,
+		ID:   hash(path),
+	}
+	if info != nil {
+		meta.ModTime = info.ModTime()
+		meta.Size = info.Size()
+	}
+	if man, ok := loadManifest(filepath.Dir(path)); ok {
+		meta.Summary = man.Summary
+		meta.Entrypoints = man.Entrypoints
+	}
+	if meta.Summary == "" {
+		if data, readErr := os.ReadFile(path); readErr == nil {
+			meta.Summary = extractFrontMatterSummary(string(data))
+		}
+	}
+	metaByName[name] = meta
+}
+
 func Scan(dirs []string) Inventory {
-	var skills []SkillMeta
+	metaByName := map[string]SkillMeta{}
 	for _, dir := range dirs {
 		if strings.TrimSpace(dir) == "" {
 			continue
@@ -96,56 +136,47 @@ func Scan(dirs []string) Inventory {
 		if err != nil {
 			continue
 		}
-		_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return nil
 			}
 			if d.Type()&os.ModeSymlink != 0 {
 				return nil
 			}
-			if d.IsDir() {
+			if !d.IsDir() {
 				return nil
 			}
-			ext := strings.ToLower(filepath.Ext(path))
-			if ext != ".md" && ext != ".txt" {
+			if path == root {
 				return nil
 			}
 			realPath, err := filepath.EvalSymlinks(path)
 			if err != nil {
-				return nil
+				return filepath.SkipDir
 			}
 			rel, err := filepath.Rel(root, realPath)
 			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				return filepath.SkipDir
+			}
+			skillPath, ok := skillFileInDir(realPath)
+			if !ok {
 				return nil
 			}
-			info, _ := d.Info()
-			mt := time.Time{}
-			sz := int64(0)
-			if info != nil {
-				mt = info.ModTime()
-				sz = info.Size()
-			}
-			name := strings.TrimSuffix(filepath.Base(realPath), ext)
-			meta := SkillMeta{Name: name, Path: realPath, ModTime: mt, Size: sz, ID: hash(realPath)}
-
-			// Try skill.json manifest in the same directory.
-			if man, ok := loadManifest(filepath.Dir(realPath)); ok {
-				meta.Summary = man.Summary
-				meta.Entrypoints = man.Entrypoints
-			}
-
-			// Try YAML front matter summary if not already set from manifest.
-			if meta.Summary == "" && ext == ".md" {
-				if data, readErr := os.ReadFile(realPath); readErr == nil {
-					meta.Summary = extractFrontMatterSummary(string(data))
-				}
-			}
-
-			skills = append(skills, meta)
-			return nil
+			info, _ := os.Stat(skillPath)
+			appendSkill(metaByName, skillPath, filepath.Base(realPath), info)
+			return filepath.SkipDir
 		})
 	}
-	sort.Slice(skills, func(i, j int) bool { return skills[i].Name < skills[j].Name })
+
+	skills := make([]SkillMeta, 0, len(metaByName))
+	for _, s := range metaByName {
+		skills = append(skills, s)
+	}
+	sort.Slice(skills, func(i, j int) bool {
+		if skills[i].Name == skills[j].Name {
+			return skills[i].Path < skills[j].Path
+		}
+		return skills[i].Name < skills[j].Name
+	})
 	by := map[string]SkillMeta{}
 	for _, s := range skills {
 		by[s.Name] = s

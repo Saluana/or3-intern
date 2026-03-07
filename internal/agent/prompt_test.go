@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"or3-intern/internal/memory"
+	"or3-intern/internal/scope"
 )
 
 // TestPromptIncludesIdentity verifies that IdentityText appears in the system prompt.
@@ -98,7 +99,7 @@ func TestDocContextIncluded(t *testing.T) {
 	ctx := context.Background()
 
 	// Insert a doc via UpsertDoc so RetrieveDocs can find it.
-	err := memory.UpsertDoc(ctx, d, "scope1", "/docs/guide.md", "markdown", "guide.md",
+	err := memory.UpsertDoc(ctx, d, scope.GlobalMemoryScope, "/docs/guide.md", "markdown", "guide.md",
 		"A guide for testing", "This document explains testing procedures in detail.", nil, "abc123", 0, 100)
 	if err != nil {
 		t.Fatalf("UpsertDoc: %v", err)
@@ -108,7 +109,6 @@ func TestDocContextIncluded(t *testing.T) {
 		DB:               d,
 		HistoryMax:       10,
 		DocRetriever:     &memory.DocRetriever{DB: d},
-		DocScopeKey:      "scope1",
 		DocRetrieveLimit: 5,
 	}
 

@@ -78,6 +78,15 @@ func TestDefault_Values(t *testing.T) {
 	if !cfg.Tools.RestrictToWorkspace {
 		t.Error("expected RestrictToWorkspace=true by default")
 	}
+	if cfg.ConsolidationMaxMessages != 50 {
+		t.Errorf("expected ConsolidationMaxMessages=50, got %d", cfg.ConsolidationMaxMessages)
+	}
+	if cfg.ConsolidationMaxInputChars != 12000 {
+		t.Errorf("expected ConsolidationMaxInputChars=12000, got %d", cfg.ConsolidationMaxInputChars)
+	}
+	if cfg.ConsolidationAsyncTimeoutSeconds != 30 {
+		t.Errorf("expected ConsolidationAsyncTimeoutSeconds=30, got %d", cfg.ConsolidationAsyncTimeoutSeconds)
+	}
 }
 
 func TestLoad_FileNotExist_CreatesDefault(t *testing.T) {
@@ -316,6 +325,15 @@ func TestLoad_ZeroValues_GetDefaults(t *testing.T) {
 	}
 	if cfg.Provider.TimeoutSeconds != 60 {
 		t.Errorf("expected TimeoutSeconds=60, got %d", cfg.Provider.TimeoutSeconds)
+	}
+	if cfg.ConsolidationMaxMessages != 50 {
+		t.Errorf("expected ConsolidationMaxMessages=50, got %d", cfg.ConsolidationMaxMessages)
+	}
+	if cfg.ConsolidationMaxInputChars != 12000 {
+		t.Errorf("expected ConsolidationMaxInputChars=12000, got %d", cfg.ConsolidationMaxInputChars)
+	}
+	if cfg.ConsolidationAsyncTimeoutSeconds != 30 {
+		t.Errorf("expected ConsolidationAsyncTimeoutSeconds=30, got %d", cfg.ConsolidationAsyncTimeoutSeconds)
 	}
 }
 

@@ -522,3 +522,259 @@ func TestMessage_Fields(t *testing.T) {
 		t.Errorf("expected positive CreatedAt, got %d", m.CreatedAt)
 	}
 }
+
+// ---- GetConsolidationRange ----
+
+func TestGetConsolidationRange_NoSession(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	lastID, oldestID, err := d.GetConsolidationRange(ctx, "nonexistent", 10)
+	if err != nil {
+		t.Fatalf("GetConsolidationRange: %v", err)
+	}
+	if lastID != 0 || oldestID != 0 {
+		t.Errorf("expected (0,0) for missing session, got (%d,%d)", lastID, oldestID)
+	}
+}
+
+func TestGetConsolidationRange_FewMessages(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	// Insert fewer messages than historyMax — all messages are in the active
+	// window, so oldestActiveID equals the first message's ID and there is
+	// nothing to consolidate (no messages with id < oldestActiveID beyond the cursor).
+	var firstID int64
+	for i := 0; i < 3; i++ {
+		id, _ := d.AppendMessage(ctx, "sess", "user", "msg", nil)
+		if i == 0 {
+			firstID = id
+		}
+	}
+
+	lastID, oldestID, err := d.GetConsolidationRange(ctx, "sess", 10)
+	if err != nil {
+		t.Fatalf("GetConsolidationRange: %v", err)
+	}
+	if lastID != 0 {
+		t.Errorf("expected lastID=0 (nothing consolidated), got %d", lastID)
+	}
+	// With 3 messages and historyMax=10, the active window covers all messages.
+	// oldestActiveID should equal the first message's ID.
+	if oldestID != firstID {
+		t.Errorf("expected oldestActiveID=%d (all in window), got %d", firstID, oldestID)
+	}
+}
+
+func TestGetConsolidationRange_ManyMessages(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	// Insert 20 messages, historyMax=5 → oldestActiveID should be the ID of
+	// the 16th message (5 from the end).
+	var ids []int64
+	for i := 0; i < 20; i++ {
+		id, err := d.AppendMessage(ctx, "sess", "user", "msg", nil)
+		if err != nil {
+			t.Fatalf("AppendMessage: %v", err)
+		}
+		ids = append(ids, id)
+	}
+
+	lastID, oldestActiveID, err := d.GetConsolidationRange(ctx, "sess", 5)
+	if err != nil {
+		t.Fatalf("GetConsolidationRange: %v", err)
+	}
+	if lastID != 0 {
+		t.Errorf("expected lastID=0 (nothing consolidated yet), got %d", lastID)
+	}
+	// oldestActiveID should be the 16th message ID (index 15).
+	expectedOldest := ids[15]
+	if oldestActiveID != expectedOldest {
+		t.Errorf("expected oldestActiveID=%d, got %d", expectedOldest, oldestActiveID)
+	}
+}
+
+// ---- GetMessagesForConsolidation ----
+
+func TestGetMessagesForConsolidation_Range(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	var ids []int64
+	for i := 0; i < 10; i++ {
+		id, _ := d.AppendMessage(ctx, "sess", "user", "msg", nil)
+		ids = append(ids, id)
+	}
+
+	// Retrieve messages strictly between ids[2] and ids[7].
+	msgs, err := d.GetMessagesForConsolidation(ctx, "sess", ids[2], ids[7])
+	if err != nil {
+		t.Fatalf("GetMessagesForConsolidation: %v", err)
+	}
+	if len(msgs) != 4 {
+		t.Errorf("expected 4 messages (ids[3]..ids[6]), got %d", len(msgs))
+	}
+	if msgs[0].ID != ids[3] {
+		t.Errorf("expected first message id=%d, got %d", ids[3], msgs[0].ID)
+	}
+}
+
+func TestGetMessagesForConsolidation_Empty(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	msgs, err := d.GetMessagesForConsolidation(ctx, "sess", 0, 1)
+	if err != nil {
+		t.Fatalf("GetMessagesForConsolidation: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Errorf("expected 0 messages, got %d", len(msgs))
+	}
+}
+
+// ---- SetLastConsolidatedID ----
+
+func TestSetLastConsolidatedID(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	d.EnsureSession(ctx, "sess")
+	if err := d.SetLastConsolidatedID(ctx, "sess", 42); err != nil {
+		t.Fatalf("SetLastConsolidatedID: %v", err)
+	}
+
+	// Verify via GetConsolidationRange.
+	lastID, _, err := d.GetConsolidationRange(ctx, "sess", 10)
+	if err != nil {
+		t.Fatalf("GetConsolidationRange: %v", err)
+	}
+	if lastID != 42 {
+		t.Errorf("expected lastConsolidatedID=42, got %d", lastID)
+	}
+}
+
+func TestWriteConsolidation_Atomic(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	var lastMsgID int64
+	for i := 0; i < 3; i++ {
+		id, err := d.AppendMessage(ctx, "sess", "user", "msg", nil)
+		if err != nil {
+			t.Fatalf("AppendMessage: %v", err)
+		}
+		lastMsgID = id
+	}
+
+	noteID, err := d.WriteConsolidation(ctx, ConsolidationWrite{
+		SessionKey:    "sess",
+		ScopeKey:      "sess",
+		NoteText:      "summary",
+		Embedding:     []byte{},
+		SourceMsgID:   sql.NullInt64{Int64: lastMsgID, Valid: true},
+		NoteTags:      "consolidation",
+		CanonicalKey:  "long_term_memory",
+		CanonicalText: "- stable fact",
+		CursorMsgID:   lastMsgID,
+	})
+	if err != nil {
+		t.Fatalf("WriteConsolidation: %v", err)
+	}
+	if noteID == 0 {
+		t.Fatal("expected non-zero note id")
+	}
+
+	lastID, _, err := d.GetConsolidationRange(ctx, "sess", 10)
+	if err != nil {
+		t.Fatalf("GetConsolidationRange: %v", err)
+	}
+	if lastID != lastMsgID {
+		t.Fatalf("expected last consolidated id %d, got %d", lastMsgID, lastID)
+	}
+
+	rows, err := d.StreamMemoryNotesScopeLimit(ctx, "sess", 10)
+	if err != nil {
+		t.Fatalf("StreamMemoryNotesScopeLimit: %v", err)
+	}
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		count++
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 note, got %d", count)
+	}
+
+	pinned, ok, err := d.GetPinnedValue(ctx, "sess", "long_term_memory")
+	if err != nil {
+		t.Fatalf("GetPinnedValue: %v", err)
+	}
+	if !ok || pinned != "- stable fact" {
+		t.Fatalf("expected canonical memory to be updated, got ok=%v value=%q", ok, pinned)
+	}
+}
+
+func TestWriteConsolidation_RollbackOnFailure(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	if err := d.EnsureSession(ctx, "sess"); err != nil {
+		t.Fatalf("EnsureSession: %v", err)
+	}
+
+	// Empty canonical key and source message id is valid, but we intentionally fail on cursor update
+	// by writing to a missing session key.
+	_, err := d.WriteConsolidation(ctx, ConsolidationWrite{
+		SessionKey:  "missing-session",
+		ScopeKey:    "sess",
+		NoteText:    "summary",
+		Embedding:   []byte{},
+		NoteTags:    "consolidation",
+		CursorMsgID: 999,
+	})
+	if err == nil {
+		t.Fatal("expected write error for missing session")
+	}
+
+	rows, err := d.StreamMemoryNotesScopeLimit(ctx, "sess", 10)
+	if err != nil {
+		t.Fatalf("StreamMemoryNotesScopeLimit: %v", err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		t.Fatal("expected no note due to rollback")
+	}
+}
+
+func TestResetSessionHistory(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		if _, err := d.AppendMessage(ctx, "sess", "user", "msg", nil); err != nil {
+			t.Fatalf("AppendMessage: %v", err)
+		}
+	}
+	if err := d.SetLastConsolidatedID(ctx, "sess", 2); err != nil {
+		t.Fatalf("SetLastConsolidatedID: %v", err)
+	}
+
+	if err := d.ResetSessionHistory(ctx, "sess"); err != nil {
+		t.Fatalf("ResetSessionHistory: %v", err)
+	}
+
+	msgs, err := d.GetLastMessages(ctx, "sess", 10)
+	if err != nil {
+		t.Fatalf("GetLastMessages: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("expected no messages after reset, got %d", len(msgs))
+	}
+	lastID, _, err := d.GetConsolidationRange(ctx, "sess", 10)
+	if err != nil {
+		t.Fatalf("GetConsolidationRange: %v", err)
+	}
+	if lastID != 0 {
+		t.Fatalf("expected cursor reset to 0, got %d", lastID)
+	}
+}

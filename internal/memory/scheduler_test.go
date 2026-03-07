@@ -66,3 +66,40 @@ func TestScheduler_IndependentSessions(t *testing.T) {
 		t.Fatalf("unexpected calls: %#v", calls)
 	}
 }
+
+func TestScheduler_RemovesIdleSessionState(t *testing.T) {
+	done := make(chan struct{})
+	s := NewScheduler(2*time.Second, func(ctx context.Context, sessionKey string) {
+		close(done)
+	})
+	s.Trigger("sess")
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected scheduler run")
+	}
+	time.Sleep(30 * time.Millisecond)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.sessions) != 0 {
+		t.Fatalf("expected idle sessions map to be empty, got %#v", s.sessions)
+	}
+}
+
+func TestScheduler_RunUsesCanceledBaseContext(t *testing.T) {
+	baseCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	errCh := make(chan error, 1)
+	s := NewSchedulerWithContext(baseCtx, 2*time.Second, func(ctx context.Context, sessionKey string) {
+		errCh <- ctx.Err()
+	})
+	s.Trigger("sess")
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("expected canceled context")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected scheduler run")
+	}
+}

@@ -235,6 +235,157 @@ func TestConsolidator_MaxInputCharsBoundsPromptAndSkipsEmbedOnFailure(t *testing
 	}
 }
 
+func TestConsolidator_RunOnce_OnlyAdvancesThroughIncludedMessages(t *testing.T) {
+	d := openConsolidateTestDB(t)
+	ctx := context.Background()
+	ids := make([]int64, 0, 3)
+	for _, content := range []string{"short one", "short two", strings.Repeat("z", 300)} {
+		id, err := d.AppendMessage(ctx, "sess", "user", content, nil)
+		if err != nil {
+			t.Fatalf("AppendMessage: %v", err)
+		}
+		ids = append(ids, id)
+	}
+	prov, _ := buildConsolidationProvider(t, `{"summary":"bounded summary","canonical_memory":"- bounded"}`, true)
+	c := &Consolidator{
+		DB:            d,
+		Provider:      prov,
+		WindowSize:    1,
+		MaxMessages:   10,
+		MaxInputChars: 40,
+	}
+	didWork, err := c.RunOnce(ctx, "sess", 1, RunMode{ArchiveAll: true})
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !didWork {
+		t.Fatal("expected work to be done")
+	}
+	lastID, _, err := d.GetConsolidationRange(ctx, "sess", 1)
+	if err != nil {
+		t.Fatalf("GetConsolidationRange: %v", err)
+	}
+	if lastID != ids[1] {
+		t.Fatalf("expected cursor to stop at second included message %d, got %d", ids[1], lastID)
+	}
+	rows, err := d.StreamMemoryNotesScopeLimit(ctx, "sess", 10)
+	if err != nil {
+		t.Fatalf("StreamMemoryNotesScopeLimit: %v", err)
+	}
+	defer rows.Close()
+	var note db.MemoryNoteRow
+	if !rows.Next() {
+		t.Fatal("expected a memory note")
+	}
+	if err := rows.Scan(&note.ID, &note.Text, &note.Embedding, &note.SourceMessageID, &note.Tags, &note.CreatedAt); err != nil {
+		t.Fatalf("rows.Scan: %v", err)
+	}
+	if !note.SourceMessageID.Valid || note.SourceMessageID.Int64 != ids[1] {
+		t.Fatalf("expected source message id %d, got %+v", ids[1], note.SourceMessageID)
+	}
+	if rows.Next() {
+		t.Fatal("expected exactly one memory note")
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows.Err: %v", err)
+	}
+	remaining, err := d.GetConsolidationMessages(ctx, "sess", lastID, 0, 10)
+	if err != nil {
+		t.Fatalf("GetConsolidationMessages: %v", err)
+	}
+	if len(remaining) != 1 || remaining[0].ID != ids[2] {
+		t.Fatalf("expected only third message to remain unconsolidated, got %#v", remaining)
+	}
+}
+
+func TestConsolidator_RunOnce_FirstOversizeMessageStillAdvancesSafely(t *testing.T) {
+	d := openConsolidateTestDB(t)
+	ctx := context.Background()
+	firstID, err := d.AppendMessage(ctx, "sess", "user", strings.Repeat("x", 200), nil)
+	if err != nil {
+		t.Fatalf("AppendMessage first: %v", err)
+	}
+	secondID, err := d.AppendMessage(ctx, "sess", "user", "tail", nil)
+	if err != nil {
+		t.Fatalf("AppendMessage second: %v", err)
+	}
+	prov, calls := buildConsolidationProvider(t, `{"summary":"trimmed summary","canonical_memory":"- trimmed"}`, true)
+	c := &Consolidator{
+		DB:            d,
+		Provider:      prov,
+		WindowSize:    1,
+		MaxMessages:   10,
+		MaxInputChars: 20,
+	}
+	didWork, err := c.RunOnce(ctx, "sess", 1, RunMode{ArchiveAll: true})
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !didWork {
+		t.Fatal("expected work to be done")
+	}
+	if atomic.LoadInt32(calls.Chat) != 1 {
+		t.Fatalf("expected one chat call, got %d", atomic.LoadInt32(calls.Chat))
+	}
+	lastID, _, err := d.GetConsolidationRange(ctx, "sess", 1)
+	if err != nil {
+		t.Fatalf("GetConsolidationRange: %v", err)
+	}
+	if lastID != firstID {
+		t.Fatalf("expected cursor to advance through first truncated message %d, got %d", firstID, lastID)
+	}
+	remaining, err := d.GetConsolidationMessages(ctx, "sess", lastID, 0, 10)
+	if err != nil {
+		t.Fatalf("GetConsolidationMessages: %v", err)
+	}
+	if len(remaining) != 1 || remaining[0].ID != secondID {
+		t.Fatalf("expected second message to remain unconsolidated, got %#v", remaining)
+	}
+}
+
+func TestConsolidator_RunOnce_AdaptiveTriggerOnLargeTranscript(t *testing.T) {
+	d := openConsolidateTestDB(t)
+	ctx := context.Background()
+	for _, content := range []string{
+		strings.Repeat("a", 30),
+		strings.Repeat("b", 30),
+		"active",
+	} {
+		if _, err := d.AppendMessage(ctx, "sess", "user", content, nil); err != nil {
+			t.Fatalf("AppendMessage: %v", err)
+		}
+	}
+	prov, calls := buildConsolidationProvider(t, `{"summary":"adaptive summary","canonical_memory":"- adaptive"}`, true)
+	c := &Consolidator{
+		DB:            d,
+		Provider:      prov,
+		WindowSize:    5,
+		MaxMessages:   10,
+		MaxInputChars: 80,
+	}
+	didWork, err := c.RunOnce(ctx, "sess", 1, RunMode{})
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !didWork {
+		t.Fatal("expected adaptive trigger to consolidate")
+	}
+	if atomic.LoadInt32(calls.Chat) != 1 {
+		t.Fatalf("expected one chat call, got %d", atomic.LoadInt32(calls.Chat))
+	}
+	lastID, _, err := d.GetConsolidationRange(ctx, "sess", 1)
+	if err != nil {
+		t.Fatalf("GetConsolidationRange: %v", err)
+	}
+	remaining, err := d.GetConsolidationMessages(ctx, "sess", lastID, 0, 10)
+	if err != nil {
+		t.Fatalf("GetConsolidationMessages: %v", err)
+	}
+	if len(remaining) != 1 || remaining[0].Content != "active" {
+		t.Fatalf("expected only active-window message to remain, got %#v", remaining)
+	}
+}
+
 func TestContentToStr_Other(t *testing.T) {
 	got := contentToStr(42)
 	if !strings.Contains(got, "42") {

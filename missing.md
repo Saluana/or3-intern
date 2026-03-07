@@ -15,8 +15,8 @@
 - **Richer session management controls**: nanobot has an explicit session manager with cancellation/consolidation lifecycle; `or3-intern` has session keys and DB persistence, but less active session orchestration.
 
 **What I’d prioritize next**
-- 1) MCP support
-- 2) background subagents
-- 3) automatic memory consolidation
-- 4) attachments/media
-- 5) Email + Matrix
+- 1) MCP support - TODO
+- 2) background subagents - PLANNED
+- 3) automatic memory consolidation - DONE
+- 4) attachments/media - PLANNED
+- 5) Email + Matrix - TODO

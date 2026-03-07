@@ -122,13 +122,11 @@ func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMa
 	if len(msgs) == 0 {
 		return false, nil
 	}
-	if !mode.ArchiveAll && len(msgs) < windowSize {
-		return false, nil
-	}
-	lastMsgID := msgs[len(msgs)-1].ID
+	lastCandidateID := msgs[len(msgs)-1].ID
 
 	// Build a plain-text conversation transcript.
 	var sb strings.Builder
+	var lastIncludedID int64
 	for _, m := range msgs {
 		// Skip tool messages – they're noisy and usually captured by the surrounding turns.
 		if m.Role == "tool" {
@@ -140,10 +138,20 @@ func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMa
 		}
 		line := m.Role + ": " + content
 		if sb.Len()+len(line)+1 > maxInputChars {
+			if sb.Len() == 0 {
+				remaining := maxInputChars - len(m.Role) - 3
+				if remaining > 0 {
+					line = m.Role + ": " + content[:remaining] + "…"
+					sb.WriteString(line)
+					sb.WriteString("\n")
+					lastIncludedID = m.ID
+				}
+			}
 			break
 		}
 		sb.WriteString(line)
 		sb.WriteString("\n")
+		lastIncludedID = m.ID
 	}
 	transcript := strings.TrimSpace(sb.String())
 	memScope := sessionKey
@@ -154,12 +162,25 @@ func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMa
 		_, err := c.DB.WriteConsolidation(ctx, db.ConsolidationWrite{
 			SessionKey:  sessionKey,
 			ScopeKey:    memScope,
-			CursorMsgID: lastMsgID,
+			CursorMsgID: lastCandidateID,
 		})
 		if err != nil {
 			return false, fmt.Errorf("consolidation advance cursor: %w", err)
 		}
 		return true, nil
+	}
+	shouldConsolidate := mode.ArchiveAll || len(msgs) >= windowSize
+	if !shouldConsolidate {
+		adaptiveTriggerChars := maxInputChars / canonicalMemoryInputDivisor
+		if adaptiveTriggerChars <= 0 {
+			adaptiveTriggerChars = 1
+		}
+		if len(msgs) >= maxMessages || len(transcript) >= adaptiveTriggerChars {
+			shouldConsolidate = true
+		}
+	}
+	if !shouldConsolidate {
+		return false, nil
 	}
 
 	currentCanonical, _, err := c.DB.GetPinnedValue(ctx, memScope, canonicalKey)
@@ -197,7 +218,7 @@ func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMa
 		w := db.ConsolidationWrite{
 			SessionKey:  sessionKey,
 			ScopeKey:    memScope,
-			CursorMsgID: lastMsgID,
+			CursorMsgID: lastIncludedID,
 		}
 		if canonical != "" {
 			w.CanonicalKey = canonicalKey
@@ -230,9 +251,9 @@ func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMa
 		ScopeKey:    memScope,
 		NoteText:    summary,
 		Embedding:   embedding,
-		SourceMsgID: sql.NullInt64{Int64: lastMsgID, Valid: true},
+		SourceMsgID: sql.NullInt64{Int64: lastIncludedID, Valid: true},
 		NoteTags:    "consolidation",
-		CursorMsgID: lastMsgID,
+		CursorMsgID: lastIncludedID,
 	}
 	if canonical != "" {
 		w.CanonicalKey = canonicalKey

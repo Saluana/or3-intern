@@ -82,7 +82,7 @@ func (s *Scheduler) runLoop(sessionKey string) {
 			s.mu.Unlock()
 			continue
 		}
-		state.running = false
+		delete(s.sessions, sessionKey)
 		s.mu.Unlock()
 		return
 	}

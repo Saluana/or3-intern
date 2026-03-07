@@ -167,7 +167,8 @@ func main() {
 			MaxInputChars:      cfg.ConsolidationMaxInputChars,
 			CanonicalPinnedKey: "long_term_memory",
 		}
-		rt.ConsolidationScheduler = memory.NewScheduler(
+		rt.ConsolidationScheduler = memory.NewSchedulerWithContext(
+			ctx,
 			time.Duration(cfg.ConsolidationAsyncTimeoutSeconds)*time.Second,
 			func(runCtx context.Context, sessionKey string) {
 				historyMax := cfg.HistoryMax

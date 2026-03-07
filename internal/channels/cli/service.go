@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 
 	"or3-intern/internal/bus"
 )
@@ -24,6 +25,10 @@ func (s Service) Stop(ctx context.Context) error {
 }
 
 func (s Service) Deliver(ctx context.Context, to, text string, meta map[string]any) error {
-	_ = meta
+	if len(meta) > 0 {
+		if raw, ok := meta["media_paths"].([]string); ok && len(raw) > 0 {
+			return fmt.Errorf("cli channel does not support media attachments")
+		}
+	}
 	return s.Deliverer.Deliver(ctx, "cli", to, text)
 }

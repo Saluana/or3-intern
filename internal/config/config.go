@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 )
 
@@ -22,6 +23,7 @@ type Config struct {
 	SessionCache           int    `json:"sessionCacheLimit"`
 	HistoryMax             int    `json:"historyMaxMessages"`
 	MaxToolBytes           int    `json:"maxToolBytes"`
+	MaxMediaBytes          int    `json:"maxMediaBytes"`
 	MaxToolLoops           int    `json:"maxToolLoops"`
 	MemoryRetrieve         int    `json:"memoryRetrieveLimit"`
 	VectorK                int    `json:"vectorSearchK"`
@@ -29,11 +31,12 @@ type Config struct {
 	VectorScanLimit        int    `json:"vectorScanLimit"`
 	WorkerCount            int    `json:"workerCount"`
 
-	ConsolidationEnabled             bool `json:"consolidationEnabled"`
-	ConsolidationWindowSize          int  `json:"consolidationWindowSize"`
-	ConsolidationMaxMessages         int  `json:"consolidationMaxMessages"`
-	ConsolidationMaxInputChars       int  `json:"consolidationMaxInputChars"`
-	ConsolidationAsyncTimeoutSeconds int  `json:"consolidationAsyncTimeoutSeconds"`
+	ConsolidationEnabled             bool            `json:"consolidationEnabled"`
+	ConsolidationWindowSize          int             `json:"consolidationWindowSize"`
+	ConsolidationMaxMessages         int             `json:"consolidationMaxMessages"`
+	ConsolidationMaxInputChars       int             `json:"consolidationMaxInputChars"`
+	ConsolidationAsyncTimeoutSeconds int             `json:"consolidationAsyncTimeoutSeconds"`
+	Subagents                        SubagentsConfig `json:"subagents"`
 
 	Provider  ProviderConfig  `json:"provider"`
 	Tools     ToolsConfig     `json:"tools"`
@@ -48,6 +51,7 @@ type ProviderConfig struct {
 	Model          string  `json:"model"`
 	Temperature    float64 `json:"temperature"`
 	EmbedModel     string  `json:"embedModel"`
+	EnableVision   bool    `json:"enableVision"`
 	TimeoutSeconds int     `json:"timeoutSeconds"`
 }
 
@@ -68,6 +72,13 @@ type HeartbeatConfig struct {
 	Enabled         bool   `json:"enabled"`
 	IntervalMinutes int    `json:"intervalMinutes"`
 	TasksFile       string `json:"tasksFile"`
+}
+
+type SubagentsConfig struct {
+	Enabled            bool `json:"enabled"`
+	MaxConcurrent      int  `json:"maxConcurrent"`
+	MaxQueued          int  `json:"maxQueued"`
+	TaskTimeoutSeconds int  `json:"taskTimeoutSeconds"`
 }
 
 type TelegramChannelConfig struct {
@@ -132,6 +143,7 @@ func Default() Config {
 		SessionCache:                     64,
 		HistoryMax:                       40,
 		MaxToolBytes:                     24 * 1024,
+		MaxMediaBytes:                    20 * 1024 * 1024,
 		MaxToolLoops:                     6,
 		MemoryRetrieve:                   8,
 		VectorK:                          8,
@@ -143,6 +155,12 @@ func Default() Config {
 		ConsolidationMaxMessages:         50,
 		ConsolidationMaxInputChars:       12000,
 		ConsolidationAsyncTimeoutSeconds: 30,
+		Subagents: SubagentsConfig{
+			Enabled:            false,
+			MaxConcurrent:      1,
+			MaxQueued:          32,
+			TaskTimeoutSeconds: 300,
+		},
 		Provider: ProviderConfig{
 			APIBase:        "https://api.openai.com/v1",
 			APIKey:         os.Getenv("OPENAI_API_KEY"),
@@ -214,6 +232,26 @@ func ApplyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("OR3_WHATSAPP_BRIDGE_TOKEN"); v != "" {
 		cfg.Channels.WhatsApp.BridgeToken = v
 	}
+	if v := os.Getenv("OR3_SUBAGENTS_ENABLED"); v != "" {
+		if parsed, err := strconv.ParseBool(v); err == nil {
+			cfg.Subagents.Enabled = parsed
+		}
+	}
+	if v := os.Getenv("OR3_SUBAGENTS_MAX_CONCURRENT"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			cfg.Subagents.MaxConcurrent = parsed
+		}
+	}
+	if v := os.Getenv("OR3_SUBAGENTS_MAX_QUEUED"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			cfg.Subagents.MaxQueued = parsed
+		}
+	}
+	if v := os.Getenv("OR3_SUBAGENTS_TASK_TIMEOUT_SECONDS"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			cfg.Subagents.TaskTimeoutSeconds = parsed
+		}
+	}
 }
 
 func Save(path string, cfg Config) error {
@@ -269,6 +307,9 @@ func Load(path string) (Config, error) {
 	if cfg.MaxToolBytes <= 0 {
 		cfg.MaxToolBytes = 24 * 1024
 	}
+	if cfg.MaxMediaBytes <= 0 {
+		cfg.MaxMediaBytes = 20 * 1024 * 1024
+	}
 	if cfg.MaxToolLoops <= 0 {
 		cfg.MaxToolLoops = 6
 	}
@@ -289,6 +330,15 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.ConsolidationAsyncTimeoutSeconds <= 0 {
 		cfg.ConsolidationAsyncTimeoutSeconds = 30
+	}
+	if cfg.Subagents.MaxConcurrent <= 0 {
+		cfg.Subagents.MaxConcurrent = 1
+	}
+	if cfg.Subagents.MaxQueued <= 0 {
+		cfg.Subagents.MaxQueued = 32
+	}
+	if cfg.Subagents.TaskTimeoutSeconds <= 0 {
+		cfg.Subagents.TaskTimeoutSeconds = 300
 	}
 	if cfg.Channels.Telegram.APIBase == "" {
 		cfg.Channels.Telegram.APIBase = "https://api.telegram.org"

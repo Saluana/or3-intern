@@ -96,9 +96,9 @@ func TestBuildChannelManager_RegistersEnabledChannels(t *testing.T) {
 	cfg.Channels.Slack.AppToken = "app"
 	cfg.Channels.Slack.BotToken = "bot"
 
-	mgr, err := buildChannelManager(cfg, cli.Deliverer{})
+	mgr, err := buildChannelManager(cfg, cli.Deliverer{}, nil, 0)
 	if err != nil {
-		 t.Fatalf("buildChannelManager: %v", err)
+		t.Fatalf("buildChannelManager: %v", err)
 	}
 	names := strings.Join(mgr.Names(), ",")
 	if !strings.Contains(names, "cli") || !strings.Contains(names, "telegram") || !strings.Contains(names, "slack") {

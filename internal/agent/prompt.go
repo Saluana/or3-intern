@@ -2,11 +2,17 @@ package agent
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
+	"or3-intern/internal/artifacts"
 	"or3-intern/internal/db"
 	"or3-intern/internal/memory"
 	"or3-intern/internal/providers"
@@ -37,41 +43,48 @@ cron:
 `
 
 const (
-	defaultBootstrapMaxChars = 20000
+	defaultBootstrapMaxChars      = 20000
 	defaultBootstrapTotalMaxChars = 150000
-	defaultPinnedOneLineMax = 220
-	defaultRetrievedOneLineMax = 240
-	defaultSkillsSummaryMax = 80
+	defaultPinnedOneLineMax       = 220
+	defaultRetrievedOneLineMax    = 240
+	defaultSkillsSummaryMax       = 80
+	defaultVisionMaxImages        = 4
+	defaultVisionMaxImageBytes    = 4 << 20
+	defaultVisionTotalBytes       = 8 << 20
 )
 
 type PromptParts struct {
-	System []providers.ChatMessage
+	System  []providers.ChatMessage
 	History []providers.ChatMessage
 }
 
 type Builder struct {
-	DB *db.DB
-	Skills skills.Inventory
-	Mem *memory.Retriever
-	Provider *providers.Client
-	EmbedModel string
+	DB           *db.DB
+	Artifacts    *artifacts.Store
+	Skills       skills.Inventory
+	Mem          *memory.Retriever
+	Provider     *providers.Client
+	EmbedModel   string
+	EnableVision bool
 
-	Soul string
-	AgentInstructions string
-	ToolNotes string
-	BootstrapMaxChars int
+	Soul                   string
+	AgentInstructions      string
+	ToolNotes              string
+	BootstrapMaxChars      int
 	BootstrapTotalMaxChars int
-	SkillsSummaryMax int
+	SkillsSummaryMax       int
 
 	HistoryMax int
-	VectorK int
-	FTSK int
-	TopK int
+	VectorK    int
+	FTSK       int
+	TopK       int
 }
 
 func (b *Builder) Build(ctx context.Context, sessionKey string, userMessage string) (PromptParts, []memory.Retrieved, error) {
 	pinned, err := b.DB.GetPinned(ctx, sessionKey)
-	if err != nil { return PromptParts{}, nil, err }
+	if err != nil {
+		return PromptParts{}, nil, err
+	}
 	pinnedText := formatPinned(pinned)
 
 	// embed and retrieve
@@ -85,13 +98,16 @@ func (b *Builder) Build(ctx context.Context, sessionKey string, userMessage stri
 	memText := formatRetrieved(retrieved)
 
 	histRows, err := b.DB.GetLastMessages(ctx, sessionKey, b.HistoryMax)
-	if err != nil { return PromptParts{}, nil, err }
+	if err != nil {
+		return PromptParts{}, nil, err
+	}
+	visionBudget := newVisionBudget()
 	hist := make([]providers.ChatMessage, 0, len(histRows))
 	for _, m := range histRows {
 		msg := providers.ChatMessage{Role: m.Role, Content: m.Content}
-		if m.Role == "assistant" {
-			var payload map[string]any
-			if err := json.Unmarshal([]byte(m.PayloadJSON), &payload); err == nil {
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(m.PayloadJSON), &payload); err == nil {
+			if m.Role == "assistant" {
 				if raw, ok := payload["tool_calls"]; ok {
 					b, _ := json.Marshal(raw)
 					var tcs []providers.ToolCall
@@ -99,6 +115,9 @@ func (b *Builder) Build(ctx context.Context, sessionKey string, userMessage stri
 						msg.ToolCalls = tcs
 					}
 				}
+			}
+			if m.Role == "user" {
+				msg.Content = b.buildUserContent(ctx, m.Content, attachmentsFromPayload(payload), visionBudget)
 			}
 		}
 		hist = append(hist, msg)
@@ -111,13 +130,156 @@ func (b *Builder) Build(ctx context.Context, sessionKey string, userMessage stri
 	return PromptParts{System: sys, History: hist}, retrieved, nil
 }
 
+func attachmentsFromPayload(payload map[string]any) []artifacts.Attachment {
+	if len(payload) == 0 {
+		return nil
+	}
+	raw := payload["attachments"]
+	if raw == nil {
+		if meta, ok := payload["meta"].(map[string]any); ok {
+			raw = meta["attachments"]
+		}
+	}
+	if raw == nil {
+		return nil
+	}
+	b, _ := json.Marshal(raw)
+	var atts []artifacts.Attachment
+	if err := json.Unmarshal(b, &atts); err != nil {
+		return nil
+	}
+	out := make([]artifacts.Attachment, 0, len(atts))
+	for _, att := range atts {
+		if strings.TrimSpace(att.ArtifactID) == "" {
+			continue
+		}
+		if strings.TrimSpace(att.Filename) == "" {
+			att.Filename = "attachment"
+		}
+		if strings.TrimSpace(att.Kind) == "" {
+			att.Kind = artifacts.DetectKind(att.Filename, att.Mime)
+		}
+		out = append(out, att)
+	}
+	return out
+}
+
+type visionBudget struct {
+	remainingImages int
+	remainingBytes  int64
+}
+
+func newVisionBudget() *visionBudget {
+	return &visionBudget{
+		remainingImages: defaultVisionMaxImages,
+		remainingBytes:  defaultVisionTotalBytes,
+	}
+}
+
+func (b *Builder) buildUserContent(ctx context.Context, text string, atts []artifacts.Attachment, budget *visionBudget) any {
+	if !b.EnableVision || b.Artifacts == nil || len(atts) == 0 {
+		return text
+	}
+	parts := make([]map[string]any, 0, len(atts)+1)
+	imageParts := 0
+	if strings.TrimSpace(text) != "" {
+		parts = append(parts, map[string]any{
+			"type": "text",
+			"text": text,
+		})
+	}
+	for _, att := range atts {
+		if strings.TrimSpace(att.Kind) != artifacts.KindImage && !strings.HasPrefix(strings.ToLower(strings.TrimSpace(att.Mime)), "image/") {
+			continue
+		}
+		part, ok := b.imagePart(ctx, att, budget)
+		if !ok {
+			continue
+		}
+		parts = append(parts, part)
+		imageParts++
+	}
+	if imageParts == 0 {
+		return text
+	}
+	return parts
+}
+
+func (b *Builder) imagePart(ctx context.Context, att artifacts.Attachment, budget *visionBudget) (map[string]any, bool) {
+	if budget == nil || budget.remainingImages <= 0 || budget.remainingBytes <= 0 {
+		return nil, false
+	}
+	stored, err := b.Artifacts.Lookup(ctx, att.ArtifactID)
+	if err != nil {
+		return nil, false
+	}
+	sizeBytes := stored.SizeBytes
+	if sizeBytes <= 0 {
+		info, err := os.Stat(stored.Path)
+		if err != nil {
+			return nil, false
+		}
+		sizeBytes = info.Size()
+	}
+	if sizeBytes <= 0 || sizeBytes > defaultVisionMaxImageBytes || sizeBytes > budget.remainingBytes {
+		return nil, false
+	}
+	data, err := readCappedFile(stored.Path, defaultVisionMaxImageBytes)
+	if err != nil {
+		return nil, false
+	}
+	if int64(len(data)) > budget.remainingBytes {
+		return nil, false
+	}
+	mimeType := strings.TrimSpace(stored.Mime)
+	if mimeType == "" {
+		mimeType = strings.TrimSpace(att.Mime)
+	}
+	if mimeType == "" {
+		mimeType = mime.TypeByExtension(filepath.Ext(stored.Path))
+	}
+	if !strings.HasPrefix(strings.ToLower(mimeType), "image/") {
+		return nil, false
+	}
+	budget.remainingImages--
+	budget.remainingBytes -= int64(len(data))
+	return map[string]any{
+		"type": "image_url",
+		"image_url": map[string]any{
+			"url": "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data),
+		},
+	}, true
+}
+
+func readCappedFile(path string, maxBytes int64) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("file exceeds vision limit")
+	}
+	return data, nil
+}
+
 func (b *Builder) composeSystemPrompt(pinnedText, memText string) string {
 	maxEach := b.BootstrapMaxChars
-	if maxEach <= 0 { maxEach = defaultBootstrapMaxChars }
+	if maxEach <= 0 {
+		maxEach = defaultBootstrapMaxChars
+	}
 	maxTotal := b.BootstrapTotalMaxChars
-	if maxTotal <= 0 { maxTotal = defaultBootstrapTotalMaxChars }
+	if maxTotal <= 0 {
+		maxTotal = defaultBootstrapTotalMaxChars
+	}
 	skillsMax := b.SkillsSummaryMax
-	if skillsMax <= 0 { skillsMax = defaultSkillsSummaryMax }
+	if skillsMax <= 0 {
+		skillsMax = defaultSkillsSummaryMax
+	}
 
 	soul := strings.TrimSpace(b.Soul)
 	if soul == "" {
@@ -134,7 +296,7 @@ func (b *Builder) composeSystemPrompt(pinnedText, memText string) string {
 
 	sections := []struct {
 		title string
-		text string
+		text  string
 	}{
 		{title: "SOUL.md", text: truncateText(soul, maxEach)},
 		{title: "AGENTS.md", text: truncateText(inst, maxEach)},
@@ -165,23 +327,33 @@ func truncateText(s string, max int) string {
 }
 
 func formatPinned(m map[string]string) string {
-	if len(m) == 0 { return "(none)" }
+	if len(m) == 0 {
+		return "(none)"
+	}
 	keys := make([]string, 0, len(m))
-	for k := range m { keys = append(keys, k) }
+	for k := range m {
+		keys = append(keys, k)
+	}
 	sort.Strings(keys)
 	var b strings.Builder
 	for _, k := range keys {
 		v := strings.TrimSpace(m[k])
-		if v == "" { continue }
+		if v == "" {
+			continue
+		}
 		b.WriteString(fmt.Sprintf("- %s: %s\n", k, oneLine(v, defaultPinnedOneLineMax)))
 	}
 	s := strings.TrimSpace(b.String())
-	if s == "" { return "(none)" }
+	if s == "" {
+		return "(none)"
+	}
 	return s
 }
 
 func formatRetrieved(ms []memory.Retrieved) string {
-	if len(ms) == 0 { return "(none)" }
+	if len(ms) == 0 {
+		return "(none)"
+	}
 	var b strings.Builder
 	for i, m := range ms {
 		b.WriteString(fmt.Sprintf("%d) [%s] %s\n", i+1, m.Source, oneLine(m.Text, defaultRetrievedOneLineMax)))
@@ -192,6 +364,8 @@ func formatRetrieved(ms []memory.Retrieved) string {
 func oneLine(s string, max int) string {
 	s = strings.ReplaceAll(s, "\n", " ")
 	s = strings.Join(strings.Fields(s), " ")
-	if max > 0 && len(s) > max { s = s[:max] + "…" }
+	if max > 0 && len(s) > max {
+		s = s[:max] + "…"
+	}
 	return s
 }

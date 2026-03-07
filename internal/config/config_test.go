@@ -24,6 +24,10 @@ func clearConfigEnv(t *testing.T) {
 		"OR3_DISCORD_TOKEN",
 		"OR3_WHATSAPP_BRIDGE_URL",
 		"OR3_WHATSAPP_BRIDGE_TOKEN",
+		"OR3_SUBAGENTS_ENABLED",
+		"OR3_SUBAGENTS_MAX_CONCURRENT",
+		"OR3_SUBAGENTS_MAX_QUEUED",
+		"OR3_SUBAGENTS_TASK_TIMEOUT_SECONDS",
 	} {
 		t.Setenv(key, "")
 	}
@@ -41,6 +45,9 @@ func TestDefault_Values(t *testing.T) {
 	}
 	if cfg.MaxToolBytes != 24*1024 {
 		t.Errorf("expected MaxToolBytes=%d, got %d", 24*1024, cfg.MaxToolBytes)
+	}
+	if cfg.MaxMediaBytes != 20*1024*1024 {
+		t.Errorf("expected MaxMediaBytes=%d, got %d", 20*1024*1024, cfg.MaxMediaBytes)
 	}
 	if cfg.MaxToolLoops != 6 {
 		t.Errorf("expected MaxToolLoops=6, got %d", cfg.MaxToolLoops)
@@ -66,6 +73,9 @@ func TestDefault_Values(t *testing.T) {
 	if cfg.Provider.TimeoutSeconds != 60 {
 		t.Errorf("expected TimeoutSeconds=60, got %d", cfg.Provider.TimeoutSeconds)
 	}
+	if cfg.Provider.EnableVision {
+		t.Error("expected Provider.EnableVision=false by default")
+	}
 	if cfg.Cron.Enabled != true {
 		t.Error("expected Cron.Enabled=true")
 	}
@@ -86,6 +96,18 @@ func TestDefault_Values(t *testing.T) {
 	}
 	if cfg.ConsolidationAsyncTimeoutSeconds != 30 {
 		t.Errorf("expected ConsolidationAsyncTimeoutSeconds=30, got %d", cfg.ConsolidationAsyncTimeoutSeconds)
+	}
+	if cfg.Subagents.Enabled {
+		t.Error("expected Subagents.Enabled=false by default")
+	}
+	if cfg.Subagents.MaxConcurrent != 1 {
+		t.Errorf("expected Subagents.MaxConcurrent=1, got %d", cfg.Subagents.MaxConcurrent)
+	}
+	if cfg.Subagents.MaxQueued != 32 {
+		t.Errorf("expected Subagents.MaxQueued=32, got %d", cfg.Subagents.MaxQueued)
+	}
+	if cfg.Subagents.TaskTimeoutSeconds != 300 {
+		t.Errorf("expected Subagents.TaskTimeoutSeconds=300, got %d", cfg.Subagents.TaskTimeoutSeconds)
 	}
 }
 
@@ -199,6 +221,12 @@ func TestLoad_ValidFile(t *testing.T) {
 	if cfg.HistoryMax != 20 {
 		t.Errorf("expected HistoryMax=20, got %d", cfg.HistoryMax)
 	}
+	if cfg.MaxMediaBytes != Default().MaxMediaBytes {
+		t.Errorf("expected missing MaxMediaBytes to default to %d, got %d", Default().MaxMediaBytes, cfg.MaxMediaBytes)
+	}
+	if cfg.Provider.EnableVision {
+		t.Error("expected missing EnableVision to default to false")
+	}
 }
 
 func TestLoad_InvalidJSON(t *testing.T) {
@@ -228,6 +256,10 @@ func TestLoad_EnvOverrides(t *testing.T) {
 	t.Setenv("OR3_MODEL", "env-model")
 	t.Setenv("OR3_EMBED_MODEL", "env-embed")
 	t.Setenv("OR3_API_BASE", "https://env.api")
+	t.Setenv("OR3_SUBAGENTS_ENABLED", "true")
+	t.Setenv("OR3_SUBAGENTS_MAX_CONCURRENT", "3")
+	t.Setenv("OR3_SUBAGENTS_MAX_QUEUED", "12")
+	t.Setenv("OR3_SUBAGENTS_TASK_TIMEOUT_SECONDS", "90")
 
 	cfg, err := Load(path)
 	if err != nil {
@@ -247,6 +279,39 @@ func TestLoad_EnvOverrides(t *testing.T) {
 	}
 	if cfg.Provider.APIBase != "https://env.api" {
 		t.Errorf("expected APIBase='https://env.api', got %q", cfg.Provider.APIBase)
+	}
+	if !cfg.Subagents.Enabled {
+		t.Error("expected subagents enabled from env override")
+	}
+	if cfg.Subagents.MaxConcurrent != 3 {
+		t.Errorf("expected MaxConcurrent=3, got %d", cfg.Subagents.MaxConcurrent)
+	}
+	if cfg.Subagents.MaxQueued != 12 {
+		t.Errorf("expected MaxQueued=12, got %d", cfg.Subagents.MaxQueued)
+	}
+	if cfg.Subagents.TaskTimeoutSeconds != 90 {
+		t.Errorf("expected TaskTimeoutSeconds=90, got %d", cfg.Subagents.TaskTimeoutSeconds)
+	}
+}
+
+func TestLoad_SubagentNormalization(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	input := Default()
+	input.Subagents.MaxConcurrent = 0
+	input.Subagents.MaxQueued = 0
+	input.Subagents.TaskTimeoutSeconds = 0
+	b, _ := json.MarshalIndent(input, "", "  ")
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Subagents.MaxConcurrent != 1 || cfg.Subagents.MaxQueued != 32 || cfg.Subagents.TaskTimeoutSeconds != 300 {
+		t.Fatalf("expected normalized subagent defaults, got %+v", cfg.Subagents)
 	}
 }
 

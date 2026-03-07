@@ -23,9 +23,9 @@ The proposed design extends those existing seams instead of creating a separate 
 - `internal/channels/discord/discord.go`
   - inbound attachment download and outbound multipart upload
 - `internal/channels/slack/slack.go`
-  - explicit v1 unsupported-media behavior for outbound sends
+  - inbound file-share handling and outbound external upload flow
 - `internal/channels/whatsapp/whatsapp.go`
-  - explicit v1 unsupported-media behavior unless bridge protocol is extended
+  - richer bridge command/event envelopes for inbound and outbound media
 - `internal/tools/message.go`
   - `send_message` parameters and validation for `media`
 - `internal/agent/runtime.go`
@@ -34,6 +34,8 @@ The proposed design extends those existing seams instead of creating a separate 
   - rebuild multimodal user messages from message payloads
 - `internal/providers/openai.go`
   - no endpoint change required, but request content must support structured multimodal arrays cleanly
+- external WhatsApp bridge implementation
+  - extend the bridge protocol and bridge-side media send/receive behavior to match the Go channel contract
 
 ## Control flow / architecture
 
@@ -87,7 +89,7 @@ flowchart TD
    - workspace restrictions / allowed root
 3. Validated paths are passed via `meta["media_paths"]`.
 4. Supported channels upload those files with the outbound message.
-5. Unsupported channels return a clear error.
+5. Channel-specific multi-step flows are handled inside the channel implementation or bridge adapter rather than leaking complexity into the tool interface.
 
 ## Data and persistence
 
@@ -168,6 +170,17 @@ Suggested helpers:
 
 The filename can remain in payload JSON instead of forcing an `artifacts` schema migration.
 
+### Channel-specific delivery details
+
+- Telegram:
+  - keep direct Bot API uploads for photo/audio/document
+- Discord:
+  - use multipart file upload against the channel messages endpoint
+- Slack:
+  - use Slack's external upload flow (`files.getUploadURLExternal` -> upload bytes -> `files.completeUploadExternal`) and then preserve thread/channel context
+- WhatsApp:
+  - extend the bridge JSON protocol so Go can send media requests and receive inbound media descriptors or downloaded file refs through the bridge
+
 ## Interfaces and types
 
 ### Shared attachment descriptor
@@ -235,10 +248,12 @@ This mirrors the nanobot pattern without requiring a new provider abstraction.
   - return bounded error and optionally retry once with text-only content if the implementation chooses a fallback path
 - Unsafe outbound path:
   - reject before channel dispatch
-- Unsupported outbound channel:
-  - return explicit tool error
 - Missing artifact on prompt rebuild:
   - degrade to text marker, do not abort the entire turn
+- Slack upload step failure:
+  - fail the affected attachment clearly and preserve the base message outcome decision defined by the implementation
+- WhatsApp bridge contract mismatch:
+  - fail with a bounded bridge error and keep the text-only fallback behavior explicit
 
 ## Channel scope for v1
 
@@ -248,14 +263,14 @@ This mirrors the nanobot pattern without requiring a new provider abstraction.
 - Telegram outbound photo/document/audio sending
 - Discord inbound attachment download
 - Discord outbound multipart file uploads
+- Slack inbound file-share handling
+- Slack outbound file upload flow
+- WhatsApp inbound media through the bridge
+- WhatsApp outbound media through the bridge
 - CLI text markers for visibility
 
 ### Explicitly deferred
 
-- Slack binary upload
-  - Slack’s upload flow is more complex than current `chat.postMessage` usage and should not be half-implemented
-- WhatsApp bridge media
-  - current repo only contains the Go client side; bridge protocol extensions are external
 - OCR, image captioning beyond provider vision, and audio transcription
 - Remote URL outbound attachments
 
@@ -281,6 +296,8 @@ This mirrors the nanobot pattern without requiring a new provider abstraction.
   - send photo/document with caption or companion text
 - Discord inbound attachment download
 - Discord outbound multipart upload
+- Slack inbound file-share parsing and outbound upload flow
+- WhatsApp bridge media event parsing and outbound media send flow
 - runtime persistence:
   - `Runtime.turn` stores attachment metadata in user message payload
   - `Builder.Build` reconstructs recent multimodal image messages

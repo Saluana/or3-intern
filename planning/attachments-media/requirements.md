@@ -4,9 +4,9 @@ This plan adds attachment and media support to `or3-intern` in a way that fits t
 
 Assumptions for v1:
 
-- Inbound attachment handling is implemented for channel code that already lives in this repo, with Telegram and Discord as the primary targets.
-- Outbound media delivery is implemented for channels whose APIs can be handled directly in this repo without adding a new service layer, with Telegram and Discord as the primary targets.
-- Slack binary upload and WhatsApp media exchange are explicitly deferred because Slack requires a more complex upload flow and WhatsApp media depends on bridge protocol changes outside this repo.
+- Inbound attachment handling is implemented across the configured external channels, including Telegram, Discord, Slack, and WhatsApp.
+- Outbound media delivery is implemented across the configured external channels, including Telegram, Discord, Slack, and WhatsApp.
+- Slack binary upload and WhatsApp media exchange are treated as part of the initial feature scope rather than a follow-up, even where they require multi-step API flows or bridge protocol changes.
 - Image attachments may be sent to the provider when vision input is explicitly enabled; non-image media remains available through textual markers and stored artifact metadata.
 
 ## Requirements
@@ -21,6 +21,7 @@ Acceptance criteria:
 - WHEN a supported inbound channel receives a media-only message, THEN the channel handler SHALL synthesize a non-empty textual marker so the turn is still persisted and visible in history.
 - WHEN an inbound attachment is accepted, THEN the file SHALL be persisted locally using repo-managed storage instead of a remote URL reference.
 - IF an attachment download fails, THEN the system SHALL continue processing the message and SHALL include a failure marker rather than dropping the turn or crashing.
+- WHEN Slack or WhatsApp is the source channel, THEN the implementation SHALL use the channel-specific upload/download flow or bridge contract needed to move binary media rather than downgrading the turn to text-only.
 
 ### 2. Attachment safety and limits
 
@@ -61,8 +62,8 @@ As the agent using `send_message`, I want to attach local media to outbound mess
 Acceptance criteria:
 
 - WHEN `send_message` is called with text plus a list of media paths, THEN the tool SHALL validate the paths before dispatching delivery.
-- WHEN the target channel supports outbound media in v1, THEN the channel SHALL upload or send the file and SHALL preserve the text body as a caption or companion message where the API requires it.
-- IF the requested channel does not support outbound media in v1, THEN the tool SHALL return a clear error instead of silently dropping attachments.
+- WHEN the target channel is Telegram, Discord, Slack, or WhatsApp, THEN the channel SHALL upload or send the file and SHALL preserve the text body as a caption or companion message where the API requires it.
+- IF a specific file type cannot be sent by a given channel API or bridge flow, THEN the tool SHALL return a clear error instead of silently dropping that attachment.
 - WHEN outbound media references local files, THEN validation SHALL respect existing workspace and artifact boundaries.
 
 ### 6. Compatibility and observability
@@ -75,6 +76,7 @@ Acceptance criteria:
 - WHEN older configs are loaded, THEN sensible media defaults SHALL be applied without breaking startup.
 - WHEN attachment handling is exercised in tests, THEN coverage SHALL include success, failure, oversize, unsupported-type, and fallback behavior.
 - WHEN a supported channel uses media groups or multi-file inbound messages, THEN the implementation SHALL define whether v1 aggregates them or handles them one-by-one, and tests SHALL match that decision.
+- WHEN media support depends on a WhatsApp bridge contract, THEN the planned implementation SHALL define that contract and SHALL include compatibility tests or fixtures for it.
 
 ## Non-functional constraints
 

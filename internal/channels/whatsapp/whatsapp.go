@@ -2,22 +2,30 @@ package whatsapp
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
+	"mime"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 
+	"or3-intern/internal/artifacts"
 	"or3-intern/internal/bus"
+	rootchannels "or3-intern/internal/channels"
 	"or3-intern/internal/config"
 )
 
 type Channel struct {
-	Config config.WhatsAppBridgeConfig
-	Dialer *websocket.Dialer
+	Config        config.WhatsAppBridgeConfig
+	Dialer        *websocket.Dialer
+	Artifacts     *artifacts.Store
+	MaxMediaBytes int
 
 	mu     sync.Mutex
 	conn   *websocket.Conn
@@ -70,8 +78,18 @@ func (c *Channel) Deliver(ctx context.Context, to, text string, meta map[string]
 		return fmt.Errorf("whatsapp target required")
 	}
 	cmd := map[string]any{"type": "send", "to": target, "text": text}
+	if mediaPaths := rootchannels.MediaPaths(meta); len(mediaPaths) > 0 {
+		attachments, err := c.outboundAttachments(mediaPaths)
+		if err != nil {
+			return err
+		}
+		cmd["attachments"] = attachments
+	}
 	if meta != nil {
 		for k, v := range meta {
+			if k == "media_paths" {
+				continue
+			}
 			cmd[k] = v
 		}
 	}
@@ -116,7 +134,7 @@ func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
 				return
 			}
 		}
-		if msg.Type != "message" || strings.TrimSpace(msg.Text) == "" {
+		if msg.Type != "message" {
 			continue
 		}
 		if !c.allowedFrom(msg.From) {
@@ -126,18 +144,27 @@ func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
 		if target == "" {
 			target = strings.TrimSpace(msg.From)
 		}
+		attachments, markers := c.captureAttachments(ctx, "whatsapp:"+target, msg.Attachments)
+		content := rootchannels.ComposeMessageText(msg.Text, markers)
+		if content == "" {
+			continue
+		}
+		meta := map[string]any{
+			"chat_id":             target,
+			"message_id":          msg.ID,
+			"reply_to_message_id": msg.ID,
+			"is_group":            msg.IsGroup,
+		}
+		if len(attachments) > 0 {
+			meta["attachments"] = attachments
+		}
 		eventBus.Publish(bus.Event{
 			Type:       bus.EventUserMessage,
 			SessionKey: "whatsapp:" + target,
 			Channel:    "whatsapp",
 			From:       msg.From,
-			Message:    strings.TrimSpace(msg.Text),
-			Meta: map[string]any{
-				"chat_id":             target,
-				"message_id":          msg.ID,
-				"reply_to_message_id": msg.ID,
-				"is_group":            msg.IsGroup,
-			},
+			Message:    content,
+			Meta:       meta,
 		})
 	}
 }
@@ -155,12 +182,110 @@ func (c *Channel) allowedFrom(from string) bool {
 }
 
 type inboundMessage struct {
-	Type    string `json:"type"`
-	ID      string `json:"id"`
-	Chat    string `json:"chat"`
-	From    string `json:"from"`
-	Text    string `json:"text"`
-	IsGroup bool   `json:"isGroup"`
+	Type        string             `json:"type"`
+	ID          string             `json:"id"`
+	Chat        string             `json:"chat"`
+	From        string             `json:"from"`
+	Text        string             `json:"text"`
+	IsGroup     bool               `json:"isGroup"`
+	Attachments []bridgeAttachment `json:"attachments"`
+}
+
+type bridgeAttachment struct {
+	Path       string `json:"path,omitempty"`
+	DataBase64 string `json:"data_base64,omitempty"`
+	Filename   string `json:"filename,omitempty"`
+	Mime       string `json:"mime,omitempty"`
+	Kind       string `json:"kind,omitempty"`
+	SizeBytes  int64  `json:"size_bytes,omitempty"`
+}
+
+func (c *Channel) captureAttachments(ctx context.Context, sessionKey string, refs []bridgeAttachment) ([]artifacts.Attachment, []string) {
+	attachments := make([]artifacts.Attachment, 0, len(refs))
+	markers := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		filename := artifacts.NormalizeFilename(ref.Filename, ref.Mime)
+		kind := strings.TrimSpace(ref.Kind)
+		if kind == "" {
+			kind = artifacts.DetectKind(filename, ref.Mime)
+		}
+		if c.MaxMediaBytes == 0 {
+			markers = append(markers, artifacts.FailureMarker(kind, filename, "disabled by config"))
+			continue
+		}
+		if c.MaxMediaBytes > 0 && ref.SizeBytes > int64(c.MaxMediaBytes) {
+			markers = append(markers, artifacts.FailureMarker(kind, filename, "too large"))
+			continue
+		}
+		if c.Artifacts == nil {
+			markers = append(markers, artifacts.FailureMarker(kind, filename, "storage unavailable"))
+			continue
+		}
+		data, err := decodeBridgeAttachment(ref, c.MaxMediaBytes)
+		if err != nil {
+			reason := "invalid media payload"
+			if strings.Contains(err.Error(), "too large") {
+				reason = "too large"
+			}
+			markers = append(markers, artifacts.FailureMarker(kind, filename, reason))
+			continue
+		}
+		att, err := c.Artifacts.SaveNamed(ctx, sessionKey, filename, ref.Mime, data)
+		if err != nil {
+			markers = append(markers, artifacts.FailureMarker(kind, filename, "save failed"))
+			continue
+		}
+		attachments = append(attachments, att)
+		markers = append(markers, artifacts.Marker(att))
+	}
+	return attachments, markers
+}
+
+func (c *Channel) outboundAttachments(paths []string) ([]bridgeAttachment, error) {
+	attachments := make([]bridgeAttachment, 0, len(paths))
+	for _, mediaPath := range paths {
+		info, err := os.Stat(mediaPath)
+		if err != nil {
+			return nil, err
+		}
+		if c.MaxMediaBytes == 0 {
+			return nil, fmt.Errorf("media attachments disabled by config")
+		}
+		if c.MaxMediaBytes > 0 && info.Size() > int64(c.MaxMediaBytes) {
+			return nil, fmt.Errorf("media path exceeds maxMediaBytes: %s", mediaPath)
+		}
+		data, err := os.ReadFile(mediaPath)
+		if err != nil {
+			return nil, err
+		}
+		mimeType := mime.TypeByExtension(strings.ToLower(filepath.Ext(mediaPath)))
+		attachments = append(attachments, bridgeAttachment{
+			DataBase64: base64.StdEncoding.EncodeToString(data),
+			Filename:   filepath.Base(mediaPath),
+			Mime:       mimeType,
+			Kind:       artifacts.DetectKind(mediaPath, mimeType),
+			SizeBytes:  info.Size(),
+		})
+	}
+	return attachments, nil
+}
+
+func decodeBridgeAttachment(ref bridgeAttachment, maxBytes int) ([]byte, error) {
+	raw := strings.TrimSpace(ref.DataBase64)
+	if raw == "" {
+		return nil, fmt.Errorf("missing inline data")
+	}
+	if maxBytes > 0 && base64.StdEncoding.DecodedLen(len(raw)) > maxBytes {
+		return nil, fmt.Errorf("attachment too large")
+	}
+	data, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		return nil, err
+	}
+	if maxBytes > 0 && len(data) > maxBytes {
+		return nil, fmt.Errorf("attachment too large")
+	}
+	return data, nil
 }
 
 func BridgeURL(base string) string {

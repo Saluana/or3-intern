@@ -1,12 +1,15 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"or3-intern/internal/artifacts"
 	"or3-intern/internal/bus"
 	"or3-intern/internal/cron"
 	"or3-intern/internal/db"
@@ -335,6 +338,138 @@ func TestBuilder_Build_ToolCallsInHistory(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected tool calls to be parsed from history")
+	}
+}
+
+func TestBuilder_Build_UserImageAttachmentWithVision(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	store := &artifacts.Store{Dir: t.TempDir(), DB: d}
+	if err := d.EnsureSession(ctx, "media"); err != nil {
+		t.Fatalf("EnsureSession: %v", err)
+	}
+	att, err := store.SaveNamed(ctx, "media", "photo.png", "image/png", []byte("fake-image"))
+	if err != nil {
+		t.Fatalf("SaveNamed: %v", err)
+	}
+	if _, err := d.AppendMessage(ctx, "media", "user", "describe this\n[image: photo.png]", map[string]any{
+		"meta": map[string]any{"attachments": []artifacts.Attachment{att}},
+	}); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	b := &Builder{DB: d, Artifacts: store, EnableVision: true, HistoryMax: 10}
+	pp, _, err := b.Build(ctx, "media", "describe this")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(pp.History) != 1 {
+		t.Fatalf("expected one history message, got %d", len(pp.History))
+	}
+	parts, ok := pp.History[0].Content.([]map[string]any)
+	if !ok {
+		t.Fatalf("expected structured content, got %T", pp.History[0].Content)
+	}
+	if len(parts) != 2 {
+		t.Fatalf("expected text + image parts, got %#v", parts)
+	}
+	if parts[1]["type"] != "image_url" {
+		t.Fatalf("expected image_url part, got %#v", parts[1])
+	}
+}
+
+func TestBuilder_Build_UserImageAttachmentWithVisionDisabledFallsBackToText(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	if _, err := d.AppendMessage(ctx, "media-off", "user", "look\n[image: photo.png]", map[string]any{
+		"meta": map[string]any{"attachments": []map[string]any{{
+			"artifact_id": "missing",
+			"filename":    "photo.png",
+			"mime":        "image/png",
+			"kind":        "image",
+			"size_bytes":  12,
+		}}},
+	}); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	b := &Builder{DB: d, EnableVision: false, HistoryMax: 10}
+	pp, _, err := b.Build(ctx, "media-off", "look")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if got, ok := pp.History[0].Content.(string); !ok || got != "look\n[image: photo.png]" {
+		t.Fatalf("expected text fallback, got %#v", pp.History[0].Content)
+	}
+}
+
+func TestBuilder_Build_UserImageAttachmentMissingArtifactFallsBackToText(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	if _, err := d.AppendMessage(ctx, "media-missing", "user", "look\n[image: photo.png]", map[string]any{
+		"meta": map[string]any{"attachments": []map[string]any{{
+			"artifact_id": "missing",
+			"filename":    "photo.png",
+			"mime":        "image/png",
+			"kind":        "image",
+			"size_bytes":  12,
+		}}},
+	}); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	b := &Builder{
+		DB:           d,
+		Artifacts:    &artifacts.Store{Dir: t.TempDir(), DB: d},
+		EnableVision: true,
+		HistoryMax:   10,
+	}
+	pp, _, err := b.Build(ctx, "media-missing", "look")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if got, ok := pp.History[0].Content.(string); !ok || got != "look\n[image: photo.png]" {
+		t.Fatalf("expected missing artifact fallback to text, got %#v", pp.History[0].Content)
+	}
+}
+
+func TestBuilder_Build_UserImageAttachmentsRespectVisionBudget(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	store := &artifacts.Store{Dir: t.TempDir(), DB: d}
+	if err := d.EnsureSession(ctx, "media-budget"); err != nil {
+		t.Fatalf("EnsureSession: %v", err)
+	}
+	imageData := bytes.Repeat([]byte("a"), 3<<20)
+	for i := 0; i < 3; i++ {
+		name := fmt.Sprintf("photo-%d.png", i)
+		att, err := store.SaveNamed(ctx, "media-budget", name, "image/png", imageData)
+		if err != nil {
+			t.Fatalf("SaveNamed %d: %v", i, err)
+		}
+		if _, err := d.AppendMessage(ctx, "media-budget", "user", fmt.Sprintf("describe %d\n[image: %s]", i, name), map[string]any{
+			"meta": map[string]any{"attachments": []artifacts.Attachment{att}},
+		}); err != nil {
+			t.Fatalf("AppendMessage %d: %v", i, err)
+		}
+	}
+
+	b := &Builder{DB: d, Artifacts: store, EnableVision: true, HistoryMax: 10}
+	pp, _, err := b.Build(ctx, "media-budget", "describe")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(pp.History) != 3 {
+		t.Fatalf("expected three history messages, got %d", len(pp.History))
+	}
+	if _, ok := pp.History[0].Content.([]map[string]any); !ok {
+		t.Fatalf("expected first image within budget to be structured, got %T", pp.History[0].Content)
+	}
+	if _, ok := pp.History[1].Content.([]map[string]any); !ok {
+		t.Fatalf("expected second image within budget to be structured, got %T", pp.History[1].Content)
+	}
+	if got, ok := pp.History[2].Content.(string); !ok || !strings.Contains(got, "[image: photo-2.png]") {
+		t.Fatalf("expected third image to fall back to text marker, got %#v", pp.History[2].Content)
 	}
 }
 

@@ -44,6 +44,23 @@ type Runtime struct {
 	locks sync.Map // sessionKey -> *sync.Mutex
 }
 
+type BackgroundRunInput struct {
+	SessionKey       string
+	ParentSessionKey string
+	Task             string
+	PromptSnapshot   []providers.ChatMessage
+	Tools            *tools.Registry
+	Meta             map[string]any
+	Channel          string
+	ReplyTo          string
+}
+
+type BackgroundRunResult struct {
+	FinalText  string
+	Preview    string
+	ArtifactID string
+}
+
 func (r *Runtime) lockFor(key string) *sync.Mutex {
 	v, _ := r.locks.LoadOrStore(key, &sync.Mutex{})
 	return v.(*sync.Mutex)
@@ -78,84 +95,15 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 	if r.Builder == nil {
 		return fmt.Errorf("runtime builder not configured")
 	}
-	pp, _, err := r.Builder.Build(ctx, ev.SessionKey, ev.Message)
+	messages, err := r.BuildPromptSnapshot(ctx, ev.SessionKey, ev.Message)
 	if err != nil {
 		return err
 	}
 
-	messages := append([]providers.ChatMessage{}, pp.System...)
-	messages = append(messages, pp.History...)
-	messages = append(messages, providers.ChatMessage{Role: "user", Content: ev.Message})
-
-	// tool loop
-	maxLoops := r.MaxToolLoops
-	if maxLoops <= 0 {
-		maxLoops = 6
-	}
-	previewBytes := r.ToolPreviewBytes
-	if previewBytes <= 0 {
-		previewBytes = 500
-	}
-	var finalText string
-	for loop := 0; loop < maxLoops; loop++ {
-		req := providers.ChatCompletionRequest{
-			Model:       r.Model,
-			Messages:    messages,
-			Tools:       toToolDefs(r.Tools),
-			Temperature: r.Temperature,
-		}
-		resp, err := r.Provider.Chat(ctx, req)
-		if err != nil {
-			return err
-		}
-		if len(resp.Choices) == 0 {
-			return fmt.Errorf("no choices")
-		}
-		msg := resp.Choices[0].Message
-		if len(msg.ToolCalls) == 0 {
-			finalText = strings.TrimSpace(contentToString(msg.Content))
-			messages = append(messages, providers.ChatMessage{Role: "assistant", Content: finalText})
-			break
-		}
-		// assistant message with tool calls (store content too)
-		messages = append(messages, providers.ChatMessage{Role: "assistant", Content: msg.Content, ToolCalls: msg.ToolCalls})
-		if _, err := r.DB.AppendMessage(ctx, ev.SessionKey, "assistant", contentToString(msg.Content), map[string]any{"tool_calls": msg.ToolCalls}); err != nil {
-			log.Printf("append assistant(tool_calls) failed: %v", err)
-		}
-
-		// execute tools sequentially
-		for _, tc := range msg.ToolCalls {
-			toolCtx := tools.ContextWithSession(ctx, ev.SessionKey)
-			out, err := r.Tools.Execute(toolCtx, tc.Function.Name, tc.Function.Arguments)
-			if err != nil {
-				out = "tool error: " + err.Error()
-			}
-
-			payload := map[string]any{
-				"tool": tc.Function.Name,
-				"args": json.RawMessage([]byte(tc.Function.Arguments)),
-			}
-			sendOut := out
-			if r.MaxToolBytes > 0 && len(out) > r.MaxToolBytes && r.Artifacts != nil {
-				id, e := r.Artifacts.Save(ctx, ev.SessionKey, "text/plain", []byte(out))
-				if e == nil {
-					preview := out
-					if len(preview) > previewBytes {
-						preview = preview[:previewBytes] + "…[preview]"
-					}
-					payload["artifact_id"] = id
-					payload["preview"] = preview
-					sendOut = fmt.Sprintf("artifact_id=%s\npreview:\n%s", id, preview)
-				} else {
-					log.Printf("artifact save failed: %v", e)
-				}
-			}
-			// persist tool result as a message with role=tool? nanobot stores tool outputs; we keep it but bounded.
-			if _, err := r.DB.AppendMessage(ctx, ev.SessionKey, "tool", sendOut, payload); err != nil {
-				log.Printf("append tool message failed: %v", err)
-			}
-			messages = append(messages, providers.ChatMessage{Role: "tool", ToolCallID: tc.ID, Content: sendOut})
-		}
+	replyTarget := deliveryTarget(ev)
+	finalText, err := r.executeConversation(ctx, ev.SessionKey, messages, r.Tools, ev.Channel, replyTarget)
+	if err != nil {
+		return err
 	}
 
 	if finalText == "" {
@@ -167,7 +115,7 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 
 	// deliver
 	if r.Deliver != nil {
-		if err := r.Deliver.Deliver(ctx, ev.Channel, ev.From, finalText); err != nil {
+		if err := r.Deliver.Deliver(ctx, ev.Channel, replyTarget, finalText); err != nil {
 			log.Printf("deliver failed: %v", err)
 		}
 	}
@@ -188,7 +136,61 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 	return nil
 }
 
+func (r *Runtime) BuildPromptSnapshot(ctx context.Context, sessionKey string, userMessage string) ([]providers.ChatMessage, error) {
+	if r.Builder == nil {
+		return nil, fmt.Errorf("runtime builder not configured")
+	}
+	pp, _, err := r.Builder.Build(ctx, sessionKey, userMessage)
+	if err != nil {
+		return nil, err
+	}
+	messages := append([]providers.ChatMessage{}, pp.System...)
+	messages = append(messages, pp.History...)
+	if len(pp.History) == 0 || pp.History[len(pp.History)-1].Role != "user" {
+		messages = append(messages, providers.ChatMessage{Role: "user", Content: userMessage})
+	}
+	return messages, nil
+}
+
+func (r *Runtime) RunBackground(ctx context.Context, input BackgroundRunInput) (BackgroundRunResult, error) {
+	mu := r.lockFor(input.SessionKey)
+	mu.Lock()
+	defer mu.Unlock()
+
+	if strings.TrimSpace(input.SessionKey) == "" {
+		return BackgroundRunResult{}, fmt.Errorf("background session key required")
+	}
+	if len(input.PromptSnapshot) == 0 {
+		return BackgroundRunResult{}, fmt.Errorf("background prompt snapshot required")
+	}
+	if _, err := r.DB.AppendMessage(ctx, input.SessionKey, "user", input.Task, input.Meta); err != nil {
+		return BackgroundRunResult{}, err
+	}
+	reg := input.Tools
+	if reg == nil {
+		reg = r.Tools
+	}
+	finalText, err := r.executeConversation(ctx, input.SessionKey, append([]providers.ChatMessage{}, input.PromptSnapshot...), reg, input.Channel, input.ReplyTo)
+	if err != nil {
+		return BackgroundRunResult{}, err
+	}
+	storedText, preview, artifactID := r.boundTextResult(ctx, input.SessionKey, finalText)
+	payload := cloneMap(input.Meta)
+	if input.ParentSessionKey != "" {
+		payload["parent_session_key"] = input.ParentSessionKey
+	}
+	if artifactID != "" {
+		payload["artifact_id"] = artifactID
+		payload["preview"] = preview
+	}
+	if _, err := r.DB.AppendMessage(ctx, input.SessionKey, "assistant", storedText, payload); err != nil {
+		log.Printf("append background assistant(final) failed: %v", err)
+	}
+	return BackgroundRunResult{FinalText: finalText, Preview: preview, ArtifactID: artifactID}, nil
+}
+
 func (r *Runtime) handleNewSession(ctx context.Context, ev bus.Event) error {
+	replyTarget := deliveryTarget(ev)
 	if r.Consolidator != nil && r.Builder != nil {
 		historyMax := r.Builder.HistoryMax
 		if historyMax <= 0 {
@@ -197,7 +199,7 @@ func (r *Runtime) handleNewSession(ctx context.Context, ev bus.Event) error {
 		if err := r.Consolidator.ArchiveAll(ctx, ev.SessionKey, historyMax); err != nil {
 			msg := "Memory archival failed, session not cleared. Please try again."
 			if r.Deliver != nil {
-				if derr := r.Deliver.Deliver(ctx, ev.Channel, ev.From, msg); derr != nil {
+				if derr := r.Deliver.Deliver(ctx, ev.Channel, replyTarget, msg); derr != nil {
 					log.Printf("deliver failed: %v", derr)
 				}
 			}
@@ -207,14 +209,14 @@ func (r *Runtime) handleNewSession(ctx context.Context, ev bus.Event) error {
 	if err := r.DB.ResetSessionHistory(ctx, ev.SessionKey); err != nil {
 		msg := "New session failed. Please try again."
 		if r.Deliver != nil {
-			if derr := r.Deliver.Deliver(ctx, ev.Channel, ev.From, msg); derr != nil {
+			if derr := r.Deliver.Deliver(ctx, ev.Channel, replyTarget, msg); derr != nil {
 				log.Printf("deliver failed: %v", derr)
 			}
 		}
 		return nil
 	}
 	if r.Deliver != nil {
-		if err := r.Deliver.Deliver(ctx, ev.Channel, ev.From, "New session started."); err != nil {
+		if err := r.Deliver.Deliver(ctx, ev.Channel, replyTarget, "New session started."); err != nil {
 			log.Printf("deliver failed: %v", err)
 		}
 	}
@@ -230,6 +232,122 @@ func contentToString(v any) string {
 	}
 	b, _ := json.Marshal(v)
 	return string(b)
+}
+
+func (r *Runtime) executeConversation(ctx context.Context, sessionKey string, messages []providers.ChatMessage, reg *tools.Registry, channel string, replyTo string) (string, error) {
+	if reg == nil {
+		reg = tools.NewRegistry()
+	}
+	maxLoops := r.MaxToolLoops
+	if maxLoops <= 0 {
+		maxLoops = 6
+	}
+	for loop := 0; loop < maxLoops; loop++ {
+		req := providers.ChatCompletionRequest{
+			Model:       r.Model,
+			Messages:    messages,
+			Tools:       toToolDefs(reg),
+			Temperature: r.Temperature,
+		}
+		resp, err := r.Provider.Chat(ctx, req)
+		if err != nil {
+			return "", err
+		}
+		if len(resp.Choices) == 0 {
+			return "", fmt.Errorf("no choices")
+		}
+		msg := resp.Choices[0].Message
+		if len(msg.ToolCalls) == 0 {
+			finalText := strings.TrimSpace(contentToString(msg.Content))
+			messages = append(messages, providers.ChatMessage{Role: "assistant", Content: finalText})
+			return finalText, nil
+		}
+		messages = append(messages, providers.ChatMessage{Role: "assistant", Content: msg.Content, ToolCalls: msg.ToolCalls})
+		if _, err := r.DB.AppendMessage(ctx, sessionKey, "assistant", contentToString(msg.Content), map[string]any{"tool_calls": msg.ToolCalls}); err != nil {
+			log.Printf("append assistant(tool_calls) failed: %v", err)
+		}
+
+		for _, tc := range msg.ToolCalls {
+			toolCtx := tools.ContextWithSession(ctx, sessionKey)
+			toolCtx = tools.ContextWithDelivery(toolCtx, channel, replyTo)
+			out, err := reg.Execute(toolCtx, tc.Function.Name, tc.Function.Arguments)
+			if err != nil {
+				out = "tool error: " + err.Error()
+			}
+
+			payload := map[string]any{
+				"tool": tc.Function.Name,
+				"args": json.RawMessage([]byte(tc.Function.Arguments)),
+			}
+			sendOut, preview, artifactID := r.boundTextResult(ctx, sessionKey, out)
+			if artifactID != "" {
+				payload["artifact_id"] = artifactID
+				payload["preview"] = preview
+			}
+			if _, err := r.DB.AppendMessage(ctx, sessionKey, "tool", sendOut, payload); err != nil {
+				log.Printf("append tool message failed: %v", err)
+			}
+			messages = append(messages, providers.ChatMessage{Role: "tool", ToolCallID: tc.ID, Content: sendOut})
+		}
+	}
+	return "(no response)", nil
+}
+
+func (r *Runtime) boundTextResult(ctx context.Context, sessionKey string, text string) (stored string, preview string, artifactID string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return "(no response)", "(no response)", ""
+	}
+	preview = previewText(text, r.toolPreviewBytes())
+	if r.MaxToolBytes > 0 && len(text) > r.MaxToolBytes && r.Artifacts != nil {
+		id, err := r.Artifacts.Save(ctx, sessionKey, "text/plain", []byte(text))
+		if err != nil {
+			log.Printf("artifact save failed: %v", err)
+			return text, preview, ""
+		}
+		return fmt.Sprintf("artifact_id=%s\npreview:\n%s", id, preview), preview, id
+	}
+	return text, preview, ""
+}
+
+func (r *Runtime) toolPreviewBytes() int {
+	if r.ToolPreviewBytes <= 0 {
+		return 500
+	}
+	return r.ToolPreviewBytes
+}
+
+func previewText(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "(no response)"
+	}
+	if max > 0 && len(s) > max {
+		return s[:max] + "…[preview]"
+	}
+	return s
+}
+
+func cloneMap(in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return map[string]any{}
+	}
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func deliveryTarget(ev bus.Event) string {
+	if len(ev.Meta) > 0 {
+		for _, key := range []string{"chat_id", "channel_id"} {
+			if target := strings.TrimSpace(fmt.Sprint(ev.Meta[key])); target != "" && target != "<nil>" {
+				return target
+			}
+		}
+	}
+	return strings.TrimSpace(ev.From)
 }
 
 func toToolDefs(reg *tools.Registry) []providers.ToolDef {

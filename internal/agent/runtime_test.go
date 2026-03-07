@@ -23,11 +23,15 @@ import (
 // mockDeliverer captures delivered messages
 type mockDeliverer struct {
 	messages []string
+	channel  string
+	to       string
 	err      error
 }
 
 func (m *mockDeliverer) Deliver(ctx context.Context, channel, to, text string) error {
 	m.messages = append(m.messages, text)
+	m.channel = channel
+	m.to = to
 	return m.err
 }
 
@@ -110,6 +114,102 @@ func TestRuntime_Handle_UserMessage(t *testing.T) {
 	}
 	if deliver.messages[0] != "Hello there!" {
 		t.Errorf("expected 'Hello there!', got %q", deliver.messages[0])
+	}
+}
+
+func TestRuntime_Handle_UsesChannelTargetFromEventMeta(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	response := providers.ChatCompletionResponse{
+		Choices: []struct {
+			Message struct {
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			} `json:"message"`
+		}{{
+			Message: struct {
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			}{Role: "assistant", Content: "Reply"},
+		}},
+	}
+	_, provider := buildChatServer(t, response)
+	deliver := &mockDeliverer{}
+	rt := buildSimpleRuntime(t, provider, d, deliver)
+
+	err := rt.Handle(context.Background(), bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess1",
+		Channel:    "discord",
+		From:       "user-id",
+		Message:    "hello",
+		Meta:       map[string]any{"channel_id": "channel-1"},
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if deliver.to != "channel-1" {
+		t.Fatalf("expected delivery to channel target, got %q", deliver.to)
+	}
+}
+
+func TestRuntime_Handle_PersistsAttachmentMetadata(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	response := providers.ChatCompletionResponse{
+		Choices: []struct {
+			Message struct {
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			} `json:"message"`
+		}{{
+			Message: struct {
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			}{Role: "assistant", Content: "ok"},
+		}},
+	}
+	_, provider := buildChatServer(t, response)
+	rt := buildSimpleRuntime(t, provider, d, &mockDeliverer{})
+	ev := bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess1",
+		Channel:    "telegram",
+		From:       "user",
+		Message:    "see image\n[image: photo.png]",
+		Meta: map[string]any{
+			"attachments": []map[string]any{{
+				"artifact_id": "artifact-1",
+				"filename":    "photo.png",
+				"mime":        "image/png",
+				"kind":        "image",
+				"size_bytes":  10,
+			}},
+		},
+	}
+	if err := rt.Handle(context.Background(), ev); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	msgs, err := d.GetLastMessages(context.Background(), "sess1", 10)
+	if err != nil {
+		t.Fatalf("GetLastMessages: %v", err)
+	}
+	if len(msgs) == 0 {
+		t.Fatal("expected persisted messages")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(msgs[0].PayloadJSON), &payload); err != nil {
+		t.Fatalf("Unmarshal payload: %v", err)
+	}
+	meta, ok := payload["meta"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected meta in payload, got %#v", payload)
+	}
+	attachments, ok := meta["attachments"].([]any)
+	if !ok || len(attachments) != 1 {
+		t.Fatalf("expected attachments in payload meta, got %#v", meta["attachments"])
 	}
 }
 
@@ -309,6 +409,25 @@ func (e *echoTool) Schema() map[string]any {
 	return e.SchemaFor(e.Name(), e.Description(), e.Parameters())
 }
 
+type deliveryContextTool struct {
+	tools.Base
+	channel string
+	to      string
+}
+
+func (dct *deliveryContextTool) Name() string        { return "delivery_context_tool" }
+func (dct *deliveryContextTool) Description() string { return "captures delivery context" }
+func (dct *deliveryContextTool) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{}}
+}
+func (dct *deliveryContextTool) Execute(ctx context.Context, params map[string]any) (string, error) {
+	dct.channel, dct.to = tools.DeliveryFromContext(ctx)
+	return "captured", nil
+}
+func (dct *deliveryContextTool) Schema() map[string]any {
+	return dct.SchemaFor(dct.Name(), dct.Description(), dct.Parameters())
+}
+
 func TestRuntime_Handle_ArtifactSave(t *testing.T) {
 	d := openRuntimeTestDB(t)
 	artifactsDir := t.TempDir()
@@ -396,6 +515,76 @@ func TestRuntime_Handle_ArtifactSave(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("Handle artifact: %v", err)
+	}
+}
+
+func TestRuntime_Handle_ToolContextIncludesDelivery(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		var resp providers.ChatCompletionResponse
+		if callCount == 1 {
+			resp = providers.ChatCompletionResponse{
+				Choices: []struct {
+					Message struct {
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					} `json:"message"`
+				}{{
+					Message: struct {
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					}{
+						Role: "assistant",
+						ToolCalls: []providers.ToolCall{{
+							ID:   "tc-delivery",
+							Type: "function",
+							Function: struct {
+								Name      string `json:"name"`
+								Arguments string `json:"arguments"`
+							}{Name: "delivery_context_tool", Arguments: `{}`},
+						}},
+					},
+				}},
+			}
+		} else {
+			resp = providers.ChatCompletionResponse{Choices: []struct {
+				Message struct {
+					Role      string               `json:"role"`
+					Content   any                  `json:"content"`
+					ToolCalls []providers.ToolCall `json:"tool_calls"`
+				} `json:"message"`
+			}{{Message: struct {
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			}{Role: "assistant", Content: "done"}}}}
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+	provider := providers.New(srv.URL, "key", 10*time.Second)
+	provider.HTTP = srv.Client()
+	tool := &deliveryContextTool{}
+	reg := tools.NewRegistry()
+	reg.Register(tool)
+	rt := &Runtime{DB: d, Provider: provider, Model: "gpt-4", Tools: reg, Builder: &Builder{DB: d, HistoryMax: 10}, MaxToolLoops: 4}
+	if err := rt.Handle(context.Background(), bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess",
+		Channel:    "discord",
+		From:       "user-1",
+		Message:    "hello",
+		Meta:       map[string]any{"channel_id": "channel-1"},
+	}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if tool.channel != "discord" || tool.to != "channel-1" {
+		t.Fatalf("expected delivery context discord/channel-1, got %q/%q", tool.channel, tool.to)
 	}
 }
 

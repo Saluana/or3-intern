@@ -89,42 +89,25 @@ func main() {
 	ctx := context.Background()
 	timeout := time.Duration(cfg.Provider.TimeoutSeconds) * time.Second
 	prov := providers.New(cfg.Provider.APIBase, cfg.Provider.APIKey, timeout)
+	art := &artifacts.Store{Dir: cfg.ArtifactsDir, DB: d}
 
 	b := bus.New(256)
 	del := cli.Deliverer{}
-	channelManager, err := buildChannelManager(cfg, del)
+	channelManager, err := buildChannelManager(cfg, del, art, cfg.MaxMediaBytes)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "channel config error:", err)
 		os.Exit(1)
 	}
 
-	art := &artifacts.Store{Dir: cfg.ArtifactsDir, DB: d}
-
-	reg := tools.NewRegistry()
-	reg.Register(&tools.ExecTool{Timeout: time.Duration(cfg.Tools.ExecTimeoutSeconds) * time.Second, RestrictDir: allowedRoot(cfg), PathAppend: cfg.Tools.PathAppend})
-	fileRoot := allowedRoot(cfg)
-	reg.Register(&tools.ReadFile{FileTool: tools.FileTool{Root: fileRoot}})
-	reg.Register(&tools.WriteFile{FileTool: tools.FileTool{Root: fileRoot}})
-	reg.Register(&tools.EditFile{FileTool: tools.FileTool{Root: fileRoot}})
-	reg.Register(&tools.ListDir{FileTool: tools.FileTool{Root: fileRoot}})
-	reg.Register(&tools.WebFetch{})
-	reg.Register(&tools.WebSearch{APIKey: cfg.Tools.BraveAPIKey})
-
-	// memory tools
-	reg.Register(&tools.MemorySetPinned{DB: d})
-	reg.Register(&tools.MemoryAddNote{DB: d, Provider: prov, EmbedModel: cfg.Provider.EmbedModel})
-	reg.Register(&tools.MemorySearch{DB: d, Provider: prov, EmbedModel: cfg.Provider.EmbedModel, VectorK: cfg.VectorK, FTSK: cfg.FTSK, TopK: cfg.MemoryRetrieve, VectorScanLimit: cfg.VectorScanLimit})
-
-	// send_message tool
-	reg.Register(&tools.SendMessage{Deliver: func(ctx context.Context, channel, to, text string) error {
-		return channelManager.Deliver(ctx, channel, to, text)
-	}})
-
 	// skills
 	builtin := filepath.Join(filepath.Dir(cfgPathOrDefault(cfgPath)), "builtin_skills")
 	workspace := filepath.Join(cfg.WorkspaceDir, "workspace_skills")
 	inv := skills.Scan([]string{builtin, workspace})
-	reg.Register(&tools.ReadSkill{Inventory: &inv})
+	var cronSvc *cron.Service
+	var subagentManager *agent.SubagentManager
+	buildRuntimeTools := func() *tools.Registry {
+		return buildToolRegistry(cfg, d, prov, channelManager, &inv, cronSvc, subagentManager)
+	}
 
 	ret := memory.NewRetriever(d)
 	ret.VectorScanLimit = cfg.VectorScanLimit
@@ -134,13 +117,15 @@ func main() {
 		Provider:    prov,
 		Model:       cfg.Provider.Model,
 		Temperature: cfg.Provider.Temperature,
-		Tools:       reg,
+		Tools:       buildRuntimeTools(),
 		Builder: &agent.Builder{
 			DB:                     d,
+			Artifacts:              art,
 			Skills:                 inv,
 			Mem:                    ret,
 			Provider:               prov,
 			EmbedModel:             cfg.Provider.EmbedModel,
+			EnableVision:           cfg.Provider.EnableVision,
 			Soul:                   loadBootstrapFile(cfg.SoulFile, cfg.WorkspaceDir, "SOUL.md", agent.DefaultSoul),
 			AgentInstructions:      loadBootstrapFile(cfg.AgentsFile, cfg.WorkspaceDir, "AGENTS.md", agent.DefaultAgentInstructions),
 			ToolNotes:              loadBootstrapFile(cfg.ToolsFile, cfg.WorkspaceDir, "TOOLS.md", agent.DefaultToolNotes),
@@ -155,6 +140,24 @@ func main() {
 		MaxToolBytes: cfg.MaxToolBytes,
 		MaxToolLoops: cfg.MaxToolLoops,
 		Deliver:      delivererFunc(channelManager.Deliver),
+	}
+	if cfg.Subagents.Enabled {
+		subagentManager = &agent.SubagentManager{
+			DB:            d,
+			Runtime:       rt,
+			Deliver:       delivererFunc(channelManager.Deliver),
+			MaxConcurrent: cfg.Subagents.MaxConcurrent,
+			MaxQueued:     cfg.Subagents.MaxQueued,
+			TaskTimeout:   time.Duration(cfg.Subagents.TaskTimeoutSeconds) * time.Second,
+			BackgroundTools: func() *tools.Registry {
+				return buildToolRegistry(cfg, d, prov, channelManager, &inv, cronSvc, nil)
+			},
+		}
+		if err := subagentManager.Start(ctx); err != nil {
+			fmt.Fprintln(os.Stderr, "subagent manager error:", err)
+			os.Exit(1)
+		}
+		rt.Tools = buildRuntimeTools()
 	}
 	if cfg.ConsolidationEnabled {
 		rt.Consolidator = &memory.Consolidator{
@@ -190,14 +193,13 @@ func main() {
 	}
 
 	// cron service + tool
-	var cronSvc *cron.Service
 	if cfg.Cron.Enabled {
 		cronSvc = cron.New(cfg.Cron.StorePath, agent.CronRunner(b, cfg.DefaultSessionKey))
 		if err := cronSvc.Start(); err != nil {
 			fmt.Fprintln(os.Stderr, "cron start error:", err)
 			os.Exit(1)
 		}
-		reg.Register(&tools.CronTool{Svc: cronSvc})
+		rt.Tools = buildRuntimeTools()
 	}
 
 	switch cmd {
@@ -257,6 +259,11 @@ func main() {
 	if cronSvc != nil {
 		cronSvc.Stop()
 	}
+	if subagentManager != nil {
+		if err := subagentManager.Stop(context.Background()); err != nil {
+			log.Printf("subagent manager stop failed: %v", err)
+		}
+	}
 	_ = channelManager.StopAll(context.Background())
 }
 
@@ -266,29 +273,65 @@ func (f delivererFunc) Deliver(ctx context.Context, channel, to, text string) er
 	return f(ctx, channel, to, text)
 }
 
-func buildChannelManager(cfg config.Config, cliDeliverer cli.Deliverer) (*rootchannels.Manager, error) {
+func buildToolRegistry(cfg config.Config, d *db.DB, prov *providers.Client, channelManager *rootchannels.Manager, inv *skills.Inventory, cronSvc *cron.Service, spawnManager tools.SpawnEnqueuer) *tools.Registry {
+	reg := tools.NewRegistry()
+	fileRoot := allowedRoot(cfg)
+	reg.Register(&tools.ExecTool{Timeout: time.Duration(cfg.Tools.ExecTimeoutSeconds) * time.Second, RestrictDir: fileRoot, PathAppend: cfg.Tools.PathAppend})
+	reg.Register(&tools.ReadFile{FileTool: tools.FileTool{Root: fileRoot}})
+	reg.Register(&tools.WriteFile{FileTool: tools.FileTool{Root: fileRoot}})
+	reg.Register(&tools.EditFile{FileTool: tools.FileTool{Root: fileRoot}})
+	reg.Register(&tools.ListDir{FileTool: tools.FileTool{Root: fileRoot}})
+	reg.Register(&tools.WebFetch{})
+	reg.Register(&tools.WebSearch{APIKey: cfg.Tools.BraveAPIKey})
+	reg.Register(&tools.MemorySetPinned{DB: d})
+	reg.Register(&tools.MemoryAddNote{DB: d, Provider: prov, EmbedModel: cfg.Provider.EmbedModel})
+	reg.Register(&tools.MemorySearch{DB: d, Provider: prov, EmbedModel: cfg.Provider.EmbedModel, VectorK: cfg.VectorK, FTSK: cfg.FTSK, TopK: cfg.MemoryRetrieve, VectorScanLimit: cfg.VectorScanLimit})
+	reg.Register(&tools.SendMessage{
+		Deliver: func(ctx context.Context, channel, to, text string, meta map[string]any) error {
+			if channelManager == nil {
+				return fmt.Errorf("channel manager not configured")
+			}
+			return channelManager.DeliverWithMeta(ctx, channel, to, text, meta)
+		},
+		AllowedRoot:   fileRoot,
+		ArtifactsDir:  cfg.ArtifactsDir,
+		MaxMediaBytes: cfg.MaxMediaBytes,
+	})
+	if inv != nil {
+		reg.Register(&tools.ReadSkill{Inventory: inv})
+	}
+	if cronSvc != nil {
+		reg.Register(&tools.CronTool{Svc: cronSvc})
+	}
+	if spawnManager != nil {
+		reg.Register(&tools.SpawnSubagent{Manager: spawnManager})
+	}
+	return reg
+}
+
+func buildChannelManager(cfg config.Config, cliDeliverer cli.Deliverer, art *artifacts.Store, maxMediaBytes int) (*rootchannels.Manager, error) {
 	mgr := rootchannels.NewManager()
 	if err := mgr.Register(cli.Service{Deliverer: cliDeliverer}); err != nil {
 		return nil, err
 	}
 	if cfg.Channels.Telegram.Enabled {
-		if err := mgr.Register(&telegram.Channel{Config: cfg.Channels.Telegram}); err != nil {
+		if err := mgr.Register(&telegram.Channel{Config: cfg.Channels.Telegram, Artifacts: art, MaxMediaBytes: maxMediaBytes}); err != nil {
 			return nil, err
 		}
 	}
 	if cfg.Channels.Slack.Enabled {
-		if err := mgr.Register(&slack.Channel{Config: cfg.Channels.Slack}); err != nil {
+		if err := mgr.Register(&slack.Channel{Config: cfg.Channels.Slack, Artifacts: art, MaxMediaBytes: maxMediaBytes}); err != nil {
 			return nil, err
 		}
 	}
 	if cfg.Channels.Discord.Enabled {
-		if err := mgr.Register(&discord.Channel{Config: cfg.Channels.Discord}); err != nil {
+		if err := mgr.Register(&discord.Channel{Config: cfg.Channels.Discord, Artifacts: art, MaxMediaBytes: maxMediaBytes}); err != nil {
 			return nil, err
 		}
 	}
 	if cfg.Channels.WhatsApp.Enabled {
 		cfg.Channels.WhatsApp.BridgeURL = whatsapp.BridgeURL(cfg.Channels.WhatsApp.BridgeURL)
-		if err := mgr.Register(&whatsapp.Channel{Config: cfg.Channels.WhatsApp}); err != nil {
+		if err := mgr.Register(&whatsapp.Channel{Config: cfg.Channels.WhatsApp, Artifacts: art, MaxMediaBytes: maxMediaBytes}); err != nil {
 			return nil, err
 		}
 	}

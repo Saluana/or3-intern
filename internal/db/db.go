@@ -88,6 +88,25 @@ func (d *DB) migrate(ctx context.Context) error {
 			INSERT INTO memory_fts(memory_fts, rowid, text) VALUES('delete', old.id, old.text);
 			INSERT INTO memory_fts(rowid, text) VALUES (new.id, new.text);
 		END;`,
+		`CREATE TABLE IF NOT EXISTS subagent_jobs(
+			id TEXT PRIMARY KEY,
+			parent_session_key TEXT NOT NULL,
+			child_session_key TEXT NOT NULL,
+			channel TEXT NOT NULL,
+			reply_to TEXT NOT NULL,
+			task TEXT NOT NULL,
+			status TEXT NOT NULL,
+			result_preview TEXT NOT NULL DEFAULT '',
+			artifact_id TEXT NOT NULL DEFAULT '',
+			error_text TEXT NOT NULL DEFAULT '',
+			requested_at INTEGER NOT NULL,
+			started_at INTEGER NOT NULL DEFAULT 0,
+			finished_at INTEGER NOT NULL DEFAULT 0,
+			attempts INTEGER NOT NULL DEFAULT 0,
+			metadata_json TEXT NOT NULL DEFAULT '{}'
+		);`,
+		`CREATE INDEX IF NOT EXISTS subagent_jobs_status_requested_at ON subagent_jobs(status, requested_at);`,
+		`CREATE INDEX IF NOT EXISTS subagent_jobs_parent_session ON subagent_jobs(parent_session_key, requested_at);`,
 	}
 	for _, s := range stmts {
 		if _, err := d.SQL.ExecContext(ctx, s); err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"math"
 	"strings"
 
@@ -35,6 +36,34 @@ type ConsolidationWrite struct {
 	CanonicalKey  string
 	CanonicalText string
 	CursorMsgID   int64
+}
+
+const (
+	SubagentStatusQueued      = "queued"
+	SubagentStatusRunning     = "running"
+	SubagentStatusSucceeded   = "succeeded"
+	SubagentStatusFailed      = "failed"
+	SubagentStatusInterrupted = "interrupted"
+)
+
+var ErrSubagentQueueFull = errors.New("subagent queue is full")
+
+type SubagentJob struct {
+	ID               string
+	ParentSessionKey string
+	ChildSessionKey  string
+	Channel          string
+	ReplyTo          string
+	Task             string
+	Status           string
+	ResultPreview    string
+	ArtifactID       string
+	ErrorText        string
+	RequestedAt      int64
+	StartedAt        int64
+	FinishedAt       int64
+	Attempts         int
+	MetadataJSON     string
 }
 
 func (d *DB) EnsureSession(ctx context.Context, key string) error {
@@ -371,6 +400,276 @@ func (d *DB) ResetSessionHistory(ctx context.Context, sessionKey string) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+func (d *DB) EnqueueSubagentJob(ctx context.Context, job SubagentJob) error {
+	return d.EnqueueSubagentJobLimited(ctx, job, 0)
+}
+
+func (d *DB) EnqueueSubagentJobLimited(ctx context.Context, job SubagentJob, maxQueued int) error {
+	if job.RequestedAt == 0 {
+		job.RequestedAt = NowMS()
+	}
+	if strings.TrimSpace(job.Status) == "" {
+		job.Status = SubagentStatusQueued
+	}
+	if strings.TrimSpace(job.MetadataJSON) == "" {
+		job.MetadataJSON = "{}"
+	}
+	tx, err := d.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := ensureSessionTx(ctx, tx, job.ParentSessionKey); err != nil {
+		return err
+	}
+	if err := ensureSessionTx(ctx, tx, job.ChildSessionKey); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO subagent_jobs(
+			id, parent_session_key, child_session_key, channel, reply_to, task, status,
+			result_preview, artifact_id, error_text, requested_at, started_at, finished_at, attempts, metadata_json
+		)
+		SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+		WHERE ? <= 0 OR (SELECT COUNT(*) FROM subagent_jobs WHERE status=?) < ?`,
+		job.ID,
+		job.ParentSessionKey,
+		job.ChildSessionKey,
+		job.Channel,
+		job.ReplyTo,
+		job.Task,
+		job.Status,
+		job.ResultPreview,
+		job.ArtifactID,
+		job.ErrorText,
+		job.RequestedAt,
+		job.StartedAt,
+		job.FinishedAt,
+		job.Attempts,
+		job.MetadataJSON,
+		maxQueued,
+		SubagentStatusQueued,
+		maxQueued,
+	)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrSubagentQueueFull
+	}
+	return tx.Commit()
+}
+
+func (d *DB) GetSubagentJob(ctx context.Context, id string) (SubagentJob, bool, error) {
+	row := d.SQL.QueryRowContext(ctx,
+		`SELECT id, parent_session_key, child_session_key, channel, reply_to, task, status,
+			result_preview, artifact_id, error_text, requested_at, started_at, finished_at, attempts, metadata_json
+		 FROM subagent_jobs WHERE id=?`, id)
+	job, err := scanSubagentJob(row)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return SubagentJob{}, false, nil
+		}
+		return SubagentJob{}, false, err
+	}
+	return job, true, nil
+}
+
+func (d *DB) ListQueuedSubagentJobs(ctx context.Context) ([]SubagentJob, error) {
+	rows, err := d.SQL.QueryContext(ctx,
+		`SELECT id, parent_session_key, child_session_key, channel, reply_to, task, status,
+			result_preview, artifact_id, error_text, requested_at, started_at, finished_at, attempts, metadata_json
+		 FROM subagent_jobs WHERE status=? ORDER BY requested_at ASC, id ASC`,
+		SubagentStatusQueued)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SubagentJob
+	for rows.Next() {
+		job, err := scanSubagentJob(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, job)
+	}
+	return out, rows.Err()
+}
+
+func (d *DB) MarkSubagentRunning(ctx context.Context, id string) error {
+	now := NowMS()
+	_, err := d.SQL.ExecContext(ctx,
+		`UPDATE subagent_jobs
+		 SET status=?, started_at=CASE WHEN started_at=0 THEN ? ELSE started_at END, attempts=attempts+1
+		 WHERE id=? AND status=?`,
+		SubagentStatusRunning, now, id, SubagentStatusQueued)
+	return err
+}
+
+func (d *DB) ClaimNextSubagentJob(ctx context.Context) (*SubagentJob, error) {
+	tx, err := d.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	row := tx.QueryRowContext(ctx,
+		`SELECT id, parent_session_key, child_session_key, channel, reply_to, task, status,
+			result_preview, artifact_id, error_text, requested_at, started_at, finished_at, attempts, metadata_json
+		 FROM subagent_jobs WHERE status=? ORDER BY requested_at ASC, id ASC LIMIT 1`,
+		SubagentStatusQueued)
+	job, err := scanSubagentJob(row)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	now := NowMS()
+	res, err := tx.ExecContext(ctx,
+		`UPDATE subagent_jobs SET status=?, started_at=?, attempts=attempts+1 WHERE id=? AND status=?`,
+		SubagentStatusRunning, now, job.ID, SubagentStatusQueued)
+	if err != nil {
+		return nil, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if affected == 0 {
+		return nil, tx.Commit()
+	}
+	job.Status = SubagentStatusRunning
+	job.StartedAt = now
+	job.Attempts++
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &job, nil
+}
+
+func (d *DB) MarkSubagentSucceeded(ctx context.Context, id, preview, artifactID string) error {
+	_, err := d.SQL.ExecContext(ctx,
+		`UPDATE subagent_jobs
+		 SET status=?, result_preview=?, artifact_id=?, error_text='', finished_at=?
+		 WHERE id=?`,
+		SubagentStatusSucceeded, preview, artifactID, NowMS(), id)
+	return err
+}
+
+func (d *DB) MarkSubagentFailed(ctx context.Context, id, errText string) error {
+	_, err := d.SQL.ExecContext(ctx,
+		`UPDATE subagent_jobs
+		 SET status=?, error_text=?, finished_at=?
+		 WHERE id=?`,
+		SubagentStatusFailed, errText, NowMS(), id)
+	return err
+}
+
+func (d *DB) MarkSubagentInterrupted(ctx context.Context, id, errText string) error {
+	_, err := d.SQL.ExecContext(ctx,
+		`UPDATE subagent_jobs
+		 SET status=?, error_text=?, finished_at=?
+		 WHERE id=?`,
+		SubagentStatusInterrupted, errText, NowMS(), id)
+	return err
+}
+
+func (d *DB) MarkRunningSubagentsInterrupted(ctx context.Context, reason string) error {
+	if strings.TrimSpace(reason) == "" {
+		reason = "interrupted during restart"
+	}
+	_, err := d.SQL.ExecContext(ctx,
+		`UPDATE subagent_jobs
+		 SET status=?, error_text=?, finished_at=?
+		 WHERE status=?`,
+		SubagentStatusInterrupted, reason, NowMS(), SubagentStatusRunning)
+	return err
+}
+
+func (d *DB) FinalizeSubagentJob(ctx context.Context, job SubagentJob, status, preview, artifactID, errText, parentSummary string, parentPayload any) error {
+	tx, err := d.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx,
+		`UPDATE subagent_jobs
+		 SET status=?, result_preview=?, artifact_id=?, error_text=?, finished_at=?
+		 WHERE id=? AND status=?`,
+		status, preview, artifactID, errText, NowMS(), job.ID, SubagentStatusRunning)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	if strings.TrimSpace(parentSummary) != "" {
+		if _, err := appendMessageTx(ctx, tx, job.ParentSessionKey, "assistant", parentSummary, parentPayload); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func scanSubagentJob(scanner interface{ Scan(dest ...any) error }) (SubagentJob, error) {
+	var job SubagentJob
+	err := scanner.Scan(
+		&job.ID,
+		&job.ParentSessionKey,
+		&job.ChildSessionKey,
+		&job.Channel,
+		&job.ReplyTo,
+		&job.Task,
+		&job.Status,
+		&job.ResultPreview,
+		&job.ArtifactID,
+		&job.ErrorText,
+		&job.RequestedAt,
+		&job.StartedAt,
+		&job.FinishedAt,
+		&job.Attempts,
+		&job.MetadataJSON,
+	)
+	return job, err
+}
+
+func ensureSessionTx(ctx context.Context, tx *sql.Tx, key string) error {
+	now := NowMS()
+	_, err := tx.ExecContext(ctx,
+		`INSERT INTO sessions(key, created_at, updated_at) VALUES(?,?,?)
+		 ON CONFLICT(key) DO UPDATE SET updated_at=excluded.updated_at`,
+		key, now, now)
+	return err
+}
+
+func appendMessageTx(ctx context.Context, tx *sql.Tx, sessionKey, role, content string, payload any) (int64, error) {
+	if err := ensureSessionTx(ctx, tx, sessionKey); err != nil {
+		return 0, err
+	}
+	pb, _ := json.Marshal(payload)
+	now := NowMS()
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO messages(session_key, role, content, payload_json, created_at) VALUES(?,?,?,?,?)`,
+		sessionKey, role, content, string(pb), now)
+	if err != nil {
+		return 0, err
+	}
+	id, _ := res.LastInsertId()
+	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET updated_at=? WHERE key=?`, now, sessionKey); err != nil {
+		return id, err
+	}
+	return id, nil
 }
 
 func normalizeMemorySession(sessionKey string) string {

@@ -6,14 +6,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 
+	"or3-intern/internal/artifacts"
 	"or3-intern/internal/bus"
+	rootchannels "or3-intern/internal/channels"
 	"or3-intern/internal/config"
 )
 
@@ -21,6 +26,8 @@ type Channel struct {
 	Config config.DiscordChannelConfig
 	HTTP   *http.Client
 	Dialer *websocket.Dialer
+	Artifacts *artifacts.Store
+	MaxMediaBytes int
 
 	mu     sync.Mutex
 	conn   *websocket.Conn
@@ -85,6 +92,10 @@ func (c *Channel) Deliver(ctx context.Context, to, text string, meta map[string]
 	if channelID == "" {
 		return fmt.Errorf("discord channel id required")
 	}
+	mediaPaths := rootchannels.MediaPaths(meta)
+	if len(mediaPaths) > 0 {
+		return c.postMultipart(ctx, channelID, text, mediaPaths, meta)
+	}
 	payload := map[string]any{"content": text}
 	if replyID, ok := meta["message_reference"].(string); ok && replyID != "" {
 		payload["message_reference"] = map[string]any{"message_id": replyID}
@@ -142,7 +153,7 @@ func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
 			case "MESSAGE_CREATE":
 				var msg inboundMessage
 				_ = json.Unmarshal(frame.D, &msg)
-				if msg.Author.Bot || strings.TrimSpace(msg.Content) == "" {
+				if msg.Author.Bot {
 					continue
 				}
 				if !c.allowedUser(msg.Author.ID) {
@@ -152,7 +163,17 @@ func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
 					continue
 				}
 				clean := strings.TrimSpace(stripMention(msg.Content, c.botID))
-				eventBus.Publish(bus.Event{Type: bus.EventUserMessage, SessionKey: "discord:" + msg.ChannelID, Channel: "discord", From: msg.Author.ID, Message: clean, Meta: map[string]any{"channel_id": msg.ChannelID, "message_reference": msg.ID}})
+				sessionKey := "discord:" + msg.ChannelID
+				attachments, markers := c.captureAttachments(ctx, sessionKey, msg.Attachments)
+				content := rootchannels.ComposeMessageText(clean, markers)
+				if content == "" {
+					continue
+				}
+				meta := map[string]any{"channel_id": msg.ChannelID, "message_reference": msg.ID}
+				if len(attachments) > 0 {
+					meta["attachments"] = attachments
+				}
+				eventBus.Publish(bus.Event{Type: bus.EventUserMessage, SessionKey: sessionKey, Channel: "discord", From: msg.Author.ID, Message: content, Meta: meta})
 			}
 		}
 		select {
@@ -218,6 +239,134 @@ func (c *Channel) postJSON(ctx context.Context, endpoint string, payload any, ou
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
+func (c *Channel) captureAttachments(ctx context.Context, sessionKey string, refs []discordAttachment) ([]artifacts.Attachment, []string) {
+	attachments := make([]artifacts.Attachment, 0, len(refs))
+	markers := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		filename := artifacts.NormalizeFilename(ref.Filename, ref.ContentType)
+		kind := artifacts.DetectKind(filename, ref.ContentType)
+		if c.MaxMediaBytes == 0 {
+			markers = append(markers, artifacts.FailureMarker(kind, filename, "disabled by config"))
+			continue
+		}
+		if c.MaxMediaBytes > 0 && ref.Size > int64(c.MaxMediaBytes) {
+			markers = append(markers, artifacts.FailureMarker(kind, filename, "too large"))
+			continue
+		}
+		if c.Artifacts == nil {
+			markers = append(markers, artifacts.FailureMarker(kind, filename, "storage unavailable"))
+			continue
+		}
+		data, err := c.downloadAttachment(ctx, ref.URL)
+		if err != nil {
+			markers = append(markers, artifacts.FailureMarker(kind, filename, "download failed"))
+			continue
+		}
+		att, err := c.Artifacts.SaveNamed(ctx, sessionKey, filename, ref.ContentType, data)
+		if err != nil {
+			markers = append(markers, artifacts.FailureMarker(kind, filename, "save failed"))
+			continue
+		}
+		attachments = append(attachments, att)
+		markers = append(markers, artifacts.Marker(att))
+	}
+	return attachments, markers
+}
+
+func (c *Channel) downloadAttachment(ctx context.Context, url string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.client().Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("discord attachment error: %s", resp.Status)
+	}
+	limit := int64(c.MaxMediaBytes)
+	if limit <= 0 {
+		limit = 25 << 20
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if c.MaxMediaBytes > 0 && len(data) > c.MaxMediaBytes {
+		return nil, fmt.Errorf("discord attachment exceeds maxMediaBytes")
+	}
+	return data, nil
+}
+
+func (c *Channel) postMultipart(ctx context.Context, channelID, text string, mediaPaths []string, meta map[string]any) error {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	payload := map[string]any{}
+	if strings.TrimSpace(text) != "" {
+		payload["content"] = text
+	}
+	if replyID, ok := meta["message_reference"].(string); ok && replyID != "" {
+		payload["message_reference"] = map[string]any{"message_id": replyID}
+	}
+	payloadJSON, _ := json.Marshal(payload)
+	if err := writer.WriteField("payload_json", string(payloadJSON)); err != nil {
+		return err
+	}
+	for i, mediaPath := range mediaPaths {
+		if err := c.attachFilePart(writer, i, mediaPath); err != nil {
+			return err
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.apiBase()+"/channels/"+channelID+"/messages", &body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bot "+c.Config.Token)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	resp, err := c.client().Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("discord api error: %s %s", resp.Status, string(respBody))
+	}
+	return nil
+}
+
+func (c *Channel) attachFilePart(writer *multipart.Writer, index int, mediaPath string) error {
+	info, err := os.Stat(mediaPath)
+	if err != nil {
+		return err
+	}
+	if c.MaxMediaBytes == 0 {
+		return fmt.Errorf("media attachments disabled by config")
+	}
+	if c.MaxMediaBytes > 0 && info.Size() > int64(c.MaxMediaBytes) {
+		return fmt.Errorf("media path exceeds maxMediaBytes: %s", mediaPath)
+	}
+	file, err := os.Open(mediaPath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	part, err := writer.CreateFormFile(fmt.Sprintf("files[%d]", index), filepath.Base(mediaPath))
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(part, file); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (c *Channel) allowedUser(user string) bool {
 	if len(c.Config.AllowedUserIDs) == 0 {
 		return true
@@ -263,8 +412,16 @@ type inboundMessage struct {
 	ChannelID string    `json:"channel_id"`
 	Content   string    `json:"content"`
 	Mentions  []mention `json:"mentions"`
+	Attachments []discordAttachment `json:"attachments"`
 	Author    struct {
 		ID  string `json:"id"`
 		Bot bool   `json:"bot"`
 	} `json:"author"`
+}
+
+type discordAttachment struct {
+	URL         string `json:"url"`
+	Filename    string `json:"filename"`
+	ContentType string `json:"content_type"`
+	Size        int64  `json:"size"`
 }

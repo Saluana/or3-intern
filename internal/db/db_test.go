@@ -3,8 +3,10 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -776,5 +778,178 @@ func TestResetSessionHistory(t *testing.T) {
 	}
 	if lastID != 0 {
 		t.Fatalf("expected cursor reset to 0, got %d", lastID)
+	}
+}
+
+func TestOpen_CreatesSubagentJobsTable(t *testing.T) {
+	d := openTestDB(t)
+	row := d.SQL.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='subagent_jobs'`)
+	var name string
+	if err := row.Scan(&name); err != nil {
+		t.Fatalf("expected subagent_jobs table, got err=%v", err)
+	}
+	if name != "subagent_jobs" {
+		t.Fatalf("expected subagent_jobs table, got %q", name)
+	}
+}
+
+func TestSubagentJobs_Lifecycle(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	job := SubagentJob{
+		ID:               "job-1",
+		ParentSessionKey: "parent",
+		ChildSessionKey:  "parent:subagent:job-1",
+		Channel:          "cli",
+		ReplyTo:          "user",
+		Task:             "do work",
+	}
+	if err := d.EnqueueSubagentJob(ctx, job); err != nil {
+		t.Fatalf("EnqueueSubagentJob: %v", err)
+	}
+	queued, err := d.ListQueuedSubagentJobs(ctx)
+	if err != nil {
+		t.Fatalf("ListQueuedSubagentJobs: %v", err)
+	}
+	if len(queued) != 1 || queued[0].ID != job.ID {
+		t.Fatalf("expected queued job, got %#v", queued)
+	}
+	claimed, err := d.ClaimNextSubagentJob(ctx)
+	if err != nil {
+		t.Fatalf("ClaimNextSubagentJob: %v", err)
+	}
+	if claimed == nil || claimed.Status != SubagentStatusRunning || claimed.Attempts != 1 {
+		t.Fatalf("expected running claimed job, got %#v", claimed)
+	}
+	if err := d.MarkSubagentSucceeded(ctx, job.ID, "preview", "artifact-1"); err != nil {
+		t.Fatalf("MarkSubagentSucceeded: %v", err)
+	}
+	stored, ok, err := d.GetSubagentJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("GetSubagentJob: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected stored job")
+	}
+	if stored.Status != SubagentStatusSucceeded || stored.ResultPreview != "preview" || stored.ArtifactID != "artifact-1" || stored.FinishedAt == 0 {
+		t.Fatalf("unexpected stored job after success: %#v", stored)
+	}
+}
+
+func TestSubagentJobs_ReconcileRunning(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	job := SubagentJob{
+		ID:               "job-2",
+		ParentSessionKey: "parent",
+		ChildSessionKey:  "parent:subagent:job-2",
+		Channel:          "cli",
+		ReplyTo:          "user",
+		Task:             "do work",
+	}
+	if err := d.EnqueueSubagentJob(ctx, job); err != nil {
+		t.Fatalf("EnqueueSubagentJob: %v", err)
+	}
+	if _, err := d.AppendMessage(ctx, job.ParentSessionKey, "user", "start", nil); err != nil {
+		t.Fatalf("AppendMessage parent: %v", err)
+	}
+	if err := d.MarkSubagentRunning(ctx, job.ID); err != nil {
+		t.Fatalf("MarkSubagentRunning: %v", err)
+	}
+	if err := d.MarkRunningSubagentsInterrupted(ctx, "restart"); err != nil {
+		t.Fatalf("MarkRunningSubagentsInterrupted: %v", err)
+	}
+	stored, ok, err := d.GetSubagentJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("GetSubagentJob: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected stored job")
+	}
+	if stored.Status != SubagentStatusInterrupted || stored.ErrorText != "restart" || stored.FinishedAt == 0 {
+		t.Fatalf("unexpected interrupted job: %#v", stored)
+	}
+}
+
+func TestSubagentJobs_EnqueueWithLimit(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	errCh := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errCh <- d.EnqueueSubagentJobLimited(ctx, SubagentJob{
+				ID:               "job-limit-" + string(rune('a'+i)),
+				ParentSessionKey: "parent",
+				ChildSessionKey:  "parent:subagent:" + string(rune('a'+i)),
+				Task:             "do work",
+			}, 1)
+		}(i)
+	}
+	wg.Wait()
+	close(errCh)
+	var successCount int
+	var fullCount int
+	for err := range errCh {
+		switch {
+		case err == nil:
+			successCount++
+		case errors.Is(err, ErrSubagentQueueFull):
+			fullCount++
+		default:
+			t.Fatalf("unexpected enqueue error: %v", err)
+		}
+	}
+	if successCount != 1 || fullCount != 1 {
+		t.Fatalf("expected one success and one queue-full error, got success=%d full=%d", successCount, fullCount)
+	}
+	queued, err := d.ListQueuedSubagentJobs(ctx)
+	if err != nil {
+		t.Fatalf("ListQueuedSubagentJobs: %v", err)
+	}
+	if len(queued) != 1 {
+		t.Fatalf("expected exactly one queued job, got %#v", queued)
+	}
+}
+
+func TestSubagentJobs_FinalizePersistsSummaryAtomically(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	job := SubagentJob{
+		ID:               "job-finalize",
+		ParentSessionKey: "parent",
+		ChildSessionKey:  "parent:subagent:job-finalize",
+		Task:             "do work",
+	}
+	if err := d.EnqueueSubagentJob(ctx, job); err != nil {
+		t.Fatalf("EnqueueSubagentJob: %v", err)
+	}
+	if _, err := d.AppendMessage(ctx, job.ParentSessionKey, "user", "start", nil); err != nil {
+		t.Fatalf("AppendMessage parent: %v", err)
+	}
+	if err := d.MarkSubagentRunning(ctx, job.ID); err != nil {
+		t.Fatalf("MarkSubagentRunning: %v", err)
+	}
+	if err := d.FinalizeSubagentJob(ctx, job, SubagentStatusSucceeded, "done", "artifact-1", "", "summary text", map[string]any{"subagent_job_id": job.ID}); err != nil {
+		t.Fatalf("FinalizeSubagentJob: %v", err)
+	}
+	stored, ok, err := d.GetSubagentJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("GetSubagentJob: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected stored job")
+	}
+	if stored.Status != SubagentStatusSucceeded || stored.ResultPreview != "done" || stored.ArtifactID != "artifact-1" {
+		t.Fatalf("unexpected finalized job: %#v", stored)
+	}
+	msgs, err := d.GetLastMessages(ctx, job.ParentSessionKey, 10)
+	if err != nil {
+		t.Fatalf("GetLastMessages: %v", err)
+	}
+	if len(msgs) == 0 || msgs[len(msgs)-1].Content != "summary text" {
+		t.Fatalf("expected parent summary message, got %#v", msgs)
 	}
 }

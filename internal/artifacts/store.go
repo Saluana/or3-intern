@@ -3,10 +3,12 @@ package artifacts
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"or3-intern/internal/db"
@@ -14,20 +16,66 @@ import (
 
 type Store struct {
 	Dir string
-	DB *db.DB
+	DB  *db.DB
 }
 
 func (s *Store) Save(ctx context.Context, sessionKey, mime string, data []byte) (string, error) {
-	if s.Dir == "" { return "", fmt.Errorf("artifacts dir not set") }
+	if s.Dir == "" {
+		return "", fmt.Errorf("artifacts dir not set")
+	}
+	if s.DB == nil {
+		return "", fmt.Errorf("artifacts db not set")
+	}
+	if err := s.DB.EnsureSession(ctx, strings.TrimSpace(sessionKey)); err != nil {
+		return "", err
+	}
 	_ = os.MkdirAll(s.Dir, 0o755)
 	id := randID()
 	path := filepath.Join(s.Dir, id)
-	if err := os.WriteFile(path, data, 0o644); err != nil { return "", err }
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return "", err
+	}
 	_, err := s.DB.SQL.ExecContext(ctx,
 		`INSERT INTO artifacts(id, session_key, mime, path, size_bytes, created_at) VALUES(?,?,?,?,?,?)`,
 		id, sessionKey, mime, path, len(data), time.Now().UnixMilli())
-	if err != nil { return "", err }
+	if err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
 	return id, nil
+}
+
+func (s *Store) SaveNamed(ctx context.Context, sessionKey, filename, mimeType string, data []byte) (Attachment, error) {
+	filename = NormalizeFilename(filename, mimeType)
+	id, err := s.Save(ctx, sessionKey, mimeType, data)
+	if err != nil {
+		return Attachment{}, err
+	}
+	return Attachment{
+		ArtifactID: id,
+		Filename:   filename,
+		Mime:       strings.TrimSpace(mimeType),
+		Kind:       DetectKind(filename, mimeType),
+		SizeBytes:  int64(len(data)),
+	}, nil
+}
+
+func (s *Store) Lookup(ctx context.Context, artifactID string) (StoredArtifact, error) {
+	if s.DB == nil {
+		return StoredArtifact{}, fmt.Errorf("artifacts db not set")
+	}
+	row := s.DB.SQL.QueryRowContext(ctx,
+		`SELECT id, session_key, mime, path, size_bytes FROM artifacts WHERE id=?`,
+		strings.TrimSpace(artifactID),
+	)
+	var stored StoredArtifact
+	if err := row.Scan(&stored.ID, &stored.SessionKey, &stored.Mime, &stored.Path, &stored.SizeBytes); err != nil {
+		if err == sql.ErrNoRows {
+			return StoredArtifact{}, fmt.Errorf("artifact not found: %s", artifactID)
+		}
+		return StoredArtifact{}, err
+	}
+	return stored, nil
 }
 
 func randID() string {

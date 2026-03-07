@@ -106,6 +106,75 @@ func TestStore_Save_MultipleArtifacts(t *testing.T) {
 	}
 }
 
+func TestStore_SaveNamedAndLookup(t *testing.T) {
+	d := openTestDB(t)
+	dir := t.TempDir()
+	ctx := context.Background()
+	if err := d.EnsureSession(ctx, "sess"); err != nil {
+		t.Fatalf("EnsureSession: %v", err)
+	}
+
+	store := &Store{Dir: dir, DB: d}
+	att, err := store.SaveNamed(ctx, "sess", "photo.png", "image/png", []byte("png-data"))
+	if err != nil {
+		t.Fatalf("SaveNamed: %v", err)
+	}
+	if att.ArtifactID == "" {
+		t.Fatal("expected artifact id")
+	}
+	if att.Kind != KindImage {
+		t.Fatalf("expected image kind, got %q", att.Kind)
+	}
+	if att.Filename != "photo.png" {
+		t.Fatalf("expected filename to round-trip, got %q", att.Filename)
+	}
+
+	stored, err := store.Lookup(ctx, att.ArtifactID)
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if stored.Mime != "image/png" {
+		t.Fatalf("expected mime image/png, got %q", stored.Mime)
+	}
+	content, err := os.ReadFile(stored.Path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(content) != "png-data" {
+		t.Fatalf("unexpected stored content: %q", string(content))
+	}
+}
+
+func TestStore_Save_CreatesSessionAutomatically(t *testing.T) {
+	d := openTestDB(t)
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	store := &Store{Dir: dir, DB: d}
+	id, err := store.Save(ctx, "fresh-session", "text/plain", []byte("artifact content"))
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if id == "" {
+		t.Fatal("expected artifact id")
+	}
+	var count int
+	if err := d.SQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions WHERE key=?`, "fresh-session").Scan(&count); err != nil {
+		t.Fatalf("QueryRowContext: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected session to be created, got count=%d", count)
+	}
+}
+
+func TestStore_SaveNamed_NoDirSet(t *testing.T) {
+	d := openTestDB(t)
+	store := &Store{DB: d}
+	if _, err := store.SaveNamed(context.Background(), "sess", "photo.png", "image/png", []byte("png-data")); err == nil {
+		t.Fatal("expected error when artifacts dir is not configured")
+	}
+}
+
 func TestRandID_NotEmpty(t *testing.T) {
 	id := randID()
 	if id == "" {

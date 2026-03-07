@@ -1,0 +1,305 @@
+package agent
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"log"
+	"strings"
+	"sync"
+	"time"
+
+	"or3-intern/internal/db"
+	"or3-intern/internal/tools"
+)
+
+type SubagentManager struct {
+	DB              *db.DB
+	Runtime         *Runtime
+	Deliver         Deliverer
+	MaxConcurrent   int
+	MaxQueued       int
+	TaskTimeout     time.Duration
+	BackgroundTools func() *tools.Registry
+
+	mu       sync.Mutex
+	started  bool
+	ctx      context.Context
+	cancel   context.CancelFunc
+	notifyCh chan struct{}
+	wg       sync.WaitGroup
+}
+
+func (m *SubagentManager) Start(ctx context.Context) error {
+	if m == nil {
+		return fmt.Errorf("subagent manager is nil")
+	}
+	if m.DB == nil {
+		return fmt.Errorf("subagent db not configured")
+	}
+	if m.Runtime == nil {
+		return fmt.Errorf("subagent runtime not configured")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.started {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if m.MaxConcurrent <= 0 {
+		m.MaxConcurrent = 1
+	}
+	if m.MaxQueued <= 0 {
+		m.MaxQueued = 32
+	}
+	if m.TaskTimeout <= 0 {
+		m.TaskTimeout = 5 * time.Minute
+	}
+	if err := m.DB.MarkRunningSubagentsInterrupted(ctx, "subagent interrupted during restart"); err != nil {
+		return err
+	}
+	m.ctx, m.cancel = context.WithCancel(ctx)
+	m.notifyCh = make(chan struct{}, 1)
+	m.started = true
+	for i := 0; i < m.MaxConcurrent; i++ {
+		m.wg.Add(1)
+		go m.workerLoop()
+	}
+	queued, err := m.DB.ListQueuedSubagentJobs(ctx)
+	if err != nil {
+		return err
+	}
+	if len(queued) > 0 {
+		select {
+		case m.notifyCh <- struct{}{}:
+		default:
+		}
+	}
+	return nil
+}
+
+func (m *SubagentManager) Stop(ctx context.Context) error {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	if !m.started {
+		m.mu.Unlock()
+		return nil
+	}
+	cancel := m.cancel
+	m.started = false
+	m.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	done := make(chan struct{})
+	go func() {
+		m.wg.Wait()
+		close(done)
+	}()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (m *SubagentManager) Enqueue(ctx context.Context, req tools.SpawnRequest) (tools.SpawnJob, error) {
+	if m == nil || m.DB == nil {
+		return tools.SpawnJob{}, fmt.Errorf("background subagents disabled")
+	}
+	task := strings.TrimSpace(req.Task)
+	if task == "" {
+		return tools.SpawnJob{}, fmt.Errorf("empty task")
+	}
+	parentSessionKey := strings.TrimSpace(req.ParentSessionKey)
+	if parentSessionKey == "" {
+		return tools.SpawnJob{}, fmt.Errorf("missing parent session")
+	}
+	jobID := newSubagentID()
+	job := db.SubagentJob{
+		ID:               jobID,
+		ParentSessionKey: parentSessionKey,
+		ChildSessionKey:  childSessionKey(parentSessionKey, jobID),
+		Channel:          strings.TrimSpace(req.Channel),
+		ReplyTo:          strings.TrimSpace(req.To),
+		Task:             task,
+		Status:           db.SubagentStatusQueued,
+		MetadataJSON:     "{}",
+	}
+	if err := m.DB.EnqueueSubagentJobLimited(ctx, job, m.MaxQueued); err != nil {
+		return tools.SpawnJob{}, err
+	}
+	m.signal()
+	return tools.SpawnJob{ID: job.ID, ChildSessionKey: job.ChildSessionKey}, nil
+}
+
+func (m *SubagentManager) workerLoop() {
+	defer m.wg.Done()
+	for {
+		ran, err := m.runOnce()
+		if err != nil {
+			if !errors.Is(err, context.Canceled) {
+				log.Printf("subagent worker error: %v", err)
+			}
+		}
+		if ran {
+			continue
+		}
+		select {
+		case <-m.ctx.Done():
+			return
+		case <-m.notifyCh:
+		}
+	}
+}
+
+func (m *SubagentManager) runOnce() (bool, error) {
+	job, err := m.DB.ClaimNextSubagentJob(m.ctx)
+	if err != nil || job == nil {
+		return false, err
+	}
+	m.executeJob(*job)
+	return true, nil
+}
+
+func (m *SubagentManager) executeJob(job db.SubagentJob) {
+	runCtx, cancel := context.WithTimeout(m.ctx, m.TaskTimeout)
+	defer cancel()
+	result, err := m.runJob(runCtx, job)
+	if err != nil {
+		reason := strings.TrimSpace(err.Error())
+		switch {
+		case errors.Is(err, context.Canceled), errors.Is(runCtx.Err(), context.Canceled):
+			m.finalizeJob(job, db.SubagentStatusInterrupted, "", "", reasonOrDefault(reason, "subagent interrupted"))
+		case errors.Is(err, context.DeadlineExceeded), errors.Is(runCtx.Err(), context.DeadlineExceeded):
+			m.finalizeJob(job, db.SubagentStatusFailed, "", "", reasonOrDefault(reason, "subagent timed out"))
+		default:
+			m.finalizeJob(job, db.SubagentStatusFailed, "", "", reasonOrDefault(reason, "subagent failed"))
+		}
+		return
+	}
+	m.finalizeJob(job, db.SubagentStatusSucceeded, result.Preview, result.ArtifactID, "")
+}
+
+func (m *SubagentManager) runJob(ctx context.Context, job db.SubagentJob) (BackgroundRunResult, error) {
+	promptSnapshot, err := m.Runtime.BuildPromptSnapshot(ctx, job.ParentSessionKey, job.Task)
+	if err != nil {
+		return BackgroundRunResult{}, err
+	}
+	return m.Runtime.RunBackground(ctx, BackgroundRunInput{
+		SessionKey:       job.ChildSessionKey,
+		ParentSessionKey: job.ParentSessionKey,
+		Task:             job.Task,
+		PromptSnapshot:   promptSnapshot,
+		Tools:            m.backgroundTools(),
+		Meta: map[string]any{
+			"subagent_job_id":    job.ID,
+			"parent_session_key": job.ParentSessionKey,
+		},
+		Channel: job.Channel,
+		ReplyTo: job.ReplyTo,
+	})
+}
+
+func (m *SubagentManager) backgroundTools() *tools.Registry {
+	if m.BackgroundTools != nil {
+		return m.BackgroundTools()
+	}
+	return tools.NewRegistry()
+}
+
+func (m *SubagentManager) finalizeJob(job db.SubagentJob, status string, preview string, artifactID string, errText string) {
+	success := status == db.SubagentStatusSucceeded
+	text := formatParentSubagentSummary(job, success, preview, artifactID, errText)
+	payload := map[string]any{
+		"subagent_job_id": job.ID,
+		"child_session":   job.ChildSessionKey,
+		"status":          status,
+	}
+	if artifactID != "" {
+		payload["artifact_id"] = artifactID
+	}
+	if err := m.DB.FinalizeSubagentJob(context.Background(), job, status, preview, artifactID, errText, text, payload); err != nil {
+		log.Printf("finalize subagent failed: job=%s err=%v", job.ID, err)
+		return
+	}
+	m.deliverCompletion(context.Background(), job, success, preview, artifactID, errText)
+}
+
+func (m *SubagentManager) deliverCompletion(ctx context.Context, job db.SubagentJob, success bool, preview string, artifactID string, errText string) {
+	deliverer := m.Deliver
+	if deliverer == nil && m.Runtime != nil {
+		deliverer = m.Runtime.Deliver
+	}
+	if deliverer == nil || strings.TrimSpace(job.Channel) == "" || strings.TrimSpace(job.ReplyTo) == "" {
+		return
+	}
+	text := formatDeliverySubagentSummary(job, success, preview, artifactID, errText)
+	if err := deliverer.Deliver(ctx, job.Channel, job.ReplyTo, text); err != nil {
+		log.Printf("subagent delivery failed: job=%s err=%v", job.ID, err)
+	}
+}
+
+func (m *SubagentManager) signal() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.started || m.notifyCh == nil {
+		return
+	}
+	select {
+	case m.notifyCh <- struct{}{}:
+	default:
+	}
+}
+
+func childSessionKey(parentSessionKey, jobID string) string {
+	return parentSessionKey + ":subagent:" + jobID
+}
+
+func newSubagentID() string {
+	var raw [12]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return fmt.Sprintf("job-%d", time.Now().UnixNano())
+	}
+	return "job-" + hex.EncodeToString(raw[:])
+}
+
+func reasonOrDefault(reason string, fallback string) string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return fallback
+	}
+	return reason
+}
+
+func formatParentSubagentSummary(job db.SubagentJob, success bool, preview string, artifactID string, errText string) string {
+	if success {
+		text := fmt.Sprintf("Background job %s completed: %s", job.ID, preview)
+		if artifactID != "" {
+			text += fmt.Sprintf("\nartifact_id=%s", artifactID)
+		}
+		return text
+	}
+	return fmt.Sprintf("Background job %s failed: %s", job.ID, reasonOrDefault(errText, "unknown error"))
+}
+
+func formatDeliverySubagentSummary(job db.SubagentJob, success bool, preview string, artifactID string, errText string) string {
+	if success {
+		text := fmt.Sprintf("Background job %s finished. %s", job.ID, preview)
+		if artifactID != "" {
+			text += fmt.Sprintf("\nartifact_id=%s", artifactID)
+		}
+		return text
+	}
+	return fmt.Sprintf("Background job %s failed. %s", job.ID, reasonOrDefault(errText, "unknown error"))
+}

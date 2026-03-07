@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"strings"
 
@@ -678,4 +679,123 @@ func normalizeMemorySession(sessionKey string) string {
 		return scope.GlobalMemoryScope
 	}
 	return sessionKey
+}
+
+// LinkSession links a physical session key to a logical scope key.
+// If scopeKey is empty, the sessionKey itself is used.
+func (d *DB) LinkSession(ctx context.Context, sessionKey, scopeKey string, meta map[string]any) error {
+	if strings.TrimSpace(sessionKey) == "" {
+		return fmt.Errorf("sessionKey required")
+	}
+	if strings.TrimSpace(scopeKey) == "" {
+		scopeKey = sessionKey
+	}
+	mb, err := json.Marshal(meta)
+	if err != nil {
+		return fmt.Errorf("marshal metadata: %w", err)
+	}
+	if mb == nil {
+		mb = []byte("{}")
+	}
+	_, err = d.SQL.ExecContext(ctx,
+		`INSERT INTO session_links(session_key, scope_key, linked_at, metadata_json) VALUES(?,?,?,?)
+         ON CONFLICT(session_key) DO UPDATE SET scope_key=excluded.scope_key, linked_at=excluded.linked_at, metadata_json=excluded.metadata_json`,
+		sessionKey, scopeKey, NowMS(), string(mb))
+	return err
+}
+
+// ResolveScopeKey returns the logical scope key for a physical session key.
+// If no link exists, it returns the session key itself.
+func (d *DB) ResolveScopeKey(ctx context.Context, sessionKey string) (string, error) {
+	row := d.SQL.QueryRowContext(ctx,
+		`SELECT scope_key FROM session_links WHERE session_key=?`, sessionKey)
+	var scopeKey string
+	if err := row.Scan(&scopeKey); err != nil {
+		if err == sql.ErrNoRows {
+			return sessionKey, nil
+		}
+		return sessionKey, err
+	}
+	return scopeKey, nil
+}
+
+// ListScopeSessions returns all physical session keys linked to the given scope key.
+func (d *DB) ListScopeSessions(ctx context.Context, scopeKey string) ([]string, error) {
+	rows, err := d.SQL.QueryContext(ctx,
+		`SELECT session_key FROM session_links WHERE scope_key=? ORDER BY linked_at ASC`, scopeKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var sk string
+		if err := rows.Scan(&sk); err != nil {
+			return nil, err
+		}
+		out = append(out, sk)
+	}
+	return out, rows.Err()
+}
+
+// GetLastMessagesScoped reads history for all sessions linked under the same scope
+// as sessionKey, ordered by message id ascending, up to limit messages.
+func (d *DB) GetLastMessagesScoped(ctx context.Context, sessionKey string, limit int) ([]Message, error) {
+	scopeKey, err := d.ResolveScopeKey(ctx, sessionKey)
+	if err != nil {
+		return d.GetLastMessages(ctx, sessionKey, limit)
+	}
+	// get all sessions in scope (including the session itself)
+	linked, err := d.ListScopeSessions(ctx, scopeKey)
+	if err != nil || len(linked) == 0 {
+		return d.GetLastMessages(ctx, sessionKey, limit)
+	}
+	// build IN clause; always include the physical session key itself
+	allKeys := linked
+	found := false
+	for _, k := range linked {
+		if k == sessionKey {
+			found = true
+			break
+		}
+	}
+	if !found {
+		allKeys = append(allKeys, sessionKey)
+	}
+	// build placeholders
+	placeholders := make([]string, len(allKeys))
+	args := make([]any, len(allKeys)+1)
+	for i, k := range allKeys {
+		placeholders[i] = "?"
+		args[i] = k
+	}
+	args[len(allKeys)] = limit
+	q := `SELECT id, session_key, role, content, payload_json, created_at
+          FROM messages WHERE session_key IN (` + strings.Join(placeholders, ",") + `)
+          ORDER BY id DESC LIMIT ?`
+	rows, err := d.SQL.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Message
+	for rows.Next() {
+		var m Message
+		if err := rows.Scan(&m.ID, &m.SessionKey, &m.Role, &m.Content, &m.PayloadJSON, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// reverse to chronological
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	// align so first is user
+	for len(out) > 0 && out[0].Role != "user" {
+		out = out[1:]
+	}
+	return out, nil
 }

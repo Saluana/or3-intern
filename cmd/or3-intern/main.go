@@ -78,6 +78,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, "bootstrap tools file error:", err)
 		os.Exit(1)
 	}
+	// Bootstrap IDENTITY.md and MEMORY.md (silent fallback if missing)
+	if cfg.IdentityFile != "" {
+		_ = ensureFileIfMissing(cfg.IdentityFile, "# Identity\n")
+	}
+	if cfg.MemoryFile != "" {
+		_ = ensureFileIfMissing(cfg.MemoryFile, "# Static Memory\n")
+	}
 
 	d, err := db.Open(cfg.DBPath)
 	if err != nil {
@@ -235,7 +242,6 @@ func main() {
 			os.Exit(1)
 		}
 	case "migrate-jsonl":
-		// or3-intern migrate-jsonl /path/to/session.jsonl cli:default
 		if len(args) < 2 {
 			fmt.Fprintln(os.Stderr, "usage: or3-intern migrate-jsonl <jsonl_path> [session_key]")
 			os.Exit(2)
@@ -251,6 +257,59 @@ func main() {
 		fmt.Println("ok")
 	case "version":
 		fmt.Println("or3-intern v1")
+	case "scope":
+		// or3-intern scope link <session-key> <scope-key>
+		// or3-intern scope list <scope-key>
+		fs := flag.NewFlagSet("scope", flag.ExitOnError)
+		_ = fs.Parse(args[1:])
+		scopeArgs := fs.Args()
+		if len(scopeArgs) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: or3-intern scope <link|list> ...")
+			os.Exit(2)
+		}
+		switch scopeArgs[0] {
+		case "link":
+			if len(scopeArgs) < 3 {
+				fmt.Fprintln(os.Stderr, "usage: or3-intern scope link <session-key> <scope-key>")
+				os.Exit(2)
+			}
+			if err := d.LinkSession(ctx, scopeArgs[1], scopeArgs[2], nil); err != nil {
+				fmt.Fprintln(os.Stderr, "scope link error:", err)
+				os.Exit(1)
+			}
+			fmt.Printf("Linked session %q -> scope %q\n", scopeArgs[1], scopeArgs[2])
+		case "list":
+			if len(scopeArgs) < 2 {
+				fmt.Fprintln(os.Stderr, "usage: or3-intern scope list <scope-key>")
+				os.Exit(2)
+			}
+			sessions, err := d.ListScopeSessions(ctx, scopeArgs[1])
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "scope list error:", err)
+				os.Exit(1)
+			}
+			if len(sessions) == 0 {
+				fmt.Println("(no sessions linked to scope)")
+			} else {
+				for _, s := range sessions {
+					fmt.Println(s)
+				}
+			}
+		case "resolve":
+			if len(scopeArgs) < 2 {
+				fmt.Fprintln(os.Stderr, "usage: or3-intern scope resolve <session-key>")
+				os.Exit(2)
+			}
+			scopeKey, err := d.ResolveScopeKey(ctx, scopeArgs[1])
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "scope resolve error:", err)
+				os.Exit(1)
+			}
+			fmt.Println(scopeKey)
+		default:
+			fmt.Fprintln(os.Stderr, "unknown scope subcommand:", scopeArgs[0])
+			os.Exit(2)
+		}
 	default:
 		fmt.Fprintln(os.Stderr, "unknown command:", cmd)
 		os.Exit(2)

@@ -107,6 +107,41 @@ func (d *DB) migrate(ctx context.Context) error {
 		);`,
 		`CREATE INDEX IF NOT EXISTS subagent_jobs_status_requested_at ON subagent_jobs(status, requested_at);`,
 		`CREATE INDEX IF NOT EXISTS subagent_jobs_parent_session ON subagent_jobs(parent_session_key, requested_at);`,
+		`CREATE TABLE IF NOT EXISTS session_links(
+			session_key TEXT PRIMARY KEY,
+			scope_key TEXT NOT NULL,
+			linked_at INTEGER NOT NULL,
+			metadata_json TEXT NOT NULL DEFAULT '{}'
+		);`,
+		`CREATE INDEX IF NOT EXISTS session_links_scope_key ON session_links(scope_key);`,
+		`CREATE TABLE IF NOT EXISTS memory_docs(
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			scope_key TEXT NOT NULL,
+			path TEXT NOT NULL,
+			kind TEXT NOT NULL,
+			title TEXT NOT NULL DEFAULT '',
+			summary TEXT NOT NULL DEFAULT '',
+			text TEXT NOT NULL,
+			embedding BLOB,
+			hash TEXT NOT NULL,
+			mtime_ms INTEGER NOT NULL,
+			size_bytes INTEGER NOT NULL,
+			active INTEGER NOT NULL DEFAULT 1,
+			updated_at INTEGER NOT NULL,
+			UNIQUE(scope_key, path)
+		);`,
+		`CREATE INDEX IF NOT EXISTS memory_docs_scope_path ON memory_docs(scope_key, path);`,
+		`CREATE VIRTUAL TABLE IF NOT EXISTS memory_docs_fts USING fts5(title, summary, text, content='memory_docs', content_rowid='id');`,
+		`CREATE TRIGGER IF NOT EXISTS memory_docs_ai AFTER INSERT ON memory_docs BEGIN
+			INSERT INTO memory_docs_fts(rowid, title, summary, text) VALUES (new.id, new.title, new.summary, new.text);
+		END;`,
+		`CREATE TRIGGER IF NOT EXISTS memory_docs_ad AFTER DELETE ON memory_docs BEGIN
+			INSERT INTO memory_docs_fts(memory_docs_fts, rowid, title, summary, text) VALUES('delete', old.id, old.title, old.summary, old.text);
+		END;`,
+		`CREATE TRIGGER IF NOT EXISTS memory_docs_au AFTER UPDATE ON memory_docs BEGIN
+			INSERT INTO memory_docs_fts(memory_docs_fts, rowid, title, summary, text) VALUES('delete', old.id, old.title, old.summary, old.text);
+			INSERT INTO memory_docs_fts(rowid, title, summary, text) VALUES (new.id, new.title, new.summary, new.text);
+		END;`,
 	}
 	for _, s := range stmts {
 		if _, err := d.SQL.ExecContext(ctx, s); err != nil {

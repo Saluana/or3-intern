@@ -38,6 +38,12 @@ type Config struct {
 	ConsolidationAsyncTimeoutSeconds int             `json:"consolidationAsyncTimeoutSeconds"`
 	Subagents                        SubagentsConfig `json:"subagents"`
 
+	IdentityFile string        `json:"identityFile"`
+	MemoryFile   string        `json:"memoryFile"`
+	DocIndex     DocIndexConfig `json:"docIndex"`
+	Skills       SkillsConfig   `json:"skills"`
+	Triggers     TriggerConfig  `json:"triggers"`
+
 	Provider  ProviderConfig  `json:"provider"`
 	Tools     ToolsConfig     `json:"tools"`
 	Cron      CronConfig      `json:"cron"`
@@ -126,6 +132,41 @@ type ChannelsConfig struct {
 	WhatsApp WhatsAppBridgeConfig  `json:"whatsApp"`
 }
 
+type DocIndexConfig struct {
+	Enabled        bool     `json:"enabled"`
+	Roots          []string `json:"roots"`
+	MaxFiles       int      `json:"maxFiles"`
+	MaxFileBytes   int      `json:"maxFileBytes"`
+	MaxChunks      int      `json:"maxChunks"`
+	EmbedMaxBytes  int      `json:"embedMaxBytes"`
+	RefreshSeconds int      `json:"refreshSeconds"`
+	RetrieveLimit  int      `json:"retrieveLimit"`
+}
+
+type SkillsConfig struct {
+	EnableExec    bool `json:"enableExec"`
+	MaxRunSeconds int  `json:"maxRunSeconds"`
+}
+
+type WebhookConfig struct {
+	Enabled   bool   `json:"enabled"`
+	Addr      string `json:"addr"`
+	Secret    string `json:"secret"`
+	MaxBodyKB int    `json:"maxBodyKB"`
+}
+
+type FileWatchConfig struct {
+	Enabled         bool     `json:"enabled"`
+	Paths           []string `json:"paths"`
+	PollSeconds     int      `json:"pollSeconds"`
+	DebounceSeconds int      `json:"debounceSeconds"`
+}
+
+type TriggerConfig struct {
+	Webhook   WebhookConfig   `json:"webhook"`
+	FileWatch FileWatchConfig `json:"fileWatch"`
+}
+
 func Default() Config {
 	home, _ := os.UserHomeDir()
 	root := filepath.Join(home, ".or3-intern")
@@ -138,6 +179,8 @@ func Default() Config {
 		SoulFile:                         filepath.Join(root, "SOUL.md"),
 		AgentsFile:                       filepath.Join(root, "AGENTS.md"),
 		ToolsFile:                        filepath.Join(root, "TOOLS.md"),
+		IdentityFile:                     filepath.Join(root, "IDENTITY.md"),
+		MemoryFile:                       filepath.Join(root, "MEMORY.md"),
 		BootstrapMaxChars:                20000,
 		BootstrapTotalMaxChars:           150000,
 		SessionCache:                     64,
@@ -160,6 +203,31 @@ func Default() Config {
 			MaxConcurrent:      1,
 			MaxQueued:          32,
 			TaskTimeoutSeconds: 300,
+		},
+		DocIndex: DocIndexConfig{
+			Enabled:        false,
+			MaxFiles:       100,
+			MaxFileBytes:   64 * 1024,
+			MaxChunks:      500,
+			EmbedMaxBytes:  8 * 1024,
+			RefreshSeconds: 300,
+			RetrieveLimit:  5,
+		},
+		Skills: SkillsConfig{
+			EnableExec:    false,
+			MaxRunSeconds: 30,
+		},
+		Triggers: TriggerConfig{
+			Webhook: WebhookConfig{
+				Enabled:   false,
+				Addr:      "127.0.0.1:8765",
+				MaxBodyKB: 64,
+			},
+			FileWatch: FileWatchConfig{
+				Enabled:         false,
+				PollSeconds:     5,
+				DebounceSeconds: 2,
+			},
 		},
 		Provider: ProviderConfig{
 			APIBase:        "https://api.openai.com/v1",
@@ -354,6 +422,39 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.Channels.WhatsApp.BridgeURL == "" {
 		cfg.Channels.WhatsApp.BridgeURL = "ws://127.0.0.1:3001/ws"
+	}
+	if cfg.DocIndex.MaxFiles <= 0 {
+		cfg.DocIndex.MaxFiles = 100
+	}
+	if cfg.DocIndex.MaxFileBytes <= 0 {
+		cfg.DocIndex.MaxFileBytes = 64 * 1024
+	}
+	if cfg.DocIndex.MaxChunks <= 0 {
+		cfg.DocIndex.MaxChunks = 500
+	}
+	if cfg.DocIndex.EmbedMaxBytes <= 0 {
+		cfg.DocIndex.EmbedMaxBytes = 8 * 1024
+	}
+	if cfg.DocIndex.RefreshSeconds <= 0 {
+		cfg.DocIndex.RefreshSeconds = 300
+	}
+	if cfg.DocIndex.RetrieveLimit <= 0 {
+		cfg.DocIndex.RetrieveLimit = 5
+	}
+	if cfg.Skills.MaxRunSeconds <= 0 {
+		cfg.Skills.MaxRunSeconds = 30
+	}
+	if cfg.Triggers.Webhook.Addr == "" {
+		cfg.Triggers.Webhook.Addr = "127.0.0.1:8765"
+	}
+	if cfg.Triggers.Webhook.MaxBodyKB <= 0 {
+		cfg.Triggers.Webhook.MaxBodyKB = 64
+	}
+	if cfg.Triggers.FileWatch.PollSeconds <= 0 {
+		cfg.Triggers.FileWatch.PollSeconds = 5
+	}
+	if cfg.Triggers.FileWatch.DebounceSeconds <= 0 {
+		cfg.Triggers.FileWatch.DebounceSeconds = 2
 	}
 	return cfg, nil
 }

@@ -953,3 +953,124 @@ func TestSubagentJobs_FinalizePersistsSummaryAtomically(t *testing.T) {
 		t.Fatalf("expected parent summary message, got %#v", msgs)
 	}
 }
+
+func TestLinkSession(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	if err := d.LinkSession(ctx, "session-a", "scope-1", nil); err != nil {
+		t.Fatalf("LinkSession a: %v", err)
+	}
+	if err := d.LinkSession(ctx, "session-b", "scope-1", nil); err != nil {
+		t.Fatalf("LinkSession b: %v", err)
+	}
+
+	scopeA, err := d.ResolveScopeKey(ctx, "session-a")
+	if err != nil {
+		t.Fatalf("ResolveScopeKey a: %v", err)
+	}
+	if scopeA != "scope-1" {
+		t.Fatalf("expected scope-1, got %q", scopeA)
+	}
+
+	scopeB, err := d.ResolveScopeKey(ctx, "session-b")
+	if err != nil {
+		t.Fatalf("ResolveScopeKey b: %v", err)
+	}
+	if scopeB != "scope-1" {
+		t.Fatalf("expected scope-1, got %q", scopeB)
+	}
+}
+
+func TestResolveScopeKeyUnlinked(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	scopeKey, err := d.ResolveScopeKey(ctx, "unlinked-session")
+	if err != nil {
+		t.Fatalf("ResolveScopeKey: %v", err)
+	}
+	if scopeKey != "unlinked-session" {
+		t.Fatalf("expected unlinked-session, got %q", scopeKey)
+	}
+}
+
+func TestListScopeSessions(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	if err := d.LinkSession(ctx, "sess-x", "scope-2", nil); err != nil {
+		t.Fatalf("LinkSession x: %v", err)
+	}
+	if err := d.LinkSession(ctx, "sess-y", "scope-2", nil); err != nil {
+		t.Fatalf("LinkSession y: %v", err)
+	}
+
+	sessions, err := d.ListScopeSessions(ctx, "scope-2")
+	if err != nil {
+		t.Fatalf("ListScopeSessions: %v", err)
+	}
+	if len(sessions) != 2 {
+		t.Fatalf("expected 2 sessions, got %d", len(sessions))
+	}
+	found := map[string]bool{}
+	for _, s := range sessions {
+		found[s] = true
+	}
+	if !found["sess-x"] || !found["sess-y"] {
+		t.Fatalf("expected sess-x and sess-y, got %v", sessions)
+	}
+}
+
+func TestGetLastMessagesScoped(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	// Link two sessions to a scope
+	if err := d.LinkSession(ctx, "scoped-a", "scope-3", nil); err != nil {
+		t.Fatalf("LinkSession a: %v", err)
+	}
+	if err := d.LinkSession(ctx, "scoped-b", "scope-3", nil); err != nil {
+		t.Fatalf("LinkSession b: %v", err)
+	}
+
+	// Add messages to both sessions
+	if _, err := d.AppendMessage(ctx, "scoped-a", "user", "hello from a", nil); err != nil {
+		t.Fatalf("AppendMessage a user: %v", err)
+	}
+	if _, err := d.AppendMessage(ctx, "scoped-a", "assistant", "reply from a", nil); err != nil {
+		t.Fatalf("AppendMessage a assistant: %v", err)
+	}
+	if _, err := d.AppendMessage(ctx, "scoped-b", "user", "hello from b", nil); err != nil {
+		t.Fatalf("AppendMessage b user: %v", err)
+	}
+	if _, err := d.AppendMessage(ctx, "scoped-b", "assistant", "reply from b", nil); err != nil {
+		t.Fatalf("AppendMessage b assistant: %v", err)
+	}
+
+	msgs, err := d.GetLastMessagesScoped(ctx, "scoped-a", 10)
+	if err != nil {
+		t.Fatalf("GetLastMessagesScoped: %v", err)
+	}
+	if len(msgs) < 2 {
+		t.Fatalf("expected at least 2 messages, got %d", len(msgs))
+	}
+	// First message must be a user message (alignment rule)
+	if msgs[0].Role != "user" {
+		t.Fatalf("expected first message to be user, got %q", msgs[0].Role)
+	}
+	// Messages must be in ascending id order (chronological)
+	for i := 1; i < len(msgs); i++ {
+		if msgs[i].ID < msgs[i-1].ID {
+			t.Fatalf("messages not in chronological order at index %d", i)
+		}
+	}
+	// Both sessions' messages should appear
+	contents := map[string]bool{}
+	for _, m := range msgs {
+		contents[m.Content] = true
+	}
+	if !contents["hello from a"] || !contents["hello from b"] {
+		t.Fatalf("expected messages from both sessions, got %v", contents)
+	}
+}

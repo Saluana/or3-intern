@@ -157,7 +157,7 @@ func TestRuntime_Streaming_AbortOnToolCalls(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount++
 		if callCount == 1 {
-			// First call: SSE response with a tool call
+			// First call: SSE response with a tool call (no text content)
 			w.Header().Set("Content-Type", "text/event-stream")
 			fmt.Fprintln(w, `data: {"id":"1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"exec","arguments":"{\"cmd\":\"echo hi\"}"}}]},"finish_reason":"tool_calls"}]}`)
 			fmt.Fprintln(w, `data: [DONE]`)
@@ -196,11 +196,14 @@ func TestRuntime_Streaming_AbortOnToolCalls(t *testing.T) {
 		t.Fatalf("Handle: %v", err)
 	}
 
+	// With lazy stream init, BeginStream is only called when there are text
+	// deltas. The first turn has only tool calls (no text), so no writer is
+	// created for it. Only the final text-only turn creates a writer.
 	if len(writers) != 1 {
 		t.Fatalf("expected exactly 1 stream writer for the final answer, got %d", len(writers))
 	}
 	if writers[0].aborted {
-		t.Error("did not expect aborted stream output on tool-call turn")
+		t.Error("did not expect aborted stream output on final answer")
 	}
 	if !writers[0].closed {
 		t.Error("expected final stream writer to be closed")

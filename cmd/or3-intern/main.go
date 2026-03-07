@@ -101,7 +101,8 @@ func main() {
 	art := &artifacts.Store{Dir: cfg.ArtifactsDir, DB: d}
 
 	b := bus.New(256)
-	del := cli.Deliverer{}
+	spinner := cli.NewSpinner()
+	del := cli.Deliverer{Spinner: spinner}
 	channelManager, err := buildChannelManager(cfg, del, art, cfg.MaxMediaBytes)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "channel config error:", err)
@@ -262,7 +263,7 @@ func main() {
 		rt.Streamer = del
 		_ = channelManager.Start(ctx, "cli", b)
 		runWorkers(ctx, b, rt, cfg.WorkerCount)
-		ch := &cli.Channel{Bus: b, SessionKey: cfg.DefaultSessionKey}
+		ch := &cli.Channel{Bus: b, SessionKey: cfg.DefaultSessionKey, Spinner: spinner}
 		if err := ch.Run(ctx); err != nil {
 			fmt.Fprintln(os.Stderr, "cli error:", err)
 		}

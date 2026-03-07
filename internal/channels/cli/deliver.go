@@ -3,79 +3,113 @@ package cli
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"or3-intern/internal/bus"
 	"or3-intern/internal/channels"
 )
 
-type Deliverer struct{}
+// Deliverer handles final and streaming output to the CLI terminal.
+type Deliverer struct {
+	Spinner *Spinner // shared with Channel; stopped before any output
+}
 
 func (Deliverer) Name() string { return "cli" }
 
-func (Deliverer) Start(ctx context.Context, eventBus *bus.Bus) error {
-	_ = ctx
-	_ = eventBus
+func (Deliverer) Start(ctx context.Context, eventBus *bus.Bus) error { return nil }
+
+func (Deliverer) Stop(ctx context.Context) error { return nil }
+
+func (d Deliverer) Deliver(ctx context.Context, channel, to, text string) error {
+	d.stopSpinner()
+	fmt.Print(FormatResponse(text))
+	fmt.Println()
+	fmt.Println()
+	if sep := Separator(); sep != "" {
+		fmt.Println(sep)
+	}
+	ShowPrompt()
 	return nil
 }
 
-func (Deliverer) Stop(ctx context.Context) error {
-	_ = ctx
-	return nil
+func (d Deliverer) stopSpinner() {
+	if d.Spinner != nil {
+		d.Spinner.Stop()
+	}
 }
 
-func (Deliverer) Deliver(ctx context.Context, channel, to, text string) error {
-	_ = ctx
-	if channel == "" { channel = "cli" }
-	fmt.Printf("\n[%s] %s\n\n", channel, text)
-	return nil
-}
+// ──────────────────────── streaming ────────────────────────
 
-// CLIStreamWriter writes deltas directly to stdout.
+// CLIStreamWriter renders incremental text deltas to stdout with styling.
 type CLIStreamWriter struct {
 	started bool
 	closed  bool
 	aborted bool
+	spinner *Spinner
 }
 
 func (w *CLIStreamWriter) WriteDelta(ctx context.Context, text string) error {
-	_ = ctx
 	if w.closed || w.aborted {
 		return nil
 	}
-	w.started = true
+	if !w.started {
+		// Stop the spinner and print the response header on the first delta.
+		if w.spinner != nil {
+			w.spinner.Stop()
+		}
+		w.started = true
+		fmt.Print(ResponsePrefix())
+	}
+	// Indent any embedded newlines so multi-line streamed text stays aligned.
+	if isTTY {
+		text = strings.ReplaceAll(text, "\n", "\n    ")
+	}
 	fmt.Print(text)
 	return nil
 }
 
 func (w *CLIStreamWriter) Close(ctx context.Context, finalText string) error {
-	_ = ctx
 	if w.aborted {
 		return nil
 	}
 	w.closed = true
 	if w.started {
-		fmt.Println() // newline after streamed content
-	} else {
-		// Never streamed - print the final text now
-		fmt.Printf("\n[cli] %s\n\n", finalText)
+		// End the streamed block with spacing.
+		fmt.Println()
+		fmt.Println()
+		if sep := Separator(); sep != "" {
+			fmt.Println(sep)
+		}
+		ShowPrompt()
+	} else if strings.TrimSpace(finalText) != "" {
+		// Nothing was streamed — print the full response now.
+		if w.spinner != nil {
+			w.spinner.Stop()
+		}
+		fmt.Print(FormatResponse(finalText))
+		fmt.Println()
+		fmt.Println()
+		if sep := Separator(); sep != "" {
+			fmt.Println(sep)
+		}
+		ShowPrompt()
 	}
+	// If not started AND no text, do nothing (tool-call turn — spinner may keep running).
 	return nil
 }
 
 func (w *CLIStreamWriter) Abort(ctx context.Context) error {
-	_ = ctx
 	w.aborted = true
 	if w.started {
-		fmt.Println("\n[aborted]")
+		fmt.Println()
+		fmt.Println(style(ansiYellow, "  ⚠ [aborted]"))
+		ShowPrompt()
 	}
+	// If not started, leave spinner untouched so it carries through tool-call loops.
 	return nil
 }
 
 // BeginStream implements channels.StreamingChannel.
-func (Deliverer) BeginStream(ctx context.Context, to string, meta map[string]any) (channels.StreamWriter, error) {
-	_ = ctx
-	_ = to
-	_ = meta
-	fmt.Print("\n[cli] ")
-	return &CLIStreamWriter{}, nil
+func (d Deliverer) BeginStream(ctx context.Context, to string, meta map[string]any) (channels.StreamWriter, error) {
+	return &CLIStreamWriter{spinner: d.Spinner}, nil
 }

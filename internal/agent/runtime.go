@@ -281,34 +281,49 @@ func (r *Runtime) executeConversation(ctx context.Context, sessionKey string, me
 
 		var resp providers.ChatCompletionResponse
 		var err error
-		var bufferedDeltas []string
+		var sw channels.StreamWriter   // lazily created on first text delta
+		var swOnce sync.Once
 		if r.Streamer != nil {
 			resp, err = r.Provider.ChatStream(ctx, req, func(text string) {
-				bufferedDeltas = append(bufferedDeltas, text)
+				swOnce.Do(func() {
+					w, beginErr := r.Streamer.BeginStream(ctx, replyTo, map[string]any{"channel": channel})
+					if beginErr == nil {
+						sw = w
+					}
+				})
+				if sw != nil {
+					_ = sw.WriteDelta(ctx, text)
+				}
 			})
 		} else {
 			resp, err = r.Provider.Chat(ctx, req)
 		}
 		if err != nil {
+			if sw != nil {
+				_ = sw.Abort(ctx)
+			}
 			return "", false, err
 		}
 		if len(resp.Choices) == 0 {
+			if sw != nil {
+				_ = sw.Abort(ctx)
+			}
 			return "", false, fmt.Errorf("no choices")
 		}
 		msg := resp.Choices[0].Message
 		if len(msg.ToolCalls) == 0 {
 			finalText := strings.TrimSpace(contentToString(msg.Content))
 			messages = append(messages, providers.ChatMessage{Role: "assistant", Content: finalText})
-			if r.Streamer != nil && len(bufferedDeltas) > 0 {
-				if sw, err := r.Streamer.BeginStream(ctx, replyTo, map[string]any{"channel": channel}); err == nil {
-					for _, delta := range bufferedDeltas {
-						_ = sw.WriteDelta(ctx, delta)
-					}
-					_ = sw.Close(ctx, finalText)
-					return finalText, true, nil
-				}
+			if sw != nil {
+				_ = sw.Close(ctx, finalText)
+				return finalText, true, nil
 			}
 			return finalText, false, nil
+		}
+
+		// Tool-call turn: close any partial stream that showed text.
+		if sw != nil {
+			_ = sw.Close(ctx, contentToString(msg.Content))
 		}
 
 		messages = append(messages, providers.ChatMessage{Role: "assistant", Content: msg.Content, ToolCalls: msg.ToolCalls})

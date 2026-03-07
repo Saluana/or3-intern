@@ -20,7 +20,6 @@ func TestDeliver_Basic(t *testing.T) {
 
 func TestDeliver_EmptyChannel(t *testing.T) {
 	d := Deliverer{}
-	// Should default to "cli" if channel is empty
 	err := d.Deliver(context.Background(), "", "user", "message")
 	if err != nil {
 		t.Fatalf("Deliver with empty channel: %v", err)
@@ -36,7 +35,7 @@ func TestDeliver_LongMessage(t *testing.T) {
 	}
 }
 
-// capturingWriter swaps os.Stdout with a buffer during a test.
+// captureStdout swaps os.Stdout with a buffer during a test.
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()
 	old := os.Stdout
@@ -63,12 +62,9 @@ func TestCLIStreamWriter_WriteDeltaAndClose(t *testing.T) {
 		_ = w.WriteDelta(ctx, " world")
 		_ = w.Close(ctx, "hello world")
 	})
-	// text printed incrementally; Close adds a newline
+	// text printed incrementally; Close adds trailing spacing and prompt
 	if !strings.Contains(out, "hello world") {
 		t.Errorf("expected 'hello world' in output, got %q", out)
-	}
-	if !strings.HasSuffix(out, "\n") {
-		t.Errorf("expected trailing newline, got %q", out)
 	}
 }
 
@@ -121,7 +117,7 @@ func TestCLIStreamWriter_WriteAfterClose(t *testing.T) {
 	}
 }
 
-func TestBeginStream_PrintsPrefix(t *testing.T) {
+func TestBeginStream_ReturnsWriter(t *testing.T) {
 	out := captureStdout(t, func() {
 		d := Deliverer{}
 		sw, err := d.BeginStream(context.Background(), "user", nil)
@@ -132,9 +128,6 @@ func TestBeginStream_PrintsPrefix(t *testing.T) {
 		_ = sw.WriteDelta(context.Background(), "streamed")
 		_ = sw.Close(context.Background(), "streamed")
 	})
-	if !strings.Contains(out, "[cli]") {
-		t.Errorf("expected '[cli]' prefix in output, got %q", out)
-	}
 	if !strings.Contains(out, "streamed") {
 		t.Errorf("expected 'streamed' in output, got %q", out)
 	}

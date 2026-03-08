@@ -141,7 +141,7 @@ func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
 		if content == "" {
 			continue
 		}
-		meta := map[string]any{"channel_id": ev.Channel, "thread_ts": ev.ThreadTS}
+		meta := map[string]any{"channel_id": ev.Channel, "thread_ts": ev.ThreadTS, "channel_type": ev.ChannelType}
 		if len(attachments) > 0 {
 			meta["attachments"] = attachments
 		}
@@ -401,13 +401,14 @@ type socketEnvelope struct {
 	Type       string `json:"type"`
 	Payload    struct {
 		Event struct {
-			Type     string      `json:"type"`
-			Text     string      `json:"text"`
-			User     string      `json:"user"`
-			BotID    string      `json:"bot_id"`
-			Channel  string      `json:"channel"`
-			ThreadTS string      `json:"thread_ts"`
-			Files    []slackFile `json:"files"`
+			Type        string      `json:"type"`
+			Text        string      `json:"text"`
+			User        string      `json:"user"`
+			BotID       string      `json:"bot_id"`
+			Channel     string      `json:"channel"`
+			ChannelType string      `json:"channel_type"`
+			ThreadTS    string      `json:"thread_ts"`
+			Files       []slackFile `json:"files"`
 		} `json:"event"`
 		Authorizations []struct {
 			UserID string `json:"user_id"`

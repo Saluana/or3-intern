@@ -169,7 +169,7 @@ func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
 				if content == "" {
 					continue
 				}
-				meta := map[string]any{"channel_id": msg.ChannelID, "message_reference": msg.ID}
+				meta := map[string]any{"channel_id": msg.ChannelID, "message_reference": msg.ID, "guild_id": msg.GuildID, "is_private": strings.TrimSpace(msg.GuildID) == ""}
 				if len(attachments) > 0 {
 					meta["attachments"] = attachments
 				}
@@ -408,10 +408,11 @@ type mention struct {
 }
 
 type inboundMessage struct {
-	ID        string    `json:"id"`
-	ChannelID string    `json:"channel_id"`
-	Content   string    `json:"content"`
-	Mentions  []mention `json:"mentions"`
+	ID          string    `json:"id"`
+	ChannelID   string    `json:"channel_id"`
+	GuildID     string    `json:"guild_id"`
+	Content     string    `json:"content"`
+	Mentions    []mention `json:"mentions"`
 	Attachments []discordAttachment `json:"attachments"`
 	Author    struct {
 		ID  string `json:"id"`

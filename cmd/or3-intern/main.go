@@ -190,11 +190,15 @@ func main() {
 			TopK:                   cfg.MemoryRetrieve,
 			DocRetriever:           docRetriever,
 			DocRetrieveLimit:       cfg.DocIndex.RetrieveLimit,
+			WorkspaceDir:           cfg.WorkspaceDir,
 		},
 		Artifacts:    art,
 		MaxToolBytes: cfg.MaxToolBytes,
 		MaxToolLoops: cfg.MaxToolLoops,
 		Deliver:      delivererFunc(channelManager.Deliver),
+		DefaultScopeKey:    cfg.DefaultSessionKey,
+		LinkDirectMessages: cfg.Session.DirectMessagesShareDefault,
+		IdentityScopeMap:   buildIdentityScopeMap(cfg),
 	}
 	if cfg.Subagents.Enabled {
 		subagentManager = &agent.SubagentManager{
@@ -389,6 +393,24 @@ func main() {
 		}
 	}
 	_ = channelManager.StopAll(context.Background())
+}
+
+func buildIdentityScopeMap(cfg config.Config) map[string]string {
+	out := map[string]string{}
+	for _, link := range cfg.Session.IdentityLinks {
+		canonical := strings.TrimSpace(link.Canonical)
+		if canonical == "" {
+			continue
+		}
+		for _, peer := range link.Peers {
+			peer = strings.TrimSpace(peer)
+			if peer == "" {
+				continue
+			}
+			out[peer] = canonical
+		}
+	}
+	return out
 }
 
 type delivererFunc func(ctx context.Context, channel, to, text string) error

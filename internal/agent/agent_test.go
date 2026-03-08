@@ -192,7 +192,7 @@ func TestFormatRetrieved_WithResults(t *testing.T) {
 
 func TestBuilder_ComposeSystemPrompt_Defaults(t *testing.T) {
 	b := &Builder{}
-	got := b.composeSystemPrompt("(none)", "(none)", "", "", "", "")
+	got := b.composeSystemPrompt("(none)", "(none)", "", "", "", "", "")
 	if !strings.Contains(got, "System Prompt") {
 		t.Errorf("expected '# System Prompt' in output, got %q", got)
 	}
@@ -203,7 +203,7 @@ func TestBuilder_ComposeSystemPrompt_Defaults(t *testing.T) {
 
 func TestBuilder_ComposeSystemPrompt_CustomSoul(t *testing.T) {
 	b := &Builder{Soul: "Custom soul text"}
-	got := b.composeSystemPrompt("(none)", "(none)", "", "", "", "")
+	got := b.composeSystemPrompt("(none)", "(none)", "", "", "", "", "")
 	if !strings.Contains(got, "Custom soul text") {
 		t.Errorf("expected custom soul in output, got %q", got)
 	}
@@ -213,7 +213,7 @@ func TestBuilder_ComposeSystemPrompt_Truncation(t *testing.T) {
 	b := &Builder{
 		BootstrapTotalMaxChars: 50,
 	}
-	got := b.composeSystemPrompt("(none)", "(none)", "", "", "", "")
+	got := b.composeSystemPrompt("(none)", "(none)", "", "", "", "", "")
 	if len(got) > 100 { // allow for "[truncated]" suffix
 		// Just verify it's bounded
 	}
@@ -222,7 +222,7 @@ func TestBuilder_ComposeSystemPrompt_Truncation(t *testing.T) {
 
 func TestBuilder_ComposeSystemPrompt_WithPinned(t *testing.T) {
 	b := &Builder{}
-	got := b.composeSystemPrompt("- name: Alice", "(none)", "", "", "", "")
+	got := b.composeSystemPrompt("- name: Alice", "(none)", "", "", "", "", "")
 	if !strings.Contains(got, "name: Alice") {
 		t.Errorf("expected pinned memory in output, got %q", got)
 	}
@@ -232,7 +232,7 @@ func TestBuilder_ComposeSystemPrompt_WithSkills(t *testing.T) {
 	dir := t.TempDir()
 	_ = skills.Scan([]string{dir}) // use empty skills
 	b := &Builder{}
-	got := b.composeSystemPrompt("(none)", "(none)", "", "", "", "")
+	got := b.composeSystemPrompt("(none)", "(none)", "", "", "", "", "")
 	if !strings.Contains(got, "Skills Inventory") {
 		t.Errorf("expected 'Skills Inventory' section, got %q", got)
 	}

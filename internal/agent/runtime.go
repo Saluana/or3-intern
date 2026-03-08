@@ -43,6 +43,9 @@ type Runtime struct {
 
 	Consolidator           *memory.Consolidator
 	ConsolidationScheduler *memory.Scheduler
+	DefaultScopeKey        string
+	LinkDirectMessages     bool
+	IdentityScopeMap       map[string]string
 
 	locks sync.Map // sessionKey -> *sync.Mutex
 }
@@ -85,6 +88,7 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 	if ev.Type == bus.EventUserMessage && strings.EqualFold(strings.TrimSpace(ev.Message), commandNewSession) {
 		return r.handleNewSession(ctx, ev)
 	}
+	r.ensureSessionScope(ctx, ev)
 
 	// persist user message
 	msgID, err := r.DB.AppendMessage(ctx, ev.SessionKey, "user", ev.Message, map[string]any{
@@ -133,6 +137,61 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 	}
 
 	return nil
+}
+
+func (r *Runtime) ensureSessionScope(ctx context.Context, ev bus.Event) {
+	if r == nil || r.DB == nil || strings.TrimSpace(ev.SessionKey) == "" {
+		return
+	}
+	scopeKey, ok := r.scopeKeyForEvent(ev)
+	if !ok {
+		return
+	}
+	scopeKey = strings.TrimSpace(scopeKey)
+	if scopeKey == "" || scopeKey == ev.SessionKey {
+		return
+	}
+	meta := map[string]any{"auto": true, "channel": ev.Channel}
+	_ = r.DB.LinkSession(ctx, ev.SessionKey, scopeKey, meta)
+}
+
+func (r *Runtime) scopeKeyForEvent(ev bus.Event) (string, bool) {
+	if r == nil {
+		return "", false
+	}
+	if scopeKey := strings.TrimSpace(r.IdentityScopeMap[ev.SessionKey]); scopeKey != "" {
+		return scopeKey, true
+	}
+	if r.LinkDirectMessages && isDirectMessageEvent(ev) {
+		scopeKey := strings.TrimSpace(r.DefaultScopeKey)
+		if scopeKey == "" {
+			scopeKey = ev.SessionKey
+		}
+		return scopeKey, true
+	}
+	return "", false
+}
+
+func isDirectMessageEvent(ev bus.Event) bool {
+	if len(ev.Meta) == 0 {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(ev.Channel)) {
+	case "telegram":
+		return strings.EqualFold(strings.TrimSpace(fmt.Sprint(ev.Meta["chat_type"])), "private")
+	case "slack":
+		return strings.EqualFold(strings.TrimSpace(fmt.Sprint(ev.Meta["channel_type"])), "im")
+	case "discord":
+		if v, ok := ev.Meta["is_private"].(bool); ok {
+			return v
+		}
+		return strings.TrimSpace(fmt.Sprint(ev.Meta["guild_id"])) == ""
+	case "whatsapp":
+		if v, ok := ev.Meta["is_group"].(bool); ok {
+			return !v
+		}
+	}
+	return false
 }
 
 func (r *Runtime) handleExplicitSkillInvocation(ctx context.Context, ev bus.Event, msgID int64) (bool, error) {

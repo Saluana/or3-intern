@@ -144,6 +144,7 @@ func (c *Channel) fetchUpdates(ctx context.Context, eventBus *bus.Bus) error {
 		}
 		meta := map[string]any{
 			"chat_id":             chatID,
+			"chat_type":           msg.Chat.Type,
 			"message_id":          msg.MessageID,
 			"reply_to_message_id": int64(msg.MessageID),
 			"username":            msg.From.Username,
@@ -532,7 +533,8 @@ type inboundMessage struct {
 	Caption      string `json:"caption"`
 	MediaGroupID string `json:"media_group_id"`
 	Chat      struct {
-		ID int64 `json:"id"`
+		ID   int64  `json:"id"`
+		Type string `json:"type"`
 	} `json:"chat"`
 	From struct {
 		ID       int64  `json:"id"`

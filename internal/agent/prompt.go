@@ -93,6 +93,7 @@ type Builder struct {
 	HeartbeatText    string               // content of HEARTBEAT.md – injected only for autonomous turns
 	DocRetriever     *memory.DocRetriever // for indexed file context
 	DocRetrieveLimit int                  // max docs to retrieve
+	WorkspaceDir     string
 }
 
 // Build builds a prompt snapshot. It is a convenience wrapper around BuildWithOptions.
@@ -140,6 +141,9 @@ func (b *Builder) BuildWithOptions(ctx context.Context, opts BuildOptions) (Prom
 			docContextText = strings.TrimSpace(sb.String())
 		}
 	}
+	workspaceContextText := memory.BuildWorkspaceContext(memory.WorkspaceContextConfig{
+		WorkspaceDir: b.WorkspaceDir,
+	}, opts.UserMessage)
 
 	histRows, err := b.DB.GetLastMessagesScoped(ctx, opts.SessionKey, b.HistoryMax)
 	if err != nil {
@@ -171,7 +175,7 @@ func (b *Builder) BuildWithOptions(ctx context.Context, opts BuildOptions) (Prom
 	if opts.Autonomous {
 		heartbeat = b.HeartbeatText
 	}
-	sysText := b.composeSystemPrompt(pinnedText, memText, b.IdentityText, b.StaticMemory, heartbeat, docContextText)
+	sysText := b.composeSystemPrompt(pinnedText, memText, b.IdentityText, b.StaticMemory, heartbeat, docContextText, workspaceContextText)
 	sys := []providers.ChatMessage{
 		{Role: "system", Content: sysText},
 	}
@@ -315,7 +319,7 @@ func readCappedFile(path string, maxBytes int64) ([]byte, error) {
 	return data, nil
 }
 
-func (b *Builder) composeSystemPrompt(pinnedText, memText, identityText, staticMemoryText, heartbeatText, docContextText string) string {
+func (b *Builder) composeSystemPrompt(pinnedText, memText, identityText, staticMemoryText, heartbeatText, docContextText, workspaceContextText string) string {
 	maxEach := b.BootstrapMaxChars
 	if maxEach <= 0 {
 		maxEach = defaultBootstrapMaxChars
@@ -363,6 +367,9 @@ func (b *Builder) composeSystemPrompt(pinnedText, memText, identityText, staticM
 	}
 	sections = append(sections, section{title: "Pinned Memory", text: pinnedText})
 	sections = append(sections, section{title: "Retrieved Memory", text: memText})
+	if t := strings.TrimSpace(workspaceContextText); t != "" {
+		sections = append(sections, section{title: "Workspace Context", text: truncateText(t, maxEach)})
+	}
 	if t := strings.TrimSpace(docContextText); t != "" {
 		sections = append(sections, section{title: "Indexed File Context", text: truncateText(t, maxEach)})
 	}

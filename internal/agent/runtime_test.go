@@ -928,118 +928,195 @@ func TestRuntime_ConsolidationScheduler_SingleFlightCoalesces(t *testing.T) {
 }
 
 func TestRuntimeWithIndexedDocs(t *testing.T) {
-d := openRuntimeTestDB(t)
-ctx := context.Background()
+	d := openRuntimeTestDB(t)
+	ctx := context.Background()
 
-// Create a temp dir with a markdown file containing "important penguin behavior"
-tmpDir := t.TempDir()
-docContent := "# Penguin Facts\n\nImportant penguin behavior: penguins huddle together for warmth.\n"
-docPath := filepath.Join(tmpDir, "penguins.md")
-if err := os.WriteFile(docPath, []byte(docContent), 0o644); err != nil {
-t.Fatalf("write doc file: %v", err)
-}
+	// Create a temp dir with a markdown file containing "important penguin behavior"
+	tmpDir := t.TempDir()
+	docContent := "# Penguin Facts\n\nImportant penguin behavior: penguins huddle together for warmth.\n"
+	docPath := filepath.Join(tmpDir, "penguins.md")
+	if err := os.WriteFile(docPath, []byte(docContent), 0o644); err != nil {
+		t.Fatalf("write doc file: %v", err)
+	}
 
-// Insert the doc directly via UpsertDoc (no real embedding server needed)
-if err := memory.UpsertDoc(ctx, d, scope.GlobalMemoryScope, docPath, "markdown", "Penguin Facts", "", docContent, nil, "testhash", 0, int64(len(docContent))); err != nil {
-t.Fatalf("UpsertDoc: %v", err)
-}
+	// Insert the doc directly via UpsertDoc (no real embedding server needed)
+	if err := memory.UpsertDoc(ctx, d, scope.GlobalMemoryScope, docPath, "markdown", "Penguin Facts", "", docContent, nil, "testhash", 0, int64(len(docContent))); err != nil {
+		t.Fatalf("UpsertDoc: %v", err)
+	}
 
-docRetriever := &memory.DocRetriever{DB: d}
+	docRetriever := &memory.DocRetriever{DB: d}
 
-// Build a fake provider response
-response := providers.ChatCompletionResponse{
-Choices: []struct {
-Message struct {
-Role      string               `json:"role"`
-Content   any                  `json:"content"`
-ToolCalls []providers.ToolCall `json:"tool_calls"`
-} `json:"message"`
-}{{
-Message: struct {
-Role      string               `json:"role"`
-Content   any                  `json:"content"`
-ToolCalls []providers.ToolCall `json:"tool_calls"`
-}{Role: "assistant", Content: "Penguins huddle for warmth."},
-}},
-}
-_, provider := buildChatServer(t, response)
+	// Build a fake provider response
+	response := providers.ChatCompletionResponse{
+		Choices: []struct {
+			Message struct {
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			} `json:"message"`
+		}{{
+			Message: struct {
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			}{Role: "assistant", Content: "Penguins huddle for warmth."},
+		}},
+	}
+	_, provider := buildChatServer(t, response)
 
-b := &Builder{
-DB:               d,
-HistoryMax:       10,
-DocRetriever:     docRetriever,
-DocRetrieveLimit: 5,
-}
+	b := &Builder{
+		DB:               d,
+		HistoryMax:       10,
+		DocRetriever:     docRetriever,
+		DocRetrieveLimit: 5,
+	}
 
-pp, _, err := b.BuildWithOptions(ctx, BuildOptions{SessionKey: "test-scope", UserMessage: "penguin behavior"})
-if err != nil {
-t.Fatalf("BuildWithOptions: %v", err)
-}
+	pp, _, err := b.BuildWithOptions(ctx, BuildOptions{SessionKey: "test-scope", UserMessage: "penguin behavior"})
+	if err != nil {
+		t.Fatalf("BuildWithOptions: %v", err)
+	}
 
-// Find system prompt content
-var sysText string
-for _, msg := range pp.System {
-if msg.Role == "system" {
-if s, ok := msg.Content.(string); ok {
-sysText += s
-}
-}
-}
+	// Find system prompt content
+	var sysText string
+	for _, msg := range pp.System {
+		if msg.Role == "system" {
+			if s, ok := msg.Content.(string); ok {
+				sysText += s
+			}
+		}
+	}
 
-// The system prompt should include the doc excerpt about penguins
-if !strings.Contains(sysText, "penguin") && !strings.Contains(strings.ToLower(sysText), "penguin") {
-t.Errorf("expected system prompt to contain penguin doc context, got:\n%s", sysText)
-}
-_ = provider
+	// The system prompt should include the doc excerpt about penguins
+	if !strings.Contains(sysText, "penguin") && !strings.Contains(strings.ToLower(sysText), "penguin") {
+		t.Errorf("expected system prompt to contain penguin doc context, got:\n%s", sysText)
+	}
+	_ = provider
 }
 
 func TestRuntimeLinkedSessionHistory(t *testing.T) {
-d := openRuntimeTestDB(t)
-ctx := context.Background()
+	d := openRuntimeTestDB(t)
+	ctx := context.Background()
 
-// Link two session keys to a shared scope
-if err := d.LinkSession(ctx, "session-a", "shared-scope", nil); err != nil {
-t.Fatalf("LinkSession a: %v", err)
-}
-if err := d.LinkSession(ctx, "session-b", "shared-scope", nil); err != nil {
-t.Fatalf("LinkSession b: %v", err)
+	// Link two session keys to a shared scope
+	if err := d.LinkSession(ctx, "session-a", "shared-scope", nil); err != nil {
+		t.Fatalf("LinkSession a: %v", err)
+	}
+	if err := d.LinkSession(ctx, "session-b", "shared-scope", nil); err != nil {
+		t.Fatalf("LinkSession b: %v", err)
+	}
+
+	// Append messages to both sessions
+	if _, err := d.AppendMessage(ctx, "session-a", "user", "hello from session-a", nil); err != nil {
+		t.Fatalf("AppendMessage a user: %v", err)
+	}
+	if _, err := d.AppendMessage(ctx, "session-a", "assistant", "reply to session-a", nil); err != nil {
+		t.Fatalf("AppendMessage a assistant: %v", err)
+	}
+	if _, err := d.AppendMessage(ctx, "session-b", "user", "hello from session-b", nil); err != nil {
+		t.Fatalf("AppendMessage b user: %v", err)
+	}
+	if _, err := d.AppendMessage(ctx, "session-b", "assistant", "reply to session-b", nil); err != nil {
+		t.Fatalf("AppendMessage b assistant: %v", err)
+	}
+
+	// GetLastMessagesScoped with either session key should return messages from both sessions
+	msgs, err := d.GetLastMessagesScoped(ctx, "session-a", 20)
+	if err != nil {
+		t.Fatalf("GetLastMessagesScoped: %v", err)
+	}
+	if len(msgs) < 2 {
+		t.Fatalf("expected at least 2 messages across linked sessions, got %d", len(msgs))
+	}
+
+	contents := map[string]bool{}
+	for _, m := range msgs {
+		contents[m.Content] = true
+	}
+	if !contents["hello from session-a"] || !contents["hello from session-b"] {
+		t.Fatalf("expected messages from both sessions, got %v", contents)
+	}
+
+	// Verify chronological order
+	for i := 1; i < len(msgs); i++ {
+		if msgs[i].ID < msgs[i-1].ID {
+			t.Fatalf("messages not in chronological order at index %d", i)
+		}
+	}
+
 }
 
-// Append messages to both sessions
-if _, err := d.AppendMessage(ctx, "session-a", "user", "hello from session-a", nil); err != nil {
-t.Fatalf("AppendMessage a user: %v", err)
-}
-if _, err := d.AppendMessage(ctx, "session-a", "assistant", "reply to session-a", nil); err != nil {
-t.Fatalf("AppendMessage a assistant: %v", err)
-}
-if _, err := d.AppendMessage(ctx, "session-b", "user", "hello from session-b", nil); err != nil {
-t.Fatalf("AppendMessage b user: %v", err)
-}
-if _, err := d.AppendMessage(ctx, "session-b", "assistant", "reply to session-b", nil); err != nil {
-t.Fatalf("AppendMessage b assistant: %v", err)
+func TestRuntimeEnsureSessionScope_AutoLinksDirectMessages(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	ctx := context.Background()
+	rt := &Runtime{
+		DB:                 d,
+		DefaultScopeKey:    "cli:default",
+		LinkDirectMessages: true,
+	}
+	rt.ensureSessionScope(ctx, bus.Event{
+		SessionKey: "telegram:123",
+		Channel:    "telegram",
+		Meta:       map[string]any{"chat_type": "private"},
+	})
+	scopeKey, err := d.ResolveScopeKey(ctx, "telegram:123")
+	if err != nil {
+		t.Fatalf("ResolveScopeKey: %v", err)
+	}
+	if scopeKey != "cli:default" {
+		t.Fatalf("expected auto-linked scope cli:default, got %q", scopeKey)
+	}
+
+	rt.ensureSessionScope(ctx, bus.Event{
+		SessionKey: "whatsapp:555",
+		Channel:    "whatsapp",
+		Meta:       map[string]any{"is_group": false},
+	})
+	scopeKey, err = d.ResolveScopeKey(ctx, "whatsapp:555")
+	if err != nil {
+		t.Fatalf("ResolveScopeKey whatsapp: %v", err)
+	}
+	if scopeKey != "cli:default" {
+		t.Fatalf("expected whatsapp direct message to share cli:default, got %q", scopeKey)
+	}
+
+	rt.ensureSessionScope(ctx, bus.Event{
+		SessionKey: "whatsapp:group-1",
+		Channel:    "whatsapp",
+		Meta:       map[string]any{"is_group": true},
+	})
+	scopeKey, err = d.ResolveScopeKey(ctx, "whatsapp:group-1")
+	if err != nil {
+		t.Fatalf("ResolveScopeKey group: %v", err)
+	}
+	if scopeKey != "whatsapp:group-1" {
+		t.Fatalf("expected group chat to stay isolated, got %q", scopeKey)
+	}
 }
 
-// GetLastMessagesScoped with either session key should return messages from both sessions
-msgs, err := d.GetLastMessagesScoped(ctx, "session-a", 20)
-if err != nil {
-t.Fatalf("GetLastMessagesScoped: %v", err)
-}
-if len(msgs) < 2 {
-t.Fatalf("expected at least 2 messages across linked sessions, got %d", len(msgs))
-}
-
-contents := map[string]bool{}
-for _, m := range msgs {
-contents[m.Content] = true
-}
-if !contents["hello from session-a"] || !contents["hello from session-b"] {
-t.Fatalf("expected messages from both sessions, got %v", contents)
-}
-
-// Verify chronological order
-for i := 1; i < len(msgs); i++ {
-if msgs[i].ID < msgs[i-1].ID {
-t.Fatalf("messages not in chronological order at index %d", i)
-}
-}
+func TestRuntimeTurn_NewSessionSkipsAutoLinking(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	ctx := context.Background()
+	rt := &Runtime{
+		DB:                 d,
+		DefaultScopeKey:    "cli:default",
+		LinkDirectMessages: true,
+		Deliver:            &mockDeliverer{},
+	}
+	if err := rt.Handle(ctx, bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "telegram:123",
+		Channel:    "telegram",
+		From:       "123",
+		Message:    "/new",
+		Meta:       map[string]any{"chat_type": "private"},
+	}); err != nil {
+		t.Fatalf("Handle /new: %v", err)
+	}
+	scopeKey, err := d.ResolveScopeKey(ctx, "telegram:123")
+	if err != nil {
+		t.Fatalf("ResolveScopeKey: %v", err)
+	}
+	if scopeKey != "telegram:123" {
+		t.Fatalf("expected /new to leave direct message unlinked, got %q", scopeKey)
+	}
 }

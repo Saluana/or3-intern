@@ -2,8 +2,11 @@ package agent
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"or3-intern/internal/memory"
 	"or3-intern/internal/scope"
@@ -206,7 +209,7 @@ func TestEmptyOptionalSectionsOmitted(t *testing.T) {
 	noStaticMem := ""
 	noHeartbeat := ""
 	noDocContext := ""
-	got := b.composeSystemPrompt(pinned, retrieved, noIdentity, noStaticMem, noHeartbeat, noDocContext)
+	got := b.composeSystemPrompt(pinned, retrieved, noIdentity, noStaticMem, noHeartbeat, noDocContext, "")
 	if strings.Contains(got, "Identity") {
 		t.Error("expected 'Identity' section to be omitted when IdentityText is empty")
 	}
@@ -218,5 +221,32 @@ func TestEmptyOptionalSectionsOmitted(t *testing.T) {
 	}
 	if strings.Contains(got, "Indexed File Context") {
 		t.Error("expected 'Indexed File Context' section to be omitted when docContextText is empty")
+	}
+}
+
+func TestWorkspaceContextIncluded(t *testing.T) {
+	d := openTestDB(t)
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("# Project\nThis repo handles penguin logistics."), 0o644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(workspace, "memory"), 0o755); err != nil {
+		t.Fatalf("mkdir memory: %v", err)
+	}
+	day := time.Now().Format("2006-01-02") + ".md"
+	if err := os.WriteFile(filepath.Join(workspace, "memory", day), []byte("Discussed penguin migration plans."), 0o644); err != nil {
+		t.Fatalf("write daily memory: %v", err)
+	}
+	b := &Builder{DB: d, HistoryMax: 10, WorkspaceDir: workspace}
+	pp, _, err := b.Build(context.Background(), "sess", "penguin plans")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	sys := pp.System[0].Content.(string)
+	if !strings.Contains(sys, "Workspace Context") {
+		t.Fatalf("expected workspace context section, got %q", sys)
+	}
+	if !strings.Contains(strings.ToLower(sys), "penguin") {
+		t.Fatalf("expected workspace context to include workspace content, got %q", sys)
 	}
 }

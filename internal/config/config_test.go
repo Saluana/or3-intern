@@ -112,6 +112,9 @@ func TestDefault_Values(t *testing.T) {
 	if cfg.Channels.Telegram.OpenAccess || cfg.Channels.Slack.OpenAccess || cfg.Channels.Discord.OpenAccess || cfg.Channels.WhatsApp.OpenAccess {
 		t.Error("expected external channels to default to closed access")
 	}
+	if cfg.Session.DirectMessagesShareDefault {
+		t.Error("expected direct messages to stay isolated by default")
+	}
 }
 
 func TestLoad_EnabledExternalChannelRequiresAllowlistOrOpenAccess(t *testing.T) {

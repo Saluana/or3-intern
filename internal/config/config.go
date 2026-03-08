@@ -44,6 +44,7 @@ type Config struct {
 	DocIndex     DocIndexConfig `json:"docIndex"`
 	Skills       SkillsConfig   `json:"skills"`
 	Triggers     TriggerConfig  `json:"triggers"`
+	Session      SessionConfig  `json:"session"`
 
 	Provider  ProviderConfig  `json:"provider"`
 	Tools     ToolsConfig     `json:"tools"`
@@ -195,6 +196,16 @@ type TriggerConfig struct {
 	FileWatch FileWatchConfig `json:"fileWatch"`
 }
 
+type SessionConfig struct {
+	DirectMessagesShareDefault bool                  `json:"directMessagesShareDefault"`
+	IdentityLinks              []SessionIdentityLink `json:"identityLinks"`
+}
+
+type SessionIdentityLink struct {
+	Canonical string   `json:"canonical"`
+	Peers     []string `json:"peers"`
+}
+
 func Default() Config {
 	home, _ := os.UserHomeDir()
 	root := filepath.Join(home, ".or3-intern")
@@ -267,6 +278,10 @@ func Default() Config {
 				PollSeconds:     5,
 				DebounceSeconds: 2,
 			},
+		},
+		Session: SessionConfig{
+			DirectMessagesShareDefault: false,
+			IdentityLinks:              []SessionIdentityLink{},
 		},
 		Provider: ProviderConfig{
 			APIBase:        "https://api.openai.com/v1",
@@ -512,6 +527,9 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.Triggers.FileWatch.DebounceSeconds <= 0 {
 		cfg.Triggers.FileWatch.DebounceSeconds = 2
+	}
+	if cfg.Session.IdentityLinks == nil {
+		cfg.Session.IdentityLinks = []SessionIdentityLink{}
 	}
 	if err := validateChannelAccess(cfg); err != nil {
 		return cfg, err

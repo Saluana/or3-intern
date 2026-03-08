@@ -156,11 +156,38 @@ type WhatsAppBridgeConfig struct {
 	AllowedFrom []string `json:"allowedFrom"`
 }
 
+type EmailChannelConfig struct {
+	Enabled             bool     `json:"enabled"`
+	OpenAccess          bool     `json:"openAccess"`
+	ConsentGranted      bool     `json:"consentGranted"`
+	AllowedSenders      []string `json:"allowedSenders"`
+	DefaultTo           string   `json:"defaultTo"`
+	AutoReplyEnabled    bool     `json:"autoReplyEnabled"`
+	PollIntervalSeconds int      `json:"pollIntervalSeconds"`
+	MarkSeen            bool     `json:"markSeen"`
+	MaxBodyChars        int      `json:"maxBodyChars"`
+	SubjectPrefix       string   `json:"subjectPrefix"`
+	FromAddress         string   `json:"fromAddress"`
+	IMAPMailbox         string   `json:"imapMailbox"`
+	IMAPHost            string   `json:"imapHost"`
+	IMAPPort            int      `json:"imapPort"`
+	IMAPUseSSL          bool     `json:"imapUseSSL"`
+	IMAPUsername        string   `json:"imapUsername"`
+	IMAPPassword        string   `json:"imapPassword"`
+	SMTPHost            string   `json:"smtpHost"`
+	SMTPPort            int      `json:"smtpPort"`
+	SMTPUseTLS          bool     `json:"smtpUseTLS"`
+	SMTPUseSSL          bool     `json:"smtpUseSSL"`
+	SMTPUsername        string   `json:"smtpUsername"`
+	SMTPPassword        string   `json:"smtpPassword"`
+}
+
 type ChannelsConfig struct {
 	Telegram TelegramChannelConfig `json:"telegram"`
 	Slack    SlackChannelConfig    `json:"slack"`
 	Discord  DiscordChannelConfig  `json:"discord"`
 	WhatsApp WhatsAppBridgeConfig  `json:"whatsApp"`
+	Email    EmailChannelConfig    `json:"email"`
 }
 
 type DocIndexConfig struct {
@@ -336,6 +363,21 @@ func Default() Config {
 			Slack:    SlackChannelConfig{Enabled: false, APIBase: "https://slack.com/api", RequireMention: true},
 			Discord:  DiscordChannelConfig{Enabled: false, APIBase: "https://discord.com/api/v10", RequireMention: true},
 			WhatsApp: WhatsAppBridgeConfig{Enabled: false, BridgeURL: "ws://127.0.0.1:3001/ws"},
+			Email: EmailChannelConfig{
+				Enabled:             false,
+				ConsentGranted:      false,
+				AutoReplyEnabled:    false,
+				PollIntervalSeconds: 30,
+				MarkSeen:            true,
+				MaxBodyChars:        4000,
+				SubjectPrefix:       "Re: ",
+				IMAPMailbox:         "INBOX",
+				IMAPPort:            993,
+				IMAPUseSSL:          true,
+				SMTPPort:            587,
+				SMTPUseTLS:          true,
+				SMTPUseSSL:          false,
+			},
 		},
 	}
 }
@@ -384,6 +426,37 @@ func ApplyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("OR3_WHATSAPP_BRIDGE_TOKEN"); v != "" {
 		cfg.Channels.WhatsApp.BridgeToken = v
+	}
+	if v := os.Getenv("OR3_EMAIL_IMAP_HOST"); v != "" {
+		cfg.Channels.Email.IMAPHost = v
+	}
+	if v := os.Getenv("OR3_EMAIL_IMAP_PORT"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			cfg.Channels.Email.IMAPPort = parsed
+		}
+	}
+	if v := os.Getenv("OR3_EMAIL_IMAP_USERNAME"); v != "" {
+		cfg.Channels.Email.IMAPUsername = v
+	}
+	if v := os.Getenv("OR3_EMAIL_IMAP_PASSWORD"); v != "" {
+		cfg.Channels.Email.IMAPPassword = v
+	}
+	if v := os.Getenv("OR3_EMAIL_SMTP_HOST"); v != "" {
+		cfg.Channels.Email.SMTPHost = v
+	}
+	if v := os.Getenv("OR3_EMAIL_SMTP_PORT"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			cfg.Channels.Email.SMTPPort = parsed
+		}
+	}
+	if v := os.Getenv("OR3_EMAIL_SMTP_USERNAME"); v != "" {
+		cfg.Channels.Email.SMTPUsername = v
+	}
+	if v := os.Getenv("OR3_EMAIL_SMTP_PASSWORD"); v != "" {
+		cfg.Channels.Email.SMTPPassword = v
+	}
+	if v := os.Getenv("OR3_EMAIL_FROM_ADDRESS"); v != "" {
+		cfg.Channels.Email.FromAddress = v
 	}
 	if v := os.Getenv("OR3_SUBAGENTS_ENABLED"); v != "" {
 		if parsed, err := strconv.ParseBool(v); err == nil {
@@ -508,6 +581,24 @@ func Load(path string) (Config, error) {
 	if cfg.Channels.WhatsApp.BridgeURL == "" {
 		cfg.Channels.WhatsApp.BridgeURL = "ws://127.0.0.1:3001/ws"
 	}
+	if cfg.Channels.Email.PollIntervalSeconds <= 0 {
+		cfg.Channels.Email.PollIntervalSeconds = 30
+	}
+	if cfg.Channels.Email.MaxBodyChars <= 0 {
+		cfg.Channels.Email.MaxBodyChars = 4000
+	}
+	if strings.TrimSpace(cfg.Channels.Email.SubjectPrefix) == "" {
+		cfg.Channels.Email.SubjectPrefix = "Re: "
+	}
+	if strings.TrimSpace(cfg.Channels.Email.IMAPMailbox) == "" {
+		cfg.Channels.Email.IMAPMailbox = "INBOX"
+	}
+	if cfg.Channels.Email.IMAPPort <= 0 {
+		cfg.Channels.Email.IMAPPort = 993
+	}
+	if cfg.Channels.Email.SMTPPort <= 0 {
+		cfg.Channels.Email.SMTPPort = 587
+	}
 	if cfg.DocIndex.MaxFiles <= 0 {
 		cfg.DocIndex.MaxFiles = 100
 	}
@@ -621,6 +712,20 @@ func validateChannelAccess(cfg Config) error {
 	}
 	if cfg.Channels.WhatsApp.Enabled && !cfg.Channels.WhatsApp.OpenAccess && !hasNonEmpty(cfg.Channels.WhatsApp.AllowedFrom) {
 		return errors.New("whatsApp enabled: set channels.whatsApp.allowedFrom or channels.whatsApp.openAccess=true")
+	}
+	if cfg.Channels.Email.Enabled {
+		if !cfg.Channels.Email.ConsentGranted {
+			return errors.New("email enabled: set channels.email.consentGranted=true after explicit permission")
+		}
+		if !cfg.Channels.Email.OpenAccess && !hasNonEmpty(cfg.Channels.Email.AllowedSenders) {
+			return errors.New("email enabled: set channels.email.allowedSenders or channels.email.openAccess=true")
+		}
+		if strings.TrimSpace(cfg.Channels.Email.IMAPHost) == "" || strings.TrimSpace(cfg.Channels.Email.IMAPUsername) == "" || strings.TrimSpace(cfg.Channels.Email.IMAPPassword) == "" {
+			return errors.New("email enabled: imapHost, imapUsername, and imapPassword are required")
+		}
+		if strings.TrimSpace(cfg.Channels.Email.SMTPHost) == "" || strings.TrimSpace(cfg.Channels.Email.SMTPUsername) == "" || strings.TrimSpace(cfg.Channels.Email.SMTPPassword) == "" {
+			return errors.New("email enabled: smtpHost, smtpUsername, and smtpPassword are required")
+		}
 	}
 	return nil
 }

@@ -18,6 +18,7 @@ import (
 	rootchannels "or3-intern/internal/channels"
 	"or3-intern/internal/channels/cli"
 	"or3-intern/internal/channels/discord"
+	"or3-intern/internal/channels/email"
 	"or3-intern/internal/channels/slack"
 	"or3-intern/internal/channels/telegram"
 	"or3-intern/internal/channels/whatsapp"
@@ -514,6 +515,15 @@ func buildChannelManager(cfg config.Config, cliDeliverer cli.Deliverer, art *art
 	if cfg.Channels.WhatsApp.Enabled {
 		cfg.Channels.WhatsApp.BridgeURL = whatsapp.BridgeURL(cfg.Channels.WhatsApp.BridgeURL)
 		if err := mgr.Register(&whatsapp.Channel{Config: cfg.Channels.WhatsApp, Artifacts: art, MaxMediaBytes: maxMediaBytes}); err != nil {
+			return nil, err
+		}
+	}
+	if cfg.Channels.Email.Enabled {
+		var database *db.DB
+		if art != nil {
+			database = art.DB
+		}
+		if err := mgr.Register(&email.Channel{Config: cfg.Channels.Email, DB: database}); err != nil {
 			return nil, err
 		}
 	}

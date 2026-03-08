@@ -3,16 +3,20 @@ module or3-intern
 go 1.23.0
 
 require (
+	github.com/emersion/go-imap/v2 v2.0.0-beta.8
 	github.com/gorilla/websocket v1.5.3
 	github.com/mattn/go-isatty v0.0.20
 	github.com/modelcontextprotocol/go-sdk v0.8.0
 	github.com/robfig/cron/v3 v3.0.1
+	golang.org/x/net v0.6.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.33.1
 )
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/emersion/go-message v0.18.2 // indirect
+	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6 // indirect
 	github.com/google/jsonschema-go v0.3.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect

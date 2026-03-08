@@ -25,7 +25,7 @@ The `init` command can store your provider settings in `~/.or3-intern/config.jso
 
 - `or3-intern init` guided first-run setup
 - `or3-intern chat` interactive CLI
-- `or3-intern serve` run enabled external channels (Telegram / Slack / Discord / WhatsApp bridge)
+- `or3-intern serve` run enabled external channels (Telegram / Slack / Discord / WhatsApp bridge / Email)
 - `or3-intern agent -m "hello"` one-shot
 - `or3-intern skills ...` list, inspect, search, install, update, check, and remove ClawHub/OpenClaw-compatible skills
 - `or3-intern migrate-jsonl /path/to/session.jsonl [session_key]`
@@ -36,7 +36,7 @@ The `init` command can store your provider settings in `~/.or3-intern/config.jso
 - History is always fetched with `LIMIT` and never full-scanned.
 - Hybrid memory retrieval: pinned + vector (cosine) + FTS keyword search.
 - External channels are disabled by default; configure them in `config.json` or via env vars before using `serve`.
-- Supported non-CLI channels: Telegram, Slack, Discord, and a local WhatsApp bridge.
+- Supported non-CLI channels: Telegram, Slack, Discord, Email, and a local WhatsApp bridge.
 
 ## Dependencies
 
@@ -100,6 +100,7 @@ Safety notes:
 - Telegram
 - Slack
 - Discord
+- Email
 - WhatsApp via a local bridge
 
 All external channels are disabled by default.
@@ -133,6 +134,15 @@ OR3_SLACK_BOT_TOKEN=
 OR3_DISCORD_TOKEN=
 OR3_WHATSAPP_BRIDGE_URL=ws://127.0.0.1:3001/ws
 OR3_WHATSAPP_BRIDGE_TOKEN=
+OR3_EMAIL_IMAP_HOST=
+OR3_EMAIL_IMAP_PORT=993
+OR3_EMAIL_IMAP_USERNAME=
+OR3_EMAIL_IMAP_PASSWORD=
+OR3_EMAIL_SMTP_HOST=
+OR3_EMAIL_SMTP_PORT=587
+OR3_EMAIL_SMTP_USERNAME=
+OR3_EMAIL_SMTP_PASSWORD=
+OR3_EMAIL_FROM_ADDRESS=
 ```
 
 ### Config Shape
@@ -175,6 +185,31 @@ The `config.json` channel section looks like this:
 			"bridgeToken": "",
 			"defaultTo": "",
 			"allowedFrom": []
+    },
+    "email": {
+      "enabled": false,
+      "openAccess": false,
+      "consentGranted": false,
+      "allowedSenders": [],
+      "defaultTo": "",
+      "autoReplyEnabled": false,
+      "pollIntervalSeconds": 30,
+      "markSeen": true,
+      "maxBodyChars": 4000,
+      "subjectPrefix": "Re: ",
+      "fromAddress": "",
+      "imapMailbox": "INBOX",
+      "imapHost": "",
+      "imapPort": 993,
+      "imapUseSSL": true,
+      "imapUsername": "",
+      "imapPassword": "",
+      "smtpHost": "",
+      "smtpPort": 587,
+      "smtpUseTLS": true,
+      "smtpUseSSL": false,
+      "smtpUsername": "",
+      "smtpPassword": ""
 		}
 	}
 }
@@ -220,6 +255,18 @@ WhatsApp support expects a compatible local bridge service.
 
 The bridge should expose a websocket endpoint compatible with the message format used by `or3-intern`.
 
+### Email
+
+- Set `channels.email.enabled=true`
+- Set `channels.email.consentGranted=true` only after explicit permission to access the mailbox
+- Set either `channels.email.openAccess=true` or a non-empty `allowedSenders` allowlist
+- Configure IMAP with `imapHost`, `imapPort`, `imapUsername`, `imapPassword`, and optionally `imapMailbox`
+- Configure SMTP with `smtpHost`, `smtpPort`, `smtpUsername`, `smtpPassword`, and optionally `fromAddress`
+- `autoReplyEnabled=false` keeps inbound email from being auto-answered by normal turns; explicit `send_message` sends still work when a `to` address is provided
+- v1 is text-first: plain text is preferred, HTML falls back to lightweight text conversion, and attachments are intentionally ignored
+
+Email only starts under `serve`. Inbound mail is polled over IMAP, routed into session keys like `email:user@example.com`, and outbound replies reuse the latest stored subject/message-id threading metadata when available.
+
 ### Session Keys
 
 External channels automatically namespace session keys by platform, for example:
@@ -227,6 +274,7 @@ External channels automatically namespace session keys by platform, for example:
 - `telegram:<chat-id>`
 - `slack:<channel-id>`
 - `discord:<channel-id>`
+- `email:<normalized-address>`
 - `whatsapp:<chat-id>`
 
 This keeps chat history and long-term memory isolated by channel/session.

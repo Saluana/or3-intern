@@ -157,6 +157,52 @@ func TestRuntime_Handle_UsesChannelTargetFromEventMeta(t *testing.T) {
 	}
 }
 
+func TestRuntime_Handle_EmailAutoReplyDisabledDoesNotDeliver(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	response := providers.ChatCompletionResponse{
+		Choices: []struct {
+			Message struct {
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			} `json:"message"`
+		}{
+			{
+				Message: struct {
+					Role      string               `json:"role"`
+					Content   any                  `json:"content"`
+					ToolCalls []providers.ToolCall `json:"tool_calls"`
+				}{Role: "assistant", Content: "Reply"},
+			},
+		},
+	}
+	_, provider := buildChatServer(t, response)
+	deliver := &mockDeliverer{}
+	rt := buildSimpleRuntime(t, provider, d, deliver)
+
+	err := rt.Handle(context.Background(), bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "email:alice@example.com",
+		Channel:    "email",
+		From:       "alice@example.com",
+		Message:    "hello",
+		Meta:       map[string]any{"auto_reply_enabled": false},
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(deliver.messages) != 0 {
+		t.Fatalf("expected no delivered messages, got %#v", deliver.messages)
+	}
+	msgs, err := d.GetLastMessages(context.Background(), "email:alice@example.com", 10)
+	if err != nil {
+		t.Fatalf("GetLastMessages: %v", err)
+	}
+	if len(msgs) < 2 {
+		t.Fatalf("expected persisted user and assistant messages, got %#v", msgs)
+	}
+}
+
 func TestRuntime_Handle_PersistsAttachmentMetadata(t *testing.T) {
 	d := openRuntimeTestDB(t)
 	response := providers.ChatCompletionResponse{

@@ -67,8 +67,15 @@ func (t *SendMessage) Execute(ctx context.Context, params map[string]any) (strin
 		return "", fmt.Errorf("message requires text or media")
 	}
 	var meta map[string]any
-	if len(mediaPaths) > 0 {
-		meta = map[string]any{"media_paths": mediaPaths}
+	explicitTo := strings.TrimSpace(readOptionalString(params, "to")) != ""
+	if len(mediaPaths) > 0 || explicitTo {
+		meta = map[string]any{}
+		if len(mediaPaths) > 0 {
+			meta["media_paths"] = mediaPaths
+		}
+		if explicitTo {
+			meta["explicit_to"] = true
+		}
 	}
 	if err := t.Deliver(ctx, ch, to, text, meta); err != nil {
 		return "", err

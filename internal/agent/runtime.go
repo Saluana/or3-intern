@@ -193,6 +193,8 @@ func isDirectMessageEvent(ev bus.Event) bool {
 		if v, ok := ev.Meta["is_group"].(bool); ok {
 			return !v
 		}
+	case "email":
+		return true
 	}
 	return false
 }
@@ -211,7 +213,7 @@ func (r *Runtime) handleExplicitSkillInvocation(ctx context.Context, ev bus.Even
 		return false, nil
 	}
 	if !skill.UserInvocable {
-		r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, "skill is not user-invocable: "+skill.Name, false, true)
+		r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, "skill is not user-invocable: "+skill.Name, false, shouldAutoDeliver(ev))
 		return true, nil
 	}
 	if !skill.Eligible {
@@ -224,12 +226,12 @@ func (r *Runtime) handleExplicitSkillInvocation(ctx context.Context, ev bus.Even
 		if len(reasons) > 0 {
 			message += " (" + strings.Join(reasons, "; ") + ")"
 		}
-		r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, message, false, true)
+		r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, message, false, shouldAutoDeliver(ev))
 		return true, nil
 	}
 	if skill.CommandDispatch == "tool" {
 		text := r.dispatchExplicitSkillTool(ctx, ev, skill, commandName, rawArgs)
-		r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, text, false, true)
+		r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, text, false, shouldAutoDeliver(ev))
 		return true, nil
 	}
 
@@ -263,7 +265,7 @@ func (r *Runtime) handleExplicitSkillInvocation(ctx context.Context, ev bus.Even
 	if err != nil {
 		return true, err
 	}
-	r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, finalText, streamed, true)
+	r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, finalText, streamed, shouldAutoDeliver(ev))
 	return true, nil
 }
 
@@ -623,7 +625,25 @@ func isAutonomousEvent(eventType bus.EventType) bool {
 }
 
 func shouldAutoDeliver(ev bus.Event) bool {
-	return ev.Type != bus.EventHeartbeat
+	if ev.Type == bus.EventHeartbeat {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(ev.Channel), "email") {
+		if len(ev.Meta) == 0 {
+			return true
+		}
+		value, ok := ev.Meta["auto_reply_enabled"]
+		if !ok {
+			return true
+		}
+		switch cast := value.(type) {
+		case bool:
+			return cast
+		default:
+			return strings.EqualFold(strings.TrimSpace(fmt.Sprint(cast)), "true")
+		}
+	}
+	return true
 }
 
 func releaseEvent(ev bus.Event) {

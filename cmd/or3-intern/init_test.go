@@ -96,13 +96,22 @@ func TestBuildChannelManager_RegistersEnabledChannels(t *testing.T) {
 	cfg.Channels.Slack.Enabled = true
 	cfg.Channels.Slack.AppToken = "app"
 	cfg.Channels.Slack.BotToken = "bot"
+	cfg.Channels.Email.Enabled = true
+	cfg.Channels.Email.ConsentGranted = true
+	cfg.Channels.Email.OpenAccess = true
+	cfg.Channels.Email.IMAPHost = "imap.example.com"
+	cfg.Channels.Email.IMAPUsername = "imap-user"
+	cfg.Channels.Email.IMAPPassword = "imap-pass"
+	cfg.Channels.Email.SMTPHost = "smtp.example.com"
+	cfg.Channels.Email.SMTPUsername = "smtp-user"
+	cfg.Channels.Email.SMTPPassword = "smtp-pass"
 
 	mgr, err := buildChannelManager(cfg, cli.Deliverer{}, nil, 0)
 	if err != nil {
 		t.Fatalf("buildChannelManager: %v", err)
 	}
 	names := strings.Join(mgr.Names(), ",")
-	if !strings.Contains(names, "cli") || !strings.Contains(names, "telegram") || !strings.Contains(names, "slack") {
+	if !strings.Contains(names, "cli") || !strings.Contains(names, "telegram") || !strings.Contains(names, "slack") || !strings.Contains(names, "email") {
 		t.Fatalf("expected registered channels, got %q", names)
 	}
 }

@@ -24,6 +24,15 @@ func clearConfigEnv(t *testing.T) {
 		"OR3_DISCORD_TOKEN",
 		"OR3_WHATSAPP_BRIDGE_URL",
 		"OR3_WHATSAPP_BRIDGE_TOKEN",
+		"OR3_EMAIL_IMAP_HOST",
+		"OR3_EMAIL_IMAP_PORT",
+		"OR3_EMAIL_IMAP_USERNAME",
+		"OR3_EMAIL_IMAP_PASSWORD",
+		"OR3_EMAIL_SMTP_HOST",
+		"OR3_EMAIL_SMTP_PORT",
+		"OR3_EMAIL_SMTP_USERNAME",
+		"OR3_EMAIL_SMTP_PASSWORD",
+		"OR3_EMAIL_FROM_ADDRESS",
 		"OR3_SUBAGENTS_ENABLED",
 		"OR3_SUBAGENTS_MAX_CONCURRENT",
 		"OR3_SUBAGENTS_MAX_QUEUED",
@@ -112,6 +121,12 @@ func TestDefault_Values(t *testing.T) {
 	if cfg.Channels.Telegram.OpenAccess || cfg.Channels.Slack.OpenAccess || cfg.Channels.Discord.OpenAccess || cfg.Channels.WhatsApp.OpenAccess {
 		t.Error("expected external channels to default to closed access")
 	}
+	if cfg.Channels.Email.Enabled || cfg.Channels.Email.ConsentGranted || cfg.Channels.Email.OpenAccess {
+		t.Error("expected email channel to default to disabled closed access without consent")
+	}
+	if cfg.Channels.Email.PollIntervalSeconds != 30 || cfg.Channels.Email.MaxBodyChars != 4000 {
+		t.Fatalf("unexpected email defaults: %+v", cfg.Channels.Email)
+	}
 	if cfg.Session.DirectMessagesShareDefault {
 		t.Error("expected direct messages to stay isolated by default")
 	}
@@ -162,6 +177,72 @@ func TestLoad_EnabledExternalChannelAllowsExplicitOpenAccess(t *testing.T) {
 	}
 	if !loaded.Channels.Telegram.OpenAccess {
 		t.Fatal("expected telegram openAccess to remain true")
+	}
+}
+
+func TestLoad_EmailChannelRequiresConsentAndCredentials(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	cfg := Default()
+	cfg.Channels.Email.Enabled = true
+	cfg.Channels.Email.OpenAccess = true
+	cfg.Channels.Email.IMAPHost = "imap.example.com"
+	cfg.Channels.Email.IMAPUsername = "imap-user"
+	cfg.Channels.Email.IMAPPassword = "imap-pass"
+	cfg.Channels.Email.SMTPHost = "smtp.example.com"
+	cfg.Channels.Email.SMTPUsername = "smtp-user"
+	cfg.Channels.Email.SMTPPassword = "smtp-pass"
+
+	b, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected validation error when email is enabled without consent")
+	}
+
+	cfg.Channels.Email.ConsentGranted = true
+	cfg.Channels.Email.IMAPPassword = ""
+	b, _ = json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected validation error when email credentials are incomplete")
+	}
+}
+
+func TestLoad_EmailChannelEnvOverrides(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	b, _ := json.MarshalIndent(Default(), "", "  ")
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	t.Setenv("OR3_EMAIL_IMAP_HOST", "imap.env.test")
+	t.Setenv("OR3_EMAIL_IMAP_PORT", "1993")
+	t.Setenv("OR3_EMAIL_IMAP_USERNAME", "imap-env-user")
+	t.Setenv("OR3_EMAIL_IMAP_PASSWORD", "imap-env-pass")
+	t.Setenv("OR3_EMAIL_SMTP_HOST", "smtp.env.test")
+	t.Setenv("OR3_EMAIL_SMTP_PORT", "1587")
+	t.Setenv("OR3_EMAIL_SMTP_USERNAME", "smtp-env-user")
+	t.Setenv("OR3_EMAIL_SMTP_PASSWORD", "smtp-env-pass")
+	t.Setenv("OR3_EMAIL_FROM_ADDRESS", "bot@env.test")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Channels.Email.IMAPHost != "imap.env.test" || cfg.Channels.Email.IMAPPort != 1993 || cfg.Channels.Email.IMAPUsername != "imap-env-user" || cfg.Channels.Email.IMAPPassword != "imap-env-pass" {
+		t.Fatalf("unexpected IMAP env overrides: %+v", cfg.Channels.Email)
+	}
+	if cfg.Channels.Email.SMTPHost != "smtp.env.test" || cfg.Channels.Email.SMTPPort != 1587 || cfg.Channels.Email.SMTPUsername != "smtp-env-user" || cfg.Channels.Email.SMTPPassword != "smtp-env-pass" || cfg.Channels.Email.FromAddress != "bot@env.test" {
+		t.Fatalf("unexpected SMTP env overrides: %+v", cfg.Channels.Email)
 	}
 }
 
@@ -429,12 +510,14 @@ func TestLoad_ChannelEnvOverrides(t *testing.T) {
 	t.Setenv("OR3_DISCORD_TOKEN", "discord-token")
 	t.Setenv("OR3_WHATSAPP_BRIDGE_URL", "ws://127.0.0.1:3001/ws")
 	t.Setenv("OR3_WHATSAPP_BRIDGE_TOKEN", "bridge-token")
+	t.Setenv("OR3_EMAIL_IMAP_HOST", "imap.example.com")
+	t.Setenv("OR3_EMAIL_SMTP_HOST", "smtp.example.com")
 
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Channels.Telegram.Token != "telegram-token" || cfg.Channels.Slack.AppToken != "slack-app" || cfg.Channels.Slack.BotToken != "slack-bot" || cfg.Channels.Discord.Token != "discord-token" || cfg.Channels.WhatsApp.BridgeToken != "bridge-token" {
+	if cfg.Channels.Telegram.Token != "telegram-token" || cfg.Channels.Slack.AppToken != "slack-app" || cfg.Channels.Slack.BotToken != "slack-bot" || cfg.Channels.Discord.Token != "discord-token" || cfg.Channels.WhatsApp.BridgeToken != "bridge-token" || cfg.Channels.Email.IMAPHost != "imap.example.com" || cfg.Channels.Email.SMTPHost != "smtp.example.com" {
 		t.Fatalf("unexpected channel env overrides: %#v", cfg.Channels)
 	}
 }

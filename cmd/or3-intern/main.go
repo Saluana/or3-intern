@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"or3-intern/internal/agent"
@@ -22,6 +24,7 @@ import (
 	"or3-intern/internal/config"
 	"or3-intern/internal/cron"
 	"or3-intern/internal/db"
+	"or3-intern/internal/heartbeat"
 	"or3-intern/internal/memory"
 	"or3-intern/internal/providers"
 	"or3-intern/internal/scope"
@@ -95,7 +98,8 @@ func main() {
 	}
 	defer d.Close()
 
-	ctx := context.Background()
+	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
 	timeout := time.Duration(cfg.Provider.TimeoutSeconds) * time.Second
 	prov := providers.New(cfg.Provider.APIBase, cfg.Provider.APIKey, timeout)
 	art := &artifacts.Store{Dir: cfg.ArtifactsDir, DB: d}
@@ -181,7 +185,7 @@ func main() {
 			ToolNotes:              loadBootstrapFile(cfg.ToolsFile, cfg.WorkspaceDir, "TOOLS.md", agent.DefaultToolNotes),
 			IdentityText:           loadBootstrapFile(cfg.IdentityFile, cfg.WorkspaceDir, "IDENTITY.md", ""),
 			StaticMemory:           loadBootstrapFile(cfg.MemoryFile, cfg.WorkspaceDir, "MEMORY.md", ""),
-			HeartbeatText:          loadBootstrapFile(cfg.Heartbeat.TasksFile, cfg.WorkspaceDir, "HEARTBEAT.md", ""),
+			HeartbeatTasksFile:     cfg.Heartbeat.TasksFile,
 			BootstrapMaxChars:      cfg.BootstrapMaxChars,
 			BootstrapTotalMaxChars: cfg.BootstrapTotalMaxChars,
 			HistoryMax:             cfg.HistoryMax,
@@ -192,10 +196,10 @@ func main() {
 			DocRetrieveLimit:       cfg.DocIndex.RetrieveLimit,
 			WorkspaceDir:           cfg.WorkspaceDir,
 		},
-		Artifacts:    art,
-		MaxToolBytes: cfg.MaxToolBytes,
-		MaxToolLoops: cfg.MaxToolLoops,
-		Deliver:      delivererFunc(channelManager.Deliver),
+		Artifacts:          art,
+		MaxToolBytes:       cfg.MaxToolBytes,
+		MaxToolLoops:       cfg.MaxToolLoops,
+		Deliver:            delivererFunc(channelManager.Deliver),
 		DefaultScopeKey:    cfg.DefaultSessionKey,
 		LinkDirectMessages: cfg.Session.DirectMessagesShareDefault,
 		IdentityScopeMap:   buildIdentityScopeMap(cfg),
@@ -261,6 +265,7 @@ func main() {
 		rt.Tools = buildRuntimeTools()
 	}
 
+	var heartbeatSvc *heartbeat.Service
 	switch cmd {
 	case "chat":
 		rt.Streamer = del
@@ -287,8 +292,12 @@ func main() {
 		fileWatcher := triggers.NewFileWatcher(cfg.Triggers.FileWatch, b, cfg.DefaultSessionKey)
 		fileWatcher.Start(ctx)
 		defer fileWatcher.Stop()
+		heartbeatSvc = heartbeatServiceForCommand(cmd, cfg, b)
+		if heartbeatSvc != nil {
+			heartbeatSvc.Start(ctx)
+		}
 		fmt.Println("or3-intern serve: channels running. Ctrl+C to stop.")
-		select {}
+		<-ctx.Done()
 	case "agent":
 		// one-shot: or3-intern agent -m "hello"
 		fs := flag.NewFlagSet("agent", flag.ExitOnError)
@@ -384,6 +393,9 @@ func main() {
 		os.Exit(2)
 	}
 
+	if heartbeatSvc != nil {
+		heartbeatSvc.Stop()
+	}
 	if cronSvc != nil {
 		cronSvc.Stop()
 	}
@@ -503,6 +515,13 @@ func allowedRoot(cfg config.Config) string {
 		return cfg.AllowedDir
 	}
 	return ""
+}
+
+func heartbeatServiceForCommand(cmd string, cfg config.Config, eventBus *bus.Bus) *heartbeat.Service {
+	if cmd != "serve" || !cfg.Heartbeat.Enabled {
+		return nil
+	}
+	return heartbeat.New(cfg.Heartbeat, cfg.WorkspaceDir, eventBus)
 }
 
 func runWorkers(ctx context.Context, b *bus.Bus, rt *agent.Runtime, n int) {

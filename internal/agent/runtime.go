@@ -14,6 +14,7 @@ import (
 	"or3-intern/internal/channels"
 	"or3-intern/internal/cron"
 	"or3-intern/internal/db"
+	"or3-intern/internal/heartbeat"
 	"or3-intern/internal/memory"
 	"or3-intern/internal/providers"
 	"or3-intern/internal/skills"
@@ -77,7 +78,7 @@ func (r *Runtime) Handle(ctx context.Context, ev bus.Event) error {
 	mu.Lock()
 	defer mu.Unlock()
 	switch ev.Type {
-	case bus.EventUserMessage, bus.EventCron, bus.EventSystem, bus.EventWebhook, bus.EventFileChange:
+	case bus.EventUserMessage, bus.EventCron, bus.EventHeartbeat, bus.EventSystem, bus.EventWebhook, bus.EventFileChange:
 		return r.turn(ctx, ev)
 	default:
 		return nil
@@ -85,6 +86,8 @@ func (r *Runtime) Handle(ctx context.Context, ev bus.Event) error {
 }
 
 func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
+	defer releaseEvent(ev)
+
 	if ev.Type == bus.EventUserMessage && strings.EqualFold(strings.TrimSpace(ev.Message), commandNewSession) {
 		return r.handleNewSession(ctx, ev)
 	}
@@ -105,7 +108,7 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 	if r.Builder == nil {
 		return fmt.Errorf("runtime builder not configured")
 	}
-	isAutonomous := ev.Type == bus.EventCron || ev.Type == bus.EventWebhook || ev.Type == bus.EventFileChange
+	isAutonomous := isAutonomousEvent(ev.Type)
 	messages, err := r.BuildPromptSnapshotWithOptions(ctx, BuildOptions{
 		SessionKey:  ev.SessionKey,
 		UserMessage: ev.Message,
@@ -121,7 +124,7 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 		return err
 	}
 
-	r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, finalText, streamed)
+	r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, finalText, streamed, shouldAutoDeliver(ev))
 
 	// best-effort rolling consolidation of old messages into memory notes
 	if r.Consolidator != nil && r.Builder != nil && r.ConsolidationScheduler != nil {
@@ -208,7 +211,7 @@ func (r *Runtime) handleExplicitSkillInvocation(ctx context.Context, ev bus.Even
 		return false, nil
 	}
 	if !skill.UserInvocable {
-		r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, "skill is not user-invocable: "+skill.Name, false)
+		r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, "skill is not user-invocable: "+skill.Name, false, true)
 		return true, nil
 	}
 	if !skill.Eligible {
@@ -221,12 +224,12 @@ func (r *Runtime) handleExplicitSkillInvocation(ctx context.Context, ev bus.Even
 		if len(reasons) > 0 {
 			message += " (" + strings.Join(reasons, "; ") + ")"
 		}
-		r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, message, false)
+		r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, message, false, true)
 		return true, nil
 	}
 	if skill.CommandDispatch == "tool" {
 		text := r.dispatchExplicitSkillTool(ctx, ev, skill, commandName, rawArgs)
-		r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, text, false)
+		r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, text, false, true)
 		return true, nil
 	}
 
@@ -260,7 +263,7 @@ func (r *Runtime) handleExplicitSkillInvocation(ctx context.Context, ev bus.Even
 	if err != nil {
 		return true, err
 	}
-	r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, finalText, streamed)
+	r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, finalText, streamed, true)
 	return true, nil
 }
 
@@ -539,14 +542,14 @@ func (r *Runtime) skillRunEnvFor(name string) map[string]string {
 	return r.Builder.Skills.RunEnvForSkill(name)
 }
 
-func (r *Runtime) persistAssistantReply(ctx context.Context, sessionKey string, msgID int64, channel, replyTarget, finalText string, streamed bool) {
+func (r *Runtime) persistAssistantReply(ctx context.Context, sessionKey string, msgID int64, channel, replyTarget, finalText string, streamed bool, autoDeliver bool) {
 	if strings.TrimSpace(finalText) == "" {
 		finalText = "(no response)"
 	}
 	if _, err := r.DB.AppendMessage(ctx, sessionKey, "assistant", finalText, map[string]any{"in_reply_to": msgID}); err != nil {
 		log.Printf("append assistant(final) failed: %v", err)
 	}
-	if !streamed && r.Deliver != nil {
+	if autoDeliver && !streamed && r.Deliver != nil {
 		if err := r.Deliver.Deliver(ctx, channel, replyTarget, finalText); err != nil {
 			log.Printf("deliver failed: %v", err)
 		}
@@ -608,6 +611,30 @@ func deliveryTarget(ev bus.Event) string {
 		}
 	}
 	return strings.TrimSpace(ev.From)
+}
+
+func isAutonomousEvent(eventType bus.EventType) bool {
+	switch eventType {
+	case bus.EventCron, bus.EventHeartbeat, bus.EventWebhook, bus.EventFileChange:
+		return true
+	default:
+		return false
+	}
+}
+
+func shouldAutoDeliver(ev bus.Event) bool {
+	return ev.Type != bus.EventHeartbeat
+}
+
+func releaseEvent(ev bus.Event) {
+	if len(ev.Meta) == 0 {
+		return
+	}
+	done, ok := ev.Meta[heartbeat.MetaKeyDone].(func())
+	if !ok || done == nil {
+		return
+	}
+	done()
 }
 
 func toToolDefs(reg *tools.Registry) []providers.ToolDef {

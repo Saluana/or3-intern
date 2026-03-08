@@ -96,6 +96,52 @@ func TestHeartbeatOnlyForAutonomous(t *testing.T) {
 	}
 }
 
+func TestHeartbeatTextRefreshesFromFile(t *testing.T) {
+	d := openTestDB(t)
+	workspace := t.TempDir()
+	heartbeatPath := filepath.Join(workspace, "HEARTBEAT.md")
+	if err := os.WriteFile(heartbeatPath, []byte("# Heartbeat\n- first task"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	b := &Builder{
+		DB:                 d,
+		HistoryMax:         10,
+		HeartbeatTasksFile: heartbeatPath,
+		WorkspaceDir:       workspace,
+	}
+
+	first, _, err := b.BuildWithOptions(context.Background(), BuildOptions{
+		SessionKey:  "sess",
+		UserMessage: "check tasks",
+		Autonomous:  true,
+	})
+	if err != nil {
+		t.Fatalf("BuildWithOptions: %v", err)
+	}
+	if !strings.Contains(first.System[0].Content.(string), "first task") {
+		t.Fatalf("expected first heartbeat text, got %q", first.System[0].Content.(string))
+	}
+
+	if err := os.WriteFile(heartbeatPath, []byte("# Heartbeat\n- second task"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	second, _, err := b.BuildWithOptions(context.Background(), BuildOptions{
+		SessionKey:  "sess",
+		UserMessage: "check tasks",
+		Autonomous:  true,
+	})
+	if err != nil {
+		t.Fatalf("BuildWithOptions: %v", err)
+	}
+	if !strings.Contains(second.System[0].Content.(string), "second task") {
+		t.Fatalf("expected refreshed heartbeat text, got %q", second.System[0].Content.(string))
+	}
+	if strings.Contains(second.System[0].Content.(string), "first task") {
+		t.Fatalf("expected stale heartbeat text to be replaced, got %q", second.System[0].Content.(string))
+	}
+}
+
 // TestDocContextIncluded verifies that DocRetriever results appear in the system prompt.
 func TestDocContextIncluded(t *testing.T) {
 	d := openTestDB(t)

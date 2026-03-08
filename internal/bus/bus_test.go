@@ -78,7 +78,7 @@ func TestChannel_IsReadOnly(t *testing.T) {
 }
 
 func TestEventTypes(t *testing.T) {
-	cases := []EventType{EventUserMessage, EventCron, EventSystem, EventWebhook, EventFileChange}
+	cases := []EventType{EventUserMessage, EventCron, EventHeartbeat, EventSystem, EventWebhook, EventFileChange}
 	for _, et := range cases {
 		b := New(1)
 		b.Publish(Event{Type: et})

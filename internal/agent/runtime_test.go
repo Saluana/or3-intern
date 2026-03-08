@@ -16,6 +16,7 @@ import (
 	"or3-intern/internal/artifacts"
 	"or3-intern/internal/bus"
 	"or3-intern/internal/db"
+	"or3-intern/internal/heartbeat"
 	"or3-intern/internal/memory"
 	"or3-intern/internal/providers"
 	"or3-intern/internal/scope"
@@ -243,6 +244,59 @@ func TestRuntime_Handle_CronEvent(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("Handle cron: %v", err)
+	}
+}
+
+func TestRuntime_Handle_HeartbeatEventSkipsDefaultDelivery(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	response := providers.ChatCompletionResponse{
+		Choices: []struct {
+			Message struct {
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			} `json:"message"`
+		}{{
+			Message: struct {
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			}{Role: "assistant", Content: "Heartbeat complete"},
+		}},
+	}
+	_, provider := buildChatServer(t, response)
+	deliver := &mockDeliverer{}
+	rt := buildSimpleRuntime(t, provider, d, deliver)
+
+	var released atomic.Bool
+	err := rt.Handle(context.Background(), bus.Event{
+		Type:       bus.EventHeartbeat,
+		SessionKey: "heartbeat:test",
+		Channel:    "system",
+		From:       "heartbeat",
+		Message:    "run heartbeat",
+		Meta: map[string]any{
+			heartbeat.MetaKeyDone: func() {
+				released.Store(true)
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Handle heartbeat: %v", err)
+	}
+	if len(deliver.messages) != 0 {
+		t.Fatalf("expected no default delivery for heartbeat, got %#v", deliver.messages)
+	}
+	if !released.Load() {
+		t.Fatal("expected heartbeat completion callback to run")
+	}
+
+	msgs, err := d.GetLastMessages(context.Background(), "heartbeat:test", 10)
+	if err != nil {
+		t.Fatalf("GetLastMessages: %v", err)
+	}
+	if len(msgs) < 2 || msgs[len(msgs)-1].Role != "assistant" || msgs[len(msgs)-1].Content != "Heartbeat complete" {
+		t.Fatalf("expected assistant reply to persist, got %#v", msgs)
 	}
 }
 
@@ -587,6 +641,103 @@ func TestRuntime_Handle_ToolContextIncludesDelivery(t *testing.T) {
 	}
 	if tool.channel != "discord" || tool.to != "channel-1" {
 		t.Fatalf("expected delivery context discord/channel-1, got %q/%q", tool.channel, tool.to)
+	}
+}
+
+func TestRuntime_Handle_HeartbeatSendMessageToolStillWorks(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		var resp providers.ChatCompletionResponse
+		if callCount == 1 {
+			resp = providers.ChatCompletionResponse{
+				Choices: []struct {
+					Message struct {
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					} `json:"message"`
+				}{{
+					Message: struct {
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					}{
+						Role: "assistant",
+						ToolCalls: []providers.ToolCall{{
+							ID:   "tc-send",
+							Type: "function",
+							Function: struct {
+								Name      string `json:"name"`
+								Arguments string `json:"arguments"`
+							}{Name: "send_message", Arguments: `{"channel":"cli","to":"ops","text":"heartbeat ping"}`},
+						}},
+					},
+				}},
+			}
+		} else {
+			resp = providers.ChatCompletionResponse{
+				Choices: []struct {
+					Message struct {
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					} `json:"message"`
+				}{{
+					Message: struct {
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					}{Role: "assistant", Content: "sent"},
+				}},
+			}
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	provider := providers.New(srv.URL, "key", 10*time.Second)
+	provider.HTTP = srv.Client()
+
+	var sentChannel, sentTo, sentText string
+	reg := tools.NewRegistry()
+	reg.Register(&tools.SendMessage{
+		Deliver: func(ctx context.Context, channel, to, text string, meta map[string]any) error {
+			sentChannel = channel
+			sentTo = to
+			sentText = text
+			return nil
+		},
+	})
+
+	deliver := &mockDeliverer{}
+	rt := &Runtime{
+		DB:           d,
+		Provider:     provider,
+		Model:        "gpt-4",
+		Tools:        reg,
+		Builder:      &Builder{DB: d, HistoryMax: 10},
+		MaxToolLoops: 4,
+		Deliver:      deliver,
+	}
+
+	err := rt.Handle(context.Background(), bus.Event{
+		Type:       bus.EventHeartbeat,
+		SessionKey: "heartbeat:send",
+		Channel:    "system",
+		From:       "heartbeat",
+		Message:    "notify",
+	})
+	if err != nil {
+		t.Fatalf("Handle heartbeat send_message: %v", err)
+	}
+	if sentChannel != "cli" || sentTo != "ops" || sentText != "heartbeat ping" {
+		t.Fatalf("expected explicit send_message delivery to work, got %q/%q/%q", sentChannel, sentTo, sentText)
+	}
+	if len(deliver.messages) != 0 {
+		t.Fatalf("expected no default delivery for heartbeat final response, got %#v", deliver.messages)
 	}
 }
 

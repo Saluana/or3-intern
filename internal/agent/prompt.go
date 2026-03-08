@@ -14,6 +14,7 @@ import (
 
 	"or3-intern/internal/artifacts"
 	"or3-intern/internal/db"
+	"or3-intern/internal/heartbeat"
 	"or3-intern/internal/memory"
 	"or3-intern/internal/providers"
 	"or3-intern/internal/scope"
@@ -88,12 +89,13 @@ type Builder struct {
 	TopK       int
 
 	// New fields for lightweight OpenClaw parity
-	IdentityText     string               // content of IDENTITY.md
-	StaticMemory     string               // content of MEMORY.md
-	HeartbeatText    string               // content of HEARTBEAT.md – injected only for autonomous turns
-	DocRetriever     *memory.DocRetriever // for indexed file context
-	DocRetrieveLimit int                  // max docs to retrieve
-	WorkspaceDir     string
+	IdentityText       string               // content of IDENTITY.md
+	StaticMemory       string               // content of MEMORY.md
+	HeartbeatText      string               // content of HEARTBEAT.md – injected only for autonomous turns
+	HeartbeatTasksFile string               // configured heartbeat file path for per-turn refresh
+	DocRetriever       *memory.DocRetriever // for indexed file context
+	DocRetrieveLimit   int                  // max docs to retrieve
+	WorkspaceDir       string
 }
 
 // Build builds a prompt snapshot. It is a convenience wrapper around BuildWithOptions.
@@ -173,13 +175,26 @@ func (b *Builder) BuildWithOptions(ctx context.Context, opts BuildOptions) (Prom
 
 	heartbeat := ""
 	if opts.Autonomous {
-		heartbeat = b.HeartbeatText
+		heartbeat = b.currentHeartbeatText()
 	}
 	sysText := b.composeSystemPrompt(pinnedText, memText, b.IdentityText, b.StaticMemory, heartbeat, docContextText, workspaceContextText)
 	sys := []providers.ChatMessage{
 		{Role: "system", Content: sysText},
 	}
 	return PromptParts{System: sys, History: hist}, retrieved, nil
+}
+
+func (b *Builder) currentHeartbeatText() string {
+	if b == nil {
+		return ""
+	}
+	if path, text, err := heartbeat.LoadTasksFile(b.HeartbeatTasksFile, b.WorkspaceDir); err == nil && strings.TrimSpace(path) != "" {
+		if heartbeat.HasActiveInstructions(text) {
+			return text
+		}
+		return ""
+	}
+	return strings.TrimSpace(b.HeartbeatText)
 }
 
 func attachmentsFromPayload(payload map[string]any) []artifacts.Attachment {

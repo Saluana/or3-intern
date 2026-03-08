@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"or3-intern/internal/bus"
 	"or3-intern/internal/channels/cli"
 	"or3-intern/internal/config"
 )
@@ -103,5 +104,27 @@ func TestBuildChannelManager_RegistersEnabledChannels(t *testing.T) {
 	names := strings.Join(mgr.Names(), ",")
 	if !strings.Contains(names, "cli") || !strings.Contains(names, "telegram") || !strings.Contains(names, "slack") {
 		t.Fatalf("expected registered channels, got %q", names)
+	}
+}
+
+func TestHeartbeatServiceForCommand_OnlyServeAndEnabled(t *testing.T) {
+	cfg := config.Default()
+	eventBus := bus.New(1)
+
+	if svc := heartbeatServiceForCommand("chat", cfg, eventBus); svc != nil {
+		t.Fatal("expected no heartbeat service for chat command")
+	}
+
+	cfg.Heartbeat.Enabled = true
+	if svc := heartbeatServiceForCommand("agent", cfg, eventBus); svc != nil {
+		t.Fatal("expected no heartbeat service for agent command")
+	}
+
+	svc := heartbeatServiceForCommand("serve", cfg, eventBus)
+	if svc == nil {
+		t.Fatal("expected heartbeat service for serve command when enabled")
+	}
+	if svc.Config.SessionKey != config.DefaultHeartbeatSessionKey {
+		t.Fatalf("expected normalized heartbeat session key, got %q", svc.Config.SessionKey)
 	}
 }

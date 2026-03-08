@@ -9,18 +9,19 @@ type EventType string
 const (
 	EventUserMessage EventType = "user_message"
 	EventCron        EventType = "cron"
+	EventHeartbeat   EventType = "heartbeat"
 	EventSystem      EventType = "system"
 	EventWebhook     EventType = "webhook"
 	EventFileChange  EventType = "file_change"
 )
 
 type Event struct {
-	Type EventType
+	Type       EventType
 	SessionKey string
-	Channel string
-	From string
-	Message string
-	Meta map[string]any
+	Channel    string
+	From       string
+	Message    string
+	Meta       map[string]any
 }
 
 type Handler func(ctx context.Context, ev Event) error
@@ -30,7 +31,9 @@ type Bus struct {
 }
 
 func New(buffer int) *Bus {
-	if buffer <= 0 { buffer = 128 }
+	if buffer <= 0 {
+		buffer = 128
+	}
 	return &Bus{ch: make(chan Event, buffer)}
 }
 

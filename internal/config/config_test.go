@@ -115,6 +115,12 @@ func TestDefault_Values(t *testing.T) {
 	if cfg.Session.DirectMessagesShareDefault {
 		t.Error("expected direct messages to stay isolated by default")
 	}
+	if cfg.Heartbeat.IntervalMinutes != 30 {
+		t.Fatalf("expected Heartbeat.IntervalMinutes=30, got %d", cfg.Heartbeat.IntervalMinutes)
+	}
+	if cfg.Heartbeat.SessionKey != DefaultHeartbeatSessionKey {
+		t.Fatalf("expected Heartbeat.SessionKey=%q, got %q", DefaultHeartbeatSessionKey, cfg.Heartbeat.SessionKey)
+	}
 }
 
 func TestLoad_EnabledExternalChannelRequiresAllowlistOrOpenAccess(t *testing.T) {
@@ -274,6 +280,35 @@ func TestLoad_ValidFile(t *testing.T) {
 	}
 	if cfg.Provider.EnableVision {
 		t.Error("expected missing EnableVision to default to false")
+	}
+}
+
+func TestLoad_HeartbeatDefaultsRemainBackwardCompatible(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	raw := map[string]any{
+		"heartbeat": map[string]any{
+			"enabled":         true,
+			"intervalMinutes": 0,
+			"tasksFile":       filepath.Join(dir, "HEARTBEAT.md"),
+		},
+	}
+	b, _ := json.MarshalIndent(raw, "", "  ")
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Heartbeat.IntervalMinutes != 30 {
+		t.Fatalf("expected default heartbeat interval after normalization, got %d", cfg.Heartbeat.IntervalMinutes)
+	}
+	if cfg.Heartbeat.SessionKey != DefaultHeartbeatSessionKey {
+		t.Fatalf("expected default heartbeat session key, got %q", cfg.Heartbeat.SessionKey)
 	}
 }
 

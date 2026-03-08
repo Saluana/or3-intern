@@ -76,10 +76,13 @@ type CronConfig struct {
 	StorePath string `json:"storePath"`
 }
 
+const DefaultHeartbeatSessionKey = "heartbeat:default"
+
 type HeartbeatConfig struct {
 	Enabled         bool   `json:"enabled"`
 	IntervalMinutes int    `json:"intervalMinutes"`
 	TasksFile       string `json:"tasksFile"`
+	SessionKey      string `json:"sessionKey"`
 }
 
 type SubagentsConfig struct {
@@ -298,8 +301,13 @@ func Default() Config {
 			RestrictToWorkspace: true,
 			PathAppend:          "",
 		},
-		Cron:      CronConfig{Enabled: true, StorePath: filepath.Join(root, "cron.json")},
-		Heartbeat: HeartbeatConfig{Enabled: false, IntervalMinutes: 30, TasksFile: filepath.Join(root, "HEARTBEAT.md")},
+		Cron: CronConfig{Enabled: true, StorePath: filepath.Join(root, "cron.json")},
+		Heartbeat: HeartbeatConfig{
+			Enabled:         false,
+			IntervalMinutes: 30,
+			TasksFile:       filepath.Join(root, "HEARTBEAT.md"),
+			SessionKey:      DefaultHeartbeatSessionKey,
+		},
 		Channels: ChannelsConfig{
 			Telegram: TelegramChannelConfig{Enabled: false, APIBase: "https://api.telegram.org", PollSeconds: 2},
 			Slack:    SlackChannelConfig{Enabled: false, APIBase: "https://slack.com/api", RequireMention: true},
@@ -527,6 +535,15 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.Triggers.FileWatch.DebounceSeconds <= 0 {
 		cfg.Triggers.FileWatch.DebounceSeconds = 2
+	}
+	if cfg.Heartbeat.IntervalMinutes <= 0 {
+		cfg.Heartbeat.IntervalMinutes = 30
+	}
+	if cfg.Heartbeat.IntervalMinutes < 1 {
+		cfg.Heartbeat.IntervalMinutes = 1
+	}
+	if strings.TrimSpace(cfg.Heartbeat.SessionKey) == "" {
+		cfg.Heartbeat.SessionKey = DefaultHeartbeatSessionKey
 	}
 	if cfg.Session.IdentityLinks == nil {
 		cfg.Session.IdentityLinks = []SessionIdentityLink{}

@@ -188,7 +188,7 @@ Three markdown files configure the agent's identity and persistent context:
 
 - **IDENTITY.md** – Loaded once at startup; defines who the agent is (name, role, personality traits). Injects into every system prompt.
 - **MEMORY.md** – Static knowledge the agent always has access to (facts, preferences, standing instructions). Injects into every system prompt.
-- **HEARTBEAT.md** – Autonomous task list injected only during scheduled (cron/webhook/file-watch) turns, not user-initiated chats. Useful for periodic background tasks.
+- **HEARTBEAT.md** – Autonomous task list injected only during heartbeat, cron, webhook, and file-watch turns, not user-initiated chats. It is reloaded on each autonomous turn so edits apply without restart.
 
 Configure file paths in `config.json`:
 
@@ -196,9 +196,16 @@ Configure file paths in `config.json`:
 {
   "identityFile": "/path/to/IDENTITY.md",
   "memoryFile":   "/path/to/MEMORY.md",
-  "heartbeat": { "tasksFile": "/path/to/HEARTBEAT.md" }
+  "heartbeat": {
+    "enabled": false,
+    "intervalMinutes": 30,
+    "tasksFile": "/path/to/HEARTBEAT.md",
+    "sessionKey": "heartbeat:default"
+  }
 }
 ```
+
+`heartbeat.enabled` is off by default and only applies to `or3-intern serve`.
 
 ### Document Index
 
@@ -381,6 +388,31 @@ The webhook server listens at `/webhook` (fixed path).
 ```
 
 Both trigger types use `HEARTBEAT.md` instructions when dispatching autonomous turns.
+
+### Heartbeat Service
+
+Heartbeat is a timer-driven autonomous trigger that runs inside `or3-intern serve`.
+
+```json
+{
+  "heartbeat": {
+    "enabled": true,
+    "intervalMinutes": 15,
+    "tasksFile": "/path/to/HEARTBEAT.md",
+    "sessionKey": "heartbeat:default"
+  }
+}
+```
+
+- Heartbeat is disabled by default.
+- Heartbeat does not run during `chat` or one-shot `agent` commands.
+- The interval is configured in minutes and normalized to a sane minimum.
+- Heartbeat uses its own session key so its history and long-term memory stay deterministic across ticks.
+- `HEARTBEAT.md` is reread on each autonomous turn, so edits apply without restarting `serve`.
+- Empty files, comment-only files, and missing files are skipped instead of triggering a model call.
+- Heartbeat turns do not auto-send a normal assistant reply anywhere. If the agent should proactively notify someone, it must call `send_message` explicitly.
+
+Use heartbeat when the agent should periodically review a standing background task list. Use cron when you need a specific schedule or per-job delivery target.
 
 ### Streaming
 

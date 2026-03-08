@@ -28,7 +28,7 @@ The content is organized as follows:
 ## Notes
 - Some files may have been excluded based on .gitignore rules and Repomix's configuration
 - Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
-- Files matching these patterns are excluded: nanobot-repo.md, .github, planning, missing.md, breakdown.md
+- Files matching these patterns are excluded: .github, planning, nanobot-repo.md, repomix-output.md, missing.md, **/*_test.go
 - Files matching patterns in .gitignore are excluded
 - Files matching default ignore patterns are excluded
 - Files are sorted by Git change count (files with more changes are at the bottom)
@@ -36,998 +36,99 @@ The content is organized as follows:
 # Directory Structure
 ```
 builtin_skills/
-  cron.md
+  cron/
+    SKILL.md
 cmd/
   or3-intern/
-    init_test.go
     init.go
     main.go
     migrate.go
-    tools_registry_test.go
+    skills_cmd.go
 internal/
   agent/
-    agent_test.go
-    prompt_test.go
     prompt.go
-    runtime_streaming_test.go
-    runtime_test.go
     runtime.go
-    subagents_test.go
     subagents.go
   artifacts/
     attachment.go
-    store_test.go
     store.go
   bus/
-    bus_test.go
     bus.go
   channels/
     cli/
-      cli_test.go
       cli.go
-      deliver_test.go
       deliver.go
       service.go
+      terminal.go
     discord/
-      discord_test.go
       discord.go
+    email/
+      email.go
     slack/
-      slack_test.go
       slack.go
     telegram/
-      telegram_test.go
       telegram.go
     whatsapp/
-      whatsapp_test.go
       whatsapp.go
-    channels_test.go
     channels.go
     media.go
     stream.go
+  clawhub/
+    client.go
   config/
-    config_test.go
     config.go
   cron/
-    cron_test.go
     cron.go
   db/
-    db_test.go
     db.go
     store.go
+  heartbeat/
+    service.go
+  mcp/
+    manager.go
   memory/
-    consolidate_test.go
     consolidate.go
-    docs_test.go
     docs.go
-    retrieve_test.go
     retrieve.go
-    scheduler_test.go
     scheduler.go
-    vector_test.go
     vector.go
+    workspace_context.go
   providers/
-    openai_stream_test.go
-    openai_test.go
     openai.go
   scope/
     scope.go
   skills/
-    skills_test.go
     skills.go
   tools/
     context.go
-    cron_test.go
     cron.go
-    exec_test.go
     exec.go
-    files_test.go
     files.go
-    memory_test.go
     memory.go
-    message_test.go
     message.go
     registry.go
-    skill_run_test.go
-    skill_run.go
-    skill_test.go
+    skill_exec.go
     skill.go
-    spawn_test.go
     spawn.go
-    tools_test.go
     tools.go
-    web_test.go
     web.go
   triggers/
-    filewatch_test.go
     filewatch.go
     triggers.go
-    webhook_test.go
     webhook.go
 .env.example
 .gitignore
+breakdown.md
 go.mod
 README.md
 ```
 
 # Files
 
-## File: builtin_skills/cron.md
+## File: builtin_skills/cron/SKILL.md
 ````markdown
 # cron
 Use the `cron` tool to add/list/remove/run/status scheduled jobs.
-````
-
-## File: cmd/or3-intern/tools_registry_test.go
-````go
-package main
-
-import (
-	"context"
-	"fmt"
-	"path/filepath"
-	"testing"
-	"time"
-
-	"or3-intern/internal/artifacts"
-	"or3-intern/internal/channels/cli"
-	"or3-intern/internal/config"
-	"or3-intern/internal/db"
-	"or3-intern/internal/providers"
-	"or3-intern/internal/skills"
-	"or3-intern/internal/tools"
-)
-
-type stubSpawnManager struct{}
-
-func (stubSpawnManager) Enqueue(ctx context.Context, req tools.SpawnRequest) (tools.SpawnJob, error) {
-	return tools.SpawnJob{ID: "job-1", ChildSessionKey: "child"}, nil
-}
-
-func TestBuildToolRegistry_ReturnsFreshToolInstances(t *testing.T) {
-	cfg := config.Default()
-	cfg.WorkspaceDir = t.TempDir()
-	cfg.Tools.RestrictToWorkspace = true
-
-	d, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("db.Open: %v", err)
-	}
-	defer d.Close()
-
-	provider := providers.New("http://example.invalid", "key", time.Second)
-	channelManager, err := buildChannelManager(cfg, cli.Deliverer{}, &artifacts.Store{Dir: t.TempDir(), DB: d}, cfg.MaxMediaBytes)
-	if err != nil {
-		t.Fatalf("buildChannelManager: %v", err)
-	}
-	inv := skills.Inventory{}
-
-	reg1 := buildToolRegistry(cfg, d, provider, channelManager, &inv, nil, stubSpawnManager{})
-	reg2 := buildToolRegistry(cfg, d, provider, channelManager, &inv, nil, stubSpawnManager{})
-
-	for _, name := range []string{"read_file", "memory_search", "send_message", "spawn_subagent"} {
-		tool1 := reg1.Get(name)
-		tool2 := reg2.Get(name)
-		if tool1 == nil || tool2 == nil {
-			t.Fatalf("expected tool %q in both registries", name)
-		}
-		if fmt.Sprintf("%p", tool1) == fmt.Sprintf("%p", tool2) {
-			t.Fatalf("expected fresh instance for %q", name)
-		}
-	}
-}
-````
-
-## File: internal/agent/runtime_streaming_test.go
-````go
-package agent
-
-import (
-	"context"
-	"fmt"
-	"net/http"
-	"net/http/httptest"
-	"testing"
-	"time"
-
-	"or3-intern/internal/bus"
-	"or3-intern/internal/channels"
-	"or3-intern/internal/providers"
-)
-
-// mockStreamWriter records all deltas and close/abort calls.
-type mockStreamWriter struct {
-	deltas  []string
-	closed  bool
-	aborted bool
-}
-
-func (w *mockStreamWriter) WriteDelta(_ context.Context, text string) error {
-	w.deltas = append(w.deltas, text)
-	return nil
-}
-
-func (w *mockStreamWriter) Close(_ context.Context, _ string) error {
-	w.closed = true
-	return nil
-}
-
-func (w *mockStreamWriter) Abort(_ context.Context) error {
-	w.aborted = true
-	return nil
-}
-
-// mockStreamer implements channels.StreamingChannel using mockStreamWriter.
-type mockStreamer struct {
-	writer *mockStreamWriter
-}
-
-func (s *mockStreamer) BeginStream(_ context.Context, _ string, _ map[string]any) (channels.StreamWriter, error) {
-	return s.writer, nil
-}
-
-// buildSSEServer creates a test server that returns an SSE stream.
-func buildSSEServer(t *testing.T, sseLines []string) (*httptest.Server, *providers.Client) {
-	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		for _, l := range sseLines {
-			fmt.Fprintln(w, l)
-		}
-	}))
-	t.Cleanup(srv.Close)
-	c := providers.New(srv.URL, "test-key", 10*time.Second)
-	c.HTTP = srv.Client()
-	return srv, c
-}
-
-func TestRuntime_Streaming_FinalAnswer(t *testing.T) {
-	d := openRuntimeTestDB(t)
-	sseLines := []string{
-		`data: {"id":"1","choices":[{"delta":{"content":"Hello"},"finish_reason":""}]}`,
-		`data: {"id":"1","choices":[{"delta":{"content":" streamed"},"finish_reason":"stop"}]}`,
-		`data: [DONE]`,
-	}
-	_, provider := buildSSEServer(t, sseLines)
-	deliver := &mockDeliverer{}
-	rt := buildSimpleRuntime(t, provider, d, deliver)
-
-	writer := &mockStreamWriter{}
-	streamer := &mockStreamer{writer: writer}
-	rt.Streamer = streamer
-
-	ev := bus.Event{
-		Type:       bus.EventUserMessage,
-		SessionKey: "sess-stream",
-		Channel:    "cli",
-		From:       "user",
-		Message:    "hello",
-	}
-
-	err := rt.Handle(context.Background(), ev)
-	if err != nil {
-		t.Fatalf("Handle: %v", err)
-	}
-
-	// Streamer was used: deltas should have been written
-	if len(writer.deltas) == 0 {
-		t.Error("expected deltas written to stream writer")
-	}
-	combined := ""
-	for _, d := range writer.deltas {
-		combined += d
-	}
-	if combined != "Hello streamed" {
-		t.Errorf("expected 'Hello streamed', got %q", combined)
-	}
-	if !writer.closed {
-		t.Error("expected stream writer to be closed")
-	}
-
-	// When streaming, the Deliver method should NOT be called (to avoid double output)
-	if len(deliver.messages) != 0 {
-		t.Errorf("expected no delivered messages (already streamed), got %v", deliver.messages)
-	}
-}
-
-func TestRuntime_Streaming_FallbackWhenNoStreamer(t *testing.T) {
-	d := openRuntimeTestDB(t)
-	response := providers.ChatCompletionResponse{
-		Choices: []struct {
-			Message struct {
-				Role      string               `json:"role"`
-				Content   any                  `json:"content"`
-				ToolCalls []providers.ToolCall `json:"tool_calls"`
-			} `json:"message"`
-		}{{
-			Message: struct {
-				Role      string               `json:"role"`
-				Content   any                  `json:"content"`
-				ToolCalls []providers.ToolCall `json:"tool_calls"`
-			}{Role: "assistant", Content: "No streaming here"},
-		}},
-	}
-	_, provider := buildChatServer(t, response)
-	deliver := &mockDeliverer{}
-	rt := buildSimpleRuntime(t, provider, d, deliver)
-	// rt.Streamer is nil - should fall back to normal Deliver
-
-	ev := bus.Event{
-		Type:       bus.EventUserMessage,
-		SessionKey: "sess-fallback",
-		Channel:    "cli",
-		From:       "user",
-		Message:    "hello",
-	}
-
-	err := rt.Handle(context.Background(), ev)
-	if err != nil {
-		t.Fatalf("Handle: %v", err)
-	}
-	if len(deliver.messages) == 0 {
-		t.Error("expected message delivered via Deliver (no streamer)")
-	}
-	if deliver.messages[0] != "No streaming here" {
-		t.Errorf("expected 'No streaming here', got %q", deliver.messages[0])
-	}
-}
-
-func TestRuntime_Streaming_AbortOnToolCalls(t *testing.T) {
-	d := openRuntimeTestDB(t)
-
-	callCount := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
-		if callCount == 1 {
-			// First call: SSE response with a tool call
-			w.Header().Set("Content-Type", "text/event-stream")
-			fmt.Fprintln(w, `data: {"id":"1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"exec","arguments":"{\"cmd\":\"echo hi\"}"}}]},"finish_reason":"tool_calls"}]}`)
-			fmt.Fprintln(w, `data: [DONE]`)
-		} else {
-			// Second call: SSE final answer
-			w.Header().Set("Content-Type", "text/event-stream")
-			fmt.Fprintln(w, `data: {"id":"2","choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}`)
-			fmt.Fprintln(w, `data: [DONE]`)
-		}
-	}))
-	defer srv.Close()
-
-	prov := providers.New(srv.URL, "key", 10*time.Second)
-	prov.HTTP = srv.Client()
-
-	deliver := &mockDeliverer{}
-	rt := buildSimpleRuntime(t, prov, d, deliver)
-
-	writers := []*mockStreamWriter{}
-	rt.Streamer = &funcStreamer{fn: func() (channels.StreamWriter, error) {
-		w := &mockStreamWriter{}
-		writers = append(writers, w)
-		return w, nil
-	}}
-
-	ev := bus.Event{
-		Type:       bus.EventUserMessage,
-		SessionKey: "sess-tool",
-		Channel:    "cli",
-		From:       "user",
-		Message:    "run something",
-	}
-
-	err := rt.Handle(context.Background(), ev)
-	if err != nil {
-		t.Fatalf("Handle: %v", err)
-	}
-
-	if len(writers) < 2 {
-		t.Fatalf("expected at least 2 stream writers (one per loop), got %d", len(writers))
-	}
-	// First writer should have been aborted (tool call turn)
-	if !writers[0].aborted {
-		t.Error("expected first stream writer to be aborted (tool call turn)")
-	}
-	// Last writer should be closed (final answer)
-	last := writers[len(writers)-1]
-	if !last.closed {
-		t.Error("expected last stream writer to be closed (final answer)")
-	}
-}
-
-// funcStreamer allows a custom function to create writers.
-type funcStreamer struct {
-	fn func() (channels.StreamWriter, error)
-}
-
-func (s *funcStreamer) BeginStream(_ context.Context, _ string, _ map[string]any) (channels.StreamWriter, error) {
-	return s.fn()
-}
-````
-
-## File: internal/agent/subagents_test.go
-````go
-package agent
-
-import (
-	"context"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
-	"strings"
-	"testing"
-	"time"
-
-	"or3-intern/internal/artifacts"
-	"or3-intern/internal/bus"
-	"or3-intern/internal/db"
-	"or3-intern/internal/providers"
-	"or3-intern/internal/tools"
-)
-
-func TestSubagentManager_SuccessPersistsAndNotifies(t *testing.T) {
-	d := openRuntimeTestDB(t)
-	deliver := &mockDeliverer{}
-	artifactsDir := t.TempDir()
-	providerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"choices": []map[string]any{{
-				"message": map[string]any{"role": "assistant", "content": strings.Repeat("x", 64)},
-			}},
-		})
-	}))
-	defer providerServer.Close()
-	provider := providers.New(providerServer.URL, "k", 5*time.Second)
-	provider.HTTP = providerServer.Client()
-	rt := &Runtime{
-		DB:               d,
-		Provider:         provider,
-		Model:            "gpt-4",
-		Tools:            tools.NewRegistry(),
-		Builder:          &Builder{DB: d, HistoryMax: 10},
-		MaxToolLoops:     2,
-		MaxToolBytes:     10,
-		ToolPreviewBytes: 8,
-		Artifacts:        &artifacts.Store{Dir: artifactsDir, DB: d},
-		Deliver:          deliver,
-	}
-	if _, err := d.AppendMessage(context.Background(), "parent", "user", "start background work", nil); err != nil {
-		t.Fatalf("AppendMessage parent: %v", err)
-	}
-	mgr := &SubagentManager{DB: d, Runtime: rt, Deliver: deliver, MaxConcurrent: 1, MaxQueued: 8, TaskTimeout: 2 * time.Second}
-	if err := mgr.Start(context.Background()); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer mgr.Stop(context.Background())
-
-	job, err := mgr.Enqueue(context.Background(), tools.SpawnRequest{ParentSessionKey: "parent", Task: "background task", Channel: "cli", To: "user"})
-	if err != nil {
-		t.Fatalf("Enqueue: %v", err)
-	}
-	stored := waitForSubagentJob(t, d, job.ID, db.SubagentStatusSucceeded)
-	if stored.ArtifactID == "" || stored.ResultPreview == "" {
-		t.Fatalf("expected artifact-backed success result, got %#v", stored)
-	}
-	msgs, err := d.GetLastMessages(context.Background(), "parent", 20)
-	if err != nil {
-		t.Fatalf("GetLastMessages parent: %v", err)
-	}
-	if !containsMessage(msgs, "Background job "+job.ID+" completed") {
-		t.Fatalf("expected parent completion note, got %#v", msgs)
-	}
-	if len(deliver.messages) == 0 || !strings.Contains(deliver.messages[0], "Background job "+job.ID+" finished") {
-		t.Fatalf("expected completion delivery, got %#v", deliver.messages)
-	}
-	childMsgs, err := d.GetLastMessages(context.Background(), job.ChildSessionKey, 20)
-	if err != nil {
-		t.Fatalf("GetLastMessages child: %v", err)
-	}
-	if len(childMsgs) < 2 {
-		t.Fatalf("expected child-session history, got %#v", childMsgs)
-	}
-}
-
-func TestSubagentManager_FailurePersistsAndNotifies(t *testing.T) {
-	d := openRuntimeTestDB(t)
-	deliver := &mockDeliverer{}
-	providerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "provider down", http.StatusBadGateway)
-	}))
-	defer providerServer.Close()
-	provider := providers.New(providerServer.URL, "k", 5*time.Second)
-	provider.HTTP = providerServer.Client()
-	rt := &Runtime{
-		DB:           d,
-		Provider:     provider,
-		Model:        "gpt-4",
-		Tools:        tools.NewRegistry(),
-		Builder:      &Builder{DB: d, HistoryMax: 10},
-		MaxToolLoops: 2,
-		Deliver:      deliver,
-	}
-	if _, err := d.AppendMessage(context.Background(), "parent", "user", "start background work", nil); err != nil {
-		t.Fatalf("AppendMessage parent: %v", err)
-	}
-	mgr := &SubagentManager{DB: d, Runtime: rt, Deliver: deliver, MaxConcurrent: 1, MaxQueued: 8, TaskTimeout: 2 * time.Second}
-	if err := mgr.Start(context.Background()); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer mgr.Stop(context.Background())
-
-	job, err := mgr.Enqueue(context.Background(), tools.SpawnRequest{ParentSessionKey: "parent", Task: "background task", Channel: "cli", To: "user"})
-	if err != nil {
-		t.Fatalf("Enqueue: %v", err)
-	}
-	stored := waitForSubagentJob(t, d, job.ID, db.SubagentStatusFailed)
-	if stored.ErrorText == "" {
-		t.Fatalf("expected persisted failure error, got %#v", stored)
-	}
-	msgs, err := d.GetLastMessages(context.Background(), "parent", 20)
-	if err != nil {
-		t.Fatalf("GetLastMessages parent: %v", err)
-	}
-	if !containsMessage(msgs, "Background job "+job.ID+" failed") {
-		t.Fatalf("expected parent failure note, got %#v", msgs)
-	}
-	if len(deliver.messages) == 0 || !strings.Contains(deliver.messages[0], "Background job "+job.ID+" failed") {
-		t.Fatalf("expected failure delivery, got %#v", deliver.messages)
-	}
-}
-
-func TestSubagentManager_DoesNotBlockForegroundTurn(t *testing.T) {
-	d := openRuntimeTestDB(t)
-	deliver := &mockDeliverer{}
-	started := make(chan struct{}, 1)
-	release := make(chan struct{})
-	providerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req providers.ChatCompletionRequest
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		last := req.Messages[len(req.Messages)-1]
-		content := contentToString(last.Content)
-		if strings.Contains(content, "long task") {
-			select {
-			case started <- struct{}{}:
-			default:
-			}
-			<-release
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"choices": []map[string]any{{
-				"message": map[string]any{"role": "assistant", "content": "ok"},
-			}},
-		})
-	}))
-	defer providerServer.Close()
-	provider := providers.New(providerServer.URL, "k", 5*time.Second)
-	provider.HTTP = providerServer.Client()
-	rt := buildSimpleRuntime(t, provider, d, deliver)
-	mgr := &SubagentManager{DB: d, Runtime: rt, Deliver: deliver, MaxConcurrent: 1, MaxQueued: 8, TaskTimeout: 2 * time.Second}
-	if err := mgr.Start(context.Background()); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer mgr.Stop(context.Background())
-
-	if _, err := mgr.Enqueue(context.Background(), tools.SpawnRequest{ParentSessionKey: "parent", Task: "long task", Channel: "cli", To: "user"}); err != nil {
-		t.Fatalf("Enqueue: %v", err)
-	}
-	select {
-	case <-started:
-	case <-time.After(2 * time.Second):
-		t.Fatal("expected background job to start")
-	}
-	start := time.Now()
-	err := rt.Handle(context.Background(), bus.Event{Type: bus.EventUserMessage, SessionKey: "parent", Channel: "cli", From: "user", Message: "foreground follow-up"})
-	elapsed := time.Since(start)
-	if err != nil {
-		t.Fatalf("Handle: %v", err)
-	}
-	if elapsed > 300*time.Millisecond {
-		t.Fatalf("expected foreground turn to stay non-blocking, elapsed=%v", elapsed)
-	}
-	close(release)
-}
-
-func TestSubagentManager_TimeoutMarksFailure(t *testing.T) {
-	d := openRuntimeTestDB(t)
-	deliver := &mockDeliverer{}
-	providerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(200 * time.Millisecond)
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"choices": []map[string]any{{
-				"message": map[string]any{"role": "assistant", "content": "slow"},
-			}},
-		})
-	}))
-	defer providerServer.Close()
-	provider := providers.New(providerServer.URL, "k", 5*time.Second)
-	provider.HTTP = providerServer.Client()
-	rt := &Runtime{
-		DB:           d,
-		Provider:     provider,
-		Model:        "gpt-4",
-		Tools:        tools.NewRegistry(),
-		Builder:      &Builder{DB: d, HistoryMax: 10},
-		MaxToolLoops: 2,
-		Deliver:      deliver,
-	}
-	if _, err := d.AppendMessage(context.Background(), "parent", "user", "start background work", nil); err != nil {
-		t.Fatalf("AppendMessage parent: %v", err)
-	}
-	mgr := &SubagentManager{DB: d, Runtime: rt, Deliver: deliver, MaxConcurrent: 1, MaxQueued: 8, TaskTimeout: 50 * time.Millisecond}
-	if err := mgr.Start(context.Background()); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer mgr.Stop(context.Background())
-
-	job, err := mgr.Enqueue(context.Background(), tools.SpawnRequest{ParentSessionKey: "parent", Task: "background task", Channel: "cli", To: "user"})
-	if err != nil {
-		t.Fatalf("Enqueue: %v", err)
-	}
-	stored := waitForSubagentJob(t, d, job.ID, db.SubagentStatusFailed)
-	if !strings.Contains(strings.ToLower(stored.ErrorText), "timeout") && !strings.Contains(strings.ToLower(stored.ErrorText), "deadline") {
-		t.Fatalf("expected timeout-related failure, got %#v", stored)
-	}
-}
-
-func TestSubagentManager_FinalizeFailureDoesNotDeliver(t *testing.T) {
-	d := openRuntimeTestDB(t)
-	deliver := &mockDeliverer{}
-	job := db.SubagentJob{
-		ID:               "job-finalize-fail",
-		ParentSessionKey: "parent",
-		ChildSessionKey:  "parent:subagent:job-finalize-fail",
-		Task:             "background task",
-	}
-	if err := d.EnqueueSubagentJob(context.Background(), job); err != nil {
-		t.Fatalf("EnqueueSubagentJob: %v", err)
-	}
-	mgr := &SubagentManager{DB: d, Deliver: deliver}
-	mgr.finalizeJob(job, db.SubagentStatusSucceeded, "preview", "", "")
-	if len(deliver.messages) != 0 {
-		t.Fatalf("expected no delivery on finalize failure, got %#v", deliver.messages)
-	}
-	msgs, err := d.GetLastMessages(context.Background(), job.ParentSessionKey, 10)
-	if err != nil {
-		t.Fatalf("GetLastMessages: %v", err)
-	}
-	if len(msgs) != 0 {
-		t.Fatalf("expected no persisted parent summary on finalize failure, got %#v", msgs)
-	}
-}
-
-func waitForSubagentJob(t *testing.T, d *db.DB, id string, want string) db.SubagentJob {
-	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		job, ok, err := d.GetSubagentJob(context.Background(), id)
-		if err != nil {
-			t.Fatalf("GetSubagentJob: %v", err)
-		}
-		if ok && job.Status == want {
-			return job
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for job %s status %s", id, want)
-	return db.SubagentJob{}
-}
-
-func containsMessage(msgs []db.Message, needle string) bool {
-	for _, msg := range msgs {
-		if strings.Contains(msg.Content, needle) {
-			return true
-		}
-	}
-	return false
-}
-````
-
-## File: internal/agent/subagents.go
-````go
-package agent
-
-import (
-	"context"
-	"crypto/rand"
-	"encoding/hex"
-	"errors"
-	"fmt"
-	"log"
-	"strings"
-	"sync"
-	"time"
-
-	"or3-intern/internal/db"
-	"or3-intern/internal/tools"
-)
-
-type SubagentManager struct {
-	DB              *db.DB
-	Runtime         *Runtime
-	Deliver         Deliverer
-	MaxConcurrent   int
-	MaxQueued       int
-	TaskTimeout     time.Duration
-	BackgroundTools func() *tools.Registry
-
-	mu       sync.Mutex
-	started  bool
-	ctx      context.Context
-	cancel   context.CancelFunc
-	notifyCh chan struct{}
-	wg       sync.WaitGroup
-}
-
-func (m *SubagentManager) Start(ctx context.Context) error {
-	if m == nil {
-		return fmt.Errorf("subagent manager is nil")
-	}
-	if m.DB == nil {
-		return fmt.Errorf("subagent db not configured")
-	}
-	if m.Runtime == nil {
-		return fmt.Errorf("subagent runtime not configured")
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.started {
-		return nil
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if m.MaxConcurrent <= 0 {
-		m.MaxConcurrent = 1
-	}
-	if m.MaxQueued <= 0 {
-		m.MaxQueued = 32
-	}
-	if m.TaskTimeout <= 0 {
-		m.TaskTimeout = 5 * time.Minute
-	}
-	if err := m.DB.MarkRunningSubagentsInterrupted(ctx, "subagent interrupted during restart"); err != nil {
-		return err
-	}
-	m.ctx, m.cancel = context.WithCancel(ctx)
-	m.notifyCh = make(chan struct{}, 1)
-	m.started = true
-	for i := 0; i < m.MaxConcurrent; i++ {
-		m.wg.Add(1)
-		go m.workerLoop()
-	}
-	queued, err := m.DB.ListQueuedSubagentJobs(ctx)
-	if err != nil {
-		return err
-	}
-	if len(queued) > 0 {
-		select {
-		case m.notifyCh <- struct{}{}:
-		default:
-		}
-	}
-	return nil
-}
-
-func (m *SubagentManager) Stop(ctx context.Context) error {
-	if m == nil {
-		return nil
-	}
-	m.mu.Lock()
-	if !m.started {
-		m.mu.Unlock()
-		return nil
-	}
-	cancel := m.cancel
-	m.started = false
-	m.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-	done := make(chan struct{})
-	go func() {
-		m.wg.Wait()
-		close(done)
-	}()
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-func (m *SubagentManager) Enqueue(ctx context.Context, req tools.SpawnRequest) (tools.SpawnJob, error) {
-	if m == nil || m.DB == nil {
-		return tools.SpawnJob{}, fmt.Errorf("background subagents disabled")
-	}
-	task := strings.TrimSpace(req.Task)
-	if task == "" {
-		return tools.SpawnJob{}, fmt.Errorf("empty task")
-	}
-	parentSessionKey := strings.TrimSpace(req.ParentSessionKey)
-	if parentSessionKey == "" {
-		return tools.SpawnJob{}, fmt.Errorf("missing parent session")
-	}
-	jobID := newSubagentID()
-	job := db.SubagentJob{
-		ID:               jobID,
-		ParentSessionKey: parentSessionKey,
-		ChildSessionKey:  childSessionKey(parentSessionKey, jobID),
-		Channel:          strings.TrimSpace(req.Channel),
-		ReplyTo:          strings.TrimSpace(req.To),
-		Task:             task,
-		Status:           db.SubagentStatusQueued,
-		MetadataJSON:     "{}",
-	}
-	if err := m.DB.EnqueueSubagentJobLimited(ctx, job, m.MaxQueued); err != nil {
-		return tools.SpawnJob{}, err
-	}
-	m.signal()
-	return tools.SpawnJob{ID: job.ID, ChildSessionKey: job.ChildSessionKey}, nil
-}
-
-func (m *SubagentManager) workerLoop() {
-	defer m.wg.Done()
-	for {
-		ran, err := m.runOnce()
-		if err != nil {
-			if !errors.Is(err, context.Canceled) {
-				log.Printf("subagent worker error: %v", err)
-			}
-		}
-		if ran {
-			continue
-		}
-		select {
-		case <-m.ctx.Done():
-			return
-		case <-m.notifyCh:
-		}
-	}
-}
-
-func (m *SubagentManager) runOnce() (bool, error) {
-	job, err := m.DB.ClaimNextSubagentJob(m.ctx)
-	if err != nil || job == nil {
-		return false, err
-	}
-	m.executeJob(*job)
-	return true, nil
-}
-
-func (m *SubagentManager) executeJob(job db.SubagentJob) {
-	runCtx, cancel := context.WithTimeout(m.ctx, m.TaskTimeout)
-	defer cancel()
-	result, err := m.runJob(runCtx, job)
-	if err != nil {
-		reason := strings.TrimSpace(err.Error())
-		switch {
-		case errors.Is(err, context.Canceled), errors.Is(runCtx.Err(), context.Canceled):
-			m.finalizeJob(job, db.SubagentStatusInterrupted, "", "", reasonOrDefault(reason, "subagent interrupted"))
-		case errors.Is(err, context.DeadlineExceeded), errors.Is(runCtx.Err(), context.DeadlineExceeded):
-			m.finalizeJob(job, db.SubagentStatusFailed, "", "", reasonOrDefault(reason, "subagent timed out"))
-		default:
-			m.finalizeJob(job, db.SubagentStatusFailed, "", "", reasonOrDefault(reason, "subagent failed"))
-		}
-		return
-	}
-	m.finalizeJob(job, db.SubagentStatusSucceeded, result.Preview, result.ArtifactID, "")
-}
-
-func (m *SubagentManager) runJob(ctx context.Context, job db.SubagentJob) (BackgroundRunResult, error) {
-	promptSnapshot, err := m.Runtime.BuildPromptSnapshot(ctx, job.ParentSessionKey, job.Task)
-	if err != nil {
-		return BackgroundRunResult{}, err
-	}
-	return m.Runtime.RunBackground(ctx, BackgroundRunInput{
-		SessionKey:       job.ChildSessionKey,
-		ParentSessionKey: job.ParentSessionKey,
-		Task:             job.Task,
-		PromptSnapshot:   promptSnapshot,
-		Tools:            m.backgroundTools(),
-		Meta: map[string]any{
-			"subagent_job_id":    job.ID,
-			"parent_session_key": job.ParentSessionKey,
-		},
-		Channel: job.Channel,
-		ReplyTo: job.ReplyTo,
-	})
-}
-
-func (m *SubagentManager) backgroundTools() *tools.Registry {
-	if m.BackgroundTools != nil {
-		return m.BackgroundTools()
-	}
-	return tools.NewRegistry()
-}
-
-func (m *SubagentManager) finalizeJob(job db.SubagentJob, status string, preview string, artifactID string, errText string) {
-	success := status == db.SubagentStatusSucceeded
-	text := formatParentSubagentSummary(job, success, preview, artifactID, errText)
-	payload := map[string]any{
-		"subagent_job_id": job.ID,
-		"child_session":   job.ChildSessionKey,
-		"status":          status,
-	}
-	if artifactID != "" {
-		payload["artifact_id"] = artifactID
-	}
-	if err := m.DB.FinalizeSubagentJob(context.Background(), job, status, preview, artifactID, errText, text, payload); err != nil {
-		log.Printf("finalize subagent failed: job=%s err=%v", job.ID, err)
-		return
-	}
-	m.deliverCompletion(context.Background(), job, success, preview, artifactID, errText)
-}
-
-func (m *SubagentManager) deliverCompletion(ctx context.Context, job db.SubagentJob, success bool, preview string, artifactID string, errText string) {
-	deliverer := m.Deliver
-	if deliverer == nil && m.Runtime != nil {
-		deliverer = m.Runtime.Deliver
-	}
-	if deliverer == nil || strings.TrimSpace(job.Channel) == "" || strings.TrimSpace(job.ReplyTo) == "" {
-		return
-	}
-	text := formatDeliverySubagentSummary(job, success, preview, artifactID, errText)
-	if err := deliverer.Deliver(ctx, job.Channel, job.ReplyTo, text); err != nil {
-		log.Printf("subagent delivery failed: job=%s err=%v", job.ID, err)
-	}
-}
-
-func (m *SubagentManager) signal() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if !m.started || m.notifyCh == nil {
-		return
-	}
-	select {
-	case m.notifyCh <- struct{}{}:
-	default:
-	}
-}
-
-func childSessionKey(parentSessionKey, jobID string) string {
-	return parentSessionKey + ":subagent:" + jobID
-}
-
-func newSubagentID() string {
-	var raw [12]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		return fmt.Sprintf("job-%d", time.Now().UnixNano())
-	}
-	return "job-" + hex.EncodeToString(raw[:])
-}
-
-func reasonOrDefault(reason string, fallback string) string {
-	reason = strings.TrimSpace(reason)
-	if reason == "" {
-		return fallback
-	}
-	return reason
-}
-
-func formatParentSubagentSummary(job db.SubagentJob, success bool, preview string, artifactID string, errText string) string {
-	if success {
-		text := fmt.Sprintf("Background job %s completed: %s", job.ID, preview)
-		if artifactID != "" {
-			text += fmt.Sprintf("\nartifact_id=%s", artifactID)
-		}
-		return text
-	}
-	return fmt.Sprintf("Background job %s failed: %s", job.ID, reasonOrDefault(errText, "unknown error"))
-}
-
-func formatDeliverySubagentSummary(job db.SubagentJob, success bool, preview string, artifactID string, errText string) string {
-	if success {
-		text := fmt.Sprintf("Background job %s finished. %s", job.ID, preview)
-		if artifactID != "" {
-			text += fmt.Sprintf("\nartifact_id=%s", artifactID)
-		}
-		return text
-	}
-	return fmt.Sprintf("Background job %s failed. %s", job.ID, reasonOrDefault(errText, "unknown error"))
-}
 ````
 
 ## File: internal/artifacts/attachment.go
@@ -1130,334 +231,1163 @@ func FailureMarker(kind, name, reason string) string {
 }
 ````
 
-## File: internal/channels/cli/cli_test.go
+## File: internal/channels/cli/terminal.go
 ````go
 package cli
 
 import (
-	"context"
+	"fmt"
 	"os"
-	"testing"
+	"strings"
+	"sync"
 	"time"
 
-	"or3-intern/internal/bus"
+	"github.com/mattn/go-isatty"
 )
 
-func TestChannel_Run_Exit(t *testing.T) {
-	// Create a pipe to simulate stdin
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("os.Pipe: %v", err)
+// isTTY is true when stdout is an interactive terminal.
+var isTTY = isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
+
+// ---------- ANSI helpers ----------
+
+const (
+	ansiReset     = "\033[0m"
+	ansiBold      = "\033[1m"
+	ansiDim       = "\033[2m"
+	ansiItalic    = "\033[3m"
+	ansiCyan      = "\033[36m"
+	ansiYellow    = "\033[33m"
+	ansiGray      = "\033[90m"
+	ansiWhite     = "\033[97m"
+	ansiGreen     = "\033[32m"
+	ansiCursorUp  = "\033[1A" // move cursor up one line
+	ansiClearLine = "\033[2K" // clear entire line
+)
+
+func style(codes, text string) string {
+	if !isTTY {
+		return text
 	}
-
-	// Replace stdin
-	oldStdin := os.Stdin
-	os.Stdin = r
-	defer func() {
-		os.Stdin = oldStdin
-		r.Close()
-	}()
-
-	b := bus.New(10)
-	ch := &Channel{Bus: b, SessionKey: "test"}
-
-	// Write /exit command
-	go func() {
-		w.WriteString("/exit\n")
-		w.Close()
-	}()
-
-	done := make(chan error, 1)
-	go func() {
-		done <- ch.Run(context.Background())
-	}()
-
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Errorf("unexpected error from Run: %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for Run to exit")
-	}
+	return codes + text + ansiReset
 }
 
-func TestChannel_Run_PublishesMessage(t *testing.T) {
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("os.Pipe: %v", err)
+// ---------- Banner ----------
+
+// Banner returns the startup header shown when the CLI launches.
+func Banner() string {
+	if !isTTY {
+		return "or3-intern CLI. Type /exit to quit.\n"
 	}
-
-	oldStdin := os.Stdin
-	os.Stdin = r
-	defer func() {
-		os.Stdin = oldStdin
-		r.Close()
-	}()
-
-	b := bus.New(10)
-	ch := &Channel{Bus: b, SessionKey: "test-sess"}
-
-	// Write a message then exit
-	go func() {
-		w.WriteString("hello world\n")
-		w.WriteString("/exit\n")
-		w.Close()
-	}()
-
-	done := make(chan struct{})
-	go func() {
-		ch.Run(context.Background())
-		close(done)
-	}()
-
-	// Wait for event on bus
-	select {
-	case ev := <-b.Channel():
-		if ev.Message != "hello world" {
-			t.Errorf("expected message 'hello world', got %q", ev.Message)
-		}
-		if ev.SessionKey != "test-sess" {
-			t.Errorf("expected session 'test-sess', got %q", ev.SessionKey)
-		}
-		if ev.Channel != "cli" {
-			t.Errorf("expected channel 'cli', got %q", ev.Channel)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for event")
-	}
-
-	<-done
+	top := style(ansiDim, "╭───────────────────────────────────────────────╮")
+	mid1 := style(ansiDim, "│") + "  " + style(ansiBold+ansiCyan, "or3-intern") + "                                  " + style(ansiDim, "│")
+	mid2 := style(ansiDim, "│") + "  " + style(ansiGray, "Type /exit to quit · /new for new session") + "  " + style(ansiDim, "│")
+	bot := style(ansiDim, "╰───────────────────────────────────────────────╯")
+	return fmt.Sprintf("\n%s\n%s\n%s\n%s\n", top, mid1, mid2, bot)
 }
 
-func TestChannel_Run_SkipsBlankLines(t *testing.T) {
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("os.Pipe: %v", err)
+// ---------- Prompt / separators ----------
+
+// Prompt returns the input prompt string.
+func Prompt() string {
+	if !isTTY {
+		return "> "
 	}
-
-	oldStdin := os.Stdin
-	os.Stdin = r
-	defer func() {
-		os.Stdin = oldStdin
-		r.Close()
-	}()
-
-	b := bus.New(10)
-	ch := &Channel{Bus: b, SessionKey: "test"}
-
-	go func() {
-		w.WriteString("  \n") // blank line
-		w.WriteString("\n")   // empty
-		w.WriteString("real message\n")
-		w.WriteString("/exit\n")
-		w.Close()
-	}()
-
-	done := make(chan struct{})
-	go func() {
-		ch.Run(context.Background())
-		close(done)
-	}()
-
-	select {
-	case ev := <-b.Channel():
-		if ev.Message != "real message" {
-			t.Errorf("expected 'real message', got %q", ev.Message)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout")
-	}
-	<-done
+	return ansiBold + ansiCyan + "❯ " + ansiReset
 }
 
-func TestChannel_Run_DefaultSessionKey(t *testing.T) {
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("os.Pipe: %v", err)
+// ShowPrompt prints a blank line gap then the prompt, signalling the user
+// that input is ready. Called by the Deliverer after finishing output.
+func ShowPrompt() {
+	if !isTTY {
+		fmt.Print(Prompt())
+		return
 	}
-
-	oldStdin := os.Stdin
-	os.Stdin = r
-	defer func() {
-		os.Stdin = oldStdin
-		r.Close()
-	}()
-
-	b := bus.New(10)
-	// No SessionKey set - should default to "default"
-	ch := &Channel{Bus: b}
-
-	go func() {
-		w.WriteString("msg\n")
-		w.WriteString("/exit\n")
-		w.Close()
-	}()
-
-	done := make(chan struct{})
-	go func() {
-		ch.Run(context.Background())
-		close(done)
-	}()
-
-	select {
-	case ev := <-b.Channel():
-		if ev.SessionKey != "default" {
-			t.Errorf("expected default session key 'default', got %q", ev.SessionKey)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout")
-	}
-	<-done
+	fmt.Print("\n" + Prompt())
 }
 
-func TestChannel_Run_FullBus(t *testing.T) {
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("os.Pipe: %v", err)
+// Separator returns a faint horizontal rule placed after a response block.
+func Separator() string {
+	if !isTTY {
+		return ""
 	}
-
-	oldStdin := os.Stdin
-	os.Stdin = r
-	defer func() {
-		os.Stdin = oldStdin
-		r.Close()
-	}()
-
-	// Create a bus with buffer=0 to simulate full bus
-	b := bus.New(1)
-	// Fill the bus
-	b.Publish(bus.Event{})
-
-	ch := &Channel{Bus: b, SessionKey: "test"}
-
-	go func() {
-		// This message should be dropped (bus full) but not crash
-		w.WriteString("dropped message\n")
-		w.WriteString("/exit\n")
-		w.Close()
-	}()
-
-	done := make(chan error, 1)
-	go func() {
-		done <- ch.Run(context.Background())
-	}()
-
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Errorf("unexpected error: %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout")
-	}
+	return "  " + ansiDim + strings.Repeat("─", 50) + ansiReset
 }
 
-func TestChannel_Run_EOFOnStdin(t *testing.T) {
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("os.Pipe: %v", err)
+// ---------- User message formatting ----------
+
+// RewriteUserMessage moves the cursor up to overwrite the raw prompt line
+// with a styled version of the user's message. This transforms the bare
+// "❯ text" into a clearly labeled user block. No-op when not a TTY.
+func RewriteUserMessage(text string) {
+	if !isTTY {
+		return
 	}
+	// Move up over the raw prompt line and replace it.
+	fmt.Print(ansiCursorUp + ansiClearLine)
+	fmt.Printf("  %s%s▌%s %s%s\n",
+		ansiBold, ansiCyan, ansiReset,
+		style(ansiBold+ansiWhite, text), ansiReset)
+}
 
-	oldStdin := os.Stdin
-	os.Stdin = r
-	defer func() {
-		os.Stdin = oldStdin
-		r.Close()
-	}()
+// ---------- Assistant header ----------
 
-	b := bus.New(10)
-	ch := &Channel{Bus: b, SessionKey: "test"}
+// AssistantHeader returns the header line printed before each response.
+func AssistantHeader() string {
+	if !isTTY {
+		return ""
+	}
+	name := ansiBold + ansiGreen + "◆ or3-intern" + ansiReset
+	line := ansiDim + " " + strings.Repeat("─", 38) + ansiReset
+	return "\n  " + name + line + "\n"
+}
 
-	// Close write end to simulate EOF
-	w.Close()
+// ---------- Response formatting ----------
 
-	done := make(chan error, 1)
+// ResponsePrefix returns the prefix printed before the first streaming delta.
+func ResponsePrefix() string {
+	if !isTTY {
+		return "\n"
+	}
+	return AssistantHeader() + "\n    "
+}
+
+// FormatResponse wraps a complete (non-streamed) response for display.
+func FormatResponse(text string) string {
+	if !isTTY {
+		return "[cli] " + text
+	}
+	lines := strings.Split(text, "\n")
+	for i, l := range lines {
+		lines[i] = "    " + l
+	}
+	return AssistantHeader() + "\n" + strings.Join(lines, "\n")
+}
+
+// ---------- Spinner ----------
+
+// Spinner provides a braille-dot animation on stdout while the agent thinks.
+// Only animates when stdout is a TTY; safe for concurrent Start/Stop.
+type Spinner struct {
+	mu      sync.Mutex
+	running bool
+	stopCh  chan struct{}
+	stopped chan struct{}
+}
+
+// NewSpinner creates a ready-to-use Spinner (initially stopped).
+func NewSpinner() *Spinner {
+	return &Spinner{}
+}
+
+// Start begins the animation with the given label (e.g. "thinking…").
+// No-op if already running or stdout is not a TTY.
+func (s *Spinner) Start(label string) {
+	if !isTTY {
+		return
+	}
+	s.mu.Lock()
+	if s.running {
+		s.mu.Unlock()
+		return
+	}
+	s.running = true
+	s.stopCh = make(chan struct{})
+	s.stopped = make(chan struct{})
+	s.mu.Unlock()
+
 	go func() {
-		done <- ch.Run(context.Background())
-	}()
-
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Errorf("unexpected error on EOF: %v", err)
+		defer close(s.stopped)
+		frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+		i := 0
+		ticker := time.NewTicker(80 * time.Millisecond)
+		defer ticker.Stop()
+		// First frame immediately.
+		fmt.Fprintf(os.Stdout, "\r  %s%s %s%s", ansiDim, frames[0], label, ansiReset)
+		for {
+			select {
+			case <-s.stopCh:
+				// Clear the spinner line.
+				fmt.Fprint(os.Stdout, "\r\033[K")
+				return
+			case <-ticker.C:
+				i++
+				fmt.Fprintf(os.Stdout, "\r  %s%s %s%s", ansiDim, frames[i%len(frames)], label, ansiReset)
+			}
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout")
+	}()
+}
+
+// Stop halts the animation and clears the spinner line.
+// Blocks until the animation goroutine exits. Safe to call when not running.
+func (s *Spinner) Stop() {
+	s.mu.Lock()
+	if !s.running {
+		s.mu.Unlock()
+		return
 	}
+	s.running = false
+	close(s.stopCh)
+	stopped := s.stopped
+	s.mu.Unlock()
+	<-stopped
 }
 ````
 
-## File: internal/channels/channels_test.go
+## File: internal/channels/email/email.go
 ````go
-package channels
+package email
 
 import (
+	"bytes"
 	"context"
-	"testing"
+	"crypto/tls"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"html"
+	"io"
+	"log"
+	"mime"
+	"mime/multipart"
+	"mime/quotedprintable"
+	"net"
+	"net/mail"
+	"net/smtp"
+	"net/textproto"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/emersion/go-imap/v2"
+	"github.com/emersion/go-imap/v2/imapclient"
+	xhtml "golang.org/x/net/html"
 
 	"or3-intern/internal/bus"
+	"or3-intern/internal/config"
+	"or3-intern/internal/db"
 )
 
-type testChannel struct {
-	name         string
-	startedCount int
-	stoppedCount int
-	delivered    []string
+const (
+	defaultPollInterval = 30 * time.Second
+	defaultNetTimeout   = 30 * time.Second
+	maxFetchBatch       = 20
+	maxProcessedKeys    = 4096
+	dedupeMessageLimit  = 200
+	lookupMessageLimit  = 50
+)
+
+type InboundMessage struct {
+	UID       string
+	From      string
+	Subject   string
+	MessageID string
+	Date      time.Time
+	Body      string
 }
 
-func (c *testChannel) Name() string { return c.name }
-func (c *testChannel) Start(ctx context.Context, eventBus *bus.Bus) error {
-	_ = ctx
-	_ = eventBus
-	c.startedCount++
-	return nil
+type OutboundMessage struct {
+	To        string
+	From      string
+	Subject   string
+	Text      string
+	InReplyTo string
 }
-func (c *testChannel) Stop(ctx context.Context) error {
-	_ = ctx
-	c.stoppedCount++
-	return nil
+
+type threadState struct {
+	Subject   string
+	MessageID string
 }
-func (c *testChannel) Deliver(ctx context.Context, to, text string, meta map[string]any) error {
-	_ = ctx
-	_ = meta
-	c.delivered = append(c.delivered, to+":"+text)
+
+type Channel struct {
+	Config config.EmailChannelConfig
+	DB     *db.DB
+
+	FetchMessages func(ctx context.Context) ([]InboundMessage, error)
+	SendMail      func(ctx context.Context, outbound OutboundMessage) error
+
+	mu             sync.Mutex
+	running        bool
+	cancel         context.CancelFunc
+	threadBySender map[string]threadState
+	processedKeys  map[string]struct{}
+	processedOrder []string
+}
+
+func (c *Channel) Name() string { return "email" }
+
+func (c *Channel) Start(ctx context.Context, eventBus *bus.Bus) error {
+	if err := c.validate(); err != nil {
+		return err
+	}
+	if eventBus == nil {
+		return fmt.Errorf("event bus not configured")
+	}
+	if !c.Config.ConsentGranted {
+		log.Printf("email channel disabled: consentGranted is false")
+		return nil
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.running {
+		return nil
+	}
+	if c.threadBySender == nil {
+		c.threadBySender = map[string]threadState{}
+	}
+	if c.processedKeys == nil {
+		c.processedKeys = map[string]struct{}{}
+	}
+	childCtx, cancel := context.WithCancel(ctx)
+	c.cancel = cancel
+	c.running = true
+	go c.pollLoop(childCtx, eventBus)
 	return nil
 }
 
-func TestManager_RegisterStartDeliverStop(t *testing.T) {
-	m := NewManager()
-	ch := &testChannel{name: "telegram"}
-	if err := m.Register(ch); err != nil {
-		t.Fatalf("Register: %v", err)
+func (c *Channel) Stop(ctx context.Context) error {
+	_ = ctx
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cancel != nil {
+		c.cancel()
 	}
-	if err := m.StartAll(context.Background(), bus.New(1)); err != nil {
-		t.Fatalf("StartAll: %v", err)
+	c.cancel = nil
+	c.running = false
+	return nil
+}
+
+func (c *Channel) Deliver(ctx context.Context, to, text string, meta map[string]any) error {
+	recipient := normalizeAddress(to)
+	if recipient == "" {
+		recipient = normalizeAddress(c.Config.DefaultTo)
 	}
-	if ch.startedCount != 1 {
-		t.Fatalf("expected start count 1, got %d", ch.startedCount)
+	if recipient == "" {
+		return fmt.Errorf("email recipient address required")
 	}
-	if err := m.Deliver(context.Background(), "telegram", "123", "hello"); err != nil {
-		t.Fatalf("Deliver: %v", err)
+
+	thread, _, err := c.lookupThread(ctx, recipient)
+	if err != nil {
+		return err
 	}
-	if len(ch.delivered) != 1 || ch.delivered[0] != "123:hello" {
-		t.Fatalf("unexpected delivered messages: %#v", ch.delivered)
+
+	subject := c.subjectForDelivery(meta, thread.Subject)
+	message := OutboundMessage{
+		To:        recipient,
+		From:      c.fromAddress(),
+		Subject:   subject,
+		Text:      text,
+		InReplyTo: thread.MessageID,
 	}
-	if err := m.StopAll(context.Background()); err != nil {
-		t.Fatalf("StopAll: %v", err)
+	return c.sendMail(ctx, message)
+}
+
+func (c *Channel) pollLoop(ctx context.Context, eventBus *bus.Bus) {
+	interval := time.Duration(c.Config.PollIntervalSeconds) * time.Second
+	if interval <= 0 {
+		interval = defaultPollInterval
 	}
-	if ch.stoppedCount != 1 {
-		t.Fatalf("expected stop count 1, got %d", ch.stoppedCount)
+	if interval < 5*time.Second {
+		interval = 5 * time.Second
+	}
+
+	c.pollOnce(ctx, eventBus)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.pollOnce(ctx, eventBus)
+		}
 	}
 }
 
-func TestManager_RejectsDuplicateNames(t *testing.T) {
-	m := NewManager()
-	if err := m.Register(&testChannel{name: "slack"}); err != nil {
-		t.Fatalf("Register: %v", err)
+func (c *Channel) pollOnce(ctx context.Context, eventBus *bus.Bus) {
+	messages, err := c.fetchMessages(ctx)
+	if err != nil {
+		log.Printf("email polling error: %v", err)
+		return
 	}
-	if err := m.Register(&testChannel{name: "slack"}); err == nil {
-		t.Fatal("expected duplicate registration error")
+	for _, inbound := range messages {
+		sender := normalizeAddress(inbound.From)
+		if sender == "" {
+			continue
+		}
+		if c.alreadyProcessed(inbound.UID, inbound.MessageID) {
+			continue
+		}
+		if !c.allowedSender(sender) {
+			c.rememberProcessed(inbound.UID, inbound.MessageID)
+			log.Printf("email sender ignored: %s", sender)
+			continue
+		}
+		persisted, err := c.alreadyProcessedPersisted(ctx, sender, inbound.UID, inbound.MessageID)
+		if err != nil {
+			log.Printf("email dedupe lookup failed for %s: %v", sender, err)
+		} else if persisted {
+			c.rememberProcessed(inbound.UID, inbound.MessageID)
+			continue
+		}
+		c.rememberProcessed(inbound.UID, inbound.MessageID)
+		c.rememberThread(sender, inbound.Subject, inbound.MessageID)
+		meta := map[string]any{
+			"sender_email":       sender,
+			"subject":            strings.TrimSpace(inbound.Subject),
+			"message_id":         strings.TrimSpace(inbound.MessageID),
+			"uid":                strings.TrimSpace(inbound.UID),
+			"auto_reply_enabled": c.Config.AutoReplyEnabled,
+		}
+		if !inbound.Date.IsZero() {
+			meta["date"] = inbound.Date.Format(time.RFC3339)
+		}
+		ok := eventBus.Publish(bus.Event{
+			Type:       bus.EventUserMessage,
+			SessionKey: "email:" + sender,
+			Channel:    "email",
+			From:       sender,
+			Message:    formatInboundMessage(sender, inbound.Subject, inbound.Date, inbound.Body),
+			Meta:       meta,
+		})
+		if !ok {
+			log.Printf("email event dropped: queue full for %s", sender)
+		}
+	}
+}
+
+func (c *Channel) validate() error {
+	if !c.Config.Enabled {
+		return nil
+	}
+	if !c.Config.OpenAccess && !hasNonEmpty(c.Config.AllowedSenders) {
+		return fmt.Errorf("email enabled: set allowedSenders or openAccess=true")
+	}
+	if strings.TrimSpace(c.Config.IMAPHost) == "" || strings.TrimSpace(c.Config.IMAPUsername) == "" || strings.TrimSpace(c.Config.IMAPPassword) == "" {
+		return fmt.Errorf("email requires IMAP host, username, and password")
+	}
+	if strings.TrimSpace(c.Config.SMTPHost) == "" || strings.TrimSpace(c.Config.SMTPUsername) == "" || strings.TrimSpace(c.Config.SMTPPassword) == "" {
+		return fmt.Errorf("email requires SMTP host, username, and password")
+	}
+	return nil
+}
+
+func (c *Channel) fetchMessages(ctx context.Context) ([]InboundMessage, error) {
+	if c.FetchMessages != nil {
+		return c.FetchMessages(ctx)
+	}
+	return c.fetchViaIMAP(ctx)
+}
+
+func (c *Channel) sendMail(ctx context.Context, outbound OutboundMessage) error {
+	if c.SendMail != nil {
+		return c.SendMail(ctx, outbound)
+	}
+	return c.sendViaSMTP(ctx, outbound)
+}
+
+func (c *Channel) fetchViaIMAP(ctx context.Context) ([]InboundMessage, error) {
+	client, stopWatch, err := c.dialIMAP(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer stopWatch()
+	defer client.Close()
+	if err := client.Login(c.Config.IMAPUsername, c.Config.IMAPPassword).Wait(); err != nil {
+		return nil, fmt.Errorf("imap login: %w", err)
+	}
+	defer func() {
+		if err := client.Logout().Wait(); err != nil {
+			log.Printf("email logout error: %v", err)
+		}
+	}()
+
+	mailbox := strings.TrimSpace(c.Config.IMAPMailbox)
+	if mailbox == "" {
+		mailbox = "INBOX"
+	}
+	if _, err := client.Select(mailbox, nil).Wait(); err != nil {
+		return nil, fmt.Errorf("imap select %s: %w", mailbox, err)
+	}
+
+	criteria := &imap.SearchCriteria{NotFlag: []imap.Flag{imap.FlagSeen}}
+	searchData, err := client.UIDSearch(criteria, nil).Wait()
+	if err != nil {
+		return nil, fmt.Errorf("imap search: %w", err)
+	}
+	uids := searchData.AllUIDs()
+	if len(uids) == 0 {
+		return nil, nil
+	}
+	sort.Slice(uids, func(i, j int) bool { return uids[i] < uids[j] })
+	if len(uids) > maxFetchBatch {
+		uids = uids[len(uids)-maxFetchBatch:]
+	}
+
+	var uidSet imap.UIDSet
+	uidSet.AddNum(uids...)
+	bodySection := &imap.FetchItemBodySection{Peek: true}
+	messages, err := client.Fetch(uidSet, &imap.FetchOptions{
+		UID:         true,
+		Envelope:    true,
+		BodySection: []*imap.FetchItemBodySection{bodySection},
+	}).Collect()
+	if err != nil {
+		return nil, fmt.Errorf("imap fetch: %w", err)
+	}
+	sort.Slice(messages, func(i, j int) bool { return messages[i].UID < messages[j].UID })
+
+	out := make([]InboundMessage, 0, len(messages))
+	markedUIDs := make([]imap.UID, 0, len(messages))
+	for _, message := range messages {
+		raw := message.FindBodySection(bodySection)
+		if len(raw) == 0 {
+			continue
+		}
+		parsed, err := parseRawEmail(raw, c.Config.MaxBodyChars)
+		if err != nil {
+			log.Printf("email parse error for uid=%d: %v", message.UID, err)
+			continue
+		}
+		parsed.UID = fmt.Sprintf("%d", message.UID)
+		out = append(out, parsed)
+		if c.Config.MarkSeen {
+			markedUIDs = append(markedUIDs, message.UID)
+		}
+	}
+	if c.Config.MarkSeen && len(markedUIDs) > 0 {
+		var seenSet imap.UIDSet
+		seenSet.AddNum(markedUIDs...)
+		storeFlags := &imap.StoreFlags{Op: imap.StoreFlagsAdd, Silent: true, Flags: []imap.Flag{imap.FlagSeen}}
+		if err := client.Store(seenSet, storeFlags, nil).Close(); err != nil {
+			log.Printf("email mark seen error: %v", err)
+		}
+	}
+	return out, nil
+}
+
+func (c *Channel) dialIMAP(ctx context.Context) (*imapclient.Client, func(), error) {
+	address := net.JoinHostPort(strings.TrimSpace(c.Config.IMAPHost), fmt.Sprintf("%d", c.Config.IMAPPort))
+	dialer := &net.Dialer{Timeout: defaultNetTimeout}
+	var conn net.Conn
+	var err error
+	if c.Config.IMAPUseSSL {
+		baseConn, dialErr := dialer.DialContext(ctx, "tcp", address)
+		if dialErr != nil {
+			return nil, func() {}, dialErr
+		}
+		tlsConn := tls.Client(baseConn, &tls.Config{ServerName: strings.TrimSpace(c.Config.IMAPHost)})
+		if deadline, ok := connectionDeadline(ctx); ok {
+			_ = tlsConn.SetDeadline(deadline)
+		}
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			_ = baseConn.Close()
+			return nil, func() {}, fmt.Errorf("imap tls handshake: %w", err)
+		}
+		conn = tlsConn
+	} else {
+		conn, err = dialer.DialContext(ctx, "tcp", address)
+		if err != nil {
+			return nil, func() {}, err
+		}
+	}
+	if deadline, ok := connectionDeadline(ctx); ok {
+		_ = conn.SetDeadline(deadline)
+	}
+	stopWatch := watchConnContext(ctx, conn)
+	client := imapclient.New(conn, nil)
+	if err := client.WaitGreeting(); err != nil {
+		stopWatch()
+		_ = client.Close()
+		return nil, func() {}, fmt.Errorf("imap greeting: %w", err)
+	}
+	return client, stopWatch, nil
+}
+
+func (c *Channel) sendViaSMTP(ctx context.Context, outbound OutboundMessage) error {
+	if err := c.validateSMTPAuthTransport(); err != nil {
+		return err
+	}
+	messageBytes, err := buildOutboundMessage(outbound)
+	if err != nil {
+		return err
+	}
+	address := net.JoinHostPort(strings.TrimSpace(c.Config.SMTPHost), fmt.Sprintf("%d", c.Config.SMTPPort))
+	dialer := &net.Dialer{Timeout: 30 * time.Second}
+
+	var conn net.Conn
+	if c.Config.SMTPUseSSL {
+		conn, err = tls.DialWithDialer(dialer, "tcp", address, &tls.Config{ServerName: strings.TrimSpace(c.Config.SMTPHost)})
+	} else {
+		conn, err = dialer.DialContext(ctx, "tcp", address)
+	}
+	if err != nil {
+		return fmt.Errorf("smtp dial: %w", err)
+	}
+	defer conn.Close()
+
+	client, err := smtp.NewClient(conn, strings.TrimSpace(c.Config.SMTPHost))
+	if err != nil {
+		return fmt.Errorf("smtp client: %w", err)
+	}
+	defer client.Close()
+
+	if c.Config.SMTPUseTLS && !c.Config.SMTPUseSSL {
+		if err := client.StartTLS(&tls.Config{ServerName: strings.TrimSpace(c.Config.SMTPHost)}); err != nil {
+			return fmt.Errorf("smtp starttls: %w", err)
+		}
+	}
+	if strings.TrimSpace(c.Config.SMTPUsername) != "" {
+		auth := smtp.PlainAuth("", c.Config.SMTPUsername, c.Config.SMTPPassword, strings.TrimSpace(c.Config.SMTPHost))
+		if err := client.Auth(auth); err != nil {
+			return fmt.Errorf("smtp auth: %w", err)
+		}
+	}
+	if err := client.Mail(outbound.From); err != nil {
+		return fmt.Errorf("smtp mail from: %w", err)
+	}
+	if err := client.Rcpt(outbound.To); err != nil {
+		return fmt.Errorf("smtp rcpt to: %w", err)
+	}
+	writer, err := client.Data()
+	if err != nil {
+		return fmt.Errorf("smtp data: %w", err)
+	}
+	if _, err := writer.Write(messageBytes); err != nil {
+		_ = writer.Close()
+		return fmt.Errorf("smtp write: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return fmt.Errorf("smtp finalize: %w", err)
+	}
+	if err := client.Quit(); err != nil {
+		return fmt.Errorf("smtp quit: %w", err)
+	}
+	return nil
+}
+
+func buildOutboundMessage(outbound OutboundMessage) ([]byte, error) {
+	from := strings.TrimSpace(outbound.From)
+	to := normalizeAddress(outbound.To)
+	if from == "" || to == "" {
+		return nil, fmt.Errorf("email from and to addresses are required")
+	}
+	subject := strings.TrimSpace(outbound.Subject)
+	if subject == "" {
+		subject = "or3-intern reply"
+	}
+	body := strings.ReplaceAll(outbound.Text, "\r\n", "\n")
+	body = strings.ReplaceAll(body, "\r", "\n")
+
+	var buf bytes.Buffer
+	headers := []string{
+		"From: " + from,
+		"To: " + to,
+		"Subject: " + mime.QEncoding.Encode("utf-8", subject),
+		"Date: " + time.Now().Format(time.RFC1123Z),
+		fmt.Sprintf("Message-ID: <%d.%s>", time.Now().UnixNano(), strings.ReplaceAll(strings.SplitN(from, "@", 2)[0], " ", "-")),
+		"MIME-Version: 1.0",
+		"Content-Type: text/plain; charset=UTF-8",
+		"Content-Transfer-Encoding: quoted-printable",
+	}
+	if strings.TrimSpace(outbound.InReplyTo) != "" {
+		headers = append(headers, "In-Reply-To: "+strings.TrimSpace(outbound.InReplyTo))
+		headers = append(headers, "References: "+strings.TrimSpace(outbound.InReplyTo))
+	}
+	for _, headerLine := range headers {
+		buf.WriteString(headerLine)
+		buf.WriteString("\r\n")
+	}
+	buf.WriteString("\r\n")
+	quoted := quotedprintable.NewWriter(&buf)
+	if _, err := quoted.Write([]byte(body)); err != nil {
+		return nil, err
+	}
+	if err := quoted.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func parseRawEmail(raw []byte, maxBodyChars int) (InboundMessage, error) {
+	message, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		return InboundMessage{}, err
+	}
+	parsed := InboundMessage{
+		From:      normalizeAddress(message.Header.Get("From")),
+		Subject:   decodeHeaderValue(message.Header.Get("Subject")),
+		MessageID: strings.TrimSpace(message.Header.Get("Message-ID")),
+	}
+	if dateValue := strings.TrimSpace(message.Header.Get("Date")); dateValue != "" {
+		if parsedDate, err := mail.ParseDate(dateValue); err == nil {
+			parsed.Date = parsedDate
+		}
+	}
+	parsed.Body = extractBodyText(textproto.MIMEHeader(message.Header), message.Body, maxBodyChars)
+	return parsed, nil
+}
+
+func extractBodyText(header textproto.MIMEHeader, body io.Reader, maxBodyChars int) string {
+	plain, htmlBodies := extractEntityBodies(header, body, maxBodyChars)
+	if len(plain) > 0 {
+		return truncateText(strings.Join(plain, "\n\n"), maxBodyChars)
+	}
+	if len(htmlBodies) > 0 {
+		return truncateText(strings.Join(htmlBodies, "\n\n"), maxBodyChars)
+	}
+	return ""
+}
+
+func extractEntityBodies(header textproto.MIMEHeader, body io.Reader, maxBodyChars int) ([]string, []string) {
+	mediaType, params, err := mime.ParseMediaType(header.Get("Content-Type"))
+	if err != nil || mediaType == "" {
+		mediaType = "text/plain"
+	}
+	disposition, _, _ := mime.ParseMediaType(header.Get("Content-Disposition"))
+	if strings.EqualFold(disposition, "attachment") {
+		return nil, nil
+	}
+
+	if strings.HasPrefix(strings.ToLower(mediaType), "multipart/") {
+		boundary := params["boundary"]
+		if boundary == "" {
+			return nil, nil
+		}
+		reader := multipart.NewReader(decodeTransferEncoding(body, header.Get("Content-Transfer-Encoding")), boundary)
+		plainParts := []string{}
+		htmlParts := []string{}
+		for {
+			part, err := reader.NextPart()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				break
+			}
+			childPlain, childHTML := extractEntityBodies(part.Header, part, maxBodyChars)
+			plainParts = append(plainParts, childPlain...)
+			htmlParts = append(htmlParts, childHTML...)
+		}
+		return plainParts, htmlParts
+	}
+
+	decodedBody, err := io.ReadAll(io.LimitReader(decodeTransferEncoding(body, header.Get("Content-Transfer-Encoding")), int64(maxReadBytes(maxBodyChars))))
+	if err != nil {
+		return nil, nil
+	}
+	text := strings.TrimSpace(string(decodedBody))
+	if text == "" {
+		return nil, nil
+	}
+	switch strings.ToLower(mediaType) {
+	case "text/plain":
+		return []string{normalizeText(text)}, nil
+	case "text/html":
+		return nil, []string{normalizeText(htmlToText(text))}
+	default:
+		return nil, nil
+	}
+}
+
+func decodeTransferEncoding(body io.Reader, encoding string) io.Reader {
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
+	case "base64":
+		return base64.NewDecoder(base64.StdEncoding, strings.NewReader(readAllString(body)))
+	case "quoted-printable":
+		return quotedprintable.NewReader(body)
+	default:
+		return body
+	}
+}
+
+func readAllString(reader io.Reader) string {
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+func maxReadBytes(maxBodyChars int) int {
+	if maxBodyChars <= 0 {
+		return 8192
+	}
+	return maxBodyChars*4 + 1024
+}
+
+func htmlToText(input string) string {
+	tokenizer := xhtml.NewTokenizer(strings.NewReader(input))
+	segments := make([]string, 0, 16)
+	appendText := func(text string) {
+		text = strings.Join(strings.Fields(html.UnescapeString(text)), " ")
+		if text == "" {
+			return
+		}
+		if len(segments) > 0 {
+			last := segments[len(segments)-1]
+			if !strings.HasSuffix(last, "\n") && last != " " {
+				segments = append(segments, " ")
+			}
+		}
+		segments = append(segments, text)
+	}
+	appendBreak := func(double bool) {
+		if len(segments) == 0 {
+			return
+		}
+		want := "\n"
+		if double {
+			want = "\n\n"
+		}
+		last := segments[len(segments)-1]
+		if strings.HasSuffix(last, "\n\n") || (!double && strings.HasSuffix(last, "\n")) {
+			return
+		}
+		segments = append(segments, want)
+	}
+	for {
+		tokenType := tokenizer.Next()
+		switch tokenType {
+		case xhtml.ErrorToken:
+			return html.UnescapeString(strings.Join(segments, ""))
+		case xhtml.TextToken:
+			appendText(string(tokenizer.Text()))
+		case xhtml.StartTagToken, xhtml.EndTagToken, xhtml.SelfClosingTagToken:
+			name, _ := tokenizer.TagName()
+			switch strings.ToLower(string(name)) {
+			case "br":
+				appendBreak(false)
+			case "p", "div", "section", "article", "header", "footer", "aside", "li", "tr",
+				"h1", "h2", "h3", "h4", "h5", "h6":
+				appendBreak(true)
+			}
+		}
+	}
+}
+
+func normalizeText(input string) string {
+	text := strings.ReplaceAll(input, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	lines := strings.Split(text, "\n")
+	cleaned := make([]string, 0, len(lines))
+	blankCount := 0
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			blankCount++
+			if blankCount > 1 {
+				continue
+			}
+			cleaned = append(cleaned, "")
+			continue
+		}
+		blankCount = 0
+		cleaned = append(cleaned, trimmed)
+	}
+	return strings.TrimSpace(strings.Join(cleaned, "\n"))
+}
+
+func truncateText(text string, maxBodyChars int) string {
+	text = strings.TrimSpace(text)
+	if maxBodyChars > 0 && len(text) > maxBodyChars {
+		return strings.TrimSpace(text[:maxBodyChars]) + "…"
+	}
+	return text
+}
+
+func formatInboundMessage(sender, subject string, sentAt time.Time, body string) string {
+	lines := []string{"From: " + sender}
+	if strings.TrimSpace(subject) != "" {
+		lines = append(lines, "Subject: "+strings.TrimSpace(subject))
+	}
+	if !sentAt.IsZero() {
+		lines = append(lines, "Date: "+sentAt.Format(time.RFC1123Z))
+	}
+	if strings.TrimSpace(body) != "" {
+		lines = append(lines, "", strings.TrimSpace(body))
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+func (c *Channel) allowedSender(sender string) bool {
+	if c.Config.OpenAccess {
+		return true
+	}
+	for _, allowed := range c.Config.AllowedSenders {
+		if normalizeAddress(allowed) == sender {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeAddress(value string) string {
+	parsed, err := mail.ParseAddress(strings.TrimSpace(value))
+	if err == nil {
+		return strings.ToLower(strings.TrimSpace(parsed.Address))
+	}
+	if strings.Contains(value, "<") && strings.Contains(value, ">") {
+		start := strings.LastIndex(value, "<")
+		end := strings.LastIndex(value, ">")
+		if start >= 0 && end > start {
+			value = value[start+1 : end]
+		}
+	}
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func decodeHeaderValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	decoder := new(mime.WordDecoder)
+	decoded, err := decoder.DecodeHeader(value)
+	if err != nil {
+		return value
+	}
+	return strings.TrimSpace(decoded)
+}
+
+func (c *Channel) rememberProcessed(uid, messageID string) {
+	keys := []string{}
+	if strings.TrimSpace(uid) != "" {
+		keys = append(keys, "uid:"+strings.TrimSpace(uid))
+	}
+	if strings.TrimSpace(messageID) != "" {
+		keys = append(keys, "msgid:"+strings.TrimSpace(messageID))
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.processedKeys == nil {
+		c.processedKeys = map[string]struct{}{}
+	}
+	for _, key := range keys {
+		if _, exists := c.processedKeys[key]; exists {
+			continue
+		}
+		c.processedKeys[key] = struct{}{}
+		c.processedOrder = append(c.processedOrder, key)
+	}
+	for len(c.processedOrder) > maxProcessedKeys {
+		oldest := c.processedOrder[0]
+		c.processedOrder = c.processedOrder[1:]
+		delete(c.processedKeys, oldest)
+	}
+}
+
+func (c *Channel) alreadyProcessed(uid, messageID string) bool {
+	keys := []string{}
+	if strings.TrimSpace(uid) != "" {
+		keys = append(keys, "uid:"+strings.TrimSpace(uid))
+	}
+	if strings.TrimSpace(messageID) != "" {
+		keys = append(keys, "msgid:"+strings.TrimSpace(messageID))
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, key := range keys {
+		if _, exists := c.processedKeys[key]; exists {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Channel) alreadyProcessedPersisted(ctx context.Context, sender, uid, messageID string) (bool, error) {
+	if c.DB == nil {
+		return false, nil
+	}
+	uid = strings.TrimSpace(uid)
+	messageID = strings.TrimSpace(messageID)
+	if uid == "" && messageID == "" {
+		return false, nil
+	}
+	messages, err := c.DB.GetLastMessages(ctx, "email:"+sender, dedupeMessageLimit)
+	if err != nil {
+		return false, err
+	}
+	for _, message := range messages {
+		if message.Role != "user" || strings.TrimSpace(message.PayloadJSON) == "" {
+			continue
+		}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(message.PayloadJSON), &payload); err != nil {
+			continue
+		}
+		meta, _ := payload["meta"].(map[string]any)
+		if len(meta) == 0 {
+			continue
+		}
+		storedUID := strings.TrimSpace(fmt.Sprint(meta["uid"]))
+		storedMessageID := strings.TrimSpace(fmt.Sprint(meta["message_id"]))
+		if uid != "" && storedUID == uid {
+			return true, nil
+		}
+		if messageID != "" && storedMessageID == messageID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (c *Channel) rememberThread(sender, subject, messageID string) {
+	sender = normalizeAddress(sender)
+	if sender == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.threadBySender == nil {
+		c.threadBySender = map[string]threadState{}
+	}
+	state := c.threadBySender[sender]
+	if strings.TrimSpace(subject) != "" {
+		state.Subject = strings.TrimSpace(subject)
+	}
+	if strings.TrimSpace(messageID) != "" {
+		state.MessageID = strings.TrimSpace(messageID)
+	}
+	c.threadBySender[sender] = state
+}
+
+func (c *Channel) lookupThread(ctx context.Context, recipient string) (threadState, bool, error) {
+	recipient = normalizeAddress(recipient)
+	c.mu.Lock()
+	state, ok := c.threadBySender[recipient]
+	c.mu.Unlock()
+	if ok && (state.Subject != "" || state.MessageID != "") {
+		return state, true, nil
+	}
+	if c.DB == nil {
+		return threadState{}, false, nil
+	}
+	messages, err := c.DB.GetLastMessages(ctx, "email:"+recipient, lookupMessageLimit)
+	if err != nil {
+		return threadState{}, false, err
+	}
+	for idx := len(messages) - 1; idx >= 0; idx-- {
+		message := messages[idx]
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(message.PayloadJSON), &payload); err != nil {
+			continue
+		}
+		if strings.TrimSpace(fmt.Sprint(payload["channel"])) != "email" {
+			continue
+		}
+		meta, _ := payload["meta"].(map[string]any)
+		if len(meta) == 0 {
+			continue
+		}
+		state = threadState{
+			Subject:   strings.TrimSpace(fmt.Sprint(meta["subject"])),
+			MessageID: strings.TrimSpace(fmt.Sprint(meta["message_id"])),
+		}
+		if state.Subject != "" || state.MessageID != "" {
+			c.rememberThread(recipient, state.Subject, state.MessageID)
+			return state, true, nil
+		}
+	}
+	return threadState{}, false, nil
+}
+
+func (c *Channel) subjectForDelivery(meta map[string]any, base string) string {
+	if override := strings.TrimSpace(fmt.Sprint(meta["subject"])); override != "" && override != "<nil>" {
+		return override
+	}
+	base = strings.TrimSpace(base)
+	if base == "" {
+		return "or3-intern reply"
+	}
+	lower := strings.ToLower(base)
+	if strings.HasPrefix(lower, "re:") {
+		return base
+	}
+	prefix := strings.TrimSpace(c.Config.SubjectPrefix)
+	if prefix == "" {
+		prefix = "Re:"
+	}
+	if !strings.HasSuffix(prefix, ":") && !strings.HasSuffix(prefix, " ") {
+		prefix += " "
+	}
+	if !strings.HasSuffix(prefix, " ") {
+		prefix += " "
+	}
+	return prefix + base
+}
+
+func (c *Channel) fromAddress() string {
+	if value := normalizeAddress(c.Config.FromAddress); value != "" {
+		return value
+	}
+	if value := normalizeAddress(c.Config.SMTPUsername); value != "" {
+		return value
+	}
+	return normalizeAddress(c.Config.IMAPUsername)
+}
+
+func truthyMeta(meta map[string]any, key string) bool {
+	if len(meta) == 0 {
+		return false
+	}
+	value, exists := meta[key]
+	if !exists {
+		return false
+	}
+	switch cast := value.(type) {
+	case bool:
+		return cast
+	default:
+		return strings.EqualFold(strings.TrimSpace(fmt.Sprint(value)), "true")
+	}
+}
+
+func hasNonEmpty(values []string) bool {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Channel) validateSMTPAuthTransport() error {
+	if strings.TrimSpace(c.Config.SMTPUsername) == "" {
+		return nil
+	}
+	if c.Config.SMTPUseSSL || c.Config.SMTPUseTLS {
+		return nil
+	}
+	return fmt.Errorf("smtp auth requires TLS or SSL")
+}
+
+func connectionDeadline(ctx context.Context) (time.Time, bool) {
+	if ctx == nil {
+		return time.Now().Add(defaultNetTimeout), true
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		return deadline, true
+	}
+	return time.Now().Add(defaultNetTimeout), true
+}
+
+func watchConnContext(ctx context.Context, conn net.Conn) func() {
+	if ctx == nil || conn == nil {
+		return func() {}
+	}
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-done:
+		}
+	}()
+	return func() {
+		close(done)
 	}
 }
 ````
@@ -1694,1136 +1624,1461 @@ type StreamingChannel interface {
 }
 ````
 
-## File: internal/memory/docs_test.go
+## File: internal/clawhub/client.go
 ````go
-package memory
+package clawhub
 
 import (
-	"context"
-	"fmt"
-	"os"
-	"path/filepath"
-	"testing"
-
-	"or3-intern/internal/db"
-)
-
-func openDocsTestDB(t *testing.T) *db.DB {
-	t.Helper()
-	dir := t.TempDir()
-	d, err := db.Open(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatalf("db.Open: %v", err)
-	}
-	t.Cleanup(func() { d.Close() })
-	return d
-}
-
-func TestSyncRoots(t *testing.T) {
-	d := openDocsTestDB(t)
-	ctx := context.Background()
-
-	// create a temp directory with some files
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "readme.md"), []byte("# Hello\nThis is a test document."), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	indexer := &DocIndexer{
-		DB:     d,
-		Config: DocIndexConfig{Roots: []string{root}},
-	}
-
-	if err := indexer.SyncRoots(ctx, "scope1"); err != nil {
-		t.Fatalf("SyncRoots: %v", err)
-	}
-
-	rows, err := d.SQL.QueryContext(ctx, `SELECT path, kind, active FROM memory_docs WHERE scope_key='scope1' ORDER BY path`)
-	if err != nil {
-		t.Fatalf("query: %v", err)
-	}
-	defer rows.Close()
-
-	type row struct {
-		path, kind string
-		active     int
-	}
-	var got []row
-	for rows.Next() {
-		var r row
-		if err := rows.Scan(&r.path, &r.kind, &r.active); err != nil {
-			t.Fatal(err)
-		}
-		got = append(got, r)
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatal(err)
-	}
-
-	if len(got) != 2 {
-		t.Fatalf("expected 2 docs, got %d: %v", len(got), got)
-	}
-	for _, r := range got {
-		if r.active != 1 {
-			t.Errorf("expected active=1 for %s, got %d", r.path, r.active)
-		}
-	}
-
-	// verify kinds
-	kinds := map[string]string{}
-	for _, r := range got {
-		kinds[filepath.Base(r.path)] = r.kind
-	}
-	if kinds["readme.md"] != "markdown" {
-		t.Errorf("expected markdown, got %q", kinds["readme.md"])
-	}
-	if kinds["main.go"] != "go" {
-		t.Errorf("expected go, got %q", kinds["main.go"])
-	}
-}
-
-func TestRetrieveDocs(t *testing.T) {
-	d := openDocsTestDB(t)
-	ctx := context.Background()
-
-	err := UpsertDoc(ctx, d, "scope1", "/docs/guide.md", "markdown", "User Guide",
-		"How to get started", "Getting started: install the tool and run it.", nil, "abc123", 0, 100)
-	if err != nil {
-		t.Fatalf("UpsertDoc: %v", err)
-	}
-	err = UpsertDoc(ctx, d, "scope1", "/docs/api.md", "markdown", "API Reference",
-		"API endpoints list", "The API exposes REST endpoints for integration.", nil, "def456", 0, 200)
-	if err != nil {
-		t.Fatalf("UpsertDoc: %v", err)
-	}
-
-	r := &DocRetriever{DB: d}
-
-	results, err := r.RetrieveDocs(ctx, "scope1", "install tool", 5)
-	if err != nil {
-		t.Fatalf("RetrieveDocs: %v", err)
-	}
-	if len(results) == 0 {
-		t.Fatal("expected at least one result")
-	}
-	found := false
-	for _, res := range results {
-		if res.Title == "User Guide" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("expected User Guide in results, got %v", results)
-	}
-}
-
-func TestRetrieveDocs_Empty(t *testing.T) {
-	d := openDocsTestDB(t)
-	ctx := context.Background()
-
-	r := &DocRetriever{DB: d}
-	results, err := r.RetrieveDocs(ctx, "scope1", "", 5)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(results) != 0 {
-		t.Errorf("expected empty results for blank query, got %d", len(results))
-	}
-}
-
-func TestSyncRootsDeactivation(t *testing.T) {
-	d := openDocsTestDB(t)
-	ctx := context.Background()
-
-	root := t.TempDir()
-	filePath := filepath.Join(root, "note.txt")
-	if err := os.WriteFile(filePath, []byte("important note content"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	indexer := &DocIndexer{
-		DB:     d,
-		Config: DocIndexConfig{Roots: []string{root}},
-	}
-
-	// first sync - file should be active
-	if err := indexer.SyncRoots(ctx, "scope1"); err != nil {
-		t.Fatalf("SyncRoots: %v", err)
-	}
-	var active int
-	if err := d.SQL.QueryRowContext(ctx,
-		`SELECT active FROM memory_docs WHERE scope_key='scope1' AND path=?`, filePath,
-	).Scan(&active); err != nil {
-		t.Fatalf("query after first sync: %v", err)
-	}
-	if active != 1 {
-		t.Fatalf("expected active=1 after first sync, got %d", active)
-	}
-
-	// delete the file and sync again
-	if err := os.Remove(filePath); err != nil {
-		t.Fatal(err)
-	}
-	if err := indexer.SyncRoots(ctx, "scope1"); err != nil {
-		t.Fatalf("SyncRoots after delete: %v", err)
-	}
-
-	if err := d.SQL.QueryRowContext(ctx,
-		`SELECT active FROM memory_docs WHERE scope_key='scope1' AND path=?`, filePath,
-	).Scan(&active); err != nil {
-		t.Fatalf("query after second sync: %v", err)
-	}
-	if active != 0 {
-		t.Errorf("expected active=0 after file deleted, got %d", active)
-	}
-}
-
-func TestSyncRootsCaps(t *testing.T) {
-	d := openDocsTestDB(t)
-	ctx := context.Background()
-
-	root := t.TempDir()
-	for i := 0; i < 10; i++ {
-		name := filepath.Join(root, fmt.Sprintf("file%d.txt", i))
-		if err := os.WriteFile(name, []byte("content"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	indexer := &DocIndexer{
-		DB:     d,
-		Config: DocIndexConfig{Roots: []string{root}, MaxFiles: 3},
-	}
-
-	if err := indexer.SyncRoots(ctx, "scope1"); err != nil {
-		t.Fatalf("SyncRoots: %v", err)
-	}
-
-	var count int
-	if err := d.SQL.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM memory_docs WHERE scope_key='scope1' AND active=1`,
-	).Scan(&count); err != nil {
-		t.Fatalf("count query: %v", err)
-	}
-	if count > 3 {
-		t.Errorf("expected at most 3 docs (MaxFiles=3), got %d", count)
-	}
-}
-
-func TestSyncRoots_NoRoots(t *testing.T) {
-	d := openDocsTestDB(t)
-	ctx := context.Background()
-
-	indexer := &DocIndexer{
-		DB:     d,
-		Config: DocIndexConfig{},
-	}
-	if err := indexer.SyncRoots(ctx, "scope1"); err != nil {
-		t.Fatalf("expected no error with no roots, got %v", err)
-	}
-}
-
-func TestSyncRoots_Idempotent(t *testing.T) {
-	d := openDocsTestDB(t)
-	ctx := context.Background()
-
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "config.toml"), []byte("key = \"value\"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	indexer := &DocIndexer{
-		DB:     d,
-		Config: DocIndexConfig{Roots: []string{root}},
-	}
-
-	// sync twice - should not error or duplicate
-	if err := indexer.SyncRoots(ctx, "scope1"); err != nil {
-		t.Fatalf("first SyncRoots: %v", err)
-	}
-	if err := indexer.SyncRoots(ctx, "scope1"); err != nil {
-		t.Fatalf("second SyncRoots: %v", err)
-	}
-
-	var count int
-	if err := d.SQL.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM memory_docs WHERE scope_key='scope1' AND active=1`,
-	).Scan(&count); err != nil {
-		t.Fatalf("count query: %v", err)
-	}
-	if count != 1 {
-		t.Errorf("expected 1 doc after idempotent sync, got %d", count)
-	}
-}
-````
-
-## File: internal/memory/docs.go
-````go
-package memory
-
-import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"io/fs"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
-
-	"or3-intern/internal/db"
-	"or3-intern/internal/providers"
+	"time"
 )
 
-// DocIndexConfig controls what gets indexed.
-type DocIndexConfig struct {
-	Roots          []string
-	MaxFiles       int
-	MaxFileBytes   int
-	MaxChunks      int
-	EmbedMaxBytes  int
-	RefreshSeconds int
-	RetrieveLimit  int
+const (
+	apiSearch   = "/api/v1/search"
+	apiResolve  = "/api/v1/resolve"
+	apiDownload = "/api/v1/download"
+	apiSkills   = "/api/v1/skills"
+)
+
+type Client struct {
+	SiteURL     string
+	RegistryURL string
+	HTTP        *http.Client
 }
 
-// IndexedDoc is a row from memory_docs.
-type IndexedDoc struct {
-	ID        int64
-	ScopeKey  string
-	Path      string
-	Kind      string
-	Title     string
-	Summary   string
-	Text      string
-	Embedding []byte
-	MTimeMS   int64
-	SizeBytes int64
-	Active    bool
-	UpdatedAt int64
+type SearchResult struct {
+	Slug        string
+	DisplayName string
+	Summary     string
+	Version     string
+	Score       float64
+	UpdatedAt   int64
 }
 
-// DocIndexer syncs configured roots into the memory_docs table.
-type DocIndexer struct {
-	DB         *db.DB
-	Provider   *providers.Client
-	EmbedModel string
-	Config     DocIndexConfig
+type SkillInfo struct {
+	Slug            string
+	DisplayName     string
+	Summary         string
+	LatestVersion   string
+	SelectedVersion string
+	Owner           string
 }
 
-func (x *DocIndexer) defaults() DocIndexConfig {
-	c := x.Config
-	if c.MaxFiles <= 0 {
-		c.MaxFiles = 100
-	}
-	if c.MaxFileBytes <= 0 {
-		c.MaxFileBytes = 64 * 1024
-	}
-	if c.MaxChunks <= 0 {
-		c.MaxChunks = 500
-	}
-	if c.EmbedMaxBytes <= 0 {
-		c.EmbedMaxBytes = 8 * 1024
-	}
-	if c.RetrieveLimit <= 0 {
-		c.RetrieveLimit = 5
-	}
-	return c
+type ResolveResult struct {
+	MatchVersion  string
+	LatestVersion string
 }
 
-// SyncRoots scans all configured roots and updates memory_docs for scopeKey.
-// It enforces caps on file count and file size, skips symlinks, and
-// deactivates docs for files that have disappeared.
-func (x *DocIndexer) SyncRoots(ctx context.Context, scopeKey string) error {
-	cfg := x.defaults()
-	if len(cfg.Roots) == 0 {
-		return nil
+type InstallOptions struct {
+	Force bool
+}
+
+type InstallResult struct {
+	Path        string
+	Slug        string
+	Version     string
+	Fingerprint string
+}
+
+type SkillOrigin struct {
+	Version          int    `json:"version"`
+	Registry         string `json:"registry"`
+	Slug             string `json:"slug"`
+	InstalledVersion string `json:"installedVersion"`
+	InstalledAt      int64  `json:"installedAt"`
+	Fingerprint      string `json:"fingerprint"`
+}
+
+type InstalledSkill struct {
+	Name     string
+	Path     string
+	Origin   SkillOrigin
+	Modified bool
+}
+
+func New(siteURL, registryURL string) *Client {
+	return &Client{
+		SiteURL:     strings.TrimRight(siteURL, "/"),
+		RegistryURL: strings.TrimRight(registryURL, "/"),
+		HTTP:        &http.Client{Timeout: 15 * time.Second},
 	}
+}
 
-	seen := map[string]bool{}
-	fileCount := 0
-	chunkCount := 0
-
-	for _, root := range cfg.Roots {
-		if strings.TrimSpace(root) == "" {
-			continue
-		}
-		absRoot, err := filepath.Abs(root)
-		if err != nil {
-			continue
-		}
-		absRoot, err = filepath.EvalSymlinks(absRoot)
-		if err != nil {
-			continue
-		}
-
-		err = filepath.WalkDir(absRoot, func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return nil
-			}
-			if d.Type()&os.ModeSymlink != 0 {
-				return nil
-			}
-			if d.IsDir() {
-				if strings.HasPrefix(d.Name(), ".") && path != absRoot {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			ext := strings.ToLower(filepath.Ext(path))
-			switch ext {
-			case ".md", ".txt", ".go", ".py", ".js", ".ts", ".json", ".yaml", ".yml", ".toml", ".sh", ".rs", ".java", ".c", ".cpp", ".h":
-			default:
-				return nil
-			}
-
-			realPath, err := filepath.EvalSymlinks(path)
-			if err != nil {
-				return nil
-			}
-			rel, err := filepath.Rel(absRoot, realPath)
-			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-				return nil
-			}
-
-			if fileCount >= cfg.MaxFiles {
-				return filepath.SkipAll
-			}
-			if chunkCount >= cfg.MaxChunks {
-				return filepath.SkipAll
-			}
-
-			info, err := os.Lstat(realPath)
-			if err != nil {
-				return nil
-			}
-			if info.Size() > int64(cfg.MaxFileBytes) {
-				return nil
-			}
-
-			seen[realPath] = true
-			fileCount++
-
-			data, err := os.ReadFile(realPath)
-			if err != nil {
-				return nil
-			}
-			if len(data) > cfg.MaxFileBytes {
-				data = data[:cfg.MaxFileBytes]
-			}
-
-			h := fileHash(data)
-			mtimeMS := info.ModTime().UnixMilli()
-			sizeBytes := info.Size()
-
-			kind := extKind(ext)
-			title := filepath.Base(realPath)
-			text := string(data)
-			summary := extractSummary(text)
-
-			if !x.needsUpdate(ctx, scopeKey, realPath, h) {
-				chunkCount++
-				return nil
-			}
-
-			var embedding []byte
-			if x.Provider != nil && x.EmbedModel != "" && len(data) <= cfg.EmbedMaxBytes {
-				vec, err := x.Provider.Embed(ctx, x.EmbedModel, truncateForEmbed(text, cfg.EmbedMaxBytes))
-				if err == nil && len(vec) > 0 {
-					embedding = PackFloat32(vec)
-				}
-			}
-
-			now := db.NowMS()
-			_, err = x.DB.SQL.ExecContext(ctx,
-				`INSERT INTO memory_docs(scope_key, path, kind, title, summary, text, embedding, hash, mtime_ms, size_bytes, active, updated_at)
-                 VALUES(?,?,?,?,?,?,?,?,?,?,1,?)
-                 ON CONFLICT(scope_key, path) DO UPDATE SET
-                   kind=excluded.kind, title=excluded.title, summary=excluded.summary,
-                   text=excluded.text, embedding=excluded.embedding,
-                   hash=excluded.hash, mtime_ms=excluded.mtime_ms,
-                   size_bytes=excluded.size_bytes, active=1, updated_at=excluded.updated_at`,
-				scopeKey, realPath, kind, title, summary, text, nullBytes(embedding), h, mtimeMS, sizeBytes, now)
-			if err != nil {
-				return nil
-			}
-			chunkCount++
-			return nil
+func (c *Client) Search(ctx context.Context, query string, limit int) ([]SearchResult, error) {
+	url := c.apiURL(apiSearch)
+	url.RawQuery = queryString(map[string]string{
+		"q":     strings.TrimSpace(query),
+		"limit": intString(limit),
+	})
+	var response struct {
+		Results []struct {
+			Slug        string  `json:"slug"`
+			DisplayName string  `json:"displayName"`
+			Summary     string  `json:"summary"`
+			Version     string  `json:"version"`
+			Score       float64 `json:"score"`
+			UpdatedAt   int64   `json:"updatedAt"`
+		} `json:"results"`
+	}
+	if err := c.getJSON(ctx, url.String(), &response); err != nil {
+		return nil, err
+	}
+	results := make([]SearchResult, 0, len(response.Results))
+	for _, item := range response.Results {
+		results = append(results, SearchResult{
+			Slug:        item.Slug,
+			DisplayName: item.DisplayName,
+			Summary:     item.Summary,
+			Version:     item.Version,
+			Score:       item.Score,
+			UpdatedAt:   item.UpdatedAt,
 		})
-		_ = err
+	}
+	return results, nil
+}
+
+func (c *Client) Inspect(ctx context.Context, slug, version string) (SkillInfo, error) {
+	slug = sanitizeSlug(slug)
+	if slug == "" {
+		return SkillInfo{}, fmt.Errorf("slug required")
+	}
+	var response struct {
+		Skill *struct {
+			Slug        string `json:"slug"`
+			DisplayName string `json:"displayName"`
+			Summary     string `json:"summary"`
+		} `json:"skill"`
+		LatestVersion *struct {
+			Version string `json:"version"`
+		} `json:"latestVersion"`
+		Owner *struct {
+			Handle      string `json:"handle"`
+			DisplayName string `json:"displayName"`
+		} `json:"owner"`
+	}
+	if err := c.getJSON(ctx, c.apiURL(apiSkills+"/"+slug).String(), &response); err != nil {
+		return SkillInfo{}, err
+	}
+	if response.Skill == nil {
+		return SkillInfo{}, fmt.Errorf("skill not found: %s", slug)
+	}
+	info := SkillInfo{
+		Slug:        response.Skill.Slug,
+		DisplayName: response.Skill.DisplayName,
+		Summary:     response.Skill.Summary,
+		LatestVersion: stringOr(response.LatestVersion, func(v *struct {
+			Version string `json:"version"`
+		}) string {
+			return v.Version
+		}),
+		SelectedVersion: strings.TrimSpace(version),
+		Owner:           ownerName(response.Owner),
+	}
+	if info.SelectedVersion == "" {
+		info.SelectedVersion = info.LatestVersion
+	}
+	return info, nil
+}
+
+func (c *Client) Resolve(ctx context.Context, slug, fingerprint string) (ResolveResult, error) {
+	slug = sanitizeSlug(slug)
+	if slug == "" {
+		return ResolveResult{}, fmt.Errorf("slug required")
+	}
+	url := c.apiURL(apiResolve)
+	url.RawQuery = queryString(map[string]string{
+		"slug":    slug,
+		"version": "",
+		"hash":    strings.TrimSpace(fingerprint),
+	})
+	var response struct {
+		Match *struct {
+			Version string `json:"version"`
+		} `json:"match"`
+		LatestVersion *struct {
+			Version string `json:"version"`
+		} `json:"latestVersion"`
+	}
+	if err := c.getJSON(ctx, url.String(), &response); err != nil {
+		return ResolveResult{}, err
+	}
+	return ResolveResult{
+		MatchVersion: stringOr(response.Match, func(v *struct {
+			Version string `json:"version"`
+		}) string {
+			return v.Version
+		}),
+		LatestVersion: stringOr(response.LatestVersion, func(v *struct {
+			Version string `json:"version"`
+		}) string {
+			return v.Version
+		}),
+	}, nil
+}
+
+func (c *Client) Download(ctx context.Context, slug, version string) ([]byte, error) {
+	slug = sanitizeSlug(slug)
+	if slug == "" {
+		return nil, fmt.Errorf("slug required")
+	}
+	url := c.apiURL(apiDownload)
+	url.RawQuery = queryString(map[string]string{
+		"slug":    slug,
+		"version": strings.TrimSpace(version),
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, readHTTPError(resp)
+	}
+	return io.ReadAll(resp.Body)
+}
+
+func (c *Client) Install(ctx context.Context, slug, version, destDir string, opts InstallOptions) (InstallResult, error) {
+	info, err := c.Inspect(ctx, slug, version)
+	if err != nil {
+		return InstallResult{}, err
+	}
+	if strings.TrimSpace(info.SelectedVersion) == "" {
+		return InstallResult{}, fmt.Errorf("could not resolve version for %s", slug)
+	}
+	zipBytes, err := c.Download(ctx, slug, info.SelectedVersion)
+	if err != nil {
+		return InstallResult{}, err
+	}
+	target := filepath.Join(destDir, sanitizeSlug(slug))
+	if err := installZip(zipBytes, target, SkillOrigin{
+		Version:          1,
+		Registry:         c.RegistryURL,
+		Slug:             sanitizeSlug(slug),
+		InstalledVersion: info.SelectedVersion,
+		InstalledAt:      time.Now().UnixMilli(),
+	}, opts); err != nil {
+		return InstallResult{}, err
+	}
+	origin, err := ReadOrigin(target)
+	if err != nil {
+		return InstallResult{}, err
+	}
+	return InstallResult{
+		Path:        target,
+		Slug:        origin.Slug,
+		Version:     origin.InstalledVersion,
+		Fingerprint: origin.Fingerprint,
+	}, nil
+}
+
+func installZip(zipBytes []byte, target string, origin SkillOrigin, opts InstallOptions) error {
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	if stat, err := os.Stat(target); err == nil && stat.IsDir() {
+		if !opts.Force {
+			modified, checkErr := LocalEdits(target)
+			if checkErr != nil {
+				return checkErr
+			}
+			if modified {
+				return fmt.Errorf("local modifications detected: %s", target)
+			}
+		}
+	} else if err == nil {
+		return fmt.Errorf("target exists and is not a directory: %s", target)
 	}
 
-	// deactivate docs no longer on disk
-	rows, err := x.DB.SQL.QueryContext(ctx,
-		`SELECT path FROM memory_docs WHERE scope_key=? AND active=1`, scopeKey)
+	tempRoot, err := os.MkdirTemp(filepath.Dir(target), ".clawhub-*")
 	if err != nil {
 		return err
 	}
-	var toDeactivate []string
-	for rows.Next() {
-		var p string
-		if err := rows.Scan(&p); err != nil {
-			continue
-		}
-		if !seen[p] {
-			toDeactivate = append(toDeactivate, p)
+	defer os.RemoveAll(tempRoot)
+	tempTarget := filepath.Join(tempRoot, filepath.Base(target))
+	if err := extractZipToDir(zipBytes, tempTarget); err != nil {
+		return err
+	}
+	fingerprint, err := FingerprintDir(tempTarget)
+	if err != nil {
+		return err
+	}
+	origin.Fingerprint = fingerprint
+	if err := WriteOrigin(tempTarget, origin); err != nil {
+		return err
+	}
+
+	backup := target + ".bak"
+	_ = os.RemoveAll(backup)
+	if _, err := os.Stat(target); err == nil {
+		if err := os.Rename(target, backup); err != nil {
+			return err
 		}
 	}
-	rows.Close()
-	for _, p := range toDeactivate {
-		_, _ = x.DB.SQL.ExecContext(ctx,
-			`UPDATE memory_docs SET active=0, updated_at=? WHERE scope_key=? AND path=?`,
-			db.NowMS(), scopeKey, p)
+	if err := os.Rename(tempTarget, target); err != nil {
+		if _, statErr := os.Stat(backup); statErr == nil {
+			_ = os.Rename(backup, target)
+		}
+		return err
+	}
+	_ = os.RemoveAll(backup)
+	return nil
+}
+
+func extractZipToDir(zipBytes []byte, target string) error {
+	reader, err := zip.NewReader(bytes.NewReader(zipBytes), int64(len(zipBytes)))
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		return err
+	}
+	for _, file := range reader.File {
+		rel, ok := safeZipPath(file.Name)
+		if !ok {
+			continue
+		}
+		full := filepath.Join(target, rel)
+		if file.FileInfo().IsDir() {
+			if err := os.MkdirAll(full, 0o755); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			return err
+		}
+		rc, err := file.Open()
+		if err != nil {
+			return err
+		}
+		data, readErr := io.ReadAll(rc)
+		_ = rc.Close()
+		if readErr != nil {
+			return readErr
+		}
+		mode := file.Mode()
+		if mode == 0 {
+			mode = 0o644
+		}
+		if err := os.WriteFile(full, data, mode); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-func (x *DocIndexer) needsUpdate(ctx context.Context, scopeKey, path, newHash string) bool {
-	row := x.DB.SQL.QueryRowContext(ctx,
-		`SELECT hash FROM memory_docs WHERE scope_key=? AND path=? AND active=1`, scopeKey, path)
-	var existing string
-	if err := row.Scan(&existing); err != nil {
-		return true
+func FingerprintDir(root string) (string, error) {
+	type item struct {
+		path string
+		sum  string
 	}
-	return existing != newHash
-}
-
-// DocRetriever retrieves indexed docs by FTS query.
-type DocRetriever struct {
-	DB *db.DB
-}
-
-// RetrievedDoc is a doc excerpt returned by retrieval.
-type RetrievedDoc struct {
-	Path    string
-	Title   string
-	Excerpt string
-	Score   float64
-}
-
-// RetrieveDocs queries the FTS index for docs matching query.
-func (r *DocRetriever) RetrieveDocs(ctx context.Context, scopeKey, query string, topK int) ([]RetrievedDoc, error) {
-	if topK <= 0 {
-		topK = 5
-	}
-	q := normalizeFTSQuery(query)
-	if q == "" {
-		return nil, nil
-	}
-	rows, err := r.DB.SQL.QueryContext(ctx,
-		`SELECT memory_docs_fts.rowid, memory_docs.path, memory_docs.title, memory_docs.text, bm25(memory_docs_fts) as rank
-         FROM memory_docs_fts
-         JOIN memory_docs ON memory_docs.id = memory_docs_fts.rowid
-         WHERE memory_docs_fts MATCH ? AND memory_docs.scope_key=? AND memory_docs.active=1
-         ORDER BY rank LIMIT ?`,
-		q, scopeKey, topK)
+	var files []item
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if d.Name() == ".clawhub" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		sum := sha256.Sum256(data)
+		files = append(files, item{
+			path: filepath.ToSlash(rel),
+			sum:  hex.EncodeToString(sum[:]),
+		})
+		return nil
+	})
 	if err != nil {
+		return "", err
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].path < files[j].path })
+	h := sha256.New()
+	for _, file := range files {
+		_, _ = io.WriteString(h, file.path+":"+file.sum+"\n")
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func LocalEdits(skillDir string) (bool, error) {
+	origin, err := ReadOrigin(skillDir)
+	if err != nil {
+		return false, err
+	}
+	current, err := FingerprintDir(skillDir)
+	if err != nil {
+		return false, err
+	}
+	return current != origin.Fingerprint, nil
+}
+
+func ListInstalled(root string) ([]InstalledSkill, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
 		return nil, err
 	}
-	defer rows.Close()
-	var out []RetrievedDoc
-	for rows.Next() {
-		var rowid int64
-		var path, title, text string
-		var rank float64
-		if err := rows.Scan(&rowid, &path, &title, &text, &rank); err != nil {
+	out := make([]InstalledSkill, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		path := filepath.Join(root, entry.Name())
+		origin, err := ReadOrigin(path)
+		if err != nil {
+			continue
+		}
+		modified, err := LocalEdits(path)
+		if err != nil {
 			return nil, err
 		}
-		out = append(out, RetrievedDoc{
-			Path:    path,
-			Title:   title,
-			Excerpt: excerptText(text, 500),
-			Score:   1.0 / (1.0 + rank),
+		out = append(out, InstalledSkill{
+			Name:     entry.Name(),
+			Path:     path,
+			Origin:   origin,
+			Modified: modified,
 		})
 	}
-	return out, rows.Err()
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
 }
 
-// UpsertDoc inserts or updates a doc in memory_docs (for direct use by tests).
-func UpsertDoc(ctx context.Context, d *db.DB, scopeKey, path, kind, title, summary, text string, embedding []byte, hash string, mtimeMS, sizeBytes int64) error {
-	now := db.NowMS()
-	_, err := d.SQL.ExecContext(ctx,
-		`INSERT INTO memory_docs(scope_key, path, kind, title, summary, text, embedding, hash, mtime_ms, size_bytes, active, updated_at)
-         VALUES(?,?,?,?,?,?,?,?,?,?,1,?)
-         ON CONFLICT(scope_key, path) DO UPDATE SET
-           kind=excluded.kind, title=excluded.title, summary=excluded.summary,
-           text=excluded.text, embedding=excluded.embedding,
-           hash=excluded.hash, mtime_ms=excluded.mtime_ms,
-           size_bytes=excluded.size_bytes, active=1, updated_at=excluded.updated_at`,
-		scopeKey, path, kind, title, summary, text, nullBytes(embedding), hash, mtimeMS, sizeBytes, now)
-	return err
-}
-
-func fileHash(data []byte) string {
-	h := sha256.Sum256(data)
-	return hex.EncodeToString(h[:8])
-}
-
-func extKind(ext string) string {
-	switch ext {
-	case ".md":
-		return "markdown"
-	case ".txt":
-		return "text"
-	case ".go":
-		return "go"
-	case ".py":
-		return "python"
-	case ".js":
-		return "javascript"
-	case ".ts":
-		return "typescript"
-	case ".json":
-		return "json"
-	case ".yaml", ".yml":
-		return "yaml"
-	case ".toml":
-		return "toml"
-	case ".sh":
-		return "shell"
-	default:
-		return "text"
+func ReadOrigin(skillDir string) (SkillOrigin, error) {
+	data, err := os.ReadFile(filepath.Join(skillDir, ".clawhub", "origin.json"))
+	if err != nil {
+		return SkillOrigin{}, err
 	}
+	var origin SkillOrigin
+	if err := json.Unmarshal(data, &origin); err != nil {
+		return SkillOrigin{}, err
+	}
+	return origin, nil
 }
 
-func extractSummary(text string) string {
-	for _, line := range strings.SplitN(text, "\n", 20) {
-		line = strings.TrimSpace(line)
-		if line == "" {
+func WriteOrigin(skillDir string, origin SkillOrigin) error {
+	path := filepath.Join(skillDir, ".clawhub", "origin.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(origin, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0o644)
+}
+
+func RemoveSkill(root, name string) error {
+	name = sanitizeSlug(name)
+	if name == "" {
+		return fmt.Errorf("skill name required")
+	}
+	return os.RemoveAll(filepath.Join(root, name))
+}
+
+func (c *Client) apiURL(path string) *urlBuilder {
+	return newURLBuilder(c.RegistryURL, path)
+}
+
+func (c *Client) httpClient() *http.Client {
+	if c != nil && c.HTTP != nil {
+		return c.HTTP
+	}
+	return &http.Client{Timeout: 15 * time.Second}
+}
+
+func (c *Client) getJSON(ctx context.Context, rawURL string, dest any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return readHTTPError(resp)
+	}
+	return json.NewDecoder(resp.Body).Decode(dest)
+}
+
+func sanitizeSlug(slug string) string {
+	slug = strings.TrimSpace(slug)
+	if slug == "" || strings.Contains(slug, "..") || strings.Contains(slug, "/") || strings.Contains(slug, "\\") {
+		return ""
+	}
+	return slug
+}
+
+func safeZipPath(path string) (string, bool) {
+	path = strings.TrimSpace(strings.ReplaceAll(path, "\\", "/"))
+	path = strings.TrimPrefix(path, "./")
+	path = strings.TrimPrefix(path, "/")
+	if path == "" || strings.Contains(path, "..") {
+		return "", false
+	}
+	return filepath.FromSlash(path), true
+}
+
+func readHTTPError(resp *http.Response) error {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	text := strings.TrimSpace(string(body))
+	if text == "" {
+		text = resp.Status
+	}
+	return fmt.Errorf("clawhub API error: %s", text)
+}
+
+func queryString(values map[string]string) string {
+	var parts []string
+	for key, value := range values {
+		if strings.TrimSpace(value) == "" {
 			continue
 		}
-		if strings.HasPrefix(line, "#") {
-			continue
-		}
-		if strings.HasPrefix(line, "```") || strings.HasPrefix(line, "---") {
-			continue
-		}
-		if len(line) > 200 {
-			line = line[:200]
-		}
-		return line
+		parts = append(parts, urlEncode(key)+"="+urlEncode(value))
 	}
-	return ""
+	sort.Strings(parts)
+	return strings.Join(parts, "&")
 }
 
-func truncateForEmbed(text string, max int) string {
-	if max <= 0 || len(text) <= max {
-		return text
+func intString(v int) string {
+	if v <= 0 {
+		return ""
 	}
-	return text[:max]
+	return fmt.Sprint(v)
 }
 
-func excerptText(text string, maxChars int) string {
-	text = strings.TrimSpace(text)
-	if len(text) <= maxChars {
-		return text
+func ownerName(owner *struct {
+	Handle      string `json:"handle"`
+	DisplayName string `json:"displayName"`
+}) string {
+	if owner == nil {
+		return ""
 	}
-	return text[:maxChars] + "…"
+	if strings.TrimSpace(owner.Handle) != "" {
+		return owner.Handle
+	}
+	return owner.DisplayName
 }
 
-func nullBytes(b []byte) any {
-	if len(b) == 0 {
-		return nil
+func stringOr[T any](value *T, fn func(*T) string) string {
+	if value == nil {
+		return ""
 	}
-	return b
+	return strings.TrimSpace(fn(value))
+}
+
+type urlBuilder struct {
+	base     string
+	path     string
+	RawQuery string
+}
+
+func newURLBuilder(base, path string) *urlBuilder {
+	return &urlBuilder{
+		base: strings.TrimRight(base, "/"),
+		path: path,
+	}
+}
+
+func (u *urlBuilder) String() string {
+	if strings.TrimSpace(u.RawQuery) == "" {
+		return u.base + u.path
+	}
+	return u.base + u.path + "?" + u.RawQuery
+}
+
+func urlEncode(s string) string {
+	replacer := strings.NewReplacer(
+		"%", "%25",
+		" ", "%20",
+		"!", "%21",
+		"#", "%23",
+		"$", "%24",
+		"&", "%26",
+		"'", "%27",
+		"(", "%28",
+		")", "%29",
+		"+", "%2B",
+		",", "%2C",
+		"/", "%2F",
+		":", "%3A",
+		";", "%3B",
+		"=", "%3D",
+		"?", "%3F",
+		"@", "%40",
+	)
+	return replacer.Replace(s)
 }
 ````
 
-## File: internal/providers/openai_stream_test.go
+## File: internal/heartbeat/service.go
 ````go
-package providers
+package heartbeat
 
 import (
 	"context"
-	"fmt"
-	"net/http"
-	"net/http/httptest"
+	"errors"
+	"log"
+	"os"
+	"path/filepath"
 	"strings"
-	"testing"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"or3-intern/internal/bus"
+	"or3-intern/internal/config"
 )
 
-func sseServer(t *testing.T, lines []string) (*httptest.Server, *Client) {
-	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		for _, l := range lines {
-			fmt.Fprintln(w, l)
+const (
+	DefaultChannel = "system"
+	DefaultFrom    = "heartbeat"
+	SeedMessage    = "Review HEARTBEAT.md and execute any active recurring tasks."
+
+	MetaKeyHeartbeat = "heartbeat"
+	MetaKeyDone      = "heartbeat_done"
+)
+
+type Service struct {
+	Config       config.HeartbeatConfig
+	WorkspaceDir string
+	Bus          *bus.Bus
+
+	logf func(string, ...any)
+
+	mu        sync.Mutex
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+	tickQueue chan struct{}
+	inFlight  atomic.Bool
+	stopping  atomic.Bool
+}
+
+func New(cfg config.HeartbeatConfig, workspaceDir string, eventBus *bus.Bus) *Service {
+	return &Service{
+		Config:       cfg,
+		WorkspaceDir: workspaceDir,
+		Bus:          eventBus,
+		logf:         log.Printf,
+	}
+}
+
+func (s *Service) Start(ctx context.Context) {
+	if s == nil || !s.Config.Enabled || s.Bus == nil {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cancel != nil {
+		return
+	}
+	s.stopping.Store(false)
+
+	childCtx, cancel := context.WithCancel(ctx)
+	s.cancel = cancel
+	s.tickQueue = make(chan struct{}, 1)
+
+	interval := time.Duration(normalizeIntervalMinutes(s.Config.IntervalMinutes)) * time.Minute
+	s.wg.Add(2)
+	go s.runTicker(childCtx, interval)
+	go s.runPublisher(childCtx)
+}
+
+func (s *Service) Stop() {
+	if s == nil {
+		return
+	}
+	s.stopping.Store(true)
+
+	s.mu.Lock()
+	cancel := s.cancel
+	s.cancel = nil
+	s.tickQueue = nil
+	s.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	s.wg.Wait()
+	s.inFlight.Store(false)
+}
+
+func (s *Service) runTicker(ctx context.Context, interval time.Duration) {
+	defer s.wg.Done()
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.enqueueTick("timer")
 		}
-	}))
-	t.Cleanup(srv.Close)
-	c := New(srv.URL, "key", 0)
-	c.HTTP = srv.Client()
-	return srv, c
+	}
 }
 
-func TestChatStream_TextOnly(t *testing.T) {
-	lines := []string{
-		`data: {"id":"1","choices":[{"delta":{"content":"Hello"},"finish_reason":""}]}`,
-		`data: {"id":"1","choices":[{"delta":{"content":", world"},"finish_reason":""}]}`,
-		`data: [DONE]`,
-	}
-	_, c := sseServer(t, lines)
+func (s *Service) runPublisher(ctx context.Context) {
+	defer s.wg.Done()
 
-	var got []string
-	resp, err := c.ChatStream(context.Background(), ChatCompletionRequest{Model: "m"}, func(text string) {
-		got = append(got, text)
-	})
+	for {
+		if s.stopping.Load() || ctx.Err() != nil {
+			return
+		}
+
+		s.mu.Lock()
+		tickQueue := s.tickQueue
+		s.mu.Unlock()
+		if tickQueue == nil {
+			return
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-tickQueue:
+			if s.stopping.Load() || ctx.Err() != nil {
+				return
+			}
+			s.processTick()
+		}
+	}
+}
+
+func (s *Service) enqueueTick(source string) bool {
+	s.mu.Lock()
+	tickQueue := s.tickQueue
+	s.mu.Unlock()
+	if tickQueue == nil {
+		return false
+	}
+
+	select {
+	case tickQueue <- struct{}{}:
+		return true
+	default:
+		s.logf("heartbeat tick dropped: pending tick already queued source=%s", source)
+		return false
+	}
+}
+
+func (s *Service) processTick() {
+	if s.inFlight.Load() {
+		s.logf("heartbeat tick skipped: previous turn still in flight")
+		return
+	}
+
+	path, text, err := LoadTasksFile(s.Config.TasksFile, s.WorkspaceDir)
 	if err != nil {
-		t.Fatalf("ChatStream: %v", err)
+		if errors.Is(err, os.ErrNotExist) {
+			s.logf("heartbeat tick skipped: tasks file not found")
+			return
+		}
+		s.logf("heartbeat tick skipped: read failed path=%q err=%v", path, err)
+		return
 	}
-	if len(resp.Choices) == 0 {
-		t.Fatal("expected choices")
+	if !HasActiveInstructions(text) {
+		return
 	}
-	content := resp.Choices[0].Message.Content
-	if content != "Hello, world" {
-		t.Errorf("expected 'Hello, world', got %q", content)
+
+	s.inFlight.Store(true)
+	ev := bus.Event{
+		Type:       bus.EventHeartbeat,
+		SessionKey: normalizedSessionKey(s.Config.SessionKey),
+		Channel:    DefaultChannel,
+		From:       DefaultFrom,
+		Message:    SeedMessage,
+		Meta: map[string]any{
+			MetaKeyHeartbeat: true,
+			MetaKeyDone: func() {
+				s.inFlight.Store(false)
+			},
+			"tasks_path": path,
+		},
 	}
-	if strings.Join(got, "") != "Hello, world" {
-		t.Errorf("onDelta got %v", got)
+	if ok := s.Bus.Publish(ev); !ok {
+		s.inFlight.Store(false)
+		s.logf("heartbeat tick dropped: event bus full")
 	}
 }
 
-func TestChatStream_NilOnDelta(t *testing.T) {
-	lines := []string{
-		`data: {"id":"1","choices":[{"delta":{"content":"hi"},"finish_reason":""}]}`,
-		`data: [DONE]`,
+func LoadTasksFile(configPath, workspaceDir string) (string, string, error) {
+	var firstErr error
+	for _, path := range candidatePaths(configPath, workspaceDir) {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			return path, strings.TrimSpace(string(data)), nil
+		}
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
 	}
-	_, c := sseServer(t, lines)
-
-	resp, err := c.ChatStream(context.Background(), ChatCompletionRequest{Model: "m"}, nil)
-	if err != nil {
-		t.Fatalf("ChatStream with nil onDelta: %v", err)
+	if firstErr != nil {
+		return strings.TrimSpace(configPath), "", firstErr
 	}
-	if resp.Choices[0].Message.Content != "hi" {
-		t.Errorf("expected 'hi', got %q", resp.Choices[0].Message.Content)
-	}
+	return strings.TrimSpace(configPath), "", os.ErrNotExist
 }
 
-func TestChatStream_HTTPError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
-		fmt.Fprint(w, "unauthorized")
-	}))
-	defer srv.Close()
-	c := New(srv.URL, "bad", 0)
-	c.HTTP = srv.Client()
-
-	_, err := c.ChatStream(context.Background(), ChatCompletionRequest{}, nil)
-	if err == nil {
-		t.Fatal("expected error for HTTP error")
+func HasActiveInstructions(text string) bool {
+	inComment := false
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if inComment {
+			if strings.Contains(trimmed, "-->") {
+				inComment = false
+			}
+			continue
+		}
+		if strings.HasPrefix(trimmed, "<!--") {
+			if !strings.Contains(trimmed, "-->") {
+				inComment = true
+			}
+			continue
+		}
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		return true
 	}
-	if !strings.Contains(err.Error(), "401") {
-		t.Errorf("expected 401 in error, got %q", err.Error())
-	}
+	return false
 }
 
-func TestChatStream_SkipsNonDataLines(t *testing.T) {
-	lines := []string{
-		`: keep-alive`,
-		``,
-		`data: {"id":"1","choices":[{"delta":{"content":"ok"},"finish_reason":""}]}`,
-		`data: [DONE]`,
+func candidatePaths(configPath, workspaceDir string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, 3)
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		if _, ok := seen[path]; ok {
+			return
+		}
+		seen[path] = struct{}{}
+		out = append(out, path)
 	}
-	_, c := sseServer(t, lines)
-
-	resp, err := c.ChatStream(context.Background(), ChatCompletionRequest{}, nil)
-	if err != nil {
-		t.Fatalf("ChatStream: %v", err)
+	if strings.TrimSpace(workspaceDir) != "" {
+		add(filepath.Join(workspaceDir, "HEARTBEAT.md"))
+		add(filepath.Join(workspaceDir, "heartbeat.md"))
 	}
-	if resp.Choices[0].Message.Content != "ok" {
-		t.Errorf("expected 'ok', got %q", resp.Choices[0].Message.Content)
-	}
+	add(configPath)
+	return out
 }
 
-func TestChatStream_WithToolCalls(t *testing.T) {
-	lines := []string{
-		`data: {"id":"1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"exec","arguments":""}}]},"finish_reason":""}]}`,
-		`data: {"id":"1","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"cmd\":"}}]},"finish_reason":""}]}`,
-		`data: {"id":"1","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"echo\"}"}}]},"finish_reason":"tool_calls"}]}`,
-		`data: [DONE]`,
+func normalizeIntervalMinutes(v int) int {
+	if v <= 0 {
+		return 30
 	}
-	_, c := sseServer(t, lines)
-
-	resp, err := c.ChatStream(context.Background(), ChatCompletionRequest{}, nil)
-	if err != nil {
-		t.Fatalf("ChatStream: %v", err)
+	if v < 1 {
+		return 1
 	}
-	tcs := resp.Choices[0].Message.ToolCalls
-	if len(tcs) != 1 {
-		t.Fatalf("expected 1 tool call, got %d", len(tcs))
-	}
-	if tcs[0].ID != "call_1" {
-		t.Errorf("expected ID 'call_1', got %q", tcs[0].ID)
-	}
-	if tcs[0].Function.Name != "exec" {
-		t.Errorf("expected name 'exec', got %q", tcs[0].Function.Name)
-	}
-	if tcs[0].Function.Arguments != `{"cmd":"echo"}` {
-		t.Errorf("unexpected arguments: %q", tcs[0].Function.Arguments)
-	}
+	return v
 }
 
-func TestMergeStreamToolCalls_IndexBased(t *testing.T) {
-	existing := []ToolCall{}
-	// first chunk: sets ID, name, empty args
-	existing = mergeStreamToolCalls(existing, []ToolCall{
-		{Index: 0, ID: "call_1", Type: "function", Function: struct {
-			Name      string `json:"name"`
-			Arguments string `json:"arguments"`
-		}{Name: "exec", Arguments: ""}},
-	})
-	// second chunk: no ID, partial args
-	existing = mergeStreamToolCalls(existing, []ToolCall{
-		{Index: 0, Function: struct {
-			Name      string `json:"name"`
-			Arguments string `json:"arguments"`
-		}{Arguments: `{"cmd":`}},
-	})
-	// third chunk: rest of args
-	existing = mergeStreamToolCalls(existing, []ToolCall{
-		{Index: 0, Function: struct {
-			Name      string `json:"name"`
-			Arguments string `json:"arguments"`
-		}{Arguments: `"hi"}`}},
-	})
-
-	if len(existing) != 1 {
-		t.Fatalf("expected 1 tool call, got %d", len(existing))
+func normalizedSessionKey(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return config.DefaultHeartbeatSessionKey
 	}
-	if existing[0].ID != "call_1" {
-		t.Errorf("ID mismatch: %q", existing[0].ID)
-	}
-	if existing[0].Function.Arguments != `{"cmd":"hi"}` {
-		t.Errorf("args mismatch: %q", existing[0].Function.Arguments)
-	}
+	return v
 }
 ````
 
-## File: internal/providers/openai_test.go
+## File: internal/mcp/manager.go
 ````go
-package providers
+package mcp
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
-	"net/http/httptest"
-	"testing"
+	"os"
+	"os/exec"
+	"sort"
+	"strings"
 	"time"
+
+	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"or3-intern/internal/config"
+	"or3-intern/internal/tools"
 )
 
-func TestNew(t *testing.T) {
-	c := New("https://api.example.com", "my-key", 30*time.Second)
-	if c == nil {
-		t.Fatal("expected non-nil client")
+const maxResultChars = 64 * 1024
+
+type session interface {
+	Close() error
+	ListTools(ctx context.Context, params *sdkmcp.ListToolsParams) (*sdkmcp.ListToolsResult, error)
+	CallTool(ctx context.Context, params *sdkmcp.CallToolParams) (*sdkmcp.CallToolResult, error)
+}
+
+type connector func(ctx context.Context, name string, cfg config.MCPServerConfig) (session, error)
+
+type Manager struct {
+	servers  map[string]config.MCPServerConfig
+	logf     func(string, ...any)
+	connect  connector
+	sessions map[string]session
+	tools    []remoteToolSpec
+}
+
+type remoteToolSpec struct {
+	localName   string
+	serverName  string
+	remoteName  string
+	description string
+	parameters  map[string]any
+	timeout     time.Duration
+	session     session
+}
+
+type RemoteTool struct {
+	tools.Base
+
+	localName   string
+	serverName  string
+	remoteName  string
+	description string
+	parameters  map[string]any
+	timeout     time.Duration
+	session     session
+}
+
+func NewManager(servers map[string]config.MCPServerConfig) *Manager {
+	cloned := make(map[string]config.MCPServerConfig, len(servers))
+	for name, server := range servers {
+		cloned[name] = server
 	}
-	if c.APIBase != "https://api.example.com" {
-		t.Errorf("expected APIBase='https://api.example.com', got %q", c.APIBase)
-	}
-	if c.APIKey != "my-key" {
-		t.Errorf("expected APIKey='my-key', got %q", c.APIKey)
-	}
-	if c.HTTP == nil {
-		t.Error("expected non-nil HTTP client")
+	return &Manager{
+		servers:  cloned,
+		connect:  connectSession,
+		sessions: map[string]session{},
 	}
 }
 
-func TestChat_Success(t *testing.T) {
-	response := ChatCompletionResponse{
-		Choices: []struct {
-			Message struct {
-				Role      string    `json:"role"`
-				Content   any       `json:"content"`
-				ToolCalls []ToolCall `json:"tool_calls"`
-			} `json:"message"`
-		}{
-			{
-				Message: struct {
-					Role      string    `json:"role"`
-					Content   any       `json:"content"`
-					ToolCalls []ToolCall `json:"tool_calls"`
-				}{
-					Role:    "assistant",
-					Content: "Hello! How can I help?",
-				},
-			},
-		},
+func (m *Manager) SetLogger(logf func(string, ...any)) {
+	if m == nil {
+		return
+	}
+	m.logf = logf
+}
+
+func (m *Manager) ToolNames() []string {
+	if m == nil {
+		return nil
+	}
+	out := make([]string, 0, len(m.tools))
+	for _, spec := range m.tools {
+		out = append(out, spec.localName)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (m *Manager) Connect(ctx context.Context) error {
+	if m == nil {
+		return nil
+	}
+	if len(m.tools) > 0 || len(m.sessions) > 0 {
+		return nil
 	}
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" {
-			t.Errorf("expected POST, got %s", r.Method)
+	usedLocalNames := map[string]string{}
+	for _, name := range enabledServerNames(m.servers) {
+		cfg := m.servers[name]
+		sess, err := m.connect(ctx, name, cfg)
+		if err != nil {
+			m.logFailure(name, "connect failed", err)
+			continue
 		}
-		if r.Header.Get("Content-Type") != "application/json" {
-			t.Errorf("expected Content-Type application/json")
+
+		remoteTools, err := listTools(ctx, sess, cfg)
+		if err != nil {
+			_ = sess.Close()
+			m.logFailure(name, "tool discovery failed", err)
+			continue
 		}
-		if r.Header.Get("Authorization") != "Bearer test-key" {
-			t.Errorf("expected Authorization header, got %q", r.Header.Get("Authorization"))
+		remoteTools = filterRemoteTools(name, remoteTools, m.logfSafe)
+		sort.Slice(remoteTools, func(i, j int) bool {
+			return strings.ToLower(remoteTools[i].Name) < strings.ToLower(remoteTools[j].Name)
+		})
+
+		added := 0
+		for _, remote := range remoteTools {
+			spec := newRemoteToolSpec(name, cfg, remote, sess)
+			if previous, ok := usedLocalNames[spec.localName]; ok {
+				m.logfSafe("mcp tool skipped: duplicate local name=%s remote=%s/%s previous=%s", spec.localName, name, remote.Name, previous)
+				continue
+			}
+			usedLocalNames[spec.localName] = previousToolLabel(name, remote.Name)
+			m.tools = append(m.tools, spec)
+			added++
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
-	}))
-	defer srv.Close()
 
-	c := &Client{
-		APIBase: srv.URL,
-		APIKey:  "test-key",
-		HTTP:    srv.Client(),
+		m.sessions[name] = sess
+		m.logfSafe("mcp server connected: name=%s transport=%s tools=%d", name, cfg.Transport, added)
 	}
-
-	req := ChatCompletionRequest{
-		Model: "gpt-4",
-		Messages: []ChatMessage{
-			{Role: "user", Content: "hello"},
-		},
-	}
-
-	resp, err := c.Chat(context.Background(), req)
-	if err != nil {
-		t.Fatalf("Chat: %v", err)
-	}
-	if len(resp.Choices) != 1 {
-		t.Fatalf("expected 1 choice, got %d", len(resp.Choices))
-	}
-	if resp.Choices[0].Message.Role != "assistant" {
-		t.Errorf("expected role 'assistant', got %q", resp.Choices[0].Message.Role)
-	}
+	return nil
 }
 
-func TestChat_HTTPError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
-		fmt.Fprint(w, "unauthorized")
-	}))
-	defer srv.Close()
-
-	c := &Client{
-		APIBase: srv.URL,
-		APIKey:  "bad-key",
-		HTTP:    srv.Client(),
+func (m *Manager) RegisterTools(reg *tools.Registry) int {
+	if m == nil || reg == nil {
+		return 0
 	}
-
-	_, err := c.Chat(context.Background(), ChatCompletionRequest{})
-	if err == nil {
-		t.Fatal("expected error for HTTP error")
+	for _, spec := range m.tools {
+		reg.Register(spec.Tool())
 	}
+	return len(m.tools)
 }
 
-func TestChat_InvalidJSON(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, "not json")
-	}))
-	defer srv.Close()
-
-	c := &Client{
-		APIBase: srv.URL,
-		HTTP:    srv.Client(),
+func (m *Manager) Close() error {
+	if m == nil {
+		return nil
 	}
-
-	_, err := c.Chat(context.Background(), ChatCompletionRequest{})
-	if err == nil {
-		t.Fatal("expected error for invalid JSON")
-	}
-}
-
-func TestChat_NoAPIKey(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Should not have Authorization header
-		if r.Header.Get("Authorization") != "" {
-			t.Errorf("expected no Authorization header, got %q", r.Header.Get("Authorization"))
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(ChatCompletionResponse{})
-	}))
-	defer srv.Close()
-
-	c := &Client{
-		APIBase: srv.URL,
-		APIKey:  "", // empty
-		HTTP:    srv.Client(),
-	}
-
-	c.Chat(context.Background(), ChatCompletionRequest{})
-}
-
-func TestChat_WithToolCalls(t *testing.T) {
-	response := ChatCompletionResponse{
-		Choices: []struct {
-			Message struct {
-				Role      string    `json:"role"`
-				Content   any       `json:"content"`
-				ToolCalls []ToolCall `json:"tool_calls"`
-			} `json:"message"`
-		}{
-			{
-				Message: struct {
-					Role      string    `json:"role"`
-					Content   any       `json:"content"`
-					ToolCalls []ToolCall `json:"tool_calls"`
-				}{
-					Role: "assistant",
-					ToolCalls: []ToolCall{
-						{
-							ID:   "call_123",
-							Type: "function",
-							Function: struct {
-								Name      string `json:"name"`
-								Arguments string `json:"arguments"`
-							}{
-								Name:      "exec",
-								Arguments: `{"command":"echo hi"}`,
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
-	}))
-	defer srv.Close()
-
-	c := &Client{APIBase: srv.URL, HTTP: srv.Client()}
-	resp, err := c.Chat(context.Background(), ChatCompletionRequest{})
-	if err != nil {
-		t.Fatalf("Chat: %v", err)
-	}
-	if len(resp.Choices[0].Message.ToolCalls) != 1 {
-		t.Errorf("expected 1 tool call, got %d", len(resp.Choices[0].Message.ToolCalls))
-	}
-	if resp.Choices[0].Message.ToolCalls[0].Function.Name != "exec" {
-		t.Errorf("expected tool name 'exec', got %q", resp.Choices[0].Message.ToolCalls[0].Function.Name)
-	}
-}
-
-func TestEmbed_Success(t *testing.T) {
-	embedding := []float32{0.1, 0.2, 0.3, 0.4}
-	response := EmbeddingResponse{
-		Data: []struct {
-			Embedding []float32 `json:"embedding"`
-		}{
-			{Embedding: embedding},
-		},
-	}
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" {
-			t.Errorf("expected POST, got %s", r.Method)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
-	}))
-	defer srv.Close()
-
-	c := &Client{APIBase: srv.URL, HTTP: srv.Client()}
-	vec, err := c.Embed(context.Background(), "text-embedding-3-small", "hello world")
-	if err != nil {
-		t.Fatalf("Embed: %v", err)
-	}
-	if len(vec) != len(embedding) {
-		t.Fatalf("expected %d elements, got %d", len(embedding), len(vec))
-	}
-	for i, v := range embedding {
-		if vec[i] != v {
-			t.Errorf("vec[%d] = %v, want %v", i, vec[i], v)
+	var errs []error
+	for name, sess := range m.sessions {
+		if err := sess.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
 		}
 	}
+	m.sessions = map[string]session{}
+	m.tools = nil
+	return errors.Join(errs...)
 }
 
-func TestEmbed_HTTPError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprint(w, "server error")
-	}))
-	defer srv.Close()
+func (m *Manager) logFailure(name, prefix string, err error) {
+	if m == nil || m.logf == nil || err == nil {
+		return
+	}
+	msg := strings.TrimSpace(err.Error())
+	if len(msg) > 240 {
+		msg = msg[:240] + "...[truncated]"
+	}
+	m.logf("mcp server unavailable: name=%s %s err=%s", name, prefix, msg)
+}
 
-	c := &Client{APIBase: srv.URL, HTTP: srv.Client()}
-	_, err := c.Embed(context.Background(), "model", "text")
-	if err == nil {
-		t.Fatal("expected error for HTTP error")
+func (m *Manager) logfSafe(format string, args ...any) {
+	if m == nil || m.logf == nil {
+		return
+	}
+	m.logf(format, args...)
+}
+
+func (s remoteToolSpec) Tool() tools.Tool {
+	return &RemoteTool{
+		localName:   s.localName,
+		serverName:  s.serverName,
+		remoteName:  s.remoteName,
+		description: s.description,
+		parameters:  cloneAnyMap(s.parameters),
+		timeout:     s.timeout,
+		session:     s.session,
 	}
 }
 
-func TestEmbed_InvalidJSON(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, "not json")
-	}))
-	defer srv.Close()
+func (t *RemoteTool) Name() string { return t.localName }
 
-	c := &Client{APIBase: srv.URL, HTTP: srv.Client()}
-	_, err := c.Embed(context.Background(), "model", "text")
-	if err == nil {
-		t.Fatal("expected error for invalid JSON")
+func (t *RemoteTool) Description() string {
+	if strings.TrimSpace(t.description) != "" {
+		return t.description
 	}
+	return fmt.Sprintf("MCP tool %s from server %s.", t.remoteName, t.serverName)
 }
 
-func TestEmbed_NoData(t *testing.T) {
-	response := EmbeddingResponse{Data: []struct {
-		Embedding []float32 `json:"embedding"`
-	}{}}
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
-	}))
-	defer srv.Close()
-
-	c := &Client{APIBase: srv.URL, HTTP: srv.Client()}
-	_, err := c.Embed(context.Background(), "model", "text")
-	if err == nil {
-		t.Fatal("expected error when no embedding data returned")
-	}
+func (t *RemoteTool) Parameters() map[string]any {
+	return cloneAnyMap(t.parameters)
 }
 
-func TestChat_ContextCanceled(t *testing.T) {
-	done := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Block until test signals done or timeout
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-		}
-	}))
+func (t *RemoteTool) Schema() map[string]any {
+	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
+}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+func (t *RemoteTool) Execute(ctx context.Context, params map[string]any) (string, error) {
+	if t.session == nil {
+		return "", fmt.Errorf("mcp %s/%s: session not connected", t.serverName, t.remoteName)
+	}
+
+	callCtx := ctx
+	cancel := func() {}
+	if t.timeout > 0 {
+		callCtx, cancel = context.WithTimeout(ctx, t.timeout)
+	}
 	defer cancel()
 
-	c := &Client{APIBase: srv.URL, HTTP: &http.Client{Timeout: 200 * time.Millisecond}}
-	_, err := c.Chat(ctx, ChatCompletionRequest{})
+	res, err := t.session.CallTool(callCtx, &sdkmcp.CallToolParams{
+		Name:      t.remoteName,
+		Arguments: cloneAnyMap(params),
+	})
+	if err != nil {
+		return "", fmt.Errorf("mcp %s/%s: %w", t.serverName, t.remoteName, err)
+	}
 
-	close(done) // unblock server handlers
-	srv.Close()
+	text := resultToText(res, maxResultChars)
+	if res != nil && res.IsError {
+		if strings.TrimSpace(text) == "" {
+			text = "remote tool reported error"
+		}
+		return "", fmt.Errorf("mcp %s/%s: %s", t.serverName, t.remoteName, text)
+	}
+	return text, nil
+}
 
-	if err == nil {
-		t.Fatal("expected error for canceled context")
+func connectSession(ctx context.Context, _ string, cfg config.MCPServerConfig) (session, error) {
+	transport, err := buildTransport(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	client := sdkmcp.NewClient(&sdkmcp.Implementation{Name: "or3-intern", Version: "v1"}, nil)
+	connectCtx := ctx
+	cancel := func() {}
+	if cfg.ConnectTimeoutSeconds > 0 {
+		connectCtx, cancel = context.WithTimeout(ctx, time.Duration(cfg.ConnectTimeoutSeconds)*time.Second)
+	}
+	defer cancel()
+
+	return client.Connect(connectCtx, transport, nil)
+}
+
+func buildTransport(cfg config.MCPServerConfig) (sdkmcp.Transport, error) {
+	switch cfg.Transport {
+	case "stdio":
+		cmd := exec.Command(cfg.Command, cfg.Args...)
+		cmd.Env = mergeEnv(os.Environ(), cfg.Env)
+		return &sdkmcp.CommandTransport{Command: cmd}, nil
+	case "sse":
+		return &sdkmcp.SSEClientTransport{
+			Endpoint:   cfg.URL,
+			HTTPClient: buildHTTPClient(cfg),
+		}, nil
+	case "streamablehttp":
+		return &sdkmcp.StreamableClientTransport{
+			Endpoint:   cfg.URL,
+			HTTPClient: buildHTTPClient(cfg),
+			MaxRetries: -1,
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported MCP transport: %s", cfg.Transport)
 	}
 }
 
-func TestEmbed_WithAPIKey(t *testing.T) {
-	var gotAuth string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth = r.Header.Get("Authorization")
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(EmbeddingResponse{
-			Data: []struct {
-				Embedding []float32 `json:"embedding"`
-			}{{Embedding: []float32{0.1}}},
-		})
-	}))
-	defer srv.Close()
-
-	c := &Client{APIBase: srv.URL, APIKey: "my-embed-key", HTTP: srv.Client()}
-	c.Embed(context.Background(), "model", "text")
-
-	if gotAuth != "Bearer my-embed-key" {
-		t.Errorf("expected 'Bearer my-embed-key', got %q", gotAuth)
+func buildHTTPClient(cfg config.MCPServerConfig) *http.Client {
+	timeout := time.Duration(cfg.ConnectTimeoutSeconds) * time.Second
+	base := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: timeout, KeepAlive: 30 * time.Second}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          10,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   timeout,
+		ResponseHeaderTimeout: timeout,
+		ExpectContinueTimeout: time.Second,
 	}
+	return &http.Client{
+		Transport: &headerRoundTripper{base: base, headers: cfg.Headers},
+	}
+}
+
+func listTools(ctx context.Context, sess session, cfg config.MCPServerConfig) ([]*sdkmcp.Tool, error) {
+	var out []*sdkmcp.Tool
+	var cursor string
+	for {
+		reqCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.ConnectTimeoutSeconds)*time.Second)
+		res, err := sess.ListTools(reqCtx, &sdkmcp.ListToolsParams{Cursor: cursor})
+		cancel()
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, res.Tools...)
+		cursor = strings.TrimSpace(res.NextCursor)
+		if cursor == "" {
+			break
+		}
+	}
+	return out, nil
+}
+
+func enabledServerNames(servers map[string]config.MCPServerConfig) []string {
+	names := make([]string, 0, len(servers))
+	for name, server := range servers {
+		if server.Enabled {
+			names = append(names, name)
+		}
+	}
+	sort.Slice(names, func(i, j int) bool {
+		return strings.ToLower(names[i]) < strings.ToLower(names[j])
+	})
+	return names
+}
+
+func newRemoteToolSpec(serverName string, cfg config.MCPServerConfig, remote *sdkmcp.Tool, sess session) remoteToolSpec {
+	remoteName := ""
+	description := ""
+	var inputSchema any
+	if remote != nil {
+		remoteName = strings.TrimSpace(remote.Name)
+		description = strings.TrimSpace(remote.Description)
+		inputSchema = remote.InputSchema
+	}
+	return remoteToolSpec{
+		localName:   localToolName(serverName, remoteName),
+		serverName:  serverName,
+		remoteName:  remoteName,
+		description: description,
+		parameters:  normalizeSchema(inputSchema),
+		timeout:     time.Duration(cfg.ToolTimeoutSeconds) * time.Second,
+		session:     sess,
+	}
+}
+
+func filterRemoteTools(serverName string, remoteTools []*sdkmcp.Tool, logf func(string, ...any)) []*sdkmcp.Tool {
+	filtered := make([]*sdkmcp.Tool, 0, len(remoteTools))
+	for index, remote := range remoteTools {
+		if remote == nil {
+			if logf != nil {
+				logf("mcp tool skipped: malformed entry server=%s index=%d reason=nil", serverName, index)
+			}
+			continue
+		}
+		if strings.TrimSpace(remote.Name) == "" {
+			if logf != nil {
+				logf("mcp tool skipped: malformed entry server=%s index=%d reason=missing-name", serverName, index)
+			}
+			continue
+		}
+		filtered = append(filtered, remote)
+	}
+	return filtered
+}
+
+func localToolName(serverName, remoteName string) string {
+	return "mcp_" + sanitizeName(serverName) + "_" + sanitizeName(remoteName)
+}
+
+func sanitizeName(raw string) string {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	if raw == "" {
+		return "unnamed"
+	}
+	var b strings.Builder
+	lastUnderscore := false
+	for _, r := range raw {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastUnderscore = false
+			continue
+		}
+		if !lastUnderscore {
+			b.WriteByte('_')
+			lastUnderscore = true
+		}
+	}
+	out := strings.Trim(b.String(), "_")
+	if out == "" {
+		return "unnamed"
+	}
+	return out
+}
+
+func normalizeSchema(schema any) map[string]any {
+	if schema == nil {
+		return defaultParameters()
+	}
+	if m, ok := schema.(map[string]any); ok && len(m) > 0 {
+		return cloneAnyMap(m)
+	}
+	b, err := json.Marshal(schema)
+	if err != nil {
+		return defaultParameters()
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil || len(m) == 0 {
+		return defaultParameters()
+	}
+	return m
+}
+
+func resultToText(res *sdkmcp.CallToolResult, limit int) string {
+	if res == nil {
+		return ""
+	}
+	var parts []string
+	for _, content := range res.Content {
+		if part := contentToText(content, limit); strings.TrimSpace(part) != "" {
+			parts = append(parts, part)
+		}
+	}
+	if structured := structuredToText(res.StructuredContent); structured != "" {
+		if len(parts) == 0 || strings.TrimSpace(parts[len(parts)-1]) != strings.TrimSpace(structured) {
+			parts = append(parts, structured)
+		}
+	}
+	return truncateResult(strings.Join(parts, "\n\n"), limit)
+}
+
+func structuredToText(v any) string {
+	if v == nil {
+		return ""
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+func contentToText(content sdkmcp.Content, limit int) string {
+	switch block := content.(type) {
+	case *sdkmcp.TextContent:
+		return truncateResult(block.Text, limit)
+	case *sdkmcp.ImageContent:
+		return fmt.Sprintf("[image content omitted mime=%s bytes=%d]", block.MIMEType, len(block.Data))
+	case *sdkmcp.AudioContent:
+		return fmt.Sprintf("[audio content omitted mime=%s bytes=%d]", block.MIMEType, len(block.Data))
+	case *sdkmcp.ResourceLink:
+		return fmt.Sprintf("[resource link uri=%s name=%s]", block.URI, strings.TrimSpace(block.Name))
+	case *sdkmcp.EmbeddedResource:
+		if block.Resource == nil {
+			return "[embedded resource omitted]"
+		}
+		if strings.TrimSpace(block.Resource.Text) != "" {
+			return truncateResult(block.Resource.Text, limit)
+		}
+		if len(block.Resource.Blob) > 0 {
+			return fmt.Sprintf("[embedded resource omitted uri=%s mime=%s bytes=%d]", block.Resource.URI, block.Resource.MIMEType, len(block.Resource.Blob))
+		}
+		return fmt.Sprintf("[embedded resource uri=%s]", block.Resource.URI)
+	default:
+		b, err := json.Marshal(content)
+		if err != nil {
+			return fmt.Sprintf("[unsupported MCP content %T]", content)
+		}
+		return truncateResult(string(b), limit)
+	}
+}
+
+func truncateResult(text string, limit int) string {
+	text = strings.TrimSpace(text)
+	if limit <= 0 || len(text) <= limit {
+		return text
+	}
+	return strings.TrimSpace(text[:limit]) + "...[truncated]"
+}
+
+func cloneAnyMap(in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return map[string]any{}
+	}
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func defaultParameters() map[string]any {
+	return map[string]any{
+		"type":       "object",
+		"properties": map[string]any{},
+	}
+}
+
+func mergeEnv(base []string, overrides map[string]string) []string {
+	merged := make(map[string]string, len(base)+len(overrides))
+	for _, raw := range base {
+		key, value, ok := strings.Cut(raw, "=")
+		if !ok || strings.TrimSpace(key) == "" {
+			continue
+		}
+		merged[key] = value
+	}
+	for key, value := range overrides {
+		if strings.TrimSpace(key) == "" {
+			continue
+		}
+		merged[key] = value
+	}
+	if len(merged) == 0 {
+		return []string{}
+	}
+	keys := make([]string, 0, len(merged))
+	for key := range merged {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, key+"="+merged[key])
+	}
+	return out
+}
+
+func previousToolLabel(serverName, remoteName string) string {
+	return serverName + "/" + remoteName
+}
+
+type headerRoundTripper struct {
+	base    http.RoundTripper
+	headers map[string]string
+}
+
+func (rt *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	base := rt.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	cloned := req.Clone(req.Context())
+	for key, value := range rt.headers {
+		cloned.Header.Set(key, value)
+	}
+	return base.RoundTrip(cloned)
 }
 ````
 
@@ -2841,307 +3096,6 @@ const (
 func IsGlobalScopeRequest(v string) bool {
 	v = strings.TrimSpace(v)
 	return strings.EqualFold(v, GlobalScopeAlias) || v == GlobalMemoryScope
-}
-````
-
-## File: internal/tools/cron_test.go
-````go
-package tools
-
-import (
-	"context"
-	"errors"
-	"path/filepath"
-	"strings"
-	"testing"
-	"time"
-
-	"or3-intern/internal/cron"
-)
-
-func makeTestCronService(t *testing.T) *cron.Service {
-	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "cron.json")
-	svc := cron.New(path, func(ctx context.Context, job cron.CronJob) error {
-		return nil
-	})
-	if err := svc.Start(); err != nil {
-		t.Fatalf("cron.Start: %v", err)
-	}
-	t.Cleanup(func() { svc.Stop() })
-	return svc
-}
-
-func TestCronTool_NoService(t *testing.T) {
-	tool := &CronTool{}
-	_, err := tool.Execute(context.Background(), map[string]any{"action": "list"})
-	if err == nil {
-		t.Fatal("expected error when service is nil")
-	}
-}
-
-func TestCronTool_UnknownAction(t *testing.T) {
-	svc := makeTestCronService(t)
-	tool := &CronTool{Svc: svc}
-	_, err := tool.Execute(context.Background(), map[string]any{"action": "invalid"})
-	if err == nil {
-		t.Fatal("expected error for unknown action")
-	}
-	if !strings.Contains(err.Error(), "unknown action") {
-		t.Errorf("expected 'unknown action', got %q", err.Error())
-	}
-}
-
-func TestCronTool_Status(t *testing.T) {
-	svc := makeTestCronService(t)
-	tool := &CronTool{Svc: svc}
-	out, err := tool.Execute(context.Background(), map[string]any{"action": "status"})
-	if err != nil {
-		t.Fatalf("CronTool status: %v", err)
-	}
-	if !strings.Contains(out, "jobs") {
-		t.Errorf("expected 'jobs' in status output, got %q", out)
-	}
-}
-
-func TestCronTool_List_Empty(t *testing.T) {
-	svc := makeTestCronService(t)
-	tool := &CronTool{Svc: svc}
-	out, err := tool.Execute(context.Background(), map[string]any{"action": "list"})
-	if err != nil {
-		t.Fatalf("CronTool list: %v", err)
-	}
-	if out != "null" && out != "[]" {
-		// Allow empty array notation
-		if !strings.Contains(out, "null") && !strings.Contains(out, "[]") {
-			t.Logf("list output: %q", out)
-		}
-	}
-}
-
-func TestCronTool_Add_And_List(t *testing.T) {
-	svc := makeTestCronService(t)
-	tool := &CronTool{Svc: svc}
-
-	// Add a job
-	out, err := tool.Execute(context.Background(), map[string]any{
-		"action": "add",
-		"job": map[string]any{
-			"name":    "test job",
-			"enabled": true,
-			"schedule": map[string]any{
-				"kind":     "cron",
-				"expr":     "0 * * * *",
-			},
-			"payload": map[string]any{
-				"kind":    "agent_turn",
-				"message": "hello",
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("CronTool add: %v", err)
-	}
-	if out != "ok" {
-		t.Errorf("expected 'ok', got %q", out)
-	}
-
-	// List should have 1 job
-	listOut, err := tool.Execute(context.Background(), map[string]any{"action": "list"})
-	if err != nil {
-		t.Fatalf("CronTool list: %v", err)
-	}
-	if !strings.Contains(listOut, "test job") {
-		t.Errorf("expected 'test job' in list output, got %q", listOut)
-	}
-}
-
-func TestCronTool_Add_MissingJob(t *testing.T) {
-	svc := makeTestCronService(t)
-	tool := &CronTool{Svc: svc}
-	_, err := tool.Execute(context.Background(), map[string]any{
-		"action": "add",
-	})
-	if err == nil {
-		t.Fatal("expected error when job is missing")
-	}
-}
-
-func TestCronTool_Add_Defaults(t *testing.T) {
-	svc := makeTestCronService(t)
-	tool := &CronTool{Svc: svc}
-
-	// Add minimal job (no enabled, no payload kind, no schedule kind)
-	out, err := tool.Execute(context.Background(), map[string]any{
-		"action": "add",
-		"job": map[string]any{
-			"name": "minimal",
-		},
-	})
-	if err != nil {
-		t.Fatalf("CronTool add minimal: %v", err)
-	}
-	if out != "ok" {
-		t.Errorf("expected 'ok', got %q", out)
-	}
-}
-
-func TestCronTool_Remove(t *testing.T) {
-	svc := makeTestCronService(t)
-	tool := &CronTool{Svc: svc}
-
-	// Add a job first
-	tool.Execute(context.Background(), map[string]any{
-		"action": "add",
-		"job": map[string]any{
-			"name": "to remove",
-		},
-	})
-
-	jobs, _ := svc.List()
-	if len(jobs) == 0 {
-		t.Fatal("expected at least one job")
-	}
-	id := jobs[0].ID
-
-	out, err := tool.Execute(context.Background(), map[string]any{
-		"action": "remove",
-		"id":     id,
-	})
-	if err != nil {
-		t.Fatalf("CronTool remove: %v", err)
-	}
-	if !strings.Contains(out, "true") {
-		t.Errorf("expected 'true' in remove output, got %q", out)
-	}
-}
-
-func TestCronTool_Remove_NotFound(t *testing.T) {
-	svc := makeTestCronService(t)
-	tool := &CronTool{Svc: svc}
-
-	out, err := tool.Execute(context.Background(), map[string]any{
-		"action": "remove",
-		"id":     "nonexistent-id",
-	})
-	if err != nil {
-		t.Fatalf("CronTool remove: %v", err)
-	}
-	if !strings.Contains(out, "false") {
-		t.Errorf("expected 'false' for not-found removal, got %q", out)
-	}
-}
-
-func TestCronTool_Run(t *testing.T) {
-	ran := false
-	dir := t.TempDir()
-	path := filepath.Join(dir, "cron.json")
-	svc := cron.New(path, func(ctx context.Context, job cron.CronJob) error {
-		ran = true
-		return nil
-	})
-	if err := svc.Start(); err != nil {
-		t.Fatalf("cron.Start: %v", err)
-	}
-	defer svc.Stop()
-
-	// Add a disabled job so it only runs via force
-	svc.Add(cron.CronJob{
-		ID:      "test-run",
-		Name:    "run test",
-		Enabled: false,
-		Schedule: cron.CronSchedule{Kind: cron.KindEvery, EveryMS: int64((time.Hour).Milliseconds())},
-		Payload:  cron.CronPayload{Kind: "agent_turn", Message: "test"},
-	})
-
-	tool := &CronTool{Svc: svc}
-	out, err := tool.Execute(context.Background(), map[string]any{
-		"action": "run",
-		"id":     "test-run",
-		"force":  true,
-	})
-	if err != nil {
-		t.Fatalf("CronTool run: %v", err)
-	}
-	if !strings.Contains(out, "true") {
-		t.Errorf("expected 'true' in run output, got %q", out)
-	}
-	if !ran {
-		t.Error("expected runner to be called")
-	}
-}
-
-func TestCronTool_Run_NotEnabled_NoForce(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "cron.json")
-	svc := cron.New(path, func(ctx context.Context, job cron.CronJob) error {
-		return nil
-	})
-	svc.Start()
-	defer svc.Stop()
-
-	svc.Add(cron.CronJob{
-		ID:      "disabled-job",
-		Enabled: false,
-		Schedule: cron.CronSchedule{Kind: cron.KindEvery, EveryMS: int64((time.Hour).Milliseconds())},
-		Payload:  cron.CronPayload{Kind: "agent_turn"},
-	})
-
-	tool := &CronTool{Svc: svc}
-	out, err := tool.Execute(context.Background(), map[string]any{
-		"action": "run",
-		"id":     "disabled-job",
-		"force":  false,
-	})
-	if err != nil {
-		t.Fatalf("CronTool run: %v", err)
-	}
-	if !strings.Contains(out, "false") {
-		t.Errorf("expected 'false' for disabled job without force, got %q", out)
-	}
-}
-
-func TestCronTool_Run_WithError(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "cron.json")
-	svc := cron.New(path, func(ctx context.Context, job cron.CronJob) error {
-		return errors.New("runner failed")
-	})
-	svc.Start()
-	defer svc.Stop()
-
-	svc.Add(cron.CronJob{
-		ID:      "err-job",
-		Enabled: true,
-		Schedule: cron.CronSchedule{Kind: cron.KindEvery, EveryMS: int64((time.Hour).Milliseconds())},
-		Payload:  cron.CronPayload{Kind: "agent_turn"},
-	})
-
-	tool := &CronTool{Svc: svc}
-	_, err := tool.Execute(context.Background(), map[string]any{
-		"action": "run",
-		"id":     "err-job",
-		"force":  true,
-	})
-	if err == nil {
-		t.Fatal("expected error when runner fails")
-	}
-}
-
-func TestCronTool_Name(t *testing.T) {
-	tool := &CronTool{}
-	if tool.Name() != "cron" {
-		t.Errorf("expected 'cron', got %q", tool.Name())
-	}
-}
-
-func TestCronTool_Schema(t *testing.T) {
-	tool := &CronTool{}
-	schema := tool.Schema()
-	if schema["type"] != "function" {
-		t.Errorf("expected 'function', got %v", schema["type"])
-	}
 }
 ````
 
@@ -3221,395 +3175,7 @@ func (t *CronTool) Execute(ctx context.Context, params map[string]any) (string, 
 }
 ````
 
-## File: internal/tools/exec_test.go
-````go
-package tools
-
-import (
-	"context"
-	"os"
-	"path/filepath"
-	"strings"
-	"testing"
-	"time"
-)
-
-func TestExecTool_BasicCommand(t *testing.T) {
-	tool := &ExecTool{Timeout: 5 * time.Second}
-	out, err := tool.Execute(context.Background(), map[string]any{
-		"command": "echo hello",
-	})
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	if !strings.Contains(out, "hello") {
-		t.Errorf("expected output to contain 'hello', got %q", out)
-	}
-}
-
-func TestExecTool_EmptyCommand(t *testing.T) {
-	tool := &ExecTool{Timeout: 5 * time.Second}
-	_, err := tool.Execute(context.Background(), map[string]any{
-		"command": "  ",
-	})
-	if err == nil {
-		t.Fatal("expected error for empty command")
-	}
-}
-
-func TestExecTool_MissingCommandParam(t *testing.T) {
-	tool := &ExecTool{Timeout: 5 * time.Second}
-	_, err := tool.Execute(context.Background(), map[string]any{})
-	if err == nil {
-		t.Fatal("expected error for missing command param")
-	}
-}
-
-func TestExecTool_BlockedPattern(t *testing.T) {
-	tool := &ExecTool{Timeout: 5 * time.Second}
-	_, err := tool.Execute(context.Background(), map[string]any{
-		"command": "rm -rf /tmp/something",
-	})
-	if err == nil {
-		t.Fatal("expected error for blocked pattern 'rm -rf'")
-	}
-	if !strings.Contains(err.Error(), "blocked") {
-		t.Errorf("expected 'blocked' in error, got %q", err.Error())
-	}
-}
-
-func TestExecTool_CustomBlockedPatterns(t *testing.T) {
-	tool := &ExecTool{
-		Timeout:         5 * time.Second,
-		BlockedPatterns: []string{"forbidden_cmd"},
-	}
-	_, err := tool.Execute(context.Background(), map[string]any{
-		"command": "forbidden_cmd arg",
-	})
-	if err == nil {
-		t.Fatal("expected error for custom blocked pattern")
-	}
-}
-
-func TestExecTool_ExitError(t *testing.T) {
-	tool := &ExecTool{Timeout: 5 * time.Second}
-	out, err := tool.Execute(context.Background(), map[string]any{
-		"command": "exit 1",
-	})
-	if err != nil {
-		t.Fatalf("Execute should not return error on exit code (got: %v)", err)
-	}
-	if !strings.Contains(out, "exit error") {
-		t.Errorf("expected 'exit error' in output for non-zero exit, got %q", out)
-	}
-}
-
-func TestExecTool_StderrOutput(t *testing.T) {
-	tool := &ExecTool{Timeout: 5 * time.Second}
-	out, err := tool.Execute(context.Background(), map[string]any{
-		"command": "echo err >&2",
-	})
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	// stderr is non-empty so output includes "stderr:"
-	if !strings.Contains(out, "stderr") {
-		t.Errorf("expected 'stderr' in output, got %q", out)
-	}
-}
-
-func TestExecTool_OutputTruncation(t *testing.T) {
-	tool := &ExecTool{
-		Timeout:        5 * time.Second,
-		OutputMaxBytes: 10,
-	}
-	out, err := tool.Execute(context.Background(), map[string]any{
-		"command": "echo " + strings.Repeat("a", 100),
-	})
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	if !strings.Contains(out, "truncated") {
-		t.Errorf("expected '[truncated]' in output, got %q", out)
-	}
-}
-
-func TestExecTool_RestrictDir_Inside(t *testing.T) {
-	dir := t.TempDir()
-	tool := &ExecTool{
-		Timeout:     5 * time.Second,
-		RestrictDir: dir,
-	}
-	out, err := tool.Execute(context.Background(), map[string]any{
-		"command": "echo ok",
-		"cwd":     dir,
-	})
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	if !strings.Contains(out, "ok") {
-		t.Errorf("expected 'ok' in output, got %q", out)
-	}
-}
-
-func TestExecTool_RestrictDir_Outside(t *testing.T) {
-	dir := t.TempDir()
-	tool := &ExecTool{
-		Timeout:     5 * time.Second,
-		RestrictDir: dir,
-	}
-	_, err := tool.Execute(context.Background(), map[string]any{
-		"command": "echo outside",
-		"cwd":     "/tmp",
-	})
-	if err == nil {
-		t.Fatal("expected error for cwd outside restrict dir")
-	}
-	if !strings.Contains(err.Error(), "outside allowed") {
-		t.Errorf("expected 'outside allowed' in error, got %q", err.Error())
-	}
-}
-
-func TestExecTool_TimeoutParam(t *testing.T) {
-	tool := &ExecTool{Timeout: 10 * time.Second}
-	out, err := tool.Execute(context.Background(), map[string]any{
-		"command":        "echo timeout_test",
-		"timeoutSeconds": float64(5),
-	})
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	if !strings.Contains(out, "timeout_test") {
-		t.Errorf("expected 'timeout_test', got %q", out)
-	}
-}
-
-func TestExecTool_WithCwd(t *testing.T) {
-	dir := t.TempDir()
-	tool := &ExecTool{Timeout: 5 * time.Second}
-	out, err := tool.Execute(context.Background(), map[string]any{
-		"command": "pwd",
-		"cwd":     dir,
-	})
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	// Output should contain the temp dir path
-	if !strings.Contains(out, filepath.Base(dir)) {
-		t.Errorf("expected cwd in output, got %q", out)
-	}
-}
-
-func TestExecTool_PathAppend(t *testing.T) {
-	dir := t.TempDir()
-	// Create a small script in the dir
-	script := filepath.Join(dir, "myscript")
-	os.WriteFile(script, []byte("#!/bin/sh\necho fromscript"), 0o755)
-
-	tool := &ExecTool{
-		Timeout:    5 * time.Second,
-		PathAppend: dir,
-	}
-	out, err := tool.Execute(context.Background(), map[string]any{
-		"command": "myscript",
-	})
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	if !strings.Contains(out, "fromscript") {
-		t.Errorf("expected 'fromscript', got %q", out)
-	}
-}
-
-func TestExecTool_Name(t *testing.T) {
-	tool := &ExecTool{}
-	if tool.Name() != "exec" {
-		t.Errorf("expected 'exec', got %q", tool.Name())
-	}
-}
-
-func TestExecTool_Description(t *testing.T) {
-	tool := &ExecTool{}
-	if tool.Description() == "" {
-		t.Error("expected non-empty description")
-	}
-}
-
-func TestExecTool_Parameters(t *testing.T) {
-	tool := &ExecTool{}
-	params := tool.Parameters()
-	if params["type"] != "object" {
-		t.Errorf("expected type 'object', got %v", params["type"])
-	}
-}
-
-func TestExecTool_Schema(t *testing.T) {
-	tool := &ExecTool{}
-	schema := tool.Schema()
-	if schema["type"] != "function" {
-		t.Errorf("expected type 'function', got %v", schema["type"])
-	}
-}
-````
-
-## File: internal/tools/skill_run_test.go
-````go
-package tools
-
-import (
-	"context"
-	"encoding/json"
-	"os"
-	"path/filepath"
-	"strings"
-	"testing"
-
-	"or3-intern/internal/skills"
-)
-
-func makeRunSkillInventory(t *testing.T, manifest string) (*skills.Inventory, string) {
-	t.Helper()
-	dir := t.TempDir()
-	// Write the skill markdown file
-	if err := os.WriteFile(filepath.Join(dir, "testskill.md"), []byte("# Test Skill\nDoes things."), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	// Write skill.json manifest
-	if manifest != "" {
-		if err := os.WriteFile(filepath.Join(dir, "skill.json"), []byte(manifest), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	inv := skills.Scan([]string{dir})
-	return &inv, dir
-}
-
-func TestRunSkillNoInventory(t *testing.T) {
-	tool := &RunSkill{}
-	_, err := tool.Execute(context.Background(), map[string]any{"skill": "any"})
-	if err == nil {
-		t.Fatal("expected error when inventory is nil")
-	}
-}
-
-func TestRunSkillNotFound(t *testing.T) {
-	inv, _ := makeRunSkillInventory(t, "")
-	tool := &RunSkill{Inventory: inv}
-	_, err := tool.Execute(context.Background(), map[string]any{"skill": "nonexistent"})
-	if err == nil {
-		t.Fatal("expected error for missing skill")
-	}
-	if !strings.Contains(err.Error(), "not found") {
-		t.Errorf("expected 'not found' in error, got %q", err.Error())
-	}
-}
-
-func TestRunSkillNoEntrypoints(t *testing.T) {
-	manifest := `{"summary":"no eps","entrypoints":[]}`
-	inv, _ := makeRunSkillInventory(t, manifest)
-	tool := &RunSkill{Inventory: inv}
-	_, err := tool.Execute(context.Background(), map[string]any{"skill": "testskill"})
-	if err == nil {
-		t.Fatal("expected error for skill with no entrypoints")
-	}
-	if !strings.Contains(err.Error(), "no declared entrypoints") {
-		t.Errorf("expected 'no declared entrypoints' in error, got %q", err.Error())
-	}
-}
-
-func TestRunSkillEntrypointNotFound(t *testing.T) {
-	manifest := buildManifest([]skills.SkillEntry{
-		{Name: "run", Command: []string{"echo", "hello"}, TimeoutSeconds: 5},
-	})
-	inv, _ := makeRunSkillInventory(t, manifest)
-	tool := &RunSkill{Inventory: inv}
-	_, err := tool.Execute(context.Background(), map[string]any{
-		"skill":      "testskill",
-		"entrypoint": "nonexistent",
-	})
-	if err == nil {
-		t.Fatal("expected error for missing entrypoint")
-	}
-	if !strings.Contains(err.Error(), "not found") {
-		t.Errorf("expected 'not found' in error, got %q", err.Error())
-	}
-}
-
-func TestRunSkillSuccess(t *testing.T) {
-	manifest := buildManifest([]skills.SkillEntry{
-		{Name: "run", Command: []string{"echo", "hello world"}, TimeoutSeconds: 5},
-	})
-	inv, _ := makeRunSkillInventory(t, manifest)
-	tool := &RunSkill{Inventory: inv}
-	out, err := tool.Execute(context.Background(), map[string]any{"skill": "testskill"})
-	if err != nil {
-		t.Fatalf("RunSkill.Execute: %v", err)
-	}
-	if !strings.Contains(out, "hello world") {
-		t.Errorf("expected 'hello world' in output, got %q", out)
-	}
-}
-
-func TestRunSkillEntrypointNamedSelection(t *testing.T) {
-	manifest := buildManifest([]skills.SkillEntry{
-		{Name: "first", Command: []string{"echo", "first-output"}, TimeoutSeconds: 5},
-		{Name: "second", Command: []string{"echo", "second-output"}, TimeoutSeconds: 5},
-	})
-	inv, _ := makeRunSkillInventory(t, manifest)
-	tool := &RunSkill{Inventory: inv}
-
-	// Select first
-	out, err := tool.Execute(context.Background(), map[string]any{
-		"skill":      "testskill",
-		"entrypoint": "first",
-	})
-	if err != nil {
-		t.Fatalf("RunSkill.Execute (first): %v", err)
-	}
-	if !strings.Contains(out, "first-output") {
-		t.Errorf("expected 'first-output', got %q", out)
-	}
-
-	// Select second
-	out, err = tool.Execute(context.Background(), map[string]any{
-		"skill":      "testskill",
-		"entrypoint": "second",
-	})
-	if err != nil {
-		t.Fatalf("RunSkill.Execute (second): %v", err)
-	}
-	if !strings.Contains(out, "second-output") {
-		t.Errorf("expected 'second-output', got %q", out)
-	}
-}
-
-func TestRunSkillName(t *testing.T) {
-	tool := &RunSkill{}
-	if tool.Name() != "run_skill" {
-		t.Errorf("expected 'run_skill', got %q", tool.Name())
-	}
-}
-
-func TestRunSkillSchema(t *testing.T) {
-	tool := &RunSkill{}
-	schema := tool.Schema()
-	if schema["type"] != "function" {
-		t.Errorf("expected schema type 'function', got %v", schema["type"])
-	}
-}
-
-// buildManifest marshals a skill manifest JSON for use in tests.
-func buildManifest(entries []skills.SkillEntry) string {
-	type manifest struct {
-		Summary     string             `json:"summary"`
-		Entrypoints []skills.SkillEntry `json:"entrypoints"`
-	}
-	b, _ := json.Marshal(manifest{Summary: "test skill", Entrypoints: entries})
-	return string(b)
-}
-````
-
-## File: internal/tools/skill_run.go
+## File: internal/tools/skill_exec.go
 ````go
 package tools
 
@@ -3626,408 +3192,200 @@ import (
 	"or3-intern/internal/skills"
 )
 
-// RunSkill executes a declared entrypoint from a skill manifest.
-// It does NOT accept arbitrary command strings; it only runs
-// manifest-declared argv, preventing shell injection.
-type RunSkill struct {
+type RunSkillScript struct {
 	Base
 	Inventory      *skills.Inventory
-	DefaultTimeout time.Duration
-	RestrictDir    string
+	Timeout        time.Duration
 	OutputMaxBytes int
 }
 
-func (t *RunSkill) Name() string { return "run_skill" }
+func (t *RunSkillScript) Name() string { return "run_skill_script" }
 
-func (t *RunSkill) Description() string {
-	return "Execute a declared entrypoint from a skill manifest. Only entrypoints declared in skill.json are allowed; arbitrary commands are not accepted."
+func (t *RunSkillScript) Description() string {
+	return "Run a skill-local script or declared entrypoint without shell interpolation."
 }
 
-func (t *RunSkill) Parameters() map[string]any {
+func (t *RunSkillScript) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"skill": map[string]any{
-				"type":        "string",
-				"description": "Skill name from inventory",
+			"skill":      map[string]any{"type": "string", "description": "Skill name from inventory"},
+			"path":       map[string]any{"type": "string", "description": "Bundle-relative script path"},
+			"entrypoint": map[string]any{"type": "string", "description": "Named skill.json entrypoint"},
+			"args": map[string]any{
+				"type":        "array",
+				"items":       map[string]any{"type": "string"},
+				"description": "Optional argument list",
 			},
-			"entrypoint": map[string]any{
-				"type":        "string",
-				"description": "Entrypoint name declared in the skill manifest (default: first entrypoint)",
-			},
-			"stdin": map[string]any{
-				"type":        "string",
-				"description": "Optional stdin input (only if entrypoint declares acceptsStdin: true)",
-			},
+			"stdin":          map[string]any{"type": "string", "description": "Optional stdin text"},
+			"timeoutSeconds": map[string]any{"type": "integer", "description": "Optional timeout override"},
 		},
 		"required": []string{"skill"},
 	}
 }
 
-func (t *RunSkill) Schema() map[string]any {
+func (t *RunSkillScript) Schema() map[string]any {
 	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
 }
 
-func (t *RunSkill) Execute(ctx context.Context, params map[string]any) (string, error) {
+func (t *RunSkillScript) Execute(ctx context.Context, params map[string]any) (string, error) {
 	if t.Inventory == nil {
 		return "", fmt.Errorf("skills inventory not configured")
 	}
 	skillName := strings.TrimSpace(fmt.Sprint(params["skill"]))
 	if skillName == "" {
-		return "", fmt.Errorf("missing skill name")
+		return "", fmt.Errorf("missing skill")
 	}
-	meta, ok := t.Inventory.Get(skillName)
+	skill, ok := t.Inventory.Get(skillName)
 	if !ok {
 		return "", fmt.Errorf("skill not found: %s", skillName)
 	}
-	if len(meta.Entrypoints) == 0 {
-		return "", fmt.Errorf("skill %q has no declared entrypoints", skillName)
-	}
 
-	// select entrypoint
-	epName := ""
-	if v, ok := params["entrypoint"]; ok && v != nil {
-		epName = strings.TrimSpace(fmt.Sprint(v))
+	cmd, err := t.commandForSkill(skill, params)
+	if err != nil {
+		return "", err
 	}
-	var ep *skills.SkillEntry
-	if epName == "" {
-		ep = &meta.Entrypoints[0]
-	} else {
-		for i := range meta.Entrypoints {
-			if meta.Entrypoints[i].Name == epName {
-				ep = &meta.Entrypoints[i]
-				break
-			}
-		}
-	}
-	if ep == nil {
-		return "", fmt.Errorf("entrypoint %q not found in skill %q", epName, skillName)
-	}
-	if len(ep.Command) == 0 {
-		return "", fmt.Errorf("entrypoint %q has empty command", ep.Name)
-	}
-
-	// validate all command parts are non-empty (no shell expansion)
-	for _, part := range ep.Command {
-		if strings.TrimSpace(part) == "" {
-			return "", fmt.Errorf("entrypoint command contains empty part")
-		}
-	}
-
-	// working directory: skill's directory, verified to be inside RestrictDir if set
-	cwd := filepath.Dir(meta.Path)
-	if t.RestrictDir != "" {
-		absRestrict, _ := filepath.Abs(t.RestrictDir)
-		absCwd, _ := filepath.Abs(cwd)
-		rel, err := filepath.Rel(absRestrict, absCwd)
-		if err != nil || strings.HasPrefix(rel, "..") {
-			return "", fmt.Errorf("skill directory outside allowed path")
-		}
-	}
-
-	// resolve timeout
-	timeout := t.DefaultTimeout
-	if ep.TimeoutSeconds > 0 {
-		timeout = time.Duration(ep.TimeoutSeconds) * time.Second
-	}
+	timeout := t.Timeout
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-
-	cctx, cancel := context.WithTimeout(ctx, timeout)
+	if v, ok := params["timeoutSeconds"].(float64); ok && v > 0 {
+		timeout = time.Duration(int(v)) * time.Second
+	}
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// Direct argv execution - no shell
-	cmd := exec.CommandContext(cctx, ep.Command[0], ep.Command[1:]...)
-	cmd.Dir = cwd
-	cmd.Env = os.Environ()
-
-	// stdin
-	stdinText := ""
-	if ep.AcceptsStdin {
-		if v, ok := params["stdin"].(string); ok {
-			stdinText = v
-		}
+	command := exec.CommandContext(runCtx, cmd[0], cmd[1:]...)
+	command.Dir = skill.Dir
+	command.Env = mergeEnv(os.Environ(), EnvFromContext(ctx))
+	if stdin := strings.TrimSpace(fmt.Sprint(params["stdin"])); stdin != "" {
+		command.Stdin = strings.NewReader(stdin)
 	}
-	if stdinText != "" {
-		cmd.Stdin = strings.NewReader(stdinText)
-	}
-
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	err = command.Run()
 
-	runErr := cmd.Run()
 	out := stdout.String()
 	er := stderr.String()
-
-	maxBytes := t.OutputMaxBytes
-	if maxBytes <= 0 {
-		maxBytes = 10000
+	max := t.OutputMaxBytes
+	if max <= 0 {
+		max = defaultExecOutputMaxBytes
 	}
-	if len(out) > maxBytes {
-		out = out[:maxBytes] + "\n...[truncated]\n"
+	if len(out) > max {
+		out = out[:max] + "\n...[truncated]\n"
 	}
-	if len(er) > maxBytes {
-		er = er[:maxBytes] + "\n...[truncated]\n"
+	if len(er) > max {
+		er = er[:max] + "\n...[truncated]\n"
 	}
-
-	if runErr != nil {
-		return fmt.Sprintf("exit error: %v\n\nstdout:\n%s\n\nstderr:\n%s", runErr, out, er), nil
+	if err != nil {
+		return fmt.Sprintf("exit error: %v\n\nstdout:\n%s\n\nstderr:\n%s", err, out, er), nil
 	}
 	if strings.TrimSpace(er) != "" {
 		return fmt.Sprintf("stdout:\n%s\n\nstderr:\n%s", out, er), nil
 	}
 	return out, nil
 }
-````
 
-## File: internal/tools/skill_test.go
-````go
-package tools
-
-import (
-	"context"
-	"os"
-	"path/filepath"
-	"strings"
-	"testing"
-
-	"or3-intern/internal/skills"
-)
-
-func makeTestSkillsInventory(t *testing.T) *skills.Inventory {
-	t.Helper()
-	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "my_skill.md"), []byte("# My Skill\nDo stuff"), 0o644)
-
-	inv := skills.Scan([]string{dir})
-	return &inv
-}
-
-func TestReadSkill_NoInventory(t *testing.T) {
-	tool := &ReadSkill{}
-	_, err := tool.Execute(context.Background(), map[string]any{"name": "any"})
-	if err == nil {
-		t.Fatal("expected error when inventory is nil")
+func (t *RunSkillScript) commandForSkill(skill skills.SkillMeta, params map[string]any) ([]string, error) {
+	entrypoint := strings.TrimSpace(fmt.Sprint(params["entrypoint"]))
+	if entrypoint == "<nil>" {
+		entrypoint = ""
 	}
-}
-
-func TestReadSkill_MissingName(t *testing.T) {
-	inv := makeTestSkillsInventory(t)
-	tool := &ReadSkill{Inventory: inv}
-	_, err := tool.Execute(context.Background(), map[string]any{"name": ""})
-	if err == nil {
-		t.Fatal("expected error for empty name")
-	}
-}
-
-func TestReadSkill_WhitespaceName(t *testing.T) {
-	inv := makeTestSkillsInventory(t)
-	tool := &ReadSkill{Inventory: inv}
-	_, err := tool.Execute(context.Background(), map[string]any{"name": "   "})
-	if err == nil {
-		t.Fatal("expected error for whitespace-only name")
-	}
-}
-
-func TestReadSkill_NotFound(t *testing.T) {
-	inv := makeTestSkillsInventory(t)
-	tool := &ReadSkill{Inventory: inv}
-	_, err := tool.Execute(context.Background(), map[string]any{"name": "nonexistent"})
-	if err == nil {
-		t.Fatal("expected error for nonexistent skill")
-	}
-	if !strings.Contains(err.Error(), "not found") {
-		t.Errorf("expected 'not found' in error, got %q", err.Error())
-	}
-}
-
-func TestReadSkill_Success(t *testing.T) {
-	inv := makeTestSkillsInventory(t)
-	tool := &ReadSkill{Inventory: inv}
-	out, err := tool.Execute(context.Background(), map[string]any{"name": "my_skill"})
-	if err != nil {
-		t.Fatalf("ReadSkill: %v", err)
-	}
-	if !strings.Contains(out, "my_skill") {
-		t.Errorf("expected skill name in output, got %q", out)
-	}
-	if !strings.Contains(out, "Do stuff") {
-		t.Errorf("expected skill body in output, got %q", out)
-	}
-}
-
-func TestReadSkill_MaxBytes(t *testing.T) {
-	dir := t.TempDir()
-	content := strings.Repeat("x", 1000)
-	os.WriteFile(filepath.Join(dir, "big_skill.md"), []byte(content), 0o644)
-	inv := skills.Scan([]string{dir})
-	tool := &ReadSkill{Inventory: &inv, MaxBytes: 100}
-
-	out, err := tool.Execute(context.Background(), map[string]any{"name": "big_skill"})
-	if err != nil {
-		t.Fatalf("ReadSkill: %v", err)
-	}
-	// The body should be truncated to 100 bytes
-	if len(out) > 200 { // allow for the "# Skill: ..." header
-		// Check that content portion is limited
-		idx := strings.Index(out, "\n\n")
-		if idx >= 0 {
-			body := out[idx+2:]
-			if len(body) > 100 {
-				t.Errorf("expected body truncated to 100 bytes, got %d", len(body))
+	if entrypoint != "" {
+		for _, candidate := range skill.Entrypoints {
+			if candidate.Name != entrypoint {
+				continue
 			}
+			cmd, err := t.entrypointCommand(skill, candidate)
+			if err != nil {
+				return nil, err
+			}
+			return append(cmd, stringArgs(params["args"])...), nil
+		}
+		return nil, fmt.Errorf("entrypoint not found: %s", entrypoint)
+	}
+
+	relPath := strings.TrimSpace(fmt.Sprint(params["path"]))
+	if relPath == "<nil>" {
+		relPath = ""
+	}
+	if relPath == "" {
+		return nil, fmt.Errorf("missing path or entrypoint")
+	}
+	resolved, err := t.Inventory.ResolveBundlePath(skill.Name, relPath)
+	if err != nil {
+		return nil, err
+	}
+	base, err := scriptCommand(resolved)
+	if err != nil {
+		return nil, err
+	}
+	return append(base, stringArgs(params["args"])...), nil
+}
+
+func (t *RunSkillScript) entrypointCommand(skill skills.SkillMeta, entry skills.SkillEntry) ([]string, error) {
+	if len(entry.Command) == 0 {
+		return nil, fmt.Errorf("entrypoint has no command: %s", entry.Name)
+	}
+	cmd := make([]string, 0, len(entry.Command))
+	for _, token := range entry.Command {
+		token = strings.ReplaceAll(token, "{baseDir}", skill.Dir)
+		cmd = append(cmd, token)
+	}
+	if len(cmd) == 0 {
+		return nil, fmt.Errorf("entrypoint has no command: %s", entry.Name)
+	}
+	if strings.HasPrefix(cmd[0], ".") || strings.Contains(cmd[0], string(filepath.Separator)) {
+		resolved, err := t.Inventory.ResolveBundlePath(skill.Name, cmd[0])
+		if err != nil {
+			return nil, err
+		}
+		cmd[0] = resolved
+	}
+	return cmd, nil
+}
+
+func scriptCommand(path string) ([]string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.IsDir() {
+		return nil, fmt.Errorf("bundle path is a directory: %s", path)
+	}
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".sh":
+		return []string{"bash", path}, nil
+	case ".py":
+		if _, err := exec.LookPath("python3"); err == nil {
+			return []string{"python3", path}, nil
+		}
+		if _, err := exec.LookPath("python"); err == nil {
+			return []string{"python", path}, nil
+		}
+		return nil, fmt.Errorf("python interpreter not found")
+	default:
+		if info.Mode()&0o111 != 0 {
+			return []string{path}, nil
+		}
+		return nil, fmt.Errorf("unsupported script type: %s", filepath.Ext(path))
+	}
+}
+
+func stringArgs(raw any) []string {
+	values, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		text := strings.TrimSpace(fmt.Sprint(value))
+		if text != "" {
+			out = append(out, text)
 		}
 	}
-}
-
-func TestReadSkill_MaxBytesParam(t *testing.T) {
-	inv := makeTestSkillsInventory(t)
-	tool := &ReadSkill{Inventory: inv}
-	out, err := tool.Execute(context.Background(), map[string]any{
-		"name":     "my_skill",
-		"maxBytes": float64(10),
-	})
-	if err != nil {
-		t.Fatalf("ReadSkill: %v", err)
-	}
-	_ = out
-}
-
-func TestReadSkill_Name(t *testing.T) {
-	tool := &ReadSkill{}
-	if tool.Name() != "read_skill" {
-		t.Errorf("expected 'read_skill', got %q", tool.Name())
-	}
-}
-
-func TestReadSkill_Schema(t *testing.T) {
-	tool := &ReadSkill{}
-	schema := tool.Schema()
-	if schema["type"] != "function" {
-		t.Errorf("expected 'function', got %v", schema["type"])
-	}
-}
-````
-
-## File: internal/tools/skill.go
-````go
-package tools
-
-import (
-	"context"
-	"fmt"
-	"strings"
-
-	"or3-intern/internal/skills"
-)
-
-type ReadSkill struct {
-	Base
-	Inventory *skills.Inventory
-	MaxBytes int
-}
-
-func (t *ReadSkill) Name() string { return "read_skill" }
-func (t *ReadSkill) Description() string {
-	return "Read the full body of a skill by name (for ClawHub-compatible SKILL.md usage)."
-}
-func (t *ReadSkill) Parameters() map[string]any {
-	return map[string]any{"type":"object","properties":map[string]any{
-		"name": map[string]any{"type":"string", "description":"Skill name from inventory"},
-		"maxBytes": map[string]any{"type":"integer", "description":"Optional max bytes"},
-	},"required":[]string{"name"}}
-}
-func (t *ReadSkill) Schema() map[string]any { return t.SchemaFor(t.Name(), t.Description(), t.Parameters()) }
-
-func (t *ReadSkill) Execute(ctx context.Context, params map[string]any) (string, error) {
-	_ = ctx
-	if t.Inventory == nil { return "", fmt.Errorf("skills inventory not configured") }
-	name := strings.TrimSpace(fmt.Sprint(params["name"]))
-	if name == "" { return "", fmt.Errorf("missing name") }
-	s, ok := t.Inventory.Get(name)
-	if !ok {
-		return "", fmt.Errorf("skill not found: %s", name)
-	}
-	maxBytes := t.MaxBytes
-	if maxBytes <= 0 { maxBytes = 200000 }
-	if v, ok := params["maxBytes"].(float64); ok && int(v) > 0 {
-		maxBytes = int(v)
-	}
-	body, err := skills.LoadBody(s.Path, maxBytes)
-	if err != nil { return "", err }
-	return fmt.Sprintf("# Skill: %s\n\n%s", s.Name, body), nil
-}
-````
-
-## File: internal/tools/spawn_test.go
-````go
-package tools
-
-import (
-	"context"
-	"errors"
-	"strings"
-	"testing"
-)
-
-type fakeSpawnManager struct {
-	req SpawnRequest
-	job SpawnJob
-	err error
-}
-
-func (f *fakeSpawnManager) Enqueue(ctx context.Context, req SpawnRequest) (SpawnJob, error) {
-	f.req = req
-	if f.err != nil {
-		return SpawnJob{}, f.err
-	}
-	if f.job.ID == "" {
-		f.job = SpawnJob{ID: "job-123", ChildSessionKey: req.ParentSessionKey + ":subagent:job-123"}
-	}
-	return f.job, nil
-}
-
-func TestSpawnSubagent_ExecuteSuccessUsesContextDefaults(t *testing.T) {
-	mgr := &fakeSpawnManager{}
-	tool := &SpawnSubagent{Manager: mgr}
-	ctx := ContextWithSession(context.Background(), "sess-1")
-	ctx = ContextWithDelivery(ctx, "cli", "user")
-	out, err := tool.Execute(ctx, map[string]any{"task": "investigate"})
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	if !strings.Contains(out, "job-123") {
-		t.Fatalf("expected output to include job id, got %q", out)
-	}
-	if mgr.req.ParentSessionKey != "sess-1" || mgr.req.Channel != "cli" || mgr.req.To != "user" || mgr.req.Task != "investigate" {
-		t.Fatalf("unexpected enqueue request: %#v", mgr.req)
-	}
-}
-
-func TestSpawnSubagent_ExecuteEmptyTask(t *testing.T) {
-	tool := &SpawnSubagent{Manager: &fakeSpawnManager{}}
-	_, err := tool.Execute(context.Background(), map[string]any{"task": "   "})
-	if err == nil {
-		t.Fatal("expected empty task error")
-	}
-}
-
-func TestSpawnSubagent_DisabledWithoutManager(t *testing.T) {
-	tool := &SpawnSubagent{}
-	_, err := tool.Execute(context.Background(), map[string]any{"task": "work"})
-	if err == nil {
-		t.Fatal("expected disabled error")
-	}
-}
-
-func TestSpawnSubagent_ExecuteManagerError(t *testing.T) {
-	tool := &SpawnSubagent{Manager: &fakeSpawnManager{err: errors.New("queue full")}}
-	_, err := tool.Execute(context.Background(), map[string]any{"task": "work"})
-	if err == nil || !strings.Contains(err.Error(), "queue full") {
-		t.Fatalf("expected propagated queue error, got %v", err)
-	}
+	return out
 }
 ````
 
@@ -4136,147 +3494,6 @@ func readOptionalString(params map[string]any, key string) string {
 }
 ````
 
-## File: internal/tools/tools_test.go
-````go
-package tools
-
-import (
-	"context"
-	"testing"
-)
-
-func TestBase_SchemaFor(t *testing.T) {
-	b := Base{}
-	schema := b.SchemaFor("my_tool", "does stuff", map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"arg": map[string]any{"type": "string"},
-		},
-	})
-	if schema["type"] != "function" {
-		t.Errorf("expected type 'function', got %v", schema["type"])
-	}
-	fn, ok := schema["function"].(map[string]any)
-	if !ok {
-		t.Fatal("expected 'function' key to be map[string]any")
-	}
-	if fn["name"] != "my_tool" {
-		t.Errorf("expected name 'my_tool', got %v", fn["name"])
-	}
-	if fn["description"] != "does stuff" {
-		t.Errorf("expected description 'does stuff', got %v", fn["description"])
-	}
-	if fn["parameters"] == nil {
-		t.Error("expected parameters to be set")
-	}
-}
-
-// --- Registry tests ---
-
-type mockTool struct {
-	Base
-	name string
-	desc string
-}
-
-func (m *mockTool) Name() string        { return m.name }
-func (m *mockTool) Description() string { return m.desc }
-func (m *mockTool) Parameters() map[string]any {
-	return map[string]any{"type": "object", "properties": map[string]any{}}
-}
-func (m *mockTool) Execute(ctx context.Context, params map[string]any) (string, error) {
-	return "mock result", nil
-}
-func (m *mockTool) Schema() map[string]any {
-	return m.SchemaFor(m.name, m.desc, m.Parameters())
-}
-
-func TestRegistry_RegisterAndGet(t *testing.T) {
-	r := NewRegistry()
-	tool := &mockTool{name: "test_tool", desc: "a test tool"}
-	r.Register(tool)
-
-	got := r.Get("test_tool")
-	if got == nil {
-		t.Fatal("expected to find registered tool")
-	}
-	if got.Name() != "test_tool" {
-		t.Errorf("expected name 'test_tool', got %q", got.Name())
-	}
-}
-
-func TestRegistry_Get_NotFound(t *testing.T) {
-	r := NewRegistry()
-	if r.Get("nonexistent") != nil {
-		t.Error("expected nil for unregistered tool")
-	}
-}
-
-func TestRegistry_Names(t *testing.T) {
-	r := NewRegistry()
-	r.Register(&mockTool{name: "tool_a", desc: ""})
-	r.Register(&mockTool{name: "tool_b", desc: ""})
-
-	names := r.Names()
-	if len(names) != 2 {
-		t.Errorf("expected 2 names, got %d", len(names))
-	}
-}
-
-func TestRegistry_Definitions(t *testing.T) {
-	r := NewRegistry()
-	r.Register(&mockTool{name: "tool_a", desc: "desc a"})
-	defs := r.Definitions()
-	if len(defs) != 1 {
-		t.Errorf("expected 1 definition, got %d", len(defs))
-	}
-}
-
-func TestRegistry_Execute_Success(t *testing.T) {
-	r := NewRegistry()
-	r.Register(&mockTool{name: "test_tool", desc: ""})
-
-	out, err := r.Execute(context.Background(), "test_tool", `{}`)
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	if out != "mock result" {
-		t.Errorf("expected 'mock result', got %q", out)
-	}
-}
-
-func TestRegistry_Execute_NotFound(t *testing.T) {
-	r := NewRegistry()
-	_, err := r.Execute(context.Background(), "missing_tool", `{}`)
-	if err == nil {
-		t.Fatal("expected error for missing tool")
-	}
-}
-
-func TestRegistry_Execute_InvalidJSON(t *testing.T) {
-	r := NewRegistry()
-	r.Register(&mockTool{name: "test_tool", desc: ""})
-
-	_, err := r.Execute(context.Background(), "test_tool", `{invalid`)
-	if err == nil {
-		t.Fatal("expected error for invalid JSON")
-	}
-}
-
-func TestRegistry_Execute_EmptyArgs(t *testing.T) {
-	r := NewRegistry()
-	r.Register(&mockTool{name: "test_tool", desc: ""})
-
-	out, err := r.Execute(context.Background(), "test_tool", "")
-	if err != nil {
-		t.Fatalf("Execute with empty args: %v", err)
-	}
-	if out != "mock result" {
-		t.Errorf("expected 'mock result', got %q", out)
-	}
-}
-````
-
 ## File: internal/tools/tools.go
 ````go
 package tools
@@ -4303,155 +3520,6 @@ func (Base) SchemaFor(name, desc string, params map[string]any) map[string]any {
 			"description": desc,
 			"parameters": params,
 		},
-	}
-}
-````
-
-## File: internal/triggers/filewatch_test.go
-````go
-package triggers
-
-import (
-	"os"
-	"path/filepath"
-	"testing"
-	"time"
-
-	"or3-intern/internal/bus"
-	"or3-intern/internal/config"
-)
-
-func newTestFileWatcher(t *testing.T, paths []string, pollSec, debounceSec int) (*FileWatcher, *bus.Bus) {
-	t.Helper()
-	b := bus.New(16)
-	cfg := config.FileWatchConfig{
-		Enabled:         true,
-		Paths:           paths,
-		PollSeconds:     pollSec,
-		DebounceSeconds: debounceSec,
-	}
-	fw := NewFileWatcher(cfg, b, "test-session")
-	return fw, b
-}
-
-func TestFileWatcherPublishesChange(t *testing.T) {
-	dir := t.TempDir()
-	filePath := filepath.Join(dir, "watched.txt")
-	if err := os.WriteFile(filePath, []byte("initial"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	b := bus.New(16)
-	cfg := config.FileWatchConfig{
-		Enabled:         true,
-		Paths:           []string{filePath},
-		PollSeconds:     1,
-		DebounceSeconds: 0,
-	}
-	fw := NewFileWatcher(cfg, b, "test-session")
-
-	// Manually do first poll to establish baseline
-	fw.poll(nil)
-
-	// Modify file
-	time.Sleep(10 * time.Millisecond) // ensure mtime difference
-	if err := os.WriteFile(filePath, []byte("changed content"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Poll again - should publish event now
-	fw.poll(nil)
-
-	select {
-	case ev := <-b.Channel():
-		if ev.Type != "file_change" {
-			t.Errorf("expected EventFileChange, got %q", ev.Type)
-		}
-		if ev.SessionKey != "test-session" {
-			t.Errorf("expected 'test-session', got %q", ev.SessionKey)
-		}
-		absPath, _ := filepath.Abs(filePath)
-		if ev.From != absPath {
-			t.Errorf("expected From=%q, got %q", absPath, ev.From)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for file change event")
-	}
-}
-
-func TestFileWatcherDebounce(t *testing.T) {
-	dir := t.TempDir()
-	filePath := filepath.Join(dir, "debounce.txt")
-	if err := os.WriteFile(filePath, []byte("v1"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	b := bus.New(16)
-	cfg := config.FileWatchConfig{
-		Enabled:         true,
-		Paths:           []string{filePath},
-		PollSeconds:     1,
-		DebounceSeconds: 60, // very large debounce window
-	}
-	fw := NewFileWatcher(cfg, b, "test-session")
-
-	// Establish baseline
-	fw.poll(nil)
-
-	// First change - should publish
-	time.Sleep(10 * time.Millisecond)
-	if err := os.WriteFile(filePath, []byte("v2"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	fw.poll(nil)
-
-	// Second change very quickly (within debounce) - should NOT publish
-	time.Sleep(10 * time.Millisecond)
-	if err := os.WriteFile(filePath, []byte("v3"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	fw.poll(nil)
-
-	// Should have exactly one event
-	count := 0
-	drain:
-	for {
-		select {
-		case <-b.Channel():
-			count++
-		default:
-			break drain
-		}
-	}
-	if count != 1 {
-		t.Errorf("expected 1 event (debounce), got %d", count)
-	}
-}
-
-func TestFileWatcherFirstObservationNoEvent(t *testing.T) {
-	dir := t.TempDir()
-	filePath := filepath.Join(dir, "baseline.txt")
-	if err := os.WriteFile(filePath, []byte("initial"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	b := bus.New(16)
-	cfg := config.FileWatchConfig{
-		Enabled:         true,
-		Paths:           []string{filePath},
-		PollSeconds:     1,
-		DebounceSeconds: 0,
-	}
-	fw := NewFileWatcher(cfg, b, "test-session")
-
-	// First poll - just baseline, no event
-	fw.poll(nil)
-
-	select {
-	case ev := <-b.Channel():
-		t.Errorf("unexpected event on first poll: %+v", ev)
-	default:
-		// correct: no event
 	}
 }
 ````
@@ -4609,145 +3677,6 @@ type TriggerMeta struct {
 }
 ````
 
-## File: internal/triggers/webhook_test.go
-````go
-package triggers
-
-import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
-	"fmt"
-	"io"
-	"net/http"
-	"net/http/httptest"
-	"strings"
-	"testing"
-	"time"
-
-	"or3-intern/internal/bus"
-	"or3-intern/internal/config"
-)
-
-func newTestWebhookServer(t *testing.T, secret string) (*WebhookServer, *bus.Bus) {
-	t.Helper()
-	b := bus.New(16)
-	cfg := config.WebhookConfig{
-		Enabled:   true,
-		Secret:    secret,
-		MaxBodyKB: 1,
-	}
-	srv := NewWebhookServer(cfg, b, "test-session")
-	return srv, b
-}
-
-func doRequest(t *testing.T, srv *WebhookServer, body string, headers map[string]string) *httptest.ResponseRecorder {
-	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(body))
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-	rw := httptest.NewRecorder()
-	srv.handle(rw, req)
-	return rw
-}
-
-func TestWebhookAuthFailure(t *testing.T) {
-	srv, _ := newTestWebhookServer(t, "mysecret")
-	rw := doRequest(t, srv, "hello", nil)
-	if rw.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401, got %d", rw.Code)
-	}
-}
-
-func TestWebhookAuthSuccess(t *testing.T) {
-	srv, b := newTestWebhookServer(t, "mysecret")
-	rw := doRequest(t, srv, "hello", map[string]string{
-		"X-Webhook-Secret": "mysecret",
-	})
-	if rw.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d: %s", rw.Code, rw.Body.String())
-	}
-	select {
-	case ev := <-b.Channel():
-		if ev.Message != "hello" {
-			t.Errorf("expected message 'hello', got %q", ev.Message)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for bus event")
-	}
-}
-
-func TestWebhookHMAC(t *testing.T) {
-	secret := "hmac-secret"
-	body := `{"event":"push"}`
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte(body))
-	sig := "sha256=" + hex.EncodeToString(mac.Sum(nil))
-
-	srv, b := newTestWebhookServer(t, secret)
-	rw := doRequest(t, srv, body, map[string]string{
-		"X-Hub-Signature-256": sig,
-	})
-	if rw.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d: %s", rw.Code, rw.Body.String())
-	}
-	select {
-	case ev := <-b.Channel():
-		if ev.Message != body {
-			t.Errorf("expected body as message, got %q", ev.Message)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for bus event")
-	}
-}
-
-func TestWebhookBodySizeLimit(t *testing.T) {
-	srv, _ := newTestWebhookServer(t, "mysecret")
-	// MaxBodyKB is 1, so generate > 1KB body
-	bigBody := strings.Repeat("x", 1025)
-	rw := doRequest(t, srv, bigBody, map[string]string{
-		"X-Webhook-Secret": "mysecret",
-	})
-	if rw.Code != http.StatusRequestEntityTooLarge {
-		t.Errorf("expected 413, got %d", rw.Code)
-	}
-}
-
-func TestWebhookPublishesToBus(t *testing.T) {
-	srv, b := newTestWebhookServer(t, "s3cr3t")
-	payload := `{"action":"test"}`
-	rw := doRequest(t, srv, payload, map[string]string{
-		"X-Webhook-Secret": "s3cr3t",
-		"X-Request-ID":     "req-123",
-	})
-	if rw.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", rw.Code)
-	}
-	resp, _ := io.ReadAll(rw.Body)
-	if string(resp) != "ok" {
-		t.Errorf("expected body 'ok', got %q", string(resp))
-	}
-	select {
-	case ev := <-b.Channel():
-		if ev.Type != "webhook" {
-			t.Errorf("expected EventWebhook, got %q", ev.Type)
-		}
-		if ev.SessionKey != "test-session" {
-			t.Errorf("expected session key 'test-session', got %q", ev.SessionKey)
-		}
-		if ev.Message != payload {
-			t.Errorf("expected message %q, got %q", payload, ev.Message)
-		}
-		if fmt.Sprint(ev.Meta["x-request-id"]) != "req-123" {
-			t.Errorf("expected x-request-id 'req-123', got %q", ev.Meta["x-request-id"])
-		}
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for bus event")
-	}
-}
-````
-
 ## File: internal/triggers/webhook.go
 ````go
 package triggers
@@ -4876,6 +3805,54 @@ func (w *WebhookServer) authenticate(r *http.Request, body []byte) bool {
 	// Fall back to simple shared secret in X-Webhook-Secret header
 	return r.Header.Get("X-Webhook-Secret") == secret
 }
+````
+
+## File: breakdown.md
+````markdown
+## Simple Architecture Breakdown (Core Layers)
+
+1. **Gateway** (The Central Hub / Control Plane)  
+   This is the single main process you run (e.g., `openclaw gateway`).  
+   - It listens for incoming messages from all your connected apps at once.  
+   - It manages sessions (so conversations stay coherent across WhatsApp → Telegram → Discord).  
+   - It handles routing: message comes in → Gateway wakes the right agent → agent thinks/acts → Gateway sends reply back through the original channel.  
+   - It also runs background stuff like heartbeats and crons.
+
+2. **Agent Runtime / Reasoning Loop** (The Brain in Action)  
+   When there's input (your message, a scheduled cron, a webhook, or a heartbeat trigger):  
+   - **Gather context** — Pulls from conversation history + persistent memory files + workspace files.  
+   - **Call the LLM** — Sends the assembled prompt to your chosen model (Claude Opus, Sonnet, etc.).  
+   - **Model decides** — Outputs normal text reply OR tool calls (e.g., "use browser to check site", "write file X", "run shell command").  
+   - **Execute tools/skills** → Loop repeats if needed (classic ReAct/agent loop: observe → think → act → repeat).  
+   - Finally streams the response back via Gateway.  
+   This loop makes it feel "smart" and capable of multi-step tasks.
+
+3. **Memory System** (What Makes It Feel Persistent)  
+   Everything is file-based (super simple, no database hassle):  
+   - Core files like `soul.md` (personality/vibe/boundaries), `identity.md` (who/what it is), `MEMORY.md` (short-term recall), `HEARTBEAT.md` (what to check periodically).  
+   - Long-term: daily logs, project folders, thematic notes in a `memory/` dir.  
+   - Agent reads these on startup/wakeup → "remembers" across restarts/sessions.  
+   - Semantic search across files for pulling relevant old info without bloating context.
+
+4. **Tools & Skills** (The Hands — What Lets It Act)  
+   - Built-in tools: browser control, file ops, shell execution, voice on macOS/iOS, Canvas UI, etc.  
+   - **Skills** — Community plugins (thousands in ClawHub marketplace). These are installable extensions (e.g., GitHub integration, semantic scraping, email summarizer, custom browser stealth).  
+   - Agent decides which skill/tool to call based on descriptions (like function calling).  
+   - Very extensible — you (or community) can write new ones in code.
+
+5. **Proactivity / Autonomy Layer** (Why It Feels "Alive")  
+   - **Heartbeat** — Agent wakes every X minutes/hours, reads `HEARTBEAT.md`, checks for pending work (new emails, calendar, mentions), acts if needed, then sleeps.  
+   - **Cron jobs** — Precise scheduled tasks (e.g., "at 3 AM scrape report and notify me").  
+   - **Multi-agent support** — Main agent can spawn sub-agents (specialized ones for research/coding/writing) that run in parallel/isolated sessions.  
+   - Triggers: messages, schedules, webhooks, file changes → agent can start working without you prompting.
+
+### Quick Summary Flow
+- You message via WhatsApp: "Summarize my emails and draft replies."  
+- Gateway receives → routes to agent session.  
+- Agent assembles context (history + MEMORY.md + email skill).  
+- LLM thinks → calls email tool + browser if needed → loops until done.  
+- Gateway sends reply + any side effects (files written, calendar events added).  
+- Later (heartbeat/cron): agent wakes independently → checks if anything new needs doing → messages you proactively.
 ````
 
 ## File: cmd/or3-intern/init.go
@@ -5177,742 +4154,778 @@ func toStr(v any) string {
 }
 ````
 
-## File: internal/agent/prompt_test.go
+## File: cmd/or3-intern/skills_cmd.go
+````go
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"log"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"or3-intern/internal/clawhub"
+	"or3-intern/internal/config"
+	"or3-intern/internal/mcp"
+	"or3-intern/internal/skills"
+)
+
+type skillsCommandDeps struct {
+	Client        *clawhub.Client
+	LoadToolNames func(context.Context, config.Config) map[string]struct{}
+	LoadInventory func(toolNames map[string]struct{}) skills.Inventory
+	Stdout        io.Writer
+	Stderr        io.Writer
+}
+
+func runSkillsCommand(ctx context.Context, cfg config.Config, bundledDir string, args []string, stdout, stderr io.Writer) error {
+	deps := skillsCommandDeps{
+		Client: newClawHubClient(cfg),
+		LoadToolNames: func(ctx context.Context, cfg config.Config) map[string]struct{} {
+			return loadAvailableToolNamesWithManager(ctx, cfg, nil)
+		},
+		LoadInventory: func(toolNames map[string]struct{}) skills.Inventory {
+			return buildSkillsInventory(cfg, bundledDir, toolNames)
+		},
+		Stdout: stdout,
+		Stderr: stderr,
+	}
+	return runSkillsCommandWithDeps(ctx, cfg, args, deps)
+}
+
+func runSkillsCommandWithDeps(ctx context.Context, cfg config.Config, args []string, deps skillsCommandDeps) error {
+	if deps.Client == nil {
+		deps.Client = newClawHubClient(cfg)
+	}
+	if deps.LoadToolNames == nil {
+		deps.LoadToolNames = func(ctx context.Context, cfg config.Config) map[string]struct{} {
+			return loadAvailableToolNamesWithManager(ctx, cfg, nil)
+		}
+	}
+	if deps.LoadInventory == nil {
+		return fmt.Errorf("skills inventory loader not configured")
+	}
+	if deps.Stdout == nil {
+		deps.Stdout = os.Stdout
+	}
+	if deps.Stderr == nil {
+		deps.Stderr = os.Stderr
+	}
+	if len(args) == 0 {
+		return fmt.Errorf("usage: or3-intern skills <list|info|check|search|install|update|remove> ...")
+	}
+
+	switch args[0] {
+	case "list":
+		fs := flag.NewFlagSet("skills list", flag.ContinueOnError)
+		fs.SetOutput(deps.Stderr)
+		eligibleOnly := fs.Bool("eligible", false, "show only eligible skills")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		inv := deps.LoadInventory(deps.LoadToolNames(ctx, cfg))
+		if len(inv.Skills) == 0 {
+			_, _ = fmt.Fprintln(deps.Stdout, "(no skills found)")
+			return nil
+		}
+		for _, skill := range inv.Skills {
+			if *eligibleOnly && !skill.Eligible {
+				continue
+			}
+			status := "eligible"
+			switch {
+			case skill.ParseError != "":
+				status = "parse-error"
+			case skill.Disabled:
+				status = "disabled"
+			case !skill.Eligible:
+				status = "ineligible"
+			case skill.Hidden:
+				status = "hidden"
+			}
+			_, _ = fmt.Fprintf(deps.Stdout, "%s\t%s\t%s\t%s\n", skill.Name, status, skill.Source, skill.Dir)
+		}
+		return nil
+	case "info":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: or3-intern skills info <name>")
+		}
+		inv := deps.LoadInventory(deps.LoadToolNames(ctx, cfg))
+		skill, ok := inv.Get(args[1])
+		if !ok {
+			return fmt.Errorf("skill not found: %s", args[1])
+		}
+		_, _ = fmt.Fprintf(deps.Stdout, "Name: %s\n", skill.Name)
+		_, _ = fmt.Fprintf(deps.Stdout, "Description: %s\n", skill.Description)
+		_, _ = fmt.Fprintf(deps.Stdout, "Source: %s\n", skill.Source)
+		_, _ = fmt.Fprintf(deps.Stdout, "Location: %s\n", skill.Dir)
+		if skill.Homepage != "" {
+			_, _ = fmt.Fprintf(deps.Stdout, "Homepage: %s\n", skill.Homepage)
+		}
+		_, _ = fmt.Fprintf(deps.Stdout, "Eligible: %t\n", skill.Eligible)
+		_, _ = fmt.Fprintf(deps.Stdout, "User Invocable: %t\n", skill.UserInvocable)
+		if skill.Hidden {
+			_, _ = fmt.Fprintln(deps.Stdout, "Model Visibility: hidden")
+		}
+		if skill.CommandDispatch != "" {
+			_, _ = fmt.Fprintf(deps.Stdout, "Command Dispatch: %s\n", skill.CommandDispatch)
+			_, _ = fmt.Fprintf(deps.Stdout, "Command Tool: %s\n", skill.CommandTool)
+			_, _ = fmt.Fprintf(deps.Stdout, "Command Arg Mode: %s\n", skill.CommandArgMode)
+		}
+		printReasons(deps.Stdout, "Missing", skill.Missing)
+		printReasons(deps.Stdout, "Unsupported", skill.Unsupported)
+		if skill.ParseError != "" {
+			_, _ = fmt.Fprintf(deps.Stdout, "Parse Error: %s\n", skill.ParseError)
+		}
+		return nil
+	case "check":
+		inv := deps.LoadInventory(deps.LoadToolNames(ctx, cfg))
+		if len(inv.Skills) == 0 {
+			_, _ = fmt.Fprintln(deps.Stdout, "(no skills found)")
+			return nil
+		}
+		for _, skill := range inv.Skills {
+			if skill.Eligible {
+				_, _ = fmt.Fprintf(deps.Stdout, "[ok] %s\n", skill.Name)
+				continue
+			}
+			reasons := append([]string{}, skill.Missing...)
+			reasons = append(reasons, skill.Unsupported...)
+			if skill.ParseError != "" {
+				reasons = append(reasons, skill.ParseError)
+			}
+			_, _ = fmt.Fprintf(deps.Stdout, "[blocked] %s: %s\n", skill.Name, strings.Join(reasons, "; "))
+		}
+		return nil
+	case "search":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: or3-intern skills search <query>")
+		}
+		results, err := deps.Client.Search(ctx, strings.Join(args[1:], " "), 10)
+		if err != nil {
+			return err
+		}
+		if len(results) == 0 {
+			_, _ = fmt.Fprintln(deps.Stdout, "(no results)")
+			return nil
+		}
+		for _, result := range results {
+			version := result.Version
+			if version == "" {
+				version = "latest"
+			}
+			_, _ = fmt.Fprintf(deps.Stdout, "%s\t%s\t%s\n", result.Slug, version, strings.TrimSpace(result.DisplayName))
+		}
+		return nil
+	case "install":
+		fs := flag.NewFlagSet("skills install", flag.ContinueOnError)
+		fs.SetOutput(deps.Stderr)
+		version := fs.String("version", "", "skill version")
+		force := fs.Bool("force", false, "overwrite local modifications")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if fs.NArg() < 1 {
+			return fmt.Errorf("usage: or3-intern skills install <slug> [--version v]")
+		}
+		result, err := deps.Client.Install(ctx, fs.Arg(0), *version, resolveInstallRoot(cfg), clawhub.InstallOptions{Force: *force})
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(deps.Stdout, "installed\t%s\t%s\t%s\n", result.Slug, result.Version, result.Path)
+		return nil
+	case "update":
+		fs := flag.NewFlagSet("skills update", flag.ContinueOnError)
+		fs.SetOutput(deps.Stderr)
+		all := fs.Bool("all", false, "update all installed skills")
+		version := fs.String("version", "", "target version")
+		force := fs.Bool("force", false, "overwrite local modifications")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		root := resolveInstallRoot(cfg)
+		installed, err := clawhub.ListInstalled(root)
+		if err != nil {
+			return err
+		}
+		targets := installed
+		if !*all {
+			if fs.NArg() < 1 {
+				return fmt.Errorf("usage: or3-intern skills update <name>|--all")
+			}
+			match, matchErr := findInstalledSkill(installed, fs.Arg(0))
+			if matchErr != nil {
+				return matchErr
+			}
+			targets = []clawhub.InstalledSkill{match}
+		}
+		if len(targets) == 0 {
+			_, _ = fmt.Fprintln(deps.Stdout, "(no installed skills)")
+			return nil
+		}
+		for _, item := range targets {
+			info, err := deps.Client.Inspect(ctx, item.Origin.Slug, *version)
+			if err != nil {
+				return err
+			}
+			targetVersion := strings.TrimSpace(*version)
+			if targetVersion == "" {
+				targetVersion = info.LatestVersion
+			}
+			if targetVersion == "" {
+				return fmt.Errorf("could not resolve latest version for %s", item.Origin.Slug)
+			}
+			if item.Origin.InstalledVersion == targetVersion {
+				_, _ = fmt.Fprintf(deps.Stdout, "up-to-date\t%s\t%s\n", item.Origin.Slug, targetVersion)
+				continue
+			}
+			if _, err := deps.Client.Install(ctx, item.Origin.Slug, targetVersion, root, clawhub.InstallOptions{Force: *force}); err != nil {
+				return err
+			}
+			_, _ = fmt.Fprintf(deps.Stdout, "updated\t%s\t%s\n", item.Origin.Slug, targetVersion)
+		}
+		return nil
+	case "remove":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: or3-intern skills remove <name>")
+		}
+		root := resolveInstallRoot(cfg)
+		installed, err := clawhub.ListInstalled(root)
+		if err != nil {
+			return err
+		}
+		match, err := findInstalledSkill(installed, args[1])
+		if err != nil {
+			return err
+		}
+		if err := clawhub.RemoveSkill(root, match.Name); err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(deps.Stdout, "removed\t%s\n", match.Name)
+		return nil
+	default:
+		return fmt.Errorf("unknown skills subcommand: %s", args[0])
+	}
+}
+
+func buildSkillsInventory(cfg config.Config, bundledDir string, toolNames map[string]struct{}) skills.Inventory {
+	return skills.ScanWithOptions(skills.LoadOptions{
+		Roots:          buildSkillRoots(cfg, bundledDir),
+		Entries:        skillEntries(cfg),
+		GlobalConfig:   configMap(cfg),
+		Env:            envMap(),
+		AvailableTools: toolNames,
+	})
+}
+
+func loadAvailableToolNames(ctx context.Context, cfg config.Config) map[string]struct{} {
+	return loadAvailableToolNamesWithManager(ctx, cfg, nil)
+}
+
+func loadAvailableToolNamesWithManager(ctx context.Context, cfg config.Config, manager *mcp.Manager) map[string]struct{} {
+	toolNames := availableToolNames(cfg.Cron.Enabled, cfg.Subagents.Enabled)
+	if len(cfg.Tools.MCPServers) == 0 {
+		return toolNames
+	}
+	if manager != nil {
+		for _, name := range manager.ToolNames() {
+			toolNames[name] = struct{}{}
+		}
+		return toolNames
+	}
+	manager = mcp.NewManager(cfg.Tools.MCPServers)
+	manager.SetLogger(log.Printf)
+	if err := manager.Connect(ctx); err != nil {
+		log.Printf("mcp setup failed: %v", err)
+		return toolNames
+	}
+	defer func() {
+		if err := manager.Close(); err != nil {
+			log.Printf("mcp close failed: %v", err)
+		}
+	}()
+	for _, name := range manager.ToolNames() {
+		toolNames[name] = struct{}{}
+	}
+	return toolNames
+}
+
+func buildSkillRoots(cfg config.Config, bundledDir string) []skills.Root {
+	var roots []skills.Root
+	for _, extra := range cfg.Skills.Load.ExtraDirs {
+		if strings.TrimSpace(extra) == "" {
+			continue
+		}
+		roots = append(roots, skills.Root{Path: extra, Source: skills.SourceExtra})
+	}
+	if strings.TrimSpace(bundledDir) != "" {
+		roots = append(roots, skills.Root{Path: bundledDir, Source: skills.SourceBundled})
+	}
+	if strings.TrimSpace(cfg.Skills.ManagedDir) != "" {
+		roots = append(roots, skills.Root{Path: cfg.Skills.ManagedDir, Source: skills.SourceManaged})
+	}
+	if strings.TrimSpace(cfg.WorkspaceDir) != "" {
+		roots = append(roots,
+			skills.Root{Path: filepath.Join(cfg.WorkspaceDir, "workspace_skills"), Source: skills.SourceExtra, Priority: 35},
+			skills.Root{Path: filepath.Join(cfg.WorkspaceDir, "skills"), Source: skills.SourceWorkspace},
+		)
+	}
+	return roots
+}
+
+func skillEntries(cfg config.Config) map[string]skills.EntryConfig {
+	out := make(map[string]skills.EntryConfig, len(cfg.Skills.Entries))
+	for key, entry := range cfg.Skills.Entries {
+		out[key] = skills.EntryConfig{
+			Enabled: entry.Enabled,
+			APIKey:  entry.APIKey,
+			Env:     entry.Env,
+			Config:  entry.Config,
+		}
+	}
+	return out
+}
+
+func configMap(cfg config.Config) map[string]any {
+	buf, _ := json.Marshal(cfg)
+	out := map[string]any{}
+	_ = json.Unmarshal(buf, &out)
+	return out
+}
+
+func envMap() map[string]string {
+	out := map[string]string{}
+	for _, raw := range os.Environ() {
+		key, value, ok := strings.Cut(raw, "=")
+		if ok {
+			out[key] = value
+		}
+	}
+	return out
+}
+
+func resolveInstallRoot(cfg config.Config) string {
+	installDir := strings.TrimSpace(cfg.Skills.ClawHub.InstallDir)
+	if installDir == "" {
+		installDir = "skills"
+	}
+	if filepath.IsAbs(installDir) {
+		return installDir
+	}
+	if strings.TrimSpace(cfg.Skills.ManagedDir) != "" {
+		return cfg.Skills.ManagedDir
+	}
+	return filepath.Join(filepath.Dir(config.DefaultPath()), installDir)
+}
+
+func availableToolNames(includeCron, includeSubagents bool) map[string]struct{} {
+	names := []string{
+		"exec",
+		"read_file",
+		"write_file",
+		"edit_file",
+		"list_dir",
+		"web_fetch",
+		"web_search",
+		"memory_set_pinned",
+		"memory_add_note",
+		"memory_search",
+		"send_message",
+		"read_skill",
+		"run_skill_script",
+	}
+	if includeCron {
+		names = append(names, "cron")
+	}
+	if includeSubagents {
+		names = append(names, "spawn_subagent")
+	}
+	sort.Strings(names)
+	out := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		out[name] = struct{}{}
+	}
+	return out
+}
+
+func newClawHubClient(cfg config.Config) *clawhub.Client {
+	return clawhub.New(cfg.Skills.ClawHub.SiteURL, cfg.Skills.ClawHub.RegistryURL)
+}
+
+func findInstalledSkill(installed []clawhub.InstalledSkill, raw string) (clawhub.InstalledSkill, error) {
+	target := strings.TrimSpace(raw)
+	for _, item := range installed {
+		if item.Name == target || item.Origin.Slug == target {
+			return item, nil
+		}
+	}
+	return clawhub.InstalledSkill{}, fmt.Errorf("installed skill not found: %s", raw)
+}
+
+func printReasons(w io.Writer, label string, values []string) {
+	if len(values) == 0 {
+		return
+	}
+	_, _ = fmt.Fprintf(w, "%s: %s\n", label, strings.Join(values, "; "))
+}
+````
+
+## File: internal/agent/subagents.go
 ````go
 package agent
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"log"
 	"strings"
-	"testing"
-
-	"or3-intern/internal/memory"
-)
-
-// TestPromptIncludesIdentity verifies that IdentityText appears in the system prompt.
-func TestPromptIncludesIdentity(t *testing.T) {
-	d := openTestDB(t)
-	b := &Builder{
-		DB:           d,
-		HistoryMax:   10,
-		IdentityText: "I am a test assistant with a unique identity.",
-	}
-	pp, _, err := b.Build(context.Background(), "sess", "hello")
-	if err != nil {
-		t.Fatalf("Build: %v", err)
-	}
-	sys := pp.System[0].Content.(string)
-	if !strings.Contains(sys, "Identity") {
-		t.Errorf("expected 'Identity' section header in system prompt, got %q", sys)
-	}
-	if !strings.Contains(sys, "unique identity") {
-		t.Errorf("expected identity text in system prompt, got %q", sys)
-	}
-}
-
-// TestPromptIncludesStaticMemory verifies that StaticMemory appears in the system prompt.
-func TestPromptIncludesStaticMemory(t *testing.T) {
-	d := openTestDB(t)
-	b := &Builder{
-		DB:           d,
-		HistoryMax:   10,
-		StaticMemory: "Remember: the answer is always 42.",
-	}
-	pp, _, err := b.Build(context.Background(), "sess", "hello")
-	if err != nil {
-		t.Fatalf("Build: %v", err)
-	}
-	sys := pp.System[0].Content.(string)
-	if !strings.Contains(sys, "Static Memory") {
-		t.Errorf("expected 'Static Memory' section header in system prompt, got %q", sys)
-	}
-	if !strings.Contains(sys, "answer is always 42") {
-		t.Errorf("expected static memory text in system prompt, got %q", sys)
-	}
-}
-
-// TestHeartbeatOnlyForAutonomous verifies that HeartbeatText only appears when Autonomous=true.
-func TestHeartbeatOnlyForAutonomous(t *testing.T) {
-	d := openTestDB(t)
-	heartbeat := "HEARTBEAT: check your tasks now."
-	b := &Builder{
-		DB:            d,
-		HistoryMax:    10,
-		HeartbeatText: heartbeat,
-	}
-
-	// Non-autonomous: heartbeat should NOT appear.
-	ppNormal, _, err := b.BuildWithOptions(context.Background(), BuildOptions{
-		SessionKey:  "sess",
-		UserMessage: "hello",
-		Autonomous:  false,
-	})
-	if err != nil {
-		t.Fatalf("BuildWithOptions (non-autonomous): %v", err)
-	}
-	sysNormal := ppNormal.System[0].Content.(string)
-	if strings.Contains(sysNormal, "Heartbeat") {
-		t.Errorf("expected NO 'Heartbeat' section for non-autonomous turn, got %q", sysNormal)
-	}
-
-	// Autonomous: heartbeat SHOULD appear.
-	ppAuto, _, err := b.BuildWithOptions(context.Background(), BuildOptions{
-		SessionKey:  "sess",
-		UserMessage: "hello",
-		Autonomous:  true,
-	})
-	if err != nil {
-		t.Fatalf("BuildWithOptions (autonomous): %v", err)
-	}
-	sysAuto := ppAuto.System[0].Content.(string)
-	if !strings.Contains(sysAuto, "Heartbeat") {
-		t.Errorf("expected 'Heartbeat' section for autonomous turn, got %q", sysAuto)
-	}
-	if !strings.Contains(sysAuto, "check your tasks now") {
-		t.Errorf("expected heartbeat text in autonomous system prompt, got %q", sysAuto)
-	}
-}
-
-// TestDocContextIncluded verifies that DocRetriever results appear in the system prompt.
-func TestDocContextIncluded(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	// Insert a doc via UpsertDoc so RetrieveDocs can find it.
-	err := memory.UpsertDoc(ctx, d, "scope1", "/docs/guide.md", "markdown", "guide.md",
-		"A guide for testing", "This document explains testing procedures in detail.", nil, "abc123", 0, 100)
-	if err != nil {
-		t.Fatalf("UpsertDoc: %v", err)
-	}
-
-	b := &Builder{
-		DB:               d,
-		HistoryMax:       10,
-		DocRetriever:     &memory.DocRetriever{DB: d},
-		DocScopeKey:      "scope1",
-		DocRetrieveLimit: 5,
-	}
-
-	pp, _, err := b.BuildWithOptions(ctx, BuildOptions{
-		SessionKey:  "sess",
-		UserMessage: "testing procedures",
-	})
-	if err != nil {
-		t.Fatalf("BuildWithOptions: %v", err)
-	}
-	sys := pp.System[0].Content.(string)
-	if !strings.Contains(sys, "Indexed File Context") {
-		t.Errorf("expected 'Indexed File Context' section in system prompt, got %q", sys)
-	}
-	if !strings.Contains(sys, "guide.md") {
-		t.Errorf("expected doc path in system prompt, got %q", sys)
-	}
-}
-
-// TestBuildWithOptions_WrapperParity verifies Build and BuildWithOptions produce identical results.
-func TestBuildWithOptions_WrapperParity(t *testing.T) {
-	d := openTestDB(t)
-	b := &Builder{DB: d, HistoryMax: 10}
-
-	pp1, ret1, err1 := b.Build(context.Background(), "s1", "msg")
-	pp2, ret2, err2 := b.BuildWithOptions(context.Background(), BuildOptions{SessionKey: "s1", UserMessage: "msg"})
-
-	if err1 != nil || err2 != nil {
-		t.Fatalf("errors: %v / %v", err1, err2)
-	}
-	if len(ret1) != len(ret2) {
-		t.Errorf("retrieved count mismatch: %d vs %d", len(ret1), len(ret2))
-	}
-	sys1 := pp1.System[0].Content.(string)
-	sys2 := pp2.System[0].Content.(string)
-	if sys1 != sys2 {
-		t.Errorf("system prompts differ:\n%q\nvs\n%q", sys1, sys2)
-	}
-}
-
-// TestIdentityAfterSoul verifies that the Identity section appears after SOUL.md.
-func TestIdentityAfterSoul(t *testing.T) {
-	d := openTestDB(t)
-	b := &Builder{
-		DB:           d,
-		HistoryMax:   10,
-		IdentityText: "MyIdentity",
-	}
-	pp, _, err := b.Build(context.Background(), "s", "hi")
-	if err != nil {
-		t.Fatalf("Build: %v", err)
-	}
-	sys := pp.System[0].Content.(string)
-	soulIdx := strings.Index(sys, "SOUL.md")
-	identIdx := strings.Index(sys, "Identity")
-	agentsIdx := strings.Index(sys, "AGENTS.md")
-	if soulIdx < 0 || identIdx < 0 || agentsIdx < 0 {
-		t.Fatalf("missing sections in: %q", sys)
-	}
-	if !(soulIdx < identIdx && identIdx < agentsIdx) {
-		t.Errorf("expected order SOUL.md < Identity < AGENTS.md, indices: %d %d %d", soulIdx, identIdx, agentsIdx)
-	}
-}
-
-// TestStaticMemoryAfterAgents verifies that the Static Memory section appears after AGENTS.md.
-func TestStaticMemoryAfterAgents(t *testing.T) {
-	d := openTestDB(t)
-	b := &Builder{
-		DB:           d,
-		HistoryMax:   10,
-		StaticMemory: "MyStaticMem",
-	}
-	pp, _, err := b.Build(context.Background(), "s", "hi")
-	if err != nil {
-		t.Fatalf("Build: %v", err)
-	}
-	sys := pp.System[0].Content.(string)
-	agentsIdx := strings.Index(sys, "AGENTS.md")
-	staticIdx := strings.Index(sys, "Static Memory")
-	toolsIdx := strings.Index(sys, "TOOLS.md")
-	if agentsIdx < 0 || staticIdx < 0 || toolsIdx < 0 {
-		t.Fatalf("missing sections in: %q", sys)
-	}
-	if !(agentsIdx < staticIdx && staticIdx < toolsIdx) {
-		t.Errorf("expected order AGENTS.md < Static Memory < TOOLS.md, indices: %d %d %d", agentsIdx, staticIdx, toolsIdx)
-	}
-}
-
-// TestEmptyOptionalSectionsOmitted verifies that empty optional sections are not rendered.
-func TestEmptyOptionalSectionsOmitted(t *testing.T) {
-	b := &Builder{}
-	pinned := "(none)"
-	retrieved := "(none)"
-	noIdentity := ""
-	noStaticMem := ""
-	noHeartbeat := ""
-	noDocContext := ""
-	got := b.composeSystemPrompt(pinned, retrieved, noIdentity, noStaticMem, noHeartbeat, noDocContext)
-	if strings.Contains(got, "Identity") {
-		t.Error("expected 'Identity' section to be omitted when IdentityText is empty")
-	}
-	if strings.Contains(got, "Static Memory") {
-		t.Error("expected 'Static Memory' section to be omitted when StaticMemory is empty")
-	}
-	if strings.Contains(got, "Heartbeat") {
-		t.Error("expected 'Heartbeat' section to be omitted when heartbeatText is empty")
-	}
-	if strings.Contains(got, "Indexed File Context") {
-		t.Error("expected 'Indexed File Context' section to be omitted when docContextText is empty")
-	}
-}
-````
-
-## File: internal/artifacts/store_test.go
-````go
-package artifacts
-
-import (
-	"context"
-	"os"
-	"path/filepath"
-	"testing"
+	"sync"
+	"time"
 
 	"or3-intern/internal/db"
+	"or3-intern/internal/tools"
 )
 
-func openTestDB(t *testing.T) *db.DB {
-	t.Helper()
-	dir := t.TempDir()
-	d, err := db.Open(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatalf("db.Open: %v", err)
-	}
-	t.Cleanup(func() { d.Close() })
-	return d
-}
-
-func TestStore_Save_OK(t *testing.T) {
-	d := openTestDB(t)
-	dir := t.TempDir()
-	ctx := context.Background()
-
-	// Create the session
-	d.EnsureSession(ctx, "sess1")
-
-	store := &Store{Dir: dir, DB: d}
-	id, err := store.Save(ctx, "sess1", "text/plain", []byte("artifact content"))
-	if err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	if id == "" {
-		t.Error("expected non-empty artifact ID")
-	}
-
-	// Check file was created
-	files, _ := os.ReadDir(dir)
-	if len(files) != 1 {
-		t.Errorf("expected 1 artifact file, got %d", len(files))
-	}
-
-	// Check content
-	content, _ := os.ReadFile(filepath.Join(dir, id))
-	if string(content) != "artifact content" {
-		t.Errorf("expected 'artifact content', got %q", string(content))
-	}
-}
-
-func TestStore_Save_NoDirSet(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	store := &Store{Dir: "", DB: d}
-	_, err := store.Save(ctx, "sess1", "text/plain", []byte("data"))
-	if err == nil {
-		t.Fatal("expected error when Dir is not set")
-	}
-}
-
-func TestStore_Save_CreatesDir(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-	d.EnsureSession(ctx, "sess1")
-
-	// Use a dir that doesn't exist yet
-	tmpDir := t.TempDir()
-	dir := filepath.Join(tmpDir, "artifacts", "subdir")
-
-	store := &Store{Dir: dir, DB: d}
-	id, err := store.Save(ctx, "sess1", "text/plain", []byte("hello"))
-	if err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	if id == "" {
-		t.Error("expected non-empty artifact ID")
-	}
-
-	// Dir should now exist
-	if _, err := os.Stat(dir); os.IsNotExist(err) {
-		t.Error("expected artifacts directory to be created")
-	}
-}
-
-func TestStore_Save_MultipleArtifacts(t *testing.T) {
-	d := openTestDB(t)
-	dir := t.TempDir()
-	ctx := context.Background()
-	d.EnsureSession(ctx, "sess")
-
-	store := &Store{Dir: dir, DB: d}
-
-	ids := map[string]bool{}
-	for i := 0; i < 5; i++ {
-		id, err := store.Save(ctx, "sess", "text/plain", []byte("data"))
-		if err != nil {
-			t.Fatalf("Save %d: %v", i, err)
-		}
-		if ids[id] {
-			t.Errorf("duplicate artifact ID: %q", id)
-		}
-		ids[id] = true
-	}
-}
-
-func TestStore_SaveNamedAndLookup(t *testing.T) {
-	d := openTestDB(t)
-	dir := t.TempDir()
-	ctx := context.Background()
-	if err := d.EnsureSession(ctx, "sess"); err != nil {
-		t.Fatalf("EnsureSession: %v", err)
-	}
-
-	store := &Store{Dir: dir, DB: d}
-	att, err := store.SaveNamed(ctx, "sess", "photo.png", "image/png", []byte("png-data"))
-	if err != nil {
-		t.Fatalf("SaveNamed: %v", err)
-	}
-	if att.ArtifactID == "" {
-		t.Fatal("expected artifact id")
-	}
-	if att.Kind != KindImage {
-		t.Fatalf("expected image kind, got %q", att.Kind)
-	}
-	if att.Filename != "photo.png" {
-		t.Fatalf("expected filename to round-trip, got %q", att.Filename)
-	}
-
-	stored, err := store.Lookup(ctx, att.ArtifactID)
-	if err != nil {
-		t.Fatalf("Lookup: %v", err)
-	}
-	if stored.Mime != "image/png" {
-		t.Fatalf("expected mime image/png, got %q", stored.Mime)
-	}
-	content, err := os.ReadFile(stored.Path)
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
-	if string(content) != "png-data" {
-		t.Fatalf("unexpected stored content: %q", string(content))
-	}
-}
-
-func TestStore_Save_CreatesSessionAutomatically(t *testing.T) {
-	d := openTestDB(t)
-	dir := t.TempDir()
-	ctx := context.Background()
-
-	store := &Store{Dir: dir, DB: d}
-	id, err := store.Save(ctx, "fresh-session", "text/plain", []byte("artifact content"))
-	if err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	if id == "" {
-		t.Fatal("expected artifact id")
-	}
-	var count int
-	if err := d.SQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions WHERE key=?`, "fresh-session").Scan(&count); err != nil {
-		t.Fatalf("QueryRowContext: %v", err)
-	}
-	if count != 1 {
-		t.Fatalf("expected session to be created, got count=%d", count)
-	}
-}
-
-func TestStore_SaveNamed_NoDirSet(t *testing.T) {
-	d := openTestDB(t)
-	store := &Store{DB: d}
-	if _, err := store.SaveNamed(context.Background(), "sess", "photo.png", "image/png", []byte("png-data")); err == nil {
-		t.Fatal("expected error when artifacts dir is not configured")
-	}
-}
-
-func TestRandID_NotEmpty(t *testing.T) {
-	id := randID()
-	if id == "" {
-		t.Error("expected non-empty random ID")
-	}
-}
-
-func TestRandID_Uniqueness(t *testing.T) {
-	ids := map[string]bool{}
-	for i := 0; i < 100; i++ {
-		id := randID()
-		if ids[id] {
-			t.Errorf("duplicate ID generated: %q", id)
-		}
-		ids[id] = true
-	}
-}
-````
-
-## File: internal/bus/bus_test.go
-````go
-package bus
-
-import (
-	"context"
-	"testing"
-	"time"
+const (
+	subagentClaimRetryDelay = 25 * time.Millisecond
+	subagentFinalizeTimeout = 5 * time.Second
 )
 
-func TestNew_DefaultBuffer(t *testing.T) {
-	b := New(0)
-	if b == nil {
-		t.Fatal("expected non-nil bus")
+type SubagentManager struct {
+	DB              *db.DB
+	Runtime         *Runtime
+	Deliver         Deliverer
+	MaxConcurrent   int
+	MaxQueued       int
+	TaskTimeout     time.Duration
+	BackgroundTools func() *tools.Registry
+
+	mu       sync.Mutex
+	started  bool
+	ctx      context.Context
+	cancel   context.CancelFunc
+	notifyCh chan struct{}
+	wg       sync.WaitGroup
+}
+
+func (m *SubagentManager) Start(ctx context.Context) error {
+	if m == nil {
+		return fmt.Errorf("subagent manager is nil")
 	}
-	// should accept at least 128 events without blocking
-	for i := 0; i < 128; i++ {
-		ok := b.Publish(Event{Type: EventUserMessage, Message: "test"})
-		if !ok {
-			t.Fatalf("expected publish to succeed at i=%d", i)
-		}
+	if m.DB == nil {
+		return fmt.Errorf("subagent db not configured")
+	}
+	if m.Runtime == nil {
+		return fmt.Errorf("subagent runtime not configured")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.started {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if m.MaxConcurrent <= 0 {
+		m.MaxConcurrent = 1
+	}
+	if m.MaxQueued <= 0 {
+		m.MaxQueued = 32
+	}
+	if m.TaskTimeout <= 0 {
+		m.TaskTimeout = 5 * time.Minute
+	}
+	running, err := m.DB.ListRunningSubagentJobs(ctx)
+	if err != nil {
+		return err
+	}
+	queued, err := m.DB.ListQueuedSubagentJobs(ctx)
+	if err != nil {
+		return err
+	}
+	m.ctx, m.cancel = context.WithCancel(ctx)
+	m.notifyCh = make(chan struct{}, m.MaxConcurrent)
+	m.started = true
+	for i := 0; i < m.MaxConcurrent; i++ {
+		m.wg.Add(1)
+		go m.workerLoop()
+	}
+	for _, job := range running {
+		m.reconcileInterruptedJob(job, "subagent interrupted during restart")
+	}
+	if len(queued) > 0 {
+		m.signalN(min(len(queued), m.MaxConcurrent))
+	}
+	return nil
+}
+
+func (m *SubagentManager) Stop(ctx context.Context) error {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	if !m.started {
+		m.mu.Unlock()
+		return nil
+	}
+	cancel := m.cancel
+	m.started = false
+	m.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	done := make(chan struct{})
+	go func() {
+		m.wg.Wait()
+		close(done)
+	}()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
-func TestNew_CustomBuffer(t *testing.T) {
-	b := New(4)
-	if b == nil {
-		t.Fatal("expected non-nil bus")
+func (m *SubagentManager) Enqueue(ctx context.Context, req tools.SpawnRequest) (tools.SpawnJob, error) {
+	if m == nil || m.DB == nil {
+		return tools.SpawnJob{}, fmt.Errorf("background subagents disabled")
 	}
-	// first 4 succeed
-	for i := 0; i < 4; i++ {
-		ok := b.Publish(Event{Type: EventUserMessage})
-		if !ok {
-			t.Fatalf("expected publish to succeed at i=%d", i)
-		}
+	task := strings.TrimSpace(req.Task)
+	if task == "" {
+		return tools.SpawnJob{}, fmt.Errorf("empty task")
 	}
-	// 5th should fail (buffer full)
-	ok := b.Publish(Event{Type: EventUserMessage})
-	if ok {
-		t.Fatal("expected publish to fail on full buffer")
+	parentSessionKey := strings.TrimSpace(req.ParentSessionKey)
+	if parentSessionKey == "" {
+		return tools.SpawnJob{}, fmt.Errorf("missing parent session")
 	}
+	jobID := newSubagentID()
+	job := db.SubagentJob{
+		ID:               jobID,
+		ParentSessionKey: parentSessionKey,
+		ChildSessionKey:  childSessionKey(parentSessionKey, jobID),
+		Channel:          strings.TrimSpace(req.Channel),
+		ReplyTo:          strings.TrimSpace(req.To),
+		Task:             task,
+		Status:           db.SubagentStatusQueued,
+		MetadataJSON:     "{}",
+	}
+	if err := m.DB.EnqueueSubagentJobLimited(ctx, job, m.MaxQueued); err != nil {
+		return tools.SpawnJob{}, err
+	}
+	m.signal()
+	return tools.SpawnJob{ID: job.ID, ChildSessionKey: job.ChildSessionKey}, nil
 }
 
-func TestPublish_Success(t *testing.T) {
-	b := New(10)
-	ev := Event{
-		Type:       EventUserMessage,
-		SessionKey: "session1",
-		Channel:    "cli",
-		From:       "user",
-		Message:    "hello",
-		Meta:       map[string]any{"key": "val"},
-	}
-	ok := b.Publish(ev)
-	if !ok {
-		t.Fatal("expected publish to succeed")
-	}
-
-	got := <-b.Channel()
-	if got.Type != EventUserMessage {
-		t.Errorf("expected type %s, got %s", EventUserMessage, got.Type)
-	}
-	if got.SessionKey != "session1" {
-		t.Errorf("expected session key 'session1', got %q", got.SessionKey)
-	}
-	if got.Message != "hello" {
-		t.Errorf("expected message 'hello', got %q", got.Message)
-	}
-	if got.Meta["key"] != "val" {
-		t.Errorf("expected meta key 'val', got %v", got.Meta["key"])
-	}
-}
-
-func TestChannel_IsReadOnly(t *testing.T) {
-	b := New(1)
-	ch := b.Channel()
-	if ch == nil {
-		t.Fatal("expected non-nil channel")
-	}
-}
-
-func TestEventTypes(t *testing.T) {
-	cases := []EventType{EventUserMessage, EventCron, EventSystem, EventWebhook, EventFileChange}
-	for _, et := range cases {
-		b := New(1)
-		b.Publish(Event{Type: et})
-		ev := <-b.Channel()
-		if ev.Type != et {
-			t.Errorf("expected type %s, got %s", et, ev.Type)
-		}
-	}
-}
-
-func TestBus_EventFlow(t *testing.T) {
-	b := New(10)
-	_ = context.Background()
-
-	events := []Event{
-		{Type: EventUserMessage, SessionKey: "s1", Message: "msg1"},
-		{Type: EventCron, SessionKey: "s2", Message: "cron1"},
-		{Type: EventSystem, SessionKey: "s3", Message: "sys1"},
-	}
-
-	for _, ev := range events {
-		b.Publish(ev)
-	}
-
-	ch := b.Channel()
-	for _, want := range events {
-		select {
-		case got := <-ch:
-			if got.Type != want.Type || got.Message != want.Message {
-				t.Errorf("got {%s,%s}, want {%s,%s}", got.Type, got.Message, want.Type, want.Message)
-			}
-		case <-time.After(100 * time.Millisecond):
-			t.Fatal("timeout waiting for event")
-		}
-	}
-}
-
-func TestPublish_Overflow(t *testing.T) {
-	b := New(2)
-	b.Publish(Event{Type: EventUserMessage})
-	b.Publish(Event{Type: EventUserMessage})
-	// third publish should drop
-	ok := b.Publish(Event{Type: EventUserMessage})
-	if ok {
-		t.Fatal("expected overflow publish to return false")
-	}
-}
-````
-
-## File: internal/channels/cli/cli.go
-````go
-package cli
-
-import (
-	"bufio"
-	"context"
-	"fmt"
-	"os"
-	"strings"
-
-	"or3-intern/internal/bus"
-)
-
-type Channel struct {
-	Bus *bus.Bus
-	SessionKey string
-}
-
-func (c *Channel) Run(ctx context.Context) error {
-	if c.SessionKey == "" { c.SessionKey = "default" }
-	in := bufio.NewScanner(os.Stdin)
-	fmt.Println("or3-intern CLI. Type /exit to quit.")
+func (m *SubagentManager) workerLoop() {
+	defer m.wg.Done()
 	for {
-		fmt.Print("> ")
-		if !in.Scan() { return nil }
-		line := strings.TrimSpace(in.Text())
-		if line == "" { continue }
-		if line == "/exit" { return nil }
-		ok := c.Bus.Publish(bus.Event{Type: bus.EventUserMessage, SessionKey: c.SessionKey, Channel: "cli", From: "local", Message: line})
-		if !ok {
-			fmt.Println("[warn] queue is full; message dropped")
+		ran, err := m.runOnce()
+		if err != nil {
+			if !errors.Is(err, context.Canceled) {
+				log.Printf("subagent worker error: %v", err)
+			}
+		}
+		if ran {
+			continue
+		}
+		select {
+		case <-m.ctx.Done():
+			return
+		case <-m.notifyCh:
+		case <-time.After(subagentClaimRetryDelay):
 		}
 	}
 }
-````
 
-## File: internal/channels/cli/deliver_test.go
-````go
-package cli
-
-import (
-	"bytes"
-	"context"
-	"fmt"
-	"io"
-	"os"
-	"strings"
-	"testing"
-)
-
-func TestDeliver_Basic(t *testing.T) {
-	d := Deliverer{}
-	err := d.Deliver(context.Background(), "cli", "user", "hello there")
-	if err != nil {
-		t.Fatalf("Deliver: %v", err)
+func (m *SubagentManager) runOnce() (bool, error) {
+	job, err := m.DB.ClaimNextSubagentJob(m.ctx)
+	if err != nil || job == nil {
+		return false, err
 	}
+	m.executeJob(*job)
+	return true, nil
 }
 
-func TestDeliver_EmptyChannel(t *testing.T) {
-	d := Deliverer{}
-	// Should default to "cli" if channel is empty
-	err := d.Deliver(context.Background(), "", "user", "message")
+func (m *SubagentManager) executeJob(job db.SubagentJob) {
+	runCtx, cancel := context.WithTimeout(m.ctx, m.TaskTimeout)
+	defer cancel()
+	result, err := m.runJob(runCtx, job)
 	if err != nil {
-		t.Fatalf("Deliver with empty channel: %v", err)
+		reason := strings.TrimSpace(err.Error())
+		switch {
+		case errors.Is(err, context.Canceled), errors.Is(runCtx.Err(), context.Canceled):
+			m.finalizeJob(runCtx, job, db.SubagentStatusInterrupted, "", "", reasonOrDefault(reason, "subagent interrupted"), true)
+		case errors.Is(err, context.DeadlineExceeded), errors.Is(runCtx.Err(), context.DeadlineExceeded):
+			m.finalizeJob(runCtx, job, db.SubagentStatusFailed, "", "", reasonOrDefault(reason, "subagent timed out"), true)
+		default:
+			m.finalizeJob(runCtx, job, db.SubagentStatusFailed, "", "", reasonOrDefault(reason, "subagent failed"), true)
+		}
+		return
 	}
+	m.finalizeJob(runCtx, job, db.SubagentStatusSucceeded, result.Preview, result.ArtifactID, "", true)
 }
 
-func TestDeliver_LongMessage(t *testing.T) {
-	d := Deliverer{}
-	msg := strings.Repeat("x", 10000)
-	err := d.Deliver(context.Background(), "cli", "user", msg)
+func (m *SubagentManager) runJob(ctx context.Context, job db.SubagentJob) (BackgroundRunResult, error) {
+	promptSnapshot, err := m.Runtime.BuildPromptSnapshot(ctx, job.ParentSessionKey, job.Task)
 	if err != nil {
-		t.Fatalf("Deliver long message: %v", err)
+		return BackgroundRunResult{}, err
 	}
-}
-
-// capturingWriter swaps os.Stdout with a buffer during a test.
-func captureStdout(t *testing.T, fn func()) string {
-	t.Helper()
-	old := os.Stdout
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("os.Pipe: %v", err)
-	}
-	os.Stdout = w
-
-	fn()
-
-	w.Close()
-	os.Stdout = old
-	var buf bytes.Buffer
-	io.Copy(&buf, r)
-	return buf.String()
-}
-
-func TestCLIStreamWriter_WriteDeltaAndClose(t *testing.T) {
-	out := captureStdout(t, func() {
-		w := &CLIStreamWriter{}
-		ctx := context.Background()
-		_ = w.WriteDelta(ctx, "hello")
-		_ = w.WriteDelta(ctx, " world")
-		_ = w.Close(ctx, "hello world")
+	return m.Runtime.RunBackground(ctx, BackgroundRunInput{
+		SessionKey:       job.ChildSessionKey,
+		ParentSessionKey: job.ParentSessionKey,
+		Task:             job.Task,
+		PromptSnapshot:   promptSnapshot,
+		Tools:            m.backgroundTools(),
+		Meta: map[string]any{
+			"subagent_job_id":    job.ID,
+			"parent_session_key": job.ParentSessionKey,
+		},
+		Channel: job.Channel,
+		ReplyTo: job.ReplyTo,
 	})
-	// text printed incrementally; Close adds a newline
-	if !strings.Contains(out, "hello world") {
-		t.Errorf("expected 'hello world' in output, got %q", out)
+}
+
+func (m *SubagentManager) backgroundTools() *tools.Registry {
+	if m.BackgroundTools != nil {
+		return m.BackgroundTools()
 	}
-	if !strings.HasSuffix(out, "\n") {
-		t.Errorf("expected trailing newline, got %q", out)
+	return tools.NewRegistry()
+}
+
+func (m *SubagentManager) finalizeJob(baseCtx context.Context, job db.SubagentJob, status string, preview string, artifactID string, errText string, deliver bool) {
+	finalizeCtx, cancel := boundedContext(baseCtx, subagentFinalizeTimeout)
+	defer cancel()
+	success := status == db.SubagentStatusSucceeded
+	text := formatParentSubagentSummary(job, success, preview, artifactID, errText)
+	payload := map[string]any{
+		"subagent_job_id": job.ID,
+		"child_session":   job.ChildSessionKey,
+		"status":          status,
+	}
+	if artifactID != "" {
+		payload["artifact_id"] = artifactID
+	}
+	if err := m.DB.FinalizeSubagentJob(finalizeCtx, job, status, preview, artifactID, errText, text, payload); err != nil {
+		log.Printf("finalize subagent failed: job=%s err=%v", job.ID, err)
+		return
+	}
+	if deliver {
+		m.deliverCompletion(finalizeCtx, job, success, preview, artifactID, errText)
 	}
 }
 
-func TestCLIStreamWriter_CloseWithoutDelta(t *testing.T) {
-	out := captureStdout(t, func() {
-		w := &CLIStreamWriter{}
-		ctx := context.Background()
-		_ = w.Close(ctx, "fallback text")
-	})
-	if !strings.Contains(out, "fallback text") {
-		t.Errorf("expected 'fallback text' in output, got %q", out)
+func (m *SubagentManager) reconcileInterruptedJob(job db.SubagentJob, reason string) {
+	m.finalizeJob(m.ctx, job, db.SubagentStatusInterrupted, "", "", reasonOrDefault(reason, "subagent interrupted during restart"), false)
+}
+
+func (m *SubagentManager) deliverCompletion(ctx context.Context, job db.SubagentJob, success bool, preview string, artifactID string, errText string) {
+	deliverer := m.Deliver
+	if deliverer == nil && m.Runtime != nil {
+		deliverer = m.Runtime.Deliver
+	}
+	if deliverer == nil || strings.TrimSpace(job.Channel) == "" || strings.TrimSpace(job.ReplyTo) == "" {
+		return
+	}
+	text := formatDeliverySubagentSummary(job, success, preview, artifactID, errText)
+	if err := deliverer.Deliver(ctx, job.Channel, job.ReplyTo, text); err != nil {
+		log.Printf("subagent delivery failed: job=%s err=%v", job.ID, err)
 	}
 }
 
-func TestCLIStreamWriter_AbortAfterDelta(t *testing.T) {
-	out := captureStdout(t, func() {
-		w := &CLIStreamWriter{}
-		ctx := context.Background()
-		_ = w.WriteDelta(ctx, "partial")
-		_ = w.Abort(ctx)
-	})
-	if !strings.Contains(out, "partial") {
-		t.Errorf("expected 'partial' in output, got %q", out)
-	}
-	if !strings.Contains(out, "[aborted]") {
-		t.Errorf("expected '[aborted]' in output, got %q", out)
-	}
+func (m *SubagentManager) signal() {
+	m.signalN(1)
 }
 
-func TestCLIStreamWriter_AbortWithoutDelta(t *testing.T) {
-	out := captureStdout(t, func() {
-		w := &CLIStreamWriter{}
-		_ = w.Abort(context.Background())
-	})
-	// No output expected when nothing was written
-	if strings.Contains(out, "[aborted]") {
-		t.Errorf("unexpected '[aborted]' when nothing was written, got %q", out)
+func (m *SubagentManager) signalN(n int) {
+	if n <= 0 {
+		return
 	}
-}
-
-func TestCLIStreamWriter_WriteAfterClose(t *testing.T) {
-	w := &CLIStreamWriter{}
-	ctx := context.Background()
-	_ = w.WriteDelta(ctx, "hello")
-	_ = w.Close(ctx, "hello")
-	// Further writes should be silently ignored
-	err := w.WriteDelta(ctx, "extra")
-	if err != nil {
-		t.Errorf("unexpected error after close: %v", err)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.started || m.notifyCh == nil {
+		return
 	}
-}
-
-func TestBeginStream_PrintsPrefix(t *testing.T) {
-	out := captureStdout(t, func() {
-		d := Deliverer{}
-		sw, err := d.BeginStream(context.Background(), "user", nil)
-		if err != nil {
-			t.Errorf("BeginStream: %v", err)
+	for i := 0; i < n; i++ {
+		select {
+		case m.notifyCh <- struct{}{}:
+		default:
 			return
 		}
-		_ = sw.WriteDelta(context.Background(), "streamed")
-		_ = sw.Close(context.Background(), "streamed")
-	})
-	if !strings.Contains(out, "[cli]") {
-		t.Errorf("expected '[cli]' prefix in output, got %q", out)
 	}
-	if !strings.Contains(out, "streamed") {
-		t.Errorf("expected 'streamed' in output, got %q", out)
+}
+
+func boundedContext(base context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if base == nil {
+		base = context.Background()
+	} else {
+		base = context.WithoutCancel(base)
 	}
-	fmt.Print() // flush
+	if timeout <= 0 {
+		return context.WithCancel(base)
+	}
+	return context.WithTimeout(base, timeout)
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func childSessionKey(parentSessionKey, jobID string) string {
+	return parentSessionKey + ":subagent:" + jobID
+}
+
+func newSubagentID() string {
+	var raw [12]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return fmt.Sprintf("job-%d", time.Now().UnixNano())
+	}
+	return "job-" + hex.EncodeToString(raw[:])
+}
+
+func reasonOrDefault(reason string, fallback string) string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return fallback
+	}
+	return reason
+}
+
+func formatParentSubagentSummary(job db.SubagentJob, success bool, preview string, artifactID string, errText string) string {
+	if success {
+		text := fmt.Sprintf("Background job %s completed: %s", job.ID, preview)
+		if artifactID != "" {
+			text += fmt.Sprintf("\nartifact_id=%s", artifactID)
+		}
+		return text
+	}
+	return fmt.Sprintf("Background job %s failed: %s", job.ID, reasonOrDefault(errText, "unknown error"))
+}
+
+func formatDeliverySubagentSummary(job db.SubagentJob, success bool, preview string, artifactID string, errText string) string {
+	if success {
+		text := fmt.Sprintf("Background job %s finished. %s", job.ID, preview)
+		if artifactID != "" {
+			text += fmt.Sprintf("\nartifact_id=%s", artifactID)
+		}
+		return text
+	}
+	return fmt.Sprintf("Background job %s failed. %s", job.ID, reasonOrDefault(errText, "unknown error"))
 }
 ````
 
@@ -5954,196 +4967,2728 @@ func (s Service) Deliver(ctx context.Context, to, text string, meta map[string]a
 }
 ````
 
-## File: internal/channels/discord/discord_test.go
+## File: internal/memory/workspace_context.go
 ````go
-package discord
+package memory
+
+import (
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+)
+
+const (
+	defaultWorkspaceContextMaxFileBytes = 32 * 1024
+	defaultWorkspaceContextMaxResults   = 6
+	defaultWorkspaceContextMaxChars     = 6000
+	defaultWorkspaceContextScanLimit    = 200
+	workspaceContextCacheTTL            = 5 * time.Second
+)
+
+type workspaceContextCacheKey struct {
+	root         string
+	query        string
+	maxFileBytes int
+	maxResults   int
+	maxChars     int
+}
+
+type workspaceContextCacheEntry struct {
+	text      string
+	expiresAt time.Time
+}
+
+var workspaceContextCache = struct {
+	mu      sync.Mutex
+	entries map[workspaceContextCacheKey]workspaceContextCacheEntry
+}{entries: map[workspaceContextCacheKey]workspaceContextCacheEntry{}}
+
+type WorkspaceContextConfig struct {
+	WorkspaceDir string
+	MaxFileBytes int
+	MaxResults   int
+	MaxChars     int
+	Now          time.Time
+}
+
+type workspaceCandidate struct {
+	Path    string
+	Excerpt string
+	Score   int
+}
+
+func BuildWorkspaceContext(cfg WorkspaceContextConfig, query string) string {
+	root := strings.TrimSpace(cfg.WorkspaceDir)
+	if root == "" {
+		return ""
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return ""
+	}
+	realRoot, err := filepath.EvalSymlinks(absRoot)
+	if err != nil {
+		return ""
+	}
+	maxFileBytes := cfg.MaxFileBytes
+	if maxFileBytes <= 0 {
+		maxFileBytes = defaultWorkspaceContextMaxFileBytes
+	}
+	maxResults := cfg.MaxResults
+	if maxResults <= 0 {
+		maxResults = defaultWorkspaceContextMaxResults
+	}
+	maxChars := cfg.MaxChars
+	if maxChars <= 0 {
+		maxChars = defaultWorkspaceContextMaxChars
+	}
+	cacheKey := workspaceContextCacheKey{
+		root:         realRoot,
+		query:        strings.TrimSpace(strings.ToLower(query)),
+		maxFileBytes: maxFileBytes,
+		maxResults:   maxResults,
+		maxChars:     maxChars,
+	}
+	now := cfg.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if cached, ok := getWorkspaceContextCache(cacheKey, now); ok {
+		return cached
+	}
+
+	seen := map[string]struct{}{}
+	candidates := make([]workspaceCandidate, 0, maxResults)
+	appendCandidate := func(candidate workspaceCandidate) {
+		candidate.Path = strings.TrimSpace(candidate.Path)
+		candidate.Excerpt = strings.TrimSpace(candidate.Excerpt)
+		if candidate.Path == "" || candidate.Excerpt == "" {
+			return
+		}
+		if _, exists := seen[candidate.Path]; exists {
+			return
+		}
+		seen[candidate.Path] = struct{}{}
+		candidates = append(candidates, candidate)
+	}
+
+	for _, name := range []string{"README.md", "TODO.md", "TASKS.md", "PLAN.md", "STATUS.md", "NOTES.md", "PROJECT.md"} {
+		candidate, ok := workspaceFileCandidate(realRoot, filepath.Join(realRoot, name), maxFileBytes, nil)
+		if ok {
+			appendCandidate(candidate)
+		}
+	}
+	for _, candidate := range recentMemoryCandidates(realRoot, now, maxFileBytes) {
+		appendCandidate(candidate)
+	}
+	tokens := workspaceQueryTokens(query)
+	if len(tokens) > 0 {
+		for _, candidate := range relevantWorkspaceCandidates(realRoot, tokens, maxFileBytes, maxResults, seen) {
+			appendCandidate(candidate)
+		}
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	if len(candidates) > maxResults {
+		candidates = candidates[:maxResults]
+	}
+	var out strings.Builder
+	out.WriteString("Startup workspace context gathered before the model call.\n")
+	for i, candidate := range candidates {
+		out.WriteString(fmt.Sprintf("%d) [%s] %s\n", i+1, relativeDisplayPath(realRoot, candidate.Path), workspaceOneLine(candidate.Excerpt, 320)))
+	}
+	text := workspaceTruncate(strings.TrimSpace(out.String()), maxChars)
+	setWorkspaceContextCache(cacheKey, text, now)
+	return text
+}
+
+func getWorkspaceContextCache(key workspaceContextCacheKey, now time.Time) (string, bool) {
+	workspaceContextCache.mu.Lock()
+	defer workspaceContextCache.mu.Unlock()
+	entry, ok := workspaceContextCache.entries[key]
+	if !ok {
+		return "", false
+	}
+	if !entry.expiresAt.After(now) {
+		delete(workspaceContextCache.entries, key)
+		return "", false
+	}
+	return entry.text, true
+}
+
+func setWorkspaceContextCache(key workspaceContextCacheKey, text string, now time.Time) {
+	workspaceContextCache.mu.Lock()
+	defer workspaceContextCache.mu.Unlock()
+	workspaceContextCache.entries[key] = workspaceContextCacheEntry{text: text, expiresAt: now.Add(workspaceContextCacheTTL)}
+}
+
+func recentMemoryCandidates(root string, now time.Time, maxFileBytes int) []workspaceCandidate {
+	memoryDir := filepath.Join(root, "memory")
+	entries, err := os.ReadDir(memoryDir)
+	if err != nil {
+		return nil
+	}
+	preferred := map[string]struct{}{
+		now.Format("2006-01-02") + ".md":                    {},
+		now.Add(-24*time.Hour).Format("2006-01-02") + ".md": {},
+	}
+	var selected []workspaceCandidate
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if _, ok := preferred[entry.Name()]; !ok {
+			continue
+		}
+		candidate, ok := workspaceFileCandidate(root, filepath.Join(memoryDir, entry.Name()), maxFileBytes, nil)
+		if ok {
+			selected = append(selected, candidate)
+		}
+	}
+	if len(selected) > 0 {
+		sort.Slice(selected, func(i, j int) bool { return selected[i].Path < selected[j].Path })
+		return selected
+	}
+	type fileInfo struct {
+		path    string
+		modTime time.Time
+	}
+	files := make([]fileInfo, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".md") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		files = append(files, fileInfo{path: filepath.Join(memoryDir, entry.Name()), modTime: info.ModTime()})
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].modTime.After(files[j].modTime) })
+	if len(files) > 2 {
+		files = files[:2]
+	}
+	out := make([]workspaceCandidate, 0, len(files))
+	for _, file := range files {
+		candidate, ok := workspaceFileCandidate(root, file.path, maxFileBytes, nil)
+		if ok {
+			out = append(out, candidate)
+		}
+	}
+	return out
+}
+
+func relevantWorkspaceCandidates(root string, tokens []string, maxFileBytes, maxResults int, seen map[string]struct{}) []workspaceCandidate {
+	var candidates []workspaceCandidate
+	visited := 0
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return nil
+		}
+		if rel == "." {
+			return nil
+		}
+		if d.IsDir() {
+			name := strings.ToLower(d.Name())
+			if strings.HasPrefix(name, ".") || name == "node_modules" || name == "vendor" || name == "artifacts" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if visited >= defaultWorkspaceContextScanLimit {
+			return fs.SkipAll
+		}
+		visited++
+		if _, exists := seen[path]; exists {
+			return nil
+		}
+		if !isWorkspaceContextFile(path) || isBootstrapWorkspaceFile(path) {
+			return nil
+		}
+		candidate, ok := workspaceFileCandidate(root, path, maxFileBytes, tokens)
+		if !ok || candidate.Score <= 0 {
+			return nil
+		}
+		candidates = append(candidates, candidate)
+		return nil
+	})
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].Score == candidates[j].Score {
+			return candidates[i].Path < candidates[j].Path
+		}
+		return candidates[i].Score > candidates[j].Score
+	})
+	if len(candidates) > maxResults {
+		candidates = candidates[:maxResults]
+	}
+	return candidates
+}
+
+func workspaceFileCandidate(root, path string, maxFileBytes int, tokens []string) (workspaceCandidate, bool) {
+	resolved, ok := workspaceSafePath(root, path)
+	if !ok {
+		return workspaceCandidate{}, false
+	}
+	f, err := os.Open(resolved)
+	if err != nil {
+		return workspaceCandidate{}, false
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, int64(maxFileBytes)))
+	if err != nil {
+		return workspaceCandidate{}, false
+	}
+	text := strings.TrimSpace(string(data))
+	if text == "" {
+		return workspaceCandidate{}, false
+	}
+	excerpt, score := workspaceExcerpt(resolved, text, tokens)
+	if len(tokens) == 0 {
+		score = 1
+	}
+	return workspaceCandidate{Path: resolved, Excerpt: excerpt, Score: score}, true
+}
+
+func workspaceSafePath(root, path string) (string, bool) {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", false
+	}
+	realPath, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		return "", false
+	}
+	rel, err := filepath.Rel(root, realPath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return realPath, true
+}
+
+func workspaceExcerpt(path, text string, tokens []string) (string, int) {
+	one := workspaceOneLine(text, 500)
+	if len(tokens) == 0 {
+		return one, 0
+	}
+	lowerPath := strings.ToLower(path)
+	lowerText := strings.ToLower(text)
+	best := -1
+	score := 0
+	for _, token := range tokens {
+		if strings.Contains(lowerPath, token) {
+			score += 6
+		}
+		if idx := strings.Index(lowerText, token); idx >= 0 {
+			score += 3
+			if best < 0 || idx < best {
+				best = idx
+			}
+		}
+	}
+	if best < 0 {
+		return one, score
+	}
+	start := best - 120
+	if start < 0 {
+		start = 0
+	}
+	end := best + 220
+	if end > len(text) {
+		end = len(text)
+	}
+	excerpt := strings.TrimSpace(text[start:end])
+	if start > 0 {
+		excerpt = "…" + excerpt
+	}
+	if end < len(text) {
+		excerpt += "…"
+	}
+	return workspaceOneLine(excerpt, 500), score
+}
+
+func workspaceQueryTokens(query string) []string {
+	raw := strings.FieldsFunc(strings.ToLower(query), func(r rune) bool {
+		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9')
+	})
+	stop := map[string]struct{}{
+		"the": {}, "and": {}, "for": {}, "with": {}, "that": {}, "this": {}, "from": {}, "into": {},
+		"what": {}, "when": {}, "where": {}, "have": {}, "just": {}, "please": {}, "about": {},
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(raw))
+	for _, token := range raw {
+		if len(token) < 3 {
+			continue
+		}
+		if _, blocked := stop[token]; blocked {
+			continue
+		}
+		if _, exists := seen[token]; exists {
+			continue
+		}
+		seen[token] = struct{}{}
+		out = append(out, token)
+	}
+	return out
+}
+
+func isWorkspaceContextFile(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".md", ".txt":
+		return true
+	default:
+		return false
+	}
+}
+
+func isBootstrapWorkspaceFile(path string) bool {
+	name := strings.ToUpper(filepath.Base(path))
+	switch name {
+	case "SOUL.MD", "AGENTS.MD", "TOOLS.MD", "IDENTITY.MD", "MEMORY.MD", "HEARTBEAT.MD":
+		return true
+	default:
+		return false
+	}
+}
+
+func relativeDisplayPath(root, path string) string {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return path
+	}
+	return filepath.ToSlash(rel)
+}
+
+func workspaceOneLine(s string, max int) string {
+	s = strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
+	if max > 0 && len(s) > max {
+		return strings.TrimSpace(s[:max]) + "…"
+	}
+	return s
+}
+
+func workspaceTruncate(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if max > 0 && len(s) > max {
+		return strings.TrimSpace(s[:max]) + "\n…[truncated]"
+	}
+	return s
+}
+````
+
+## File: internal/tools/skill.go
+````go
+package tools
 
 import (
 	"context"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
+	"fmt"
+	"strings"
+
+	"or3-intern/internal/skills"
+)
+
+type ReadSkill struct {
+	Base
+	Inventory *skills.Inventory
+	MaxBytes  int
+}
+
+func (t *ReadSkill) Name() string { return "read_skill" }
+func (t *ReadSkill) Description() string {
+	return "Read the full body of a skill by name (for ClawHub-compatible SKILL.md usage)."
+}
+func (t *ReadSkill) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{
+		"name":     map[string]any{"type": "string", "description": "Skill name from inventory"},
+		"maxBytes": map[string]any{"type": "integer", "description": "Optional max bytes"},
+	}, "required": []string{"name"}}
+}
+func (t *ReadSkill) Schema() map[string]any {
+	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
+}
+
+func (t *ReadSkill) Execute(ctx context.Context, params map[string]any) (string, error) {
+	_ = ctx
+	if t.Inventory == nil {
+		return "", fmt.Errorf("skills inventory not configured")
+	}
+	name := strings.TrimSpace(fmt.Sprint(params["name"]))
+	if name == "" {
+		return "", fmt.Errorf("missing name")
+	}
+	s, ok := t.Inventory.Get(name)
+	if !ok {
+		return "", fmt.Errorf("skill not found: %s", name)
+	}
+	maxBytes := t.MaxBytes
+	if maxBytes <= 0 {
+		maxBytes = 200000
+	}
+	if v, ok := params["maxBytes"].(float64); ok && int(v) > 0 {
+		maxBytes = int(v)
+	}
+	body, err := skills.LoadBody(s.Path, maxBytes)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("# Skill: %s (%s, %s)\n\n%s", s.Name, s.Source, s.Dir, body), nil
+}
+````
+
+## File: .env.example
+````
+# Example environment for or3-intern
+#
+# This repo does NOT auto-load .env files.
+# Load it in your shell before running, for example:
+#   set -a; source .env; set +a
+#   go run ./cmd/or3-intern chat
+#
+# If you use OpenRouter, set OR3_API_BASE and OR3_API_KEY.
+# If you use OpenAI defaults, OPENAI_API_KEY is enough.
+
+# --- Provider ---
+# Used as the default API key unless OR3_API_KEY is set.
+OPENAI_API_KEY=
+
+# Preferred explicit provider key override.
+OR3_API_KEY=
+
+# OpenAI-compatible API base.
+# OpenAI default: https://api.openai.com/v1
+# OpenRouter: https://openrouter.ai/api/v1
+OR3_API_BASE=https://api.openai.com/v1
+
+# Chat model name.
+# Examples:
+#   gpt-4.1-mini
+#   openai/gpt-4o-mini
+OR3_MODEL=gpt-4.1-mini
+
+# Embedding model used for memory retrieval.
+OR3_EMBED_MODEL=text-embedding-3-small
+
+# --- App storage ---
+OR3_DB_PATH=
+OR3_ARTIFACTS_DIR=
+
+# --- Optional tool integrations ---
+BRAVE_API_KEY=
+
+# --- Optional chat channels ---
+OR3_TELEGRAM_TOKEN=
+OR3_SLACK_APP_TOKEN=
+OR3_SLACK_BOT_TOKEN=
+OR3_DISCORD_TOKEN=
+OR3_WHATSAPP_BRIDGE_URL=ws://127.0.0.1:3001/ws
+OR3_WHATSAPP_BRIDGE_TOKEN=
+````
+
+## File: .gitignore
+````
+.env
+.or3/
+/or3-intern
+or3-intern.exe
+````
+
+## File: internal/artifacts/store.go
+````go
+package artifacts
+
+import (
+	"context"
+	"crypto/rand"
+	"database/sql"
+	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-	"testing"
+	"time"
+
+	"or3-intern/internal/db"
+)
+
+type Store struct {
+	Dir string
+	DB  *db.DB
+}
+
+func (s *Store) Save(ctx context.Context, sessionKey, mime string, data []byte) (string, error) {
+	if s.Dir == "" {
+		return "", fmt.Errorf("artifacts dir not set")
+	}
+	if s.DB == nil {
+		return "", fmt.Errorf("artifacts db not set")
+	}
+	if err := s.DB.EnsureSession(ctx, strings.TrimSpace(sessionKey)); err != nil {
+		return "", err
+	}
+	_ = os.MkdirAll(s.Dir, 0o755)
+	id := randID()
+	path := filepath.Join(s.Dir, id)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return "", err
+	}
+	_, err := s.DB.SQL.ExecContext(ctx,
+		`INSERT INTO artifacts(id, session_key, mime, path, size_bytes, created_at) VALUES(?,?,?,?,?,?)`,
+		id, sessionKey, mime, path, len(data), time.Now().UnixMilli())
+	if err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	return id, nil
+}
+
+func (s *Store) SaveNamed(ctx context.Context, sessionKey, filename, mimeType string, data []byte) (Attachment, error) {
+	filename = NormalizeFilename(filename, mimeType)
+	id, err := s.Save(ctx, sessionKey, mimeType, data)
+	if err != nil {
+		return Attachment{}, err
+	}
+	return Attachment{
+		ArtifactID: id,
+		Filename:   filename,
+		Mime:       strings.TrimSpace(mimeType),
+		Kind:       DetectKind(filename, mimeType),
+		SizeBytes:  int64(len(data)),
+	}, nil
+}
+
+func (s *Store) Lookup(ctx context.Context, artifactID string) (StoredArtifact, error) {
+	if s.DB == nil {
+		return StoredArtifact{}, fmt.Errorf("artifacts db not set")
+	}
+	row := s.DB.SQL.QueryRowContext(ctx,
+		`SELECT id, session_key, mime, path, size_bytes FROM artifacts WHERE id=?`,
+		strings.TrimSpace(artifactID),
+	)
+	var stored StoredArtifact
+	if err := row.Scan(&stored.ID, &stored.SessionKey, &stored.Mime, &stored.Path, &stored.SizeBytes); err != nil {
+		if err == sql.ErrNoRows {
+			return StoredArtifact{}, fmt.Errorf("artifact not found: %s", artifactID)
+		}
+		return StoredArtifact{}, err
+	}
+	return stored, nil
+}
+
+func randID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b[:])
+}
+````
+
+## File: internal/channels/cli/cli.go
+````go
+package cli
+
+import (
+	"bufio"
+	"context"
+	"fmt"
+	"os"
+	"strings"
+
+	"or3-intern/internal/bus"
+)
+
+// Channel reads user input from stdin and publishes messages to the bus.
+type Channel struct {
+	Bus        *bus.Bus
+	SessionKey string
+	Spinner    *Spinner // shared with Deliverer so it can be stopped on output
+}
+
+func (c *Channel) Run(ctx context.Context) error {
+	if c.SessionKey == "" {
+		c.SessionKey = "default"
+	}
+	in := bufio.NewScanner(os.Stdin)
+	fmt.Print(Banner())
+	ShowPrompt() // initial prompt
+	for {
+		// Prompt is printed either above (first iteration) or by the
+		// Deliverer after finishing a response. We block on Scan here.
+		if !in.Scan() {
+			return nil
+		}
+		line := strings.TrimSpace(in.Text())
+		if line == "" {
+			fmt.Print(Prompt())
+			continue
+		}
+		if line == "/exit" {
+			if isTTY {
+				fmt.Println(style(ansiDim+ansiGray, "  Goodbye 👋"))
+			}
+			return nil
+		}
+
+		ok := c.Bus.Publish(bus.Event{
+			Type:       bus.EventUserMessage,
+			SessionKey: c.SessionKey,
+			Channel:    "cli",
+			From:       "local",
+			Message:    line,
+		})
+		if !ok {
+			fmt.Println(style(ansiYellow, "  ⚠ queue full — message dropped"))
+			fmt.Print(Prompt())
+		} else {
+			// Restyle the raw prompt line into a labeled user message block.
+			RewriteUserMessage(line)
+			if c.Spinner != nil {
+				c.Spinner.Start("thinking…")
+			}
+			// Don't print the prompt — the Deliverer will show it
+			// after the response is fully rendered.
+		}
+	}
+}
+````
+
+## File: internal/channels/whatsapp/whatsapp.go
+````go
+package whatsapp
+
+import (
+	"context"
+	"encoding/base64"
+	"fmt"
+	"mime"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 
 	"or3-intern/internal/artifacts"
 	"or3-intern/internal/bus"
+	rootchannels "or3-intern/internal/channels"
 	"or3-intern/internal/config"
+)
+
+type Channel struct {
+	Config        config.WhatsAppBridgeConfig
+	Dialer        *websocket.Dialer
+	Artifacts     *artifacts.Store
+	MaxMediaBytes int
+
+	mu     sync.Mutex
+	conn   *websocket.Conn
+	cancel context.CancelFunc
+	closed bool
+}
+
+func (c *Channel) Name() string { return "whatsapp" }
+
+func (c *Channel) Start(ctx context.Context, eventBus *bus.Bus) error {
+	if strings.TrimSpace(c.Config.BridgeURL) == "" {
+		return fmt.Errorf("whatsapp bridge url not configured")
+	}
+	conn, err := c.connect(ctx)
+	if err != nil {
+		return err
+	}
+	childCtx, cancel := context.WithCancel(ctx)
+	c.mu.Lock()
+	c.conn = conn
+	c.cancel = cancel
+	c.closed = false
+	c.mu.Unlock()
+	go c.readLoop(childCtx, eventBus)
+	return nil
+}
+
+func (c *Channel) Stop(ctx context.Context) error {
+	_ = ctx
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cancel != nil {
+		c.cancel()
+	}
+	if c.conn != nil {
+		_ = c.conn.Close()
+	}
+	c.conn = nil
+	c.cancel = nil
+	c.closed = true
+	return nil
+}
+
+func (c *Channel) Deliver(ctx context.Context, to, text string, meta map[string]any) error {
+	target := strings.TrimSpace(to)
+	if target == "" {
+		target = strings.TrimSpace(c.Config.DefaultTo)
+	}
+	if target == "" {
+		return fmt.Errorf("whatsapp target required")
+	}
+	cmd := map[string]any{"type": "send", "to": target, "text": text}
+	if mediaPaths := rootchannels.MediaPaths(meta); len(mediaPaths) > 0 {
+		attachments, err := c.outboundAttachments(mediaPaths)
+		if err != nil {
+			return err
+		}
+		cmd["attachments"] = attachments
+	}
+	if meta != nil {
+		for k, v := range meta {
+			if k == "media_paths" {
+				continue
+			}
+			cmd[k] = v
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.conn == nil {
+		return fmt.Errorf("whatsapp bridge not connected")
+	}
+	return c.conn.WriteJSON(cmd)
+}
+
+func (c *Channel) connect(ctx context.Context) (*websocket.Conn, error) {
+	dialer := c.Dialer
+	if dialer == nil {
+		dialer = websocket.DefaultDialer
+	}
+	headers := http.Header{}
+	if token := strings.TrimSpace(c.Config.BridgeToken); token != "" {
+		headers.Set("Authorization", "Bearer "+token)
+	}
+	conn, _, err := dialer.DialContext(ctx, c.Config.BridgeURL, headers)
+	if err != nil {
+		return nil, err
+	}
+	return conn, nil
+}
+
+func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
+	for {
+		c.mu.Lock()
+		conn := c.conn
+		c.mu.Unlock()
+		if conn == nil {
+			return
+		}
+		var msg inboundMessage
+		if err := conn.ReadJSON(&msg); err != nil {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				return
+			}
+		}
+		if msg.Type != "message" {
+			continue
+		}
+		if !c.allowedFrom(msg.From) {
+			continue
+		}
+		target := strings.TrimSpace(msg.Chat)
+		if target == "" {
+			target = strings.TrimSpace(msg.From)
+		}
+		attachments, markers := c.captureAttachments(ctx, "whatsapp:"+target, msg.Attachments)
+		content := rootchannels.ComposeMessageText(msg.Text, markers)
+		if content == "" {
+			continue
+		}
+		meta := map[string]any{
+			"chat_id":             target,
+			"message_id":          msg.ID,
+			"reply_to_message_id": msg.ID,
+			"is_group":            msg.IsGroup,
+		}
+		if len(attachments) > 0 {
+			meta["attachments"] = attachments
+		}
+		eventBus.Publish(bus.Event{
+			Type:       bus.EventUserMessage,
+			SessionKey: "whatsapp:" + target,
+			Channel:    "whatsapp",
+			From:       msg.From,
+			Message:    content,
+			Meta:       meta,
+		})
+	}
+}
+
+func (c *Channel) allowedFrom(from string) bool {
+	if len(c.Config.AllowedFrom) == 0 {
+		return c.Config.OpenAccess
+	}
+	for _, allowed := range c.Config.AllowedFrom {
+		if strings.TrimSpace(allowed) == strings.TrimSpace(from) {
+			return true
+		}
+	}
+	return false
+}
+
+type inboundMessage struct {
+	Type        string             `json:"type"`
+	ID          string             `json:"id"`
+	Chat        string             `json:"chat"`
+	From        string             `json:"from"`
+	Text        string             `json:"text"`
+	IsGroup     bool               `json:"isGroup"`
+	Attachments []bridgeAttachment `json:"attachments"`
+}
+
+type bridgeAttachment struct {
+	Path       string `json:"path,omitempty"`
+	DataBase64 string `json:"data_base64,omitempty"`
+	Filename   string `json:"filename,omitempty"`
+	Mime       string `json:"mime,omitempty"`
+	Kind       string `json:"kind,omitempty"`
+	SizeBytes  int64  `json:"size_bytes,omitempty"`
+}
+
+func (c *Channel) captureAttachments(ctx context.Context, sessionKey string, refs []bridgeAttachment) ([]artifacts.Attachment, []string) {
+	attachments := make([]artifacts.Attachment, 0, len(refs))
+	markers := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		filename := artifacts.NormalizeFilename(ref.Filename, ref.Mime)
+		kind := strings.TrimSpace(ref.Kind)
+		if kind == "" {
+			kind = artifacts.DetectKind(filename, ref.Mime)
+		}
+		if c.MaxMediaBytes == 0 {
+			markers = append(markers, artifacts.FailureMarker(kind, filename, "disabled by config"))
+			continue
+		}
+		if c.MaxMediaBytes > 0 && ref.SizeBytes > int64(c.MaxMediaBytes) {
+			markers = append(markers, artifacts.FailureMarker(kind, filename, "too large"))
+			continue
+		}
+		if c.Artifacts == nil {
+			markers = append(markers, artifacts.FailureMarker(kind, filename, "storage unavailable"))
+			continue
+		}
+		data, err := decodeBridgeAttachment(ref, c.MaxMediaBytes)
+		if err != nil {
+			reason := "invalid media payload"
+			if strings.Contains(err.Error(), "too large") {
+				reason = "too large"
+			}
+			markers = append(markers, artifacts.FailureMarker(kind, filename, reason))
+			continue
+		}
+		att, err := c.Artifacts.SaveNamed(ctx, sessionKey, filename, ref.Mime, data)
+		if err != nil {
+			markers = append(markers, artifacts.FailureMarker(kind, filename, "save failed"))
+			continue
+		}
+		attachments = append(attachments, att)
+		markers = append(markers, artifacts.Marker(att))
+	}
+	return attachments, markers
+}
+
+func (c *Channel) outboundAttachments(paths []string) ([]bridgeAttachment, error) {
+	attachments := make([]bridgeAttachment, 0, len(paths))
+	for _, mediaPath := range paths {
+		info, err := os.Stat(mediaPath)
+		if err != nil {
+			return nil, err
+		}
+		if c.MaxMediaBytes == 0 {
+			return nil, fmt.Errorf("media attachments disabled by config")
+		}
+		if c.MaxMediaBytes > 0 && info.Size() > int64(c.MaxMediaBytes) {
+			return nil, fmt.Errorf("media path exceeds maxMediaBytes: %s", mediaPath)
+		}
+		data, err := os.ReadFile(mediaPath)
+		if err != nil {
+			return nil, err
+		}
+		mimeType := mime.TypeByExtension(strings.ToLower(filepath.Ext(mediaPath)))
+		attachments = append(attachments, bridgeAttachment{
+			DataBase64: base64.StdEncoding.EncodeToString(data),
+			Filename:   filepath.Base(mediaPath),
+			Mime:       mimeType,
+			Kind:       artifacts.DetectKind(mediaPath, mimeType),
+			SizeBytes:  info.Size(),
+		})
+	}
+	return attachments, nil
+}
+
+func decodeBridgeAttachment(ref bridgeAttachment, maxBytes int) ([]byte, error) {
+	raw := strings.TrimSpace(ref.DataBase64)
+	if raw == "" {
+		return nil, fmt.Errorf("missing inline data")
+	}
+	if maxBytes > 0 && base64.StdEncoding.DecodedLen(len(raw)) > maxBytes {
+		return nil, fmt.Errorf("attachment too large")
+	}
+	data, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		return nil, err
+	}
+	if maxBytes > 0 && len(data) > maxBytes {
+		return nil, fmt.Errorf("attachment too large")
+	}
+	return data, nil
+}
+
+func BridgeURL(base string) string {
+	u, err := url.Parse(strings.TrimSpace(base))
+	if err != nil || u == nil {
+		return ""
+	}
+	if u.Path == "" {
+		u.Path = "/ws"
+	}
+	return u.String()
+}
+
+func NewTestDialer() *websocket.Dialer {
+	return &websocket.Dialer{HandshakeTimeout: 5 * time.Second}
+}
+````
+
+## File: internal/memory/docs.go
+````go
+package memory
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"or3-intern/internal/db"
+	"or3-intern/internal/providers"
+)
+
+// DocIndexConfig controls what gets indexed.
+type DocIndexConfig struct {
+	Roots          []string
+	MaxFiles       int
+	MaxFileBytes   int
+	MaxChunks      int
+	EmbedMaxBytes  int
+	RefreshSeconds int
+	RetrieveLimit  int
+}
+
+// IndexedDoc is a row from memory_docs.
+type IndexedDoc struct {
+	ID        int64
+	ScopeKey  string
+	Path      string
+	Kind      string
+	Title     string
+	Summary   string
+	Text      string
+	Embedding []byte
+	MTimeMS   int64
+	SizeBytes int64
+	Active    bool
+	UpdatedAt int64
+}
+
+// DocIndexer syncs configured roots into the memory_docs table.
+type DocIndexer struct {
+	DB         *db.DB
+	Provider   *providers.Client
+	EmbedModel string
+	Config     DocIndexConfig
+}
+
+type indexedDocState struct {
+	hash      string
+	mtimeMS   int64
+	sizeBytes int64
+	active    bool
+}
+
+func (x *DocIndexer) defaults() DocIndexConfig {
+	c := x.Config
+	if c.MaxFiles <= 0 {
+		c.MaxFiles = 100
+	}
+	if c.MaxFileBytes <= 0 {
+		c.MaxFileBytes = 64 * 1024
+	}
+	if c.MaxChunks <= 0 {
+		c.MaxChunks = 500
+	}
+	if c.EmbedMaxBytes <= 0 {
+		c.EmbedMaxBytes = 8 * 1024
+	}
+	if c.RetrieveLimit <= 0 {
+		c.RetrieveLimit = 5
+	}
+	return c
+}
+
+// SyncRoots scans all configured roots and updates memory_docs for scopeKey.
+// It enforces caps on file count and file size, skips symlinks, and
+// deactivates docs for files that have disappeared.
+func (x *DocIndexer) SyncRoots(ctx context.Context, scopeKey string) error {
+	if x == nil || x.DB == nil {
+		return fmt.Errorf("doc indexer not configured")
+	}
+	cfg := x.defaults()
+	if len(cfg.Roots) == 0 {
+		return nil
+	}
+
+	seen := map[string]bool{}
+	fileCount := 0
+	chunkCount := 0
+	existing, err := x.loadIndexedDocState(ctx, scopeKey)
+	if err != nil {
+		return err
+	}
+
+	for _, root := range cfg.Roots {
+		if strings.TrimSpace(root) == "" {
+			continue
+		}
+		absRoot, err := filepath.Abs(root)
+		if err != nil {
+			continue
+		}
+		absRoot, err = filepath.EvalSymlinks(absRoot)
+		if err != nil {
+			continue
+		}
+
+			err = filepath.WalkDir(absRoot, func(path string, d fs.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				if d.Type()&os.ModeSymlink != 0 {
+					return nil
+				}
+				if d.IsDir() {
+				if strings.HasPrefix(d.Name(), ".") && path != absRoot {
+					return filepath.SkipDir
+				}
+				return nil
+				}
+				ext := strings.ToLower(filepath.Ext(path))
+				switch ext {
+				case ".md", ".txt":
+				default:
+					return nil
+				}
+
+				realPath, err := filepath.EvalSymlinks(path)
+				if err != nil {
+					return err
+				}
+			rel, err := filepath.Rel(absRoot, realPath)
+			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				return nil
+			}
+
+			if fileCount >= cfg.MaxFiles {
+				return filepath.SkipAll
+			}
+			if chunkCount >= cfg.MaxChunks {
+				return filepath.SkipAll
+			}
+
+				info, err := os.Lstat(realPath)
+				if err != nil {
+					return err
+				}
+				if info.Size() > int64(cfg.MaxFileBytes) {
+					return nil
+				}
+
+			seen[realPath] = true
+			fileCount++
+			mtimeMS := info.ModTime().UnixMilli()
+			sizeBytes := info.Size()
+			if state, ok := existing[realPath]; ok && state.active && state.mtimeMS == mtimeMS && state.sizeBytes == sizeBytes {
+				chunkCount++
+				return nil
+			}
+
+				data, err := readDocFile(realPath, cfg.MaxFileBytes)
+				if err != nil {
+					return err
+				}
+
+			h := fileHash(data)
+			if state, ok := existing[realPath]; ok && state.active && state.hash == h {
+				chunkCount++
+				return nil
+			}
+
+			kind := extKind(ext)
+			title := filepath.Base(realPath)
+			text := string(data)
+			summary := extractSummary(text)
+
+			var embedding []byte
+			if x.Provider != nil && x.EmbedModel != "" && len(data) <= cfg.EmbedMaxBytes {
+				vec, err := x.Provider.Embed(ctx, x.EmbedModel, truncateForEmbed(text, cfg.EmbedMaxBytes))
+				if err == nil && len(vec) > 0 {
+					embedding = PackFloat32(vec)
+				}
+			}
+
+			now := db.NowMS()
+				_, err = x.DB.SQL.ExecContext(ctx,
+					`INSERT INTO memory_docs(scope_key, path, kind, title, summary, text, embedding, hash, mtime_ms, size_bytes, active, updated_at)
+                 VALUES(?,?,?,?,?,?,?,?,?,?,1,?)
+                 ON CONFLICT(scope_key, path) DO UPDATE SET
+                   kind=excluded.kind, title=excluded.title, summary=excluded.summary,
+                   text=excluded.text, embedding=excluded.embedding,
+                   hash=excluded.hash, mtime_ms=excluded.mtime_ms,
+                   size_bytes=excluded.size_bytes, active=1, updated_at=excluded.updated_at`,
+					scopeKey, realPath, kind, title, summary, text, nullBytes(embedding), h, mtimeMS, sizeBytes, now)
+				if err != nil {
+					return fmt.Errorf("upsert indexed doc %s: %w", realPath, err)
+				}
+				chunkCount++
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+		}
+
+	// deactivate docs no longer on disk
+	rows, err := x.DB.SQL.QueryContext(ctx,
+		`SELECT path FROM memory_docs WHERE scope_key=? AND active=1`, scopeKey)
+	if err != nil {
+		return err
+	}
+	var toDeactivate []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			continue
+		}
+		if !seen[p] {
+			toDeactivate = append(toDeactivate, p)
+		}
+	}
+	rows.Close()
+	for _, p := range toDeactivate {
+		_, _ = x.DB.SQL.ExecContext(ctx,
+			`UPDATE memory_docs SET active=0, updated_at=? WHERE scope_key=? AND path=?`,
+			db.NowMS(), scopeKey, p)
+	}
+	return nil
+}
+
+func (x *DocIndexer) loadIndexedDocState(ctx context.Context, scopeKey string) (map[string]indexedDocState, error) {
+	rows, err := x.DB.SQL.QueryContext(ctx,
+		`SELECT path, hash, mtime_ms, size_bytes, active FROM memory_docs WHERE scope_key=?`, scopeKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]indexedDocState{}
+	for rows.Next() {
+		var path, hash string
+		var mtimeMS, sizeBytes int64
+		var active int
+		if err := rows.Scan(&path, &hash, &mtimeMS, &sizeBytes, &active); err != nil {
+			return nil, err
+		}
+		out[path] = indexedDocState{hash: hash, mtimeMS: mtimeMS, sizeBytes: sizeBytes, active: active == 1}
+	}
+	return out, rows.Err()
+}
+
+func readDocFile(path string, maxBytes int) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(io.LimitReader(f, int64(maxBytes)))
+}
+
+func (x *DocIndexer) needsUpdate(ctx context.Context, scopeKey, path, newHash string) bool {
+	row := x.DB.SQL.QueryRowContext(ctx,
+		`SELECT hash FROM memory_docs WHERE scope_key=? AND path=? AND active=1`, scopeKey, path)
+	var existing string
+	if err := row.Scan(&existing); err != nil {
+		return true
+	}
+	return existing != newHash
+}
+
+// DocRetriever retrieves indexed docs by FTS query.
+type DocRetriever struct {
+	DB *db.DB
+}
+
+// RetrievedDoc is a doc excerpt returned by retrieval.
+type RetrievedDoc struct {
+	Path    string
+	Title   string
+	Excerpt string
+	Score   float64
+}
+
+// RetrieveDocs queries the FTS index for docs matching query.
+func (r *DocRetriever) RetrieveDocs(ctx context.Context, scopeKey, query string, topK int) ([]RetrievedDoc, error) {
+	if topK <= 0 {
+		topK = 5
+	}
+	q := normalizeFTSQuery(query)
+	if q == "" {
+		return nil, nil
+	}
+	rows, err := r.DB.SQL.QueryContext(ctx,
+		`SELECT memory_docs_fts.rowid, memory_docs.path, memory_docs.title, memory_docs.text, bm25(memory_docs_fts) as rank
+         FROM memory_docs_fts
+         JOIN memory_docs ON memory_docs.id = memory_docs_fts.rowid
+         WHERE memory_docs_fts MATCH ? AND memory_docs.scope_key=? AND memory_docs.active=1
+         ORDER BY rank LIMIT ?`,
+		q, scopeKey, topK)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []RetrievedDoc
+	for rows.Next() {
+		var rowid int64
+		var path, title, text string
+		var rank float64
+		if err := rows.Scan(&rowid, &path, &title, &text, &rank); err != nil {
+			return nil, err
+		}
+		out = append(out, RetrievedDoc{
+			Path:    path,
+			Title:   title,
+			Excerpt: excerptText(text, 500),
+			Score:   1.0 / (1.0 + rank),
+		})
+	}
+	return out, rows.Err()
+}
+
+// UpsertDoc inserts or updates a doc in memory_docs (for direct use by tests).
+func UpsertDoc(ctx context.Context, d *db.DB, scopeKey, path, kind, title, summary, text string, embedding []byte, hash string, mtimeMS, sizeBytes int64) error {
+	now := db.NowMS()
+	_, err := d.SQL.ExecContext(ctx,
+		`INSERT INTO memory_docs(scope_key, path, kind, title, summary, text, embedding, hash, mtime_ms, size_bytes, active, updated_at)
+         VALUES(?,?,?,?,?,?,?,?,?,?,1,?)
+         ON CONFLICT(scope_key, path) DO UPDATE SET
+           kind=excluded.kind, title=excluded.title, summary=excluded.summary,
+           text=excluded.text, embedding=excluded.embedding,
+           hash=excluded.hash, mtime_ms=excluded.mtime_ms,
+           size_bytes=excluded.size_bytes, active=1, updated_at=excluded.updated_at`,
+		scopeKey, path, kind, title, summary, text, nullBytes(embedding), hash, mtimeMS, sizeBytes, now)
+	return err
+}
+
+func fileHash(data []byte) string {
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:8])
+}
+
+func extKind(ext string) string {
+	switch ext {
+	case ".md":
+		return "markdown"
+	case ".txt":
+		return "text"
+	default:
+		return "text"
+	}
+}
+
+func extractSummary(text string) string {
+	for _, line := range strings.SplitN(text, "\n", 20) {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "```") || strings.HasPrefix(line, "---") {
+			continue
+		}
+		if len(line) > 200 {
+			line = line[:200]
+		}
+		return line
+	}
+	return ""
+}
+
+func truncateForEmbed(text string, max int) string {
+	if max <= 0 || len(text) <= max {
+		return text
+	}
+	return text[:max]
+}
+
+func excerptText(text string, maxChars int) string {
+	text = strings.TrimSpace(text)
+	if len(text) <= maxChars {
+		return text
+	}
+	return text[:maxChars] + "…"
+}
+
+func nullBytes(b []byte) any {
+	if len(b) == 0 {
+		return nil
+	}
+	return b
+}
+````
+
+## File: internal/memory/retrieve.go
+````go
+package memory
+
+import (
+	"context"
+	"sort"
+	"strings"
+
 	"or3-intern/internal/db"
 )
 
-func openDiscordTestDB(t *testing.T) *db.DB {
-	t.Helper()
-	d, err := db.Open(filepath.Join(t.TempDir(), "discord.db"))
+type Retrieved struct {
+	Source string // pinned|vector|fts
+	ID int64
+	Text string
+	Score float64
+}
+
+type Retriever struct {
+	DB *db.DB
+	VectorWeight float64
+	FTSWeight float64
+	VectorScanLimit int
+}
+
+func NewRetriever(d *db.DB) *Retriever {
+	return &Retriever{DB: d, VectorWeight: 0.7, FTSWeight: 0.3, VectorScanLimit: 2000}
+}
+
+func (r *Retriever) Retrieve(ctx context.Context, sessionKey, query string, queryVec []float32, vectorK, ftsK, topK int) ([]Retrieved, error) {
+	vecs, err := VectorSearch(ctx, r.DB, sessionKey, queryVec, vectorK, r.VectorScanLimit)
+	if err != nil { return nil, err }
+	fts, _ := r.DB.SearchFTS(ctx, sessionKey, normalizeFTSQuery(query), ftsK)
+
+	type agg struct {
+		id int64
+		text string
+		v float64
+		f float64
+	}
+	m := map[int64]*agg{}
+	for _, c := range vecs {
+		a := m[c.ID]
+		if a == nil { a = &agg{id: c.ID, text: c.Text}; m[c.ID] = a }
+		a.v = c.Score
+	}
+	for _, f := range fts {
+		a := m[f.ID]
+		if a == nil { a = &agg{id: f.ID, text: f.Text}; m[f.ID] = a }
+		// bm25 lower is better. Convert to a positive "higher is better".
+		a.f = 1.0 / (1.0 + f.Rank)
+	}
+
+	out := make([]Retrieved, 0, len(m))
+	for _, a := range m {
+		score := (a.v * r.VectorWeight) + (a.f * r.FTSWeight)
+		src := "hybrid"
+		if a.f > 0 && a.v == 0 { src = "fts" }
+		if a.v > 0 && a.f == 0 { src = "vector" }
+		out = append(out, Retrieved{Source: src, ID: a.id, Text: a.text, Score: score})
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Score == out[j].Score {
+			return out[i].ID > out[j].ID // stable-ish
+		}
+		return out[i].Score > out[j].Score
+	})
+	if len(out) > topK { out = out[:topK] }
+	return out, nil
+}
+
+func normalizeFTSQuery(q string) string {
+	q = strings.TrimSpace(q)
+	if q == "" { return "" }
+	// simple: split on spaces, quote terms that contain punctuation
+	parts := strings.Fields(q)
+	for i, p := range parts {
+		if strings.ContainsAny(p, `":*`) {
+			parts[i] = `"` + strings.ReplaceAll(p, `"`, `""`) + `"`
+		}
+	}
+	return strings.Join(parts, " ")
+}
+````
+
+## File: internal/memory/scheduler.go
+````go
+package memory
+
+import (
+	"context"
+	"sync"
+	"time"
+)
+
+type Scheduler struct {
+	timeout time.Duration
+	run     func(context.Context, string)
+	baseCtx context.Context
+
+	mu       sync.Mutex
+	sessions map[string]*schedulerState
+}
+
+type schedulerState struct {
+	running bool
+	dirty   bool
+}
+
+func NewScheduler(timeout time.Duration, run func(context.Context, string)) *Scheduler {
+	return NewSchedulerWithContext(context.Background(), timeout, run)
+}
+
+func NewSchedulerWithContext(baseCtx context.Context, timeout time.Duration, run func(context.Context, string)) *Scheduler {
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	return &Scheduler{
+		timeout:  timeout,
+		run:      run,
+		baseCtx:  baseCtx,
+		sessions: map[string]*schedulerState{},
+	}
+}
+
+func (s *Scheduler) Trigger(sessionKey string) {
+	if s == nil || s.run == nil || sessionKey == "" {
+		return
+	}
+	s.mu.Lock()
+	state, ok := s.sessions[sessionKey]
+	if !ok {
+		state = &schedulerState{}
+		s.sessions[sessionKey] = state
+	}
+	if state.running {
+		state.dirty = true
+		s.mu.Unlock()
+		return
+	}
+	state.running = true
+	state.dirty = false
+	s.mu.Unlock()
+
+	go s.runLoop(sessionKey)
+}
+
+func (s *Scheduler) runLoop(sessionKey string) {
+	for {
+		base := s.baseCtx
+		if base == nil {
+			base = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(base, s.timeout)
+		s.run(ctx, sessionKey)
+		cancel()
+
+		s.mu.Lock()
+		state := s.sessions[sessionKey]
+		if state == nil {
+			s.mu.Unlock()
+			return
+		}
+		if state.dirty {
+			state.dirty = false
+			s.mu.Unlock()
+			continue
+		}
+		delete(s.sessions, sessionKey)
+		s.mu.Unlock()
+		return
+	}
+}
+````
+
+## File: internal/tools/context.go
+````go
+package tools
+
+import (
+	"context"
+
+	"or3-intern/internal/scope"
+)
+
+type sessionContextKey struct{}
+type deliveryChannelContextKey struct{}
+type deliveryToContextKey struct{}
+type envContextKey struct{}
+
+func ContextWithSession(ctx context.Context, sessionKey string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if sessionKey == "" {
+		sessionKey = scope.GlobalMemoryScope
+	}
+	return context.WithValue(ctx, sessionContextKey{}, sessionKey)
+}
+
+func ContextWithDelivery(ctx context.Context, channel, to string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx = context.WithValue(ctx, deliveryChannelContextKey{}, channel)
+	return context.WithValue(ctx, deliveryToContextKey{}, to)
+}
+
+func ContextWithEnv(ctx context.Context, env map[string]string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if len(env) == 0 {
+		return ctx
+	}
+	copyEnv := make(map[string]string, len(env))
+	for k, v := range env {
+		copyEnv[k] = v
+	}
+	return context.WithValue(ctx, envContextKey{}, copyEnv)
+}
+
+func SessionFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return scope.GlobalMemoryScope
+	}
+	if sessionKey, ok := ctx.Value(sessionContextKey{}).(string); ok && sessionKey != "" {
+		return sessionKey
+	}
+	return scope.GlobalMemoryScope
+}
+
+func DeliveryFromContext(ctx context.Context) (channel string, to string) {
+	if ctx == nil {
+		return "", ""
+	}
+	if v, ok := ctx.Value(deliveryChannelContextKey{}).(string); ok {
+		channel = v
+	}
+	if v, ok := ctx.Value(deliveryToContextKey{}).(string); ok {
+		to = v
+	}
+	return channel, to
+}
+
+func EnvFromContext(ctx context.Context) map[string]string {
+	if ctx == nil {
+		return nil
+	}
+	if env, ok := ctx.Value(envContextKey{}).(map[string]string); ok && len(env) > 0 {
+		copyEnv := make(map[string]string, len(env))
+		for k, v := range env {
+			copyEnv[k] = v
+		}
+		return copyEnv
+	}
+	return nil
+}
+````
+
+## File: internal/tools/exec.go
+````go
+package tools
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+type ExecTool struct {
+	Base
+	Timeout         time.Duration
+	RestrictDir     string // if non-empty, cwd must be inside
+	PathAppend      string
+	OutputMaxBytes  int
+	BlockedPatterns []string
+}
+
+const defaultExecOutputMaxBytes = 10000
+
+func (t *ExecTool) Name() string { return "exec" }
+func (t *ExecTool) Description() string {
+	return "Run a shell command with safety limits. Output is truncated."
+}
+func (t *ExecTool) Parameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"command":        map[string]any{"type": "string", "description": "Shell command to run"},
+			"cwd":            map[string]any{"type": "string", "description": "Working directory (optional)"},
+			"timeoutSeconds": map[string]any{"type": "integer", "description": "Override timeout (optional)"},
+		},
+		"required": []string{"command"},
+	}
+}
+func (t *ExecTool) Schema() map[string]any {
+	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
+}
+
+var defaultBlockedPatterns = []string{
+	"rm -rf", "mkfs", "dd ", "shutdown", "reboot", "poweroff", ":(){", ">|", "chown -R /", "chmod -R 777 /",
+}
+
+func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, error) {
+	cmdS, _ := params["command"].(string)
+	if strings.TrimSpace(cmdS) == "" {
+		return "", errors.New("missing command")
+	}
+	lc := strings.ToLower(cmdS)
+	patterns := t.BlockedPatterns
+	if len(patterns) == 0 {
+		patterns = defaultBlockedPatterns
+	}
+	for _, b := range patterns {
+		if strings.Contains(lc, b) {
+			return "", fmt.Errorf("blocked command pattern: %q", b)
+		}
+	}
+	cwd, _ := params["cwd"].(string)
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
+	if t.RestrictDir != "" {
+		abs, _ := filepath.Abs(cwd)
+		root, _ := filepath.Abs(t.RestrictDir)
+		rel, err := filepath.Rel(root, abs)
+		if err != nil || strings.HasPrefix(rel, "..") {
+			return "", fmt.Errorf("cwd outside allowed directory")
+		}
+	}
+
+	to := t.Timeout
+	if v, ok := params["timeoutSeconds"].(float64); ok && v > 0 {
+		to = time.Duration(int(v)) * time.Second
+	}
+	cctx, cancel := context.WithTimeout(ctx, to)
+	defer cancel()
+
+	c := exec.CommandContext(cctx, "bash", "-lc", cmdS)
+	c.Dir = cwd
+	env := os.Environ()
+	ctxEnv := EnvFromContext(ctx)
+	if len(ctxEnv) > 0 {
+		env = mergeEnv(env, ctxEnv)
+	}
+	if t.PathAppend != "" {
+		pathValue := lookupEnv(env, "PATH")
+		env = append(env, "PATH="+pathValue+string(os.PathListSeparator)+t.PathAppend)
+	}
+	c.Env = env
+	var stdout, stderr bytes.Buffer
+	c.Stdout = &stdout
+	c.Stderr = &stderr
+	err := c.Run()
+	out := stdout.String()
+	er := stderr.String()
+	max := t.OutputMaxBytes
+	if max <= 0 {
+		max = defaultExecOutputMaxBytes
+	}
+	if len(out) > max {
+		out = out[:max] + "\n...[truncated]\n"
+	}
+	if len(er) > max {
+		er = er[:max] + "\n...[truncated]\n"
+	}
 	if err != nil {
-		t.Fatalf("db.Open: %v", err)
+		return fmt.Sprintf("exit error: %v\n\nstdout:\n%s\n\nstderr:\n%s", err, out, er), nil
 	}
-	t.Cleanup(func() { _ = d.Close() })
-	return d
+	if strings.TrimSpace(er) != "" {
+		return fmt.Sprintf("stdout:\n%s\n\nstderr:\n%s", out, er), nil
+	}
+	return out, nil
 }
 
-func TestChannel_StartReceivesMessage(t *testing.T) {
-	upgrader := websocket.Upgrader{}
-	identified := make(chan bool, 1)
-	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
+func mergeEnv(base []string, overlay map[string]string) []string {
+	if len(overlay) == 0 {
+		return append([]string{}, base...)
+	}
+	values := make(map[string]string, len(base)+len(overlay))
+	order := make([]string, 0, len(base)+len(overlay))
+	for _, raw := range base {
+		key, value, ok := strings.Cut(raw, "=")
+		if !ok {
+			continue
+		}
+		if _, exists := values[key]; !exists {
+			order = append(order, key)
+		}
+		values[key] = value
+	}
+	for key, value := range overlay {
+		if _, exists := values[key]; !exists {
+			order = append(order, key)
+		}
+		values[key] = value
+	}
+	out := make([]string, 0, len(order))
+	for _, key := range order {
+		out = append(out, key+"="+values[key])
+	}
+	return out
+}
+
+func lookupEnv(env []string, key string) string {
+	for _, raw := range env {
+		name, value, ok := strings.Cut(raw, "=")
+		if ok && name == key {
+			return value
+		}
+	}
+	return os.Getenv(key)
+}
+````
+
+## File: internal/tools/files.go
+````go
+package tools
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+type FileTool struct {
+	Base
+	Root string // allowed root (optional)
+}
+
+const (
+	defaultReadFileMaxBytes = 200000
+	defaultListDirMaxEntries = 200
+)
+
+func (t *FileTool) safePath(p string) (string, error) {
+	if strings.TrimSpace(p) == "" { return "", errors.New("missing path") }
+	abs, err := filepath.Abs(p)
+	if err != nil { return "", err }
+	abs, err = canonicalizePath(abs)
+	if err != nil { return "", err }
+	if t.Root != "" {
+		root, err := filepath.Abs(t.Root)
+		if err != nil { return "", err }
+		root, err = canonicalizeRoot(root)
+		if err != nil { return "", err }
+		rel, err := filepath.Rel(root, abs)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return "", fmt.Errorf("path outside allowed root")
+		}
+	}
+	return abs, nil
+}
+
+func canonicalizeRoot(root string) (string, error) {
+	if _, err := os.Stat(root); err != nil { return "", err }
+	return filepath.EvalSymlinks(root)
+}
+
+func canonicalizePath(abs string) (string, error) {
+	if _, err := os.Lstat(abs); err == nil {
+		return filepath.EvalSymlinks(abs)
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+	existing := abs
+	missingParts := make([]string, 0, 4)
+	for {
+		if _, err := os.Lstat(existing); err == nil {
+			break
+		} else if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(existing)
+		if parent == existing {
+			return "", os.ErrNotExist
+		}
+		missingParts = append(missingParts, filepath.Base(existing))
+		existing = parent
+	}
+	realExisting, err := filepath.EvalSymlinks(existing)
+	if err != nil { return "", err }
+	for i := len(missingParts) - 1; i >= 0; i-- {
+		realExisting = filepath.Join(realExisting, missingParts[i])
+	}
+	return realExisting, nil
+}
+
+type ReadFile struct{ FileTool }
+func (t *ReadFile) Name() string { return "read_file" }
+func (t *ReadFile) Description() string { return "Read a UTF-8 text file." }
+func (t *ReadFile) Parameters() map[string]any {
+	return map[string]any{"type":"object","properties":map[string]any{
+		"path": map[string]any{"type":"string"},
+		"maxBytes": map[string]any{"type":"integer","description":"Max bytes to read (default 200000)"},
+	},"required":[]string{"path"}}
+}
+func (t *ReadFile) Schema() map[string]any { return t.SchemaFor(t.Name(), t.Description(), t.Parameters()) }
+func (t *ReadFile) Execute(ctx context.Context, params map[string]any) (string, error) {
+	p, err := t.safePath(fmt.Sprint(params["path"]))
+	if err != nil { return "", err }
+	max := defaultReadFileMaxBytes
+	if v, ok := params["maxBytes"].(float64); ok && int(v) > 0 { max = int(v) }
+	b, err := os.ReadFile(p)
+	if err != nil { return "", err }
+	if len(b) > max { b = b[:max] }
+	return string(b), nil
+}
+
+type WriteFile struct{ FileTool }
+func (t *WriteFile) Name() string { return "write_file" }
+func (t *WriteFile) Description() string { return "Write text to a file (overwrites)." }
+func (t *WriteFile) Parameters() map[string]any {
+	return map[string]any{"type":"object","properties":map[string]any{
+		"path": map[string]any{"type":"string"},
+		"content": map[string]any{"type":"string"},
+		"mkdirs": map[string]any{"type":"boolean"},
+	},"required":[]string{"path","content"}}
+}
+func (t *WriteFile) Schema() map[string]any { return t.SchemaFor(t.Name(), t.Description(), t.Parameters()) }
+func (t *WriteFile) Execute(ctx context.Context, params map[string]any) (string, error) {
+	p, err := t.safePath(fmt.Sprint(params["path"]))
+	if err != nil { return "", err }
+	content := fmt.Sprint(params["content"])
+	mkdirs, _ := params["mkdirs"].(bool)
+	if mkdirs {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil { return "", err }
+	}
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil { return "", err }
+	return "ok", nil
+}
+
+type EditFile struct{ FileTool }
+func (t *EditFile) Name() string { return "edit_file" }
+func (t *EditFile) Description() string {
+	return "Edit a text file by applying a list of find/replace operations."
+}
+func (t *EditFile) Parameters() map[string]any {
+	return map[string]any{"type":"object","properties":map[string]any{
+		"path": map[string]any{"type":"string"},
+		"edits": map[string]any{"type":"array","items":map[string]any{
+			"type":"object",
+			"properties":map[string]any{
+				"find": map[string]any{"type":"string"},
+				"replace": map[string]any{"type":"string"},
+				"count": map[string]any{"type":"integer","description":"max replacements (0=all)"},
+			},
+			"required":[]string{"find","replace"},
+		}},
+	},"required":[]string{"path","edits"}}
+}
+func (t *EditFile) Schema() map[string]any { return t.SchemaFor(t.Name(), t.Description(), t.Parameters()) }
+func (t *EditFile) Execute(ctx context.Context, params map[string]any) (string, error) {
+	p, err := t.safePath(fmt.Sprint(params["path"]))
+	if err != nil { return "", err }
+	b, err := os.ReadFile(p)
+	if err != nil { return "", err }
+	s := string(b)
+	rawEdits, _ := params["edits"].([]any)
+	for _, e := range rawEdits {
+		m, _ := e.(map[string]any)
+		find := fmt.Sprint(m["find"])
+		replace := fmt.Sprint(m["replace"])
+		count := 0
+		if v, ok := m["count"].(float64); ok { count = int(v) }
+		if count <= 0 {
+			s = strings.ReplaceAll(s, find, replace)
+		} else {
+			s = strings.Replace(s, find, replace, count)
+		}
+	}
+	if err := os.WriteFile(p, []byte(s), 0o644); err != nil { return "", err }
+	return "ok", nil
+}
+
+type ListDir struct{ FileTool }
+func (t *ListDir) Name() string { return "list_dir" }
+func (t *ListDir) Description() string { return "List directory entries." }
+func (t *ListDir) Parameters() map[string]any {
+	return map[string]any{"type":"object","properties":map[string]any{
+		"path": map[string]any{"type":"string"},
+		"max": map[string]any{"type":"integer"},
+	},"required":[]string{"path"}}
+}
+func (t *ListDir) Schema() map[string]any { return t.SchemaFor(t.Name(), t.Description(), t.Parameters()) }
+func (t *ListDir) Execute(ctx context.Context, params map[string]any) (string, error) {
+	p, err := t.safePath(fmt.Sprint(params["path"]))
+	if err != nil { return "", err }
+	ents, err := os.ReadDir(p)
+	if err != nil { return "", err }
+	max := defaultListDirMaxEntries
+	if v, ok := params["max"].(float64); ok && int(v) > 0 { max = int(v) }
+	type entry struct{ Name string `json:"name"`; IsDir bool `json:"isDir"`; Size int64 `json:"size"` }
+	out := []entry{}
+	for _, e := range ents {
+		if len(out) >= max { break }
+		info, _ := e.Info()
+		sz := int64(0)
+		if info != nil { sz = info.Size() }
+		out = append(out, entry{Name: e.Name(), IsDir: e.IsDir(), Size: sz})
+	}
+	b, _ := json.MarshalIndent(out, "", "  ")
+	return string(b), nil
+}
+````
+
+## File: internal/tools/memory.go
+````go
+package tools
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"strings"
+
+	"or3-intern/internal/db"
+	"or3-intern/internal/memory"
+	"or3-intern/internal/providers"
+	"or3-intern/internal/scope"
+)
+
+type MemorySetPinned struct {
+	Base
+	DB *db.DB
+}
+func (t *MemorySetPinned) Name() string { return "memory_set_pinned" }
+func (t *MemorySetPinned) Description() string { return "Upsert a pinned memory entry (always included in prompts)." }
+func (t *MemorySetPinned) Parameters() map[string]any {
+	return map[string]any{"type":"object","properties":map[string]any{
+		"key": map[string]any{"type":"string"},
+		"content": map[string]any{"type":"string"},
+		"scope": map[string]any{"type":"string", "description":"Optional scope override: 'global' to share across sessions"},
+	},"required":[]string{"key","content"}}
+}
+func (t *MemorySetPinned) Schema() map[string]any { return t.SchemaFor(t.Name(), t.Description(), t.Parameters()) }
+func (t *MemorySetPinned) Execute(ctx context.Context, params map[string]any) (string, error) {
+	if t.DB == nil { return "", fmt.Errorf("db not set") }
+	key := strings.TrimSpace(fmt.Sprint(params["key"]))
+	content := strings.TrimSpace(fmt.Sprint(params["content"]))
+	if key == "" || content == "" { return "", fmt.Errorf("missing key/content") }
+	if err := t.DB.UpsertPinned(ctx, memoryScopeFromParams(ctx, params), key, content); err != nil { return "", err }
+	return "ok", nil
+}
+
+type MemoryAddNote struct {
+	Base
+	DB *db.DB
+	Provider *providers.Client
+	EmbedModel string
+}
+func (t *MemoryAddNote) Name() string { return "memory_add_note" }
+func (t *MemoryAddNote) Description() string { return "Add a semantic memory note to the indexed memory store." }
+func (t *MemoryAddNote) Parameters() map[string]any {
+	return map[string]any{"type":"object","properties":map[string]any{
+		"text": map[string]any{"type":"string"},
+		"tags": map[string]any{"type":"string","description":"comma-separated tags (optional)"},
+		"source_message_id": map[string]any{"type":"integer","description":"source message id (optional)"},
+		"scope": map[string]any{"type":"string", "description":"Optional scope override: 'global' to share across sessions"},
+	},"required":[]string{"text"}}
+}
+func (t *MemoryAddNote) Schema() map[string]any { return t.SchemaFor(t.Name(), t.Description(), t.Parameters()) }
+func (t *MemoryAddNote) Execute(ctx context.Context, params map[string]any) (string, error) {
+	if t.DB == nil || t.Provider == nil { return "", fmt.Errorf("missing deps") }
+	text := strings.TrimSpace(fmt.Sprint(params["text"]))
+	if text == "" { return "", fmt.Errorf("empty text") }
+	tags := strings.TrimSpace(fmt.Sprint(params["tags"]))
+	var src sql.NullInt64
+	if v, ok := params["source_message_id"].(float64); ok && int64(v) > 0 {
+		src = sql.NullInt64{Int64: int64(v), Valid: true}
+	}
+	vec, err := t.Provider.Embed(ctx, t.EmbedModel, text)
+	if err != nil { return "", err }
+	blob := memory.PackFloat32(vec)
+	id, err := t.DB.InsertMemoryNote(ctx, memoryScopeFromParams(ctx, params), text, blob, src, tags)
+	if err != nil { return "", err }
+	return fmt.Sprintf("ok: %d", id), nil
+}
+
+type MemorySearch struct {
+	Base
+	DB *db.DB
+	Provider *providers.Client
+	EmbedModel string
+	VectorK int
+	FTSK int
+	TopK int
+	VectorScanLimit int
+}
+func (t *MemorySearch) Name() string { return "memory_search" }
+func (t *MemorySearch) Description() string { return "Search long-term memory (hybrid semantic + keyword) and return top results." }
+func (t *MemorySearch) Parameters() map[string]any {
+	return map[string]any{"type":"object","properties":map[string]any{
+		"query": map[string]any{"type":"string"},
+		"topK": map[string]any{"type":"integer"},
+		"scope": map[string]any{"type":"string", "description":"Optional scope override: 'global' to search only shared memory"},
+	},"required":[]string{"query"}}
+}
+func (t *MemorySearch) Schema() map[string]any { return t.SchemaFor(t.Name(), t.Description(), t.Parameters()) }
+func (t *MemorySearch) Execute(ctx context.Context, params map[string]any) (string, error) {
+	if t.DB == nil || t.Provider == nil { return "", fmt.Errorf("missing deps") }
+	q := strings.TrimSpace(fmt.Sprint(params["query"]))
+	if q == "" { return "", fmt.Errorf("empty query") }
+	topK := t.TopK
+	if v, ok := params["topK"].(float64); ok && int(v) > 0 { topK = int(v) }
+	vec, err := t.Provider.Embed(ctx, t.EmbedModel, q)
+	if err != nil { return "", err }
+	r := memory.NewRetriever(t.DB)
+	r.VectorScanLimit = t.VectorScanLimit
+	got, err := r.Retrieve(ctx, memoryScopeFromParams(ctx, params), q, vec, t.VectorK, t.FTSK, topK)
+	if err != nil { return "", err }
+	var b strings.Builder
+	for i, m := range got {
+		b.WriteString(fmt.Sprintf("%d. [%s] %.4f %s\n", i+1, m.Source, m.Score, m.Text))
+	}
+	return b.String(), nil
+}
+
+func memoryScopeFromParams(ctx context.Context, params map[string]any) string {
+	if requestedScope := strings.TrimSpace(fmt.Sprint(params["scope"])); scope.IsGlobalScopeRequest(requestedScope) {
+		return scope.GlobalMemoryScope
+	}
+	return SessionFromContext(ctx)
+}
+````
+
+## File: internal/tools/message.go
+````go
+package tools
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+type DeliverFunc func(ctx context.Context, channel, to, text string, meta map[string]any) error
+
+type SendMessage struct {
+	Base
+	Deliver        DeliverFunc
+	DefaultChannel string
+	DefaultTo      string
+	AllowedRoot    string
+	ArtifactsDir   string
+	MaxMediaBytes  int
+}
+
+func (t *SendMessage) Name() string { return "send_message" }
+func (t *SendMessage) Description() string {
+	return "Send a message via a configured channel (for reminders/cron or proactive messages)."
+}
+func (t *SendMessage) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{
+		"channel": map[string]any{"type": "string"},
+		"to":      map[string]any{"type": "string"},
+		"text":    map[string]any{"type": "string"},
+		"media": map[string]any{
+			"type":        "array",
+			"items":       map[string]any{"type": "string"},
+			"description": "Optional local file paths to send as attachments.",
+		},
+	}, "required": []string{}}
+}
+func (t *SendMessage) Schema() map[string]any {
+	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
+}
+func (t *SendMessage) Execute(ctx context.Context, params map[string]any) (string, error) {
+	if t.Deliver == nil {
+		return "", fmt.Errorf("deliver not configured")
+	}
+	ctxChannel, ctxTo := DeliveryFromContext(ctx)
+	ch := readOptionalString(params, "channel")
+	to := readOptionalString(params, "to")
+	text := readOptionalString(params, "text")
+	if ch == "" {
+		ch = strings.TrimSpace(t.DefaultChannel)
+	}
+	if ch == "" {
+		ch = strings.TrimSpace(ctxChannel)
+	}
+	if to == "" {
+		to = strings.TrimSpace(t.DefaultTo)
+	}
+	if to == "" {
+		to = strings.TrimSpace(ctxTo)
+	}
+	mediaPaths, err := t.validateMediaPaths(params["media"])
+	if err != nil {
+		return "", err
+	}
+	if text == "" && len(mediaPaths) == 0 {
+		return "", fmt.Errorf("message requires text or media")
+	}
+	var meta map[string]any
+	explicitTo := strings.TrimSpace(readOptionalString(params, "to")) != ""
+	if len(mediaPaths) > 0 || explicitTo {
+		meta = map[string]any{}
+		if len(mediaPaths) > 0 {
+			meta["media_paths"] = mediaPaths
+		}
+		if explicitTo {
+			meta["explicit_to"] = true
+		}
+	}
+	if err := t.Deliver(ctx, ch, to, text, meta); err != nil {
+		return "", err
+	}
+	return "ok", nil
+}
+
+func (t *SendMessage) validateMediaPaths(raw any) ([]string, error) {
+	items, err := stringSlice(raw)
+	if err != nil {
+		return nil, err
+	}
+	if len(items) == 0 {
+		return nil, nil
+	}
+	roots := make([]string, 0, 2)
+	if strings.TrimSpace(t.AllowedRoot) != "" {
+		roots = append(roots, strings.TrimSpace(t.AllowedRoot))
+	}
+	if strings.TrimSpace(t.ArtifactsDir) != "" {
+		roots = append(roots, strings.TrimSpace(t.ArtifactsDir))
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		p, err := filepath.Abs(strings.TrimSpace(item))
 		if err != nil {
-			t.Fatalf("upgrade: %v", err)
+			return nil, err
 		}
-		defer conn.Close()
-		_ = conn.WriteJSON(map[string]any{"op": 10, "d": map[string]any{"heartbeat_interval": 10000}})
-		_, raw, err := conn.ReadMessage()
+		p, err = canonicalizePath(p)
 		if err != nil {
-			t.Fatalf("Read identify: %v", err)
+			return nil, err
 		}
-		if strings.Contains(string(raw), `"op":2`) {
-			identified <- true
-		}
-		_ = conn.WriteJSON(map[string]any{"op": 0, "t": "READY", "d": map[string]any{"user": map[string]any{"id": "B1"}}})
-		_ = conn.WriteJSON(map[string]any{"op": 0, "t": "MESSAGE_CREATE", "d": map[string]any{"id": "m1", "channel_id": "C1", "content": "<@B1> hello", "author": map[string]any{"id": "U1", "bot": false}, "mentions": []map[string]any{{"id": "B1"}}}})
-		<-time.After(100 * time.Millisecond)
-	}))
-	defer wsServer.Close()
-	b := bus.New(1)
-	ch := &Channel{Config: config.DiscordChannelConfig{Token: "token", GatewayURL: "ws" + strings.TrimPrefix(wsServer.URL, "http"), RequireMention: true}}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	if err := ch.Start(ctx, b); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer ch.Stop(context.Background())
-	select {
-	case <-identified:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for identify")
-	}
-	select {
-	case ev := <-b.Channel():
-		if ev.Channel != "discord" || ev.Message != "hello" {
-			t.Fatalf("unexpected event: %#v", ev)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for discord event")
-	}
-}
-
-func TestChannel_DeliverPostsMessage(t *testing.T) {
-	var got map[string]any
-	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/channels/C1/messages" {
-			t.Fatalf("unexpected path: %s", r.URL.Path)
-		}
-		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
-			t.Fatalf("decode body: %v", err)
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"id":"1"}`))
-	}))
-	defer apiServer.Close()
-	ch := &Channel{Config: config.DiscordChannelConfig{Token: "token", APIBase: apiServer.URL, DefaultChannelID: "C1"}}
-	if err := ch.Deliver(context.Background(), "", "hello", map[string]any{"message_reference": "m1"}); err != nil {
-		t.Fatalf("Deliver: %v", err)
-	}
-	if got["content"] != "hello" {
-		t.Fatalf("unexpected payload: %#v", got)
-	}
-}
-
-func TestChannel_StartReceivesAttachmentMessage(t *testing.T) {
-	d := openDiscordTestDB(t)
-	store := &artifacts.Store{Dir: t.TempDir(), DB: d}
-	fileServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte("image-data"))
-	}))
-	defer fileServer.Close()
-
-	upgrader := websocket.Upgrader{}
-	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
+		info, err := os.Stat(p)
 		if err != nil {
-			t.Fatalf("upgrade: %v", err)
+			return nil, err
 		}
-		defer conn.Close()
-		_ = conn.WriteJSON(map[string]any{"op": 10, "d": map[string]any{"heartbeat_interval": 10000}})
-		_, _, _ = conn.ReadMessage()
-		_ = conn.WriteJSON(map[string]any{"op": 0, "t": "READY", "d": map[string]any{"user": map[string]any{"id": "B1"}}})
-		_ = conn.WriteJSON(map[string]any{"op": 0, "t": "MESSAGE_CREATE", "d": map[string]any{
-			"id":         "m1",
-			"channel_id": "C1",
-			"content":    "",
-			"author":     map[string]any{"id": "U1", "bot": false},
-			"mentions":   []map[string]any{},
-			"attachments": []map[string]any{{
-				"url":          fileServer.URL + "/file.png",
-				"filename":     "file.png",
-				"content_type": "image/png",
-				"size":         10,
-			}},
-		}})
-		<-time.After(100 * time.Millisecond)
-	}))
-	defer wsServer.Close()
-
-	b := bus.New(1)
-	ch := &Channel{
-		Config:        config.DiscordChannelConfig{Token: "token", GatewayURL: "ws" + strings.TrimPrefix(wsServer.URL, "http"), RequireMention: false},
-		Artifacts:     store,
-		MaxMediaBytes: 1024,
+		if info.IsDir() {
+			return nil, fmt.Errorf("media path is a directory: %s", item)
+		}
+		if t.MaxMediaBytes == 0 {
+			return nil, fmt.Errorf("media attachments disabled by config")
+		}
+		if t.MaxMediaBytes > 0 && info.Size() > int64(t.MaxMediaBytes) {
+			return nil, fmt.Errorf("media path exceeds maxMediaBytes: %s", item)
+		}
+		if len(roots) > 0 {
+			allowed := false
+			for _, root := range roots {
+				ok, err := pathWithinRoot(p, root)
+				if err != nil {
+					return nil, err
+				}
+				if ok {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				return nil, fmt.Errorf("media path outside allowed roots: %s", item)
+			}
+		}
+		out = append(out, p)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	if err := ch.Start(ctx, b); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer ch.Stop(context.Background())
+	return out, nil
+}
 
-	select {
-	case ev := <-b.Channel():
-		if ev.Message != "[image: file.png]" {
-			t.Fatalf("unexpected event message: %#v", ev.Message)
+func pathWithinRoot(absPath, root string) (bool, error) {
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return false, err
+	}
+	root, err = canonicalizeRoot(root)
+	if err != nil {
+		return false, err
+	}
+	rel, err := filepath.Rel(root, absPath)
+	if err != nil {
+		return false, err
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)), nil
+}
+
+func stringSlice(raw any) ([]string, error) {
+	switch v := raw.(type) {
+	case nil:
+		return nil, nil
+	case []string:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			if strings.TrimSpace(item) == "" {
+				continue
+			}
+			out = append(out, item)
 		}
-		raw, ok := ev.Meta["attachments"].([]artifacts.Attachment)
-		if !ok || len(raw) != 1 {
-			t.Fatalf("expected one attachment in meta, got %#v", ev.Meta["attachments"])
+		return out, nil
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			s := strings.TrimSpace(fmt.Sprint(item))
+			if s == "" {
+				continue
+			}
+			out = append(out, s)
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for discord media event")
+		return out, nil
+	default:
+		return nil, fmt.Errorf("media must be an array of strings")
+	}
+}
+````
+
+## File: internal/tools/web.go
+````go
+package tools
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/netip"
+	"net/url"
+	"strings"
+	"time"
+)
+
+type WebFetch struct{
+	Base
+	HTTP *http.Client
+	Timeout time.Duration
+	DefaultMaxBytes int
+}
+
+const (
+	defaultWebTimeout = 20 * time.Second
+	defaultWebFetchMaxBytes = 200000
+	defaultWebFetchMaxRedirects = 10
+	defaultWebSearchMaxCount = 10
+	defaultWebSearchReadMaxBytes = 1 << 20
+)
+
+func (t *WebFetch) Name() string { return "web_fetch" }
+func (t *WebFetch) Description() string { return "Fetch a URL (GET) and return text (truncated)." }
+func (t *WebFetch) Parameters() map[string]any {
+	return map[string]any{"type":"object","properties":map[string]any{
+		"url": map[string]any{"type":"string"},
+		"maxBytes": map[string]any{"type":"integer"},
+	},"required":[]string{"url"}}
+}
+func (t *WebFetch) Schema() map[string]any { return t.SchemaFor(t.Name(), t.Description(), t.Parameters()) }
+func (t *WebFetch) Execute(ctx context.Context, params map[string]any) (string, error) {
+	u := fmt.Sprint(params["url"])
+	if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+		return "", fmt.Errorf("invalid url")
+	}
+	parsed, err := url.Parse(u)
+	if err != nil { return "", err }
+	if err := validateFetchURL(ctx, parsed); err != nil { return "", err }
+	max := t.DefaultMaxBytes
+	if max <= 0 { max = defaultWebFetchMaxBytes }
+	if v, ok := params["maxBytes"].(float64); ok && int(v) > 0 { max = int(v) }
+	client := t.HTTP
+	if t.HTTP == nil {
+		to := t.Timeout
+		if to <= 0 { to = defaultWebTimeout }
+		client = &http.Client{Timeout: to}
+	} else {
+		copyClient := *t.HTTP
+		client = &copyClient
+	}
+	prevCheckRedirect := client.CheckRedirect
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= defaultWebFetchMaxRedirects {
+			return fmt.Errorf("stopped after %d redirects", defaultWebFetchMaxRedirects)
+		}
+		if prevCheckRedirect != nil {
+			if err := prevCheckRedirect(req, via); err != nil {
+				return err
+			}
+		}
+		return validateFetchURL(req.Context(), req.URL)
+	}
+	r, err := http.NewRequestWithContext(ctx, "GET", parsed.String(), nil)
+	if err != nil { return "", err }
+	resp, err := client.Do(r)
+	if err != nil { return "", err }
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, int64(max)))
+	return fmt.Sprintf("status: %s\n\n%s", resp.Status, string(body)), nil
+}
+
+func validateFetchURL(ctx context.Context, target *url.URL) error {
+	if target == nil {
+		return fmt.Errorf("invalid url")
+	}
+	hostname := strings.TrimSpace(strings.ToLower(target.Hostname()))
+	if hostname == "" {
+		return fmt.Errorf("missing host")
+	}
+	if isBlockedFetchHostname(hostname) {
+		return fmt.Errorf("blocked fetch target")
+	}
+	if ip, err := netip.ParseAddr(hostname); err == nil {
+		if isBlockedFetchAddr(ip.Unmap()) {
+			return fmt.Errorf("blocked fetch target")
+		}
+		return nil
+	}
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, hostname)
+	if err != nil {
+		return err
+	}
+	if len(addrs) == 0 {
+		return fmt.Errorf("host did not resolve")
+	}
+	for _, addr := range addrs {
+		if ip, ok := netip.AddrFromSlice(addr.IP); ok && isBlockedFetchAddr(ip.Unmap()) {
+			return fmt.Errorf("blocked fetch target")
+		}
+	}
+	return nil
+}
+
+func isBlockedFetchHostname(hostname string) bool {
+	switch hostname {
+	case "localhost", "ip6-localhost", "metadata.google.internal":
+		return true
+	default:
+		return false
 	}
 }
 
-func TestChannel_DeliverPostsMultipartWithMedia(t *testing.T) {
-	mediaPath := filepath.Join(t.TempDir(), "image.png")
-	if err := os.WriteFile(mediaPath, []byte("image-data"), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
+func isBlockedFetchAddr(addr netip.Addr) bool {
+	if !addr.IsValid() {
+		return true
+	}
+	if addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() || addr.IsMulticast() || addr.IsUnspecified() {
+		return true
+	}
+	return addr.String() == "169.254.169.254"
+}
+
+type WebSearch struct{
+	Base
+	APIKey string
+	HTTP *http.Client
+	Timeout time.Duration
+	ReadMaxBytes int
+}
+
+func (t *WebSearch) Name() string { return "web_search" }
+func (t *WebSearch) Description() string {
+	return "Search the web (Brave Search API) and return top results."
+}
+func (t *WebSearch) Parameters() map[string]any {
+	return map[string]any{"type":"object","properties":map[string]any{
+		"query": map[string]any{"type":"string"},
+		"count": map[string]any{"type":"integer","description":"max results (default 5)"},
+	},"required":[]string{"query"}}
+}
+func (t *WebSearch) Schema() map[string]any { return t.SchemaFor(t.Name(), t.Description(), t.Parameters()) }
+
+func (t *WebSearch) Execute(ctx context.Context, params map[string]any) (string, error) {
+	if strings.TrimSpace(t.APIKey) == "" {
+		return "", fmt.Errorf("Brave API key not configured (set BRAVE_API_KEY)")
+	}
+	q := fmt.Sprint(params["query"])
+	count := 5
+	if v, ok := params["count"].(float64); ok && int(v) > 0 { count = int(v) }
+	if count > defaultWebSearchMaxCount { count = defaultWebSearchMaxCount }
+	if t.HTTP == nil {
+		to := t.Timeout
+		if to <= 0 { to = defaultWebTimeout }
+		t.HTTP = &http.Client{Timeout: to}
 	}
 
-	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/channels/C1/messages" {
-			t.Fatalf("unexpected path: %s", r.URL.Path)
-		}
-		if !strings.Contains(r.Header.Get("Content-Type"), "multipart/form-data") {
-			t.Fatalf("expected multipart request, got %s", r.Header.Get("Content-Type"))
-		}
-		if err := r.ParseMultipartForm(1 << 20); err != nil {
-			t.Fatalf("ParseMultipartForm: %v", err)
-		}
-		if r.FormValue("payload_json") == "" {
-			t.Fatal("expected payload_json field")
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"id":"1"}`))
-	}))
-	defer apiServer.Close()
+	endpoint := "https://api.search.brave.com/res/v1/web/search?q=" + url.QueryEscape(q) + "&count=" + fmt.Sprint(count)
+	r, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
+	if err != nil { return "", err }
+	r.Header.Set("Accept", "application/json")
+	r.Header.Set("X-Subscription-Token", t.APIKey)
 
-	ch := &Channel{Config: config.DiscordChannelConfig{Token: "token", APIBase: apiServer.URL, DefaultChannelID: "C1"}, MaxMediaBytes: 1024}
-	if err := ch.Deliver(context.Background(), "", "hello", map[string]any{"media_paths": []string{mediaPath}}); err != nil {
-		t.Fatalf("Deliver: %v", err)
+	resp, err := t.HTTP.Do(r)
+	if err != nil { return "", err }
+	defer resp.Body.Close()
+	maxRead := t.ReadMaxBytes
+	if maxRead <= 0 { maxRead = defaultWebSearchReadMaxBytes }
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, int64(maxRead)))
+	if resp.StatusCode >= 300 {
+		return "", fmt.Errorf("search error %s: %s", resp.Status, string(body))
 	}
+
+	// Reduce response to stable subset
+	var raw map[string]any
+	_ = json.Unmarshal(body, &raw)
+	out := map[string]any{"query": q, "results": []any{}}
+	web, _ := raw["web"].(map[string]any)
+	results, _ := web["results"].([]any)
+	for _, it := range results {
+		m, _ := it.(map[string]any)
+		out["results"] = append(out["results"].([]any), map[string]any{
+			"title": m["title"],
+			"url": m["url"],
+			"description": m["description"],
+		})
+	}
+	b, _ := json.MarshalIndent(out, "", "  ")
+	return string(b), nil
+}
+
+// Optional: simple text extract from HTML (very rough)
+func StripHTML(s string) string {
+	var b bytes.Buffer
+	in := false
+	for _, r := range s {
+		if r == '<' { in = true; continue }
+		if r == '>' { in = false; continue }
+		if !in { b.WriteRune(r) }
+	}
+	return b.String()
+}
+````
+
+## File: internal/bus/bus.go
+````go
+package bus
+
+import (
+	"context"
+)
+
+type EventType string
+
+const (
+	EventUserMessage EventType = "user_message"
+	EventCron        EventType = "cron"
+	EventHeartbeat   EventType = "heartbeat"
+	EventSystem      EventType = "system"
+	EventWebhook     EventType = "webhook"
+	EventFileChange  EventType = "file_change"
+)
+
+type Event struct {
+	Type       EventType
+	SessionKey string
+	Channel    string
+	From       string
+	Message    string
+	Meta       map[string]any
+}
+
+type Handler func(ctx context.Context, ev Event) error
+
+type Bus struct {
+	ch chan Event
+}
+
+func New(buffer int) *Bus {
+	if buffer <= 0 {
+		buffer = 128
+	}
+	return &Bus{ch: make(chan Event, buffer)}
+}
+
+func (b *Bus) Publish(ev Event) bool {
+	select {
+	case b.ch <- ev:
+		return true
+	default:
+		return false
+	}
+}
+func (b *Bus) Channel() <-chan Event { return b.ch }
+````
+
+## File: internal/channels/cli/deliver.go
+````go
+package cli
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	"or3-intern/internal/bus"
+	"or3-intern/internal/channels"
+)
+
+// Deliverer handles final and streaming output to the CLI terminal.
+type Deliverer struct {
+	Spinner *Spinner // shared with Channel; stopped before any output
+}
+
+func (Deliverer) Name() string { return "cli" }
+
+func (Deliverer) Start(ctx context.Context, eventBus *bus.Bus) error { return nil }
+
+func (Deliverer) Stop(ctx context.Context) error { return nil }
+
+func (d Deliverer) Deliver(ctx context.Context, channel, to, text string) error {
+	d.stopSpinner()
+	fmt.Print(FormatResponse(text))
+	fmt.Println()
+	fmt.Println()
+	if sep := Separator(); sep != "" {
+		fmt.Println(sep)
+	}
+	ShowPrompt()
+	return nil
+}
+
+func (d Deliverer) stopSpinner() {
+	if d.Spinner != nil {
+		d.Spinner.Stop()
+	}
+}
+
+// ──────────────────────── streaming ────────────────────────
+
+// CLIStreamWriter renders incremental text deltas to stdout with styling.
+type CLIStreamWriter struct {
+	started bool
+	closed  bool
+	aborted bool
+	spinner *Spinner
+}
+
+func (w *CLIStreamWriter) WriteDelta(ctx context.Context, text string) error {
+	if w.closed || w.aborted {
+		return nil
+	}
+	if !w.started {
+		// Stop the spinner and print the response header on the first delta.
+		if w.spinner != nil {
+			w.spinner.Stop()
+		}
+		w.started = true
+		fmt.Print(ResponsePrefix())
+	}
+	// Indent any embedded newlines so multi-line streamed text stays aligned.
+	if isTTY {
+		text = strings.ReplaceAll(text, "\n", "\n    ")
+	}
+	fmt.Print(text)
+	return nil
+}
+
+func (w *CLIStreamWriter) Close(ctx context.Context, finalText string) error {
+	if w.aborted {
+		return nil
+	}
+	w.closed = true
+	if w.started {
+		// End the streamed block with spacing.
+		fmt.Println()
+		fmt.Println()
+		if sep := Separator(); sep != "" {
+			fmt.Println(sep)
+		}
+		ShowPrompt()
+	} else if strings.TrimSpace(finalText) != "" {
+		// Nothing was streamed — print the full response now.
+		if w.spinner != nil {
+			w.spinner.Stop()
+		}
+		fmt.Print(FormatResponse(finalText))
+		fmt.Println()
+		fmt.Println()
+		if sep := Separator(); sep != "" {
+			fmt.Println(sep)
+		}
+		ShowPrompt()
+	}
+	// If not started AND no text, do nothing (tool-call turn — spinner may keep running).
+	return nil
+}
+
+func (w *CLIStreamWriter) Abort(ctx context.Context) error {
+	w.aborted = true
+	if w.started {
+		fmt.Println()
+		fmt.Println(style(ansiYellow, "  ⚠ [aborted]"))
+		ShowPrompt()
+	}
+	// If not started, leave spinner untouched so it carries through tool-call loops.
+	return nil
+}
+
+// BeginStream implements channels.StreamingChannel.
+func (d Deliverer) BeginStream(ctx context.Context, to string, meta map[string]any) (channels.StreamWriter, error) {
+	return &CLIStreamWriter{spinner: d.Spinner}, nil
 }
 ````
 
@@ -6320,7 +7865,7 @@ func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
 				if content == "" {
 					continue
 				}
-				meta := map[string]any{"channel_id": msg.ChannelID, "message_reference": msg.ID}
+				meta := map[string]any{"channel_id": msg.ChannelID, "message_reference": msg.ID, "guild_id": msg.GuildID, "is_private": strings.TrimSpace(msg.GuildID) == ""}
 				if len(attachments) > 0 {
 					meta["attachments"] = attachments
 				}
@@ -6520,7 +8065,7 @@ func (c *Channel) attachFilePart(writer *multipart.Writer, index int, mediaPath 
 
 func (c *Channel) allowedUser(user string) bool {
 	if len(c.Config.AllowedUserIDs) == 0 {
-		return true
+		return c.Config.OpenAccess
 	}
 	for _, allowed := range c.Config.AllowedUserIDs {
 		if strings.TrimSpace(allowed) == user {
@@ -6559,10 +8104,11 @@ type mention struct {
 }
 
 type inboundMessage struct {
-	ID        string    `json:"id"`
-	ChannelID string    `json:"channel_id"`
-	Content   string    `json:"content"`
-	Mentions  []mention `json:"mentions"`
+	ID          string    `json:"id"`
+	ChannelID   string    `json:"channel_id"`
+	GuildID     string    `json:"guild_id"`
+	Content     string    `json:"content"`
+	Mentions    []mention `json:"mentions"`
 	Attachments []discordAttachment `json:"attachments"`
 	Author    struct {
 		ID  string `json:"id"`
@@ -6575,320 +8121,6 @@ type discordAttachment struct {
 	Filename    string `json:"filename"`
 	ContentType string `json:"content_type"`
 	Size        int64  `json:"size"`
-}
-````
-
-## File: internal/channels/slack/slack_test.go
-````go
-package slack
-
-import (
-	"context"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
-	"os"
-	"path/filepath"
-	"strings"
-	"testing"
-	"time"
-
-	"github.com/gorilla/websocket"
-
-	"or3-intern/internal/artifacts"
-	"or3-intern/internal/bus"
-	"or3-intern/internal/config"
-	"or3-intern/internal/db"
-)
-
-func openSlackTestDB(t *testing.T) *db.DB {
-	t.Helper()
-	d, err := db.Open(filepath.Join(t.TempDir(), "slack.db"))
-	if err != nil {
-		t.Fatalf("db.Open: %v", err)
-	}
-	t.Cleanup(func() { _ = d.Close() })
-	return d
-}
-
-func TestChannel_StartReceivesEventAndAcks(t *testing.T) {
-	upgrader := websocket.Upgrader{}
-	ackSeen := make(chan string, 1)
-	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			t.Fatalf("upgrade: %v", err)
-		}
-		defer conn.Close()
-		_ = conn.WriteJSON(map[string]any{
-			"envelope_id": "env1",
-			"type":        "events_api",
-			"payload": map[string]any{
-				"authorizations": []map[string]any{{"user_id": "B123"}},
-				"event":          map[string]any{"type": "message", "text": "<@B123> hello", "user": "U1", "channel": "C1"},
-			},
-		})
-		var ack map[string]any
-		if err := conn.ReadJSON(&ack); err != nil {
-			t.Fatalf("ReadJSON ack: %v", err)
-		}
-		ackSeen <- ack["envelope_id"].(string)
-	}))
-	defer wsServer.Close()
-	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/apps.connections.open" {
-			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "url": "ws" + strings.TrimPrefix(wsServer.URL, "http")})
-			return
-		}
-		t.Fatalf("unexpected api path: %s", r.URL.Path)
-	}))
-	defer apiServer.Close()
-
-	b := bus.New(1)
-	ch := &Channel{Config: config.SlackChannelConfig{AppToken: "app", BotToken: "bot", APIBase: apiServer.URL, RequireMention: true}}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	if err := ch.Start(ctx, b); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer ch.Stop(context.Background())
-	select {
-	case env := <-ackSeen:
-		if env != "env1" {
-			t.Fatalf("unexpected ack envelope: %s", env)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for slack ack")
-	}
-	select {
-	case ev := <-b.Channel():
-		if ev.Channel != "slack" || ev.Message != "hello" {
-			t.Fatalf("unexpected event: %#v", ev)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for slack event")
-	}
-}
-
-func TestChannel_DeliverPostsMessage(t *testing.T) {
-	var got map[string]any
-	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/chat.postMessage" {
-			t.Fatalf("unexpected path: %s", r.URL.Path)
-		}
-		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
-			t.Fatalf("decode body: %v", err)
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
-	}))
-	defer apiServer.Close()
-	ch := &Channel{Config: config.SlackChannelConfig{BotToken: "bot", APIBase: apiServer.URL, DefaultChannelID: "C1"}}
-	if err := ch.Deliver(context.Background(), "", "hello", map[string]any{"thread_ts": "123.45"}); err != nil {
-		t.Fatalf("Deliver: %v", err)
-	}
-	if got["channel"] != "C1" || got["text"] != "hello" || got["thread_ts"] != "123.45" {
-		t.Fatalf("unexpected payload: %#v", got)
-	}
-}
-
-func TestChannel_StartReceivesFileShare(t *testing.T) {
-	d := openSlackTestDB(t)
-	store := &artifacts.Store{Dir: t.TempDir(), DB: d}
-	fileServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if auth := r.Header.Get("Authorization"); auth != "Bearer bot" {
-			t.Fatalf("expected bot auth header, got %q", auth)
-		}
-		_, _ = w.Write([]byte("image-data"))
-	}))
-	defer fileServer.Close()
-
-	upgrader := websocket.Upgrader{}
-	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			t.Fatalf("upgrade: %v", err)
-		}
-		defer conn.Close()
-		_ = conn.WriteJSON(map[string]any{
-			"envelope_id": "env1",
-			"type":        "events_api",
-			"payload": map[string]any{
-				"authorizations": []map[string]any{{"user_id": "B123"}},
-				"event": map[string]any{
-					"type":    "message",
-					"text":    "",
-					"user":    "U1",
-					"channel": "C1",
-					"files": []map[string]any{{
-						"id":                   "F1",
-						"name":                 "image.png",
-						"mimetype":             "image/png",
-						"size":                 10,
-						"url_private_download": fileServer.URL + "/download",
-					}},
-				},
-			},
-		})
-		var ack map[string]any
-		if err := conn.ReadJSON(&ack); err != nil {
-			t.Fatalf("ReadJSON ack: %v", err)
-		}
-		if ack["envelope_id"] != "env1" {
-			t.Fatalf("unexpected ack: %#v", ack)
-		}
-		<-time.After(100 * time.Millisecond)
-	}))
-	defer wsServer.Close()
-	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/apps.connections.open" {
-			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "url": "ws" + strings.TrimPrefix(wsServer.URL, "http")})
-			return
-		}
-		t.Fatalf("unexpected api path: %s", r.URL.Path)
-	}))
-	defer apiServer.Close()
-
-	b := bus.New(1)
-	ch := &Channel{
-		Config:        config.SlackChannelConfig{AppToken: "app", BotToken: "bot", APIBase: apiServer.URL, RequireMention: false},
-		Artifacts:     store,
-		MaxMediaBytes: 1024,
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	if err := ch.Start(ctx, b); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer ch.Stop(context.Background())
-
-	select {
-	case ev := <-b.Channel():
-		if ev.Message != "[image: image.png]" {
-			t.Fatalf("unexpected event message: %#v", ev.Message)
-		}
-		raw, ok := ev.Meta["attachments"].([]artifacts.Attachment)
-		if !ok || len(raw) != 1 {
-			t.Fatalf("expected one attachment in meta, got %#v", ev.Meta["attachments"])
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for slack media event")
-	}
-}
-
-func TestChannel_StartReceivesFileShareWhenMentionRequired(t *testing.T) {
-	d := openSlackTestDB(t)
-	store := &artifacts.Store{Dir: t.TempDir(), DB: d}
-	fileServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if auth := r.Header.Get("Authorization"); auth != "Bearer bot" {
-			t.Fatalf("expected bot auth header, got %q", auth)
-		}
-		_, _ = w.Write([]byte("image-data"))
-	}))
-	defer fileServer.Close()
-
-	upgrader := websocket.Upgrader{}
-	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			t.Fatalf("upgrade: %v", err)
-		}
-		defer conn.Close()
-		_ = conn.WriteJSON(map[string]any{
-			"envelope_id": "env1",
-			"type":        "events_api",
-			"payload": map[string]any{
-				"authorizations": []map[string]any{{"user_id": "B123"}},
-				"event": map[string]any{
-					"type":    "message",
-					"text":    "",
-					"user":    "U1",
-					"channel": "C1",
-					"files": []map[string]any{{
-						"id":                   "F1",
-						"name":                 "image.png",
-						"mimetype":             "image/png",
-						"size":                 10,
-						"url_private_download": fileServer.URL + "/download",
-					}},
-				},
-			},
-		})
-		var ack map[string]any
-		if err := conn.ReadJSON(&ack); err != nil {
-			t.Fatalf("ReadJSON ack: %v", err)
-		}
-		if ack["envelope_id"] != "env1" {
-			t.Fatalf("unexpected ack: %#v", ack)
-		}
-		<-time.After(100 * time.Millisecond)
-	}))
-	defer wsServer.Close()
-	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/apps.connections.open" {
-			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "url": "ws" + strings.TrimPrefix(wsServer.URL, "http")})
-			return
-		}
-		t.Fatalf("unexpected api path: %s", r.URL.Path)
-	}))
-	defer apiServer.Close()
-
-	b := bus.New(1)
-	ch := &Channel{
-		Config:        config.SlackChannelConfig{AppToken: "app", BotToken: "bot", APIBase: apiServer.URL, RequireMention: true},
-		Artifacts:     store,
-		MaxMediaBytes: 1024,
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	if err := ch.Start(ctx, b); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer ch.Stop(context.Background())
-
-	select {
-	case ev := <-b.Channel():
-		if ev.Message != "[image: image.png]" {
-			t.Fatalf("unexpected event message: %#v", ev.Message)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for slack media event with mention requirement")
-	}
-}
-
-func TestChannel_DeliverUploadsMedia(t *testing.T) {
-	mediaPath := filepath.Join(t.TempDir(), "image.png")
-	if err := os.WriteFile(mediaPath, []byte("image-data"), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-	uploadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			t.Fatalf("expected POST upload, got %s", r.Method)
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer uploadServer.Close()
-
-	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/files.getUploadURLExternal":
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"ok":         true,
-				"upload_url": uploadServer.URL + "/upload",
-				"file_id":    "F1",
-			})
-		case "/files.completeUploadExternal":
-			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
-		default:
-			t.Fatalf("unexpected api path: %s", r.URL.Path)
-		}
-	}))
-	defer apiServer.Close()
-
-	ch := &Channel{Config: config.SlackChannelConfig{BotToken: "bot", APIBase: apiServer.URL, DefaultChannelID: "C1"}, MaxMediaBytes: 1024}
-	if err := ch.Deliver(context.Background(), "", "hello", map[string]any{"media_paths": []string{mediaPath}, "thread_ts": "123.45"}); err != nil {
-		t.Fatalf("Deliver: %v", err)
-	}
 }
 ````
 
@@ -7037,7 +8269,7 @@ func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
 		if content == "" {
 			continue
 		}
-		meta := map[string]any{"channel_id": ev.Channel, "thread_ts": ev.ThreadTS}
+		meta := map[string]any{"channel_id": ev.Channel, "thread_ts": ev.ThreadTS, "channel_type": ev.ChannelType}
 		if len(attachments) > 0 {
 			meta["attachments"] = attachments
 		}
@@ -7282,7 +8514,7 @@ func firstNonEmpty(values ...string) string {
 
 func (c *Channel) allowedUser(user string) bool {
 	if len(c.Config.AllowedUserIDs) == 0 {
-		return true
+		return c.Config.OpenAccess
 	}
 	for _, allowed := range c.Config.AllowedUserIDs {
 		if strings.TrimSpace(allowed) == user {
@@ -7297,13 +8529,14 @@ type socketEnvelope struct {
 	Type       string `json:"type"`
 	Payload    struct {
 		Event struct {
-			Type     string      `json:"type"`
-			Text     string      `json:"text"`
-			User     string      `json:"user"`
-			BotID    string      `json:"bot_id"`
-			Channel  string      `json:"channel"`
-			ThreadTS string      `json:"thread_ts"`
-			Files    []slackFile `json:"files"`
+			Type        string      `json:"type"`
+			Text        string      `json:"text"`
+			User        string      `json:"user"`
+			BotID       string      `json:"bot_id"`
+			Channel     string      `json:"channel"`
+			ChannelType string      `json:"channel_type"`
+			ThreadTS    string      `json:"thread_ts"`
+			Files       []slackFile `json:"files"`
 		} `json:"event"`
 		Authorizations []struct {
 			UserID string `json:"user_id"`
@@ -7319,192 +8552,6 @@ type slackFile struct {
 	Size               int64  `json:"size"`
 	URLPrivate         string `json:"url_private"`
 	URLPrivateDownload string `json:"url_private_download"`
-}
-````
-
-## File: internal/channels/telegram/telegram_test.go
-````go
-package telegram
-
-import (
-	"context"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
-	"os"
-	"path/filepath"
-	"sync"
-	"testing"
-	"time"
-
-	"or3-intern/internal/artifacts"
-	"or3-intern/internal/bus"
-	"or3-intern/internal/config"
-	"or3-intern/internal/db"
-)
-
-func openTelegramTestDB(t *testing.T) *db.DB {
-	t.Helper()
-	d, err := db.Open(filepath.Join(t.TempDir(), "telegram.db"))
-	if err != nil {
-		t.Fatalf("db.Open: %v", err)
-	}
-	t.Cleanup(func() { _ = d.Close() })
-	return d
-}
-
-func TestChannel_FetchUpdatesPublishesMessage(t *testing.T) {
-	var mu sync.Mutex
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"ok": true,
-			"result": []map[string]any{{
-				"update_id": 1,
-				"message": map[string]any{
-					"message_id": 99,
-					"text":       "hello telegram",
-					"chat":       map[string]any{"id": 123},
-					"from":       map[string]any{"id": 456, "username": "alice"},
-				},
-			}},
-		})
-		mu.Lock()
-		mu.Unlock()
-	}))
-	defer server.Close()
-
-	ch := &Channel{Config: config.TelegramChannelConfig{Token: "token", APIBase: server.URL, PollSeconds: 1}}
-	b := bus.New(1)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	if err := ch.Start(ctx, b); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer ch.Stop(context.Background())
-	select {
-	case ev := <-b.Channel():
-		if ev.Channel != "telegram" || ev.SessionKey != "telegram:123" || ev.Message != "hello telegram" {
-			t.Fatalf("unexpected event: %#v", ev)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for telegram event")
-	}
-}
-
-func TestChannel_DeliverSendsMessage(t *testing.T) {
-	var got map[string]any
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/bottoken/sendMessage" {
-			t.Fatalf("unexpected path: %s", r.URL.Path)
-		}
-		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
-			t.Fatalf("decode body: %v", err)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": map[string]any{"message_id": 1}})
-	}))
-	defer server.Close()
-
-	ch := &Channel{Config: config.TelegramChannelConfig{Token: "token", APIBase: server.URL, DefaultChatID: "123"}}
-	if err := ch.Deliver(context.Background(), "", "hello", map[string]any{"reply_to_message_id": int64(44)}); err != nil {
-		t.Fatalf("Deliver: %v", err)
-	}
-	if got["chat_id"] != "123" || got["text"] != "hello" {
-		t.Fatalf("unexpected payload: %#v", got)
-	}
-}
-
-func TestChannel_FetchUpdatesPublishesPhotoAttachment(t *testing.T) {
-	d := openTelegramTestDB(t)
-	store := &artifacts.Store{Dir: t.TempDir(), DB: d}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/bottoken/getUpdates":
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"ok": true,
-				"result": []map[string]any{{
-					"update_id": 2,
-					"message": map[string]any{
-						"message_id": 100,
-						"caption":    "see image",
-						"chat":       map[string]any{"id": 123},
-						"from":       map[string]any{"id": 456, "username": "alice"},
-						"photo": []map[string]any{{
-							"file_id":   "photo-1",
-							"file_size": 10,
-						}},
-					},
-				}},
-			})
-		case "/bottoken/getFile":
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"ok":     true,
-				"result": map[string]any{"file_path": "photos/p1.jpg", "file_size": 10},
-			})
-		case "/file/bottoken/photos/p1.jpg":
-			_, _ = w.Write([]byte("image-data"))
-		default:
-			t.Fatalf("unexpected path: %s", r.URL.Path)
-		}
-	}))
-	defer server.Close()
-
-	ch := &Channel{
-		Config:        config.TelegramChannelConfig{Token: "token", APIBase: server.URL, PollSeconds: 1},
-		Artifacts:     store,
-		MaxMediaBytes: 1024,
-	}
-	b := bus.New(1)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	if err := ch.Start(ctx, b); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer ch.Stop(context.Background())
-
-	select {
-	case ev := <-b.Channel():
-		if ev.Message != "see image\n[image: photo.jpg]" {
-			t.Fatalf("unexpected message: %#v", ev.Message)
-		}
-		raw, ok := ev.Meta["attachments"].([]artifacts.Attachment)
-		if !ok || len(raw) != 1 {
-			t.Fatalf("expected one attachment in meta, got %#v", ev.Meta["attachments"])
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for telegram media event")
-	}
-}
-
-func TestChannel_DeliverSendsPhotoUpload(t *testing.T) {
-	mediaPath := filepath.Join(t.TempDir(), "photo.png")
-	if err := os.WriteFile(mediaPath, []byte("image-data"), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/bottoken/sendPhoto" {
-			t.Fatalf("unexpected path: %s", r.URL.Path)
-		}
-		if err := r.ParseMultipartForm(1 << 20); err != nil {
-			t.Fatalf("ParseMultipartForm: %v", err)
-		}
-		if got := r.FormValue("chat_id"); got != "123" {
-			t.Fatalf("expected chat_id 123, got %q", got)
-		}
-		if got := r.FormValue("caption"); got != "hello" {
-			t.Fatalf("expected caption hello, got %q", got)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": map[string]any{"message_id": 1}})
-	}))
-	defer server.Close()
-
-	ch := &Channel{Config: config.TelegramChannelConfig{Token: "token", APIBase: server.URL, DefaultChatID: "123"}, MaxMediaBytes: 1024}
-	if err := ch.Deliver(context.Background(), "", "hello", map[string]any{"media_paths": []string{mediaPath}}); err != nil {
-		t.Fatalf("Deliver: %v", err)
-	}
 }
 ````
 
@@ -7656,6 +8703,7 @@ func (c *Channel) fetchUpdates(ctx context.Context, eventBus *bus.Bus) error {
 		}
 		meta := map[string]any{
 			"chat_id":             chatID,
+			"chat_type":           msg.Chat.Type,
 			"message_id":          msg.MessageID,
 			"reply_to_message_id": int64(msg.MessageID),
 			"username":            msg.From.Username,
@@ -7680,7 +8728,7 @@ func (c *Channel) fetchUpdates(ctx context.Context, eventBus *bus.Bus) error {
 
 func (c *Channel) allowedChat(chatID string) bool {
 	if len(c.Config.AllowedChatIDs) == 0 {
-		return true
+		return c.Config.OpenAccess
 	}
 	for _, allowed := range c.Config.AllowedChatIDs {
 		if strings.TrimSpace(allowed) == chatID {
@@ -8044,7 +9092,8 @@ type inboundMessage struct {
 	Caption      string `json:"caption"`
 	MediaGroupID string `json:"media_group_id"`
 	Chat      struct {
-		ID int64 `json:"id"`
+		ID   int64  `json:"id"`
+		Type string `json:"type"`
 	} `json:"chat"`
 	From struct {
 		ID       int64  `json:"id"`
@@ -8076,6913 +9125,6 @@ type inboundMessage struct {
 type fileInfo struct {
 	FilePath string `json:"file_path"`
 	FileSize int64  `json:"file_size"`
-}
-````
-
-## File: internal/channels/whatsapp/whatsapp_test.go
-````go
-package whatsapp
-
-import (
-	"context"
-	"encoding/base64"
-	"net/http"
-	"net/http/httptest"
-	"os"
-	"path/filepath"
-	"testing"
-	"time"
-
-	"github.com/gorilla/websocket"
-
-	"or3-intern/internal/artifacts"
-	"or3-intern/internal/bus"
-	"or3-intern/internal/config"
-	"or3-intern/internal/db"
-)
-
-func openWhatsAppTestDB(t *testing.T) *db.DB {
-	t.Helper()
-	d, err := db.Open(filepath.Join(t.TempDir(), "whatsapp.db"))
-	if err != nil {
-		t.Fatalf("db.Open: %v", err)
-	}
-	t.Cleanup(func() { _ = d.Close() })
-	return d
-}
-
-func TestChannel_StartPublishesInboundMessage(t *testing.T) {
-	upgrader := websocket.Upgrader{}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			t.Fatalf("upgrade: %v", err)
-		}
-		defer conn.Close()
-		_ = conn.WriteJSON(map[string]any{"type": "message", "id": "m1", "chat": "group1", "from": "123", "text": "hello", "isGroup": true})
-		<-time.After(100 * time.Millisecond)
-	}))
-	defer server.Close()
-	b := bus.New(1)
-	ch := &Channel{Config: config.WhatsAppBridgeConfig{BridgeURL: "ws" + server.URL[len("http"):]}}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	if err := ch.Start(ctx, b); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer ch.Stop(context.Background())
-	select {
-	case ev := <-b.Channel():
-		if ev.Channel != "whatsapp" || ev.SessionKey != "whatsapp:group1" || ev.Message != "hello" {
-			t.Fatalf("unexpected event: %#v", ev)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for inbound whatsapp message")
-	}
-}
-
-func TestChannel_DeliverWritesSendCommand(t *testing.T) {
-	upgrader := websocket.Upgrader{}
-	got := make(chan map[string]any, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			t.Fatalf("upgrade: %v", err)
-		}
-		defer conn.Close()
-		var msg map[string]any
-		if err := conn.ReadJSON(&msg); err != nil {
-			t.Fatalf("ReadJSON: %v", err)
-		}
-		got <- msg
-	}))
-	defer server.Close()
-	ch := &Channel{Config: config.WhatsAppBridgeConfig{BridgeURL: "ws" + server.URL[len("http"):], DefaultTo: "123"}}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	if err := ch.Start(ctx, bus.New(1)); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer ch.Stop(context.Background())
-	if err := ch.Deliver(context.Background(), "", "hello", nil); err != nil {
-		t.Fatalf("Deliver: %v", err)
-	}
-	select {
-	case msg := <-got:
-		if msg["type"] != "send" || msg["to"] != "123" || msg["text"] != "hello" {
-			t.Fatalf("unexpected send command: %#v", msg)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for send command")
-	}
-}
-
-func TestChannel_StartPublishesInboundAttachmentMessage(t *testing.T) {
-	d := openWhatsAppTestDB(t)
-	store := &artifacts.Store{Dir: t.TempDir(), DB: d}
-
-	upgrader := websocket.Upgrader{}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			t.Fatalf("upgrade: %v", err)
-		}
-		defer conn.Close()
-		_ = conn.WriteJSON(map[string]any{
-			"type": "message",
-			"id":   "m1",
-			"chat": "group1",
-			"from": "123",
-			"text": "",
-			"attachments": []map[string]any{{
-				"data_base64": base64.StdEncoding.EncodeToString([]byte("image-data")),
-				"filename":    "photo.png",
-				"mime":        "image/png",
-				"kind":        "image",
-				"size_bytes":  10,
-			}},
-		})
-		<-time.After(100 * time.Millisecond)
-	}))
-	defer server.Close()
-	b := bus.New(1)
-	ch := &Channel{
-		Config:        config.WhatsAppBridgeConfig{BridgeURL: "ws" + server.URL[len("http"):]},
-		Artifacts:     store,
-		MaxMediaBytes: 1024,
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	if err := ch.Start(ctx, b); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer ch.Stop(context.Background())
-
-	select {
-	case ev := <-b.Channel():
-		if ev.Message != "[image: photo.png]" {
-			t.Fatalf("unexpected event message: %#v", ev.Message)
-		}
-		raw, ok := ev.Meta["attachments"].([]artifacts.Attachment)
-		if !ok || len(raw) != 1 {
-			t.Fatalf("expected one attachment in meta, got %#v", ev.Meta["attachments"])
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for inbound whatsapp media message")
-	}
-}
-
-func TestChannel_DeliverWritesSendCommandWithAttachments(t *testing.T) {
-	mediaPath := filepath.Join(t.TempDir(), "photo.png")
-	if err := os.WriteFile(mediaPath, []byte("image-data"), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-
-	upgrader := websocket.Upgrader{}
-	got := make(chan map[string]any, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			t.Fatalf("upgrade: %v", err)
-		}
-		defer conn.Close()
-		var msg map[string]any
-		if err := conn.ReadJSON(&msg); err != nil {
-			t.Fatalf("ReadJSON: %v", err)
-		}
-		got <- msg
-	}))
-	defer server.Close()
-	ch := &Channel{Config: config.WhatsAppBridgeConfig{BridgeURL: "ws" + server.URL[len("http"):], DefaultTo: "123"}, MaxMediaBytes: 1024}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	if err := ch.Start(ctx, bus.New(1)); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer ch.Stop(context.Background())
-	if err := ch.Deliver(context.Background(), "", "hello", map[string]any{"media_paths": []string{mediaPath}}); err != nil {
-		t.Fatalf("Deliver: %v", err)
-	}
-	select {
-	case msg := <-got:
-		attachments, ok := msg["attachments"].([]any)
-		if msg["type"] != "send" || msg["to"] != "123" || msg["text"] != "hello" || !ok || len(attachments) != 1 {
-			t.Fatalf("unexpected send command: %#v", msg)
-		}
-		first, ok := attachments[0].(map[string]any)
-		if !ok || first["data_base64"] == "" {
-			t.Fatalf("expected inline attachment payload, got %#v", attachments[0])
-		}
-		if _, hasPath := first["path"]; hasPath {
-			t.Fatalf("expected outbound bridge payload to omit local path, got %#v", first)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for media send command")
-	}
-}
-
-func TestChannel_StartRejectsPathOnlyInboundAttachment(t *testing.T) {
-	d := openWhatsAppTestDB(t)
-	store := &artifacts.Store{Dir: t.TempDir(), DB: d}
-	attachmentPath := filepath.Join(t.TempDir(), "photo.png")
-	if err := os.WriteFile(attachmentPath, []byte("image-data"), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-
-	upgrader := websocket.Upgrader{}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			t.Fatalf("upgrade: %v", err)
-		}
-		defer conn.Close()
-		_ = conn.WriteJSON(map[string]any{
-			"type": "message",
-			"id":   "m1",
-			"chat": "group1",
-			"from": "123",
-			"text": "",
-			"attachments": []map[string]any{{
-				"path":       attachmentPath,
-				"filename":   "photo.png",
-				"mime":       "image/png",
-				"kind":       "image",
-				"size_bytes": 10,
-			}},
-		})
-		<-time.After(100 * time.Millisecond)
-	}))
-	defer server.Close()
-	b := bus.New(1)
-	ch := &Channel{
-		Config:        config.WhatsAppBridgeConfig{BridgeURL: "ws" + server.URL[len("http"):]},
-		Artifacts:     store,
-		MaxMediaBytes: 1024,
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	if err := ch.Start(ctx, b); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer ch.Stop(context.Background())
-
-	select {
-	case ev := <-b.Channel():
-		if ev.Message != "[image: photo.png - invalid media payload]" {
-			t.Fatalf("unexpected event message: %#v", ev.Message)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for inbound whatsapp invalid media marker")
-	}
-}
-````
-
-## File: internal/channels/whatsapp/whatsapp.go
-````go
-package whatsapp
-
-import (
-	"context"
-	"encoding/base64"
-	"fmt"
-	"mime"
-	"net/http"
-	"net/url"
-	"os"
-	"path/filepath"
-	"strings"
-	"sync"
-	"time"
-
-	"github.com/gorilla/websocket"
-
-	"or3-intern/internal/artifacts"
-	"or3-intern/internal/bus"
-	rootchannels "or3-intern/internal/channels"
-	"or3-intern/internal/config"
-)
-
-type Channel struct {
-	Config        config.WhatsAppBridgeConfig
-	Dialer        *websocket.Dialer
-	Artifacts     *artifacts.Store
-	MaxMediaBytes int
-
-	mu     sync.Mutex
-	conn   *websocket.Conn
-	cancel context.CancelFunc
-	closed bool
-}
-
-func (c *Channel) Name() string { return "whatsapp" }
-
-func (c *Channel) Start(ctx context.Context, eventBus *bus.Bus) error {
-	if strings.TrimSpace(c.Config.BridgeURL) == "" {
-		return fmt.Errorf("whatsapp bridge url not configured")
-	}
-	conn, err := c.connect(ctx)
-	if err != nil {
-		return err
-	}
-	childCtx, cancel := context.WithCancel(ctx)
-	c.mu.Lock()
-	c.conn = conn
-	c.cancel = cancel
-	c.closed = false
-	c.mu.Unlock()
-	go c.readLoop(childCtx, eventBus)
-	return nil
-}
-
-func (c *Channel) Stop(ctx context.Context) error {
-	_ = ctx
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.cancel != nil {
-		c.cancel()
-	}
-	if c.conn != nil {
-		_ = c.conn.Close()
-	}
-	c.conn = nil
-	c.cancel = nil
-	c.closed = true
-	return nil
-}
-
-func (c *Channel) Deliver(ctx context.Context, to, text string, meta map[string]any) error {
-	target := strings.TrimSpace(to)
-	if target == "" {
-		target = strings.TrimSpace(c.Config.DefaultTo)
-	}
-	if target == "" {
-		return fmt.Errorf("whatsapp target required")
-	}
-	cmd := map[string]any{"type": "send", "to": target, "text": text}
-	if mediaPaths := rootchannels.MediaPaths(meta); len(mediaPaths) > 0 {
-		attachments, err := c.outboundAttachments(mediaPaths)
-		if err != nil {
-			return err
-		}
-		cmd["attachments"] = attachments
-	}
-	if meta != nil {
-		for k, v := range meta {
-			if k == "media_paths" {
-				continue
-			}
-			cmd[k] = v
-		}
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.conn == nil {
-		return fmt.Errorf("whatsapp bridge not connected")
-	}
-	return c.conn.WriteJSON(cmd)
-}
-
-func (c *Channel) connect(ctx context.Context) (*websocket.Conn, error) {
-	dialer := c.Dialer
-	if dialer == nil {
-		dialer = websocket.DefaultDialer
-	}
-	headers := http.Header{}
-	if token := strings.TrimSpace(c.Config.BridgeToken); token != "" {
-		headers.Set("Authorization", "Bearer "+token)
-	}
-	conn, _, err := dialer.DialContext(ctx, c.Config.BridgeURL, headers)
-	if err != nil {
-		return nil, err
-	}
-	return conn, nil
-}
-
-func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
-	for {
-		c.mu.Lock()
-		conn := c.conn
-		c.mu.Unlock()
-		if conn == nil {
-			return
-		}
-		var msg inboundMessage
-		if err := conn.ReadJSON(&msg); err != nil {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				return
-			}
-		}
-		if msg.Type != "message" {
-			continue
-		}
-		if !c.allowedFrom(msg.From) {
-			continue
-		}
-		target := strings.TrimSpace(msg.Chat)
-		if target == "" {
-			target = strings.TrimSpace(msg.From)
-		}
-		attachments, markers := c.captureAttachments(ctx, "whatsapp:"+target, msg.Attachments)
-		content := rootchannels.ComposeMessageText(msg.Text, markers)
-		if content == "" {
-			continue
-		}
-		meta := map[string]any{
-			"chat_id":             target,
-			"message_id":          msg.ID,
-			"reply_to_message_id": msg.ID,
-			"is_group":            msg.IsGroup,
-		}
-		if len(attachments) > 0 {
-			meta["attachments"] = attachments
-		}
-		eventBus.Publish(bus.Event{
-			Type:       bus.EventUserMessage,
-			SessionKey: "whatsapp:" + target,
-			Channel:    "whatsapp",
-			From:       msg.From,
-			Message:    content,
-			Meta:       meta,
-		})
-	}
-}
-
-func (c *Channel) allowedFrom(from string) bool {
-	if len(c.Config.AllowedFrom) == 0 {
-		return true
-	}
-	for _, allowed := range c.Config.AllowedFrom {
-		if strings.TrimSpace(allowed) == strings.TrimSpace(from) {
-			return true
-		}
-	}
-	return false
-}
-
-type inboundMessage struct {
-	Type        string             `json:"type"`
-	ID          string             `json:"id"`
-	Chat        string             `json:"chat"`
-	From        string             `json:"from"`
-	Text        string             `json:"text"`
-	IsGroup     bool               `json:"isGroup"`
-	Attachments []bridgeAttachment `json:"attachments"`
-}
-
-type bridgeAttachment struct {
-	Path       string `json:"path,omitempty"`
-	DataBase64 string `json:"data_base64,omitempty"`
-	Filename   string `json:"filename,omitempty"`
-	Mime       string `json:"mime,omitempty"`
-	Kind       string `json:"kind,omitempty"`
-	SizeBytes  int64  `json:"size_bytes,omitempty"`
-}
-
-func (c *Channel) captureAttachments(ctx context.Context, sessionKey string, refs []bridgeAttachment) ([]artifacts.Attachment, []string) {
-	attachments := make([]artifacts.Attachment, 0, len(refs))
-	markers := make([]string, 0, len(refs))
-	for _, ref := range refs {
-		filename := artifacts.NormalizeFilename(ref.Filename, ref.Mime)
-		kind := strings.TrimSpace(ref.Kind)
-		if kind == "" {
-			kind = artifacts.DetectKind(filename, ref.Mime)
-		}
-		if c.MaxMediaBytes == 0 {
-			markers = append(markers, artifacts.FailureMarker(kind, filename, "disabled by config"))
-			continue
-		}
-		if c.MaxMediaBytes > 0 && ref.SizeBytes > int64(c.MaxMediaBytes) {
-			markers = append(markers, artifacts.FailureMarker(kind, filename, "too large"))
-			continue
-		}
-		if c.Artifacts == nil {
-			markers = append(markers, artifacts.FailureMarker(kind, filename, "storage unavailable"))
-			continue
-		}
-		data, err := decodeBridgeAttachment(ref, c.MaxMediaBytes)
-		if err != nil {
-			reason := "invalid media payload"
-			if strings.Contains(err.Error(), "too large") {
-				reason = "too large"
-			}
-			markers = append(markers, artifacts.FailureMarker(kind, filename, reason))
-			continue
-		}
-		att, err := c.Artifacts.SaveNamed(ctx, sessionKey, filename, ref.Mime, data)
-		if err != nil {
-			markers = append(markers, artifacts.FailureMarker(kind, filename, "save failed"))
-			continue
-		}
-		attachments = append(attachments, att)
-		markers = append(markers, artifacts.Marker(att))
-	}
-	return attachments, markers
-}
-
-func (c *Channel) outboundAttachments(paths []string) ([]bridgeAttachment, error) {
-	attachments := make([]bridgeAttachment, 0, len(paths))
-	for _, mediaPath := range paths {
-		info, err := os.Stat(mediaPath)
-		if err != nil {
-			return nil, err
-		}
-		if c.MaxMediaBytes == 0 {
-			return nil, fmt.Errorf("media attachments disabled by config")
-		}
-		if c.MaxMediaBytes > 0 && info.Size() > int64(c.MaxMediaBytes) {
-			return nil, fmt.Errorf("media path exceeds maxMediaBytes: %s", mediaPath)
-		}
-		data, err := os.ReadFile(mediaPath)
-		if err != nil {
-			return nil, err
-		}
-		mimeType := mime.TypeByExtension(strings.ToLower(filepath.Ext(mediaPath)))
-		attachments = append(attachments, bridgeAttachment{
-			DataBase64: base64.StdEncoding.EncodeToString(data),
-			Filename:   filepath.Base(mediaPath),
-			Mime:       mimeType,
-			Kind:       artifacts.DetectKind(mediaPath, mimeType),
-			SizeBytes:  info.Size(),
-		})
-	}
-	return attachments, nil
-}
-
-func decodeBridgeAttachment(ref bridgeAttachment, maxBytes int) ([]byte, error) {
-	raw := strings.TrimSpace(ref.DataBase64)
-	if raw == "" {
-		return nil, fmt.Errorf("missing inline data")
-	}
-	if maxBytes > 0 && base64.StdEncoding.DecodedLen(len(raw)) > maxBytes {
-		return nil, fmt.Errorf("attachment too large")
-	}
-	data, err := base64.StdEncoding.DecodeString(raw)
-	if err != nil {
-		return nil, err
-	}
-	if maxBytes > 0 && len(data) > maxBytes {
-		return nil, fmt.Errorf("attachment too large")
-	}
-	return data, nil
-}
-
-func BridgeURL(base string) string {
-	u, err := url.Parse(strings.TrimSpace(base))
-	if err != nil || u == nil {
-		return ""
-	}
-	if u.Path == "" {
-		u.Path = "/ws"
-	}
-	return u.String()
-}
-
-func NewTestDialer() *websocket.Dialer {
-	return &websocket.Dialer{HandshakeTimeout: 5 * time.Second}
-}
-````
-
-## File: internal/cron/cron_test.go
-````go
-package cron
-
-import (
-	"context"
-	"encoding/json"
-	"os"
-	"path/filepath"
-	"strings"
-	"testing"
-	"time"
-)
-
-func makeService(t *testing.T) (*Service, string) {
-	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "cron.json")
-	svc := New(path, func(ctx context.Context, job CronJob) error {
-		return nil
-	})
-	return svc, path
-}
-
-func TestNew(t *testing.T) {
-	svc, _ := makeService(t)
-	if svc == nil {
-		t.Fatal("expected non-nil service")
-	}
-}
-
-func TestStart_Stop(t *testing.T) {
-	svc, _ := makeService(t)
-
-	if err := svc.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	// Starting again should be a no-op
-	if err := svc.Start(); err != nil {
-		t.Fatalf("Start (second call): %v", err)
-	}
-	svc.Stop()
-	// Stopping again should be a no-op
-	svc.Stop()
-}
-
-func TestAdd_And_List(t *testing.T) {
-	svc, _ := makeService(t)
-	svc.Start()
-	defer svc.Stop()
-
-	job := CronJob{
-		Name:    "test job",
-		Enabled: true,
-		Schedule: CronSchedule{Kind: KindEvery, EveryMS: 60000},
-		Payload:  CronPayload{Kind: "agent_turn", Message: "hello"},
-	}
-	if err := svc.Add(job); err != nil {
-		t.Fatalf("Add: %v", err)
-	}
-
-	jobs, err := svc.List()
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if len(jobs) != 1 {
-		t.Errorf("expected 1 job, got %d", len(jobs))
-	}
-	if jobs[0].Name != "test job" {
-		t.Errorf("expected name 'test job', got %q", jobs[0].Name)
-	}
-}
-
-func TestAdd_AutoGeneratesID(t *testing.T) {
-	svc, _ := makeService(t)
-	svc.Start()
-	defer svc.Stop()
-
-	job := CronJob{Name: "no-id", Enabled: true, Schedule: CronSchedule{Kind: KindEvery, EveryMS: 60000}}
-	svc.Add(job)
-
-	jobs, _ := svc.List()
-	if jobs[0].ID == "" {
-		t.Error("expected auto-generated ID")
-	}
-}
-
-func TestAdd_UsesNameAsIDIfMissing(t *testing.T) {
-	svc, _ := makeService(t)
-	svc.Start()
-	defer svc.Stop()
-
-	job := CronJob{Enabled: true, Schedule: CronSchedule{Kind: KindEvery, EveryMS: 60000}}
-	svc.Add(job)
-
-	jobs, _ := svc.List()
-	// ID should match Name when no Name is given either (both auto-generated)
-	if jobs[0].Name == "" {
-		t.Error("expected name to default to id")
-	}
-}
-
-func TestAdd_SetsTimestamps(t *testing.T) {
-	svc, _ := makeService(t)
-	svc.Start()
-	defer svc.Stop()
-
-	before := time.Now().UnixMilli()
-	svc.Add(CronJob{Enabled: true, Schedule: CronSchedule{Kind: KindEvery, EveryMS: 60000}})
-	after := time.Now().UnixMilli()
-
-	jobs, _ := svc.List()
-	if jobs[0].CreatedAtMS < before || jobs[0].CreatedAtMS > after {
-		t.Errorf("CreatedAtMS out of range: got %d, expected [%d, %d]", jobs[0].CreatedAtMS, before, after)
-	}
-}
-
-func TestRemove_Found(t *testing.T) {
-	svc, _ := makeService(t)
-	svc.Start()
-	defer svc.Stop()
-
-	svc.Add(CronJob{ID: "job1", Enabled: true, Schedule: CronSchedule{Kind: KindEvery, EveryMS: 60000}})
-
-	found, err := svc.Remove("job1")
-	if err != nil {
-		t.Fatalf("Remove: %v", err)
-	}
-	if !found {
-		t.Error("expected found=true")
-	}
-
-	jobs, _ := svc.List()
-	if len(jobs) != 0 {
-		t.Errorf("expected 0 jobs after removal, got %d", len(jobs))
-	}
-}
-
-func TestRemove_NotFound(t *testing.T) {
-	svc, _ := makeService(t)
-	svc.Start()
-	defer svc.Stop()
-
-	found, err := svc.Remove("nonexistent")
-	if err != nil {
-		t.Fatalf("Remove: %v", err)
-	}
-	if found {
-		t.Error("expected found=false for nonexistent job")
-	}
-}
-
-func TestRunNow_Success(t *testing.T) {
-	ran := false
-	dir := t.TempDir()
-	path := filepath.Join(dir, "cron.json")
-	svc := New(path, func(ctx context.Context, job CronJob) error {
-		ran = true
-		return nil
-	})
-	svc.Start()
-	defer svc.Stop()
-
-	svc.Add(CronJob{
-		ID:       "runme",
-		Enabled:  true,
-		Schedule: CronSchedule{Kind: KindEvery, EveryMS: 60000},
-	})
-
-	found, err := svc.RunNow(context.Background(), "runme", false)
-	if err != nil {
-		t.Fatalf("RunNow: %v", err)
-	}
-	if !found {
-		t.Error("expected found=true")
-	}
-	if !ran {
-		t.Error("expected runner to be called")
-	}
-}
-
-func TestRunNow_NotFound(t *testing.T) {
-	svc, _ := makeService(t)
-	svc.Start()
-	defer svc.Stop()
-
-	found, err := svc.RunNow(context.Background(), "missing", false)
-	if err != nil {
-		t.Fatalf("RunNow: %v", err)
-	}
-	if found {
-		t.Error("expected found=false for missing job")
-	}
-}
-
-func TestRunNow_Disabled_NoForce(t *testing.T) {
-	ran := false
-	dir := t.TempDir()
-	path := filepath.Join(dir, "cron.json")
-	svc := New(path, func(ctx context.Context, job CronJob) error {
-		ran = true
-		return nil
-	})
-	svc.Start()
-	defer svc.Stop()
-
-	svc.Add(CronJob{
-		ID:       "disabled",
-		Enabled:  false,
-		Schedule: CronSchedule{Kind: KindEvery, EveryMS: 60000},
-	})
-
-	found, _ := svc.RunNow(context.Background(), "disabled", false)
-	if found {
-		t.Error("expected found=false for disabled job without force")
-	}
-	if ran {
-		t.Error("expected runner NOT to be called for disabled job without force")
-	}
-}
-
-func TestRunNow_Disabled_WithForce(t *testing.T) {
-	ran := false
-	dir := t.TempDir()
-	path := filepath.Join(dir, "cron.json")
-	svc := New(path, func(ctx context.Context, job CronJob) error {
-		ran = true
-		return nil
-	})
-	svc.Start()
-	defer svc.Stop()
-
-	svc.Add(CronJob{
-		ID:       "force-run",
-		Enabled:  false,
-		Schedule: CronSchedule{Kind: KindEvery, EveryMS: 60000},
-	})
-
-	found, err := svc.RunNow(context.Background(), "force-run", true)
-	if err != nil {
-		t.Fatalf("RunNow: %v", err)
-	}
-	if !found {
-		t.Error("expected found=true with force")
-	}
-	if !ran {
-		t.Error("expected runner to be called with force")
-	}
-}
-
-func TestRunNow_DeleteAfterRun(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "cron.json")
-	svc := New(path, func(ctx context.Context, job CronJob) error {
-		return nil
-	})
-	svc.Start()
-	defer svc.Stop()
-
-	svc.Add(CronJob{
-		ID:             "delete-after",
-		Enabled:        true,
-		DeleteAfterRun: true,
-		Schedule:       CronSchedule{Kind: KindEvery, EveryMS: 60000},
-	})
-
-	svc.RunNow(context.Background(), "delete-after", false)
-
-	jobs, _ := svc.List()
-	for _, j := range jobs {
-		if j.ID == "delete-after" {
-			t.Error("expected job to be deleted after run")
-		}
-	}
-}
-
-func TestStatus_NoJobs(t *testing.T) {
-	svc, _ := makeService(t)
-	svc.Start()
-	defer svc.Stop()
-
-	s, err := svc.Status()
-	if err != nil {
-		t.Fatalf("Status: %v", err)
-	}
-	if s["jobs"].(int) != 0 {
-		t.Errorf("expected 0 jobs, got %v", s["jobs"])
-	}
-}
-
-func TestStatus_WithJobs(t *testing.T) {
-	svc, _ := makeService(t)
-	svc.Start()
-	defer svc.Stop()
-
-	svc.Add(CronJob{
-		Enabled:  true,
-		Schedule: CronSchedule{Kind: KindEvery, EveryMS: 60000},
-	})
-
-	s, err := svc.Status()
-	if err != nil {
-		t.Fatalf("Status: %v", err)
-	}
-	if s["jobs"].(int) != 1 {
-		t.Errorf("expected 1 job, got %v", s["jobs"])
-	}
-}
-
-func TestStatus_NextWakeAtMS(t *testing.T) {
-	svc, _ := makeService(t)
-	svc.Start()
-	defer svc.Stop()
-
-	// Add a job with a known next_run_at_ms
-	next := time.Now().Add(time.Hour).UnixMilli()
-	svc.Add(CronJob{
-		Enabled:  true,
-		Schedule: CronSchedule{Kind: KindEvery, EveryMS: 60000},
-		State:    CronJobState{NextRunAtMS: &next},
-	})
-
-	s, err := svc.Status()
-	if err != nil {
-		t.Fatalf("Status: %v", err)
-	}
-	if s["next_wake_at_ms"] == nil {
-		t.Error("expected next_wake_at_ms to be set")
-	}
-}
-
-func TestArmJob_KindAt_PastTime(t *testing.T) {
-	svc, _ := makeService(t)
-	svc.Start()
-	defer svc.Stop()
-
-	// at time in the past - should not schedule (no panic)
-	svc.Add(CronJob{
-		ID:      "at-past",
-		Enabled: true,
-		Schedule: CronSchedule{
-			Kind: KindAt,
-			AtMS: time.Now().Add(-time.Hour).UnixMilli(),
-		},
-	})
-
-	jobs, _ := svc.List()
-	if len(jobs) != 1 {
-		t.Errorf("expected 1 job, got %d", len(jobs))
-	}
-}
-
-func TestArmJob_KindEvery_ZeroInterval(t *testing.T) {
-	svc, _ := makeService(t)
-	svc.Start()
-	defer svc.Stop()
-
-	// Zero EveryMS should default to 60s
-	svc.Add(CronJob{
-		ID:      "every-zero",
-		Enabled: true,
-		Schedule: CronSchedule{
-			Kind:    KindEvery,
-			EveryMS: 0,
-		},
-	})
-
-	jobs, _ := svc.List()
-	if len(jobs) != 1 {
-		t.Errorf("expected 1 job, got %d", len(jobs))
-	}
-}
-
-func TestArmJob_KindCron_ValidExpr(t *testing.T) {
-	svc, _ := makeService(t)
-	svc.Start()
-	defer svc.Stop()
-
-	svc.Add(CronJob{
-		ID:      "cron-expr",
-		Enabled: true,
-		Schedule: CronSchedule{
-			Kind: KindCron,
-			Expr: "0 * * * *",
-		},
-	})
-
-	jobs, _ := svc.List()
-	if len(jobs) != 1 {
-		t.Errorf("expected 1 job, got %d", len(jobs))
-	}
-}
-
-func TestArmJob_KindCron_InvalidExpr(t *testing.T) {
-	svc, _ := makeService(t)
-	svc.Start()
-	defer svc.Stop()
-
-	// Invalid cron expr - should log but not panic
-	svc.Add(CronJob{
-		ID:      "bad-expr",
-		Enabled: true,
-		Schedule: CronSchedule{
-			Kind: KindCron,
-			Expr: "not a valid cron expression at all",
-		},
-	})
-
-	jobs, _ := svc.List()
-	if len(jobs) != 1 {
-		t.Errorf("expected 1 job (still added, just not scheduled), got %d", len(jobs))
-	}
-}
-
-func TestArmJob_DisabledJob(t *testing.T) {
-	svc, _ := makeService(t)
-	svc.Start()
-	defer svc.Stop()
-
-	svc.Add(CronJob{
-		ID:      "disabled",
-		Enabled: false,
-		Schedule: CronSchedule{Kind: KindEvery, EveryMS: 60000},
-	})
-
-	jobs, _ := svc.List()
-	if len(jobs) != 1 {
-		t.Errorf("expected 1 job, got %d", len(jobs))
-	}
-}
-
-func TestFilepathDir(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"/home/user/config.json", "/home/user"},
-		{"config.json", "."},
-		{"/config.json", "."},
-		{"a/b/c/d.json", "a/b/c"},
-	}
-	for _, tc := range tests {
-		got := filepathDir(tc.input)
-		if got != tc.want {
-			t.Errorf("filepathDir(%q) = %q, want %q", tc.input, got, tc.want)
-		}
-	}
-}
-
-func TestRandID_Length(t *testing.T) {
-	id := randID()
-	if len(id) != 10 {
-		t.Errorf("expected 10-char ID, got %d: %q", len(id), id)
-	}
-}
-
-func TestRandID_Uniqueness(t *testing.T) {
-	ids := map[string]bool{}
-	for i := 0; i < 100; i++ {
-		id := randID()
-		if ids[id] {
-			t.Errorf("duplicate id generated: %q", id)
-		}
-		ids[id] = true
-	}
-}
-
-func TestLoad_FileNotExist(t *testing.T) {
-	svc, _ := makeService(t)
-	// load from non-existent path should return empty store
-	st, err := svc.load()
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if len(st.Jobs) != 0 {
-		t.Errorf("expected 0 jobs from non-existent file, got %d", len(st.Jobs))
-	}
-}
-
-func TestLoad_InvalidJSON(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "cron.json")
-	os.WriteFile(path, []byte("{invalid"), 0o644)
-
-	svc := New(path, func(ctx context.Context, job CronJob) error { return nil })
-	_, err := svc.load()
-	if err == nil {
-		t.Fatal("expected error for invalid JSON")
-	}
-}
-
-func TestSave_And_Load(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "cron.json")
-	svc := New(path, func(ctx context.Context, job CronJob) error { return nil })
-
-	st := Store{
-		Version: 1,
-		Jobs: []CronJob{
-			{ID: "saved-job", Name: "saved", Enabled: true},
-		},
-	}
-	if err := svc.save(st); err != nil {
-		t.Fatalf("save: %v", err)
-	}
-
-	loaded, err := svc.load()
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if len(loaded.Jobs) != 1 {
-		t.Errorf("expected 1 job, got %d", len(loaded.Jobs))
-	}
-	if loaded.Jobs[0].ID != "saved-job" {
-		t.Errorf("expected ID 'saved-job', got %q", loaded.Jobs[0].ID)
-	}
-}
-
-func TestRunNow_UpdatesLastRun(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "cron.json")
-	svc := New(path, func(ctx context.Context, job CronJob) error { return nil })
-	svc.Start()
-	defer svc.Stop()
-
-	before := time.Now().UnixMilli()
-	svc.Add(CronJob{ID: "track-run", Enabled: true, Schedule: CronSchedule{Kind: KindEvery, EveryMS: 60000}})
-	svc.RunNow(context.Background(), "track-run", false)
-	after := time.Now().UnixMilli()
-
-	jobs, _ := svc.List()
-	if len(jobs) == 0 {
-		t.Fatal("expected 1 job")
-	}
-	if jobs[0].State.LastRunAtMS == nil {
-		t.Fatal("expected LastRunAtMS to be set")
-	}
-	if *jobs[0].State.LastRunAtMS < before || *jobs[0].State.LastRunAtMS > after {
-		t.Errorf("LastRunAtMS=%d out of range [%d,%d]", *jobs[0].State.LastRunAtMS, before, after)
-	}
-	if jobs[0].State.LastStatus != "ok" {
-		t.Errorf("expected LastStatus='ok', got %q", jobs[0].State.LastStatus)
-	}
-}
-
-func TestArmJob_KindAt_FutureTime(t *testing.T) {
-runCh := make(chan struct{}, 1)
-dir := t.TempDir()
-path := filepath.Join(dir, "cron.json")
-svc := New(path, func(ctx context.Context, job CronJob) error {
-runCh <- struct{}{}
-return nil
-})
-svc.Start()
-defer svc.Stop()
-
-// Schedule to run very soon
-atMS := time.Now().Add(100 * time.Millisecond).UnixMilli()
-svc.Add(CronJob{
-ID:      "at-future",
-Enabled: true,
-Schedule: CronSchedule{
-Kind: KindAt,
-AtMS: atMS,
-},
-})
-
-// Wait for it to run
-select {
-case <-runCh:
-// success
-case <-time.After(2 * time.Second):
-t.Error("timeout waiting for KindAt job to run")
-}
-}
-
-func TestRemove_WithSchedulerEntry(t *testing.T) {
-dir := t.TempDir()
-path := filepath.Join(dir, "cron.json")
-svc := New(path, func(ctx context.Context, job CronJob) error { return nil })
-svc.Start()
-defer svc.Stop()
-
-// Add a cron job (uses the scheduler)
-svc.Add(CronJob{
-ID:      "sched-job",
-Enabled: true,
-Schedule: CronSchedule{Kind: KindCron, Expr: "0 * * * *"},
-})
-
-// Remove should also remove from scheduler entries
-found, err := svc.Remove("sched-job")
-if err != nil {
-t.Fatalf("Remove: %v", err)
-}
-if !found {
-t.Error("expected found=true")
-}
-
-jobs, _ := svc.List()
-if len(jobs) != 0 {
-t.Errorf("expected 0 jobs after removal, got %d", len(jobs))
-}
-}
-
-func TestStart_WithExistingJobs(t *testing.T) {
-dir := t.TempDir()
-path := filepath.Join(dir, "cron.json")
-
-// First, create a service and add jobs
-svc1 := New(path, func(ctx context.Context, job CronJob) error { return nil })
-svc1.Start()
-svc1.Add(CronJob{
-ID:      "existing",
-Enabled: true,
-Schedule: CronSchedule{Kind: KindEvery, EveryMS: 60000},
-})
-svc1.Stop()
-
-// Create a new service with same path - Start should load existing jobs
-svc2 := New(path, func(ctx context.Context, job CronJob) error { return nil })
-if err := svc2.Start(); err != nil {
-t.Fatalf("Start with existing jobs: %v", err)
-}
-defer svc2.Stop()
-
-jobs, _ := svc2.List()
-if len(jobs) != 1 {
-t.Errorf("expected 1 job loaded from file, got %d", len(jobs))
-}
-}
-
-func TestRunNow_SaveError(t *testing.T) {
-dir := t.TempDir()
-path := filepath.Join(dir, "cron.json")
-svc := New(path, func(ctx context.Context, job CronJob) error { return nil })
-svc.Start()
-defer svc.Stop()
-
-svc.Add(CronJob{
-ID:      "save-err",
-Enabled: true,
-Schedule: CronSchedule{Kind: KindEvery, EveryMS: 60000},
-})
-
-// Run successfully
-found, err := svc.RunNow(context.Background(), "save-err", false)
-if err != nil {
-t.Fatalf("RunNow: %v", err)
-}
-if !found {
-t.Error("expected found=true")
-}
-}
-
-func TestCronPayloadSessionKey(t *testing.T) {
-payload := CronPayload{
-Kind:       "agent_turn",
-Message:    "hello from cron",
-SessionKey: "custom-session-123",
-Channel:    "telegram",
-To:         "user456",
-}
-
-// Serialize
-data, err := json.Marshal(payload)
-if err != nil {
-t.Fatalf("Marshal: %v", err)
-}
-
-// Deserialize
-var decoded CronPayload
-if err := json.Unmarshal(data, &decoded); err != nil {
-t.Fatalf("Unmarshal: %v", err)
-}
-
-if decoded.SessionKey != "custom-session-123" {
-t.Errorf("expected SessionKey %q, got %q", "custom-session-123", decoded.SessionKey)
-}
-if decoded.Kind != "agent_turn" {
-t.Errorf("expected Kind %q, got %q", "agent_turn", decoded.Kind)
-}
-if decoded.Message != "hello from cron" {
-t.Errorf("expected Message %q, got %q", "hello from cron", decoded.Message)
-}
-}
-
-func TestCronPayloadSessionKey_OmitEmpty(t *testing.T) {
-// SessionKey should be omitted when empty (json:"session_key,omitempty")
-payload := CronPayload{
-Kind:    "agent_turn",
-Message: "no session key",
-}
-data, err := json.Marshal(payload)
-if err != nil {
-t.Fatalf("Marshal: %v", err)
-}
-if strings.Contains(string(data), "session_key") {
-t.Errorf("expected session_key to be omitted when empty, got: %s", string(data))
-}
-}
-
-func TestCronRunnerPerJobSession(t *testing.T) {
-svc, _ := makeService(t)
-if err := svc.Start(); err != nil {
-t.Fatalf("Start: %v", err)
-}
-defer svc.Stop()
-
-// Track which session key the runner sees
-var capturedSessionKey string
-var runnerCalled bool
-svc2 := &Service{
-path: svc.path,
-runner: func(ctx context.Context, job CronJob) error {
-capturedSessionKey = job.Payload.SessionKey
-runnerCalled = true
-return nil
-},
-}
-
-// Simulate a job with per-job SessionKey
-job := CronJob{
-ID:      "per-job-session",
-Name:    "Per Job Session Test",
-Enabled: true,
-Schedule: CronSchedule{Kind: KindEvery, EveryMS: 60000},
-Payload: CronPayload{
-Kind:       "agent_turn",
-Message:    "per-job message",
-SessionKey: "per-job-session-key",
-},
-}
-
-// Directly call the runner with the job
-if err := svc2.runner(context.Background(), job); err != nil {
-t.Fatalf("runner: %v", err)
-}
-
-if !runnerCalled {
-t.Fatal("expected runner to be called")
-}
-if capturedSessionKey != "per-job-session-key" {
-t.Errorf("expected SessionKey %q, got %q", "per-job-session-key", capturedSessionKey)
-}
-}
-````
-
-## File: internal/memory/retrieve_test.go
-````go
-package memory
-
-import (
-	"context"
-	"database/sql"
-	"path/filepath"
-	"testing"
-
-	"or3-intern/internal/db"
-	"or3-intern/internal/scope"
-)
-
-func openRetrieveTestDB(t *testing.T) *db.DB {
-	t.Helper()
-	dir := t.TempDir()
-	d, err := db.Open(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatalf("db.Open: %v", err)
-	}
-	t.Cleanup(func() { d.Close() })
-	return d
-}
-
-func TestNewRetriever(t *testing.T) {
-	d := openRetrieveTestDB(t)
-	r := NewRetriever(d)
-	if r == nil {
-		t.Fatal("expected non-nil retriever")
-	}
-	if r.VectorWeight != 0.7 {
-		t.Errorf("expected VectorWeight=0.7, got %v", r.VectorWeight)
-	}
-	if r.FTSWeight != 0.3 {
-		t.Errorf("expected FTSWeight=0.3, got %v", r.FTSWeight)
-	}
-	if r.VectorScanLimit != 2000 {
-		t.Errorf("expected VectorScanLimit=2000, got %d", r.VectorScanLimit)
-	}
-}
-
-func TestRetrieve_Empty(t *testing.T) {
-	d := openRetrieveTestDB(t)
-	r := NewRetriever(d)
-	ctx := context.Background()
-
-	results, err := r.Retrieve(ctx, "session1", "hello", []float32{0.5, 0.5}, 5, 5, 10)
-	if err != nil {
-		t.Fatalf("Retrieve: %v", err)
-	}
-	if len(results) != 0 {
-		t.Errorf("expected empty results, got %d", len(results))
-	}
-}
-
-func TestRetrieve_WithVectorResults(t *testing.T) {
-	d := openRetrieveTestDB(t)
-	ctx := context.Background()
-
-	blob := PackFloat32([]float32{1.0, 0.0})
-	d.InsertMemoryNote(ctx, "session1", "vector match", blob, sql.NullInt64{}, "")
-
-	r := NewRetriever(d)
-	results, err := r.Retrieve(ctx, "session1", "query", []float32{1.0, 0.0}, 5, 5, 10)
-	if err != nil {
-		t.Fatalf("Retrieve: %v", err)
-	}
-	if len(results) == 0 {
-		t.Fatal("expected at least one result")
-	}
-	found := false
-	for _, res := range results {
-		if res.Text == "vector match" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Error("expected 'vector match' in results")
-	}
-}
-
-func TestRetrieve_SourceLabels(t *testing.T) {
-	d := openRetrieveTestDB(t)
-	ctx := context.Background()
-
-	// Insert note with known embedding
-	blob := PackFloat32([]float32{1.0, 0.0})
-	d.InsertMemoryNote(ctx, "session1", "fox quick jump", blob, sql.NullInt64{}, "")
-
-	r := NewRetriever(d)
-	// Exact vector match, also FTS match
-	results, err := r.Retrieve(ctx, "session1", "fox quick jump", []float32{1.0, 0.0}, 5, 5, 10)
-	if err != nil {
-		t.Fatalf("Retrieve: %v", err)
-	}
-	if len(results) == 0 {
-		t.Fatal("expected results")
-	}
-	// If both vector and FTS match, source should be "hybrid"
-	for _, res := range results {
-		if res.Text == "fox quick jump" {
-			if res.Source != "hybrid" && res.Source != "vector" && res.Source != "fts" {
-				t.Errorf("unexpected source %q", res.Source)
-			}
-		}
-	}
-}
-
-func TestRetrieve_TopKLimit(t *testing.T) {
-	d := openRetrieveTestDB(t)
-	ctx := context.Background()
-
-	for i := 0; i < 10; i++ {
-		blob := PackFloat32([]float32{float32(i), 0.0})
-		d.InsertMemoryNote(ctx, "session1", "note", blob, sql.NullInt64{}, "")
-	}
-
-	r := NewRetriever(d)
-	results, err := r.Retrieve(ctx, "session1", "note", []float32{5.0, 0.0}, 10, 10, 3)
-	if err != nil {
-		t.Fatalf("Retrieve: %v", err)
-	}
-	if len(results) > 3 {
-		t.Errorf("expected at most 3 results, got %d", len(results))
-	}
-}
-
-func TestRetrieve_SortedByScore(t *testing.T) {
-	d := openRetrieveTestDB(t)
-	ctx := context.Background()
-
-	blobs := [][]float32{{1, 0}, {0, 1}, {0.7071, 0.7071}}
-	texts := []string{"alpha", "beta", "gamma"}
-	for i, v := range blobs {
-		d.InsertMemoryNote(ctx, "session1", texts[i], PackFloat32(v), sql.NullInt64{}, "")
-	}
-
-	r := NewRetriever(d)
-	results, err := r.Retrieve(ctx, "session1", "alpha", []float32{1, 0}, 5, 5, 10)
-	if err != nil {
-		t.Fatalf("Retrieve: %v", err)
-	}
-	for i := 1; i < len(results); i++ {
-		if results[i].Score > results[i-1].Score {
-			t.Errorf("results not sorted descending: [%d]=%v > [%d]=%v", i, results[i].Score, i-1, results[i-1].Score)
-		}
-	}
-}
-
-func TestRetrieve_RespectsSessionScope(t *testing.T) {
-	d := openRetrieveTestDB(t)
-	ctx := context.Background()
-
-	d.InsertMemoryNote(ctx, "session-a", "private note", PackFloat32([]float32{1, 0}), sql.NullInt64{}, "")
-	d.InsertMemoryNote(ctx, scope.GlobalMemoryScope, "shared note", PackFloat32([]float32{1, 0}), sql.NullInt64{}, "")
-
-	r := NewRetriever(d)
-	results, err := r.Retrieve(ctx, "session-b", "note", []float32{1, 0}, 5, 5, 10)
-	if err != nil {
-		t.Fatalf("Retrieve: %v", err)
-	}
-	if len(results) == 0 || results[0].Text != "shared note" {
-		t.Fatalf("expected shared note only, got %#v", results)
-	}
-	for _, result := range results {
-		if result.Text == "private note" {
-			t.Fatalf("unexpected cross-session result: %#v", results)
-		}
-	}
-}
-
-func TestNormalizeFTSQuery(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"", ""},
-		{"  ", ""},
-		{"hello world", "hello world"},
-		{"hello:world", `"hello:world"`},
-		{`with "quotes"`, `with """quotes"""`},
-		{"star*term", `"star*term"`},
-		{"normal words only", "normal words only"},
-	}
-	for _, tc := range tests {
-		got := normalizeFTSQuery(tc.input)
-		if got != tc.want {
-			t.Errorf("normalizeFTSQuery(%q) = %q, want %q", tc.input, got, tc.want)
-		}
-	}
-}
-````
-
-## File: internal/memory/scheduler_test.go
-````go
-package memory
-
-import (
-	"context"
-	"sync"
-	"sync/atomic"
-	"testing"
-	"time"
-)
-
-func TestScheduler_SingleFlightAndCoalesce(t *testing.T) {
-	var started int32
-	block := make(chan struct{})
-	done := make(chan struct{})
-	s := NewScheduler(2*time.Second, func(ctx context.Context, sessionKey string) {
-		atomic.AddInt32(&started, 1)
-		if atomic.LoadInt32(&started) == 1 {
-			<-block
-		}
-		if atomic.LoadInt32(&started) >= 2 {
-			select {
-			case done <- struct{}{}:
-			default:
-			}
-		}
-	})
-
-	s.Trigger("sess")
-	time.Sleep(30 * time.Millisecond)
-	s.Trigger("sess")
-	close(block)
-
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("expected coalesced second pass")
-	}
-	if got := atomic.LoadInt32(&started); got != 2 {
-		t.Fatalf("expected exactly 2 runs, got %d", got)
-	}
-}
-
-func TestScheduler_IndependentSessions(t *testing.T) {
-	var mu sync.Mutex
-	calls := map[string]int{}
-	done := make(chan struct{}, 2)
-	s := NewScheduler(2*time.Second, func(ctx context.Context, sessionKey string) {
-		mu.Lock()
-		calls[sessionKey]++
-		mu.Unlock()
-		done <- struct{}{}
-	})
-	s.Trigger("a")
-	s.Trigger("b")
-
-	for i := 0; i < 2; i++ {
-		select {
-		case <-done:
-		case <-time.After(2 * time.Second):
-			t.Fatal("expected both sessions to run")
-		}
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if calls["a"] != 1 || calls["b"] != 1 {
-		t.Fatalf("unexpected calls: %#v", calls)
-	}
-}
-
-func TestScheduler_RemovesIdleSessionState(t *testing.T) {
-	done := make(chan struct{})
-	s := NewScheduler(2*time.Second, func(ctx context.Context, sessionKey string) {
-		close(done)
-	})
-	s.Trigger("sess")
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("expected scheduler run")
-	}
-	time.Sleep(30 * time.Millisecond)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.sessions) != 0 {
-		t.Fatalf("expected idle sessions map to be empty, got %#v", s.sessions)
-	}
-}
-
-func TestScheduler_RunUsesCanceledBaseContext(t *testing.T) {
-	baseCtx, cancel := context.WithCancel(context.Background())
-	cancel()
-	errCh := make(chan error, 1)
-	s := NewSchedulerWithContext(baseCtx, 2*time.Second, func(ctx context.Context, sessionKey string) {
-		errCh <- ctx.Err()
-	})
-	s.Trigger("sess")
-	select {
-	case err := <-errCh:
-		if err == nil {
-			t.Fatal("expected canceled context")
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("expected scheduler run")
-	}
-}
-````
-
-## File: internal/memory/vector_test.go
-````go
-package memory
-
-import (
-	"context"
-	"database/sql"
-	"math"
-	"path/filepath"
-	"testing"
-
-	"or3-intern/internal/db"
-	"or3-intern/internal/scope"
-)
-
-// ---- PackFloat32 / UnpackFloat32 ----
-
-func TestPackUnpackFloat32_RoundTrip(t *testing.T) {
-	orig := []float32{1.0, 2.5, -3.0, 0.0, 1e10}
-	packed := PackFloat32(orig)
-	if len(packed) != len(orig)*4 {
-		t.Errorf("expected %d bytes, got %d", len(orig)*4, len(packed))
-	}
-	got, err := UnpackFloat32(packed)
-	if err != nil {
-		t.Fatalf("UnpackFloat32: %v", err)
-	}
-	if len(got) != len(orig) {
-		t.Fatalf("expected %d values, got %d", len(orig), len(got))
-	}
-	for i := range orig {
-		if got[i] != orig[i] {
-			t.Errorf("index %d: expected %v, got %v", i, orig[i], got[i])
-		}
-	}
-}
-
-func TestPackFloat32_Empty(t *testing.T) {
-	packed := PackFloat32(nil)
-	if len(packed) != 0 {
-		t.Errorf("expected empty bytes for nil input, got %d bytes", len(packed))
-	}
-}
-
-func TestUnpackFloat32_Invalid(t *testing.T) {
-	_, err := UnpackFloat32([]byte{1, 2, 3}) // 3 bytes is not a multiple of 4
-	if err == nil {
-		t.Fatal("expected error for invalid blob size")
-	}
-}
-
-func TestUnpackFloat32_Empty(t *testing.T) {
-	got, err := UnpackFloat32([]byte{})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(got) != 0 {
-		t.Errorf("expected empty slice, got %d elements", len(got))
-	}
-}
-
-// ---- Cosine ----
-
-func TestCosine_Identical(t *testing.T) {
-	v := []float32{1, 2, 3}
-	score := Cosine(v, v)
-	if math.Abs(score-1.0) > 1e-6 {
-		t.Errorf("expected cosine similarity of identical vectors ≈1.0, got %v", score)
-	}
-}
-
-func TestCosine_Orthogonal(t *testing.T) {
-	a := []float32{1, 0}
-	b := []float32{0, 1}
-	score := Cosine(a, b)
-	if math.Abs(score) > 1e-6 {
-		t.Errorf("expected cosine similarity of orthogonal vectors ≈0.0, got %v", score)
-	}
-}
-
-func TestCosine_Opposite(t *testing.T) {
-	a := []float32{1, 0}
-	b := []float32{-1, 0}
-	score := Cosine(a, b)
-	if math.Abs(score+1.0) > 1e-6 {
-		t.Errorf("expected cosine similarity of opposite vectors ≈-1.0, got %v", score)
-	}
-}
-
-func TestCosine_ZeroVectorA(t *testing.T) {
-	a := []float32{0, 0}
-	b := []float32{1, 2}
-	score := Cosine(a, b)
-	if score != 0 {
-		t.Errorf("expected 0 when a is zero vector, got %v", score)
-	}
-}
-
-func TestCosine_ZeroVectorB(t *testing.T) {
-	a := []float32{1, 2}
-	b := []float32{0, 0}
-	score := Cosine(a, b)
-	if score != 0 {
-		t.Errorf("expected 0 when b is zero vector, got %v", score)
-	}
-}
-
-func TestCosine_DifferentLengths(t *testing.T) {
-	a := []float32{1, 0, 0}
-	b := []float32{1, 0}
-	// should use min length
-	score := Cosine(a, b)
-	if math.Abs(score-1.0) > 1e-6 {
-		t.Errorf("expected ~1.0 for first-element match, got %v", score)
-	}
-}
-
-// ---- heap ----
-
-func TestCandMinHeap(t *testing.T) {
-	h := &candMinHeap{
-		{ID: 1, Score: 0.5},
-		{ID: 2, Score: 0.9},
-		{ID: 3, Score: 0.1},
-	}
-	if h.Len() != 3 {
-		t.Errorf("expected Len 3, got %d", h.Len())
-	}
-	if !h.Less(2, 0) { // 0.1 < 0.5
-		t.Error("expected Less(2,0) to be true")
-	}
-	h.Swap(0, 1)
-	if (*h)[0].ID != 2 || (*h)[1].ID != 1 {
-		t.Error("expected Swap to swap elements")
-	}
-}
-
-// ---- VectorSearch ----
-
-func openTestDB(t *testing.T) *db.DB {
-	t.Helper()
-	dir := t.TempDir()
-	d, err := db.Open(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatalf("db.Open: %v", err)
-	}
-	t.Cleanup(func() { d.Close() })
-	return d
-}
-
-func TestVectorSearch_Empty(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	query := []float32{0.5, 0.5}
-	results, err := VectorSearch(ctx, d, "session1", query, 5, 100)
-	if err != nil {
-		t.Fatalf("VectorSearch: %v", err)
-	}
-	if len(results) != 0 {
-		t.Errorf("expected empty results, got %d", len(results))
-	}
-}
-
-func TestVectorSearch_Results(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	// Insert notes with embeddings
-	vecs := [][]float32{
-		{1, 0},
-		{0, 1},
-		{0.7071, 0.7071},
-	}
-	for i, v := range vecs {
-		blob := PackFloat32(v)
-		d.InsertMemoryNote(ctx, "session1", []string{"first", "second", "third"}[i], blob, sql.NullInt64{}, "")
-	}
-
-	// Query similar to {1, 0}
-	results, err := VectorSearch(ctx, d, "session1", []float32{1, 0}, 3, 100)
-	if err != nil {
-		t.Fatalf("VectorSearch: %v", err)
-	}
-	if len(results) == 0 {
-		t.Fatal("expected results")
-	}
-	// "first" should appear in results (it has cosine=1.0 with {1,0})
-	found := false
-	for _, r := range results {
-		if r.Text == "first" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Error("expected 'first' to be in results")
-	}
-	// VectorSearch returns results sorted ascending (min->max) by score
-	// Just verify all results are present
-	if len(results) != 3 {
-		t.Errorf("expected 3 results, got %d", len(results))
-	}
-}
-
-func TestVectorSearch_InvalidEmbeddingSkipped(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	// Insert a note with invalid embedding
-	d.InsertMemoryNote(ctx, "session1", "bad note", []byte{1, 2, 3}, sql.NullInt64{}, "")
-	// Insert a good one
-	blob := PackFloat32([]float32{1, 0})
-	d.InsertMemoryNote(ctx, "session1", "good note", blob, sql.NullInt64{}, "")
-
-	results, err := VectorSearch(ctx, d, "session1", []float32{1, 0}, 5, 100)
-	if err != nil {
-		t.Fatalf("VectorSearch: %v", err)
-	}
-	if len(results) != 1 {
-		t.Errorf("expected 1 result (bad note skipped), got %d", len(results))
-	}
-	if results[0].Text != "good note" {
-		t.Errorf("expected 'good note', got %q", results[0].Text)
-	}
-}
-
-func TestVectorSearch_KLimit(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	// Insert 5 notes
-	for i := 0; i < 5; i++ {
-		blob := PackFloat32([]float32{float32(i), 0})
-		d.InsertMemoryNote(ctx, "session1", "note", blob, sql.NullInt64{}, "")
-	}
-
-	results, err := VectorSearch(ctx, d, "session1", []float32{4, 0}, 3, 100)
-	if err != nil {
-		t.Fatalf("VectorSearch: %v", err)
-	}
-	if len(results) > 3 {
-		t.Errorf("expected at most 3 results, got %d", len(results))
-	}
-}
-
-func TestVectorSearch_PreservesSessionRowsWhenGlobalCorpusIsNewer(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	if _, err := d.InsertMemoryNote(ctx, "session-a", "session match", PackFloat32([]float32{1, 0}), sql.NullInt64{}, ""); err != nil {
-		t.Fatalf("InsertMemoryNote session: %v", err)
-	}
-	for i := 0; i < 5; i++ {
-		if _, err := d.InsertMemoryNote(ctx, scope.GlobalMemoryScope, "shared note", PackFloat32([]float32{0, 1}), sql.NullInt64{}, ""); err != nil {
-			t.Fatalf("InsertMemoryNote shared: %v", err)
-		}
-	}
-
-	results, err := VectorSearch(ctx, d, "session-a", []float32{1, 0}, 3, 2)
-	if err != nil {
-		t.Fatalf("VectorSearch: %v", err)
-	}
-	found := false
-	for _, result := range results {
-		if result.Text == "session match" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatalf("expected session-scoped note to remain searchable, got %#v", results)
-	}
-}
-````
-
-## File: internal/tools/context.go
-````go
-package tools
-
-import (
-	"context"
-
-	"or3-intern/internal/scope"
-)
-
-type sessionContextKey struct{}
-type deliveryChannelContextKey struct{}
-type deliveryToContextKey struct{}
-
-func ContextWithSession(ctx context.Context, sessionKey string) context.Context {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if sessionKey == "" {
-		sessionKey = scope.GlobalMemoryScope
-	}
-	return context.WithValue(ctx, sessionContextKey{}, sessionKey)
-}
-
-func ContextWithDelivery(ctx context.Context, channel, to string) context.Context {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	ctx = context.WithValue(ctx, deliveryChannelContextKey{}, channel)
-	return context.WithValue(ctx, deliveryToContextKey{}, to)
-}
-
-func SessionFromContext(ctx context.Context) string {
-	if ctx == nil {
-		return scope.GlobalMemoryScope
-	}
-	if sessionKey, ok := ctx.Value(sessionContextKey{}).(string); ok && sessionKey != "" {
-		return sessionKey
-	}
-	return scope.GlobalMemoryScope
-}
-
-func DeliveryFromContext(ctx context.Context) (channel string, to string) {
-	if ctx == nil {
-		return "", ""
-	}
-	if v, ok := ctx.Value(deliveryChannelContextKey{}).(string); ok {
-		channel = v
-	}
-	if v, ok := ctx.Value(deliveryToContextKey{}).(string); ok {
-		to = v
-	}
-	return channel, to
-}
-````
-
-## File: internal/tools/exec.go
-````go
-package tools
-
-import (
-	"bytes"
-	"context"
-	"errors"
-	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"strings"
-	"time"
-)
-
-type ExecTool struct {
-	Base
-	Timeout time.Duration
-	RestrictDir string // if non-empty, cwd must be inside
-	PathAppend string
-	OutputMaxBytes int
-	BlockedPatterns []string
-}
-
-const defaultExecOutputMaxBytes = 10000
-
-func (t *ExecTool) Name() string { return "exec" }
-func (t *ExecTool) Description() string {
-	return "Run a shell command with safety limits. Output is truncated."
-}
-func (t *ExecTool) Parameters() map[string]any {
-	return map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"command": map[string]any{"type": "string", "description": "Shell command to run"},
-			"cwd": map[string]any{"type": "string", "description": "Working directory (optional)"},
-			"timeoutSeconds": map[string]any{"type": "integer", "description": "Override timeout (optional)"},
-		},
-		"required": []string{"command"},
-	}
-}
-func (t *ExecTool) Schema() map[string]any { return t.SchemaFor(t.Name(), t.Description(), t.Parameters()) }
-
-var defaultBlockedPatterns = []string{
-	"rm -rf", "mkfs", "dd ", "shutdown", "reboot", "poweroff", ":(){", ">|", "chown -R /", "chmod -R 777 /",
-}
-
-func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, error) {
-	cmdS, _ := params["command"].(string)
-	if strings.TrimSpace(cmdS) == "" { return "", errors.New("missing command") }
-	lc := strings.ToLower(cmdS)
-	patterns := t.BlockedPatterns
-	if len(patterns) == 0 { patterns = defaultBlockedPatterns }
-	for _, b := range patterns {
-		if strings.Contains(lc, b) {
-			return "", fmt.Errorf("blocked command pattern: %q", b)
-		}
-	}
-	cwd, _ := params["cwd"].(string)
-	if cwd == "" { cwd, _ = os.Getwd() }
-	if t.RestrictDir != "" {
-		abs, _ := filepath.Abs(cwd)
-		root, _ := filepath.Abs(t.RestrictDir)
-		rel, err := filepath.Rel(root, abs)
-		if err != nil || strings.HasPrefix(rel, "..") {
-			return "", fmt.Errorf("cwd outside allowed directory")
-		}
-	}
-
-	to := t.Timeout
-	if v, ok := params["timeoutSeconds"].(float64); ok && v > 0 {
-		to = time.Duration(int(v)) * time.Second
-	}
-	cctx, cancel := context.WithTimeout(ctx, to)
-	defer cancel()
-
-	c := exec.CommandContext(cctx, "bash", "-lc", cmdS)
-	c.Dir = cwd
-	if t.PathAppend != "" {
-		env := os.Environ()
-		env = append(env, "PATH="+os.Getenv("PATH")+string(os.PathListSeparator)+t.PathAppend)
-		c.Env = env
-	}
-	var stdout, stderr bytes.Buffer
-	c.Stdout = &stdout
-	c.Stderr = &stderr
-	err := c.Run()
-	out := stdout.String()
-	er := stderr.String()
-	max := t.OutputMaxBytes
-	if max <= 0 { max = defaultExecOutputMaxBytes }
-	if len(out) > max { out = out[:max] + "\n...[truncated]\n" }
-	if len(er) > max { er = er[:max] + "\n...[truncated]\n" }
-	if err != nil {
-		return fmt.Sprintf("exit error: %v\n\nstdout:\n%s\n\nstderr:\n%s", err, out, er), nil
-	}
-	if strings.TrimSpace(er) != "" {
-		return fmt.Sprintf("stdout:\n%s\n\nstderr:\n%s", out, er), nil
-	}
-	return out, nil
-}
-````
-
-## File: internal/tools/files_test.go
-````go
-package tools
-
-import (
-	"context"
-	"encoding/json"
-	"os"
-	"path/filepath"
-	"strings"
-	"testing"
-)
-
-// ---- safePath ----
-
-func TestSafePath_Valid(t *testing.T) {
-	tool := &FileTool{}
-	dir := t.TempDir()
-	path, err := tool.safePath(filepath.Join(dir, "file.txt"))
-	if err != nil {
-		t.Fatalf("safePath: %v", err)
-	}
-	if path == "" {
-		t.Error("expected non-empty path")
-	}
-}
-
-func TestSafePath_Empty(t *testing.T) {
-	tool := &FileTool{}
-	_, err := tool.safePath("")
-	if err == nil {
-		t.Fatal("expected error for empty path")
-	}
-}
-
-func TestSafePath_Whitespace(t *testing.T) {
-	tool := &FileTool{}
-	_, err := tool.safePath("   ")
-	if err == nil {
-		t.Fatal("expected error for whitespace-only path")
-	}
-}
-
-func TestSafePath_OutsideRoot(t *testing.T) {
-	dir := t.TempDir()
-	tool := &FileTool{Root: dir}
-	_, err := tool.safePath("/tmp")
-	if err == nil {
-		t.Fatal("expected error for path outside root")
-	}
-	if !strings.Contains(err.Error(), "outside allowed root") {
-		t.Errorf("expected 'outside allowed root', got %q", err.Error())
-	}
-}
-
-func TestSafePath_InsideRoot(t *testing.T) {
-	dir := t.TempDir()
-	tool := &FileTool{Root: dir}
-	path, err := tool.safePath(filepath.Join(dir, "subdir", "file.txt"))
-	if err != nil {
-		t.Fatalf("safePath: %v", err)
-	}
-	if path == "" {
-		t.Error("expected non-empty path")
-	}
-}
-
-func TestSafePath_BlocksSymlinkEscape(t *testing.T) {
-	root := t.TempDir()
-	outside := t.TempDir()
-	link := filepath.Join(root, "escape")
-	if err := os.Symlink(outside, link); err != nil {
-		t.Skipf("symlink unsupported: %v", err)
-	}
-	tool := &FileTool{Root: root}
-	_, err := tool.safePath(filepath.Join(link, "secret.txt"))
-	if err == nil {
-		t.Fatal("expected symlink escape to be blocked")
-	}
-}
-
-// ---- ReadFile ----
-
-func TestReadFile_OK(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "test.txt")
-	os.WriteFile(p, []byte("hello file"), 0o644)
-
-	tool := &ReadFile{}
-	out, err := tool.Execute(context.Background(), map[string]any{"path": p})
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
-	if out != "hello file" {
-		t.Errorf("expected 'hello file', got %q", out)
-	}
-}
-
-func TestReadFile_NotFound(t *testing.T) {
-	tool := &ReadFile{}
-	_, err := tool.Execute(context.Background(), map[string]any{"path": "/nonexistent/file.txt"})
-	if err == nil {
-		t.Fatal("expected error for missing file")
-	}
-}
-
-func TestReadFile_Truncation(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "large.txt")
-	os.WriteFile(p, []byte(strings.Repeat("x", 200)), 0o644)
-
-	tool := &ReadFile{}
-	out, err := tool.Execute(context.Background(), map[string]any{
-		"path":     p,
-		"maxBytes": float64(100),
-	})
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
-	if len(out) != 100 {
-		t.Errorf("expected 100 bytes, got %d", len(out))
-	}
-}
-
-func TestReadFile_EmptyPath(t *testing.T) {
-	tool := &ReadFile{}
-	_, err := tool.Execute(context.Background(), map[string]any{"path": ""})
-	if err == nil {
-		t.Fatal("expected error for empty path")
-	}
-}
-
-func TestReadFile_Name(t *testing.T) {
-	tool := &ReadFile{}
-	if tool.Name() != "read_file" {
-		t.Errorf("expected 'read_file', got %q", tool.Name())
-	}
-}
-
-func TestReadFile_Schema(t *testing.T) {
-	tool := &ReadFile{}
-	schema := tool.Schema()
-	if schema["type"] != "function" {
-		t.Errorf("expected 'function', got %v", schema["type"])
-	}
-}
-
-// ---- WriteFile ----
-
-func TestWriteFile_OK(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "out.txt")
-
-	tool := &WriteFile{}
-	out, err := tool.Execute(context.Background(), map[string]any{
-		"path":    p,
-		"content": "written content",
-	})
-	if err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-	if out != "ok" {
-		t.Errorf("expected 'ok', got %q", out)
-	}
-	got, _ := os.ReadFile(p)
-	if string(got) != "written content" {
-		t.Errorf("expected 'written content', got %q", string(got))
-	}
-}
-
-func TestWriteFile_Mkdirs(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "a", "b", "c", "file.txt")
-
-	tool := &WriteFile{}
-	out, err := tool.Execute(context.Background(), map[string]any{
-		"path":    p,
-		"content": "content",
-		"mkdirs":  true,
-	})
-	if err != nil {
-		t.Fatalf("WriteFile with mkdirs: %v", err)
-	}
-	if out != "ok" {
-		t.Errorf("expected 'ok', got %q", out)
-	}
-}
-
-func TestWriteFile_NoMkdirs_FailsOnMissingDir(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "missing", "file.txt")
-
-	tool := &WriteFile{}
-	_, err := tool.Execute(context.Background(), map[string]any{
-		"path":    p,
-		"content": "content",
-	})
-	if err == nil {
-		t.Fatal("expected error when parent dir is missing and mkdirs=false")
-	}
-}
-
-func TestWriteFile_Name(t *testing.T) {
-	tool := &WriteFile{}
-	if tool.Name() != "write_file" {
-		t.Errorf("expected 'write_file', got %q", tool.Name())
-	}
-}
-
-// ---- EditFile ----
-
-func TestEditFile_ReplaceAll(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "edit.txt")
-	os.WriteFile(p, []byte("foo foo foo"), 0o644)
-
-	tool := &EditFile{}
-	out, err := tool.Execute(context.Background(), map[string]any{
-		"path": p,
-		"edits": []any{
-			map[string]any{"find": "foo", "replace": "bar"},
-		},
-	})
-	if err != nil {
-		t.Fatalf("EditFile: %v", err)
-	}
-	if out != "ok" {
-		t.Errorf("expected 'ok', got %q", out)
-	}
-	got, _ := os.ReadFile(p)
-	if string(got) != "bar bar bar" {
-		t.Errorf("expected 'bar bar bar', got %q", string(got))
-	}
-}
-
-func TestEditFile_ReplaceCount(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "edit.txt")
-	os.WriteFile(p, []byte("foo foo foo"), 0o644)
-
-	tool := &EditFile{}
-	tool.Execute(context.Background(), map[string]any{
-		"path": p,
-		"edits": []any{
-			map[string]any{"find": "foo", "replace": "bar", "count": float64(1)},
-		},
-	})
-	got, _ := os.ReadFile(p)
-	if string(got) != "bar foo foo" {
-		t.Errorf("expected 'bar foo foo', got %q", string(got))
-	}
-}
-
-func TestEditFile_NotFound(t *testing.T) {
-	tool := &EditFile{}
-	_, err := tool.Execute(context.Background(), map[string]any{
-		"path":  "/nonexistent/file.txt",
-		"edits": []any{},
-	})
-	if err == nil {
-		t.Fatal("expected error for missing file")
-	}
-}
-
-func TestEditFile_Name(t *testing.T) {
-	tool := &EditFile{}
-	if tool.Name() != "edit_file" {
-		t.Errorf("expected 'edit_file', got %q", tool.Name())
-	}
-}
-
-func TestEditFile_NoEdits(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "file.txt")
-	os.WriteFile(p, []byte("original"), 0o644)
-
-	tool := &EditFile{}
-	out, err := tool.Execute(context.Background(), map[string]any{
-		"path":  p,
-		"edits": []any{},
-	})
-	if err != nil {
-		t.Fatalf("EditFile no edits: %v", err)
-	}
-	if out != "ok" {
-		t.Errorf("expected 'ok', got %q", out)
-	}
-	got, _ := os.ReadFile(p)
-	if string(got) != "original" {
-		t.Errorf("expected unchanged 'original', got %q", string(got))
-	}
-}
-
-// ---- ListDir ----
-
-func TestListDir_OK(t *testing.T) {
-	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("a"), 0o644)
-	os.WriteFile(filepath.Join(dir, "b.txt"), []byte("b"), 0o644)
-	os.MkdirAll(filepath.Join(dir, "subdir"), 0o755)
-
-	tool := &ListDir{}
-	out, err := tool.Execute(context.Background(), map[string]any{"path": dir})
-	if err != nil {
-		t.Fatalf("ListDir: %v", err)
-	}
-
-	var entries []struct {
-		Name  string `json:"name"`
-		IsDir bool   `json:"isDir"`
-		Size  int64  `json:"size"`
-	}
-	if err := json.Unmarshal([]byte(out), &entries); err != nil {
-		t.Fatalf("parse output: %v", err)
-	}
-	if len(entries) != 3 {
-		t.Errorf("expected 3 entries, got %d", len(entries))
-	}
-}
-
-func TestListDir_MaxEntries(t *testing.T) {
-	dir := t.TempDir()
-	for i := 0; i < 5; i++ {
-		os.WriteFile(filepath.Join(dir, []string{"a", "b", "c", "d", "e"}[i]+".txt"), []byte("x"), 0o644)
-	}
-
-	tool := &ListDir{}
-	out, err := tool.Execute(context.Background(), map[string]any{
-		"path": dir,
-		"max":  float64(2),
-	})
-	if err != nil {
-		t.Fatalf("ListDir: %v", err)
-	}
-	var entries []any
-	json.Unmarshal([]byte(out), &entries)
-	if len(entries) != 2 {
-		t.Errorf("expected 2 entries with max=2, got %d", len(entries))
-	}
-}
-
-func TestListDir_NotFound(t *testing.T) {
-	tool := &ListDir{}
-	_, err := tool.Execute(context.Background(), map[string]any{"path": "/nonexistent/directory"})
-	if err == nil {
-		t.Fatal("expected error for missing directory")
-	}
-}
-
-func TestListDir_Name(t *testing.T) {
-	tool := &ListDir{}
-	if tool.Name() != "list_dir" {
-		t.Errorf("expected 'list_dir', got %q", tool.Name())
-	}
-}
-
-func TestWriteFile_Description(t *testing.T) {
-	tool := &WriteFile{}
-	if tool.Description() == "" {
-		t.Error("expected non-empty description")
-	}
-}
-
-func TestWriteFile_Parameters(t *testing.T) {
-	tool := &WriteFile{}
-	params := tool.Parameters()
-	if params["type"] != "object" {
-		t.Errorf("expected 'object', got %v", params["type"])
-	}
-}
-
-func TestEditFile_Description(t *testing.T) {
-	tool := &EditFile{}
-	if tool.Description() == "" {
-		t.Error("expected non-empty description")
-	}
-}
-
-func TestEditFile_Parameters(t *testing.T) {
-	tool := &EditFile{}
-	params := tool.Parameters()
-	if params["type"] != "object" {
-		t.Errorf("expected 'object', got %v", params["type"])
-	}
-}
-
-func TestEditFile_Schema(t *testing.T) {
-	tool := &EditFile{}
-	schema := tool.Schema()
-	if schema["type"] != "function" {
-		t.Errorf("expected 'function', got %v", schema["type"])
-	}
-}
-
-func TestListDir_Description(t *testing.T) {
-	tool := &ListDir{}
-	if tool.Description() == "" {
-		t.Error("expected non-empty description")
-	}
-}
-
-func TestListDir_Parameters(t *testing.T) {
-	tool := &ListDir{}
-	params := tool.Parameters()
-	if params["type"] != "object" {
-		t.Errorf("expected 'object', got %v", params["type"])
-	}
-}
-
-func TestListDir_Schema(t *testing.T) {
-	tool := &ListDir{}
-	schema := tool.Schema()
-	if schema["type"] != "function" {
-		t.Errorf("expected 'function', got %v", schema["type"])
-	}
-}
-
-func TestReadFile_Description(t *testing.T) {
-	tool := &ReadFile{}
-	if tool.Description() == "" {
-		t.Error("expected non-empty description")
-	}
-}
-
-func TestReadFile_Parameters(t *testing.T) {
-	tool := &ReadFile{}
-	params := tool.Parameters()
-	if params["type"] != "object" {
-		t.Errorf("expected 'object', got %v", params["type"])
-	}
-}
-
-func TestWriteFile_Schema(t *testing.T) {
-tool := &WriteFile{}
-schema := tool.Schema()
-if schema["type"] != "function" {
-t.Errorf("expected 'function', got %v", schema["type"])
-}
-}
-````
-
-## File: internal/tools/memory_test.go
-````go
-package tools
-
-import (
-	"context"
-	"encoding/json"
-	"fmt"
-	"net/http"
-	"net/http/httptest"
-	"path/filepath"
-	"strings"
-	"testing"
-	"time"
-
-	"or3-intern/internal/db"
-	"or3-intern/internal/providers"
-	"or3-intern/internal/scope"
-)
-
-func makeMemoryTestDB(t *testing.T) *db.DB {
-	t.Helper()
-	d, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("db.Open: %v", err)
-	}
-	t.Cleanup(func() { d.Close() })
-	return d
-}
-
-func makeEmbedServer(t *testing.T, vec []float32) (*httptest.Server, *providers.Client) {
-	t.Helper()
-	resp := map[string]any{
-		"data": []map[string]any{
-			{"embedding": vec},
-		},
-	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
-	}))
-	t.Cleanup(srv.Close)
-	c := providers.New(srv.URL, "test-key", 10*time.Second)
-	c.HTTP = srv.Client()
-	return srv, c
-}
-
-// ---- MemorySetPinned ----
-
-func TestMemorySetPinned_NoDB(t *testing.T) {
-	tool := &MemorySetPinned{}
-	_, err := tool.Execute(context.Background(), map[string]any{
-		"key":     "k",
-		"content": "v",
-	})
-	if err == nil {
-		t.Fatal("expected error when DB is nil")
-	}
-}
-
-func TestMemorySetPinned_EmptyKey(t *testing.T) {
-	d := makeMemoryTestDB(t)
-	tool := &MemorySetPinned{DB: d}
-	_, err := tool.Execute(context.Background(), map[string]any{
-		"key":     "",
-		"content": "value",
-	})
-	if err == nil {
-		t.Fatal("expected error for empty key")
-	}
-}
-
-func TestMemorySetPinned_EmptyContent(t *testing.T) {
-	d := makeMemoryTestDB(t)
-	tool := &MemorySetPinned{DB: d}
-	_, err := tool.Execute(context.Background(), map[string]any{
-		"key":     "mykey",
-		"content": "",
-	})
-	if err == nil {
-		t.Fatal("expected error for empty content")
-	}
-}
-
-func TestMemorySetPinned_Success(t *testing.T) {
-	d := makeMemoryTestDB(t)
-	tool := &MemorySetPinned{DB: d}
-	ctx := ContextWithSession(context.Background(), "session-a")
-	out, err := tool.Execute(ctx, map[string]any{
-		"key":     "name",
-		"content": "Alice",
-	})
-	if err != nil {
-		t.Fatalf("MemorySetPinned: %v", err)
-	}
-	if out != "ok" {
-		t.Errorf("expected 'ok', got %q", out)
-	}
-
-	// Verify pinned memory was stored
-	pinned, _ := d.GetPinned(context.Background(), "session-a")
-	if pinned["name"] != "Alice" {
-		t.Errorf("expected pinned['name']='Alice', got %q", pinned["name"])
-	}
-}
-
-func TestMemorySetPinned_Overwrite(t *testing.T) {
-	d := makeMemoryTestDB(t)
-	tool := &MemorySetPinned{DB: d}
-
-	ctx := ContextWithSession(context.Background(), "session-a")
-	tool.Execute(ctx, map[string]any{"key": "k", "content": "first"})
-	tool.Execute(ctx, map[string]any{"key": "k", "content": "second"})
-
-	pinned, _ := d.GetPinned(context.Background(), "session-a")
-	if pinned["k"] != "second" {
-		t.Errorf("expected 'second', got %q", pinned["k"])
-	}
-}
-
-func TestMemorySetPinned_GlobalScope(t *testing.T) {
-	d := makeMemoryTestDB(t)
-	tool := &MemorySetPinned{DB: d}
-	if _, err := tool.Execute(context.Background(), map[string]any{"key": "shared", "content": "value", "scope": scope.GlobalScopeAlias}); err != nil {
-		t.Fatalf("MemorySetPinned: %v", err)
-	}
-	pinned, _ := d.GetPinned(context.Background(), "other-session")
-	if pinned["shared"] != "value" {
-		t.Fatalf("expected global pinned memory, got %#v", pinned)
-	}
-}
-
-func TestMemorySetPinned_Name(t *testing.T) {
-	tool := &MemorySetPinned{}
-	if tool.Name() != "memory_set_pinned" {
-		t.Errorf("expected 'memory_set_pinned', got %q", tool.Name())
-	}
-}
-
-func TestMemorySetPinned_Schema(t *testing.T) {
-	tool := &MemorySetPinned{}
-	schema := tool.Schema()
-	if schema["type"] != "function" {
-		t.Errorf("expected 'function', got %v", schema["type"])
-	}
-}
-
-// ---- MemoryAddNote ----
-
-func TestMemoryAddNote_NoDB(t *testing.T) {
-	tool := &MemoryAddNote{}
-	_, err := tool.Execute(context.Background(), map[string]any{"text": "hello"})
-	if err == nil {
-		t.Fatal("expected error when DB is nil")
-	}
-}
-
-func TestMemoryAddNote_EmptyText(t *testing.T) {
-	d := makeMemoryTestDB(t)
-	_, c := makeEmbedServer(t, []float32{0.1, 0.2})
-	tool := &MemoryAddNote{DB: d, Provider: c, EmbedModel: "model"}
-	_, err := tool.Execute(context.Background(), map[string]any{"text": ""})
-	if err == nil {
-		t.Fatal("expected error for empty text")
-	}
-}
-
-func TestMemoryAddNote_Success(t *testing.T) {
-	d := makeMemoryTestDB(t)
-	_, c := makeEmbedServer(t, []float32{0.1, 0.2})
-	tool := &MemoryAddNote{DB: d, Provider: c, EmbedModel: "model"}
-	out, err := tool.Execute(context.Background(), map[string]any{
-		"text": "This is a memory note",
-		"tags": "important",
-	})
-	if err != nil {
-		t.Fatalf("MemoryAddNote: %v", err)
-	}
-	if !strings.HasPrefix(out, "ok:") {
-		t.Errorf("expected 'ok: ...' output, got %q", out)
-	}
-}
-
-func TestMemoryAddNote_WithSourceMessageID(t *testing.T) {
-	d := makeMemoryTestDB(t)
-	_, c := makeEmbedServer(t, []float32{0.1, 0.2})
-	tool := &MemoryAddNote{DB: d, Provider: c, EmbedModel: "model"}
-	out, err := tool.Execute(context.Background(), map[string]any{
-		"text":              "memory with source",
-		"source_message_id": float64(42),
-	})
-	if err != nil {
-		t.Fatalf("MemoryAddNote: %v", err)
-	}
-	if !strings.HasPrefix(out, "ok:") {
-		t.Errorf("expected 'ok: ...' output, got %q", out)
-	}
-}
-
-func TestMemoryAddNote_EmbedFails(t *testing.T) {
-	d := makeMemoryTestDB(t)
-	// Create a server that returns an error
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprint(w, "embed error")
-	}))
-	defer srv.Close()
-	c := providers.New(srv.URL, "key", 10*time.Second)
-	c.HTTP = srv.Client()
-
-	tool := &MemoryAddNote{DB: d, Provider: c, EmbedModel: "model"}
-	_, err := tool.Execute(context.Background(), map[string]any{"text": "hello"})
-	if err == nil {
-		t.Fatal("expected error when embed fails")
-	}
-}
-
-func TestMemoryAddNote_Name(t *testing.T) {
-	tool := &MemoryAddNote{}
-	if tool.Name() != "memory_add_note" {
-		t.Errorf("expected 'memory_add_note', got %q", tool.Name())
-	}
-}
-
-func TestMemoryAddNote_Schema(t *testing.T) {
-	tool := &MemoryAddNote{}
-	schema := tool.Schema()
-	if schema["type"] != "function" {
-		t.Errorf("expected 'function', got %v", schema["type"])
-	}
-}
-
-// ---- MemorySearch ----
-
-func TestMemorySearch_NoDB(t *testing.T) {
-	tool := &MemorySearch{}
-	_, err := tool.Execute(context.Background(), map[string]any{"query": "test"})
-	if err == nil {
-		t.Fatal("expected error when DB is nil")
-	}
-}
-
-func TestMemorySearch_EmptyQuery(t *testing.T) {
-	d := makeMemoryTestDB(t)
-	_, c := makeEmbedServer(t, []float32{0.1, 0.2})
-	tool := &MemorySearch{DB: d, Provider: c, EmbedModel: "model"}
-	_, err := tool.Execute(context.Background(), map[string]any{"query": ""})
-	if err == nil {
-		t.Fatal("expected error for empty query")
-	}
-}
-
-func TestMemorySearch_EmptyDB(t *testing.T) {
-	d := makeMemoryTestDB(t)
-	_, c := makeEmbedServer(t, []float32{0.1, 0.2})
-	tool := &MemorySearch{
-		DB:              d,
-		Provider:        c,
-		EmbedModel:      "model",
-		VectorK:         5,
-		FTSK:            5,
-		TopK:            5,
-		VectorScanLimit: 100,
-	}
-	out, err := tool.Execute(context.Background(), map[string]any{"query": "hello"})
-	if err != nil {
-		t.Fatalf("MemorySearch: %v", err)
-	}
-	if out != "" {
-		t.Errorf("expected empty output for empty db, got %q", out)
-	}
-}
-
-func TestMemorySearch_WithTopKParam(t *testing.T) {
-	d := makeMemoryTestDB(t)
-	_, c := makeEmbedServer(t, []float32{0.1, 0.2})
-	tool := &MemorySearch{
-		DB:         d,
-		Provider:   c,
-		EmbedModel: "model",
-		TopK:       3,
-	}
-	out, err := tool.Execute(context.Background(), map[string]any{
-		"query": "test",
-		"topK":  float64(2),
-	})
-	if err != nil {
-		t.Fatalf("MemorySearch: %v", err)
-	}
-	_ = out
-}
-
-func TestMemorySearch_EmbedFails(t *testing.T) {
-	d := makeMemoryTestDB(t)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprint(w, "error")
-	}))
-	defer srv.Close()
-	c := providers.New(srv.URL, "key", 10*time.Second)
-	c.HTTP = srv.Client()
-
-	tool := &MemorySearch{DB: d, Provider: c, EmbedModel: "model", TopK: 5}
-	_, err := tool.Execute(context.Background(), map[string]any{"query": "test"})
-	if err == nil {
-		t.Fatal("expected error when embed fails")
-	}
-}
-
-func TestMemorySearch_Name(t *testing.T) {
-	tool := &MemorySearch{}
-	if tool.Name() != "memory_search" {
-		t.Errorf("expected 'memory_search', got %q", tool.Name())
-	}
-}
-
-func TestMemorySearch_Schema(t *testing.T) {
-	tool := &MemorySearch{}
-	schema := tool.Schema()
-	if schema["type"] != "function" {
-		t.Errorf("expected 'function', got %v", schema["type"])
-	}
-}
-````
-
-## File: internal/tools/message_test.go
-````go
-package tools
-
-import (
-	"context"
-	"errors"
-	"os"
-	"path/filepath"
-	"testing"
-)
-
-func TestSendMessage_NoDeliver(t *testing.T) {
-	tool := &SendMessage{}
-	_, err := tool.Execute(context.Background(), map[string]any{
-		"text": "hello",
-	})
-	if err == nil {
-		t.Fatal("expected error when deliver is nil")
-	}
-}
-
-func TestSendMessage_Success(t *testing.T) {
-	var gotChannel, gotTo, gotText string
-	tool := &SendMessage{
-		Deliver: func(ctx context.Context, ch, to, text string, meta map[string]any) error {
-			gotChannel = ch
-			gotTo = to
-			gotText = text
-			return nil
-		},
-		DefaultChannel: "cli",
-		DefaultTo:      "user",
-	}
-	out, err := tool.Execute(context.Background(), map[string]any{
-		"text":    "hello world",
-		"channel": "",
-		"to":      "",
-	})
-	if err != nil {
-		t.Fatalf("SendMessage: %v", err)
-	}
-	if out != "ok" {
-		t.Errorf("expected 'ok', got %q", out)
-	}
-	if gotChannel != "cli" {
-		t.Errorf("expected channel 'cli', got %q", gotChannel)
-	}
-	if gotTo != "user" {
-		t.Errorf("expected to 'user', got %q", gotTo)
-	}
-	if gotText != "hello world" {
-		t.Errorf("expected text 'hello world', got %q", gotText)
-	}
-}
-
-func TestSendMessage_CustomChannelAndTo(t *testing.T) {
-	var gotChannel, gotTo string
-	tool := &SendMessage{
-		Deliver: func(ctx context.Context, ch, to, text string, meta map[string]any) error {
-			gotChannel = ch
-			gotTo = to
-			return nil
-		},
-		DefaultChannel: "default-ch",
-		DefaultTo:      "default-to",
-	}
-	tool.Execute(context.Background(), map[string]any{
-		"text":    "msg",
-		"channel": "custom-ch",
-		"to":      "custom-to",
-	})
-	if gotChannel != "custom-ch" {
-		t.Errorf("expected channel 'custom-ch', got %q", gotChannel)
-	}
-	if gotTo != "custom-to" {
-		t.Errorf("expected to 'custom-to', got %q", gotTo)
-	}
-}
-
-func TestSendMessage_EmptyText(t *testing.T) {
-	tool := &SendMessage{
-		Deliver: func(ctx context.Context, ch, to, text string, meta map[string]any) error {
-			return nil
-		},
-	}
-	_, err := tool.Execute(context.Background(), map[string]any{
-		"text": "",
-	})
-	if err == nil {
-		t.Fatal("expected error for empty text")
-	}
-}
-
-func TestSendMessage_DeliverError(t *testing.T) {
-	tool := &SendMessage{
-		Deliver: func(ctx context.Context, ch, to, text string, meta map[string]any) error {
-			return errors.New("deliver failed")
-		},
-	}
-	_, err := tool.Execute(context.Background(), map[string]any{
-		"text": "test",
-	})
-	if err == nil {
-		t.Fatal("expected error when deliver returns error")
-	}
-}
-
-func TestSendMessage_Name(t *testing.T) {
-	tool := &SendMessage{}
-	if tool.Name() != "send_message" {
-		t.Errorf("expected 'send_message', got %q", tool.Name())
-	}
-}
-
-func TestSendMessage_Description(t *testing.T) {
-	tool := &SendMessage{}
-	if tool.Description() == "" {
-		t.Error("expected non-empty description")
-	}
-}
-
-func TestSendMessage_Schema(t *testing.T) {
-	tool := &SendMessage{}
-	schema := tool.Schema()
-	if schema["type"] != "function" {
-		t.Errorf("expected 'function', got %v", schema["type"])
-	}
-}
-
-func TestSendMessage_TextOnlyWhitespace(t *testing.T) {
-	tool := &SendMessage{
-		Deliver: func(ctx context.Context, ch, to, text string, meta map[string]any) error {
-			return nil
-		},
-	}
-	_, err := tool.Execute(context.Background(), map[string]any{
-		"text": "  ",
-	})
-	if err == nil {
-		t.Fatal("expected error for whitespace-only text without media")
-	}
-}
-
-func TestSendMessage_MediaOnlySuccess(t *testing.T) {
-	root := t.TempDir()
-	mediaPath := filepath.Join(root, "image.png")
-	if err := os.WriteFile(mediaPath, []byte("image-bytes"), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-
-	var gotText string
-	var gotMeta map[string]any
-	tool := &SendMessage{
-		Deliver: func(ctx context.Context, ch, to, text string, meta map[string]any) error {
-			gotText = text
-			gotMeta = meta
-			return nil
-		},
-		AllowedRoot:   root,
-		MaxMediaBytes: 1024,
-	}
-	if _, err := tool.Execute(context.Background(), map[string]any{
-		"media": []any{mediaPath},
-	}); err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	if gotText != "" {
-		t.Fatalf("expected empty text for media-only message, got %q", gotText)
-	}
-	wantPath, err := canonicalizePath(mediaPath)
-	if err != nil {
-		t.Fatalf("canonicalizePath: %v", err)
-	}
-	paths, ok := gotMeta["media_paths"].([]string)
-	if !ok || len(paths) != 1 || paths[0] != wantPath {
-		t.Fatalf("expected media_paths to be passed through, got %#v", gotMeta)
-	}
-}
-
-func TestSendMessage_UsesContextDefaultsWhenKeysOmitted(t *testing.T) {
-	var gotChannel, gotTo string
-	tool := &SendMessage{
-		Deliver: func(ctx context.Context, ch, to, text string, meta map[string]any) error {
-			gotChannel = ch
-			gotTo = to
-			return nil
-		},
-	}
-	ctx := ContextWithDelivery(context.Background(), "discord", "channel-1")
-	if _, err := tool.Execute(ctx, map[string]any{"text": "hello"}); err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	if gotChannel != "discord" || gotTo != "channel-1" {
-		t.Fatalf("expected context delivery target, got %q/%q", gotChannel, gotTo)
-	}
-}
-
-func TestSendMessage_MissingTextDoesNotBecomeNilString(t *testing.T) {
-	tool := &SendMessage{
-		Deliver: func(ctx context.Context, ch, to, text string, meta map[string]any) error {
-			return nil
-		},
-	}
-	if _, err := tool.Execute(context.Background(), map[string]any{}); err == nil {
-		t.Fatal("expected empty message error when text and media are both omitted")
-	}
-}
-
-func TestSendMessage_MediaOutsideAllowedRoot(t *testing.T) {
-	root := t.TempDir()
-	other := t.TempDir()
-	mediaPath := filepath.Join(other, "image.png")
-	if err := os.WriteFile(mediaPath, []byte("image-bytes"), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-
-	tool := &SendMessage{
-		Deliver: func(ctx context.Context, ch, to, text string, meta map[string]any) error {
-			return nil
-		},
-		AllowedRoot:   root,
-		MaxMediaBytes: 1024,
-	}
-	if _, err := tool.Execute(context.Background(), map[string]any{
-		"text":  "hello",
-		"media": []any{mediaPath},
-	}); err == nil {
-		t.Fatal("expected error for media outside allowed root")
-	}
-}
-````
-
-## File: internal/tools/message.go
-````go
-package tools
-
-import (
-	"context"
-	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
-)
-
-type DeliverFunc func(ctx context.Context, channel, to, text string, meta map[string]any) error
-
-type SendMessage struct {
-	Base
-	Deliver        DeliverFunc
-	DefaultChannel string
-	DefaultTo      string
-	AllowedRoot    string
-	ArtifactsDir   string
-	MaxMediaBytes  int
-}
-
-func (t *SendMessage) Name() string { return "send_message" }
-func (t *SendMessage) Description() string {
-	return "Send a message via a configured channel (for reminders/cron or proactive messages)."
-}
-func (t *SendMessage) Parameters() map[string]any {
-	return map[string]any{"type": "object", "properties": map[string]any{
-		"channel": map[string]any{"type": "string"},
-		"to":      map[string]any{"type": "string"},
-		"text":    map[string]any{"type": "string"},
-		"media": map[string]any{
-			"type":        "array",
-			"items":       map[string]any{"type": "string"},
-			"description": "Optional local file paths to send as attachments.",
-		},
-	}, "required": []string{}}
-}
-func (t *SendMessage) Schema() map[string]any {
-	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
-}
-func (t *SendMessage) Execute(ctx context.Context, params map[string]any) (string, error) {
-	if t.Deliver == nil {
-		return "", fmt.Errorf("deliver not configured")
-	}
-	ctxChannel, ctxTo := DeliveryFromContext(ctx)
-	ch := readOptionalString(params, "channel")
-	to := readOptionalString(params, "to")
-	text := readOptionalString(params, "text")
-	if ch == "" {
-		ch = strings.TrimSpace(t.DefaultChannel)
-	}
-	if ch == "" {
-		ch = strings.TrimSpace(ctxChannel)
-	}
-	if to == "" {
-		to = strings.TrimSpace(t.DefaultTo)
-	}
-	if to == "" {
-		to = strings.TrimSpace(ctxTo)
-	}
-	mediaPaths, err := t.validateMediaPaths(params["media"])
-	if err != nil {
-		return "", err
-	}
-	if text == "" && len(mediaPaths) == 0 {
-		return "", fmt.Errorf("message requires text or media")
-	}
-	var meta map[string]any
-	if len(mediaPaths) > 0 {
-		meta = map[string]any{"media_paths": mediaPaths}
-	}
-	if err := t.Deliver(ctx, ch, to, text, meta); err != nil {
-		return "", err
-	}
-	return "ok", nil
-}
-
-func (t *SendMessage) validateMediaPaths(raw any) ([]string, error) {
-	items, err := stringSlice(raw)
-	if err != nil {
-		return nil, err
-	}
-	if len(items) == 0 {
-		return nil, nil
-	}
-	roots := make([]string, 0, 2)
-	if strings.TrimSpace(t.AllowedRoot) != "" {
-		roots = append(roots, strings.TrimSpace(t.AllowedRoot))
-	}
-	if strings.TrimSpace(t.ArtifactsDir) != "" {
-		roots = append(roots, strings.TrimSpace(t.ArtifactsDir))
-	}
-	out := make([]string, 0, len(items))
-	for _, item := range items {
-		p, err := filepath.Abs(strings.TrimSpace(item))
-		if err != nil {
-			return nil, err
-		}
-		p, err = canonicalizePath(p)
-		if err != nil {
-			return nil, err
-		}
-		info, err := os.Stat(p)
-		if err != nil {
-			return nil, err
-		}
-		if info.IsDir() {
-			return nil, fmt.Errorf("media path is a directory: %s", item)
-		}
-		if t.MaxMediaBytes == 0 {
-			return nil, fmt.Errorf("media attachments disabled by config")
-		}
-		if t.MaxMediaBytes > 0 && info.Size() > int64(t.MaxMediaBytes) {
-			return nil, fmt.Errorf("media path exceeds maxMediaBytes: %s", item)
-		}
-		if len(roots) > 0 {
-			allowed := false
-			for _, root := range roots {
-				ok, err := pathWithinRoot(p, root)
-				if err != nil {
-					return nil, err
-				}
-				if ok {
-					allowed = true
-					break
-				}
-			}
-			if !allowed {
-				return nil, fmt.Errorf("media path outside allowed roots: %s", item)
-			}
-		}
-		out = append(out, p)
-	}
-	return out, nil
-}
-
-func pathWithinRoot(absPath, root string) (bool, error) {
-	root, err := filepath.Abs(root)
-	if err != nil {
-		return false, err
-	}
-	root, err = canonicalizeRoot(root)
-	if err != nil {
-		return false, err
-	}
-	rel, err := filepath.Rel(root, absPath)
-	if err != nil {
-		return false, err
-	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)), nil
-}
-
-func stringSlice(raw any) ([]string, error) {
-	switch v := raw.(type) {
-	case nil:
-		return nil, nil
-	case []string:
-		out := make([]string, 0, len(v))
-		for _, item := range v {
-			if strings.TrimSpace(item) == "" {
-				continue
-			}
-			out = append(out, item)
-		}
-		return out, nil
-	case []any:
-		out := make([]string, 0, len(v))
-		for _, item := range v {
-			s := strings.TrimSpace(fmt.Sprint(item))
-			if s == "" {
-				continue
-			}
-			out = append(out, s)
-		}
-		return out, nil
-	default:
-		return nil, fmt.Errorf("media must be an array of strings")
-	}
-}
-````
-
-## File: internal/tools/registry.go
-````go
-package tools
-
-import (
-	"context"
-	"encoding/json"
-	"fmt"
-)
-
-type Registry struct {
-	tools map[string]Tool
-}
-
-func NewRegistry() *Registry {
-	return &Registry{tools: map[string]Tool{}}
-}
-
-func (r *Registry) Register(t Tool)      { r.tools[t.Name()] = t }
-func (r *Registry) Get(name string) Tool { return r.tools[name] }
-func (r *Registry) Names() []string {
-	out := make([]string, 0, len(r.tools))
-	for k := range r.tools {
-		out = append(out, k)
-	}
-	return out
-}
-
-func (r *Registry) Definitions() []map[string]any {
-	out := make([]map[string]any, 0, len(r.tools))
-	for _, t := range r.tools {
-		out = append(out, t.Schema())
-	}
-	return out
-}
-
-func (r *Registry) Execute(ctx context.Context, name string, argsJSON string) (string, error) {
-	t := r.tools[name]
-	if t == nil {
-		return "", fmt.Errorf("tool '%s' not found", name)
-	}
-	var params map[string]any
-	if argsJSON == "" {
-		params = map[string]any{}
-	} else {
-		if err := json.Unmarshal([]byte(argsJSON), &params); err != nil {
-			return "", fmt.Errorf("invalid tool args: %w", err)
-		}
-	}
-	return t.Execute(ctx, params)
-}
-````
-
-## File: internal/tools/web_test.go
-````go
-package tools
-
-import (
-	"context"
-	"encoding/json"
-	"fmt"
-	"net/http"
-	"net/http/httptest"
-	"strings"
-	"testing"
-	"time"
-)
-
-// ---- StripHTML ----
-
-func TestStripHTML_NoTags(t *testing.T) {
-	in := "plain text"
-	out := StripHTML(in)
-	if out != "plain text" {
-		t.Errorf("expected 'plain text', got %q", out)
-	}
-}
-
-func TestStripHTML_WithTags(t *testing.T) {
-	in := "<p>Hello <b>World</b></p>"
-	out := StripHTML(in)
-	if out != "Hello World" {
-		t.Errorf("expected 'Hello World', got %q", out)
-	}
-}
-
-func TestStripHTML_Empty(t *testing.T) {
-	out := StripHTML("")
-	if out != "" {
-		t.Errorf("expected empty string, got %q", out)
-	}
-}
-
-func TestStripHTML_OnlyTags(t *testing.T) {
-	out := StripHTML("<br><br/>")
-	if out != "" {
-		t.Errorf("expected empty, got %q", out)
-	}
-}
-
-// ---- WebFetch ----
-
-func TestWebFetch_InvalidURL(t *testing.T) {
-	tool := &WebFetch{}
-	_, err := tool.Execute(context.Background(), map[string]any{
-		"url": "ftp://not-http",
-	})
-	if err == nil {
-		t.Fatal("expected error for non-http URL")
-	}
-}
-
-func TestWebFetch_EmptyURL(t *testing.T) {
-	tool := &WebFetch{}
-	_, err := tool.Execute(context.Background(), map[string]any{
-		"url": "",
-	})
-	if err == nil {
-		t.Fatal("expected error for empty URL")
-	}
-}
-
-func TestWebFetch_Success(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, "hello from server")
-	}))
-	defer srv.Close()
-
-	tool := &WebFetch{HTTP: &http.Client{Transport: &urlRewriteTransport{base: srv.URL}}}
-	out, err := tool.Execute(context.Background(), map[string]any{
-		"url": "https://example.com/test",
-	})
-	if err != nil {
-		t.Fatalf("WebFetch: %v", err)
-	}
-	if !strings.Contains(out, "hello from server") {
-		t.Errorf("expected server response in output, got %q", out)
-	}
-	if !strings.Contains(out, "200") {
-		t.Errorf("expected status 200 in output, got %q", out)
-	}
-}
-
-func TestWebFetch_MaxBytes(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, strings.Repeat("x", 1000))
-	}))
-	defer srv.Close()
-
-	tool := &WebFetch{HTTP: &http.Client{Transport: &urlRewriteTransport{base: srv.URL}}}
-	out, err := tool.Execute(context.Background(), map[string]any{
-		"url":      "https://example.com/large",
-		"maxBytes": float64(50),
-	})
-	if err != nil {
-		t.Fatalf("WebFetch: %v", err)
-	}
-	// Body should be limited to 50 bytes
-	_ = out
-}
-
-func TestWebFetch_BlocksLocalhost(t *testing.T) {
-	tool := &WebFetch{}
-	_, err := tool.Execute(context.Background(), map[string]any{"url": "http://127.0.0.1:8080"})
-	if err == nil {
-		t.Fatal("expected localhost fetch to be blocked")
-	}
-}
-
-func TestWebFetch_StopsAfterDefaultRedirectLimit(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "https://example.com/loop", http.StatusFound)
-	}))
-	defer srv.Close()
-
-	tool := &WebFetch{
-		HTTP:    &http.Client{Transport: &urlRewriteTransport{base: srv.URL}},
-		Timeout: 2 * time.Second,
-	}
-	_, err := tool.Execute(context.Background(), map[string]any{"url": "https://example.com/loop"})
-	if err == nil {
-		t.Fatal("expected redirect loop to fail")
-	}
-	if !strings.Contains(err.Error(), "stopped after 10 redirects") {
-		t.Fatalf("expected redirect limit error, got %v", err)
-	}
-}
-
-func TestWebFetch_Name(t *testing.T) {
-	tool := &WebFetch{}
-	if tool.Name() != "web_fetch" {
-		t.Errorf("expected 'web_fetch', got %q", tool.Name())
-	}
-}
-
-func TestWebFetch_Schema(t *testing.T) {
-	tool := &WebFetch{}
-	schema := tool.Schema()
-	if schema["type"] != "function" {
-		t.Errorf("expected 'function', got %v", schema["type"])
-	}
-}
-
-// ---- WebSearch ----
-
-func TestWebSearch_NoAPIKey(t *testing.T) {
-	tool := &WebSearch{APIKey: ""}
-	_, err := tool.Execute(context.Background(), map[string]any{
-		"query": "test",
-	})
-	if err == nil {
-		t.Fatal("expected error when API key is not set")
-	}
-	if !strings.Contains(err.Error(), "Brave API key") {
-		t.Errorf("expected 'Brave API key' in error, got %q", err.Error())
-	}
-}
-
-func TestWebSearch_Success(t *testing.T) {
-	// Mock Brave Search API
-	response := map[string]any{
-		"web": map[string]any{
-			"results": []any{
-				map[string]any{
-					"title":       "Test Result",
-					"url":         "https://example.com",
-					"description": "A test result",
-				},
-			},
-		},
-	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
-	}))
-	defer srv.Close()
-
-	tool := &WebSearch{
-		APIKey: "test-key",
-		HTTP:   srv.Client(),
-	}
-	// Override endpoint by changing the HTTP client transport
-	// We can't easily override the URL, so let's test via a custom HTTP client
-	// that redirects to the test server
-	tool.HTTP = &http.Client{
-		Transport: &urlRewriteTransport{
-			base: srv.URL,
-		},
-	}
-
-	out, err := tool.Execute(context.Background(), map[string]any{
-		"query": "golang test",
-	})
-	if err != nil {
-		t.Fatalf("WebSearch: %v", err)
-	}
-	if !strings.Contains(out, "Test Result") {
-		t.Errorf("expected 'Test Result' in output, got %q", out)
-	}
-}
-
-func TestWebSearch_ErrorStatus(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
-		fmt.Fprint(w, "unauthorized")
-	}))
-	defer srv.Close()
-
-	tool := &WebSearch{
-		APIKey: "bad-key",
-		HTTP: &http.Client{
-			Transport: &urlRewriteTransport{base: srv.URL},
-		},
-	}
-
-	_, err := tool.Execute(context.Background(), map[string]any{
-		"query": "test",
-	})
-	if err == nil {
-		t.Fatal("expected error for HTTP error response")
-	}
-}
-
-func TestWebSearch_DefaultCount(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Check that count param is in URL
-		count := r.URL.Query().Get("count")
-		if count != "5" {
-			t.Errorf("expected count=5, got %q", count)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"web": map[string]any{"results": []any{}}})
-	}))
-	defer srv.Close()
-
-	tool := &WebSearch{
-		APIKey: "test-key",
-		HTTP: &http.Client{
-			Transport: &urlRewriteTransport{base: srv.URL},
-		},
-	}
-
-	tool.Execute(context.Background(), map[string]any{"query": "test"})
-}
-
-func TestWebSearch_MaxCountCapped(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		count := r.URL.Query().Get("count")
-		if count != "10" {
-			t.Errorf("expected count capped at 10, got %q", count)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"web": map[string]any{"results": []any{}}})
-	}))
-	defer srv.Close()
-
-	tool := &WebSearch{
-		APIKey: "test-key",
-		HTTP: &http.Client{
-			Transport: &urlRewriteTransport{base: srv.URL},
-		},
-	}
-
-	tool.Execute(context.Background(), map[string]any{
-		"query": "test",
-		"count": float64(100), // exceeds default max of 10
-	})
-}
-
-func TestWebSearch_Name(t *testing.T) {
-	tool := &WebSearch{}
-	if tool.Name() != "web_search" {
-		t.Errorf("expected 'web_search', got %q", tool.Name())
-	}
-}
-
-func TestWebSearch_Schema(t *testing.T) {
-	tool := &WebSearch{}
-	schema := tool.Schema()
-	if schema["type"] != "function" {
-		t.Errorf("expected 'function', got %v", schema["type"])
-	}
-}
-
-// urlRewriteTransport rewrites all requests to a test server base URL
-type urlRewriteTransport struct {
-	base string
-}
-
-func (t *urlRewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	req2 := req.Clone(req.Context())
-	req2.URL.Scheme = "http"
-	req2.URL.Host = strings.TrimPrefix(t.base, "http://")
-	return http.DefaultTransport.RoundTrip(req2)
-}
-````
-
-## File: .env.example
-````
-# Example environment for or3-intern
-#
-# This repo does NOT auto-load .env files.
-# Load it in your shell before running, for example:
-#   set -a; source .env; set +a
-#   go run ./cmd/or3-intern chat
-#
-# If you use OpenRouter, set OR3_API_BASE and OR3_API_KEY.
-# If you use OpenAI defaults, OPENAI_API_KEY is enough.
-
-# --- Provider ---
-# Used as the default API key unless OR3_API_KEY is set.
-OPENAI_API_KEY=
-
-# Preferred explicit provider key override.
-OR3_API_KEY=
-
-# OpenAI-compatible API base.
-# OpenAI default: https://api.openai.com/v1
-# OpenRouter: https://openrouter.ai/api/v1
-OR3_API_BASE=https://api.openai.com/v1
-
-# Chat model name.
-# Examples:
-#   gpt-4.1-mini
-#   openai/gpt-4o-mini
-OR3_MODEL=gpt-4.1-mini
-
-# Embedding model used for memory retrieval.
-OR3_EMBED_MODEL=text-embedding-3-small
-
-# --- App storage ---
-OR3_DB_PATH=
-OR3_ARTIFACTS_DIR=
-
-# --- Optional tool integrations ---
-BRAVE_API_KEY=
-
-# --- Optional chat channels ---
-OR3_TELEGRAM_TOKEN=
-OR3_SLACK_APP_TOKEN=
-OR3_SLACK_BOT_TOKEN=
-OR3_DISCORD_TOKEN=
-OR3_WHATSAPP_BRIDGE_URL=ws://127.0.0.1:3001/ws
-OR3_WHATSAPP_BRIDGE_TOKEN=
-````
-
-## File: .gitignore
-````
-.env
-.or3/
-/or3-intern
-or3-intern.exe
-````
-
-## File: cmd/or3-intern/init_test.go
-````go
-package main
-
-import (
-	"encoding/json"
-	"os"
-	"path/filepath"
-	"strings"
-	"testing"
-
-	"or3-intern/internal/channels/cli"
-	"or3-intern/internal/config"
-)
-
-func TestInitDefaults_UsesWorkspacePaths(t *testing.T) {
-	t.Setenv("OR3_DB_PATH", "")
-	t.Setenv("OR3_ARTIFACTS_DIR", "")
-	t.Setenv("OR3_API_BASE", "")
-	t.Setenv("OR3_API_KEY", "")
-	t.Setenv("OR3_MODEL", "")
-	t.Setenv("OR3_EMBED_MODEL", "")
-	cfg := initDefaults("/tmp/project")
-	if cfg.DBPath != "/tmp/project/.or3/or3-intern.sqlite" {
-		t.Fatalf("unexpected DB path: %q", cfg.DBPath)
-	}
-	if cfg.ArtifactsDir != "/tmp/project/.or3/artifacts" {
-		t.Fatalf("unexpected artifacts dir: %q", cfg.ArtifactsDir)
-	}
-	if !cfg.Tools.RestrictToWorkspace {
-		t.Fatal("expected workspace restriction enabled")
-	}
-	if cfg.WorkspaceDir != "/tmp/project" {
-		t.Fatalf("unexpected workspace dir: %q", cfg.WorkspaceDir)
-	}
-}
-
-func TestRunInitWithIO_WritesConfig(t *testing.T) {
-	t.Setenv("OR3_DB_PATH", "")
-	t.Setenv("OR3_ARTIFACTS_DIR", "")
-	t.Setenv("OR3_API_BASE", "")
-	t.Setenv("OR3_API_KEY", "")
-	t.Setenv("OR3_MODEL", "")
-	t.Setenv("OR3_EMBED_MODEL", "")
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.json")
-	input := strings.NewReader(strings.Join([]string{
-		"2",
-		"",
-		"",
-		"",
-		"y",
-		"test-key",
-		"",
-		"",
-		"",
-		"",
-	}, "\n"))
-	var out strings.Builder
-
-	if err := runInitWithIO(input, &out, configPath, "/workspace/project"); err != nil {
-		t.Fatalf("runInitWithIO: %v", err)
-	}
-
-	b, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatalf("read config: %v", err)
-	}
-	var cfg config.Config
-	if err := json.Unmarshal(b, &cfg); err != nil {
-		t.Fatalf("unmarshal config: %v", err)
-	}
-	if cfg.Provider.APIBase != "https://openrouter.ai/api/v1" {
-		t.Fatalf("unexpected API base: %q", cfg.Provider.APIBase)
-	}
-	if cfg.Provider.Model != "openai/gpt-4o-mini" {
-		t.Fatalf("unexpected model: %q", cfg.Provider.Model)
-	}
-	if cfg.Provider.APIKey != "test-key" {
-		t.Fatalf("unexpected API key: %q", cfg.Provider.APIKey)
-	}
-	if cfg.DBPath != "/workspace/project/.or3/or3-intern.sqlite" {
-		t.Fatalf("unexpected DB path: %q", cfg.DBPath)
-	}
-	if !strings.Contains(out.String(), "Saved config") {
-		t.Fatalf("expected success output, got %q", out.String())
-	}
-	if !strings.Contains(out.String(), "go run ./cmd/or3-intern chat") {
-		t.Fatalf("expected next-step instructions, got %q", out.String())
-	}
-}
-
-func TestBuildChannelManager_RegistersEnabledChannels(t *testing.T) {
-	cfg := config.Default()
-	cfg.Channels.Telegram.Enabled = true
-	cfg.Channels.Telegram.Token = "test-token"
-	cfg.Channels.Slack.Enabled = true
-	cfg.Channels.Slack.AppToken = "app"
-	cfg.Channels.Slack.BotToken = "bot"
-
-	mgr, err := buildChannelManager(cfg, cli.Deliverer{}, nil, 0)
-	if err != nil {
-		t.Fatalf("buildChannelManager: %v", err)
-	}
-	names := strings.Join(mgr.Names(), ",")
-	if !strings.Contains(names, "cli") || !strings.Contains(names, "telegram") || !strings.Contains(names, "slack") {
-		t.Fatalf("expected registered channels, got %q", names)
-	}
-}
-````
-
-## File: internal/agent/agent_test.go
-````go
-package agent
-
-import (
-	"bytes"
-	"context"
-	"fmt"
-	"path/filepath"
-	"strings"
-	"testing"
-	"time"
-
-	"or3-intern/internal/artifacts"
-	"or3-intern/internal/bus"
-	"or3-intern/internal/cron"
-	"or3-intern/internal/db"
-	"or3-intern/internal/memory"
-	"or3-intern/internal/skills"
-)
-
-func openTestDB(t *testing.T) *db.DB {
-	t.Helper()
-	d, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("db.Open: %v", err)
-	}
-	t.Cleanup(func() { d.Close() })
-	return d
-}
-
-// ---- truncateText ----
-
-func TestTruncateText_NoMax(t *testing.T) {
-	s := "hello world"
-	got := truncateText(s, 0)
-	if got != s {
-		t.Errorf("expected %q, got %q", s, got)
-	}
-}
-
-func TestTruncateText_WithinLimit(t *testing.T) {
-	s := "hello"
-	got := truncateText(s, 100)
-	if got != s {
-		t.Errorf("expected %q, got %q", s, got)
-	}
-}
-
-func TestTruncateText_Truncated(t *testing.T) {
-	s := strings.Repeat("a", 200)
-	got := truncateText(s, 100)
-	if len(got) >= 200 {
-		t.Error("expected truncation to happen")
-	}
-	if !strings.Contains(got, "[truncated]") {
-		t.Errorf("expected '[truncated]' marker, got %q", got)
-	}
-}
-
-func TestTruncateText_TrimsWhitespace(t *testing.T) {
-	s := "  hello  "
-	got := truncateText(s, 0)
-	if got != "hello" {
-		t.Errorf("expected 'hello', got %q", got)
-	}
-}
-
-// ---- oneLine ----
-
-func TestOneLine_SingleLine(t *testing.T) {
-	s := "hello world"
-	got := oneLine(s, 0)
-	if got != "hello world" {
-		t.Errorf("expected 'hello world', got %q", got)
-	}
-}
-
-func TestOneLine_MultiLine(t *testing.T) {
-	s := "line one\nline two\nline three"
-	got := oneLine(s, 0)
-	if strings.Contains(got, "\n") {
-		t.Error("expected no newlines in output")
-	}
-}
-
-func TestOneLine_MaxLength(t *testing.T) {
-	s := strings.Repeat("a", 300)
-	got := oneLine(s, 100)
-	// "…" is 3 bytes in UTF-8, so max 100 chars + 3 bytes = 103
-	if len(got) > 103 {
-		t.Errorf("expected at most 103 bytes, got %d", len(got))
-	}
-	if !strings.HasSuffix(got, "…") {
-		t.Errorf("expected '…' suffix, got %q", got)
-	}
-}
-
-func TestOneLine_CollapseSpaces(t *testing.T) {
-	s := "hello   world"
-	got := oneLine(s, 0)
-	if got != "hello world" {
-		t.Errorf("expected 'hello world', got %q", got)
-	}
-}
-
-// ---- formatPinned ----
-
-func TestFormatPinned_Empty(t *testing.T) {
-	got := formatPinned(map[string]string{})
-	if got != "(none)" {
-		t.Errorf("expected '(none)', got %q", got)
-	}
-}
-
-func TestFormatPinned_WithEntries(t *testing.T) {
-	m := map[string]string{
-		"name": "Alice",
-		"age":  "30",
-	}
-	got := formatPinned(m)
-	if !strings.Contains(got, "name") || !strings.Contains(got, "Alice") {
-		t.Errorf("expected 'name: Alice' in output, got %q", got)
-	}
-	if !strings.Contains(got, "age") || !strings.Contains(got, "30") {
-		t.Errorf("expected 'age: 30' in output, got %q", got)
-	}
-}
-
-func TestFormatPinned_SkipsEmptyValues(t *testing.T) {
-	m := map[string]string{
-		"present": "value",
-		"empty":   "",
-		"spaces":  "   ",
-	}
-	got := formatPinned(m)
-	if strings.Contains(got, "empty") {
-		t.Error("expected empty-value key to be skipped")
-	}
-	if strings.Contains(got, "spaces") {
-		t.Error("expected whitespace-only value key to be skipped")
-	}
-}
-
-func TestFormatPinned_AllEmpty_ReturnsNone(t *testing.T) {
-	m := map[string]string{
-		"key": "  ",
-	}
-	got := formatPinned(m)
-	if got != "(none)" {
-		t.Errorf("expected '(none)' when all values empty, got %q", got)
-	}
-}
-
-func TestFormatPinned_Sorted(t *testing.T) {
-	m := map[string]string{
-		"z_key": "last",
-		"a_key": "first",
-		"m_key": "middle",
-	}
-	got := formatPinned(m)
-	aIdx := strings.Index(got, "a_key")
-	mIdx := strings.Index(got, "m_key")
-	zIdx := strings.Index(got, "z_key")
-	if aIdx > mIdx || mIdx > zIdx {
-		t.Errorf("expected sorted output, got %q", got)
-	}
-}
-
-// ---- formatRetrieved ----
-
-func TestFormatRetrieved_Empty(t *testing.T) {
-	got := formatRetrieved(nil)
-	if got != "(none)" {
-		t.Errorf("expected '(none)', got %q", got)
-	}
-}
-
-func TestFormatRetrieved_WithResults(t *testing.T) {
-	ms := []memory.Retrieved{
-		{Source: "vector", Text: "relevant text", Score: 0.9},
-		{Source: "fts", Text: "another text", Score: 0.5},
-	}
-	got := formatRetrieved(ms)
-	if !strings.Contains(got, "relevant text") {
-		t.Errorf("expected 'relevant text' in output, got %q", got)
-	}
-	if !strings.Contains(got, "vector") {
-		t.Errorf("expected source 'vector' in output, got %q", got)
-	}
-}
-
-// ---- Builder.composeSystemPrompt ----
-
-func TestBuilder_ComposeSystemPrompt_Defaults(t *testing.T) {
-	b := &Builder{}
-	got := b.composeSystemPrompt("(none)", "(none)", "", "", "", "")
-	if !strings.Contains(got, "System Prompt") {
-		t.Errorf("expected '# System Prompt' in output, got %q", got)
-	}
-	if !strings.Contains(got, "SOUL.md") {
-		t.Errorf("expected 'SOUL.md' section, got %q", got)
-	}
-}
-
-func TestBuilder_ComposeSystemPrompt_CustomSoul(t *testing.T) {
-	b := &Builder{Soul: "Custom soul text"}
-	got := b.composeSystemPrompt("(none)", "(none)", "", "", "", "")
-	if !strings.Contains(got, "Custom soul text") {
-		t.Errorf("expected custom soul in output, got %q", got)
-	}
-}
-
-func TestBuilder_ComposeSystemPrompt_Truncation(t *testing.T) {
-	b := &Builder{
-		BootstrapTotalMaxChars: 50,
-	}
-	got := b.composeSystemPrompt("(none)", "(none)", "", "", "", "")
-	if len(got) > 100 { // allow for "[truncated]" suffix
-		// Just verify it's bounded
-	}
-	_ = got
-}
-
-func TestBuilder_ComposeSystemPrompt_WithPinned(t *testing.T) {
-	b := &Builder{}
-	got := b.composeSystemPrompt("- name: Alice", "(none)", "", "", "", "")
-	if !strings.Contains(got, "name: Alice") {
-		t.Errorf("expected pinned memory in output, got %q", got)
-	}
-}
-
-func TestBuilder_ComposeSystemPrompt_WithSkills(t *testing.T) {
-	dir := t.TempDir()
-	_ = skills.Scan([]string{dir}) // use empty skills
-	b := &Builder{}
-	got := b.composeSystemPrompt("(none)", "(none)", "", "", "", "")
-	if !strings.Contains(got, "Skills Inventory") {
-		t.Errorf("expected 'Skills Inventory' section, got %q", got)
-	}
-}
-
-// ---- Builder.Build ----
-
-func TestBuilder_Build_Basic(t *testing.T) {
-	d := openTestDB(t)
-	b := &Builder{
-		DB:         d,
-		HistoryMax: 10,
-	}
-
-	pp, _, err := b.Build(context.Background(), "test-session", "hello")
-	if err != nil {
-		t.Fatalf("Build: %v", err)
-	}
-	if len(pp.System) == 0 {
-		t.Error("expected at least one system message")
-	}
-	if pp.System[0].Role != "system" {
-		t.Errorf("expected role 'system', got %q", pp.System[0].Role)
-	}
-}
-
-func TestBuilder_Build_WithHistory(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	d.AppendMessage(ctx, "s1", "user", "first message", nil)
-	d.AppendMessage(ctx, "s1", "assistant", "first response", nil)
-
-	b := &Builder{
-		DB:         d,
-		HistoryMax: 10,
-	}
-
-	pp, _, err := b.Build(ctx, "s1", "second message")
-	if err != nil {
-		t.Fatalf("Build: %v", err)
-	}
-	if len(pp.History) < 1 {
-		t.Error("expected history messages")
-	}
-}
-
-func TestBuilder_Build_NoHistory(t *testing.T) {
-	d := openTestDB(t)
-	b := &Builder{
-		DB:         d,
-		HistoryMax: 10,
-	}
-
-	pp, retrieved, err := b.Build(context.Background(), "empty-session", "hello")
-	if err != nil {
-		t.Fatalf("Build: %v", err)
-	}
-	if len(pp.History) != 0 {
-		t.Errorf("expected no history, got %d messages", len(pp.History))
-	}
-	if len(retrieved) != 0 {
-		t.Errorf("expected no retrieved (no provider), got %d", len(retrieved))
-	}
-}
-
-func TestBuilder_Build_EmptyMessage(t *testing.T) {
-	d := openTestDB(t)
-	b := &Builder{
-		DB:         d,
-		HistoryMax: 10,
-	}
-
-	_, _, err := b.Build(context.Background(), "s1", "")
-	if err != nil {
-		t.Fatalf("Build with empty message: %v", err)
-	}
-}
-
-func TestBuilder_Build_ToolCallsInHistory(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	d.AppendMessage(ctx, "s2", "user", "user msg", nil)
-	// Append assistant message with tool_calls payload
-	d.AppendMessage(ctx, "s2", "assistant", "tool content", map[string]any{
-		"tool_calls": []map[string]any{
-			{"id": "tc1", "type": "function", "function": map[string]any{"name": "test_tool", "arguments": "{}"}},
-		},
-	})
-
-	b := &Builder{DB: d, HistoryMax: 10}
-	pp, _, err := b.Build(ctx, "s2", "next msg")
-	if err != nil {
-		t.Fatalf("Build: %v", err)
-	}
-	found := false
-	for _, m := range pp.History {
-		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Error("expected tool calls to be parsed from history")
-	}
-}
-
-func TestBuilder_Build_UserImageAttachmentWithVision(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-	store := &artifacts.Store{Dir: t.TempDir(), DB: d}
-	if err := d.EnsureSession(ctx, "media"); err != nil {
-		t.Fatalf("EnsureSession: %v", err)
-	}
-	att, err := store.SaveNamed(ctx, "media", "photo.png", "image/png", []byte("fake-image"))
-	if err != nil {
-		t.Fatalf("SaveNamed: %v", err)
-	}
-	if _, err := d.AppendMessage(ctx, "media", "user", "describe this\n[image: photo.png]", map[string]any{
-		"meta": map[string]any{"attachments": []artifacts.Attachment{att}},
-	}); err != nil {
-		t.Fatalf("AppendMessage: %v", err)
-	}
-
-	b := &Builder{DB: d, Artifacts: store, EnableVision: true, HistoryMax: 10}
-	pp, _, err := b.Build(ctx, "media", "describe this")
-	if err != nil {
-		t.Fatalf("Build: %v", err)
-	}
-	if len(pp.History) != 1 {
-		t.Fatalf("expected one history message, got %d", len(pp.History))
-	}
-	parts, ok := pp.History[0].Content.([]map[string]any)
-	if !ok {
-		t.Fatalf("expected structured content, got %T", pp.History[0].Content)
-	}
-	if len(parts) != 2 {
-		t.Fatalf("expected text + image parts, got %#v", parts)
-	}
-	if parts[1]["type"] != "image_url" {
-		t.Fatalf("expected image_url part, got %#v", parts[1])
-	}
-}
-
-func TestBuilder_Build_UserImageAttachmentWithVisionDisabledFallsBackToText(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-	if _, err := d.AppendMessage(ctx, "media-off", "user", "look\n[image: photo.png]", map[string]any{
-		"meta": map[string]any{"attachments": []map[string]any{{
-			"artifact_id": "missing",
-			"filename":    "photo.png",
-			"mime":        "image/png",
-			"kind":        "image",
-			"size_bytes":  12,
-		}}},
-	}); err != nil {
-		t.Fatalf("AppendMessage: %v", err)
-	}
-
-	b := &Builder{DB: d, EnableVision: false, HistoryMax: 10}
-	pp, _, err := b.Build(ctx, "media-off", "look")
-	if err != nil {
-		t.Fatalf("Build: %v", err)
-	}
-	if got, ok := pp.History[0].Content.(string); !ok || got != "look\n[image: photo.png]" {
-		t.Fatalf("expected text fallback, got %#v", pp.History[0].Content)
-	}
-}
-
-func TestBuilder_Build_UserImageAttachmentMissingArtifactFallsBackToText(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-	if _, err := d.AppendMessage(ctx, "media-missing", "user", "look\n[image: photo.png]", map[string]any{
-		"meta": map[string]any{"attachments": []map[string]any{{
-			"artifact_id": "missing",
-			"filename":    "photo.png",
-			"mime":        "image/png",
-			"kind":        "image",
-			"size_bytes":  12,
-		}}},
-	}); err != nil {
-		t.Fatalf("AppendMessage: %v", err)
-	}
-
-	b := &Builder{
-		DB:           d,
-		Artifacts:    &artifacts.Store{Dir: t.TempDir(), DB: d},
-		EnableVision: true,
-		HistoryMax:   10,
-	}
-	pp, _, err := b.Build(ctx, "media-missing", "look")
-	if err != nil {
-		t.Fatalf("Build: %v", err)
-	}
-	if got, ok := pp.History[0].Content.(string); !ok || got != "look\n[image: photo.png]" {
-		t.Fatalf("expected missing artifact fallback to text, got %#v", pp.History[0].Content)
-	}
-}
-
-func TestBuilder_Build_UserImageAttachmentsRespectVisionBudget(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-	store := &artifacts.Store{Dir: t.TempDir(), DB: d}
-	if err := d.EnsureSession(ctx, "media-budget"); err != nil {
-		t.Fatalf("EnsureSession: %v", err)
-	}
-	imageData := bytes.Repeat([]byte("a"), 3<<20)
-	for i := 0; i < 3; i++ {
-		name := fmt.Sprintf("photo-%d.png", i)
-		att, err := store.SaveNamed(ctx, "media-budget", name, "image/png", imageData)
-		if err != nil {
-			t.Fatalf("SaveNamed %d: %v", i, err)
-		}
-		if _, err := d.AppendMessage(ctx, "media-budget", "user", fmt.Sprintf("describe %d\n[image: %s]", i, name), map[string]any{
-			"meta": map[string]any{"attachments": []artifacts.Attachment{att}},
-		}); err != nil {
-			t.Fatalf("AppendMessage %d: %v", i, err)
-		}
-	}
-
-	b := &Builder{DB: d, Artifacts: store, EnableVision: true, HistoryMax: 10}
-	pp, _, err := b.Build(ctx, "media-budget", "describe")
-	if err != nil {
-		t.Fatalf("Build: %v", err)
-	}
-	if len(pp.History) != 3 {
-		t.Fatalf("expected three history messages, got %d", len(pp.History))
-	}
-	if _, ok := pp.History[0].Content.([]map[string]any); !ok {
-		t.Fatalf("expected first image within budget to be structured, got %T", pp.History[0].Content)
-	}
-	if _, ok := pp.History[1].Content.([]map[string]any); !ok {
-		t.Fatalf("expected second image within budget to be structured, got %T", pp.History[1].Content)
-	}
-	if got, ok := pp.History[2].Content.(string); !ok || !strings.Contains(got, "[image: photo-2.png]") {
-		t.Fatalf("expected third image to fall back to text marker, got %#v", pp.History[2].Content)
-	}
-}
-
-// ---- CronRunner ----
-
-func TestCronRunner_PublishesEvent(t *testing.T) {
-	b := bus.New(10)
-	runner := CronRunner(b, "test-session")
-
-	job := cron.CronJob{
-		ID:   "job1",
-		Name: "test job",
-		Payload: cron.CronPayload{
-			Kind:    "agent_turn",
-			Message: "scheduled message",
-			Channel: "cli",
-			To:      "user",
-		},
-	}
-
-	err := runner(context.Background(), job)
-	if err != nil {
-		t.Fatalf("CronRunner: %v", err)
-	}
-
-	select {
-	case ev := <-b.Channel():
-		if ev.Type != bus.EventCron {
-			t.Errorf("expected EventCron, got %s", ev.Type)
-		}
-		if ev.SessionKey != "test-session" {
-			t.Errorf("expected session 'test-session', got %q", ev.SessionKey)
-		}
-		if ev.Message != "scheduled message" {
-			t.Errorf("expected 'scheduled message', got %q", ev.Message)
-		}
-		if ev.Meta["job_id"] != "job1" {
-			t.Errorf("expected meta job_id='job1', got %v", ev.Meta["job_id"])
-		}
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("timeout waiting for event")
-	}
-}
-
-func TestCronRunner_EmptyMessage_UsesName(t *testing.T) {
-	b := bus.New(10)
-	runner := CronRunner(b, "test-session")
-
-	job := cron.CronJob{
-		ID:   "j1",
-		Name: "my job",
-		Payload: cron.CronPayload{
-			Kind:    "agent_turn",
-			Message: "", // empty
-		},
-	}
-
-	runner(context.Background(), job)
-
-	select {
-	case ev := <-b.Channel():
-		if !strings.Contains(ev.Message, "my job") {
-			t.Errorf("expected message to contain job name, got %q", ev.Message)
-		}
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("timeout waiting for event")
-	}
-}
-
-func TestCronRunner_FullBus_ReturnsError(t *testing.T) {
-	b := bus.New(1)
-	b.Publish(bus.Event{}) // fill the bus
-
-	runner := CronRunner(b, "session")
-	err := runner(context.Background(), cron.CronJob{
-		ID:      "j1",
-		Payload: cron.CronPayload{Message: "msg"},
-	})
-	if err == nil {
-		t.Fatal("expected error when bus is full")
-	}
-	if !strings.Contains(err.Error(), "full") {
-		t.Errorf("expected 'full' in error, got %q", err.Error())
-	}
-}
-
-// ---- WithTimeout ----
-
-func TestWithTimeout_Default(t *testing.T) {
-	ctx := context.Background()
-	cctx, cancel := WithTimeout(ctx, 0)
-	defer cancel()
-	if cctx == nil {
-		t.Fatal("expected non-nil context")
-	}
-	dl, ok := cctx.Deadline()
-	if !ok {
-		t.Fatal("expected deadline to be set")
-	}
-	if time.Until(dl) <= 0 {
-		t.Error("expected future deadline")
-	}
-}
-
-func TestWithTimeout_CustomSec(t *testing.T) {
-	ctx := context.Background()
-	cctx, cancel := WithTimeout(ctx, 5)
-	defer cancel()
-	dl, ok := cctx.Deadline()
-	if !ok {
-		t.Fatal("expected deadline to be set")
-	}
-	remaining := time.Until(dl)
-	if remaining <= 4*time.Second || remaining > 5*time.Second+100*time.Millisecond {
-		t.Errorf("expected ~5s deadline, got %v", remaining)
-	}
-}
-
-// ---- contentToString ----
-
-func TestContentToString_String(t *testing.T) {
-	got := contentToString("hello")
-	if got != "hello" {
-		t.Errorf("expected 'hello', got %q", got)
-	}
-}
-
-func TestContentToString_Nil(t *testing.T) {
-	got := contentToString(nil)
-	if got != "" {
-		t.Errorf("expected empty string, got %q", got)
-	}
-}
-
-func TestContentToString_Map(t *testing.T) {
-	got := contentToString(map[string]any{"key": "val"})
-	if got == "" {
-		t.Error("expected non-empty JSON output for map")
-	}
-	if !strings.Contains(got, "key") {
-		t.Errorf("expected 'key' in JSON output, got %q", got)
-	}
-}
-
-func TestContentToString_Int(t *testing.T) {
-	got := contentToString(42)
-	if got != "42" {
-		t.Errorf("expected '42', got %q", got)
-	}
-}
-
-// ---- toToolDefs ----
-
-func TestToToolDefs_NilRegistry(t *testing.T) {
-	defs := toToolDefs(nil)
-	if defs != nil {
-		t.Error("expected nil for nil registry")
-	}
-}
-````
-
-## File: internal/artifacts/store.go
-````go
-package artifacts
-
-import (
-	"context"
-	"crypto/rand"
-	"database/sql"
-	"encoding/hex"
-	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
-	"time"
-
-	"or3-intern/internal/db"
-)
-
-type Store struct {
-	Dir string
-	DB  *db.DB
-}
-
-func (s *Store) Save(ctx context.Context, sessionKey, mime string, data []byte) (string, error) {
-	if s.Dir == "" {
-		return "", fmt.Errorf("artifacts dir not set")
-	}
-	if s.DB == nil {
-		return "", fmt.Errorf("artifacts db not set")
-	}
-	if err := s.DB.EnsureSession(ctx, strings.TrimSpace(sessionKey)); err != nil {
-		return "", err
-	}
-	_ = os.MkdirAll(s.Dir, 0o755)
-	id := randID()
-	path := filepath.Join(s.Dir, id)
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		return "", err
-	}
-	_, err := s.DB.SQL.ExecContext(ctx,
-		`INSERT INTO artifacts(id, session_key, mime, path, size_bytes, created_at) VALUES(?,?,?,?,?,?)`,
-		id, sessionKey, mime, path, len(data), time.Now().UnixMilli())
-	if err != nil {
-		_ = os.Remove(path)
-		return "", err
-	}
-	return id, nil
-}
-
-func (s *Store) SaveNamed(ctx context.Context, sessionKey, filename, mimeType string, data []byte) (Attachment, error) {
-	filename = NormalizeFilename(filename, mimeType)
-	id, err := s.Save(ctx, sessionKey, mimeType, data)
-	if err != nil {
-		return Attachment{}, err
-	}
-	return Attachment{
-		ArtifactID: id,
-		Filename:   filename,
-		Mime:       strings.TrimSpace(mimeType),
-		Kind:       DetectKind(filename, mimeType),
-		SizeBytes:  int64(len(data)),
-	}, nil
-}
-
-func (s *Store) Lookup(ctx context.Context, artifactID string) (StoredArtifact, error) {
-	if s.DB == nil {
-		return StoredArtifact{}, fmt.Errorf("artifacts db not set")
-	}
-	row := s.DB.SQL.QueryRowContext(ctx,
-		`SELECT id, session_key, mime, path, size_bytes FROM artifacts WHERE id=?`,
-		strings.TrimSpace(artifactID),
-	)
-	var stored StoredArtifact
-	if err := row.Scan(&stored.ID, &stored.SessionKey, &stored.Mime, &stored.Path, &stored.SizeBytes); err != nil {
-		if err == sql.ErrNoRows {
-			return StoredArtifact{}, fmt.Errorf("artifact not found: %s", artifactID)
-		}
-		return StoredArtifact{}, err
-	}
-	return stored, nil
-}
-
-func randID() string {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return fmt.Sprintf("%d", time.Now().UnixNano())
-	}
-	return hex.EncodeToString(b[:])
-}
-````
-
-## File: internal/bus/bus.go
-````go
-package bus
-
-import (
-	"context"
-)
-
-type EventType string
-
-const (
-	EventUserMessage EventType = "user_message"
-	EventCron        EventType = "cron"
-	EventSystem      EventType = "system"
-	EventWebhook     EventType = "webhook"
-	EventFileChange  EventType = "file_change"
-)
-
-type Event struct {
-	Type EventType
-	SessionKey string
-	Channel string
-	From string
-	Message string
-	Meta map[string]any
-}
-
-type Handler func(ctx context.Context, ev Event) error
-
-type Bus struct {
-	ch chan Event
-}
-
-func New(buffer int) *Bus {
-	if buffer <= 0 { buffer = 128 }
-	return &Bus{ch: make(chan Event, buffer)}
-}
-
-func (b *Bus) Publish(ev Event) bool {
-	select {
-	case b.ch <- ev:
-		return true
-	default:
-		return false
-	}
-}
-func (b *Bus) Channel() <-chan Event { return b.ch }
-````
-
-## File: internal/channels/cli/deliver.go
-````go
-package cli
-
-import (
-	"context"
-	"fmt"
-
-	"or3-intern/internal/bus"
-	"or3-intern/internal/channels"
-)
-
-type Deliverer struct{}
-
-func (Deliverer) Name() string { return "cli" }
-
-func (Deliverer) Start(ctx context.Context, eventBus *bus.Bus) error {
-	_ = ctx
-	_ = eventBus
-	return nil
-}
-
-func (Deliverer) Stop(ctx context.Context) error {
-	_ = ctx
-	return nil
-}
-
-func (Deliverer) Deliver(ctx context.Context, channel, to, text string) error {
-	_ = ctx
-	if channel == "" { channel = "cli" }
-	fmt.Printf("\n[%s] %s\n\n", channel, text)
-	return nil
-}
-
-// CLIStreamWriter writes deltas directly to stdout.
-type CLIStreamWriter struct {
-	started bool
-	closed  bool
-	aborted bool
-}
-
-func (w *CLIStreamWriter) WriteDelta(ctx context.Context, text string) error {
-	_ = ctx
-	if w.closed || w.aborted {
-		return nil
-	}
-	w.started = true
-	fmt.Print(text)
-	return nil
-}
-
-func (w *CLIStreamWriter) Close(ctx context.Context, finalText string) error {
-	_ = ctx
-	if w.aborted {
-		return nil
-	}
-	w.closed = true
-	if w.started {
-		fmt.Println() // newline after streamed content
-	} else {
-		// Never streamed - print the final text now
-		fmt.Printf("\n[cli] %s\n\n", finalText)
-	}
-	return nil
-}
-
-func (w *CLIStreamWriter) Abort(ctx context.Context) error {
-	_ = ctx
-	w.aborted = true
-	if w.started {
-		fmt.Println("\n[aborted]")
-	}
-	return nil
-}
-
-// BeginStream implements channels.StreamingChannel.
-func (Deliverer) BeginStream(ctx context.Context, to string, meta map[string]any) (channels.StreamWriter, error) {
-	_ = ctx
-	_ = to
-	_ = meta
-	fmt.Print("\n[cli] ")
-	return &CLIStreamWriter{}, nil
-}
-````
-
-## File: internal/memory/retrieve.go
-````go
-package memory
-
-import (
-	"context"
-	"sort"
-	"strings"
-
-	"or3-intern/internal/db"
-)
-
-type Retrieved struct {
-	Source string // pinned|vector|fts
-	ID int64
-	Text string
-	Score float64
-}
-
-type Retriever struct {
-	DB *db.DB
-	VectorWeight float64
-	FTSWeight float64
-	VectorScanLimit int
-}
-
-func NewRetriever(d *db.DB) *Retriever {
-	return &Retriever{DB: d, VectorWeight: 0.7, FTSWeight: 0.3, VectorScanLimit: 2000}
-}
-
-func (r *Retriever) Retrieve(ctx context.Context, sessionKey, query string, queryVec []float32, vectorK, ftsK, topK int) ([]Retrieved, error) {
-	vecs, err := VectorSearch(ctx, r.DB, sessionKey, queryVec, vectorK, r.VectorScanLimit)
-	if err != nil { return nil, err }
-	fts, _ := r.DB.SearchFTS(ctx, sessionKey, normalizeFTSQuery(query), ftsK)
-
-	type agg struct {
-		id int64
-		text string
-		v float64
-		f float64
-	}
-	m := map[int64]*agg{}
-	for _, c := range vecs {
-		a := m[c.ID]
-		if a == nil { a = &agg{id: c.ID, text: c.Text}; m[c.ID] = a }
-		a.v = c.Score
-	}
-	for _, f := range fts {
-		a := m[f.ID]
-		if a == nil { a = &agg{id: f.ID, text: f.Text}; m[f.ID] = a }
-		// bm25 lower is better. Convert to a positive "higher is better".
-		a.f = 1.0 / (1.0 + f.Rank)
-	}
-
-	out := make([]Retrieved, 0, len(m))
-	for _, a := range m {
-		score := (a.v * r.VectorWeight) + (a.f * r.FTSWeight)
-		src := "hybrid"
-		if a.f > 0 && a.v == 0 { src = "fts" }
-		if a.v > 0 && a.f == 0 { src = "vector" }
-		out = append(out, Retrieved{Source: src, ID: a.id, Text: a.text, Score: score})
-	}
-
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Score == out[j].Score {
-			return out[i].ID > out[j].ID // stable-ish
-		}
-		return out[i].Score > out[j].Score
-	})
-	if len(out) > topK { out = out[:topK] }
-	return out, nil
-}
-
-func normalizeFTSQuery(q string) string {
-	q = strings.TrimSpace(q)
-	if q == "" { return "" }
-	// simple: split on spaces, quote terms that contain punctuation
-	parts := strings.Fields(q)
-	for i, p := range parts {
-		if strings.ContainsAny(p, `":*`) {
-			parts[i] = `"` + strings.ReplaceAll(p, `"`, `""`) + `"`
-		}
-	}
-	return strings.Join(parts, " ")
-}
-````
-
-## File: internal/memory/scheduler.go
-````go
-package memory
-
-import (
-	"context"
-	"sync"
-	"time"
-)
-
-type Scheduler struct {
-	timeout time.Duration
-	run     func(context.Context, string)
-	baseCtx context.Context
-
-	mu       sync.Mutex
-	sessions map[string]*schedulerState
-}
-
-type schedulerState struct {
-	running bool
-	dirty   bool
-}
-
-func NewScheduler(timeout time.Duration, run func(context.Context, string)) *Scheduler {
-	return NewSchedulerWithContext(context.Background(), timeout, run)
-}
-
-func NewSchedulerWithContext(baseCtx context.Context, timeout time.Duration, run func(context.Context, string)) *Scheduler {
-	if timeout <= 0 {
-		timeout = 30 * time.Second
-	}
-	if baseCtx == nil {
-		baseCtx = context.Background()
-	}
-	return &Scheduler{
-		timeout:  timeout,
-		run:      run,
-		baseCtx:  baseCtx,
-		sessions: map[string]*schedulerState{},
-	}
-}
-
-func (s *Scheduler) Trigger(sessionKey string) {
-	if s == nil || s.run == nil || sessionKey == "" {
-		return
-	}
-	s.mu.Lock()
-	state, ok := s.sessions[sessionKey]
-	if !ok {
-		state = &schedulerState{}
-		s.sessions[sessionKey] = state
-	}
-	if state.running {
-		state.dirty = true
-		s.mu.Unlock()
-		return
-	}
-	state.running = true
-	state.dirty = false
-	s.mu.Unlock()
-
-	go s.runLoop(sessionKey)
-}
-
-func (s *Scheduler) runLoop(sessionKey string) {
-	for {
-		base := s.baseCtx
-		if base == nil {
-			base = context.Background()
-		}
-		ctx, cancel := context.WithTimeout(base, s.timeout)
-		s.run(ctx, sessionKey)
-		cancel()
-
-		s.mu.Lock()
-		state := s.sessions[sessionKey]
-		if state == nil {
-			s.mu.Unlock()
-			return
-		}
-		if state.dirty {
-			state.dirty = false
-			s.mu.Unlock()
-			continue
-		}
-		delete(s.sessions, sessionKey)
-		s.mu.Unlock()
-		return
-	}
-}
-````
-
-## File: internal/memory/vector.go
-````go
-package memory
-
-import (
-	"bytes"
-	"container/heap"
-	"context"
-	"encoding/binary"
-	"errors"
-	"math"
-	"strings"
-
-	"or3-intern/internal/db"
-	"or3-intern/internal/scope"
-)
-
-func PackFloat32(vec []float32) []byte {
-	var b bytes.Buffer
-	_ = binary.Write(&b, binary.LittleEndian, vec)
-	return b.Bytes()
-}
-
-func UnpackFloat32(blob []byte) ([]float32, error) {
-	if len(blob)%4 != 0 { return nil, errors.New("invalid float32 blob") }
-	out := make([]float32, len(blob)/4)
-	if err := binary.Read(bytes.NewReader(blob), binary.LittleEndian, &out); err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func Cosine(a, b []float32) float64 {
-	var dot, na, nb float64
-	n := len(a)
-	if len(b) < n { n = len(b) }
-	for i := 0; i < n; i++ {
-		av := float64(a[i])
-		bv := float64(b[i])
-		dot += av * bv
-		na += av * av
-		nb += bv * bv
-	}
-	if na == 0 || nb == 0 { return 0 }
-	return dot / (math.Sqrt(na) * math.Sqrt(nb))
-}
-
-type VecCandidate struct {
-	ID int64
-	Text string
-	Score float64
-}
-
-type candMinHeap []VecCandidate
-
-func (h candMinHeap) Len() int { return len(h) }
-func (h candMinHeap) Less(i, j int) bool { return h[i].Score < h[j].Score }
-func (h candMinHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
-func (h *candMinHeap) Push(x any) { *h = append(*h, x.(VecCandidate)) }
-func (h *candMinHeap) Pop() any {
-	old := *h
-	n := len(old)
-	x := old[n-1]
-	*h = old[:n-1]
-	return x
-}
-
-func VectorSearch(ctx context.Context, d *db.DB, sessionKey string, queryVec []float32, k int, scanLimit int) ([]VecCandidate, error) {
-	h := &candMinHeap{}
-	heap.Init(h)
-
-	scopes := []string{scope.GlobalMemoryScope}
-	if trimmedSessionKey := strings.TrimSpace(sessionKey); trimmedSessionKey != "" && trimmedSessionKey != scope.GlobalMemoryScope {
-		scopes = append(scopes, sessionKey)
-	}
-	for _, memoryScope := range scopes {
-		rows, err := d.StreamMemoryNotesScopeLimit(ctx, memoryScope, scanLimit)
-		if err != nil { return nil, err }
-		if err := addVectorCandidates(rows, queryVec, k, h); err != nil {
-			_ = rows.Close()
-			return nil, err
-		}
-		if err := rows.Close(); err != nil {
-			return nil, err
-		}
-	}
-
-	// pop into descending slice
-	out := make([]VecCandidate, h.Len())
-	for i := len(out)-1; i >= 0; i-- {
-		out[i] = heap.Pop(h).(VecCandidate)
-	}
-	// now out ascending (min->max). reverse to max->min
-	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 { out[i], out[j] = out[j], out[i] }
-	return out, nil
-}
-
-func addVectorCandidates(rows interface {
-	Next() bool
-	Scan(dest ...any) error
-	Err() error
-}, queryVec []float32, k int, h *candMinHeap) error {
-	for rows.Next() {
-		var id int64
-		var text string
-		var emb []byte
-		var src any
-		var tags string
-		var created int64
-		if err := rows.Scan(&id, &text, &emb, &src, &tags, &created); err != nil {
-			return err
-		}
-		v, err := UnpackFloat32(emb)
-		if err != nil {
-			continue
-		}
-		score := Cosine(queryVec, v)
-		if h.Len() < k {
-			heap.Push(h, VecCandidate{ID: id, Text: text, Score: score})
-		} else if (*h)[0].Score < score {
-			(*h)[0] = VecCandidate{ID: id, Text: text, Score: score}
-			heap.Fix(h, 0)
-		}
-	}
-	return rows.Err()
-}
-````
-
-## File: internal/skills/skills_test.go
-````go
-package skills
-
-import (
-	"os"
-	"path/filepath"
-	"strings"
-	"testing"
-)
-
-func makeSkillsDir(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "skill_one.md"), []byte("# Skill One\nContent one"), 0o644)
-	os.WriteFile(filepath.Join(dir, "skill_two.txt"), []byte("Skill two content"), 0o644)
-	os.WriteFile(filepath.Join(dir, "not_a_skill.json"), []byte(`{}`), 0o644)
-	return dir
-}
-
-func TestScan_Empty(t *testing.T) {
-	inv := Scan(nil)
-	if len(inv.Skills) != 0 {
-		t.Errorf("expected 0 skills, got %d", len(inv.Skills))
-	}
-}
-
-func TestScan_EmptyDir(t *testing.T) {
-	dir := t.TempDir()
-	inv := Scan([]string{dir})
-	if len(inv.Skills) != 0 {
-		t.Errorf("expected 0 skills in empty dir, got %d", len(inv.Skills))
-	}
-}
-
-func TestScan_BlankDirSkipped(t *testing.T) {
-	inv := Scan([]string{"   ", ""})
-	if len(inv.Skills) != 0 {
-		t.Errorf("expected 0 skills with blank dirs, got %d", len(inv.Skills))
-	}
-}
-
-func TestScan_FiltersByExtension(t *testing.T) {
-	dir := makeSkillsDir(t)
-	inv := Scan([]string{dir})
-	// should include .md and .txt but not .json
-	if len(inv.Skills) != 2 {
-		t.Errorf("expected 2 skills, got %d", len(inv.Skills))
-	}
-	for _, s := range inv.Skills {
-		if s.Name == "not_a_skill" {
-			t.Error("expected .json file to be excluded")
-		}
-	}
-}
-
-func TestScan_SortedByName(t *testing.T) {
-	dir := makeSkillsDir(t)
-	inv := Scan([]string{dir})
-	for i := 1; i < len(inv.Skills); i++ {
-		if inv.Skills[i].Name < inv.Skills[i-1].Name {
-			t.Errorf("expected sorted skills, got %q before %q", inv.Skills[i-1].Name, inv.Skills[i].Name)
-		}
-	}
-}
-
-func TestScan_SkillFields(t *testing.T) {
-	dir := makeSkillsDir(t)
-	inv := Scan([]string{dir})
-
-	for _, s := range inv.Skills {
-		if s.Name == "" {
-			t.Error("expected non-empty skill name")
-		}
-		if s.Path == "" {
-			t.Error("expected non-empty skill path")
-		}
-		if s.ID == "" {
-			t.Error("expected non-empty skill ID")
-		}
-		if s.Size <= 0 {
-			t.Errorf("expected positive size for %q, got %d", s.Name, s.Size)
-		}
-	}
-}
-
-func TestScan_MultipleDirs(t *testing.T) {
-	dir1 := t.TempDir()
-	dir2 := t.TempDir()
-	os.WriteFile(filepath.Join(dir1, "alpha.md"), []byte("alpha"), 0o644)
-	os.WriteFile(filepath.Join(dir2, "beta.md"), []byte("beta"), 0o644)
-
-	inv := Scan([]string{dir1, dir2})
-	if len(inv.Skills) != 2 {
-		t.Errorf("expected 2 skills, got %d", len(inv.Skills))
-	}
-}
-
-func TestScan_SkipsSymlinkedSkill(t *testing.T) {
-	dir := t.TempDir()
-	targetDir := t.TempDir()
-	target := filepath.Join(targetDir, "outside.md")
-	os.WriteFile(target, []byte("outside"), 0o644)
-	link := filepath.Join(dir, "outside.md")
-	if err := os.Symlink(target, link); err != nil {
-		t.Skipf("symlink unsupported: %v", err)
-	}
-	inv := Scan([]string{dir})
-	if len(inv.Skills) != 0 {
-		t.Fatalf("expected symlinked skill to be skipped, got %#v", inv.Skills)
-	}
-}
-
-func TestInventory_Get_Found(t *testing.T) {
-	dir := makeSkillsDir(t)
-	inv := Scan([]string{dir})
-
-	s, ok := inv.Get("skill_one")
-	if !ok {
-		t.Fatal("expected to find 'skill_one'")
-	}
-	if s.Name != "skill_one" {
-		t.Errorf("expected name 'skill_one', got %q", s.Name)
-	}
-}
-
-func TestInventory_Get_NotFound(t *testing.T) {
-	dir := makeSkillsDir(t)
-	inv := Scan([]string{dir})
-
-	_, ok := inv.Get("nonexistent")
-	if ok {
-		t.Error("expected 'nonexistent' to not be found")
-	}
-}
-
-func TestInventory_Summary_Empty(t *testing.T) {
-	inv := Scan(nil)
-	s := inv.Summary(50)
-	if s != "(no skills found)" {
-		t.Errorf("expected '(no skills found)', got %q", s)
-	}
-}
-
-func TestInventory_Summary_WithItems(t *testing.T) {
-	dir := makeSkillsDir(t)
-	inv := Scan([]string{dir})
-
-	s := inv.Summary(10)
-	if !strings.Contains(s, "skill_one") && !strings.Contains(s, "skill_two") {
-		t.Errorf("expected summary to contain skill names, got %q", s)
-	}
-}
-
-func TestInventory_Summary_MaxItems(t *testing.T) {
-	dir := t.TempDir()
-	for i := 0; i < 5; i++ {
-		name := []string{"aaa", "bbb", "ccc", "ddd", "eee"}[i]
-		os.WriteFile(filepath.Join(dir, name+".md"), []byte("content"), 0o644)
-	}
-
-	inv := Scan([]string{dir})
-	// Limit to 2
-	s := inv.Summary(2)
-	lines := strings.Split(strings.TrimSpace(s), "\n")
-	// 2 items + "…" = 3 lines
-	if len(lines) != 3 {
-		t.Errorf("expected 3 lines (2 items + ellipsis), got %d: %q", len(lines), s)
-	}
-	if lines[2] != "…" {
-		t.Errorf("expected last line to be '…', got %q", lines[2])
-	}
-}
-
-func TestInventory_Summary_DefaultMax(t *testing.T) {
-	dir := makeSkillsDir(t)
-	inv := Scan([]string{dir})
-	// passing 0 should use default of 50
-	s := inv.Summary(0)
-	if s == "" || s == "(no skills found)" {
-		t.Errorf("expected summary with content, got %q", s)
-	}
-}
-
-func TestLoadBody_Normal(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "skill.md")
-	content := "# Skill\nSome content here"
-	os.WriteFile(path, []byte(content), 0o644)
-
-	got, err := LoadBody(path, 0)
-	if err != nil {
-		t.Fatalf("LoadBody: %v", err)
-	}
-	if got != content {
-		t.Errorf("expected %q, got %q", content, got)
-	}
-}
-
-func TestLoadBody_Truncation(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "large.md")
-	content := strings.Repeat("a", 100)
-	os.WriteFile(path, []byte(content), 0o644)
-
-	got, err := LoadBody(path, 50)
-	if err != nil {
-		t.Fatalf("LoadBody: %v", err)
-	}
-	if len(got) != 50 {
-		t.Errorf("expected 50 bytes, got %d", len(got))
-	}
-}
-
-func TestLoadBody_FileNotFound(t *testing.T) {
-	_, err := LoadBody("/nonexistent/path/skill.md", 0)
-	if err == nil {
-		t.Fatal("expected error for missing file")
-	}
-}
-
-func TestHash_Deterministic(t *testing.T) {
-	h1 := hash("some/path/file.md")
-	h2 := hash("some/path/file.md")
-	if h1 != h2 {
-		t.Errorf("expected deterministic hash, got %q and %q", h1, h2)
-	}
-}
-
-func TestHash_Different(t *testing.T) {
-	h1 := hash("path/a.md")
-	h2 := hash("path/b.md")
-	if h1 == h2 {
-		t.Error("expected different hashes for different paths")
-	}
-}
-
-// ---- Manifest and front matter ----
-
-func TestSkillManifestParsing(t *testing.T) {
-	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "myskill.md"), []byte("# My Skill\nDoes things."), 0o644)
-	os.WriteFile(filepath.Join(dir, "skill.json"), []byte(`{
-		"summary": "a really cool skill",
-		"entrypoints": [
-			{"name": "run", "command": ["python", "main.py"], "timeoutSeconds": 30, "acceptsStdin": false}
-		]
-	}`), 0o644)
-
-	inv := Scan([]string{dir})
-	if len(inv.Skills) != 1 {
-		t.Fatalf("expected 1 skill, got %d", len(inv.Skills))
-	}
-	s := inv.Skills[0]
-	if s.Summary != "a really cool skill" {
-		t.Errorf("expected summary 'a really cool skill', got %q", s.Summary)
-	}
-	if len(s.Entrypoints) != 1 {
-		t.Fatalf("expected 1 entrypoint, got %d", len(s.Entrypoints))
-	}
-	ep := s.Entrypoints[0]
-	if ep.Name != "run" {
-		t.Errorf("expected entrypoint name 'run', got %q", ep.Name)
-	}
-	if len(ep.Command) != 2 || ep.Command[0] != "python" {
-		t.Errorf("expected command [python main.py], got %v", ep.Command)
-	}
-	if ep.TimeoutSeconds != 30 {
-		t.Errorf("expected timeout 30, got %d", ep.TimeoutSeconds)
-	}
-	if ep.AcceptsStdin {
-		t.Error("expected acceptsStdin false")
-	}
-}
-
-func TestSkillFrontMatterSummary(t *testing.T) {
-	dir := t.TempDir()
-	content := "---\nsummary: parses front matter correctly\n---\n# Skill\nBody text."
-	os.WriteFile(filepath.Join(dir, "frontmatter.md"), []byte(content), 0o644)
-
-	inv := Scan([]string{dir})
-	if len(inv.Skills) != 1 {
-		t.Fatalf("expected 1 skill, got %d", len(inv.Skills))
-	}
-	s := inv.Skills[0]
-	if s.Summary != "parses front matter correctly" {
-		t.Errorf("expected summary 'parses front matter correctly', got %q", s.Summary)
-	}
-}
-
-func TestSkillManifestOverridesFrontMatter(t *testing.T) {
-	dir := t.TempDir()
-	content := "---\nsummary: from front matter\n---\n# Skill"
-	os.WriteFile(filepath.Join(dir, "skill.md"), []byte(content), 0o644)
-	os.WriteFile(filepath.Join(dir, "skill.json"), []byte(`{"summary":"from manifest"}`), 0o644)
-
-	inv := Scan([]string{dir})
-	if len(inv.Skills) != 1 {
-		t.Fatalf("expected 1 skill, got %d", len(inv.Skills))
-	}
-	// manifest takes precedence
-	if inv.Skills[0].Summary != "from manifest" {
-		t.Errorf("expected manifest summary to take precedence, got %q", inv.Skills[0].Summary)
-	}
-}
-
-func TestSkillSummaryInInventory(t *testing.T) {
-	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "alpha.md"), []byte("---\nsummary: does alpha things\n---\n# Alpha"), 0o644)
-	os.WriteFile(filepath.Join(dir, "beta.md"), []byte("# Beta\nNo front matter."), 0o644)
-
-	inv := Scan([]string{dir})
-	s := inv.Summary(10)
-
-	if !strings.Contains(s, "alpha: does alpha things") {
-		t.Errorf("expected summary line 'alpha: does alpha things' in %q", s)
-	}
-	if !strings.Contains(s, "- beta\n") && !strings.HasSuffix(s, "- beta") {
-		t.Errorf("expected plain '- beta' line (no summary) in %q", s)
-	}
-}
-
-func TestExtractFrontMatterSummary_NoFrontMatter(t *testing.T) {
-	got := extractFrontMatterSummary("# Title\nsome body")
-	if got != "" {
-		t.Errorf("expected empty string for no front matter, got %q", got)
-	}
-}
-
-func TestExtractFrontMatterSummary_WithSummary(t *testing.T) {
-	content := "---\nsummary: hello world\nauthor: test\n---\n# Body"
-	got := extractFrontMatterSummary(content)
-	if got != "hello world" {
-		t.Errorf("expected 'hello world', got %q", got)
-	}
-}
-
-func TestExtractFrontMatterSummary_WithQuotedSummary(t *testing.T) {
-	content := "---\nsummary: \"quoted value\"\n---\n# Body"
-	got := extractFrontMatterSummary(content)
-	if got != "quoted value" {
-		t.Errorf("expected 'quoted value', got %q", got)
-	}
-}
-
-func TestExtractFrontMatterSummary_MissingSummaryKey(t *testing.T) {
-	content := "---\nauthor: someone\n---\n# Body"
-	got := extractFrontMatterSummary(content)
-	if got != "" {
-		t.Errorf("expected empty string when no summary key, got %q", got)
-	}
-}
-
-func TestSkillManifest_InvalidJSON(t *testing.T) {
-	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "myskill.md"), []byte("# Skill"), 0o644)
-	os.WriteFile(filepath.Join(dir, "skill.json"), []byte(`not valid json`), 0o644)
-
-	// Should not panic; skill loads without summary/entrypoints
-	inv := Scan([]string{dir})
-	if len(inv.Skills) != 1 {
-		t.Fatalf("expected 1 skill even with invalid manifest, got %d", len(inv.Skills))
-	}
-	if inv.Skills[0].Summary != "" {
-		t.Errorf("expected empty summary for invalid manifest, got %q", inv.Skills[0].Summary)
-	}
-}
-````
-
-## File: internal/tools/files.go
-````go
-package tools
-
-import (
-	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
-)
-
-type FileTool struct {
-	Base
-	Root string // allowed root (optional)
-}
-
-const (
-	defaultReadFileMaxBytes = 200000
-	defaultListDirMaxEntries = 200
-)
-
-func (t *FileTool) safePath(p string) (string, error) {
-	if strings.TrimSpace(p) == "" { return "", errors.New("missing path") }
-	abs, err := filepath.Abs(p)
-	if err != nil { return "", err }
-	abs, err = canonicalizePath(abs)
-	if err != nil { return "", err }
-	if t.Root != "" {
-		root, err := filepath.Abs(t.Root)
-		if err != nil { return "", err }
-		root, err = canonicalizeRoot(root)
-		if err != nil { return "", err }
-		rel, err := filepath.Rel(root, abs)
-		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return "", fmt.Errorf("path outside allowed root")
-		}
-	}
-	return abs, nil
-}
-
-func canonicalizeRoot(root string) (string, error) {
-	if _, err := os.Stat(root); err != nil { return "", err }
-	return filepath.EvalSymlinks(root)
-}
-
-func canonicalizePath(abs string) (string, error) {
-	if _, err := os.Lstat(abs); err == nil {
-		return filepath.EvalSymlinks(abs)
-	} else if !os.IsNotExist(err) {
-		return "", err
-	}
-	existing := abs
-	missingParts := make([]string, 0, 4)
-	for {
-		if _, err := os.Lstat(existing); err == nil {
-			break
-		} else if !os.IsNotExist(err) {
-			return "", err
-		}
-		parent := filepath.Dir(existing)
-		if parent == existing {
-			return "", os.ErrNotExist
-		}
-		missingParts = append(missingParts, filepath.Base(existing))
-		existing = parent
-	}
-	realExisting, err := filepath.EvalSymlinks(existing)
-	if err != nil { return "", err }
-	for i := len(missingParts) - 1; i >= 0; i-- {
-		realExisting = filepath.Join(realExisting, missingParts[i])
-	}
-	return realExisting, nil
-}
-
-type ReadFile struct{ FileTool }
-func (t *ReadFile) Name() string { return "read_file" }
-func (t *ReadFile) Description() string { return "Read a UTF-8 text file." }
-func (t *ReadFile) Parameters() map[string]any {
-	return map[string]any{"type":"object","properties":map[string]any{
-		"path": map[string]any{"type":"string"},
-		"maxBytes": map[string]any{"type":"integer","description":"Max bytes to read (default 200000)"},
-	},"required":[]string{"path"}}
-}
-func (t *ReadFile) Schema() map[string]any { return t.SchemaFor(t.Name(), t.Description(), t.Parameters()) }
-func (t *ReadFile) Execute(ctx context.Context, params map[string]any) (string, error) {
-	p, err := t.safePath(fmt.Sprint(params["path"]))
-	if err != nil { return "", err }
-	max := defaultReadFileMaxBytes
-	if v, ok := params["maxBytes"].(float64); ok && int(v) > 0 { max = int(v) }
-	b, err := os.ReadFile(p)
-	if err != nil { return "", err }
-	if len(b) > max { b = b[:max] }
-	return string(b), nil
-}
-
-type WriteFile struct{ FileTool }
-func (t *WriteFile) Name() string { return "write_file" }
-func (t *WriteFile) Description() string { return "Write text to a file (overwrites)." }
-func (t *WriteFile) Parameters() map[string]any {
-	return map[string]any{"type":"object","properties":map[string]any{
-		"path": map[string]any{"type":"string"},
-		"content": map[string]any{"type":"string"},
-		"mkdirs": map[string]any{"type":"boolean"},
-	},"required":[]string{"path","content"}}
-}
-func (t *WriteFile) Schema() map[string]any { return t.SchemaFor(t.Name(), t.Description(), t.Parameters()) }
-func (t *WriteFile) Execute(ctx context.Context, params map[string]any) (string, error) {
-	p, err := t.safePath(fmt.Sprint(params["path"]))
-	if err != nil { return "", err }
-	content := fmt.Sprint(params["content"])
-	mkdirs, _ := params["mkdirs"].(bool)
-	if mkdirs {
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil { return "", err }
-	}
-	if err := os.WriteFile(p, []byte(content), 0o644); err != nil { return "", err }
-	return "ok", nil
-}
-
-type EditFile struct{ FileTool }
-func (t *EditFile) Name() string { return "edit_file" }
-func (t *EditFile) Description() string {
-	return "Edit a text file by applying a list of find/replace operations."
-}
-func (t *EditFile) Parameters() map[string]any {
-	return map[string]any{"type":"object","properties":map[string]any{
-		"path": map[string]any{"type":"string"},
-		"edits": map[string]any{"type":"array","items":map[string]any{
-			"type":"object",
-			"properties":map[string]any{
-				"find": map[string]any{"type":"string"},
-				"replace": map[string]any{"type":"string"},
-				"count": map[string]any{"type":"integer","description":"max replacements (0=all)"},
-			},
-			"required":[]string{"find","replace"},
-		}},
-	},"required":[]string{"path","edits"}}
-}
-func (t *EditFile) Schema() map[string]any { return t.SchemaFor(t.Name(), t.Description(), t.Parameters()) }
-func (t *EditFile) Execute(ctx context.Context, params map[string]any) (string, error) {
-	p, err := t.safePath(fmt.Sprint(params["path"]))
-	if err != nil { return "", err }
-	b, err := os.ReadFile(p)
-	if err != nil { return "", err }
-	s := string(b)
-	rawEdits, _ := params["edits"].([]any)
-	for _, e := range rawEdits {
-		m, _ := e.(map[string]any)
-		find := fmt.Sprint(m["find"])
-		replace := fmt.Sprint(m["replace"])
-		count := 0
-		if v, ok := m["count"].(float64); ok { count = int(v) }
-		if count <= 0 {
-			s = strings.ReplaceAll(s, find, replace)
-		} else {
-			s = strings.Replace(s, find, replace, count)
-		}
-	}
-	if err := os.WriteFile(p, []byte(s), 0o644); err != nil { return "", err }
-	return "ok", nil
-}
-
-type ListDir struct{ FileTool }
-func (t *ListDir) Name() string { return "list_dir" }
-func (t *ListDir) Description() string { return "List directory entries." }
-func (t *ListDir) Parameters() map[string]any {
-	return map[string]any{"type":"object","properties":map[string]any{
-		"path": map[string]any{"type":"string"},
-		"max": map[string]any{"type":"integer"},
-	},"required":[]string{"path"}}
-}
-func (t *ListDir) Schema() map[string]any { return t.SchemaFor(t.Name(), t.Description(), t.Parameters()) }
-func (t *ListDir) Execute(ctx context.Context, params map[string]any) (string, error) {
-	p, err := t.safePath(fmt.Sprint(params["path"]))
-	if err != nil { return "", err }
-	ents, err := os.ReadDir(p)
-	if err != nil { return "", err }
-	max := defaultListDirMaxEntries
-	if v, ok := params["max"].(float64); ok && int(v) > 0 { max = int(v) }
-	type entry struct{ Name string `json:"name"`; IsDir bool `json:"isDir"`; Size int64 `json:"size"` }
-	out := []entry{}
-	for _, e := range ents {
-		if len(out) >= max { break }
-		info, _ := e.Info()
-		sz := int64(0)
-		if info != nil { sz = info.Size() }
-		out = append(out, entry{Name: e.Name(), IsDir: e.IsDir(), Size: sz})
-	}
-	b, _ := json.MarshalIndent(out, "", "  ")
-	return string(b), nil
-}
-````
-
-## File: internal/tools/memory.go
-````go
-package tools
-
-import (
-	"context"
-	"database/sql"
-	"fmt"
-	"strings"
-
-	"or3-intern/internal/db"
-	"or3-intern/internal/memory"
-	"or3-intern/internal/providers"
-	"or3-intern/internal/scope"
-)
-
-type MemorySetPinned struct {
-	Base
-	DB *db.DB
-}
-func (t *MemorySetPinned) Name() string { return "memory_set_pinned" }
-func (t *MemorySetPinned) Description() string { return "Upsert a pinned memory entry (always included in prompts)." }
-func (t *MemorySetPinned) Parameters() map[string]any {
-	return map[string]any{"type":"object","properties":map[string]any{
-		"key": map[string]any{"type":"string"},
-		"content": map[string]any{"type":"string"},
-		"scope": map[string]any{"type":"string", "description":"Optional scope override: 'global' to share across sessions"},
-	},"required":[]string{"key","content"}}
-}
-func (t *MemorySetPinned) Schema() map[string]any { return t.SchemaFor(t.Name(), t.Description(), t.Parameters()) }
-func (t *MemorySetPinned) Execute(ctx context.Context, params map[string]any) (string, error) {
-	if t.DB == nil { return "", fmt.Errorf("db not set") }
-	key := strings.TrimSpace(fmt.Sprint(params["key"]))
-	content := strings.TrimSpace(fmt.Sprint(params["content"]))
-	if key == "" || content == "" { return "", fmt.Errorf("missing key/content") }
-	if err := t.DB.UpsertPinned(ctx, memoryScopeFromParams(ctx, params), key, content); err != nil { return "", err }
-	return "ok", nil
-}
-
-type MemoryAddNote struct {
-	Base
-	DB *db.DB
-	Provider *providers.Client
-	EmbedModel string
-}
-func (t *MemoryAddNote) Name() string { return "memory_add_note" }
-func (t *MemoryAddNote) Description() string { return "Add a semantic memory note to the indexed memory store." }
-func (t *MemoryAddNote) Parameters() map[string]any {
-	return map[string]any{"type":"object","properties":map[string]any{
-		"text": map[string]any{"type":"string"},
-		"tags": map[string]any{"type":"string","description":"comma-separated tags (optional)"},
-		"source_message_id": map[string]any{"type":"integer","description":"source message id (optional)"},
-		"scope": map[string]any{"type":"string", "description":"Optional scope override: 'global' to share across sessions"},
-	},"required":[]string{"text"}}
-}
-func (t *MemoryAddNote) Schema() map[string]any { return t.SchemaFor(t.Name(), t.Description(), t.Parameters()) }
-func (t *MemoryAddNote) Execute(ctx context.Context, params map[string]any) (string, error) {
-	if t.DB == nil || t.Provider == nil { return "", fmt.Errorf("missing deps") }
-	text := strings.TrimSpace(fmt.Sprint(params["text"]))
-	if text == "" { return "", fmt.Errorf("empty text") }
-	tags := strings.TrimSpace(fmt.Sprint(params["tags"]))
-	var src sql.NullInt64
-	if v, ok := params["source_message_id"].(float64); ok && int64(v) > 0 {
-		src = sql.NullInt64{Int64: int64(v), Valid: true}
-	}
-	vec, err := t.Provider.Embed(ctx, t.EmbedModel, text)
-	if err != nil { return "", err }
-	blob := memory.PackFloat32(vec)
-	id, err := t.DB.InsertMemoryNote(ctx, memoryScopeFromParams(ctx, params), text, blob, src, tags)
-	if err != nil { return "", err }
-	return fmt.Sprintf("ok: %d", id), nil
-}
-
-type MemorySearch struct {
-	Base
-	DB *db.DB
-	Provider *providers.Client
-	EmbedModel string
-	VectorK int
-	FTSK int
-	TopK int
-	VectorScanLimit int
-}
-func (t *MemorySearch) Name() string { return "memory_search" }
-func (t *MemorySearch) Description() string { return "Search long-term memory (hybrid semantic + keyword) and return top results." }
-func (t *MemorySearch) Parameters() map[string]any {
-	return map[string]any{"type":"object","properties":map[string]any{
-		"query": map[string]any{"type":"string"},
-		"topK": map[string]any{"type":"integer"},
-		"scope": map[string]any{"type":"string", "description":"Optional scope override: 'global' to search only shared memory"},
-	},"required":[]string{"query"}}
-}
-func (t *MemorySearch) Schema() map[string]any { return t.SchemaFor(t.Name(), t.Description(), t.Parameters()) }
-func (t *MemorySearch) Execute(ctx context.Context, params map[string]any) (string, error) {
-	if t.DB == nil || t.Provider == nil { return "", fmt.Errorf("missing deps") }
-	q := strings.TrimSpace(fmt.Sprint(params["query"]))
-	if q == "" { return "", fmt.Errorf("empty query") }
-	topK := t.TopK
-	if v, ok := params["topK"].(float64); ok && int(v) > 0 { topK = int(v) }
-	vec, err := t.Provider.Embed(ctx, t.EmbedModel, q)
-	if err != nil { return "", err }
-	r := memory.NewRetriever(t.DB)
-	r.VectorScanLimit = t.VectorScanLimit
-	got, err := r.Retrieve(ctx, memoryScopeFromParams(ctx, params), q, vec, t.VectorK, t.FTSK, topK)
-	if err != nil { return "", err }
-	var b strings.Builder
-	for i, m := range got {
-		b.WriteString(fmt.Sprintf("%d. [%s] %.4f %s\n", i+1, m.Source, m.Score, m.Text))
-	}
-	return b.String(), nil
-}
-
-func memoryScopeFromParams(ctx context.Context, params map[string]any) string {
-	if requestedScope := strings.TrimSpace(fmt.Sprint(params["scope"])); scope.IsGlobalScopeRequest(requestedScope) {
-		return scope.GlobalMemoryScope
-	}
-	return SessionFromContext(ctx)
-}
-````
-
-## File: internal/tools/web.go
-````go
-package tools
-
-import (
-	"bytes"
-	"context"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net"
-	"net/http"
-	"net/netip"
-	"net/url"
-	"strings"
-	"time"
-)
-
-type WebFetch struct{
-	Base
-	HTTP *http.Client
-	Timeout time.Duration
-	DefaultMaxBytes int
-}
-
-const (
-	defaultWebTimeout = 20 * time.Second
-	defaultWebFetchMaxBytes = 200000
-	defaultWebFetchMaxRedirects = 10
-	defaultWebSearchMaxCount = 10
-	defaultWebSearchReadMaxBytes = 1 << 20
-)
-
-func (t *WebFetch) Name() string { return "web_fetch" }
-func (t *WebFetch) Description() string { return "Fetch a URL (GET) and return text (truncated)." }
-func (t *WebFetch) Parameters() map[string]any {
-	return map[string]any{"type":"object","properties":map[string]any{
-		"url": map[string]any{"type":"string"},
-		"maxBytes": map[string]any{"type":"integer"},
-	},"required":[]string{"url"}}
-}
-func (t *WebFetch) Schema() map[string]any { return t.SchemaFor(t.Name(), t.Description(), t.Parameters()) }
-func (t *WebFetch) Execute(ctx context.Context, params map[string]any) (string, error) {
-	u := fmt.Sprint(params["url"])
-	if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
-		return "", fmt.Errorf("invalid url")
-	}
-	parsed, err := url.Parse(u)
-	if err != nil { return "", err }
-	if err := validateFetchURL(ctx, parsed); err != nil { return "", err }
-	max := t.DefaultMaxBytes
-	if max <= 0 { max = defaultWebFetchMaxBytes }
-	if v, ok := params["maxBytes"].(float64); ok && int(v) > 0 { max = int(v) }
-	client := t.HTTP
-	if t.HTTP == nil {
-		to := t.Timeout
-		if to <= 0 { to = defaultWebTimeout }
-		client = &http.Client{Timeout: to}
-	} else {
-		copyClient := *t.HTTP
-		client = &copyClient
-	}
-	prevCheckRedirect := client.CheckRedirect
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if len(via) >= defaultWebFetchMaxRedirects {
-			return fmt.Errorf("stopped after %d redirects", defaultWebFetchMaxRedirects)
-		}
-		if prevCheckRedirect != nil {
-			if err := prevCheckRedirect(req, via); err != nil {
-				return err
-			}
-		}
-		return validateFetchURL(req.Context(), req.URL)
-	}
-	r, err := http.NewRequestWithContext(ctx, "GET", parsed.String(), nil)
-	if err != nil { return "", err }
-	resp, err := client.Do(r)
-	if err != nil { return "", err }
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, int64(max)))
-	return fmt.Sprintf("status: %s\n\n%s", resp.Status, string(body)), nil
-}
-
-func validateFetchURL(ctx context.Context, target *url.URL) error {
-	if target == nil {
-		return fmt.Errorf("invalid url")
-	}
-	hostname := strings.TrimSpace(strings.ToLower(target.Hostname()))
-	if hostname == "" {
-		return fmt.Errorf("missing host")
-	}
-	if isBlockedFetchHostname(hostname) {
-		return fmt.Errorf("blocked fetch target")
-	}
-	if ip, err := netip.ParseAddr(hostname); err == nil {
-		if isBlockedFetchAddr(ip.Unmap()) {
-			return fmt.Errorf("blocked fetch target")
-		}
-		return nil
-	}
-	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, hostname)
-	if err != nil {
-		return err
-	}
-	if len(addrs) == 0 {
-		return fmt.Errorf("host did not resolve")
-	}
-	for _, addr := range addrs {
-		if ip, ok := netip.AddrFromSlice(addr.IP); ok && isBlockedFetchAddr(ip.Unmap()) {
-			return fmt.Errorf("blocked fetch target")
-		}
-	}
-	return nil
-}
-
-func isBlockedFetchHostname(hostname string) bool {
-	switch hostname {
-	case "localhost", "ip6-localhost", "metadata.google.internal":
-		return true
-	default:
-		return false
-	}
-}
-
-func isBlockedFetchAddr(addr netip.Addr) bool {
-	if !addr.IsValid() {
-		return true
-	}
-	if addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() || addr.IsMulticast() || addr.IsUnspecified() {
-		return true
-	}
-	return addr.String() == "169.254.169.254"
-}
-
-type WebSearch struct{
-	Base
-	APIKey string
-	HTTP *http.Client
-	Timeout time.Duration
-	ReadMaxBytes int
-}
-
-func (t *WebSearch) Name() string { return "web_search" }
-func (t *WebSearch) Description() string {
-	return "Search the web (Brave Search API) and return top results."
-}
-func (t *WebSearch) Parameters() map[string]any {
-	return map[string]any{"type":"object","properties":map[string]any{
-		"query": map[string]any{"type":"string"},
-		"count": map[string]any{"type":"integer","description":"max results (default 5)"},
-	},"required":[]string{"query"}}
-}
-func (t *WebSearch) Schema() map[string]any { return t.SchemaFor(t.Name(), t.Description(), t.Parameters()) }
-
-func (t *WebSearch) Execute(ctx context.Context, params map[string]any) (string, error) {
-	if strings.TrimSpace(t.APIKey) == "" {
-		return "", fmt.Errorf("Brave API key not configured (set BRAVE_API_KEY)")
-	}
-	q := fmt.Sprint(params["query"])
-	count := 5
-	if v, ok := params["count"].(float64); ok && int(v) > 0 { count = int(v) }
-	if count > defaultWebSearchMaxCount { count = defaultWebSearchMaxCount }
-	if t.HTTP == nil {
-		to := t.Timeout
-		if to <= 0 { to = defaultWebTimeout }
-		t.HTTP = &http.Client{Timeout: to}
-	}
-
-	endpoint := "https://api.search.brave.com/res/v1/web/search?q=" + url.QueryEscape(q) + "&count=" + fmt.Sprint(count)
-	r, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
-	if err != nil { return "", err }
-	r.Header.Set("Accept", "application/json")
-	r.Header.Set("X-Subscription-Token", t.APIKey)
-
-	resp, err := t.HTTP.Do(r)
-	if err != nil { return "", err }
-	defer resp.Body.Close()
-	maxRead := t.ReadMaxBytes
-	if maxRead <= 0 { maxRead = defaultWebSearchReadMaxBytes }
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, int64(maxRead)))
-	if resp.StatusCode >= 300 {
-		return "", fmt.Errorf("search error %s: %s", resp.Status, string(body))
-	}
-
-	// Reduce response to stable subset
-	var raw map[string]any
-	_ = json.Unmarshal(body, &raw)
-	out := map[string]any{"query": q, "results": []any{}}
-	web, _ := raw["web"].(map[string]any)
-	results, _ := web["results"].([]any)
-	for _, it := range results {
-		m, _ := it.(map[string]any)
-		out["results"] = append(out["results"].([]any), map[string]any{
-			"title": m["title"],
-			"url": m["url"],
-			"description": m["description"],
-		})
-	}
-	b, _ := json.MarshalIndent(out, "", "  ")
-	return string(b), nil
-}
-
-// Optional: simple text extract from HTML (very rough)
-func StripHTML(s string) string {
-	var b bytes.Buffer
-	in := false
-	for _, r := range s {
-		if r == '<' { in = true; continue }
-		if r == '>' { in = false; continue }
-		if !in { b.WriteRune(r) }
-	}
-	return b.String()
-}
-````
-
-## File: go.mod
-````
-module or3-intern
-
-go 1.22
-
-require (
-	github.com/gorilla/websocket v1.5.3
-	github.com/robfig/cron/v3 v3.0.1
-	modernc.org/sqlite v1.33.1
-)
-
-require (
-	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/google/uuid v1.6.0 // indirect
-	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
-	github.com/mattn/go-isatty v0.0.20 // indirect
-	github.com/ncruces/go-strftime v0.1.9 // indirect
-	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	golang.org/x/sys v0.22.0 // indirect
-	modernc.org/gc/v3 v3.0.0-20240107210532-573471604cb6 // indirect
-	modernc.org/libc v1.55.3 // indirect
-	modernc.org/mathutil v1.6.0 // indirect
-	modernc.org/memory v1.8.0 // indirect
-	modernc.org/strutil v1.2.0 // indirect
-	modernc.org/token v1.1.0 // indirect
-)
-````
-
-## File: internal/agent/runtime_test.go
-````go
-package agent
-
-import (
-	"context"
-	"encoding/json"
-	"fmt"
-	"net/http"
-	"net/http/httptest"
-	"os"
-	"path/filepath"
-	"strings"
-	"sync/atomic"
-	"testing"
-	"time"
-
-	"or3-intern/internal/artifacts"
-	"or3-intern/internal/bus"
-	"or3-intern/internal/db"
-	"or3-intern/internal/memory"
-	"or3-intern/internal/providers"
-	"or3-intern/internal/tools"
-)
-
-// mockDeliverer captures delivered messages
-type mockDeliverer struct {
-	messages []string
-	channel  string
-	to       string
-	err      error
-}
-
-func (m *mockDeliverer) Deliver(ctx context.Context, channel, to, text string) error {
-	m.messages = append(m.messages, text)
-	m.channel = channel
-	m.to = to
-	return m.err
-}
-
-// buildChatServer creates a test HTTP server that responds to /chat/completions
-func buildChatServer(t *testing.T, response providers.ChatCompletionResponse) (*httptest.Server, *providers.Client) {
-	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
-	}))
-	t.Cleanup(srv.Close)
-	c := providers.New(srv.URL, "test-key", 10*time.Second)
-	c.HTTP = srv.Client()
-	return srv, c
-}
-
-func openRuntimeTestDB(t *testing.T) *db.DB {
-	t.Helper()
-	d, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("db.Open: %v", err)
-	}
-	t.Cleanup(func() { d.Close() })
-	return d
-}
-
-func buildSimpleRuntime(t *testing.T, provider *providers.Client, d *db.DB, deliver *mockDeliverer) *Runtime {
-	t.Helper()
-	reg := tools.NewRegistry()
-	b := &Builder{
-		DB:         d,
-		HistoryMax: 10,
-	}
-	return &Runtime{
-		DB:           d,
-		Provider:     provider,
-		Model:        "gpt-4",
-		Tools:        reg,
-		Builder:      b,
-		MaxToolLoops: 2,
-		Deliver:      deliver,
-	}
-}
-
-func TestRuntime_Handle_UserMessage(t *testing.T) {
-	d := openRuntimeTestDB(t)
-	response := providers.ChatCompletionResponse{
-		Choices: []struct {
-			Message struct {
-				Role      string               `json:"role"`
-				Content   any                  `json:"content"`
-				ToolCalls []providers.ToolCall `json:"tool_calls"`
-			} `json:"message"`
-		}{{
-			Message: struct {
-				Role      string               `json:"role"`
-				Content   any                  `json:"content"`
-				ToolCalls []providers.ToolCall `json:"tool_calls"`
-			}{Role: "assistant", Content: "Hello there!"},
-		}},
-	}
-	_, provider := buildChatServer(t, response)
-	deliver := &mockDeliverer{}
-	rt := buildSimpleRuntime(t, provider, d, deliver)
-
-	ev := bus.Event{
-		Type:       bus.EventUserMessage,
-		SessionKey: "sess1",
-		Channel:    "cli",
-		From:       "user",
-		Message:    "hello",
-	}
-
-	err := rt.Handle(context.Background(), ev)
-	if err != nil {
-		t.Fatalf("Handle: %v", err)
-	}
-	if len(deliver.messages) == 0 {
-		t.Error("expected at least one delivered message")
-	}
-	if deliver.messages[0] != "Hello there!" {
-		t.Errorf("expected 'Hello there!', got %q", deliver.messages[0])
-	}
-}
-
-func TestRuntime_Handle_UsesChannelTargetFromEventMeta(t *testing.T) {
-	d := openRuntimeTestDB(t)
-	response := providers.ChatCompletionResponse{
-		Choices: []struct {
-			Message struct {
-				Role      string               `json:"role"`
-				Content   any                  `json:"content"`
-				ToolCalls []providers.ToolCall `json:"tool_calls"`
-			} `json:"message"`
-		}{{
-			Message: struct {
-				Role      string               `json:"role"`
-				Content   any                  `json:"content"`
-				ToolCalls []providers.ToolCall `json:"tool_calls"`
-			}{Role: "assistant", Content: "Reply"},
-		}},
-	}
-	_, provider := buildChatServer(t, response)
-	deliver := &mockDeliverer{}
-	rt := buildSimpleRuntime(t, provider, d, deliver)
-
-	err := rt.Handle(context.Background(), bus.Event{
-		Type:       bus.EventUserMessage,
-		SessionKey: "sess1",
-		Channel:    "discord",
-		From:       "user-id",
-		Message:    "hello",
-		Meta:       map[string]any{"channel_id": "channel-1"},
-	})
-	if err != nil {
-		t.Fatalf("Handle: %v", err)
-	}
-	if deliver.to != "channel-1" {
-		t.Fatalf("expected delivery to channel target, got %q", deliver.to)
-	}
-}
-
-func TestRuntime_Handle_PersistsAttachmentMetadata(t *testing.T) {
-	d := openRuntimeTestDB(t)
-	response := providers.ChatCompletionResponse{
-		Choices: []struct {
-			Message struct {
-				Role      string               `json:"role"`
-				Content   any                  `json:"content"`
-				ToolCalls []providers.ToolCall `json:"tool_calls"`
-			} `json:"message"`
-		}{{
-			Message: struct {
-				Role      string               `json:"role"`
-				Content   any                  `json:"content"`
-				ToolCalls []providers.ToolCall `json:"tool_calls"`
-			}{Role: "assistant", Content: "ok"},
-		}},
-	}
-	_, provider := buildChatServer(t, response)
-	rt := buildSimpleRuntime(t, provider, d, &mockDeliverer{})
-	ev := bus.Event{
-		Type:       bus.EventUserMessage,
-		SessionKey: "sess1",
-		Channel:    "telegram",
-		From:       "user",
-		Message:    "see image\n[image: photo.png]",
-		Meta: map[string]any{
-			"attachments": []map[string]any{{
-				"artifact_id": "artifact-1",
-				"filename":    "photo.png",
-				"mime":        "image/png",
-				"kind":        "image",
-				"size_bytes":  10,
-			}},
-		},
-	}
-	if err := rt.Handle(context.Background(), ev); err != nil {
-		t.Fatalf("Handle: %v", err)
-	}
-	msgs, err := d.GetLastMessages(context.Background(), "sess1", 10)
-	if err != nil {
-		t.Fatalf("GetLastMessages: %v", err)
-	}
-	if len(msgs) == 0 {
-		t.Fatal("expected persisted messages")
-	}
-	var payload map[string]any
-	if err := json.Unmarshal([]byte(msgs[0].PayloadJSON), &payload); err != nil {
-		t.Fatalf("Unmarshal payload: %v", err)
-	}
-	meta, ok := payload["meta"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected meta in payload, got %#v", payload)
-	}
-	attachments, ok := meta["attachments"].([]any)
-	if !ok || len(attachments) != 1 {
-		t.Fatalf("expected attachments in payload meta, got %#v", meta["attachments"])
-	}
-}
-
-func TestRuntime_Handle_CronEvent(t *testing.T) {
-	d := openRuntimeTestDB(t)
-	response := providers.ChatCompletionResponse{
-		Choices: []struct {
-			Message struct {
-				Role      string               `json:"role"`
-				Content   any                  `json:"content"`
-				ToolCalls []providers.ToolCall `json:"tool_calls"`
-			} `json:"message"`
-		}{{
-			Message: struct {
-				Role      string               `json:"role"`
-				Content   any                  `json:"content"`
-				ToolCalls []providers.ToolCall `json:"tool_calls"`
-			}{Role: "assistant", Content: "Cron response"},
-		}},
-	}
-	_, provider := buildChatServer(t, response)
-	deliver := &mockDeliverer{}
-	rt := buildSimpleRuntime(t, provider, d, deliver)
-
-	err := rt.Handle(context.Background(), bus.Event{
-		Type:       bus.EventCron,
-		SessionKey: "sess1",
-		Message:    "cron task",
-	})
-	if err != nil {
-		t.Fatalf("Handle cron: %v", err)
-	}
-}
-
-func TestRuntime_Handle_UnknownEvent(t *testing.T) {
-	d := openRuntimeTestDB(t)
-	_, provider := buildChatServer(t, providers.ChatCompletionResponse{})
-	rt := buildSimpleRuntime(t, provider, d, &mockDeliverer{})
-
-	// Unknown event type should return nil without processing
-	err := rt.Handle(context.Background(), bus.Event{
-		Type:       "unknown_type",
-		SessionKey: "sess1",
-	})
-	if err != nil {
-		t.Fatalf("expected no error for unknown event type, got: %v", err)
-	}
-}
-
-func TestRuntime_Handle_NoBuilder(t *testing.T) {
-	d := openRuntimeTestDB(t)
-	_, provider := buildChatServer(t, providers.ChatCompletionResponse{})
-	rt := &Runtime{
-		DB:       d,
-		Provider: provider,
-		Model:    "gpt-4",
-		Tools:    tools.NewRegistry(),
-		Builder:  nil, // no builder
-	}
-
-	err := rt.Handle(context.Background(), bus.Event{
-		Type:       bus.EventUserMessage,
-		SessionKey: "sess1",
-		Message:    "hello",
-	})
-	if err == nil {
-		t.Fatal("expected error when builder is nil")
-	}
-}
-
-func TestRuntime_Handle_NoChoices(t *testing.T) {
-	d := openRuntimeTestDB(t)
-	// Return empty choices
-	response := providers.ChatCompletionResponse{Choices: nil}
-	_, provider := buildChatServer(t, response)
-	b := &Builder{DB: d, HistoryMax: 10}
-	rt := &Runtime{
-		DB:           d,
-		Provider:     provider,
-		Model:        "gpt-4",
-		Tools:        tools.NewRegistry(),
-		Builder:      b,
-		MaxToolLoops: 2,
-	}
-
-	err := rt.Handle(context.Background(), bus.Event{
-		Type:       bus.EventUserMessage,
-		SessionKey: "sess1",
-		Message:    "hello",
-	})
-	if err == nil {
-		t.Fatal("expected error when no choices returned")
-	}
-}
-
-func TestRuntime_Handle_WithToolCall(t *testing.T) {
-	d := openRuntimeTestDB(t)
-
-	callCount := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
-		w.Header().Set("Content-Type", "application/json")
-		var resp providers.ChatCompletionResponse
-		if callCount == 1 {
-			// First call returns tool call
-			resp = providers.ChatCompletionResponse{
-				Choices: []struct {
-					Message struct {
-						Role      string               `json:"role"`
-						Content   any                  `json:"content"`
-						ToolCalls []providers.ToolCall `json:"tool_calls"`
-					} `json:"message"`
-				}{{
-					Message: struct {
-						Role      string               `json:"role"`
-						Content   any                  `json:"content"`
-						ToolCalls []providers.ToolCall `json:"tool_calls"`
-					}{
-						Role: "assistant",
-						ToolCalls: []providers.ToolCall{{
-							ID:   "tc1",
-							Type: "function",
-							Function: struct {
-								Name      string `json:"name"`
-								Arguments string `json:"arguments"`
-							}{Name: "echo_tool", Arguments: `{}`},
-						}},
-					},
-				}},
-			}
-		} else {
-			// Second call returns final text
-			resp = providers.ChatCompletionResponse{
-				Choices: []struct {
-					Message struct {
-						Role      string               `json:"role"`
-						Content   any                  `json:"content"`
-						ToolCalls []providers.ToolCall `json:"tool_calls"`
-					} `json:"message"`
-				}{{
-					Message: struct {
-						Role      string               `json:"role"`
-						Content   any                  `json:"content"`
-						ToolCalls []providers.ToolCall `json:"tool_calls"`
-					}{Role: "assistant", Content: "Final answer"},
-				}},
-			}
-		}
-		json.NewEncoder(w).Encode(resp)
-	}))
-	defer srv.Close()
-
-	provider := providers.New(srv.URL, "key", 10*time.Second)
-	provider.HTTP = srv.Client()
-
-	reg := tools.NewRegistry()
-	// Register a simple echo tool
-	reg.Register(&echoTool{})
-
-	deliver := &mockDeliverer{}
-	b := &Builder{DB: d, HistoryMax: 10}
-	rt := &Runtime{
-		DB:           d,
-		Provider:     provider,
-		Model:        "gpt-4",
-		Tools:        reg,
-		Builder:      b,
-		MaxToolLoops: 6,
-		Deliver:      deliver,
-	}
-
-	err := rt.Handle(context.Background(), bus.Event{
-		Type:       bus.EventUserMessage,
-		SessionKey: "sess-tool",
-		Message:    "do tool call",
-	})
-	if err != nil {
-		t.Fatalf("Handle with tool call: %v", err)
-	}
-	if len(deliver.messages) == 0 || deliver.messages[0] != "Final answer" {
-		t.Errorf("expected 'Final answer', got %v", deliver.messages)
-	}
-}
-
-// echoTool is a simple test tool for agent tests
-type echoTool struct{ tools.Base }
-
-func (e *echoTool) Name() string        { return "echo_tool" }
-func (e *echoTool) Description() string { return "echoes input" }
-func (e *echoTool) Parameters() map[string]any {
-	return map[string]any{"type": "object", "properties": map[string]any{}}
-}
-func (e *echoTool) Execute(ctx context.Context, params map[string]any) (string, error) {
-	return "echo result", nil
-}
-func (e *echoTool) Schema() map[string]any {
-	return e.SchemaFor(e.Name(), e.Description(), e.Parameters())
-}
-
-type deliveryContextTool struct {
-	tools.Base
-	channel string
-	to      string
-}
-
-func (dct *deliveryContextTool) Name() string        { return "delivery_context_tool" }
-func (dct *deliveryContextTool) Description() string { return "captures delivery context" }
-func (dct *deliveryContextTool) Parameters() map[string]any {
-	return map[string]any{"type": "object", "properties": map[string]any{}}
-}
-func (dct *deliveryContextTool) Execute(ctx context.Context, params map[string]any) (string, error) {
-	dct.channel, dct.to = tools.DeliveryFromContext(ctx)
-	return "captured", nil
-}
-func (dct *deliveryContextTool) Schema() map[string]any {
-	return dct.SchemaFor(dct.Name(), dct.Description(), dct.Parameters())
-}
-
-func TestRuntime_Handle_ArtifactSave(t *testing.T) {
-	d := openRuntimeTestDB(t)
-	artifactsDir := t.TempDir()
-
-	// First call: return tool call that generates large output
-	callCount := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
-		w.Header().Set("Content-Type", "application/json")
-		var resp providers.ChatCompletionResponse
-		if callCount == 1 {
-			resp = providers.ChatCompletionResponse{
-				Choices: []struct {
-					Message struct {
-						Role      string               `json:"role"`
-						Content   any                  `json:"content"`
-						ToolCalls []providers.ToolCall `json:"tool_calls"`
-					} `json:"message"`
-				}{{
-					Message: struct {
-						Role      string               `json:"role"`
-						Content   any                  `json:"content"`
-						ToolCalls []providers.ToolCall `json:"tool_calls"`
-					}{
-						Role: "assistant",
-						ToolCalls: []providers.ToolCall{{
-							ID:   "tc-large",
-							Type: "function",
-							Function: struct {
-								Name      string `json:"name"`
-								Arguments string `json:"arguments"`
-							}{Name: "large_output_tool", Arguments: `{}`},
-						}},
-					},
-				}},
-			}
-		} else {
-			resp = providers.ChatCompletionResponse{
-				Choices: []struct {
-					Message struct {
-						Role      string               `json:"role"`
-						Content   any                  `json:"content"`
-						ToolCalls []providers.ToolCall `json:"tool_calls"`
-					} `json:"message"`
-				}{{
-					Message: struct {
-						Role      string               `json:"role"`
-						Content   any                  `json:"content"`
-						ToolCalls []providers.ToolCall `json:"tool_calls"`
-					}{Role: "assistant", Content: "done"},
-				}},
-			}
-		}
-		json.NewEncoder(w).Encode(resp)
-	}))
-	defer srv.Close()
-
-	provider := providers.New(srv.URL, "key", 10*time.Second)
-	provider.HTTP = srv.Client()
-
-	d.EnsureSession(context.Background(), "sess-artifact")
-
-	reg := tools.NewRegistry()
-	reg.Register(&largeOutputTool{})
-
-	deliver := &mockDeliverer{}
-	b := &Builder{DB: d, HistoryMax: 10}
-	rt := &Runtime{
-		DB:               d,
-		Provider:         provider,
-		Model:            "gpt-4",
-		Tools:            reg,
-		Builder:          b,
-		MaxToolLoops:     6,
-		Deliver:          deliver,
-		MaxToolBytes:     10, // small limit to trigger artifact save
-		ToolPreviewBytes: 5,
-		Artifacts:        &artifacts.Store{Dir: artifactsDir, DB: d},
-	}
-
-	err := rt.Handle(context.Background(), bus.Event{
-		Type:       bus.EventUserMessage,
-		SessionKey: "sess-artifact",
-		Message:    "large output",
-	})
-	if err != nil {
-		t.Fatalf("Handle artifact: %v", err)
-	}
-}
-
-func TestRuntime_Handle_ToolContextIncludesDelivery(t *testing.T) {
-	d := openRuntimeTestDB(t)
-	callCount := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
-		w.Header().Set("Content-Type", "application/json")
-		var resp providers.ChatCompletionResponse
-		if callCount == 1 {
-			resp = providers.ChatCompletionResponse{
-				Choices: []struct {
-					Message struct {
-						Role      string               `json:"role"`
-						Content   any                  `json:"content"`
-						ToolCalls []providers.ToolCall `json:"tool_calls"`
-					} `json:"message"`
-				}{{
-					Message: struct {
-						Role      string               `json:"role"`
-						Content   any                  `json:"content"`
-						ToolCalls []providers.ToolCall `json:"tool_calls"`
-					}{
-						Role: "assistant",
-						ToolCalls: []providers.ToolCall{{
-							ID:   "tc-delivery",
-							Type: "function",
-							Function: struct {
-								Name      string `json:"name"`
-								Arguments string `json:"arguments"`
-							}{Name: "delivery_context_tool", Arguments: `{}`},
-						}},
-					},
-				}},
-			}
-		} else {
-			resp = providers.ChatCompletionResponse{Choices: []struct {
-				Message struct {
-					Role      string               `json:"role"`
-					Content   any                  `json:"content"`
-					ToolCalls []providers.ToolCall `json:"tool_calls"`
-				} `json:"message"`
-			}{{Message: struct {
-				Role      string               `json:"role"`
-				Content   any                  `json:"content"`
-				ToolCalls []providers.ToolCall `json:"tool_calls"`
-			}{Role: "assistant", Content: "done"}}}}
-		}
-		_ = json.NewEncoder(w).Encode(resp)
-	}))
-	defer srv.Close()
-	provider := providers.New(srv.URL, "key", 10*time.Second)
-	provider.HTTP = srv.Client()
-	tool := &deliveryContextTool{}
-	reg := tools.NewRegistry()
-	reg.Register(tool)
-	rt := &Runtime{DB: d, Provider: provider, Model: "gpt-4", Tools: reg, Builder: &Builder{DB: d, HistoryMax: 10}, MaxToolLoops: 4}
-	if err := rt.Handle(context.Background(), bus.Event{
-		Type:       bus.EventUserMessage,
-		SessionKey: "sess",
-		Channel:    "discord",
-		From:       "user-1",
-		Message:    "hello",
-		Meta:       map[string]any{"channel_id": "channel-1"},
-	}); err != nil {
-		t.Fatalf("Handle: %v", err)
-	}
-	if tool.channel != "discord" || tool.to != "channel-1" {
-		t.Fatalf("expected delivery context discord/channel-1, got %q/%q", tool.channel, tool.to)
-	}
-}
-
-// largeOutputTool generates output larger than MaxToolBytes
-type largeOutputTool struct{ tools.Base }
-
-func (e *largeOutputTool) Name() string        { return "large_output_tool" }
-func (e *largeOutputTool) Description() string { return "generates large output" }
-func (e *largeOutputTool) Parameters() map[string]any {
-	return map[string]any{"type": "object", "properties": map[string]any{}}
-}
-func (e *largeOutputTool) Execute(ctx context.Context, params map[string]any) (string, error) {
-	// Generate output that exceeds MaxToolBytes
-	return fmt.Sprintf("%s", string(make([]byte, 100))), nil
-}
-func (e *largeOutputTool) Schema() map[string]any {
-	return e.SchemaFor(e.Name(), e.Description(), e.Parameters())
-}
-
-func TestRuntime_Handle_NoMaxLoops_Defaults(t *testing.T) {
-	d := openRuntimeTestDB(t)
-	response := providers.ChatCompletionResponse{
-		Choices: []struct {
-			Message struct {
-				Role      string               `json:"role"`
-				Content   any                  `json:"content"`
-				ToolCalls []providers.ToolCall `json:"tool_calls"`
-			} `json:"message"`
-		}{{
-			Message: struct {
-				Role      string               `json:"role"`
-				Content   any                  `json:"content"`
-				ToolCalls []providers.ToolCall `json:"tool_calls"`
-			}{Role: "assistant", Content: "response"},
-		}},
-	}
-	_, provider := buildChatServer(t, response)
-	b := &Builder{DB: d, HistoryMax: 10}
-	rt := &Runtime{
-		DB:           d,
-		Provider:     provider,
-		Model:        "gpt-4",
-		Tools:        tools.NewRegistry(),
-		Builder:      b,
-		MaxToolLoops: 0, // should default to 6
-	}
-
-	err := rt.Handle(context.Background(), bus.Event{
-		Type:       bus.EventUserMessage,
-		SessionKey: "sess-default-loops",
-		Message:    "hello",
-	})
-	if err != nil {
-		t.Fatalf("Handle with default max loops: %v", err)
-	}
-}
-
-func TestRuntime_Handle_SystemEvent(t *testing.T) {
-	d := openRuntimeTestDB(t)
-	response := providers.ChatCompletionResponse{
-		Choices: []struct {
-			Message struct {
-				Role      string               `json:"role"`
-				Content   any                  `json:"content"`
-				ToolCalls []providers.ToolCall `json:"tool_calls"`
-			} `json:"message"`
-		}{{
-			Message: struct {
-				Role      string               `json:"role"`
-				Content   any                  `json:"content"`
-				ToolCalls []providers.ToolCall `json:"tool_calls"`
-			}{Role: "assistant", Content: "sys response"},
-		}},
-	}
-	_, provider := buildChatServer(t, response)
-	deliver := &mockDeliverer{}
-	rt := buildSimpleRuntime(t, provider, d, deliver)
-
-	err := rt.Handle(context.Background(), bus.Event{
-		Type:       bus.EventSystem,
-		SessionKey: "sess-sys",
-		Message:    "system message",
-	})
-	if err != nil {
-		t.Fatalf("Handle system: %v", err)
-	}
-}
-
-func TestToToolDefs_WithRegistry(t *testing.T) {
-	reg := tools.NewRegistry()
-	reg.Register(&echoTool{})
-
-	defs := toToolDefs(reg)
-	if len(defs) != 1 {
-		t.Errorf("expected 1 tool def, got %d", len(defs))
-	}
-	if defs[0].Type != "function" {
-		t.Errorf("expected type 'function', got %q", defs[0].Type)
-	}
-	if defs[0].Function.Name != "echo_tool" {
-		t.Errorf("expected name 'echo_tool', got %q", defs[0].Function.Name)
-	}
-}
-
-func TestRuntime_LockFor_SameKey(t *testing.T) {
-	rt := &Runtime{}
-	mu1 := rt.lockFor("key1")
-	mu2 := rt.lockFor("key1")
-	if mu1 != mu2 {
-		t.Error("expected same mutex for same key")
-	}
-}
-
-func TestRuntime_LockFor_DifferentKeys(t *testing.T) {
-	rt := &Runtime{}
-	mu1 := rt.lockFor("key1")
-	mu2 := rt.lockFor("key2")
-	if mu1 == mu2 {
-		t.Error("expected different mutexes for different keys")
-	}
-}
-
-func TestRuntime_ConsolidationScheduler_DoesNotBlockTurn(t *testing.T) {
-	d := openRuntimeTestDB(t)
-	response := providers.ChatCompletionResponse{
-		Choices: []struct {
-			Message struct {
-				Role      string               `json:"role"`
-				Content   any                  `json:"content"`
-				ToolCalls []providers.ToolCall `json:"tool_calls"`
-			} `json:"message"`
-		}{{
-			Message: struct {
-				Role      string               `json:"role"`
-				Content   any                  `json:"content"`
-				ToolCalls []providers.ToolCall `json:"tool_calls"`
-			}{Role: "assistant", Content: "ok"},
-		}},
-	}
-	_, provider := buildChatServer(t, response)
-	deliver := &mockDeliverer{}
-	rt := buildSimpleRuntime(t, provider, d, deliver)
-
-	started := make(chan struct{}, 1)
-	release := make(chan struct{})
-	rt.Consolidator = &memory.Consolidator{Provider: &providers.Client{}}
-	rt.ConsolidationScheduler = memory.NewScheduler(2*time.Second, func(ctx context.Context, sessionKey string) {
-		started <- struct{}{}
-		<-release
-	})
-
-	start := time.Now()
-	err := rt.Handle(context.Background(), bus.Event{
-		Type:       bus.EventUserMessage,
-		SessionKey: "sess-non-blocking",
-		Channel:    "cli",
-		From:       "user",
-		Message:    "hello",
-	})
-	elapsed := time.Since(start)
-	if err != nil {
-		t.Fatalf("Handle: %v", err)
-	}
-	if elapsed > 300*time.Millisecond {
-		t.Fatalf("expected non-blocking turn, elapsed=%v", elapsed)
-	}
-	select {
-	case <-started:
-	case <-time.After(1 * time.Second):
-		t.Fatal("expected scheduler run")
-	}
-	close(release)
-}
-
-func TestRuntime_HandleNewSession_Success(t *testing.T) {
-	d := openRuntimeTestDB(t)
-	ctx := context.Background()
-	for i := 0; i < 6; i++ {
-		if _, err := d.AppendMessage(ctx, "sess-new", "user", "hello", nil); err != nil {
-			t.Fatalf("AppendMessage: %v", err)
-		}
-	}
-	provServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/chat/completions":
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": `{"summary":"done","canonical_memory":"- fact"}`}}},
-			})
-		case "/embeddings":
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"embedding": []float32{0.1}}}})
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer provServer.Close()
-	prov := providers.New(provServer.URL, "k", 5*time.Second)
-	prov.HTTP = provServer.Client()
-
-	deliver := &mockDeliverer{}
-	rt := &Runtime{
-		DB:       d,
-		Provider: prov,
-		Model:    "gpt-4.1-mini",
-		Tools:    tools.NewRegistry(),
-		Builder:  &Builder{DB: d, HistoryMax: 40},
-		Deliver:  deliver,
-		Consolidator: &memory.Consolidator{
-			DB:                 d,
-			Provider:           prov,
-			WindowSize:         1,
-			MaxMessages:        50,
-			MaxInputChars:      4000,
-			CanonicalPinnedKey: "long_term_memory",
-		},
-	}
-	if err := rt.Handle(ctx, bus.Event{
-		Type:       bus.EventUserMessage,
-		SessionKey: "sess-new",
-		Channel:    "cli",
-		From:       "user",
-		Message:    "/new",
-	}); err != nil {
-		t.Fatalf("Handle /new: %v", err)
-	}
-	msgs, err := d.GetLastMessages(ctx, "sess-new", 20)
-	if err != nil {
-		t.Fatalf("GetLastMessages: %v", err)
-	}
-	if len(msgs) != 0 {
-		t.Fatalf("expected messages cleared, got %d", len(msgs))
-	}
-	if len(deliver.messages) == 0 || deliver.messages[0] != "New session started." {
-		t.Fatalf("unexpected deliver messages: %#v", deliver.messages)
-	}
-}
-
-func TestRuntime_HandleNewSession_FailurePreservesHistory(t *testing.T) {
-	d := openRuntimeTestDB(t)
-	ctx := context.Background()
-	for i := 0; i < 4; i++ {
-		if _, err := d.AppendMessage(ctx, "sess-new-fail", "user", "hello", nil); err != nil {
-			t.Fatalf("AppendMessage: %v", err)
-		}
-	}
-	provServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "bad gateway", http.StatusBadGateway)
-	}))
-	defer provServer.Close()
-	prov := providers.New(provServer.URL, "k", 5*time.Second)
-	prov.HTTP = provServer.Client()
-
-	deliver := &mockDeliverer{}
-	rt := &Runtime{
-		DB:       d,
-		Provider: prov,
-		Model:    "gpt-4.1-mini",
-		Tools:    tools.NewRegistry(),
-		Builder:  &Builder{DB: d, HistoryMax: 40},
-		Deliver:  deliver,
-		Consolidator: &memory.Consolidator{
-			DB:            d,
-			Provider:      prov,
-			WindowSize:    1,
-			MaxMessages:   50,
-			MaxInputChars: 4000,
-		},
-	}
-	if err := rt.Handle(ctx, bus.Event{
-		Type:       bus.EventUserMessage,
-		SessionKey: "sess-new-fail",
-		Channel:    "cli",
-		From:       "user",
-		Message:    "/new",
-	}); err != nil {
-		t.Fatalf("Handle /new: %v", err)
-	}
-	msgs, err := d.GetLastMessages(ctx, "sess-new-fail", 20)
-	if err != nil {
-		t.Fatalf("GetLastMessages: %v", err)
-	}
-	if len(msgs) == 0 {
-		t.Fatal("expected history preserved on archive failure")
-	}
-	if len(deliver.messages) == 0 || !strings.Contains(deliver.messages[0], "Memory archival failed") {
-		t.Fatalf("expected archival failure message, got %#v", deliver.messages)
-	}
-}
-
-func TestRuntime_ConsolidationScheduler_SingleFlightCoalesces(t *testing.T) {
-	d := openRuntimeTestDB(t)
-	response := providers.ChatCompletionResponse{
-		Choices: []struct {
-			Message struct {
-				Role      string               `json:"role"`
-				Content   any                  `json:"content"`
-				ToolCalls []providers.ToolCall `json:"tool_calls"`
-			} `json:"message"`
-		}{{
-			Message: struct {
-				Role      string               `json:"role"`
-				Content   any                  `json:"content"`
-				ToolCalls []providers.ToolCall `json:"tool_calls"`
-			}{Role: "assistant", Content: "ok"},
-		}},
-	}
-	_, provider := buildChatServer(t, response)
-	deliver := &mockDeliverer{}
-	rt := buildSimpleRuntime(t, provider, d, deliver)
-
-	var runs int32
-	firstRelease := make(chan struct{})
-	secondSeen := make(chan struct{}, 1)
-	rt.Consolidator = &memory.Consolidator{Provider: &providers.Client{}}
-	rt.ConsolidationScheduler = memory.NewScheduler(2*time.Second, func(ctx context.Context, sessionKey string) {
-		n := atomic.AddInt32(&runs, 1)
-		if n == 1 {
-			<-firstRelease
-			return
-		}
-		if n == 2 {
-			secondSeen <- struct{}{}
-		}
-	})
-
-	if err := rt.Handle(context.Background(), bus.Event{Type: bus.EventUserMessage, SessionKey: "sess-c", Channel: "cli", From: "u", Message: "a"}); err != nil {
-		t.Fatalf("first handle: %v", err)
-	}
-	if err := rt.Handle(context.Background(), bus.Event{Type: bus.EventUserMessage, SessionKey: "sess-c", Channel: "cli", From: "u", Message: "b"}); err != nil {
-		t.Fatalf("second handle: %v", err)
-	}
-	close(firstRelease)
-	select {
-	case <-secondSeen:
-	case <-time.After(2 * time.Second):
-		t.Fatal("expected coalesced second scheduler pass")
-	}
-}
-
-func TestRuntimeWithIndexedDocs(t *testing.T) {
-d := openRuntimeTestDB(t)
-ctx := context.Background()
-
-// Create a temp dir with a markdown file containing "important penguin behavior"
-tmpDir := t.TempDir()
-docContent := "# Penguin Facts\n\nImportant penguin behavior: penguins huddle together for warmth.\n"
-docPath := filepath.Join(tmpDir, "penguins.md")
-if err := os.WriteFile(docPath, []byte(docContent), 0o644); err != nil {
-t.Fatalf("write doc file: %v", err)
-}
-
-// Insert the doc directly via UpsertDoc (no real embedding server needed)
-if err := memory.UpsertDoc(ctx, d, "test-scope", docPath, "markdown", "Penguin Facts", "", docContent, nil, "testhash", 0, int64(len(docContent))); err != nil {
-t.Fatalf("UpsertDoc: %v", err)
-}
-
-docRetriever := &memory.DocRetriever{DB: d}
-
-// Build a fake provider response
-response := providers.ChatCompletionResponse{
-Choices: []struct {
-Message struct {
-Role      string               `json:"role"`
-Content   any                  `json:"content"`
-ToolCalls []providers.ToolCall `json:"tool_calls"`
-} `json:"message"`
-}{{
-Message: struct {
-Role      string               `json:"role"`
-Content   any                  `json:"content"`
-ToolCalls []providers.ToolCall `json:"tool_calls"`
-}{Role: "assistant", Content: "Penguins huddle for warmth."},
-}},
-}
-_, provider := buildChatServer(t, response)
-
-b := &Builder{
-DB:               d,
-HistoryMax:       10,
-DocRetriever:     docRetriever,
-DocScopeKey:      "test-scope",
-DocRetrieveLimit: 5,
-}
-
-pp, _, err := b.BuildWithOptions(ctx, BuildOptions{SessionKey: "test-scope", UserMessage: "penguin behavior"})
-if err != nil {
-t.Fatalf("BuildWithOptions: %v", err)
-}
-
-// Find system prompt content
-var sysText string
-for _, msg := range pp.System {
-if msg.Role == "system" {
-if s, ok := msg.Content.(string); ok {
-sysText += s
-}
-}
-}
-
-// The system prompt should include the doc excerpt about penguins
-if !strings.Contains(sysText, "penguin") && !strings.Contains(strings.ToLower(sysText), "penguin") {
-t.Errorf("expected system prompt to contain penguin doc context, got:\n%s", sysText)
-}
-_ = provider
-}
-
-func TestRuntimeLinkedSessionHistory(t *testing.T) {
-d := openRuntimeTestDB(t)
-ctx := context.Background()
-
-// Link two session keys to a shared scope
-if err := d.LinkSession(ctx, "session-a", "shared-scope", nil); err != nil {
-t.Fatalf("LinkSession a: %v", err)
-}
-if err := d.LinkSession(ctx, "session-b", "shared-scope", nil); err != nil {
-t.Fatalf("LinkSession b: %v", err)
-}
-
-// Append messages to both sessions
-if _, err := d.AppendMessage(ctx, "session-a", "user", "hello from session-a", nil); err != nil {
-t.Fatalf("AppendMessage a user: %v", err)
-}
-if _, err := d.AppendMessage(ctx, "session-a", "assistant", "reply to session-a", nil); err != nil {
-t.Fatalf("AppendMessage a assistant: %v", err)
-}
-if _, err := d.AppendMessage(ctx, "session-b", "user", "hello from session-b", nil); err != nil {
-t.Fatalf("AppendMessage b user: %v", err)
-}
-if _, err := d.AppendMessage(ctx, "session-b", "assistant", "reply to session-b", nil); err != nil {
-t.Fatalf("AppendMessage b assistant: %v", err)
-}
-
-// GetLastMessagesScoped with either session key should return messages from both sessions
-msgs, err := d.GetLastMessagesScoped(ctx, "session-a", 20)
-if err != nil {
-t.Fatalf("GetLastMessagesScoped: %v", err)
-}
-if len(msgs) < 2 {
-t.Fatalf("expected at least 2 messages across linked sessions, got %d", len(msgs))
-}
-
-contents := map[string]bool{}
-for _, m := range msgs {
-contents[m.Content] = true
-}
-if !contents["hello from session-a"] || !contents["hello from session-b"] {
-t.Fatalf("expected messages from both sessions, got %v", contents)
-}
-
-// Verify chronological order
-for i := 1; i < len(msgs); i++ {
-if msgs[i].ID < msgs[i-1].ID {
-t.Fatalf("messages not in chronological order at index %d", i)
-}
-}
 }
 ````
 
@@ -15304,404 +9446,6 @@ func randID() string {
 }
 ````
 
-## File: internal/memory/consolidate_test.go
-````go
-package memory
-
-import (
-	"context"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
-	"path/filepath"
-	"strings"
-	"sync/atomic"
-	"testing"
-	"time"
-
-	"or3-intern/internal/db"
-	"or3-intern/internal/providers"
-)
-
-func openConsolidateTestDB(t *testing.T) *db.DB {
-	t.Helper()
-	d, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("db.Open: %v", err)
-	}
-	t.Cleanup(func() { d.Close() })
-	return d
-}
-
-type callCounts struct {
-	Chat  *int32
-	Embed *int32
-}
-
-func buildConsolidationProvider(t *testing.T, chatBody string, embedOK bool) (*providers.Client, callCounts) {
-	t.Helper()
-	var chatCalls int32
-	var embedCalls int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/chat/completions":
-			atomic.AddInt32(&chatCalls, 1)
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"choices": []map[string]any{
-					{"message": map[string]any{"role": "assistant", "content": chatBody}},
-				},
-			})
-		case "/embeddings":
-			atomic.AddInt32(&embedCalls, 1)
-			if !embedOK {
-				http.Error(w, "embed fail", http.StatusBadGateway)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"data": []map[string]any{{"embedding": []float32{0.1, 0.2}}},
-			})
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	t.Cleanup(srv.Close)
-	p := providers.New(srv.URL, "test-key", 5*time.Second)
-	p.HTTP = srv.Client()
-	return p, callCounts{Chat: &chatCalls, Embed: &embedCalls}
-}
-
-func TestConsolidator_NilProvider(t *testing.T) {
-	d := openConsolidateTestDB(t)
-	c := &Consolidator{DB: d}
-	if err := c.MaybeConsolidate(context.Background(), "sess", 10); err != nil {
-		t.Fatalf("expected nil error for nil provider, got: %v", err)
-	}
-}
-
-func TestConsolidator_TooFewMessages_NoProviderCall(t *testing.T) {
-	d := openConsolidateTestDB(t)
-	ctx := context.Background()
-	for i := 0; i < 4; i++ {
-		if _, err := d.AppendMessage(ctx, "sess", "user", "msg", nil); err != nil {
-			t.Fatalf("AppendMessage: %v", err)
-		}
-	}
-	prov, calls := buildConsolidationProvider(t, `{"summary":"x","canonical_memory":"- x"}`, true)
-	c := &Consolidator{DB: d, Provider: prov, WindowSize: 5}
-	if err := c.MaybeConsolidate(ctx, "sess", 2); err != nil {
-		t.Fatalf("expected nil error, got: %v", err)
-	}
-	if atomic.LoadInt32(calls.Chat) != 0 {
-		t.Fatalf("expected no chat calls, got %d", atomic.LoadInt32(calls.Chat))
-	}
-}
-
-func TestConsolidator_RunOnce_PersistsNoteCursorAndCanonical(t *testing.T) {
-	d := openConsolidateTestDB(t)
-	ctx := context.Background()
-	for i := 0; i < 14; i++ {
-		role := "user"
-		if i%2 == 1 {
-			role = "assistant"
-		}
-		if _, err := d.AppendMessage(ctx, "sess", role, "message "+string(rune('a'+i)), nil); err != nil {
-			t.Fatalf("AppendMessage: %v", err)
-		}
-	}
-	prov, calls := buildConsolidationProvider(t, `{"summary":"Short summary.","canonical_memory":"- prefers concise output"}`, true)
-	c := &Consolidator{
-		DB:                 d,
-		Provider:           prov,
-		WindowSize:         5,
-		MaxMessages:        50,
-		MaxInputChars:      12000,
-		EmbedModel:         "embed-model",
-		CanonicalPinnedKey: "long_term_memory",
-	}
-	didWork, err := c.RunOnce(ctx, "sess", 5, RunMode{})
-	if err != nil {
-		t.Fatalf("RunOnce: %v", err)
-	}
-	if !didWork {
-		t.Fatal("expected consolidation work")
-	}
-	if atomic.LoadInt32(calls.Chat) != 1 {
-		t.Fatalf("expected 1 chat call, got %d", atomic.LoadInt32(calls.Chat))
-	}
-	if atomic.LoadInt32(calls.Embed) != 1 {
-		t.Fatalf("expected 1 embed call, got %d", atomic.LoadInt32(calls.Embed))
-	}
-
-	lastID, _, err := d.GetConsolidationRange(ctx, "sess", 5)
-	if err != nil {
-		t.Fatalf("GetConsolidationRange: %v", err)
-	}
-	if lastID == 0 {
-		t.Fatal("expected cursor to advance")
-	}
-	pinned, ok, err := d.GetPinnedValue(ctx, "sess", "long_term_memory")
-	if err != nil {
-		t.Fatalf("GetPinnedValue: %v", err)
-	}
-	if !ok || !strings.Contains(pinned, "concise output") {
-		t.Fatalf("expected canonical memory update, got ok=%v value=%q", ok, pinned)
-	}
-}
-
-func TestConsolidator_EmptyTranscript_AdvancesCursor(t *testing.T) {
-	d := openConsolidateTestDB(t)
-	ctx := context.Background()
-	var ids []int64
-	for i := 0; i < 6; i++ {
-		id, err := d.AppendMessage(ctx, "sess", "tool", "tool output", nil)
-		if err != nil {
-			t.Fatalf("AppendMessage: %v", err)
-		}
-		ids = append(ids, id)
-	}
-	prov, calls := buildConsolidationProvider(t, `{"summary":"unused","canonical_memory":"unused"}`, true)
-	c := &Consolidator{DB: d, Provider: prov, WindowSize: 1, MaxMessages: 50, MaxInputChars: 12000}
-	didWork, err := c.RunOnce(ctx, "sess", 1, RunMode{ArchiveAll: true})
-	if err != nil {
-		t.Fatalf("RunOnce: %v", err)
-	}
-	if !didWork {
-		t.Fatal("expected didWork true for cursor advancement")
-	}
-	if atomic.LoadInt32(calls.Chat) != 0 {
-		t.Fatalf("expected no chat call for empty transcript, got %d", atomic.LoadInt32(calls.Chat))
-	}
-	lastID, _, err := d.GetConsolidationRange(ctx, "sess", 1)
-	if err != nil {
-		t.Fatalf("GetConsolidationRange: %v", err)
-	}
-	if lastID != ids[len(ids)-1] {
-		t.Fatalf("expected cursor=%d, got %d", ids[len(ids)-1], lastID)
-	}
-}
-
-func TestConsolidator_ArchiveAll_MultiPass(t *testing.T) {
-	d := openConsolidateTestDB(t)
-	ctx := context.Background()
-	for i := 0; i < 120; i++ {
-		if _, err := d.AppendMessage(ctx, "sess", "user", "line", nil); err != nil {
-			t.Fatalf("AppendMessage: %v", err)
-		}
-	}
-	prov, calls := buildConsolidationProvider(t, `{"summary":"pass summary","canonical_memory":"- memory"}`, false)
-	c := &Consolidator{
-		DB:                 d,
-		Provider:           prov,
-		WindowSize:         10,
-		MaxMessages:        25,
-		MaxInputChars:      2000,
-		CanonicalPinnedKey: "long_term_memory",
-	}
-	if err := c.ArchiveAll(ctx, "sess", 40); err != nil {
-		t.Fatalf("ArchiveAll: %v", err)
-	}
-	lastID, oldestID, err := d.GetConsolidationRange(ctx, "sess", 40)
-	if err != nil {
-		t.Fatalf("GetConsolidationRange: %v", err)
-	}
-	if oldestID != 0 && lastID < oldestID {
-		t.Fatalf("expected cursor to move through archive-all range, got last=%d oldest=%d", lastID, oldestID)
-	}
-	if atomic.LoadInt32(calls.Chat) < 2 {
-		t.Fatalf("expected multiple chat calls for multipass archive, got %d", atomic.LoadInt32(calls.Chat))
-	}
-}
-
-func TestConsolidator_MaxInputCharsBoundsPromptAndSkipsEmbedOnFailure(t *testing.T) {
-	d := openConsolidateTestDB(t)
-	ctx := context.Background()
-	for i := 0; i < 12; i++ {
-		if _, err := d.AppendMessage(ctx, "sess", "user", strings.Repeat("x", 400), nil); err != nil {
-			t.Fatalf("AppendMessage: %v", err)
-		}
-	}
-	prov, calls := buildConsolidationProvider(t, `{"summary":"bounded summary","canonical_memory":"- bounded"}`, false)
-	c := &Consolidator{
-		DB:            d,
-		Provider:      prov,
-		WindowSize:    5,
-		MaxMessages:   50,
-		MaxInputChars: 500,
-		EmbedModel:    "embed-model",
-	}
-	didWork, err := c.RunOnce(ctx, "sess", 5, RunMode{})
-	if err != nil {
-		t.Fatalf("RunOnce: %v", err)
-	}
-	if !didWork {
-		t.Fatal("expected work to be done")
-	}
-	if atomic.LoadInt32(calls.Embed) != 1 {
-		t.Fatalf("expected embed attempt, got %d", atomic.LoadInt32(calls.Embed))
-	}
-}
-
-func TestConsolidator_RunOnce_OnlyAdvancesThroughIncludedMessages(t *testing.T) {
-	d := openConsolidateTestDB(t)
-	ctx := context.Background()
-	ids := make([]int64, 0, 3)
-	for _, content := range []string{"short one", "short two", strings.Repeat("z", 300)} {
-		id, err := d.AppendMessage(ctx, "sess", "user", content, nil)
-		if err != nil {
-			t.Fatalf("AppendMessage: %v", err)
-		}
-		ids = append(ids, id)
-	}
-	prov, _ := buildConsolidationProvider(t, `{"summary":"bounded summary","canonical_memory":"- bounded"}`, true)
-	c := &Consolidator{
-		DB:            d,
-		Provider:      prov,
-		WindowSize:    1,
-		MaxMessages:   10,
-		MaxInputChars: 40,
-	}
-	didWork, err := c.RunOnce(ctx, "sess", 1, RunMode{ArchiveAll: true})
-	if err != nil {
-		t.Fatalf("RunOnce: %v", err)
-	}
-	if !didWork {
-		t.Fatal("expected work to be done")
-	}
-	lastID, _, err := d.GetConsolidationRange(ctx, "sess", 1)
-	if err != nil {
-		t.Fatalf("GetConsolidationRange: %v", err)
-	}
-	if lastID != ids[1] {
-		t.Fatalf("expected cursor to stop at second included message %d, got %d", ids[1], lastID)
-	}
-	rows, err := d.StreamMemoryNotesScopeLimit(ctx, "sess", 10)
-	if err != nil {
-		t.Fatalf("StreamMemoryNotesScopeLimit: %v", err)
-	}
-	defer rows.Close()
-	var note db.MemoryNoteRow
-	if !rows.Next() {
-		t.Fatal("expected a memory note")
-	}
-	if err := rows.Scan(&note.ID, &note.Text, &note.Embedding, &note.SourceMessageID, &note.Tags, &note.CreatedAt); err != nil {
-		t.Fatalf("rows.Scan: %v", err)
-	}
-	if !note.SourceMessageID.Valid || note.SourceMessageID.Int64 != ids[1] {
-		t.Fatalf("expected source message id %d, got %+v", ids[1], note.SourceMessageID)
-	}
-	if rows.Next() {
-		t.Fatal("expected exactly one memory note")
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("rows.Err: %v", err)
-	}
-	remaining, err := d.GetConsolidationMessages(ctx, "sess", lastID, 0, 10)
-	if err != nil {
-		t.Fatalf("GetConsolidationMessages: %v", err)
-	}
-	if len(remaining) != 1 || remaining[0].ID != ids[2] {
-		t.Fatalf("expected only third message to remain unconsolidated, got %#v", remaining)
-	}
-}
-
-func TestConsolidator_RunOnce_FirstOversizeMessageStillAdvancesSafely(t *testing.T) {
-	d := openConsolidateTestDB(t)
-	ctx := context.Background()
-	firstID, err := d.AppendMessage(ctx, "sess", "user", strings.Repeat("x", 200), nil)
-	if err != nil {
-		t.Fatalf("AppendMessage first: %v", err)
-	}
-	secondID, err := d.AppendMessage(ctx, "sess", "user", "tail", nil)
-	if err != nil {
-		t.Fatalf("AppendMessage second: %v", err)
-	}
-	prov, calls := buildConsolidationProvider(t, `{"summary":"trimmed summary","canonical_memory":"- trimmed"}`, true)
-	c := &Consolidator{
-		DB:            d,
-		Provider:      prov,
-		WindowSize:    1,
-		MaxMessages:   10,
-		MaxInputChars: 20,
-	}
-	didWork, err := c.RunOnce(ctx, "sess", 1, RunMode{ArchiveAll: true})
-	if err != nil {
-		t.Fatalf("RunOnce: %v", err)
-	}
-	if !didWork {
-		t.Fatal("expected work to be done")
-	}
-	if atomic.LoadInt32(calls.Chat) != 1 {
-		t.Fatalf("expected one chat call, got %d", atomic.LoadInt32(calls.Chat))
-	}
-	lastID, _, err := d.GetConsolidationRange(ctx, "sess", 1)
-	if err != nil {
-		t.Fatalf("GetConsolidationRange: %v", err)
-	}
-	if lastID != firstID {
-		t.Fatalf("expected cursor to advance through first truncated message %d, got %d", firstID, lastID)
-	}
-	remaining, err := d.GetConsolidationMessages(ctx, "sess", lastID, 0, 10)
-	if err != nil {
-		t.Fatalf("GetConsolidationMessages: %v", err)
-	}
-	if len(remaining) != 1 || remaining[0].ID != secondID {
-		t.Fatalf("expected second message to remain unconsolidated, got %#v", remaining)
-	}
-}
-
-func TestConsolidator_RunOnce_AdaptiveTriggerOnLargeTranscript(t *testing.T) {
-	d := openConsolidateTestDB(t)
-	ctx := context.Background()
-	for _, content := range []string{
-		strings.Repeat("a", 30),
-		strings.Repeat("b", 30),
-		"active",
-	} {
-		if _, err := d.AppendMessage(ctx, "sess", "user", content, nil); err != nil {
-			t.Fatalf("AppendMessage: %v", err)
-		}
-	}
-	prov, calls := buildConsolidationProvider(t, `{"summary":"adaptive summary","canonical_memory":"- adaptive"}`, true)
-	c := &Consolidator{
-		DB:            d,
-		Provider:      prov,
-		WindowSize:    5,
-		MaxMessages:   10,
-		MaxInputChars: 80,
-	}
-	didWork, err := c.RunOnce(ctx, "sess", 1, RunMode{})
-	if err != nil {
-		t.Fatalf("RunOnce: %v", err)
-	}
-	if !didWork {
-		t.Fatal("expected adaptive trigger to consolidate")
-	}
-	if atomic.LoadInt32(calls.Chat) != 1 {
-		t.Fatalf("expected one chat call, got %d", atomic.LoadInt32(calls.Chat))
-	}
-	lastID, _, err := d.GetConsolidationRange(ctx, "sess", 1)
-	if err != nil {
-		t.Fatalf("GetConsolidationRange: %v", err)
-	}
-	remaining, err := d.GetConsolidationMessages(ctx, "sess", lastID, 0, 10)
-	if err != nil {
-		t.Fatalf("GetConsolidationMessages: %v", err)
-	}
-	if len(remaining) != 1 || remaining[0].Content != "active" {
-		t.Fatalf("expected only active-window message to remain, got %#v", remaining)
-	}
-}
-
-func TestContentToStr_Other(t *testing.T) {
-	got := contentToStr(42)
-	if !strings.Contains(got, "42") {
-		t.Errorf("expected '42' in output, got %q", got)
-	}
-}
-````
-
 ## File: internal/memory/consolidate.go
 ````go
 package memory
@@ -16011,6 +9755,206 @@ func trimTo(s string, max int) string {
 }
 ````
 
+## File: internal/memory/vector.go
+````go
+package memory
+
+import (
+	"bytes"
+	"container/heap"
+	"context"
+	"encoding/binary"
+	"errors"
+	"math"
+	"strings"
+
+	"or3-intern/internal/db"
+	"or3-intern/internal/scope"
+)
+
+func PackFloat32(vec []float32) []byte {
+	var b bytes.Buffer
+	_ = binary.Write(&b, binary.LittleEndian, vec)
+	return b.Bytes()
+}
+
+func UnpackFloat32(blob []byte) ([]float32, error) {
+	if len(blob)%4 != 0 { return nil, errors.New("invalid float32 blob") }
+	out := make([]float32, len(blob)/4)
+	if err := binary.Read(bytes.NewReader(blob), binary.LittleEndian, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func Cosine(a, b []float32) float64 {
+	var dot, na, nb float64
+	n := len(a)
+	if len(b) < n { n = len(b) }
+	for i := 0; i < n; i++ {
+		av := float64(a[i])
+		bv := float64(b[i])
+		dot += av * bv
+		na += av * av
+		nb += bv * bv
+	}
+	if na == 0 || nb == 0 { return 0 }
+	return dot / (math.Sqrt(na) * math.Sqrt(nb))
+}
+
+type VecCandidate struct {
+	ID int64
+	Text string
+	Score float64
+}
+
+type candMinHeap []VecCandidate
+
+func (h candMinHeap) Len() int { return len(h) }
+func (h candMinHeap) Less(i, j int) bool { return h[i].Score < h[j].Score }
+func (h candMinHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+func (h *candMinHeap) Push(x any) { *h = append(*h, x.(VecCandidate)) }
+func (h *candMinHeap) Pop() any {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[:n-1]
+	return x
+}
+
+func VectorSearch(ctx context.Context, d *db.DB, sessionKey string, queryVec []float32, k int, scanLimit int) ([]VecCandidate, error) {
+	_ = scanLimit
+	queryBlob := PackFloat32(queryVec)
+	scopes := []string{scope.GlobalMemoryScope}
+	if trimmedSessionKey := strings.TrimSpace(sessionKey); trimmedSessionKey != "" && trimmedSessionKey != scope.GlobalMemoryScope {
+		scopes = append(scopes, sessionKey)
+	}
+	seen := make(map[int64]struct{}, k*len(scopes))
+	out := make([]VecCandidate, 0, k*len(scopes))
+	for _, memoryScope := range scopes {
+		rows, err := d.SearchVecScope(ctx, memoryScope, queryBlob, k)
+		if err != nil {
+			return nil, err
+		}
+		if len(rows) == 0 {
+			rows, err = d.SearchVecScopeFallback(ctx, memoryScope, queryBlob, k)
+			if err != nil {
+				return nil, err
+			}
+		}
+		for _, row := range rows {
+			if _, ok := seen[row.ID]; ok {
+				continue
+			}
+			seen[row.ID] = struct{}{}
+			out = append(out, VecCandidate{
+				ID:    row.ID,
+				Text:  row.Text,
+				Score: 1.0 / (1.0 + row.Distance),
+			})
+		}
+	}
+	return out, nil
+}
+
+func addVectorCandidates(rows interface {
+	Next() bool
+	Scan(dest ...any) error
+	Err() error
+}, queryVec []float32, k int, h *candMinHeap) error {
+	for rows.Next() {
+		var id int64
+		var text string
+		var emb []byte
+		var src any
+		var tags string
+		var created int64
+		if err := rows.Scan(&id, &text, &emb, &src, &tags, &created); err != nil {
+			return err
+		}
+		v, err := UnpackFloat32(emb)
+		if err != nil {
+			continue
+		}
+		score := Cosine(queryVec, v)
+		if h.Len() < k {
+			heap.Push(h, VecCandidate{ID: id, Text: text, Score: score})
+		} else if (*h)[0].Score < score {
+			(*h)[0] = VecCandidate{ID: id, Text: text, Score: score}
+			heap.Fix(h, 0)
+		}
+	}
+	return rows.Err()
+}
+````
+
+## File: internal/tools/registry.go
+````go
+package tools
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"sort"
+)
+
+type Registry struct {
+	tools map[string]Tool
+}
+
+func NewRegistry() *Registry {
+	return &Registry{tools: map[string]Tool{}}
+}
+
+func (r *Registry) Register(t Tool)      { r.tools[t.Name()] = t }
+func (r *Registry) Get(name string) Tool { return r.tools[name] }
+func (r *Registry) Names() []string {
+	out := make([]string, 0, len(r.tools))
+	for k := range r.tools {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (r *Registry) Definitions() []map[string]any {
+	names := r.Names()
+	out := make([]map[string]any, 0, len(names))
+	for _, name := range names {
+		out = append(out, r.tools[name].Schema())
+	}
+	return out
+}
+
+func (r *Registry) Execute(ctx context.Context, name string, argsJSON string) (string, error) {
+	t := r.tools[name]
+	if t == nil {
+		return "", fmt.Errorf("tool '%s' not found", name)
+	}
+	var params map[string]any
+	if argsJSON == "" {
+		params = map[string]any{}
+	} else {
+		if err := json.Unmarshal([]byte(argsJSON), &params); err != nil {
+			return "", fmt.Errorf("invalid tool args: %w", err)
+		}
+	}
+	return r.ExecuteParams(ctx, name, params)
+}
+
+func (r *Registry) ExecuteParams(ctx context.Context, name string, params map[string]any) (string, error) {
+	t := r.tools[name]
+	if t == nil {
+		return "", fmt.Errorf("tool '%s' not found", name)
+	}
+	if params == nil {
+		params = map[string]any{}
+	}
+	return t.Execute(ctx, params)
+}
+````
+
 ## File: internal/providers/openai.go
 ````go
 package providers
@@ -16169,6 +10113,7 @@ func (c *Client) ChatStream(ctx context.Context, req ChatCompletionRequest, onDe
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	var contentBuilder strings.Builder
 	var finalToolCalls []ToolCall
 
@@ -16282,6 +10227,420 @@ func (c *Client) Embed(ctx context.Context, model, input string) ([]float32, err
 }
 ````
 
+## File: internal/db/db.go
+````go
+package db
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"sync"
+	"time"
+
+	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
+	_ "github.com/mattn/go-sqlite3"
+	"or3-intern/internal/scope"
+
+	_ "modernc.org/sqlite"
+)
+
+var sqliteVecAutoOnce sync.Once
+
+type DB struct {
+	SQL    *sql.DB
+	VecSQL *sql.DB
+}
+
+func Open(path string) (*DB, error) {
+	primaryDSN := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)", path)
+	s, err := sql.Open("sqlite", primaryDSN)
+	if err != nil {
+		return nil, err
+	}
+	s.SetMaxOpenConns(4)
+	s.SetMaxIdleConns(4)
+
+	sqliteVecAutoOnce.Do(sqlite_vec.Auto)
+	vecDSN := fmt.Sprintf("file:%s?_busy_timeout=5000&_journal=WAL&_sync=NORMAL&_fk=1", path)
+	vec, err := sql.Open("sqlite3", vecDSN)
+	if err != nil {
+		_ = s.Close()
+		return nil, err
+	}
+	vec.SetMaxOpenConns(2)
+	vec.SetMaxIdleConns(2)
+
+	d := &DB{SQL: s, VecSQL: vec}
+	if err := d.migrate(context.Background()); err != nil {
+		_ = vec.Close()
+		_ = s.Close()
+		return nil, err
+	}
+	return d, nil
+}
+
+func (d *DB) Close() error {
+	if d == nil {
+		return nil
+	}
+	var err error
+	if d.VecSQL != nil {
+		if closeErr := d.VecSQL.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}
+	if d.SQL != nil {
+		if closeErr := d.SQL.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}
+	return err
+}
+
+func (d *DB) migrate(ctx context.Context) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS sessions(
+			key TEXT PRIMARY KEY,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			metadata_json TEXT NOT NULL DEFAULT '{}',
+			last_consolidated_msg_id INTEGER NOT NULL DEFAULT 0
+		);`,
+		`CREATE TABLE IF NOT EXISTS messages(
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_key TEXT NOT NULL,
+			role TEXT NOT NULL,
+			content TEXT NOT NULL,
+			payload_json TEXT NOT NULL DEFAULT '{}',
+			created_at INTEGER NOT NULL,
+			FOREIGN KEY(session_key) REFERENCES sessions(key) ON DELETE CASCADE
+		);`,
+		`CREATE INDEX IF NOT EXISTS messages_session_id ON messages(session_key, id);`,
+		`CREATE TABLE IF NOT EXISTS artifacts(
+			id TEXT PRIMARY KEY,
+			session_key TEXT NOT NULL,
+			mime TEXT NOT NULL,
+			path TEXT NOT NULL,
+			size_bytes INTEGER NOT NULL,
+			created_at INTEGER NOT NULL,
+			FOREIGN KEY(session_key) REFERENCES sessions(key) ON DELETE CASCADE
+		);`,
+		`CREATE TABLE IF NOT EXISTS memory_pinned(
+			session_key TEXT NOT NULL DEFAULT '` + scope.GlobalMemoryScope + `',
+			key TEXT NOT NULL,
+			content TEXT NOT NULL,
+			updated_at INTEGER NOT NULL,
+			PRIMARY KEY(session_key, key)
+		);`,
+		`CREATE TABLE IF NOT EXISTS memory_notes(
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_key TEXT NOT NULL DEFAULT '` + scope.GlobalMemoryScope + `',
+			text TEXT NOT NULL,
+			embedding BLOB NOT NULL,
+			source_message_id INTEGER,
+			tags TEXT NOT NULL DEFAULT '',
+			created_at INTEGER NOT NULL
+		);`,
+		// FTS5
+		`CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(text, content='memory_notes', content_rowid='id');`,
+		`CREATE TRIGGER IF NOT EXISTS memory_notes_ai AFTER INSERT ON memory_notes BEGIN
+			INSERT INTO memory_fts(rowid, text) VALUES (new.id, new.text);
+		END;`,
+		`CREATE TRIGGER IF NOT EXISTS memory_notes_ad AFTER DELETE ON memory_notes BEGIN
+			INSERT INTO memory_fts(memory_fts, rowid, text) VALUES('delete', old.id, old.text);
+		END;`,
+		`CREATE TRIGGER IF NOT EXISTS memory_notes_au AFTER UPDATE ON memory_notes BEGIN
+			INSERT INTO memory_fts(memory_fts, rowid, text) VALUES('delete', old.id, old.text);
+			INSERT INTO memory_fts(rowid, text) VALUES (new.id, new.text);
+		END;`,
+		`CREATE TABLE IF NOT EXISTS subagent_jobs(
+			id TEXT PRIMARY KEY,
+			parent_session_key TEXT NOT NULL,
+			child_session_key TEXT NOT NULL,
+			channel TEXT NOT NULL,
+			reply_to TEXT NOT NULL,
+			task TEXT NOT NULL,
+			status TEXT NOT NULL,
+			result_preview TEXT NOT NULL DEFAULT '',
+			artifact_id TEXT NOT NULL DEFAULT '',
+			error_text TEXT NOT NULL DEFAULT '',
+			requested_at INTEGER NOT NULL,
+			started_at INTEGER NOT NULL DEFAULT 0,
+			finished_at INTEGER NOT NULL DEFAULT 0,
+			attempts INTEGER NOT NULL DEFAULT 0,
+			metadata_json TEXT NOT NULL DEFAULT '{}'
+		);`,
+		`CREATE INDEX IF NOT EXISTS subagent_jobs_status_requested_at ON subagent_jobs(status, requested_at);`,
+		`CREATE INDEX IF NOT EXISTS subagent_jobs_parent_session ON subagent_jobs(parent_session_key, requested_at);`,
+		`CREATE TABLE IF NOT EXISTS session_links(
+			session_key TEXT PRIMARY KEY,
+			scope_key TEXT NOT NULL,
+			linked_at INTEGER NOT NULL,
+			metadata_json TEXT NOT NULL DEFAULT '{}'
+		);`,
+		`CREATE INDEX IF NOT EXISTS session_links_scope_key ON session_links(scope_key);`,
+		`CREATE TABLE IF NOT EXISTS memory_docs(
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			scope_key TEXT NOT NULL,
+			path TEXT NOT NULL,
+			kind TEXT NOT NULL,
+			title TEXT NOT NULL DEFAULT '',
+			summary TEXT NOT NULL DEFAULT '',
+			text TEXT NOT NULL,
+			embedding BLOB,
+			hash TEXT NOT NULL,
+			mtime_ms INTEGER NOT NULL,
+			size_bytes INTEGER NOT NULL,
+			active INTEGER NOT NULL DEFAULT 1,
+			updated_at INTEGER NOT NULL,
+			UNIQUE(scope_key, path)
+		);`,
+		`CREATE INDEX IF NOT EXISTS memory_docs_scope_path ON memory_docs(scope_key, path);`,
+		`CREATE VIRTUAL TABLE IF NOT EXISTS memory_docs_fts USING fts5(title, summary, text, content='memory_docs', content_rowid='id');`,
+		`CREATE TRIGGER IF NOT EXISTS memory_docs_ai AFTER INSERT ON memory_docs BEGIN
+			INSERT INTO memory_docs_fts(rowid, title, summary, text) VALUES (new.id, new.title, new.summary, new.text);
+		END;`,
+		`CREATE TRIGGER IF NOT EXISTS memory_docs_ad AFTER DELETE ON memory_docs BEGIN
+			INSERT INTO memory_docs_fts(memory_docs_fts, rowid, title, summary, text) VALUES('delete', old.id, old.title, old.summary, old.text);
+		END;`,
+		`CREATE TRIGGER IF NOT EXISTS memory_docs_au AFTER UPDATE ON memory_docs BEGIN
+			INSERT INTO memory_docs_fts(memory_docs_fts, rowid, title, summary, text) VALUES('delete', old.id, old.title, old.summary, old.text);
+			INSERT INTO memory_docs_fts(rowid, title, summary, text) VALUES (new.id, new.title, new.summary, new.text);
+		END;`,
+		`CREATE TABLE IF NOT EXISTS memory_vec_meta(
+			id INTEGER PRIMARY KEY CHECK(id=1),
+			dims INTEGER NOT NULL DEFAULT 0,
+			updated_at INTEGER NOT NULL DEFAULT 0
+		);`,
+		`INSERT INTO memory_vec_meta(id, dims, updated_at)
+			VALUES(1, 0, 0)
+			ON CONFLICT(id) DO NOTHING;`,
+	}
+	for _, s := range stmts {
+		if _, err := d.SQL.ExecContext(ctx, s); err != nil {
+			return err
+		}
+	}
+	if err := d.migrateMemoryPinned(ctx); err != nil {
+		return err
+	}
+	if err := d.ensureMemoryNotesSessionColumn(ctx); err != nil {
+		return err
+	}
+	if err := d.migrateLegacyGlobalMemoryScope(ctx); err != nil {
+		return err
+	}
+	if err := d.ensureMemoryVecIndexForExisting(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+func NowMS() int64 { return time.Now().UnixMilli() }
+
+func (d *DB) migrateMemoryPinned(ctx context.Context) error {
+	hasSession, err := d.tableHasColumn(ctx, "memory_pinned", "session_key")
+	if err != nil {
+		return err
+	}
+	if hasSession {
+		_, err = d.SQL.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS memory_pinned_session_key_key ON memory_pinned(session_key, key);`)
+		return err
+	}
+	stmts := []string{
+		`ALTER TABLE memory_pinned RENAME TO memory_pinned_legacy;`,
+		`CREATE TABLE memory_pinned(
+			session_key TEXT NOT NULL DEFAULT '` + scope.GlobalMemoryScope + `',
+			key TEXT NOT NULL,
+			content TEXT NOT NULL,
+			updated_at INTEGER NOT NULL,
+			PRIMARY KEY(session_key, key)
+		);`,
+		`INSERT INTO memory_pinned(session_key, key, content, updated_at)
+		 SELECT '` + scope.GlobalMemoryScope + `', key, content, updated_at FROM memory_pinned_legacy;`,
+		`DROP TABLE memory_pinned_legacy;`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS memory_pinned_session_key_key ON memory_pinned(session_key, key);`,
+	}
+	for _, stmt := range stmts {
+		if _, err := d.SQL.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *DB) ensureMemoryNotesSessionColumn(ctx context.Context) error {
+	hasSession, err := d.tableHasColumn(ctx, "memory_notes", "session_key")
+	if err != nil {
+		return err
+	}
+	if !hasSession {
+		if _, err := d.SQL.ExecContext(ctx, `ALTER TABLE memory_notes ADD COLUMN session_key TEXT NOT NULL DEFAULT '`+scope.GlobalMemoryScope+`';`); err != nil {
+			return err
+		}
+	}
+	_, err = d.SQL.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS memory_notes_session_id ON memory_notes(session_key, id);`)
+	return err
+}
+
+func (d *DB) migrateLegacyGlobalMemoryScope(ctx context.Context) error {
+	if scope.GlobalMemoryScope == scope.GlobalScopeAlias {
+		return nil
+	}
+	if _, err := d.SQL.ExecContext(ctx,
+		`INSERT INTO memory_pinned(session_key, key, content, updated_at)
+		 SELECT ?, key, content, updated_at FROM memory_pinned WHERE session_key=?
+		 ON CONFLICT(session_key, key) DO UPDATE SET content=excluded.content, updated_at=excluded.updated_at`,
+		scope.GlobalMemoryScope, scope.GlobalScopeAlias); err != nil {
+		return err
+	}
+	if _, err := d.SQL.ExecContext(ctx, `DELETE FROM memory_pinned WHERE session_key=?`, scope.GlobalScopeAlias); err != nil {
+		return err
+	}
+	_, err := d.SQL.ExecContext(ctx, `UPDATE memory_notes SET session_key=? WHERE session_key=?`, scope.GlobalMemoryScope, scope.GlobalScopeAlias)
+	if err != nil {
+		return err
+	}
+	if dims, derr := d.MemoryVectorDims(ctx); derr == nil && dims > 0 && d.VecSQL != nil {
+		_, err = d.VecSQL.ExecContext(ctx, `UPDATE memory_vec SET session_key=? WHERE session_key=?`, scope.GlobalMemoryScope, scope.GlobalScopeAlias)
+	}
+	return err
+}
+
+func (d *DB) ensureMemoryVecIndexForExisting(ctx context.Context) error {
+	dims, err := d.MemoryVectorDims(ctx)
+	if err != nil {
+		return err
+	}
+	if dims == 0 {
+		dims, err = d.firstMemoryVectorDim(ctx)
+		if err != nil {
+			return err
+		}
+	}
+	if dims <= 0 {
+		return nil
+	}
+	return d.initMemoryVecIndex(ctx, dims)
+}
+
+func (d *DB) MemoryVectorDims(ctx context.Context) (int, error) {
+	row := d.SQL.QueryRowContext(ctx, `SELECT dims FROM memory_vec_meta WHERE id=1`)
+	var dims int
+	if err := row.Scan(&dims); err != nil {
+		if err == sql.ErrNoRows {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return dims, nil
+}
+
+func (d *DB) firstMemoryVectorDim(ctx context.Context) (int, error) {
+	row := d.SQL.QueryRowContext(ctx,
+		`SELECT COALESCE(length(embedding), 0)
+		 FROM memory_notes
+		 WHERE typeof(embedding)='blob' AND length(embedding) >= 4 AND (length(embedding) % 4)=0
+		 ORDER BY id ASC
+		 LIMIT 1`)
+	var bytes int
+	if err := row.Scan(&bytes); err != nil {
+		if err == sql.ErrNoRows {
+			return 0, nil
+		}
+		return 0, err
+	}
+	if bytes <= 0 {
+		return 0, nil
+	}
+	return bytes / 4, nil
+}
+
+func (d *DB) EnsureMemoryVecIndexWithDim(ctx context.Context, dims int) error {
+	if dims <= 0 {
+		return nil
+	}
+	existing, err := d.MemoryVectorDims(ctx)
+	if err != nil {
+		return err
+	}
+	if existing > 0 && existing != dims {
+		return nil
+	}
+	return d.initMemoryVecIndex(ctx, dims)
+}
+
+func (d *DB) initMemoryVecIndex(ctx context.Context, dims int) error {
+	if dims <= 0 {
+		return nil
+	}
+	if d == nil || d.VecSQL == nil {
+		return nil
+	}
+	tx, err := d.VecSQL.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var existing int
+	if err := tx.QueryRowContext(ctx, `SELECT dims FROM memory_vec_meta WHERE id=1`).Scan(&existing); err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	if existing > 0 && existing != dims {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `DROP TABLE IF EXISTS memory_vec`); err != nil {
+		return err
+	}
+	createSQL := fmt.Sprintf(`CREATE VIRTUAL TABLE memory_vec USING vec0(
+			note_id integer primary key,
+			session_key text partition key,
+			embedding float[%d] distance_metric=cosine,
+			+text text
+		)`, dims)
+	if _, err := tx.ExecContext(ctx, createSQL); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO memory_vec(note_id, session_key, embedding, text)
+		 SELECT id, session_key, embedding, text
+		 FROM memory_notes
+		 WHERE typeof(embedding)='blob' AND length(embedding)=?`, dims*4); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO memory_vec_meta(id, dims, updated_at)
+		 VALUES(1, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET dims=excluded.dims, updated_at=excluded.updated_at`,
+		dims, NowMS()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (d *DB) tableHasColumn(ctx context.Context, tableName, columnName string) (bool, error) {
+	rows, err := d.SQL.QueryContext(ctx, `PRAGMA table_info(`+tableName+`)`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notNull, pk int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &defaultValue, &pk); err != nil {
+			return false, err
+		}
+		if name == columnName {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+````
+
 ## File: internal/skills/skills.go
 ````go
 package skills
@@ -16290,12 +10649,17 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // SkillEntry describes a declared executable entrypoint from a skill manifest.
@@ -16306,14 +10670,107 @@ type SkillEntry struct {
 	AcceptsStdin   bool     `json:"acceptsStdin"`
 }
 
+type Source string
+
+const (
+	SourceExtra     Source = "extra"
+	SourceBundled   Source = "bundled"
+	SourceManaged   Source = "managed"
+	SourceWorkspace Source = "workspace"
+)
+
+type Root struct {
+	Path     string
+	Source   Source
+	Label    string
+	Priority int
+}
+
+type EntryConfig struct {
+	Enabled *bool
+	APIKey  string
+	Env     map[string]string
+	Config  map[string]any
+}
+
+type LoadOptions struct {
+	Roots          []Root
+	Entries        map[string]EntryConfig
+	GlobalConfig   map[string]any
+	Env            map[string]string
+	AvailableTools map[string]struct{}
+	OS             string
+}
+
+type SkillInstallSpec struct {
+	ID      string   `json:"id"`
+	Kind    string   `json:"kind"`
+	Label   string   `json:"label"`
+	Bins    []string `json:"bins"`
+	Formula string   `json:"formula"`
+	Tap     string   `json:"tap"`
+	Package string   `json:"package"`
+	Module  string   `json:"module"`
+	OS      []string `json:"os"`
+	URL     string   `json:"url"`
+}
+
+type NixPluginSpec struct {
+	Plugin  string   `json:"plugin"`
+	Systems []string `json:"systems"`
+}
+
+type SkillRequirements struct {
+	Bins    []string `json:"bins"`
+	AnyBins []string `json:"anyBins"`
+	Env     []string `json:"env"`
+	Config  []string `json:"config"`
+}
+
+type SkillRuntimeMeta struct {
+	Always     bool               `json:"always"`
+	SkillKey   string             `json:"skillKey"`
+	PrimaryEnv string             `json:"primaryEnv"`
+	Emoji      string             `json:"emoji"`
+	Homepage   string             `json:"homepage"`
+	OS         []string           `json:"os"`
+	Requires   SkillRequirements  `json:"requires"`
+	Install    []SkillInstallSpec `json:"install"`
+	Nix        *NixPluginSpec     `json:"nix"`
+}
+
 type SkillMeta struct {
 	Name        string
+	Description string
+	Homepage    string
 	Path        string
+	Dir         string
+	Location    string
+	Source      Source
 	ModTime     time.Time
 	Size        int64
 	ID          string
-	Summary     string       // short capability description
-	Entrypoints []SkillEntry // declared executable entrypoints from manifest
+	Summary     string
+	Entrypoints []SkillEntry
+
+	UserInvocable          bool
+	DisableModelInvocation bool
+	CommandDispatch        string
+	CommandTool            string
+	CommandArgMode         string
+
+	Metadata    SkillRuntimeMeta
+	Key         string
+	Eligible    bool
+	Disabled    bool
+	Hidden      bool
+	Missing     []string
+	Unsupported []string
+	ParseError  string
+	RuntimeEnv  map[string]string
+
+	sourcePriority int
+	rootOrder      int
 }
 
 type Inventory struct {
@@ -16321,13 +10778,246 @@ type Inventory struct {
 	byName map[string]SkillMeta
 }
 
-// skillManifest is the JSON structure of skill.json.
 type skillManifest struct {
 	Summary     string       `json:"summary"`
 	Entrypoints []SkillEntry `json:"entrypoints"`
 }
 
-// loadManifest tries to load a skill.json from the same directory as path.
+type skillFrontMatter struct {
+	Name                   string         `yaml:"name"`
+	Description            string         `yaml:"description"`
+	Summary                string         `yaml:"summary"`
+	Homepage               string         `yaml:"homepage"`
+	UserInvocable          *bool          `yaml:"user-invocable"`
+	DisableModelInvocation bool           `yaml:"disable-model-invocation"`
+	CommandDispatch        string         `yaml:"command-dispatch"`
+	CommandTool            string         `yaml:"command-tool"`
+	CommandArgMode         string         `yaml:"command-arg-mode"`
+	Metadata               map[string]any `yaml:"metadata"`
+}
+
+func defaultPriority(source Source) int {
+	switch source {
+	case SourceWorkspace:
+		return 40
+	case SourceManaged:
+		return 30
+	case SourceBundled:
+		return 20
+	default:
+		return 10
+	}
+}
+
+// Scan keeps the old simple API for tests and callers that only provide directories.
+func Scan(dirs []string) Inventory {
+	roots := make([]Root, 0, len(dirs))
+	for i, dir := range dirs {
+		roots = append(roots, Root{
+			Path:     dir,
+			Source:   SourceExtra,
+			Label:    dir,
+			Priority: i + 1,
+		})
+	}
+	return ScanWithOptions(LoadOptions{Roots: roots})
+}
+
+func ScanWithOptions(opts LoadOptions) Inventory {
+	if len(opts.Env) == 0 {
+		opts.Env = envMap(os.Environ())
+	}
+	if strings.TrimSpace(opts.OS) == "" {
+		opts.OS = runtime.GOOS
+	}
+
+	metaByName := map[string]SkillMeta{}
+	for i, root := range opts.Roots {
+		root = normalizeRoot(root)
+		if strings.TrimSpace(root.Path) == "" {
+			continue
+		}
+		absRoot, err := filepath.Abs(root.Path)
+		if err != nil {
+			continue
+		}
+		realRoot, err := filepath.EvalSymlinks(absRoot)
+		if err != nil {
+			continue
+		}
+		scanSkillDir(metaByName, realRoot, root, i, opts)
+		_ = filepath.WalkDir(realRoot, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if d.Type()&os.ModeSymlink != 0 {
+				return nil
+			}
+			if !d.IsDir() {
+				return nil
+			}
+			if path == realRoot {
+				return nil
+			}
+			realPath, err := filepath.EvalSymlinks(path)
+			if err != nil {
+				return filepath.SkipDir
+			}
+			rel, err := filepath.Rel(realRoot, realPath)
+			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				return filepath.SkipDir
+			}
+			if scanSkillDir(metaByName, realPath, root, i, opts) {
+				return filepath.SkipDir
+			}
+			return nil
+		})
+	}
+
+	skills := make([]SkillMeta, 0, len(metaByName))
+	for _, s := range metaByName {
+		skills = append(skills, s)
+	}
+	sort.Slice(skills, func(i, j int) bool {
+		if skills[i].Name == skills[j].Name {
+			if skills[i].sourcePriority == skills[j].sourcePriority {
+				return skills[i].Path < skills[j].Path
+			}
+			return skills[i].sourcePriority > skills[j].sourcePriority
+		}
+		return strings.ToLower(skills[i].Name) < strings.ToLower(skills[j].Name)
+	})
+	by := make(map[string]SkillMeta, len(skills))
+	for _, s := range skills {
+		by[s.Name] = s
+		by[strings.ToLower(s.Name)] = s
+	}
+	return Inventory{Skills: skills, byName: by}
+}
+
+func normalizeRoot(root Root) Root {
+	if strings.TrimSpace(root.Label) == "" {
+		root.Label = string(root.Source)
+	}
+	if root.Priority == 0 {
+		root.Priority = defaultPriority(root.Source)
+	}
+	return root
+}
+
+func scanSkillDir(metaByName map[string]SkillMeta, dir string, root Root, order int, opts LoadOptions) bool {
+	skillPath, ok := skillFileInDir(dir)
+	if !ok {
+		return false
+	}
+	meta := loadSkill(dir, skillPath, root, order, opts)
+	current, exists := metaByName[meta.Name]
+	if !exists || shouldOverride(current, meta) {
+		metaByName[meta.Name] = meta
+	}
+	return true
+}
+
+func shouldOverride(current SkillMeta, candidate SkillMeta) bool {
+	if candidate.sourcePriority != current.sourcePriority {
+		return candidate.sourcePriority > current.sourcePriority
+	}
+	if candidate.rootOrder != current.rootOrder {
+		return candidate.rootOrder > current.rootOrder
+	}
+	return candidate.Path > current.Path
+}
+
+func skillFileInDir(dir string) (string, bool) {
+	for _, name := range []string{"SKILL.md", "skill.md"} {
+		path := filepath.Join(dir, name)
+		info, err := os.Lstat(path)
+		if err != nil {
+			continue
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			continue
+		}
+		return path, true
+	}
+	return "", false
+}
+
+func loadSkill(dir, path string, root Root, order int, opts LoadOptions) SkillMeta {
+	info, _ := os.Stat(path)
+	meta := SkillMeta{
+		Name:           filepath.Base(dir),
+		Path:           path,
+		Dir:            dir,
+		Location:       dir,
+		Source:         root.Source,
+		ID:             hash(path),
+		UserInvocable:  true,
+		CommandArgMode: "raw",
+		sourcePriority: root.Priority,
+		rootOrder:      order,
+	}
+	if info != nil {
+		meta.ModTime = info.ModTime()
+		meta.Size = info.Size()
+	}
+
+	body, err := LoadBody(path, 0)
+	if err != nil {
+		meta.ParseError = err.Error()
+		meta.Hidden = true
+		return meta
+	}
+	fm, rawTop, err := parseFrontMatter(body)
+	if err != nil {
+		meta.ParseError = err.Error()
+		meta.Hidden = true
+		return meta
+	}
+	if strings.TrimSpace(fm.Name) != "" {
+		meta.Name = strings.TrimSpace(fm.Name)
+	}
+	meta.Description = strings.TrimSpace(firstNonEmpty(fm.Description, fm.Summary))
+	meta.Summary = meta.Description
+	meta.Homepage = strings.TrimSpace(fm.Homepage)
+	if fm.UserInvocable != nil {
+		meta.UserInvocable = *fm.UserInvocable
+	}
+	meta.DisableModelInvocation = fm.DisableModelInvocation
+	meta.Hidden = meta.DisableModelInvocation
+	meta.CommandDispatch = strings.TrimSpace(fm.CommandDispatch)
+	meta.CommandTool = strings.TrimSpace(fm.CommandTool)
+	if strings.TrimSpace(fm.CommandArgMode) != "" {
+		meta.CommandArgMode = strings.TrimSpace(fm.CommandArgMode)
+	}
+
+	if manifest, ok := loadManifest(dir); ok {
+		meta.Entrypoints = manifest.Entrypoints
+		if strings.TrimSpace(manifest.Summary) != "" {
+			meta.Summary = strings.TrimSpace(manifest.Summary)
+		}
+		if meta.Description == "" {
+			meta.Summary = strings.TrimSpace(manifest.Summary)
+			meta.Description = meta.Summary
+		}
+	}
+
+	runtimeMeta, ok := normalizeRuntimeMetadata(fm.Metadata)
+	if ok {
+		meta.Metadata = runtimeMeta
+	}
+	if meta.Homepage == "" {
+		meta.Homepage = strings.TrimSpace(meta.Metadata.Homepage)
+	}
+	if meta.Key == "" {
+		meta.Key = strings.TrimSpace(firstNonEmpty(meta.Metadata.SkillKey, meta.Name))
+	}
+	entry := entryConfigForSkill(opts.Entries, meta)
+	meta.RuntimeEnv = buildRuntimeEnv(meta, entry, opts.Env)
+	applyEligibility(&meta, rawTop, body, entry, opts)
+	return meta
+}
+
 func loadManifest(dir string) (skillManifest, bool) {
 	data, err := os.ReadFile(filepath.Join(dir, "skill.json"))
 	if err != nil {
@@ -16340,125 +11030,240 @@ func loadManifest(dir string) (skillManifest, bool) {
 	return m, true
 }
 
-// maxFrontMatterLines is the maximum number of lines scanned for YAML front matter.
-const maxFrontMatterLines = 20
-
-// extractFrontMatterSummary parses the first YAML front matter block (--- ... ---)
-// and returns the value of the "summary:" field if present.
-func extractFrontMatterSummary(content string) string {
-	lines := strings.SplitN(content, "\n", maxFrontMatterLines)
-	if len(lines) == 0 {
-		return ""
+func parseFrontMatter(content string) (skillFrontMatter, map[string]any, error) {
+	block, ok, err := frontMatterBlock(content)
+	if err != nil {
+		return skillFrontMatter{}, nil, err
 	}
-	if strings.TrimSpace(lines[0]) != "---" {
-		return ""
+	if !ok {
+		return skillFrontMatter{}, map[string]any{}, nil
 	}
-	for _, line := range lines[1:] {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "---" {
-			break
-		}
-		if strings.HasPrefix(trimmed, "summary:") {
-			val := strings.TrimSpace(strings.TrimPrefix(trimmed, "summary:"))
-			// Strip optional quotes
-			val = strings.Trim(val, `"'`)
-			return val
-		}
+	var raw map[string]any
+	if err := yaml.Unmarshal([]byte(block), &raw); err != nil {
+		return skillFrontMatter{}, nil, fmt.Errorf("invalid frontmatter: %w", err)
 	}
-	return ""
+	raw = toStringMap(raw)
+	var fm skillFrontMatter
+	if err := yaml.Unmarshal([]byte(block), &fm); err != nil {
+		return skillFrontMatter{}, nil, fmt.Errorf("invalid frontmatter: %w", err)
+	}
+	fm.Metadata = toStringMap(fm.Metadata)
+	return fm, raw, nil
 }
 
-func Scan(dirs []string) Inventory {
-	var skills []SkillMeta
-	for _, dir := range dirs {
-		if strings.TrimSpace(dir) == "" {
-			continue
-		}
-		root, err := filepath.Abs(dir)
-		if err != nil {
-			continue
-		}
-		root, err = filepath.EvalSymlinks(root)
-		if err != nil {
-			continue
-		}
-		_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return nil
-			}
-			if d.Type()&os.ModeSymlink != 0 {
-				return nil
-			}
-			if d.IsDir() {
-				return nil
-			}
-			ext := strings.ToLower(filepath.Ext(path))
-			if ext != ".md" && ext != ".txt" {
-				return nil
-			}
-			realPath, err := filepath.EvalSymlinks(path)
-			if err != nil {
-				return nil
-			}
-			rel, err := filepath.Rel(root, realPath)
-			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-				return nil
-			}
-			info, _ := d.Info()
-			mt := time.Time{}
-			sz := int64(0)
-			if info != nil {
-				mt = info.ModTime()
-				sz = info.Size()
-			}
-			name := strings.TrimSuffix(filepath.Base(realPath), ext)
-			meta := SkillMeta{Name: name, Path: realPath, ModTime: mt, Size: sz, ID: hash(realPath)}
-
-			// Try skill.json manifest in the same directory.
-			if man, ok := loadManifest(filepath.Dir(realPath)); ok {
-				meta.Summary = man.Summary
-				meta.Entrypoints = man.Entrypoints
-			}
-
-			// Try YAML front matter summary if not already set from manifest.
-			if meta.Summary == "" && ext == ".md" {
-				if data, readErr := os.ReadFile(realPath); readErr == nil {
-					meta.Summary = extractFrontMatterSummary(string(data))
-				}
-			}
-
-			skills = append(skills, meta)
-			return nil
-		})
+func frontMatterBlock(content string) (string, bool, error) {
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	if !strings.HasPrefix(content, "---\n") {
+		return "", false, nil
 	}
-	sort.Slice(skills, func(i, j int) bool { return skills[i].Name < skills[j].Name })
-	by := map[string]SkillMeta{}
-	for _, s := range skills {
-		by[s.Name] = s
+	rest := content[len("---\n"):]
+	end := strings.Index(rest, "\n---")
+	if end < 0 {
+		return "", false, fmt.Errorf("invalid frontmatter: missing closing delimiter")
 	}
-	return Inventory{Skills: skills, byName: by}
+	block := rest[:end]
+	return block, true, nil
+}
+
+func extractFrontMatterSummary(content string) string {
+	fm, _, err := parseFrontMatter(content)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(firstNonEmpty(fm.Summary, fm.Description))
+}
+
+func normalizeRuntimeMetadata(raw map[string]any) (SkillRuntimeMeta, bool) {
+	if len(raw) == 0 {
+		return SkillRuntimeMeta{}, false
+	}
+	var selected any
+	for _, key := range []string{"openclaw", "clawdbot", "clawdis"} {
+		if value, ok := raw[key]; ok {
+			selected = value
+			break
+		}
+	}
+	if selected == nil {
+		return SkillRuntimeMeta{}, false
+	}
+	buf, err := json.Marshal(toStringMap(selected))
+	if err != nil {
+		return SkillRuntimeMeta{}, false
+	}
+	var meta SkillRuntimeMeta
+	if err := json.Unmarshal(buf, &meta); err != nil {
+		return SkillRuntimeMeta{}, false
+	}
+	return meta, true
+}
+
+func applyEligibility(meta *SkillMeta, rawTop map[string]any, body string, entry EntryConfig, opts LoadOptions) {
+	if meta == nil {
+		return
+	}
+	if meta.ParseError != "" {
+		meta.Eligible = false
+		return
+	}
+	meta.Disabled = entry.Enabled != nil && !*entry.Enabled
+	if meta.Disabled {
+		meta.Missing = append(meta.Missing, "disabled in config")
+	}
+	meta.Unsupported = append(meta.Unsupported, detectUnsupported(*meta, rawTop, body, opts)...)
+	if meta.Metadata.Always && !meta.Disabled && len(meta.Unsupported) == 0 {
+		meta.Eligible = true
+		return
+	}
+	if len(meta.Metadata.OS) > 0 && !containsFold(meta.Metadata.OS, opts.OS) {
+		meta.Missing = append(meta.Missing, fmt.Sprintf("os mismatch: requires %s", strings.Join(meta.Metadata.OS, ", ")))
+	}
+	for _, bin := range meta.Metadata.Requires.Bins {
+		if !hasBinary(bin) {
+			meta.Missing = append(meta.Missing, "missing binary: "+bin)
+		}
+	}
+	if len(meta.Metadata.Requires.AnyBins) > 0 {
+		ok := false
+		for _, bin := range meta.Metadata.Requires.AnyBins {
+			if hasBinary(bin) {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			meta.Missing = append(meta.Missing, "missing any-of binary: "+strings.Join(meta.Metadata.Requires.AnyBins, ", "))
+		}
+	}
+	for _, envName := range meta.Metadata.Requires.Env {
+		if strings.TrimSpace(meta.RuntimeEnv[envName]) == "" {
+			meta.Missing = append(meta.Missing, "missing env: "+envName)
+		}
+	}
+	for _, key := range meta.Metadata.Requires.Config {
+		if !configTruthy(opts.GlobalConfig, entry.Config, key) {
+			meta.Missing = append(meta.Missing, "missing config: "+key)
+		}
+	}
+	meta.Eligible = !meta.Disabled && len(meta.Missing) == 0 && len(meta.Unsupported) == 0
+}
+
+func detectUnsupported(meta SkillMeta, rawTop map[string]any, body string, opts LoadOptions) []string {
+	var unsupported []string
+	if rawTop["tools"] != nil {
+		unsupported = append(unsupported, "frontmatter custom tools not supported")
+	}
+	if meta.Metadata.Nix != nil && strings.TrimSpace(meta.Metadata.Nix.Plugin) != "" {
+		unsupported = append(unsupported, "requires nix plugin: "+meta.Metadata.Nix.Plugin)
+	}
+	if meta.CommandDispatch != "" && meta.CommandDispatch != "tool" {
+		unsupported = append(unsupported, "unsupported command-dispatch: "+meta.CommandDispatch)
+	}
+	if meta.CommandDispatch == "tool" {
+		if meta.CommandTool == "" {
+			unsupported = append(unsupported, "command-dispatch tool requires command-tool")
+		} else if len(opts.AvailableTools) > 0 {
+			if _, ok := opts.AvailableTools[meta.CommandTool]; !ok {
+				unsupported = append(unsupported, "requires unsupported tool: "+meta.CommandTool)
+			}
+		}
+	}
+	if strings.Contains(body, "nodes.run") {
+		unsupported = append(unsupported, "requires unsupported tool: nodes.run")
+	}
+	return unsupported
+}
+
+func buildRuntimeEnv(meta SkillMeta, entry EntryConfig, baseEnv map[string]string) map[string]string {
+	out := copyMap(baseEnv)
+	for k, v := range entry.Env {
+		if strings.TrimSpace(k) == "" || strings.TrimSpace(v) == "" {
+			continue
+		}
+		if strings.TrimSpace(out[k]) == "" {
+			out[k] = v
+		}
+	}
+	if meta.Metadata.PrimaryEnv != "" && strings.TrimSpace(entry.APIKey) != "" && strings.TrimSpace(out[meta.Metadata.PrimaryEnv]) == "" {
+		out[meta.Metadata.PrimaryEnv] = entry.APIKey
+	}
+	return out
+}
+
+func entryConfigForSkill(entries map[string]EntryConfig, meta SkillMeta) EntryConfig {
+	if len(entries) == 0 {
+		return EntryConfig{}
+	}
+	if entry, ok := entries[meta.Key]; ok {
+		return entry
+	}
+	return entries[meta.Name]
 }
 
 func (inv Inventory) Get(name string) (SkillMeta, bool) {
-	s, ok := inv.byName[name]
+	if strings.TrimSpace(name) == "" {
+		return SkillMeta{}, false
+	}
+	if s, ok := inv.byName[name]; ok {
+		return s, true
+	}
+	s, ok := inv.byName[strings.ToLower(name)]
 	return s, ok
 }
 
 func (inv Inventory) Summary(max int) string {
+	return summarize(inv.Skills, max)
+}
+
+func (inv Inventory) ModelSummary(max int) string {
+	filtered := make([]SkillMeta, 0, len(inv.Skills))
+	for _, skill := range inv.Skills {
+		if !skill.Eligible || skill.Hidden {
+			continue
+		}
+		filtered = append(filtered, skill)
+	}
+	if len(filtered) == 0 {
+		return "(no eligible skills found)"
+	}
 	if max <= 0 {
 		max = 50
 	}
-	lines := []string{}
-	for i, s := range inv.Skills {
+	lines := make([]string, 0, min(len(filtered), max)+1)
+	for i, skill := range filtered {
 		if i >= max {
 			lines = append(lines, "…")
 			break
 		}
-		if s.Summary != "" {
-			lines = append(lines, "- "+s.Name+": "+s.Summary)
-		} else {
-			lines = append(lines, "- "+s.Name)
+		desc := strings.TrimSpace(skill.Description)
+		if desc == "" {
+			desc = strings.TrimSpace(skill.Summary)
 		}
+		location := strings.TrimSpace(skill.Location)
+		if location == "" {
+			location = skill.Dir
+		}
+		lines = append(lines, fmt.Sprintf("- %s | %s | %s", skill.Name, oneLine(desc, 140), location))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func summarize(skills []SkillMeta, max int) string {
+	if max <= 0 {
+		max = 50
+	}
+	lines := []string{}
+	for i, s := range skills {
+		if i >= max {
+			lines = append(lines, "…")
+			break
+		}
+		desc := strings.TrimSpace(firstNonEmpty(s.Description, s.Summary))
+		if desc == "" {
+			lines = append(lines, "- "+s.Name)
+			continue
+		}
+		lines = append(lines, "- "+s.Name+": "+oneLine(desc, 140))
 	}
 	if len(lines) == 0 {
 		return "(no skills found)"
@@ -16466,14 +11271,79 @@ func (inv Inventory) Summary(max int) string {
 	return strings.Join(lines, "\n")
 }
 
+func (inv Inventory) RunEnv() map[string]string {
+	out := map[string]string{}
+	for _, skill := range inv.Skills {
+		if !skill.Eligible {
+			continue
+		}
+		for k, v := range filteredRuntimeEnv(skill.RuntimeEnv) {
+			if _, exists := out[k]; !exists {
+				out[k] = v
+			}
+		}
+	}
+	return out
+}
+
+func (inv Inventory) RunEnvForSkill(name string) map[string]string {
+	skill, ok := inv.Get(name)
+	if !ok || !skill.Eligible {
+		return nil
+	}
+	return filteredRuntimeEnv(skill.RuntimeEnv)
+}
+
+func (inv Inventory) ResolveBundlePath(name, relPath string) (string, error) {
+	skill, ok := inv.Get(name)
+	if !ok {
+		return "", fmt.Errorf("skill not found: %s", name)
+	}
+	relPath = strings.TrimSpace(relPath)
+	if relPath == "" {
+		return skill.Dir, nil
+	}
+	if filepath.IsAbs(relPath) {
+		return "", fmt.Errorf("bundle path must be relative")
+	}
+	root, err := filepath.EvalSymlinks(skill.Dir)
+	if err != nil {
+		return "", err
+	}
+	full := filepath.Join(root, relPath)
+	clean := filepath.Clean(full)
+	real, err := filepath.EvalSymlinks(clean)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		real = clean
+	}
+	rel, err := filepath.Rel(root, real)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fs.ErrPermission
+	}
+	return real, nil
+}
+
 func LoadBody(path string, maxBytes int) (string, error) {
-	if maxBytes <= 0 { maxBytes = 200000 }
+	if maxBytes <= 0 {
+		maxBytes = 200000
+	}
 	info, err := os.Lstat(path)
-	if err != nil { return "", err }
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() { return "", fs.ErrPermission }
+	if err != nil {
+		return "", err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return "", fs.ErrPermission
+	}
 	b, err := os.ReadFile(path)
-	if err != nil { return "", err }
-	if len(b) > maxBytes { b = b[:maxBytes] }
+	if err != nil {
+		return "", err
+	}
+	if len(b) > maxBytes {
+		b = b[:maxBytes]
+	}
 	return string(b), nil
 }
 
@@ -16481,6 +11351,741 @@ func hash(s string) string {
 	h := sha1.Sum([]byte(s))
 	return hex.EncodeToString(h[:8])
 }
+
+func hasBinary(name string) bool {
+	if strings.TrimSpace(name) == "" {
+		return false
+	}
+	_, err := exec.LookPath(name)
+	return err == nil
+}
+
+func configTruthy(global map[string]any, skill map[string]any, path string) bool {
+	if truthy(lookupPath(global, path)) {
+		return true
+	}
+	return truthy(lookupPath(skill, path))
+}
+
+func lookupPath(root map[string]any, path string) any {
+	if len(root) == 0 || strings.TrimSpace(path) == "" {
+		return nil
+	}
+	var current any = root
+	for _, part := range strings.Split(path, ".") {
+		m, ok := current.(map[string]any)
+		if !ok {
+			return nil
+		}
+		current, ok = m[part]
+		if !ok {
+			return nil
+		}
+	}
+	return current
+}
+
+func truthy(v any) bool {
+	switch val := v.(type) {
+	case nil:
+		return false
+	case bool:
+		return val
+	case string:
+		return strings.TrimSpace(val) != ""
+	case float64:
+		return val != 0
+	case int:
+		return val != 0
+	case []any:
+		return len(val) > 0
+	case map[string]any:
+		return len(val) > 0
+	default:
+		return true
+	}
+}
+
+func envMap(values []string) map[string]string {
+	out := make(map[string]string, len(values))
+	for _, raw := range values {
+		key, value, ok := strings.Cut(raw, "=")
+		if !ok {
+			continue
+		}
+		out[key] = value
+	}
+	return out
+}
+
+func toStringMap(v any) map[string]any {
+	switch val := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(val))
+		for k, child := range val {
+			out[k] = normalizeValue(child)
+		}
+		return out
+	case map[any]any:
+		out := make(map[string]any, len(val))
+		for k, child := range val {
+			out[fmt.Sprint(k)] = normalizeValue(child)
+		}
+		return out
+	default:
+		return map[string]any{}
+	}
+}
+
+func normalizeValue(v any) any {
+	switch val := v.(type) {
+	case map[string]any, map[any]any:
+		return toStringMap(val)
+	case []any:
+		out := make([]any, 0, len(val))
+		for _, item := range val {
+			out = append(out, normalizeValue(item))
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+func copyMap(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func filteredRuntimeEnv(env map[string]string) map[string]string {
+	out := map[string]string{}
+	for k, v := range env {
+		if strings.TrimSpace(k) == "" || strings.TrimSpace(v) == "" {
+			continue
+		}
+		if strings.TrimSpace(os.Getenv(k)) != "" {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+func containsFold(values []string, target string) bool {
+	for _, value := range values {
+		if strings.EqualFold(strings.TrimSpace(value), strings.TrimSpace(target)) {
+			return true
+		}
+	}
+	return false
+}
+
+func oneLine(s string, max int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.Join(strings.Fields(s), " ")
+	if max > 0 && len(s) > max {
+		s = s[:max] + "…"
+	}
+	return s
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+````
+
+## File: go.mod
+````
+module or3-intern
+
+go 1.24.0
+
+require (
+	github.com/asg017/sqlite-vec-go-bindings v0.1.6
+	github.com/emersion/go-imap/v2 v2.0.0-beta.8
+	github.com/gorilla/websocket v1.5.3
+	github.com/mattn/go-isatty v0.0.20
+	github.com/mattn/go-sqlite3 v1.14.34
+	github.com/modelcontextprotocol/go-sdk v0.8.0
+	github.com/robfig/cron/v3 v3.0.1
+	golang.org/x/net v0.6.0
+	gopkg.in/yaml.v3 v3.0.1
+	modernc.org/sqlite v1.33.1
+)
+
+require (
+	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/emersion/go-message v0.18.2 // indirect
+	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6 // indirect
+	github.com/google/jsonschema-go v0.3.0 // indirect
+	github.com/google/uuid v1.6.0 // indirect
+	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
+	github.com/ncruces/go-strftime v0.1.9 // indirect
+	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
+	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
+	golang.org/x/sys v0.40.0 // indirect
+	modernc.org/gc/v3 v3.0.0-20240107210532-573471604cb6 // indirect
+	modernc.org/libc v1.55.3 // indirect
+	modernc.org/mathutil v1.6.0 // indirect
+	modernc.org/memory v1.8.0 // indirect
+	modernc.org/strutil v1.2.0 // indirect
+	modernc.org/token v1.1.0 // indirect
+)
+````
+
+## File: README.md
+````markdown
+# or3-intern (v1)
+
+Go rewrite of nanobot with SQLite persistence + hybrid long-term memory retrieval.
+
+## Quick start
+
+1) Run guided setup:
+```bash
+go run ./cmd/or3-intern init
+```
+
+2) Start interactive chat:
+```bash
+go run ./cmd/or3-intern chat
+```
+
+3) Or run enabled external channels:
+```bash
+go run ./cmd/or3-intern serve
+```
+
+The `init` command can store your provider settings in `~/.or3-intern/config.json`, so you do not need to manually manage env vars unless you want to.
+
+## Commands
+
+- `or3-intern init` guided first-run setup
+- `or3-intern chat` interactive CLI
+- `or3-intern serve` run enabled external channels (Telegram / Slack / Discord / WhatsApp bridge / Email)
+- `or3-intern agent -m "hello"` one-shot
+- `or3-intern skills ...` list, inspect, search, install, update, check, and remove ClawHub/OpenClaw-compatible skills
+- `or3-intern migrate-jsonl /path/to/session.jsonl [session_key]`
+
+## Notes
+
+- Uses SQLite with WAL + single-connection for deterministic low-RAM operation.
+- History is always fetched with `LIMIT` and never full-scanned.
+- Hybrid memory retrieval: pinned + vector (cosine) + FTS keyword search.
+- External channels are disabled by default; configure them in `config.json` or via env vars before using `serve`.
+- Supported non-CLI channels: Telegram, Slack, Discord, Email, and a local WhatsApp bridge.
+
+## Dependencies
+
+This repo uses external Go modules (SQLite driver + cron parser). If you're building in an offline environment, you must vendor modules ahead of time.
+
+## MCP Tool Integrations
+
+MCP support is optional and disabled by default. Configure servers under `tools.mcpServers`; enabled servers connect during startup, their tools are registered before workers begin handling turns, and per-server connection failures are logged and skipped instead of aborting the whole process.
+
+Remote tools are exposed to the model as normal function tools with stable local names like `mcp_<server>_<tool>`.
+
+```json
+{
+  "tools": {
+    "mcpServers": {
+      "filesystem": {
+        "enabled": true,
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/root"],
+        "env": {
+          "NODE_ENV": "production"
+        },
+        "connectTimeoutSeconds": 10,
+        "toolTimeoutSeconds": 30
+      },
+      "localDocs": {
+        "enabled": false,
+        "transport": "streamableHttp",
+        "url": "http://127.0.0.1:8080/mcp",
+        "headers": {
+          "Authorization": "Bearer <token>"
+        },
+        "allowInsecureHttp": true,
+        "connectTimeoutSeconds": 10,
+        "toolTimeoutSeconds": 30
+      }
+    }
+  }
+}
+```
+
+Supported transports:
+
+- `stdio`
+- `sse`
+- `streamableHttp`
+
+Safety notes:
+
+- Prefer `stdio` for local trusted servers.
+- HTTP transports are explicit. Plain `http://` endpoints are rejected unless `allowInsecureHttp=true`, and even then only for loopback/localhost addresses.
+- Stdio MCP servers inherit the ambient process environment, and any keys in the configured `env` map override those inherited values.
+- MCP tool calls use the existing tool loop, per-call timeout, error handling, and artifact spill path.
+- v1 intentionally does not include live reconnect loops, hot-add/hot-remove of MCP tools, SQLite persistence for tool catalogs, or a separate MCP gateway service.
+
+## Channel Integrations
+
+`or3-intern` supports these non-CLI channels:
+
+- Telegram
+- Slack
+- Discord
+- Email
+- WhatsApp via a local bridge
+
+All external channels are disabled by default.
+
+### Running Channels
+
+Use the CLI chat for local terminal interaction:
+
+```bash
+go run ./cmd/or3-intern chat
+```
+
+Use the channel runner for enabled external integrations:
+
+```bash
+go run ./cmd/or3-intern serve
+```
+
+`serve` starts the agent workers plus any enabled channels from your config.
+
+### Environment Variables
+
+You can configure channels through `config.json` or environment variables.
+
+Available env vars:
+
+```dotenv
+OR3_TELEGRAM_TOKEN=
+OR3_SLACK_APP_TOKEN=
+OR3_SLACK_BOT_TOKEN=
+OR3_DISCORD_TOKEN=
+OR3_WHATSAPP_BRIDGE_URL=ws://127.0.0.1:3001/ws
+OR3_WHATSAPP_BRIDGE_TOKEN=
+OR3_EMAIL_IMAP_HOST=
+OR3_EMAIL_IMAP_PORT=993
+OR3_EMAIL_IMAP_USERNAME=
+OR3_EMAIL_IMAP_PASSWORD=
+OR3_EMAIL_SMTP_HOST=
+OR3_EMAIL_SMTP_PORT=587
+OR3_EMAIL_SMTP_USERNAME=
+OR3_EMAIL_SMTP_PASSWORD=
+OR3_EMAIL_FROM_ADDRESS=
+```
+
+### Config Shape
+
+The `config.json` channel section looks like this:
+
+```json
+{
+	"channels": {
+		"telegram": {
+			"enabled": false,
+			"token": "",
+			"apiBase": "https://api.telegram.org",
+			"pollSeconds": 2,
+			"defaultChatId": "",
+			"allowedChatIds": []
+		},
+		"slack": {
+			"enabled": false,
+			"appToken": "",
+			"botToken": "",
+			"apiBase": "https://slack.com/api",
+			"socketModeUrl": "",
+			"defaultChannelId": "",
+			"allowedUserIds": [],
+			"requireMention": true
+		},
+		"discord": {
+			"enabled": false,
+			"token": "",
+			"apiBase": "https://discord.com/api/v10",
+			"gatewayUrl": "",
+			"defaultChannelId": "",
+			"allowedUserIds": [],
+			"requireMention": true
+		},
+		"whatsApp": {
+			"enabled": false,
+			"bridgeUrl": "ws://127.0.0.1:3001/ws",
+			"bridgeToken": "",
+			"defaultTo": "",
+			"allowedFrom": []
+    },
+    "email": {
+      "enabled": false,
+      "openAccess": false,
+      "consentGranted": false,
+      "allowedSenders": [],
+      "defaultTo": "",
+      "autoReplyEnabled": false,
+      "pollIntervalSeconds": 30,
+      "markSeen": true,
+      "maxBodyChars": 4000,
+      "subjectPrefix": "Re: ",
+      "fromAddress": "",
+      "imapMailbox": "INBOX",
+      "imapHost": "",
+      "imapPort": 993,
+      "imapUseSSL": true,
+      "imapUsername": "",
+      "imapPassword": "",
+      "smtpHost": "",
+      "smtpPort": 587,
+      "smtpUseTLS": true,
+      "smtpUseSSL": false,
+      "smtpUsername": "",
+      "smtpPassword": ""
+		}
+	}
+}
+```
+
+### Telegram
+
+- Set `channels.telegram.enabled=true`
+- Set `channels.telegram.token` or `OR3_TELEGRAM_TOKEN`
+- Optionally set `defaultChatId` for outbound `send_message` defaults
+- Optionally restrict inbound traffic with `allowedChatIds`
+
+Telegram uses polling, so no webhook setup is required.
+
+### Slack
+
+- Set `channels.slack.enabled=true`
+- Set `channels.slack.appToken` and `channels.slack.botToken`
+- Optionally set `defaultChannelId`
+- Optionally restrict inbound traffic with `allowedUserIds`
+- `requireMention=true` is recommended for shared channels
+
+Slack uses Socket Mode for inbound events and Web API for outbound messages.
+
+### Discord
+
+- Set `channels.discord.enabled=true`
+- Set `channels.discord.token`
+- Optionally set `defaultChannelId`
+- Optionally restrict inbound traffic with `allowedUserIds`
+- `requireMention=true` is recommended for guild channels
+
+Discord uses the Gateway for inbound events and REST for outbound messages.
+
+### WhatsApp Bridge
+
+WhatsApp support expects a compatible local bridge service.
+
+- Set `channels.whatsApp.enabled=true`
+- Set `channels.whatsApp.bridgeUrl` or `OR3_WHATSAPP_BRIDGE_URL`
+- Optionally set `channels.whatsApp.bridgeToken`
+- Optionally set `defaultTo` and `allowedFrom`
+
+The bridge should expose a websocket endpoint compatible with the message format used by `or3-intern`.
+
+### Email
+
+- Set `channels.email.enabled=true`
+- Set `channels.email.consentGranted=true` only after explicit permission to access the mailbox
+- Set either `channels.email.openAccess=true` or a non-empty `allowedSenders` allowlist
+- Configure IMAP with `imapHost`, `imapPort`, `imapUsername`, `imapPassword`, and optionally `imapMailbox`
+- Configure SMTP with `smtpHost`, `smtpPort`, `smtpUsername`, `smtpPassword`, and optionally `fromAddress`
+- `autoReplyEnabled=false` keeps inbound email from being auto-answered by normal turns; explicit `send_message` sends still work when a `to` address is provided
+- v1 is text-first: plain text is preferred, HTML falls back to lightweight text conversion, and attachments are intentionally ignored
+
+Email only starts under `serve`. Inbound mail is polled over IMAP, routed into session keys like `email:user@example.com`, and outbound replies reuse the latest stored subject/message-id threading metadata when available.
+
+### Session Keys
+
+External channels automatically namespace session keys by platform, for example:
+
+- `telegram:<chat-id>`
+- `slack:<channel-id>`
+- `discord:<channel-id>`
+- `email:<normalized-address>`
+- `whatsapp:<chat-id>`
+
+This keeps chat history and long-term memory isolated by channel/session.
+
+## New Features
+
+### Bootstrap Files
+
+Three markdown files configure the agent's identity and persistent context:
+
+- **IDENTITY.md** – Loaded once at startup; defines who the agent is (name, role, personality traits). Injects into every system prompt.
+- **MEMORY.md** – Static knowledge the agent always has access to (facts, preferences, standing instructions). Injects into every system prompt.
+- **HEARTBEAT.md** – Autonomous task list injected only during heartbeat, cron, webhook, and file-watch turns, not user-initiated chats. It is reloaded on each autonomous turn so edits apply without restart.
+
+Configure file paths in `config.json`:
+
+```json
+{
+  "identityFile": "/path/to/IDENTITY.md",
+  "memoryFile":   "/path/to/MEMORY.md",
+  "heartbeat": {
+    "enabled": false,
+    "intervalMinutes": 30,
+    "tasksFile": "/path/to/HEARTBEAT.md",
+    "sessionKey": "heartbeat:default"
+  }
+}
+```
+
+`heartbeat.enabled` is off by default and only applies to `or3-intern serve`.
+
+### Document Index
+
+Opt-in file indexing allows the agent to retrieve relevant file excerpts as context for each query.
+
+```json
+{
+  "docIndex": {
+    "enabled": true,
+    "roots": ["/path/to/docs", "/path/to/notes"],
+    "maxFiles": 200,
+    "maxFileBytes": 65536,
+    "refreshSeconds": 300,
+    "retrieveLimit": 5
+  }
+}
+```
+
+- Files are indexed at startup and re-synced every `refreshSeconds`.
+- Retrieval uses full-text search (FTS5) to find relevant excerpts.
+- Only non-empty matches are injected into the system prompt.
+- Supported file types: `.md`, `.txt`, `.go`, `.py`, `.js`, `.ts`, `.json`, `.yaml`, `.toml`, `.sh`.
+
+### Session Scopes
+
+Link multiple session keys to a shared scope for cross-channel continuity. Sessions in the same scope share conversation history.
+
+```bash
+# Link a Telegram session and a Discord session to one scope
+or3-intern scope link telegram:12345 my-project
+or3-intern scope link discord:67890 my-project
+
+# List all sessions in a scope
+or3-intern scope list my-project
+
+# Resolve the scope for a session
+or3-intern scope resolve telegram:12345
+```
+
+### ClawHub-Compatible Skills
+
+Skills can include a `skill.json` manifest for rich metadata:
+
+```json
+{
+  "summary": "Does something useful",
+  "entrypoints": [
+    {
+      "name": "run",
+      "command": ["./run.sh", "--mode", "fast"],
+      "timeoutSeconds": 30,
+      "acceptsStdin": false
+    }
+  ]
+}
+```
+
+`or3-intern` now loads ClawHub/OpenClaw-style skill bundles directly from:
+
+- bundled: `builtin_skills/`
+- managed: `~/.or3-intern/skills`
+- workspace: `<workspace>/skills`
+
+Precedence is `workspace > managed > bundled`. A legacy `<workspace>/workspace_skills` folder is still scanned below the new workspace root for migration safety.
+
+Supported frontmatter keys include:
+
+- `name`
+- `description`
+- `homepage`
+- `user-invocable`
+- `disable-model-invocation`
+- `command-dispatch`
+- `command-tool`
+- `command-arg-mode`
+
+Supported metadata namespaces:
+
+- `metadata.openclaw`
+- `metadata.clawdbot`
+- `metadata.clawdis`
+
+Eligibility checks cover OS, required binaries, any-of binaries, required env vars, required config flags, and explicit per-skill disable flags from config. Ineligible skills remain inspectable through `read_skill` and `or3-intern skills info/check`.
+
+Per-skill config is additive and lightweight:
+
+```json
+{
+  "skills": {
+    "managedDir": "/Users/me/.or3-intern/skills",
+    "load": {
+      "extraDirs": ["/opt/shared-skills"],
+      "watch": false,
+      "watchDebounceMs": 250
+    },
+    "entries": {
+      "demo-skill": {
+        "enabled": true,
+        "apiKey": "secret",
+        "env": {
+          "DEMO_MODE": "1"
+        },
+        "config": {
+          "browser": {
+            "enabled": true
+          }
+        }
+      }
+    },
+    "clawHub": {
+      "siteUrl": "https://clawhub.ai",
+      "registryUrl": "https://clawhub.ai",
+      "installDir": "skills"
+    }
+  }
+}
+```
+
+Skill env injection is scoped to a live run and is not copied into prompts or persisted message history.
+
+Use the native management commands instead of the Node/Bun `clawhub` CLI:
+
+```bash
+or3-intern skills list
+or3-intern skills list --eligible
+or3-intern skills info <name>
+or3-intern skills check
+or3-intern skills search "calendar"
+or3-intern skills install <slug>
+or3-intern skills update <name>
+or3-intern skills update --all
+or3-intern skills remove <name>
+```
+
+Explicit user invocation is supported for user-invocable skills:
+
+```text
+/my-skill raw arguments here
+```
+
+For `command-dispatch: tool`, `or3-intern` forwards the raw argument string directly to the target tool. Otherwise it starts a normal model turn seeded with the selected `SKILL.md`.
+
+Trust model:
+
+- Treat third-party skills as untrusted input.
+- Installer hints from skill metadata are informational only; `or3-intern` does not auto-run them.
+- Not every ClawHub skill is portable. Skills that depend on unsupported OpenClaw-only tools, custom frontmatter-defined tools, Nix/plugin flows, or remote node assumptions are reported as unavailable instead of failing silently.
+
+### Triggers
+
+**Webhook server** – receives POST requests and dispatches them as agent events:
+
+```json
+{
+  "triggers": {
+    "webhook": {
+      "enabled": true,
+      "addr": ":8080",
+      "secret": "my-secret-token"
+    }
+  }
+}
+```
+
+The webhook server listens at `/webhook` (fixed path).
+
+**File watcher** – polls configured paths for new/changed files:
+
+```json
+{
+  "triggers": {
+    "fileWatch": {
+      "enabled": true,
+      "paths": ["/path/to/watch", "/another/path"],
+      "pollSeconds": 10,
+      "debounceSeconds": 2
+    }
+  }
+}
+```
+
+Both trigger types use `HEARTBEAT.md` instructions when dispatching autonomous turns.
+
+### Heartbeat Service
+
+Heartbeat is a timer-driven autonomous trigger that runs inside `or3-intern serve`.
+
+```json
+{
+  "heartbeat": {
+    "enabled": true,
+    "intervalMinutes": 15,
+    "tasksFile": "/path/to/HEARTBEAT.md",
+    "sessionKey": "heartbeat:default"
+  }
+}
+```
+
+- Heartbeat is disabled by default.
+- Heartbeat does not run during `chat` or one-shot `agent` commands.
+- The interval is configured in minutes and normalized to a sane minimum.
+- Heartbeat uses its own session key so its history and long-term memory stay deterministic across ticks.
+- `HEARTBEAT.md` is reread on each autonomous turn, so edits apply without restarting `serve`.
+- Empty files, comment-only files, and missing files are skipped instead of triggering a model call.
+- Heartbeat turns do not auto-send a normal assistant reply anywhere. If the agent should proactively notify someone, it must call `send_message` explicitly.
+
+Use heartbeat when the agent should periodically review a standing background task list. Use cron when you need a specific schedule or per-job delivery target.
+
+### Streaming
+
+CLI (`chat` command) supports live streamed output. The assistant's response is printed token-by-token as it arrives from the provider. No additional configuration required.
+
+### Cron Jobs with Per-Job Session Keys
+
+Scheduled jobs can target a specific session (and thus its history/memory) independently of the default session:
+
+```json
+{
+  "payload": {
+    "kind": "agent_turn",
+    "message": "Daily standup summary",
+    "session_key": "slack:standup-channel",
+    "channel": "slack",
+    "to": "standup-channel"
+  }
+}
+```
+
+When `session_key` is set on a job payload, it overrides the global `defaultSessionKey` for that job.
 ````
 
 ## File: internal/agent/prompt.go
@@ -16498,11 +12103,15 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"or3-intern/internal/artifacts"
 	"or3-intern/internal/db"
+	"or3-intern/internal/heartbeat"
 	"or3-intern/internal/memory"
 	"or3-intern/internal/providers"
+	"or3-intern/internal/scope"
 	"or3-intern/internal/skills"
 )
 
@@ -16538,7 +12147,25 @@ const (
 	defaultVisionMaxImages        = 4
 	defaultVisionMaxImageBytes    = 4 << 20
 	defaultVisionTotalBytes       = 8 << 20
+	embedCacheTTL                 = 5 * time.Minute
+	embedCacheMaxEntries          = 128
 )
+
+type embedCacheKey struct {
+	model string
+	input string
+}
+
+type embedCacheEntry struct {
+	vec       []float32
+	expiresAt time.Time
+	usedAt    time.Time
+}
+
+var promptEmbedCache = struct {
+	mu      sync.Mutex
+	entries map[embedCacheKey]embedCacheEntry
+}{entries: map[embedCacheKey]embedCacheEntry{}}
 
 type PromptParts struct {
 	System  []providers.ChatMessage
@@ -16574,12 +12201,13 @@ type Builder struct {
 	TopK       int
 
 	// New fields for lightweight OpenClaw parity
-	IdentityText     string // content of IDENTITY.md
-	StaticMemory     string // content of MEMORY.md
-	HeartbeatText    string // content of HEARTBEAT.md – injected only for autonomous turns
-	DocRetriever     *memory.DocRetriever // for indexed file context
-	DocScopeKey      string               // scope key for doc retrieval
-	DocRetrieveLimit int                  // max docs to retrieve
+	IdentityText       string               // content of IDENTITY.md
+	StaticMemory       string               // content of MEMORY.md
+	HeartbeatText      string               // content of HEARTBEAT.md – injected only for autonomous turns
+	HeartbeatTasksFile string               // configured heartbeat file path for per-turn refresh
+	DocRetriever       *memory.DocRetriever // for indexed file context
+	DocRetrieveLimit   int                  // max docs to retrieve
+	WorkspaceDir       string
 }
 
 // Build builds a prompt snapshot. It is a convenience wrapper around BuildWithOptions.
@@ -16589,7 +12217,13 @@ func (b *Builder) Build(ctx context.Context, sessionKey string, userMessage stri
 
 // BuildWithOptions builds a prompt snapshot using the provided options.
 func (b *Builder) BuildWithOptions(ctx context.Context, opts BuildOptions) (PromptParts, []memory.Retrieved, error) {
-	pinned, err := b.DB.GetPinned(ctx, opts.SessionKey)
+	scopeKey := opts.SessionKey
+	if b.DB != nil && strings.TrimSpace(opts.SessionKey) != "" {
+		if resolved, err := b.DB.ResolveScopeKey(ctx, opts.SessionKey); err == nil && strings.TrimSpace(resolved) != "" {
+			scopeKey = resolved
+		}
+	}
+	pinned, err := b.DB.GetPinned(ctx, scopeKey)
 	if err != nil {
 		return PromptParts{}, nil, err
 	}
@@ -16598,9 +12232,9 @@ func (b *Builder) BuildWithOptions(ctx context.Context, opts BuildOptions) (Prom
 	// embed and retrieve
 	var retrieved []memory.Retrieved
 	if b.Mem != nil && b.Provider != nil && strings.TrimSpace(opts.UserMessage) != "" {
-		vec, err := b.Provider.Embed(ctx, b.EmbedModel, opts.UserMessage)
+		vec, err := cachedEmbed(ctx, b.Provider, b.EmbedModel, opts.UserMessage)
 		if err == nil {
-			retrieved, _ = b.Mem.Retrieve(ctx, opts.SessionKey, opts.UserMessage, vec, b.VectorK, b.FTSK, b.TopK)
+			retrieved, _ = b.Mem.Retrieve(ctx, scopeKey, opts.UserMessage, vec, b.VectorK, b.FTSK, b.TopK)
 		}
 	}
 	memText := formatRetrieved(retrieved)
@@ -16612,7 +12246,7 @@ func (b *Builder) BuildWithOptions(ctx context.Context, opts BuildOptions) (Prom
 		if limit <= 0 {
 			limit = 5
 		}
-		docs, _ := b.DocRetriever.RetrieveDocs(ctx, b.DocScopeKey, opts.UserMessage, limit)
+		docs, _ := b.DocRetriever.RetrieveDocs(ctx, scope.GlobalMemoryScope, opts.UserMessage, limit)
 		if len(docs) > 0 {
 			var sb strings.Builder
 			for i, d := range docs {
@@ -16621,8 +12255,11 @@ func (b *Builder) BuildWithOptions(ctx context.Context, opts BuildOptions) (Prom
 			docContextText = strings.TrimSpace(sb.String())
 		}
 	}
+	workspaceContextText := memory.BuildWorkspaceContext(memory.WorkspaceContextConfig{
+		WorkspaceDir: b.WorkspaceDir,
+	}, opts.UserMessage)
 
-	histRows, err := b.DB.GetLastMessages(ctx, opts.SessionKey, b.HistoryMax)
+	histRows, err := b.DB.GetLastMessagesScoped(ctx, opts.SessionKey, b.HistoryMax)
 	if err != nil {
 		return PromptParts{}, nil, err
 	}
@@ -16650,13 +12287,26 @@ func (b *Builder) BuildWithOptions(ctx context.Context, opts BuildOptions) (Prom
 
 	heartbeat := ""
 	if opts.Autonomous {
-		heartbeat = b.HeartbeatText
+		heartbeat = b.currentHeartbeatText()
 	}
-	sysText := b.composeSystemPrompt(pinnedText, memText, b.IdentityText, b.StaticMemory, heartbeat, docContextText)
+	sysText := b.composeSystemPrompt(pinnedText, memText, b.IdentityText, b.StaticMemory, heartbeat, docContextText, workspaceContextText)
 	sys := []providers.ChatMessage{
 		{Role: "system", Content: sysText},
 	}
 	return PromptParts{System: sys, History: hist}, retrieved, nil
+}
+
+func (b *Builder) currentHeartbeatText() string {
+	if b == nil {
+		return ""
+	}
+	if path, text, err := heartbeat.LoadTasksFile(b.HeartbeatTasksFile, b.WorkspaceDir); err == nil && strings.TrimSpace(path) != "" {
+		if heartbeat.HasActiveInstructions(text) {
+			return text
+		}
+		return ""
+	}
+	return strings.TrimSpace(b.HeartbeatText)
 }
 
 func attachmentsFromPayload(payload map[string]any) []artifacts.Attachment {
@@ -16796,7 +12446,7 @@ func readCappedFile(path string, maxBytes int64) ([]byte, error) {
 	return data, nil
 }
 
-func (b *Builder) composeSystemPrompt(pinnedText, memText, identityText, staticMemoryText, heartbeatText, docContextText string) string {
+func (b *Builder) composeSystemPrompt(pinnedText, memText, identityText, staticMemoryText, heartbeatText, docContextText, workspaceContextText string) string {
 	maxEach := b.BootstrapMaxChars
 	if maxEach <= 0 {
 		maxEach = defaultBootstrapMaxChars
@@ -16844,10 +12494,13 @@ func (b *Builder) composeSystemPrompt(pinnedText, memText, identityText, staticM
 	}
 	sections = append(sections, section{title: "Pinned Memory", text: pinnedText})
 	sections = append(sections, section{title: "Retrieved Memory", text: memText})
+	if t := strings.TrimSpace(workspaceContextText); t != "" {
+		sections = append(sections, section{title: "Workspace Context", text: truncateText(t, maxEach)})
+	}
 	if t := strings.TrimSpace(docContextText); t != "" {
 		sections = append(sections, section{title: "Indexed File Context", text: truncateText(t, maxEach)})
 	}
-	sections = append(sections, section{title: "Skills Inventory", text: b.Skills.Summary(skillsMax)})
+	sections = append(sections, section{title: "Skills Inventory", text: b.Skills.ModelSummary(skillsMax)})
 
 	var out strings.Builder
 	out.WriteString("# System Prompt\n")
@@ -16912,2090 +12565,51 @@ func oneLine(s string, max int) string {
 	}
 	return s
 }
-````
 
-## File: internal/db/db.go
-````go
-package db
+func cachedEmbed(ctx context.Context, provider *providers.Client, model, input string) ([]float32, error) {
+	input = strings.TrimSpace(input)
+	model = strings.TrimSpace(model)
+	if provider == nil {
+		return nil, fmt.Errorf("provider not configured")
+	}
+	if model == "" || input == "" {
+		return provider.Embed(ctx, model, input)
+	}
+	key := embedCacheKey{model: model, input: input}
+	now := time.Now()
+	promptEmbedCache.mu.Lock()
+	if entry, ok := promptEmbedCache.entries[key]; ok && entry.expiresAt.After(now) {
+		entry.usedAt = now
+		promptEmbedCache.entries[key] = entry
+		vec := append([]float32(nil), entry.vec...)
+		promptEmbedCache.mu.Unlock()
+		return vec, nil
+	}
+	promptEmbedCache.mu.Unlock()
 
-import (
-	"context"
-	"database/sql"
-	"fmt"
-	"time"
-
-	"or3-intern/internal/scope"
-
-	_ "modernc.org/sqlite"
-)
-
-type DB struct {
-	SQL *sql.DB
-}
-
-func Open(path string) (*DB, error) {
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)", path)
-	s, err := sql.Open("sqlite", dsn)
+	vec, err := provider.Embed(ctx, model, input)
 	if err != nil {
 		return nil, err
 	}
-	s.SetMaxOpenConns(1) // deterministic, low-RAM
-	d := &DB{SQL: s}
-	if err := d.migrate(context.Background()); err != nil {
-		_ = s.Close()
-		return nil, err
-	}
-	return d, nil
-}
-
-func (d *DB) Close() error { return d.SQL.Close() }
-
-func (d *DB) migrate(ctx context.Context) error {
-	stmts := []string{
-		`CREATE TABLE IF NOT EXISTS sessions(
-			key TEXT PRIMARY KEY,
-			created_at INTEGER NOT NULL,
-			updated_at INTEGER NOT NULL,
-			metadata_json TEXT NOT NULL DEFAULT '{}',
-			last_consolidated_msg_id INTEGER NOT NULL DEFAULT 0
-		);`,
-		`CREATE TABLE IF NOT EXISTS messages(
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			session_key TEXT NOT NULL,
-			role TEXT NOT NULL,
-			content TEXT NOT NULL,
-			payload_json TEXT NOT NULL DEFAULT '{}',
-			created_at INTEGER NOT NULL,
-			FOREIGN KEY(session_key) REFERENCES sessions(key) ON DELETE CASCADE
-		);`,
-		`CREATE INDEX IF NOT EXISTS messages_session_id ON messages(session_key, id);`,
-		`CREATE TABLE IF NOT EXISTS artifacts(
-			id TEXT PRIMARY KEY,
-			session_key TEXT NOT NULL,
-			mime TEXT NOT NULL,
-			path TEXT NOT NULL,
-			size_bytes INTEGER NOT NULL,
-			created_at INTEGER NOT NULL,
-			FOREIGN KEY(session_key) REFERENCES sessions(key) ON DELETE CASCADE
-		);`,
-		`CREATE TABLE IF NOT EXISTS memory_pinned(
-			session_key TEXT NOT NULL DEFAULT '` + scope.GlobalMemoryScope + `',
-			key TEXT NOT NULL,
-			content TEXT NOT NULL,
-			updated_at INTEGER NOT NULL,
-			PRIMARY KEY(session_key, key)
-		);`,
-		`CREATE TABLE IF NOT EXISTS memory_notes(
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			session_key TEXT NOT NULL DEFAULT '` + scope.GlobalMemoryScope + `',
-			text TEXT NOT NULL,
-			embedding BLOB NOT NULL,
-			source_message_id INTEGER,
-			tags TEXT NOT NULL DEFAULT '',
-			created_at INTEGER NOT NULL
-		);`,
-		// FTS5
-		`CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(text, content='memory_notes', content_rowid='id');`,
-		`CREATE TRIGGER IF NOT EXISTS memory_notes_ai AFTER INSERT ON memory_notes BEGIN
-			INSERT INTO memory_fts(rowid, text) VALUES (new.id, new.text);
-		END;`,
-		`CREATE TRIGGER IF NOT EXISTS memory_notes_ad AFTER DELETE ON memory_notes BEGIN
-			INSERT INTO memory_fts(memory_fts, rowid, text) VALUES('delete', old.id, old.text);
-		END;`,
-		`CREATE TRIGGER IF NOT EXISTS memory_notes_au AFTER UPDATE ON memory_notes BEGIN
-			INSERT INTO memory_fts(memory_fts, rowid, text) VALUES('delete', old.id, old.text);
-			INSERT INTO memory_fts(rowid, text) VALUES (new.id, new.text);
-		END;`,
-		`CREATE TABLE IF NOT EXISTS subagent_jobs(
-			id TEXT PRIMARY KEY,
-			parent_session_key TEXT NOT NULL,
-			child_session_key TEXT NOT NULL,
-			channel TEXT NOT NULL,
-			reply_to TEXT NOT NULL,
-			task TEXT NOT NULL,
-			status TEXT NOT NULL,
-			result_preview TEXT NOT NULL DEFAULT '',
-			artifact_id TEXT NOT NULL DEFAULT '',
-			error_text TEXT NOT NULL DEFAULT '',
-			requested_at INTEGER NOT NULL,
-			started_at INTEGER NOT NULL DEFAULT 0,
-			finished_at INTEGER NOT NULL DEFAULT 0,
-			attempts INTEGER NOT NULL DEFAULT 0,
-			metadata_json TEXT NOT NULL DEFAULT '{}'
-		);`,
-		`CREATE INDEX IF NOT EXISTS subagent_jobs_status_requested_at ON subagent_jobs(status, requested_at);`,
-		`CREATE INDEX IF NOT EXISTS subagent_jobs_parent_session ON subagent_jobs(parent_session_key, requested_at);`,
-		`CREATE TABLE IF NOT EXISTS session_links(
-			session_key TEXT PRIMARY KEY,
-			scope_key TEXT NOT NULL,
-			linked_at INTEGER NOT NULL,
-			metadata_json TEXT NOT NULL DEFAULT '{}'
-		);`,
-		`CREATE INDEX IF NOT EXISTS session_links_scope_key ON session_links(scope_key);`,
-		`CREATE TABLE IF NOT EXISTS memory_docs(
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			scope_key TEXT NOT NULL,
-			path TEXT NOT NULL,
-			kind TEXT NOT NULL,
-			title TEXT NOT NULL DEFAULT '',
-			summary TEXT NOT NULL DEFAULT '',
-			text TEXT NOT NULL,
-			embedding BLOB,
-			hash TEXT NOT NULL,
-			mtime_ms INTEGER NOT NULL,
-			size_bytes INTEGER NOT NULL,
-			active INTEGER NOT NULL DEFAULT 1,
-			updated_at INTEGER NOT NULL,
-			UNIQUE(scope_key, path)
-		);`,
-		`CREATE INDEX IF NOT EXISTS memory_docs_scope_path ON memory_docs(scope_key, path);`,
-		`CREATE VIRTUAL TABLE IF NOT EXISTS memory_docs_fts USING fts5(title, summary, text, content='memory_docs', content_rowid='id');`,
-		`CREATE TRIGGER IF NOT EXISTS memory_docs_ai AFTER INSERT ON memory_docs BEGIN
-			INSERT INTO memory_docs_fts(rowid, title, summary, text) VALUES (new.id, new.title, new.summary, new.text);
-		END;`,
-		`CREATE TRIGGER IF NOT EXISTS memory_docs_ad AFTER DELETE ON memory_docs BEGIN
-			INSERT INTO memory_docs_fts(memory_docs_fts, rowid, title, summary, text) VALUES('delete', old.id, old.title, old.summary, old.text);
-		END;`,
-		`CREATE TRIGGER IF NOT EXISTS memory_docs_au AFTER UPDATE ON memory_docs BEGIN
-			INSERT INTO memory_docs_fts(memory_docs_fts, rowid, title, summary, text) VALUES('delete', old.id, old.title, old.summary, old.text);
-			INSERT INTO memory_docs_fts(rowid, title, summary, text) VALUES (new.id, new.title, new.summary, new.text);
-		END;`,
-	}
-	for _, s := range stmts {
-		if _, err := d.SQL.ExecContext(ctx, s); err != nil {
-			return err
+	promptEmbedCache.mu.Lock()
+	if len(promptEmbedCache.entries) >= embedCacheMaxEntries {
+		var oldestKey embedCacheKey
+		var oldest time.Time
+		for k, entry := range promptEmbedCache.entries {
+			if oldest.IsZero() || entry.usedAt.Before(oldest) {
+				oldest = entry.usedAt
+				oldestKey = k
+			}
 		}
-	}
-	if err := d.migrateMemoryPinned(ctx); err != nil {
-		return err
-	}
-	if err := d.ensureMemoryNotesSessionColumn(ctx); err != nil {
-		return err
-	}
-	if err := d.migrateLegacyGlobalMemoryScope(ctx); err != nil {
-		return err
-	}
-	return nil
-}
-
-func NowMS() int64 { return time.Now().UnixMilli() }
-
-func (d *DB) migrateMemoryPinned(ctx context.Context) error {
-	hasSession, err := d.tableHasColumn(ctx, "memory_pinned", "session_key")
-	if err != nil {
-		return err
-	}
-	if hasSession {
-		_, err = d.SQL.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS memory_pinned_session_key_key ON memory_pinned(session_key, key);`)
-		return err
-	}
-	stmts := []string{
-		`ALTER TABLE memory_pinned RENAME TO memory_pinned_legacy;`,
-		`CREATE TABLE memory_pinned(
-			session_key TEXT NOT NULL DEFAULT '` + scope.GlobalMemoryScope + `',
-			key TEXT NOT NULL,
-			content TEXT NOT NULL,
-			updated_at INTEGER NOT NULL,
-			PRIMARY KEY(session_key, key)
-		);`,
-		`INSERT INTO memory_pinned(session_key, key, content, updated_at)
-		 SELECT '` + scope.GlobalMemoryScope + `', key, content, updated_at FROM memory_pinned_legacy;`,
-		`DROP TABLE memory_pinned_legacy;`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS memory_pinned_session_key_key ON memory_pinned(session_key, key);`,
-	}
-	for _, stmt := range stmts {
-		if _, err := d.SQL.ExecContext(ctx, stmt); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (d *DB) ensureMemoryNotesSessionColumn(ctx context.Context) error {
-	hasSession, err := d.tableHasColumn(ctx, "memory_notes", "session_key")
-	if err != nil {
-		return err
-	}
-	if !hasSession {
-		if _, err := d.SQL.ExecContext(ctx, `ALTER TABLE memory_notes ADD COLUMN session_key TEXT NOT NULL DEFAULT '`+scope.GlobalMemoryScope+`';`); err != nil {
-			return err
-		}
-	}
-	_, err = d.SQL.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS memory_notes_session_id ON memory_notes(session_key, id);`)
-	return err
-}
-
-func (d *DB) migrateLegacyGlobalMemoryScope(ctx context.Context) error {
-	if scope.GlobalMemoryScope == scope.GlobalScopeAlias {
-		return nil
-	}
-	if _, err := d.SQL.ExecContext(ctx,
-		`INSERT INTO memory_pinned(session_key, key, content, updated_at)
-		 SELECT ?, key, content, updated_at FROM memory_pinned WHERE session_key=?
-		 ON CONFLICT(session_key, key) DO UPDATE SET content=excluded.content, updated_at=excluded.updated_at`,
-		scope.GlobalMemoryScope, scope.GlobalScopeAlias); err != nil {
-		return err
-	}
-	if _, err := d.SQL.ExecContext(ctx, `DELETE FROM memory_pinned WHERE session_key=?`, scope.GlobalScopeAlias); err != nil {
-		return err
-	}
-	_, err := d.SQL.ExecContext(ctx, `UPDATE memory_notes SET session_key=? WHERE session_key=?`, scope.GlobalMemoryScope, scope.GlobalScopeAlias)
-	return err
-}
-
-func (d *DB) tableHasColumn(ctx context.Context, tableName, columnName string) (bool, error) {
-	rows, err := d.SQL.QueryContext(ctx, `PRAGMA table_info(`+tableName+`)`)
-	if err != nil {
-		return false, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var cid int
-		var name, ctype string
-		var notNull, pk int
-		var defaultValue any
-		if err := rows.Scan(&cid, &name, &ctype, &notNull, &defaultValue, &pk); err != nil {
-			return false, err
-		}
-		if name == columnName {
-			return true, nil
-		}
-	}
-	return false, rows.Err()
-}
-````
-
-## File: README.md
-````markdown
-# or3-intern (v1)
-
-Go rewrite of nanobot with SQLite persistence + hybrid long-term memory retrieval.
-
-## Quick start
-
-1) Run guided setup:
-```bash
-go run ./cmd/or3-intern init
-```
-
-2) Start interactive chat:
-```bash
-go run ./cmd/or3-intern chat
-```
-
-3) Or run enabled external channels:
-```bash
-go run ./cmd/or3-intern serve
-```
-
-The `init` command can store your provider settings in `~/.or3-intern/config.json`, so you do not need to manually manage env vars unless you want to.
-
-## Commands
-
-- `or3-intern init` guided first-run setup
-- `or3-intern chat` interactive CLI
-- `or3-intern serve` run enabled external channels (Telegram / Slack / Discord / WhatsApp bridge)
-- `or3-intern agent -m "hello"` one-shot
-- `or3-intern migrate-jsonl /path/to/session.jsonl [session_key]`
-
-## Notes
-
-- Uses SQLite with WAL + single-connection for deterministic low-RAM operation.
-- History is always fetched with `LIMIT` and never full-scanned.
-- Hybrid memory retrieval: pinned + vector (cosine) + FTS keyword search.
-- External channels are disabled by default; configure them in `config.json` or via env vars before using `serve`.
-- Supported non-CLI channels: Telegram, Slack, Discord, and a local WhatsApp bridge.
-
-## Dependencies
-
-This repo uses external Go modules (SQLite driver + cron parser). If you're building in an offline environment, you must vendor modules ahead of time.
-
-## Channel Integrations
-
-`or3-intern` supports these non-CLI channels:
-
-- Telegram
-- Slack
-- Discord
-- WhatsApp via a local bridge
-
-All external channels are disabled by default.
-
-### Running Channels
-
-Use the CLI chat for local terminal interaction:
-
-```bash
-go run ./cmd/or3-intern chat
-```
-
-Use the channel runner for enabled external integrations:
-
-```bash
-go run ./cmd/or3-intern serve
-```
-
-`serve` starts the agent workers plus any enabled channels from your config.
-
-### Environment Variables
-
-You can configure channels through `config.json` or environment variables.
-
-Available env vars:
-
-```dotenv
-OR3_TELEGRAM_TOKEN=
-OR3_SLACK_APP_TOKEN=
-OR3_SLACK_BOT_TOKEN=
-OR3_DISCORD_TOKEN=
-OR3_WHATSAPP_BRIDGE_URL=ws://127.0.0.1:3001/ws
-OR3_WHATSAPP_BRIDGE_TOKEN=
-```
-
-### Config Shape
-
-The `config.json` channel section looks like this:
-
-```json
-{
-	"channels": {
-		"telegram": {
-			"enabled": false,
-			"token": "",
-			"apiBase": "https://api.telegram.org",
-			"pollSeconds": 2,
-			"defaultChatId": "",
-			"allowedChatIds": []
-		},
-		"slack": {
-			"enabled": false,
-			"appToken": "",
-			"botToken": "",
-			"apiBase": "https://slack.com/api",
-			"socketModeUrl": "",
-			"defaultChannelId": "",
-			"allowedUserIds": [],
-			"requireMention": true
-		},
-		"discord": {
-			"enabled": false,
-			"token": "",
-			"apiBase": "https://discord.com/api/v10",
-			"gatewayUrl": "",
-			"defaultChannelId": "",
-			"allowedUserIds": [],
-			"requireMention": true
-		},
-		"whatsApp": {
-			"enabled": false,
-			"bridgeUrl": "ws://127.0.0.1:3001/ws",
-			"bridgeToken": "",
-			"defaultTo": "",
-			"allowedFrom": []
-		}
-	}
-}
-```
-
-### Telegram
-
-- Set `channels.telegram.enabled=true`
-- Set `channels.telegram.token` or `OR3_TELEGRAM_TOKEN`
-- Optionally set `defaultChatId` for outbound `send_message` defaults
-- Optionally restrict inbound traffic with `allowedChatIds`
-
-Telegram uses polling, so no webhook setup is required.
-
-### Slack
-
-- Set `channels.slack.enabled=true`
-- Set `channels.slack.appToken` and `channels.slack.botToken`
-- Optionally set `defaultChannelId`
-- Optionally restrict inbound traffic with `allowedUserIds`
-- `requireMention=true` is recommended for shared channels
-
-Slack uses Socket Mode for inbound events and Web API for outbound messages.
-
-### Discord
-
-- Set `channels.discord.enabled=true`
-- Set `channels.discord.token`
-- Optionally set `defaultChannelId`
-- Optionally restrict inbound traffic with `allowedUserIds`
-- `requireMention=true` is recommended for guild channels
-
-Discord uses the Gateway for inbound events and REST for outbound messages.
-
-### WhatsApp Bridge
-
-WhatsApp support expects a compatible local bridge service.
-
-- Set `channels.whatsApp.enabled=true`
-- Set `channels.whatsApp.bridgeUrl` or `OR3_WHATSAPP_BRIDGE_URL`
-- Optionally set `channels.whatsApp.bridgeToken`
-- Optionally set `defaultTo` and `allowedFrom`
-
-The bridge should expose a websocket endpoint compatible with the message format used by `or3-intern`.
-
-### Session Keys
-
-External channels automatically namespace session keys by platform, for example:
-
-- `telegram:<chat-id>`
-- `slack:<channel-id>`
-- `discord:<channel-id>`
-- `whatsapp:<chat-id>`
-
-This keeps chat history and long-term memory isolated by channel/session.
-
-## New Features
-
-### Bootstrap Files
-
-Three markdown files configure the agent's identity and persistent context:
-
-- **IDENTITY.md** – Loaded once at startup; defines who the agent is (name, role, personality traits). Injects into every system prompt.
-- **MEMORY.md** – Static knowledge the agent always has access to (facts, preferences, standing instructions). Injects into every system prompt.
-- **HEARTBEAT.md** – Autonomous task list injected only during scheduled (cron/webhook/file-watch) turns, not user-initiated chats. Useful for periodic background tasks.
-
-Configure file paths in `config.json`:
-
-```json
-{
-  "identityFile": "/path/to/IDENTITY.md",
-  "memoryFile":   "/path/to/MEMORY.md",
-  "heartbeat": { "tasksFile": "/path/to/HEARTBEAT.md" }
-}
-```
-
-### Document Index
-
-Opt-in file indexing allows the agent to retrieve relevant file excerpts as context for each query.
-
-```json
-{
-  "docIndex": {
-    "enabled": true,
-    "roots": ["/path/to/docs", "/path/to/notes"],
-    "maxFiles": 200,
-    "maxFileBytes": 65536,
-    "refreshSeconds": 300,
-    "retrieveLimit": 5
-  }
-}
-```
-
-- Files are indexed at startup and re-synced every `refreshSeconds`.
-- Retrieval uses full-text search (FTS5) to find relevant excerpts.
-- Only non-empty matches are injected into the system prompt.
-- Supported file types: `.md`, `.txt`, `.go`, `.py`, `.js`, `.ts`, `.json`, `.yaml`, `.toml`, `.sh`.
-
-### Session Scopes
-
-Link multiple session keys to a shared scope for cross-channel continuity. Sessions in the same scope share conversation history.
-
-```bash
-# Link a Telegram session and a Discord session to one scope
-or3-intern scope link telegram:12345 my-project
-or3-intern scope link discord:67890 my-project
-
-# List all sessions in a scope
-or3-intern scope list my-project
-
-# Resolve the scope for a session
-or3-intern scope resolve telegram:12345
-```
-
-### Skill Manifests
-
-Skills can include a `skill.json` manifest for rich metadata:
-
-```json
-{
-  "summary": "Does something useful",
-  "entrypoints": [
-    {
-      "name": "run",
-      "command": ["./run.sh", "--mode", "fast"],
-      "timeoutSeconds": 30,
-      "acceptsStdin": false
-    }
-  ]
-}
-```
-
-Place skills in `builtin_skills/` (bundled) or `workspace_skills/` (user-defined). Enable execution with `skills.enableExec=true`.
-
-### Triggers
-
-**Webhook server** – receives POST requests and dispatches them as agent events:
-
-```json
-{
-  "triggers": {
-    "webhook": {
-      "enabled": true,
-      "addr": ":8080",
-      "secret": "my-secret-token"
-    }
-  }
-}
-```
-
-The webhook server listens at `/webhook` (fixed path).
-
-**File watcher** – polls configured paths for new/changed files:
-
-```json
-{
-  "triggers": {
-    "fileWatch": {
-      "enabled": true,
-      "paths": ["/path/to/watch", "/another/path"],
-      "pollSeconds": 10,
-      "debounceSeconds": 2
-    }
-  }
-}
-```
-
-Both trigger types use `HEARTBEAT.md` instructions when dispatching autonomous turns.
-
-### Streaming
-
-CLI (`chat` command) supports live streamed output. The assistant's response is printed token-by-token as it arrives from the provider. No additional configuration required.
-
-### Cron Jobs with Per-Job Session Keys
-
-Scheduled jobs can target a specific session (and thus its history/memory) independently of the default session:
-
-```json
-{
-  "payload": {
-    "kind": "agent_turn",
-    "message": "Daily standup summary",
-    "session_key": "slack:standup-channel",
-    "channel": "slack",
-    "to": "standup-channel"
-  }
-}
-```
-
-When `session_key` is set on a job payload, it overrides the global `defaultSessionKey` for that job.
-````
-
-## File: internal/config/config_test.go
-````go
-package config
-
-import (
-	"encoding/json"
-	"os"
-	"path/filepath"
-	"testing"
-)
-
-func clearConfigEnv(t *testing.T) {
-	t.Helper()
-	for _, key := range []string{
-		"OPENAI_API_KEY",
-		"BRAVE_API_KEY",
-		"OR3_DB_PATH",
-		"OR3_ARTIFACTS_DIR",
-		"OR3_API_BASE",
-		"OR3_API_KEY",
-		"OR3_MODEL",
-		"OR3_EMBED_MODEL",
-		"OR3_TELEGRAM_TOKEN",
-		"OR3_SLACK_APP_TOKEN",
-		"OR3_SLACK_BOT_TOKEN",
-		"OR3_DISCORD_TOKEN",
-		"OR3_WHATSAPP_BRIDGE_URL",
-		"OR3_WHATSAPP_BRIDGE_TOKEN",
-		"OR3_SUBAGENTS_ENABLED",
-		"OR3_SUBAGENTS_MAX_CONCURRENT",
-		"OR3_SUBAGENTS_MAX_QUEUED",
-		"OR3_SUBAGENTS_TASK_TIMEOUT_SECONDS",
-	} {
-		t.Setenv(key, "")
-	}
-}
-
-func TestDefault_Values(t *testing.T) {
-	clearConfigEnv(t)
-	cfg := Default()
-
-	if cfg.DefaultSessionKey != "cli:default" {
-		t.Errorf("expected DefaultSessionKey='cli:default', got %q", cfg.DefaultSessionKey)
-	}
-	if cfg.HistoryMax != 40 {
-		t.Errorf("expected HistoryMax=40, got %d", cfg.HistoryMax)
-	}
-	if cfg.MaxToolBytes != 24*1024 {
-		t.Errorf("expected MaxToolBytes=%d, got %d", 24*1024, cfg.MaxToolBytes)
-	}
-	if cfg.MaxMediaBytes != 20*1024*1024 {
-		t.Errorf("expected MaxMediaBytes=%d, got %d", 20*1024*1024, cfg.MaxMediaBytes)
-	}
-	if cfg.MaxToolLoops != 6 {
-		t.Errorf("expected MaxToolLoops=6, got %d", cfg.MaxToolLoops)
-	}
-	if cfg.VectorK != 8 {
-		t.Errorf("expected VectorK=8, got %d", cfg.VectorK)
-	}
-	if cfg.FTSK != 8 {
-		t.Errorf("expected FTSK=8, got %d", cfg.FTSK)
-	}
-	if cfg.VectorScanLimit != 2000 {
-		t.Errorf("expected VectorScanLimit=2000, got %d", cfg.VectorScanLimit)
-	}
-	if cfg.WorkerCount != 4 {
-		t.Errorf("expected WorkerCount=4, got %d", cfg.WorkerCount)
-	}
-	if cfg.Provider.Model != "gpt-4.1-mini" {
-		t.Errorf("expected Model='gpt-4.1-mini', got %q", cfg.Provider.Model)
-	}
-	if cfg.Provider.APIBase != "https://api.openai.com/v1" {
-		t.Errorf("expected APIBase='https://api.openai.com/v1', got %q", cfg.Provider.APIBase)
-	}
-	if cfg.Provider.TimeoutSeconds != 60 {
-		t.Errorf("expected TimeoutSeconds=60, got %d", cfg.Provider.TimeoutSeconds)
-	}
-	if cfg.Provider.EnableVision {
-		t.Error("expected Provider.EnableVision=false by default")
-	}
-	if cfg.Cron.Enabled != true {
-		t.Error("expected Cron.Enabled=true")
-	}
-	if cfg.BootstrapMaxChars != 20000 {
-		t.Errorf("expected BootstrapMaxChars=20000, got %d", cfg.BootstrapMaxChars)
-	}
-	if cfg.BootstrapTotalMaxChars != 150000 {
-		t.Errorf("expected BootstrapTotalMaxChars=150000, got %d", cfg.BootstrapTotalMaxChars)
-	}
-	if !cfg.Tools.RestrictToWorkspace {
-		t.Error("expected RestrictToWorkspace=true by default")
-	}
-	if cfg.ConsolidationMaxMessages != 50 {
-		t.Errorf("expected ConsolidationMaxMessages=50, got %d", cfg.ConsolidationMaxMessages)
-	}
-	if cfg.ConsolidationMaxInputChars != 12000 {
-		t.Errorf("expected ConsolidationMaxInputChars=12000, got %d", cfg.ConsolidationMaxInputChars)
-	}
-	if cfg.ConsolidationAsyncTimeoutSeconds != 30 {
-		t.Errorf("expected ConsolidationAsyncTimeoutSeconds=30, got %d", cfg.ConsolidationAsyncTimeoutSeconds)
-	}
-	if cfg.Subagents.Enabled {
-		t.Error("expected Subagents.Enabled=false by default")
-	}
-	if cfg.Subagents.MaxConcurrent != 1 {
-		t.Errorf("expected Subagents.MaxConcurrent=1, got %d", cfg.Subagents.MaxConcurrent)
-	}
-	if cfg.Subagents.MaxQueued != 32 {
-		t.Errorf("expected Subagents.MaxQueued=32, got %d", cfg.Subagents.MaxQueued)
-	}
-	if cfg.Subagents.TaskTimeoutSeconds != 300 {
-		t.Errorf("expected Subagents.TaskTimeoutSeconds=300, got %d", cfg.Subagents.TaskTimeoutSeconds)
-	}
-}
-
-func TestLoad_FileNotExist_CreatesDefault(t *testing.T) {
-	clearConfigEnv(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if cfg.DefaultSessionKey != "cli:default" {
-		t.Errorf("expected DefaultSessionKey='cli:default', got %q", cfg.DefaultSessionKey)
-	}
-	// should have created the file
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		t.Error("expected config file to be created")
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat config: %v", err)
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("expected config permissions 0600, got %o", info.Mode().Perm())
-	}
-}
-
-func TestLoad_FileNotExist_AppliesEnvOverrides(t *testing.T) {
-	clearConfigEnv(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-
-	t.Setenv("OR3_API_BASE", "https://openrouter.ai/api/v1")
-	t.Setenv("OR3_API_KEY", "env-key")
-
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if cfg.Provider.APIBase != "https://openrouter.ai/api/v1" {
-		t.Fatalf("expected env API base override, got %q", cfg.Provider.APIBase)
-	}
-	if cfg.Provider.APIKey != "env-key" {
-		t.Fatalf("expected env API key override, got %q", cfg.Provider.APIKey)
-	}
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		t.Fatal("expected config file to be created")
-	}
-	stored, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read stored config: %v", err)
-	}
-	var saved Config
-	if err := json.Unmarshal(stored, &saved); err != nil {
-		t.Fatalf("unmarshal stored config: %v", err)
-	}
-	if saved.Provider.APIBase != Default().Provider.APIBase {
-		t.Fatalf("expected on-disk config to keep default API base, got %q", saved.Provider.APIBase)
-	}
-}
-
-func TestSave_ExistingFilePermissionsAreTightened(t *testing.T) {
-	clearConfigEnv(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(path, mustJSON(Default()), 0o644); err != nil {
-		t.Fatalf("seed config: %v", err)
-	}
-
-	if err := Save(path, Default()); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat config: %v", err)
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("expected config permissions 0600 after save, got %o", info.Mode().Perm())
-	}
-}
-
-func TestLoad_ValidFile(t *testing.T) {
-	clearConfigEnv(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-
-	input := Config{
-		DBPath:            "/tmp/test.db",
-		DefaultSessionKey: "test:session",
-		HistoryMax:        20,
-		MaxToolLoops:      3,
-		Provider: ProviderConfig{
-			APIBase:        "https://custom.api",
-			TimeoutSeconds: 30,
-		},
-	}
-	b, _ := json.MarshalIndent(input, "", "  ")
-	os.WriteFile(path, b, 0o644)
-
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if cfg.DBPath != "/tmp/test.db" {
-		t.Errorf("expected DBPath='/tmp/test.db', got %q", cfg.DBPath)
-	}
-	if cfg.DefaultSessionKey != "test:session" {
-		t.Errorf("expected DefaultSessionKey='test:session', got %q", cfg.DefaultSessionKey)
-	}
-	if cfg.HistoryMax != 20 {
-		t.Errorf("expected HistoryMax=20, got %d", cfg.HistoryMax)
-	}
-	if cfg.MaxMediaBytes != Default().MaxMediaBytes {
-		t.Errorf("expected missing MaxMediaBytes to default to %d, got %d", Default().MaxMediaBytes, cfg.MaxMediaBytes)
-	}
-	if cfg.Provider.EnableVision {
-		t.Error("expected missing EnableVision to default to false")
-	}
-}
-
-func TestLoad_InvalidJSON(t *testing.T) {
-	clearConfigEnv(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-	os.WriteFile(path, []byte("{invalid json"), 0o644)
-
-	_, err := Load(path)
-	if err == nil {
-		t.Fatal("expected error for invalid JSON")
-	}
-}
-
-func TestLoad_EnvOverrides(t *testing.T) {
-	clearConfigEnv(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-
-	// Write valid default config
-	b, _ := json.MarshalIndent(Default(), "", "  ")
-	os.WriteFile(path, b, 0o644)
-
-	// Set env vars
-	t.Setenv("OR3_DB_PATH", "/env/test.db")
-	t.Setenv("OR3_API_KEY", "env-key")
-	t.Setenv("OR3_MODEL", "env-model")
-	t.Setenv("OR3_EMBED_MODEL", "env-embed")
-	t.Setenv("OR3_API_BASE", "https://env.api")
-	t.Setenv("OR3_SUBAGENTS_ENABLED", "true")
-	t.Setenv("OR3_SUBAGENTS_MAX_CONCURRENT", "3")
-	t.Setenv("OR3_SUBAGENTS_MAX_QUEUED", "12")
-	t.Setenv("OR3_SUBAGENTS_TASK_TIMEOUT_SECONDS", "90")
-
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if cfg.DBPath != "/env/test.db" {
-		t.Errorf("expected DBPath='/env/test.db', got %q", cfg.DBPath)
-	}
-	if cfg.Provider.APIKey != "env-key" {
-		t.Errorf("expected APIKey='env-key', got %q", cfg.Provider.APIKey)
-	}
-	if cfg.Provider.Model != "env-model" {
-		t.Errorf("expected Model='env-model', got %q", cfg.Provider.Model)
-	}
-	if cfg.Provider.EmbedModel != "env-embed" {
-		t.Errorf("expected EmbedModel='env-embed', got %q", cfg.Provider.EmbedModel)
-	}
-	if cfg.Provider.APIBase != "https://env.api" {
-		t.Errorf("expected APIBase='https://env.api', got %q", cfg.Provider.APIBase)
-	}
-	if !cfg.Subagents.Enabled {
-		t.Error("expected subagents enabled from env override")
-	}
-	if cfg.Subagents.MaxConcurrent != 3 {
-		t.Errorf("expected MaxConcurrent=3, got %d", cfg.Subagents.MaxConcurrent)
-	}
-	if cfg.Subagents.MaxQueued != 12 {
-		t.Errorf("expected MaxQueued=12, got %d", cfg.Subagents.MaxQueued)
-	}
-	if cfg.Subagents.TaskTimeoutSeconds != 90 {
-		t.Errorf("expected TaskTimeoutSeconds=90, got %d", cfg.Subagents.TaskTimeoutSeconds)
-	}
-}
-
-func TestLoad_SubagentNormalization(t *testing.T) {
-	clearConfigEnv(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-	input := Default()
-	input.Subagents.MaxConcurrent = 0
-	input.Subagents.MaxQueued = 0
-	input.Subagents.TaskTimeoutSeconds = 0
-	b, _ := json.MarshalIndent(input, "", "  ")
-	if err := os.WriteFile(path, b, 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if cfg.Subagents.MaxConcurrent != 1 || cfg.Subagents.MaxQueued != 32 || cfg.Subagents.TaskTimeoutSeconds != 300 {
-		t.Fatalf("expected normalized subagent defaults, got %+v", cfg.Subagents)
-	}
-}
-
-func TestLoad_ArtifactsDirEnvOverride(t *testing.T) {
-	clearConfigEnv(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-	b, _ := json.MarshalIndent(Default(), "", "  ")
-	os.WriteFile(path, b, 0o644)
-
-	t.Setenv("OR3_ARTIFACTS_DIR", "/env/artifacts")
-
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if cfg.ArtifactsDir != "/env/artifacts" {
-		t.Errorf("expected ArtifactsDir='/env/artifacts', got %q", cfg.ArtifactsDir)
-	}
-}
-
-func TestLoad_ChannelEnvOverrides(t *testing.T) {
-	clearConfigEnv(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-	b, _ := json.MarshalIndent(Default(), "", "  ")
-	os.WriteFile(path, b, 0o644)
-
-	t.Setenv("OR3_TELEGRAM_TOKEN", "telegram-token")
-	t.Setenv("OR3_SLACK_APP_TOKEN", "slack-app")
-	t.Setenv("OR3_SLACK_BOT_TOKEN", "slack-bot")
-	t.Setenv("OR3_DISCORD_TOKEN", "discord-token")
-	t.Setenv("OR3_WHATSAPP_BRIDGE_URL", "ws://127.0.0.1:3001/ws")
-	t.Setenv("OR3_WHATSAPP_BRIDGE_TOKEN", "bridge-token")
-
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if cfg.Channels.Telegram.Token != "telegram-token" || cfg.Channels.Slack.AppToken != "slack-app" || cfg.Channels.Slack.BotToken != "slack-bot" || cfg.Channels.Discord.Token != "discord-token" || cfg.Channels.WhatsApp.BridgeToken != "bridge-token" {
-		t.Fatalf("unexpected channel env overrides: %#v", cfg.Channels)
-	}
-}
-
-func TestLoad_ZeroValues_GetDefaults(t *testing.T) {
-	clearConfigEnv(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-
-	// config with zero values
-	input := Config{}
-	b, _ := json.MarshalIndent(input, "", "  ")
-	os.WriteFile(path, b, 0o644)
-
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if cfg.DefaultSessionKey != "cli:default" {
-		t.Errorf("expected DefaultSessionKey='cli:default', got %q", cfg.DefaultSessionKey)
-	}
-	if cfg.HistoryMax != 40 {
-		t.Errorf("expected HistoryMax=40, got %d", cfg.HistoryMax)
-	}
-	if cfg.MaxToolBytes != 24*1024 {
-		t.Errorf("expected MaxToolBytes=%d, got %d", 24*1024, cfg.MaxToolBytes)
-	}
-	if cfg.MaxToolLoops != 6 {
-		t.Errorf("expected MaxToolLoops=6, got %d", cfg.MaxToolLoops)
-	}
-	if cfg.VectorScanLimit != 2000 {
-		t.Errorf("expected VectorScanLimit=2000, got %d", cfg.VectorScanLimit)
-	}
-	if cfg.WorkerCount != 4 {
-		t.Errorf("expected WorkerCount=4, got %d", cfg.WorkerCount)
-	}
-	if cfg.Provider.TimeoutSeconds != 60 {
-		t.Errorf("expected TimeoutSeconds=60, got %d", cfg.Provider.TimeoutSeconds)
-	}
-	if cfg.ConsolidationMaxMessages != 50 {
-		t.Errorf("expected ConsolidationMaxMessages=50, got %d", cfg.ConsolidationMaxMessages)
-	}
-	if cfg.ConsolidationMaxInputChars != 12000 {
-		t.Errorf("expected ConsolidationMaxInputChars=12000, got %d", cfg.ConsolidationMaxInputChars)
-	}
-	if cfg.ConsolidationAsyncTimeoutSeconds != 30 {
-		t.Errorf("expected ConsolidationAsyncTimeoutSeconds=30, got %d", cfg.ConsolidationAsyncTimeoutSeconds)
-	}
-}
-
-func TestLoad_EmptyPath_UsesDefault(t *testing.T) {
-	clearConfigEnv(t)
-	// Use a temp home dir to avoid touching real home
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
-
-	cfg, err := Load("")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if cfg.DefaultSessionKey == "" {
-		t.Error("expected non-empty DefaultSessionKey")
-	}
-}
-
-func TestMustJSON(t *testing.T) {
-	clearConfigEnv(t)
-	cfg := Default()
-	b := mustJSON(cfg)
-	if len(b) == 0 {
-		t.Fatal("expected non-empty JSON output")
-	}
-	var out Config
-	if err := json.Unmarshal(b, &out); err != nil {
-		t.Fatalf("expected valid JSON, got error: %v", err)
-	}
-}
-````
-
-## File: internal/db/db_test.go
-````go
-package db
-
-import (
-	"context"
-	"database/sql"
-	"errors"
-	"os"
-	"path/filepath"
-	"sync"
-	"testing"
-	"time"
-
-	"or3-intern/internal/scope"
-)
-
-func openTestDB(t *testing.T) *DB {
-	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "test.db")
-	d, err := Open(path)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	t.Cleanup(func() { d.Close() })
-	return d
-}
-
-func TestOpen_CreatesDB(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "test.db")
-	d, err := Open(path)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	defer d.Close()
-
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		t.Error("expected db file to be created")
-	}
-}
-
-func TestOpen_MigratesLegacyMemorySchema(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "legacy.db")
-
-	sqlDB, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatalf("sql.Open legacy db: %v", err)
-	}
-	defer sqlDB.Close()
-
-	legacyStmts := []string{
-		`CREATE TABLE sessions(
-			key TEXT PRIMARY KEY,
-			created_at INTEGER NOT NULL,
-			updated_at INTEGER NOT NULL,
-			metadata_json TEXT NOT NULL DEFAULT '{}',
-			last_consolidated_msg_id INTEGER NOT NULL DEFAULT 0
-		);`,
-		`CREATE TABLE messages(
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			session_key TEXT NOT NULL,
-			role TEXT NOT NULL,
-			content TEXT NOT NULL,
-			payload_json TEXT NOT NULL DEFAULT '{}',
-			created_at INTEGER NOT NULL
-		);`,
-		`CREATE TABLE memory_pinned(
-			key TEXT PRIMARY KEY,
-			content TEXT NOT NULL,
-			updated_at INTEGER NOT NULL
-		);`,
-		`CREATE TABLE memory_notes(
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			text TEXT NOT NULL,
-			embedding BLOB NOT NULL,
-			source_message_id INTEGER,
-			tags TEXT NOT NULL DEFAULT '',
-			created_at INTEGER NOT NULL
-		);`,
-		`CREATE VIRTUAL TABLE memory_fts USING fts5(text, content='memory_notes', content_rowid='id');`,
-		`CREATE TRIGGER memory_notes_ai AFTER INSERT ON memory_notes BEGIN
-			INSERT INTO memory_fts(rowid, text) VALUES (new.id, new.text);
-		END;`,
-	}
-	for _, stmt := range legacyStmts {
-		if _, err := sqlDB.Exec(stmt); err != nil {
-			t.Fatalf("exec legacy schema: %v", err)
-		}
-	}
-	if _, err := sqlDB.Exec(`INSERT INTO memory_notes(text, embedding, tags, created_at) VALUES('legacy note', x'00000000', '', 1)`); err != nil {
-		t.Fatalf("seed legacy note: %v", err)
-	}
-	if _, err := sqlDB.Exec(`INSERT INTO memory_pinned(key, content, updated_at) VALUES('name', 'legacy', 1)`); err != nil {
-		t.Fatalf("seed legacy pinned: %v", err)
-	}
-	_ = sqlDB.Close()
-
-	d, err := Open(path)
-	if err != nil {
-		t.Fatalf("Open migrated db: %v", err)
-	}
-	defer d.Close()
-
-	pinned, err := d.GetPinned(context.Background(), "session1")
-	if err != nil {
-		t.Fatalf("GetPinned after migration: %v", err)
-	}
-	if pinned["name"] != "legacy" {
-		t.Fatalf("expected legacy pinned data after migration, got %#v", pinned)
-	}
-
-	rows, err := d.StreamMemoryNotesLimit(context.Background(), "session1", 10)
-	if err != nil {
-		t.Fatalf("StreamMemoryNotesLimit after migration: %v", err)
-	}
-	defer rows.Close()
-	if !rows.Next() {
-		t.Fatal("expected migrated memory note row")
-	}
-	var id int64
-	var text string
-	var emb []byte
-	var sourceID any
-	var tags string
-	var createdAt int64
-	if err := rows.Scan(&id, &text, &emb, &sourceID, &tags, &createdAt); err != nil {
-		t.Fatalf("scan migrated memory note: %v", err)
-	}
-	if text != "legacy note" {
-		t.Fatalf("expected migrated memory note, got %q", text)
-	}
-}
-
-func TestOpen_InvalidPath(t *testing.T) {
-	// A path inside a non-existent directory shouldn't cause Open to fail
-	// because SQLite creates the file. But an invalid path format should fail.
-	_, err := Open("/dev/null/invalid/path/test.db")
-	if err == nil {
-		t.Fatal("expected error for invalid path")
-	}
-}
-
-func TestNowMS(t *testing.T) {
-	before := time.Now().UnixMilli()
-	ms := NowMS()
-	after := time.Now().UnixMilli()
-	if ms < before || ms > after {
-		t.Errorf("NowMS() = %d, expected between %d and %d", ms, before, after)
-	}
-}
-
-func TestClose(t *testing.T) {
-	d := openTestDB(t)
-	if err := d.Close(); err != nil {
-		t.Errorf("unexpected close error: %v", err)
-	}
-}
-
-func TestEnsureSession(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	err := d.EnsureSession(ctx, "test-session")
-	if err != nil {
-		t.Fatalf("EnsureSession: %v", err)
-	}
-
-	// calling again should upsert without error
-	err = d.EnsureSession(ctx, "test-session")
-	if err != nil {
-		t.Fatalf("EnsureSession (second call): %v", err)
-	}
-}
-
-func TestAppendMessage_Basic(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	id, err := d.AppendMessage(ctx, "session1", "user", "hello", nil)
-	if err != nil {
-		t.Fatalf("AppendMessage: %v", err)
-	}
-	if id <= 0 {
-		t.Errorf("expected positive id, got %d", id)
-	}
-}
-
-func TestAppendMessage_WithPayload(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	payload := map[string]any{"channel": "cli", "from": "user"}
-	id, err := d.AppendMessage(ctx, "session1", "user", "hello", payload)
-	if err != nil {
-		t.Fatalf("AppendMessage: %v", err)
-	}
-	if id <= 0 {
-		t.Fatalf("expected positive id, got %d", id)
-	}
-}
-
-func TestGetLastMessages_Empty(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	msgs, err := d.GetLastMessages(ctx, "session1", 10)
-	if err != nil {
-		t.Fatalf("GetLastMessages: %v", err)
-	}
-	if len(msgs) != 0 {
-		t.Errorf("expected 0 messages, got %d", len(msgs))
-	}
-}
-
-func TestGetLastMessages_Chronological(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	d.AppendMessage(ctx, "s1", "user", "first", nil)
-	d.AppendMessage(ctx, "s1", "assistant", "second", nil)
-	d.AppendMessage(ctx, "s1", "user", "third", nil)
-
-	msgs, err := d.GetLastMessages(ctx, "s1", 10)
-	if err != nil {
-		t.Fatalf("GetLastMessages: %v", err)
-	}
-	// Should be aligned so first is user
-	if len(msgs) == 0 {
-		t.Fatal("expected at least one message")
-	}
-	if msgs[0].Role != "user" {
-		t.Errorf("expected first message role 'user', got %q", msgs[0].Role)
-	}
-}
-
-func TestGetLastMessages_LimitRespected(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	for i := 0; i < 10; i++ {
-		d.AppendMessage(ctx, "s1", "user", "msg", nil)
-	}
-
-	msgs, err := d.GetLastMessages(ctx, "s1", 3)
-	if err != nil {
-		t.Fatalf("GetLastMessages: %v", err)
-	}
-	if len(msgs) > 3 {
-		t.Errorf("expected at most 3 messages, got %d", len(msgs))
-	}
-}
-
-func TestGetLastMessages_AlignToUser(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	// Insert only assistant messages
-	d.AppendMessage(ctx, "s1", "assistant", "resp1", nil)
-	d.AppendMessage(ctx, "s1", "assistant", "resp2", nil)
-
-	msgs, err := d.GetLastMessages(ctx, "s1", 10)
-	if err != nil {
-		t.Fatalf("GetLastMessages: %v", err)
-	}
-	// should return empty (no user start) or at least not start with assistant
-	for _, m := range msgs {
-		if m.Role == "assistant" && msgs[0].Role == "assistant" {
-			// This would only be invalid if first is assistant - but alignment strips leading non-user
-			break
-		}
-	}
-}
-
-func TestGetPinned_Empty(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	pinned, err := d.GetPinned(ctx, "session1")
-	if err != nil {
-		t.Fatalf("GetPinned: %v", err)
-	}
-	if len(pinned) != 0 {
-		t.Errorf("expected empty pinned, got %d entries", len(pinned))
-	}
-}
-
-func TestUpsertPinned_And_GetPinned(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	err := d.UpsertPinned(ctx, "session1", "name", "Alice")
-	if err != nil {
-		t.Fatalf("UpsertPinned: %v", err)
-	}
-
-	pinned, err := d.GetPinned(ctx, "session1")
-	if err != nil {
-		t.Fatalf("GetPinned: %v", err)
-	}
-	if v, ok := pinned["name"]; !ok || v != "Alice" {
-		t.Errorf("expected pinned['name']='Alice', got %q", pinned["name"])
-	}
-}
-
-func TestUpsertPinned_Overwrites(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	d.UpsertPinned(ctx, "session1", "key", "first")
-	d.UpsertPinned(ctx, "session1", "key", "second")
-
-	pinned, _ := d.GetPinned(ctx, "session1")
-	if pinned["key"] != "second" {
-		t.Errorf("expected 'second', got %q", pinned["key"])
-	}
-}
-
-func TestGetPinned_IncludesGlobalAndSession(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	if err := d.UpsertPinned(ctx, scope.GlobalMemoryScope, "shared", "all"); err != nil {
-		t.Fatalf("UpsertPinned global: %v", err)
-	}
-	if err := d.UpsertPinned(ctx, "session-a", "local", "only-a"); err != nil {
-		t.Fatalf("UpsertPinned session: %v", err)
-	}
-
-	pinned, err := d.GetPinned(ctx, "session-a")
-	if err != nil {
-		t.Fatalf("GetPinned: %v", err)
-	}
-	if pinned["shared"] != "all" || pinned["local"] != "only-a" {
-		t.Fatalf("expected global and session pinned values, got %#v", pinned)
-	}
-
-	pinnedB, err := d.GetPinned(ctx, "session-b")
-	if err != nil {
-		t.Fatalf("GetPinned: %v", err)
-	}
-	if pinnedB["shared"] != "all" {
-		t.Fatalf("expected shared global entry, got %#v", pinnedB)
-	}
-	if _, ok := pinnedB["local"]; ok {
-		t.Fatalf("did not expect session-a entry in session-b view: %#v", pinnedB)
-	}
-}
-
-func TestGetPinned_SessionNamedGlobalDoesNotLeak(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	if err := d.UpsertPinned(ctx, scope.GlobalMemoryScope, "shared", "all"); err != nil {
-		t.Fatalf("UpsertPinned global: %v", err)
-	}
-	if err := d.UpsertPinned(ctx, scope.GlobalScopeAlias, "local", "only-global-session"); err != nil {
-		t.Fatalf("UpsertPinned session: %v", err)
-	}
-
-	pinnedOther, err := d.GetPinned(ctx, "session-b")
-	if err != nil {
-		t.Fatalf("GetPinned other: %v", err)
-	}
-	if pinnedOther["shared"] != "all" {
-		t.Fatalf("expected shared global entry, got %#v", pinnedOther)
-	}
-	if _, ok := pinnedOther["local"]; ok {
-		t.Fatalf("did not expect session named global to leak, got %#v", pinnedOther)
-	}
-
-	pinnedGlobal, err := d.GetPinned(ctx, scope.GlobalScopeAlias)
-	if err != nil {
-		t.Fatalf("GetPinned global session: %v", err)
-	}
-	if pinnedGlobal["local"] != "only-global-session" {
-		t.Fatalf("expected session-global entry, got %#v", pinnedGlobal)
-	}
-}
-
-func TestInsertMemoryNote(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	embedding := make([]byte, 4*3)
-	id, err := d.InsertMemoryNote(ctx, "session1", "test text", embedding, sql.NullInt64{}, "tag1,tag2")
-	if err != nil {
-		t.Fatalf("InsertMemoryNote: %v", err)
-	}
-	if id <= 0 {
-		t.Errorf("expected positive id, got %d", id)
-	}
-}
-
-func TestStreamMemoryNotesLimit_NoLimit(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	d.InsertMemoryNote(ctx, "session1", "note1", make([]byte, 4), sql.NullInt64{}, "")
-	d.InsertMemoryNote(ctx, "session1", "note2", make([]byte, 4), sql.NullInt64{}, "")
-
-	rows, err := d.StreamMemoryNotesLimit(ctx, "session1", 0)
-	if err != nil {
-		t.Fatalf("StreamMemoryNotesLimit: %v", err)
-	}
-	defer rows.Close()
-	count := 0
-	for rows.Next() {
-		count++
-		var id int64
-		var text string
-		var emb []byte
-		var src any
-		var tags string
-		var created int64
-		rows.Scan(&id, &text, &emb, &src, &tags, &created)
-	}
-	if count != 2 {
-		t.Errorf("expected 2 rows, got %d", count)
-	}
-}
-
-func TestStreamMemoryNotesLimit_WithLimit(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	for i := 0; i < 5; i++ {
-		d.InsertMemoryNote(ctx, "session1", "note", make([]byte, 4), sql.NullInt64{}, "")
-	}
-
-	rows, err := d.StreamMemoryNotesLimit(ctx, "session1", 2)
-	if err != nil {
-		t.Fatalf("StreamMemoryNotesLimit: %v", err)
-	}
-	defer rows.Close()
-	count := 0
-	for rows.Next() {
-		count++
-		var id int64
-		var text string
-		var emb []byte
-		var src any
-		var tags string
-		var created int64
-		rows.Scan(&id, &text, &emb, &src, &tags, &created)
-	}
-	if count != 2 {
-		t.Errorf("expected 2 rows, got %d", count)
-	}
-}
-
-func TestSearchFTS(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	// Insert notes to trigger FTS
-	d.InsertMemoryNote(ctx, "session1", "the quick brown fox", make([]byte, 4), sql.NullInt64{}, "")
-	d.InsertMemoryNote(ctx, "session1", "lazy dog sits", make([]byte, 4), sql.NullInt64{}, "")
-
-	results, err := d.SearchFTS(ctx, "session1", "quick fox", 5)
-	if err != nil {
-		t.Fatalf("SearchFTS: %v", err)
-	}
-	if len(results) == 0 {
-		t.Error("expected at least one FTS result")
-	}
-	if results[0].Text != "the quick brown fox" {
-		t.Errorf("expected 'the quick brown fox', got %q", results[0].Text)
-	}
-}
-
-func TestSearchFTS_Empty(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	results, err := d.SearchFTS(ctx, "session1", "anything", 5)
-	if err != nil {
-		t.Fatalf("SearchFTS: %v", err)
-	}
-	if len(results) != 0 {
-		t.Errorf("expected empty results, got %d", len(results))
-	}
-}
-
-func TestSearchFTS_SessionIsolation(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	d.InsertMemoryNote(ctx, "session-a", "private fox", make([]byte, 4), sql.NullInt64{}, "")
-	d.InsertMemoryNote(ctx, scope.GlobalMemoryScope, "shared fox", make([]byte, 4), sql.NullInt64{}, "")
-
-	results, err := d.SearchFTS(ctx, "session-b", "fox", 10)
-	if err != nil {
-		t.Fatalf("SearchFTS: %v", err)
-	}
-	if len(results) != 1 || results[0].Text != "shared fox" {
-		t.Fatalf("expected only shared result, got %#v", results)
-	}
-}
-
-func TestMessage_Fields(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	d.AppendMessage(ctx, "sess", "user", "hello world", nil)
-	msgs, err := d.GetLastMessages(ctx, "sess", 10)
-	if err != nil {
-		t.Fatalf("GetLastMessages: %v", err)
-	}
-	if len(msgs) != 1 {
-		t.Fatalf("expected 1 message, got %d", len(msgs))
-	}
-	m := msgs[0]
-	if m.SessionKey != "sess" {
-		t.Errorf("expected SessionKey='sess', got %q", m.SessionKey)
-	}
-	if m.Role != "user" {
-		t.Errorf("expected Role='user', got %q", m.Role)
-	}
-	if m.Content != "hello world" {
-		t.Errorf("expected Content='hello world', got %q", m.Content)
-	}
-	if m.CreatedAt <= 0 {
-		t.Errorf("expected positive CreatedAt, got %d", m.CreatedAt)
-	}
-}
-
-// ---- GetConsolidationRange ----
-
-func TestGetConsolidationRange_NoSession(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	lastID, oldestID, err := d.GetConsolidationRange(ctx, "nonexistent", 10)
-	if err != nil {
-		t.Fatalf("GetConsolidationRange: %v", err)
-	}
-	if lastID != 0 || oldestID != 0 {
-		t.Errorf("expected (0,0) for missing session, got (%d,%d)", lastID, oldestID)
-	}
-}
-
-func TestGetConsolidationRange_FewMessages(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	// Insert fewer messages than historyMax — all messages are in the active
-	// window, so oldestActiveID equals the first message's ID and there is
-	// nothing to consolidate (no messages with id < oldestActiveID beyond the cursor).
-	var firstID int64
-	for i := 0; i < 3; i++ {
-		id, _ := d.AppendMessage(ctx, "sess", "user", "msg", nil)
-		if i == 0 {
-			firstID = id
-		}
-	}
-
-	lastID, oldestID, err := d.GetConsolidationRange(ctx, "sess", 10)
-	if err != nil {
-		t.Fatalf("GetConsolidationRange: %v", err)
-	}
-	if lastID != 0 {
-		t.Errorf("expected lastID=0 (nothing consolidated), got %d", lastID)
-	}
-	// With 3 messages and historyMax=10, the active window covers all messages.
-	// oldestActiveID should equal the first message's ID.
-	if oldestID != firstID {
-		t.Errorf("expected oldestActiveID=%d (all in window), got %d", firstID, oldestID)
-	}
-}
-
-func TestGetConsolidationRange_ManyMessages(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	// Insert 20 messages, historyMax=5 → oldestActiveID should be the ID of
-	// the 16th message (5 from the end).
-	var ids []int64
-	for i := 0; i < 20; i++ {
-		id, err := d.AppendMessage(ctx, "sess", "user", "msg", nil)
-		if err != nil {
-			t.Fatalf("AppendMessage: %v", err)
-		}
-		ids = append(ids, id)
-	}
-
-	lastID, oldestActiveID, err := d.GetConsolidationRange(ctx, "sess", 5)
-	if err != nil {
-		t.Fatalf("GetConsolidationRange: %v", err)
-	}
-	if lastID != 0 {
-		t.Errorf("expected lastID=0 (nothing consolidated yet), got %d", lastID)
-	}
-	// oldestActiveID should be the 16th message ID (index 15).
-	expectedOldest := ids[15]
-	if oldestActiveID != expectedOldest {
-		t.Errorf("expected oldestActiveID=%d, got %d", expectedOldest, oldestActiveID)
-	}
-}
-
-// ---- GetMessagesForConsolidation ----
-
-func TestGetMessagesForConsolidation_Range(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	var ids []int64
-	for i := 0; i < 10; i++ {
-		id, _ := d.AppendMessage(ctx, "sess", "user", "msg", nil)
-		ids = append(ids, id)
-	}
-
-	// Retrieve messages strictly between ids[2] and ids[7].
-	msgs, err := d.GetMessagesForConsolidation(ctx, "sess", ids[2], ids[7])
-	if err != nil {
-		t.Fatalf("GetMessagesForConsolidation: %v", err)
-	}
-	if len(msgs) != 4 {
-		t.Errorf("expected 4 messages (ids[3]..ids[6]), got %d", len(msgs))
-	}
-	if msgs[0].ID != ids[3] {
-		t.Errorf("expected first message id=%d, got %d", ids[3], msgs[0].ID)
-	}
-}
-
-func TestGetMessagesForConsolidation_Empty(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	msgs, err := d.GetMessagesForConsolidation(ctx, "sess", 0, 1)
-	if err != nil {
-		t.Fatalf("GetMessagesForConsolidation: %v", err)
-	}
-	if len(msgs) != 0 {
-		t.Errorf("expected 0 messages, got %d", len(msgs))
-	}
-}
-
-// ---- SetLastConsolidatedID ----
-
-func TestSetLastConsolidatedID(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	d.EnsureSession(ctx, "sess")
-	if err := d.SetLastConsolidatedID(ctx, "sess", 42); err != nil {
-		t.Fatalf("SetLastConsolidatedID: %v", err)
-	}
-
-	// Verify via GetConsolidationRange.
-	lastID, _, err := d.GetConsolidationRange(ctx, "sess", 10)
-	if err != nil {
-		t.Fatalf("GetConsolidationRange: %v", err)
-	}
-	if lastID != 42 {
-		t.Errorf("expected lastConsolidatedID=42, got %d", lastID)
-	}
-}
-
-func TestWriteConsolidation_Atomic(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	var lastMsgID int64
-	for i := 0; i < 3; i++ {
-		id, err := d.AppendMessage(ctx, "sess", "user", "msg", nil)
-		if err != nil {
-			t.Fatalf("AppendMessage: %v", err)
-		}
-		lastMsgID = id
-	}
-
-	noteID, err := d.WriteConsolidation(ctx, ConsolidationWrite{
-		SessionKey:    "sess",
-		ScopeKey:      "sess",
-		NoteText:      "summary",
-		Embedding:     []byte{},
-		SourceMsgID:   sql.NullInt64{Int64: lastMsgID, Valid: true},
-		NoteTags:      "consolidation",
-		CanonicalKey:  "long_term_memory",
-		CanonicalText: "- stable fact",
-		CursorMsgID:   lastMsgID,
-	})
-	if err != nil {
-		t.Fatalf("WriteConsolidation: %v", err)
-	}
-	if noteID == 0 {
-		t.Fatal("expected non-zero note id")
-	}
-
-	lastID, _, err := d.GetConsolidationRange(ctx, "sess", 10)
-	if err != nil {
-		t.Fatalf("GetConsolidationRange: %v", err)
-	}
-	if lastID != lastMsgID {
-		t.Fatalf("expected last consolidated id %d, got %d", lastMsgID, lastID)
-	}
-
-	rows, err := d.StreamMemoryNotesScopeLimit(ctx, "sess", 10)
-	if err != nil {
-		t.Fatalf("StreamMemoryNotesScopeLimit: %v", err)
-	}
-	defer rows.Close()
-	count := 0
-	for rows.Next() {
-		count++
-	}
-	if count != 1 {
-		t.Fatalf("expected 1 note, got %d", count)
-	}
-
-	pinned, ok, err := d.GetPinnedValue(ctx, "sess", "long_term_memory")
-	if err != nil {
-		t.Fatalf("GetPinnedValue: %v", err)
-	}
-	if !ok || pinned != "- stable fact" {
-		t.Fatalf("expected canonical memory to be updated, got ok=%v value=%q", ok, pinned)
-	}
-}
-
-func TestWriteConsolidation_RollbackOnFailure(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-	if err := d.EnsureSession(ctx, "sess"); err != nil {
-		t.Fatalf("EnsureSession: %v", err)
-	}
-
-	// Empty canonical key and source message id is valid, but we intentionally fail on cursor update
-	// by writing to a missing session key.
-	_, err := d.WriteConsolidation(ctx, ConsolidationWrite{
-		SessionKey:  "missing-session",
-		ScopeKey:    "sess",
-		NoteText:    "summary",
-		Embedding:   []byte{},
-		NoteTags:    "consolidation",
-		CursorMsgID: 999,
-	})
-	if err == nil {
-		t.Fatal("expected write error for missing session")
-	}
-
-	rows, err := d.StreamMemoryNotesScopeLimit(ctx, "sess", 10)
-	if err != nil {
-		t.Fatalf("StreamMemoryNotesScopeLimit: %v", err)
-	}
-	defer rows.Close()
-	if rows.Next() {
-		t.Fatal("expected no note due to rollback")
-	}
-}
-
-func TestResetSessionHistory(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-	for i := 0; i < 3; i++ {
-		if _, err := d.AppendMessage(ctx, "sess", "user", "msg", nil); err != nil {
-			t.Fatalf("AppendMessage: %v", err)
-		}
-	}
-	if err := d.SetLastConsolidatedID(ctx, "sess", 2); err != nil {
-		t.Fatalf("SetLastConsolidatedID: %v", err)
-	}
-
-	if err := d.ResetSessionHistory(ctx, "sess"); err != nil {
-		t.Fatalf("ResetSessionHistory: %v", err)
-	}
-
-	msgs, err := d.GetLastMessages(ctx, "sess", 10)
-	if err != nil {
-		t.Fatalf("GetLastMessages: %v", err)
-	}
-	if len(msgs) != 0 {
-		t.Fatalf("expected no messages after reset, got %d", len(msgs))
-	}
-	lastID, _, err := d.GetConsolidationRange(ctx, "sess", 10)
-	if err != nil {
-		t.Fatalf("GetConsolidationRange: %v", err)
-	}
-	if lastID != 0 {
-		t.Fatalf("expected cursor reset to 0, got %d", lastID)
-	}
-}
-
-func TestOpen_CreatesSubagentJobsTable(t *testing.T) {
-	d := openTestDB(t)
-	row := d.SQL.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='subagent_jobs'`)
-	var name string
-	if err := row.Scan(&name); err != nil {
-		t.Fatalf("expected subagent_jobs table, got err=%v", err)
-	}
-	if name != "subagent_jobs" {
-		t.Fatalf("expected subagent_jobs table, got %q", name)
-	}
-}
-
-func TestSubagentJobs_Lifecycle(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-	job := SubagentJob{
-		ID:               "job-1",
-		ParentSessionKey: "parent",
-		ChildSessionKey:  "parent:subagent:job-1",
-		Channel:          "cli",
-		ReplyTo:          "user",
-		Task:             "do work",
-	}
-	if err := d.EnqueueSubagentJob(ctx, job); err != nil {
-		t.Fatalf("EnqueueSubagentJob: %v", err)
-	}
-	queued, err := d.ListQueuedSubagentJobs(ctx)
-	if err != nil {
-		t.Fatalf("ListQueuedSubagentJobs: %v", err)
-	}
-	if len(queued) != 1 || queued[0].ID != job.ID {
-		t.Fatalf("expected queued job, got %#v", queued)
-	}
-	claimed, err := d.ClaimNextSubagentJob(ctx)
-	if err != nil {
-		t.Fatalf("ClaimNextSubagentJob: %v", err)
-	}
-	if claimed == nil || claimed.Status != SubagentStatusRunning || claimed.Attempts != 1 {
-		t.Fatalf("expected running claimed job, got %#v", claimed)
-	}
-	if err := d.MarkSubagentSucceeded(ctx, job.ID, "preview", "artifact-1"); err != nil {
-		t.Fatalf("MarkSubagentSucceeded: %v", err)
-	}
-	stored, ok, err := d.GetSubagentJob(ctx, job.ID)
-	if err != nil {
-		t.Fatalf("GetSubagentJob: %v", err)
-	}
-	if !ok {
-		t.Fatal("expected stored job")
-	}
-	if stored.Status != SubagentStatusSucceeded || stored.ResultPreview != "preview" || stored.ArtifactID != "artifact-1" || stored.FinishedAt == 0 {
-		t.Fatalf("unexpected stored job after success: %#v", stored)
-	}
-}
-
-func TestSubagentJobs_ReconcileRunning(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-	job := SubagentJob{
-		ID:               "job-2",
-		ParentSessionKey: "parent",
-		ChildSessionKey:  "parent:subagent:job-2",
-		Channel:          "cli",
-		ReplyTo:          "user",
-		Task:             "do work",
-	}
-	if err := d.EnqueueSubagentJob(ctx, job); err != nil {
-		t.Fatalf("EnqueueSubagentJob: %v", err)
-	}
-	if _, err := d.AppendMessage(ctx, job.ParentSessionKey, "user", "start", nil); err != nil {
-		t.Fatalf("AppendMessage parent: %v", err)
-	}
-	if err := d.MarkSubagentRunning(ctx, job.ID); err != nil {
-		t.Fatalf("MarkSubagentRunning: %v", err)
-	}
-	if err := d.MarkRunningSubagentsInterrupted(ctx, "restart"); err != nil {
-		t.Fatalf("MarkRunningSubagentsInterrupted: %v", err)
-	}
-	stored, ok, err := d.GetSubagentJob(ctx, job.ID)
-	if err != nil {
-		t.Fatalf("GetSubagentJob: %v", err)
-	}
-	if !ok {
-		t.Fatal("expected stored job")
-	}
-	if stored.Status != SubagentStatusInterrupted || stored.ErrorText != "restart" || stored.FinishedAt == 0 {
-		t.Fatalf("unexpected interrupted job: %#v", stored)
-	}
-}
-
-func TestSubagentJobs_EnqueueWithLimit(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-	var wg sync.WaitGroup
-	errCh := make(chan error, 2)
-	for i := 0; i < 2; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			errCh <- d.EnqueueSubagentJobLimited(ctx, SubagentJob{
-				ID:               "job-limit-" + string(rune('a'+i)),
-				ParentSessionKey: "parent",
-				ChildSessionKey:  "parent:subagent:" + string(rune('a'+i)),
-				Task:             "do work",
-			}, 1)
-		}(i)
-	}
-	wg.Wait()
-	close(errCh)
-	var successCount int
-	var fullCount int
-	for err := range errCh {
-		switch {
-		case err == nil:
-			successCount++
-		case errors.Is(err, ErrSubagentQueueFull):
-			fullCount++
-		default:
-			t.Fatalf("unexpected enqueue error: %v", err)
-		}
-	}
-	if successCount != 1 || fullCount != 1 {
-		t.Fatalf("expected one success and one queue-full error, got success=%d full=%d", successCount, fullCount)
-	}
-	queued, err := d.ListQueuedSubagentJobs(ctx)
-	if err != nil {
-		t.Fatalf("ListQueuedSubagentJobs: %v", err)
-	}
-	if len(queued) != 1 {
-		t.Fatalf("expected exactly one queued job, got %#v", queued)
-	}
-}
-
-func TestSubagentJobs_FinalizePersistsSummaryAtomically(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-	job := SubagentJob{
-		ID:               "job-finalize",
-		ParentSessionKey: "parent",
-		ChildSessionKey:  "parent:subagent:job-finalize",
-		Task:             "do work",
-	}
-	if err := d.EnqueueSubagentJob(ctx, job); err != nil {
-		t.Fatalf("EnqueueSubagentJob: %v", err)
-	}
-	if _, err := d.AppendMessage(ctx, job.ParentSessionKey, "user", "start", nil); err != nil {
-		t.Fatalf("AppendMessage parent: %v", err)
-	}
-	if err := d.MarkSubagentRunning(ctx, job.ID); err != nil {
-		t.Fatalf("MarkSubagentRunning: %v", err)
-	}
-	if err := d.FinalizeSubagentJob(ctx, job, SubagentStatusSucceeded, "done", "artifact-1", "", "summary text", map[string]any{"subagent_job_id": job.ID}); err != nil {
-		t.Fatalf("FinalizeSubagentJob: %v", err)
-	}
-	stored, ok, err := d.GetSubagentJob(ctx, job.ID)
-	if err != nil {
-		t.Fatalf("GetSubagentJob: %v", err)
-	}
-	if !ok {
-		t.Fatal("expected stored job")
-	}
-	if stored.Status != SubagentStatusSucceeded || stored.ResultPreview != "done" || stored.ArtifactID != "artifact-1" {
-		t.Fatalf("unexpected finalized job: %#v", stored)
-	}
-	msgs, err := d.GetLastMessages(ctx, job.ParentSessionKey, 10)
-	if err != nil {
-		t.Fatalf("GetLastMessages: %v", err)
-	}
-	if len(msgs) == 0 || msgs[len(msgs)-1].Content != "summary text" {
-		t.Fatalf("expected parent summary message, got %#v", msgs)
-	}
-}
-
-func TestLinkSession(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	if err := d.LinkSession(ctx, "session-a", "scope-1", nil); err != nil {
-		t.Fatalf("LinkSession a: %v", err)
-	}
-	if err := d.LinkSession(ctx, "session-b", "scope-1", nil); err != nil {
-		t.Fatalf("LinkSession b: %v", err)
-	}
-
-	scopeA, err := d.ResolveScopeKey(ctx, "session-a")
-	if err != nil {
-		t.Fatalf("ResolveScopeKey a: %v", err)
-	}
-	if scopeA != "scope-1" {
-		t.Fatalf("expected scope-1, got %q", scopeA)
-	}
-
-	scopeB, err := d.ResolveScopeKey(ctx, "session-b")
-	if err != nil {
-		t.Fatalf("ResolveScopeKey b: %v", err)
-	}
-	if scopeB != "scope-1" {
-		t.Fatalf("expected scope-1, got %q", scopeB)
-	}
-}
-
-func TestResolveScopeKeyUnlinked(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	scopeKey, err := d.ResolveScopeKey(ctx, "unlinked-session")
-	if err != nil {
-		t.Fatalf("ResolveScopeKey: %v", err)
-	}
-	if scopeKey != "unlinked-session" {
-		t.Fatalf("expected unlinked-session, got %q", scopeKey)
-	}
-}
-
-func TestListScopeSessions(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	if err := d.LinkSession(ctx, "sess-x", "scope-2", nil); err != nil {
-		t.Fatalf("LinkSession x: %v", err)
-	}
-	if err := d.LinkSession(ctx, "sess-y", "scope-2", nil); err != nil {
-		t.Fatalf("LinkSession y: %v", err)
-	}
-
-	sessions, err := d.ListScopeSessions(ctx, "scope-2")
-	if err != nil {
-		t.Fatalf("ListScopeSessions: %v", err)
-	}
-	if len(sessions) != 2 {
-		t.Fatalf("expected 2 sessions, got %d", len(sessions))
-	}
-	found := map[string]bool{}
-	for _, s := range sessions {
-		found[s] = true
-	}
-	if !found["sess-x"] || !found["sess-y"] {
-		t.Fatalf("expected sess-x and sess-y, got %v", sessions)
-	}
-}
-
-func TestGetLastMessagesScoped(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	// Link two sessions to a scope
-	if err := d.LinkSession(ctx, "scoped-a", "scope-3", nil); err != nil {
-		t.Fatalf("LinkSession a: %v", err)
-	}
-	if err := d.LinkSession(ctx, "scoped-b", "scope-3", nil); err != nil {
-		t.Fatalf("LinkSession b: %v", err)
-	}
-
-	// Add messages to both sessions
-	if _, err := d.AppendMessage(ctx, "scoped-a", "user", "hello from a", nil); err != nil {
-		t.Fatalf("AppendMessage a user: %v", err)
-	}
-	if _, err := d.AppendMessage(ctx, "scoped-a", "assistant", "reply from a", nil); err != nil {
-		t.Fatalf("AppendMessage a assistant: %v", err)
-	}
-	if _, err := d.AppendMessage(ctx, "scoped-b", "user", "hello from b", nil); err != nil {
-		t.Fatalf("AppendMessage b user: %v", err)
-	}
-	if _, err := d.AppendMessage(ctx, "scoped-b", "assistant", "reply from b", nil); err != nil {
-		t.Fatalf("AppendMessage b assistant: %v", err)
-	}
-
-	msgs, err := d.GetLastMessagesScoped(ctx, "scoped-a", 10)
-	if err != nil {
-		t.Fatalf("GetLastMessagesScoped: %v", err)
-	}
-	if len(msgs) < 2 {
-		t.Fatalf("expected at least 2 messages, got %d", len(msgs))
-	}
-	// First message must be a user message (alignment rule)
-	if msgs[0].Role != "user" {
-		t.Fatalf("expected first message to be user, got %q", msgs[0].Role)
-	}
-	// Messages must be in ascending id order (chronological)
-	for i := 1; i < len(msgs); i++ {
-		if msgs[i].ID < msgs[i-1].ID {
-			t.Fatalf("messages not in chronological order at index %d", i)
-		}
-	}
-	// Both sessions' messages should appear
-	contents := map[string]bool{}
-	for _, m := range msgs {
-		contents[m.Content] = true
-	}
-	if !contents["hello from a"] || !contents["hello from b"] {
-		t.Fatalf("expected messages from both sessions, got %v", contents)
-	}
+		delete(promptEmbedCache.entries, oldestKey)
+	}
+	promptEmbedCache.entries[key] = embedCacheEntry{
+		vec:       append([]float32(nil), vec...),
+		expiresAt: now.Add(embedCacheTTL),
+		usedAt:    now,
+	}
+	promptEmbedCache.mu.Unlock()
+	return vec, nil
 }
 ````
 
@@ -19173,6 +12787,11 @@ func (d *DB) UpsertPinned(ctx context.Context, sessionKey, key, content string) 
 
 func (d *DB) InsertMemoryNote(ctx context.Context, sessionKey, text string, embedding []byte, sourceMsgID sql.NullInt64, tags string) (int64, error) {
 	sessionKey = normalizeMemorySession(sessionKey)
+	if len(embedding) >= 4 && len(embedding)%4 == 0 {
+		if err := d.EnsureMemoryVecIndexWithDim(ctx, len(embedding)/4); err != nil {
+			return 0, err
+		}
+	}
 	res, err := d.SQL.ExecContext(ctx,
 		`INSERT INTO memory_notes(session_key, text, embedding, source_message_id, tags, created_at) VALUES(?,?,?,?,?,?)`,
 		sessionKey, text, embedding, sourceMsgID, tags, NowMS())
@@ -19180,7 +12799,37 @@ func (d *DB) InsertMemoryNote(ctx context.Context, sessionKey, text string, embe
 		return 0, err
 	}
 	id, _ := res.LastInsertId()
+	_ = d.upsertMemoryVec(ctx, id, sessionKey, text, embedding)
 	return id, nil
+}
+
+func (d *DB) upsertMemoryVec(ctx context.Context, noteID int64, sessionKey, text string, embedding []byte) error {
+	if d == nil || d.VecSQL == nil {
+		return nil
+	}
+	if len(embedding) < 4 || len(embedding)%4 != 0 {
+		return nil
+	}
+	dims, err := d.MemoryVectorDims(ctx)
+	if err != nil {
+		return err
+	}
+	if dims == 0 {
+		if err := d.EnsureMemoryVecIndexWithDim(ctx, len(embedding)/4); err != nil {
+			return err
+		}
+		dims, err = d.MemoryVectorDims(ctx)
+		if err != nil {
+			return err
+		}
+	}
+	if dims != len(embedding)/4 {
+		return nil
+	}
+	_, err = d.VecSQL.ExecContext(ctx,
+		`INSERT OR REPLACE INTO memory_vec(note_id, session_key, embedding, text) VALUES(?,?,?,?)`,
+		noteID, sessionKey, embedding, text)
+	return err
 }
 
 type MemoryNoteRow struct {
@@ -19229,6 +12878,77 @@ type FTSCandidate struct {
 	ID   int64
 	Text string
 	Rank float64
+}
+
+type VecCandidateRow struct {
+	ID       int64
+	Text     string
+	Distance float64
+}
+
+func (d *DB) SearchVecScope(ctx context.Context, sessionKey string, queryVec []byte, k int) ([]VecCandidateRow, error) {
+	if d == nil || d.VecSQL == nil {
+		return nil, nil
+	}
+	if k <= 0 || len(queryVec) == 0 {
+		return nil, nil
+	}
+	dims, err := d.MemoryVectorDims(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if dims == 0 || len(queryVec) != dims*4 {
+		return nil, nil
+	}
+	rows, err := d.VecSQL.QueryContext(ctx,
+		`SELECT note_id, text, distance
+		 FROM memory_vec
+		 WHERE embedding MATCH ? AND k = ? AND session_key = ?
+		 ORDER BY distance`,
+		queryVec, k, normalizeMemorySession(sessionKey))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanVecCandidateRows(rows)
+}
+
+func (d *DB) SearchVecScopeFallback(ctx context.Context, sessionKey string, queryVec []byte, k int) ([]VecCandidateRow, error) {
+	if d == nil || d.VecSQL == nil {
+		return nil, nil
+	}
+	if k <= 0 || len(queryVec) == 0 || len(queryVec)%4 != 0 {
+		return nil, nil
+	}
+	rows, err := d.VecSQL.QueryContext(ctx,
+		`SELECT id, text, vec_distance_cosine(embedding, ?) AS distance
+		 FROM memory_notes
+		 WHERE session_key=? AND typeof(embedding)='blob' AND length(embedding)=?
+		 ORDER BY distance ASC
+		 LIMIT ?`,
+		queryVec, normalizeMemorySession(sessionKey), len(queryVec), k)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanVecCandidateRows(rows)
+}
+
+func scanVecCandidateRows(rows *sql.Rows) ([]VecCandidateRow, error) {
+	var out []VecCandidateRow
+	for rows.Next() {
+		var item VecCandidateRow
+		var distance sql.NullFloat64
+		if err := rows.Scan(&item.ID, &item.Text, &distance); err != nil {
+			return nil, err
+		}
+		if !distance.Valid {
+			continue
+		}
+		item.Distance = distance.Float64
+		out = append(out, item)
+	}
+	return out, rows.Err()
 }
 
 func (d *DB) SearchFTS(ctx context.Context, sessionKey, query string, k int) ([]FTSCandidate, error) {
@@ -19384,6 +13104,9 @@ func (d *DB) WriteConsolidation(ctx context.Context, w ConsolidationWrite) (int6
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
+	if noteID > 0 {
+		_ = d.upsertMemoryVec(ctx, noteID, normalizeMemorySession(w.ScopeKey), w.NoteText, w.Embedding)
+	}
 	return noteID, nil
 }
 
@@ -19486,11 +13209,19 @@ func (d *DB) GetSubagentJob(ctx context.Context, id string) (SubagentJob, bool, 
 }
 
 func (d *DB) ListQueuedSubagentJobs(ctx context.Context) ([]SubagentJob, error) {
+	return d.listSubagentJobsByStatus(ctx, SubagentStatusQueued)
+}
+
+func (d *DB) ListRunningSubagentJobs(ctx context.Context) ([]SubagentJob, error) {
+	return d.listSubagentJobsByStatus(ctx, SubagentStatusRunning)
+}
+
+func (d *DB) listSubagentJobsByStatus(ctx context.Context, status string) ([]SubagentJob, error) {
 	rows, err := d.SQL.QueryContext(ctx,
 		`SELECT id, parent_session_key, child_session_key, channel, reply_to, task, status,
 			result_preview, artifact_id, error_text, requested_at, started_at, finished_at, attempts, metadata_json
 		 FROM subagent_jobs WHERE status=? ORDER BY requested_at ASC, id ASC`,
-		SubagentStatusQueued)
+		status)
 	if err != nil {
 		return nil, err
 	}
@@ -19811,9 +13542,12 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -19846,11 +13580,12 @@ type Config struct {
 	ConsolidationAsyncTimeoutSeconds int             `json:"consolidationAsyncTimeoutSeconds"`
 	Subagents                        SubagentsConfig `json:"subagents"`
 
-	IdentityFile string        `json:"identityFile"`
-	MemoryFile   string        `json:"memoryFile"`
+	IdentityFile string         `json:"identityFile"`
+	MemoryFile   string         `json:"memoryFile"`
 	DocIndex     DocIndexConfig `json:"docIndex"`
 	Skills       SkillsConfig   `json:"skills"`
 	Triggers     TriggerConfig  `json:"triggers"`
+	Session      SessionConfig  `json:"session"`
 
 	Provider  ProviderConfig  `json:"provider"`
 	Tools     ToolsConfig     `json:"tools"`
@@ -19870,11 +13605,12 @@ type ProviderConfig struct {
 }
 
 type ToolsConfig struct {
-	BraveAPIKey         string `json:"braveApiKey"`
-	WebProxy            string `json:"webProxy"`
-	ExecTimeoutSeconds  int    `json:"execTimeoutSeconds"`
-	RestrictToWorkspace bool   `json:"restrictToWorkspace"`
-	PathAppend          string `json:"pathAppend"`
+	BraveAPIKey         string                     `json:"braveApiKey"`
+	WebProxy            string                     `json:"webProxy"`
+	ExecTimeoutSeconds  int                        `json:"execTimeoutSeconds"`
+	RestrictToWorkspace bool                       `json:"restrictToWorkspace"`
+	PathAppend          string                     `json:"pathAppend"`
+	MCPServers          map[string]MCPServerConfig `json:"mcpServers"`
 }
 
 type CronConfig struct {
@@ -19882,10 +13618,32 @@ type CronConfig struct {
 	StorePath string `json:"storePath"`
 }
 
+const DefaultHeartbeatSessionKey = "heartbeat:default"
+
+const (
+	DefaultMCPTransport             = "stdio"
+	DefaultMCPConnectTimeoutSeconds = 10
+	DefaultMCPToolTimeoutSeconds    = 30
+)
+
+type MCPServerConfig struct {
+	Enabled               bool              `json:"enabled"`
+	Transport             string            `json:"transport"`
+	Command               string            `json:"command"`
+	Args                  []string          `json:"args"`
+	Env                   map[string]string `json:"env"`
+	URL                   string            `json:"url"`
+	Headers               map[string]string `json:"headers"`
+	ToolTimeoutSeconds    int               `json:"toolTimeoutSeconds"`
+	ConnectTimeoutSeconds int               `json:"connectTimeoutSeconds"`
+	AllowInsecureHTTP     bool              `json:"allowInsecureHttp"`
+}
+
 type HeartbeatConfig struct {
 	Enabled         bool   `json:"enabled"`
 	IntervalMinutes int    `json:"intervalMinutes"`
 	TasksFile       string `json:"tasksFile"`
+	SessionKey      string `json:"sessionKey"`
 }
 
 type SubagentsConfig struct {
@@ -19897,6 +13655,7 @@ type SubagentsConfig struct {
 
 type TelegramChannelConfig struct {
 	Enabled        bool     `json:"enabled"`
+	OpenAccess     bool     `json:"openAccess"`
 	Token          string   `json:"token"`
 	APIBase        string   `json:"apiBase"`
 	PollSeconds    int      `json:"pollSeconds"`
@@ -19906,6 +13665,7 @@ type TelegramChannelConfig struct {
 
 type SlackChannelConfig struct {
 	Enabled          bool     `json:"enabled"`
+	OpenAccess       bool     `json:"openAccess"`
 	AppToken         string   `json:"appToken"`
 	BotToken         string   `json:"botToken"`
 	APIBase          string   `json:"apiBase"`
@@ -19917,6 +13677,7 @@ type SlackChannelConfig struct {
 
 type DiscordChannelConfig struct {
 	Enabled          bool     `json:"enabled"`
+	OpenAccess       bool     `json:"openAccess"`
 	Token            string   `json:"token"`
 	APIBase          string   `json:"apiBase"`
 	GatewayURL       string   `json:"gatewayUrl"`
@@ -19927,10 +13688,37 @@ type DiscordChannelConfig struct {
 
 type WhatsAppBridgeConfig struct {
 	Enabled     bool     `json:"enabled"`
+	OpenAccess  bool     `json:"openAccess"`
 	BridgeURL   string   `json:"bridgeUrl"`
 	BridgeToken string   `json:"bridgeToken"`
 	DefaultTo   string   `json:"defaultTo"`
 	AllowedFrom []string `json:"allowedFrom"`
+}
+
+type EmailChannelConfig struct {
+	Enabled             bool     `json:"enabled"`
+	OpenAccess          bool     `json:"openAccess"`
+	ConsentGranted      bool     `json:"consentGranted"`
+	AllowedSenders      []string `json:"allowedSenders"`
+	DefaultTo           string   `json:"defaultTo"`
+	AutoReplyEnabled    bool     `json:"autoReplyEnabled"`
+	PollIntervalSeconds int      `json:"pollIntervalSeconds"`
+	MarkSeen            bool     `json:"markSeen"`
+	MaxBodyChars        int      `json:"maxBodyChars"`
+	SubjectPrefix       string   `json:"subjectPrefix"`
+	FromAddress         string   `json:"fromAddress"`
+	IMAPMailbox         string   `json:"imapMailbox"`
+	IMAPHost            string   `json:"imapHost"`
+	IMAPPort            int      `json:"imapPort"`
+	IMAPUseSSL          bool     `json:"imapUseSSL"`
+	IMAPUsername        string   `json:"imapUsername"`
+	IMAPPassword        string   `json:"imapPassword"`
+	SMTPHost            string   `json:"smtpHost"`
+	SMTPPort            int      `json:"smtpPort"`
+	SMTPUseTLS          bool     `json:"smtpUseTLS"`
+	SMTPUseSSL          bool     `json:"smtpUseSSL"`
+	SMTPUsername        string   `json:"smtpUsername"`
+	SMTPPassword        string   `json:"smtpPassword"`
 }
 
 type ChannelsConfig struct {
@@ -19938,6 +13726,7 @@ type ChannelsConfig struct {
 	Slack    SlackChannelConfig    `json:"slack"`
 	Discord  DiscordChannelConfig  `json:"discord"`
 	WhatsApp WhatsAppBridgeConfig  `json:"whatsApp"`
+	Email    EmailChannelConfig    `json:"email"`
 }
 
 type DocIndexConfig struct {
@@ -19952,8 +13741,31 @@ type DocIndexConfig struct {
 }
 
 type SkillsConfig struct {
-	EnableExec    bool `json:"enableExec"`
-	MaxRunSeconds int  `json:"maxRunSeconds"`
+	EnableExec    bool                        `json:"enableExec"`
+	MaxRunSeconds int                         `json:"maxRunSeconds"`
+	ManagedDir    string                      `json:"managedDir"`
+	Load          SkillsLoadConfig            `json:"load"`
+	Entries       map[string]SkillEntryConfig `json:"entries"`
+	ClawHub       ClawHubConfig               `json:"clawHub"`
+}
+
+type SkillsLoadConfig struct {
+	ExtraDirs       []string `json:"extraDirs"`
+	Watch           bool     `json:"watch"`
+	WatchDebounceMS int      `json:"watchDebounceMs"`
+}
+
+type SkillEntryConfig struct {
+	Enabled *bool             `json:"enabled,omitempty"`
+	APIKey  string            `json:"apiKey"`
+	Env     map[string]string `json:"env"`
+	Config  map[string]any    `json:"config"`
+}
+
+type ClawHubConfig struct {
+	SiteURL     string `json:"siteUrl"`
+	RegistryURL string `json:"registryUrl"`
+	InstallDir  string `json:"installDir"`
 }
 
 type WebhookConfig struct {
@@ -19973,6 +13785,16 @@ type FileWatchConfig struct {
 type TriggerConfig struct {
 	Webhook   WebhookConfig   `json:"webhook"`
 	FileWatch FileWatchConfig `json:"fileWatch"`
+}
+
+type SessionConfig struct {
+	DirectMessagesShareDefault bool                  `json:"directMessagesShareDefault"`
+	IdentityLinks              []SessionIdentityLink `json:"identityLinks"`
+}
+
+type SessionIdentityLink struct {
+	Canonical string   `json:"canonical"`
+	Peers     []string `json:"peers"`
 }
 
 func Default() Config {
@@ -20024,6 +13846,17 @@ func Default() Config {
 		Skills: SkillsConfig{
 			EnableExec:    false,
 			MaxRunSeconds: 30,
+			ManagedDir:    filepath.Join(root, "skills"),
+			Load: SkillsLoadConfig{
+				Watch:           false,
+				WatchDebounceMS: 250,
+			},
+			Entries: map[string]SkillEntryConfig{},
+			ClawHub: ClawHubConfig{
+				SiteURL:     "https://clawhub.ai",
+				RegistryURL: "https://clawhub.ai",
+				InstallDir:  "skills",
+			},
 		},
 		Triggers: TriggerConfig{
 			Webhook: WebhookConfig{
@@ -20036,6 +13869,10 @@ func Default() Config {
 				PollSeconds:     5,
 				DebounceSeconds: 2,
 			},
+		},
+		Session: SessionConfig{
+			DirectMessagesShareDefault: false,
+			IdentityLinks:              []SessionIdentityLink{},
 		},
 		Provider: ProviderConfig{
 			APIBase:        "https://api.openai.com/v1",
@@ -20051,14 +13888,35 @@ func Default() Config {
 			ExecTimeoutSeconds:  60,
 			RestrictToWorkspace: true,
 			PathAppend:          "",
+			MCPServers:          map[string]MCPServerConfig{},
 		},
-		Cron:      CronConfig{Enabled: true, StorePath: filepath.Join(root, "cron.json")},
-		Heartbeat: HeartbeatConfig{Enabled: false, IntervalMinutes: 30, TasksFile: filepath.Join(root, "HEARTBEAT.md")},
+		Cron: CronConfig{Enabled: true, StorePath: filepath.Join(root, "cron.json")},
+		Heartbeat: HeartbeatConfig{
+			Enabled:         false,
+			IntervalMinutes: 30,
+			TasksFile:       filepath.Join(root, "HEARTBEAT.md"),
+			SessionKey:      DefaultHeartbeatSessionKey,
+		},
 		Channels: ChannelsConfig{
 			Telegram: TelegramChannelConfig{Enabled: false, APIBase: "https://api.telegram.org", PollSeconds: 2},
 			Slack:    SlackChannelConfig{Enabled: false, APIBase: "https://slack.com/api", RequireMention: true},
 			Discord:  DiscordChannelConfig{Enabled: false, APIBase: "https://discord.com/api/v10", RequireMention: true},
 			WhatsApp: WhatsAppBridgeConfig{Enabled: false, BridgeURL: "ws://127.0.0.1:3001/ws"},
+			Email: EmailChannelConfig{
+				Enabled:             false,
+				ConsentGranted:      false,
+				AutoReplyEnabled:    false,
+				PollIntervalSeconds: 30,
+				MarkSeen:            true,
+				MaxBodyChars:        4000,
+				SubjectPrefix:       "Re: ",
+				IMAPMailbox:         "INBOX",
+				IMAPPort:            993,
+				IMAPUseSSL:          true,
+				SMTPPort:            587,
+				SMTPUseTLS:          true,
+				SMTPUseSSL:          false,
+			},
 		},
 	}
 }
@@ -20107,6 +13965,37 @@ func ApplyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("OR3_WHATSAPP_BRIDGE_TOKEN"); v != "" {
 		cfg.Channels.WhatsApp.BridgeToken = v
+	}
+	if v := os.Getenv("OR3_EMAIL_IMAP_HOST"); v != "" {
+		cfg.Channels.Email.IMAPHost = v
+	}
+	if v := os.Getenv("OR3_EMAIL_IMAP_PORT"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			cfg.Channels.Email.IMAPPort = parsed
+		}
+	}
+	if v := os.Getenv("OR3_EMAIL_IMAP_USERNAME"); v != "" {
+		cfg.Channels.Email.IMAPUsername = v
+	}
+	if v := os.Getenv("OR3_EMAIL_IMAP_PASSWORD"); v != "" {
+		cfg.Channels.Email.IMAPPassword = v
+	}
+	if v := os.Getenv("OR3_EMAIL_SMTP_HOST"); v != "" {
+		cfg.Channels.Email.SMTPHost = v
+	}
+	if v := os.Getenv("OR3_EMAIL_SMTP_PORT"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			cfg.Channels.Email.SMTPPort = parsed
+		}
+	}
+	if v := os.Getenv("OR3_EMAIL_SMTP_USERNAME"); v != "" {
+		cfg.Channels.Email.SMTPUsername = v
+	}
+	if v := os.Getenv("OR3_EMAIL_SMTP_PASSWORD"); v != "" {
+		cfg.Channels.Email.SMTPPassword = v
+	}
+	if v := os.Getenv("OR3_EMAIL_FROM_ADDRESS"); v != "" {
+		cfg.Channels.Email.FromAddress = v
 	}
 	if v := os.Getenv("OR3_SUBAGENTS_ENABLED"); v != "" {
 		if parsed, err := strconv.ParseBool(v); err == nil {
@@ -20231,6 +14120,24 @@ func Load(path string) (Config, error) {
 	if cfg.Channels.WhatsApp.BridgeURL == "" {
 		cfg.Channels.WhatsApp.BridgeURL = "ws://127.0.0.1:3001/ws"
 	}
+	if cfg.Channels.Email.PollIntervalSeconds <= 0 {
+		cfg.Channels.Email.PollIntervalSeconds = 30
+	}
+	if cfg.Channels.Email.MaxBodyChars <= 0 {
+		cfg.Channels.Email.MaxBodyChars = 4000
+	}
+	if strings.TrimSpace(cfg.Channels.Email.SubjectPrefix) == "" {
+		cfg.Channels.Email.SubjectPrefix = "Re: "
+	}
+	if strings.TrimSpace(cfg.Channels.Email.IMAPMailbox) == "" {
+		cfg.Channels.Email.IMAPMailbox = "INBOX"
+	}
+	if cfg.Channels.Email.IMAPPort <= 0 {
+		cfg.Channels.Email.IMAPPort = 993
+	}
+	if cfg.Channels.Email.SMTPPort <= 0 {
+		cfg.Channels.Email.SMTPPort = 587
+	}
 	if cfg.DocIndex.MaxFiles <= 0 {
 		cfg.DocIndex.MaxFiles = 100
 	}
@@ -20252,6 +14159,48 @@ func Load(path string) (Config, error) {
 	if cfg.Skills.MaxRunSeconds <= 0 {
 		cfg.Skills.MaxRunSeconds = 30
 	}
+	if strings.TrimSpace(cfg.Skills.ManagedDir) == "" {
+		cfg.Skills.ManagedDir = filepath.Join(filepath.Dir(DefaultPath()), "skills")
+	}
+	if cfg.Skills.Load.WatchDebounceMS <= 0 {
+		cfg.Skills.Load.WatchDebounceMS = 250
+	}
+	if cfg.Skills.Entries == nil {
+		cfg.Skills.Entries = map[string]SkillEntryConfig{}
+	}
+	if cfg.Tools.MCPServers == nil {
+		cfg.Tools.MCPServers = map[string]MCPServerConfig{}
+	}
+	for name, server := range cfg.Tools.MCPServers {
+		server.Transport = strings.ToLower(strings.TrimSpace(server.Transport))
+		if server.Transport == "" {
+			server.Transport = DefaultMCPTransport
+		}
+		server.Command = strings.TrimSpace(server.Command)
+		server.URL = strings.TrimSpace(server.URL)
+		if server.Env == nil {
+			server.Env = map[string]string{}
+		}
+		if server.Headers == nil {
+			server.Headers = map[string]string{}
+		}
+		if server.ToolTimeoutSeconds <= 0 {
+			server.ToolTimeoutSeconds = DefaultMCPToolTimeoutSeconds
+		}
+		if server.ConnectTimeoutSeconds <= 0 {
+			server.ConnectTimeoutSeconds = DefaultMCPConnectTimeoutSeconds
+		}
+		cfg.Tools.MCPServers[name] = server
+	}
+	if strings.TrimSpace(cfg.Skills.ClawHub.SiteURL) == "" {
+		cfg.Skills.ClawHub.SiteURL = "https://clawhub.ai"
+	}
+	if strings.TrimSpace(cfg.Skills.ClawHub.RegistryURL) == "" {
+		cfg.Skills.ClawHub.RegistryURL = "https://clawhub.ai"
+	}
+	if strings.TrimSpace(cfg.Skills.ClawHub.InstallDir) == "" {
+		cfg.Skills.ClawHub.InstallDir = "skills"
+	}
 	if cfg.Triggers.Webhook.Addr == "" {
 		cfg.Triggers.Webhook.Addr = "127.0.0.1:8765"
 	}
@@ -20264,12 +14213,132 @@ func Load(path string) (Config, error) {
 	if cfg.Triggers.FileWatch.DebounceSeconds <= 0 {
 		cfg.Triggers.FileWatch.DebounceSeconds = 2
 	}
+	if cfg.Heartbeat.IntervalMinutes <= 0 {
+		cfg.Heartbeat.IntervalMinutes = 30
+	}
+	if cfg.Heartbeat.IntervalMinutes < 1 {
+		cfg.Heartbeat.IntervalMinutes = 1
+	}
+	if strings.TrimSpace(cfg.Heartbeat.SessionKey) == "" {
+		cfg.Heartbeat.SessionKey = DefaultHeartbeatSessionKey
+	}
+	if cfg.Session.IdentityLinks == nil {
+		cfg.Session.IdentityLinks = []SessionIdentityLink{}
+	}
+	if err := validateMCPServers(cfg.Tools.MCPServers); err != nil {
+		return cfg, err
+	}
+	if err := validateChannelAccess(cfg); err != nil {
+		return cfg, err
+	}
 	return cfg, nil
 }
 
 func mustJSON(v any) []byte {
 	b, _ := json.MarshalIndent(v, "", "  ")
 	return b
+}
+
+func validateChannelAccess(cfg Config) error {
+	if cfg.Channels.Telegram.Enabled && !cfg.Channels.Telegram.OpenAccess && !hasNonEmpty(cfg.Channels.Telegram.AllowedChatIDs) {
+		return errors.New("telegram enabled: set channels.telegram.allowedChatIds or channels.telegram.openAccess=true")
+	}
+	if cfg.Channels.Slack.Enabled && !cfg.Channels.Slack.OpenAccess && !hasNonEmpty(cfg.Channels.Slack.AllowedUserIDs) {
+		return errors.New("slack enabled: set channels.slack.allowedUserIds or channels.slack.openAccess=true")
+	}
+	if cfg.Channels.Discord.Enabled && !cfg.Channels.Discord.OpenAccess && !hasNonEmpty(cfg.Channels.Discord.AllowedUserIDs) {
+		return errors.New("discord enabled: set channels.discord.allowedUserIds or channels.discord.openAccess=true")
+	}
+	if cfg.Channels.WhatsApp.Enabled && !cfg.Channels.WhatsApp.OpenAccess && !hasNonEmpty(cfg.Channels.WhatsApp.AllowedFrom) {
+		return errors.New("whatsApp enabled: set channels.whatsApp.allowedFrom or channels.whatsApp.openAccess=true")
+	}
+	if cfg.Channels.Email.Enabled {
+		if !cfg.Channels.Email.ConsentGranted {
+			return errors.New("email enabled: set channels.email.consentGranted=true after explicit permission")
+		}
+		if !cfg.Channels.Email.OpenAccess && !hasNonEmpty(cfg.Channels.Email.AllowedSenders) {
+			return errors.New("email enabled: set channels.email.allowedSenders or channels.email.openAccess=true")
+		}
+		if strings.TrimSpace(cfg.Channels.Email.IMAPHost) == "" || strings.TrimSpace(cfg.Channels.Email.IMAPUsername) == "" || strings.TrimSpace(cfg.Channels.Email.IMAPPassword) == "" {
+			return errors.New("email enabled: imapHost, imapUsername, and imapPassword are required")
+		}
+		if strings.TrimSpace(cfg.Channels.Email.SMTPHost) == "" || strings.TrimSpace(cfg.Channels.Email.SMTPUsername) == "" || strings.TrimSpace(cfg.Channels.Email.SMTPPassword) == "" {
+			return errors.New("email enabled: smtpHost, smtpUsername, and smtpPassword are required")
+		}
+	}
+	return nil
+}
+
+func validateMCPServers(servers map[string]MCPServerConfig) error {
+	for name, server := range servers {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return errors.New("tools.mcpServers contains an empty server name")
+		}
+		if !server.Enabled {
+			continue
+		}
+		switch server.Transport {
+		case "stdio":
+			if server.Command == "" {
+				return errors.New("tools.mcpServers." + name + ": stdio transport requires command")
+			}
+		case "sse", "streamablehttp":
+			if err := validateMCPHTTPURL(name, server); err != nil {
+				return err
+			}
+		default:
+			return errors.New("tools.mcpServers." + name + ": unsupported transport " + strconv.Quote(server.Transport))
+		}
+	}
+	return nil
+}
+
+func validateMCPHTTPURL(name string, server MCPServerConfig) error {
+	if server.URL == "" {
+		return errors.New("tools.mcpServers." + name + ": transport " + strconv.Quote(server.Transport) + " requires url")
+	}
+	u, err := url.Parse(server.URL)
+	if err != nil {
+		return errors.New("tools.mcpServers." + name + ": invalid url")
+	}
+	if u.User != nil {
+		return errors.New("tools.mcpServers." + name + ": url must not embed credentials")
+	}
+	if u.Host == "" {
+		return errors.New("tools.mcpServers." + name + ": url must include host")
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return nil
+	case "http":
+		if !server.AllowInsecureHTTP {
+			return errors.New("tools.mcpServers." + name + ": insecure http requires allowInsecureHttp=true")
+		}
+		if !isLoopbackHost(u.Hostname()) {
+			return errors.New("tools.mcpServers." + name + ": insecure http is limited to localhost or loopback hosts")
+		}
+		return nil
+	default:
+		return errors.New("tools.mcpServers." + name + ": url scheme must be https or http")
+	}
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(strings.TrimSpace(host), "localhost") {
+		return true
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && ip.IsLoopback()
+}
+
+func hasNonEmpty(values []string) bool {
+	for _, value := range values {
+		if value != "" {
+			return true
+		}
+	}
+	return false
 }
 ````
 
@@ -20291,8 +14360,10 @@ import (
 	"or3-intern/internal/channels"
 	"or3-intern/internal/cron"
 	"or3-intern/internal/db"
+	"or3-intern/internal/heartbeat"
 	"or3-intern/internal/memory"
 	"or3-intern/internal/providers"
+	"or3-intern/internal/skills"
 	"or3-intern/internal/tools"
 )
 
@@ -20300,6 +14371,11 @@ const commandNewSession = "/new"
 
 type Deliverer interface {
 	Deliver(ctx context.Context, channel, to, text string) error
+}
+
+type sessionLock struct {
+	mu   sync.Mutex
+	refs int
 }
 
 type Runtime struct {
@@ -20319,8 +14395,12 @@ type Runtime struct {
 
 	Consolidator           *memory.Consolidator
 	ConsolidationScheduler *memory.Scheduler
+	DefaultScopeKey        string
+	LinkDirectMessages     bool
+	IdentityScopeMap       map[string]string
 
-	locks sync.Map // sessionKey -> *sync.Mutex
+	locksMu sync.Mutex
+	locks   map[string]*sessionLock
 }
 
 type BackgroundRunInput struct {
@@ -20341,16 +14421,63 @@ type BackgroundRunResult struct {
 }
 
 func (r *Runtime) lockFor(key string) *sync.Mutex {
-	v, _ := r.locks.LoadOrStore(key, &sync.Mutex{})
-	return v.(*sync.Mutex)
+	return &r.getSessionLock(key).mu
+}
+
+func (r *Runtime) acquireSessionLock(key string) *sessionLock {
+	r.locksMu.Lock()
+	if r.locks == nil {
+		r.locks = map[string]*sessionLock{}
+	}
+	entry := r.locks[key]
+	if entry == nil {
+		entry = &sessionLock{}
+		r.locks[key] = entry
+	}
+	entry.refs++
+	r.locksMu.Unlock()
+	return entry
+}
+
+func (r *Runtime) releaseSessionLock(key string, entry *sessionLock) {
+	if r == nil || entry == nil {
+		return
+	}
+	r.locksMu.Lock()
+	if entry.refs > 0 {
+		entry.refs--
+	}
+	if entry.refs == 0 {
+		if current := r.locks[key]; current == entry {
+			delete(r.locks, key)
+		}
+	}
+	r.locksMu.Unlock()
+}
+
+func (r *Runtime) getSessionLock(key string) *sessionLock {
+	r.locksMu.Lock()
+	defer r.locksMu.Unlock()
+	if r.locks == nil {
+		r.locks = map[string]*sessionLock{}
+	}
+	entry := r.locks[key]
+	if entry == nil {
+		entry = &sessionLock{}
+		r.locks[key] = entry
+	}
+	return entry
 }
 
 func (r *Runtime) Handle(ctx context.Context, ev bus.Event) error {
-	mu := r.lockFor(ev.SessionKey)
-	mu.Lock()
-	defer mu.Unlock()
+	entry := r.acquireSessionLock(ev.SessionKey)
+	entry.mu.Lock()
+	defer func() {
+		entry.mu.Unlock()
+		r.releaseSessionLock(ev.SessionKey, entry)
+	}()
 	switch ev.Type {
-	case bus.EventUserMessage, bus.EventCron, bus.EventSystem, bus.EventWebhook, bus.EventFileChange:
+	case bus.EventUserMessage, bus.EventCron, bus.EventHeartbeat, bus.EventSystem, bus.EventWebhook, bus.EventFileChange:
 		return r.turn(ctx, ev)
 	default:
 		return nil
@@ -20358,9 +14485,12 @@ func (r *Runtime) Handle(ctx context.Context, ev bus.Event) error {
 }
 
 func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
+	defer releaseEvent(ev)
+
 	if ev.Type == bus.EventUserMessage && strings.EqualFold(strings.TrimSpace(ev.Message), commandNewSession) {
 		return r.handleNewSession(ctx, ev)
 	}
+	r.ensureSessionScope(ctx, ev)
 
 	// persist user message
 	msgID, err := r.DB.AppendMessage(ctx, ev.SessionKey, "user", ev.Message, map[string]any{
@@ -20369,12 +14499,15 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 	if err != nil {
 		return err
 	}
+	if handled, err := r.handleExplicitSkillInvocation(ctx, ev, msgID); handled || err != nil {
+		return err
+	}
 
 	// build prompt
 	if r.Builder == nil {
 		return fmt.Errorf("runtime builder not configured")
 	}
-	isAutonomous := ev.Type == bus.EventCron || ev.Type == bus.EventWebhook || ev.Type == bus.EventFileChange
+	isAutonomous := isAutonomousEvent(ev.Type)
 	messages, err := r.BuildPromptSnapshotWithOptions(ctx, BuildOptions{
 		SessionKey:  ev.SessionKey,
 		UserMessage: ev.Message,
@@ -20390,19 +14523,7 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 		return err
 	}
 
-	if finalText == "" {
-		finalText = "(no response)"
-	}
-	if _, err := r.DB.AppendMessage(ctx, ev.SessionKey, "assistant", finalText, map[string]any{"in_reply_to": msgID}); err != nil {
-		log.Printf("append assistant(final) failed: %v", err)
-	}
-
-	// deliver only when the response was not already streamed to the channel
-	if !streamed && r.Deliver != nil {
-		if err := r.Deliver.Deliver(ctx, ev.Channel, replyTarget, finalText); err != nil {
-			log.Printf("deliver failed: %v", err)
-		}
-	}
+	r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, finalText, streamed, shouldAutoDeliver(ev))
 
 	// best-effort rolling consolidation of old messages into memory notes
 	if r.Consolidator != nil && r.Builder != nil && r.ConsolidationScheduler != nil {
@@ -20418,6 +14539,187 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 	}
 
 	return nil
+}
+
+func (r *Runtime) ensureSessionScope(ctx context.Context, ev bus.Event) {
+	if r == nil || r.DB == nil || strings.TrimSpace(ev.SessionKey) == "" {
+		return
+	}
+	scopeKey, ok := r.scopeKeyForEvent(ev)
+	if !ok {
+		return
+	}
+	scopeKey = strings.TrimSpace(scopeKey)
+	if scopeKey == "" || scopeKey == ev.SessionKey {
+		return
+	}
+	meta := map[string]any{"auto": true, "channel": ev.Channel}
+	_ = r.DB.LinkSession(ctx, ev.SessionKey, scopeKey, meta)
+}
+
+func (r *Runtime) scopeKeyForEvent(ev bus.Event) (string, bool) {
+	if r == nil {
+		return "", false
+	}
+	if scopeKey := strings.TrimSpace(r.IdentityScopeMap[ev.SessionKey]); scopeKey != "" {
+		return scopeKey, true
+	}
+	if r.LinkDirectMessages && isDirectMessageEvent(ev) {
+		scopeKey := strings.TrimSpace(r.DefaultScopeKey)
+		if scopeKey == "" {
+			scopeKey = ev.SessionKey
+		}
+		return scopeKey, true
+	}
+	return "", false
+}
+
+func isDirectMessageEvent(ev bus.Event) bool {
+	if len(ev.Meta) == 0 {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(ev.Channel)) {
+	case "telegram":
+		return strings.EqualFold(strings.TrimSpace(fmt.Sprint(ev.Meta["chat_type"])), "private")
+	case "slack":
+		return strings.EqualFold(strings.TrimSpace(fmt.Sprint(ev.Meta["channel_type"])), "im")
+	case "discord":
+		if v, ok := ev.Meta["is_private"].(bool); ok {
+			return v
+		}
+		return strings.TrimSpace(fmt.Sprint(ev.Meta["guild_id"])) == ""
+	case "whatsapp":
+		if v, ok := ev.Meta["is_group"].(bool); ok {
+			return !v
+		}
+	case "email":
+		return true
+	}
+	return false
+}
+
+func (r *Runtime) handleExplicitSkillInvocation(ctx context.Context, ev bus.Event, msgID int64) (bool, error) {
+	if ev.Type != bus.EventUserMessage || r.Builder == nil {
+		return false, nil
+	}
+	commandName, rawArgs, ok := parseSkillCommand(ev.Message)
+	if !ok || commandName == "new" {
+		return false, nil
+	}
+	replyTarget := deliveryTarget(ev)
+	skill, found := r.Builder.Skills.Get(commandName)
+	if !found {
+		return false, nil
+	}
+	if !skill.UserInvocable {
+		r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, "skill is not user-invocable: "+skill.Name, false, shouldAutoDeliver(ev))
+		return true, nil
+	}
+	if !skill.Eligible {
+		reasons := append([]string{}, skill.Missing...)
+		reasons = append(reasons, skill.Unsupported...)
+		if skill.ParseError != "" {
+			reasons = append(reasons, skill.ParseError)
+		}
+		message := "skill unavailable: " + skill.Name
+		if len(reasons) > 0 {
+			message += " (" + strings.Join(reasons, "; ") + ")"
+		}
+		r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, message, false, shouldAutoDeliver(ev))
+		return true, nil
+	}
+	if skill.CommandDispatch == "tool" {
+		text := r.dispatchExplicitSkillTool(ctx, ev, skill, commandName, rawArgs)
+		r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, text, false, shouldAutoDeliver(ev))
+		return true, nil
+	}
+
+	promptInput := strings.TrimSpace(rawArgs)
+	if promptInput == "" {
+		promptInput = skill.Name
+	}
+	messages, err := r.BuildPromptSnapshotWithOptions(ctx, BuildOptions{
+		SessionKey:  ev.SessionKey,
+		UserMessage: promptInput,
+	})
+	if err != nil {
+		return true, err
+	}
+	body, err := skills.LoadBody(skill.Path, 200000)
+	if err != nil {
+		return true, err
+	}
+	seed := fmt.Sprintf("Explicit skill requested: %s\nLocation: %s\nSource: %s\n\n%s", skill.Name, skill.Dir, skill.Source, body)
+	seeded := make([]providers.ChatMessage, 0, len(messages)+1)
+	if len(messages) > 0 {
+		seeded = append(seeded, messages[0])
+		seeded = append(seeded, providers.ChatMessage{Role: "system", Content: seed})
+		seeded = append(seeded, messages[1:]...)
+	} else {
+		seeded = append(seeded, providers.ChatMessage{Role: "system", Content: seed})
+		seeded = append(seeded, providers.ChatMessage{Role: "user", Content: promptInput})
+	}
+	runCtx := tools.ContextWithEnv(ctx, r.skillRunEnvFor(skill.Name))
+	finalText, streamed, err := r.executeConversation(runCtx, ev.SessionKey, seeded, r.Tools, ev.Channel, replyTarget)
+	if err != nil {
+		return true, err
+	}
+	r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, finalText, streamed, shouldAutoDeliver(ev))
+	return true, nil
+}
+
+func (r *Runtime) dispatchExplicitSkillTool(ctx context.Context, ev bus.Event, skill skills.SkillMeta, commandName, rawArgs string) string {
+	if r.Tools == nil {
+		return "tool registry not configured"
+	}
+	scopeKey := ev.SessionKey
+	if r.DB != nil && strings.TrimSpace(ev.SessionKey) != "" {
+		if resolved, err := r.DB.ResolveScopeKey(ctx, ev.SessionKey); err == nil && strings.TrimSpace(resolved) != "" {
+			scopeKey = resolved
+		}
+	}
+	toolCtx := tools.ContextWithSession(ctx, scopeKey)
+	toolCtx = tools.ContextWithDelivery(toolCtx, ev.Channel, deliveryTarget(ev))
+	toolCtx = tools.ContextWithEnv(toolCtx, r.skillRunEnvFor(skill.Name))
+	params := map[string]any{
+		"command":     rawArgs,
+		"commandName": commandName,
+		"skillName":   skill.Name,
+	}
+	out, err := r.Tools.ExecuteParams(toolCtx, skill.CommandTool, params)
+	if err != nil {
+		out = "tool error: " + err.Error()
+	}
+	payload := map[string]any{
+		"tool":        skill.CommandTool,
+		"skill":       skill.Name,
+		"commandName": commandName,
+		"args":        rawArgs,
+	}
+	sendOut, preview, artifactID := r.boundTextResult(ctx, ev.SessionKey, out)
+	if artifactID != "" {
+		payload["artifact_id"] = artifactID
+		payload["preview"] = preview
+	}
+	if _, err := r.DB.AppendMessage(ctx, ev.SessionKey, "tool", sendOut, payload); err != nil {
+		log.Printf("append tool message failed: %v", err)
+	}
+	return out
+}
+
+func parseSkillCommand(message string) (commandName string, rawArgs string, ok bool) {
+	message = strings.TrimSpace(message)
+	if !strings.HasPrefix(message, "/") || len(message) < 2 {
+		return "", "", false
+	}
+	body := strings.TrimPrefix(message, "/")
+	commandName, rawArgs, _ = strings.Cut(body, " ")
+	commandName = strings.TrimSpace(commandName)
+	rawArgs = strings.TrimSpace(rawArgs)
+	if commandName == "" {
+		return "", "", false
+	}
+	return commandName, rawArgs, true
 }
 
 func (r *Runtime) BuildPromptSnapshot(ctx context.Context, sessionKey string, userMessage string) ([]providers.ChatMessage, error) {
@@ -20453,9 +14755,12 @@ func (r *Runtime) BuildPromptSnapshotWithOptions(ctx context.Context, opts Build
 }
 
 func (r *Runtime) RunBackground(ctx context.Context, input BackgroundRunInput) (BackgroundRunResult, error) {
-	mu := r.lockFor(input.SessionKey)
-	mu.Lock()
-	defer mu.Unlock()
+	entry := r.acquireSessionLock(input.SessionKey)
+	entry.mu.Lock()
+	defer func() {
+		entry.mu.Unlock()
+		r.releaseSessionLock(input.SessionKey, entry)
+	}()
 
 	if strings.TrimSpace(input.SessionKey) == "" {
 		return BackgroundRunResult{}, fmt.Errorf("background session key required")
@@ -20538,6 +14843,12 @@ func (r *Runtime) executeConversation(ctx context.Context, sessionKey string, me
 	if reg == nil {
 		reg = tools.NewRegistry()
 	}
+	scopeKey := sessionKey
+	if r.DB != nil && strings.TrimSpace(sessionKey) != "" {
+		if resolved, err := r.DB.ResolveScopeKey(ctx, sessionKey); err == nil && strings.TrimSpace(resolved) != "" {
+			scopeKey = resolved
+		}
+	}
 	maxLoops := r.MaxToolLoops
 	if maxLoops <= 0 {
 		maxLoops = 6
@@ -20550,20 +14861,22 @@ func (r *Runtime) executeConversation(ctx context.Context, sessionKey string, me
 			Temperature: r.Temperature,
 		}
 
-		// Begin a stream for this turn if a streamer is configured.
-		var sw channels.StreamWriter
-		var onDelta func(string)
-		if r.Streamer != nil {
-			if writer, err := r.Streamer.BeginStream(ctx, replyTo, map[string]any{"channel": channel}); err == nil {
-				sw = writer
-				onDelta = func(text string) { _ = sw.WriteDelta(ctx, text) }
-			}
-		}
-
 		var resp providers.ChatCompletionResponse
 		var err error
-		if onDelta != nil {
-			resp, err = r.Provider.ChatStream(ctx, req, onDelta)
+		var sw channels.StreamWriter // lazily created on first text delta
+		var swOnce sync.Once
+		if r.Streamer != nil {
+			resp, err = r.Provider.ChatStream(ctx, req, func(text string) {
+				swOnce.Do(func() {
+					w, beginErr := r.Streamer.BeginStream(ctx, replyTo, map[string]any{"channel": channel})
+					if beginErr == nil {
+						sw = w
+					}
+				})
+				if sw != nil {
+					_ = sw.WriteDelta(ctx, text)
+				}
+			})
 		} else {
 			resp, err = r.Provider.Chat(ctx, req)
 		}
@@ -20590,9 +14903,9 @@ func (r *Runtime) executeConversation(ctx context.Context, sessionKey string, me
 			return finalText, false, nil
 		}
 
-		// This turn has tool calls — abort any in-progress stream.
+		// Tool-call turn: close any partial stream that showed text.
 		if sw != nil {
-			_ = sw.Abort(ctx)
+			_ = sw.Close(ctx, contentToString(msg.Content))
 		}
 
 		messages = append(messages, providers.ChatMessage{Role: "assistant", Content: msg.Content, ToolCalls: msg.ToolCalls})
@@ -20601,7 +14914,7 @@ func (r *Runtime) executeConversation(ctx context.Context, sessionKey string, me
 		}
 
 		for _, tc := range msg.ToolCalls {
-			toolCtx := tools.ContextWithSession(ctx, sessionKey)
+			toolCtx := tools.ContextWithSession(ctx, scopeKey)
 			toolCtx = tools.ContextWithDelivery(toolCtx, channel, replyTo)
 			out, err := reg.Execute(toolCtx, tc.Function.Name, tc.Function.Arguments)
 			if err != nil {
@@ -20624,6 +14937,27 @@ func (r *Runtime) executeConversation(ctx context.Context, sessionKey string, me
 		}
 	}
 	return "(no response)", false, nil
+}
+
+func (r *Runtime) skillRunEnvFor(name string) map[string]string {
+	if r.Builder == nil {
+		return nil
+	}
+	return r.Builder.Skills.RunEnvForSkill(name)
+}
+
+func (r *Runtime) persistAssistantReply(ctx context.Context, sessionKey string, msgID int64, channel, replyTarget, finalText string, streamed bool, autoDeliver bool) {
+	if strings.TrimSpace(finalText) == "" {
+		finalText = "(no response)"
+	}
+	if _, err := r.DB.AppendMessage(ctx, sessionKey, "assistant", finalText, map[string]any{"in_reply_to": msgID}); err != nil {
+		log.Printf("append assistant(final) failed: %v", err)
+	}
+	if autoDeliver && !streamed && r.Deliver != nil {
+		if err := r.Deliver.Deliver(ctx, channel, replyTarget, finalText); err != nil {
+			log.Printf("deliver failed: %v", err)
+		}
+	}
 }
 
 func (r *Runtime) boundTextResult(ctx context.Context, sessionKey string, text string) (stored string, preview string, artifactID string) {
@@ -20681,6 +15015,48 @@ func deliveryTarget(ev bus.Event) string {
 		}
 	}
 	return strings.TrimSpace(ev.From)
+}
+
+func isAutonomousEvent(eventType bus.EventType) bool {
+	switch eventType {
+	case bus.EventCron, bus.EventHeartbeat, bus.EventWebhook, bus.EventFileChange:
+		return true
+	default:
+		return false
+	}
+}
+
+func shouldAutoDeliver(ev bus.Event) bool {
+	if ev.Type == bus.EventHeartbeat {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(ev.Channel), "email") {
+		if len(ev.Meta) == 0 {
+			return true
+		}
+		value, ok := ev.Meta["auto_reply_enabled"]
+		if !ok {
+			return true
+		}
+		switch cast := value.(type) {
+		case bool:
+			return cast
+		default:
+			return strings.EqualFold(strings.TrimSpace(fmt.Sprint(cast)), "true")
+		}
+	}
+	return true
+}
+
+func releaseEvent(ev bus.Event) {
+	if len(ev.Meta) == 0 {
+		return
+	}
+	done, ok := ev.Meta[heartbeat.MetaKeyDone].(func())
+	if !ok || done == nil {
+		return
+	}
+	done()
 }
 
 func toToolDefs(reg *tools.Registry) []providers.ToolDef {
@@ -20743,8 +15119,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"or3-intern/internal/agent"
@@ -20753,20 +15131,27 @@ import (
 	rootchannels "or3-intern/internal/channels"
 	"or3-intern/internal/channels/cli"
 	"or3-intern/internal/channels/discord"
+	"or3-intern/internal/channels/email"
 	"or3-intern/internal/channels/slack"
 	"or3-intern/internal/channels/telegram"
 	"or3-intern/internal/channels/whatsapp"
 	"or3-intern/internal/config"
 	"or3-intern/internal/cron"
 	"or3-intern/internal/db"
+	"or3-intern/internal/heartbeat"
+	"or3-intern/internal/mcp"
 	"or3-intern/internal/memory"
 	"or3-intern/internal/providers"
+	"or3-intern/internal/scope"
 	"or3-intern/internal/skills"
 	"or3-intern/internal/tools"
 	"or3-intern/internal/triggers"
 )
 
-const schedulerMaxConsolidationPasses = 3
+const (
+	schedulerMaxConsolidationPasses = 3
+	gracefulShutdownTimeout        = 5 * time.Second
+)
 
 func main() {
 	var cfgPath string
@@ -20831,27 +15216,42 @@ func main() {
 	}
 	defer d.Close()
 
-	ctx := context.Background()
+	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
 	timeout := time.Duration(cfg.Provider.TimeoutSeconds) * time.Second
 	prov := providers.New(cfg.Provider.APIBase, cfg.Provider.APIKey, timeout)
 	art := &artifacts.Store{Dir: cfg.ArtifactsDir, DB: d}
 
 	b := bus.New(256)
-	del := cli.Deliverer{}
+	spinner := cli.NewSpinner()
+	del := cli.Deliverer{Spinner: spinner}
 	channelManager, err := buildChannelManager(cfg, del, art, cfg.MaxMediaBytes)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "channel config error:", err)
 		os.Exit(1)
 	}
 
+	var mcpManager *mcp.Manager
+	if len(cfg.Tools.MCPServers) > 0 {
+		mcpManager = mcp.NewManager(cfg.Tools.MCPServers)
+		mcpManager.SetLogger(log.Printf)
+		if err := mcpManager.Connect(ctx); err != nil {
+			log.Printf("mcp setup failed: %v", err)
+		}
+	}
+
 	// skills
 	builtin := filepath.Join(filepath.Dir(cfgPathOrDefault(cfgPath)), "builtin_skills")
-	workspace := filepath.Join(cfg.WorkspaceDir, "workspace_skills")
-	inv := skills.Scan([]string{builtin, workspace})
+	toolNames := loadAvailableToolNamesWithManager(ctx, cfg, mcpManager)
+	inv := buildSkillsInventory(cfg, builtin, toolNames)
 	var cronSvc *cron.Service
 	var subagentManager *agent.SubagentManager
+	enableSubagents := subagentsEnabledForCommand(cmd, cfg)
 	buildRuntimeTools := func() *tools.Registry {
-		return buildToolRegistry(cfg, d, prov, channelManager, &inv, cronSvc, subagentManager)
+		return buildToolRegistry(cfg, d, prov, channelManager, &inv, cronSvc, subagentManager, mcpManager)
+	}
+	buildBackgroundTools := func() *tools.Registry {
+		return buildBackgroundToolRegistry(cfg, d, prov, channelManager, &inv, cronSvc, mcpManager)
 	}
 
 	ret := memory.NewRetriever(d)
@@ -20879,7 +15279,7 @@ func main() {
 		go func() {
 			syncCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
-			if err := docIndexer.SyncRoots(syncCtx, cfg.DefaultSessionKey); err != nil {
+			if err := docIndexer.SyncRoots(syncCtx, scope.GlobalMemoryScope); err != nil {
 				log.Printf("doc index sync failed: %v", err)
 			}
 		}()
@@ -20890,7 +15290,7 @@ func main() {
 			defer ticker.Stop()
 			for range ticker.C {
 				syncCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-				if err := docIndexer.SyncRoots(syncCtx, cfg.DefaultSessionKey); err != nil {
+				if err := docIndexer.SyncRoots(syncCtx, scope.GlobalMemoryScope); err != nil {
 					log.Printf("doc index refresh failed: %v", err)
 				}
 				cancel()
@@ -20917,7 +15317,7 @@ func main() {
 			ToolNotes:              loadBootstrapFile(cfg.ToolsFile, cfg.WorkspaceDir, "TOOLS.md", agent.DefaultToolNotes),
 			IdentityText:           loadBootstrapFile(cfg.IdentityFile, cfg.WorkspaceDir, "IDENTITY.md", ""),
 			StaticMemory:           loadBootstrapFile(cfg.MemoryFile, cfg.WorkspaceDir, "MEMORY.md", ""),
-			HeartbeatText:          loadBootstrapFile(cfg.Heartbeat.TasksFile, cfg.WorkspaceDir, "HEARTBEAT.md", ""),
+			HeartbeatTasksFile:     cfg.Heartbeat.TasksFile,
 			BootstrapMaxChars:      cfg.BootstrapMaxChars,
 			BootstrapTotalMaxChars: cfg.BootstrapTotalMaxChars,
 			HistoryMax:             cfg.HistoryMax,
@@ -20925,15 +15325,29 @@ func main() {
 			FTSK:                   cfg.FTSK,
 			TopK:                   cfg.MemoryRetrieve,
 			DocRetriever:           docRetriever,
-			DocScopeKey:            cfg.DefaultSessionKey,
 			DocRetrieveLimit:       cfg.DocIndex.RetrieveLimit,
+			WorkspaceDir:           cfg.WorkspaceDir,
 		},
-		Artifacts:    art,
-		MaxToolBytes: cfg.MaxToolBytes,
-		MaxToolLoops: cfg.MaxToolLoops,
-		Deliver:      delivererFunc(channelManager.Deliver),
+		Artifacts:          art,
+		MaxToolBytes:       cfg.MaxToolBytes,
+		MaxToolLoops:       cfg.MaxToolLoops,
+		Deliver:            delivererFunc(channelManager.Deliver),
+		DefaultScopeKey:    cfg.DefaultSessionKey,
+		LinkDirectMessages: cfg.Session.DirectMessagesShareDefault,
+		IdentityScopeMap:   buildIdentityScopeMap(cfg),
 	}
-	if cfg.Subagents.Enabled {
+
+	// cron service + tool
+	if cfg.Cron.Enabled {
+		cronSvc = cron.New(cfg.Cron.StorePath, agent.CronRunner(b, cfg.DefaultSessionKey))
+		if err := cronSvc.Start(); err != nil {
+			fmt.Fprintln(os.Stderr, "cron start error:", err)
+			os.Exit(1)
+		}
+		rt.Tools = buildRuntimeTools()
+	}
+
+	if enableSubagents {
 		subagentManager = &agent.SubagentManager{
 			DB:            d,
 			Runtime:       rt,
@@ -20942,7 +15356,7 @@ func main() {
 			MaxQueued:     cfg.Subagents.MaxQueued,
 			TaskTimeout:   time.Duration(cfg.Subagents.TaskTimeoutSeconds) * time.Second,
 			BackgroundTools: func() *tools.Registry {
-				return buildToolRegistry(cfg, d, prov, channelManager, &inv, cronSvc, nil)
+				return buildBackgroundTools()
 			},
 		}
 		if err := subagentManager.Start(ctx); err != nil {
@@ -20984,22 +15398,13 @@ func main() {
 		)
 	}
 
-	// cron service + tool
-	if cfg.Cron.Enabled {
-		cronSvc = cron.New(cfg.Cron.StorePath, agent.CronRunner(b, cfg.DefaultSessionKey))
-		if err := cronSvc.Start(); err != nil {
-			fmt.Fprintln(os.Stderr, "cron start error:", err)
-			os.Exit(1)
-		}
-		rt.Tools = buildRuntimeTools()
-	}
-
+	var heartbeatSvc *heartbeat.Service
 	switch cmd {
 	case "chat":
 		rt.Streamer = del
 		_ = channelManager.Start(ctx, "cli", b)
 		runWorkers(ctx, b, rt, cfg.WorkerCount)
-		ch := &cli.Channel{Bus: b, SessionKey: cfg.DefaultSessionKey}
+		ch := &cli.Channel{Bus: b, SessionKey: cfg.DefaultSessionKey, Spinner: spinner}
 		if err := ch.Run(ctx); err != nil {
 			fmt.Fprintln(os.Stderr, "cli error:", err)
 		}
@@ -21020,8 +15425,12 @@ func main() {
 		fileWatcher := triggers.NewFileWatcher(cfg.Triggers.FileWatch, b, cfg.DefaultSessionKey)
 		fileWatcher.Start(ctx)
 		defer fileWatcher.Stop()
+		heartbeatSvc = heartbeatServiceForCommand(cmd, cfg, b)
+		if heartbeatSvc != nil {
+			heartbeatSvc.Start(ctx)
+		}
 		fmt.Println("or3-intern serve: channels running. Ctrl+C to stop.")
-		select {}
+		<-ctx.Done()
 	case "agent":
 		// one-shot: or3-intern agent -m "hello"
 		fs := flag.NewFlagSet("agent", flag.ExitOnError)
@@ -21054,6 +15463,11 @@ func main() {
 		fmt.Println("ok")
 	case "version":
 		fmt.Println("or3-intern v1")
+	case "skills":
+		if err := runSkillsCommand(ctx, cfg, builtin, args[1:], os.Stdout, os.Stderr); err != nil {
+			fmt.Fprintln(os.Stderr, "skills error:", err)
+			os.Exit(1)
+		}
 	case "scope":
 		// or3-intern scope link <session-key> <scope-key>
 		// or3-intern scope list <scope-key>
@@ -21112,15 +15526,55 @@ func main() {
 		os.Exit(2)
 	}
 
+	if heartbeatSvc != nil {
+		heartbeatSvc.Stop()
+	}
+	if mcpManager != nil {
+		if err := mcpManager.Close(); err != nil {
+			log.Printf("mcp shutdown failed: %v", err)
+		}
+	}
 	if cronSvc != nil {
 		cronSvc.Stop()
 	}
 	if subagentManager != nil {
-		if err := subagentManager.Stop(context.Background()); err != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), gracefulShutdownTimeout)
+		if err := subagentManager.Stop(shutdownCtx); err != nil {
 			log.Printf("subagent manager stop failed: %v", err)
 		}
+		cancel()
 	}
 	_ = channelManager.StopAll(context.Background())
+}
+
+func subagentsEnabledForCommand(cmd string, cfg config.Config) bool {
+	if !cfg.Subagents.Enabled {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(cmd)) {
+	case "chat", "serve":
+		return true
+	default:
+		return false
+	}
+}
+
+func buildIdentityScopeMap(cfg config.Config) map[string]string {
+	out := map[string]string{}
+	for _, link := range cfg.Session.IdentityLinks {
+		canonical := strings.TrimSpace(link.Canonical)
+		if canonical == "" {
+			continue
+		}
+		for _, peer := range link.Peers {
+			peer = strings.TrimSpace(peer)
+			if peer == "" {
+				continue
+			}
+			out[peer] = canonical
+		}
+	}
+	return out
 }
 
 type delivererFunc func(ctx context.Context, channel, to, text string) error
@@ -21129,7 +15583,19 @@ func (f delivererFunc) Deliver(ctx context.Context, channel, to, text string) er
 	return f(ctx, channel, to, text)
 }
 
-func buildToolRegistry(cfg config.Config, d *db.DB, prov *providers.Client, channelManager *rootchannels.Manager, inv *skills.Inventory, cronSvc *cron.Service, spawnManager tools.SpawnEnqueuer) *tools.Registry {
+type mcpToolRegistrar interface {
+	RegisterTools(reg *tools.Registry) int
+}
+
+func buildToolRegistry(cfg config.Config, d *db.DB, prov *providers.Client, channelManager *rootchannels.Manager, inv *skills.Inventory, cronSvc *cron.Service, spawnManager tools.SpawnEnqueuer, mcpRegistrar mcpToolRegistrar) *tools.Registry {
+	return buildToolRegistryWithOptions(cfg, d, prov, channelManager, inv, cronSvc, spawnManager, mcpRegistrar, true)
+}
+
+func buildBackgroundToolRegistry(cfg config.Config, d *db.DB, prov *providers.Client, channelManager *rootchannels.Manager, inv *skills.Inventory, cronSvc *cron.Service, mcpRegistrar mcpToolRegistrar) *tools.Registry {
+	return buildToolRegistryWithOptions(cfg, d, prov, channelManager, inv, cronSvc, nil, mcpRegistrar, false)
+}
+
+func buildToolRegistryWithOptions(cfg config.Config, d *db.DB, prov *providers.Client, channelManager *rootchannels.Manager, inv *skills.Inventory, cronSvc *cron.Service, spawnManager tools.SpawnEnqueuer, mcpRegistrar mcpToolRegistrar, includeSendMessage bool) *tools.Registry {
 	reg := tools.NewRegistry()
 	fileRoot := allowedRoot(cfg)
 	reg.Register(&tools.ExecTool{Timeout: time.Duration(cfg.Tools.ExecTimeoutSeconds) * time.Second, RestrictDir: fileRoot, PathAppend: cfg.Tools.PathAppend})
@@ -21142,33 +15608,31 @@ func buildToolRegistry(cfg config.Config, d *db.DB, prov *providers.Client, chan
 	reg.Register(&tools.MemorySetPinned{DB: d})
 	reg.Register(&tools.MemoryAddNote{DB: d, Provider: prov, EmbedModel: cfg.Provider.EmbedModel})
 	reg.Register(&tools.MemorySearch{DB: d, Provider: prov, EmbedModel: cfg.Provider.EmbedModel, VectorK: cfg.VectorK, FTSK: cfg.FTSK, TopK: cfg.MemoryRetrieve, VectorScanLimit: cfg.VectorScanLimit})
-	reg.Register(&tools.SendMessage{
-		Deliver: func(ctx context.Context, channel, to, text string, meta map[string]any) error {
-			if channelManager == nil {
-				return fmt.Errorf("channel manager not configured")
-			}
-			return channelManager.DeliverWithMeta(ctx, channel, to, text, meta)
-		},
-		AllowedRoot:   fileRoot,
-		ArtifactsDir:  cfg.ArtifactsDir,
-		MaxMediaBytes: cfg.MaxMediaBytes,
-	})
+	if includeSendMessage {
+		reg.Register(&tools.SendMessage{
+			Deliver: func(ctx context.Context, channel, to, text string, meta map[string]any) error {
+				if channelManager == nil {
+					return fmt.Errorf("channel manager not configured")
+				}
+				return channelManager.DeliverWithMeta(ctx, channel, to, text, meta)
+			},
+			AllowedRoot:   fileRoot,
+			ArtifactsDir:  cfg.ArtifactsDir,
+			MaxMediaBytes: cfg.MaxMediaBytes,
+		})
+	}
 	if inv != nil {
 		reg.Register(&tools.ReadSkill{Inventory: inv})
-	}
-	if inv != nil && cfg.Skills.EnableExec {
-		reg.Register(&tools.RunSkill{
-			Inventory:      inv,
-			DefaultTimeout: time.Duration(cfg.Skills.MaxRunSeconds) * time.Second,
-			RestrictDir:    fileRoot,
-			OutputMaxBytes: cfg.MaxToolBytes,
-		})
+		reg.Register(&tools.RunSkillScript{Inventory: inv, Timeout: time.Duration(cfg.Skills.MaxRunSeconds) * time.Second})
 	}
 	if cronSvc != nil {
 		reg.Register(&tools.CronTool{Svc: cronSvc})
 	}
 	if spawnManager != nil {
 		reg.Register(&tools.SpawnSubagent{Manager: spawnManager})
+	}
+	if mcpRegistrar != nil {
+		mcpRegistrar.RegisterTools(reg)
 	}
 	return reg
 }
@@ -21199,6 +15663,15 @@ func buildChannelManager(cfg config.Config, cliDeliverer cli.Deliverer, art *art
 			return nil, err
 		}
 	}
+	if cfg.Channels.Email.Enabled {
+		var database *db.DB
+		if art != nil {
+			database = art.DB
+		}
+		if err := mgr.Register(&email.Channel{Config: cfg.Channels.Email, DB: database}); err != nil {
+			return nil, err
+		}
+	}
 	return mgr, nil
 }
 
@@ -21220,6 +15693,13 @@ func allowedRoot(cfg config.Config) string {
 		return cfg.AllowedDir
 	}
 	return ""
+}
+
+func heartbeatServiceForCommand(cmd string, cfg config.Config, eventBus *bus.Bus) *heartbeat.Service {
+	if cmd != "serve" || !cfg.Heartbeat.Enabled {
+		return nil
+	}
+	return heartbeat.New(cfg.Heartbeat, cfg.WorkspaceDir, eventBus)
 }
 
 func runWorkers(ctx context.Context, b *bus.Bus, rt *agent.Runtime, n int) {

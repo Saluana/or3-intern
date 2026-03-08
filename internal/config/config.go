@@ -3,6 +3,8 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -64,11 +66,12 @@ type ProviderConfig struct {
 }
 
 type ToolsConfig struct {
-	BraveAPIKey         string `json:"braveApiKey"`
-	WebProxy            string `json:"webProxy"`
-	ExecTimeoutSeconds  int    `json:"execTimeoutSeconds"`
-	RestrictToWorkspace bool   `json:"restrictToWorkspace"`
-	PathAppend          string `json:"pathAppend"`
+	BraveAPIKey         string                     `json:"braveApiKey"`
+	WebProxy            string                     `json:"webProxy"`
+	ExecTimeoutSeconds  int                        `json:"execTimeoutSeconds"`
+	RestrictToWorkspace bool                       `json:"restrictToWorkspace"`
+	PathAppend          string                     `json:"pathAppend"`
+	MCPServers          map[string]MCPServerConfig `json:"mcpServers"`
 }
 
 type CronConfig struct {
@@ -77,6 +80,25 @@ type CronConfig struct {
 }
 
 const DefaultHeartbeatSessionKey = "heartbeat:default"
+
+const (
+	DefaultMCPTransport             = "stdio"
+	DefaultMCPConnectTimeoutSeconds = 10
+	DefaultMCPToolTimeoutSeconds    = 30
+)
+
+type MCPServerConfig struct {
+	Enabled               bool              `json:"enabled"`
+	Transport             string            `json:"transport"`
+	Command               string            `json:"command"`
+	Args                  []string          `json:"args"`
+	Env                   map[string]string `json:"env"`
+	URL                   string            `json:"url"`
+	Headers               map[string]string `json:"headers"`
+	ToolTimeoutSeconds    int               `json:"toolTimeoutSeconds"`
+	ConnectTimeoutSeconds int               `json:"connectTimeoutSeconds"`
+	AllowInsecureHTTP     bool              `json:"allowInsecureHttp"`
+}
 
 type HeartbeatConfig struct {
 	Enabled         bool   `json:"enabled"`
@@ -300,6 +322,7 @@ func Default() Config {
 			ExecTimeoutSeconds:  60,
 			RestrictToWorkspace: true,
 			PathAppend:          "",
+			MCPServers:          map[string]MCPServerConfig{},
 		},
 		Cron: CronConfig{Enabled: true, StorePath: filepath.Join(root, "cron.json")},
 		Heartbeat: HeartbeatConfig{
@@ -515,6 +538,30 @@ func Load(path string) (Config, error) {
 	if cfg.Skills.Entries == nil {
 		cfg.Skills.Entries = map[string]SkillEntryConfig{}
 	}
+	if cfg.Tools.MCPServers == nil {
+		cfg.Tools.MCPServers = map[string]MCPServerConfig{}
+	}
+	for name, server := range cfg.Tools.MCPServers {
+		server.Transport = strings.ToLower(strings.TrimSpace(server.Transport))
+		if server.Transport == "" {
+			server.Transport = DefaultMCPTransport
+		}
+		server.Command = strings.TrimSpace(server.Command)
+		server.URL = strings.TrimSpace(server.URL)
+		if server.Env == nil {
+			server.Env = map[string]string{}
+		}
+		if server.Headers == nil {
+			server.Headers = map[string]string{}
+		}
+		if server.ToolTimeoutSeconds <= 0 {
+			server.ToolTimeoutSeconds = DefaultMCPToolTimeoutSeconds
+		}
+		if server.ConnectTimeoutSeconds <= 0 {
+			server.ConnectTimeoutSeconds = DefaultMCPConnectTimeoutSeconds
+		}
+		cfg.Tools.MCPServers[name] = server
+	}
 	if strings.TrimSpace(cfg.Skills.ClawHub.SiteURL) == "" {
 		cfg.Skills.ClawHub.SiteURL = "https://clawhub.ai"
 	}
@@ -548,6 +595,9 @@ func Load(path string) (Config, error) {
 	if cfg.Session.IdentityLinks == nil {
 		cfg.Session.IdentityLinks = []SessionIdentityLink{}
 	}
+	if err := validateMCPServers(cfg.Tools.MCPServers); err != nil {
+		return cfg, err
+	}
 	if err := validateChannelAccess(cfg); err != nil {
 		return cfg, err
 	}
@@ -573,6 +623,69 @@ func validateChannelAccess(cfg Config) error {
 		return errors.New("whatsApp enabled: set channels.whatsApp.allowedFrom or channels.whatsApp.openAccess=true")
 	}
 	return nil
+}
+
+func validateMCPServers(servers map[string]MCPServerConfig) error {
+	for name, server := range servers {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return errors.New("tools.mcpServers contains an empty server name")
+		}
+		if !server.Enabled {
+			continue
+		}
+		switch server.Transport {
+		case "stdio":
+			if server.Command == "" {
+				return errors.New("tools.mcpServers." + name + ": stdio transport requires command")
+			}
+		case "sse", "streamablehttp":
+			if err := validateMCPHTTPURL(name, server); err != nil {
+				return err
+			}
+		default:
+			return errors.New("tools.mcpServers." + name + ": unsupported transport " + strconv.Quote(server.Transport))
+		}
+	}
+	return nil
+}
+
+func validateMCPHTTPURL(name string, server MCPServerConfig) error {
+	if server.URL == "" {
+		return errors.New("tools.mcpServers." + name + ": transport " + strconv.Quote(server.Transport) + " requires url")
+	}
+	u, err := url.Parse(server.URL)
+	if err != nil {
+		return errors.New("tools.mcpServers." + name + ": invalid url")
+	}
+	if u.User != nil {
+		return errors.New("tools.mcpServers." + name + ": url must not embed credentials")
+	}
+	if u.Host == "" {
+		return errors.New("tools.mcpServers." + name + ": url must include host")
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return nil
+	case "http":
+		if !server.AllowInsecureHTTP {
+			return errors.New("tools.mcpServers." + name + ": insecure http requires allowInsecureHttp=true")
+		}
+		if !isLoopbackHost(u.Hostname()) {
+			return errors.New("tools.mcpServers." + name + ": insecure http is limited to localhost or loopback hosts")
+		}
+		return nil
+	default:
+		return errors.New("tools.mcpServers." + name + ": url scheme must be https or http")
+	}
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(strings.TrimSpace(host), "localhost") {
+		return true
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && ip.IsLoopback()
 }
 
 func hasNonEmpty(values []string) bool {

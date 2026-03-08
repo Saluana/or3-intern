@@ -20,7 +20,13 @@ import (
 func TestRunSkillsCommand_ListEligible(t *testing.T) {
 	cfg := config.Default()
 	deps := skillsCommandDeps{
+		LoadToolNames: func(context.Context, config.Config) map[string]struct{} {
+			return map[string]struct{}{"mcp_demo_echo": {}}
+		},
 		LoadInventory: func(toolNames map[string]struct{}) skills.Inventory {
+			if _, ok := toolNames["mcp_demo_echo"]; !ok {
+				t.Fatalf("expected MCP tool names to be passed into inventory: %#v", toolNames)
+			}
 			return skills.Inventory{
 				Skills: []skills.SkillMeta{
 					{Name: "visible", Eligible: true, Source: skills.SourceWorkspace, Dir: "/tmp/visible"},
@@ -80,6 +86,9 @@ func TestRunSkillsCommand_InstallUpdateRefusesLocalEditsAndRemove(t *testing.T) 
 	var out bytes.Buffer
 	deps := skillsCommandDeps{
 		Client: client,
+		LoadToolNames: func(context.Context, config.Config) map[string]struct{} {
+			return map[string]struct{}{}
+		},
 		LoadInventory: func(toolNames map[string]struct{}) skills.Inventory {
 			return skills.Inventory{}
 		},
@@ -101,6 +110,65 @@ func TestRunSkillsCommand_InstallUpdateRefusesLocalEditsAndRemove(t *testing.T) 
 	}
 	if _, err := os.Stat(filepath.Join(resolveInstallRoot(cfg), "demo")); !os.IsNotExist(err) {
 		t.Fatalf("expected skill directory removed, stat err=%v", err)
+	}
+}
+
+func TestRunSkillsCommand_InfoAndCheckUseConfiguredToolNames(t *testing.T) {
+	cfg := config.Default()
+	root := t.TempDir()
+	demoDir := filepath.Join(root, "demo")
+	if err := os.MkdirAll(demoDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(demoDir, "SKILL.md"), []byte(`---
+name: demo
+description: demo skill
+command-dispatch: tool
+command-tool: mcp_demo_echo
+command-arg-mode: raw
+---
+# Demo
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	toolNamesCalls := 0
+	deps := skillsCommandDeps{
+		LoadToolNames: func(context.Context, config.Config) map[string]struct{} {
+			toolNamesCalls++
+			return map[string]struct{}{"mcp_demo_echo": {}}
+		},
+		LoadInventory: func(toolNames map[string]struct{}) skills.Inventory {
+			if _, ok := toolNames["mcp_demo_echo"]; !ok {
+				t.Fatalf("expected MCP tool names to be passed into inventory: %#v", toolNames)
+			}
+			return skills.ScanWithOptions(skills.LoadOptions{
+				Roots:          []skills.Root{{Path: root, Source: skills.SourceWorkspace}},
+				AvailableTools: toolNames,
+			})
+		},
+	}
+
+	var infoOut bytes.Buffer
+	deps.Stdout = &infoOut
+	deps.Stderr = &infoOut
+	if err := runSkillsCommandWithDeps(context.Background(), cfg, []string{"info", "demo"}, deps); err != nil {
+		t.Fatalf("info: %v", err)
+	}
+	if !strings.Contains(infoOut.String(), "Command Tool: mcp_demo_echo") {
+		t.Fatalf("expected command tool in info output, got %q", infoOut.String())
+	}
+
+	var checkOut bytes.Buffer
+	deps.Stdout = &checkOut
+	deps.Stderr = &checkOut
+	if err := runSkillsCommandWithDeps(context.Background(), cfg, []string{"check"}, deps); err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	if !strings.Contains(checkOut.String(), "[ok] demo") {
+		t.Fatalf("expected eligible skill in check output, got %q", checkOut.String())
+	}
+	if toolNamesCalls != 2 {
+		t.Fatalf("expected tool names loader to be used for both info and check, got %d calls", toolNamesCalls)
 	}
 }
 

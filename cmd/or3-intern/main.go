@@ -25,6 +25,7 @@ import (
 	"or3-intern/internal/cron"
 	"or3-intern/internal/db"
 	"or3-intern/internal/heartbeat"
+	"or3-intern/internal/mcp"
 	"or3-intern/internal/memory"
 	"or3-intern/internal/providers"
 	"or3-intern/internal/scope"
@@ -113,13 +114,23 @@ func main() {
 		os.Exit(1)
 	}
 
+	var mcpManager *mcp.Manager
+	if len(cfg.Tools.MCPServers) > 0 {
+		mcpManager = mcp.NewManager(cfg.Tools.MCPServers)
+		mcpManager.SetLogger(log.Printf)
+		if err := mcpManager.Connect(ctx); err != nil {
+			log.Printf("mcp setup failed: %v", err)
+		}
+	}
+
 	// skills
 	builtin := filepath.Join(filepath.Dir(cfgPathOrDefault(cfgPath)), "builtin_skills")
-	inv := buildSkillsInventory(cfg, builtin, availableToolNames(cfg.Cron.Enabled, cfg.Subagents.Enabled))
+	toolNames := loadAvailableToolNamesWithManager(ctx, cfg, mcpManager)
+	inv := buildSkillsInventory(cfg, builtin, toolNames)
 	var cronSvc *cron.Service
 	var subagentManager *agent.SubagentManager
 	buildRuntimeTools := func() *tools.Registry {
-		return buildToolRegistry(cfg, d, prov, channelManager, &inv, cronSvc, subagentManager)
+		return buildToolRegistry(cfg, d, prov, channelManager, &inv, cronSvc, subagentManager, mcpManager)
 	}
 
 	ret := memory.NewRetriever(d)
@@ -213,7 +224,7 @@ func main() {
 			MaxQueued:     cfg.Subagents.MaxQueued,
 			TaskTimeout:   time.Duration(cfg.Subagents.TaskTimeoutSeconds) * time.Second,
 			BackgroundTools: func() *tools.Registry {
-				return buildToolRegistry(cfg, d, prov, channelManager, &inv, cronSvc, nil)
+				return buildToolRegistry(cfg, d, prov, channelManager, &inv, cronSvc, nil, mcpManager)
 			},
 		}
 		if err := subagentManager.Start(ctx); err != nil {
@@ -396,6 +407,11 @@ func main() {
 	if heartbeatSvc != nil {
 		heartbeatSvc.Stop()
 	}
+	if mcpManager != nil {
+		if err := mcpManager.Close(); err != nil {
+			log.Printf("mcp shutdown failed: %v", err)
+		}
+	}
 	if cronSvc != nil {
 		cronSvc.Stop()
 	}
@@ -431,7 +447,11 @@ func (f delivererFunc) Deliver(ctx context.Context, channel, to, text string) er
 	return f(ctx, channel, to, text)
 }
 
-func buildToolRegistry(cfg config.Config, d *db.DB, prov *providers.Client, channelManager *rootchannels.Manager, inv *skills.Inventory, cronSvc *cron.Service, spawnManager tools.SpawnEnqueuer) *tools.Registry {
+type mcpToolRegistrar interface {
+	RegisterTools(reg *tools.Registry) int
+}
+
+func buildToolRegistry(cfg config.Config, d *db.DB, prov *providers.Client, channelManager *rootchannels.Manager, inv *skills.Inventory, cronSvc *cron.Service, spawnManager tools.SpawnEnqueuer, mcpRegistrar mcpToolRegistrar) *tools.Registry {
 	reg := tools.NewRegistry()
 	fileRoot := allowedRoot(cfg)
 	reg.Register(&tools.ExecTool{Timeout: time.Duration(cfg.Tools.ExecTimeoutSeconds) * time.Second, RestrictDir: fileRoot, PathAppend: cfg.Tools.PathAppend})
@@ -464,6 +484,9 @@ func buildToolRegistry(cfg config.Config, d *db.DB, prov *providers.Client, chan
 	}
 	if spawnManager != nil {
 		reg.Register(&tools.SpawnSubagent{Manager: spawnManager})
+	}
+	if mcpRegistrar != nil {
+		mcpRegistrar.RegisterTools(reg)
 	}
 	return reg
 }

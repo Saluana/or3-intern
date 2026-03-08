@@ -42,6 +42,57 @@ The `init` command can store your provider settings in `~/.or3-intern/config.jso
 
 This repo uses external Go modules (SQLite driver + cron parser). If you're building in an offline environment, you must vendor modules ahead of time.
 
+## MCP Tool Integrations
+
+MCP support is optional and disabled by default. Configure servers under `tools.mcpServers`; enabled servers connect during startup, their tools are registered before workers begin handling turns, and per-server connection failures are logged and skipped instead of aborting the whole process.
+
+Remote tools are exposed to the model as normal function tools with stable local names like `mcp_<server>_<tool>`.
+
+```json
+{
+  "tools": {
+    "mcpServers": {
+      "filesystem": {
+        "enabled": true,
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/root"],
+        "env": {
+          "NODE_ENV": "production"
+        },
+        "connectTimeoutSeconds": 10,
+        "toolTimeoutSeconds": 30
+      },
+      "localDocs": {
+        "enabled": false,
+        "transport": "streamableHttp",
+        "url": "http://127.0.0.1:8080/mcp",
+        "headers": {
+          "Authorization": "Bearer <token>"
+        },
+        "allowInsecureHttp": true,
+        "connectTimeoutSeconds": 10,
+        "toolTimeoutSeconds": 30
+      }
+    }
+  }
+}
+```
+
+Supported transports:
+
+- `stdio`
+- `sse`
+- `streamableHttp`
+
+Safety notes:
+
+- Prefer `stdio` for local trusted servers.
+- HTTP transports are explicit. Plain `http://` endpoints are rejected unless `allowInsecureHttp=true`, and even then only for loopback/localhost addresses.
+- Stdio MCP servers inherit the ambient process environment, and any keys in the configured `env` map override those inherited values.
+- MCP tool calls use the existing tool loop, per-call timeout, error handling, and artifact spill path.
+- v1 intentionally does not include live reconnect loops, hot-add/hot-remove of MCP tools, SQLite persistence for tool catalogs, or a separate MCP gateway service.
+
 ## Channel Integrations
 
 `or3-intern` supports these non-CLI channels:

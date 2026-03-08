@@ -450,6 +450,143 @@ func TestRuntime_Handle_WithToolCall(t *testing.T) {
 	}
 }
 
+func TestRuntime_Handle_WithMCPNamedTool_UsesNormalToolPath(t *testing.T) {
+	d := openRuntimeTestDB(t)
+
+	var firstTools []providers.ToolDef
+	var secondMessages []providers.ChatMessage
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+
+		var req providers.ChatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if callCount == 0 {
+			firstTools = append([]providers.ToolDef(nil), req.Tools...)
+		} else {
+			secondMessages = append([]providers.ChatMessage(nil), req.Messages...)
+		}
+		callCount++
+
+		w.Header().Set("Content-Type", "application/json")
+		var resp providers.ChatCompletionResponse
+		if callCount == 1 {
+			resp = providers.ChatCompletionResponse{
+				Choices: []struct {
+					Message struct {
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					} `json:"message"`
+				}{{
+					Message: struct {
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					}{
+						Role: "assistant",
+						ToolCalls: []providers.ToolCall{{
+							ID:   "tc-mcp",
+							Type: "function",
+							Function: struct {
+								Name      string `json:"name"`
+								Arguments string `json:"arguments"`
+							}{Name: "mcp_demo_echo", Arguments: `{"text":"hi"}`},
+						}},
+					},
+				}},
+			}
+		} else {
+			resp = providers.ChatCompletionResponse{
+				Choices: []struct {
+					Message struct {
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					} `json:"message"`
+				}{{
+					Message: struct {
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					}{Role: "assistant", Content: "MCP done"},
+				}},
+			}
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	provider := providers.New(srv.URL, "key", 10*time.Second)
+	provider.HTTP = srv.Client()
+
+	tool := &mcpEchoTool{}
+	reg := tools.NewRegistry()
+	reg.Register(tool)
+
+	deliver := &mockDeliverer{}
+	rt := &Runtime{
+		DB:           d,
+		Provider:     provider,
+		Model:        "gpt-4",
+		Tools:        reg,
+		Builder:      &Builder{DB: d, HistoryMax: 10},
+		MaxToolLoops: 6,
+		Deliver:      deliver,
+	}
+
+	if err := rt.Handle(context.Background(), bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess-mcp-tool",
+		Channel:    "cli",
+		From:       "user",
+		Message:    "use the MCP tool",
+	}); err != nil {
+		t.Fatalf("Handle with MCP tool: %v", err)
+	}
+
+	if callCount != 2 {
+		t.Fatalf("expected two provider requests, got %d", callCount)
+	}
+	if !tool.called || tool.gotText != "hi" {
+		t.Fatalf("expected MCP tool to execute with text=hi, got called=%v text=%q", tool.called, tool.gotText)
+	}
+	if len(firstTools) != 1 {
+		t.Fatalf("expected one advertised tool, got %#v", firstTools)
+	}
+	if firstTools[0].Function.Name != "mcp_demo_echo" {
+		t.Fatalf("expected MCP tool name in tool defs, got %#v", firstTools[0].Function)
+	}
+	if firstTools[0].Function.Description != "MCP-backed echo" {
+		t.Fatalf("expected MCP tool description in tool defs, got %#v", firstTools[0].Function.Description)
+	}
+	params, ok := firstTools[0].Function.Parameters.(map[string]any)
+	if !ok {
+		t.Fatalf("expected JSON schema parameters, got %#v", firstTools[0].Function.Parameters)
+	}
+	properties, ok := params["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected schema properties, got %#v", params)
+	}
+	textField, ok := properties["text"].(map[string]any)
+	if !ok || textField["type"] != "string" {
+		t.Fatalf("expected text property schema, got %#v", properties["text"])
+	}
+	if len(secondMessages) == 0 {
+		t.Fatal("expected second provider request to include tool result")
+	}
+	last := secondMessages[len(secondMessages)-1]
+	if last.Role != "tool" || last.Content != "remote echo: hi" {
+		t.Fatalf("expected tool message with MCP output, got %#v", last)
+	}
+	if len(deliver.messages) == 0 || deliver.messages[0] != "MCP done" {
+		t.Fatalf("expected final delivery after MCP tool execution, got %#v", deliver.messages)
+	}
+}
+
 // echoTool is a simple test tool for agent tests
 type echoTool struct{ tools.Base }
 
@@ -462,6 +599,31 @@ func (e *echoTool) Execute(ctx context.Context, params map[string]any) (string, 
 	return "echo result", nil
 }
 func (e *echoTool) Schema() map[string]any {
+	return e.SchemaFor(e.Name(), e.Description(), e.Parameters())
+}
+
+type mcpEchoTool struct {
+	tools.Base
+	called  bool
+	gotText string
+}
+
+func (e *mcpEchoTool) Name() string        { return "mcp_demo_echo" }
+func (e *mcpEchoTool) Description() string { return "MCP-backed echo" }
+func (e *mcpEchoTool) Parameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"text": map[string]any{"type": "string"},
+		},
+	}
+}
+func (e *mcpEchoTool) Execute(ctx context.Context, params map[string]any) (string, error) {
+	e.called = true
+	e.gotText = fmt.Sprint(params["text"])
+	return "remote echo: " + e.gotText, nil
+}
+func (e *mcpEchoTool) Schema() map[string]any {
 	return e.SchemaFor(e.Name(), e.Description(), e.Parameters())
 }
 

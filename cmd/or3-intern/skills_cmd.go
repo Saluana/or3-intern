@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,11 +14,13 @@ import (
 
 	"or3-intern/internal/clawhub"
 	"or3-intern/internal/config"
+	"or3-intern/internal/mcp"
 	"or3-intern/internal/skills"
 )
 
 type skillsCommandDeps struct {
 	Client        *clawhub.Client
+	LoadToolNames func(context.Context, config.Config) map[string]struct{}
 	LoadInventory func(toolNames map[string]struct{}) skills.Inventory
 	Stdout        io.Writer
 	Stderr        io.Writer
@@ -26,6 +29,9 @@ type skillsCommandDeps struct {
 func runSkillsCommand(ctx context.Context, cfg config.Config, bundledDir string, args []string, stdout, stderr io.Writer) error {
 	deps := skillsCommandDeps{
 		Client: newClawHubClient(cfg),
+		LoadToolNames: func(ctx context.Context, cfg config.Config) map[string]struct{} {
+			return loadAvailableToolNamesWithManager(ctx, cfg, nil)
+		},
 		LoadInventory: func(toolNames map[string]struct{}) skills.Inventory {
 			return buildSkillsInventory(cfg, bundledDir, toolNames)
 		},
@@ -38,6 +44,11 @@ func runSkillsCommand(ctx context.Context, cfg config.Config, bundledDir string,
 func runSkillsCommandWithDeps(ctx context.Context, cfg config.Config, args []string, deps skillsCommandDeps) error {
 	if deps.Client == nil {
 		deps.Client = newClawHubClient(cfg)
+	}
+	if deps.LoadToolNames == nil {
+		deps.LoadToolNames = func(ctx context.Context, cfg config.Config) map[string]struct{} {
+			return loadAvailableToolNamesWithManager(ctx, cfg, nil)
+		}
 	}
 	if deps.LoadInventory == nil {
 		return fmt.Errorf("skills inventory loader not configured")
@@ -60,7 +71,7 @@ func runSkillsCommandWithDeps(ctx context.Context, cfg config.Config, args []str
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		inv := deps.LoadInventory(availableToolNames(cfg.Cron.Enabled, cfg.Subagents.Enabled))
+		inv := deps.LoadInventory(deps.LoadToolNames(ctx, cfg))
 		if len(inv.Skills) == 0 {
 			_, _ = fmt.Fprintln(deps.Stdout, "(no skills found)")
 			return nil
@@ -87,7 +98,7 @@ func runSkillsCommandWithDeps(ctx context.Context, cfg config.Config, args []str
 		if len(args) < 2 {
 			return fmt.Errorf("usage: or3-intern skills info <name>")
 		}
-		inv := deps.LoadInventory(availableToolNames(cfg.Cron.Enabled, cfg.Subagents.Enabled))
+		inv := deps.LoadInventory(deps.LoadToolNames(ctx, cfg))
 		skill, ok := inv.Get(args[1])
 		if !ok {
 			return fmt.Errorf("skill not found: %s", args[1])
@@ -116,7 +127,7 @@ func runSkillsCommandWithDeps(ctx context.Context, cfg config.Config, args []str
 		}
 		return nil
 	case "check":
-		inv := deps.LoadInventory(availableToolNames(cfg.Cron.Enabled, cfg.Subagents.Enabled))
+		inv := deps.LoadInventory(deps.LoadToolNames(ctx, cfg))
 		if len(inv.Skills) == 0 {
 			_, _ = fmt.Fprintln(deps.Stdout, "(no skills found)")
 			return nil
@@ -253,6 +264,38 @@ func buildSkillsInventory(cfg config.Config, bundledDir string, toolNames map[st
 		Env:            envMap(),
 		AvailableTools: toolNames,
 	})
+}
+
+func loadAvailableToolNames(ctx context.Context, cfg config.Config) map[string]struct{} {
+	return loadAvailableToolNamesWithManager(ctx, cfg, nil)
+}
+
+func loadAvailableToolNamesWithManager(ctx context.Context, cfg config.Config, manager *mcp.Manager) map[string]struct{} {
+	toolNames := availableToolNames(cfg.Cron.Enabled, cfg.Subagents.Enabled)
+	if len(cfg.Tools.MCPServers) == 0 {
+		return toolNames
+	}
+	if manager != nil {
+		for _, name := range manager.ToolNames() {
+			toolNames[name] = struct{}{}
+		}
+		return toolNames
+	}
+	manager = mcp.NewManager(cfg.Tools.MCPServers)
+	manager.SetLogger(log.Printf)
+	if err := manager.Connect(ctx); err != nil {
+		log.Printf("mcp setup failed: %v", err)
+		return toolNames
+	}
+	defer func() {
+		if err := manager.Close(); err != nil {
+			log.Printf("mcp close failed: %v", err)
+		}
+	}()
+	for _, name := range manager.ToolNames() {
+		toolNames[name] = struct{}{}
+	}
+	return toolNames
 }
 
 func buildSkillRoots(cfg config.Config, bundledDir string) []skills.Root {

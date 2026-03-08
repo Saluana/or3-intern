@@ -154,6 +154,7 @@ func (c *Client) ChatStream(ctx context.Context, req ChatCompletionRequest, onDe
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	var contentBuilder strings.Builder
 	var finalToolCalls []ToolCall
 

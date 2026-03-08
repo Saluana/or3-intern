@@ -170,6 +170,11 @@ func (d *DB) UpsertPinned(ctx context.Context, sessionKey, key, content string) 
 
 func (d *DB) InsertMemoryNote(ctx context.Context, sessionKey, text string, embedding []byte, sourceMsgID sql.NullInt64, tags string) (int64, error) {
 	sessionKey = normalizeMemorySession(sessionKey)
+	if len(embedding) >= 4 && len(embedding)%4 == 0 {
+		if err := d.EnsureMemoryVecIndexWithDim(ctx, len(embedding)/4); err != nil {
+			return 0, err
+		}
+	}
 	res, err := d.SQL.ExecContext(ctx,
 		`INSERT INTO memory_notes(session_key, text, embedding, source_message_id, tags, created_at) VALUES(?,?,?,?,?,?)`,
 		sessionKey, text, embedding, sourceMsgID, tags, NowMS())
@@ -177,7 +182,37 @@ func (d *DB) InsertMemoryNote(ctx context.Context, sessionKey, text string, embe
 		return 0, err
 	}
 	id, _ := res.LastInsertId()
+	_ = d.upsertMemoryVec(ctx, id, sessionKey, text, embedding)
 	return id, nil
+}
+
+func (d *DB) upsertMemoryVec(ctx context.Context, noteID int64, sessionKey, text string, embedding []byte) error {
+	if d == nil || d.VecSQL == nil {
+		return nil
+	}
+	if len(embedding) < 4 || len(embedding)%4 != 0 {
+		return nil
+	}
+	dims, err := d.MemoryVectorDims(ctx)
+	if err != nil {
+		return err
+	}
+	if dims == 0 {
+		if err := d.EnsureMemoryVecIndexWithDim(ctx, len(embedding)/4); err != nil {
+			return err
+		}
+		dims, err = d.MemoryVectorDims(ctx)
+		if err != nil {
+			return err
+		}
+	}
+	if dims != len(embedding)/4 {
+		return nil
+	}
+	_, err = d.VecSQL.ExecContext(ctx,
+		`INSERT OR REPLACE INTO memory_vec(note_id, session_key, embedding, text) VALUES(?,?,?,?)`,
+		noteID, sessionKey, embedding, text)
+	return err
 }
 
 type MemoryNoteRow struct {
@@ -226,6 +261,77 @@ type FTSCandidate struct {
 	ID   int64
 	Text string
 	Rank float64
+}
+
+type VecCandidateRow struct {
+	ID       int64
+	Text     string
+	Distance float64
+}
+
+func (d *DB) SearchVecScope(ctx context.Context, sessionKey string, queryVec []byte, k int) ([]VecCandidateRow, error) {
+	if d == nil || d.VecSQL == nil {
+		return nil, nil
+	}
+	if k <= 0 || len(queryVec) == 0 {
+		return nil, nil
+	}
+	dims, err := d.MemoryVectorDims(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if dims == 0 || len(queryVec) != dims*4 {
+		return nil, nil
+	}
+	rows, err := d.VecSQL.QueryContext(ctx,
+		`SELECT note_id, text, distance
+		 FROM memory_vec
+		 WHERE embedding MATCH ? AND k = ? AND session_key = ?
+		 ORDER BY distance`,
+		queryVec, k, normalizeMemorySession(sessionKey))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanVecCandidateRows(rows)
+}
+
+func (d *DB) SearchVecScopeFallback(ctx context.Context, sessionKey string, queryVec []byte, k int) ([]VecCandidateRow, error) {
+	if d == nil || d.VecSQL == nil {
+		return nil, nil
+	}
+	if k <= 0 || len(queryVec) == 0 || len(queryVec)%4 != 0 {
+		return nil, nil
+	}
+	rows, err := d.VecSQL.QueryContext(ctx,
+		`SELECT id, text, vec_distance_cosine(embedding, ?) AS distance
+		 FROM memory_notes
+		 WHERE session_key=? AND typeof(embedding)='blob' AND length(embedding)=?
+		 ORDER BY distance ASC
+		 LIMIT ?`,
+		queryVec, normalizeMemorySession(sessionKey), len(queryVec), k)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanVecCandidateRows(rows)
+}
+
+func scanVecCandidateRows(rows *sql.Rows) ([]VecCandidateRow, error) {
+	var out []VecCandidateRow
+	for rows.Next() {
+		var item VecCandidateRow
+		var distance sql.NullFloat64
+		if err := rows.Scan(&item.ID, &item.Text, &distance); err != nil {
+			return nil, err
+		}
+		if !distance.Valid {
+			continue
+		}
+		item.Distance = distance.Float64
+		out = append(out, item)
+	}
+	return out, rows.Err()
 }
 
 func (d *DB) SearchFTS(ctx context.Context, sessionKey, query string, k int) ([]FTSCandidate, error) {
@@ -380,6 +486,9 @@ func (d *DB) WriteConsolidation(ctx context.Context, w ConsolidationWrite) (int6
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
+	}
+	if noteID > 0 {
+		_ = d.upsertMemoryVec(ctx, noteID, normalizeMemorySession(w.ScopeKey), w.NoteText, w.Embedding)
 	}
 	return noteID, nil
 }

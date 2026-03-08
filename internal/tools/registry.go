@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 )
 
 type Registry struct {
@@ -21,13 +22,15 @@ func (r *Registry) Names() []string {
 	for k := range r.tools {
 		out = append(out, k)
 	}
+	sort.Strings(out)
 	return out
 }
 
 func (r *Registry) Definitions() []map[string]any {
-	out := make([]map[string]any, 0, len(r.tools))
-	for _, t := range r.tools {
-		out = append(out, t.Schema())
+	names := r.Names()
+	out := make([]map[string]any, 0, len(names))
+	for _, name := range names {
+		out = append(out, r.tools[name].Schema())
 	}
 	return out
 }

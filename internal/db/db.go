@@ -4,33 +4,68 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sync"
 	"time"
 
+	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
+	_ "github.com/mattn/go-sqlite3"
 	"or3-intern/internal/scope"
 
 	_ "modernc.org/sqlite"
 )
 
+var sqliteVecAutoOnce sync.Once
+
 type DB struct {
-	SQL *sql.DB
+	SQL    *sql.DB
+	VecSQL *sql.DB
 }
 
 func Open(path string) (*DB, error) {
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)", path)
-	s, err := sql.Open("sqlite", dsn)
+	primaryDSN := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)", path)
+	s, err := sql.Open("sqlite", primaryDSN)
 	if err != nil {
 		return nil, err
 	}
-	s.SetMaxOpenConns(1) // deterministic, low-RAM
-	d := &DB{SQL: s}
+	s.SetMaxOpenConns(4)
+	s.SetMaxIdleConns(4)
+
+	sqliteVecAutoOnce.Do(sqlite_vec.Auto)
+	vecDSN := fmt.Sprintf("file:%s?_busy_timeout=5000&_journal=WAL&_sync=NORMAL&_fk=1", path)
+	vec, err := sql.Open("sqlite3", vecDSN)
+	if err != nil {
+		_ = s.Close()
+		return nil, err
+	}
+	vec.SetMaxOpenConns(2)
+	vec.SetMaxIdleConns(2)
+
+	d := &DB{SQL: s, VecSQL: vec}
 	if err := d.migrate(context.Background()); err != nil {
+		_ = vec.Close()
 		_ = s.Close()
 		return nil, err
 	}
 	return d, nil
 }
 
-func (d *DB) Close() error { return d.SQL.Close() }
+func (d *DB) Close() error {
+	if d == nil {
+		return nil
+	}
+	var err error
+	if d.VecSQL != nil {
+		if closeErr := d.VecSQL.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}
+	if d.SQL != nil {
+		if closeErr := d.SQL.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}
+	return err
+}
 
 func (d *DB) migrate(ctx context.Context) error {
 	stmts := []string{
@@ -142,6 +177,14 @@ func (d *DB) migrate(ctx context.Context) error {
 			INSERT INTO memory_docs_fts(memory_docs_fts, rowid, title, summary, text) VALUES('delete', old.id, old.title, old.summary, old.text);
 			INSERT INTO memory_docs_fts(rowid, title, summary, text) VALUES (new.id, new.title, new.summary, new.text);
 		END;`,
+		`CREATE TABLE IF NOT EXISTS memory_vec_meta(
+			id INTEGER PRIMARY KEY CHECK(id=1),
+			dims INTEGER NOT NULL DEFAULT 0,
+			updated_at INTEGER NOT NULL DEFAULT 0
+		);`,
+		`INSERT INTO memory_vec_meta(id, dims, updated_at)
+			VALUES(1, 0, 0)
+			ON CONFLICT(id) DO NOTHING;`,
 	}
 	for _, s := range stmts {
 		if _, err := d.SQL.ExecContext(ctx, s); err != nil {
@@ -155,6 +198,9 @@ func (d *DB) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := d.migrateLegacyGlobalMemoryScope(ctx); err != nil {
+		return err
+	}
+	if err := d.ensureMemoryVecIndexForExisting(ctx); err != nil {
 		return err
 	}
 	return nil
@@ -222,7 +268,124 @@ func (d *DB) migrateLegacyGlobalMemoryScope(ctx context.Context) error {
 		return err
 	}
 	_, err := d.SQL.ExecContext(ctx, `UPDATE memory_notes SET session_key=? WHERE session_key=?`, scope.GlobalMemoryScope, scope.GlobalScopeAlias)
+	if err != nil {
+		return err
+	}
+	if dims, derr := d.MemoryVectorDims(ctx); derr == nil && dims > 0 && d.VecSQL != nil {
+		_, err = d.VecSQL.ExecContext(ctx, `UPDATE memory_vec SET session_key=? WHERE session_key=?`, scope.GlobalMemoryScope, scope.GlobalScopeAlias)
+	}
 	return err
+}
+
+func (d *DB) ensureMemoryVecIndexForExisting(ctx context.Context) error {
+	dims, err := d.MemoryVectorDims(ctx)
+	if err != nil {
+		return err
+	}
+	if dims == 0 {
+		dims, err = d.firstMemoryVectorDim(ctx)
+		if err != nil {
+			return err
+		}
+	}
+	if dims <= 0 {
+		return nil
+	}
+	return d.initMemoryVecIndex(ctx, dims)
+}
+
+func (d *DB) MemoryVectorDims(ctx context.Context) (int, error) {
+	row := d.SQL.QueryRowContext(ctx, `SELECT dims FROM memory_vec_meta WHERE id=1`)
+	var dims int
+	if err := row.Scan(&dims); err != nil {
+		if err == sql.ErrNoRows {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return dims, nil
+}
+
+func (d *DB) firstMemoryVectorDim(ctx context.Context) (int, error) {
+	row := d.SQL.QueryRowContext(ctx,
+		`SELECT COALESCE(length(embedding), 0)
+		 FROM memory_notes
+		 WHERE typeof(embedding)='blob' AND length(embedding) >= 4 AND (length(embedding) % 4)=0
+		 ORDER BY id ASC
+		 LIMIT 1`)
+	var bytes int
+	if err := row.Scan(&bytes); err != nil {
+		if err == sql.ErrNoRows {
+			return 0, nil
+		}
+		return 0, err
+	}
+	if bytes <= 0 {
+		return 0, nil
+	}
+	return bytes / 4, nil
+}
+
+func (d *DB) EnsureMemoryVecIndexWithDim(ctx context.Context, dims int) error {
+	if dims <= 0 {
+		return nil
+	}
+	existing, err := d.MemoryVectorDims(ctx)
+	if err != nil {
+		return err
+	}
+	if existing > 0 && existing != dims {
+		return nil
+	}
+	return d.initMemoryVecIndex(ctx, dims)
+}
+
+func (d *DB) initMemoryVecIndex(ctx context.Context, dims int) error {
+	if dims <= 0 {
+		return nil
+	}
+	if d == nil || d.VecSQL == nil {
+		return nil
+	}
+	tx, err := d.VecSQL.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var existing int
+	if err := tx.QueryRowContext(ctx, `SELECT dims FROM memory_vec_meta WHERE id=1`).Scan(&existing); err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	if existing > 0 && existing != dims {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `DROP TABLE IF EXISTS memory_vec`); err != nil {
+		return err
+	}
+	createSQL := fmt.Sprintf(`CREATE VIRTUAL TABLE memory_vec USING vec0(
+			note_id integer primary key,
+			session_key text partition key,
+			embedding float[%d] distance_metric=cosine,
+			+text text
+		)`, dims)
+	if _, err := tx.ExecContext(ctx, createSQL); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO memory_vec(note_id, session_key, embedding, text)
+		 SELECT id, session_key, embedding, text
+		 FROM memory_notes
+		 WHERE typeof(embedding)='blob' AND length(embedding)=?`, dims*4); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO memory_vec_meta(id, dims, updated_at)
+		 VALUES(1, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET dims=excluded.dims, updated_at=excluded.updated_at`,
+		dims, NowMS()); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (d *DB) tableHasColumn(ctx context.Context, tableName, columnName string) (bool, error) {

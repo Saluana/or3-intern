@@ -27,6 +27,11 @@ type Deliverer interface {
 	Deliver(ctx context.Context, channel, to, text string) error
 }
 
+type sessionLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
 type Runtime struct {
 	DB               *db.DB
 	Provider         *providers.Client
@@ -48,7 +53,7 @@ type Runtime struct {
 	LinkDirectMessages     bool
 	IdentityScopeMap       map[string]string
 
-	locks sync.Map // sessionKey -> *sync.Mutex
+	locks sync.Map // sessionKey -> *sessionLock
 }
 
 type BackgroundRunInput struct {
@@ -69,14 +74,41 @@ type BackgroundRunResult struct {
 }
 
 func (r *Runtime) lockFor(key string) *sync.Mutex {
-	v, _ := r.locks.LoadOrStore(key, &sync.Mutex{})
-	return v.(*sync.Mutex)
+	v, _ := r.locks.LoadOrStore(key, &sessionLock{})
+	return &v.(*sessionLock).mu
+}
+
+func (r *Runtime) acquireSessionLock(key string) *sessionLock {
+	v, _ := r.locks.LoadOrStore(key, &sessionLock{})
+	entry := v.(*sessionLock)
+	entry.mu.Lock()
+	entry.refs++
+	entry.mu.Unlock()
+	return entry
+}
+
+func (r *Runtime) releaseSessionLock(key string, entry *sessionLock) {
+	if r == nil || entry == nil {
+		return
+	}
+	entry.mu.Lock()
+	if entry.refs > 0 {
+		entry.refs--
+	}
+	remaining := entry.refs
+	entry.mu.Unlock()
+	if remaining == 0 {
+		r.locks.Delete(key)
+	}
 }
 
 func (r *Runtime) Handle(ctx context.Context, ev bus.Event) error {
-	mu := r.lockFor(ev.SessionKey)
-	mu.Lock()
-	defer mu.Unlock()
+	entry := r.acquireSessionLock(ev.SessionKey)
+	entry.mu.Lock()
+	defer func() {
+		entry.mu.Unlock()
+		r.releaseSessionLock(ev.SessionKey, entry)
+	}()
 	switch ev.Type {
 	case bus.EventUserMessage, bus.EventCron, bus.EventHeartbeat, bus.EventSystem, bus.EventWebhook, bus.EventFileChange:
 		return r.turn(ctx, ev)
@@ -356,9 +388,12 @@ func (r *Runtime) BuildPromptSnapshotWithOptions(ctx context.Context, opts Build
 }
 
 func (r *Runtime) RunBackground(ctx context.Context, input BackgroundRunInput) (BackgroundRunResult, error) {
-	mu := r.lockFor(input.SessionKey)
-	mu.Lock()
-	defer mu.Unlock()
+	entry := r.acquireSessionLock(input.SessionKey)
+	entry.mu.Lock()
+	defer func() {
+		entry.mu.Unlock()
+		r.releaseSessionLock(input.SessionKey, entry)
+	}()
 
 	if strings.TrimSpace(input.SessionKey) == "" {
 		return BackgroundRunResult{}, fmt.Errorf("background session key required")

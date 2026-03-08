@@ -64,32 +64,37 @@ func (h *candMinHeap) Pop() any {
 }
 
 func VectorSearch(ctx context.Context, d *db.DB, sessionKey string, queryVec []float32, k int, scanLimit int) ([]VecCandidate, error) {
-	h := &candMinHeap{}
-	heap.Init(h)
-
+	_ = scanLimit
+	queryBlob := PackFloat32(queryVec)
 	scopes := []string{scope.GlobalMemoryScope}
 	if trimmedSessionKey := strings.TrimSpace(sessionKey); trimmedSessionKey != "" && trimmedSessionKey != scope.GlobalMemoryScope {
 		scopes = append(scopes, sessionKey)
 	}
+	seen := make(map[int64]struct{}, k*len(scopes))
+	out := make([]VecCandidate, 0, k*len(scopes))
 	for _, memoryScope := range scopes {
-		rows, err := d.StreamMemoryNotesScopeLimit(ctx, memoryScope, scanLimit)
-		if err != nil { return nil, err }
-		if err := addVectorCandidates(rows, queryVec, k, h); err != nil {
-			_ = rows.Close()
+		rows, err := d.SearchVecScope(ctx, memoryScope, queryBlob, k)
+		if err != nil {
 			return nil, err
 		}
-		if err := rows.Close(); err != nil {
-			return nil, err
+		if len(rows) == 0 {
+			rows, err = d.SearchVecScopeFallback(ctx, memoryScope, queryBlob, k)
+			if err != nil {
+				return nil, err
+			}
+		}
+		for _, row := range rows {
+			if _, ok := seen[row.ID]; ok {
+				continue
+			}
+			seen[row.ID] = struct{}{}
+			out = append(out, VecCandidate{
+				ID:    row.ID,
+				Text:  row.Text,
+				Score: 1.0 / (1.0 + row.Distance),
+			})
 		}
 	}
-
-	// pop into descending slice
-	out := make([]VecCandidate, h.Len())
-	for i := len(out)-1; i >= 0; i-- {
-		out[i] = heap.Pop(h).(VecCandidate)
-	}
-	// now out ascending (min->max). reverse to max->min
-	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 { out[i], out[j] = out[j], out[i] }
 	return out, nil
 }
 

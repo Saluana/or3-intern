@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -16,7 +17,26 @@ const (
 	defaultWorkspaceContextMaxResults   = 6
 	defaultWorkspaceContextMaxChars     = 6000
 	defaultWorkspaceContextScanLimit    = 200
+	workspaceContextCacheTTL            = 5 * time.Second
 )
+
+type workspaceContextCacheKey struct {
+	root         string
+	query        string
+	maxFileBytes int
+	maxResults   int
+	maxChars     int
+}
+
+type workspaceContextCacheEntry struct {
+	text      string
+	expiresAt time.Time
+}
+
+var workspaceContextCache = struct {
+	mu      sync.Mutex
+	entries map[workspaceContextCacheKey]workspaceContextCacheEntry
+}{entries: map[workspaceContextCacheKey]workspaceContextCacheEntry{}}
 
 type WorkspaceContextConfig struct {
 	WorkspaceDir string
@@ -57,9 +77,19 @@ func BuildWorkspaceContext(cfg WorkspaceContextConfig, query string) string {
 	if maxChars <= 0 {
 		maxChars = defaultWorkspaceContextMaxChars
 	}
+	cacheKey := workspaceContextCacheKey{
+		root:         realRoot,
+		query:        strings.TrimSpace(strings.ToLower(query)),
+		maxFileBytes: maxFileBytes,
+		maxResults:   maxResults,
+		maxChars:     maxChars,
+	}
 	now := cfg.Now
 	if now.IsZero() {
 		now = time.Now()
+	}
+	if cached, ok := getWorkspaceContextCache(cacheKey, now); ok {
+		return cached
 	}
 
 	seen := map[string]struct{}{}
@@ -103,7 +133,29 @@ func BuildWorkspaceContext(cfg WorkspaceContextConfig, query string) string {
 	for i, candidate := range candidates {
 		out.WriteString(fmt.Sprintf("%d) [%s] %s\n", i+1, relativeDisplayPath(realRoot, candidate.Path), workspaceOneLine(candidate.Excerpt, 320)))
 	}
-	return workspaceTruncate(strings.TrimSpace(out.String()), maxChars)
+	text := workspaceTruncate(strings.TrimSpace(out.String()), maxChars)
+	setWorkspaceContextCache(cacheKey, text, now)
+	return text
+}
+
+func getWorkspaceContextCache(key workspaceContextCacheKey, now time.Time) (string, bool) {
+	workspaceContextCache.mu.Lock()
+	defer workspaceContextCache.mu.Unlock()
+	entry, ok := workspaceContextCache.entries[key]
+	if !ok {
+		return "", false
+	}
+	if !entry.expiresAt.After(now) {
+		delete(workspaceContextCache.entries, key)
+		return "", false
+	}
+	return entry.text, true
+}
+
+func setWorkspaceContextCache(key workspaceContextCacheKey, text string, now time.Time) {
+	workspaceContextCache.mu.Lock()
+	defer workspaceContextCache.mu.Unlock()
+	workspaceContextCache.entries[key] = workspaceContextCacheEntry{text: text, expiresAt: now.Add(workspaceContextCacheTTL)}
 }
 
 func recentMemoryCandidates(root string, now time.Time, maxFileBytes int) []workspaceCandidate {

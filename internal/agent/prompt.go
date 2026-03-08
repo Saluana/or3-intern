@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"or3-intern/internal/artifacts"
 	"or3-intern/internal/db"
@@ -53,7 +55,25 @@ const (
 	defaultVisionMaxImages        = 4
 	defaultVisionMaxImageBytes    = 4 << 20
 	defaultVisionTotalBytes       = 8 << 20
+	embedCacheTTL                 = 5 * time.Minute
+	embedCacheMaxEntries          = 128
 )
+
+type embedCacheKey struct {
+	model string
+	input string
+}
+
+type embedCacheEntry struct {
+	vec       []float32
+	expiresAt time.Time
+	usedAt    time.Time
+}
+
+var promptEmbedCache = struct {
+	mu      sync.Mutex
+	entries map[embedCacheKey]embedCacheEntry
+}{entries: map[embedCacheKey]embedCacheEntry{}}
 
 type PromptParts struct {
 	System  []providers.ChatMessage
@@ -120,7 +140,7 @@ func (b *Builder) BuildWithOptions(ctx context.Context, opts BuildOptions) (Prom
 	// embed and retrieve
 	var retrieved []memory.Retrieved
 	if b.Mem != nil && b.Provider != nil && strings.TrimSpace(opts.UserMessage) != "" {
-		vec, err := b.Provider.Embed(ctx, b.EmbedModel, opts.UserMessage)
+		vec, err := cachedEmbed(ctx, b.Provider, b.EmbedModel, opts.UserMessage)
 		if err == nil {
 			retrieved, _ = b.Mem.Retrieve(ctx, scopeKey, opts.UserMessage, vec, b.VectorK, b.FTSK, b.TopK)
 		}
@@ -452,4 +472,50 @@ func oneLine(s string, max int) string {
 		s = s[:max] + "…"
 	}
 	return s
+}
+
+func cachedEmbed(ctx context.Context, provider *providers.Client, model, input string) ([]float32, error) {
+	input = strings.TrimSpace(input)
+	model = strings.TrimSpace(model)
+	if provider == nil {
+		return nil, fmt.Errorf("provider not configured")
+	}
+	if model == "" || input == "" {
+		return provider.Embed(ctx, model, input)
+	}
+	key := embedCacheKey{model: model, input: input}
+	now := time.Now()
+	promptEmbedCache.mu.Lock()
+	if entry, ok := promptEmbedCache.entries[key]; ok && entry.expiresAt.After(now) {
+		entry.usedAt = now
+		promptEmbedCache.entries[key] = entry
+		vec := append([]float32(nil), entry.vec...)
+		promptEmbedCache.mu.Unlock()
+		return vec, nil
+	}
+	promptEmbedCache.mu.Unlock()
+
+	vec, err := provider.Embed(ctx, model, input)
+	if err != nil {
+		return nil, err
+	}
+	promptEmbedCache.mu.Lock()
+	if len(promptEmbedCache.entries) >= embedCacheMaxEntries {
+		var oldestKey embedCacheKey
+		var oldest time.Time
+		for k, entry := range promptEmbedCache.entries {
+			if oldest.IsZero() || entry.usedAt.Before(oldest) {
+				oldest = entry.usedAt
+				oldestKey = k
+			}
+		}
+		delete(promptEmbedCache.entries, oldestKey)
+	}
+	promptEmbedCache.entries[key] = embedCacheEntry{
+		vec:       append([]float32(nil), vec...),
+		expiresAt: now.Add(embedCacheTTL),
+		usedAt:    now,
+	}
+	promptEmbedCache.mu.Unlock()
+	return vec, nil
 }

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -49,6 +50,13 @@ type DocIndexer struct {
 	Config     DocIndexConfig
 }
 
+type indexedDocState struct {
+	hash      string
+	mtimeMS   int64
+	sizeBytes int64
+	active    bool
+}
+
 func (x *DocIndexer) defaults() DocIndexConfig {
 	c := x.Config
 	if c.MaxFiles <= 0 {
@@ -84,6 +92,10 @@ func (x *DocIndexer) SyncRoots(ctx context.Context, scopeKey string) error {
 	seen := map[string]bool{}
 	fileCount := 0
 	chunkCount := 0
+	existing, err := x.loadIndexedDocState(ctx, scopeKey)
+	if err != nil {
+		return err
+	}
 
 	for _, root := range cfg.Roots {
 		if strings.TrimSpace(root) == "" {
@@ -144,28 +156,28 @@ func (x *DocIndexer) SyncRoots(ctx context.Context, scopeKey string) error {
 
 			seen[realPath] = true
 			fileCount++
+			mtimeMS := info.ModTime().UnixMilli()
+			sizeBytes := info.Size()
+			if state, ok := existing[realPath]; ok && state.active && state.mtimeMS == mtimeMS && state.sizeBytes == sizeBytes {
+				chunkCount++
+				return nil
+			}
 
-				data, err := os.ReadFile(realPath)
+				data, err := readDocFile(realPath, cfg.MaxFileBytes)
 				if err != nil {
 					return err
 				}
-			if len(data) > cfg.MaxFileBytes {
-				data = data[:cfg.MaxFileBytes]
-			}
 
 			h := fileHash(data)
-			mtimeMS := info.ModTime().UnixMilli()
-			sizeBytes := info.Size()
+			if state, ok := existing[realPath]; ok && state.active && state.hash == h {
+				chunkCount++
+				return nil
+			}
 
 			kind := extKind(ext)
 			title := filepath.Base(realPath)
 			text := string(data)
 			summary := extractSummary(text)
-
-			if !x.needsUpdate(ctx, scopeKey, realPath, h) {
-				chunkCount++
-				return nil
-			}
 
 			var embedding []byte
 			if x.Provider != nil && x.EmbedModel != "" && len(data) <= cfg.EmbedMaxBytes {
@@ -219,6 +231,35 @@ func (x *DocIndexer) SyncRoots(ctx context.Context, scopeKey string) error {
 			db.NowMS(), scopeKey, p)
 	}
 	return nil
+}
+
+func (x *DocIndexer) loadIndexedDocState(ctx context.Context, scopeKey string) (map[string]indexedDocState, error) {
+	rows, err := x.DB.SQL.QueryContext(ctx,
+		`SELECT path, hash, mtime_ms, size_bytes, active FROM memory_docs WHERE scope_key=?`, scopeKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]indexedDocState{}
+	for rows.Next() {
+		var path, hash string
+		var mtimeMS, sizeBytes int64
+		var active int
+		if err := rows.Scan(&path, &hash, &mtimeMS, &sizeBytes, &active); err != nil {
+			return nil, err
+		}
+		out[path] = indexedDocState{hash: hash, mtimeMS: mtimeMS, sizeBytes: sizeBytes, active: active == 1}
+	}
+	return out, rows.Err()
+}
+
+func readDocFile(path string, maxBytes int) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(io.LimitReader(f, int64(maxBytes)))
 }
 
 func (x *DocIndexer) needsUpdate(ctx context.Context, scopeKey, path, newHash string) bool {

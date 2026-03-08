@@ -137,3 +137,21 @@ func TestHeartbeatServiceForCommand_OnlyServeAndEnabled(t *testing.T) {
 		t.Fatalf("expected normalized heartbeat session key, got %q", svc.Config.SessionKey)
 	}
 }
+
+func TestSubagentsEnabledForCommand(t *testing.T) {
+	cfg := config.Default()
+	cfg.Subagents.Enabled = true
+	if !subagentsEnabledForCommand("chat", cfg) {
+		t.Fatal("expected chat to enable subagents")
+	}
+	if !subagentsEnabledForCommand("serve", cfg) {
+		t.Fatal("expected serve to enable subagents")
+	}
+	if subagentsEnabledForCommand("agent", cfg) {
+		t.Fatal("expected one-shot agent mode to disable subagents")
+	}
+	cfg.Subagents.Enabled = false
+	if subagentsEnabledForCommand("serve", cfg) {
+		t.Fatal("expected disabled config to win")
+	}
+}

@@ -53,7 +53,8 @@ type Runtime struct {
 	LinkDirectMessages     bool
 	IdentityScopeMap       map[string]string
 
-	locks sync.Map // sessionKey -> *sessionLock
+	locksMu sync.Mutex
+	locks   map[string]*sessionLock
 }
 
 type BackgroundRunInput struct {
@@ -74,16 +75,21 @@ type BackgroundRunResult struct {
 }
 
 func (r *Runtime) lockFor(key string) *sync.Mutex {
-	v, _ := r.locks.LoadOrStore(key, &sessionLock{})
-	return &v.(*sessionLock).mu
+	return &r.getSessionLock(key).mu
 }
 
 func (r *Runtime) acquireSessionLock(key string) *sessionLock {
-	v, _ := r.locks.LoadOrStore(key, &sessionLock{})
-	entry := v.(*sessionLock)
-	entry.mu.Lock()
+	r.locksMu.Lock()
+	if r.locks == nil {
+		r.locks = map[string]*sessionLock{}
+	}
+	entry := r.locks[key]
+	if entry == nil {
+		entry = &sessionLock{}
+		r.locks[key] = entry
+	}
 	entry.refs++
-	entry.mu.Unlock()
+	r.locksMu.Unlock()
 	return entry
 }
 
@@ -91,15 +97,30 @@ func (r *Runtime) releaseSessionLock(key string, entry *sessionLock) {
 	if r == nil || entry == nil {
 		return
 	}
-	entry.mu.Lock()
+	r.locksMu.Lock()
 	if entry.refs > 0 {
 		entry.refs--
 	}
-	remaining := entry.refs
-	entry.mu.Unlock()
-	if remaining == 0 {
-		r.locks.Delete(key)
+	if entry.refs == 0 {
+		if current := r.locks[key]; current == entry {
+			delete(r.locks, key)
+		}
 	}
+	r.locksMu.Unlock()
+}
+
+func (r *Runtime) getSessionLock(key string) *sessionLock {
+	r.locksMu.Lock()
+	defer r.locksMu.Unlock()
+	if r.locks == nil {
+		r.locks = map[string]*sessionLock{}
+	}
+	entry := r.locks[key]
+	if entry == nil {
+		entry = &sessionLock{}
+		r.locks[key] = entry
+	}
+	return entry
 }
 
 func (r *Runtime) Handle(ctx context.Context, ev bus.Event) error {

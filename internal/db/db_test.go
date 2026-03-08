@@ -871,6 +871,30 @@ func TestSubagentJobs_ReconcileRunning(t *testing.T) {
 	}
 }
 
+func TestSubagentJobs_ListRunning(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	job := SubagentJob{
+		ID:               "job-running-list",
+		ParentSessionKey: "parent",
+		ChildSessionKey:  "parent:subagent:job-running-list",
+		Task:             "do work",
+	}
+	if err := d.EnqueueSubagentJob(ctx, job); err != nil {
+		t.Fatalf("EnqueueSubagentJob: %v", err)
+	}
+	if err := d.MarkSubagentRunning(ctx, job.ID); err != nil {
+		t.Fatalf("MarkSubagentRunning: %v", err)
+	}
+	running, err := d.ListRunningSubagentJobs(ctx)
+	if err != nil {
+		t.Fatalf("ListRunningSubagentJobs: %v", err)
+	}
+	if len(running) != 1 || running[0].ID != job.ID {
+		t.Fatalf("expected running job list to include %q, got %#v", job.ID, running)
+	}
+}
+
 func TestSubagentJobs_EnqueueWithLimit(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()

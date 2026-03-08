@@ -35,7 +35,10 @@ import (
 	"or3-intern/internal/triggers"
 )
 
-const schedulerMaxConsolidationPasses = 3
+const (
+	schedulerMaxConsolidationPasses = 3
+	gracefulShutdownTimeout        = 5 * time.Second
+)
 
 func main() {
 	var cfgPath string
@@ -130,8 +133,12 @@ func main() {
 	inv := buildSkillsInventory(cfg, builtin, toolNames)
 	var cronSvc *cron.Service
 	var subagentManager *agent.SubagentManager
+	enableSubagents := subagentsEnabledForCommand(cmd, cfg)
 	buildRuntimeTools := func() *tools.Registry {
 		return buildToolRegistry(cfg, d, prov, channelManager, &inv, cronSvc, subagentManager, mcpManager)
+	}
+	buildBackgroundTools := func() *tools.Registry {
+		return buildBackgroundToolRegistry(cfg, d, prov, channelManager, &inv, cronSvc, mcpManager)
 	}
 
 	ret := memory.NewRetriever(d)
@@ -216,7 +223,18 @@ func main() {
 		LinkDirectMessages: cfg.Session.DirectMessagesShareDefault,
 		IdentityScopeMap:   buildIdentityScopeMap(cfg),
 	}
-	if cfg.Subagents.Enabled {
+
+	// cron service + tool
+	if cfg.Cron.Enabled {
+		cronSvc = cron.New(cfg.Cron.StorePath, agent.CronRunner(b, cfg.DefaultSessionKey))
+		if err := cronSvc.Start(); err != nil {
+			fmt.Fprintln(os.Stderr, "cron start error:", err)
+			os.Exit(1)
+		}
+		rt.Tools = buildRuntimeTools()
+	}
+
+	if enableSubagents {
 		subagentManager = &agent.SubagentManager{
 			DB:            d,
 			Runtime:       rt,
@@ -225,7 +243,7 @@ func main() {
 			MaxQueued:     cfg.Subagents.MaxQueued,
 			TaskTimeout:   time.Duration(cfg.Subagents.TaskTimeoutSeconds) * time.Second,
 			BackgroundTools: func() *tools.Registry {
-				return buildToolRegistry(cfg, d, prov, channelManager, &inv, cronSvc, nil, mcpManager)
+				return buildBackgroundTools()
 			},
 		}
 		if err := subagentManager.Start(ctx); err != nil {
@@ -265,16 +283,6 @@ func main() {
 				}
 			},
 		)
-	}
-
-	// cron service + tool
-	if cfg.Cron.Enabled {
-		cronSvc = cron.New(cfg.Cron.StorePath, agent.CronRunner(b, cfg.DefaultSessionKey))
-		if err := cronSvc.Start(); err != nil {
-			fmt.Fprintln(os.Stderr, "cron start error:", err)
-			os.Exit(1)
-		}
-		rt.Tools = buildRuntimeTools()
 	}
 
 	var heartbeatSvc *heartbeat.Service
@@ -417,11 +425,25 @@ func main() {
 		cronSvc.Stop()
 	}
 	if subagentManager != nil {
-		if err := subagentManager.Stop(context.Background()); err != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), gracefulShutdownTimeout)
+		if err := subagentManager.Stop(shutdownCtx); err != nil {
 			log.Printf("subagent manager stop failed: %v", err)
 		}
+		cancel()
 	}
 	_ = channelManager.StopAll(context.Background())
+}
+
+func subagentsEnabledForCommand(cmd string, cfg config.Config) bool {
+	if !cfg.Subagents.Enabled {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(cmd)) {
+	case "chat", "serve":
+		return true
+	default:
+		return false
+	}
 }
 
 func buildIdentityScopeMap(cfg config.Config) map[string]string {
@@ -453,6 +475,14 @@ type mcpToolRegistrar interface {
 }
 
 func buildToolRegistry(cfg config.Config, d *db.DB, prov *providers.Client, channelManager *rootchannels.Manager, inv *skills.Inventory, cronSvc *cron.Service, spawnManager tools.SpawnEnqueuer, mcpRegistrar mcpToolRegistrar) *tools.Registry {
+	return buildToolRegistryWithOptions(cfg, d, prov, channelManager, inv, cronSvc, spawnManager, mcpRegistrar, true)
+}
+
+func buildBackgroundToolRegistry(cfg config.Config, d *db.DB, prov *providers.Client, channelManager *rootchannels.Manager, inv *skills.Inventory, cronSvc *cron.Service, mcpRegistrar mcpToolRegistrar) *tools.Registry {
+	return buildToolRegistryWithOptions(cfg, d, prov, channelManager, inv, cronSvc, nil, mcpRegistrar, false)
+}
+
+func buildToolRegistryWithOptions(cfg config.Config, d *db.DB, prov *providers.Client, channelManager *rootchannels.Manager, inv *skills.Inventory, cronSvc *cron.Service, spawnManager tools.SpawnEnqueuer, mcpRegistrar mcpToolRegistrar, includeSendMessage bool) *tools.Registry {
 	reg := tools.NewRegistry()
 	fileRoot := allowedRoot(cfg)
 	reg.Register(&tools.ExecTool{Timeout: time.Duration(cfg.Tools.ExecTimeoutSeconds) * time.Second, RestrictDir: fileRoot, PathAppend: cfg.Tools.PathAppend})
@@ -465,17 +495,19 @@ func buildToolRegistry(cfg config.Config, d *db.DB, prov *providers.Client, chan
 	reg.Register(&tools.MemorySetPinned{DB: d})
 	reg.Register(&tools.MemoryAddNote{DB: d, Provider: prov, EmbedModel: cfg.Provider.EmbedModel})
 	reg.Register(&tools.MemorySearch{DB: d, Provider: prov, EmbedModel: cfg.Provider.EmbedModel, VectorK: cfg.VectorK, FTSK: cfg.FTSK, TopK: cfg.MemoryRetrieve, VectorScanLimit: cfg.VectorScanLimit})
-	reg.Register(&tools.SendMessage{
-		Deliver: func(ctx context.Context, channel, to, text string, meta map[string]any) error {
-			if channelManager == nil {
-				return fmt.Errorf("channel manager not configured")
-			}
-			return channelManager.DeliverWithMeta(ctx, channel, to, text, meta)
-		},
-		AllowedRoot:   fileRoot,
-		ArtifactsDir:  cfg.ArtifactsDir,
-		MaxMediaBytes: cfg.MaxMediaBytes,
-	})
+	if includeSendMessage {
+		reg.Register(&tools.SendMessage{
+			Deliver: func(ctx context.Context, channel, to, text string, meta map[string]any) error {
+				if channelManager == nil {
+					return fmt.Errorf("channel manager not configured")
+				}
+				return channelManager.DeliverWithMeta(ctx, channel, to, text, meta)
+			},
+			AllowedRoot:   fileRoot,
+			ArtifactsDir:  cfg.ArtifactsDir,
+			MaxMediaBytes: cfg.MaxMediaBytes,
+		})
+	}
 	if inv != nil {
 		reg.Register(&tools.ReadSkill{Inventory: inv})
 		reg.Register(&tools.RunSkillScript{Inventory: inv, Timeout: time.Duration(cfg.Skills.MaxRunSeconds) * time.Second})

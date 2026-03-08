@@ -95,6 +95,35 @@ func TestBuildToolRegistry_RegistersMCPTools(t *testing.T) {
 	}
 }
 
+func TestBuildBackgroundToolRegistry_OmitsMessagingAndSpawn(t *testing.T) {
+	cfg := config.Default()
+	cfg.WorkspaceDir = t.TempDir()
+
+	d, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer d.Close()
+
+	provider := providers.New("http://example.invalid", "key", time.Second)
+	channelManager, err := buildChannelManager(cfg, cli.Deliverer{}, &artifacts.Store{Dir: t.TempDir(), DB: d}, cfg.MaxMediaBytes)
+	if err != nil {
+		t.Fatalf("buildChannelManager: %v", err)
+	}
+	inv := skills.Inventory{}
+
+	reg := buildBackgroundToolRegistry(cfg, d, provider, channelManager, &inv, nil, nil)
+	if reg.Get("send_message") != nil {
+		t.Fatal("expected send_message to be omitted from background registry")
+	}
+	if reg.Get("spawn_subagent") != nil {
+		t.Fatal("expected spawn_subagent to be omitted from background registry")
+	}
+	if reg.Get("read_file") == nil {
+		t.Fatal("expected background registry to retain work tools")
+	}
+}
+
 type stubTool struct {
 	tools.Base
 	name string

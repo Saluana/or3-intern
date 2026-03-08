@@ -15,6 +15,11 @@ import (
 	"or3-intern/internal/tools"
 )
 
+const (
+	subagentClaimRetryDelay = 25 * time.Millisecond
+	subagentFinalizeTimeout = 5 * time.Second
+)
+
 type SubagentManager struct {
 	DB              *db.DB
 	Runtime         *Runtime
@@ -59,25 +64,26 @@ func (m *SubagentManager) Start(ctx context.Context) error {
 	if m.TaskTimeout <= 0 {
 		m.TaskTimeout = 5 * time.Minute
 	}
-	if err := m.DB.MarkRunningSubagentsInterrupted(ctx, "subagent interrupted during restart"); err != nil {
+	running, err := m.DB.ListRunningSubagentJobs(ctx)
+	if err != nil {
 		return err
-	}
-	m.ctx, m.cancel = context.WithCancel(ctx)
-	m.notifyCh = make(chan struct{}, 1)
-	m.started = true
-	for i := 0; i < m.MaxConcurrent; i++ {
-		m.wg.Add(1)
-		go m.workerLoop()
 	}
 	queued, err := m.DB.ListQueuedSubagentJobs(ctx)
 	if err != nil {
 		return err
 	}
+	m.ctx, m.cancel = context.WithCancel(ctx)
+	m.notifyCh = make(chan struct{}, m.MaxConcurrent)
+	m.started = true
+	for i := 0; i < m.MaxConcurrent; i++ {
+		m.wg.Add(1)
+		go m.workerLoop()
+	}
+	for _, job := range running {
+		m.reconcileInterruptedJob(job, "subagent interrupted during restart")
+	}
 	if len(queued) > 0 {
-		select {
-		case m.notifyCh <- struct{}{}:
-		default:
-		}
+		m.signalN(min(len(queued), m.MaxConcurrent))
 	}
 	return nil
 }
@@ -159,6 +165,7 @@ func (m *SubagentManager) workerLoop() {
 		case <-m.ctx.Done():
 			return
 		case <-m.notifyCh:
+		case <-time.After(subagentClaimRetryDelay):
 		}
 	}
 }
@@ -180,15 +187,15 @@ func (m *SubagentManager) executeJob(job db.SubagentJob) {
 		reason := strings.TrimSpace(err.Error())
 		switch {
 		case errors.Is(err, context.Canceled), errors.Is(runCtx.Err(), context.Canceled):
-			m.finalizeJob(job, db.SubagentStatusInterrupted, "", "", reasonOrDefault(reason, "subagent interrupted"))
+			m.finalizeJob(runCtx, job, db.SubagentStatusInterrupted, "", "", reasonOrDefault(reason, "subagent interrupted"), true)
 		case errors.Is(err, context.DeadlineExceeded), errors.Is(runCtx.Err(), context.DeadlineExceeded):
-			m.finalizeJob(job, db.SubagentStatusFailed, "", "", reasonOrDefault(reason, "subagent timed out"))
+			m.finalizeJob(runCtx, job, db.SubagentStatusFailed, "", "", reasonOrDefault(reason, "subagent timed out"), true)
 		default:
-			m.finalizeJob(job, db.SubagentStatusFailed, "", "", reasonOrDefault(reason, "subagent failed"))
+			m.finalizeJob(runCtx, job, db.SubagentStatusFailed, "", "", reasonOrDefault(reason, "subagent failed"), true)
 		}
 		return
 	}
-	m.finalizeJob(job, db.SubagentStatusSucceeded, result.Preview, result.ArtifactID, "")
+	m.finalizeJob(runCtx, job, db.SubagentStatusSucceeded, result.Preview, result.ArtifactID, "", true)
 }
 
 func (m *SubagentManager) runJob(ctx context.Context, job db.SubagentJob) (BackgroundRunResult, error) {
@@ -218,7 +225,9 @@ func (m *SubagentManager) backgroundTools() *tools.Registry {
 	return tools.NewRegistry()
 }
 
-func (m *SubagentManager) finalizeJob(job db.SubagentJob, status string, preview string, artifactID string, errText string) {
+func (m *SubagentManager) finalizeJob(baseCtx context.Context, job db.SubagentJob, status string, preview string, artifactID string, errText string, deliver bool) {
+	finalizeCtx, cancel := boundedContext(baseCtx, subagentFinalizeTimeout)
+	defer cancel()
 	success := status == db.SubagentStatusSucceeded
 	text := formatParentSubagentSummary(job, success, preview, artifactID, errText)
 	payload := map[string]any{
@@ -229,11 +238,17 @@ func (m *SubagentManager) finalizeJob(job db.SubagentJob, status string, preview
 	if artifactID != "" {
 		payload["artifact_id"] = artifactID
 	}
-	if err := m.DB.FinalizeSubagentJob(context.Background(), job, status, preview, artifactID, errText, text, payload); err != nil {
+	if err := m.DB.FinalizeSubagentJob(finalizeCtx, job, status, preview, artifactID, errText, text, payload); err != nil {
 		log.Printf("finalize subagent failed: job=%s err=%v", job.ID, err)
 		return
 	}
-	m.deliverCompletion(context.Background(), job, success, preview, artifactID, errText)
+	if deliver {
+		m.deliverCompletion(finalizeCtx, job, success, preview, artifactID, errText)
+	}
+}
+
+func (m *SubagentManager) reconcileInterruptedJob(job db.SubagentJob, reason string) {
+	m.finalizeJob(m.ctx, job, db.SubagentStatusInterrupted, "", "", reasonOrDefault(reason, "subagent interrupted during restart"), false)
 }
 
 func (m *SubagentManager) deliverCompletion(ctx context.Context, job db.SubagentJob, success bool, preview string, artifactID string, errText string) {
@@ -251,15 +266,44 @@ func (m *SubagentManager) deliverCompletion(ctx context.Context, job db.Subagent
 }
 
 func (m *SubagentManager) signal() {
+	m.signalN(1)
+}
+
+func (m *SubagentManager) signalN(n int) {
+	if n <= 0 {
+		return
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if !m.started || m.notifyCh == nil {
 		return
 	}
-	select {
-	case m.notifyCh <- struct{}{}:
-	default:
+	for i := 0; i < n; i++ {
+		select {
+		case m.notifyCh <- struct{}{}:
+		default:
+			return
+		}
 	}
+}
+
+func boundedContext(base context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if base == nil {
+		base = context.Background()
+	} else {
+		base = context.WithoutCancel(base)
+	}
+	if timeout <= 0 {
+		return context.WithCancel(base)
+	}
+	return context.WithTimeout(base, timeout)
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func childSessionKey(parentSessionKey, jobID string) string {

@@ -236,7 +236,7 @@ func TestSubagentManager_FinalizeFailureDoesNotDeliver(t *testing.T) {
 		t.Fatalf("EnqueueSubagentJob: %v", err)
 	}
 	mgr := &SubagentManager{DB: d, Deliver: deliver}
-	mgr.finalizeJob(job, db.SubagentStatusSucceeded, "preview", "", "")
+	mgr.finalizeJob(context.Background(), job, db.SubagentStatusSucceeded, "preview", "", "", true)
 	if len(deliver.messages) != 0 {
 		t.Fatalf("expected no delivery on finalize failure, got %#v", deliver.messages)
 	}
@@ -246,6 +246,55 @@ func TestSubagentManager_FinalizeFailureDoesNotDeliver(t *testing.T) {
 	}
 	if len(msgs) != 0 {
 		t.Fatalf("expected no persisted parent summary on finalize failure, got %#v", msgs)
+	}
+}
+
+func TestSubagentManager_StartDoesNotHalfStartOnError(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	mgr := &SubagentManager{DB: d, Runtime: &Runtime{}, MaxConcurrent: 2}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := mgr.Start(ctx); err == nil {
+		t.Fatal("expected Start to fail with canceled context")
+	}
+	if mgr.started {
+		t.Fatal("expected manager to remain stopped on startup failure")
+	}
+}
+
+func TestSubagentManager_StartReconcilesRunningJobs(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	if _, err := d.AppendMessage(context.Background(), "parent", "user", "start", nil); err != nil {
+		t.Fatalf("AppendMessage parent: %v", err)
+	}
+	job := db.SubagentJob{
+		ID:               "job-restart",
+		ParentSessionKey: "parent",
+		ChildSessionKey:  "parent:subagent:job-restart",
+		Task:             "background task",
+	}
+	if err := d.EnqueueSubagentJob(context.Background(), job); err != nil {
+		t.Fatalf("EnqueueSubagentJob: %v", err)
+	}
+	if err := d.MarkSubagentRunning(context.Background(), job.ID); err != nil {
+		t.Fatalf("MarkSubagentRunning: %v", err)
+	}
+	mgr := &SubagentManager{DB: d, Runtime: &Runtime{}, MaxConcurrent: 1}
+	if err := mgr.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer mgr.Stop(context.Background())
+
+	stored := waitForSubagentJob(t, d, job.ID, db.SubagentStatusInterrupted)
+	if !strings.Contains(stored.ErrorText, "restart") {
+		t.Fatalf("expected restart reconciliation reason, got %#v", stored)
+	}
+	msgs, err := d.GetLastMessages(context.Background(), "parent", 10)
+	if err != nil {
+		t.Fatalf("GetLastMessages: %v", err)
+	}
+	if !containsMessage(msgs, "Background job "+job.ID+" failed") {
+		t.Fatalf("expected reconciled parent summary, got %#v", msgs)
 	}
 }
 

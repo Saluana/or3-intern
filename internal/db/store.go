@@ -592,11 +592,19 @@ func (d *DB) GetSubagentJob(ctx context.Context, id string) (SubagentJob, bool, 
 }
 
 func (d *DB) ListQueuedSubagentJobs(ctx context.Context) ([]SubagentJob, error) {
+	return d.listSubagentJobsByStatus(ctx, SubagentStatusQueued)
+}
+
+func (d *DB) ListRunningSubagentJobs(ctx context.Context) ([]SubagentJob, error) {
+	return d.listSubagentJobsByStatus(ctx, SubagentStatusRunning)
+}
+
+func (d *DB) listSubagentJobsByStatus(ctx context.Context, status string) ([]SubagentJob, error) {
 	rows, err := d.SQL.QueryContext(ctx,
 		`SELECT id, parent_session_key, child_session_key, channel, reply_to, task, status,
 			result_preview, artifact_id, error_text, requested_at, started_at, finished_at, attempts, metadata_json
 		 FROM subagent_jobs WHERE status=? ORDER BY requested_at ASC, id ASC`,
-		SubagentStatusQueued)
+		status)
 	if err != nil {
 		return nil, err
 	}

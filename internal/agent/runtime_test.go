@@ -1068,6 +1068,37 @@ func TestRuntime_LockFor_DifferentKeys(t *testing.T) {
 	}
 }
 
+func TestRuntime_AcquireSessionLock_PreservesSingleEntry(t *testing.T) {
+	rt := &Runtime{}
+	entry1 := rt.acquireSessionLock("session-1")
+	entry1.mu.Lock()
+
+	entryCh := make(chan *sessionLock, 1)
+	done := make(chan struct{})
+	go func() {
+		entry2 := rt.acquireSessionLock("session-1")
+		entryCh <- entry2
+		entry2.mu.Lock()
+		entry2.mu.Unlock()
+		rt.releaseSessionLock("session-1", entry2)
+		close(done)
+	}()
+
+	entry2 := <-entryCh
+	if entry2 != entry1 {
+		t.Fatal("expected second waiter to reuse the same session lock entry")
+	}
+	entry1.mu.Unlock()
+	rt.releaseSessionLock("session-1", entry1)
+
+	entry3 := rt.acquireSessionLock("session-1")
+	if entry3 != entry1 {
+		t.Fatal("expected lock entry to stay stable while another waiter exists")
+	}
+	rt.releaseSessionLock("session-1", entry3)
+	<-done
+}
+
 func TestRuntime_ConsolidationScheduler_DoesNotBlockTurn(t *testing.T) {
 	d := openRuntimeTestDB(t)
 	response := providers.ChatCompletionResponse{

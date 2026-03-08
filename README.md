@@ -27,6 +27,7 @@ The `init` command can store your provider settings in `~/.or3-intern/config.jso
 - `or3-intern chat` interactive CLI
 - `or3-intern serve` run enabled external channels (Telegram / Slack / Discord / WhatsApp bridge)
 - `or3-intern agent -m "hello"` one-shot
+- `or3-intern skills ...` list, inspect, search, install, update, check, and remove ClawHub/OpenClaw-compatible skills
 - `or3-intern migrate-jsonl /path/to/session.jsonl [session_key]`
 
 ## Notes
@@ -237,7 +238,7 @@ or3-intern scope list my-project
 or3-intern scope resolve telegram:12345
 ```
 
-### Skill Manifests
+### ClawHub-Compatible Skills
 
 Skills can include a `skill.json` manifest for rich metadata:
 
@@ -255,7 +256,96 @@ Skills can include a `skill.json` manifest for rich metadata:
 }
 ```
 
-Place skills in `builtin_skills/` (bundled) or `workspace_skills/` (user-defined). Enable execution with `skills.enableExec=true`.
+`or3-intern` now loads ClawHub/OpenClaw-style skill bundles directly from:
+
+- bundled: `builtin_skills/`
+- managed: `~/.or3-intern/skills`
+- workspace: `<workspace>/skills`
+
+Precedence is `workspace > managed > bundled`. A legacy `<workspace>/workspace_skills` folder is still scanned below the new workspace root for migration safety.
+
+Supported frontmatter keys include:
+
+- `name`
+- `description`
+- `homepage`
+- `user-invocable`
+- `disable-model-invocation`
+- `command-dispatch`
+- `command-tool`
+- `command-arg-mode`
+
+Supported metadata namespaces:
+
+- `metadata.openclaw`
+- `metadata.clawdbot`
+- `metadata.clawdis`
+
+Eligibility checks cover OS, required binaries, any-of binaries, required env vars, required config flags, and explicit per-skill disable flags from config. Ineligible skills remain inspectable through `read_skill` and `or3-intern skills info/check`.
+
+Per-skill config is additive and lightweight:
+
+```json
+{
+  "skills": {
+    "managedDir": "/Users/me/.or3-intern/skills",
+    "load": {
+      "extraDirs": ["/opt/shared-skills"],
+      "watch": false,
+      "watchDebounceMs": 250
+    },
+    "entries": {
+      "demo-skill": {
+        "enabled": true,
+        "apiKey": "secret",
+        "env": {
+          "DEMO_MODE": "1"
+        },
+        "config": {
+          "browser": {
+            "enabled": true
+          }
+        }
+      }
+    },
+    "clawHub": {
+      "siteUrl": "https://clawhub.ai",
+      "registryUrl": "https://clawhub.ai",
+      "installDir": "skills"
+    }
+  }
+}
+```
+
+Skill env injection is scoped to a live run and is not copied into prompts or persisted message history.
+
+Use the native management commands instead of the Node/Bun `clawhub` CLI:
+
+```bash
+or3-intern skills list
+or3-intern skills list --eligible
+or3-intern skills info <name>
+or3-intern skills check
+or3-intern skills search "calendar"
+or3-intern skills install <slug>
+or3-intern skills update <name>
+or3-intern skills update --all
+or3-intern skills remove <name>
+```
+
+Explicit user invocation is supported for user-invocable skills:
+
+```text
+/my-skill raw arguments here
+```
+
+For `command-dispatch: tool`, `or3-intern` forwards the raw argument string directly to the target tool. Otherwise it starts a normal model turn seeded with the selected `SKILL.md`.
+
+Trust model:
+
+- Treat third-party skills as untrusted input.
+- Installer hints from skill metadata are informational only; `or3-intern` does not auto-run them.
+- Not every ClawHub skill is portable. Skills that depend on unsupported OpenClaw-only tools, custom frontmatter-defined tools, Nix/plugin flows, or remote node assumptions are reported as unavailable instead of failing silently.
 
 ### Triggers
 

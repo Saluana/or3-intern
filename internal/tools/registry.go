@@ -45,5 +45,16 @@ func (r *Registry) Execute(ctx context.Context, name string, argsJSON string) (s
 			return "", fmt.Errorf("invalid tool args: %w", err)
 		}
 	}
+	return r.ExecuteParams(ctx, name, params)
+}
+
+func (r *Registry) ExecuteParams(ctx context.Context, name string, params map[string]any) (string, error) {
+	t := r.tools[name]
+	if t == nil {
+		return "", fmt.Errorf("tool '%s' not found", name)
+	}
+	if params == nil {
+		params = map[string]any{}
+	}
 	return t.Execute(ctx, params)
 }

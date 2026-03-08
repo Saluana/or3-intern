@@ -111,8 +111,7 @@ func main() {
 
 	// skills
 	builtin := filepath.Join(filepath.Dir(cfgPathOrDefault(cfgPath)), "builtin_skills")
-	workspace := filepath.Join(cfg.WorkspaceDir, "workspace_skills")
-	inv := skills.Scan([]string{builtin, workspace})
+	inv := buildSkillsInventory(cfg, builtin, availableToolNames(cfg.Cron.Enabled, cfg.Subagents.Enabled))
 	var cronSvc *cron.Service
 	var subagentManager *agent.SubagentManager
 	buildRuntimeTools := func() *tools.Registry {
@@ -141,26 +140,26 @@ func main() {
 		}
 		docRetriever = &memory.DocRetriever{DB: d}
 		// Initial sync in background (don't block startup)
-			go func() {
-				syncCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-				defer cancel()
-				if err := docIndexer.SyncRoots(syncCtx, scope.GlobalMemoryScope); err != nil {
-					log.Printf("doc index sync failed: %v", err)
-				}
-			}()
-		}
+		go func() {
+			syncCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			if err := docIndexer.SyncRoots(syncCtx, scope.GlobalMemoryScope); err != nil {
+				log.Printf("doc index sync failed: %v", err)
+			}
+		}()
+	}
 	if docIndexer != nil && cfg.DocIndex.RefreshSeconds > 0 {
-			go func() {
-				ticker := time.NewTicker(time.Duration(cfg.DocIndex.RefreshSeconds) * time.Second)
-				defer ticker.Stop()
-				for range ticker.C {
-					syncCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-					if err := docIndexer.SyncRoots(syncCtx, scope.GlobalMemoryScope); err != nil {
-						log.Printf("doc index refresh failed: %v", err)
-					}
-					cancel()
+		go func() {
+			ticker := time.NewTicker(time.Duration(cfg.DocIndex.RefreshSeconds) * time.Second)
+			defer ticker.Stop()
+			for range ticker.C {
+				syncCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+				if err := docIndexer.SyncRoots(syncCtx, scope.GlobalMemoryScope); err != nil {
+					log.Printf("doc index refresh failed: %v", err)
 				}
-			}()
+				cancel()
+			}
+		}()
 	}
 
 	rt := &agent.Runtime{
@@ -186,12 +185,12 @@ func main() {
 			BootstrapMaxChars:      cfg.BootstrapMaxChars,
 			BootstrapTotalMaxChars: cfg.BootstrapTotalMaxChars,
 			HistoryMax:             cfg.HistoryMax,
-				VectorK:                cfg.VectorK,
-				FTSK:                   cfg.FTSK,
-				TopK:                   cfg.MemoryRetrieve,
-				DocRetriever:           docRetriever,
-				DocRetrieveLimit:       cfg.DocIndex.RetrieveLimit,
-			},
+			VectorK:                cfg.VectorK,
+			FTSK:                   cfg.FTSK,
+			TopK:                   cfg.MemoryRetrieve,
+			DocRetriever:           docRetriever,
+			DocRetrieveLimit:       cfg.DocIndex.RetrieveLimit,
+		},
 		Artifacts:    art,
 		MaxToolBytes: cfg.MaxToolBytes,
 		MaxToolLoops: cfg.MaxToolLoops,
@@ -318,6 +317,11 @@ func main() {
 		fmt.Println("ok")
 	case "version":
 		fmt.Println("or3-intern v1")
+	case "skills":
+		if err := runSkillsCommand(ctx, cfg, builtin, args[1:], os.Stdout, os.Stderr); err != nil {
+			fmt.Fprintln(os.Stderr, "skills error:", err)
+			os.Exit(1)
+		}
 	case "scope":
 		// or3-intern scope link <session-key> <scope-key>
 		// or3-intern scope list <scope-key>
@@ -419,6 +423,7 @@ func buildToolRegistry(cfg config.Config, d *db.DB, prov *providers.Client, chan
 	})
 	if inv != nil {
 		reg.Register(&tools.ReadSkill{Inventory: inv})
+		reg.Register(&tools.RunSkillScript{Inventory: inv, Timeout: time.Duration(cfg.Skills.MaxRunSeconds) * time.Second})
 	}
 	if cronSvc != nil {
 		reg.Register(&tools.CronTool{Svc: cronSvc})

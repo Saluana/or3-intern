@@ -16,6 +16,7 @@ import (
 	"or3-intern/internal/db"
 	"or3-intern/internal/memory"
 	"or3-intern/internal/providers"
+	"or3-intern/internal/skills"
 	"or3-intern/internal/tools"
 )
 
@@ -92,6 +93,9 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 	if err != nil {
 		return err
 	}
+	if handled, err := r.handleExplicitSkillInvocation(ctx, ev, msgID); handled || err != nil {
+		return err
+	}
 
 	// build prompt
 	if r.Builder == nil {
@@ -113,19 +117,7 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 		return err
 	}
 
-	if finalText == "" {
-		finalText = "(no response)"
-	}
-	if _, err := r.DB.AppendMessage(ctx, ev.SessionKey, "assistant", finalText, map[string]any{"in_reply_to": msgID}); err != nil {
-		log.Printf("append assistant(final) failed: %v", err)
-	}
-
-	// deliver only when the response was not already streamed to the channel
-	if !streamed && r.Deliver != nil {
-		if err := r.Deliver.Deliver(ctx, ev.Channel, replyTarget, finalText); err != nil {
-			log.Printf("deliver failed: %v", err)
-		}
-	}
+	r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, finalText, streamed)
 
 	// best-effort rolling consolidation of old messages into memory notes
 	if r.Consolidator != nil && r.Builder != nil && r.ConsolidationScheduler != nil {
@@ -141,6 +133,130 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 	}
 
 	return nil
+}
+
+func (r *Runtime) handleExplicitSkillInvocation(ctx context.Context, ev bus.Event, msgID int64) (bool, error) {
+	if ev.Type != bus.EventUserMessage || r.Builder == nil {
+		return false, nil
+	}
+	commandName, rawArgs, ok := parseSkillCommand(ev.Message)
+	if !ok || commandName == "new" {
+		return false, nil
+	}
+	replyTarget := deliveryTarget(ev)
+	skill, found := r.Builder.Skills.Get(commandName)
+	if !found {
+		return false, nil
+	}
+	if !skill.UserInvocable {
+		r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, "skill is not user-invocable: "+skill.Name, false)
+		return true, nil
+	}
+	if !skill.Eligible {
+		reasons := append([]string{}, skill.Missing...)
+		reasons = append(reasons, skill.Unsupported...)
+		if skill.ParseError != "" {
+			reasons = append(reasons, skill.ParseError)
+		}
+		message := "skill unavailable: " + skill.Name
+		if len(reasons) > 0 {
+			message += " (" + strings.Join(reasons, "; ") + ")"
+		}
+		r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, message, false)
+		return true, nil
+	}
+	if skill.CommandDispatch == "tool" {
+		text := r.dispatchExplicitSkillTool(ctx, ev, skill, commandName, rawArgs)
+		r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, text, false)
+		return true, nil
+	}
+
+	promptInput := strings.TrimSpace(rawArgs)
+	if promptInput == "" {
+		promptInput = skill.Name
+	}
+	messages, err := r.BuildPromptSnapshotWithOptions(ctx, BuildOptions{
+		SessionKey:  ev.SessionKey,
+		UserMessage: promptInput,
+	})
+	if err != nil {
+		return true, err
+	}
+	body, err := skills.LoadBody(skill.Path, 200000)
+	if err != nil {
+		return true, err
+	}
+	seed := fmt.Sprintf("Explicit skill requested: %s\nLocation: %s\nSource: %s\n\n%s", skill.Name, skill.Dir, skill.Source, body)
+	seeded := make([]providers.ChatMessage, 0, len(messages)+1)
+	if len(messages) > 0 {
+		seeded = append(seeded, messages[0])
+		seeded = append(seeded, providers.ChatMessage{Role: "system", Content: seed})
+		seeded = append(seeded, messages[1:]...)
+	} else {
+		seeded = append(seeded, providers.ChatMessage{Role: "system", Content: seed})
+		seeded = append(seeded, providers.ChatMessage{Role: "user", Content: promptInput})
+	}
+	runCtx := tools.ContextWithEnv(ctx, r.skillRunEnvFor(skill.Name))
+	finalText, streamed, err := r.executeConversation(runCtx, ev.SessionKey, seeded, r.Tools, ev.Channel, replyTarget)
+	if err != nil {
+		return true, err
+	}
+	r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, finalText, streamed)
+	return true, nil
+}
+
+func (r *Runtime) dispatchExplicitSkillTool(ctx context.Context, ev bus.Event, skill skills.SkillMeta, commandName, rawArgs string) string {
+	if r.Tools == nil {
+		return "tool registry not configured"
+	}
+	scopeKey := ev.SessionKey
+	if r.DB != nil && strings.TrimSpace(ev.SessionKey) != "" {
+		if resolved, err := r.DB.ResolveScopeKey(ctx, ev.SessionKey); err == nil && strings.TrimSpace(resolved) != "" {
+			scopeKey = resolved
+		}
+	}
+	toolCtx := tools.ContextWithSession(ctx, scopeKey)
+	toolCtx = tools.ContextWithDelivery(toolCtx, ev.Channel, deliveryTarget(ev))
+	toolCtx = tools.ContextWithEnv(toolCtx, r.skillRunEnvFor(skill.Name))
+	params := map[string]any{
+		"command":     rawArgs,
+		"commandName": commandName,
+		"skillName":   skill.Name,
+	}
+	out, err := r.Tools.ExecuteParams(toolCtx, skill.CommandTool, params)
+	if err != nil {
+		out = "tool error: " + err.Error()
+	}
+	payload := map[string]any{
+		"tool":        skill.CommandTool,
+		"skill":       skill.Name,
+		"commandName": commandName,
+		"args":        rawArgs,
+	}
+	sendOut, preview, artifactID := r.boundTextResult(ctx, ev.SessionKey, out)
+	if artifactID != "" {
+		payload["artifact_id"] = artifactID
+		payload["preview"] = preview
+	}
+	if _, err := r.DB.AppendMessage(ctx, ev.SessionKey, "tool", sendOut, payload); err != nil {
+		log.Printf("append tool message failed: %v", err)
+	}
+	return out
+}
+
+func parseSkillCommand(message string) (commandName string, rawArgs string, ok bool) {
+	message = strings.TrimSpace(message)
+	if !strings.HasPrefix(message, "/") || len(message) < 2 {
+		return "", "", false
+	}
+	body := strings.TrimPrefix(message, "/")
+	commandName, rawArgs, _ = strings.Cut(body, " ")
+	commandName = strings.TrimSpace(commandName)
+	rawArgs = strings.TrimSpace(rawArgs)
+	if commandName == "" {
+		return "", "", false
+	}
+	return commandName, rawArgs, true
 }
 
 func (r *Runtime) BuildPromptSnapshot(ctx context.Context, sessionKey string, userMessage string) ([]providers.ChatMessage, error) {
@@ -281,7 +397,7 @@ func (r *Runtime) executeConversation(ctx context.Context, sessionKey string, me
 
 		var resp providers.ChatCompletionResponse
 		var err error
-		var sw channels.StreamWriter   // lazily created on first text delta
+		var sw channels.StreamWriter // lazily created on first text delta
 		var swOnce sync.Once
 		if r.Streamer != nil {
 			resp, err = r.Provider.ChatStream(ctx, req, func(text string) {
@@ -355,6 +471,27 @@ func (r *Runtime) executeConversation(ctx context.Context, sessionKey string, me
 		}
 	}
 	return "(no response)", false, nil
+}
+
+func (r *Runtime) skillRunEnvFor(name string) map[string]string {
+	if r.Builder == nil {
+		return nil
+	}
+	return r.Builder.Skills.RunEnvForSkill(name)
+}
+
+func (r *Runtime) persistAssistantReply(ctx context.Context, sessionKey string, msgID int64, channel, replyTarget, finalText string, streamed bool) {
+	if strings.TrimSpace(finalText) == "" {
+		finalText = "(no response)"
+	}
+	if _, err := r.DB.AppendMessage(ctx, sessionKey, "assistant", finalText, map[string]any{"in_reply_to": msgID}); err != nil {
+		log.Printf("append assistant(final) failed: %v", err)
+	}
+	if !streamed && r.Deliver != nil {
+		if err := r.Deliver.Deliver(ctx, channel, replyTarget, finalText); err != nil {
+			log.Printf("deliver failed: %v", err)
+		}
+	}
 }
 
 func (r *Runtime) boundTextResult(ctx context.Context, sessionKey string, text string) (stored string, preview string, artifactID string) {

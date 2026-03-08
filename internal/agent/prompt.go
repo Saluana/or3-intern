@@ -88,9 +88,9 @@ type Builder struct {
 	TopK       int
 
 	// New fields for lightweight OpenClaw parity
-	IdentityText     string // content of IDENTITY.md
-	StaticMemory     string // content of MEMORY.md
-	HeartbeatText    string // content of HEARTBEAT.md – injected only for autonomous turns
+	IdentityText     string               // content of IDENTITY.md
+	StaticMemory     string               // content of MEMORY.md
+	HeartbeatText    string               // content of HEARTBEAT.md – injected only for autonomous turns
 	DocRetriever     *memory.DocRetriever // for indexed file context
 	DocRetrieveLimit int                  // max docs to retrieve
 }
@@ -366,7 +366,7 @@ func (b *Builder) composeSystemPrompt(pinnedText, memText, identityText, staticM
 	if t := strings.TrimSpace(docContextText); t != "" {
 		sections = append(sections, section{title: "Indexed File Context", text: truncateText(t, maxEach)})
 	}
-	sections = append(sections, section{title: "Skills Inventory", text: b.Skills.Summary(skillsMax)})
+	sections = append(sections, section{title: "Skills Inventory", text: b.Skills.ModelSummary(skillsMax)})
 
 	var out strings.Builder
 	out.WriteString("# System Prompt\n")

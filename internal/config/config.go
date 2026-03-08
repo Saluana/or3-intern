@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -38,8 +39,8 @@ type Config struct {
 	ConsolidationAsyncTimeoutSeconds int             `json:"consolidationAsyncTimeoutSeconds"`
 	Subagents                        SubagentsConfig `json:"subagents"`
 
-	IdentityFile string        `json:"identityFile"`
-	MemoryFile   string        `json:"memoryFile"`
+	IdentityFile string         `json:"identityFile"`
+	MemoryFile   string         `json:"memoryFile"`
 	DocIndex     DocIndexConfig `json:"docIndex"`
 	Skills       SkillsConfig   `json:"skills"`
 	Triggers     TriggerConfig  `json:"triggers"`
@@ -148,8 +149,31 @@ type DocIndexConfig struct {
 }
 
 type SkillsConfig struct {
-	EnableExec    bool `json:"enableExec"`
-	MaxRunSeconds int  `json:"maxRunSeconds"`
+	EnableExec    bool                        `json:"enableExec"`
+	MaxRunSeconds int                         `json:"maxRunSeconds"`
+	ManagedDir    string                      `json:"managedDir"`
+	Load          SkillsLoadConfig            `json:"load"`
+	Entries       map[string]SkillEntryConfig `json:"entries"`
+	ClawHub       ClawHubConfig               `json:"clawHub"`
+}
+
+type SkillsLoadConfig struct {
+	ExtraDirs       []string `json:"extraDirs"`
+	Watch           bool     `json:"watch"`
+	WatchDebounceMS int      `json:"watchDebounceMs"`
+}
+
+type SkillEntryConfig struct {
+	Enabled *bool             `json:"enabled,omitempty"`
+	APIKey  string            `json:"apiKey"`
+	Env     map[string]string `json:"env"`
+	Config  map[string]any    `json:"config"`
+}
+
+type ClawHubConfig struct {
+	SiteURL     string `json:"siteUrl"`
+	RegistryURL string `json:"registryUrl"`
+	InstallDir  string `json:"installDir"`
 }
 
 type WebhookConfig struct {
@@ -220,6 +244,17 @@ func Default() Config {
 		Skills: SkillsConfig{
 			EnableExec:    false,
 			MaxRunSeconds: 30,
+			ManagedDir:    filepath.Join(root, "skills"),
+			Load: SkillsLoadConfig{
+				Watch:           false,
+				WatchDebounceMS: 250,
+			},
+			Entries: map[string]SkillEntryConfig{},
+			ClawHub: ClawHubConfig{
+				SiteURL:     "https://clawhub.ai",
+				RegistryURL: "https://clawhub.ai",
+				InstallDir:  "skills",
+			},
 		},
 		Triggers: TriggerConfig{
 			Webhook: WebhookConfig{
@@ -447,6 +482,24 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.Skills.MaxRunSeconds <= 0 {
 		cfg.Skills.MaxRunSeconds = 30
+	}
+	if strings.TrimSpace(cfg.Skills.ManagedDir) == "" {
+		cfg.Skills.ManagedDir = filepath.Join(filepath.Dir(DefaultPath()), "skills")
+	}
+	if cfg.Skills.Load.WatchDebounceMS <= 0 {
+		cfg.Skills.Load.WatchDebounceMS = 250
+	}
+	if cfg.Skills.Entries == nil {
+		cfg.Skills.Entries = map[string]SkillEntryConfig{}
+	}
+	if strings.TrimSpace(cfg.Skills.ClawHub.SiteURL) == "" {
+		cfg.Skills.ClawHub.SiteURL = "https://clawhub.ai"
+	}
+	if strings.TrimSpace(cfg.Skills.ClawHub.RegistryURL) == "" {
+		cfg.Skills.ClawHub.RegistryURL = "https://clawhub.ai"
+	}
+	if strings.TrimSpace(cfg.Skills.ClawHub.InstallDir) == "" {
+		cfg.Skills.ClawHub.InstallDir = "skills"
 	}
 	if cfg.Triggers.Webhook.Addr == "" {
 		cfg.Triggers.Webhook.Addr = "127.0.0.1:8765"

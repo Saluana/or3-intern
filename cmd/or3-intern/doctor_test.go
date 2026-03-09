@@ -2,34 +2,290 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 
 	"or3-intern/internal/config"
 )
 
+func TestDoctorFindings_SafeBaseline(t *testing.T) {
+	cfg := safeDoctorConfig()
+	findings := doctorFindings(cfg)
+	if len(findings) != 0 {
+		t.Fatalf("expected no findings, got %#v", findings)
+	}
+
+	var out bytes.Buffer
+	if err := runDoctorCommand(cfg, nil, &out, &out); err != nil {
+		t.Fatalf("runDoctorCommand: %v", err)
+	}
+	if !strings.Contains(out.String(), "[ok] configuration looks safe") {
+		t.Fatalf("expected ok output, got %q", out.String())
+	}
+}
+
+func TestDoctorFindings_ExpandedWarnings(t *testing.T) {
+	tests := []struct {
+		name        string
+		mutate      func(*config.Config)
+		expectArea  string
+		expectMatch string
+	}{
+		{
+			name: "audit disabled",
+			mutate: func(cfg *config.Config) {
+				cfg.Security.Audit.Enabled = false
+			},
+			expectArea:  "security",
+			expectMatch: "audit logging is disabled",
+		},
+		{
+			name: "secret store disabled",
+			mutate: func(cfg *config.Config) {
+				cfg.Security.SecretStore.Enabled = false
+			},
+			expectArea:  "security",
+			expectMatch: "secret store is disabled",
+		},
+		{
+			name: "profiles disabled with public ingress",
+			mutate: func(cfg *config.Config) {
+				cfg.Security.Profiles.Enabled = false
+				cfg.Channels.Slack.Enabled = true
+				cfg.Channels.Slack.OpenAccess = true
+			},
+			expectArea:  "profiles",
+			expectMatch: "public ingress is enabled while access profiles are disabled",
+		},
+		{
+			name: "stdio mcp missing env allowlist",
+			mutate: func(cfg *config.Config) {
+				cfg.Tools.MCPServers = map[string]config.MCPServerConfig{
+					"local": {
+						Enabled:   true,
+						Transport: "stdio",
+						Command:   "demo-mcp",
+					},
+				}
+			},
+			expectArea:  "mcp",
+			expectMatch: "uses stdio without a server childEnvAllowlist",
+		},
+		{
+			name: "http mcp insecure",
+			mutate: func(cfg *config.Config) {
+				cfg.Tools.MCPServers = map[string]config.MCPServerConfig{
+					"remote": {
+						Enabled:           true,
+						Transport:         "streamablehttp",
+						URL:               "http://127.0.0.1:8080/mcp",
+						AllowInsecureHTTP: true,
+					},
+				}
+			},
+			expectArea:  "mcp",
+			expectMatch: "uses insecure HTTP transport",
+		},
+		{
+			name: "webhook profile too permissive",
+			mutate: func(cfg *config.Config) {
+				cfg.Triggers.Webhook.Enabled = true
+				cfg.Security.Profiles.Default = "danger"
+				cfg.Security.Profiles.Profiles["danger"] = config.AccessProfileConfig{
+					MaxCapability:  "privileged",
+					AllowedTools:   []string{"exec", "run_skill_script"},
+					AllowedHosts:   []string{"*.example.com"},
+					WritablePaths:  []string{"/tmp"},
+					AllowSubagents: true,
+				}
+			},
+			expectArea:  "webhook",
+			expectMatch: "webhook resolves to profile \"danger\" with privileged capability",
+		},
+		{
+			name: "broad global allowed hosts",
+			mutate: func(cfg *config.Config) {
+				cfg.Security.Network.AllowedHosts = []string{"*"}
+			},
+			expectArea:  "network",
+			expectMatch: "security.network.allowedHosts contains *",
+		},
+		{
+			name: "exec shell posture",
+			mutate: func(cfg *config.Config) {
+				cfg.Hardening.PrivilegedTools = true
+			},
+			expectArea:  "exec",
+			expectMatch: "exec shell command mode is available",
+		},
+		{
+			name: "skill execution quarantine disabled",
+			mutate: func(cfg *config.Config) {
+				cfg.Skills.EnableExec = true
+				cfg.Skills.Policy.QuarantineByDefault = false
+			},
+			expectArea:  "skills",
+			expectMatch: "skill execution is enabled while quarantineByDefault is false",
+		},
+		{
+			name: "public channel privileged profile",
+			mutate: func(cfg *config.Config) {
+				cfg.Channels.Discord.Enabled = true
+				cfg.Channels.Discord.OpenAccess = true
+				cfg.Security.Profiles.Default = "danger"
+				cfg.Security.Profiles.Profiles["danger"] = config.AccessProfileConfig{
+					MaxCapability: "privileged",
+				}
+			},
+			expectArea:  "discord",
+			expectMatch: "open-access channel resolves to profile \"danger\" with privileged capability",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := safeDoctorConfig()
+			tt.mutate(&cfg)
+			findings := doctorFindings(cfg)
+			if !findingContains(findings, tt.expectArea, tt.expectMatch) {
+				t.Fatalf("expected finding %q in area %q, got %#v", tt.expectMatch, tt.expectArea, findings)
+			}
+		})
+	}
+}
+
 func TestRunDoctorCommand_PrintsWarnings(t *testing.T) {
-	cfg := config.Default()
+	cfg := safeDoctorConfig()
 	cfg.Tools.RestrictToWorkspace = false
 	cfg.Hardening.PrivilegedTools = true
 	cfg.Triggers.Webhook.Enabled = true
 	cfg.Triggers.Webhook.Secret = ""
 	cfg.Triggers.Webhook.Addr = "0.0.0.0:8765"
+	cfg.Security.Profiles.Default = "danger"
+	cfg.Security.Profiles.Profiles["danger"] = config.AccessProfileConfig{MaxCapability: "privileged", AllowedTools: []string{"exec"}}
 	var out bytes.Buffer
 	if err := runDoctorCommand(cfg, nil, &out, &out); err != nil {
 		t.Fatalf("runDoctorCommand: %v", err)
 	}
 	text := out.String()
-	if !strings.Contains(text, "filesystem") || !strings.Contains(text, "privileged-exec") || !strings.Contains(text, "webhook") {
-		t.Fatalf("expected grouped warnings, got %q", text)
+	for _, area := range []string{"filesystem", "exec", "privileged-exec", "webhook"} {
+		if !strings.Contains(text, area) {
+			t.Fatalf("expected %q warning in %q", area, text)
+		}
 	}
 }
 
 func TestRunDoctorCommand_StrictFailsOnWarnings(t *testing.T) {
-	cfg := config.Default()
-	cfg.Tools.RestrictToWorkspace = false
+	cfg := safeDoctorConfig()
+	cfg.Hardening.PrivilegedTools = true
 	var out bytes.Buffer
 	if err := runDoctorCommand(cfg, []string{"--strict"}, &out, &out); err == nil {
 		t.Fatal("expected strict doctor run to fail on warnings")
 	}
+}
+
+func TestDoctorFindings_ProfileHostThreshold(t *testing.T) {
+	cfg := safeDoctorConfig()
+	hosts := make([]string, 0, 11)
+	for i := 0; i < 11; i++ {
+		hosts = append(hosts, fmt.Sprintf("host-%d.example.com", i))
+	}
+	cfg.Security.Profiles.Profiles["safe"] = config.AccessProfileConfig{
+		MaxCapability: "safe",
+		AllowedTools:  []string{"web_fetch"},
+		AllowedHosts:  hosts,
+	}
+	findings := doctorFindings(cfg)
+	if !findingContains(findings, "profiles", "profile \"safe\" has broad allowedHosts") {
+		t.Fatalf("expected broad host warning, got %#v", findings)
+	}
+}
+
+func TestDoctorFindings_SafeProfileCountsAsMeaningfulRestriction(t *testing.T) {
+	cfg := safeDoctorConfig()
+	cfg.Hardening.GuardedTools = true
+	cfg.Channels.Slack.Enabled = true
+	cfg.Channels.Slack.OpenAccess = true
+	cfg.Security.Profiles.Profiles["safe"] = config.AccessProfileConfig{
+		MaxCapability: "safe",
+	}
+	findings := doctorFindings(cfg)
+	if findingContains(findings, "slack", "without a meaningful tool restriction") {
+		t.Fatalf("expected safe profile to avoid tool restriction warning, got %#v", findings)
+	}
+}
+
+func TestDoctorFindings_ExecWarningsRespectEffectiveProfiles(t *testing.T) {
+	t.Run("webhook safe profile suppresses generic exec ingress warning", func(t *testing.T) {
+		cfg := safeDoctorConfig()
+		cfg.Hardening.PrivilegedTools = true
+		cfg.Triggers.Webhook.Enabled = true
+		findings := doctorFindings(cfg)
+		if findingContains(findings, "exec", "public or webhook-facing ingress can reach privileged exec posture") {
+			t.Fatalf("expected webhook safe profile to suppress generic exec ingress warning, got %#v", findings)
+		}
+	})
+
+	t.Run("guarded webhook profile with exec allowlist cannot reach exec", func(t *testing.T) {
+		cfg := safeDoctorConfig()
+		cfg.Hardening.PrivilegedTools = true
+		cfg.Triggers.Webhook.Enabled = true
+		cfg.Security.Profiles.Default = "guarded"
+		cfg.Security.Profiles.Profiles["guarded"] = config.AccessProfileConfig{
+			MaxCapability: "guarded",
+			AllowedTools:  []string{"exec"},
+		}
+		findings := doctorFindings(cfg)
+		if findingContains(findings, "webhook", "can reach exec shell mode via profile") {
+			t.Fatalf("expected guarded webhook profile to avoid exec warning, got %#v", findings)
+		}
+	})
+
+	t.Run("guarded public profile with exec allowlist cannot reach exec", func(t *testing.T) {
+		cfg := safeDoctorConfig()
+		cfg.Hardening.PrivilegedTools = true
+		cfg.Channels.Discord.Enabled = true
+		cfg.Channels.Discord.OpenAccess = true
+		cfg.Security.Profiles.Default = "guarded"
+		cfg.Security.Profiles.Profiles["guarded"] = config.AccessProfileConfig{
+			MaxCapability: "guarded",
+			AllowedTools:  []string{"exec"},
+		}
+		findings := doctorFindings(cfg)
+		if findingContains(findings, "discord", "can reach exec shell mode via profile") {
+			t.Fatalf("expected guarded public profile to avoid exec warning, got %#v", findings)
+		}
+	})
+}
+
+func findingContains(findings []doctorFinding, area, match string) bool {
+	for _, finding := range findings {
+		if finding.Area == area && strings.Contains(finding.Message, match) {
+			return true
+		}
+	}
+	return false
+}
+
+func safeDoctorConfig() config.Config {
+	cfg := config.Default()
+	cfg.WorkspaceDir = "/workspace"
+	cfg.Security.Audit.Enabled = true
+	cfg.Security.Audit.Strict = true
+	cfg.Security.Audit.VerifyOnStart = true
+	cfg.Security.SecretStore.Enabled = true
+	cfg.Security.SecretStore.Required = true
+	cfg.Security.Profiles.Enabled = true
+	cfg.Security.Profiles.Default = "safe"
+	cfg.Security.Profiles.Profiles = map[string]config.AccessProfileConfig{
+		"safe": {
+			MaxCapability: "safe",
+			AllowedTools:  []string{"read_file"},
+		},
+	}
+	cfg.Security.Network.Enabled = true
+	cfg.Security.Network.DefaultDeny = true
+	cfg.Tools.MCPServers = map[string]config.MCPServerConfig{}
+	return cfg
 }

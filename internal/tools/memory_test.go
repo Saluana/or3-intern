@@ -319,3 +319,159 @@ func TestMemorySearch_Schema(t *testing.T) {
 		t.Errorf("expected 'function', got %v", schema["type"])
 	}
 }
+
+// ---- MemoryRecent ----
+
+func TestMemoryRecent_NoDB(t *testing.T) {
+	tool := &MemoryRecent{}
+	_, err := tool.Execute(context.Background(), nil)
+	if err == nil {
+		t.Fatal("expected error when DB is nil")
+	}
+}
+
+func TestMemoryRecent_ScopedHistoryAndLimitCap(t *testing.T) {
+	d := makeMemoryTestDB(t)
+	ctx := context.Background()
+	if err := d.LinkSession(ctx, "session-a", "scope-1", nil); err != nil {
+		t.Fatalf("LinkSession a: %v", err)
+	}
+	if err := d.LinkSession(ctx, "session-b", "scope-1", nil); err != nil {
+		t.Fatalf("LinkSession b: %v", err)
+	}
+	for _, msg := range []struct {
+		session string
+		role    string
+		content string
+	}{
+		{"session-a", "user", "user one"},
+		{"session-a", "assistant", "assistant one"},
+		{"session-b", "user", "user two"},
+		{"session-b", "assistant", "assistant two"},
+		{"session-a", "user", "user three"},
+		{"session-a", "assistant", "assistant three"},
+	} {
+		if _, err := d.AppendMessage(ctx, msg.session, msg.role, msg.content, nil); err != nil {
+			t.Fatalf("AppendMessage(%s, %s): %v", msg.session, msg.role, err)
+		}
+	}
+	tool := &MemoryRecent{DB: d, DefaultLimit: 2, MaxLimit: 4, MaxChars: 50}
+	out, err := tool.Execute(ContextWithSession(ctx, "session-a"), map[string]any{"limit": float64(99)})
+	if err != nil {
+		t.Fatalf("MemoryRecent: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("expected 4 lines after limit cap, got %d: %q", len(lines), out)
+	}
+	if strings.Contains(out, "user one") || strings.Contains(out, "assistant one") {
+		t.Fatalf("expected oldest messages to be excluded by limit cap, got %q", out)
+	}
+	if !strings.Contains(out, "[session-b/user] user two") || !strings.Contains(out, "[session-a/assistant] assistant three") {
+		t.Fatalf("expected scoped recent history in output, got %q", out)
+	}
+}
+
+func TestMemoryRecent_Name(t *testing.T) {
+	tool := &MemoryRecent{}
+	if tool.Name() != "memory_recent" {
+		t.Errorf("expected 'memory_recent', got %q", tool.Name())
+	}
+}
+
+func TestMemoryRecent_Schema(t *testing.T) {
+	tool := &MemoryRecent{}
+	schema := tool.Schema()
+	if schema["type"] != "function" {
+		t.Errorf("expected 'function', got %v", schema["type"])
+	}
+}
+
+// ---- MemoryGetPinned ----
+
+func TestMemoryGetPinned_NoDB(t *testing.T) {
+	tool := &MemoryGetPinned{}
+	_, err := tool.Execute(context.Background(), nil)
+	if err == nil {
+		t.Fatal("expected error when DB is nil")
+	}
+}
+
+func TestMemoryGetPinned_MergesScopedAndGlobalPinned(t *testing.T) {
+	d := makeMemoryTestDB(t)
+	ctx := context.Background()
+	if err := d.UpsertPinned(ctx, scope.GlobalMemoryScope, "shared", "global value"); err != nil {
+		t.Fatalf("UpsertPinned global shared: %v", err)
+	}
+	if err := d.UpsertPinned(ctx, "session-a", "shared", "session value"); err != nil {
+		t.Fatalf("UpsertPinned session shared: %v", err)
+	}
+	if err := d.UpsertPinned(ctx, "session-a", "local", "only here"); err != nil {
+		t.Fatalf("UpsertPinned session local: %v", err)
+	}
+	tool := &MemoryGetPinned{DB: d, MaxChars: 100}
+	out, err := tool.Execute(ContextWithSession(ctx, "session-a"), nil)
+	if err != nil {
+		t.Fatalf("MemoryGetPinned: %v", err)
+	}
+	if !strings.Contains(out, "local: only here") {
+		t.Fatalf("expected local pinned memory, got %q", out)
+	}
+	if !strings.Contains(out, "shared: session value") {
+		t.Fatalf("expected session entry to override shared value, got %q", out)
+	}
+	if strings.Contains(out, "global value") {
+		t.Fatalf("expected session override to hide global value, got %q", out)
+	}
+	if strings.Index(out, "local: only here") > strings.Index(out, "shared: session value") {
+		t.Fatalf("expected sorted output, got %q", out)
+	}
+}
+
+func TestMemoryGetPinned_KeyAndGlobalScopeOverride(t *testing.T) {
+	d := makeMemoryTestDB(t)
+	ctx := context.Background()
+	if err := d.UpsertPinned(ctx, scope.GlobalMemoryScope, "shared", "global value"); err != nil {
+		t.Fatalf("UpsertPinned global shared: %v", err)
+	}
+	if err := d.UpsertPinned(ctx, "session-a", "shared", "session value"); err != nil {
+		t.Fatalf("UpsertPinned session shared: %v", err)
+	}
+	tool := &MemoryGetPinned{DB: d, MaxChars: 100}
+	out, err := tool.Execute(ContextWithSession(ctx, "session-a"), map[string]any{"key": "shared"})
+	if err != nil {
+		t.Fatalf("MemoryGetPinned session key: %v", err)
+	}
+	if out != "shared: session value" {
+		t.Fatalf("expected session-scoped key value, got %q", out)
+	}
+	out, err = tool.Execute(ContextWithSession(ctx, "session-a"), map[string]any{"key": "shared", "scope": scope.GlobalScopeAlias})
+	if err != nil {
+		t.Fatalf("MemoryGetPinned global key: %v", err)
+	}
+	if out != "shared: global value" {
+		t.Fatalf("expected global-scoped key value, got %q", out)
+	}
+	out, err = tool.Execute(ContextWithSession(ctx, "session-a"), map[string]any{"key": "missing"})
+	if err != nil {
+		t.Fatalf("MemoryGetPinned missing key: %v", err)
+	}
+	if out != "" {
+		t.Fatalf("expected empty output for missing key, got %q", out)
+	}
+}
+
+func TestMemoryGetPinned_Name(t *testing.T) {
+	tool := &MemoryGetPinned{}
+	if tool.Name() != "memory_get_pinned" {
+		t.Errorf("expected 'memory_get_pinned', got %q", tool.Name())
+	}
+}
+
+func TestMemoryGetPinned_Schema(t *testing.T) {
+	tool := &MemoryGetPinned{}
+	schema := tool.Schema()
+	if schema["type"] != "function" {
+		t.Errorf("expected 'function', got %v", schema["type"])
+	}
+}

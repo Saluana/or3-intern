@@ -554,6 +554,8 @@ func buildToolRegistryWithOptions(cfg config.Config, d *db.DB, prov *providers.C
 	reg.Register(&tools.MemorySetPinned{DB: d})
 	reg.Register(&tools.MemoryAddNote{DB: d, Provider: prov, EmbedModel: cfg.Provider.EmbedModel})
 	reg.Register(&tools.MemorySearch{DB: d, Provider: prov, EmbedModel: cfg.Provider.EmbedModel, VectorK: cfg.VectorK, FTSK: cfg.FTSK, TopK: cfg.MemoryRetrieve, VectorScanLimit: cfg.VectorScanLimit})
+	reg.Register(&tools.MemoryRecent{DB: d, DefaultLimit: 10, MaxLimit: cfg.HistoryMax, MaxChars: 240})
+	reg.Register(&tools.MemoryGetPinned{DB: d, MaxChars: 400})
 	if includeSendMessage {
 		reg.Register(&tools.SendMessage{
 			Deliver: func(ctx context.Context, channel, to, text string, meta map[string]any) error {

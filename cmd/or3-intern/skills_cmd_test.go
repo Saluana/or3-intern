@@ -204,6 +204,15 @@ func TestResolveInstallRoot_PrefersManagedDirOverWorkspace(t *testing.T) {
 	}
 }
 
+func TestAvailableToolNames_IncludesCuratedMemoryReadTools(t *testing.T) {
+	got := availableToolNames(false, false)
+	for _, name := range []string{"memory_recent", "memory_get_pinned"} {
+		if _, ok := got[name]; !ok {
+			t.Fatalf("expected tool name %q to be available", name)
+		}
+	}
+}
+
 func makeTestZip(t *testing.T, files map[string]string) []byte {
 	t.Helper()
 	var buf bytes.Buffer

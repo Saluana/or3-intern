@@ -427,6 +427,8 @@ func availableToolNames(includeCron, includeSubagents bool) map[string]struct{} 
 		"memory_set_pinned",
 		"memory_add_note",
 		"memory_search",
+		"memory_recent",
+		"memory_get_pinned",
 		"send_message",
 		"read_skill",
 		"run_skill_script",

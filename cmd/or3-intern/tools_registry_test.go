@@ -54,7 +54,7 @@ func TestBuildToolRegistry_ReturnsFreshToolInstances(t *testing.T) {
 	reg1 := buildToolRegistry(cfg, d, provider, channelManager, &inv, nil, stubSpawnManager{}, nil)
 	reg2 := buildToolRegistry(cfg, d, provider, channelManager, &inv, nil, stubSpawnManager{}, nil)
 
-	for _, name := range []string{"read_file", "memory_search", "send_message", "spawn_subagent"} {
+	for _, name := range []string{"read_file", "memory_search", "memory_recent", "memory_get_pinned", "send_message", "spawn_subagent"} {
 		tool1 := reg1.Get(name)
 		tool2 := reg2.Get(name)
 		if tool1 == nil || tool2 == nil {

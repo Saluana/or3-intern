@@ -63,6 +63,10 @@ func TestFileWatcherPublishesChange(t *testing.T) {
 		if ev.From != absPath {
 			t.Errorf("expected From=%q, got %q", absPath, ev.From)
 		}
+		structured, ok := ev.Meta[MetaKeyStructuredEvent].(map[string]any)
+		if !ok || structured["source"] != "filewatch" {
+			t.Fatalf("expected structured filewatch metadata, got %#v", ev.Meta)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for file change event")
 	}
@@ -103,7 +107,7 @@ func TestFileWatcherDebounce(t *testing.T) {
 
 	// Should have exactly one event
 	count := 0
-	drain:
+drain:
 	for {
 		select {
 		case <-b.Channel():

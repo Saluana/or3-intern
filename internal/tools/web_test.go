@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"or3-intern/internal/security"
 )
 
 // ---- StripHTML ----
@@ -109,6 +111,23 @@ func TestWebFetch_BlocksLocalhost(t *testing.T) {
 	_, err := tool.Execute(context.Background(), map[string]any{"url": "http://127.0.0.1:8080"})
 	if err == nil {
 		t.Fatal("expected localhost fetch to be blocked")
+	}
+}
+
+func TestWebFetch_HostPolicyDeniesUnknownHost(t *testing.T) {
+	tool := &WebFetch{HostPolicy: security.HostPolicy{Enabled: true, DefaultDeny: true, AllowedHosts: []string{"example.com"}}}
+	_, err := tool.Execute(context.Background(), map[string]any{"url": "https://api.openai.com/v1"})
+	if err == nil {
+		t.Fatal("expected host policy denial")
+	}
+}
+
+func TestWebFetch_ActiveProfileWithNoHostsDeniesByDefault(t *testing.T) {
+	tool := &WebFetch{}
+	ctx := ContextWithActiveProfile(context.Background(), ActiveProfile{Name: "no-network"})
+	_, err := tool.Execute(ctx, map[string]any{"url": "https://example.com"})
+	if err == nil || !strings.Contains(err.Error(), "host denied by policy") {
+		t.Fatalf("expected profile host denial, got %v", err)
 	}
 }
 

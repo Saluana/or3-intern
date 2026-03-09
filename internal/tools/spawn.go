@@ -8,6 +8,7 @@ import (
 
 type SpawnRequest struct {
 	ParentSessionKey string
+	ProfileName      string
 	Task             string
 	Channel          string
 	To               string
@@ -72,6 +73,7 @@ func (t *SpawnSubagent) Execute(ctx context.Context, params map[string]any) (str
 	}
 	job, err := t.Manager.Enqueue(ctx, SpawnRequest{
 		ParentSessionKey: SessionFromContext(ctx),
+		ProfileName:      ActiveProfileFromContext(ctx).Name,
 		Task:             task,
 		Channel:          channel,
 		To:               to,

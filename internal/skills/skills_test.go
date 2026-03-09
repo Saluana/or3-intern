@@ -318,6 +318,73 @@ func TestSkillManifestOverridesFrontMatter(t *testing.T) {
 	}
 }
 
+func TestSkillPermissionsAndApprovalPolicy(t *testing.T) {
+	dir := t.TempDir()
+	bundle := makeSkillBundle(t, dir, "approved-skill", "---\npermissions:\n  shell: true\n  hosts: [api.example.com]\n---\n# Skill")
+	if err := os.WriteFile(filepath.Join(bundle, "skill.json"), []byte(`{"entrypoints":[{"name":"run","command":["./run.sh"]}]}`), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	inv := ScanWithOptions(LoadOptions{
+		Roots: []Root{{Path: dir, Source: SourceWorkspace}},
+		ApprovalPolicy: ApprovalPolicy{
+			QuarantineByDefault: true,
+			ApprovedSkills:      map[string]struct{}{"approved-skill": {}},
+		},
+	})
+	if len(inv.Skills) != 1 {
+		t.Fatalf("expected 1 skill, got %d", len(inv.Skills))
+	}
+	skill := inv.Skills[0]
+	if skill.PermissionState != "approved" {
+		t.Fatalf("expected approved permission state, got %+v", skill)
+	}
+	if !skill.Permissions.Shell || len(skill.Permissions.AllowedHosts) != 1 || skill.Permissions.AllowedHosts[0] != "api.example.com" {
+		t.Fatalf("unexpected permissions: %+v", skill.Permissions)
+	}
+	if !strings.Contains(skill.Permissions.Summary(), "shell") {
+		t.Fatalf("expected permission summary, got %q", skill.Permissions.Summary())
+	}
+}
+
+func TestSkillPermissionsDefaultToQuarantined(t *testing.T) {
+	dir := t.TempDir()
+	bundle := makeSkillBundle(t, dir, "quarantined-skill", "# Skill")
+	if err := os.WriteFile(filepath.Join(bundle, "skill.json"), []byte(`{"entrypoints":[{"name":"run","command":["./run.sh"]}]}`), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	inv := ScanWithOptions(LoadOptions{Roots: []Root{{Path: dir, Source: SourceWorkspace}}, ApprovalPolicy: ApprovalPolicy{QuarantineByDefault: true}})
+	if inv.Skills[0].PermissionState != "quarantined" {
+		t.Fatalf("expected quarantined permission state, got %+v", inv.Skills[0])
+	}
+}
+
+func TestSkillWithoutExecutionSurfaceStaysApproved(t *testing.T) {
+	dir := t.TempDir()
+	makeSkillBundle(t, dir, "tool-dispatch-skill", "---\ncommand-dispatch: tool\ncommand-tool: demo_echo\n---\n# Skill")
+	inv := ScanWithOptions(LoadOptions{Roots: []Root{{Path: dir, Source: SourceWorkspace}}, ApprovalPolicy: ApprovalPolicy{QuarantineByDefault: true}})
+	if len(inv.Skills) != 1 {
+		t.Fatalf("expected 1 skill, got %d", len(inv.Skills))
+	}
+	if inv.Skills[0].PermissionState != "approved" {
+		t.Fatalf("expected non-executable skill to remain approved, got %+v", inv.Skills[0])
+	}
+}
+
+func TestSkillRunnableBundleWithoutEntrypointIsQuarantined(t *testing.T) {
+	dir := t.TempDir()
+	bundle := makeSkillBundle(t, dir, "path-runner", "# Skill")
+	if err := os.WriteFile(filepath.Join(bundle, "tool.sh"), []byte("#!/bin/sh\necho hi\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	inv := ScanWithOptions(LoadOptions{Roots: []Root{{Path: dir, Source: SourceWorkspace}}, ApprovalPolicy: ApprovalPolicy{QuarantineByDefault: true}})
+	if len(inv.Skills) != 1 {
+		t.Fatalf("expected 1 skill, got %d", len(inv.Skills))
+	}
+	if inv.Skills[0].PermissionState != "quarantined" {
+		t.Fatalf("expected runnable bundle to be quarantined, got %+v", inv.Skills[0])
+	}
+}
+
 func TestSkillSummaryInInventory(t *testing.T) {
 	dir := t.TempDir()
 	makeSkillBundle(t, dir, "alpha", "---\nsummary: does alpha things\n---\n# Alpha")

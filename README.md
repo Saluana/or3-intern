@@ -27,6 +27,9 @@ The `init` command can store your provider settings in `~/.or3-intern/config.jso
 - `or3-intern chat` interactive CLI
 - `or3-intern serve` run enabled external channels (Telegram / Slack / Discord / WhatsApp bridge / Email)
 - `or3-intern agent -m "hello"` one-shot
+- `or3-intern doctor [--strict]` print hardening warnings for the current config
+- `or3-intern secrets <set|delete|list>` manage encrypted secret refs stored in SQLite
+- `or3-intern audit [verify]` verify the append-only audit chain
 - `or3-intern skills ...` list, inspect, search, install, update, check, and remove ClawHub/OpenClaw-compatible skills
 - `or3-intern migrate-jsonl /path/to/session.jsonl [session_key]`
 
@@ -69,6 +72,114 @@ Example hardening block:
   }
 }
 ```
+
+  Phase 2 adds four narrow hardening layers on top of that baseline:
+
+  - skills can declare permission metadata and default to a quarantined execution state until explicitly approved in `skills.policy.approved`
+  - heartbeat, webhook, and file-watch turns attach a bounded `structured_event` payload in event metadata and surface it in the autonomous system prompt
+  - privileged shell exec and `run_skill_script` can optionally route through a Bubblewrap wrapper via `hardening.sandbox`
+  - `or3-intern doctor` audits the current config for common unsafe settings and supports `--strict` for CI-style failures
+
+  Example Phase 2 additions:
+
+  ```json
+  {
+    "skills": {
+      "enableExec": true,
+      "policy": {
+        "quarantineByDefault": true,
+        "approved": ["runner", "deploy-skill"]
+      }
+    },
+    "hardening": {
+      "sandbox": {
+        "enabled": true,
+        "bubblewrapPath": "bwrap",
+        "allowNetwork": false,
+        "writablePaths": []
+      }
+    }
+  }
+  ```
+
+  Notes:
+
+  - `skills list` now prints both eligibility and permission state
+  - `skills info` shows declared permissions and approval/quarantine notes
+  - `skills check` reports `[quarantined]` for script-capable skills that have not been approved yet
+  - Bubblewrap support is optional and Linux-first; when enabled but unavailable, privileged execution is denied instead of silently falling back
+
+  Phase 3 adds four heavier controls on top of that baseline:
+
+  - config can reference encrypted secrets stored in SQLite via `secret:<name>` while plaintext fallback remains available during migration
+  - sensitive actions append HMAC-chained audit records and can be verified with `or3-intern audit verify`
+  - named access profiles can cap capability tiers, allowed tools, writable paths, outbound hosts, and subagent use per channel/trigger
+  - outbound HTTP, provider, and MCP traffic can be limited with `security.network` trusted-host policy
+
+  Example Phase 3 additions:
+
+  ```json
+  {
+    "security": {
+      "secretStore": {
+        "enabled": true,
+        "required": false,
+        "keyFile": "/Users/me/.or3-intern/master.key"
+      },
+      "audit": {
+        "enabled": true,
+        "strict": true,
+        "keyFile": "/Users/me/.or3-intern/audit.key",
+        "verifyOnStart": true
+      },
+      "profiles": {
+        "enabled": true,
+        "default": "interactive",
+        "channels": {"telegram": "interactive"},
+        "triggers": {"webhook": "autonomous"},
+        "profiles": {
+          "interactive": {
+            "maxCapability": "guarded",
+            "allowedTools": ["read_file", "list_dir", "web_fetch"],
+            "allowedHosts": ["api.openai.com", "api.search.brave.com"],
+            "writablePaths": ["/Users/me/workspace"],
+            "allowSubagents": false
+          },
+          "autonomous": {
+            "maxCapability": "safe",
+            "allowedTools": ["read_file", "list_dir"],
+            "allowedHosts": [],
+            "writablePaths": [],
+            "allowSubagents": false
+          }
+        }
+      },
+      "network": {
+        "enabled": true,
+        "defaultDeny": true,
+        "allowedHosts": ["api.openai.com", "api.search.brave.com", "*.slack.com"],
+        "allowLoopback": false,
+        "allowPrivate": false
+      }
+    },
+    "provider": {
+      "apiKey": "secret:provider.openai"
+    },
+    "triggers": {
+      "webhook": {
+        "secret": "secret:webhook.github"
+      }
+    }
+  }
+  ```
+
+  Phase 3 rollout notes:
+
+  - create the secret store key by running `or3-intern secrets set <name> <value>` after enabling `security.secretStore`
+  - update config values to `secret:<name>` one secret at a time; plaintext config still loads unless `secretStore.required=true`
+  - enable `security.audit.verifyOnStart=true` only after the initial audit key and audit chain are in place
+  - keep `security.network.defaultDeny=false` during discovery, then switch to `true` once all required outbound hosts are listed
+  - start with permissive profiles and narrow them per channel/trigger after verifying tool usage
 
 ## Dependencies
 
@@ -123,6 +234,7 @@ Safety notes:
 - HTTP transports are explicit. Plain `http://` endpoints are rejected unless `allowInsecureHttp=true`, and even then only for loopback/localhost addresses.
 - Stdio MCP servers inherit only the configured child environment allowlist plus any explicitly configured `env` entries.
 - MCP tool calls use the existing tool loop, per-call timeout, error handling, and artifact spill path.
+- When `security.network` is enabled, MCP HTTP transports must also satisfy the global trusted-host policy.
 - v1 intentionally does not include live reconnect loops, hot-add/hot-remove of MCP tools, SQLite persistence for tool catalogs, or a separate MCP gateway service.
 
 ## Channel Integrations
@@ -313,6 +425,16 @@ External channels automatically namespace session keys by platform, for example:
 - `whatsapp:<chat-id>`
 
 This keeps chat history and long-term memory isolated by channel/session.
+
+### Structured Trigger Inputs
+
+Autonomous trigger producers now attach a bounded `structured_event` object in `bus.Event.Meta`:
+
+- `heartbeat` includes the tasks path and session key
+- `webhook` includes route, request id, remote address, content type, and a bounded body preview
+- `filewatch` includes path, size, and mtime
+
+The runtime still keeps the current plain-text trigger message for backward compatibility, but autonomous prompts also receive the structured payload under a dedicated system-prompt section.
 
 ## New Features
 

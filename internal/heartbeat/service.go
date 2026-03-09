@@ -13,6 +13,7 @@ import (
 
 	"or3-intern/internal/bus"
 	"or3-intern/internal/config"
+	"or3-intern/internal/triggers"
 )
 
 const (
@@ -181,6 +182,12 @@ func (s *Service) processTick() {
 				s.inFlight.Store(false)
 			},
 			"tasks_path": path,
+			triggers.MetaKeyStructuredEvent: triggers.StructuredEventMap(triggers.StructuredEvent{
+				Type:    string(bus.EventHeartbeat),
+				Source:  "heartbeat",
+				Trusted: true,
+				Details: map[string]any{"tasks_path": path, "session_key": normalizedSessionKey(s.Config.SessionKey)},
+			}),
 		},
 	}
 	if ok := s.Bus.Publish(ev); !ok {

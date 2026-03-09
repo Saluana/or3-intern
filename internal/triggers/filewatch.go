@@ -127,6 +127,12 @@ func (fw *FileWatcher) poll(ctx context.Context) {
 				"path":  absPath,
 				"size":  info.Size(),
 				"mtime": info.ModTime().UnixMilli(),
+				MetaKeyStructuredEvent: StructuredEventMap(StructuredEvent{
+					Type:    string(bus.EventFileChange),
+					Source:  "filewatch",
+					Trusted: true,
+					Details: map[string]any{"path": absPath, "size": info.Size(), "mtime": info.ModTime().UnixMilli()},
+				}),
 			},
 		}
 		if ok := fw.Bus.Publish(ev); !ok {

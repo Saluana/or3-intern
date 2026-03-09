@@ -22,6 +22,7 @@ type skillsCommandDeps struct {
 	Client        *clawhub.Client
 	LoadToolNames func(context.Context, config.Config) map[string]struct{}
 	LoadInventory func(toolNames map[string]struct{}) skills.Inventory
+	Audit         func(context.Context, string, any) error
 	Stdout        io.Writer
 	Stderr        io.Writer
 }
@@ -91,7 +92,11 @@ func runSkillsCommandWithDeps(ctx context.Context, cfg config.Config, args []str
 			case skill.Hidden:
 				status = "hidden"
 			}
-			_, _ = fmt.Fprintf(deps.Stdout, "%s\t%s\t%s\t%s\n", skill.Name, status, skill.Source, skill.Dir)
+			permissionState := strings.TrimSpace(skill.PermissionState)
+			if permissionState == "" {
+				permissionState = "approved"
+			}
+			_, _ = fmt.Fprintf(deps.Stdout, "%s\t%s\t%s\t%s\t%s\n", skill.Name, status, permissionState, skill.Source, skill.Dir)
 		}
 		return nil
 	case "info":
@@ -112,6 +117,11 @@ func runSkillsCommandWithDeps(ctx context.Context, cfg config.Config, args []str
 		}
 		_, _ = fmt.Fprintf(deps.Stdout, "Eligible: %t\n", skill.Eligible)
 		_, _ = fmt.Fprintf(deps.Stdout, "User Invocable: %t\n", skill.UserInvocable)
+		if strings.TrimSpace(skill.PermissionState) != "" {
+			_, _ = fmt.Fprintf(deps.Stdout, "Permission State: %s\n", skill.PermissionState)
+			_, _ = fmt.Fprintf(deps.Stdout, "Declared Permissions: %s\n", skill.Permissions.Summary())
+			printReasons(deps.Stdout, "Permission Notes", skill.PermissionNotes)
+		}
 		if skill.Hidden {
 			_, _ = fmt.Fprintln(deps.Stdout, "Model Visibility: hidden")
 		}
@@ -133,6 +143,20 @@ func runSkillsCommandWithDeps(ctx context.Context, cfg config.Config, args []str
 			return nil
 		}
 		for _, skill := range inv.Skills {
+			if skill.PermissionState == "quarantined" {
+				_, _ = fmt.Fprintf(deps.Stdout, "[quarantined] %s: %s\n", skill.Name, strings.Join(skill.PermissionNotes, "; "))
+				continue
+			}
+			if skill.PermissionState == "blocked" {
+				reasons := append([]string{}, skill.PermissionNotes...)
+				reasons = append(reasons, skill.Missing...)
+				reasons = append(reasons, skill.Unsupported...)
+				if skill.ParseError != "" {
+					reasons = append(reasons, skill.ParseError)
+				}
+				_, _ = fmt.Fprintf(deps.Stdout, "[blocked] %s: %s\n", skill.Name, strings.Join(reasons, "; "))
+				continue
+			}
 			if skill.Eligible {
 				_, _ = fmt.Fprintf(deps.Stdout, "[ok] %s\n", skill.Name)
 				continue
@@ -179,6 +203,11 @@ func runSkillsCommandWithDeps(ctx context.Context, cfg config.Config, args []str
 		result, err := deps.Client.Install(ctx, fs.Arg(0), *version, resolveInstallRoot(cfg), clawhub.InstallOptions{Force: *force})
 		if err != nil {
 			return err
+		}
+		if deps.Audit != nil {
+			if err := deps.Audit(ctx, "skill.install", map[string]any{"slug": result.Slug, "version": result.Version, "path": result.Path}); err != nil {
+				return err
+			}
 		}
 		_, _ = fmt.Fprintf(deps.Stdout, "installed\t%s\t%s\t%s\n", result.Slug, result.Version, result.Path)
 		return nil
@@ -230,6 +259,11 @@ func runSkillsCommandWithDeps(ctx context.Context, cfg config.Config, args []str
 			if _, err := deps.Client.Install(ctx, item.Origin.Slug, targetVersion, root, clawhub.InstallOptions{Force: *force}); err != nil {
 				return err
 			}
+			if deps.Audit != nil {
+				if err := deps.Audit(ctx, "skill.update", map[string]any{"slug": item.Origin.Slug, "version": targetVersion}); err != nil {
+					return err
+				}
+			}
 			_, _ = fmt.Fprintf(deps.Stdout, "updated\t%s\t%s\n", item.Origin.Slug, targetVersion)
 		}
 		return nil
@@ -249,6 +283,11 @@ func runSkillsCommandWithDeps(ctx context.Context, cfg config.Config, args []str
 		if err := clawhub.RemoveSkill(root, match.Name); err != nil {
 			return err
 		}
+		if deps.Audit != nil {
+			if err := deps.Audit(ctx, "skill.remove", map[string]any{"name": match.Name}); err != nil {
+				return err
+			}
+		}
 		_, _ = fmt.Fprintf(deps.Stdout, "removed\t%s\n", match.Name)
 		return nil
 	default:
@@ -257,12 +296,22 @@ func runSkillsCommandWithDeps(ctx context.Context, cfg config.Config, args []str
 }
 
 func buildSkillsInventory(cfg config.Config, bundledDir string, toolNames map[string]struct{}) skills.Inventory {
+	approved := make(map[string]struct{}, len(cfg.Skills.Policy.Approved)*2)
+	for _, name := range cfg.Skills.Policy.Approved {
+		trimmed := strings.TrimSpace(name)
+		if trimmed == "" {
+			continue
+		}
+		approved[trimmed] = struct{}{}
+		approved[strings.ToLower(trimmed)] = struct{}{}
+	}
 	return skills.ScanWithOptions(skills.LoadOptions{
 		Roots:          buildSkillRoots(cfg, bundledDir),
 		Entries:        skillEntries(cfg),
 		GlobalConfig:   configMap(cfg),
 		Env:            envMap(),
 		AvailableTools: toolNames,
+		ApprovalPolicy: skills.ApprovalPolicy{QuarantineByDefault: cfg.Skills.Policy.QuarantineByDefault, ApprovedSkills: approved},
 	})
 }
 

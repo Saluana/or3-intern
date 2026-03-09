@@ -254,8 +254,9 @@ func TestEmptyOptionalSectionsOmitted(t *testing.T) {
 	noIdentity := ""
 	noStaticMem := ""
 	noHeartbeat := ""
+	noStructured := ""
 	noDocContext := ""
-	got := b.composeSystemPrompt(pinned, retrieved, noIdentity, noStaticMem, noHeartbeat, noDocContext, "")
+	got := b.composeSystemPrompt(pinned, retrieved, noIdentity, noStaticMem, noHeartbeat, noStructured, noDocContext, "")
 	if strings.Contains(got, "Identity") {
 		t.Error("expected 'Identity' section to be omitted when IdentityText is empty")
 	}
@@ -267,6 +268,29 @@ func TestEmptyOptionalSectionsOmitted(t *testing.T) {
 	}
 	if strings.Contains(got, "Indexed File Context") {
 		t.Error("expected 'Indexed File Context' section to be omitted when docContextText is empty")
+	}
+}
+
+func TestPromptIncludesStructuredTriggerContext(t *testing.T) {
+	d := openTestDB(t)
+	b := &Builder{DB: d, HistoryMax: 10}
+	pp, _, err := b.BuildWithOptions(context.Background(), BuildOptions{
+		SessionKey:  "sess",
+		UserMessage: "incoming webhook",
+		Autonomous:  true,
+		EventMeta: map[string]any{"structured_event": map[string]any{
+			"type":    "webhook",
+			"source":  "webhook",
+			"trusted": false,
+			"details": map[string]any{"route": "github", "request_id": "req-1"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("BuildWithOptions: %v", err)
+	}
+	sys := pp.System[0].Content.(string)
+	if !strings.Contains(sys, "Structured Trigger Context") || !strings.Contains(sys, "request_id") {
+		t.Fatalf("expected structured trigger context in prompt, got %q", sys)
 	}
 }
 

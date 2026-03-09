@@ -24,6 +24,8 @@ type WebhookServer struct {
 	server     *http.Server
 }
 
+const structuredBodyPreviewMaxChars = 512
+
 func NewWebhookServer(cfg config.WebhookConfig, b *bus.Bus, sessionKey string) *WebhookServer {
 	return &WebhookServer{Config: cfg, Bus: b, SessionKey: sessionKey}
 }
@@ -86,6 +88,10 @@ func (w *WebhookServer) handle(rw http.ResponseWriter, r *http.Request) {
 
 	route := strings.TrimPrefix(r.URL.Path, "/webhook")
 	route = strings.TrimPrefix(route, "/")
+	preview := strings.TrimSpace(string(body))
+	if len(preview) > structuredBodyPreviewMaxChars {
+		preview = preview[:structuredBodyPreviewMaxChars] + "...[truncated]"
+	}
 
 	ev := bus.Event{
 		Type:       bus.EventWebhook,
@@ -97,6 +103,19 @@ func (w *WebhookServer) handle(rw http.ResponseWriter, r *http.Request) {
 			"route":        route,
 			"content_type": r.Header.Get("Content-Type"),
 			"x-request-id": r.Header.Get("X-Request-ID"),
+			MetaKeyStructuredEvent: StructuredEventMap(StructuredEvent{
+				Type:    string(bus.EventWebhook),
+				Source:  "webhook",
+				Trusted: false,
+				Details: map[string]any{
+					"route":        route,
+					"content_type": r.Header.Get("Content-Type"),
+					"request_id":   r.Header.Get("X-Request-ID"),
+					"remote_addr":  r.RemoteAddr,
+					"body_preview": preview,
+					"body_bytes":   len(body),
+				},
+			}),
 		},
 	}
 	if ok := w.Bus.Publish(ev); !ok {

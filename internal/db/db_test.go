@@ -150,6 +150,45 @@ func TestNowMS(t *testing.T) {
 	}
 }
 
+func TestSecretsStore_RoundTrip(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	if err := d.PutSecret(ctx, "provider.openai", []byte("cipher"), []byte("nonce"), 1, "v1"); err != nil {
+		t.Fatalf("PutSecret: %v", err)
+	}
+	record, ok, err := d.GetSecret(ctx, "provider.openai")
+	if err != nil {
+		t.Fatalf("GetSecret: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected stored secret record")
+	}
+	if string(record.Ciphertext) != "cipher" || string(record.Nonce) != "nonce" {
+		t.Fatalf("unexpected secret record: %#v", record)
+	}
+}
+
+func TestAuditEvents_VerifyDetectsTampering(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	key := []byte("01234567890123456789012345678901")
+	if err := d.AppendAuditEvent(ctx, AuditEventInput{EventType: "tool.execute", SessionKey: "sess", Actor: "cli", Payload: map[string]any{"tool": "exec"}}, key); err != nil {
+		t.Fatalf("AppendAuditEvent first: %v", err)
+	}
+	if err := d.AppendAuditEvent(ctx, AuditEventInput{EventType: "secret.set", Actor: "cli", Payload: map[string]any{"name": "provider"}}, key); err != nil {
+		t.Fatalf("AppendAuditEvent second: %v", err)
+	}
+	if err := d.VerifyAuditChain(ctx, key); err != nil {
+		t.Fatalf("VerifyAuditChain: %v", err)
+	}
+	if _, err := d.SQL.ExecContext(ctx, `UPDATE audit_events SET payload_json='{"tampered":true}' WHERE id=1`); err != nil {
+		t.Fatalf("tamper update: %v", err)
+	}
+	if err := d.VerifyAuditChain(ctx, key); err == nil {
+		t.Fatal("expected tampered audit chain to fail verification")
+	}
+}
+
 func TestClose(t *testing.T) {
 	d := openTestDB(t)
 	if err := d.Close(); err != nil {

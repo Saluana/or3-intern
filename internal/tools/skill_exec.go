@@ -15,10 +15,12 @@ import (
 
 type RunSkillScript struct {
 	Base
-	Inventory      *skills.Inventory
-	Timeout        time.Duration
+	Inventory         *skills.Inventory
+	Enabled           bool
+	Timeout           time.Duration
 	ChildEnvAllowlist []string
-	OutputMaxBytes int
+	Sandbox           BubblewrapConfig
+	OutputMaxBytes    int
 }
 
 func (t *RunSkillScript) Capability() CapabilityLevel { return CapabilityPrivileged }
@@ -56,6 +58,9 @@ func (t *RunSkillScript) Execute(ctx context.Context, params map[string]any) (st
 	if t.Inventory == nil {
 		return "", fmt.Errorf("skills inventory not configured")
 	}
+	if !t.Enabled {
+		return "", fmt.Errorf("skill execution disabled")
+	}
 	skillName := strings.TrimSpace(fmt.Sprint(params["skill"]))
 	if skillName == "" {
 		return "", fmt.Errorf("missing skill")
@@ -63,6 +68,12 @@ func (t *RunSkillScript) Execute(ctx context.Context, params map[string]any) (st
 	skill, ok := t.Inventory.Get(skillName)
 	if !ok {
 		return "", fmt.Errorf("skill not found: %s", skillName)
+	}
+	if skill.PermissionState == "blocked" {
+		return "", fmt.Errorf("skill blocked: %s", strings.Join(skill.PermissionNotes, "; "))
+	}
+	if skill.PermissionState != "approved" {
+		return "", fmt.Errorf("skill requires approval before execution: %s", skill.Name)
 	}
 
 	cmd, err := t.commandForSkill(skill, params)
@@ -79,7 +90,13 @@ func (t *RunSkillScript) Execute(ctx context.Context, params map[string]any) (st
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	command := exec.CommandContext(runCtx, cmd[0], cmd[1:]...)
+	command, err := commandWithSandbox(runCtx, t.Sandbox, skill.Dir, cmd)
+	if err != nil {
+		return "", err
+	}
+	if command == nil {
+		command = exec.CommandContext(runCtx, cmd[0], cmd[1:]...)
+	}
 	command.Dir = skill.Dir
 	command.Env = BuildChildEnv(os.Environ(), t.ChildEnvAllowlist, EnvFromContext(ctx), "")
 	if stdin := strings.TrimSpace(fmt.Sprint(params["stdin"])); stdin != "" {

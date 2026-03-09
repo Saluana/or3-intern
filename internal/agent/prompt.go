@@ -21,6 +21,7 @@ import (
 	"or3-intern/internal/providers"
 	"or3-intern/internal/scope"
 	"or3-intern/internal/skills"
+	"or3-intern/internal/triggers"
 )
 
 const DefaultSoul = `# Soul
@@ -85,6 +86,7 @@ type BuildOptions struct {
 	SessionKey  string
 	UserMessage string
 	Autonomous  bool // true for cron/webhook/file-change events
+	EventMeta   map[string]any
 }
 
 type Builder struct {
@@ -194,10 +196,16 @@ func (b *Builder) BuildWithOptions(ctx context.Context, opts BuildOptions) (Prom
 	}
 
 	heartbeat := ""
+	structuredContext := ""
+	structuredMax := b.BootstrapMaxChars
+	if structuredMax <= 0 {
+		structuredMax = defaultBootstrapMaxChars
+	}
 	if opts.Autonomous {
 		heartbeat = b.currentHeartbeatText()
+		structuredContext = formatStructuredEventContext(opts.EventMeta, structuredMax)
 	}
-	sysText := b.composeSystemPrompt(pinnedText, memText, b.IdentityText, b.StaticMemory, heartbeat, docContextText, workspaceContextText)
+	sysText := b.composeSystemPrompt(pinnedText, memText, b.IdentityText, b.StaticMemory, heartbeat, structuredContext, docContextText, workspaceContextText)
 	sys := []providers.ChatMessage{
 		{Role: "system", Content: sysText},
 	}
@@ -354,7 +362,7 @@ func readCappedFile(path string, maxBytes int64) ([]byte, error) {
 	return data, nil
 }
 
-func (b *Builder) composeSystemPrompt(pinnedText, memText, identityText, staticMemoryText, heartbeatText, docContextText, workspaceContextText string) string {
+func (b *Builder) composeSystemPrompt(pinnedText, memText, identityText, staticMemoryText, heartbeatText, structuredContextText, docContextText, workspaceContextText string) string {
 	maxEach := b.BootstrapMaxChars
 	if maxEach <= 0 {
 		maxEach = defaultBootstrapMaxChars
@@ -400,6 +408,9 @@ func (b *Builder) composeSystemPrompt(pinnedText, memText, identityText, staticM
 	if t := strings.TrimSpace(heartbeatText); t != "" {
 		sections = append(sections, section{title: "Heartbeat", text: truncateText(t, maxEach)})
 	}
+	if t := strings.TrimSpace(structuredContextText); t != "" {
+		sections = append(sections, section{title: "Structured Trigger Context", text: truncateText(t, maxEach)})
+	}
 	sections = append(sections, section{title: "Pinned Memory", text: pinnedText})
 	sections = append(sections, section{title: "Retrieved Memory", text: memText})
 	if t := strings.TrimSpace(workspaceContextText); t != "" {
@@ -420,6 +431,17 @@ func (b *Builder) composeSystemPrompt(pinnedText, memText, identityText, staticM
 		out.WriteString("\n")
 	}
 	return truncateText(strings.TrimSpace(out.String()), maxTotal)
+}
+
+func formatStructuredEventContext(meta map[string]any, max int) string {
+	if len(meta) == 0 {
+		return ""
+	}
+	raw, ok := meta[triggers.MetaKeyStructuredEvent]
+	if !ok {
+		return ""
+	}
+	return truncateText(triggers.StructuredEventJSON(raw), max)
 }
 
 func truncateText(s string, max int) string {

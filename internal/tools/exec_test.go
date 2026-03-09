@@ -9,6 +9,16 @@ import (
 	"time"
 )
 
+func writeFakeBubblewrap(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "bwrap")
+	content := "#!/bin/sh\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = \"--\" ]; then\n    shift\n    exec \"$@\"\n  fi\n  shift\ndone\nexit 97\n"
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	return path
+}
+
 func TestExecTool_BasicCommand(t *testing.T) {
 	tool := &ExecTool{Timeout: 5 * time.Second}
 	out, err := tool.Execute(context.Background(), map[string]any{
@@ -53,6 +63,25 @@ func TestExecTool_AllowedPrograms(t *testing.T) {
 		t.Fatalf("Execute allowed program: %v", err)
 	}
 	if !strings.Contains(out, "ok") {
+		t.Fatalf("unexpected output: %q", out)
+	}
+}
+
+func TestExecTool_BubblewrapUnavailable(t *testing.T) {
+	tool := &ExecTool{Timeout: 5 * time.Second, Sandbox: BubblewrapConfig{Enabled: true, BubblewrapPath: filepath.Join(t.TempDir(), "missing-bwrap")}}
+	if _, err := tool.Execute(context.Background(), map[string]any{"command": "echo hi"}); err == nil || !strings.Contains(err.Error(), "bubblewrap unavailable") {
+		t.Fatalf("expected bubblewrap unavailable error, got %v", err)
+	}
+}
+
+func TestExecTool_BubblewrapEnabled(t *testing.T) {
+	bwrap := writeFakeBubblewrap(t)
+	tool := &ExecTool{Timeout: 5 * time.Second, Sandbox: BubblewrapConfig{Enabled: true, BubblewrapPath: bwrap}}
+	out, err := tool.Execute(context.Background(), map[string]any{"command": "echo sandboxed"})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !strings.Contains(out, "sandboxed") {
 		t.Fatalf("unexpected output: %q", out)
 	}
 }

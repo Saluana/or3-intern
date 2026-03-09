@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"strings"
 
 	"or3-intern/internal/scope"
 )
@@ -11,8 +12,18 @@ type deliveryChannelContextKey struct{}
 type deliveryToContextKey struct{}
 type envContextKey struct{}
 type toolGuardContextKey struct{}
+type activeProfileContextKey struct{}
 
-type ToolGuard func(ctx context.Context, tool Tool, capability CapabilityLevel) error
+type ToolGuard func(ctx context.Context, tool Tool, capability CapabilityLevel, params map[string]any) error
+
+type ActiveProfile struct {
+	Name           string
+	MaxCapability  CapabilityLevel
+	AllowedTools   map[string]struct{}
+	AllowedHosts   []string
+	WritablePaths  []string
+	AllowSubagents bool
+}
 
 func ContextWithSession(ctx context.Context, sessionKey string) context.Context {
 	if ctx == nil {
@@ -54,6 +65,29 @@ func ContextWithToolGuard(ctx context.Context, guard ToolGuard) context.Context 
 		return ctx
 	}
 	return context.WithValue(ctx, toolGuardContextKey{}, guard)
+}
+
+func ContextWithActiveProfile(ctx context.Context, profile ActiveProfile) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if strings.TrimSpace(profile.Name) == "" && len(profile.AllowedTools) == 0 && len(profile.AllowedHosts) == 0 && len(profile.WritablePaths) == 0 && !profile.AllowSubagents && profile.MaxCapability == "" {
+		return ctx
+	}
+	cloned := ActiveProfile{
+		Name:           strings.TrimSpace(profile.Name),
+		MaxCapability:  profile.MaxCapability,
+		AllowedHosts:   append([]string{}, profile.AllowedHosts...),
+		WritablePaths:  append([]string{}, profile.WritablePaths...),
+		AllowSubagents: profile.AllowSubagents,
+	}
+	if len(profile.AllowedTools) > 0 {
+		cloned.AllowedTools = make(map[string]struct{}, len(profile.AllowedTools))
+		for key := range profile.AllowedTools {
+			cloned.AllowedTools[key] = struct{}{}
+		}
+	}
+	return context.WithValue(ctx, activeProfileContextKey{}, cloned)
 }
 
 func SessionFromContext(ctx context.Context) string {
@@ -99,4 +133,12 @@ func ToolGuardFromContext(ctx context.Context) ToolGuard {
 	}
 	guard, _ := ctx.Value(toolGuardContextKey{}).(ToolGuard)
 	return guard
+}
+
+func ActiveProfileFromContext(ctx context.Context) ActiveProfile {
+	if ctx == nil {
+		return ActiveProfile{}
+	}
+	profile, _ := ctx.Value(activeProfileContextKey{}).(ActiveProfile)
+	return profile
 }

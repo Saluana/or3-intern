@@ -154,6 +154,15 @@ func TestDefault_Values(t *testing.T) {
 	if len(cfg.Hardening.ChildEnvAllowlist) == 0 {
 		t.Fatal("expected default child environment allowlist")
 	}
+	if !cfg.Skills.Policy.QuarantineByDefault {
+		t.Fatal("expected skills to quarantine by default")
+	}
+	if cfg.Hardening.Sandbox.BubblewrapPath != "bwrap" {
+		t.Fatalf("expected default bubblewrap path, got %q", cfg.Hardening.Sandbox.BubblewrapPath)
+	}
+	if cfg.Security.SecretStore.KeyFile == "" || cfg.Security.Audit.KeyFile == "" {
+		t.Fatal("expected default phase 3 key file paths")
+	}
 }
 
 func TestLoad_HardeningDefaultsAndOverrides(t *testing.T) {
@@ -216,6 +225,51 @@ func TestLoad_HardeningAllowsDisablingPeerIsolation(t *testing.T) {
 	}
 	if loaded.Hardening.IsolateChannelPeers {
 		t.Fatalf("expected peer isolation disable to persist, got %+v", loaded.Hardening)
+	}
+}
+
+func TestLoad_SkillsPolicyAllowsDisablingQuarantineByDefault(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	cfg := Default()
+	cfg.Skills.Policy.QuarantineByDefault = false
+	cfg.Skills.Policy.Approved = []string{"demo"}
+
+	b, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.Skills.Policy.QuarantineByDefault {
+		t.Fatalf("expected quarantineByDefault=false to persist, got %+v", loaded.Skills.Policy)
+	}
+	if len(loaded.Skills.Policy.Approved) != 1 || loaded.Skills.Policy.Approved[0] != "demo" {
+		t.Fatalf("unexpected approved skills: %#v", loaded.Skills.Policy.Approved)
+	}
+}
+
+func TestLoad_RejectsUnknownAccessProfileReference(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	cfg := Default()
+	cfg.Security.Profiles.Enabled = true
+	cfg.Security.Profiles.Default = "missing"
+
+	b, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected unknown access profile reference to fail")
 	}
 }
 

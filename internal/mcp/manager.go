@@ -16,6 +16,7 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"or3-intern/internal/config"
+	"or3-intern/internal/security"
 	"or3-intern/internal/tools"
 )
 
@@ -30,11 +31,12 @@ type session interface {
 type connector func(ctx context.Context, name string, cfg config.MCPServerConfig) (session, error)
 
 type Manager struct {
-	servers  map[string]config.MCPServerConfig
-	logf     func(string, ...any)
-	connect  connector
-	sessions map[string]session
-	tools    []remoteToolSpec
+	servers    map[string]config.MCPServerConfig
+	logf       func(string, ...any)
+	connect    connector
+	sessions   map[string]session
+	tools      []remoteToolSpec
+	hostPolicy security.HostPolicy
 }
 
 type remoteToolSpec struct {
@@ -66,11 +68,14 @@ func NewManager(servers map[string]config.MCPServerConfig) *Manager {
 	for name, server := range servers {
 		cloned[name] = server
 	}
-	return &Manager{
+	mgr := &Manager{
 		servers:  cloned,
-		connect:  connectSession,
 		sessions: map[string]session{},
 	}
+	mgr.connect = func(ctx context.Context, name string, cfg config.MCPServerConfig) (session, error) {
+		return connectSessionWithPolicy(ctx, name, cfg, mgr.hostPolicy)
+	}
+	return mgr
 }
 
 func (m *Manager) SetLogger(logf func(string, ...any)) {
@@ -78,6 +83,13 @@ func (m *Manager) SetLogger(logf func(string, ...any)) {
 		return
 	}
 	m.logf = logf
+}
+
+func (m *Manager) SetHostPolicy(policy security.HostPolicy) {
+	if m == nil {
+		return
+	}
+	m.hostPolicy = policy
 }
 
 func (m *Manager) ToolNames() []string {
@@ -103,6 +115,12 @@ func (m *Manager) Connect(ctx context.Context) error {
 	usedLocalNames := map[string]string{}
 	for _, name := range enabledServerNames(m.servers) {
 		cfg := m.servers[name]
+		if m.hostPolicy.EnabledPolicy() && (cfg.Transport == "sse" || cfg.Transport == "streamablehttp") {
+			if err := m.hostPolicy.ValidateEndpoint(ctx, cfg.URL); err != nil {
+				m.logFailure(name, "host policy denied", err)
+				continue
+			}
+		}
 		sess, err := m.connect(ctx, name, cfg)
 		if err != nil {
 			m.logFailure(name, "connect failed", err)
@@ -240,8 +258,12 @@ func (t *RemoteTool) Execute(ctx context.Context, params map[string]any) (string
 	return text, nil
 }
 
-func connectSession(ctx context.Context, _ string, cfg config.MCPServerConfig) (session, error) {
-	transport, err := buildTransport(cfg)
+func connectSession(ctx context.Context, name string, cfg config.MCPServerConfig) (session, error) {
+	return connectSessionWithPolicy(ctx, name, cfg, security.HostPolicy{})
+}
+
+func connectSessionWithPolicy(ctx context.Context, _ string, cfg config.MCPServerConfig, policy security.HostPolicy) (session, error) {
+	transport, err := buildTransportWithPolicy(cfg, policy)
 	if err != nil {
 		return nil, err
 	}
@@ -258,6 +280,10 @@ func connectSession(ctx context.Context, _ string, cfg config.MCPServerConfig) (
 }
 
 func buildTransport(cfg config.MCPServerConfig) (sdkmcp.Transport, error) {
+	return buildTransportWithPolicy(cfg, security.HostPolicy{})
+}
+
+func buildTransportWithPolicy(cfg config.MCPServerConfig, policy security.HostPolicy) (sdkmcp.Transport, error) {
 	switch cfg.Transport {
 	case "stdio":
 		cmd := exec.Command(cfg.Command, cfg.Args...)
@@ -266,12 +292,12 @@ func buildTransport(cfg config.MCPServerConfig) (sdkmcp.Transport, error) {
 	case "sse":
 		return &sdkmcp.SSEClientTransport{
 			Endpoint:   cfg.URL,
-			HTTPClient: buildHTTPClient(cfg),
+			HTTPClient: buildHTTPClient(cfg, policy),
 		}, nil
 	case "streamablehttp":
 		return &sdkmcp.StreamableClientTransport{
 			Endpoint:   cfg.URL,
-			HTTPClient: buildHTTPClient(cfg),
+			HTTPClient: buildHTTPClient(cfg, policy),
 			MaxRetries: -1,
 		}, nil
 	default:
@@ -279,7 +305,7 @@ func buildTransport(cfg config.MCPServerConfig) (sdkmcp.Transport, error) {
 	}
 }
 
-func buildHTTPClient(cfg config.MCPServerConfig) *http.Client {
+func buildHTTPClient(cfg config.MCPServerConfig, policy security.HostPolicy) *http.Client {
 	timeout := time.Duration(cfg.ConnectTimeoutSeconds) * time.Second
 	base := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
@@ -291,9 +317,13 @@ func buildHTTPClient(cfg config.MCPServerConfig) *http.Client {
 		ResponseHeaderTimeout: timeout,
 		ExpectContinueTimeout: time.Second,
 	}
-	return &http.Client{
+	client := &http.Client{
 		Transport: &headerRoundTripper{base: base, headers: cfg.Headers},
 	}
+	if policy.EnabledPolicy() {
+		return security.WrapHTTPClient(client, policy)
+	}
+	return client
 }
 
 func listTools(ctx context.Context, sess session, cfg config.MCPServerConfig) ([]*sdkmcp.Tool, error) {

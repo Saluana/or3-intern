@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -132,6 +133,16 @@ func (m *SubagentManager) Enqueue(ctx context.Context, req tools.SpawnRequest) (
 		return tools.SpawnJob{}, fmt.Errorf("missing parent session")
 	}
 	jobID := newSubagentID()
+	metadata := map[string]any{}
+	if profileName := strings.TrimSpace(req.ProfileName); profileName != "" {
+		metadata["profile_name"] = profileName
+	}
+	metadataJSON := "{}"
+	if len(metadata) > 0 {
+		if b, err := json.Marshal(metadata); err == nil {
+			metadataJSON = string(b)
+		}
+	}
 	job := db.SubagentJob{
 		ID:               jobID,
 		ParentSessionKey: parentSessionKey,
@@ -140,7 +151,7 @@ func (m *SubagentManager) Enqueue(ctx context.Context, req tools.SpawnRequest) (
 		ReplyTo:          strings.TrimSpace(req.To),
 		Task:             task,
 		Status:           db.SubagentStatusQueued,
-		MetadataJSON:     "{}",
+		MetadataJSON:     metadataJSON,
 	}
 	if err := m.DB.EnqueueSubagentJobLimited(ctx, job, m.MaxQueued); err != nil {
 		return tools.SpawnJob{}, err
@@ -212,10 +223,22 @@ func (m *SubagentManager) runJob(ctx context.Context, job db.SubagentJob) (Backg
 		Meta: map[string]any{
 			"subagent_job_id":    job.ID,
 			"parent_session_key": job.ParentSessionKey,
+			"profile_name":       profileNameFromMetadata(job.MetadataJSON),
 		},
 		Channel: job.Channel,
 		ReplyTo: job.ReplyTo,
 	})
+}
+
+func profileNameFromMetadata(raw string) string {
+	if strings.TrimSpace(raw) == "" {
+		return ""
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal([]byte(raw), &metadata); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(metadata["profile_name"]))
 }
 
 func (m *SubagentManager) backgroundTools() *tools.Registry {

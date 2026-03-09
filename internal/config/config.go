@@ -47,6 +47,7 @@ type Config struct {
 	Skills       SkillsConfig   `json:"skills"`
 	Triggers     TriggerConfig  `json:"triggers"`
 	Session      SessionConfig  `json:"session"`
+	Security     SecurityConfig `json:"security"`
 
 	Provider  ProviderConfig  `json:"provider"`
 	Tools     ToolsConfig     `json:"tools"`
@@ -62,7 +63,15 @@ type HardeningConfig struct {
 	ExecAllowedPrograms []string             `json:"execAllowedPrograms"`
 	ChildEnvAllowlist   []string             `json:"childEnvAllowlist"`
 	IsolateChannelPeers bool                 `json:"isolateChannelPeers"`
+	Sandbox             SandboxConfig        `json:"sandbox"`
 	Quotas              HardeningQuotaConfig `json:"quotas"`
+}
+
+type SandboxConfig struct {
+	Enabled        bool     `json:"enabled"`
+	BubblewrapPath string   `json:"bubblewrapPath"`
+	AllowNetwork   bool     `json:"allowNetwork"`
+	WritablePaths  []string `json:"writablePaths"`
 }
 
 type HardeningQuotaConfig struct {
@@ -224,9 +233,15 @@ type SkillsConfig struct {
 	EnableExec    bool                        `json:"enableExec"`
 	MaxRunSeconds int                         `json:"maxRunSeconds"`
 	ManagedDir    string                      `json:"managedDir"`
+	Policy        SkillPolicyConfig           `json:"policy"`
 	Load          SkillsLoadConfig            `json:"load"`
 	Entries       map[string]SkillEntryConfig `json:"entries"`
 	ClawHub       ClawHubConfig               `json:"clawHub"`
+}
+
+type SkillPolicyConfig struct {
+	QuarantineByDefault bool     `json:"quarantineByDefault"`
+	Approved            []string `json:"approved"`
 }
 
 type SkillsLoadConfig struct {
@@ -275,6 +290,50 @@ type SessionConfig struct {
 type SessionIdentityLink struct {
 	Canonical string   `json:"canonical"`
 	Peers     []string `json:"peers"`
+}
+
+type SecurityConfig struct {
+	SecretStore SecretStoreConfig    `json:"secretStore"`
+	Audit       AuditConfig          `json:"audit"`
+	Profiles    AccessProfilesConfig `json:"profiles"`
+	Network     NetworkPolicyConfig  `json:"network"`
+}
+
+type SecretStoreConfig struct {
+	Enabled  bool   `json:"enabled"`
+	Required bool   `json:"required"`
+	KeyFile  string `json:"keyFile"`
+}
+
+type AuditConfig struct {
+	Enabled       bool   `json:"enabled"`
+	Strict        bool   `json:"strict"`
+	KeyFile       string `json:"keyFile"`
+	VerifyOnStart bool   `json:"verifyOnStart"`
+}
+
+type AccessProfilesConfig struct {
+	Enabled  bool                           `json:"enabled"`
+	Default  string                         `json:"default"`
+	Channels map[string]string              `json:"channels"`
+	Triggers map[string]string              `json:"triggers"`
+	Profiles map[string]AccessProfileConfig `json:"profiles"`
+}
+
+type AccessProfileConfig struct {
+	MaxCapability  string   `json:"maxCapability"`
+	AllowedTools   []string `json:"allowedTools"`
+	AllowedHosts   []string `json:"allowedHosts"`
+	WritablePaths  []string `json:"writablePaths"`
+	AllowSubagents bool     `json:"allowSubagents"`
+}
+
+type NetworkPolicyConfig struct {
+	Enabled       bool     `json:"enabled"`
+	DefaultDeny   bool     `json:"defaultDeny"`
+	AllowedHosts  []string `json:"allowedHosts"`
+	AllowLoopback bool     `json:"allowLoopback"`
+	AllowPrivate  bool     `json:"allowPrivate"`
 }
 
 func Default() Config {
@@ -327,6 +386,10 @@ func Default() Config {
 			EnableExec:    false,
 			MaxRunSeconds: 30,
 			ManagedDir:    filepath.Join(root, "skills"),
+			Policy: SkillPolicyConfig{
+				QuarantineByDefault: true,
+				Approved:            []string{},
+			},
 			Load: SkillsLoadConfig{
 				Watch:           false,
 				WatchDebounceMS: 250,
@@ -354,6 +417,33 @@ func Default() Config {
 			DirectMessagesShareDefault: false,
 			IdentityLinks:              []SessionIdentityLink{},
 		},
+		Security: SecurityConfig{
+			SecretStore: SecretStoreConfig{
+				Enabled:  false,
+				Required: false,
+				KeyFile:  filepath.Join(root, "master.key"),
+			},
+			Audit: AuditConfig{
+				Enabled:       false,
+				Strict:        false,
+				KeyFile:       filepath.Join(root, "audit.key"),
+				VerifyOnStart: false,
+			},
+			Profiles: AccessProfilesConfig{
+				Enabled:  false,
+				Default:  "",
+				Channels: map[string]string{},
+				Triggers: map[string]string{},
+				Profiles: map[string]AccessProfileConfig{},
+			},
+			Network: NetworkPolicyConfig{
+				Enabled:       false,
+				DefaultDeny:   false,
+				AllowedHosts:  []string{},
+				AllowLoopback: false,
+				AllowPrivate:  false,
+			},
+		},
 		Provider: ProviderConfig{
 			APIBase:        "https://api.openai.com/v1",
 			APIKey:         os.Getenv("OPENAI_API_KEY"),
@@ -376,6 +466,12 @@ func Default() Config {
 			ExecAllowedPrograms: []string{"cat", "echo", "find", "git", "grep", "head", "ls", "pwd", "sed", "tail"},
 			ChildEnvAllowlist:   []string{"PATH", "HOME", "TMPDIR", "TMP", "TEMP"},
 			IsolateChannelPeers: true,
+			Sandbox: SandboxConfig{
+				Enabled:        false,
+				BubblewrapPath: "bwrap",
+				AllowNetwork:   false,
+				WritablePaths:  []string{},
+			},
 			Quotas: HardeningQuotaConfig{
 				Enabled:          true,
 				MaxToolCalls:     16,
@@ -659,6 +755,9 @@ func Load(path string) (Config, error) {
 	if cfg.Skills.Load.WatchDebounceMS <= 0 {
 		cfg.Skills.Load.WatchDebounceMS = 250
 	}
+	if cfg.Skills.Policy.Approved == nil {
+		cfg.Skills.Policy.Approved = []string{}
+	}
 	if cfg.Skills.Entries == nil {
 		cfg.Skills.Entries = map[string]SkillEntryConfig{}
 	}
@@ -670,6 +769,12 @@ func Load(path string) (Config, error) {
 	}
 	if len(cfg.Hardening.ChildEnvAllowlist) == 0 {
 		cfg.Hardening.ChildEnvAllowlist = append([]string{}, Default().Hardening.ChildEnvAllowlist...)
+	}
+	if strings.TrimSpace(cfg.Hardening.Sandbox.BubblewrapPath) == "" {
+		cfg.Hardening.Sandbox.BubblewrapPath = Default().Hardening.Sandbox.BubblewrapPath
+	}
+	if cfg.Hardening.Sandbox.WritablePaths == nil {
+		cfg.Hardening.Sandbox.WritablePaths = []string{}
 	}
 	if cfg.Hardening.Quotas.MaxToolCalls <= 0 {
 		cfg.Hardening.Quotas.MaxToolCalls = Default().Hardening.Quotas.MaxToolCalls
@@ -740,10 +845,38 @@ func Load(path string) (Config, error) {
 	if cfg.Session.IdentityLinks == nil {
 		cfg.Session.IdentityLinks = []SessionIdentityLink{}
 	}
+	if strings.TrimSpace(cfg.Security.SecretStore.KeyFile) == "" {
+		cfg.Security.SecretStore.KeyFile = Default().Security.SecretStore.KeyFile
+	}
+	if strings.TrimSpace(cfg.Security.Audit.KeyFile) == "" {
+		cfg.Security.Audit.KeyFile = Default().Security.Audit.KeyFile
+	}
+	if cfg.Security.Profiles.Channels == nil {
+		cfg.Security.Profiles.Channels = map[string]string{}
+	}
+	if cfg.Security.Profiles.Triggers == nil {
+		cfg.Security.Profiles.Triggers = map[string]string{}
+	}
+	if cfg.Security.Profiles.Profiles == nil {
+		cfg.Security.Profiles.Profiles = map[string]AccessProfileConfig{}
+	}
+	if cfg.Security.Network.AllowedHosts == nil {
+		cfg.Security.Network.AllowedHosts = []string{}
+	}
+	for name, profile := range cfg.Security.Profiles.Profiles {
+		profile.MaxCapability = strings.ToLower(strings.TrimSpace(profile.MaxCapability))
+		profile.AllowedTools = compactStrings(profile.AllowedTools)
+		profile.AllowedHosts = compactStrings(profile.AllowedHosts)
+		profile.WritablePaths = compactStrings(profile.WritablePaths)
+		cfg.Security.Profiles.Profiles[name] = profile
+	}
 	if err := validateMCPServers(cfg.Tools.MCPServers); err != nil {
 		return cfg, err
 	}
 	if err := validateChannelAccess(cfg); err != nil {
+		return cfg, err
+	}
+	if err := validateAccessProfiles(cfg.Security.Profiles); err != nil {
 		return cfg, err
 	}
 	return cfg, nil
@@ -837,6 +970,66 @@ func validateMCPHTTPURL(name string, server MCPServerConfig) error {
 	default:
 		return errors.New("tools.mcpServers." + name + ": url scheme must be https or http")
 	}
+}
+
+func validateAccessProfiles(cfg AccessProfilesConfig) error {
+	if !cfg.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(cfg.Default) != "" {
+		if _, ok := cfg.Profiles[strings.TrimSpace(cfg.Default)]; !ok {
+			return errors.New("security.profiles.default references unknown profile")
+		}
+	}
+	for name, profile := range cfg.Profiles {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return errors.New("security.profiles.profiles contains an empty profile name")
+		}
+		switch profile.MaxCapability {
+		case "", "safe", "guarded", "privileged":
+		default:
+			return errors.New("security.profiles.profiles." + name + ": unsupported maxCapability")
+		}
+	}
+	for channel, profileName := range cfg.Channels {
+		if strings.TrimSpace(channel) == "" {
+			return errors.New("security.profiles.channels contains an empty channel name")
+		}
+		if _, ok := cfg.Profiles[strings.TrimSpace(profileName)]; !ok {
+			return errors.New("security.profiles.channels." + channel + " references unknown profile")
+		}
+	}
+	for trigger, profileName := range cfg.Triggers {
+		if strings.TrimSpace(trigger) == "" {
+			return errors.New("security.profiles.triggers contains an empty trigger name")
+		}
+		if _, ok := cfg.Profiles[strings.TrimSpace(profileName)]; !ok {
+			return errors.New("security.profiles.triggers." + trigger + " references unknown profile")
+		}
+	}
+	return nil
+}
+
+func compactStrings(values []string) []string {
+	if len(values) == 0 {
+		return []string{}
+	}
+	out := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		key := strings.ToLower(trimmed)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, trimmed)
+	}
+	return out
 }
 
 func isLoopbackHost(host string) bool {

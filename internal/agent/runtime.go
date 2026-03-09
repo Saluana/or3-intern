@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/url"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +21,7 @@ import (
 	"or3-intern/internal/memory"
 	"or3-intern/internal/providers"
 	"or3-intern/internal/scope"
+	"or3-intern/internal/security"
 	"or3-intern/internal/skills"
 	"or3-intern/internal/tools"
 )
@@ -45,11 +48,13 @@ type Runtime struct {
 	Temperature      float64
 	Tools            *tools.Registry
 	Hardening        config.HardeningConfig
+	AccessProfiles   config.AccessProfilesConfig
 	Builder          *Builder
 	Artifacts        *artifacts.Store
 	MaxToolBytes     int
 	MaxToolLoops     int
 	ToolPreviewBytes int
+	Audit            *security.AuditLogger
 
 	Deliver  Deliverer
 	Streamer channels.StreamingChannel
@@ -141,6 +146,7 @@ func (r *Runtime) getSessionLock(key string) *sessionLock {
 }
 
 func (r *Runtime) Handle(ctx context.Context, ev bus.Event) error {
+	ctx = r.contextWithEventProfile(ctx, ev)
 	entry := r.acquireSessionLock(ev.SessionKey)
 	entry.mu.Lock()
 	defer func() {
@@ -183,6 +189,7 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 		SessionKey:  ev.SessionKey,
 		UserMessage: ev.Message,
 		Autonomous:  isAutonomous,
+		EventMeta:   cloneMap(ev.Meta),
 	})
 	if err != nil {
 		return err
@@ -312,6 +319,7 @@ func (r *Runtime) handleExplicitSkillInvocation(ctx context.Context, ev bus.Even
 	messages, err := r.BuildPromptSnapshotWithOptions(ctx, BuildOptions{
 		SessionKey:  ev.SessionKey,
 		UserMessage: promptInput,
+		EventMeta:   cloneMap(ev.Meta),
 	})
 	if err != nil {
 		return true, err
@@ -428,6 +436,7 @@ func (r *Runtime) BuildPromptSnapshotWithOptions(ctx context.Context, opts Build
 }
 
 func (r *Runtime) RunBackground(ctx context.Context, input BackgroundRunInput) (BackgroundRunResult, error) {
+	ctx = r.contextWithProfileName(ctx, strings.TrimSpace(fmt.Sprint(input.Meta["profile_name"])))
 	entry := r.acquireSessionLock(input.SessionKey)
 	entry.mu.Lock()
 	defer func() {
@@ -614,18 +623,32 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 	return "(no response)", false, nil
 }
 
-func (r *Runtime) guardToolExecution(ctx context.Context, tool tools.Tool, capability tools.CapabilityLevel) error {
+func (r *Runtime) guardToolExecution(ctx context.Context, tool tools.Tool, capability tools.CapabilityLevel, params map[string]any) error {
 	if tool == nil {
 		return nil
 	}
+	profile := tools.ActiveProfileFromContext(ctx)
 	if tool.Name() == "send_message" && trustedToolAccessFromContext(ctx) {
 		capability = tools.CapabilitySafe
+	}
+	if err := r.enforceProfile(ctx, profile, tool, capability, params); err != nil {
+		return err
 	}
 	if capability == tools.CapabilityGuarded && !r.Hardening.GuardedTools {
 		return fmt.Errorf("tool requires guarded access: %s", tool.Name())
 	}
 	if capability == tools.CapabilityPrivileged && !r.Hardening.PrivilegedTools {
 		return fmt.Errorf("tool requires privileged access: %s", tool.Name())
+	}
+	if r.Audit != nil && (capability == tools.CapabilityPrivileged || tool.Name() == "spawn_subagent") {
+		if err := r.Audit.Record(ctx, "tool.execute", tools.SessionFromContext(ctx), profileActor(profile), map[string]any{
+			"tool":       tool.Name(),
+			"capability": capability,
+			"profile":    profile.Name,
+			"summary":    summarizeToolParams(tool.Name(), params),
+		}); err != nil {
+			return err
+		}
 	}
 	if !r.Hardening.Quotas.Enabled {
 		return nil
@@ -649,6 +672,181 @@ func (r *Runtime) guardToolExecution(ctx context.Context, tool tools.Tool, capab
 		}
 	}
 	return nil
+}
+
+func (r *Runtime) contextWithEventProfile(ctx context.Context, ev bus.Event) context.Context {
+	if r == nil {
+		return ctx
+	}
+	return r.contextWithProfileName(ctx, r.profileNameForEvent(ev))
+}
+
+func (r *Runtime) contextWithProfileName(ctx context.Context, name string) context.Context {
+	profile, ok := r.resolveProfile(name)
+	if !ok {
+		return ctx
+	}
+	return tools.ContextWithActiveProfile(ctx, profile)
+}
+
+func (r *Runtime) profileNameForEvent(ev bus.Event) string {
+	if len(ev.Meta) > 0 {
+		if profileName := strings.TrimSpace(fmt.Sprint(ev.Meta["profile_name"])); profileName != "" && profileName != "<nil>" {
+			return profileName
+		}
+	}
+	if !r.AccessProfiles.Enabled {
+		return ""
+	}
+	triggerKey := strings.ToLower(strings.TrimSpace(string(ev.Type)))
+	if profileName := strings.TrimSpace(r.AccessProfiles.Triggers[triggerKey]); profileName != "" {
+		return profileName
+	}
+	if profileName := strings.TrimSpace(r.AccessProfiles.Channels[strings.ToLower(strings.TrimSpace(ev.Channel))]); profileName != "" {
+		return profileName
+	}
+	return strings.TrimSpace(r.AccessProfiles.Default)
+}
+
+func (r *Runtime) resolveProfile(name string) (tools.ActiveProfile, bool) {
+	name = strings.TrimSpace(name)
+	if !r.AccessProfiles.Enabled || name == "" {
+		return tools.ActiveProfile{}, false
+	}
+	profileCfg, ok := r.AccessProfiles.Profiles[name]
+	if !ok {
+		return tools.ActiveProfile{}, false
+	}
+	allowed := map[string]struct{}{}
+	for _, toolName := range profileCfg.AllowedTools {
+		allowed[strings.TrimSpace(toolName)] = struct{}{}
+	}
+	maxCapability := tools.CapabilityPrivileged
+	switch strings.ToLower(strings.TrimSpace(profileCfg.MaxCapability)) {
+	case "safe":
+		maxCapability = tools.CapabilitySafe
+	case "guarded":
+		maxCapability = tools.CapabilityGuarded
+	case "privileged", "":
+		maxCapability = tools.CapabilityPrivileged
+	}
+	return tools.ActiveProfile{
+		Name:           name,
+		MaxCapability:  maxCapability,
+		AllowedTools:   allowed,
+		AllowedHosts:   append([]string{}, profileCfg.AllowedHosts...),
+		WritablePaths:  append([]string{}, profileCfg.WritablePaths...),
+		AllowSubagents: profileCfg.AllowSubagents,
+	}, true
+}
+
+func (r *Runtime) enforceProfile(ctx context.Context, profile tools.ActiveProfile, tool tools.Tool, capability tools.CapabilityLevel, params map[string]any) error {
+	if strings.TrimSpace(profile.Name) == "" {
+		return nil
+	}
+	if capabilityRank(capability) > capabilityRank(profile.MaxCapability) {
+		return fmt.Errorf("tool exceeds profile capability: %s", tool.Name())
+	}
+	if len(profile.AllowedTools) > 0 {
+		if _, ok := profile.AllowedTools[tool.Name()]; !ok {
+			return fmt.Errorf("tool denied by profile: %s", tool.Name())
+		}
+	}
+	if tool.Name() == "spawn_subagent" && !profile.AllowSubagents {
+		return fmt.Errorf("subagents denied by profile")
+	}
+	switch tool.Name() {
+	case "write_file", "edit_file":
+		if len(profile.WritablePaths) == 0 {
+			return fmt.Errorf("path denied by profile")
+		}
+		if err := validateProfileWritablePath(profile.WritablePaths, fmt.Sprint(params["path"])); err != nil {
+			return err
+		}
+	case "exec":
+		if cwd := strings.TrimSpace(fmt.Sprint(params["cwd"])); cwd != "" && cwd != "<nil>" {
+			if len(profile.WritablePaths) == 0 {
+				return fmt.Errorf("path denied by profile")
+			}
+			if err := validateProfileWritablePath(profile.WritablePaths, cwd); err != nil {
+				return err
+			}
+		}
+	}
+	switch tool.Name() {
+	case "web_fetch":
+		parsed, err := url.Parse(strings.TrimSpace(fmt.Sprint(params["url"])))
+		if err != nil {
+			return err
+		}
+		if err := (security.HostPolicy{Enabled: true, DefaultDeny: true, AllowedHosts: profile.AllowedHosts}).ValidateURL(ctx, parsed); err != nil {
+			return err
+		}
+	case "web_search":
+		if err := (security.HostPolicy{Enabled: true, DefaultDeny: true, AllowedHosts: profile.AllowedHosts}).ValidateHost(ctx, "api.search.brave.com"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func capabilityRank(level tools.CapabilityLevel) int {
+	switch level {
+	case tools.CapabilitySafe:
+		return 0
+	case tools.CapabilityGuarded:
+		return 1
+	case tools.CapabilityPrivileged:
+		return 2
+	default:
+		return 2
+	}
+}
+
+func validateProfileWritablePath(allowed []string, path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" || path == "<nil>" {
+		return nil
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	for _, root := range allowed {
+		rootPath, rootErr := filepath.Abs(root)
+		if rootErr != nil {
+			continue
+		}
+		rel, relErr := filepath.Rel(rootPath, absPath)
+		if relErr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return nil
+		}
+	}
+	return fmt.Errorf("path denied by profile")
+}
+
+func profileActor(profile tools.ActiveProfile) string {
+	if strings.TrimSpace(profile.Name) == "" {
+		return "runtime"
+	}
+	return "profile:" + profile.Name
+}
+
+func summarizeToolParams(toolName string, params map[string]any) map[string]any {
+	summary := map[string]any{"tool": toolName}
+	switch toolName {
+	case "exec":
+		summary["program"] = strings.TrimSpace(fmt.Sprint(params["program"]))
+		summary["cwd"] = strings.TrimSpace(fmt.Sprint(params["cwd"]))
+	case "run_skill_script":
+		summary["skill"] = strings.TrimSpace(fmt.Sprint(params["skill"]))
+		summary["entrypoint"] = strings.TrimSpace(fmt.Sprint(params["entrypoint"]))
+	case "spawn_subagent":
+		summary["task"] = previewText(strings.TrimSpace(fmt.Sprint(params["task"])), 120)
+	case "web_fetch":
+		summary["url"] = strings.TrimSpace(fmt.Sprint(params["url"]))
+	}
+	return summary
 }
 
 func (r *Runtime) sessionQuotaState(sessionKey string) *sessionQuotaState {

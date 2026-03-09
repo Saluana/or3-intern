@@ -14,14 +14,15 @@ import (
 
 type ExecTool struct {
 	Base
-	Timeout         time.Duration
-	RestrictDir     string // if non-empty, cwd must be inside
-	PathAppend      string
+	Timeout           time.Duration
+	RestrictDir       string // if non-empty, cwd must be inside
+	PathAppend        string
 	ChildEnvAllowlist []string
-	AllowedPrograms []string
-	DisableShell    bool
-	OutputMaxBytes  int
-	BlockedPatterns []string
+	AllowedPrograms   []string
+	Sandbox           BubblewrapConfig
+	DisableShell      bool
+	OutputMaxBytes    int
+	BlockedPatterns   []string
 }
 
 const defaultExecOutputMaxBytes = 10000
@@ -117,8 +118,15 @@ func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, 
 	defer cancel()
 
 	var c *exec.Cmd
+	var err error
 	if legacyCommand != "" {
-		c = exec.CommandContext(cctx, "bash", "-lc", legacyCommand)
+		c, err = commandWithSandbox(cctx, t.Sandbox, cwd, []string{"bash", "-lc", legacyCommand})
+		if err != nil {
+			return "", err
+		}
+		if c == nil {
+			c = exec.CommandContext(cctx, "bash", "-lc", legacyCommand)
+		}
 	} else {
 		c = exec.CommandContext(cctx, program, stringArgs(params["args"])...)
 	}
@@ -127,7 +135,7 @@ func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, 
 	var stdout, stderr bytes.Buffer
 	c.Stdout = &stdout
 	c.Stderr = &stderr
-	err := c.Run()
+	err = c.Run()
 	out := stdout.String()
 	er := stderr.String()
 	max := t.OutputMaxBytes

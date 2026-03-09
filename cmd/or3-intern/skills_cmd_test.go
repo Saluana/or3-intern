@@ -29,8 +29,8 @@ func TestRunSkillsCommand_ListEligible(t *testing.T) {
 			}
 			return skills.Inventory{
 				Skills: []skills.SkillMeta{
-					{Name: "visible", Eligible: true, Source: skills.SourceWorkspace, Dir: "/tmp/visible"},
-					{Name: "blocked", Eligible: false, Source: skills.SourceManaged, Dir: "/tmp/blocked"},
+					{Name: "visible", Eligible: true, PermissionState: "approved", Source: skills.SourceWorkspace, Dir: "/tmp/visible"},
+					{Name: "blocked", Eligible: false, PermissionState: "blocked", Source: skills.SourceManaged, Dir: "/tmp/blocked"},
 				},
 			}
 		},
@@ -43,7 +43,7 @@ func TestRunSkillsCommand_ListEligible(t *testing.T) {
 		t.Fatalf("runSkillsCommandWithDeps: %v", err)
 	}
 	text := out.String()
-	if !strings.Contains(text, "visible\teligible\tworkspace") {
+	if !strings.Contains(text, "visible\teligible\tapproved\tworkspace") {
 		t.Fatalf("unexpected output: %q", text)
 	}
 	if strings.Contains(text, "blocked") {
@@ -157,6 +157,9 @@ command-arg-mode: raw
 	if !strings.Contains(infoOut.String(), "Command Tool: mcp_demo_echo") {
 		t.Fatalf("expected command tool in info output, got %q", infoOut.String())
 	}
+	if !strings.Contains(infoOut.String(), "Permission State: approved") {
+		t.Fatalf("expected permission state in info output, got %q", infoOut.String())
+	}
 
 	var checkOut bytes.Buffer
 	deps.Stdout = &checkOut
@@ -169,6 +172,25 @@ command-arg-mode: raw
 	}
 	if toolNamesCalls != 2 {
 		t.Fatalf("expected tool names loader to be used for both info and check, got %d calls", toolNamesCalls)
+	}
+}
+
+func TestRunSkillsCommand_CheckShowsQuarantinedSkill(t *testing.T) {
+	cfg := config.Default()
+	deps := skillsCommandDeps{
+		LoadToolNames: func(context.Context, config.Config) map[string]struct{} { return map[string]struct{}{} },
+		LoadInventory: func(toolNames map[string]struct{}) skills.Inventory {
+			return skills.Inventory{Skills: []skills.SkillMeta{{Name: "runner", Eligible: true, PermissionState: "quarantined", PermissionNotes: []string{"operator approval required before script execution"}}}}
+		},
+	}
+	var out bytes.Buffer
+	deps.Stdout = &out
+	deps.Stderr = &out
+	if err := runSkillsCommandWithDeps(context.Background(), cfg, []string{"check"}, deps); err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	if !strings.Contains(out.String(), "[quarantined] runner") {
+		t.Fatalf("expected quarantined skill output, got %q", out.String())
 	}
 }
 

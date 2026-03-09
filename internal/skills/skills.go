@@ -54,7 +54,13 @@ type LoadOptions struct {
 	GlobalConfig   map[string]any
 	Env            map[string]string
 	AvailableTools map[string]struct{}
+	ApprovalPolicy ApprovalPolicy
 	OS             string
+}
+
+type ApprovalPolicy struct {
+	QuarantineByDefault bool
+	ApprovedSkills      map[string]struct{}
 }
 
 type SkillInstallSpec struct {
@@ -94,6 +100,14 @@ type SkillRuntimeMeta struct {
 	Nix        *NixPluginSpec     `json:"nix"`
 }
 
+type SkillPermissions struct {
+	Shell        bool     `json:"shell" yaml:"shell"`
+	Network      bool     `json:"network" yaml:"network"`
+	Write        bool     `json:"write" yaml:"write"`
+	AllowedPaths []string `json:"paths" yaml:"paths"`
+	AllowedHosts []string `json:"hosts" yaml:"hosts"`
+}
+
 type SkillMeta struct {
 	Name        string
 	Description string
@@ -114,15 +128,18 @@ type SkillMeta struct {
 	CommandTool            string
 	CommandArgMode         string
 
-	Metadata    SkillRuntimeMeta
-	Key         string
-	Eligible    bool
-	Disabled    bool
-	Hidden      bool
-	Missing     []string
-	Unsupported []string
-	ParseError  string
-	RuntimeEnv  map[string]string
+	Metadata        SkillRuntimeMeta
+	Permissions     SkillPermissions
+	PermissionState string
+	PermissionNotes []string
+	Key             string
+	Eligible        bool
+	Disabled        bool
+	Hidden          bool
+	Missing         []string
+	Unsupported     []string
+	ParseError      string
+	RuntimeEnv      map[string]string
 
 	sourcePriority int
 	rootOrder      int
@@ -134,21 +151,23 @@ type Inventory struct {
 }
 
 type skillManifest struct {
-	Summary     string       `json:"summary"`
-	Entrypoints []SkillEntry `json:"entrypoints"`
+	Summary     string           `json:"summary"`
+	Entrypoints []SkillEntry     `json:"entrypoints"`
+	Permissions SkillPermissions `json:"permissions"`
 }
 
 type skillFrontMatter struct {
-	Name                   string         `yaml:"name"`
-	Description            string         `yaml:"description"`
-	Summary                string         `yaml:"summary"`
-	Homepage               string         `yaml:"homepage"`
-	UserInvocable          *bool          `yaml:"user-invocable"`
-	DisableModelInvocation bool           `yaml:"disable-model-invocation"`
-	CommandDispatch        string         `yaml:"command-dispatch"`
-	CommandTool            string         `yaml:"command-tool"`
-	CommandArgMode         string         `yaml:"command-arg-mode"`
-	Metadata               map[string]any `yaml:"metadata"`
+	Name                   string           `yaml:"name"`
+	Description            string           `yaml:"description"`
+	Summary                string           `yaml:"summary"`
+	Homepage               string           `yaml:"homepage"`
+	UserInvocable          *bool            `yaml:"user-invocable"`
+	DisableModelInvocation bool             `yaml:"disable-model-invocation"`
+	CommandDispatch        string           `yaml:"command-dispatch"`
+	CommandTool            string           `yaml:"command-tool"`
+	CommandArgMode         string           `yaml:"command-arg-mode"`
+	Permissions            SkillPermissions `yaml:"permissions"`
+	Metadata               map[string]any   `yaml:"metadata"`
 }
 
 func defaultPriority(source Source) int {
@@ -321,12 +340,14 @@ func loadSkill(dir, path string, root Root, order int, opts LoadOptions) SkillMe
 	if err != nil {
 		meta.ParseError = err.Error()
 		meta.Hidden = true
+		applyApprovalPolicy(&meta, opts.ApprovalPolicy)
 		return meta
 	}
 	fm, rawTop, err := parseFrontMatter(body)
 	if err != nil {
 		meta.ParseError = err.Error()
 		meta.Hidden = true
+		applyApprovalPolicy(&meta, opts.ApprovalPolicy)
 		return meta
 	}
 	if strings.TrimSpace(fm.Name) != "" {
@@ -345,9 +366,17 @@ func loadSkill(dir, path string, root Root, order int, opts LoadOptions) SkillMe
 	if strings.TrimSpace(fm.CommandArgMode) != "" {
 		meta.CommandArgMode = strings.TrimSpace(fm.CommandArgMode)
 	}
+	meta.Permissions = normalizeSkillPermissions(fm.Permissions)
 
-	if manifest, ok := loadManifest(dir); ok {
+	manifest, err := loadManifest(dir)
+	if err != nil {
+		meta.ParseError = err.Error()
+		meta.Hidden = true
+	} else if len(manifest.Entrypoints) > 0 || manifest.Permissions.Requested() || strings.TrimSpace(manifest.Summary) != "" {
 		meta.Entrypoints = manifest.Entrypoints
+		if requested := normalizeSkillPermissions(manifest.Permissions); requested.Requested() {
+			meta.Permissions = requested
+		}
 		if strings.TrimSpace(manifest.Summary) != "" {
 			meta.Summary = strings.TrimSpace(manifest.Summary)
 		}
@@ -370,19 +399,100 @@ func loadSkill(dir, path string, root Root, order int, opts LoadOptions) SkillMe
 	entry := entryConfigForSkill(opts.Entries, meta)
 	meta.RuntimeEnv = buildRuntimeEnv(meta, entry, opts.Env)
 	applyEligibility(&meta, rawTop, body, entry, opts)
+	applyApprovalPolicy(&meta, opts.ApprovalPolicy)
 	return meta
 }
 
-func loadManifest(dir string) (skillManifest, bool) {
+func normalizeSkillPermissions(raw SkillPermissions) SkillPermissions {
+	raw.AllowedPaths = compactStrings(raw.AllowedPaths)
+	raw.AllowedHosts = compactStrings(raw.AllowedHosts)
+	return raw
+}
+
+func (p SkillPermissions) Requested() bool {
+	return p.Shell || p.Network || p.Write || len(p.AllowedPaths) > 0 || len(p.AllowedHosts) > 0
+}
+
+func (p SkillPermissions) Summary() string {
+	parts := make([]string, 0, 5)
+	if p.Shell {
+		parts = append(parts, "shell")
+	}
+	if p.Network {
+		parts = append(parts, "network")
+	}
+	if p.Write {
+		parts = append(parts, "write")
+	}
+	if len(p.AllowedPaths) > 0 {
+		parts = append(parts, "paths="+strings.Join(p.AllowedPaths, ","))
+	}
+	if len(p.AllowedHosts) > 0 {
+		parts = append(parts, "hosts="+strings.Join(p.AllowedHosts, ","))
+	}
+	if len(parts) == 0 {
+		return "(none declared)"
+	}
+	return strings.Join(parts, "; ")
+}
+
+func applyApprovalPolicy(meta *SkillMeta, policy ApprovalPolicy) {
+	if meta == nil {
+		return
+	}
+	if meta.ParseError != "" {
+		meta.PermissionState = "blocked"
+		meta.PermissionNotes = append(meta.PermissionNotes, "metadata parse failed")
+		return
+	}
+	if skillApproved(meta, policy.ApprovedSkills) {
+		meta.PermissionState = "approved"
+		meta.PermissionNotes = append(meta.PermissionNotes, "approved in config")
+		return
+	}
+	if skillNeedsApproval(meta) {
+		meta.PermissionState = "quarantined"
+		meta.PermissionNotes = append(meta.PermissionNotes, "operator approval required before script execution")
+		return
+	}
+	meta.PermissionState = "approved"
+}
+
+func skillNeedsApproval(meta *SkillMeta) bool {
+	if meta == nil {
+		return false
+	}
+	if meta.Permissions.Requested() || len(meta.Entrypoints) > 0 {
+		return true
+	}
+	return skillHasRunnableContent(meta.Dir)
+}
+
+func skillApproved(meta *SkillMeta, approved map[string]struct{}) bool {
+	if meta == nil || len(approved) == 0 {
+		return false
+	}
+	for _, key := range []string{meta.Name, meta.Key, strings.ToLower(meta.Name), strings.ToLower(meta.Key)} {
+		if _, ok := approved[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func loadManifest(dir string) (skillManifest, error) {
 	data, err := os.ReadFile(filepath.Join(dir, "skill.json"))
 	if err != nil {
-		return skillManifest{}, false
+		if os.IsNotExist(err) {
+			return skillManifest{}, nil
+		}
+		return skillManifest{}, err
 	}
 	var m skillManifest
 	if err := json.Unmarshal(data, &m); err != nil {
-		return skillManifest{}, false
+		return skillManifest{}, fmt.Errorf("invalid skill manifest: %w", err)
 	}
-	return m, true
+	return m, nil
 }
 
 func parseFrontMatter(content string) (skillFrontMatter, map[string]any, error) {
@@ -827,6 +937,63 @@ func filteredRuntimeEnv(env map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+func compactStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		key := strings.ToLower(value)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
+func skillHasRunnableContent(dir string) bool {
+	if strings.TrimSpace(dir) == "" {
+		return false
+	}
+	found := false
+	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || found {
+			return fs.SkipAll
+		}
+		if path == dir {
+			return nil
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		name := strings.ToLower(strings.TrimSpace(d.Name()))
+		if name == "skill.md" || name == "skill.json" {
+			return nil
+		}
+		info, infoErr := d.Info()
+		if infoErr != nil || !info.Mode().IsRegular() {
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(name))
+		if info.Mode()&0o111 != 0 || ext == ".sh" || ext == ".py" {
+			found = true
+			return fs.SkipAll
+		}
+		return nil
+	})
+	return found
 }
 
 func containsFold(values []string, target string) bool {

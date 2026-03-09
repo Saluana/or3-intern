@@ -10,6 +10,7 @@ import (
 
 	"or3-intern/internal/bus"
 	"or3-intern/internal/config"
+	"or3-intern/internal/triggers"
 )
 
 func TestServiceStartStopDisabledNoop(t *testing.T) {
@@ -51,6 +52,10 @@ func TestServiceProcessTickPublishesHeartbeatEvent(t *testing.T) {
 		}
 		if ev.Meta[MetaKeyHeartbeat] != true {
 			t.Fatalf("expected heartbeat meta flag, got %#v", ev.Meta)
+		}
+		structured, ok := ev.Meta[triggers.MetaKeyStructuredEvent].(map[string]any)
+		if !ok || structured["source"] != "heartbeat" {
+			t.Fatalf("expected structured heartbeat metadata, got %#v", ev.Meta)
 		}
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("expected heartbeat event to be published")

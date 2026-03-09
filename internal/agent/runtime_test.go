@@ -792,6 +792,85 @@ func TestRuntime_Handle_ArtifactSave(t *testing.T) {
 	}
 }
 
+func TestRuntime_GuardToolExecution_ProfileDeniesPrivilegedTool(t *testing.T) {
+	rt := &Runtime{}
+	ctx := tools.ContextWithActiveProfile(context.Background(), tools.ActiveProfile{
+		Name:          "safe-only",
+		MaxCapability: tools.CapabilitySafe,
+		AllowedTools:  map[string]struct{}{"read_file": {}},
+	})
+	err := rt.guardToolExecution(ctx, &privilegedEchoTool{}, tools.CapabilityPrivileged, map[string]any{})
+	if err == nil || !strings.Contains(err.Error(), "profile capability") {
+		t.Fatalf("expected profile denial, got %v", err)
+	}
+}
+
+func TestRuntime_GuardToolExecution_ProfileDeniesSubagents(t *testing.T) {
+	rt := &Runtime{}
+	ctx := tools.ContextWithActiveProfile(context.Background(), tools.ActiveProfile{
+		Name:           "no-subagents",
+		MaxCapability:  tools.CapabilityGuarded,
+		AllowedTools:   map[string]struct{}{"spawn_subagent": {}},
+		AllowSubagents: false,
+	})
+	err := rt.guardToolExecution(ctx, &tools.SpawnSubagent{}, tools.CapabilityGuarded, map[string]any{"task": "background job"})
+	if err == nil || !strings.Contains(err.Error(), "subagents denied") {
+		t.Fatalf("expected subagent denial, got %v", err)
+	}
+}
+
+func TestRuntime_GuardToolExecution_ProfileWithEmptyHostsDeniesWebFetch(t *testing.T) {
+	rt := &Runtime{}
+	ctx := tools.ContextWithActiveProfile(context.Background(), tools.ActiveProfile{
+		Name:          "no-network",
+		MaxCapability: tools.CapabilityGuarded,
+		AllowedTools:  map[string]struct{}{"web_fetch": {}},
+	})
+	err := rt.guardToolExecution(ctx, &tools.WebFetch{}, tools.CapabilityGuarded, map[string]any{"url": "https://example.com"})
+	if err == nil || !strings.Contains(err.Error(), "host denied by policy") {
+		t.Fatalf("expected host denial, got %v", err)
+	}
+}
+
+func TestRuntime_GuardToolExecution_ProfileWithEmptyHostsDeniesWebSearch(t *testing.T) {
+	rt := &Runtime{}
+	ctx := tools.ContextWithActiveProfile(context.Background(), tools.ActiveProfile{
+		Name:          "no-network",
+		MaxCapability: tools.CapabilitySafe,
+		AllowedTools:  map[string]struct{}{"web_search": {}},
+	})
+	err := rt.guardToolExecution(ctx, &tools.WebSearch{}, tools.CapabilitySafe, map[string]any{"query": "hello"})
+	if err == nil || !strings.Contains(err.Error(), "host denied by policy") {
+		t.Fatalf("expected host denial, got %v", err)
+	}
+}
+
+func TestRuntime_GuardToolExecution_ProfileWithEmptyWritablePathsDeniesWriteFile(t *testing.T) {
+	rt := &Runtime{}
+	ctx := tools.ContextWithActiveProfile(context.Background(), tools.ActiveProfile{
+		Name:          "read-only",
+		MaxCapability: tools.CapabilityGuarded,
+		AllowedTools:  map[string]struct{}{"write_file": {}},
+	})
+	err := rt.guardToolExecution(ctx, &tools.WriteFile{}, tools.CapabilityGuarded, map[string]any{"path": "/tmp/out.txt"})
+	if err == nil || !strings.Contains(err.Error(), "path denied by profile") {
+		t.Fatalf("expected path denial, got %v", err)
+	}
+}
+
+func TestRuntime_GuardToolExecution_ProfileWithEmptyWritablePathsDeniesExecCWD(t *testing.T) {
+	rt := &Runtime{}
+	ctx := tools.ContextWithActiveProfile(context.Background(), tools.ActiveProfile{
+		Name:          "read-only",
+		MaxCapability: tools.CapabilityPrivileged,
+		AllowedTools:  map[string]struct{}{"exec": {}},
+	})
+	err := rt.guardToolExecution(ctx, &tools.ExecTool{}, tools.CapabilityPrivileged, map[string]any{"cwd": "/tmp"})
+	if err == nil || !strings.Contains(err.Error(), "path denied by profile") {
+		t.Fatalf("expected path denial, got %v", err)
+	}
+}
+
 func TestRuntime_Handle_GuardedToolDeniedByDefault(t *testing.T) {
 	d := openRuntimeTestDB(t)
 	callCount := 0

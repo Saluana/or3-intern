@@ -177,6 +177,12 @@ func TestScanWithOptions_ParseErrorDoesNotBreakInventory(t *testing.T) {
 	if broken.ParseError == "" {
 		t.Fatal("expected parse error")
 	}
+	if broken.PermissionState != "blocked" {
+		t.Fatalf("expected broken skill to be blocked, got %#v", broken)
+	}
+	if len(broken.PermissionNotes) == 0 || !strings.Contains(strings.Join(broken.PermissionNotes, " | "), "metadata parse failed") {
+		t.Fatalf("expected blocked permission note, got %#v", broken.PermissionNotes)
+	}
 	if healthy, ok := inv.Get("healthy"); !ok || healthy.ParseError != "" {
 		t.Fatalf("expected unrelated skill to load, got %#v", healthy)
 	}

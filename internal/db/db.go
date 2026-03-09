@@ -185,6 +185,25 @@ func (d *DB) migrate(ctx context.Context) error {
 		`INSERT INTO memory_vec_meta(id, dims, updated_at)
 			VALUES(1, 0, 0)
 			ON CONFLICT(id) DO NOTHING;`,
+		`CREATE TABLE IF NOT EXISTS secrets(
+			name TEXT PRIMARY KEY,
+			ciphertext BLOB NOT NULL,
+			nonce BLOB NOT NULL,
+			version INTEGER NOT NULL DEFAULT 1,
+			key_version TEXT NOT NULL DEFAULT 'v1',
+			updated_at INTEGER NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS audit_events(
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			event_type TEXT NOT NULL,
+			session_key TEXT NOT NULL DEFAULT '',
+			actor TEXT NOT NULL DEFAULT '',
+			payload_json TEXT NOT NULL DEFAULT '{}',
+			prev_hash BLOB NOT NULL,
+			record_hash BLOB NOT NULL,
+			created_at INTEGER NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS audit_events_created_at ON audit_events(created_at);`,
 	}
 	for _, s := range stmts {
 		if _, err := d.SQL.ExecContext(ctx, s); err != nil {

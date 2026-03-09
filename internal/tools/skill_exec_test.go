@@ -26,12 +26,12 @@ func makeExecutableSkillInventory(t *testing.T) *skills.Inventory {
 	if err := os.WriteFile(filepath.Join(dir, "skill.json"), []byte(`{"entrypoints":[{"name":"hello","command":["./tool.sh","entry"]}]}`), 0o644); err != nil {
 		t.Fatalf("manifest write: %v", err)
 	}
-	inv := skills.ScanWithOptions(skills.LoadOptions{Roots: []skills.Root{{Path: root, Source: skills.SourceWorkspace}}})
+	inv := skills.ScanWithOptions(skills.LoadOptions{Roots: []skills.Root{{Path: root, Source: skills.SourceWorkspace}}, ApprovalPolicy: skills.ApprovalPolicy{QuarantineByDefault: true, ApprovedSkills: map[string]struct{}{"runner": {}}}})
 	return &inv
 }
 
 func TestRunSkillScript_PathExecution(t *testing.T) {
-	tool := &RunSkillScript{Inventory: makeExecutableSkillInventory(t)}
+	tool := &RunSkillScript{Inventory: makeExecutableSkillInventory(t), Enabled: true}
 	out, err := tool.Execute(context.Background(), map[string]any{
 		"skill": "runner",
 		"path":  "tool.sh",
@@ -46,7 +46,7 @@ func TestRunSkillScript_PathExecution(t *testing.T) {
 }
 
 func TestRunSkillScript_EntrypointExecution(t *testing.T) {
-	tool := &RunSkillScript{Inventory: makeExecutableSkillInventory(t)}
+	tool := &RunSkillScript{Inventory: makeExecutableSkillInventory(t), Enabled: true}
 	out, err := tool.Execute(context.Background(), map[string]any{
 		"skill":      "runner",
 		"entrypoint": "hello",
@@ -60,7 +60,7 @@ func TestRunSkillScript_EntrypointExecution(t *testing.T) {
 }
 
 func TestRunSkillScript_EntrypointExecution_AppendsArgs(t *testing.T) {
-	tool := &RunSkillScript{Inventory: makeExecutableSkillInventory(t)}
+	tool := &RunSkillScript{Inventory: makeExecutableSkillInventory(t), Enabled: true}
 	out, err := tool.Execute(context.Background(), map[string]any{
 		"skill":      "runner",
 		"entrypoint": "hello",
@@ -75,11 +75,41 @@ func TestRunSkillScript_EntrypointExecution_AppendsArgs(t *testing.T) {
 }
 
 func TestRunSkillScript_RejectsPathEscape(t *testing.T) {
-	tool := &RunSkillScript{Inventory: makeExecutableSkillInventory(t)}
+	tool := &RunSkillScript{Inventory: makeExecutableSkillInventory(t), Enabled: true}
 	if _, err := tool.Execute(context.Background(), map[string]any{
 		"skill": "runner",
 		"path":  "../escape.sh",
 	}); err == nil {
 		t.Fatal("expected path escape to fail")
+	}
+}
+
+func TestRunSkillScript_RejectsQuarantinedSkill(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "runner")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("# Runner\n"), 0o644); err != nil {
+		t.Fatalf("skill write: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "tool.sh"), []byte("#!/bin/sh\necho hi\n"), 0o755); err != nil {
+		t.Fatalf("script write: %v", err)
+	}
+	inv := skills.ScanWithOptions(skills.LoadOptions{Roots: []skills.Root{{Path: root, Source: skills.SourceWorkspace}}, ApprovalPolicy: skills.ApprovalPolicy{QuarantineByDefault: true}})
+	tool := &RunSkillScript{Inventory: &inv, Enabled: true}
+	if _, err := tool.Execute(context.Background(), map[string]any{"skill": "runner", "path": "tool.sh"}); err == nil || !strings.Contains(err.Error(), "requires approval") {
+		t.Fatalf("expected approval error, got %v", err)
+	}
+}
+
+func TestRunSkillScript_BubblewrapEnabled(t *testing.T) {
+	tool := &RunSkillScript{Inventory: makeExecutableSkillInventory(t), Enabled: true, Sandbox: BubblewrapConfig{Enabled: true, BubblewrapPath: writeFakeBubblewrap(t)}}
+	out, err := tool.Execute(context.Background(), map[string]any{"skill": "runner", "entrypoint": "hello"})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !strings.Contains(out, "script:entry") {
+		t.Fatalf("unexpected output: %q", out)
 	}
 }

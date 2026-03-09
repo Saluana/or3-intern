@@ -129,6 +129,39 @@ func TestWebhookPublishesToBus(t *testing.T) {
 		if fmt.Sprint(ev.Meta["x-request-id"]) != "req-123" {
 			t.Errorf("expected x-request-id 'req-123', got %q", ev.Meta["x-request-id"])
 		}
+		structured, ok := ev.Meta[MetaKeyStructuredEvent].(map[string]any)
+		if !ok || structured["source"] != "webhook" {
+			t.Fatalf("expected structured webhook metadata, got %#v", ev.Meta)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for bus event")
+	}
+}
+
+func TestWebhookStructuredPreviewIsBounded(t *testing.T) {
+	srv, b := newTestWebhookServer(t, "s3cr3t")
+	payload := strings.Repeat("a", structuredBodyPreviewMaxChars+128)
+	rw := doRequest(t, srv, payload, map[string]string{"X-Webhook-Secret": "s3cr3t"})
+	if rw.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rw.Code)
+	}
+	select {
+	case ev := <-b.Channel():
+		structured, ok := ev.Meta[MetaKeyStructuredEvent].(map[string]any)
+		if !ok {
+			t.Fatalf("expected structured webhook metadata, got %#v", ev.Meta)
+		}
+		details, ok := structured["details"].(map[string]any)
+		if !ok {
+			t.Fatalf("expected structured details, got %#v", structured)
+		}
+		preview := fmt.Sprint(details["body_preview"])
+		if len(preview) <= structuredBodyPreviewMaxChars || !strings.Contains(preview, "[truncated]") {
+			t.Fatalf("expected truncated preview, got %q", preview)
+		}
+		if got := int(details["body_bytes"].(int)); got != len(payload) {
+			t.Fatalf("expected body_bytes=%d, got %d", len(payload), got)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for bus event")
 	}

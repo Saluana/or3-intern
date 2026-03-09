@@ -30,6 +30,7 @@ import (
 	"or3-intern/internal/memory"
 	"or3-intern/internal/providers"
 	"or3-intern/internal/scope"
+	"or3-intern/internal/security"
 	"or3-intern/internal/skills"
 	"or3-intern/internal/tools"
 	"or3-intern/internal/triggers"
@@ -37,7 +38,7 @@ import (
 
 const (
 	schedulerMaxConsolidationPasses = 3
-	gracefulShutdownTimeout        = 5 * time.Second
+	gracefulShutdownTimeout         = 5 * time.Second
 )
 
 func main() {
@@ -62,6 +63,13 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "config error:", err)
 		os.Exit(1)
+	}
+	if cmd == "doctor" {
+		if err := runDoctorCommand(cfg, args[1:], os.Stdout, os.Stderr); err != nil {
+			fmt.Fprintln(os.Stderr, "doctor error:", err)
+			os.Exit(1)
+		}
+		return
 	}
 	if cfg.Tools.RestrictToWorkspace && strings.TrimSpace(cfg.WorkspaceDir) == "" {
 		if cwd, err := os.Getwd(); err == nil {
@@ -105,8 +113,36 @@ func main() {
 
 	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
+	cfg, secretManager, auditLogger, err := setupSecurity(ctx, cfg, d)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "security error:", err)
+		os.Exit(1)
+	}
+	if cmd == "secrets" {
+		if secretManager == nil && cfg.Security.SecretStore.Enabled {
+			key, keyErr := security.LoadOrCreateKey(cfg.Security.SecretStore.KeyFile)
+			if keyErr != nil {
+				fmt.Fprintln(os.Stderr, "secret key error:", keyErr)
+				os.Exit(1)
+			}
+			secretManager = &security.SecretManager{DB: d, Key: key}
+		}
+		if err := runSecretsCommand(ctx, secretManager, auditLogger, args[1:], os.Stdout, os.Stderr); err != nil {
+			fmt.Fprintln(os.Stderr, "secrets error:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if cmd == "audit" {
+		if err := runAuditCommand(ctx, auditLogger, args[1:], os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "audit error:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	timeout := time.Duration(cfg.Provider.TimeoutSeconds) * time.Second
 	prov := providers.New(cfg.Provider.APIBase, cfg.Provider.APIKey, timeout)
+	prov.HostPolicy = buildHostPolicy(cfg)
 	art := &artifacts.Store{Dir: cfg.ArtifactsDir, DB: d}
 
 	b := bus.New(256)
@@ -122,6 +158,7 @@ func main() {
 	if len(cfg.Tools.MCPServers) > 0 {
 		mcpManager = mcp.NewManager(cfg.Tools.MCPServers)
 		mcpManager.SetLogger(log.Printf)
+		mcpManager.SetHostPolicy(buildHostPolicy(cfg))
 		if err := mcpManager.Connect(ctx); err != nil {
 			log.Printf("mcp setup failed: %v", err)
 		}
@@ -223,6 +260,8 @@ func main() {
 		LinkDirectMessages: cfg.Session.DirectMessagesShareDefault,
 		IdentityScopeMap:   buildIdentityScopeMap(cfg),
 		Hardening:          cfg.Hardening,
+		AccessProfiles:     cfg.Security.Profiles,
+		Audit:              auditLogger,
 	}
 
 	// cron service + tool
@@ -352,7 +391,24 @@ func main() {
 	case "version":
 		fmt.Println("or3-intern v1")
 	case "skills":
-		if err := runSkillsCommand(ctx, cfg, builtin, args[1:], os.Stdout, os.Stderr); err != nil {
+		deps := skillsCommandDeps{
+			Client: newClawHubClient(cfg),
+			LoadToolNames: func(ctx context.Context, cfg config.Config) map[string]struct{} {
+				return loadAvailableToolNamesWithManager(ctx, cfg, nil)
+			},
+			LoadInventory: func(toolNames map[string]struct{}) skills.Inventory {
+				return buildSkillsInventory(cfg, builtin, toolNames)
+			},
+			Audit: func(ctx context.Context, eventType string, payload any) error {
+				if auditLogger == nil {
+					return nil
+				}
+				return auditLogger.Record(ctx, eventType, "", "cli", payload)
+			},
+			Stdout: os.Stdout,
+			Stderr: os.Stderr,
+		}
+		if err := runSkillsCommandWithDeps(ctx, cfg, args[1:], deps); err != nil {
 			fmt.Fprintln(os.Stderr, "skills error:", err)
 			os.Exit(1)
 		}
@@ -486,13 +542,15 @@ func buildBackgroundToolRegistry(cfg config.Config, d *db.DB, prov *providers.Cl
 func buildToolRegistryWithOptions(cfg config.Config, d *db.DB, prov *providers.Client, channelManager *rootchannels.Manager, inv *skills.Inventory, cronSvc *cron.Service, spawnManager tools.SpawnEnqueuer, mcpRegistrar mcpToolRegistrar, includeSendMessage bool) *tools.Registry {
 	reg := tools.NewRegistry()
 	fileRoot := allowedRoot(cfg)
-	reg.Register(&tools.ExecTool{Timeout: time.Duration(cfg.Tools.ExecTimeoutSeconds) * time.Second, RestrictDir: fileRoot, PathAppend: cfg.Tools.PathAppend, AllowedPrograms: append([]string{}, cfg.Hardening.ExecAllowedPrograms...), ChildEnvAllowlist: append([]string{}, cfg.Hardening.ChildEnvAllowlist...)})
+	sandboxCfg := tools.BubblewrapConfig{Enabled: cfg.Hardening.Sandbox.Enabled, BubblewrapPath: cfg.Hardening.Sandbox.BubblewrapPath, AllowNetwork: cfg.Hardening.Sandbox.AllowNetwork, WritablePaths: append([]string{}, cfg.Hardening.Sandbox.WritablePaths...)}
+	hostPolicy := buildHostPolicy(cfg)
+	reg.Register(&tools.ExecTool{Timeout: time.Duration(cfg.Tools.ExecTimeoutSeconds) * time.Second, RestrictDir: fileRoot, PathAppend: cfg.Tools.PathAppend, AllowedPrograms: append([]string{}, cfg.Hardening.ExecAllowedPrograms...), ChildEnvAllowlist: append([]string{}, cfg.Hardening.ChildEnvAllowlist...), Sandbox: sandboxCfg})
 	reg.Register(&tools.ReadFile{FileTool: tools.FileTool{Root: fileRoot}})
 	reg.Register(&tools.WriteFile{FileTool: tools.FileTool{Root: fileRoot}})
 	reg.Register(&tools.EditFile{FileTool: tools.FileTool{Root: fileRoot}})
 	reg.Register(&tools.ListDir{FileTool: tools.FileTool{Root: fileRoot}})
-	reg.Register(&tools.WebFetch{})
-	reg.Register(&tools.WebSearch{APIKey: cfg.Tools.BraveAPIKey})
+	reg.Register(&tools.WebFetch{HostPolicy: hostPolicy})
+	reg.Register(&tools.WebSearch{APIKey: cfg.Tools.BraveAPIKey, HostPolicy: hostPolicy})
 	reg.Register(&tools.MemorySetPinned{DB: d})
 	reg.Register(&tools.MemoryAddNote{DB: d, Provider: prov, EmbedModel: cfg.Provider.EmbedModel})
 	reg.Register(&tools.MemorySearch{DB: d, Provider: prov, EmbedModel: cfg.Provider.EmbedModel, VectorK: cfg.VectorK, FTSK: cfg.FTSK, TopK: cfg.MemoryRetrieve, VectorScanLimit: cfg.VectorScanLimit})
@@ -511,7 +569,7 @@ func buildToolRegistryWithOptions(cfg config.Config, d *db.DB, prov *providers.C
 	}
 	if inv != nil {
 		reg.Register(&tools.ReadSkill{Inventory: inv})
-		reg.Register(&tools.RunSkillScript{Inventory: inv, Timeout: time.Duration(cfg.Skills.MaxRunSeconds) * time.Second, ChildEnvAllowlist: append([]string{}, cfg.Hardening.ChildEnvAllowlist...)})
+		reg.Register(&tools.RunSkillScript{Inventory: inv, Enabled: cfg.Skills.EnableExec, Timeout: time.Duration(cfg.Skills.MaxRunSeconds) * time.Second, ChildEnvAllowlist: append([]string{}, cfg.Hardening.ChildEnvAllowlist...), Sandbox: sandboxCfg})
 	}
 	if cronSvc != nil {
 		reg.Register(&tools.CronTool{Svc: cronSvc})

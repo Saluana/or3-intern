@@ -20,6 +20,8 @@ type SendMessage struct {
 	MaxMediaBytes  int
 }
 
+func (t *SendMessage) Capability() CapabilityLevel { return CapabilityGuarded }
+
 func (t *SendMessage) Name() string { return "send_message" }
 func (t *SendMessage) Description() string {
 	return "Send a message via a configured channel (for reminders/cron or proactive messages)."

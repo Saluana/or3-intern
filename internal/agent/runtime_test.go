@@ -15,6 +15,7 @@ import (
 
 	"or3-intern/internal/artifacts"
 	"or3-intern/internal/bus"
+	"or3-intern/internal/config"
 	"or3-intern/internal/db"
 	"or3-intern/internal/heartbeat"
 	"or3-intern/internal/memory"
@@ -648,6 +649,15 @@ func (e *echoTool) Schema() map[string]any {
 	return e.SchemaFor(e.Name(), e.Description(), e.Parameters())
 }
 
+type guardedEchoTool struct{ echoTool }
+
+func (e *guardedEchoTool) Capability() tools.CapabilityLevel { return tools.CapabilityGuarded }
+
+type privilegedEchoTool struct{ echoTool }
+
+func (e *privilegedEchoTool) Name() string                      { return "privileged_echo_tool" }
+func (e *privilegedEchoTool) Capability() tools.CapabilityLevel { return tools.CapabilityPrivileged }
+
 type mcpEchoTool struct {
 	tools.Base
 	called  bool
@@ -779,6 +789,131 @@ func TestRuntime_Handle_ArtifactSave(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("Handle artifact: %v", err)
+	}
+}
+
+func TestRuntime_Handle_GuardedToolDeniedByDefault(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		var resp providers.ChatCompletionResponse
+		if callCount == 1 {
+			resp = providers.ChatCompletionResponse{Choices: []struct {
+				Message struct {
+					Role      string               `json:"role"`
+					Content   any                  `json:"content"`
+					ToolCalls []providers.ToolCall `json:"tool_calls"`
+				} `json:"message"`
+			}{{Message: struct {
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			}{Role: "assistant", ToolCalls: []providers.ToolCall{{ID: "tc1", Type: "function", Function: struct {
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			}{Name: "echo_tool", Arguments: `{}`}}}}}}}
+		} else {
+			resp = providers.ChatCompletionResponse{Choices: []struct {
+				Message struct {
+					Role      string               `json:"role"`
+					Content   any                  `json:"content"`
+					ToolCalls []providers.ToolCall `json:"tool_calls"`
+				} `json:"message"`
+			}{{Message: struct {
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			}{Role: "assistant", Content: "done"}}}}
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+	provider := providers.New(srv.URL, "key", 10*time.Second)
+	provider.HTTP = srv.Client()
+	reg := tools.NewRegistry()
+	reg.Register(&guardedEchoTool{})
+	rt := &Runtime{DB: d, Provider: provider, Model: "gpt-4", Tools: reg, Builder: &Builder{DB: d, HistoryMax: 10}, MaxToolLoops: 4, Deliver: &mockDeliverer{}, Hardening: config.Default().Hardening}
+	if err := rt.Handle(context.Background(), bus.Event{Type: bus.EventUserMessage, SessionKey: "sess-guarded", Message: "try guarded"}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	msgs, err := d.GetLastMessages(context.Background(), "sess-guarded", 10)
+	if err != nil {
+		t.Fatalf("GetLastMessages: %v", err)
+	}
+	found := false
+	for _, msg := range msgs {
+		if msg.Role == "tool" && strings.Contains(msg.Content, "tool requires guarded access") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected guarded access denial in tool history, got %#v", msgs)
+	}
+}
+
+func TestRuntime_Handle_ToolQuotaExceeded(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		var resp providers.ChatCompletionResponse
+		switch callCount {
+		case 1, 2:
+			resp = providers.ChatCompletionResponse{Choices: []struct {
+				Message struct {
+					Role      string               `json:"role"`
+					Content   any                  `json:"content"`
+					ToolCalls []providers.ToolCall `json:"tool_calls"`
+				} `json:"message"`
+			}{{Message: struct {
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			}{Role: "assistant", ToolCalls: []providers.ToolCall{{ID: fmt.Sprintf("tc%d", callCount), Type: "function", Function: struct {
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			}{Name: "echo_tool", Arguments: `{}`}}}}}}}
+		default:
+			resp = providers.ChatCompletionResponse{Choices: []struct {
+				Message struct {
+					Role      string               `json:"role"`
+					Content   any                  `json:"content"`
+					ToolCalls []providers.ToolCall `json:"tool_calls"`
+				} `json:"message"`
+			}{{Message: struct {
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			}{Role: "assistant", Content: "done"}}}}
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+	provider := providers.New(srv.URL, "key", 10*time.Second)
+	provider.HTTP = srv.Client()
+	reg := tools.NewRegistry()
+	reg.Register(&echoTool{})
+	hardening := config.Default().Hardening
+	hardening.Quotas.MaxToolCalls = 1
+	rt := &Runtime{DB: d, Provider: provider, Model: "gpt-4", Tools: reg, Builder: &Builder{DB: d, HistoryMax: 10}, MaxToolLoops: 4, Deliver: &mockDeliverer{}, Hardening: hardening}
+	if err := rt.Handle(context.Background(), bus.Event{Type: bus.EventUserMessage, SessionKey: "sess-quota", Message: "hit quota"}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	msgs, err := d.GetLastMessages(context.Background(), "sess-quota", 20)
+	if err != nil {
+		t.Fatalf("GetLastMessages: %v", err)
+	}
+	found := false
+	for _, msg := range msgs {
+		if msg.Role == "tool" && strings.Contains(msg.Content, "quota exceeded") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected quota denial in tool history, got %#v", msgs)
 	}
 }
 
@@ -946,6 +1081,118 @@ func TestRuntime_Handle_HeartbeatSendMessageToolStillWorks(t *testing.T) {
 	}
 	if len(deliver.messages) != 0 {
 		t.Fatalf("expected no default delivery for heartbeat final response, got %#v", deliver.messages)
+	}
+}
+
+func TestRuntime_Handle_UserMessageSendMessageDeniedByDefault(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		var resp providers.ChatCompletionResponse
+		if callCount == 1 {
+			resp = providers.ChatCompletionResponse{
+				Choices: []struct {
+					Message struct {
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					} `json:"message"`
+				}{{
+					Message: struct {
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					}{
+						Role: "assistant",
+						ToolCalls: []providers.ToolCall{{
+							ID:   "tc-send",
+							Type: "function",
+							Function: struct {
+								Name      string `json:"name"`
+								Arguments string `json:"arguments"`
+							}{Name: "send_message", Arguments: `{"channel":"cli","to":"ops","text":"hello"}`},
+						}},
+					},
+				}},
+			}
+		} else {
+			resp = providers.ChatCompletionResponse{Choices: []struct {
+				Message struct {
+					Role      string               `json:"role"`
+					Content   any                  `json:"content"`
+					ToolCalls []providers.ToolCall `json:"tool_calls"`
+				} `json:"message"`
+			}{{Message: struct {
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			}{Role: "assistant", Content: "done"}}}}
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	provider := providers.New(srv.URL, "key", 10*time.Second)
+	provider.HTTP = srv.Client()
+
+	called := false
+	reg := tools.NewRegistry()
+	reg.Register(&tools.SendMessage{
+		Deliver: func(ctx context.Context, channel, to, text string, meta map[string]any) error {
+			called = true
+			return nil
+		},
+	})
+
+	rt := &Runtime{
+		DB:           d,
+		Provider:     provider,
+		Model:        "gpt-4",
+		Tools:        reg,
+		Builder:      &Builder{DB: d, HistoryMax: 10},
+		MaxToolLoops: 4,
+		Deliver:      &mockDeliverer{},
+		Hardening:    config.Default().Hardening,
+	}
+
+	if err := rt.Handle(context.Background(), bus.Event{Type: bus.EventUserMessage, SessionKey: "sess-send-blocked", Message: "notify ops"}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if called {
+		t.Fatal("expected send_message delivery to be blocked for user-triggered events")
+	}
+	msgs, err := d.GetLastMessages(context.Background(), "sess-send-blocked", 20)
+	if err != nil {
+		t.Fatalf("GetLastMessages: %v", err)
+	}
+	found := false
+	for _, msg := range msgs {
+		if msg.Role == "tool" && strings.Contains(msg.Content, "tool requires guarded access: send_message") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected guarded access denial in tool history, got %#v", msgs)
+	}
+}
+
+func TestRuntime_SessionQuotaStateEvictsOldestEntries(t *testing.T) {
+	rt := &Runtime{}
+	for i := 0; i < maxTrackedQuotaSessions+5; i++ {
+		state := rt.sessionQuotaState(fmt.Sprintf("sess-%04d", i))
+		if state == nil {
+			t.Fatal("expected quota state")
+		}
+	}
+	rt.quotaMu.Lock()
+	defer rt.quotaMu.Unlock()
+	if len(rt.quotas) > maxTrackedQuotaSessions {
+		t.Fatalf("expected quota map to be bounded, got %d entries", len(rt.quotas))
+	}
+	if _, ok := rt.quotas["sess-0000"]; ok {
+		t.Fatalf("expected oldest quota entry to be evicted")
 	}
 }
 

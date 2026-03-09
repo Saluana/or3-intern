@@ -89,6 +89,41 @@ func TestChannel_DeliverSendsMessage(t *testing.T) {
 	}
 }
 
+func TestChannel_FetchUpdatesPublishesIsolatedGroupMessageWhenEnabled(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok": true,
+			"result": []map[string]any{{
+				"update_id": 1,
+				"message": map[string]any{
+					"message_id": 99,
+					"text":       "hello group",
+					"chat":       map[string]any{"id": 123, "type": "group"},
+					"from":       map[string]any{"id": 456, "username": "alice"},
+				},
+			}},
+		})
+	}))
+	defer server.Close()
+	ch := &Channel{Config: config.TelegramChannelConfig{Token: "token", APIBase: server.URL, PollSeconds: 1, OpenAccess: true}, IsolatePeers: true}
+	b := bus.New(1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := ch.Start(ctx, b); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer ch.Stop(context.Background())
+	select {
+	case ev := <-b.Channel():
+		if ev.SessionKey != "telegram:123:456" {
+			t.Fatalf("expected isolated session key, got %#v", ev)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for telegram event")
+	}
+}
+
 func TestChannel_FetchUpdatesPublishesPhotoAttachment(t *testing.T) {
 	d := openTelegramTestDB(t)
 	store := &artifacts.Store{Dir: t.TempDir(), DB: d}

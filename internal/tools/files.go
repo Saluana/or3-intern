@@ -95,6 +95,7 @@ func (t *ReadFile) Execute(ctx context.Context, params map[string]any) (string, 
 }
 
 type WriteFile struct{ FileTool }
+func (t *WriteFile) Capability() CapabilityLevel { return CapabilityGuarded }
 func (t *WriteFile) Name() string { return "write_file" }
 func (t *WriteFile) Description() string { return "Write text to a file (overwrites)." }
 func (t *WriteFile) Parameters() map[string]any {
@@ -118,6 +119,7 @@ func (t *WriteFile) Execute(ctx context.Context, params map[string]any) (string,
 }
 
 type EditFile struct{ FileTool }
+func (t *EditFile) Capability() CapabilityLevel { return CapabilityGuarded }
 func (t *EditFile) Name() string { return "edit_file" }
 func (t *EditFile) Description() string {
 	return "Edit a text file by applying a list of find/replace operations."

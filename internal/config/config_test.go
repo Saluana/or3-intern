@@ -136,6 +136,87 @@ func TestDefault_Values(t *testing.T) {
 	if cfg.Heartbeat.SessionKey != DefaultHeartbeatSessionKey {
 		t.Fatalf("expected Heartbeat.SessionKey=%q, got %q", DefaultHeartbeatSessionKey, cfg.Heartbeat.SessionKey)
 	}
+	if cfg.Hardening.GuardedTools {
+		t.Error("expected guarded tools to be disabled by default")
+	}
+	if cfg.Hardening.PrivilegedTools {
+		t.Error("expected privileged tools to be disabled by default")
+	}
+	if !cfg.Hardening.IsolateChannelPeers {
+		t.Error("expected channel peer isolation to be enabled by default")
+	}
+	if !cfg.Hardening.Quotas.Enabled {
+		t.Error("expected quotas to be enabled by default")
+	}
+	if len(cfg.Hardening.ExecAllowedPrograms) == 0 {
+		t.Fatal("expected default exec allowlist")
+	}
+	if len(cfg.Hardening.ChildEnvAllowlist) == 0 {
+		t.Fatal("expected default child environment allowlist")
+	}
+}
+
+func TestLoad_HardeningDefaultsAndOverrides(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	cfg := Default()
+	cfg.Hardening.GuardedTools = true
+	cfg.Hardening.PrivilegedTools = true
+	cfg.Hardening.ExecAllowedPrograms = []string{"go", "git"}
+	cfg.Hardening.ChildEnvAllowlist = []string{"PATH"}
+	cfg.Hardening.Quotas = HardeningQuotaConfig{
+		Enabled:          true,
+		MaxToolCalls:     3,
+		MaxExecCalls:     1,
+		MaxWebCalls:      2,
+		MaxSubagentCalls: 1,
+	}
+
+	b, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !loaded.Hardening.GuardedTools || !loaded.Hardening.PrivilegedTools {
+		t.Fatalf("expected hardening overrides to survive, got %+v", loaded.Hardening)
+	}
+	if got := loaded.Hardening.ExecAllowedPrograms; len(got) != 2 || got[0] != "go" || got[1] != "git" {
+		t.Fatalf("unexpected exec allowlist: %#v", got)
+	}
+	if got := loaded.Hardening.ChildEnvAllowlist; len(got) != 1 || got[0] != "PATH" {
+		t.Fatalf("unexpected child env allowlist: %#v", got)
+	}
+	if loaded.Hardening.Quotas.MaxToolCalls != 3 || loaded.Hardening.Quotas.MaxExecCalls != 1 || loaded.Hardening.Quotas.MaxWebCalls != 2 || loaded.Hardening.Quotas.MaxSubagentCalls != 1 {
+		t.Fatalf("unexpected quota overrides: %+v", loaded.Hardening.Quotas)
+	}
+}
+
+func TestLoad_HardeningAllowsDisablingPeerIsolation(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	cfg := Default()
+	cfg.Hardening.IsolateChannelPeers = false
+
+	b, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.Hardening.IsolateChannelPeers {
+		t.Fatalf("expected peer isolation disable to persist, got %+v", loaded.Hardening)
+	}
 }
 
 func TestLoad_EnabledExternalChannelRequiresAllowlistOrOpenAccess(t *testing.T) {

@@ -22,6 +22,58 @@ func TestExecTool_BasicCommand(t *testing.T) {
 	}
 }
 
+func TestExecTool_ProgramArgs(t *testing.T) {
+	tool := &ExecTool{Timeout: 5 * time.Second}
+	out, err := tool.Execute(context.Background(), map[string]any{
+		"program": "echo",
+		"args":    []any{"hello", "argv"},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !strings.Contains(out, "hello argv") {
+		t.Fatalf("unexpected output: %q", out)
+	}
+}
+
+func TestExecTool_DisableShell(t *testing.T) {
+	tool := &ExecTool{Timeout: 5 * time.Second, DisableShell: true}
+	if _, err := tool.Execute(context.Background(), map[string]any{"command": "echo hello"}); err == nil {
+		t.Fatal("expected shell execution to be disabled")
+	}
+}
+
+func TestExecTool_AllowedPrograms(t *testing.T) {
+	tool := &ExecTool{Timeout: 5 * time.Second, AllowedPrograms: []string{"echo"}}
+	if _, err := tool.Execute(context.Background(), map[string]any{"program": "pwd"}); err == nil {
+		t.Fatal("expected program allowlist rejection")
+	}
+	out, err := tool.Execute(context.Background(), map[string]any{"program": "echo", "args": []any{"ok"}})
+	if err != nil {
+		t.Fatalf("Execute allowed program: %v", err)
+	}
+	if !strings.Contains(out, "ok") {
+		t.Fatalf("unexpected output: %q", out)
+	}
+}
+
+func TestExecTool_ChildEnvAllowlistScrubsInheritedEnv(t *testing.T) {
+	t.Setenv("INHERITED_SECRET", "top-secret")
+	dir := t.TempDir()
+	script := filepath.Join(dir, "printenv.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf %s \"${INHERITED_SECRET:-missing}\"\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	tool := &ExecTool{Timeout: 5 * time.Second, ChildEnvAllowlist: []string{"PATH"}}
+	out, err := tool.Execute(context.Background(), map[string]any{"program": script})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if strings.TrimSpace(out) != "missing" {
+		t.Fatalf("expected inherited secret to be scrubbed, got %q", out)
+	}
+}
+
 func TestExecTool_EmptyCommand(t *testing.T) {
 	tool := &ExecTool{Timeout: 5 * time.Second}
 	_, err := tool.Execute(context.Background(), map[string]any{

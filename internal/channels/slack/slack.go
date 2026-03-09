@@ -28,6 +28,7 @@ type Channel struct {
 	Dialer        *websocket.Dialer
 	Artifacts     *artifacts.Store
 	MaxMediaBytes int
+	IsolatePeers  bool
 
 	mu     sync.Mutex
 	conn   *websocket.Conn
@@ -136,6 +137,9 @@ func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
 		}
 		clean := strings.TrimSpace(strings.ReplaceAll(ev.Text, "<@"+c.botID+">", ""))
 		sessionKey := "slack:" + ev.Channel
+		if c.IsolatePeers {
+			sessionKey += ":" + ev.User
+		}
 		attachments, markers := c.captureFiles(ctx, sessionKey, ev.Files)
 		content := rootchannels.ComposeMessageText(clean, markers)
 		if content == "" {

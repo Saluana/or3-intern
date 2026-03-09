@@ -59,6 +59,8 @@ type RemoteTool struct {
 	session     session
 }
 
+func (t *RemoteTool) Capability() tools.CapabilityLevel { return tools.CapabilityGuarded }
+
 func NewManager(servers map[string]config.MCPServerConfig) *Manager {
 	cloned := make(map[string]config.MCPServerConfig, len(servers))
 	for name, server := range servers {
@@ -259,7 +261,7 @@ func buildTransport(cfg config.MCPServerConfig) (sdkmcp.Transport, error) {
 	switch cfg.Transport {
 	case "stdio":
 		cmd := exec.Command(cfg.Command, cfg.Args...)
-		cmd.Env = mergeEnv(os.Environ(), cfg.Env)
+		cmd.Env = tools.BuildChildEnv(os.Environ(), cfg.ChildEnvAllowlist, cfg.Env, "")
 		return &sdkmcp.CommandTransport{Command: cmd}, nil
 	case "sse":
 		return &sdkmcp.SSEClientTransport{

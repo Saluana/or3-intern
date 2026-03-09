@@ -58,6 +58,36 @@ func TestChannel_StartPublishesInboundMessage(t *testing.T) {
 	}
 }
 
+func TestChannel_StartPublishesIsolatedInboundMessageWhenEnabled(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		_ = conn.WriteJSON(map[string]any{"type": "message", "id": "m1", "chat": "group1", "from": "123", "text": "hello", "isGroup": true})
+		<-time.After(100 * time.Millisecond)
+	}))
+	defer server.Close()
+	b := bus.New(1)
+	ch := &Channel{Config: config.WhatsAppBridgeConfig{BridgeURL: "ws" + server.URL[len("http"):], OpenAccess: true}, IsolatePeers: true}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := ch.Start(ctx, b); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer ch.Stop(context.Background())
+	select {
+	case ev := <-b.Channel():
+		if ev.SessionKey != "whatsapp:group1:123" {
+			t.Fatalf("expected isolated session key, got %#v", ev)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for inbound whatsapp message")
+	}
+}
+
 func TestChannel_DeliverWritesSendCommand(t *testing.T) {
 	upgrader := websocket.Upgrader{}
 	got := make(chan map[string]any, 1)

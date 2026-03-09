@@ -17,6 +17,9 @@ type ExecTool struct {
 	Timeout         time.Duration
 	RestrictDir     string // if non-empty, cwd must be inside
 	PathAppend      string
+	ChildEnvAllowlist []string
+	AllowedPrograms []string
+	DisableShell    bool
 	OutputMaxBytes  int
 	BlockedPatterns []string
 }
@@ -25,21 +28,30 @@ const defaultExecOutputMaxBytes = 10000
 
 func (t *ExecTool) Name() string { return "exec" }
 func (t *ExecTool) Description() string {
-	return "Run a shell command with safety limits. Output is truncated."
+	return "Run a program with safety limits. Output is truncated. Legacy shell commands are optional."
 }
 func (t *ExecTool) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"command":        map[string]any{"type": "string", "description": "Shell command to run"},
+			"program":        map[string]any{"type": "string", "description": "Program to run"},
+			"args":           map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Program arguments"},
+			"command":        map[string]any{"type": "string", "description": "Legacy shell command to run (privileged)"},
 			"cwd":            map[string]any{"type": "string", "description": "Working directory (optional)"},
 			"timeoutSeconds": map[string]any{"type": "integer", "description": "Override timeout (optional)"},
 		},
-		"required": []string{"command"},
+		"required": []string{},
 	}
 }
 func (t *ExecTool) Schema() map[string]any {
 	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
+}
+
+func (t *ExecTool) CapabilityForParams(params map[string]any) CapabilityLevel {
+	if strings.TrimSpace(fmt.Sprint(params["command"])) != "" && fmt.Sprint(params["command"]) != "<nil>" {
+		return CapabilityPrivileged
+	}
+	return CapabilityGuarded
 }
 
 var defaultBlockedPatterns = []string{
@@ -47,18 +59,28 @@ var defaultBlockedPatterns = []string{
 }
 
 func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, error) {
-	cmdS, _ := params["command"].(string)
-	if strings.TrimSpace(cmdS) == "" {
-		return "", errors.New("missing command")
+	program := strings.TrimSpace(fmt.Sprint(params["program"]))
+	if program == "<nil>" {
+		program = ""
 	}
-	lc := strings.ToLower(cmdS)
-	patterns := t.BlockedPatterns
-	if len(patterns) == 0 {
-		patterns = defaultBlockedPatterns
+	legacyCommand, _ := params["command"].(string)
+	legacyCommand = strings.TrimSpace(legacyCommand)
+	if program == "" && legacyCommand == "" {
+		return "", errors.New("missing program or command")
 	}
-	for _, b := range patterns {
-		if strings.Contains(lc, b) {
-			return "", fmt.Errorf("blocked command pattern: %q", b)
+	if legacyCommand != "" {
+		if t.DisableShell {
+			return "", errors.New("shell command execution disabled")
+		}
+		lc := strings.ToLower(legacyCommand)
+		patterns := t.BlockedPatterns
+		if len(patterns) == 0 {
+			patterns = defaultBlockedPatterns
+		}
+		for _, b := range patterns {
+			if strings.Contains(lc, b) {
+				return "", fmt.Errorf("blocked command pattern: %q", b)
+			}
 		}
 	}
 	cwd, _ := params["cwd"].(string)
@@ -66,12 +88,25 @@ func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, 
 		cwd, _ = os.Getwd()
 	}
 	if t.RestrictDir != "" {
-		abs, _ := filepath.Abs(cwd)
-		root, _ := filepath.Abs(t.RestrictDir)
+		abs, err := filepath.Abs(cwd)
+		if err != nil {
+			return "", err
+		}
+		abs, err = canonicalizePath(abs)
+		if err != nil {
+			return "", err
+		}
+		root, err := canonicalizeRoot(t.RestrictDir)
+		if err != nil {
+			return "", err
+		}
 		rel, err := filepath.Rel(root, abs)
-		if err != nil || strings.HasPrefix(rel, "..") {
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return "", fmt.Errorf("cwd outside allowed directory")
 		}
+	}
+	if program != "" && len(t.AllowedPrograms) > 0 && !allowedProgram(program, t.AllowedPrograms) {
+		return "", fmt.Errorf("program not allowed: %s", program)
 	}
 
 	to := t.Timeout
@@ -81,18 +116,14 @@ func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, 
 	cctx, cancel := context.WithTimeout(ctx, to)
 	defer cancel()
 
-	c := exec.CommandContext(cctx, "bash", "-lc", cmdS)
+	var c *exec.Cmd
+	if legacyCommand != "" {
+		c = exec.CommandContext(cctx, "bash", "-lc", legacyCommand)
+	} else {
+		c = exec.CommandContext(cctx, program, stringArgs(params["args"])...)
+	}
 	c.Dir = cwd
-	env := os.Environ()
-	ctxEnv := EnvFromContext(ctx)
-	if len(ctxEnv) > 0 {
-		env = mergeEnv(env, ctxEnv)
-	}
-	if t.PathAppend != "" {
-		pathValue := lookupEnv(env, "PATH")
-		env = append(env, "PATH="+pathValue+string(os.PathListSeparator)+t.PathAppend)
-	}
-	c.Env = env
+	c.Env = BuildChildEnv(os.Environ(), t.ChildEnvAllowlist, EnvFromContext(ctx), t.PathAppend)
 	var stdout, stderr bytes.Buffer
 	c.Stdout = &stdout
 	c.Stderr = &stderr
@@ -118,41 +149,20 @@ func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, 
 	return out, nil
 }
 
-func mergeEnv(base []string, overlay map[string]string) []string {
-	if len(overlay) == 0 {
-		return append([]string{}, base...)
+func allowedProgram(program string, allowed []string) bool {
+	program = strings.TrimSpace(program)
+	if program == "" {
+		return false
 	}
-	values := make(map[string]string, len(base)+len(overlay))
-	order := make([]string, 0, len(base)+len(overlay))
-	for _, raw := range base {
-		key, value, ok := strings.Cut(raw, "=")
-		if !ok {
+	base := filepath.Base(program)
+	for _, candidate := range allowed {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
 			continue
 		}
-		if _, exists := values[key]; !exists {
-			order = append(order, key)
-		}
-		values[key] = value
-	}
-	for key, value := range overlay {
-		if _, exists := values[key]; !exists {
-			order = append(order, key)
-		}
-		values[key] = value
-	}
-	out := make([]string, 0, len(order))
-	for _, key := range order {
-		out = append(out, key+"="+values[key])
-	}
-	return out
-}
-
-func lookupEnv(env []string, key string) string {
-	for _, raw := range env {
-		name, value, ok := strings.Cut(raw, "=")
-		if ok && name == key {
-			return value
+		if candidate == program || candidate == base {
+			return true
 		}
 	}
-	return os.Getenv(key)
+	return false
 }

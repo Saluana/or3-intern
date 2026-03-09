@@ -69,6 +69,42 @@ func TestChannel_StartReceivesMessage(t *testing.T) {
 		if ev.Channel != "discord" || ev.Message != "hello" {
 			t.Fatalf("unexpected event: %#v", ev)
 		}
+		if ev.SessionKey != "discord:C1" {
+			t.Fatalf("expected channel-scoped session by default, got %#v", ev)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for discord event")
+	}
+}
+
+func TestChannel_StartReceivesIsolatedSessionPerUserWhenEnabled(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		_ = conn.WriteJSON(map[string]any{"op": 10, "d": map[string]any{"heartbeat_interval": 10000}})
+		_, _, _ = conn.ReadMessage()
+		_ = conn.WriteJSON(map[string]any{"op": 0, "t": "READY", "d": map[string]any{"user": map[string]any{"id": "B1"}}})
+		_ = conn.WriteJSON(map[string]any{"op": 0, "t": "MESSAGE_CREATE", "d": map[string]any{"id": "m1", "channel_id": "C1", "content": "<@B1> hello", "author": map[string]any{"id": "U1", "bot": false}, "mentions": []map[string]any{{"id": "B1"}}}})
+		<-time.After(100 * time.Millisecond)
+	}))
+	defer wsServer.Close()
+	b := bus.New(1)
+	ch := &Channel{Config: config.DiscordChannelConfig{Token: "token", GatewayURL: "ws" + strings.TrimPrefix(wsServer.URL, "http"), RequireMention: true, OpenAccess: true}, IsolatePeers: true}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := ch.Start(ctx, b); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer ch.Stop(context.Background())
+	select {
+	case ev := <-b.Channel():
+		if ev.SessionKey != "discord:C1:U1" {
+			t.Fatalf("expected isolated session key, got %#v", ev)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for discord event")
 	}

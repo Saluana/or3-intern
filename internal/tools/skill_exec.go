@@ -17,8 +17,11 @@ type RunSkillScript struct {
 	Base
 	Inventory      *skills.Inventory
 	Timeout        time.Duration
+	ChildEnvAllowlist []string
 	OutputMaxBytes int
 }
+
+func (t *RunSkillScript) Capability() CapabilityLevel { return CapabilityPrivileged }
 
 func (t *RunSkillScript) Name() string { return "run_skill_script" }
 
@@ -78,7 +81,7 @@ func (t *RunSkillScript) Execute(ctx context.Context, params map[string]any) (st
 
 	command := exec.CommandContext(runCtx, cmd[0], cmd[1:]...)
 	command.Dir = skill.Dir
-	command.Env = mergeEnv(os.Environ(), EnvFromContext(ctx))
+	command.Env = BuildChildEnv(os.Environ(), t.ChildEnvAllowlist, EnvFromContext(ctx), "")
 	if stdin := strings.TrimSpace(fmt.Sprint(params["stdin"])); stdin != "" {
 		command.Stdin = strings.NewReader(stdin)
 	}

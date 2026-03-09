@@ -50,9 +50,27 @@ type Config struct {
 
 	Provider  ProviderConfig  `json:"provider"`
 	Tools     ToolsConfig     `json:"tools"`
+	Hardening HardeningConfig `json:"hardening"`
 	Cron      CronConfig      `json:"cron"`
 	Heartbeat HeartbeatConfig `json:"heartbeat"`
 	Channels  ChannelsConfig  `json:"channels"`
+}
+
+type HardeningConfig struct {
+	GuardedTools        bool                 `json:"guardedTools"`
+	PrivilegedTools     bool                 `json:"privilegedTools"`
+	ExecAllowedPrograms []string             `json:"execAllowedPrograms"`
+	ChildEnvAllowlist   []string             `json:"childEnvAllowlist"`
+	IsolateChannelPeers bool                 `json:"isolateChannelPeers"`
+	Quotas              HardeningQuotaConfig `json:"quotas"`
+}
+
+type HardeningQuotaConfig struct {
+	Enabled          bool `json:"enabled"`
+	MaxToolCalls     int  `json:"maxToolCalls"`
+	MaxExecCalls     int  `json:"maxExecCalls"`
+	MaxWebCalls      int  `json:"maxWebCalls"`
+	MaxSubagentCalls int  `json:"maxSubagentCalls"`
 }
 
 type ProviderConfig struct {
@@ -93,6 +111,7 @@ type MCPServerConfig struct {
 	Command               string            `json:"command"`
 	Args                  []string          `json:"args"`
 	Env                   map[string]string `json:"env"`
+	ChildEnvAllowlist     []string          `json:"childEnvAllowlist"`
 	URL                   string            `json:"url"`
 	Headers               map[string]string `json:"headers"`
 	ToolTimeoutSeconds    int               `json:"toolTimeoutSeconds"`
@@ -350,6 +369,20 @@ func Default() Config {
 			RestrictToWorkspace: true,
 			PathAppend:          "",
 			MCPServers:          map[string]MCPServerConfig{},
+		},
+		Hardening: HardeningConfig{
+			GuardedTools:        false,
+			PrivilegedTools:     false,
+			ExecAllowedPrograms: []string{"cat", "echo", "find", "git", "grep", "head", "ls", "pwd", "sed", "tail"},
+			ChildEnvAllowlist:   []string{"PATH", "HOME", "TMPDIR", "TMP", "TEMP"},
+			IsolateChannelPeers: true,
+			Quotas: HardeningQuotaConfig{
+				Enabled:          true,
+				MaxToolCalls:     16,
+				MaxExecCalls:     2,
+				MaxWebCalls:      4,
+				MaxSubagentCalls: 2,
+			},
 		},
 		Cron: CronConfig{Enabled: true, StorePath: filepath.Join(root, "cron.json")},
 		Heartbeat: HeartbeatConfig{
@@ -632,6 +665,24 @@ func Load(path string) (Config, error) {
 	if cfg.Tools.MCPServers == nil {
 		cfg.Tools.MCPServers = map[string]MCPServerConfig{}
 	}
+	if len(cfg.Hardening.ExecAllowedPrograms) == 0 {
+		cfg.Hardening.ExecAllowedPrograms = append([]string{}, Default().Hardening.ExecAllowedPrograms...)
+	}
+	if len(cfg.Hardening.ChildEnvAllowlist) == 0 {
+		cfg.Hardening.ChildEnvAllowlist = append([]string{}, Default().Hardening.ChildEnvAllowlist...)
+	}
+	if cfg.Hardening.Quotas.MaxToolCalls <= 0 {
+		cfg.Hardening.Quotas.MaxToolCalls = Default().Hardening.Quotas.MaxToolCalls
+	}
+	if cfg.Hardening.Quotas.MaxExecCalls <= 0 {
+		cfg.Hardening.Quotas.MaxExecCalls = Default().Hardening.Quotas.MaxExecCalls
+	}
+	if cfg.Hardening.Quotas.MaxWebCalls <= 0 {
+		cfg.Hardening.Quotas.MaxWebCalls = Default().Hardening.Quotas.MaxWebCalls
+	}
+	if cfg.Hardening.Quotas.MaxSubagentCalls <= 0 {
+		cfg.Hardening.Quotas.MaxSubagentCalls = Default().Hardening.Quotas.MaxSubagentCalls
+	}
 	for name, server := range cfg.Tools.MCPServers {
 		server.Transport = strings.ToLower(strings.TrimSpace(server.Transport))
 		if server.Transport == "" {
@@ -641,6 +692,9 @@ func Load(path string) (Config, error) {
 		server.URL = strings.TrimSpace(server.URL)
 		if server.Env == nil {
 			server.Env = map[string]string{}
+		}
+		if len(server.ChildEnvAllowlist) == 0 {
+			server.ChildEnvAllowlist = append([]string{}, cfg.Hardening.ChildEnvAllowlist...)
 		}
 		if server.Headers == nil {
 			server.Headers = map[string]string{}

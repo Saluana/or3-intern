@@ -83,6 +83,51 @@ func TestChannel_StartReceivesEventAndAcks(t *testing.T) {
 		if ev.Channel != "slack" || ev.Message != "hello" {
 			t.Fatalf("unexpected event: %#v", ev)
 		}
+		if ev.SessionKey != "slack:C1" {
+			t.Fatalf("expected channel-scoped session by default, got %#v", ev)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for slack event")
+	}
+}
+
+func TestChannel_StartReceivesIsolatedSessionPerUserWhenEnabled(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		_ = conn.WriteJSON(map[string]any{
+			"envelope_id": "env1",
+			"type":        "events_api",
+			"payload": map[string]any{
+				"authorizations": []map[string]any{{"user_id": "B123"}},
+				"event":          map[string]any{"type": "message", "text": "<@B123> hello", "user": "U1", "channel": "C1"},
+			},
+		})
+		var ack map[string]any
+		_ = conn.ReadJSON(&ack)
+	}))
+	defer wsServer.Close()
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "url": "ws" + strings.TrimPrefix(wsServer.URL, "http")})
+	}))
+	defer apiServer.Close()
+	b := bus.New(1)
+	ch := &Channel{Config: config.SlackChannelConfig{AppToken: "app", BotToken: "bot", APIBase: apiServer.URL, RequireMention: true, OpenAccess: true}, IsolatePeers: true}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := ch.Start(ctx, b); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer ch.Stop(context.Background())
+	select {
+	case ev := <-b.Channel():
+		if ev.SessionKey != "slack:C1:U1" {
+			t.Fatalf("expected isolated session key, got %#v", ev)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for slack event")
 	}

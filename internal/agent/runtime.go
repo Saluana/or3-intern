@@ -12,16 +12,22 @@ import (
 	"or3-intern/internal/artifacts"
 	"or3-intern/internal/bus"
 	"or3-intern/internal/channels"
+	"or3-intern/internal/config"
 	"or3-intern/internal/cron"
 	"or3-intern/internal/db"
 	"or3-intern/internal/heartbeat"
 	"or3-intern/internal/memory"
 	"or3-intern/internal/providers"
+	"or3-intern/internal/scope"
 	"or3-intern/internal/skills"
 	"or3-intern/internal/tools"
 )
 
 const commandNewSession = "/new"
+
+const maxTrackedQuotaSessions = 1024
+
+type trustedToolAccessContextKey struct{}
 
 type Deliverer interface {
 	Deliver(ctx context.Context, channel, to, text string) error
@@ -38,6 +44,7 @@ type Runtime struct {
 	Model            string
 	Temperature      float64
 	Tools            *tools.Registry
+	Hardening        config.HardeningConfig
 	Builder          *Builder
 	Artifacts        *artifacts.Store
 	MaxToolBytes     int
@@ -55,6 +62,16 @@ type Runtime struct {
 
 	locksMu sync.Mutex
 	locks   map[string]*sessionLock
+	quotaMu sync.Mutex
+	quotas  map[string]*sessionQuotaState
+}
+
+type sessionQuotaState struct {
+	ToolCalls     int
+	ExecCalls     int
+	WebCalls      int
+	SubagentCalls int
+	LastSeen      time.Time
 }
 
 type BackgroundRunInput struct {
@@ -172,7 +189,7 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 	}
 
 	replyTarget := deliveryTarget(ev)
-	finalText, streamed, err := r.executeConversation(ctx, ev.SessionKey, messages, r.Tools, ev.Channel, replyTarget)
+	finalText, streamed, err := r.executeConversation(ctx, ev.Type, ev.SessionKey, messages, r.Tools, ev.Channel, replyTarget)
 	if err != nil {
 		return err
 	}
@@ -314,7 +331,7 @@ func (r *Runtime) handleExplicitSkillInvocation(ctx context.Context, ev bus.Even
 		seeded = append(seeded, providers.ChatMessage{Role: "user", Content: promptInput})
 	}
 	runCtx := tools.ContextWithEnv(ctx, r.skillRunEnvFor(skill.Name))
-	finalText, streamed, err := r.executeConversation(runCtx, ev.SessionKey, seeded, r.Tools, ev.Channel, replyTarget)
+	finalText, streamed, err := r.executeConversation(runCtx, ev.Type, ev.SessionKey, seeded, r.Tools, ev.Channel, replyTarget)
 	if err != nil {
 		return true, err
 	}
@@ -335,6 +352,8 @@ func (r *Runtime) dispatchExplicitSkillTool(ctx context.Context, ev bus.Event, s
 	toolCtx := tools.ContextWithSession(ctx, scopeKey)
 	toolCtx = tools.ContextWithDelivery(toolCtx, ev.Channel, deliveryTarget(ev))
 	toolCtx = tools.ContextWithEnv(toolCtx, r.skillRunEnvFor(skill.Name))
+	toolCtx = r.contextWithTrustedToolAccess(toolCtx, ev)
+	toolCtx = tools.ContextWithToolGuard(toolCtx, r.guardToolExecution)
 	params := map[string]any{
 		"command":     rawArgs,
 		"commandName": commandName,
@@ -429,7 +448,7 @@ func (r *Runtime) RunBackground(ctx context.Context, input BackgroundRunInput) (
 	if reg == nil {
 		reg = r.Tools
 	}
-	finalText, _, err := r.executeConversation(ctx, input.SessionKey, append([]providers.ChatMessage{}, input.PromptSnapshot...), reg, input.Channel, input.ReplyTo)
+	finalText, _, err := r.executeConversation(ctx, bus.EventSystem, input.SessionKey, append([]providers.ChatMessage{}, input.PromptSnapshot...), reg, input.Channel, input.ReplyTo)
 	if err != nil {
 		return BackgroundRunResult{}, err
 	}
@@ -493,7 +512,7 @@ func contentToString(v any) string {
 	return string(b)
 }
 
-func (r *Runtime) executeConversation(ctx context.Context, sessionKey string, messages []providers.ChatMessage, reg *tools.Registry, channel string, replyTo string) (string, bool, error) {
+func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventType, sessionKey string, messages []providers.ChatMessage, reg *tools.Registry, channel string, replyTo string) (string, bool, error) {
 	if reg == nil {
 		reg = tools.NewRegistry()
 	}
@@ -570,6 +589,8 @@ func (r *Runtime) executeConversation(ctx context.Context, sessionKey string, me
 		for _, tc := range msg.ToolCalls {
 			toolCtx := tools.ContextWithSession(ctx, scopeKey)
 			toolCtx = tools.ContextWithDelivery(toolCtx, channel, replyTo)
+			toolCtx = r.contextWithTrustedToolAccess(toolCtx, bus.Event{Type: eventType, SessionKey: sessionKey, Channel: channel})
+			toolCtx = tools.ContextWithToolGuard(toolCtx, r.guardToolExecution)
 			out, err := reg.Execute(toolCtx, tc.Function.Name, tc.Function.Arguments)
 			if err != nil {
 				out = "tool error: " + err.Error()
@@ -591,6 +612,119 @@ func (r *Runtime) executeConversation(ctx context.Context, sessionKey string, me
 		}
 	}
 	return "(no response)", false, nil
+}
+
+func (r *Runtime) guardToolExecution(ctx context.Context, tool tools.Tool, capability tools.CapabilityLevel) error {
+	if tool == nil {
+		return nil
+	}
+	if tool.Name() == "send_message" && trustedToolAccessFromContext(ctx) {
+		capability = tools.CapabilitySafe
+	}
+	if capability == tools.CapabilityGuarded && !r.Hardening.GuardedTools {
+		return fmt.Errorf("tool requires guarded access: %s", tool.Name())
+	}
+	if capability == tools.CapabilityPrivileged && !r.Hardening.PrivilegedTools {
+		return fmt.Errorf("tool requires privileged access: %s", tool.Name())
+	}
+	if !r.Hardening.Quotas.Enabled {
+		return nil
+	}
+	state := r.sessionQuotaState(tools.SessionFromContext(ctx))
+	if err := quotaIncrement(&state.ToolCalls, r.Hardening.Quotas.MaxToolCalls, "tool calls", tool.Name()); err != nil {
+		return err
+	}
+	switch tool.Name() {
+	case "exec", "run_skill_script":
+		if err := quotaIncrement(&state.ExecCalls, r.Hardening.Quotas.MaxExecCalls, "exec calls", tool.Name()); err != nil {
+			return err
+		}
+	case "web_fetch", "web_search":
+		if err := quotaIncrement(&state.WebCalls, r.Hardening.Quotas.MaxWebCalls, "web calls", tool.Name()); err != nil {
+			return err
+		}
+	case "spawn_subagent":
+		if err := quotaIncrement(&state.SubagentCalls, r.Hardening.Quotas.MaxSubagentCalls, "subagent calls", tool.Name()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Runtime) sessionQuotaState(sessionKey string) *sessionQuotaState {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		sessionKey = scope.GlobalMemoryScope
+	}
+	r.quotaMu.Lock()
+	defer r.quotaMu.Unlock()
+	if r.quotas == nil {
+		r.quotas = map[string]*sessionQuotaState{}
+	}
+	r.evictQuotaStateLocked()
+	state := r.quotas[sessionKey]
+	if state == nil {
+		state = &sessionQuotaState{}
+		r.quotas[sessionKey] = state
+	}
+	state.LastSeen = time.Now()
+	return state
+}
+
+func (r *Runtime) contextWithTrustedToolAccess(ctx context.Context, ev bus.Event) context.Context {
+	if !isTrustedToolEvent(ev.Type) {
+		return ctx
+	}
+	return context.WithValue(ctx, trustedToolAccessContextKey{}, true)
+}
+
+func trustedToolAccessFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	trusted, _ := ctx.Value(trustedToolAccessContextKey{}).(bool)
+	return trusted
+}
+
+func isTrustedToolEvent(eventType bus.EventType) bool {
+	switch eventType {
+	case bus.EventHeartbeat, bus.EventCron:
+		return true
+	default:
+		return false
+	}
+}
+
+func (r *Runtime) evictQuotaStateLocked() {
+	if len(r.quotas) < maxTrackedQuotaSessions {
+		return
+	}
+	oldestKey := ""
+	var oldestTime time.Time
+	for key, state := range r.quotas {
+		if state == nil {
+			delete(r.quotas, key)
+			continue
+		}
+		if oldestKey == "" || state.LastSeen.Before(oldestTime) {
+			oldestKey = key
+			oldestTime = state.LastSeen
+		}
+	}
+	if oldestKey != "" {
+		delete(r.quotas, oldestKey)
+	}
+}
+
+func quotaIncrement(current *int, limit int, label string, toolName string) error {
+	if current == nil || limit <= 0 {
+		return nil
+	}
+	if *current >= limit {
+		return fmt.Errorf("quota exceeded for %s while executing %s", label, toolName)
+	}
+	*current = *current + 1
+	return nil
 }
 
 func (r *Runtime) skillRunEnvFor(name string) map[string]string {

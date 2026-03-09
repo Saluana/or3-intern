@@ -29,6 +29,8 @@ type SpawnSubagent struct {
 	DefaultTo      string
 }
 
+func (t *SpawnSubagent) Capability() CapabilityLevel { return CapabilityGuarded }
+
 func (t *SpawnSubagent) Name() string { return "spawn_subagent" }
 
 func (t *SpawnSubagent) Description() string {

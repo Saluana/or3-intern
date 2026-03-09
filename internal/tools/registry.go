@@ -59,5 +59,10 @@ func (r *Registry) ExecuteParams(ctx context.Context, name string, params map[st
 	if params == nil {
 		params = map[string]any{}
 	}
+	if guard := ToolGuardFromContext(ctx); guard != nil {
+		if err := guard(ctx, t, ToolCapability(t, params)); err != nil {
+			return "", err
+		}
+	}
 	return t.Execute(ctx, params)
 }

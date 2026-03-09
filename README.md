@@ -38,6 +38,38 @@ The `init` command can store your provider settings in `~/.or3-intern/config.jso
 - External channels are disabled by default; configure them in `config.json` or via env vars before using `serve`.
 - Supported non-CLI channels: Telegram, Slack, Discord, Email, and a local WhatsApp bridge.
 
+## Hardening Defaults
+
+Phase 1 hardening is now wired into the default runtime profile:
+
+- file tools stay workspace-rooted by default
+- external channels stay closed unless explicitly allowlisted or opened
+- child processes use a scrubbed environment allowlist instead of inheriting the full parent env
+- `exec` prefers `program` + `args`; legacy shell commands remain available only through privileged tool policy
+- tool calls are checked against capability tiers and bounded per-session quotas
+- external channel session keys can isolate peers so unrelated senders do not share the same conversation state
+
+Example hardening block:
+
+```json
+{
+  "hardening": {
+    "guardedTools": false,
+    "privilegedTools": false,
+    "execAllowedPrograms": ["cat", "echo", "find", "git", "grep", "head", "ls", "pwd", "sed", "tail"],
+    "childEnvAllowlist": ["PATH", "HOME", "TMPDIR", "TMP", "TEMP"],
+    "isolateChannelPeers": true,
+    "quotas": {
+      "enabled": true,
+      "maxToolCalls": 16,
+      "maxExecCalls": 2,
+      "maxWebCalls": 4,
+      "maxSubagentCalls": 2
+    }
+  }
+}
+```
+
 ## Dependencies
 
 This repo uses external Go modules (SQLite driver + cron parser). If you're building in an offline environment, you must vendor modules ahead of time.
@@ -89,7 +121,7 @@ Safety notes:
 
 - Prefer `stdio` for local trusted servers.
 - HTTP transports are explicit. Plain `http://` endpoints are rejected unless `allowInsecureHttp=true`, and even then only for loopback/localhost addresses.
-- Stdio MCP servers inherit the ambient process environment, and any keys in the configured `env` map override those inherited values.
+- Stdio MCP servers inherit only the configured child environment allowlist plus any explicitly configured `env` entries.
 - MCP tool calls use the existing tool loop, per-call timeout, error handling, and artifact spill path.
 - v1 intentionally does not include live reconnect loops, hot-add/hot-remove of MCP tools, SQLite persistence for tool catalogs, or a separate MCP gateway service.
 
@@ -231,6 +263,7 @@ Telegram uses polling, so no webhook setup is required.
 - Optionally set `defaultChannelId`
 - Optionally restrict inbound traffic with `allowedUserIds`
 - `requireMention=true` is recommended for shared channels
+- when `hardening.isolateChannelPeers=true`, inbound sessions are isolated per sender instead of sharing one thread per channel
 
 Slack uses Socket Mode for inbound events and Web API for outbound messages.
 
@@ -241,6 +274,7 @@ Slack uses Socket Mode for inbound events and Web API for outbound messages.
 - Optionally set `defaultChannelId`
 - Optionally restrict inbound traffic with `allowedUserIds`
 - `requireMention=true` is recommended for guild channels
+- when `hardening.isolateChannelPeers=true`, inbound sessions are isolated per sender instead of sharing one thread per channel
 
 Discord uses the Gateway for inbound events and REST for outbound messages.
 
@@ -252,6 +286,7 @@ WhatsApp support expects a compatible local bridge service.
 - Set `channels.whatsApp.bridgeUrl` or `OR3_WHATSAPP_BRIDGE_URL`
 - Optionally set `channels.whatsApp.bridgeToken`
 - Optionally set `defaultTo` and `allowedFrom`
+- when `hardening.isolateChannelPeers=true`, inbound sessions are isolated per sender even inside shared chats
 
 The bridge should expose a websocket endpoint compatible with the message format used by `or3-intern`.
 

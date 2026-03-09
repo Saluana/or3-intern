@@ -10,6 +10,9 @@ type sessionContextKey struct{}
 type deliveryChannelContextKey struct{}
 type deliveryToContextKey struct{}
 type envContextKey struct{}
+type toolGuardContextKey struct{}
+
+type ToolGuard func(ctx context.Context, tool Tool, capability CapabilityLevel) error
 
 func ContextWithSession(ctx context.Context, sessionKey string) context.Context {
 	if ctx == nil {
@@ -41,6 +44,16 @@ func ContextWithEnv(ctx context.Context, env map[string]string) context.Context 
 		copyEnv[k] = v
 	}
 	return context.WithValue(ctx, envContextKey{}, copyEnv)
+}
+
+func ContextWithToolGuard(ctx context.Context, guard ToolGuard) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if guard == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, toolGuardContextKey{}, guard)
 }
 
 func SessionFromContext(ctx context.Context) string {
@@ -78,4 +91,12 @@ func EnvFromContext(ctx context.Context) map[string]string {
 		return copyEnv
 	}
 	return nil
+}
+
+func ToolGuardFromContext(ctx context.Context) ToolGuard {
+	if ctx == nil {
+		return nil
+	}
+	guard, _ := ctx.Value(toolGuardContextKey{}).(ToolGuard)
+	return guard
 }

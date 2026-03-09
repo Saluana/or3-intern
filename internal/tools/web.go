@@ -21,6 +21,8 @@ type WebFetch struct{
 	DefaultMaxBytes int
 }
 
+func (t *WebFetch) Capability() CapabilityLevel { return CapabilityGuarded }
+
 const (
 	defaultWebTimeout = 20 * time.Second
 	defaultWebFetchMaxBytes = 200000
@@ -137,6 +139,8 @@ type WebSearch struct{
 	Timeout time.Duration
 	ReadMaxBytes int
 }
+
+func (t *WebSearch) Capability() CapabilityLevel { return CapabilitySafe }
 
 func (t *WebSearch) Name() string { return "web_search" }
 func (t *WebSearch) Description() string {

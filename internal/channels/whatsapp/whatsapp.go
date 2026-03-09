@@ -26,6 +26,7 @@ type Channel struct {
 	Dialer        *websocket.Dialer
 	Artifacts     *artifacts.Store
 	MaxMediaBytes int
+	IsolatePeers  bool
 
 	mu     sync.Mutex
 	conn   *websocket.Conn
@@ -144,7 +145,11 @@ func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
 		if target == "" {
 			target = strings.TrimSpace(msg.From)
 		}
-		attachments, markers := c.captureAttachments(ctx, "whatsapp:"+target, msg.Attachments)
+		sessionKey := "whatsapp:" + target
+		if c.IsolatePeers {
+			sessionKey += ":" + strings.TrimSpace(msg.From)
+		}
+		attachments, markers := c.captureAttachments(ctx, sessionKey, msg.Attachments)
 		content := rootchannels.ComposeMessageText(msg.Text, markers)
 		if content == "" {
 			continue
@@ -160,7 +165,7 @@ func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
 		}
 		eventBus.Publish(bus.Event{
 			Type:       bus.EventUserMessage,
-			SessionKey: "whatsapp:" + target,
+			SessionKey: sessionKey,
 			Channel:    "whatsapp",
 			From:       msg.From,
 			Message:    content,

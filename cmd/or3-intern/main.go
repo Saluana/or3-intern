@@ -222,6 +222,7 @@ func main() {
 		DefaultScopeKey:    cfg.DefaultSessionKey,
 		LinkDirectMessages: cfg.Session.DirectMessagesShareDefault,
 		IdentityScopeMap:   buildIdentityScopeMap(cfg),
+		Hardening:          cfg.Hardening,
 	}
 
 	// cron service + tool
@@ -485,7 +486,7 @@ func buildBackgroundToolRegistry(cfg config.Config, d *db.DB, prov *providers.Cl
 func buildToolRegistryWithOptions(cfg config.Config, d *db.DB, prov *providers.Client, channelManager *rootchannels.Manager, inv *skills.Inventory, cronSvc *cron.Service, spawnManager tools.SpawnEnqueuer, mcpRegistrar mcpToolRegistrar, includeSendMessage bool) *tools.Registry {
 	reg := tools.NewRegistry()
 	fileRoot := allowedRoot(cfg)
-	reg.Register(&tools.ExecTool{Timeout: time.Duration(cfg.Tools.ExecTimeoutSeconds) * time.Second, RestrictDir: fileRoot, PathAppend: cfg.Tools.PathAppend})
+	reg.Register(&tools.ExecTool{Timeout: time.Duration(cfg.Tools.ExecTimeoutSeconds) * time.Second, RestrictDir: fileRoot, PathAppend: cfg.Tools.PathAppend, AllowedPrograms: append([]string{}, cfg.Hardening.ExecAllowedPrograms...), ChildEnvAllowlist: append([]string{}, cfg.Hardening.ChildEnvAllowlist...)})
 	reg.Register(&tools.ReadFile{FileTool: tools.FileTool{Root: fileRoot}})
 	reg.Register(&tools.WriteFile{FileTool: tools.FileTool{Root: fileRoot}})
 	reg.Register(&tools.EditFile{FileTool: tools.FileTool{Root: fileRoot}})
@@ -510,7 +511,7 @@ func buildToolRegistryWithOptions(cfg config.Config, d *db.DB, prov *providers.C
 	}
 	if inv != nil {
 		reg.Register(&tools.ReadSkill{Inventory: inv})
-		reg.Register(&tools.RunSkillScript{Inventory: inv, Timeout: time.Duration(cfg.Skills.MaxRunSeconds) * time.Second})
+		reg.Register(&tools.RunSkillScript{Inventory: inv, Timeout: time.Duration(cfg.Skills.MaxRunSeconds) * time.Second, ChildEnvAllowlist: append([]string{}, cfg.Hardening.ChildEnvAllowlist...)})
 	}
 	if cronSvc != nil {
 		reg.Register(&tools.CronTool{Svc: cronSvc})
@@ -530,23 +531,23 @@ func buildChannelManager(cfg config.Config, cliDeliverer cli.Deliverer, art *art
 		return nil, err
 	}
 	if cfg.Channels.Telegram.Enabled {
-		if err := mgr.Register(&telegram.Channel{Config: cfg.Channels.Telegram, Artifacts: art, MaxMediaBytes: maxMediaBytes}); err != nil {
+		if err := mgr.Register(&telegram.Channel{Config: cfg.Channels.Telegram, Artifacts: art, MaxMediaBytes: maxMediaBytes, IsolatePeers: cfg.Hardening.IsolateChannelPeers}); err != nil {
 			return nil, err
 		}
 	}
 	if cfg.Channels.Slack.Enabled {
-		if err := mgr.Register(&slack.Channel{Config: cfg.Channels.Slack, Artifacts: art, MaxMediaBytes: maxMediaBytes}); err != nil {
+		if err := mgr.Register(&slack.Channel{Config: cfg.Channels.Slack, Artifacts: art, MaxMediaBytes: maxMediaBytes, IsolatePeers: cfg.Hardening.IsolateChannelPeers}); err != nil {
 			return nil, err
 		}
 	}
 	if cfg.Channels.Discord.Enabled {
-		if err := mgr.Register(&discord.Channel{Config: cfg.Channels.Discord, Artifacts: art, MaxMediaBytes: maxMediaBytes}); err != nil {
+		if err := mgr.Register(&discord.Channel{Config: cfg.Channels.Discord, Artifacts: art, MaxMediaBytes: maxMediaBytes, IsolatePeers: cfg.Hardening.IsolateChannelPeers}); err != nil {
 			return nil, err
 		}
 	}
 	if cfg.Channels.WhatsApp.Enabled {
 		cfg.Channels.WhatsApp.BridgeURL = whatsapp.BridgeURL(cfg.Channels.WhatsApp.BridgeURL)
-		if err := mgr.Register(&whatsapp.Channel{Config: cfg.Channels.WhatsApp, Artifacts: art, MaxMediaBytes: maxMediaBytes}); err != nil {
+		if err := mgr.Register(&whatsapp.Channel{Config: cfg.Channels.WhatsApp, Artifacts: art, MaxMediaBytes: maxMediaBytes, IsolatePeers: cfg.Hardening.IsolateChannelPeers}); err != nil {
 			return nil, err
 		}
 	}

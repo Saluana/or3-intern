@@ -27,6 +27,7 @@ type Channel struct {
 	HTTP   *http.Client
 	Artifacts *artifacts.Store
 	MaxMediaBytes int
+	IsolatePeers bool
 
 	mu      sync.Mutex
 	running bool
@@ -133,6 +134,9 @@ func (c *Channel) fetchUpdates(ctx context.Context, eventBus *bus.Bus) error {
 			continue
 		}
 		sessionKey := "telegram:" + chatID
+		if c.IsolatePeers && !strings.EqualFold(strings.TrimSpace(msg.Chat.Type), "private") {
+			sessionKey = sessionKey + ":" + strconv.FormatInt(msg.From.ID, 10)
+		}
 		text := strings.TrimSpace(msg.Text)
 		if text == "" {
 			text = strings.TrimSpace(msg.Caption)

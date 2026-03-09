@@ -28,6 +28,7 @@ type Channel struct {
 	Dialer *websocket.Dialer
 	Artifacts *artifacts.Store
 	MaxMediaBytes int
+	IsolatePeers bool
 
 	mu     sync.Mutex
 	conn   *websocket.Conn
@@ -164,6 +165,9 @@ func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
 				}
 				clean := strings.TrimSpace(stripMention(msg.Content, c.botID))
 				sessionKey := "discord:" + msg.ChannelID
+				if c.IsolatePeers {
+					sessionKey += ":" + msg.Author.ID
+				}
 				attachments, markers := c.captureAttachments(ctx, sessionKey, msg.Attachments)
 				content := rootchannels.ComposeMessageText(clean, markers)
 				if content == "" {

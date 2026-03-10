@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	rootchannels "or3-intern/internal/channels"
 )
 
 type DeliverFunc func(ctx context.Context, channel, to, text string, meta map[string]any) error
@@ -31,6 +33,10 @@ func (t *SendMessage) Parameters() map[string]any {
 		"channel": map[string]any{"type": "string"},
 		"to":      map[string]any{"type": "string"},
 		"text":    map[string]any{"type": "string"},
+		"reply_in_thread": map[string]any{
+			"type":        "boolean",
+			"description": "When true, reuse the current channel's reply/thread metadata for the outgoing message.",
+		},
 		"media": map[string]any{
 			"type":        "array",
 			"items":       map[string]any{"type": "string"},
@@ -68,21 +74,60 @@ func (t *SendMessage) Execute(ctx context.Context, params map[string]any) (strin
 	if text == "" && len(mediaPaths) == 0 {
 		return "", fmt.Errorf("message requires text or media")
 	}
-	var meta map[string]any
+	inheritedReplyMeta := DeliveryMetaFromContext(ctx)
+	meta := map[string]any{}
 	explicitTo := strings.TrimSpace(readOptionalString(params, "to")) != ""
-	if len(mediaPaths) > 0 || explicitTo {
-		meta = map[string]any{}
+	replyInThread, err := optionalBool(params["reply_in_thread"])
+	if err != nil {
+		return "", err
+	}
+	if replyInThread {
+		if explicitTo {
+			return "", fmt.Errorf("reply_in_thread requires using the current delivery target")
+		}
+		if strings.TrimSpace(ctxChannel) != "" && !strings.EqualFold(strings.TrimSpace(ch), strings.TrimSpace(ctxChannel)) {
+			return "", fmt.Errorf("reply_in_thread requires using the current delivery channel")
+		}
+		for k, v := range inheritedReplyMeta {
+			meta[k] = v
+		}
+	}
+	if len(mediaPaths) > 0 || explicitTo || len(meta) > 0 {
 		if len(mediaPaths) > 0 {
-			meta["media_paths"] = mediaPaths
+			meta[rootchannels.MetaMediaPaths] = mediaPaths
 		}
 		if explicitTo {
 			meta["explicit_to"] = true
 		}
 	}
+	if len(meta) == 0 {
+		meta = nil
+	}
 	if err := t.Deliver(ctx, ch, to, text, meta); err != nil {
 		return "", err
 	}
 	return "ok", nil
+}
+
+func optionalBool(raw any) (bool, error) {
+	switch v := raw.(type) {
+	case nil:
+		return false, nil
+	case bool:
+		return v, nil
+	case string:
+		text := strings.TrimSpace(strings.ToLower(v))
+		switch text {
+		case "", "false", "0", "no":
+			return false, nil
+		case "true", "1", "yes":
+			return true, nil
+		default:
+			return false, fmt.Errorf("reply_in_thread must be a boolean")
+		}
+	default:
+		return false, fmt.Errorf("reply_in_thread must be a boolean")
+	}
 }
 
 func (t *SendMessage) validateMediaPaths(raw any) ([]string, error) {

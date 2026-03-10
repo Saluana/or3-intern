@@ -2,6 +2,7 @@ package channels
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"or3-intern/internal/bus"
@@ -66,5 +67,35 @@ func TestManager_RejectsDuplicateNames(t *testing.T) {
 	}
 	if err := m.Register(&testChannel{name: "slack"}); err == nil {
 		t.Fatal("expected duplicate registration error")
+	}
+}
+
+func TestReplyMeta_PreservesThreadingFieldsOnly(t *testing.T) {
+	meta := map[string]any{
+		"channel_id":         "C1",
+		MetaThreadTS:          "123.45",
+		MetaReplyToMessageID:  int64(44),
+		MetaMessageReference:  "m-1",
+		"attachments":        []string{"artifact"},
+		MetaMediaPaths:        []string{"/tmp/file.txt"},
+	}
+	got := ReplyMeta(meta)
+	want := map[string]any{
+		MetaThreadTS:         "123.45",
+		MetaReplyToMessageID: int64(44),
+		MetaMessageReference: "m-1",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("expected reply meta %#v, got %#v", want, got)
+	}
+}
+
+func TestReplyMeta_IgnoresEmptyValues(t *testing.T) {
+	got := ReplyMeta(map[string]any{
+		MetaThreadTS:         " ",
+		MetaReplyToMessageID: int64(0),
+	})
+	if got != nil {
+		t.Fatalf("expected nil reply meta, got %#v", got)
 	}
 }

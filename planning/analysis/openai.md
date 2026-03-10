@@ -23,8 +23,6 @@ The biggest gap versus nanobot is not simplicity but sharpness of product philos
 Specific technical weaknesses I would prioritize
  
 
-5. Channel support is broad, but parity is uneven.
-   CLI has streaming. External channels exist, but I did not see evidence of deep streaming parity, retry strategies, delivery guarantees, edit-in-place semantics, or serious channel-specific backpressure control. NullClaw publicly emphasizes much broader channel coverage and a fuller stack here.   ([GitHub][1])
 
 6. The autonomous layer is useful, but prompt-driven.
    Heartbeat, webhook, and file-watch all ultimately feed natural-language turns into the agent. That is flexible, but it is also risky and less deterministic than structured task execution. OpenClaw’s public discussion around structured heartbeat instructions is a better long-term direction.   ([GitHub][2])

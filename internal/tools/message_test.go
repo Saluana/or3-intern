@@ -178,19 +178,90 @@ func TestSendMessage_MediaOnlySuccess(t *testing.T) {
 
 func TestSendMessage_UsesContextDefaultsWhenKeysOmitted(t *testing.T) {
 	var gotChannel, gotTo string
+	var gotMeta map[string]any
 	tool := &SendMessage{
 		Deliver: func(ctx context.Context, ch, to, text string, meta map[string]any) error {
 			gotChannel = ch
 			gotTo = to
+			gotMeta = meta
 			return nil
 		},
 	}
 	ctx := ContextWithDelivery(context.Background(), "discord", "channel-1")
+	ctx = ContextWithDeliveryMeta(ctx, map[string]any{"message_reference": "m-1"})
 	if _, err := tool.Execute(ctx, map[string]any{"text": "hello"}); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 	if gotChannel != "discord" || gotTo != "channel-1" {
 		t.Fatalf("expected context delivery target, got %q/%q", gotChannel, gotTo)
+	}
+	if gotMeta != nil {
+		t.Fatalf("expected no inherited reply metadata by default, got %#v", gotMeta)
+	}
+}
+
+func TestSendMessage_ReplyInThreadPreservesInheritedReplyMeta(t *testing.T) {
+	var gotMeta map[string]any
+	tool := &SendMessage{
+		Deliver: func(ctx context.Context, ch, to, text string, meta map[string]any) error {
+			gotMeta = meta
+			return nil
+		},
+	}
+	ctx := ContextWithDelivery(context.Background(), "slack", "C1")
+	ctx = ContextWithDeliveryMeta(ctx, map[string]any{"thread_ts": "123.45"})
+	if _, err := tool.Execute(ctx, map[string]any{"text": "hello", "reply_in_thread": true}); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if gotMeta["thread_ts"] != "123.45" {
+		t.Fatalf("expected inherited thread metadata to be preserved, got %#v", gotMeta)
+	}
+	if _, ok := gotMeta["explicit_to"]; ok {
+		t.Fatalf("did not expect explicit_to marker, got %#v", gotMeta)
+	}
+}
+
+func TestSendMessage_ExplicitChannelDropsInheritedReplyMeta(t *testing.T) {
+	var gotMeta map[string]any
+	tool := &SendMessage{
+		Deliver: func(ctx context.Context, ch, to, text string, meta map[string]any) error {
+			gotMeta = meta
+			return nil
+		},
+	}
+	ctx := ContextWithDelivery(context.Background(), "slack", "C1")
+	ctx = ContextWithDeliveryMeta(ctx, map[string]any{"thread_ts": "123.45"})
+	if _, err := tool.Execute(ctx, map[string]any{"channel": "discord", "text": "hello"}); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if _, ok := gotMeta["thread_ts"]; ok {
+		t.Fatalf("expected inherited thread metadata to be removed for explicit channel, got %#v", gotMeta)
+	}
+}
+
+func TestSendMessage_ReplyInThreadRejectsExplicitTarget(t *testing.T) {
+	tool := &SendMessage{
+		Deliver: func(ctx context.Context, ch, to, text string, meta map[string]any) error {
+			return nil
+		},
+	}
+	ctx := ContextWithDelivery(context.Background(), "slack", "C1")
+	ctx = ContextWithDeliveryMeta(ctx, map[string]any{"thread_ts": "123.45"})
+	if _, err := tool.Execute(ctx, map[string]any{"to": "C2", "text": "hello", "reply_in_thread": true}); err == nil {
+		t.Fatal("expected reply_in_thread with explicit target to fail")
+	}
+}
+
+func TestSendMessage_ReplyInThreadRejectsExplicitChannel(t *testing.T) {
+	tool := &SendMessage{
+		Deliver: func(ctx context.Context, ch, to, text string, meta map[string]any) error {
+			return nil
+		},
+	}
+	ctx := ContextWithDelivery(context.Background(), "slack", "C1")
+	ctx = ContextWithDeliveryMeta(ctx, map[string]any{"thread_ts": "123.45"})
+	if _, err := tool.Execute(ctx, map[string]any{"channel": "discord", "text": "hello", "reply_in_thread": true}); err == nil {
+		t.Fatal("expected reply_in_thread with explicit channel to fail")
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 
 	"or3-intern/internal/artifacts"
 	"or3-intern/internal/bus"
+	"or3-intern/internal/channels"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
 	"or3-intern/internal/heartbeat"
@@ -29,6 +30,7 @@ type mockDeliverer struct {
 	messages []string
 	channel  string
 	to       string
+	meta     map[string]any
 	err      error
 }
 
@@ -37,6 +39,11 @@ func (m *mockDeliverer) Deliver(ctx context.Context, channel, to, text string) e
 	m.channel = channel
 	m.to = to
 	return m.err
+}
+
+func (m *mockDeliverer) DeliverWithMeta(ctx context.Context, channel, to, text string, meta map[string]any) error {
+	m.meta = channels.CloneMeta(meta)
+	return m.Deliver(ctx, channel, to, text)
 }
 
 // buildChatServer creates a test HTTP server that responds to /chat/completions
@@ -155,6 +162,96 @@ func TestRuntime_Handle_UsesChannelTargetFromEventMeta(t *testing.T) {
 	}
 	if deliver.to != "channel-1" {
 		t.Fatalf("expected delivery to channel target, got %q", deliver.to)
+	}
+}
+
+func TestRuntime_Handle_PreservesReplyMetadataForDelivery(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	response := providers.ChatCompletionResponse{
+		Choices: []struct {
+			Message struct {
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			} `json:"message"`
+		}{
+			{
+				Message: struct {
+					Role      string               `json:"role"`
+					Content   any                  `json:"content"`
+					ToolCalls []providers.ToolCall `json:"tool_calls"`
+				}{Role: "assistant", Content: "Reply"},
+			},
+		},
+	}
+	_, provider := buildChatServer(t, response)
+	deliver := &mockDeliverer{}
+	rt := buildSimpleRuntime(t, provider, d, deliver)
+
+	err := rt.Handle(context.Background(), bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess1",
+		Channel:    "slack",
+		From:       "user-id",
+		Message:    "hello",
+		Meta: map[string]any{
+			"channel_id":           "channel-1",
+			channels.MetaThreadTS:   "123.45",
+			"attachments":          []string{"artifact"},
+			channels.MetaMediaPaths: []string{"/tmp/file.txt"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if got := deliver.meta[channels.MetaThreadTS]; got != "123.45" {
+		t.Fatalf("expected thread metadata to be delivered, got %#v", deliver.meta)
+	}
+	if _, ok := deliver.meta["attachments"]; ok {
+		t.Fatalf("expected only reply metadata to be delivered, got %#v", deliver.meta)
+	}
+}
+
+func TestRuntime_Handle_StreamPreservesReplyMetadata(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintln(w, `data: {"id":"1","choices":[{"delta":{"content":"Hello"},"finish_reason":""}]}`)
+		fmt.Fprintln(w, `data: {"id":"1","choices":[{"delta":{"content":" there"},"finish_reason":""}]}`)
+		fmt.Fprintln(w, `data: [DONE]`)
+	}))
+	defer srv.Close()
+
+	provider := providers.New(srv.URL, "key", 10*time.Second)
+	provider.HTTP = srv.Client()
+	streamer := &replyMetaStreamer{}
+	rt := &Runtime{DB: d, Provider: provider, Model: "gpt-4", Tools: tools.NewRegistry(), Builder: &Builder{DB: d, HistoryMax: 10}, MaxToolLoops: 2, Streamer: streamer}
+
+	err := rt.Handle(context.Background(), bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess-stream",
+		Channel:    "slack",
+		From:       "user-id",
+		Message:    "hello",
+		Meta:       map[string]any{"channel_id": "channel-1", channels.MetaThreadTS: "123.45"},
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if streamer.to != "channel-1" {
+		t.Fatalf("expected stream target channel-1, got %q", streamer.to)
+	}
+	if got := streamer.meta[channels.MetaThreadTS]; got != "123.45" {
+		t.Fatalf("expected streamed thread metadata, got %#v", streamer.meta)
+	}
+	if got := streamer.meta["channel"]; got != "slack" {
+		t.Fatalf("expected stream channel metadata, got %#v", streamer.meta)
+	}
+	if streamer.writer == nil || !streamer.writer.closed {
+		t.Fatalf("expected stream final text, got %#v", streamer.writer)
+	}
+	if strings.Join(streamer.writer.deltas, "") != "Hello there" {
+		t.Fatalf("expected streamed deltas to form final text, got %#v", streamer.writer.deltas)
 	}
 }
 
@@ -687,6 +784,7 @@ type deliveryContextTool struct {
 	tools.Base
 	channel string
 	to      string
+	meta    map[string]any
 }
 
 func (dct *deliveryContextTool) Name() string        { return "delivery_context_tool" }
@@ -696,10 +794,24 @@ func (dct *deliveryContextTool) Parameters() map[string]any {
 }
 func (dct *deliveryContextTool) Execute(ctx context.Context, params map[string]any) (string, error) {
 	dct.channel, dct.to = tools.DeliveryFromContext(ctx)
+	dct.meta = tools.DeliveryMetaFromContext(ctx)
 	return "captured", nil
 }
 func (dct *deliveryContextTool) Schema() map[string]any {
 	return dct.SchemaFor(dct.Name(), dct.Description(), dct.Parameters())
+}
+
+type replyMetaStreamer struct {
+	to     string
+	meta   map[string]any
+	writer *mockStreamWriter
+}
+
+func (m *replyMetaStreamer) BeginStream(ctx context.Context, to string, meta map[string]any) (channels.StreamWriter, error) {
+	m.to = to
+	m.meta = channels.CloneMeta(meta)
+	m.writer = &mockStreamWriter{}
+	return m.writer, nil
 }
 
 func TestRuntime_Handle_ArtifactSave(t *testing.T) {
@@ -1057,12 +1169,15 @@ func TestRuntime_Handle_ToolContextIncludesDelivery(t *testing.T) {
 		Channel:    "discord",
 		From:       "user-1",
 		Message:    "hello",
-		Meta:       map[string]any{"channel_id": "channel-1"},
+		Meta:       map[string]any{"channel_id": "channel-1", channels.MetaMessageReference: "m-1"},
 	}); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	if tool.channel != "discord" || tool.to != "channel-1" {
 		t.Fatalf("expected delivery context discord/channel-1, got %q/%q", tool.channel, tool.to)
+	}
+	if got := tool.meta[channels.MetaMessageReference]; got != "m-1" {
+		t.Fatalf("expected message reference in tool delivery context, got %#v", tool.meta)
 	}
 }
 
@@ -1160,6 +1275,95 @@ func TestRuntime_Handle_HeartbeatSendMessageToolStillWorks(t *testing.T) {
 	}
 	if len(deliver.messages) != 0 {
 		t.Fatalf("expected no default delivery for heartbeat final response, got %#v", deliver.messages)
+	}
+}
+
+func TestRuntime_Handle_HeartbeatSendMessageDoesNotImplicitlyThread(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		var resp providers.ChatCompletionResponse
+		if callCount == 1 {
+			resp = providers.ChatCompletionResponse{
+				Choices: []struct {
+					Message struct {
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					} `json:"message"`
+				}{
+					{
+						Message: struct {
+							Role      string               `json:"role"`
+							Content   any                  `json:"content"`
+							ToolCalls []providers.ToolCall `json:"tool_calls"`
+						}{
+							Role: "assistant",
+							ToolCalls: []providers.ToolCall{{
+								ID:   "tc-send",
+								Type: "function",
+								Function: struct {
+									Name      string `json:"name"`
+									Arguments string `json:"arguments"`
+								}{Name: "send_message", Arguments: `{"text":"heartbeat ping"}`},
+							}},
+						},
+					},
+				},
+			}
+		} else {
+			resp = providers.ChatCompletionResponse{
+				Choices: []struct {
+					Message struct {
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					} `json:"message"`
+				}{
+					{
+						Message: struct {
+							Role      string               `json:"role"`
+							Content   any                  `json:"content"`
+							ToolCalls []providers.ToolCall `json:"tool_calls"`
+						}{Role: "assistant", Content: "sent"},
+					},
+				},
+			}
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	provider := providers.New(srv.URL, "key", 10*time.Second)
+	provider.HTTP = srv.Client()
+
+	var sentMeta map[string]any
+	reg := tools.NewRegistry()
+	reg.Register(&tools.SendMessage{
+		Deliver: func(ctx context.Context, channel, to, text string, meta map[string]any) error {
+			sentMeta = channels.CloneMeta(meta)
+			return nil
+		},
+	})
+
+	rt := &Runtime{DB: d, Provider: provider, Model: "gpt-4", Tools: reg, Builder: &Builder{DB: d, HistoryMax: 10}, MaxToolLoops: 4}
+	err := rt.Handle(context.Background(), bus.Event{
+		Type:       bus.EventHeartbeat,
+		SessionKey: "heartbeat:thread",
+		Channel:    "slack",
+		From:       "heartbeat",
+		Message:    "notify",
+		Meta:       map[string]any{"channel_id": "C1", channels.MetaThreadTS: "123.45"},
+	})
+	if err != nil {
+		t.Fatalf("Handle heartbeat send_message: %v", err)
+	}
+	if sentMeta != nil {
+		if _, ok := sentMeta[channels.MetaThreadTS]; ok {
+			t.Fatalf("expected proactive send_message not to inherit thread metadata, got %#v", sentMeta)
+		}
 	}
 }
 

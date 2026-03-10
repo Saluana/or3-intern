@@ -10,6 +10,7 @@ import (
 type sessionContextKey struct{}
 type deliveryChannelContextKey struct{}
 type deliveryToContextKey struct{}
+type deliveryMetaContextKey struct{}
 type envContextKey struct{}
 type toolGuardContextKey struct{}
 type activeProfileContextKey struct{}
@@ -52,6 +53,20 @@ func ContextWithDelivery(ctx context.Context, channel, to string) context.Contex
 	}
 	ctx = context.WithValue(ctx, deliveryChannelContextKey{}, channel)
 	return context.WithValue(ctx, deliveryToContextKey{}, to)
+}
+
+func ContextWithDeliveryMeta(ctx context.Context, meta map[string]any) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if len(meta) == 0 {
+		return ctx
+	}
+	cloned := make(map[string]any, len(meta))
+	for k, v := range meta {
+		cloned[k] = v
+	}
+	return context.WithValue(ctx, deliveryMetaContextKey{}, cloned)
 }
 
 func ContextWithEnv(ctx context.Context, env map[string]string) context.Context {
@@ -146,6 +161,21 @@ func DeliveryFromContext(ctx context.Context) (channel string, to string) {
 		to = v
 	}
 	return channel, to
+}
+
+func DeliveryMetaFromContext(ctx context.Context) map[string]any {
+	if ctx == nil {
+		return nil
+	}
+	meta, _ := ctx.Value(deliveryMetaContextKey{}).(map[string]any)
+	if len(meta) == 0 {
+		return nil
+	}
+	cloned := make(map[string]any, len(meta))
+	for k, v := range meta {
+		cloned[k] = v
+	}
+	return cloned
 }
 
 func EnvFromContext(ctx context.Context) map[string]string {

@@ -36,6 +36,10 @@ type Deliverer interface {
 	Deliver(ctx context.Context, channel, to, text string) error
 }
 
+type MetaDeliverer interface {
+	DeliverWithMeta(ctx context.Context, channel, to, text string, meta map[string]any) error
+}
+
 type sessionLock struct {
 	mu   sync.Mutex
 	refs int
@@ -196,12 +200,13 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 	}
 
 	replyTarget := deliveryTarget(ev)
-	finalText, streamed, err := r.executeConversation(ctx, ev.Type, ev.SessionKey, messages, r.Tools, ev.Channel, replyTarget)
+	replyMeta := channels.ReplyMeta(ev.Meta)
+	finalText, streamed, err := r.executeConversation(ctx, ev.Type, ev.SessionKey, messages, r.Tools, ev.Channel, replyTarget, replyMeta)
 	if err != nil {
 		return err
 	}
 
-	r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, finalText, streamed, shouldAutoDeliver(ev))
+	r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, finalText, replyMeta, streamed, shouldAutoDeliver(ev))
 
 	// best-effort rolling consolidation of old messages into memory notes
 	if r.Consolidator != nil && r.Builder != nil && r.ConsolidationScheduler != nil {
@@ -285,12 +290,13 @@ func (r *Runtime) handleExplicitSkillInvocation(ctx context.Context, ev bus.Even
 		return false, nil
 	}
 	replyTarget := deliveryTarget(ev)
+	replyMeta := channels.ReplyMeta(ev.Meta)
 	skill, found := r.Builder.Skills.Get(commandName)
 	if !found {
 		return false, nil
 	}
 	if !skill.UserInvocable {
-		r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, "skill is not user-invocable: "+skill.Name, false, shouldAutoDeliver(ev))
+		r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, "skill is not user-invocable: "+skill.Name, replyMeta, false, shouldAutoDeliver(ev))
 		return true, nil
 	}
 	if !skill.Eligible {
@@ -303,12 +309,12 @@ func (r *Runtime) handleExplicitSkillInvocation(ctx context.Context, ev bus.Even
 		if len(reasons) > 0 {
 			message += " (" + strings.Join(reasons, "; ") + ")"
 		}
-		r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, message, false, shouldAutoDeliver(ev))
+		r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, message, replyMeta, false, shouldAutoDeliver(ev))
 		return true, nil
 	}
 	if skill.CommandDispatch == "tool" {
 		text := r.dispatchExplicitSkillTool(ctx, ev, skill, commandName, rawArgs)
-		r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, text, false, shouldAutoDeliver(ev))
+		r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, text, replyMeta, false, shouldAutoDeliver(ev))
 		return true, nil
 	}
 
@@ -340,11 +346,11 @@ func (r *Runtime) handleExplicitSkillInvocation(ctx context.Context, ev bus.Even
 	}
 	runCtx := tools.ContextWithEnv(ctx, r.skillRunEnvFor(skill.Name))
 	runCtx = tools.ContextWithSkillPolicy(runCtx, skillPolicyForSkill(skill))
-	finalText, streamed, err := r.executeConversation(runCtx, ev.Type, ev.SessionKey, seeded, r.Tools, ev.Channel, replyTarget)
+	finalText, streamed, err := r.executeConversation(runCtx, ev.Type, ev.SessionKey, seeded, r.Tools, ev.Channel, replyTarget, replyMeta)
 	if err != nil {
 		return true, err
 	}
-	r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, finalText, streamed, shouldAutoDeliver(ev))
+	r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, finalText, replyMeta, streamed, shouldAutoDeliver(ev))
 	return true, nil
 }
 
@@ -360,6 +366,7 @@ func (r *Runtime) dispatchExplicitSkillTool(ctx context.Context, ev bus.Event, s
 	}
 	toolCtx := tools.ContextWithSession(ctx, scopeKey)
 	toolCtx = tools.ContextWithDelivery(toolCtx, ev.Channel, deliveryTarget(ev))
+	toolCtx = tools.ContextWithDeliveryMeta(toolCtx, channels.ReplyMeta(ev.Meta))
 	toolCtx = tools.ContextWithEnv(toolCtx, r.skillRunEnvFor(skill.Name))
 	toolCtx = tools.ContextWithSkillPolicy(toolCtx, skillPolicyForSkill(skill))
 	toolCtx = r.contextWithTrustedToolAccess(toolCtx, ev)
@@ -459,7 +466,7 @@ func (r *Runtime) RunBackground(ctx context.Context, input BackgroundRunInput) (
 	if reg == nil {
 		reg = r.Tools
 	}
-	finalText, _, err := r.executeConversation(ctx, bus.EventSystem, input.SessionKey, append([]providers.ChatMessage{}, input.PromptSnapshot...), reg, input.Channel, input.ReplyTo)
+	finalText, _, err := r.executeConversation(ctx, bus.EventSystem, input.SessionKey, append([]providers.ChatMessage{}, input.PromptSnapshot...), reg, input.Channel, input.ReplyTo, nil)
 	if err != nil {
 		return BackgroundRunResult{}, err
 	}
@@ -488,7 +495,7 @@ func (r *Runtime) handleNewSession(ctx context.Context, ev bus.Event) error {
 		if err := r.Consolidator.ArchiveAll(ctx, ev.SessionKey, historyMax); err != nil {
 			msg := "Memory archival failed, session not cleared. Please try again."
 			if r.Deliver != nil {
-				if derr := r.Deliver.Deliver(ctx, ev.Channel, replyTarget, msg); derr != nil {
+				if derr := r.deliver(ctx, ev.Channel, replyTarget, msg, ev.Meta); derr != nil {
 					log.Printf("deliver failed: %v", derr)
 				}
 			}
@@ -498,14 +505,14 @@ func (r *Runtime) handleNewSession(ctx context.Context, ev bus.Event) error {
 	if err := r.DB.ResetSessionHistory(ctx, ev.SessionKey); err != nil {
 		msg := "New session failed. Please try again."
 		if r.Deliver != nil {
-			if derr := r.Deliver.Deliver(ctx, ev.Channel, replyTarget, msg); derr != nil {
+			if derr := r.deliver(ctx, ev.Channel, replyTarget, msg, ev.Meta); derr != nil {
 				log.Printf("deliver failed: %v", derr)
 			}
 		}
 		return nil
 	}
 	if r.Deliver != nil {
-		if err := r.Deliver.Deliver(ctx, ev.Channel, replyTarget, "New session started."); err != nil {
+		if err := r.deliver(ctx, ev.Channel, replyTarget, "New session started.", ev.Meta); err != nil {
 			log.Printf("deliver failed: %v", err)
 		}
 	}
@@ -523,7 +530,7 @@ func contentToString(v any) string {
 	return string(b)
 }
 
-func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventType, sessionKey string, messages []providers.ChatMessage, reg *tools.Registry, channel string, replyTo string) (string, bool, error) {
+func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventType, sessionKey string, messages []providers.ChatMessage, reg *tools.Registry, channel string, replyTo string, replyMeta map[string]any) (string, bool, error) {
 	if reg == nil {
 		reg = tools.NewRegistry()
 	}
@@ -552,7 +559,12 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 		if r.Streamer != nil {
 			resp, err = r.Provider.ChatStream(ctx, req, func(text string) {
 				swOnce.Do(func() {
-					w, beginErr := r.Streamer.BeginStream(ctx, replyTo, map[string]any{"channel": channel})
+					streamMeta := channels.CloneMeta(replyMeta)
+					if streamMeta == nil {
+						streamMeta = map[string]any{}
+					}
+					streamMeta["channel"] = channel
+					w, beginErr := r.Streamer.BeginStream(ctx, replyTo, streamMeta)
 					if beginErr == nil {
 						sw = w
 					}
@@ -600,6 +612,7 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 		for _, tc := range msg.ToolCalls {
 			toolCtx := tools.ContextWithSession(ctx, scopeKey)
 			toolCtx = tools.ContextWithDelivery(toolCtx, channel, replyTo)
+			toolCtx = tools.ContextWithDeliveryMeta(toolCtx, replyMeta)
 			toolCtx = r.contextWithTrustedToolAccess(toolCtx, bus.Event{Type: eventType, SessionKey: sessionKey, Channel: channel})
 			toolCtx = tools.ContextWithToolGuard(toolCtx, r.guardToolExecution)
 			out, err := reg.Execute(toolCtx, tc.Function.Name, tc.Function.Arguments)
@@ -1015,7 +1028,7 @@ func (r *Runtime) skillRunEnvFor(name string) map[string]string {
 	return r.Builder.Skills.RunEnvForSkill(name)
 }
 
-func (r *Runtime) persistAssistantReply(ctx context.Context, sessionKey string, msgID int64, channel, replyTarget, finalText string, streamed bool, autoDeliver bool) {
+func (r *Runtime) persistAssistantReply(ctx context.Context, sessionKey string, msgID int64, channel, replyTarget, finalText string, replyMeta map[string]any, streamed bool, autoDeliver bool) {
 	if strings.TrimSpace(finalText) == "" {
 		finalText = "(no response)"
 	}
@@ -1023,10 +1036,20 @@ func (r *Runtime) persistAssistantReply(ctx context.Context, sessionKey string, 
 		log.Printf("append assistant(final) failed: %v", err)
 	}
 	if autoDeliver && !streamed && r.Deliver != nil {
-		if err := r.Deliver.Deliver(ctx, channel, replyTarget, finalText); err != nil {
+		if err := r.deliver(ctx, channel, replyTarget, finalText, replyMeta); err != nil {
 			log.Printf("deliver failed: %v", err)
 		}
 	}
+}
+
+func (r *Runtime) deliver(ctx context.Context, channel, to, text string, meta map[string]any) error {
+	if r.Deliver == nil {
+		return nil
+	}
+	if withMeta, ok := r.Deliver.(MetaDeliverer); ok {
+		return withMeta.DeliverWithMeta(ctx, channel, to, text, channels.ReplyMeta(meta))
+	}
+	return r.Deliver.Deliver(ctx, channel, to, text)
 }
 
 func (r *Runtime) boundTextResult(ctx context.Context, sessionKey string, text string) (stored string, preview string, artifactID string) {

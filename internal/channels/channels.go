@@ -11,6 +11,13 @@ import (
 	"or3-intern/internal/bus"
 )
 
+const (
+	MetaMediaPaths       = "media_paths"
+	MetaThreadTS         = "thread_ts"
+	MetaReplyToMessageID = "reply_to_message_id"
+	MetaMessageReference = "message_reference"
+)
+
 type Channel interface {
 	Name() string
 	Start(ctx context.Context, eventBus *bus.Bus) error
@@ -142,4 +149,63 @@ func (m *Manager) get(name string) (Channel, error) {
 		return nil, fmt.Errorf("channel not found: %s", name)
 	}
 	return ch, nil
+}
+
+func CloneMeta(meta map[string]any) map[string]any {
+	if len(meta) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(meta))
+	for k, v := range meta {
+		out[k] = v
+	}
+	return out
+}
+
+func ReplyMeta(meta map[string]any) map[string]any {
+	if len(meta) == 0 {
+		return nil
+	}
+	out := map[string]any{}
+	for _, key := range []string{MetaThreadTS, MetaReplyToMessageID, MetaMessageReference} {
+		if value, ok := meta[key]; ok && hasMeaningfulMetaValue(value) {
+			out[key] = value
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func hasMeaningfulMetaValue(value any) bool {
+	switch v := value.(type) {
+	case nil:
+		return false
+	case string:
+		return strings.TrimSpace(v) != ""
+	case int:
+		return v > 0
+	case int8:
+		return v > 0
+	case int16:
+		return v > 0
+	case int32:
+		return v > 0
+	case int64:
+		return v > 0
+	case uint:
+		return v > 0
+	case uint8:
+		return v > 0
+	case uint16:
+		return v > 0
+	case uint32:
+		return v > 0
+	case uint64:
+		return v > 0
+	default:
+		text := strings.TrimSpace(fmt.Sprint(value))
+		return text != "" && text != "<nil>"
+	}
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 )
 
 type Registry struct {
@@ -33,6 +34,35 @@ func (r *Registry) Definitions() []map[string]any {
 		out = append(out, r.tools[name].Schema())
 	}
 	return out
+}
+
+func (r *Registry) CloneFiltered(allowed []string) *Registry {
+	if r == nil {
+		return NewRegistry()
+	}
+	if len(allowed) == 0 {
+		clone := NewRegistry()
+		for _, name := range r.Names() {
+			clone.Register(r.tools[name])
+		}
+		return clone
+	}
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, name := range allowed {
+		trimmed := strings.TrimSpace(name)
+		if trimmed == "" {
+			continue
+		}
+		allowedSet[trimmed] = struct{}{}
+	}
+	clone := NewRegistry()
+	for _, name := range r.Names() {
+		if _, ok := allowedSet[name]; !ok {
+			continue
+		}
+		clone.Register(r.tools[name])
+	}
+	return clone
 }
 
 func (r *Registry) Execute(ctx context.Context, name string, argsJSON string) (string, error) {

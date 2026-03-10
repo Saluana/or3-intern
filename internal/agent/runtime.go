@@ -204,7 +204,7 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 
 	replyTarget := deliveryTarget(ev)
 	replyMeta := channels.ReplyMeta(ev.Meta)
-	finalText, streamed, err := r.executeConversation(ctx, ev.Type, ev.SessionKey, messages, r.Tools, ev.Channel, replyTarget, replyMeta)
+	finalText, streamed, err := r.executeConversation(ctx, ev.Type, ev.SessionKey, messages, r.effectiveTools(ctx, r.Tools), ev.Channel, replyTarget, replyMeta)
 	if err != nil {
 		return err
 	}
@@ -349,7 +349,7 @@ func (r *Runtime) handleExplicitSkillInvocation(ctx context.Context, ev bus.Even
 	}
 	runCtx := tools.ContextWithEnv(ctx, r.skillRunEnvFor(skill.Name))
 	runCtx = tools.ContextWithSkillPolicy(runCtx, skillPolicyForSkill(skill))
-	finalText, streamed, err := r.executeConversation(runCtx, ev.Type, ev.SessionKey, seeded, r.Tools, ev.Channel, replyTarget, replyMeta)
+	finalText, streamed, err := r.executeConversation(runCtx, ev.Type, ev.SessionKey, seeded, r.effectiveTools(runCtx, r.Tools), ev.Channel, replyTarget, replyMeta)
 	if err != nil {
 		return true, err
 	}
@@ -467,7 +467,7 @@ func (r *Runtime) RunBackground(ctx context.Context, input BackgroundRunInput) (
 	}
 	reg := input.Tools
 	if reg == nil {
-		reg = r.Tools
+		reg = r.effectiveTools(ctx, r.Tools)
 	}
 	finalText, _, err := r.executeConversation(ctx, bus.EventSystem, input.SessionKey, append([]providers.ChatMessage{}, input.PromptSnapshot...), reg, input.Channel, input.ReplyTo, nil)
 	if err != nil {
@@ -537,6 +537,7 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 	if reg == nil {
 		reg = tools.NewRegistry()
 	}
+	observer := conversationObserverFromContext(ctx)
 	scopeKey := sessionKey
 	if r.DB != nil && strings.TrimSpace(sessionKey) != "" {
 		if resolved, err := r.DB.ResolveScopeKey(ctx, sessionKey); err == nil && strings.TrimSpace(resolved) != "" {
@@ -559,15 +560,19 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 		var err error
 		var sw channels.StreamWriter // lazily created on first text delta
 		var swOnce sync.Once
-		if r.Streamer != nil {
+		streamer := r.streamerForContext(ctx)
+		if streamer != nil {
 			resp, err = r.Provider.ChatStream(ctx, req, func(text string) {
+				if observer != nil {
+					observer.OnTextDelta(ctx, text)
+				}
 				swOnce.Do(func() {
 					streamMeta := channels.CloneMeta(replyMeta)
 					if streamMeta == nil {
 						streamMeta = map[string]any{}
 					}
 					streamMeta["channel"] = channel
-					w, beginErr := r.Streamer.BeginStream(ctx, replyTo, streamMeta)
+					w, beginErr := streamer.BeginStream(ctx, replyTo, streamMeta)
 					if beginErr == nil {
 						sw = w
 					}
@@ -583,13 +588,20 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 			if sw != nil {
 				_ = sw.Abort(ctx)
 			}
+			if observer != nil {
+				observer.OnError(ctx, err)
+			}
 			return "", false, err
 		}
 		if len(resp.Choices) == 0 {
 			if sw != nil {
 				_ = sw.Abort(ctx)
 			}
-			return "", false, fmt.Errorf("no choices")
+			err = fmt.Errorf("no choices")
+			if observer != nil {
+				observer.OnError(ctx, err)
+			}
+			return "", false, err
 		}
 		msg := resp.Choices[0].Message
 		if len(msg.ToolCalls) == 0 {
@@ -597,7 +609,13 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 			messages = append(messages, providers.ChatMessage{Role: "assistant", Content: finalText})
 			if sw != nil {
 				_ = sw.Close(ctx, finalText)
+				if observer != nil {
+					observer.OnCompletion(ctx, finalText, true)
+				}
 				return finalText, true, nil
+			}
+			if observer != nil {
+				observer.OnCompletion(ctx, finalText, false)
 			}
 			return finalText, false, nil
 		}
@@ -613,12 +631,18 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 		}
 
 		for _, tc := range msg.ToolCalls {
+			if observer != nil {
+				observer.OnToolCall(ctx, tc.Function.Name, tc.Function.Arguments)
+			}
 			toolCtx := tools.ContextWithSession(ctx, scopeKey)
 			toolCtx = tools.ContextWithDelivery(toolCtx, channel, replyTo)
 			toolCtx = tools.ContextWithDeliveryMeta(toolCtx, replyMeta)
 			toolCtx = r.contextWithTrustedToolAccess(toolCtx, bus.Event{Type: eventType, SessionKey: sessionKey, Channel: channel})
 			toolCtx = tools.ContextWithToolGuard(toolCtx, r.guardToolExecution)
 			out, err := reg.Execute(toolCtx, tc.Function.Name, tc.Function.Arguments)
+			if observer != nil {
+				observer.OnToolResult(ctx, tc.Function.Name, out, err)
+			}
 			if err != nil {
 				out = formatToolExecutionError(out, err)
 			}
@@ -639,6 +663,23 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 		}
 	}
 	return "(no response)", false, nil
+}
+
+func (r *Runtime) effectiveTools(ctx context.Context, fallback *tools.Registry) *tools.Registry {
+	if reg := toolRegistryFromContext(ctx); reg != nil {
+		return reg
+	}
+	if fallback == nil {
+		return tools.NewRegistry()
+	}
+	return fallback
+}
+
+func (r *Runtime) streamerForContext(ctx context.Context) channels.StreamingChannel {
+	if streamer := streamingChannelFromContext(ctx); streamer != nil {
+		return streamer
+	}
+	return r.Streamer
 }
 
 func (r *Runtime) guardToolExecution(ctx context.Context, tool tools.Tool, capability tools.CapabilityLevel, params map[string]any) error {

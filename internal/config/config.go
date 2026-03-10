@@ -53,6 +53,7 @@ type Config struct {
 	Tools     ToolsConfig     `json:"tools"`
 	Hardening HardeningConfig `json:"hardening"`
 	Cron      CronConfig      `json:"cron"`
+	Service   ServiceConfig   `json:"service"`
 	Heartbeat HeartbeatConfig `json:"heartbeat"`
 	Channels  ChannelsConfig  `json:"channels"`
 }
@@ -134,6 +135,12 @@ type HeartbeatConfig struct {
 	IntervalMinutes int    `json:"intervalMinutes"`
 	TasksFile       string `json:"tasksFile"`
 	SessionKey      string `json:"sessionKey"`
+}
+
+type ServiceConfig struct {
+	Enabled bool   `json:"enabled"`
+	Listen  string `json:"listen"`
+	Secret  string `json:"secret"`
 }
 
 type SubagentsConfig struct {
@@ -489,6 +496,11 @@ func Default() Config {
 			},
 		},
 		Cron: CronConfig{Enabled: true, StorePath: filepath.Join(root, "cron.json")},
+		Service: ServiceConfig{
+			Enabled: false,
+			Listen:  "127.0.0.1:9100",
+			Secret:  "",
+		},
 		Heartbeat: HeartbeatConfig{
 			Enabled:         false,
 			IntervalMinutes: 30,
@@ -615,6 +627,17 @@ func ApplyEnvOverrides(cfg *Config) {
 			cfg.Subagents.TaskTimeoutSeconds = parsed
 		}
 	}
+	if v := os.Getenv("OR3_SERVICE_ENABLED"); v != "" {
+		if parsed, err := strconv.ParseBool(v); err == nil {
+			cfg.Service.Enabled = parsed
+		}
+	}
+	if v := os.Getenv("OR3_SERVICE_LISTEN"); v != "" {
+		cfg.Service.Listen = v
+	}
+	if v := os.Getenv("OR3_SERVICE_SECRET"); v != "" {
+		cfg.Service.Secret = v
+	}
 }
 
 func Save(path string, cfg Config) error {
@@ -702,6 +725,9 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.Subagents.TaskTimeoutSeconds <= 0 {
 		cfg.Subagents.TaskTimeoutSeconds = 300
+	}
+	if strings.TrimSpace(cfg.Service.Listen) == "" {
+		cfg.Service.Listen = Default().Service.Listen
 	}
 	if cfg.Channels.Telegram.APIBase == "" {
 		cfg.Channels.Telegram.APIBase = "https://api.telegram.org"

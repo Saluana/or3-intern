@@ -171,14 +171,14 @@ Although some services may be started by jobs that run through `or3-intern`, the
 
 ## Tasks
 
-- [ ] **Config** — Add `ServiceConfig` to `internal/config/config.go` with `Enabled`, `Listen`, `Secret` fields. Add env overrides `OR3_SERVICE_ENABLED`, `OR3_SERVICE_LISTEN`, `OR3_SERVICE_SECRET`. Add defaults (`false`, `127.0.0.1:9100`, empty).
-- [ ] **Service entry** — Add `cmd/or3-intern/service.go` that starts an HTTP listener using the shared runtime (same `agent.Builder`, tool registry, DB, provider, subagent manager). Wire it into `main.go` command dispatch.
-- [ ] **Auth middleware** — Add HMAC-based shared-secret middleware. Refuse to start if `Secret` is empty. Reject requests with invalid or missing auth headers.
-- [ ] **Job registry** — Add `internal/agent/job_registry.go` with in-memory job tracking: register, lookup, fan-out subscribe, cancel, and cleanup. Keep it bounded (max tracked jobs, TTL for completed entries).
-- [ ] **Turn endpoint** — Add `POST /internal/v1/turns` handler that calls `agent.Builder.Run()` with the provided session key, message, and optional tool policy. Stream events via SSE or return JSON based on Accept header.
-- [ ] **Subagent endpoint** — Add `POST /internal/v1/subagents` handler that submits work to the existing `SubagentManager` and returns a job handle.
-- [ ] **Stream endpoint** — Add `GET /internal/v1/jobs/:id/stream` handler that subscribes to the job registry's fan-out channel and writes SSE events.
-- [ ] **Abort endpoint** — Add `POST /internal/v1/jobs/:id/abort` handler that cancels the job context and returns confirmation.
-- [ ] **Tests** — Add tests for: auth rejection (missing/invalid secret), successful turn execution and SSE event ordering, subagent policy inheritance, abort cancellation, stream fan-out to multiple consumers, job registry cleanup.
-- [ ] **Doctor check** — Add a `doctor` finding that warns if the service is enabled but the secret is weak or the listen address is publicly routable.
-- [ ] **Docs** — Document service-mode config, startup, security expectations, and the internal API contract in the README or a dedicated doc file.
+- [x] **Config** — Added `ServiceConfig` to `internal/config/config.go` with `Enabled`, `Listen`, `Secret` fields, env overrides `OR3_SERVICE_ENABLED`, `OR3_SERVICE_LISTEN`, `OR3_SERVICE_SECRET`, and defaults (`false`, `127.0.0.1:9100`, empty).
+- [x] **Service entry** — Added `cmd/or3-intern/service.go` and wired `service` into `cmd/or3-intern/main.go` using the shared runtime/subagent manager instead of a second execution stack.
+- [x] **Auth middleware** — Added HMAC-based shared-secret middleware in `cmd/or3-intern/service_auth.go`; startup now fails closed when `service.secret` is empty.
+- [x] **Job registry** — Added `internal/agent/job_registry.go` with transient tracking, fan-out subscriptions, cancellation hooks, and retention-based cleanup.
+- [x] **Turn endpoint** — Added `POST /internal/v1/turns` with SSE-or-JSON behavior, per-request tool allowlists, and runtime event streaming.
+- [x] **Subagent endpoint** — Added `POST /internal/v1/subagents` backed by the existing `SubagentManager`, including service-originated prompt snapshots/tool allowlists.
+- [x] **Stream endpoint** — Added `GET /internal/v1/jobs/:id/stream` SSE fan-out over the shared job registry.
+- [x] **Abort endpoint** — Added `POST /internal/v1/jobs/:id/abort` for turn cancellation and queued/running subagent abort handling.
+- [x] **Tests** — Added focused coverage for auth rejection, SSE ordering, abort cancellation, fan-out/cleanup in the job registry, and config/doctor wiring.
+- [x] **Doctor check** — Added `doctor` warnings for weak service secrets and non-loopback service bind addresses.
+- [x] **Docs** — Documented service config, startup, auth expectations, and the internal API contract in `README.md`.

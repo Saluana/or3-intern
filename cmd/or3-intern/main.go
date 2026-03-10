@@ -263,6 +263,12 @@ func main() {
 		AccessProfiles:     cfg.Security.Profiles,
 		Audit:              auditLogger,
 	}
+	var serviceJobs *agent.JobRegistry
+	if cmd == "service" {
+		serviceJobs = agent.NewJobRegistry(0, 0)
+		rt.Deliver = nil
+		rt.Streamer = nil
+	}
 
 	// cron service + tool
 	if cfg.Cron.Enabled {
@@ -282,9 +288,13 @@ func main() {
 			MaxConcurrent: cfg.Subagents.MaxConcurrent,
 			MaxQueued:     cfg.Subagents.MaxQueued,
 			TaskTimeout:   time.Duration(cfg.Subagents.TaskTimeoutSeconds) * time.Second,
+			Jobs:          serviceJobs,
 			BackgroundTools: func() *tools.Registry {
 				return buildBackgroundTools()
 			},
+		}
+		if cmd == "service" {
+			subagentManager.Deliver = nil
 		}
 		if err := subagentManager.Start(ctx); err != nil {
 			fmt.Fprintln(os.Stderr, "subagent manager error:", err)
@@ -358,6 +368,12 @@ func main() {
 		}
 		fmt.Println("or3-intern serve: channels running. Ctrl+C to stop.")
 		<-ctx.Done()
+	case "service":
+		runWorkers(ctx, b, rt, cfg.WorkerCount)
+		if err := runServiceCommand(ctx, cfg, rt, subagentManager, serviceJobs); err != nil {
+			fmt.Fprintln(os.Stderr, "service error:", err)
+			os.Exit(1)
+		}
 	case "agent":
 		// one-shot: or3-intern agent -m "hello"
 		fs := flag.NewFlagSet("agent", flag.ExitOnError)
@@ -496,7 +512,7 @@ func subagentsEnabledForCommand(cmd string, cfg config.Config) bool {
 		return false
 	}
 	switch strings.ToLower(strings.TrimSpace(cmd)) {
-	case "chat", "serve":
+	case "service", "chat", "serve":
 		return true
 	default:
 		return false

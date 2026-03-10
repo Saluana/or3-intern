@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"or3-intern/internal/db"
+	"or3-intern/internal/providers"
 	"or3-intern/internal/tools"
 )
 
@@ -29,6 +30,7 @@ type SubagentManager struct {
 	MaxQueued       int
 	TaskTimeout     time.Duration
 	BackgroundTools func() *tools.Registry
+	Jobs            *JobRegistry
 
 	mu       sync.Mutex
 	started  bool
@@ -36,6 +38,26 @@ type SubagentManager struct {
 	cancel   context.CancelFunc
 	notifyCh chan struct{}
 	wg       sync.WaitGroup
+}
+
+type ServiceSubagentRequest struct {
+	ParentSessionKey string
+	Task             string
+	PromptSnapshot   []providers.ChatMessage
+	AllowedTools     []string
+	ProfileName      string
+	Channel          string
+	ReplyTo          string
+	Meta             map[string]any
+	Timeout          time.Duration
+}
+
+type subagentJobMetadata struct {
+	ProfileName    string                  `json:"profile_name,omitempty"`
+	AllowedTools   []string                `json:"allowed_tools,omitempty"`
+	PromptSnapshot []providers.ChatMessage `json:"prompt_snapshot,omitempty"`
+	TimeoutSeconds int                     `json:"timeout_seconds,omitempty"`
+	ServiceMeta    map[string]any          `json:"service_meta,omitempty"`
 }
 
 func (m *SubagentManager) Start(ctx context.Context) error {
@@ -137,12 +159,7 @@ func (m *SubagentManager) Enqueue(ctx context.Context, req tools.SpawnRequest) (
 	if profileName := strings.TrimSpace(req.ProfileName); profileName != "" {
 		metadata["profile_name"] = profileName
 	}
-	metadataJSON := "{}"
-	if len(metadata) > 0 {
-		if b, err := json.Marshal(metadata); err == nil {
-			metadataJSON = string(b)
-		}
-	}
+	metadataJSON := mustMetadataJSON(metadata)
 	job := db.SubagentJob{
 		ID:               jobID,
 		ParentSessionKey: parentSessionKey,
@@ -155,6 +172,53 @@ func (m *SubagentManager) Enqueue(ctx context.Context, req tools.SpawnRequest) (
 	}
 	if err := m.DB.EnqueueSubagentJobLimited(ctx, job, m.MaxQueued); err != nil {
 		return tools.SpawnJob{}, err
+	}
+	if m.Jobs != nil {
+		m.Jobs.RegisterWithID(job.ID, "subagent")
+		m.Jobs.Publish(job.ID, "queued", map[string]any{"status": db.SubagentStatusQueued, "child_session_key": job.ChildSessionKey})
+	}
+	m.signal()
+	return tools.SpawnJob{ID: job.ID, ChildSessionKey: job.ChildSessionKey}, nil
+}
+
+func (m *SubagentManager) EnqueueService(ctx context.Context, req ServiceSubagentRequest) (tools.SpawnJob, error) {
+	if m == nil || m.DB == nil {
+		return tools.SpawnJob{}, fmt.Errorf("background subagents disabled")
+	}
+	parentSessionKey := strings.TrimSpace(req.ParentSessionKey)
+	if parentSessionKey == "" {
+		return tools.SpawnJob{}, fmt.Errorf("missing parent session")
+	}
+	task := strings.TrimSpace(req.Task)
+	if task == "" {
+		return tools.SpawnJob{}, fmt.Errorf("empty task")
+	}
+	jobID := newSubagentID()
+	metadata := subagentJobMetadata{
+		ProfileName:    strings.TrimSpace(req.ProfileName),
+		AllowedTools:   append([]string{}, req.AllowedTools...),
+		PromptSnapshot: append([]providers.ChatMessage{}, req.PromptSnapshot...),
+		ServiceMeta:    cloneMap(req.Meta),
+	}
+	if req.Timeout > 0 {
+		metadata.TimeoutSeconds = int(req.Timeout / time.Second)
+	}
+	job := db.SubagentJob{
+		ID:               jobID,
+		ParentSessionKey: parentSessionKey,
+		ChildSessionKey:  childSessionKey(parentSessionKey, jobID),
+		Channel:          strings.TrimSpace(req.Channel),
+		ReplyTo:          strings.TrimSpace(req.ReplyTo),
+		Task:             task,
+		Status:           db.SubagentStatusQueued,
+		MetadataJSON:     mustMetadataJSON(metadata),
+	}
+	if err := m.DB.EnqueueSubagentJobLimited(ctx, job, m.MaxQueued); err != nil {
+		return tools.SpawnJob{}, err
+	}
+	if m.Jobs != nil {
+		m.Jobs.RegisterWithID(job.ID, "subagent")
+		m.Jobs.Publish(job.ID, "queued", map[string]any{"status": db.SubagentStatusQueued, "child_session_key": job.ChildSessionKey})
 	}
 	m.signal()
 	return tools.SpawnJob{ID: job.ID, ChildSessionKey: job.ChildSessionKey}, nil
@@ -191,8 +255,13 @@ func (m *SubagentManager) runOnce() (bool, error) {
 }
 
 func (m *SubagentManager) executeJob(job db.SubagentJob) {
-	runCtx, cancel := context.WithTimeout(m.ctx, m.TaskTimeout)
+	timeout := m.jobTimeout(job)
+	runCtx, cancel := context.WithTimeout(m.ctx, timeout)
 	defer cancel()
+	if m.Jobs != nil {
+		m.Jobs.AttachCancel(job.ID, cancel)
+		m.Jobs.Publish(job.ID, "started", map[string]any{"status": db.SubagentStatusRunning, "child_session_key": job.ChildSessionKey})
+	}
 	result, err := m.runJob(runCtx, job)
 	if err != nil {
 		reason := strings.TrimSpace(err.Error())
@@ -210,20 +279,29 @@ func (m *SubagentManager) executeJob(job db.SubagentJob) {
 }
 
 func (m *SubagentManager) runJob(ctx context.Context, job db.SubagentJob) (BackgroundRunResult, error) {
-	promptSnapshot, err := m.Runtime.BuildPromptSnapshot(ctx, job.ParentSessionKey, job.Task)
-	if err != nil {
-		return BackgroundRunResult{}, err
+	metadata := parseSubagentJobMetadata(job.MetadataJSON)
+	promptSnapshot := append([]providers.ChatMessage{}, metadata.PromptSnapshot...)
+	var err error
+	if len(promptSnapshot) == 0 {
+		promptSnapshot, err = m.Runtime.BuildPromptSnapshot(ctx, job.ParentSessionKey, job.Task)
+		if err != nil {
+			return BackgroundRunResult{}, err
+		}
+	}
+	if m.Jobs != nil {
+		ctx = ContextWithConversationObserver(ctx, m.Jobs.Observer(job.ID))
+		ctx = ContextWithStreamingChannel(ctx, NullStreamer{})
 	}
 	return m.Runtime.RunBackground(ctx, BackgroundRunInput{
 		SessionKey:       job.ChildSessionKey,
 		ParentSessionKey: job.ParentSessionKey,
 		Task:             job.Task,
 		PromptSnapshot:   promptSnapshot,
-		Tools:            m.backgroundTools(),
+		Tools:            toolRegistryWithAllowlist(m.backgroundTools(), metadata.AllowedTools),
 		Meta: map[string]any{
 			"subagent_job_id":    job.ID,
 			"parent_session_key": job.ParentSessionKey,
-			"profile_name":       profileNameFromMetadata(job.MetadataJSON),
+			"profile_name":       metadata.ProfileName,
 		},
 		Channel: job.Channel,
 		ReplyTo: job.ReplyTo,
@@ -231,14 +309,7 @@ func (m *SubagentManager) runJob(ctx context.Context, job db.SubagentJob) (Backg
 }
 
 func profileNameFromMetadata(raw string) string {
-	if strings.TrimSpace(raw) == "" {
-		return ""
-	}
-	var metadata map[string]any
-	if err := json.Unmarshal([]byte(raw), &metadata); err != nil {
-		return ""
-	}
-	return strings.TrimSpace(fmt.Sprint(metadata["profile_name"]))
+	return parseSubagentJobMetadata(raw).ProfileName
 }
 
 func (m *SubagentManager) backgroundTools() *tools.Registry {
@@ -265,9 +336,83 @@ func (m *SubagentManager) finalizeJob(baseCtx context.Context, job db.SubagentJo
 		log.Printf("finalize subagent failed: job=%s err=%v", job.ID, err)
 		return
 	}
+	if m.Jobs != nil {
+		if status == db.SubagentStatusSucceeded {
+			m.Jobs.Complete(job.ID, status, map[string]any{"preview": preview, "artifact_id": artifactID, "child_session_key": job.ChildSessionKey})
+		} else if status == db.SubagentStatusInterrupted {
+			m.Jobs.Complete(job.ID, "aborted", map[string]any{"message": errText, "child_session_key": job.ChildSessionKey})
+		} else {
+			m.Jobs.Fail(job.ID, errText, map[string]any{"child_session_key": job.ChildSessionKey})
+		}
+	}
 	if deliver {
 		m.deliverCompletion(finalizeCtx, job, success, preview, artifactID, errText)
 	}
+}
+
+func (m *SubagentManager) Abort(ctx context.Context, id string) error {
+	if m == nil || m.DB == nil {
+		return fmt.Errorf("background subagents disabled")
+	}
+	if m.Jobs != nil && m.Jobs.Cancel(id) {
+		return nil
+	}
+	job, ok, err := m.DB.GetSubagentJob(ctx, id)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("job not found")
+	}
+	if job.Status == db.SubagentStatusQueued {
+		if err := m.DB.MarkSubagentInterrupted(ctx, id, "subagent aborted before execution"); err != nil {
+			return err
+		}
+		if m.Jobs != nil {
+			m.Jobs.Complete(id, "aborted", map[string]any{"message": "subagent aborted before execution", "child_session_key": job.ChildSessionKey})
+		}
+		return nil
+	}
+	return fmt.Errorf("job is not abortable")
+}
+
+func (m *SubagentManager) jobTimeout(job db.SubagentJob) time.Duration {
+	metadata := parseSubagentJobMetadata(job.MetadataJSON)
+	if metadata.TimeoutSeconds > 0 {
+		return time.Duration(metadata.TimeoutSeconds) * time.Second
+	}
+	if m.TaskTimeout <= 0 {
+		return 5 * time.Minute
+	}
+	return m.TaskTimeout
+}
+
+func parseSubagentJobMetadata(raw string) subagentJobMetadata {
+	if strings.TrimSpace(raw) == "" {
+		return subagentJobMetadata{}
+	}
+	var metadata subagentJobMetadata
+	if err := json.Unmarshal([]byte(raw), &metadata); err != nil {
+		var legacy map[string]any
+		if legacyErr := json.Unmarshal([]byte(raw), &legacy); legacyErr != nil {
+			return subagentJobMetadata{}
+		}
+		metadata.ProfileName = strings.TrimSpace(fmt.Sprint(legacy["profile_name"]))
+		return metadata
+	}
+	metadata.ProfileName = strings.TrimSpace(metadata.ProfileName)
+	return metadata
+}
+
+func mustMetadataJSON(payload any) string {
+	if payload == nil {
+		return "{}"
+	}
+	b, err := json.Marshal(payload)
+	if err != nil || len(b) == 0 {
+		return "{}"
+	}
+	return string(b)
 }
 
 func (m *SubagentManager) reconcileInterruptedJob(job db.SubagentJob, reason string) {

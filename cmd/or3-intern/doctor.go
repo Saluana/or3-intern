@@ -52,6 +52,7 @@ func doctorFindings(cfg config.Config) []doctorFinding {
 	findings = append(findings, hardeningFindings(cfg)...)
 	findings = append(findings, securityFindings(cfg)...)
 	findings = append(findings, webhookFindings(cfg)...)
+	findings = append(findings, serviceFindings(cfg)...)
 	findings = append(findings, mcpFindings(cfg)...)
 	findings = append(findings, networkFindings(cfg)...)
 	findings = append(findings, profileFindings(cfg)...)
@@ -178,6 +179,25 @@ func webhookFindings(cfg config.Config) []doctorFinding {
 	}
 	if cfg.Skills.EnableExec && profileAllowsPrivileged(profile) && profileAllowsTool(profile, "run_skill_script") {
 		addWarn(fmt.Sprintf("webhook can reach skill execution via profile %q", profileName))
+	}
+	return findings
+}
+
+func serviceFindings(cfg config.Config) []doctorFinding {
+	findings := []doctorFinding{}
+	addWarn := func(message string) {
+		findings = append(findings, doctorFinding{Level: "warn", Area: "service", Message: message})
+	}
+	if !cfg.Service.Enabled {
+		return findings
+	}
+	if strings.TrimSpace(cfg.Service.Secret) == "" {
+		addWarn("service mode is enabled without a shared secret")
+	} else if len(strings.TrimSpace(cfg.Service.Secret)) < 24 {
+		addWarn("service mode is enabled with a weak shared secret")
+	}
+	if !isLoopbackAddr(cfg.Service.Listen) {
+		addWarn("service bind address is not loopback-only")
 	}
 	return findings
 }

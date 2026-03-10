@@ -26,6 +26,7 @@ The `init` command can store your provider settings in `~/.or3-intern/config.jso
 - `or3-intern init` guided first-run setup
 - `or3-intern chat` interactive CLI
 - `or3-intern serve` run enabled external channels (Telegram / Slack / Discord / WhatsApp bridge / Email)
+- `or3-intern service` run the internal authenticated HTTP API for OR3 Net
 - `or3-intern agent -m "hello"` one-shot
 - `or3-intern doctor [--strict]` print hardening warnings for the current config
 - `or3-intern secrets <set|delete|list>` manage encrypted secret refs stored in SQLite
@@ -40,6 +41,41 @@ The `init` command can store your provider settings in `~/.or3-intern/config.jso
 - Hybrid memory retrieval: pinned + vector (cosine) + FTS keyword search.
 - External channels are disabled by default; configure them in `config.json` or via env vars before using `serve`.
 - Supported non-CLI channels: Telegram, Slack, Discord, Email, and a local WhatsApp bridge.
+
+## Internal Service Mode
+
+`or3-intern service` starts a loopback-only HTTP API intended for `or3-net`. It reuses the same runtime, tool registry, memory, quotas, and subagent manager as the CLI/runtime entrypoints.
+
+Example config:
+
+```json
+{
+  "service": {
+    "enabled": true,
+    "listen": "127.0.0.1:9100",
+    "secret": "replace-with-a-long-random-shared-secret"
+  }
+}
+```
+
+Environment overrides:
+
+- `OR3_SERVICE_ENABLED`
+- `OR3_SERVICE_LISTEN`
+- `OR3_SERVICE_SECRET`
+
+Endpoints:
+
+- `POST /internal/v1/turns` submit a foreground turn; returns SSE when `Accept: text/event-stream` is set, otherwise waits for JSON completion
+- `POST /internal/v1/subagents` queue a background subagent job using the existing subagent manager
+- `GET /internal/v1/jobs/:jobId/stream` attach to a live SSE stream for a turn or subagent job
+- `POST /internal/v1/jobs/:jobId/abort` cancel a running job when possible
+
+Security notes:
+
+- the service refuses to start without `service.secret`
+- all routes require `Authorization: Bearer <signed-token>` using the shared HMAC secret
+- keep `service.listen` on loopback/private networking only; `or3-intern doctor` warns on weak secrets or public bind addresses
 
 ## Hardening Defaults
 

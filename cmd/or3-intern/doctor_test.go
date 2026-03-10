@@ -33,6 +33,25 @@ func TestDoctorFindings_ExpandedWarnings(t *testing.T) {
 		expectMatch string
 	}{
 		{
+			name: "service weak secret",
+			mutate: func(cfg *config.Config) {
+				cfg.Service.Enabled = true
+				cfg.Service.Secret = "short-secret"
+			},
+			expectArea:  "service",
+			expectMatch: "weak shared secret",
+		},
+		{
+			name: "service public bind",
+			mutate: func(cfg *config.Config) {
+				cfg.Service.Enabled = true
+				cfg.Service.Secret = strings.Repeat("a", 32)
+				cfg.Service.Listen = "0.0.0.0:9100"
+			},
+			expectArea:  "service",
+			expectMatch: "not loopback-only",
+		},
+		{
 			name: "audit disabled",
 			mutate: func(cfg *config.Config) {
 				cfg.Security.Audit.Enabled = false
@@ -231,7 +250,7 @@ func TestDoctorFindings_ExecWarningsRespectEffectiveProfiles(t *testing.T) {
 	t.Run("webhook safe profile suppresses generic exec ingress warning", func(t *testing.T) {
 		cfg := safeDoctorConfig()
 		cfg.Hardening.PrivilegedTools = true
-			cfg.Hardening.EnableExecShell = true
+		cfg.Hardening.EnableExecShell = true
 		cfg.Triggers.Webhook.Enabled = true
 		findings := doctorFindings(cfg)
 		if findingContains(findings, "exec", "public or webhook-facing ingress can reach privileged exec posture") {
@@ -242,7 +261,7 @@ func TestDoctorFindings_ExecWarningsRespectEffectiveProfiles(t *testing.T) {
 	t.Run("guarded webhook profile with exec allowlist cannot reach exec", func(t *testing.T) {
 		cfg := safeDoctorConfig()
 		cfg.Hardening.PrivilegedTools = true
-			cfg.Hardening.EnableExecShell = true
+		cfg.Hardening.EnableExecShell = true
 		cfg.Triggers.Webhook.Enabled = true
 		cfg.Security.Profiles.Default = "guarded"
 		cfg.Security.Profiles.Profiles["guarded"] = config.AccessProfileConfig{

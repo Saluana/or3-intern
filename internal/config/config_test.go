@@ -37,6 +37,9 @@ func clearConfigEnv(t *testing.T) {
 		"OR3_SUBAGENTS_MAX_CONCURRENT",
 		"OR3_SUBAGENTS_MAX_QUEUED",
 		"OR3_SUBAGENTS_TASK_TIMEOUT_SECONDS",
+		"OR3_SERVICE_ENABLED",
+		"OR3_SERVICE_LISTEN",
+		"OR3_SERVICE_SECRET",
 	} {
 		t.Setenv(key, "")
 	}
@@ -118,6 +121,15 @@ func TestDefault_Values(t *testing.T) {
 	if cfg.Subagents.TaskTimeoutSeconds != 300 {
 		t.Errorf("expected Subagents.TaskTimeoutSeconds=300, got %d", cfg.Subagents.TaskTimeoutSeconds)
 	}
+	if cfg.Service.Enabled {
+		t.Error("expected Service.Enabled=false by default")
+	}
+	if cfg.Service.Listen != "127.0.0.1:9100" {
+		t.Fatalf("expected Service.Listen default, got %q", cfg.Service.Listen)
+	}
+	if cfg.Service.Secret != "" {
+		t.Fatalf("expected Service.Secret empty by default, got %q", cfg.Service.Secret)
+	}
 	if cfg.Channels.Telegram.OpenAccess || cfg.Channels.Slack.OpenAccess || cfg.Channels.Discord.OpenAccess || cfg.Channels.WhatsApp.OpenAccess {
 		t.Error("expected external channels to default to closed access")
 	}
@@ -165,6 +177,26 @@ func TestDefault_Values(t *testing.T) {
 	}
 	if cfg.Security.SecretStore.KeyFile == "" || cfg.Security.Audit.KeyFile == "" {
 		t.Fatal("expected default phase 3 key file paths")
+	}
+}
+
+func TestApplyEnvOverrides_ServiceConfig(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := Default()
+	t.Setenv("OR3_SERVICE_ENABLED", "true")
+	t.Setenv("OR3_SERVICE_LISTEN", "127.0.0.1:9200")
+	t.Setenv("OR3_SERVICE_SECRET", "top-secret-value")
+
+	ApplyEnvOverrides(&cfg)
+
+	if !cfg.Service.Enabled {
+		t.Fatal("expected service enabled override")
+	}
+	if cfg.Service.Listen != "127.0.0.1:9200" {
+		t.Fatalf("unexpected service listen override: %q", cfg.Service.Listen)
+	}
+	if cfg.Service.Secret != "top-secret-value" {
+		t.Fatalf("unexpected service secret override: %q", cfg.Service.Secret)
 	}
 }
 

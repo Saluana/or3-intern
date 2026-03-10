@@ -52,6 +52,7 @@ internal/
   agent/
     prompt.go
     runtime.go
+    structured_autonomy.go
     subagents.go
   artifacts/
     attachment.go
@@ -124,6 +125,7 @@ internal/
     web.go
   triggers/
     filewatch.go
+    structured_tasks.go
     triggers.go
     webhook.go
 .env.example
@@ -169,151 +171,6 @@ func runAuditCommand(ctx context.Context, audit *security.AuditLogger, args []st
 		return nil
 	}
 	return fmt.Errorf("unknown audit subcommand: %s", args[0])
-}
-````
-
-## File: cmd/or3-intern/doctor.go
-````go
-package main
-
-import (
-	"flag"
-	"fmt"
-	"io"
-	"net"
-	"os"
-	"sort"
-	"strings"
-
-	"or3-intern/internal/config"
-)
-
-type doctorFinding struct {
-	Level   string
-	Area    string
-	Message string
-}
-
-func runDoctorCommand(cfg config.Config, args []string, stdout, stderr io.Writer) error {
-	if stdout == nil {
-		stdout = os.Stdout
-	}
-	if stderr == nil {
-		stderr = os.Stderr
-	}
-	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	strict := fs.Bool("strict", false, "exit non-zero when warnings are found")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	findings := doctorFindings(cfg)
-	if len(findings) == 0 {
-		_, _ = fmt.Fprintln(stdout, "[ok] configuration looks safe")
-		return nil
-	}
-	for _, finding := range findings {
-		_, _ = fmt.Fprintf(stdout, "[%s] %s: %s\n", finding.Level, finding.Area, finding.Message)
-	}
-	if *strict && hasDoctorWarnings(findings) {
-		return fmt.Errorf("doctor found warnings")
-	}
-	return nil
-}
-
-func doctorFindings(cfg config.Config) []doctorFinding {
-	findings := make([]doctorFinding, 0, 16)
-	add := func(level, area, message string) {
-		findings = append(findings, doctorFinding{Level: level, Area: area, Message: message})
-	}
-	if !cfg.Tools.RestrictToWorkspace {
-		add("warn", "filesystem", "workspace restriction is disabled")
-	}
-	if cfg.Tools.RestrictToWorkspace && strings.TrimSpace(cfg.WorkspaceDir) == "" {
-		add("warn", "filesystem", "workspace restriction is enabled but workspaceDir is empty")
-	}
-	if len(cfg.Hardening.ChildEnvAllowlist) == 0 {
-		add("warn", "env", "child process environment allowlist is empty")
-	}
-	if !cfg.Hardening.Quotas.Enabled {
-		add("warn", "quotas", "tool quotas are disabled")
-	}
-	if cfg.Hardening.Quotas.MaxToolCalls <= 0 || cfg.Hardening.Quotas.MaxExecCalls <= 0 || cfg.Hardening.Quotas.MaxWebCalls <= 0 || cfg.Hardening.Quotas.MaxSubagentCalls <= 0 {
-		add("warn", "quotas", "one or more quota limits are unset")
-	}
-	if cfg.Hardening.PrivilegedTools && !cfg.Hardening.Sandbox.Enabled {
-		add("warn", "privileged-exec", "privileged tools are enabled without Bubblewrap sandboxing")
-	}
-	if cfg.Hardening.Sandbox.Enabled && strings.TrimSpace(cfg.Hardening.Sandbox.BubblewrapPath) == "" {
-		add("warn", "privileged-exec", "Bubblewrap sandbox is enabled without a bubblewrapPath")
-	}
-	if cfg.Triggers.Webhook.Enabled {
-		if strings.TrimSpace(cfg.Triggers.Webhook.Secret) == "" {
-			add("warn", "webhook", "webhook is enabled without a secret")
-		}
-		if !isLoopbackAddr(cfg.Triggers.Webhook.Addr) {
-			add("warn", "webhook", "webhook bind address is not loopback-only")
-		}
-	}
-	for _, finding := range channelExposureFindings(cfg) {
-		findings = append(findings, finding)
-	}
-	sort.SliceStable(findings, func(i, j int) bool {
-		if findings[i].Area == findings[j].Area {
-			return findings[i].Message < findings[j].Message
-		}
-		return findings[i].Area < findings[j].Area
-	})
-	return findings
-}
-
-func channelExposureFindings(cfg config.Config) []doctorFinding {
-	findings := []doctorFinding{}
-	add := func(area, message string) {
-		findings = append(findings, doctorFinding{Level: "warn", Area: area, Message: message})
-	}
-	if cfg.Channels.Telegram.Enabled && cfg.Channels.Telegram.OpenAccess {
-		add("telegram", "channel is open to any sender")
-	}
-	if cfg.Channels.Slack.Enabled && cfg.Channels.Slack.OpenAccess {
-		add("slack", "channel is open to any sender")
-	}
-	if cfg.Channels.Discord.Enabled && cfg.Channels.Discord.OpenAccess {
-		add("discord", "channel is open to any sender")
-	}
-	if cfg.Channels.WhatsApp.Enabled && cfg.Channels.WhatsApp.OpenAccess {
-		add("whatsapp", "channel is open to any sender")
-	}
-	if cfg.Channels.Email.Enabled && cfg.Channels.Email.OpenAccess {
-		add("email", "channel is open to any sender")
-	}
-	return findings
-}
-
-func hasDoctorWarnings(findings []doctorFinding) bool {
-	for _, finding := range findings {
-		if strings.EqualFold(finding.Level, "warn") || strings.EqualFold(finding.Level, "error") {
-			return true
-		}
-	}
-	return false
-}
-
-func isLoopbackAddr(addr string) bool {
-	addr = strings.TrimSpace(addr)
-	if addr == "" {
-		return true
-	}
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		host = addr
-	}
-	host = strings.Trim(host, "[]")
-	if host == "" || strings.EqualFold(host, "localhost") {
-		return true
-	}
-	parsed := net.ParseIP(host)
-	return parsed != nil && parsed.IsLoopback()
 }
 ````
 
@@ -524,6 +381,233 @@ func validateConfiguredOutboundEndpoints(ctx context.Context, cfg config.Config,
 		}
 	}
 	return nil
+}
+````
+
+## File: internal/agent/structured_autonomy.go
+````go
+package agent
+
+import (
+	"context"
+	"fmt"
+	"reflect"
+	"strings"
+
+	"or3-intern/internal/bus"
+	"or3-intern/internal/channels"
+	"or3-intern/internal/tools"
+	"or3-intern/internal/triggers"
+)
+
+func (r *Runtime) handleStructuredAutonomy(ctx context.Context, ev bus.Event, msgID int64) (bool, error) {
+	if !isAutonomousEvent(ev.Type) || r.Tools == nil {
+		return false, nil
+	}
+	env, ok := triggers.StructuredTasksFromMeta(ev.Meta)
+	if !ok || len(env.Tasks) == 0 {
+		return false, nil
+	}
+	replyTarget := deliveryTarget(ev)
+	replyMeta := channels.ReplyMeta(ev.Meta)
+	scopeKey := ev.SessionKey
+	if r.DB != nil && strings.TrimSpace(ev.SessionKey) != "" {
+		if resolved, err := r.DB.ResolveScopeKey(ctx, ev.SessionKey); err == nil && strings.TrimSpace(resolved) != "" {
+			scopeKey = resolved
+		}
+	}
+	toolCtx := tools.ContextWithSession(ctx, scopeKey)
+	toolCtx = tools.ContextWithDelivery(toolCtx, ev.Channel, replyTarget)
+	toolCtx = tools.ContextWithDeliveryMeta(toolCtx, replyMeta)
+	toolCtx = r.contextWithTrustedToolAccess(toolCtx, ev)
+	toolCtx = tools.ContextWithToolGuard(toolCtx, r.guardToolExecution)
+
+	succeeded := 0
+	failures := make([]string, 0)
+	for index, task := range env.Tasks {
+		toolName := strings.TrimSpace(task.Tool)
+		params := cloneMap(task.Params)
+		tool := r.Tools.Get(toolName)
+		if tool == nil {
+			failures = append(failures, fmt.Sprintf("#%d %s: tool not found", index+1, toolName))
+			continue
+		}
+		if err := validateStructuredToolParams(tool, params); err != nil {
+			failures = append(failures, fmt.Sprintf("#%d %s: %v", index+1, toolName, err))
+			continue
+		}
+		out, err := r.Tools.ExecuteParams(toolCtx, toolName, params)
+		payload := map[string]any{
+			"tool":            toolName,
+			"args":            params,
+			"structured_task": true,
+			"task_index":      index,
+		}
+		if err != nil {
+			out = "tool error: " + err.Error()
+			failures = append(failures, fmt.Sprintf("#%d %s: %v", index+1, toolName, err))
+		} else {
+			succeeded++
+		}
+		sendOut, preview, artifactID := r.boundTextResult(ctx, ev.SessionKey, out)
+		if artifactID != "" {
+			payload["artifact_id"] = artifactID
+			payload["preview"] = preview
+		}
+		if _, appendErr := r.DB.AppendMessage(ctx, ev.SessionKey, "tool", sendOut, payload); appendErr != nil {
+			return true, appendErr
+		}
+	}
+	summary := structuredAutonomySummary(succeeded, len(env.Tasks), failures)
+	r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, summary, replyMeta, false, false)
+	return true, nil
+}
+
+func structuredAutonomySummary(succeeded, total int, failures []string) string {
+	base := fmt.Sprintf("structured autonomous tasks executed: %d/%d succeeded", succeeded, total)
+	if len(failures) == 0 {
+		return base
+	}
+	return base + "\nfailures:\n- " + strings.Join(failures, "\n- ")
+}
+
+func validateStructuredToolParams(tool tools.Tool, params map[string]any) error {
+	if tool == nil {
+		return fmt.Errorf("tool not found")
+	}
+	if params == nil {
+		params = map[string]any{}
+	}
+	return validateStructuredValue(tool.Parameters(), params, "params")
+}
+
+func validateStructuredValue(schema map[string]any, value any, path string) error {
+	typeName := strings.TrimSpace(fmt.Sprint(schema["type"]))
+	switch typeName {
+	case "", "object":
+		mapped, ok := value.(map[string]any)
+		if !ok {
+			return fmt.Errorf("%s must be an object", path)
+		}
+		properties, _ := schema["properties"].(map[string]any)
+		for _, name := range requiredSchemaFields(schema["required"]) {
+			if _, ok := mapped[name]; !ok {
+				return fmt.Errorf("%s.%s is required", path, name)
+			}
+		}
+		if additional, ok := schema["additionalProperties"].(bool); ok && !additional {
+			for key := range mapped {
+				if _, known := properties[key]; !known {
+					return fmt.Errorf("%s.%s is not allowed", path, key)
+				}
+			}
+		}
+		for key, raw := range mapped {
+			childSchema, ok := properties[key].(map[string]any)
+			if !ok {
+				continue
+			}
+			if err := validateStructuredValue(childSchema, raw, path+"."+key); err != nil {
+				return err
+			}
+		}
+		return nil
+	case "array":
+		items, ok := sliceItems(value)
+		if !ok {
+			return fmt.Errorf("%s must be an array", path)
+		}
+		itemSchema, _ := schema["items"].(map[string]any)
+		for index, item := range items {
+			if len(itemSchema) == 0 {
+				continue
+			}
+			if err := validateStructuredValue(itemSchema, item, fmt.Sprintf("%s[%d]", path, index)); err != nil {
+				return err
+			}
+		}
+		return nil
+	case "string":
+		if _, ok := value.(string); !ok {
+			return fmt.Errorf("%s must be a string", path)
+		}
+		return nil
+	case "boolean":
+		if _, ok := value.(bool); !ok {
+			return fmt.Errorf("%s must be a boolean", path)
+		}
+		return nil
+	case "integer":
+		if !isIntegerValue(value) {
+			return fmt.Errorf("%s must be an integer", path)
+		}
+		return nil
+	case "number":
+		if !isNumericValue(value) {
+			return fmt.Errorf("%s must be a number", path)
+		}
+		return nil
+	default:
+		return nil
+	}
+}
+
+func requiredSchemaFields(raw any) []string {
+	items, ok := raw.([]any)
+	if !ok {
+		if typed, ok := raw.([]string); ok {
+			return append([]string{}, typed...)
+		}
+		return nil
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		name := strings.TrimSpace(fmt.Sprint(item))
+		if name != "" && name != "<nil>" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+func sliceItems(value any) ([]any, bool) {
+	if value == nil {
+		return nil, false
+	}
+	if items, ok := value.([]any); ok {
+		return items, true
+	}
+	rv := reflect.ValueOf(value)
+	if rv.Kind() != reflect.Slice && rv.Kind() != reflect.Array {
+		return nil, false
+	}
+	out := make([]any, rv.Len())
+	for index := 0; index < rv.Len(); index++ {
+		out[index] = rv.Index(index).Interface()
+	}
+	return out, true
+}
+
+func isNumericValue(value any) bool {
+	switch value.(type) {
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64:
+		return true
+	default:
+		return false
+	}
+}
+
+func isIntegerValue(value any) bool {
+	switch cast := value.(type) {
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		return true
+	case float32:
+		return float32(int64(cast)) == cast
+	case float64:
+		return float64(int64(cast)) == cast
+	default:
+		return false
+	}
 }
 ````
 
@@ -1788,155 +1872,6 @@ func watchConnContext(ctx context.Context, conn net.Conn) func() {
 }
 ````
 
-## File: internal/channels/channels.go
-````go
-package channels
-
-import (
-	"context"
-	"errors"
-	"fmt"
-	"sort"
-	"strings"
-	"sync"
-
-	"or3-intern/internal/bus"
-)
-
-type Channel interface {
-	Name() string
-	Start(ctx context.Context, eventBus *bus.Bus) error
-	Stop(ctx context.Context) error
-	Deliver(ctx context.Context, to, text string, meta map[string]any) error
-}
-
-type Manager struct {
-	mu       sync.RWMutex
-	channels map[string]Channel
-	started  map[string]bool
-}
-
-func NewManager() *Manager {
-	return &Manager{channels: map[string]Channel{}, started: map[string]bool{}}
-}
-
-func (m *Manager) Register(ch Channel) error {
-	if ch == nil {
-		return errors.New("nil channel")
-	}
-	name := strings.TrimSpace(strings.ToLower(ch.Name()))
-	if name == "" {
-		return errors.New("channel name required")
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if _, exists := m.channels[name]; exists {
-		return fmt.Errorf("channel already registered: %s", name)
-	}
-	m.channels[name] = ch
-	return nil
-}
-
-func (m *Manager) Names() []string {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	out := make([]string, 0, len(m.channels))
-	for name := range m.channels {
-		out = append(out, name)
-	}
-	sort.Strings(out)
-	return out
-}
-
-func (m *Manager) StartAll(ctx context.Context, eventBus *bus.Bus) error {
-	for _, name := range m.Names() {
-		if err := m.Start(ctx, name, eventBus); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (m *Manager) Start(ctx context.Context, name string, eventBus *bus.Bus) error {
-	ch, err := m.get(name)
-	if err != nil {
-		return err
-	}
-	m.mu.Lock()
-	if m.started[name] {
-		m.mu.Unlock()
-		return nil
-	}
-	m.mu.Unlock()
-	if err := ch.Start(ctx, eventBus); err != nil {
-		return err
-	}
-	m.mu.Lock()
-	m.started[name] = true
-	m.mu.Unlock()
-	return nil
-}
-
-func (m *Manager) StopAll(ctx context.Context) error {
-	var errs []string
-	for _, name := range m.Names() {
-		if err := m.Stop(ctx, name); err != nil {
-			errs = append(errs, err.Error())
-		}
-	}
-	if len(errs) > 0 {
-		return errors.New(strings.Join(errs, "; "))
-	}
-	return nil
-}
-
-func (m *Manager) Stop(ctx context.Context, name string) error {
-	ch, err := m.get(name)
-	if err != nil {
-		return err
-	}
-	m.mu.Lock()
-	started := m.started[name]
-	m.mu.Unlock()
-	if !started {
-		return nil
-	}
-	if err := ch.Stop(ctx); err != nil {
-		return err
-	}
-	m.mu.Lock()
-	delete(m.started, name)
-	m.mu.Unlock()
-	return nil
-}
-
-func (m *Manager) Deliver(ctx context.Context, channel, to, text string) error {
-	return m.DeliverWithMeta(ctx, channel, to, text, nil)
-}
-
-func (m *Manager) DeliverWithMeta(ctx context.Context, channel, to, text string, meta map[string]any) error {
-	if strings.TrimSpace(channel) == "" {
-		channel = "cli"
-	}
-	ch, err := m.get(channel)
-	if err != nil {
-		return err
-	}
-	return ch.Deliver(ctx, to, text, meta)
-}
-
-func (m *Manager) get(name string) (Channel, error) {
-	name = strings.TrimSpace(strings.ToLower(name))
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	ch := m.channels[name]
-	if ch == nil {
-		return nil, fmt.Errorf("channel not found: %s", name)
-	}
-	return ch, nil
-}
-````
-
 ## File: internal/channels/media.go
 ````go
 package channels
@@ -2017,629 +1952,6 @@ type StreamingChannel interface {
 	// meta contains channel-specific metadata (e.g., chat_id).
 	// Returns a StreamWriter to write deltas, or an error.
 	BeginStream(ctx context.Context, to string, meta map[string]any) (StreamWriter, error)
-}
-````
-
-## File: internal/clawhub/client.go
-````go
-package clawhub
-
-import (
-	"archive/zip"
-	"bytes"
-	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
-	"os"
-	"path/filepath"
-	"sort"
-	"strings"
-	"time"
-)
-
-const (
-	apiSearch   = "/api/v1/search"
-	apiResolve  = "/api/v1/resolve"
-	apiDownload = "/api/v1/download"
-	apiSkills   = "/api/v1/skills"
-)
-
-type Client struct {
-	SiteURL     string
-	RegistryURL string
-	HTTP        *http.Client
-}
-
-type SearchResult struct {
-	Slug        string
-	DisplayName string
-	Summary     string
-	Version     string
-	Score       float64
-	UpdatedAt   int64
-}
-
-type SkillInfo struct {
-	Slug            string
-	DisplayName     string
-	Summary         string
-	LatestVersion   string
-	SelectedVersion string
-	Owner           string
-}
-
-type ResolveResult struct {
-	MatchVersion  string
-	LatestVersion string
-}
-
-type InstallOptions struct {
-	Force bool
-}
-
-type InstallResult struct {
-	Path        string
-	Slug        string
-	Version     string
-	Fingerprint string
-}
-
-type SkillOrigin struct {
-	Version          int    `json:"version"`
-	Registry         string `json:"registry"`
-	Slug             string `json:"slug"`
-	InstalledVersion string `json:"installedVersion"`
-	InstalledAt      int64  `json:"installedAt"`
-	Fingerprint      string `json:"fingerprint"`
-}
-
-type InstalledSkill struct {
-	Name     string
-	Path     string
-	Origin   SkillOrigin
-	Modified bool
-}
-
-func New(siteURL, registryURL string) *Client {
-	return &Client{
-		SiteURL:     strings.TrimRight(siteURL, "/"),
-		RegistryURL: strings.TrimRight(registryURL, "/"),
-		HTTP:        &http.Client{Timeout: 15 * time.Second},
-	}
-}
-
-func (c *Client) Search(ctx context.Context, query string, limit int) ([]SearchResult, error) {
-	url := c.apiURL(apiSearch)
-	url.RawQuery = queryString(map[string]string{
-		"q":     strings.TrimSpace(query),
-		"limit": intString(limit),
-	})
-	var response struct {
-		Results []struct {
-			Slug        string  `json:"slug"`
-			DisplayName string  `json:"displayName"`
-			Summary     string  `json:"summary"`
-			Version     string  `json:"version"`
-			Score       float64 `json:"score"`
-			UpdatedAt   int64   `json:"updatedAt"`
-		} `json:"results"`
-	}
-	if err := c.getJSON(ctx, url.String(), &response); err != nil {
-		return nil, err
-	}
-	results := make([]SearchResult, 0, len(response.Results))
-	for _, item := range response.Results {
-		results = append(results, SearchResult{
-			Slug:        item.Slug,
-			DisplayName: item.DisplayName,
-			Summary:     item.Summary,
-			Version:     item.Version,
-			Score:       item.Score,
-			UpdatedAt:   item.UpdatedAt,
-		})
-	}
-	return results, nil
-}
-
-func (c *Client) Inspect(ctx context.Context, slug, version string) (SkillInfo, error) {
-	slug = sanitizeSlug(slug)
-	if slug == "" {
-		return SkillInfo{}, fmt.Errorf("slug required")
-	}
-	var response struct {
-		Skill *struct {
-			Slug        string `json:"slug"`
-			DisplayName string `json:"displayName"`
-			Summary     string `json:"summary"`
-		} `json:"skill"`
-		LatestVersion *struct {
-			Version string `json:"version"`
-		} `json:"latestVersion"`
-		Owner *struct {
-			Handle      string `json:"handle"`
-			DisplayName string `json:"displayName"`
-		} `json:"owner"`
-	}
-	if err := c.getJSON(ctx, c.apiURL(apiSkills+"/"+slug).String(), &response); err != nil {
-		return SkillInfo{}, err
-	}
-	if response.Skill == nil {
-		return SkillInfo{}, fmt.Errorf("skill not found: %s", slug)
-	}
-	info := SkillInfo{
-		Slug:        response.Skill.Slug,
-		DisplayName: response.Skill.DisplayName,
-		Summary:     response.Skill.Summary,
-		LatestVersion: stringOr(response.LatestVersion, func(v *struct {
-			Version string `json:"version"`
-		}) string {
-			return v.Version
-		}),
-		SelectedVersion: strings.TrimSpace(version),
-		Owner:           ownerName(response.Owner),
-	}
-	if info.SelectedVersion == "" {
-		info.SelectedVersion = info.LatestVersion
-	}
-	return info, nil
-}
-
-func (c *Client) Resolve(ctx context.Context, slug, fingerprint string) (ResolveResult, error) {
-	slug = sanitizeSlug(slug)
-	if slug == "" {
-		return ResolveResult{}, fmt.Errorf("slug required")
-	}
-	url := c.apiURL(apiResolve)
-	url.RawQuery = queryString(map[string]string{
-		"slug":    slug,
-		"version": "",
-		"hash":    strings.TrimSpace(fingerprint),
-	})
-	var response struct {
-		Match *struct {
-			Version string `json:"version"`
-		} `json:"match"`
-		LatestVersion *struct {
-			Version string `json:"version"`
-		} `json:"latestVersion"`
-	}
-	if err := c.getJSON(ctx, url.String(), &response); err != nil {
-		return ResolveResult{}, err
-	}
-	return ResolveResult{
-		MatchVersion: stringOr(response.Match, func(v *struct {
-			Version string `json:"version"`
-		}) string {
-			return v.Version
-		}),
-		LatestVersion: stringOr(response.LatestVersion, func(v *struct {
-			Version string `json:"version"`
-		}) string {
-			return v.Version
-		}),
-	}, nil
-}
-
-func (c *Client) Download(ctx context.Context, slug, version string) ([]byte, error) {
-	slug = sanitizeSlug(slug)
-	if slug == "" {
-		return nil, fmt.Errorf("slug required")
-	}
-	url := c.apiURL(apiDownload)
-	url.RawQuery = queryString(map[string]string{
-		"slug":    slug,
-		"version": strings.TrimSpace(version),
-	})
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := c.httpClient().Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, readHTTPError(resp)
-	}
-	return io.ReadAll(resp.Body)
-}
-
-func (c *Client) Install(ctx context.Context, slug, version, destDir string, opts InstallOptions) (InstallResult, error) {
-	info, err := c.Inspect(ctx, slug, version)
-	if err != nil {
-		return InstallResult{}, err
-	}
-	if strings.TrimSpace(info.SelectedVersion) == "" {
-		return InstallResult{}, fmt.Errorf("could not resolve version for %s", slug)
-	}
-	zipBytes, err := c.Download(ctx, slug, info.SelectedVersion)
-	if err != nil {
-		return InstallResult{}, err
-	}
-	target := filepath.Join(destDir, sanitizeSlug(slug))
-	if err := installZip(zipBytes, target, SkillOrigin{
-		Version:          1,
-		Registry:         c.RegistryURL,
-		Slug:             sanitizeSlug(slug),
-		InstalledVersion: info.SelectedVersion,
-		InstalledAt:      time.Now().UnixMilli(),
-	}, opts); err != nil {
-		return InstallResult{}, err
-	}
-	origin, err := ReadOrigin(target)
-	if err != nil {
-		return InstallResult{}, err
-	}
-	return InstallResult{
-		Path:        target,
-		Slug:        origin.Slug,
-		Version:     origin.InstalledVersion,
-		Fingerprint: origin.Fingerprint,
-	}, nil
-}
-
-func installZip(zipBytes []byte, target string, origin SkillOrigin, opts InstallOptions) error {
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return err
-	}
-	if stat, err := os.Stat(target); err == nil && stat.IsDir() {
-		if !opts.Force {
-			modified, checkErr := LocalEdits(target)
-			if checkErr != nil {
-				return checkErr
-			}
-			if modified {
-				return fmt.Errorf("local modifications detected: %s", target)
-			}
-		}
-	} else if err == nil {
-		return fmt.Errorf("target exists and is not a directory: %s", target)
-	}
-
-	tempRoot, err := os.MkdirTemp(filepath.Dir(target), ".clawhub-*")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(tempRoot)
-	tempTarget := filepath.Join(tempRoot, filepath.Base(target))
-	if err := extractZipToDir(zipBytes, tempTarget); err != nil {
-		return err
-	}
-	fingerprint, err := FingerprintDir(tempTarget)
-	if err != nil {
-		return err
-	}
-	origin.Fingerprint = fingerprint
-	if err := WriteOrigin(tempTarget, origin); err != nil {
-		return err
-	}
-
-	backup := target + ".bak"
-	_ = os.RemoveAll(backup)
-	if _, err := os.Stat(target); err == nil {
-		if err := os.Rename(target, backup); err != nil {
-			return err
-		}
-	}
-	if err := os.Rename(tempTarget, target); err != nil {
-		if _, statErr := os.Stat(backup); statErr == nil {
-			_ = os.Rename(backup, target)
-		}
-		return err
-	}
-	_ = os.RemoveAll(backup)
-	return nil
-}
-
-func extractZipToDir(zipBytes []byte, target string) error {
-	reader, err := zip.NewReader(bytes.NewReader(zipBytes), int64(len(zipBytes)))
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(target, 0o755); err != nil {
-		return err
-	}
-	for _, file := range reader.File {
-		rel, ok := safeZipPath(file.Name)
-		if !ok {
-			continue
-		}
-		full := filepath.Join(target, rel)
-		if file.FileInfo().IsDir() {
-			if err := os.MkdirAll(full, 0o755); err != nil {
-				return err
-			}
-			continue
-		}
-		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-			return err
-		}
-		rc, err := file.Open()
-		if err != nil {
-			return err
-		}
-		data, readErr := io.ReadAll(rc)
-		_ = rc.Close()
-		if readErr != nil {
-			return readErr
-		}
-		mode := file.Mode()
-		if mode == 0 {
-			mode = 0o644
-		}
-		if err := os.WriteFile(full, data, mode); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func FingerprintDir(root string) (string, error) {
-	type item struct {
-		path string
-		sum  string
-	}
-	var files []item
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			if d.Name() == ".clawhub" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return nil
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		sum := sha256.Sum256(data)
-		files = append(files, item{
-			path: filepath.ToSlash(rel),
-			sum:  hex.EncodeToString(sum[:]),
-		})
-		return nil
-	})
-	if err != nil {
-		return "", err
-	}
-	sort.Slice(files, func(i, j int) bool { return files[i].path < files[j].path })
-	h := sha256.New()
-	for _, file := range files {
-		_, _ = io.WriteString(h, file.path+":"+file.sum+"\n")
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
-func LocalEdits(skillDir string) (bool, error) {
-	origin, err := ReadOrigin(skillDir)
-	if err != nil {
-		return false, err
-	}
-	current, err := FingerprintDir(skillDir)
-	if err != nil {
-		return false, err
-	}
-	return current != origin.Fingerprint, nil
-}
-
-func ListInstalled(root string) ([]InstalledSkill, error) {
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	out := make([]InstalledSkill, 0, len(entries))
-	for _, entry := range entries {
-		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
-			continue
-		}
-		path := filepath.Join(root, entry.Name())
-		origin, err := ReadOrigin(path)
-		if err != nil {
-			continue
-		}
-		modified, err := LocalEdits(path)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, InstalledSkill{
-			Name:     entry.Name(),
-			Path:     path,
-			Origin:   origin,
-			Modified: modified,
-		})
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out, nil
-}
-
-func ReadOrigin(skillDir string) (SkillOrigin, error) {
-	data, err := os.ReadFile(filepath.Join(skillDir, ".clawhub", "origin.json"))
-	if err != nil {
-		return SkillOrigin{}, err
-	}
-	var origin SkillOrigin
-	if err := json.Unmarshal(data, &origin); err != nil {
-		return SkillOrigin{}, err
-	}
-	return origin, nil
-}
-
-func WriteOrigin(skillDir string, origin SkillOrigin) error {
-	path := filepath.Join(skillDir, ".clawhub", "origin.json")
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(origin, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, append(data, '\n'), 0o644)
-}
-
-func RemoveSkill(root, name string) error {
-	name = sanitizeSlug(name)
-	if name == "" {
-		return fmt.Errorf("skill name required")
-	}
-	return os.RemoveAll(filepath.Join(root, name))
-}
-
-func (c *Client) apiURL(path string) *urlBuilder {
-	return newURLBuilder(c.RegistryURL, path)
-}
-
-func (c *Client) httpClient() *http.Client {
-	if c != nil && c.HTTP != nil {
-		return c.HTTP
-	}
-	return &http.Client{Timeout: 15 * time.Second}
-}
-
-func (c *Client) getJSON(ctx context.Context, rawURL string, dest any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Accept", "application/json")
-	resp, err := c.httpClient().Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return readHTTPError(resp)
-	}
-	return json.NewDecoder(resp.Body).Decode(dest)
-}
-
-func sanitizeSlug(slug string) string {
-	slug = strings.TrimSpace(slug)
-	if slug == "" || strings.Contains(slug, "..") || strings.Contains(slug, "/") || strings.Contains(slug, "\\") {
-		return ""
-	}
-	return slug
-}
-
-func safeZipPath(path string) (string, bool) {
-	path = strings.TrimSpace(strings.ReplaceAll(path, "\\", "/"))
-	path = strings.TrimPrefix(path, "./")
-	path = strings.TrimPrefix(path, "/")
-	if path == "" || strings.Contains(path, "..") {
-		return "", false
-	}
-	return filepath.FromSlash(path), true
-}
-
-func readHTTPError(resp *http.Response) error {
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	text := strings.TrimSpace(string(body))
-	if text == "" {
-		text = resp.Status
-	}
-	return fmt.Errorf("clawhub API error: %s", text)
-}
-
-func queryString(values map[string]string) string {
-	var parts []string
-	for key, value := range values {
-		if strings.TrimSpace(value) == "" {
-			continue
-		}
-		parts = append(parts, urlEncode(key)+"="+urlEncode(value))
-	}
-	sort.Strings(parts)
-	return strings.Join(parts, "&")
-}
-
-func intString(v int) string {
-	if v <= 0 {
-		return ""
-	}
-	return fmt.Sprint(v)
-}
-
-func ownerName(owner *struct {
-	Handle      string `json:"handle"`
-	DisplayName string `json:"displayName"`
-}) string {
-	if owner == nil {
-		return ""
-	}
-	if strings.TrimSpace(owner.Handle) != "" {
-		return owner.Handle
-	}
-	return owner.DisplayName
-}
-
-func stringOr[T any](value *T, fn func(*T) string) string {
-	if value == nil {
-		return ""
-	}
-	return strings.TrimSpace(fn(value))
-}
-
-type urlBuilder struct {
-	base     string
-	path     string
-	RawQuery string
-}
-
-func newURLBuilder(base, path string) *urlBuilder {
-	return &urlBuilder{
-		base: strings.TrimRight(base, "/"),
-		path: path,
-	}
-}
-
-func (u *urlBuilder) String() string {
-	if strings.TrimSpace(u.RawQuery) == "" {
-		return u.base + u.path
-	}
-	return u.base + u.path + "?" + u.RawQuery
-}
-
-func urlEncode(s string) string {
-	replacer := strings.NewReplacer(
-		"%", "%25",
-		" ", "%20",
-		"!", "%21",
-		"#", "%23",
-		"$", "%24",
-		"&", "%26",
-		"'", "%27",
-		"(", "%28",
-		")", "%29",
-		"+", "%2B",
-		",", "%2C",
-		"/", "%2F",
-		":", "%3A",
-		";", "%3B",
-		"=", "%3D",
-		"?", "%3F",
-		"@", "%40",
-	)
-	return replacer.Replace(s)
 }
 ````
 
@@ -3378,77 +2690,6 @@ func (t *CronTool) Execute(ctx context.Context, params map[string]any) (string, 
 }
 ````
 
-## File: internal/tools/env.go
-````go
-package tools
-
-import (
-	"os"
-	"strings"
-)
-
-func BuildChildEnv(base []string, allowlist []string, overlay map[string]string, pathAppend string) []string {
-	values := map[string]string{}
-	order := make([]string, 0, len(base)+len(overlay)+1)
-	allowed := map[string]struct{}{}
-	for _, name := range allowlist {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		allowed[name] = struct{}{}
-	}
-	includeAll := len(allowed) == 0
-	for _, raw := range base {
-		key, value, ok := strings.Cut(raw, "=")
-		if !ok {
-			continue
-		}
-		if !includeAll {
-			if _, ok := allowed[key]; !ok {
-				continue
-			}
-		}
-		if _, exists := values[key]; !exists {
-			order = append(order, key)
-		}
-		values[key] = value
-	}
-	for key, value := range overlay {
-		key = strings.TrimSpace(key)
-		if key == "" {
-			continue
-		}
-		if _, exists := values[key]; !exists {
-			order = append(order, key)
-		}
-		values[key] = value
-	}
-	if pathAppend != "" {
-		pathValue := values["PATH"]
-		if pathValue == "" {
-			pathValue = os.Getenv("PATH")
-		}
-		values["PATH"] = pathValue + string(os.PathListSeparator) + pathAppend
-		seen := false
-		for _, key := range order {
-			if key == "PATH" {
-				seen = true
-				break
-			}
-		}
-		if !seen {
-			order = append(order, "PATH")
-		}
-	}
-	out := make([]string, 0, len(order))
-	for _, key := range order {
-		out = append(out, key+"="+values[key])
-	}
-	return out
-}
-````
-
 ## File: internal/tools/sandbox.go
 ````go
 package tools
@@ -3501,6 +2742,234 @@ func commandWithSandbox(ctx context.Context, cfg BubblewrapConfig, cwd string, c
 	args = append(args, "--")
 	args = append(args, command...)
 	return exec.CommandContext(ctx, bwrap, args...), nil
+}
+````
+
+## File: internal/triggers/structured_tasks.go
+````go
+package triggers
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+)
+
+const MetaKeyStructuredTasks = "structured_tasks"
+
+type StructuredToolCall struct {
+	Tool   string         `json:"tool"`
+	Params map[string]any `json:"params,omitempty"`
+}
+
+type StructuredTaskEnvelope struct {
+	Version int                  `json:"version,omitempty"`
+	Tasks   []StructuredToolCall `json:"tasks"`
+}
+
+func StructuredTasksMap(env StructuredTaskEnvelope) map[string]any {
+	tasks := make([]map[string]any, 0, len(env.Tasks))
+	for _, task := range env.Tasks {
+		tool := strings.TrimSpace(task.Tool)
+		if tool == "" {
+			continue
+		}
+		entry := map[string]any{"tool": tool}
+		if len(task.Params) > 0 {
+			params := make(map[string]any, len(task.Params))
+			for key, value := range task.Params {
+				trimmed := strings.TrimSpace(key)
+				if trimmed == "" {
+					continue
+				}
+				params[trimmed] = value
+			}
+			if len(params) > 0 {
+				entry["params"] = params
+			}
+		}
+		tasks = append(tasks, entry)
+	}
+	out := map[string]any{"tasks": tasks}
+	if env.Version > 0 {
+		out["version"] = env.Version
+	}
+	return out
+}
+
+func StructuredTasksFromMeta(meta map[string]any) (StructuredTaskEnvelope, bool) {
+	if len(meta) == 0 {
+		return StructuredTaskEnvelope{}, false
+	}
+	raw, ok := meta[MetaKeyStructuredTasks]
+	if !ok || raw == nil {
+		return StructuredTaskEnvelope{}, false
+	}
+	return normalizeStructuredTasks(raw)
+}
+
+func ParseStructuredTasksJSON(data []byte) (StructuredTaskEnvelope, bool) {
+	var raw any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return StructuredTaskEnvelope{}, false
+	}
+	return normalizeStructuredTasks(raw)
+}
+
+func ParseStructuredTasksText(text string) (StructuredTaskEnvelope, bool) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return StructuredTaskEnvelope{}, false
+	}
+	if env, ok := ParseStructuredTasksJSON([]byte(text)); ok {
+		return env, true
+	}
+	block, ok := extractStructuredTasksFence(text)
+	if !ok {
+		return StructuredTaskEnvelope{}, false
+	}
+	return ParseStructuredTasksJSON([]byte(block))
+}
+
+func normalizeStructuredTasks(raw any) (StructuredTaskEnvelope, bool) {
+	root, ok := raw.(map[string]any)
+	if ok {
+		if tasksRaw, exists := root["structured_tasks"]; exists {
+			env, ok := normalizeStructuredTasks(tasksRaw)
+			if !ok {
+				return StructuredTaskEnvelope{}, false
+			}
+			if version := toInt(root["version"]); version > 0 && env.Version == 0 {
+				env.Version = version
+			}
+			return env, true
+		}
+		tasksRaw, exists := root["tasks"]
+		if !exists {
+			return StructuredTaskEnvelope{}, false
+		}
+		tasks, ok := normalizeStructuredTaskList(tasksRaw)
+		if !ok {
+			return StructuredTaskEnvelope{}, false
+		}
+		version := toInt(root["version"])
+		return StructuredTaskEnvelope{Version: version, Tasks: tasks}, len(tasks) > 0
+	}
+	if tasks, ok := normalizeStructuredTaskList(raw); ok {
+		return StructuredTaskEnvelope{Tasks: tasks}, len(tasks) > 0
+	}
+	return StructuredTaskEnvelope{}, false
+}
+
+func normalizeStructuredTaskList(raw any) ([]StructuredToolCall, bool) {
+	if typed, ok := raw.([]StructuredToolCall); ok {
+		out := make([]StructuredToolCall, 0, len(typed))
+		for _, task := range typed {
+			tool := strings.TrimSpace(task.Tool)
+			if tool == "" {
+				return nil, false
+			}
+			out = append(out, StructuredToolCall{Tool: tool, Params: task.Params})
+		}
+		return out, len(out) > 0
+	}
+	if typed, ok := raw.([]map[string]any); ok {
+		items := make([]any, 0, len(typed))
+		for _, item := range typed {
+			items = append(items, item)
+		}
+		raw = items
+	}
+	items, ok := raw.([]any)
+	if !ok {
+		return nil, false
+	}
+	out := make([]StructuredToolCall, 0, len(items))
+	for _, item := range items {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		tool := strings.TrimSpace(toString(entry["tool"]))
+		if tool == "" {
+			return nil, false
+		}
+		params := map[string]any{}
+		if rawParams, exists := entry["params"]; exists && rawParams != nil {
+			mapped, ok := rawParams.(map[string]any)
+			if !ok {
+				return nil, false
+			}
+			for key, value := range mapped {
+				trimmed := strings.TrimSpace(key)
+				if trimmed == "" {
+					continue
+				}
+				params[trimmed] = value
+			}
+		}
+		if len(params) == 0 {
+			params = nil
+		}
+		out = append(out, StructuredToolCall{Tool: tool, Params: params})
+	}
+	return out, true
+}
+
+func extractStructuredTasksFence(text string) (string, bool) {
+	lines := strings.Split(text, "\n")
+	inside := false
+	var body []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !inside {
+			if !strings.HasPrefix(trimmed, "```") {
+				continue
+			}
+			info := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(trimmed, "```")))
+			if strings.Contains(info, "or3-tasks") || strings.Contains(info, "structured-tasks") || strings.Contains(info, "autonomous-tasks") {
+				inside = true
+				body = body[:0]
+			}
+			continue
+		}
+		if strings.HasPrefix(trimmed, "```") {
+			payload := strings.TrimSpace(strings.Join(body, "\n"))
+			if payload == "" {
+				return "", false
+			}
+			return payload, true
+		}
+		body = append(body, line)
+	}
+	return "", false
+}
+
+func toString(raw any) string {
+	if raw == nil {
+		return ""
+	}
+	if s, ok := raw.(string); ok {
+		return strings.TrimSpace(s)
+	}
+	text := strings.TrimSpace(fmt.Sprint(raw))
+	if text == "<nil>" {
+		return ""
+	}
+	return text
+}
+
+func toInt(raw any) int {
+	switch v := raw.(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	default:
+		return 0
+	}
 }
 ````
 
@@ -3889,711 +3358,1060 @@ func (s Service) Deliver(ctx context.Context, to, text string, meta map[string]a
 }
 ````
 
-## File: internal/heartbeat/service.go
+## File: internal/channels/channels.go
 ````go
-package heartbeat
+package channels
 
 import (
 	"context"
 	"errors"
-	"log"
-	"os"
-	"path/filepath"
+	"fmt"
+	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
-	"time"
 
 	"or3-intern/internal/bus"
-	"or3-intern/internal/config"
-	"or3-intern/internal/triggers"
 )
 
 const (
-	DefaultChannel = "system"
-	DefaultFrom    = "heartbeat"
-	SeedMessage    = "Review HEARTBEAT.md and execute any active recurring tasks."
-
-	MetaKeyHeartbeat = "heartbeat"
-	MetaKeyDone      = "heartbeat_done"
+	MetaMediaPaths       = "media_paths"
+	MetaThreadTS         = "thread_ts"
+	MetaReplyToMessageID = "reply_to_message_id"
+	MetaMessageReference = "message_reference"
 )
 
-type Service struct {
-	Config       config.HeartbeatConfig
-	WorkspaceDir string
-	Bus          *bus.Bus
-
-	logf func(string, ...any)
-
-	mu        sync.Mutex
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
-	tickQueue chan struct{}
-	inFlight  atomic.Bool
-	stopping  atomic.Bool
+type Channel interface {
+	Name() string
+	Start(ctx context.Context, eventBus *bus.Bus) error
+	Stop(ctx context.Context) error
+	Deliver(ctx context.Context, to, text string, meta map[string]any) error
 }
 
-func New(cfg config.HeartbeatConfig, workspaceDir string, eventBus *bus.Bus) *Service {
-	return &Service{
-		Config:       cfg,
-		WorkspaceDir: workspaceDir,
-		Bus:          eventBus,
-		logf:         log.Printf,
-	}
+type Manager struct {
+	mu       sync.RWMutex
+	channels map[string]Channel
+	started  map[string]bool
 }
 
-func (s *Service) Start(ctx context.Context) {
-	if s == nil || !s.Config.Enabled || s.Bus == nil {
-		return
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.cancel != nil {
-		return
-	}
-	s.stopping.Store(false)
-
-	childCtx, cancel := context.WithCancel(ctx)
-	s.cancel = cancel
-	s.tickQueue = make(chan struct{}, 1)
-
-	interval := time.Duration(normalizeIntervalMinutes(s.Config.IntervalMinutes)) * time.Minute
-	s.wg.Add(2)
-	go s.runTicker(childCtx, interval)
-	go s.runPublisher(childCtx)
+func NewManager() *Manager {
+	return &Manager{channels: map[string]Channel{}, started: map[string]bool{}}
 }
 
-func (s *Service) Stop() {
-	if s == nil {
-		return
+func (m *Manager) Register(ch Channel) error {
+	if ch == nil {
+		return errors.New("nil channel")
 	}
-	s.stopping.Store(true)
-
-	s.mu.Lock()
-	cancel := s.cancel
-	s.cancel = nil
-	s.tickQueue = nil
-	s.mu.Unlock()
-
-	if cancel != nil {
-		cancel()
+	name := strings.TrimSpace(strings.ToLower(ch.Name()))
+	if name == "" {
+		return errors.New("channel name required")
 	}
-	s.wg.Wait()
-	s.inFlight.Store(false)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.channels[name]; exists {
+		return fmt.Errorf("channel already registered: %s", name)
+	}
+	m.channels[name] = ch
+	return nil
 }
 
-func (s *Service) runTicker(ctx context.Context, interval time.Duration) {
-	defer s.wg.Done()
-
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			s.enqueueTick("timer")
-		}
+func (m *Manager) Names() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]string, 0, len(m.channels))
+	for name := range m.channels {
+		out = append(out, name)
 	}
-}
-
-func (s *Service) runPublisher(ctx context.Context) {
-	defer s.wg.Done()
-
-	for {
-		if s.stopping.Load() || ctx.Err() != nil {
-			return
-		}
-
-		s.mu.Lock()
-		tickQueue := s.tickQueue
-		s.mu.Unlock()
-		if tickQueue == nil {
-			return
-		}
-
-		select {
-		case <-ctx.Done():
-			return
-		case <-tickQueue:
-			if s.stopping.Load() || ctx.Err() != nil {
-				return
-			}
-			s.processTick()
-		}
-	}
-}
-
-func (s *Service) enqueueTick(source string) bool {
-	s.mu.Lock()
-	tickQueue := s.tickQueue
-	s.mu.Unlock()
-	if tickQueue == nil {
-		return false
-	}
-
-	select {
-	case tickQueue <- struct{}{}:
-		return true
-	default:
-		s.logf("heartbeat tick dropped: pending tick already queued source=%s", source)
-		return false
-	}
-}
-
-func (s *Service) processTick() {
-	if s.inFlight.Load() {
-		s.logf("heartbeat tick skipped: previous turn still in flight")
-		return
-	}
-
-	path, text, err := LoadTasksFile(s.Config.TasksFile, s.WorkspaceDir)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			s.logf("heartbeat tick skipped: tasks file not found")
-			return
-		}
-		s.logf("heartbeat tick skipped: read failed path=%q err=%v", path, err)
-		return
-	}
-	if !HasActiveInstructions(text) {
-		return
-	}
-
-	s.inFlight.Store(true)
-	ev := bus.Event{
-		Type:       bus.EventHeartbeat,
-		SessionKey: normalizedSessionKey(s.Config.SessionKey),
-		Channel:    DefaultChannel,
-		From:       DefaultFrom,
-		Message:    SeedMessage,
-		Meta: map[string]any{
-			MetaKeyHeartbeat: true,
-			MetaKeyDone: func() {
-				s.inFlight.Store(false)
-			},
-			"tasks_path": path,
-			triggers.MetaKeyStructuredEvent: triggers.StructuredEventMap(triggers.StructuredEvent{
-				Type:    string(bus.EventHeartbeat),
-				Source:  "heartbeat",
-				Trusted: true,
-				Details: map[string]any{"tasks_path": path, "session_key": normalizedSessionKey(s.Config.SessionKey)},
-			}),
-		},
-	}
-	if ok := s.Bus.Publish(ev); !ok {
-		s.inFlight.Store(false)
-		s.logf("heartbeat tick dropped: event bus full")
-	}
-}
-
-func LoadTasksFile(configPath, workspaceDir string) (string, string, error) {
-	var firstErr error
-	for _, path := range candidatePaths(configPath, workspaceDir) {
-		data, err := os.ReadFile(path)
-		if err == nil {
-			return path, strings.TrimSpace(string(data)), nil
-		}
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if firstErr == nil {
-			firstErr = err
-		}
-	}
-	if firstErr != nil {
-		return strings.TrimSpace(configPath), "", firstErr
-	}
-	return strings.TrimSpace(configPath), "", os.ErrNotExist
-}
-
-func HasActiveInstructions(text string) bool {
-	inComment := false
-	for _, line := range strings.Split(text, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
-		if inComment {
-			if strings.Contains(trimmed, "-->") {
-				inComment = false
-			}
-			continue
-		}
-		if strings.HasPrefix(trimmed, "<!--") {
-			if !strings.Contains(trimmed, "-->") {
-				inComment = true
-			}
-			continue
-		}
-		if strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		return true
-	}
-	return false
-}
-
-func candidatePaths(configPath, workspaceDir string) []string {
-	seen := map[string]struct{}{}
-	out := make([]string, 0, 3)
-	add := func(path string) {
-		path = strings.TrimSpace(path)
-		if path == "" {
-			return
-		}
-		if _, ok := seen[path]; ok {
-			return
-		}
-		seen[path] = struct{}{}
-		out = append(out, path)
-	}
-	if strings.TrimSpace(workspaceDir) != "" {
-		add(filepath.Join(workspaceDir, "HEARTBEAT.md"))
-		add(filepath.Join(workspaceDir, "heartbeat.md"))
-	}
-	add(configPath)
+	sort.Strings(out)
 	return out
 }
 
-func normalizeIntervalMinutes(v int) int {
-	if v <= 0 {
-		return 30
+func (m *Manager) StartAll(ctx context.Context, eventBus *bus.Bus) error {
+	for _, name := range m.Names() {
+		if err := m.Start(ctx, name, eventBus); err != nil {
+			return err
+		}
 	}
-	if v < 1 {
-		return 1
-	}
-	return v
+	return nil
 }
 
-func normalizedSessionKey(v string) string {
-	v = strings.TrimSpace(v)
-	if v == "" {
-		return config.DefaultHeartbeatSessionKey
+func (m *Manager) Start(ctx context.Context, name string, eventBus *bus.Bus) error {
+	ch, err := m.get(name)
+	if err != nil {
+		return err
 	}
-	return v
+	m.mu.Lock()
+	if m.started[name] {
+		m.mu.Unlock()
+		return nil
+	}
+	m.mu.Unlock()
+	if err := ch.Start(ctx, eventBus); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.started[name] = true
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *Manager) StopAll(ctx context.Context) error {
+	var errs []string
+	for _, name := range m.Names() {
+		if err := m.Stop(ctx, name); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
+	if len(errs) > 0 {
+		return errors.New(strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+func (m *Manager) Stop(ctx context.Context, name string) error {
+	ch, err := m.get(name)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	started := m.started[name]
+	m.mu.Unlock()
+	if !started {
+		return nil
+	}
+	if err := ch.Stop(ctx); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	delete(m.started, name)
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *Manager) Deliver(ctx context.Context, channel, to, text string) error {
+	return m.DeliverWithMeta(ctx, channel, to, text, nil)
+}
+
+func (m *Manager) DeliverWithMeta(ctx context.Context, channel, to, text string, meta map[string]any) error {
+	if strings.TrimSpace(channel) == "" {
+		channel = "cli"
+	}
+	ch, err := m.get(channel)
+	if err != nil {
+		return err
+	}
+	return ch.Deliver(ctx, to, text, meta)
+}
+
+func (m *Manager) get(name string) (Channel, error) {
+	name = strings.TrimSpace(strings.ToLower(name))
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	ch := m.channels[name]
+	if ch == nil {
+		return nil, fmt.Errorf("channel not found: %s", name)
+	}
+	return ch, nil
+}
+
+func CloneMeta(meta map[string]any) map[string]any {
+	if len(meta) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(meta))
+	for k, v := range meta {
+		out[k] = v
+	}
+	return out
+}
+
+func ReplyMeta(meta map[string]any) map[string]any {
+	if len(meta) == 0 {
+		return nil
+	}
+	out := map[string]any{}
+	for _, key := range []string{MetaThreadTS, MetaReplyToMessageID, MetaMessageReference} {
+		if value, ok := meta[key]; ok && hasMeaningfulMetaValue(value) {
+			out[key] = value
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func hasMeaningfulMetaValue(value any) bool {
+	switch v := value.(type) {
+	case nil:
+		return false
+	case string:
+		return strings.TrimSpace(v) != ""
+	case int:
+		return v > 0
+	case int8:
+		return v > 0
+	case int16:
+		return v > 0
+	case int32:
+		return v > 0
+	case int64:
+		return v > 0
+	case uint:
+		return v > 0
+	case uint8:
+		return v > 0
+	case uint16:
+		return v > 0
+	case uint32:
+		return v > 0
+	case uint64:
+		return v > 0
+	default:
+		text := strings.TrimSpace(fmt.Sprint(value))
+		return text != "" && text != "<nil>"
+	}
 }
 ````
 
-## File: internal/memory/workspace_context.go
+## File: internal/clawhub/client.go
 ````go
-package memory
+package clawhub
 
 import (
+	"archive/zip"
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
-	"io/fs"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 )
 
 const (
-	defaultWorkspaceContextMaxFileBytes = 32 * 1024
-	defaultWorkspaceContextMaxResults   = 6
-	defaultWorkspaceContextMaxChars     = 6000
-	defaultWorkspaceContextScanLimit    = 200
-	workspaceContextCacheTTL            = 5 * time.Second
+	apiSearch   = "/api/v1/search"
+	apiResolve  = "/api/v1/resolve"
+	apiDownload = "/api/v1/download"
+	apiSkills   = "/api/v1/skills"
 )
 
-type workspaceContextCacheKey struct {
-	root         string
-	query        string
-	maxFileBytes int
-	maxResults   int
-	maxChars     int
+type Client struct {
+	SiteURL     string
+	RegistryURL string
+	HTTP        *http.Client
 }
 
-type workspaceContextCacheEntry struct {
-	text      string
-	expiresAt time.Time
+type SearchResult struct {
+	Slug        string
+	DisplayName string
+	Summary     string
+	Version     string
+	Score       float64
+	UpdatedAt   int64
 }
 
-var workspaceContextCache = struct {
-	mu      sync.Mutex
-	entries map[workspaceContextCacheKey]workspaceContextCacheEntry
-}{entries: map[workspaceContextCacheKey]workspaceContextCacheEntry{}}
-
-type WorkspaceContextConfig struct {
-	WorkspaceDir string
-	MaxFileBytes int
-	MaxResults   int
-	MaxChars     int
-	Now          time.Time
+type SkillInfo struct {
+	Slug            string
+	DisplayName     string
+	Summary         string
+	LatestVersion   string
+	SelectedVersion string
+	Owner           string
 }
 
-type workspaceCandidate struct {
-	Path    string
-	Excerpt string
-	Score   int
+type ResolveResult struct {
+	MatchVersion  string
+	LatestVersion string
 }
 
-func BuildWorkspaceContext(cfg WorkspaceContextConfig, query string) string {
-	root := strings.TrimSpace(cfg.WorkspaceDir)
-	if root == "" {
-		return ""
+type InstallOptions struct {
+	Force bool
+}
+
+type InstallResult struct {
+	Path        string
+	Slug        string
+	Version     string
+	Fingerprint string
+}
+
+type ScanFinding struct {
+	Severity string `json:"severity"`
+	Path     string `json:"path"`
+	Rule     string `json:"rule"`
+	Message  string `json:"message"`
+}
+
+func (f ScanFinding) Summary() string {
+	parts := make([]string, 0, 3)
+	if text := strings.TrimSpace(f.Severity); text != "" {
+		parts = append(parts, text)
 	}
-	absRoot, err := filepath.Abs(root)
+	if text := strings.TrimSpace(f.Path); text != "" {
+		parts = append(parts, text)
+	}
+	if text := strings.TrimSpace(f.Message); text != "" {
+		parts = append(parts, text)
+	}
+	return strings.Join(parts, ": ")
+}
+
+type SkillOrigin struct {
+	Version          int    `json:"version"`
+	Registry         string `json:"registry"`
+	Slug             string `json:"slug"`
+	Owner            string `json:"owner,omitempty"`
+	InstalledVersion string `json:"installedVersion"`
+	InstalledAt      int64  `json:"installedAt"`
+	Fingerprint      string `json:"fingerprint"`
+	ScanStatus       string `json:"scanStatus,omitempty"`
+	ScanFindings     []ScanFinding `json:"scanFindings,omitempty"`
+}
+
+type InstalledSkill struct {
+	Name     string
+	Path     string
+	Origin   SkillOrigin
+	Modified bool
+}
+
+func New(siteURL, registryURL string) *Client {
+	return &Client{
+		SiteURL:     strings.TrimRight(siteURL, "/"),
+		RegistryURL: strings.TrimRight(registryURL, "/"),
+		HTTP:        &http.Client{Timeout: 15 * time.Second},
+	}
+}
+
+func (c *Client) Search(ctx context.Context, query string, limit int) ([]SearchResult, error) {
+	url := c.apiURL(apiSearch)
+	url.RawQuery = queryString(map[string]string{
+		"q":     strings.TrimSpace(query),
+		"limit": intString(limit),
+	})
+	var response struct {
+		Results []struct {
+			Slug        string  `json:"slug"`
+			DisplayName string  `json:"displayName"`
+			Summary     string  `json:"summary"`
+			Version     string  `json:"version"`
+			Score       float64 `json:"score"`
+			UpdatedAt   int64   `json:"updatedAt"`
+		} `json:"results"`
+	}
+	if err := c.getJSON(ctx, url.String(), &response); err != nil {
+		return nil, err
+	}
+	results := make([]SearchResult, 0, len(response.Results))
+	for _, item := range response.Results {
+		results = append(results, SearchResult{
+			Slug:        item.Slug,
+			DisplayName: item.DisplayName,
+			Summary:     item.Summary,
+			Version:     item.Version,
+			Score:       item.Score,
+			UpdatedAt:   item.UpdatedAt,
+		})
+	}
+	return results, nil
+}
+
+func (c *Client) Inspect(ctx context.Context, slug, version string) (SkillInfo, error) {
+	slug = sanitizeSlug(slug)
+	if slug == "" {
+		return SkillInfo{}, fmt.Errorf("slug required")
+	}
+	var response struct {
+		Skill *struct {
+			Slug        string `json:"slug"`
+			DisplayName string `json:"displayName"`
+			Summary     string `json:"summary"`
+		} `json:"skill"`
+		LatestVersion *struct {
+			Version string `json:"version"`
+		} `json:"latestVersion"`
+		Owner *struct {
+			Handle      string `json:"handle"`
+			DisplayName string `json:"displayName"`
+		} `json:"owner"`
+	}
+	if err := c.getJSON(ctx, c.apiURL(apiSkills+"/"+slug).String(), &response); err != nil {
+		return SkillInfo{}, err
+	}
+	if response.Skill == nil {
+		return SkillInfo{}, fmt.Errorf("skill not found: %s", slug)
+	}
+	info := SkillInfo{
+		Slug:        response.Skill.Slug,
+		DisplayName: response.Skill.DisplayName,
+		Summary:     response.Skill.Summary,
+		LatestVersion: stringOr(response.LatestVersion, func(v *struct {
+			Version string `json:"version"`
+		}) string {
+			return v.Version
+		}),
+		SelectedVersion: strings.TrimSpace(version),
+		Owner:           ownerName(response.Owner),
+	}
+	if info.SelectedVersion == "" {
+		info.SelectedVersion = info.LatestVersion
+	}
+	return info, nil
+}
+
+func (c *Client) Resolve(ctx context.Context, slug, fingerprint string) (ResolveResult, error) {
+	slug = sanitizeSlug(slug)
+	if slug == "" {
+		return ResolveResult{}, fmt.Errorf("slug required")
+	}
+	url := c.apiURL(apiResolve)
+	url.RawQuery = queryString(map[string]string{
+		"slug":    slug,
+		"version": "",
+		"hash":    strings.TrimSpace(fingerprint),
+	})
+	var response struct {
+		Match *struct {
+			Version string `json:"version"`
+		} `json:"match"`
+		LatestVersion *struct {
+			Version string `json:"version"`
+		} `json:"latestVersion"`
+	}
+	if err := c.getJSON(ctx, url.String(), &response); err != nil {
+		return ResolveResult{}, err
+	}
+	return ResolveResult{
+		MatchVersion: stringOr(response.Match, func(v *struct {
+			Version string `json:"version"`
+		}) string {
+			return v.Version
+		}),
+		LatestVersion: stringOr(response.LatestVersion, func(v *struct {
+			Version string `json:"version"`
+		}) string {
+			return v.Version
+		}),
+	}, nil
+}
+
+func (c *Client) Download(ctx context.Context, slug, version string) ([]byte, error) {
+	slug = sanitizeSlug(slug)
+	if slug == "" {
+		return nil, fmt.Errorf("slug required")
+	}
+	url := c.apiURL(apiDownload)
+	url.RawQuery = queryString(map[string]string{
+		"slug":    slug,
+		"version": strings.TrimSpace(version),
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url.String(), nil)
 	if err != nil {
-		return ""
+		return nil, err
 	}
-	realRoot, err := filepath.EvalSymlinks(absRoot)
+	resp, err := c.httpClient().Do(req)
 	if err != nil {
-		return ""
+		return nil, err
 	}
-	maxFileBytes := cfg.MaxFileBytes
-	if maxFileBytes <= 0 {
-		maxFileBytes = defaultWorkspaceContextMaxFileBytes
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, readHTTPError(resp)
 	}
-	maxResults := cfg.MaxResults
-	if maxResults <= 0 {
-		maxResults = defaultWorkspaceContextMaxResults
-	}
-	maxChars := cfg.MaxChars
-	if maxChars <= 0 {
-		maxChars = defaultWorkspaceContextMaxChars
-	}
-	cacheKey := workspaceContextCacheKey{
-		root:         realRoot,
-		query:        strings.TrimSpace(strings.ToLower(query)),
-		maxFileBytes: maxFileBytes,
-		maxResults:   maxResults,
-		maxChars:     maxChars,
-	}
-	now := cfg.Now
-	if now.IsZero() {
-		now = time.Now()
-	}
-	if cached, ok := getWorkspaceContextCache(cacheKey, now); ok {
-		return cached
-	}
-
-	seen := map[string]struct{}{}
-	candidates := make([]workspaceCandidate, 0, maxResults)
-	appendCandidate := func(candidate workspaceCandidate) {
-		candidate.Path = strings.TrimSpace(candidate.Path)
-		candidate.Excerpt = strings.TrimSpace(candidate.Excerpt)
-		if candidate.Path == "" || candidate.Excerpt == "" {
-			return
-		}
-		if _, exists := seen[candidate.Path]; exists {
-			return
-		}
-		seen[candidate.Path] = struct{}{}
-		candidates = append(candidates, candidate)
-	}
-
-	for _, name := range []string{"README.md", "TODO.md", "TASKS.md", "PLAN.md", "STATUS.md", "NOTES.md", "PROJECT.md"} {
-		candidate, ok := workspaceFileCandidate(realRoot, filepath.Join(realRoot, name), maxFileBytes, nil)
-		if ok {
-			appendCandidate(candidate)
-		}
-	}
-	for _, candidate := range recentMemoryCandidates(realRoot, now, maxFileBytes) {
-		appendCandidate(candidate)
-	}
-	tokens := workspaceQueryTokens(query)
-	if len(tokens) > 0 {
-		for _, candidate := range relevantWorkspaceCandidates(realRoot, tokens, maxFileBytes, maxResults, seen) {
-			appendCandidate(candidate)
-		}
-	}
-	if len(candidates) == 0 {
-		return ""
-	}
-	if len(candidates) > maxResults {
-		candidates = candidates[:maxResults]
-	}
-	var out strings.Builder
-	out.WriteString("Startup workspace context gathered before the model call.\n")
-	for i, candidate := range candidates {
-		out.WriteString(fmt.Sprintf("%d) [%s] %s\n", i+1, relativeDisplayPath(realRoot, candidate.Path), workspaceOneLine(candidate.Excerpt, 320)))
-	}
-	text := workspaceTruncate(strings.TrimSpace(out.String()), maxChars)
-	setWorkspaceContextCache(cacheKey, text, now)
-	return text
+	return io.ReadAll(resp.Body)
 }
 
-func getWorkspaceContextCache(key workspaceContextCacheKey, now time.Time) (string, bool) {
-	workspaceContextCache.mu.Lock()
-	defer workspaceContextCache.mu.Unlock()
-	entry, ok := workspaceContextCache.entries[key]
-	if !ok {
-		return "", false
-	}
-	if !entry.expiresAt.After(now) {
-		delete(workspaceContextCache.entries, key)
-		return "", false
-	}
-	return entry.text, true
-}
-
-func setWorkspaceContextCache(key workspaceContextCacheKey, text string, now time.Time) {
-	workspaceContextCache.mu.Lock()
-	defer workspaceContextCache.mu.Unlock()
-	workspaceContextCache.entries[key] = workspaceContextCacheEntry{text: text, expiresAt: now.Add(workspaceContextCacheTTL)}
-}
-
-func recentMemoryCandidates(root string, now time.Time, maxFileBytes int) []workspaceCandidate {
-	memoryDir := filepath.Join(root, "memory")
-	entries, err := os.ReadDir(memoryDir)
+func (c *Client) Install(ctx context.Context, slug, version, destDir string, opts InstallOptions) (InstallResult, error) {
+	info, err := c.Inspect(ctx, slug, version)
 	if err != nil {
-		return nil
+		return InstallResult{}, err
 	}
-	preferred := map[string]struct{}{
-		now.Format("2006-01-02") + ".md":                    {},
-		now.Add(-24*time.Hour).Format("2006-01-02") + ".md": {},
+	if strings.TrimSpace(info.SelectedVersion) == "" {
+		return InstallResult{}, fmt.Errorf("could not resolve version for %s", slug)
 	}
-	var selected []workspaceCandidate
-	for _, entry := range entries {
-		if entry.IsDir() {
+	zipBytes, err := c.Download(ctx, slug, info.SelectedVersion)
+	if err != nil {
+		return InstallResult{}, err
+	}
+	target := filepath.Join(destDir, sanitizeSlug(slug))
+	if err := installZip(zipBytes, target, SkillOrigin{
+		Version:          2,
+		Registry:         c.RegistryURL,
+		Slug:             sanitizeSlug(slug),
+		Owner:            info.Owner,
+		InstalledVersion: info.SelectedVersion,
+		InstalledAt:      time.Now().UnixMilli(),
+	}, opts); err != nil {
+		return InstallResult{}, err
+	}
+	origin, err := ReadOrigin(target)
+	if err != nil {
+		return InstallResult{}, err
+	}
+	return InstallResult{
+		Path:        target,
+		Slug:        origin.Slug,
+		Version:     origin.InstalledVersion,
+		Fingerprint: origin.Fingerprint,
+	}, nil
+}
+
+func installZip(zipBytes []byte, target string, origin SkillOrigin, opts InstallOptions) error {
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	if stat, err := os.Stat(target); err == nil && stat.IsDir() {
+		if !opts.Force {
+			modified, checkErr := LocalEdits(target)
+			if checkErr != nil {
+				return checkErr
+			}
+			if modified {
+				return fmt.Errorf("local modifications detected: %s", target)
+			}
+		}
+	} else if err == nil {
+		return fmt.Errorf("target exists and is not a directory: %s", target)
+	}
+
+	tempRoot, err := os.MkdirTemp(filepath.Dir(target), ".clawhub-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tempRoot)
+	tempTarget := filepath.Join(tempRoot, filepath.Base(target))
+	if err := extractZipToDir(zipBytes, tempTarget); err != nil {
+		return err
+	}
+	fingerprint, err := FingerprintDir(tempTarget)
+	if err != nil {
+		return err
+	}
+	origin.Fingerprint = fingerprint
+	scanStatus, scanFindings, err := scanInstalledSkill(tempTarget)
+	if err != nil {
+		return err
+	}
+	origin.ScanStatus = scanStatus
+	origin.ScanFindings = scanFindings
+	if err := WriteOrigin(tempTarget, origin); err != nil {
+		return err
+	}
+
+	backup := target + ".bak"
+	_ = os.RemoveAll(backup)
+	if _, err := os.Stat(target); err == nil {
+		if err := os.Rename(target, backup); err != nil {
+			return err
+		}
+	}
+	if err := os.Rename(tempTarget, target); err != nil {
+		if _, statErr := os.Stat(backup); statErr == nil {
+			_ = os.Rename(backup, target)
+		}
+		return err
+	}
+	_ = os.RemoveAll(backup)
+	return nil
+}
+
+func extractZipToDir(zipBytes []byte, target string) error {
+	reader, err := zip.NewReader(bytes.NewReader(zipBytes), int64(len(zipBytes)))
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		return err
+	}
+	for _, file := range reader.File {
+		rel, ok := safeZipPath(file.Name)
+		if !ok {
 			continue
 		}
-		if _, ok := preferred[entry.Name()]; !ok {
+		full := filepath.Join(target, rel)
+		if file.FileInfo().IsDir() {
+			if err := os.MkdirAll(full, 0o755); err != nil {
+				return err
+			}
 			continue
 		}
-		candidate, ok := workspaceFileCandidate(root, filepath.Join(memoryDir, entry.Name()), maxFileBytes, nil)
-		if ok {
-			selected = append(selected, candidate)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			return err
 		}
-	}
-	if len(selected) > 0 {
-		sort.Slice(selected, func(i, j int) bool { return selected[i].Path < selected[j].Path })
-		return selected
-	}
-	type fileInfo struct {
-		path    string
-		modTime time.Time
-	}
-	files := make([]fileInfo, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".md") {
-			continue
-		}
-		info, err := entry.Info()
+		rc, err := file.Open()
 		if err != nil {
-			continue
+			return err
 		}
-		files = append(files, fileInfo{path: filepath.Join(memoryDir, entry.Name()), modTime: info.ModTime()})
-	}
-	sort.Slice(files, func(i, j int) bool { return files[i].modTime.After(files[j].modTime) })
-	if len(files) > 2 {
-		files = files[:2]
-	}
-	out := make([]workspaceCandidate, 0, len(files))
-	for _, file := range files {
-		candidate, ok := workspaceFileCandidate(root, file.path, maxFileBytes, nil)
-		if ok {
-			out = append(out, candidate)
+		data, readErr := io.ReadAll(rc)
+		_ = rc.Close()
+		if readErr != nil {
+			return readErr
+		}
+		mode := file.Mode()
+		if mode == 0 {
+			mode = 0o644
+		}
+		if err := os.WriteFile(full, data, mode); err != nil {
+			return err
 		}
 	}
-	return out
+	return nil
 }
 
-func relevantWorkspaceCandidates(root string, tokens []string, maxFileBytes, maxResults int, seen map[string]struct{}) []workspaceCandidate {
-	var candidates []workspaceCandidate
-	visited := 0
-	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+func FingerprintDir(root string) (string, error) {
+	type item struct {
+		path string
+		sum  string
+	}
+	var files []item
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			return nil
-		}
-		rel, relErr := filepath.Rel(root, path)
-		if relErr != nil {
-			return nil
-		}
-		if rel == "." {
-			return nil
+			return err
 		}
 		if d.IsDir() {
-			name := strings.ToLower(d.Name())
-			if strings.HasPrefix(name, ".") || name == "node_modules" || name == "vendor" || name == "artifacts" {
+			if d.Name() == ".clawhub" {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		if visited >= defaultWorkspaceContextScanLimit {
-			return fs.SkipAll
+		info, err := d.Info()
+		if err != nil {
+			return err
 		}
-		visited++
-		if _, exists := seen[path]; exists {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			return nil
 		}
-		if !isWorkspaceContextFile(path) || isBootstrapWorkspaceFile(path) {
-			return nil
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
 		}
-		candidate, ok := workspaceFileCandidate(root, path, maxFileBytes, tokens)
-		if !ok || candidate.Score <= 0 {
-			return nil
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
 		}
-		candidates = append(candidates, candidate)
+		sum := sha256.Sum256(data)
+		files = append(files, item{
+			path: filepath.ToSlash(rel),
+			sum:  hex.EncodeToString(sum[:]),
+		})
 		return nil
 	})
-	sort.Slice(candidates, func(i, j int) bool {
-		if candidates[i].Score == candidates[j].Score {
-			return candidates[i].Path < candidates[j].Path
+	if err != nil {
+		return "", err
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].path < files[j].path })
+	h := sha256.New()
+	for _, file := range files {
+		_, _ = io.WriteString(h, file.path+":"+file.sum+"\n")
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func LocalEdits(skillDir string) (bool, error) {
+	origin, err := ReadOrigin(skillDir)
+	if err != nil {
+		return false, err
+	}
+	current, err := FingerprintDir(skillDir)
+	if err != nil {
+		return false, err
+	}
+	return current != origin.Fingerprint, nil
+}
+
+func ListInstalled(root string) ([]InstalledSkill, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
 		}
-		return candidates[i].Score > candidates[j].Score
+		return nil, err
+	}
+	out := make([]InstalledSkill, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		path := filepath.Join(root, entry.Name())
+		origin, err := ReadOrigin(path)
+		if err != nil {
+			continue
+		}
+		modified, err := LocalEdits(path)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, InstalledSkill{
+			Name:     entry.Name(),
+			Path:     path,
+			Origin:   origin,
+			Modified: modified,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+func ReadOrigin(skillDir string) (SkillOrigin, error) {
+	data, err := os.ReadFile(filepath.Join(skillDir, ".clawhub", "origin.json"))
+	if err != nil {
+		return SkillOrigin{}, err
+	}
+	var origin SkillOrigin
+	if err := json.Unmarshal(data, &origin); err != nil {
+		return SkillOrigin{}, err
+	}
+	return origin, nil
+}
+
+func WriteOrigin(skillDir string, origin SkillOrigin) error {
+	path := filepath.Join(skillDir, ".clawhub", "origin.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(origin, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0o644)
+}
+
+const installScanReadMaxBytes = 128 * 1024
+
+func scanInstalledSkill(root string) (string, []ScanFinding, error) {
+	findings := make([]ScanFinding, 0)
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if d.Name() == ".clawhub" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		info, infoErr := d.Info()
+		if infoErr != nil {
+			return infoErr
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return relErr
+		}
+		rel = filepath.ToSlash(rel)
+		findings = append(findings, pathFindings(rel)...)
+		if info.Size() <= 0 || info.Size() > installScanReadMaxBytes || !scanContentFile(rel, info.Mode()) {
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		findings = append(findings, contentFindings(rel, string(data))...)
+		return nil
 	})
-	if len(candidates) > maxResults {
-		candidates = candidates[:maxResults]
-	}
-	return candidates
-}
-
-func workspaceFileCandidate(root, path string, maxFileBytes int, tokens []string) (workspaceCandidate, bool) {
-	resolved, ok := workspaceSafePath(root, path)
-	if !ok {
-		return workspaceCandidate{}, false
-	}
-	f, err := os.Open(resolved)
 	if err != nil {
-		return workspaceCandidate{}, false
+		return "", nil, err
 	}
-	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, int64(maxFileBytes)))
-	if err != nil {
-		return workspaceCandidate{}, false
-	}
-	text := strings.TrimSpace(string(data))
-	if text == "" {
-		return workspaceCandidate{}, false
-	}
-	excerpt, score := workspaceExcerpt(resolved, text, tokens)
-	if len(tokens) == 0 {
-		score = 1
-	}
-	return workspaceCandidate{Path: resolved, Excerpt: excerpt, Score: score}, true
-}
-
-func workspaceSafePath(root, path string) (string, bool) {
-	absPath, err := filepath.Abs(path)
-	if err != nil {
-		return "", false
-	}
-	realPath, err := filepath.EvalSymlinks(absPath)
-	if err != nil {
-		return "", false
-	}
-	rel, err := filepath.Rel(root, realPath)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", false
-	}
-	return realPath, true
-}
-
-func workspaceExcerpt(path, text string, tokens []string) (string, int) {
-	one := workspaceOneLine(text, 500)
-	if len(tokens) == 0 {
-		return one, 0
-	}
-	lowerPath := strings.ToLower(path)
-	lowerText := strings.ToLower(text)
-	best := -1
-	score := 0
-	for _, token := range tokens {
-		if strings.Contains(lowerPath, token) {
-			score += 6
+	status := "clean"
+	for _, finding := range findings {
+		switch strings.ToLower(strings.TrimSpace(finding.Severity)) {
+		case "high":
+			return "blocked", findings, nil
+		case "medium":
+			status = "quarantined"
 		}
-		if idx := strings.Index(lowerText, token); idx >= 0 {
-			score += 3
-			if best < 0 || idx < best {
-				best = idx
+	}
+	return status, findings, nil
+}
+
+func pathFindings(rel string) []ScanFinding {
+	lower := strings.ToLower(strings.TrimSpace(rel))
+	for _, name := range []string{".env", ".netrc", ".npmrc", ".pypirc", "id_rsa", "id_dsa", ".aws/credentials", ".aws/config", ".ssh/config", ".ssh/known_hosts"} {
+		if lower == name || strings.HasSuffix(lower, "/"+name) {
+			return []ScanFinding{{Severity: "high", Path: rel, Rule: "credential-material", Message: "bundle contains credential or host-secret material"}}
+		}
+	}
+	return nil
+}
+
+func scanContentFile(rel string, mode os.FileMode) bool {
+	ext := strings.ToLower(filepath.Ext(rel))
+	if mode&0o111 != 0 {
+		return true
+	}
+	switch ext {
+	case ".sh", ".bash", ".zsh", ".command", ".ps1", ".bat", ".cmd", ".py", ".rb", ".js", ".ts":
+		return true
+	default:
+		return false
+	}
+}
+
+func contentFindings(rel, content string) []ScanFinding {
+	lower := strings.ToLower(content)
+	findings := make([]ScanFinding, 0, 2)
+	rules := []struct {
+		rule     string
+		severity string
+		message  string
+		match    func(string) bool
+	}{
+		{rule: "curl-pipe-shell", severity: "medium", message: "downloads remote content directly into a shell", match: func(s string) bool { return strings.Contains(s, "curl ") && strings.Contains(s, "| sh") }},
+		{rule: "wget-pipe-shell", severity: "medium", message: "downloads remote content directly into a shell", match: func(s string) bool { return strings.Contains(s, "wget ") && strings.Contains(s, "| sh") }},
+		{rule: "powershell-iex", severity: "medium", message: "executes downloaded content inline", match: func(s string) bool { return strings.Contains(s, "invoke-webrequest") && strings.Contains(s, "iex") }},
+		{rule: "reverse-shell", severity: "medium", message: "contains a shell/network handoff pattern", match: func(s string) bool { return strings.Contains(s, "/dev/tcp/") || strings.Contains(s, "nc -e") }},
+		{rule: "osascript", severity: "medium", message: "invokes local system automation outside the declared tool model", match: func(s string) bool { return strings.Contains(s, "osascript") }},
+	}
+	for _, rule := range rules {
+		if rule.match(lower) {
+			findings = append(findings, ScanFinding{Severity: rule.severity, Path: rel, Rule: rule.rule, Message: rule.message})
+		}
+	}
+	return findings
+}
+
+func RemoveSkill(root, name string) error {
+	name = sanitizeSlug(name)
+	if name == "" {
+		return fmt.Errorf("skill name required")
+	}
+	return os.RemoveAll(filepath.Join(root, name))
+}
+
+func (c *Client) apiURL(path string) *urlBuilder {
+	return newURLBuilder(c.RegistryURL, path)
+}
+
+func (c *Client) httpClient() *http.Client {
+	if c != nil && c.HTTP != nil {
+		return c.HTTP
+	}
+	return &http.Client{Timeout: 15 * time.Second}
+}
+
+func (c *Client) getJSON(ctx context.Context, rawURL string, dest any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return readHTTPError(resp)
+	}
+	return json.NewDecoder(resp.Body).Decode(dest)
+}
+
+func sanitizeSlug(slug string) string {
+	slug = strings.TrimSpace(slug)
+	if slug == "" || strings.Contains(slug, "..") || strings.Contains(slug, "/") || strings.Contains(slug, "\\") {
+		return ""
+	}
+	return slug
+}
+
+func safeZipPath(path string) (string, bool) {
+	path = strings.TrimSpace(strings.ReplaceAll(path, "\\", "/"))
+	path = strings.TrimPrefix(path, "./")
+	path = strings.TrimPrefix(path, "/")
+	if path == "" || strings.Contains(path, "..") {
+		return "", false
+	}
+	return filepath.FromSlash(path), true
+}
+
+func readHTTPError(resp *http.Response) error {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	text := strings.TrimSpace(string(body))
+	if text == "" {
+		text = resp.Status
+	}
+	return fmt.Errorf("clawhub API error: %s", text)
+}
+
+func queryString(values map[string]string) string {
+	var parts []string
+	for key, value := range values {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		parts = append(parts, urlEncode(key)+"="+urlEncode(value))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, "&")
+}
+
+func intString(v int) string {
+	if v <= 0 {
+		return ""
+	}
+	return fmt.Sprint(v)
+}
+
+func ownerName(owner *struct {
+	Handle      string `json:"handle"`
+	DisplayName string `json:"displayName"`
+}) string {
+	if owner == nil {
+		return ""
+	}
+	if strings.TrimSpace(owner.Handle) != "" {
+		return owner.Handle
+	}
+	return owner.DisplayName
+}
+
+func stringOr[T any](value *T, fn func(*T) string) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(fn(value))
+}
+
+type urlBuilder struct {
+	base     string
+	path     string
+	RawQuery string
+}
+
+func newURLBuilder(base, path string) *urlBuilder {
+	return &urlBuilder{
+		base: strings.TrimRight(base, "/"),
+		path: path,
+	}
+}
+
+func (u *urlBuilder) String() string {
+	if strings.TrimSpace(u.RawQuery) == "" {
+		return u.base + u.path
+	}
+	return u.base + u.path + "?" + u.RawQuery
+}
+
+func urlEncode(s string) string {
+	replacer := strings.NewReplacer(
+		"%", "%25",
+		" ", "%20",
+		"!", "%21",
+		"#", "%23",
+		"$", "%24",
+		"&", "%26",
+		"'", "%27",
+		"(", "%28",
+		")", "%29",
+		"+", "%2B",
+		",", "%2C",
+		"/", "%2F",
+		":", "%3A",
+		";", "%3B",
+		"=", "%3D",
+		"?", "%3F",
+		"@", "%40",
+	)
+	return replacer.Replace(s)
+}
+````
+
+## File: internal/tools/env.go
+````go
+package tools
+
+import (
+	"os"
+	"strings"
+)
+
+var defaultChildEnvAllowlist = []string{"PATH", "HOME", "TMPDIR", "TMP", "TEMP"}
+
+func EffectiveChildEnvAllowlist(allowlist []string) []string {
+	cleaned := make([]string, 0, len(allowlist))
+	seen := map[string]struct{}{}
+	for _, name := range allowlist {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		cleaned = append(cleaned, name)
+	}
+	if len(cleaned) > 0 {
+		return cleaned
+	}
+	return append([]string{}, defaultChildEnvAllowlist...)
+}
+
+func BuildChildEnv(base []string, allowlist []string, overlay map[string]string, pathAppend string) []string {
+	values := map[string]string{}
+	order := make([]string, 0, len(base)+len(overlay)+1)
+	allowed := map[string]struct{}{}
+	for _, name := range EffectiveChildEnvAllowlist(allowlist) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		allowed[name] = struct{}{}
+	}
+	for _, raw := range base {
+		key, value, ok := strings.Cut(raw, "=")
+		if !ok {
+			continue
+		}
+		if _, ok := allowed[key]; !ok {
+			continue
+		}
+		if _, exists := values[key]; !exists {
+			order = append(order, key)
+		}
+		values[key] = value
+	}
+	for key, value := range overlay {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		if _, exists := values[key]; !exists {
+			order = append(order, key)
+		}
+		values[key] = value
+	}
+	if pathAppend != "" {
+		pathValue := values["PATH"]
+		if pathValue == "" {
+			pathValue = os.Getenv("PATH")
+		}
+		values["PATH"] = pathValue + string(os.PathListSeparator) + pathAppend
+		seen := false
+		for _, key := range order {
+			if key == "PATH" {
+				seen = true
+				break
 			}
 		}
-	}
-	if best < 0 {
-		return one, score
-	}
-	start := best - 120
-	if start < 0 {
-		start = 0
-	}
-	end := best + 220
-	if end > len(text) {
-		end = len(text)
-	}
-	excerpt := strings.TrimSpace(text[start:end])
-	if start > 0 {
-		excerpt = "…" + excerpt
-	}
-	if end < len(text) {
-		excerpt += "…"
-	}
-	return workspaceOneLine(excerpt, 500), score
-}
-
-func workspaceQueryTokens(query string) []string {
-	raw := strings.FieldsFunc(strings.ToLower(query), func(r rune) bool {
-		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9')
-	})
-	stop := map[string]struct{}{
-		"the": {}, "and": {}, "for": {}, "with": {}, "that": {}, "this": {}, "from": {}, "into": {},
-		"what": {}, "when": {}, "where": {}, "have": {}, "just": {}, "please": {}, "about": {},
-	}
-	seen := map[string]struct{}{}
-	out := make([]string, 0, len(raw))
-	for _, token := range raw {
-		if len(token) < 3 {
-			continue
+		if !seen {
+			order = append(order, "PATH")
 		}
-		if _, blocked := stop[token]; blocked {
-			continue
-		}
-		if _, exists := seen[token]; exists {
-			continue
-		}
-		seen[token] = struct{}{}
-		out = append(out, token)
+	}
+	out := make([]string, 0, len(order))
+	for _, key := range order {
+		out = append(out, key+"="+values[key])
 	}
 	return out
-}
-
-func isWorkspaceContextFile(path string) bool {
-	switch strings.ToLower(filepath.Ext(path)) {
-	case ".md", ".txt":
-		return true
-	default:
-		return false
-	}
-}
-
-func isBootstrapWorkspaceFile(path string) bool {
-	name := strings.ToUpper(filepath.Base(path))
-	switch name {
-	case "SOUL.MD", "AGENTS.MD", "TOOLS.MD", "IDENTITY.MD", "MEMORY.MD", "HEARTBEAT.MD":
-		return true
-	default:
-		return false
-	}
-}
-
-func relativeDisplayPath(root, path string) string {
-	rel, err := filepath.Rel(root, path)
-	if err != nil {
-		return path
-	}
-	return filepath.ToSlash(rel)
-}
-
-func workspaceOneLine(s string, max int) string {
-	s = strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
-	if max > 0 && len(s) > max {
-		return strings.TrimSpace(s[:max]) + "…"
-	}
-	return s
-}
-
-func workspaceTruncate(s string, max int) string {
-	s = strings.TrimSpace(s)
-	if max > 0 && len(s) > max {
-		return strings.TrimSpace(s[:max]) + "\n…[truncated]"
-	}
-	return s
 }
 ````
 
@@ -4720,152 +4538,6 @@ func (Base) SchemaFor(name, desc string, params map[string]any) map[string]any {
 }
 ````
 
-## File: internal/triggers/filewatch.go
-````go
-package triggers
-
-import (
-	"context"
-	"log"
-	"os"
-	"path/filepath"
-	"strings"
-	"sync"
-	"time"
-
-	"or3-intern/internal/bus"
-	"or3-intern/internal/config"
-)
-
-type FileWatcher struct {
-	Config     config.FileWatchConfig
-	Bus        *bus.Bus
-	SessionKey string
-
-	mu     sync.Mutex
-	last   map[string]fileState
-	cancel context.CancelFunc
-}
-
-type fileState struct {
-	mtime  time.Time
-	size   int64
-	lastEv time.Time // last time we published an event for this path
-}
-
-func NewFileWatcher(cfg config.FileWatchConfig, b *bus.Bus, sessionKey string) *FileWatcher {
-	return &FileWatcher{
-		Config:     cfg,
-		Bus:        b,
-		SessionKey: sessionKey,
-		last:       map[string]fileState{},
-	}
-}
-
-func (fw *FileWatcher) Start(ctx context.Context) {
-	if !fw.Config.Enabled || len(fw.Config.Paths) == 0 {
-		return
-	}
-	pollInterval := time.Duration(fw.Config.PollSeconds) * time.Second
-	if pollInterval <= 0 {
-		pollInterval = 5 * time.Second
-	}
-	ctx, fw.cancel = context.WithCancel(ctx)
-	go fw.loop(ctx, pollInterval)
-}
-
-func (fw *FileWatcher) Stop() {
-	if fw.cancel != nil {
-		fw.cancel()
-	}
-}
-
-func (fw *FileWatcher) loop(ctx context.Context, interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			fw.poll(ctx)
-		}
-	}
-}
-
-func (fw *FileWatcher) poll(ctx context.Context) {
-	debounce := time.Duration(fw.Config.DebounceSeconds) * time.Second
-	if debounce <= 0 {
-		debounce = 2 * time.Second
-	}
-	fw.mu.Lock()
-	defer fw.mu.Unlock()
-	now := time.Now()
-	for _, p := range fw.Config.Paths {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			continue
-		}
-		absPath, err := filepath.Abs(p)
-		if err != nil {
-			continue
-		}
-		// Don't follow symlinks
-		info, err := os.Lstat(absPath)
-		if err != nil {
-			continue
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			continue
-		}
-		prev, seen := fw.last[absPath]
-		cur := fileState{mtime: info.ModTime(), size: info.Size()}
-		if seen {
-			// Check if changed
-			if cur.mtime == prev.mtime && cur.size == prev.size {
-				continue
-			}
-			// Debounce: don't republish if we published recently
-			if now.Sub(prev.lastEv) < debounce {
-				// update state but don't publish yet
-				fw.last[absPath] = fileState{mtime: cur.mtime, size: cur.size, lastEv: prev.lastEv}
-				continue
-			}
-		}
-		cur.lastEv = now
-		fw.last[absPath] = cur
-		if !seen {
-			// First observation - record baseline with zero lastEv so debounce
-			// does not prevent the first change event from being published.
-			fw.last[absPath] = fileState{mtime: cur.mtime, size: cur.size}
-			continue
-		}
-		// Publish event
-		ev := bus.Event{
-			Type:       bus.EventFileChange,
-			SessionKey: fw.SessionKey,
-			Channel:    "filewatch",
-			From:       absPath,
-			Message:    "file changed: " + absPath,
-			Meta: map[string]any{
-				"path":  absPath,
-				"size":  info.Size(),
-				"mtime": info.ModTime().UnixMilli(),
-				MetaKeyStructuredEvent: StructuredEventMap(StructuredEvent{
-					Type:    string(bus.EventFileChange),
-					Source:  "filewatch",
-					Trusted: true,
-					Details: map[string]any{"path": absPath, "size": info.Size(), "mtime": info.ModTime().UnixMilli()},
-				}),
-			},
-		}
-		if ok := fw.Bus.Publish(ev); !ok {
-			log.Printf("filewatch: bus full, dropping event for %s", absPath)
-		}
-	}
-}
-````
-
 ## File: internal/triggers/triggers.go
 ````go
 package triggers
@@ -4918,155 +4590,6 @@ func StructuredEventJSON(raw any) string {
 		return ""
 	}
 	return string(b)
-}
-````
-
-## File: internal/triggers/webhook.go
-````go
-package triggers
-
-import (
-	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
-	"fmt"
-	"io"
-	"log"
-	"net"
-	"net/http"
-	"strings"
-	"time"
-
-	"or3-intern/internal/bus"
-	"or3-intern/internal/config"
-)
-
-type WebhookServer struct {
-	Config     config.WebhookConfig
-	Bus        *bus.Bus
-	SessionKey string
-	server     *http.Server
-}
-
-const structuredBodyPreviewMaxChars = 512
-
-func NewWebhookServer(cfg config.WebhookConfig, b *bus.Bus, sessionKey string) *WebhookServer {
-	return &WebhookServer{Config: cfg, Bus: b, SessionKey: sessionKey}
-}
-
-func (w *WebhookServer) Start(ctx context.Context) error {
-	if !w.Config.Enabled || strings.TrimSpace(w.Config.Secret) == "" {
-		return nil
-	}
-	addr := strings.TrimSpace(w.Config.Addr)
-	if addr == "" {
-		addr = "127.0.0.1:8765"
-	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/webhook", w.handle)
-	mux.HandleFunc("/webhook/", w.handle)
-	w.server = &http.Server{
-		Addr:         addr,
-		Handler:      mux,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
-	}
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return fmt.Errorf("webhook listen %s: %w", addr, err)
-	}
-	go func() {
-		if err := w.server.Serve(ln); err != nil && err != http.ErrServerClosed {
-			log.Printf("webhook server error: %v", err)
-		}
-	}()
-	return nil
-}
-
-func (w *WebhookServer) Stop(ctx context.Context) error {
-	if w.server == nil {
-		return nil
-	}
-	return w.server.Shutdown(ctx)
-}
-
-func (w *WebhookServer) handle(rw http.ResponseWriter, r *http.Request) {
-	maxBytes := int64(w.Config.MaxBodyKB) * 1024
-	if maxBytes <= 0 {
-		maxBytes = 64 * 1024
-	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxBytes+1))
-	if err != nil {
-		http.Error(rw, "read error", http.StatusInternalServerError)
-		return
-	}
-	if int64(len(body)) > maxBytes {
-		http.Error(rw, "request too large", http.StatusRequestEntityTooLarge)
-		return
-	}
-
-	if !w.authenticate(r, body) {
-		http.Error(rw, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-
-	route := strings.TrimPrefix(r.URL.Path, "/webhook")
-	route = strings.TrimPrefix(route, "/")
-	preview := strings.TrimSpace(string(body))
-	if len(preview) > structuredBodyPreviewMaxChars {
-		preview = preview[:structuredBodyPreviewMaxChars] + "...[truncated]"
-	}
-
-	ev := bus.Event{
-		Type:       bus.EventWebhook,
-		SessionKey: w.SessionKey,
-		Channel:    "webhook",
-		From:       r.RemoteAddr,
-		Message:    string(body),
-		Meta: map[string]any{
-			"route":        route,
-			"content_type": r.Header.Get("Content-Type"),
-			"x-request-id": r.Header.Get("X-Request-ID"),
-			MetaKeyStructuredEvent: StructuredEventMap(StructuredEvent{
-				Type:    string(bus.EventWebhook),
-				Source:  "webhook",
-				Trusted: false,
-				Details: map[string]any{
-					"route":        route,
-					"content_type": r.Header.Get("Content-Type"),
-					"request_id":   r.Header.Get("X-Request-ID"),
-					"remote_addr":  r.RemoteAddr,
-					"body_preview": preview,
-					"body_bytes":   len(body),
-				},
-			}),
-		},
-	}
-	if ok := w.Bus.Publish(ev); !ok {
-		http.Error(rw, "bus full", http.StatusServiceUnavailable)
-		return
-	}
-	rw.WriteHeader(http.StatusOK)
-	_, _ = fmt.Fprint(rw, "ok")
-}
-
-func (w *WebhookServer) authenticate(r *http.Request, body []byte) bool {
-	secret := w.Config.Secret
-	if secret == "" {
-		return false
-	}
-	// Check HMAC-SHA256 in X-Hub-Signature-256
-	sig := r.Header.Get("X-Hub-Signature-256")
-	if strings.HasPrefix(sig, "sha256=") {
-		sig = strings.TrimPrefix(sig, "sha256=")
-		mac := hmac.New(sha256.New, []byte(secret))
-		mac.Write(body)
-		expected := hex.EncodeToString(mac.Sum(nil))
-		return hmac.Equal([]byte(sig), []byte(expected))
-	}
-	// Fall back to simple shared secret in X-Webhook-Secret header
-	return r.Header.Get("X-Webhook-Secret") == secret
 }
 ````
 
@@ -5125,477 +4648,6 @@ OR3_WHATSAPP_BRIDGE_TOKEN=
 .or3/
 /or3-intern
 or3-intern.exe
-````
-
-## File: cmd/or3-intern/skills_cmd.go
-````go
-package main
-
-import (
-	"context"
-	"encoding/json"
-	"flag"
-	"fmt"
-	"io"
-	"log"
-	"os"
-	"path/filepath"
-	"sort"
-	"strings"
-
-	"or3-intern/internal/clawhub"
-	"or3-intern/internal/config"
-	"or3-intern/internal/mcp"
-	"or3-intern/internal/skills"
-)
-
-type skillsCommandDeps struct {
-	Client        *clawhub.Client
-	LoadToolNames func(context.Context, config.Config) map[string]struct{}
-	LoadInventory func(toolNames map[string]struct{}) skills.Inventory
-	Audit         func(context.Context, string, any) error
-	Stdout        io.Writer
-	Stderr        io.Writer
-}
-
-func runSkillsCommand(ctx context.Context, cfg config.Config, bundledDir string, args []string, stdout, stderr io.Writer) error {
-	deps := skillsCommandDeps{
-		Client: newClawHubClient(cfg),
-		LoadToolNames: func(ctx context.Context, cfg config.Config) map[string]struct{} {
-			return loadAvailableToolNamesWithManager(ctx, cfg, nil)
-		},
-		LoadInventory: func(toolNames map[string]struct{}) skills.Inventory {
-			return buildSkillsInventory(cfg, bundledDir, toolNames)
-		},
-		Stdout: stdout,
-		Stderr: stderr,
-	}
-	return runSkillsCommandWithDeps(ctx, cfg, args, deps)
-}
-
-func runSkillsCommandWithDeps(ctx context.Context, cfg config.Config, args []string, deps skillsCommandDeps) error {
-	if deps.Client == nil {
-		deps.Client = newClawHubClient(cfg)
-	}
-	if deps.LoadToolNames == nil {
-		deps.LoadToolNames = func(ctx context.Context, cfg config.Config) map[string]struct{} {
-			return loadAvailableToolNamesWithManager(ctx, cfg, nil)
-		}
-	}
-	if deps.LoadInventory == nil {
-		return fmt.Errorf("skills inventory loader not configured")
-	}
-	if deps.Stdout == nil {
-		deps.Stdout = os.Stdout
-	}
-	if deps.Stderr == nil {
-		deps.Stderr = os.Stderr
-	}
-	if len(args) == 0 {
-		return fmt.Errorf("usage: or3-intern skills <list|info|check|search|install|update|remove> ...")
-	}
-
-	switch args[0] {
-	case "list":
-		fs := flag.NewFlagSet("skills list", flag.ContinueOnError)
-		fs.SetOutput(deps.Stderr)
-		eligibleOnly := fs.Bool("eligible", false, "show only eligible skills")
-		if err := fs.Parse(args[1:]); err != nil {
-			return err
-		}
-		inv := deps.LoadInventory(deps.LoadToolNames(ctx, cfg))
-		if len(inv.Skills) == 0 {
-			_, _ = fmt.Fprintln(deps.Stdout, "(no skills found)")
-			return nil
-		}
-		for _, skill := range inv.Skills {
-			if *eligibleOnly && !skill.Eligible {
-				continue
-			}
-			status := "eligible"
-			switch {
-			case skill.ParseError != "":
-				status = "parse-error"
-			case skill.Disabled:
-				status = "disabled"
-			case !skill.Eligible:
-				status = "ineligible"
-			case skill.Hidden:
-				status = "hidden"
-			}
-			permissionState := strings.TrimSpace(skill.PermissionState)
-			if permissionState == "" {
-				permissionState = "approved"
-			}
-			_, _ = fmt.Fprintf(deps.Stdout, "%s\t%s\t%s\t%s\t%s\n", skill.Name, status, permissionState, skill.Source, skill.Dir)
-		}
-		return nil
-	case "info":
-		if len(args) < 2 {
-			return fmt.Errorf("usage: or3-intern skills info <name>")
-		}
-		inv := deps.LoadInventory(deps.LoadToolNames(ctx, cfg))
-		skill, ok := inv.Get(args[1])
-		if !ok {
-			return fmt.Errorf("skill not found: %s", args[1])
-		}
-		_, _ = fmt.Fprintf(deps.Stdout, "Name: %s\n", skill.Name)
-		_, _ = fmt.Fprintf(deps.Stdout, "Description: %s\n", skill.Description)
-		_, _ = fmt.Fprintf(deps.Stdout, "Source: %s\n", skill.Source)
-		_, _ = fmt.Fprintf(deps.Stdout, "Location: %s\n", skill.Dir)
-		if skill.Homepage != "" {
-			_, _ = fmt.Fprintf(deps.Stdout, "Homepage: %s\n", skill.Homepage)
-		}
-		_, _ = fmt.Fprintf(deps.Stdout, "Eligible: %t\n", skill.Eligible)
-		_, _ = fmt.Fprintf(deps.Stdout, "User Invocable: %t\n", skill.UserInvocable)
-		if strings.TrimSpace(skill.PermissionState) != "" {
-			_, _ = fmt.Fprintf(deps.Stdout, "Permission State: %s\n", skill.PermissionState)
-			_, _ = fmt.Fprintf(deps.Stdout, "Declared Permissions: %s\n", skill.Permissions.Summary())
-			printReasons(deps.Stdout, "Permission Notes", skill.PermissionNotes)
-		}
-		if skill.Hidden {
-			_, _ = fmt.Fprintln(deps.Stdout, "Model Visibility: hidden")
-		}
-		if skill.CommandDispatch != "" {
-			_, _ = fmt.Fprintf(deps.Stdout, "Command Dispatch: %s\n", skill.CommandDispatch)
-			_, _ = fmt.Fprintf(deps.Stdout, "Command Tool: %s\n", skill.CommandTool)
-			_, _ = fmt.Fprintf(deps.Stdout, "Command Arg Mode: %s\n", skill.CommandArgMode)
-		}
-		printReasons(deps.Stdout, "Missing", skill.Missing)
-		printReasons(deps.Stdout, "Unsupported", skill.Unsupported)
-		if skill.ParseError != "" {
-			_, _ = fmt.Fprintf(deps.Stdout, "Parse Error: %s\n", skill.ParseError)
-		}
-		return nil
-	case "check":
-		inv := deps.LoadInventory(deps.LoadToolNames(ctx, cfg))
-		if len(inv.Skills) == 0 {
-			_, _ = fmt.Fprintln(deps.Stdout, "(no skills found)")
-			return nil
-		}
-		for _, skill := range inv.Skills {
-			if skill.PermissionState == "quarantined" {
-				_, _ = fmt.Fprintf(deps.Stdout, "[quarantined] %s: %s\n", skill.Name, strings.Join(skill.PermissionNotes, "; "))
-				continue
-			}
-			if skill.PermissionState == "blocked" {
-				reasons := append([]string{}, skill.PermissionNotes...)
-				reasons = append(reasons, skill.Missing...)
-				reasons = append(reasons, skill.Unsupported...)
-				if skill.ParseError != "" {
-					reasons = append(reasons, skill.ParseError)
-				}
-				_, _ = fmt.Fprintf(deps.Stdout, "[blocked] %s: %s\n", skill.Name, strings.Join(reasons, "; "))
-				continue
-			}
-			if skill.Eligible {
-				_, _ = fmt.Fprintf(deps.Stdout, "[ok] %s\n", skill.Name)
-				continue
-			}
-			reasons := append([]string{}, skill.Missing...)
-			reasons = append(reasons, skill.Unsupported...)
-			if skill.ParseError != "" {
-				reasons = append(reasons, skill.ParseError)
-			}
-			_, _ = fmt.Fprintf(deps.Stdout, "[blocked] %s: %s\n", skill.Name, strings.Join(reasons, "; "))
-		}
-		return nil
-	case "search":
-		if len(args) < 2 {
-			return fmt.Errorf("usage: or3-intern skills search <query>")
-		}
-		results, err := deps.Client.Search(ctx, strings.Join(args[1:], " "), 10)
-		if err != nil {
-			return err
-		}
-		if len(results) == 0 {
-			_, _ = fmt.Fprintln(deps.Stdout, "(no results)")
-			return nil
-		}
-		for _, result := range results {
-			version := result.Version
-			if version == "" {
-				version = "latest"
-			}
-			_, _ = fmt.Fprintf(deps.Stdout, "%s\t%s\t%s\n", result.Slug, version, strings.TrimSpace(result.DisplayName))
-		}
-		return nil
-	case "install":
-		fs := flag.NewFlagSet("skills install", flag.ContinueOnError)
-		fs.SetOutput(deps.Stderr)
-		version := fs.String("version", "", "skill version")
-		force := fs.Bool("force", false, "overwrite local modifications")
-		if err := fs.Parse(args[1:]); err != nil {
-			return err
-		}
-		if fs.NArg() < 1 {
-			return fmt.Errorf("usage: or3-intern skills install <slug> [--version v]")
-		}
-		result, err := deps.Client.Install(ctx, fs.Arg(0), *version, resolveInstallRoot(cfg), clawhub.InstallOptions{Force: *force})
-		if err != nil {
-			return err
-		}
-		if deps.Audit != nil {
-			if err := deps.Audit(ctx, "skill.install", map[string]any{"slug": result.Slug, "version": result.Version, "path": result.Path}); err != nil {
-				return err
-			}
-		}
-		_, _ = fmt.Fprintf(deps.Stdout, "installed\t%s\t%s\t%s\n", result.Slug, result.Version, result.Path)
-		return nil
-	case "update":
-		fs := flag.NewFlagSet("skills update", flag.ContinueOnError)
-		fs.SetOutput(deps.Stderr)
-		all := fs.Bool("all", false, "update all installed skills")
-		version := fs.String("version", "", "target version")
-		force := fs.Bool("force", false, "overwrite local modifications")
-		if err := fs.Parse(args[1:]); err != nil {
-			return err
-		}
-		root := resolveInstallRoot(cfg)
-		installed, err := clawhub.ListInstalled(root)
-		if err != nil {
-			return err
-		}
-		targets := installed
-		if !*all {
-			if fs.NArg() < 1 {
-				return fmt.Errorf("usage: or3-intern skills update <name>|--all")
-			}
-			match, matchErr := findInstalledSkill(installed, fs.Arg(0))
-			if matchErr != nil {
-				return matchErr
-			}
-			targets = []clawhub.InstalledSkill{match}
-		}
-		if len(targets) == 0 {
-			_, _ = fmt.Fprintln(deps.Stdout, "(no installed skills)")
-			return nil
-		}
-		for _, item := range targets {
-			info, err := deps.Client.Inspect(ctx, item.Origin.Slug, *version)
-			if err != nil {
-				return err
-			}
-			targetVersion := strings.TrimSpace(*version)
-			if targetVersion == "" {
-				targetVersion = info.LatestVersion
-			}
-			if targetVersion == "" {
-				return fmt.Errorf("could not resolve latest version for %s", item.Origin.Slug)
-			}
-			if item.Origin.InstalledVersion == targetVersion {
-				_, _ = fmt.Fprintf(deps.Stdout, "up-to-date\t%s\t%s\n", item.Origin.Slug, targetVersion)
-				continue
-			}
-			if _, err := deps.Client.Install(ctx, item.Origin.Slug, targetVersion, root, clawhub.InstallOptions{Force: *force}); err != nil {
-				return err
-			}
-			if deps.Audit != nil {
-				if err := deps.Audit(ctx, "skill.update", map[string]any{"slug": item.Origin.Slug, "version": targetVersion}); err != nil {
-					return err
-				}
-			}
-			_, _ = fmt.Fprintf(deps.Stdout, "updated\t%s\t%s\n", item.Origin.Slug, targetVersion)
-		}
-		return nil
-	case "remove":
-		if len(args) < 2 {
-			return fmt.Errorf("usage: or3-intern skills remove <name>")
-		}
-		root := resolveInstallRoot(cfg)
-		installed, err := clawhub.ListInstalled(root)
-		if err != nil {
-			return err
-		}
-		match, err := findInstalledSkill(installed, args[1])
-		if err != nil {
-			return err
-		}
-		if err := clawhub.RemoveSkill(root, match.Name); err != nil {
-			return err
-		}
-		if deps.Audit != nil {
-			if err := deps.Audit(ctx, "skill.remove", map[string]any{"name": match.Name}); err != nil {
-				return err
-			}
-		}
-		_, _ = fmt.Fprintf(deps.Stdout, "removed\t%s\n", match.Name)
-		return nil
-	default:
-		return fmt.Errorf("unknown skills subcommand: %s", args[0])
-	}
-}
-
-func buildSkillsInventory(cfg config.Config, bundledDir string, toolNames map[string]struct{}) skills.Inventory {
-	approved := make(map[string]struct{}, len(cfg.Skills.Policy.Approved)*2)
-	for _, name := range cfg.Skills.Policy.Approved {
-		trimmed := strings.TrimSpace(name)
-		if trimmed == "" {
-			continue
-		}
-		approved[trimmed] = struct{}{}
-		approved[strings.ToLower(trimmed)] = struct{}{}
-	}
-	return skills.ScanWithOptions(skills.LoadOptions{
-		Roots:          buildSkillRoots(cfg, bundledDir),
-		Entries:        skillEntries(cfg),
-		GlobalConfig:   configMap(cfg),
-		Env:            envMap(),
-		AvailableTools: toolNames,
-		ApprovalPolicy: skills.ApprovalPolicy{QuarantineByDefault: cfg.Skills.Policy.QuarantineByDefault, ApprovedSkills: approved},
-	})
-}
-
-func loadAvailableToolNames(ctx context.Context, cfg config.Config) map[string]struct{} {
-	return loadAvailableToolNamesWithManager(ctx, cfg, nil)
-}
-
-func loadAvailableToolNamesWithManager(ctx context.Context, cfg config.Config, manager *mcp.Manager) map[string]struct{} {
-	toolNames := availableToolNames(cfg.Cron.Enabled, cfg.Subagents.Enabled)
-	if len(cfg.Tools.MCPServers) == 0 {
-		return toolNames
-	}
-	if manager != nil {
-		for _, name := range manager.ToolNames() {
-			toolNames[name] = struct{}{}
-		}
-		return toolNames
-	}
-	manager = mcp.NewManager(cfg.Tools.MCPServers)
-	manager.SetLogger(log.Printf)
-	if err := manager.Connect(ctx); err != nil {
-		log.Printf("mcp setup failed: %v", err)
-		return toolNames
-	}
-	defer func() {
-		if err := manager.Close(); err != nil {
-			log.Printf("mcp close failed: %v", err)
-		}
-	}()
-	for _, name := range manager.ToolNames() {
-		toolNames[name] = struct{}{}
-	}
-	return toolNames
-}
-
-func buildSkillRoots(cfg config.Config, bundledDir string) []skills.Root {
-	var roots []skills.Root
-	for _, extra := range cfg.Skills.Load.ExtraDirs {
-		if strings.TrimSpace(extra) == "" {
-			continue
-		}
-		roots = append(roots, skills.Root{Path: extra, Source: skills.SourceExtra})
-	}
-	if strings.TrimSpace(bundledDir) != "" {
-		roots = append(roots, skills.Root{Path: bundledDir, Source: skills.SourceBundled})
-	}
-	if strings.TrimSpace(cfg.Skills.ManagedDir) != "" {
-		roots = append(roots, skills.Root{Path: cfg.Skills.ManagedDir, Source: skills.SourceManaged})
-	}
-	if strings.TrimSpace(cfg.WorkspaceDir) != "" {
-		roots = append(roots,
-			skills.Root{Path: filepath.Join(cfg.WorkspaceDir, "workspace_skills"), Source: skills.SourceExtra, Priority: 35},
-			skills.Root{Path: filepath.Join(cfg.WorkspaceDir, "skills"), Source: skills.SourceWorkspace},
-		)
-	}
-	return roots
-}
-
-func skillEntries(cfg config.Config) map[string]skills.EntryConfig {
-	out := make(map[string]skills.EntryConfig, len(cfg.Skills.Entries))
-	for key, entry := range cfg.Skills.Entries {
-		out[key] = skills.EntryConfig{
-			Enabled: entry.Enabled,
-			APIKey:  entry.APIKey,
-			Env:     entry.Env,
-			Config:  entry.Config,
-		}
-	}
-	return out
-}
-
-func configMap(cfg config.Config) map[string]any {
-	buf, _ := json.Marshal(cfg)
-	out := map[string]any{}
-	_ = json.Unmarshal(buf, &out)
-	return out
-}
-
-func envMap() map[string]string {
-	out := map[string]string{}
-	for _, raw := range os.Environ() {
-		key, value, ok := strings.Cut(raw, "=")
-		if ok {
-			out[key] = value
-		}
-	}
-	return out
-}
-
-func resolveInstallRoot(cfg config.Config) string {
-	installDir := strings.TrimSpace(cfg.Skills.ClawHub.InstallDir)
-	if installDir == "" {
-		installDir = "skills"
-	}
-	if filepath.IsAbs(installDir) {
-		return installDir
-	}
-	if strings.TrimSpace(cfg.Skills.ManagedDir) != "" {
-		return cfg.Skills.ManagedDir
-	}
-	return filepath.Join(filepath.Dir(config.DefaultPath()), installDir)
-}
-
-func availableToolNames(includeCron, includeSubagents bool) map[string]struct{} {
-	names := []string{
-		"exec",
-		"read_file",
-		"write_file",
-		"edit_file",
-		"list_dir",
-		"web_fetch",
-		"web_search",
-		"memory_set_pinned",
-		"memory_add_note",
-		"memory_search",
-		"send_message",
-		"read_skill",
-		"run_skill_script",
-	}
-	if includeCron {
-		names = append(names, "cron")
-	}
-	if includeSubagents {
-		names = append(names, "spawn_subagent")
-	}
-	sort.Strings(names)
-	out := make(map[string]struct{}, len(names))
-	for _, name := range names {
-		out[name] = struct{}{}
-	}
-	return out
-}
-
-func newClawHubClient(cfg config.Config) *clawhub.Client {
-	return clawhub.New(cfg.Skills.ClawHub.SiteURL, cfg.Skills.ClawHub.RegistryURL)
-}
-
-func findInstalledSkill(installed []clawhub.InstalledSkill, raw string) (clawhub.InstalledSkill, error) {
-	target := strings.TrimSpace(raw)
-	for _, item := range installed {
-		if item.Name == target || item.Origin.Slug == target {
-			return item, nil
-		}
-	}
-	return clawhub.InstalledSkill{}, fmt.Errorf("installed skill not found: %s", raw)
-}
-
-func printReasons(w io.Writer, label string, values []string) {
-	if len(values) == 0 {
-		return
-	}
-	_, _ = fmt.Fprintf(w, "%s: %s\n", label, strings.Join(values, "; "))
-}
 ````
 
 ## File: internal/agent/subagents.go
@@ -6131,6 +5183,298 @@ func (c *Channel) Run(ctx context.Context) error {
 			// after the response is fully rendered.
 		}
 	}
+}
+````
+
+## File: internal/heartbeat/service.go
+````go
+package heartbeat
+
+import (
+	"context"
+	"errors"
+	"log"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"or3-intern/internal/bus"
+	"or3-intern/internal/config"
+	"or3-intern/internal/triggers"
+)
+
+const (
+	DefaultChannel = "system"
+	DefaultFrom    = "heartbeat"
+	SeedMessage    = "Review HEARTBEAT.md and execute any active recurring tasks."
+
+	MetaKeyHeartbeat = "heartbeat"
+	MetaKeyDone      = "heartbeat_done"
+)
+
+type Service struct {
+	Config       config.HeartbeatConfig
+	WorkspaceDir string
+	Bus          *bus.Bus
+
+	logf func(string, ...any)
+
+	mu        sync.Mutex
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+	tickQueue chan struct{}
+	inFlight  atomic.Bool
+	stopping  atomic.Bool
+}
+
+func New(cfg config.HeartbeatConfig, workspaceDir string, eventBus *bus.Bus) *Service {
+	return &Service{
+		Config:       cfg,
+		WorkspaceDir: workspaceDir,
+		Bus:          eventBus,
+		logf:         log.Printf,
+	}
+}
+
+func (s *Service) Start(ctx context.Context) {
+	if s == nil || !s.Config.Enabled || s.Bus == nil {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cancel != nil {
+		return
+	}
+	s.stopping.Store(false)
+
+	childCtx, cancel := context.WithCancel(ctx)
+	s.cancel = cancel
+	s.tickQueue = make(chan struct{}, 1)
+
+	interval := time.Duration(normalizeIntervalMinutes(s.Config.IntervalMinutes)) * time.Minute
+	s.wg.Add(2)
+	go s.runTicker(childCtx, interval)
+	go s.runPublisher(childCtx)
+}
+
+func (s *Service) Stop() {
+	if s == nil {
+		return
+	}
+	s.stopping.Store(true)
+
+	s.mu.Lock()
+	cancel := s.cancel
+	s.cancel = nil
+	s.tickQueue = nil
+	s.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	s.wg.Wait()
+	s.inFlight.Store(false)
+}
+
+func (s *Service) runTicker(ctx context.Context, interval time.Duration) {
+	defer s.wg.Done()
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.enqueueTick("timer")
+		}
+	}
+}
+
+func (s *Service) runPublisher(ctx context.Context) {
+	defer s.wg.Done()
+
+	for {
+		if s.stopping.Load() || ctx.Err() != nil {
+			return
+		}
+
+		s.mu.Lock()
+		tickQueue := s.tickQueue
+		s.mu.Unlock()
+		if tickQueue == nil {
+			return
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-tickQueue:
+			if s.stopping.Load() || ctx.Err() != nil {
+				return
+			}
+			s.processTick()
+		}
+	}
+}
+
+func (s *Service) enqueueTick(source string) bool {
+	s.mu.Lock()
+	tickQueue := s.tickQueue
+	s.mu.Unlock()
+	if tickQueue == nil {
+		return false
+	}
+
+	select {
+	case tickQueue <- struct{}{}:
+		return true
+	default:
+		s.logf("heartbeat tick dropped: pending tick already queued source=%s", source)
+		return false
+	}
+}
+
+func (s *Service) processTick() {
+	if s.inFlight.Load() {
+		s.logf("heartbeat tick skipped: previous turn still in flight")
+		return
+	}
+
+	path, text, err := LoadTasksFile(s.Config.TasksFile, s.WorkspaceDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			s.logf("heartbeat tick skipped: tasks file not found")
+			return
+		}
+		s.logf("heartbeat tick skipped: read failed path=%q err=%v", path, err)
+		return
+	}
+	if !HasActiveInstructions(text) {
+		return
+	}
+
+	s.inFlight.Store(true)
+	meta := map[string]any{
+		MetaKeyHeartbeat: true,
+		MetaKeyDone: func() {
+			s.inFlight.Store(false)
+		},
+		"tasks_path": path,
+		triggers.MetaKeyStructuredEvent: triggers.StructuredEventMap(triggers.StructuredEvent{
+			Type:    string(bus.EventHeartbeat),
+			Source:  "heartbeat",
+			Trusted: true,
+			Details: map[string]any{"tasks_path": path, "session_key": normalizedSessionKey(s.Config.SessionKey)},
+		}),
+	}
+	if structuredTasks, ok := triggers.ParseStructuredTasksText(text); ok {
+		meta[triggers.MetaKeyStructuredTasks] = triggers.StructuredTasksMap(structuredTasks)
+	}
+	ev := bus.Event{
+		Type:       bus.EventHeartbeat,
+		SessionKey: normalizedSessionKey(s.Config.SessionKey),
+		Channel:    DefaultChannel,
+		From:       DefaultFrom,
+		Message:    SeedMessage,
+		Meta:       meta,
+	}
+	if ok := s.Bus.Publish(ev); !ok {
+		s.inFlight.Store(false)
+		s.logf("heartbeat tick dropped: event bus full")
+	}
+}
+
+func LoadTasksFile(configPath, workspaceDir string) (string, string, error) {
+	var firstErr error
+	for _, path := range candidatePaths(configPath, workspaceDir) {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			return path, strings.TrimSpace(string(data)), nil
+		}
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	if firstErr != nil {
+		return strings.TrimSpace(configPath), "", firstErr
+	}
+	return strings.TrimSpace(configPath), "", os.ErrNotExist
+}
+
+func HasActiveInstructions(text string) bool {
+	inComment := false
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if inComment {
+			if strings.Contains(trimmed, "-->") {
+				inComment = false
+			}
+			continue
+		}
+		if strings.HasPrefix(trimmed, "<!--") {
+			if !strings.Contains(trimmed, "-->") {
+				inComment = true
+			}
+			continue
+		}
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func candidatePaths(configPath, workspaceDir string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, 3)
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		if _, ok := seen[path]; ok {
+			return
+		}
+		seen[path] = struct{}{}
+		out = append(out, path)
+	}
+	if strings.TrimSpace(workspaceDir) != "" {
+		add(filepath.Join(workspaceDir, "HEARTBEAT.md"))
+		add(filepath.Join(workspaceDir, "heartbeat.md"))
+	}
+	add(configPath)
+	return out
+}
+
+func normalizeIntervalMinutes(v int) int {
+	if v <= 0 {
+		return 30
+	}
+	if v < 1 {
+		return 1
+	}
+	return v
+}
+
+func normalizedSessionKey(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return config.DefaultHeartbeatSessionKey
+	}
+	return v
 }
 ````
 
@@ -7121,93 +6465,6 @@ func nullBytes(b []byte) any {
 }
 ````
 
-## File: internal/memory/retrieve.go
-````go
-package memory
-
-import (
-	"context"
-	"sort"
-	"strings"
-
-	"or3-intern/internal/db"
-)
-
-type Retrieved struct {
-	Source string // pinned|vector|fts
-	ID int64
-	Text string
-	Score float64
-}
-
-type Retriever struct {
-	DB *db.DB
-	VectorWeight float64
-	FTSWeight float64
-	VectorScanLimit int
-}
-
-func NewRetriever(d *db.DB) *Retriever {
-	return &Retriever{DB: d, VectorWeight: 0.7, FTSWeight: 0.3, VectorScanLimit: 2000}
-}
-
-func (r *Retriever) Retrieve(ctx context.Context, sessionKey, query string, queryVec []float32, vectorK, ftsK, topK int) ([]Retrieved, error) {
-	vecs, err := VectorSearch(ctx, r.DB, sessionKey, queryVec, vectorK, r.VectorScanLimit)
-	if err != nil { return nil, err }
-	fts, _ := r.DB.SearchFTS(ctx, sessionKey, normalizeFTSQuery(query), ftsK)
-
-	type agg struct {
-		id int64
-		text string
-		v float64
-		f float64
-	}
-	m := map[int64]*agg{}
-	for _, c := range vecs {
-		a := m[c.ID]
-		if a == nil { a = &agg{id: c.ID, text: c.Text}; m[c.ID] = a }
-		a.v = c.Score
-	}
-	for _, f := range fts {
-		a := m[f.ID]
-		if a == nil { a = &agg{id: f.ID, text: f.Text}; m[f.ID] = a }
-		// bm25 lower is better. Convert to a positive "higher is better".
-		a.f = 1.0 / (1.0 + f.Rank)
-	}
-
-	out := make([]Retrieved, 0, len(m))
-	for _, a := range m {
-		score := (a.v * r.VectorWeight) + (a.f * r.FTSWeight)
-		src := "hybrid"
-		if a.f > 0 && a.v == 0 { src = "fts" }
-		if a.v > 0 && a.f == 0 { src = "vector" }
-		out = append(out, Retrieved{Source: src, ID: a.id, Text: a.text, Score: score})
-	}
-
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Score == out[j].Score {
-			return out[i].ID > out[j].ID // stable-ish
-		}
-		return out[i].Score > out[j].Score
-	})
-	if len(out) > topK { out = out[:topK] }
-	return out, nil
-}
-
-func normalizeFTSQuery(q string) string {
-	q = strings.TrimSpace(q)
-	if q == "" { return "" }
-	// simple: split on spaces, quote terms that contain punctuation
-	parts := strings.Fields(q)
-	for i, p := range parts {
-		if strings.ContainsAny(p, `":*`) {
-			parts[i] = `"` + strings.ReplaceAll(p, `"`, `""`) + `"`
-		}
-	}
-	return strings.Join(parts, " ")
-}
-````
-
 ## File: internal/memory/scheduler.go
 ````go
 package memory
@@ -7301,123 +6558,449 @@ func (s *Scheduler) runLoop(sessionKey string) {
 }
 ````
 
-## File: internal/tools/memory.go
+## File: internal/memory/workspace_context.go
 ````go
-package tools
+package memory
 
 import (
-	"context"
-	"database/sql"
 	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
-
-	"or3-intern/internal/db"
-	"or3-intern/internal/memory"
-	"or3-intern/internal/providers"
-	"or3-intern/internal/scope"
+	"sync"
+	"time"
 )
 
-type MemorySetPinned struct {
-	Base
-	DB *db.DB
-}
-func (t *MemorySetPinned) Name() string { return "memory_set_pinned" }
-func (t *MemorySetPinned) Description() string { return "Upsert a pinned memory entry (always included in prompts)." }
-func (t *MemorySetPinned) Parameters() map[string]any {
-	return map[string]any{"type":"object","properties":map[string]any{
-		"key": map[string]any{"type":"string"},
-		"content": map[string]any{"type":"string"},
-		"scope": map[string]any{"type":"string", "description":"Optional scope override: 'global' to share across sessions"},
-	},"required":[]string{"key","content"}}
-}
-func (t *MemorySetPinned) Schema() map[string]any { return t.SchemaFor(t.Name(), t.Description(), t.Parameters()) }
-func (t *MemorySetPinned) Execute(ctx context.Context, params map[string]any) (string, error) {
-	if t.DB == nil { return "", fmt.Errorf("db not set") }
-	key := strings.TrimSpace(fmt.Sprint(params["key"]))
-	content := strings.TrimSpace(fmt.Sprint(params["content"]))
-	if key == "" || content == "" { return "", fmt.Errorf("missing key/content") }
-	if err := t.DB.UpsertPinned(ctx, memoryScopeFromParams(ctx, params), key, content); err != nil { return "", err }
-	return "ok", nil
+const (
+	defaultWorkspaceContextMaxFileBytes = 32 * 1024
+	defaultWorkspaceContextMaxResults   = 6
+	defaultWorkspaceContextMaxChars     = 6000
+	defaultWorkspaceContextScanLimit    = 200
+	workspaceContextCacheTTL            = 5 * time.Second
+)
+
+type workspaceContextCacheKey struct {
+	root         string
+	query        string
+	maxFileBytes int
+	maxResults   int
+	maxChars     int
 }
 
-type MemoryAddNote struct {
-	Base
-	DB *db.DB
-	Provider *providers.Client
-	EmbedModel string
-}
-func (t *MemoryAddNote) Name() string { return "memory_add_note" }
-func (t *MemoryAddNote) Description() string { return "Add a semantic memory note to the indexed memory store." }
-func (t *MemoryAddNote) Parameters() map[string]any {
-	return map[string]any{"type":"object","properties":map[string]any{
-		"text": map[string]any{"type":"string"},
-		"tags": map[string]any{"type":"string","description":"comma-separated tags (optional)"},
-		"source_message_id": map[string]any{"type":"integer","description":"source message id (optional)"},
-		"scope": map[string]any{"type":"string", "description":"Optional scope override: 'global' to share across sessions"},
-	},"required":[]string{"text"}}
-}
-func (t *MemoryAddNote) Schema() map[string]any { return t.SchemaFor(t.Name(), t.Description(), t.Parameters()) }
-func (t *MemoryAddNote) Execute(ctx context.Context, params map[string]any) (string, error) {
-	if t.DB == nil || t.Provider == nil { return "", fmt.Errorf("missing deps") }
-	text := strings.TrimSpace(fmt.Sprint(params["text"]))
-	if text == "" { return "", fmt.Errorf("empty text") }
-	tags := strings.TrimSpace(fmt.Sprint(params["tags"]))
-	var src sql.NullInt64
-	if v, ok := params["source_message_id"].(float64); ok && int64(v) > 0 {
-		src = sql.NullInt64{Int64: int64(v), Valid: true}
-	}
-	vec, err := t.Provider.Embed(ctx, t.EmbedModel, text)
-	if err != nil { return "", err }
-	blob := memory.PackFloat32(vec)
-	id, err := t.DB.InsertMemoryNote(ctx, memoryScopeFromParams(ctx, params), text, blob, src, tags)
-	if err != nil { return "", err }
-	return fmt.Sprintf("ok: %d", id), nil
+type workspaceContextCacheEntry struct {
+	text      string
+	expiresAt time.Time
 }
 
-type MemorySearch struct {
-	Base
-	DB *db.DB
-	Provider *providers.Client
-	EmbedModel string
-	VectorK int
-	FTSK int
-	TopK int
-	VectorScanLimit int
-}
-func (t *MemorySearch) Name() string { return "memory_search" }
-func (t *MemorySearch) Description() string { return "Search long-term memory (hybrid semantic + keyword) and return top results." }
-func (t *MemorySearch) Parameters() map[string]any {
-	return map[string]any{"type":"object","properties":map[string]any{
-		"query": map[string]any{"type":"string"},
-		"topK": map[string]any{"type":"integer"},
-		"scope": map[string]any{"type":"string", "description":"Optional scope override: 'global' to search only shared memory"},
-	},"required":[]string{"query"}}
-}
-func (t *MemorySearch) Schema() map[string]any { return t.SchemaFor(t.Name(), t.Description(), t.Parameters()) }
-func (t *MemorySearch) Execute(ctx context.Context, params map[string]any) (string, error) {
-	if t.DB == nil || t.Provider == nil { return "", fmt.Errorf("missing deps") }
-	q := strings.TrimSpace(fmt.Sprint(params["query"]))
-	if q == "" { return "", fmt.Errorf("empty query") }
-	topK := t.TopK
-	if v, ok := params["topK"].(float64); ok && int(v) > 0 { topK = int(v) }
-	vec, err := t.Provider.Embed(ctx, t.EmbedModel, q)
-	if err != nil { return "", err }
-	r := memory.NewRetriever(t.DB)
-	r.VectorScanLimit = t.VectorScanLimit
-	got, err := r.Retrieve(ctx, memoryScopeFromParams(ctx, params), q, vec, t.VectorK, t.FTSK, topK)
-	if err != nil { return "", err }
-	var b strings.Builder
-	for i, m := range got {
-		b.WriteString(fmt.Sprintf("%d. [%s] %.4f %s\n", i+1, m.Source, m.Score, m.Text))
-	}
-	return b.String(), nil
+var workspaceContextCache = struct {
+	mu      sync.Mutex
+	entries map[workspaceContextCacheKey]workspaceContextCacheEntry
+}{entries: map[workspaceContextCacheKey]workspaceContextCacheEntry{}}
+
+type WorkspaceContextConfig struct {
+	WorkspaceDir string
+	MaxFileBytes int
+	MaxResults   int
+	MaxChars     int
+	Now          time.Time
 }
 
-func memoryScopeFromParams(ctx context.Context, params map[string]any) string {
-	if requestedScope := strings.TrimSpace(fmt.Sprint(params["scope"])); scope.IsGlobalScopeRequest(requestedScope) {
-		return scope.GlobalMemoryScope
+type workspaceCandidate struct {
+	Path    string
+	Excerpt string
+	Score   int
+	ModTime time.Time
+}
+
+func BuildWorkspaceContext(cfg WorkspaceContextConfig, query string) string {
+	root := strings.TrimSpace(cfg.WorkspaceDir)
+	if root == "" {
+		return ""
 	}
-	return SessionFromContext(ctx)
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return ""
+	}
+	realRoot, err := filepath.EvalSymlinks(absRoot)
+	if err != nil {
+		return ""
+	}
+	maxFileBytes := cfg.MaxFileBytes
+	if maxFileBytes <= 0 {
+		maxFileBytes = defaultWorkspaceContextMaxFileBytes
+	}
+	maxResults := cfg.MaxResults
+	if maxResults <= 0 {
+		maxResults = defaultWorkspaceContextMaxResults
+	}
+	maxChars := cfg.MaxChars
+	if maxChars <= 0 {
+		maxChars = defaultWorkspaceContextMaxChars
+	}
+	cacheKey := workspaceContextCacheKey{
+		root:         realRoot,
+		query:        strings.TrimSpace(strings.ToLower(query)),
+		maxFileBytes: maxFileBytes,
+		maxResults:   maxResults,
+		maxChars:     maxChars,
+	}
+	now := cfg.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if cached, ok := getWorkspaceContextCache(cacheKey, now); ok {
+		return cached
+	}
+
+	seen := map[string]struct{}{}
+	candidates := make([]workspaceCandidate, 0, maxResults)
+	appendCandidate := func(candidate workspaceCandidate) {
+		candidate.Path = strings.TrimSpace(candidate.Path)
+		candidate.Excerpt = strings.TrimSpace(candidate.Excerpt)
+		if candidate.Path == "" || candidate.Excerpt == "" {
+			return
+		}
+		if _, exists := seen[candidate.Path]; exists {
+			return
+		}
+		seen[candidate.Path] = struct{}{}
+		candidates = append(candidates, candidate)
+	}
+
+	for _, name := range []string{"README.md", "TODO.md", "TASKS.md", "PLAN.md", "STATUS.md", "NOTES.md", "PROJECT.md"} {
+		candidate, ok := workspaceFileCandidate(realRoot, filepath.Join(realRoot, name), maxFileBytes, nil)
+		if ok {
+			appendCandidate(candidate)
+		}
+	}
+	for _, candidate := range recentMemoryCandidates(realRoot, now, maxFileBytes) {
+		appendCandidate(candidate)
+	}
+	tokens := workspaceQueryTokens(query)
+	if len(tokens) > 0 {
+		for _, candidate := range relevantWorkspaceCandidates(realRoot, tokens, maxFileBytes, maxResults, seen) {
+			appendCandidate(candidate)
+		}
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	if len(candidates) > maxResults {
+		candidates = candidates[:maxResults]
+	}
+	var out strings.Builder
+	out.WriteString("Startup workspace context gathered before the model call.\n")
+	for i, candidate := range candidates {
+		out.WriteString(fmt.Sprintf("%d) [%s] %s\n", i+1, relativeDisplayPath(realRoot, candidate.Path), workspaceOneLine(candidate.Excerpt, 320)))
+	}
+	text := workspaceTruncate(strings.TrimSpace(out.String()), maxChars)
+	setWorkspaceContextCache(cacheKey, text, now)
+	return text
+}
+
+func getWorkspaceContextCache(key workspaceContextCacheKey, now time.Time) (string, bool) {
+	workspaceContextCache.mu.Lock()
+	defer workspaceContextCache.mu.Unlock()
+	entry, ok := workspaceContextCache.entries[key]
+	if !ok {
+		return "", false
+	}
+	if !entry.expiresAt.After(now) {
+		delete(workspaceContextCache.entries, key)
+		return "", false
+	}
+	return entry.text, true
+}
+
+func setWorkspaceContextCache(key workspaceContextCacheKey, text string, now time.Time) {
+	workspaceContextCache.mu.Lock()
+	defer workspaceContextCache.mu.Unlock()
+	workspaceContextCache.entries[key] = workspaceContextCacheEntry{text: text, expiresAt: now.Add(workspaceContextCacheTTL)}
+}
+
+func recentMemoryCandidates(root string, now time.Time, maxFileBytes int) []workspaceCandidate {
+	memoryDir := filepath.Join(root, "memory")
+	entries, err := os.ReadDir(memoryDir)
+	if err != nil {
+		return nil
+	}
+	preferred := map[string]struct{}{
+		now.Format("2006-01-02") + ".md":                    {},
+		now.Add(-24*time.Hour).Format("2006-01-02") + ".md": {},
+	}
+	var selected []workspaceCandidate
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if _, ok := preferred[entry.Name()]; !ok {
+			continue
+		}
+		candidate, ok := workspaceFileCandidate(root, filepath.Join(memoryDir, entry.Name()), maxFileBytes, nil)
+		if ok {
+			selected = append(selected, candidate)
+		}
+	}
+	if len(selected) > 0 {
+		sort.Slice(selected, func(i, j int) bool { return selected[i].Path < selected[j].Path })
+		return selected
+	}
+	type fileInfo struct {
+		path    string
+		modTime time.Time
+	}
+	files := make([]fileInfo, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".md") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		files = append(files, fileInfo{path: filepath.Join(memoryDir, entry.Name()), modTime: info.ModTime()})
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].modTime.After(files[j].modTime) })
+	if len(files) > 2 {
+		files = files[:2]
+	}
+	out := make([]workspaceCandidate, 0, len(files))
+	for _, file := range files {
+		candidate, ok := workspaceFileCandidate(root, file.path, maxFileBytes, nil)
+		if ok {
+			out = append(out, candidate)
+		}
+	}
+	return out
+}
+
+func relevantWorkspaceCandidates(root string, tokens []string, maxFileBytes, maxResults int, seen map[string]struct{}) []workspaceCandidate {
+	var candidates []workspaceCandidate
+	visited := 0
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return nil
+		}
+		if rel == "." {
+			return nil
+		}
+		if d.IsDir() {
+			name := strings.ToLower(d.Name())
+			if strings.HasPrefix(name, ".") || name == "node_modules" || name == "vendor" || name == "artifacts" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if visited >= defaultWorkspaceContextScanLimit {
+			return fs.SkipAll
+		}
+		visited++
+		if _, exists := seen[path]; exists {
+			return nil
+		}
+		if !isWorkspaceContextFile(path) || isBootstrapWorkspaceFile(path) {
+			return nil
+		}
+		candidate, ok := workspaceFileCandidate(root, path, maxFileBytes, tokens)
+		if !ok || candidate.Score <= 0 {
+			return nil
+		}
+		candidates = append(candidates, candidate)
+		return nil
+	})
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].Score == candidates[j].Score {
+			if candidates[i].ModTime.Equal(candidates[j].ModTime) {
+				return candidates[i].Path < candidates[j].Path
+			}
+			return candidates[i].ModTime.After(candidates[j].ModTime)
+		}
+		return candidates[i].Score > candidates[j].Score
+	})
+	if len(candidates) > maxResults {
+		candidates = candidates[:maxResults]
+	}
+	return candidates
+}
+
+func workspaceFileCandidate(root, path string, maxFileBytes int, tokens []string) (workspaceCandidate, bool) {
+	resolved, ok := workspaceSafePath(root, path)
+	if !ok {
+		return workspaceCandidate{}, false
+	}
+	f, err := os.Open(resolved)
+	if err != nil {
+		return workspaceCandidate{}, false
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, int64(maxFileBytes)))
+	if err != nil {
+		return workspaceCandidate{}, false
+	}
+	text := strings.TrimSpace(string(data))
+	if text == "" {
+		return workspaceCandidate{}, false
+	}
+	info, err := f.Stat()
+	if err != nil {
+		return workspaceCandidate{}, false
+	}
+	excerpt, score := workspaceExcerpt(resolved, text, tokens)
+	if len(tokens) == 0 {
+		score = 1
+	}
+	recencyBonus := workspaceRecencyScore(info.ModTime())
+	return workspaceCandidate{Path: resolved, Excerpt: excerpt, Score: score + recencyBonus, ModTime: info.ModTime()}, true
+}
+
+func workspaceSafePath(root, path string) (string, bool) {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", false
+	}
+	realPath, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		return "", false
+	}
+	rel, err := filepath.Rel(root, realPath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return realPath, true
+}
+
+func workspaceExcerpt(path, text string, tokens []string) (string, int) {
+	one := workspaceOneLine(text, 500)
+	if len(tokens) == 0 {
+		return one, 0
+	}
+	lowerPath := strings.ToLower(path)
+	lowerText := strings.ToLower(text)
+	best := -1
+	score := 0
+	for _, token := range tokens {
+		if strings.Contains(lowerPath, token) {
+			score += 6
+		}
+		if idx := strings.Index(lowerText, token); idx >= 0 {
+			score += 3
+			if best < 0 || idx < best {
+				best = idx
+			}
+		}
+	}
+	if best < 0 {
+		return one, score
+	}
+	start := best - 120
+	if start < 0 {
+		start = 0
+	}
+	end := best + 220
+	if end > len(text) {
+		end = len(text)
+	}
+	excerpt := strings.TrimSpace(text[start:end])
+	if start > 0 {
+		excerpt = "…" + excerpt
+	}
+	if end < len(text) {
+		excerpt += "…"
+	}
+	return workspaceOneLine(excerpt, 500), score
+}
+
+func workspaceRecencyScore(modTime time.Time) int {
+	if modTime.IsZero() {
+		return 0
+	}
+	age := time.Since(modTime)
+	switch {
+	case age <= 24*time.Hour:
+		return 3
+	case age <= 7*24*time.Hour:
+		return 2
+	case age <= 30*24*time.Hour:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func workspaceQueryTokens(query string) []string {
+	raw := strings.FieldsFunc(strings.ToLower(query), func(r rune) bool {
+		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9')
+	})
+	stop := map[string]struct{}{
+		"the": {}, "and": {}, "for": {}, "with": {}, "that": {}, "this": {}, "from": {}, "into": {},
+		"what": {}, "when": {}, "where": {}, "have": {}, "just": {}, "please": {}, "about": {},
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(raw))
+	for _, token := range raw {
+		if len(token) < 3 {
+			continue
+		}
+		if _, blocked := stop[token]; blocked {
+			continue
+		}
+		if _, exists := seen[token]; exists {
+			continue
+		}
+		seen[token] = struct{}{}
+		out = append(out, token)
+	}
+	return out
+}
+
+func isWorkspaceContextFile(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".md", ".txt":
+		return true
+	default:
+		return false
+	}
+}
+
+func isBootstrapWorkspaceFile(path string) bool {
+	name := strings.ToUpper(filepath.Base(path))
+	switch name {
+	case "SOUL.MD", "AGENTS.MD", "TOOLS.MD", "IDENTITY.MD", "MEMORY.MD", "HEARTBEAT.MD":
+		return true
+	default:
+		return false
+	}
+}
+
+func relativeDisplayPath(root, path string) string {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return path
+	}
+	return filepath.ToSlash(rel)
+}
+
+func workspaceOneLine(s string, max int) string {
+	s = strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
+	if max > 0 && len(s) > max {
+		return strings.TrimSpace(s[:max]) + "…"
+	}
+	return s
+}
+
+func workspaceTruncate(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if max > 0 && len(s) > max {
+		return strings.TrimSpace(s[:max]) + "\n…[truncated]"
+	}
+	return s
 }
 ````
 
@@ -7761,6 +7344,938 @@ func readOptionalString(params map[string]any, key string) string {
 		return ""
 	}
 	return strings.TrimSpace(fmt.Sprint(v))
+}
+````
+
+## File: internal/triggers/filewatch.go
+````go
+package triggers
+
+import (
+	"context"
+	"log"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"or3-intern/internal/bus"
+	"or3-intern/internal/config"
+)
+
+const structuredFileReadMaxBytes = 64 * 1024
+
+type FileWatcher struct {
+	Config     config.FileWatchConfig
+	Bus        *bus.Bus
+	SessionKey string
+
+	mu     sync.Mutex
+	last   map[string]fileState
+	cancel context.CancelFunc
+}
+
+type fileState struct {
+	mtime  time.Time
+	size   int64
+	lastEv time.Time // last time we published an event for this path
+}
+
+func NewFileWatcher(cfg config.FileWatchConfig, b *bus.Bus, sessionKey string) *FileWatcher {
+	return &FileWatcher{
+		Config:     cfg,
+		Bus:        b,
+		SessionKey: sessionKey,
+		last:       map[string]fileState{},
+	}
+}
+
+func (fw *FileWatcher) Start(ctx context.Context) {
+	if !fw.Config.Enabled || len(fw.Config.Paths) == 0 {
+		return
+	}
+	pollInterval := time.Duration(fw.Config.PollSeconds) * time.Second
+	if pollInterval <= 0 {
+		pollInterval = 5 * time.Second
+	}
+	ctx, fw.cancel = context.WithCancel(ctx)
+	go fw.loop(ctx, pollInterval)
+}
+
+func (fw *FileWatcher) Stop() {
+	if fw.cancel != nil {
+		fw.cancel()
+	}
+}
+
+func (fw *FileWatcher) loop(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			fw.poll(ctx)
+		}
+	}
+}
+
+func (fw *FileWatcher) poll(ctx context.Context) {
+	debounce := time.Duration(fw.Config.DebounceSeconds) * time.Second
+	if debounce <= 0 {
+		debounce = 2 * time.Second
+	}
+	fw.mu.Lock()
+	defer fw.mu.Unlock()
+	now := time.Now()
+	for _, p := range fw.Config.Paths {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		absPath, err := filepath.Abs(p)
+		if err != nil {
+			continue
+		}
+		// Don't follow symlinks
+		info, err := os.Lstat(absPath)
+		if err != nil {
+			continue
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		prev, seen := fw.last[absPath]
+		cur := fileState{mtime: info.ModTime(), size: info.Size()}
+		if seen {
+			// Check if changed
+			if cur.mtime == prev.mtime && cur.size == prev.size {
+				continue
+			}
+			// Debounce: don't republish if we published recently
+			if now.Sub(prev.lastEv) < debounce {
+				// update state but don't publish yet
+				fw.last[absPath] = fileState{mtime: cur.mtime, size: cur.size, lastEv: prev.lastEv}
+				continue
+			}
+		}
+		cur.lastEv = now
+		fw.last[absPath] = cur
+		if !seen {
+			// First observation - record baseline with zero lastEv so debounce
+			// does not prevent the first change event from being published.
+			fw.last[absPath] = fileState{mtime: cur.mtime, size: cur.size}
+			continue
+		}
+		// Publish event
+		meta := map[string]any{
+			"path":  absPath,
+			"size":  info.Size(),
+			"mtime": info.ModTime().UnixMilli(),
+			MetaKeyStructuredEvent: StructuredEventMap(StructuredEvent{
+				Type:    string(bus.EventFileChange),
+				Source:  "filewatch",
+				Trusted: true,
+				Details: map[string]any{"path": absPath, "size": info.Size(), "mtime": info.ModTime().UnixMilli()},
+			}),
+		}
+		if info.Size() > 0 && info.Size() <= structuredFileReadMaxBytes {
+			if data, readErr := os.ReadFile(absPath); readErr == nil {
+				if structuredTasks, ok := ParseStructuredTasksText(string(data)); ok {
+					meta[MetaKeyStructuredTasks] = StructuredTasksMap(structuredTasks)
+				}
+			}
+		}
+		ev := bus.Event{
+			Type:       bus.EventFileChange,
+			SessionKey: fw.SessionKey,
+			Channel:    "filewatch",
+			From:       absPath,
+			Message:    "file changed: " + absPath,
+			Meta:       meta,
+		}
+		if ok := fw.Bus.Publish(ev); !ok {
+			log.Printf("filewatch: bus full, dropping event for %s", absPath)
+		}
+	}
+}
+````
+
+## File: internal/triggers/webhook.go
+````go
+package triggers
+
+import (
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"strings"
+	"time"
+
+	"or3-intern/internal/bus"
+	"or3-intern/internal/config"
+)
+
+type WebhookServer struct {
+	Config     config.WebhookConfig
+	Bus        *bus.Bus
+	SessionKey string
+	server     *http.Server
+}
+
+const structuredBodyPreviewMaxChars = 512
+
+func NewWebhookServer(cfg config.WebhookConfig, b *bus.Bus, sessionKey string) *WebhookServer {
+	return &WebhookServer{Config: cfg, Bus: b, SessionKey: sessionKey}
+}
+
+func (w *WebhookServer) Start(ctx context.Context) error {
+	if !w.Config.Enabled || strings.TrimSpace(w.Config.Secret) == "" {
+		return nil
+	}
+	addr := strings.TrimSpace(w.Config.Addr)
+	if addr == "" {
+		addr = "127.0.0.1:8765"
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/webhook", w.handle)
+	mux.HandleFunc("/webhook/", w.handle)
+	w.server = &http.Server{
+		Addr:         addr,
+		Handler:      mux,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("webhook listen %s: %w", addr, err)
+	}
+	go func() {
+		if err := w.server.Serve(ln); err != nil && err != http.ErrServerClosed {
+			log.Printf("webhook server error: %v", err)
+		}
+	}()
+	return nil
+}
+
+func (w *WebhookServer) Stop(ctx context.Context) error {
+	if w.server == nil {
+		return nil
+	}
+	return w.server.Shutdown(ctx)
+}
+
+func (w *WebhookServer) handle(rw http.ResponseWriter, r *http.Request) {
+	maxBytes := int64(w.Config.MaxBodyKB) * 1024
+	if maxBytes <= 0 {
+		maxBytes = 64 * 1024
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBytes+1))
+	if err != nil {
+		http.Error(rw, "read error", http.StatusInternalServerError)
+		return
+	}
+	if int64(len(body)) > maxBytes {
+		http.Error(rw, "request too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+
+	if !w.authenticate(r, body) {
+		http.Error(rw, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	route := strings.TrimPrefix(r.URL.Path, "/webhook")
+	route = strings.TrimPrefix(route, "/")
+	preview := strings.TrimSpace(string(body))
+	if len(preview) > structuredBodyPreviewMaxChars {
+		preview = preview[:structuredBodyPreviewMaxChars] + "...[truncated]"
+	}
+
+	ev := bus.Event{
+		Type:       bus.EventWebhook,
+		SessionKey: w.SessionKey,
+		Channel:    "webhook",
+		From:       r.RemoteAddr,
+		Message:    string(body),
+		Meta: map[string]any{
+			"route":        route,
+			"content_type": r.Header.Get("Content-Type"),
+			"x-request-id": r.Header.Get("X-Request-ID"),
+			MetaKeyStructuredEvent: StructuredEventMap(StructuredEvent{
+				Type:    string(bus.EventWebhook),
+				Source:  "webhook",
+				Trusted: false,
+				Details: map[string]any{
+					"route":        route,
+					"content_type": r.Header.Get("Content-Type"),
+					"request_id":   r.Header.Get("X-Request-ID"),
+					"remote_addr":  r.RemoteAddr,
+					"body_preview": preview,
+					"body_bytes":   len(body),
+				},
+			}),
+		},
+	}
+	if structuredTasks, ok := ParseStructuredTasksText(string(body)); ok {
+		ev.Meta[MetaKeyStructuredTasks] = StructuredTasksMap(structuredTasks)
+	}
+	if ok := w.Bus.Publish(ev); !ok {
+		http.Error(rw, "bus full", http.StatusServiceUnavailable)
+		return
+	}
+	rw.WriteHeader(http.StatusOK)
+	_, _ = fmt.Fprint(rw, "ok")
+}
+
+func (w *WebhookServer) authenticate(r *http.Request, body []byte) bool {
+	secret := w.Config.Secret
+	if secret == "" {
+		return false
+	}
+	// Check HMAC-SHA256 in X-Hub-Signature-256
+	sig := r.Header.Get("X-Hub-Signature-256")
+	if strings.HasPrefix(sig, "sha256=") {
+		sig = strings.TrimPrefix(sig, "sha256=")
+		mac := hmac.New(sha256.New, []byte(secret))
+		mac.Write(body)
+		expected := hex.EncodeToString(mac.Sum(nil))
+		return hmac.Equal([]byte(sig), []byte(expected))
+	}
+	// Fall back to simple shared secret in X-Webhook-Secret header
+	return r.Header.Get("X-Webhook-Secret") == secret
+}
+````
+
+## File: cmd/or3-intern/doctor.go
+````go
+package main
+
+import (
+	"flag"
+	"fmt"
+	"io"
+	"net"
+	"net/url"
+	"os"
+	"sort"
+	"strings"
+
+	"or3-intern/internal/config"
+)
+
+type doctorFinding struct {
+	Level   string
+	Area    string
+	Message string
+}
+
+func runDoctorCommand(cfg config.Config, args []string, stdout, stderr io.Writer) error {
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+	if stderr == nil {
+		stderr = os.Stderr
+	}
+	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	strict := fs.Bool("strict", false, "exit non-zero when warnings are found")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	findings := doctorFindings(cfg)
+	if len(findings) == 0 {
+		_, _ = fmt.Fprintln(stdout, "[ok] configuration looks safe")
+		return nil
+	}
+	for _, finding := range findings {
+		_, _ = fmt.Fprintf(stdout, "[%s] %s: %s\n", finding.Level, finding.Area, finding.Message)
+	}
+	if *strict && hasDoctorWarnings(findings) {
+		return fmt.Errorf("doctor found warnings")
+	}
+	return nil
+}
+
+func doctorFindings(cfg config.Config) []doctorFinding {
+	findings := make([]doctorFinding, 0, 32)
+	findings = append(findings, filesystemFindings(cfg)...)
+	findings = append(findings, hardeningFindings(cfg)...)
+	findings = append(findings, securityFindings(cfg)...)
+	findings = append(findings, webhookFindings(cfg)...)
+	findings = append(findings, mcpFindings(cfg)...)
+	findings = append(findings, networkFindings(cfg)...)
+	findings = append(findings, profileFindings(cfg)...)
+	findings = append(findings, execFindings(cfg)...)
+	findings = append(findings, skillFindings(cfg)...)
+	findings = append(findings, channelExposureFindings(cfg)...)
+	sort.SliceStable(findings, func(i, j int) bool {
+		if findings[i].Area == findings[j].Area {
+			return findings[i].Message < findings[j].Message
+		}
+		return findings[i].Area < findings[j].Area
+	})
+	return findings
+}
+
+func filesystemFindings(cfg config.Config) []doctorFinding {
+	findings := []doctorFinding{}
+	addWarn := func(area, message string) {
+		findings = append(findings, doctorFinding{Level: "warn", Area: area, Message: message})
+	}
+	if !cfg.Tools.RestrictToWorkspace {
+		addWarn("filesystem", "workspace restriction is disabled")
+	}
+	if cfg.Tools.RestrictToWorkspace && strings.TrimSpace(cfg.WorkspaceDir) == "" {
+		addWarn("filesystem", "workspace restriction is enabled but workspaceDir is empty")
+	}
+	return findings
+}
+
+func hardeningFindings(cfg config.Config) []doctorFinding {
+	findings := []doctorFinding{}
+	addWarn := func(area, message string) {
+		findings = append(findings, doctorFinding{Level: "warn", Area: area, Message: message})
+	}
+	if len(cfg.Hardening.ChildEnvAllowlist) == 0 {
+		addWarn("env", "child process environment allowlist is empty")
+	}
+	if !cfg.Hardening.Quotas.Enabled {
+		addWarn("quotas", "tool quotas are disabled")
+	}
+	if cfg.Hardening.Quotas.MaxToolCalls <= 0 || cfg.Hardening.Quotas.MaxExecCalls <= 0 || cfg.Hardening.Quotas.MaxWebCalls <= 0 || cfg.Hardening.Quotas.MaxSubagentCalls <= 0 {
+		addWarn("quotas", "one or more quota limits are unset")
+	}
+	if cfg.Hardening.PrivilegedTools && !cfg.Hardening.Sandbox.Enabled {
+		addWarn("privileged-exec", "privileged tools are enabled without Bubblewrap sandboxing")
+	}
+	if cfg.Hardening.Sandbox.Enabled && strings.TrimSpace(cfg.Hardening.Sandbox.BubblewrapPath) == "" {
+		addWarn("privileged-exec", "Bubblewrap sandbox is enabled without a bubblewrapPath")
+	}
+	return findings
+}
+
+func securityFindings(cfg config.Config) []doctorFinding {
+	findings := []doctorFinding{}
+	addWarn := func(message string) {
+		findings = append(findings, doctorFinding{Level: "warn", Area: "security", Message: message})
+	}
+	if !cfg.Security.Audit.Enabled {
+		addWarn("audit logging is disabled")
+	} else {
+		if !cfg.Security.Audit.Strict {
+			addWarn("audit logging is enabled but strict mode is off")
+		}
+		if !cfg.Security.Audit.VerifyOnStart {
+			addWarn("audit logging is enabled but verifyOnStart is off")
+		}
+	}
+	if !cfg.Security.SecretStore.Enabled {
+		addWarn("secret store is disabled")
+		if hasExternalIntegrations(cfg) {
+			addWarn("secret store is disabled while external integrations are enabled")
+		}
+	} else if !cfg.Security.SecretStore.Required && hasExternalIntegrations(cfg) {
+		addWarn("secret store failures are tolerated while channels, webhook, or MCP integrations are enabled")
+	}
+	if !cfg.Security.Profiles.Enabled {
+		addWarn("access profiles are disabled")
+	}
+	return findings
+}
+
+func webhookFindings(cfg config.Config) []doctorFinding {
+	findings := []doctorFinding{}
+	addWarn := func(message string) {
+		findings = append(findings, doctorFinding{Level: "warn", Area: "webhook", Message: message})
+	}
+	if !cfg.Triggers.Webhook.Enabled {
+		return findings
+	}
+	if strings.TrimSpace(cfg.Triggers.Webhook.Secret) == "" {
+		addWarn("webhook is enabled without a secret")
+	}
+	if !isLoopbackAddr(cfg.Triggers.Webhook.Addr) {
+		addWarn("webhook bind address is not loopback-only")
+	}
+	profileName, profile, ok := resolveEffectiveProfile(cfg, "webhook", "webhook")
+	if !ok {
+		addWarn("webhook is enabled without an effective access profile")
+		if cfg.Hardening.PrivilegedTools {
+			addWarn("webhook can reach privileged tools because no access profile applies")
+		}
+		if cfg.Hardening.GuardedTools {
+			addWarn("webhook can reach guarded tools because no access profile applies")
+		}
+		if cfg.Skills.EnableExec && cfg.Hardening.PrivilegedTools {
+			addWarn("webhook can reach skill execution because no access profile applies")
+		}
+		return findings
+	}
+	if profileAllowsPrivileged(profile) {
+		addWarn(fmt.Sprintf("webhook resolves to profile %q with privileged capability", profileName))
+	}
+	if profile.AllowSubagents {
+		addWarn(fmt.Sprintf("webhook resolves to profile %q with subagents enabled", profileName))
+	}
+	if len(profile.WritablePaths) > 0 {
+		addWarn(fmt.Sprintf("webhook resolves to profile %q with writable paths", profileName))
+	}
+	if hostListTooBroad(profile.AllowedHosts) {
+		addWarn(fmt.Sprintf("webhook resolves to profile %q with broad allowedHosts", profileName))
+	}
+	if cfg.Hardening.EnableExecShell && cfg.Hardening.PrivilegedTools && profileCanReachExec(profile) {
+		addWarn(fmt.Sprintf("webhook can reach exec shell mode via profile %q", profileName))
+	}
+	if cfg.Skills.EnableExec && profileAllowsPrivileged(profile) && profileAllowsTool(profile, "run_skill_script") {
+		addWarn(fmt.Sprintf("webhook can reach skill execution via profile %q", profileName))
+	}
+	return findings
+}
+
+func mcpFindings(cfg config.Config) []doctorFinding {
+	findings := []doctorFinding{}
+	addWarn := func(message string) {
+		findings = append(findings, doctorFinding{Level: "warn", Area: "mcp", Message: message})
+	}
+	if len(cfg.Tools.MCPServers) == 0 {
+		return findings
+	}
+	for name, server := range cfg.Tools.MCPServers {
+		if !server.Enabled {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(server.Transport)) {
+		case "stdio":
+			if len(server.ChildEnvAllowlist) == 0 {
+				addWarn(fmt.Sprintf("server %q uses stdio without a server childEnvAllowlist", name))
+				if len(cfg.Hardening.ChildEnvAllowlist) == 0 {
+					addWarn(fmt.Sprintf("server %q uses stdio with no server or global child environment allowlist", name))
+				}
+			}
+		case "sse", "streamablehttp":
+			if server.AllowInsecureHTTP || isInsecureHTTPURL(server.URL) {
+				addWarn(fmt.Sprintf("server %q uses insecure HTTP transport", name))
+			}
+			if !cfg.Security.Network.Enabled || !cfg.Security.Network.DefaultDeny {
+				addWarn(fmt.Sprintf("server %q uses remote HTTP transport without deny-by-default network policy", name))
+			}
+			if hostListTooBroad(cfg.Security.Network.AllowedHosts) {
+				addWarn(fmt.Sprintf("server %q relies on a broad network allowlist", name))
+			}
+		}
+	}
+	return findings
+}
+
+func networkFindings(cfg config.Config) []doctorFinding {
+	findings := []doctorFinding{}
+	addWarn := func(message string) {
+		findings = append(findings, doctorFinding{Level: "warn", Area: "network", Message: message})
+	}
+	if hostListContainsLiteralStar(cfg.Security.Network.AllowedHosts) {
+		addWarn("security.network.allowedHosts contains *")
+	}
+	if hostListTooBroad(cfg.Security.Network.AllowedHosts) {
+		addWarn("security.network.allowedHosts is broad")
+	}
+	if hasRemoteHTTPMCP(cfg) && (!cfg.Security.Network.Enabled || !cfg.Security.Network.DefaultDeny) {
+		addWarn("remote MCP transports are enabled without a meaningful deny-by-default network posture")
+	}
+	return findings
+}
+
+func profileFindings(cfg config.Config) []doctorFinding {
+	findings := []doctorFinding{}
+	addWarn := func(message string) {
+		findings = append(findings, doctorFinding{Level: "warn", Area: "profiles", Message: message})
+	}
+	if !cfg.Security.Profiles.Enabled {
+		if hasPublicIngress(cfg) {
+			addWarn("public ingress is enabled while access profiles are disabled")
+		}
+		if cfg.Triggers.Webhook.Enabled {
+			addWarn("webhook is enabled while access profiles are disabled")
+		}
+		return findings
+	}
+	if len(cfg.Security.Profiles.Profiles) == 0 {
+		addWarn("access profiles are enabled but no profiles are defined")
+		return findings
+	}
+	if strings.TrimSpace(cfg.Security.Profiles.Default) == "" && len(cfg.Security.Profiles.Channels) == 0 && len(cfg.Security.Profiles.Triggers) == 0 {
+		addWarn("access profiles are enabled but no default, channel, or trigger mapping is configured")
+	}
+	if hasPublicIngress(cfg) && strings.TrimSpace(cfg.Security.Profiles.Default) == "" {
+		missing := false
+		for _, channel := range openAccessChannelNames(cfg) {
+			if _, _, ok := resolveEffectiveProfile(cfg, "", channel); !ok {
+				missing = true
+				break
+			}
+		}
+		if missing {
+			addWarn("one or more open-access channels have no effective access profile")
+		}
+	}
+	if cfg.Triggers.Webhook.Enabled {
+		if _, _, ok := resolveEffectiveProfile(cfg, "webhook", "webhook"); !ok {
+			addWarn("webhook has no effective access profile")
+		}
+	}
+	profileNames := make([]string, 0, len(cfg.Security.Profiles.Profiles))
+	for name := range cfg.Security.Profiles.Profiles {
+		profileNames = append(profileNames, name)
+	}
+	sort.Strings(profileNames)
+	for _, name := range profileNames {
+		profile := cfg.Security.Profiles.Profiles[name]
+		if hostListContainsLiteralStar(profile.AllowedHosts) {
+			addWarn(fmt.Sprintf("profile %q allowedHosts contains *", name))
+		}
+		if hostListTooBroad(profile.AllowedHosts) {
+			addWarn(fmt.Sprintf("profile %q has broad allowedHosts", name))
+		}
+		if profileAllowsPrivileged(profile) && len(profile.AllowedTools) == 0 {
+			addWarn(fmt.Sprintf("profile %q permits privileged capability without an explicit tool allowlist", name))
+		}
+	}
+	return findings
+}
+
+func execFindings(cfg config.Config) []doctorFinding {
+	findings := []doctorFinding{}
+	addWarn := func(message string) {
+		findings = append(findings, doctorFinding{Level: "warn", Area: "exec", Message: message})
+	}
+	if !cfg.Hardening.PrivilegedTools && !cfg.Hardening.GuardedTools {
+		return findings
+	}
+	if len(cfg.Hardening.ExecAllowedPrograms) == 0 {
+		addWarn("exec is enabled without an exec allowlist")
+	}
+	if len(cfg.Hardening.ChildEnvAllowlist) == 0 {
+		addWarn("exec-capable configuration has an empty child environment allowlist")
+	}
+	if cfg.Hardening.EnableExecShell {
+		addWarn("exec shell command mode is enabled; prefer program + args and keep shell mode off unless strictly required")
+	}
+	if publicIngressCanReachExec(cfg) || webhookCanReachExec(cfg) {
+		addWarn("public or webhook-facing ingress can reach privileged exec posture unless profiles deny it")
+	}
+	return findings
+}
+
+func skillFindings(cfg config.Config) []doctorFinding {
+	findings := []doctorFinding{}
+	addWarn := func(message string) {
+		findings = append(findings, doctorFinding{Level: "warn", Area: "skills", Message: message})
+	}
+	if !cfg.Skills.EnableExec {
+		return findings
+	}
+	if !cfg.Skills.Policy.QuarantineByDefault {
+		addWarn("skill execution is enabled while quarantineByDefault is false")
+	}
+	if len(cfg.Skills.Policy.TrustedOwners) == 0 {
+		addWarn("skill execution is enabled without a trustedOwners policy for managed skills")
+	}
+	if len(cfg.Skills.Policy.TrustedRegistries) == 0 {
+		addWarn("skill execution is enabled without a trustedRegistries policy for managed skills")
+	}
+	if len(cfg.Hardening.ChildEnvAllowlist) == 0 {
+		addWarn("skill execution is enabled with an empty child environment allowlist")
+	}
+	if hasPublicIngress(cfg) && publicIngressCanReachSkillExec(cfg) {
+		addWarn("public ingress can reach skill execution through a permissive profile")
+	}
+	if cfg.Triggers.Webhook.Enabled {
+		if _, profile, ok := resolveEffectiveProfile(cfg, "webhook", "webhook"); !ok || (profileAllowsPrivileged(profile) && profileAllowsTool(profile, "run_skill_script")) {
+			addWarn("webhook can reach skill execution through a permissive profile")
+		}
+	}
+	return findings
+}
+
+func channelExposureFindings(cfg config.Config) []doctorFinding {
+	findings := []doctorFinding{}
+	add := func(area, message string) {
+		findings = append(findings, doctorFinding{Level: "warn", Area: area, Message: message})
+	}
+	if cfg.Channels.Telegram.Enabled && cfg.Channels.Telegram.OpenAccess {
+		add("telegram", "channel is open to any sender")
+		appendPublicChannelExposureWarnings(&findings, cfg, "telegram")
+	}
+	if cfg.Channels.Slack.Enabled && cfg.Channels.Slack.OpenAccess {
+		add("slack", "channel is open to any sender")
+		appendPublicChannelExposureWarnings(&findings, cfg, "slack")
+	}
+	if cfg.Channels.Discord.Enabled && cfg.Channels.Discord.OpenAccess {
+		add("discord", "channel is open to any sender")
+		appendPublicChannelExposureWarnings(&findings, cfg, "discord")
+	}
+	if cfg.Channels.WhatsApp.Enabled && cfg.Channels.WhatsApp.OpenAccess {
+		add("whatsapp", "channel is open to any sender")
+		appendPublicChannelExposureWarnings(&findings, cfg, "whatsapp")
+	}
+	if cfg.Channels.Email.Enabled && cfg.Channels.Email.OpenAccess {
+		add("email", "channel is open to any sender")
+		appendPublicChannelExposureWarnings(&findings, cfg, "email")
+	}
+	return findings
+}
+
+func appendPublicChannelExposureWarnings(findings *[]doctorFinding, cfg config.Config, channel string) {
+	add := func(message string) {
+		*findings = append(*findings, doctorFinding{Level: "warn", Area: channel, Message: message})
+	}
+	profileName, profile, ok := resolveEffectiveProfile(cfg, "", channel)
+	if !ok {
+		if cfg.Hardening.PrivilegedTools {
+			add("open-access channel can reach privileged tools because no access profile applies")
+		}
+		if cfg.Hardening.GuardedTools {
+			add("open-access channel can reach guarded tools because no access profile applies")
+		}
+		if cfg.Skills.EnableExec && cfg.Hardening.PrivilegedTools {
+			add("open-access channel can reach skill execution because no access profile applies")
+		}
+		return
+	}
+	if profileAllowsPrivileged(profile) {
+		add(fmt.Sprintf("open-access channel resolves to profile %q with privileged capability", profileName))
+	}
+	if cfg.Hardening.GuardedTools && !profileHasMeaningfulToolRestriction(profile) {
+		add(fmt.Sprintf("open-access channel resolves to profile %q without a meaningful tool restriction", profileName))
+	}
+	if cfg.Hardening.EnableExecShell && cfg.Hardening.PrivilegedTools && profileCanReachExec(profile) {
+		add(fmt.Sprintf("open-access channel can reach exec shell mode via profile %q", profileName))
+	}
+	if cfg.Skills.EnableExec && profileAllowsPrivileged(profile) && profileAllowsTool(profile, "run_skill_script") {
+		add(fmt.Sprintf("open-access channel can reach skill execution via profile %q", profileName))
+	}
+}
+
+func hasDoctorWarnings(findings []doctorFinding) bool {
+	for _, finding := range findings {
+		if strings.EqualFold(finding.Level, "warn") || strings.EqualFold(finding.Level, "error") {
+			return true
+		}
+	}
+	return false
+}
+
+func isLoopbackAddr(addr string) bool {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return true
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	host = strings.Trim(host, "[]")
+	if host == "" || strings.EqualFold(host, "localhost") {
+		return true
+	}
+	parsed := net.ParseIP(host)
+	return parsed != nil && parsed.IsLoopback()
+}
+
+func hasExternalIntegrations(cfg config.Config) bool {
+	return cfg.Triggers.Webhook.Enabled || anyEnabledChannels(cfg) || anyEnabledMCPServers(cfg)
+}
+
+func anyEnabledChannels(cfg config.Config) bool {
+	return cfg.Channels.Telegram.Enabled || cfg.Channels.Slack.Enabled || cfg.Channels.Discord.Enabled || cfg.Channels.WhatsApp.Enabled || cfg.Channels.Email.Enabled
+}
+
+func anyEnabledMCPServers(cfg config.Config) bool {
+	for _, server := range cfg.Tools.MCPServers {
+		if server.Enabled {
+			return true
+		}
+	}
+	return false
+}
+
+func hasPublicIngress(cfg config.Config) bool {
+	return len(openAccessChannelNames(cfg)) > 0
+}
+
+func openAccessChannelNames(cfg config.Config) []string {
+	channels := []string{}
+	if cfg.Channels.Telegram.Enabled && cfg.Channels.Telegram.OpenAccess {
+		channels = append(channels, "telegram")
+	}
+	if cfg.Channels.Slack.Enabled && cfg.Channels.Slack.OpenAccess {
+		channels = append(channels, "slack")
+	}
+	if cfg.Channels.Discord.Enabled && cfg.Channels.Discord.OpenAccess {
+		channels = append(channels, "discord")
+	}
+	if cfg.Channels.WhatsApp.Enabled && cfg.Channels.WhatsApp.OpenAccess {
+		channels = append(channels, "whatsapp")
+	}
+	if cfg.Channels.Email.Enabled && cfg.Channels.Email.OpenAccess {
+		channels = append(channels, "email")
+	}
+	return channels
+}
+
+func resolveEffectiveProfile(cfg config.Config, trigger, channel string) (string, config.AccessProfileConfig, bool) {
+	if !cfg.Security.Profiles.Enabled {
+		return "", config.AccessProfileConfig{}, false
+	}
+	if profileName := strings.TrimSpace(cfg.Security.Profiles.Triggers[strings.ToLower(strings.TrimSpace(trigger))]); profileName != "" {
+		profile, ok := cfg.Security.Profiles.Profiles[profileName]
+		return profileName, profile, ok
+	}
+	if profileName := strings.TrimSpace(cfg.Security.Profiles.Channels[strings.ToLower(strings.TrimSpace(channel))]); profileName != "" {
+		profile, ok := cfg.Security.Profiles.Profiles[profileName]
+		return profileName, profile, ok
+	}
+	profileName := strings.TrimSpace(cfg.Security.Profiles.Default)
+	if profileName == "" {
+		return "", config.AccessProfileConfig{}, false
+	}
+	profile, ok := cfg.Security.Profiles.Profiles[profileName]
+	return profileName, profile, ok
+}
+
+func profileAllowsPrivileged(profile config.AccessProfileConfig) bool {
+	maxCapability := strings.ToLower(strings.TrimSpace(profile.MaxCapability))
+	return maxCapability == "" || maxCapability == "privileged"
+}
+
+func profileAllowsGuarded(profile config.AccessProfileConfig) bool {
+	maxCapability := strings.ToLower(strings.TrimSpace(profile.MaxCapability))
+	return maxCapability == "" || maxCapability == "privileged" || maxCapability == "guarded"
+}
+
+func profileAllowsTool(profile config.AccessProfileConfig, toolName string) bool {
+	if len(profile.AllowedTools) == 0 {
+		return true
+	}
+	toolName = strings.TrimSpace(toolName)
+	for _, allowed := range profile.AllowedTools {
+		if strings.TrimSpace(allowed) == toolName {
+			return true
+		}
+	}
+	return false
+}
+
+func profileHasMeaningfulToolRestriction(profile config.AccessProfileConfig) bool {
+	return !profileAllowsGuarded(profile) || len(profile.AllowedTools) > 0
+}
+
+func profileCanReachExec(profile config.AccessProfileConfig) bool {
+	return profileAllowsPrivileged(profile) && profileAllowsTool(profile, "exec")
+}
+
+func hostListContainsLiteralStar(hosts []string) bool {
+	for _, host := range hosts {
+		if strings.TrimSpace(host) == "*" {
+			return true
+		}
+	}
+	return false
+}
+
+func hostListTooBroad(hosts []string) bool {
+	if len(hosts) > 10 {
+		return true
+	}
+	for _, host := range hosts {
+		host = strings.TrimSpace(strings.ToLower(host))
+		if host == "*" {
+			return true
+		}
+		if strings.Contains(host, "*") && !strings.HasPrefix(host, "*.") {
+			return true
+		}
+		if strings.HasPrefix(host, "*.") {
+			return true
+		}
+	}
+	return false
+}
+
+func isInsecureHTTPURL(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(u.Scheme, "http")
+}
+
+func hasRemoteHTTPMCP(cfg config.Config) bool {
+	for _, server := range cfg.Tools.MCPServers {
+		if !server.Enabled {
+			continue
+		}
+		transport := strings.ToLower(strings.TrimSpace(server.Transport))
+		if transport != "sse" && transport != "streamablehttp" {
+			continue
+		}
+		u, err := url.Parse(strings.TrimSpace(server.URL))
+		if err != nil {
+			return true
+		}
+		if !isLoopbackAddr(u.Hostname()) {
+			return true
+		}
+	}
+	return false
+}
+
+func publicIngressCanReachSkillExec(cfg config.Config) bool {
+	for _, channel := range openAccessChannelNames(cfg) {
+		_, profile, ok := resolveEffectiveProfile(cfg, "", channel)
+		if !ok {
+			return cfg.Hardening.PrivilegedTools
+		}
+		if profileAllowsPrivileged(profile) && profileAllowsTool(profile, "run_skill_script") {
+			return true
+		}
+	}
+	return false
+}
+
+func publicIngressCanReachExec(cfg config.Config) bool {
+	if !cfg.Hardening.EnableExecShell || !cfg.Hardening.PrivilegedTools {
+		return false
+	}
+	for _, channel := range openAccessChannelNames(cfg) {
+		_, profile, ok := resolveEffectiveProfile(cfg, "", channel)
+		if !ok {
+			return true
+		}
+		if profileCanReachExec(profile) {
+			return true
+		}
+	}
+	return false
+}
+
+func webhookCanReachExec(cfg config.Config) bool {
+	if !cfg.Hardening.EnableExecShell || !cfg.Hardening.PrivilegedTools || !cfg.Triggers.Webhook.Enabled {
+		return false
+	}
+	_, profile, ok := resolveEffectiveProfile(cfg, "webhook", "webhook")
+	if !ok {
+		return true
+	}
+	return profileCanReachExec(profile)
 }
 ````
 
@@ -8875,136 +9390,237 @@ func trimTo(s string, max int) string {
 }
 ````
 
-## File: internal/memory/vector.go
+## File: internal/memory/retrieve.go
 ````go
 package memory
 
 import (
-	"bytes"
-	"container/heap"
 	"context"
-	"encoding/binary"
-	"errors"
 	"math"
+	"sort"
 	"strings"
 
 	"or3-intern/internal/db"
-	"or3-intern/internal/scope"
 )
 
-func PackFloat32(vec []float32) []byte {
-	var b bytes.Buffer
-	_ = binary.Write(&b, binary.LittleEndian, vec)
-	return b.Bytes()
-}
-
-func UnpackFloat32(blob []byte) ([]float32, error) {
-	if len(blob)%4 != 0 { return nil, errors.New("invalid float32 blob") }
-	out := make([]float32, len(blob)/4)
-	if err := binary.Read(bytes.NewReader(blob), binary.LittleEndian, &out); err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func Cosine(a, b []float32) float64 {
-	var dot, na, nb float64
-	n := len(a)
-	if len(b) < n { n = len(b) }
-	for i := 0; i < n; i++ {
-		av := float64(a[i])
-		bv := float64(b[i])
-		dot += av * bv
-		na += av * av
-		nb += bv * bv
-	}
-	if na == 0 || nb == 0 { return 0 }
-	return dot / (math.Sqrt(na) * math.Sqrt(nb))
-}
-
-type VecCandidate struct {
+type Retrieved struct {
+	Source string // pinned|vector|fts
 	ID int64
 	Text string
 	Score float64
 }
 
-type candMinHeap []VecCandidate
-
-func (h candMinHeap) Len() int { return len(h) }
-func (h candMinHeap) Less(i, j int) bool { return h[i].Score < h[j].Score }
-func (h candMinHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
-func (h *candMinHeap) Push(x any) { *h = append(*h, x.(VecCandidate)) }
-func (h *candMinHeap) Pop() any {
-	old := *h
-	n := len(old)
-	x := old[n-1]
-	*h = old[:n-1]
-	return x
+type Retriever struct {
+	DB *db.DB
+	VectorWeight float64
+	FTSWeight float64
+	LexicalWeight float64
+	RecencyWeight float64
+	VectorScanLimit int
 }
 
-func VectorSearch(ctx context.Context, d *db.DB, sessionKey string, queryVec []float32, k int, scanLimit int) ([]VecCandidate, error) {
-	_ = scanLimit
-	queryBlob := PackFloat32(queryVec)
-	scopes := []string{scope.GlobalMemoryScope}
-	if trimmedSessionKey := strings.TrimSpace(sessionKey); trimmedSessionKey != "" && trimmedSessionKey != scope.GlobalMemoryScope {
-		scopes = append(scopes, sessionKey)
-	}
-	seen := make(map[int64]struct{}, k*len(scopes))
-	out := make([]VecCandidate, 0, k*len(scopes))
-	for _, memoryScope := range scopes {
-		rows, err := d.SearchVecScope(ctx, memoryScope, queryBlob, k)
-		if err != nil {
-			return nil, err
-		}
-		if len(rows) == 0 {
-			rows, err = d.SearchVecScopeFallback(ctx, memoryScope, queryBlob, k)
-			if err != nil {
-				return nil, err
-			}
-		}
-		for _, row := range rows {
-			if _, ok := seen[row.ID]; ok {
-				continue
-			}
-			seen[row.ID] = struct{}{}
-			out = append(out, VecCandidate{
-				ID:    row.ID,
-				Text:  row.Text,
-				Score: 1.0 / (1.0 + row.Distance),
-			})
-		}
-	}
-	return out, nil
+func NewRetriever(d *db.DB) *Retriever {
+	return &Retriever{DB: d, VectorWeight: 0.55, FTSWeight: 0.25, LexicalWeight: 0.12, RecencyWeight: 0.08, VectorScanLimit: 2000}
 }
 
-func addVectorCandidates(rows interface {
-	Next() bool
-	Scan(dest ...any) error
-	Err() error
-}, queryVec []float32, k int, h *candMinHeap) error {
-	for rows.Next() {
-		var id int64
-		var text string
-		var emb []byte
-		var src any
-		var tags string
-		var created int64
-		if err := rows.Scan(&id, &text, &emb, &src, &tags, &created); err != nil {
-			return err
+func (r *Retriever) Retrieve(ctx context.Context, sessionKey, query string, queryVec []float32, vectorK, ftsK, topK int) ([]Retrieved, error) {
+	vecs, err := VectorSearch(ctx, r.DB, sessionKey, queryVec, vectorK, r.VectorScanLimit)
+	if err != nil { return nil, err }
+	fts, _ := r.DB.SearchFTS(ctx, sessionKey, normalizeFTSQuery(query), ftsK)
+
+	type agg struct {
+		id int64
+		text string
+		v float64
+		f float64
+		createdAt int64
+	}
+	m := map[int64]*agg{}
+	for _, c := range vecs {
+		a := m[c.ID]
+		if a == nil { a = &agg{id: c.ID, text: c.Text}; m[c.ID] = a }
+		a.v = c.Score
+		if c.CreatedAt > a.createdAt {
+			a.createdAt = c.CreatedAt
 		}
-		v, err := UnpackFloat32(emb)
-		if err != nil {
+	}
+	for _, f := range fts {
+		a := m[f.ID]
+		if a == nil { a = &agg{id: f.ID, text: f.Text}; m[f.ID] = a }
+		// bm25 lower is better. Convert to a positive "higher is better".
+		a.f = 1.0 / (1.0 + f.Rank)
+		if f.CreatedAt > a.createdAt {
+			a.createdAt = f.CreatedAt
+		}
+	}
+
+	raw := make([]Retrieved, 0, len(m))
+	tokens := retrievalTokens(query)
+	newest := int64(0)
+	for _, a := range m {
+		if a.createdAt > newest {
+			newest = a.createdAt
+		}
+	}
+	for _, a := range m {
+		lexical := lexicalOverlapScore(tokens, a.text)
+		recency := recencyScore(a.createdAt, newest)
+		score := (a.v * r.VectorWeight) + (a.f * r.FTSWeight) + (lexical * r.LexicalWeight) + (recency * r.RecencyWeight)
+		src := "hybrid"
+		if a.f > 0 && a.v == 0 { src = "fts" }
+		if a.v > 0 && a.f == 0 { src = "vector" }
+		raw = append(raw, Retrieved{Source: src, ID: a.id, Text: a.text, Score: score})
+	}
+
+	sort.Slice(raw, func(i, j int) bool {
+		if raw[i].Score == raw[j].Score {
+			return raw[i].ID > raw[j].ID
+		}
+		return raw[i].Score > raw[j].Score
+	})
+	return diversifyRetrieved(raw, topK), nil
+}
+
+func retrievalTokens(query string) []string {
+	parts := strings.FieldsFunc(strings.ToLower(query), func(r rune) bool {
+		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9')
+	})
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if len(part) < 3 {
 			continue
 		}
-		score := Cosine(queryVec, v)
-		if h.Len() < k {
-			heap.Push(h, VecCandidate{ID: id, Text: text, Score: score})
-		} else if (*h)[0].Score < score {
-			(*h)[0] = VecCandidate{ID: id, Text: text, Score: score}
-			heap.Fix(h, 0)
+		if _, ok := seen[part]; ok {
+			continue
+		}
+		seen[part] = struct{}{}
+		out = append(out, part)
+	}
+	return out
+}
+
+func lexicalOverlapScore(tokens []string, text string) float64 {
+	if len(tokens) == 0 {
+		return 0
+	}
+	lower := strings.ToLower(text)
+	hits := 0
+	for _, token := range tokens {
+		if strings.Contains(lower, token) {
+			hits++
 		}
 	}
-	return rows.Err()
+	return float64(hits) / float64(len(tokens))
+}
+
+func recencyScore(createdAt, newest int64) float64 {
+	if createdAt <= 0 || newest <= 0 || createdAt >= newest {
+		return 1
+	}
+	ageHours := float64(newest-createdAt) / (1000 * 60 * 60)
+	if ageHours <= 0 {
+		return 1
+	}
+	return math.Exp(-ageHours / (24 * 14))
+}
+
+func diversifyRetrieved(items []Retrieved, topK int) []Retrieved {
+	if topK <= 0 || len(items) == 0 {
+		return nil
+	}
+	selected := make([]Retrieved, 0, min(topK, len(items)))
+	seenCanonical := map[string]struct{}{}
+	sourceCounts := map[string]int{}
+	for _, item := range items {
+		canonical := canonicalRetrievedText(item.Text)
+		if canonical != "" {
+			if _, ok := seenCanonical[canonical]; ok {
+				continue
+			}
+			duplicate := false
+			for _, existing := range selected {
+				if similarRetrievedText(existing.Text, item.Text) {
+					duplicate = true
+					break
+				}
+			}
+			if duplicate {
+				continue
+			}
+		}
+		penalty := 1.0 / float64(sourceCounts[item.Source]+1)
+		item.Score = item.Score * (0.85 + 0.15*penalty)
+		selected = append(selected, item)
+		if canonical != "" {
+			seenCanonical[canonical] = struct{}{}
+		}
+		sourceCounts[item.Source]++
+		if len(selected) >= topK {
+			break
+		}
+	}
+	sort.Slice(selected, func(i, j int) bool {
+		if selected[i].Score == selected[j].Score {
+			return selected[i].ID > selected[j].ID
+		}
+		return selected[i].Score > selected[j].Score
+	})
+	return selected
+}
+
+func canonicalRetrievedText(text string) string {
+	text = strings.ToLower(strings.Join(strings.Fields(text), " "))
+	if len(text) > 180 {
+		text = text[:180]
+	}
+	return text
+}
+
+func similarRetrievedText(a, b string) bool {
+	ac := canonicalRetrievedText(a)
+	bc := canonicalRetrievedText(b)
+	if ac == "" || bc == "" {
+		return false
+	}
+	if ac == bc {
+		return true
+	}
+	at := retrievalTokens(ac)
+	bt := retrievalTokens(bc)
+	if len(at) == 0 || len(bt) == 0 {
+		return false
+	}
+	set := map[string]struct{}{}
+	for _, token := range at {
+		set[token] = struct{}{}
+	}
+	shared := 0
+	union := len(set)
+	for _, token := range bt {
+		if _, ok := set[token]; ok {
+			shared++
+			continue
+		}
+		union++
+	}
+	if union == 0 {
+		return false
+	}
+	return float64(shared)/float64(union) >= 0.8
+}
+
+func normalizeFTSQuery(q string) string {
+	q = strings.TrimSpace(q)
+	if q == "" { return "" }
+	// simple: split on spaces, quote terms that contain punctuation
+	parts := strings.Fields(q)
+	for i, p := range parts {
+		if strings.ContainsAny(p, `":*`) {
+			parts[i] = `"` + strings.ReplaceAll(p, `"`, `""`) + `"`
+		}
+	}
+	return strings.Join(parts, " ")
 }
 ````
 
@@ -9205,196 +9821,507 @@ func (t *ListDir) Execute(ctx context.Context, params map[string]any) (string, e
 }
 ````
 
-## File: internal/tools/message.go
+## File: cmd/or3-intern/skills_cmd.go
 ````go
-package tools
+package main
 
 import (
 	"context"
+	"encoding/json"
+	"flag"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+
+	"or3-intern/internal/clawhub"
+	"or3-intern/internal/config"
+	"or3-intern/internal/mcp"
+	"or3-intern/internal/skills"
 )
 
-type DeliverFunc func(ctx context.Context, channel, to, text string, meta map[string]any) error
-
-type SendMessage struct {
-	Base
-	Deliver        DeliverFunc
-	DefaultChannel string
-	DefaultTo      string
-	AllowedRoot    string
-	ArtifactsDir   string
-	MaxMediaBytes  int
+type skillsCommandDeps struct {
+	Client        *clawhub.Client
+	LoadToolNames func(context.Context, config.Config) map[string]struct{}
+	LoadInventory func(toolNames map[string]struct{}) skills.Inventory
+	Audit         func(context.Context, string, any) error
+	Stdout        io.Writer
+	Stderr        io.Writer
 }
 
-func (t *SendMessage) Capability() CapabilityLevel { return CapabilityGuarded }
-
-func (t *SendMessage) Name() string { return "send_message" }
-func (t *SendMessage) Description() string {
-	return "Send a message via a configured channel (for reminders/cron or proactive messages)."
-}
-func (t *SendMessage) Parameters() map[string]any {
-	return map[string]any{"type": "object", "properties": map[string]any{
-		"channel": map[string]any{"type": "string"},
-		"to":      map[string]any{"type": "string"},
-		"text":    map[string]any{"type": "string"},
-		"media": map[string]any{
-			"type":        "array",
-			"items":       map[string]any{"type": "string"},
-			"description": "Optional local file paths to send as attachments.",
+func runSkillsCommand(ctx context.Context, cfg config.Config, bundledDir string, args []string, stdout, stderr io.Writer) error {
+	deps := skillsCommandDeps{
+		Client: newClawHubClient(cfg),
+		LoadToolNames: func(ctx context.Context, cfg config.Config) map[string]struct{} {
+			return loadAvailableToolNamesWithManager(ctx, cfg, nil)
 		},
-	}, "required": []string{}}
-}
-func (t *SendMessage) Schema() map[string]any {
-	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
-}
-func (t *SendMessage) Execute(ctx context.Context, params map[string]any) (string, error) {
-	if t.Deliver == nil {
-		return "", fmt.Errorf("deliver not configured")
+		LoadInventory: func(toolNames map[string]struct{}) skills.Inventory {
+			return buildSkillsInventory(cfg, bundledDir, toolNames)
+		},
+		Stdout: stdout,
+		Stderr: stderr,
 	}
-	ctxChannel, ctxTo := DeliveryFromContext(ctx)
-	ch := readOptionalString(params, "channel")
-	to := readOptionalString(params, "to")
-	text := readOptionalString(params, "text")
-	if ch == "" {
-		ch = strings.TrimSpace(t.DefaultChannel)
-	}
-	if ch == "" {
-		ch = strings.TrimSpace(ctxChannel)
-	}
-	if to == "" {
-		to = strings.TrimSpace(t.DefaultTo)
-	}
-	if to == "" {
-		to = strings.TrimSpace(ctxTo)
-	}
-	mediaPaths, err := t.validateMediaPaths(params["media"])
-	if err != nil {
-		return "", err
-	}
-	if text == "" && len(mediaPaths) == 0 {
-		return "", fmt.Errorf("message requires text or media")
-	}
-	var meta map[string]any
-	explicitTo := strings.TrimSpace(readOptionalString(params, "to")) != ""
-	if len(mediaPaths) > 0 || explicitTo {
-		meta = map[string]any{}
-		if len(mediaPaths) > 0 {
-			meta["media_paths"] = mediaPaths
-		}
-		if explicitTo {
-			meta["explicit_to"] = true
-		}
-	}
-	if err := t.Deliver(ctx, ch, to, text, meta); err != nil {
-		return "", err
-	}
-	return "ok", nil
+	return runSkillsCommandWithDeps(ctx, cfg, args, deps)
 }
 
-func (t *SendMessage) validateMediaPaths(raw any) ([]string, error) {
-	items, err := stringSlice(raw)
-	if err != nil {
-		return nil, err
+func runSkillsCommandWithDeps(ctx context.Context, cfg config.Config, args []string, deps skillsCommandDeps) error {
+	if deps.Client == nil {
+		deps.Client = newClawHubClient(cfg)
 	}
-	if len(items) == 0 {
-		return nil, nil
+	if deps.LoadToolNames == nil {
+		deps.LoadToolNames = func(ctx context.Context, cfg config.Config) map[string]struct{} {
+			return loadAvailableToolNamesWithManager(ctx, cfg, nil)
+		}
 	}
-	roots := make([]string, 0, 2)
-	if strings.TrimSpace(t.AllowedRoot) != "" {
-		roots = append(roots, strings.TrimSpace(t.AllowedRoot))
+	if deps.LoadInventory == nil {
+		return fmt.Errorf("skills inventory loader not configured")
 	}
-	if strings.TrimSpace(t.ArtifactsDir) != "" {
-		roots = append(roots, strings.TrimSpace(t.ArtifactsDir))
+	if deps.Stdout == nil {
+		deps.Stdout = os.Stdout
 	}
-	out := make([]string, 0, len(items))
-	for _, item := range items {
-		p, err := filepath.Abs(strings.TrimSpace(item))
-		if err != nil {
-			return nil, err
-		}
-		p, err = canonicalizePath(p)
-		if err != nil {
-			return nil, err
-		}
-		info, err := os.Stat(p)
-		if err != nil {
-			return nil, err
-		}
-		if info.IsDir() {
-			return nil, fmt.Errorf("media path is a directory: %s", item)
-		}
-		if t.MaxMediaBytes == 0 {
-			return nil, fmt.Errorf("media attachments disabled by config")
-		}
-		if t.MaxMediaBytes > 0 && info.Size() > int64(t.MaxMediaBytes) {
-			return nil, fmt.Errorf("media path exceeds maxMediaBytes: %s", item)
-		}
-		if len(roots) > 0 {
-			allowed := false
-			for _, root := range roots {
-				ok, err := pathWithinRoot(p, root)
-				if err != nil {
-					return nil, err
-				}
-				if ok {
-					allowed = true
-					break
-				}
-			}
-			if !allowed {
-				return nil, fmt.Errorf("media path outside allowed roots: %s", item)
-			}
-		}
-		out = append(out, p)
+	if deps.Stderr == nil {
+		deps.Stderr = os.Stderr
 	}
-	return out, nil
-}
+	if len(args) == 0 {
+		return fmt.Errorf("usage: or3-intern skills <list|info|check|search|install|update|remove> ...")
+	}
 
-func pathWithinRoot(absPath, root string) (bool, error) {
-	root, err := filepath.Abs(root)
-	if err != nil {
-		return false, err
-	}
-	root, err = canonicalizeRoot(root)
-	if err != nil {
-		return false, err
-	}
-	rel, err := filepath.Rel(root, absPath)
-	if err != nil {
-		return false, err
-	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)), nil
-}
-
-func stringSlice(raw any) ([]string, error) {
-	switch v := raw.(type) {
-	case nil:
-		return nil, nil
-	case []string:
-		out := make([]string, 0, len(v))
-		for _, item := range v {
-			if strings.TrimSpace(item) == "" {
+	switch args[0] {
+	case "list":
+		fs := flag.NewFlagSet("skills list", flag.ContinueOnError)
+		fs.SetOutput(deps.Stderr)
+		eligibleOnly := fs.Bool("eligible", false, "show only eligible skills")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		inv := deps.LoadInventory(deps.LoadToolNames(ctx, cfg))
+		if len(inv.Skills) == 0 {
+			_, _ = fmt.Fprintln(deps.Stdout, "(no skills found)")
+			return nil
+		}
+		for _, skill := range inv.Skills {
+			if *eligibleOnly && !skill.Eligible {
 				continue
 			}
-			out = append(out, item)
+			status := "eligible"
+			switch {
+			case skill.ParseError != "":
+				status = "parse-error"
+			case skill.Disabled:
+				status = "disabled"
+			case !skill.Eligible:
+				status = "ineligible"
+			case skill.Hidden:
+				status = "hidden"
+			}
+			permissionState := strings.TrimSpace(skill.PermissionState)
+			if permissionState == "" {
+				permissionState = "approved"
+			}
+			_, _ = fmt.Fprintf(deps.Stdout, "%s\t%s\t%s\t%s\t%s\n", skill.Name, status, permissionState, skill.Source, skill.Dir)
 		}
-		return out, nil
-	case []any:
-		out := make([]string, 0, len(v))
-		for _, item := range v {
-			s := strings.TrimSpace(fmt.Sprint(item))
-			if s == "" {
+		return nil
+	case "info":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: or3-intern skills info <name>")
+		}
+		inv := deps.LoadInventory(deps.LoadToolNames(ctx, cfg))
+		skill, ok := inv.Get(args[1])
+		if !ok {
+			return fmt.Errorf("skill not found: %s", args[1])
+		}
+		_, _ = fmt.Fprintf(deps.Stdout, "Name: %s\n", skill.Name)
+		_, _ = fmt.Fprintf(deps.Stdout, "Description: %s\n", skill.Description)
+		_, _ = fmt.Fprintf(deps.Stdout, "Source: %s\n", skill.Source)
+		_, _ = fmt.Fprintf(deps.Stdout, "Location: %s\n", skill.Dir)
+		if skill.Homepage != "" {
+			_, _ = fmt.Fprintf(deps.Stdout, "Homepage: %s\n", skill.Homepage)
+		}
+		_, _ = fmt.Fprintf(deps.Stdout, "Eligible: %t\n", skill.Eligible)
+		_, _ = fmt.Fprintf(deps.Stdout, "User Invocable: %t\n", skill.UserInvocable)
+		if skill.Publisher != "" {
+			_, _ = fmt.Fprintf(deps.Stdout, "Publisher: %s\n", skill.Publisher)
+		}
+		if skill.Registry != "" {
+			_, _ = fmt.Fprintf(deps.Stdout, "Registry: %s\n", skill.Registry)
+		}
+		if skill.InstalledVersion != "" {
+			_, _ = fmt.Fprintf(deps.Stdout, "Installed Version: %s\n", skill.InstalledVersion)
+		}
+		if skill.Modified {
+			_, _ = fmt.Fprintln(deps.Stdout, "Local Modifications: true")
+		}
+		if strings.TrimSpace(skill.ScanStatus) != "" {
+			_, _ = fmt.Fprintf(deps.Stdout, "Scan Status: %s\n", skill.ScanStatus)
+			printReasons(deps.Stdout, "Scan Findings", skill.ScanFindings)
+		}
+		if strings.TrimSpace(skill.PermissionState) != "" {
+			_, _ = fmt.Fprintf(deps.Stdout, "Permission State: %s\n", skill.PermissionState)
+			_, _ = fmt.Fprintf(deps.Stdout, "Declared Permissions: %s\n", skill.Permissions.Summary())
+			printReasons(deps.Stdout, "Permission Notes", skill.PermissionNotes)
+		}
+		if skill.Hidden {
+			_, _ = fmt.Fprintln(deps.Stdout, "Model Visibility: hidden")
+		}
+		if skill.CommandDispatch != "" {
+			_, _ = fmt.Fprintf(deps.Stdout, "Command Dispatch: %s\n", skill.CommandDispatch)
+			_, _ = fmt.Fprintf(deps.Stdout, "Command Tool: %s\n", skill.CommandTool)
+			_, _ = fmt.Fprintf(deps.Stdout, "Command Arg Mode: %s\n", skill.CommandArgMode)
+		}
+		printReasons(deps.Stdout, "Missing", skill.Missing)
+		printReasons(deps.Stdout, "Unsupported", skill.Unsupported)
+		if skill.ParseError != "" {
+			_, _ = fmt.Fprintf(deps.Stdout, "Parse Error: %s\n", skill.ParseError)
+		}
+		return nil
+	case "check":
+		inv := deps.LoadInventory(deps.LoadToolNames(ctx, cfg))
+		if len(inv.Skills) == 0 {
+			_, _ = fmt.Fprintln(deps.Stdout, "(no skills found)")
+			return nil
+		}
+		for _, skill := range inv.Skills {
+			if skill.PermissionState == "quarantined" {
+				_, _ = fmt.Fprintf(deps.Stdout, "[quarantined] %s: %s\n", skill.Name, strings.Join(skill.PermissionNotes, "; "))
 				continue
 			}
-			out = append(out, s)
+			if skill.PermissionState == "blocked" {
+				reasons := append([]string{}, skill.PermissionNotes...)
+				reasons = append(reasons, skill.Missing...)
+				reasons = append(reasons, skill.Unsupported...)
+				if skill.ParseError != "" {
+					reasons = append(reasons, skill.ParseError)
+				}
+				_, _ = fmt.Fprintf(deps.Stdout, "[blocked] %s: %s\n", skill.Name, strings.Join(reasons, "; "))
+				continue
+			}
+			if skill.Eligible {
+				_, _ = fmt.Fprintf(deps.Stdout, "[ok] %s\n", skill.Name)
+				continue
+			}
+			reasons := append([]string{}, skill.Missing...)
+			reasons = append(reasons, skill.Unsupported...)
+			if skill.ParseError != "" {
+				reasons = append(reasons, skill.ParseError)
+			}
+			_, _ = fmt.Fprintf(deps.Stdout, "[blocked] %s: %s\n", skill.Name, strings.Join(reasons, "; "))
 		}
-		return out, nil
+		return nil
+	case "search":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: or3-intern skills search <query>")
+		}
+		results, err := deps.Client.Search(ctx, strings.Join(args[1:], " "), 10)
+		if err != nil {
+			return err
+		}
+		if len(results) == 0 {
+			_, _ = fmt.Fprintln(deps.Stdout, "(no results)")
+			return nil
+		}
+		for _, result := range results {
+			version := result.Version
+			if version == "" {
+				version = "latest"
+			}
+			_, _ = fmt.Fprintf(deps.Stdout, "%s\t%s\t%s\n", result.Slug, version, strings.TrimSpace(result.DisplayName))
+		}
+		return nil
+	case "install":
+		fs := flag.NewFlagSet("skills install", flag.ContinueOnError)
+		fs.SetOutput(deps.Stderr)
+		version := fs.String("version", "", "skill version")
+		force := fs.Bool("force", false, "overwrite local modifications")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if fs.NArg() < 1 {
+			return fmt.Errorf("usage: or3-intern skills install <slug> [--version v]")
+		}
+		result, err := deps.Client.Install(ctx, fs.Arg(0), *version, resolveInstallRoot(cfg), clawhub.InstallOptions{Force: *force})
+		if err != nil {
+			return err
+		}
+		if deps.Audit != nil {
+			if err := deps.Audit(ctx, "skill.install", map[string]any{"slug": result.Slug, "version": result.Version, "path": result.Path}); err != nil {
+				return err
+			}
+		}
+		_, _ = fmt.Fprintf(deps.Stdout, "installed\t%s\t%s\t%s\n", result.Slug, result.Version, result.Path)
+		return nil
+	case "update":
+		fs := flag.NewFlagSet("skills update", flag.ContinueOnError)
+		fs.SetOutput(deps.Stderr)
+		all := fs.Bool("all", false, "update all installed skills")
+		version := fs.String("version", "", "target version")
+		force := fs.Bool("force", false, "overwrite local modifications")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		root := resolveInstallRoot(cfg)
+		installed, err := clawhub.ListInstalled(root)
+		if err != nil {
+			return err
+		}
+		targets := installed
+		if !*all {
+			if fs.NArg() < 1 {
+				return fmt.Errorf("usage: or3-intern skills update <name>|--all")
+			}
+			match, matchErr := findInstalledSkill(installed, fs.Arg(0))
+			if matchErr != nil {
+				return matchErr
+			}
+			targets = []clawhub.InstalledSkill{match}
+		}
+		if len(targets) == 0 {
+			_, _ = fmt.Fprintln(deps.Stdout, "(no installed skills)")
+			return nil
+		}
+		for _, item := range targets {
+			info, err := deps.Client.Inspect(ctx, item.Origin.Slug, *version)
+			if err != nil {
+				return err
+			}
+			targetVersion := strings.TrimSpace(*version)
+			if targetVersion == "" {
+				targetVersion = info.LatestVersion
+			}
+			if targetVersion == "" {
+				return fmt.Errorf("could not resolve latest version for %s", item.Origin.Slug)
+			}
+			if item.Origin.InstalledVersion == targetVersion {
+				_, _ = fmt.Fprintf(deps.Stdout, "up-to-date\t%s\t%s\n", item.Origin.Slug, targetVersion)
+				continue
+			}
+			if _, err := deps.Client.Install(ctx, item.Origin.Slug, targetVersion, root, clawhub.InstallOptions{Force: *force}); err != nil {
+				return err
+			}
+			if deps.Audit != nil {
+				if err := deps.Audit(ctx, "skill.update", map[string]any{"slug": item.Origin.Slug, "version": targetVersion}); err != nil {
+					return err
+				}
+			}
+			_, _ = fmt.Fprintf(deps.Stdout, "updated\t%s\t%s\n", item.Origin.Slug, targetVersion)
+		}
+		return nil
+	case "remove":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: or3-intern skills remove <name>")
+		}
+		root := resolveInstallRoot(cfg)
+		installed, err := clawhub.ListInstalled(root)
+		if err != nil {
+			return err
+		}
+		match, err := findInstalledSkill(installed, args[1])
+		if err != nil {
+			return err
+		}
+		if err := clawhub.RemoveSkill(root, match.Name); err != nil {
+			return err
+		}
+		if deps.Audit != nil {
+			if err := deps.Audit(ctx, "skill.remove", map[string]any{"name": match.Name}); err != nil {
+				return err
+			}
+		}
+		_, _ = fmt.Fprintf(deps.Stdout, "removed\t%s\n", match.Name)
+		return nil
 	default:
-		return nil, fmt.Errorf("media must be an array of strings")
+		return fmt.Errorf("unknown skills subcommand: %s", args[0])
 	}
+}
+
+func buildSkillsInventory(cfg config.Config, bundledDir string, toolNames map[string]struct{}) skills.Inventory {
+	approved := make(map[string]struct{}, len(cfg.Skills.Policy.Approved)*2)
+	for _, name := range cfg.Skills.Policy.Approved {
+		trimmed := strings.TrimSpace(name)
+		if trimmed == "" {
+			continue
+		}
+		approved[trimmed] = struct{}{}
+		approved[strings.ToLower(trimmed)] = struct{}{}
+	}
+	trustedOwners := makePolicySet(cfg.Skills.Policy.TrustedOwners)
+	blockedOwners := makePolicySet(cfg.Skills.Policy.BlockedOwners)
+	trustedRegistries := makePolicySet(cfg.Skills.Policy.TrustedRegistries)
+	return skills.ScanWithOptions(skills.LoadOptions{
+		Roots:          buildSkillRoots(cfg, bundledDir),
+		Entries:        skillEntries(cfg),
+		GlobalConfig:   configMap(cfg),
+		Env:            envMap(),
+		AvailableTools: toolNames,
+		ApprovalPolicy: skills.ApprovalPolicy{QuarantineByDefault: cfg.Skills.Policy.QuarantineByDefault, ApprovedSkills: approved, TrustedOwners: trustedOwners, BlockedOwners: blockedOwners, TrustedRegistries: trustedRegistries},
+	})
+}
+
+func makePolicySet(values []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		normalized := strings.TrimRight(strings.ToLower(strings.TrimSpace(value)), "/")
+		if normalized == "" {
+			continue
+		}
+		out[normalized] = struct{}{}
+	}
+	return out
+}
+
+func loadAvailableToolNames(ctx context.Context, cfg config.Config) map[string]struct{} {
+	return loadAvailableToolNamesWithManager(ctx, cfg, nil)
+}
+
+func loadAvailableToolNamesWithManager(ctx context.Context, cfg config.Config, manager *mcp.Manager) map[string]struct{} {
+	toolNames := availableToolNames(cfg.Cron.Enabled, cfg.Subagents.Enabled)
+	if len(cfg.Tools.MCPServers) == 0 {
+		return toolNames
+	}
+	if manager != nil {
+		for _, name := range manager.ToolNames() {
+			toolNames[name] = struct{}{}
+		}
+		return toolNames
+	}
+	manager = mcp.NewManager(cfg.Tools.MCPServers)
+	manager.SetLogger(log.Printf)
+	if err := manager.Connect(ctx); err != nil {
+		log.Printf("mcp setup failed: %v", err)
+		return toolNames
+	}
+	defer func() {
+		if err := manager.Close(); err != nil {
+			log.Printf("mcp close failed: %v", err)
+		}
+	}()
+	for _, name := range manager.ToolNames() {
+		toolNames[name] = struct{}{}
+	}
+	return toolNames
+}
+
+func buildSkillRoots(cfg config.Config, bundledDir string) []skills.Root {
+	var roots []skills.Root
+	for _, extra := range cfg.Skills.Load.ExtraDirs {
+		if strings.TrimSpace(extra) == "" {
+			continue
+		}
+		roots = append(roots, skills.Root{Path: extra, Source: skills.SourceExtra})
+	}
+	if strings.TrimSpace(bundledDir) != "" {
+		roots = append(roots, skills.Root{Path: bundledDir, Source: skills.SourceBundled})
+	}
+	if strings.TrimSpace(cfg.Skills.ManagedDir) != "" {
+		roots = append(roots, skills.Root{Path: cfg.Skills.ManagedDir, Source: skills.SourceManaged})
+	}
+	if strings.TrimSpace(cfg.WorkspaceDir) != "" {
+		roots = append(roots,
+			skills.Root{Path: filepath.Join(cfg.WorkspaceDir, "workspace_skills"), Source: skills.SourceExtra, Priority: 35},
+			skills.Root{Path: filepath.Join(cfg.WorkspaceDir, "skills"), Source: skills.SourceWorkspace},
+		)
+	}
+	return roots
+}
+
+func skillEntries(cfg config.Config) map[string]skills.EntryConfig {
+	out := make(map[string]skills.EntryConfig, len(cfg.Skills.Entries))
+	for key, entry := range cfg.Skills.Entries {
+		out[key] = skills.EntryConfig{
+			Enabled: entry.Enabled,
+			APIKey:  entry.APIKey,
+			Env:     entry.Env,
+			Config:  entry.Config,
+		}
+	}
+	return out
+}
+
+func configMap(cfg config.Config) map[string]any {
+	buf, _ := json.Marshal(cfg)
+	out := map[string]any{}
+	_ = json.Unmarshal(buf, &out)
+	return out
+}
+
+func envMap() map[string]string {
+	out := map[string]string{}
+	for _, raw := range os.Environ() {
+		key, value, ok := strings.Cut(raw, "=")
+		if ok {
+			out[key] = value
+		}
+	}
+	return out
+}
+
+func resolveInstallRoot(cfg config.Config) string {
+	installDir := strings.TrimSpace(cfg.Skills.ClawHub.InstallDir)
+	if installDir == "" {
+		installDir = "skills"
+	}
+	if filepath.IsAbs(installDir) {
+		return installDir
+	}
+	if strings.TrimSpace(cfg.Skills.ManagedDir) != "" {
+		return cfg.Skills.ManagedDir
+	}
+	return filepath.Join(filepath.Dir(config.DefaultPath()), installDir)
+}
+
+func availableToolNames(includeCron, includeSubagents bool) map[string]struct{} {
+	names := []string{
+		"exec",
+		"read_file",
+		"write_file",
+		"edit_file",
+		"list_dir",
+		"web_fetch",
+		"web_search",
+		"memory_set_pinned",
+		"memory_add_note",
+		"memory_search",
+		"memory_recent",
+		"memory_get_pinned",
+		"send_message",
+		"read_skill",
+		"run_skill_script",
+	}
+	if includeCron {
+		names = append(names, "cron")
+	}
+	if includeSubagents {
+		names = append(names, "spawn_subagent")
+	}
+	sort.Strings(names)
+	out := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		out[name] = struct{}{}
+	}
+	return out
+}
+
+func newClawHubClient(cfg config.Config) *clawhub.Client {
+	return clawhub.New(cfg.Skills.ClawHub.SiteURL, cfg.Skills.ClawHub.RegistryURL)
+}
+
+func findInstalledSkill(installed []clawhub.InstalledSkill, raw string) (clawhub.InstalledSkill, error) {
+	target := strings.TrimSpace(raw)
+	for _, item := range installed {
+		if item.Name == target || item.Origin.Slug == target {
+			return item, nil
+		}
+	}
+	return clawhub.InstalledSkill{}, fmt.Errorf("installed skill not found: %s", raw)
+}
+
+func printReasons(w io.Writer, label string, values []string) {
+	if len(values) == 0 {
+		return
+	}
+	_, _ = fmt.Fprintf(w, "%s: %s\n", label, strings.Join(values, "; "))
 }
 ````
 
@@ -10846,331 +11773,636 @@ type fileInfo struct {
 }
 ````
 
-## File: internal/tools/context.go
+## File: internal/memory/vector.go
 ````go
-package tools
-
-import (
-	"context"
-	"strings"
-
-	"or3-intern/internal/scope"
-)
-
-type sessionContextKey struct{}
-type deliveryChannelContextKey struct{}
-type deliveryToContextKey struct{}
-type envContextKey struct{}
-type toolGuardContextKey struct{}
-type activeProfileContextKey struct{}
-
-type ToolGuard func(ctx context.Context, tool Tool, capability CapabilityLevel, params map[string]any) error
-
-type ActiveProfile struct {
-	Name           string
-	MaxCapability  CapabilityLevel
-	AllowedTools   map[string]struct{}
-	AllowedHosts   []string
-	WritablePaths  []string
-	AllowSubagents bool
-}
-
-func ContextWithSession(ctx context.Context, sessionKey string) context.Context {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if sessionKey == "" {
-		sessionKey = scope.GlobalMemoryScope
-	}
-	return context.WithValue(ctx, sessionContextKey{}, sessionKey)
-}
-
-func ContextWithDelivery(ctx context.Context, channel, to string) context.Context {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	ctx = context.WithValue(ctx, deliveryChannelContextKey{}, channel)
-	return context.WithValue(ctx, deliveryToContextKey{}, to)
-}
-
-func ContextWithEnv(ctx context.Context, env map[string]string) context.Context {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if len(env) == 0 {
-		return ctx
-	}
-	copyEnv := make(map[string]string, len(env))
-	for k, v := range env {
-		copyEnv[k] = v
-	}
-	return context.WithValue(ctx, envContextKey{}, copyEnv)
-}
-
-func ContextWithToolGuard(ctx context.Context, guard ToolGuard) context.Context {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if guard == nil {
-		return ctx
-	}
-	return context.WithValue(ctx, toolGuardContextKey{}, guard)
-}
-
-func ContextWithActiveProfile(ctx context.Context, profile ActiveProfile) context.Context {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if strings.TrimSpace(profile.Name) == "" && len(profile.AllowedTools) == 0 && len(profile.AllowedHosts) == 0 && len(profile.WritablePaths) == 0 && !profile.AllowSubagents && profile.MaxCapability == "" {
-		return ctx
-	}
-	cloned := ActiveProfile{
-		Name:           strings.TrimSpace(profile.Name),
-		MaxCapability:  profile.MaxCapability,
-		AllowedHosts:   append([]string{}, profile.AllowedHosts...),
-		WritablePaths:  append([]string{}, profile.WritablePaths...),
-		AllowSubagents: profile.AllowSubagents,
-	}
-	if len(profile.AllowedTools) > 0 {
-		cloned.AllowedTools = make(map[string]struct{}, len(profile.AllowedTools))
-		for key := range profile.AllowedTools {
-			cloned.AllowedTools[key] = struct{}{}
-		}
-	}
-	return context.WithValue(ctx, activeProfileContextKey{}, cloned)
-}
-
-func SessionFromContext(ctx context.Context) string {
-	if ctx == nil {
-		return scope.GlobalMemoryScope
-	}
-	if sessionKey, ok := ctx.Value(sessionContextKey{}).(string); ok && sessionKey != "" {
-		return sessionKey
-	}
-	return scope.GlobalMemoryScope
-}
-
-func DeliveryFromContext(ctx context.Context) (channel string, to string) {
-	if ctx == nil {
-		return "", ""
-	}
-	if v, ok := ctx.Value(deliveryChannelContextKey{}).(string); ok {
-		channel = v
-	}
-	if v, ok := ctx.Value(deliveryToContextKey{}).(string); ok {
-		to = v
-	}
-	return channel, to
-}
-
-func EnvFromContext(ctx context.Context) map[string]string {
-	if ctx == nil {
-		return nil
-	}
-	if env, ok := ctx.Value(envContextKey{}).(map[string]string); ok && len(env) > 0 {
-		copyEnv := make(map[string]string, len(env))
-		for k, v := range env {
-			copyEnv[k] = v
-		}
-		return copyEnv
-	}
-	return nil
-}
-
-func ToolGuardFromContext(ctx context.Context) ToolGuard {
-	if ctx == nil {
-		return nil
-	}
-	guard, _ := ctx.Value(toolGuardContextKey{}).(ToolGuard)
-	return guard
-}
-
-func ActiveProfileFromContext(ctx context.Context) ActiveProfile {
-	if ctx == nil {
-		return ActiveProfile{}
-	}
-	profile, _ := ctx.Value(activeProfileContextKey{}).(ActiveProfile)
-	return profile
-}
-````
-
-## File: internal/tools/exec.go
-````go
-package tools
+package memory
 
 import (
 	"bytes"
+	"container/heap"
 	"context"
+	"encoding/binary"
 	"errors"
-	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"strings"
-	"time"
+	"math"
+
+	"or3-intern/internal/db"
 )
 
-type ExecTool struct {
-	Base
-	Timeout           time.Duration
-	RestrictDir       string // if non-empty, cwd must be inside
-	PathAppend        string
-	ChildEnvAllowlist []string
-	AllowedPrograms   []string
-	Sandbox           BubblewrapConfig
-	DisableShell      bool
-	OutputMaxBytes    int
-	BlockedPatterns   []string
+func PackFloat32(vec []float32) []byte {
+	var b bytes.Buffer
+	_ = binary.Write(&b, binary.LittleEndian, vec)
+	return b.Bytes()
 }
 
-const defaultExecOutputMaxBytes = 10000
-
-func (t *ExecTool) Name() string { return "exec" }
-func (t *ExecTool) Description() string {
-	return "Run a program with safety limits. Output is truncated. Legacy shell commands are optional."
-}
-func (t *ExecTool) Parameters() map[string]any {
-	return map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"program":        map[string]any{"type": "string", "description": "Program to run"},
-			"args":           map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Program arguments"},
-			"command":        map[string]any{"type": "string", "description": "Legacy shell command to run (privileged)"},
-			"cwd":            map[string]any{"type": "string", "description": "Working directory (optional)"},
-			"timeoutSeconds": map[string]any{"type": "integer", "description": "Override timeout (optional)"},
-		},
-		"required": []string{},
-	}
-}
-func (t *ExecTool) Schema() map[string]any {
-	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
-}
-
-func (t *ExecTool) CapabilityForParams(params map[string]any) CapabilityLevel {
-	if strings.TrimSpace(fmt.Sprint(params["command"])) != "" && fmt.Sprint(params["command"]) != "<nil>" {
-		return CapabilityPrivileged
-	}
-	return CapabilityGuarded
-}
-
-var defaultBlockedPatterns = []string{
-	"rm -rf", "mkfs", "dd ", "shutdown", "reboot", "poweroff", ":(){", ">|", "chown -R /", "chmod -R 777 /",
-}
-
-func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, error) {
-	program := strings.TrimSpace(fmt.Sprint(params["program"]))
-	if program == "<nil>" {
-		program = ""
-	}
-	legacyCommand, _ := params["command"].(string)
-	legacyCommand = strings.TrimSpace(legacyCommand)
-	if program == "" && legacyCommand == "" {
-		return "", errors.New("missing program or command")
-	}
-	if legacyCommand != "" {
-		if t.DisableShell {
-			return "", errors.New("shell command execution disabled")
-		}
-		lc := strings.ToLower(legacyCommand)
-		patterns := t.BlockedPatterns
-		if len(patterns) == 0 {
-			patterns = defaultBlockedPatterns
-		}
-		for _, b := range patterns {
-			if strings.Contains(lc, b) {
-				return "", fmt.Errorf("blocked command pattern: %q", b)
-			}
-		}
-	}
-	cwd, _ := params["cwd"].(string)
-	if cwd == "" {
-		cwd, _ = os.Getwd()
-	}
-	if t.RestrictDir != "" {
-		abs, err := filepath.Abs(cwd)
-		if err != nil {
-			return "", err
-		}
-		abs, err = canonicalizePath(abs)
-		if err != nil {
-			return "", err
-		}
-		root, err := canonicalizeRoot(t.RestrictDir)
-		if err != nil {
-			return "", err
-		}
-		rel, err := filepath.Rel(root, abs)
-		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return "", fmt.Errorf("cwd outside allowed directory")
-		}
-	}
-	if program != "" && len(t.AllowedPrograms) > 0 && !allowedProgram(program, t.AllowedPrograms) {
-		return "", fmt.Errorf("program not allowed: %s", program)
-	}
-
-	to := t.Timeout
-	if v, ok := params["timeoutSeconds"].(float64); ok && v > 0 {
-		to = time.Duration(int(v)) * time.Second
-	}
-	cctx, cancel := context.WithTimeout(ctx, to)
-	defer cancel()
-
-	var c *exec.Cmd
-	var err error
-	if legacyCommand != "" {
-		c, err = commandWithSandbox(cctx, t.Sandbox, cwd, []string{"bash", "-lc", legacyCommand})
-		if err != nil {
-			return "", err
-		}
-		if c == nil {
-			c = exec.CommandContext(cctx, "bash", "-lc", legacyCommand)
-		}
-	} else {
-		c = exec.CommandContext(cctx, program, stringArgs(params["args"])...)
-	}
-	c.Dir = cwd
-	c.Env = BuildChildEnv(os.Environ(), t.ChildEnvAllowlist, EnvFromContext(ctx), t.PathAppend)
-	var stdout, stderr bytes.Buffer
-	c.Stdout = &stdout
-	c.Stderr = &stderr
-	err = c.Run()
-	out := stdout.String()
-	er := stderr.String()
-	max := t.OutputMaxBytes
-	if max <= 0 {
-		max = defaultExecOutputMaxBytes
-	}
-	if len(out) > max {
-		out = out[:max] + "\n...[truncated]\n"
-	}
-	if len(er) > max {
-		er = er[:max] + "\n...[truncated]\n"
-	}
-	if err != nil {
-		return fmt.Sprintf("exit error: %v\n\nstdout:\n%s\n\nstderr:\n%s", err, out, er), nil
-	}
-	if strings.TrimSpace(er) != "" {
-		return fmt.Sprintf("stdout:\n%s\n\nstderr:\n%s", out, er), nil
+func UnpackFloat32(blob []byte) ([]float32, error) {
+	if len(blob)%4 != 0 { return nil, errors.New("invalid float32 blob") }
+	out := make([]float32, len(blob)/4)
+	if err := binary.Read(bytes.NewReader(blob), binary.LittleEndian, &out); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
 
-func allowedProgram(program string, allowed []string) bool {
-	program = strings.TrimSpace(program)
-	if program == "" {
-		return false
+func Cosine(a, b []float32) float64 {
+	var dot, na, nb float64
+	n := len(a)
+	if len(b) < n { n = len(b) }
+	for i := 0; i < n; i++ {
+		av := float64(a[i])
+		bv := float64(b[i])
+		dot += av * bv
+		na += av * av
+		nb += bv * bv
 	}
-	base := filepath.Base(program)
-	for _, candidate := range allowed {
-		candidate = strings.TrimSpace(candidate)
-		if candidate == "" {
+	if na == 0 || nb == 0 { return 0 }
+	return dot / (math.Sqrt(na) * math.Sqrt(nb))
+}
+
+type VecCandidate struct {
+	ID        int64
+	Text      string
+	Score     float64
+	CreatedAt int64
+}
+
+type candMinHeap []VecCandidate
+
+func (h candMinHeap) Len() int { return len(h) }
+func (h candMinHeap) Less(i, j int) bool { return h[i].Score < h[j].Score }
+func (h candMinHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+func (h *candMinHeap) Push(x any) { *h = append(*h, x.(VecCandidate)) }
+func (h *candMinHeap) Pop() any {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[:n-1]
+	return x
+}
+
+func VectorSearch(ctx context.Context, d *db.DB, sessionKey string, queryVec []float32, k int, scanLimit int) ([]VecCandidate, error) {
+	_ = scanLimit
+	queryBlob := PackFloat32(queryVec)
+	rows, err := d.SearchMemoryVectors(ctx, sessionKey, queryBlob, k)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]VecCandidate, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, VecCandidate{
+			ID:        row.ID,
+			Text:      row.Text,
+			Score:     1.0 / (1.0 + row.Distance),
+			CreatedAt: row.CreatedAt,
+		})
+	}
+	return out, nil
+}
+
+func addVectorCandidates(rows interface {
+	Next() bool
+	Scan(dest ...any) error
+	Err() error
+}, queryVec []float32, k int, h *candMinHeap) error {
+	for rows.Next() {
+		var id int64
+		var text string
+		var emb []byte
+		var src any
+		var tags string
+		var created int64
+		if err := rows.Scan(&id, &text, &emb, &src, &tags, &created); err != nil {
+			return err
+		}
+		v, err := UnpackFloat32(emb)
+		if err != nil {
 			continue
 		}
-		if candidate == program || candidate == base {
-			return true
+		score := Cosine(queryVec, v)
+		if h.Len() < k {
+			heap.Push(h, VecCandidate{ID: id, Text: text, Score: score})
+		} else if (*h)[0].Score < score {
+			(*h)[0] = VecCandidate{ID: id, Text: text, Score: score}
+			heap.Fix(h, 0)
 		}
 	}
-	return false
+	return rows.Err()
+}
+````
+
+## File: internal/tools/memory.go
+````go
+package tools
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"sort"
+	"strings"
+
+	"or3-intern/internal/db"
+	"or3-intern/internal/memory"
+	"or3-intern/internal/providers"
+	"or3-intern/internal/scope"
+)
+
+type MemorySetPinned struct {
+	Base
+	DB *db.DB
+}
+
+func (t *MemorySetPinned) Name() string { return "memory_set_pinned" }
+func (t *MemorySetPinned) Description() string {
+	return "Upsert a pinned memory entry (always included in prompts)."
+}
+func (t *MemorySetPinned) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{
+		"key":     map[string]any{"type": "string"},
+		"content": map[string]any{"type": "string"},
+		"scope":   map[string]any{"type": "string", "description": "Optional scope override: 'global' to share across sessions"},
+	}, "required": []string{"key", "content"}}
+}
+func (t *MemorySetPinned) Schema() map[string]any {
+	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
+}
+func (t *MemorySetPinned) Execute(ctx context.Context, params map[string]any) (string, error) {
+	if t.DB == nil {
+		return "", fmt.Errorf("db not set")
+	}
+	key := stringParam(params, "key")
+	content := stringParam(params, "content")
+	if key == "" || content == "" {
+		return "", fmt.Errorf("missing key/content")
+	}
+	if err := t.DB.UpsertPinned(ctx, memoryScopeFromParams(ctx, params), key, content); err != nil {
+		return "", err
+	}
+	return "ok", nil
+}
+
+type MemoryAddNote struct {
+	Base
+	DB         *db.DB
+	Provider   *providers.Client
+	EmbedModel string
+}
+
+func (t *MemoryAddNote) Name() string { return "memory_add_note" }
+func (t *MemoryAddNote) Description() string {
+	return "Add a semantic memory note to the indexed memory store."
+}
+func (t *MemoryAddNote) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{
+		"text":              map[string]any{"type": "string"},
+		"tags":              map[string]any{"type": "string", "description": "comma-separated tags (optional)"},
+		"source_message_id": map[string]any{"type": "integer", "description": "source message id (optional)"},
+		"scope":             map[string]any{"type": "string", "description": "Optional scope override: 'global' to share across sessions"},
+	}, "required": []string{"text"}}
+}
+func (t *MemoryAddNote) Schema() map[string]any {
+	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
+}
+func (t *MemoryAddNote) Execute(ctx context.Context, params map[string]any) (string, error) {
+	if t.DB == nil || t.Provider == nil {
+		return "", fmt.Errorf("missing deps")
+	}
+	text := stringParam(params, "text")
+	if text == "" {
+		return "", fmt.Errorf("empty text")
+	}
+	tags := stringParam(params, "tags")
+	var src sql.NullInt64
+	if v, ok := params["source_message_id"].(float64); ok && int64(v) > 0 {
+		src = sql.NullInt64{Int64: int64(v), Valid: true}
+	}
+	vec, err := t.Provider.Embed(ctx, t.EmbedModel, text)
+	if err != nil {
+		return "", err
+	}
+	blob := memory.PackFloat32(vec)
+	id, err := t.DB.InsertMemoryNote(ctx, memoryScopeFromParams(ctx, params), text, blob, src, tags)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("ok: %d", id), nil
+}
+
+type MemorySearch struct {
+	Base
+	DB              *db.DB
+	Provider        *providers.Client
+	EmbedModel      string
+	VectorK         int
+	FTSK            int
+	TopK            int
+	VectorScanLimit int
+}
+
+func (t *MemorySearch) Name() string { return "memory_search" }
+func (t *MemorySearch) Description() string {
+	return "Search long-term memory (hybrid semantic + keyword) and return top results."
+}
+func (t *MemorySearch) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{
+		"query": map[string]any{"type": "string"},
+		"topK":  map[string]any{"type": "integer"},
+		"scope": map[string]any{"type": "string", "description": "Optional scope override: 'global' to search only shared memory"},
+	}, "required": []string{"query"}}
+}
+func (t *MemorySearch) Schema() map[string]any {
+	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
+}
+func (t *MemorySearch) Execute(ctx context.Context, params map[string]any) (string, error) {
+	if t.DB == nil || t.Provider == nil {
+		return "", fmt.Errorf("missing deps")
+	}
+	q := stringParam(params, "query")
+	if q == "" {
+		return "", fmt.Errorf("empty query")
+	}
+	topK := t.TopK
+	if v, ok := params["topK"].(float64); ok && int(v) > 0 {
+		topK = int(v)
+	}
+	vec, err := t.Provider.Embed(ctx, t.EmbedModel, q)
+	if err != nil {
+		return "", err
+	}
+	r := memory.NewRetriever(t.DB)
+	r.VectorScanLimit = t.VectorScanLimit
+	got, err := r.Retrieve(ctx, memoryScopeFromParams(ctx, params), q, vec, t.VectorK, t.FTSK, topK)
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	for i, m := range got {
+		b.WriteString(fmt.Sprintf("%d. [%s] %.4f %s\n", i+1, m.Source, m.Score, m.Text))
+	}
+	return b.String(), nil
+}
+
+type MemoryRecent struct {
+	Base
+	DB           *db.DB
+	DefaultLimit int
+	MaxLimit     int
+	MaxChars     int
+}
+
+func (t *MemoryRecent) Name() string { return "memory_recent" }
+func (t *MemoryRecent) Description() string {
+	return "Fetch recent conversation messages from the current linked session scope."
+}
+func (t *MemoryRecent) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{
+		"limit": map[string]any{"type": "integer"},
+	}}
+}
+func (t *MemoryRecent) Schema() map[string]any {
+	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
+}
+func (t *MemoryRecent) Execute(ctx context.Context, params map[string]any) (string, error) {
+	if t.DB == nil {
+		return "", fmt.Errorf("db not set")
+	}
+	limit := boundedPositiveInt(params["limit"], t.DefaultLimit, t.MaxLimit)
+	msgs, err := t.DB.GetLastMessagesScoped(ctx, SessionFromContext(ctx), limit)
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	for i, msg := range msgs {
+		b.WriteString(fmt.Sprintf("%d. [%s/%s] %s\n", i+1, msg.SessionKey, msg.Role, compactMemoryText(msg.Content, t.MaxChars)))
+	}
+	return b.String(), nil
+}
+
+type MemoryGetPinned struct {
+	Base
+	DB       *db.DB
+	MaxChars int
+}
+
+func (t *MemoryGetPinned) Name() string { return "memory_get_pinned" }
+func (t *MemoryGetPinned) Description() string {
+	return "Read pinned memory entries for the current session, including shared global entries."
+}
+func (t *MemoryGetPinned) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{
+		"key":   map[string]any{"type": "string", "description": "Optional pinned memory key to fetch"},
+		"scope": map[string]any{"type": "string", "description": "Optional scope override: 'global' to read only shared memory"},
+	}}
+}
+func (t *MemoryGetPinned) Schema() map[string]any {
+	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
+}
+func (t *MemoryGetPinned) Execute(ctx context.Context, params map[string]any) (string, error) {
+	if t.DB == nil {
+		return "", fmt.Errorf("db not set")
+	}
+	pinned, err := t.DB.GetPinned(ctx, memoryScopeFromParams(ctx, params))
+	if err != nil {
+		return "", err
+	}
+	key := stringParam(params, "key")
+	if key != "" {
+		value, ok := pinned[key]
+		if !ok {
+			return "", nil
+		}
+		return fmt.Sprintf("%s: %s", key, compactMemoryText(value, t.MaxChars)), nil
+	}
+	keys := make([]string, 0, len(pinned))
+	for key := range pinned {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, key := range keys {
+		b.WriteString(fmt.Sprintf("%s: %s\n", key, compactMemoryText(pinned[key], t.MaxChars)))
+	}
+	return b.String(), nil
+}
+
+func memoryScopeFromParams(ctx context.Context, params map[string]any) string {
+	if requestedScope := stringParam(params, "scope"); scope.IsGlobalScopeRequest(requestedScope) {
+		return scope.GlobalMemoryScope
+	}
+	return SessionFromContext(ctx)
+}
+
+func stringParam(params map[string]any, key string) string {
+	if params == nil {
+		return ""
+	}
+	value, ok := params[key]
+	if !ok || value == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(value))
+}
+
+func boundedPositiveInt(raw any, fallback, max int) int {
+	value := fallback
+	if v, ok := raw.(float64); ok && int(v) > 0 {
+		value = int(v)
+	}
+	if max > 0 && value > max {
+		return max
+	}
+	if value < 0 {
+		return 0
+	}
+	return value
+}
+
+func compactMemoryText(text string, maxChars int) string {
+	text = strings.Join(strings.Fields(text), " ")
+	if maxChars <= 0 || len(text) <= maxChars {
+		return text
+	}
+	if maxChars <= 3 {
+		return text[:maxChars]
+	}
+	return text[:maxChars-3] + "..."
+}
+````
+
+## File: internal/tools/message.go
+````go
+package tools
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	rootchannels "or3-intern/internal/channels"
+)
+
+type DeliverFunc func(ctx context.Context, channel, to, text string, meta map[string]any) error
+
+type SendMessage struct {
+	Base
+	Deliver        DeliverFunc
+	DefaultChannel string
+	DefaultTo      string
+	AllowedRoot    string
+	ArtifactsDir   string
+	MaxMediaBytes  int
+}
+
+func (t *SendMessage) Capability() CapabilityLevel { return CapabilityGuarded }
+
+func (t *SendMessage) Name() string { return "send_message" }
+func (t *SendMessage) Description() string {
+	return "Send a message via a configured channel (for reminders/cron or proactive messages)."
+}
+func (t *SendMessage) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{
+		"channel": map[string]any{"type": "string"},
+		"to":      map[string]any{"type": "string"},
+		"text":    map[string]any{"type": "string"},
+		"reply_in_thread": map[string]any{
+			"type":        "boolean",
+			"description": "When true, reuse the current channel's reply/thread metadata for the outgoing message.",
+		},
+		"media": map[string]any{
+			"type":        "array",
+			"items":       map[string]any{"type": "string"},
+			"description": "Optional local file paths to send as attachments.",
+		},
+	}, "required": []string{}}
+}
+func (t *SendMessage) Schema() map[string]any {
+	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
+}
+func (t *SendMessage) Execute(ctx context.Context, params map[string]any) (string, error) {
+	if t.Deliver == nil {
+		return "", fmt.Errorf("deliver not configured")
+	}
+	ctxChannel, ctxTo := DeliveryFromContext(ctx)
+	ch := readOptionalString(params, "channel")
+	to := readOptionalString(params, "to")
+	text := readOptionalString(params, "text")
+	if ch == "" {
+		ch = strings.TrimSpace(t.DefaultChannel)
+	}
+	if ch == "" {
+		ch = strings.TrimSpace(ctxChannel)
+	}
+	if to == "" {
+		to = strings.TrimSpace(t.DefaultTo)
+	}
+	if to == "" {
+		to = strings.TrimSpace(ctxTo)
+	}
+	mediaPaths, err := t.validateMediaPaths(params["media"])
+	if err != nil {
+		return "", err
+	}
+	if text == "" && len(mediaPaths) == 0 {
+		return "", fmt.Errorf("message requires text or media")
+	}
+	inheritedReplyMeta := DeliveryMetaFromContext(ctx)
+	meta := map[string]any{}
+	explicitTo := strings.TrimSpace(readOptionalString(params, "to")) != ""
+	replyInThread, err := optionalBool(params["reply_in_thread"])
+	if err != nil {
+		return "", err
+	}
+	if replyInThread {
+		if explicitTo {
+			return "", fmt.Errorf("reply_in_thread requires using the current delivery target")
+		}
+		if strings.TrimSpace(ctxChannel) != "" && !strings.EqualFold(strings.TrimSpace(ch), strings.TrimSpace(ctxChannel)) {
+			return "", fmt.Errorf("reply_in_thread requires using the current delivery channel")
+		}
+		for k, v := range inheritedReplyMeta {
+			meta[k] = v
+		}
+	}
+	if len(mediaPaths) > 0 || explicitTo || len(meta) > 0 {
+		if len(mediaPaths) > 0 {
+			meta[rootchannels.MetaMediaPaths] = mediaPaths
+		}
+		if explicitTo {
+			meta["explicit_to"] = true
+		}
+	}
+	if len(meta) == 0 {
+		meta = nil
+	}
+	if err := t.Deliver(ctx, ch, to, text, meta); err != nil {
+		return "", err
+	}
+	return "ok", nil
+}
+
+func optionalBool(raw any) (bool, error) {
+	switch v := raw.(type) {
+	case nil:
+		return false, nil
+	case bool:
+		return v, nil
+	case string:
+		text := strings.TrimSpace(strings.ToLower(v))
+		switch text {
+		case "", "false", "0", "no":
+			return false, nil
+		case "true", "1", "yes":
+			return true, nil
+		default:
+			return false, fmt.Errorf("reply_in_thread must be a boolean")
+		}
+	default:
+		return false, fmt.Errorf("reply_in_thread must be a boolean")
+	}
+}
+
+func (t *SendMessage) validateMediaPaths(raw any) ([]string, error) {
+	items, err := stringSlice(raw)
+	if err != nil {
+		return nil, err
+	}
+	if len(items) == 0 {
+		return nil, nil
+	}
+	roots := make([]string, 0, 2)
+	if strings.TrimSpace(t.AllowedRoot) != "" {
+		roots = append(roots, strings.TrimSpace(t.AllowedRoot))
+	}
+	if strings.TrimSpace(t.ArtifactsDir) != "" {
+		roots = append(roots, strings.TrimSpace(t.ArtifactsDir))
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		p, err := filepath.Abs(strings.TrimSpace(item))
+		if err != nil {
+			return nil, err
+		}
+		p, err = canonicalizePath(p)
+		if err != nil {
+			return nil, err
+		}
+		info, err := os.Stat(p)
+		if err != nil {
+			return nil, err
+		}
+		if info.IsDir() {
+			return nil, fmt.Errorf("media path is a directory: %s", item)
+		}
+		if t.MaxMediaBytes == 0 {
+			return nil, fmt.Errorf("media attachments disabled by config")
+		}
+		if t.MaxMediaBytes > 0 && info.Size() > int64(t.MaxMediaBytes) {
+			return nil, fmt.Errorf("media path exceeds maxMediaBytes: %s", item)
+		}
+		if len(roots) > 0 {
+			allowed := false
+			for _, root := range roots {
+				ok, err := pathWithinRoot(p, root)
+				if err != nil {
+					return nil, err
+				}
+				if ok {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				return nil, fmt.Errorf("media path outside allowed roots: %s", item)
+			}
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+func pathWithinRoot(absPath, root string) (bool, error) {
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return false, err
+	}
+	root, err = canonicalizeRoot(root)
+	if err != nil {
+		return false, err
+	}
+	rel, err := filepath.Rel(root, absPath)
+	if err != nil {
+		return false, err
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)), nil
+}
+
+func stringSlice(raw any) ([]string, error) {
+	switch v := raw.(type) {
+	case nil:
+		return nil, nil
+	case []string:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			if strings.TrimSpace(item) == "" {
+				continue
+			}
+			out = append(out, item)
+		}
+		return out, nil
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			s := strings.TrimSpace(fmt.Sprint(item))
+			if s == "" {
+				continue
+			}
+			out = append(out, s)
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("media must be an array of strings")
+	}
 }
 ````
 
@@ -11763,6 +12995,187 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 }
 ````
 
+## File: internal/tools/exec.go
+````go
+package tools
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+type ExecTool struct {
+	Base
+	Timeout           time.Duration
+	RestrictDir       string // if non-empty, cwd must be inside
+	PathAppend        string
+	ChildEnvAllowlist []string
+	AllowedPrograms   []string
+	Sandbox           BubblewrapConfig
+	EnableLegacyShell bool
+	DisableShell      bool
+	OutputMaxBytes    int
+	BlockedPatterns   []string
+}
+
+const defaultExecOutputMaxBytes = 10000
+
+func (t *ExecTool) Name() string { return "exec" }
+func (t *ExecTool) Description() string {
+	return "Run an allowed program with safety limits. Output is truncated. Legacy shell commands require explicit opt-in."
+}
+func (t *ExecTool) Parameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"program":        map[string]any{"type": "string", "description": "Program to run"},
+			"args":           map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Program arguments"},
+			"command":        map[string]any{"type": "string", "description": "Legacy shell command to run (privileged, explicit opt-in only)"},
+			"cwd":            map[string]any{"type": "string", "description": "Working directory (optional)"},
+			"timeoutSeconds": map[string]any{"type": "integer", "description": "Override timeout (optional)"},
+		},
+		"required": []string{},
+	}
+}
+func (t *ExecTool) Schema() map[string]any {
+	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
+}
+
+func (t *ExecTool) CapabilityForParams(params map[string]any) CapabilityLevel {
+	if strings.TrimSpace(fmt.Sprint(params["command"])) != "" && fmt.Sprint(params["command"]) != "<nil>" {
+		return CapabilityPrivileged
+	}
+	return CapabilityGuarded
+}
+
+var defaultBlockedPatterns = []string{
+	"rm -rf", "mkfs", "dd ", "shutdown", "reboot", "poweroff", ":(){", ">|", "chown -R /", "chmod -R 777 /",
+}
+
+func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, error) {
+	program := strings.TrimSpace(fmt.Sprint(params["program"]))
+	if program == "<nil>" {
+		program = ""
+	}
+	legacyCommand, _ := params["command"].(string)
+	legacyCommand = strings.TrimSpace(legacyCommand)
+	if program == "" && legacyCommand == "" {
+		return "", errors.New("missing program or command")
+	}
+	if legacyCommand != "" {
+		if !t.EnableLegacyShell || t.DisableShell {
+			return "", errors.New("shell command execution disabled; use program + args or explicitly enable legacy shell mode")
+		}
+		lc := strings.ToLower(legacyCommand)
+		patterns := t.BlockedPatterns
+		if len(patterns) == 0 {
+			patterns = defaultBlockedPatterns
+		}
+		for _, b := range patterns {
+			if strings.Contains(lc, b) {
+				return "", fmt.Errorf("blocked command pattern: %q", b)
+			}
+		}
+	}
+	cwd, _ := params["cwd"].(string)
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
+	if t.RestrictDir != "" {
+		abs, err := filepath.Abs(cwd)
+		if err != nil {
+			return "", err
+		}
+		abs, err = canonicalizePath(abs)
+		if err != nil {
+			return "", err
+		}
+		root, err := canonicalizeRoot(t.RestrictDir)
+		if err != nil {
+			return "", err
+		}
+		rel, err := filepath.Rel(root, abs)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return "", fmt.Errorf("cwd outside allowed directory")
+		}
+	}
+	if program != "" && len(t.AllowedPrograms) > 0 && !allowedProgram(program, t.AllowedPrograms) {
+		return "", fmt.Errorf("program not allowed: %s", program)
+	}
+
+	to := t.Timeout
+	if v, ok := params["timeoutSeconds"].(float64); ok && v > 0 {
+		to = time.Duration(int(v)) * time.Second
+	}
+	cctx, cancel := context.WithTimeout(ctx, to)
+	defer cancel()
+
+	var c *exec.Cmd
+	var err error
+	if legacyCommand != "" {
+		c, err = commandWithSandbox(cctx, t.Sandbox, cwd, []string{"bash", "-lc", legacyCommand})
+		if err != nil {
+			return "", err
+		}
+		if c == nil {
+			c = exec.CommandContext(cctx, "bash", "-lc", legacyCommand)
+		}
+	} else {
+		c = exec.CommandContext(cctx, program, stringArgs(params["args"])...)
+	}
+	c.Dir = cwd
+	c.Env = BuildChildEnv(os.Environ(), t.ChildEnvAllowlist, EnvFromContext(ctx), t.PathAppend)
+	var stdout, stderr bytes.Buffer
+	c.Stdout = &stdout
+	c.Stderr = &stderr
+	err = c.Run()
+	out := stdout.String()
+	er := stderr.String()
+	max := t.OutputMaxBytes
+	if max <= 0 {
+		max = defaultExecOutputMaxBytes
+	}
+	if len(out) > max {
+		out = out[:max] + "\n...[truncated]\n"
+	}
+	if len(er) > max {
+		er = er[:max] + "\n...[truncated]\n"
+	}
+	if err != nil {
+		return fmt.Sprintf("exit error: %v\n\nstdout:\n%s\n\nstderr:\n%s", err, out, er), nil
+	}
+	if strings.TrimSpace(er) != "" {
+		return fmt.Sprintf("stdout:\n%s\n\nstderr:\n%s", out, er), nil
+	}
+	return out, nil
+}
+
+func allowedProgram(program string, allowed []string) bool {
+	program = strings.TrimSpace(program)
+	if program == "" {
+		return false
+	}
+	base := filepath.Base(program)
+	for _, candidate := range allowed {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		if candidate == program || candidate == base {
+			return true
+		}
+	}
+	return false
+}
+````
+
 ## File: internal/tools/registry.go
 ````go
 package tools
@@ -12268,6 +13681,266 @@ func (d *DB) tableHasColumn(ctx context.Context, tableName, columnName string) (
 }
 ````
 
+## File: internal/tools/context.go
+````go
+package tools
+
+import (
+	"context"
+	"strings"
+
+	"or3-intern/internal/scope"
+)
+
+type sessionContextKey struct{}
+type deliveryChannelContextKey struct{}
+type deliveryToContextKey struct{}
+type deliveryMetaContextKey struct{}
+type envContextKey struct{}
+type toolGuardContextKey struct{}
+type activeProfileContextKey struct{}
+type skillPolicyContextKey struct{}
+
+type ToolGuard func(ctx context.Context, tool Tool, capability CapabilityLevel, params map[string]any) error
+
+type ActiveProfile struct {
+	Name           string
+	MaxCapability  CapabilityLevel
+	AllowedTools   map[string]struct{}
+	AllowedHosts   []string
+	WritablePaths  []string
+	AllowSubagents bool
+}
+
+type SkillPolicy struct {
+	Name           string
+	AllowedTools   map[string]struct{}
+	AllowExecution bool
+	AllowNetwork   bool
+	AllowWrite     bool
+	AllowedHosts   []string
+	WritablePaths  []string
+}
+
+func ContextWithSession(ctx context.Context, sessionKey string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if sessionKey == "" {
+		sessionKey = scope.GlobalMemoryScope
+	}
+	return context.WithValue(ctx, sessionContextKey{}, sessionKey)
+}
+
+func ContextWithDelivery(ctx context.Context, channel, to string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx = context.WithValue(ctx, deliveryChannelContextKey{}, channel)
+	return context.WithValue(ctx, deliveryToContextKey{}, to)
+}
+
+func ContextWithDeliveryMeta(ctx context.Context, meta map[string]any) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if len(meta) == 0 {
+		return ctx
+	}
+	cloned := make(map[string]any, len(meta))
+	for k, v := range meta {
+		cloned[k] = v
+	}
+	return context.WithValue(ctx, deliveryMetaContextKey{}, cloned)
+}
+
+func ContextWithEnv(ctx context.Context, env map[string]string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if len(env) == 0 {
+		return ctx
+	}
+	copyEnv := make(map[string]string, len(env))
+	for k, v := range env {
+		copyEnv[k] = v
+	}
+	return context.WithValue(ctx, envContextKey{}, copyEnv)
+}
+
+func ContextWithToolGuard(ctx context.Context, guard ToolGuard) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if guard == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, toolGuardContextKey{}, guard)
+}
+
+func ContextWithActiveProfile(ctx context.Context, profile ActiveProfile) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if strings.TrimSpace(profile.Name) == "" && len(profile.AllowedTools) == 0 && len(profile.AllowedHosts) == 0 && len(profile.WritablePaths) == 0 && !profile.AllowSubagents && profile.MaxCapability == "" {
+		return ctx
+	}
+	cloned := ActiveProfile{
+		Name:           strings.TrimSpace(profile.Name),
+		MaxCapability:  profile.MaxCapability,
+		AllowedHosts:   append([]string{}, profile.AllowedHosts...),
+		WritablePaths:  append([]string{}, profile.WritablePaths...),
+		AllowSubagents: profile.AllowSubagents,
+	}
+	if len(profile.AllowedTools) > 0 {
+		cloned.AllowedTools = make(map[string]struct{}, len(profile.AllowedTools))
+		for key := range profile.AllowedTools {
+			cloned.AllowedTools[key] = struct{}{}
+		}
+	}
+	return context.WithValue(ctx, activeProfileContextKey{}, cloned)
+}
+
+func ContextWithSkillPolicy(ctx context.Context, policy SkillPolicy) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if strings.TrimSpace(policy.Name) == "" && len(policy.AllowedTools) == 0 && !policy.AllowExecution && !policy.AllowNetwork && !policy.AllowWrite && len(policy.AllowedHosts) == 0 && len(policy.WritablePaths) == 0 {
+		return ctx
+	}
+	cloned := SkillPolicy{
+		Name:           strings.TrimSpace(policy.Name),
+		AllowExecution: policy.AllowExecution,
+		AllowNetwork:   policy.AllowNetwork,
+		AllowWrite:     policy.AllowWrite,
+		AllowedHosts:   append([]string{}, policy.AllowedHosts...),
+		WritablePaths:  append([]string{}, policy.WritablePaths...),
+	}
+	if len(policy.AllowedTools) > 0 {
+		cloned.AllowedTools = make(map[string]struct{}, len(policy.AllowedTools))
+		for key := range policy.AllowedTools {
+			cloned.AllowedTools[key] = struct{}{}
+		}
+	}
+	return context.WithValue(ctx, skillPolicyContextKey{}, cloned)
+}
+
+func SessionFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return scope.GlobalMemoryScope
+	}
+	if sessionKey, ok := ctx.Value(sessionContextKey{}).(string); ok && sessionKey != "" {
+		return sessionKey
+	}
+	return scope.GlobalMemoryScope
+}
+
+func DeliveryFromContext(ctx context.Context) (channel string, to string) {
+	if ctx == nil {
+		return "", ""
+	}
+	if v, ok := ctx.Value(deliveryChannelContextKey{}).(string); ok {
+		channel = v
+	}
+	if v, ok := ctx.Value(deliveryToContextKey{}).(string); ok {
+		to = v
+	}
+	return channel, to
+}
+
+func DeliveryMetaFromContext(ctx context.Context) map[string]any {
+	if ctx == nil {
+		return nil
+	}
+	meta, _ := ctx.Value(deliveryMetaContextKey{}).(map[string]any)
+	if len(meta) == 0 {
+		return nil
+	}
+	cloned := make(map[string]any, len(meta))
+	for k, v := range meta {
+		cloned[k] = v
+	}
+	return cloned
+}
+
+func EnvFromContext(ctx context.Context) map[string]string {
+	if ctx == nil {
+		return nil
+	}
+	if env, ok := ctx.Value(envContextKey{}).(map[string]string); ok && len(env) > 0 {
+		copyEnv := make(map[string]string, len(env))
+		for k, v := range env {
+			copyEnv[k] = v
+		}
+		return copyEnv
+	}
+	return nil
+}
+
+func ToolGuardFromContext(ctx context.Context) ToolGuard {
+	if ctx == nil {
+		return nil
+	}
+	guard, _ := ctx.Value(toolGuardContextKey{}).(ToolGuard)
+	return guard
+}
+
+func ActiveProfileFromContext(ctx context.Context) ActiveProfile {
+	if ctx == nil {
+		return ActiveProfile{}
+	}
+	profile, _ := ctx.Value(activeProfileContextKey{}).(ActiveProfile)
+	return profile
+}
+
+func SkillPolicyFromContext(ctx context.Context) SkillPolicy {
+	if ctx == nil {
+		return SkillPolicy{}
+	}
+	policy, _ := ctx.Value(skillPolicyContextKey{}).(SkillPolicy)
+	return policy
+}
+````
+
+## File: go.mod
+````
+module or3-intern
+
+go 1.24.0
+
+require (
+	github.com/asg017/sqlite-vec-go-bindings v0.1.6
+	github.com/emersion/go-imap/v2 v2.0.0-beta.8
+	github.com/gorilla/websocket v1.5.3
+	github.com/mattn/go-isatty v0.0.20
+	github.com/mattn/go-sqlite3 v1.14.34
+	github.com/modelcontextprotocol/go-sdk v0.8.0
+	github.com/robfig/cron/v3 v3.0.1
+	golang.org/x/net v0.6.0
+	gopkg.in/yaml.v3 v3.0.1
+	modernc.org/sqlite v1.33.1
+)
+
+require (
+	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/emersion/go-message v0.18.2 // indirect
+	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6 // indirect
+	github.com/google/jsonschema-go v0.3.0 // indirect
+	github.com/google/uuid v1.6.0 // indirect
+	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
+	github.com/ncruces/go-strftime v0.1.9 // indirect
+	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
+	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
+	golang.org/x/sys v0.40.0 // indirect
+	modernc.org/gc/v3 v3.0.0-20240107210532-573471604cb6 // indirect
+	modernc.org/libc v1.55.3 // indirect
+	modernc.org/mathutil v1.6.0 // indirect
+	modernc.org/memory v1.8.0 // indirect
+	modernc.org/strutil v1.2.0 // indirect
+	modernc.org/token v1.1.0 // indirect
+)
+````
+
 ## File: internal/skills/skills.go
 ````go
 package skills
@@ -12285,6 +13958,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"or3-intern/internal/clawhub"
 
 	"gopkg.in/yaml.v3"
 )
@@ -12333,6 +14008,9 @@ type LoadOptions struct {
 type ApprovalPolicy struct {
 	QuarantineByDefault bool
 	ApprovedSkills      map[string]struct{}
+	TrustedOwners       map[string]struct{}
+	BlockedOwners       map[string]struct{}
+	TrustedRegistries   map[string]struct{}
 }
 
 type SkillInstallSpec struct {
@@ -12402,8 +14080,15 @@ type SkillMeta struct {
 
 	Metadata        SkillRuntimeMeta
 	Permissions     SkillPermissions
+	AllowedTools    []string
 	PermissionState string
 	PermissionNotes []string
+	Publisher       string
+	Registry        string
+	InstalledVersion string
+	Modified        bool
+	ScanStatus      string
+	ScanFindings    []string
 	Key             string
 	Eligible        bool
 	Disabled        bool
@@ -12425,6 +14110,7 @@ type Inventory struct {
 type skillManifest struct {
 	Summary     string           `json:"summary"`
 	Entrypoints []SkillEntry     `json:"entrypoints"`
+	Tools       []string         `json:"tools"`
 	Permissions SkillPermissions `json:"permissions"`
 }
 
@@ -12639,13 +14325,16 @@ func loadSkill(dir, path string, root Root, order int, opts LoadOptions) SkillMe
 		meta.CommandArgMode = strings.TrimSpace(fm.CommandArgMode)
 	}
 	meta.Permissions = normalizeSkillPermissions(fm.Permissions)
+	declaredTools, _ := parseDeclaredTools(rawTop["tools"])
+	meta.AllowedTools = declaredTools
 
 	manifest, err := loadManifest(dir)
 	if err != nil {
 		meta.ParseError = err.Error()
 		meta.Hidden = true
-	} else if len(manifest.Entrypoints) > 0 || manifest.Permissions.Requested() || strings.TrimSpace(manifest.Summary) != "" {
+	} else if len(manifest.Entrypoints) > 0 || len(manifest.Tools) > 0 || manifest.Permissions.Requested() || strings.TrimSpace(manifest.Summary) != "" {
 		meta.Entrypoints = manifest.Entrypoints
+		meta.AllowedTools = mergeStringLists(meta.AllowedTools, compactStrings(manifest.Tools))
 		if requested := normalizeSkillPermissions(manifest.Permissions); requested.Requested() {
 			meta.Permissions = requested
 		}
@@ -12670,9 +14359,35 @@ func loadSkill(dir, path string, root Root, order int, opts LoadOptions) SkillMe
 	}
 	entry := entryConfigForSkill(opts.Entries, meta)
 	meta.RuntimeEnv = buildRuntimeEnv(meta, entry, opts.Env)
+	applyOriginMetadata(&meta)
 	applyEligibility(&meta, rawTop, body, entry, opts)
 	applyApprovalPolicy(&meta, opts.ApprovalPolicy)
 	return meta
+}
+
+func applyOriginMetadata(meta *SkillMeta) {
+	if meta == nil || strings.TrimSpace(meta.Dir) == "" {
+		return
+	}
+	origin, err := clawhub.ReadOrigin(meta.Dir)
+	if err != nil {
+		if meta.Source == SourceManaged {
+			meta.PermissionNotes = append(meta.PermissionNotes, "managed skill missing origin metadata")
+		}
+		return
+	}
+	meta.Publisher = strings.TrimSpace(origin.Owner)
+	meta.Registry = strings.TrimSpace(origin.Registry)
+	meta.InstalledVersion = strings.TrimSpace(origin.InstalledVersion)
+	meta.ScanStatus = normalizeSupplyChainValue(origin.ScanStatus)
+	for _, finding := range origin.ScanFindings {
+		if summary := strings.TrimSpace(finding.Summary()); summary != "" {
+			meta.ScanFindings = append(meta.ScanFindings, summary)
+		}
+	}
+	if modified, modErr := clawhub.LocalEdits(meta.Dir); modErr == nil {
+		meta.Modified = modified
+	}
 }
 
 func normalizeSkillPermissions(raw SkillPermissions) SkillPermissions {
@@ -12683,6 +14398,31 @@ func normalizeSkillPermissions(raw SkillPermissions) SkillPermissions {
 
 func (p SkillPermissions) Requested() bool {
 	return p.Shell || p.Network || p.Write || len(p.AllowedPaths) > 0 || len(p.AllowedHosts) > 0
+}
+
+func parseDeclaredTools(raw any) ([]string, bool) {
+	switch value := raw.(type) {
+	case nil:
+		return nil, true
+	case []string:
+		return compactStrings(value), true
+	case []any:
+		out := make([]string, 0, len(value))
+		for _, item := range value {
+			name, ok := item.(string)
+			if !ok {
+				return nil, false
+			}
+			name = strings.TrimSpace(name)
+			if name == "" {
+				continue
+			}
+			out = append(out, name)
+		}
+		return compactStrings(out), true
+	default:
+		return nil, false
+	}
 }
 
 func (p SkillPermissions) Summary() string {
@@ -12717,10 +14457,49 @@ func applyApprovalPolicy(meta *SkillMeta, policy ApprovalPolicy) {
 		meta.PermissionNotes = append(meta.PermissionNotes, "metadata parse failed")
 		return
 	}
-	if skillApproved(meta, policy.ApprovedSkills) {
-		meta.PermissionState = "approved"
-		meta.PermissionNotes = append(meta.PermissionNotes, "approved in config")
+	if ownerBlocked(meta, policy.BlockedOwners) {
+		meta.PermissionState = "blocked"
+		meta.PermissionNotes = append(meta.PermissionNotes, "publisher blocked by policy: "+meta.Publisher)
 		return
+	}
+	if strings.EqualFold(meta.ScanStatus, "blocked") {
+		meta.PermissionState = "blocked"
+		meta.PermissionNotes = append(meta.PermissionNotes, "install-time scan blocked this bundle")
+		meta.PermissionNotes = append(meta.PermissionNotes, meta.ScanFindings...)
+		return
+	}
+	if meta.Modified {
+		meta.PermissionState = "quarantined"
+		meta.PermissionNotes = append(meta.PermissionNotes, "local modifications detected since install")
+		return
+	}
+	if strings.EqualFold(meta.ScanStatus, "quarantined") {
+		meta.PermissionState = "quarantined"
+		meta.PermissionNotes = append(meta.PermissionNotes, "install-time scan flagged this bundle for review")
+		meta.PermissionNotes = append(meta.PermissionNotes, meta.ScanFindings...)
+		return
+	}
+	trustedPublisher := publisherTrusted(meta, policy)
+	if skillApproved(meta, policy.ApprovedSkills) || trustedPublisher {
+		meta.PermissionState = "approved"
+		if trustedPublisher {
+			meta.PermissionNotes = append(meta.PermissionNotes, "approved by trusted publisher policy")
+		} else {
+			meta.PermissionNotes = append(meta.PermissionNotes, "approved in config")
+		}
+		return
+	}
+	if meta.Source == SourceManaged && skillNeedsApproval(meta) {
+		if strings.TrimSpace(meta.Registry) == "" || strings.TrimSpace(meta.Publisher) == "" {
+			meta.PermissionState = "quarantined"
+			meta.PermissionNotes = append(meta.PermissionNotes, "managed skill is missing trusted origin details")
+			return
+		}
+		if len(policy.TrustedOwners) > 0 || len(policy.TrustedRegistries) > 0 {
+			meta.PermissionState = "quarantined"
+			meta.PermissionNotes = append(meta.PermissionNotes, "publisher or registry is not trusted by policy")
+			return
+		}
 	}
 	if skillNeedsApproval(meta) {
 		meta.PermissionState = "quarantined"
@@ -12728,6 +14507,41 @@ func applyApprovalPolicy(meta *SkillMeta, policy ApprovalPolicy) {
 		return
 	}
 	meta.PermissionState = "approved"
+}
+
+func ownerBlocked(meta *SkillMeta, blocked map[string]struct{}) bool {
+	if meta == nil || len(blocked) == 0 {
+		return false
+	}
+	_, ok := blocked[normalizeSupplyChainValue(meta.Publisher)]
+	return ok
+}
+
+func publisherTrusted(meta *SkillMeta, policy ApprovalPolicy) bool {
+	if meta == nil {
+		return false
+	}
+	anyPolicy := len(policy.TrustedOwners) > 0 || len(policy.TrustedRegistries) > 0
+	if !anyPolicy {
+		return false
+	}
+	if len(policy.TrustedOwners) > 0 {
+		if _, ok := policy.TrustedOwners[normalizeSupplyChainValue(meta.Publisher)]; !ok {
+			return false
+		}
+	}
+	if len(policy.TrustedRegistries) > 0 {
+		if _, ok := policy.TrustedRegistries[normalizeSupplyChainValue(meta.Registry)]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeSupplyChainValue(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	value = strings.TrimRight(value, "/")
+	return value
 }
 
 func skillNeedsApproval(meta *SkillMeta) bool {
@@ -12887,11 +14701,21 @@ func applyEligibility(meta *SkillMeta, rawTop map[string]any, body string, entry
 
 func detectUnsupported(meta SkillMeta, rawTop map[string]any, body string, opts LoadOptions) []string {
 	var unsupported []string
-	if rawTop["tools"] != nil {
-		unsupported = append(unsupported, "frontmatter custom tools not supported")
+	if _, ok := rawTop["tools"]; ok {
+		if _, valid := parseDeclaredTools(rawTop["tools"]); !valid {
+			unsupported = append(unsupported, "frontmatter tools must be a list of string tool names")
+		}
 	}
 	if meta.Metadata.Nix != nil && strings.TrimSpace(meta.Metadata.Nix.Plugin) != "" {
 		unsupported = append(unsupported, "requires nix plugin: "+meta.Metadata.Nix.Plugin)
+	}
+	for _, toolName := range meta.AllowedTools {
+		if len(opts.AvailableTools) == 0 {
+			continue
+		}
+		if _, ok := opts.AvailableTools[toolName]; !ok {
+			unsupported = append(unsupported, "requires unsupported tool: "+toolName)
+		}
 	}
 	if meta.CommandDispatch != "" && meta.CommandDispatch != "tool" {
 		unsupported = append(unsupported, "unsupported command-dispatch: "+meta.CommandDispatch)
@@ -12909,6 +14733,22 @@ func detectUnsupported(meta SkillMeta, rawTop map[string]any, body string, opts 
 		unsupported = append(unsupported, "requires unsupported tool: nodes.run")
 	}
 	return unsupported
+}
+
+func mergeStringLists(base []string, extra []string) []string {
+	out := append([]string{}, compactStrings(base)...)
+	seen := map[string]struct{}{}
+	for _, item := range out {
+		seen[item] = struct{}{}
+	}
+	for _, item := range compactStrings(extra) {
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		out = append(out, item)
+	}
+	return out
 }
 
 func buildRuntimeEnv(meta SkillMeta, entry EntryConfig, baseEnv map[string]string) map[string]string {
@@ -13303,43 +15143,551 @@ func min(a, b int) int {
 }
 ````
 
-## File: go.mod
-````
-module or3-intern
+## File: internal/agent/prompt.go
+````go
+package agent
 
-go 1.24.0
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"io"
+	"mime"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"time"
 
-require (
-	github.com/asg017/sqlite-vec-go-bindings v0.1.6
-	github.com/emersion/go-imap/v2 v2.0.0-beta.8
-	github.com/gorilla/websocket v1.5.3
-	github.com/mattn/go-isatty v0.0.20
-	github.com/mattn/go-sqlite3 v1.14.34
-	github.com/modelcontextprotocol/go-sdk v0.8.0
-	github.com/robfig/cron/v3 v3.0.1
-	golang.org/x/net v0.6.0
-	gopkg.in/yaml.v3 v3.0.1
-	modernc.org/sqlite v1.33.1
+	"or3-intern/internal/artifacts"
+	"or3-intern/internal/db"
+	"or3-intern/internal/heartbeat"
+	"or3-intern/internal/memory"
+	"or3-intern/internal/providers"
+	"or3-intern/internal/scope"
+	"or3-intern/internal/skills"
+	"or3-intern/internal/triggers"
 )
 
-require (
-	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/emersion/go-message v0.18.2 // indirect
-	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6 // indirect
-	github.com/google/jsonschema-go v0.3.0 // indirect
-	github.com/google/uuid v1.6.0 // indirect
-	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
-	github.com/ncruces/go-strftime v0.1.9 // indirect
-	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
-	golang.org/x/sys v0.40.0 // indirect
-	modernc.org/gc/v3 v3.0.0-20240107210532-573471604cb6 // indirect
-	modernc.org/libc v1.55.3 // indirect
-	modernc.org/mathutil v1.6.0 // indirect
-	modernc.org/memory v1.8.0 // indirect
-	modernc.org/strutil v1.2.0 // indirect
-	modernc.org/token v1.1.0 // indirect
+const DefaultSoul = `# Soul
+I am or3-intern, a personal AI assistant.
+- Be clear and direct
+- Prefer deterministic, bounded work
+- Use tools when needed; keep outputs short
+`
+
+const DefaultAgentInstructions = `# Agent Instructions
+- Use pinned memory for stable facts.
+- Retrieve relevant memory snippets before answering.
+- Keep constant RAM usage: last N messages + top K memories only.
+- Large tool outputs must spill to artifacts.
+`
+
+const DefaultToolNotes = `# Tool Usage Notes
+exec:
+- Commands have a timeout
+- Dangerous commands blocked
+- Output truncated
+cron:
+- Use cron tool for scheduled reminders.
+`
+
+const (
+	defaultBootstrapMaxChars      = 20000
+	defaultBootstrapTotalMaxChars = 150000
+	defaultPinnedOneLineMax       = 220
+	defaultRetrievedOneLineMax    = 240
+	defaultSkillsSummaryMax       = 80
+	defaultVisionMaxImages        = 4
+	defaultVisionMaxImageBytes    = 4 << 20
+	defaultVisionTotalBytes       = 8 << 20
+	embedCacheTTL                 = 5 * time.Minute
+	embedCacheMaxEntries          = 128
 )
+
+type embedCacheKey struct {
+	model string
+	input string
+}
+
+type embedCacheEntry struct {
+	vec       []float32
+	expiresAt time.Time
+	usedAt    time.Time
+}
+
+var promptEmbedCache = struct {
+	mu      sync.Mutex
+	entries map[embedCacheKey]embedCacheEntry
+}{entries: map[embedCacheKey]embedCacheEntry{}}
+
+type PromptParts struct {
+	System  []providers.ChatMessage
+	History []providers.ChatMessage
+}
+
+// BuildOptions holds options for building a prompt.
+type BuildOptions struct {
+	SessionKey  string
+	UserMessage string
+	Autonomous  bool // true for cron/webhook/file-change events
+	EventMeta   map[string]any
+}
+
+type Builder struct {
+	DB           *db.DB
+	Artifacts    *artifacts.Store
+	Skills       skills.Inventory
+	Mem          *memory.Retriever
+	Provider     *providers.Client
+	EmbedModel   string
+	EnableVision bool
+
+	Soul                   string
+	AgentInstructions      string
+	ToolNotes              string
+	BootstrapMaxChars      int
+	BootstrapTotalMaxChars int
+	SkillsSummaryMax       int
+
+	HistoryMax int
+	VectorK    int
+	FTSK       int
+	TopK       int
+
+	// New fields for lightweight OpenClaw parity
+	IdentityText       string               // content of IDENTITY.md
+	StaticMemory       string               // content of MEMORY.md
+	HeartbeatText      string               // content of HEARTBEAT.md – injected only for autonomous turns
+	HeartbeatTasksFile string               // configured heartbeat file path for per-turn refresh
+	DocRetriever       *memory.DocRetriever // for indexed file context
+	DocRetrieveLimit   int                  // max docs to retrieve
+	WorkspaceDir       string
+}
+
+// Build builds a prompt snapshot. It is a convenience wrapper around BuildWithOptions.
+func (b *Builder) Build(ctx context.Context, sessionKey string, userMessage string) (PromptParts, []memory.Retrieved, error) {
+	return b.BuildWithOptions(ctx, BuildOptions{SessionKey: sessionKey, UserMessage: userMessage})
+}
+
+// BuildWithOptions builds a prompt snapshot using the provided options.
+func (b *Builder) BuildWithOptions(ctx context.Context, opts BuildOptions) (PromptParts, []memory.Retrieved, error) {
+	scopeKey := opts.SessionKey
+	if b.DB != nil && strings.TrimSpace(opts.SessionKey) != "" {
+		if resolved, err := b.DB.ResolveScopeKey(ctx, opts.SessionKey); err == nil && strings.TrimSpace(resolved) != "" {
+			scopeKey = resolved
+		}
+	}
+	pinned, err := b.DB.GetPinned(ctx, scopeKey)
+	if err != nil {
+		return PromptParts{}, nil, err
+	}
+	pinnedText := formatPinned(pinned)
+
+	// embed and retrieve
+	var retrieved []memory.Retrieved
+	if b.Mem != nil && b.Provider != nil && strings.TrimSpace(opts.UserMessage) != "" {
+		vec, err := cachedEmbed(ctx, b.Provider, b.EmbedModel, opts.UserMessage)
+		if err == nil {
+			retrieved, _ = b.Mem.Retrieve(ctx, scopeKey, opts.UserMessage, vec, b.VectorK, b.FTSK, b.TopK)
+		}
+	}
+	memText := formatRetrieved(retrieved)
+
+	// indexed doc context
+	var docContextText string
+	if b.DocRetriever != nil && strings.TrimSpace(opts.UserMessage) != "" {
+		limit := b.DocRetrieveLimit
+		if limit <= 0 {
+			limit = 5
+		}
+		docs, _ := b.DocRetriever.RetrieveDocs(ctx, scope.GlobalMemoryScope, opts.UserMessage, limit)
+		if len(docs) > 0 {
+			var sb strings.Builder
+			for i, d := range docs {
+				sb.WriteString(fmt.Sprintf("%d) [%s] %s\n", i+1, d.Path, d.Excerpt))
+			}
+			docContextText = strings.TrimSpace(sb.String())
+		}
+	}
+	workspaceContextText := memory.BuildWorkspaceContext(memory.WorkspaceContextConfig{
+		WorkspaceDir: b.WorkspaceDir,
+	}, opts.UserMessage)
+
+	histRows, err := b.DB.GetLastMessagesScoped(ctx, opts.SessionKey, b.HistoryMax)
+	if err != nil {
+		return PromptParts{}, nil, err
+	}
+	visionBudget := newVisionBudget()
+	hist := make([]providers.ChatMessage, 0, len(histRows))
+	for _, m := range histRows {
+		msg := providers.ChatMessage{Role: m.Role, Content: m.Content}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(m.PayloadJSON), &payload); err == nil {
+			if m.Role == "assistant" {
+				if raw, ok := payload["tool_calls"]; ok {
+					b, _ := json.Marshal(raw)
+					var tcs []providers.ToolCall
+					if err := json.Unmarshal(b, &tcs); err == nil {
+						msg.ToolCalls = tcs
+					}
+				}
+			}
+			if m.Role == "user" {
+				msg.Content = b.buildUserContent(ctx, m.Content, attachmentsFromPayload(payload), visionBudget)
+			}
+		}
+		hist = append(hist, msg)
+	}
+
+	heartbeat := ""
+	structuredContext := ""
+	structuredMax := b.BootstrapMaxChars
+	if structuredMax <= 0 {
+		structuredMax = defaultBootstrapMaxChars
+	}
+	if opts.Autonomous {
+		heartbeat = b.currentHeartbeatText()
+		structuredContext = formatStructuredEventContext(opts.EventMeta, structuredMax)
+	}
+	sysText := b.composeSystemPrompt(pinnedText, memText, b.IdentityText, b.StaticMemory, heartbeat, structuredContext, docContextText, workspaceContextText)
+	sys := []providers.ChatMessage{
+		{Role: "system", Content: sysText},
+	}
+	return PromptParts{System: sys, History: hist}, retrieved, nil
+}
+
+func (b *Builder) currentHeartbeatText() string {
+	if b == nil {
+		return ""
+	}
+	if path, text, err := heartbeat.LoadTasksFile(b.HeartbeatTasksFile, b.WorkspaceDir); err == nil && strings.TrimSpace(path) != "" {
+		if heartbeat.HasActiveInstructions(text) {
+			return text
+		}
+		return ""
+	}
+	return strings.TrimSpace(b.HeartbeatText)
+}
+
+func attachmentsFromPayload(payload map[string]any) []artifacts.Attachment {
+	if len(payload) == 0 {
+		return nil
+	}
+	raw := payload["attachments"]
+	if raw == nil {
+		if meta, ok := payload["meta"].(map[string]any); ok {
+			raw = meta["attachments"]
+		}
+	}
+	if raw == nil {
+		return nil
+	}
+	b, _ := json.Marshal(raw)
+	var atts []artifacts.Attachment
+	if err := json.Unmarshal(b, &atts); err != nil {
+		return nil
+	}
+	out := make([]artifacts.Attachment, 0, len(atts))
+	for _, att := range atts {
+		if strings.TrimSpace(att.ArtifactID) == "" {
+			continue
+		}
+		if strings.TrimSpace(att.Filename) == "" {
+			att.Filename = "attachment"
+		}
+		if strings.TrimSpace(att.Kind) == "" {
+			att.Kind = artifacts.DetectKind(att.Filename, att.Mime)
+		}
+		out = append(out, att)
+	}
+	return out
+}
+
+type visionBudget struct {
+	remainingImages int
+	remainingBytes  int64
+}
+
+func newVisionBudget() *visionBudget {
+	return &visionBudget{
+		remainingImages: defaultVisionMaxImages,
+		remainingBytes:  defaultVisionTotalBytes,
+	}
+}
+
+func (b *Builder) buildUserContent(ctx context.Context, text string, atts []artifacts.Attachment, budget *visionBudget) any {
+	if !b.EnableVision || b.Artifacts == nil || len(atts) == 0 {
+		return text
+	}
+	parts := make([]map[string]any, 0, len(atts)+1)
+	imageParts := 0
+	if strings.TrimSpace(text) != "" {
+		parts = append(parts, map[string]any{
+			"type": "text",
+			"text": text,
+		})
+	}
+	for _, att := range atts {
+		if strings.TrimSpace(att.Kind) != artifacts.KindImage && !strings.HasPrefix(strings.ToLower(strings.TrimSpace(att.Mime)), "image/") {
+			continue
+		}
+		part, ok := b.imagePart(ctx, att, budget)
+		if !ok {
+			continue
+		}
+		parts = append(parts, part)
+		imageParts++
+	}
+	if imageParts == 0 {
+		return text
+	}
+	return parts
+}
+
+func (b *Builder) imagePart(ctx context.Context, att artifacts.Attachment, budget *visionBudget) (map[string]any, bool) {
+	if budget == nil || budget.remainingImages <= 0 || budget.remainingBytes <= 0 {
+		return nil, false
+	}
+	stored, err := b.Artifacts.Lookup(ctx, att.ArtifactID)
+	if err != nil {
+		return nil, false
+	}
+	sizeBytes := stored.SizeBytes
+	if sizeBytes <= 0 {
+		info, err := os.Stat(stored.Path)
+		if err != nil {
+			return nil, false
+		}
+		sizeBytes = info.Size()
+	}
+	if sizeBytes <= 0 || sizeBytes > defaultVisionMaxImageBytes || sizeBytes > budget.remainingBytes {
+		return nil, false
+	}
+	data, err := readCappedFile(stored.Path, defaultVisionMaxImageBytes)
+	if err != nil {
+		return nil, false
+	}
+	if int64(len(data)) > budget.remainingBytes {
+		return nil, false
+	}
+	mimeType := strings.TrimSpace(stored.Mime)
+	if mimeType == "" {
+		mimeType = strings.TrimSpace(att.Mime)
+	}
+	if mimeType == "" {
+		mimeType = mime.TypeByExtension(filepath.Ext(stored.Path))
+	}
+	if !strings.HasPrefix(strings.ToLower(mimeType), "image/") {
+		return nil, false
+	}
+	budget.remainingImages--
+	budget.remainingBytes -= int64(len(data))
+	return map[string]any{
+		"type": "image_url",
+		"image_url": map[string]any{
+			"url": "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data),
+		},
+	}, true
+}
+
+func readCappedFile(path string, maxBytes int64) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("file exceeds vision limit")
+	}
+	return data, nil
+}
+
+func (b *Builder) composeSystemPrompt(pinnedText, memText, identityText, staticMemoryText, heartbeatText, structuredContextText, docContextText, workspaceContextText string) string {
+	maxEach := b.BootstrapMaxChars
+	if maxEach <= 0 {
+		maxEach = defaultBootstrapMaxChars
+	}
+	maxTotal := b.BootstrapTotalMaxChars
+	if maxTotal <= 0 {
+		maxTotal = defaultBootstrapTotalMaxChars
+	}
+	skillsMax := b.SkillsSummaryMax
+	if skillsMax <= 0 {
+		skillsMax = defaultSkillsSummaryMax
+	}
+
+	soul := strings.TrimSpace(b.Soul)
+	if soul == "" {
+		soul = DefaultSoul
+	}
+	inst := strings.TrimSpace(b.AgentInstructions)
+	if inst == "" {
+		inst = DefaultAgentInstructions
+	}
+	notes := strings.TrimSpace(b.ToolNotes)
+	if notes == "" {
+		notes = DefaultToolNotes
+	}
+
+	type section struct {
+		title string
+		text  string
+	}
+	// Build sections in order, omitting optional ones when empty.
+	sections := []section{
+		{title: "SOUL.md", text: truncateText(soul, maxEach)},
+	}
+	if t := strings.TrimSpace(identityText); t != "" {
+		sections = append(sections, section{title: "Identity", text: truncateText(t, maxEach)})
+	}
+	sections = append(sections, section{title: "AGENTS.md", text: truncateText(inst, maxEach)})
+	if t := strings.TrimSpace(staticMemoryText); t != "" {
+		sections = append(sections, section{title: "Static Memory", text: truncateText(t, maxEach)})
+	}
+	sections = append(sections, section{title: "TOOLS.md", text: truncateText(notes, maxEach)})
+	if t := strings.TrimSpace(heartbeatText); t != "" {
+		sections = append(sections, section{title: "Heartbeat", text: truncateText(t, maxEach)})
+	}
+	if t := strings.TrimSpace(structuredContextText); t != "" {
+		sections = append(sections, section{title: "Structured Trigger Context", text: truncateText(t, maxEach)})
+	}
+	sections = append(sections, section{title: "Pinned Memory", text: pinnedText})
+	sections = append(sections, section{title: "Retrieved Memory", text: memText})
+	if t := strings.TrimSpace(workspaceContextText); t != "" {
+		sections = append(sections, section{title: "Workspace Context", text: truncateText(t, maxEach)})
+	}
+	if t := strings.TrimSpace(docContextText); t != "" {
+		sections = append(sections, section{title: "Indexed File Context", text: truncateText(t, maxEach)})
+	}
+	sections = append(sections, section{title: "Skills Inventory", text: b.Skills.ModelSummary(skillsMax)})
+
+	var out strings.Builder
+	out.WriteString("# System Prompt\n")
+	for _, s := range sections {
+		out.WriteString("\n## ")
+		out.WriteString(s.title)
+		out.WriteString("\n")
+		out.WriteString(strings.TrimSpace(s.text))
+		out.WriteString("\n")
+	}
+	return truncateText(strings.TrimSpace(out.String()), maxTotal)
+}
+
+func formatStructuredEventContext(meta map[string]any, max int) string {
+	if len(meta) == 0 {
+		return ""
+	}
+	raw, ok := meta[triggers.MetaKeyStructuredEvent]
+	if !ok {
+		return ""
+	}
+	return truncateText(triggers.StructuredEventJSON(raw), max)
+}
+
+func truncateText(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if max > 0 && len(s) > max {
+		return strings.TrimSpace(s[:max]) + "\n…[truncated]"
+	}
+	return s
+}
+
+func formatPinned(m map[string]string) string {
+	if len(m) == 0 {
+		return "(none)"
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		v := strings.TrimSpace(m[k])
+		if v == "" {
+			continue
+		}
+		b.WriteString(fmt.Sprintf("- %s: %s\n", k, oneLine(v, defaultPinnedOneLineMax)))
+	}
+	s := strings.TrimSpace(b.String())
+	if s == "" {
+		return "(none)"
+	}
+	return s
+}
+
+func formatRetrieved(ms []memory.Retrieved) string {
+	if len(ms) == 0 {
+		return "(none)"
+	}
+	var b strings.Builder
+	for i, m := range ms {
+		b.WriteString(fmt.Sprintf("%d) [%s] %s\n", i+1, m.Source, oneLine(m.Text, defaultRetrievedOneLineMax)))
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func oneLine(s string, max int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.Join(strings.Fields(s), " ")
+	if max > 0 && len(s) > max {
+		s = s[:max] + "…"
+	}
+	return s
+}
+
+func cachedEmbed(ctx context.Context, provider *providers.Client, model, input string) ([]float32, error) {
+	input = strings.TrimSpace(input)
+	model = strings.TrimSpace(model)
+	if provider == nil {
+		return nil, fmt.Errorf("provider not configured")
+	}
+	if model == "" || input == "" {
+		return provider.Embed(ctx, model, input)
+	}
+	key := embedCacheKey{model: model, input: input}
+	now := time.Now()
+	promptEmbedCache.mu.Lock()
+	if entry, ok := promptEmbedCache.entries[key]; ok && entry.expiresAt.After(now) {
+		entry.usedAt = now
+		promptEmbedCache.entries[key] = entry
+		vec := append([]float32(nil), entry.vec...)
+		promptEmbedCache.mu.Unlock()
+		return vec, nil
+	}
+	promptEmbedCache.mu.Unlock()
+
+	vec, err := provider.Embed(ctx, model, input)
+	if err != nil {
+		return nil, err
+	}
+	promptEmbedCache.mu.Lock()
+	if len(promptEmbedCache.entries) >= embedCacheMaxEntries {
+		var oldestKey embedCacheKey
+		var oldest time.Time
+		for k, entry := range promptEmbedCache.entries {
+			if oldest.IsZero() || entry.usedAt.Before(oldest) {
+				oldest = entry.usedAt
+				oldestKey = k
+			}
+		}
+		delete(promptEmbedCache.entries, oldestKey)
+	}
+	promptEmbedCache.entries[key] = embedCacheEntry{
+		vec:       append([]float32(nil), vec...),
+		expiresAt: now.Add(embedCacheTTL),
+		usedAt:    now,
+	}
+	promptEmbedCache.mu.Unlock()
+	return vec, nil
+}
 ````
 
 ## File: internal/db/store.go
@@ -13604,15 +15952,49 @@ func (d *DB) StreamMemoryNotesLimit(ctx context.Context, sessionKey string, limi
 }
 
 type FTSCandidate struct {
-	ID   int64
-	Text string
-	Rank float64
+	ID        int64
+	Text      string
+	Rank      float64
+	CreatedAt int64
 }
 
 type VecCandidateRow struct {
-	ID       int64
-	Text     string
-	Distance float64
+	ID        int64
+	Text      string
+	Distance  float64
+	CreatedAt int64
+}
+
+func (d *DB) SearchMemoryVectors(ctx context.Context, sessionKey string, queryVec []byte, k int) ([]VecCandidateRow, error) {
+	if d == nil || k <= 0 || len(queryVec) == 0 {
+		return nil, nil
+	}
+	scopes := []string{scope.GlobalMemoryScope}
+	if trimmed := strings.TrimSpace(sessionKey); trimmed != "" && trimmed != scope.GlobalMemoryScope {
+		scopes = append(scopes, normalizeMemorySession(trimmed))
+	}
+	seen := make(map[int64]struct{}, k*len(scopes))
+	out := make([]VecCandidateRow, 0, k*len(scopes))
+	for _, memoryScope := range scopes {
+		rows, err := d.SearchVecScope(ctx, memoryScope, queryVec, k)
+		if err != nil {
+			return nil, err
+		}
+		if len(rows) == 0 {
+			rows, err = d.SearchVecScopeFallback(ctx, memoryScope, queryVec, k)
+			if err != nil {
+				return nil, err
+			}
+		}
+		for _, row := range rows {
+			if _, ok := seen[row.ID]; ok {
+				continue
+			}
+			seen[row.ID] = struct{}{}
+			out = append(out, row)
+		}
+	}
+	return out, nil
 }
 
 func (d *DB) SearchVecScope(ctx context.Context, sessionKey string, queryVec []byte, k int) ([]VecCandidateRow, error) {
@@ -13630,9 +16012,10 @@ func (d *DB) SearchVecScope(ctx context.Context, sessionKey string, queryVec []b
 		return nil, nil
 	}
 	rows, err := d.VecSQL.QueryContext(ctx,
-		`SELECT note_id, text, distance
+		`SELECT memory_vec.note_id, memory_vec.text, distance, memory_notes.created_at
 		 FROM memory_vec
-		 WHERE embedding MATCH ? AND k = ? AND session_key = ?
+		 JOIN memory_notes ON memory_notes.id = memory_vec.note_id
+		 WHERE memory_vec.embedding MATCH ? AND memory_vec.k = ? AND memory_vec.session_key = ?
 		 ORDER BY distance`,
 		queryVec, k, normalizeMemorySession(sessionKey))
 	if err != nil {
@@ -13650,7 +16033,7 @@ func (d *DB) SearchVecScopeFallback(ctx context.Context, sessionKey string, quer
 		return nil, nil
 	}
 	rows, err := d.VecSQL.QueryContext(ctx,
-		`SELECT id, text, vec_distance_cosine(embedding, ?) AS distance
+		`SELECT id, text, vec_distance_cosine(embedding, ?) AS distance, created_at
 		 FROM memory_notes
 		 WHERE session_key=? AND typeof(embedding)='blob' AND length(embedding)=?
 		 ORDER BY distance ASC
@@ -13668,7 +16051,7 @@ func scanVecCandidateRows(rows *sql.Rows) ([]VecCandidateRow, error) {
 	for rows.Next() {
 		var item VecCandidateRow
 		var distance sql.NullFloat64
-		if err := rows.Scan(&item.ID, &item.Text, &distance); err != nil {
+		if err := rows.Scan(&item.ID, &item.Text, &distance, &item.CreatedAt); err != nil {
 			return nil, err
 		}
 		if !distance.Valid {
@@ -13684,7 +16067,7 @@ func (d *DB) SearchFTS(ctx context.Context, sessionKey, query string, k int) ([]
 	sessionKey = normalizeMemorySession(sessionKey)
 	// bm25 lower is better; invert
 	rows, err := d.SQL.QueryContext(ctx,
-		`SELECT memory_fts.rowid, memory_fts.text, bm25(memory_fts) as rank
+		`SELECT memory_fts.rowid, memory_fts.text, bm25(memory_fts) as rank, memory_notes.created_at
 		 FROM memory_fts
 		 JOIN memory_notes ON memory_notes.id = memory_fts.rowid
 		 WHERE memory_fts MATCH ? AND memory_notes.session_key IN (?, ?)
@@ -13699,10 +16082,11 @@ func (d *DB) SearchFTS(ctx context.Context, sessionKey, query string, k int) ([]
 		var id int64
 		var text string
 		var rank float64
-		if err := rows.Scan(&id, &text, &rank); err != nil {
+		var createdAt int64
+		if err := rows.Scan(&id, &text, &rank, &createdAt); err != nil {
 			return nil, err
 		}
-		out = append(out, FTSCandidate{ID: id, Text: text, Rank: rank})
+		out = append(out, FTSCandidate{ID: id, Text: text, Rank: rank, CreatedAt: createdAt})
 	}
 	return out, rows.Err()
 }
@@ -14264,553 +16648,6 @@ func (d *DB) GetLastMessagesScoped(ctx context.Context, sessionKey string, limit
 }
 ````
 
-## File: internal/agent/prompt.go
-````go
-package agent
-
-import (
-	"context"
-	"encoding/base64"
-	"encoding/json"
-	"fmt"
-	"io"
-	"mime"
-	"os"
-	"path/filepath"
-	"sort"
-	"strings"
-	"sync"
-	"time"
-
-	"or3-intern/internal/artifacts"
-	"or3-intern/internal/db"
-	"or3-intern/internal/heartbeat"
-	"or3-intern/internal/memory"
-	"or3-intern/internal/providers"
-	"or3-intern/internal/scope"
-	"or3-intern/internal/skills"
-	"or3-intern/internal/triggers"
-)
-
-const DefaultSoul = `# Soul
-I am or3-intern, a personal AI assistant.
-- Be clear and direct
-- Prefer deterministic, bounded work
-- Use tools when needed; keep outputs short
-`
-
-const DefaultAgentInstructions = `# Agent Instructions
-- Use pinned memory for stable facts.
-- Retrieve relevant memory snippets before answering.
-- Keep constant RAM usage: last N messages + top K memories only.
-- Large tool outputs must spill to artifacts.
-`
-
-const DefaultToolNotes = `# Tool Usage Notes
-exec:
-- Commands have a timeout
-- Dangerous commands blocked
-- Output truncated
-cron:
-- Use cron tool for scheduled reminders.
-`
-
-const (
-	defaultBootstrapMaxChars      = 20000
-	defaultBootstrapTotalMaxChars = 150000
-	defaultPinnedOneLineMax       = 220
-	defaultRetrievedOneLineMax    = 240
-	defaultSkillsSummaryMax       = 80
-	defaultVisionMaxImages        = 4
-	defaultVisionMaxImageBytes    = 4 << 20
-	defaultVisionTotalBytes       = 8 << 20
-	embedCacheTTL                 = 5 * time.Minute
-	embedCacheMaxEntries          = 128
-)
-
-type embedCacheKey struct {
-	model string
-	input string
-}
-
-type embedCacheEntry struct {
-	vec       []float32
-	expiresAt time.Time
-	usedAt    time.Time
-}
-
-var promptEmbedCache = struct {
-	mu      sync.Mutex
-	entries map[embedCacheKey]embedCacheEntry
-}{entries: map[embedCacheKey]embedCacheEntry{}}
-
-type PromptParts struct {
-	System  []providers.ChatMessage
-	History []providers.ChatMessage
-}
-
-// BuildOptions holds options for building a prompt.
-type BuildOptions struct {
-	SessionKey  string
-	UserMessage string
-	Autonomous  bool // true for cron/webhook/file-change events
-	EventMeta   map[string]any
-}
-
-type Builder struct {
-	DB           *db.DB
-	Artifacts    *artifacts.Store
-	Skills       skills.Inventory
-	Mem          *memory.Retriever
-	Provider     *providers.Client
-	EmbedModel   string
-	EnableVision bool
-
-	Soul                   string
-	AgentInstructions      string
-	ToolNotes              string
-	BootstrapMaxChars      int
-	BootstrapTotalMaxChars int
-	SkillsSummaryMax       int
-
-	HistoryMax int
-	VectorK    int
-	FTSK       int
-	TopK       int
-
-	// New fields for lightweight OpenClaw parity
-	IdentityText       string               // content of IDENTITY.md
-	StaticMemory       string               // content of MEMORY.md
-	HeartbeatText      string               // content of HEARTBEAT.md – injected only for autonomous turns
-	HeartbeatTasksFile string               // configured heartbeat file path for per-turn refresh
-	DocRetriever       *memory.DocRetriever // for indexed file context
-	DocRetrieveLimit   int                  // max docs to retrieve
-	WorkspaceDir       string
-}
-
-// Build builds a prompt snapshot. It is a convenience wrapper around BuildWithOptions.
-func (b *Builder) Build(ctx context.Context, sessionKey string, userMessage string) (PromptParts, []memory.Retrieved, error) {
-	return b.BuildWithOptions(ctx, BuildOptions{SessionKey: sessionKey, UserMessage: userMessage})
-}
-
-// BuildWithOptions builds a prompt snapshot using the provided options.
-func (b *Builder) BuildWithOptions(ctx context.Context, opts BuildOptions) (PromptParts, []memory.Retrieved, error) {
-	scopeKey := opts.SessionKey
-	if b.DB != nil && strings.TrimSpace(opts.SessionKey) != "" {
-		if resolved, err := b.DB.ResolveScopeKey(ctx, opts.SessionKey); err == nil && strings.TrimSpace(resolved) != "" {
-			scopeKey = resolved
-		}
-	}
-	pinned, err := b.DB.GetPinned(ctx, scopeKey)
-	if err != nil {
-		return PromptParts{}, nil, err
-	}
-	pinnedText := formatPinned(pinned)
-
-	// embed and retrieve
-	var retrieved []memory.Retrieved
-	if b.Mem != nil && b.Provider != nil && strings.TrimSpace(opts.UserMessage) != "" {
-		vec, err := cachedEmbed(ctx, b.Provider, b.EmbedModel, opts.UserMessage)
-		if err == nil {
-			retrieved, _ = b.Mem.Retrieve(ctx, scopeKey, opts.UserMessage, vec, b.VectorK, b.FTSK, b.TopK)
-		}
-	}
-	memText := formatRetrieved(retrieved)
-
-	// indexed doc context
-	var docContextText string
-	if b.DocRetriever != nil && strings.TrimSpace(opts.UserMessage) != "" {
-		limit := b.DocRetrieveLimit
-		if limit <= 0 {
-			limit = 5
-		}
-		docs, _ := b.DocRetriever.RetrieveDocs(ctx, scope.GlobalMemoryScope, opts.UserMessage, limit)
-		if len(docs) > 0 {
-			var sb strings.Builder
-			for i, d := range docs {
-				sb.WriteString(fmt.Sprintf("%d) [%s] %s\n", i+1, d.Path, d.Excerpt))
-			}
-			docContextText = strings.TrimSpace(sb.String())
-		}
-	}
-	workspaceContextText := memory.BuildWorkspaceContext(memory.WorkspaceContextConfig{
-		WorkspaceDir: b.WorkspaceDir,
-	}, opts.UserMessage)
-
-	histRows, err := b.DB.GetLastMessagesScoped(ctx, opts.SessionKey, b.HistoryMax)
-	if err != nil {
-		return PromptParts{}, nil, err
-	}
-	visionBudget := newVisionBudget()
-	hist := make([]providers.ChatMessage, 0, len(histRows))
-	for _, m := range histRows {
-		msg := providers.ChatMessage{Role: m.Role, Content: m.Content}
-		var payload map[string]any
-		if err := json.Unmarshal([]byte(m.PayloadJSON), &payload); err == nil {
-			if m.Role == "assistant" {
-				if raw, ok := payload["tool_calls"]; ok {
-					b, _ := json.Marshal(raw)
-					var tcs []providers.ToolCall
-					if err := json.Unmarshal(b, &tcs); err == nil {
-						msg.ToolCalls = tcs
-					}
-				}
-			}
-			if m.Role == "user" {
-				msg.Content = b.buildUserContent(ctx, m.Content, attachmentsFromPayload(payload), visionBudget)
-			}
-		}
-		hist = append(hist, msg)
-	}
-
-	heartbeat := ""
-	structuredContext := ""
-	structuredMax := b.BootstrapMaxChars
-	if structuredMax <= 0 {
-		structuredMax = defaultBootstrapMaxChars
-	}
-	if opts.Autonomous {
-		heartbeat = b.currentHeartbeatText()
-		structuredContext = formatStructuredEventContext(opts.EventMeta, structuredMax)
-	}
-	sysText := b.composeSystemPrompt(pinnedText, memText, b.IdentityText, b.StaticMemory, heartbeat, structuredContext, docContextText, workspaceContextText)
-	sys := []providers.ChatMessage{
-		{Role: "system", Content: sysText},
-	}
-	return PromptParts{System: sys, History: hist}, retrieved, nil
-}
-
-func (b *Builder) currentHeartbeatText() string {
-	if b == nil {
-		return ""
-	}
-	if path, text, err := heartbeat.LoadTasksFile(b.HeartbeatTasksFile, b.WorkspaceDir); err == nil && strings.TrimSpace(path) != "" {
-		if heartbeat.HasActiveInstructions(text) {
-			return text
-		}
-		return ""
-	}
-	return strings.TrimSpace(b.HeartbeatText)
-}
-
-func attachmentsFromPayload(payload map[string]any) []artifacts.Attachment {
-	if len(payload) == 0 {
-		return nil
-	}
-	raw := payload["attachments"]
-	if raw == nil {
-		if meta, ok := payload["meta"].(map[string]any); ok {
-			raw = meta["attachments"]
-		}
-	}
-	if raw == nil {
-		return nil
-	}
-	b, _ := json.Marshal(raw)
-	var atts []artifacts.Attachment
-	if err := json.Unmarshal(b, &atts); err != nil {
-		return nil
-	}
-	out := make([]artifacts.Attachment, 0, len(atts))
-	for _, att := range atts {
-		if strings.TrimSpace(att.ArtifactID) == "" {
-			continue
-		}
-		if strings.TrimSpace(att.Filename) == "" {
-			att.Filename = "attachment"
-		}
-		if strings.TrimSpace(att.Kind) == "" {
-			att.Kind = artifacts.DetectKind(att.Filename, att.Mime)
-		}
-		out = append(out, att)
-	}
-	return out
-}
-
-type visionBudget struct {
-	remainingImages int
-	remainingBytes  int64
-}
-
-func newVisionBudget() *visionBudget {
-	return &visionBudget{
-		remainingImages: defaultVisionMaxImages,
-		remainingBytes:  defaultVisionTotalBytes,
-	}
-}
-
-func (b *Builder) buildUserContent(ctx context.Context, text string, atts []artifacts.Attachment, budget *visionBudget) any {
-	if !b.EnableVision || b.Artifacts == nil || len(atts) == 0 {
-		return text
-	}
-	parts := make([]map[string]any, 0, len(atts)+1)
-	imageParts := 0
-	if strings.TrimSpace(text) != "" {
-		parts = append(parts, map[string]any{
-			"type": "text",
-			"text": text,
-		})
-	}
-	for _, att := range atts {
-		if strings.TrimSpace(att.Kind) != artifacts.KindImage && !strings.HasPrefix(strings.ToLower(strings.TrimSpace(att.Mime)), "image/") {
-			continue
-		}
-		part, ok := b.imagePart(ctx, att, budget)
-		if !ok {
-			continue
-		}
-		parts = append(parts, part)
-		imageParts++
-	}
-	if imageParts == 0 {
-		return text
-	}
-	return parts
-}
-
-func (b *Builder) imagePart(ctx context.Context, att artifacts.Attachment, budget *visionBudget) (map[string]any, bool) {
-	if budget == nil || budget.remainingImages <= 0 || budget.remainingBytes <= 0 {
-		return nil, false
-	}
-	stored, err := b.Artifacts.Lookup(ctx, att.ArtifactID)
-	if err != nil {
-		return nil, false
-	}
-	sizeBytes := stored.SizeBytes
-	if sizeBytes <= 0 {
-		info, err := os.Stat(stored.Path)
-		if err != nil {
-			return nil, false
-		}
-		sizeBytes = info.Size()
-	}
-	if sizeBytes <= 0 || sizeBytes > defaultVisionMaxImageBytes || sizeBytes > budget.remainingBytes {
-		return nil, false
-	}
-	data, err := readCappedFile(stored.Path, defaultVisionMaxImageBytes)
-	if err != nil {
-		return nil, false
-	}
-	if int64(len(data)) > budget.remainingBytes {
-		return nil, false
-	}
-	mimeType := strings.TrimSpace(stored.Mime)
-	if mimeType == "" {
-		mimeType = strings.TrimSpace(att.Mime)
-	}
-	if mimeType == "" {
-		mimeType = mime.TypeByExtension(filepath.Ext(stored.Path))
-	}
-	if !strings.HasPrefix(strings.ToLower(mimeType), "image/") {
-		return nil, false
-	}
-	budget.remainingImages--
-	budget.remainingBytes -= int64(len(data))
-	return map[string]any{
-		"type": "image_url",
-		"image_url": map[string]any{
-			"url": "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data),
-		},
-	}, true
-}
-
-func readCappedFile(path string, maxBytes int64) ([]byte, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) > maxBytes {
-		return nil, fmt.Errorf("file exceeds vision limit")
-	}
-	return data, nil
-}
-
-func (b *Builder) composeSystemPrompt(pinnedText, memText, identityText, staticMemoryText, heartbeatText, structuredContextText, docContextText, workspaceContextText string) string {
-	maxEach := b.BootstrapMaxChars
-	if maxEach <= 0 {
-		maxEach = defaultBootstrapMaxChars
-	}
-	maxTotal := b.BootstrapTotalMaxChars
-	if maxTotal <= 0 {
-		maxTotal = defaultBootstrapTotalMaxChars
-	}
-	skillsMax := b.SkillsSummaryMax
-	if skillsMax <= 0 {
-		skillsMax = defaultSkillsSummaryMax
-	}
-
-	soul := strings.TrimSpace(b.Soul)
-	if soul == "" {
-		soul = DefaultSoul
-	}
-	inst := strings.TrimSpace(b.AgentInstructions)
-	if inst == "" {
-		inst = DefaultAgentInstructions
-	}
-	notes := strings.TrimSpace(b.ToolNotes)
-	if notes == "" {
-		notes = DefaultToolNotes
-	}
-
-	type section struct {
-		title string
-		text  string
-	}
-	// Build sections in order, omitting optional ones when empty.
-	sections := []section{
-		{title: "SOUL.md", text: truncateText(soul, maxEach)},
-	}
-	if t := strings.TrimSpace(identityText); t != "" {
-		sections = append(sections, section{title: "Identity", text: truncateText(t, maxEach)})
-	}
-	sections = append(sections, section{title: "AGENTS.md", text: truncateText(inst, maxEach)})
-	if t := strings.TrimSpace(staticMemoryText); t != "" {
-		sections = append(sections, section{title: "Static Memory", text: truncateText(t, maxEach)})
-	}
-	sections = append(sections, section{title: "TOOLS.md", text: truncateText(notes, maxEach)})
-	if t := strings.TrimSpace(heartbeatText); t != "" {
-		sections = append(sections, section{title: "Heartbeat", text: truncateText(t, maxEach)})
-	}
-	if t := strings.TrimSpace(structuredContextText); t != "" {
-		sections = append(sections, section{title: "Structured Trigger Context", text: truncateText(t, maxEach)})
-	}
-	sections = append(sections, section{title: "Pinned Memory", text: pinnedText})
-	sections = append(sections, section{title: "Retrieved Memory", text: memText})
-	if t := strings.TrimSpace(workspaceContextText); t != "" {
-		sections = append(sections, section{title: "Workspace Context", text: truncateText(t, maxEach)})
-	}
-	if t := strings.TrimSpace(docContextText); t != "" {
-		sections = append(sections, section{title: "Indexed File Context", text: truncateText(t, maxEach)})
-	}
-	sections = append(sections, section{title: "Skills Inventory", text: b.Skills.ModelSummary(skillsMax)})
-
-	var out strings.Builder
-	out.WriteString("# System Prompt\n")
-	for _, s := range sections {
-		out.WriteString("\n## ")
-		out.WriteString(s.title)
-		out.WriteString("\n")
-		out.WriteString(strings.TrimSpace(s.text))
-		out.WriteString("\n")
-	}
-	return truncateText(strings.TrimSpace(out.String()), maxTotal)
-}
-
-func formatStructuredEventContext(meta map[string]any, max int) string {
-	if len(meta) == 0 {
-		return ""
-	}
-	raw, ok := meta[triggers.MetaKeyStructuredEvent]
-	if !ok {
-		return ""
-	}
-	return truncateText(triggers.StructuredEventJSON(raw), max)
-}
-
-func truncateText(s string, max int) string {
-	s = strings.TrimSpace(s)
-	if max > 0 && len(s) > max {
-		return strings.TrimSpace(s[:max]) + "\n…[truncated]"
-	}
-	return s
-}
-
-func formatPinned(m map[string]string) string {
-	if len(m) == 0 {
-		return "(none)"
-	}
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	var b strings.Builder
-	for _, k := range keys {
-		v := strings.TrimSpace(m[k])
-		if v == "" {
-			continue
-		}
-		b.WriteString(fmt.Sprintf("- %s: %s\n", k, oneLine(v, defaultPinnedOneLineMax)))
-	}
-	s := strings.TrimSpace(b.String())
-	if s == "" {
-		return "(none)"
-	}
-	return s
-}
-
-func formatRetrieved(ms []memory.Retrieved) string {
-	if len(ms) == 0 {
-		return "(none)"
-	}
-	var b strings.Builder
-	for i, m := range ms {
-		b.WriteString(fmt.Sprintf("%d) [%s] %s\n", i+1, m.Source, oneLine(m.Text, defaultRetrievedOneLineMax)))
-	}
-	return strings.TrimSpace(b.String())
-}
-
-func oneLine(s string, max int) string {
-	s = strings.ReplaceAll(s, "\n", " ")
-	s = strings.Join(strings.Fields(s), " ")
-	if max > 0 && len(s) > max {
-		s = s[:max] + "…"
-	}
-	return s
-}
-
-func cachedEmbed(ctx context.Context, provider *providers.Client, model, input string) ([]float32, error) {
-	input = strings.TrimSpace(input)
-	model = strings.TrimSpace(model)
-	if provider == nil {
-		return nil, fmt.Errorf("provider not configured")
-	}
-	if model == "" || input == "" {
-		return provider.Embed(ctx, model, input)
-	}
-	key := embedCacheKey{model: model, input: input}
-	now := time.Now()
-	promptEmbedCache.mu.Lock()
-	if entry, ok := promptEmbedCache.entries[key]; ok && entry.expiresAt.After(now) {
-		entry.usedAt = now
-		promptEmbedCache.entries[key] = entry
-		vec := append([]float32(nil), entry.vec...)
-		promptEmbedCache.mu.Unlock()
-		return vec, nil
-	}
-	promptEmbedCache.mu.Unlock()
-
-	vec, err := provider.Embed(ctx, model, input)
-	if err != nil {
-		return nil, err
-	}
-	promptEmbedCache.mu.Lock()
-	if len(promptEmbedCache.entries) >= embedCacheMaxEntries {
-		var oldestKey embedCacheKey
-		var oldest time.Time
-		for k, entry := range promptEmbedCache.entries {
-			if oldest.IsZero() || entry.usedAt.Before(oldest) {
-				oldest = entry.usedAt
-				oldestKey = k
-			}
-		}
-		delete(promptEmbedCache.entries, oldestKey)
-	}
-	promptEmbedCache.entries[key] = embedCacheEntry{
-		vec:       append([]float32(nil), vec...),
-		expiresAt: now.Add(embedCacheTTL),
-		usedAt:    now,
-	}
-	promptEmbedCache.mu.Unlock()
-	return vec, nil
-}
-````
-
 ## File: README.md
 ````markdown
 # or3-intern (v1)
@@ -14863,7 +16700,7 @@ Phase 1 hardening is now wired into the default runtime profile:
 - file tools stay workspace-rooted by default
 - external channels stay closed unless explicitly allowlisted or opened
 - child processes use a scrubbed environment allowlist instead of inheriting the full parent env
-- `exec` prefers `program` + `args`; legacy shell commands remain available only through privileged tool policy
+- `exec` prefers `program` + `args`; legacy shell commands are disabled by default and require explicit `hardening.enableExecShell` opt-in
 - tool calls are checked against capability tiers and bounded per-session quotas
 - external channel session keys can isolate peers so unrelated senders do not share the same conversation state
 
@@ -14874,6 +16711,7 @@ Example hardening block:
   "hardening": {
     "guardedTools": false,
     "privilegedTools": false,
+    "enableExecShell": false,
     "execAllowedPrograms": ["cat", "echo", "find", "git", "grep", "head", "ls", "pwd", "sed", "tail"],
     "childEnvAllowlist": ["PATH", "HOME", "TMPDIR", "TMP", "TEMP"],
     "isolateChannelPeers": true,
@@ -14890,7 +16728,7 @@ Example hardening block:
 
   Phase 2 adds four narrow hardening layers on top of that baseline:
 
-  - skills can declare permission metadata and default to a quarantined execution state until explicitly approved in `skills.policy.approved`
+  - skills can declare permission metadata plus a `tools` allowlist, and those bounds are enforced during explicit skill execution while script-capable skills still default to a quarantined state until explicitly approved in `skills.policy.approved`
   - heartbeat, webhook, and file-watch turns attach a bounded `structured_event` payload in event metadata and surface it in the autonomous system prompt
   - privileged shell exec and `run_skill_script` can optionally route through a Bubblewrap wrapper via `hardening.sandbox`
   - `or3-intern doctor` audits the current config for common unsafe settings and supports `--strict` for CI-style failures
@@ -15249,7 +17087,13 @@ Autonomous trigger producers now attach a bounded `structured_event` object in `
 - `webhook` includes route, request id, remote address, content type, and a bounded body preview
 - `filewatch` includes path, size, and mtime
 
-The runtime still keeps the current plain-text trigger message for backward compatibility, but autonomous prompts also receive the structured payload under a dedicated system-prompt section.
+If trigger content also contains a `structured_tasks` envelope, the runtime validates and executes those tool calls directly through the normal tool registry, quotas, and guards without sending the trigger instructions to the model. Plain-text trigger messages remain supported as the fallback path, and autonomous prompts still receive the bounded `structured_event` payload under a dedicated system-prompt section.
+
+Supported `structured_tasks` forms are intentionally lightweight:
+
+- raw JSON like `{"tasks":[{"tool":"send_message","params":{"text":"done"}}]}`
+- a top-level `structured_tasks` field inside a larger JSON object
+- a fenced code block tagged `or3-tasks`, `structured-tasks`, or `autonomous-tasks`
 
 ## New Features
 
@@ -15386,6 +17230,13 @@ Per-skill config is additive and lightweight:
         }
       }
     },
+    "policy": {
+      "quarantineByDefault": true,
+      "approved": ["my-local-skill"],
+      "trustedOwners": ["openclaw", "my-team"],
+      "blockedOwners": ["known-bad-publisher"],
+      "trustedRegistries": ["https://clawhub.ai"]
+    },
     "clawHub": {
       "siteUrl": "https://clawhub.ai",
       "registryUrl": "https://clawhub.ai",
@@ -15422,8 +17273,12 @@ For `command-dispatch: tool`, `or3-intern` forwards the raw argument string dire
 Trust model:
 
 - Treat third-party skills as untrusted input.
+- Managed installs now persist origin metadata including registry, publisher, fingerprint, installed version, and install-time scan findings in `.clawhub/origin.json`.
+- Install-time scanning flags obvious high-risk bundles such as embedded credential material or downloader-to-shell patterns; flagged bundles stay quarantined or blocked until reviewed.
+- `trustedOwners` and `trustedRegistries` let you auto-approve managed skills from known publishers, while `blockedOwners` hard-blocks known-bad publishers even if the bundle otherwise parses cleanly.
+- Local edits after installation are treated as trust drift and re-quarantine the skill until it is reviewed or reinstalled.
 - Installer hints from skill metadata are informational only; `or3-intern` does not auto-run them.
-- Not every ClawHub skill is portable. Skills that depend on unsupported OpenClaw-only tools, custom frontmatter-defined tools, Nix/plugin flows, or remote node assumptions are reported as unavailable instead of failing silently.
+- Not every ClawHub skill is portable. Skills that depend on unsupported OpenClaw-only tools, malformed `tools` declarations, Nix/plugin flows, or remote node assumptions are reported as unavailable instead of failing silently.
 
 ### Triggers
 
@@ -15458,7 +17313,7 @@ The webhook server listens at `/webhook` (fixed path).
 }
 ```
 
-Both trigger types use `HEARTBEAT.md` instructions when dispatching autonomous turns.
+Both trigger types use `HEARTBEAT.md` instructions when dispatching autonomous turns, and either trigger can switch to deterministic execution by supplying a valid `structured_tasks` payload.
 
 ### Heartbeat Service
 
@@ -15480,6 +17335,7 @@ Heartbeat is a timer-driven autonomous trigger that runs inside `or3-intern serv
 - The interval is configured in minutes and normalized to a sane minimum.
 - Heartbeat uses its own session key so its history and long-term memory stay deterministic across ticks.
 - `HEARTBEAT.md` is reread on each autonomous turn, so edits apply without restarting `serve`.
+- If `HEARTBEAT.md` contains a valid `structured_tasks` payload, heartbeat executes those validated tool calls directly instead of routing the instructions through the model.
 - Empty files, comment-only files, and missing files are skipped instead of triggering a model call.
 - Heartbeat turns do not auto-send a normal assistant reply anywhere. If the agent should proactively notify someone, it must call `send_message` explicitly.
 
@@ -15572,6 +17428,7 @@ type Config struct {
 type HardeningConfig struct {
 	GuardedTools        bool                 `json:"guardedTools"`
 	PrivilegedTools     bool                 `json:"privilegedTools"`
+	EnableExecShell     bool                 `json:"enableExecShell"`
 	ExecAllowedPrograms []string             `json:"execAllowedPrograms"`
 	ChildEnvAllowlist   []string             `json:"childEnvAllowlist"`
 	IsolateChannelPeers bool                 `json:"isolateChannelPeers"`
@@ -15754,6 +17611,9 @@ type SkillsConfig struct {
 type SkillPolicyConfig struct {
 	QuarantineByDefault bool     `json:"quarantineByDefault"`
 	Approved            []string `json:"approved"`
+	TrustedOwners       []string `json:"trustedOwners"`
+	BlockedOwners       []string `json:"blockedOwners"`
+	TrustedRegistries   []string `json:"trustedRegistries"`
 }
 
 type SkillsLoadConfig struct {
@@ -15901,6 +17761,9 @@ func Default() Config {
 			Policy: SkillPolicyConfig{
 				QuarantineByDefault: true,
 				Approved:            []string{},
+				TrustedOwners:       []string{},
+				BlockedOwners:       []string{},
+				TrustedRegistries:   []string{},
 			},
 			Load: SkillsLoadConfig{
 				Watch:           false,
@@ -15975,6 +17838,7 @@ func Default() Config {
 		Hardening: HardeningConfig{
 			GuardedTools:        false,
 			PrivilegedTools:     false,
+			EnableExecShell:     false,
 			ExecAllowedPrograms: []string{"cat", "echo", "find", "git", "grep", "head", "ls", "pwd", "sed", "tail"},
 			ChildEnvAllowlist:   []string{"PATH", "HOME", "TMPDIR", "TMP", "TEMP"},
 			IsolateChannelPeers: true,
@@ -16270,6 +18134,19 @@ func Load(path string) (Config, error) {
 	if cfg.Skills.Policy.Approved == nil {
 		cfg.Skills.Policy.Approved = []string{}
 	}
+	if cfg.Skills.Policy.TrustedOwners == nil {
+		cfg.Skills.Policy.TrustedOwners = []string{}
+	}
+	if cfg.Skills.Policy.BlockedOwners == nil {
+		cfg.Skills.Policy.BlockedOwners = []string{}
+	}
+	if cfg.Skills.Policy.TrustedRegistries == nil {
+		cfg.Skills.Policy.TrustedRegistries = []string{}
+	}
+	cfg.Skills.Policy.Approved = compactStrings(cfg.Skills.Policy.Approved)
+	cfg.Skills.Policy.TrustedOwners = compactStrings(cfg.Skills.Policy.TrustedOwners)
+	cfg.Skills.Policy.BlockedOwners = compactStrings(cfg.Skills.Policy.BlockedOwners)
+	cfg.Skills.Policy.TrustedRegistries = compactStrings(cfg.Skills.Policy.TrustedRegistries)
 	if cfg.Skills.Entries == nil {
 		cfg.Skills.Entries = map[string]SkillEntryConfig{}
 	}
@@ -16602,6 +18479,10 @@ type Deliverer interface {
 	Deliver(ctx context.Context, channel, to, text string) error
 }
 
+type MetaDeliverer interface {
+	DeliverWithMeta(ctx context.Context, channel, to, text string, meta map[string]any) error
+}
+
 type sessionLock struct {
 	mu   sync.Mutex
 	refs int
@@ -16745,6 +18626,9 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 	if handled, err := r.handleExplicitSkillInvocation(ctx, ev, msgID); handled || err != nil {
 		return err
 	}
+	if handled, err := r.handleStructuredAutonomy(ctx, ev, msgID); handled || err != nil {
+		return err
+	}
 
 	// build prompt
 	if r.Builder == nil {
@@ -16762,12 +18646,13 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 	}
 
 	replyTarget := deliveryTarget(ev)
-	finalText, streamed, err := r.executeConversation(ctx, ev.Type, ev.SessionKey, messages, r.Tools, ev.Channel, replyTarget)
+	replyMeta := channels.ReplyMeta(ev.Meta)
+	finalText, streamed, err := r.executeConversation(ctx, ev.Type, ev.SessionKey, messages, r.Tools, ev.Channel, replyTarget, replyMeta)
 	if err != nil {
 		return err
 	}
 
-	r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, finalText, streamed, shouldAutoDeliver(ev))
+	r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, finalText, replyMeta, streamed, shouldAutoDeliver(ev))
 
 	// best-effort rolling consolidation of old messages into memory notes
 	if r.Consolidator != nil && r.Builder != nil && r.ConsolidationScheduler != nil {
@@ -16851,12 +18736,13 @@ func (r *Runtime) handleExplicitSkillInvocation(ctx context.Context, ev bus.Even
 		return false, nil
 	}
 	replyTarget := deliveryTarget(ev)
+	replyMeta := channels.ReplyMeta(ev.Meta)
 	skill, found := r.Builder.Skills.Get(commandName)
 	if !found {
 		return false, nil
 	}
 	if !skill.UserInvocable {
-		r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, "skill is not user-invocable: "+skill.Name, false, shouldAutoDeliver(ev))
+		r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, "skill is not user-invocable: "+skill.Name, replyMeta, false, shouldAutoDeliver(ev))
 		return true, nil
 	}
 	if !skill.Eligible {
@@ -16869,12 +18755,12 @@ func (r *Runtime) handleExplicitSkillInvocation(ctx context.Context, ev bus.Even
 		if len(reasons) > 0 {
 			message += " (" + strings.Join(reasons, "; ") + ")"
 		}
-		r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, message, false, shouldAutoDeliver(ev))
+		r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, message, replyMeta, false, shouldAutoDeliver(ev))
 		return true, nil
 	}
 	if skill.CommandDispatch == "tool" {
 		text := r.dispatchExplicitSkillTool(ctx, ev, skill, commandName, rawArgs)
-		r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, text, false, shouldAutoDeliver(ev))
+		r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, text, replyMeta, false, shouldAutoDeliver(ev))
 		return true, nil
 	}
 
@@ -16905,11 +18791,12 @@ func (r *Runtime) handleExplicitSkillInvocation(ctx context.Context, ev bus.Even
 		seeded = append(seeded, providers.ChatMessage{Role: "user", Content: promptInput})
 	}
 	runCtx := tools.ContextWithEnv(ctx, r.skillRunEnvFor(skill.Name))
-	finalText, streamed, err := r.executeConversation(runCtx, ev.Type, ev.SessionKey, seeded, r.Tools, ev.Channel, replyTarget)
+	runCtx = tools.ContextWithSkillPolicy(runCtx, skillPolicyForSkill(skill))
+	finalText, streamed, err := r.executeConversation(runCtx, ev.Type, ev.SessionKey, seeded, r.Tools, ev.Channel, replyTarget, replyMeta)
 	if err != nil {
 		return true, err
 	}
-	r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, finalText, streamed, shouldAutoDeliver(ev))
+	r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, finalText, replyMeta, streamed, shouldAutoDeliver(ev))
 	return true, nil
 }
 
@@ -16925,7 +18812,9 @@ func (r *Runtime) dispatchExplicitSkillTool(ctx context.Context, ev bus.Event, s
 	}
 	toolCtx := tools.ContextWithSession(ctx, scopeKey)
 	toolCtx = tools.ContextWithDelivery(toolCtx, ev.Channel, deliveryTarget(ev))
+	toolCtx = tools.ContextWithDeliveryMeta(toolCtx, channels.ReplyMeta(ev.Meta))
 	toolCtx = tools.ContextWithEnv(toolCtx, r.skillRunEnvFor(skill.Name))
+	toolCtx = tools.ContextWithSkillPolicy(toolCtx, skillPolicyForSkill(skill))
 	toolCtx = r.contextWithTrustedToolAccess(toolCtx, ev)
 	toolCtx = tools.ContextWithToolGuard(toolCtx, r.guardToolExecution)
 	params := map[string]any{
@@ -17023,7 +18912,7 @@ func (r *Runtime) RunBackground(ctx context.Context, input BackgroundRunInput) (
 	if reg == nil {
 		reg = r.Tools
 	}
-	finalText, _, err := r.executeConversation(ctx, bus.EventSystem, input.SessionKey, append([]providers.ChatMessage{}, input.PromptSnapshot...), reg, input.Channel, input.ReplyTo)
+	finalText, _, err := r.executeConversation(ctx, bus.EventSystem, input.SessionKey, append([]providers.ChatMessage{}, input.PromptSnapshot...), reg, input.Channel, input.ReplyTo, nil)
 	if err != nil {
 		return BackgroundRunResult{}, err
 	}
@@ -17052,7 +18941,7 @@ func (r *Runtime) handleNewSession(ctx context.Context, ev bus.Event) error {
 		if err := r.Consolidator.ArchiveAll(ctx, ev.SessionKey, historyMax); err != nil {
 			msg := "Memory archival failed, session not cleared. Please try again."
 			if r.Deliver != nil {
-				if derr := r.Deliver.Deliver(ctx, ev.Channel, replyTarget, msg); derr != nil {
+				if derr := r.deliver(ctx, ev.Channel, replyTarget, msg, ev.Meta); derr != nil {
 					log.Printf("deliver failed: %v", derr)
 				}
 			}
@@ -17062,14 +18951,14 @@ func (r *Runtime) handleNewSession(ctx context.Context, ev bus.Event) error {
 	if err := r.DB.ResetSessionHistory(ctx, ev.SessionKey); err != nil {
 		msg := "New session failed. Please try again."
 		if r.Deliver != nil {
-			if derr := r.Deliver.Deliver(ctx, ev.Channel, replyTarget, msg); derr != nil {
+			if derr := r.deliver(ctx, ev.Channel, replyTarget, msg, ev.Meta); derr != nil {
 				log.Printf("deliver failed: %v", derr)
 			}
 		}
 		return nil
 	}
 	if r.Deliver != nil {
-		if err := r.Deliver.Deliver(ctx, ev.Channel, replyTarget, "New session started."); err != nil {
+		if err := r.deliver(ctx, ev.Channel, replyTarget, "New session started.", ev.Meta); err != nil {
 			log.Printf("deliver failed: %v", err)
 		}
 	}
@@ -17087,7 +18976,7 @@ func contentToString(v any) string {
 	return string(b)
 }
 
-func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventType, sessionKey string, messages []providers.ChatMessage, reg *tools.Registry, channel string, replyTo string) (string, bool, error) {
+func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventType, sessionKey string, messages []providers.ChatMessage, reg *tools.Registry, channel string, replyTo string, replyMeta map[string]any) (string, bool, error) {
 	if reg == nil {
 		reg = tools.NewRegistry()
 	}
@@ -17116,7 +19005,12 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 		if r.Streamer != nil {
 			resp, err = r.Provider.ChatStream(ctx, req, func(text string) {
 				swOnce.Do(func() {
-					w, beginErr := r.Streamer.BeginStream(ctx, replyTo, map[string]any{"channel": channel})
+					streamMeta := channels.CloneMeta(replyMeta)
+					if streamMeta == nil {
+						streamMeta = map[string]any{}
+					}
+					streamMeta["channel"] = channel
+					w, beginErr := r.Streamer.BeginStream(ctx, replyTo, streamMeta)
 					if beginErr == nil {
 						sw = w
 					}
@@ -17164,6 +19058,7 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 		for _, tc := range msg.ToolCalls {
 			toolCtx := tools.ContextWithSession(ctx, scopeKey)
 			toolCtx = tools.ContextWithDelivery(toolCtx, channel, replyTo)
+			toolCtx = tools.ContextWithDeliveryMeta(toolCtx, replyMeta)
 			toolCtx = r.contextWithTrustedToolAccess(toolCtx, bus.Event{Type: eventType, SessionKey: sessionKey, Channel: channel})
 			toolCtx = tools.ContextWithToolGuard(toolCtx, r.guardToolExecution)
 			out, err := reg.Execute(toolCtx, tc.Function.Name, tc.Function.Arguments)
@@ -17198,6 +19093,9 @@ func (r *Runtime) guardToolExecution(ctx context.Context, tool tools.Tool, capab
 		capability = tools.CapabilitySafe
 	}
 	if err := r.enforceProfile(ctx, profile, tool, capability, params); err != nil {
+		return err
+	}
+	if err := r.enforceSkillPolicy(ctx, tool, params); err != nil {
 		return err
 	}
 	if capability == tools.CapabilityGuarded && !r.Hardening.GuardedTools {
@@ -17238,6 +19136,84 @@ func (r *Runtime) guardToolExecution(ctx context.Context, tool tools.Tool, capab
 		}
 	}
 	return nil
+}
+
+func (r *Runtime) enforceSkillPolicy(ctx context.Context, tool tools.Tool, params map[string]any) error {
+	policy := tools.SkillPolicyFromContext(ctx)
+	if tool == nil || strings.TrimSpace(policy.Name) == "" {
+		return nil
+	}
+	if len(policy.AllowedTools) > 0 {
+		if _, ok := policy.AllowedTools[tool.Name()]; !ok {
+			return fmt.Errorf("tool denied by skill policy: %s", tool.Name())
+		}
+	}
+	switch tool.Name() {
+	case "exec", "run_skill_script":
+		if !policy.AllowExecution {
+			return fmt.Errorf("execution denied by skill policy: %s", tool.Name())
+		}
+		if cwd := strings.TrimSpace(fmt.Sprint(params["cwd"])); cwd != "" && cwd != "<nil>" && len(policy.WritablePaths) > 0 {
+			if err := validateProfileWritablePath(policy.WritablePaths, cwd); err != nil {
+				return err
+			}
+		}
+	case "write_file", "edit_file":
+		if !policy.AllowWrite {
+			return fmt.Errorf("write denied by skill policy: %s", tool.Name())
+		}
+		if len(policy.WritablePaths) > 0 {
+			if err := validateProfileWritablePath(policy.WritablePaths, fmt.Sprint(params["path"])); err != nil {
+				return err
+			}
+		}
+	case "web_fetch":
+		if !policy.AllowNetwork {
+			return fmt.Errorf("network denied by skill policy: %s", tool.Name())
+		}
+		if len(policy.AllowedHosts) > 0 {
+			parsed, err := url.Parse(strings.TrimSpace(fmt.Sprint(params["url"])))
+			if err != nil {
+				return err
+			}
+			if err := (security.HostPolicy{Enabled: true, DefaultDeny: true, AllowedHosts: policy.AllowedHosts}).ValidateURL(ctx, parsed); err != nil {
+				return err
+			}
+		}
+	case "web_search":
+		if !policy.AllowNetwork {
+			return fmt.Errorf("network denied by skill policy: %s", tool.Name())
+		}
+		if len(policy.AllowedHosts) > 0 {
+			if err := (security.HostPolicy{Enabled: true, DefaultDeny: true, AllowedHosts: policy.AllowedHosts}).ValidateHost(ctx, "api.search.brave.com"); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func skillPolicyForSkill(skill skills.SkillMeta) tools.SkillPolicy {
+	allowed := map[string]struct{}{}
+	for _, toolName := range skill.AllowedTools {
+		toolName = strings.TrimSpace(toolName)
+		if toolName == "" {
+			continue
+		}
+		allowed[toolName] = struct{}{}
+	}
+	if commandTool := strings.TrimSpace(skill.CommandTool); commandTool != "" {
+		allowed[commandTool] = struct{}{}
+	}
+	return tools.SkillPolicy{
+		Name:           skill.Name,
+		AllowedTools:   allowed,
+		AllowExecution: skill.Permissions.Shell || (strings.EqualFold(skill.CommandDispatch, "tool") && (strings.EqualFold(skill.CommandTool, "exec") || strings.EqualFold(skill.CommandTool, "run_skill_script"))),
+		AllowNetwork:   skill.Permissions.Network,
+		AllowWrite:     skill.Permissions.Write,
+		AllowedHosts:   append([]string{}, skill.Permissions.AllowedHosts...),
+		WritablePaths:  append([]string{}, skill.Permissions.AllowedPaths...),
+	}
 }
 
 func (r *Runtime) contextWithEventProfile(ctx context.Context, ev bus.Event) context.Context {
@@ -17498,7 +19474,7 @@ func (r *Runtime) skillRunEnvFor(name string) map[string]string {
 	return r.Builder.Skills.RunEnvForSkill(name)
 }
 
-func (r *Runtime) persistAssistantReply(ctx context.Context, sessionKey string, msgID int64, channel, replyTarget, finalText string, streamed bool, autoDeliver bool) {
+func (r *Runtime) persistAssistantReply(ctx context.Context, sessionKey string, msgID int64, channel, replyTarget, finalText string, replyMeta map[string]any, streamed bool, autoDeliver bool) {
 	if strings.TrimSpace(finalText) == "" {
 		finalText = "(no response)"
 	}
@@ -17506,10 +19482,20 @@ func (r *Runtime) persistAssistantReply(ctx context.Context, sessionKey string, 
 		log.Printf("append assistant(final) failed: %v", err)
 	}
 	if autoDeliver && !streamed && r.Deliver != nil {
-		if err := r.Deliver.Deliver(ctx, channel, replyTarget, finalText); err != nil {
+		if err := r.deliver(ctx, channel, replyTarget, finalText, replyMeta); err != nil {
 			log.Printf("deliver failed: %v", err)
 		}
 	}
+}
+
+func (r *Runtime) deliver(ctx context.Context, channel, to, text string, meta map[string]any) error {
+	if r.Deliver == nil {
+		return nil
+	}
+	if withMeta, ok := r.Deliver.(MetaDeliverer); ok {
+		return withMeta.DeliverWithMeta(ctx, channel, to, text, channels.ReplyMeta(meta))
+	}
+	return r.Deliver.Deliver(ctx, channel, to, text)
 }
 
 func (r *Runtime) boundTextResult(ctx context.Context, sessionKey string, text string) (stored string, preview string, artifactID string) {
@@ -18209,7 +20195,7 @@ func buildToolRegistryWithOptions(cfg config.Config, d *db.DB, prov *providers.C
 	fileRoot := allowedRoot(cfg)
 	sandboxCfg := tools.BubblewrapConfig{Enabled: cfg.Hardening.Sandbox.Enabled, BubblewrapPath: cfg.Hardening.Sandbox.BubblewrapPath, AllowNetwork: cfg.Hardening.Sandbox.AllowNetwork, WritablePaths: append([]string{}, cfg.Hardening.Sandbox.WritablePaths...)}
 	hostPolicy := buildHostPolicy(cfg)
-	reg.Register(&tools.ExecTool{Timeout: time.Duration(cfg.Tools.ExecTimeoutSeconds) * time.Second, RestrictDir: fileRoot, PathAppend: cfg.Tools.PathAppend, AllowedPrograms: append([]string{}, cfg.Hardening.ExecAllowedPrograms...), ChildEnvAllowlist: append([]string{}, cfg.Hardening.ChildEnvAllowlist...), Sandbox: sandboxCfg})
+	reg.Register(&tools.ExecTool{Timeout: time.Duration(cfg.Tools.ExecTimeoutSeconds) * time.Second, RestrictDir: fileRoot, PathAppend: cfg.Tools.PathAppend, AllowedPrograms: append([]string{}, cfg.Hardening.ExecAllowedPrograms...), ChildEnvAllowlist: append([]string{}, cfg.Hardening.ChildEnvAllowlist...), Sandbox: sandboxCfg, EnableLegacyShell: cfg.Hardening.EnableExecShell})
 	reg.Register(&tools.ReadFile{FileTool: tools.FileTool{Root: fileRoot}})
 	reg.Register(&tools.WriteFile{FileTool: tools.FileTool{Root: fileRoot}})
 	reg.Register(&tools.EditFile{FileTool: tools.FileTool{Root: fileRoot}})
@@ -18219,6 +20205,8 @@ func buildToolRegistryWithOptions(cfg config.Config, d *db.DB, prov *providers.C
 	reg.Register(&tools.MemorySetPinned{DB: d})
 	reg.Register(&tools.MemoryAddNote{DB: d, Provider: prov, EmbedModel: cfg.Provider.EmbedModel})
 	reg.Register(&tools.MemorySearch{DB: d, Provider: prov, EmbedModel: cfg.Provider.EmbedModel, VectorK: cfg.VectorK, FTSK: cfg.FTSK, TopK: cfg.MemoryRetrieve, VectorScanLimit: cfg.VectorScanLimit})
+	reg.Register(&tools.MemoryRecent{DB: d, DefaultLimit: 10, MaxLimit: cfg.HistoryMax, MaxChars: 240})
+	reg.Register(&tools.MemoryGetPinned{DB: d, MaxChars: 400})
 	if includeSendMessage {
 		reg.Register(&tools.SendMessage{
 			Deliver: func(ctx context.Context, channel, to, text string, meta map[string]any) error {

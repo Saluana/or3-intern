@@ -23,9 +23,6 @@ The biggest gap versus nanobot is not simplicity but sharpness of product philos
 Specific technical weaknesses I would prioritize
  
 
-7. The skill supply-chain model is decent, not strong.
-   You fingerprint installed bundles and preserve origin metadata, which is good. But I did not see signature verification, publisher trust policies, quarantine modes, permission prompts, or install-time scanning. Given the wider OpenClaw ecosystem’s recent focus on malicious skills, this is a high-value gap.   ([GitHub][4])
-
 8. It needs clearer product positioning.
    Right now or3-intern is partly “Go rewrite of nanobot,” partly “OpenClaw-compatible runtime,” and partly “local personal agent platform.” The code is good enough that this matters. If you keep adding breadth, you are competing with NullClaw/OpenClaw. If you optimize for lean deployment and determinism, you are competing with nanobot. The architecture currently points more toward the former.  ([GitHub][1])
 

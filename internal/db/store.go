@@ -258,15 +258,49 @@ func (d *DB) StreamMemoryNotesLimit(ctx context.Context, sessionKey string, limi
 }
 
 type FTSCandidate struct {
-	ID   int64
-	Text string
-	Rank float64
+	ID        int64
+	Text      string
+	Rank      float64
+	CreatedAt int64
 }
 
 type VecCandidateRow struct {
-	ID       int64
-	Text     string
-	Distance float64
+	ID        int64
+	Text      string
+	Distance  float64
+	CreatedAt int64
+}
+
+func (d *DB) SearchMemoryVectors(ctx context.Context, sessionKey string, queryVec []byte, k int) ([]VecCandidateRow, error) {
+	if d == nil || k <= 0 || len(queryVec) == 0 {
+		return nil, nil
+	}
+	scopes := []string{scope.GlobalMemoryScope}
+	if trimmed := strings.TrimSpace(sessionKey); trimmed != "" && trimmed != scope.GlobalMemoryScope {
+		scopes = append(scopes, normalizeMemorySession(trimmed))
+	}
+	seen := make(map[int64]struct{}, k*len(scopes))
+	out := make([]VecCandidateRow, 0, k*len(scopes))
+	for _, memoryScope := range scopes {
+		rows, err := d.SearchVecScope(ctx, memoryScope, queryVec, k)
+		if err != nil {
+			return nil, err
+		}
+		if len(rows) == 0 {
+			rows, err = d.SearchVecScopeFallback(ctx, memoryScope, queryVec, k)
+			if err != nil {
+				return nil, err
+			}
+		}
+		for _, row := range rows {
+			if _, ok := seen[row.ID]; ok {
+				continue
+			}
+			seen[row.ID] = struct{}{}
+			out = append(out, row)
+		}
+	}
+	return out, nil
 }
 
 func (d *DB) SearchVecScope(ctx context.Context, sessionKey string, queryVec []byte, k int) ([]VecCandidateRow, error) {
@@ -284,9 +318,10 @@ func (d *DB) SearchVecScope(ctx context.Context, sessionKey string, queryVec []b
 		return nil, nil
 	}
 	rows, err := d.VecSQL.QueryContext(ctx,
-		`SELECT note_id, text, distance
+		`SELECT memory_vec.note_id, memory_vec.text, distance, memory_notes.created_at
 		 FROM memory_vec
-		 WHERE embedding MATCH ? AND k = ? AND session_key = ?
+		 JOIN memory_notes ON memory_notes.id = memory_vec.note_id
+		 WHERE memory_vec.embedding MATCH ? AND memory_vec.k = ? AND memory_vec.session_key = ?
 		 ORDER BY distance`,
 		queryVec, k, normalizeMemorySession(sessionKey))
 	if err != nil {
@@ -304,7 +339,7 @@ func (d *DB) SearchVecScopeFallback(ctx context.Context, sessionKey string, quer
 		return nil, nil
 	}
 	rows, err := d.VecSQL.QueryContext(ctx,
-		`SELECT id, text, vec_distance_cosine(embedding, ?) AS distance
+		`SELECT id, text, vec_distance_cosine(embedding, ?) AS distance, created_at
 		 FROM memory_notes
 		 WHERE session_key=? AND typeof(embedding)='blob' AND length(embedding)=?
 		 ORDER BY distance ASC
@@ -322,7 +357,7 @@ func scanVecCandidateRows(rows *sql.Rows) ([]VecCandidateRow, error) {
 	for rows.Next() {
 		var item VecCandidateRow
 		var distance sql.NullFloat64
-		if err := rows.Scan(&item.ID, &item.Text, &distance); err != nil {
+		if err := rows.Scan(&item.ID, &item.Text, &distance, &item.CreatedAt); err != nil {
 			return nil, err
 		}
 		if !distance.Valid {
@@ -338,7 +373,7 @@ func (d *DB) SearchFTS(ctx context.Context, sessionKey, query string, k int) ([]
 	sessionKey = normalizeMemorySession(sessionKey)
 	// bm25 lower is better; invert
 	rows, err := d.SQL.QueryContext(ctx,
-		`SELECT memory_fts.rowid, memory_fts.text, bm25(memory_fts) as rank
+		`SELECT memory_fts.rowid, memory_fts.text, bm25(memory_fts) as rank, memory_notes.created_at
 		 FROM memory_fts
 		 JOIN memory_notes ON memory_notes.id = memory_fts.rowid
 		 WHERE memory_fts MATCH ? AND memory_notes.session_key IN (?, ?)
@@ -353,10 +388,11 @@ func (d *DB) SearchFTS(ctx context.Context, sessionKey, query string, k int) ([]
 		var id int64
 		var text string
 		var rank float64
-		if err := rows.Scan(&id, &text, &rank); err != nil {
+		var createdAt int64
+		if err := rows.Scan(&id, &text, &rank, &createdAt); err != nil {
 			return nil, err
 		}
-		out = append(out, FTSCandidate{ID: id, Text: text, Rank: rank})
+		out = append(out, FTSCandidate{ID: id, Text: text, Rank: rank, CreatedAt: createdAt})
 	}
 	return out, rows.Err()
 }

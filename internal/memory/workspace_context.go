@@ -50,6 +50,7 @@ type workspaceCandidate struct {
 	Path    string
 	Excerpt string
 	Score   int
+	ModTime time.Time
 }
 
 func BuildWorkspaceContext(cfg WorkspaceContextConfig, query string) string {
@@ -254,7 +255,10 @@ func relevantWorkspaceCandidates(root string, tokens []string, maxFileBytes, max
 	})
 	sort.Slice(candidates, func(i, j int) bool {
 		if candidates[i].Score == candidates[j].Score {
-			return candidates[i].Path < candidates[j].Path
+			if candidates[i].ModTime.Equal(candidates[j].ModTime) {
+				return candidates[i].Path < candidates[j].Path
+			}
+			return candidates[i].ModTime.After(candidates[j].ModTime)
 		}
 		return candidates[i].Score > candidates[j].Score
 	})
@@ -282,11 +286,16 @@ func workspaceFileCandidate(root, path string, maxFileBytes int, tokens []string
 	if text == "" {
 		return workspaceCandidate{}, false
 	}
+	info, err := f.Stat()
+	if err != nil {
+		return workspaceCandidate{}, false
+	}
 	excerpt, score := workspaceExcerpt(resolved, text, tokens)
 	if len(tokens) == 0 {
 		score = 1
 	}
-	return workspaceCandidate{Path: resolved, Excerpt: excerpt, Score: score}, true
+	recencyBonus := workspaceRecencyScore(info.ModTime())
+	return workspaceCandidate{Path: resolved, Excerpt: excerpt, Score: score + recencyBonus, ModTime: info.ModTime()}, true
 }
 
 func workspaceSafePath(root, path string) (string, bool) {
@@ -344,6 +353,23 @@ func workspaceExcerpt(path, text string, tokens []string) (string, int) {
 		excerpt += "…"
 	}
 	return workspaceOneLine(excerpt, 500), score
+}
+
+func workspaceRecencyScore(modTime time.Time) int {
+	if modTime.IsZero() {
+		return 0
+	}
+	age := time.Since(modTime)
+	switch {
+	case age <= 24*time.Hour:
+		return 3
+	case age <= 7*24*time.Hour:
+		return 2
+	case age <= 30*24*time.Hour:
+		return 1
+	default:
+		return 0
+	}
 }
 
 func workspaceQueryTokens(query string) []string {

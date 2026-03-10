@@ -23,12 +23,6 @@ The biggest gap versus nanobot is not simplicity but sharpness of product philos
 Specific technical weaknesses I would prioritize
  
 
-3. Retrieval quality is good, but still fairly first-generation.
-   The hybrid retriever is solid, but basic. It merges vector and FTS with fixed weights. The vector path can fall back to brute-force cosine if sqlite-vec does not return rows. The workspace context ranking is heuristic. I did not see reranking, recency decay, source diversity control, dedup by semantic similarity, or retrieval evaluation tooling. This is likely where users will feel “smart enough to be useful, not yet smart enough to be sticky.”   
-
-4. The DB story is stronger than nanobot, but more complex than it needs to be.
-   Using one driver for primary SQL and another for vector search is understandable, but it creates operational complexity, packaging risk, and portability issues. If your goal is a lightweight deploy-anywhere runtime, this split stack is a cost. It also weakens your “simple ops” story relative to your stated design goals.  
-
 5. Channel support is broad, but parity is uneven.
    CLI has streaming. External channels exist, but I did not see evidence of deep streaming parity, retry strategies, delivery guarantees, edit-in-place semantics, or serious channel-specific backpressure control. NullClaw publicly emphasizes much broader channel coverage and a fuller stack here.   ([GitHub][1])
 

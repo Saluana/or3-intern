@@ -7,10 +7,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"math"
-	"strings"
 
 	"or3-intern/internal/db"
-	"or3-intern/internal/scope"
 )
 
 func PackFloat32(vec []float32) []byte {
@@ -44,9 +42,10 @@ func Cosine(a, b []float32) float64 {
 }
 
 type VecCandidate struct {
-	ID int64
-	Text string
-	Score float64
+	ID        int64
+	Text      string
+	Score     float64
+	CreatedAt int64
 }
 
 type candMinHeap []VecCandidate
@@ -66,34 +65,18 @@ func (h *candMinHeap) Pop() any {
 func VectorSearch(ctx context.Context, d *db.DB, sessionKey string, queryVec []float32, k int, scanLimit int) ([]VecCandidate, error) {
 	_ = scanLimit
 	queryBlob := PackFloat32(queryVec)
-	scopes := []string{scope.GlobalMemoryScope}
-	if trimmedSessionKey := strings.TrimSpace(sessionKey); trimmedSessionKey != "" && trimmedSessionKey != scope.GlobalMemoryScope {
-		scopes = append(scopes, sessionKey)
+	rows, err := d.SearchMemoryVectors(ctx, sessionKey, queryBlob, k)
+	if err != nil {
+		return nil, err
 	}
-	seen := make(map[int64]struct{}, k*len(scopes))
-	out := make([]VecCandidate, 0, k*len(scopes))
-	for _, memoryScope := range scopes {
-		rows, err := d.SearchVecScope(ctx, memoryScope, queryBlob, k)
-		if err != nil {
-			return nil, err
-		}
-		if len(rows) == 0 {
-			rows, err = d.SearchVecScopeFallback(ctx, memoryScope, queryBlob, k)
-			if err != nil {
-				return nil, err
-			}
-		}
-		for _, row := range rows {
-			if _, ok := seen[row.ID]; ok {
-				continue
-			}
-			seen[row.ID] = struct{}{}
-			out = append(out, VecCandidate{
-				ID:    row.ID,
-				Text:  row.Text,
-				Score: 1.0 / (1.0 + row.Distance),
-			})
-		}
+	out := make([]VecCandidate, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, VecCandidate{
+			ID:        row.ID,
+			Text:      row.Text,
+			Score:     1.0 / (1.0 + row.Distance),
+			CreatedAt: row.CreatedAt,
+		})
 	}
 	return out, nil
 }

@@ -270,3 +270,23 @@ func TestVectorSearch_PreservesSessionRowsWhenGlobalCorpusIsNewer(t *testing.T) 
 		t.Fatalf("expected session-scoped note to remain searchable, got %#v", results)
 	}
 }
+
+func TestVectorSearch_UsesDBOwnedScopedSearch(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	if _, err := d.InsertMemoryNote(ctx, "session-a", "session vector", PackFloat32([]float32{1, 0}), sql.NullInt64{}, ""); err != nil {
+		t.Fatalf("InsertMemoryNote session: %v", err)
+	}
+	if _, err := d.InsertMemoryNote(ctx, scope.GlobalMemoryScope, "shared vector", PackFloat32([]float32{0.9, 0.1}), sql.NullInt64{}, ""); err != nil {
+		t.Fatalf("InsertMemoryNote shared: %v", err)
+	}
+
+	results, err := VectorSearch(ctx, d, "session-a", []float32{1, 0}, 5, 100)
+	if err != nil {
+		t.Fatalf("VectorSearch: %v", err)
+	}
+	if len(results) < 2 {
+		t.Fatalf("expected both scoped and shared results, got %#v", results)
+	}
+}

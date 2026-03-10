@@ -27,11 +27,17 @@ func TestNewRetriever(t *testing.T) {
 	if r == nil {
 		t.Fatal("expected non-nil retriever")
 	}
-	if r.VectorWeight != 0.7 {
-		t.Errorf("expected VectorWeight=0.7, got %v", r.VectorWeight)
+	if r.VectorWeight != 0.55 {
+		t.Errorf("expected VectorWeight=0.55, got %v", r.VectorWeight)
 	}
-	if r.FTSWeight != 0.3 {
-		t.Errorf("expected FTSWeight=0.3, got %v", r.FTSWeight)
+	if r.FTSWeight != 0.25 {
+		t.Errorf("expected FTSWeight=0.25, got %v", r.FTSWeight)
+	}
+	if r.LexicalWeight != 0.12 {
+		t.Errorf("expected LexicalWeight=0.12, got %v", r.LexicalWeight)
+	}
+	if r.RecencyWeight != 0.08 {
+		t.Errorf("expected RecencyWeight=0.08, got %v", r.RecencyWeight)
 	}
 	if r.VectorScanLimit != 2000 {
 		t.Errorf("expected VectorScanLimit=2000, got %d", r.VectorScanLimit)
@@ -187,5 +193,64 @@ func TestNormalizeFTSQuery(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("normalizeFTSQuery(%q) = %q, want %q", tc.input, got, tc.want)
 		}
+	}
+}
+
+func TestRetrieve_PrefersMoreRecentEquivalentMatches(t *testing.T) {
+	d := openRetrieveTestDB(t)
+	ctx := context.Background()
+
+	olderID, err := d.InsertMemoryNote(ctx, "session1", "deploy runbook stable release", PackFloat32([]float32{1, 0}), sql.NullInt64{}, "")
+	if err != nil {
+		t.Fatalf("InsertMemoryNote older: %v", err)
+	}
+	newerID, err := d.InsertMemoryNote(ctx, "session1", "deploy runbook stable release", PackFloat32([]float32{1, 0}), sql.NullInt64{}, "")
+	if err != nil {
+		t.Fatalf("InsertMemoryNote newer: %v", err)
+	}
+	if olderID == newerID {
+		t.Fatal("expected distinct note ids")
+	}
+
+	r := NewRetriever(d)
+	results, err := r.Retrieve(ctx, "session1", "deploy stable release", []float32{1, 0}, 10, 10, 5)
+	if err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected results")
+	}
+	if results[0].ID != newerID {
+		t.Fatalf("expected newer note to rank first, got %#v", results)
+	}
+}
+
+func TestRetrieve_DeduplicatesNearIdenticalText(t *testing.T) {
+	d := openRetrieveTestDB(t)
+	ctx := context.Background()
+
+	if _, err := d.InsertMemoryNote(ctx, "session1", "release checklist deploy api service", PackFloat32([]float32{1, 0}), sql.NullInt64{}, ""); err != nil {
+		t.Fatalf("InsertMemoryNote first: %v", err)
+	}
+	if _, err := d.InsertMemoryNote(ctx, "session1", "release checklist deploy api service", PackFloat32([]float32{1, 0}), sql.NullInt64{}, ""); err != nil {
+		t.Fatalf("InsertMemoryNote second: %v", err)
+	}
+	if _, err := d.InsertMemoryNote(ctx, "session1", "database migration rollback plan", PackFloat32([]float32{0, 1}), sql.NullInt64{}, ""); err != nil {
+		t.Fatalf("InsertMemoryNote third: %v", err)
+	}
+
+	r := NewRetriever(d)
+	results, err := r.Retrieve(ctx, "session1", "release checklist deploy api", []float32{1, 0}, 10, 10, 5)
+	if err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+	count := 0
+	for _, result := range results {
+		if result.Text == "release checklist deploy api service" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected duplicate text to collapse to one result, got %#v", results)
 	}
 }

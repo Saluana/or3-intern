@@ -18,10 +18,14 @@ import (
 )
 
 const (
-	apiSearch   = "/api/v1/search"
-	apiResolve  = "/api/v1/resolve"
-	apiDownload = "/api/v1/download"
-	apiSkills   = "/api/v1/skills"
+	apiSearch                  = "/api/v1/search"
+	apiResolve                 = "/api/v1/resolve"
+	apiDownload                = "/api/v1/download"
+	apiSkills                  = "/api/v1/skills"
+	maxDownloadZipBytes        = 32 << 20
+	maxArchiveEntries          = 512
+	maxArchiveFileBytes  int64 = 4 << 20
+	maxArchiveTotalBytes int64 = 64 << 20
 )
 
 type Client struct {
@@ -86,14 +90,14 @@ func (f ScanFinding) Summary() string {
 }
 
 type SkillOrigin struct {
-	Version          int    `json:"version"`
-	Registry         string `json:"registry"`
-	Slug             string `json:"slug"`
-	Owner            string `json:"owner,omitempty"`
-	InstalledVersion string `json:"installedVersion"`
-	InstalledAt      int64  `json:"installedAt"`
-	Fingerprint      string `json:"fingerprint"`
-	ScanStatus       string `json:"scanStatus,omitempty"`
+	Version          int           `json:"version"`
+	Registry         string        `json:"registry"`
+	Slug             string        `json:"slug"`
+	Owner            string        `json:"owner,omitempty"`
+	InstalledVersion string        `json:"installedVersion"`
+	InstalledAt      int64         `json:"installedAt"`
+	Fingerprint      string        `json:"fingerprint"`
+	ScanStatus       string        `json:"scanStatus,omitempty"`
 	ScanFindings     []ScanFinding `json:"scanFindings,omitempty"`
 }
 
@@ -246,7 +250,15 @@ func (c *Client) Download(ctx context.Context, slug, version string) ([]byte, er
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, readHTTPError(resp)
 	}
-	return io.ReadAll(resp.Body)
+	reader := &io.LimitedReader{R: resp.Body, N: maxDownloadZipBytes + 1}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxDownloadZipBytes {
+		return nil, fmt.Errorf("download exceeded %d bytes", maxDownloadZipBytes)
+	}
+	return data, nil
 }
 
 func (c *Client) Install(ctx context.Context, slug, version, destDir string, opts InstallOptions) (InstallResult, error) {
@@ -344,13 +356,20 @@ func installZip(zipBytes []byte, target string, origin SkillOrigin, opts Install
 }
 
 func extractZipToDir(zipBytes []byte, target string) error {
+	if int64(len(zipBytes)) > maxDownloadZipBytes {
+		return fmt.Errorf("archive exceeded %d bytes", maxDownloadZipBytes)
+	}
 	reader, err := zip.NewReader(bytes.NewReader(zipBytes), int64(len(zipBytes)))
 	if err != nil {
 		return err
 	}
+	if len(reader.File) > maxArchiveEntries {
+		return fmt.Errorf("archive exceeded %d entries", maxArchiveEntries)
+	}
 	if err := os.MkdirAll(target, 0o755); err != nil {
 		return err
 	}
+	var totalBytes int64
 	for _, file := range reader.File {
 		rel, ok := safeZipPath(file.Name)
 		if !ok {
@@ -370,16 +389,39 @@ func extractZipToDir(zipBytes []byte, target string) error {
 		if err != nil {
 			return err
 		}
-		data, readErr := io.ReadAll(rc)
-		_ = rc.Close()
-		if readErr != nil {
-			return readErr
-		}
 		mode := file.Mode()
 		if mode == 0 {
 			mode = 0o644
 		}
-		if err := os.WriteFile(full, data, mode); err != nil {
+		out, err := os.OpenFile(full, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
+		if err != nil {
+			_ = rc.Close()
+			return err
+		}
+		limited := &io.LimitedReader{R: rc, N: maxArchiveFileBytes + 1}
+		written, copyErr := io.Copy(out, limited)
+		closeErr := rc.Close()
+		outCloseErr := out.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		if outCloseErr != nil {
+			return outCloseErr
+		}
+		if written > maxArchiveFileBytes {
+			return fmt.Errorf("archive entry exceeded %d bytes: %s", maxArchiveFileBytes, rel)
+		}
+		totalBytes += written
+		if totalBytes > maxArchiveTotalBytes {
+			return fmt.Errorf("archive exceeded %d extracted bytes", maxArchiveTotalBytes)
+		}
+		if file.UncompressedSize64 > uint64(maxArchiveFileBytes) {
+			return fmt.Errorf("archive entry exceeded %d bytes: %s", maxArchiveFileBytes, rel)
+		}
+		if err := os.Chmod(full, mode); err != nil {
 			return err
 		}
 	}

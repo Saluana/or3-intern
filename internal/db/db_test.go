@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -186,6 +187,75 @@ func TestAuditEvents_VerifyDetectsTampering(t *testing.T) {
 	}
 	if err := d.VerifyAuditChain(ctx, key); err == nil {
 		t.Fatal("expected tampered audit chain to fail verification")
+	}
+}
+
+func TestAuditEvents_ConcurrentAppendKeepsChainValid(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	key := []byte("01234567890123456789012345678901")
+
+	const writes = 16
+	var wg sync.WaitGroup
+	errs := make(chan error, writes)
+	for i := 0; i < writes; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs <- d.AppendAuditEvent(ctx, AuditEventInput{
+				EventType:  "tool.execute",
+				SessionKey: fmt.Sprintf("sess-%d", i),
+				Actor:      "test",
+				Payload:    map[string]any{"i": i},
+			}, key)
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("AppendAuditEvent: %v", err)
+		}
+	}
+	if err := d.VerifyAuditChain(ctx, key); err != nil {
+		t.Fatalf("VerifyAuditChain: %v", err)
+	}
+}
+
+func TestAuditEvents_ConcurrentWithMessageWrites(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	key := []byte("01234567890123456789012345678901")
+
+	const writes = 32
+	var wg sync.WaitGroup
+	errs := make(chan error, writes*2)
+	for i := 0; i < writes; i++ {
+		wg.Add(2)
+		go func(i int) {
+			defer wg.Done()
+			_, err := d.AppendMessage(ctx, fmt.Sprintf("sess-%d", i%4), "user", fmt.Sprintf("msg-%d", i), nil)
+			errs <- err
+		}(i)
+		go func(i int) {
+			defer wg.Done()
+			errs <- d.AppendAuditEvent(ctx, AuditEventInput{
+				EventType:  "tool.execute",
+				SessionKey: fmt.Sprintf("sess-%d", i),
+				Actor:      "test",
+				Payload:    map[string]any{"i": i},
+			}, key)
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent write failed: %v", err)
+		}
+	}
+	if err := d.VerifyAuditChain(ctx, key); err != nil {
+		t.Fatalf("VerifyAuditChain: %v", err)
 	}
 }
 

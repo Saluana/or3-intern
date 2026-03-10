@@ -82,13 +82,31 @@ func (d *DB) ListSecretNames(ctx context.Context) ([]string, error) {
 }
 
 func (d *DB) AppendAuditEvent(ctx context.Context, input AuditEventInput, key []byte) error {
+	d.auditMu.Lock()
+	defer d.auditMu.Unlock()
+
 	payloadBytes, err := json.Marshal(input.Payload)
 	if err != nil {
 		return err
 	}
 	payload := truncateAuditPayload(string(payloadBytes))
+	conn, err := d.SQL.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		}
+	}()
+
 	prevHash := []byte{}
-	row := d.SQL.QueryRowContext(ctx, `SELECT record_hash FROM audit_events ORDER BY id DESC LIMIT 1`)
+	row := conn.QueryRowContext(ctx, `SELECT record_hash FROM audit_events ORDER BY id DESC LIMIT 1`)
 	var previous []byte
 	if err := row.Scan(&previous); err == nil {
 		prevHash = append([]byte{}, previous...)
@@ -97,10 +115,16 @@ func (d *DB) AppendAuditEvent(ctx context.Context, input AuditEventInput, key []
 	}
 	createdAt := NowMS()
 	recordHash := computeAuditHash(key, input.EventType, input.SessionKey, input.Actor, payload, prevHash, createdAt)
-	_, err = d.SQL.ExecContext(ctx,
+	if _, err = conn.ExecContext(ctx,
 		`INSERT INTO audit_events(event_type, session_key, actor, payload_json, prev_hash, record_hash, created_at) VALUES(?,?,?,?,?,?,?)`,
-		strings.TrimSpace(input.EventType), strings.TrimSpace(input.SessionKey), strings.TrimSpace(input.Actor), payload, prevHash, recordHash, createdAt)
-	return err
+		strings.TrimSpace(input.EventType), strings.TrimSpace(input.SessionKey), strings.TrimSpace(input.Actor), payload, prevHash, recordHash, createdAt); err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 func (d *DB) VerifyAuditChain(ctx context.Context, key []byte) error {

@@ -182,6 +182,20 @@ func TestWriteFile_Mkdirs(t *testing.T) {
 	if out != "ok" {
 		t.Errorf("expected 'ok', got %q", out)
 	}
+	info, err := os.Stat(filepath.Dir(p))
+	if err != nil {
+		t.Fatalf("Stat parent: %v", err)
+	}
+	if info.Mode().Perm() != 0o700 {
+		t.Fatalf("expected parent dir mode 0700, got %#o", info.Mode().Perm())
+	}
+	fileInfo, err := os.Stat(p)
+	if err != nil {
+		t.Fatalf("Stat file: %v", err)
+	}
+	if fileInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("expected file mode 0600, got %#o", fileInfo.Mode().Perm())
+	}
 }
 
 func TestWriteFile_NoMkdirs_FailsOnMissingDir(t *testing.T) {
@@ -202,6 +216,30 @@ func TestWriteFile_Name(t *testing.T) {
 	tool := &WriteFile{}
 	if tool.Name() != "write_file" {
 		t.Errorf("expected 'write_file', got %q", tool.Name())
+	}
+}
+
+func TestEditFile_PreservesExistingMode(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "script.sh")
+	if err := os.WriteFile(p, []byte("echo one\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	tool := &EditFile{}
+	if _, err := tool.Execute(context.Background(), map[string]any{
+		"path": p,
+		"edits": []any{
+			map[string]any{"find": "one", "replace": "two"},
+		},
+	}); err != nil {
+		t.Fatalf("EditFile: %v", err)
+	}
+	info, err := os.Stat(p)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Fatalf("expected executable mode to be preserved, got %#o", info.Mode().Perm())
 	}
 }
 
@@ -429,9 +467,9 @@ func TestReadFile_Parameters(t *testing.T) {
 }
 
 func TestWriteFile_Schema(t *testing.T) {
-tool := &WriteFile{}
-schema := tool.Schema()
-if schema["type"] != "function" {
-t.Errorf("expected 'function', got %v", schema["type"])
-}
+	tool := &WriteFile{}
+	schema := tool.Schema()
+	if schema["type"] != "function" {
+		t.Errorf("expected 'function', got %v", schema["type"])
+	}
 }

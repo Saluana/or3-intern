@@ -321,7 +321,7 @@ func buildHTTPClient(cfg config.MCPServerConfig, policy security.HostPolicy) *ht
 		Transport: &headerRoundTripper{base: base, headers: cfg.Headers},
 	}
 	if policy.EnabledPolicy() {
-		return security.WrapHTTPClient(client, policy)
+		client.Transport = &headerRoundTripper{base: security.WrapHTTPClient(&http.Client{Transport: base}, policy).Transport, headers: cfg.Headers}
 	}
 	return client
 }

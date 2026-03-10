@@ -29,10 +29,10 @@ func (s *Store) Save(ctx context.Context, sessionKey, mime string, data []byte) 
 	if err := s.DB.EnsureSession(ctx, strings.TrimSpace(sessionKey)); err != nil {
 		return "", err
 	}
-	_ = os.MkdirAll(s.Dir, 0o755)
+	_ = os.MkdirAll(s.Dir, 0o700)
 	id := randID()
 	path := filepath.Join(s.Dir, id)
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return "", err
 	}
 	_, err := s.DB.SQL.ExecContext(ctx,

@@ -53,6 +53,25 @@ func TestExecTool_ProgramArgs(t *testing.T) {
 	}
 }
 
+func TestExecTool_RelativeProgramUsesCwd(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "tool.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho fromcwd\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	tool := &ExecTool{Timeout: 5 * time.Second}
+	out, err := tool.Execute(context.Background(), map[string]any{
+		"program": "./tool.sh",
+		"cwd":     dir,
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !strings.Contains(out, "fromcwd") {
+		t.Fatalf("unexpected output: %q", out)
+	}
+}
+
 func TestExecTool_DisableShell(t *testing.T) {
 	tool := &ExecTool{Timeout: 5 * time.Second, DisableShell: true}
 	if _, err := tool.Execute(context.Background(), map[string]any{"command": "echo hello"}); err == nil {
@@ -71,6 +90,18 @@ func TestExecTool_AllowedPrograms(t *testing.T) {
 	}
 	if !strings.Contains(out, "ok") {
 		t.Fatalf("unexpected output: %q", out)
+	}
+}
+
+func TestExecTool_AllowedProgramsRejectsPathByBasename(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "echo")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho hijacked\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	tool := &ExecTool{Timeout: 5 * time.Second, AllowedPrograms: []string{"echo"}}
+	if _, err := tool.Execute(context.Background(), map[string]any{"program": script}); err == nil {
+		t.Fatal("expected basename-only allowlist bypass to be rejected")
 	}
 }
 
@@ -143,9 +174,9 @@ func TestExecTool_BlockedPattern(t *testing.T) {
 
 func TestExecTool_CustomBlockedPatterns(t *testing.T) {
 	tool := &ExecTool{
-		Timeout:         5 * time.Second,
+		Timeout:           5 * time.Second,
 		EnableLegacyShell: true,
-		BlockedPatterns: []string{"forbidden_cmd"},
+		BlockedPatterns:   []string{"forbidden_cmd"},
 	}
 	_, err := tool.Execute(context.Background(), map[string]any{
 		"command": "forbidden_cmd arg",
@@ -160,11 +191,14 @@ func TestExecTool_ExitError(t *testing.T) {
 	out, err := tool.Execute(context.Background(), map[string]any{
 		"command": "exit 1",
 	})
-	if err != nil {
-		t.Fatalf("Execute should not return error on exit code (got: %v)", err)
+	if err == nil {
+		t.Fatal("expected exit code to return an error")
 	}
-	if !strings.Contains(out, "exit error") {
-		t.Errorf("expected 'exit error' in output for non-zero exit, got %q", out)
+	if !strings.Contains(err.Error(), "exec failed") {
+		t.Fatalf("expected wrapped exec error, got %v", err)
+	}
+	if !strings.Contains(out, "stdout:") || !strings.Contains(out, "stderr:") {
+		t.Errorf("expected stdout/stderr sections in output, got %q", out)
 	}
 }
 
@@ -184,9 +218,9 @@ func TestExecTool_StderrOutput(t *testing.T) {
 
 func TestExecTool_OutputTruncation(t *testing.T) {
 	tool := &ExecTool{
-		Timeout:        5 * time.Second,
+		Timeout:           5 * time.Second,
 		EnableLegacyShell: true,
-		OutputMaxBytes: 10,
+		OutputMaxBytes:    10,
 	}
 	out, err := tool.Execute(context.Background(), map[string]any{
 		"command": "echo " + strings.Repeat("a", 100),
@@ -202,9 +236,9 @@ func TestExecTool_OutputTruncation(t *testing.T) {
 func TestExecTool_RestrictDir_Inside(t *testing.T) {
 	dir := t.TempDir()
 	tool := &ExecTool{
-		Timeout:     5 * time.Second,
+		Timeout:           5 * time.Second,
 		EnableLegacyShell: true,
-		RestrictDir: dir,
+		RestrictDir:       dir,
 	}
 	out, err := tool.Execute(context.Background(), map[string]any{
 		"command": "echo ok",
@@ -221,9 +255,9 @@ func TestExecTool_RestrictDir_Inside(t *testing.T) {
 func TestExecTool_RestrictDir_Outside(t *testing.T) {
 	dir := t.TempDir()
 	tool := &ExecTool{
-		Timeout:     5 * time.Second,
+		Timeout:           5 * time.Second,
 		EnableLegacyShell: true,
-		RestrictDir: dir,
+		RestrictDir:       dir,
 	}
 	_, err := tool.Execute(context.Background(), map[string]any{
 		"command": "echo outside",
@@ -274,9 +308,9 @@ func TestExecTool_PathAppend(t *testing.T) {
 	os.WriteFile(script, []byte("#!/bin/sh\necho fromscript"), 0o755)
 
 	tool := &ExecTool{
-		Timeout:    5 * time.Second,
+		Timeout:           5 * time.Second,
 		EnableLegacyShell: true,
-		PathAppend: dir,
+		PathAppend:        dir,
 	}
 	out, err := tool.Execute(context.Background(), map[string]any{
 		"command": "myscript",

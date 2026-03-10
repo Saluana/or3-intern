@@ -17,8 +17,9 @@ import (
 var sqliteVecAutoOnce sync.Once
 
 type DB struct {
-	SQL    *sql.DB
-	VecSQL *sql.DB
+	SQL     *sql.DB
+	VecSQL  *sql.DB
+	auditMu sync.Mutex
 }
 
 func Open(path string) (*DB, error) {

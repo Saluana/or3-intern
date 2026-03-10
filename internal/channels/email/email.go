@@ -558,20 +558,12 @@ func extractEntityBodies(header textproto.MIMEHeader, body io.Reader, maxBodyCha
 func decodeTransferEncoding(body io.Reader, encoding string) io.Reader {
 	switch strings.ToLower(strings.TrimSpace(encoding)) {
 	case "base64":
-		return base64.NewDecoder(base64.StdEncoding, strings.NewReader(readAllString(body)))
+		return base64.NewDecoder(base64.StdEncoding, body)
 	case "quoted-printable":
 		return quotedprintable.NewReader(body)
 	default:
 		return body
 	}
-}
-
-func readAllString(reader io.Reader) string {
-	data, err := io.ReadAll(reader)
-	if err != nil {
-		return ""
-	}
-	return string(data)
 }
 
 func maxReadBytes(maxBodyChars int) int {

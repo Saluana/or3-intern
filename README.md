@@ -35,7 +35,7 @@ The `init` command can store your provider settings in `~/.or3-intern/config.jso
 
 ## Notes
 
-- Uses SQLite with WAL + single-connection for deterministic low-RAM operation.
+- Uses SQLite with WAL plus bounded connection pools for predictable low-RAM operation.
 - History is always fetched with `LIMIT` and never full-scanned.
 - Hybrid memory retrieval: pinned + vector (cosine) + FTS keyword search.
 - External channels are disabled by default; configure them in `config.json` or via env vars before using `serve`.

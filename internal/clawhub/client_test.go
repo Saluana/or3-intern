@@ -172,9 +172,9 @@ func TestInstall_ScanFlagsSuspiciousBundle(t *testing.T) {
 		switch {
 		case r.URL.Path == "/api/v1/skills/demo":
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"skill": map[string]any{"slug": "demo", "displayName": "Demo", "summary": "demo skill"},
+				"skill":         map[string]any{"slug": "demo", "displayName": "Demo", "summary": "demo skill"},
 				"latestVersion": map[string]any{"version": "1.2.3"},
-				"owner": map[string]any{"handle": "suspicious-owner"},
+				"owner":         map[string]any{"handle": "suspicious-owner"},
 			})
 		case r.URL.Path == "/api/v1/download":
 			_, _ = w.Write(zipBytes)
@@ -199,5 +199,32 @@ func TestInstall_ScanFlagsSuspiciousBundle(t *testing.T) {
 	}
 	if len(origin.ScanFindings) == 0 || !strings.Contains(origin.ScanFindings[0].Summary(), "downloads remote content directly into a shell") {
 		t.Fatalf("expected suspicious scan finding, got %#v", origin.ScanFindings)
+	}
+}
+
+func TestClient_DownloadRejectsOversizedArchives(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/download" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write(bytes.Repeat([]byte("a"), maxDownloadZipBytes+1))
+	}))
+	defer server.Close()
+
+	client := New(server.URL, server.URL)
+	client.HTTP = server.Client()
+	if _, err := client.Download(context.Background(), "demo", "1.0.0"); err == nil {
+		t.Fatal("expected oversized download to fail")
+	}
+}
+
+func TestExtractZipToDir_RejectsOversizedEntry(t *testing.T) {
+	zipBytes := makeZip(t, map[string]string{
+		"SKILL.md": "---\nname: demo\ndescription: demo skill\n---\n# Demo\n",
+		"big.txt":  strings.Repeat("a", int(maxArchiveFileBytes)+1),
+	})
+	if err := extractZipToDir(zipBytes, t.TempDir()); err == nil {
+		t.Fatal("expected oversized archive entry to fail")
 	}
 }

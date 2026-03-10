@@ -107,8 +107,15 @@ func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, 
 			return "", fmt.Errorf("cwd outside allowed directory")
 		}
 	}
-	if program != "" && len(t.AllowedPrograms) > 0 && !allowedProgram(program, t.AllowedPrograms) {
-		return "", fmt.Errorf("program not allowed: %s", program)
+	if program != "" {
+		resolvedProgram, err := resolveExecutable(program, cwd)
+		if err != nil {
+			return "", err
+		}
+		if len(t.AllowedPrograms) > 0 && !allowedProgram(program, resolvedProgram, t.AllowedPrograms) {
+			return "", fmt.Errorf("program not allowed: %s", program)
+		}
+		program = resolvedProgram
 	}
 
 	to := t.Timeout
@@ -150,28 +157,85 @@ func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, 
 		er = er[:max] + "\n...[truncated]\n"
 	}
 	if err != nil {
-		return fmt.Sprintf("exit error: %v\n\nstdout:\n%s\n\nstderr:\n%s", err, out, er), nil
+		return formatCommandOutput(out, er), fmt.Errorf("exec failed: %w", err)
 	}
 	if strings.TrimSpace(er) != "" {
-		return fmt.Sprintf("stdout:\n%s\n\nstderr:\n%s", out, er), nil
+		return formatCommandOutput(out, er), nil
 	}
 	return out, nil
 }
 
-func allowedProgram(program string, allowed []string) bool {
+func allowedProgram(program string, resolved string, allowed []string) bool {
 	program = strings.TrimSpace(program)
-	if program == "" {
+	resolved = strings.TrimSpace(resolved)
+	if program == "" || resolved == "" {
 		return false
 	}
-	base := filepath.Base(program)
+	programHasPath := hasPathSeparator(program)
 	for _, candidate := range allowed {
 		candidate = strings.TrimSpace(candidate)
 		if candidate == "" {
 			continue
 		}
-		if candidate == program || candidate == base {
+		if hasPathSeparator(candidate) {
+			resolvedCandidate, err := canonicalExecutablePath(candidate)
+			if err == nil && resolvedCandidate == resolved {
+				return true
+			}
+			continue
+		}
+		if !programHasPath && candidate == program {
 			return true
 		}
 	}
 	return false
+}
+
+func resolveExecutable(program string, cwd string) (string, error) {
+	program = strings.TrimSpace(program)
+	if program == "" {
+		return "", fmt.Errorf("missing program")
+	}
+	if hasPathSeparator(program) {
+		if !filepath.IsAbs(program) {
+			base := strings.TrimSpace(cwd)
+			if base == "" {
+				var err error
+				base, err = os.Getwd()
+				if err != nil {
+					return "", err
+				}
+			}
+			program = filepath.Join(base, program)
+		}
+		return canonicalExecutablePath(program)
+	}
+	resolved, err := exec.LookPath(program)
+	if err != nil {
+		return "", err
+	}
+	return canonicalExecutablePath(resolved)
+}
+
+func canonicalExecutablePath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err == nil {
+		return resolved, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	return abs, nil
+}
+
+func hasPathSeparator(path string) bool {
+	return strings.ContainsRune(path, filepath.Separator) || (filepath.Separator != '/' && strings.ContainsRune(path, '/'))
+}
+
+func formatCommandOutput(stdout, stderr string) string {
+	return fmt.Sprintf("stdout:\n%s\n\nstderr:\n%s", stdout, stderr)
 }

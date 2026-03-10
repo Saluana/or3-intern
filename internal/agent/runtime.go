@@ -381,7 +381,7 @@ func (r *Runtime) dispatchExplicitSkillTool(ctx context.Context, ev bus.Event, s
 	}
 	out, err := r.Tools.ExecuteParams(toolCtx, skill.CommandTool, params)
 	if err != nil {
-		out = "tool error: " + err.Error()
+		out = formatToolExecutionError(out, err)
 	}
 	payload := map[string]any{
 		"tool":        skill.CommandTool,
@@ -620,7 +620,7 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 			toolCtx = tools.ContextWithToolGuard(toolCtx, r.guardToolExecution)
 			out, err := reg.Execute(toolCtx, tc.Function.Name, tc.Function.Arguments)
 			if err != nil {
-				out = "tool error: " + err.Error()
+				out = formatToolExecutionError(out, err)
 			}
 
 			payload := map[string]any{
@@ -946,6 +946,16 @@ func summarizeToolParams(toolName string, params map[string]any) map[string]any 
 		summary["url"] = strings.TrimSpace(fmt.Sprint(params["url"]))
 	}
 	return summary
+}
+
+func formatToolExecutionError(out string, err error) string {
+	if err == nil {
+		return out
+	}
+	if strings.TrimSpace(out) == "" {
+		return "tool error: " + err.Error()
+	}
+	return out + "\n\nerror: " + err.Error()
 }
 
 func (r *Runtime) sessionQuotaState(sessionKey string) *sessionQuotaState {

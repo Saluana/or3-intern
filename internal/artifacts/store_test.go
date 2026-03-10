@@ -48,6 +48,13 @@ func TestStore_Save_OK(t *testing.T) {
 	if string(content) != "artifact content" {
 		t.Errorf("expected 'artifact content', got %q", string(content))
 	}
+	info, err := os.Stat(filepath.Join(dir, id))
+	if err != nil {
+		t.Fatalf("Stat artifact: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("expected artifact mode 0600, got %#o", info.Mode().Perm())
+	}
 }
 
 func TestStore_Save_NoDirSet(t *testing.T) {
@@ -82,6 +89,13 @@ func TestStore_Save_CreatesDir(t *testing.T) {
 	// Dir should now exist
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		t.Error("expected artifacts directory to be created")
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("Stat dir: %v", err)
+	}
+	if info.Mode().Perm() != 0o700 {
+		t.Fatalf("expected artifacts dir mode 0700, got %#o", info.Mode().Perm())
 	}
 }
 

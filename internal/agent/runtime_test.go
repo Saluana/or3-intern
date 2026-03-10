@@ -196,9 +196,9 @@ func TestRuntime_Handle_PreservesReplyMetadataForDelivery(t *testing.T) {
 		From:       "user-id",
 		Message:    "hello",
 		Meta: map[string]any{
-			"channel_id":           "channel-1",
+			"channel_id":            "channel-1",
 			channels.MetaThreadTS:   "123.45",
-			"attachments":          []string{"artifact"},
+			"attachments":           []string{"artifact"},
 			channels.MetaMediaPaths: []string{"/tmp/file.txt"},
 		},
 	})
@@ -827,6 +827,16 @@ func (rtt *requiredTextTool) Schema() map[string]any {
 	return rtt.SchemaFor(rtt.Name(), rtt.Description(), rtt.Parameters())
 }
 
+func TestFormatToolExecutionError_PreservesOutput(t *testing.T) {
+	got := formatToolExecutionError("stdout:\nfailed test\n\nstderr:\nboom", fmt.Errorf("exec failed: exit status 1"))
+	if !strings.Contains(got, "stdout:\nfailed test") {
+		t.Fatalf("expected tool output to be preserved, got %q", got)
+	}
+	if !strings.Contains(got, "error: exec failed: exit status 1") {
+		t.Fatalf("expected error text to be appended, got %q", got)
+	}
+}
+
 type replyMetaStreamer struct {
 	to     string
 	meta   map[string]any
@@ -855,9 +865,9 @@ func TestRuntime_Handle_StructuredAutonomyExecutesDirectly(t *testing.T) {
 		From:       "remote",
 		Message:    "ignored prompt body",
 		Meta: map[string]any{
-			"channel_id":             "channel-1",
-			channels.MetaThreadTS:     "123.45",
-			heartbeat.MetaKeyDone:      func() { released.Store(true) },
+			"channel_id":          "channel-1",
+			channels.MetaThreadTS: "123.45",
+			heartbeat.MetaKeyDone: func() { released.Store(true) },
 			triggers.MetaKeyStructuredTasks: triggers.StructuredTasksMap(triggers.StructuredTaskEnvelope{
 				Tasks: []triggers.StructuredToolCall{{Tool: tool.Name()}},
 			}),

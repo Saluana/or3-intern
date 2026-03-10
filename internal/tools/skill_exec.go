@@ -120,10 +120,10 @@ func (t *RunSkillScript) Execute(ctx context.Context, params map[string]any) (st
 		er = er[:max] + "\n...[truncated]\n"
 	}
 	if err != nil {
-		return fmt.Sprintf("exit error: %v\n\nstdout:\n%s\n\nstderr:\n%s", err, out, er), nil
+		return formatCommandOutput(out, er), fmt.Errorf("exec failed: %w", err)
 	}
 	if strings.TrimSpace(er) != "" {
-		return fmt.Sprintf("stdout:\n%s\n\nstderr:\n%s", out, er), nil
+		return formatCommandOutput(out, er), nil
 	}
 	return out, nil
 }

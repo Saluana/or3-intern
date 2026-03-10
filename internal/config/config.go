@@ -60,6 +60,7 @@ type Config struct {
 type HardeningConfig struct {
 	GuardedTools        bool                 `json:"guardedTools"`
 	PrivilegedTools     bool                 `json:"privilegedTools"`
+	EnableExecShell     bool                 `json:"enableExecShell"`
 	ExecAllowedPrograms []string             `json:"execAllowedPrograms"`
 	ChildEnvAllowlist   []string             `json:"childEnvAllowlist"`
 	IsolateChannelPeers bool                 `json:"isolateChannelPeers"`
@@ -463,6 +464,7 @@ func Default() Config {
 		Hardening: HardeningConfig{
 			GuardedTools:        false,
 			PrivilegedTools:     false,
+			EnableExecShell:     false,
 			ExecAllowedPrograms: []string{"cat", "echo", "find", "git", "grep", "head", "ls", "pwd", "sed", "tail"},
 			ChildEnvAllowlist:   []string{"PATH", "HOME", "TMPDIR", "TMP", "TEMP"},
 			IsolateChannelPeers: true,

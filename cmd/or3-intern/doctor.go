@@ -173,7 +173,7 @@ func webhookFindings(cfg config.Config) []doctorFinding {
 	if hostListTooBroad(profile.AllowedHosts) {
 		addWarn(fmt.Sprintf("webhook resolves to profile %q with broad allowedHosts", profileName))
 	}
-	if cfg.Hardening.PrivilegedTools && profileCanReachExec(profile) {
+	if cfg.Hardening.EnableExecShell && cfg.Hardening.PrivilegedTools && profileCanReachExec(profile) {
 		addWarn(fmt.Sprintf("webhook can reach exec shell mode via profile %q", profileName))
 	}
 	if cfg.Skills.EnableExec && profileAllowsPrivileged(profile) && profileAllowsTool(profile, "run_skill_script") {
@@ -306,8 +306,8 @@ func execFindings(cfg config.Config) []doctorFinding {
 	if len(cfg.Hardening.ChildEnvAllowlist) == 0 {
 		addWarn("exec-capable configuration has an empty child environment allowlist")
 	}
-	if cfg.Hardening.PrivilegedTools {
-		addWarn("exec shell command mode is available; execAllowedPrograms only constrains program mode")
+	if cfg.Hardening.EnableExecShell {
+		addWarn("exec shell command mode is enabled; prefer program + args and keep shell mode off unless strictly required")
 	}
 	if publicIngressCanReachExec(cfg) || webhookCanReachExec(cfg) {
 		addWarn("public or webhook-facing ingress can reach privileged exec posture unless profiles deny it")
@@ -391,7 +391,7 @@ func appendPublicChannelExposureWarnings(findings *[]doctorFinding, cfg config.C
 	if cfg.Hardening.GuardedTools && !profileHasMeaningfulToolRestriction(profile) {
 		add(fmt.Sprintf("open-access channel resolves to profile %q without a meaningful tool restriction", profileName))
 	}
-	if cfg.Hardening.PrivilegedTools && profileCanReachExec(profile) {
+	if cfg.Hardening.EnableExecShell && cfg.Hardening.PrivilegedTools && profileCanReachExec(profile) {
 		add(fmt.Sprintf("open-access channel can reach exec shell mode via profile %q", profileName))
 	}
 	if cfg.Skills.EnableExec && profileAllowsPrivileged(profile) && profileAllowsTool(profile, "run_skill_script") {
@@ -587,7 +587,7 @@ func publicIngressCanReachSkillExec(cfg config.Config) bool {
 }
 
 func publicIngressCanReachExec(cfg config.Config) bool {
-	if !cfg.Hardening.PrivilegedTools {
+	if !cfg.Hardening.EnableExecShell || !cfg.Hardening.PrivilegedTools {
 		return false
 	}
 	for _, channel := range openAccessChannelNames(cfg) {
@@ -603,7 +603,7 @@ func publicIngressCanReachExec(cfg config.Config) bool {
 }
 
 func webhookCanReachExec(cfg config.Config) bool {
-	if !cfg.Hardening.PrivilegedTools || !cfg.Triggers.Webhook.Enabled {
+	if !cfg.Hardening.EnableExecShell || !cfg.Hardening.PrivilegedTools || !cfg.Triggers.Webhook.Enabled {
 		return false
 	}
 	_, profile, ok := resolveEffectiveProfile(cfg, "webhook", "webhook")

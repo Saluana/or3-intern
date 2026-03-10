@@ -115,9 +115,10 @@ func TestDoctorFindings_ExpandedWarnings(t *testing.T) {
 			name: "exec shell posture",
 			mutate: func(cfg *config.Config) {
 				cfg.Hardening.PrivilegedTools = true
+				cfg.Hardening.EnableExecShell = true
 			},
 			expectArea:  "exec",
-			expectMatch: "exec shell command mode is available",
+			expectMatch: "exec shell command mode is enabled",
 		},
 		{
 			name: "skill execution quarantine disabled",
@@ -159,6 +160,7 @@ func TestRunDoctorCommand_PrintsWarnings(t *testing.T) {
 	cfg := safeDoctorConfig()
 	cfg.Tools.RestrictToWorkspace = false
 	cfg.Hardening.PrivilegedTools = true
+	cfg.Hardening.EnableExecShell = true
 	cfg.Triggers.Webhook.Enabled = true
 	cfg.Triggers.Webhook.Secret = ""
 	cfg.Triggers.Webhook.Addr = "0.0.0.0:8765"
@@ -179,6 +181,7 @@ func TestRunDoctorCommand_PrintsWarnings(t *testing.T) {
 func TestRunDoctorCommand_StrictFailsOnWarnings(t *testing.T) {
 	cfg := safeDoctorConfig()
 	cfg.Hardening.PrivilegedTools = true
+	cfg.Hardening.EnableExecShell = true
 	var out bytes.Buffer
 	if err := runDoctorCommand(cfg, []string{"--strict"}, &out, &out); err == nil {
 		t.Fatal("expected strict doctor run to fail on warnings")
@@ -220,6 +223,7 @@ func TestDoctorFindings_ExecWarningsRespectEffectiveProfiles(t *testing.T) {
 	t.Run("webhook safe profile suppresses generic exec ingress warning", func(t *testing.T) {
 		cfg := safeDoctorConfig()
 		cfg.Hardening.PrivilegedTools = true
+			cfg.Hardening.EnableExecShell = true
 		cfg.Triggers.Webhook.Enabled = true
 		findings := doctorFindings(cfg)
 		if findingContains(findings, "exec", "public or webhook-facing ingress can reach privileged exec posture") {
@@ -230,6 +234,7 @@ func TestDoctorFindings_ExecWarningsRespectEffectiveProfiles(t *testing.T) {
 	t.Run("guarded webhook profile with exec allowlist cannot reach exec", func(t *testing.T) {
 		cfg := safeDoctorConfig()
 		cfg.Hardening.PrivilegedTools = true
+			cfg.Hardening.EnableExecShell = true
 		cfg.Triggers.Webhook.Enabled = true
 		cfg.Security.Profiles.Default = "guarded"
 		cfg.Security.Profiles.Profiles["guarded"] = config.AccessProfileConfig{
@@ -245,6 +250,7 @@ func TestDoctorFindings_ExecWarningsRespectEffectiveProfiles(t *testing.T) {
 	t.Run("guarded public profile with exec allowlist cannot reach exec", func(t *testing.T) {
 		cfg := safeDoctorConfig()
 		cfg.Hardening.PrivilegedTools = true
+		cfg.Hardening.EnableExecShell = true
 		cfg.Channels.Discord.Enabled = true
 		cfg.Channels.Discord.OpenAccess = true
 		cfg.Security.Profiles.Default = "guarded"
@@ -255,6 +261,23 @@ func TestDoctorFindings_ExecWarningsRespectEffectiveProfiles(t *testing.T) {
 		findings := doctorFindings(cfg)
 		if findingContains(findings, "discord", "can reach exec shell mode via profile") {
 			t.Fatalf("expected guarded public profile to avoid exec warning, got %#v", findings)
+		}
+	})
+
+	t.Run("public profile does not report shell exposure when shell mode is off", func(t *testing.T) {
+		cfg := safeDoctorConfig()
+		cfg.Hardening.PrivilegedTools = true
+		cfg.Hardening.EnableExecShell = false
+		cfg.Channels.Discord.Enabled = true
+		cfg.Channels.Discord.OpenAccess = true
+		cfg.Security.Profiles.Default = "danger"
+		cfg.Security.Profiles.Profiles["danger"] = config.AccessProfileConfig{
+			MaxCapability: "privileged",
+			AllowedTools:  []string{"exec"},
+		}
+		findings := doctorFindings(cfg)
+		if findingContains(findings, "discord", "can reach exec shell mode via profile") {
+			t.Fatalf("expected shell-mode warning to be suppressed when enableExecShell=false, got %#v", findings)
 		}
 	})
 }

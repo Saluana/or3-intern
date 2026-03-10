@@ -544,7 +544,7 @@ func buildToolRegistryWithOptions(cfg config.Config, d *db.DB, prov *providers.C
 	fileRoot := allowedRoot(cfg)
 	sandboxCfg := tools.BubblewrapConfig{Enabled: cfg.Hardening.Sandbox.Enabled, BubblewrapPath: cfg.Hardening.Sandbox.BubblewrapPath, AllowNetwork: cfg.Hardening.Sandbox.AllowNetwork, WritablePaths: append([]string{}, cfg.Hardening.Sandbox.WritablePaths...)}
 	hostPolicy := buildHostPolicy(cfg)
-	reg.Register(&tools.ExecTool{Timeout: time.Duration(cfg.Tools.ExecTimeoutSeconds) * time.Second, RestrictDir: fileRoot, PathAppend: cfg.Tools.PathAppend, AllowedPrograms: append([]string{}, cfg.Hardening.ExecAllowedPrograms...), ChildEnvAllowlist: append([]string{}, cfg.Hardening.ChildEnvAllowlist...), Sandbox: sandboxCfg})
+	reg.Register(&tools.ExecTool{Timeout: time.Duration(cfg.Tools.ExecTimeoutSeconds) * time.Second, RestrictDir: fileRoot, PathAppend: cfg.Tools.PathAppend, AllowedPrograms: append([]string{}, cfg.Hardening.ExecAllowedPrograms...), ChildEnvAllowlist: append([]string{}, cfg.Hardening.ChildEnvAllowlist...), Sandbox: sandboxCfg, EnableLegacyShell: cfg.Hardening.EnableExecShell})
 	reg.Register(&tools.ReadFile{FileTool: tools.FileTool{Root: fileRoot}})
 	reg.Register(&tools.WriteFile{FileTool: tools.FileTool{Root: fileRoot}})
 	reg.Register(&tools.EditFile{FileTool: tools.FileTool{Root: fileRoot}})

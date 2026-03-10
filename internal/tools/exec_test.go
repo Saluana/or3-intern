@@ -20,7 +20,7 @@ func writeFakeBubblewrap(t *testing.T) string {
 }
 
 func TestExecTool_BasicCommand(t *testing.T) {
-	tool := &ExecTool{Timeout: 5 * time.Second}
+	tool := &ExecTool{Timeout: 5 * time.Second, EnableLegacyShell: true}
 	out, err := tool.Execute(context.Background(), map[string]any{
 		"command": "echo hello",
 	})
@@ -29,6 +29,13 @@ func TestExecTool_BasicCommand(t *testing.T) {
 	}
 	if !strings.Contains(out, "hello") {
 		t.Errorf("expected output to contain 'hello', got %q", out)
+	}
+}
+
+func TestExecTool_ShellCommandDisabledByDefault(t *testing.T) {
+	tool := &ExecTool{Timeout: 5 * time.Second}
+	if _, err := tool.Execute(context.Background(), map[string]any{"command": "echo hello"}); err == nil {
+		t.Fatal("expected shell execution to be disabled by default")
 	}
 }
 
@@ -68,7 +75,7 @@ func TestExecTool_AllowedPrograms(t *testing.T) {
 }
 
 func TestExecTool_BubblewrapUnavailable(t *testing.T) {
-	tool := &ExecTool{Timeout: 5 * time.Second, Sandbox: BubblewrapConfig{Enabled: true, BubblewrapPath: filepath.Join(t.TempDir(), "missing-bwrap")}}
+	tool := &ExecTool{Timeout: 5 * time.Second, EnableLegacyShell: true, Sandbox: BubblewrapConfig{Enabled: true, BubblewrapPath: filepath.Join(t.TempDir(), "missing-bwrap")}}
 	if _, err := tool.Execute(context.Background(), map[string]any{"command": "echo hi"}); err == nil || !strings.Contains(err.Error(), "bubblewrap unavailable") {
 		t.Fatalf("expected bubblewrap unavailable error, got %v", err)
 	}
@@ -76,7 +83,7 @@ func TestExecTool_BubblewrapUnavailable(t *testing.T) {
 
 func TestExecTool_BubblewrapEnabled(t *testing.T) {
 	bwrap := writeFakeBubblewrap(t)
-	tool := &ExecTool{Timeout: 5 * time.Second, Sandbox: BubblewrapConfig{Enabled: true, BubblewrapPath: bwrap}}
+	tool := &ExecTool{Timeout: 5 * time.Second, EnableLegacyShell: true, Sandbox: BubblewrapConfig{Enabled: true, BubblewrapPath: bwrap}}
 	out, err := tool.Execute(context.Background(), map[string]any{"command": "echo sandboxed"})
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -104,7 +111,7 @@ func TestExecTool_ChildEnvAllowlistScrubsInheritedEnv(t *testing.T) {
 }
 
 func TestExecTool_EmptyCommand(t *testing.T) {
-	tool := &ExecTool{Timeout: 5 * time.Second}
+	tool := &ExecTool{Timeout: 5 * time.Second, EnableLegacyShell: true}
 	_, err := tool.Execute(context.Background(), map[string]any{
 		"command": "  ",
 	})
@@ -114,7 +121,7 @@ func TestExecTool_EmptyCommand(t *testing.T) {
 }
 
 func TestExecTool_MissingCommandParam(t *testing.T) {
-	tool := &ExecTool{Timeout: 5 * time.Second}
+	tool := &ExecTool{Timeout: 5 * time.Second, EnableLegacyShell: true}
 	_, err := tool.Execute(context.Background(), map[string]any{})
 	if err == nil {
 		t.Fatal("expected error for missing command param")
@@ -122,7 +129,7 @@ func TestExecTool_MissingCommandParam(t *testing.T) {
 }
 
 func TestExecTool_BlockedPattern(t *testing.T) {
-	tool := &ExecTool{Timeout: 5 * time.Second}
+	tool := &ExecTool{Timeout: 5 * time.Second, EnableLegacyShell: true}
 	_, err := tool.Execute(context.Background(), map[string]any{
 		"command": "rm -rf /tmp/something",
 	})
@@ -137,6 +144,7 @@ func TestExecTool_BlockedPattern(t *testing.T) {
 func TestExecTool_CustomBlockedPatterns(t *testing.T) {
 	tool := &ExecTool{
 		Timeout:         5 * time.Second,
+		EnableLegacyShell: true,
 		BlockedPatterns: []string{"forbidden_cmd"},
 	}
 	_, err := tool.Execute(context.Background(), map[string]any{
@@ -148,7 +156,7 @@ func TestExecTool_CustomBlockedPatterns(t *testing.T) {
 }
 
 func TestExecTool_ExitError(t *testing.T) {
-	tool := &ExecTool{Timeout: 5 * time.Second}
+	tool := &ExecTool{Timeout: 5 * time.Second, EnableLegacyShell: true}
 	out, err := tool.Execute(context.Background(), map[string]any{
 		"command": "exit 1",
 	})
@@ -161,7 +169,7 @@ func TestExecTool_ExitError(t *testing.T) {
 }
 
 func TestExecTool_StderrOutput(t *testing.T) {
-	tool := &ExecTool{Timeout: 5 * time.Second}
+	tool := &ExecTool{Timeout: 5 * time.Second, EnableLegacyShell: true}
 	out, err := tool.Execute(context.Background(), map[string]any{
 		"command": "echo err >&2",
 	})
@@ -177,6 +185,7 @@ func TestExecTool_StderrOutput(t *testing.T) {
 func TestExecTool_OutputTruncation(t *testing.T) {
 	tool := &ExecTool{
 		Timeout:        5 * time.Second,
+		EnableLegacyShell: true,
 		OutputMaxBytes: 10,
 	}
 	out, err := tool.Execute(context.Background(), map[string]any{
@@ -194,6 +203,7 @@ func TestExecTool_RestrictDir_Inside(t *testing.T) {
 	dir := t.TempDir()
 	tool := &ExecTool{
 		Timeout:     5 * time.Second,
+		EnableLegacyShell: true,
 		RestrictDir: dir,
 	}
 	out, err := tool.Execute(context.Background(), map[string]any{
@@ -212,6 +222,7 @@ func TestExecTool_RestrictDir_Outside(t *testing.T) {
 	dir := t.TempDir()
 	tool := &ExecTool{
 		Timeout:     5 * time.Second,
+		EnableLegacyShell: true,
 		RestrictDir: dir,
 	}
 	_, err := tool.Execute(context.Background(), map[string]any{
@@ -227,7 +238,7 @@ func TestExecTool_RestrictDir_Outside(t *testing.T) {
 }
 
 func TestExecTool_TimeoutParam(t *testing.T) {
-	tool := &ExecTool{Timeout: 10 * time.Second}
+	tool := &ExecTool{Timeout: 10 * time.Second, EnableLegacyShell: true}
 	out, err := tool.Execute(context.Background(), map[string]any{
 		"command":        "echo timeout_test",
 		"timeoutSeconds": float64(5),
@@ -242,7 +253,7 @@ func TestExecTool_TimeoutParam(t *testing.T) {
 
 func TestExecTool_WithCwd(t *testing.T) {
 	dir := t.TempDir()
-	tool := &ExecTool{Timeout: 5 * time.Second}
+	tool := &ExecTool{Timeout: 5 * time.Second, EnableLegacyShell: true}
 	out, err := tool.Execute(context.Background(), map[string]any{
 		"command": "pwd",
 		"cwd":     dir,
@@ -264,6 +275,7 @@ func TestExecTool_PathAppend(t *testing.T) {
 
 	tool := &ExecTool{
 		Timeout:    5 * time.Second,
+		EnableLegacyShell: true,
 		PathAppend: dir,
 	}
 	out, err := tool.Execute(context.Background(), map[string]any{

@@ -48,7 +48,7 @@ Phase 1 hardening is now wired into the default runtime profile:
 - file tools stay workspace-rooted by default
 - external channels stay closed unless explicitly allowlisted or opened
 - child processes use a scrubbed environment allowlist instead of inheriting the full parent env
-- `exec` prefers `program` + `args`; legacy shell commands remain available only through privileged tool policy
+- `exec` prefers `program` + `args`; legacy shell commands are disabled by default and require explicit `hardening.enableExecShell` opt-in
 - tool calls are checked against capability tiers and bounded per-session quotas
 - external channel session keys can isolate peers so unrelated senders do not share the same conversation state
 
@@ -59,6 +59,7 @@ Example hardening block:
   "hardening": {
     "guardedTools": false,
     "privilegedTools": false,
+    "enableExecShell": false,
     "execAllowedPrograms": ["cat", "echo", "find", "git", "grep", "head", "ls", "pwd", "sed", "tail"],
     "childEnvAllowlist": ["PATH", "HOME", "TMPDIR", "TMP", "TEMP"],
     "isolateChannelPeers": true,
@@ -75,7 +76,7 @@ Example hardening block:
 
   Phase 2 adds four narrow hardening layers on top of that baseline:
 
-  - skills can declare permission metadata and default to a quarantined execution state until explicitly approved in `skills.policy.approved`
+  - skills can declare permission metadata plus a `tools` allowlist, and those bounds are enforced during explicit skill execution while script-capable skills still default to a quarantined state until explicitly approved in `skills.policy.approved`
   - heartbeat, webhook, and file-watch turns attach a bounded `structured_event` payload in event metadata and surface it in the autonomous system prompt
   - privileged shell exec and `run_skill_script` can optionally route through a Bubblewrap wrapper via `hardening.sandbox`
   - `or3-intern doctor` audits the current config for common unsafe settings and supports `--strict` for CI-style failures
@@ -608,7 +609,7 @@ Trust model:
 
 - Treat third-party skills as untrusted input.
 - Installer hints from skill metadata are informational only; `or3-intern` does not auto-run them.
-- Not every ClawHub skill is portable. Skills that depend on unsupported OpenClaw-only tools, custom frontmatter-defined tools, Nix/plugin flows, or remote node assumptions are reported as unavailable instead of failing silently.
+- Not every ClawHub skill is portable. Skills that depend on unsupported OpenClaw-only tools, malformed `tools` declarations, Nix/plugin flows, or remote node assumptions are reported as unavailable instead of failing silently.
 
 ### Triggers
 

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"or3-intern/internal/bus"
+	"or3-intern/internal/config"
 	"or3-intern/internal/providers"
 	"or3-intern/internal/skills"
 	"or3-intern/internal/tools"
@@ -68,7 +69,7 @@ func makeRuntimeSkillInventory(t *testing.T, body string, entry skills.EntryConf
 		Entries: map[string]skills.EntryConfig{
 			"slash": entry,
 		},
-		AvailableTools: map[string]struct{}{"inspect_env": {}, "raw_dispatch": {}, "read_skill": {}},
+		AvailableTools: map[string]struct{}{"inspect_env": {}, "raw_dispatch": {}, "read_skill": {}, "exec": {}},
 		Env:            map[string]string{},
 	})
 }
@@ -116,6 +117,36 @@ metadata:
 	}
 	if got := strings.Join(deliver.messages, "\n"); !strings.Contains(got, "ran:hello there") {
 		t.Fatalf("expected dispatched tool output, got %q", got)
+	}
+}
+
+func TestRuntime_ExplicitSkillCommand_ExecDispatchRemainsRunnableWithoutShellPermissionMetadata(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	deliver := &mockDeliverer{}
+	reg := tools.NewRegistry()
+	reg.Register(&tools.ExecTool{Timeout: 5 * time.Second, EnableLegacyShell: true})
+	rt := &Runtime{
+		DB:    d,
+		Tools: reg,
+		Hardening: config.HardeningConfig{
+			PrivilegedTools: true,
+		},
+		Builder: &Builder{DB: d, HistoryMax: 10, Skills: makeRuntimeSkillInventory(t, `---
+name: slash
+description: dispatches raw args to exec
+command-dispatch: tool
+command-tool: exec
+---
+# Slash
+`, skills.EntryConfig{})},
+		Deliver: deliver,
+	}
+
+	if err := rt.Handle(context.Background(), bus.Event{Type: bus.EventUserMessage, SessionKey: "sess-exec-dispatch", Channel: "cli", From: "user", Message: "/slash echo hello"}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if got := strings.Join(deliver.messages, "\n"); !strings.Contains(got, "hello") {
+		t.Fatalf("expected exec dispatch output, got %q", got)
 	}
 }
 
@@ -342,6 +373,202 @@ Use this skill carefully.
 	}
 	if tool.secret != "secret-value" {
 		t.Fatalf("expected scoped env injection, got %q", tool.secret)
+	}
+}
+
+func TestRuntime_ExplicitSkillConversation_DeclaredToolAllowlistIsEnforced(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	tool := &inspectEnvTool{}
+	reg := tools.NewRegistry()
+	reg.Register(tool)
+
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		if callCount == 1 {
+			_ = json.NewEncoder(w).Encode(providers.ChatCompletionResponse{
+				Choices: []struct {
+					Message struct {
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					} `json:"message"`
+				}{{
+					Message: struct {
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					}{
+						Role: "assistant",
+						ToolCalls: []providers.ToolCall{{
+							ID:   "tc1",
+							Type: "function",
+							Function: struct {
+								Name      string `json:"name"`
+								Arguments string `json:"arguments"`
+							}{Name: "inspect_env", Arguments: `{}`},
+						}},
+					},
+				}},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(providers.ChatCompletionResponse{
+			Choices: []struct {
+				Message struct {
+					Role      string               `json:"role"`
+					Content   any                  `json:"content"`
+					ToolCalls []providers.ToolCall `json:"tool_calls"`
+				} `json:"message"`
+			}{{
+				Message: struct {
+					Role      string               `json:"role"`
+					Content   any                  `json:"content"`
+					ToolCalls []providers.ToolCall `json:"tool_calls"`
+				}{Role: "assistant", Content: "done"},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	provider := providers.New(server.URL, "k", 5*time.Second)
+	provider.HTTP = server.Client()
+	rt := &Runtime{
+		DB:           d,
+		Provider:     provider,
+		Model:        "gpt-4.1-mini",
+		Tools:        reg,
+		MaxToolLoops: 2,
+		Builder: &Builder{DB: d, HistoryMax: 10, Skills: makeRuntimeSkillInventory(t, `---
+name: slash
+description: seeded skill
+tools: [read_skill]
+metadata:
+  openclaw:
+    primaryEnv: API_SECRET
+---
+# Slash
+Use this skill carefully.
+`, skills.EntryConfig{APIKey: "secret-value"})},
+		Deliver: &mockDeliverer{},
+	}
+
+	if err := rt.Handle(context.Background(), bus.Event{Type: bus.EventUserMessage, SessionKey: "sess-skill-tools", Channel: "cli", From: "user", Message: "/slash run the tool"}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if tool.secret != "" {
+		t.Fatalf("expected denied tool to not receive env, got %q", tool.secret)
+	}
+	msgs, err := d.GetLastMessages(context.Background(), "sess-skill-tools", 20)
+	if err != nil {
+		t.Fatalf("GetLastMessages: %v", err)
+	}
+	found := false
+	for _, msg := range msgs {
+		if msg.Role == "tool" && strings.Contains(msg.Content, "tool denied by skill policy: inspect_env") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected skill policy denial in tool history, got %#v", msgs)
+	}
+}
+
+func TestRuntime_ExplicitSkillConversation_ExecutionPermissionIsEnforced(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	reg := tools.NewRegistry()
+	reg.Register(&tools.ExecTool{AllowedPrograms: []string{"echo"}, Timeout: 5 * time.Second})
+
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		if callCount == 1 {
+			_ = json.NewEncoder(w).Encode(providers.ChatCompletionResponse{
+				Choices: []struct {
+					Message struct {
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					} `json:"message"`
+				}{{
+					Message: struct {
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					}{
+						Role: "assistant",
+						ToolCalls: []providers.ToolCall{{
+							ID:   "tc1",
+							Type: "function",
+							Function: struct {
+								Name      string `json:"name"`
+								Arguments string `json:"arguments"`
+							}{Name: "exec", Arguments: `{"program":"echo","args":["hi"]}`},
+						}},
+					},
+				}},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(providers.ChatCompletionResponse{
+			Choices: []struct {
+				Message struct {
+					Role      string               `json:"role"`
+					Content   any                  `json:"content"`
+					ToolCalls []providers.ToolCall `json:"tool_calls"`
+				} `json:"message"`
+			}{{
+				Message: struct {
+					Role      string               `json:"role"`
+					Content   any                  `json:"content"`
+					ToolCalls []providers.ToolCall `json:"tool_calls"`
+				}{Role: "assistant", Content: "done"},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	provider := providers.New(server.URL, "k", 5*time.Second)
+	provider.HTTP = server.Client()
+	hardening := config.Default().Hardening
+	hardening.GuardedTools = true
+	rt := &Runtime{
+		DB:           d,
+		Provider:     provider,
+		Model:        "gpt-4.1-mini",
+		Tools:        reg,
+		MaxToolLoops: 2,
+		Hardening:    hardening,
+		Builder: &Builder{DB: d, HistoryMax: 10, Skills: makeRuntimeSkillInventory(t, `---
+name: slash
+description: seeded skill
+tools: [exec]
+permissions:
+  shell: false
+---
+# Slash
+No execution permission.
+`, skills.EntryConfig{})},
+		Deliver: &mockDeliverer{},
+	}
+
+	if err := rt.Handle(context.Background(), bus.Event{Type: bus.EventUserMessage, SessionKey: "sess-skill-exec", Channel: "cli", From: "user", Message: "/slash run the tool"}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	msgs, err := d.GetLastMessages(context.Background(), "sess-skill-exec", 20)
+	if err != nil {
+		t.Fatalf("GetLastMessages: %v", err)
+	}
+	found := false
+	for _, msg := range msgs {
+		if msg.Role == "tool" && strings.Contains(msg.Content, "execution denied by skill policy: exec") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected skill execution denial in tool history, got %#v", msgs)
 	}
 }
 

@@ -41,6 +41,7 @@ func (s *fakeSession) CallTool(ctx context.Context, params *sdkmcp.CallToolParam
 func TestBuildTransportVariants(t *testing.T) {
 	t.Setenv("PATH", "/test/bin")
 	t.Setenv("HOME", "/test/home")
+	t.Setenv("INHERITED_SECRET", "top-secret")
 	stdio, err := buildTransport(config.MCPServerConfig{
 		Transport: "stdio",
 		Command:   "demo-server",
@@ -59,6 +60,9 @@ func TestBuildTransportVariants(t *testing.T) {
 	}
 	if got := envSliceToMap(cmdTransport.Command.Env); got["API_KEY"] != "secret" || got["PATH"] != "/test/bin" || got["HOME"] != "/test/home" {
 		t.Fatalf("expected merged env, got %#v", got)
+	}
+	if got := envSliceToMap(cmdTransport.Command.Env); got["INHERITED_SECRET"] != "" {
+		t.Fatalf("expected inherited secret to be scrubbed, got %#v", got)
 	}
 
 	sse, err := buildTransport(config.MCPServerConfig{

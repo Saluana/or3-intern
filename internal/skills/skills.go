@@ -130,6 +130,7 @@ type SkillMeta struct {
 
 	Metadata        SkillRuntimeMeta
 	Permissions     SkillPermissions
+	AllowedTools    []string
 	PermissionState string
 	PermissionNotes []string
 	Key             string
@@ -153,6 +154,7 @@ type Inventory struct {
 type skillManifest struct {
 	Summary     string           `json:"summary"`
 	Entrypoints []SkillEntry     `json:"entrypoints"`
+	Tools       []string         `json:"tools"`
 	Permissions SkillPermissions `json:"permissions"`
 }
 
@@ -367,13 +369,16 @@ func loadSkill(dir, path string, root Root, order int, opts LoadOptions) SkillMe
 		meta.CommandArgMode = strings.TrimSpace(fm.CommandArgMode)
 	}
 	meta.Permissions = normalizeSkillPermissions(fm.Permissions)
+	declaredTools, _ := parseDeclaredTools(rawTop["tools"])
+	meta.AllowedTools = declaredTools
 
 	manifest, err := loadManifest(dir)
 	if err != nil {
 		meta.ParseError = err.Error()
 		meta.Hidden = true
-	} else if len(manifest.Entrypoints) > 0 || manifest.Permissions.Requested() || strings.TrimSpace(manifest.Summary) != "" {
+	} else if len(manifest.Entrypoints) > 0 || len(manifest.Tools) > 0 || manifest.Permissions.Requested() || strings.TrimSpace(manifest.Summary) != "" {
 		meta.Entrypoints = manifest.Entrypoints
+		meta.AllowedTools = mergeStringLists(meta.AllowedTools, compactStrings(manifest.Tools))
 		if requested := normalizeSkillPermissions(manifest.Permissions); requested.Requested() {
 			meta.Permissions = requested
 		}
@@ -411,6 +416,31 @@ func normalizeSkillPermissions(raw SkillPermissions) SkillPermissions {
 
 func (p SkillPermissions) Requested() bool {
 	return p.Shell || p.Network || p.Write || len(p.AllowedPaths) > 0 || len(p.AllowedHosts) > 0
+}
+
+func parseDeclaredTools(raw any) ([]string, bool) {
+	switch value := raw.(type) {
+	case nil:
+		return nil, true
+	case []string:
+		return compactStrings(value), true
+	case []any:
+		out := make([]string, 0, len(value))
+		for _, item := range value {
+			name, ok := item.(string)
+			if !ok {
+				return nil, false
+			}
+			name = strings.TrimSpace(name)
+			if name == "" {
+				continue
+			}
+			out = append(out, name)
+		}
+		return compactStrings(out), true
+	default:
+		return nil, false
+	}
 }
 
 func (p SkillPermissions) Summary() string {
@@ -615,11 +645,21 @@ func applyEligibility(meta *SkillMeta, rawTop map[string]any, body string, entry
 
 func detectUnsupported(meta SkillMeta, rawTop map[string]any, body string, opts LoadOptions) []string {
 	var unsupported []string
-	if rawTop["tools"] != nil {
-		unsupported = append(unsupported, "frontmatter custom tools not supported")
+	if _, ok := rawTop["tools"]; ok {
+		if _, valid := parseDeclaredTools(rawTop["tools"]); !valid {
+			unsupported = append(unsupported, "frontmatter tools must be a list of string tool names")
+		}
 	}
 	if meta.Metadata.Nix != nil && strings.TrimSpace(meta.Metadata.Nix.Plugin) != "" {
 		unsupported = append(unsupported, "requires nix plugin: "+meta.Metadata.Nix.Plugin)
+	}
+	for _, toolName := range meta.AllowedTools {
+		if len(opts.AvailableTools) == 0 {
+			continue
+		}
+		if _, ok := opts.AvailableTools[toolName]; !ok {
+			unsupported = append(unsupported, "requires unsupported tool: "+toolName)
+		}
 	}
 	if meta.CommandDispatch != "" && meta.CommandDispatch != "tool" {
 		unsupported = append(unsupported, "unsupported command-dispatch: "+meta.CommandDispatch)
@@ -637,6 +677,22 @@ func detectUnsupported(meta SkillMeta, rawTop map[string]any, body string, opts 
 		unsupported = append(unsupported, "requires unsupported tool: nodes.run")
 	}
 	return unsupported
+}
+
+func mergeStringLists(base []string, extra []string) []string {
+	out := append([]string{}, compactStrings(base)...)
+	seen := map[string]struct{}{}
+	for _, item := range out {
+		seen[item] = struct{}{}
+	}
+	for _, item := range compactStrings(extra) {
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		out = append(out, item)
+	}
+	return out
 }
 
 func buildRuntimeEnv(meta SkillMeta, entry EntryConfig, baseEnv map[string]string) map[string]string {

@@ -142,6 +142,9 @@ func TestDefault_Values(t *testing.T) {
 	if cfg.Hardening.PrivilegedTools {
 		t.Error("expected privileged tools to be disabled by default")
 	}
+	if cfg.Hardening.EnableExecShell {
+		t.Error("expected exec shell mode to be disabled by default")
+	}
 	if !cfg.Hardening.IsolateChannelPeers {
 		t.Error("expected channel peer isolation to be enabled by default")
 	}
@@ -173,6 +176,7 @@ func TestLoad_HardeningDefaultsAndOverrides(t *testing.T) {
 	cfg := Default()
 	cfg.Hardening.GuardedTools = true
 	cfg.Hardening.PrivilegedTools = true
+	cfg.Hardening.EnableExecShell = true
 	cfg.Hardening.ExecAllowedPrograms = []string{"go", "git"}
 	cfg.Hardening.ChildEnvAllowlist = []string{"PATH"}
 	cfg.Hardening.Quotas = HardeningQuotaConfig{
@@ -192,7 +196,7 @@ func TestLoad_HardeningDefaultsAndOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if !loaded.Hardening.GuardedTools || !loaded.Hardening.PrivilegedTools {
+	if !loaded.Hardening.GuardedTools || !loaded.Hardening.PrivilegedTools || !loaded.Hardening.EnableExecShell {
 		t.Fatalf("expected hardening overrides to survive, got %+v", loaded.Hardening)
 	}
 	if got := loaded.Hardening.ExecAllowedPrograms; len(got) != 2 || got[0] != "go" || got[1] != "git" {

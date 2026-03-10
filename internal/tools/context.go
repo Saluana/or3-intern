@@ -13,6 +13,7 @@ type deliveryToContextKey struct{}
 type envContextKey struct{}
 type toolGuardContextKey struct{}
 type activeProfileContextKey struct{}
+type skillPolicyContextKey struct{}
 
 type ToolGuard func(ctx context.Context, tool Tool, capability CapabilityLevel, params map[string]any) error
 
@@ -23,6 +24,16 @@ type ActiveProfile struct {
 	AllowedHosts   []string
 	WritablePaths  []string
 	AllowSubagents bool
+}
+
+type SkillPolicy struct {
+	Name           string
+	AllowedTools   map[string]struct{}
+	AllowExecution bool
+	AllowNetwork   bool
+	AllowWrite     bool
+	AllowedHosts   []string
+	WritablePaths  []string
 }
 
 func ContextWithSession(ctx context.Context, sessionKey string) context.Context {
@@ -90,6 +101,30 @@ func ContextWithActiveProfile(ctx context.Context, profile ActiveProfile) contex
 	return context.WithValue(ctx, activeProfileContextKey{}, cloned)
 }
 
+func ContextWithSkillPolicy(ctx context.Context, policy SkillPolicy) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if strings.TrimSpace(policy.Name) == "" && len(policy.AllowedTools) == 0 && !policy.AllowExecution && !policy.AllowNetwork && !policy.AllowWrite && len(policy.AllowedHosts) == 0 && len(policy.WritablePaths) == 0 {
+		return ctx
+	}
+	cloned := SkillPolicy{
+		Name:           strings.TrimSpace(policy.Name),
+		AllowExecution: policy.AllowExecution,
+		AllowNetwork:   policy.AllowNetwork,
+		AllowWrite:     policy.AllowWrite,
+		AllowedHosts:   append([]string{}, policy.AllowedHosts...),
+		WritablePaths:  append([]string{}, policy.WritablePaths...),
+	}
+	if len(policy.AllowedTools) > 0 {
+		cloned.AllowedTools = make(map[string]struct{}, len(policy.AllowedTools))
+		for key := range policy.AllowedTools {
+			cloned.AllowedTools[key] = struct{}{}
+		}
+	}
+	return context.WithValue(ctx, skillPolicyContextKey{}, cloned)
+}
+
 func SessionFromContext(ctx context.Context) string {
 	if ctx == nil {
 		return scope.GlobalMemoryScope
@@ -141,4 +176,12 @@ func ActiveProfileFromContext(ctx context.Context) ActiveProfile {
 	}
 	profile, _ := ctx.Value(activeProfileContextKey{}).(ActiveProfile)
 	return profile
+}
+
+func SkillPolicyFromContext(ctx context.Context) SkillPolicy {
+	if ctx == nil {
+		return SkillPolicy{}
+	}
+	policy, _ := ctx.Value(skillPolicyContextKey{}).(SkillPolicy)
+	return policy
 }

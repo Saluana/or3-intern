@@ -113,3 +113,27 @@ func TestRunSkillScript_BubblewrapEnabled(t *testing.T) {
 		t.Fatalf("unexpected output: %q", out)
 	}
 }
+
+func TestRunSkillScript_EmptyAllowlistFallsBackToScrubbedEnv(t *testing.T) {
+	t.Setenv("INHERITED_SECRET", "top-secret")
+	root := t.TempDir()
+	dir := filepath.Join(root, "runner")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("---\nname: runner\ndescription: run scripts\n---\n# Runner\n"), 0o644); err != nil {
+		t.Fatalf("skill write: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "env.sh"), []byte("#!/bin/sh\nprintf %s \"${INHERITED_SECRET:-missing}\"\n"), 0o755); err != nil {
+		t.Fatalf("script write: %v", err)
+	}
+	inv := skills.ScanWithOptions(skills.LoadOptions{Roots: []skills.Root{{Path: root, Source: skills.SourceWorkspace}}, ApprovalPolicy: skills.ApprovalPolicy{QuarantineByDefault: true, ApprovedSkills: map[string]struct{}{"runner": {}}}})
+	tool := &RunSkillScript{Inventory: &inv, Enabled: true}
+	out, err := tool.Execute(context.Background(), map[string]any{"skill": "runner", "path": "env.sh"})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if strings.TrimSpace(out) != "missing" {
+		t.Fatalf("expected inherited secret to be scrubbed, got %q", out)
+	}
+}

@@ -245,7 +245,7 @@ tools:
 	if skill.Eligible {
 		t.Fatal("expected custom tool declaration to make skill ineligible")
 	}
-	if !strings.Contains(strings.Join(skill.Unsupported, " | "), "frontmatter custom tools not supported") {
+	if !strings.Contains(strings.Join(skill.Unsupported, " | "), "frontmatter tools must be a list of string tool names") {
 		t.Fatalf("unexpected unsupported reasons: %#v", skill.Unsupported)
 	}
 }

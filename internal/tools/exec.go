@@ -20,6 +20,7 @@ type ExecTool struct {
 	ChildEnvAllowlist []string
 	AllowedPrograms   []string
 	Sandbox           BubblewrapConfig
+	EnableLegacyShell bool
 	DisableShell      bool
 	OutputMaxBytes    int
 	BlockedPatterns   []string
@@ -29,7 +30,7 @@ const defaultExecOutputMaxBytes = 10000
 
 func (t *ExecTool) Name() string { return "exec" }
 func (t *ExecTool) Description() string {
-	return "Run a program with safety limits. Output is truncated. Legacy shell commands are optional."
+	return "Run an allowed program with safety limits. Output is truncated. Legacy shell commands require explicit opt-in."
 }
 func (t *ExecTool) Parameters() map[string]any {
 	return map[string]any{
@@ -37,7 +38,7 @@ func (t *ExecTool) Parameters() map[string]any {
 		"properties": map[string]any{
 			"program":        map[string]any{"type": "string", "description": "Program to run"},
 			"args":           map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Program arguments"},
-			"command":        map[string]any{"type": "string", "description": "Legacy shell command to run (privileged)"},
+			"command":        map[string]any{"type": "string", "description": "Legacy shell command to run (privileged, explicit opt-in only)"},
 			"cwd":            map[string]any{"type": "string", "description": "Working directory (optional)"},
 			"timeoutSeconds": map[string]any{"type": "integer", "description": "Override timeout (optional)"},
 		},
@@ -70,8 +71,8 @@ func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, 
 		return "", errors.New("missing program or command")
 	}
 	if legacyCommand != "" {
-		if t.DisableShell {
-			return "", errors.New("shell command execution disabled")
+		if !t.EnableLegacyShell || t.DisableShell {
+			return "", errors.New("shell command execution disabled; use program + args or explicitly enable legacy shell mode")
 		}
 		lc := strings.ToLower(legacyCommand)
 		patterns := t.BlockedPatterns

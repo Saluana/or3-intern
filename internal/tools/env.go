@@ -5,27 +5,46 @@ import (
 	"strings"
 )
 
+var defaultChildEnvAllowlist = []string{"PATH", "HOME", "TMPDIR", "TMP", "TEMP"}
+
+func EffectiveChildEnvAllowlist(allowlist []string) []string {
+	cleaned := make([]string, 0, len(allowlist))
+	seen := map[string]struct{}{}
+	for _, name := range allowlist {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		cleaned = append(cleaned, name)
+	}
+	if len(cleaned) > 0 {
+		return cleaned
+	}
+	return append([]string{}, defaultChildEnvAllowlist...)
+}
+
 func BuildChildEnv(base []string, allowlist []string, overlay map[string]string, pathAppend string) []string {
 	values := map[string]string{}
 	order := make([]string, 0, len(base)+len(overlay)+1)
 	allowed := map[string]struct{}{}
-	for _, name := range allowlist {
+	for _, name := range EffectiveChildEnvAllowlist(allowlist) {
 		name = strings.TrimSpace(name)
 		if name == "" {
 			continue
 		}
 		allowed[name] = struct{}{}
 	}
-	includeAll := len(allowed) == 0
 	for _, raw := range base {
 		key, value, ok := strings.Cut(raw, "=")
 		if !ok {
 			continue
 		}
-		if !includeAll {
-			if _, ok := allowed[key]; !ok {
-				continue
-			}
+		if _, ok := allowed[key]; !ok {
+			continue
 		}
 		if _, exists := values[key]; !exists {
 			order = append(order, key)

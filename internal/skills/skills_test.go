@@ -465,3 +465,100 @@ func TestScan_DuplicateNameLaterDirWins(t *testing.T) {
 		t.Fatalf("expected later dir to win, got %q", s.Summary)
 	}
 }
+
+func TestScanWithOptions_ParsesDeclaredToolsAllowlist(t *testing.T) {
+	root := t.TempDir()
+	makeSkillBundle(t, root, "custom-tool", `---
+name: custom-tool
+description: custom tool skill
+tools:
+  - read_skill
+  - exec
+---
+# Custom
+`)
+
+	inv := ScanWithOptions(LoadOptions{
+		Roots:          []Root{{Path: root, Source: SourceWorkspace}},
+		AvailableTools: map[string]struct{}{"read_skill": {}, "exec": {}},
+	})
+	skill, ok := inv.Get("custom-tool")
+	if !ok {
+		t.Fatal("expected skill")
+	}
+	if !skill.Eligible {
+		t.Fatalf("expected declared tool list to be supported, got unsupported=%v", skill.Unsupported)
+	}
+	if len(skill.AllowedTools) != 2 || skill.AllowedTools[0] != "read_skill" || skill.AllowedTools[1] != "exec" {
+		t.Fatalf("unexpected declared tools: %#v", skill.AllowedTools)
+	}
+}
+
+func TestScanWithOptions_MergesManifestOnlyDeclaredTools(t *testing.T) {
+	root := t.TempDir()
+	bundle := makeSkillBundle(t, root, "manifest-tools", "---\nname: manifest-tools\ndescription: only manifest tools\n---\n# Manifest tools\n")
+	if err := os.WriteFile(filepath.Join(bundle, "skill.json"), []byte(`{"tools":["read_skill"]}`), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	inv := ScanWithOptions(LoadOptions{Roots: []Root{{Path: root, Source: SourceWorkspace}}, AvailableTools: map[string]struct{}{"read_skill": {}}})
+	skill, ok := inv.Get("manifest-tools")
+	if !ok {
+		t.Fatal("expected skill")
+	}
+	if len(skill.AllowedTools) != 1 || skill.AllowedTools[0] != "read_skill" {
+		t.Fatalf("expected manifest-only tools to be merged, got %#v", skill.AllowedTools)
+	}
+	if !skill.Eligible {
+		t.Fatalf("expected manifest-only tools skill to remain eligible, got unsupported=%v", skill.Unsupported)
+	}
+}
+
+func TestScanWithOptions_RejectsMalformedDeclaredTools(t *testing.T) {
+	root := t.TempDir()
+	makeSkillBundle(t, root, "custom-tool", `---
+name: custom-tool
+description: custom tool skill
+tools:
+  customThing:
+    description: unsupported
+---
+# Custom
+`)
+
+	inv := ScanWithOptions(LoadOptions{Roots: []Root{{Path: root, Source: SourceWorkspace}}})
+	skill, ok := inv.Get("custom-tool")
+	if !ok {
+		t.Fatal("expected skill")
+	}
+	if skill.Eligible {
+		t.Fatal("expected malformed tools declaration to make skill ineligible")
+	}
+	if !strings.Contains(strings.Join(skill.Unsupported, " | "), "frontmatter tools must be a list of string tool names") {
+		t.Fatalf("unexpected unsupported reasons: %#v", skill.Unsupported)
+	}
+}
+
+func TestScanWithOptions_RejectsNonStringDeclaredToolEntries(t *testing.T) {
+	root := t.TempDir()
+	makeSkillBundle(t, root, "custom-tool", `---
+name: custom-tool
+description: custom tool skill
+tools:
+  - read_skill
+  - 123
+---
+# Custom
+`)
+
+	inv := ScanWithOptions(LoadOptions{Roots: []Root{{Path: root, Source: SourceWorkspace}}, AvailableTools: map[string]struct{}{"read_skill": {}}})
+	skill, ok := inv.Get("custom-tool")
+	if !ok {
+		t.Fatal("expected skill")
+	}
+	if skill.Eligible {
+		t.Fatal("expected non-string tools entry to make skill ineligible")
+	}
+	if !strings.Contains(strings.Join(skill.Unsupported, " | "), "frontmatter tools must be a list of string tool names") {
+		t.Fatalf("unexpected unsupported reasons: %#v", skill.Unsupported)
+	}
+}

@@ -21,12 +21,7 @@ The biggest gap versus OpenClaw is security posture. OpenClaw’s current public
 The biggest gap versus nanobot is not simplicity but sharpness of product philosophy. Nanobot is winning on clarity: tiny core, low code surface, low mental overhead. or3-intern has become a runtime platform. That is good, but it risks sitting in an awkward middle. It is no longer tiny enough to win on purity, but not yet hardened enough to win as an “agent OS.” ([GitHub][3])
 
 Specific technical weaknesses I would prioritize
-
-1. Execution safety is still too permissive.
-   The `exec` tool shells out through `bash -lc`, and the blocklist is shallow string matching. That is enough to stop obvious accidents, but not enough to protect against prompt-induced misuse or clever variants. `run_skill_script` can execute bundle scripts and inherited environment values. MCP stdio servers also inherit the ambient environment with optional overrides. This is the single biggest weakness in the codebase.   
-
-2. Tool governance is thin.
-   The tool registry is just a name-to-tool map with JSON argument decoding. I did not see a policy layer for per-channel tool allowlists, per-session tool budgets, per-skill capability manifests enforced at runtime, or user confirmation for dangerous classes of actions. OpenClaw appears to be moving toward declared function lists and schema-enforced sandboxes for skills; or3-intern should copy that direction.   ([GitHub][2])
+ 
 
 3. Retrieval quality is good, but still fairly first-generation.
    The hybrid retriever is solid, but basic. It merges vector and FTS with fixed weights. The vector path can fall back to brute-force cosine if sqlite-vec does not return rows. The workspace context ranking is heuristic. I did not see reranking, recency decay, source diversity control, dedup by semantic similarity, or retrieval evaluation tooling. This is likely where users will feel “smart enough to be useful, not yet smart enough to be sticky.”   

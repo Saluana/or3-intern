@@ -339,6 +339,7 @@ func (r *Runtime) handleExplicitSkillInvocation(ctx context.Context, ev bus.Even
 		seeded = append(seeded, providers.ChatMessage{Role: "user", Content: promptInput})
 	}
 	runCtx := tools.ContextWithEnv(ctx, r.skillRunEnvFor(skill.Name))
+	runCtx = tools.ContextWithSkillPolicy(runCtx, skillPolicyForSkill(skill))
 	finalText, streamed, err := r.executeConversation(runCtx, ev.Type, ev.SessionKey, seeded, r.Tools, ev.Channel, replyTarget)
 	if err != nil {
 		return true, err
@@ -360,6 +361,7 @@ func (r *Runtime) dispatchExplicitSkillTool(ctx context.Context, ev bus.Event, s
 	toolCtx := tools.ContextWithSession(ctx, scopeKey)
 	toolCtx = tools.ContextWithDelivery(toolCtx, ev.Channel, deliveryTarget(ev))
 	toolCtx = tools.ContextWithEnv(toolCtx, r.skillRunEnvFor(skill.Name))
+	toolCtx = tools.ContextWithSkillPolicy(toolCtx, skillPolicyForSkill(skill))
 	toolCtx = r.contextWithTrustedToolAccess(toolCtx, ev)
 	toolCtx = tools.ContextWithToolGuard(toolCtx, r.guardToolExecution)
 	params := map[string]any{
@@ -634,6 +636,9 @@ func (r *Runtime) guardToolExecution(ctx context.Context, tool tools.Tool, capab
 	if err := r.enforceProfile(ctx, profile, tool, capability, params); err != nil {
 		return err
 	}
+	if err := r.enforceSkillPolicy(ctx, tool, params); err != nil {
+		return err
+	}
 	if capability == tools.CapabilityGuarded && !r.Hardening.GuardedTools {
 		return fmt.Errorf("tool requires guarded access: %s", tool.Name())
 	}
@@ -672,6 +677,84 @@ func (r *Runtime) guardToolExecution(ctx context.Context, tool tools.Tool, capab
 		}
 	}
 	return nil
+}
+
+func (r *Runtime) enforceSkillPolicy(ctx context.Context, tool tools.Tool, params map[string]any) error {
+	policy := tools.SkillPolicyFromContext(ctx)
+	if tool == nil || strings.TrimSpace(policy.Name) == "" {
+		return nil
+	}
+	if len(policy.AllowedTools) > 0 {
+		if _, ok := policy.AllowedTools[tool.Name()]; !ok {
+			return fmt.Errorf("tool denied by skill policy: %s", tool.Name())
+		}
+	}
+	switch tool.Name() {
+	case "exec", "run_skill_script":
+		if !policy.AllowExecution {
+			return fmt.Errorf("execution denied by skill policy: %s", tool.Name())
+		}
+		if cwd := strings.TrimSpace(fmt.Sprint(params["cwd"])); cwd != "" && cwd != "<nil>" && len(policy.WritablePaths) > 0 {
+			if err := validateProfileWritablePath(policy.WritablePaths, cwd); err != nil {
+				return err
+			}
+		}
+	case "write_file", "edit_file":
+		if !policy.AllowWrite {
+			return fmt.Errorf("write denied by skill policy: %s", tool.Name())
+		}
+		if len(policy.WritablePaths) > 0 {
+			if err := validateProfileWritablePath(policy.WritablePaths, fmt.Sprint(params["path"])); err != nil {
+				return err
+			}
+		}
+	case "web_fetch":
+		if !policy.AllowNetwork {
+			return fmt.Errorf("network denied by skill policy: %s", tool.Name())
+		}
+		if len(policy.AllowedHosts) > 0 {
+			parsed, err := url.Parse(strings.TrimSpace(fmt.Sprint(params["url"])))
+			if err != nil {
+				return err
+			}
+			if err := (security.HostPolicy{Enabled: true, DefaultDeny: true, AllowedHosts: policy.AllowedHosts}).ValidateURL(ctx, parsed); err != nil {
+				return err
+			}
+		}
+	case "web_search":
+		if !policy.AllowNetwork {
+			return fmt.Errorf("network denied by skill policy: %s", tool.Name())
+		}
+		if len(policy.AllowedHosts) > 0 {
+			if err := (security.HostPolicy{Enabled: true, DefaultDeny: true, AllowedHosts: policy.AllowedHosts}).ValidateHost(ctx, "api.search.brave.com"); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func skillPolicyForSkill(skill skills.SkillMeta) tools.SkillPolicy {
+	allowed := map[string]struct{}{}
+	for _, toolName := range skill.AllowedTools {
+		toolName = strings.TrimSpace(toolName)
+		if toolName == "" {
+			continue
+		}
+		allowed[toolName] = struct{}{}
+	}
+	if commandTool := strings.TrimSpace(skill.CommandTool); commandTool != "" {
+		allowed[commandTool] = struct{}{}
+	}
+	return tools.SkillPolicy{
+		Name:           skill.Name,
+		AllowedTools:   allowed,
+		AllowExecution: skill.Permissions.Shell || (strings.EqualFold(skill.CommandDispatch, "tool") && (strings.EqualFold(skill.CommandTool, "exec") || strings.EqualFold(skill.CommandTool, "run_skill_script"))),
+		AllowNetwork:   skill.Permissions.Network,
+		AllowWrite:     skill.Permissions.Write,
+		AllowedHosts:   append([]string{}, skill.Permissions.AllowedHosts...),
+		WritablePaths:  append([]string{}, skill.Permissions.AllowedPaths...),
+	}
 }
 
 func (r *Runtime) contextWithEventProfile(ctx context.Context, ev bus.Event) context.Context {

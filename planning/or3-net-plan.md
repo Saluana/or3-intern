@@ -119,6 +119,14 @@ Service-triggered turns must follow the **exact same rules** as CLI/channel-trig
 
 This is achieved by reusing the shared runtime that `main.go` already builds, not by creating a parallel execution path.
 
+### 6. Browser dashboard launch is not an `or3-intern` responsibility
+
+Although some services may be started by jobs that run through `or3-intern`, the browser launch and tunnel-exposure flow should remain outside the `or3-intern` service API in v1.
+
+- `or3-intern` may start or supervise a service process inside a node or sandbox-backed environment.
+- `or3-net` should own the user-facing `launch service` endpoint, authorization checks, and any integration with `or3-sandbox` tunnel APIs.
+- This keeps the internal API focused on execution (`turns`, `subagents`, `stream`, `abort`) rather than browser/session mediation.
+
 ---
 
 ## What does NOT change
@@ -128,6 +136,7 @@ This is achieved by reusing the shared runtime that `main.go` already builds, no
 - **Config format** — the existing `config.json` structure is extended (new `service` block), not replaced. Existing configs continue to load without changes.
 - **SQLite schema** — no new tables or migrations needed for the service API. `or3-intern` continues using the same DB for history, memory, artifacts, secrets, and audit.
 - **Tool safety** — the service API does not bypass hardening, quotas, or sandbox policies.
+- **Browser tunnel mediation** — end-user dashboard launch and signed browser tunnel flows stay in `or3-net`/`or3-sandbox`, not in `or3-intern`.
 
 ---
 
@@ -140,6 +149,7 @@ This is achieved by reusing the shared runtime that `main.go` already builds, no
 | Shared-secret auth, not JWT/OAuth | This is an internal API on localhost/private-network. Shared HMAC is simple, auditable, and sufficient. |
 | SSE for streaming, not WebSocket | Matches the existing streaming patterns in the repo and what `or3-net` expects to relay. |
 | Fail closed on missing secret | Prevents accidental exposure of an unauthenticated execution endpoint. |
+| Keep browser launch outside the internal API | Prevents the service API from growing into a second control plane for UI/session flows. |
 
 ---
 

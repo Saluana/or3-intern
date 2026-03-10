@@ -166,3 +166,36 @@ func TestWebhookStructuredPreviewIsBounded(t *testing.T) {
 		t.Fatal("timed out waiting for bus event")
 	}
 }
+
+func TestWebhookPublishesStructuredTasks(t *testing.T) {
+	srv, b := newTestWebhookServer(t, "s3cr3t")
+	payload := `{"tasks":[{"tool":"echo_tool","params":{"text":"hi"}}]}`
+	rw := doRequest(t, srv, payload, map[string]string{"X-Webhook-Secret": "s3cr3t"})
+	if rw.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rw.Code)
+	}
+	select {
+	case ev := <-b.Channel():
+		structuredTasks, ok := ev.Meta[MetaKeyStructuredTasks].(map[string]any)
+		if !ok {
+			t.Fatalf("expected structured tasks metadata, got %#v", ev.Meta)
+		}
+		first, ok := firstStructuredTask(structuredTasks)
+		if !ok || first["tool"] != "echo_tool" {
+			t.Fatalf("expected echo_tool task, got %#v", structuredTasks)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for bus event")
+	}
+}
+
+func firstStructuredTask(structuredTasks map[string]any) (map[string]any, bool) {
+	if rawTasks, ok := structuredTasks["tasks"].([]any); ok && len(rawTasks) > 0 {
+		first, ok := rawTasks[0].(map[string]any)
+		return first, ok
+	}
+	if rawTasks, ok := structuredTasks["tasks"].([]map[string]any); ok && len(rawTasks) > 0 {
+		return rawTasks[0], true
+	}
+	return nil, false
+}

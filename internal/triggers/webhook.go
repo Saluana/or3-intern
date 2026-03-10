@@ -118,6 +118,9 @@ func (w *WebhookServer) handle(rw http.ResponseWriter, r *http.Request) {
 			}),
 		},
 	}
+	if structuredTasks, ok := ParseStructuredTasksText(string(body)); ok {
+		ev.Meta[MetaKeyStructuredTasks] = StructuredTasksMap(structuredTasks)
+	}
 	if ok := w.Bus.Publish(ev); !ok {
 		http.Error(rw, "bus full", http.StatusServiceUnavailable)
 		return

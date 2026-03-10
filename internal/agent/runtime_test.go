@@ -23,6 +23,7 @@ import (
 	"or3-intern/internal/providers"
 	"or3-intern/internal/scope"
 	"or3-intern/internal/tools"
+	"or3-intern/internal/triggers"
 )
 
 // mockDeliverer captures delivered messages
@@ -801,6 +802,31 @@ func (dct *deliveryContextTool) Schema() map[string]any {
 	return dct.SchemaFor(dct.Name(), dct.Description(), dct.Parameters())
 }
 
+type requiredTextTool struct {
+	tools.Base
+	called bool
+}
+
+func (rtt *requiredTextTool) Name() string        { return "required_text_tool" }
+func (rtt *requiredTextTool) Description() string { return "requires string text input" }
+func (rtt *requiredTextTool) Parameters() map[string]any {
+	return map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"required":             []any{"text"},
+		"properties": map[string]any{
+			"text": map[string]any{"type": "string"},
+		},
+	}
+}
+func (rtt *requiredTextTool) Execute(ctx context.Context, params map[string]any) (string, error) {
+	rtt.called = true
+	return fmt.Sprint(params["text"]), nil
+}
+func (rtt *requiredTextTool) Schema() map[string]any {
+	return rtt.SchemaFor(rtt.Name(), rtt.Description(), rtt.Parameters())
+}
+
 type replyMetaStreamer struct {
 	to     string
 	meta   map[string]any
@@ -812,6 +838,102 @@ func (m *replyMetaStreamer) BeginStream(ctx context.Context, to string, meta map
 	m.meta = channels.CloneMeta(meta)
 	m.writer = &mockStreamWriter{}
 	return m.writer, nil
+}
+
+func TestRuntime_Handle_StructuredAutonomyExecutesDirectly(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	tool := &deliveryContextTool{}
+	reg := tools.NewRegistry()
+	reg.Register(tool)
+	rt := &Runtime{DB: d, Tools: reg}
+
+	var released atomic.Bool
+	err := rt.Handle(context.Background(), bus.Event{
+		Type:       bus.EventWebhook,
+		SessionKey: "sess-structured",
+		Channel:    "slack",
+		From:       "remote",
+		Message:    "ignored prompt body",
+		Meta: map[string]any{
+			"channel_id":             "channel-1",
+			channels.MetaThreadTS:     "123.45",
+			heartbeat.MetaKeyDone:      func() { released.Store(true) },
+			triggers.MetaKeyStructuredTasks: triggers.StructuredTasksMap(triggers.StructuredTaskEnvelope{
+				Tasks: []triggers.StructuredToolCall{{Tool: tool.Name()}},
+			}),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if !released.Load() {
+		t.Fatal("expected completion callback to run")
+	}
+	if tool.channel != "slack" || tool.to != "channel-1" {
+		t.Fatalf("expected delivery context slack/channel-1, got %q/%q", tool.channel, tool.to)
+	}
+	if got := tool.meta[channels.MetaThreadTS]; got != "123.45" {
+		t.Fatalf("expected reply metadata in tool context, got %#v", tool.meta)
+	}
+
+	msgs, err := d.GetLastMessages(context.Background(), "sess-structured", 10)
+	if err != nil {
+		t.Fatalf("GetLastMessages: %v", err)
+	}
+	if len(msgs) != 3 {
+		t.Fatalf("expected user/tool/assistant messages, got %#v", msgs)
+	}
+	if msgs[1].Role != "tool" {
+		t.Fatalf("expected tool message, got %#v", msgs[1])
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(msgs[1].PayloadJSON), &payload); err != nil {
+		t.Fatalf("Unmarshal payload: %v", err)
+	}
+	if payload["tool"] != tool.Name() || payload["structured_task"] != true {
+		t.Fatalf("expected structured task payload, got %#v", payload)
+	}
+	if msgs[2].Role != "assistant" || !strings.Contains(msgs[2].Content, "1/1 succeeded") {
+		t.Fatalf("expected structured execution summary, got %#v", msgs[2])
+	}
+}
+
+func TestRuntime_Handle_StructuredAutonomyValidatesParams(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	tool := &requiredTextTool{}
+	reg := tools.NewRegistry()
+	reg.Register(tool)
+	rt := &Runtime{DB: d, Tools: reg}
+
+	err := rt.Handle(context.Background(), bus.Event{
+		Type:       bus.EventHeartbeat,
+		SessionKey: "sess-structured-invalid",
+		Channel:    "system",
+		From:       "heartbeat",
+		Message:    heartbeat.SeedMessage,
+		Meta: map[string]any{
+			triggers.MetaKeyStructuredTasks: triggers.StructuredTasksMap(triggers.StructuredTaskEnvelope{
+				Tasks: []triggers.StructuredToolCall{{Tool: tool.Name(), Params: map[string]any{"text": 123}}},
+			}),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if tool.called {
+		t.Fatal("expected invalid structured task to be rejected before execution")
+	}
+
+	msgs, err := d.GetLastMessages(context.Background(), "sess-structured-invalid", 10)
+	if err != nil {
+		t.Fatalf("GetLastMessages: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("expected user and assistant summary messages, got %#v", msgs)
+	}
+	if got := msgs[1].Content; !strings.Contains(got, "0/1 succeeded") || !strings.Contains(got, "params.text must be a string") {
+		t.Fatalf("expected validation failure summary, got %q", got)
+	}
 }
 
 func TestRuntime_Handle_ArtifactSave(t *testing.T) {

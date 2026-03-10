@@ -23,10 +23,6 @@ The biggest gap versus nanobot is not simplicity but sharpness of product philos
 Specific technical weaknesses I would prioritize
  
 
-
-6. The autonomous layer is useful, but prompt-driven.
-   Heartbeat, webhook, and file-watch all ultimately feed natural-language turns into the agent. That is flexible, but it is also risky and less deterministic than structured task execution. OpenClaw’s public discussion around structured heartbeat instructions is a better long-term direction.   ([GitHub][2])
-
 7. The skill supply-chain model is decent, not strong.
    You fingerprint installed bundles and preserve origin metadata, which is good. But I did not see signature verification, publisher trust policies, quarantine modes, permission prompts, or install-time scanning. Given the wider OpenClaw ecosystem’s recent focus on malicious skills, this is a high-value gap.   ([GitHub][4])
 

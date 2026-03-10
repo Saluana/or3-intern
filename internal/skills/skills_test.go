@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"or3-intern/internal/clawhub"
 )
 
 func makeSkillBundle(t *testing.T, root, name, body string) string {
@@ -385,6 +387,120 @@ func TestSkillRunnableBundleWithoutEntrypointIsQuarantined(t *testing.T) {
 	}
 }
 
+func TestManagedSkillTrustedPublisherAutoApproves(t *testing.T) {
+	root := t.TempDir()
+	bundle := makeSkillBundle(t, root, "trusted-runner", "# Skill")
+	if err := os.WriteFile(filepath.Join(bundle, "skill.json"), []byte(`{"entrypoints":[{"name":"run","command":["./run.sh"]}]}`), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(bundle, "run.sh"), []byte("#!/bin/sh\necho hi\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := clawhub.WriteOrigin(bundle, clawhub.SkillOrigin{Version: 2, Registry: "https://clawhub.ai", Owner: "trusted-owner", Slug: "trusted-runner", InstalledVersion: "1.0.0", InstalledAt: 1, Fingerprint: mustFingerprint(t, bundle), ScanStatus: "clean"}); err != nil {
+		t.Fatalf("WriteOrigin: %v", err)
+	}
+	inv := ScanWithOptions(LoadOptions{Roots: []Root{{Path: root, Source: SourceManaged}}, ApprovalPolicy: ApprovalPolicy{QuarantineByDefault: true, TrustedOwners: map[string]struct{}{"trusted-owner": {}}, TrustedRegistries: map[string]struct{}{"https://clawhub.ai": {}}}})
+	if len(inv.Skills) != 1 {
+		t.Fatalf("expected 1 skill, got %d", len(inv.Skills))
+	}
+	if inv.Skills[0].PermissionState != "approved" {
+		t.Fatalf("expected trusted managed skill to be approved, got %+v", inv.Skills[0])
+	}
+	if !strings.Contains(strings.Join(inv.Skills[0].PermissionNotes, " | "), "trusted publisher policy") {
+		t.Fatalf("expected trusted publisher note, got %#v", inv.Skills[0].PermissionNotes)
+	}
+}
+
+func TestManagedSkillBlockedOwnerIsBlocked(t *testing.T) {
+	root := t.TempDir()
+	bundle := makeSkillBundle(t, root, "blocked-runner", "# Skill")
+	if err := os.WriteFile(filepath.Join(bundle, "skill.json"), []byte(`{"entrypoints":[{"name":"run","command":["./run.sh"]}]}`), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(bundle, "run.sh"), []byte("#!/bin/sh\necho hi\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := clawhub.WriteOrigin(bundle, clawhub.SkillOrigin{Version: 2, Registry: "https://clawhub.ai", Owner: "blocked-owner", Slug: "blocked-runner", InstalledVersion: "1.0.0", InstalledAt: 1, Fingerprint: mustFingerprint(t, bundle), ScanStatus: "clean"}); err != nil {
+		t.Fatalf("WriteOrigin: %v", err)
+	}
+	inv := ScanWithOptions(LoadOptions{Roots: []Root{{Path: root, Source: SourceManaged}}, ApprovalPolicy: ApprovalPolicy{QuarantineByDefault: true, BlockedOwners: map[string]struct{}{"blocked-owner": {}}}})
+	if inv.Skills[0].PermissionState != "blocked" {
+		t.Fatalf("expected blocked owner to block skill, got %+v", inv.Skills[0])
+	}
+}
+
+func TestManagedSkillTrustedPublisherWithLocalEditsIsQuarantined(t *testing.T) {
+	root := t.TempDir()
+	bundle := makeSkillBundle(t, root, "trusted-modified-runner", "# Skill")
+	if err := os.WriteFile(filepath.Join(bundle, "skill.json"), []byte(`{"entrypoints":[{"name":"run","command":["./run.sh"]}]}`), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(bundle, "run.sh"), []byte("#!/bin/sh\necho hi\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := clawhub.WriteOrigin(bundle, clawhub.SkillOrigin{Version: 2, Registry: "https://clawhub.ai", Owner: "trusted-owner", Slug: "trusted-modified-runner", InstalledVersion: "1.0.0", InstalledAt: 1, Fingerprint: mustFingerprint(t, bundle), ScanStatus: "clean"}); err != nil {
+		t.Fatalf("WriteOrigin: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(bundle, "run.sh"), []byte("#!/bin/sh\necho modified\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	inv := ScanWithOptions(LoadOptions{Roots: []Root{{Path: root, Source: SourceManaged}}, ApprovalPolicy: ApprovalPolicy{QuarantineByDefault: true, TrustedOwners: map[string]struct{}{"trusted-owner": {}}, TrustedRegistries: map[string]struct{}{"https://clawhub.ai": {}}}})
+	if len(inv.Skills) != 1 {
+		t.Fatalf("expected 1 skill, got %d", len(inv.Skills))
+	}
+	if inv.Skills[0].PermissionState != "quarantined" {
+		t.Fatalf("expected modified trusted managed skill to be quarantined, got %+v", inv.Skills[0])
+	}
+	if !strings.Contains(strings.Join(inv.Skills[0].PermissionNotes, " | "), "local modifications detected") {
+		t.Fatalf("expected local modifications note, got %#v", inv.Skills[0].PermissionNotes)
+	}
+}
+
+func TestManagedSkillScanFindingsQuarantine(t *testing.T) {
+	root := t.TempDir()
+	bundle := makeSkillBundle(t, root, "flagged-runner", "# Skill")
+	if err := os.WriteFile(filepath.Join(bundle, "skill.json"), []byte(`{"entrypoints":[{"name":"run","command":["./run.sh"]}]}`), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(bundle, "run.sh"), []byte("#!/bin/sh\necho hi\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := clawhub.WriteOrigin(bundle, clawhub.SkillOrigin{Version: 2, Registry: "https://clawhub.ai", Owner: "review-owner", Slug: "flagged-runner", InstalledVersion: "1.0.0", InstalledAt: 1, Fingerprint: mustFingerprint(t, bundle), ScanStatus: "quarantined", ScanFindings: []clawhub.ScanFinding{{Severity: "medium", Path: "run.sh", Rule: "curl-pipe-shell", Message: "downloads remote content directly into a shell"}}}); err != nil {
+		t.Fatalf("WriteOrigin: %v", err)
+	}
+	inv := ScanWithOptions(LoadOptions{Roots: []Root{{Path: root, Source: SourceManaged}}, ApprovalPolicy: ApprovalPolicy{QuarantineByDefault: true}})
+	if inv.Skills[0].PermissionState != "quarantined" {
+		t.Fatalf("expected scan finding to quarantine skill, got %+v", inv.Skills[0])
+	}
+	if !strings.Contains(strings.Join(inv.Skills[0].PermissionNotes, " | "), "install-time scan flagged") {
+		t.Fatalf("expected scan note, got %#v", inv.Skills[0].PermissionNotes)
+	}
+}
+
+func TestManagedSkillTrustedPublisherStillHonorsQuarantinedScan(t *testing.T) {
+	root := t.TempDir()
+	bundle := makeSkillBundle(t, root, "trusted-flagged-runner", "# Skill")
+	if err := os.WriteFile(filepath.Join(bundle, "skill.json"), []byte(`{"entrypoints":[{"name":"run","command":["./run.sh"]}]}`), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(bundle, "run.sh"), []byte("#!/bin/sh\necho hi\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := clawhub.WriteOrigin(bundle, clawhub.SkillOrigin{Version: 2, Registry: "https://clawhub.ai", Owner: "trusted-owner", Slug: "trusted-flagged-runner", InstalledVersion: "1.0.0", InstalledAt: 1, Fingerprint: mustFingerprint(t, bundle), ScanStatus: "quarantined", ScanFindings: []clawhub.ScanFinding{{Severity: "medium", Path: "run.sh", Rule: "curl-pipe-shell", Message: "downloads remote content directly into a shell"}}}); err != nil {
+		t.Fatalf("WriteOrigin: %v", err)
+	}
+	inv := ScanWithOptions(LoadOptions{Roots: []Root{{Path: root, Source: SourceManaged}}, ApprovalPolicy: ApprovalPolicy{QuarantineByDefault: true, TrustedOwners: map[string]struct{}{"trusted-owner": {}}, TrustedRegistries: map[string]struct{}{"https://clawhub.ai": {}}}})
+	if len(inv.Skills) != 1 {
+		t.Fatalf("expected 1 skill, got %d", len(inv.Skills))
+	}
+	if inv.Skills[0].PermissionState != "quarantined" {
+		t.Fatalf("expected quarantined scan to win over trusted publisher policy, got %+v", inv.Skills[0])
+	}
+	if !strings.Contains(strings.Join(inv.Skills[0].PermissionNotes, " | "), "install-time scan flagged") {
+		t.Fatalf("expected install-time scan note, got %#v", inv.Skills[0].PermissionNotes)
+	}
+}
+
 func TestSkillSummaryInInventory(t *testing.T) {
 	dir := t.TempDir()
 	makeSkillBundle(t, dir, "alpha", "---\nsummary: does alpha things\n---\n# Alpha")
@@ -561,4 +677,13 @@ tools:
 	if !strings.Contains(strings.Join(skill.Unsupported, " | "), "frontmatter tools must be a list of string tool names") {
 		t.Fatalf("unexpected unsupported reasons: %#v", skill.Unsupported)
 	}
+}
+
+func mustFingerprint(t *testing.T, dir string) string {
+	t.Helper()
+	fingerprint, err := clawhub.FingerprintDir(dir)
+	if err != nil {
+		t.Fatalf("FingerprintDir: %v", err)
+	}
+	return fingerprint
 }

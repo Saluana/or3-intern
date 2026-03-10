@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"or3-intern/internal/clawhub"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -61,6 +63,9 @@ type LoadOptions struct {
 type ApprovalPolicy struct {
 	QuarantineByDefault bool
 	ApprovedSkills      map[string]struct{}
+	TrustedOwners       map[string]struct{}
+	BlockedOwners       map[string]struct{}
+	TrustedRegistries   map[string]struct{}
 }
 
 type SkillInstallSpec struct {
@@ -133,6 +138,12 @@ type SkillMeta struct {
 	AllowedTools    []string
 	PermissionState string
 	PermissionNotes []string
+	Publisher       string
+	Registry        string
+	InstalledVersion string
+	Modified        bool
+	ScanStatus      string
+	ScanFindings    []string
 	Key             string
 	Eligible        bool
 	Disabled        bool
@@ -403,9 +414,35 @@ func loadSkill(dir, path string, root Root, order int, opts LoadOptions) SkillMe
 	}
 	entry := entryConfigForSkill(opts.Entries, meta)
 	meta.RuntimeEnv = buildRuntimeEnv(meta, entry, opts.Env)
+	applyOriginMetadata(&meta)
 	applyEligibility(&meta, rawTop, body, entry, opts)
 	applyApprovalPolicy(&meta, opts.ApprovalPolicy)
 	return meta
+}
+
+func applyOriginMetadata(meta *SkillMeta) {
+	if meta == nil || strings.TrimSpace(meta.Dir) == "" {
+		return
+	}
+	origin, err := clawhub.ReadOrigin(meta.Dir)
+	if err != nil {
+		if meta.Source == SourceManaged {
+			meta.PermissionNotes = append(meta.PermissionNotes, "managed skill missing origin metadata")
+		}
+		return
+	}
+	meta.Publisher = strings.TrimSpace(origin.Owner)
+	meta.Registry = strings.TrimSpace(origin.Registry)
+	meta.InstalledVersion = strings.TrimSpace(origin.InstalledVersion)
+	meta.ScanStatus = normalizeSupplyChainValue(origin.ScanStatus)
+	for _, finding := range origin.ScanFindings {
+		if summary := strings.TrimSpace(finding.Summary()); summary != "" {
+			meta.ScanFindings = append(meta.ScanFindings, summary)
+		}
+	}
+	if modified, modErr := clawhub.LocalEdits(meta.Dir); modErr == nil {
+		meta.Modified = modified
+	}
 }
 
 func normalizeSkillPermissions(raw SkillPermissions) SkillPermissions {
@@ -475,10 +512,49 @@ func applyApprovalPolicy(meta *SkillMeta, policy ApprovalPolicy) {
 		meta.PermissionNotes = append(meta.PermissionNotes, "metadata parse failed")
 		return
 	}
-	if skillApproved(meta, policy.ApprovedSkills) {
-		meta.PermissionState = "approved"
-		meta.PermissionNotes = append(meta.PermissionNotes, "approved in config")
+	if ownerBlocked(meta, policy.BlockedOwners) {
+		meta.PermissionState = "blocked"
+		meta.PermissionNotes = append(meta.PermissionNotes, "publisher blocked by policy: "+meta.Publisher)
 		return
+	}
+	if strings.EqualFold(meta.ScanStatus, "blocked") {
+		meta.PermissionState = "blocked"
+		meta.PermissionNotes = append(meta.PermissionNotes, "install-time scan blocked this bundle")
+		meta.PermissionNotes = append(meta.PermissionNotes, meta.ScanFindings...)
+		return
+	}
+	if meta.Modified {
+		meta.PermissionState = "quarantined"
+		meta.PermissionNotes = append(meta.PermissionNotes, "local modifications detected since install")
+		return
+	}
+	if strings.EqualFold(meta.ScanStatus, "quarantined") {
+		meta.PermissionState = "quarantined"
+		meta.PermissionNotes = append(meta.PermissionNotes, "install-time scan flagged this bundle for review")
+		meta.PermissionNotes = append(meta.PermissionNotes, meta.ScanFindings...)
+		return
+	}
+	trustedPublisher := publisherTrusted(meta, policy)
+	if skillApproved(meta, policy.ApprovedSkills) || trustedPublisher {
+		meta.PermissionState = "approved"
+		if trustedPublisher {
+			meta.PermissionNotes = append(meta.PermissionNotes, "approved by trusted publisher policy")
+		} else {
+			meta.PermissionNotes = append(meta.PermissionNotes, "approved in config")
+		}
+		return
+	}
+	if meta.Source == SourceManaged && skillNeedsApproval(meta) {
+		if strings.TrimSpace(meta.Registry) == "" || strings.TrimSpace(meta.Publisher) == "" {
+			meta.PermissionState = "quarantined"
+			meta.PermissionNotes = append(meta.PermissionNotes, "managed skill is missing trusted origin details")
+			return
+		}
+		if len(policy.TrustedOwners) > 0 || len(policy.TrustedRegistries) > 0 {
+			meta.PermissionState = "quarantined"
+			meta.PermissionNotes = append(meta.PermissionNotes, "publisher or registry is not trusted by policy")
+			return
+		}
 	}
 	if skillNeedsApproval(meta) {
 		meta.PermissionState = "quarantined"
@@ -486,6 +562,41 @@ func applyApprovalPolicy(meta *SkillMeta, policy ApprovalPolicy) {
 		return
 	}
 	meta.PermissionState = "approved"
+}
+
+func ownerBlocked(meta *SkillMeta, blocked map[string]struct{}) bool {
+	if meta == nil || len(blocked) == 0 {
+		return false
+	}
+	_, ok := blocked[normalizeSupplyChainValue(meta.Publisher)]
+	return ok
+}
+
+func publisherTrusted(meta *SkillMeta, policy ApprovalPolicy) bool {
+	if meta == nil {
+		return false
+	}
+	anyPolicy := len(policy.TrustedOwners) > 0 || len(policy.TrustedRegistries) > 0
+	if !anyPolicy {
+		return false
+	}
+	if len(policy.TrustedOwners) > 0 {
+		if _, ok := policy.TrustedOwners[normalizeSupplyChainValue(meta.Publisher)]; !ok {
+			return false
+		}
+	}
+	if len(policy.TrustedRegistries) > 0 {
+		if _, ok := policy.TrustedRegistries[normalizeSupplyChainValue(meta.Registry)]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeSupplyChainValue(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	value = strings.TrimRight(value, "/")
+	return value
 }
 
 func skillNeedsApproval(meta *SkillMeta) bool {

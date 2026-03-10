@@ -130,6 +130,14 @@ func TestDoctorFindings_ExpandedWarnings(t *testing.T) {
 			expectMatch: "skill execution is enabled while quarantineByDefault is false",
 		},
 		{
+			name: "skill execution missing trusted publisher policy",
+			mutate: func(cfg *config.Config) {
+				cfg.Skills.EnableExec = true
+			},
+			expectArea:  "skills",
+			expectMatch: "skill execution is enabled without a trustedOwners policy",
+		},
+		{
 			name: "public channel privileged profile",
 			mutate: func(cfg *config.Config) {
 				cfg.Channels.Discord.Enabled = true

@@ -147,3 +147,51 @@ func TestFileWatcherFirstObservationNoEvent(t *testing.T) {
 		// correct: no event
 	}
 }
+
+func TestFileWatcherPublishesStructuredTasksForChangedFile(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "structured.json")
+	if err := os.WriteFile(filePath, []byte("initial"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	b := bus.New(16)
+	fw := NewFileWatcher(config.FileWatchConfig{
+		Enabled:         true,
+		Paths:           []string{filePath},
+		PollSeconds:     1,
+		DebounceSeconds: 0,
+	}, b, "test-session")
+
+	fw.poll(nil)
+	time.Sleep(10 * time.Millisecond)
+	if err := os.WriteFile(filePath, []byte(`{"tasks":[{"tool":"echo_tool"}]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fw.poll(nil)
+
+	select {
+	case ev := <-b.Channel():
+		structuredTasks, ok := ev.Meta[MetaKeyStructuredTasks].(map[string]any)
+		if !ok {
+			t.Fatalf("expected structured tasks metadata, got %#v", ev.Meta)
+		}
+		first, ok := firstStructuredFileTask(structuredTasks)
+		if !ok || first["tool"] != "echo_tool" {
+			t.Fatalf("expected echo_tool task, got %#v", structuredTasks)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for file change event")
+	}
+}
+
+func firstStructuredFileTask(structuredTasks map[string]any) (map[string]any, bool) {
+	if rawTasks, ok := structuredTasks["tasks"].([]any); ok && len(rawTasks) > 0 {
+		first, ok := rawTasks[0].(map[string]any)
+		return first, ok
+	}
+	if rawTasks, ok := structuredTasks["tasks"].([]map[string]any); ok && len(rawTasks) > 0 {
+		return rawTasks[0], true
+	}
+	return nil, false
+}

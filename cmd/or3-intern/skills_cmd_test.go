@@ -194,6 +194,53 @@ func TestRunSkillsCommand_CheckShowsQuarantinedSkill(t *testing.T) {
 	}
 }
 
+func TestRunSkillsCommand_InfoShowsSupplyChainMetadata(t *testing.T) {
+	cfg := config.Default()
+	root := t.TempDir()
+	bundle := filepath.Join(root, "runner")
+	if err := os.MkdirAll(bundle, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(bundle, "SKILL.md"), []byte("---\nname: runner\ndescription: runner\n---\n# Runner\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(bundle, "skill.json"), []byte(`{"entrypoints":[{"name":"run","command":["./run.sh"]}]}`), 0o644); err != nil {
+		t.Fatalf("WriteFile skill.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(bundle, "run.sh"), []byte("#!/bin/sh\necho hi\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile run.sh: %v", err)
+	}
+	if err := clawhub.WriteOrigin(bundle, clawhub.SkillOrigin{
+		Version:          2,
+		Registry:         "https://clawhub.ai",
+		Owner:            "demo-owner",
+		Slug:             "runner",
+		InstalledVersion: "1.0.0",
+		InstalledAt:      1,
+		Fingerprint:      "mismatch-on-purpose",
+		ScanStatus:       "quarantined",
+		ScanFindings:     []clawhub.ScanFinding{{Severity: "medium", Path: "run.sh", Rule: "curl-pipe-shell", Message: "downloads remote content directly into a shell"}},
+	}); err != nil {
+		t.Fatalf("WriteOrigin: %v", err)
+	}
+	deps := skillsCommandDeps{
+		LoadToolNames: func(context.Context, config.Config) map[string]struct{} { return map[string]struct{}{} },
+		LoadInventory: func(toolNames map[string]struct{}) skills.Inventory {
+			return skills.ScanWithOptions(skills.LoadOptions{Roots: []skills.Root{{Path: root, Source: skills.SourceManaged}}, ApprovalPolicy: skills.ApprovalPolicy{QuarantineByDefault: true}})
+		},
+	}
+	var out bytes.Buffer
+	deps.Stdout = &out
+	deps.Stderr = &out
+	if err := runSkillsCommandWithDeps(context.Background(), cfg, []string{"info", "runner"}, deps); err != nil {
+		t.Fatalf("info: %v", err)
+	}
+	text := out.String()
+	if !strings.Contains(text, "Publisher: demo-owner") || !strings.Contains(text, "Registry: https://clawhub.ai") || !strings.Contains(text, "Scan Status: quarantined") {
+		t.Fatalf("expected supply-chain metadata in info output, got %q", text)
+	}
+}
+
 func TestResolveInstallRoot_PrefersManagedDirOverWorkspace(t *testing.T) {
 	cfg := config.Default()
 	cfg.WorkspaceDir = filepath.Join(t.TempDir(), "workspace")

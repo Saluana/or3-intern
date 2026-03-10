@@ -326,6 +326,12 @@ func skillFindings(cfg config.Config) []doctorFinding {
 	if !cfg.Skills.Policy.QuarantineByDefault {
 		addWarn("skill execution is enabled while quarantineByDefault is false")
 	}
+	if len(cfg.Skills.Policy.TrustedOwners) == 0 {
+		addWarn("skill execution is enabled without a trustedOwners policy for managed skills")
+	}
+	if len(cfg.Skills.Policy.TrustedRegistries) == 0 {
+		addWarn("skill execution is enabled without a trustedRegistries policy for managed skills")
+	}
 	if len(cfg.Hardening.ChildEnvAllowlist) == 0 {
 		addWarn("skill execution is enabled with an empty child environment allowlist")
 	}

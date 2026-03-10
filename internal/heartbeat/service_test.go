@@ -62,6 +62,46 @@ func TestServiceProcessTickPublishesHeartbeatEvent(t *testing.T) {
 	}
 }
 
+func TestServiceProcessTickPublishesStructuredTasks(t *testing.T) {
+	dir := t.TempDir()
+	tasksPath := filepath.Join(dir, "HEARTBEAT.md")
+	if err := os.WriteFile(tasksPath, []byte(`{"tasks":[{"tool":"echo_tool"}]}`), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	eventBus := bus.New(1)
+	svc := New(config.HeartbeatConfig{
+		Enabled:         true,
+		IntervalMinutes: 5,
+		TasksFile:       tasksPath,
+		SessionKey:      "heartbeat:test",
+	}, "", eventBus)
+
+	svc.processTick()
+
+	select {
+	case ev := <-eventBus.Channel():
+		structuredTasks, ok := ev.Meta[triggers.MetaKeyStructuredTasks].(map[string]any)
+		if !ok {
+			t.Fatalf("expected structured tasks metadata, got %#v", ev.Meta)
+		}
+		tasks, ok := structuredTasks["tasks"].([]map[string]any)
+		if ok && len(tasks) == 1 && tasks[0]["tool"] == "echo_tool" {
+			return
+		}
+		rawTasks, ok := structuredTasks["tasks"].([]any)
+		if !ok || len(rawTasks) != 1 {
+			t.Fatalf("expected structured task list, got %#v", structuredTasks)
+		}
+		first, ok := rawTasks[0].(map[string]any)
+		if !ok || first["tool"] != "echo_tool" {
+			t.Fatalf("expected echo_tool task, got %#v", structuredTasks)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("expected heartbeat event to be published")
+	}
+}
+
 func TestServiceProcessTickUsesWorkspaceFallback(t *testing.T) {
 	workspace := t.TempDir()
 	workspaceHeartbeat := filepath.Join(workspace, "HEARTBEAT.md")

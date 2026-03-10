@@ -170,25 +170,29 @@ func (s *Service) processTick() {
 	}
 
 	s.inFlight.Store(true)
+	meta := map[string]any{
+		MetaKeyHeartbeat: true,
+		MetaKeyDone: func() {
+			s.inFlight.Store(false)
+		},
+		"tasks_path": path,
+		triggers.MetaKeyStructuredEvent: triggers.StructuredEventMap(triggers.StructuredEvent{
+			Type:    string(bus.EventHeartbeat),
+			Source:  "heartbeat",
+			Trusted: true,
+			Details: map[string]any{"tasks_path": path, "session_key": normalizedSessionKey(s.Config.SessionKey)},
+		}),
+	}
+	if structuredTasks, ok := triggers.ParseStructuredTasksText(text); ok {
+		meta[triggers.MetaKeyStructuredTasks] = triggers.StructuredTasksMap(structuredTasks)
+	}
 	ev := bus.Event{
 		Type:       bus.EventHeartbeat,
 		SessionKey: normalizedSessionKey(s.Config.SessionKey),
 		Channel:    DefaultChannel,
 		From:       DefaultFrom,
 		Message:    SeedMessage,
-		Meta: map[string]any{
-			MetaKeyHeartbeat: true,
-			MetaKeyDone: func() {
-				s.inFlight.Store(false)
-			},
-			"tasks_path": path,
-			triggers.MetaKeyStructuredEvent: triggers.StructuredEventMap(triggers.StructuredEvent{
-				Type:    string(bus.EventHeartbeat),
-				Source:  "heartbeat",
-				Trusted: true,
-				Details: map[string]any{"tasks_path": path, "session_key": normalizedSessionKey(s.Config.SessionKey)},
-			}),
-		},
+		Meta:       meta,
 	}
 	if ok := s.Bus.Publish(ev); !ok {
 		s.inFlight.Store(false)

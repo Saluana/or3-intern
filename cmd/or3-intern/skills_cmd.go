@@ -117,6 +117,22 @@ func runSkillsCommandWithDeps(ctx context.Context, cfg config.Config, args []str
 		}
 		_, _ = fmt.Fprintf(deps.Stdout, "Eligible: %t\n", skill.Eligible)
 		_, _ = fmt.Fprintf(deps.Stdout, "User Invocable: %t\n", skill.UserInvocable)
+		if skill.Publisher != "" {
+			_, _ = fmt.Fprintf(deps.Stdout, "Publisher: %s\n", skill.Publisher)
+		}
+		if skill.Registry != "" {
+			_, _ = fmt.Fprintf(deps.Stdout, "Registry: %s\n", skill.Registry)
+		}
+		if skill.InstalledVersion != "" {
+			_, _ = fmt.Fprintf(deps.Stdout, "Installed Version: %s\n", skill.InstalledVersion)
+		}
+		if skill.Modified {
+			_, _ = fmt.Fprintln(deps.Stdout, "Local Modifications: true")
+		}
+		if strings.TrimSpace(skill.ScanStatus) != "" {
+			_, _ = fmt.Fprintf(deps.Stdout, "Scan Status: %s\n", skill.ScanStatus)
+			printReasons(deps.Stdout, "Scan Findings", skill.ScanFindings)
+		}
 		if strings.TrimSpace(skill.PermissionState) != "" {
 			_, _ = fmt.Fprintf(deps.Stdout, "Permission State: %s\n", skill.PermissionState)
 			_, _ = fmt.Fprintf(deps.Stdout, "Declared Permissions: %s\n", skill.Permissions.Summary())
@@ -305,14 +321,29 @@ func buildSkillsInventory(cfg config.Config, bundledDir string, toolNames map[st
 		approved[trimmed] = struct{}{}
 		approved[strings.ToLower(trimmed)] = struct{}{}
 	}
+	trustedOwners := makePolicySet(cfg.Skills.Policy.TrustedOwners)
+	blockedOwners := makePolicySet(cfg.Skills.Policy.BlockedOwners)
+	trustedRegistries := makePolicySet(cfg.Skills.Policy.TrustedRegistries)
 	return skills.ScanWithOptions(skills.LoadOptions{
 		Roots:          buildSkillRoots(cfg, bundledDir),
 		Entries:        skillEntries(cfg),
 		GlobalConfig:   configMap(cfg),
 		Env:            envMap(),
 		AvailableTools: toolNames,
-		ApprovalPolicy: skills.ApprovalPolicy{QuarantineByDefault: cfg.Skills.Policy.QuarantineByDefault, ApprovedSkills: approved},
+		ApprovalPolicy: skills.ApprovalPolicy{QuarantineByDefault: cfg.Skills.Policy.QuarantineByDefault, ApprovedSkills: approved, TrustedOwners: trustedOwners, BlockedOwners: blockedOwners, TrustedRegistries: trustedRegistries},
 	})
+}
+
+func makePolicySet(values []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		normalized := strings.TrimRight(strings.ToLower(strings.TrimSpace(value)), "/")
+		if normalized == "" {
+			continue
+		}
+		out[normalized] = struct{}{}
+	}
+	return out
 }
 
 func loadAvailableToolNames(ctx context.Context, cfg config.Config) map[string]struct{} {

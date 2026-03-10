@@ -435,7 +435,13 @@ Autonomous trigger producers now attach a bounded `structured_event` object in `
 - `webhook` includes route, request id, remote address, content type, and a bounded body preview
 - `filewatch` includes path, size, and mtime
 
-The runtime still keeps the current plain-text trigger message for backward compatibility, but autonomous prompts also receive the structured payload under a dedicated system-prompt section.
+If trigger content also contains a `structured_tasks` envelope, the runtime validates and executes those tool calls directly through the normal tool registry, quotas, and guards without sending the trigger instructions to the model. Plain-text trigger messages remain supported as the fallback path, and autonomous prompts still receive the bounded `structured_event` payload under a dedicated system-prompt section.
+
+Supported `structured_tasks` forms are intentionally lightweight:
+
+- raw JSON like `{"tasks":[{"tool":"send_message","params":{"text":"done"}}]}`
+- a top-level `structured_tasks` field inside a larger JSON object
+- a fenced code block tagged `or3-tasks`, `structured-tasks`, or `autonomous-tasks`
 
 ## New Features
 
@@ -572,6 +578,13 @@ Per-skill config is additive and lightweight:
         }
       }
     },
+    "policy": {
+      "quarantineByDefault": true,
+      "approved": ["my-local-skill"],
+      "trustedOwners": ["openclaw", "my-team"],
+      "blockedOwners": ["known-bad-publisher"],
+      "trustedRegistries": ["https://clawhub.ai"]
+    },
     "clawHub": {
       "siteUrl": "https://clawhub.ai",
       "registryUrl": "https://clawhub.ai",
@@ -608,6 +621,10 @@ For `command-dispatch: tool`, `or3-intern` forwards the raw argument string dire
 Trust model:
 
 - Treat third-party skills as untrusted input.
+- Managed installs now persist origin metadata including registry, publisher, fingerprint, installed version, and install-time scan findings in `.clawhub/origin.json`.
+- Install-time scanning flags obvious high-risk bundles such as embedded credential material or downloader-to-shell patterns; flagged bundles stay quarantined or blocked until reviewed.
+- `trustedOwners` and `trustedRegistries` let you auto-approve managed skills from known publishers, while `blockedOwners` hard-blocks known-bad publishers even if the bundle otherwise parses cleanly.
+- Local edits after installation are treated as trust drift and re-quarantine the skill until it is reviewed or reinstalled.
 - Installer hints from skill metadata are informational only; `or3-intern` does not auto-run them.
 - Not every ClawHub skill is portable. Skills that depend on unsupported OpenClaw-only tools, malformed `tools` declarations, Nix/plugin flows, or remote node assumptions are reported as unavailable instead of failing silently.
 
@@ -644,7 +661,7 @@ The webhook server listens at `/webhook` (fixed path).
 }
 ```
 
-Both trigger types use `HEARTBEAT.md` instructions when dispatching autonomous turns.
+Both trigger types use `HEARTBEAT.md` instructions when dispatching autonomous turns, and either trigger can switch to deterministic execution by supplying a valid `structured_tasks` payload.
 
 ### Heartbeat Service
 
@@ -666,6 +683,7 @@ Heartbeat is a timer-driven autonomous trigger that runs inside `or3-intern serv
 - The interval is configured in minutes and normalized to a sane minimum.
 - Heartbeat uses its own session key so its history and long-term memory stay deterministic across ticks.
 - `HEARTBEAT.md` is reread on each autonomous turn, so edits apply without restarting `serve`.
+- If `HEARTBEAT.md` contains a valid `structured_tasks` payload, heartbeat executes those validated tool calls directly instead of routing the instructions through the model.
 - Empty files, comment-only files, and missing files are skipped instead of triggering a model call.
 - Heartbeat turns do not auto-send a normal assistant reply anywhere. If the agent should proactively notify someone, it must call `send_message` explicitly.
 

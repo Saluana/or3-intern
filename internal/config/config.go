@@ -243,6 +243,9 @@ type SkillsConfig struct {
 type SkillPolicyConfig struct {
 	QuarantineByDefault bool     `json:"quarantineByDefault"`
 	Approved            []string `json:"approved"`
+	TrustedOwners       []string `json:"trustedOwners"`
+	BlockedOwners       []string `json:"blockedOwners"`
+	TrustedRegistries   []string `json:"trustedRegistries"`
 }
 
 type SkillsLoadConfig struct {
@@ -390,6 +393,9 @@ func Default() Config {
 			Policy: SkillPolicyConfig{
 				QuarantineByDefault: true,
 				Approved:            []string{},
+				TrustedOwners:       []string{},
+				BlockedOwners:       []string{},
+				TrustedRegistries:   []string{},
 			},
 			Load: SkillsLoadConfig{
 				Watch:           false,
@@ -760,6 +766,19 @@ func Load(path string) (Config, error) {
 	if cfg.Skills.Policy.Approved == nil {
 		cfg.Skills.Policy.Approved = []string{}
 	}
+	if cfg.Skills.Policy.TrustedOwners == nil {
+		cfg.Skills.Policy.TrustedOwners = []string{}
+	}
+	if cfg.Skills.Policy.BlockedOwners == nil {
+		cfg.Skills.Policy.BlockedOwners = []string{}
+	}
+	if cfg.Skills.Policy.TrustedRegistries == nil {
+		cfg.Skills.Policy.TrustedRegistries = []string{}
+	}
+	cfg.Skills.Policy.Approved = compactStrings(cfg.Skills.Policy.Approved)
+	cfg.Skills.Policy.TrustedOwners = compactStrings(cfg.Skills.Policy.TrustedOwners)
+	cfg.Skills.Policy.BlockedOwners = compactStrings(cfg.Skills.Policy.BlockedOwners)
+	cfg.Skills.Policy.TrustedRegistries = compactStrings(cfg.Skills.Policy.TrustedRegistries)
 	if cfg.Skills.Entries == nil {
 		cfg.Skills.Entries = map[string]SkillEntryConfig{}
 	}

@@ -183,6 +183,9 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 	if handled, err := r.handleExplicitSkillInvocation(ctx, ev, msgID); handled || err != nil {
 		return err
 	}
+	if handled, err := r.handleStructuredAutonomy(ctx, ev, msgID); handled || err != nil {
+		return err
+	}
 
 	// build prompt
 	if r.Builder == nil {

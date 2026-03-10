@@ -13,6 +13,8 @@ import (
 	"or3-intern/internal/config"
 )
 
+const structuredFileReadMaxBytes = 64 * 1024
+
 type FileWatcher struct {
 	Config     config.FileWatchConfig
 	Bus        *bus.Bus
@@ -117,23 +119,31 @@ func (fw *FileWatcher) poll(ctx context.Context) {
 			continue
 		}
 		// Publish event
+		meta := map[string]any{
+			"path":  absPath,
+			"size":  info.Size(),
+			"mtime": info.ModTime().UnixMilli(),
+			MetaKeyStructuredEvent: StructuredEventMap(StructuredEvent{
+				Type:    string(bus.EventFileChange),
+				Source:  "filewatch",
+				Trusted: true,
+				Details: map[string]any{"path": absPath, "size": info.Size(), "mtime": info.ModTime().UnixMilli()},
+			}),
+		}
+		if info.Size() > 0 && info.Size() <= structuredFileReadMaxBytes {
+			if data, readErr := os.ReadFile(absPath); readErr == nil {
+				if structuredTasks, ok := ParseStructuredTasksText(string(data)); ok {
+					meta[MetaKeyStructuredTasks] = StructuredTasksMap(structuredTasks)
+				}
+			}
+		}
 		ev := bus.Event{
 			Type:       bus.EventFileChange,
 			SessionKey: fw.SessionKey,
 			Channel:    "filewatch",
 			From:       absPath,
 			Message:    "file changed: " + absPath,
-			Meta: map[string]any{
-				"path":  absPath,
-				"size":  info.Size(),
-				"mtime": info.ModTime().UnixMilli(),
-				MetaKeyStructuredEvent: StructuredEventMap(StructuredEvent{
-					Type:    string(bus.EventFileChange),
-					Source:  "filewatch",
-					Trusted: true,
-					Details: map[string]any{"path": absPath, "size": info.Size(), "mtime": info.ModTime().UnixMilli()},
-				}),
-			},
+			Meta:       meta,
 		}
 		if ok := fw.Bus.Publish(ev); !ok {
 			log.Printf("filewatch: bus full, dropping event for %s", absPath)

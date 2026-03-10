@@ -64,13 +64,37 @@ type InstallResult struct {
 	Fingerprint string
 }
 
+type ScanFinding struct {
+	Severity string `json:"severity"`
+	Path     string `json:"path"`
+	Rule     string `json:"rule"`
+	Message  string `json:"message"`
+}
+
+func (f ScanFinding) Summary() string {
+	parts := make([]string, 0, 3)
+	if text := strings.TrimSpace(f.Severity); text != "" {
+		parts = append(parts, text)
+	}
+	if text := strings.TrimSpace(f.Path); text != "" {
+		parts = append(parts, text)
+	}
+	if text := strings.TrimSpace(f.Message); text != "" {
+		parts = append(parts, text)
+	}
+	return strings.Join(parts, ": ")
+}
+
 type SkillOrigin struct {
 	Version          int    `json:"version"`
 	Registry         string `json:"registry"`
 	Slug             string `json:"slug"`
+	Owner            string `json:"owner,omitempty"`
 	InstalledVersion string `json:"installedVersion"`
 	InstalledAt      int64  `json:"installedAt"`
 	Fingerprint      string `json:"fingerprint"`
+	ScanStatus       string `json:"scanStatus,omitempty"`
+	ScanFindings     []ScanFinding `json:"scanFindings,omitempty"`
 }
 
 type InstalledSkill struct {
@@ -239,9 +263,10 @@ func (c *Client) Install(ctx context.Context, slug, version, destDir string, opt
 	}
 	target := filepath.Join(destDir, sanitizeSlug(slug))
 	if err := installZip(zipBytes, target, SkillOrigin{
-		Version:          1,
+		Version:          2,
 		Registry:         c.RegistryURL,
 		Slug:             sanitizeSlug(slug),
+		Owner:            info.Owner,
 		InstalledVersion: info.SelectedVersion,
 		InstalledAt:      time.Now().UnixMilli(),
 	}, opts); err != nil {
@@ -291,6 +316,12 @@ func installZip(zipBytes []byte, target string, origin SkillOrigin, opts Install
 		return err
 	}
 	origin.Fingerprint = fingerprint
+	scanStatus, scanFindings, err := scanInstalledSkill(tempTarget)
+	if err != nil {
+		return err
+	}
+	origin.ScanStatus = scanStatus
+	origin.ScanFindings = scanFindings
 	if err := WriteOrigin(tempTarget, origin); err != nil {
 		return err
 	}
@@ -471,6 +502,104 @@ func WriteOrigin(skillDir string, origin SkillOrigin) error {
 		return err
 	}
 	return os.WriteFile(path, append(data, '\n'), 0o644)
+}
+
+const installScanReadMaxBytes = 128 * 1024
+
+func scanInstalledSkill(root string) (string, []ScanFinding, error) {
+	findings := make([]ScanFinding, 0)
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if d.Name() == ".clawhub" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		info, infoErr := d.Info()
+		if infoErr != nil {
+			return infoErr
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return relErr
+		}
+		rel = filepath.ToSlash(rel)
+		findings = append(findings, pathFindings(rel)...)
+		if info.Size() <= 0 || info.Size() > installScanReadMaxBytes || !scanContentFile(rel, info.Mode()) {
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		findings = append(findings, contentFindings(rel, string(data))...)
+		return nil
+	})
+	if err != nil {
+		return "", nil, err
+	}
+	status := "clean"
+	for _, finding := range findings {
+		switch strings.ToLower(strings.TrimSpace(finding.Severity)) {
+		case "high":
+			return "blocked", findings, nil
+		case "medium":
+			status = "quarantined"
+		}
+	}
+	return status, findings, nil
+}
+
+func pathFindings(rel string) []ScanFinding {
+	lower := strings.ToLower(strings.TrimSpace(rel))
+	for _, name := range []string{".env", ".netrc", ".npmrc", ".pypirc", "id_rsa", "id_dsa", ".aws/credentials", ".aws/config", ".ssh/config", ".ssh/known_hosts"} {
+		if lower == name || strings.HasSuffix(lower, "/"+name) {
+			return []ScanFinding{{Severity: "high", Path: rel, Rule: "credential-material", Message: "bundle contains credential or host-secret material"}}
+		}
+	}
+	return nil
+}
+
+func scanContentFile(rel string, mode os.FileMode) bool {
+	ext := strings.ToLower(filepath.Ext(rel))
+	if mode&0o111 != 0 {
+		return true
+	}
+	switch ext {
+	case ".sh", ".bash", ".zsh", ".command", ".ps1", ".bat", ".cmd", ".py", ".rb", ".js", ".ts":
+		return true
+	default:
+		return false
+	}
+}
+
+func contentFindings(rel, content string) []ScanFinding {
+	lower := strings.ToLower(content)
+	findings := make([]ScanFinding, 0, 2)
+	rules := []struct {
+		rule     string
+		severity string
+		message  string
+		match    func(string) bool
+	}{
+		{rule: "curl-pipe-shell", severity: "medium", message: "downloads remote content directly into a shell", match: func(s string) bool { return strings.Contains(s, "curl ") && strings.Contains(s, "| sh") }},
+		{rule: "wget-pipe-shell", severity: "medium", message: "downloads remote content directly into a shell", match: func(s string) bool { return strings.Contains(s, "wget ") && strings.Contains(s, "| sh") }},
+		{rule: "powershell-iex", severity: "medium", message: "executes downloaded content inline", match: func(s string) bool { return strings.Contains(s, "invoke-webrequest") && strings.Contains(s, "iex") }},
+		{rule: "reverse-shell", severity: "medium", message: "contains a shell/network handoff pattern", match: func(s string) bool { return strings.Contains(s, "/dev/tcp/") || strings.Contains(s, "nc -e") }},
+		{rule: "osascript", severity: "medium", message: "invokes local system automation outside the declared tool model", match: func(s string) bool { return strings.Contains(s, "osascript") }},
+	}
+	for _, rule := range rules {
+		if rule.match(lower) {
+			findings = append(findings, ScanFinding{Severity: rule.severity, Path: rel, Rule: rule.rule, Message: rule.message})
+		}
+	}
+	return findings
 }
 
 func RemoveSkill(root, name string) error {

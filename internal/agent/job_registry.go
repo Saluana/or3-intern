@@ -127,6 +127,12 @@ func (r *JobRegistry) Publish(id string, eventType string, data map[string]any) 
 	if entry == nil {
 		return false
 	}
+	if data == nil {
+		data = map[string]any{}
+	}
+	if _, ok := data["job_id"]; !ok {
+		data["job_id"] = id
+	}
 	now := time.Now()
 	entry.updatedAt = now
 	if status, ok := data["status"].(string); ok && status != "" {

@@ -1273,6 +1273,13 @@ func BenchmarkScopedRetrieval(b *testing.B) {
 			b.Fatalf("StreamMemoryNotesScopeLimit: %v", err)
 		}
 		for rows.Next() {
+			var id int64
+			var text string
+			var emb []byte
+			var src any
+			var tags string
+			var created int64
+			rows.Scan(&id, &text, &emb, &src, &tags, &created)
 		}
 		rows.Close()
 	}

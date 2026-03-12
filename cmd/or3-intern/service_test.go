@@ -721,6 +721,63 @@ func TestRunServiceCommand_RefusesInvalidHostedProfile(t *testing.T) {
 	}
 }
 
+func hostedNoExecBaseConfig() config.Config {
+	cfg := config.Default()
+	cfg.Service.Secret = strings.Repeat("x", 32)
+	cfg.Service.Listen = "127.0.0.1:0"
+	cfg.RuntimeProfile = config.ProfileHostedNoExec
+	cfg.Security.SecretStore.Enabled = true
+	cfg.Security.Audit.Enabled = true
+	cfg.Security.Network.Enabled = true
+	cfg.Hardening.EnableExecShell = false
+	cfg.Hardening.PrivilegedTools = false
+	return cfg
+}
+
+func TestRunServiceCommand_HostedNoExec_RefusesExecShell(t *testing.T) {
+	cfg := hostedNoExecBaseConfig()
+	cfg.Hardening.EnableExecShell = true
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err := runServiceCommand(ctx, cfg, nil, nil, nil)
+	if err == nil {
+		t.Fatal("expected error for hosted-no-exec with enableExecShell=true, got nil")
+	}
+	if !strings.Contains(err.Error(), "startup refused") {
+		t.Fatalf("expected 'startup refused' in error, got: %v", err)
+	}
+}
+
+func TestRunServiceCommand_HostedNoExec_RefusesPrivilegedTools(t *testing.T) {
+	cfg := hostedNoExecBaseConfig()
+	cfg.Hardening.PrivilegedTools = true
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err := runServiceCommand(ctx, cfg, nil, nil, nil)
+	if err == nil {
+		t.Fatal("expected error for hosted-no-exec with privilegedTools=true, got nil")
+	}
+	if !strings.Contains(err.Error(), "startup refused") {
+		t.Fatalf("expected 'startup refused' in error, got: %v", err)
+	}
+}
+
+func TestRunServiceCommand_HostedNoExec_AllowsCleanConfig(t *testing.T) {
+	cfg := hostedNoExecBaseConfig()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err := runServiceCommand(ctx, cfg, nil, nil, nil)
+	if err != nil && strings.Contains(err.Error(), "startup refused") {
+		t.Fatalf("clean hosted-no-exec config should not be refused, got: %v", err)
+	}
+}
+
 // TestV1TurnsContractAliases pins the accepted session key aliases and allowed_tools
 // alias for POST /internal/v1/turns so that regressions break CI.
 func TestV1TurnsContractAliases(t *testing.T) {

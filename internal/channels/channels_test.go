@@ -4,6 +4,7 @@ import (
 	"context"
 	"reflect"
 	"testing"
+	"time"
 
 	"or3-intern/internal/bus"
 )
@@ -97,5 +98,36 @@ func TestReplyMeta_IgnoresEmptyValues(t *testing.T) {
 	})
 	if got != nil {
 		t.Fatalf("expected nil reply meta, got %#v", got)
+	}
+}
+
+func TestIngressDeduplicator_BlocksDuplicates(t *testing.T) {
+	d := NewIngressDeduplicator(time.Minute)
+	if d.IsDuplicate("msg-1") {
+		t.Fatal("first call should not be a duplicate")
+	}
+	if !d.IsDuplicate("msg-1") {
+		t.Fatal("second call with same key should be a duplicate")
+	}
+}
+
+func TestIngressDeduplicator_AllowsAfterTTLExpiry(t *testing.T) {
+	d := NewIngressDeduplicator(50 * time.Millisecond)
+	if d.IsDuplicate("msg-a") {
+		t.Fatal("first call for msg-a should not be a duplicate")
+	}
+	if d.IsDuplicate("msg-b") {
+		t.Fatal("msg-b should not be a duplicate of msg-a")
+	}
+	time.Sleep(60 * time.Millisecond)
+	if d.IsDuplicate("msg-a") {
+		t.Fatal("msg-a should not be a duplicate after TTL expiry")
+	}
+}
+
+func TestIngressDeduplicator_DefaultTTL(t *testing.T) {
+	d := NewIngressDeduplicator(0)
+	if d.ttl != defaultDeduplicatorTTL {
+		t.Fatalf("expected default TTL %v, got %v", defaultDeduplicatorTTL, d.ttl)
 	}
 }

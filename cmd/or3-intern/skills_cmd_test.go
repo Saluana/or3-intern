@@ -260,6 +260,73 @@ func TestAvailableToolNames_IncludesCuratedMemoryReadTools(t *testing.T) {
 	}
 }
 
+func TestFilterAdvertisedToolNames_HostedNoExecHidesExecTools(t *testing.T) {
+	cfg := config.Default()
+	cfg.RuntimeProfile = config.ProfileHostedNoExec
+	cfg.Hardening.GuardedTools = true
+	cfg.Hardening.PrivilegedTools = true
+	cfg.Skills.EnableExec = true
+
+	got := filterAdvertisedToolNames(cfg, availableToolNames(false, false))
+	if _, ok := got["exec"]; ok {
+		t.Fatalf("expected exec to be hidden in hosted-no-exec, got %#v", got)
+	}
+	if _, ok := got["run_skill_script"]; ok {
+		t.Fatalf("expected run_skill_script to be hidden in hosted-no-exec, got %#v", got)
+	}
+}
+
+func TestFilterAdvertisedToolNames_RemoteSandboxRequiresSandboxForExecTools(t *testing.T) {
+	cfg := config.Default()
+	cfg.RuntimeProfile = config.ProfileHostedRemoteSandbox
+	cfg.Hardening.GuardedTools = true
+	cfg.Skills.EnableExec = true
+
+	got := filterAdvertisedToolNames(cfg, availableToolNames(false, false))
+	if _, ok := got["exec"]; ok {
+		t.Fatalf("expected exec to be hidden without sandbox, got %#v", got)
+	}
+	if _, ok := got["run_skill_script"]; ok {
+		t.Fatalf("expected run_skill_script to be hidden without sandbox, got %#v", got)
+	}
+
+	cfg.Hardening.Sandbox.Enabled = true
+	got = filterAdvertisedToolNames(cfg, availableToolNames(false, false))
+	if _, ok := got["exec"]; !ok {
+		t.Fatalf("expected exec to return when sandbox is enabled, got %#v", got)
+	}
+	if _, ok := got["run_skill_script"]; !ok {
+		t.Fatalf("expected run_skill_script to return when sandbox is enabled, got %#v", got)
+	}
+}
+
+func TestBuildSkillsInventory_HostedProfilesForceQuarantineByDefault(t *testing.T) {
+	cfg := config.Default()
+	cfg.RuntimeProfile = config.ProfileHostedService
+	cfg.Skills.Policy.QuarantineByDefault = false
+	cfg.WorkspaceDir = t.TempDir()
+
+	skillDir := filepath.Join(cfg.WorkspaceDir, "skills", "runner")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# Runner\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile skill: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "tool.sh"), []byte("#!/bin/sh\necho hi\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile script: %v", err)
+	}
+
+	inv := buildSkillsInventory(cfg, "", map[string]struct{}{"exec": {}})
+	skill, ok := inv.Get("runner")
+	if !ok {
+		t.Fatal("expected runner skill in inventory")
+	}
+	if skill.PermissionState != "quarantined" {
+		t.Fatalf("expected hosted profile to quarantine runnable skill by default, got %#v", skill)
+	}
+}
+
 func makeTestZip(t *testing.T, files map[string]string) []byte {
 	t.Helper()
 	var buf bytes.Buffer

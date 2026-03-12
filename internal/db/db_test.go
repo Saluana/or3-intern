@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1218,6 +1219,67 @@ func TestIntegrityCheck_BasicConsistency(t *testing.T) {
 	}
 	if result != "ok" {
 		t.Errorf("integrity check failed: %s", result)
+	}
+}
+
+func TestBackupRestore_PreservesCurrentSchemaAndData(t *testing.T) {
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "source.db")
+	d, err := Open(sourcePath)
+	if err != nil {
+		t.Fatalf("Open source db: %v", err)
+	}
+	defer d.Close()
+	ctx := context.Background()
+
+	if _, err := d.AppendMessage(ctx, "backup-session", "user", "hello backup", map[string]any{"source": "test"}); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+	if err := d.UpsertPinned(ctx, "backup-session", "note", "restored"); err != nil {
+		t.Fatalf("UpsertPinned: %v", err)
+	}
+
+	backupPath := filepath.Join(dir, "backup.db")
+	quotedBackupPath := strings.ReplaceAll(backupPath, "'", "''")
+	if _, err := d.SQL.ExecContext(ctx, fmt.Sprintf("VACUUM INTO '%s'", quotedBackupPath)); err != nil {
+		t.Fatalf("VACUUM INTO backup: %v", err)
+	}
+
+	restored, err := Open(backupPath)
+	if err != nil {
+		t.Fatalf("Open restored db: %v", err)
+	}
+	defer restored.Close()
+
+	msgs, err := restored.GetLastMessages(ctx, "backup-session", 10)
+	if err != nil {
+		t.Fatalf("GetLastMessages restored: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].Content != "hello backup" {
+		t.Fatalf("expected restored history row, got %#v", msgs)
+	}
+	pinned, err := restored.GetPinned(ctx, "backup-session")
+	if err != nil {
+		t.Fatalf("GetPinned restored: %v", err)
+	}
+	if pinned["note"] != "restored" {
+		t.Fatalf("expected restored pinned note, got %#v", pinned)
+	}
+
+	var result string
+	if err := restored.SQL.QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&result); err != nil {
+		t.Fatalf("PRAGMA integrity_check restored: %v", err)
+	}
+	if result != "ok" {
+		t.Fatalf("restored integrity check failed: %s", result)
+	}
+
+	var count int
+	if err := restored.SQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('messages','memory_pinned','memory_docs','subagent_jobs')`).Scan(&count); err != nil {
+		t.Fatalf("schema table count: %v", err)
+	}
+	if count != 4 {
+		t.Fatalf("expected restored backup to preserve current schema, got %d tables", count)
 	}
 }
 

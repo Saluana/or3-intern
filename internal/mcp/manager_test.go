@@ -11,6 +11,7 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"or3-intern/internal/config"
+	"or3-intern/internal/security"
 	"or3-intern/internal/tools"
 )
 
@@ -323,6 +324,33 @@ func TestManagerConnect_SkipsMalformedRemoteTools(t *testing.T) {
 	joined := strings.Join(logs, "\n")
 	if !strings.Contains(joined, "reason=nil") || !strings.Contains(joined, "reason=missing-name") {
 		t.Fatalf("expected malformed-tool logs, got %#v", logs)
+	}
+}
+
+func TestManagerConnect_HostPolicyBlocksRemoteHTTPBeforeDial(t *testing.T) {
+	manager := NewManager(map[string]config.MCPServerConfig{
+		"remote": {Enabled: true, Transport: "sse", URL: "https://blocked.example.com/mcp", ToolTimeoutSeconds: 5},
+	})
+	manager.SetHostPolicy(security.HostPolicy{
+		Enabled:       true,
+		DefaultDeny:   true,
+		AllowedHosts:  []string{"allowed.example.com"},
+		AllowLoopback: true,
+	})
+	called := false
+	manager.connect = func(ctx context.Context, name string, cfg config.MCPServerConfig) (session, error) {
+		called = true
+		return nil, errors.New("unexpected dial")
+	}
+
+	if err := manager.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if called {
+		t.Fatal("expected host policy to block remote MCP before dial")
+	}
+	if got := manager.ToolNames(); len(got) != 0 {
+		t.Fatalf("expected blocked remote MCP to register no tools, got %#v", got)
 	}
 }
 

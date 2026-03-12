@@ -16,23 +16,24 @@ import (
 	"sync"
 	"time"
 
-	rootchannels "or3-intern/internal/channels"
 	"or3-intern/internal/artifacts"
 	"or3-intern/internal/bus"
+	rootchannels "or3-intern/internal/channels"
 	"or3-intern/internal/config"
 )
 
 type Channel struct {
-	Config config.TelegramChannelConfig
-	HTTP   *http.Client
-	Artifacts *artifacts.Store
+	Config        config.TelegramChannelConfig
+	HTTP          *http.Client
+	Artifacts     *artifacts.Store
 	MaxMediaBytes int
-	IsolatePeers bool
+	IsolatePeers  bool
 
 	mu      sync.Mutex
 	running bool
 	cancel  context.CancelFunc
 	offset  int64
+	dedupe  *rootchannels.IngressDeduplicator
 }
 
 func (c *Channel) Name() string { return "telegram" }
@@ -131,6 +132,9 @@ func (c *Channel) fetchUpdates(ctx context.Context, eventBus *bus.Bus) error {
 		msg := update.Message
 		chatID := strconv.FormatInt(msg.Chat.ID, 10)
 		if !c.allowedChat(chatID) {
+			continue
+		}
+		if key := telegramDedupeKey(msg); key != "" && c.ingressDeduper().IsDuplicate(key) {
 			continue
 		}
 		sessionKey := "telegram:" + chatID
@@ -241,6 +245,9 @@ func (c *Channel) postJSON(ctx context.Context, path string, payload any, out an
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return telegramRateLimitError(resp)
+	}
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("telegram api error: %s", resp.Status)
 	}
@@ -255,6 +262,36 @@ func (c *Channel) postJSON(ctx context.Context, path string, payload any, out an
 		return nil
 	}
 	return json.Unmarshal(envelope.Result, out)
+}
+
+func (c *Channel) ingressDeduper() *rootchannels.IngressDeduplicator {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.dedupe == nil {
+		c.dedupe = rootchannels.NewIngressDeduplicator(0)
+	}
+	return c.dedupe
+}
+
+func telegramDedupeKey(msg inboundMessage) string {
+	if msg.Chat.ID == 0 || msg.MessageID == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d:%d", msg.Chat.ID, msg.MessageID)
+}
+
+func telegramRateLimitError(resp *http.Response) error {
+	if resp == nil {
+		return rootchannels.FormatRateLimitError("telegram", 0, "")
+	}
+	var payload struct {
+		Description string `json:"description"`
+		Parameters  struct {
+			RetryAfter int `json:"retry_after"`
+		} `json:"parameters"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&payload)
+	return rootchannels.FormatRateLimitError("telegram", time.Duration(payload.Parameters.RetryAfter)*time.Second, payload.Description)
 }
 
 func (c *Channel) captureAttachments(ctx context.Context, sessionKey string, msg inboundMessage) ([]artifacts.Attachment, []string) {
@@ -536,7 +573,7 @@ type inboundMessage struct {
 	Text         string `json:"text"`
 	Caption      string `json:"caption"`
 	MediaGroupID string `json:"media_group_id"`
-	Chat      struct {
+	Chat         struct {
 		ID   int64  `json:"id"`
 		Type string `json:"type"`
 	} `json:"chat"`

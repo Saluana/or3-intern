@@ -58,6 +58,41 @@ func TestChannel_StartPublishesInboundMessage(t *testing.T) {
 	}
 }
 
+func TestChannel_StartDeduplicatesRepeatedMessageID(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		payload := map[string]any{"type": "message", "id": "m1", "chat": "group1", "from": "123", "text": "hello", "isGroup": true}
+		_ = conn.WriteJSON(payload)
+		_ = conn.WriteJSON(payload)
+		<-time.After(100 * time.Millisecond)
+	}))
+	defer server.Close()
+	b := bus.New(2)
+	ch := &Channel{Config: config.WhatsAppBridgeConfig{BridgeURL: "ws" + server.URL[len("http"):], OpenAccess: true}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := ch.Start(ctx, b); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer ch.Stop(context.Background())
+
+	select {
+	case <-b.Channel():
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for first inbound whatsapp message")
+	}
+	select {
+	case ev := <-b.Channel():
+		t.Fatalf("expected duplicate whatsapp event to be suppressed, got %#v", ev)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
 func TestChannel_StartPublishesIsolatedInboundMessageWhenEnabled(t *testing.T) {
 	upgrader := websocket.Upgrader{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -23,17 +23,18 @@ import (
 )
 
 type Channel struct {
-	Config config.DiscordChannelConfig
-	HTTP   *http.Client
-	Dialer *websocket.Dialer
-	Artifacts *artifacts.Store
+	Config        config.DiscordChannelConfig
+	HTTP          *http.Client
+	Dialer        *websocket.Dialer
+	Artifacts     *artifacts.Store
 	MaxMediaBytes int
-	IsolatePeers bool
+	IsolatePeers  bool
 
 	mu     sync.Mutex
 	conn   *websocket.Conn
 	cancel context.CancelFunc
 	botID  string
+	dedupe *rootchannels.IngressDeduplicator
 }
 
 func (c *Channel) Name() string { return "discord" }
@@ -44,7 +45,9 @@ func (c *Channel) Start(ctx context.Context, eventBus *bus.Bus) error {
 	}
 	url := strings.TrimSpace(c.Config.GatewayURL)
 	if url == "" {
-		var resp struct{ URL string `json:"url"` }
+		var resp struct {
+			URL string `json:"url"`
+		}
 		if err := c.getJSON(ctx, c.apiBase()+"/gateway/bot", &resp); err != nil {
 			return err
 		}
@@ -128,7 +131,9 @@ func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
 		}
 		switch frame.Op {
 		case 10:
-			var hello struct { HeartbeatInterval float64 `json:"heartbeat_interval"` }
+			var hello struct {
+				HeartbeatInterval float64 `json:"heartbeat_interval"`
+			}
 			_ = json.Unmarshal(frame.D, &hello)
 			_ = conn.WriteJSON(map[string]any{"op": 2, "d": map[string]any{"token": c.Config.Token, "intents": 513, "properties": map[string]string{"$os": "linux", "$browser": "or3-intern", "$device": "or3-intern"}}})
 			interval := time.Duration(int64(hello.HeartbeatInterval)) * time.Millisecond
@@ -148,13 +153,20 @@ func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
 		case 0:
 			switch frame.T {
 			case "READY":
-				var ready struct { User struct { ID string `json:"id"` } `json:"user"` }
+				var ready struct {
+					User struct {
+						ID string `json:"id"`
+					} `json:"user"`
+				}
 				_ = json.Unmarshal(frame.D, &ready)
 				c.botID = ready.User.ID
 			case "MESSAGE_CREATE":
 				var msg inboundMessage
 				_ = json.Unmarshal(frame.D, &msg)
 				if msg.Author.Bot {
+					continue
+				}
+				if key := discordDedupeKey(msg); key != "" && c.ingressDeduper().IsDuplicate(key) {
 					continue
 				}
 				if !c.allowedUser(msg.Author.ID) {
@@ -214,6 +226,9 @@ func (c *Channel) getJSON(ctx context.Context, endpoint string, out any) error {
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return discordRateLimitError(resp)
+	}
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("discord api error: %s", resp.Status)
 	}
@@ -233,6 +248,9 @@ func (c *Channel) postJSON(ctx context.Context, endpoint string, payload any, ou
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return discordRateLimitError(resp)
+	}
 	if resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("discord api error: %s %s", resp.Status, string(body))
@@ -241,6 +259,37 @@ func (c *Channel) postJSON(ctx context.Context, endpoint string, payload any, ou
 		return nil
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+func (c *Channel) ingressDeduper() *rootchannels.IngressDeduplicator {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.dedupe == nil {
+		c.dedupe = rootchannels.NewIngressDeduplicator(0)
+	}
+	return c.dedupe
+}
+
+func discordDedupeKey(msg inboundMessage) string {
+	if strings.TrimSpace(msg.ID) != "" {
+		return msg.ID
+	}
+	if strings.TrimSpace(msg.ChannelID) == "" || strings.TrimSpace(msg.Author.ID) == "" {
+		return ""
+	}
+	return strings.Join([]string{msg.ChannelID, msg.Author.ID, msg.Content}, "|")
+}
+
+func discordRateLimitError(resp *http.Response) error {
+	if resp == nil {
+		return rootchannels.FormatRateLimitError("discord", 0, "")
+	}
+	var payload struct {
+		Message    string  `json:"message"`
+		RetryAfter float64 `json:"retry_after"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&payload)
+	return rootchannels.FormatRateLimitError("discord", time.Duration(payload.RetryAfter*float64(time.Second)), payload.Message)
 }
 
 func (c *Channel) captureAttachments(ctx context.Context, sessionKey string, refs []discordAttachment) ([]artifacts.Attachment, []string) {
@@ -412,13 +461,13 @@ type mention struct {
 }
 
 type inboundMessage struct {
-	ID          string    `json:"id"`
-	ChannelID   string    `json:"channel_id"`
-	GuildID     string    `json:"guild_id"`
-	Content     string    `json:"content"`
-	Mentions    []mention `json:"mentions"`
+	ID          string              `json:"id"`
+	ChannelID   string              `json:"channel_id"`
+	GuildID     string              `json:"guild_id"`
+	Content     string              `json:"content"`
+	Mentions    []mention           `json:"mentions"`
 	Attachments []discordAttachment `json:"attachments"`
-	Author    struct {
+	Author      struct {
 		ID  string `json:"id"`
 		Bot bool   `json:"bot"`
 	} `json:"author"`

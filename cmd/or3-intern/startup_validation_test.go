@@ -48,6 +48,59 @@ func TestValidateStartupCommand_ChatAllowsLocalStdioMCPWithGlobalAllowlist(t *te
 	}
 }
 
+func TestValidateStartupCommand_HostedNoExecAllowsRemoteMCPWithSafeNetworkPosture(t *testing.T) {
+	cfg := hostedStartupConfig()
+	cfg.RuntimeProfile = config.ProfileHostedNoExec
+	cfg.Tools.MCPServers = map[string]config.MCPServerConfig{
+		"remote": {
+			Enabled:   true,
+			Transport: "sse",
+			URL:       "https://mcp.example.com/stream",
+		},
+	}
+	cfg.Security.Network.AllowedHosts = []string{"mcp.example.com"}
+
+	if err := validateStartupCommand("chat", cfg); err != nil {
+		t.Fatalf("expected hosted-no-exec remote MCP flow to pass, got %v", err)
+	}
+}
+
+func TestValidateStartupCommand_RemoteSandboxRejectsBroadLocalExecWithoutSandbox(t *testing.T) {
+	cfg := hostedStartupConfig()
+	cfg.RuntimeProfile = config.ProfileHostedRemoteSandbox
+	cfg.Service.Secret = strings.Repeat("s", 32)
+	cfg.Hardening.PrivilegedTools = true
+
+	err := validateStartupCommand("service", cfg)
+	if err == nil {
+		t.Fatal("expected hosted-remote-sandbox-only startup validation to fail")
+	}
+	if !strings.Contains(err.Error(), "Bubblewrap sandboxing") {
+		t.Fatalf("expected sandbox refusal, got %v", err)
+	}
+}
+
+func TestValidateStartupCommand_RemoteSandboxAllowsRemoteFlowWithSandbox(t *testing.T) {
+	cfg := hostedStartupConfig()
+	cfg.RuntimeProfile = config.ProfileHostedRemoteSandbox
+	cfg.Service.Secret = strings.Repeat("s", 32)
+	cfg.Hardening.PrivilegedTools = true
+	cfg.Hardening.ExecAllowedPrograms = []string{"git"}
+	cfg.Hardening.Sandbox.Enabled = true
+	cfg.Tools.MCPServers = map[string]config.MCPServerConfig{
+		"remote": {
+			Enabled:   true,
+			Transport: "streamablehttp",
+			URL:       "https://mcp.example.com/stream",
+		},
+	}
+	cfg.Security.Network.AllowedHosts = []string{"mcp.example.com"}
+
+	if err := validateStartupCommand("service", cfg); err != nil {
+		t.Fatalf("expected sandboxed hosted-remote-sandbox-only remote flow to pass, got %v", err)
+	}
+}
+
 func TestValidateStartupCommand_ServiceRejectsWeakSecret(t *testing.T) {
 	cfg := hostedStartupConfig()
 	cfg.Service.Secret = "short-secret"

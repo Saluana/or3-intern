@@ -49,6 +49,12 @@ Set `runtimeProfile` in `config.json` (or override with `OR3_RUNTIME_PROFILE`) t
 
 Hosted profiles (`hosted-*`) run strict validation at startup — `or3-intern serve` and `or3-intern service` will refuse to start if `security.secretStore`, `security.audit`, or `security.network` are absent or disabled.
 
+Hosted profiles also bias the runtime toward explicit opt-in:
+
+- executable skills stay quarantined by default even if `skills.policy.quarantineByDefault` is unset
+- `hosted-no-exec` does not advertise local `exec` or `run_skill_script` capability to the skill inventory
+- `hosted-remote-sandbox-only` only advertises local exec-capable tools when Bubblewrap sandboxing is enabled
+
 `or3-intern doctor` warns when `runtimeProfile` is not set, and flags constraint violations for the active profile.
 
 ## Core config sections

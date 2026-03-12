@@ -37,6 +37,7 @@ The README documents these safety rules:
 - stdio MCP servers inherit only the configured child environment allowlist plus explicit per-server `env` entries
 - MCP tool calls go through the existing tool loop, timeout handling, and artifact spill behavior
 - when `security.network` is enabled, MCP HTTP transports must satisfy the global trusted-host policy
+- hosted-profile startup and skill inventory enumeration fail closed for remote MCP HTTP endpoints that do not satisfy the effective host policy
 
 ## Operational notes
 

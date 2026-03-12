@@ -18,15 +18,15 @@
 
 # 4. Narrow external integration risk
 
-- [ ] [Req 4] Add duplicate-delivery and rate-handling regressions in `internal/channels/*` for the currently supported external channels.
-- [ ] [Req 4] Tighten hosted-profile defaults in `internal/skills/*`, `internal/mcp/*`, and tool policy paths so untrusted skills, non-loopback MCP HTTP, and risky exec stay opt-in.
-- [ ] [Req 4] Add tests showing `hosted-no-exec` and `hosted-remote-sandbox-only` refuse broad local exec while preserving supported remote execution flows.
+- [x] [Req 4] Add duplicate-delivery and rate-handling regressions in `internal/channels/*` for the currently supported external channels.
+- [x] [Req 4] Tighten hosted-profile defaults in `internal/skills/*`, `internal/mcp/*`, and tool policy paths so untrusted skills, non-loopback MCP HTTP, and risky exec stay opt-in.
+- [x] [Req 4] Add tests showing `hosted-no-exec` and `hosted-remote-sandbox-only` refuse broad local exec while preserving supported remote execution flows.
 
 # 5. Measure retrieval and durability instead of assuming them
 
-- [ ] [Req 5] Add benchmarks or soak tests in `internal/db/*`, `internal/memory/*`, and adjacent packages for last-N history load, scoped retrieval, hybrid search, and document indexing.
-- [ ] [Req 5] Add migration and integrity-check regressions for the current SQLite schema and backup/restore procedures where scripts already exist.
-- [ ] [Req 5] Document practical latency and memory budgets in the planning notes or operational docs once the measurements exist.
+- [x] [Req 5] Add benchmarks or soak tests in `internal/db/*`, `internal/memory/*`, and adjacent packages for last-N history load, scoped retrieval, hybrid search, and document indexing.
+- [x] [Req 5] Add migration and integrity-check regressions for the current SQLite schema and backup/restore procedures where scripts already exist.
+- [x] [Req 5] Document practical latency and memory budgets in the planning notes or operational docs once the measurements exist.
 
 # 6. Out of scope
 

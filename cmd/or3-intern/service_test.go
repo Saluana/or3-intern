@@ -772,6 +772,9 @@ func TestRunServiceCommand_HostedNoExec_AllowsCleanConfig(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Profile validation runs before the runtime nil check, so a nil runtime
+	// here means we reach "runtime not configured" only if profile checks pass.
+	// If profile validation had rejected the config it would return "startup refused".
 	err := runServiceCommand(ctx, cfg, nil, nil, nil)
 	if err != nil && strings.Contains(err.Error(), "startup refused") {
 		t.Fatalf("clean hosted-no-exec config should not be refused, got: %v", err)

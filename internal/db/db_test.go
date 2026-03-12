@@ -1279,7 +1279,9 @@ func BenchmarkScopedRetrieval(b *testing.B) {
 			var src any
 			var tags string
 			var created int64
-			rows.Scan(&id, &text, &emb, &src, &tags, &created)
+			if err := rows.Scan(&id, &text, &emb, &src, &tags, &created); err != nil {
+				b.Fatalf("Scan: %v", err)
+			}
 		}
 		rows.Close()
 	}

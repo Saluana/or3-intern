@@ -51,9 +51,29 @@ Behavior:
 - returns Server-Sent Events when the request sends `Accept: text/event-stream`
 - otherwise waits for completion and returns JSON
 
+Request fields:
+
+- canonical: `session_key`, `message`, optional `tool_policy`, `meta`, `profile_name`
+- compatibility aliases also accepted: `intern_session_key`, `allowed_tools`, and the SDK camelCase forms (`sessionKey`, `internSessionKey`, `allowedTools`, `profileName`)
+
+`tool_policy` uses the OR3 Net shape:
+
+```json
+{
+  "mode": "allow_all | deny_all | allow_list | deny_list",
+  "allowed_tools": ["read_file"],
+  "blocked_tools": ["exec"]
+}
+```
+
 ### `POST /internal/v1/subagents`
 
 Queues a background subagent job through the shared subagent manager.
+
+Request fields:
+
+- canonical: `parent_session_key`, `task`, optional `prompt_snapshot`, `tool_policy`, `timeout_seconds`, `meta`, `profile_name`, `channel`, `reply_to`
+- compatibility aliases also accepted: `session_key`, `intern_session_key`, `allowed_tools`, `timeout`, and the SDK camelCase forms (`parentSessionKey`, `sessionKey`, `internSessionKey`, `promptSnapshot`, `allowedTools`, `timeoutSeconds`, `profileName`, `replyTo`)
 
 ### `GET /internal/v1/jobs/:jobId/stream`
 

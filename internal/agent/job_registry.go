@@ -11,6 +11,7 @@ import (
 const (
 	defaultJobRetention   = 2 * time.Minute
 	defaultMaxTrackedJobs = 256
+	defaultMaxJobEvents   = 256
 	jobSubscriberBuffer   = 128
 )
 
@@ -34,6 +35,7 @@ type JobRegistry struct {
 	jobs       map[string]*jobEntry
 	retention  time.Duration
 	maxTracked int
+	maxEvents  int
 }
 
 type jobEntry struct {
@@ -67,6 +69,7 @@ func NewJobRegistry(retention time.Duration, maxTracked int) *JobRegistry {
 		jobs:       map[string]*jobEntry{},
 		retention:  retention,
 		maxTracked: maxTracked,
+		maxEvents:  defaultMaxJobEvents,
 	}
 }
 
@@ -141,6 +144,9 @@ func (r *JobRegistry) Publish(id string, eventType string, data map[string]any) 
 	entry.nextSeq++
 	event := JobEvent{Sequence: entry.nextSeq, Type: eventType, Data: cloneEventData(data)}
 	entry.events = append(entry.events, event)
+	if r.maxEvents > 0 && len(entry.events) > r.maxEvents {
+		entry.events = append([]JobEvent(nil), entry.events[len(entry.events)-r.maxEvents:]...)
+	}
 	for _, ch := range entry.subscribers {
 		select {
 		case ch <- event:
@@ -318,6 +324,9 @@ func (r *JobRegistry) cleanupLocked(now time.Time) {
 		oldestID := ""
 		var oldest time.Time
 		for id, entry := range r.jobs {
+			if entry == nil || !entry.terminal {
+				continue
+			}
 			if oldestID == "" || entry.updatedAt.Before(oldest) {
 				oldestID = id
 				oldest = entry.updatedAt

@@ -14,33 +14,13 @@ import (
 	"or3-intern/internal/bus"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
-	"or3-intern/internal/providers"
+	"or3-intern/internal/tools"
 )
 
 type serviceServer struct {
 	runtime         *agent.Runtime
 	subagentManager *agent.SubagentManager
 	jobs            *agent.JobRegistry
-}
-
-type serviceTurnRequest struct {
-	SessionKey   string         `json:"session_key"`
-	Message      string         `json:"message"`
-	AllowedTools []string       `json:"allowed_tools"`
-	Meta         map[string]any `json:"meta"`
-	ProfileName  string         `json:"profile_name"`
-}
-
-type serviceSubagentRequest struct {
-	ParentSessionKey string                  `json:"parent_session_key"`
-	Task             string                  `json:"task"`
-	PromptSnapshot   []providers.ChatMessage `json:"prompt_snapshot"`
-	AllowedTools     []string                `json:"allowed_tools"`
-	TimeoutSeconds   int                     `json:"timeout_seconds"`
-	Meta             map[string]any          `json:"meta"`
-	ProfileName      string                  `json:"profile_name"`
-	Channel          string                  `json:"channel"`
-	ReplyTo          string                  `json:"reply_to"`
 }
 
 func runServiceCommand(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, jobs *agent.JobRegistry) error {
@@ -88,13 +68,11 @@ func (s *serviceServer) handleTurns(w http.ResponseWriter, r *http.Request) {
 		writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 		return
 	}
-	var req serviceTurnRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	req, err := decodeServiceTurnRequest(r.Body, s.runtime.Tools)
+	if err != nil {
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid request body"})
 		return
 	}
-	req.SessionKey = strings.TrimSpace(req.SessionKey)
-	req.Message = strings.TrimSpace(req.Message)
 	if req.SessionKey == "" || req.Message == "" {
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "session_key and message are required"})
 		return
@@ -127,8 +105,12 @@ func (s *serviceServer) runTurnJob(ctx context.Context, jobID string, req servic
 	observer := &serviceObserver{ConversationObserver: s.jobs.Observer(jobID)}
 	runCtx := agent.ContextWithConversationObserver(ctx, observer)
 	runCtx = agent.ContextWithStreamingChannel(runCtx, agent.NullStreamer{})
-	if len(req.AllowedTools) > 0 {
-		runCtx = agent.ContextWithToolRegistry(runCtx, s.runtime.Tools.CloneFiltered(req.AllowedTools))
+	if req.RestrictTools {
+		filtered := tools.NewRegistry()
+		if len(req.AllowedTools) > 0 {
+			filtered = s.runtime.Tools.CloneFiltered(req.AllowedTools)
+		}
+		runCtx = agent.ContextWithToolRegistry(runCtx, filtered)
 	}
 	meta := cloneServiceMeta(req.Meta)
 	if req.ProfileName != "" {
@@ -162,13 +144,11 @@ func (s *serviceServer) handleSubagents(w http.ResponseWriter, r *http.Request) 
 		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "subagent manager is not enabled"})
 		return
 	}
-	var req serviceSubagentRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	req, err := decodeServiceSubagentRequest(r.Body, backgroundToolsRegistry(s.subagentManager))
+	if err != nil {
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid request body"})
 		return
 	}
-	req.ParentSessionKey = strings.TrimSpace(req.ParentSessionKey)
-	req.Task = strings.TrimSpace(req.Task)
 	if req.ParentSessionKey == "" || req.Task == "" {
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "parent_session_key and task are required"})
 		return
@@ -178,6 +158,7 @@ func (s *serviceServer) handleSubagents(w http.ResponseWriter, r *http.Request) 
 		Task:             req.Task,
 		PromptSnapshot:   req.PromptSnapshot,
 		AllowedTools:     req.AllowedTools,
+		RestrictTools:    req.RestrictTools,
 		ProfileName:      req.ProfileName,
 		Channel:          req.Channel,
 		ReplyTo:          req.ReplyTo,

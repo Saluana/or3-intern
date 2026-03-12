@@ -298,6 +298,56 @@ func TestSubagentManager_StartReconcilesRunningJobs(t *testing.T) {
 	}
 }
 
+func TestSubagentManager_AbortQueuedJobIsAtomic(t *testing.T) {
+	d := openRuntimeTestDB(t)
+
+	queued := db.SubagentJob{
+		ID:               "job-queued-abort",
+		ParentSessionKey: "parent",
+		ChildSessionKey:  "parent:subagent:job-queued-abort",
+		Task:             "background task",
+	}
+	if err := d.EnqueueSubagentJob(context.Background(), queued); err != nil {
+		t.Fatalf("EnqueueSubagentJob queued: %v", err)
+	}
+
+	job, aborted, err := d.AbortQueuedSubagentJob(context.Background(), queued.ID, "subagent aborted before execution")
+	if err != nil {
+		t.Fatalf("AbortQueuedSubagentJob queued: %v", err)
+	}
+	if !aborted || job.Status != db.SubagentStatusInterrupted {
+		t.Fatalf("expected queued job to abort atomically, got job=%#v aborted=%v", job, aborted)
+	}
+
+	running := db.SubagentJob{
+		ID:               "job-running-abort",
+		ParentSessionKey: "parent",
+		ChildSessionKey:  "parent:subagent:job-running-abort",
+		Task:             "background task",
+	}
+	if err := d.EnqueueSubagentJob(context.Background(), running); err != nil {
+		t.Fatalf("EnqueueSubagentJob running: %v", err)
+	}
+	if err := d.MarkSubagentRunning(context.Background(), running.ID); err != nil {
+		t.Fatalf("MarkSubagentRunning: %v", err)
+	}
+
+	job, aborted, err = d.AbortQueuedSubagentJob(context.Background(), running.ID, "subagent aborted before execution")
+	if err != nil {
+		t.Fatalf("AbortQueuedSubagentJob running: %v", err)
+	}
+	if aborted {
+		t.Fatalf("expected running job not to be aborted via queued-only helper, got %#v", job)
+	}
+	stored, ok, err := d.GetSubagentJob(context.Background(), running.ID)
+	if err != nil {
+		t.Fatalf("GetSubagentJob running: %v", err)
+	}
+	if !ok || stored.Status != db.SubagentStatusRunning {
+		t.Fatalf("expected running job to stay running, got %#v ok=%v", stored, ok)
+	}
+}
+
 func waitForSubagentJob(t *testing.T, d *db.DB, id string, want string) db.SubagentJob {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)

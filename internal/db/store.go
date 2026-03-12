@@ -708,6 +708,51 @@ func (d *DB) ClaimNextSubagentJob(ctx context.Context) (*SubagentJob, error) {
 	return &job, nil
 }
 
+func (d *DB) AbortQueuedSubagentJob(ctx context.Context, id, errText string) (SubagentJob, bool, error) {
+	tx, err := d.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return SubagentJob{}, false, err
+	}
+	defer tx.Rollback()
+
+	row := tx.QueryRowContext(ctx,
+		`SELECT id, parent_session_key, child_session_key, channel, reply_to, task, status,
+			result_preview, artifact_id, error_text, requested_at, started_at, finished_at, attempts, metadata_json
+		 FROM subagent_jobs WHERE id=?`,
+		id)
+	job, err := scanSubagentJob(row)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return SubagentJob{}, false, nil
+		}
+		return SubagentJob{}, false, err
+	}
+
+	now := NowMS()
+	res, err := tx.ExecContext(ctx,
+		`UPDATE subagent_jobs
+		 SET status=?, error_text=?, finished_at=?
+		 WHERE id=? AND status=?`,
+		SubagentStatusInterrupted, errText, now, id, SubagentStatusQueued)
+	if err != nil {
+		return SubagentJob{}, false, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return SubagentJob{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return SubagentJob{}, false, err
+	}
+	if affected == 0 {
+		return job, false, nil
+	}
+	job.Status = SubagentStatusInterrupted
+	job.ErrorText = errText
+	job.FinishedAt = now
+	return job, true, nil
+}
+
 func (d *DB) MarkSubagentSucceeded(ctx context.Context, id, preview, artifactID string) error {
 	_, err := d.SQL.ExecContext(ctx,
 		`UPDATE subagent_jobs

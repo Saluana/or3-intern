@@ -20,6 +20,18 @@ import (
 	"or3-intern/internal/tools"
 )
 
+type serviceTestTool struct {
+	name string
+}
+
+func (t serviceTestTool) Name() string               { return t.name }
+func (t serviceTestTool) Description() string        { return t.name }
+func (t serviceTestTool) Parameters() map[string]any { return map[string]any{} }
+func (t serviceTestTool) Schema() map[string]any     { return map[string]any{} }
+func (t serviceTestTool) Execute(context.Context, map[string]any) (string, error) {
+	return "", nil
+}
+
 func TestServiceAuthMiddleware_RejectsMissingBearer(t *testing.T) {
 	handler := serviceAuthMiddleware("super-secret-super-secret", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -127,6 +139,69 @@ func TestValidateServiceAuthorization(t *testing.T) {
 				t.Fatalf("expected %q, got %v", tc.wantErr, err)
 			}
 		})
+	}
+}
+
+func TestDecodeServiceTurnRequest_AcceptsToolPolicyAliases(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(serviceTestTool{name: "read_file"})
+
+	req, err := decodeServiceTurnRequest(strings.NewReader(`{
+		"intern_session_key":"svc:alias",
+		"message":"hello",
+		"tool_policy":{"mode":"deny_all"},
+		"profileName":"ops",
+		"meta":{"trace_id":"trace-1"}
+	}`), registry)
+	if err != nil {
+		t.Fatalf("decodeServiceTurnRequest: %v", err)
+	}
+	if req.SessionKey != "svc:alias" {
+		t.Fatalf("expected intern session alias to populate session key, got %#v", req)
+	}
+	if !req.RestrictTools || len(req.AllowedTools) != 0 {
+		t.Fatalf("expected deny_all tool policy to restrict to zero tools, got %#v", req)
+	}
+	if req.ProfileName != "ops" {
+		t.Fatalf("expected profile alias to populate profile name, got %#v", req)
+	}
+	if req.Meta["trace_id"] != "trace-1" {
+		t.Fatalf("expected meta to be preserved, got %#v", req.Meta)
+	}
+}
+
+func TestDecodeServiceSubagentRequest_AcceptsSessionAndToolPolicyAliases(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(serviceTestTool{name: "read_file"})
+	registry.Register(serviceTestTool{name: "write_file"})
+
+	req, err := decodeServiceSubagentRequest(strings.NewReader(`{
+		"sessionKey":"svc:parent",
+		"task":"background task",
+		"promptSnapshot":[{"role":"user","content":"remember this"}],
+		"toolPolicy":{"mode":"deny_list","blockedTools":["write_file"]},
+		"timeout":9,
+		"profile_name":"or3-default",
+		"channel":"service",
+		"replyTo":"or3-net"
+	}`), registry)
+	if err != nil {
+		t.Fatalf("decodeServiceSubagentRequest: %v", err)
+	}
+	if req.ParentSessionKey != "svc:parent" {
+		t.Fatalf("expected session key alias to populate parent session key, got %#v", req)
+	}
+	if !req.RestrictTools || len(req.AllowedTools) != 1 || req.AllowedTools[0] != "read_file" {
+		t.Fatalf("expected deny_list to resolve surviving tools, got %#v", req)
+	}
+	if req.TimeoutSeconds != 9 {
+		t.Fatalf("expected timeout alias to populate timeout seconds, got %#v", req)
+	}
+	if len(req.PromptSnapshot) != 1 || req.PromptSnapshot[0].Role != "user" {
+		t.Fatalf("expected prompt snapshot alias to populate prompt snapshot, got %#v", req.PromptSnapshot)
+	}
+	if req.ReplyTo != "or3-net" {
+		t.Fatalf("expected replyTo alias to populate reply target, got %#v", req)
 	}
 }
 

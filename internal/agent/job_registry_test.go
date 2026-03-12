@@ -61,3 +61,45 @@ func TestJobRegistry_CleansUpExpiredJobs(t *testing.T) {
 		t.Fatalf("expected expired job %q to be cleaned up", job.ID)
 	}
 }
+
+func TestJobRegistry_DoesNotEvictLiveJobsWhenBounded(t *testing.T) {
+	registry := NewJobRegistry(time.Hour, 2)
+	live := registry.RegisterWithID("job-live", "turn")
+	registry.Publish(live.ID, "started", map[string]any{"status": "running"})
+
+	doneA := registry.RegisterWithID("job-done-a", "turn")
+	registry.Complete(doneA.ID, "completed", map[string]any{"final_text": "a"})
+	doneB := registry.RegisterWithID("job-done-b", "turn")
+	registry.Complete(doneB.ID, "completed", map[string]any{"final_text": "b"})
+
+	registry.mu.Lock()
+	registry.cleanupLocked(time.Now())
+	registry.mu.Unlock()
+
+	if _, ok := registry.Snapshot(live.ID); !ok {
+		t.Fatal("expected live job to remain tracked")
+	}
+	if len(registry.jobs) != 2 {
+		t.Fatalf("expected registry to trim only terminal jobs down to limit, got %d entries", len(registry.jobs))
+	}
+}
+
+func TestJobRegistry_BoundsPerJobEventHistory(t *testing.T) {
+	registry := NewJobRegistry(time.Minute, 16)
+	registry.maxEvents = 3
+	job := registry.RegisterWithID("job-events", "turn")
+	for i := 0; i < 5; i++ {
+		registry.Publish(job.ID, "text_delta", map[string]any{"content": i})
+	}
+
+	snapshot, ok := registry.Snapshot(job.ID)
+	if !ok {
+		t.Fatal("expected snapshot to succeed")
+	}
+	if len(snapshot.Events) != 3 {
+		t.Fatalf("expected event history to be capped at 3, got %d", len(snapshot.Events))
+	}
+	if snapshot.Events[0].Sequence != 3 || snapshot.Events[2].Sequence != 5 {
+		t.Fatalf("expected trimmed history to retain newest sequence numbers, got %#v", snapshot.Events)
+	}
+}

@@ -42,25 +42,27 @@ Four HTTP endpoints on the service listener, all behind shared-secret auth middl
 Submits a full agent turn (model call → tool loop → response).
 
 ```
-Request:  { session_key, message, tool_policy?, meta? }
+Request:  { session_key|intern_session_key, message, tool_policy?, meta?, profile_name? }
 Response: SSE stream of events OR JSON result (based on Accept header)
 ```
 
 - Internally calls the same `agent.Builder.Run()` path that `chat` and `serve` use.
 - The `session_key` determines which conversation history and memory scope the turn uses.
 - `tool_policy` can override the default tool set for this specific turn.
+- Backward-compatible aliases (`allowed_tools` and the SDK camelCase field names) are accepted, but `tool_policy` is the canonical contract.
 
 #### `POST /internal/v1/subagents`
 
 Spawns a bounded subagent turn using the existing `SubagentManager`.
 
 ```
-Request:  { task, prompt_snapshot, tool_policy, timeout }
+Request:  { parent_session_key|session_key|intern_session_key, task, prompt_snapshot?, tool_policy?, timeout_seconds?, meta?, profile_name?, channel?, reply_to? }
 Response: { job_id, status: "queued" }
 ```
 
 - Uses the same `SubagentManager` that `spawn_subagent` tool calls use.
 - Inherits the same `MaxConcurrent`, `MaxQueued`, and `TaskTimeoutSeconds` limits from `SubagentsConfig`.
+- Backward-compatible aliases (`allowed_tools`, `timeout`, and the SDK camelCase field names) are accepted, but `tool_policy` is the canonical tool contract.
 
 #### `GET /internal/v1/jobs/:jobId/stream`
 

@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -119,6 +121,45 @@ func TestWebFetch_HostPolicyDeniesUnknownHost(t *testing.T) {
 	_, err := tool.Execute(context.Background(), map[string]any{"url": "https://api.openai.com/v1"})
 	if err == nil {
 		t.Fatal("expected host policy denial")
+	}
+}
+
+func TestWebFetch_PinsValidatedHostIntoDial(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "pinned")
+	}))
+	defer srv.Close()
+
+	serverURL, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url.Parse: %v", err)
+	}
+
+	var dialedAddr string
+	tool := &WebFetch{
+		HTTP: &http.Client{
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+					dialedAddr = addr
+					return (&net.Dialer{}).DialContext(ctx, network, serverURL.Host)
+				},
+			},
+		},
+		Timeout: 2 * time.Second,
+	}
+
+	out, err := tool.Execute(context.Background(), map[string]any{"url": "http://example.com/pinned"})
+	if err != nil {
+		t.Fatalf("WebFetch: %v", err)
+	}
+	if dialedAddr == "" {
+		t.Fatal("expected dial target to be recorded")
+	}
+	if strings.HasPrefix(dialedAddr, "example.com:") {
+		t.Fatalf("expected fetch dial to use a validated IP, got %q", dialedAddr)
+	}
+	if !strings.Contains(out, "pinned") {
+		t.Fatalf("expected test server response, got %q", out)
 	}
 }
 

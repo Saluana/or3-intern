@@ -78,6 +78,7 @@ func (t *WebFetch) Execute(ctx context.Context, params map[string]any) (string, 
 		copyClient := *t.HTTP
 		client = &copyClient
 	}
+	client = security.WrapHTTPClient(client, t.HostPolicy)
 	prevCheckRedirect := client.CheckRedirect
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= defaultWebFetchMaxRedirects {

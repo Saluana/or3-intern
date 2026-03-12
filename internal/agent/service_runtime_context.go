@@ -65,7 +65,7 @@ func toolRegistryFromContext(ctx context.Context) *tools.Registry {
 	return reg
 }
 
-func toolRegistryWithAllowlist(base *tools.Registry, allowed []string) *tools.Registry {
+func toolRegistryWithAllowlist(base *tools.Registry, allowed []string, restrict bool) *tools.Registry {
 	if base == nil {
 		return tools.NewRegistry()
 	}
@@ -77,8 +77,11 @@ func toolRegistryWithAllowlist(base *tools.Registry, allowed []string) *tools.Re
 		}
 		trimmed = append(trimmed, name)
 	}
-	if len(trimmed) == 0 {
+	if !restrict {
 		return base
+	}
+	if len(trimmed) == 0 {
+		return tools.NewRegistry()
 	}
 	return base.CloneFiltered(trimmed)
 }

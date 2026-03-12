@@ -45,6 +45,7 @@ type ServiceSubagentRequest struct {
 	Task             string
 	PromptSnapshot   []providers.ChatMessage
 	AllowedTools     []string
+	RestrictTools    bool
 	ProfileName      string
 	Channel          string
 	ReplyTo          string
@@ -55,6 +56,7 @@ type ServiceSubagentRequest struct {
 type subagentJobMetadata struct {
 	ProfileName    string                  `json:"profile_name,omitempty"`
 	AllowedTools   []string                `json:"allowed_tools,omitempty"`
+	RestrictTools  bool                    `json:"restrict_tools,omitempty"`
 	PromptSnapshot []providers.ChatMessage `json:"prompt_snapshot,omitempty"`
 	TimeoutSeconds int                     `json:"timeout_seconds,omitempty"`
 	ServiceMeta    map[string]any          `json:"service_meta,omitempty"`
@@ -197,6 +199,7 @@ func (m *SubagentManager) EnqueueService(ctx context.Context, req ServiceSubagen
 	metadata := subagentJobMetadata{
 		ProfileName:    strings.TrimSpace(req.ProfileName),
 		AllowedTools:   append([]string{}, req.AllowedTools...),
+		RestrictTools:  req.RestrictTools,
 		PromptSnapshot: append([]providers.ChatMessage{}, req.PromptSnapshot...),
 		ServiceMeta:    cloneMap(req.Meta),
 	}
@@ -297,7 +300,7 @@ func (m *SubagentManager) runJob(ctx context.Context, job db.SubagentJob) (Backg
 		ParentSessionKey: job.ParentSessionKey,
 		Task:             job.Task,
 		PromptSnapshot:   promptSnapshot,
-		Tools:            toolRegistryWithAllowlist(m.backgroundTools(), metadata.AllowedTools),
+		Tools:            toolRegistryWithAllowlist(m.backgroundTools(), metadata.AllowedTools, metadata.RestrictTools),
 		Meta: map[string]any{
 			"subagent_job_id":    job.ID,
 			"parent_session_key": job.ParentSessionKey,
@@ -357,23 +360,27 @@ func (m *SubagentManager) Abort(ctx context.Context, id string) error {
 	if m.Jobs != nil && m.Jobs.Cancel(id) {
 		return nil
 	}
-	job, ok, err := m.DB.GetSubagentJob(ctx, id)
+	job, ok, err := m.DB.AbortQueuedSubagentJob(ctx, id, "subagent aborted before execution")
 	if err != nil {
 		return err
 	}
 	if !ok {
-		return fmt.Errorf("job not found")
-	}
-	if job.Status == db.SubagentStatusQueued {
-		if err := m.DB.MarkSubagentInterrupted(ctx, id, "subagent aborted before execution"); err != nil {
-			return err
+		stored, exists, lookupErr := m.DB.GetSubagentJob(ctx, id)
+		if lookupErr != nil {
+			return lookupErr
 		}
-		if m.Jobs != nil {
-			m.Jobs.Complete(id, "aborted", map[string]any{"message": "subagent aborted before execution", "child_session_key": job.ChildSessionKey})
+		if !exists {
+			return fmt.Errorf("job not found")
 		}
-		return nil
+		if stored.Status == db.SubagentStatusQueued {
+			return fmt.Errorf("job is not abortable")
+		}
+		return fmt.Errorf("job is not abortable")
 	}
-	return fmt.Errorf("job is not abortable")
+	if m.Jobs != nil {
+		m.Jobs.Complete(id, "aborted", map[string]any{"message": "subagent aborted before execution", "child_session_key": job.ChildSessionKey})
+	}
+	return nil
 }
 
 func (m *SubagentManager) jobTimeout(job db.SubagentJob) time.Duration {

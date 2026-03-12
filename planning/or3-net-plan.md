@@ -13,6 +13,8 @@
 
 This means `or3-intern` needs to expose a small authenticated HTTP surface that `or3-net` can call. The rest of `or3-intern` — config loading, tool registry, memory, quotas, channels, cron, hardening — stays exactly as it is.
 
+`or3-net` now owns a durable `network_session_id` binding layer on top of the execution-facing `session_key`. The important contract for `or3-intern` is unchanged: `or3-net` resolves or creates the binding, then calls the internal service using the canonical `session_key`/`intern_session_key` for history and memory scope.
+
 ---
 
 ## What changes in `or3-intern`
@@ -28,6 +30,8 @@ A new entry path (either a `service` subcommand or a `--service` flag on `serve`
 - Environment overrides: `OR3_SERVICE_ENABLED`, `OR3_SERVICE_LISTEN`, `OR3_SERVICE_SECRET`, following the same pattern as other env overrides in `config.go`.
 
 The service listener reuses the same `agent.Builder`, tool registry, memory store, DB, subagent manager, and provider client that the CLI and channel commands already build. It does **not** create a second runtime — it shares the one that `main.go` constructs.
+
+That means `or3-intern` should continue treating `session_key` as the execution identity and should not learn or persist `network_session_id` directly. Session binding, replay, and operator-visible history belong in `or3-net`.
 
 ### 2. Internal API endpoints
 

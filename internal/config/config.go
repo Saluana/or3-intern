@@ -651,7 +651,7 @@ func ApplyEnvOverrides(cfg *Config) {
 		cfg.Service.Secret = v
 	}
 	if v := os.Getenv("OR3_RUNTIME_PROFILE"); v != "" {
-		cfg.RuntimeProfile = RuntimeProfile(v)
+		cfg.RuntimeProfile = RuntimeProfile(strings.ToLower(strings.TrimSpace(v)))
 	}
 }
 

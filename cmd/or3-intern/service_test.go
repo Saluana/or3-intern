@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"or3-intern/internal/agent"
+	"or3-intern/internal/config"
 	"or3-intern/internal/db"
 	"or3-intern/internal/providers"
 	"or3-intern/internal/tools"
@@ -694,4 +695,28 @@ func mustReadBody(t *testing.T, body io.Reader) string {
 		t.Fatalf("ReadAll: %v", err)
 	}
 	return string(payload)
+}
+
+func TestRunServiceCommand_RefusesInvalidHostedProfile(t *testing.T) {
+	rt, cleanup := buildServiceTestRuntime(t, func(w http.ResponseWriter, r *http.Request) {})
+	defer cleanup()
+
+	cfg := config.Default()
+	cfg.Service.Secret = strings.Repeat("x", 32)
+	cfg.Service.Listen = "127.0.0.1:0"
+	cfg.RuntimeProfile = config.ProfileHostedService
+	// Deliberately misconfigure: hosted profile requires secret store and audit
+	cfg.Security.SecretStore.Enabled = false
+	cfg.Security.Audit.Enabled = false
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err := runServiceCommand(ctx, cfg, rt, nil, nil)
+	if err == nil {
+		t.Fatal("expected error for misconfigured hosted profile, got nil")
+	}
+	if !strings.Contains(err.Error(), "service startup refused") {
+		t.Fatalf("expected 'service startup refused' in error, got: %v", err)
+	}
 }

@@ -59,6 +59,7 @@ func doctorFindings(cfg config.Config) []doctorFinding {
 	findings = append(findings, execFindings(cfg)...)
 	findings = append(findings, skillFindings(cfg)...)
 	findings = append(findings, channelExposureFindings(cfg)...)
+	findings = append(findings, runtimeProfileFindings(cfg)...)
 	sort.SliceStable(findings, func(i, j int) bool {
 		if findings[i].Area == findings[j].Area {
 			return findings[i].Message < findings[j].Message
@@ -423,6 +424,48 @@ func appendPublicChannelExposureWarnings(findings *[]doctorFinding, cfg config.C
 	if cfg.Skills.EnableExec && profileAllowsPrivileged(profile) && profileAllowsTool(profile, "run_skill_script") {
 		add(fmt.Sprintf("open-access channel can reach skill execution via profile %q", profileName))
 	}
+}
+
+func runtimeProfileFindings(cfg config.Config) []doctorFinding {
+	findings := []doctorFinding{}
+	addWarn := func(message string) {
+		findings = append(findings, doctorFinding{Level: "warn", Area: "runtime-profile", Message: message})
+	}
+
+	p := cfg.RuntimeProfile
+	if p == "" {
+		addWarn("runtimeProfile is not set; consider setting it to one of: local-dev, single-user-hardened, hosted-service, hosted-no-exec, hosted-remote-sandbox-only")
+		return findings
+	}
+
+	if config.IsHostedProfile(p) {
+		if !cfg.Security.SecretStore.Enabled {
+			addWarn("hosted profile requires security.secretStore.enabled")
+		}
+		if !cfg.Security.Audit.Enabled {
+			addWarn("hosted profile requires security.audit.enabled")
+		}
+		if !cfg.Security.Network.Enabled {
+			addWarn("hosted profile should configure security.network outbound policy")
+		}
+	}
+
+	if p == config.ProfileHostedNoExec {
+		if cfg.Hardening.EnableExecShell {
+			addWarn("hosted-no-exec profile: enableExecShell should be false")
+		}
+		if cfg.Hardening.PrivilegedTools {
+			addWarn("hosted-no-exec profile: privilegedTools should be false")
+		}
+	}
+
+	if p == config.ProfileHostedRemoteSandbox {
+		if cfg.Hardening.EnableExecShell && !cfg.Hardening.Sandbox.Enabled {
+			addWarn("hosted-remote-sandbox-only profile: exec requires sandbox to be enabled")
+		}
+	}
+
+	return findings
 }
 
 func hasDoctorWarnings(findings []doctorFinding) bool {

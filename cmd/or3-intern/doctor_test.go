@@ -337,5 +337,107 @@ func safeDoctorConfig() config.Config {
 	cfg.Security.Network.Enabled = true
 	cfg.Security.Network.DefaultDeny = true
 	cfg.Tools.MCPServers = map[string]config.MCPServerConfig{}
+	cfg.RuntimeProfile = config.ProfileLocalDev
 	return cfg
+}
+
+func TestRuntimeProfileFindings(t *testing.T) {
+	t.Run("no profile set emits warn", func(t *testing.T) {
+		cfg := safeDoctorConfig()
+		cfg.RuntimeProfile = ""
+		findings := runtimeProfileFindings(cfg)
+		if !findingContains(findings, "runtime-profile", "runtimeProfile is not set") {
+			t.Fatalf("expected unset runtimeProfile warning, got %#v", findings)
+		}
+	})
+
+	t.Run("local-dev profile produces no findings", func(t *testing.T) {
+		cfg := safeDoctorConfig()
+		cfg.RuntimeProfile = config.ProfileLocalDev
+		findings := runtimeProfileFindings(cfg)
+		if len(findings) != 0 {
+			t.Fatalf("expected no findings for local-dev, got %#v", findings)
+		}
+	})
+
+	t.Run("hosted profile without secret store warns", func(t *testing.T) {
+		cfg := safeDoctorConfig()
+		cfg.RuntimeProfile = config.ProfileHostedService
+		cfg.Security.SecretStore.Enabled = false
+		findings := runtimeProfileFindings(cfg)
+		if !findingContains(findings, "runtime-profile", "security.secretStore.enabled") {
+			t.Fatalf("expected secretStore warning, got %#v", findings)
+		}
+	})
+
+	t.Run("hosted profile without audit warns", func(t *testing.T) {
+		cfg := safeDoctorConfig()
+		cfg.RuntimeProfile = config.ProfileHostedService
+		cfg.Security.Audit.Enabled = false
+		findings := runtimeProfileFindings(cfg)
+		if !findingContains(findings, "runtime-profile", "security.audit.enabled") {
+			t.Fatalf("expected audit warning, got %#v", findings)
+		}
+	})
+
+	t.Run("hosted profile without network warns", func(t *testing.T) {
+		cfg := safeDoctorConfig()
+		cfg.RuntimeProfile = config.ProfileHostedService
+		cfg.Security.Network.Enabled = false
+		findings := runtimeProfileFindings(cfg)
+		if !findingContains(findings, "runtime-profile", "security.network outbound policy") {
+			t.Fatalf("expected network warning, got %#v", findings)
+		}
+	})
+
+	t.Run("hosted-no-exec with exec shell enabled warns", func(t *testing.T) {
+		cfg := safeDoctorConfig()
+		cfg.RuntimeProfile = config.ProfileHostedNoExec
+		cfg.Hardening.EnableExecShell = true
+		findings := runtimeProfileFindings(cfg)
+		if !findingContains(findings, "runtime-profile", "enableExecShell should be false") {
+			t.Fatalf("expected enableExecShell warning, got %#v", findings)
+		}
+	})
+
+	t.Run("hosted-no-exec with privileged tools warns", func(t *testing.T) {
+		cfg := safeDoctorConfig()
+		cfg.RuntimeProfile = config.ProfileHostedNoExec
+		cfg.Hardening.PrivilegedTools = true
+		findings := runtimeProfileFindings(cfg)
+		if !findingContains(findings, "runtime-profile", "privilegedTools should be false") {
+			t.Fatalf("expected privilegedTools warning, got %#v", findings)
+		}
+	})
+
+	t.Run("hosted-remote-sandbox-only exec without sandbox warns", func(t *testing.T) {
+		cfg := safeDoctorConfig()
+		cfg.RuntimeProfile = config.ProfileHostedRemoteSandbox
+		cfg.Hardening.EnableExecShell = true
+		cfg.Hardening.Sandbox.Enabled = false
+		findings := runtimeProfileFindings(cfg)
+		if !findingContains(findings, "runtime-profile", "exec requires sandbox to be enabled") {
+			t.Fatalf("expected sandbox warning, got %#v", findings)
+		}
+	})
+
+	t.Run("hosted-remote-sandbox-only exec with sandbox no warns", func(t *testing.T) {
+		cfg := safeDoctorConfig()
+		cfg.RuntimeProfile = config.ProfileHostedRemoteSandbox
+		cfg.Hardening.EnableExecShell = true
+		cfg.Hardening.Sandbox.Enabled = true
+		findings := runtimeProfileFindings(cfg)
+		if findingContains(findings, "runtime-profile", "exec requires sandbox") {
+			t.Fatalf("expected no sandbox warning when sandbox enabled, got %#v", findings)
+		}
+	})
+
+	t.Run("well-configured hosted profile produces no profile findings", func(t *testing.T) {
+		cfg := safeDoctorConfig()
+		cfg.RuntimeProfile = config.ProfileHostedService
+		findings := runtimeProfileFindings(cfg)
+		if len(findings) != 0 {
+			t.Fatalf("expected no findings for well-configured hosted profile, got %#v", findings)
+		}
+	})
 }

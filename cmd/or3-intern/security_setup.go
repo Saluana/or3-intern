@@ -21,12 +21,13 @@ func buildHostPolicy(cfg config.Config) security.HostPolicy {
 }
 
 func setupSecurity(ctx context.Context, cfg config.Config, d *db.DB) (config.Config, *security.SecretManager, *security.AuditLogger, error) {
+	hostedProfile := config.IsHostedProfile(cfg.RuntimeProfile)
 	var secretManager *security.SecretManager
 	if cfg.Security.SecretStore.Enabled {
 		key, err := security.LoadExistingKey(cfg.Security.SecretStore.KeyFile)
 		if err != nil {
-			if cfg.Security.SecretStore.Required {
-				return cfg, nil, nil, err
+			if hostedProfile || cfg.Security.SecretStore.Required {
+				return cfg, nil, nil, fmt.Errorf("secret store unavailable: %w", err)
 			}
 		} else {
 			secretManager = &security.SecretManager{DB: d, Key: key}
@@ -36,8 +37,8 @@ func setupSecurity(ctx context.Context, cfg config.Config, d *db.DB) (config.Con
 	if cfg.Security.Audit.Enabled {
 		auditKey, err := security.LoadOrCreateKey(cfg.Security.Audit.KeyFile)
 		if err != nil {
-			if cfg.Security.Audit.Strict {
-				return cfg, secretManager, nil, err
+			if hostedProfile || cfg.Security.Audit.Strict {
+				return cfg, secretManager, nil, fmt.Errorf("audit logger unavailable: %w", err)
 			}
 		} else {
 			auditLogger = &security.AuditLogger{DB: d, Key: auditKey, Strict: cfg.Security.Audit.Strict}

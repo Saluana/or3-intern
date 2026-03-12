@@ -384,9 +384,21 @@ func TestRuntimeProfileFindings(t *testing.T) {
 		cfg := safeDoctorConfig()
 		cfg.RuntimeProfile = config.ProfileHostedService
 		cfg.Security.Network.Enabled = false
+		cfg.Security.Network.DefaultDeny = false
 		findings := runtimeProfileFindings(cfg)
 		if !findingContains(findings, "runtime-profile", "security.network outbound policy") {
 			t.Fatalf("expected network warning, got %#v", findings)
+		}
+	})
+
+	t.Run("hosted profile with default deny and network disabled does not warn", func(t *testing.T) {
+		cfg := safeDoctorConfig()
+		cfg.RuntimeProfile = config.ProfileHostedService
+		cfg.Security.Network.Enabled = false
+		cfg.Security.Network.DefaultDeny = true
+		findings := runtimeProfileFindings(cfg)
+		if findingContains(findings, "runtime-profile", "security.network outbound policy") {
+			t.Fatalf("expected no network warning with defaultDeny policy, got %#v", findings)
 		}
 	})
 

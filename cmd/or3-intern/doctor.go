@@ -445,7 +445,7 @@ func runtimeProfileFindings(cfg config.Config) []doctorFinding {
 		if !cfg.Security.Audit.Enabled {
 			addWarn("hosted profile requires security.audit.enabled")
 		}
-		if !cfg.Security.Network.Enabled {
+		if !cfg.Security.Network.Enabled && !cfg.Security.Network.DefaultDeny {
 			addWarn("hosted profile should configure security.network outbound policy")
 		}
 	}

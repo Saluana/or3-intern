@@ -1,14 +1,14 @@
 # 1. Freeze the service contract `or3-net` depends on
 
 - [ ] [Req 1] Document the supported v1 service contract in `docs/api-reference.md` and pin request/response fixtures for turns, subagents, job stream attach, and abort.
-- [ ] [Req 1] Add compatibility tests around `cmd/or3-intern/service.go`, `cmd/or3-intern/service_auth.go`, and related handlers so breaking changes fail CI.
+- [x] [Req 1] Add compatibility tests around `cmd/or3-intern/service.go`, `cmd/or3-intern/service_auth.go`, and related handlers so breaking changes fail CI.
 - [ ] [Req 1] Add a lightweight cross-repo compatibility check for the current `or3-net` client assumptions around aliases, `tool_policy`, streaming, and abort.
 
 # 2. Add explicit runtime profiles without a new runtime layer
 
 - [ ] [Req 2] Extend `internal/config/*` with a small named runtime-profile setting that maps onto existing hardening, service, channel, and automation controls.
 - [ ] [Req 2] Wire profile validation into `cmd/or3-intern/chat`, `serve`, and `service` startup so risky profile/config combinations fail early.
-- [ ] [Req 2] Update `docs/security-and-hardening.md`, `docs/configuration-reference.md`, and `README.md` with the supported profile set and intended use.
+- [x] [Req 2] Update `docs/security-and-hardening.md`, `docs/configuration-reference.md`, and `README.md` with the supported profile set and intended use.
 
 # 3. Make strict hardening mandatory in serious modes
 

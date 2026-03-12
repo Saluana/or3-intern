@@ -104,6 +104,7 @@ Requests cancellation of a running job when cancellation is possible.
 ## Compatibility contract
 
 The following aliases are part of the stable v1 contract and are covered by CI compatibility tests in `cmd/or3-intern/service_test.go`.
+Fixture-pinned request and response shapes live in `cmd/or3-intern/testdata/service_contract/` and are exercised by `TestOr3NetCompatibilityFixtures`.
 
 **`POST /internal/v1/turns` — session key aliases** (all resolve to `session_key`):
 `session_key`, `intern_session_key`, `sessionKey`, `internSessionKey`

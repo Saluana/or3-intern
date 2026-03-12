@@ -1,0 +1,12 @@
+{
+  "internSessionKey": "svc:fixture",
+  "message": "hello contract",
+  "toolPolicy": {
+    "mode": "allow_list",
+    "allowedTools": ["read_file"]
+  },
+  "profileName": "ops",
+  "meta": {
+    "trace_id": "trace-turn"
+  }
+}

@@ -118,6 +118,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, "security error:", err)
 		os.Exit(1)
 	}
+	if err := validateStartupCommand(cmd, cfg); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	if cmd == "secrets" {
 		if secretManager == nil && cfg.Security.SecretStore.Enabled {
 			key, keyErr := security.LoadOrCreateKey(cfg.Security.SecretStore.KeyFile)
@@ -346,12 +350,6 @@ func main() {
 			fmt.Fprintln(os.Stderr, "cli error:", err)
 		}
 	case "serve":
-		if config.IsHostedProfile(cfg.RuntimeProfile) {
-			if err := config.ValidateProfile(cfg); err != nil {
-				fmt.Fprintf(os.Stderr, "hosted profile validation failed: %v\n", err)
-				os.Exit(1)
-			}
-		}
 		runWorkers(ctx, b, rt, cfg.WorkerCount)
 		if err := channelManager.StartAll(ctx, b); err != nil {
 			fmt.Fprintln(os.Stderr, "channel start error:", err)

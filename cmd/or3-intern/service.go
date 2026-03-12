@@ -27,14 +27,8 @@ func runServiceCommand(ctx context.Context, cfg config.Config, rt *agent.Runtime
 	if strings.TrimSpace(cfg.Service.Secret) == "" {
 		return fmt.Errorf("service secret is required")
 	}
-	if err := config.ValidateProfile(cfg); err != nil {
-		return fmt.Errorf("service startup refused: %w; move risky execution to or3-sandbox or fix the profile configuration", err)
-	}
-	// Enforce hosted-no-exec profile: refuse if exec tools are reachable
-	if cfg.RuntimeProfile == config.ProfileHostedNoExec {
-		if cfg.Hardening.EnableExecShell || cfg.Hardening.PrivilegedTools {
-			return fmt.Errorf("service startup refused: hosted-no-exec profile forbids enableExecShell and privilegedTools; use or3-sandbox for isolated execution")
-		}
+	if err := validateStartupCommand("service", cfg); err != nil {
+		return err
 	}
 	if rt == nil {
 		return fmt.Errorf("runtime not configured")

@@ -1,0 +1,13 @@
+{
+  "parent_session_key": "svc:parent",
+  "task": "background contract task",
+  "allowed_tools": ["read_file"],
+  "restrict_tools": true,
+  "timeout_seconds": 15,
+  "profile_name": "ops",
+  "channel": "service",
+  "reply_to": "or3-net",
+  "meta": {
+    "trace_id": "trace-subagent"
+  }
+}

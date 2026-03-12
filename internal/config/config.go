@@ -23,6 +23,69 @@ const (
 	ProfileHostedRemoteSandbox RuntimeProfile = "hosted-remote-sandbox-only"
 )
 
+// RuntimeProfileSpec describes the intended operating posture for a runtime profile.
+type RuntimeProfileSpec struct {
+	Name                    RuntimeProfile
+	Hosted                  bool
+	RequireSecretStore      bool
+	RequireAudit            bool
+	RequireNetworkPolicy    bool
+	RequireStrictAudit      bool
+	RequireAuditVerifyStart bool
+	RequireSecretStoreKey   bool
+	ForbidExecShell         bool
+	ForbidPrivilegedTools   bool
+	RequireSandboxForExec   bool
+}
+
+// ProfileSpec returns the effective runtime-profile rules for p.
+func ProfileSpec(p RuntimeProfile) RuntimeProfileSpec {
+	switch p {
+	case ProfileSingleUserHardened:
+		return RuntimeProfileSpec{
+			Name: p,
+		}
+	case ProfileHostedService:
+		return RuntimeProfileSpec{
+			Name:                    p,
+			Hosted:                  true,
+			RequireSecretStore:      true,
+			RequireAudit:            true,
+			RequireNetworkPolicy:    true,
+			RequireStrictAudit:      true,
+			RequireAuditVerifyStart: true,
+			RequireSecretStoreKey:   true,
+		}
+	case ProfileHostedNoExec:
+		return RuntimeProfileSpec{
+			Name:                    p,
+			Hosted:                  true,
+			RequireSecretStore:      true,
+			RequireAudit:            true,
+			RequireNetworkPolicy:    true,
+			RequireStrictAudit:      true,
+			RequireAuditVerifyStart: true,
+			RequireSecretStoreKey:   true,
+			ForbidExecShell:         true,
+			ForbidPrivilegedTools:   true,
+		}
+	case ProfileHostedRemoteSandbox:
+		return RuntimeProfileSpec{
+			Name:                    p,
+			Hosted:                  true,
+			RequireSecretStore:      true,
+			RequireAudit:            true,
+			RequireNetworkPolicy:    true,
+			RequireStrictAudit:      true,
+			RequireAuditVerifyStart: true,
+			RequireSecretStoreKey:   true,
+			RequireSandboxForExec:   true,
+		}
+	default:
+		return RuntimeProfileSpec{Name: p}
+	}
+}
+
 type Config struct {
 	DBPath                 string `json:"dbPath"`
 	ArtifactsDir           string `json:"artifactsDir"`
@@ -1089,27 +1152,56 @@ func validateRuntimeProfile(p RuntimeProfile) error {
 // ValidateProfile checks that the profile+config combination is safe.
 // It returns the first constraint violation found.
 func ValidateProfile(cfg Config) error {
-	p := cfg.RuntimeProfile
-	if IsHostedProfile(p) {
+	spec := ProfileSpec(cfg.RuntimeProfile)
+	if spec.RequireSecretStore {
 		if !cfg.Security.SecretStore.Enabled {
 			return errors.New("hosted profiles require security.secretStore.enabled")
 		}
+	}
+	if spec.RequireAudit {
 		if !cfg.Security.Audit.Enabled {
 			return errors.New("hosted profiles require security.audit.enabled")
 		}
+	}
+	if spec.RequireNetworkPolicy {
 		if !cfg.Security.Network.Enabled && !cfg.Security.Network.DefaultDeny {
 			return errors.New("hosted profiles require security.network policy to be configured")
 		}
 	}
-	if p == ProfileHostedNoExec {
+	if spec.Hosted && hasRemoteHTTPMCPServers(cfg.Tools.MCPServers) {
+		if !cfg.Security.Network.Enabled || !cfg.Security.Network.DefaultDeny {
+			return errors.New("hosted profiles require deny-by-default security.network for remote MCP HTTP")
+		}
+		if networkAllowlistTooBroad(cfg.Security.Network.AllowedHosts) {
+			return errors.New("hosted profiles require a narrow security.network.allowedHosts for remote MCP HTTP")
+		}
+	}
+	if spec.RequireStrictAudit {
+		if !cfg.Security.Audit.Strict {
+			return errors.New("profile requires security.audit.strict")
+		}
+	}
+	if spec.RequireAuditVerifyStart {
+		if !cfg.Security.Audit.VerifyOnStart {
+			return errors.New("profile requires security.audit.verifyOnStart")
+		}
+	}
+	if spec.RequireSecretStoreKey {
+		if !cfg.Security.SecretStore.Required {
+			return errors.New("profile requires security.secretStore.required")
+		}
+	}
+	if spec.ForbidExecShell {
 		if cfg.Hardening.EnableExecShell {
 			return errors.New("hosted-no-exec profile does not allow enableExecShell")
 		}
+	}
+	if spec.ForbidPrivilegedTools {
 		if cfg.Hardening.PrivilegedTools {
 			return errors.New("hosted-no-exec profile does not allow privilegedTools")
 		}
 	}
-	if p == ProfileHostedRemoteSandbox {
+	if spec.RequireSandboxForExec {
 		if cfg.Hardening.EnableExecShell && !cfg.Hardening.Sandbox.Enabled {
 			return errors.New("hosted-remote-sandbox-only profile requires sandbox for exec")
 		}
@@ -1153,6 +1245,45 @@ func isLoopbackHost(host string) bool {
 	}
 	ip := net.ParseIP(strings.Trim(host, "[]"))
 	return ip != nil && ip.IsLoopback()
+}
+
+func hasRemoteHTTPMCPServers(servers map[string]MCPServerConfig) bool {
+	for _, server := range servers {
+		if !server.Enabled {
+			continue
+		}
+		transport := strings.ToLower(strings.TrimSpace(server.Transport))
+		if transport != "sse" && transport != "streamablehttp" {
+			continue
+		}
+		u, err := url.Parse(strings.TrimSpace(server.URL))
+		if err != nil {
+			return true
+		}
+		if u.Hostname() == "" || !isLoopbackHost(u.Hostname()) {
+			return true
+		}
+	}
+	return false
+}
+
+func networkAllowlistTooBroad(hosts []string) bool {
+	if len(hosts) > 10 {
+		return true
+	}
+	for _, host := range hosts {
+		host = strings.TrimSpace(strings.ToLower(host))
+		if host == "*" {
+			return true
+		}
+		if strings.HasPrefix(host, "*.") {
+			return true
+		}
+		if strings.Contains(host, "*") {
+			return true
+		}
+	}
+	return false
 }
 
 func hasNonEmpty(values []string) bool {

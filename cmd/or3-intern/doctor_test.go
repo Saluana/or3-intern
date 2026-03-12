@@ -370,6 +370,16 @@ func TestRuntimeProfileFindings(t *testing.T) {
 		}
 	})
 
+	t.Run("hosted profile without required secret store warns", func(t *testing.T) {
+		cfg := safeDoctorConfig()
+		cfg.RuntimeProfile = config.ProfileHostedService
+		cfg.Security.SecretStore.Required = false
+		findings := runtimeProfileFindings(cfg)
+		if !findingContains(findings, "runtime-profile", "security.secretStore.required") {
+			t.Fatalf("expected secretStore.required warning, got %#v", findings)
+		}
+	})
+
 	t.Run("hosted profile without audit warns", func(t *testing.T) {
 		cfg := safeDoctorConfig()
 		cfg.RuntimeProfile = config.ProfileHostedService
@@ -377,6 +387,26 @@ func TestRuntimeProfileFindings(t *testing.T) {
 		findings := runtimeProfileFindings(cfg)
 		if !findingContains(findings, "runtime-profile", "security.audit.enabled") {
 			t.Fatalf("expected audit warning, got %#v", findings)
+		}
+	})
+
+	t.Run("hosted profile without strict audit warns", func(t *testing.T) {
+		cfg := safeDoctorConfig()
+		cfg.RuntimeProfile = config.ProfileHostedService
+		cfg.Security.Audit.Strict = false
+		findings := runtimeProfileFindings(cfg)
+		if !findingContains(findings, "runtime-profile", "security.audit.strict") {
+			t.Fatalf("expected audit.strict warning, got %#v", findings)
+		}
+	})
+
+	t.Run("hosted profile without audit verifyOnStart warns", func(t *testing.T) {
+		cfg := safeDoctorConfig()
+		cfg.RuntimeProfile = config.ProfileHostedService
+		cfg.Security.Audit.VerifyOnStart = false
+		findings := runtimeProfileFindings(cfg)
+		if !findingContains(findings, "runtime-profile", "security.audit.verifyOnStart") {
+			t.Fatalf("expected audit.verifyOnStart warning, got %#v", findings)
 		}
 	})
 

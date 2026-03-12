@@ -442,8 +442,17 @@ func runtimeProfileFindings(cfg config.Config) []doctorFinding {
 		if !cfg.Security.SecretStore.Enabled {
 			addWarn("hosted profile requires security.secretStore.enabled")
 		}
+		if !cfg.Security.SecretStore.Required {
+			addWarn("hosted profile requires security.secretStore.required")
+		}
 		if !cfg.Security.Audit.Enabled {
 			addWarn("hosted profile requires security.audit.enabled")
+		}
+		if !cfg.Security.Audit.Strict {
+			addWarn("hosted profile requires security.audit.strict")
+		}
+		if !cfg.Security.Audit.VerifyOnStart {
+			addWarn("hosted profile requires security.audit.verifyOnStart")
 		}
 		if !cfg.Security.Network.Enabled && !cfg.Security.Network.DefaultDeny {
 			addWarn("hosted profile should configure security.network outbound policy")

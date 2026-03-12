@@ -727,8 +727,12 @@ func hostedNoExecBaseConfig() config.Config {
 	cfg.Service.Listen = "127.0.0.1:0"
 	cfg.RuntimeProfile = config.ProfileHostedNoExec
 	cfg.Security.SecretStore.Enabled = true
+	cfg.Security.SecretStore.Required = true
 	cfg.Security.Audit.Enabled = true
+	cfg.Security.Audit.Strict = true
+	cfg.Security.Audit.VerifyOnStart = true
 	cfg.Security.Network.Enabled = true
+	cfg.Security.Network.DefaultDeny = true
 	cfg.Hardening.EnableExecShell = false
 	cfg.Hardening.PrivilegedTools = false
 	return cfg

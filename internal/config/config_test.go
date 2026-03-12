@@ -818,7 +818,10 @@ func TestRuntimeProfileEnvOverride(t *testing.T) {
 func hostedConfig() Config {
 	cfg := Default()
 	cfg.Security.SecretStore.Enabled = true
+	cfg.Security.SecretStore.Required = true
 	cfg.Security.Audit.Enabled = true
+	cfg.Security.Audit.Strict = true
+	cfg.Security.Audit.VerifyOnStart = true
 	cfg.Security.Network.Enabled = true
 	cfg.Security.Network.DefaultDeny = true
 	return cfg
@@ -835,6 +838,14 @@ func TestValidateProfile(t *testing.T) {
 	t.Run("local-dev always passes", func(t *testing.T) {
 		cfg := Default()
 		cfg.RuntimeProfile = ProfileLocalDev
+		if err := ValidateProfile(cfg); err != nil {
+			t.Errorf("expected nil, got %v", err)
+		}
+	})
+
+	t.Run("single-user-hardened remains advisory", func(t *testing.T) {
+		cfg := Default()
+		cfg.RuntimeProfile = ProfileSingleUserHardened
 		if err := ValidateProfile(cfg); err != nil {
 			t.Errorf("expected nil, got %v", err)
 		}
@@ -896,6 +907,70 @@ func TestValidateProfile(t *testing.T) {
 		cfg.RuntimeProfile = ProfileHostedService
 		if err := ValidateProfile(cfg); err != nil {
 			t.Errorf("expected nil, got %v", err)
+		}
+	})
+
+	t.Run("hosted-service requires secretStore.required", func(t *testing.T) {
+		cfg := hostedConfig()
+		cfg.RuntimeProfile = ProfileHostedService
+		cfg.Security.SecretStore.Required = false
+		err := ValidateProfile(cfg)
+		if err == nil || err.Error() != "profile requires security.secretStore.required" {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("hosted-service requires audit.strict", func(t *testing.T) {
+		cfg := hostedConfig()
+		cfg.RuntimeProfile = ProfileHostedService
+		cfg.Security.Audit.Strict = false
+		err := ValidateProfile(cfg)
+		if err == nil || err.Error() != "profile requires security.audit.strict" {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("hosted-service requires audit.verifyOnStart", func(t *testing.T) {
+		cfg := hostedConfig()
+		cfg.RuntimeProfile = ProfileHostedService
+		cfg.Security.Audit.VerifyOnStart = false
+		err := ValidateProfile(cfg)
+		if err == nil || err.Error() != "profile requires security.audit.verifyOnStart" {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("hosted-service requires deny-by-default for remote MCP http", func(t *testing.T) {
+		cfg := hostedConfig()
+		cfg.RuntimeProfile = ProfileHostedService
+		cfg.Security.Network.DefaultDeny = false
+		cfg.Tools.MCPServers = map[string]MCPServerConfig{
+			"remote": {
+				Enabled:   true,
+				Transport: "sse",
+				URL:       "https://mcp.example.com/stream",
+			},
+		}
+		err := ValidateProfile(cfg)
+		if err == nil || err.Error() != "hosted profiles require deny-by-default security.network for remote MCP HTTP" {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("hosted-service rejects broad allowlist for remote MCP http", func(t *testing.T) {
+		cfg := hostedConfig()
+		cfg.RuntimeProfile = ProfileHostedService
+		cfg.Security.Network.AllowedHosts = []string{"*.example.com"}
+		cfg.Tools.MCPServers = map[string]MCPServerConfig{
+			"remote": {
+				Enabled:   true,
+				Transport: "streamablehttp",
+				URL:       "https://mcp.example.com/stream",
+			},
+		}
+		err := ValidateProfile(cfg)
+		if err == nil || err.Error() != "hosted profiles require a narrow security.network.allowedHosts for remote MCP HTTP" {
+			t.Errorf("unexpected error: %v", err)
 		}
 	})
 

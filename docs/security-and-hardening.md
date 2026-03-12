@@ -35,7 +35,27 @@ Phase 3 adds stronger operational controls:
 - named access profiles for channels and triggers
 - outbound host restrictions through `security.network`
 
+## Runtime profiles
+
+Set `runtimeProfile` in `config.json` (or override with `OR3_RUNTIME_PROFILE`) to declare the intended execution posture:
+
+| Profile | Intent |
+| --- | --- |
+| `local-dev` | Permissive defaults for local development; no additional security requirements enforced. |
+| `single-user-hardened` | Personal server with tighter defaults; recommended for self-hosted single-user deployments. |
+| `hosted-service` | Multi-user or public-facing service; secret-store, audit, and network policy are all required at startup. |
+| `hosted-no-exec` | Hosted service with shell execution disabled; `enableExecShell` and `privilegedTools` are forbidden. |
+| `hosted-remote-sandbox-only` | Hosted service where exec is only permitted inside a sandbox; startup fails if exec is enabled without sandbox. |
+
+Hosted profiles (`hosted-*`) run strict validation at startup — `or3-intern serve` and `or3-intern service` will refuse to start if `security.secretStore`, `security.audit`, or `security.network` are absent or disabled.
+
+`or3-intern doctor` warns when `runtimeProfile` is not set, and flags constraint violations for the active profile.
+
 ## Core config sections
+
+### `runtimeProfile`
+
+Named execution posture; selects startup validation rules. One of: `local-dev`, `single-user-hardened`, `hosted-service`, `hosted-no-exec`, `hosted-remote-sandbox-only`.
 
 ### `hardening`
 

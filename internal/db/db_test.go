@@ -1207,3 +1207,95 @@ func TestGetLastMessagesScoped(t *testing.T) {
 		t.Fatalf("expected messages from both sessions, got %v", contents)
 	}
 }
+
+func TestIntegrityCheck_BasicConsistency(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	var result string
+	if err := d.SQL.QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&result); err != nil {
+		t.Fatalf("PRAGMA integrity_check: %v", err)
+	}
+	if result != "ok" {
+		t.Errorf("integrity check failed: %s", result)
+	}
+}
+
+func BenchmarkHistoryLoad(b *testing.B) {
+	b.ReportAllocs()
+	dir := b.TempDir()
+	d, err := Open(filepath.Join(dir, "bench.db"))
+	if err != nil {
+		b.Fatalf("Open: %v", err)
+	}
+	defer d.Close()
+	ctx := context.Background()
+
+	for i := 0; i < 50; i++ {
+		role := "user"
+		if i%2 == 1 {
+			role = "assistant"
+		}
+		if _, err := d.AppendMessage(ctx, "bench-session", role, fmt.Sprintf("message %d", i), nil); err != nil {
+			b.Fatalf("AppendMessage: %v", err)
+		}
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := d.GetLastMessages(ctx, "bench-session", 20); err != nil {
+			b.Fatalf("GetLastMessages: %v", err)
+		}
+	}
+}
+
+func BenchmarkScopedRetrieval(b *testing.B) {
+	b.ReportAllocs()
+	dir := b.TempDir()
+	d, err := Open(filepath.Join(dir, "bench.db"))
+	if err != nil {
+		b.Fatalf("Open: %v", err)
+	}
+	defer d.Close()
+	ctx := context.Background()
+
+	embedding := make([]byte, 4*8)
+	for i := 0; i < 50; i++ {
+		if _, err := d.InsertMemoryNote(ctx, "bench-session", fmt.Sprintf("memory note %d about something important", i), embedding, sql.NullInt64{}, "bench"); err != nil {
+			b.Fatalf("InsertMemoryNote: %v", err)
+		}
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		rows, err := d.StreamMemoryNotesScopeLimit(ctx, "bench-session", 20)
+		if err != nil {
+			b.Fatalf("StreamMemoryNotesScopeLimit: %v", err)
+		}
+		for rows.Next() {
+		}
+		rows.Close()
+	}
+}
+
+func BenchmarkInsertHistory(b *testing.B) {
+	b.ReportAllocs()
+	dir := b.TempDir()
+	d, err := Open(filepath.Join(dir, "bench.db"))
+	if err != nil {
+		b.Fatalf("Open: %v", err)
+	}
+	defer d.Close()
+	ctx := context.Background()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		role := "user"
+		if i%2 == 1 {
+			role = "assistant"
+		}
+		if _, err := d.AppendMessage(ctx, "bench-session", role, fmt.Sprintf("message %d", i), nil); err != nil {
+			b.Fatalf("AppendMessage: %v", err)
+		}
+	}
+}

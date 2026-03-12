@@ -12,6 +12,17 @@ import (
 	"time"
 )
 
+// RuntimeProfile names the intended execution posture for this instance.
+type RuntimeProfile string
+
+const (
+	ProfileLocalDev            RuntimeProfile = "local-dev"
+	ProfileSingleUserHardened  RuntimeProfile = "single-user-hardened"
+	ProfileHostedService       RuntimeProfile = "hosted-service"
+	ProfileHostedNoExec        RuntimeProfile = "hosted-no-exec"
+	ProfileHostedRemoteSandbox RuntimeProfile = "hosted-remote-sandbox-only"
+)
+
 type Config struct {
 	DBPath                 string `json:"dbPath"`
 	ArtifactsDir           string `json:"artifactsDir"`
@@ -40,6 +51,7 @@ type Config struct {
 	ConsolidationMaxInputChars       int             `json:"consolidationMaxInputChars"`
 	ConsolidationAsyncTimeoutSeconds int             `json:"consolidationAsyncTimeoutSeconds"`
 	Subagents                        SubagentsConfig `json:"subagents"`
+	RuntimeProfile                   RuntimeProfile  `json:"runtimeProfile"`
 
 	IdentityFile string         `json:"identityFile"`
 	MemoryFile   string         `json:"memoryFile"`
@@ -638,6 +650,9 @@ func ApplyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("OR3_SERVICE_SECRET"); v != "" {
 		cfg.Service.Secret = v
 	}
+	if v := os.Getenv("OR3_RUNTIME_PROFILE"); v != "" {
+		cfg.RuntimeProfile = RuntimeProfile(v)
+	}
 }
 
 func Save(path string, cfg Config) error {
@@ -926,6 +941,10 @@ func Load(path string) (Config, error) {
 	if err := validateAccessProfiles(cfg.Security.Profiles); err != nil {
 		return cfg, err
 	}
+	cfg.RuntimeProfile = RuntimeProfile(strings.ToLower(strings.TrimSpace(string(cfg.RuntimeProfile))))
+	if err := validateRuntimeProfile(cfg.RuntimeProfile); err != nil {
+		return cfg, err
+	}
 	return cfg, nil
 }
 
@@ -1056,6 +1075,55 @@ func validateAccessProfiles(cfg AccessProfilesConfig) error {
 		}
 	}
 	return nil
+}
+
+func validateRuntimeProfile(p RuntimeProfile) error {
+	switch p {
+	case "", ProfileLocalDev, ProfileSingleUserHardened,
+		ProfileHostedService, ProfileHostedNoExec, ProfileHostedRemoteSandbox:
+		return nil
+	}
+	return errors.New("unrecognized runtimeProfile: " + string(p))
+}
+
+// ValidateProfile checks that the profile+config combination is safe.
+// It returns the first constraint violation found.
+func ValidateProfile(cfg Config) error {
+	p := cfg.RuntimeProfile
+	if IsHostedProfile(p) {
+		if !cfg.Security.SecretStore.Enabled {
+			return errors.New("hosted profiles require security.secretStore.enabled")
+		}
+		if !cfg.Security.Audit.Enabled {
+			return errors.New("hosted profiles require security.audit.enabled")
+		}
+		if !cfg.Security.Network.Enabled && !cfg.Security.Network.DefaultDeny {
+			return errors.New("hosted profiles require security.network policy to be configured")
+		}
+	}
+	if p == ProfileHostedNoExec {
+		if cfg.Hardening.EnableExecShell {
+			return errors.New("hosted-no-exec profile does not allow enableExecShell")
+		}
+		if cfg.Hardening.PrivilegedTools {
+			return errors.New("hosted-no-exec profile does not allow privilegedTools")
+		}
+	}
+	if p == ProfileHostedRemoteSandbox {
+		if cfg.Hardening.EnableExecShell && !cfg.Hardening.Sandbox.Enabled {
+			return errors.New("hosted-remote-sandbox-only profile requires sandbox for exec")
+		}
+	}
+	return nil
+}
+
+// IsHostedProfile reports whether p is one of the hosted runtime profiles.
+func IsHostedProfile(p RuntimeProfile) bool {
+	switch p {
+	case ProfileHostedService, ProfileHostedNoExec, ProfileHostedRemoteSandbox:
+		return true
+	}
+	return false
 }
 
 func compactStrings(values []string) []string {

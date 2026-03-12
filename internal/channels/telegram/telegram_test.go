@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -66,6 +67,52 @@ func TestChannel_FetchUpdatesPublishesMessage(t *testing.T) {
 	}
 }
 
+func TestChannel_FetchUpdatesDeduplicatesRepeatedMessageID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok": true,
+			"result": []map[string]any{
+				{
+					"update_id": 1,
+					"message": map[string]any{
+						"message_id": 99,
+						"text":       "hello telegram",
+						"chat":       map[string]any{"id": 123},
+						"from":       map[string]any{"id": 456, "username": "alice"},
+					},
+				},
+				{
+					"update_id": 2,
+					"message": map[string]any{
+						"message_id": 99,
+						"text":       "hello telegram",
+						"chat":       map[string]any{"id": 123},
+						"from":       map[string]any{"id": 456, "username": "alice"},
+					},
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	ch := &Channel{Config: config.TelegramChannelConfig{Token: "token", APIBase: server.URL, PollSeconds: 1, OpenAccess: true}}
+	b := bus.New(2)
+	if err := ch.fetchUpdates(context.Background(), b); err != nil {
+		t.Fatalf("fetchUpdates: %v", err)
+	}
+	select {
+	case <-b.Channel():
+	default:
+		t.Fatal("expected first telegram event")
+	}
+	select {
+	case ev := <-b.Channel():
+		t.Fatalf("expected duplicate telegram message to be suppressed, got %#v", ev)
+	default:
+	}
+}
+
 func TestChannel_DeliverSendsMessage(t *testing.T) {
 	var got map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -86,6 +133,24 @@ func TestChannel_DeliverSendsMessage(t *testing.T) {
 	}
 	if got["chat_id"] != "123" || got["text"] != "hello" {
 		t.Fatalf("unexpected payload: %#v", got)
+	}
+}
+
+func TestChannel_DeliverSurfacesRateLimit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":          false,
+			"description": "Too Many Requests: retry later",
+			"parameters":  map[string]any{"retry_after": 2},
+		})
+	}))
+	defer server.Close()
+
+	ch := &Channel{Config: config.TelegramChannelConfig{Token: "token", APIBase: server.URL, DefaultChatID: "123", OpenAccess: true}}
+	err := ch.Deliver(context.Background(), "", "hello", nil)
+	if err == nil || !strings.Contains(err.Error(), "telegram rate limited") || !strings.Contains(err.Error(), "2s") {
+		t.Fatalf("expected telegram rate-limit error, got %v", err)
 	}
 }
 

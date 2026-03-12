@@ -41,7 +41,7 @@
 
 ## 6. Remote MCP network hardening (Req 8, 12, 14)
 - [ ] Extend `cmd/or3-intern/doctor.go` to classify remote `sse` / `streamablehttp` MCP without deny-by-default host policy as blocking in hardened/exposed contexts.
-- [ ] Reuse `validateConfiguredOutboundEndpoints` in `cmd/or3-intern/security_setup.go` as a required startup gate for enabled remote MCP servers.
+- [x] Reuse `validateConfiguredOutboundEndpoints` in `cmd/or3-intern/security_setup.go` as a required startup gate for enabled remote MCP servers.
 - [ ] Add stricter checks for wildcard or overly broad `security.network.allowedHosts` when remote MCP is enabled.
 - [ ] Update `internal/mcp/manager.go` tests to verify fail-closed behavior for invalid remote endpoint/network posture combinations.
 - [ ] Update `docs/mcp-tool-integrations.md` and `docs/security-and-hardening.md` with the new mandatory host-policy requirements.
@@ -71,7 +71,7 @@
 - [ ] Add fixture configs under a testdata location for `safe-local`, `safe-private-service`, `unsafe-public-no-profiles`, `unsafe-remote-mcp-no-network`, and `unsafe-privileged-no-bwrap`.
 - [ ] Add table-driven tests asserting both `doctor` findings and startup accept/reject behavior for each fixture.
 - [ ] Add service auth regression tests that cover replay, expiry, future timestamps, and invalid signatures.
-- [ ] Add endpoint/profile/network regression tests in `internal/security/network_test.go` and `cmd/or3-intern/doctor_test.go`.
+- [x] Add endpoint/profile/network regression tests in `internal/security/network_test.go` and `cmd/or3-intern/doctor_test.go`.
 - [ ] Add fuzz targets for service request decoding, webhook payload parsing, structured task parsing, and host policy endpoint parsing.
 
 ## 11. CI and release gates (Req 16)

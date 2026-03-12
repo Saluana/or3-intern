@@ -91,6 +91,56 @@ func TestChannel_StartReceivesEventAndAcks(t *testing.T) {
 	}
 }
 
+func TestChannel_StartDeduplicatesRepeatedEnvelope(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		payload := map[string]any{
+			"envelope_id": "env1",
+			"type":        "events_api",
+			"payload": map[string]any{
+				"authorizations": []map[string]any{{"user_id": "B123"}},
+				"event":          map[string]any{"type": "message", "text": "<@B123> hello", "user": "U1", "channel": "C1"},
+			},
+		}
+		_ = conn.WriteJSON(payload)
+		var ack map[string]any
+		_ = conn.ReadJSON(&ack)
+		_ = conn.WriteJSON(payload)
+		_ = conn.ReadJSON(&ack)
+		<-time.After(100 * time.Millisecond)
+	}))
+	defer wsServer.Close()
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "url": "ws" + strings.TrimPrefix(wsServer.URL, "http")})
+	}))
+	defer apiServer.Close()
+
+	b := bus.New(2)
+	ch := &Channel{Config: config.SlackChannelConfig{AppToken: "app", BotToken: "bot", APIBase: apiServer.URL, RequireMention: true, OpenAccess: true}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := ch.Start(ctx, b); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer ch.Stop(context.Background())
+
+	select {
+	case <-b.Channel():
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for first slack event")
+	}
+	select {
+	case ev := <-b.Channel():
+		t.Fatalf("expected duplicate slack event to be suppressed, got %#v", ev)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
 func TestChannel_StartReceivesIsolatedSessionPerUserWhenEnabled(t *testing.T) {
 	upgrader := websocket.Upgrader{}
 	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -151,6 +201,19 @@ func TestChannel_DeliverPostsMessage(t *testing.T) {
 	}
 	if got["channel"] != "C1" || got["text"] != "hello" || got["thread_ts"] != "123.45" {
 		t.Fatalf("unexpected payload: %#v", got)
+	}
+}
+
+func TestChannel_DeliverSurfacesRateLimit(t *testing.T) {
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "3")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer apiServer.Close()
+	ch := &Channel{Config: config.SlackChannelConfig{BotToken: "bot", APIBase: apiServer.URL, DefaultChannelID: "C1", OpenAccess: true}}
+	err := ch.Deliver(context.Background(), "", "hello", nil)
+	if err == nil || !strings.Contains(err.Error(), "slack rate limited") || !strings.Contains(err.Error(), "3s") {
+		t.Fatalf("expected slack rate-limit error, got %v", err)
 	}
 }
 

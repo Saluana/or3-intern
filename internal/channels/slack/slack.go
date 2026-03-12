@@ -34,6 +34,7 @@ type Channel struct {
 	conn   *websocket.Conn
 	cancel context.CancelFunc
 	botID  string
+	dedupe *rootchannels.IngressDeduplicator
 }
 
 func (c *Channel) Name() string { return "slack" }
@@ -122,6 +123,9 @@ func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
 		if envelope.Type != "events_api" || envelope.Payload.Event.Type != "message" {
 			continue
 		}
+		if key := slackDedupeKey(envelope); key != "" && c.ingressDeduper().IsDuplicate(key) {
+			continue
+		}
 		ev := envelope.Payload.Event
 		if ev.BotID != "" || ev.User == "" {
 			continue
@@ -206,6 +210,9 @@ func (c *Channel) postJSON(ctx context.Context, endpoint, token string, payload 
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return rootchannels.FormatRateLimitError("slack", rootchannels.ParseRetryAfterSeconds(resp.Header.Get("Retry-After")), "")
+	}
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("slack api error: %s", resp.Status)
 	}
@@ -229,6 +236,9 @@ func (c *Channel) postForm(ctx context.Context, endpoint, token string, values u
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return rootchannels.FormatRateLimitError("slack", rootchannels.ParseRetryAfterSeconds(resp.Header.Get("Retry-After")), "")
+	}
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("slack api error: %s", resp.Status)
 	}
@@ -236,6 +246,26 @@ func (c *Channel) postForm(ctx context.Context, endpoint, token string, values u
 		return nil
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+func (c *Channel) ingressDeduper() *rootchannels.IngressDeduplicator {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.dedupe == nil {
+		c.dedupe = rootchannels.NewIngressDeduplicator(0)
+	}
+	return c.dedupe
+}
+
+func slackDedupeKey(envelope socketEnvelope) string {
+	if strings.TrimSpace(envelope.EnvelopeID) != "" {
+		return envelope.EnvelopeID
+	}
+	ev := envelope.Payload.Event
+	if strings.TrimSpace(ev.Channel) == "" || strings.TrimSpace(ev.User) == "" {
+		return ""
+	}
+	return strings.Join([]string{ev.Channel, ev.User, ev.ThreadTS, ev.Text}, "|")
 }
 
 func (c *Channel) captureFiles(ctx context.Context, sessionKey string, files []slackFile) ([]artifacts.Attachment, []string) {

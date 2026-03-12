@@ -29,6 +29,7 @@ The `init` command can store provider settings in `~/.or3-intern/config.json`, s
 - ClawHub/OpenClaw-compatible skills with trust and quarantine controls
 - Webhook, file-watch, heartbeat, and cron-based automation
 - Phase-based hardening, audit, secret store, profile, and network controls
+- Set `runtimeProfile` to `local-dev`, `hosted-service`, `hosted-no-exec`, or `hosted-remote-sandbox-only` to select the intended execution posture — see [docs/security-and-hardening.md](docs/security-and-hardening.md).
 - Optional MCP tool integrations over stdio, SSE, and streamable HTTP
 
 ## Commands

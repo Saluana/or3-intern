@@ -32,6 +32,7 @@ type Channel struct {
 	conn   *websocket.Conn
 	cancel context.CancelFunc
 	closed bool
+	dedupe *rootchannels.IngressDeduplicator
 }
 
 func (c *Channel) Name() string { return "whatsapp" }
@@ -136,6 +137,9 @@ func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
 			}
 		}
 		if msg.Type != "message" {
+			continue
+		}
+		if key := whatsappDedupeKey(msg); key != "" && c.ingressDeduper().IsDuplicate(key) {
 			continue
 		}
 		if !c.allowedFrom(msg.From) {
@@ -306,4 +310,27 @@ func BridgeURL(base string) string {
 
 func NewTestDialer() *websocket.Dialer {
 	return &websocket.Dialer{HandshakeTimeout: 5 * time.Second}
+}
+
+func (c *Channel) ingressDeduper() *rootchannels.IngressDeduplicator {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.dedupe == nil {
+		c.dedupe = rootchannels.NewIngressDeduplicator(0)
+	}
+	return c.dedupe
+}
+
+func whatsappDedupeKey(msg inboundMessage) string {
+	if strings.TrimSpace(msg.ID) != "" {
+		return msg.ID
+	}
+	target := strings.TrimSpace(msg.Chat)
+	if target == "" {
+		target = strings.TrimSpace(msg.From)
+	}
+	if target == "" || strings.TrimSpace(msg.From) == "" {
+		return ""
+	}
+	return strings.Join([]string{target, msg.From, msg.Text}, "|")
 }

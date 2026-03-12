@@ -1,0 +1,7 @@
+{
+  "final_text": "Hello fixture",
+  "job_id": "__JOB_ID__",
+  "kind": "turn",
+  "session_key": "svc:fixture",
+  "status": "completed"
+}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1205,5 +1206,167 @@ func TestGetLastMessagesScoped(t *testing.T) {
 	}
 	if !contents["hello from a"] || !contents["hello from b"] {
 		t.Fatalf("expected messages from both sessions, got %v", contents)
+	}
+}
+
+func TestIntegrityCheck_BasicConsistency(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	var result string
+	if err := d.SQL.QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&result); err != nil {
+		t.Fatalf("PRAGMA integrity_check: %v", err)
+	}
+	if result != "ok" {
+		t.Errorf("integrity check failed: %s", result)
+	}
+}
+
+func TestBackupRestore_PreservesCurrentSchemaAndData(t *testing.T) {
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "source.db")
+	d, err := Open(sourcePath)
+	if err != nil {
+		t.Fatalf("Open source db: %v", err)
+	}
+	defer d.Close()
+	ctx := context.Background()
+
+	if _, err := d.AppendMessage(ctx, "backup-session", "user", "hello backup", map[string]any{"source": "test"}); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+	if err := d.UpsertPinned(ctx, "backup-session", "note", "restored"); err != nil {
+		t.Fatalf("UpsertPinned: %v", err)
+	}
+
+	backupPath := filepath.Join(dir, "backup.db")
+	quotedBackupPath := strings.ReplaceAll(backupPath, "'", "''")
+	if _, err := d.SQL.ExecContext(ctx, fmt.Sprintf("VACUUM INTO '%s'", quotedBackupPath)); err != nil {
+		t.Fatalf("VACUUM INTO backup: %v", err)
+	}
+
+	restored, err := Open(backupPath)
+	if err != nil {
+		t.Fatalf("Open restored db: %v", err)
+	}
+	defer restored.Close()
+
+	msgs, err := restored.GetLastMessages(ctx, "backup-session", 10)
+	if err != nil {
+		t.Fatalf("GetLastMessages restored: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].Content != "hello backup" {
+		t.Fatalf("expected restored history row, got %#v", msgs)
+	}
+	pinned, err := restored.GetPinned(ctx, "backup-session")
+	if err != nil {
+		t.Fatalf("GetPinned restored: %v", err)
+	}
+	if pinned["note"] != "restored" {
+		t.Fatalf("expected restored pinned note, got %#v", pinned)
+	}
+
+	var result string
+	if err := restored.SQL.QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&result); err != nil {
+		t.Fatalf("PRAGMA integrity_check restored: %v", err)
+	}
+	if result != "ok" {
+		t.Fatalf("restored integrity check failed: %s", result)
+	}
+
+	var count int
+	if err := restored.SQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('messages','memory_pinned','memory_docs','subagent_jobs')`).Scan(&count); err != nil {
+		t.Fatalf("schema table count: %v", err)
+	}
+	if count != 4 {
+		t.Fatalf("expected restored backup to preserve current schema, got %d tables", count)
+	}
+}
+
+func BenchmarkHistoryLoad(b *testing.B) {
+	b.ReportAllocs()
+	dir := b.TempDir()
+	d, err := Open(filepath.Join(dir, "bench.db"))
+	if err != nil {
+		b.Fatalf("Open: %v", err)
+	}
+	defer d.Close()
+	ctx := context.Background()
+
+	for i := 0; i < 50; i++ {
+		role := "user"
+		if i%2 == 1 {
+			role = "assistant"
+		}
+		if _, err := d.AppendMessage(ctx, "bench-session", role, fmt.Sprintf("message %d", i), nil); err != nil {
+			b.Fatalf("AppendMessage: %v", err)
+		}
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := d.GetLastMessages(ctx, "bench-session", 20); err != nil {
+			b.Fatalf("GetLastMessages: %v", err)
+		}
+	}
+}
+
+func BenchmarkScopedRetrieval(b *testing.B) {
+	b.ReportAllocs()
+	dir := b.TempDir()
+	d, err := Open(filepath.Join(dir, "bench.db"))
+	if err != nil {
+		b.Fatalf("Open: %v", err)
+	}
+	defer d.Close()
+	ctx := context.Background()
+
+	embedding := make([]byte, 4*8)
+	for i := 0; i < 50; i++ {
+		if _, err := d.InsertMemoryNote(ctx, "bench-session", fmt.Sprintf("memory note %d about something important", i), embedding, sql.NullInt64{}, "bench"); err != nil {
+			b.Fatalf("InsertMemoryNote: %v", err)
+		}
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		rows, err := d.StreamMemoryNotesScopeLimit(ctx, "bench-session", 20)
+		if err != nil {
+			b.Fatalf("StreamMemoryNotesScopeLimit: %v", err)
+		}
+		for rows.Next() {
+			var id int64
+			var text string
+			var emb []byte
+			var src any
+			var tags string
+			var created int64
+			if err := rows.Scan(&id, &text, &emb, &src, &tags, &created); err != nil {
+				b.Fatalf("Scan: %v", err)
+			}
+		}
+		rows.Close()
+	}
+}
+
+func BenchmarkInsertHistory(b *testing.B) {
+	b.ReportAllocs()
+	dir := b.TempDir()
+	d, err := Open(filepath.Join(dir, "bench.db"))
+	if err != nil {
+		b.Fatalf("Open: %v", err)
+	}
+	defer d.Close()
+	ctx := context.Background()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		role := "user"
+		if i%2 == 1 {
+			role = "assistant"
+		}
+		if _, err := d.AppendMessage(ctx, "bench-session", role, fmt.Sprintf("message %d", i), nil); err != nil {
+			b.Fatalf("AppendMessage: %v", err)
+		}
 	}
 }

@@ -324,13 +324,20 @@ func buildSkillsInventory(cfg config.Config, bundledDir string, toolNames map[st
 	trustedOwners := makePolicySet(cfg.Skills.Policy.TrustedOwners)
 	blockedOwners := makePolicySet(cfg.Skills.Policy.BlockedOwners)
 	trustedRegistries := makePolicySet(cfg.Skills.Policy.TrustedRegistries)
+	approvalPolicy := skills.ApprovalPolicy{
+		QuarantineByDefault: cfg.Skills.Policy.QuarantineByDefault || config.IsHostedProfile(cfg.RuntimeProfile),
+		ApprovedSkills:      approved,
+		TrustedOwners:       trustedOwners,
+		BlockedOwners:       blockedOwners,
+		TrustedRegistries:   trustedRegistries,
+	}
 	return skills.ScanWithOptions(skills.LoadOptions{
 		Roots:          buildSkillRoots(cfg, bundledDir),
 		Entries:        skillEntries(cfg),
 		GlobalConfig:   configMap(cfg),
 		Env:            envMap(),
 		AvailableTools: toolNames,
-		ApprovalPolicy: skills.ApprovalPolicy{QuarantineByDefault: cfg.Skills.Policy.QuarantineByDefault, ApprovedSkills: approved, TrustedOwners: trustedOwners, BlockedOwners: blockedOwners, TrustedRegistries: trustedRegistries},
+		ApprovalPolicy: approvalPolicy,
 	})
 }
 
@@ -351,11 +358,12 @@ func loadAvailableToolNames(ctx context.Context, cfg config.Config) map[string]s
 }
 
 func loadAvailableToolNamesWithManager(ctx context.Context, cfg config.Config, manager *mcp.Manager) map[string]struct{} {
-	toolNames := availableToolNames(cfg.Cron.Enabled, cfg.Subagents.Enabled)
+	toolNames := filterAdvertisedToolNames(cfg, availableToolNames(cfg.Cron.Enabled, cfg.Subagents.Enabled))
 	if len(cfg.Tools.MCPServers) == 0 {
 		return toolNames
 	}
 	if manager != nil {
+		manager.SetHostPolicy(buildHostPolicy(cfg))
 		for _, name := range manager.ToolNames() {
 			toolNames[name] = struct{}{}
 		}
@@ -363,6 +371,7 @@ func loadAvailableToolNamesWithManager(ctx context.Context, cfg config.Config, m
 	}
 	manager = mcp.NewManager(cfg.Tools.MCPServers)
 	manager.SetLogger(log.Printf)
+	manager.SetHostPolicy(buildHostPolicy(cfg))
 	if err := manager.Connect(ctx); err != nil {
 		log.Printf("mcp setup failed: %v", err)
 		return toolNames
@@ -376,6 +385,30 @@ func loadAvailableToolNamesWithManager(ctx context.Context, cfg config.Config, m
 		toolNames[name] = struct{}{}
 	}
 	return toolNames
+}
+
+func filterAdvertisedToolNames(cfg config.Config, toolNames map[string]struct{}) map[string]struct{} {
+	filtered := make(map[string]struct{}, len(toolNames))
+	for name := range toolNames {
+		filtered[name] = struct{}{}
+	}
+	if !cfg.Hardening.GuardedTools && !cfg.Hardening.PrivilegedTools {
+		delete(filtered, "exec")
+	}
+	if !cfg.Skills.EnableExec {
+		delete(filtered, "run_skill_script")
+	}
+	switch cfg.RuntimeProfile {
+	case config.ProfileHostedNoExec:
+		delete(filtered, "exec")
+		delete(filtered, "run_skill_script")
+	case config.ProfileHostedRemoteSandbox:
+		if !cfg.Hardening.Sandbox.Enabled {
+			delete(filtered, "exec")
+			delete(filtered, "run_skill_script")
+		}
+	}
+	return filtered
 }
 
 func buildSkillRoots(cfg config.Config, bundledDir string) []skills.Root {

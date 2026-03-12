@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"or3-intern/internal/agent"
+	"or3-intern/internal/config"
 	"or3-intern/internal/db"
 	"or3-intern/internal/providers"
 	"or3-intern/internal/tools"
@@ -694,4 +695,361 @@ func mustReadBody(t *testing.T, body io.Reader) string {
 		t.Fatalf("ReadAll: %v", err)
 	}
 	return string(payload)
+}
+
+func TestRunServiceCommand_RefusesInvalidHostedProfile(t *testing.T) {
+	rt, cleanup := buildServiceTestRuntime(t, func(w http.ResponseWriter, r *http.Request) {})
+	defer cleanup()
+
+	cfg := config.Default()
+	cfg.Service.Secret = strings.Repeat("x", 32)
+	cfg.Service.Listen = "127.0.0.1:0"
+	cfg.RuntimeProfile = config.ProfileHostedService
+	// Deliberately misconfigure: hosted profile requires secret store and audit
+	cfg.Security.SecretStore.Enabled = false
+	cfg.Security.Audit.Enabled = false
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err := runServiceCommand(ctx, cfg, rt, nil, nil)
+	if err == nil {
+		t.Fatal("expected error for misconfigured hosted profile, got nil")
+	}
+	if !strings.Contains(err.Error(), "service startup refused") {
+		t.Fatalf("expected 'service startup refused' in error, got: %v", err)
+	}
+}
+
+func hostedNoExecBaseConfig() config.Config {
+	cfg := config.Default()
+	cfg.Service.Secret = strings.Repeat("x", 32)
+	cfg.Service.Listen = "127.0.0.1:0"
+	cfg.RuntimeProfile = config.ProfileHostedNoExec
+	cfg.Security.SecretStore.Enabled = true
+	cfg.Security.SecretStore.Required = true
+	cfg.Security.Audit.Enabled = true
+	cfg.Security.Audit.Strict = true
+	cfg.Security.Audit.VerifyOnStart = true
+	cfg.Security.Network.Enabled = true
+	cfg.Security.Network.DefaultDeny = true
+	cfg.Hardening.EnableExecShell = false
+	cfg.Hardening.PrivilegedTools = false
+	return cfg
+}
+
+func TestRunServiceCommand_HostedNoExec_RefusesExecShell(t *testing.T) {
+	cfg := hostedNoExecBaseConfig()
+	cfg.Hardening.EnableExecShell = true
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err := runServiceCommand(ctx, cfg, nil, nil, nil)
+	if err == nil {
+		t.Fatal("expected error for hosted-no-exec with enableExecShell=true, got nil")
+	}
+	if !strings.Contains(err.Error(), "startup refused") {
+		t.Fatalf("expected 'startup refused' in error, got: %v", err)
+	}
+}
+
+func TestRunServiceCommand_HostedNoExec_RefusesPrivilegedTools(t *testing.T) {
+	cfg := hostedNoExecBaseConfig()
+	cfg.Hardening.PrivilegedTools = true
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err := runServiceCommand(ctx, cfg, nil, nil, nil)
+	if err == nil {
+		t.Fatal("expected error for hosted-no-exec with privilegedTools=true, got nil")
+	}
+	if !strings.Contains(err.Error(), "startup refused") {
+		t.Fatalf("expected 'startup refused' in error, got: %v", err)
+	}
+}
+
+func TestRunServiceCommand_HostedNoExec_AllowsCleanConfig(t *testing.T) {
+	cfg := hostedNoExecBaseConfig()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Profile validation runs before the runtime nil check, so a nil runtime
+	// here means we reach "runtime not configured" only if profile checks pass.
+	// If profile validation had rejected the config it would return "startup refused".
+	err := runServiceCommand(ctx, cfg, nil, nil, nil)
+	if err != nil && strings.Contains(err.Error(), "startup refused") {
+		t.Fatalf("clean hosted-no-exec config should not be refused, got: %v", err)
+	}
+}
+
+// TestV1TurnsContractAliases pins the accepted session key aliases and allowed_tools
+// alias for POST /internal/v1/turns so that regressions break CI.
+func TestV1TurnsContractAliases(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(serviceTestTool{name: "read_file"})
+
+	cases := []struct {
+		name    string
+		body    string
+		wantKey string
+	}{
+		{
+			name:    "intern_session_key",
+			body:    `{"intern_session_key":"svc:intern","message":"hi"}`,
+			wantKey: "svc:intern",
+		},
+		{
+			name:    "sessionKey camelCase",
+			body:    `{"sessionKey":"svc:camel","message":"hi"}`,
+			wantKey: "svc:camel",
+		},
+		{
+			name:    "internSessionKey camelCase",
+			body:    `{"internSessionKey":"svc:camel-intern","message":"hi"}`,
+			wantKey: "svc:camel-intern",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := decodeServiceTurnRequest(strings.NewReader(tc.body), registry)
+			if err != nil {
+				t.Fatalf("decodeServiceTurnRequest: %v", err)
+			}
+			if req.SessionKey != tc.wantKey {
+				t.Fatalf("expected session key %q, got %q", tc.wantKey, req.SessionKey)
+			}
+		})
+	}
+
+	// allowedTools camelCase alias should work the same as allowed_tools
+	t.Run("allowedTools camelCase", func(t *testing.T) {
+		req, err := decodeServiceTurnRequest(strings.NewReader(`{"session_key":"svc:key","message":"hi","allowedTools":["read_file"]}`), registry)
+		if err != nil {
+			t.Fatalf("decodeServiceTurnRequest: %v", err)
+		}
+		if !req.RestrictTools || len(req.AllowedTools) != 1 || req.AllowedTools[0] != "read_file" {
+			t.Fatalf("expected allowedTools alias to restrict to [read_file], got RestrictTools=%v AllowedTools=%v", req.RestrictTools, req.AllowedTools)
+		}
+	})
+}
+
+// TestV1SubagentsContractAliases pins the accepted parent_session_key aliases and
+// timeout aliases for POST /internal/v1/subagents.
+func TestV1SubagentsContractAliases(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(serviceTestTool{name: "read_file"})
+
+	sessionAliases := []struct {
+		name    string
+		body    string
+		wantKey string
+	}{
+		{
+			name:    "session_key",
+			body:    `{"session_key":"svc:sk","task":"do it"}`,
+			wantKey: "svc:sk",
+		},
+		{
+			name:    "intern_session_key",
+			body:    `{"intern_session_key":"svc:isk","task":"do it"}`,
+			wantKey: "svc:isk",
+		},
+		{
+			name:    "sessionKey camelCase",
+			body:    `{"sessionKey":"svc:skc","task":"do it"}`,
+			wantKey: "svc:skc",
+		},
+		{
+			name:    "parentSessionKey camelCase",
+			body:    `{"parentSessionKey":"svc:psk","task":"do it"}`,
+			wantKey: "svc:psk",
+		},
+		{
+			name:    "internSessionKey camelCase",
+			body:    `{"internSessionKey":"svc:iskc","task":"do it"}`,
+			wantKey: "svc:iskc",
+		},
+	}
+	for _, tc := range sessionAliases {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := decodeServiceSubagentRequest(strings.NewReader(tc.body), registry)
+			if err != nil {
+				t.Fatalf("decodeServiceSubagentRequest: %v", err)
+			}
+			if req.ParentSessionKey != tc.wantKey {
+				t.Fatalf("expected parent_session_key %q, got %q", tc.wantKey, req.ParentSessionKey)
+			}
+		})
+	}
+
+	timeoutAliases := []struct {
+		name    string
+		body    string
+		wantSec int
+	}{
+		{
+			name:    "timeout alias",
+			body:    `{"parent_session_key":"svc:p","task":"do it","timeout":30}`,
+			wantSec: 30,
+		},
+		{
+			name:    "timeoutSeconds camelCase alias",
+			body:    `{"parent_session_key":"svc:p","task":"do it","timeoutSeconds":60}`,
+			wantSec: 60,
+		},
+	}
+	for _, tc := range timeoutAliases {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := decodeServiceSubagentRequest(strings.NewReader(tc.body), registry)
+			if err != nil {
+				t.Fatalf("decodeServiceSubagentRequest: %v", err)
+			}
+			if req.TimeoutSeconds != tc.wantSec {
+				t.Fatalf("expected TimeoutSeconds %d, got %d", tc.wantSec, req.TimeoutSeconds)
+			}
+		})
+	}
+}
+
+// TestV1ToolPolicyShape pins the tool_policy JSON shape in both snake_case and
+// camelCase forms for turns and subagents.
+func TestV1ToolPolicyShape(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(serviceTestTool{name: "read_file"})
+	registry.Register(serviceTestTool{name: "exec"})
+
+	cases := []struct {
+		name        string
+		body        string
+		wantMode    string
+		wantAllowed []string
+		wantBlocked []string
+	}{
+		{
+			name: "snake_case tool_policy",
+			body: `{
+				"session_key":"svc:k","message":"hi",
+				"tool_policy":{
+					"mode":"allow_list",
+					"allowed_tools":["read_file"],
+					"blocked_tools":["exec"]
+				}
+			}`,
+			wantMode:    "allow_list",
+			wantAllowed: []string{"read_file"},
+			wantBlocked: []string{"exec"},
+		},
+		{
+			name: "camelCase toolPolicy",
+			body: `{
+				"session_key":"svc:k","message":"hi",
+				"toolPolicy":{
+					"mode":"allow_list",
+					"allowedTools":["read_file"],
+					"blockedTools":["exec"]
+				}
+			}`,
+			wantMode:    "allow_list",
+			wantAllowed: []string{"read_file"},
+			wantBlocked: []string{"exec"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := decodeServiceTurnRequest(strings.NewReader(tc.body), registry)
+			if err != nil {
+				t.Fatalf("decodeServiceTurnRequest: %v", err)
+			}
+			// allow_list: only read_file survives
+			if !req.RestrictTools {
+				t.Fatalf("expected RestrictTools=true for allow_list mode")
+			}
+			if len(req.AllowedTools) != 1 || req.AllowedTools[0] != "read_file" {
+				t.Fatalf("expected AllowedTools=[read_file], got %v", req.AllowedTools)
+			}
+		})
+	}
+}
+
+// TestV1JobsStreamRoute pins the stable v1 route shapes for job stream and abort.
+func TestV1JobsStreamRoute(t *testing.T) {
+	jobs := agent.NewJobRegistry(time.Minute, 32)
+	server := &serviceServer{jobs: jobs}
+
+	routes := []struct {
+		method   string
+		path     string
+		wantCode int
+	}{
+		// GET /stream on unknown job → 404
+		{http.MethodGet, "/internal/v1/jobs/unknown-job-id/stream", http.StatusNotFound},
+		// POST /stream → 405
+		{http.MethodPost, "/internal/v1/jobs/unknown-job-id/stream", http.StatusMethodNotAllowed},
+		// POST /abort on unknown job → 404
+		{http.MethodPost, "/internal/v1/jobs/unknown-job-id/abort", http.StatusNotFound},
+		// GET /abort → 405
+		{http.MethodGet, "/internal/v1/jobs/unknown-job-id/abort", http.StatusMethodNotAllowed},
+	}
+	for _, tc := range routes {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			rec := httptest.NewRecorder()
+			server.handleJobs(rec, req)
+			if rec.Code != tc.wantCode {
+				t.Fatalf("expected %d, got %d (%s)", tc.wantCode, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestV1JobsAbortCompletedJob verifies that aborting an already-completed job
+// returns 200 (ok:true) rather than a conflict error.
+func TestV1JobsAbortCompletedJob(t *testing.T) {
+	jobs := agent.NewJobRegistry(time.Minute, 32)
+	server := &serviceServer{jobs: jobs}
+
+	snapshot := jobs.Register("turn")
+	jobs.Complete(snapshot.ID, "completed", map[string]any{"final_text": "done"})
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/jobs/"+snapshot.ID+"/abort", nil)
+	rec := httptest.NewRecorder()
+	server.handleJobs(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for completed job abort, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if payload["ok"] != true {
+		t.Fatalf("expected ok:true in abort response for completed job, got %#v", payload)
+	}
+}
+
+// TestV1TurnsRequiresSessionKeyAndMessage verifies that a request missing
+// session_key returns HTTP 400.
+func TestV1TurnsRequiresSessionKeyAndMessage(t *testing.T) {
+	rt := &agent.Runtime{Tools: tools.NewRegistry()}
+	jobs := agent.NewJobRegistry(time.Minute, 32)
+	server := &serviceServer{runtime: rt, jobs: jobs}
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/turns", strings.NewReader(`{"message":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.handleTurns(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing session_key, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if _, hasError := payload["error"]; !hasError {
+		t.Fatalf("expected error field in 400 response, got %#v", payload)
+	}
 }

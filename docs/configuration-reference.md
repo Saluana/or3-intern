@@ -19,6 +19,7 @@
 | `service` | Internal authenticated HTTP API settings |
 | `channels` | Telegram, Slack, Discord, WhatsApp bridge, and Email configuration |
 | `security` | Secret store, audit, access profiles, and outbound network policy |
+| `runtimeProfile` | Named execution posture (`local-dev`, `hosted-service`, `hosted-no-exec`, etc.) |
 | `docIndex` | Opt-in document indexing for prompt-time retrieval |
 | `subagents` | Background job queueing and concurrency controls |
 
@@ -141,6 +142,20 @@ Phase 3 security controls:
 - `network`
 
 See [security-and-hardening.md](security-and-hardening.md).
+
+### `runtimeProfile`
+
+Selects the named execution posture enforced at startup. Valid values:
+
+- `local-dev` — permissive; no additional security requirements.
+- `single-user-hardened` — tighter defaults for self-hosted personal use.
+- `hosted-service` — requires `security.secretStore`, `security.audit`, and `security.network` to be enabled.
+- `hosted-no-exec` — like `hosted-service` but also forbids `hardening.enableExecShell` and `hardening.privilegedTools`.
+- `hosted-remote-sandbox-only` — requires a sandbox when exec is enabled.
+
+Override with the `OR3_RUNTIME_PROFILE` environment variable.
+
+See [security-and-hardening.md](security-and-hardening.md) for startup validation details.
 
 ### `docIndex`
 

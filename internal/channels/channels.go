@@ -7,9 +7,56 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"or3-intern/internal/bus"
 )
+
+const defaultDeduplicatorTTL = 5 * time.Minute
+
+// IngressDeduplicator tracks recently seen message identifiers and blocks
+// duplicate delivery within a configurable window. It is safe for concurrent
+// use.
+type IngressDeduplicator struct {
+	mu   sync.Mutex
+	seen map[string]time.Time
+	ttl  time.Duration
+}
+
+// NewIngressDeduplicator creates a deduplicator with the given TTL (how long a
+// seen key is remembered). A zero or negative TTL defaults to 5 minutes.
+func NewIngressDeduplicator(ttl time.Duration) *IngressDeduplicator {
+	if ttl <= 0 {
+		ttl = defaultDeduplicatorTTL
+	}
+	return &IngressDeduplicator{
+		seen: make(map[string]time.Time),
+		ttl:  ttl,
+	}
+}
+
+// IsDuplicate returns true when key was already seen within the TTL window.
+// Evicts stale entries on each call.
+func (d *IngressDeduplicator) IsDuplicate(key string) bool {
+	now := time.Now()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.evictExpired(now)
+	if _, exists := d.seen[key]; exists {
+		return true
+	}
+	d.seen[key] = now
+	return false
+}
+
+// evictExpired must be called with d.mu held.
+func (d *IngressDeduplicator) evictExpired(now time.Time) {
+	for k, t := range d.seen {
+		if now.Sub(t) >= d.ttl {
+			delete(d.seen, k)
+		}
+	}
+}
 
 const (
 	MetaMediaPaths       = "media_paths"

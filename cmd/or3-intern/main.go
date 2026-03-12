@@ -118,6 +118,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, "security error:", err)
 		os.Exit(1)
 	}
+	if err := validateStartupCommand(cmd, cfg); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	if cmd == "secrets" {
 		if secretManager == nil && cfg.Security.SecretStore.Enabled {
 			key, keyErr := security.LoadOrCreateKey(cfg.Security.SecretStore.KeyFile)

@@ -27,6 +27,9 @@ func runServiceCommand(ctx context.Context, cfg config.Config, rt *agent.Runtime
 	if strings.TrimSpace(cfg.Service.Secret) == "" {
 		return fmt.Errorf("service secret is required")
 	}
+	if err := validateStartupCommand("service", cfg); err != nil {
+		return err
+	}
 	if rt == nil {
 		return fmt.Errorf("runtime not configured")
 	}

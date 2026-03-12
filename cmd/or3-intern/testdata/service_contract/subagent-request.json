@@ -1,0 +1,21 @@
+{
+  "parentSessionKey": "svc:parent",
+  "task": "background contract task",
+  "promptSnapshot": [
+    {
+      "role": "user",
+      "content": "remember contract"
+    }
+  ],
+  "toolPolicy": {
+    "mode": "deny_list",
+    "blockedTools": ["write_file"]
+  },
+  "timeoutSeconds": 15,
+  "profileName": "ops",
+  "channel": "service",
+  "replyTo": "or3-net",
+  "meta": {
+    "trace_id": "trace-subagent"
+  }
+}

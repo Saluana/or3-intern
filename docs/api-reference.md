@@ -100,3 +100,25 @@ Requests cancellation of a running job when cancellation is possible.
 
 - `cmd/or3-intern/service.go`
 - `cmd/or3-intern/service_auth.go`
+
+## Compatibility contract
+
+The following aliases are part of the stable v1 contract and are covered by CI compatibility tests in `cmd/or3-intern/service_test.go`.
+
+**`POST /internal/v1/turns` — session key aliases** (all resolve to `session_key`):
+`session_key`, `intern_session_key`, `sessionKey`, `internSessionKey`
+
+**`POST /internal/v1/turns` — tool policy aliases**:
+`tool_policy` / `toolPolicy`; `allowed_tools` / `allowedTools`; `blocked_tools` / `blockedTools`
+
+**`POST /internal/v1/subagents` — parent session key aliases** (all resolve to `parent_session_key`):
+`parent_session_key`, `session_key`, `intern_session_key`, `parentSessionKey`, `sessionKey`, `internSessionKey`
+
+**`POST /internal/v1/subagents` — timeout aliases** (all resolve to `timeout_seconds`):
+`timeout_seconds`, `timeoutSeconds`, `timeout`
+
+**Stable job routes:**
+- `GET /internal/v1/jobs/{jobId}/stream` — returns 404 for unknown jobs
+- `POST /internal/v1/jobs/{jobId}/abort` — returns 404 for unknown, 200 for completed
+
+Any change that removes or renames a supported alias, or alters job route behaviour, will fail the `TestV1*` tests in CI.

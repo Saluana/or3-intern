@@ -49,4 +49,3 @@ func MediaPaths(meta map[string]any) []string {
 		return nil
 	}
 }
-

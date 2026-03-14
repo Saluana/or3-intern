@@ -26,7 +26,9 @@ func TestStore_Save_OK(t *testing.T) {
 	ctx := context.Background()
 
 	// Create the session
-	d.EnsureSession(ctx, "sess1")
+	if err := d.EnsureSession(ctx, "sess1"); err != nil {
+		t.Fatalf("EnsureSession: %v", err)
+	}
 
 	store := &Store{Dir: dir, DB: d}
 	id, err := store.Save(ctx, "sess1", "text/plain", []byte("artifact content"))
@@ -71,7 +73,9 @@ func TestStore_Save_NoDirSet(t *testing.T) {
 func TestStore_Save_CreatesDir(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
-	d.EnsureSession(ctx, "sess1")
+	if err := d.EnsureSession(ctx, "sess1"); err != nil {
+		t.Fatalf("EnsureSession: %v", err)
+	}
 
 	// Use a dir that doesn't exist yet
 	tmpDir := t.TempDir()
@@ -103,7 +107,9 @@ func TestStore_Save_MultipleArtifacts(t *testing.T) {
 	d := openTestDB(t)
 	dir := t.TempDir()
 	ctx := context.Background()
-	d.EnsureSession(ctx, "sess")
+	if err := d.EnsureSession(ctx, "sess"); err != nil {
+		t.Fatalf("EnsureSession: %v", err)
+	}
 
 	store := &Store{Dir: dir, DB: d}
 

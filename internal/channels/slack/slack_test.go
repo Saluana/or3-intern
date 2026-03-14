@@ -69,7 +69,7 @@ func TestChannel_StartReceivesEventAndAcks(t *testing.T) {
 	if err := ch.Start(ctx, b); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer ch.Stop(context.Background())
+	defer func() { _ = ch.Stop(context.Background()) }()
 	select {
 	case env := <-ackSeen:
 		if env != "env1" {
@@ -127,7 +127,7 @@ func TestChannel_StartDeduplicatesRepeatedEnvelope(t *testing.T) {
 	if err := ch.Start(ctx, b); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer ch.Stop(context.Background())
+	defer func() { _ = ch.Stop(context.Background()) }()
 
 	select {
 	case <-b.Channel():
@@ -172,7 +172,7 @@ func TestChannel_StartReceivesIsolatedSessionPerUserWhenEnabled(t *testing.T) {
 	if err := ch.Start(ctx, b); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer ch.Stop(context.Background())
+	defer func() { _ = ch.Stop(context.Background()) }()
 	select {
 	case ev := <-b.Channel():
 		if ev.SessionKey != "slack:C1:U1" {
@@ -285,7 +285,11 @@ func TestChannel_StartReceivesFileShare(t *testing.T) {
 	if err := ch.Start(ctx, b); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer ch.Stop(context.Background())
+	defer func() {
+		if err := ch.Stop(context.Background()); err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+	}()
 
 	select {
 	case ev := <-b.Channel():
@@ -369,7 +373,11 @@ func TestChannel_StartReceivesFileShareWhenMentionRequired(t *testing.T) {
 	if err := ch.Start(ctx, b); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer ch.Stop(context.Background())
+	defer func() {
+		if err := ch.Stop(context.Background()); err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+	}()
 
 	select {
 	case ev := <-b.Channel():

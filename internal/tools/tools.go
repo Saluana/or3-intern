@@ -51,9 +51,9 @@ func (Base) SchemaFor(name, desc string, params map[string]any) map[string]any {
 	return map[string]any{
 		"type": "function",
 		"function": map[string]any{
-			"name": name,
+			"name":        name,
 			"description": desc,
-			"parameters": params,
+			"parameters":  params,
 		},
 	}
 }

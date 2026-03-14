@@ -50,7 +50,7 @@ func TestSubagentManager_SuccessPersistsAndNotifies(t *testing.T) {
 	if err := mgr.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer mgr.Stop(context.Background())
+	defer func() { _ = mgr.Stop(context.Background()) }()
 
 	job, err := mgr.Enqueue(context.Background(), tools.SpawnRequest{ParentSessionKey: "parent", Task: "background task", Channel: "cli", To: "user"})
 	if err != nil {
@@ -104,7 +104,7 @@ func TestSubagentManager_FailurePersistsAndNotifies(t *testing.T) {
 	if err := mgr.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer mgr.Stop(context.Background())
+	defer func() { _ = mgr.Stop(context.Background()) }()
 
 	job, err := mgr.Enqueue(context.Background(), tools.SpawnRequest{ParentSessionKey: "parent", Task: "background task", Channel: "cli", To: "user"})
 	if err != nil {
@@ -158,7 +158,7 @@ func TestSubagentManager_DoesNotBlockForegroundTurn(t *testing.T) {
 	if err := mgr.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer mgr.Stop(context.Background())
+	defer func() { _ = mgr.Stop(context.Background()) }()
 
 	if _, err := mgr.Enqueue(context.Background(), tools.SpawnRequest{ParentSessionKey: "parent", Task: "long task", Channel: "cli", To: "user"}); err != nil {
 		t.Fatalf("Enqueue: %v", err)
@@ -211,7 +211,11 @@ func TestSubagentManager_TimeoutMarksFailure(t *testing.T) {
 	if err := mgr.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer mgr.Stop(context.Background())
+	defer func() {
+		if err := mgr.Stop(context.Background()); err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+	}()
 
 	job, err := mgr.Enqueue(context.Background(), tools.SpawnRequest{ParentSessionKey: "parent", Task: "background task", Channel: "cli", To: "user"})
 	if err != nil {
@@ -283,7 +287,11 @@ func TestSubagentManager_StartReconcilesRunningJobs(t *testing.T) {
 	if err := mgr.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer mgr.Stop(context.Background())
+	defer func() {
+		if err := mgr.Stop(context.Background()); err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+	}()
 
 	stored := waitForSubagentJob(t, d, job.ID, db.SubagentStatusInterrupted)
 	if !strings.Contains(stored.ErrorText, "restart") {

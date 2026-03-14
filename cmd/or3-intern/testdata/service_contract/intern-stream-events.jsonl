@@ -1,0 +1,3 @@
+{"event":"queued","data":{"job_id":"__JOB_ID__","status":"queued"}}
+{"event":"started","data":{"job_id":"__JOB_ID__","status":"running"}}
+{"event":"completion","data":{"job_id":"__JOB_ID__","status":"completed","final_text":"done"}}

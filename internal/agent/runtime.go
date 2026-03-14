@@ -606,7 +606,6 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 		msg := resp.Choices[0].Message
 		if len(msg.ToolCalls) == 0 {
 			finalText := strings.TrimSpace(contentToString(msg.Content))
-			messages = append(messages, providers.ChatMessage{Role: "assistant", Content: finalText})
 			if sw != nil {
 				_ = sw.Close(ctx, finalText)
 				if observer != nil {

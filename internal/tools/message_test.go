@@ -63,11 +63,13 @@ func TestSendMessage_CustomChannelAndTo(t *testing.T) {
 		DefaultChannel: "default-ch",
 		DefaultTo:      "default-to",
 	}
-	tool.Execute(context.Background(), map[string]any{
+	if _, err := tool.Execute(context.Background(), map[string]any{
 		"text":    "msg",
 		"channel": "custom-ch",
 		"to":      "custom-to",
-	})
+	}); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
 	if gotChannel != "custom-ch" {
 		t.Errorf("expected channel 'custom-ch', got %q", gotChannel)
 	}

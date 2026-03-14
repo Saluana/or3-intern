@@ -258,10 +258,6 @@ func (t *RemoteTool) Execute(ctx context.Context, params map[string]any) (string
 	return text, nil
 }
 
-func connectSession(ctx context.Context, name string, cfg config.MCPServerConfig) (session, error) {
-	return connectSessionWithPolicy(ctx, name, cfg, security.HostPolicy{})
-}
-
 func connectSessionWithPolicy(ctx context.Context, _ string, cfg config.MCPServerConfig, policy security.HostPolicy) (session, error) {
 	transport, err := buildTransportWithPolicy(cfg, policy)
 	if err != nil {
@@ -528,36 +524,6 @@ func defaultParameters() map[string]any {
 		"type":       "object",
 		"properties": map[string]any{},
 	}
-}
-
-func mergeEnv(base []string, overrides map[string]string) []string {
-	merged := make(map[string]string, len(base)+len(overrides))
-	for _, raw := range base {
-		key, value, ok := strings.Cut(raw, "=")
-		if !ok || strings.TrimSpace(key) == "" {
-			continue
-		}
-		merged[key] = value
-	}
-	for key, value := range overrides {
-		if strings.TrimSpace(key) == "" {
-			continue
-		}
-		merged[key] = value
-	}
-	if len(merged) == 0 {
-		return []string{}
-	}
-	keys := make([]string, 0, len(merged))
-	for key := range merged {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	out := make([]string, 0, len(keys))
-	for _, key := range keys {
-		out = append(out, key+"="+merged[key])
-	}
-	return out
 }
 
 func previousToolLabel(serverName, remoteName string) string {

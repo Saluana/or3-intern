@@ -67,7 +67,7 @@ func (t *WebFetch) Execute(ctx context.Context, params map[string]any) (string, 
 	if v, ok := params["maxBytes"].(float64); ok && int(v) > 0 {
 		max = int(v)
 	}
-	client := t.HTTP
+	var client *http.Client
 	if t.HTTP == nil {
 		to := t.Timeout
 		if to <= 0 {

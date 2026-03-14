@@ -60,7 +60,9 @@ func TestClient_SearchInspectInstallAndModificationSafety(t *testing.T) {
 				"owner":         map[string]any{"handle": "openclaw"},
 			})
 		case r.URL.Path == "/api/v1/download":
-			w.Write(zipBytes)
+			if _, err := w.Write(zipBytes); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
 		default:
 			http.NotFound(w, r)
 		}

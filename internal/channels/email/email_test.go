@@ -119,7 +119,11 @@ func TestChannel_StartPublishesInboundEmailEvent(t *testing.T) {
 	if err := channel.Start(ctx, eventBus); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer channel.Stop(context.Background())
+	defer func() {
+		if err := channel.Stop(context.Background()); err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+	}()
 
 	select {
 	case event := <-eventBus.Channel():

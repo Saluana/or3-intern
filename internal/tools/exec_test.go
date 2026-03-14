@@ -305,7 +305,9 @@ func TestExecTool_PathAppend(t *testing.T) {
 	dir := t.TempDir()
 	// Create a small script in the dir
 	script := filepath.Join(dir, "myscript")
-	os.WriteFile(script, []byte("#!/bin/sh\necho fromscript"), 0o755)
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho fromscript"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 
 	tool := &ExecTool{
 		Timeout:           5 * time.Second,

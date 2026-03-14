@@ -56,6 +56,13 @@ Request fields:
 - canonical: `session_key`, `message`, optional `tool_policy`, `meta`, `profile_name`
 - compatibility aliases also accepted: `intern_session_key`, `allowed_tools`, and the SDK camelCase forms (`sessionKey`, `internSessionKey`, `allowedTools`, `profileName`)
 
+Session identity contract:
+
+- `session_key` is the canonical `or3-intern` execution identity for turns, memory, and persisted messages.
+- `or3-net` may bind its own durable `network_session_id` to a `session_key`, but that binding remains external to `or3-intern`; the service accepts it only as metadata/header context and does not replace `session_key` with it.
+- if `or3-intern` needs a logical grouping across multiple physical session keys, it uses `session_links.scope_key`; it does not rename the execution-session field.
+- aliases are accepted only at the HTTP ingress layer and are normalized immediately to `session_key` before runtime execution.
+
 `tool_policy` uses the OR3 Net shape:
 
 ```json
@@ -74,6 +81,12 @@ Request fields:
 
 - canonical: `parent_session_key`, `task`, optional `prompt_snapshot`, `tool_policy`, `timeout_seconds`, `meta`, `profile_name`, `channel`, `reply_to`
 - compatibility aliases also accepted: `session_key`, `intern_session_key`, `allowed_tools`, `timeout`, and the SDK camelCase forms (`parentSessionKey`, `sessionKey`, `internSessionKey`, `promptSnapshot`, `allowedTools`, `timeoutSeconds`, `profileName`, `replyTo`)
+
+Parent session contract:
+
+- `parent_session_key` is the canonical parent execution identity for subagent work.
+- ingress aliases (`session_key`, `intern_session_key`, `parentSessionKey`, `sessionKey`, `internSessionKey`) are compatibility shims only; they normalize to `parent_session_key` and are not used internally after decoding.
+- provider-owned metadata such as `request_id`, `workspace_id`, and `network_session_id` may accompany the request, but they do not supersede `parent_session_key`.
 
 ### `GET /internal/v1/jobs/:jobId/stream`
 
@@ -105,6 +118,15 @@ Requests cancellation of a running job when cancellation is possible.
 
 The following aliases are part of the stable v1 contract and are covered by CI compatibility tests in `cmd/or3-intern/service_test.go`.
 Fixture-pinned request and response shapes live in `cmd/or3-intern/testdata/service_contract/` and are exercised by `TestOr3NetCompatibilityFixtures`.
+
+## Session key ownership
+
+- `session_key` is owned by `or3-intern` and remains the only canonical execution-session field in service requests, DB rows, job events, and runtime APIs.
+- `network_session_id` is owned by `or3-net`; when present, it is propagated as request metadata (`X-Network-Session-Id`, request `meta`, and service lifecycle payloads) so `or3-net` can correlate work without changing the `or3-intern` session model.
+- alias drift is intentionally contained to the service ingress boundary:
+  - turn requests normalize `session_key`, `intern_session_key`, `sessionKey`, `internSessionKey` → `session_key`
+  - subagent requests normalize `parent_session_key`, `session_key`, `intern_session_key`, `parentSessionKey`, `sessionKey`, `internSessionKey` → `parent_session_key`
+  - no internal package should introduce new aliases such as `session_id` for these service contracts without an explicit compatibility test update.
 
 **`POST /internal/v1/turns` — session key aliases** (all resolve to `session_key`):
 `session_key`, `intern_session_key`, `sessionKey`, `internSessionKey`

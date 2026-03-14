@@ -1,6 +1,7 @@
 package triggers
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,19 +10,6 @@ import (
 	"or3-intern/internal/bus"
 	"or3-intern/internal/config"
 )
-
-func newTestFileWatcher(t *testing.T, paths []string, pollSec, debounceSec int) (*FileWatcher, *bus.Bus) {
-	t.Helper()
-	b := bus.New(16)
-	cfg := config.FileWatchConfig{
-		Enabled:         true,
-		Paths:           paths,
-		PollSeconds:     pollSec,
-		DebounceSeconds: debounceSec,
-	}
-	fw := NewFileWatcher(cfg, b, "test-session")
-	return fw, b
-}
 
 func TestFileWatcherPublishesChange(t *testing.T) {
 	dir := t.TempDir()
@@ -40,7 +28,7 @@ func TestFileWatcherPublishesChange(t *testing.T) {
 	fw := NewFileWatcher(cfg, b, "test-session")
 
 	// Manually do first poll to establish baseline
-	fw.poll(nil)
+	fw.poll(context.Background())
 
 	// Modify file
 	time.Sleep(10 * time.Millisecond) // ensure mtime difference
@@ -49,7 +37,7 @@ func TestFileWatcherPublishesChange(t *testing.T) {
 	}
 
 	// Poll again - should publish event now
-	fw.poll(nil)
+	fw.poll(context.Background())
 
 	select {
 	case ev := <-b.Channel():
@@ -89,21 +77,21 @@ func TestFileWatcherDebounce(t *testing.T) {
 	fw := NewFileWatcher(cfg, b, "test-session")
 
 	// Establish baseline
-	fw.poll(nil)
+	fw.poll(context.Background())
 
 	// First change - should publish
 	time.Sleep(10 * time.Millisecond)
 	if err := os.WriteFile(filePath, []byte("v2"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	fw.poll(nil)
+	fw.poll(context.Background())
 
 	// Second change very quickly (within debounce) - should NOT publish
 	time.Sleep(10 * time.Millisecond)
 	if err := os.WriteFile(filePath, []byte("v3"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	fw.poll(nil)
+	fw.poll(context.Background())
 
 	// Should have exactly one event
 	count := 0
@@ -138,7 +126,7 @@ func TestFileWatcherFirstObservationNoEvent(t *testing.T) {
 	fw := NewFileWatcher(cfg, b, "test-session")
 
 	// First poll - just baseline, no event
-	fw.poll(nil)
+	fw.poll(context.Background())
 
 	select {
 	case ev := <-b.Channel():
@@ -163,12 +151,12 @@ func TestFileWatcherPublishesStructuredTasksForChangedFile(t *testing.T) {
 		DebounceSeconds: 0,
 	}, b, "test-session")
 
-	fw.poll(nil)
+	fw.poll(context.Background())
 	time.Sleep(10 * time.Millisecond)
 	if err := os.WriteFile(filePath, []byte(`{"tasks":[{"tool":"echo_tool"}]}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	fw.poll(nil)
+	fw.poll(context.Background())
 
 	select {
 	case ev := <-b.Channel():

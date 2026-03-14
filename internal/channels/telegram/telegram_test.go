@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -29,7 +28,6 @@ func openTelegramTestDB(t *testing.T) *db.DB {
 }
 
 func TestChannel_FetchUpdatesPublishesMessage(t *testing.T) {
-	var mu sync.Mutex
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -44,8 +42,6 @@ func TestChannel_FetchUpdatesPublishesMessage(t *testing.T) {
 				},
 			}},
 		})
-		mu.Lock()
-		mu.Unlock()
 	}))
 	defer server.Close()
 
@@ -56,7 +52,7 @@ func TestChannel_FetchUpdatesPublishesMessage(t *testing.T) {
 	if err := ch.Start(ctx, b); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer ch.Stop(context.Background())
+	defer func() { _ = ch.Stop(context.Background()) }()
 	select {
 	case ev := <-b.Channel():
 		if ev.Channel != "telegram" || ev.SessionKey != "telegram:123" || ev.Message != "hello telegram" {
@@ -178,7 +174,7 @@ func TestChannel_FetchUpdatesPublishesIsolatedGroupMessageWhenEnabled(t *testing
 	if err := ch.Start(ctx, b); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer ch.Stop(context.Background())
+	defer func() { _ = ch.Stop(context.Background()) }()
 	select {
 	case ev := <-b.Channel():
 		if ev.SessionKey != "telegram:123:456" {
@@ -236,7 +232,7 @@ func TestChannel_FetchUpdatesPublishesPhotoAttachment(t *testing.T) {
 	if err := ch.Start(ctx, b); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer ch.Stop(context.Background())
+	defer func() { _ = ch.Stop(context.Background()) }()
 
 	select {
 	case ev := <-b.Channel():

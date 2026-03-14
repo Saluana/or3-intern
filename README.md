@@ -72,6 +72,13 @@ See [CLI Reference](docs/cli-reference.md) for command details.
 - External channels are disabled by default until configured.
 - `or3-intern doctor` is the fastest way to audit an installation before exposing channels, triggers, or the service API.
 
+## Config alignment
+
+- Native runtime settings come from process env plus `~/.or3-intern/config.json`; treat env as the authoritative override layer for service-mode deployments.
+- Cross-repo deployment tooling should reserve the `OR3_INTERN_*` prefix, then translate those values into repo-native config before launching `or3-intern`.
+- The shared deployment-key mapping for `or3-net` ⇄ `or3-intern` service credentials is documented in [../or3-net/planning/platform-standardization/config-alignment.md](../or3-net/planning/platform-standardization/config-alignment.md).
+- Frozen service fixture coverage is enforced via [.github/workflows/contracts.yml](.github/workflows/contracts.yml).
+
 ## Dependencies
 
 This repo uses external Go modules (including SQLite drivers, `sqlite-vec`, and the cron parser). If you are building in an offline environment, vendor the modules ahead of time.

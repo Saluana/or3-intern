@@ -94,4 +94,3 @@ func FailureMarker(kind, name, reason string) string {
 	}
 	return fmt.Sprintf("[%s: %s - %s]", kind, name, reason)
 }
-

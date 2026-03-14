@@ -11,17 +11,17 @@ import (
 
 type Retrieved struct {
 	Source string // pinned|vector|fts
-	ID int64
-	Text string
-	Score float64
+	ID     int64
+	Text   string
+	Score  float64
 }
 
 type Retriever struct {
-	DB *db.DB
-	VectorWeight float64
-	FTSWeight float64
-	LexicalWeight float64
-	RecencyWeight float64
+	DB              *db.DB
+	VectorWeight    float64
+	FTSWeight       float64
+	LexicalWeight   float64
+	RecencyWeight   float64
 	VectorScanLimit int
 }
 
@@ -31,20 +31,25 @@ func NewRetriever(d *db.DB) *Retriever {
 
 func (r *Retriever) Retrieve(ctx context.Context, sessionKey, query string, queryVec []float32, vectorK, ftsK, topK int) ([]Retrieved, error) {
 	vecs, err := VectorSearch(ctx, r.DB, sessionKey, queryVec, vectorK, r.VectorScanLimit)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	fts, _ := r.DB.SearchFTS(ctx, sessionKey, normalizeFTSQuery(query), ftsK)
 
 	type agg struct {
-		id int64
-		text string
-		v float64
-		f float64
+		id        int64
+		text      string
+		v         float64
+		f         float64
 		createdAt int64
 	}
 	m := map[int64]*agg{}
 	for _, c := range vecs {
 		a := m[c.ID]
-		if a == nil { a = &agg{id: c.ID, text: c.Text}; m[c.ID] = a }
+		if a == nil {
+			a = &agg{id: c.ID, text: c.Text}
+			m[c.ID] = a
+		}
 		a.v = c.Score
 		if c.CreatedAt > a.createdAt {
 			a.createdAt = c.CreatedAt
@@ -52,7 +57,10 @@ func (r *Retriever) Retrieve(ctx context.Context, sessionKey, query string, quer
 	}
 	for _, f := range fts {
 		a := m[f.ID]
-		if a == nil { a = &agg{id: f.ID, text: f.Text}; m[f.ID] = a }
+		if a == nil {
+			a = &agg{id: f.ID, text: f.Text}
+			m[f.ID] = a
+		}
 		// bm25 lower is better. Convert to a positive "higher is better".
 		a.f = 1.0 / (1.0 + f.Rank)
 		if f.CreatedAt > a.createdAt {
@@ -73,8 +81,12 @@ func (r *Retriever) Retrieve(ctx context.Context, sessionKey, query string, quer
 		recency := recencyScore(a.createdAt, newest)
 		score := (a.v * r.VectorWeight) + (a.f * r.FTSWeight) + (lexical * r.LexicalWeight) + (recency * r.RecencyWeight)
 		src := "hybrid"
-		if a.f > 0 && a.v == 0 { src = "fts" }
-		if a.v > 0 && a.f == 0 { src = "vector" }
+		if a.f > 0 && a.v == 0 {
+			src = "fts"
+		}
+		if a.v > 0 && a.f == 0 {
+			src = "vector"
+		}
 		raw = append(raw, Retrieved{Source: src, ID: a.id, Text: a.text, Score: score})
 	}
 
@@ -218,7 +230,9 @@ func similarRetrievedText(a, b string) bool {
 
 func normalizeFTSQuery(q string) string {
 	q = strings.TrimSpace(q)
-	if q == "" { return "" }
+	if q == "" {
+		return ""
+	}
 	// simple: split on spaces, quote terms that contain punctuation
 	parts := strings.Fields(q)
 	for i, p := range parts {

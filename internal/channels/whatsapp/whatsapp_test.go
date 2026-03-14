@@ -18,6 +18,13 @@ import (
 	"or3-intern/internal/db"
 )
 
+func mustStopChannel(t *testing.T, ch *Channel) {
+	t.Helper()
+	if err := ch.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+}
+
 func openWhatsAppTestDB(t *testing.T) *db.DB {
 	t.Helper()
 	d, err := db.Open(filepath.Join(t.TempDir(), "whatsapp.db"))
@@ -47,7 +54,7 @@ func TestChannel_StartPublishesInboundMessage(t *testing.T) {
 	if err := ch.Start(ctx, b); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer ch.Stop(context.Background())
+	defer mustStopChannel(t, ch)
 	select {
 	case ev := <-b.Channel():
 		if ev.Channel != "whatsapp" || ev.SessionKey != "whatsapp:group1" || ev.Message != "hello" {
@@ -79,7 +86,7 @@ func TestChannel_StartDeduplicatesRepeatedMessageID(t *testing.T) {
 	if err := ch.Start(ctx, b); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer ch.Stop(context.Background())
+	defer mustStopChannel(t, ch)
 
 	select {
 	case <-b.Channel():
@@ -112,7 +119,7 @@ func TestChannel_StartPublishesIsolatedInboundMessageWhenEnabled(t *testing.T) {
 	if err := ch.Start(ctx, b); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer ch.Stop(context.Background())
+	defer mustStopChannel(t, ch)
 	select {
 	case ev := <-b.Channel():
 		if ev.SessionKey != "whatsapp:group1:123" {
@@ -145,7 +152,7 @@ func TestChannel_DeliverWritesSendCommand(t *testing.T) {
 	if err := ch.Start(ctx, bus.New(1)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer ch.Stop(context.Background())
+	defer mustStopChannel(t, ch)
 	if err := ch.Deliver(context.Background(), "", "hello", nil); err != nil {
 		t.Fatalf("Deliver: %v", err)
 	}
@@ -198,7 +205,7 @@ func TestChannel_StartPublishesInboundAttachmentMessage(t *testing.T) {
 	if err := ch.Start(ctx, b); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer ch.Stop(context.Background())
+	defer mustStopChannel(t, ch)
 
 	select {
 	case ev := <-b.Channel():
@@ -241,7 +248,7 @@ func TestChannel_DeliverWritesSendCommandWithAttachments(t *testing.T) {
 	if err := ch.Start(ctx, bus.New(1)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer ch.Stop(context.Background())
+	defer mustStopChannel(t, ch)
 	if err := ch.Deliver(context.Background(), "", "hello", map[string]any{"media_paths": []string{mediaPath}}); err != nil {
 		t.Fatalf("Deliver: %v", err)
 	}
@@ -306,7 +313,7 @@ func TestChannel_StartRejectsPathOnlyInboundAttachment(t *testing.T) {
 	if err := ch.Start(ctx, b); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer ch.Stop(context.Background())
+	defer mustStopChannel(t, ch)
 
 	select {
 	case ev := <-b.Channel():

@@ -74,11 +74,11 @@ func TestManager_RejectsDuplicateNames(t *testing.T) {
 func TestReplyMeta_PreservesThreadingFieldsOnly(t *testing.T) {
 	meta := map[string]any{
 		"channel_id":         "C1",
-		MetaThreadTS:          "123.45",
-		MetaReplyToMessageID:  int64(44),
-		MetaMessageReference:  "m-1",
+		MetaThreadTS:         "123.45",
+		MetaReplyToMessageID: int64(44),
+		MetaMessageReference: "m-1",
 		"attachments":        []string{"artifact"},
-		MetaMediaPaths:        []string{"/tmp/file.txt"},
+		MetaMediaPaths:       []string{"/tmp/file.txt"},
 	}
 	got := ReplyMeta(meta)
 	want := map[string]any{

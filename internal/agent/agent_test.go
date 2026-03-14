@@ -215,9 +215,8 @@ func TestBuilder_ComposeSystemPrompt_Truncation(t *testing.T) {
 	}
 	got := b.composeSystemPrompt("(none)", "(none)", "", "", "", "", "", "")
 	if len(got) > 100 { // allow for "[truncated]" suffix
-		// Just verify it's bounded
+		t.Fatalf("expected bounded prompt, got len=%d", len(got))
 	}
-	_ = got
 }
 
 func TestBuilder_ComposeSystemPrompt_WithPinned(t *testing.T) {
@@ -263,8 +262,12 @@ func TestBuilder_Build_WithHistory(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
 
-	d.AppendMessage(ctx, "s1", "user", "first message", nil)
-	d.AppendMessage(ctx, "s1", "assistant", "first response", nil)
+	if _, err := d.AppendMessage(ctx, "s1", "user", "first message", nil); err != nil {
+		t.Fatalf("AppendMessage user: %v", err)
+	}
+	if _, err := d.AppendMessage(ctx, "s1", "assistant", "first response", nil); err != nil {
+		t.Fatalf("AppendMessage assistant: %v", err)
+	}
 
 	b := &Builder{
 		DB:         d,
@@ -316,13 +319,17 @@ func TestBuilder_Build_ToolCallsInHistory(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
 
-	d.AppendMessage(ctx, "s2", "user", "user msg", nil)
+	if _, err := d.AppendMessage(ctx, "s2", "user", "user msg", nil); err != nil {
+		t.Fatalf("AppendMessage user: %v", err)
+	}
 	// Append assistant message with tool_calls payload
-	d.AppendMessage(ctx, "s2", "assistant", "tool content", map[string]any{
+	if _, err := d.AppendMessage(ctx, "s2", "assistant", "tool content", map[string]any{
 		"tool_calls": []map[string]any{
 			{"id": "tc1", "type": "function", "function": map[string]any{"name": "test_tool", "arguments": "{}"}},
 		},
-	})
+	}); err != nil {
+		t.Fatalf("AppendMessage assistant: %v", err)
+	}
 
 	b := &Builder{DB: d, HistoryMax: 10}
 	pp, _, err := b.Build(ctx, "s2", "next msg")
@@ -527,7 +534,9 @@ func TestCronRunner_EmptyMessage_UsesName(t *testing.T) {
 		},
 	}
 
-	runner(context.Background(), job)
+	if err := runner(context.Background(), job); err != nil {
+		t.Fatalf("runner: %v", err)
+	}
 
 	select {
 	case ev := <-b.Channel():

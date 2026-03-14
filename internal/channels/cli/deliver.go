@@ -38,6 +38,23 @@ func (d Deliverer) stopSpinner() {
 	}
 }
 
+func ShowError(spinner *Spinner, err error) {
+	if spinner != nil {
+		spinner.Stop()
+	}
+	if err == nil {
+		ShowPrompt()
+		return
+	}
+	fmt.Print(FormatResponse("Error: " + err.Error()))
+	fmt.Println()
+	fmt.Println()
+	if sep := Separator(); sep != "" {
+		fmt.Println(sep)
+	}
+	ShowPrompt()
+}
+
 // ──────────────────────── streaming ────────────────────────
 
 // CLIStreamWriter renders incremental text deltas to stdout with styling.

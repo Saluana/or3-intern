@@ -63,7 +63,9 @@ func TestRetrieve_WithVectorResults(t *testing.T) {
 	ctx := context.Background()
 
 	blob := PackFloat32([]float32{1.0, 0.0})
-	d.InsertMemoryNote(ctx, "session1", "vector match", blob, sql.NullInt64{}, "")
+	if _, err := d.InsertMemoryNote(ctx, "session1", "vector match", blob, sql.NullInt64{}, ""); err != nil {
+		t.Fatalf("InsertMemoryNote: %v", err)
+	}
 
 	r := NewRetriever(d)
 	results, err := r.Retrieve(ctx, "session1", "query", []float32{1.0, 0.0}, 5, 5, 10)
@@ -91,7 +93,9 @@ func TestRetrieve_SourceLabels(t *testing.T) {
 
 	// Insert note with known embedding
 	blob := PackFloat32([]float32{1.0, 0.0})
-	d.InsertMemoryNote(ctx, "session1", "fox quick jump", blob, sql.NullInt64{}, "")
+	if _, err := d.InsertMemoryNote(ctx, "session1", "fox quick jump", blob, sql.NullInt64{}, ""); err != nil {
+		t.Fatalf("InsertMemoryNote: %v", err)
+	}
 
 	r := NewRetriever(d)
 	// Exact vector match, also FTS match
@@ -118,7 +122,9 @@ func TestRetrieve_TopKLimit(t *testing.T) {
 
 	for i := 0; i < 10; i++ {
 		blob := PackFloat32([]float32{float32(i), 0.0})
-		d.InsertMemoryNote(ctx, "session1", "note", blob, sql.NullInt64{}, "")
+		if _, err := d.InsertMemoryNote(ctx, "session1", "note", blob, sql.NullInt64{}, ""); err != nil {
+			t.Fatalf("InsertMemoryNote: %v", err)
+		}
 	}
 
 	r := NewRetriever(d)
@@ -138,7 +144,9 @@ func TestRetrieve_SortedByScore(t *testing.T) {
 	blobs := [][]float32{{1, 0}, {0, 1}, {0.7071, 0.7071}}
 	texts := []string{"alpha", "beta", "gamma"}
 	for i, v := range blobs {
-		d.InsertMemoryNote(ctx, "session1", texts[i], PackFloat32(v), sql.NullInt64{}, "")
+		if _, err := d.InsertMemoryNote(ctx, "session1", texts[i], PackFloat32(v), sql.NullInt64{}, ""); err != nil {
+			t.Fatalf("InsertMemoryNote: %v", err)
+		}
 	}
 
 	r := NewRetriever(d)
@@ -157,8 +165,12 @@ func TestRetrieve_RespectsSessionScope(t *testing.T) {
 	d := openRetrieveTestDB(t)
 	ctx := context.Background()
 
-	d.InsertMemoryNote(ctx, "session-a", "private note", PackFloat32([]float32{1, 0}), sql.NullInt64{}, "")
-	d.InsertMemoryNote(ctx, scope.GlobalMemoryScope, "shared note", PackFloat32([]float32{1, 0}), sql.NullInt64{}, "")
+	if _, err := d.InsertMemoryNote(ctx, "session-a", "private note", PackFloat32([]float32{1, 0}), sql.NullInt64{}, ""); err != nil {
+		t.Fatalf("InsertMemoryNote private: %v", err)
+	}
+	if _, err := d.InsertMemoryNote(ctx, scope.GlobalMemoryScope, "shared note", PackFloat32([]float32{1, 0}), sql.NullInt64{}, ""); err != nil {
+		t.Fatalf("InsertMemoryNote shared: %v", err)
+	}
 
 	r := NewRetriever(d)
 	results, err := r.Retrieve(ctx, "session-b", "note", []float32{1, 0}, 5, 5, 10)

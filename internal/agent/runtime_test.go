@@ -52,7 +52,9 @@ func buildChatServer(t *testing.T, response providers.ChatCompletionResponse) (*
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			t.Fatalf("Encode: %v", err)
+		}
 	}))
 	t.Cleanup(srv.Close)
 	c := providers.New(srv.URL, "test-key", 10*time.Second)
@@ -559,7 +561,9 @@ func TestRuntime_Handle_WithToolCall(t *testing.T) {
 				}},
 			}
 		}
-		json.NewEncoder(w).Encode(resp)
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("Encode: %v", err)
+		}
 	}))
 	defer srv.Close()
 
@@ -999,14 +1003,18 @@ func TestRuntime_Handle_ArtifactSave(t *testing.T) {
 				}},
 			}
 		}
-		json.NewEncoder(w).Encode(resp)
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("Encode: %v", err)
+		}
 	}))
 	defer srv.Close()
 
 	provider := providers.New(srv.URL, "key", 10*time.Second)
 	provider.HTTP = srv.Client()
 
-	d.EnsureSession(context.Background(), "sess-artifact")
+	if err := d.EnsureSession(context.Background(), "sess-artifact"); err != nil {
+		t.Fatalf("EnsureSession: %v", err)
+	}
 
 	reg := tools.NewRegistry()
 	reg.Register(&largeOutputTool{})
@@ -1621,7 +1629,7 @@ func (e *largeOutputTool) Parameters() map[string]any {
 }
 func (e *largeOutputTool) Execute(ctx context.Context, params map[string]any) (string, error) {
 	// Generate output that exceeds MaxToolBytes
-	return fmt.Sprintf("%s", string(make([]byte, 100))), nil
+	return string(make([]byte, 100)), nil
 }
 func (e *largeOutputTool) Schema() map[string]any {
 	return e.SchemaFor(e.Name(), e.Description(), e.Parameters())
@@ -1736,12 +1744,12 @@ func TestRuntime_AcquireSessionLock_PreservesSingleEntry(t *testing.T) {
 	entry1.mu.Lock()
 
 	entryCh := make(chan *sessionLock, 1)
+	releaseEntry2 := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
 		entry2 := rt.acquireSessionLock("session-1")
 		entryCh <- entry2
-		entry2.mu.Lock()
-		entry2.mu.Unlock()
+		<-releaseEntry2
 		rt.releaseSessionLock("session-1", entry2)
 		close(done)
 	}()
@@ -1758,6 +1766,7 @@ func TestRuntime_AcquireSessionLock_PreservesSingleEntry(t *testing.T) {
 		t.Fatal("expected lock entry to stay stable while another waiter exists")
 	}
 	rt.releaseSessionLock("session-1", entry3)
+	close(releaseEntry2)
 	<-done
 }
 

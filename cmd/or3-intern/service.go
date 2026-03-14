@@ -76,12 +76,14 @@ func (s *serviceServer) handleTurns(w http.ResponseWriter, r *http.Request) {
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid request body"})
 		return
 	}
+	audit := serviceAuditHeadersFromRequest(r)
+	req.Meta = mergeServiceAuditMeta(req.Meta, audit)
 	if req.SessionKey == "" || req.Message == "" {
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "session_key and message are required"})
 		return
 	}
 	job := s.jobs.Register("turn")
-	s.jobs.Publish(job.ID, "queued", map[string]any{"status": "queued", "session_key": req.SessionKey})
+	s.jobs.Publish(job.ID, "queued", serviceLifecyclePayload(req.SessionKey, req.Meta, map[string]any{"status": "queued"}))
 
 	ctx, cancel := context.WithCancel(withDetachedContext(r.Context()))
 	s.jobs.AttachCancel(job.ID, cancel)
@@ -104,7 +106,7 @@ func (s *serviceServer) handleTurns(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *serviceServer) runTurnJob(ctx context.Context, jobID string, req serviceTurnRequest) {
-	s.jobs.Publish(jobID, "started", map[string]any{"status": "running", "session_key": req.SessionKey})
+	s.jobs.Publish(jobID, "started", serviceLifecyclePayload(req.SessionKey, req.Meta, map[string]any{"status": "running"}))
 	observer := &serviceObserver{ConversationObserver: s.jobs.Observer(jobID)}
 	runCtx := agent.ContextWithConversationObserver(ctx, observer)
 	runCtx = agent.ContextWithStreamingChannel(runCtx, agent.NullStreamer{})
@@ -129,13 +131,13 @@ func (s *serviceServer) runTurnJob(ctx context.Context, jobID string, req servic
 	})
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
-			s.jobs.Complete(jobID, "aborted", map[string]any{"session_key": req.SessionKey, "message": "job aborted"})
+			s.jobs.Complete(jobID, "aborted", serviceLifecyclePayload(req.SessionKey, req.Meta, map[string]any{"message": "job aborted"}))
 			return
 		}
-		s.jobs.Fail(jobID, err.Error(), map[string]any{"session_key": req.SessionKey})
+		s.jobs.Fail(jobID, err.Error(), serviceLifecyclePayload(req.SessionKey, req.Meta, nil))
 		return
 	}
-	s.jobs.Complete(jobID, "completed", map[string]any{"session_key": req.SessionKey, "final_text": observer.finalText})
+	s.jobs.Complete(jobID, "completed", serviceLifecyclePayload(req.SessionKey, req.Meta, map[string]any{"final_text": observer.finalText}))
 }
 
 func (s *serviceServer) handleSubagents(w http.ResponseWriter, r *http.Request) {
@@ -152,6 +154,8 @@ func (s *serviceServer) handleSubagents(w http.ResponseWriter, r *http.Request) 
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid request body"})
 		return
 	}
+	audit := serviceAuditHeadersFromRequest(r)
+	req.Meta = mergeServiceAuditMeta(req.Meta, audit)
 	if req.ParentSessionKey == "" || req.Task == "" {
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "parent_session_key and task are required"})
 		return
@@ -336,6 +340,47 @@ func cloneServiceMeta(meta map[string]any) map[string]any {
 		out[key] = value
 	}
 	return out
+}
+
+type serviceAuditHeaders struct {
+	RequestID        string
+	WorkspaceID      string
+	NetworkSessionID string
+}
+
+func serviceAuditHeadersFromRequest(r *http.Request) serviceAuditHeaders {
+	return serviceAuditHeaders{
+		RequestID:        strings.TrimSpace(r.Header.Get("X-Request-Id")),
+		WorkspaceID:      strings.TrimSpace(r.Header.Get("X-Workspace-Id")),
+		NetworkSessionID: strings.TrimSpace(r.Header.Get("X-Network-Session-Id")),
+	}
+}
+
+func mergeServiceAuditMeta(meta map[string]any, audit serviceAuditHeaders) map[string]any {
+	out := cloneServiceMeta(meta)
+	if audit.RequestID != "" {
+		out["request_id"] = audit.RequestID
+	}
+	if audit.WorkspaceID != "" {
+		out["workspace_id"] = audit.WorkspaceID
+	}
+	if audit.NetworkSessionID != "" {
+		out["network_session_id"] = audit.NetworkSessionID
+	}
+	return out
+}
+
+func serviceLifecyclePayload(sessionKey string, meta map[string]any, extra map[string]any) map[string]any {
+	payload := map[string]any{"session_key": sessionKey}
+	for _, key := range []string{"request_id", "workspace_id", "network_session_id"} {
+		if value, ok := meta[key]; ok {
+			payload[key] = value
+		}
+	}
+	for key, value := range extra {
+		payload[key] = value
+	}
+	return payload
 }
 
 func isTerminalStatus(status string) bool {

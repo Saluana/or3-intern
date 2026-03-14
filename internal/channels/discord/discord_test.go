@@ -58,7 +58,7 @@ func TestChannel_StartReceivesMessage(t *testing.T) {
 	if err := ch.Start(ctx, b); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer ch.Stop(context.Background())
+	defer func() { _ = ch.Stop(context.Background()) }()
 	select {
 	case <-identified:
 	case <-time.After(2 * time.Second):
@@ -101,7 +101,7 @@ func TestChannel_StartDeduplicatesRepeatedMessageID(t *testing.T) {
 	if err := ch.Start(ctx, b); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer ch.Stop(context.Background())
+	defer func() { _ = ch.Stop(context.Background()) }()
 
 	select {
 	case <-b.Channel():
@@ -137,7 +137,7 @@ func TestChannel_StartReceivesIsolatedSessionPerUserWhenEnabled(t *testing.T) {
 	if err := ch.Start(ctx, b); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer ch.Stop(context.Background())
+	defer func() { _ = ch.Stop(context.Background()) }()
 	select {
 	case ev := <-b.Channel():
 		if ev.SessionKey != "discord:C1:U1" {
@@ -229,7 +229,7 @@ func TestChannel_StartReceivesAttachmentMessage(t *testing.T) {
 	if err := ch.Start(ctx, b); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer ch.Stop(context.Background())
+	defer func() { _ = ch.Stop(context.Background()) }()
 
 	select {
 	case ev := <-b.Channel():

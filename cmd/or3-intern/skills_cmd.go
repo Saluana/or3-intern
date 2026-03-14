@@ -27,21 +27,6 @@ type skillsCommandDeps struct {
 	Stderr        io.Writer
 }
 
-func runSkillsCommand(ctx context.Context, cfg config.Config, bundledDir string, args []string, stdout, stderr io.Writer) error {
-	deps := skillsCommandDeps{
-		Client: newClawHubClient(cfg),
-		LoadToolNames: func(ctx context.Context, cfg config.Config) map[string]struct{} {
-			return loadAvailableToolNamesWithManager(ctx, cfg, nil)
-		},
-		LoadInventory: func(toolNames map[string]struct{}) skills.Inventory {
-			return buildSkillsInventory(cfg, bundledDir, toolNames)
-		},
-		Stdout: stdout,
-		Stderr: stderr,
-	}
-	return runSkillsCommandWithDeps(ctx, cfg, args, deps)
-}
-
 func runSkillsCommandWithDeps(ctx context.Context, cfg config.Config, args []string, deps skillsCommandDeps) error {
 	if deps.Client == nil {
 		deps.Client = newClawHubClient(cfg)
@@ -351,10 +336,6 @@ func makePolicySet(values []string) map[string]struct{} {
 		out[normalized] = struct{}{}
 	}
 	return out
-}
-
-func loadAvailableToolNames(ctx context.Context, cfg config.Config) map[string]struct{} {
-	return loadAvailableToolNamesWithManager(ctx, cfg, nil)
 }
 
 func loadAvailableToolNamesWithManager(ctx context.Context, cfg config.Config, manager *mcp.Manager) map[string]struct{} {

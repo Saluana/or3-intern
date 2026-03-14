@@ -110,30 +110,30 @@ func (x *DocIndexer) SyncRoots(ctx context.Context, scopeKey string) error {
 			continue
 		}
 
-			err = filepath.WalkDir(absRoot, func(path string, d fs.DirEntry, err error) error {
-				if err != nil {
-					return err
-				}
-				if d.Type()&os.ModeSymlink != 0 {
-					return nil
-				}
-				if d.IsDir() {
+		err = filepath.WalkDir(absRoot, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.Type()&os.ModeSymlink != 0 {
+				return nil
+			}
+			if d.IsDir() {
 				if strings.HasPrefix(d.Name(), ".") && path != absRoot {
 					return filepath.SkipDir
 				}
 				return nil
-				}
-				ext := strings.ToLower(filepath.Ext(path))
-				switch ext {
-				case ".md", ".txt":
-				default:
-					return nil
-				}
+			}
+			ext := strings.ToLower(filepath.Ext(path))
+			switch ext {
+			case ".md", ".txt":
+			default:
+				return nil
+			}
 
-				realPath, err := filepath.EvalSymlinks(path)
-				if err != nil {
-					return err
-				}
+			realPath, err := filepath.EvalSymlinks(path)
+			if err != nil {
+				return err
+			}
 			rel, err := filepath.Rel(absRoot, realPath)
 			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 				return nil
@@ -146,13 +146,13 @@ func (x *DocIndexer) SyncRoots(ctx context.Context, scopeKey string) error {
 				return filepath.SkipAll
 			}
 
-				info, err := os.Lstat(realPath)
-				if err != nil {
-					return err
-				}
-				if info.Size() > int64(cfg.MaxFileBytes) {
-					return nil
-				}
+			info, err := os.Lstat(realPath)
+			if err != nil {
+				return err
+			}
+			if info.Size() > int64(cfg.MaxFileBytes) {
+				return nil
+			}
 
 			seen[realPath] = true
 			fileCount++
@@ -163,10 +163,10 @@ func (x *DocIndexer) SyncRoots(ctx context.Context, scopeKey string) error {
 				return nil
 			}
 
-				data, err := readDocFile(realPath, cfg.MaxFileBytes)
-				if err != nil {
-					return err
-				}
+			data, err := readDocFile(realPath, cfg.MaxFileBytes)
+			if err != nil {
+				return err
+			}
 
 			h := fileHash(data)
 			if state, ok := existing[realPath]; ok && state.active && state.hash == h {
@@ -188,25 +188,25 @@ func (x *DocIndexer) SyncRoots(ctx context.Context, scopeKey string) error {
 			}
 
 			now := db.NowMS()
-				_, err = x.DB.SQL.ExecContext(ctx,
-					`INSERT INTO memory_docs(scope_key, path, kind, title, summary, text, embedding, hash, mtime_ms, size_bytes, active, updated_at)
+			_, err = x.DB.SQL.ExecContext(ctx,
+				`INSERT INTO memory_docs(scope_key, path, kind, title, summary, text, embedding, hash, mtime_ms, size_bytes, active, updated_at)
                  VALUES(?,?,?,?,?,?,?,?,?,?,1,?)
                  ON CONFLICT(scope_key, path) DO UPDATE SET
                    kind=excluded.kind, title=excluded.title, summary=excluded.summary,
                    text=excluded.text, embedding=excluded.embedding,
                    hash=excluded.hash, mtime_ms=excluded.mtime_ms,
                    size_bytes=excluded.size_bytes, active=1, updated_at=excluded.updated_at`,
-					scopeKey, realPath, kind, title, summary, text, nullBytes(embedding), h, mtimeMS, sizeBytes, now)
-				if err != nil {
-					return fmt.Errorf("upsert indexed doc %s: %w", realPath, err)
-				}
-				chunkCount++
-				return nil
-			})
+				scopeKey, realPath, kind, title, summary, text, nullBytes(embedding), h, mtimeMS, sizeBytes, now)
 			if err != nil {
-				return err
+				return fmt.Errorf("upsert indexed doc %s: %w", realPath, err)
 			}
+			chunkCount++
+			return nil
+		})
+		if err != nil {
+			return err
 		}
+	}
 
 	// deactivate docs no longer on disk
 	rows, err := x.DB.SQL.QueryContext(ctx,
@@ -260,16 +260,6 @@ func readDocFile(path string, maxBytes int) ([]byte, error) {
 	}
 	defer f.Close()
 	return io.ReadAll(io.LimitReader(f, int64(maxBytes)))
-}
-
-func (x *DocIndexer) needsUpdate(ctx context.Context, scopeKey, path, newHash string) bool {
-	row := x.DB.SQL.QueryRowContext(ctx,
-		`SELECT hash FROM memory_docs WHERE scope_key=? AND path=? AND active=1`, scopeKey, path)
-	var existing string
-	if err := row.Scan(&existing); err != nil {
-		return true
-	}
-	return existing != newHash
 }
 
 // DocRetriever retrieves indexed docs by FTS query.

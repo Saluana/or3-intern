@@ -1,0 +1,34 @@
+name: Contract Tests
+
+on:
+  push:
+    paths:
+      - '.github/workflows/contracts.yml'
+      - 'go.mod'
+      - 'go.sum'
+      - 'cmd/or3-intern/**'
+      - 'internal/agent/**'
+      - 'internal/db/**'
+      - 'internal/providers/**'
+      - 'docs/api-reference.md'
+  pull_request:
+    paths:
+      - '.github/workflows/contracts.yml'
+      - 'go.mod'
+      - 'go.sum'
+      - 'cmd/or3-intern/**'
+      - 'internal/agent/**'
+      - 'internal/db/**'
+      - 'internal/providers/**'
+      - 'docs/api-reference.md'
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Run frozen service contract tests
+        run: go test ./cmd/or3-intern -run 'TestOr3NetCompatibilityFixtures'

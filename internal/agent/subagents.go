@@ -221,7 +221,7 @@ func (m *SubagentManager) EnqueueService(ctx context.Context, req ServiceSubagen
 	}
 	if m.Jobs != nil {
 		m.Jobs.RegisterWithID(job.ID, "subagent")
-		m.Jobs.Publish(job.ID, "queued", map[string]any{"status": db.SubagentStatusQueued, "child_session_key": job.ChildSessionKey})
+		m.Jobs.Publish(job.ID, "queued", serviceLifecycleEventPayload(metadata.ServiceMeta, map[string]any{"status": db.SubagentStatusQueued, "child_session_key": job.ChildSessionKey}))
 	}
 	m.signal()
 	return tools.SpawnJob{ID: job.ID, ChildSessionKey: job.ChildSessionKey}, nil
@@ -261,9 +261,10 @@ func (m *SubagentManager) executeJob(job db.SubagentJob) {
 	timeout := m.jobTimeout(job)
 	runCtx, cancel := context.WithTimeout(m.ctx, timeout)
 	defer cancel()
+	metadata := parseSubagentJobMetadata(job.MetadataJSON)
 	if m.Jobs != nil {
 		m.Jobs.AttachCancel(job.ID, cancel)
-		m.Jobs.Publish(job.ID, "started", map[string]any{"status": db.SubagentStatusRunning, "child_session_key": job.ChildSessionKey})
+		m.Jobs.Publish(job.ID, "started", serviceLifecycleEventPayload(metadata.ServiceMeta, map[string]any{"status": db.SubagentStatusRunning, "child_session_key": job.ChildSessionKey}))
 	}
 	result, err := m.runJob(runCtx, job)
 	if err != nil {
@@ -311,10 +312,6 @@ func (m *SubagentManager) runJob(ctx context.Context, job db.SubagentJob) (Backg
 	})
 }
 
-func profileNameFromMetadata(raw string) string {
-	return parseSubagentJobMetadata(raw).ProfileName
-}
-
 func (m *SubagentManager) backgroundTools() *tools.Registry {
 	if m.BackgroundTools != nil {
 		return m.BackgroundTools()
@@ -327,6 +324,7 @@ func (m *SubagentManager) finalizeJob(baseCtx context.Context, job db.SubagentJo
 	defer cancel()
 	success := status == db.SubagentStatusSucceeded
 	text := formatParentSubagentSummary(job, success, preview, artifactID, errText)
+	metadata := parseSubagentJobMetadata(job.MetadataJSON)
 	payload := map[string]any{
 		"subagent_job_id": job.ID,
 		"child_session":   job.ChildSessionKey,
@@ -341,11 +339,11 @@ func (m *SubagentManager) finalizeJob(baseCtx context.Context, job db.SubagentJo
 	}
 	if m.Jobs != nil {
 		if status == db.SubagentStatusSucceeded {
-			m.Jobs.Complete(job.ID, status, map[string]any{"preview": preview, "artifact_id": artifactID, "child_session_key": job.ChildSessionKey})
+			m.Jobs.Complete(job.ID, status, serviceLifecycleEventPayload(metadata.ServiceMeta, map[string]any{"preview": preview, "artifact_id": artifactID, "child_session_key": job.ChildSessionKey}))
 		} else if status == db.SubagentStatusInterrupted {
-			m.Jobs.Complete(job.ID, "aborted", map[string]any{"message": errText, "child_session_key": job.ChildSessionKey})
+			m.Jobs.Complete(job.ID, "aborted", serviceLifecycleEventPayload(metadata.ServiceMeta, map[string]any{"message": errText, "child_session_key": job.ChildSessionKey}))
 		} else {
-			m.Jobs.Fail(job.ID, errText, map[string]any{"child_session_key": job.ChildSessionKey})
+			m.Jobs.Fail(job.ID, errText, serviceLifecycleEventPayload(metadata.ServiceMeta, map[string]any{"child_session_key": job.ChildSessionKey}))
 		}
 	}
 	if deliver {
@@ -409,6 +407,19 @@ func parseSubagentJobMetadata(raw string) subagentJobMetadata {
 	}
 	metadata.ProfileName = strings.TrimSpace(metadata.ProfileName)
 	return metadata
+}
+
+func serviceLifecycleEventPayload(serviceMeta map[string]any, payload map[string]any) map[string]any {
+	out := map[string]any{}
+	for key, value := range payload {
+		out[key] = value
+	}
+	for _, key := range []string{"request_id", "workspace_id", "network_session_id"} {
+		if value, ok := serviceMeta[key]; ok {
+			out[key] = value
+		}
+	}
+	return out
 }
 
 func mustMetadataJSON(payload any) string {

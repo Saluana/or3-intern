@@ -13,7 +13,9 @@ import (
 
 func migrateJSONL(ctx context.Context, d *db.DB, path, sessionKey string) error {
 	f, err := os.Open(path)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	defer f.Close()
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 1024), 4<<20)
@@ -21,7 +23,9 @@ func migrateJSONL(ctx context.Context, d *db.DB, path, sessionKey string) error 
 	for sc.Scan() {
 		lineNo++
 		line := sc.Text()
-		if len(line) == 0 { continue }
+		if len(line) == 0 {
+			continue
+		}
 		var obj map[string]any
 		if err := json.Unmarshal([]byte(line), &obj); err != nil {
 			// tolerate non-json line
@@ -32,9 +36,6 @@ func migrateJSONL(ctx context.Context, d *db.DB, path, sessionKey string) error 
 		}
 		// detect metadata
 		if lineNo == 1 {
-			if _, ok := obj["messages"]; ok {
-				// not expected
-			}
 			// store as session metadata_json if it looks like metadata
 			if obj["role"] == nil && obj["content"] == nil {
 				b, _ := json.Marshal(obj)
@@ -48,13 +49,17 @@ func migrateJSONL(ctx context.Context, d *db.DB, path, sessionKey string) error 
 			}
 		}
 		role := toStr(obj["role"])
-		if role == "" { role = "user" }
+		if role == "" {
+			role = "user"
+		}
 		content := toStr(obj["content"])
 		payload := obj
 		delete(payload, "role")
 		delete(payload, "content")
 		_, err := d.AppendMessage(ctx, sessionKey, role, content, payload)
-		if err != nil { return fmt.Errorf("line %d: %w", lineNo, err) }
+		if err != nil {
+			return fmt.Errorf("line %d: %w", lineNo, err)
+		}
 	}
 	return sc.Err()
 }

@@ -35,7 +35,9 @@ func makeEmbedServer(t *testing.T, vec []float32) (*httptest.Server, *providers.
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("Encode: %v", err)
+		}
 	}))
 	t.Cleanup(srv.Close)
 	c := providers.New(srv.URL, "test-key", 10*time.Second)
@@ -107,8 +109,12 @@ func TestMemorySetPinned_Overwrite(t *testing.T) {
 	tool := &MemorySetPinned{DB: d}
 
 	ctx := ContextWithSession(context.Background(), "session-a")
-	tool.Execute(ctx, map[string]any{"key": "k", "content": "first"})
-	tool.Execute(ctx, map[string]any{"key": "k", "content": "second"})
+	if _, err := tool.Execute(ctx, map[string]any{"key": "k", "content": "first"}); err != nil {
+		t.Fatalf("MemorySetPinned first: %v", err)
+	}
+	if _, err := tool.Execute(ctx, map[string]any{"key": "k", "content": "second"}); err != nil {
+		t.Fatalf("MemorySetPinned second: %v", err)
+	}
 
 	pinned, _ := d.GetPinned(context.Background(), "session-a")
 	if pinned["k"] != "second" {

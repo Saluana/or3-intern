@@ -68,7 +68,7 @@ func TestRunSkillsCommand_InstallUpdateRefusesLocalEditsAndRemove(t *testing.T) 
 				"latestVersion": map[string]any{"version": "1.0.1"},
 			})
 		case r.URL.Path == "/api/v1/download":
-			w.Write(zipBytes)
+			_, _ = w.Write(zipBytes)
 		default:
 			http.NotFound(w, r)
 		}

@@ -202,7 +202,9 @@ func TestLoadBody_Normal(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "SKILL.md")
 	content := "# Skill\nSome content here"
-	os.WriteFile(path, []byte(content), 0o644)
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 
 	got, err := LoadBody(path, 0)
 	if err != nil {
@@ -217,7 +219,9 @@ func TestLoadBody_Truncation(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "SKILL.md")
 	content := strings.Repeat("a", 100)
-	os.WriteFile(path, []byte(content), 0o644)
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 
 	got, err := LoadBody(path, 50)
 	if err != nil {
@@ -256,12 +260,14 @@ func TestHash_Different(t *testing.T) {
 func TestSkillManifestParsing(t *testing.T) {
 	dir := t.TempDir()
 	bundle := makeSkillBundle(t, dir, "myskill", "# My Skill\nDoes things.")
-	os.WriteFile(filepath.Join(bundle, "skill.json"), []byte(`{
+	if err := os.WriteFile(filepath.Join(bundle, "skill.json"), []byte(`{
 		"summary": "a really cool skill",
 		"entrypoints": [
 			{"name": "run", "command": ["python", "main.py"], "timeoutSeconds": 30, "acceptsStdin": false}
 		]
-	}`), 0o644)
+	}`), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 
 	inv := Scan([]string{dir})
 	if len(inv.Skills) != 1 {
@@ -308,7 +314,9 @@ func TestSkillManifestOverridesFrontMatter(t *testing.T) {
 	dir := t.TempDir()
 	content := "---\nsummary: from front matter\n---\n# Skill"
 	bundle := makeSkillBundle(t, dir, "skill-bundle", content)
-	os.WriteFile(filepath.Join(bundle, "skill.json"), []byte(`{"summary":"from manifest"}`), 0o644)
+	if err := os.WriteFile(filepath.Join(bundle, "skill.json"), []byte(`{"summary":"from manifest"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 
 	inv := Scan([]string{dir})
 	if len(inv.Skills) != 1 {
@@ -551,7 +559,9 @@ func TestExtractFrontMatterSummary_MissingSummaryKey(t *testing.T) {
 func TestSkillManifest_InvalidJSON(t *testing.T) {
 	dir := t.TempDir()
 	bundle := makeSkillBundle(t, dir, "myskill", "# Skill")
-	os.WriteFile(filepath.Join(bundle, "skill.json"), []byte(`not valid json`), 0o644)
+	if err := os.WriteFile(filepath.Join(bundle, "skill.json"), []byte(`not valid json`), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 
 	// Should not panic; skill loads without summary/entrypoints
 	inv := Scan([]string{dir})

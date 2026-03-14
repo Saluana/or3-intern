@@ -27,6 +27,24 @@ func openTestDB(t *testing.T) *DB {
 	return d
 }
 
+func mustAppendMessage(t *testing.T, d *DB, ctx context.Context, sessionKey, role, content string, payload any) int64 {
+	t.Helper()
+	id, err := d.AppendMessage(ctx, sessionKey, role, content, payload)
+	if err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+	return id
+}
+
+func mustInsertMemoryNote(t *testing.T, d *DB, ctx context.Context, sessionKey, text string, embedding []byte, sourceMessageID sql.NullInt64, tags string) int64 {
+	t.Helper()
+	id, err := d.InsertMemoryNote(ctx, sessionKey, text, embedding, sourceMessageID, tags)
+	if err != nil {
+		t.Fatalf("InsertMemoryNote: %v", err)
+	}
+	return id
+}
+
 func TestOpen_CreatesDB(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.db")
@@ -327,9 +345,15 @@ func TestGetLastMessages_Chronological(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
 
-	d.AppendMessage(ctx, "s1", "user", "first", nil)
-	d.AppendMessage(ctx, "s1", "assistant", "second", nil)
-	d.AppendMessage(ctx, "s1", "user", "third", nil)
+	if _, err := d.AppendMessage(ctx, "s1", "user", "first", nil); err != nil {
+		t.Fatalf("AppendMessage first: %v", err)
+	}
+	if _, err := d.AppendMessage(ctx, "s1", "assistant", "second", nil); err != nil {
+		t.Fatalf("AppendMessage second: %v", err)
+	}
+	if _, err := d.AppendMessage(ctx, "s1", "user", "third", nil); err != nil {
+		t.Fatalf("AppendMessage third: %v", err)
+	}
 
 	msgs, err := d.GetLastMessages(ctx, "s1", 10)
 	if err != nil {
@@ -349,7 +373,7 @@ func TestGetLastMessages_LimitRespected(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < 10; i++ {
-		d.AppendMessage(ctx, "s1", "user", "msg", nil)
+		mustAppendMessage(t, d, ctx, "s1", "user", "msg", nil)
 	}
 
 	msgs, err := d.GetLastMessages(ctx, "s1", 3)
@@ -366,8 +390,8 @@ func TestGetLastMessages_AlignToUser(t *testing.T) {
 	ctx := context.Background()
 
 	// Insert only assistant messages
-	d.AppendMessage(ctx, "s1", "assistant", "resp1", nil)
-	d.AppendMessage(ctx, "s1", "assistant", "resp2", nil)
+	mustAppendMessage(t, d, ctx, "s1", "assistant", "resp1", nil)
+	mustAppendMessage(t, d, ctx, "s1", "assistant", "resp2", nil)
 
 	msgs, err := d.GetLastMessages(ctx, "s1", 10)
 	if err != nil {
@@ -417,8 +441,12 @@ func TestUpsertPinned_Overwrites(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
 
-	d.UpsertPinned(ctx, "session1", "key", "first")
-	d.UpsertPinned(ctx, "session1", "key", "second")
+	if err := d.UpsertPinned(ctx, "session1", "key", "first"); err != nil {
+		t.Fatalf("UpsertPinned first: %v", err)
+	}
+	if err := d.UpsertPinned(ctx, "session1", "key", "second"); err != nil {
+		t.Fatalf("UpsertPinned second: %v", err)
+	}
 
 	pinned, _ := d.GetPinned(ctx, "session1")
 	if pinned["key"] != "second" {
@@ -506,8 +534,12 @@ func TestStreamMemoryNotesLimit_NoLimit(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
 
-	d.InsertMemoryNote(ctx, "session1", "note1", make([]byte, 4), sql.NullInt64{}, "")
-	d.InsertMemoryNote(ctx, "session1", "note2", make([]byte, 4), sql.NullInt64{}, "")
+	if _, err := d.InsertMemoryNote(ctx, "session1", "note1", make([]byte, 4), sql.NullInt64{}, ""); err != nil {
+		t.Fatalf("InsertMemoryNote note1: %v", err)
+	}
+	if _, err := d.InsertMemoryNote(ctx, "session1", "note2", make([]byte, 4), sql.NullInt64{}, ""); err != nil {
+		t.Fatalf("InsertMemoryNote note2: %v", err)
+	}
 
 	rows, err := d.StreamMemoryNotesLimit(ctx, "session1", 0)
 	if err != nil {
@@ -523,7 +555,9 @@ func TestStreamMemoryNotesLimit_NoLimit(t *testing.T) {
 		var src any
 		var tags string
 		var created int64
-		rows.Scan(&id, &text, &emb, &src, &tags, &created)
+		if err := rows.Scan(&id, &text, &emb, &src, &tags, &created); err != nil {
+			t.Fatalf("rows.Scan: %v", err)
+		}
 	}
 	if count != 2 {
 		t.Errorf("expected 2 rows, got %d", count)
@@ -535,7 +569,9 @@ func TestStreamMemoryNotesLimit_WithLimit(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < 5; i++ {
-		d.InsertMemoryNote(ctx, "session1", "note", make([]byte, 4), sql.NullInt64{}, "")
+		if _, err := d.InsertMemoryNote(ctx, "session1", "note", make([]byte, 4), sql.NullInt64{}, ""); err != nil {
+			t.Fatalf("InsertMemoryNote note: %v", err)
+		}
 	}
 
 	rows, err := d.StreamMemoryNotesLimit(ctx, "session1", 2)
@@ -552,7 +588,9 @@ func TestStreamMemoryNotesLimit_WithLimit(t *testing.T) {
 		var src any
 		var tags string
 		var created int64
-		rows.Scan(&id, &text, &emb, &src, &tags, &created)
+		if err := rows.Scan(&id, &text, &emb, &src, &tags, &created); err != nil {
+			t.Fatalf("rows.Scan: %v", err)
+		}
 	}
 	if count != 2 {
 		t.Errorf("expected 2 rows, got %d", count)
@@ -564,8 +602,8 @@ func TestSearchFTS(t *testing.T) {
 	ctx := context.Background()
 
 	// Insert notes to trigger FTS
-	d.InsertMemoryNote(ctx, "session1", "the quick brown fox", make([]byte, 4), sql.NullInt64{}, "")
-	d.InsertMemoryNote(ctx, "session1", "lazy dog sits", make([]byte, 4), sql.NullInt64{}, "")
+	mustInsertMemoryNote(t, d, ctx, "session1", "the quick brown fox", make([]byte, 4), sql.NullInt64{}, "")
+	mustInsertMemoryNote(t, d, ctx, "session1", "lazy dog sits", make([]byte, 4), sql.NullInt64{}, "")
 
 	results, err := d.SearchFTS(ctx, "session1", "quick fox", 5)
 	if err != nil {
@@ -596,8 +634,8 @@ func TestSearchFTS_SessionIsolation(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
 
-	d.InsertMemoryNote(ctx, "session-a", "private fox", make([]byte, 4), sql.NullInt64{}, "")
-	d.InsertMemoryNote(ctx, scope.GlobalMemoryScope, "shared fox", make([]byte, 4), sql.NullInt64{}, "")
+	mustInsertMemoryNote(t, d, ctx, "session-a", "private fox", make([]byte, 4), sql.NullInt64{}, "")
+	mustInsertMemoryNote(t, d, ctx, scope.GlobalMemoryScope, "shared fox", make([]byte, 4), sql.NullInt64{}, "")
 
 	results, err := d.SearchFTS(ctx, "session-b", "fox", 10)
 	if err != nil {
@@ -612,7 +650,7 @@ func TestMessage_Fields(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
 
-	d.AppendMessage(ctx, "sess", "user", "hello world", nil)
+	mustAppendMessage(t, d, ctx, "sess", "user", "hello world", nil)
 	msgs, err := d.GetLastMessages(ctx, "sess", 10)
 	if err != nil {
 		t.Fatalf("GetLastMessages: %v", err)
@@ -752,7 +790,9 @@ func TestSetLastConsolidatedID(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
 
-	d.EnsureSession(ctx, "sess")
+	if err := d.EnsureSession(ctx, "sess"); err != nil {
+		t.Fatalf("EnsureSession: %v", err)
+	}
 	if err := d.SetLastConsolidatedID(ctx, "sess", 42); err != nil {
 		t.Fatalf("SetLastConsolidatedID: %v", err)
 	}

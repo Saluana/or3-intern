@@ -11,6 +11,20 @@ import (
 	"or3-intern/internal/cron"
 )
 
+func mustStartCronService(t *testing.T, svc *cron.Service) {
+	t.Helper()
+	if err := svc.Start(); err != nil {
+		t.Fatalf("cron.Start: %v", err)
+	}
+}
+
+func mustAddCronToolJob(t *testing.T, svc *cron.Service, job cron.CronJob) {
+	t.Helper()
+	if err := svc.Add(job); err != nil {
+		t.Fatalf("cron.Add: %v", err)
+	}
+}
+
 func makeTestCronService(t *testing.T) *cron.Service {
 	t.Helper()
 	dir := t.TempDir()
@@ -18,9 +32,7 @@ func makeTestCronService(t *testing.T) *cron.Service {
 	svc := cron.New(path, func(ctx context.Context, job cron.CronJob) error {
 		return nil
 	})
-	if err := svc.Start(); err != nil {
-		t.Fatalf("cron.Start: %v", err)
-	}
+	mustStartCronService(t, svc)
 	t.Cleanup(func() { svc.Stop() })
 	return svc
 }
@@ -83,8 +95,8 @@ func TestCronTool_Add_And_List(t *testing.T) {
 			"name":    "test job",
 			"enabled": true,
 			"schedule": map[string]any{
-				"kind":     "cron",
-				"expr":     "0 * * * *",
+				"kind": "cron",
+				"expr": "0 * * * *",
 			},
 			"payload": map[string]any{
 				"kind":    "agent_turn",
@@ -144,12 +156,14 @@ func TestCronTool_Remove(t *testing.T) {
 	tool := &CronTool{Svc: svc}
 
 	// Add a job first
-	tool.Execute(context.Background(), map[string]any{
+	if _, err := tool.Execute(context.Background(), map[string]any{
 		"action": "add",
 		"job": map[string]any{
 			"name": "to remove",
 		},
-	})
+	}); err != nil {
+		t.Fatalf("CronTool add: %v", err)
+	}
 
 	jobs, _ := svc.List()
 	if len(jobs) == 0 {
@@ -199,10 +213,10 @@ func TestCronTool_Run(t *testing.T) {
 	defer svc.Stop()
 
 	// Add a disabled job so it only runs via force
-	svc.Add(cron.CronJob{
-		ID:      "test-run",
-		Name:    "run test",
-		Enabled: false,
+	mustAddCronToolJob(t, svc, cron.CronJob{
+		ID:       "test-run",
+		Name:     "run test",
+		Enabled:  false,
 		Schedule: cron.CronSchedule{Kind: cron.KindEvery, EveryMS: int64((time.Hour).Milliseconds())},
 		Payload:  cron.CronPayload{Kind: "agent_turn", Message: "test"},
 	})
@@ -230,12 +244,12 @@ func TestCronTool_Run_NotEnabled_NoForce(t *testing.T) {
 	svc := cron.New(path, func(ctx context.Context, job cron.CronJob) error {
 		return nil
 	})
-	svc.Start()
+	mustStartCronService(t, svc)
 	defer svc.Stop()
 
-	svc.Add(cron.CronJob{
-		ID:      "disabled-job",
-		Enabled: false,
+	mustAddCronToolJob(t, svc, cron.CronJob{
+		ID:       "disabled-job",
+		Enabled:  false,
 		Schedule: cron.CronSchedule{Kind: cron.KindEvery, EveryMS: int64((time.Hour).Milliseconds())},
 		Payload:  cron.CronPayload{Kind: "agent_turn"},
 	})
@@ -260,12 +274,12 @@ func TestCronTool_Run_WithError(t *testing.T) {
 	svc := cron.New(path, func(ctx context.Context, job cron.CronJob) error {
 		return errors.New("runner failed")
 	})
-	svc.Start()
+	mustStartCronService(t, svc)
 	defer svc.Stop()
 
-	svc.Add(cron.CronJob{
-		ID:      "err-job",
-		Enabled: true,
+	mustAddCronToolJob(t, svc, cron.CronJob{
+		ID:       "err-job",
+		Enabled:  true,
 		Schedule: cron.CronSchedule{Kind: cron.KindEvery, EveryMS: int64((time.Hour).Milliseconds())},
 		Payload:  cron.CronPayload{Kind: "agent_turn"},
 	})

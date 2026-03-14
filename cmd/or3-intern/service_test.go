@@ -53,7 +53,7 @@ func TestValidateServiceAuthorization(t *testing.T) {
 	valid := mustIssueServiceTokenAt(t, secret, now.Add(-time.Minute))
 	expired := mustIssueServiceTokenAt(t, secret, now.Add(-serviceTokenMaxAge-time.Second))
 	future := mustIssueServiceTokenAt(t, secret, now.Add(31*time.Second))
-	badSignature := valid[:len(valid)-1] + "0"
+	badSignature := mutateServiceTokenSignature(valid)
 	invalidPayload := "%%%." + hex.EncodeToString(signServiceToken(secret, "%%%"))
 	invalidJSONPayload := signedServiceToken(t, secret, base64.RawURLEncoding.EncodeToString([]byte("{")))
 	missingNonce := signedServiceToken(t, secret, encodeServiceClaims(t, serviceTokenClaims{IssuedAt: now.Unix()}))
@@ -251,6 +251,9 @@ func TestServiceTurns_JSONResponse(t *testing.T) {
 	defer httpServer.Close()
 
 	req := mustServiceRequest(t, httpServer, strings.Repeat("j", 32), http.MethodPost, "/internal/v1/turns", `{"session_key":"svc:json","message":"hello"}`)
+	req.Header.Set("X-Request-Id", "req_intern_turn")
+	req.Header.Set("X-Workspace-Id", "ws_intern")
+	req.Header.Set("X-Network-Session-Id", "sess_intern")
 	resp, err := httpServer.Client().Do(req)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
@@ -271,6 +274,25 @@ func TestServiceTurns_JSONResponse(t *testing.T) {
 	}
 	if _, ok := payload["job_id"].(string); !ok {
 		t.Fatalf("expected job_id in response, got %#v", payload)
+	}
+	jobID, _ := payload["job_id"].(string)
+	snapshot, ok := server.jobs.Snapshot(jobID)
+	if !ok {
+		t.Fatalf("expected stored snapshot for %s", jobID)
+	}
+	for _, event := range snapshot.Events {
+		if event.Type != "queued" && event.Type != "started" && event.Type != "completion" && event.Type != "error" {
+			continue
+		}
+		if event.Data["request_id"] != "req_intern_turn" {
+			t.Fatalf("expected request_id in lifecycle event, got %#v", event.Data)
+		}
+		if event.Data["workspace_id"] != "ws_intern" {
+			t.Fatalf("expected workspace_id in lifecycle event, got %#v", event.Data)
+		}
+		if event.Data["network_session_id"] != "sess_intern" {
+			t.Fatalf("expected network_session_id in lifecycle event, got %#v", event.Data)
+		}
 	}
 }
 
@@ -551,6 +573,9 @@ func TestServiceSubagents_EnqueueAndAbortQueuedJob(t *testing.T) {
 		"reply_to":"or3-net"
 	}`
 	req := mustServiceRequest(t, httpServer, strings.Repeat("q", 32), http.MethodPost, "/internal/v1/subagents", reqBody)
+	req.Header.Set("X-Request-Id", "req_subagent")
+	req.Header.Set("X-Workspace-Id", "ws_subagent")
+	req.Header.Set("X-Network-Session-Id", "sess_subagent")
 	resp, err := httpServer.Client().Do(req)
 	if err != nil {
 		t.Fatalf("Do subagents: %v", err)
@@ -588,6 +613,27 @@ func TestServiceSubagents_EnqueueAndAbortQueuedJob(t *testing.T) {
 	}
 	if metadata["timeout_seconds"] != float64(9) {
 		t.Fatalf("expected timeout metadata to persist, got %#v", metadata)
+	}
+	serviceMeta, _ := metadata["service_meta"].(map[string]any)
+	if serviceMeta["request_id"] != "req_subagent" || serviceMeta["workspace_id"] != "ws_subagent" || serviceMeta["network_session_id"] != "sess_subagent" {
+		t.Fatalf("expected audit headers to persist in service_meta, got %#v", metadata)
+	}
+	snapshot, ok := jobs.Snapshot(jobID)
+	if !ok {
+		t.Fatalf("expected queued job snapshot for %s", jobID)
+	}
+	queuedEventFound := false
+	for _, event := range snapshot.Events {
+		if event.Type != "queued" {
+			continue
+		}
+		queuedEventFound = true
+		if event.Data["request_id"] != "req_subagent" || event.Data["workspace_id"] != "ws_subagent" || event.Data["network_session_id"] != "sess_subagent" {
+			t.Fatalf("expected audit headers in queued subagent lifecycle event, got %#v", event.Data)
+		}
+	}
+	if !queuedEventFound {
+		t.Fatalf("expected queued lifecycle event for %s", jobID)
 	}
 
 	abortReq := mustServiceRequest(t, httpServer, strings.Repeat("q", 32), http.MethodPost, "/internal/v1/jobs/"+jobID+"/abort", "")
@@ -672,6 +718,18 @@ func mustIssueServiceTokenAt(t *testing.T, secret string, now time.Time) string 
 		t.Fatalf("issueServiceBearerToken: %v", err)
 	}
 	return token
+}
+
+func mutateServiceTokenSignature(token string) string {
+	if token == "" {
+		return "0"
+	}
+	last := token[len(token)-1]
+	replacement := byte('0')
+	if last == '0' {
+		replacement = '1'
+	}
+	return token[:len(token)-1] + string(replacement)
 }
 
 func encodeServiceClaims(t *testing.T, claims serviceTokenClaims) string {

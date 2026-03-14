@@ -50,7 +50,9 @@ func captureStdout(t *testing.T, fn func()) string {
 	w.Close()
 	os.Stdout = old
 	var buf bytes.Buffer
-	io.Copy(&buf, r)
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatalf("io.Copy: %v", err)
+	}
 	return buf.String()
 }
 
@@ -134,3 +136,11 @@ func TestBeginStream_ReturnsWriter(t *testing.T) {
 	fmt.Print() // flush
 }
 
+func TestShowError(t *testing.T) {
+	out := captureStdout(t, func() {
+		ShowError(nil, fmt.Errorf("provider error 401 Unauthorized"))
+	})
+	if !strings.Contains(out, "Error: provider error 401 Unauthorized") {
+		t.Fatalf("expected rendered error, got %q", out)
+	}
+}

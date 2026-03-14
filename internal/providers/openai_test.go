@@ -10,6 +10,13 @@ import (
 	"time"
 )
 
+func mustEncodeResponse(t *testing.T, w http.ResponseWriter, payload any) {
+	t.Helper()
+	if err := json.NewEncoder(w).Encode(payload); err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+}
+
 func TestNew(t *testing.T) {
 	c := New("https://api.example.com", "my-key", 30*time.Second)
 	if c == nil {
@@ -30,15 +37,15 @@ func TestChat_Success(t *testing.T) {
 	response := ChatCompletionResponse{
 		Choices: []struct {
 			Message struct {
-				Role      string    `json:"role"`
-				Content   any       `json:"content"`
+				Role      string     `json:"role"`
+				Content   any        `json:"content"`
 				ToolCalls []ToolCall `json:"tool_calls"`
 			} `json:"message"`
 		}{
 			{
 				Message: struct {
-					Role      string    `json:"role"`
-					Content   any       `json:"content"`
+					Role      string     `json:"role"`
+					Content   any        `json:"content"`
 					ToolCalls []ToolCall `json:"tool_calls"`
 				}{
 					Role:    "assistant",
@@ -59,7 +66,7 @@ func TestChat_Success(t *testing.T) {
 			t.Errorf("expected Authorization header, got %q", r.Header.Get("Authorization"))
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
+		mustEncodeResponse(t, w, response)
 	}))
 	defer srv.Close()
 
@@ -131,7 +138,7 @@ func TestChat_NoAPIKey(t *testing.T) {
 			t.Errorf("expected no Authorization header, got %q", r.Header.Get("Authorization"))
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(ChatCompletionResponse{})
+		mustEncodeResponse(t, w, ChatCompletionResponse{})
 	}))
 	defer srv.Close()
 
@@ -141,22 +148,24 @@ func TestChat_NoAPIKey(t *testing.T) {
 		HTTP:    srv.Client(),
 	}
 
-	c.Chat(context.Background(), ChatCompletionRequest{})
+	if _, err := c.Chat(context.Background(), ChatCompletionRequest{}); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
 }
 
 func TestChat_WithToolCalls(t *testing.T) {
 	response := ChatCompletionResponse{
 		Choices: []struct {
 			Message struct {
-				Role      string    `json:"role"`
-				Content   any       `json:"content"`
+				Role      string     `json:"role"`
+				Content   any        `json:"content"`
 				ToolCalls []ToolCall `json:"tool_calls"`
 			} `json:"message"`
 		}{
 			{
 				Message: struct {
-					Role      string    `json:"role"`
-					Content   any       `json:"content"`
+					Role      string     `json:"role"`
+					Content   any        `json:"content"`
 					ToolCalls []ToolCall `json:"tool_calls"`
 				}{
 					Role: "assistant",
@@ -180,7 +189,7 @@ func TestChat_WithToolCalls(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
+		mustEncodeResponse(t, w, response)
 	}))
 	defer srv.Close()
 
@@ -212,7 +221,7 @@ func TestEmbed_Success(t *testing.T) {
 			t.Errorf("expected POST, got %s", r.Method)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
+		mustEncodeResponse(t, w, response)
 	}))
 	defer srv.Close()
 
@@ -265,7 +274,7 @@ func TestEmbed_NoData(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
+		mustEncodeResponse(t, w, response)
 	}))
 	defer srv.Close()
 
@@ -305,7 +314,7 @@ func TestEmbed_WithAPIKey(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(EmbeddingResponse{
+		mustEncodeResponse(t, w, EmbeddingResponse{
 			Data: []struct {
 				Embedding []float32 `json:"embedding"`
 			}{{Embedding: []float32{0.1}}},
@@ -314,7 +323,9 @@ func TestEmbed_WithAPIKey(t *testing.T) {
 	defer srv.Close()
 
 	c := &Client{APIBase: srv.URL, APIKey: "my-embed-key", HTTP: srv.Client()}
-	c.Embed(context.Background(), "model", "text")
+	if _, err := c.Embed(context.Background(), "model", "text"); err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
 
 	if gotAuth != "Bearer my-embed-key" {
 		t.Errorf("expected 'Bearer my-embed-key', got %q", gotAuth)

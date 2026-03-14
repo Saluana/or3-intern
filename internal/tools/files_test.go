@@ -9,6 +9,13 @@ import (
 	"testing"
 )
 
+func mustWriteFile(t *testing.T, path string, data []byte, mode os.FileMode) {
+	t.Helper()
+	if err := os.WriteFile(path, data, mode); err != nil {
+		t.Fatalf("WriteFile(%s): %v", path, err)
+	}
+}
+
 // ---- safePath ----
 
 func TestSafePath_Valid(t *testing.T) {
@@ -82,7 +89,7 @@ func TestSafePath_BlocksSymlinkEscape(t *testing.T) {
 func TestReadFile_OK(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "test.txt")
-	os.WriteFile(p, []byte("hello file"), 0o644)
+	mustWriteFile(t, p, []byte("hello file"), 0o644)
 
 	tool := &ReadFile{}
 	out, err := tool.Execute(context.Background(), map[string]any{"path": p})
@@ -105,7 +112,7 @@ func TestReadFile_NotFound(t *testing.T) {
 func TestReadFile_Truncation(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "large.txt")
-	os.WriteFile(p, []byte(strings.Repeat("x", 200)), 0o644)
+	mustWriteFile(t, p, []byte(strings.Repeat("x", 200)), 0o644)
 
 	tool := &ReadFile{}
 	out, err := tool.Execute(context.Background(), map[string]any{
@@ -248,7 +255,7 @@ func TestEditFile_PreservesExistingMode(t *testing.T) {
 func TestEditFile_ReplaceAll(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "edit.txt")
-	os.WriteFile(p, []byte("foo foo foo"), 0o644)
+	mustWriteFile(t, p, []byte("foo foo foo"), 0o644)
 
 	tool := &EditFile{}
 	out, err := tool.Execute(context.Background(), map[string]any{
@@ -272,15 +279,17 @@ func TestEditFile_ReplaceAll(t *testing.T) {
 func TestEditFile_ReplaceCount(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "edit.txt")
-	os.WriteFile(p, []byte("foo foo foo"), 0o644)
+	mustWriteFile(t, p, []byte("foo foo foo"), 0o644)
 
 	tool := &EditFile{}
-	tool.Execute(context.Background(), map[string]any{
+	if _, err := tool.Execute(context.Background(), map[string]any{
 		"path": p,
 		"edits": []any{
 			map[string]any{"find": "foo", "replace": "bar", "count": float64(1)},
 		},
-	})
+	}); err != nil {
+		t.Fatalf("EditFile: %v", err)
+	}
 	got, _ := os.ReadFile(p)
 	if string(got) != "bar foo foo" {
 		t.Errorf("expected 'bar foo foo', got %q", string(got))
@@ -308,7 +317,7 @@ func TestEditFile_Name(t *testing.T) {
 func TestEditFile_NoEdits(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "file.txt")
-	os.WriteFile(p, []byte("original"), 0o644)
+	mustWriteFile(t, p, []byte("original"), 0o644)
 
 	tool := &EditFile{}
 	out, err := tool.Execute(context.Background(), map[string]any{
@@ -331,9 +340,11 @@ func TestEditFile_NoEdits(t *testing.T) {
 
 func TestListDir_OK(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("a"), 0o644)
-	os.WriteFile(filepath.Join(dir, "b.txt"), []byte("b"), 0o644)
-	os.MkdirAll(filepath.Join(dir, "subdir"), 0o755)
+	mustWriteFile(t, filepath.Join(dir, "a.txt"), []byte("a"), 0o644)
+	mustWriteFile(t, filepath.Join(dir, "b.txt"), []byte("b"), 0o644)
+	if err := os.MkdirAll(filepath.Join(dir, "subdir"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
 
 	tool := &ListDir{}
 	out, err := tool.Execute(context.Background(), map[string]any{"path": dir})
@@ -357,7 +368,7 @@ func TestListDir_OK(t *testing.T) {
 func TestListDir_MaxEntries(t *testing.T) {
 	dir := t.TempDir()
 	for i := 0; i < 5; i++ {
-		os.WriteFile(filepath.Join(dir, []string{"a", "b", "c", "d", "e"}[i]+".txt"), []byte("x"), 0o644)
+		mustWriteFile(t, filepath.Join(dir, []string{"a", "b", "c", "d", "e"}[i]+".txt"), []byte("x"), 0o644)
 	}
 
 	tool := &ListDir{}
@@ -369,7 +380,9 @@ func TestListDir_MaxEntries(t *testing.T) {
 		t.Fatalf("ListDir: %v", err)
 	}
 	var entries []any
-	json.Unmarshal([]byte(out), &entries)
+	if err := json.Unmarshal([]byte(out), &entries); err != nil {
+		t.Fatalf("parse output: %v", err)
+	}
 	if len(entries) != 2 {
 		t.Errorf("expected 2 entries with max=2, got %d", len(entries))
 	}

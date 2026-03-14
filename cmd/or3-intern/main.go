@@ -344,13 +344,13 @@ func main() {
 	case "chat":
 		rt.Streamer = del
 		_ = channelManager.Start(ctx, "cli", b)
-		runWorkers(ctx, b, rt, cfg.WorkerCount)
+		runWorkers(ctx, b, rt, cfg.WorkerCount, spinner)
 		ch := &cli.Channel{Bus: b, SessionKey: cfg.DefaultSessionKey, Spinner: spinner}
 		if err := ch.Run(ctx); err != nil {
 			fmt.Fprintln(os.Stderr, "cli error:", err)
 		}
 	case "serve":
-		runWorkers(ctx, b, rt, cfg.WorkerCount)
+		runWorkers(ctx, b, rt, cfg.WorkerCount, nil)
 		if err := channelManager.StartAll(ctx, b); err != nil {
 			fmt.Fprintln(os.Stderr, "channel start error:", err)
 			os.Exit(1)
@@ -361,7 +361,9 @@ func main() {
 			fmt.Fprintln(os.Stderr, "webhook start error:", err)
 			os.Exit(1)
 		}
-		defer webhookSrv.Stop(context.Background())
+		defer func() {
+			_ = webhookSrv.Stop(context.Background())
+		}()
 		// start file watcher if configured
 		fileWatcher := triggers.NewFileWatcher(cfg.Triggers.FileWatch, b, cfg.DefaultSessionKey)
 		fileWatcher.Start(ctx)
@@ -373,7 +375,7 @@ func main() {
 		fmt.Println("or3-intern serve: channels running. Ctrl+C to stop.")
 		<-ctx.Done()
 	case "service":
-		runWorkers(ctx, b, rt, cfg.WorkerCount)
+		runWorkers(ctx, b, rt, cfg.WorkerCount, nil)
 		if err := runServiceCommand(ctx, cfg, rt, subagentManager, serviceJobs); err != nil {
 			fmt.Fprintln(os.Stderr, "service error:", err)
 			os.Exit(1)
@@ -670,7 +672,7 @@ func heartbeatServiceForCommand(cmd string, cfg config.Config, eventBus *bus.Bus
 	return heartbeat.New(cfg.Heartbeat, cfg.WorkspaceDir, eventBus)
 }
 
-func runWorkers(ctx context.Context, b *bus.Bus, rt *agent.Runtime, n int) {
+func runWorkers(ctx context.Context, b *bus.Bus, rt *agent.Runtime, n int, spinner *cli.Spinner) {
 	if n <= 0 {
 		n = 4
 	}
@@ -679,7 +681,11 @@ func runWorkers(ctx context.Context, b *bus.Bus, rt *agent.Runtime, n int) {
 			for ev := range b.Channel() {
 				cctx, cancel := agent.WithTimeout(ctx, 120)
 				if err := rt.Handle(cctx, ev); err != nil {
-					log.Printf("handle event failed: type=%s session=%s err=%v", ev.Type, ev.SessionKey, err)
+					if ev.Channel == "cli" {
+						cli.ShowError(spinner, err)
+					} else {
+						log.Printf("handle event failed: type=%s session=%s err=%v", ev.Type, ev.SessionKey, err)
+					}
 				}
 				cancel()
 			}

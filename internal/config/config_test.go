@@ -7,6 +7,13 @@ import (
 	"testing"
 )
 
+func mustWriteTestFile(t *testing.T, path string, data []byte) {
+	t.Helper()
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("WriteFile(%s): %v", path, err)
+	}
+}
+
 func clearConfigEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
@@ -513,7 +520,7 @@ func TestLoad_ValidFile(t *testing.T) {
 		},
 	}
 	b, _ := json.MarshalIndent(input, "", "  ")
-	os.WriteFile(path, b, 0o644)
+	mustWriteTestFile(t, path, b)
 
 	cfg, err := Load(path)
 	if err != nil {
@@ -569,7 +576,7 @@ func TestLoad_InvalidJSON(t *testing.T) {
 	clearConfigEnv(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
-	os.WriteFile(path, []byte("{invalid json"), 0o644)
+	mustWriteTestFile(t, path, []byte("{invalid json"))
 
 	_, err := Load(path)
 	if err == nil {
@@ -584,7 +591,7 @@ func TestLoad_EnvOverrides(t *testing.T) {
 
 	// Write valid default config
 	b, _ := json.MarshalIndent(Default(), "", "  ")
-	os.WriteFile(path, b, 0o644)
+	mustWriteTestFile(t, path, b)
 
 	// Set env vars
 	t.Setenv("OR3_DB_PATH", "/env/test.db")
@@ -656,7 +663,7 @@ func TestLoad_ArtifactsDirEnvOverride(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	b, _ := json.MarshalIndent(Default(), "", "  ")
-	os.WriteFile(path, b, 0o644)
+	mustWriteTestFile(t, path, b)
 
 	t.Setenv("OR3_ARTIFACTS_DIR", "/env/artifacts")
 
@@ -674,7 +681,7 @@ func TestLoad_ChannelEnvOverrides(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	b, _ := json.MarshalIndent(Default(), "", "  ")
-	os.WriteFile(path, b, 0o644)
+	mustWriteTestFile(t, path, b)
 
 	t.Setenv("OR3_TELEGRAM_TOKEN", "telegram-token")
 	t.Setenv("OR3_SLACK_APP_TOKEN", "slack-app")
@@ -702,7 +709,7 @@ func TestLoad_ZeroValues_GetDefaults(t *testing.T) {
 	// config with zero values
 	input := Config{}
 	b, _ := json.MarshalIndent(input, "", "  ")
-	os.WriteFile(path, b, 0o644)
+	mustWriteTestFile(t, path, b)
 
 	cfg, err := Load(path)
 	if err != nil {

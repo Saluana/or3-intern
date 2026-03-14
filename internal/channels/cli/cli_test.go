@@ -9,6 +9,13 @@ import (
 	"or3-intern/internal/bus"
 )
 
+func mustWriteInput(t *testing.T, w *os.File, input string) {
+	t.Helper()
+	if _, err := w.WriteString(input); err != nil {
+		t.Fatalf("WriteString: %v", err)
+	}
+}
+
 func TestChannel_Run_Exit(t *testing.T) {
 	// Create a pipe to simulate stdin
 	r, w, err := os.Pipe()
@@ -29,8 +36,8 @@ func TestChannel_Run_Exit(t *testing.T) {
 
 	// Write /exit command
 	go func() {
-		w.WriteString("/exit\n")
-		w.Close()
+		mustWriteInput(t, w, "/exit\n")
+		_ = w.Close()
 	}()
 
 	done := make(chan error, 1)
@@ -66,14 +73,16 @@ func TestChannel_Run_PublishesMessage(t *testing.T) {
 
 	// Write a message then exit
 	go func() {
-		w.WriteString("hello world\n")
-		w.WriteString("/exit\n")
-		w.Close()
+		mustWriteInput(t, w, "hello world\n")
+		mustWriteInput(t, w, "/exit\n")
+		_ = w.Close()
 	}()
 
 	done := make(chan struct{})
 	go func() {
-		ch.Run(context.Background())
+		if err := ch.Run(context.Background()); err != nil {
+			t.Errorf("Run: %v", err)
+		}
 		close(done)
 	}()
 
@@ -113,16 +122,18 @@ func TestChannel_Run_SkipsBlankLines(t *testing.T) {
 	ch := &Channel{Bus: b, SessionKey: "test"}
 
 	go func() {
-		w.WriteString("  \n") // blank line
-		w.WriteString("\n")   // empty
-		w.WriteString("real message\n")
-		w.WriteString("/exit\n")
-		w.Close()
+		mustWriteInput(t, w, "  \n")
+		mustWriteInput(t, w, "\n")
+		mustWriteInput(t, w, "real message\n")
+		mustWriteInput(t, w, "/exit\n")
+		_ = w.Close()
 	}()
 
 	done := make(chan struct{})
 	go func() {
-		ch.Run(context.Background())
+		if err := ch.Run(context.Background()); err != nil {
+			t.Errorf("Run: %v", err)
+		}
 		close(done)
 	}()
 
@@ -155,14 +166,16 @@ func TestChannel_Run_DefaultSessionKey(t *testing.T) {
 	ch := &Channel{Bus: b}
 
 	go func() {
-		w.WriteString("msg\n")
-		w.WriteString("/exit\n")
-		w.Close()
+		mustWriteInput(t, w, "msg\n")
+		mustWriteInput(t, w, "/exit\n")
+		_ = w.Close()
 	}()
 
 	done := make(chan struct{})
 	go func() {
-		ch.Run(context.Background())
+		if err := ch.Run(context.Background()); err != nil {
+			t.Errorf("Run: %v", err)
+		}
 		close(done)
 	}()
 
@@ -199,9 +212,9 @@ func TestChannel_Run_FullBus(t *testing.T) {
 
 	go func() {
 		// This message should be dropped (bus full) but not crash
-		w.WriteString("dropped message\n")
-		w.WriteString("/exit\n")
-		w.Close()
+		mustWriteInput(t, w, "dropped message\n")
+		mustWriteInput(t, w, "/exit\n")
+		_ = w.Close()
 	}()
 
 	done := make(chan error, 1)
@@ -252,4 +265,3 @@ func TestChannel_Run_EOFOnStdin(t *testing.T) {
 		t.Fatal("timeout")
 	}
 }
-

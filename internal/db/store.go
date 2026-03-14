@@ -485,7 +485,9 @@ func (d *DB) WriteConsolidation(ctx context.Context, w ConsolidationWrite) (int6
 	if err != nil {
 		return 0, err
 	}
-	defer tx.Rollback()
+	defer func() {
+		_ = tx.Rollback()
+	}()
 
 	var noteID int64
 	if strings.TrimSpace(w.NoteText) != "" {
@@ -534,7 +536,11 @@ func (d *DB) ResetSessionHistory(ctx context.Context, sessionKey string) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() {
+		if rollbackErr := tx.Rollback(); rollbackErr != nil && rollbackErr != sql.ErrTxDone {
+			panic(rollbackErr)
+		}
+	}()
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM messages WHERE session_key=?`, sessionKey); err != nil {
 		return err
@@ -566,7 +572,9 @@ func (d *DB) EnqueueSubagentJobLimited(ctx context.Context, job SubagentJob, max
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() {
+		_ = tx.Rollback()
+	}()
 	if err := ensureSessionTx(ctx, tx, job.ParentSessionKey); err != nil {
 		return err
 	}
@@ -671,7 +679,9 @@ func (d *DB) ClaimNextSubagentJob(ctx context.Context) (*SubagentJob, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback()
+	defer func() {
+		_ = tx.Rollback()
+	}()
 
 	row := tx.QueryRowContext(ctx,
 		`SELECT id, parent_session_key, child_session_key, channel, reply_to, task, status,
@@ -713,7 +723,9 @@ func (d *DB) AbortQueuedSubagentJob(ctx context.Context, id, errText string) (Su
 	if err != nil {
 		return SubagentJob{}, false, err
 	}
-	defer tx.Rollback()
+	defer func() {
+		_ = tx.Rollback()
+	}()
 
 	row := tx.QueryRowContext(ctx,
 		`SELECT id, parent_session_key, child_session_key, channel, reply_to, task, status,
@@ -797,7 +809,9 @@ func (d *DB) FinalizeSubagentJob(ctx context.Context, job SubagentJob, status, p
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() {
+		_ = tx.Rollback()
+	}()
 	res, err := tx.ExecContext(ctx,
 		`UPDATE subagent_jobs
 		 SET status=?, result_preview=?, artifact_id=?, error_text=?, finished_at=?

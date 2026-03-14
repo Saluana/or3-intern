@@ -884,22 +884,6 @@ func (c *Channel) fromAddress() string {
 	return normalizeAddress(c.Config.IMAPUsername)
 }
 
-func truthyMeta(meta map[string]any, key string) bool {
-	if len(meta) == 0 {
-		return false
-	}
-	value, exists := meta[key]
-	if !exists {
-		return false
-	}
-	switch cast := value.(type) {
-	case bool:
-		return cast
-	default:
-		return strings.EqualFold(strings.TrimSpace(fmt.Sprint(value)), "true")
-	}
-}
-
 func hasNonEmpty(values []string) bool {
 	for _, value := range values {
 		if strings.TrimSpace(value) != "" {

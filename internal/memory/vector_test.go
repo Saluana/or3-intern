@@ -172,7 +172,9 @@ func TestVectorSearch_Results(t *testing.T) {
 	}
 	for i, v := range vecs {
 		blob := PackFloat32(v)
-		d.InsertMemoryNote(ctx, "session1", []string{"first", "second", "third"}[i], blob, sql.NullInt64{}, "")
+		if _, err := d.InsertMemoryNote(ctx, "session1", []string{"first", "second", "third"}[i], blob, sql.NullInt64{}, ""); err != nil {
+			t.Fatalf("InsertMemoryNote: %v", err)
+		}
 	}
 
 	// Query similar to {1, 0}
@@ -206,10 +208,14 @@ func TestVectorSearch_InvalidEmbeddingSkipped(t *testing.T) {
 	ctx := context.Background()
 
 	// Insert a note with invalid embedding
-	d.InsertMemoryNote(ctx, "session1", "bad note", []byte{1, 2, 3}, sql.NullInt64{}, "")
+	if _, err := d.InsertMemoryNote(ctx, "session1", "bad note", []byte{1, 2, 3}, sql.NullInt64{}, ""); err != nil {
+		t.Fatalf("InsertMemoryNote bad: %v", err)
+	}
 	// Insert a good one
 	blob := PackFloat32([]float32{1, 0})
-	d.InsertMemoryNote(ctx, "session1", "good note", blob, sql.NullInt64{}, "")
+	if _, err := d.InsertMemoryNote(ctx, "session1", "good note", blob, sql.NullInt64{}, ""); err != nil {
+		t.Fatalf("InsertMemoryNote good: %v", err)
+	}
 
 	results, err := VectorSearch(ctx, d, "session1", []float32{1, 0}, 5, 100)
 	if err != nil {
@@ -230,7 +236,9 @@ func TestVectorSearch_KLimit(t *testing.T) {
 	// Insert 5 notes
 	for i := 0; i < 5; i++ {
 		blob := PackFloat32([]float32{float32(i), 0})
-		d.InsertMemoryNote(ctx, "session1", "note", blob, sql.NullInt64{}, "")
+		if _, err := d.InsertMemoryNote(ctx, "session1", "note", blob, sql.NullInt64{}, ""); err != nil {
+			t.Fatalf("InsertMemoryNote %d: %v", i, err)
+		}
 	}
 
 	results, err := VectorSearch(ctx, d, "session1", []float32{4, 0}, 3, 100)

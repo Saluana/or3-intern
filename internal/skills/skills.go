@@ -133,25 +133,25 @@ type SkillMeta struct {
 	CommandTool            string
 	CommandArgMode         string
 
-	Metadata        SkillRuntimeMeta
-	Permissions     SkillPermissions
-	AllowedTools    []string
-	PermissionState string
-	PermissionNotes []string
-	Publisher       string
-	Registry        string
+	Metadata         SkillRuntimeMeta
+	Permissions      SkillPermissions
+	AllowedTools     []string
+	PermissionState  string
+	PermissionNotes  []string
+	Publisher        string
+	Registry         string
 	InstalledVersion string
-	Modified        bool
-	ScanStatus      string
-	ScanFindings    []string
-	Key             string
-	Eligible        bool
-	Disabled        bool
-	Hidden          bool
-	Missing         []string
-	Unsupported     []string
-	ParseError      string
-	RuntimeEnv      map[string]string
+	Modified         bool
+	ScanStatus       string
+	ScanFindings     []string
+	Key              string
+	Eligible         bool
+	Disabled         bool
+	Hidden           bool
+	Missing          []string
+	Unsupported      []string
+	ParseError       string
+	RuntimeEnv       map[string]string
 
 	sourcePriority int
 	rootOrder      int

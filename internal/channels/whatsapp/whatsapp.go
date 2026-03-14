@@ -87,13 +87,11 @@ func (c *Channel) Deliver(ctx context.Context, to, text string, meta map[string]
 		}
 		cmd["attachments"] = attachments
 	}
-	if meta != nil {
-		for k, v := range meta {
-			if k == "media_paths" {
-				continue
-			}
-			cmd[k] = v
+	for k, v := range meta {
+		if k == "media_paths" {
+			continue
 		}
+		cmd[k] = v
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()

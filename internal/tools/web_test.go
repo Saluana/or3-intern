@@ -236,7 +236,9 @@ func TestWebSearch_Success(t *testing.T) {
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			t.Fatalf("Encode: %v", err)
+		}
 	}))
 	defer srv.Close()
 
@@ -294,7 +296,9 @@ func TestWebSearch_DefaultCount(t *testing.T) {
 			t.Errorf("expected count=5, got %q", count)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"web": map[string]any{"results": []any{}}})
+		if err := json.NewEncoder(w).Encode(map[string]any{"web": map[string]any{"results": []any{}}}); err != nil {
+			t.Fatalf("Encode: %v", err)
+		}
 	}))
 	defer srv.Close()
 
@@ -305,7 +309,9 @@ func TestWebSearch_DefaultCount(t *testing.T) {
 		},
 	}
 
-	tool.Execute(context.Background(), map[string]any{"query": "test"})
+	if _, err := tool.Execute(context.Background(), map[string]any{"query": "test"}); err != nil {
+		t.Fatalf("WebSearch default count: %v", err)
+	}
 }
 
 func TestWebSearch_MaxCountCapped(t *testing.T) {
@@ -315,7 +321,9 @@ func TestWebSearch_MaxCountCapped(t *testing.T) {
 			t.Errorf("expected count capped at 10, got %q", count)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"web": map[string]any{"results": []any{}}})
+		if err := json.NewEncoder(w).Encode(map[string]any{"web": map[string]any{"results": []any{}}}); err != nil {
+			t.Fatalf("Encode: %v", err)
+		}
 	}))
 	defer srv.Close()
 
@@ -326,10 +334,12 @@ func TestWebSearch_MaxCountCapped(t *testing.T) {
 		},
 	}
 
-	tool.Execute(context.Background(), map[string]any{
+	if _, err := tool.Execute(context.Background(), map[string]any{
 		"query": "test",
 		"count": float64(100), // exceeds default max of 10
-	})
+	}); err != nil {
+		t.Fatalf("WebSearch capped count: %v", err)
+	}
 }
 
 func TestWebSearch_Name(t *testing.T) {

@@ -210,6 +210,58 @@ func TestRuntime_Streaming_AbortOnToolCalls(t *testing.T) {
 	}
 }
 
+func TestRuntime_Streaming_AbortPartialTextWhenToolCallsFollow(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "text/event-stream")
+		if callCount == 1 {
+			fmt.Fprintln(w, `data: {"id":"1","choices":[{"delta":{"content":"draft"},"finish_reason":""}]}`)
+			fmt.Fprintln(w, `data: {"id":"1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"exec","arguments":"{\"cmd\":\"echo hi\"}"}}]},"finish_reason":"tool_calls"}]}`)
+			fmt.Fprintln(w, `data: [DONE]`)
+			return
+		}
+		fmt.Fprintln(w, `data: {"id":"2","choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}`)
+		fmt.Fprintln(w, `data: [DONE]`)
+	}))
+	defer srv.Close()
+
+	prov := providers.New(srv.URL, "key", 10*time.Second)
+	prov.HTTP = srv.Client()
+	rt := buildSimpleRuntime(t, prov, d, &mockDeliverer{})
+
+	writers := []*mockStreamWriter{}
+	rt.Streamer = &funcStreamer{fn: func() (channels.StreamWriter, error) {
+		w := &mockStreamWriter{}
+		writers = append(writers, w)
+		return w, nil
+	}}
+
+	err := rt.Handle(context.Background(), bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess-partial-tool",
+		Channel:    "cli",
+		From:       "user",
+		Message:    "run something",
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(writers) != 2 {
+		t.Fatalf("expected 2 stream writers, got %d", len(writers))
+	}
+	if !writers[0].aborted {
+		t.Fatal("expected partial stream to be aborted")
+	}
+	if writers[0].closed {
+		t.Fatal("did not expect partial stream to be closed")
+	}
+	if !writers[1].closed {
+		t.Fatal("expected final stream to be closed")
+	}
+}
+
 // funcStreamer allows a custom function to create writers.
 type funcStreamer struct {
 	fn func() (channels.StreamWriter, error)

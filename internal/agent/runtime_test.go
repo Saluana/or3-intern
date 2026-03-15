@@ -1248,6 +1248,85 @@ func TestRuntime_Handle_ToolQuotaExceeded(t *testing.T) {
 	}
 }
 
+func TestRuntime_ExecuteConversation_ReturnsErrorWhenToolLoopBudgetExhausted(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		resp := providers.ChatCompletionResponse{Choices: []struct {
+			Message struct {
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			} `json:"message"`
+		}{{Message: struct {
+			Role      string               `json:"role"`
+			Content   any                  `json:"content"`
+			ToolCalls []providers.ToolCall `json:"tool_calls"`
+		}{
+			Role: "assistant",
+			ToolCalls: []providers.ToolCall{{ID: fmt.Sprintf("loop-%d", callCount), Type: "function", Function: struct {
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			}{Name: "echo_tool", Arguments: `{}`}}},
+		}}}}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	provider := providers.New(srv.URL, "key", 10*time.Second)
+	provider.HTTP = srv.Client()
+	reg := tools.NewRegistry()
+	reg.Register(&echoTool{})
+	rt := &Runtime{DB: d, Provider: provider, Model: "gpt-4", Tools: reg, Builder: &Builder{DB: d, HistoryMax: 10}, MaxToolLoops: 2}
+
+	_, _, err := rt.executeConversation(context.Background(), bus.EventUserMessage, "sess-loop-budget", []providers.ChatMessage{{Role: "user", Content: "loop forever"}}, reg, "cli", "user", nil)
+	if err == nil {
+		t.Fatal("expected loop exhaustion error")
+	}
+	if !strings.Contains(err.Error(), "max tool loops exceeded") {
+		t.Fatalf("expected loop exhaustion error, got %v", err)
+	}
+
+	msgs, err := d.GetLastMessages(context.Background(), "sess-loop-budget", 20)
+	if err != nil {
+		t.Fatalf("GetLastMessages: %v", err)
+	}
+	for _, msg := range msgs {
+		if msg.Role == "assistant" && msg.Content == "(no response)" {
+			t.Fatalf("unexpected fake final assistant message persisted: %#v", msgs)
+		}
+	}
+}
+
+func TestRuntime_IncrementQuota_IsSerializedPerScope(t *testing.T) {
+	hardening := config.Default().Hardening
+	hardening.Quotas.MaxToolCalls = 1000
+	rt := &Runtime{Hardening: hardening}
+
+	const workers = 64
+	errCh := make(chan error, workers)
+	start := make(chan struct{})
+	for i := 0; i < workers; i++ {
+		go func() {
+			<-start
+			errCh <- rt.incrementQuota("shared-scope", "echo_tool")
+		}()
+	}
+	close(start)
+	for i := 0; i < workers; i++ {
+		if err := <-errCh; err != nil {
+			t.Fatalf("incrementQuota: %v", err)
+		}
+	}
+
+	state := rt.sessionQuotaState("shared-scope")
+	if state.ToolCalls != workers {
+		t.Fatalf("expected %d serialized tool calls, got %d", workers, state.ToolCalls)
+	}
+}
+
 func TestRuntime_Handle_ToolContextIncludesDelivery(t *testing.T) {
 	d := openRuntimeTestDB(t)
 	callCount := 0
@@ -1720,19 +1799,19 @@ func TestToToolDefs_WithRegistry(t *testing.T) {
 	}
 }
 
-func TestRuntime_LockFor_SameKey(t *testing.T) {
+func TestRuntime_GetSessionLock_SameKey(t *testing.T) {
 	rt := &Runtime{}
-	mu1 := rt.lockFor("key1")
-	mu2 := rt.lockFor("key1")
+	mu1 := &rt.getSessionLock("key1").mu
+	mu2 := &rt.getSessionLock("key1").mu
 	if mu1 != mu2 {
 		t.Error("expected same mutex for same key")
 	}
 }
 
-func TestRuntime_LockFor_DifferentKeys(t *testing.T) {
+func TestRuntime_GetSessionLock_DifferentKeys(t *testing.T) {
 	rt := &Runtime{}
-	mu1 := rt.lockFor("key1")
-	mu2 := rt.lockFor("key2")
+	mu1 := &rt.getSessionLock("key1").mu
+	mu2 := &rt.getSessionLock("key2").mu
 	if mu1 == mu2 {
 		t.Error("expected different mutexes for different keys")
 	}

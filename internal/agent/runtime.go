@@ -106,10 +106,6 @@ type BackgroundRunResult struct {
 	ArtifactID string
 }
 
-func (r *Runtime) lockFor(key string) *sync.Mutex {
-	return &r.getSessionLock(key).mu
-}
-
 func (r *Runtime) acquireSessionLock(key string) *sessionLock {
 	r.locksMu.Lock()
 	if r.locks == nil {
@@ -631,7 +627,7 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 
 		// Tool-call turn: close any partial stream that showed text.
 		if sw != nil {
-			_ = sw.Close(ctx, contentToString(msg.Content))
+			_ = sw.Abort(ctx)
 		}
 
 		messages = append(messages, providers.ChatMessage{Role: "assistant", Content: msg.Content, ToolCalls: msg.ToolCalls})
@@ -671,7 +667,7 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 			messages = append(messages, providers.ChatMessage{Role: "tool", ToolCallID: tc.ID, Content: sendOut})
 		}
 	}
-	return "(no response)", false, nil
+	return "", false, fmt.Errorf("max tool loops exceeded for session %s", sessionKey)
 }
 
 func (r *Runtime) effectiveTools(ctx context.Context, fallback *tools.Registry) *tools.Registry {
@@ -724,25 +720,7 @@ func (r *Runtime) guardToolExecution(ctx context.Context, tool tools.Tool, capab
 	if !r.Hardening.Quotas.Enabled {
 		return nil
 	}
-	state := r.sessionQuotaState(tools.SessionFromContext(ctx))
-	if err := quotaIncrement(&state.ToolCalls, r.Hardening.Quotas.MaxToolCalls, "tool calls", tool.Name()); err != nil {
-		return err
-	}
-	switch tool.Name() {
-	case "exec", "run_skill_script":
-		if err := quotaIncrement(&state.ExecCalls, r.Hardening.Quotas.MaxExecCalls, "exec calls", tool.Name()); err != nil {
-			return err
-		}
-	case "web_fetch", "web_search":
-		if err := quotaIncrement(&state.WebCalls, r.Hardening.Quotas.MaxWebCalls, "web calls", tool.Name()); err != nil {
-			return err
-		}
-	case "spawn_subagent":
-		if err := quotaIncrement(&state.SubagentCalls, r.Hardening.Quotas.MaxSubagentCalls, "subagent calls", tool.Name()); err != nil {
-			return err
-		}
-	}
-	return nil
+	return r.incrementQuota(tools.SessionFromContext(ctx), tool.Name())
 }
 
 func (r *Runtime) enforceSkillPolicy(ctx context.Context, tool tools.Tool, params map[string]any) error {
@@ -1008,6 +986,26 @@ func formatToolExecutionError(out string, err error) string {
 	return out + "\n\nerror: " + err.Error()
 }
 
+func (r *Runtime) incrementQuota(sessionKey string, toolName string) error {
+	r.quotaMu.Lock()
+	defer r.quotaMu.Unlock()
+
+	state := r.sessionQuotaStateLocked(sessionKey)
+	if err := quotaIncrement(&state.ToolCalls, r.Hardening.Quotas.MaxToolCalls, "tool calls", toolName); err != nil {
+		return err
+	}
+	switch toolName {
+	case "exec", "run_skill_script":
+		return quotaIncrement(&state.ExecCalls, r.Hardening.Quotas.MaxExecCalls, "exec calls", toolName)
+	case "web_fetch", "web_search":
+		return quotaIncrement(&state.WebCalls, r.Hardening.Quotas.MaxWebCalls, "web calls", toolName)
+	case "spawn_subagent":
+		return quotaIncrement(&state.SubagentCalls, r.Hardening.Quotas.MaxSubagentCalls, "subagent calls", toolName)
+	default:
+		return nil
+	}
+}
+
 func (r *Runtime) sessionQuotaState(sessionKey string) *sessionQuotaState {
 	sessionKey = strings.TrimSpace(sessionKey)
 	if sessionKey == "" {
@@ -1015,6 +1013,10 @@ func (r *Runtime) sessionQuotaState(sessionKey string) *sessionQuotaState {
 	}
 	r.quotaMu.Lock()
 	defer r.quotaMu.Unlock()
+	return r.sessionQuotaStateLocked(sessionKey)
+}
+
+func (r *Runtime) sessionQuotaStateLocked(sessionKey string) *sessionQuotaState {
 	if r.quotas == nil {
 		r.quotas = map[string]*sessionQuotaState{}
 	}

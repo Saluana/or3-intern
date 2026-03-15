@@ -77,20 +77,19 @@ func (d *DB) EnsureSession(ctx context.Context, key string) error {
 }
 
 func (d *DB) AppendMessage(ctx context.Context, sessionKey, role, content string, payload any) (int64, error) {
-	if err := d.EnsureSession(ctx, sessionKey); err != nil {
-		return 0, err
-	}
-	pb, _ := json.Marshal(payload)
-	now := NowMS()
-	res, err := d.SQL.ExecContext(ctx,
-		`INSERT INTO messages(session_key, role, content, payload_json, created_at) VALUES(?,?,?,?,?)`,
-		sessionKey, role, content, string(pb), now)
+	tx, err := d.SQL.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
-	id, _ := res.LastInsertId()
-	if _, err := d.SQL.ExecContext(ctx, `UPDATE sessions SET updated_at=? WHERE key=?`, now, sessionKey); err != nil {
-		return id, err
+	defer func() {
+		_ = tx.Rollback()
+	}()
+	id, err := appendMessageTx(ctx, tx, sessionKey, role, content, payload)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
 	}
 	return id, nil
 }
@@ -406,8 +405,11 @@ func (d *DB) GetConsolidationRange(ctx context.Context, sessionKey string, histo
 	row := d.SQL.QueryRowContext(ctx,
 		`SELECT last_consolidated_msg_id FROM sessions WHERE key=?`, sessionKey)
 	if scanErr := row.Scan(&lastConsolidatedID); scanErr != nil {
-		// Session row not found yet → nothing to consolidate.
-		return 0, 0, nil
+		if errors.Is(scanErr, sql.ErrNoRows) {
+			// Session row not found yet → nothing to consolidate.
+			return 0, 0, nil
+		}
+		return 0, 0, scanErr
 	}
 
 	// Oldest ID in the active window (last historyMax messages).

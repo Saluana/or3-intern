@@ -328,6 +328,33 @@ func TestAppendMessage_WithPayload(t *testing.T) {
 	}
 }
 
+func TestAppendMessage_RollsBackWhenSessionUpdateFails(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	if _, err := d.SQL.ExecContext(ctx, `
+		CREATE TRIGGER sessions_update_fail
+		BEFORE UPDATE ON sessions
+		BEGIN
+			SELECT RAISE(FAIL, 'session update failed');
+		END;`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	_, err := d.AppendMessage(ctx, "session1", "user", "hello", nil)
+	if err == nil {
+		t.Fatal("expected append failure")
+	}
+
+	msgs, err := d.GetLastMessages(ctx, "session1", 10)
+	if err != nil {
+		t.Fatalf("GetLastMessages: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("expected rolled-back message insert, got %#v", msgs)
+	}
+}
+
 func TestGetLastMessages_Empty(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
@@ -685,6 +712,17 @@ func TestGetConsolidationRange_NoSession(t *testing.T) {
 	}
 	if lastID != 0 || oldestID != 0 {
 		t.Errorf("expected (0,0) for missing session, got (%d,%d)", lastID, oldestID)
+	}
+}
+
+func TestGetConsolidationRange_PropagatesQueryErrors(t *testing.T) {
+	d := openTestDB(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, _, err := d.GetConsolidationRange(ctx, "sess", 10)
+	if err == nil {
+		t.Fatal("expected query error for canceled context")
 	}
 }
 

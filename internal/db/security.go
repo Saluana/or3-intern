@@ -110,7 +110,7 @@ func (d *DB) AppendAuditEvent(ctx context.Context, input AuditEventInput, key []
 	var previous []byte
 	if err := row.Scan(&previous); err == nil {
 		prevHash = append([]byte{}, previous...)
-	} else if err != nil && err != sql.ErrNoRows {
+	} else if err != sql.ErrNoRows {
 		return err
 	}
 	createdAt := NowMS()

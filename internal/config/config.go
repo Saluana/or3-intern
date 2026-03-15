@@ -1,3 +1,5 @@
+// Package config defines the persisted runtime configuration and validation
+// rules for or3-intern.
 package config
 
 import (
@@ -16,10 +18,15 @@ import (
 type RuntimeProfile string
 
 const (
-	ProfileLocalDev            RuntimeProfile = "local-dev"
-	ProfileSingleUserHardened  RuntimeProfile = "single-user-hardened"
-	ProfileHostedService       RuntimeProfile = "hosted-service"
-	ProfileHostedNoExec        RuntimeProfile = "hosted-no-exec"
+	// ProfileLocalDev is the default profile for local development workflows.
+	ProfileLocalDev RuntimeProfile = "local-dev"
+	// ProfileSingleUserHardened tightens local defaults for a single trusted user.
+	ProfileSingleUserHardened RuntimeProfile = "single-user-hardened"
+	// ProfileHostedService enables the safeguards required for hosted operation.
+	ProfileHostedService RuntimeProfile = "hosted-service"
+	// ProfileHostedNoExec disables direct execution in hosted deployments.
+	ProfileHostedNoExec RuntimeProfile = "hosted-no-exec"
+	// ProfileHostedRemoteSandbox requires sandboxed execution for hosted use.
 	ProfileHostedRemoteSandbox RuntimeProfile = "hosted-remote-sandbox-only"
 )
 
@@ -86,6 +93,7 @@ func ProfileSpec(p RuntimeProfile) RuntimeProfileSpec {
 	}
 }
 
+// Config is the top-level persisted runtime configuration.
 type Config struct {
 	DBPath                 string `json:"dbPath"`
 	ArtifactsDir           string `json:"artifactsDir"`
@@ -133,6 +141,7 @@ type Config struct {
 	Channels  ChannelsConfig  `json:"channels"`
 }
 
+// HardeningConfig controls sandboxing, privilege gates, and per-tool quotas.
 type HardeningConfig struct {
 	GuardedTools        bool                 `json:"guardedTools"`
 	PrivilegedTools     bool                 `json:"privilegedTools"`
@@ -144,6 +153,7 @@ type HardeningConfig struct {
 	Quotas              HardeningQuotaConfig `json:"quotas"`
 }
 
+// SandboxConfig defines how exec-capable tools are isolated.
 type SandboxConfig struct {
 	Enabled        bool     `json:"enabled"`
 	BubblewrapPath string   `json:"bubblewrapPath"`
@@ -151,6 +161,7 @@ type SandboxConfig struct {
 	WritablePaths  []string `json:"writablePaths"`
 }
 
+// HardeningQuotaConfig limits how many sensitive tool calls a turn may issue.
 type HardeningQuotaConfig struct {
 	Enabled          bool `json:"enabled"`
 	MaxToolCalls     int  `json:"maxToolCalls"`
@@ -159,6 +170,7 @@ type HardeningQuotaConfig struct {
 	MaxSubagentCalls int  `json:"maxSubagentCalls"`
 }
 
+// ProviderConfig selects the LLM and embedding provider endpoints and limits.
 type ProviderConfig struct {
 	APIBase        string  `json:"apiBase"`
 	APIKey         string  `json:"apiKey"`
@@ -169,6 +181,7 @@ type ProviderConfig struct {
 	TimeoutSeconds int     `json:"timeoutSeconds"`
 }
 
+// ToolsConfig configures built-in tools and external MCP server integrations.
 type ToolsConfig struct {
 	BraveAPIKey         string                     `json:"braveApiKey"`
 	WebProxy            string                     `json:"webProxy"`
@@ -178,19 +191,25 @@ type ToolsConfig struct {
 	MCPServers          map[string]MCPServerConfig `json:"mcpServers"`
 }
 
+// CronConfig enables persistence for scheduled background jobs.
 type CronConfig struct {
 	Enabled   bool   `json:"enabled"`
 	StorePath string `json:"storePath"`
 }
 
+// DefaultHeartbeatSessionKey is the fallback session key used by heartbeat turns.
 const DefaultHeartbeatSessionKey = "heartbeat:default"
 
 const (
-	DefaultMCPTransport             = "stdio"
+	// DefaultMCPTransport is the default transport for MCP servers.
+	DefaultMCPTransport = "stdio"
+	// DefaultMCPConnectTimeoutSeconds is the default MCP dial timeout.
 	DefaultMCPConnectTimeoutSeconds = 10
-	DefaultMCPToolTimeoutSeconds    = 30
+	// DefaultMCPToolTimeoutSeconds is the default timeout for a single MCP tool call.
+	DefaultMCPToolTimeoutSeconds = 30
 )
 
+// MCPServerConfig describes one configured MCP server entry.
 type MCPServerConfig struct {
 	Enabled               bool              `json:"enabled"`
 	Transport             string            `json:"transport"`
@@ -205,6 +224,7 @@ type MCPServerConfig struct {
 	AllowInsecureHTTP     bool              `json:"allowInsecureHttp"`
 }
 
+// HeartbeatConfig controls recurring heartbeat turns sourced from a tasks file.
 type HeartbeatConfig struct {
 	Enabled         bool   `json:"enabled"`
 	IntervalMinutes int    `json:"intervalMinutes"`
@@ -212,12 +232,14 @@ type HeartbeatConfig struct {
 	SessionKey      string `json:"sessionKey"`
 }
 
+// ServiceConfig configures the optional authenticated service listener.
 type ServiceConfig struct {
 	Enabled bool   `json:"enabled"`
 	Listen  string `json:"listen"`
 	Secret  string `json:"secret"`
 }
 
+// SubagentsConfig limits the internal subagent queue and worker pool.
 type SubagentsConfig struct {
 	Enabled            bool `json:"enabled"`
 	MaxConcurrent      int  `json:"maxConcurrent"`
@@ -225,6 +247,7 @@ type SubagentsConfig struct {
 	TaskTimeoutSeconds int  `json:"taskTimeoutSeconds"`
 }
 
+// TelegramChannelConfig configures Telegram ingress and delivery.
 type TelegramChannelConfig struct {
 	Enabled        bool     `json:"enabled"`
 	OpenAccess     bool     `json:"openAccess"`
@@ -235,6 +258,7 @@ type TelegramChannelConfig struct {
 	AllowedChatIDs []string `json:"allowedChatIds"`
 }
 
+// SlackChannelConfig configures Slack socket-mode ingress and delivery.
 type SlackChannelConfig struct {
 	Enabled          bool     `json:"enabled"`
 	OpenAccess       bool     `json:"openAccess"`
@@ -247,6 +271,7 @@ type SlackChannelConfig struct {
 	RequireMention   bool     `json:"requireMention"`
 }
 
+// DiscordChannelConfig configures Discord ingress and delivery.
 type DiscordChannelConfig struct {
 	Enabled          bool     `json:"enabled"`
 	OpenAccess       bool     `json:"openAccess"`
@@ -258,6 +283,7 @@ type DiscordChannelConfig struct {
 	RequireMention   bool     `json:"requireMention"`
 }
 
+// WhatsAppBridgeConfig configures the external WhatsApp bridge connection.
 type WhatsAppBridgeConfig struct {
 	Enabled     bool     `json:"enabled"`
 	OpenAccess  bool     `json:"openAccess"`
@@ -267,6 +293,7 @@ type WhatsAppBridgeConfig struct {
 	AllowedFrom []string `json:"allowedFrom"`
 }
 
+// EmailChannelConfig configures email polling, access control, and replies.
 type EmailChannelConfig struct {
 	Enabled             bool     `json:"enabled"`
 	OpenAccess          bool     `json:"openAccess"`
@@ -293,6 +320,7 @@ type EmailChannelConfig struct {
 	SMTPPassword        string   `json:"smtpPassword"`
 }
 
+// ChannelsConfig groups per-channel transport settings.
 type ChannelsConfig struct {
 	Telegram TelegramChannelConfig `json:"telegram"`
 	Slack    SlackChannelConfig    `json:"slack"`
@@ -301,6 +329,7 @@ type ChannelsConfig struct {
 	Email    EmailChannelConfig    `json:"email"`
 }
 
+// DocIndexConfig controls workspace document indexing for retrieval.
 type DocIndexConfig struct {
 	Enabled        bool     `json:"enabled"`
 	Roots          []string `json:"roots"`
@@ -312,6 +341,7 @@ type DocIndexConfig struct {
 	RetrieveLimit  int      `json:"retrieveLimit"`
 }
 
+// SkillsConfig controls managed skill loading, policy, and runtime behavior.
 type SkillsConfig struct {
 	EnableExec    bool                        `json:"enableExec"`
 	MaxRunSeconds int                         `json:"maxRunSeconds"`
@@ -322,6 +352,7 @@ type SkillsConfig struct {
 	ClawHub       ClawHubConfig               `json:"clawHub"`
 }
 
+// SkillPolicyConfig defines which external skills are trusted or blocked.
 type SkillPolicyConfig struct {
 	QuarantineByDefault bool     `json:"quarantineByDefault"`
 	Approved            []string `json:"approved"`
@@ -330,12 +361,14 @@ type SkillPolicyConfig struct {
 	TrustedRegistries   []string `json:"trustedRegistries"`
 }
 
+// SkillsLoadConfig controls additional skill directories and file watching.
 type SkillsLoadConfig struct {
 	ExtraDirs       []string `json:"extraDirs"`
 	Watch           bool     `json:"watch"`
 	WatchDebounceMS int      `json:"watchDebounceMs"`
 }
 
+// SkillEntryConfig overrides configuration for a single named skill.
 type SkillEntryConfig struct {
 	Enabled *bool             `json:"enabled,omitempty"`
 	APIKey  string            `json:"apiKey"`
@@ -343,12 +376,14 @@ type SkillEntryConfig struct {
 	Config  map[string]any    `json:"config"`
 }
 
+// ClawHubConfig configures the default remote skill registry.
 type ClawHubConfig struct {
 	SiteURL     string `json:"siteUrl"`
 	RegistryURL string `json:"registryUrl"`
 	InstallDir  string `json:"installDir"`
 }
 
+// WebhookConfig configures the webhook trigger listener.
 type WebhookConfig struct {
 	Enabled   bool   `json:"enabled"`
 	Addr      string `json:"addr"`
@@ -356,6 +391,7 @@ type WebhookConfig struct {
 	MaxBodyKB int    `json:"maxBodyKB"`
 }
 
+// FileWatchConfig configures filesystem-based trigger polling.
 type FileWatchConfig struct {
 	Enabled         bool     `json:"enabled"`
 	Paths           []string `json:"paths"`
@@ -363,21 +399,25 @@ type FileWatchConfig struct {
 	DebounceSeconds int      `json:"debounceSeconds"`
 }
 
+// TriggerConfig groups external trigger sources.
 type TriggerConfig struct {
 	Webhook   WebhookConfig   `json:"webhook"`
 	FileWatch FileWatchConfig `json:"fileWatch"`
 }
 
+// SessionConfig controls session-sharing defaults and identity links.
 type SessionConfig struct {
 	DirectMessagesShareDefault bool                  `json:"directMessagesShareDefault"`
 	IdentityLinks              []SessionIdentityLink `json:"identityLinks"`
 }
 
+// SessionIdentityLink maps a canonical identity to equivalent peer identities.
 type SessionIdentityLink struct {
 	Canonical string   `json:"canonical"`
 	Peers     []string `json:"peers"`
 }
 
+// SecurityConfig groups secret storage, auditing, profiles, and network policy.
 type SecurityConfig struct {
 	SecretStore SecretStoreConfig    `json:"secretStore"`
 	Audit       AuditConfig          `json:"audit"`
@@ -385,12 +425,14 @@ type SecurityConfig struct {
 	Network     NetworkPolicyConfig  `json:"network"`
 }
 
+// SecretStoreConfig configures encrypted secret persistence.
 type SecretStoreConfig struct {
 	Enabled  bool   `json:"enabled"`
 	Required bool   `json:"required"`
 	KeyFile  string `json:"keyFile"`
 }
 
+// AuditConfig configures append-only audit logging and verification.
 type AuditConfig struct {
 	Enabled       bool   `json:"enabled"`
 	Strict        bool   `json:"strict"`
@@ -398,6 +440,7 @@ type AuditConfig struct {
 	VerifyOnStart bool   `json:"verifyOnStart"`
 }
 
+// AccessProfilesConfig maps channels and triggers onto named access profiles.
 type AccessProfilesConfig struct {
 	Enabled  bool                           `json:"enabled"`
 	Default  string                         `json:"default"`
@@ -406,6 +449,7 @@ type AccessProfilesConfig struct {
 	Profiles map[string]AccessProfileConfig `json:"profiles"`
 }
 
+// AccessProfileConfig limits tools, hosts, and write paths for a profile.
 type AccessProfileConfig struct {
 	MaxCapability  string   `json:"maxCapability"`
 	AllowedTools   []string `json:"allowedTools"`
@@ -414,6 +458,7 @@ type AccessProfileConfig struct {
 	AllowSubagents bool     `json:"allowSubagents"`
 }
 
+// NetworkPolicyConfig defines outbound network restrictions.
 type NetworkPolicyConfig struct {
 	Enabled       bool     `json:"enabled"`
 	DefaultDeny   bool     `json:"defaultDeny"`
@@ -422,6 +467,7 @@ type NetworkPolicyConfig struct {
 	AllowPrivate  bool     `json:"allowPrivate"`
 }
 
+// Default returns the baseline configuration used for new installations.
 func Default() Config {
 	home, _ := os.UserHomeDir()
 	root := filepath.Join(home, ".or3-intern")
@@ -606,11 +652,13 @@ func Default() Config {
 	}
 }
 
+// DefaultPath returns the default on-disk config file path.
 func DefaultPath() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".or3-intern", "config.json")
 }
 
+// ApplyEnvOverrides applies supported OR3_* environment variable overrides in place.
 func ApplyEnvOverrides(cfg *Config) {
 	if cfg == nil {
 		return
@@ -718,6 +766,7 @@ func ApplyEnvOverrides(cfg *Config) {
 	}
 }
 
+// Save writes cfg to path using a private file mode.
 func Save(path string, cfg Config) error {
 	if path == "" {
 		path = DefaultPath()
@@ -731,6 +780,7 @@ func Save(path string, cfg Config) error {
 	return os.Chmod(path, 0o600)
 }
 
+// Load reads configuration from path, creating a default file when missing.
 func Load(path string) (Config, error) {
 	cfg := Default()
 	if path == "" {

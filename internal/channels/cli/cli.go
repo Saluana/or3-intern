@@ -1,3 +1,4 @@
+// Package cli implements the local interactive terminal channel.
 package cli
 
 import (
@@ -17,6 +18,7 @@ type Channel struct {
 	Spinner    *Spinner // shared with Deliverer so it can be stopped on output
 }
 
+// Run reads stdin, publishes user messages, and manages the interactive prompt.
 func (c *Channel) Run(ctx context.Context) error {
 	if c.SessionKey == "" {
 		c.SessionKey = "default"

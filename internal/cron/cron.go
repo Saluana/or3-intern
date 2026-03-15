@@ -1,3 +1,4 @@
+// Package cron stores and runs scheduled jobs backed by a JSON file.
 package cron
 
 import (
@@ -14,14 +15,19 @@ import (
 	"github.com/robfig/cron/v3"
 )
 
+// ScheduleKind identifies how a job's next run time is computed.
 type ScheduleKind string
 
 const (
-	KindAt    ScheduleKind = "at"
+	// KindAt runs a job once at an absolute Unix-millisecond timestamp.
+	KindAt ScheduleKind = "at"
+	// KindEvery runs a job on a fixed interval.
 	KindEvery ScheduleKind = "every"
-	KindCron  ScheduleKind = "cron"
+	// KindCron runs a job using a cron expression.
+	KindCron ScheduleKind = "cron"
 )
 
+// CronSchedule describes when a cron job should run.
 type CronSchedule struct {
 	Kind    ScheduleKind `json:"kind"`
 	AtMS    int64        `json:"at_ms,omitempty"`
@@ -30,6 +36,7 @@ type CronSchedule struct {
 	TZ      string       `json:"tz,omitempty"`
 }
 
+// CronPayload is the user-visible work queued when a job fires.
 type CronPayload struct {
 	Kind       string `json:"kind"` // "agent_turn"|"system_event"
 	Message    string `json:"message"`
@@ -39,6 +46,7 @@ type CronPayload struct {
 	SessionKey string `json:"session_key,omitempty"` // optional per-job session key override
 }
 
+// CronJobState records the latest execution result for a job.
 type CronJobState struct {
 	NextRunAtMS *int64 `json:"next_run_at_ms,omitempty"`
 	LastRunAtMS *int64 `json:"last_run_at_ms,omitempty"`
@@ -46,6 +54,7 @@ type CronJobState struct {
 	LastError   string `json:"last_error,omitempty"`
 }
 
+// CronJob is a persisted scheduled job definition.
 type CronJob struct {
 	ID             string       `json:"id"`
 	Name           string       `json:"name"`
@@ -58,13 +67,16 @@ type CronJob struct {
 	DeleteAfterRun bool         `json:"delete_after_run"`
 }
 
+// Store is the on-disk JSON document that holds scheduled jobs.
 type Store struct {
 	Version int       `json:"version"`
 	Jobs    []CronJob `json:"jobs"`
 }
 
+// Runner executes a single cron job when it becomes due.
 type Runner func(ctx context.Context, job CronJob) error
 
+// Service loads, schedules, and persists cron jobs. It is safe for concurrent use.
 type Service struct {
 	mu      sync.Mutex
 	path    string
@@ -73,6 +85,7 @@ type Service struct {
 	entries map[string]cron.EntryID
 }
 
+// New constructs a Service backed by path and runner.
 func New(path string, runner Runner) *Service {
 	return &Service{
 		path:    path,
@@ -116,6 +129,7 @@ func filepathDir(p string) string {
 	return p[:i]
 }
 
+// Start loads persisted jobs and arms the scheduler.
 func (s *Service) Start() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -136,6 +150,7 @@ func (s *Service) Start() error {
 	return nil
 }
 
+// Stop halts the scheduler and waits for the cron runner to stop.
 func (s *Service) Stop() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -147,6 +162,7 @@ func (s *Service) Stop() {
 	}
 }
 
+// Status reports the number of jobs and the earliest known next wake time.
 func (s *Service) Status() (map[string]any, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -169,6 +185,7 @@ func (s *Service) Status() (map[string]any, error) {
 	return map[string]any{"jobs": len(st.Jobs), "next_wake_at_ms": nextPtr}, nil
 }
 
+// List returns the persisted jobs in storage order.
 func (s *Service) List() ([]CronJob, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -179,6 +196,7 @@ func (s *Service) List() ([]CronJob, error) {
 	return st.Jobs, nil
 }
 
+// Add assigns missing identifiers, persists job, and arms it when possible.
 func (s *Service) Add(job CronJob) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -203,6 +221,7 @@ func (s *Service) Add(job CronJob) error {
 	return nil
 }
 
+// Remove deletes the job with id and reports whether one was found.
 func (s *Service) Remove(id string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -230,6 +249,9 @@ func (s *Service) Remove(id string) (bool, error) {
 	return found, nil
 }
 
+// RunNow runs the job with id immediately.
+//
+// When force is false, disabled jobs are skipped and reported as not run.
 func (s *Service) RunNow(ctx context.Context, id string, force bool) (bool, error) {
 	s.mu.Lock()
 	st, err := s.load()

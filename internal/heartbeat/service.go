@@ -1,3 +1,4 @@
+// Package heartbeat publishes recurring review events derived from a tasks file.
 package heartbeat
 
 import (
@@ -17,14 +18,20 @@ import (
 )
 
 const (
+	// DefaultChannel is the channel name used for emitted heartbeat events.
 	DefaultChannel = "system"
-	DefaultFrom    = "heartbeat"
-	SeedMessage    = "Review HEARTBEAT.md and execute any active recurring tasks."
+	// DefaultFrom is the sender name used for emitted heartbeat events.
+	DefaultFrom = "heartbeat"
+	// SeedMessage is the default instruction sent with a heartbeat event.
+	SeedMessage = "Review HEARTBEAT.md and execute any active recurring tasks."
 
+	// MetaKeyHeartbeat marks an event as originating from the heartbeat service.
 	MetaKeyHeartbeat = "heartbeat"
-	MetaKeyDone      = "heartbeat_done"
+	// MetaKeyDone stores a completion callback that clears the in-flight flag.
+	MetaKeyDone = "heartbeat_done"
 )
 
+// Service watches for recurring heartbeat work and publishes it onto the bus.
 type Service struct {
 	Config       config.HeartbeatConfig
 	WorkspaceDir string
@@ -40,6 +47,7 @@ type Service struct {
 	stopping  atomic.Bool
 }
 
+// New constructs a heartbeat service for cfg and workspaceDir.
 func New(cfg config.HeartbeatConfig, workspaceDir string, eventBus *bus.Bus) *Service {
 	return &Service{
 		Config:       cfg,
@@ -49,6 +57,7 @@ func New(cfg config.HeartbeatConfig, workspaceDir string, eventBus *bus.Bus) *Se
 	}
 }
 
+// Start launches the ticker and publisher goroutines when the service is enabled.
 func (s *Service) Start(ctx context.Context) {
 	if s == nil || !s.Config.Enabled || s.Bus == nil {
 		return
@@ -71,6 +80,7 @@ func (s *Service) Start(ctx context.Context) {
 	go s.runPublisher(childCtx)
 }
 
+// Stop cancels background work and waits for the service to drain.
 func (s *Service) Stop() {
 	if s == nil {
 		return
@@ -200,6 +210,8 @@ func (s *Service) processTick() {
 	}
 }
 
+// LoadTasksFile resolves and reads the heartbeat tasks file.
+// It returns the chosen path, trimmed contents, and any read error.
 func LoadTasksFile(configPath, workspaceDir string) (string, string, error) {
 	var firstErr error
 	for _, path := range candidatePaths(configPath, workspaceDir) {
@@ -220,6 +232,7 @@ func LoadTasksFile(configPath, workspaceDir string) (string, string, error) {
 	return strings.TrimSpace(configPath), "", os.ErrNotExist
 }
 
+// HasActiveInstructions reports whether text contains actionable non-comment content.
 func HasActiveInstructions(text string) bool {
 	inComment := false
 	for _, line := range strings.Split(text, "\n") {

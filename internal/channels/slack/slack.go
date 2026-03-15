@@ -1,3 +1,4 @@
+// Package slack implements the Slack socket-mode channel adapter.
 package slack
 
 import (
@@ -22,6 +23,7 @@ import (
 	"or3-intern/internal/config"
 )
 
+// Channel receives Slack events over Socket Mode and sends outbound messages.
 type Channel struct {
 	Config        config.SlackChannelConfig
 	HTTP          *http.Client
@@ -37,8 +39,10 @@ type Channel struct {
 	dedupe *rootchannels.IngressDeduplicator
 }
 
+// Name returns the registered channel name.
 func (c *Channel) Name() string { return "slack" }
 
+// Start opens the Socket Mode connection and begins reading events.
 func (c *Channel) Start(ctx context.Context, eventBus *bus.Bus) error {
 	if strings.TrimSpace(c.Config.AppToken) == "" || strings.TrimSpace(c.Config.BotToken) == "" {
 		return fmt.Errorf("slack tokens not configured")
@@ -64,6 +68,7 @@ func (c *Channel) Start(ctx context.Context, eventBus *bus.Bus) error {
 	return nil
 }
 
+// Stop closes the Socket Mode connection.
 func (c *Channel) Stop(ctx context.Context) error {
 	_ = ctx
 	c.mu.Lock()
@@ -79,6 +84,7 @@ func (c *Channel) Stop(ctx context.Context) error {
 	return nil
 }
 
+// Deliver posts a Slack message or uploads media attachments.
 func (c *Channel) Deliver(ctx context.Context, to, text string, meta map[string]any) error {
 	channelID := strings.TrimSpace(to)
 	if channelID == "" {

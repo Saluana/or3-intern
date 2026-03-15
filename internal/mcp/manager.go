@@ -1,3 +1,4 @@
+// Package mcp connects configured Model Context Protocol servers and exposes their tools.
 package mcp
 
 import (
@@ -30,6 +31,7 @@ type session interface {
 
 type connector func(ctx context.Context, name string, cfg config.MCPServerConfig) (session, error)
 
+// Manager owns MCP server sessions and the remote tools discovered from them.
 type Manager struct {
 	servers    map[string]config.MCPServerConfig
 	logf       func(string, ...any)
@@ -49,6 +51,7 @@ type remoteToolSpec struct {
 	session     session
 }
 
+// RemoteTool adapts one discovered MCP tool to the local tools.Tool interface.
 type RemoteTool struct {
 	tools.Base
 
@@ -61,8 +64,10 @@ type RemoteTool struct {
 	session     session
 }
 
+// Capability reports the trust level required to invoke the remote tool.
 func (t *RemoteTool) Capability() tools.CapabilityLevel { return tools.CapabilityGuarded }
 
+// NewManager constructs a Manager for the configured servers.
 func NewManager(servers map[string]config.MCPServerConfig) *Manager {
 	cloned := make(map[string]config.MCPServerConfig, len(servers))
 	for name, server := range servers {
@@ -78,6 +83,7 @@ func NewManager(servers map[string]config.MCPServerConfig) *Manager {
 	return mgr
 }
 
+// SetLogger installs a logger for connection and discovery failures.
 func (m *Manager) SetLogger(logf func(string, ...any)) {
 	if m == nil {
 		return
@@ -85,6 +91,7 @@ func (m *Manager) SetLogger(logf func(string, ...any)) {
 	m.logf = logf
 }
 
+// SetHostPolicy sets the outbound host policy used for remote transports.
 func (m *Manager) SetHostPolicy(policy security.HostPolicy) {
 	if m == nil {
 		return
@@ -92,6 +99,7 @@ func (m *Manager) SetHostPolicy(policy security.HostPolicy) {
 	m.hostPolicy = policy
 }
 
+// ToolNames returns the discovered local MCP tool names in sorted order.
 func (m *Manager) ToolNames() []string {
 	if m == nil {
 		return nil
@@ -104,6 +112,7 @@ func (m *Manager) ToolNames() []string {
 	return out
 }
 
+// Connect establishes sessions to enabled servers and discovers their tools.
 func (m *Manager) Connect(ctx context.Context) error {
 	if m == nil {
 		return nil
@@ -156,6 +165,7 @@ func (m *Manager) Connect(ctx context.Context) error {
 	return nil
 }
 
+// RegisterTools registers all discovered remote tools into reg.
 func (m *Manager) RegisterTools(reg *tools.Registry) int {
 	if m == nil || reg == nil {
 		return 0
@@ -166,6 +176,7 @@ func (m *Manager) RegisterTools(reg *tools.Registry) int {
 	return len(m.tools)
 }
 
+// Close closes all active sessions and clears discovered tools.
 func (m *Manager) Close() error {
 	if m == nil {
 		return nil
@@ -211,8 +222,10 @@ func (s remoteToolSpec) Tool() tools.Tool {
 	}
 }
 
+// Name returns the local tool name exposed to the runtime.
 func (t *RemoteTool) Name() string { return t.localName }
 
+// Description returns the remote tool description or a synthesized fallback.
 func (t *RemoteTool) Description() string {
 	if strings.TrimSpace(t.description) != "" {
 		return t.description
@@ -220,14 +233,17 @@ func (t *RemoteTool) Description() string {
 	return fmt.Sprintf("MCP tool %s from server %s.", t.remoteName, t.serverName)
 }
 
+// Parameters returns a cloned JSON-schema-like parameter description.
 func (t *RemoteTool) Parameters() map[string]any {
 	return cloneAnyMap(t.parameters)
 }
 
+// Schema returns the runtime tool schema for this remote tool.
 func (t *RemoteTool) Schema() map[string]any {
 	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
 }
 
+// Execute calls the remote tool and converts its result into plain text.
 func (t *RemoteTool) Execute(ctx context.Context, params map[string]any) (string, error) {
 	if t.session == nil {
 		return "", fmt.Errorf("mcp %s/%s: session not connected", t.serverName, t.remoteName)

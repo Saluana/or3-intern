@@ -14,12 +14,16 @@ type Deliverer struct {
 	Spinner *Spinner // shared with Channel; stopped before any output
 }
 
+// Name returns the registered channel name.
 func (Deliverer) Name() string { return "cli" }
 
+// Start is a no-op because the terminal deliverer has no background lifecycle.
 func (Deliverer) Start(ctx context.Context, eventBus *bus.Bus) error { return nil }
 
+// Stop is a no-op because the terminal deliverer has no background lifecycle.
 func (Deliverer) Stop(ctx context.Context) error { return nil }
 
+// Deliver renders a completed assistant response to stdout.
 func (d Deliverer) Deliver(ctx context.Context, channel, to, text string) error {
 	d.stopSpinner()
 	fmt.Print(FormatResponse(text))
@@ -38,6 +42,7 @@ func (d Deliverer) stopSpinner() {
 	}
 }
 
+// ShowError stops spinner and renders err to the terminal.
 func ShowError(spinner *Spinner, err error) {
 	if spinner != nil {
 		spinner.Stop()
@@ -65,6 +70,7 @@ type CLIStreamWriter struct {
 	spinner *Spinner
 }
 
+// WriteDelta appends one streamed text chunk to the terminal output.
 func (w *CLIStreamWriter) WriteDelta(ctx context.Context, text string) error {
 	if w.closed || w.aborted {
 		return nil
@@ -85,6 +91,7 @@ func (w *CLIStreamWriter) WriteDelta(ctx context.Context, text string) error {
 	return nil
 }
 
+// Close finishes the stream and renders finalText when nothing was streamed.
 func (w *CLIStreamWriter) Close(ctx context.Context, finalText string) error {
 	if w.aborted {
 		return nil
@@ -115,6 +122,7 @@ func (w *CLIStreamWriter) Close(ctx context.Context, finalText string) error {
 	return nil
 }
 
+// Abort marks the stream aborted and renders an abort marker when streaming started.
 func (w *CLIStreamWriter) Abort(ctx context.Context) error {
 	w.aborted = true
 	if w.started {
@@ -126,7 +134,7 @@ func (w *CLIStreamWriter) Abort(ctx context.Context) error {
 	return nil
 }
 
-// BeginStream implements channels.StreamingChannel.
+// BeginStream returns a stream writer for incremental CLI output.
 func (d Deliverer) BeginStream(ctx context.Context, to string, meta map[string]any) (channels.StreamWriter, error) {
 	return &CLIStreamWriter{spinner: d.Spinner}, nil
 }

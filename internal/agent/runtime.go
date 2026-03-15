@@ -1,3 +1,4 @@
+// Package agent coordinates prompt building, tool execution, and turn delivery.
 package agent
 
 import (
@@ -32,10 +33,12 @@ const maxTrackedQuotaSessions = 1024
 
 type trustedToolAccessContextKey struct{}
 
+// Deliverer sends a completed response to a channel target.
 type Deliverer interface {
 	Deliver(ctx context.Context, channel, to, text string) error
 }
 
+// MetaDeliverer sends a completed response with channel-specific metadata.
 type MetaDeliverer interface {
 	DeliverWithMeta(ctx context.Context, channel, to, text string, meta map[string]any) error
 }
@@ -45,6 +48,7 @@ type sessionLock struct {
 	refs int
 }
 
+// Runtime executes conversational turns against the configured model and tools.
 type Runtime struct {
 	DB               *db.DB
 	Provider         *providers.Client
@@ -83,6 +87,7 @@ type sessionQuotaState struct {
 	LastSeen      time.Time
 }
 
+// BackgroundRunInput describes an isolated subagent-style background run.
 type BackgroundRunInput struct {
 	SessionKey       string
 	ParentSessionKey string
@@ -94,6 +99,7 @@ type BackgroundRunInput struct {
 	ReplyTo          string
 }
 
+// BackgroundRunResult contains the final persisted outputs of a background run.
 type BackgroundRunResult struct {
 	FinalText  string
 	Preview    string
@@ -149,6 +155,7 @@ func (r *Runtime) getSessionLock(key string) *sessionLock {
 	return entry
 }
 
+// Handle routes a published event into the runtime turn pipeline.
 func (r *Runtime) Handle(ctx context.Context, ev bus.Event) error {
 	ctx = r.contextWithEventProfile(ctx, ev)
 	entry := r.acquireSessionLock(ev.SessionKey)
@@ -415,6 +422,7 @@ func parseSkillCommand(message string) (commandName string, rawArgs string, ok b
 	return commandName, rawArgs, true
 }
 
+// BuildPromptSnapshot builds the prompt snapshot for a normal user turn.
 func (r *Runtime) BuildPromptSnapshot(ctx context.Context, sessionKey string, userMessage string) ([]providers.ChatMessage, error) {
 	if r.Builder == nil {
 		return nil, fmt.Errorf("runtime builder not configured")
@@ -431,6 +439,7 @@ func (r *Runtime) BuildPromptSnapshot(ctx context.Context, sessionKey string, us
 	return messages, nil
 }
 
+// BuildPromptSnapshotWithOptions builds a prompt snapshot with explicit turn options.
 func (r *Runtime) BuildPromptSnapshotWithOptions(ctx context.Context, opts BuildOptions) ([]providers.ChatMessage, error) {
 	if r.Builder == nil {
 		return nil, fmt.Errorf("runtime builder not configured")
@@ -447,6 +456,7 @@ func (r *Runtime) BuildPromptSnapshotWithOptions(ctx context.Context, opts Build
 	return messages, nil
 }
 
+// RunBackground executes a background task without auto-persisting a user event.
 func (r *Runtime) RunBackground(ctx context.Context, input BackgroundRunInput) (BackgroundRunResult, error) {
 	ctx = r.contextWithProfileName(ctx, strings.TrimSpace(fmt.Sprint(input.Meta["profile_name"])))
 	entry := r.acquireSessionLock(input.SessionKey)
@@ -1226,6 +1236,7 @@ func toToolDefs(reg *tools.Registry) []providers.ToolDef {
 }
 
 // Cron runner helper: turns a job into a bus event message
+// CronRunner adapts the event bus into a cron.Runner.
 func CronRunner(b *bus.Bus, defaultSessionKey string) cron.Runner {
 	return func(ctx context.Context, job cron.CronJob) error {
 		_ = ctx
@@ -1246,6 +1257,7 @@ func CronRunner(b *bus.Bus, defaultSessionKey string) cron.Runner {
 	}
 }
 
+// WithTimeout derives a timeout context when sec is positive.
 func WithTimeout(ctx context.Context, sec int) (context.Context, context.CancelFunc) {
 	if sec <= 0 {
 		sec = 60

@@ -1,3 +1,4 @@
+// Package db opens and migrates the SQLite stores used by or3-intern.
 package db
 
 import (
@@ -7,21 +8,24 @@ import (
 	"sync"
 	"time"
 
+	"or3-intern/internal/scope"
+
 	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	_ "github.com/mattn/go-sqlite3"
-	"or3-intern/internal/scope"
 
 	_ "modernc.org/sqlite"
 )
 
 var sqliteVecAutoOnce sync.Once
 
+// DB holds the primary SQL connection and the sqlite-vec connection.
 type DB struct {
 	SQL     *sql.DB
 	VecSQL  *sql.DB
 	auditMu sync.Mutex
 }
 
+// Open opens path, configures both SQLite drivers, and runs migrations.
 func Open(path string) (*DB, error) {
 	primaryDSN := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)", path)
 	s, err := sql.Open("sqlite", primaryDSN)
@@ -50,22 +54,23 @@ func Open(path string) (*DB, error) {
 	return d, nil
 }
 
+// Close closes both database handles and returns the first close error.
 func (d *DB) Close() error {
 	if d == nil {
 		return nil
 	}
-	var err error
+	var firstErr error
 	if d.VecSQL != nil {
-		if closeErr := d.VecSQL.Close(); closeErr != nil && err == nil {
-			err = closeErr
+		if closeErr := d.VecSQL.Close(); closeErr != nil {
+			firstErr = closeErr
 		}
 	}
 	if d.SQL != nil {
-		if closeErr := d.SQL.Close(); closeErr != nil && err == nil {
-			err = closeErr
+		if closeErr := d.SQL.Close(); closeErr != nil && firstErr == nil {
+			firstErr = closeErr
 		}
 	}
-	return err
+	return firstErr
 }
 
 func (d *DB) migrate(ctx context.Context) error {
@@ -226,6 +231,7 @@ func (d *DB) migrate(ctx context.Context) error {
 	return nil
 }
 
+// NowMS returns the current Unix time in milliseconds.
 func NowMS() int64 { return time.Now().UnixMilli() }
 
 func (d *DB) migrateMemoryPinned(ctx context.Context) error {
@@ -314,6 +320,7 @@ func (d *DB) ensureMemoryVecIndexForExisting(ctx context.Context) error {
 	return d.initMemoryVecIndex(ctx, dims)
 }
 
+// MemoryVectorDims reports the configured memory vector dimensionality.
 func (d *DB) MemoryVectorDims(ctx context.Context) (int, error) {
 	row := d.SQL.QueryRowContext(ctx, `SELECT dims FROM memory_vec_meta WHERE id=1`)
 	var dims int
@@ -346,6 +353,7 @@ func (d *DB) firstMemoryVectorDim(ctx context.Context) (int, error) {
 	return bytes / 4, nil
 }
 
+// EnsureMemoryVecIndexWithDim initializes the vector index when dims is valid.
 func (d *DB) EnsureMemoryVecIndexWithDim(ctx context.Context, dims int) error {
 	if dims <= 0 {
 		return nil

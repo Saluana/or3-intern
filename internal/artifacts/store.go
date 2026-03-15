@@ -1,3 +1,4 @@
+// Package artifacts persists binary attachments referenced from conversations.
 package artifacts
 
 import (
@@ -14,11 +15,13 @@ import (
 	"or3-intern/internal/db"
 )
 
+// Store saves artifact bytes on disk and tracks them in the database.
 type Store struct {
 	Dir string
 	DB  *db.DB
 }
 
+// Save writes data to disk and returns the stored artifact ID.
 func (s *Store) Save(ctx context.Context, sessionKey, mime string, data []byte) (string, error) {
 	if s.Dir == "" {
 		return "", fmt.Errorf("artifacts dir not set")
@@ -45,6 +48,7 @@ func (s *Store) Save(ctx context.Context, sessionKey, mime string, data []byte) 
 	return id, nil
 }
 
+// SaveNamed stores data and returns an attachment record with a normalized filename.
 func (s *Store) SaveNamed(ctx context.Context, sessionKey, filename, mimeType string, data []byte) (Attachment, error) {
 	filename = NormalizeFilename(filename, mimeType)
 	id, err := s.Save(ctx, sessionKey, mimeType, data)
@@ -60,6 +64,7 @@ func (s *Store) SaveNamed(ctx context.Context, sessionKey, filename, mimeType st
 	}, nil
 }
 
+// Lookup returns the stored artifact metadata for artifactID.
 func (s *Store) Lookup(ctx context.Context, artifactID string) (StoredArtifact, error) {
 	if s.DB == nil {
 		return StoredArtifact{}, fmt.Errorf("artifacts db not set")

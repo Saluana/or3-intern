@@ -1,3 +1,4 @@
+// Package clawhub installs and inspects managed skills from the ClawHub registry.
 package clawhub
 
 import (
@@ -28,12 +29,14 @@ const (
 	maxArchiveTotalBytes int64 = 64 << 20
 )
 
+// Client talks to the ClawHub site and registry APIs.
 type Client struct {
 	SiteURL     string
 	RegistryURL string
 	HTTP        *http.Client
 }
 
+// SearchResult is one search hit returned by the registry.
 type SearchResult struct {
 	Slug        string
 	DisplayName string
@@ -43,6 +46,7 @@ type SearchResult struct {
 	UpdatedAt   int64
 }
 
+// SkillInfo describes a skill and the version chosen for installation.
 type SkillInfo struct {
 	Slug            string
 	DisplayName     string
@@ -52,15 +56,18 @@ type SkillInfo struct {
 	Owner           string
 }
 
+// ResolveResult reports which installed fingerprint matches a known release.
 type ResolveResult struct {
 	MatchVersion  string
 	LatestVersion string
 }
 
+// InstallOptions controls how an installation handles existing local content.
 type InstallOptions struct {
 	Force bool
 }
 
+// InstallResult summarizes a successful skill install.
 type InstallResult struct {
 	Path        string
 	Slug        string
@@ -68,6 +75,7 @@ type InstallResult struct {
 	Fingerprint string
 }
 
+// ScanFinding records one security-related issue discovered during install scanning.
 type ScanFinding struct {
 	Severity string `json:"severity"`
 	Path     string `json:"path"`
@@ -75,6 +83,7 @@ type ScanFinding struct {
 	Message  string `json:"message"`
 }
 
+// Summary returns a compact human-readable form of the finding.
 func (f ScanFinding) Summary() string {
 	parts := make([]string, 0, 3)
 	if text := strings.TrimSpace(f.Severity); text != "" {
@@ -89,6 +98,7 @@ func (f ScanFinding) Summary() string {
 	return strings.Join(parts, ": ")
 }
 
+// SkillOrigin is the persisted provenance metadata written into an installed skill.
 type SkillOrigin struct {
 	Version          int           `json:"version"`
 	Registry         string        `json:"registry"`
@@ -101,6 +111,7 @@ type SkillOrigin struct {
 	ScanFindings     []ScanFinding `json:"scanFindings,omitempty"`
 }
 
+// InstalledSkill describes one installed managed skill on disk.
 type InstalledSkill struct {
 	Name     string
 	Path     string
@@ -108,6 +119,7 @@ type InstalledSkill struct {
 	Modified bool
 }
 
+// New constructs a Client for the given site and registry URLs.
 func New(siteURL, registryURL string) *Client {
 	return &Client{
 		SiteURL:     strings.TrimRight(siteURL, "/"),
@@ -116,6 +128,7 @@ func New(siteURL, registryURL string) *Client {
 	}
 }
 
+// Search queries the registry and returns up to limit matching skills.
 func (c *Client) Search(ctx context.Context, query string, limit int) ([]SearchResult, error) {
 	url := c.apiURL(apiSearch)
 	url.RawQuery = queryString(map[string]string{
@@ -149,6 +162,7 @@ func (c *Client) Search(ctx context.Context, query string, limit int) ([]SearchR
 	return results, nil
 }
 
+// Inspect fetches metadata for slug and resolves the version that would be installed.
 func (c *Client) Inspect(ctx context.Context, slug, version string) (SkillInfo, error) {
 	slug = sanitizeSlug(slug)
 	if slug == "" {
@@ -192,6 +206,7 @@ func (c *Client) Inspect(ctx context.Context, slug, version string) (SkillInfo, 
 	return info, nil
 }
 
+// Resolve matches fingerprint against known releases for slug.
 func (c *Client) Resolve(ctx context.Context, slug, fingerprint string) (ResolveResult, error) {
 	slug = sanitizeSlug(slug)
 	if slug == "" {
@@ -228,6 +243,7 @@ func (c *Client) Resolve(ctx context.Context, slug, fingerprint string) (Resolve
 	}, nil
 }
 
+// Download fetches the zipped skill bundle for slug and version.
 func (c *Client) Download(ctx context.Context, slug, version string) ([]byte, error) {
 	slug = sanitizeSlug(slug)
 	if slug == "" {
@@ -261,6 +277,7 @@ func (c *Client) Download(ctx context.Context, slug, version string) ([]byte, er
 	return data, nil
 }
 
+// Install downloads, scans, and installs slug into destDir.
 func (c *Client) Install(ctx context.Context, slug, version, destDir string, opts InstallOptions) (InstallResult, error) {
 	info, err := c.Inspect(ctx, slug, version)
 	if err != nil {
@@ -428,6 +445,7 @@ func extractZipToDir(zipBytes []byte, target string) error {
 	return nil
 }
 
+// FingerprintDir hashes the regular files under root, excluding .clawhub metadata.
 func FingerprintDir(root string) (string, error) {
 	type item struct {
 		path string
@@ -477,6 +495,7 @@ func FingerprintDir(root string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+// LocalEdits reports whether the installed contents differ from the recorded fingerprint.
 func LocalEdits(skillDir string) (bool, error) {
 	origin, err := ReadOrigin(skillDir)
 	if err != nil {
@@ -489,6 +508,7 @@ func LocalEdits(skillDir string) (bool, error) {
 	return current != origin.Fingerprint, nil
 }
 
+// ListInstalled returns managed skills found below root.
 func ListInstalled(root string) ([]InstalledSkill, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -522,6 +542,7 @@ func ListInstalled(root string) ([]InstalledSkill, error) {
 	return out, nil
 }
 
+// ReadOrigin loads the .clawhub origin metadata for skillDir.
 func ReadOrigin(skillDir string) (SkillOrigin, error) {
 	data, err := os.ReadFile(filepath.Join(skillDir, ".clawhub", "origin.json"))
 	if err != nil {
@@ -534,6 +555,7 @@ func ReadOrigin(skillDir string) (SkillOrigin, error) {
 	return origin, nil
 }
 
+// WriteOrigin writes origin metadata into skillDir.
 func WriteOrigin(skillDir string, origin SkillOrigin) error {
 	path := filepath.Join(skillDir, ".clawhub", "origin.json")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -644,6 +666,7 @@ func contentFindings(rel, content string) []ScanFinding {
 	return findings
 }
 
+// RemoveSkill removes the named installed skill from root.
 func RemoveSkill(root, name string) error {
 	name = sanitizeSlug(name)
 	if name == "" {

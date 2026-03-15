@@ -1,3 +1,4 @@
+// Package skills discovers, evaluates, and loads skill metadata from multiple roots.
 package skills
 
 import (
@@ -30,12 +31,17 @@ type SkillEntry struct {
 type Source string
 
 const (
-	SourceExtra     Source = "extra"
-	SourceBundled   Source = "bundled"
-	SourceManaged   Source = "managed"
+	// SourceExtra marks skills loaded from explicitly supplied extra roots.
+	SourceExtra Source = "extra"
+	// SourceBundled marks skills that ship with the application.
+	SourceBundled Source = "bundled"
+	// SourceManaged marks skills installed from a remote registry.
+	SourceManaged Source = "managed"
+	// SourceWorkspace marks workspace-local skills.
 	SourceWorkspace Source = "workspace"
 )
 
+// Root describes one filesystem root scanned for skills.
 type Root struct {
 	Path     string
 	Source   Source
@@ -43,6 +49,7 @@ type Root struct {
 	Priority int
 }
 
+// EntryConfig applies per-skill runtime configuration overrides.
 type EntryConfig struct {
 	Enabled *bool
 	APIKey  string
@@ -50,6 +57,7 @@ type EntryConfig struct {
 	Config  map[string]any
 }
 
+// LoadOptions controls how skill discovery and eligibility evaluation run.
 type LoadOptions struct {
 	Roots          []Root
 	Entries        map[string]EntryConfig
@@ -60,6 +68,7 @@ type LoadOptions struct {
 	OS             string
 }
 
+// ApprovalPolicy describes which managed skills are trusted or blocked.
 type ApprovalPolicy struct {
 	QuarantineByDefault bool
 	ApprovedSkills      map[string]struct{}
@@ -68,6 +77,7 @@ type ApprovalPolicy struct {
 	TrustedRegistries   map[string]struct{}
 }
 
+// SkillInstallSpec describes one suggested installation route for a dependency.
 type SkillInstallSpec struct {
 	ID      string   `json:"id"`
 	Kind    string   `json:"kind"`
@@ -81,11 +91,13 @@ type SkillInstallSpec struct {
 	URL     string   `json:"url"`
 }
 
+// NixPluginSpec describes an optional Nix plugin dependency.
 type NixPluginSpec struct {
 	Plugin  string   `json:"plugin"`
 	Systems []string `json:"systems"`
 }
 
+// SkillRequirements lists binary, env, and config prerequisites.
 type SkillRequirements struct {
 	Bins    []string `json:"bins"`
 	AnyBins []string `json:"anyBins"`
@@ -93,6 +105,7 @@ type SkillRequirements struct {
 	Config  []string `json:"config"`
 }
 
+// SkillRuntimeMeta captures runtime metadata parsed from skill front matter.
 type SkillRuntimeMeta struct {
 	Always     bool               `json:"always"`
 	SkillKey   string             `json:"skillKey"`
@@ -105,6 +118,7 @@ type SkillRuntimeMeta struct {
 	Nix        *NixPluginSpec     `json:"nix"`
 }
 
+// SkillPermissions describes the requested shell, network, and write permissions.
 type SkillPermissions struct {
 	Shell        bool     `json:"shell" yaml:"shell"`
 	Network      bool     `json:"network" yaml:"network"`
@@ -113,6 +127,7 @@ type SkillPermissions struct {
 	AllowedHosts []string `json:"hosts" yaml:"hosts"`
 }
 
+// SkillMeta is the fully merged metadata for one discovered skill.
 type SkillMeta struct {
 	Name        string
 	Description string
@@ -157,6 +172,7 @@ type SkillMeta struct {
 	rootOrder      int
 }
 
+// Inventory is the discovered skill set plus a name index.
 type Inventory struct {
 	Skills []SkillMeta
 	byName map[string]SkillMeta
@@ -196,7 +212,7 @@ func defaultPriority(source Source) int {
 	}
 }
 
-// Scan keeps the old simple API for tests and callers that only provide directories.
+// Scan keeps the simple legacy API for callers that only provide directories.
 func Scan(dirs []string) Inventory {
 	roots := make([]Root, 0, len(dirs))
 	for i, dir := range dirs {
@@ -210,6 +226,7 @@ func Scan(dirs []string) Inventory {
 	return ScanWithOptions(LoadOptions{Roots: roots})
 }
 
+// ScanWithOptions discovers skills and evaluates their runtime eligibility.
 func ScanWithOptions(opts LoadOptions) Inventory {
 	if len(opts.Env) == 0 {
 		opts.Env = envMap(os.Environ())

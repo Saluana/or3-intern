@@ -1,3 +1,4 @@
+// Package memory retrieves and consolidates long-lived memory entries.
 package memory
 
 import (
@@ -9,6 +10,7 @@ import (
 	"or3-intern/internal/db"
 )
 
+// Retrieved is one memory hit returned from hybrid retrieval.
 type Retrieved struct {
 	Source string // pinned|vector|fts
 	ID     int64
@@ -16,6 +18,7 @@ type Retrieved struct {
 	Score  float64
 }
 
+// Retriever ranks vector, FTS, lexical, and recency signals into a single result set.
 type Retriever struct {
 	DB              *db.DB
 	VectorWeight    float64
@@ -25,10 +28,12 @@ type Retriever struct {
 	VectorScanLimit int
 }
 
+// NewRetriever constructs a Retriever with default ranking weights.
 func NewRetriever(d *db.DB) *Retriever {
 	return &Retriever{DB: d, VectorWeight: 0.55, FTSWeight: 0.25, LexicalWeight: 0.12, RecencyWeight: 0.08, VectorScanLimit: 2000}
 }
 
+// Retrieve runs hybrid retrieval and returns diversified top-k memory results.
 func (r *Retriever) Retrieve(ctx context.Context, sessionKey, query string, queryVec []float32, vectorK, ftsK, topK int) ([]Retrieved, error) {
 	vecs, err := VectorSearch(ctx, r.DB, sessionKey, queryVec, vectorK, r.VectorScanLimit)
 	if err != nil {

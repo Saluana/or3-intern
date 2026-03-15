@@ -39,6 +39,7 @@ func style(codes, text string) string {
 // ---------- Banner ----------
 
 // Banner returns the startup header shown when the CLI launches.
+// Banner returns the startup header shown when the CLI launches.
 func Banner() string {
 	if !isTTY {
 		return "or3-intern CLI. Type /exit to quit.\n"
@@ -53,6 +54,7 @@ func Banner() string {
 // ---------- Prompt / separators ----------
 
 // Prompt returns the input prompt string.
+// Prompt returns the input prompt string.
 func Prompt() string {
 	if !isTTY {
 		return "> "
@@ -62,6 +64,7 @@ func Prompt() string {
 
 // ShowPrompt prints a blank line gap then the prompt, signalling the user
 // that input is ready. Called by the Deliverer after finishing output.
+// ShowPrompt renders the next interactive prompt.
 func ShowPrompt() {
 	if !isTTY {
 		fmt.Print(Prompt())
@@ -71,6 +74,7 @@ func ShowPrompt() {
 }
 
 // Separator returns a faint horizontal rule placed after a response block.
+// Separator returns the faint rule shown after a response block.
 func Separator() string {
 	if !isTTY {
 		return ""
@@ -83,6 +87,7 @@ func Separator() string {
 // RewriteUserMessage moves the cursor up to overwrite the raw prompt line
 // with a styled version of the user's message. This transforms the bare
 // "❯ text" into a clearly labeled user block. No-op when not a TTY.
+// RewriteUserMessage restyles the raw prompt line into a formatted user block.
 func RewriteUserMessage(text string) {
 	if !isTTY {
 		return
@@ -97,6 +102,7 @@ func RewriteUserMessage(text string) {
 // ---------- Assistant header ----------
 
 // AssistantHeader returns the header line printed before each response.
+// AssistantHeader returns the header line printed before each response.
 func AssistantHeader() string {
 	if !isTTY {
 		return ""
@@ -109,6 +115,7 @@ func AssistantHeader() string {
 // ---------- Response formatting ----------
 
 // ResponsePrefix returns the prefix printed before the first streaming delta.
+// ResponsePrefix returns the prefix printed before the first streamed delta.
 func ResponsePrefix() string {
 	if !isTTY {
 		return "\n"
@@ -117,6 +124,7 @@ func ResponsePrefix() string {
 }
 
 // FormatResponse wraps a complete (non-streamed) response for display.
+// FormatResponse wraps a complete non-streamed response for display.
 func FormatResponse(text string) string {
 	if !isTTY {
 		return "[cli] " + text
@@ -132,6 +140,7 @@ func FormatResponse(text string) string {
 
 // Spinner provides a braille-dot animation on stdout while the agent thinks.
 // Only animates when stdout is a TTY; safe for concurrent Start/Stop.
+// Spinner renders a terminal animation while the agent is working.
 type Spinner struct {
 	mu      sync.Mutex
 	running bool
@@ -140,12 +149,14 @@ type Spinner struct {
 }
 
 // NewSpinner creates a ready-to-use Spinner (initially stopped).
+// NewSpinner constructs a stopped Spinner.
 func NewSpinner() *Spinner {
 	return &Spinner{}
 }
 
 // Start begins the animation with the given label (e.g. "thinking…").
 // No-op if already running or stdout is not a TTY.
+// Start begins the spinner animation with label.
 func (s *Spinner) Start(label string) {
 	if !isTTY {
 		return
@@ -184,6 +195,7 @@ func (s *Spinner) Start(label string) {
 
 // Stop halts the animation and clears the spinner line.
 // Blocks until the animation goroutine exits. Safe to call when not running.
+// Stop halts the spinner and clears its line.
 func (s *Spinner) Stop() {
 	s.mu.Lock()
 	if !s.running {

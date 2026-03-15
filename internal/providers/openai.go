@@ -1,3 +1,4 @@
+// Package providers wraps the OpenAI-compatible chat and embedding APIs used by or3-intern.
 package providers
 
 import (
@@ -14,6 +15,7 @@ import (
 	"or3-intern/internal/security"
 )
 
+// Client talks to an OpenAI-compatible HTTP API.
 type Client struct {
 	APIBase    string
 	APIKey     string
@@ -21,6 +23,7 @@ type Client struct {
 	HostPolicy security.HostPolicy
 }
 
+// New constructs a Client for apiBase using timeout for all requests.
 func New(apiBase, apiKey string, timeout time.Duration) *Client {
 	return &Client{
 		APIBase: apiBase,
@@ -29,6 +32,7 @@ func New(apiBase, apiKey string, timeout time.Duration) *Client {
 	}
 }
 
+// ChatMessage is one message sent to or returned from the provider.
 type ChatMessage struct {
 	Role       string     `json:"role"`
 	Content    any        `json:"content,omitempty"` // string|null
@@ -37,6 +41,7 @@ type ChatMessage struct {
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 }
 
+// ToolDef declares a callable tool in provider request format.
 type ToolDef struct {
 	Type     string   `json:"type"`
 	Function ToolFunc `json:"function"`
@@ -47,6 +52,7 @@ type ToolFunc struct {
 	Parameters  any    `json:"parameters,omitempty"`
 }
 
+// ToolCall is one tool invocation requested by the provider.
 type ToolCall struct {
 	ID       string `json:"id"`
 	Index    int    `json:"index"`
@@ -57,6 +63,7 @@ type ToolCall struct {
 	} `json:"function"`
 }
 
+// ChatCompletionRequest is the non-streaming chat completion payload.
 type ChatCompletionRequest struct {
 	Model       string        `json:"model"`
 	Messages    []ChatMessage `json:"messages"`
@@ -65,6 +72,7 @@ type ChatCompletionRequest struct {
 	Temperature float64       `json:"temperature,omitempty"`
 }
 
+// ChatCompletionResponse is the normalized response from a chat completion.
 type ChatCompletionResponse struct {
 	Choices []struct {
 		Message struct {
@@ -75,6 +83,7 @@ type ChatCompletionResponse struct {
 	} `json:"choices"`
 }
 
+// Chat performs a non-streaming chat completion request.
 func (c *Client) Chat(ctx context.Context, req ChatCompletionRequest) (ChatCompletionResponse, error) {
 	var out ChatCompletionResponse
 	b, _ := json.Marshal(req)
@@ -112,25 +121,28 @@ type ChatCompletionStreamRequest struct {
 	Stream      bool          `json:"stream"`
 }
 
+// ChatStreamDelta is one incremental SSE delta from a streamed completion.
 type ChatStreamDelta struct {
 	Role      string     `json:"role"`
 	Content   string     `json:"content"`
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 }
 
+// ChatStreamChoice is one choice entry from a streamed completion chunk.
 type ChatStreamChoice struct {
 	Index        int             `json:"index"`
 	Delta        ChatStreamDelta `json:"delta"`
 	FinishReason string          `json:"finish_reason"`
 }
 
+// ChatStreamChunk is one SSE payload from a streamed completion.
 type ChatStreamChunk struct {
 	ID      string             `json:"id"`
 	Choices []ChatStreamChoice `json:"choices"`
 }
 
-// ChatStream sends the request with stream:true, calls onDelta for each text
-// delta, and returns the fully-accumulated ChatCompletionResponse.
+// ChatStream sends the request with stream=true, calls onDelta for each text
+// delta, and returns the fully accumulated completion response.
 func (c *Client) ChatStream(ctx context.Context, req ChatCompletionRequest, onDelta func(text string)) (ChatCompletionResponse, error) {
 	streamReq := ChatCompletionStreamRequest{
 		Model:       req.Model,

@@ -1,3 +1,4 @@
+// Package discord implements the Discord channel adapter.
 package discord
 
 import (
@@ -22,6 +23,7 @@ import (
 	"or3-intern/internal/config"
 )
 
+// Channel receives Discord gateway events and sends outbound messages.
 type Channel struct {
 	Config        config.DiscordChannelConfig
 	HTTP          *http.Client
@@ -37,8 +39,10 @@ type Channel struct {
 	dedupe *rootchannels.IngressDeduplicator
 }
 
+// Name returns the registered channel name.
 func (c *Channel) Name() string { return "discord" }
 
+// Start connects to the Discord gateway and begins reading events.
 func (c *Channel) Start(ctx context.Context, eventBus *bus.Bus) error {
 	if strings.TrimSpace(c.Config.Token) == "" {
 		return fmt.Errorf("discord token not configured")
@@ -73,6 +77,7 @@ func (c *Channel) Start(ctx context.Context, eventBus *bus.Bus) error {
 	return nil
 }
 
+// Stop closes the Discord gateway connection.
 func (c *Channel) Stop(ctx context.Context) error {
 	_ = ctx
 	c.mu.Lock()
@@ -88,6 +93,7 @@ func (c *Channel) Stop(ctx context.Context) error {
 	return nil
 }
 
+// Deliver posts a Discord message or multipart media payload.
 func (c *Channel) Deliver(ctx context.Context, to, text string, meta map[string]any) error {
 	channelID := strings.TrimSpace(to)
 	if channelID == "" {

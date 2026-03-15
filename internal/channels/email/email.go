@@ -1,3 +1,4 @@
+// Package email implements the email channel adapter.
 package email
 
 import (
@@ -40,6 +41,7 @@ const (
 	lookupMessageLimit  = 50
 )
 
+// InboundMessage is a normalized email fetched from IMAP.
 type InboundMessage struct {
 	UID       string
 	From      string
@@ -49,6 +51,7 @@ type InboundMessage struct {
 	Body      string
 }
 
+// OutboundMessage is an email prepared for SMTP delivery.
 type OutboundMessage struct {
 	To        string
 	From      string
@@ -62,6 +65,7 @@ type threadState struct {
 	MessageID string
 }
 
+// Channel polls inbound email and sends outbound replies.
 type Channel struct {
 	Config config.EmailChannelConfig
 	DB     *db.DB
@@ -77,8 +81,10 @@ type Channel struct {
 	processedOrder []string
 }
 
+// Name returns the registered channel name.
 func (c *Channel) Name() string { return "email" }
 
+// Start validates configuration and begins polling for inbound mail.
 func (c *Channel) Start(ctx context.Context, eventBus *bus.Bus) error {
 	if err := c.validate(); err != nil {
 		return err
@@ -109,6 +115,7 @@ func (c *Channel) Start(ctx context.Context, eventBus *bus.Bus) error {
 	return nil
 }
 
+// Stop cancels polling and leaves any current request to drain.
 func (c *Channel) Stop(ctx context.Context) error {
 	_ = ctx
 	c.mu.Lock()
@@ -121,6 +128,7 @@ func (c *Channel) Stop(ctx context.Context) error {
 	return nil
 }
 
+// Deliver sends a reply or new outbound email.
 func (c *Channel) Deliver(ctx context.Context, to, text string, meta map[string]any) error {
 	recipient := normalizeAddress(to)
 	if recipient == "" {

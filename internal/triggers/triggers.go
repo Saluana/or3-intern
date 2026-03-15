@@ -1,3 +1,4 @@
+// Package triggers defines shared metadata for webhook and filewatch events.
 package triggers
 
 import (
@@ -13,8 +14,10 @@ type TriggerMeta struct {
 	Headers map[string]string // for webhook events (limited subset)
 }
 
+// MetaKeyStructuredEvent stores normalized structured trigger metadata.
 const MetaKeyStructuredEvent = "structured_event"
 
+// StructuredEvent is the normalized envelope attached to structured trigger events.
 type StructuredEvent struct {
 	Type    string         `json:"type"`
 	Source  string         `json:"source"`
@@ -22,6 +25,7 @@ type StructuredEvent struct {
 	Details map[string]any `json:"details,omitempty"`
 }
 
+// StructuredEventMap converts event to a plain map for message metadata.
 func StructuredEventMap(event StructuredEvent) map[string]any {
 	details := map[string]any{}
 	for key, value := range event.Details {
@@ -39,6 +43,7 @@ func StructuredEventMap(event StructuredEvent) map[string]any {
 	}
 }
 
+// StructuredEventJSON pretty-prints raw structured trigger metadata.
 func StructuredEventJSON(raw any) string {
 	if raw == nil {
 		return ""

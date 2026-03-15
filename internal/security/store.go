@@ -1,3 +1,4 @@
+// Package security provides secret storage, audit logging, and outbound host policy helpers.
 package security
 
 import (
@@ -20,11 +21,13 @@ import (
 
 const secretRefPrefix = "secret:"
 
+// SecretManager resolves and persists encrypted secrets.
 type SecretManager struct {
 	DB  *db.DB
 	Key []byte
 }
 
+// LoadOrCreateKey loads an existing secret-store key or creates one at path.
 func LoadOrCreateKey(path string) ([]byte, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -54,6 +57,7 @@ func LoadOrCreateKey(path string) ([]byte, error) {
 	return key, nil
 }
 
+// LoadExistingKey loads an existing secret-store key from path.
 func LoadExistingKey(path string) ([]byte, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -72,6 +76,7 @@ func LoadExistingKey(path string) ([]byte, error) {
 	return nil, fmt.Errorf("key file too short")
 }
 
+// ResolveRef resolves a secret: reference or returns raw unchanged.
 func (m *SecretManager) ResolveRef(ctx context.Context, raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if !strings.HasPrefix(strings.ToLower(raw), secretRefPrefix) {
@@ -94,6 +99,7 @@ func (m *SecretManager) ResolveRef(ctx context.Context, raw string) (string, err
 	return secret, nil
 }
 
+// Put encrypts and stores value under name.
 func (m *SecretManager) Put(ctx context.Context, name, value string) error {
 	if m == nil || m.DB == nil || len(m.Key) == 0 {
 		return fmt.Errorf("secret store unavailable")
@@ -109,6 +115,7 @@ func (m *SecretManager) Put(ctx context.Context, name, value string) error {
 	return m.DB.PutSecret(ctx, name, ciphertext, nonce, 1, "v1")
 }
 
+// Get decrypts and returns the secret stored under name.
 func (m *SecretManager) Get(ctx context.Context, name string) (string, bool, error) {
 	if m == nil || m.DB == nil || len(m.Key) == 0 {
 		return "", false, fmt.Errorf("secret store unavailable")
@@ -124,6 +131,7 @@ func (m *SecretManager) Get(ctx context.Context, name string) (string, bool, err
 	return string(plain), true, nil
 }
 
+// Delete removes the secret stored under name.
 func (m *SecretManager) Delete(ctx context.Context, name string) error {
 	if m == nil || m.DB == nil {
 		return fmt.Errorf("secret store unavailable")
@@ -131,6 +139,7 @@ func (m *SecretManager) Delete(ctx context.Context, name string) error {
 	return m.DB.DeleteSecret(ctx, name)
 }
 
+// List returns the stored secret names.
 func (m *SecretManager) List(ctx context.Context) ([]string, error) {
 	if m == nil || m.DB == nil {
 		return nil, fmt.Errorf("secret store unavailable")
@@ -138,12 +147,14 @@ func (m *SecretManager) List(ctx context.Context) ([]string, error) {
 	return m.DB.ListSecretNames(ctx)
 }
 
+// AuditLogger appends and verifies tamper-evident audit records.
 type AuditLogger struct {
 	DB     *db.DB
 	Key    []byte
 	Strict bool
 }
 
+// Record appends one audit event or fails closed when Strict is set.
 func (a *AuditLogger) Record(ctx context.Context, eventType, sessionKey, actor string, payload any) error {
 	if a == nil || a.DB == nil || len(a.Key) == 0 {
 		if a != nil && a.Strict {
@@ -159,6 +170,7 @@ func (a *AuditLogger) Record(ctx context.Context, eventType, sessionKey, actor s
 	}, a.Key)
 }
 
+// Verify validates the persisted audit chain.
 func (a *AuditLogger) Verify(ctx context.Context) error {
 	if a == nil || a.DB == nil || len(a.Key) == 0 {
 		return nil
@@ -166,6 +178,7 @@ func (a *AuditLogger) Verify(ctx context.Context) error {
 	return a.DB.VerifyAuditChain(ctx, a.Key)
 }
 
+// ResolveConfigSecrets expands secret references across cfg.
 func ResolveConfigSecrets(ctx context.Context, cfg config.Config, mgr *SecretManager) (config.Config, error) {
 	resolved := cfg
 	if mgr == nil {
@@ -178,6 +191,7 @@ func ResolveConfigSecrets(ctx context.Context, cfg config.Config, mgr *SecretMan
 	return resolved, nil
 }
 
+// ValidateNoSecretRefs reports whether cfg still contains unresolved secret references.
 func ValidateNoSecretRefs(cfg config.Config) error {
 	if path, ok := findSecretRef(reflect.ValueOf(cfg), "config"); ok {
 		return fmt.Errorf("unresolved secret ref at %s", path)

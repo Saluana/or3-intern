@@ -1,3 +1,4 @@
+// Package telegram implements the Telegram channel adapter.
 package telegram
 
 import (
@@ -22,6 +23,7 @@ import (
 	"or3-intern/internal/config"
 )
 
+// Channel polls Telegram updates and delivers outbound messages.
 type Channel struct {
 	Config        config.TelegramChannelConfig
 	HTTP          *http.Client
@@ -36,8 +38,10 @@ type Channel struct {
 	dedupe  *rootchannels.IngressDeduplicator
 }
 
+// Name returns the registered channel name.
 func (c *Channel) Name() string { return "telegram" }
 
+// Start validates configuration and begins polling Telegram updates.
 func (c *Channel) Start(ctx context.Context, eventBus *bus.Bus) error {
 	if strings.TrimSpace(c.Config.Token) == "" {
 		return fmt.Errorf("telegram token not configured")
@@ -57,6 +61,7 @@ func (c *Channel) Start(ctx context.Context, eventBus *bus.Bus) error {
 	return nil
 }
 
+// Stop cancels polling and releases the current session state.
 func (c *Channel) Stop(ctx context.Context) error {
 	_ = ctx
 	c.mu.Lock()
@@ -69,6 +74,7 @@ func (c *Channel) Stop(ctx context.Context) error {
 	return nil
 }
 
+// Deliver sends a Telegram text or media message.
 func (c *Channel) Deliver(ctx context.Context, to, text string, meta map[string]any) error {
 	chatID := strings.TrimSpace(to)
 	if chatID == "" {

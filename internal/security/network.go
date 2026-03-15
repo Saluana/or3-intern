@@ -14,6 +14,7 @@ var lookupIPAddr = func(ctx context.Context, host string) ([]net.IPAddr, error) 
 	return net.DefaultResolver.LookupIPAddr(ctx, host)
 }
 
+// HostPolicy constrains which outbound hosts and address classes may be used.
 type HostPolicy struct {
 	Enabled       bool
 	DefaultDeny   bool
@@ -22,10 +23,12 @@ type HostPolicy struct {
 	AllowPrivate  bool
 }
 
+// EnabledPolicy reports whether any host restrictions are active.
 func (p HostPolicy) EnabledPolicy() bool {
 	return p.Enabled || p.DefaultDeny || len(p.AllowedHosts) > 0
 }
 
+// ValidateURL checks whether target is allowed by the host policy.
 func (p HostPolicy) ValidateURL(ctx context.Context, target *url.URL) error {
 	if target == nil {
 		return fmt.Errorf("invalid url")
@@ -37,6 +40,7 @@ func (p HostPolicy) ValidateURL(ctx context.Context, target *url.URL) error {
 	return p.ValidateHost(ctx, hostname)
 }
 
+// ValidateEndpoint validates a URL or host:port endpoint string.
 func (p HostPolicy) ValidateEndpoint(ctx context.Context, raw string) error {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -56,6 +60,7 @@ func (p HostPolicy) ValidateEndpoint(ctx context.Context, raw string) error {
 	return p.ValidateHost(ctx, raw)
 }
 
+// ValidateHost resolves and validates hostname against the policy.
 func (p HostPolicy) ValidateHost(ctx context.Context, hostname string) error {
 	_, err := p.resolveHost(ctx, hostname)
 	return err
@@ -137,6 +142,7 @@ func hostAllowed(host string, patterns []string) bool {
 	return false
 }
 
+// WrapHTTPClient returns a clone of client that enforces policy on requests and redirects.
 func WrapHTTPClient(client *http.Client, policy HostPolicy) *http.Client {
 	if client == nil {
 		client = &http.Client{}

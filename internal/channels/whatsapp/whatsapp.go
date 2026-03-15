@@ -1,3 +1,4 @@
+// Package whatsapp implements the WhatsApp bridge channel adapter.
 package whatsapp
 
 import (
@@ -21,6 +22,7 @@ import (
 	"or3-intern/internal/config"
 )
 
+// Channel reads and writes messages over the configured bridge websocket.
 type Channel struct {
 	Config        config.WhatsAppBridgeConfig
 	Dialer        *websocket.Dialer
@@ -35,8 +37,10 @@ type Channel struct {
 	dedupe *rootchannels.IngressDeduplicator
 }
 
+// Name returns the registered channel name.
 func (c *Channel) Name() string { return "whatsapp" }
 
+// Start connects to the bridge and begins reading inbound messages.
 func (c *Channel) Start(ctx context.Context, eventBus *bus.Bus) error {
 	if strings.TrimSpace(c.Config.BridgeURL) == "" {
 		return fmt.Errorf("whatsapp bridge url not configured")
@@ -55,6 +59,7 @@ func (c *Channel) Start(ctx context.Context, eventBus *bus.Bus) error {
 	return nil
 }
 
+// Stop closes the bridge connection.
 func (c *Channel) Stop(ctx context.Context) error {
 	_ = ctx
 	c.mu.Lock()
@@ -71,6 +76,7 @@ func (c *Channel) Stop(ctx context.Context) error {
 	return nil
 }
 
+// Deliver sends a bridge command for a text or media message.
 func (c *Channel) Deliver(ctx context.Context, to, text string, meta map[string]any) error {
 	target := strings.TrimSpace(to)
 	if target == "" {
@@ -295,6 +301,7 @@ func decodeBridgeAttachment(ref bridgeAttachment, maxBytes int) ([]byte, error) 
 	return data, nil
 }
 
+// BridgeURL normalizes a base WhatsApp bridge URL to its websocket endpoint.
 func BridgeURL(base string) string {
 	u, err := url.Parse(strings.TrimSpace(base))
 	if err != nil || u == nil {
@@ -306,6 +313,7 @@ func BridgeURL(base string) string {
 	return u.String()
 }
 
+// NewTestDialer returns a short-timeout dialer for bridge tests.
 func NewTestDialer() *websocket.Dialer {
 	return &websocket.Dialer{HandshakeTimeout: 5 * time.Second}
 }

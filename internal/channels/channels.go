@@ -1,3 +1,4 @@
+// Package channels defines the shared channel interfaces and metadata helpers.
 package channels
 
 import (
@@ -59,12 +60,17 @@ func (d *IngressDeduplicator) evictExpired(now time.Time) {
 }
 
 const (
-	MetaMediaPaths       = "media_paths"
-	MetaThreadTS         = "thread_ts"
+	// MetaMediaPaths stores local media attachments that accompany a delivery.
+	MetaMediaPaths = "media_paths"
+	// MetaThreadTS stores a thread identifier for threaded channels.
+	MetaThreadTS = "thread_ts"
+	// MetaReplyToMessageID stores a provider-specific reply target identifier.
 	MetaReplyToMessageID = "reply_to_message_id"
+	// MetaMessageReference stores a provider-specific reply reference payload.
 	MetaMessageReference = "message_reference"
 )
 
+// Channel is the transport contract implemented by each messaging integration.
 type Channel interface {
 	Name() string
 	Start(ctx context.Context, eventBus *bus.Bus) error
@@ -72,16 +78,19 @@ type Channel interface {
 	Deliver(ctx context.Context, to, text string, meta map[string]any) error
 }
 
+// Manager owns a named set of channels and their start state.
 type Manager struct {
 	mu       sync.RWMutex
 	channels map[string]Channel
 	started  map[string]bool
 }
 
+// NewManager constructs an empty channel manager.
 func NewManager() *Manager {
 	return &Manager{channels: map[string]Channel{}, started: map[string]bool{}}
 }
 
+// Register adds ch under its normalized name.
 func (m *Manager) Register(ch Channel) error {
 	if ch == nil {
 		return errors.New("nil channel")
@@ -99,6 +108,7 @@ func (m *Manager) Register(ch Channel) error {
 	return nil
 }
 
+// Names returns the registered channel names in sorted order.
 func (m *Manager) Names() []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -110,6 +120,7 @@ func (m *Manager) Names() []string {
 	return out
 }
 
+// StartAll starts every registered channel in name order.
 func (m *Manager) StartAll(ctx context.Context, eventBus *bus.Bus) error {
 	for _, name := range m.Names() {
 		if err := m.Start(ctx, name, eventBus); err != nil {
@@ -119,6 +130,7 @@ func (m *Manager) StartAll(ctx context.Context, eventBus *bus.Bus) error {
 	return nil
 }
 
+// Start starts the named channel if it is not already running.
 func (m *Manager) Start(ctx context.Context, name string, eventBus *bus.Bus) error {
 	ch, err := m.get(name)
 	if err != nil {
@@ -139,6 +151,7 @@ func (m *Manager) Start(ctx context.Context, name string, eventBus *bus.Bus) err
 	return nil
 }
 
+// StopAll stops all registered channels and joins any returned errors.
 func (m *Manager) StopAll(ctx context.Context) error {
 	var errs []string
 	for _, name := range m.Names() {
@@ -152,6 +165,7 @@ func (m *Manager) StopAll(ctx context.Context) error {
 	return nil
 }
 
+// Stop stops the named channel if it is running.
 func (m *Manager) Stop(ctx context.Context, name string) error {
 	ch, err := m.get(name)
 	if err != nil {
@@ -172,10 +186,12 @@ func (m *Manager) Stop(ctx context.Context, name string) error {
 	return nil
 }
 
+// Deliver sends text on channel without extra metadata.
 func (m *Manager) Deliver(ctx context.Context, channel, to, text string) error {
 	return m.DeliverWithMeta(ctx, channel, to, text, nil)
 }
 
+// DeliverWithMeta sends text on channel with provider-specific metadata.
 func (m *Manager) DeliverWithMeta(ctx context.Context, channel, to, text string, meta map[string]any) error {
 	if strings.TrimSpace(channel) == "" {
 		channel = "cli"
@@ -198,6 +214,7 @@ func (m *Manager) get(name string) (Channel, error) {
 	return ch, nil
 }
 
+// CloneMeta returns a shallow copy of meta.
 func CloneMeta(meta map[string]any) map[string]any {
 	if len(meta) == 0 {
 		return nil
@@ -209,6 +226,7 @@ func CloneMeta(meta map[string]any) map[string]any {
 	return out
 }
 
+// ReplyMeta extracts only reply-thread metadata from meta.
 func ReplyMeta(meta map[string]any) map[string]any {
 	if len(meta) == 0 {
 		return nil

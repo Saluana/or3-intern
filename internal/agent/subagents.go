@@ -22,6 +22,7 @@ const (
 	subagentFinalizeTimeout = 5 * time.Second
 )
 
+// SubagentManager queues and runs background subagent jobs.
 type SubagentManager struct {
 	DB              *db.DB
 	Runtime         *Runtime
@@ -40,6 +41,7 @@ type SubagentManager struct {
 	wg       sync.WaitGroup
 }
 
+// ServiceSubagentRequest describes a service-originated subagent request.
 type ServiceSubagentRequest struct {
 	ParentSessionKey string
 	Task             string
@@ -62,6 +64,7 @@ type subagentJobMetadata struct {
 	ServiceMeta    map[string]any          `json:"service_meta,omitempty"`
 }
 
+// Start launches the background workers and resumes queued jobs.
 func (m *SubagentManager) Start(ctx context.Context) error {
 	if m == nil {
 		return fmt.Errorf("subagent manager is nil")
@@ -113,6 +116,7 @@ func (m *SubagentManager) Start(ctx context.Context) error {
 	return nil
 }
 
+// Stop cancels workers and waits for them to exit.
 func (m *SubagentManager) Stop(ctx context.Context) error {
 	if m == nil {
 		return nil
@@ -144,6 +148,7 @@ func (m *SubagentManager) Stop(ctx context.Context) error {
 	}
 }
 
+// Enqueue stores a tool-originated subagent request and signals workers.
 func (m *SubagentManager) Enqueue(ctx context.Context, req tools.SpawnRequest) (tools.SpawnJob, error) {
 	if m == nil || m.DB == nil {
 		return tools.SpawnJob{}, fmt.Errorf("background subagents disabled")
@@ -183,6 +188,7 @@ func (m *SubagentManager) Enqueue(ctx context.Context, req tools.SpawnRequest) (
 	return tools.SpawnJob{ID: job.ID, ChildSessionKey: job.ChildSessionKey}, nil
 }
 
+// EnqueueService stores a service-originated subagent request and signals workers.
 func (m *SubagentManager) EnqueueService(ctx context.Context, req ServiceSubagentRequest) (tools.SpawnJob, error) {
 	if m == nil || m.DB == nil {
 		return tools.SpawnJob{}, fmt.Errorf("background subagents disabled")
@@ -351,6 +357,7 @@ func (m *SubagentManager) finalizeJob(baseCtx context.Context, job db.SubagentJo
 	}
 }
 
+// Abort cancels the running or queued subagent job with id.
 func (m *SubagentManager) Abort(ctx context.Context, id string) error {
 	if m == nil || m.DB == nil {
 		return fmt.Errorf("background subagents disabled")

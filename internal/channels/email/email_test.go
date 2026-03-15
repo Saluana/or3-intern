@@ -145,6 +145,18 @@ func TestChannel_StartPublishesInboundEmailEvent(t *testing.T) {
 	}
 }
 
+func TestChannel_StartSkipsValidationWhenConsentDisabled(t *testing.T) {
+	config := baseConfig()
+	config.ConsentGranted = false
+	config.IMAPHost = ""
+	config.SMTPHost = ""
+	channel := &Channel{Config: config}
+
+	if err := channel.Start(context.Background(), nil); err != nil {
+		t.Fatalf("expected consent-disabled start to no-op, got %v", err)
+	}
+}
+
 func TestChannel_DeduplicatesInboundMessages(t *testing.T) {
 	config := baseConfig()
 	fetches := 0
@@ -352,5 +364,69 @@ func TestChannel_FetchViaIMAPHonorsContextCancellation(t *testing.T) {
 		}
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("expected fetchViaIMAP to stop after context cancellation")
+	}
+}
+
+func TestChannel_SendViaSMTPHonorsContextCancellationAfterConnect(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer listener.Close()
+
+	host, portValue, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatalf("SplitHostPort: %v", err)
+	}
+	port, err := strconv.Atoi(portValue)
+	if err != nil {
+		t.Fatalf("Atoi: %v", err)
+	}
+
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err == nil {
+			accepted <- conn
+		}
+	}()
+
+	config := baseConfig()
+	config.SMTPHost = host
+	config.SMTPPort = port
+	config.SMTPUsername = ""
+	config.SMTPPassword = ""
+	config.SMTPUseSSL = false
+	config.SMTPUseTLS = false
+	channel := &Channel{Config: config}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- channel.sendViaSMTP(ctx, OutboundMessage{
+			To:      "alice@example.com",
+			From:    "bot@example.com",
+			Subject: "Subject",
+			Text:    "Body",
+		})
+	}()
+
+	var conn net.Conn
+	select {
+	case conn = <-accepted:
+	case <-time.After(time.Second):
+		t.Fatal("expected SMTP client to connect")
+	}
+	defer conn.Close()
+
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected cancellation error")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected sendViaSMTP to stop after context cancellation")
 	}
 }

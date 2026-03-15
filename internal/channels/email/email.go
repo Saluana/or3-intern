@@ -86,15 +86,15 @@ func (c *Channel) Name() string { return "email" }
 
 // Start validates configuration and begins polling for inbound mail.
 func (c *Channel) Start(ctx context.Context, eventBus *bus.Bus) error {
+	if !c.Config.ConsentGranted {
+		log.Printf("email channel disabled: consentGranted is false")
+		return nil
+	}
 	if err := c.validate(); err != nil {
 		return err
 	}
 	if eventBus == nil {
 		return fmt.Errorf("event bus not configured")
-	}
-	if !c.Config.ConsentGranted {
-		log.Printf("email channel disabled: consentGranted is false")
-		return nil
 	}
 
 	c.mu.Lock()
@@ -386,16 +386,24 @@ func (c *Channel) sendViaSMTP(ctx context.Context, outbound OutboundMessage) err
 		return err
 	}
 	address := net.JoinHostPort(strings.TrimSpace(c.Config.SMTPHost), fmt.Sprintf("%d", c.Config.SMTPPort))
-	dialer := &net.Dialer{Timeout: 30 * time.Second}
+	dialer := &net.Dialer{Timeout: defaultNetTimeout}
 
-	var conn net.Conn
-	if c.Config.SMTPUseSSL {
-		conn, err = tls.DialWithDialer(dialer, "tcp", address, &tls.Config{ServerName: strings.TrimSpace(c.Config.SMTPHost)})
-	} else {
-		conn, err = dialer.DialContext(ctx, "tcp", address)
-	}
+	conn, err := dialer.DialContext(ctx, "tcp", address)
 	if err != nil {
 		return fmt.Errorf("smtp dial: %w", err)
+	}
+	if deadline, ok := connectionDeadline(ctx); ok {
+		_ = conn.SetDeadline(deadline)
+	}
+	stopWatch := watchConnContext(ctx, conn)
+	defer stopWatch()
+	if c.Config.SMTPUseSSL {
+		tlsConn := tls.Client(conn, &tls.Config{ServerName: strings.TrimSpace(c.Config.SMTPHost)})
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			_ = conn.Close()
+			return fmt.Errorf("smtp tls handshake: %w", err)
+		}
+		conn = tlsConn
 	}
 	defer conn.Close()
 

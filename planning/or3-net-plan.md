@@ -15,6 +15,8 @@ This means `or3-intern` needs to expose a small authenticated HTTP surface that 
 
 `or3-net` now owns a durable `network_session_id` binding layer on top of the execution-facing `session_key`. The important contract for `or3-intern` is unchanged: `or3-net` resolves or creates the binding, then calls the internal service using the canonical `session_key`/`intern_session_key` for history and memory scope.
 
+Host-workspace staging stays outside `or3-intern` ownership. In the current v1 split, `or3-net` resolves host roots, prepares staged runtime sessions, and commits or discards staged file changes; `or3-sandbox` only provides runtime workspace transfer substrate. `or3-intern` should continue receiving execution/session metadata only and must not become the owner of host-path resolution, workspace transport, or commit policy.
+
 ---
 
 ## What changes in `or3-intern`

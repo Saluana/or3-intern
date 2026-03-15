@@ -1,0 +1,960 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>or3-intern — The AI Runtime That Actually Runs Your Work</title>
+  <meta name="description" content="or3-intern is the local-first AI runtime that remembers, automates, integrates, and operates with production-grade guardrails." />
+  <meta name="theme-color" content="#0f0d17" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    /* ===== MD3 Dark Theme — Enhanced Tokens ===== */
+    :root {
+      --surface:         #0f0d17;
+      --surface-dim:     #0b0a12;
+      --surface-low:     #171521;
+      --surface-cont:    #1e1b2a;
+      --surface-high:    #27243a;
+      --surface-highest: #322f48;
+      --primary:         #c9b1ff;
+      --primary-bright:  #e0d0ff;
+      --on-primary:      #2d1a5e;
+      --primary-cont:    #4a3680;
+      --on-primary-cont: #ece0ff;
+      --secondary:       #cec2dc;
+      --secondary-cont:  #4a4458;
+      --tertiary:        #f0b0c8;
+      --tertiary-bright: #ffd0e4;
+      --on-tertiary:     #4a2538;
+      --tertiary-cont:   #633b48;
+      --on-surface:      #eae4f0;
+      --on-surface-var:  #c8c0d4;
+      --outline:         #908a9c;
+      --outline-var:     #48445a;
+      --success:         #7ee8a0;
+      --warning:         #f8dc6c;
+      --error:           #f2b8b5;
+      --glow-primary:    rgba(201,177,255,0.12);
+      --glow-tertiary:   rgba(240,176,200,0.10);
+      --elev-1: 0 1px 3px 1px rgba(0,0,0,.20), 0 1px 2px rgba(0,0,0,.36);
+      --elev-2: 0 2px 6px 2px rgba(0,0,0,.20), 0 1px 2px rgba(0,0,0,.36);
+      --elev-3: 0 4px 12px 4px rgba(0,0,0,.24), 0 1px 3px rgba(0,0,0,.36);
+      --radius-xs: 6px;
+      --radius-sm: 10px;
+      --radius-md: 14px;
+      --radius-lg: 20px;
+      --radius-xl: 28px;
+      --radius-full: 9999px;
+      --ease: cubic-bezier(.22,.61,.36,1);
+      --ease-bounce: cubic-bezier(.34,1.56,.64,1);
+      --dur-fast: 180ms;
+      --dur-mid: 350ms;
+      --dur-slow: 600ms;
+      --max-w: 1180px;
+    }
+
+    /* ===== Reset ===== */
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    html{scroll-behavior:smooth;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+    body{
+      font-family:"Inter",system-ui,sans-serif;
+      font-size:16px;line-height:1.6;
+      color:var(--on-surface);
+      background:var(--surface);
+      overflow-x:hidden;
+    }
+    a{color:inherit;text-decoration:none}
+    img{max-width:100%;display:block}
+    ul{list-style:none}
+
+    /* ===== Ambient background ===== */
+    body::before{
+      content:"";position:fixed;inset:0;z-index:0;pointer-events:none;
+      background:
+        radial-gradient(ellipse 60% 50% at 20% 10%, rgba(140,80,255,.08) 0%, transparent 70%),
+        radial-gradient(ellipse 50% 40% at 80% 60%, rgba(240,176,200,.06) 0%, transparent 70%),
+        radial-gradient(ellipse 40% 60% at 50% 90%, rgba(100,60,255,.05) 0%, transparent 70%);
+    }
+
+    .page{position:relative;z-index:1}
+
+    .wrap{
+      width:min(100% - 48px, var(--max-w));
+      margin-inline:auto;
+    }
+
+    /* ===== Top App Bar ===== */
+    .topbar{
+      position:sticky;top:0;z-index:100;
+      background:rgba(15,13,23,.82);
+      backdrop-filter:blur(16px) saturate(1.4);
+      -webkit-backdrop-filter:blur(16px) saturate(1.4);
+      border-bottom:1px solid rgba(72,68,90,.5);
+      transition:box-shadow var(--dur-fast) var(--ease);
+    }
+    .topbar.scrolled{box-shadow:var(--elev-2)}
+    .nav{display:flex;align-items:center;justify-content:space-between;height:64px}
+    .brand{display:inline-flex;align-items:center;gap:10px;font-weight:700;font-size:1.05rem;letter-spacing:-.2px}
+    .brand-mark{
+      width:36px;height:36px;border-radius:var(--radius-sm);
+      background:linear-gradient(135deg,var(--primary-cont),var(--on-primary));
+      display:grid;place-items:center;
+      color:var(--primary-bright);font-weight:800;font-size:.8rem;
+    }
+    .nav-links{display:flex;gap:2px}
+    .nav-links a{
+      padding:8px 14px;border-radius:var(--radius-full);
+      color:var(--on-surface-var);font-size:.85rem;font-weight:500;
+      transition:background var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease);
+    }
+    .nav-links a:hover{background:var(--glow-primary);color:var(--on-surface)}
+    .nav-cta{display:inline-flex;align-items:center;gap:8px}
+
+    /* ===== Buttons ===== */
+    .btn,.btn-outline{
+      display:inline-flex;align-items:center;justify-content:center;gap:8px;
+      border:none;border-radius:var(--radius-full);
+      padding:11px 28px;font-family:inherit;font-weight:600;font-size:.875rem;
+      letter-spacing:.2px;cursor:pointer;white-space:nowrap;
+      transition:all var(--dur-fast) var(--ease);text-decoration:none;
+    }
+    .btn{
+      background:linear-gradient(135deg,var(--primary) 0%,#a78bfa 100%);
+      color:#1a1130;
+      box-shadow:0 0 0 0 rgba(201,177,255,0);
+    }
+    .btn:hover{
+      box-shadow:0 0 24px rgba(201,177,255,.28);
+      transform:translateY(-1px);
+    }
+    .btn-outline{
+      background:transparent;color:var(--primary);
+      border:1.5px solid var(--outline);
+    }
+    .btn-outline:hover{
+      border-color:var(--primary);
+      background:var(--glow-primary);
+    }
+    .btn:focus-visible,.btn-outline:focus-visible{
+      outline:2px solid var(--primary);outline-offset:3px;
+    }
+
+    /* ===== HERO ===== */
+    .hero{padding:72px 0 40px;position:relative}
+    .hero-grid{
+      display:grid;grid-template-columns:1.05fr .95fr;
+      gap:48px;align-items:center;
+    }
+    .eyebrow{
+      display:inline-flex;align-items:center;gap:8px;
+      padding:6px 16px 6px 12px;border-radius:var(--radius-full);
+      background:var(--surface-cont);
+      border:1px solid var(--outline-var);
+      color:var(--on-surface-var);font-size:.72rem;font-weight:500;
+      letter-spacing:.4px;margin-bottom:20px;
+    }
+    .dot-live{
+      width:7px;height:7px;border-radius:50%;background:var(--success);
+      box-shadow:0 0 0 0 rgba(126,232,160,.5);
+      animation:blink 2.4s ease-in-out infinite;
+    }
+    @keyframes blink{
+      0%,100%{box-shadow:0 0 0 0 rgba(126,232,160,.45)}
+      50%{box-shadow:0 0 0 7px rgba(126,232,160,0)}
+    }
+
+    h1{
+      font-size:clamp(2.6rem,5.4vw,3.75rem);
+      line-height:1.1;letter-spacing:-.5px;font-weight:800;
+      margin:0 0 20px;max-width:15ch;
+    }
+    .grad{
+      background:linear-gradient(135deg,var(--primary-bright) 0%,var(--tertiary-bright) 60%,var(--primary) 100%);
+      background-size:200% auto;
+      -webkit-background-clip:text;background-clip:text;color:transparent;
+      animation:shimmer 6s ease infinite;
+    }
+    @keyframes shimmer{
+      0%{background-position:0% 50%}
+      50%{background-position:100% 50%}
+      100%{background-position:0% 50%}
+    }
+
+    .hero-sub{
+      margin-bottom:28px;color:var(--on-surface-var);
+      max-width:52ch;font-size:1.05rem;line-height:1.65;
+    }
+    .hero-btns{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:28px}
+    .proof-pills{
+      display:flex;flex-wrap:wrap;gap:8px 16px;
+      color:var(--on-surface-var);font-size:.82rem;
+    }
+    .proof-pills span{display:inline-flex;align-items:center;gap:6px}
+    .proof-pills span::before{content:"\2713";color:var(--success);font-weight:700}
+
+    /* Terminal card */
+    .hero-card{
+      border-radius:var(--radius-xl);
+      background:var(--surface-cont);
+      border:1px solid var(--outline-var);
+      box-shadow:var(--elev-3);
+      padding:14px;position:relative;overflow:hidden;
+    }
+    .hero-card::before{
+      content:"";position:absolute;top:-40%;right:-30%;
+      width:300px;height:300px;border-radius:50%;
+      background:radial-gradient(circle,rgba(201,177,255,.10),transparent 70%);
+      pointer-events:none;
+    }
+    .term{
+      border-radius:var(--radius-md);overflow:hidden;
+      border:1px solid var(--outline-var);
+      background:var(--surface-dim);position:relative;
+    }
+    .term-bar{
+      display:flex;align-items:center;gap:6px;
+      padding:11px 14px;background:var(--surface-low);
+      border-bottom:1px solid var(--outline-var);
+    }
+    .term-dot{width:10px;height:10px;border-radius:50%}
+    .term-dot:nth-child(1){background:#f87171}
+    .term-dot:nth-child(2){background:#fbbf24}
+    .term-dot:nth-child(3){background:#34d399}
+    .term-title{margin-left:auto;color:var(--outline);font-size:.7rem;letter-spacing:.3px}
+    .term-body{
+      padding:18px 14px;
+      font-family:"JetBrains Mono","Fira Code",ui-monospace,monospace;
+      font-size:.78rem;line-height:1.75;color:var(--on-surface-var);
+      min-height:310px;
+    }
+    .tl{opacity:0;transform:translateY(5px);animation:rise .45s var(--ease) forwards}
+    .tl:nth-child(1){animation-delay:.05s}
+    .tl:nth-child(2){animation-delay:.12s}
+    .tl:nth-child(3){animation-delay:.19s}
+    .tl:nth-child(4){animation-delay:.26s}
+    .tl:nth-child(5){animation-delay:.33s}
+    .tl:nth-child(6){animation-delay:.40s}
+    .tl:nth-child(7){animation-delay:.47s}
+    .tl:nth-child(8){animation-delay:.54s}
+    .tl:nth-child(9){animation-delay:.61s}
+    .tl:nth-child(10){animation-delay:.68s}
+    @keyframes rise{to{opacity:1;transform:translateY(0)}}
+    .c-prompt{color:var(--tertiary)}
+    .c-cmd{color:var(--primary-bright)}
+    .c-warn{color:var(--warning)}
+    .c-ok{color:var(--success)}
+
+    /* Floating pills below terminal */
+    .float-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}
+    .float-pill{
+      padding:14px;border-radius:var(--radius-md);
+      background:var(--surface-high);
+      border:1px solid var(--outline-var);
+      font-size:.78rem;line-height:1.55;color:var(--on-surface-var);
+    }
+    .float-pill strong{
+      display:block;color:var(--on-surface);font-size:.84rem;
+      font-weight:600;margin-bottom:3px;
+    }
+
+    /* ===== Proof strip ===== */
+    .proof-strip{padding:12px 0 0}
+    .proof-row{
+      display:grid;grid-template-columns:repeat(4,1fr);gap:12px;
+      padding:14px;border-radius:var(--radius-xl);
+      background:var(--surface-cont);
+      border:1px solid var(--outline-var);
+    }
+    .pstat{
+      padding:18px 14px;border-radius:var(--radius-md);
+      background:var(--surface-high);text-align:center;
+    }
+    .pstat strong{
+      display:block;font-size:1.2rem;font-weight:700;
+      color:var(--primary);
+    }
+    .pstat span{
+      display:block;margin-top:5px;font-size:.78rem;
+      color:var(--on-surface-var);line-height:1.45;
+    }
+
+    /* ===== Section base ===== */
+    section{padding:88px 0}
+    .sec-head{max-width:640px;margin-bottom:44px}
+    .label{
+      display:inline-block;font-size:.68rem;font-weight:600;
+      letter-spacing:.6px;text-transform:uppercase;
+      color:var(--tertiary);margin-bottom:14px;
+    }
+    h2{
+      font-size:clamp(1.9rem,3.8vw,2.75rem);
+      line-height:1.14;font-weight:700;letter-spacing:-.3px;
+      margin:0 0 8px;
+    }
+    .sec-copy{
+      margin-top:10px;color:var(--on-surface-var);
+      font-size:.95rem;line-height:1.6;
+    }
+
+    /* ===== Section divider glow ===== */
+    .divider{
+      height:1px;border:none;
+      background:linear-gradient(90deg,transparent,var(--outline-var) 30%,var(--primary-cont) 50%,var(--outline-var) 70%,transparent);
+      margin:0;
+    }
+
+    /* ===== Cards ===== */
+    .card{
+      padding:28px;border-radius:var(--radius-lg);
+      background:var(--surface-cont);
+      border:1px solid var(--outline-var);
+      transition:box-shadow var(--dur-fast) var(--ease),
+                 border-color var(--dur-fast) var(--ease),
+                 transform var(--dur-fast) var(--ease);
+    }
+    .card:hover{
+      box-shadow:var(--elev-2);
+      border-color:rgba(201,177,255,.18);
+      transform:translateY(-2px);
+    }
+    .card h3{
+      margin:0 0 10px;font-size:1.3rem;font-weight:600;line-height:1.3;
+    }
+    .card p,.card li{
+      color:var(--on-surface-var);line-height:1.6;font-size:.88rem;
+    }
+
+    /* ===== Icon (tonal container) ===== */
+    .icon{
+      width:48px;height:48px;border-radius:var(--radius-sm);
+      display:grid;place-items:center;margin-bottom:16px;
+      font-size:1.3rem;
+    }
+    .icon-purple{background:var(--primary-cont);color:var(--primary-bright)}
+    .icon-pink{background:var(--tertiary-cont);color:var(--tertiary-bright)}
+    .icon-green{background:rgba(126,232,160,.14);color:var(--success)}
+
+    /* ===== Grids ===== */
+    .g2{display:grid;gap:16px;grid-template-columns:1fr 1fr}
+    .g3{display:grid;gap:16px;grid-template-columns:repeat(3,1fr)}
+    .g4{display:grid;gap:16px;grid-template-columns:repeat(4,1fr)}
+
+    /* ===== Pain grid ===== */
+    .pain-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+    .clean-list{padding:0;margin:0;display:grid;gap:14px}
+    .clean-list li{
+      display:flex;gap:12px;align-items:flex-start;
+      font-size:.88rem;line-height:1.55;color:var(--on-surface-var);
+    }
+    .clean-list li::before{
+      content:"\2726";color:var(--tertiary);font-weight:700;
+      flex-shrink:0;margin-top:2px;
+    }
+
+    /* ===== Feature cards ===== */
+    .feat-card{display:flex;flex-direction:column}
+    .tag{
+      display:inline-flex;width:fit-content;
+      padding:4px 14px;border-radius:var(--radius-full);
+      background:rgba(201,177,255,.12);
+      color:var(--primary-bright);
+      font-size:.68rem;font-weight:600;letter-spacing:.4px;
+      margin-bottom:16px;
+    }
+
+    /* ===== Journey ===== */
+    .journey{
+      display:grid;grid-template-columns:repeat(4,1fr);
+      gap:16px;counter-reset:journey;
+    }
+    .step{
+      padding:24px;border-radius:var(--radius-lg);
+      background:var(--surface-cont);
+      border:1px solid var(--outline-var);
+      transition:border-color var(--dur-fast) var(--ease);
+    }
+    .step:hover{border-color:rgba(201,177,255,.22)}
+    .step::before{
+      counter-increment:journey;content:counter(journey);
+      display:inline-grid;place-items:center;
+      width:34px;height:34px;border-radius:var(--radius-full);
+      margin-bottom:14px;
+      background:linear-gradient(135deg,var(--primary-cont),var(--on-primary));
+      color:var(--primary-bright);font-weight:700;font-size:.85rem;
+    }
+    .step h3{font-size:.95rem;font-weight:600;margin-bottom:8px}
+    .step p{color:var(--on-surface-var);font-size:.84rem;line-height:1.55}
+
+    /* ===== Comparison ===== */
+    .comparison{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+    .comparison ul{padding:0;margin:16px 0 0;display:grid;gap:12px}
+    .comparison li{
+      padding-left:22px;position:relative;
+      font-size:.88rem;color:var(--on-surface-var);line-height:1.55;
+    }
+    .comparison li::before{
+      content:"\2022";position:absolute;left:0;
+      color:var(--primary);font-size:1.3rem;line-height:1;top:1px;
+    }
+
+    /* ===== Testimonial ===== */
+    .testimonial{display:grid;grid-template-columns:1.1fr .9fr;gap:16px}
+    .quote{
+      font-size:clamp(1.2rem,2vw,1.6rem);line-height:1.45;
+      color:var(--on-surface);font-weight:500;
+    }
+    .quote-meta{margin-top:14px;color:var(--on-surface-var);font-size:.84rem}
+
+    /* ===== Pricing ===== */
+    .pricing{position:relative;overflow:hidden}
+    .price-tag{display:flex;align-items:flex-end;gap:8px;margin:18px 0 12px}
+    .price-tag strong{
+      font-size:clamp(2.2rem,4.5vw,3.2rem);line-height:1;
+      font-weight:800;letter-spacing:-.5px;
+    }
+    .check-list{margin:16px 0 0;padding:0;display:grid;gap:12px}
+    .check-list li{
+      display:flex;gap:10px;color:var(--on-surface-var);
+      font-size:.88rem;line-height:1.55;
+    }
+    .check-list li::before{content:"\2713";color:var(--success);font-weight:700;flex-shrink:0}
+
+    /* Pricing card gradient border */
+    .pricing-card{
+      position:relative;
+      background:linear-gradient(135deg,rgba(201,177,255,.06),rgba(240,176,200,.04));
+    }
+    .pricing-card::before{
+      content:"";position:absolute;inset:-1px;
+      border-radius:calc(var(--radius-lg) + 1px);
+      padding:1px;
+      background:linear-gradient(135deg,rgba(201,177,255,.25),transparent 40%,transparent 60%,rgba(240,176,200,.2));
+      -webkit-mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);
+      mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);
+      -webkit-mask-composite:xor;
+      mask-composite:exclude;
+      pointer-events:none;
+    }
+
+    /* ===== CTA Band ===== */
+    .cta-band{
+      padding:44px;border-radius:var(--radius-xl);
+      background:linear-gradient(135deg,var(--surface-high) 0%,rgba(74,54,128,.18) 100%);
+      border:1px solid var(--outline-var);
+      display:grid;grid-template-columns:1.15fr .85fr;
+      gap:28px;align-items:center;
+    }
+
+    /* ===== FAQ ===== */
+    .faq-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+    .faq-item summary{
+      list-style:none;cursor:pointer;
+      font-weight:600;font-size:.95rem;line-height:1.5;
+      display:flex;align-items:center;justify-content:space-between;gap:16px;
+      color:var(--on-surface);
+    }
+    .faq-item summary::-webkit-details-marker{display:none}
+    .faq-item summary::after{
+      content:"+";font-size:1.3rem;color:var(--primary);
+      transition:transform var(--dur-fast) var(--ease);flex-shrink:0;
+    }
+    .faq-item[open] summary::after{transform:rotate(45deg)}
+    .faq-item p{margin:12px 0 0;color:var(--on-surface-var);font-size:.86rem;line-height:1.6}
+
+    /* ===== Footer ===== */
+    .footer{
+      padding:32px 0 48px;
+      color:var(--outline);font-size:.78rem;
+      border-top:1px solid var(--outline-var);
+    }
+
+    /* ===== Scroll Reveal ===== */
+    .rv{
+      opacity:0;transform:translateY(20px);
+      transition:opacity var(--dur-slow) var(--ease),
+                 transform var(--dur-slow) var(--ease);
+    }
+    .rv.show{opacity:1;transform:translateY(0)}
+
+    /* ===== Reduced motion ===== */
+    @media(prefers-reduced-motion:reduce){
+      html{scroll-behavior:auto}
+      *,*::before,*::after{animation:none!important;transition:none!important}
+      .rv{opacity:1;transform:none}
+    }
+
+    /* ===== Responsive: Tablet ===== */
+    @media(max-width:1080px){
+      .hero-grid,.pain-grid,.testimonial,.cta-band,.comparison{
+        grid-template-columns:1fr;
+      }
+      .g3,.g4,.journey,.proof-row,.faq-grid{
+        grid-template-columns:repeat(2,1fr);
+      }
+    }
+
+    /* ===== Responsive: Mobile ===== */
+    @media(max-width:760px){
+      .wrap{width:min(100% - 28px,var(--max-w))}
+      .nav-links{display:none}
+      .hero{padding-top:40px}
+      .g3,.g4,.journey,.proof-row,.faq-grid,.float-grid,.g2{
+        grid-template-columns:1fr;
+      }
+      h1{max-width:none}
+      .hero-btns,.nav-cta{flex-wrap:wrap}
+      .btn,.btn-outline{width:100%;justify-content:center}
+      .term-body{min-height:auto}
+      .cta-band{padding:24px;grid-template-columns:1fr}
+    }
+  </style>
+</head>
+<body>
+<div class="page">
+
+  <!-- ===== TOP APP BAR ===== -->
+  <header class="topbar" id="topbar">
+    <div class="wrap nav">
+      <a class="brand" href="#top" aria-label="or3-intern home">
+        <span class="brand-mark">or3</span>
+        <span>or3-intern</span>
+      </a>
+      <nav class="nav-links" aria-label="Primary">
+        <a href="#why">Why it wins</a>
+        <a href="#features">Features</a>
+        <a href="#proof">Proof</a>
+        <a href="#pricing">Offer</a>
+        <a href="#faq">FAQ</a>
+      </nav>
+      <div class="nav-cta">
+        <a class="btn-outline" href="#proof">See the advantage</a>
+        <a class="btn" href="#pricing">Get started</a>
+      </div>
+    </div>
+  </header>
+
+  <main id="top">
+
+    <!-- ===== HERO ===== -->
+    <section class="hero">
+      <div class="wrap hero-grid">
+        <div>
+          <div class="eyebrow rv">
+            <span class="dot-live"></span>
+            Local-first AI runtime &middot; memory &middot; channels &middot; automation &middot; hardening
+          </div>
+          <h1 class="rv">
+            Stop buying <span class="grad">AI demos.</span><br/>
+            Start running an AI&nbsp;operator.
+          </h1>
+          <p class="hero-sub rv">
+            or3-intern is the AI runtime for teams who want more than a chatbot.
+            It remembers context, works across real channels, automates recurring
+            jobs, integrates with tools, and stays governed with production-grade controls.
+          </p>
+          <div class="hero-btns rv">
+            <a class="btn" href="#pricing">Launch your AI operator &rarr;</a>
+            <a class="btn-outline" href="#why">Why this converts work into output</a>
+          </div>
+          <div class="proof-pills rv" aria-label="Key differentiators">
+            <span>Shared runtime across CLI, service, channels &amp; jobs</span>
+            <span>SQLite-backed history &amp; hybrid memory retrieval</span>
+            <span>Secrets, audit, profiles &amp; network policy built&nbsp;in</span>
+          </div>
+        </div>
+
+        <div class="hero-card rv">
+          <div class="term">
+            <div class="term-bar">
+              <span class="term-dot"></span>
+              <span class="term-dot"></span>
+              <span class="term-dot"></span>
+              <span class="term-title">or3-intern live operator flow</span>
+            </div>
+            <div class="term-body">
+              <div class="tl"><span class="c-prompt">$</span> <span class="c-cmd">or3-intern init</span></div>
+              <div class="tl">Configured provider, memory, artifacts, channels, and runtime profile.</div>
+              <div class="tl"><span class="c-prompt">$</span> <span class="c-cmd">or3-intern serve</span></div>
+              <div class="tl"><span class="c-ok">&#10003;</span> Telegram enabled</div>
+              <div class="tl"><span class="c-ok">&#10003;</span> Slack enabled</div>
+              <div class="tl"><span class="c-ok">&#10003;</span> Cron + heartbeat running</div>
+              <div class="tl"><span class="c-ok">&#10003;</span> MCP tools connected</div>
+              <div class="tl"><span class="c-warn">&#8594;</span> New inbound request: &ldquo;Summarize the incident and notify the team&rdquo;</div>
+              <div class="tl">Pulled memory, checked policies, executed tools, posted reply, logged audit trail.</div>
+              <div class="tl"><span class="c-ok">Result:</span> one AI brain, everywhere your work happens.</div>
+            </div>
+          </div>
+          <div class="float-grid">
+            <div class="float-pill">
+              <strong>Remembers context</strong>
+              SQLite history, hybrid retrieval, document indexing, and standing memory.
+            </div>
+            <div class="float-pill">
+              <strong>Acts across channels</strong>
+              CLI, service API, Telegram, Slack, Discord, Email, and WhatsApp bridge.
+            </div>
+            <div class="float-pill">
+              <strong>Runs autonomously</strong>
+              Webhooks, file-watch, heartbeat, cron, and structured tasks.
+            </div>
+            <div class="float-pill">
+              <strong>Stays controlled</strong>
+              Secrets, audit, host policy, access profiles, and runtime hardening.
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== PROOF STRIP ===== -->
+    <section class="proof-strip">
+      <div class="wrap">
+        <div class="proof-row rv" id="proof">
+          <div class="pstat">
+            <strong>1 runtime</strong>
+            <span>One shared AI system across chat, channels, service APIs, and automation.</span>
+          </div>
+          <div class="pstat">
+            <strong>5+ channels</strong>
+            <span>Real communication surfaces, not just another browser tab.</span>
+          </div>
+          <div class="pstat">
+            <strong>4 postures</strong>
+            <span>From local development to hardened service deployment.</span>
+          </div>
+          <div class="pstat">
+            <strong>Built-in guardrails</strong>
+            <span>Secret refs, audit chain, quotas, profiles, and outbound network policy.</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <hr class="divider" />
+
+    <!-- ===== WHY ===== -->
+    <section id="why">
+      <div class="wrap">
+        <div class="sec-head rv">
+          <span class="label">Why buyers switch</span>
+          <h2>The problem is not getting AI to talk.<br/>The problem is getting AI to <span class="grad">operate.</span></h2>
+          <p class="sec-copy">
+            Most AI products fail after the demo because they are disconnected from
+            the real flow of work. They forget context, live in one interface,
+            break when you add automation, and become risky the moment you expose
+            them to the outside&nbsp;world.
+          </p>
+        </div>
+
+        <div class="pain-grid">
+          <div class="card rv">
+            <div class="icon icon-pink">&#10005;</div>
+            <h3>What you are stuck with now</h3>
+            <ul class="clean-list">
+              <li>A chatbot that forgets everything important after the session ends.</li>
+              <li>Separate bots for internal chat, external channels, and background automation.</li>
+              <li>Fragile glue code between prompts, tools, schedules, and APIs.</li>
+              <li>Security anxiety the second AI touches secrets, shell tools, or public endpoints.</li>
+              <li>No operational confidence because there is no audit trail, profile system, or host policy.</li>
+            </ul>
+          </div>
+          <div class="card rv">
+            <div class="icon icon-green">&#10003;</div>
+            <h3>What or3-intern changes</h3>
+            <ul class="clean-list">
+              <li>One AI runtime that powers local chat, service mode, channels, triggers, and scheduled jobs.</li>
+              <li>Persistent memory with SQLite-backed history, hybrid retrieval, and document indexing.</li>
+              <li>Real-world channel integrations so the agent meets your users where they already work.</li>
+              <li>Hardening features designed for grown-up deployments, not retrofitted after the fact.</li>
+              <li>Extensibility through skills and MCP tool integrations so it grows with your stack.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <hr class="divider" />
+
+    <!-- ===== FEATURES ===== -->
+    <section id="features">
+      <div class="wrap">
+        <div class="sec-head rv">
+          <span class="label">Features that close the deal</span>
+          <h2>Every layer is engineered to reduce friction and increase&nbsp;trust.</h2>
+          <p class="sec-copy">
+            This is not a vague AI promise. It is a system with concrete advantages:
+            faster setup, deeper context, broader reach, safer execution, and
+            cleaner&nbsp;operations.
+          </p>
+        </div>
+
+        <div class="g3">
+          <article class="card feat-card rv">
+            <span class="tag">Memory that compounds</span>
+            <h3>Persistent context that actually sticks</h3>
+            <p>SQLite-backed history, pinned memory, hybrid vector + FTS retrieval, and document indexing mean the system gets more useful over time instead of resetting every conversation.</p>
+          </article>
+          <article class="card feat-card rv">
+            <span class="tag">Reach beyond the browser</span>
+            <h3>One operator across real channels</h3>
+            <p>Run through CLI, internal service APIs, Telegram, Slack, Discord, Email, and WhatsApp bridge&mdash;all on the same shared runtime and policy model.</p>
+          </article>
+          <article class="card feat-card rv">
+            <span class="tag">Autonomy without chaos</span>
+            <h3>Automation built in, not bolted on</h3>
+            <p>Webhooks, file-watch triggers, heartbeat tasks, cron jobs, and structured task execution let the system move from reactive assistant to active operator.</p>
+          </article>
+          <article class="card feat-card rv">
+            <span class="tag">Guardrails by design</span>
+            <h3>Security that makes adoption easier</h3>
+            <p>Secret references, audit verification, runtime profiles, access profiles, quotas, sandbox options, and host-based network policy lower the risk of real deployment.</p>
+          </article>
+          <article class="card feat-card rv">
+            <span class="tag">Fits your stack</span>
+            <h3>Skills &amp; MCP extend capability fast</h3>
+            <p>Add managed skills, quarantine or approve them intelligently, and connect MCP tools over stdio, SSE, or streamable HTTP with policy-aware controls.</p>
+          </article>
+          <article class="card feat-card rv">
+            <span class="tag">Operational confidence</span>
+            <h3>Built to move from local to hosted</h3>
+            <p>Run <code style="background:var(--surface-high);padding:2px 8px;border-radius:6px;font-size:.8rem">doctor --strict</code>, choose a runtime posture, validate startup constraints, and scale from personal workflows to service-grade&nbsp;deployments.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <hr class="divider" />
+
+    <!-- ===== VALUE JOURNEY ===== -->
+    <section>
+      <div class="wrap">
+        <div class="sec-head rv">
+          <span class="label">How buyers rationalize the purchase</span>
+          <h2>You are not paying for responses. You are paying for <span class="grad">leverage.</span></h2>
+          <p class="sec-copy">
+            The real value comes from replacing fragmented tooling, shrinking manual
+            follow-up, and turning AI from a novelty into reliable operational&nbsp;capacity.
+          </p>
+        </div>
+
+        <div class="journey">
+          <div class="step rv">
+            <h3>Replace tool sprawl</h3>
+            <p>Stop paying the operational tax of separate bots, one-off scripts, prompt silos, and brittle glue code.</p>
+          </div>
+          <div class="step rv">
+            <h3>Compress response time</h3>
+            <p>One runtime can receive, reason, retrieve context, act, and respond without handoffs between systems.</p>
+          </div>
+          <div class="step rv">
+            <h3>Increase output quality</h3>
+            <p>Persistent memory and shared context produce more relevant results than stateless assistants ever can.</p>
+          </div>
+          <div class="step rv">
+            <h3>Adopt with confidence</h3>
+            <p>Security and hardening features reduce the hidden cost that normally stalls AI rollout inside serious teams.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <hr class="divider" />
+
+    <!-- ===== COMPARISON ===== -->
+    <section>
+      <div class="wrap comparison">
+        <div class="card rv">
+          <div class="icon icon-pink">&#128556;</div>
+          <h3>The typical AI product</h3>
+          <ul>
+            <li>Lives in one interface</li>
+            <li>Forgets everything outside the active session</li>
+            <li>Needs extra tooling for channels and automation</li>
+            <li>Becomes risky the moment it touches tools or endpoints</li>
+            <li>Feels impressive in demos and fragile in production</li>
+          </ul>
+        </div>
+        <div class="card rv">
+          <div class="icon icon-purple">&#9889;</div>
+          <h3>The or3-intern advantage</h3>
+          <ul>
+            <li>Shared runtime across interactive, async, and service workflows</li>
+            <li>Persistent memory and retrieval grounded in local data</li>
+            <li>Channels, triggers, schedules, and service mode already in the box</li>
+            <li>Guardrails for secrets, audit, profiles, quotas, and host policy</li>
+            <li>Built to become infrastructure, not just interface decoration</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <hr class="divider" />
+
+    <!-- ===== TESTIMONIAL ===== -->
+    <section>
+      <div class="wrap testimonial">
+        <div class="card rv">
+          <span class="label">What your future buyer-self says</span>
+          <p class="quote">&ldquo;We stopped experimenting with AI in isolated pockets and finally gave the business one operator that could remember, integrate, automate, and still stay under control.&rdquo;</p>
+          <div class="quote-meta">That is the emotional reason this product wins: fewer moving parts, more output, less risk.</div>
+        </div>
+        <div class="card rv">
+          <div class="icon icon-purple">&#129504;</div>
+          <h3>Ideal for</h3>
+          <ul class="check-list">
+            <li>Founders who want an AI operator instead of a toy assistant</li>
+            <li>Internal tools teams who need one platform for AI workflows</li>
+            <li>Operators who care about memory, reach, and governance</li>
+            <li>Teams who want to start local-first and scale toward service mode</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <hr class="divider" />
+
+    <!-- ===== PRICING ===== -->
+    <section id="pricing">
+      <div class="wrap">
+        <div class="sec-head rv">
+          <span class="label">The offer</span>
+          <h2>Buy one system that replaces a pile of partial&nbsp;solutions.</h2>
+          <p class="sec-copy">
+            The conversion decision is simple: if you believe your team needs AI
+            that can do more than answer prompts, this is the category&nbsp;upgrade.
+          </p>
+        </div>
+
+        <div class="card pricing-card rv">
+          <div class="g3">
+            <div>
+              <span class="label">Why it is worth it</span>
+              <h3 style="font-size:1.65rem;margin:0">You get infrastructure-level value.</h3>
+              <div class="price-tag">
+                <strong>1 runtime</strong>
+                <span style="color:var(--on-surface-var);padding-bottom:6px">for memory, channels, automation, service APIs, skills &amp; governance</span>
+              </div>
+              <p class="sec-copy" style="margin-top:6px">
+                Instead of paying in tool sprawl, prompt drift, and operational
+                fragility, you buy a platform that turns AI into a durable business&nbsp;capability.
+              </p>
+              <div class="hero-btns" style="margin-top:20px">
+                <a class="btn" href="#final-cta">Yes &mdash; I want the operator</a>
+                <a class="btn-outline" href="#faq">Answer my objections</a>
+              </div>
+            </div>
+            <div>
+              <h3>What makes the decision easy</h3>
+              <ul class="check-list">
+                <li>Grounded in local-first persistence, so your context stays yours.</li>
+                <li>Works across the surfaces your business already uses.</li>
+                <li>Supports autonomy, not just interactive prompting.</li>
+                <li>Includes the hardening layer that serious deployment demands.</li>
+              </ul>
+            </div>
+            <div>
+              <h3>What you stop buying separately</h3>
+              <ul class="check-list">
+                <li>Disconnected channel bots</li>
+                <li>One-off automation glue</li>
+                <li>Stateless AI wrappers</li>
+                <li>Afterthought governance retrofits</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <hr class="divider" />
+
+    <!-- ===== FAQ ===== -->
+    <section id="faq">
+      <div class="wrap">
+        <div class="sec-head rv">
+          <span class="label">Objection handling</span>
+          <h2>The questions buyers ask before they say&nbsp;yes.</h2>
+        </div>
+        <div class="faq-grid">
+          <details class="card faq-item rv" open>
+            <summary>Why not just use a normal AI assistant?</summary>
+            <p>Because a normal assistant gives you isolated conversations. or3-intern gives you a runtime: memory, channels, automation, service mode, tools, and governance in one system.</p>
+          </details>
+          <details class="card faq-item rv">
+            <summary>Is this only for developers?</summary>
+            <p>It is built by engineers, but the value is operational: faster execution, fewer handoffs, more reliable automation, and safer adoption. Technical teams enable it; the business benefits from it.</p>
+          </details>
+          <details class="card faq-item rv">
+            <summary>What if we need security controls?</summary>
+            <p>That is one of its biggest strengths. Runtime profiles, audit verification, secret refs, quotas, host policy, access profiles, and hardened execution are already part of the product.</p>
+          </details>
+          <details class="card faq-item rv">
+            <summary>Can it grow with our stack?</summary>
+            <p>Yes. Skills and MCP integrations make the system extensible, while service mode and channel adapters let it operate beyond a single UI.</p>
+          </details>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== FINAL CTA ===== -->
+    <section id="final-cta">
+      <div class="wrap">
+        <div class="cta-band rv">
+          <div>
+            <span class="label">Final close</span>
+            <h2 style="margin-bottom:12px">If you want AI that only talks, keep&nbsp;shopping.</h2>
+            <p style="margin:0;max-width:46rem;color:var(--on-surface-var);font-size:1rem;line-height:1.6">
+              If you want AI that can remember, integrate, automate, and operate
+              like part of the business&mdash;this is the smarter buy. The future
+              is not another assistant tab. The future is one dependable AI runtime
+              embedded into how work actually gets&nbsp;done.
+            </p>
+          </div>
+          <div>
+            <div class="card" style="min-height:100%">
+              <h3 style="font-size:1.3rem">Make the obvious move</h3>
+              <ul class="check-list">
+                <li>Start local-first</li>
+                <li>Expand to channels and automation</li>
+                <li>Harden for real deployment</li>
+                <li>Let one AI brain power the workflow</li>
+              </ul>
+              <div class="hero-btns" style="margin-top:18px;margin-bottom:0">
+                <a class="btn" href="#top">Back to top &uarr;</a>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="wrap">
+      <p>Built around the real capabilities of or3-intern: local-first runtime, shared memory, channel integrations, automation, service mode, hardening, skills, and MCP extensions.</p>
+    </div>
+  </footer>
+</div>
+
+<script>
+  // Scroll-reveal with IntersectionObserver
+  const io = new IntersectionObserver(
+    (entries) => {
+      entries.forEach((e) => {
+        if (e.isIntersecting) { e.target.classList.add('show'); io.unobserve(e.target); }
+      });
+    },
+    { threshold: 0.08, rootMargin: '0px 0px -40px 0px' }
+  );
+  document.querySelectorAll('.rv').forEach((el) => io.observe(el));
+
+  // Top bar elevation on scroll
+  const tb = document.getElementById('topbar');
+  window.addEventListener('scroll', () => {
+    tb.classList.toggle('scrolled', window.scrollY > 8);
+  }, { passive: true });
+</script>
+</body>
+</html>

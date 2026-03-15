@@ -226,6 +226,32 @@ func TestInventory_ResolveBundlePath(t *testing.T) {
 	}
 }
 
+func TestInventory_ResolveBundlePath_EmptyReturnsCanonicalRoot(t *testing.T) {
+	parent := t.TempDir()
+	actualRoot := filepath.Join(parent, "actual")
+	if err := os.MkdirAll(actualRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	symlinkRoot := filepath.Join(parent, "linked")
+	if err := os.Symlink(actualRoot, symlinkRoot); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+	makeSkillBundle(t, actualRoot, "bundle", "# Bundle")
+
+	inv := ScanWithOptions(LoadOptions{Roots: []Root{{Path: symlinkRoot, Source: SourceWorkspace}}})
+	resolved, err := inv.ResolveBundlePath("bundle", "")
+	if err != nil {
+		t.Fatalf("ResolveBundlePath empty: %v", err)
+	}
+	want, err := filepath.EvalSymlinks(filepath.Join(actualRoot, "bundle"))
+	if err != nil {
+		t.Fatalf("EvalSymlinks want: %v", err)
+	}
+	if resolved != want {
+		t.Fatalf("expected canonical root %q, got %q", want, resolved)
+	}
+}
+
 func TestScanWithOptions_DetectsUnsupportedCustomTools(t *testing.T) {
 	root := t.TempDir()
 	makeSkillBundle(t, root, "custom-tool", `---

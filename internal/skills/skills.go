@@ -639,11 +639,19 @@ func skillApproved(meta *SkillMeta, approved map[string]struct{}) bool {
 }
 
 func loadManifest(dir string) (skillManifest, error) {
-	data, err := os.ReadFile(filepath.Join(dir, "skill.json"))
+	manifestPath := filepath.Join(dir, "skill.json")
+	info, err := os.Lstat(manifestPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return skillManifest{}, nil
 		}
+		return skillManifest{}, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return skillManifest{}, fs.ErrPermission
+	}
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
 		return skillManifest{}, err
 	}
 	var m skillManifest
@@ -948,16 +956,16 @@ func (inv Inventory) ResolveBundlePath(name, relPath string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("skill not found: %s", name)
 	}
-	relPath = strings.TrimSpace(relPath)
-	if relPath == "" {
-		return skill.Dir, nil
-	}
-	if filepath.IsAbs(relPath) {
-		return "", fmt.Errorf("bundle path must be relative")
-	}
 	root, err := filepath.EvalSymlinks(skill.Dir)
 	if err != nil {
 		return "", err
+	}
+	relPath = strings.TrimSpace(relPath)
+	if relPath == "" {
+		return root, nil
+	}
+	if filepath.IsAbs(relPath) {
+		return "", fmt.Errorf("bundle path must be relative")
 	}
 	full := filepath.Join(root, relPath)
 	clean := filepath.Clean(full)

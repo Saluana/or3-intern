@@ -328,6 +328,30 @@ func TestSkillManifestOverridesFrontMatter(t *testing.T) {
 	}
 }
 
+func TestLoadManifest_RejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	bundle := makeSkillBundle(t, dir, "symlinked-manifest", "# Skill")
+	target := filepath.Join(dir, "outside.json")
+	if err := os.WriteFile(target, []byte(`{"summary":"outside"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile target: %v", err)
+	}
+	if err := os.Symlink(target, filepath.Join(bundle, "skill.json")); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	inv := Scan([]string{dir})
+	if len(inv.Skills) != 1 {
+		t.Fatalf("expected 1 skill, got %d", len(inv.Skills))
+	}
+	skill := inv.Skills[0]
+	if skill.ParseError == "" {
+		t.Fatal("expected symlinked manifest to be rejected")
+	}
+	if !strings.Contains(strings.ToLower(skill.ParseError), "permission") {
+		t.Fatalf("expected permission parse error, got %q", skill.ParseError)
+	}
+}
+
 func TestSkillPermissionsAndApprovalPolicy(t *testing.T) {
 	dir := t.TempDir()
 	bundle := makeSkillBundle(t, dir, "approved-skill", "---\npermissions:\n  shell: true\n  hosts: [api.example.com]\n---\n# Skill")

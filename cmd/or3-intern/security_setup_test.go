@@ -82,3 +82,27 @@ func TestSetupSecurity_HostedProfileRequiresWorkingAuditLogger(t *testing.T) {
 		t.Fatalf("expected audit logger availability error, got %v", err)
 	}
 }
+
+func TestSetupApprovalBroker_EnabledWithoutKeyStillReturnsBroker(t *testing.T) {
+	d, err := db.Open(filepath.Join(t.TempDir(), "security.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+
+	cfg := config.Default()
+	cfg.Security.Approvals.Enabled = true
+	cfg.Security.Approvals.KeyFile = ""
+	cfg.Security.Approvals.Exec.Mode = config.ApprovalModeDeny
+
+	broker, err := setupApprovalBroker(cfg, d, nil)
+	if err != nil {
+		t.Fatalf("setupApprovalBroker: %v", err)
+	}
+	if broker == nil {
+		t.Fatal("expected approval broker when approvals are enabled")
+	}
+	if len(broker.SignKey) != 0 {
+		t.Fatalf("expected keyless broker for deny mode, got %d-byte key", len(broker.SignKey))
+	}
+}

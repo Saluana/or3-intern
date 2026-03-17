@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"or3-intern/internal/approval"
 )
 
 const serviceTokenMaxAge = 5 * time.Minute
@@ -21,14 +23,86 @@ type serviceTokenClaims struct {
 	Nonce    string `json:"nonce"`
 }
 
+type serviceAuthContextKey struct{}
+
+type serviceAuthIdentity struct {
+	Kind   string
+	Actor  string
+	Role   string
+	Device string
+}
+
 func serviceAuthMiddleware(secret string, next http.Handler) http.Handler {
+	return serviceAuthMiddlewareWithBroker(secret, nil, next)
+}
+
+func serviceAuthMiddlewareWithBroker(secret string, broker *approval.Broker, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := validateServiceAuthorization(secret, r.Header.Get("Authorization"), time.Now()); err != nil {
+		if allowsUnauthenticatedPairingRoute(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		identity, err := authenticateServiceRequest(secret, broker, r.Header.Get("Authorization"), time.Now(), r.Context())
+		if err != nil {
 			writeServiceJSON(w, http.StatusUnauthorized, map[string]any{"error": err.Error()})
 			return
 		}
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), serviceAuthContextKey{}, identity)))
 	})
+}
+
+func authenticateServiceRequest(secret string, broker *approval.Broker, header string, now time.Time, ctx context.Context) (serviceAuthIdentity, error) {
+	if err := validateServiceAuthorization(secret, header, now); err == nil {
+		return serviceAuthIdentity{Kind: "shared-secret", Actor: "service:shared-secret", Role: "admin"}, nil
+	}
+	if broker == nil {
+		return serviceAuthIdentity{}, fmt.Errorf("missing bearer token")
+	}
+	scheme, token, ok := strings.Cut(strings.TrimSpace(header), " ")
+	if !ok || !strings.EqualFold(scheme, "Bearer") || strings.TrimSpace(token) == "" {
+		return serviceAuthIdentity{}, fmt.Errorf("missing bearer token")
+	}
+	device, err := broker.AuthenticateDeviceToken(ctx, token)
+	if err != nil {
+		return serviceAuthIdentity{}, err
+	}
+	return serviceAuthIdentity{Kind: "paired-device", Actor: "device:" + device.DeviceID, Role: device.Role, Device: device.DeviceID}, nil
+}
+
+func serviceAuthIdentityFromContext(ctx context.Context) serviceAuthIdentity {
+	if ctx == nil {
+		return serviceAuthIdentity{}
+	}
+	identity, _ := ctx.Value(serviceAuthContextKey{}).(serviceAuthIdentity)
+	return identity
+}
+
+func allowsUnauthenticatedPairingRoute(r *http.Request) bool {
+	if r == nil || r.URL == nil {
+		return false
+	}
+	if r.Method != http.MethodPost {
+		return false
+	}
+	path := strings.TrimSpace(r.URL.Path)
+	return path == "/internal/v1/pairing/requests" || path == "/internal/v1/pairing/exchange"
+}
+
+func requireServiceRole(w http.ResponseWriter, r *http.Request, roles ...string) bool {
+	identity := serviceAuthIdentityFromContext(r.Context())
+	if identity.Kind == "shared-secret" {
+		return true
+	}
+	if len(roles) == 0 {
+		return true
+	}
+	for _, role := range roles {
+		if identity.Role == role {
+			return true
+		}
+	}
+	writeServiceJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
+	return false
 }
 
 func validateServiceAuthorization(secret string, header string, now time.Time) error {

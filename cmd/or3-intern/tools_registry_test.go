@@ -51,8 +51,8 @@ func TestBuildToolRegistry_ReturnsFreshToolInstances(t *testing.T) {
 	}
 	inv := skills.Inventory{}
 
-	reg1 := buildToolRegistry(cfg, d, provider, channelManager, &inv, nil, stubSpawnManager{}, nil)
-	reg2 := buildToolRegistry(cfg, d, provider, channelManager, &inv, nil, stubSpawnManager{}, nil)
+	reg1 := buildToolRegistry(cfg, d, provider, channelManager, &inv, nil, stubSpawnManager{}, nil, nil)
+	reg2 := buildToolRegistry(cfg, d, provider, channelManager, &inv, nil, stubSpawnManager{}, nil, nil)
 
 	for _, name := range []string{"read_file", "memory_search", "memory_recent", "memory_get_pinned", "send_message", "spawn_subagent"} {
 		tool1 := reg1.Get(name)
@@ -89,7 +89,7 @@ func TestBuildToolRegistry_RegistersMCPTools(t *testing.T) {
 			return 1
 		},
 	}
-	reg := buildToolRegistry(cfg, d, provider, channelManager, &inv, nil, nil, mcpRegistrar)
+	reg := buildToolRegistry(cfg, d, provider, channelManager, &inv, nil, nil, mcpRegistrar, nil)
 	if reg.Get("mcp_demo_echo") == nil {
 		t.Fatal("expected MCP tool to be registered")
 	}
@@ -112,7 +112,7 @@ func TestBuildBackgroundToolRegistry_OmitsMessagingAndSpawn(t *testing.T) {
 	}
 	inv := skills.Inventory{}
 
-	reg := buildBackgroundToolRegistry(cfg, d, provider, channelManager, &inv, nil, nil)
+	reg := buildBackgroundToolRegistry(cfg, d, provider, channelManager, &inv, nil, nil, nil)
 	if reg.Get("send_message") != nil {
 		t.Fatal("expected send_message to be omitted from background registry")
 	}

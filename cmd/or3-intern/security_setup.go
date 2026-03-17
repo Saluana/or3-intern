@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"or3-intern/internal/approval"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
 	"or3-intern/internal/security"
@@ -123,4 +124,25 @@ func validateConfiguredOutboundEndpoints(ctx context.Context, cfg config.Config,
 		}
 	}
 	return nil
+}
+
+func setupApprovalBroker(cfg config.Config, d *db.DB, audit *security.AuditLogger) (*approval.Broker, error) {
+	keyFile := strings.TrimSpace(cfg.Security.Approvals.KeyFile)
+	if keyFile == "" {
+		if !cfg.Security.Approvals.Enabled {
+			return nil, nil
+		}
+		return &approval.Broker{DB: d, Audit: audit, Config: cfg.Security.Approvals, HostID: cfg.Security.Approvals.HostID}, nil
+	}
+	key, err := security.LoadOrCreateKey(keyFile)
+	if err != nil {
+		if cfg.Security.Approvals.Enabled && approvalBrokerRequired(cfg) {
+			return nil, fmt.Errorf("approval broker unavailable: %w", err)
+		}
+		if cfg.Security.Approvals.Enabled {
+			return &approval.Broker{DB: d, Audit: audit, Config: cfg.Security.Approvals, HostID: cfg.Security.Approvals.HostID}, nil
+		}
+		return nil, nil
+	}
+	return &approval.Broker{DB: d, Audit: audit, Config: cfg.Security.Approvals, HostID: cfg.Security.Approvals.HostID, SignKey: key}, nil
 }

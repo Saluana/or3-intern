@@ -51,6 +51,7 @@ func doctorFindings(cfg config.Config) []doctorFinding {
 	findings = append(findings, filesystemFindings(cfg)...)
 	findings = append(findings, hardeningFindings(cfg)...)
 	findings = append(findings, securityFindings(cfg)...)
+	findings = append(findings, approvalFindings(cfg)...)
 	findings = append(findings, webhookFindings(cfg)...)
 	findings = append(findings, serviceFindings(cfg)...)
 	findings = append(findings, mcpFindings(cfg)...)
@@ -66,6 +67,23 @@ func doctorFindings(cfg config.Config) []doctorFinding {
 		}
 		return findings[i].Area < findings[j].Area
 	})
+	return findings
+}
+
+func approvalFindings(cfg config.Config) []doctorFinding {
+	findings := []doctorFinding{}
+	addWarn := func(message string) {
+		findings = append(findings, doctorFinding{Level: "warn", Area: "approvals", Message: message})
+	}
+	if !cfg.Security.Approvals.Enabled {
+		return findings
+	}
+	if approvalBrokerRequired(cfg) && strings.TrimSpace(cfg.Security.Approvals.KeyFile) == "" {
+		addWarn("approval broker keyFile is required when approvals use ask or allowlist mode")
+	}
+	if cfg.Service.Enabled && !isLoopbackAddr(cfg.Service.Listen) && approvalBrokerRequired(cfg) && strings.TrimSpace(cfg.Security.Approvals.KeyFile) == "" {
+		addWarn("service mode is exposed beyond loopback while approvals require a broker keyFile")
+	}
 	return findings
 }
 

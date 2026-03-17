@@ -186,6 +186,55 @@ func TestDefault_Values(t *testing.T) {
 	if cfg.Security.SecretStore.KeyFile == "" || cfg.Security.Audit.KeyFile == "" {
 		t.Fatal("expected default phase 3 key file paths")
 	}
+	if cfg.Security.Approvals.HostID != "local" {
+		t.Fatalf("expected default approval host ID, got %q", cfg.Security.Approvals.HostID)
+	}
+	if cfg.Security.Approvals.Exec.Mode != ApprovalModeTrusted {
+		t.Fatalf("expected trusted exec approval default, got %q", cfg.Security.Approvals.Exec.Mode)
+	}
+}
+
+func TestLoad_ApprovalsRemainBackwardCompatibleWhenMissing(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	cfg := Default()
+	cfg.Security.Approvals = ApprovalConfig{}
+
+	b, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.Security.Approvals.HostID != "local" {
+		t.Fatalf("expected host ID default, got %q", loaded.Security.Approvals.HostID)
+	}
+	if loaded.Security.Approvals.Pairing.Mode != ApprovalModeAsk {
+		t.Fatalf("expected pairing default mode, got %q", loaded.Security.Approvals.Pairing.Mode)
+	}
+}
+
+func TestLoad_RejectsUnknownApprovalMode(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	cfg := Default()
+	cfg.Security.Approvals.Exec.Mode = ApprovalMode("maybe")
+
+	b, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected unknown approval mode to fail")
+	}
 }
 
 func TestApplyEnvOverrides_ServiceConfig(t *testing.T) {

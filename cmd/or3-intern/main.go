@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"or3-intern/internal/agent"
+	"or3-intern/internal/approval"
 	"or3-intern/internal/artifacts"
 	"or3-intern/internal/bus"
 	rootchannels "or3-intern/internal/channels"
@@ -144,6 +145,11 @@ func main() {
 		}
 		return
 	}
+	approvalBroker, err := setupApprovalBroker(cfg, d, auditLogger)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "approval error:", err)
+		os.Exit(1)
+	}
 	timeout := time.Duration(cfg.Provider.TimeoutSeconds) * time.Second
 	prov := providers.New(cfg.Provider.APIBase, cfg.Provider.APIKey, timeout)
 	prov.HostPolicy = buildHostPolicy(cfg)
@@ -176,10 +182,10 @@ func main() {
 	var subagentManager *agent.SubagentManager
 	enableSubagents := subagentsEnabledForCommand(cmd, cfg)
 	buildRuntimeTools := func() *tools.Registry {
-		return buildToolRegistry(cfg, d, prov, channelManager, &inv, cronSvc, subagentManager, mcpManager)
+		return buildToolRegistry(cfg, d, prov, channelManager, &inv, cronSvc, subagentManager, mcpManager, approvalBroker)
 	}
 	buildBackgroundTools := func() *tools.Registry {
-		return buildBackgroundToolRegistry(cfg, d, prov, channelManager, &inv, cronSvc, mcpManager)
+		return buildBackgroundToolRegistry(cfg, d, prov, channelManager, &inv, cronSvc, mcpManager, approvalBroker)
 	}
 
 	ret := memory.NewRetriever(d)
@@ -266,6 +272,7 @@ func main() {
 		Hardening:          cfg.Hardening,
 		AccessProfiles:     cfg.Security.Profiles,
 		Audit:              auditLogger,
+		ApprovalBroker:     approvalBroker,
 	}
 	var serviceJobs *agent.JobRegistry
 	if cmd == "service" {
@@ -376,7 +383,7 @@ func main() {
 		<-ctx.Done()
 	case "service":
 		runWorkers(ctx, b, rt, cfg.WorkerCount, nil)
-		if err := runServiceCommand(ctx, cfg, rt, subagentManager, serviceJobs); err != nil {
+		if err := runServiceCommandWithBroker(ctx, cfg, rt, subagentManager, serviceJobs, approvalBroker); err != nil {
 			fmt.Fprintln(os.Stderr, "service error:", err)
 			os.Exit(1)
 		}
@@ -385,14 +392,18 @@ func main() {
 		fs := flag.NewFlagSet("agent", flag.ExitOnError)
 		var msg string
 		var session string
+		var approvalToken string
 		fs.StringVar(&msg, "m", "", "message")
 		fs.StringVar(&session, "s", cfg.DefaultSessionKey, "session key")
+		fs.StringVar(&approvalToken, "approval-token", "", "one-shot approval token")
 		_ = fs.Parse(args[1:])
 		if strings.TrimSpace(msg) == "" {
 			fmt.Fprintln(os.Stderr, "missing -m message")
 			os.Exit(2)
 		}
-		if err := rt.Handle(ctx, bus.Event{Type: bus.EventUserMessage, SessionKey: session, Channel: "cli", From: "local", Message: msg}); err != nil {
+		agentCtx := tools.ContextWithApprovalToken(ctx, approvalToken)
+		agentCtx = tools.ContextWithRequesterIdentity(agentCtx, "cli", approval.RoleOperator)
+		if err := rt.Handle(agentCtx, bus.Event{Type: bus.EventUserMessage, SessionKey: session, Channel: "cli", From: "local", Message: msg}); err != nil {
 			fmt.Fprintln(os.Stderr, "agent error:", err)
 			os.Exit(1)
 		}
@@ -432,6 +443,16 @@ func main() {
 		}
 		if err := runSkillsCommandWithDeps(ctx, cfg, args[1:], deps); err != nil {
 			fmt.Fprintln(os.Stderr, "skills error:", err)
+			os.Exit(1)
+		}
+	case "approvals":
+		if err := runApprovalsCommand(ctx, approvalBroker, args[1:], os.Stdout, os.Stderr); err != nil {
+			fmt.Fprintln(os.Stderr, "approvals error:", err)
+			os.Exit(1)
+		}
+	case "devices":
+		if err := runDevicesCommand(ctx, approvalBroker, args[1:], os.Stdout, os.Stderr); err != nil {
+			fmt.Fprintln(os.Stderr, "devices error:", err)
 			os.Exit(1)
 		}
 	case "scope":
@@ -553,20 +574,20 @@ type mcpToolRegistrar interface {
 	RegisterTools(reg *tools.Registry) int
 }
 
-func buildToolRegistry(cfg config.Config, d *db.DB, prov *providers.Client, channelManager *rootchannels.Manager, inv *skills.Inventory, cronSvc *cron.Service, spawnManager tools.SpawnEnqueuer, mcpRegistrar mcpToolRegistrar) *tools.Registry {
-	return buildToolRegistryWithOptions(cfg, d, prov, channelManager, inv, cronSvc, spawnManager, mcpRegistrar, true)
+func buildToolRegistry(cfg config.Config, d *db.DB, prov *providers.Client, channelManager *rootchannels.Manager, inv *skills.Inventory, cronSvc *cron.Service, spawnManager tools.SpawnEnqueuer, mcpRegistrar mcpToolRegistrar, approvalBroker *approval.Broker) *tools.Registry {
+	return buildToolRegistryWithOptions(cfg, d, prov, channelManager, inv, cronSvc, spawnManager, mcpRegistrar, approvalBroker, true)
 }
 
-func buildBackgroundToolRegistry(cfg config.Config, d *db.DB, prov *providers.Client, channelManager *rootchannels.Manager, inv *skills.Inventory, cronSvc *cron.Service, mcpRegistrar mcpToolRegistrar) *tools.Registry {
-	return buildToolRegistryWithOptions(cfg, d, prov, channelManager, inv, cronSvc, nil, mcpRegistrar, false)
+func buildBackgroundToolRegistry(cfg config.Config, d *db.DB, prov *providers.Client, channelManager *rootchannels.Manager, inv *skills.Inventory, cronSvc *cron.Service, mcpRegistrar mcpToolRegistrar, approvalBroker *approval.Broker) *tools.Registry {
+	return buildToolRegistryWithOptions(cfg, d, prov, channelManager, inv, cronSvc, nil, mcpRegistrar, approvalBroker, false)
 }
 
-func buildToolRegistryWithOptions(cfg config.Config, d *db.DB, prov *providers.Client, channelManager *rootchannels.Manager, inv *skills.Inventory, cronSvc *cron.Service, spawnManager tools.SpawnEnqueuer, mcpRegistrar mcpToolRegistrar, includeSendMessage bool) *tools.Registry {
+func buildToolRegistryWithOptions(cfg config.Config, d *db.DB, prov *providers.Client, channelManager *rootchannels.Manager, inv *skills.Inventory, cronSvc *cron.Service, spawnManager tools.SpawnEnqueuer, mcpRegistrar mcpToolRegistrar, approvalBroker *approval.Broker, includeSendMessage bool) *tools.Registry {
 	reg := tools.NewRegistry()
 	fileRoot := allowedRoot(cfg)
 	sandboxCfg := tools.BubblewrapConfig{Enabled: cfg.Hardening.Sandbox.Enabled, BubblewrapPath: cfg.Hardening.Sandbox.BubblewrapPath, AllowNetwork: cfg.Hardening.Sandbox.AllowNetwork, WritablePaths: append([]string{}, cfg.Hardening.Sandbox.WritablePaths...)}
 	hostPolicy := buildHostPolicy(cfg)
-	reg.Register(&tools.ExecTool{Timeout: time.Duration(cfg.Tools.ExecTimeoutSeconds) * time.Second, RestrictDir: fileRoot, PathAppend: cfg.Tools.PathAppend, AllowedPrograms: append([]string{}, cfg.Hardening.ExecAllowedPrograms...), ChildEnvAllowlist: append([]string{}, cfg.Hardening.ChildEnvAllowlist...), Sandbox: sandboxCfg, EnableLegacyShell: cfg.Hardening.EnableExecShell})
+	reg.Register(&tools.ExecTool{Timeout: time.Duration(cfg.Tools.ExecTimeoutSeconds) * time.Second, RestrictDir: fileRoot, PathAppend: cfg.Tools.PathAppend, AllowedPrograms: append([]string{}, cfg.Hardening.ExecAllowedPrograms...), ChildEnvAllowlist: append([]string{}, cfg.Hardening.ChildEnvAllowlist...), Sandbox: sandboxCfg, EnableLegacyShell: cfg.Hardening.EnableExecShell, ApprovalBroker: approvalBroker})
 	reg.Register(&tools.ReadFile{FileTool: tools.FileTool{Root: fileRoot}})
 	reg.Register(&tools.WriteFile{FileTool: tools.FileTool{Root: fileRoot}})
 	reg.Register(&tools.EditFile{FileTool: tools.FileTool{Root: fileRoot}})
@@ -593,7 +614,7 @@ func buildToolRegistryWithOptions(cfg config.Config, d *db.DB, prov *providers.C
 	}
 	if inv != nil {
 		reg.Register(&tools.ReadSkill{Inventory: inv})
-		reg.Register(&tools.RunSkillScript{Inventory: inv, Enabled: cfg.Skills.EnableExec, Timeout: time.Duration(cfg.Skills.MaxRunSeconds) * time.Second, ChildEnvAllowlist: append([]string{}, cfg.Hardening.ChildEnvAllowlist...), Sandbox: sandboxCfg})
+		reg.Register(&tools.RunSkillScript{Inventory: inv, Enabled: cfg.Skills.EnableExec, Timeout: time.Duration(cfg.Skills.MaxRunSeconds) * time.Second, ChildEnvAllowlist: append([]string{}, cfg.Hardening.ChildEnvAllowlist...), Sandbox: sandboxCfg, ApprovalBroker: approvalBroker})
 	}
 	if cronSvc != nil {
 		reg.Register(&tools.CronTool{Svc: cronSvc})

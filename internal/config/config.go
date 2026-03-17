@@ -417,10 +417,38 @@ type SessionIdentityLink struct {
 	Peers     []string `json:"peers"`
 }
 
+type ApprovalMode string
+
+const (
+	ApprovalModeDeny      ApprovalMode = "deny"
+	ApprovalModeAsk       ApprovalMode = "ask"
+	ApprovalModeAllowlist ApprovalMode = "allowlist"
+	ApprovalModeTrusted   ApprovalMode = "trusted"
+)
+
+type ApprovalDomainConfig struct {
+	Mode ApprovalMode `json:"mode"`
+}
+
+type ApprovalConfig struct {
+	Enabled                 bool                 `json:"enabled"`
+	HostID                  string               `json:"hostId"`
+	KeyFile                 string               `json:"keyFile"`
+	PairingCodeTTLSeconds   int                  `json:"pairingCodeTtlSeconds"`
+	PendingTTLSeconds       int                  `json:"pendingTtlSeconds"`
+	ApprovalTokenTTLSeconds int                  `json:"approvalTokenTtlSeconds"`
+	Pairing                 ApprovalDomainConfig `json:"pairing"`
+	Exec                    ApprovalDomainConfig `json:"exec"`
+	SkillExecution          ApprovalDomainConfig `json:"skillExecution"`
+	SecretAccess            ApprovalDomainConfig `json:"secretAccess"`
+	MessageSend             ApprovalDomainConfig `json:"messageSend"`
+}
+
 // SecurityConfig groups secret storage, auditing, profiles, and network policy.
 type SecurityConfig struct {
 	SecretStore SecretStoreConfig    `json:"secretStore"`
 	Audit       AuditConfig          `json:"audit"`
+	Approvals   ApprovalConfig       `json:"approvals"`
 	Profiles    AccessProfilesConfig `json:"profiles"`
 	Network     NetworkPolicyConfig  `json:"network"`
 }
@@ -563,6 +591,19 @@ func Default() Config {
 				Strict:        false,
 				KeyFile:       filepath.Join(root, "audit.key"),
 				VerifyOnStart: false,
+			},
+			Approvals: ApprovalConfig{
+				Enabled:                 false,
+				HostID:                  "local",
+				KeyFile:                 filepath.Join(root, "approvals.key"),
+				PairingCodeTTLSeconds:   300,
+				PendingTTLSeconds:       900,
+				ApprovalTokenTTLSeconds: 300,
+				Pairing:                 ApprovalDomainConfig{Mode: ApprovalModeAsk},
+				Exec:                    ApprovalDomainConfig{Mode: ApprovalModeTrusted},
+				SkillExecution:          ApprovalDomainConfig{Mode: ApprovalModeTrusted},
+				SecretAccess:            ApprovalDomainConfig{Mode: ApprovalModeAsk},
+				MessageSend:             ApprovalDomainConfig{Mode: ApprovalModeAsk},
 			},
 			Profiles: AccessProfilesConfig{
 				Enabled:  false,
@@ -1026,6 +1067,26 @@ func Load(path string) (Config, error) {
 	if strings.TrimSpace(cfg.Security.Audit.KeyFile) == "" {
 		cfg.Security.Audit.KeyFile = Default().Security.Audit.KeyFile
 	}
+	if strings.TrimSpace(cfg.Security.Approvals.HostID) == "" {
+		cfg.Security.Approvals.HostID = Default().Security.Approvals.HostID
+	}
+	if strings.TrimSpace(cfg.Security.Approvals.KeyFile) == "" {
+		cfg.Security.Approvals.KeyFile = Default().Security.Approvals.KeyFile
+	}
+	if cfg.Security.Approvals.PairingCodeTTLSeconds <= 0 {
+		cfg.Security.Approvals.PairingCodeTTLSeconds = Default().Security.Approvals.PairingCodeTTLSeconds
+	}
+	if cfg.Security.Approvals.PendingTTLSeconds <= 0 {
+		cfg.Security.Approvals.PendingTTLSeconds = Default().Security.Approvals.PendingTTLSeconds
+	}
+	if cfg.Security.Approvals.ApprovalTokenTTLSeconds <= 0 {
+		cfg.Security.Approvals.ApprovalTokenTTLSeconds = Default().Security.Approvals.ApprovalTokenTTLSeconds
+	}
+	cfg.Security.Approvals.Pairing.Mode = normalizeApprovalMode(cfg.Security.Approvals.Pairing.Mode, Default().Security.Approvals.Pairing.Mode)
+	cfg.Security.Approvals.Exec.Mode = normalizeApprovalMode(cfg.Security.Approvals.Exec.Mode, Default().Security.Approvals.Exec.Mode)
+	cfg.Security.Approvals.SkillExecution.Mode = normalizeApprovalMode(cfg.Security.Approvals.SkillExecution.Mode, Default().Security.Approvals.SkillExecution.Mode)
+	cfg.Security.Approvals.SecretAccess.Mode = normalizeApprovalMode(cfg.Security.Approvals.SecretAccess.Mode, Default().Security.Approvals.SecretAccess.Mode)
+	cfg.Security.Approvals.MessageSend.Mode = normalizeApprovalMode(cfg.Security.Approvals.MessageSend.Mode, Default().Security.Approvals.MessageSend.Mode)
 	if cfg.Security.Profiles.Channels == nil {
 		cfg.Security.Profiles.Channels = map[string]string{}
 	}
@@ -1052,6 +1113,9 @@ func Load(path string) (Config, error) {
 		return cfg, err
 	}
 	if err := validateAccessProfiles(cfg.Security.Profiles); err != nil {
+		return cfg, err
+	}
+	if err := validateApprovals(cfg.Security.Approvals); err != nil {
 		return cfg, err
 	}
 	cfg.RuntimeProfile = RuntimeProfile(strings.ToLower(strings.TrimSpace(string(cfg.RuntimeProfile))))
@@ -1188,6 +1252,41 @@ func validateAccessProfiles(cfg AccessProfilesConfig) error {
 		}
 	}
 	return nil
+}
+
+func validateApprovals(cfg ApprovalConfig) error {
+	if strings.TrimSpace(cfg.HostID) == "" {
+		return errors.New("security.approvals.hostId is required")
+	}
+	for name, mode := range map[string]ApprovalMode{
+		"pairing":        cfg.Pairing.Mode,
+		"exec":           cfg.Exec.Mode,
+		"skillExecution": cfg.SkillExecution.Mode,
+		"secretAccess":   cfg.SecretAccess.Mode,
+		"messageSend":    cfg.MessageSend.Mode,
+	} {
+		if !isValidApprovalMode(mode) {
+			return errors.New("security.approvals." + name + ": unsupported mode")
+		}
+	}
+	return nil
+}
+
+func normalizeApprovalMode(mode ApprovalMode, fallback ApprovalMode) ApprovalMode {
+	normalized := ApprovalMode(strings.ToLower(strings.TrimSpace(string(mode))))
+	if normalized == "" {
+		return fallback
+	}
+	return normalized
+}
+
+func isValidApprovalMode(mode ApprovalMode) bool {
+	switch normalizeApprovalMode(mode, "") {
+	case ApprovalModeDeny, ApprovalModeAsk, ApprovalModeAllowlist, ApprovalModeTrusted:
+		return true
+	default:
+		return false
+	}
 }
 
 func validateRuntimeProfile(p RuntimeProfile) error {

@@ -52,6 +52,16 @@ func TestDoctorFindings_ExpandedWarnings(t *testing.T) {
 			expectMatch: "not loopback-only",
 		},
 		{
+			name: "approvals ask mode without broker key",
+			mutate: func(cfg *config.Config) {
+				cfg.Security.Approvals.Enabled = true
+				cfg.Security.Approvals.KeyFile = ""
+				cfg.Security.Approvals.Exec.Mode = config.ApprovalModeAsk
+			},
+			expectArea:  "approvals",
+			expectMatch: "approval broker keyFile is required",
+		},
+		{
 			name: "audit disabled",
 			mutate: func(cfg *config.Config) {
 				cfg.Security.Audit.Enabled = false

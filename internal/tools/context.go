@@ -15,6 +15,8 @@ type envContextKey struct{}
 type toolGuardContextKey struct{}
 type activeProfileContextKey struct{}
 type skillPolicyContextKey struct{}
+type approvalTokenContextKey struct{}
+type requesterIdentityContextKey struct{}
 
 type ToolGuard func(ctx context.Context, tool Tool, capability CapabilityLevel, params map[string]any) error
 
@@ -35,6 +37,11 @@ type SkillPolicy struct {
 	AllowWrite     bool
 	AllowedHosts   []string
 	WritablePaths  []string
+}
+
+type RequesterIdentity struct {
+	Actor string
+	Role  string
 }
 
 func ContextWithSession(ctx context.Context, sessionKey string) context.Context {
@@ -140,6 +147,28 @@ func ContextWithSkillPolicy(ctx context.Context, policy SkillPolicy) context.Con
 	return context.WithValue(ctx, skillPolicyContextKey{}, cloned)
 }
 
+func ContextWithApprovalToken(ctx context.Context, token string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, approvalTokenContextKey{}, token)
+}
+
+func ContextWithRequesterIdentity(ctx context.Context, actor, role string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	identity := RequesterIdentity{Actor: strings.TrimSpace(actor), Role: strings.TrimSpace(role)}
+	if identity.Actor == "" && identity.Role == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, requesterIdentityContextKey{}, identity)
+}
+
 func SessionFromContext(ctx context.Context) string {
 	if ctx == nil {
 		return scope.GlobalMemoryScope
@@ -214,4 +243,20 @@ func SkillPolicyFromContext(ctx context.Context) SkillPolicy {
 	}
 	policy, _ := ctx.Value(skillPolicyContextKey{}).(SkillPolicy)
 	return policy
+}
+
+func ApprovalTokenFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	token, _ := ctx.Value(approvalTokenContextKey{}).(string)
+	return strings.TrimSpace(token)
+}
+
+func RequesterIdentityFromContext(ctx context.Context) RequesterIdentity {
+	if ctx == nil {
+		return RequesterIdentity{}
+	}
+	identity, _ := ctx.Value(requesterIdentityContextKey{}).(RequesterIdentity)
+	return identity
 }

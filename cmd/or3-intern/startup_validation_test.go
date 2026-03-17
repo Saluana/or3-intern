@@ -128,3 +128,20 @@ func TestValidateStartupCommand_ServeRejectsWebhookWithoutProfile(t *testing.T) 
 		t.Fatalf("expected effective profile error, got %v", err)
 	}
 }
+
+func TestValidateStartupCommand_ServiceRejectsApprovalAskModeWithoutBrokerKey(t *testing.T) {
+	cfg := hostedStartupConfig()
+	cfg.Service.Secret = strings.Repeat("s", 32)
+	cfg.Service.Listen = "0.0.0.0:8080"
+	cfg.Security.Approvals.Enabled = true
+	cfg.Security.Approvals.KeyFile = ""
+	cfg.Security.Approvals.Exec.Mode = config.ApprovalModeAsk
+
+	err := validateStartupCommand("service", cfg)
+	if err == nil {
+		t.Fatal("expected hosted service validation to fail when approvals need a broker key")
+	}
+	if !strings.Contains(err.Error(), "approval broker keyFile") {
+		t.Fatalf("expected approval broker key error, got %v", err)
+	}
+}

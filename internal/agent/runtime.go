@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"or3-intern/internal/approval"
 	"or3-intern/internal/artifacts"
 	"or3-intern/internal/bus"
 	"or3-intern/internal/channels"
@@ -63,6 +64,7 @@ type Runtime struct {
 	MaxToolLoops     int
 	ToolPreviewBytes int
 	Audit            *security.AuditLogger
+	ApprovalBroker   *approval.Broker
 
 	Deliver  Deliverer
 	Streamer channels.StreamingChannel
@@ -707,6 +709,13 @@ func (r *Runtime) guardToolExecution(ctx context.Context, tool tools.Tool, capab
 	if capability == tools.CapabilityPrivileged && !r.Hardening.PrivilegedTools {
 		return fmt.Errorf("tool requires privileged access: %s", tool.Name())
 	}
+	if r.ApprovalBroker != nil && (tool.Name() == "exec" || tool.Name() == "run_skill_script") {
+		if mode := r.approvalModeForTool(tool.Name()); mode == config.ApprovalModeAsk || mode == config.ApprovalModeAllowlist || mode == config.ApprovalModeDeny {
+			if len(r.ApprovalBroker.SignKey) == 0 {
+				return fmt.Errorf("approval broker unavailable for %s", tool.Name())
+			}
+		}
+	}
 	if r.Audit != nil && (capability == tools.CapabilityPrivileged || tool.Name() == "spawn_subagent") {
 		if err := r.Audit.Record(ctx, "tool.execute", tools.SessionFromContext(ctx), profileActor(profile), map[string]any{
 			"tool":       tool.Name(),
@@ -721,6 +730,20 @@ func (r *Runtime) guardToolExecution(ctx context.Context, tool tools.Tool, capab
 		return nil
 	}
 	return r.incrementQuota(tools.SessionFromContext(ctx), tool.Name())
+}
+
+func (r *Runtime) approvalModeForTool(toolName string) config.ApprovalMode {
+	if r == nil || r.ApprovalBroker == nil {
+		return config.ApprovalModeTrusted
+	}
+	switch toolName {
+	case "exec":
+		return r.ApprovalBroker.Config.Exec.Mode
+	case "run_skill_script":
+		return r.ApprovalBroker.Config.SkillExecution.Mode
+	default:
+		return config.ApprovalModeTrusted
+	}
 }
 
 func (r *Runtime) enforceSkillPolicy(ctx context.Context, tool tools.Tool, params map[string]any) error {

@@ -23,6 +23,7 @@ type serviceTurnRequestFixture struct {
 	RestrictTools bool           `json:"restrict_tools"`
 	Meta          map[string]any `json:"meta"`
 	ProfileName   string         `json:"profile_name"`
+	ApprovalToken string         `json:"approval_token"`
 }
 
 type serviceSubagentRequestFixture struct {
@@ -35,6 +36,7 @@ type serviceSubagentRequestFixture struct {
 	ProfileName      string         `json:"profile_name"`
 	Channel          string         `json:"channel"`
 	ReplyTo          string         `json:"reply_to"`
+	ApprovalToken    string         `json:"approval_token"`
 }
 
 func TestOr3NetCompatibilityFixtures_RequestDecoding(t *testing.T) {
@@ -89,6 +91,7 @@ func TestOr3NetCompatibilityFixtures_RequestDecoding(t *testing.T) {
 			ProfileName:      actual.ProfileName,
 			Channel:          actual.Channel,
 			ReplyTo:          actual.ReplyTo,
+			ApprovalToken:    actual.ApprovalToken,
 		}
 		if !reflect.DeepEqual(got, expected) {
 			t.Fatalf("decoded subagent request mismatch\nexpected: %#v\ngot: %#v", expected, got)

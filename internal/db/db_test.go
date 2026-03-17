@@ -161,6 +161,66 @@ func TestOpen_InvalidPath(t *testing.T) {
 	}
 }
 
+func TestOpen_CreatesApprovalAndPairingTables(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	for _, table := range []string{"paired_devices", "pairing_requests", "approval_requests", "approval_allowlists", "approval_tokens"} {
+		row := d.SQL.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table)
+		var name string
+		if err := row.Scan(&name); err != nil {
+			t.Fatalf("expected table %s: %v", table, err)
+		}
+	}
+}
+
+func TestApprovalStore_RoundTripAndReopen(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "approval.db")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	ctx := context.Background()
+	pairing, err := d.CreatePairingRequest(ctx, PairingRequestRecord{
+		DeviceID:        "device-1",
+		Role:            "operator",
+		DisplayName:     "Ops Laptop",
+		Origin:          "127.0.0.1",
+		PairingCodeHash: []byte("hash"),
+		RequestedAt:     1,
+		ExpiresAt:       2,
+		Status:          "pending",
+		Metadata:        map[string]any{"ip": "127.0.0.1"},
+	})
+	if err != nil {
+		t.Fatalf("CreatePairingRequest: %v", err)
+	}
+	if _, err := d.CreateApprovalRequest(ctx, ApprovalRequestRecord{Type: "exec", SubjectHash: "subj", SubjectJSON: `{"type":"exec"}`, ExecutionHostID: "local", Status: "pending", PolicyMode: "ask", RequestedAt: 3, ExpiresAt: 4}); err != nil {
+		t.Fatalf("CreateApprovalRequest: %v", err)
+	}
+	if _, err := d.CreateApprovalAllowlist(ctx, ApprovalAllowlistRecord{Domain: "exec", ScopeJSON: `{"host_id":"local"}`, MatcherJSON: `{"program":"echo"}`, CreatedBy: "cli", CreatedAt: 5}); err != nil {
+		t.Fatalf("CreateApprovalAllowlist: %v", err)
+	}
+	if _, err := d.UpsertPairedDevice(ctx, PairedDeviceRecord{DeviceID: pairing.DeviceID, Role: pairing.Role, DisplayName: pairing.DisplayName, TokenHash: []byte("token"), Status: "active", CreatedAt: 6, LastSeenAt: 6}); err != nil {
+		t.Fatalf("UpsertPairedDevice: %v", err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	d, err = Open(path)
+	if err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	defer d.Close()
+	if _, err := d.GetPairingRequest(ctx, pairing.ID); err != nil {
+		t.Fatalf("GetPairingRequest after reopen: %v", err)
+	}
+	if _, err := d.GetPairedDevice(ctx, pairing.DeviceID); err != nil {
+		t.Fatalf("GetPairedDevice after reopen: %v", err)
+	}
+}
+
 func TestNowMS(t *testing.T) {
 	before := time.Now().UnixMilli()
 	ms := NowMS()

@@ -66,6 +66,7 @@ func requiresHostedStrictStartup(cmd string, cfg config.Config) bool {
 func strictStartupFindings(cmd string, cfg config.Config) []doctorFinding {
 	findings := []doctorFinding{}
 	findings = append(findings, privilegedExecStartupFindings(cfg)...)
+	findings = append(findings, approvalStartupFindings(cmd, cfg)...)
 	if hasRemoteHTTPMCP(cfg) {
 		findings = append(findings, mcpFindings(cfg)...)
 		findings = append(findings, networkFindings(cfg)...)
@@ -92,6 +93,47 @@ func strictStartupFindings(cmd string, cfg config.Config) []doctorFinding {
 		}
 	}
 	return findings
+}
+
+func approvalStartupFindings(cmd string, cfg config.Config) []doctorFinding {
+	findings := []doctorFinding{}
+	if !cfg.Security.Approvals.Enabled {
+		return findings
+	}
+	if !approvalBrokerRequired(cfg) {
+		return findings
+	}
+	if strings.TrimSpace(cfg.Security.Approvals.KeyFile) == "" {
+		findings = append(findings, doctorFinding{
+			Level:   "warn",
+			Area:    "approvals",
+			Message: "approval broker keyFile is required when approvals run in ask or allowlist mode",
+		})
+	}
+	if cmd == "service" && !isLoopbackAddr(cfg.Service.Listen) && strings.TrimSpace(cfg.Security.Approvals.KeyFile) == "" {
+		findings = append(findings, doctorFinding{
+			Level:   "warn",
+			Area:    "approvals",
+			Message: "service mode is exposed beyond loopback while approvals require a broker keyFile",
+		})
+	}
+	return findings
+}
+
+func approvalBrokerRequired(cfg config.Config) bool {
+	for _, mode := range []config.ApprovalMode{
+		cfg.Security.Approvals.Pairing.Mode,
+		cfg.Security.Approvals.Exec.Mode,
+		cfg.Security.Approvals.SkillExecution.Mode,
+		cfg.Security.Approvals.SecretAccess.Mode,
+		cfg.Security.Approvals.MessageSend.Mode,
+	} {
+		switch mode {
+		case config.ApprovalModeAsk, config.ApprovalModeAllowlist:
+			return true
+		}
+	}
+	return false
 }
 
 func privilegedExecStartupFindings(cfg config.Config) []doctorFinding {

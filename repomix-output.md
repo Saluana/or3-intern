@@ -167,6 +167,7 @@ internal/
 .gitignore
 breakdown.md
 go.mod
+index.html
 README.md
 ```
 
@@ -351,6 +352,84 @@ func runAuditCommand(ctx context.Context, audit *security.AuditLogger, args []st
 		return nil
 	}
 	return fmt.Errorf("unknown audit subcommand: %s", args[0])
+}
+````
+
+## File: cmd/or3-intern/migrate.go
+````go
+package main
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"os"
+
+	"or3-intern/internal/db"
+)
+
+func migrateJSONL(ctx context.Context, d *db.DB, path, sessionKey string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 1024), 4<<20)
+	lineNo := 0
+	for sc.Scan() {
+		lineNo++
+		line := sc.Text()
+		if len(line) == 0 {
+			continue
+		}
+		var obj map[string]any
+		if err := json.Unmarshal([]byte(line), &obj); err != nil {
+			// tolerate non-json line
+			if _, err := d.AppendMessage(ctx, sessionKey, "user", line, map[string]any{"migrated_line": lineNo}); err != nil {
+				return fmt.Errorf("line %d: %w", lineNo, err)
+			}
+			continue
+		}
+		// detect metadata
+		if lineNo == 1 {
+			// store as session metadata_json if it looks like metadata
+			if obj["role"] == nil && obj["content"] == nil {
+				b, _ := json.Marshal(obj)
+				if err := d.EnsureSession(ctx, sessionKey); err != nil {
+					log.Printf("ensure session failed during migration: %v", err)
+				}
+				if _, err := d.SQL.ExecContext(ctx, `UPDATE sessions SET metadata_json=? WHERE key=?`, string(b), sessionKey); err != nil {
+					log.Printf("session metadata update failed during migration: %v", err)
+				}
+				continue
+			}
+		}
+		role := toStr(obj["role"])
+		if role == "" {
+			role = "user"
+		}
+		content := toStr(obj["content"])
+		payload := obj
+		delete(payload, "role")
+		delete(payload, "content")
+		_, err := d.AppendMessage(ctx, sessionKey, role, content, payload)
+		if err != nil {
+			return fmt.Errorf("line %d: %w", lineNo, err)
+		}
+	}
+	return sc.Err()
+}
+
+func toStr(v any) string {
+	switch x := v.(type) {
+	case string:
+		return x
+	default:
+		return fmt.Sprint(v)
+	}
 }
 ````
 
@@ -1755,208 +1834,6 @@ func normalizeToolNames(names []string) []string {
 }
 ````
 
-## File: internal/channels/cli/terminal.go
-````go
-package cli
-
-import (
-	"fmt"
-	"os"
-	"strings"
-	"sync"
-	"time"
-
-	"github.com/mattn/go-isatty"
-)
-
-// isTTY is true when stdout is an interactive terminal.
-var isTTY = isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
-
-// ---------- ANSI helpers ----------
-
-const (
-	ansiReset     = "\033[0m"
-	ansiBold      = "\033[1m"
-	ansiDim       = "\033[2m"
-	ansiItalic    = "\033[3m"
-	ansiCyan      = "\033[36m"
-	ansiYellow    = "\033[33m"
-	ansiGray      = "\033[90m"
-	ansiWhite     = "\033[97m"
-	ansiGreen     = "\033[32m"
-	ansiCursorUp  = "\033[1A" // move cursor up one line
-	ansiClearLine = "\033[2K" // clear entire line
-)
-
-func style(codes, text string) string {
-	if !isTTY {
-		return text
-	}
-	return codes + text + ansiReset
-}
-
-// ---------- Banner ----------
-
-// Banner returns the startup header shown when the CLI launches.
-func Banner() string {
-	if !isTTY {
-		return "or3-intern CLI. Type /exit to quit.\n"
-	}
-	top := style(ansiDim, "╭───────────────────────────────────────────────╮")
-	mid1 := style(ansiDim, "│") + "  " + style(ansiBold+ansiCyan, "or3-intern") + "                                  " + style(ansiDim, "│")
-	mid2 := style(ansiDim, "│") + "  " + style(ansiGray, "Type /exit to quit · /new for new session") + "  " + style(ansiDim, "│")
-	bot := style(ansiDim, "╰───────────────────────────────────────────────╯")
-	return fmt.Sprintf("\n%s\n%s\n%s\n%s\n", top, mid1, mid2, bot)
-}
-
-// ---------- Prompt / separators ----------
-
-// Prompt returns the input prompt string.
-func Prompt() string {
-	if !isTTY {
-		return "> "
-	}
-	return ansiBold + ansiCyan + "❯ " + ansiReset
-}
-
-// ShowPrompt prints a blank line gap then the prompt, signalling the user
-// that input is ready. Called by the Deliverer after finishing output.
-func ShowPrompt() {
-	if !isTTY {
-		fmt.Print(Prompt())
-		return
-	}
-	fmt.Print("\n" + Prompt())
-}
-
-// Separator returns a faint horizontal rule placed after a response block.
-func Separator() string {
-	if !isTTY {
-		return ""
-	}
-	return "  " + ansiDim + strings.Repeat("─", 50) + ansiReset
-}
-
-// ---------- User message formatting ----------
-
-// RewriteUserMessage moves the cursor up to overwrite the raw prompt line
-// with a styled version of the user's message. This transforms the bare
-// "❯ text" into a clearly labeled user block. No-op when not a TTY.
-func RewriteUserMessage(text string) {
-	if !isTTY {
-		return
-	}
-	// Move up over the raw prompt line and replace it.
-	fmt.Print(ansiCursorUp + ansiClearLine)
-	fmt.Printf("  %s%s▌%s %s%s\n",
-		ansiBold, ansiCyan, ansiReset,
-		style(ansiBold+ansiWhite, text), ansiReset)
-}
-
-// ---------- Assistant header ----------
-
-// AssistantHeader returns the header line printed before each response.
-func AssistantHeader() string {
-	if !isTTY {
-		return ""
-	}
-	name := ansiBold + ansiGreen + "◆ or3-intern" + ansiReset
-	line := ansiDim + " " + strings.Repeat("─", 38) + ansiReset
-	return "\n  " + name + line + "\n"
-}
-
-// ---------- Response formatting ----------
-
-// ResponsePrefix returns the prefix printed before the first streaming delta.
-func ResponsePrefix() string {
-	if !isTTY {
-		return "\n"
-	}
-	return AssistantHeader() + "\n    "
-}
-
-// FormatResponse wraps a complete (non-streamed) response for display.
-func FormatResponse(text string) string {
-	if !isTTY {
-		return "[cli] " + text
-	}
-	lines := strings.Split(text, "\n")
-	for i, l := range lines {
-		lines[i] = "    " + l
-	}
-	return AssistantHeader() + "\n" + strings.Join(lines, "\n")
-}
-
-// ---------- Spinner ----------
-
-// Spinner provides a braille-dot animation on stdout while the agent thinks.
-// Only animates when stdout is a TTY; safe for concurrent Start/Stop.
-type Spinner struct {
-	mu      sync.Mutex
-	running bool
-	stopCh  chan struct{}
-	stopped chan struct{}
-}
-
-// NewSpinner creates a ready-to-use Spinner (initially stopped).
-func NewSpinner() *Spinner {
-	return &Spinner{}
-}
-
-// Start begins the animation with the given label (e.g. "thinking…").
-// No-op if already running or stdout is not a TTY.
-func (s *Spinner) Start(label string) {
-	if !isTTY {
-		return
-	}
-	s.mu.Lock()
-	if s.running {
-		s.mu.Unlock()
-		return
-	}
-	s.running = true
-	s.stopCh = make(chan struct{})
-	s.stopped = make(chan struct{})
-	s.mu.Unlock()
-
-	go func() {
-		defer close(s.stopped)
-		frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-		i := 0
-		ticker := time.NewTicker(80 * time.Millisecond)
-		defer ticker.Stop()
-		// First frame immediately.
-		fmt.Fprintf(os.Stdout, "\r  %s%s %s%s", ansiDim, frames[0], label, ansiReset)
-		for {
-			select {
-			case <-s.stopCh:
-				// Clear the spinner line.
-				fmt.Fprint(os.Stdout, "\r\033[K")
-				return
-			case <-ticker.C:
-				i++
-				fmt.Fprintf(os.Stdout, "\r  %s%s %s%s", ansiDim, frames[i%len(frames)], label, ansiReset)
-			}
-		}
-	}()
-}
-
-// Stop halts the animation and clears the spinner line.
-// Blocks until the animation goroutine exits. Safe to call when not running.
-func (s *Spinner) Stop() {
-	s.mu.Lock()
-	if !s.running {
-		s.mu.Unlock()
-		return
-	}
-	s.running = false
-	close(s.stopCh)
-	stopped := s.stopped
-	s.mu.Unlock()
-	<-stopped
-}
-````
-
 ## File: internal/channels/rate_limit.go
 ````go
 package channels
@@ -2030,346 +1907,164 @@ type StreamingChannel interface {
 }
 ````
 
-## File: internal/scope/scope.go
+## File: internal/tools/cron.go
 ````go
-package scope
-
-import "strings"
-
-const (
-	GlobalMemoryScope = "__or3_global__"
-	GlobalScopeAlias  = "global"
-)
-
-func IsGlobalScopeRequest(v string) bool {
-	v = strings.TrimSpace(v)
-	return strings.EqualFold(v, GlobalScopeAlias) || v == GlobalMemoryScope
-}
-````
-
-## File: internal/security/store.go
-````go
-package security
+package tools
 
 import (
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/hmac"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
+	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
-	"reflect"
 	"strings"
+	"time"
 
-	"or3-intern/internal/config"
-	"or3-intern/internal/db"
+	"or3-intern/internal/cron"
 )
 
-const secretRefPrefix = "secret:"
-
-type SecretManager struct {
-	DB  *db.DB
-	Key []byte
+type CronTool struct {
+	Base
+	Svc *cron.Service
 }
 
-func LoadOrCreateKey(path string) ([]byte, error) {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return nil, fmt.Errorf("key file required")
+func (t *CronTool) Name() string { return "cron" }
+func (t *CronTool) Description() string {
+	return "Manage scheduled jobs: add/list/remove/run/status."
+}
+func (t *CronTool) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{
+		"action": map[string]any{"type": "string", "enum": []any{"add", "list", "remove", "run", "status"}},
+		"job":    map[string]any{"type": "object", "description": "job object for add"},
+		"id":     map[string]any{"type": "string", "description": "job id for remove/run"},
+		"force":  map[string]any{"type": "boolean", "description": "force run"},
+	}, "required": []string{"action"}}
+}
+func (t *CronTool) Schema() map[string]any {
+	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
+}
+
+func (t *CronTool) Execute(ctx context.Context, params map[string]any) (string, error) {
+	if t.Svc == nil {
+		return "", fmt.Errorf("cron service not configured")
 	}
-	if raw, err := os.ReadFile(path); err == nil {
-		if decoded, decErr := base64.StdEncoding.DecodeString(strings.TrimSpace(string(raw))); decErr == nil && len(decoded) >= 32 {
-			return decoded[:32], nil
+	act := strings.TrimSpace(fmt.Sprint(params["action"]))
+	switch act {
+	case "status":
+		s, err := t.Svc.Status()
+		if err != nil {
+			return "", err
 		}
-		if len(raw) >= 32 {
-			return raw[:32], nil
+		b, _ := json.MarshalIndent(s, "", "  ")
+		return string(b), nil
+	case "list":
+		j, err := t.Svc.List()
+		if err != nil {
+			return "", err
 		}
-		return nil, fmt.Errorf("key file too short")
-	} else if !os.IsNotExist(err) {
-		return nil, err
+		b, _ := json.MarshalIndent(j, "", "  ")
+		return string(b), nil
+	case "remove":
+		id := strings.TrimSpace(fmt.Sprint(params["id"]))
+		ok, err := t.Svc.Remove(id)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("removed: %v", ok), nil
+	case "run":
+		id := strings.TrimSpace(fmt.Sprint(params["id"]))
+		force, _ := params["force"].(bool)
+		ok, err := t.Svc.RunNow(ctx, id, force)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("ran: %v", ok), nil
+	case "add":
+		raw, _ := params["job"].(map[string]any)
+		if raw == nil {
+			return "", fmt.Errorf("missing job")
+		}
+		b, _ := json.Marshal(raw)
+		var j cron.CronJob
+		if err := json.Unmarshal(b, &j); err != nil {
+			return "", err
+		}
+		// defaults
+		if !j.Enabled && raw["enabled"] == nil {
+			j.Enabled = true
+		}
+		if j.Payload.Kind == "" {
+			j.Payload.Kind = "agent_turn"
+		}
+		if j.Schedule.Kind == "" {
+			j.Schedule.Kind = cron.KindEvery
+			j.Schedule.EveryMS = int64((24 * time.Hour).Milliseconds())
+		}
+		if err := t.Svc.Add(j); err != nil {
+			return "", err
+		}
+		return "ok", nil
+	default:
+		return "", fmt.Errorf("unknown action")
 	}
-	key := make([]byte, 32)
-	if _, err := rand.Read(key); err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(filepathDir(path), 0o700); err != nil {
-		return nil, err
-	}
-	if err := os.WriteFile(path, []byte(base64.StdEncoding.EncodeToString(key)), 0o600); err != nil {
-		return nil, err
-	}
-	return key, nil
+}
+````
+
+## File: internal/tools/skill.go
+````go
+package tools
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	"or3-intern/internal/skills"
+)
+
+type ReadSkill struct {
+	Base
+	Inventory *skills.Inventory
+	MaxBytes  int
 }
 
-func LoadExistingKey(path string) ([]byte, error) {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return nil, fmt.Errorf("key file required")
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	if decoded, decErr := base64.StdEncoding.DecodeString(strings.TrimSpace(string(raw))); decErr == nil && len(decoded) >= 32 {
-		return decoded[:32], nil
-	}
-	if len(raw) >= 32 {
-		return raw[:32], nil
-	}
-	return nil, fmt.Errorf("key file too short")
+func (t *ReadSkill) Name() string { return "read_skill" }
+func (t *ReadSkill) Description() string {
+	return "Read the full body of a skill by name (for ClawHub-compatible SKILL.md usage)."
+}
+func (t *ReadSkill) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{
+		"name":     map[string]any{"type": "string", "description": "Skill name from inventory"},
+		"maxBytes": map[string]any{"type": "integer", "description": "Optional max bytes"},
+	}, "required": []string{"name"}}
+}
+func (t *ReadSkill) Schema() map[string]any {
+	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
 }
 
-func (m *SecretManager) ResolveRef(ctx context.Context, raw string) (string, error) {
-	raw = strings.TrimSpace(raw)
-	if !strings.HasPrefix(strings.ToLower(raw), secretRefPrefix) {
-		return raw, nil
+func (t *ReadSkill) Execute(ctx context.Context, params map[string]any) (string, error) {
+	_ = ctx
+	if t.Inventory == nil {
+		return "", fmt.Errorf("skills inventory not configured")
 	}
-	if m == nil || m.DB == nil || len(m.Key) == 0 {
-		return "", fmt.Errorf("secret store unavailable")
-	}
-	name := strings.TrimSpace(raw[len(secretRefPrefix):])
+	name := strings.TrimSpace(fmt.Sprint(params["name"]))
 	if name == "" {
-		return "", fmt.Errorf("invalid secret ref")
+		return "", fmt.Errorf("missing name")
 	}
-	secret, ok, err := m.Get(ctx, name)
+	s, ok := t.Inventory.Get(name)
+	if !ok {
+		return "", fmt.Errorf("skill not found: %s", name)
+	}
+	maxBytes := t.MaxBytes
+	if maxBytes <= 0 {
+		maxBytes = 200000
+	}
+	if v, ok := params["maxBytes"].(float64); ok && int(v) > 0 {
+		maxBytes = int(v)
+	}
+	body, err := skills.LoadBody(s.Path, maxBytes)
 	if err != nil {
 		return "", err
 	}
-	if !ok {
-		return "", fmt.Errorf("secret not found: %s", name)
-	}
-	return secret, nil
-}
-
-func (m *SecretManager) Put(ctx context.Context, name, value string) error {
-	if m == nil || m.DB == nil || len(m.Key) == 0 {
-		return fmt.Errorf("secret store unavailable")
-	}
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return fmt.Errorf("secret name required")
-	}
-	ciphertext, nonce, err := encryptBlob(m.Key, []byte(value))
-	if err != nil {
-		return err
-	}
-	return m.DB.PutSecret(ctx, name, ciphertext, nonce, 1, "v1")
-}
-
-func (m *SecretManager) Get(ctx context.Context, name string) (string, bool, error) {
-	if m == nil || m.DB == nil || len(m.Key) == 0 {
-		return "", false, fmt.Errorf("secret store unavailable")
-	}
-	record, ok, err := m.DB.GetSecret(ctx, name)
-	if err != nil || !ok {
-		return "", ok, err
-	}
-	plain, err := decryptBlob(m.Key, record.Ciphertext, record.Nonce)
-	if err != nil {
-		return "", false, fmt.Errorf("decrypt secret %s: %w", name, err)
-	}
-	return string(plain), true, nil
-}
-
-func (m *SecretManager) Delete(ctx context.Context, name string) error {
-	if m == nil || m.DB == nil {
-		return fmt.Errorf("secret store unavailable")
-	}
-	return m.DB.DeleteSecret(ctx, name)
-}
-
-func (m *SecretManager) List(ctx context.Context) ([]string, error) {
-	if m == nil || m.DB == nil {
-		return nil, fmt.Errorf("secret store unavailable")
-	}
-	return m.DB.ListSecretNames(ctx)
-}
-
-type AuditLogger struct {
-	DB     *db.DB
-	Key    []byte
-	Strict bool
-}
-
-func (a *AuditLogger) Record(ctx context.Context, eventType, sessionKey, actor string, payload any) error {
-	if a == nil || a.DB == nil || len(a.Key) == 0 {
-		if a != nil && a.Strict {
-			return fmt.Errorf("audit logger unavailable")
-		}
-		return nil
-	}
-	return a.DB.AppendAuditEvent(ctx, db.AuditEventInput{
-		EventType:  eventType,
-		SessionKey: strings.TrimSpace(sessionKey),
-		Actor:      strings.TrimSpace(actor),
-		Payload:    payload,
-	}, a.Key)
-}
-
-func (a *AuditLogger) Verify(ctx context.Context) error {
-	if a == nil || a.DB == nil || len(a.Key) == 0 {
-		return nil
-	}
-	return a.DB.VerifyAuditChain(ctx, a.Key)
-}
-
-func ResolveConfigSecrets(ctx context.Context, cfg config.Config, mgr *SecretManager) (config.Config, error) {
-	resolved := cfg
-	if mgr == nil {
-		return resolved, nil
-	}
-	value := reflect.ValueOf(&resolved).Elem()
-	if err := resolveValue(ctx, value, mgr); err != nil {
-		return cfg, err
-	}
-	return resolved, nil
-}
-
-func ValidateNoSecretRefs(cfg config.Config) error {
-	if path, ok := findSecretRef(reflect.ValueOf(cfg), "config"); ok {
-		return fmt.Errorf("unresolved secret ref at %s", path)
-	}
-	return nil
-}
-
-func resolveValue(ctx context.Context, value reflect.Value, mgr *SecretManager) error {
-	if !value.IsValid() {
-		return nil
-	}
-	switch value.Kind() {
-	case reflect.Pointer:
-		if value.IsNil() {
-			return nil
-		}
-		return resolveValue(ctx, value.Elem(), mgr)
-	case reflect.Struct:
-		for i := 0; i < value.NumField(); i++ {
-			if !value.Field(i).CanSet() {
-				continue
-			}
-			if err := resolveValue(ctx, value.Field(i), mgr); err != nil {
-				return err
-			}
-		}
-	case reflect.Map:
-		if value.IsNil() || value.Type().Key().Kind() != reflect.String {
-			return nil
-		}
-		for _, key := range value.MapKeys() {
-			elem := value.MapIndex(key)
-			if !elem.IsValid() {
-				continue
-			}
-			if value.Type().Elem().Kind() == reflect.String {
-				resolved, err := mgr.ResolveRef(ctx, elem.String())
-				if err != nil {
-					return err
-				}
-				value.SetMapIndex(key, reflect.ValueOf(resolved))
-				continue
-			}
-			clone := reflect.New(elem.Type()).Elem()
-			clone.Set(elem)
-			if err := resolveValue(ctx, clone, mgr); err != nil {
-				return err
-			}
-			value.SetMapIndex(key, clone)
-		}
-	case reflect.String:
-		resolved, err := mgr.ResolveRef(ctx, value.String())
-		if err != nil {
-			return err
-		}
-		value.SetString(resolved)
-	}
-	return nil
-}
-
-func findSecretRef(value reflect.Value, path string) (string, bool) {
-	if !value.IsValid() {
-		return "", false
-	}
-	for value.Kind() == reflect.Pointer || value.Kind() == reflect.Interface {
-		if value.IsNil() {
-			return "", false
-		}
-		value = value.Elem()
-	}
-	switch value.Kind() {
-	case reflect.Struct:
-		for i := 0; i < value.NumField(); i++ {
-			field := value.Type().Field(i)
-			name := field.Name
-			if tag := strings.TrimSpace(strings.Split(field.Tag.Get("json"), ",")[0]); tag != "" && tag != "-" {
-				name = tag
-			}
-			if foundPath, ok := findSecretRef(value.Field(i), path+"."+name); ok {
-				return foundPath, true
-			}
-		}
-	case reflect.Map:
-		for _, key := range value.MapKeys() {
-			foundPath, ok := findSecretRef(value.MapIndex(key), path+"."+fmt.Sprint(key.Interface()))
-			if ok {
-				return foundPath, true
-			}
-		}
-	case reflect.Slice, reflect.Array:
-		for i := 0; i < value.Len(); i++ {
-			if foundPath, ok := findSecretRef(value.Index(i), fmt.Sprintf("%s[%d]", path, i)); ok {
-				return foundPath, true
-			}
-		}
-	case reflect.String:
-		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(value.String())), secretRefPrefix) {
-			return path, true
-		}
-	}
-	return "", false
-}
-
-func encryptBlob(master, plaintext []byte) ([]byte, []byte, error) {
-	block, err := aes.NewCipher(deriveKey(master, "secrets"))
-	if err != nil {
-		return nil, nil, err
-	}
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, nil, err
-	}
-	nonce := make([]byte, aead.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, nil, err
-	}
-	sealed := aead.Seal(nil, nonce, plaintext, nil)
-	return sealed, nonce, nil
-}
-
-func decryptBlob(master, ciphertext, nonce []byte) ([]byte, error) {
-	block, err := aes.NewCipher(deriveKey(master, "secrets"))
-	if err != nil {
-		return nil, err
-	}
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	return aead.Open(nil, nonce, ciphertext, nil)
-}
-
-func deriveKey(master []byte, label string) []byte {
-	h := hmac.New(sha256.New, master)
-	_, _ = h.Write([]byte(label))
-	sum := h.Sum(nil)
-	return sum[:32]
-}
-
-func filepathDir(path string) string {
-	return filepath.Dir(path)
+	return fmt.Sprintf("# Skill: %s (%s, %s)\n\n%s", s.Name, s.Source, s.Dir, body), nil
 }
 ````
 
@@ -2647,6 +2342,970 @@ func toInt(raw any) int {
 - LLM thinks → calls email tool + browser if needed → loops until done.  
 - Gateway sends reply + any side effects (files written, calendar events added).  
 - Later (heartbeat/cron): agent wakes independently → checks if anything new needs doing → messages you proactively.
+````
+
+## File: index.html
+````html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>or3-intern — The AI Runtime That Actually Runs Your Work</title>
+  <meta name="description" content="or3-intern is the local-first AI runtime that remembers, automates, integrates, and operates with production-grade guardrails." />
+  <meta name="theme-color" content="#0f0d17" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    /* ===== MD3 Dark Theme — Enhanced Tokens ===== */
+    :root {
+      --surface:         #0f0d17;
+      --surface-dim:     #0b0a12;
+      --surface-low:     #171521;
+      --surface-cont:    #1e1b2a;
+      --surface-high:    #27243a;
+      --surface-highest: #322f48;
+      --primary:         #c9b1ff;
+      --primary-bright:  #e0d0ff;
+      --on-primary:      #2d1a5e;
+      --primary-cont:    #4a3680;
+      --on-primary-cont: #ece0ff;
+      --secondary:       #cec2dc;
+      --secondary-cont:  #4a4458;
+      --tertiary:        #f0b0c8;
+      --tertiary-bright: #ffd0e4;
+      --on-tertiary:     #4a2538;
+      --tertiary-cont:   #633b48;
+      --on-surface:      #eae4f0;
+      --on-surface-var:  #c8c0d4;
+      --outline:         #908a9c;
+      --outline-var:     #48445a;
+      --success:         #7ee8a0;
+      --warning:         #f8dc6c;
+      --error:           #f2b8b5;
+      --glow-primary:    rgba(201,177,255,0.12);
+      --glow-tertiary:   rgba(240,176,200,0.10);
+      --elev-1: 0 1px 3px 1px rgba(0,0,0,.20), 0 1px 2px rgba(0,0,0,.36);
+      --elev-2: 0 2px 6px 2px rgba(0,0,0,.20), 0 1px 2px rgba(0,0,0,.36);
+      --elev-3: 0 4px 12px 4px rgba(0,0,0,.24), 0 1px 3px rgba(0,0,0,.36);
+      --radius-xs: 6px;
+      --radius-sm: 10px;
+      --radius-md: 14px;
+      --radius-lg: 20px;
+      --radius-xl: 28px;
+      --radius-full: 9999px;
+      --ease: cubic-bezier(.22,.61,.36,1);
+      --ease-bounce: cubic-bezier(.34,1.56,.64,1);
+      --dur-fast: 180ms;
+      --dur-mid: 350ms;
+      --dur-slow: 600ms;
+      --max-w: 1180px;
+    }
+
+    /* ===== Reset ===== */
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    html{scroll-behavior:smooth;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+    body{
+      font-family:"Inter",system-ui,sans-serif;
+      font-size:16px;line-height:1.6;
+      color:var(--on-surface);
+      background:var(--surface);
+      overflow-x:hidden;
+    }
+    a{color:inherit;text-decoration:none}
+    img{max-width:100%;display:block}
+    ul{list-style:none}
+
+    /* ===== Ambient background ===== */
+    body::before{
+      content:"";position:fixed;inset:0;z-index:0;pointer-events:none;
+      background:
+        radial-gradient(ellipse 60% 50% at 20% 10%, rgba(140,80,255,.08) 0%, transparent 70%),
+        radial-gradient(ellipse 50% 40% at 80% 60%, rgba(240,176,200,.06) 0%, transparent 70%),
+        radial-gradient(ellipse 40% 60% at 50% 90%, rgba(100,60,255,.05) 0%, transparent 70%);
+    }
+
+    .page{position:relative;z-index:1}
+
+    .wrap{
+      width:min(100% - 48px, var(--max-w));
+      margin-inline:auto;
+    }
+
+    /* ===== Top App Bar ===== */
+    .topbar{
+      position:sticky;top:0;z-index:100;
+      background:rgba(15,13,23,.82);
+      backdrop-filter:blur(16px) saturate(1.4);
+      -webkit-backdrop-filter:blur(16px) saturate(1.4);
+      border-bottom:1px solid rgba(72,68,90,.5);
+      transition:box-shadow var(--dur-fast) var(--ease);
+    }
+    .topbar.scrolled{box-shadow:var(--elev-2)}
+    .nav{display:flex;align-items:center;justify-content:space-between;height:64px}
+    .brand{display:inline-flex;align-items:center;gap:10px;font-weight:700;font-size:1.05rem;letter-spacing:-.2px}
+    .brand-mark{
+      width:36px;height:36px;border-radius:var(--radius-sm);
+      background:linear-gradient(135deg,var(--primary-cont),var(--on-primary));
+      display:grid;place-items:center;
+      color:var(--primary-bright);font-weight:800;font-size:.8rem;
+    }
+    .nav-links{display:flex;gap:2px}
+    .nav-links a{
+      padding:8px 14px;border-radius:var(--radius-full);
+      color:var(--on-surface-var);font-size:.85rem;font-weight:500;
+      transition:background var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease);
+    }
+    .nav-links a:hover{background:var(--glow-primary);color:var(--on-surface)}
+    .nav-cta{display:inline-flex;align-items:center;gap:8px}
+
+    /* ===== Buttons ===== */
+    .btn,.btn-outline{
+      display:inline-flex;align-items:center;justify-content:center;gap:8px;
+      border:none;border-radius:var(--radius-full);
+      padding:11px 28px;font-family:inherit;font-weight:600;font-size:.875rem;
+      letter-spacing:.2px;cursor:pointer;white-space:nowrap;
+      transition:all var(--dur-fast) var(--ease);text-decoration:none;
+    }
+    .btn{
+      background:linear-gradient(135deg,var(--primary) 0%,#a78bfa 100%);
+      color:#1a1130;
+      box-shadow:0 0 0 0 rgba(201,177,255,0);
+    }
+    .btn:hover{
+      box-shadow:0 0 24px rgba(201,177,255,.28);
+      transform:translateY(-1px);
+    }
+    .btn-outline{
+      background:transparent;color:var(--primary);
+      border:1.5px solid var(--outline);
+    }
+    .btn-outline:hover{
+      border-color:var(--primary);
+      background:var(--glow-primary);
+    }
+    .btn:focus-visible,.btn-outline:focus-visible{
+      outline:2px solid var(--primary);outline-offset:3px;
+    }
+
+    /* ===== HERO ===== */
+    .hero{padding:72px 0 40px;position:relative}
+    .hero-grid{
+      display:grid;grid-template-columns:1.05fr .95fr;
+      gap:48px;align-items:center;
+    }
+    .eyebrow{
+      display:inline-flex;align-items:center;gap:8px;
+      padding:6px 16px 6px 12px;border-radius:var(--radius-full);
+      background:var(--surface-cont);
+      border:1px solid var(--outline-var);
+      color:var(--on-surface-var);font-size:.72rem;font-weight:500;
+      letter-spacing:.4px;margin-bottom:20px;
+    }
+    .dot-live{
+      width:7px;height:7px;border-radius:50%;background:var(--success);
+      box-shadow:0 0 0 0 rgba(126,232,160,.5);
+      animation:blink 2.4s ease-in-out infinite;
+    }
+    @keyframes blink{
+      0%,100%{box-shadow:0 0 0 0 rgba(126,232,160,.45)}
+      50%{box-shadow:0 0 0 7px rgba(126,232,160,0)}
+    }
+
+    h1{
+      font-size:clamp(2.6rem,5.4vw,3.75rem);
+      line-height:1.1;letter-spacing:-.5px;font-weight:800;
+      margin:0 0 20px;max-width:15ch;
+    }
+    .grad{
+      background:linear-gradient(135deg,var(--primary-bright) 0%,var(--tertiary-bright) 60%,var(--primary) 100%);
+      background-size:200% auto;
+      -webkit-background-clip:text;background-clip:text;color:transparent;
+      animation:shimmer 6s ease infinite;
+    }
+    @keyframes shimmer{
+      0%{background-position:0% 50%}
+      50%{background-position:100% 50%}
+      100%{background-position:0% 50%}
+    }
+
+    .hero-sub{
+      margin-bottom:28px;color:var(--on-surface-var);
+      max-width:52ch;font-size:1.05rem;line-height:1.65;
+    }
+    .hero-btns{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:28px}
+    .proof-pills{
+      display:flex;flex-wrap:wrap;gap:8px 16px;
+      color:var(--on-surface-var);font-size:.82rem;
+    }
+    .proof-pills span{display:inline-flex;align-items:center;gap:6px}
+    .proof-pills span::before{content:"\2713";color:var(--success);font-weight:700}
+
+    /* Terminal card */
+    .hero-card{
+      border-radius:var(--radius-xl);
+      background:var(--surface-cont);
+      border:1px solid var(--outline-var);
+      box-shadow:var(--elev-3);
+      padding:14px;position:relative;overflow:hidden;
+    }
+    .hero-card::before{
+      content:"";position:absolute;top:-40%;right:-30%;
+      width:300px;height:300px;border-radius:50%;
+      background:radial-gradient(circle,rgba(201,177,255,.10),transparent 70%);
+      pointer-events:none;
+    }
+    .term{
+      border-radius:var(--radius-md);overflow:hidden;
+      border:1px solid var(--outline-var);
+      background:var(--surface-dim);position:relative;
+    }
+    .term-bar{
+      display:flex;align-items:center;gap:6px;
+      padding:11px 14px;background:var(--surface-low);
+      border-bottom:1px solid var(--outline-var);
+    }
+    .term-dot{width:10px;height:10px;border-radius:50%}
+    .term-dot:nth-child(1){background:#f87171}
+    .term-dot:nth-child(2){background:#fbbf24}
+    .term-dot:nth-child(3){background:#34d399}
+    .term-title{margin-left:auto;color:var(--outline);font-size:.7rem;letter-spacing:.3px}
+    .term-body{
+      padding:18px 14px;
+      font-family:"JetBrains Mono","Fira Code",ui-monospace,monospace;
+      font-size:.78rem;line-height:1.75;color:var(--on-surface-var);
+      min-height:310px;
+    }
+    .tl{opacity:0;transform:translateY(5px);animation:rise .45s var(--ease) forwards}
+    .tl:nth-child(1){animation-delay:.05s}
+    .tl:nth-child(2){animation-delay:.12s}
+    .tl:nth-child(3){animation-delay:.19s}
+    .tl:nth-child(4){animation-delay:.26s}
+    .tl:nth-child(5){animation-delay:.33s}
+    .tl:nth-child(6){animation-delay:.40s}
+    .tl:nth-child(7){animation-delay:.47s}
+    .tl:nth-child(8){animation-delay:.54s}
+    .tl:nth-child(9){animation-delay:.61s}
+    .tl:nth-child(10){animation-delay:.68s}
+    @keyframes rise{to{opacity:1;transform:translateY(0)}}
+    .c-prompt{color:var(--tertiary)}
+    .c-cmd{color:var(--primary-bright)}
+    .c-warn{color:var(--warning)}
+    .c-ok{color:var(--success)}
+
+    /* Floating pills below terminal */
+    .float-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}
+    .float-pill{
+      padding:14px;border-radius:var(--radius-md);
+      background:var(--surface-high);
+      border:1px solid var(--outline-var);
+      font-size:.78rem;line-height:1.55;color:var(--on-surface-var);
+    }
+    .float-pill strong{
+      display:block;color:var(--on-surface);font-size:.84rem;
+      font-weight:600;margin-bottom:3px;
+    }
+
+    /* ===== Proof strip ===== */
+    .proof-strip{padding:12px 0 0}
+    .proof-row{
+      display:grid;grid-template-columns:repeat(4,1fr);gap:12px;
+      padding:14px;border-radius:var(--radius-xl);
+      background:var(--surface-cont);
+      border:1px solid var(--outline-var);
+    }
+    .pstat{
+      padding:18px 14px;border-radius:var(--radius-md);
+      background:var(--surface-high);text-align:center;
+    }
+    .pstat strong{
+      display:block;font-size:1.2rem;font-weight:700;
+      color:var(--primary);
+    }
+    .pstat span{
+      display:block;margin-top:5px;font-size:.78rem;
+      color:var(--on-surface-var);line-height:1.45;
+    }
+
+    /* ===== Section base ===== */
+    section{padding:88px 0}
+    .sec-head{max-width:640px;margin-bottom:44px}
+    .label{
+      display:inline-block;font-size:.68rem;font-weight:600;
+      letter-spacing:.6px;text-transform:uppercase;
+      color:var(--tertiary);margin-bottom:14px;
+    }
+    h2{
+      font-size:clamp(1.9rem,3.8vw,2.75rem);
+      line-height:1.14;font-weight:700;letter-spacing:-.3px;
+      margin:0 0 8px;
+    }
+    .sec-copy{
+      margin-top:10px;color:var(--on-surface-var);
+      font-size:.95rem;line-height:1.6;
+    }
+
+    /* ===== Section divider glow ===== */
+    .divider{
+      height:1px;border:none;
+      background:linear-gradient(90deg,transparent,var(--outline-var) 30%,var(--primary-cont) 50%,var(--outline-var) 70%,transparent);
+      margin:0;
+    }
+
+    /* ===== Cards ===== */
+    .card{
+      padding:28px;border-radius:var(--radius-lg);
+      background:var(--surface-cont);
+      border:1px solid var(--outline-var);
+      transition:box-shadow var(--dur-fast) var(--ease),
+                 border-color var(--dur-fast) var(--ease),
+                 transform var(--dur-fast) var(--ease);
+    }
+    .card:hover{
+      box-shadow:var(--elev-2);
+      border-color:rgba(201,177,255,.18);
+      transform:translateY(-2px);
+    }
+    .card h3{
+      margin:0 0 10px;font-size:1.3rem;font-weight:600;line-height:1.3;
+    }
+    .card p,.card li{
+      color:var(--on-surface-var);line-height:1.6;font-size:.88rem;
+    }
+
+    /* ===== Icon (tonal container) ===== */
+    .icon{
+      width:48px;height:48px;border-radius:var(--radius-sm);
+      display:grid;place-items:center;margin-bottom:16px;
+      font-size:1.3rem;
+    }
+    .icon-purple{background:var(--primary-cont);color:var(--primary-bright)}
+    .icon-pink{background:var(--tertiary-cont);color:var(--tertiary-bright)}
+    .icon-green{background:rgba(126,232,160,.14);color:var(--success)}
+
+    /* ===== Grids ===== */
+    .g2{display:grid;gap:16px;grid-template-columns:1fr 1fr}
+    .g3{display:grid;gap:16px;grid-template-columns:repeat(3,1fr)}
+    .g4{display:grid;gap:16px;grid-template-columns:repeat(4,1fr)}
+
+    /* ===== Pain grid ===== */
+    .pain-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+    .clean-list{padding:0;margin:0;display:grid;gap:14px}
+    .clean-list li{
+      display:flex;gap:12px;align-items:flex-start;
+      font-size:.88rem;line-height:1.55;color:var(--on-surface-var);
+    }
+    .clean-list li::before{
+      content:"\2726";color:var(--tertiary);font-weight:700;
+      flex-shrink:0;margin-top:2px;
+    }
+
+    /* ===== Feature cards ===== */
+    .feat-card{display:flex;flex-direction:column}
+    .tag{
+      display:inline-flex;width:fit-content;
+      padding:4px 14px;border-radius:var(--radius-full);
+      background:rgba(201,177,255,.12);
+      color:var(--primary-bright);
+      font-size:.68rem;font-weight:600;letter-spacing:.4px;
+      margin-bottom:16px;
+    }
+
+    /* ===== Journey ===== */
+    .journey{
+      display:grid;grid-template-columns:repeat(4,1fr);
+      gap:16px;counter-reset:journey;
+    }
+    .step{
+      padding:24px;border-radius:var(--radius-lg);
+      background:var(--surface-cont);
+      border:1px solid var(--outline-var);
+      transition:border-color var(--dur-fast) var(--ease);
+    }
+    .step:hover{border-color:rgba(201,177,255,.22)}
+    .step::before{
+      counter-increment:journey;content:counter(journey);
+      display:inline-grid;place-items:center;
+      width:34px;height:34px;border-radius:var(--radius-full);
+      margin-bottom:14px;
+      background:linear-gradient(135deg,var(--primary-cont),var(--on-primary));
+      color:var(--primary-bright);font-weight:700;font-size:.85rem;
+    }
+    .step h3{font-size:.95rem;font-weight:600;margin-bottom:8px}
+    .step p{color:var(--on-surface-var);font-size:.84rem;line-height:1.55}
+
+    /* ===== Comparison ===== */
+    .comparison{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+    .comparison ul{padding:0;margin:16px 0 0;display:grid;gap:12px}
+    .comparison li{
+      padding-left:22px;position:relative;
+      font-size:.88rem;color:var(--on-surface-var);line-height:1.55;
+    }
+    .comparison li::before{
+      content:"\2022";position:absolute;left:0;
+      color:var(--primary);font-size:1.3rem;line-height:1;top:1px;
+    }
+
+    /* ===== Testimonial ===== */
+    .testimonial{display:grid;grid-template-columns:1.1fr .9fr;gap:16px}
+    .quote{
+      font-size:clamp(1.2rem,2vw,1.6rem);line-height:1.45;
+      color:var(--on-surface);font-weight:500;
+    }
+    .quote-meta{margin-top:14px;color:var(--on-surface-var);font-size:.84rem}
+
+    /* ===== Pricing ===== */
+    .pricing{position:relative;overflow:hidden}
+    .price-tag{display:flex;align-items:flex-end;gap:8px;margin:18px 0 12px}
+    .price-tag strong{
+      font-size:clamp(2.2rem,4.5vw,3.2rem);line-height:1;
+      font-weight:800;letter-spacing:-.5px;
+    }
+    .check-list{margin:16px 0 0;padding:0;display:grid;gap:12px}
+    .check-list li{
+      display:flex;gap:10px;color:var(--on-surface-var);
+      font-size:.88rem;line-height:1.55;
+    }
+    .check-list li::before{content:"\2713";color:var(--success);font-weight:700;flex-shrink:0}
+
+    /* Pricing card gradient border */
+    .pricing-card{
+      position:relative;
+      background:linear-gradient(135deg,rgba(201,177,255,.06),rgba(240,176,200,.04));
+    }
+    .pricing-card::before{
+      content:"";position:absolute;inset:-1px;
+      border-radius:calc(var(--radius-lg) + 1px);
+      padding:1px;
+      background:linear-gradient(135deg,rgba(201,177,255,.25),transparent 40%,transparent 60%,rgba(240,176,200,.2));
+      -webkit-mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);
+      mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);
+      -webkit-mask-composite:xor;
+      mask-composite:exclude;
+      pointer-events:none;
+    }
+
+    /* ===== CTA Band ===== */
+    .cta-band{
+      padding:44px;border-radius:var(--radius-xl);
+      background:linear-gradient(135deg,var(--surface-high) 0%,rgba(74,54,128,.18) 100%);
+      border:1px solid var(--outline-var);
+      display:grid;grid-template-columns:1.15fr .85fr;
+      gap:28px;align-items:center;
+    }
+
+    /* ===== FAQ ===== */
+    .faq-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+    .faq-item summary{
+      list-style:none;cursor:pointer;
+      font-weight:600;font-size:.95rem;line-height:1.5;
+      display:flex;align-items:center;justify-content:space-between;gap:16px;
+      color:var(--on-surface);
+    }
+    .faq-item summary::-webkit-details-marker{display:none}
+    .faq-item summary::after{
+      content:"+";font-size:1.3rem;color:var(--primary);
+      transition:transform var(--dur-fast) var(--ease);flex-shrink:0;
+    }
+    .faq-item[open] summary::after{transform:rotate(45deg)}
+    .faq-item p{margin:12px 0 0;color:var(--on-surface-var);font-size:.86rem;line-height:1.6}
+
+    /* ===== Footer ===== */
+    .footer{
+      padding:32px 0 48px;
+      color:var(--outline);font-size:.78rem;
+      border-top:1px solid var(--outline-var);
+    }
+
+    /* ===== Scroll Reveal ===== */
+    .rv{
+      opacity:0;transform:translateY(20px);
+      transition:opacity var(--dur-slow) var(--ease),
+                 transform var(--dur-slow) var(--ease);
+    }
+    .rv.show{opacity:1;transform:translateY(0)}
+
+    /* ===== Reduced motion ===== */
+    @media(prefers-reduced-motion:reduce){
+      html{scroll-behavior:auto}
+      *,*::before,*::after{animation:none!important;transition:none!important}
+      .rv{opacity:1;transform:none}
+    }
+
+    /* ===== Responsive: Tablet ===== */
+    @media(max-width:1080px){
+      .hero-grid,.pain-grid,.testimonial,.cta-band,.comparison{
+        grid-template-columns:1fr;
+      }
+      .g3,.g4,.journey,.proof-row,.faq-grid{
+        grid-template-columns:repeat(2,1fr);
+      }
+    }
+
+    /* ===== Responsive: Mobile ===== */
+    @media(max-width:760px){
+      .wrap{width:min(100% - 28px,var(--max-w))}
+      .nav-links{display:none}
+      .hero{padding-top:40px}
+      .g3,.g4,.journey,.proof-row,.faq-grid,.float-grid,.g2{
+        grid-template-columns:1fr;
+      }
+      h1{max-width:none}
+      .hero-btns,.nav-cta{flex-wrap:wrap}
+      .btn,.btn-outline{width:100%;justify-content:center}
+      .term-body{min-height:auto}
+      .cta-band{padding:24px;grid-template-columns:1fr}
+    }
+  </style>
+</head>
+<body>
+<div class="page">
+
+  <!-- ===== TOP APP BAR ===== -->
+  <header class="topbar" id="topbar">
+    <div class="wrap nav">
+      <a class="brand" href="#top" aria-label="or3-intern home">
+        <span class="brand-mark">or3</span>
+        <span>or3-intern</span>
+      </a>
+      <nav class="nav-links" aria-label="Primary">
+        <a href="#why">Why it wins</a>
+        <a href="#features">Features</a>
+        <a href="#proof">Proof</a>
+        <a href="#pricing">Offer</a>
+        <a href="#faq">FAQ</a>
+      </nav>
+      <div class="nav-cta">
+        <a class="btn-outline" href="#proof">See the advantage</a>
+        <a class="btn" href="#pricing">Get started</a>
+      </div>
+    </div>
+  </header>
+
+  <main id="top">
+
+    <!-- ===== HERO ===== -->
+    <section class="hero">
+      <div class="wrap hero-grid">
+        <div>
+          <div class="eyebrow rv">
+            <span class="dot-live"></span>
+            Local-first AI runtime &middot; memory &middot; channels &middot; automation &middot; hardening
+          </div>
+          <h1 class="rv">
+            Stop buying <span class="grad">AI demos.</span><br/>
+            Start running an AI&nbsp;operator.
+          </h1>
+          <p class="hero-sub rv">
+            or3-intern is the AI runtime for teams who want more than a chatbot.
+            It remembers context, works across real channels, automates recurring
+            jobs, integrates with tools, and stays governed with production-grade controls.
+          </p>
+          <div class="hero-btns rv">
+            <a class="btn" href="#pricing">Launch your AI operator &rarr;</a>
+            <a class="btn-outline" href="#why">Why this converts work into output</a>
+          </div>
+          <div class="proof-pills rv" aria-label="Key differentiators">
+            <span>Shared runtime across CLI, service, channels &amp; jobs</span>
+            <span>SQLite-backed history &amp; hybrid memory retrieval</span>
+            <span>Secrets, audit, profiles &amp; network policy built&nbsp;in</span>
+          </div>
+        </div>
+
+        <div class="hero-card rv">
+          <div class="term">
+            <div class="term-bar">
+              <span class="term-dot"></span>
+              <span class="term-dot"></span>
+              <span class="term-dot"></span>
+              <span class="term-title">or3-intern live operator flow</span>
+            </div>
+            <div class="term-body">
+              <div class="tl"><span class="c-prompt">$</span> <span class="c-cmd">or3-intern init</span></div>
+              <div class="tl">Configured provider, memory, artifacts, channels, and runtime profile.</div>
+              <div class="tl"><span class="c-prompt">$</span> <span class="c-cmd">or3-intern serve</span></div>
+              <div class="tl"><span class="c-ok">&#10003;</span> Telegram enabled</div>
+              <div class="tl"><span class="c-ok">&#10003;</span> Slack enabled</div>
+              <div class="tl"><span class="c-ok">&#10003;</span> Cron + heartbeat running</div>
+              <div class="tl"><span class="c-ok">&#10003;</span> MCP tools connected</div>
+              <div class="tl"><span class="c-warn">&#8594;</span> New inbound request: &ldquo;Summarize the incident and notify the team&rdquo;</div>
+              <div class="tl">Pulled memory, checked policies, executed tools, posted reply, logged audit trail.</div>
+              <div class="tl"><span class="c-ok">Result:</span> one AI brain, everywhere your work happens.</div>
+            </div>
+          </div>
+          <div class="float-grid">
+            <div class="float-pill">
+              <strong>Remembers context</strong>
+              SQLite history, hybrid retrieval, document indexing, and standing memory.
+            </div>
+            <div class="float-pill">
+              <strong>Acts across channels</strong>
+              CLI, service API, Telegram, Slack, Discord, Email, and WhatsApp bridge.
+            </div>
+            <div class="float-pill">
+              <strong>Runs autonomously</strong>
+              Webhooks, file-watch, heartbeat, cron, and structured tasks.
+            </div>
+            <div class="float-pill">
+              <strong>Stays controlled</strong>
+              Secrets, audit, host policy, access profiles, and runtime hardening.
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== PROOF STRIP ===== -->
+    <section class="proof-strip">
+      <div class="wrap">
+        <div class="proof-row rv" id="proof">
+          <div class="pstat">
+            <strong>1 runtime</strong>
+            <span>One shared AI system across chat, channels, service APIs, and automation.</span>
+          </div>
+          <div class="pstat">
+            <strong>5+ channels</strong>
+            <span>Real communication surfaces, not just another browser tab.</span>
+          </div>
+          <div class="pstat">
+            <strong>4 postures</strong>
+            <span>From local development to hardened service deployment.</span>
+          </div>
+          <div class="pstat">
+            <strong>Built-in guardrails</strong>
+            <span>Secret refs, audit chain, quotas, profiles, and outbound network policy.</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <hr class="divider" />
+
+    <!-- ===== WHY ===== -->
+    <section id="why">
+      <div class="wrap">
+        <div class="sec-head rv">
+          <span class="label">Why buyers switch</span>
+          <h2>The problem is not getting AI to talk.<br/>The problem is getting AI to <span class="grad">operate.</span></h2>
+          <p class="sec-copy">
+            Most AI products fail after the demo because they are disconnected from
+            the real flow of work. They forget context, live in one interface,
+            break when you add automation, and become risky the moment you expose
+            them to the outside&nbsp;world.
+          </p>
+        </div>
+
+        <div class="pain-grid">
+          <div class="card rv">
+            <div class="icon icon-pink">&#10005;</div>
+            <h3>What you are stuck with now</h3>
+            <ul class="clean-list">
+              <li>A chatbot that forgets everything important after the session ends.</li>
+              <li>Separate bots for internal chat, external channels, and background automation.</li>
+              <li>Fragile glue code between prompts, tools, schedules, and APIs.</li>
+              <li>Security anxiety the second AI touches secrets, shell tools, or public endpoints.</li>
+              <li>No operational confidence because there is no audit trail, profile system, or host policy.</li>
+            </ul>
+          </div>
+          <div class="card rv">
+            <div class="icon icon-green">&#10003;</div>
+            <h3>What or3-intern changes</h3>
+            <ul class="clean-list">
+              <li>One AI runtime that powers local chat, service mode, channels, triggers, and scheduled jobs.</li>
+              <li>Persistent memory with SQLite-backed history, hybrid retrieval, and document indexing.</li>
+              <li>Real-world channel integrations so the agent meets your users where they already work.</li>
+              <li>Hardening features designed for grown-up deployments, not retrofitted after the fact.</li>
+              <li>Extensibility through skills and MCP tool integrations so it grows with your stack.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <hr class="divider" />
+
+    <!-- ===== FEATURES ===== -->
+    <section id="features">
+      <div class="wrap">
+        <div class="sec-head rv">
+          <span class="label">Features that close the deal</span>
+          <h2>Every layer is engineered to reduce friction and increase&nbsp;trust.</h2>
+          <p class="sec-copy">
+            This is not a vague AI promise. It is a system with concrete advantages:
+            faster setup, deeper context, broader reach, safer execution, and
+            cleaner&nbsp;operations.
+          </p>
+        </div>
+
+        <div class="g3">
+          <article class="card feat-card rv">
+            <span class="tag">Memory that compounds</span>
+            <h3>Persistent context that actually sticks</h3>
+            <p>SQLite-backed history, pinned memory, hybrid vector + FTS retrieval, and document indexing mean the system gets more useful over time instead of resetting every conversation.</p>
+          </article>
+          <article class="card feat-card rv">
+            <span class="tag">Reach beyond the browser</span>
+            <h3>One operator across real channels</h3>
+            <p>Run through CLI, internal service APIs, Telegram, Slack, Discord, Email, and WhatsApp bridge&mdash;all on the same shared runtime and policy model.</p>
+          </article>
+          <article class="card feat-card rv">
+            <span class="tag">Autonomy without chaos</span>
+            <h3>Automation built in, not bolted on</h3>
+            <p>Webhooks, file-watch triggers, heartbeat tasks, cron jobs, and structured task execution let the system move from reactive assistant to active operator.</p>
+          </article>
+          <article class="card feat-card rv">
+            <span class="tag">Guardrails by design</span>
+            <h3>Security that makes adoption easier</h3>
+            <p>Secret references, audit verification, runtime profiles, access profiles, quotas, sandbox options, and host-based network policy lower the risk of real deployment.</p>
+          </article>
+          <article class="card feat-card rv">
+            <span class="tag">Fits your stack</span>
+            <h3>Skills &amp; MCP extend capability fast</h3>
+            <p>Add managed skills, quarantine or approve them intelligently, and connect MCP tools over stdio, SSE, or streamable HTTP with policy-aware controls.</p>
+          </article>
+          <article class="card feat-card rv">
+            <span class="tag">Operational confidence</span>
+            <h3>Built to move from local to hosted</h3>
+            <p>Run <code style="background:var(--surface-high);padding:2px 8px;border-radius:6px;font-size:.8rem">doctor --strict</code>, choose a runtime posture, validate startup constraints, and scale from personal workflows to service-grade&nbsp;deployments.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <hr class="divider" />
+
+    <!-- ===== VALUE JOURNEY ===== -->
+    <section>
+      <div class="wrap">
+        <div class="sec-head rv">
+          <span class="label">How buyers rationalize the purchase</span>
+          <h2>You are not paying for responses. You are paying for <span class="grad">leverage.</span></h2>
+          <p class="sec-copy">
+            The real value comes from replacing fragmented tooling, shrinking manual
+            follow-up, and turning AI from a novelty into reliable operational&nbsp;capacity.
+          </p>
+        </div>
+
+        <div class="journey">
+          <div class="step rv">
+            <h3>Replace tool sprawl</h3>
+            <p>Stop paying the operational tax of separate bots, one-off scripts, prompt silos, and brittle glue code.</p>
+          </div>
+          <div class="step rv">
+            <h3>Compress response time</h3>
+            <p>One runtime can receive, reason, retrieve context, act, and respond without handoffs between systems.</p>
+          </div>
+          <div class="step rv">
+            <h3>Increase output quality</h3>
+            <p>Persistent memory and shared context produce more relevant results than stateless assistants ever can.</p>
+          </div>
+          <div class="step rv">
+            <h3>Adopt with confidence</h3>
+            <p>Security and hardening features reduce the hidden cost that normally stalls AI rollout inside serious teams.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <hr class="divider" />
+
+    <!-- ===== COMPARISON ===== -->
+    <section>
+      <div class="wrap comparison">
+        <div class="card rv">
+          <div class="icon icon-pink">&#128556;</div>
+          <h3>The typical AI product</h3>
+          <ul>
+            <li>Lives in one interface</li>
+            <li>Forgets everything outside the active session</li>
+            <li>Needs extra tooling for channels and automation</li>
+            <li>Becomes risky the moment it touches tools or endpoints</li>
+            <li>Feels impressive in demos and fragile in production</li>
+          </ul>
+        </div>
+        <div class="card rv">
+          <div class="icon icon-purple">&#9889;</div>
+          <h3>The or3-intern advantage</h3>
+          <ul>
+            <li>Shared runtime across interactive, async, and service workflows</li>
+            <li>Persistent memory and retrieval grounded in local data</li>
+            <li>Channels, triggers, schedules, and service mode already in the box</li>
+            <li>Guardrails for secrets, audit, profiles, quotas, and host policy</li>
+            <li>Built to become infrastructure, not just interface decoration</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <hr class="divider" />
+
+    <!-- ===== TESTIMONIAL ===== -->
+    <section>
+      <div class="wrap testimonial">
+        <div class="card rv">
+          <span class="label">What your future buyer-self says</span>
+          <p class="quote">&ldquo;We stopped experimenting with AI in isolated pockets and finally gave the business one operator that could remember, integrate, automate, and still stay under control.&rdquo;</p>
+          <div class="quote-meta">That is the emotional reason this product wins: fewer moving parts, more output, less risk.</div>
+        </div>
+        <div class="card rv">
+          <div class="icon icon-purple">&#129504;</div>
+          <h3>Ideal for</h3>
+          <ul class="check-list">
+            <li>Founders who want an AI operator instead of a toy assistant</li>
+            <li>Internal tools teams who need one platform for AI workflows</li>
+            <li>Operators who care about memory, reach, and governance</li>
+            <li>Teams who want to start local-first and scale toward service mode</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <hr class="divider" />
+
+    <!-- ===== PRICING ===== -->
+    <section id="pricing">
+      <div class="wrap">
+        <div class="sec-head rv">
+          <span class="label">The offer</span>
+          <h2>Buy one system that replaces a pile of partial&nbsp;solutions.</h2>
+          <p class="sec-copy">
+            The conversion decision is simple: if you believe your team needs AI
+            that can do more than answer prompts, this is the category&nbsp;upgrade.
+          </p>
+        </div>
+
+        <div class="card pricing-card rv">
+          <div class="g3">
+            <div>
+              <span class="label">Why it is worth it</span>
+              <h3 style="font-size:1.65rem;margin:0">You get infrastructure-level value.</h3>
+              <div class="price-tag">
+                <strong>1 runtime</strong>
+                <span style="color:var(--on-surface-var);padding-bottom:6px">for memory, channels, automation, service APIs, skills &amp; governance</span>
+              </div>
+              <p class="sec-copy" style="margin-top:6px">
+                Instead of paying in tool sprawl, prompt drift, and operational
+                fragility, you buy a platform that turns AI into a durable business&nbsp;capability.
+              </p>
+              <div class="hero-btns" style="margin-top:20px">
+                <a class="btn" href="#final-cta">Yes &mdash; I want the operator</a>
+                <a class="btn-outline" href="#faq">Answer my objections</a>
+              </div>
+            </div>
+            <div>
+              <h3>What makes the decision easy</h3>
+              <ul class="check-list">
+                <li>Grounded in local-first persistence, so your context stays yours.</li>
+                <li>Works across the surfaces your business already uses.</li>
+                <li>Supports autonomy, not just interactive prompting.</li>
+                <li>Includes the hardening layer that serious deployment demands.</li>
+              </ul>
+            </div>
+            <div>
+              <h3>What you stop buying separately</h3>
+              <ul class="check-list">
+                <li>Disconnected channel bots</li>
+                <li>One-off automation glue</li>
+                <li>Stateless AI wrappers</li>
+                <li>Afterthought governance retrofits</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <hr class="divider" />
+
+    <!-- ===== FAQ ===== -->
+    <section id="faq">
+      <div class="wrap">
+        <div class="sec-head rv">
+          <span class="label">Objection handling</span>
+          <h2>The questions buyers ask before they say&nbsp;yes.</h2>
+        </div>
+        <div class="faq-grid">
+          <details class="card faq-item rv" open>
+            <summary>Why not just use a normal AI assistant?</summary>
+            <p>Because a normal assistant gives you isolated conversations. or3-intern gives you a runtime: memory, channels, automation, service mode, tools, and governance in one system.</p>
+          </details>
+          <details class="card faq-item rv">
+            <summary>Is this only for developers?</summary>
+            <p>It is built by engineers, but the value is operational: faster execution, fewer handoffs, more reliable automation, and safer adoption. Technical teams enable it; the business benefits from it.</p>
+          </details>
+          <details class="card faq-item rv">
+            <summary>What if we need security controls?</summary>
+            <p>That is one of its biggest strengths. Runtime profiles, audit verification, secret refs, quotas, host policy, access profiles, and hardened execution are already part of the product.</p>
+          </details>
+          <details class="card faq-item rv">
+            <summary>Can it grow with our stack?</summary>
+            <p>Yes. Skills and MCP integrations make the system extensible, while service mode and channel adapters let it operate beyond a single UI.</p>
+          </details>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== FINAL CTA ===== -->
+    <section id="final-cta">
+      <div class="wrap">
+        <div class="cta-band rv">
+          <div>
+            <span class="label">Final close</span>
+            <h2 style="margin-bottom:12px">If you want AI that only talks, keep&nbsp;shopping.</h2>
+            <p style="margin:0;max-width:46rem;color:var(--on-surface-var);font-size:1rem;line-height:1.6">
+              If you want AI that can remember, integrate, automate, and operate
+              like part of the business&mdash;this is the smarter buy. The future
+              is not another assistant tab. The future is one dependable AI runtime
+              embedded into how work actually gets&nbsp;done.
+            </p>
+          </div>
+          <div>
+            <div class="card" style="min-height:100%">
+              <h3 style="font-size:1.3rem">Make the obvious move</h3>
+              <ul class="check-list">
+                <li>Start local-first</li>
+                <li>Expand to channels and automation</li>
+                <li>Harden for real deployment</li>
+                <li>Let one AI brain power the workflow</li>
+              </ul>
+              <div class="hero-btns" style="margin-top:18px;margin-bottom:0">
+                <a class="btn" href="#top">Back to top &uarr;</a>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="wrap">
+      <p>Built around the real capabilities of or3-intern: local-first runtime, shared memory, channel integrations, automation, service mode, hardening, skills, and MCP extensions.</p>
+    </div>
+  </footer>
+</div>
+
+<script>
+  // Scroll-reveal with IntersectionObserver
+  const io = new IntersectionObserver(
+    (entries) => {
+      entries.forEach((e) => {
+        if (e.isIntersecting) { e.target.classList.add('show'); io.unobserve(e.target); }
+      });
+    },
+    { threshold: 0.08, rootMargin: '0px 0px -40px 0px' }
+  );
+  document.querySelectorAll('.rv').forEach((el) => io.observe(el));
+
+  // Top bar elevation on scroll
+  const tb = document.getElementById('topbar');
+  window.addEventListener('scroll', () => {
+    tb.classList.toggle('scrolled', window.scrollY > 8);
+  }, { passive: true });
+</script>
+</body>
+</html>
 ````
 
 ## File: cmd/or3-intern/testdata/service_contract/turn-response.json
@@ -3706,41 +4365,288 @@ func FailureMarker(kind, name, reason string) string {
 }
 ````
 
-## File: internal/channels/cli/service.go
+## File: internal/channels/cli/cli.go
 ````go
+// Package cli implements the local interactive terminal channel.
 package cli
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"os"
+	"strings"
 
 	"or3-intern/internal/bus"
 )
 
-type Service struct {
-	Deliverer Deliverer
+// Channel reads user input from stdin and publishes messages to the bus.
+type Channel struct {
+	Bus        *bus.Bus
+	SessionKey string
+	Spinner    *Spinner // shared with Deliverer so it can be stopped on output
 }
 
-func (s Service) Name() string { return "cli" }
+// Run reads stdin, publishes user messages, and manages the interactive prompt.
+func (c *Channel) Run(ctx context.Context) error {
+	if c.SessionKey == "" {
+		c.SessionKey = "default"
+	}
+	in := bufio.NewScanner(os.Stdin)
+	fmt.Print(Banner())
+	ShowPrompt() // initial prompt
+	for {
+		// Prompt is printed either above (first iteration) or by the
+		// Deliverer after finishing a response. We block on Scan here.
+		if !in.Scan() {
+			return nil
+		}
+		line := strings.TrimSpace(in.Text())
+		if line == "" {
+			fmt.Print(Prompt())
+			continue
+		}
+		if line == "/exit" {
+			if isTTY {
+				fmt.Println(style(ansiDim+ansiGray, "  Goodbye 👋"))
+			}
+			return nil
+		}
 
-func (s Service) Start(ctx context.Context, eventBus *bus.Bus) error {
-	_ = ctx
-	_ = eventBus
-	return nil
-}
-
-func (s Service) Stop(ctx context.Context) error {
-	_ = ctx
-	return nil
-}
-
-func (s Service) Deliver(ctx context.Context, to, text string, meta map[string]any) error {
-	if len(meta) > 0 {
-		if raw, ok := meta["media_paths"].([]string); ok && len(raw) > 0 {
-			return fmt.Errorf("cli channel does not support media attachments")
+		ok := c.Bus.Publish(bus.Event{
+			Type:       bus.EventUserMessage,
+			SessionKey: c.SessionKey,
+			Channel:    "cli",
+			From:       "local",
+			Message:    line,
+		})
+		if !ok {
+			fmt.Println(style(ansiYellow, "  ⚠ queue full — message dropped"))
+			fmt.Print(Prompt())
+		} else {
+			// Restyle the raw prompt line into a labeled user message block.
+			RewriteUserMessage(line)
+			if c.Spinner != nil {
+				c.Spinner.Start("thinking…")
+			}
+			// Don't print the prompt — the Deliverer will show it
+			// after the response is fully rendered.
 		}
 	}
-	return s.Deliverer.Deliver(ctx, "cli", to, text)
+}
+````
+
+## File: internal/channels/cli/terminal.go
+````go
+package cli
+
+import (
+	"fmt"
+	"os"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/mattn/go-isatty"
+)
+
+// isTTY is true when stdout is an interactive terminal.
+var isTTY = isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
+
+// ---------- ANSI helpers ----------
+
+const (
+	ansiReset     = "\033[0m"
+	ansiBold      = "\033[1m"
+	ansiDim       = "\033[2m"
+	ansiItalic    = "\033[3m"
+	ansiCyan      = "\033[36m"
+	ansiYellow    = "\033[33m"
+	ansiGray      = "\033[90m"
+	ansiWhite     = "\033[97m"
+	ansiGreen     = "\033[32m"
+	ansiCursorUp  = "\033[1A" // move cursor up one line
+	ansiClearLine = "\033[2K" // clear entire line
+)
+
+func style(codes, text string) string {
+	if !isTTY {
+		return text
+	}
+	return codes + text + ansiReset
+}
+
+// ---------- Banner ----------
+
+// Banner returns the startup header shown when the CLI launches.
+// Banner returns the startup header shown when the CLI launches.
+func Banner() string {
+	if !isTTY {
+		return "or3-intern CLI. Type /exit to quit.\n"
+	}
+	top := style(ansiDim, "╭───────────────────────────────────────────────╮")
+	mid1 := style(ansiDim, "│") + "  " + style(ansiBold+ansiCyan, "or3-intern") + "                                  " + style(ansiDim, "│")
+	mid2 := style(ansiDim, "│") + "  " + style(ansiGray, "Type /exit to quit · /new for new session") + "  " + style(ansiDim, "│")
+	bot := style(ansiDim, "╰───────────────────────────────────────────────╯")
+	return fmt.Sprintf("\n%s\n%s\n%s\n%s\n", top, mid1, mid2, bot)
+}
+
+// ---------- Prompt / separators ----------
+
+// Prompt returns the input prompt string.
+// Prompt returns the input prompt string.
+func Prompt() string {
+	if !isTTY {
+		return "> "
+	}
+	return ansiBold + ansiCyan + "❯ " + ansiReset
+}
+
+// ShowPrompt prints a blank line gap then the prompt, signalling the user
+// that input is ready. Called by the Deliverer after finishing output.
+// ShowPrompt renders the next interactive prompt.
+func ShowPrompt() {
+	if !isTTY {
+		fmt.Print(Prompt())
+		return
+	}
+	fmt.Print("\n" + Prompt())
+}
+
+// Separator returns a faint horizontal rule placed after a response block.
+// Separator returns the faint rule shown after a response block.
+func Separator() string {
+	if !isTTY {
+		return ""
+	}
+	return "  " + ansiDim + strings.Repeat("─", 50) + ansiReset
+}
+
+// ---------- User message formatting ----------
+
+// RewriteUserMessage moves the cursor up to overwrite the raw prompt line
+// with a styled version of the user's message. This transforms the bare
+// "❯ text" into a clearly labeled user block. No-op when not a TTY.
+// RewriteUserMessage restyles the raw prompt line into a formatted user block.
+func RewriteUserMessage(text string) {
+	if !isTTY {
+		return
+	}
+	// Move up over the raw prompt line and replace it.
+	fmt.Print(ansiCursorUp + ansiClearLine)
+	fmt.Printf("  %s%s▌%s %s%s\n",
+		ansiBold, ansiCyan, ansiReset,
+		style(ansiBold+ansiWhite, text), ansiReset)
+}
+
+// ---------- Assistant header ----------
+
+// AssistantHeader returns the header line printed before each response.
+// AssistantHeader returns the header line printed before each response.
+func AssistantHeader() string {
+	if !isTTY {
+		return ""
+	}
+	name := ansiBold + ansiGreen + "◆ or3-intern" + ansiReset
+	line := ansiDim + " " + strings.Repeat("─", 38) + ansiReset
+	return "\n  " + name + line + "\n"
+}
+
+// ---------- Response formatting ----------
+
+// ResponsePrefix returns the prefix printed before the first streaming delta.
+// ResponsePrefix returns the prefix printed before the first streamed delta.
+func ResponsePrefix() string {
+	if !isTTY {
+		return "\n"
+	}
+	return AssistantHeader() + "\n    "
+}
+
+// FormatResponse wraps a complete (non-streamed) response for display.
+// FormatResponse wraps a complete non-streamed response for display.
+func FormatResponse(text string) string {
+	if !isTTY {
+		return "[cli] " + text
+	}
+	lines := strings.Split(text, "\n")
+	for i, l := range lines {
+		lines[i] = "    " + l
+	}
+	return AssistantHeader() + "\n" + strings.Join(lines, "\n")
+}
+
+// ---------- Spinner ----------
+
+// Spinner provides a braille-dot animation on stdout while the agent thinks.
+// Only animates when stdout is a TTY; safe for concurrent Start/Stop.
+// Spinner renders a terminal animation while the agent is working.
+type Spinner struct {
+	mu      sync.Mutex
+	running bool
+	stopCh  chan struct{}
+	stopped chan struct{}
+}
+
+// NewSpinner creates a ready-to-use Spinner (initially stopped).
+// NewSpinner constructs a stopped Spinner.
+func NewSpinner() *Spinner {
+	return &Spinner{}
+}
+
+// Start begins the animation with the given label (e.g. "thinking…").
+// No-op if already running or stdout is not a TTY.
+// Start begins the spinner animation with label.
+func (s *Spinner) Start(label string) {
+	if !isTTY {
+		return
+	}
+	s.mu.Lock()
+	if s.running {
+		s.mu.Unlock()
+		return
+	}
+	s.running = true
+	s.stopCh = make(chan struct{})
+	s.stopped = make(chan struct{})
+	s.mu.Unlock()
+
+	go func() {
+		defer close(s.stopped)
+		frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+		i := 0
+		ticker := time.NewTicker(80 * time.Millisecond)
+		defer ticker.Stop()
+		// First frame immediately.
+		fmt.Fprintf(os.Stdout, "\r  %s%s %s%s", ansiDim, frames[0], label, ansiReset)
+		for {
+			select {
+			case <-s.stopCh:
+				// Clear the spinner line.
+				fmt.Fprint(os.Stdout, "\r\033[K")
+				return
+			case <-ticker.C:
+				i++
+				fmt.Fprintf(os.Stdout, "\r  %s%s %s%s", ansiDim, frames[i%len(frames)], label, ansiReset)
+			}
+		}
+	}()
+}
+
+// Stop halts the animation and clears the spinner line.
+// Blocks until the animation goroutine exits. Safe to call when not running.
+// Stop halts the spinner and clears its line.
+func (s *Spinner) Stop() {
+	s.mu.Lock()
+	if !s.running {
+		s.mu.Unlock()
+		return
+	}
+	s.running = false
+	close(s.stopCh)
+	stopped := s.stopped
+	s.mu.Unlock()
+	<-stopped
 }
 ````
 
@@ -3799,539 +4705,364 @@ func MediaPaths(meta map[string]any) []string {
 }
 ````
 
-## File: internal/db/security.go
+## File: internal/scope/scope.go
 ````go
-package db
+// Package scope defines shared session-scope identifiers and helpers.
+package scope
 
-import (
-	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"database/sql"
-	"encoding/json"
-	"fmt"
-	"strings"
+import "strings"
+
+const (
+	// GlobalMemoryScope is the canonical scope key used for shared global memory.
+	GlobalMemoryScope = "__or3_global__"
+	// GlobalScopeAlias is the user-facing alias for the global scope.
+	GlobalScopeAlias = "global"
 )
 
-type SecretRecord struct {
-	Name       string
-	Ciphertext []byte
-	Nonce      []byte
-	Version    int
-	KeyVersion string
-	UpdatedAt  int64
-}
-
-type AuditEvent struct {
-	ID          int64
-	EventType   string
-	SessionKey  string
-	Actor       string
-	PayloadJSON string
-	PrevHash    []byte
-	RecordHash  []byte
-	CreatedAt   int64
-}
-
-type AuditEventInput struct {
-	EventType  string
-	SessionKey string
-	Actor      string
-	Payload    any
-}
-
-func (d *DB) PutSecret(ctx context.Context, name string, ciphertext, nonce []byte, version int, keyVersion string) error {
-	_, err := d.SQL.ExecContext(ctx,
-		`INSERT INTO secrets(name, ciphertext, nonce, version, key_version, updated_at) VALUES(?,?,?,?,?,?)
-		 ON CONFLICT(name) DO UPDATE SET ciphertext=excluded.ciphertext, nonce=excluded.nonce, version=excluded.version, key_version=excluded.key_version, updated_at=excluded.updated_at`,
-		strings.TrimSpace(name), ciphertext, nonce, version, strings.TrimSpace(keyVersion), NowMS())
-	return err
-}
-
-func (d *DB) GetSecret(ctx context.Context, name string) (SecretRecord, bool, error) {
-	row := d.SQL.QueryRowContext(ctx,
-		`SELECT name, ciphertext, nonce, version, key_version, updated_at FROM secrets WHERE name=?`,
-		strings.TrimSpace(name))
-	var record SecretRecord
-	if err := row.Scan(&record.Name, &record.Ciphertext, &record.Nonce, &record.Version, &record.KeyVersion, &record.UpdatedAt); err != nil {
-		if err == sql.ErrNoRows {
-			return SecretRecord{}, false, nil
-		}
-		return SecretRecord{}, false, err
-	}
-	return record, true, nil
-}
-
-func (d *DB) DeleteSecret(ctx context.Context, name string) error {
-	_, err := d.SQL.ExecContext(ctx, `DELETE FROM secrets WHERE name=?`, strings.TrimSpace(name))
-	return err
-}
-
-func (d *DB) ListSecretNames(ctx context.Context) ([]string, error) {
-	rows, err := d.SQL.QueryContext(ctx, `SELECT name FROM secrets ORDER BY name`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var names []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return nil, err
-		}
-		names = append(names, name)
-	}
-	return names, rows.Err()
-}
-
-func (d *DB) AppendAuditEvent(ctx context.Context, input AuditEventInput, key []byte) error {
-	d.auditMu.Lock()
-	defer d.auditMu.Unlock()
-
-	payloadBytes, err := json.Marshal(input.Payload)
-	if err != nil {
-		return err
-	}
-	payload := truncateAuditPayload(string(payloadBytes))
-	conn, err := d.SQL.Conn(ctx)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
-		}
-	}()
-
-	prevHash := []byte{}
-	row := conn.QueryRowContext(ctx, `SELECT record_hash FROM audit_events ORDER BY id DESC LIMIT 1`)
-	var previous []byte
-	if err := row.Scan(&previous); err == nil {
-		prevHash = append([]byte{}, previous...)
-	} else if err != nil && err != sql.ErrNoRows {
-		return err
-	}
-	createdAt := NowMS()
-	recordHash := computeAuditHash(key, input.EventType, input.SessionKey, input.Actor, payload, prevHash, createdAt)
-	if _, err = conn.ExecContext(ctx,
-		`INSERT INTO audit_events(event_type, session_key, actor, payload_json, prev_hash, record_hash, created_at) VALUES(?,?,?,?,?,?,?)`,
-		strings.TrimSpace(input.EventType), strings.TrimSpace(input.SessionKey), strings.TrimSpace(input.Actor), payload, prevHash, recordHash, createdAt); err != nil {
-		return err
-	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return err
-	}
-	committed = true
-	return nil
-}
-
-func (d *DB) VerifyAuditChain(ctx context.Context, key []byte) error {
-	rows, err := d.SQL.QueryContext(ctx,
-		`SELECT id, event_type, session_key, actor, payload_json, prev_hash, record_hash, created_at FROM audit_events ORDER BY id`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	var prev []byte
-	for rows.Next() {
-		var event AuditEvent
-		if err := rows.Scan(&event.ID, &event.EventType, &event.SessionKey, &event.Actor, &event.PayloadJSON, &event.PrevHash, &event.RecordHash, &event.CreatedAt); err != nil {
-			return err
-		}
-		if !hmac.Equal(event.PrevHash, prev) {
-			return fmt.Errorf("audit chain mismatch at id=%d", event.ID)
-		}
-		expected := computeAuditHash(key, event.EventType, event.SessionKey, event.Actor, event.PayloadJSON, event.PrevHash, event.CreatedAt)
-		if !hmac.Equal(expected, event.RecordHash) {
-			return fmt.Errorf("audit hash mismatch at id=%d", event.ID)
-		}
-		prev = append([]byte{}, event.RecordHash...)
-	}
-	return rows.Err()
-}
-
-func computeAuditHash(key []byte, eventType, sessionKey, actor, payload string, prevHash []byte, createdAt int64) []byte {
-	mac := hmac.New(sha256.New, key)
-	_, _ = mac.Write([]byte(strings.TrimSpace(eventType)))
-	_, _ = mac.Write([]byte{0})
-	_, _ = mac.Write([]byte(strings.TrimSpace(sessionKey)))
-	_, _ = mac.Write([]byte{0})
-	_, _ = mac.Write([]byte(strings.TrimSpace(actor)))
-	_, _ = mac.Write([]byte{0})
-	_, _ = mac.Write([]byte(payload))
-	_, _ = mac.Write([]byte{0})
-	_, _ = mac.Write(prevHash)
-	_, _ = mac.Write([]byte(fmt.Sprint(createdAt)))
-	return mac.Sum(nil)
-}
-
-func truncateAuditPayload(payload string) string {
-	payload = strings.TrimSpace(payload)
-	if len(payload) <= 2048 {
-		return payload
-	}
-	return payload[:2048] + "...[truncated]"
+// IsGlobalScopeRequest reports whether v refers to the global memory scope.
+func IsGlobalScopeRequest(v string) bool {
+	v = strings.TrimSpace(v)
+	return strings.EqualFold(v, GlobalScopeAlias) || v == GlobalMemoryScope
 }
 ````
 
-## File: internal/security/network.go
+## File: internal/security/store.go
 ````go
+// Package security provides secret storage, audit logging, and outbound host policy helpers.
 package security
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
-	"net"
-	"net/http"
-	"net/netip"
-	"net/url"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
+
+	"or3-intern/internal/config"
+	"or3-intern/internal/db"
 )
 
-var lookupIPAddr = func(ctx context.Context, host string) ([]net.IPAddr, error) {
-	return net.DefaultResolver.LookupIPAddr(ctx, host)
+const secretRefPrefix = "secret:"
+
+// SecretManager resolves and persists encrypted secrets.
+type SecretManager struct {
+	DB  *db.DB
+	Key []byte
 }
 
-type HostPolicy struct {
-	Enabled       bool
-	DefaultDeny   bool
-	AllowedHosts  []string
-	AllowLoopback bool
-	AllowPrivate  bool
-}
-
-func (p HostPolicy) EnabledPolicy() bool {
-	return p.Enabled || p.DefaultDeny || len(p.AllowedHosts) > 0
-}
-
-func (p HostPolicy) ValidateURL(ctx context.Context, target *url.URL) error {
-	if target == nil {
-		return fmt.Errorf("invalid url")
+// LoadOrCreateKey loads an existing secret-store key or creates one at path.
+func LoadOrCreateKey(path string) ([]byte, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, fmt.Errorf("key file required")
 	}
-	hostname := strings.TrimSpace(strings.ToLower(target.Hostname()))
-	if hostname == "" {
-		return fmt.Errorf("missing host")
+	if raw, err := os.ReadFile(path); err == nil {
+		if decoded, decErr := base64.StdEncoding.DecodeString(strings.TrimSpace(string(raw))); decErr == nil && len(decoded) >= 32 {
+			return decoded[:32], nil
+		}
+		if len(raw) >= 32 {
+			return raw[:32], nil
+		}
+		return nil, fmt.Errorf("key file too short")
+	} else if !os.IsNotExist(err) {
+		return nil, err
 	}
-	return p.ValidateHost(ctx, hostname)
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepathDir(path), 0o700); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(path, []byte(base64.StdEncoding.EncodeToString(key)), 0o600); err != nil {
+		return nil, err
+	}
+	return key, nil
 }
 
-func (p HostPolicy) ValidateEndpoint(ctx context.Context, raw string) error {
+// LoadExistingKey loads an existing secret-store key from path.
+func LoadExistingKey(path string) ([]byte, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, fmt.Errorf("key file required")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if decoded, decErr := base64.StdEncoding.DecodeString(strings.TrimSpace(string(raw))); decErr == nil && len(decoded) >= 32 {
+		return decoded[:32], nil
+	}
+	if len(raw) >= 32 {
+		return raw[:32], nil
+	}
+	return nil, fmt.Errorf("key file too short")
+}
+
+// ResolveRef resolves a secret: reference or returns raw unchanged.
+func (m *SecretManager) ResolveRef(ctx context.Context, raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
-	if raw == "" {
+	if !strings.HasPrefix(strings.ToLower(raw), secretRefPrefix) {
+		return raw, nil
+	}
+	if m == nil || m.DB == nil || len(m.Key) == 0 {
+		return "", fmt.Errorf("secret store unavailable")
+	}
+	name := strings.TrimSpace(raw[len(secretRefPrefix):])
+	if name == "" {
+		return "", fmt.Errorf("invalid secret ref")
+	}
+	secret, ok, err := m.Get(ctx, name)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", fmt.Errorf("secret not found: %s", name)
+	}
+	return secret, nil
+}
+
+// Put encrypts and stores value under name.
+func (m *SecretManager) Put(ctx context.Context, name, value string) error {
+	if m == nil || m.DB == nil || len(m.Key) == 0 {
+		return fmt.Errorf("secret store unavailable")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("secret name required")
+	}
+	ciphertext, nonce, err := encryptBlob(m.Key, []byte(value))
+	if err != nil {
+		return err
+	}
+	return m.DB.PutSecret(ctx, name, ciphertext, nonce, 1, "v1")
+}
+
+// Get decrypts and returns the secret stored under name.
+func (m *SecretManager) Get(ctx context.Context, name string) (string, bool, error) {
+	if m == nil || m.DB == nil || len(m.Key) == 0 {
+		return "", false, fmt.Errorf("secret store unavailable")
+	}
+	record, ok, err := m.DB.GetSecret(ctx, name)
+	if err != nil || !ok {
+		return "", ok, err
+	}
+	plain, err := decryptBlob(m.Key, record.Ciphertext, record.Nonce)
+	if err != nil {
+		return "", false, fmt.Errorf("decrypt secret %s: %w", name, err)
+	}
+	return string(plain), true, nil
+}
+
+// Delete removes the secret stored under name.
+func (m *SecretManager) Delete(ctx context.Context, name string) error {
+	if m == nil || m.DB == nil {
+		return fmt.Errorf("secret store unavailable")
+	}
+	return m.DB.DeleteSecret(ctx, name)
+}
+
+// List returns the stored secret names.
+func (m *SecretManager) List(ctx context.Context) ([]string, error) {
+	if m == nil || m.DB == nil {
+		return nil, fmt.Errorf("secret store unavailable")
+	}
+	return m.DB.ListSecretNames(ctx)
+}
+
+// AuditLogger appends and verifies tamper-evident audit records.
+type AuditLogger struct {
+	DB     *db.DB
+	Key    []byte
+	Strict bool
+}
+
+// Record appends one audit event or fails closed when Strict is set.
+func (a *AuditLogger) Record(ctx context.Context, eventType, sessionKey, actor string, payload any) error {
+	if a == nil || a.DB == nil || len(a.Key) == 0 {
+		if a != nil && a.Strict {
+			return fmt.Errorf("audit logger unavailable")
+		}
 		return nil
 	}
-	if strings.Contains(raw, "://") {
-		u, err := url.Parse(raw)
-		if err != nil {
-			return fmt.Errorf("invalid endpoint: %w", err)
-		}
-		return p.ValidateURL(ctx, u)
-	}
-	host, _, err := net.SplitHostPort(raw)
-	if err == nil {
-		return p.ValidateHost(ctx, strings.Trim(host, "[]"))
-	}
-	return p.ValidateHost(ctx, raw)
+	return a.DB.AppendAuditEvent(ctx, db.AuditEventInput{
+		EventType:  eventType,
+		SessionKey: strings.TrimSpace(sessionKey),
+		Actor:      strings.TrimSpace(actor),
+		Payload:    payload,
+	}, a.Key)
 }
 
-func (p HostPolicy) ValidateHost(ctx context.Context, hostname string) error {
-	_, err := p.resolveHost(ctx, hostname)
-	return err
+// Verify validates the persisted audit chain.
+func (a *AuditLogger) Verify(ctx context.Context) error {
+	if a == nil || a.DB == nil || len(a.Key) == 0 {
+		return nil
+	}
+	return a.DB.VerifyAuditChain(ctx, a.Key)
 }
 
-func (p HostPolicy) resolveHost(ctx context.Context, hostname string) (resolvedHostPlan, error) {
-	hostname = strings.Trim(strings.ToLower(strings.TrimSpace(hostname)), "[]")
-	if hostname == "" {
-		return resolvedHostPlan{}, fmt.Errorf("missing host")
+// ResolveConfigSecrets expands secret references across cfg.
+func ResolveConfigSecrets(ctx context.Context, cfg config.Config, mgr *SecretManager) (config.Config, error) {
+	resolved := cfg
+	if mgr == nil {
+		return resolved, nil
 	}
-	if ip, err := netip.ParseAddr(hostname); err == nil {
-		ip = ip.Unmap()
-		if err := p.validateAddr(ip); err != nil {
-			return resolvedHostPlan{}, err
-		}
-		return resolvedHostPlan{hostname: hostname, addrs: []netip.Addr{ip}}, nil
+	value := reflect.ValueOf(&resolved).Elem()
+	if err := resolveValue(ctx, value, mgr); err != nil {
+		return cfg, err
 	}
-	if p.EnabledPolicy() && !hostAllowed(hostname, p.AllowedHosts) && p.DefaultDeny {
-		return resolvedHostPlan{}, fmt.Errorf("host denied by policy: %s", hostname)
-	}
-	addrs, err := lookupIPAddr(ctx, hostname)
-	if err != nil {
-		return resolvedHostPlan{}, err
-	}
-	if len(addrs) == 0 {
-		return resolvedHostPlan{}, fmt.Errorf("host did not resolve")
-	}
-	approved := make([]netip.Addr, 0, len(addrs))
-	for _, addr := range addrs {
-		ip, ok := netip.AddrFromSlice(addr.IP)
-		if !ok {
-			return resolvedHostPlan{}, fmt.Errorf("host resolution failed")
-		}
-		ip = ip.Unmap()
-		if err := p.validateAddr(ip); err != nil {
-			return resolvedHostPlan{}, err
-		}
-		approved = append(approved, ip)
-	}
-	return resolvedHostPlan{hostname: hostname, addrs: approved}, nil
+	return resolved, nil
 }
 
-func (p HostPolicy) validateAddr(addr netip.Addr) error {
-	if !addr.IsValid() {
-		return fmt.Errorf("invalid host address")
-	}
-	if !p.AllowLoopback && addr.IsLoopback() {
-		return fmt.Errorf("host denied by policy: loopback")
-	}
-	if !p.AllowPrivate && (addr.IsPrivate() || addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() || addr.IsMulticast() || addr.IsUnspecified()) {
-		return fmt.Errorf("host denied by policy: private address")
-	}
-	if addr.String() == "169.254.169.254" {
-		return fmt.Errorf("host denied by policy: metadata endpoint")
+// ValidateNoSecretRefs reports whether cfg still contains unresolved secret references.
+func ValidateNoSecretRefs(cfg config.Config) error {
+	if path, ok := findSecretRef(reflect.ValueOf(cfg), "config"); ok {
+		return fmt.Errorf("unresolved secret ref at %s", path)
 	}
 	return nil
 }
 
-func hostAllowed(host string, patterns []string) bool {
-	if len(patterns) == 0 {
-		return false
-	}
-	host = strings.ToLower(strings.TrimSpace(host))
-	for _, pattern := range patterns {
-		pattern = strings.ToLower(strings.TrimSpace(pattern))
-		if pattern == "" {
-			continue
-		}
-		if pattern == host {
-			return true
-		}
-		if strings.HasPrefix(pattern, "*.") {
-			suffix := strings.TrimPrefix(pattern, "*")
-			if strings.HasSuffix(host, suffix) && len(host) > len(suffix) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func WrapHTTPClient(client *http.Client, policy HostPolicy) *http.Client {
-	if client == nil {
-		client = &http.Client{}
-	}
-	cloned := *client
-	prevCheckRedirect := cloned.CheckRedirect
-	cloned.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if err := policy.ValidateURL(req.Context(), req.URL); err != nil {
-			return err
-		}
-		if prevCheckRedirect != nil {
-			return prevCheckRedirect(req, via)
-		}
+func resolveValue(ctx context.Context, value reflect.Value, mgr *SecretManager) error {
+	if !value.IsValid() {
 		return nil
 	}
-	base := cloned.Transport
-	if base == nil {
-		base = http.DefaultTransport
-	}
-	wrappedBase := wrapTransportWithPolicy(base, policy)
-	cloned.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		plan, err := policy.resolveHost(req.Context(), req.URL.Hostname())
-		if err != nil {
-			return nil, err
+	switch value.Kind() {
+	case reflect.Pointer:
+		if value.IsNil() {
+			return nil
 		}
-		return wrappedBase.RoundTrip(req.Clone(withResolvedHostPlan(req.Context(), plan)))
-	})
-	return &cloned
-}
-
-type resolvedHostPlan struct {
-	hostname string
-	addrs    []netip.Addr
-}
-
-type resolvedHostPlanKey struct{}
-
-func withResolvedHostPlan(ctx context.Context, plan resolvedHostPlan) context.Context {
-	return context.WithValue(ctx, resolvedHostPlanKey{}, plan)
-}
-
-func resolvedHostPlanFromContext(ctx context.Context, host string) (resolvedHostPlan, bool) {
-	plan, ok := ctx.Value(resolvedHostPlanKey{}).(resolvedHostPlan)
-	if !ok {
-		return resolvedHostPlan{}, false
-	}
-	if plan.hostname != strings.Trim(strings.ToLower(strings.TrimSpace(host)), "[]") {
-		return resolvedHostPlan{}, false
-	}
-	return plan, len(plan.addrs) > 0
-}
-
-func wrapTransportWithPolicy(base http.RoundTripper, policy HostPolicy) http.RoundTripper {
-	transport, ok := base.(*http.Transport)
-	if !ok {
-		return roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-			if err := policy.ValidateURL(req.Context(), req.URL); err != nil {
-				return nil, err
+		return resolveValue(ctx, value.Elem(), mgr)
+	case reflect.Struct:
+		for i := 0; i < value.NumField(); i++ {
+			if !value.Field(i).CanSet() {
+				continue
 			}
-			return base.RoundTrip(req)
-		})
-	}
-	cloned := transport.Clone()
-	baseDial := cloned.DialContext
-	if baseDial == nil {
-		baseDial = (&net.Dialer{}).DialContext
-	}
-	cloned.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		return dialResolvedHost(ctx, network, addr, baseDial)
-	}
-	if cloned.DialTLSContext != nil {
-		baseDialTLS := cloned.DialTLSContext
-		cloned.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return dialResolvedHost(ctx, network, addr, baseDialTLS)
+			if err := resolveValue(ctx, value.Field(i), mgr); err != nil {
+				return err
+			}
 		}
+	case reflect.Map:
+		if value.IsNil() || value.Type().Key().Kind() != reflect.String {
+			return nil
+		}
+		for _, key := range value.MapKeys() {
+			elem := value.MapIndex(key)
+			if !elem.IsValid() {
+				continue
+			}
+			if value.Type().Elem().Kind() == reflect.String {
+				resolved, err := mgr.ResolveRef(ctx, elem.String())
+				if err != nil {
+					return err
+				}
+				value.SetMapIndex(key, reflect.ValueOf(resolved))
+				continue
+			}
+			clone := reflect.New(elem.Type()).Elem()
+			clone.Set(elem)
+			if err := resolveValue(ctx, clone, mgr); err != nil {
+				return err
+			}
+			value.SetMapIndex(key, clone)
+		}
+	case reflect.String:
+		resolved, err := mgr.ResolveRef(ctx, value.String())
+		if err != nil {
+			return err
+		}
+		value.SetString(resolved)
 	}
-	return cloned
+	return nil
 }
 
-func dialResolvedHost(ctx context.Context, network, addr string, dial func(context.Context, string, string) (net.Conn, error)) (net.Conn, error) {
-	host, port, err := net.SplitHostPort(addr)
+func findSecretRef(value reflect.Value, path string) (string, bool) {
+	if !value.IsValid() {
+		return "", false
+	}
+	for value.Kind() == reflect.Pointer || value.Kind() == reflect.Interface {
+		if value.IsNil() {
+			return "", false
+		}
+		value = value.Elem()
+	}
+	switch value.Kind() {
+	case reflect.Struct:
+		for i := 0; i < value.NumField(); i++ {
+			field := value.Type().Field(i)
+			name := field.Name
+			if tag := strings.TrimSpace(strings.Split(field.Tag.Get("json"), ",")[0]); tag != "" && tag != "-" {
+				name = tag
+			}
+			if foundPath, ok := findSecretRef(value.Field(i), path+"."+name); ok {
+				return foundPath, true
+			}
+		}
+	case reflect.Map:
+		for _, key := range value.MapKeys() {
+			foundPath, ok := findSecretRef(value.MapIndex(key), path+"."+fmt.Sprint(key.Interface()))
+			if ok {
+				return foundPath, true
+			}
+		}
+	case reflect.Slice, reflect.Array:
+		for i := 0; i < value.Len(); i++ {
+			if foundPath, ok := findSecretRef(value.Index(i), fmt.Sprintf("%s[%d]", path, i)); ok {
+				return foundPath, true
+			}
+		}
+	case reflect.String:
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(value.String())), secretRefPrefix) {
+			return path, true
+		}
+	}
+	return "", false
+}
+
+func encryptBlob(master, plaintext []byte) ([]byte, []byte, error) {
+	block, err := aes.NewCipher(deriveKey(master, "secrets"))
 	if err != nil {
-		host = addr
-		port = ""
+		return nil, nil, err
 	}
-	plan, ok := resolvedHostPlanFromContext(ctx, host)
-	if !ok {
-		return dial(ctx, network, addr)
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, nil, err
 	}
-	var lastErr error
-	for _, ip := range plan.addrs {
-		target := ip.String()
-		if port != "" {
-			target = net.JoinHostPort(target, port)
-		}
-		conn, err := dial(ctx, network, target)
-		if err == nil {
-			return conn, nil
-		}
-		lastErr = err
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, nil, err
 	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("host did not resolve")
-	}
-	return nil, lastErr
+	sealed := aead.Seal(nil, nonce, plaintext, nil)
+	return sealed, nonce, nil
 }
 
-type roundTripperFunc func(*http.Request) (*http.Response, error)
-
-func (fn roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
-	return fn(req)
-}
-````
-
-## File: internal/tools/cron.go
-````go
-package tools
-
-import (
-	"context"
-	"encoding/json"
-	"fmt"
-	"strings"
-	"time"
-
-	"or3-intern/internal/cron"
-)
-
-type CronTool struct {
-	Base
-	Svc *cron.Service
-}
-
-func (t *CronTool) Name() string { return "cron" }
-func (t *CronTool) Description() string {
-	return "Manage scheduled jobs: add/list/remove/run/status."
-}
-func (t *CronTool) Parameters() map[string]any {
-	return map[string]any{"type": "object", "properties": map[string]any{
-		"action": map[string]any{"type": "string", "enum": []any{"add", "list", "remove", "run", "status"}},
-		"job":    map[string]any{"type": "object", "description": "job object for add"},
-		"id":     map[string]any{"type": "string", "description": "job id for remove/run"},
-		"force":  map[string]any{"type": "boolean", "description": "force run"},
-	}, "required": []string{"action"}}
-}
-func (t *CronTool) Schema() map[string]any {
-	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
-}
-
-func (t *CronTool) Execute(ctx context.Context, params map[string]any) (string, error) {
-	if t.Svc == nil {
-		return "", fmt.Errorf("cron service not configured")
+func decryptBlob(master, ciphertext, nonce []byte) ([]byte, error) {
+	block, err := aes.NewCipher(deriveKey(master, "secrets"))
+	if err != nil {
+		return nil, err
 	}
-	act := strings.TrimSpace(fmt.Sprint(params["action"]))
-	switch act {
-	case "status":
-		s, err := t.Svc.Status()
-		if err != nil {
-			return "", err
-		}
-		b, _ := json.MarshalIndent(s, "", "  ")
-		return string(b), nil
-	case "list":
-		j, err := t.Svc.List()
-		if err != nil {
-			return "", err
-		}
-		b, _ := json.MarshalIndent(j, "", "  ")
-		return string(b), nil
-	case "remove":
-		id := strings.TrimSpace(fmt.Sprint(params["id"]))
-		ok, err := t.Svc.Remove(id)
-		if err != nil {
-			return "", err
-		}
-		return fmt.Sprintf("removed: %v", ok), nil
-	case "run":
-		id := strings.TrimSpace(fmt.Sprint(params["id"]))
-		force, _ := params["force"].(bool)
-		ok, err := t.Svc.RunNow(ctx, id, force)
-		if err != nil {
-			return "", err
-		}
-		return fmt.Sprintf("ran: %v", ok), nil
-	case "add":
-		raw, _ := params["job"].(map[string]any)
-		if raw == nil {
-			return "", fmt.Errorf("missing job")
-		}
-		b, _ := json.Marshal(raw)
-		var j cron.CronJob
-		if err := json.Unmarshal(b, &j); err != nil {
-			return "", err
-		}
-		// defaults
-		if !j.Enabled && raw["enabled"] == nil {
-			j.Enabled = true
-		}
-		if j.Payload.Kind == "" {
-			j.Payload.Kind = "agent_turn"
-		}
-		if j.Schedule.Kind == "" {
-			j.Schedule.Kind = cron.KindEvery
-			j.Schedule.EveryMS = int64((24 * time.Hour).Milliseconds())
-		}
-		if err := t.Svc.Add(j); err != nil {
-			return "", err
-		}
-		return "ok", nil
-	default:
-		return "", fmt.Errorf("unknown action")
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
 	}
+	return aead.Open(nil, nonce, ciphertext, nil)
+}
+
+func deriveKey(master []byte, label string) []byte {
+	h := hmac.New(sha256.New, master)
+	_, _ = h.Write([]byte(label))
+	sum := h.Sum(nil)
+	return sum[:32]
+}
+
+func filepathDir(path string) string {
+	return filepath.Dir(path)
 }
 ````
 
@@ -4477,121 +5208,6 @@ func sandboxPathCovered(path string, cwd string, writable []string) bool {
 }
 ````
 
-## File: internal/tools/skill.go
-````go
-package tools
-
-import (
-	"context"
-	"fmt"
-	"strings"
-
-	"or3-intern/internal/skills"
-)
-
-type ReadSkill struct {
-	Base
-	Inventory *skills.Inventory
-	MaxBytes  int
-}
-
-func (t *ReadSkill) Name() string { return "read_skill" }
-func (t *ReadSkill) Description() string {
-	return "Read the full body of a skill by name (for ClawHub-compatible SKILL.md usage)."
-}
-func (t *ReadSkill) Parameters() map[string]any {
-	return map[string]any{"type": "object", "properties": map[string]any{
-		"name":     map[string]any{"type": "string", "description": "Skill name from inventory"},
-		"maxBytes": map[string]any{"type": "integer", "description": "Optional max bytes"},
-	}, "required": []string{"name"}}
-}
-func (t *ReadSkill) Schema() map[string]any {
-	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
-}
-
-func (t *ReadSkill) Execute(ctx context.Context, params map[string]any) (string, error) {
-	_ = ctx
-	if t.Inventory == nil {
-		return "", fmt.Errorf("skills inventory not configured")
-	}
-	name := strings.TrimSpace(fmt.Sprint(params["name"]))
-	if name == "" {
-		return "", fmt.Errorf("missing name")
-	}
-	s, ok := t.Inventory.Get(name)
-	if !ok {
-		return "", fmt.Errorf("skill not found: %s", name)
-	}
-	maxBytes := t.MaxBytes
-	if maxBytes <= 0 {
-		maxBytes = 200000
-	}
-	if v, ok := params["maxBytes"].(float64); ok && int(v) > 0 {
-		maxBytes = int(v)
-	}
-	body, err := skills.LoadBody(s.Path, maxBytes)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("# Skill: %s (%s, %s)\n\n%s", s.Name, s.Source, s.Dir, body), nil
-}
-````
-
-## File: internal/triggers/triggers.go
-````go
-package triggers
-
-import (
-	"encoding/json"
-	"strings"
-)
-
-// TriggerMeta carries metadata from trigger events.
-type TriggerMeta struct {
-	Source  string            // "webhook" or "filewatch"
-	Path    string            // for file-change events
-	Route   string            // for webhook events
-	Headers map[string]string // for webhook events (limited subset)
-}
-
-const MetaKeyStructuredEvent = "structured_event"
-
-type StructuredEvent struct {
-	Type    string         `json:"type"`
-	Source  string         `json:"source"`
-	Trusted bool           `json:"trusted"`
-	Details map[string]any `json:"details,omitempty"`
-}
-
-func StructuredEventMap(event StructuredEvent) map[string]any {
-	details := map[string]any{}
-	for key, value := range event.Details {
-		trimmed := strings.TrimSpace(key)
-		if trimmed == "" {
-			continue
-		}
-		details[trimmed] = value
-	}
-	return map[string]any{
-		"type":    strings.TrimSpace(event.Type),
-		"source":  strings.TrimSpace(event.Source),
-		"trusted": event.Trusted,
-		"details": details,
-	}
-}
-
-func StructuredEventJSON(raw any) string {
-	if raw == nil {
-		return ""
-	}
-	b, err := json.MarshalIndent(raw, "", "  ")
-	if err != nil {
-		return ""
-	}
-	return string(b)
-}
-````
-
 ## File: .env.example
 ````
 # Example environment for or3-intern
@@ -4647,84 +5263,6 @@ OR3_WHATSAPP_BRIDGE_TOKEN=
 .or3/
 /or3-intern
 or3-intern.exe
-````
-
-## File: cmd/or3-intern/migrate.go
-````go
-package main
-
-import (
-	"bufio"
-	"context"
-	"encoding/json"
-	"fmt"
-	"log"
-	"os"
-
-	"or3-intern/internal/db"
-)
-
-func migrateJSONL(ctx context.Context, d *db.DB, path, sessionKey string) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 1024), 4<<20)
-	lineNo := 0
-	for sc.Scan() {
-		lineNo++
-		line := sc.Text()
-		if len(line) == 0 {
-			continue
-		}
-		var obj map[string]any
-		if err := json.Unmarshal([]byte(line), &obj); err != nil {
-			// tolerate non-json line
-			if _, err := d.AppendMessage(ctx, sessionKey, "user", line, map[string]any{"migrated_line": lineNo}); err != nil {
-				return fmt.Errorf("line %d: %w", lineNo, err)
-			}
-			continue
-		}
-		// detect metadata
-		if lineNo == 1 {
-			// store as session metadata_json if it looks like metadata
-			if obj["role"] == nil && obj["content"] == nil {
-				b, _ := json.Marshal(obj)
-				if err := d.EnsureSession(ctx, sessionKey); err != nil {
-					log.Printf("ensure session failed during migration: %v", err)
-				}
-				if _, err := d.SQL.ExecContext(ctx, `UPDATE sessions SET metadata_json=? WHERE key=?`, string(b), sessionKey); err != nil {
-					log.Printf("session metadata update failed during migration: %v", err)
-				}
-				continue
-			}
-		}
-		role := toStr(obj["role"])
-		if role == "" {
-			role = "user"
-		}
-		content := toStr(obj["content"])
-		payload := obj
-		delete(payload, "role")
-		delete(payload, "content")
-		_, err := d.AppendMessage(ctx, sessionKey, role, content, payload)
-		if err != nil {
-			return fmt.Errorf("line %d: %w", lineNo, err)
-		}
-	}
-	return sc.Err()
-}
-
-func toStr(v any) string {
-	switch x := v.(type) {
-	case string:
-		return x
-	default:
-		return fmt.Sprint(v)
-	}
-}
 ````
 
 ## File: docs/security-and-hardening.md
@@ -5258,2355 +5796,389 @@ func newServiceJobID() string {
 }
 ````
 
-## File: internal/channels/cli/cli.go
+## File: internal/artifacts/store.go
+````go
+// Package artifacts persists binary attachments referenced from conversations.
+package artifacts
+
+import (
+	"context"
+	"crypto/rand"
+	"database/sql"
+	"encoding/hex"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"or3-intern/internal/db"
+)
+
+// Store saves artifact bytes on disk and tracks them in the database.
+type Store struct {
+	Dir string
+	DB  *db.DB
+}
+
+// Save writes data to disk and returns the stored artifact ID.
+func (s *Store) Save(ctx context.Context, sessionKey, mime string, data []byte) (string, error) {
+	if s.Dir == "" {
+		return "", fmt.Errorf("artifacts dir not set")
+	}
+	if s.DB == nil {
+		return "", fmt.Errorf("artifacts db not set")
+	}
+	if err := s.DB.EnsureSession(ctx, strings.TrimSpace(sessionKey)); err != nil {
+		return "", err
+	}
+	_ = os.MkdirAll(s.Dir, 0o700)
+	id := randID()
+	path := filepath.Join(s.Dir, id)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return "", err
+	}
+	_, err := s.DB.SQL.ExecContext(ctx,
+		`INSERT INTO artifacts(id, session_key, mime, path, size_bytes, created_at) VALUES(?,?,?,?,?,?)`,
+		id, sessionKey, mime, path, len(data), time.Now().UnixMilli())
+	if err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	return id, nil
+}
+
+// SaveNamed stores data and returns an attachment record with a normalized filename.
+func (s *Store) SaveNamed(ctx context.Context, sessionKey, filename, mimeType string, data []byte) (Attachment, error) {
+	filename = NormalizeFilename(filename, mimeType)
+	id, err := s.Save(ctx, sessionKey, mimeType, data)
+	if err != nil {
+		return Attachment{}, err
+	}
+	return Attachment{
+		ArtifactID: id,
+		Filename:   filename,
+		Mime:       strings.TrimSpace(mimeType),
+		Kind:       DetectKind(filename, mimeType),
+		SizeBytes:  int64(len(data)),
+	}, nil
+}
+
+// Lookup returns the stored artifact metadata for artifactID.
+func (s *Store) Lookup(ctx context.Context, artifactID string) (StoredArtifact, error) {
+	if s.DB == nil {
+		return StoredArtifact{}, fmt.Errorf("artifacts db not set")
+	}
+	row := s.DB.SQL.QueryRowContext(ctx,
+		`SELECT id, session_key, mime, path, size_bytes FROM artifacts WHERE id=?`,
+		strings.TrimSpace(artifactID),
+	)
+	var stored StoredArtifact
+	if err := row.Scan(&stored.ID, &stored.SessionKey, &stored.Mime, &stored.Path, &stored.SizeBytes); err != nil {
+		if err == sql.ErrNoRows {
+			return StoredArtifact{}, fmt.Errorf("artifact not found: %s", artifactID)
+		}
+		return StoredArtifact{}, err
+	}
+	return stored, nil
+}
+
+func randID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b[:])
+}
+````
+
+## File: internal/bus/bus.go
+````go
+// Package bus provides a small in-memory event bus for cross-service signaling.
+package bus
+
+import (
+	"context"
+)
+
+// EventType classifies messages sent through a Bus.
+type EventType string
+
+const (
+	// EventUserMessage represents a user-authored message.
+	EventUserMessage EventType = "user_message"
+	// EventCron represents a scheduled cron job turn.
+	EventCron EventType = "cron"
+	// EventHeartbeat represents a periodic heartbeat turn.
+	EventHeartbeat EventType = "heartbeat"
+	// EventSystem represents an internal system event.
+	EventSystem EventType = "system"
+	// EventWebhook represents an inbound webhook trigger.
+	EventWebhook EventType = "webhook"
+	// EventFileChange represents a filesystem-triggered event.
+	EventFileChange EventType = "file_change"
+)
+
+// Event is a single message published on the bus.
+type Event struct {
+	Type       EventType
+	SessionKey string
+	Channel    string
+	From       string
+	Message    string
+	Meta       map[string]any
+}
+
+// Handler consumes a published event.
+type Handler func(ctx context.Context, ev Event) error
+
+// Bus is a buffered single-channel event queue.
+type Bus struct {
+	ch chan Event
+}
+
+// New constructs a Bus with buffer slots, defaulting to 128 when buffer <= 0.
+func New(buffer int) *Bus {
+	if buffer <= 0 {
+		buffer = 128
+	}
+	return &Bus{ch: make(chan Event, buffer)}
+}
+
+// Publish enqueues ev without blocking and reports whether it was accepted.
+func (b *Bus) Publish(ev Event) bool {
+	select {
+	case b.ch <- ev:
+		return true
+	default:
+		return false
+	}
+}
+
+// Channel returns the receive-only event stream.
+func (b *Bus) Channel() <-chan Event { return b.ch }
+````
+
+## File: internal/channels/cli/service.go
 ````go
 package cli
 
 import (
-	"bufio"
 	"context"
 	"fmt"
-	"os"
-	"strings"
 
 	"or3-intern/internal/bus"
 )
 
-// Channel reads user input from stdin and publishes messages to the bus.
-type Channel struct {
-	Bus        *bus.Bus
-	SessionKey string
-	Spinner    *Spinner // shared with Deliverer so it can be stopped on output
+// Service adapts the CLI deliverer to the shared channel manager interface.
+type Service struct {
+	Deliverer Deliverer
 }
 
-func (c *Channel) Run(ctx context.Context) error {
-	if c.SessionKey == "" {
-		c.SessionKey = "default"
-	}
-	in := bufio.NewScanner(os.Stdin)
-	fmt.Print(Banner())
-	ShowPrompt() // initial prompt
-	for {
-		// Prompt is printed either above (first iteration) or by the
-		// Deliverer after finishing a response. We block on Scan here.
-		if !in.Scan() {
-			return nil
-		}
-		line := strings.TrimSpace(in.Text())
-		if line == "" {
-			fmt.Print(Prompt())
-			continue
-		}
-		if line == "/exit" {
-			if isTTY {
-				fmt.Println(style(ansiDim+ansiGray, "  Goodbye 👋"))
-			}
-			return nil
-		}
+// Name returns the registered channel name.
+func (s Service) Name() string { return "cli" }
 
-		ok := c.Bus.Publish(bus.Event{
-			Type:       bus.EventUserMessage,
-			SessionKey: c.SessionKey,
-			Channel:    "cli",
-			From:       "local",
-			Message:    line,
-		})
-		if !ok {
-			fmt.Println(style(ansiYellow, "  ⚠ queue full — message dropped"))
-			fmt.Print(Prompt())
-		} else {
-			// Restyle the raw prompt line into a labeled user message block.
-			RewriteUserMessage(line)
-			if c.Spinner != nil {
-				c.Spinner.Start("thinking…")
-			}
-			// Don't print the prompt — the Deliverer will show it
-			// after the response is fully rendered.
-		}
-	}
-}
-````
-
-## File: internal/channels/email/email.go
-````go
-package email
-
-import (
-	"bytes"
-	"context"
-	"crypto/tls"
-	"encoding/base64"
-	"encoding/json"
-	"fmt"
-	"html"
-	"io"
-	"log"
-	"mime"
-	"mime/multipart"
-	"mime/quotedprintable"
-	"net"
-	"net/mail"
-	"net/smtp"
-	"net/textproto"
-	"sort"
-	"strings"
-	"sync"
-	"time"
-
-	"github.com/emersion/go-imap/v2"
-	"github.com/emersion/go-imap/v2/imapclient"
-	xhtml "golang.org/x/net/html"
-
-	"or3-intern/internal/bus"
-	"or3-intern/internal/config"
-	"or3-intern/internal/db"
-)
-
-const (
-	defaultPollInterval = 30 * time.Second
-	defaultNetTimeout   = 30 * time.Second
-	maxFetchBatch       = 20
-	maxProcessedKeys    = 4096
-	dedupeMessageLimit  = 200
-	lookupMessageLimit  = 50
-)
-
-type InboundMessage struct {
-	UID       string
-	From      string
-	Subject   string
-	MessageID string
-	Date      time.Time
-	Body      string
-}
-
-type OutboundMessage struct {
-	To        string
-	From      string
-	Subject   string
-	Text      string
-	InReplyTo string
-}
-
-type threadState struct {
-	Subject   string
-	MessageID string
-}
-
-type Channel struct {
-	Config config.EmailChannelConfig
-	DB     *db.DB
-
-	FetchMessages func(ctx context.Context) ([]InboundMessage, error)
-	SendMail      func(ctx context.Context, outbound OutboundMessage) error
-
-	mu             sync.Mutex
-	running        bool
-	cancel         context.CancelFunc
-	threadBySender map[string]threadState
-	processedKeys  map[string]struct{}
-	processedOrder []string
-}
-
-func (c *Channel) Name() string { return "email" }
-
-func (c *Channel) Start(ctx context.Context, eventBus *bus.Bus) error {
-	if err := c.validate(); err != nil {
-		return err
-	}
-	if eventBus == nil {
-		return fmt.Errorf("event bus not configured")
-	}
-	if !c.Config.ConsentGranted {
-		log.Printf("email channel disabled: consentGranted is false")
-		return nil
-	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.running {
-		return nil
-	}
-	if c.threadBySender == nil {
-		c.threadBySender = map[string]threadState{}
-	}
-	if c.processedKeys == nil {
-		c.processedKeys = map[string]struct{}{}
-	}
-	childCtx, cancel := context.WithCancel(ctx)
-	c.cancel = cancel
-	c.running = true
-	go c.pollLoop(childCtx, eventBus)
-	return nil
-}
-
-func (c *Channel) Stop(ctx context.Context) error {
+// Start is a no-op because the CLI service has no background lifecycle.
+func (s Service) Start(ctx context.Context, eventBus *bus.Bus) error {
 	_ = ctx
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.cancel != nil {
-		c.cancel()
-	}
-	c.cancel = nil
-	c.running = false
+	_ = eventBus
 	return nil
 }
 
-func (c *Channel) Deliver(ctx context.Context, to, text string, meta map[string]any) error {
-	recipient := normalizeAddress(to)
-	if recipient == "" {
-		recipient = normalizeAddress(c.Config.DefaultTo)
-	}
-	if recipient == "" {
-		return fmt.Errorf("email recipient address required")
-	}
-
-	thread, _, err := c.lookupThread(ctx, recipient)
-	if err != nil {
-		return err
-	}
-
-	subject := c.subjectForDelivery(meta, thread.Subject)
-	message := OutboundMessage{
-		To:        recipient,
-		From:      c.fromAddress(),
-		Subject:   subject,
-		Text:      text,
-		InReplyTo: thread.MessageID,
-	}
-	return c.sendMail(ctx, message)
-}
-
-func (c *Channel) pollLoop(ctx context.Context, eventBus *bus.Bus) {
-	interval := time.Duration(c.Config.PollIntervalSeconds) * time.Second
-	if interval <= 0 {
-		interval = defaultPollInterval
-	}
-	if interval < 5*time.Second {
-		interval = 5 * time.Second
-	}
-
-	c.pollOnce(ctx, eventBus)
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			c.pollOnce(ctx, eventBus)
-		}
-	}
-}
-
-func (c *Channel) pollOnce(ctx context.Context, eventBus *bus.Bus) {
-	messages, err := c.fetchMessages(ctx)
-	if err != nil {
-		log.Printf("email polling error: %v", err)
-		return
-	}
-	for _, inbound := range messages {
-		sender := normalizeAddress(inbound.From)
-		if sender == "" {
-			continue
-		}
-		if c.alreadyProcessed(inbound.UID, inbound.MessageID) {
-			continue
-		}
-		if !c.allowedSender(sender) {
-			c.rememberProcessed(inbound.UID, inbound.MessageID)
-			log.Printf("email sender ignored: %s", sender)
-			continue
-		}
-		persisted, err := c.alreadyProcessedPersisted(ctx, sender, inbound.UID, inbound.MessageID)
-		if err != nil {
-			log.Printf("email dedupe lookup failed for %s: %v", sender, err)
-		} else if persisted {
-			c.rememberProcessed(inbound.UID, inbound.MessageID)
-			continue
-		}
-		c.rememberProcessed(inbound.UID, inbound.MessageID)
-		c.rememberThread(sender, inbound.Subject, inbound.MessageID)
-		meta := map[string]any{
-			"sender_email":       sender,
-			"subject":            strings.TrimSpace(inbound.Subject),
-			"message_id":         strings.TrimSpace(inbound.MessageID),
-			"uid":                strings.TrimSpace(inbound.UID),
-			"auto_reply_enabled": c.Config.AutoReplyEnabled,
-		}
-		if !inbound.Date.IsZero() {
-			meta["date"] = inbound.Date.Format(time.RFC3339)
-		}
-		ok := eventBus.Publish(bus.Event{
-			Type:       bus.EventUserMessage,
-			SessionKey: "email:" + sender,
-			Channel:    "email",
-			From:       sender,
-			Message:    formatInboundMessage(sender, inbound.Subject, inbound.Date, inbound.Body),
-			Meta:       meta,
-		})
-		if !ok {
-			log.Printf("email event dropped: queue full for %s", sender)
-		}
-	}
-}
-
-func (c *Channel) validate() error {
-	if !c.Config.Enabled {
-		return nil
-	}
-	if !c.Config.OpenAccess && !hasNonEmpty(c.Config.AllowedSenders) {
-		return fmt.Errorf("email enabled: set allowedSenders or openAccess=true")
-	}
-	if strings.TrimSpace(c.Config.IMAPHost) == "" || strings.TrimSpace(c.Config.IMAPUsername) == "" || strings.TrimSpace(c.Config.IMAPPassword) == "" {
-		return fmt.Errorf("email requires IMAP host, username, and password")
-	}
-	if strings.TrimSpace(c.Config.SMTPHost) == "" || strings.TrimSpace(c.Config.SMTPUsername) == "" || strings.TrimSpace(c.Config.SMTPPassword) == "" {
-		return fmt.Errorf("email requires SMTP host, username, and password")
-	}
+// Stop is a no-op because the CLI service has no background lifecycle.
+func (s Service) Stop(ctx context.Context) error {
+	_ = ctx
 	return nil
 }
 
-func (c *Channel) fetchMessages(ctx context.Context) ([]InboundMessage, error) {
-	if c.FetchMessages != nil {
-		return c.FetchMessages(ctx)
-	}
-	return c.fetchViaIMAP(ctx)
-}
-
-func (c *Channel) sendMail(ctx context.Context, outbound OutboundMessage) error {
-	if c.SendMail != nil {
-		return c.SendMail(ctx, outbound)
-	}
-	return c.sendViaSMTP(ctx, outbound)
-}
-
-func (c *Channel) fetchViaIMAP(ctx context.Context) ([]InboundMessage, error) {
-	client, stopWatch, err := c.dialIMAP(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer stopWatch()
-	defer client.Close()
-	if err := client.Login(c.Config.IMAPUsername, c.Config.IMAPPassword).Wait(); err != nil {
-		return nil, fmt.Errorf("imap login: %w", err)
-	}
-	defer func() {
-		if err := client.Logout().Wait(); err != nil {
-			log.Printf("email logout error: %v", err)
-		}
-	}()
-
-	mailbox := strings.TrimSpace(c.Config.IMAPMailbox)
-	if mailbox == "" {
-		mailbox = "INBOX"
-	}
-	if _, err := client.Select(mailbox, nil).Wait(); err != nil {
-		return nil, fmt.Errorf("imap select %s: %w", mailbox, err)
-	}
-
-	criteria := &imap.SearchCriteria{NotFlag: []imap.Flag{imap.FlagSeen}}
-	searchData, err := client.UIDSearch(criteria, nil).Wait()
-	if err != nil {
-		return nil, fmt.Errorf("imap search: %w", err)
-	}
-	uids := searchData.AllUIDs()
-	if len(uids) == 0 {
-		return nil, nil
-	}
-	sort.Slice(uids, func(i, j int) bool { return uids[i] < uids[j] })
-	if len(uids) > maxFetchBatch {
-		uids = uids[len(uids)-maxFetchBatch:]
-	}
-
-	var uidSet imap.UIDSet
-	uidSet.AddNum(uids...)
-	bodySection := &imap.FetchItemBodySection{Peek: true}
-	messages, err := client.Fetch(uidSet, &imap.FetchOptions{
-		UID:         true,
-		Envelope:    true,
-		BodySection: []*imap.FetchItemBodySection{bodySection},
-	}).Collect()
-	if err != nil {
-		return nil, fmt.Errorf("imap fetch: %w", err)
-	}
-	sort.Slice(messages, func(i, j int) bool { return messages[i].UID < messages[j].UID })
-
-	out := make([]InboundMessage, 0, len(messages))
-	markedUIDs := make([]imap.UID, 0, len(messages))
-	for _, message := range messages {
-		raw := message.FindBodySection(bodySection)
-		if len(raw) == 0 {
-			continue
-		}
-		parsed, err := parseRawEmail(raw, c.Config.MaxBodyChars)
-		if err != nil {
-			log.Printf("email parse error for uid=%d: %v", message.UID, err)
-			continue
-		}
-		parsed.UID = fmt.Sprintf("%d", message.UID)
-		out = append(out, parsed)
-		if c.Config.MarkSeen {
-			markedUIDs = append(markedUIDs, message.UID)
+// Deliver forwards a CLI response while rejecting unsupported attachments.
+func (s Service) Deliver(ctx context.Context, to, text string, meta map[string]any) error {
+	if len(meta) > 0 {
+		if raw, ok := meta["media_paths"].([]string); ok && len(raw) > 0 {
+			return fmt.Errorf("cli channel does not support media attachments")
 		}
 	}
-	if c.Config.MarkSeen && len(markedUIDs) > 0 {
-		var seenSet imap.UIDSet
-		seenSet.AddNum(markedUIDs...)
-		storeFlags := &imap.StoreFlags{Op: imap.StoreFlagsAdd, Silent: true, Flags: []imap.Flag{imap.FlagSeen}}
-		if err := client.Store(seenSet, storeFlags, nil).Close(); err != nil {
-			log.Printf("email mark seen error: %v", err)
-		}
-	}
-	return out, nil
-}
-
-func (c *Channel) dialIMAP(ctx context.Context) (*imapclient.Client, func(), error) {
-	address := net.JoinHostPort(strings.TrimSpace(c.Config.IMAPHost), fmt.Sprintf("%d", c.Config.IMAPPort))
-	dialer := &net.Dialer{Timeout: defaultNetTimeout}
-	var conn net.Conn
-	var err error
-	if c.Config.IMAPUseSSL {
-		baseConn, dialErr := dialer.DialContext(ctx, "tcp", address)
-		if dialErr != nil {
-			return nil, func() {}, dialErr
-		}
-		tlsConn := tls.Client(baseConn, &tls.Config{ServerName: strings.TrimSpace(c.Config.IMAPHost)})
-		if deadline, ok := connectionDeadline(ctx); ok {
-			_ = tlsConn.SetDeadline(deadline)
-		}
-		if err := tlsConn.HandshakeContext(ctx); err != nil {
-			_ = baseConn.Close()
-			return nil, func() {}, fmt.Errorf("imap tls handshake: %w", err)
-		}
-		conn = tlsConn
-	} else {
-		conn, err = dialer.DialContext(ctx, "tcp", address)
-		if err != nil {
-			return nil, func() {}, err
-		}
-	}
-	if deadline, ok := connectionDeadline(ctx); ok {
-		_ = conn.SetDeadline(deadline)
-	}
-	stopWatch := watchConnContext(ctx, conn)
-	client := imapclient.New(conn, nil)
-	if err := client.WaitGreeting(); err != nil {
-		stopWatch()
-		_ = client.Close()
-		return nil, func() {}, fmt.Errorf("imap greeting: %w", err)
-	}
-	return client, stopWatch, nil
-}
-
-func (c *Channel) sendViaSMTP(ctx context.Context, outbound OutboundMessage) error {
-	if err := c.validateSMTPAuthTransport(); err != nil {
-		return err
-	}
-	messageBytes, err := buildOutboundMessage(outbound)
-	if err != nil {
-		return err
-	}
-	address := net.JoinHostPort(strings.TrimSpace(c.Config.SMTPHost), fmt.Sprintf("%d", c.Config.SMTPPort))
-	dialer := &net.Dialer{Timeout: 30 * time.Second}
-
-	var conn net.Conn
-	if c.Config.SMTPUseSSL {
-		conn, err = tls.DialWithDialer(dialer, "tcp", address, &tls.Config{ServerName: strings.TrimSpace(c.Config.SMTPHost)})
-	} else {
-		conn, err = dialer.DialContext(ctx, "tcp", address)
-	}
-	if err != nil {
-		return fmt.Errorf("smtp dial: %w", err)
-	}
-	defer conn.Close()
-
-	client, err := smtp.NewClient(conn, strings.TrimSpace(c.Config.SMTPHost))
-	if err != nil {
-		return fmt.Errorf("smtp client: %w", err)
-	}
-	defer client.Close()
-
-	if c.Config.SMTPUseTLS && !c.Config.SMTPUseSSL {
-		if err := client.StartTLS(&tls.Config{ServerName: strings.TrimSpace(c.Config.SMTPHost)}); err != nil {
-			return fmt.Errorf("smtp starttls: %w", err)
-		}
-	}
-	if strings.TrimSpace(c.Config.SMTPUsername) != "" {
-		auth := smtp.PlainAuth("", c.Config.SMTPUsername, c.Config.SMTPPassword, strings.TrimSpace(c.Config.SMTPHost))
-		if err := client.Auth(auth); err != nil {
-			return fmt.Errorf("smtp auth: %w", err)
-		}
-	}
-	if err := client.Mail(outbound.From); err != nil {
-		return fmt.Errorf("smtp mail from: %w", err)
-	}
-	if err := client.Rcpt(outbound.To); err != nil {
-		return fmt.Errorf("smtp rcpt to: %w", err)
-	}
-	writer, err := client.Data()
-	if err != nil {
-		return fmt.Errorf("smtp data: %w", err)
-	}
-	if _, err := writer.Write(messageBytes); err != nil {
-		_ = writer.Close()
-		return fmt.Errorf("smtp write: %w", err)
-	}
-	if err := writer.Close(); err != nil {
-		return fmt.Errorf("smtp finalize: %w", err)
-	}
-	if err := client.Quit(); err != nil {
-		return fmt.Errorf("smtp quit: %w", err)
-	}
-	return nil
-}
-
-func buildOutboundMessage(outbound OutboundMessage) ([]byte, error) {
-	from := strings.TrimSpace(outbound.From)
-	to := normalizeAddress(outbound.To)
-	if from == "" || to == "" {
-		return nil, fmt.Errorf("email from and to addresses are required")
-	}
-	subject := strings.TrimSpace(outbound.Subject)
-	if subject == "" {
-		subject = "or3-intern reply"
-	}
-	body := strings.ReplaceAll(outbound.Text, "\r\n", "\n")
-	body = strings.ReplaceAll(body, "\r", "\n")
-
-	var buf bytes.Buffer
-	headers := []string{
-		"From: " + from,
-		"To: " + to,
-		"Subject: " + mime.QEncoding.Encode("utf-8", subject),
-		"Date: " + time.Now().Format(time.RFC1123Z),
-		fmt.Sprintf("Message-ID: <%d.%s>", time.Now().UnixNano(), strings.ReplaceAll(strings.SplitN(from, "@", 2)[0], " ", "-")),
-		"MIME-Version: 1.0",
-		"Content-Type: text/plain; charset=UTF-8",
-		"Content-Transfer-Encoding: quoted-printable",
-	}
-	if strings.TrimSpace(outbound.InReplyTo) != "" {
-		headers = append(headers, "In-Reply-To: "+strings.TrimSpace(outbound.InReplyTo))
-		headers = append(headers, "References: "+strings.TrimSpace(outbound.InReplyTo))
-	}
-	for _, headerLine := range headers {
-		buf.WriteString(headerLine)
-		buf.WriteString("\r\n")
-	}
-	buf.WriteString("\r\n")
-	quoted := quotedprintable.NewWriter(&buf)
-	if _, err := quoted.Write([]byte(body)); err != nil {
-		return nil, err
-	}
-	if err := quoted.Close(); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
-func parseRawEmail(raw []byte, maxBodyChars int) (InboundMessage, error) {
-	message, err := mail.ReadMessage(bytes.NewReader(raw))
-	if err != nil {
-		return InboundMessage{}, err
-	}
-	parsed := InboundMessage{
-		From:      normalizeAddress(message.Header.Get("From")),
-		Subject:   decodeHeaderValue(message.Header.Get("Subject")),
-		MessageID: strings.TrimSpace(message.Header.Get("Message-ID")),
-	}
-	if dateValue := strings.TrimSpace(message.Header.Get("Date")); dateValue != "" {
-		if parsedDate, err := mail.ParseDate(dateValue); err == nil {
-			parsed.Date = parsedDate
-		}
-	}
-	parsed.Body = extractBodyText(textproto.MIMEHeader(message.Header), message.Body, maxBodyChars)
-	return parsed, nil
-}
-
-func extractBodyText(header textproto.MIMEHeader, body io.Reader, maxBodyChars int) string {
-	plain, htmlBodies := extractEntityBodies(header, body, maxBodyChars)
-	if len(plain) > 0 {
-		return truncateText(strings.Join(plain, "\n\n"), maxBodyChars)
-	}
-	if len(htmlBodies) > 0 {
-		return truncateText(strings.Join(htmlBodies, "\n\n"), maxBodyChars)
-	}
-	return ""
-}
-
-func extractEntityBodies(header textproto.MIMEHeader, body io.Reader, maxBodyChars int) ([]string, []string) {
-	mediaType, params, err := mime.ParseMediaType(header.Get("Content-Type"))
-	if err != nil || mediaType == "" {
-		mediaType = "text/plain"
-	}
-	disposition, _, _ := mime.ParseMediaType(header.Get("Content-Disposition"))
-	if strings.EqualFold(disposition, "attachment") {
-		return nil, nil
-	}
-
-	if strings.HasPrefix(strings.ToLower(mediaType), "multipart/") {
-		boundary := params["boundary"]
-		if boundary == "" {
-			return nil, nil
-		}
-		reader := multipart.NewReader(decodeTransferEncoding(body, header.Get("Content-Transfer-Encoding")), boundary)
-		plainParts := []string{}
-		htmlParts := []string{}
-		for {
-			part, err := reader.NextPart()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				break
-			}
-			childPlain, childHTML := extractEntityBodies(part.Header, part, maxBodyChars)
-			plainParts = append(plainParts, childPlain...)
-			htmlParts = append(htmlParts, childHTML...)
-		}
-		return plainParts, htmlParts
-	}
-
-	decodedBody, err := io.ReadAll(io.LimitReader(decodeTransferEncoding(body, header.Get("Content-Transfer-Encoding")), int64(maxReadBytes(maxBodyChars))))
-	if err != nil {
-		return nil, nil
-	}
-	text := strings.TrimSpace(string(decodedBody))
-	if text == "" {
-		return nil, nil
-	}
-	switch strings.ToLower(mediaType) {
-	case "text/plain":
-		return []string{normalizeText(text)}, nil
-	case "text/html":
-		return nil, []string{normalizeText(htmlToText(text))}
-	default:
-		return nil, nil
-	}
-}
-
-func decodeTransferEncoding(body io.Reader, encoding string) io.Reader {
-	switch strings.ToLower(strings.TrimSpace(encoding)) {
-	case "base64":
-		return base64.NewDecoder(base64.StdEncoding, body)
-	case "quoted-printable":
-		return quotedprintable.NewReader(body)
-	default:
-		return body
-	}
-}
-
-func maxReadBytes(maxBodyChars int) int {
-	if maxBodyChars <= 0 {
-		return 8192
-	}
-	return maxBodyChars*4 + 1024
-}
-
-func htmlToText(input string) string {
-	tokenizer := xhtml.NewTokenizer(strings.NewReader(input))
-	segments := make([]string, 0, 16)
-	appendText := func(text string) {
-		text = strings.Join(strings.Fields(html.UnescapeString(text)), " ")
-		if text == "" {
-			return
-		}
-		if len(segments) > 0 {
-			last := segments[len(segments)-1]
-			if !strings.HasSuffix(last, "\n") && last != " " {
-				segments = append(segments, " ")
-			}
-		}
-		segments = append(segments, text)
-	}
-	appendBreak := func(double bool) {
-		if len(segments) == 0 {
-			return
-		}
-		want := "\n"
-		if double {
-			want = "\n\n"
-		}
-		last := segments[len(segments)-1]
-		if strings.HasSuffix(last, "\n\n") || (!double && strings.HasSuffix(last, "\n")) {
-			return
-		}
-		segments = append(segments, want)
-	}
-	for {
-		tokenType := tokenizer.Next()
-		switch tokenType {
-		case xhtml.ErrorToken:
-			return html.UnescapeString(strings.Join(segments, ""))
-		case xhtml.TextToken:
-			appendText(string(tokenizer.Text()))
-		case xhtml.StartTagToken, xhtml.EndTagToken, xhtml.SelfClosingTagToken:
-			name, _ := tokenizer.TagName()
-			switch strings.ToLower(string(name)) {
-			case "br":
-				appendBreak(false)
-			case "p", "div", "section", "article", "header", "footer", "aside", "li", "tr",
-				"h1", "h2", "h3", "h4", "h5", "h6":
-				appendBreak(true)
-			}
-		}
-	}
-}
-
-func normalizeText(input string) string {
-	text := strings.ReplaceAll(input, "\r\n", "\n")
-	text = strings.ReplaceAll(text, "\r", "\n")
-	lines := strings.Split(text, "\n")
-	cleaned := make([]string, 0, len(lines))
-	blankCount := 0
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			blankCount++
-			if blankCount > 1 {
-				continue
-			}
-			cleaned = append(cleaned, "")
-			continue
-		}
-		blankCount = 0
-		cleaned = append(cleaned, trimmed)
-	}
-	return strings.TrimSpace(strings.Join(cleaned, "\n"))
-}
-
-func truncateText(text string, maxBodyChars int) string {
-	text = strings.TrimSpace(text)
-	if maxBodyChars > 0 && len(text) > maxBodyChars {
-		return strings.TrimSpace(text[:maxBodyChars]) + "…"
-	}
-	return text
-}
-
-func formatInboundMessage(sender, subject string, sentAt time.Time, body string) string {
-	lines := []string{"From: " + sender}
-	if strings.TrimSpace(subject) != "" {
-		lines = append(lines, "Subject: "+strings.TrimSpace(subject))
-	}
-	if !sentAt.IsZero() {
-		lines = append(lines, "Date: "+sentAt.Format(time.RFC1123Z))
-	}
-	if strings.TrimSpace(body) != "" {
-		lines = append(lines, "", strings.TrimSpace(body))
-	}
-	return strings.TrimSpace(strings.Join(lines, "\n"))
-}
-
-func (c *Channel) allowedSender(sender string) bool {
-	if c.Config.OpenAccess {
-		return true
-	}
-	for _, allowed := range c.Config.AllowedSenders {
-		if normalizeAddress(allowed) == sender {
-			return true
-		}
-	}
-	return false
-}
-
-func normalizeAddress(value string) string {
-	parsed, err := mail.ParseAddress(strings.TrimSpace(value))
-	if err == nil {
-		return strings.ToLower(strings.TrimSpace(parsed.Address))
-	}
-	if strings.Contains(value, "<") && strings.Contains(value, ">") {
-		start := strings.LastIndex(value, "<")
-		end := strings.LastIndex(value, ">")
-		if start >= 0 && end > start {
-			value = value[start+1 : end]
-		}
-	}
-	return strings.ToLower(strings.TrimSpace(value))
-}
-
-func decodeHeaderValue(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return ""
-	}
-	decoder := new(mime.WordDecoder)
-	decoded, err := decoder.DecodeHeader(value)
-	if err != nil {
-		return value
-	}
-	return strings.TrimSpace(decoded)
-}
-
-func (c *Channel) rememberProcessed(uid, messageID string) {
-	keys := []string{}
-	if strings.TrimSpace(uid) != "" {
-		keys = append(keys, "uid:"+strings.TrimSpace(uid))
-	}
-	if strings.TrimSpace(messageID) != "" {
-		keys = append(keys, "msgid:"+strings.TrimSpace(messageID))
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.processedKeys == nil {
-		c.processedKeys = map[string]struct{}{}
-	}
-	for _, key := range keys {
-		if _, exists := c.processedKeys[key]; exists {
-			continue
-		}
-		c.processedKeys[key] = struct{}{}
-		c.processedOrder = append(c.processedOrder, key)
-	}
-	for len(c.processedOrder) > maxProcessedKeys {
-		oldest := c.processedOrder[0]
-		c.processedOrder = c.processedOrder[1:]
-		delete(c.processedKeys, oldest)
-	}
-}
-
-func (c *Channel) alreadyProcessed(uid, messageID string) bool {
-	keys := []string{}
-	if strings.TrimSpace(uid) != "" {
-		keys = append(keys, "uid:"+strings.TrimSpace(uid))
-	}
-	if strings.TrimSpace(messageID) != "" {
-		keys = append(keys, "msgid:"+strings.TrimSpace(messageID))
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for _, key := range keys {
-		if _, exists := c.processedKeys[key]; exists {
-			return true
-		}
-	}
-	return false
-}
-
-func (c *Channel) alreadyProcessedPersisted(ctx context.Context, sender, uid, messageID string) (bool, error) {
-	if c.DB == nil {
-		return false, nil
-	}
-	uid = strings.TrimSpace(uid)
-	messageID = strings.TrimSpace(messageID)
-	if uid == "" && messageID == "" {
-		return false, nil
-	}
-	messages, err := c.DB.GetLastMessages(ctx, "email:"+sender, dedupeMessageLimit)
-	if err != nil {
-		return false, err
-	}
-	for _, message := range messages {
-		if message.Role != "user" || strings.TrimSpace(message.PayloadJSON) == "" {
-			continue
-		}
-		var payload map[string]any
-		if err := json.Unmarshal([]byte(message.PayloadJSON), &payload); err != nil {
-			continue
-		}
-		meta, _ := payload["meta"].(map[string]any)
-		if len(meta) == 0 {
-			continue
-		}
-		storedUID := strings.TrimSpace(fmt.Sprint(meta["uid"]))
-		storedMessageID := strings.TrimSpace(fmt.Sprint(meta["message_id"]))
-		if uid != "" && storedUID == uid {
-			return true, nil
-		}
-		if messageID != "" && storedMessageID == messageID {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-func (c *Channel) rememberThread(sender, subject, messageID string) {
-	sender = normalizeAddress(sender)
-	if sender == "" {
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.threadBySender == nil {
-		c.threadBySender = map[string]threadState{}
-	}
-	state := c.threadBySender[sender]
-	if strings.TrimSpace(subject) != "" {
-		state.Subject = strings.TrimSpace(subject)
-	}
-	if strings.TrimSpace(messageID) != "" {
-		state.MessageID = strings.TrimSpace(messageID)
-	}
-	c.threadBySender[sender] = state
-}
-
-func (c *Channel) lookupThread(ctx context.Context, recipient string) (threadState, bool, error) {
-	recipient = normalizeAddress(recipient)
-	c.mu.Lock()
-	state, ok := c.threadBySender[recipient]
-	c.mu.Unlock()
-	if ok && (state.Subject != "" || state.MessageID != "") {
-		return state, true, nil
-	}
-	if c.DB == nil {
-		return threadState{}, false, nil
-	}
-	messages, err := c.DB.GetLastMessages(ctx, "email:"+recipient, lookupMessageLimit)
-	if err != nil {
-		return threadState{}, false, err
-	}
-	for idx := len(messages) - 1; idx >= 0; idx-- {
-		message := messages[idx]
-		var payload map[string]any
-		if err := json.Unmarshal([]byte(message.PayloadJSON), &payload); err != nil {
-			continue
-		}
-		if strings.TrimSpace(fmt.Sprint(payload["channel"])) != "email" {
-			continue
-		}
-		meta, _ := payload["meta"].(map[string]any)
-		if len(meta) == 0 {
-			continue
-		}
-		state = threadState{
-			Subject:   strings.TrimSpace(fmt.Sprint(meta["subject"])),
-			MessageID: strings.TrimSpace(fmt.Sprint(meta["message_id"])),
-		}
-		if state.Subject != "" || state.MessageID != "" {
-			c.rememberThread(recipient, state.Subject, state.MessageID)
-			return state, true, nil
-		}
-	}
-	return threadState{}, false, nil
-}
-
-func (c *Channel) subjectForDelivery(meta map[string]any, base string) string {
-	if override := strings.TrimSpace(fmt.Sprint(meta["subject"])); override != "" && override != "<nil>" {
-		return override
-	}
-	base = strings.TrimSpace(base)
-	if base == "" {
-		return "or3-intern reply"
-	}
-	lower := strings.ToLower(base)
-	if strings.HasPrefix(lower, "re:") {
-		return base
-	}
-	prefix := strings.TrimSpace(c.Config.SubjectPrefix)
-	if prefix == "" {
-		prefix = "Re:"
-	}
-	if !strings.HasSuffix(prefix, ":") && !strings.HasSuffix(prefix, " ") {
-		prefix += " "
-	}
-	if !strings.HasSuffix(prefix, " ") {
-		prefix += " "
-	}
-	return prefix + base
-}
-
-func (c *Channel) fromAddress() string {
-	if value := normalizeAddress(c.Config.FromAddress); value != "" {
-		return value
-	}
-	if value := normalizeAddress(c.Config.SMTPUsername); value != "" {
-		return value
-	}
-	return normalizeAddress(c.Config.IMAPUsername)
-}
-
-func hasNonEmpty(values []string) bool {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return true
-		}
-	}
-	return false
-}
-
-func (c *Channel) validateSMTPAuthTransport() error {
-	if strings.TrimSpace(c.Config.SMTPUsername) == "" {
-		return nil
-	}
-	if c.Config.SMTPUseSSL || c.Config.SMTPUseTLS {
-		return nil
-	}
-	return fmt.Errorf("smtp auth requires TLS or SSL")
-}
-
-func connectionDeadline(ctx context.Context) (time.Time, bool) {
-	if ctx == nil {
-		return time.Now().Add(defaultNetTimeout), true
-	}
-	if deadline, ok := ctx.Deadline(); ok {
-		return deadline, true
-	}
-	return time.Now().Add(defaultNetTimeout), true
-}
-
-func watchConnContext(ctx context.Context, conn net.Conn) func() {
-	if ctx == nil || conn == nil {
-		return func() {}
-	}
-	done := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = conn.Close()
-		case <-done:
-		}
-	}()
-	return func() {
-		close(done)
-	}
+	return s.Deliverer.Deliver(ctx, "cli", to, text)
 }
 ````
 
-## File: internal/channels/channels.go
+## File: internal/db/security.go
 ````go
-package channels
+package db
 
 import (
 	"context"
-	"errors"
-	"fmt"
-	"sort"
-	"strings"
-	"sync"
-	"time"
-
-	"or3-intern/internal/bus"
-)
-
-const defaultDeduplicatorTTL = 5 * time.Minute
-
-// IngressDeduplicator tracks recently seen message identifiers and blocks
-// duplicate delivery within a configurable window. It is safe for concurrent
-// use.
-type IngressDeduplicator struct {
-	mu   sync.Mutex
-	seen map[string]time.Time
-	ttl  time.Duration
-}
-
-// NewIngressDeduplicator creates a deduplicator with the given TTL (how long a
-// seen key is remembered). A zero or negative TTL defaults to 5 minutes.
-func NewIngressDeduplicator(ttl time.Duration) *IngressDeduplicator {
-	if ttl <= 0 {
-		ttl = defaultDeduplicatorTTL
-	}
-	return &IngressDeduplicator{
-		seen: make(map[string]time.Time),
-		ttl:  ttl,
-	}
-}
-
-// IsDuplicate returns true when key was already seen within the TTL window.
-// Evicts stale entries on each call.
-func (d *IngressDeduplicator) IsDuplicate(key string) bool {
-	now := time.Now()
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.evictExpired(now)
-	if _, exists := d.seen[key]; exists {
-		return true
-	}
-	d.seen[key] = now
-	return false
-}
-
-// evictExpired must be called with d.mu held.
-func (d *IngressDeduplicator) evictExpired(now time.Time) {
-	for k, t := range d.seen {
-		if now.Sub(t) >= d.ttl {
-			delete(d.seen, k)
-		}
-	}
-}
-
-const (
-	MetaMediaPaths       = "media_paths"
-	MetaThreadTS         = "thread_ts"
-	MetaReplyToMessageID = "reply_to_message_id"
-	MetaMessageReference = "message_reference"
-)
-
-type Channel interface {
-	Name() string
-	Start(ctx context.Context, eventBus *bus.Bus) error
-	Stop(ctx context.Context) error
-	Deliver(ctx context.Context, to, text string, meta map[string]any) error
-}
-
-type Manager struct {
-	mu       sync.RWMutex
-	channels map[string]Channel
-	started  map[string]bool
-}
-
-func NewManager() *Manager {
-	return &Manager{channels: map[string]Channel{}, started: map[string]bool{}}
-}
-
-func (m *Manager) Register(ch Channel) error {
-	if ch == nil {
-		return errors.New("nil channel")
-	}
-	name := strings.TrimSpace(strings.ToLower(ch.Name()))
-	if name == "" {
-		return errors.New("channel name required")
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if _, exists := m.channels[name]; exists {
-		return fmt.Errorf("channel already registered: %s", name)
-	}
-	m.channels[name] = ch
-	return nil
-}
-
-func (m *Manager) Names() []string {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	out := make([]string, 0, len(m.channels))
-	for name := range m.channels {
-		out = append(out, name)
-	}
-	sort.Strings(out)
-	return out
-}
-
-func (m *Manager) StartAll(ctx context.Context, eventBus *bus.Bus) error {
-	for _, name := range m.Names() {
-		if err := m.Start(ctx, name, eventBus); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (m *Manager) Start(ctx context.Context, name string, eventBus *bus.Bus) error {
-	ch, err := m.get(name)
-	if err != nil {
-		return err
-	}
-	m.mu.Lock()
-	if m.started[name] {
-		m.mu.Unlock()
-		return nil
-	}
-	m.mu.Unlock()
-	if err := ch.Start(ctx, eventBus); err != nil {
-		return err
-	}
-	m.mu.Lock()
-	m.started[name] = true
-	m.mu.Unlock()
-	return nil
-}
-
-func (m *Manager) StopAll(ctx context.Context) error {
-	var errs []string
-	for _, name := range m.Names() {
-		if err := m.Stop(ctx, name); err != nil {
-			errs = append(errs, err.Error())
-		}
-	}
-	if len(errs) > 0 {
-		return errors.New(strings.Join(errs, "; "))
-	}
-	return nil
-}
-
-func (m *Manager) Stop(ctx context.Context, name string) error {
-	ch, err := m.get(name)
-	if err != nil {
-		return err
-	}
-	m.mu.Lock()
-	started := m.started[name]
-	m.mu.Unlock()
-	if !started {
-		return nil
-	}
-	if err := ch.Stop(ctx); err != nil {
-		return err
-	}
-	m.mu.Lock()
-	delete(m.started, name)
-	m.mu.Unlock()
-	return nil
-}
-
-func (m *Manager) Deliver(ctx context.Context, channel, to, text string) error {
-	return m.DeliverWithMeta(ctx, channel, to, text, nil)
-}
-
-func (m *Manager) DeliverWithMeta(ctx context.Context, channel, to, text string, meta map[string]any) error {
-	if strings.TrimSpace(channel) == "" {
-		channel = "cli"
-	}
-	ch, err := m.get(channel)
-	if err != nil {
-		return err
-	}
-	return ch.Deliver(ctx, to, text, meta)
-}
-
-func (m *Manager) get(name string) (Channel, error) {
-	name = strings.TrimSpace(strings.ToLower(name))
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	ch := m.channels[name]
-	if ch == nil {
-		return nil, fmt.Errorf("channel not found: %s", name)
-	}
-	return ch, nil
-}
-
-func CloneMeta(meta map[string]any) map[string]any {
-	if len(meta) == 0 {
-		return nil
-	}
-	out := make(map[string]any, len(meta))
-	for k, v := range meta {
-		out[k] = v
-	}
-	return out
-}
-
-func ReplyMeta(meta map[string]any) map[string]any {
-	if len(meta) == 0 {
-		return nil
-	}
-	out := map[string]any{}
-	for _, key := range []string{MetaThreadTS, MetaReplyToMessageID, MetaMessageReference} {
-		if value, ok := meta[key]; ok && hasMeaningfulMetaValue(value) {
-			out[key] = value
-		}
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
-func hasMeaningfulMetaValue(value any) bool {
-	switch v := value.(type) {
-	case nil:
-		return false
-	case string:
-		return strings.TrimSpace(v) != ""
-	case int:
-		return v > 0
-	case int8:
-		return v > 0
-	case int16:
-		return v > 0
-	case int32:
-		return v > 0
-	case int64:
-		return v > 0
-	case uint:
-		return v > 0
-	case uint8:
-		return v > 0
-	case uint16:
-		return v > 0
-	case uint32:
-		return v > 0
-	case uint64:
-		return v > 0
-	default:
-		text := strings.TrimSpace(fmt.Sprint(value))
-		return text != "" && text != "<nil>"
-	}
-}
-````
-
-## File: internal/clawhub/client.go
-````go
-package clawhub
-
-import (
-	"archive/zip"
-	"bytes"
-	"context"
+	"crypto/hmac"
 	"crypto/sha256"
-	"encoding/hex"
+	"database/sql"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"os"
-	"path/filepath"
-	"sort"
 	"strings"
-	"time"
 )
 
-const (
-	apiSearch                  = "/api/v1/search"
-	apiResolve                 = "/api/v1/resolve"
-	apiDownload                = "/api/v1/download"
-	apiSkills                  = "/api/v1/skills"
-	maxDownloadZipBytes        = 32 << 20
-	maxArchiveEntries          = 512
-	maxArchiveFileBytes  int64 = 4 << 20
-	maxArchiveTotalBytes int64 = 64 << 20
-)
-
-type Client struct {
-	SiteURL     string
-	RegistryURL string
-	HTTP        *http.Client
+type SecretRecord struct {
+	Name       string
+	Ciphertext []byte
+	Nonce      []byte
+	Version    int
+	KeyVersion string
+	UpdatedAt  int64
 }
 
-type SearchResult struct {
-	Slug        string
-	DisplayName string
-	Summary     string
-	Version     string
-	Score       float64
-	UpdatedAt   int64
+type AuditEvent struct {
+	ID          int64
+	EventType   string
+	SessionKey  string
+	Actor       string
+	PayloadJSON string
+	PrevHash    []byte
+	RecordHash  []byte
+	CreatedAt   int64
 }
 
-type SkillInfo struct {
-	Slug            string
-	DisplayName     string
-	Summary         string
-	LatestVersion   string
-	SelectedVersion string
-	Owner           string
+type AuditEventInput struct {
+	EventType  string
+	SessionKey string
+	Actor      string
+	Payload    any
 }
 
-type ResolveResult struct {
-	MatchVersion  string
-	LatestVersion string
+func (d *DB) PutSecret(ctx context.Context, name string, ciphertext, nonce []byte, version int, keyVersion string) error {
+	_, err := d.SQL.ExecContext(ctx,
+		`INSERT INTO secrets(name, ciphertext, nonce, version, key_version, updated_at) VALUES(?,?,?,?,?,?)
+		 ON CONFLICT(name) DO UPDATE SET ciphertext=excluded.ciphertext, nonce=excluded.nonce, version=excluded.version, key_version=excluded.key_version, updated_at=excluded.updated_at`,
+		strings.TrimSpace(name), ciphertext, nonce, version, strings.TrimSpace(keyVersion), NowMS())
+	return err
 }
 
-type InstallOptions struct {
-	Force bool
+func (d *DB) GetSecret(ctx context.Context, name string) (SecretRecord, bool, error) {
+	row := d.SQL.QueryRowContext(ctx,
+		`SELECT name, ciphertext, nonce, version, key_version, updated_at FROM secrets WHERE name=?`,
+		strings.TrimSpace(name))
+	var record SecretRecord
+	if err := row.Scan(&record.Name, &record.Ciphertext, &record.Nonce, &record.Version, &record.KeyVersion, &record.UpdatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return SecretRecord{}, false, nil
+		}
+		return SecretRecord{}, false, err
+	}
+	return record, true, nil
 }
 
-type InstallResult struct {
-	Path        string
-	Slug        string
-	Version     string
-	Fingerprint string
+func (d *DB) DeleteSecret(ctx context.Context, name string) error {
+	_, err := d.SQL.ExecContext(ctx, `DELETE FROM secrets WHERE name=?`, strings.TrimSpace(name))
+	return err
 }
 
-type ScanFinding struct {
-	Severity string `json:"severity"`
-	Path     string `json:"path"`
-	Rule     string `json:"rule"`
-	Message  string `json:"message"`
-}
-
-func (f ScanFinding) Summary() string {
-	parts := make([]string, 0, 3)
-	if text := strings.TrimSpace(f.Severity); text != "" {
-		parts = append(parts, text)
-	}
-	if text := strings.TrimSpace(f.Path); text != "" {
-		parts = append(parts, text)
-	}
-	if text := strings.TrimSpace(f.Message); text != "" {
-		parts = append(parts, text)
-	}
-	return strings.Join(parts, ": ")
-}
-
-type SkillOrigin struct {
-	Version          int           `json:"version"`
-	Registry         string        `json:"registry"`
-	Slug             string        `json:"slug"`
-	Owner            string        `json:"owner,omitempty"`
-	InstalledVersion string        `json:"installedVersion"`
-	InstalledAt      int64         `json:"installedAt"`
-	Fingerprint      string        `json:"fingerprint"`
-	ScanStatus       string        `json:"scanStatus,omitempty"`
-	ScanFindings     []ScanFinding `json:"scanFindings,omitempty"`
-}
-
-type InstalledSkill struct {
-	Name     string
-	Path     string
-	Origin   SkillOrigin
-	Modified bool
-}
-
-func New(siteURL, registryURL string) *Client {
-	return &Client{
-		SiteURL:     strings.TrimRight(siteURL, "/"),
-		RegistryURL: strings.TrimRight(registryURL, "/"),
-		HTTP:        &http.Client{Timeout: 15 * time.Second},
-	}
-}
-
-func (c *Client) Search(ctx context.Context, query string, limit int) ([]SearchResult, error) {
-	url := c.apiURL(apiSearch)
-	url.RawQuery = queryString(map[string]string{
-		"q":     strings.TrimSpace(query),
-		"limit": intString(limit),
-	})
-	var response struct {
-		Results []struct {
-			Slug        string  `json:"slug"`
-			DisplayName string  `json:"displayName"`
-			Summary     string  `json:"summary"`
-			Version     string  `json:"version"`
-			Score       float64 `json:"score"`
-			UpdatedAt   int64   `json:"updatedAt"`
-		} `json:"results"`
-	}
-	if err := c.getJSON(ctx, url.String(), &response); err != nil {
-		return nil, err
-	}
-	results := make([]SearchResult, 0, len(response.Results))
-	for _, item := range response.Results {
-		results = append(results, SearchResult{
-			Slug:        item.Slug,
-			DisplayName: item.DisplayName,
-			Summary:     item.Summary,
-			Version:     item.Version,
-			Score:       item.Score,
-			UpdatedAt:   item.UpdatedAt,
-		})
-	}
-	return results, nil
-}
-
-func (c *Client) Inspect(ctx context.Context, slug, version string) (SkillInfo, error) {
-	slug = sanitizeSlug(slug)
-	if slug == "" {
-		return SkillInfo{}, fmt.Errorf("slug required")
-	}
-	var response struct {
-		Skill *struct {
-			Slug        string `json:"slug"`
-			DisplayName string `json:"displayName"`
-			Summary     string `json:"summary"`
-		} `json:"skill"`
-		LatestVersion *struct {
-			Version string `json:"version"`
-		} `json:"latestVersion"`
-		Owner *struct {
-			Handle      string `json:"handle"`
-			DisplayName string `json:"displayName"`
-		} `json:"owner"`
-	}
-	if err := c.getJSON(ctx, c.apiURL(apiSkills+"/"+slug).String(), &response); err != nil {
-		return SkillInfo{}, err
-	}
-	if response.Skill == nil {
-		return SkillInfo{}, fmt.Errorf("skill not found: %s", slug)
-	}
-	info := SkillInfo{
-		Slug:        response.Skill.Slug,
-		DisplayName: response.Skill.DisplayName,
-		Summary:     response.Skill.Summary,
-		LatestVersion: stringOr(response.LatestVersion, func(v *struct {
-			Version string `json:"version"`
-		}) string {
-			return v.Version
-		}),
-		SelectedVersion: strings.TrimSpace(version),
-		Owner:           ownerName(response.Owner),
-	}
-	if info.SelectedVersion == "" {
-		info.SelectedVersion = info.LatestVersion
-	}
-	return info, nil
-}
-
-func (c *Client) Resolve(ctx context.Context, slug, fingerprint string) (ResolveResult, error) {
-	slug = sanitizeSlug(slug)
-	if slug == "" {
-		return ResolveResult{}, fmt.Errorf("slug required")
-	}
-	url := c.apiURL(apiResolve)
-	url.RawQuery = queryString(map[string]string{
-		"slug":    slug,
-		"version": "",
-		"hash":    strings.TrimSpace(fingerprint),
-	})
-	var response struct {
-		Match *struct {
-			Version string `json:"version"`
-		} `json:"match"`
-		LatestVersion *struct {
-			Version string `json:"version"`
-		} `json:"latestVersion"`
-	}
-	if err := c.getJSON(ctx, url.String(), &response); err != nil {
-		return ResolveResult{}, err
-	}
-	return ResolveResult{
-		MatchVersion: stringOr(response.Match, func(v *struct {
-			Version string `json:"version"`
-		}) string {
-			return v.Version
-		}),
-		LatestVersion: stringOr(response.LatestVersion, func(v *struct {
-			Version string `json:"version"`
-		}) string {
-			return v.Version
-		}),
-	}, nil
-}
-
-func (c *Client) Download(ctx context.Context, slug, version string) ([]byte, error) {
-	slug = sanitizeSlug(slug)
-	if slug == "" {
-		return nil, fmt.Errorf("slug required")
-	}
-	url := c.apiURL(apiDownload)
-	url.RawQuery = queryString(map[string]string{
-		"slug":    slug,
-		"version": strings.TrimSpace(version),
-	})
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url.String(), nil)
+func (d *DB) ListSecretNames(ctx context.Context) ([]string, error) {
+	rows, err := d.SQL.QueryContext(ctx, `SELECT name FROM secrets ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.httpClient().Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, readHTTPError(resp)
-	}
-	reader := &io.LimitedReader{R: resp.Body, N: maxDownloadZipBytes + 1}
-	data, err := io.ReadAll(reader)
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) > maxDownloadZipBytes {
-		return nil, fmt.Errorf("download exceeded %d bytes", maxDownloadZipBytes)
-	}
-	return data, nil
-}
-
-func (c *Client) Install(ctx context.Context, slug, version, destDir string, opts InstallOptions) (InstallResult, error) {
-	info, err := c.Inspect(ctx, slug, version)
-	if err != nil {
-		return InstallResult{}, err
-	}
-	if strings.TrimSpace(info.SelectedVersion) == "" {
-		return InstallResult{}, fmt.Errorf("could not resolve version for %s", slug)
-	}
-	zipBytes, err := c.Download(ctx, slug, info.SelectedVersion)
-	if err != nil {
-		return InstallResult{}, err
-	}
-	target := filepath.Join(destDir, sanitizeSlug(slug))
-	if err := installZip(zipBytes, target, SkillOrigin{
-		Version:          2,
-		Registry:         c.RegistryURL,
-		Slug:             sanitizeSlug(slug),
-		Owner:            info.Owner,
-		InstalledVersion: info.SelectedVersion,
-		InstalledAt:      time.Now().UnixMilli(),
-	}, opts); err != nil {
-		return InstallResult{}, err
-	}
-	origin, err := ReadOrigin(target)
-	if err != nil {
-		return InstallResult{}, err
-	}
-	return InstallResult{
-		Path:        target,
-		Slug:        origin.Slug,
-		Version:     origin.InstalledVersion,
-		Fingerprint: origin.Fingerprint,
-	}, nil
-}
-
-func installZip(zipBytes []byte, target string, origin SkillOrigin, opts InstallOptions) error {
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return err
-	}
-	if stat, err := os.Stat(target); err == nil && stat.IsDir() {
-		if !opts.Force {
-			modified, checkErr := LocalEdits(target)
-			if checkErr != nil {
-				return checkErr
-			}
-			if modified {
-				return fmt.Errorf("local modifications detected: %s", target)
-			}
-		}
-	} else if err == nil {
-		return fmt.Errorf("target exists and is not a directory: %s", target)
-	}
-
-	tempRoot, err := os.MkdirTemp(filepath.Dir(target), ".clawhub-*")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(tempRoot)
-	tempTarget := filepath.Join(tempRoot, filepath.Base(target))
-	if err := extractZipToDir(zipBytes, tempTarget); err != nil {
-		return err
-	}
-	fingerprint, err := FingerprintDir(tempTarget)
-	if err != nil {
-		return err
-	}
-	origin.Fingerprint = fingerprint
-	scanStatus, scanFindings, err := scanInstalledSkill(tempTarget)
-	if err != nil {
-		return err
-	}
-	origin.ScanStatus = scanStatus
-	origin.ScanFindings = scanFindings
-	if err := WriteOrigin(tempTarget, origin); err != nil {
-		return err
-	}
-
-	backup := target + ".bak"
-	_ = os.RemoveAll(backup)
-	if _, err := os.Stat(target); err == nil {
-		if err := os.Rename(target, backup); err != nil {
-			return err
-		}
-	}
-	if err := os.Rename(tempTarget, target); err != nil {
-		if _, statErr := os.Stat(backup); statErr == nil {
-			_ = os.Rename(backup, target)
-		}
-		return err
-	}
-	_ = os.RemoveAll(backup)
-	return nil
-}
-
-func extractZipToDir(zipBytes []byte, target string) error {
-	if int64(len(zipBytes)) > maxDownloadZipBytes {
-		return fmt.Errorf("archive exceeded %d bytes", maxDownloadZipBytes)
-	}
-	reader, err := zip.NewReader(bytes.NewReader(zipBytes), int64(len(zipBytes)))
-	if err != nil {
-		return err
-	}
-	if len(reader.File) > maxArchiveEntries {
-		return fmt.Errorf("archive exceeded %d entries", maxArchiveEntries)
-	}
-	if err := os.MkdirAll(target, 0o755); err != nil {
-		return err
-	}
-	var totalBytes int64
-	for _, file := range reader.File {
-		rel, ok := safeZipPath(file.Name)
-		if !ok {
-			continue
-		}
-		full := filepath.Join(target, rel)
-		if file.FileInfo().IsDir() {
-			if err := os.MkdirAll(full, 0o755); err != nil {
-				return err
-			}
-			continue
-		}
-		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-			return err
-		}
-		rc, err := file.Open()
-		if err != nil {
-			return err
-		}
-		mode := file.Mode()
-		if mode == 0 {
-			mode = 0o644
-		}
-		out, err := os.OpenFile(full, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
-		if err != nil {
-			_ = rc.Close()
-			return err
-		}
-		limited := &io.LimitedReader{R: rc, N: maxArchiveFileBytes + 1}
-		written, copyErr := io.Copy(out, limited)
-		closeErr := rc.Close()
-		outCloseErr := out.Close()
-		if copyErr != nil {
-			return copyErr
-		}
-		if closeErr != nil {
-			return closeErr
-		}
-		if outCloseErr != nil {
-			return outCloseErr
-		}
-		if written > maxArchiveFileBytes {
-			return fmt.Errorf("archive entry exceeded %d bytes: %s", maxArchiveFileBytes, rel)
-		}
-		totalBytes += written
-		if totalBytes > maxArchiveTotalBytes {
-			return fmt.Errorf("archive exceeded %d extracted bytes", maxArchiveTotalBytes)
-		}
-		if file.UncompressedSize64 > uint64(maxArchiveFileBytes) {
-			return fmt.Errorf("archive entry exceeded %d bytes: %s", maxArchiveFileBytes, rel)
-		}
-		if err := os.Chmod(full, mode); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func FingerprintDir(root string) (string, error) {
-	type item struct {
-		path string
-		sum  string
-	}
-	var files []item
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			if d.Name() == ".clawhub" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return nil
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		sum := sha256.Sum256(data)
-		files = append(files, item{
-			path: filepath.ToSlash(rel),
-			sum:  hex.EncodeToString(sum[:]),
-		})
-		return nil
-	})
-	if err != nil {
-		return "", err
-	}
-	sort.Slice(files, func(i, j int) bool { return files[i].path < files[j].path })
-	h := sha256.New()
-	for _, file := range files {
-		_, _ = io.WriteString(h, file.path+":"+file.sum+"\n")
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
-func LocalEdits(skillDir string) (bool, error) {
-	origin, err := ReadOrigin(skillDir)
-	if err != nil {
-		return false, err
-	}
-	current, err := FingerprintDir(skillDir)
-	if err != nil {
-		return false, err
-	}
-	return current != origin.Fingerprint, nil
-}
-
-func ListInstalled(root string) ([]InstalledSkill, error) {
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	out := make([]InstalledSkill, 0, len(entries))
-	for _, entry := range entries {
-		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
-			continue
-		}
-		path := filepath.Join(root, entry.Name())
-		origin, err := ReadOrigin(path)
-		if err != nil {
-			continue
-		}
-		modified, err := LocalEdits(path)
-		if err != nil {
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
 			return nil, err
 		}
-		out = append(out, InstalledSkill{
-			Name:     entry.Name(),
-			Path:     path,
-			Origin:   origin,
-			Modified: modified,
-		})
+		names = append(names, name)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out, nil
+	return names, rows.Err()
 }
 
-func ReadOrigin(skillDir string) (SkillOrigin, error) {
-	data, err := os.ReadFile(filepath.Join(skillDir, ".clawhub", "origin.json"))
-	if err != nil {
-		return SkillOrigin{}, err
-	}
-	var origin SkillOrigin
-	if err := json.Unmarshal(data, &origin); err != nil {
-		return SkillOrigin{}, err
-	}
-	return origin, nil
-}
+func (d *DB) AppendAuditEvent(ctx context.Context, input AuditEventInput, key []byte) error {
+	d.auditMu.Lock()
+	defer d.auditMu.Unlock()
 
-func WriteOrigin(skillDir string, origin SkillOrigin) error {
-	path := filepath.Join(skillDir, ".clawhub", "origin.json")
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(origin, "", "  ")
+	payloadBytes, err := json.Marshal(input.Payload)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(data, '\n'), 0o644)
-}
-
-const installScanReadMaxBytes = 128 * 1024
-
-func scanInstalledSkill(root string) (string, []ScanFinding, error) {
-	findings := make([]ScanFinding, 0)
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			if d.Name() == ".clawhub" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		info, infoErr := d.Info()
-		if infoErr != nil {
-			return infoErr
-		}
-		if !info.Mode().IsRegular() {
-			return nil
-		}
-		rel, relErr := filepath.Rel(root, path)
-		if relErr != nil {
-			return relErr
-		}
-		rel = filepath.ToSlash(rel)
-		findings = append(findings, pathFindings(rel)...)
-		if info.Size() <= 0 || info.Size() > installScanReadMaxBytes || !scanContentFile(rel, info.Mode()) {
-			return nil
-		}
-		data, readErr := os.ReadFile(path)
-		if readErr != nil {
-			return readErr
-		}
-		findings = append(findings, contentFindings(rel, string(data))...)
-		return nil
-	})
+	payload := truncateAuditPayload(string(payloadBytes))
+	conn, err := d.SQL.Conn(ctx)
 	if err != nil {
-		return "", nil, err
+		return err
 	}
-	status := "clean"
-	for _, finding := range findings {
-		switch strings.ToLower(strings.TrimSpace(finding.Severity)) {
-		case "high":
-			return "blocked", findings, nil
-		case "medium":
-			status = "quarantined"
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
 		}
-	}
-	return status, findings, nil
-}
+	}()
 
-func pathFindings(rel string) []ScanFinding {
-	lower := strings.ToLower(strings.TrimSpace(rel))
-	for _, name := range []string{".env", ".netrc", ".npmrc", ".pypirc", "id_rsa", "id_dsa", ".aws/credentials", ".aws/config", ".ssh/config", ".ssh/known_hosts"} {
-		if lower == name || strings.HasSuffix(lower, "/"+name) {
-			return []ScanFinding{{Severity: "high", Path: rel, Rule: "credential-material", Message: "bundle contains credential or host-secret material"}}
-		}
+	prevHash := []byte{}
+	row := conn.QueryRowContext(ctx, `SELECT record_hash FROM audit_events ORDER BY id DESC LIMIT 1`)
+	var previous []byte
+	if err := row.Scan(&previous); err == nil {
+		prevHash = append([]byte{}, previous...)
+	} else if err != sql.ErrNoRows {
+		return err
 	}
+	createdAt := NowMS()
+	recordHash := computeAuditHash(key, input.EventType, input.SessionKey, input.Actor, payload, prevHash, createdAt)
+	if _, err = conn.ExecContext(ctx,
+		`INSERT INTO audit_events(event_type, session_key, actor, payload_json, prev_hash, record_hash, created_at) VALUES(?,?,?,?,?,?,?)`,
+		strings.TrimSpace(input.EventType), strings.TrimSpace(input.SessionKey), strings.TrimSpace(input.Actor), payload, prevHash, recordHash, createdAt); err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return err
+	}
+	committed = true
 	return nil
 }
 
-func scanContentFile(rel string, mode os.FileMode) bool {
-	ext := strings.ToLower(filepath.Ext(rel))
-	if mode&0o111 != 0 {
-		return true
-	}
-	switch ext {
-	case ".sh", ".bash", ".zsh", ".command", ".ps1", ".bat", ".cmd", ".py", ".rb", ".js", ".ts":
-		return true
-	default:
-		return false
-	}
-}
-
-func contentFindings(rel, content string) []ScanFinding {
-	lower := strings.ToLower(content)
-	findings := make([]ScanFinding, 0, 2)
-	rules := []struct {
-		rule     string
-		severity string
-		message  string
-		match    func(string) bool
-	}{
-		{rule: "curl-pipe-shell", severity: "medium", message: "downloads remote content directly into a shell", match: func(s string) bool { return strings.Contains(s, "curl ") && strings.Contains(s, "| sh") }},
-		{rule: "wget-pipe-shell", severity: "medium", message: "downloads remote content directly into a shell", match: func(s string) bool { return strings.Contains(s, "wget ") && strings.Contains(s, "| sh") }},
-		{rule: "powershell-iex", severity: "medium", message: "executes downloaded content inline", match: func(s string) bool { return strings.Contains(s, "invoke-webrequest") && strings.Contains(s, "iex") }},
-		{rule: "reverse-shell", severity: "medium", message: "contains a shell/network handoff pattern", match: func(s string) bool { return strings.Contains(s, "/dev/tcp/") || strings.Contains(s, "nc -e") }},
-		{rule: "osascript", severity: "medium", message: "invokes local system automation outside the declared tool model", match: func(s string) bool { return strings.Contains(s, "osascript") }},
-	}
-	for _, rule := range rules {
-		if rule.match(lower) {
-			findings = append(findings, ScanFinding{Severity: rule.severity, Path: rel, Rule: rule.rule, Message: rule.message})
-		}
-	}
-	return findings
-}
-
-func RemoveSkill(root, name string) error {
-	name = sanitizeSlug(name)
-	if name == "" {
-		return fmt.Errorf("skill name required")
-	}
-	return os.RemoveAll(filepath.Join(root, name))
-}
-
-func (c *Client) apiURL(path string) *urlBuilder {
-	return newURLBuilder(c.RegistryURL, path)
-}
-
-func (c *Client) httpClient() *http.Client {
-	if c != nil && c.HTTP != nil {
-		return c.HTTP
-	}
-	return &http.Client{Timeout: 15 * time.Second}
-}
-
-func (c *Client) getJSON(ctx context.Context, rawURL string, dest any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+func (d *DB) VerifyAuditChain(ctx context.Context, key []byte) error {
+	rows, err := d.SQL.QueryContext(ctx,
+		`SELECT id, event_type, session_key, actor, payload_json, prev_hash, record_hash, created_at FROM audit_events ORDER BY id`)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Accept", "application/json")
-	resp, err := c.httpClient().Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return readHTTPError(resp)
-	}
-	return json.NewDecoder(resp.Body).Decode(dest)
-}
-
-func sanitizeSlug(slug string) string {
-	slug = strings.TrimSpace(slug)
-	if slug == "" || strings.Contains(slug, "..") || strings.Contains(slug, "/") || strings.Contains(slug, "\\") {
-		return ""
-	}
-	return slug
-}
-
-func safeZipPath(path string) (string, bool) {
-	path = strings.TrimSpace(strings.ReplaceAll(path, "\\", "/"))
-	path = strings.TrimPrefix(path, "./")
-	path = strings.TrimPrefix(path, "/")
-	if path == "" || strings.Contains(path, "..") {
-		return "", false
-	}
-	return filepath.FromSlash(path), true
-}
-
-func readHTTPError(resp *http.Response) error {
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	text := strings.TrimSpace(string(body))
-	if text == "" {
-		text = resp.Status
-	}
-	return fmt.Errorf("clawhub API error: %s", text)
-}
-
-func queryString(values map[string]string) string {
-	var parts []string
-	for key, value := range values {
-		if strings.TrimSpace(value) == "" {
-			continue
+	defer rows.Close()
+	var prev []byte
+	for rows.Next() {
+		var event AuditEvent
+		if err := rows.Scan(&event.ID, &event.EventType, &event.SessionKey, &event.Actor, &event.PayloadJSON, &event.PrevHash, &event.RecordHash, &event.CreatedAt); err != nil {
+			return err
 		}
-		parts = append(parts, urlEncode(key)+"="+urlEncode(value))
-	}
-	sort.Strings(parts)
-	return strings.Join(parts, "&")
-}
-
-func intString(v int) string {
-	if v <= 0 {
-		return ""
-	}
-	return fmt.Sprint(v)
-}
-
-func ownerName(owner *struct {
-	Handle      string `json:"handle"`
-	DisplayName string `json:"displayName"`
-}) string {
-	if owner == nil {
-		return ""
-	}
-	if strings.TrimSpace(owner.Handle) != "" {
-		return owner.Handle
-	}
-	return owner.DisplayName
-}
-
-func stringOr[T any](value *T, fn func(*T) string) string {
-	if value == nil {
-		return ""
-	}
-	return strings.TrimSpace(fn(value))
-}
-
-type urlBuilder struct {
-	base     string
-	path     string
-	RawQuery string
-}
-
-func newURLBuilder(base, path string) *urlBuilder {
-	return &urlBuilder{
-		base: strings.TrimRight(base, "/"),
-		path: path,
-	}
-}
-
-func (u *urlBuilder) String() string {
-	if strings.TrimSpace(u.RawQuery) == "" {
-		return u.base + u.path
-	}
-	return u.base + u.path + "?" + u.RawQuery
-}
-
-func urlEncode(s string) string {
-	replacer := strings.NewReplacer(
-		"%", "%25",
-		" ", "%20",
-		"!", "%21",
-		"#", "%23",
-		"$", "%24",
-		"&", "%26",
-		"'", "%27",
-		"(", "%28",
-		")", "%29",
-		"+", "%2B",
-		",", "%2C",
-		"/", "%2F",
-		":", "%3A",
-		";", "%3B",
-		"=", "%3D",
-		"?", "%3F",
-		"@", "%40",
-	)
-	return replacer.Replace(s)
-}
-````
-
-## File: internal/heartbeat/service.go
-````go
-package heartbeat
-
-import (
-	"context"
-	"errors"
-	"log"
-	"os"
-	"path/filepath"
-	"strings"
-	"sync"
-	"sync/atomic"
-	"time"
-
-	"or3-intern/internal/bus"
-	"or3-intern/internal/config"
-	"or3-intern/internal/triggers"
-)
-
-const (
-	DefaultChannel = "system"
-	DefaultFrom    = "heartbeat"
-	SeedMessage    = "Review HEARTBEAT.md and execute any active recurring tasks."
-
-	MetaKeyHeartbeat = "heartbeat"
-	MetaKeyDone      = "heartbeat_done"
-)
-
-type Service struct {
-	Config       config.HeartbeatConfig
-	WorkspaceDir string
-	Bus          *bus.Bus
-
-	logf func(string, ...any)
-
-	mu        sync.Mutex
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
-	tickQueue chan struct{}
-	inFlight  atomic.Bool
-	stopping  atomic.Bool
-}
-
-func New(cfg config.HeartbeatConfig, workspaceDir string, eventBus *bus.Bus) *Service {
-	return &Service{
-		Config:       cfg,
-		WorkspaceDir: workspaceDir,
-		Bus:          eventBus,
-		logf:         log.Printf,
-	}
-}
-
-func (s *Service) Start(ctx context.Context) {
-	if s == nil || !s.Config.Enabled || s.Bus == nil {
-		return
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.cancel != nil {
-		return
-	}
-	s.stopping.Store(false)
-
-	childCtx, cancel := context.WithCancel(ctx)
-	s.cancel = cancel
-	s.tickQueue = make(chan struct{}, 1)
-
-	interval := time.Duration(normalizeIntervalMinutes(s.Config.IntervalMinutes)) * time.Minute
-	s.wg.Add(2)
-	go s.runTicker(childCtx, interval)
-	go s.runPublisher(childCtx)
-}
-
-func (s *Service) Stop() {
-	if s == nil {
-		return
-	}
-	s.stopping.Store(true)
-
-	s.mu.Lock()
-	cancel := s.cancel
-	s.cancel = nil
-	s.tickQueue = nil
-	s.mu.Unlock()
-
-	if cancel != nil {
-		cancel()
-	}
-	s.wg.Wait()
-	s.inFlight.Store(false)
-}
-
-func (s *Service) runTicker(ctx context.Context, interval time.Duration) {
-	defer s.wg.Done()
-
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			s.enqueueTick("timer")
+		if !hmac.Equal(event.PrevHash, prev) {
+			return fmt.Errorf("audit chain mismatch at id=%d", event.ID)
 		}
+		expected := computeAuditHash(key, event.EventType, event.SessionKey, event.Actor, event.PayloadJSON, event.PrevHash, event.CreatedAt)
+		if !hmac.Equal(expected, event.RecordHash) {
+			return fmt.Errorf("audit hash mismatch at id=%d", event.ID)
+		}
+		prev = append([]byte{}, event.RecordHash...)
 	}
+	return rows.Err()
 }
 
-func (s *Service) runPublisher(ctx context.Context) {
-	defer s.wg.Done()
-
-	for {
-		if s.stopping.Load() || ctx.Err() != nil {
-			return
-		}
-
-		s.mu.Lock()
-		tickQueue := s.tickQueue
-		s.mu.Unlock()
-		if tickQueue == nil {
-			return
-		}
-
-		select {
-		case <-ctx.Done():
-			return
-		case <-tickQueue:
-			if s.stopping.Load() || ctx.Err() != nil {
-				return
-			}
-			s.processTick()
-		}
-	}
+func computeAuditHash(key []byte, eventType, sessionKey, actor, payload string, prevHash []byte, createdAt int64) []byte {
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte(strings.TrimSpace(eventType)))
+	_, _ = mac.Write([]byte{0})
+	_, _ = mac.Write([]byte(strings.TrimSpace(sessionKey)))
+	_, _ = mac.Write([]byte{0})
+	_, _ = mac.Write([]byte(strings.TrimSpace(actor)))
+	_, _ = mac.Write([]byte{0})
+	_, _ = mac.Write([]byte(payload))
+	_, _ = mac.Write([]byte{0})
+	_, _ = mac.Write(prevHash)
+	_, _ = mac.Write([]byte(fmt.Sprint(createdAt)))
+	return mac.Sum(nil)
 }
 
-func (s *Service) enqueueTick(source string) bool {
-	s.mu.Lock()
-	tickQueue := s.tickQueue
-	s.mu.Unlock()
-	if tickQueue == nil {
-		return false
+func truncateAuditPayload(payload string) string {
+	payload = strings.TrimSpace(payload)
+	if len(payload) <= 2048 {
+		return payload
 	}
-
-	select {
-	case tickQueue <- struct{}{}:
-		return true
-	default:
-		s.logf("heartbeat tick dropped: pending tick already queued source=%s", source)
-		return false
-	}
-}
-
-func (s *Service) processTick() {
-	if s.inFlight.Load() {
-		s.logf("heartbeat tick skipped: previous turn still in flight")
-		return
-	}
-
-	path, text, err := LoadTasksFile(s.Config.TasksFile, s.WorkspaceDir)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			s.logf("heartbeat tick skipped: tasks file not found")
-			return
-		}
-		s.logf("heartbeat tick skipped: read failed path=%q err=%v", path, err)
-		return
-	}
-	if !HasActiveInstructions(text) {
-		return
-	}
-
-	s.inFlight.Store(true)
-	meta := map[string]any{
-		MetaKeyHeartbeat: true,
-		MetaKeyDone: func() {
-			s.inFlight.Store(false)
-		},
-		"tasks_path": path,
-		triggers.MetaKeyStructuredEvent: triggers.StructuredEventMap(triggers.StructuredEvent{
-			Type:    string(bus.EventHeartbeat),
-			Source:  "heartbeat",
-			Trusted: true,
-			Details: map[string]any{"tasks_path": path, "session_key": normalizedSessionKey(s.Config.SessionKey)},
-		}),
-	}
-	if structuredTasks, ok := triggers.ParseStructuredTasksText(text); ok {
-		meta[triggers.MetaKeyStructuredTasks] = triggers.StructuredTasksMap(structuredTasks)
-	}
-	ev := bus.Event{
-		Type:       bus.EventHeartbeat,
-		SessionKey: normalizedSessionKey(s.Config.SessionKey),
-		Channel:    DefaultChannel,
-		From:       DefaultFrom,
-		Message:    SeedMessage,
-		Meta:       meta,
-	}
-	if ok := s.Bus.Publish(ev); !ok {
-		s.inFlight.Store(false)
-		s.logf("heartbeat tick dropped: event bus full")
-	}
-}
-
-func LoadTasksFile(configPath, workspaceDir string) (string, string, error) {
-	var firstErr error
-	for _, path := range candidatePaths(configPath, workspaceDir) {
-		data, err := os.ReadFile(path)
-		if err == nil {
-			return path, strings.TrimSpace(string(data)), nil
-		}
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if firstErr == nil {
-			firstErr = err
-		}
-	}
-	if firstErr != nil {
-		return strings.TrimSpace(configPath), "", firstErr
-	}
-	return strings.TrimSpace(configPath), "", os.ErrNotExist
-}
-
-func HasActiveInstructions(text string) bool {
-	inComment := false
-	for _, line := range strings.Split(text, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
-		if inComment {
-			if strings.Contains(trimmed, "-->") {
-				inComment = false
-			}
-			continue
-		}
-		if strings.HasPrefix(trimmed, "<!--") {
-			if !strings.Contains(trimmed, "-->") {
-				inComment = true
-			}
-			continue
-		}
-		if strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		return true
-	}
-	return false
-}
-
-func candidatePaths(configPath, workspaceDir string) []string {
-	seen := map[string]struct{}{}
-	out := make([]string, 0, 3)
-	add := func(path string) {
-		path = strings.TrimSpace(path)
-		if path == "" {
-			return
-		}
-		if _, ok := seen[path]; ok {
-			return
-		}
-		seen[path] = struct{}{}
-		out = append(out, path)
-	}
-	if strings.TrimSpace(workspaceDir) != "" {
-		add(filepath.Join(workspaceDir, "HEARTBEAT.md"))
-		add(filepath.Join(workspaceDir, "heartbeat.md"))
-	}
-	add(configPath)
-	return out
-}
-
-func normalizeIntervalMinutes(v int) int {
-	if v <= 0 {
-		return 30
-	}
-	if v < 1 {
-		return 1
-	}
-	return v
-}
-
-func normalizedSessionKey(v string) string {
-	v = strings.TrimSpace(v)
-	if v == "" {
-		return config.DefaultHeartbeatSessionKey
-	}
-	return v
+	return payload[:2048] + "...[truncated]"
 }
 ````
 
@@ -8149,6 +6721,267 @@ func workspaceTruncate(s string, max int) string {
 }
 ````
 
+## File: internal/security/network.go
+````go
+package security
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"net/http"
+	"net/netip"
+	"net/url"
+	"strings"
+)
+
+var lookupIPAddr = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+	return net.DefaultResolver.LookupIPAddr(ctx, host)
+}
+
+// HostPolicy constrains which outbound hosts and address classes may be used.
+type HostPolicy struct {
+	Enabled       bool
+	DefaultDeny   bool
+	AllowedHosts  []string
+	AllowLoopback bool
+	AllowPrivate  bool
+}
+
+// EnabledPolicy reports whether any host restrictions are active.
+func (p HostPolicy) EnabledPolicy() bool {
+	return p.Enabled || p.DefaultDeny || len(p.AllowedHosts) > 0
+}
+
+// ValidateURL checks whether target is allowed by the host policy.
+func (p HostPolicy) ValidateURL(ctx context.Context, target *url.URL) error {
+	if target == nil {
+		return fmt.Errorf("invalid url")
+	}
+	hostname := strings.TrimSpace(strings.ToLower(target.Hostname()))
+	if hostname == "" {
+		return fmt.Errorf("missing host")
+	}
+	return p.ValidateHost(ctx, hostname)
+}
+
+// ValidateEndpoint validates a URL or host:port endpoint string.
+func (p HostPolicy) ValidateEndpoint(ctx context.Context, raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	if strings.Contains(raw, "://") {
+		u, err := url.Parse(raw)
+		if err != nil {
+			return fmt.Errorf("invalid endpoint: %w", err)
+		}
+		return p.ValidateURL(ctx, u)
+	}
+	host, _, err := net.SplitHostPort(raw)
+	if err == nil {
+		return p.ValidateHost(ctx, strings.Trim(host, "[]"))
+	}
+	return p.ValidateHost(ctx, raw)
+}
+
+// ValidateHost resolves and validates hostname against the policy.
+func (p HostPolicy) ValidateHost(ctx context.Context, hostname string) error {
+	_, err := p.resolveHost(ctx, hostname)
+	return err
+}
+
+func (p HostPolicy) resolveHost(ctx context.Context, hostname string) (resolvedHostPlan, error) {
+	hostname = strings.Trim(strings.ToLower(strings.TrimSpace(hostname)), "[]")
+	if hostname == "" {
+		return resolvedHostPlan{}, fmt.Errorf("missing host")
+	}
+	if ip, err := netip.ParseAddr(hostname); err == nil {
+		ip = ip.Unmap()
+		if err := p.validateAddr(ip); err != nil {
+			return resolvedHostPlan{}, err
+		}
+		return resolvedHostPlan{hostname: hostname, addrs: []netip.Addr{ip}}, nil
+	}
+	if p.EnabledPolicy() && !hostAllowed(hostname, p.AllowedHosts) && p.DefaultDeny {
+		return resolvedHostPlan{}, fmt.Errorf("host denied by policy: %s", hostname)
+	}
+	addrs, err := lookupIPAddr(ctx, hostname)
+	if err != nil {
+		return resolvedHostPlan{}, err
+	}
+	if len(addrs) == 0 {
+		return resolvedHostPlan{}, fmt.Errorf("host did not resolve")
+	}
+	approved := make([]netip.Addr, 0, len(addrs))
+	for _, addr := range addrs {
+		ip, ok := netip.AddrFromSlice(addr.IP)
+		if !ok {
+			return resolvedHostPlan{}, fmt.Errorf("host resolution failed")
+		}
+		ip = ip.Unmap()
+		if err := p.validateAddr(ip); err != nil {
+			return resolvedHostPlan{}, err
+		}
+		approved = append(approved, ip)
+	}
+	return resolvedHostPlan{hostname: hostname, addrs: approved}, nil
+}
+
+func (p HostPolicy) validateAddr(addr netip.Addr) error {
+	if !addr.IsValid() {
+		return fmt.Errorf("invalid host address")
+	}
+	if !p.AllowLoopback && addr.IsLoopback() {
+		return fmt.Errorf("host denied by policy: loopback")
+	}
+	if !p.AllowPrivate && (addr.IsPrivate() || addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() || addr.IsMulticast() || addr.IsUnspecified()) {
+		return fmt.Errorf("host denied by policy: private address")
+	}
+	if addr.String() == "169.254.169.254" {
+		return fmt.Errorf("host denied by policy: metadata endpoint")
+	}
+	return nil
+}
+
+func hostAllowed(host string, patterns []string) bool {
+	if len(patterns) == 0 {
+		return false
+	}
+	host = strings.ToLower(strings.TrimSpace(host))
+	for _, pattern := range patterns {
+		pattern = strings.ToLower(strings.TrimSpace(pattern))
+		if pattern == "" {
+			continue
+		}
+		if pattern == host {
+			return true
+		}
+		if strings.HasPrefix(pattern, "*.") {
+			suffix := strings.TrimPrefix(pattern, "*")
+			if strings.HasSuffix(host, suffix) && len(host) > len(suffix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// WrapHTTPClient returns a clone of client that enforces policy on requests and redirects.
+func WrapHTTPClient(client *http.Client, policy HostPolicy) *http.Client {
+	if client == nil {
+		client = &http.Client{}
+	}
+	cloned := *client
+	prevCheckRedirect := cloned.CheckRedirect
+	cloned.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if err := policy.ValidateURL(req.Context(), req.URL); err != nil {
+			return err
+		}
+		if prevCheckRedirect != nil {
+			return prevCheckRedirect(req, via)
+		}
+		return nil
+	}
+	base := cloned.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	wrappedBase := wrapTransportWithPolicy(base, policy)
+	cloned.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		plan, err := policy.resolveHost(req.Context(), req.URL.Hostname())
+		if err != nil {
+			return nil, err
+		}
+		return wrappedBase.RoundTrip(req.Clone(withResolvedHostPlan(req.Context(), plan)))
+	})
+	return &cloned
+}
+
+type resolvedHostPlan struct {
+	hostname string
+	addrs    []netip.Addr
+}
+
+type resolvedHostPlanKey struct{}
+
+func withResolvedHostPlan(ctx context.Context, plan resolvedHostPlan) context.Context {
+	return context.WithValue(ctx, resolvedHostPlanKey{}, plan)
+}
+
+func resolvedHostPlanFromContext(ctx context.Context, host string) (resolvedHostPlan, bool) {
+	plan, ok := ctx.Value(resolvedHostPlanKey{}).(resolvedHostPlan)
+	if !ok {
+		return resolvedHostPlan{}, false
+	}
+	if plan.hostname != strings.Trim(strings.ToLower(strings.TrimSpace(host)), "[]") {
+		return resolvedHostPlan{}, false
+	}
+	return plan, len(plan.addrs) > 0
+}
+
+func wrapTransportWithPolicy(base http.RoundTripper, policy HostPolicy) http.RoundTripper {
+	transport, ok := base.(*http.Transport)
+	if !ok {
+		return roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			if err := policy.ValidateURL(req.Context(), req.URL); err != nil {
+				return nil, err
+			}
+			return base.RoundTrip(req)
+		})
+	}
+	cloned := transport.Clone()
+	baseDial := cloned.DialContext
+	if baseDial == nil {
+		baseDial = (&net.Dialer{}).DialContext
+	}
+	cloned.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return dialResolvedHost(ctx, network, addr, baseDial)
+	}
+	if cloned.DialTLSContext != nil {
+		baseDialTLS := cloned.DialTLSContext
+		cloned.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialResolvedHost(ctx, network, addr, baseDialTLS)
+		}
+	}
+	return cloned
+}
+
+func dialResolvedHost(ctx context.Context, network, addr string, dial func(context.Context, string, string) (net.Conn, error)) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+		port = ""
+	}
+	plan, ok := resolvedHostPlanFromContext(ctx, host)
+	if !ok {
+		return dial(ctx, network, addr)
+	}
+	var lastErr error
+	for _, ip := range plan.addrs {
+		target := ip.String()
+		if port != "" {
+			target = net.JoinHostPort(target, port)
+		}
+		conn, err := dial(ctx, network, target)
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("host did not resolve")
+	}
+	return nil, lastErr
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
+}
+````
+
 ## File: internal/tools/env.go
 ````go
 package tools
@@ -8236,6 +7069,560 @@ func BuildChildEnv(base []string, allowlist []string, overlay map[string]string,
 		out = append(out, key+"="+values[key])
 	}
 	return out
+}
+````
+
+## File: internal/tools/files.go
+````go
+package tools
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+type FileTool struct {
+	Base
+	Root string // allowed root (optional)
+}
+
+const (
+	defaultReadFileMaxBytes  = 200000
+	defaultListDirMaxEntries = 200
+)
+
+func (t *FileTool) safePath(p string) (string, error) {
+	if strings.TrimSpace(p) == "" {
+		return "", errors.New("missing path")
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", err
+	}
+	abs, err = canonicalizePath(abs)
+	if err != nil {
+		return "", err
+	}
+	if t.Root != "" {
+		root, err := filepath.Abs(t.Root)
+		if err != nil {
+			return "", err
+		}
+		root, err = canonicalizeRoot(root)
+		if err != nil {
+			return "", err
+		}
+		rel, err := filepath.Rel(root, abs)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return "", fmt.Errorf("path outside allowed root")
+		}
+	}
+	return abs, nil
+}
+
+func canonicalizeRoot(root string) (string, error) {
+	if _, err := os.Stat(root); err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(root)
+}
+
+func canonicalizePath(abs string) (string, error) {
+	if _, err := os.Lstat(abs); err == nil {
+		return filepath.EvalSymlinks(abs)
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+	existing := abs
+	missingParts := make([]string, 0, 4)
+	for {
+		if _, err := os.Lstat(existing); err == nil {
+			break
+		} else if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(existing)
+		if parent == existing {
+			return "", os.ErrNotExist
+		}
+		missingParts = append(missingParts, filepath.Base(existing))
+		existing = parent
+	}
+	realExisting, err := filepath.EvalSymlinks(existing)
+	if err != nil {
+		return "", err
+	}
+	for i := len(missingParts) - 1; i >= 0; i-- {
+		realExisting = filepath.Join(realExisting, missingParts[i])
+	}
+	return realExisting, nil
+}
+
+type ReadFile struct{ FileTool }
+
+func (t *ReadFile) Name() string        { return "read_file" }
+func (t *ReadFile) Description() string { return "Read a UTF-8 text file." }
+func (t *ReadFile) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{
+		"path":     map[string]any{"type": "string"},
+		"maxBytes": map[string]any{"type": "integer", "description": "Max bytes to read (default 200000)"},
+	}, "required": []string{"path"}}
+}
+func (t *ReadFile) Schema() map[string]any {
+	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
+}
+func (t *ReadFile) Execute(ctx context.Context, params map[string]any) (string, error) {
+	p, err := t.safePath(fmt.Sprint(params["path"]))
+	if err != nil {
+		return "", err
+	}
+	max := defaultReadFileMaxBytes
+	if v, ok := params["maxBytes"].(float64); ok && int(v) > 0 {
+		max = int(v)
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, int64(max)))
+	if err != nil {
+		return "", err
+	}
+	if len(b) > max {
+		b = b[:max]
+	}
+	return string(b), nil
+}
+
+type WriteFile struct{ FileTool }
+
+func (t *WriteFile) Capability() CapabilityLevel { return CapabilityGuarded }
+func (t *WriteFile) Name() string                { return "write_file" }
+func (t *WriteFile) Description() string         { return "Write text to a file (overwrites)." }
+func (t *WriteFile) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{
+		"path":    map[string]any{"type": "string"},
+		"content": map[string]any{"type": "string"},
+		"mkdirs":  map[string]any{"type": "boolean"},
+	}, "required": []string{"path", "content"}}
+}
+func (t *WriteFile) Schema() map[string]any {
+	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
+}
+func (t *WriteFile) Execute(ctx context.Context, params map[string]any) (string, error) {
+	p, err := t.safePath(fmt.Sprint(params["path"]))
+	if err != nil {
+		return "", err
+	}
+	content := fmt.Sprint(params["content"])
+	mkdirs, _ := params["mkdirs"].(bool)
+	if mkdirs {
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			return "", err
+		}
+	}
+	if err := os.WriteFile(p, []byte(content), existingFileMode(p, 0o600)); err != nil {
+		return "", err
+	}
+	return "ok", nil
+}
+
+type EditFile struct{ FileTool }
+
+func (t *EditFile) Capability() CapabilityLevel { return CapabilityGuarded }
+func (t *EditFile) Name() string                { return "edit_file" }
+func (t *EditFile) Description() string {
+	return "Edit a text file by applying a list of find/replace operations."
+}
+func (t *EditFile) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{
+		"path": map[string]any{"type": "string"},
+		"edits": map[string]any{"type": "array", "items": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"find":    map[string]any{"type": "string"},
+				"replace": map[string]any{"type": "string"},
+				"count":   map[string]any{"type": "integer", "description": "max replacements (0=all)"},
+			},
+			"required": []string{"find", "replace"},
+		}},
+	}, "required": []string{"path", "edits"}}
+}
+func (t *EditFile) Schema() map[string]any {
+	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
+}
+func (t *EditFile) Execute(ctx context.Context, params map[string]any) (string, error) {
+	p, err := t.safePath(fmt.Sprint(params["path"]))
+	if err != nil {
+		return "", err
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return "", err
+	}
+	s := string(b)
+	rawEdits, _ := params["edits"].([]any)
+	for _, e := range rawEdits {
+		m, _ := e.(map[string]any)
+		find := fmt.Sprint(m["find"])
+		replace := fmt.Sprint(m["replace"])
+		count := 0
+		if v, ok := m["count"].(float64); ok {
+			count = int(v)
+		}
+		if count <= 0 {
+			s = strings.ReplaceAll(s, find, replace)
+		} else {
+			s = strings.Replace(s, find, replace, count)
+		}
+	}
+	if err := os.WriteFile(p, []byte(s), existingFileMode(p, 0)); err != nil {
+		return "", err
+	}
+	return "ok", nil
+}
+
+type ListDir struct{ FileTool }
+
+func (t *ListDir) Name() string        { return "list_dir" }
+func (t *ListDir) Description() string { return "List directory entries." }
+func (t *ListDir) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{
+		"path": map[string]any{"type": "string"},
+		"max":  map[string]any{"type": "integer"},
+	}, "required": []string{"path"}}
+}
+func (t *ListDir) Schema() map[string]any {
+	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
+}
+func (t *ListDir) Execute(ctx context.Context, params map[string]any) (string, error) {
+	p, err := t.safePath(fmt.Sprint(params["path"]))
+	if err != nil {
+		return "", err
+	}
+	ents, err := os.ReadDir(p)
+	if err != nil {
+		return "", err
+	}
+	max := defaultListDirMaxEntries
+	if v, ok := params["max"].(float64); ok && int(v) > 0 {
+		max = int(v)
+	}
+	type entry struct {
+		Name  string `json:"name"`
+		IsDir bool   `json:"isDir"`
+		Size  int64  `json:"size"`
+	}
+	out := []entry{}
+	for _, e := range ents {
+		if len(out) >= max {
+			break
+		}
+		info, _ := e.Info()
+		sz := int64(0)
+		if info != nil {
+			sz = info.Size()
+		}
+		out = append(out, entry{Name: e.Name(), IsDir: e.IsDir(), Size: sz})
+	}
+	b, _ := json.MarshalIndent(out, "", "  ")
+	return string(b), nil
+}
+
+func existingFileMode(path string, defaultMode os.FileMode) os.FileMode {
+	if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+		return info.Mode().Perm()
+	}
+	if defaultMode == 0 {
+		return 0o600
+	}
+	return defaultMode
+}
+````
+
+## File: internal/tools/memory.go
+````go
+package tools
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"sort"
+	"strings"
+
+	"or3-intern/internal/db"
+	"or3-intern/internal/memory"
+	"or3-intern/internal/providers"
+	"or3-intern/internal/scope"
+)
+
+type MemorySetPinned struct {
+	Base
+	DB *db.DB
+}
+
+func (t *MemorySetPinned) Name() string { return "memory_set_pinned" }
+func (t *MemorySetPinned) Description() string {
+	return "Upsert a pinned memory entry (always included in prompts)."
+}
+func (t *MemorySetPinned) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{
+		"key":     map[string]any{"type": "string"},
+		"content": map[string]any{"type": "string"},
+		"scope":   map[string]any{"type": "string", "description": "Optional scope override: 'global' to share across sessions"},
+	}, "required": []string{"key", "content"}}
+}
+func (t *MemorySetPinned) Schema() map[string]any {
+	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
+}
+func (t *MemorySetPinned) Execute(ctx context.Context, params map[string]any) (string, error) {
+	if t.DB == nil {
+		return "", fmt.Errorf("db not set")
+	}
+	key := stringParam(params, "key")
+	content := stringParam(params, "content")
+	if key == "" || content == "" {
+		return "", fmt.Errorf("missing key/content")
+	}
+	if err := t.DB.UpsertPinned(ctx, memoryScopeFromParams(ctx, params), key, content); err != nil {
+		return "", err
+	}
+	return "ok", nil
+}
+
+type MemoryAddNote struct {
+	Base
+	DB         *db.DB
+	Provider   *providers.Client
+	EmbedModel string
+}
+
+func (t *MemoryAddNote) Name() string { return "memory_add_note" }
+func (t *MemoryAddNote) Description() string {
+	return "Add a semantic memory note to the indexed memory store."
+}
+func (t *MemoryAddNote) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{
+		"text":              map[string]any{"type": "string"},
+		"tags":              map[string]any{"type": "string", "description": "comma-separated tags (optional)"},
+		"source_message_id": map[string]any{"type": "integer", "description": "source message id (optional)"},
+		"scope":             map[string]any{"type": "string", "description": "Optional scope override: 'global' to share across sessions"},
+	}, "required": []string{"text"}}
+}
+func (t *MemoryAddNote) Schema() map[string]any {
+	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
+}
+func (t *MemoryAddNote) Execute(ctx context.Context, params map[string]any) (string, error) {
+	if t.DB == nil || t.Provider == nil {
+		return "", fmt.Errorf("missing deps")
+	}
+	text := stringParam(params, "text")
+	if text == "" {
+		return "", fmt.Errorf("empty text")
+	}
+	tags := stringParam(params, "tags")
+	var src sql.NullInt64
+	if v, ok := params["source_message_id"].(float64); ok && int64(v) > 0 {
+		src = sql.NullInt64{Int64: int64(v), Valid: true}
+	}
+	vec, err := t.Provider.Embed(ctx, t.EmbedModel, text)
+	if err != nil {
+		return "", err
+	}
+	blob := memory.PackFloat32(vec)
+	id, err := t.DB.InsertMemoryNote(ctx, memoryScopeFromParams(ctx, params), text, blob, src, tags)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("ok: %d", id), nil
+}
+
+type MemorySearch struct {
+	Base
+	DB              *db.DB
+	Provider        *providers.Client
+	EmbedModel      string
+	VectorK         int
+	FTSK            int
+	TopK            int
+	VectorScanLimit int
+}
+
+func (t *MemorySearch) Name() string { return "memory_search" }
+func (t *MemorySearch) Description() string {
+	return "Search long-term memory (hybrid semantic + keyword) and return top results."
+}
+func (t *MemorySearch) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{
+		"query": map[string]any{"type": "string"},
+		"topK":  map[string]any{"type": "integer"},
+		"scope": map[string]any{"type": "string", "description": "Optional scope override: 'global' to search only shared memory"},
+	}, "required": []string{"query"}}
+}
+func (t *MemorySearch) Schema() map[string]any {
+	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
+}
+func (t *MemorySearch) Execute(ctx context.Context, params map[string]any) (string, error) {
+	if t.DB == nil || t.Provider == nil {
+		return "", fmt.Errorf("missing deps")
+	}
+	q := stringParam(params, "query")
+	if q == "" {
+		return "", fmt.Errorf("empty query")
+	}
+	topK := t.TopK
+	if v, ok := params["topK"].(float64); ok && int(v) > 0 {
+		topK = int(v)
+	}
+	vec, err := t.Provider.Embed(ctx, t.EmbedModel, q)
+	if err != nil {
+		return "", err
+	}
+	r := memory.NewRetriever(t.DB)
+	r.VectorScanLimit = t.VectorScanLimit
+	got, err := r.Retrieve(ctx, memoryScopeFromParams(ctx, params), q, vec, t.VectorK, t.FTSK, topK)
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	for i, m := range got {
+		b.WriteString(fmt.Sprintf("%d. [%s] %.4f %s\n", i+1, m.Source, m.Score, m.Text))
+	}
+	return b.String(), nil
+}
+
+type MemoryRecent struct {
+	Base
+	DB           *db.DB
+	DefaultLimit int
+	MaxLimit     int
+	MaxChars     int
+}
+
+func (t *MemoryRecent) Name() string { return "memory_recent" }
+func (t *MemoryRecent) Description() string {
+	return "Fetch recent conversation messages from the current linked session scope."
+}
+func (t *MemoryRecent) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{
+		"limit": map[string]any{"type": "integer"},
+	}}
+}
+func (t *MemoryRecent) Schema() map[string]any {
+	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
+}
+func (t *MemoryRecent) Execute(ctx context.Context, params map[string]any) (string, error) {
+	if t.DB == nil {
+		return "", fmt.Errorf("db not set")
+	}
+	limit := boundedPositiveInt(params["limit"], t.DefaultLimit, t.MaxLimit)
+	msgs, err := t.DB.GetLastMessagesScoped(ctx, SessionFromContext(ctx), limit)
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	for i, msg := range msgs {
+		b.WriteString(fmt.Sprintf("%d. [%s/%s] %s\n", i+1, msg.SessionKey, msg.Role, compactMemoryText(msg.Content, t.MaxChars)))
+	}
+	return b.String(), nil
+}
+
+type MemoryGetPinned struct {
+	Base
+	DB       *db.DB
+	MaxChars int
+}
+
+func (t *MemoryGetPinned) Name() string { return "memory_get_pinned" }
+func (t *MemoryGetPinned) Description() string {
+	return "Read pinned memory entries for the current session, including shared global entries."
+}
+func (t *MemoryGetPinned) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{
+		"key":   map[string]any{"type": "string", "description": "Optional pinned memory key to fetch"},
+		"scope": map[string]any{"type": "string", "description": "Optional scope override: 'global' to read only shared memory"},
+	}}
+}
+func (t *MemoryGetPinned) Schema() map[string]any {
+	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
+}
+func (t *MemoryGetPinned) Execute(ctx context.Context, params map[string]any) (string, error) {
+	if t.DB == nil {
+		return "", fmt.Errorf("db not set")
+	}
+	pinned, err := t.DB.GetPinned(ctx, memoryScopeFromParams(ctx, params))
+	if err != nil {
+		return "", err
+	}
+	key := stringParam(params, "key")
+	if key != "" {
+		value, ok := pinned[key]
+		if !ok {
+			return "", nil
+		}
+		return fmt.Sprintf("%s: %s", key, compactMemoryText(value, t.MaxChars)), nil
+	}
+	keys := make([]string, 0, len(pinned))
+	for key := range pinned {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, key := range keys {
+		b.WriteString(fmt.Sprintf("%s: %s\n", key, compactMemoryText(pinned[key], t.MaxChars)))
+	}
+	return b.String(), nil
+}
+
+func memoryScopeFromParams(ctx context.Context, params map[string]any) string {
+	if requestedScope := stringParam(params, "scope"); scope.IsGlobalScopeRequest(requestedScope) {
+		return scope.GlobalMemoryScope
+	}
+	return SessionFromContext(ctx)
+}
+
+func stringParam(params map[string]any, key string) string {
+	if params == nil {
+		return ""
+	}
+	value, ok := params[key]
+	if !ok || value == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(value))
+}
+
+func boundedPositiveInt(raw any, fallback, max int) int {
+	value := fallback
+	if v, ok := raw.(float64); ok && int(v) > 0 {
+		value = int(v)
+	}
+	if max > 0 && value > max {
+		return max
+	}
+	if value < 0 {
+		return 0
+	}
+	return value
+}
+
+func compactMemoryText(text string, maxChars int) string {
+	text = strings.Join(strings.Fields(text), " ")
+	if maxChars <= 0 || len(text) <= maxChars {
+		return text
+	}
+	if maxChars <= 3 {
+		return text[:maxChars]
+	}
+	return text[:maxChars-3] + "..."
 }
 ````
 
@@ -8350,20 +7737,26 @@ func readOptionalString(params map[string]any, key string) string {
 
 ## File: internal/tools/tools.go
 ````go
+// Package tools defines the shared interfaces and capability model for runtime tools.
 package tools
 
 import (
 	"context"
 )
 
+// CapabilityLevel classifies the trust required to invoke a tool.
 type CapabilityLevel string
 
 const (
-	CapabilitySafe       CapabilityLevel = "safe"
-	CapabilityGuarded    CapabilityLevel = "guarded"
+	// CapabilitySafe covers tools that do not require elevated approval.
+	CapabilitySafe CapabilityLevel = "safe"
+	// CapabilityGuarded covers tools that may need policy checks.
+	CapabilityGuarded CapabilityLevel = "guarded"
+	// CapabilityPrivileged covers tools reserved for elevated execution.
 	CapabilityPrivileged CapabilityLevel = "privileged"
 )
 
+// Tool is the runtime interface implemented by all callable tools.
 type Tool interface {
 	Name() string
 	Description() string
@@ -8372,14 +7765,17 @@ type Tool interface {
 	Schema() map[string]any
 }
 
+// CapabilityReporter reports a static capability level for a tool.
 type CapabilityReporter interface {
 	Capability() CapabilityLevel
 }
 
+// CapabilityForParamsReporter reports a capability level for specific params.
 type CapabilityForParamsReporter interface {
 	CapabilityForParams(params map[string]any) CapabilityLevel
 }
 
+// ToolCapability returns the effective capability level for t and params.
 func ToolCapability(t Tool, params map[string]any) CapabilityLevel {
 	if t == nil {
 		return CapabilitySafe
@@ -8397,8 +7793,10 @@ func ToolCapability(t Tool, params map[string]any) CapabilityLevel {
 	return CapabilitySafe
 }
 
+// Base provides common schema helpers for tool implementations.
 type Base struct{}
 
+// SchemaFor builds a function-style tool schema.
 func (Base) SchemaFor(name, desc string, params map[string]any) map[string]any {
 	return map[string]any{
 		"type": "function",
@@ -8567,6 +7965,66 @@ func (fw *FileWatcher) poll(ctx context.Context) {
 }
 ````
 
+## File: internal/triggers/triggers.go
+````go
+// Package triggers defines shared metadata for webhook and filewatch events.
+package triggers
+
+import (
+	"encoding/json"
+	"strings"
+)
+
+// TriggerMeta carries metadata from trigger events.
+type TriggerMeta struct {
+	Source  string            // "webhook" or "filewatch"
+	Path    string            // for file-change events
+	Route   string            // for webhook events
+	Headers map[string]string // for webhook events (limited subset)
+}
+
+// MetaKeyStructuredEvent stores normalized structured trigger metadata.
+const MetaKeyStructuredEvent = "structured_event"
+
+// StructuredEvent is the normalized envelope attached to structured trigger events.
+type StructuredEvent struct {
+	Type    string         `json:"type"`
+	Source  string         `json:"source"`
+	Trusted bool           `json:"trusted"`
+	Details map[string]any `json:"details,omitempty"`
+}
+
+// StructuredEventMap converts event to a plain map for message metadata.
+func StructuredEventMap(event StructuredEvent) map[string]any {
+	details := map[string]any{}
+	for key, value := range event.Details {
+		trimmed := strings.TrimSpace(key)
+		if trimmed == "" {
+			continue
+		}
+		details[trimmed] = value
+	}
+	return map[string]any{
+		"type":    strings.TrimSpace(event.Type),
+		"source":  strings.TrimSpace(event.Source),
+		"trusted": event.Trusted,
+		"details": details,
+	}
+}
+
+// StructuredEventJSON pretty-prints raw structured trigger metadata.
+func StructuredEventJSON(raw any) string {
+	if raw == nil {
+		return ""
+	}
+	b, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+````
+
 ## File: internal/triggers/webhook.go
 ````go
 package triggers
@@ -8719,147 +8177,1793 @@ func (w *WebhookServer) authenticate(r *http.Request, body []byte) bool {
 }
 ````
 
-## File: internal/artifacts/store.go
+## File: internal/channels/channels.go
 ````go
-package artifacts
+// Package channels defines the shared channel interfaces and metadata helpers.
+package channels
 
 import (
 	"context"
-	"crypto/rand"
-	"database/sql"
-	"encoding/hex"
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
-	"or3-intern/internal/db"
+	"or3-intern/internal/bus"
 )
 
-type Store struct {
-	Dir string
-	DB  *db.DB
+const defaultDeduplicatorTTL = 5 * time.Minute
+
+// IngressDeduplicator tracks recently seen message identifiers and blocks
+// duplicate delivery within a configurable window. It is safe for concurrent
+// use.
+type IngressDeduplicator struct {
+	mu   sync.Mutex
+	seen map[string]time.Time
+	ttl  time.Duration
 }
 
-func (s *Store) Save(ctx context.Context, sessionKey, mime string, data []byte) (string, error) {
-	if s.Dir == "" {
-		return "", fmt.Errorf("artifacts dir not set")
+// NewIngressDeduplicator creates a deduplicator with the given TTL (how long a
+// seen key is remembered). A zero or negative TTL defaults to 5 minutes.
+func NewIngressDeduplicator(ttl time.Duration) *IngressDeduplicator {
+	if ttl <= 0 {
+		ttl = defaultDeduplicatorTTL
 	}
-	if s.DB == nil {
-		return "", fmt.Errorf("artifacts db not set")
+	return &IngressDeduplicator{
+		seen: make(map[string]time.Time),
+		ttl:  ttl,
 	}
-	if err := s.DB.EnsureSession(ctx, strings.TrimSpace(sessionKey)); err != nil {
-		return "", err
-	}
-	_ = os.MkdirAll(s.Dir, 0o700)
-	id := randID()
-	path := filepath.Join(s.Dir, id)
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return "", err
-	}
-	_, err := s.DB.SQL.ExecContext(ctx,
-		`INSERT INTO artifacts(id, session_key, mime, path, size_bytes, created_at) VALUES(?,?,?,?,?,?)`,
-		id, sessionKey, mime, path, len(data), time.Now().UnixMilli())
-	if err != nil {
-		_ = os.Remove(path)
-		return "", err
-	}
-	return id, nil
 }
 
-func (s *Store) SaveNamed(ctx context.Context, sessionKey, filename, mimeType string, data []byte) (Attachment, error) {
-	filename = NormalizeFilename(filename, mimeType)
-	id, err := s.Save(ctx, sessionKey, mimeType, data)
-	if err != nil {
-		return Attachment{}, err
+// IsDuplicate returns true when key was already seen within the TTL window.
+// Evicts stale entries on each call.
+func (d *IngressDeduplicator) IsDuplicate(key string) bool {
+	now := time.Now()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.evictExpired(now)
+	if _, exists := d.seen[key]; exists {
+		return true
 	}
-	return Attachment{
-		ArtifactID: id,
-		Filename:   filename,
-		Mime:       strings.TrimSpace(mimeType),
-		Kind:       DetectKind(filename, mimeType),
-		SizeBytes:  int64(len(data)),
-	}, nil
+	d.seen[key] = now
+	return false
 }
 
-func (s *Store) Lookup(ctx context.Context, artifactID string) (StoredArtifact, error) {
-	if s.DB == nil {
-		return StoredArtifact{}, fmt.Errorf("artifacts db not set")
-	}
-	row := s.DB.SQL.QueryRowContext(ctx,
-		`SELECT id, session_key, mime, path, size_bytes FROM artifacts WHERE id=?`,
-		strings.TrimSpace(artifactID),
-	)
-	var stored StoredArtifact
-	if err := row.Scan(&stored.ID, &stored.SessionKey, &stored.Mime, &stored.Path, &stored.SizeBytes); err != nil {
-		if err == sql.ErrNoRows {
-			return StoredArtifact{}, fmt.Errorf("artifact not found: %s", artifactID)
+// evictExpired must be called with d.mu held.
+func (d *IngressDeduplicator) evictExpired(now time.Time) {
+	for k, t := range d.seen {
+		if now.Sub(t) >= d.ttl {
+			delete(d.seen, k)
 		}
-		return StoredArtifact{}, err
 	}
-	return stored, nil
 }
 
-func randID() string {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return fmt.Sprintf("%d", time.Now().UnixNano())
+const (
+	// MetaMediaPaths stores local media attachments that accompany a delivery.
+	MetaMediaPaths = "media_paths"
+	// MetaThreadTS stores a thread identifier for threaded channels.
+	MetaThreadTS = "thread_ts"
+	// MetaReplyToMessageID stores a provider-specific reply target identifier.
+	MetaReplyToMessageID = "reply_to_message_id"
+	// MetaMessageReference stores a provider-specific reply reference payload.
+	MetaMessageReference = "message_reference"
+)
+
+// Channel is the transport contract implemented by each messaging integration.
+type Channel interface {
+	Name() string
+	Start(ctx context.Context, eventBus *bus.Bus) error
+	Stop(ctx context.Context) error
+	Deliver(ctx context.Context, to, text string, meta map[string]any) error
+}
+
+// Manager owns a named set of channels and their start state.
+type Manager struct {
+	mu       sync.RWMutex
+	channels map[string]Channel
+	started  map[string]bool
+}
+
+// NewManager constructs an empty channel manager.
+func NewManager() *Manager {
+	return &Manager{channels: map[string]Channel{}, started: map[string]bool{}}
+}
+
+// Register adds ch under its normalized name.
+func (m *Manager) Register(ch Channel) error {
+	if ch == nil {
+		return errors.New("nil channel")
 	}
-	return hex.EncodeToString(b[:])
+	name := strings.TrimSpace(strings.ToLower(ch.Name()))
+	if name == "" {
+		return errors.New("channel name required")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.channels[name]; exists {
+		return fmt.Errorf("channel already registered: %s", name)
+	}
+	m.channels[name] = ch
+	return nil
+}
+
+// Names returns the registered channel names in sorted order.
+func (m *Manager) Names() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]string, 0, len(m.channels))
+	for name := range m.channels {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// StartAll starts every registered channel in name order.
+func (m *Manager) StartAll(ctx context.Context, eventBus *bus.Bus) error {
+	for _, name := range m.Names() {
+		if err := m.Start(ctx, name, eventBus); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Start starts the named channel if it is not already running.
+func (m *Manager) Start(ctx context.Context, name string, eventBus *bus.Bus) error {
+	ch, err := m.get(name)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	if m.started[name] {
+		m.mu.Unlock()
+		return nil
+	}
+	m.mu.Unlock()
+	if err := ch.Start(ctx, eventBus); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.started[name] = true
+	m.mu.Unlock()
+	return nil
+}
+
+// StopAll stops all registered channels and joins any returned errors.
+func (m *Manager) StopAll(ctx context.Context) error {
+	var errs []string
+	for _, name := range m.Names() {
+		if err := m.Stop(ctx, name); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
+	if len(errs) > 0 {
+		return errors.New(strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+// Stop stops the named channel if it is running.
+func (m *Manager) Stop(ctx context.Context, name string) error {
+	ch, err := m.get(name)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	started := m.started[name]
+	m.mu.Unlock()
+	if !started {
+		return nil
+	}
+	if err := ch.Stop(ctx); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	delete(m.started, name)
+	m.mu.Unlock()
+	return nil
+}
+
+// Deliver sends text on channel without extra metadata.
+func (m *Manager) Deliver(ctx context.Context, channel, to, text string) error {
+	return m.DeliverWithMeta(ctx, channel, to, text, nil)
+}
+
+// DeliverWithMeta sends text on channel with provider-specific metadata.
+func (m *Manager) DeliverWithMeta(ctx context.Context, channel, to, text string, meta map[string]any) error {
+	if strings.TrimSpace(channel) == "" {
+		channel = "cli"
+	}
+	ch, err := m.get(channel)
+	if err != nil {
+		return err
+	}
+	return ch.Deliver(ctx, to, text, meta)
+}
+
+func (m *Manager) get(name string) (Channel, error) {
+	name = strings.TrimSpace(strings.ToLower(name))
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	ch := m.channels[name]
+	if ch == nil {
+		return nil, fmt.Errorf("channel not found: %s", name)
+	}
+	return ch, nil
+}
+
+// CloneMeta returns a shallow copy of meta.
+func CloneMeta(meta map[string]any) map[string]any {
+	if len(meta) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(meta))
+	for k, v := range meta {
+		out[k] = v
+	}
+	return out
+}
+
+// ReplyMeta extracts only reply-thread metadata from meta.
+func ReplyMeta(meta map[string]any) map[string]any {
+	if len(meta) == 0 {
+		return nil
+	}
+	out := map[string]any{}
+	for _, key := range []string{MetaThreadTS, MetaReplyToMessageID, MetaMessageReference} {
+		if value, ok := meta[key]; ok && hasMeaningfulMetaValue(value) {
+			out[key] = value
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func hasMeaningfulMetaValue(value any) bool {
+	switch v := value.(type) {
+	case nil:
+		return false
+	case string:
+		return strings.TrimSpace(v) != ""
+	case int:
+		return v > 0
+	case int8:
+		return v > 0
+	case int16:
+		return v > 0
+	case int32:
+		return v > 0
+	case int64:
+		return v > 0
+	case uint:
+		return v > 0
+	case uint8:
+		return v > 0
+	case uint16:
+		return v > 0
+	case uint32:
+		return v > 0
+	case uint64:
+		return v > 0
+	default:
+		text := strings.TrimSpace(fmt.Sprint(value))
+		return text != "" && text != "<nil>"
+	}
 }
 ````
 
-## File: internal/bus/bus.go
+## File: internal/clawhub/client.go
 ````go
-package bus
+// Package clawhub installs and inspects managed skills from the ClawHub registry.
+package clawhub
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
 )
-
-type EventType string
 
 const (
-	EventUserMessage EventType = "user_message"
-	EventCron        EventType = "cron"
-	EventHeartbeat   EventType = "heartbeat"
-	EventSystem      EventType = "system"
-	EventWebhook     EventType = "webhook"
-	EventFileChange  EventType = "file_change"
+	apiSearch                  = "/api/v1/search"
+	apiResolve                 = "/api/v1/resolve"
+	apiDownload                = "/api/v1/download"
+	apiSkills                  = "/api/v1/skills"
+	maxDownloadZipBytes        = 32 << 20
+	maxArchiveEntries          = 512
+	maxArchiveFileBytes  int64 = 4 << 20
+	maxArchiveTotalBytes int64 = 64 << 20
 )
 
-type Event struct {
-	Type       EventType
-	SessionKey string
-	Channel    string
-	From       string
-	Message    string
-	Meta       map[string]any
+// Client talks to the ClawHub site and registry APIs.
+type Client struct {
+	SiteURL     string
+	RegistryURL string
+	HTTP        *http.Client
 }
 
-type Handler func(ctx context.Context, ev Event) error
-
-type Bus struct {
-	ch chan Event
+// SearchResult is one search hit returned by the registry.
+type SearchResult struct {
+	Slug        string
+	DisplayName string
+	Summary     string
+	Version     string
+	Score       float64
+	UpdatedAt   int64
 }
 
-func New(buffer int) *Bus {
-	if buffer <= 0 {
-		buffer = 128
+// SkillInfo describes a skill and the version chosen for installation.
+type SkillInfo struct {
+	Slug            string
+	DisplayName     string
+	Summary         string
+	LatestVersion   string
+	SelectedVersion string
+	Owner           string
+}
+
+// ResolveResult reports which installed fingerprint matches a known release.
+type ResolveResult struct {
+	MatchVersion  string
+	LatestVersion string
+}
+
+// InstallOptions controls how an installation handles existing local content.
+type InstallOptions struct {
+	Force bool
+}
+
+// InstallResult summarizes a successful skill install.
+type InstallResult struct {
+	Path        string
+	Slug        string
+	Version     string
+	Fingerprint string
+}
+
+// ScanFinding records one security-related issue discovered during install scanning.
+type ScanFinding struct {
+	Severity string `json:"severity"`
+	Path     string `json:"path"`
+	Rule     string `json:"rule"`
+	Message  string `json:"message"`
+}
+
+// Summary returns a compact human-readable form of the finding.
+func (f ScanFinding) Summary() string {
+	parts := make([]string, 0, 3)
+	if text := strings.TrimSpace(f.Severity); text != "" {
+		parts = append(parts, text)
 	}
-	return &Bus{ch: make(chan Event, buffer)}
+	if text := strings.TrimSpace(f.Path); text != "" {
+		parts = append(parts, text)
+	}
+	if text := strings.TrimSpace(f.Message); text != "" {
+		parts = append(parts, text)
+	}
+	return strings.Join(parts, ": ")
 }
 
-func (b *Bus) Publish(ev Event) bool {
-	select {
-	case b.ch <- ev:
+// SkillOrigin is the persisted provenance metadata written into an installed skill.
+type SkillOrigin struct {
+	Version          int           `json:"version"`
+	Registry         string        `json:"registry"`
+	Slug             string        `json:"slug"`
+	Owner            string        `json:"owner,omitempty"`
+	InstalledVersion string        `json:"installedVersion"`
+	InstalledAt      int64         `json:"installedAt"`
+	Fingerprint      string        `json:"fingerprint"`
+	ScanStatus       string        `json:"scanStatus,omitempty"`
+	ScanFindings     []ScanFinding `json:"scanFindings,omitempty"`
+}
+
+// InstalledSkill describes one installed managed skill on disk.
+type InstalledSkill struct {
+	Name     string
+	Path     string
+	Origin   SkillOrigin
+	Modified bool
+}
+
+// New constructs a Client for the given site and registry URLs.
+func New(siteURL, registryURL string) *Client {
+	return &Client{
+		SiteURL:     strings.TrimRight(siteURL, "/"),
+		RegistryURL: strings.TrimRight(registryURL, "/"),
+		HTTP:        &http.Client{Timeout: 15 * time.Second},
+	}
+}
+
+// Search queries the registry and returns up to limit matching skills.
+func (c *Client) Search(ctx context.Context, query string, limit int) ([]SearchResult, error) {
+	url := c.apiURL(apiSearch)
+	url.RawQuery = queryString(map[string]string{
+		"q":     strings.TrimSpace(query),
+		"limit": intString(limit),
+	})
+	var response struct {
+		Results []struct {
+			Slug        string  `json:"slug"`
+			DisplayName string  `json:"displayName"`
+			Summary     string  `json:"summary"`
+			Version     string  `json:"version"`
+			Score       float64 `json:"score"`
+			UpdatedAt   int64   `json:"updatedAt"`
+		} `json:"results"`
+	}
+	if err := c.getJSON(ctx, url.String(), &response); err != nil {
+		return nil, err
+	}
+	results := make([]SearchResult, 0, len(response.Results))
+	for _, item := range response.Results {
+		results = append(results, SearchResult{
+			Slug:        item.Slug,
+			DisplayName: item.DisplayName,
+			Summary:     item.Summary,
+			Version:     item.Version,
+			Score:       item.Score,
+			UpdatedAt:   item.UpdatedAt,
+		})
+	}
+	return results, nil
+}
+
+// Inspect fetches metadata for slug and resolves the version that would be installed.
+func (c *Client) Inspect(ctx context.Context, slug, version string) (SkillInfo, error) {
+	slug = sanitizeSlug(slug)
+	if slug == "" {
+		return SkillInfo{}, fmt.Errorf("slug required")
+	}
+	var response struct {
+		Skill *struct {
+			Slug        string `json:"slug"`
+			DisplayName string `json:"displayName"`
+			Summary     string `json:"summary"`
+		} `json:"skill"`
+		LatestVersion *struct {
+			Version string `json:"version"`
+		} `json:"latestVersion"`
+		Owner *struct {
+			Handle      string `json:"handle"`
+			DisplayName string `json:"displayName"`
+		} `json:"owner"`
+	}
+	if err := c.getJSON(ctx, c.apiURL(apiSkills+"/"+slug).String(), &response); err != nil {
+		return SkillInfo{}, err
+	}
+	if response.Skill == nil {
+		return SkillInfo{}, fmt.Errorf("skill not found: %s", slug)
+	}
+	info := SkillInfo{
+		Slug:        response.Skill.Slug,
+		DisplayName: response.Skill.DisplayName,
+		Summary:     response.Skill.Summary,
+		LatestVersion: stringOr(response.LatestVersion, func(v *struct {
+			Version string `json:"version"`
+		}) string {
+			return v.Version
+		}),
+		SelectedVersion: strings.TrimSpace(version),
+		Owner:           ownerName(response.Owner),
+	}
+	if info.SelectedVersion == "" {
+		info.SelectedVersion = info.LatestVersion
+	}
+	return info, nil
+}
+
+// Resolve matches fingerprint against known releases for slug.
+func (c *Client) Resolve(ctx context.Context, slug, fingerprint string) (ResolveResult, error) {
+	slug = sanitizeSlug(slug)
+	if slug == "" {
+		return ResolveResult{}, fmt.Errorf("slug required")
+	}
+	url := c.apiURL(apiResolve)
+	url.RawQuery = queryString(map[string]string{
+		"slug":    slug,
+		"version": "",
+		"hash":    strings.TrimSpace(fingerprint),
+	})
+	var response struct {
+		Match *struct {
+			Version string `json:"version"`
+		} `json:"match"`
+		LatestVersion *struct {
+			Version string `json:"version"`
+		} `json:"latestVersion"`
+	}
+	if err := c.getJSON(ctx, url.String(), &response); err != nil {
+		return ResolveResult{}, err
+	}
+	return ResolveResult{
+		MatchVersion: stringOr(response.Match, func(v *struct {
+			Version string `json:"version"`
+		}) string {
+			return v.Version
+		}),
+		LatestVersion: stringOr(response.LatestVersion, func(v *struct {
+			Version string `json:"version"`
+		}) string {
+			return v.Version
+		}),
+	}, nil
+}
+
+// Download fetches the zipped skill bundle for slug and version.
+func (c *Client) Download(ctx context.Context, slug, version string) ([]byte, error) {
+	slug = sanitizeSlug(slug)
+	if slug == "" {
+		return nil, fmt.Errorf("slug required")
+	}
+	url := c.apiURL(apiDownload)
+	url.RawQuery = queryString(map[string]string{
+		"slug":    slug,
+		"version": strings.TrimSpace(version),
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, readHTTPError(resp)
+	}
+	reader := &io.LimitedReader{R: resp.Body, N: maxDownloadZipBytes + 1}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxDownloadZipBytes {
+		return nil, fmt.Errorf("download exceeded %d bytes", maxDownloadZipBytes)
+	}
+	return data, nil
+}
+
+// Install downloads, scans, and installs slug into destDir.
+func (c *Client) Install(ctx context.Context, slug, version, destDir string, opts InstallOptions) (InstallResult, error) {
+	info, err := c.Inspect(ctx, slug, version)
+	if err != nil {
+		return InstallResult{}, err
+	}
+	if strings.TrimSpace(info.SelectedVersion) == "" {
+		return InstallResult{}, fmt.Errorf("could not resolve version for %s", slug)
+	}
+	zipBytes, err := c.Download(ctx, slug, info.SelectedVersion)
+	if err != nil {
+		return InstallResult{}, err
+	}
+	target := filepath.Join(destDir, sanitizeSlug(slug))
+	if err := installZip(zipBytes, target, SkillOrigin{
+		Version:          2,
+		Registry:         c.RegistryURL,
+		Slug:             sanitizeSlug(slug),
+		Owner:            info.Owner,
+		InstalledVersion: info.SelectedVersion,
+		InstalledAt:      time.Now().UnixMilli(),
+	}, opts); err != nil {
+		return InstallResult{}, err
+	}
+	origin, err := ReadOrigin(target)
+	if err != nil {
+		return InstallResult{}, err
+	}
+	return InstallResult{
+		Path:        target,
+		Slug:        origin.Slug,
+		Version:     origin.InstalledVersion,
+		Fingerprint: origin.Fingerprint,
+	}, nil
+}
+
+func installZip(zipBytes []byte, target string, origin SkillOrigin, opts InstallOptions) error {
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	if stat, err := os.Stat(target); err == nil && stat.IsDir() {
+		if !opts.Force {
+			modified, checkErr := LocalEdits(target)
+			if checkErr != nil {
+				return checkErr
+			}
+			if modified {
+				return fmt.Errorf("local modifications detected: %s", target)
+			}
+		}
+	} else if err == nil {
+		return fmt.Errorf("target exists and is not a directory: %s", target)
+	}
+
+	tempRoot, err := os.MkdirTemp(filepath.Dir(target), ".clawhub-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tempRoot)
+	tempTarget := filepath.Join(tempRoot, filepath.Base(target))
+	if err := extractZipToDir(zipBytes, tempTarget); err != nil {
+		return err
+	}
+	fingerprint, err := FingerprintDir(tempTarget)
+	if err != nil {
+		return err
+	}
+	origin.Fingerprint = fingerprint
+	scanStatus, scanFindings, err := scanInstalledSkill(tempTarget)
+	if err != nil {
+		return err
+	}
+	origin.ScanStatus = scanStatus
+	origin.ScanFindings = scanFindings
+	if err := WriteOrigin(tempTarget, origin); err != nil {
+		return err
+	}
+
+	backup := target + ".bak"
+	_ = os.RemoveAll(backup)
+	if _, err := os.Stat(target); err == nil {
+		if err := os.Rename(target, backup); err != nil {
+			return err
+		}
+	}
+	if err := os.Rename(tempTarget, target); err != nil {
+		if _, statErr := os.Stat(backup); statErr == nil {
+			_ = os.Rename(backup, target)
+		}
+		return err
+	}
+	_ = os.RemoveAll(backup)
+	return nil
+}
+
+func extractZipToDir(zipBytes []byte, target string) error {
+	if int64(len(zipBytes)) > maxDownloadZipBytes {
+		return fmt.Errorf("archive exceeded %d bytes", maxDownloadZipBytes)
+	}
+	reader, err := zip.NewReader(bytes.NewReader(zipBytes), int64(len(zipBytes)))
+	if err != nil {
+		return err
+	}
+	if len(reader.File) > maxArchiveEntries {
+		return fmt.Errorf("archive exceeded %d entries", maxArchiveEntries)
+	}
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		return err
+	}
+	var totalBytes int64
+	for _, file := range reader.File {
+		rel, ok := safeZipPath(file.Name)
+		if !ok {
+			continue
+		}
+		full := filepath.Join(target, rel)
+		if file.FileInfo().IsDir() {
+			if err := os.MkdirAll(full, 0o755); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			return err
+		}
+		rc, err := file.Open()
+		if err != nil {
+			return err
+		}
+		mode := file.Mode()
+		if mode == 0 {
+			mode = 0o644
+		}
+		out, err := os.OpenFile(full, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
+		if err != nil {
+			_ = rc.Close()
+			return err
+		}
+		limited := &io.LimitedReader{R: rc, N: maxArchiveFileBytes + 1}
+		written, copyErr := io.Copy(out, limited)
+		closeErr := rc.Close()
+		outCloseErr := out.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		if outCloseErr != nil {
+			return outCloseErr
+		}
+		if written > maxArchiveFileBytes {
+			return fmt.Errorf("archive entry exceeded %d bytes: %s", maxArchiveFileBytes, rel)
+		}
+		totalBytes += written
+		if totalBytes > maxArchiveTotalBytes {
+			return fmt.Errorf("archive exceeded %d extracted bytes", maxArchiveTotalBytes)
+		}
+		if file.UncompressedSize64 > uint64(maxArchiveFileBytes) {
+			return fmt.Errorf("archive entry exceeded %d bytes: %s", maxArchiveFileBytes, rel)
+		}
+		if err := os.Chmod(full, mode); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// FingerprintDir hashes the regular files under root, excluding .clawhub metadata.
+func FingerprintDir(root string) (string, error) {
+	type item struct {
+		path string
+		sum  string
+	}
+	var files []item
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if d.Name() == ".clawhub" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		sum := sha256.Sum256(data)
+		files = append(files, item{
+			path: filepath.ToSlash(rel),
+			sum:  hex.EncodeToString(sum[:]),
+		})
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].path < files[j].path })
+	h := sha256.New()
+	for _, file := range files {
+		_, _ = io.WriteString(h, file.path+":"+file.sum+"\n")
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// LocalEdits reports whether the installed contents differ from the recorded fingerprint.
+func LocalEdits(skillDir string) (bool, error) {
+	origin, err := ReadOrigin(skillDir)
+	if err != nil {
+		return false, err
+	}
+	current, err := FingerprintDir(skillDir)
+	if err != nil {
+		return false, err
+	}
+	return current != origin.Fingerprint, nil
+}
+
+// ListInstalled returns managed skills found below root.
+func ListInstalled(root string) ([]InstalledSkill, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	out := make([]InstalledSkill, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		path := filepath.Join(root, entry.Name())
+		origin, err := ReadOrigin(path)
+		if err != nil {
+			continue
+		}
+		modified, err := LocalEdits(path)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, InstalledSkill{
+			Name:     entry.Name(),
+			Path:     path,
+			Origin:   origin,
+			Modified: modified,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+// ReadOrigin loads the .clawhub origin metadata for skillDir.
+func ReadOrigin(skillDir string) (SkillOrigin, error) {
+	data, err := os.ReadFile(filepath.Join(skillDir, ".clawhub", "origin.json"))
+	if err != nil {
+		return SkillOrigin{}, err
+	}
+	var origin SkillOrigin
+	if err := json.Unmarshal(data, &origin); err != nil {
+		return SkillOrigin{}, err
+	}
+	return origin, nil
+}
+
+// WriteOrigin writes origin metadata into skillDir.
+func WriteOrigin(skillDir string, origin SkillOrigin) error {
+	path := filepath.Join(skillDir, ".clawhub", "origin.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(origin, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0o644)
+}
+
+const installScanReadMaxBytes = 128 * 1024
+
+func scanInstalledSkill(root string) (string, []ScanFinding, error) {
+	findings := make([]ScanFinding, 0)
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if d.Name() == ".clawhub" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		info, infoErr := d.Info()
+		if infoErr != nil {
+			return infoErr
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return relErr
+		}
+		rel = filepath.ToSlash(rel)
+		findings = append(findings, pathFindings(rel)...)
+		if info.Size() <= 0 || info.Size() > installScanReadMaxBytes || !scanContentFile(rel, info.Mode()) {
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		findings = append(findings, contentFindings(rel, string(data))...)
+		return nil
+	})
+	if err != nil {
+		return "", nil, err
+	}
+	status := "clean"
+	for _, finding := range findings {
+		switch strings.ToLower(strings.TrimSpace(finding.Severity)) {
+		case "high":
+			return "blocked", findings, nil
+		case "medium":
+			status = "quarantined"
+		}
+	}
+	return status, findings, nil
+}
+
+func pathFindings(rel string) []ScanFinding {
+	lower := strings.ToLower(strings.TrimSpace(rel))
+	for _, name := range []string{".env", ".netrc", ".npmrc", ".pypirc", "id_rsa", "id_dsa", ".aws/credentials", ".aws/config", ".ssh/config", ".ssh/known_hosts"} {
+		if lower == name || strings.HasSuffix(lower, "/"+name) {
+			return []ScanFinding{{Severity: "high", Path: rel, Rule: "credential-material", Message: "bundle contains credential or host-secret material"}}
+		}
+	}
+	return nil
+}
+
+func scanContentFile(rel string, mode os.FileMode) bool {
+	ext := strings.ToLower(filepath.Ext(rel))
+	if mode&0o111 != 0 {
+		return true
+	}
+	switch ext {
+	case ".sh", ".bash", ".zsh", ".command", ".ps1", ".bat", ".cmd", ".py", ".rb", ".js", ".ts":
 		return true
 	default:
 		return false
 	}
 }
-func (b *Bus) Channel() <-chan Event { return b.ch }
+
+func contentFindings(rel, content string) []ScanFinding {
+	lower := strings.ToLower(content)
+	findings := make([]ScanFinding, 0, 2)
+	rules := []struct {
+		rule     string
+		severity string
+		message  string
+		match    func(string) bool
+	}{
+		{rule: "curl-pipe-shell", severity: "medium", message: "downloads remote content directly into a shell", match: func(s string) bool { return strings.Contains(s, "curl ") && strings.Contains(s, "| sh") }},
+		{rule: "wget-pipe-shell", severity: "medium", message: "downloads remote content directly into a shell", match: func(s string) bool { return strings.Contains(s, "wget ") && strings.Contains(s, "| sh") }},
+		{rule: "powershell-iex", severity: "medium", message: "executes downloaded content inline", match: func(s string) bool { return strings.Contains(s, "invoke-webrequest") && strings.Contains(s, "iex") }},
+		{rule: "reverse-shell", severity: "medium", message: "contains a shell/network handoff pattern", match: func(s string) bool { return strings.Contains(s, "/dev/tcp/") || strings.Contains(s, "nc -e") }},
+		{rule: "osascript", severity: "medium", message: "invokes local system automation outside the declared tool model", match: func(s string) bool { return strings.Contains(s, "osascript") }},
+	}
+	for _, rule := range rules {
+		if rule.match(lower) {
+			findings = append(findings, ScanFinding{Severity: rule.severity, Path: rel, Rule: rule.rule, Message: rule.message})
+		}
+	}
+	return findings
+}
+
+// RemoveSkill removes the named installed skill from root.
+func RemoveSkill(root, name string) error {
+	name = sanitizeSlug(name)
+	if name == "" {
+		return fmt.Errorf("skill name required")
+	}
+	return os.RemoveAll(filepath.Join(root, name))
+}
+
+func (c *Client) apiURL(path string) *urlBuilder {
+	return newURLBuilder(c.RegistryURL, path)
+}
+
+func (c *Client) httpClient() *http.Client {
+	if c != nil && c.HTTP != nil {
+		return c.HTTP
+	}
+	return &http.Client{Timeout: 15 * time.Second}
+}
+
+func (c *Client) getJSON(ctx context.Context, rawURL string, dest any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return readHTTPError(resp)
+	}
+	return json.NewDecoder(resp.Body).Decode(dest)
+}
+
+func sanitizeSlug(slug string) string {
+	slug = strings.TrimSpace(slug)
+	if slug == "" || strings.Contains(slug, "..") || strings.Contains(slug, "/") || strings.Contains(slug, "\\") {
+		return ""
+	}
+	return slug
+}
+
+func safeZipPath(path string) (string, bool) {
+	path = strings.TrimSpace(strings.ReplaceAll(path, "\\", "/"))
+	path = strings.TrimPrefix(path, "./")
+	path = strings.TrimPrefix(path, "/")
+	if path == "" || strings.Contains(path, "..") {
+		return "", false
+	}
+	return filepath.FromSlash(path), true
+}
+
+func readHTTPError(resp *http.Response) error {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	text := strings.TrimSpace(string(body))
+	if text == "" {
+		text = resp.Status
+	}
+	return fmt.Errorf("clawhub API error: %s", text)
+}
+
+func queryString(values map[string]string) string {
+	var parts []string
+	for key, value := range values {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		parts = append(parts, urlEncode(key)+"="+urlEncode(value))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, "&")
+}
+
+func intString(v int) string {
+	if v <= 0 {
+		return ""
+	}
+	return fmt.Sprint(v)
+}
+
+func ownerName(owner *struct {
+	Handle      string `json:"handle"`
+	DisplayName string `json:"displayName"`
+}) string {
+	if owner == nil {
+		return ""
+	}
+	if strings.TrimSpace(owner.Handle) != "" {
+		return owner.Handle
+	}
+	return owner.DisplayName
+}
+
+func stringOr[T any](value *T, fn func(*T) string) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(fn(value))
+}
+
+type urlBuilder struct {
+	base     string
+	path     string
+	RawQuery string
+}
+
+func newURLBuilder(base, path string) *urlBuilder {
+	return &urlBuilder{
+		base: strings.TrimRight(base, "/"),
+		path: path,
+	}
+}
+
+func (u *urlBuilder) String() string {
+	if strings.TrimSpace(u.RawQuery) == "" {
+		return u.base + u.path
+	}
+	return u.base + u.path + "?" + u.RawQuery
+}
+
+func urlEncode(s string) string {
+	replacer := strings.NewReplacer(
+		"%", "%25",
+		" ", "%20",
+		"!", "%21",
+		"#", "%23",
+		"$", "%24",
+		"&", "%26",
+		"'", "%27",
+		"(", "%28",
+		")", "%29",
+		"+", "%2B",
+		",", "%2C",
+		"/", "%2F",
+		":", "%3A",
+		";", "%3B",
+		"=", "%3D",
+		"?", "%3F",
+		"@", "%40",
+	)
+	return replacer.Replace(s)
+}
+````
+
+## File: internal/cron/cron.go
+````go
+// Package cron stores and runs scheduled jobs backed by a JSON file.
+package cron
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/binary"
+	"encoding/json"
+	"errors"
+	"log"
+	"os"
+	"sync"
+	"time"
+
+	"github.com/robfig/cron/v3"
+)
+
+// ScheduleKind identifies how a job's next run time is computed.
+type ScheduleKind string
+
+const (
+	// KindAt runs a job once at an absolute Unix-millisecond timestamp.
+	KindAt ScheduleKind = "at"
+	// KindEvery runs a job on a fixed interval.
+	KindEvery ScheduleKind = "every"
+	// KindCron runs a job using a cron expression.
+	KindCron ScheduleKind = "cron"
+)
+
+// CronSchedule describes when a cron job should run.
+type CronSchedule struct {
+	Kind    ScheduleKind `json:"kind"`
+	AtMS    int64        `json:"at_ms,omitempty"`
+	EveryMS int64        `json:"every_ms,omitempty"`
+	Expr    string       `json:"expr,omitempty"`
+	TZ      string       `json:"tz,omitempty"`
+}
+
+// CronPayload is the user-visible work queued when a job fires.
+type CronPayload struct {
+	Kind       string `json:"kind"` // "agent_turn"|"system_event"
+	Message    string `json:"message"`
+	Deliver    bool   `json:"deliver"`
+	Channel    string `json:"channel,omitempty"`
+	To         string `json:"to,omitempty"`
+	SessionKey string `json:"session_key,omitempty"` // optional per-job session key override
+}
+
+// CronJobState records the latest execution result for a job.
+type CronJobState struct {
+	NextRunAtMS *int64 `json:"next_run_at_ms,omitempty"`
+	LastRunAtMS *int64 `json:"last_run_at_ms,omitempty"`
+	LastStatus  string `json:"last_status,omitempty"` // ok|error|skipped
+	LastError   string `json:"last_error,omitempty"`
+}
+
+// CronJob is a persisted scheduled job definition.
+type CronJob struct {
+	ID             string       `json:"id"`
+	Name           string       `json:"name"`
+	Enabled        bool         `json:"enabled"`
+	Schedule       CronSchedule `json:"schedule"`
+	Payload        CronPayload  `json:"payload"`
+	State          CronJobState `json:"state"`
+	CreatedAtMS    int64        `json:"created_at_ms"`
+	UpdatedAtMS    int64        `json:"updated_at_ms"`
+	DeleteAfterRun bool         `json:"delete_after_run"`
+}
+
+// Store is the on-disk JSON document that holds scheduled jobs.
+type Store struct {
+	Version int       `json:"version"`
+	Jobs    []CronJob `json:"jobs"`
+}
+
+// Runner executes a single cron job when it becomes due.
+type Runner func(ctx context.Context, job CronJob) error
+
+// Service loads, schedules, and persists cron jobs. It is safe for concurrent use.
+type Service struct {
+	mu      sync.Mutex
+	path    string
+	runner  Runner
+	c       *cron.Cron
+	entries map[string]cron.EntryID
+}
+
+// New constructs a Service backed by path and runner.
+func New(path string, runner Runner) *Service {
+	return &Service{
+		path:    path,
+		runner:  runner,
+		entries: map[string]cron.EntryID{},
+	}
+}
+
+func (s *Service) load() (Store, error) {
+	var st Store
+	st.Version = 1
+	b, err := os.ReadFile(s.path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return st, nil
+		}
+		return st, err
+	}
+	if err := json.Unmarshal(b, &st); err != nil {
+		return st, err
+	}
+	return st, nil
+}
+
+func (s *Service) save(st Store) error {
+	if err := os.MkdirAll(filepathDir(s.path), 0o755); err != nil {
+		return err
+	}
+	b, _ := json.MarshalIndent(st, "", "  ")
+	return os.WriteFile(s.path, b, 0o644)
+}
+
+func filepathDir(p string) string {
+	i := len(p) - 1
+	for i >= 0 && p[i] != '/' && p[i] != '\\' {
+		i--
+	}
+	if i <= 0 {
+		return "."
+	}
+	return p[:i]
+}
+
+// Start loads persisted jobs and arms the scheduler.
+func (s *Service) Start() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.c != nil {
+		return nil
+	}
+
+	s.c = cron.New(cron.WithSeconds(), cron.WithParser(cron.NewParser(cron.SecondOptional|cron.Minute|cron.Hour|cron.Dom|cron.Month|cron.Dow)))
+	st, err := s.load()
+	if err != nil {
+		return err
+	}
+	for _, j := range st.Jobs {
+		s.armJobLocked(j)
+	}
+	s.c.Start()
+	return nil
+}
+
+// Stop halts the scheduler and waits for the cron runner to stop.
+func (s *Service) Stop() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.c != nil {
+		ctx := s.c.Stop()
+		<-ctx.Done()
+		s.c = nil
+		s.entries = map[string]cron.EntryID{}
+	}
+}
+
+// Status reports the number of jobs and the earliest known next wake time.
+func (s *Service) Status() (map[string]any, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, err := s.load()
+	if err != nil {
+		return nil, err
+	}
+	next := int64(0)
+	for _, j := range st.Jobs {
+		if j.State.NextRunAtMS != nil {
+			if next == 0 || *j.State.NextRunAtMS < next {
+				next = *j.State.NextRunAtMS
+			}
+		}
+	}
+	var nextPtr *int64
+	if next != 0 {
+		nextPtr = &next
+	}
+	return map[string]any{"jobs": len(st.Jobs), "next_wake_at_ms": nextPtr}, nil
+}
+
+// List returns the persisted jobs in storage order.
+func (s *Service) List() ([]CronJob, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, err := s.load()
+	if err != nil {
+		return nil, err
+	}
+	return st.Jobs, nil
+}
+
+// Add assigns missing identifiers, persists job, and arms it when possible.
+func (s *Service) Add(job CronJob) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, err := s.load()
+	if err != nil {
+		return err
+	}
+	now := time.Now().UnixMilli()
+	job.CreatedAtMS = now
+	job.UpdatedAtMS = now
+	if job.ID == "" {
+		job.ID = randID()
+	}
+	if job.Name == "" {
+		job.Name = job.ID
+	}
+	st.Jobs = append(st.Jobs, job)
+	if err := s.save(st); err != nil {
+		return err
+	}
+	s.armJobLocked(job)
+	return nil
+}
+
+// Remove deletes the job with id and reports whether one was found.
+func (s *Service) Remove(id string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, err := s.load()
+	if err != nil {
+		return false, err
+	}
+	found := false
+	n := make([]CronJob, 0, len(st.Jobs))
+	for _, j := range st.Jobs {
+		if j.ID == id {
+			found = true
+			if eid, ok := s.entries[id]; ok && s.c != nil {
+				s.c.Remove(eid)
+				delete(s.entries, id)
+			}
+			continue
+		}
+		n = append(n, j)
+	}
+	st.Jobs = n
+	if err := s.save(st); err != nil {
+		return false, err
+	}
+	return found, nil
+}
+
+// RunNow runs the job with id immediately.
+//
+// When force is false, disabled jobs are skipped and reported as not run.
+func (s *Service) RunNow(ctx context.Context, id string, force bool) (bool, error) {
+	s.mu.Lock()
+	st, err := s.load()
+	s.mu.Unlock()
+	if err != nil {
+		return false, err
+	}
+	for _, j := range st.Jobs {
+		if j.ID == id {
+			if !force && !j.Enabled {
+				return false, nil
+			}
+			err := s.runner(ctx, j)
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			st2, loadErr := s.load()
+			if loadErr != nil {
+				return true, err
+			}
+			shouldDelete := false
+			for i := range st2.Jobs {
+				if st2.Jobs[i].ID == id {
+					now := time.Now().UnixMilli()
+					st2.Jobs[i].State.LastRunAtMS = &now
+					if err != nil {
+						st2.Jobs[i].State.LastStatus = "error"
+						st2.Jobs[i].State.LastError = err.Error()
+					} else {
+						st2.Jobs[i].State.LastStatus = "ok"
+						st2.Jobs[i].State.LastError = ""
+					}
+					if st2.Jobs[i].DeleteAfterRun {
+						shouldDelete = true
+						break
+					}
+					break
+				}
+			}
+			if shouldDelete {
+				next := make([]CronJob, 0, len(st2.Jobs))
+				for _, jj := range st2.Jobs {
+					if jj.ID == id {
+						continue
+					}
+					next = append(next, jj)
+				}
+				st2.Jobs = next
+				if eid, ok := s.entries[id]; ok && s.c != nil {
+					s.c.Remove(eid)
+					delete(s.entries, id)
+				}
+			}
+			if saveErr := s.save(st2); saveErr != nil {
+				log.Printf("cron save failed: %v", saveErr)
+			}
+			return true, err
+		}
+	}
+	return false, nil
+}
+
+func (s *Service) armJobLocked(job CronJob) {
+	if s.c == nil {
+		return
+	}
+	if !job.Enabled {
+		return
+	}
+	switch job.Schedule.Kind {
+	case KindAt:
+		at := time.UnixMilli(job.Schedule.AtMS)
+		if time.Now().After(at) {
+			return
+		}
+		delay := time.Until(at)
+		// schedule using timer goroutine
+		go func(id string, d time.Duration) {
+			time.Sleep(d)
+			if err := s.runner(context.Background(), job); err != nil {
+				log.Printf("cron runner error: id=%s err=%v", id, err)
+			}
+		}(job.ID, delay)
+	case KindEvery:
+		sec := int64(job.Schedule.EveryMS / 1000)
+		if sec <= 0 {
+			sec = 60
+		}
+		spec := "@every " + (time.Duration(sec) * time.Second).String()
+		eid, err := s.c.AddFunc(spec, func() {
+			if e := s.runner(context.Background(), job); e != nil {
+				log.Printf("cron runner error: id=%s err=%v", job.ID, e)
+			}
+		})
+		if err == nil {
+			s.entries[job.ID] = eid
+		} else {
+			log.Printf("cron schedule add failed: id=%s spec=%s err=%v", job.ID, spec, err)
+		}
+	case KindCron:
+		spec := job.Schedule.Expr
+		eid, err := s.c.AddFunc(spec, func() {
+			if e := s.runner(context.Background(), job); e != nil {
+				log.Printf("cron runner error: id=%s err=%v", job.ID, e)
+			}
+		})
+		if err == nil {
+			s.entries[job.ID] = eid
+		} else {
+			log.Printf("cron schedule add failed: id=%s spec=%s err=%v", job.ID, spec, err)
+		}
+	}
+}
+
+func randUint() uint64 {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return uint64(time.Now().UnixNano())
+	}
+	return binary.LittleEndian.Uint64(b[:])
+}
+
+func randID() string {
+	const chars = "abcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, 10)
+	for i := range b {
+		b[i] = chars[int(randUint()%uint64(len(chars)))]
+	}
+	return string(b)
+}
+````
+
+## File: internal/heartbeat/service.go
+````go
+// Package heartbeat publishes recurring review events derived from a tasks file.
+package heartbeat
+
+import (
+	"context"
+	"errors"
+	"log"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"or3-intern/internal/bus"
+	"or3-intern/internal/config"
+	"or3-intern/internal/triggers"
+)
+
+const (
+	// DefaultChannel is the channel name used for emitted heartbeat events.
+	DefaultChannel = "system"
+	// DefaultFrom is the sender name used for emitted heartbeat events.
+	DefaultFrom = "heartbeat"
+	// SeedMessage is the default instruction sent with a heartbeat event.
+	SeedMessage = "Review HEARTBEAT.md and execute any active recurring tasks."
+
+	// MetaKeyHeartbeat marks an event as originating from the heartbeat service.
+	MetaKeyHeartbeat = "heartbeat"
+	// MetaKeyDone stores a completion callback that clears the in-flight flag.
+	MetaKeyDone = "heartbeat_done"
+)
+
+// Service watches for recurring heartbeat work and publishes it onto the bus.
+type Service struct {
+	Config       config.HeartbeatConfig
+	WorkspaceDir string
+	Bus          *bus.Bus
+
+	logf func(string, ...any)
+
+	mu        sync.Mutex
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+	tickQueue chan struct{}
+	inFlight  atomic.Bool
+	stopping  atomic.Bool
+}
+
+// New constructs a heartbeat service for cfg and workspaceDir.
+func New(cfg config.HeartbeatConfig, workspaceDir string, eventBus *bus.Bus) *Service {
+	return &Service{
+		Config:       cfg,
+		WorkspaceDir: workspaceDir,
+		Bus:          eventBus,
+		logf:         log.Printf,
+	}
+}
+
+// Start launches the ticker and publisher goroutines when the service is enabled.
+func (s *Service) Start(ctx context.Context) {
+	if s == nil || !s.Config.Enabled || s.Bus == nil {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cancel != nil {
+		return
+	}
+	s.stopping.Store(false)
+
+	childCtx, cancel := context.WithCancel(ctx)
+	s.cancel = cancel
+	s.tickQueue = make(chan struct{}, 1)
+
+	interval := time.Duration(normalizeIntervalMinutes(s.Config.IntervalMinutes)) * time.Minute
+	s.wg.Add(2)
+	go s.runTicker(childCtx, interval)
+	go s.runPublisher(childCtx)
+}
+
+// Stop cancels background work and waits for the service to drain.
+func (s *Service) Stop() {
+	if s == nil {
+		return
+	}
+	s.stopping.Store(true)
+
+	s.mu.Lock()
+	cancel := s.cancel
+	s.cancel = nil
+	s.tickQueue = nil
+	s.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	s.wg.Wait()
+	s.inFlight.Store(false)
+}
+
+func (s *Service) runTicker(ctx context.Context, interval time.Duration) {
+	defer s.wg.Done()
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.enqueueTick("timer")
+		}
+	}
+}
+
+func (s *Service) runPublisher(ctx context.Context) {
+	defer s.wg.Done()
+
+	for {
+		if s.stopping.Load() || ctx.Err() != nil {
+			return
+		}
+
+		s.mu.Lock()
+		tickQueue := s.tickQueue
+		s.mu.Unlock()
+		if tickQueue == nil {
+			return
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-tickQueue:
+			if s.stopping.Load() || ctx.Err() != nil {
+				return
+			}
+			s.processTick()
+		}
+	}
+}
+
+func (s *Service) enqueueTick(source string) bool {
+	s.mu.Lock()
+	tickQueue := s.tickQueue
+	s.mu.Unlock()
+	if tickQueue == nil {
+		return false
+	}
+
+	select {
+	case tickQueue <- struct{}{}:
+		return true
+	default:
+		s.logf("heartbeat tick dropped: pending tick already queued source=%s", source)
+		return false
+	}
+}
+
+func (s *Service) processTick() {
+	if s.inFlight.Load() {
+		s.logf("heartbeat tick skipped: previous turn still in flight")
+		return
+	}
+
+	path, text, err := LoadTasksFile(s.Config.TasksFile, s.WorkspaceDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			s.logf("heartbeat tick skipped: tasks file not found")
+			return
+		}
+		s.logf("heartbeat tick skipped: read failed path=%q err=%v", path, err)
+		return
+	}
+	if !HasActiveInstructions(text) {
+		return
+	}
+
+	s.inFlight.Store(true)
+	meta := map[string]any{
+		MetaKeyHeartbeat: true,
+		MetaKeyDone: func() {
+			s.inFlight.Store(false)
+		},
+		"tasks_path": path,
+		triggers.MetaKeyStructuredEvent: triggers.StructuredEventMap(triggers.StructuredEvent{
+			Type:    string(bus.EventHeartbeat),
+			Source:  "heartbeat",
+			Trusted: true,
+			Details: map[string]any{"tasks_path": path, "session_key": normalizedSessionKey(s.Config.SessionKey)},
+		}),
+	}
+	if structuredTasks, ok := triggers.ParseStructuredTasksText(text); ok {
+		meta[triggers.MetaKeyStructuredTasks] = triggers.StructuredTasksMap(structuredTasks)
+	}
+	ev := bus.Event{
+		Type:       bus.EventHeartbeat,
+		SessionKey: normalizedSessionKey(s.Config.SessionKey),
+		Channel:    DefaultChannel,
+		From:       DefaultFrom,
+		Message:    SeedMessage,
+		Meta:       meta,
+	}
+	if ok := s.Bus.Publish(ev); !ok {
+		s.inFlight.Store(false)
+		s.logf("heartbeat tick dropped: event bus full")
+	}
+}
+
+// LoadTasksFile resolves and reads the heartbeat tasks file.
+// It returns the chosen path, trimmed contents, and any read error.
+func LoadTasksFile(configPath, workspaceDir string) (string, string, error) {
+	var firstErr error
+	for _, path := range candidatePaths(configPath, workspaceDir) {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			return path, strings.TrimSpace(string(data)), nil
+		}
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	if firstErr != nil {
+		return strings.TrimSpace(configPath), "", firstErr
+	}
+	return strings.TrimSpace(configPath), "", os.ErrNotExist
+}
+
+// HasActiveInstructions reports whether text contains actionable non-comment content.
+func HasActiveInstructions(text string) bool {
+	inComment := false
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if inComment {
+			if strings.Contains(trimmed, "-->") {
+				inComment = false
+			}
+			continue
+		}
+		if strings.HasPrefix(trimmed, "<!--") {
+			if !strings.Contains(trimmed, "-->") {
+				inComment = true
+			}
+			continue
+		}
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func candidatePaths(configPath, workspaceDir string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, 3)
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		if _, ok := seen[path]; ok {
+			return
+		}
+		seen[path] = struct{}{}
+		out = append(out, path)
+	}
+	if strings.TrimSpace(workspaceDir) != "" {
+		add(filepath.Join(workspaceDir, "HEARTBEAT.md"))
+		add(filepath.Join(workspaceDir, "heartbeat.md"))
+	}
+	add(configPath)
+	return out
+}
+
+func normalizeIntervalMinutes(v int) int {
+	if v <= 0 {
+		return 30
+	}
+	if v < 1 {
+		return 1
+	}
+	return v
+}
+
+func normalizedSessionKey(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return config.DefaultHeartbeatSessionKey
+	}
+	return v
+}
 ````
 
 ## File: internal/memory/consolidate.go
@@ -9562,6 +10666,588 @@ func nullBytes(b []byte) any {
 }
 ````
 
+## File: internal/memory/retrieve.go
+````go
+// Package memory retrieves and consolidates long-lived memory entries.
+package memory
+
+import (
+	"context"
+	"math"
+	"sort"
+	"strings"
+
+	"or3-intern/internal/db"
+)
+
+// Retrieved is one memory hit returned from hybrid retrieval.
+type Retrieved struct {
+	Source string // pinned|vector|fts
+	ID     int64
+	Text   string
+	Score  float64
+}
+
+// Retriever ranks vector, FTS, lexical, and recency signals into a single result set.
+type Retriever struct {
+	DB              *db.DB
+	VectorWeight    float64
+	FTSWeight       float64
+	LexicalWeight   float64
+	RecencyWeight   float64
+	VectorScanLimit int
+}
+
+// NewRetriever constructs a Retriever with default ranking weights.
+func NewRetriever(d *db.DB) *Retriever {
+	return &Retriever{DB: d, VectorWeight: 0.55, FTSWeight: 0.25, LexicalWeight: 0.12, RecencyWeight: 0.08, VectorScanLimit: 2000}
+}
+
+// Retrieve runs hybrid retrieval and returns diversified top-k memory results.
+func (r *Retriever) Retrieve(ctx context.Context, sessionKey, query string, queryVec []float32, vectorK, ftsK, topK int) ([]Retrieved, error) {
+	vecs, err := VectorSearch(ctx, r.DB, sessionKey, queryVec, vectorK, r.VectorScanLimit)
+	if err != nil {
+		return nil, err
+	}
+	fts, _ := r.DB.SearchFTS(ctx, sessionKey, normalizeFTSQuery(query), ftsK)
+
+	type agg struct {
+		id        int64
+		text      string
+		v         float64
+		f         float64
+		createdAt int64
+	}
+	m := map[int64]*agg{}
+	for _, c := range vecs {
+		a := m[c.ID]
+		if a == nil {
+			a = &agg{id: c.ID, text: c.Text}
+			m[c.ID] = a
+		}
+		a.v = c.Score
+		if c.CreatedAt > a.createdAt {
+			a.createdAt = c.CreatedAt
+		}
+	}
+	for _, f := range fts {
+		a := m[f.ID]
+		if a == nil {
+			a = &agg{id: f.ID, text: f.Text}
+			m[f.ID] = a
+		}
+		// bm25 lower is better. Convert to a positive "higher is better".
+		a.f = 1.0 / (1.0 + f.Rank)
+		if f.CreatedAt > a.createdAt {
+			a.createdAt = f.CreatedAt
+		}
+	}
+
+	raw := make([]Retrieved, 0, len(m))
+	tokens := retrievalTokens(query)
+	newest := int64(0)
+	for _, a := range m {
+		if a.createdAt > newest {
+			newest = a.createdAt
+		}
+	}
+	for _, a := range m {
+		lexical := lexicalOverlapScore(tokens, a.text)
+		recency := recencyScore(a.createdAt, newest)
+		score := (a.v * r.VectorWeight) + (a.f * r.FTSWeight) + (lexical * r.LexicalWeight) + (recency * r.RecencyWeight)
+		src := "hybrid"
+		if a.f > 0 && a.v == 0 {
+			src = "fts"
+		}
+		if a.v > 0 && a.f == 0 {
+			src = "vector"
+		}
+		raw = append(raw, Retrieved{Source: src, ID: a.id, Text: a.text, Score: score})
+	}
+
+	sort.Slice(raw, func(i, j int) bool {
+		if raw[i].Score == raw[j].Score {
+			return raw[i].ID > raw[j].ID
+		}
+		return raw[i].Score > raw[j].Score
+	})
+	return diversifyRetrieved(raw, topK), nil
+}
+
+func retrievalTokens(query string) []string {
+	parts := strings.FieldsFunc(strings.ToLower(query), func(r rune) bool {
+		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9')
+	})
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if len(part) < 3 {
+			continue
+		}
+		if _, ok := seen[part]; ok {
+			continue
+		}
+		seen[part] = struct{}{}
+		out = append(out, part)
+	}
+	return out
+}
+
+func lexicalOverlapScore(tokens []string, text string) float64 {
+	if len(tokens) == 0 {
+		return 0
+	}
+	lower := strings.ToLower(text)
+	hits := 0
+	for _, token := range tokens {
+		if strings.Contains(lower, token) {
+			hits++
+		}
+	}
+	return float64(hits) / float64(len(tokens))
+}
+
+func recencyScore(createdAt, newest int64) float64 {
+	if createdAt <= 0 || newest <= 0 || createdAt >= newest {
+		return 1
+	}
+	ageHours := float64(newest-createdAt) / (1000 * 60 * 60)
+	if ageHours <= 0 {
+		return 1
+	}
+	return math.Exp(-ageHours / (24 * 14))
+}
+
+func diversifyRetrieved(items []Retrieved, topK int) []Retrieved {
+	if topK <= 0 || len(items) == 0 {
+		return nil
+	}
+	selected := make([]Retrieved, 0, min(topK, len(items)))
+	seenCanonical := map[string]struct{}{}
+	sourceCounts := map[string]int{}
+	for _, item := range items {
+		canonical := canonicalRetrievedText(item.Text)
+		if canonical != "" {
+			if _, ok := seenCanonical[canonical]; ok {
+				continue
+			}
+			duplicate := false
+			for _, existing := range selected {
+				if similarRetrievedText(existing.Text, item.Text) {
+					duplicate = true
+					break
+				}
+			}
+			if duplicate {
+				continue
+			}
+		}
+		penalty := 1.0 / float64(sourceCounts[item.Source]+1)
+		item.Score = item.Score * (0.85 + 0.15*penalty)
+		selected = append(selected, item)
+		if canonical != "" {
+			seenCanonical[canonical] = struct{}{}
+		}
+		sourceCounts[item.Source]++
+		if len(selected) >= topK {
+			break
+		}
+	}
+	sort.Slice(selected, func(i, j int) bool {
+		if selected[i].Score == selected[j].Score {
+			return selected[i].ID > selected[j].ID
+		}
+		return selected[i].Score > selected[j].Score
+	})
+	return selected
+}
+
+func canonicalRetrievedText(text string) string {
+	text = strings.ToLower(strings.Join(strings.Fields(text), " "))
+	if len(text) > 180 {
+		text = text[:180]
+	}
+	return text
+}
+
+func similarRetrievedText(a, b string) bool {
+	ac := canonicalRetrievedText(a)
+	bc := canonicalRetrievedText(b)
+	if ac == "" || bc == "" {
+		return false
+	}
+	if ac == bc {
+		return true
+	}
+	at := retrievalTokens(ac)
+	bt := retrievalTokens(bc)
+	if len(at) == 0 || len(bt) == 0 {
+		return false
+	}
+	set := map[string]struct{}{}
+	for _, token := range at {
+		set[token] = struct{}{}
+	}
+	shared := 0
+	union := len(set)
+	for _, token := range bt {
+		if _, ok := set[token]; ok {
+			shared++
+			continue
+		}
+		union++
+	}
+	if union == 0 {
+		return false
+	}
+	return float64(shared)/float64(union) >= 0.8
+}
+
+func normalizeFTSQuery(q string) string {
+	q = strings.TrimSpace(q)
+	if q == "" {
+		return ""
+	}
+	// simple: split on spaces, quote terms that contain punctuation
+	parts := strings.Fields(q)
+	for i, p := range parts {
+		if strings.ContainsAny(p, `":*`) {
+			parts[i] = `"` + strings.ReplaceAll(p, `"`, `""`) + `"`
+		}
+	}
+	return strings.Join(parts, " ")
+}
+````
+
+## File: internal/memory/vector.go
+````go
+package memory
+
+import (
+	"bytes"
+	"context"
+	"encoding/binary"
+	"errors"
+	"math"
+
+	"or3-intern/internal/db"
+)
+
+func PackFloat32(vec []float32) []byte {
+	var b bytes.Buffer
+	_ = binary.Write(&b, binary.LittleEndian, vec)
+	return b.Bytes()
+}
+
+func UnpackFloat32(blob []byte) ([]float32, error) {
+	if len(blob)%4 != 0 {
+		return nil, errors.New("invalid float32 blob")
+	}
+	out := make([]float32, len(blob)/4)
+	if err := binary.Read(bytes.NewReader(blob), binary.LittleEndian, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func Cosine(a, b []float32) float64 {
+	var dot, na, nb float64
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	for i := 0; i < n; i++ {
+		av := float64(a[i])
+		bv := float64(b[i])
+		dot += av * bv
+		na += av * av
+		nb += bv * bv
+	}
+	if na == 0 || nb == 0 {
+		return 0
+	}
+	return dot / (math.Sqrt(na) * math.Sqrt(nb))
+}
+
+type VecCandidate struct {
+	ID        int64
+	Text      string
+	Score     float64
+	CreatedAt int64
+}
+
+type candMinHeap []VecCandidate
+
+func (h candMinHeap) Len() int           { return len(h) }
+func (h candMinHeap) Less(i, j int) bool { return h[i].Score < h[j].Score }
+func (h candMinHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *candMinHeap) Push(x any)        { *h = append(*h, x.(VecCandidate)) }
+func (h *candMinHeap) Pop() any {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[:n-1]
+	return x
+}
+
+func VectorSearch(ctx context.Context, d *db.DB, sessionKey string, queryVec []float32, k int, scanLimit int) ([]VecCandidate, error) {
+	_ = scanLimit
+	queryBlob := PackFloat32(queryVec)
+	rows, err := d.SearchMemoryVectors(ctx, sessionKey, queryBlob, k)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]VecCandidate, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, VecCandidate{
+			ID:        row.ID,
+			Text:      row.Text,
+			Score:     1.0 / (1.0 + row.Distance),
+			CreatedAt: row.CreatedAt,
+		})
+	}
+	return out, nil
+}
+````
+
+## File: internal/tools/message.go
+````go
+package tools
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	rootchannels "or3-intern/internal/channels"
+)
+
+type DeliverFunc func(ctx context.Context, channel, to, text string, meta map[string]any) error
+
+type SendMessage struct {
+	Base
+	Deliver        DeliverFunc
+	DefaultChannel string
+	DefaultTo      string
+	AllowedRoot    string
+	ArtifactsDir   string
+	MaxMediaBytes  int
+}
+
+func (t *SendMessage) Capability() CapabilityLevel { return CapabilityGuarded }
+
+func (t *SendMessage) Name() string { return "send_message" }
+func (t *SendMessage) Description() string {
+	return "Send a message via a configured channel (for reminders/cron or proactive messages)."
+}
+func (t *SendMessage) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{
+		"channel": map[string]any{"type": "string"},
+		"to":      map[string]any{"type": "string"},
+		"text":    map[string]any{"type": "string"},
+		"reply_in_thread": map[string]any{
+			"type":        "boolean",
+			"description": "When true, reuse the current channel's reply/thread metadata for the outgoing message.",
+		},
+		"media": map[string]any{
+			"type":        "array",
+			"items":       map[string]any{"type": "string"},
+			"description": "Optional local file paths to send as attachments.",
+		},
+	}, "required": []string{}}
+}
+func (t *SendMessage) Schema() map[string]any {
+	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
+}
+func (t *SendMessage) Execute(ctx context.Context, params map[string]any) (string, error) {
+	if t.Deliver == nil {
+		return "", fmt.Errorf("deliver not configured")
+	}
+	ctxChannel, ctxTo := DeliveryFromContext(ctx)
+	ch := readOptionalString(params, "channel")
+	to := readOptionalString(params, "to")
+	text := readOptionalString(params, "text")
+	if ch == "" {
+		ch = strings.TrimSpace(t.DefaultChannel)
+	}
+	if ch == "" {
+		ch = strings.TrimSpace(ctxChannel)
+	}
+	if to == "" {
+		to = strings.TrimSpace(t.DefaultTo)
+	}
+	if to == "" {
+		to = strings.TrimSpace(ctxTo)
+	}
+	mediaPaths, err := t.validateMediaPaths(params["media"])
+	if err != nil {
+		return "", err
+	}
+	if text == "" && len(mediaPaths) == 0 {
+		return "", fmt.Errorf("message requires text or media")
+	}
+	inheritedReplyMeta := DeliveryMetaFromContext(ctx)
+	meta := map[string]any{}
+	explicitTo := strings.TrimSpace(readOptionalString(params, "to")) != ""
+	replyInThread, err := optionalBool(params["reply_in_thread"])
+	if err != nil {
+		return "", err
+	}
+	if replyInThread {
+		if explicitTo {
+			return "", fmt.Errorf("reply_in_thread requires using the current delivery target")
+		}
+		if strings.TrimSpace(ctxChannel) != "" && !strings.EqualFold(strings.TrimSpace(ch), strings.TrimSpace(ctxChannel)) {
+			return "", fmt.Errorf("reply_in_thread requires using the current delivery channel")
+		}
+		for k, v := range inheritedReplyMeta {
+			meta[k] = v
+		}
+	}
+	if len(mediaPaths) > 0 || explicitTo || len(meta) > 0 {
+		if len(mediaPaths) > 0 {
+			meta[rootchannels.MetaMediaPaths] = mediaPaths
+		}
+		if explicitTo {
+			meta["explicit_to"] = true
+		}
+	}
+	if len(meta) == 0 {
+		meta = nil
+	}
+	if err := t.Deliver(ctx, ch, to, text, meta); err != nil {
+		return "", err
+	}
+	return "ok", nil
+}
+
+func optionalBool(raw any) (bool, error) {
+	switch v := raw.(type) {
+	case nil:
+		return false, nil
+	case bool:
+		return v, nil
+	case string:
+		text := strings.TrimSpace(strings.ToLower(v))
+		switch text {
+		case "", "false", "0", "no":
+			return false, nil
+		case "true", "1", "yes":
+			return true, nil
+		default:
+			return false, fmt.Errorf("reply_in_thread must be a boolean")
+		}
+	default:
+		return false, fmt.Errorf("reply_in_thread must be a boolean")
+	}
+}
+
+func (t *SendMessage) validateMediaPaths(raw any) ([]string, error) {
+	items, err := stringSlice(raw)
+	if err != nil {
+		return nil, err
+	}
+	if len(items) == 0 {
+		return nil, nil
+	}
+	roots := make([]string, 0, 2)
+	if strings.TrimSpace(t.AllowedRoot) != "" {
+		roots = append(roots, strings.TrimSpace(t.AllowedRoot))
+	}
+	if strings.TrimSpace(t.ArtifactsDir) != "" {
+		roots = append(roots, strings.TrimSpace(t.ArtifactsDir))
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		p, err := filepath.Abs(strings.TrimSpace(item))
+		if err != nil {
+			return nil, err
+		}
+		p, err = canonicalizePath(p)
+		if err != nil {
+			return nil, err
+		}
+		info, err := os.Stat(p)
+		if err != nil {
+			return nil, err
+		}
+		if info.IsDir() {
+			return nil, fmt.Errorf("media path is a directory: %s", item)
+		}
+		if t.MaxMediaBytes == 0 {
+			return nil, fmt.Errorf("media attachments disabled by config")
+		}
+		if t.MaxMediaBytes > 0 && info.Size() > int64(t.MaxMediaBytes) {
+			return nil, fmt.Errorf("media path exceeds maxMediaBytes: %s", item)
+		}
+		if len(roots) > 0 {
+			allowed := false
+			for _, root := range roots {
+				ok, err := pathWithinRoot(p, root)
+				if err != nil {
+					return nil, err
+				}
+				if ok {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				return nil, fmt.Errorf("media path outside allowed roots: %s", item)
+			}
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+func pathWithinRoot(absPath, root string) (bool, error) {
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return false, err
+	}
+	root, err = canonicalizeRoot(root)
+	if err != nil {
+		return false, err
+	}
+	rel, err := filepath.Rel(root, absPath)
+	if err != nil {
+		return false, err
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)), nil
+}
+
+func stringSlice(raw any) ([]string, error) {
+	switch v := raw.(type) {
+	case nil:
+		return nil, nil
+	case []string:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			if strings.TrimSpace(item) == "" {
+				continue
+			}
+			out = append(out, item)
+		}
+		return out, nil
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			s := strings.TrimSpace(fmt.Sprint(item))
+			if s == "" {
+				continue
+			}
+			out = append(out, s)
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("media must be an array of strings")
+	}
+}
+````
+
 ## File: internal/tools/skill_exec.go
 ````go
 package tools
@@ -9965,12 +11651,16 @@ type Deliverer struct {
 	Spinner *Spinner // shared with Channel; stopped before any output
 }
 
+// Name returns the registered channel name.
 func (Deliverer) Name() string { return "cli" }
 
+// Start is a no-op because the terminal deliverer has no background lifecycle.
 func (Deliverer) Start(ctx context.Context, eventBus *bus.Bus) error { return nil }
 
+// Stop is a no-op because the terminal deliverer has no background lifecycle.
 func (Deliverer) Stop(ctx context.Context) error { return nil }
 
+// Deliver renders a completed assistant response to stdout.
 func (d Deliverer) Deliver(ctx context.Context, channel, to, text string) error {
 	d.stopSpinner()
 	fmt.Print(FormatResponse(text))
@@ -9989,6 +11679,7 @@ func (d Deliverer) stopSpinner() {
 	}
 }
 
+// ShowError stops spinner and renders err to the terminal.
 func ShowError(spinner *Spinner, err error) {
 	if spinner != nil {
 		spinner.Stop()
@@ -10016,6 +11707,7 @@ type CLIStreamWriter struct {
 	spinner *Spinner
 }
 
+// WriteDelta appends one streamed text chunk to the terminal output.
 func (w *CLIStreamWriter) WriteDelta(ctx context.Context, text string) error {
 	if w.closed || w.aborted {
 		return nil
@@ -10036,6 +11728,7 @@ func (w *CLIStreamWriter) WriteDelta(ctx context.Context, text string) error {
 	return nil
 }
 
+// Close finishes the stream and renders finalText when nothing was streamed.
 func (w *CLIStreamWriter) Close(ctx context.Context, finalText string) error {
 	if w.aborted {
 		return nil
@@ -10066,6 +11759,7 @@ func (w *CLIStreamWriter) Close(ctx context.Context, finalText string) error {
 	return nil
 }
 
+// Abort marks the stream aborted and renders an abort marker when streaming started.
 func (w *CLIStreamWriter) Abort(ctx context.Context) error {
 	w.aborted = true
 	if w.started {
@@ -10077,379 +11771,1813 @@ func (w *CLIStreamWriter) Abort(ctx context.Context) error {
 	return nil
 }
 
-// BeginStream implements channels.StreamingChannel.
+// BeginStream returns a stream writer for incremental CLI output.
 func (d Deliverer) BeginStream(ctx context.Context, to string, meta map[string]any) (channels.StreamWriter, error) {
 	return &CLIStreamWriter{spinner: d.Spinner}, nil
 }
 ````
 
-## File: internal/cron/cron.go
+## File: internal/channels/email/email.go
 ````go
-package cron
+// Package email implements the email channel adapter.
+package email
 
 import (
+	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/binary"
+	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
-	"errors"
+	"fmt"
+	"html"
+	"io"
 	"log"
-	"os"
+	"mime"
+	"mime/multipart"
+	"mime/quotedprintable"
+	"net"
+	"net/mail"
+	"net/smtp"
+	"net/textproto"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/robfig/cron/v3"
-)
+	"github.com/emersion/go-imap/v2"
+	"github.com/emersion/go-imap/v2/imapclient"
+	xhtml "golang.org/x/net/html"
 
-type ScheduleKind string
+	"or3-intern/internal/bus"
+	"or3-intern/internal/config"
+	"or3-intern/internal/db"
+)
 
 const (
-	KindAt    ScheduleKind = "at"
-	KindEvery ScheduleKind = "every"
-	KindCron  ScheduleKind = "cron"
+	defaultPollInterval = 30 * time.Second
+	defaultNetTimeout   = 30 * time.Second
+	maxFetchBatch       = 20
+	maxProcessedKeys    = 4096
+	dedupeMessageLimit  = 200
+	lookupMessageLimit  = 50
 )
 
-type CronSchedule struct {
-	Kind    ScheduleKind `json:"kind"`
-	AtMS    int64        `json:"at_ms,omitempty"`
-	EveryMS int64        `json:"every_ms,omitempty"`
-	Expr    string       `json:"expr,omitempty"`
-	TZ      string       `json:"tz,omitempty"`
+// InboundMessage is a normalized email fetched from IMAP.
+type InboundMessage struct {
+	UID       string
+	From      string
+	Subject   string
+	MessageID string
+	Date      time.Time
+	Body      string
 }
 
-type CronPayload struct {
-	Kind       string `json:"kind"` // "agent_turn"|"system_event"
-	Message    string `json:"message"`
-	Deliver    bool   `json:"deliver"`
-	Channel    string `json:"channel,omitempty"`
-	To         string `json:"to,omitempty"`
-	SessionKey string `json:"session_key,omitempty"` // optional per-job session key override
+// OutboundMessage is an email prepared for SMTP delivery.
+type OutboundMessage struct {
+	To        string
+	From      string
+	Subject   string
+	Text      string
+	InReplyTo string
 }
 
-type CronJobState struct {
-	NextRunAtMS *int64 `json:"next_run_at_ms,omitempty"`
-	LastRunAtMS *int64 `json:"last_run_at_ms,omitempty"`
-	LastStatus  string `json:"last_status,omitempty"` // ok|error|skipped
-	LastError   string `json:"last_error,omitempty"`
+type threadState struct {
+	Subject   string
+	MessageID string
 }
 
-type CronJob struct {
-	ID             string       `json:"id"`
-	Name           string       `json:"name"`
-	Enabled        bool         `json:"enabled"`
-	Schedule       CronSchedule `json:"schedule"`
-	Payload        CronPayload  `json:"payload"`
-	State          CronJobState `json:"state"`
-	CreatedAtMS    int64        `json:"created_at_ms"`
-	UpdatedAtMS    int64        `json:"updated_at_ms"`
-	DeleteAfterRun bool         `json:"delete_after_run"`
+// Channel polls inbound email and sends outbound replies.
+type Channel struct {
+	Config config.EmailChannelConfig
+	DB     *db.DB
+
+	FetchMessages func(ctx context.Context) ([]InboundMessage, error)
+	SendMail      func(ctx context.Context, outbound OutboundMessage) error
+
+	mu             sync.Mutex
+	running        bool
+	cancel         context.CancelFunc
+	threadBySender map[string]threadState
+	processedKeys  map[string]struct{}
+	processedOrder []string
 }
 
-type Store struct {
-	Version int       `json:"version"`
-	Jobs    []CronJob `json:"jobs"`
-}
+// Name returns the registered channel name.
+func (c *Channel) Name() string { return "email" }
 
-type Runner func(ctx context.Context, job CronJob) error
-
-type Service struct {
-	mu      sync.Mutex
-	path    string
-	runner  Runner
-	c       *cron.Cron
-	entries map[string]cron.EntryID
-}
-
-func New(path string, runner Runner) *Service {
-	return &Service{
-		path:    path,
-		runner:  runner,
-		entries: map[string]cron.EntryID{},
-	}
-}
-
-func (s *Service) load() (Store, error) {
-	var st Store
-	st.Version = 1
-	b, err := os.ReadFile(s.path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return st, nil
-		}
-		return st, err
-	}
-	if err := json.Unmarshal(b, &st); err != nil {
-		return st, err
-	}
-	return st, nil
-}
-
-func (s *Service) save(st Store) error {
-	if err := os.MkdirAll(filepathDir(s.path), 0o755); err != nil {
-		return err
-	}
-	b, _ := json.MarshalIndent(st, "", "  ")
-	return os.WriteFile(s.path, b, 0o644)
-}
-
-func filepathDir(p string) string {
-	i := len(p) - 1
-	for i >= 0 && p[i] != '/' && p[i] != '\\' {
-		i--
-	}
-	if i <= 0 {
-		return "."
-	}
-	return p[:i]
-}
-
-func (s *Service) Start() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.c != nil {
+// Start validates configuration and begins polling for inbound mail.
+func (c *Channel) Start(ctx context.Context, eventBus *bus.Bus) error {
+	if !c.Config.ConsentGranted {
+		log.Printf("email channel disabled: consentGranted is false")
 		return nil
 	}
-
-	s.c = cron.New(cron.WithSeconds(), cron.WithParser(cron.NewParser(cron.SecondOptional|cron.Minute|cron.Hour|cron.Dom|cron.Month|cron.Dow)))
-	st, err := s.load()
-	if err != nil {
+	if err := c.validate(); err != nil {
 		return err
 	}
-	for _, j := range st.Jobs {
-		s.armJobLocked(j)
+	if eventBus == nil {
+		return fmt.Errorf("event bus not configured")
 	}
-	s.c.Start()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.running {
+		return nil
+	}
+	if c.threadBySender == nil {
+		c.threadBySender = map[string]threadState{}
+	}
+	if c.processedKeys == nil {
+		c.processedKeys = map[string]struct{}{}
+	}
+	childCtx, cancel := context.WithCancel(ctx)
+	c.cancel = cancel
+	c.running = true
+	go c.pollLoop(childCtx, eventBus)
 	return nil
 }
 
-func (s *Service) Stop() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.c != nil {
-		ctx := s.c.Stop()
-		<-ctx.Done()
-		s.c = nil
-		s.entries = map[string]cron.EntryID{}
+// Stop cancels polling and leaves any current request to drain.
+func (c *Channel) Stop(ctx context.Context) error {
+	_ = ctx
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cancel != nil {
+		c.cancel()
 	}
+	c.cancel = nil
+	c.running = false
+	return nil
 }
 
-func (s *Service) Status() (map[string]any, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, err := s.load()
-	if err != nil {
-		return nil, err
+// Deliver sends a reply or new outbound email.
+func (c *Channel) Deliver(ctx context.Context, to, text string, meta map[string]any) error {
+	recipient := normalizeAddress(to)
+	if recipient == "" {
+		recipient = normalizeAddress(c.Config.DefaultTo)
 	}
-	next := int64(0)
-	for _, j := range st.Jobs {
-		if j.State.NextRunAtMS != nil {
-			if next == 0 || *j.State.NextRunAtMS < next {
-				next = *j.State.NextRunAtMS
-			}
+	if recipient == "" {
+		return fmt.Errorf("email recipient address required")
+	}
+
+	thread, _, err := c.lookupThread(ctx, recipient)
+	if err != nil {
+		return err
+	}
+
+	subject := c.subjectForDelivery(meta, thread.Subject)
+	message := OutboundMessage{
+		To:        recipient,
+		From:      c.fromAddress(),
+		Subject:   subject,
+		Text:      text,
+		InReplyTo: thread.MessageID,
+	}
+	return c.sendMail(ctx, message)
+}
+
+func (c *Channel) pollLoop(ctx context.Context, eventBus *bus.Bus) {
+	interval := time.Duration(c.Config.PollIntervalSeconds) * time.Second
+	if interval <= 0 {
+		interval = defaultPollInterval
+	}
+	if interval < 5*time.Second {
+		interval = 5 * time.Second
+	}
+
+	c.pollOnce(ctx, eventBus)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.pollOnce(ctx, eventBus)
 		}
 	}
-	var nextPtr *int64
-	if next != 0 {
-		nextPtr = &next
-	}
-	return map[string]any{"jobs": len(st.Jobs), "next_wake_at_ms": nextPtr}, nil
 }
 
-func (s *Service) List() ([]CronJob, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, err := s.load()
+func (c *Channel) pollOnce(ctx context.Context, eventBus *bus.Bus) {
+	messages, err := c.fetchMessages(ctx)
 	if err != nil {
-		return nil, err
+		log.Printf("email polling error: %v", err)
+		return
 	}
-	return st.Jobs, nil
-}
-
-func (s *Service) Add(job CronJob) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, err := s.load()
-	if err != nil {
-		return err
-	}
-	now := time.Now().UnixMilli()
-	job.CreatedAtMS = now
-	job.UpdatedAtMS = now
-	if job.ID == "" {
-		job.ID = randID()
-	}
-	if job.Name == "" {
-		job.Name = job.ID
-	}
-	st.Jobs = append(st.Jobs, job)
-	if err := s.save(st); err != nil {
-		return err
-	}
-	s.armJobLocked(job)
-	return nil
-}
-
-func (s *Service) Remove(id string) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, err := s.load()
-	if err != nil {
-		return false, err
-	}
-	found := false
-	n := make([]CronJob, 0, len(st.Jobs))
-	for _, j := range st.Jobs {
-		if j.ID == id {
-			found = true
-			if eid, ok := s.entries[id]; ok && s.c != nil {
-				s.c.Remove(eid)
-				delete(s.entries, id)
-			}
+	for _, inbound := range messages {
+		sender := normalizeAddress(inbound.From)
+		if sender == "" {
 			continue
 		}
-		n = append(n, j)
+		if c.alreadyProcessed(inbound.UID, inbound.MessageID) {
+			continue
+		}
+		if !c.allowedSender(sender) {
+			c.rememberProcessed(inbound.UID, inbound.MessageID)
+			log.Printf("email sender ignored: %s", sender)
+			continue
+		}
+		persisted, err := c.alreadyProcessedPersisted(ctx, sender, inbound.UID, inbound.MessageID)
+		if err != nil {
+			log.Printf("email dedupe lookup failed for %s: %v", sender, err)
+		} else if persisted {
+			c.rememberProcessed(inbound.UID, inbound.MessageID)
+			continue
+		}
+		c.rememberProcessed(inbound.UID, inbound.MessageID)
+		c.rememberThread(sender, inbound.Subject, inbound.MessageID)
+		meta := map[string]any{
+			"sender_email":       sender,
+			"subject":            strings.TrimSpace(inbound.Subject),
+			"message_id":         strings.TrimSpace(inbound.MessageID),
+			"uid":                strings.TrimSpace(inbound.UID),
+			"auto_reply_enabled": c.Config.AutoReplyEnabled,
+		}
+		if !inbound.Date.IsZero() {
+			meta["date"] = inbound.Date.Format(time.RFC3339)
+		}
+		ok := eventBus.Publish(bus.Event{
+			Type:       bus.EventUserMessage,
+			SessionKey: "email:" + sender,
+			Channel:    "email",
+			From:       sender,
+			Message:    formatInboundMessage(sender, inbound.Subject, inbound.Date, inbound.Body),
+			Meta:       meta,
+		})
+		if !ok {
+			log.Printf("email event dropped: queue full for %s", sender)
+		}
 	}
-	st.Jobs = n
-	if err := s.save(st); err != nil {
-		return false, err
-	}
-	return found, nil
 }
 
-func (s *Service) RunNow(ctx context.Context, id string, force bool) (bool, error) {
-	s.mu.Lock()
-	st, err := s.load()
-	s.mu.Unlock()
+func (c *Channel) validate() error {
+	if !c.Config.Enabled {
+		return nil
+	}
+	if !c.Config.OpenAccess && !hasNonEmpty(c.Config.AllowedSenders) {
+		return fmt.Errorf("email enabled: set allowedSenders or openAccess=true")
+	}
+	if strings.TrimSpace(c.Config.IMAPHost) == "" || strings.TrimSpace(c.Config.IMAPUsername) == "" || strings.TrimSpace(c.Config.IMAPPassword) == "" {
+		return fmt.Errorf("email requires IMAP host, username, and password")
+	}
+	if strings.TrimSpace(c.Config.SMTPHost) == "" || strings.TrimSpace(c.Config.SMTPUsername) == "" || strings.TrimSpace(c.Config.SMTPPassword) == "" {
+		return fmt.Errorf("email requires SMTP host, username, and password")
+	}
+	return nil
+}
+
+func (c *Channel) fetchMessages(ctx context.Context) ([]InboundMessage, error) {
+	if c.FetchMessages != nil {
+		return c.FetchMessages(ctx)
+	}
+	return c.fetchViaIMAP(ctx)
+}
+
+func (c *Channel) sendMail(ctx context.Context, outbound OutboundMessage) error {
+	if c.SendMail != nil {
+		return c.SendMail(ctx, outbound)
+	}
+	return c.sendViaSMTP(ctx, outbound)
+}
+
+func (c *Channel) fetchViaIMAP(ctx context.Context) ([]InboundMessage, error) {
+	client, stopWatch, err := c.dialIMAP(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer stopWatch()
+	defer client.Close()
+	if err := client.Login(c.Config.IMAPUsername, c.Config.IMAPPassword).Wait(); err != nil {
+		return nil, fmt.Errorf("imap login: %w", err)
+	}
+	defer func() {
+		if err := client.Logout().Wait(); err != nil {
+			log.Printf("email logout error: %v", err)
+		}
+	}()
+
+	mailbox := strings.TrimSpace(c.Config.IMAPMailbox)
+	if mailbox == "" {
+		mailbox = "INBOX"
+	}
+	if _, err := client.Select(mailbox, nil).Wait(); err != nil {
+		return nil, fmt.Errorf("imap select %s: %w", mailbox, err)
+	}
+
+	criteria := &imap.SearchCriteria{NotFlag: []imap.Flag{imap.FlagSeen}}
+	searchData, err := client.UIDSearch(criteria, nil).Wait()
+	if err != nil {
+		return nil, fmt.Errorf("imap search: %w", err)
+	}
+	uids := searchData.AllUIDs()
+	if len(uids) == 0 {
+		return nil, nil
+	}
+	sort.Slice(uids, func(i, j int) bool { return uids[i] < uids[j] })
+	if len(uids) > maxFetchBatch {
+		uids = uids[len(uids)-maxFetchBatch:]
+	}
+
+	var uidSet imap.UIDSet
+	uidSet.AddNum(uids...)
+	bodySection := &imap.FetchItemBodySection{Peek: true}
+	messages, err := client.Fetch(uidSet, &imap.FetchOptions{
+		UID:         true,
+		Envelope:    true,
+		BodySection: []*imap.FetchItemBodySection{bodySection},
+	}).Collect()
+	if err != nil {
+		return nil, fmt.Errorf("imap fetch: %w", err)
+	}
+	sort.Slice(messages, func(i, j int) bool { return messages[i].UID < messages[j].UID })
+
+	out := make([]InboundMessage, 0, len(messages))
+	markedUIDs := make([]imap.UID, 0, len(messages))
+	for _, message := range messages {
+		raw := message.FindBodySection(bodySection)
+		if len(raw) == 0 {
+			continue
+		}
+		parsed, err := parseRawEmail(raw, c.Config.MaxBodyChars)
+		if err != nil {
+			log.Printf("email parse error for uid=%d: %v", message.UID, err)
+			continue
+		}
+		parsed.UID = fmt.Sprintf("%d", message.UID)
+		out = append(out, parsed)
+		if c.Config.MarkSeen {
+			markedUIDs = append(markedUIDs, message.UID)
+		}
+	}
+	if c.Config.MarkSeen && len(markedUIDs) > 0 {
+		var seenSet imap.UIDSet
+		seenSet.AddNum(markedUIDs...)
+		storeFlags := &imap.StoreFlags{Op: imap.StoreFlagsAdd, Silent: true, Flags: []imap.Flag{imap.FlagSeen}}
+		if err := client.Store(seenSet, storeFlags, nil).Close(); err != nil {
+			log.Printf("email mark seen error: %v", err)
+		}
+	}
+	return out, nil
+}
+
+func (c *Channel) dialIMAP(ctx context.Context) (*imapclient.Client, func(), error) {
+	address := net.JoinHostPort(strings.TrimSpace(c.Config.IMAPHost), fmt.Sprintf("%d", c.Config.IMAPPort))
+	dialer := &net.Dialer{Timeout: defaultNetTimeout}
+	var conn net.Conn
+	var err error
+	if c.Config.IMAPUseSSL {
+		baseConn, dialErr := dialer.DialContext(ctx, "tcp", address)
+		if dialErr != nil {
+			return nil, func() {}, dialErr
+		}
+		tlsConn := tls.Client(baseConn, &tls.Config{ServerName: strings.TrimSpace(c.Config.IMAPHost)})
+		if deadline, ok := connectionDeadline(ctx); ok {
+			_ = tlsConn.SetDeadline(deadline)
+		}
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			_ = baseConn.Close()
+			return nil, func() {}, fmt.Errorf("imap tls handshake: %w", err)
+		}
+		conn = tlsConn
+	} else {
+		conn, err = dialer.DialContext(ctx, "tcp", address)
+		if err != nil {
+			return nil, func() {}, err
+		}
+	}
+	if deadline, ok := connectionDeadline(ctx); ok {
+		_ = conn.SetDeadline(deadline)
+	}
+	stopWatch := watchConnContext(ctx, conn)
+	client := imapclient.New(conn, nil)
+	if err := client.WaitGreeting(); err != nil {
+		stopWatch()
+		_ = client.Close()
+		return nil, func() {}, fmt.Errorf("imap greeting: %w", err)
+	}
+	return client, stopWatch, nil
+}
+
+func (c *Channel) sendViaSMTP(ctx context.Context, outbound OutboundMessage) error {
+	if err := c.validateSMTPAuthTransport(); err != nil {
+		return err
+	}
+	messageBytes, err := buildOutboundMessage(outbound)
+	if err != nil {
+		return err
+	}
+	address := net.JoinHostPort(strings.TrimSpace(c.Config.SMTPHost), fmt.Sprintf("%d", c.Config.SMTPPort))
+	dialer := &net.Dialer{Timeout: defaultNetTimeout}
+
+	conn, err := dialer.DialContext(ctx, "tcp", address)
+	if err != nil {
+		return fmt.Errorf("smtp dial: %w", err)
+	}
+	if deadline, ok := connectionDeadline(ctx); ok {
+		_ = conn.SetDeadline(deadline)
+	}
+	stopWatch := watchConnContext(ctx, conn)
+	defer stopWatch()
+	if c.Config.SMTPUseSSL {
+		tlsConn := tls.Client(conn, &tls.Config{ServerName: strings.TrimSpace(c.Config.SMTPHost)})
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			_ = conn.Close()
+			return fmt.Errorf("smtp tls handshake: %w", err)
+		}
+		conn = tlsConn
+	}
+	defer conn.Close()
+
+	client, err := smtp.NewClient(conn, strings.TrimSpace(c.Config.SMTPHost))
+	if err != nil {
+		return fmt.Errorf("smtp client: %w", err)
+	}
+	defer client.Close()
+
+	if c.Config.SMTPUseTLS && !c.Config.SMTPUseSSL {
+		if err := client.StartTLS(&tls.Config{ServerName: strings.TrimSpace(c.Config.SMTPHost)}); err != nil {
+			return fmt.Errorf("smtp starttls: %w", err)
+		}
+	}
+	if strings.TrimSpace(c.Config.SMTPUsername) != "" {
+		auth := smtp.PlainAuth("", c.Config.SMTPUsername, c.Config.SMTPPassword, strings.TrimSpace(c.Config.SMTPHost))
+		if err := client.Auth(auth); err != nil {
+			return fmt.Errorf("smtp auth: %w", err)
+		}
+	}
+	if err := client.Mail(outbound.From); err != nil {
+		return fmt.Errorf("smtp mail from: %w", err)
+	}
+	if err := client.Rcpt(outbound.To); err != nil {
+		return fmt.Errorf("smtp rcpt to: %w", err)
+	}
+	writer, err := client.Data()
+	if err != nil {
+		return fmt.Errorf("smtp data: %w", err)
+	}
+	if _, err := writer.Write(messageBytes); err != nil {
+		_ = writer.Close()
+		return fmt.Errorf("smtp write: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return fmt.Errorf("smtp finalize: %w", err)
+	}
+	if err := client.Quit(); err != nil {
+		return fmt.Errorf("smtp quit: %w", err)
+	}
+	return nil
+}
+
+func buildOutboundMessage(outbound OutboundMessage) ([]byte, error) {
+	from := strings.TrimSpace(outbound.From)
+	to := normalizeAddress(outbound.To)
+	if from == "" || to == "" {
+		return nil, fmt.Errorf("email from and to addresses are required")
+	}
+	subject := strings.TrimSpace(outbound.Subject)
+	if subject == "" {
+		subject = "or3-intern reply"
+	}
+	body := strings.ReplaceAll(outbound.Text, "\r\n", "\n")
+	body = strings.ReplaceAll(body, "\r", "\n")
+
+	var buf bytes.Buffer
+	headers := []string{
+		"From: " + from,
+		"To: " + to,
+		"Subject: " + mime.QEncoding.Encode("utf-8", subject),
+		"Date: " + time.Now().Format(time.RFC1123Z),
+		fmt.Sprintf("Message-ID: <%d.%s>", time.Now().UnixNano(), strings.ReplaceAll(strings.SplitN(from, "@", 2)[0], " ", "-")),
+		"MIME-Version: 1.0",
+		"Content-Type: text/plain; charset=UTF-8",
+		"Content-Transfer-Encoding: quoted-printable",
+	}
+	if strings.TrimSpace(outbound.InReplyTo) != "" {
+		headers = append(headers, "In-Reply-To: "+strings.TrimSpace(outbound.InReplyTo))
+		headers = append(headers, "References: "+strings.TrimSpace(outbound.InReplyTo))
+	}
+	for _, headerLine := range headers {
+		buf.WriteString(headerLine)
+		buf.WriteString("\r\n")
+	}
+	buf.WriteString("\r\n")
+	quoted := quotedprintable.NewWriter(&buf)
+	if _, err := quoted.Write([]byte(body)); err != nil {
+		return nil, err
+	}
+	if err := quoted.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func parseRawEmail(raw []byte, maxBodyChars int) (InboundMessage, error) {
+	message, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		return InboundMessage{}, err
+	}
+	parsed := InboundMessage{
+		From:      normalizeAddress(message.Header.Get("From")),
+		Subject:   decodeHeaderValue(message.Header.Get("Subject")),
+		MessageID: strings.TrimSpace(message.Header.Get("Message-ID")),
+	}
+	if dateValue := strings.TrimSpace(message.Header.Get("Date")); dateValue != "" {
+		if parsedDate, err := mail.ParseDate(dateValue); err == nil {
+			parsed.Date = parsedDate
+		}
+	}
+	parsed.Body = extractBodyText(textproto.MIMEHeader(message.Header), message.Body, maxBodyChars)
+	return parsed, nil
+}
+
+func extractBodyText(header textproto.MIMEHeader, body io.Reader, maxBodyChars int) string {
+	plain, htmlBodies := extractEntityBodies(header, body, maxBodyChars)
+	if len(plain) > 0 {
+		return truncateText(strings.Join(plain, "\n\n"), maxBodyChars)
+	}
+	if len(htmlBodies) > 0 {
+		return truncateText(strings.Join(htmlBodies, "\n\n"), maxBodyChars)
+	}
+	return ""
+}
+
+func extractEntityBodies(header textproto.MIMEHeader, body io.Reader, maxBodyChars int) ([]string, []string) {
+	mediaType, params, err := mime.ParseMediaType(header.Get("Content-Type"))
+	if err != nil || mediaType == "" {
+		mediaType = "text/plain"
+	}
+	disposition, _, _ := mime.ParseMediaType(header.Get("Content-Disposition"))
+	if strings.EqualFold(disposition, "attachment") {
+		return nil, nil
+	}
+
+	if strings.HasPrefix(strings.ToLower(mediaType), "multipart/") {
+		boundary := params["boundary"]
+		if boundary == "" {
+			return nil, nil
+		}
+		reader := multipart.NewReader(decodeTransferEncoding(body, header.Get("Content-Transfer-Encoding")), boundary)
+		plainParts := []string{}
+		htmlParts := []string{}
+		for {
+			part, err := reader.NextPart()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				break
+			}
+			childPlain, childHTML := extractEntityBodies(part.Header, part, maxBodyChars)
+			plainParts = append(plainParts, childPlain...)
+			htmlParts = append(htmlParts, childHTML...)
+		}
+		return plainParts, htmlParts
+	}
+
+	decodedBody, err := io.ReadAll(io.LimitReader(decodeTransferEncoding(body, header.Get("Content-Transfer-Encoding")), int64(maxReadBytes(maxBodyChars))))
+	if err != nil {
+		return nil, nil
+	}
+	text := strings.TrimSpace(string(decodedBody))
+	if text == "" {
+		return nil, nil
+	}
+	switch strings.ToLower(mediaType) {
+	case "text/plain":
+		return []string{normalizeText(text)}, nil
+	case "text/html":
+		return nil, []string{normalizeText(htmlToText(text))}
+	default:
+		return nil, nil
+	}
+}
+
+func decodeTransferEncoding(body io.Reader, encoding string) io.Reader {
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
+	case "base64":
+		return base64.NewDecoder(base64.StdEncoding, body)
+	case "quoted-printable":
+		return quotedprintable.NewReader(body)
+	default:
+		return body
+	}
+}
+
+func maxReadBytes(maxBodyChars int) int {
+	if maxBodyChars <= 0 {
+		return 8192
+	}
+	return maxBodyChars*4 + 1024
+}
+
+func htmlToText(input string) string {
+	tokenizer := xhtml.NewTokenizer(strings.NewReader(input))
+	segments := make([]string, 0, 16)
+	appendText := func(text string) {
+		text = strings.Join(strings.Fields(html.UnescapeString(text)), " ")
+		if text == "" {
+			return
+		}
+		if len(segments) > 0 {
+			last := segments[len(segments)-1]
+			if !strings.HasSuffix(last, "\n") && last != " " {
+				segments = append(segments, " ")
+			}
+		}
+		segments = append(segments, text)
+	}
+	appendBreak := func(double bool) {
+		if len(segments) == 0 {
+			return
+		}
+		want := "\n"
+		if double {
+			want = "\n\n"
+		}
+		last := segments[len(segments)-1]
+		if strings.HasSuffix(last, "\n\n") || (!double && strings.HasSuffix(last, "\n")) {
+			return
+		}
+		segments = append(segments, want)
+	}
+	for {
+		tokenType := tokenizer.Next()
+		switch tokenType {
+		case xhtml.ErrorToken:
+			return html.UnescapeString(strings.Join(segments, ""))
+		case xhtml.TextToken:
+			appendText(string(tokenizer.Text()))
+		case xhtml.StartTagToken, xhtml.EndTagToken, xhtml.SelfClosingTagToken:
+			name, _ := tokenizer.TagName()
+			switch strings.ToLower(string(name)) {
+			case "br":
+				appendBreak(false)
+			case "p", "div", "section", "article", "header", "footer", "aside", "li", "tr",
+				"h1", "h2", "h3", "h4", "h5", "h6":
+				appendBreak(true)
+			}
+		}
+	}
+}
+
+func normalizeText(input string) string {
+	text := strings.ReplaceAll(input, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	lines := strings.Split(text, "\n")
+	cleaned := make([]string, 0, len(lines))
+	blankCount := 0
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			blankCount++
+			if blankCount > 1 {
+				continue
+			}
+			cleaned = append(cleaned, "")
+			continue
+		}
+		blankCount = 0
+		cleaned = append(cleaned, trimmed)
+	}
+	return strings.TrimSpace(strings.Join(cleaned, "\n"))
+}
+
+func truncateText(text string, maxBodyChars int) string {
+	text = strings.TrimSpace(text)
+	if maxBodyChars > 0 && len(text) > maxBodyChars {
+		return strings.TrimSpace(text[:maxBodyChars]) + "…"
+	}
+	return text
+}
+
+func formatInboundMessage(sender, subject string, sentAt time.Time, body string) string {
+	lines := []string{"From: " + sender}
+	if strings.TrimSpace(subject) != "" {
+		lines = append(lines, "Subject: "+strings.TrimSpace(subject))
+	}
+	if !sentAt.IsZero() {
+		lines = append(lines, "Date: "+sentAt.Format(time.RFC1123Z))
+	}
+	if strings.TrimSpace(body) != "" {
+		lines = append(lines, "", strings.TrimSpace(body))
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+func (c *Channel) allowedSender(sender string) bool {
+	if c.Config.OpenAccess {
+		return true
+	}
+	for _, allowed := range c.Config.AllowedSenders {
+		if normalizeAddress(allowed) == sender {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeAddress(value string) string {
+	parsed, err := mail.ParseAddress(strings.TrimSpace(value))
+	if err == nil {
+		return strings.ToLower(strings.TrimSpace(parsed.Address))
+	}
+	if strings.Contains(value, "<") && strings.Contains(value, ">") {
+		start := strings.LastIndex(value, "<")
+		end := strings.LastIndex(value, ">")
+		if start >= 0 && end > start {
+			value = value[start+1 : end]
+		}
+	}
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func decodeHeaderValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	decoder := new(mime.WordDecoder)
+	decoded, err := decoder.DecodeHeader(value)
+	if err != nil {
+		return value
+	}
+	return strings.TrimSpace(decoded)
+}
+
+func (c *Channel) rememberProcessed(uid, messageID string) {
+	keys := []string{}
+	if strings.TrimSpace(uid) != "" {
+		keys = append(keys, "uid:"+strings.TrimSpace(uid))
+	}
+	if strings.TrimSpace(messageID) != "" {
+		keys = append(keys, "msgid:"+strings.TrimSpace(messageID))
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.processedKeys == nil {
+		c.processedKeys = map[string]struct{}{}
+	}
+	for _, key := range keys {
+		if _, exists := c.processedKeys[key]; exists {
+			continue
+		}
+		c.processedKeys[key] = struct{}{}
+		c.processedOrder = append(c.processedOrder, key)
+	}
+	for len(c.processedOrder) > maxProcessedKeys {
+		oldest := c.processedOrder[0]
+		c.processedOrder = c.processedOrder[1:]
+		delete(c.processedKeys, oldest)
+	}
+}
+
+func (c *Channel) alreadyProcessed(uid, messageID string) bool {
+	keys := []string{}
+	if strings.TrimSpace(uid) != "" {
+		keys = append(keys, "uid:"+strings.TrimSpace(uid))
+	}
+	if strings.TrimSpace(messageID) != "" {
+		keys = append(keys, "msgid:"+strings.TrimSpace(messageID))
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, key := range keys {
+		if _, exists := c.processedKeys[key]; exists {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Channel) alreadyProcessedPersisted(ctx context.Context, sender, uid, messageID string) (bool, error) {
+	if c.DB == nil {
+		return false, nil
+	}
+	uid = strings.TrimSpace(uid)
+	messageID = strings.TrimSpace(messageID)
+	if uid == "" && messageID == "" {
+		return false, nil
+	}
+	messages, err := c.DB.GetLastMessages(ctx, "email:"+sender, dedupeMessageLimit)
 	if err != nil {
 		return false, err
 	}
-	for _, j := range st.Jobs {
-		if j.ID == id {
-			if !force && !j.Enabled {
-				return false, nil
-			}
-			err := s.runner(ctx, j)
-			s.mu.Lock()
-			defer s.mu.Unlock()
-			st2, loadErr := s.load()
-			if loadErr != nil {
-				return true, err
-			}
-			shouldDelete := false
-			for i := range st2.Jobs {
-				if st2.Jobs[i].ID == id {
-					now := time.Now().UnixMilli()
-					st2.Jobs[i].State.LastRunAtMS = &now
-					if err != nil {
-						st2.Jobs[i].State.LastStatus = "error"
-						st2.Jobs[i].State.LastError = err.Error()
-					} else {
-						st2.Jobs[i].State.LastStatus = "ok"
-						st2.Jobs[i].State.LastError = ""
-					}
-					if st2.Jobs[i].DeleteAfterRun {
-						shouldDelete = true
-						break
-					}
-					break
-				}
-			}
-			if shouldDelete {
-				next := make([]CronJob, 0, len(st2.Jobs))
-				for _, jj := range st2.Jobs {
-					if jj.ID == id {
-						continue
-					}
-					next = append(next, jj)
-				}
-				st2.Jobs = next
-				if eid, ok := s.entries[id]; ok && s.c != nil {
-					s.c.Remove(eid)
-					delete(s.entries, id)
-				}
-			}
-			if saveErr := s.save(st2); saveErr != nil {
-				log.Printf("cron save failed: %v", saveErr)
-			}
-			return true, err
+	for _, message := range messages {
+		if message.Role != "user" || strings.TrimSpace(message.PayloadJSON) == "" {
+			continue
+		}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(message.PayloadJSON), &payload); err != nil {
+			continue
+		}
+		meta, _ := payload["meta"].(map[string]any)
+		if len(meta) == 0 {
+			continue
+		}
+		storedUID := strings.TrimSpace(fmt.Sprint(meta["uid"]))
+		storedMessageID := strings.TrimSpace(fmt.Sprint(meta["message_id"]))
+		if uid != "" && storedUID == uid {
+			return true, nil
+		}
+		if messageID != "" && storedMessageID == messageID {
+			return true, nil
 		}
 	}
 	return false, nil
 }
 
-func (s *Service) armJobLocked(job CronJob) {
-	if s.c == nil {
+func (c *Channel) rememberThread(sender, subject, messageID string) {
+	sender = normalizeAddress(sender)
+	if sender == "" {
 		return
 	}
-	if !job.Enabled {
-		return
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.threadBySender == nil {
+		c.threadBySender = map[string]threadState{}
 	}
-	switch job.Schedule.Kind {
-	case KindAt:
-		at := time.UnixMilli(job.Schedule.AtMS)
-		if time.Now().After(at) {
-			return
+	state := c.threadBySender[sender]
+	if strings.TrimSpace(subject) != "" {
+		state.Subject = strings.TrimSpace(subject)
+	}
+	if strings.TrimSpace(messageID) != "" {
+		state.MessageID = strings.TrimSpace(messageID)
+	}
+	c.threadBySender[sender] = state
+}
+
+func (c *Channel) lookupThread(ctx context.Context, recipient string) (threadState, bool, error) {
+	recipient = normalizeAddress(recipient)
+	c.mu.Lock()
+	state, ok := c.threadBySender[recipient]
+	c.mu.Unlock()
+	if ok && (state.Subject != "" || state.MessageID != "") {
+		return state, true, nil
+	}
+	if c.DB == nil {
+		return threadState{}, false, nil
+	}
+	messages, err := c.DB.GetLastMessages(ctx, "email:"+recipient, lookupMessageLimit)
+	if err != nil {
+		return threadState{}, false, err
+	}
+	for idx := len(messages) - 1; idx >= 0; idx-- {
+		message := messages[idx]
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(message.PayloadJSON), &payload); err != nil {
+			continue
 		}
-		delay := time.Until(at)
-		// schedule using timer goroutine
-		go func(id string, d time.Duration) {
-			time.Sleep(d)
-			if err := s.runner(context.Background(), job); err != nil {
-				log.Printf("cron runner error: id=%s err=%v", id, err)
-			}
-		}(job.ID, delay)
-	case KindEvery:
-		sec := int64(job.Schedule.EveryMS / 1000)
-		if sec <= 0 {
-			sec = 60
+		if strings.TrimSpace(fmt.Sprint(payload["channel"])) != "email" {
+			continue
 		}
-		spec := "@every " + (time.Duration(sec) * time.Second).String()
-		eid, err := s.c.AddFunc(spec, func() {
-			if e := s.runner(context.Background(), job); e != nil {
-				log.Printf("cron runner error: id=%s err=%v", job.ID, e)
-			}
-		})
-		if err == nil {
-			s.entries[job.ID] = eid
-		} else {
-			log.Printf("cron schedule add failed: id=%s spec=%s err=%v", job.ID, spec, err)
+		meta, _ := payload["meta"].(map[string]any)
+		if len(meta) == 0 {
+			continue
 		}
-	case KindCron:
-		spec := job.Schedule.Expr
-		eid, err := s.c.AddFunc(spec, func() {
-			if e := s.runner(context.Background(), job); e != nil {
-				log.Printf("cron runner error: id=%s err=%v", job.ID, e)
-			}
-		})
-		if err == nil {
-			s.entries[job.ID] = eid
-		} else {
-			log.Printf("cron schedule add failed: id=%s spec=%s err=%v", job.ID, spec, err)
+		state = threadState{
+			Subject:   strings.TrimSpace(fmt.Sprint(meta["subject"])),
+			MessageID: strings.TrimSpace(fmt.Sprint(meta["message_id"])),
 		}
+		if state.Subject != "" || state.MessageID != "" {
+			c.rememberThread(recipient, state.Subject, state.MessageID)
+			return state, true, nil
+		}
+	}
+	return threadState{}, false, nil
+}
+
+func (c *Channel) subjectForDelivery(meta map[string]any, base string) string {
+	if override := strings.TrimSpace(fmt.Sprint(meta["subject"])); override != "" && override != "<nil>" {
+		return override
+	}
+	base = strings.TrimSpace(base)
+	if base == "" {
+		return "or3-intern reply"
+	}
+	lower := strings.ToLower(base)
+	if strings.HasPrefix(lower, "re:") {
+		return base
+	}
+	prefix := strings.TrimSpace(c.Config.SubjectPrefix)
+	if prefix == "" {
+		prefix = "Re:"
+	}
+	if !strings.HasSuffix(prefix, ":") && !strings.HasSuffix(prefix, " ") {
+		prefix += " "
+	}
+	if !strings.HasSuffix(prefix, " ") {
+		prefix += " "
+	}
+	return prefix + base
+}
+
+func (c *Channel) fromAddress() string {
+	if value := normalizeAddress(c.Config.FromAddress); value != "" {
+		return value
+	}
+	if value := normalizeAddress(c.Config.SMTPUsername); value != "" {
+		return value
+	}
+	return normalizeAddress(c.Config.IMAPUsername)
+}
+
+func hasNonEmpty(values []string) bool {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Channel) validateSMTPAuthTransport() error {
+	if strings.TrimSpace(c.Config.SMTPUsername) == "" {
+		return nil
+	}
+	if c.Config.SMTPUseSSL || c.Config.SMTPUseTLS {
+		return nil
+	}
+	return fmt.Errorf("smtp auth requires TLS or SSL")
+}
+
+func connectionDeadline(ctx context.Context) (time.Time, bool) {
+	if ctx == nil {
+		return time.Now().Add(defaultNetTimeout), true
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		return deadline, true
+	}
+	return time.Now().Add(defaultNetTimeout), true
+}
+
+func watchConnContext(ctx context.Context, conn net.Conn) func() {
+	if ctx == nil || conn == nil {
+		return func() {}
+	}
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-done:
+		}
+	}()
+	return func() {
+		close(done)
+	}
+}
+````
+
+## File: internal/providers/openai.go
+````go
+// Package providers wraps the OpenAI-compatible chat and embedding APIs used by or3-intern.
+package providers
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
+	"or3-intern/internal/security"
+)
+
+// Client talks to an OpenAI-compatible HTTP API.
+type Client struct {
+	APIBase    string
+	APIKey     string
+	HTTP       *http.Client
+	HostPolicy security.HostPolicy
+}
+
+// New constructs a Client for apiBase using timeout for all requests.
+func New(apiBase, apiKey string, timeout time.Duration) *Client {
+	return &Client{
+		APIBase: apiBase,
+		APIKey:  apiKey,
+		HTTP:    &http.Client{Timeout: timeout},
 	}
 }
 
-func randUint() uint64 {
-	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return uint64(time.Now().UnixNano())
-	}
-	return binary.LittleEndian.Uint64(b[:])
+// ChatMessage is one message sent to or returned from the provider.
+type ChatMessage struct {
+	Role       string     `json:"role"`
+	Content    any        `json:"content,omitempty"` // string|null
+	Name       string     `json:"name,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 }
 
-func randID() string {
-	const chars = "abcdefghijklmnopqrstuvwxyz0123456789"
-	b := make([]byte, 10)
-	for i := range b {
-		b[i] = chars[int(randUint()%uint64(len(chars)))]
+// ToolDef declares a callable tool in provider request format.
+type ToolDef struct {
+	Type     string   `json:"type"`
+	Function ToolFunc `json:"function"`
+}
+type ToolFunc struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Parameters  any    `json:"parameters,omitempty"`
+}
+
+// ToolCall is one tool invocation requested by the provider.
+type ToolCall struct {
+	ID       string `json:"id"`
+	Index    int    `json:"index"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+// ChatCompletionRequest is the non-streaming chat completion payload.
+type ChatCompletionRequest struct {
+	Model       string        `json:"model"`
+	Messages    []ChatMessage `json:"messages"`
+	Tools       []ToolDef     `json:"tools,omitempty"`
+	ToolChoice  any           `json:"tool_choice,omitempty"`
+	Temperature float64       `json:"temperature,omitempty"`
+}
+
+// ChatCompletionResponse is the normalized response from a chat completion.
+type ChatCompletionResponse struct {
+	Choices []struct {
+		Message struct {
+			Role      string     `json:"role"`
+			Content   any        `json:"content"`
+			ToolCalls []ToolCall `json:"tool_calls"`
+		} `json:"message"`
+	} `json:"choices"`
+}
+
+// Chat performs a non-streaming chat completion request.
+func (c *Client) Chat(ctx context.Context, req ChatCompletionRequest) (ChatCompletionResponse, error) {
+	var out ChatCompletionResponse
+	b, _ := json.Marshal(req)
+	r, err := http.NewRequestWithContext(ctx, "POST", c.APIBase+"/chat/completions", bytes.NewReader(b))
+	if err != nil {
+		return out, err
 	}
-	return string(b)
+	r.Header.Set("Content-Type", "application/json")
+	if c.APIKey != "" {
+		r.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
+
+	resp, err := c.do(r)
+	if err != nil {
+		return out, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if resp.StatusCode >= 300 {
+		return out, fmt.Errorf("provider error %s: %s", resp.Status, string(body))
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
+// ChatCompletionStreamRequest is sent when stream=true.
+type ChatCompletionStreamRequest struct {
+	Model       string        `json:"model"`
+	Messages    []ChatMessage `json:"messages"`
+	Tools       []ToolDef     `json:"tools,omitempty"`
+	ToolChoice  any           `json:"tool_choice,omitempty"`
+	Temperature float64       `json:"temperature,omitempty"`
+	Stream      bool          `json:"stream"`
+}
+
+// ChatStreamDelta is one incremental SSE delta from a streamed completion.
+type ChatStreamDelta struct {
+	Role      string     `json:"role"`
+	Content   string     `json:"content"`
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+}
+
+// ChatStreamChoice is one choice entry from a streamed completion chunk.
+type ChatStreamChoice struct {
+	Index        int             `json:"index"`
+	Delta        ChatStreamDelta `json:"delta"`
+	FinishReason string          `json:"finish_reason"`
+}
+
+// ChatStreamChunk is one SSE payload from a streamed completion.
+type ChatStreamChunk struct {
+	ID      string             `json:"id"`
+	Choices []ChatStreamChoice `json:"choices"`
+}
+
+// ChatStream sends the request with stream=true, calls onDelta for each text
+// delta, and returns the fully accumulated completion response.
+func (c *Client) ChatStream(ctx context.Context, req ChatCompletionRequest, onDelta func(text string)) (ChatCompletionResponse, error) {
+	streamReq := ChatCompletionStreamRequest{
+		Model:       req.Model,
+		Messages:    req.Messages,
+		Tools:       req.Tools,
+		ToolChoice:  req.ToolChoice,
+		Temperature: req.Temperature,
+		Stream:      true,
+	}
+	b, _ := json.Marshal(streamReq)
+	r, err := http.NewRequestWithContext(ctx, "POST", c.APIBase+"/chat/completions", bytes.NewReader(b))
+	if err != nil {
+		return ChatCompletionResponse{}, err
+	}
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Accept", "text/event-stream")
+	if c.APIKey != "" {
+		r.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
+
+	resp, err := c.do(r)
+	if err != nil {
+		return ChatCompletionResponse{}, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		return ChatCompletionResponse{}, fmt.Errorf("provider error %s: %s", resp.Status, string(body))
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	var contentBuilder strings.Builder
+	var finalToolCalls []ToolCall
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			break
+		}
+		var chunk ChatStreamChunk
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			continue
+		}
+		if len(chunk.Choices) == 0 {
+			continue
+		}
+		delta := chunk.Choices[0].Delta
+		if delta.Content != "" {
+			contentBuilder.WriteString(delta.Content)
+			if onDelta != nil {
+				onDelta(delta.Content)
+			}
+		}
+		if len(delta.ToolCalls) > 0 {
+			finalToolCalls = mergeStreamToolCalls(finalToolCalls, delta.ToolCalls)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return ChatCompletionResponse{}, err
+	}
+
+	out := ChatCompletionResponse{
+		Choices: []struct {
+			Message struct {
+				Role      string     `json:"role"`
+				Content   any        `json:"content"`
+				ToolCalls []ToolCall `json:"tool_calls"`
+			} `json:"message"`
+		}{
+			{
+				Message: struct {
+					Role      string     `json:"role"`
+					Content   any        `json:"content"`
+					ToolCalls []ToolCall `json:"tool_calls"`
+				}{
+					Role:      "assistant",
+					Content:   contentBuilder.String(),
+					ToolCalls: finalToolCalls,
+				},
+			},
+		},
+	}
+	return out, nil
+}
+
+// mergeStreamToolCalls accumulates tool-call deltas arriving over SSE.
+// OpenAI streaming sends each piece as {index, partial args}; we expand the
+// slice to the required index and concatenate name/arguments incrementally.
+func mergeStreamToolCalls(existing []ToolCall, delta []ToolCall) []ToolCall {
+	for _, d := range delta {
+		idx := d.Index
+		for len(existing) <= idx {
+			existing = append(existing, ToolCall{})
+		}
+		existing[idx].Function.Arguments += d.Function.Arguments
+		if d.Function.Name != "" {
+			existing[idx].Function.Name += d.Function.Name
+		}
+		if d.ID != "" {
+			existing[idx].ID = d.ID
+		}
+		if d.Type != "" {
+			existing[idx].Type = d.Type
+		}
+		existing[idx].Index = idx
+	}
+	return existing
+}
+
+type EmbeddingRequest struct {
+	Model string `json:"model"`
+	Input string `json:"input"`
+}
+type EmbeddingResponse struct {
+	Data []struct {
+		Embedding []float32 `json:"embedding"`
+	} `json:"data"`
+}
+
+func (c *Client) Embed(ctx context.Context, model, input string) ([]float32, error) {
+	var out EmbeddingResponse
+	b, _ := json.Marshal(EmbeddingRequest{Model: model, Input: input})
+	r, err := http.NewRequestWithContext(ctx, "POST", c.APIBase+"/embeddings", bytes.NewReader(b))
+	if err != nil {
+		return nil, err
+	}
+	r.Header.Set("Content-Type", "application/json")
+	if c.APIKey != "" {
+		r.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
+
+	resp, err := c.do(r)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("provider error %s: %s", resp.Status, string(body))
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, err
+	}
+	if len(out.Data) == 0 {
+		return nil, fmt.Errorf("no embedding returned")
+	}
+	return out.Data[0].Embedding, nil
+}
+
+func (c *Client) do(req *http.Request) (*http.Response, error) {
+	client := c.HTTP
+	if client == nil {
+		client = &http.Client{Timeout: 60 * time.Second}
+	}
+	if c.HostPolicy.EnabledPolicy() {
+		client = security.WrapHTTPClient(client, c.HostPolicy)
+	}
+	return client.Do(req)
+}
+````
+
+## File: internal/tools/exec.go
+````go
+package tools
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+type ExecTool struct {
+	Base
+	Timeout           time.Duration
+	RestrictDir       string // if non-empty, cwd must be inside
+	PathAppend        string
+	ChildEnvAllowlist []string
+	AllowedPrograms   []string
+	Sandbox           BubblewrapConfig
+	EnableLegacyShell bool
+	DisableShell      bool
+	OutputMaxBytes    int
+	BlockedPatterns   []string
+}
+
+const defaultExecOutputMaxBytes = 10000
+
+func (t *ExecTool) Name() string { return "exec" }
+func (t *ExecTool) Description() string {
+	return "Run an allowed program with safety limits. Output is truncated. Legacy shell commands require explicit opt-in."
+}
+func (t *ExecTool) Parameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"program":        map[string]any{"type": "string", "description": "Program to run"},
+			"args":           map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Program arguments"},
+			"command":        map[string]any{"type": "string", "description": "Legacy shell command to run (privileged, explicit opt-in only)"},
+			"cwd":            map[string]any{"type": "string", "description": "Working directory (optional)"},
+			"timeoutSeconds": map[string]any{"type": "integer", "description": "Override timeout (optional)"},
+		},
+		"required": []string{},
+	}
+}
+func (t *ExecTool) Schema() map[string]any {
+	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
+}
+
+func (t *ExecTool) CapabilityForParams(params map[string]any) CapabilityLevel {
+	if strings.TrimSpace(fmt.Sprint(params["command"])) != "" && fmt.Sprint(params["command"]) != "<nil>" {
+		return CapabilityPrivileged
+	}
+	return CapabilityGuarded
+}
+
+var defaultBlockedPatterns = []string{
+	"rm -rf", "mkfs", "dd ", "shutdown", "reboot", "poweroff", ":(){", ">|", "chown -R /", "chmod -R 777 /",
+}
+
+func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, error) {
+	program := strings.TrimSpace(fmt.Sprint(params["program"]))
+	if program == "<nil>" {
+		program = ""
+	}
+	legacyCommand, _ := params["command"].(string)
+	legacyCommand = strings.TrimSpace(legacyCommand)
+	if program == "" && legacyCommand == "" {
+		return "", errors.New("missing program or command")
+	}
+	if legacyCommand != "" {
+		if !t.EnableLegacyShell || t.DisableShell {
+			return "", errors.New("shell command execution disabled; use program + args or explicitly enable legacy shell mode")
+		}
+		lc := strings.ToLower(legacyCommand)
+		patterns := t.BlockedPatterns
+		if len(patterns) == 0 {
+			patterns = defaultBlockedPatterns
+		}
+		for _, b := range patterns {
+			if strings.Contains(lc, b) {
+				return "", fmt.Errorf("blocked command pattern: %q", b)
+			}
+		}
+	}
+	cwd, _ := params["cwd"].(string)
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
+	if t.RestrictDir != "" {
+		abs, err := filepath.Abs(cwd)
+		if err != nil {
+			return "", err
+		}
+		abs, err = canonicalizePath(abs)
+		if err != nil {
+			return "", err
+		}
+		root, err := canonicalizeRoot(t.RestrictDir)
+		if err != nil {
+			return "", err
+		}
+		rel, err := filepath.Rel(root, abs)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return "", fmt.Errorf("cwd outside allowed directory")
+		}
+	}
+	if program != "" {
+		resolvedProgram, err := resolveExecutable(program, cwd)
+		if err != nil {
+			return "", err
+		}
+		if len(t.AllowedPrograms) > 0 && !allowedProgram(program, resolvedProgram, t.AllowedPrograms) {
+			return "", fmt.Errorf("program not allowed: %s", program)
+		}
+		program = resolvedProgram
+	}
+
+	to := t.Timeout
+	if v, ok := params["timeoutSeconds"].(float64); ok && v > 0 {
+		to = time.Duration(int(v)) * time.Second
+	}
+	cctx, cancel := context.WithTimeout(ctx, to)
+	defer cancel()
+
+	var c *exec.Cmd
+	var err error
+	if legacyCommand != "" {
+		c, err = commandWithSandbox(cctx, t.Sandbox, cwd, []string{"bash", "-lc", legacyCommand})
+		if err != nil {
+			return "", err
+		}
+		if c == nil {
+			c = exec.CommandContext(cctx, "bash", "-lc", legacyCommand)
+		}
+	} else {
+		c = exec.CommandContext(cctx, program, stringArgs(params["args"])...)
+	}
+	c.Dir = cwd
+	c.Env = BuildChildEnv(os.Environ(), t.ChildEnvAllowlist, EnvFromContext(ctx), t.PathAppend)
+	var stdout, stderr bytes.Buffer
+	c.Stdout = &stdout
+	c.Stderr = &stderr
+	err = c.Run()
+	out := stdout.String()
+	er := stderr.String()
+	max := t.OutputMaxBytes
+	if max <= 0 {
+		max = defaultExecOutputMaxBytes
+	}
+	if len(out) > max {
+		out = out[:max] + "\n...[truncated]\n"
+	}
+	if len(er) > max {
+		er = er[:max] + "\n...[truncated]\n"
+	}
+	if err != nil {
+		return formatCommandOutput(out, er), fmt.Errorf("exec failed: %w", err)
+	}
+	if strings.TrimSpace(er) != "" {
+		return formatCommandOutput(out, er), nil
+	}
+	return out, nil
+}
+
+func allowedProgram(program string, resolved string, allowed []string) bool {
+	program = strings.TrimSpace(program)
+	resolved = strings.TrimSpace(resolved)
+	if program == "" || resolved == "" {
+		return false
+	}
+	programHasPath := hasPathSeparator(program)
+	for _, candidate := range allowed {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		if hasPathSeparator(candidate) {
+			resolvedCandidate, err := canonicalExecutablePath(candidate)
+			if err == nil && resolvedCandidate == resolved {
+				return true
+			}
+			continue
+		}
+		if !programHasPath && candidate == program {
+			return true
+		}
+	}
+	return false
+}
+
+func resolveExecutable(program string, cwd string) (string, error) {
+	program = strings.TrimSpace(program)
+	if program == "" {
+		return "", fmt.Errorf("missing program")
+	}
+	if hasPathSeparator(program) {
+		if !filepath.IsAbs(program) {
+			base := strings.TrimSpace(cwd)
+			if base == "" {
+				var err error
+				base, err = os.Getwd()
+				if err != nil {
+					return "", err
+				}
+			}
+			program = filepath.Join(base, program)
+		}
+		return canonicalExecutablePath(program)
+	}
+	resolved, err := exec.LookPath(program)
+	if err != nil {
+		return "", err
+	}
+	return canonicalExecutablePath(resolved)
+}
+
+func canonicalExecutablePath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err == nil {
+		return resolved, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	return abs, nil
+}
+
+func hasPathSeparator(path string) bool {
+	return strings.ContainsRune(path, filepath.Separator) || (filepath.Separator != '/' && strings.ContainsRune(path, '/'))
+}
+
+func formatCommandOutput(stdout, stderr string) string {
+	return fmt.Sprintf("stdout:\n%s\n\nstderr:\n%s", stdout, stderr)
+}
+````
+
+## File: internal/tools/web.go
+````go
+package tools
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/netip"
+	"net/url"
+	"or3-intern/internal/security"
+	"strings"
+	"time"
+)
+
+type WebFetch struct {
+	Base
+	HTTP            *http.Client
+	Timeout         time.Duration
+	DefaultMaxBytes int
+	HostPolicy      security.HostPolicy
+}
+
+func (t *WebFetch) Capability() CapabilityLevel { return CapabilityGuarded }
+
+const (
+	defaultWebTimeout            = 20 * time.Second
+	defaultWebFetchMaxBytes      = 200000
+	defaultWebFetchMaxRedirects  = 10
+	defaultWebSearchMaxCount     = 10
+	defaultWebSearchReadMaxBytes = 1 << 20
+)
+
+func (t *WebFetch) Name() string        { return "web_fetch" }
+func (t *WebFetch) Description() string { return "Fetch a URL (GET) and return text (truncated)." }
+func (t *WebFetch) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{
+		"url":      map[string]any{"type": "string"},
+		"maxBytes": map[string]any{"type": "integer"},
+	}, "required": []string{"url"}}
+}
+func (t *WebFetch) Schema() map[string]any {
+	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
+}
+func (t *WebFetch) Execute(ctx context.Context, params map[string]any) (string, error) {
+	profile := ActiveProfileFromContext(ctx)
+	u := fmt.Sprint(params["url"])
+	if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+		return "", fmt.Errorf("invalid url")
+	}
+	parsed, err := url.Parse(u)
+	if err != nil {
+		return "", err
+	}
+	if err := validateFetchURL(ctx, parsed); err != nil {
+		return "", err
+	}
+	if err := validateURLAgainstPolicies(ctx, parsed, t.HostPolicy, profile); err != nil {
+		return "", err
+	}
+	max := t.DefaultMaxBytes
+	if max <= 0 {
+		max = defaultWebFetchMaxBytes
+	}
+	if v, ok := params["maxBytes"].(float64); ok && int(v) > 0 {
+		max = int(v)
+	}
+	var client *http.Client
+	if t.HTTP == nil {
+		to := t.Timeout
+		if to <= 0 {
+			to = defaultWebTimeout
+		}
+		client = &http.Client{Timeout: to}
+	} else {
+		copyClient := *t.HTTP
+		client = &copyClient
+	}
+	client = security.WrapHTTPClient(client, t.HostPolicy)
+	prevCheckRedirect := client.CheckRedirect
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= defaultWebFetchMaxRedirects {
+			return fmt.Errorf("stopped after %d redirects", defaultWebFetchMaxRedirects)
+		}
+		if err := validateURLAgainstPolicies(req.Context(), req.URL, t.HostPolicy, profile); err != nil {
+			return err
+		}
+		if prevCheckRedirect != nil {
+			if err := prevCheckRedirect(req, via); err != nil {
+				return err
+			}
+		}
+		return validateFetchURL(req.Context(), req.URL)
+	}
+	r, err := http.NewRequestWithContext(ctx, "GET", parsed.String(), nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := client.Do(r)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, int64(max)))
+	return fmt.Sprintf("status: %s\n\n%s", resp.Status, string(body)), nil
+}
+
+func validateFetchURL(ctx context.Context, target *url.URL) error {
+	if target == nil {
+		return fmt.Errorf("invalid url")
+	}
+	hostname := strings.TrimSpace(strings.ToLower(target.Hostname()))
+	if hostname == "" {
+		return fmt.Errorf("missing host")
+	}
+	if isBlockedFetchHostname(hostname) {
+		return fmt.Errorf("blocked fetch target")
+	}
+	if ip, err := netip.ParseAddr(hostname); err == nil {
+		if isBlockedFetchAddr(ip.Unmap()) {
+			return fmt.Errorf("blocked fetch target")
+		}
+		return nil
+	}
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, hostname)
+	if err != nil {
+		return err
+	}
+	if len(addrs) == 0 {
+		return fmt.Errorf("host did not resolve")
+	}
+	for _, addr := range addrs {
+		if ip, ok := netip.AddrFromSlice(addr.IP); ok && isBlockedFetchAddr(ip.Unmap()) {
+			return fmt.Errorf("blocked fetch target")
+		}
+	}
+	return nil
+}
+
+func isBlockedFetchHostname(hostname string) bool {
+	switch hostname {
+	case "localhost", "ip6-localhost", "metadata.google.internal":
+		return true
+	default:
+		return false
+	}
+}
+
+func isBlockedFetchAddr(addr netip.Addr) bool {
+	if !addr.IsValid() {
+		return true
+	}
+	if addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() || addr.IsMulticast() || addr.IsUnspecified() {
+		return true
+	}
+	return addr.String() == "169.254.169.254"
+}
+
+type WebSearch struct {
+	Base
+	APIKey       string
+	HTTP         *http.Client
+	Timeout      time.Duration
+	ReadMaxBytes int
+	HostPolicy   security.HostPolicy
+}
+
+func (t *WebSearch) Capability() CapabilityLevel { return CapabilitySafe }
+
+func (t *WebSearch) Name() string { return "web_search" }
+func (t *WebSearch) Description() string {
+	return "Search the web (Brave Search API) and return top results."
+}
+func (t *WebSearch) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{
+		"query": map[string]any{"type": "string"},
+		"count": map[string]any{"type": "integer", "description": "max results (default 5)"},
+	}, "required": []string{"query"}}
+}
+func (t *WebSearch) Schema() map[string]any {
+	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
+}
+
+func (t *WebSearch) Execute(ctx context.Context, params map[string]any) (string, error) {
+	profile := ActiveProfileFromContext(ctx)
+	if strings.TrimSpace(t.APIKey) == "" {
+		return "", fmt.Errorf("Brave API key not configured (set BRAVE_API_KEY)")
+	}
+	q := fmt.Sprint(params["query"])
+	count := 5
+	if v, ok := params["count"].(float64); ok && int(v) > 0 {
+		count = int(v)
+	}
+	if count > defaultWebSearchMaxCount {
+		count = defaultWebSearchMaxCount
+	}
+	if t.HTTP == nil {
+		to := t.Timeout
+		if to <= 0 {
+			to = defaultWebTimeout
+		}
+		t.HTTP = &http.Client{Timeout: to}
+	}
+
+	endpoint := "https://api.search.brave.com/res/v1/web/search?q=" + url.QueryEscape(q) + "&count=" + fmt.Sprint(count)
+	parsedEndpoint, err := url.Parse(endpoint)
+	if err != nil {
+		return "", err
+	}
+	if err := validateURLAgainstPolicies(ctx, parsedEndpoint, t.HostPolicy, profile); err != nil {
+		return "", err
+	}
+	r, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	r.Header.Set("Accept", "application/json")
+	r.Header.Set("X-Subscription-Token", t.APIKey)
+
+	resp, err := t.HTTP.Do(r)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	maxRead := t.ReadMaxBytes
+	if maxRead <= 0 {
+		maxRead = defaultWebSearchReadMaxBytes
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, int64(maxRead)))
+	if resp.StatusCode >= 300 {
+		return "", fmt.Errorf("search error %s: %s", resp.Status, string(body))
+	}
+
+	// Reduce response to stable subset
+	var raw map[string]any
+	_ = json.Unmarshal(body, &raw)
+	out := map[string]any{"query": q, "results": []any{}}
+	web, _ := raw["web"].(map[string]any)
+	results, _ := web["results"].([]any)
+	for _, it := range results {
+		m, _ := it.(map[string]any)
+		out["results"] = append(out["results"].([]any), map[string]any{
+			"title":       m["title"],
+			"url":         m["url"],
+			"description": m["description"],
+		})
+	}
+	b, _ := json.MarshalIndent(out, "", "  ")
+	return string(b), nil
+}
+
+// Optional: simple text extract from HTML (very rough)
+func StripHTML(s string) string {
+	var b bytes.Buffer
+	in := false
+	for _, r := range s {
+		if r == '<' {
+			in = true
+			continue
+		}
+		if r == '>' {
+			in = false
+			continue
+		}
+		if !in {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func validateURLAgainstPolicies(ctx context.Context, target *url.URL, policy security.HostPolicy, profile ActiveProfile) error {
+	if policy.EnabledPolicy() {
+		if err := policy.ValidateURL(ctx, target); err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(profile.Name) == "" {
+		return nil
+	}
+	return (security.HostPolicy{Enabled: true, DefaultDeny: true, AllowedHosts: profile.AllowedHosts}).ValidateURL(ctx, target)
 }
 ````
 
 ## File: internal/mcp/manager.go
 ````go
+// Package mcp connects configured Model Context Protocol servers and exposes their tools.
 package mcp
 
 import (
@@ -10482,6 +13610,7 @@ type session interface {
 
 type connector func(ctx context.Context, name string, cfg config.MCPServerConfig) (session, error)
 
+// Manager owns MCP server sessions and the remote tools discovered from them.
 type Manager struct {
 	servers    map[string]config.MCPServerConfig
 	logf       func(string, ...any)
@@ -10501,6 +13630,7 @@ type remoteToolSpec struct {
 	session     session
 }
 
+// RemoteTool adapts one discovered MCP tool to the local tools.Tool interface.
 type RemoteTool struct {
 	tools.Base
 
@@ -10513,8 +13643,10 @@ type RemoteTool struct {
 	session     session
 }
 
+// Capability reports the trust level required to invoke the remote tool.
 func (t *RemoteTool) Capability() tools.CapabilityLevel { return tools.CapabilityGuarded }
 
+// NewManager constructs a Manager for the configured servers.
 func NewManager(servers map[string]config.MCPServerConfig) *Manager {
 	cloned := make(map[string]config.MCPServerConfig, len(servers))
 	for name, server := range servers {
@@ -10530,6 +13662,7 @@ func NewManager(servers map[string]config.MCPServerConfig) *Manager {
 	return mgr
 }
 
+// SetLogger installs a logger for connection and discovery failures.
 func (m *Manager) SetLogger(logf func(string, ...any)) {
 	if m == nil {
 		return
@@ -10537,6 +13670,7 @@ func (m *Manager) SetLogger(logf func(string, ...any)) {
 	m.logf = logf
 }
 
+// SetHostPolicy sets the outbound host policy used for remote transports.
 func (m *Manager) SetHostPolicy(policy security.HostPolicy) {
 	if m == nil {
 		return
@@ -10544,6 +13678,7 @@ func (m *Manager) SetHostPolicy(policy security.HostPolicy) {
 	m.hostPolicy = policy
 }
 
+// ToolNames returns the discovered local MCP tool names in sorted order.
 func (m *Manager) ToolNames() []string {
 	if m == nil {
 		return nil
@@ -10556,6 +13691,7 @@ func (m *Manager) ToolNames() []string {
 	return out
 }
 
+// Connect establishes sessions to enabled servers and discovers their tools.
 func (m *Manager) Connect(ctx context.Context) error {
 	if m == nil {
 		return nil
@@ -10608,6 +13744,7 @@ func (m *Manager) Connect(ctx context.Context) error {
 	return nil
 }
 
+// RegisterTools registers all discovered remote tools into reg.
 func (m *Manager) RegisterTools(reg *tools.Registry) int {
 	if m == nil || reg == nil {
 		return 0
@@ -10618,6 +13755,7 @@ func (m *Manager) RegisterTools(reg *tools.Registry) int {
 	return len(m.tools)
 }
 
+// Close closes all active sessions and clears discovered tools.
 func (m *Manager) Close() error {
 	if m == nil {
 		return nil
@@ -10663,8 +13801,10 @@ func (s remoteToolSpec) Tool() tools.Tool {
 	}
 }
 
+// Name returns the local tool name exposed to the runtime.
 func (t *RemoteTool) Name() string { return t.localName }
 
+// Description returns the remote tool description or a synthesized fallback.
 func (t *RemoteTool) Description() string {
 	if strings.TrimSpace(t.description) != "" {
 		return t.description
@@ -10672,14 +13812,17 @@ func (t *RemoteTool) Description() string {
 	return fmt.Sprintf("MCP tool %s from server %s.", t.remoteName, t.serverName)
 }
 
+// Parameters returns a cloned JSON-schema-like parameter description.
 func (t *RemoteTool) Parameters() map[string]any {
 	return cloneAnyMap(t.parameters)
 }
 
+// Schema returns the runtime tool schema for this remote tool.
 func (t *RemoteTool) Schema() map[string]any {
 	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
 }
 
+// Execute calls the remote tool and converts its result into plain text.
 func (t *RemoteTool) Execute(ctx context.Context, params map[string]any) (string, error) {
 	if t.session == nil {
 		return "", fmt.Errorf("mcp %s/%s: session not connected", t.serverName, t.remoteName)
@@ -11000,3878 +14143,145 @@ func (rt *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 }
 ````
 
-## File: internal/memory/retrieve.go
-````go
-package memory
-
-import (
-	"context"
-	"math"
-	"sort"
-	"strings"
-
-	"or3-intern/internal/db"
-)
-
-type Retrieved struct {
-	Source string // pinned|vector|fts
-	ID     int64
-	Text   string
-	Score  float64
-}
-
-type Retriever struct {
-	DB              *db.DB
-	VectorWeight    float64
-	FTSWeight       float64
-	LexicalWeight   float64
-	RecencyWeight   float64
-	VectorScanLimit int
-}
-
-func NewRetriever(d *db.DB) *Retriever {
-	return &Retriever{DB: d, VectorWeight: 0.55, FTSWeight: 0.25, LexicalWeight: 0.12, RecencyWeight: 0.08, VectorScanLimit: 2000}
-}
-
-func (r *Retriever) Retrieve(ctx context.Context, sessionKey, query string, queryVec []float32, vectorK, ftsK, topK int) ([]Retrieved, error) {
-	vecs, err := VectorSearch(ctx, r.DB, sessionKey, queryVec, vectorK, r.VectorScanLimit)
-	if err != nil {
-		return nil, err
-	}
-	fts, _ := r.DB.SearchFTS(ctx, sessionKey, normalizeFTSQuery(query), ftsK)
-
-	type agg struct {
-		id        int64
-		text      string
-		v         float64
-		f         float64
-		createdAt int64
-	}
-	m := map[int64]*agg{}
-	for _, c := range vecs {
-		a := m[c.ID]
-		if a == nil {
-			a = &agg{id: c.ID, text: c.Text}
-			m[c.ID] = a
-		}
-		a.v = c.Score
-		if c.CreatedAt > a.createdAt {
-			a.createdAt = c.CreatedAt
-		}
-	}
-	for _, f := range fts {
-		a := m[f.ID]
-		if a == nil {
-			a = &agg{id: f.ID, text: f.Text}
-			m[f.ID] = a
-		}
-		// bm25 lower is better. Convert to a positive "higher is better".
-		a.f = 1.0 / (1.0 + f.Rank)
-		if f.CreatedAt > a.createdAt {
-			a.createdAt = f.CreatedAt
-		}
-	}
-
-	raw := make([]Retrieved, 0, len(m))
-	tokens := retrievalTokens(query)
-	newest := int64(0)
-	for _, a := range m {
-		if a.createdAt > newest {
-			newest = a.createdAt
-		}
-	}
-	for _, a := range m {
-		lexical := lexicalOverlapScore(tokens, a.text)
-		recency := recencyScore(a.createdAt, newest)
-		score := (a.v * r.VectorWeight) + (a.f * r.FTSWeight) + (lexical * r.LexicalWeight) + (recency * r.RecencyWeight)
-		src := "hybrid"
-		if a.f > 0 && a.v == 0 {
-			src = "fts"
-		}
-		if a.v > 0 && a.f == 0 {
-			src = "vector"
-		}
-		raw = append(raw, Retrieved{Source: src, ID: a.id, Text: a.text, Score: score})
-	}
-
-	sort.Slice(raw, func(i, j int) bool {
-		if raw[i].Score == raw[j].Score {
-			return raw[i].ID > raw[j].ID
-		}
-		return raw[i].Score > raw[j].Score
-	})
-	return diversifyRetrieved(raw, topK), nil
-}
-
-func retrievalTokens(query string) []string {
-	parts := strings.FieldsFunc(strings.ToLower(query), func(r rune) bool {
-		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9')
-	})
-	seen := map[string]struct{}{}
-	out := make([]string, 0, len(parts))
-	for _, part := range parts {
-		if len(part) < 3 {
-			continue
-		}
-		if _, ok := seen[part]; ok {
-			continue
-		}
-		seen[part] = struct{}{}
-		out = append(out, part)
-	}
-	return out
-}
-
-func lexicalOverlapScore(tokens []string, text string) float64 {
-	if len(tokens) == 0 {
-		return 0
-	}
-	lower := strings.ToLower(text)
-	hits := 0
-	for _, token := range tokens {
-		if strings.Contains(lower, token) {
-			hits++
-		}
-	}
-	return float64(hits) / float64(len(tokens))
-}
-
-func recencyScore(createdAt, newest int64) float64 {
-	if createdAt <= 0 || newest <= 0 || createdAt >= newest {
-		return 1
-	}
-	ageHours := float64(newest-createdAt) / (1000 * 60 * 60)
-	if ageHours <= 0 {
-		return 1
-	}
-	return math.Exp(-ageHours / (24 * 14))
-}
-
-func diversifyRetrieved(items []Retrieved, topK int) []Retrieved {
-	if topK <= 0 || len(items) == 0 {
-		return nil
-	}
-	selected := make([]Retrieved, 0, min(topK, len(items)))
-	seenCanonical := map[string]struct{}{}
-	sourceCounts := map[string]int{}
-	for _, item := range items {
-		canonical := canonicalRetrievedText(item.Text)
-		if canonical != "" {
-			if _, ok := seenCanonical[canonical]; ok {
-				continue
-			}
-			duplicate := false
-			for _, existing := range selected {
-				if similarRetrievedText(existing.Text, item.Text) {
-					duplicate = true
-					break
-				}
-			}
-			if duplicate {
-				continue
-			}
-		}
-		penalty := 1.0 / float64(sourceCounts[item.Source]+1)
-		item.Score = item.Score * (0.85 + 0.15*penalty)
-		selected = append(selected, item)
-		if canonical != "" {
-			seenCanonical[canonical] = struct{}{}
-		}
-		sourceCounts[item.Source]++
-		if len(selected) >= topK {
-			break
-		}
-	}
-	sort.Slice(selected, func(i, j int) bool {
-		if selected[i].Score == selected[j].Score {
-			return selected[i].ID > selected[j].ID
-		}
-		return selected[i].Score > selected[j].Score
-	})
-	return selected
-}
-
-func canonicalRetrievedText(text string) string {
-	text = strings.ToLower(strings.Join(strings.Fields(text), " "))
-	if len(text) > 180 {
-		text = text[:180]
-	}
-	return text
-}
-
-func similarRetrievedText(a, b string) bool {
-	ac := canonicalRetrievedText(a)
-	bc := canonicalRetrievedText(b)
-	if ac == "" || bc == "" {
-		return false
-	}
-	if ac == bc {
-		return true
-	}
-	at := retrievalTokens(ac)
-	bt := retrievalTokens(bc)
-	if len(at) == 0 || len(bt) == 0 {
-		return false
-	}
-	set := map[string]struct{}{}
-	for _, token := range at {
-		set[token] = struct{}{}
-	}
-	shared := 0
-	union := len(set)
-	for _, token := range bt {
-		if _, ok := set[token]; ok {
-			shared++
-			continue
-		}
-		union++
-	}
-	if union == 0 {
-		return false
-	}
-	return float64(shared)/float64(union) >= 0.8
-}
-
-func normalizeFTSQuery(q string) string {
-	q = strings.TrimSpace(q)
-	if q == "" {
-		return ""
-	}
-	// simple: split on spaces, quote terms that contain punctuation
-	parts := strings.Fields(q)
-	for i, p := range parts {
-		if strings.ContainsAny(p, `":*`) {
-			parts[i] = `"` + strings.ReplaceAll(p, `"`, `""`) + `"`
-		}
-	}
-	return strings.Join(parts, " ")
-}
-````
-
-## File: internal/tools/files.go
+## File: internal/tools/registry.go
 ````go
 package tools
 
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
-	"os"
-	"path/filepath"
-	"strings"
-)
-
-type FileTool struct {
-	Base
-	Root string // allowed root (optional)
-}
-
-const (
-	defaultReadFileMaxBytes  = 200000
-	defaultListDirMaxEntries = 200
-)
-
-func (t *FileTool) safePath(p string) (string, error) {
-	if strings.TrimSpace(p) == "" {
-		return "", errors.New("missing path")
-	}
-	abs, err := filepath.Abs(p)
-	if err != nil {
-		return "", err
-	}
-	abs, err = canonicalizePath(abs)
-	if err != nil {
-		return "", err
-	}
-	if t.Root != "" {
-		root, err := filepath.Abs(t.Root)
-		if err != nil {
-			return "", err
-		}
-		root, err = canonicalizeRoot(root)
-		if err != nil {
-			return "", err
-		}
-		rel, err := filepath.Rel(root, abs)
-		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return "", fmt.Errorf("path outside allowed root")
-		}
-	}
-	return abs, nil
-}
-
-func canonicalizeRoot(root string) (string, error) {
-	if _, err := os.Stat(root); err != nil {
-		return "", err
-	}
-	return filepath.EvalSymlinks(root)
-}
-
-func canonicalizePath(abs string) (string, error) {
-	if _, err := os.Lstat(abs); err == nil {
-		return filepath.EvalSymlinks(abs)
-	} else if !os.IsNotExist(err) {
-		return "", err
-	}
-	existing := abs
-	missingParts := make([]string, 0, 4)
-	for {
-		if _, err := os.Lstat(existing); err == nil {
-			break
-		} else if !os.IsNotExist(err) {
-			return "", err
-		}
-		parent := filepath.Dir(existing)
-		if parent == existing {
-			return "", os.ErrNotExist
-		}
-		missingParts = append(missingParts, filepath.Base(existing))
-		existing = parent
-	}
-	realExisting, err := filepath.EvalSymlinks(existing)
-	if err != nil {
-		return "", err
-	}
-	for i := len(missingParts) - 1; i >= 0; i-- {
-		realExisting = filepath.Join(realExisting, missingParts[i])
-	}
-	return realExisting, nil
-}
-
-type ReadFile struct{ FileTool }
-
-func (t *ReadFile) Name() string        { return "read_file" }
-func (t *ReadFile) Description() string { return "Read a UTF-8 text file." }
-func (t *ReadFile) Parameters() map[string]any {
-	return map[string]any{"type": "object", "properties": map[string]any{
-		"path":     map[string]any{"type": "string"},
-		"maxBytes": map[string]any{"type": "integer", "description": "Max bytes to read (default 200000)"},
-	}, "required": []string{"path"}}
-}
-func (t *ReadFile) Schema() map[string]any {
-	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
-}
-func (t *ReadFile) Execute(ctx context.Context, params map[string]any) (string, error) {
-	p, err := t.safePath(fmt.Sprint(params["path"]))
-	if err != nil {
-		return "", err
-	}
-	max := defaultReadFileMaxBytes
-	if v, ok := params["maxBytes"].(float64); ok && int(v) > 0 {
-		max = int(v)
-	}
-	f, err := os.Open(p)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	b, err := io.ReadAll(io.LimitReader(f, int64(max)))
-	if err != nil {
-		return "", err
-	}
-	if len(b) > max {
-		b = b[:max]
-	}
-	return string(b), nil
-}
-
-type WriteFile struct{ FileTool }
-
-func (t *WriteFile) Capability() CapabilityLevel { return CapabilityGuarded }
-func (t *WriteFile) Name() string                { return "write_file" }
-func (t *WriteFile) Description() string         { return "Write text to a file (overwrites)." }
-func (t *WriteFile) Parameters() map[string]any {
-	return map[string]any{"type": "object", "properties": map[string]any{
-		"path":    map[string]any{"type": "string"},
-		"content": map[string]any{"type": "string"},
-		"mkdirs":  map[string]any{"type": "boolean"},
-	}, "required": []string{"path", "content"}}
-}
-func (t *WriteFile) Schema() map[string]any {
-	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
-}
-func (t *WriteFile) Execute(ctx context.Context, params map[string]any) (string, error) {
-	p, err := t.safePath(fmt.Sprint(params["path"]))
-	if err != nil {
-		return "", err
-	}
-	content := fmt.Sprint(params["content"])
-	mkdirs, _ := params["mkdirs"].(bool)
-	if mkdirs {
-		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
-			return "", err
-		}
-	}
-	if err := os.WriteFile(p, []byte(content), existingFileMode(p, 0o600)); err != nil {
-		return "", err
-	}
-	return "ok", nil
-}
-
-type EditFile struct{ FileTool }
-
-func (t *EditFile) Capability() CapabilityLevel { return CapabilityGuarded }
-func (t *EditFile) Name() string                { return "edit_file" }
-func (t *EditFile) Description() string {
-	return "Edit a text file by applying a list of find/replace operations."
-}
-func (t *EditFile) Parameters() map[string]any {
-	return map[string]any{"type": "object", "properties": map[string]any{
-		"path": map[string]any{"type": "string"},
-		"edits": map[string]any{"type": "array", "items": map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"find":    map[string]any{"type": "string"},
-				"replace": map[string]any{"type": "string"},
-				"count":   map[string]any{"type": "integer", "description": "max replacements (0=all)"},
-			},
-			"required": []string{"find", "replace"},
-		}},
-	}, "required": []string{"path", "edits"}}
-}
-func (t *EditFile) Schema() map[string]any {
-	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
-}
-func (t *EditFile) Execute(ctx context.Context, params map[string]any) (string, error) {
-	p, err := t.safePath(fmt.Sprint(params["path"]))
-	if err != nil {
-		return "", err
-	}
-	b, err := os.ReadFile(p)
-	if err != nil {
-		return "", err
-	}
-	s := string(b)
-	rawEdits, _ := params["edits"].([]any)
-	for _, e := range rawEdits {
-		m, _ := e.(map[string]any)
-		find := fmt.Sprint(m["find"])
-		replace := fmt.Sprint(m["replace"])
-		count := 0
-		if v, ok := m["count"].(float64); ok {
-			count = int(v)
-		}
-		if count <= 0 {
-			s = strings.ReplaceAll(s, find, replace)
-		} else {
-			s = strings.Replace(s, find, replace, count)
-		}
-	}
-	if err := os.WriteFile(p, []byte(s), existingFileMode(p, 0)); err != nil {
-		return "", err
-	}
-	return "ok", nil
-}
-
-type ListDir struct{ FileTool }
-
-func (t *ListDir) Name() string        { return "list_dir" }
-func (t *ListDir) Description() string { return "List directory entries." }
-func (t *ListDir) Parameters() map[string]any {
-	return map[string]any{"type": "object", "properties": map[string]any{
-		"path": map[string]any{"type": "string"},
-		"max":  map[string]any{"type": "integer"},
-	}, "required": []string{"path"}}
-}
-func (t *ListDir) Schema() map[string]any {
-	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
-}
-func (t *ListDir) Execute(ctx context.Context, params map[string]any) (string, error) {
-	p, err := t.safePath(fmt.Sprint(params["path"]))
-	if err != nil {
-		return "", err
-	}
-	ents, err := os.ReadDir(p)
-	if err != nil {
-		return "", err
-	}
-	max := defaultListDirMaxEntries
-	if v, ok := params["max"].(float64); ok && int(v) > 0 {
-		max = int(v)
-	}
-	type entry struct {
-		Name  string `json:"name"`
-		IsDir bool   `json:"isDir"`
-		Size  int64  `json:"size"`
-	}
-	out := []entry{}
-	for _, e := range ents {
-		if len(out) >= max {
-			break
-		}
-		info, _ := e.Info()
-		sz := int64(0)
-		if info != nil {
-			sz = info.Size()
-		}
-		out = append(out, entry{Name: e.Name(), IsDir: e.IsDir(), Size: sz})
-	}
-	b, _ := json.MarshalIndent(out, "", "  ")
-	return string(b), nil
-}
-
-func existingFileMode(path string, defaultMode os.FileMode) os.FileMode {
-	if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
-		return info.Mode().Perm()
-	}
-	if defaultMode == 0 {
-		return 0o600
-	}
-	return defaultMode
-}
-````
-
-## File: internal/tools/memory.go
-````go
-package tools
-
-import (
-	"context"
-	"database/sql"
 	"fmt"
 	"sort"
 	"strings"
-
-	"or3-intern/internal/db"
-	"or3-intern/internal/memory"
-	"or3-intern/internal/providers"
-	"or3-intern/internal/scope"
 )
 
-type MemorySetPinned struct {
-	Base
-	DB *db.DB
+type Registry struct {
+	tools map[string]Tool
 }
 
-func (t *MemorySetPinned) Name() string { return "memory_set_pinned" }
-func (t *MemorySetPinned) Description() string {
-	return "Upsert a pinned memory entry (always included in prompts)."
-}
-func (t *MemorySetPinned) Parameters() map[string]any {
-	return map[string]any{"type": "object", "properties": map[string]any{
-		"key":     map[string]any{"type": "string"},
-		"content": map[string]any{"type": "string"},
-		"scope":   map[string]any{"type": "string", "description": "Optional scope override: 'global' to share across sessions"},
-	}, "required": []string{"key", "content"}}
-}
-func (t *MemorySetPinned) Schema() map[string]any {
-	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
-}
-func (t *MemorySetPinned) Execute(ctx context.Context, params map[string]any) (string, error) {
-	if t.DB == nil {
-		return "", fmt.Errorf("db not set")
-	}
-	key := stringParam(params, "key")
-	content := stringParam(params, "content")
-	if key == "" || content == "" {
-		return "", fmt.Errorf("missing key/content")
-	}
-	if err := t.DB.UpsertPinned(ctx, memoryScopeFromParams(ctx, params), key, content); err != nil {
-		return "", err
-	}
-	return "ok", nil
+func NewRegistry() *Registry {
+	return &Registry{tools: map[string]Tool{}}
 }
 
-type MemoryAddNote struct {
-	Base
-	DB         *db.DB
-	Provider   *providers.Client
-	EmbedModel string
+func (r *Registry) Register(t Tool)      { r.tools[t.Name()] = t }
+func (r *Registry) Get(name string) Tool { return r.tools[name] }
+func (r *Registry) Names() []string {
+	out := make([]string, 0, len(r.tools))
+	for k := range r.tools {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
-func (t *MemoryAddNote) Name() string { return "memory_add_note" }
-func (t *MemoryAddNote) Description() string {
-	return "Add a semantic memory note to the indexed memory store."
-}
-func (t *MemoryAddNote) Parameters() map[string]any {
-	return map[string]any{"type": "object", "properties": map[string]any{
-		"text":              map[string]any{"type": "string"},
-		"tags":              map[string]any{"type": "string", "description": "comma-separated tags (optional)"},
-		"source_message_id": map[string]any{"type": "integer", "description": "source message id (optional)"},
-		"scope":             map[string]any{"type": "string", "description": "Optional scope override: 'global' to share across sessions"},
-	}, "required": []string{"text"}}
-}
-func (t *MemoryAddNote) Schema() map[string]any {
-	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
-}
-func (t *MemoryAddNote) Execute(ctx context.Context, params map[string]any) (string, error) {
-	if t.DB == nil || t.Provider == nil {
-		return "", fmt.Errorf("missing deps")
-	}
-	text := stringParam(params, "text")
-	if text == "" {
-		return "", fmt.Errorf("empty text")
-	}
-	tags := stringParam(params, "tags")
-	var src sql.NullInt64
-	if v, ok := params["source_message_id"].(float64); ok && int64(v) > 0 {
-		src = sql.NullInt64{Int64: int64(v), Valid: true}
-	}
-	vec, err := t.Provider.Embed(ctx, t.EmbedModel, text)
-	if err != nil {
-		return "", err
-	}
-	blob := memory.PackFloat32(vec)
-	id, err := t.DB.InsertMemoryNote(ctx, memoryScopeFromParams(ctx, params), text, blob, src, tags)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("ok: %d", id), nil
-}
-
-type MemorySearch struct {
-	Base
-	DB              *db.DB
-	Provider        *providers.Client
-	EmbedModel      string
-	VectorK         int
-	FTSK            int
-	TopK            int
-	VectorScanLimit int
-}
-
-func (t *MemorySearch) Name() string { return "memory_search" }
-func (t *MemorySearch) Description() string {
-	return "Search long-term memory (hybrid semantic + keyword) and return top results."
-}
-func (t *MemorySearch) Parameters() map[string]any {
-	return map[string]any{"type": "object", "properties": map[string]any{
-		"query": map[string]any{"type": "string"},
-		"topK":  map[string]any{"type": "integer"},
-		"scope": map[string]any{"type": "string", "description": "Optional scope override: 'global' to search only shared memory"},
-	}, "required": []string{"query"}}
-}
-func (t *MemorySearch) Schema() map[string]any {
-	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
-}
-func (t *MemorySearch) Execute(ctx context.Context, params map[string]any) (string, error) {
-	if t.DB == nil || t.Provider == nil {
-		return "", fmt.Errorf("missing deps")
-	}
-	q := stringParam(params, "query")
-	if q == "" {
-		return "", fmt.Errorf("empty query")
-	}
-	topK := t.TopK
-	if v, ok := params["topK"].(float64); ok && int(v) > 0 {
-		topK = int(v)
-	}
-	vec, err := t.Provider.Embed(ctx, t.EmbedModel, q)
-	if err != nil {
-		return "", err
-	}
-	r := memory.NewRetriever(t.DB)
-	r.VectorScanLimit = t.VectorScanLimit
-	got, err := r.Retrieve(ctx, memoryScopeFromParams(ctx, params), q, vec, t.VectorK, t.FTSK, topK)
-	if err != nil {
-		return "", err
-	}
-	var b strings.Builder
-	for i, m := range got {
-		b.WriteString(fmt.Sprintf("%d. [%s] %.4f %s\n", i+1, m.Source, m.Score, m.Text))
-	}
-	return b.String(), nil
-}
-
-type MemoryRecent struct {
-	Base
-	DB           *db.DB
-	DefaultLimit int
-	MaxLimit     int
-	MaxChars     int
-}
-
-func (t *MemoryRecent) Name() string { return "memory_recent" }
-func (t *MemoryRecent) Description() string {
-	return "Fetch recent conversation messages from the current linked session scope."
-}
-func (t *MemoryRecent) Parameters() map[string]any {
-	return map[string]any{"type": "object", "properties": map[string]any{
-		"limit": map[string]any{"type": "integer"},
-	}}
-}
-func (t *MemoryRecent) Schema() map[string]any {
-	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
-}
-func (t *MemoryRecent) Execute(ctx context.Context, params map[string]any) (string, error) {
-	if t.DB == nil {
-		return "", fmt.Errorf("db not set")
-	}
-	limit := boundedPositiveInt(params["limit"], t.DefaultLimit, t.MaxLimit)
-	msgs, err := t.DB.GetLastMessagesScoped(ctx, SessionFromContext(ctx), limit)
-	if err != nil {
-		return "", err
-	}
-	var b strings.Builder
-	for i, msg := range msgs {
-		b.WriteString(fmt.Sprintf("%d. [%s/%s] %s\n", i+1, msg.SessionKey, msg.Role, compactMemoryText(msg.Content, t.MaxChars)))
-	}
-	return b.String(), nil
-}
-
-type MemoryGetPinned struct {
-	Base
-	DB       *db.DB
-	MaxChars int
-}
-
-func (t *MemoryGetPinned) Name() string { return "memory_get_pinned" }
-func (t *MemoryGetPinned) Description() string {
-	return "Read pinned memory entries for the current session, including shared global entries."
-}
-func (t *MemoryGetPinned) Parameters() map[string]any {
-	return map[string]any{"type": "object", "properties": map[string]any{
-		"key":   map[string]any{"type": "string", "description": "Optional pinned memory key to fetch"},
-		"scope": map[string]any{"type": "string", "description": "Optional scope override: 'global' to read only shared memory"},
-	}}
-}
-func (t *MemoryGetPinned) Schema() map[string]any {
-	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
-}
-func (t *MemoryGetPinned) Execute(ctx context.Context, params map[string]any) (string, error) {
-	if t.DB == nil {
-		return "", fmt.Errorf("db not set")
-	}
-	pinned, err := t.DB.GetPinned(ctx, memoryScopeFromParams(ctx, params))
-	if err != nil {
-		return "", err
-	}
-	key := stringParam(params, "key")
-	if key != "" {
-		value, ok := pinned[key]
-		if !ok {
-			return "", nil
-		}
-		return fmt.Sprintf("%s: %s", key, compactMemoryText(value, t.MaxChars)), nil
-	}
-	keys := make([]string, 0, len(pinned))
-	for key := range pinned {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	var b strings.Builder
-	for _, key := range keys {
-		b.WriteString(fmt.Sprintf("%s: %s\n", key, compactMemoryText(pinned[key], t.MaxChars)))
-	}
-	return b.String(), nil
-}
-
-func memoryScopeFromParams(ctx context.Context, params map[string]any) string {
-	if requestedScope := stringParam(params, "scope"); scope.IsGlobalScopeRequest(requestedScope) {
-		return scope.GlobalMemoryScope
-	}
-	return SessionFromContext(ctx)
-}
-
-func stringParam(params map[string]any, key string) string {
-	if params == nil {
-		return ""
-	}
-	value, ok := params[key]
-	if !ok || value == nil {
-		return ""
-	}
-	return strings.TrimSpace(fmt.Sprint(value))
-}
-
-func boundedPositiveInt(raw any, fallback, max int) int {
-	value := fallback
-	if v, ok := raw.(float64); ok && int(v) > 0 {
-		value = int(v)
-	}
-	if max > 0 && value > max {
-		return max
-	}
-	if value < 0 {
-		return 0
-	}
-	return value
-}
-
-func compactMemoryText(text string, maxChars int) string {
-	text = strings.Join(strings.Fields(text), " ")
-	if maxChars <= 0 || len(text) <= maxChars {
-		return text
-	}
-	if maxChars <= 3 {
-		return text[:maxChars]
-	}
-	return text[:maxChars-3] + "..."
-}
-````
-
-## File: internal/tools/message.go
-````go
-package tools
-
-import (
-	"context"
-	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
-
-	rootchannels "or3-intern/internal/channels"
-)
-
-type DeliverFunc func(ctx context.Context, channel, to, text string, meta map[string]any) error
-
-type SendMessage struct {
-	Base
-	Deliver        DeliverFunc
-	DefaultChannel string
-	DefaultTo      string
-	AllowedRoot    string
-	ArtifactsDir   string
-	MaxMediaBytes  int
-}
-
-func (t *SendMessage) Capability() CapabilityLevel { return CapabilityGuarded }
-
-func (t *SendMessage) Name() string { return "send_message" }
-func (t *SendMessage) Description() string {
-	return "Send a message via a configured channel (for reminders/cron or proactive messages)."
-}
-func (t *SendMessage) Parameters() map[string]any {
-	return map[string]any{"type": "object", "properties": map[string]any{
-		"channel": map[string]any{"type": "string"},
-		"to":      map[string]any{"type": "string"},
-		"text":    map[string]any{"type": "string"},
-		"reply_in_thread": map[string]any{
-			"type":        "boolean",
-			"description": "When true, reuse the current channel's reply/thread metadata for the outgoing message.",
-		},
-		"media": map[string]any{
-			"type":        "array",
-			"items":       map[string]any{"type": "string"},
-			"description": "Optional local file paths to send as attachments.",
-		},
-	}, "required": []string{}}
-}
-func (t *SendMessage) Schema() map[string]any {
-	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
-}
-func (t *SendMessage) Execute(ctx context.Context, params map[string]any) (string, error) {
-	if t.Deliver == nil {
-		return "", fmt.Errorf("deliver not configured")
-	}
-	ctxChannel, ctxTo := DeliveryFromContext(ctx)
-	ch := readOptionalString(params, "channel")
-	to := readOptionalString(params, "to")
-	text := readOptionalString(params, "text")
-	if ch == "" {
-		ch = strings.TrimSpace(t.DefaultChannel)
-	}
-	if ch == "" {
-		ch = strings.TrimSpace(ctxChannel)
-	}
-	if to == "" {
-		to = strings.TrimSpace(t.DefaultTo)
-	}
-	if to == "" {
-		to = strings.TrimSpace(ctxTo)
-	}
-	mediaPaths, err := t.validateMediaPaths(params["media"])
-	if err != nil {
-		return "", err
-	}
-	if text == "" && len(mediaPaths) == 0 {
-		return "", fmt.Errorf("message requires text or media")
-	}
-	inheritedReplyMeta := DeliveryMetaFromContext(ctx)
-	meta := map[string]any{}
-	explicitTo := strings.TrimSpace(readOptionalString(params, "to")) != ""
-	replyInThread, err := optionalBool(params["reply_in_thread"])
-	if err != nil {
-		return "", err
-	}
-	if replyInThread {
-		if explicitTo {
-			return "", fmt.Errorf("reply_in_thread requires using the current delivery target")
-		}
-		if strings.TrimSpace(ctxChannel) != "" && !strings.EqualFold(strings.TrimSpace(ch), strings.TrimSpace(ctxChannel)) {
-			return "", fmt.Errorf("reply_in_thread requires using the current delivery channel")
-		}
-		for k, v := range inheritedReplyMeta {
-			meta[k] = v
-		}
-	}
-	if len(mediaPaths) > 0 || explicitTo || len(meta) > 0 {
-		if len(mediaPaths) > 0 {
-			meta[rootchannels.MetaMediaPaths] = mediaPaths
-		}
-		if explicitTo {
-			meta["explicit_to"] = true
-		}
-	}
-	if len(meta) == 0 {
-		meta = nil
-	}
-	if err := t.Deliver(ctx, ch, to, text, meta); err != nil {
-		return "", err
-	}
-	return "ok", nil
-}
-
-func optionalBool(raw any) (bool, error) {
-	switch v := raw.(type) {
-	case nil:
-		return false, nil
-	case bool:
-		return v, nil
-	case string:
-		text := strings.TrimSpace(strings.ToLower(v))
-		switch text {
-		case "", "false", "0", "no":
-			return false, nil
-		case "true", "1", "yes":
-			return true, nil
-		default:
-			return false, fmt.Errorf("reply_in_thread must be a boolean")
-		}
-	default:
-		return false, fmt.Errorf("reply_in_thread must be a boolean")
-	}
-}
-
-func (t *SendMessage) validateMediaPaths(raw any) ([]string, error) {
-	items, err := stringSlice(raw)
-	if err != nil {
-		return nil, err
-	}
-	if len(items) == 0 {
-		return nil, nil
-	}
-	roots := make([]string, 0, 2)
-	if strings.TrimSpace(t.AllowedRoot) != "" {
-		roots = append(roots, strings.TrimSpace(t.AllowedRoot))
-	}
-	if strings.TrimSpace(t.ArtifactsDir) != "" {
-		roots = append(roots, strings.TrimSpace(t.ArtifactsDir))
-	}
-	out := make([]string, 0, len(items))
-	for _, item := range items {
-		p, err := filepath.Abs(strings.TrimSpace(item))
-		if err != nil {
-			return nil, err
-		}
-		p, err = canonicalizePath(p)
-		if err != nil {
-			return nil, err
-		}
-		info, err := os.Stat(p)
-		if err != nil {
-			return nil, err
-		}
-		if info.IsDir() {
-			return nil, fmt.Errorf("media path is a directory: %s", item)
-		}
-		if t.MaxMediaBytes == 0 {
-			return nil, fmt.Errorf("media attachments disabled by config")
-		}
-		if t.MaxMediaBytes > 0 && info.Size() > int64(t.MaxMediaBytes) {
-			return nil, fmt.Errorf("media path exceeds maxMediaBytes: %s", item)
-		}
-		if len(roots) > 0 {
-			allowed := false
-			for _, root := range roots {
-				ok, err := pathWithinRoot(p, root)
-				if err != nil {
-					return nil, err
-				}
-				if ok {
-					allowed = true
-					break
-				}
-			}
-			if !allowed {
-				return nil, fmt.Errorf("media path outside allowed roots: %s", item)
-			}
-		}
-		out = append(out, p)
-	}
-	return out, nil
-}
-
-func pathWithinRoot(absPath, root string) (bool, error) {
-	root, err := filepath.Abs(root)
-	if err != nil {
-		return false, err
-	}
-	root, err = canonicalizeRoot(root)
-	if err != nil {
-		return false, err
-	}
-	rel, err := filepath.Rel(root, absPath)
-	if err != nil {
-		return false, err
-	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)), nil
-}
-
-func stringSlice(raw any) ([]string, error) {
-	switch v := raw.(type) {
-	case nil:
-		return nil, nil
-	case []string:
-		out := make([]string, 0, len(v))
-		for _, item := range v {
-			if strings.TrimSpace(item) == "" {
-				continue
-			}
-			out = append(out, item)
-		}
-		return out, nil
-	case []any:
-		out := make([]string, 0, len(v))
-		for _, item := range v {
-			s := strings.TrimSpace(fmt.Sprint(item))
-			if s == "" {
-				continue
-			}
-			out = append(out, s)
-		}
-		return out, nil
-	default:
-		return nil, fmt.Errorf("media must be an array of strings")
-	}
-}
-````
-
-## File: internal/agent/subagents.go
-````go
-package agent
-
-import (
-	"context"
-	"crypto/rand"
-	"encoding/hex"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"log"
-	"strings"
-	"sync"
-	"time"
-
-	"or3-intern/internal/db"
-	"or3-intern/internal/providers"
-	"or3-intern/internal/tools"
-)
-
-const (
-	subagentClaimRetryDelay = 25 * time.Millisecond
-	subagentFinalizeTimeout = 5 * time.Second
-)
-
-type SubagentManager struct {
-	DB              *db.DB
-	Runtime         *Runtime
-	Deliver         Deliverer
-	MaxConcurrent   int
-	MaxQueued       int
-	TaskTimeout     time.Duration
-	BackgroundTools func() *tools.Registry
-	Jobs            *JobRegistry
-
-	mu       sync.Mutex
-	started  bool
-	ctx      context.Context
-	cancel   context.CancelFunc
-	notifyCh chan struct{}
-	wg       sync.WaitGroup
-}
-
-type ServiceSubagentRequest struct {
-	ParentSessionKey string
-	Task             string
-	PromptSnapshot   []providers.ChatMessage
-	AllowedTools     []string
-	RestrictTools    bool
-	ProfileName      string
-	Channel          string
-	ReplyTo          string
-	Meta             map[string]any
-	Timeout          time.Duration
-}
-
-type subagentJobMetadata struct {
-	ProfileName    string                  `json:"profile_name,omitempty"`
-	AllowedTools   []string                `json:"allowed_tools,omitempty"`
-	RestrictTools  bool                    `json:"restrict_tools,omitempty"`
-	PromptSnapshot []providers.ChatMessage `json:"prompt_snapshot,omitempty"`
-	TimeoutSeconds int                     `json:"timeout_seconds,omitempty"`
-	ServiceMeta    map[string]any          `json:"service_meta,omitempty"`
-}
-
-func (m *SubagentManager) Start(ctx context.Context) error {
-	if m == nil {
-		return fmt.Errorf("subagent manager is nil")
-	}
-	if m.DB == nil {
-		return fmt.Errorf("subagent db not configured")
-	}
-	if m.Runtime == nil {
-		return fmt.Errorf("subagent runtime not configured")
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.started {
-		return nil
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if m.MaxConcurrent <= 0 {
-		m.MaxConcurrent = 1
-	}
-	if m.MaxQueued <= 0 {
-		m.MaxQueued = 32
-	}
-	if m.TaskTimeout <= 0 {
-		m.TaskTimeout = 5 * time.Minute
-	}
-	running, err := m.DB.ListRunningSubagentJobs(ctx)
-	if err != nil {
-		return err
-	}
-	queued, err := m.DB.ListQueuedSubagentJobs(ctx)
-	if err != nil {
-		return err
-	}
-	m.ctx, m.cancel = context.WithCancel(ctx)
-	m.notifyCh = make(chan struct{}, m.MaxConcurrent)
-	m.started = true
-	for i := 0; i < m.MaxConcurrent; i++ {
-		m.wg.Add(1)
-		go m.workerLoop()
-	}
-	for _, job := range running {
-		m.reconcileInterruptedJob(job, "subagent interrupted during restart")
-	}
-	if len(queued) > 0 {
-		m.signalN(min(len(queued), m.MaxConcurrent))
-	}
-	return nil
-}
-
-func (m *SubagentManager) Stop(ctx context.Context) error {
-	if m == nil {
-		return nil
-	}
-	m.mu.Lock()
-	if !m.started {
-		m.mu.Unlock()
-		return nil
-	}
-	cancel := m.cancel
-	m.started = false
-	m.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-	done := make(chan struct{})
-	go func() {
-		m.wg.Wait()
-		close(done)
-	}()
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-func (m *SubagentManager) Enqueue(ctx context.Context, req tools.SpawnRequest) (tools.SpawnJob, error) {
-	if m == nil || m.DB == nil {
-		return tools.SpawnJob{}, fmt.Errorf("background subagents disabled")
-	}
-	task := strings.TrimSpace(req.Task)
-	if task == "" {
-		return tools.SpawnJob{}, fmt.Errorf("empty task")
-	}
-	parentSessionKey := strings.TrimSpace(req.ParentSessionKey)
-	if parentSessionKey == "" {
-		return tools.SpawnJob{}, fmt.Errorf("missing parent session")
-	}
-	jobID := newSubagentID()
-	metadata := map[string]any{}
-	if profileName := strings.TrimSpace(req.ProfileName); profileName != "" {
-		metadata["profile_name"] = profileName
-	}
-	metadataJSON := mustMetadataJSON(metadata)
-	job := db.SubagentJob{
-		ID:               jobID,
-		ParentSessionKey: parentSessionKey,
-		ChildSessionKey:  childSessionKey(parentSessionKey, jobID),
-		Channel:          strings.TrimSpace(req.Channel),
-		ReplyTo:          strings.TrimSpace(req.To),
-		Task:             task,
-		Status:           db.SubagentStatusQueued,
-		MetadataJSON:     metadataJSON,
-	}
-	if err := m.DB.EnqueueSubagentJobLimited(ctx, job, m.MaxQueued); err != nil {
-		return tools.SpawnJob{}, err
-	}
-	if m.Jobs != nil {
-		m.Jobs.RegisterWithID(job.ID, "subagent")
-		m.Jobs.Publish(job.ID, "queued", map[string]any{"status": db.SubagentStatusQueued, "child_session_key": job.ChildSessionKey})
-	}
-	m.signal()
-	return tools.SpawnJob{ID: job.ID, ChildSessionKey: job.ChildSessionKey}, nil
-}
-
-func (m *SubagentManager) EnqueueService(ctx context.Context, req ServiceSubagentRequest) (tools.SpawnJob, error) {
-	if m == nil || m.DB == nil {
-		return tools.SpawnJob{}, fmt.Errorf("background subagents disabled")
-	}
-	parentSessionKey := strings.TrimSpace(req.ParentSessionKey)
-	if parentSessionKey == "" {
-		return tools.SpawnJob{}, fmt.Errorf("missing parent session")
-	}
-	task := strings.TrimSpace(req.Task)
-	if task == "" {
-		return tools.SpawnJob{}, fmt.Errorf("empty task")
-	}
-	jobID := newSubagentID()
-	metadata := subagentJobMetadata{
-		ProfileName:    strings.TrimSpace(req.ProfileName),
-		AllowedTools:   append([]string{}, req.AllowedTools...),
-		RestrictTools:  req.RestrictTools,
-		PromptSnapshot: append([]providers.ChatMessage{}, req.PromptSnapshot...),
-		ServiceMeta:    cloneMap(req.Meta),
-	}
-	if req.Timeout > 0 {
-		metadata.TimeoutSeconds = int(req.Timeout / time.Second)
-	}
-	job := db.SubagentJob{
-		ID:               jobID,
-		ParentSessionKey: parentSessionKey,
-		ChildSessionKey:  childSessionKey(parentSessionKey, jobID),
-		Channel:          strings.TrimSpace(req.Channel),
-		ReplyTo:          strings.TrimSpace(req.ReplyTo),
-		Task:             task,
-		Status:           db.SubagentStatusQueued,
-		MetadataJSON:     mustMetadataJSON(metadata),
-	}
-	if err := m.DB.EnqueueSubagentJobLimited(ctx, job, m.MaxQueued); err != nil {
-		return tools.SpawnJob{}, err
-	}
-	if m.Jobs != nil {
-		m.Jobs.RegisterWithID(job.ID, "subagent")
-		m.Jobs.Publish(job.ID, "queued", serviceLifecycleEventPayload(metadata.ServiceMeta, map[string]any{"status": db.SubagentStatusQueued, "child_session_key": job.ChildSessionKey}))
-	}
-	m.signal()
-	return tools.SpawnJob{ID: job.ID, ChildSessionKey: job.ChildSessionKey}, nil
-}
-
-func (m *SubagentManager) workerLoop() {
-	defer m.wg.Done()
-	for {
-		ran, err := m.runOnce()
-		if err != nil {
-			if !errors.Is(err, context.Canceled) {
-				log.Printf("subagent worker error: %v", err)
-			}
-		}
-		if ran {
-			continue
-		}
-		select {
-		case <-m.ctx.Done():
-			return
-		case <-m.notifyCh:
-		case <-time.After(subagentClaimRetryDelay):
-		}
-	}
-}
-
-func (m *SubagentManager) runOnce() (bool, error) {
-	job, err := m.DB.ClaimNextSubagentJob(m.ctx)
-	if err != nil || job == nil {
-		return false, err
-	}
-	m.executeJob(*job)
-	return true, nil
-}
-
-func (m *SubagentManager) executeJob(job db.SubagentJob) {
-	timeout := m.jobTimeout(job)
-	runCtx, cancel := context.WithTimeout(m.ctx, timeout)
-	defer cancel()
-	metadata := parseSubagentJobMetadata(job.MetadataJSON)
-	if m.Jobs != nil {
-		m.Jobs.AttachCancel(job.ID, cancel)
-		m.Jobs.Publish(job.ID, "started", serviceLifecycleEventPayload(metadata.ServiceMeta, map[string]any{"status": db.SubagentStatusRunning, "child_session_key": job.ChildSessionKey}))
-	}
-	result, err := m.runJob(runCtx, job)
-	if err != nil {
-		reason := strings.TrimSpace(err.Error())
-		switch {
-		case errors.Is(err, context.Canceled), errors.Is(runCtx.Err(), context.Canceled):
-			m.finalizeJob(runCtx, job, db.SubagentStatusInterrupted, "", "", reasonOrDefault(reason, "subagent interrupted"), true)
-		case errors.Is(err, context.DeadlineExceeded), errors.Is(runCtx.Err(), context.DeadlineExceeded):
-			m.finalizeJob(runCtx, job, db.SubagentStatusFailed, "", "", reasonOrDefault(reason, "subagent timed out"), true)
-		default:
-			m.finalizeJob(runCtx, job, db.SubagentStatusFailed, "", "", reasonOrDefault(reason, "subagent failed"), true)
-		}
-		return
-	}
-	m.finalizeJob(runCtx, job, db.SubagentStatusSucceeded, result.Preview, result.ArtifactID, "", true)
-}
-
-func (m *SubagentManager) runJob(ctx context.Context, job db.SubagentJob) (BackgroundRunResult, error) {
-	metadata := parseSubagentJobMetadata(job.MetadataJSON)
-	promptSnapshot := append([]providers.ChatMessage{}, metadata.PromptSnapshot...)
-	var err error
-	if len(promptSnapshot) == 0 {
-		promptSnapshot, err = m.Runtime.BuildPromptSnapshot(ctx, job.ParentSessionKey, job.Task)
-		if err != nil {
-			return BackgroundRunResult{}, err
-		}
-	}
-	if m.Jobs != nil {
-		ctx = ContextWithConversationObserver(ctx, m.Jobs.Observer(job.ID))
-		ctx = ContextWithStreamingChannel(ctx, NullStreamer{})
-	}
-	return m.Runtime.RunBackground(ctx, BackgroundRunInput{
-		SessionKey:       job.ChildSessionKey,
-		ParentSessionKey: job.ParentSessionKey,
-		Task:             job.Task,
-		PromptSnapshot:   promptSnapshot,
-		Tools:            toolRegistryWithAllowlist(m.backgroundTools(), metadata.AllowedTools, metadata.RestrictTools),
-		Meta: map[string]any{
-			"subagent_job_id":    job.ID,
-			"parent_session_key": job.ParentSessionKey,
-			"profile_name":       metadata.ProfileName,
-		},
-		Channel: job.Channel,
-		ReplyTo: job.ReplyTo,
-	})
-}
-
-func (m *SubagentManager) backgroundTools() *tools.Registry {
-	if m.BackgroundTools != nil {
-		return m.BackgroundTools()
-	}
-	return tools.NewRegistry()
-}
-
-func (m *SubagentManager) finalizeJob(baseCtx context.Context, job db.SubagentJob, status string, preview string, artifactID string, errText string, deliver bool) {
-	finalizeCtx, cancel := boundedContext(baseCtx, subagentFinalizeTimeout)
-	defer cancel()
-	success := status == db.SubagentStatusSucceeded
-	text := formatParentSubagentSummary(job, success, preview, artifactID, errText)
-	metadata := parseSubagentJobMetadata(job.MetadataJSON)
-	payload := map[string]any{
-		"subagent_job_id": job.ID,
-		"child_session":   job.ChildSessionKey,
-		"status":          status,
-	}
-	if artifactID != "" {
-		payload["artifact_id"] = artifactID
-	}
-	if err := m.DB.FinalizeSubagentJob(finalizeCtx, job, status, preview, artifactID, errText, text, payload); err != nil {
-		log.Printf("finalize subagent failed: job=%s err=%v", job.ID, err)
-		return
-	}
-	if m.Jobs != nil {
-		if status == db.SubagentStatusSucceeded {
-			m.Jobs.Complete(job.ID, status, serviceLifecycleEventPayload(metadata.ServiceMeta, map[string]any{"preview": preview, "artifact_id": artifactID, "child_session_key": job.ChildSessionKey}))
-		} else if status == db.SubagentStatusInterrupted {
-			m.Jobs.Complete(job.ID, "aborted", serviceLifecycleEventPayload(metadata.ServiceMeta, map[string]any{"message": errText, "child_session_key": job.ChildSessionKey}))
-		} else {
-			m.Jobs.Fail(job.ID, errText, serviceLifecycleEventPayload(metadata.ServiceMeta, map[string]any{"child_session_key": job.ChildSessionKey}))
-		}
-	}
-	if deliver {
-		m.deliverCompletion(finalizeCtx, job, success, preview, artifactID, errText)
-	}
-}
-
-func (m *SubagentManager) Abort(ctx context.Context, id string) error {
-	if m == nil || m.DB == nil {
-		return fmt.Errorf("background subagents disabled")
-	}
-	if m.Jobs != nil && m.Jobs.Cancel(id) {
-		return nil
-	}
-	job, ok, err := m.DB.AbortQueuedSubagentJob(ctx, id, "subagent aborted before execution")
-	if err != nil {
-		return err
-	}
-	if !ok {
-		stored, exists, lookupErr := m.DB.GetSubagentJob(ctx, id)
-		if lookupErr != nil {
-			return lookupErr
-		}
-		if !exists {
-			return fmt.Errorf("job not found")
-		}
-		if stored.Status == db.SubagentStatusQueued {
-			return fmt.Errorf("job is not abortable")
-		}
-		return fmt.Errorf("job is not abortable")
-	}
-	if m.Jobs != nil {
-		m.Jobs.Complete(id, "aborted", map[string]any{"message": "subagent aborted before execution", "child_session_key": job.ChildSessionKey})
-	}
-	return nil
-}
-
-func (m *SubagentManager) jobTimeout(job db.SubagentJob) time.Duration {
-	metadata := parseSubagentJobMetadata(job.MetadataJSON)
-	if metadata.TimeoutSeconds > 0 {
-		return time.Duration(metadata.TimeoutSeconds) * time.Second
-	}
-	if m.TaskTimeout <= 0 {
-		return 5 * time.Minute
-	}
-	return m.TaskTimeout
-}
-
-func parseSubagentJobMetadata(raw string) subagentJobMetadata {
-	if strings.TrimSpace(raw) == "" {
-		return subagentJobMetadata{}
-	}
-	var metadata subagentJobMetadata
-	if err := json.Unmarshal([]byte(raw), &metadata); err != nil {
-		var legacy map[string]any
-		if legacyErr := json.Unmarshal([]byte(raw), &legacy); legacyErr != nil {
-			return subagentJobMetadata{}
-		}
-		metadata.ProfileName = strings.TrimSpace(fmt.Sprint(legacy["profile_name"]))
-		return metadata
-	}
-	metadata.ProfileName = strings.TrimSpace(metadata.ProfileName)
-	return metadata
-}
-
-func serviceLifecycleEventPayload(serviceMeta map[string]any, payload map[string]any) map[string]any {
-	out := map[string]any{}
-	for key, value := range payload {
-		out[key] = value
-	}
-	for _, key := range []string{"request_id", "workspace_id", "network_session_id"} {
-		if value, ok := serviceMeta[key]; ok {
-			out[key] = value
-		}
+func (r *Registry) Definitions() []map[string]any {
+	names := r.Names()
+	out := make([]map[string]any, 0, len(names))
+	for _, name := range names {
+		out = append(out, r.tools[name].Schema())
 	}
 	return out
 }
 
-func mustMetadataJSON(payload any) string {
-	if payload == nil {
-		return "{}"
+func (r *Registry) CloneFiltered(allowed []string) *Registry {
+	if r == nil {
+		return NewRegistry()
 	}
-	b, err := json.Marshal(payload)
-	if err != nil || len(b) == 0 {
-		return "{}"
-	}
-	return string(b)
-}
-
-func (m *SubagentManager) reconcileInterruptedJob(job db.SubagentJob, reason string) {
-	m.finalizeJob(m.ctx, job, db.SubagentStatusInterrupted, "", "", reasonOrDefault(reason, "subagent interrupted during restart"), false)
-}
-
-func (m *SubagentManager) deliverCompletion(ctx context.Context, job db.SubagentJob, success bool, preview string, artifactID string, errText string) {
-	deliverer := m.Deliver
-	if deliverer == nil && m.Runtime != nil {
-		deliverer = m.Runtime.Deliver
-	}
-	if deliverer == nil || strings.TrimSpace(job.Channel) == "" || strings.TrimSpace(job.ReplyTo) == "" {
-		return
-	}
-	text := formatDeliverySubagentSummary(job, success, preview, artifactID, errText)
-	if err := deliverer.Deliver(ctx, job.Channel, job.ReplyTo, text); err != nil {
-		log.Printf("subagent delivery failed: job=%s err=%v", job.ID, err)
-	}
-}
-
-func (m *SubagentManager) signal() {
-	m.signalN(1)
-}
-
-func (m *SubagentManager) signalN(n int) {
-	if n <= 0 {
-		return
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if !m.started || m.notifyCh == nil {
-		return
-	}
-	for i := 0; i < n; i++ {
-		select {
-		case m.notifyCh <- struct{}{}:
-		default:
-			return
+	if len(allowed) == 0 {
+		clone := NewRegistry()
+		for _, name := range r.Names() {
+			clone.Register(r.tools[name])
 		}
+		return clone
 	}
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, name := range allowed {
+		trimmed := strings.TrimSpace(name)
+		if trimmed == "" {
+			continue
+		}
+		allowedSet[trimmed] = struct{}{}
+	}
+	clone := NewRegistry()
+	for _, name := range r.Names() {
+		if _, ok := allowedSet[name]; !ok {
+			continue
+		}
+		clone.Register(r.tools[name])
+	}
+	return clone
 }
 
-func boundedContext(base context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
-	if base == nil {
-		base = context.Background()
+func (r *Registry) Execute(ctx context.Context, name string, argsJSON string) (string, error) {
+	t := r.tools[name]
+	if t == nil {
+		return "", fmt.Errorf("tool '%s' not found", name)
+	}
+	var params map[string]any
+	if argsJSON == "" {
+		params = map[string]any{}
 	} else {
-		base = context.WithoutCancel(base)
-	}
-	if timeout <= 0 {
-		return context.WithCancel(base)
-	}
-	return context.WithTimeout(base, timeout)
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func childSessionKey(parentSessionKey, jobID string) string {
-	return parentSessionKey + ":subagent:" + jobID
-}
-
-func newSubagentID() string {
-	var raw [12]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		return fmt.Sprintf("job-%d", time.Now().UnixNano())
-	}
-	return "job-" + hex.EncodeToString(raw[:])
-}
-
-func reasonOrDefault(reason string, fallback string) string {
-	reason = strings.TrimSpace(reason)
-	if reason == "" {
-		return fallback
-	}
-	return reason
-}
-
-func formatParentSubagentSummary(job db.SubagentJob, success bool, preview string, artifactID string, errText string) string {
-	if success {
-		text := fmt.Sprintf("Background job %s completed: %s", job.ID, preview)
-		if artifactID != "" {
-			text += fmt.Sprintf("\nartifact_id=%s", artifactID)
+		if err := json.Unmarshal([]byte(argsJSON), &params); err != nil {
+			return "", fmt.Errorf("invalid tool args: %w", err)
 		}
-		return text
 	}
-	return fmt.Sprintf("Background job %s failed: %s", job.ID, reasonOrDefault(errText, "unknown error"))
+	return r.ExecuteParams(ctx, name, params)
 }
 
-func formatDeliverySubagentSummary(job db.SubagentJob, success bool, preview string, artifactID string, errText string) string {
-	if success {
-		text := fmt.Sprintf("Background job %s finished. %s", job.ID, preview)
-		if artifactID != "" {
-			text += fmt.Sprintf("\nartifact_id=%s", artifactID)
-		}
-		return text
+func (r *Registry) ExecuteParams(ctx context.Context, name string, params map[string]any) (string, error) {
+	t := r.tools[name]
+	if t == nil {
+		return "", fmt.Errorf("tool '%s' not found", name)
 	}
-	return fmt.Sprintf("Background job %s failed. %s", job.ID, reasonOrDefault(errText, "unknown error"))
+	if params == nil {
+		params = map[string]any{}
+	}
+	if guard := ToolGuardFromContext(ctx); guard != nil {
+		if err := guard(ctx, t, ToolCapability(t, params), params); err != nil {
+			return "", err
+		}
+	}
+	return t.Execute(ctx, params)
 }
 ````
 
-## File: internal/channels/discord/discord.go
-````go
-package discord
-
-import (
-	"bytes"
-	"context"
-	"encoding/json"
-	"fmt"
-	"io"
-	"mime/multipart"
-	"net/http"
-	"os"
-	"path/filepath"
-	"strings"
-	"sync"
-	"time"
-
-	"github.com/gorilla/websocket"
-
-	"or3-intern/internal/artifacts"
-	"or3-intern/internal/bus"
-	rootchannels "or3-intern/internal/channels"
-	"or3-intern/internal/config"
-)
-
-type Channel struct {
-	Config        config.DiscordChannelConfig
-	HTTP          *http.Client
-	Dialer        *websocket.Dialer
-	Artifacts     *artifacts.Store
-	MaxMediaBytes int
-	IsolatePeers  bool
-
-	mu     sync.Mutex
-	conn   *websocket.Conn
-	cancel context.CancelFunc
-	botID  string
-	dedupe *rootchannels.IngressDeduplicator
-}
-
-func (c *Channel) Name() string { return "discord" }
-
-func (c *Channel) Start(ctx context.Context, eventBus *bus.Bus) error {
-	if strings.TrimSpace(c.Config.Token) == "" {
-		return fmt.Errorf("discord token not configured")
-	}
-	url := strings.TrimSpace(c.Config.GatewayURL)
-	if url == "" {
-		var resp struct {
-			URL string `json:"url"`
-		}
-		if err := c.getJSON(ctx, c.apiBase()+"/gateway/bot", &resp); err != nil {
-			return err
-		}
-		url = resp.URL
-	}
-	if url == "" {
-		return fmt.Errorf("discord gateway url missing")
-	}
-	dialer := c.Dialer
-	if dialer == nil {
-		dialer = websocket.DefaultDialer
-	}
-	conn, _, err := dialer.DialContext(ctx, url, nil)
-	if err != nil {
-		return err
-	}
-	childCtx, cancel := context.WithCancel(ctx)
-	c.mu.Lock()
-	c.conn = conn
-	c.cancel = cancel
-	c.mu.Unlock()
-	go c.readLoop(childCtx, eventBus)
-	return nil
-}
-
-func (c *Channel) Stop(ctx context.Context) error {
-	_ = ctx
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.cancel != nil {
-		c.cancel()
-	}
-	if c.conn != nil {
-		_ = c.conn.Close()
-	}
-	c.conn = nil
-	c.cancel = nil
-	return nil
-}
-
-func (c *Channel) Deliver(ctx context.Context, to, text string, meta map[string]any) error {
-	channelID := strings.TrimSpace(to)
-	if channelID == "" {
-		channelID = strings.TrimSpace(c.Config.DefaultChannelID)
-	}
-	if channelID == "" {
-		return fmt.Errorf("discord channel id required")
-	}
-	mediaPaths := rootchannels.MediaPaths(meta)
-	if len(mediaPaths) > 0 {
-		return c.postMultipart(ctx, channelID, text, mediaPaths, meta)
-	}
-	payload := map[string]any{"content": text}
-	if replyID, ok := meta["message_reference"].(string); ok && replyID != "" {
-		payload["message_reference"] = map[string]any{"message_id": replyID}
-	}
-	return c.postJSON(ctx, c.apiBase()+"/channels/"+channelID+"/messages", payload, nil)
-}
-
-func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
-	var heartbeatTicker *time.Ticker
-	defer func() {
-		if heartbeatTicker != nil {
-			heartbeatTicker.Stop()
-		}
-	}()
-	for {
-		c.mu.Lock()
-		conn := c.conn
-		c.mu.Unlock()
-		if conn == nil {
-			return
-		}
-		_, raw, err := conn.ReadMessage()
-		if err != nil {
-			return
-		}
-		var frame gatewayFrame
-		if err := json.Unmarshal(raw, &frame); err != nil {
-			continue
-		}
-		switch frame.Op {
-		case 10:
-			var hello struct {
-				HeartbeatInterval float64 `json:"heartbeat_interval"`
-			}
-			_ = json.Unmarshal(frame.D, &hello)
-			_ = conn.WriteJSON(map[string]any{"op": 2, "d": map[string]any{"token": c.Config.Token, "intents": 513, "properties": map[string]string{"$os": "linux", "$browser": "or3-intern", "$device": "or3-intern"}}})
-			interval := time.Duration(int64(hello.HeartbeatInterval)) * time.Millisecond
-			if interval > 0 {
-				heartbeatTicker = time.NewTicker(interval)
-				go func() {
-					for {
-						select {
-						case <-ctx.Done():
-							return
-						case <-heartbeatTicker.C:
-							_ = conn.WriteJSON(map[string]any{"op": 1, "d": nil})
-						}
-					}
-				}()
-			}
-		case 0:
-			switch frame.T {
-			case "READY":
-				var ready struct {
-					User struct {
-						ID string `json:"id"`
-					} `json:"user"`
-				}
-				_ = json.Unmarshal(frame.D, &ready)
-				c.botID = ready.User.ID
-			case "MESSAGE_CREATE":
-				var msg inboundMessage
-				_ = json.Unmarshal(frame.D, &msg)
-				if msg.Author.Bot {
-					continue
-				}
-				if key := discordDedupeKey(msg); key != "" && c.ingressDeduper().IsDuplicate(key) {
-					continue
-				}
-				if !c.allowedUser(msg.Author.ID) {
-					continue
-				}
-				if c.Config.RequireMention && c.botID != "" && !mentioned(msg.Mentions, c.botID) {
-					continue
-				}
-				clean := strings.TrimSpace(stripMention(msg.Content, c.botID))
-				sessionKey := "discord:" + msg.ChannelID
-				if c.IsolatePeers {
-					sessionKey += ":" + msg.Author.ID
-				}
-				attachments, markers := c.captureAttachments(ctx, sessionKey, msg.Attachments)
-				content := rootchannels.ComposeMessageText(clean, markers)
-				if content == "" {
-					continue
-				}
-				meta := map[string]any{"channel_id": msg.ChannelID, "message_reference": msg.ID, "guild_id": msg.GuildID, "is_private": strings.TrimSpace(msg.GuildID) == ""}
-				if len(attachments) > 0 {
-					meta["attachments"] = attachments
-				}
-				eventBus.Publish(bus.Event{Type: bus.EventUserMessage, SessionKey: sessionKey, Channel: "discord", From: msg.Author.ID, Message: content, Meta: meta})
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-	}
-}
-
-func (c *Channel) apiBase() string {
-	base := strings.TrimRight(strings.TrimSpace(c.Config.APIBase), "/")
-	if base == "" {
-		base = "https://discord.com/api/v10"
-	}
-	return base
-}
-
-func (c *Channel) client() *http.Client {
-	if c.HTTP != nil {
-		return c.HTTP
-	}
-	return &http.Client{Timeout: 20 * time.Second}
-}
-
-func (c *Channel) getJSON(ctx context.Context, endpoint string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bot "+c.Config.Token)
-	resp, err := c.client().Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return discordRateLimitError(resp)
-	}
-	if resp.StatusCode >= 300 {
-		return fmt.Errorf("discord api error: %s", resp.Status)
-	}
-	return json.NewDecoder(resp.Body).Decode(out)
-}
-
-func (c *Channel) postJSON(ctx context.Context, endpoint string, payload any, out any) error {
-	b, _ := json.Marshal(payload)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(b))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bot "+c.Config.Token)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.client().Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return discordRateLimitError(resp)
-	}
-	if resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("discord api error: %s %s", resp.Status, string(body))
-	}
-	if out == nil {
-		return nil
-	}
-	return json.NewDecoder(resp.Body).Decode(out)
-}
-
-func (c *Channel) ingressDeduper() *rootchannels.IngressDeduplicator {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.dedupe == nil {
-		c.dedupe = rootchannels.NewIngressDeduplicator(0)
-	}
-	return c.dedupe
-}
-
-func discordDedupeKey(msg inboundMessage) string {
-	if strings.TrimSpace(msg.ID) != "" {
-		return msg.ID
-	}
-	if strings.TrimSpace(msg.ChannelID) == "" || strings.TrimSpace(msg.Author.ID) == "" {
-		return ""
-	}
-	return strings.Join([]string{msg.ChannelID, msg.Author.ID, msg.Content}, "|")
-}
-
-func discordRateLimitError(resp *http.Response) error {
-	if resp == nil {
-		return rootchannels.FormatRateLimitError("discord", 0, "")
-	}
-	var payload struct {
-		Message    string  `json:"message"`
-		RetryAfter float64 `json:"retry_after"`
-	}
-	_ = json.NewDecoder(resp.Body).Decode(&payload)
-	return rootchannels.FormatRateLimitError("discord", time.Duration(payload.RetryAfter*float64(time.Second)), payload.Message)
-}
-
-func (c *Channel) captureAttachments(ctx context.Context, sessionKey string, refs []discordAttachment) ([]artifacts.Attachment, []string) {
-	attachments := make([]artifacts.Attachment, 0, len(refs))
-	markers := make([]string, 0, len(refs))
-	for _, ref := range refs {
-		filename := artifacts.NormalizeFilename(ref.Filename, ref.ContentType)
-		kind := artifacts.DetectKind(filename, ref.ContentType)
-		if c.MaxMediaBytes == 0 {
-			markers = append(markers, artifacts.FailureMarker(kind, filename, "disabled by config"))
-			continue
-		}
-		if c.MaxMediaBytes > 0 && ref.Size > int64(c.MaxMediaBytes) {
-			markers = append(markers, artifacts.FailureMarker(kind, filename, "too large"))
-			continue
-		}
-		if c.Artifacts == nil {
-			markers = append(markers, artifacts.FailureMarker(kind, filename, "storage unavailable"))
-			continue
-		}
-		data, err := c.downloadAttachment(ctx, ref.URL)
-		if err != nil {
-			markers = append(markers, artifacts.FailureMarker(kind, filename, "download failed"))
-			continue
-		}
-		att, err := c.Artifacts.SaveNamed(ctx, sessionKey, filename, ref.ContentType, data)
-		if err != nil {
-			markers = append(markers, artifacts.FailureMarker(kind, filename, "save failed"))
-			continue
-		}
-		attachments = append(attachments, att)
-		markers = append(markers, artifacts.Marker(att))
-	}
-	return attachments, markers
-}
-
-func (c *Channel) downloadAttachment(ctx context.Context, url string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := c.client().Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("discord attachment error: %s", resp.Status)
-	}
-	limit := int64(c.MaxMediaBytes)
-	if limit <= 0 {
-		limit = 25 << 20
-	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
-	if err != nil {
-		return nil, err
-	}
-	if c.MaxMediaBytes > 0 && len(data) > c.MaxMediaBytes {
-		return nil, fmt.Errorf("discord attachment exceeds maxMediaBytes")
-	}
-	return data, nil
-}
-
-func (c *Channel) postMultipart(ctx context.Context, channelID, text string, mediaPaths []string, meta map[string]any) error {
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	payload := map[string]any{}
-	if strings.TrimSpace(text) != "" {
-		payload["content"] = text
-	}
-	if replyID, ok := meta["message_reference"].(string); ok && replyID != "" {
-		payload["message_reference"] = map[string]any{"message_id": replyID}
-	}
-	payloadJSON, _ := json.Marshal(payload)
-	if err := writer.WriteField("payload_json", string(payloadJSON)); err != nil {
-		return err
-	}
-	for i, mediaPath := range mediaPaths {
-		if err := c.attachFilePart(writer, i, mediaPath); err != nil {
-			return err
-		}
-	}
-	if err := writer.Close(); err != nil {
-		return err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.apiBase()+"/channels/"+channelID+"/messages", &body)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bot "+c.Config.Token)
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-	resp, err := c.client().Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("discord api error: %s %s", resp.Status, string(respBody))
-	}
-	return nil
-}
-
-func (c *Channel) attachFilePart(writer *multipart.Writer, index int, mediaPath string) error {
-	info, err := os.Stat(mediaPath)
-	if err != nil {
-		return err
-	}
-	if c.MaxMediaBytes == 0 {
-		return fmt.Errorf("media attachments disabled by config")
-	}
-	if c.MaxMediaBytes > 0 && info.Size() > int64(c.MaxMediaBytes) {
-		return fmt.Errorf("media path exceeds maxMediaBytes: %s", mediaPath)
-	}
-	file, err := os.Open(mediaPath)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	part, err := writer.CreateFormFile(fmt.Sprintf("files[%d]", index), filepath.Base(mediaPath))
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(part, file); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (c *Channel) allowedUser(user string) bool {
-	if len(c.Config.AllowedUserIDs) == 0 {
-		return c.Config.OpenAccess
-	}
-	for _, allowed := range c.Config.AllowedUserIDs {
-		if strings.TrimSpace(allowed) == user {
-			return true
-		}
-	}
-	return false
-}
-
-func mentioned(mentions []mention, botID string) bool {
-	for _, m := range mentions {
-		if m.ID == botID {
-			return true
-		}
-	}
-	return false
-}
-
-func stripMention(content, botID string) string {
-	if botID == "" {
-		return content
-	}
-	content = strings.ReplaceAll(content, "<@"+botID+">", "")
-	content = strings.ReplaceAll(content, "<@!"+botID+">", "")
-	return content
-}
-
-type gatewayFrame struct {
-	Op int             `json:"op"`
-	T  string          `json:"t"`
-	D  json.RawMessage `json:"d"`
-}
-
-type mention struct {
-	ID string `json:"id"`
-}
-
-type inboundMessage struct {
-	ID          string              `json:"id"`
-	ChannelID   string              `json:"channel_id"`
-	GuildID     string              `json:"guild_id"`
-	Content     string              `json:"content"`
-	Mentions    []mention           `json:"mentions"`
-	Attachments []discordAttachment `json:"attachments"`
-	Author      struct {
-		ID  string `json:"id"`
-		Bot bool   `json:"bot"`
-	} `json:"author"`
-}
-
-type discordAttachment struct {
-	URL         string `json:"url"`
-	Filename    string `json:"filename"`
-	ContentType string `json:"content_type"`
-	Size        int64  `json:"size"`
-}
+## File: go.mod
 ````
+module or3-intern
 
-## File: internal/channels/slack/slack.go
-````go
-package slack
+go 1.24.0
 
-import (
-	"bytes"
-	"context"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
-	"net/url"
-	"os"
-	"path/filepath"
-	"strings"
-	"sync"
-	"time"
-
-	"github.com/gorilla/websocket"
-
-	"or3-intern/internal/artifacts"
-	"or3-intern/internal/bus"
-	rootchannels "or3-intern/internal/channels"
-	"or3-intern/internal/config"
+require (
+	github.com/asg017/sqlite-vec-go-bindings v0.1.6
+	github.com/emersion/go-imap/v2 v2.0.0-beta.8
+	github.com/gorilla/websocket v1.5.3
+	github.com/mattn/go-isatty v0.0.20
+	github.com/mattn/go-sqlite3 v1.14.34
+	github.com/modelcontextprotocol/go-sdk v0.8.0
+	github.com/robfig/cron/v3 v3.0.1
+	golang.org/x/net v0.6.0
+	gopkg.in/yaml.v3 v3.0.1
+	modernc.org/sqlite v1.33.1
 )
 
-type Channel struct {
-	Config        config.SlackChannelConfig
-	HTTP          *http.Client
-	Dialer        *websocket.Dialer
-	Artifacts     *artifacts.Store
-	MaxMediaBytes int
-	IsolatePeers  bool
-
-	mu     sync.Mutex
-	conn   *websocket.Conn
-	cancel context.CancelFunc
-	botID  string
-	dedupe *rootchannels.IngressDeduplicator
-}
-
-func (c *Channel) Name() string { return "slack" }
-
-func (c *Channel) Start(ctx context.Context, eventBus *bus.Bus) error {
-	if strings.TrimSpace(c.Config.AppToken) == "" || strings.TrimSpace(c.Config.BotToken) == "" {
-		return fmt.Errorf("slack tokens not configured")
-	}
-	url, err := c.openSocketURL(ctx)
-	if err != nil {
-		return err
-	}
-	dialer := c.Dialer
-	if dialer == nil {
-		dialer = websocket.DefaultDialer
-	}
-	conn, _, err := dialer.DialContext(ctx, url, nil)
-	if err != nil {
-		return err
-	}
-	childCtx, cancel := context.WithCancel(ctx)
-	c.mu.Lock()
-	c.conn = conn
-	c.cancel = cancel
-	c.mu.Unlock()
-	go c.readLoop(childCtx, eventBus)
-	return nil
-}
-
-func (c *Channel) Stop(ctx context.Context) error {
-	_ = ctx
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.cancel != nil {
-		c.cancel()
-	}
-	if c.conn != nil {
-		_ = c.conn.Close()
-	}
-	c.cancel = nil
-	c.conn = nil
-	return nil
-}
-
-func (c *Channel) Deliver(ctx context.Context, to, text string, meta map[string]any) error {
-	channelID := strings.TrimSpace(to)
-	if channelID == "" {
-		channelID = strings.TrimSpace(c.Config.DefaultChannelID)
-	}
-	if channelID == "" {
-		return fmt.Errorf("slack channel id required")
-	}
-	mediaPaths := rootchannels.MediaPaths(meta)
-	if len(mediaPaths) > 0 {
-		return c.uploadFiles(ctx, channelID, text, mediaPaths, meta)
-	}
-	payload := map[string]any{"channel": channelID, "text": text}
-	if threadTS, ok := meta["thread_ts"].(string); ok && threadTS != "" {
-		payload["thread_ts"] = threadTS
-	}
-	return c.postJSON(ctx, c.apiBase()+"/chat.postMessage", c.Config.BotToken, payload, nil)
-}
-
-func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
-	for {
-		c.mu.Lock()
-		conn := c.conn
-		c.mu.Unlock()
-		if conn == nil {
-			return
-		}
-		_, raw, err := conn.ReadMessage()
-		if err != nil {
-			return
-		}
-		var envelope socketEnvelope
-		if err := json.Unmarshal(raw, &envelope); err != nil {
-			continue
-		}
-		if envelope.EnvelopeID != "" {
-			_ = conn.WriteJSON(map[string]any{"envelope_id": envelope.EnvelopeID})
-		}
-		if envelope.Type == "hello" {
-			continue
-		}
-		if envelope.Type != "events_api" || envelope.Payload.Event.Type != "message" {
-			continue
-		}
-		if key := slackDedupeKey(envelope); key != "" && c.ingressDeduper().IsDuplicate(key) {
-			continue
-		}
-		ev := envelope.Payload.Event
-		if ev.BotID != "" || ev.User == "" {
-			continue
-		}
-		if !c.allowedUser(ev.User) {
-			continue
-		}
-		if envelope.Payload.Authorizations[0].UserID != "" && c.botID == "" {
-			c.botID = envelope.Payload.Authorizations[0].UserID
-		}
-		if c.Config.RequireMention && c.botID != "" && !strings.Contains(ev.Text, "<@"+c.botID+">") && len(ev.Files) == 0 {
-			continue
-		}
-		clean := strings.TrimSpace(strings.ReplaceAll(ev.Text, "<@"+c.botID+">", ""))
-		sessionKey := "slack:" + ev.Channel
-		if c.IsolatePeers {
-			sessionKey += ":" + ev.User
-		}
-		attachments, markers := c.captureFiles(ctx, sessionKey, ev.Files)
-		content := rootchannels.ComposeMessageText(clean, markers)
-		if content == "" {
-			continue
-		}
-		meta := map[string]any{"channel_id": ev.Channel, "thread_ts": ev.ThreadTS, "channel_type": ev.ChannelType}
-		if len(attachments) > 0 {
-			meta["attachments"] = attachments
-		}
-		eventBus.Publish(bus.Event{Type: bus.EventUserMessage, SessionKey: sessionKey, Channel: "slack", From: ev.User, Message: content, Meta: meta})
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-	}
-}
-
-func (c *Channel) openSocketURL(ctx context.Context) (string, error) {
-	var resp struct {
-		OK  bool   `json:"ok"`
-		URL string `json:"url"`
-	}
-	if err := c.postJSON(ctx, c.apiBase()+"/apps.connections.open", c.Config.AppToken, nil, &resp); err != nil {
-		return "", err
-	}
-	if !resp.OK || resp.URL == "" {
-		return "", fmt.Errorf("slack socket url missing")
-	}
-	return resp.URL, nil
-}
-
-func (c *Channel) apiBase() string {
-	base := strings.TrimRight(strings.TrimSpace(c.Config.APIBase), "/")
-	if base == "" {
-		base = "https://slack.com/api"
-	}
-	return base
-}
-
-func (c *Channel) client() *http.Client {
-	if c.HTTP != nil {
-		return c.HTTP
-	}
-	return &http.Client{Timeout: 20 * time.Second}
-}
-
-func (c *Channel) postJSON(ctx context.Context, endpoint, token string, payload any, out any) error {
-	var body io.Reader
-	if payload != nil {
-		b, _ := json.Marshal(payload)
-		body = bytes.NewReader(b)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, body)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-	resp, err := c.client().Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return rootchannels.FormatRateLimitError("slack", rootchannels.ParseRetryAfterSeconds(resp.Header.Get("Retry-After")), "")
-	}
-	if resp.StatusCode >= 300 {
-		return fmt.Errorf("slack api error: %s", resp.Status)
-	}
-	if out == nil {
-		return nil
-	}
-	return json.NewDecoder(resp.Body).Decode(out)
-}
-
-func (c *Channel) postForm(ctx context.Context, endpoint, token string, values url.Values, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(values.Encode()))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-	resp, err := c.client().Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return rootchannels.FormatRateLimitError("slack", rootchannels.ParseRetryAfterSeconds(resp.Header.Get("Retry-After")), "")
-	}
-	if resp.StatusCode >= 300 {
-		return fmt.Errorf("slack api error: %s", resp.Status)
-	}
-	if out == nil {
-		return nil
-	}
-	return json.NewDecoder(resp.Body).Decode(out)
-}
-
-func (c *Channel) ingressDeduper() *rootchannels.IngressDeduplicator {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.dedupe == nil {
-		c.dedupe = rootchannels.NewIngressDeduplicator(0)
-	}
-	return c.dedupe
-}
-
-func slackDedupeKey(envelope socketEnvelope) string {
-	if strings.TrimSpace(envelope.EnvelopeID) != "" {
-		return envelope.EnvelopeID
-	}
-	ev := envelope.Payload.Event
-	if strings.TrimSpace(ev.Channel) == "" || strings.TrimSpace(ev.User) == "" {
-		return ""
-	}
-	return strings.Join([]string{ev.Channel, ev.User, ev.ThreadTS, ev.Text}, "|")
-}
-
-func (c *Channel) captureFiles(ctx context.Context, sessionKey string, files []slackFile) ([]artifacts.Attachment, []string) {
-	attachments := make([]artifacts.Attachment, 0, len(files))
-	markers := make([]string, 0, len(files))
-	for _, file := range files {
-		filename := artifacts.NormalizeFilename(file.Name, file.Mimetype)
-		kind := artifacts.DetectKind(filename, file.Mimetype)
-		if c.MaxMediaBytes == 0 {
-			markers = append(markers, artifacts.FailureMarker(kind, filename, "disabled by config"))
-			continue
-		}
-		if c.MaxMediaBytes > 0 && file.Size > int64(c.MaxMediaBytes) {
-			markers = append(markers, artifacts.FailureMarker(kind, filename, "too large"))
-			continue
-		}
-		if c.Artifacts == nil {
-			markers = append(markers, artifacts.FailureMarker(kind, filename, "storage unavailable"))
-			continue
-		}
-		data, err := c.downloadPrivateFile(ctx, firstNonEmpty(file.URLPrivateDownload, file.URLPrivate))
-		if err != nil {
-			markers = append(markers, artifacts.FailureMarker(kind, filename, "download failed"))
-			continue
-		}
-		att, err := c.Artifacts.SaveNamed(ctx, sessionKey, filename, file.Mimetype, data)
-		if err != nil {
-			markers = append(markers, artifacts.FailureMarker(kind, filename, "save failed"))
-			continue
-		}
-		attachments = append(attachments, att)
-		markers = append(markers, artifacts.Marker(att))
-	}
-	return attachments, markers
-}
-
-func (c *Channel) downloadPrivateFile(ctx context.Context, endpoint string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+c.Config.BotToken)
-	resp, err := c.client().Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("slack file download error: %s", resp.Status)
-	}
-	limit := int64(c.MaxMediaBytes)
-	if limit <= 0 {
-		limit = 25 << 20
-	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
-	if err != nil {
-		return nil, err
-	}
-	if c.MaxMediaBytes > 0 && len(data) > c.MaxMediaBytes {
-		return nil, fmt.Errorf("slack file exceeds maxMediaBytes")
-	}
-	return data, nil
-}
-
-func (c *Channel) uploadFiles(ctx context.Context, channelID, text string, mediaPaths []string, meta map[string]any) error {
-	files := make([]map[string]any, 0, len(mediaPaths))
-	for _, mediaPath := range mediaPaths {
-		fileID, title, err := c.uploadFile(ctx, mediaPath)
-		if err != nil {
-			return err
-		}
-		files = append(files, map[string]any{"id": fileID, "title": title})
-	}
-	payload := map[string]any{
-		"channel_id": channelID,
-		"files":      files,
-	}
-	if strings.TrimSpace(text) != "" {
-		payload["initial_comment"] = text
-	}
-	if threadTS, ok := meta["thread_ts"].(string); ok && threadTS != "" {
-		payload["thread_ts"] = threadTS
-	}
-	var resp struct {
-		OK    bool   `json:"ok"`
-		Error string `json:"error"`
-	}
-	if err := c.postJSON(ctx, c.apiBase()+"/files.completeUploadExternal", c.Config.BotToken, payload, &resp); err != nil {
-		return err
-	}
-	if !resp.OK {
-		return fmt.Errorf("slack complete upload failed: %s", resp.Error)
-	}
-	return nil
-}
-
-func (c *Channel) uploadFile(ctx context.Context, mediaPath string) (string, string, error) {
-	info, err := os.Stat(mediaPath)
-	if err != nil {
-		return "", "", err
-	}
-	if c.MaxMediaBytes == 0 {
-		return "", "", fmt.Errorf("media attachments disabled by config")
-	}
-	if c.MaxMediaBytes > 0 && info.Size() > int64(c.MaxMediaBytes) {
-		return "", "", fmt.Errorf("media path exceeds maxMediaBytes: %s", mediaPath)
-	}
-	var start struct {
-		OK        bool   `json:"ok"`
-		UploadURL string `json:"upload_url"`
-		FileID    string `json:"file_id"`
-		Error     string `json:"error"`
-	}
-	form := url.Values{}
-	form.Set("filename", filepath.Base(mediaPath))
-	form.Set("length", fmt.Sprintf("%d", info.Size()))
-	if err := c.postForm(ctx, c.apiBase()+"/files.getUploadURLExternal", c.Config.BotToken, form, &start); err != nil {
-		return "", "", err
-	}
-	if !start.OK || start.UploadURL == "" || start.FileID == "" {
-		return "", "", fmt.Errorf("slack upload init failed: %s", start.Error)
-	}
-	file, err := os.Open(mediaPath)
-	if err != nil {
-		return "", "", err
-	}
-	defer file.Close()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, start.UploadURL, file)
-	if err != nil {
-		return "", "", err
-	}
-	req.Header.Set("Content-Type", "application/octet-stream")
-	resp, err := c.client().Do(req)
-	if err != nil {
-		return "", "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		return "", "", fmt.Errorf("slack upload error: %s", resp.Status)
-	}
-	return start.FileID, filepath.Base(mediaPath), nil
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
-}
-
-func (c *Channel) allowedUser(user string) bool {
-	if len(c.Config.AllowedUserIDs) == 0 {
-		return c.Config.OpenAccess
-	}
-	for _, allowed := range c.Config.AllowedUserIDs {
-		if strings.TrimSpace(allowed) == user {
-			return true
-		}
-	}
-	return false
-}
-
-type socketEnvelope struct {
-	EnvelopeID string `json:"envelope_id"`
-	Type       string `json:"type"`
-	Payload    struct {
-		Event struct {
-			Type        string      `json:"type"`
-			Text        string      `json:"text"`
-			User        string      `json:"user"`
-			BotID       string      `json:"bot_id"`
-			Channel     string      `json:"channel"`
-			ChannelType string      `json:"channel_type"`
-			ThreadTS    string      `json:"thread_ts"`
-			Files       []slackFile `json:"files"`
-		} `json:"event"`
-		Authorizations []struct {
-			UserID string `json:"user_id"`
-		} `json:"authorizations"`
-	} `json:"payload"`
-}
-
-type slackFile struct {
-	ID                 string `json:"id"`
-	Name               string `json:"name"`
-	Mimetype           string `json:"mimetype"`
-	Filetype           string `json:"filetype"`
-	Size               int64  `json:"size"`
-	URLPrivate         string `json:"url_private"`
-	URLPrivateDownload string `json:"url_private_download"`
-}
-````
-
-## File: internal/channels/telegram/telegram.go
-````go
-package telegram
-
-import (
-	"bytes"
-	"context"
-	"encoding/json"
-	"fmt"
-	"io"
-	"mime"
-	"mime/multipart"
-	"net/http"
-	"os"
-	"path/filepath"
-	"strconv"
-	"strings"
-	"sync"
-	"time"
-
-	"or3-intern/internal/artifacts"
-	"or3-intern/internal/bus"
-	rootchannels "or3-intern/internal/channels"
-	"or3-intern/internal/config"
+require (
+	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/emersion/go-message v0.18.2 // indirect
+	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6 // indirect
+	github.com/google/jsonschema-go v0.3.0 // indirect
+	github.com/google/uuid v1.6.0 // indirect
+	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
+	github.com/ncruces/go-strftime v0.1.9 // indirect
+	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
+	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
+	golang.org/x/sys v0.40.0 // indirect
+	modernc.org/gc/v3 v3.0.0-20240107210532-573471604cb6 // indirect
+	modernc.org/libc v1.55.3 // indirect
+	modernc.org/mathutil v1.6.0 // indirect
+	modernc.org/memory v1.8.0 // indirect
+	modernc.org/strutil v1.2.0 // indirect
+	modernc.org/token v1.1.0 // indirect
 )
-
-type Channel struct {
-	Config        config.TelegramChannelConfig
-	HTTP          *http.Client
-	Artifacts     *artifacts.Store
-	MaxMediaBytes int
-	IsolatePeers  bool
-
-	mu      sync.Mutex
-	running bool
-	cancel  context.CancelFunc
-	offset  int64
-	dedupe  *rootchannels.IngressDeduplicator
-}
-
-func (c *Channel) Name() string { return "telegram" }
-
-func (c *Channel) Start(ctx context.Context, eventBus *bus.Bus) error {
-	if strings.TrimSpace(c.Config.Token) == "" {
-		return fmt.Errorf("telegram token not configured")
-	}
-	if eventBus == nil {
-		return fmt.Errorf("event bus not configured")
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.running {
-		return nil
-	}
-	childCtx, cancel := context.WithCancel(ctx)
-	c.cancel = cancel
-	c.running = true
-	go c.poll(childCtx, eventBus)
-	return nil
-}
-
-func (c *Channel) Stop(ctx context.Context) error {
-	_ = ctx
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.cancel != nil {
-		c.cancel()
-	}
-	c.cancel = nil
-	c.running = false
-	return nil
-}
-
-func (c *Channel) Deliver(ctx context.Context, to, text string, meta map[string]any) error {
-	chatID := strings.TrimSpace(to)
-	if chatID == "" {
-		chatID = strings.TrimSpace(c.Config.DefaultChatID)
-	}
-	if chatID == "" {
-		return fmt.Errorf("telegram target chat id required")
-	}
-	mediaPaths := rootchannels.MediaPaths(meta)
-	if len(mediaPaths) > 0 {
-		return c.deliverMedia(ctx, chatID, text, mediaPaths, meta)
-	}
-	payload := map[string]any{"chat_id": chatID, "text": text}
-	if replyID, ok := meta["reply_to_message_id"].(int64); ok && replyID > 0 {
-		payload["reply_to_message_id"] = replyID
-	}
-	return c.postJSON(ctx, "/sendMessage", payload, nil)
-}
-
-func (c *Channel) poll(ctx context.Context, eventBus *bus.Bus) {
-	interval := time.Duration(c.Config.PollSeconds) * time.Second
-	if interval <= 0 {
-		interval = 2 * time.Second
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		if err := c.fetchUpdates(ctx, eventBus); err != nil {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(interval):
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-	}
-
-}
-
-func (c *Channel) fetchUpdates(ctx context.Context, eventBus *bus.Bus) error {
-	query := map[string]string{"timeout": "0"}
-	c.mu.Lock()
-	if c.offset > 0 {
-		query["offset"] = strconv.FormatInt(c.offset, 10)
-	}
-	c.mu.Unlock()
-	var updates []update
-	if err := c.getJSON(ctx, "/getUpdates", query, &updates); err != nil {
-		return err
-	}
-	for _, update := range updates {
-		c.mu.Lock()
-		if next := update.UpdateID + 1; next > c.offset {
-			c.offset = next
-		}
-		c.mu.Unlock()
-		msg := update.Message
-		chatID := strconv.FormatInt(msg.Chat.ID, 10)
-		if !c.allowedChat(chatID) {
-			continue
-		}
-		if key := telegramDedupeKey(msg); key != "" && c.ingressDeduper().IsDuplicate(key) {
-			continue
-		}
-		sessionKey := "telegram:" + chatID
-		if c.IsolatePeers && !strings.EqualFold(strings.TrimSpace(msg.Chat.Type), "private") {
-			sessionKey = sessionKey + ":" + strconv.FormatInt(msg.From.ID, 10)
-		}
-		text := strings.TrimSpace(msg.Text)
-		if text == "" {
-			text = strings.TrimSpace(msg.Caption)
-		}
-		attachments, markers := c.captureAttachments(ctx, sessionKey, msg)
-		content := rootchannels.ComposeMessageText(text, markers)
-		if content == "" {
-			continue
-		}
-		meta := map[string]any{
-			"chat_id":             chatID,
-			"chat_type":           msg.Chat.Type,
-			"message_id":          msg.MessageID,
-			"reply_to_message_id": int64(msg.MessageID),
-			"username":            msg.From.Username,
-		}
-		if msg.MediaGroupID != "" {
-			meta["media_group_id"] = msg.MediaGroupID
-		}
-		if len(attachments) > 0 {
-			meta["attachments"] = attachments
-		}
-		eventBus.Publish(bus.Event{
-			Type:       bus.EventUserMessage,
-			SessionKey: sessionKey,
-			Channel:    "telegram",
-			From:       strconv.FormatInt(msg.From.ID, 10),
-			Message:    content,
-			Meta:       meta,
-		})
-	}
-	return nil
-}
-
-func (c *Channel) allowedChat(chatID string) bool {
-	if len(c.Config.AllowedChatIDs) == 0 {
-		return c.Config.OpenAccess
-	}
-	for _, allowed := range c.Config.AllowedChatIDs {
-		if strings.TrimSpace(allowed) == chatID {
-			return true
-		}
-	}
-	return false
-}
-
-func (c *Channel) client() *http.Client {
-	if c.HTTP != nil {
-		return c.HTTP
-	}
-	return &http.Client{Timeout: 20 * time.Second}
-}
-
-func (c *Channel) apiBase() string {
-	base := strings.TrimRight(strings.TrimSpace(c.Config.APIBase), "/")
-	if base == "" {
-		base = "https://api.telegram.org"
-	}
-	return base + "/bot" + c.Config.Token
-}
-
-func (c *Channel) getJSON(ctx context.Context, path string, query map[string]string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.apiBase()+path, nil)
-	if err != nil {
-		return err
-	}
-	q := req.URL.Query()
-	for k, v := range query {
-		q.Set(k, v)
-	}
-	req.URL.RawQuery = q.Encode()
-	resp, err := c.client().Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		return fmt.Errorf("telegram api error: %s", resp.Status)
-	}
-	var envelope apiEnvelope
-	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
-		return err
-	}
-	if !envelope.OK {
-		return fmt.Errorf("telegram api error: %s", envelope.Description)
-	}
-	if out == nil {
-		return nil
-	}
-	return json.Unmarshal(envelope.Result, out)
-}
-
-func (c *Channel) postJSON(ctx context.Context, path string, payload any, out any) error {
-	b, _ := json.Marshal(payload)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.apiBase()+path, bytes.NewReader(b))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.client().Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return telegramRateLimitError(resp)
-	}
-	if resp.StatusCode >= 300 {
-		return fmt.Errorf("telegram api error: %s", resp.Status)
-	}
-	var envelope apiEnvelope
-	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
-		return err
-	}
-	if !envelope.OK {
-		return fmt.Errorf("telegram api error: %s", envelope.Description)
-	}
-	if out == nil {
-		return nil
-	}
-	return json.Unmarshal(envelope.Result, out)
-}
-
-func (c *Channel) ingressDeduper() *rootchannels.IngressDeduplicator {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.dedupe == nil {
-		c.dedupe = rootchannels.NewIngressDeduplicator(0)
-	}
-	return c.dedupe
-}
-
-func telegramDedupeKey(msg inboundMessage) string {
-	if msg.Chat.ID == 0 || msg.MessageID == 0 {
-		return ""
-	}
-	return fmt.Sprintf("%d:%d", msg.Chat.ID, msg.MessageID)
-}
-
-func telegramRateLimitError(resp *http.Response) error {
-	if resp == nil {
-		return rootchannels.FormatRateLimitError("telegram", 0, "")
-	}
-	var payload struct {
-		Description string `json:"description"`
-		Parameters  struct {
-			RetryAfter int `json:"retry_after"`
-		} `json:"parameters"`
-	}
-	_ = json.NewDecoder(resp.Body).Decode(&payload)
-	return rootchannels.FormatRateLimitError("telegram", time.Duration(payload.Parameters.RetryAfter)*time.Second, payload.Description)
-}
-
-func (c *Channel) captureAttachments(ctx context.Context, sessionKey string, msg inboundMessage) ([]artifacts.Attachment, []string) {
-	attachments := make([]artifacts.Attachment, 0, 4)
-	markers := make([]string, 0, 4)
-
-	// Telegram media groups are processed one update at a time in v1.
-	if len(msg.Photo) > 0 {
-		att, marker := c.captureRemoteAttachment(ctx, sessionKey, remoteAttachment{
-			FileID:   msg.Photo[len(msg.Photo)-1].FileID,
-			FileSize: msg.Photo[len(msg.Photo)-1].FileSize,
-			Filename: "photo.jpg",
-			Mime:     "image/jpeg",
-			Kind:     artifacts.KindImage,
-		})
-		if marker != "" {
-			markers = append(markers, marker)
-		}
-		if att.ArtifactID != "" {
-			attachments = append(attachments, att)
-		}
-	}
-	if msg.Voice.FileID != "" {
-		filename := "voice.ogg"
-		if msg.Voice.FileUniqueID != "" {
-			filename = msg.Voice.FileUniqueID + ".ogg"
-		}
-		att, marker := c.captureRemoteAttachment(ctx, sessionKey, remoteAttachment{
-			FileID:   msg.Voice.FileID,
-			FileSize: msg.Voice.FileSize,
-			Filename: filename,
-			Mime:     "audio/ogg",
-			Kind:     artifacts.KindAudio,
-		})
-		if marker != "" {
-			markers = append(markers, marker)
-		}
-		if att.ArtifactID != "" {
-			attachments = append(attachments, att)
-		}
-	}
-	if msg.Audio.FileID != "" {
-		att, marker := c.captureRemoteAttachment(ctx, sessionKey, remoteAttachment{
-			FileID:   msg.Audio.FileID,
-			FileSize: msg.Audio.FileSize,
-			Filename: msg.Audio.FileName,
-			Mime:     msg.Audio.MimeType,
-			Kind:     artifacts.KindAudio,
-		})
-		if marker != "" {
-			markers = append(markers, marker)
-		}
-		if att.ArtifactID != "" {
-			attachments = append(attachments, att)
-		}
-	}
-	if msg.Document.FileID != "" {
-		att, marker := c.captureRemoteAttachment(ctx, sessionKey, remoteAttachment{
-			FileID:   msg.Document.FileID,
-			FileSize: msg.Document.FileSize,
-			Filename: msg.Document.FileName,
-			Mime:     msg.Document.MimeType,
-			Kind:     artifacts.KindFile,
-		})
-		if marker != "" {
-			markers = append(markers, marker)
-		}
-		if att.ArtifactID != "" {
-			attachments = append(attachments, att)
-		}
-	}
-	return attachments, markers
-}
-
-type remoteAttachment struct {
-	FileID   string
-	FileSize int64
-	Filename string
-	Mime     string
-	Kind     string
-}
-
-func (c *Channel) captureRemoteAttachment(ctx context.Context, sessionKey string, remote remoteAttachment) (artifacts.Attachment, string) {
-	filename := artifacts.NormalizeFilename(remote.Filename, remote.Mime)
-	if remote.Kind == "" {
-		remote.Kind = artifacts.DetectKind(filename, remote.Mime)
-	}
-	if c.MaxMediaBytes == 0 {
-		return artifacts.Attachment{}, artifacts.FailureMarker(remote.Kind, filename, "disabled by config")
-	}
-	if c.MaxMediaBytes > 0 && remote.FileSize > int64(c.MaxMediaBytes) {
-		return artifacts.Attachment{}, artifacts.FailureMarker(remote.Kind, filename, "too large")
-	}
-	if c.Artifacts == nil {
-		return artifacts.Attachment{}, artifacts.FailureMarker(remote.Kind, filename, "storage unavailable")
-	}
-	info, err := c.getFile(ctx, remote.FileID)
-	if err != nil {
-		return artifacts.Attachment{}, artifacts.FailureMarker(remote.Kind, filename, "download failed")
-	}
-	if c.MaxMediaBytes > 0 && info.FileSize > int64(c.MaxMediaBytes) {
-		return artifacts.Attachment{}, artifacts.FailureMarker(remote.Kind, filename, "too large")
-	}
-	data, err := c.downloadFile(ctx, info.FilePath)
-	if err != nil {
-		return artifacts.Attachment{}, artifacts.FailureMarker(remote.Kind, filename, "download failed")
-	}
-	att, err := c.Artifacts.SaveNamed(ctx, sessionKey, filename, firstNonEmpty(remote.Mime, mime.TypeByExtension(filepath.Ext(filename))), data)
-	if err != nil {
-		return artifacts.Attachment{}, artifacts.FailureMarker(remote.Kind, filename, "save failed")
-	}
-	return att, artifacts.Marker(att)
-}
-
-func (c *Channel) getFile(ctx context.Context, fileID string) (fileInfo, error) {
-	var info fileInfo
-	err := c.getJSON(ctx, "/getFile", map[string]string{"file_id": fileID}, &info)
-	return info, err
-}
-
-func (c *Channel) downloadFile(ctx context.Context, filePath string) ([]byte, error) {
-	endpoint := strings.TrimRight(strings.TrimSpace(c.Config.APIBase), "/")
-	if endpoint == "" {
-		endpoint = "https://api.telegram.org"
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"/file/bot"+c.Config.Token+"/"+strings.TrimLeft(filePath, "/"), nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := c.client().Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("telegram file error: %s", resp.Status)
-	}
-	limit := int64(c.MaxMediaBytes)
-	if limit <= 0 {
-		limit = 25 << 20
-	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
-	if err != nil {
-		return nil, err
-	}
-	if c.MaxMediaBytes > 0 && len(data) > c.MaxMediaBytes {
-		return nil, fmt.Errorf("telegram file exceeds maxMediaBytes")
-	}
-	return data, nil
-}
-
-func (c *Channel) deliverMedia(ctx context.Context, chatID, text string, mediaPaths []string, meta map[string]any) error {
-	replyID := replyToMessageID(meta)
-	for i, mediaPath := range mediaPaths {
-		caption := ""
-		if i == 0 {
-			caption = text
-		}
-		if err := c.sendMediaFile(ctx, chatID, mediaPath, caption, replyID); err != nil {
-			return err
-		}
-	}
-	if strings.TrimSpace(text) != "" && len(mediaPaths) == 0 {
-		return c.postJSON(ctx, "/sendMessage", map[string]any{"chat_id": chatID, "text": text}, nil)
-	}
-	return nil
-}
-
-func (c *Channel) sendMediaFile(ctx context.Context, chatID, mediaPath, caption string, replyID int64) error {
-	endpoint, fieldName, mimeType := telegramSendSpec(mediaPath)
-	file, err := os.Open(mediaPath)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	if err := writer.WriteField("chat_id", chatID); err != nil {
-		return err
-	}
-	if replyID > 0 {
-		if err := writer.WriteField("reply_to_message_id", strconv.FormatInt(replyID, 10)); err != nil {
-			return err
-		}
-	}
-	if strings.TrimSpace(caption) != "" {
-		if err := writer.WriteField("caption", caption); err != nil {
-			return err
-		}
-	}
-	part, err := writer.CreateFormFile(fieldName, filepath.Base(mediaPath))
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(part, file); err != nil {
-		return err
-	}
-	if err := writer.Close(); err != nil {
-		return err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.apiBase()+endpoint, &body)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-	if mimeType != "" {
-		req.Header.Set("X-Or3-Media-Type", mimeType)
-	}
-	resp, err := c.client().Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		return fmt.Errorf("telegram api error: %s", resp.Status)
-	}
-	var envelope apiEnvelope
-	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
-		return err
-	}
-	if !envelope.OK {
-		return fmt.Errorf("telegram api error: %s", envelope.Description)
-	}
-	return nil
-}
-
-func telegramSendSpec(path string) (endpoint string, fieldName string, mimeType string) {
-	mimeType = mime.TypeByExtension(strings.ToLower(filepath.Ext(path)))
-	switch artifacts.DetectKind(path, mimeType) {
-	case artifacts.KindImage:
-		return "/sendPhoto", "photo", mimeType
-	case artifacts.KindAudio:
-		if strings.HasSuffix(strings.ToLower(path), ".ogg") || strings.HasSuffix(strings.ToLower(path), ".opus") {
-			return "/sendVoice", "voice", mimeType
-		}
-		return "/sendAudio", "audio", mimeType
-	default:
-		return "/sendDocument", "document", mimeType
-	}
-}
-
-func replyToMessageID(meta map[string]any) int64 {
-	switch v := meta["reply_to_message_id"].(type) {
-	case int64:
-		return v
-	case int:
-		return int64(v)
-	case float64:
-		return int64(v)
-	default:
-		return 0
-	}
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
-}
-
-type apiEnvelope struct {
-	OK          bool            `json:"ok"`
-	Description string          `json:"description"`
-	Result      json.RawMessage `json:"result"`
-}
-
-type update struct {
-	UpdateID int64          `json:"update_id"`
-	Message  inboundMessage `json:"message"`
-}
-
-type inboundMessage struct {
-	MessageID    int    `json:"message_id"`
-	Text         string `json:"text"`
-	Caption      string `json:"caption"`
-	MediaGroupID string `json:"media_group_id"`
-	Chat         struct {
-		ID   int64  `json:"id"`
-		Type string `json:"type"`
-	} `json:"chat"`
-	From struct {
-		ID       int64  `json:"id"`
-		Username string `json:"username"`
-	} `json:"from"`
-	Photo []struct {
-		FileID   string `json:"file_id"`
-		FileSize int64  `json:"file_size"`
-	} `json:"photo"`
-	Voice struct {
-		FileID       string `json:"file_id"`
-		FileUniqueID string `json:"file_unique_id"`
-		FileSize     int64  `json:"file_size"`
-	} `json:"voice"`
-	Audio struct {
-		FileID   string `json:"file_id"`
-		FileName string `json:"file_name"`
-		MimeType string `json:"mime_type"`
-		FileSize int64  `json:"file_size"`
-	} `json:"audio"`
-	Document struct {
-		FileID   string `json:"file_id"`
-		FileName string `json:"file_name"`
-		MimeType string `json:"mime_type"`
-		FileSize int64  `json:"file_size"`
-	} `json:"document"`
-}
-
-type fileInfo struct {
-	FilePath string `json:"file_path"`
-	FileSize int64  `json:"file_size"`
-}
-````
-
-## File: internal/channels/whatsapp/whatsapp.go
-````go
-package whatsapp
-
-import (
-	"context"
-	"encoding/base64"
-	"fmt"
-	"mime"
-	"net/http"
-	"net/url"
-	"os"
-	"path/filepath"
-	"strings"
-	"sync"
-	"time"
-
-	"github.com/gorilla/websocket"
-
-	"or3-intern/internal/artifacts"
-	"or3-intern/internal/bus"
-	rootchannels "or3-intern/internal/channels"
-	"or3-intern/internal/config"
-)
-
-type Channel struct {
-	Config        config.WhatsAppBridgeConfig
-	Dialer        *websocket.Dialer
-	Artifacts     *artifacts.Store
-	MaxMediaBytes int
-	IsolatePeers  bool
-
-	mu     sync.Mutex
-	conn   *websocket.Conn
-	cancel context.CancelFunc
-	closed bool
-	dedupe *rootchannels.IngressDeduplicator
-}
-
-func (c *Channel) Name() string { return "whatsapp" }
-
-func (c *Channel) Start(ctx context.Context, eventBus *bus.Bus) error {
-	if strings.TrimSpace(c.Config.BridgeURL) == "" {
-		return fmt.Errorf("whatsapp bridge url not configured")
-	}
-	conn, err := c.connect(ctx)
-	if err != nil {
-		return err
-	}
-	childCtx, cancel := context.WithCancel(ctx)
-	c.mu.Lock()
-	c.conn = conn
-	c.cancel = cancel
-	c.closed = false
-	c.mu.Unlock()
-	go c.readLoop(childCtx, eventBus)
-	return nil
-}
-
-func (c *Channel) Stop(ctx context.Context) error {
-	_ = ctx
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.cancel != nil {
-		c.cancel()
-	}
-	if c.conn != nil {
-		_ = c.conn.Close()
-	}
-	c.conn = nil
-	c.cancel = nil
-	c.closed = true
-	return nil
-}
-
-func (c *Channel) Deliver(ctx context.Context, to, text string, meta map[string]any) error {
-	target := strings.TrimSpace(to)
-	if target == "" {
-		target = strings.TrimSpace(c.Config.DefaultTo)
-	}
-	if target == "" {
-		return fmt.Errorf("whatsapp target required")
-	}
-	cmd := map[string]any{"type": "send", "to": target, "text": text}
-	if mediaPaths := rootchannels.MediaPaths(meta); len(mediaPaths) > 0 {
-		attachments, err := c.outboundAttachments(mediaPaths)
-		if err != nil {
-			return err
-		}
-		cmd["attachments"] = attachments
-	}
-	for k, v := range meta {
-		if k == "media_paths" {
-			continue
-		}
-		cmd[k] = v
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.conn == nil {
-		return fmt.Errorf("whatsapp bridge not connected")
-	}
-	return c.conn.WriteJSON(cmd)
-}
-
-func (c *Channel) connect(ctx context.Context) (*websocket.Conn, error) {
-	dialer := c.Dialer
-	if dialer == nil {
-		dialer = websocket.DefaultDialer
-	}
-	headers := http.Header{}
-	if token := strings.TrimSpace(c.Config.BridgeToken); token != "" {
-		headers.Set("Authorization", "Bearer "+token)
-	}
-	conn, _, err := dialer.DialContext(ctx, c.Config.BridgeURL, headers)
-	if err != nil {
-		return nil, err
-	}
-	return conn, nil
-}
-
-func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
-	for {
-		c.mu.Lock()
-		conn := c.conn
-		c.mu.Unlock()
-		if conn == nil {
-			return
-		}
-		var msg inboundMessage
-		if err := conn.ReadJSON(&msg); err != nil {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				return
-			}
-		}
-		if msg.Type != "message" {
-			continue
-		}
-		if key := whatsappDedupeKey(msg); key != "" && c.ingressDeduper().IsDuplicate(key) {
-			continue
-		}
-		if !c.allowedFrom(msg.From) {
-			continue
-		}
-		target := strings.TrimSpace(msg.Chat)
-		if target == "" {
-			target = strings.TrimSpace(msg.From)
-		}
-		sessionKey := "whatsapp:" + target
-		if c.IsolatePeers {
-			sessionKey += ":" + strings.TrimSpace(msg.From)
-		}
-		attachments, markers := c.captureAttachments(ctx, sessionKey, msg.Attachments)
-		content := rootchannels.ComposeMessageText(msg.Text, markers)
-		if content == "" {
-			continue
-		}
-		meta := map[string]any{
-			"chat_id":             target,
-			"message_id":          msg.ID,
-			"reply_to_message_id": msg.ID,
-			"is_group":            msg.IsGroup,
-		}
-		if len(attachments) > 0 {
-			meta["attachments"] = attachments
-		}
-		eventBus.Publish(bus.Event{
-			Type:       bus.EventUserMessage,
-			SessionKey: sessionKey,
-			Channel:    "whatsapp",
-			From:       msg.From,
-			Message:    content,
-			Meta:       meta,
-		})
-	}
-}
-
-func (c *Channel) allowedFrom(from string) bool {
-	if len(c.Config.AllowedFrom) == 0 {
-		return c.Config.OpenAccess
-	}
-	for _, allowed := range c.Config.AllowedFrom {
-		if strings.TrimSpace(allowed) == strings.TrimSpace(from) {
-			return true
-		}
-	}
-	return false
-}
-
-type inboundMessage struct {
-	Type        string             `json:"type"`
-	ID          string             `json:"id"`
-	Chat        string             `json:"chat"`
-	From        string             `json:"from"`
-	Text        string             `json:"text"`
-	IsGroup     bool               `json:"isGroup"`
-	Attachments []bridgeAttachment `json:"attachments"`
-}
-
-type bridgeAttachment struct {
-	Path       string `json:"path,omitempty"`
-	DataBase64 string `json:"data_base64,omitempty"`
-	Filename   string `json:"filename,omitempty"`
-	Mime       string `json:"mime,omitempty"`
-	Kind       string `json:"kind,omitempty"`
-	SizeBytes  int64  `json:"size_bytes,omitempty"`
-}
-
-func (c *Channel) captureAttachments(ctx context.Context, sessionKey string, refs []bridgeAttachment) ([]artifacts.Attachment, []string) {
-	attachments := make([]artifacts.Attachment, 0, len(refs))
-	markers := make([]string, 0, len(refs))
-	for _, ref := range refs {
-		filename := artifacts.NormalizeFilename(ref.Filename, ref.Mime)
-		kind := strings.TrimSpace(ref.Kind)
-		if kind == "" {
-			kind = artifacts.DetectKind(filename, ref.Mime)
-		}
-		if c.MaxMediaBytes == 0 {
-			markers = append(markers, artifacts.FailureMarker(kind, filename, "disabled by config"))
-			continue
-		}
-		if c.MaxMediaBytes > 0 && ref.SizeBytes > int64(c.MaxMediaBytes) {
-			markers = append(markers, artifacts.FailureMarker(kind, filename, "too large"))
-			continue
-		}
-		if c.Artifacts == nil {
-			markers = append(markers, artifacts.FailureMarker(kind, filename, "storage unavailable"))
-			continue
-		}
-		data, err := decodeBridgeAttachment(ref, c.MaxMediaBytes)
-		if err != nil {
-			reason := "invalid media payload"
-			if strings.Contains(err.Error(), "too large") {
-				reason = "too large"
-			}
-			markers = append(markers, artifacts.FailureMarker(kind, filename, reason))
-			continue
-		}
-		att, err := c.Artifacts.SaveNamed(ctx, sessionKey, filename, ref.Mime, data)
-		if err != nil {
-			markers = append(markers, artifacts.FailureMarker(kind, filename, "save failed"))
-			continue
-		}
-		attachments = append(attachments, att)
-		markers = append(markers, artifacts.Marker(att))
-	}
-	return attachments, markers
-}
-
-func (c *Channel) outboundAttachments(paths []string) ([]bridgeAttachment, error) {
-	attachments := make([]bridgeAttachment, 0, len(paths))
-	for _, mediaPath := range paths {
-		info, err := os.Stat(mediaPath)
-		if err != nil {
-			return nil, err
-		}
-		if c.MaxMediaBytes == 0 {
-			return nil, fmt.Errorf("media attachments disabled by config")
-		}
-		if c.MaxMediaBytes > 0 && info.Size() > int64(c.MaxMediaBytes) {
-			return nil, fmt.Errorf("media path exceeds maxMediaBytes: %s", mediaPath)
-		}
-		data, err := os.ReadFile(mediaPath)
-		if err != nil {
-			return nil, err
-		}
-		mimeType := mime.TypeByExtension(strings.ToLower(filepath.Ext(mediaPath)))
-		attachments = append(attachments, bridgeAttachment{
-			DataBase64: base64.StdEncoding.EncodeToString(data),
-			Filename:   filepath.Base(mediaPath),
-			Mime:       mimeType,
-			Kind:       artifacts.DetectKind(mediaPath, mimeType),
-			SizeBytes:  info.Size(),
-		})
-	}
-	return attachments, nil
-}
-
-func decodeBridgeAttachment(ref bridgeAttachment, maxBytes int) ([]byte, error) {
-	raw := strings.TrimSpace(ref.DataBase64)
-	if raw == "" {
-		return nil, fmt.Errorf("missing inline data")
-	}
-	if maxBytes > 0 && base64.StdEncoding.DecodedLen(len(raw)) > maxBytes {
-		return nil, fmt.Errorf("attachment too large")
-	}
-	data, err := base64.StdEncoding.DecodeString(raw)
-	if err != nil {
-		return nil, err
-	}
-	if maxBytes > 0 && len(data) > maxBytes {
-		return nil, fmt.Errorf("attachment too large")
-	}
-	return data, nil
-}
-
-func BridgeURL(base string) string {
-	u, err := url.Parse(strings.TrimSpace(base))
-	if err != nil || u == nil {
-		return ""
-	}
-	if u.Path == "" {
-		u.Path = "/ws"
-	}
-	return u.String()
-}
-
-func NewTestDialer() *websocket.Dialer {
-	return &websocket.Dialer{HandshakeTimeout: 5 * time.Second}
-}
-
-func (c *Channel) ingressDeduper() *rootchannels.IngressDeduplicator {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.dedupe == nil {
-		c.dedupe = rootchannels.NewIngressDeduplicator(0)
-	}
-	return c.dedupe
-}
-
-func whatsappDedupeKey(msg inboundMessage) string {
-	if strings.TrimSpace(msg.ID) != "" {
-		return msg.ID
-	}
-	target := strings.TrimSpace(msg.Chat)
-	if target == "" {
-		target = strings.TrimSpace(msg.From)
-	}
-	if target == "" || strings.TrimSpace(msg.From) == "" {
-		return ""
-	}
-	return strings.Join([]string{target, msg.From, msg.Text}, "|")
-}
-````
-
-## File: internal/memory/vector.go
-````go
-package memory
-
-import (
-	"bytes"
-	"context"
-	"encoding/binary"
-	"errors"
-	"math"
-
-	"or3-intern/internal/db"
-)
-
-func PackFloat32(vec []float32) []byte {
-	var b bytes.Buffer
-	_ = binary.Write(&b, binary.LittleEndian, vec)
-	return b.Bytes()
-}
-
-func UnpackFloat32(blob []byte) ([]float32, error) {
-	if len(blob)%4 != 0 {
-		return nil, errors.New("invalid float32 blob")
-	}
-	out := make([]float32, len(blob)/4)
-	if err := binary.Read(bytes.NewReader(blob), binary.LittleEndian, &out); err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func Cosine(a, b []float32) float64 {
-	var dot, na, nb float64
-	n := len(a)
-	if len(b) < n {
-		n = len(b)
-	}
-	for i := 0; i < n; i++ {
-		av := float64(a[i])
-		bv := float64(b[i])
-		dot += av * bv
-		na += av * av
-		nb += bv * bv
-	}
-	if na == 0 || nb == 0 {
-		return 0
-	}
-	return dot / (math.Sqrt(na) * math.Sqrt(nb))
-}
-
-type VecCandidate struct {
-	ID        int64
-	Text      string
-	Score     float64
-	CreatedAt int64
-}
-
-type candMinHeap []VecCandidate
-
-func (h candMinHeap) Len() int           { return len(h) }
-func (h candMinHeap) Less(i, j int) bool { return h[i].Score < h[j].Score }
-func (h candMinHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-func (h *candMinHeap) Push(x any)        { *h = append(*h, x.(VecCandidate)) }
-func (h *candMinHeap) Pop() any {
-	old := *h
-	n := len(old)
-	x := old[n-1]
-	*h = old[:n-1]
-	return x
-}
-
-func VectorSearch(ctx context.Context, d *db.DB, sessionKey string, queryVec []float32, k int, scanLimit int) ([]VecCandidate, error) {
-	_ = scanLimit
-	queryBlob := PackFloat32(queryVec)
-	rows, err := d.SearchMemoryVectors(ctx, sessionKey, queryBlob, k)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]VecCandidate, 0, len(rows))
-	for _, row := range rows {
-		out = append(out, VecCandidate{
-			ID:        row.ID,
-			Text:      row.Text,
-			Score:     1.0 / (1.0 + row.Distance),
-			CreatedAt: row.CreatedAt,
-		})
-	}
-	return out, nil
-}
-````
-
-## File: internal/providers/openai.go
-````go
-package providers
-
-import (
-	"bufio"
-	"bytes"
-	"context"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
-	"strings"
-	"time"
-
-	"or3-intern/internal/security"
-)
-
-type Client struct {
-	APIBase    string
-	APIKey     string
-	HTTP       *http.Client
-	HostPolicy security.HostPolicy
-}
-
-func New(apiBase, apiKey string, timeout time.Duration) *Client {
-	return &Client{
-		APIBase: apiBase,
-		APIKey:  apiKey,
-		HTTP:    &http.Client{Timeout: timeout},
-	}
-}
-
-type ChatMessage struct {
-	Role       string     `json:"role"`
-	Content    any        `json:"content,omitempty"` // string|null
-	Name       string     `json:"name,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-}
-
-type ToolDef struct {
-	Type     string   `json:"type"`
-	Function ToolFunc `json:"function"`
-}
-type ToolFunc struct {
-	Name        string `json:"name"`
-	Description string `json:"description,omitempty"`
-	Parameters  any    `json:"parameters,omitempty"`
-}
-
-type ToolCall struct {
-	ID       string `json:"id"`
-	Index    int    `json:"index"`
-	Type     string `json:"type"`
-	Function struct {
-		Name      string `json:"name"`
-		Arguments string `json:"arguments"`
-	} `json:"function"`
-}
-
-type ChatCompletionRequest struct {
-	Model       string        `json:"model"`
-	Messages    []ChatMessage `json:"messages"`
-	Tools       []ToolDef     `json:"tools,omitempty"`
-	ToolChoice  any           `json:"tool_choice,omitempty"`
-	Temperature float64       `json:"temperature,omitempty"`
-}
-
-type ChatCompletionResponse struct {
-	Choices []struct {
-		Message struct {
-			Role      string     `json:"role"`
-			Content   any        `json:"content"`
-			ToolCalls []ToolCall `json:"tool_calls"`
-		} `json:"message"`
-	} `json:"choices"`
-}
-
-func (c *Client) Chat(ctx context.Context, req ChatCompletionRequest) (ChatCompletionResponse, error) {
-	var out ChatCompletionResponse
-	b, _ := json.Marshal(req)
-	r, err := http.NewRequestWithContext(ctx, "POST", c.APIBase+"/chat/completions", bytes.NewReader(b))
-	if err != nil {
-		return out, err
-	}
-	r.Header.Set("Content-Type", "application/json")
-	if c.APIKey != "" {
-		r.Header.Set("Authorization", "Bearer "+c.APIKey)
-	}
-
-	resp, err := c.do(r)
-	if err != nil {
-		return out, err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	if resp.StatusCode >= 300 {
-		return out, fmt.Errorf("provider error %s: %s", resp.Status, string(body))
-	}
-	if err := json.Unmarshal(body, &out); err != nil {
-		return out, err
-	}
-	return out, nil
-}
-
-// ChatCompletionStreamRequest is sent when stream=true.
-type ChatCompletionStreamRequest struct {
-	Model       string        `json:"model"`
-	Messages    []ChatMessage `json:"messages"`
-	Tools       []ToolDef     `json:"tools,omitempty"`
-	ToolChoice  any           `json:"tool_choice,omitempty"`
-	Temperature float64       `json:"temperature,omitempty"`
-	Stream      bool          `json:"stream"`
-}
-
-type ChatStreamDelta struct {
-	Role      string     `json:"role"`
-	Content   string     `json:"content"`
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
-}
-
-type ChatStreamChoice struct {
-	Index        int             `json:"index"`
-	Delta        ChatStreamDelta `json:"delta"`
-	FinishReason string          `json:"finish_reason"`
-}
-
-type ChatStreamChunk struct {
-	ID      string             `json:"id"`
-	Choices []ChatStreamChoice `json:"choices"`
-}
-
-// ChatStream sends the request with stream:true, calls onDelta for each text
-// delta, and returns the fully-accumulated ChatCompletionResponse.
-func (c *Client) ChatStream(ctx context.Context, req ChatCompletionRequest, onDelta func(text string)) (ChatCompletionResponse, error) {
-	streamReq := ChatCompletionStreamRequest{
-		Model:       req.Model,
-		Messages:    req.Messages,
-		Tools:       req.Tools,
-		ToolChoice:  req.ToolChoice,
-		Temperature: req.Temperature,
-		Stream:      true,
-	}
-	b, _ := json.Marshal(streamReq)
-	r, err := http.NewRequestWithContext(ctx, "POST", c.APIBase+"/chat/completions", bytes.NewReader(b))
-	if err != nil {
-		return ChatCompletionResponse{}, err
-	}
-	r.Header.Set("Content-Type", "application/json")
-	r.Header.Set("Accept", "text/event-stream")
-	if c.APIKey != "" {
-		r.Header.Set("Authorization", "Bearer "+c.APIKey)
-	}
-
-	resp, err := c.do(r)
-	if err != nil {
-		return ChatCompletionResponse{}, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-		return ChatCompletionResponse{}, fmt.Errorf("provider error %s: %s", resp.Status, string(body))
-	}
-
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	var contentBuilder strings.Builder
-	var finalToolCalls []ToolCall
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-		data := strings.TrimPrefix(line, "data: ")
-		if data == "[DONE]" {
-			break
-		}
-		var chunk ChatStreamChunk
-		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			continue
-		}
-		if len(chunk.Choices) == 0 {
-			continue
-		}
-		delta := chunk.Choices[0].Delta
-		if delta.Content != "" {
-			contentBuilder.WriteString(delta.Content)
-			if onDelta != nil {
-				onDelta(delta.Content)
-			}
-		}
-		if len(delta.ToolCalls) > 0 {
-			finalToolCalls = mergeStreamToolCalls(finalToolCalls, delta.ToolCalls)
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return ChatCompletionResponse{}, err
-	}
-
-	out := ChatCompletionResponse{
-		Choices: []struct {
-			Message struct {
-				Role      string     `json:"role"`
-				Content   any        `json:"content"`
-				ToolCalls []ToolCall `json:"tool_calls"`
-			} `json:"message"`
-		}{
-			{
-				Message: struct {
-					Role      string     `json:"role"`
-					Content   any        `json:"content"`
-					ToolCalls []ToolCall `json:"tool_calls"`
-				}{
-					Role:      "assistant",
-					Content:   contentBuilder.String(),
-					ToolCalls: finalToolCalls,
-				},
-			},
-		},
-	}
-	return out, nil
-}
-
-// mergeStreamToolCalls accumulates tool-call deltas arriving over SSE.
-// OpenAI streaming sends each piece as {index, partial args}; we expand the
-// slice to the required index and concatenate name/arguments incrementally.
-func mergeStreamToolCalls(existing []ToolCall, delta []ToolCall) []ToolCall {
-	for _, d := range delta {
-		idx := d.Index
-		for len(existing) <= idx {
-			existing = append(existing, ToolCall{})
-		}
-		existing[idx].Function.Arguments += d.Function.Arguments
-		if d.Function.Name != "" {
-			existing[idx].Function.Name += d.Function.Name
-		}
-		if d.ID != "" {
-			existing[idx].ID = d.ID
-		}
-		if d.Type != "" {
-			existing[idx].Type = d.Type
-		}
-		existing[idx].Index = idx
-	}
-	return existing
-}
-
-type EmbeddingRequest struct {
-	Model string `json:"model"`
-	Input string `json:"input"`
-}
-type EmbeddingResponse struct {
-	Data []struct {
-		Embedding []float32 `json:"embedding"`
-	} `json:"data"`
-}
-
-func (c *Client) Embed(ctx context.Context, model, input string) ([]float32, error) {
-	var out EmbeddingResponse
-	b, _ := json.Marshal(EmbeddingRequest{Model: model, Input: input})
-	r, err := http.NewRequestWithContext(ctx, "POST", c.APIBase+"/embeddings", bytes.NewReader(b))
-	if err != nil {
-		return nil, err
-	}
-	r.Header.Set("Content-Type", "application/json")
-	if c.APIKey != "" {
-		r.Header.Set("Authorization", "Bearer "+c.APIKey)
-	}
-
-	resp, err := c.do(r)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
-	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("provider error %s: %s", resp.Status, string(body))
-	}
-	if err := json.Unmarshal(body, &out); err != nil {
-		return nil, err
-	}
-	if len(out.Data) == 0 {
-		return nil, fmt.Errorf("no embedding returned")
-	}
-	return out.Data[0].Embedding, nil
-}
-
-func (c *Client) do(req *http.Request) (*http.Response, error) {
-	client := c.HTTP
-	if client == nil {
-		client = &http.Client{Timeout: 60 * time.Second}
-	}
-	if c.HostPolicy.EnabledPolicy() {
-		client = security.WrapHTTPClient(client, c.HostPolicy)
-	}
-	return client.Do(req)
-}
 ````
 
 ## File: cmd/or3-intern/service.go
@@ -15801,6 +15211,2480 @@ func printReasons(w io.Writer, label string, values []string) {
 }
 ````
 
+## File: internal/agent/subagents.go
+````go
+package agent
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"strings"
+	"sync"
+	"time"
+
+	"or3-intern/internal/db"
+	"or3-intern/internal/providers"
+	"or3-intern/internal/tools"
+)
+
+const (
+	subagentClaimRetryDelay = 25 * time.Millisecond
+	subagentFinalizeTimeout = 5 * time.Second
+)
+
+// SubagentManager queues and runs background subagent jobs.
+type SubagentManager struct {
+	DB              *db.DB
+	Runtime         *Runtime
+	Deliver         Deliverer
+	MaxConcurrent   int
+	MaxQueued       int
+	TaskTimeout     time.Duration
+	BackgroundTools func() *tools.Registry
+	Jobs            *JobRegistry
+
+	mu       sync.Mutex
+	started  bool
+	ctx      context.Context
+	cancel   context.CancelFunc
+	notifyCh chan struct{}
+	wg       sync.WaitGroup
+}
+
+// ServiceSubagentRequest describes a service-originated subagent request.
+type ServiceSubagentRequest struct {
+	ParentSessionKey string
+	Task             string
+	PromptSnapshot   []providers.ChatMessage
+	AllowedTools     []string
+	RestrictTools    bool
+	ProfileName      string
+	Channel          string
+	ReplyTo          string
+	Meta             map[string]any
+	Timeout          time.Duration
+}
+
+type subagentJobMetadata struct {
+	ProfileName    string                  `json:"profile_name,omitempty"`
+	AllowedTools   []string                `json:"allowed_tools,omitempty"`
+	RestrictTools  bool                    `json:"restrict_tools,omitempty"`
+	PromptSnapshot []providers.ChatMessage `json:"prompt_snapshot,omitempty"`
+	TimeoutSeconds int                     `json:"timeout_seconds,omitempty"`
+	ServiceMeta    map[string]any          `json:"service_meta,omitempty"`
+}
+
+// Start launches the background workers and resumes queued jobs.
+func (m *SubagentManager) Start(ctx context.Context) error {
+	if m == nil {
+		return fmt.Errorf("subagent manager is nil")
+	}
+	if m.DB == nil {
+		return fmt.Errorf("subagent db not configured")
+	}
+	if m.Runtime == nil {
+		return fmt.Errorf("subagent runtime not configured")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.started {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if m.MaxConcurrent <= 0 {
+		m.MaxConcurrent = 1
+	}
+	if m.MaxQueued <= 0 {
+		m.MaxQueued = 32
+	}
+	if m.TaskTimeout <= 0 {
+		m.TaskTimeout = 5 * time.Minute
+	}
+	running, err := m.DB.ListRunningSubagentJobs(ctx)
+	if err != nil {
+		return err
+	}
+	queued, err := m.DB.ListQueuedSubagentJobs(ctx)
+	if err != nil {
+		return err
+	}
+	m.ctx, m.cancel = context.WithCancel(ctx)
+	m.notifyCh = make(chan struct{}, m.MaxConcurrent)
+	m.started = true
+	for i := 0; i < m.MaxConcurrent; i++ {
+		m.wg.Add(1)
+		go m.workerLoop()
+	}
+	for _, job := range running {
+		m.reconcileInterruptedJob(job, "subagent interrupted during restart")
+	}
+	if len(queued) > 0 {
+		m.signalN(min(len(queued), m.MaxConcurrent))
+	}
+	return nil
+}
+
+// Stop cancels workers and waits for them to exit.
+func (m *SubagentManager) Stop(ctx context.Context) error {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	if !m.started {
+		m.mu.Unlock()
+		return nil
+	}
+	cancel := m.cancel
+	m.started = false
+	m.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	done := make(chan struct{})
+	go func() {
+		m.wg.Wait()
+		close(done)
+	}()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Enqueue stores a tool-originated subagent request and signals workers.
+func (m *SubagentManager) Enqueue(ctx context.Context, req tools.SpawnRequest) (tools.SpawnJob, error) {
+	if m == nil || m.DB == nil {
+		return tools.SpawnJob{}, fmt.Errorf("background subagents disabled")
+	}
+	task := strings.TrimSpace(req.Task)
+	if task == "" {
+		return tools.SpawnJob{}, fmt.Errorf("empty task")
+	}
+	parentSessionKey := strings.TrimSpace(req.ParentSessionKey)
+	if parentSessionKey == "" {
+		return tools.SpawnJob{}, fmt.Errorf("missing parent session")
+	}
+	jobID := newSubagentID()
+	metadata := map[string]any{}
+	if profileName := strings.TrimSpace(req.ProfileName); profileName != "" {
+		metadata["profile_name"] = profileName
+	}
+	metadataJSON := mustMetadataJSON(metadata)
+	job := db.SubagentJob{
+		ID:               jobID,
+		ParentSessionKey: parentSessionKey,
+		ChildSessionKey:  childSessionKey(parentSessionKey, jobID),
+		Channel:          strings.TrimSpace(req.Channel),
+		ReplyTo:          strings.TrimSpace(req.To),
+		Task:             task,
+		Status:           db.SubagentStatusQueued,
+		MetadataJSON:     metadataJSON,
+	}
+	if err := m.DB.EnqueueSubagentJobLimited(ctx, job, m.MaxQueued); err != nil {
+		return tools.SpawnJob{}, err
+	}
+	if m.Jobs != nil {
+		m.Jobs.RegisterWithID(job.ID, "subagent")
+		m.Jobs.Publish(job.ID, "queued", map[string]any{"status": db.SubagentStatusQueued, "child_session_key": job.ChildSessionKey})
+	}
+	m.signal()
+	return tools.SpawnJob{ID: job.ID, ChildSessionKey: job.ChildSessionKey}, nil
+}
+
+// EnqueueService stores a service-originated subagent request and signals workers.
+func (m *SubagentManager) EnqueueService(ctx context.Context, req ServiceSubagentRequest) (tools.SpawnJob, error) {
+	if m == nil || m.DB == nil {
+		return tools.SpawnJob{}, fmt.Errorf("background subagents disabled")
+	}
+	parentSessionKey := strings.TrimSpace(req.ParentSessionKey)
+	if parentSessionKey == "" {
+		return tools.SpawnJob{}, fmt.Errorf("missing parent session")
+	}
+	task := strings.TrimSpace(req.Task)
+	if task == "" {
+		return tools.SpawnJob{}, fmt.Errorf("empty task")
+	}
+	jobID := newSubagentID()
+	metadata := subagentJobMetadata{
+		ProfileName:    strings.TrimSpace(req.ProfileName),
+		AllowedTools:   append([]string{}, req.AllowedTools...),
+		RestrictTools:  req.RestrictTools,
+		PromptSnapshot: append([]providers.ChatMessage{}, req.PromptSnapshot...),
+		ServiceMeta:    cloneMap(req.Meta),
+	}
+	if req.Timeout > 0 {
+		metadata.TimeoutSeconds = int(req.Timeout / time.Second)
+	}
+	job := db.SubagentJob{
+		ID:               jobID,
+		ParentSessionKey: parentSessionKey,
+		ChildSessionKey:  childSessionKey(parentSessionKey, jobID),
+		Channel:          strings.TrimSpace(req.Channel),
+		ReplyTo:          strings.TrimSpace(req.ReplyTo),
+		Task:             task,
+		Status:           db.SubagentStatusQueued,
+		MetadataJSON:     mustMetadataJSON(metadata),
+	}
+	if err := m.DB.EnqueueSubagentJobLimited(ctx, job, m.MaxQueued); err != nil {
+		return tools.SpawnJob{}, err
+	}
+	if m.Jobs != nil {
+		m.Jobs.RegisterWithID(job.ID, "subagent")
+		m.Jobs.Publish(job.ID, "queued", serviceLifecycleEventPayload(metadata.ServiceMeta, map[string]any{"status": db.SubagentStatusQueued, "child_session_key": job.ChildSessionKey}))
+	}
+	m.signal()
+	return tools.SpawnJob{ID: job.ID, ChildSessionKey: job.ChildSessionKey}, nil
+}
+
+func (m *SubagentManager) workerLoop() {
+	defer m.wg.Done()
+	for {
+		ran, err := m.runOnce()
+		if err != nil {
+			if !errors.Is(err, context.Canceled) {
+				log.Printf("subagent worker error: %v", err)
+			}
+		}
+		if ran {
+			continue
+		}
+		select {
+		case <-m.ctx.Done():
+			return
+		case <-m.notifyCh:
+		case <-time.After(subagentClaimRetryDelay):
+		}
+	}
+}
+
+func (m *SubagentManager) runOnce() (bool, error) {
+	job, err := m.DB.ClaimNextSubagentJob(m.ctx)
+	if err != nil || job == nil {
+		return false, err
+	}
+	m.executeJob(*job)
+	return true, nil
+}
+
+func (m *SubagentManager) executeJob(job db.SubagentJob) {
+	timeout := m.jobTimeout(job)
+	runCtx, cancel := context.WithTimeout(m.ctx, timeout)
+	defer cancel()
+	metadata := parseSubagentJobMetadata(job.MetadataJSON)
+	if m.Jobs != nil {
+		m.Jobs.AttachCancel(job.ID, cancel)
+		m.Jobs.Publish(job.ID, "started", serviceLifecycleEventPayload(metadata.ServiceMeta, map[string]any{"status": db.SubagentStatusRunning, "child_session_key": job.ChildSessionKey}))
+	}
+	result, err := m.runJob(runCtx, job)
+	if err != nil {
+		reason := strings.TrimSpace(err.Error())
+		switch {
+		case errors.Is(err, context.Canceled), errors.Is(runCtx.Err(), context.Canceled):
+			m.finalizeJob(runCtx, job, db.SubagentStatusInterrupted, "", "", reasonOrDefault(reason, "subagent interrupted"), true)
+		case errors.Is(err, context.DeadlineExceeded), errors.Is(runCtx.Err(), context.DeadlineExceeded):
+			m.finalizeJob(runCtx, job, db.SubagentStatusFailed, "", "", reasonOrDefault(reason, "subagent timed out"), true)
+		default:
+			m.finalizeJob(runCtx, job, db.SubagentStatusFailed, "", "", reasonOrDefault(reason, "subagent failed"), true)
+		}
+		return
+	}
+	m.finalizeJob(runCtx, job, db.SubagentStatusSucceeded, result.Preview, result.ArtifactID, "", true)
+}
+
+func (m *SubagentManager) runJob(ctx context.Context, job db.SubagentJob) (BackgroundRunResult, error) {
+	metadata := parseSubagentJobMetadata(job.MetadataJSON)
+	promptSnapshot := append([]providers.ChatMessage{}, metadata.PromptSnapshot...)
+	var err error
+	if len(promptSnapshot) == 0 {
+		promptSnapshot, err = m.Runtime.BuildPromptSnapshot(ctx, job.ParentSessionKey, job.Task)
+		if err != nil {
+			return BackgroundRunResult{}, err
+		}
+	}
+	if m.Jobs != nil {
+		ctx = ContextWithConversationObserver(ctx, m.Jobs.Observer(job.ID))
+		ctx = ContextWithStreamingChannel(ctx, NullStreamer{})
+	}
+	return m.Runtime.RunBackground(ctx, BackgroundRunInput{
+		SessionKey:       job.ChildSessionKey,
+		ParentSessionKey: job.ParentSessionKey,
+		Task:             job.Task,
+		PromptSnapshot:   promptSnapshot,
+		Tools:            toolRegistryWithAllowlist(m.backgroundTools(), metadata.AllowedTools, metadata.RestrictTools),
+		Meta: map[string]any{
+			"subagent_job_id":    job.ID,
+			"parent_session_key": job.ParentSessionKey,
+			"profile_name":       metadata.ProfileName,
+		},
+		Channel: job.Channel,
+		ReplyTo: job.ReplyTo,
+	})
+}
+
+func (m *SubagentManager) backgroundTools() *tools.Registry {
+	if m.BackgroundTools != nil {
+		return m.BackgroundTools()
+	}
+	return tools.NewRegistry()
+}
+
+func (m *SubagentManager) finalizeJob(baseCtx context.Context, job db.SubagentJob, status string, preview string, artifactID string, errText string, deliver bool) {
+	finalizeCtx, cancel := boundedContext(baseCtx, subagentFinalizeTimeout)
+	defer cancel()
+	success := status == db.SubagentStatusSucceeded
+	text := formatParentSubagentSummary(job, success, preview, artifactID, errText)
+	metadata := parseSubagentJobMetadata(job.MetadataJSON)
+	payload := map[string]any{
+		"subagent_job_id": job.ID,
+		"child_session":   job.ChildSessionKey,
+		"status":          status,
+	}
+	if artifactID != "" {
+		payload["artifact_id"] = artifactID
+	}
+	if err := m.DB.FinalizeSubagentJob(finalizeCtx, job, status, preview, artifactID, errText, text, payload); err != nil {
+		log.Printf("finalize subagent failed: job=%s err=%v", job.ID, err)
+		return
+	}
+	if m.Jobs != nil {
+		if status == db.SubagentStatusSucceeded {
+			m.Jobs.Complete(job.ID, status, serviceLifecycleEventPayload(metadata.ServiceMeta, map[string]any{"preview": preview, "artifact_id": artifactID, "child_session_key": job.ChildSessionKey}))
+		} else if status == db.SubagentStatusInterrupted {
+			m.Jobs.Complete(job.ID, "aborted", serviceLifecycleEventPayload(metadata.ServiceMeta, map[string]any{"message": errText, "child_session_key": job.ChildSessionKey}))
+		} else {
+			m.Jobs.Fail(job.ID, errText, serviceLifecycleEventPayload(metadata.ServiceMeta, map[string]any{"child_session_key": job.ChildSessionKey}))
+		}
+	}
+	if deliver {
+		m.deliverCompletion(finalizeCtx, job, success, preview, artifactID, errText)
+	}
+}
+
+// Abort cancels the running or queued subagent job with id.
+func (m *SubagentManager) Abort(ctx context.Context, id string) error {
+	if m == nil || m.DB == nil {
+		return fmt.Errorf("background subagents disabled")
+	}
+	if m.Jobs != nil && m.Jobs.Cancel(id) {
+		return nil
+	}
+	job, ok, err := m.DB.AbortQueuedSubagentJob(ctx, id, "subagent aborted before execution")
+	if err != nil {
+		return err
+	}
+	if !ok {
+		stored, exists, lookupErr := m.DB.GetSubagentJob(ctx, id)
+		if lookupErr != nil {
+			return lookupErr
+		}
+		if !exists {
+			return fmt.Errorf("job not found")
+		}
+		if stored.Status == db.SubagentStatusQueued {
+			return fmt.Errorf("job is not abortable")
+		}
+		return fmt.Errorf("job is not abortable")
+	}
+	if m.Jobs != nil {
+		m.Jobs.Complete(id, "aborted", map[string]any{"message": "subagent aborted before execution", "child_session_key": job.ChildSessionKey})
+	}
+	return nil
+}
+
+func (m *SubagentManager) jobTimeout(job db.SubagentJob) time.Duration {
+	metadata := parseSubagentJobMetadata(job.MetadataJSON)
+	if metadata.TimeoutSeconds > 0 {
+		return time.Duration(metadata.TimeoutSeconds) * time.Second
+	}
+	if m.TaskTimeout <= 0 {
+		return 5 * time.Minute
+	}
+	return m.TaskTimeout
+}
+
+func parseSubagentJobMetadata(raw string) subagentJobMetadata {
+	if strings.TrimSpace(raw) == "" {
+		return subagentJobMetadata{}
+	}
+	var metadata subagentJobMetadata
+	if err := json.Unmarshal([]byte(raw), &metadata); err != nil {
+		var legacy map[string]any
+		if legacyErr := json.Unmarshal([]byte(raw), &legacy); legacyErr != nil {
+			return subagentJobMetadata{}
+		}
+		metadata.ProfileName = strings.TrimSpace(fmt.Sprint(legacy["profile_name"]))
+		return metadata
+	}
+	metadata.ProfileName = strings.TrimSpace(metadata.ProfileName)
+	return metadata
+}
+
+func serviceLifecycleEventPayload(serviceMeta map[string]any, payload map[string]any) map[string]any {
+	out := map[string]any{}
+	for key, value := range payload {
+		out[key] = value
+	}
+	for _, key := range []string{"request_id", "workspace_id", "network_session_id"} {
+		if value, ok := serviceMeta[key]; ok {
+			out[key] = value
+		}
+	}
+	return out
+}
+
+func mustMetadataJSON(payload any) string {
+	if payload == nil {
+		return "{}"
+	}
+	b, err := json.Marshal(payload)
+	if err != nil || len(b) == 0 {
+		return "{}"
+	}
+	return string(b)
+}
+
+func (m *SubagentManager) reconcileInterruptedJob(job db.SubagentJob, reason string) {
+	m.finalizeJob(m.ctx, job, db.SubagentStatusInterrupted, "", "", reasonOrDefault(reason, "subagent interrupted during restart"), false)
+}
+
+func (m *SubagentManager) deliverCompletion(ctx context.Context, job db.SubagentJob, success bool, preview string, artifactID string, errText string) {
+	deliverer := m.Deliver
+	if deliverer == nil && m.Runtime != nil {
+		deliverer = m.Runtime.Deliver
+	}
+	if deliverer == nil || strings.TrimSpace(job.Channel) == "" || strings.TrimSpace(job.ReplyTo) == "" {
+		return
+	}
+	text := formatDeliverySubagentSummary(job, success, preview, artifactID, errText)
+	if err := deliverer.Deliver(ctx, job.Channel, job.ReplyTo, text); err != nil {
+		log.Printf("subagent delivery failed: job=%s err=%v", job.ID, err)
+	}
+}
+
+func (m *SubagentManager) signal() {
+	m.signalN(1)
+}
+
+func (m *SubagentManager) signalN(n int) {
+	if n <= 0 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.started || m.notifyCh == nil {
+		return
+	}
+	for i := 0; i < n; i++ {
+		select {
+		case m.notifyCh <- struct{}{}:
+		default:
+			return
+		}
+	}
+}
+
+func boundedContext(base context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if base == nil {
+		base = context.Background()
+	} else {
+		base = context.WithoutCancel(base)
+	}
+	if timeout <= 0 {
+		return context.WithCancel(base)
+	}
+	return context.WithTimeout(base, timeout)
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func childSessionKey(parentSessionKey, jobID string) string {
+	return parentSessionKey + ":subagent:" + jobID
+}
+
+func newSubagentID() string {
+	var raw [12]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return fmt.Sprintf("job-%d", time.Now().UnixNano())
+	}
+	return "job-" + hex.EncodeToString(raw[:])
+}
+
+func reasonOrDefault(reason string, fallback string) string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return fallback
+	}
+	return reason
+}
+
+func formatParentSubagentSummary(job db.SubagentJob, success bool, preview string, artifactID string, errText string) string {
+	if success {
+		text := fmt.Sprintf("Background job %s completed: %s", job.ID, preview)
+		if artifactID != "" {
+			text += fmt.Sprintf("\nartifact_id=%s", artifactID)
+		}
+		return text
+	}
+	return fmt.Sprintf("Background job %s failed: %s", job.ID, reasonOrDefault(errText, "unknown error"))
+}
+
+func formatDeliverySubagentSummary(job db.SubagentJob, success bool, preview string, artifactID string, errText string) string {
+	if success {
+		text := fmt.Sprintf("Background job %s finished. %s", job.ID, preview)
+		if artifactID != "" {
+			text += fmt.Sprintf("\nartifact_id=%s", artifactID)
+		}
+		return text
+	}
+	return fmt.Sprintf("Background job %s failed. %s", job.ID, reasonOrDefault(errText, "unknown error"))
+}
+````
+
+## File: internal/channels/discord/discord.go
+````go
+// Package discord implements the Discord channel adapter.
+package discord
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"mime/multipart"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/gorilla/websocket"
+
+	"or3-intern/internal/artifacts"
+	"or3-intern/internal/bus"
+	rootchannels "or3-intern/internal/channels"
+	"or3-intern/internal/config"
+)
+
+// Channel receives Discord gateway events and sends outbound messages.
+type Channel struct {
+	Config        config.DiscordChannelConfig
+	HTTP          *http.Client
+	Dialer        *websocket.Dialer
+	Artifacts     *artifacts.Store
+	MaxMediaBytes int
+	IsolatePeers  bool
+
+	mu     sync.Mutex
+	conn   *websocket.Conn
+	cancel context.CancelFunc
+	botID  string
+	dedupe *rootchannels.IngressDeduplicator
+}
+
+// Name returns the registered channel name.
+func (c *Channel) Name() string { return "discord" }
+
+// Start connects to the Discord gateway and begins reading events.
+func (c *Channel) Start(ctx context.Context, eventBus *bus.Bus) error {
+	if strings.TrimSpace(c.Config.Token) == "" {
+		return fmt.Errorf("discord token not configured")
+	}
+	url := strings.TrimSpace(c.Config.GatewayURL)
+	if url == "" {
+		var resp struct {
+			URL string `json:"url"`
+		}
+		if err := c.getJSON(ctx, c.apiBase()+"/gateway/bot", &resp); err != nil {
+			return err
+		}
+		url = resp.URL
+	}
+	if url == "" {
+		return fmt.Errorf("discord gateway url missing")
+	}
+	dialer := c.Dialer
+	if dialer == nil {
+		dialer = websocket.DefaultDialer
+	}
+	conn, _, err := dialer.DialContext(ctx, url, nil)
+	if err != nil {
+		return err
+	}
+	childCtx, cancel := context.WithCancel(ctx)
+	c.mu.Lock()
+	c.conn = conn
+	c.cancel = cancel
+	c.mu.Unlock()
+	go c.readLoop(childCtx, eventBus)
+	return nil
+}
+
+// Stop closes the Discord gateway connection.
+func (c *Channel) Stop(ctx context.Context) error {
+	_ = ctx
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cancel != nil {
+		c.cancel()
+	}
+	if c.conn != nil {
+		_ = c.conn.Close()
+	}
+	c.conn = nil
+	c.cancel = nil
+	return nil
+}
+
+// Deliver posts a Discord message or multipart media payload.
+func (c *Channel) Deliver(ctx context.Context, to, text string, meta map[string]any) error {
+	channelID := strings.TrimSpace(to)
+	if channelID == "" {
+		channelID = strings.TrimSpace(c.Config.DefaultChannelID)
+	}
+	if channelID == "" {
+		return fmt.Errorf("discord channel id required")
+	}
+	mediaPaths := rootchannels.MediaPaths(meta)
+	if len(mediaPaths) > 0 {
+		return c.postMultipart(ctx, channelID, text, mediaPaths, meta)
+	}
+	payload := map[string]any{"content": text}
+	if replyID, ok := meta["message_reference"].(string); ok && replyID != "" {
+		payload["message_reference"] = map[string]any{"message_id": replyID}
+	}
+	return c.postJSON(ctx, c.apiBase()+"/channels/"+channelID+"/messages", payload, nil)
+}
+
+func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
+	var heartbeatTicker *time.Ticker
+	defer func() {
+		if heartbeatTicker != nil {
+			heartbeatTicker.Stop()
+		}
+	}()
+	for {
+		c.mu.Lock()
+		conn := c.conn
+		c.mu.Unlock()
+		if conn == nil {
+			return
+		}
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		var frame gatewayFrame
+		if err := json.Unmarshal(raw, &frame); err != nil {
+			continue
+		}
+		switch frame.Op {
+		case 10:
+			var hello struct {
+				HeartbeatInterval float64 `json:"heartbeat_interval"`
+			}
+			_ = json.Unmarshal(frame.D, &hello)
+			_ = conn.WriteJSON(map[string]any{"op": 2, "d": map[string]any{"token": c.Config.Token, "intents": 513, "properties": map[string]string{"$os": "linux", "$browser": "or3-intern", "$device": "or3-intern"}}})
+			interval := time.Duration(int64(hello.HeartbeatInterval)) * time.Millisecond
+			if interval > 0 {
+				heartbeatTicker = time.NewTicker(interval)
+				go func() {
+					for {
+						select {
+						case <-ctx.Done():
+							return
+						case <-heartbeatTicker.C:
+							_ = conn.WriteJSON(map[string]any{"op": 1, "d": nil})
+						}
+					}
+				}()
+			}
+		case 0:
+			switch frame.T {
+			case "READY":
+				var ready struct {
+					User struct {
+						ID string `json:"id"`
+					} `json:"user"`
+				}
+				_ = json.Unmarshal(frame.D, &ready)
+				c.botID = ready.User.ID
+			case "MESSAGE_CREATE":
+				var msg inboundMessage
+				_ = json.Unmarshal(frame.D, &msg)
+				if msg.Author.Bot {
+					continue
+				}
+				if key := discordDedupeKey(msg); key != "" && c.ingressDeduper().IsDuplicate(key) {
+					continue
+				}
+				if !c.allowedUser(msg.Author.ID) {
+					continue
+				}
+				if c.Config.RequireMention && c.botID != "" && !mentioned(msg.Mentions, c.botID) {
+					continue
+				}
+				clean := strings.TrimSpace(stripMention(msg.Content, c.botID))
+				sessionKey := "discord:" + msg.ChannelID
+				if c.IsolatePeers {
+					sessionKey += ":" + msg.Author.ID
+				}
+				attachments, markers := c.captureAttachments(ctx, sessionKey, msg.Attachments)
+				content := rootchannels.ComposeMessageText(clean, markers)
+				if content == "" {
+					continue
+				}
+				meta := map[string]any{"channel_id": msg.ChannelID, "message_reference": msg.ID, "guild_id": msg.GuildID, "is_private": strings.TrimSpace(msg.GuildID) == ""}
+				if len(attachments) > 0 {
+					meta["attachments"] = attachments
+				}
+				eventBus.Publish(bus.Event{Type: bus.EventUserMessage, SessionKey: sessionKey, Channel: "discord", From: msg.Author.ID, Message: content, Meta: meta})
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+	}
+}
+
+func (c *Channel) apiBase() string {
+	base := strings.TrimRight(strings.TrimSpace(c.Config.APIBase), "/")
+	if base == "" {
+		base = "https://discord.com/api/v10"
+	}
+	return base
+}
+
+func (c *Channel) client() *http.Client {
+	if c.HTTP != nil {
+		return c.HTTP
+	}
+	return &http.Client{Timeout: 20 * time.Second}
+}
+
+func (c *Channel) getJSON(ctx context.Context, endpoint string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bot "+c.Config.Token)
+	resp, err := c.client().Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return discordRateLimitError(resp)
+	}
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("discord api error: %s", resp.Status)
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+func (c *Channel) postJSON(ctx context.Context, endpoint string, payload any, out any) error {
+	b, _ := json.Marshal(payload)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bot "+c.Config.Token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.client().Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return discordRateLimitError(resp)
+	}
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("discord api error: %s %s", resp.Status, string(body))
+	}
+	if out == nil {
+		return nil
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+func (c *Channel) ingressDeduper() *rootchannels.IngressDeduplicator {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.dedupe == nil {
+		c.dedupe = rootchannels.NewIngressDeduplicator(0)
+	}
+	return c.dedupe
+}
+
+func discordDedupeKey(msg inboundMessage) string {
+	if strings.TrimSpace(msg.ID) != "" {
+		return msg.ID
+	}
+	if strings.TrimSpace(msg.ChannelID) == "" || strings.TrimSpace(msg.Author.ID) == "" {
+		return ""
+	}
+	return strings.Join([]string{msg.ChannelID, msg.Author.ID, msg.Content}, "|")
+}
+
+func discordRateLimitError(resp *http.Response) error {
+	if resp == nil {
+		return rootchannels.FormatRateLimitError("discord", 0, "")
+	}
+	var payload struct {
+		Message    string  `json:"message"`
+		RetryAfter float64 `json:"retry_after"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&payload)
+	return rootchannels.FormatRateLimitError("discord", time.Duration(payload.RetryAfter*float64(time.Second)), payload.Message)
+}
+
+func (c *Channel) captureAttachments(ctx context.Context, sessionKey string, refs []discordAttachment) ([]artifacts.Attachment, []string) {
+	attachments := make([]artifacts.Attachment, 0, len(refs))
+	markers := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		filename := artifacts.NormalizeFilename(ref.Filename, ref.ContentType)
+		kind := artifacts.DetectKind(filename, ref.ContentType)
+		if c.MaxMediaBytes == 0 {
+			markers = append(markers, artifacts.FailureMarker(kind, filename, "disabled by config"))
+			continue
+		}
+		if c.MaxMediaBytes > 0 && ref.Size > int64(c.MaxMediaBytes) {
+			markers = append(markers, artifacts.FailureMarker(kind, filename, "too large"))
+			continue
+		}
+		if c.Artifacts == nil {
+			markers = append(markers, artifacts.FailureMarker(kind, filename, "storage unavailable"))
+			continue
+		}
+		data, err := c.downloadAttachment(ctx, ref.URL)
+		if err != nil {
+			markers = append(markers, artifacts.FailureMarker(kind, filename, "download failed"))
+			continue
+		}
+		att, err := c.Artifacts.SaveNamed(ctx, sessionKey, filename, ref.ContentType, data)
+		if err != nil {
+			markers = append(markers, artifacts.FailureMarker(kind, filename, "save failed"))
+			continue
+		}
+		attachments = append(attachments, att)
+		markers = append(markers, artifacts.Marker(att))
+	}
+	return attachments, markers
+}
+
+func (c *Channel) downloadAttachment(ctx context.Context, url string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.client().Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("discord attachment error: %s", resp.Status)
+	}
+	limit := int64(c.MaxMediaBytes)
+	if limit <= 0 {
+		limit = 25 << 20
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if c.MaxMediaBytes > 0 && len(data) > c.MaxMediaBytes {
+		return nil, fmt.Errorf("discord attachment exceeds maxMediaBytes")
+	}
+	return data, nil
+}
+
+func (c *Channel) postMultipart(ctx context.Context, channelID, text string, mediaPaths []string, meta map[string]any) error {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	payload := map[string]any{}
+	if strings.TrimSpace(text) != "" {
+		payload["content"] = text
+	}
+	if replyID, ok := meta["message_reference"].(string); ok && replyID != "" {
+		payload["message_reference"] = map[string]any{"message_id": replyID}
+	}
+	payloadJSON, _ := json.Marshal(payload)
+	if err := writer.WriteField("payload_json", string(payloadJSON)); err != nil {
+		return err
+	}
+	for i, mediaPath := range mediaPaths {
+		if err := c.attachFilePart(writer, i, mediaPath); err != nil {
+			return err
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.apiBase()+"/channels/"+channelID+"/messages", &body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bot "+c.Config.Token)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	resp, err := c.client().Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("discord api error: %s %s", resp.Status, string(respBody))
+	}
+	return nil
+}
+
+func (c *Channel) attachFilePart(writer *multipart.Writer, index int, mediaPath string) error {
+	info, err := os.Stat(mediaPath)
+	if err != nil {
+		return err
+	}
+	if c.MaxMediaBytes == 0 {
+		return fmt.Errorf("media attachments disabled by config")
+	}
+	if c.MaxMediaBytes > 0 && info.Size() > int64(c.MaxMediaBytes) {
+		return fmt.Errorf("media path exceeds maxMediaBytes: %s", mediaPath)
+	}
+	file, err := os.Open(mediaPath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	part, err := writer.CreateFormFile(fmt.Sprintf("files[%d]", index), filepath.Base(mediaPath))
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(part, file); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *Channel) allowedUser(user string) bool {
+	if len(c.Config.AllowedUserIDs) == 0 {
+		return c.Config.OpenAccess
+	}
+	for _, allowed := range c.Config.AllowedUserIDs {
+		if strings.TrimSpace(allowed) == user {
+			return true
+		}
+	}
+	return false
+}
+
+func mentioned(mentions []mention, botID string) bool {
+	for _, m := range mentions {
+		if m.ID == botID {
+			return true
+		}
+	}
+	return false
+}
+
+func stripMention(content, botID string) string {
+	if botID == "" {
+		return content
+	}
+	content = strings.ReplaceAll(content, "<@"+botID+">", "")
+	content = strings.ReplaceAll(content, "<@!"+botID+">", "")
+	return content
+}
+
+type gatewayFrame struct {
+	Op int             `json:"op"`
+	T  string          `json:"t"`
+	D  json.RawMessage `json:"d"`
+}
+
+type mention struct {
+	ID string `json:"id"`
+}
+
+type inboundMessage struct {
+	ID          string              `json:"id"`
+	ChannelID   string              `json:"channel_id"`
+	GuildID     string              `json:"guild_id"`
+	Content     string              `json:"content"`
+	Mentions    []mention           `json:"mentions"`
+	Attachments []discordAttachment `json:"attachments"`
+	Author      struct {
+		ID  string `json:"id"`
+		Bot bool   `json:"bot"`
+	} `json:"author"`
+}
+
+type discordAttachment struct {
+	URL         string `json:"url"`
+	Filename    string `json:"filename"`
+	ContentType string `json:"content_type"`
+	Size        int64  `json:"size"`
+}
+````
+
+## File: internal/channels/slack/slack.go
+````go
+// Package slack implements the Slack socket-mode channel adapter.
+package slack
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/gorilla/websocket"
+
+	"or3-intern/internal/artifacts"
+	"or3-intern/internal/bus"
+	rootchannels "or3-intern/internal/channels"
+	"or3-intern/internal/config"
+)
+
+// Channel receives Slack events over Socket Mode and sends outbound messages.
+type Channel struct {
+	Config        config.SlackChannelConfig
+	HTTP          *http.Client
+	Dialer        *websocket.Dialer
+	Artifacts     *artifacts.Store
+	MaxMediaBytes int
+	IsolatePeers  bool
+
+	mu     sync.Mutex
+	conn   *websocket.Conn
+	cancel context.CancelFunc
+	botID  string
+	dedupe *rootchannels.IngressDeduplicator
+}
+
+// Name returns the registered channel name.
+func (c *Channel) Name() string { return "slack" }
+
+// Start opens the Socket Mode connection and begins reading events.
+func (c *Channel) Start(ctx context.Context, eventBus *bus.Bus) error {
+	if strings.TrimSpace(c.Config.AppToken) == "" || strings.TrimSpace(c.Config.BotToken) == "" {
+		return fmt.Errorf("slack tokens not configured")
+	}
+	url, err := c.openSocketURL(ctx)
+	if err != nil {
+		return err
+	}
+	dialer := c.Dialer
+	if dialer == nil {
+		dialer = websocket.DefaultDialer
+	}
+	conn, _, err := dialer.DialContext(ctx, url, nil)
+	if err != nil {
+		return err
+	}
+	childCtx, cancel := context.WithCancel(ctx)
+	c.mu.Lock()
+	c.conn = conn
+	c.cancel = cancel
+	c.mu.Unlock()
+	go c.readLoop(childCtx, eventBus)
+	return nil
+}
+
+// Stop closes the Socket Mode connection.
+func (c *Channel) Stop(ctx context.Context) error {
+	_ = ctx
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cancel != nil {
+		c.cancel()
+	}
+	if c.conn != nil {
+		_ = c.conn.Close()
+	}
+	c.cancel = nil
+	c.conn = nil
+	return nil
+}
+
+// Deliver posts a Slack message or uploads media attachments.
+func (c *Channel) Deliver(ctx context.Context, to, text string, meta map[string]any) error {
+	channelID := strings.TrimSpace(to)
+	if channelID == "" {
+		channelID = strings.TrimSpace(c.Config.DefaultChannelID)
+	}
+	if channelID == "" {
+		return fmt.Errorf("slack channel id required")
+	}
+	mediaPaths := rootchannels.MediaPaths(meta)
+	if len(mediaPaths) > 0 {
+		return c.uploadFiles(ctx, channelID, text, mediaPaths, meta)
+	}
+	payload := map[string]any{"channel": channelID, "text": text}
+	if threadTS, ok := meta["thread_ts"].(string); ok && threadTS != "" {
+		payload["thread_ts"] = threadTS
+	}
+	return c.postJSON(ctx, c.apiBase()+"/chat.postMessage", c.Config.BotToken, payload, nil)
+}
+
+func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
+	for {
+		c.mu.Lock()
+		conn := c.conn
+		c.mu.Unlock()
+		if conn == nil {
+			return
+		}
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		var envelope socketEnvelope
+		if err := json.Unmarshal(raw, &envelope); err != nil {
+			continue
+		}
+		if envelope.EnvelopeID != "" {
+			_ = conn.WriteJSON(map[string]any{"envelope_id": envelope.EnvelopeID})
+		}
+		if envelope.Type == "hello" {
+			continue
+		}
+		if envelope.Type != "events_api" || envelope.Payload.Event.Type != "message" {
+			continue
+		}
+		if key := slackDedupeKey(envelope); key != "" && c.ingressDeduper().IsDuplicate(key) {
+			continue
+		}
+		ev := envelope.Payload.Event
+		if ev.BotID != "" || ev.User == "" {
+			continue
+		}
+		if !c.allowedUser(ev.User) {
+			continue
+		}
+		if envelope.Payload.Authorizations[0].UserID != "" && c.botID == "" {
+			c.botID = envelope.Payload.Authorizations[0].UserID
+		}
+		if c.Config.RequireMention && c.botID != "" && !strings.Contains(ev.Text, "<@"+c.botID+">") && len(ev.Files) == 0 {
+			continue
+		}
+		clean := strings.TrimSpace(strings.ReplaceAll(ev.Text, "<@"+c.botID+">", ""))
+		sessionKey := "slack:" + ev.Channel
+		if c.IsolatePeers {
+			sessionKey += ":" + ev.User
+		}
+		attachments, markers := c.captureFiles(ctx, sessionKey, ev.Files)
+		content := rootchannels.ComposeMessageText(clean, markers)
+		if content == "" {
+			continue
+		}
+		meta := map[string]any{"channel_id": ev.Channel, "thread_ts": ev.ThreadTS, "channel_type": ev.ChannelType}
+		if len(attachments) > 0 {
+			meta["attachments"] = attachments
+		}
+		eventBus.Publish(bus.Event{Type: bus.EventUserMessage, SessionKey: sessionKey, Channel: "slack", From: ev.User, Message: content, Meta: meta})
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+	}
+}
+
+func (c *Channel) openSocketURL(ctx context.Context) (string, error) {
+	var resp struct {
+		OK  bool   `json:"ok"`
+		URL string `json:"url"`
+	}
+	if err := c.postJSON(ctx, c.apiBase()+"/apps.connections.open", c.Config.AppToken, nil, &resp); err != nil {
+		return "", err
+	}
+	if !resp.OK || resp.URL == "" {
+		return "", fmt.Errorf("slack socket url missing")
+	}
+	return resp.URL, nil
+}
+
+func (c *Channel) apiBase() string {
+	base := strings.TrimRight(strings.TrimSpace(c.Config.APIBase), "/")
+	if base == "" {
+		base = "https://slack.com/api"
+	}
+	return base
+}
+
+func (c *Channel) client() *http.Client {
+	if c.HTTP != nil {
+		return c.HTTP
+	}
+	return &http.Client{Timeout: 20 * time.Second}
+}
+
+func (c *Channel) postJSON(ctx context.Context, endpoint, token string, payload any, out any) error {
+	var body io.Reader
+	if payload != nil {
+		b, _ := json.Marshal(payload)
+		body = bytes.NewReader(b)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := c.client().Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return rootchannels.FormatRateLimitError("slack", rootchannels.ParseRetryAfterSeconds(resp.Header.Get("Retry-After")), "")
+	}
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("slack api error: %s", resp.Status)
+	}
+	if out == nil {
+		return nil
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+func (c *Channel) postForm(ctx context.Context, endpoint, token string, values url.Values, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(values.Encode()))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := c.client().Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return rootchannels.FormatRateLimitError("slack", rootchannels.ParseRetryAfterSeconds(resp.Header.Get("Retry-After")), "")
+	}
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("slack api error: %s", resp.Status)
+	}
+	if out == nil {
+		return nil
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+func (c *Channel) ingressDeduper() *rootchannels.IngressDeduplicator {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.dedupe == nil {
+		c.dedupe = rootchannels.NewIngressDeduplicator(0)
+	}
+	return c.dedupe
+}
+
+func slackDedupeKey(envelope socketEnvelope) string {
+	if strings.TrimSpace(envelope.EnvelopeID) != "" {
+		return envelope.EnvelopeID
+	}
+	ev := envelope.Payload.Event
+	if strings.TrimSpace(ev.Channel) == "" || strings.TrimSpace(ev.User) == "" {
+		return ""
+	}
+	return strings.Join([]string{ev.Channel, ev.User, ev.ThreadTS, ev.Text}, "|")
+}
+
+func (c *Channel) captureFiles(ctx context.Context, sessionKey string, files []slackFile) ([]artifacts.Attachment, []string) {
+	attachments := make([]artifacts.Attachment, 0, len(files))
+	markers := make([]string, 0, len(files))
+	for _, file := range files {
+		filename := artifacts.NormalizeFilename(file.Name, file.Mimetype)
+		kind := artifacts.DetectKind(filename, file.Mimetype)
+		if c.MaxMediaBytes == 0 {
+			markers = append(markers, artifacts.FailureMarker(kind, filename, "disabled by config"))
+			continue
+		}
+		if c.MaxMediaBytes > 0 && file.Size > int64(c.MaxMediaBytes) {
+			markers = append(markers, artifacts.FailureMarker(kind, filename, "too large"))
+			continue
+		}
+		if c.Artifacts == nil {
+			markers = append(markers, artifacts.FailureMarker(kind, filename, "storage unavailable"))
+			continue
+		}
+		data, err := c.downloadPrivateFile(ctx, firstNonEmpty(file.URLPrivateDownload, file.URLPrivate))
+		if err != nil {
+			markers = append(markers, artifacts.FailureMarker(kind, filename, "download failed"))
+			continue
+		}
+		att, err := c.Artifacts.SaveNamed(ctx, sessionKey, filename, file.Mimetype, data)
+		if err != nil {
+			markers = append(markers, artifacts.FailureMarker(kind, filename, "save failed"))
+			continue
+		}
+		attachments = append(attachments, att)
+		markers = append(markers, artifacts.Marker(att))
+	}
+	return attachments, markers
+}
+
+func (c *Channel) downloadPrivateFile(ctx context.Context, endpoint string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Config.BotToken)
+	resp, err := c.client().Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("slack file download error: %s", resp.Status)
+	}
+	limit := int64(c.MaxMediaBytes)
+	if limit <= 0 {
+		limit = 25 << 20
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if c.MaxMediaBytes > 0 && len(data) > c.MaxMediaBytes {
+		return nil, fmt.Errorf("slack file exceeds maxMediaBytes")
+	}
+	return data, nil
+}
+
+func (c *Channel) uploadFiles(ctx context.Context, channelID, text string, mediaPaths []string, meta map[string]any) error {
+	files := make([]map[string]any, 0, len(mediaPaths))
+	for _, mediaPath := range mediaPaths {
+		fileID, title, err := c.uploadFile(ctx, mediaPath)
+		if err != nil {
+			return err
+		}
+		files = append(files, map[string]any{"id": fileID, "title": title})
+	}
+	payload := map[string]any{
+		"channel_id": channelID,
+		"files":      files,
+	}
+	if strings.TrimSpace(text) != "" {
+		payload["initial_comment"] = text
+	}
+	if threadTS, ok := meta["thread_ts"].(string); ok && threadTS != "" {
+		payload["thread_ts"] = threadTS
+	}
+	var resp struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if err := c.postJSON(ctx, c.apiBase()+"/files.completeUploadExternal", c.Config.BotToken, payload, &resp); err != nil {
+		return err
+	}
+	if !resp.OK {
+		return fmt.Errorf("slack complete upload failed: %s", resp.Error)
+	}
+	return nil
+}
+
+func (c *Channel) uploadFile(ctx context.Context, mediaPath string) (string, string, error) {
+	info, err := os.Stat(mediaPath)
+	if err != nil {
+		return "", "", err
+	}
+	if c.MaxMediaBytes == 0 {
+		return "", "", fmt.Errorf("media attachments disabled by config")
+	}
+	if c.MaxMediaBytes > 0 && info.Size() > int64(c.MaxMediaBytes) {
+		return "", "", fmt.Errorf("media path exceeds maxMediaBytes: %s", mediaPath)
+	}
+	var start struct {
+		OK        bool   `json:"ok"`
+		UploadURL string `json:"upload_url"`
+		FileID    string `json:"file_id"`
+		Error     string `json:"error"`
+	}
+	form := url.Values{}
+	form.Set("filename", filepath.Base(mediaPath))
+	form.Set("length", fmt.Sprintf("%d", info.Size()))
+	if err := c.postForm(ctx, c.apiBase()+"/files.getUploadURLExternal", c.Config.BotToken, form, &start); err != nil {
+		return "", "", err
+	}
+	if !start.OK || start.UploadURL == "" || start.FileID == "" {
+		return "", "", fmt.Errorf("slack upload init failed: %s", start.Error)
+	}
+	file, err := os.Open(mediaPath)
+	if err != nil {
+		return "", "", err
+	}
+	defer file.Close()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, start.UploadURL, file)
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	resp, err := c.client().Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return "", "", fmt.Errorf("slack upload error: %s", resp.Status)
+	}
+	return start.FileID, filepath.Base(mediaPath), nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func (c *Channel) allowedUser(user string) bool {
+	if len(c.Config.AllowedUserIDs) == 0 {
+		return c.Config.OpenAccess
+	}
+	for _, allowed := range c.Config.AllowedUserIDs {
+		if strings.TrimSpace(allowed) == user {
+			return true
+		}
+	}
+	return false
+}
+
+type socketEnvelope struct {
+	EnvelopeID string `json:"envelope_id"`
+	Type       string `json:"type"`
+	Payload    struct {
+		Event struct {
+			Type        string      `json:"type"`
+			Text        string      `json:"text"`
+			User        string      `json:"user"`
+			BotID       string      `json:"bot_id"`
+			Channel     string      `json:"channel"`
+			ChannelType string      `json:"channel_type"`
+			ThreadTS    string      `json:"thread_ts"`
+			Files       []slackFile `json:"files"`
+		} `json:"event"`
+		Authorizations []struct {
+			UserID string `json:"user_id"`
+		} `json:"authorizations"`
+	} `json:"payload"`
+}
+
+type slackFile struct {
+	ID                 string `json:"id"`
+	Name               string `json:"name"`
+	Mimetype           string `json:"mimetype"`
+	Filetype           string `json:"filetype"`
+	Size               int64  `json:"size"`
+	URLPrivate         string `json:"url_private"`
+	URLPrivateDownload string `json:"url_private_download"`
+}
+````
+
+## File: internal/channels/telegram/telegram.go
+````go
+// Package telegram implements the Telegram channel adapter.
+package telegram
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"mime"
+	"mime/multipart"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"or3-intern/internal/artifacts"
+	"or3-intern/internal/bus"
+	rootchannels "or3-intern/internal/channels"
+	"or3-intern/internal/config"
+)
+
+// Channel polls Telegram updates and delivers outbound messages.
+type Channel struct {
+	Config        config.TelegramChannelConfig
+	HTTP          *http.Client
+	Artifacts     *artifacts.Store
+	MaxMediaBytes int
+	IsolatePeers  bool
+
+	mu      sync.Mutex
+	running bool
+	cancel  context.CancelFunc
+	offset  int64
+	dedupe  *rootchannels.IngressDeduplicator
+}
+
+// Name returns the registered channel name.
+func (c *Channel) Name() string { return "telegram" }
+
+// Start validates configuration and begins polling Telegram updates.
+func (c *Channel) Start(ctx context.Context, eventBus *bus.Bus) error {
+	if strings.TrimSpace(c.Config.Token) == "" {
+		return fmt.Errorf("telegram token not configured")
+	}
+	if eventBus == nil {
+		return fmt.Errorf("event bus not configured")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.running {
+		return nil
+	}
+	childCtx, cancel := context.WithCancel(ctx)
+	c.cancel = cancel
+	c.running = true
+	go c.poll(childCtx, eventBus)
+	return nil
+}
+
+// Stop cancels polling and releases the current session state.
+func (c *Channel) Stop(ctx context.Context) error {
+	_ = ctx
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cancel != nil {
+		c.cancel()
+	}
+	c.cancel = nil
+	c.running = false
+	return nil
+}
+
+// Deliver sends a Telegram text or media message.
+func (c *Channel) Deliver(ctx context.Context, to, text string, meta map[string]any) error {
+	chatID := strings.TrimSpace(to)
+	if chatID == "" {
+		chatID = strings.TrimSpace(c.Config.DefaultChatID)
+	}
+	if chatID == "" {
+		return fmt.Errorf("telegram target chat id required")
+	}
+	mediaPaths := rootchannels.MediaPaths(meta)
+	if len(mediaPaths) > 0 {
+		return c.deliverMedia(ctx, chatID, text, mediaPaths, meta)
+	}
+	payload := map[string]any{"chat_id": chatID, "text": text}
+	if replyID, ok := meta["reply_to_message_id"].(int64); ok && replyID > 0 {
+		payload["reply_to_message_id"] = replyID
+	}
+	return c.postJSON(ctx, "/sendMessage", payload, nil)
+}
+
+func (c *Channel) poll(ctx context.Context, eventBus *bus.Bus) {
+	interval := time.Duration(c.Config.PollSeconds) * time.Second
+	if interval <= 0 {
+		interval = 2 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		if err := c.fetchUpdates(ctx, eventBus); err != nil {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(interval):
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+
+}
+
+func (c *Channel) fetchUpdates(ctx context.Context, eventBus *bus.Bus) error {
+	query := map[string]string{"timeout": "0"}
+	c.mu.Lock()
+	if c.offset > 0 {
+		query["offset"] = strconv.FormatInt(c.offset, 10)
+	}
+	c.mu.Unlock()
+	var updates []update
+	if err := c.getJSON(ctx, "/getUpdates", query, &updates); err != nil {
+		return err
+	}
+	for _, update := range updates {
+		c.mu.Lock()
+		if next := update.UpdateID + 1; next > c.offset {
+			c.offset = next
+		}
+		c.mu.Unlock()
+		msg := update.Message
+		chatID := strconv.FormatInt(msg.Chat.ID, 10)
+		if !c.allowedChat(chatID) {
+			continue
+		}
+		if key := telegramDedupeKey(msg); key != "" && c.ingressDeduper().IsDuplicate(key) {
+			continue
+		}
+		sessionKey := "telegram:" + chatID
+		if c.IsolatePeers && !strings.EqualFold(strings.TrimSpace(msg.Chat.Type), "private") {
+			sessionKey = sessionKey + ":" + strconv.FormatInt(msg.From.ID, 10)
+		}
+		text := strings.TrimSpace(msg.Text)
+		if text == "" {
+			text = strings.TrimSpace(msg.Caption)
+		}
+		attachments, markers := c.captureAttachments(ctx, sessionKey, msg)
+		content := rootchannels.ComposeMessageText(text, markers)
+		if content == "" {
+			continue
+		}
+		meta := map[string]any{
+			"chat_id":             chatID,
+			"chat_type":           msg.Chat.Type,
+			"message_id":          msg.MessageID,
+			"reply_to_message_id": int64(msg.MessageID),
+			"username":            msg.From.Username,
+		}
+		if msg.MediaGroupID != "" {
+			meta["media_group_id"] = msg.MediaGroupID
+		}
+		if len(attachments) > 0 {
+			meta["attachments"] = attachments
+		}
+		eventBus.Publish(bus.Event{
+			Type:       bus.EventUserMessage,
+			SessionKey: sessionKey,
+			Channel:    "telegram",
+			From:       strconv.FormatInt(msg.From.ID, 10),
+			Message:    content,
+			Meta:       meta,
+		})
+	}
+	return nil
+}
+
+func (c *Channel) allowedChat(chatID string) bool {
+	if len(c.Config.AllowedChatIDs) == 0 {
+		return c.Config.OpenAccess
+	}
+	for _, allowed := range c.Config.AllowedChatIDs {
+		if strings.TrimSpace(allowed) == chatID {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Channel) client() *http.Client {
+	if c.HTTP != nil {
+		return c.HTTP
+	}
+	return &http.Client{Timeout: 20 * time.Second}
+}
+
+func (c *Channel) apiBase() string {
+	base := strings.TrimRight(strings.TrimSpace(c.Config.APIBase), "/")
+	if base == "" {
+		base = "https://api.telegram.org"
+	}
+	return base + "/bot" + c.Config.Token
+}
+
+func (c *Channel) getJSON(ctx context.Context, path string, query map[string]string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.apiBase()+path, nil)
+	if err != nil {
+		return err
+	}
+	q := req.URL.Query()
+	for k, v := range query {
+		q.Set(k, v)
+	}
+	req.URL.RawQuery = q.Encode()
+	resp, err := c.client().Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("telegram api error: %s", resp.Status)
+	}
+	var envelope apiEnvelope
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return err
+	}
+	if !envelope.OK {
+		return fmt.Errorf("telegram api error: %s", envelope.Description)
+	}
+	if out == nil {
+		return nil
+	}
+	return json.Unmarshal(envelope.Result, out)
+}
+
+func (c *Channel) postJSON(ctx context.Context, path string, payload any, out any) error {
+	b, _ := json.Marshal(payload)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.apiBase()+path, bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.client().Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return telegramRateLimitError(resp)
+	}
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("telegram api error: %s", resp.Status)
+	}
+	var envelope apiEnvelope
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return err
+	}
+	if !envelope.OK {
+		return fmt.Errorf("telegram api error: %s", envelope.Description)
+	}
+	if out == nil {
+		return nil
+	}
+	return json.Unmarshal(envelope.Result, out)
+}
+
+func (c *Channel) ingressDeduper() *rootchannels.IngressDeduplicator {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.dedupe == nil {
+		c.dedupe = rootchannels.NewIngressDeduplicator(0)
+	}
+	return c.dedupe
+}
+
+func telegramDedupeKey(msg inboundMessage) string {
+	if msg.Chat.ID == 0 || msg.MessageID == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d:%d", msg.Chat.ID, msg.MessageID)
+}
+
+func telegramRateLimitError(resp *http.Response) error {
+	if resp == nil {
+		return rootchannels.FormatRateLimitError("telegram", 0, "")
+	}
+	var payload struct {
+		Description string `json:"description"`
+		Parameters  struct {
+			RetryAfter int `json:"retry_after"`
+		} `json:"parameters"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&payload)
+	return rootchannels.FormatRateLimitError("telegram", time.Duration(payload.Parameters.RetryAfter)*time.Second, payload.Description)
+}
+
+func (c *Channel) captureAttachments(ctx context.Context, sessionKey string, msg inboundMessage) ([]artifacts.Attachment, []string) {
+	attachments := make([]artifacts.Attachment, 0, 4)
+	markers := make([]string, 0, 4)
+
+	// Telegram media groups are processed one update at a time in v1.
+	if len(msg.Photo) > 0 {
+		att, marker := c.captureRemoteAttachment(ctx, sessionKey, remoteAttachment{
+			FileID:   msg.Photo[len(msg.Photo)-1].FileID,
+			FileSize: msg.Photo[len(msg.Photo)-1].FileSize,
+			Filename: "photo.jpg",
+			Mime:     "image/jpeg",
+			Kind:     artifacts.KindImage,
+		})
+		if marker != "" {
+			markers = append(markers, marker)
+		}
+		if att.ArtifactID != "" {
+			attachments = append(attachments, att)
+		}
+	}
+	if msg.Voice.FileID != "" {
+		filename := "voice.ogg"
+		if msg.Voice.FileUniqueID != "" {
+			filename = msg.Voice.FileUniqueID + ".ogg"
+		}
+		att, marker := c.captureRemoteAttachment(ctx, sessionKey, remoteAttachment{
+			FileID:   msg.Voice.FileID,
+			FileSize: msg.Voice.FileSize,
+			Filename: filename,
+			Mime:     "audio/ogg",
+			Kind:     artifacts.KindAudio,
+		})
+		if marker != "" {
+			markers = append(markers, marker)
+		}
+		if att.ArtifactID != "" {
+			attachments = append(attachments, att)
+		}
+	}
+	if msg.Audio.FileID != "" {
+		att, marker := c.captureRemoteAttachment(ctx, sessionKey, remoteAttachment{
+			FileID:   msg.Audio.FileID,
+			FileSize: msg.Audio.FileSize,
+			Filename: msg.Audio.FileName,
+			Mime:     msg.Audio.MimeType,
+			Kind:     artifacts.KindAudio,
+		})
+		if marker != "" {
+			markers = append(markers, marker)
+		}
+		if att.ArtifactID != "" {
+			attachments = append(attachments, att)
+		}
+	}
+	if msg.Document.FileID != "" {
+		att, marker := c.captureRemoteAttachment(ctx, sessionKey, remoteAttachment{
+			FileID:   msg.Document.FileID,
+			FileSize: msg.Document.FileSize,
+			Filename: msg.Document.FileName,
+			Mime:     msg.Document.MimeType,
+			Kind:     artifacts.KindFile,
+		})
+		if marker != "" {
+			markers = append(markers, marker)
+		}
+		if att.ArtifactID != "" {
+			attachments = append(attachments, att)
+		}
+	}
+	return attachments, markers
+}
+
+type remoteAttachment struct {
+	FileID   string
+	FileSize int64
+	Filename string
+	Mime     string
+	Kind     string
+}
+
+func (c *Channel) captureRemoteAttachment(ctx context.Context, sessionKey string, remote remoteAttachment) (artifacts.Attachment, string) {
+	filename := artifacts.NormalizeFilename(remote.Filename, remote.Mime)
+	if remote.Kind == "" {
+		remote.Kind = artifacts.DetectKind(filename, remote.Mime)
+	}
+	if c.MaxMediaBytes == 0 {
+		return artifacts.Attachment{}, artifacts.FailureMarker(remote.Kind, filename, "disabled by config")
+	}
+	if c.MaxMediaBytes > 0 && remote.FileSize > int64(c.MaxMediaBytes) {
+		return artifacts.Attachment{}, artifacts.FailureMarker(remote.Kind, filename, "too large")
+	}
+	if c.Artifacts == nil {
+		return artifacts.Attachment{}, artifacts.FailureMarker(remote.Kind, filename, "storage unavailable")
+	}
+	info, err := c.getFile(ctx, remote.FileID)
+	if err != nil {
+		return artifacts.Attachment{}, artifacts.FailureMarker(remote.Kind, filename, "download failed")
+	}
+	if c.MaxMediaBytes > 0 && info.FileSize > int64(c.MaxMediaBytes) {
+		return artifacts.Attachment{}, artifacts.FailureMarker(remote.Kind, filename, "too large")
+	}
+	data, err := c.downloadFile(ctx, info.FilePath)
+	if err != nil {
+		return artifacts.Attachment{}, artifacts.FailureMarker(remote.Kind, filename, "download failed")
+	}
+	att, err := c.Artifacts.SaveNamed(ctx, sessionKey, filename, firstNonEmpty(remote.Mime, mime.TypeByExtension(filepath.Ext(filename))), data)
+	if err != nil {
+		return artifacts.Attachment{}, artifacts.FailureMarker(remote.Kind, filename, "save failed")
+	}
+	return att, artifacts.Marker(att)
+}
+
+func (c *Channel) getFile(ctx context.Context, fileID string) (fileInfo, error) {
+	var info fileInfo
+	err := c.getJSON(ctx, "/getFile", map[string]string{"file_id": fileID}, &info)
+	return info, err
+}
+
+func (c *Channel) downloadFile(ctx context.Context, filePath string) ([]byte, error) {
+	endpoint := strings.TrimRight(strings.TrimSpace(c.Config.APIBase), "/")
+	if endpoint == "" {
+		endpoint = "https://api.telegram.org"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"/file/bot"+c.Config.Token+"/"+strings.TrimLeft(filePath, "/"), nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.client().Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("telegram file error: %s", resp.Status)
+	}
+	limit := int64(c.MaxMediaBytes)
+	if limit <= 0 {
+		limit = 25 << 20
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if c.MaxMediaBytes > 0 && len(data) > c.MaxMediaBytes {
+		return nil, fmt.Errorf("telegram file exceeds maxMediaBytes")
+	}
+	return data, nil
+}
+
+func (c *Channel) deliverMedia(ctx context.Context, chatID, text string, mediaPaths []string, meta map[string]any) error {
+	replyID := replyToMessageID(meta)
+	for i, mediaPath := range mediaPaths {
+		caption := ""
+		if i == 0 {
+			caption = text
+		}
+		if err := c.sendMediaFile(ctx, chatID, mediaPath, caption, replyID); err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(text) != "" && len(mediaPaths) == 0 {
+		return c.postJSON(ctx, "/sendMessage", map[string]any{"chat_id": chatID, "text": text}, nil)
+	}
+	return nil
+}
+
+func (c *Channel) sendMediaFile(ctx context.Context, chatID, mediaPath, caption string, replyID int64) error {
+	endpoint, fieldName, mimeType := telegramSendSpec(mediaPath)
+	file, err := os.Open(mediaPath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("chat_id", chatID); err != nil {
+		return err
+	}
+	if replyID > 0 {
+		if err := writer.WriteField("reply_to_message_id", strconv.FormatInt(replyID, 10)); err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(caption) != "" {
+		if err := writer.WriteField("caption", caption); err != nil {
+			return err
+		}
+	}
+	part, err := writer.CreateFormFile(fieldName, filepath.Base(mediaPath))
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(part, file); err != nil {
+		return err
+	}
+	if err := writer.Close(); err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.apiBase()+endpoint, &body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	if mimeType != "" {
+		req.Header.Set("X-Or3-Media-Type", mimeType)
+	}
+	resp, err := c.client().Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("telegram api error: %s", resp.Status)
+	}
+	var envelope apiEnvelope
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return err
+	}
+	if !envelope.OK {
+		return fmt.Errorf("telegram api error: %s", envelope.Description)
+	}
+	return nil
+}
+
+func telegramSendSpec(path string) (endpoint string, fieldName string, mimeType string) {
+	mimeType = mime.TypeByExtension(strings.ToLower(filepath.Ext(path)))
+	switch artifacts.DetectKind(path, mimeType) {
+	case artifacts.KindImage:
+		return "/sendPhoto", "photo", mimeType
+	case artifacts.KindAudio:
+		if strings.HasSuffix(strings.ToLower(path), ".ogg") || strings.HasSuffix(strings.ToLower(path), ".opus") {
+			return "/sendVoice", "voice", mimeType
+		}
+		return "/sendAudio", "audio", mimeType
+	default:
+		return "/sendDocument", "document", mimeType
+	}
+}
+
+func replyToMessageID(meta map[string]any) int64 {
+	switch v := meta["reply_to_message_id"].(type) {
+	case int64:
+		return v
+	case int:
+		return int64(v)
+	case float64:
+		return int64(v)
+	default:
+		return 0
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+type apiEnvelope struct {
+	OK          bool            `json:"ok"`
+	Description string          `json:"description"`
+	Result      json.RawMessage `json:"result"`
+}
+
+type update struct {
+	UpdateID int64          `json:"update_id"`
+	Message  inboundMessage `json:"message"`
+}
+
+type inboundMessage struct {
+	MessageID    int    `json:"message_id"`
+	Text         string `json:"text"`
+	Caption      string `json:"caption"`
+	MediaGroupID string `json:"media_group_id"`
+	Chat         struct {
+		ID   int64  `json:"id"`
+		Type string `json:"type"`
+	} `json:"chat"`
+	From struct {
+		ID       int64  `json:"id"`
+		Username string `json:"username"`
+	} `json:"from"`
+	Photo []struct {
+		FileID   string `json:"file_id"`
+		FileSize int64  `json:"file_size"`
+	} `json:"photo"`
+	Voice struct {
+		FileID       string `json:"file_id"`
+		FileUniqueID string `json:"file_unique_id"`
+		FileSize     int64  `json:"file_size"`
+	} `json:"voice"`
+	Audio struct {
+		FileID   string `json:"file_id"`
+		FileName string `json:"file_name"`
+		MimeType string `json:"mime_type"`
+		FileSize int64  `json:"file_size"`
+	} `json:"audio"`
+	Document struct {
+		FileID   string `json:"file_id"`
+		FileName string `json:"file_name"`
+		MimeType string `json:"mime_type"`
+		FileSize int64  `json:"file_size"`
+	} `json:"document"`
+}
+
+type fileInfo struct {
+	FilePath string `json:"file_path"`
+	FileSize int64  `json:"file_size"`
+}
+````
+
+## File: internal/channels/whatsapp/whatsapp.go
+````go
+// Package whatsapp implements the WhatsApp bridge channel adapter.
+package whatsapp
+
+import (
+	"context"
+	"encoding/base64"
+	"fmt"
+	"mime"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/gorilla/websocket"
+
+	"or3-intern/internal/artifacts"
+	"or3-intern/internal/bus"
+	rootchannels "or3-intern/internal/channels"
+	"or3-intern/internal/config"
+)
+
+// Channel reads and writes messages over the configured bridge websocket.
+type Channel struct {
+	Config        config.WhatsAppBridgeConfig
+	Dialer        *websocket.Dialer
+	Artifacts     *artifacts.Store
+	MaxMediaBytes int
+	IsolatePeers  bool
+
+	mu     sync.Mutex
+	conn   *websocket.Conn
+	cancel context.CancelFunc
+	closed bool
+	dedupe *rootchannels.IngressDeduplicator
+}
+
+// Name returns the registered channel name.
+func (c *Channel) Name() string { return "whatsapp" }
+
+// Start connects to the bridge and begins reading inbound messages.
+func (c *Channel) Start(ctx context.Context, eventBus *bus.Bus) error {
+	if strings.TrimSpace(c.Config.BridgeURL) == "" {
+		return fmt.Errorf("whatsapp bridge url not configured")
+	}
+	conn, err := c.connect(ctx)
+	if err != nil {
+		return err
+	}
+	childCtx, cancel := context.WithCancel(ctx)
+	c.mu.Lock()
+	c.conn = conn
+	c.cancel = cancel
+	c.closed = false
+	c.mu.Unlock()
+	go c.readLoop(childCtx, eventBus)
+	return nil
+}
+
+// Stop closes the bridge connection.
+func (c *Channel) Stop(ctx context.Context) error {
+	_ = ctx
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cancel != nil {
+		c.cancel()
+	}
+	if c.conn != nil {
+		_ = c.conn.Close()
+	}
+	c.conn = nil
+	c.cancel = nil
+	c.closed = true
+	return nil
+}
+
+// Deliver sends a bridge command for a text or media message.
+func (c *Channel) Deliver(ctx context.Context, to, text string, meta map[string]any) error {
+	target := strings.TrimSpace(to)
+	if target == "" {
+		target = strings.TrimSpace(c.Config.DefaultTo)
+	}
+	if target == "" {
+		return fmt.Errorf("whatsapp target required")
+	}
+	cmd := map[string]any{"type": "send", "to": target, "text": text}
+	if mediaPaths := rootchannels.MediaPaths(meta); len(mediaPaths) > 0 {
+		attachments, err := c.outboundAttachments(mediaPaths)
+		if err != nil {
+			return err
+		}
+		cmd["attachments"] = attachments
+	}
+	for k, v := range meta {
+		if k == "media_paths" {
+			continue
+		}
+		cmd[k] = v
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.conn == nil {
+		return fmt.Errorf("whatsapp bridge not connected")
+	}
+	return c.conn.WriteJSON(cmd)
+}
+
+func (c *Channel) connect(ctx context.Context) (*websocket.Conn, error) {
+	dialer := c.Dialer
+	if dialer == nil {
+		dialer = websocket.DefaultDialer
+	}
+	headers := http.Header{}
+	if token := strings.TrimSpace(c.Config.BridgeToken); token != "" {
+		headers.Set("Authorization", "Bearer "+token)
+	}
+	conn, _, err := dialer.DialContext(ctx, c.Config.BridgeURL, headers)
+	if err != nil {
+		return nil, err
+	}
+	return conn, nil
+}
+
+func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
+	for {
+		c.mu.Lock()
+		conn := c.conn
+		c.mu.Unlock()
+		if conn == nil {
+			return
+		}
+		var msg inboundMessage
+		if err := conn.ReadJSON(&msg); err != nil {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				return
+			}
+		}
+		if msg.Type != "message" {
+			continue
+		}
+		if key := whatsappDedupeKey(msg); key != "" && c.ingressDeduper().IsDuplicate(key) {
+			continue
+		}
+		if !c.allowedFrom(msg.From) {
+			continue
+		}
+		target := strings.TrimSpace(msg.Chat)
+		if target == "" {
+			target = strings.TrimSpace(msg.From)
+		}
+		sessionKey := "whatsapp:" + target
+		if c.IsolatePeers {
+			sessionKey += ":" + strings.TrimSpace(msg.From)
+		}
+		attachments, markers := c.captureAttachments(ctx, sessionKey, msg.Attachments)
+		content := rootchannels.ComposeMessageText(msg.Text, markers)
+		if content == "" {
+			continue
+		}
+		meta := map[string]any{
+			"chat_id":             target,
+			"message_id":          msg.ID,
+			"reply_to_message_id": msg.ID,
+			"is_group":            msg.IsGroup,
+		}
+		if len(attachments) > 0 {
+			meta["attachments"] = attachments
+		}
+		eventBus.Publish(bus.Event{
+			Type:       bus.EventUserMessage,
+			SessionKey: sessionKey,
+			Channel:    "whatsapp",
+			From:       msg.From,
+			Message:    content,
+			Meta:       meta,
+		})
+	}
+}
+
+func (c *Channel) allowedFrom(from string) bool {
+	if len(c.Config.AllowedFrom) == 0 {
+		return c.Config.OpenAccess
+	}
+	for _, allowed := range c.Config.AllowedFrom {
+		if strings.TrimSpace(allowed) == strings.TrimSpace(from) {
+			return true
+		}
+	}
+	return false
+}
+
+type inboundMessage struct {
+	Type        string             `json:"type"`
+	ID          string             `json:"id"`
+	Chat        string             `json:"chat"`
+	From        string             `json:"from"`
+	Text        string             `json:"text"`
+	IsGroup     bool               `json:"isGroup"`
+	Attachments []bridgeAttachment `json:"attachments"`
+}
+
+type bridgeAttachment struct {
+	Path       string `json:"path,omitempty"`
+	DataBase64 string `json:"data_base64,omitempty"`
+	Filename   string `json:"filename,omitempty"`
+	Mime       string `json:"mime,omitempty"`
+	Kind       string `json:"kind,omitempty"`
+	SizeBytes  int64  `json:"size_bytes,omitempty"`
+}
+
+func (c *Channel) captureAttachments(ctx context.Context, sessionKey string, refs []bridgeAttachment) ([]artifacts.Attachment, []string) {
+	attachments := make([]artifacts.Attachment, 0, len(refs))
+	markers := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		filename := artifacts.NormalizeFilename(ref.Filename, ref.Mime)
+		kind := strings.TrimSpace(ref.Kind)
+		if kind == "" {
+			kind = artifacts.DetectKind(filename, ref.Mime)
+		}
+		if c.MaxMediaBytes == 0 {
+			markers = append(markers, artifacts.FailureMarker(kind, filename, "disabled by config"))
+			continue
+		}
+		if c.MaxMediaBytes > 0 && ref.SizeBytes > int64(c.MaxMediaBytes) {
+			markers = append(markers, artifacts.FailureMarker(kind, filename, "too large"))
+			continue
+		}
+		if c.Artifacts == nil {
+			markers = append(markers, artifacts.FailureMarker(kind, filename, "storage unavailable"))
+			continue
+		}
+		data, err := decodeBridgeAttachment(ref, c.MaxMediaBytes)
+		if err != nil {
+			reason := "invalid media payload"
+			if strings.Contains(err.Error(), "too large") {
+				reason = "too large"
+			}
+			markers = append(markers, artifacts.FailureMarker(kind, filename, reason))
+			continue
+		}
+		att, err := c.Artifacts.SaveNamed(ctx, sessionKey, filename, ref.Mime, data)
+		if err != nil {
+			markers = append(markers, artifacts.FailureMarker(kind, filename, "save failed"))
+			continue
+		}
+		attachments = append(attachments, att)
+		markers = append(markers, artifacts.Marker(att))
+	}
+	return attachments, markers
+}
+
+func (c *Channel) outboundAttachments(paths []string) ([]bridgeAttachment, error) {
+	attachments := make([]bridgeAttachment, 0, len(paths))
+	for _, mediaPath := range paths {
+		info, err := os.Stat(mediaPath)
+		if err != nil {
+			return nil, err
+		}
+		if c.MaxMediaBytes == 0 {
+			return nil, fmt.Errorf("media attachments disabled by config")
+		}
+		if c.MaxMediaBytes > 0 && info.Size() > int64(c.MaxMediaBytes) {
+			return nil, fmt.Errorf("media path exceeds maxMediaBytes: %s", mediaPath)
+		}
+		data, err := os.ReadFile(mediaPath)
+		if err != nil {
+			return nil, err
+		}
+		mimeType := mime.TypeByExtension(strings.ToLower(filepath.Ext(mediaPath)))
+		attachments = append(attachments, bridgeAttachment{
+			DataBase64: base64.StdEncoding.EncodeToString(data),
+			Filename:   filepath.Base(mediaPath),
+			Mime:       mimeType,
+			Kind:       artifacts.DetectKind(mediaPath, mimeType),
+			SizeBytes:  info.Size(),
+		})
+	}
+	return attachments, nil
+}
+
+func decodeBridgeAttachment(ref bridgeAttachment, maxBytes int) ([]byte, error) {
+	raw := strings.TrimSpace(ref.DataBase64)
+	if raw == "" {
+		return nil, fmt.Errorf("missing inline data")
+	}
+	if maxBytes > 0 && base64.StdEncoding.DecodedLen(len(raw)) > maxBytes {
+		return nil, fmt.Errorf("attachment too large")
+	}
+	data, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		return nil, err
+	}
+	if maxBytes > 0 && len(data) > maxBytes {
+		return nil, fmt.Errorf("attachment too large")
+	}
+	return data, nil
+}
+
+// BridgeURL normalizes a base WhatsApp bridge URL to its websocket endpoint.
+func BridgeURL(base string) string {
+	u, err := url.Parse(strings.TrimSpace(base))
+	if err != nil || u == nil {
+		return ""
+	}
+	if u.Path == "" {
+		u.Path = "/ws"
+	}
+	return u.String()
+}
+
+// NewTestDialer returns a short-timeout dialer for bridge tests.
+func NewTestDialer() *websocket.Dialer {
+	return &websocket.Dialer{HandshakeTimeout: 5 * time.Second}
+}
+
+func (c *Channel) ingressDeduper() *rootchannels.IngressDeduplicator {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.dedupe == nil {
+		c.dedupe = rootchannels.NewIngressDeduplicator(0)
+	}
+	return c.dedupe
+}
+
+func whatsappDedupeKey(msg inboundMessage) string {
+	if strings.TrimSpace(msg.ID) != "" {
+		return msg.ID
+	}
+	target := strings.TrimSpace(msg.Chat)
+	if target == "" {
+		target = strings.TrimSpace(msg.From)
+	}
+	if target == "" || strings.TrimSpace(msg.From) == "" {
+		return ""
+	}
+	return strings.Join([]string{target, msg.From, msg.Text}, "|")
+}
+````
+
 ## File: internal/tools/context.go
 ````go
 package tools
@@ -16020,680 +17904,6 @@ func SkillPolicyFromContext(ctx context.Context) SkillPolicy {
 	policy, _ := ctx.Value(skillPolicyContextKey{}).(SkillPolicy)
 	return policy
 }
-````
-
-## File: internal/tools/exec.go
-````go
-package tools
-
-import (
-	"bytes"
-	"context"
-	"errors"
-	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"strings"
-	"time"
-)
-
-type ExecTool struct {
-	Base
-	Timeout           time.Duration
-	RestrictDir       string // if non-empty, cwd must be inside
-	PathAppend        string
-	ChildEnvAllowlist []string
-	AllowedPrograms   []string
-	Sandbox           BubblewrapConfig
-	EnableLegacyShell bool
-	DisableShell      bool
-	OutputMaxBytes    int
-	BlockedPatterns   []string
-}
-
-const defaultExecOutputMaxBytes = 10000
-
-func (t *ExecTool) Name() string { return "exec" }
-func (t *ExecTool) Description() string {
-	return "Run an allowed program with safety limits. Output is truncated. Legacy shell commands require explicit opt-in."
-}
-func (t *ExecTool) Parameters() map[string]any {
-	return map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"program":        map[string]any{"type": "string", "description": "Program to run"},
-			"args":           map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Program arguments"},
-			"command":        map[string]any{"type": "string", "description": "Legacy shell command to run (privileged, explicit opt-in only)"},
-			"cwd":            map[string]any{"type": "string", "description": "Working directory (optional)"},
-			"timeoutSeconds": map[string]any{"type": "integer", "description": "Override timeout (optional)"},
-		},
-		"required": []string{},
-	}
-}
-func (t *ExecTool) Schema() map[string]any {
-	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
-}
-
-func (t *ExecTool) CapabilityForParams(params map[string]any) CapabilityLevel {
-	if strings.TrimSpace(fmt.Sprint(params["command"])) != "" && fmt.Sprint(params["command"]) != "<nil>" {
-		return CapabilityPrivileged
-	}
-	return CapabilityGuarded
-}
-
-var defaultBlockedPatterns = []string{
-	"rm -rf", "mkfs", "dd ", "shutdown", "reboot", "poweroff", ":(){", ">|", "chown -R /", "chmod -R 777 /",
-}
-
-func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, error) {
-	program := strings.TrimSpace(fmt.Sprint(params["program"]))
-	if program == "<nil>" {
-		program = ""
-	}
-	legacyCommand, _ := params["command"].(string)
-	legacyCommand = strings.TrimSpace(legacyCommand)
-	if program == "" && legacyCommand == "" {
-		return "", errors.New("missing program or command")
-	}
-	if legacyCommand != "" {
-		if !t.EnableLegacyShell || t.DisableShell {
-			return "", errors.New("shell command execution disabled; use program + args or explicitly enable legacy shell mode")
-		}
-		lc := strings.ToLower(legacyCommand)
-		patterns := t.BlockedPatterns
-		if len(patterns) == 0 {
-			patterns = defaultBlockedPatterns
-		}
-		for _, b := range patterns {
-			if strings.Contains(lc, b) {
-				return "", fmt.Errorf("blocked command pattern: %q", b)
-			}
-		}
-	}
-	cwd, _ := params["cwd"].(string)
-	if cwd == "" {
-		cwd, _ = os.Getwd()
-	}
-	if t.RestrictDir != "" {
-		abs, err := filepath.Abs(cwd)
-		if err != nil {
-			return "", err
-		}
-		abs, err = canonicalizePath(abs)
-		if err != nil {
-			return "", err
-		}
-		root, err := canonicalizeRoot(t.RestrictDir)
-		if err != nil {
-			return "", err
-		}
-		rel, err := filepath.Rel(root, abs)
-		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return "", fmt.Errorf("cwd outside allowed directory")
-		}
-	}
-	if program != "" {
-		resolvedProgram, err := resolveExecutable(program, cwd)
-		if err != nil {
-			return "", err
-		}
-		if len(t.AllowedPrograms) > 0 && !allowedProgram(program, resolvedProgram, t.AllowedPrograms) {
-			return "", fmt.Errorf("program not allowed: %s", program)
-		}
-		program = resolvedProgram
-	}
-
-	to := t.Timeout
-	if v, ok := params["timeoutSeconds"].(float64); ok && v > 0 {
-		to = time.Duration(int(v)) * time.Second
-	}
-	cctx, cancel := context.WithTimeout(ctx, to)
-	defer cancel()
-
-	var c *exec.Cmd
-	var err error
-	if legacyCommand != "" {
-		c, err = commandWithSandbox(cctx, t.Sandbox, cwd, []string{"bash", "-lc", legacyCommand})
-		if err != nil {
-			return "", err
-		}
-		if c == nil {
-			c = exec.CommandContext(cctx, "bash", "-lc", legacyCommand)
-		}
-	} else {
-		c = exec.CommandContext(cctx, program, stringArgs(params["args"])...)
-	}
-	c.Dir = cwd
-	c.Env = BuildChildEnv(os.Environ(), t.ChildEnvAllowlist, EnvFromContext(ctx), t.PathAppend)
-	var stdout, stderr bytes.Buffer
-	c.Stdout = &stdout
-	c.Stderr = &stderr
-	err = c.Run()
-	out := stdout.String()
-	er := stderr.String()
-	max := t.OutputMaxBytes
-	if max <= 0 {
-		max = defaultExecOutputMaxBytes
-	}
-	if len(out) > max {
-		out = out[:max] + "\n...[truncated]\n"
-	}
-	if len(er) > max {
-		er = er[:max] + "\n...[truncated]\n"
-	}
-	if err != nil {
-		return formatCommandOutput(out, er), fmt.Errorf("exec failed: %w", err)
-	}
-	if strings.TrimSpace(er) != "" {
-		return formatCommandOutput(out, er), nil
-	}
-	return out, nil
-}
-
-func allowedProgram(program string, resolved string, allowed []string) bool {
-	program = strings.TrimSpace(program)
-	resolved = strings.TrimSpace(resolved)
-	if program == "" || resolved == "" {
-		return false
-	}
-	programHasPath := hasPathSeparator(program)
-	for _, candidate := range allowed {
-		candidate = strings.TrimSpace(candidate)
-		if candidate == "" {
-			continue
-		}
-		if hasPathSeparator(candidate) {
-			resolvedCandidate, err := canonicalExecutablePath(candidate)
-			if err == nil && resolvedCandidate == resolved {
-				return true
-			}
-			continue
-		}
-		if !programHasPath && candidate == program {
-			return true
-		}
-	}
-	return false
-}
-
-func resolveExecutable(program string, cwd string) (string, error) {
-	program = strings.TrimSpace(program)
-	if program == "" {
-		return "", fmt.Errorf("missing program")
-	}
-	if hasPathSeparator(program) {
-		if !filepath.IsAbs(program) {
-			base := strings.TrimSpace(cwd)
-			if base == "" {
-				var err error
-				base, err = os.Getwd()
-				if err != nil {
-					return "", err
-				}
-			}
-			program = filepath.Join(base, program)
-		}
-		return canonicalExecutablePath(program)
-	}
-	resolved, err := exec.LookPath(program)
-	if err != nil {
-		return "", err
-	}
-	return canonicalExecutablePath(resolved)
-}
-
-func canonicalExecutablePath(path string) (string, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return "", err
-	}
-	resolved, err := filepath.EvalSymlinks(abs)
-	if err == nil {
-		return resolved, nil
-	}
-	if errors.Is(err, os.ErrNotExist) {
-		return "", err
-	}
-	return abs, nil
-}
-
-func hasPathSeparator(path string) bool {
-	return strings.ContainsRune(path, filepath.Separator) || (filepath.Separator != '/' && strings.ContainsRune(path, '/'))
-}
-
-func formatCommandOutput(stdout, stderr string) string {
-	return fmt.Sprintf("stdout:\n%s\n\nstderr:\n%s", stdout, stderr)
-}
-````
-
-## File: internal/tools/registry.go
-````go
-package tools
-
-import (
-	"context"
-	"encoding/json"
-	"fmt"
-	"sort"
-	"strings"
-)
-
-type Registry struct {
-	tools map[string]Tool
-}
-
-func NewRegistry() *Registry {
-	return &Registry{tools: map[string]Tool{}}
-}
-
-func (r *Registry) Register(t Tool)      { r.tools[t.Name()] = t }
-func (r *Registry) Get(name string) Tool { return r.tools[name] }
-func (r *Registry) Names() []string {
-	out := make([]string, 0, len(r.tools))
-	for k := range r.tools {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
-
-func (r *Registry) Definitions() []map[string]any {
-	names := r.Names()
-	out := make([]map[string]any, 0, len(names))
-	for _, name := range names {
-		out = append(out, r.tools[name].Schema())
-	}
-	return out
-}
-
-func (r *Registry) CloneFiltered(allowed []string) *Registry {
-	if r == nil {
-		return NewRegistry()
-	}
-	if len(allowed) == 0 {
-		clone := NewRegistry()
-		for _, name := range r.Names() {
-			clone.Register(r.tools[name])
-		}
-		return clone
-	}
-	allowedSet := make(map[string]struct{}, len(allowed))
-	for _, name := range allowed {
-		trimmed := strings.TrimSpace(name)
-		if trimmed == "" {
-			continue
-		}
-		allowedSet[trimmed] = struct{}{}
-	}
-	clone := NewRegistry()
-	for _, name := range r.Names() {
-		if _, ok := allowedSet[name]; !ok {
-			continue
-		}
-		clone.Register(r.tools[name])
-	}
-	return clone
-}
-
-func (r *Registry) Execute(ctx context.Context, name string, argsJSON string) (string, error) {
-	t := r.tools[name]
-	if t == nil {
-		return "", fmt.Errorf("tool '%s' not found", name)
-	}
-	var params map[string]any
-	if argsJSON == "" {
-		params = map[string]any{}
-	} else {
-		if err := json.Unmarshal([]byte(argsJSON), &params); err != nil {
-			return "", fmt.Errorf("invalid tool args: %w", err)
-		}
-	}
-	return r.ExecuteParams(ctx, name, params)
-}
-
-func (r *Registry) ExecuteParams(ctx context.Context, name string, params map[string]any) (string, error) {
-	t := r.tools[name]
-	if t == nil {
-		return "", fmt.Errorf("tool '%s' not found", name)
-	}
-	if params == nil {
-		params = map[string]any{}
-	}
-	if guard := ToolGuardFromContext(ctx); guard != nil {
-		if err := guard(ctx, t, ToolCapability(t, params), params); err != nil {
-			return "", err
-		}
-	}
-	return t.Execute(ctx, params)
-}
-````
-
-## File: internal/tools/web.go
-````go
-package tools
-
-import (
-	"bytes"
-	"context"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net"
-	"net/http"
-	"net/netip"
-	"net/url"
-	"or3-intern/internal/security"
-	"strings"
-	"time"
-)
-
-type WebFetch struct {
-	Base
-	HTTP            *http.Client
-	Timeout         time.Duration
-	DefaultMaxBytes int
-	HostPolicy      security.HostPolicy
-}
-
-func (t *WebFetch) Capability() CapabilityLevel { return CapabilityGuarded }
-
-const (
-	defaultWebTimeout            = 20 * time.Second
-	defaultWebFetchMaxBytes      = 200000
-	defaultWebFetchMaxRedirects  = 10
-	defaultWebSearchMaxCount     = 10
-	defaultWebSearchReadMaxBytes = 1 << 20
-)
-
-func (t *WebFetch) Name() string        { return "web_fetch" }
-func (t *WebFetch) Description() string { return "Fetch a URL (GET) and return text (truncated)." }
-func (t *WebFetch) Parameters() map[string]any {
-	return map[string]any{"type": "object", "properties": map[string]any{
-		"url":      map[string]any{"type": "string"},
-		"maxBytes": map[string]any{"type": "integer"},
-	}, "required": []string{"url"}}
-}
-func (t *WebFetch) Schema() map[string]any {
-	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
-}
-func (t *WebFetch) Execute(ctx context.Context, params map[string]any) (string, error) {
-	profile := ActiveProfileFromContext(ctx)
-	u := fmt.Sprint(params["url"])
-	if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
-		return "", fmt.Errorf("invalid url")
-	}
-	parsed, err := url.Parse(u)
-	if err != nil {
-		return "", err
-	}
-	if err := validateFetchURL(ctx, parsed); err != nil {
-		return "", err
-	}
-	if err := validateURLAgainstPolicies(ctx, parsed, t.HostPolicy, profile); err != nil {
-		return "", err
-	}
-	max := t.DefaultMaxBytes
-	if max <= 0 {
-		max = defaultWebFetchMaxBytes
-	}
-	if v, ok := params["maxBytes"].(float64); ok && int(v) > 0 {
-		max = int(v)
-	}
-	var client *http.Client
-	if t.HTTP == nil {
-		to := t.Timeout
-		if to <= 0 {
-			to = defaultWebTimeout
-		}
-		client = &http.Client{Timeout: to}
-	} else {
-		copyClient := *t.HTTP
-		client = &copyClient
-	}
-	client = security.WrapHTTPClient(client, t.HostPolicy)
-	prevCheckRedirect := client.CheckRedirect
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if len(via) >= defaultWebFetchMaxRedirects {
-			return fmt.Errorf("stopped after %d redirects", defaultWebFetchMaxRedirects)
-		}
-		if err := validateURLAgainstPolicies(req.Context(), req.URL, t.HostPolicy, profile); err != nil {
-			return err
-		}
-		if prevCheckRedirect != nil {
-			if err := prevCheckRedirect(req, via); err != nil {
-				return err
-			}
-		}
-		return validateFetchURL(req.Context(), req.URL)
-	}
-	r, err := http.NewRequestWithContext(ctx, "GET", parsed.String(), nil)
-	if err != nil {
-		return "", err
-	}
-	resp, err := client.Do(r)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, int64(max)))
-	return fmt.Sprintf("status: %s\n\n%s", resp.Status, string(body)), nil
-}
-
-func validateFetchURL(ctx context.Context, target *url.URL) error {
-	if target == nil {
-		return fmt.Errorf("invalid url")
-	}
-	hostname := strings.TrimSpace(strings.ToLower(target.Hostname()))
-	if hostname == "" {
-		return fmt.Errorf("missing host")
-	}
-	if isBlockedFetchHostname(hostname) {
-		return fmt.Errorf("blocked fetch target")
-	}
-	if ip, err := netip.ParseAddr(hostname); err == nil {
-		if isBlockedFetchAddr(ip.Unmap()) {
-			return fmt.Errorf("blocked fetch target")
-		}
-		return nil
-	}
-	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, hostname)
-	if err != nil {
-		return err
-	}
-	if len(addrs) == 0 {
-		return fmt.Errorf("host did not resolve")
-	}
-	for _, addr := range addrs {
-		if ip, ok := netip.AddrFromSlice(addr.IP); ok && isBlockedFetchAddr(ip.Unmap()) {
-			return fmt.Errorf("blocked fetch target")
-		}
-	}
-	return nil
-}
-
-func isBlockedFetchHostname(hostname string) bool {
-	switch hostname {
-	case "localhost", "ip6-localhost", "metadata.google.internal":
-		return true
-	default:
-		return false
-	}
-}
-
-func isBlockedFetchAddr(addr netip.Addr) bool {
-	if !addr.IsValid() {
-		return true
-	}
-	if addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() || addr.IsMulticast() || addr.IsUnspecified() {
-		return true
-	}
-	return addr.String() == "169.254.169.254"
-}
-
-type WebSearch struct {
-	Base
-	APIKey       string
-	HTTP         *http.Client
-	Timeout      time.Duration
-	ReadMaxBytes int
-	HostPolicy   security.HostPolicy
-}
-
-func (t *WebSearch) Capability() CapabilityLevel { return CapabilitySafe }
-
-func (t *WebSearch) Name() string { return "web_search" }
-func (t *WebSearch) Description() string {
-	return "Search the web (Brave Search API) and return top results."
-}
-func (t *WebSearch) Parameters() map[string]any {
-	return map[string]any{"type": "object", "properties": map[string]any{
-		"query": map[string]any{"type": "string"},
-		"count": map[string]any{"type": "integer", "description": "max results (default 5)"},
-	}, "required": []string{"query"}}
-}
-func (t *WebSearch) Schema() map[string]any {
-	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
-}
-
-func (t *WebSearch) Execute(ctx context.Context, params map[string]any) (string, error) {
-	profile := ActiveProfileFromContext(ctx)
-	if strings.TrimSpace(t.APIKey) == "" {
-		return "", fmt.Errorf("Brave API key not configured (set BRAVE_API_KEY)")
-	}
-	q := fmt.Sprint(params["query"])
-	count := 5
-	if v, ok := params["count"].(float64); ok && int(v) > 0 {
-		count = int(v)
-	}
-	if count > defaultWebSearchMaxCount {
-		count = defaultWebSearchMaxCount
-	}
-	if t.HTTP == nil {
-		to := t.Timeout
-		if to <= 0 {
-			to = defaultWebTimeout
-		}
-		t.HTTP = &http.Client{Timeout: to}
-	}
-
-	endpoint := "https://api.search.brave.com/res/v1/web/search?q=" + url.QueryEscape(q) + "&count=" + fmt.Sprint(count)
-	parsedEndpoint, err := url.Parse(endpoint)
-	if err != nil {
-		return "", err
-	}
-	if err := validateURLAgainstPolicies(ctx, parsedEndpoint, t.HostPolicy, profile); err != nil {
-		return "", err
-	}
-	r, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
-	if err != nil {
-		return "", err
-	}
-	r.Header.Set("Accept", "application/json")
-	r.Header.Set("X-Subscription-Token", t.APIKey)
-
-	resp, err := t.HTTP.Do(r)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	maxRead := t.ReadMaxBytes
-	if maxRead <= 0 {
-		maxRead = defaultWebSearchReadMaxBytes
-	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, int64(maxRead)))
-	if resp.StatusCode >= 300 {
-		return "", fmt.Errorf("search error %s: %s", resp.Status, string(body))
-	}
-
-	// Reduce response to stable subset
-	var raw map[string]any
-	_ = json.Unmarshal(body, &raw)
-	out := map[string]any{"query": q, "results": []any{}}
-	web, _ := raw["web"].(map[string]any)
-	results, _ := web["results"].([]any)
-	for _, it := range results {
-		m, _ := it.(map[string]any)
-		out["results"] = append(out["results"].([]any), map[string]any{
-			"title":       m["title"],
-			"url":         m["url"],
-			"description": m["description"],
-		})
-	}
-	b, _ := json.MarshalIndent(out, "", "  ")
-	return string(b), nil
-}
-
-// Optional: simple text extract from HTML (very rough)
-func StripHTML(s string) string {
-	var b bytes.Buffer
-	in := false
-	for _, r := range s {
-		if r == '<' {
-			in = true
-			continue
-		}
-		if r == '>' {
-			in = false
-			continue
-		}
-		if !in {
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
-}
-
-func validateURLAgainstPolicies(ctx context.Context, target *url.URL, policy security.HostPolicy, profile ActiveProfile) error {
-	if policy.EnabledPolicy() {
-		if err := policy.ValidateURL(ctx, target); err != nil {
-			return err
-		}
-	}
-	if strings.TrimSpace(profile.Name) == "" {
-		return nil
-	}
-	return (security.HostPolicy{Enabled: true, DefaultDeny: true, AllowedHosts: profile.AllowedHosts}).ValidateURL(ctx, target)
-}
-````
-
-## File: go.mod
-````
-module or3-intern
-
-go 1.24.0
-
-require (
-	github.com/asg017/sqlite-vec-go-bindings v0.1.6
-	github.com/emersion/go-imap/v2 v2.0.0-beta.8
-	github.com/gorilla/websocket v1.5.3
-	github.com/mattn/go-isatty v0.0.20
-	github.com/mattn/go-sqlite3 v1.14.34
-	github.com/modelcontextprotocol/go-sdk v0.8.0
-	github.com/robfig/cron/v3 v3.0.1
-	golang.org/x/net v0.6.0
-	gopkg.in/yaml.v3 v3.0.1
-	modernc.org/sqlite v1.33.1
-)
-
-require (
-	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/emersion/go-message v0.18.2 // indirect
-	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6 // indirect
-	github.com/google/jsonschema-go v0.3.0 // indirect
-	github.com/google/uuid v1.6.0 // indirect
-	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
-	github.com/ncruces/go-strftime v0.1.9 // indirect
-	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
-	golang.org/x/sys v0.40.0 // indirect
-	modernc.org/gc/v3 v3.0.0-20240107210532-573471604cb6 // indirect
-	modernc.org/libc v1.55.3 // indirect
-	modernc.org/mathutil v1.6.0 // indirect
-	modernc.org/memory v1.8.0 // indirect
-	modernc.org/strutil v1.2.0 // indirect
-	modernc.org/token v1.1.0 // indirect
-)
 ````
 
 ## File: cmd/or3-intern/doctor.go
@@ -17392,1644 +18602,6 @@ func webhookCanReachExec(cfg config.Config) bool {
 }
 ````
 
-## File: internal/db/db.go
-````go
-package db
-
-import (
-	"context"
-	"database/sql"
-	"fmt"
-	"sync"
-	"time"
-
-	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
-	_ "github.com/mattn/go-sqlite3"
-	"or3-intern/internal/scope"
-
-	_ "modernc.org/sqlite"
-)
-
-var sqliteVecAutoOnce sync.Once
-
-type DB struct {
-	SQL     *sql.DB
-	VecSQL  *sql.DB
-	auditMu sync.Mutex
-}
-
-func Open(path string) (*DB, error) {
-	primaryDSN := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)", path)
-	s, err := sql.Open("sqlite", primaryDSN)
-	if err != nil {
-		return nil, err
-	}
-	s.SetMaxOpenConns(4)
-	s.SetMaxIdleConns(4)
-
-	sqliteVecAutoOnce.Do(sqlite_vec.Auto)
-	vecDSN := fmt.Sprintf("file:%s?_busy_timeout=5000&_journal=WAL&_sync=NORMAL&_fk=1", path)
-	vec, err := sql.Open("sqlite3", vecDSN)
-	if err != nil {
-		_ = s.Close()
-		return nil, err
-	}
-	vec.SetMaxOpenConns(2)
-	vec.SetMaxIdleConns(2)
-
-	d := &DB{SQL: s, VecSQL: vec}
-	if err := d.migrate(context.Background()); err != nil {
-		_ = vec.Close()
-		_ = s.Close()
-		return nil, err
-	}
-	return d, nil
-}
-
-func (d *DB) Close() error {
-	if d == nil {
-		return nil
-	}
-	var err error
-	if d.VecSQL != nil {
-		if closeErr := d.VecSQL.Close(); closeErr != nil && err == nil {
-			err = closeErr
-		}
-	}
-	if d.SQL != nil {
-		if closeErr := d.SQL.Close(); closeErr != nil && err == nil {
-			err = closeErr
-		}
-	}
-	return err
-}
-
-func (d *DB) migrate(ctx context.Context) error {
-	stmts := []string{
-		`CREATE TABLE IF NOT EXISTS sessions(
-			key TEXT PRIMARY KEY,
-			created_at INTEGER NOT NULL,
-			updated_at INTEGER NOT NULL,
-			metadata_json TEXT NOT NULL DEFAULT '{}',
-			last_consolidated_msg_id INTEGER NOT NULL DEFAULT 0
-		);`,
-		`CREATE TABLE IF NOT EXISTS messages(
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			session_key TEXT NOT NULL,
-			role TEXT NOT NULL,
-			content TEXT NOT NULL,
-			payload_json TEXT NOT NULL DEFAULT '{}',
-			created_at INTEGER NOT NULL,
-			FOREIGN KEY(session_key) REFERENCES sessions(key) ON DELETE CASCADE
-		);`,
-		`CREATE INDEX IF NOT EXISTS messages_session_id ON messages(session_key, id);`,
-		`CREATE TABLE IF NOT EXISTS artifacts(
-			id TEXT PRIMARY KEY,
-			session_key TEXT NOT NULL,
-			mime TEXT NOT NULL,
-			path TEXT NOT NULL,
-			size_bytes INTEGER NOT NULL,
-			created_at INTEGER NOT NULL,
-			FOREIGN KEY(session_key) REFERENCES sessions(key) ON DELETE CASCADE
-		);`,
-		`CREATE TABLE IF NOT EXISTS memory_pinned(
-			session_key TEXT NOT NULL DEFAULT '` + scope.GlobalMemoryScope + `',
-			key TEXT NOT NULL,
-			content TEXT NOT NULL,
-			updated_at INTEGER NOT NULL,
-			PRIMARY KEY(session_key, key)
-		);`,
-		`CREATE TABLE IF NOT EXISTS memory_notes(
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			session_key TEXT NOT NULL DEFAULT '` + scope.GlobalMemoryScope + `',
-			text TEXT NOT NULL,
-			embedding BLOB NOT NULL,
-			source_message_id INTEGER,
-			tags TEXT NOT NULL DEFAULT '',
-			created_at INTEGER NOT NULL
-		);`,
-		// FTS5
-		`CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(text, content='memory_notes', content_rowid='id');`,
-		`CREATE TRIGGER IF NOT EXISTS memory_notes_ai AFTER INSERT ON memory_notes BEGIN
-			INSERT INTO memory_fts(rowid, text) VALUES (new.id, new.text);
-		END;`,
-		`CREATE TRIGGER IF NOT EXISTS memory_notes_ad AFTER DELETE ON memory_notes BEGIN
-			INSERT INTO memory_fts(memory_fts, rowid, text) VALUES('delete', old.id, old.text);
-		END;`,
-		`CREATE TRIGGER IF NOT EXISTS memory_notes_au AFTER UPDATE ON memory_notes BEGIN
-			INSERT INTO memory_fts(memory_fts, rowid, text) VALUES('delete', old.id, old.text);
-			INSERT INTO memory_fts(rowid, text) VALUES (new.id, new.text);
-		END;`,
-		`CREATE TABLE IF NOT EXISTS subagent_jobs(
-			id TEXT PRIMARY KEY,
-			parent_session_key TEXT NOT NULL,
-			child_session_key TEXT NOT NULL,
-			channel TEXT NOT NULL,
-			reply_to TEXT NOT NULL,
-			task TEXT NOT NULL,
-			status TEXT NOT NULL,
-			result_preview TEXT NOT NULL DEFAULT '',
-			artifact_id TEXT NOT NULL DEFAULT '',
-			error_text TEXT NOT NULL DEFAULT '',
-			requested_at INTEGER NOT NULL,
-			started_at INTEGER NOT NULL DEFAULT 0,
-			finished_at INTEGER NOT NULL DEFAULT 0,
-			attempts INTEGER NOT NULL DEFAULT 0,
-			metadata_json TEXT NOT NULL DEFAULT '{}'
-		);`,
-		`CREATE INDEX IF NOT EXISTS subagent_jobs_status_requested_at ON subagent_jobs(status, requested_at);`,
-		`CREATE INDEX IF NOT EXISTS subagent_jobs_parent_session ON subagent_jobs(parent_session_key, requested_at);`,
-		`CREATE TABLE IF NOT EXISTS session_links(
-			session_key TEXT PRIMARY KEY,
-			scope_key TEXT NOT NULL,
-			linked_at INTEGER NOT NULL,
-			metadata_json TEXT NOT NULL DEFAULT '{}'
-		);`,
-		`CREATE INDEX IF NOT EXISTS session_links_scope_key ON session_links(scope_key);`,
-		`CREATE TABLE IF NOT EXISTS memory_docs(
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			scope_key TEXT NOT NULL,
-			path TEXT NOT NULL,
-			kind TEXT NOT NULL,
-			title TEXT NOT NULL DEFAULT '',
-			summary TEXT NOT NULL DEFAULT '',
-			text TEXT NOT NULL,
-			embedding BLOB,
-			hash TEXT NOT NULL,
-			mtime_ms INTEGER NOT NULL,
-			size_bytes INTEGER NOT NULL,
-			active INTEGER NOT NULL DEFAULT 1,
-			updated_at INTEGER NOT NULL,
-			UNIQUE(scope_key, path)
-		);`,
-		`CREATE INDEX IF NOT EXISTS memory_docs_scope_path ON memory_docs(scope_key, path);`,
-		`CREATE VIRTUAL TABLE IF NOT EXISTS memory_docs_fts USING fts5(title, summary, text, content='memory_docs', content_rowid='id');`,
-		`CREATE TRIGGER IF NOT EXISTS memory_docs_ai AFTER INSERT ON memory_docs BEGIN
-			INSERT INTO memory_docs_fts(rowid, title, summary, text) VALUES (new.id, new.title, new.summary, new.text);
-		END;`,
-		`CREATE TRIGGER IF NOT EXISTS memory_docs_ad AFTER DELETE ON memory_docs BEGIN
-			INSERT INTO memory_docs_fts(memory_docs_fts, rowid, title, summary, text) VALUES('delete', old.id, old.title, old.summary, old.text);
-		END;`,
-		`CREATE TRIGGER IF NOT EXISTS memory_docs_au AFTER UPDATE ON memory_docs BEGIN
-			INSERT INTO memory_docs_fts(memory_docs_fts, rowid, title, summary, text) VALUES('delete', old.id, old.title, old.summary, old.text);
-			INSERT INTO memory_docs_fts(rowid, title, summary, text) VALUES (new.id, new.title, new.summary, new.text);
-		END;`,
-		`CREATE TABLE IF NOT EXISTS memory_vec_meta(
-			id INTEGER PRIMARY KEY CHECK(id=1),
-			dims INTEGER NOT NULL DEFAULT 0,
-			updated_at INTEGER NOT NULL DEFAULT 0
-		);`,
-		`INSERT INTO memory_vec_meta(id, dims, updated_at)
-			VALUES(1, 0, 0)
-			ON CONFLICT(id) DO NOTHING;`,
-		`CREATE TABLE IF NOT EXISTS secrets(
-			name TEXT PRIMARY KEY,
-			ciphertext BLOB NOT NULL,
-			nonce BLOB NOT NULL,
-			version INTEGER NOT NULL DEFAULT 1,
-			key_version TEXT NOT NULL DEFAULT 'v1',
-			updated_at INTEGER NOT NULL
-		);`,
-		`CREATE TABLE IF NOT EXISTS audit_events(
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			event_type TEXT NOT NULL,
-			session_key TEXT NOT NULL DEFAULT '',
-			actor TEXT NOT NULL DEFAULT '',
-			payload_json TEXT NOT NULL DEFAULT '{}',
-			prev_hash BLOB NOT NULL,
-			record_hash BLOB NOT NULL,
-			created_at INTEGER NOT NULL
-		);`,
-		`CREATE INDEX IF NOT EXISTS audit_events_created_at ON audit_events(created_at);`,
-	}
-	for _, s := range stmts {
-		if _, err := d.SQL.ExecContext(ctx, s); err != nil {
-			return err
-		}
-	}
-	if err := d.migrateMemoryPinned(ctx); err != nil {
-		return err
-	}
-	if err := d.ensureMemoryNotesSessionColumn(ctx); err != nil {
-		return err
-	}
-	if err := d.migrateLegacyGlobalMemoryScope(ctx); err != nil {
-		return err
-	}
-	if err := d.ensureMemoryVecIndexForExisting(ctx); err != nil {
-		return err
-	}
-	return nil
-}
-
-func NowMS() int64 { return time.Now().UnixMilli() }
-
-func (d *DB) migrateMemoryPinned(ctx context.Context) error {
-	hasSession, err := d.tableHasColumn(ctx, "memory_pinned", "session_key")
-	if err != nil {
-		return err
-	}
-	if hasSession {
-		_, err = d.SQL.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS memory_pinned_session_key_key ON memory_pinned(session_key, key);`)
-		return err
-	}
-	stmts := []string{
-		`ALTER TABLE memory_pinned RENAME TO memory_pinned_legacy;`,
-		`CREATE TABLE memory_pinned(
-			session_key TEXT NOT NULL DEFAULT '` + scope.GlobalMemoryScope + `',
-			key TEXT NOT NULL,
-			content TEXT NOT NULL,
-			updated_at INTEGER NOT NULL,
-			PRIMARY KEY(session_key, key)
-		);`,
-		`INSERT INTO memory_pinned(session_key, key, content, updated_at)
-		 SELECT '` + scope.GlobalMemoryScope + `', key, content, updated_at FROM memory_pinned_legacy;`,
-		`DROP TABLE memory_pinned_legacy;`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS memory_pinned_session_key_key ON memory_pinned(session_key, key);`,
-	}
-	for _, stmt := range stmts {
-		if _, err := d.SQL.ExecContext(ctx, stmt); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (d *DB) ensureMemoryNotesSessionColumn(ctx context.Context) error {
-	hasSession, err := d.tableHasColumn(ctx, "memory_notes", "session_key")
-	if err != nil {
-		return err
-	}
-	if !hasSession {
-		if _, err := d.SQL.ExecContext(ctx, `ALTER TABLE memory_notes ADD COLUMN session_key TEXT NOT NULL DEFAULT '`+scope.GlobalMemoryScope+`';`); err != nil {
-			return err
-		}
-	}
-	_, err = d.SQL.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS memory_notes_session_id ON memory_notes(session_key, id);`)
-	return err
-}
-
-func (d *DB) migrateLegacyGlobalMemoryScope(ctx context.Context) error {
-	if scope.GlobalMemoryScope == scope.GlobalScopeAlias {
-		return nil
-	}
-	if _, err := d.SQL.ExecContext(ctx,
-		`INSERT INTO memory_pinned(session_key, key, content, updated_at)
-		 SELECT ?, key, content, updated_at FROM memory_pinned WHERE session_key=?
-		 ON CONFLICT(session_key, key) DO UPDATE SET content=excluded.content, updated_at=excluded.updated_at`,
-		scope.GlobalMemoryScope, scope.GlobalScopeAlias); err != nil {
-		return err
-	}
-	if _, err := d.SQL.ExecContext(ctx, `DELETE FROM memory_pinned WHERE session_key=?`, scope.GlobalScopeAlias); err != nil {
-		return err
-	}
-	_, err := d.SQL.ExecContext(ctx, `UPDATE memory_notes SET session_key=? WHERE session_key=?`, scope.GlobalMemoryScope, scope.GlobalScopeAlias)
-	if err != nil {
-		return err
-	}
-	if dims, derr := d.MemoryVectorDims(ctx); derr == nil && dims > 0 && d.VecSQL != nil {
-		_, err = d.VecSQL.ExecContext(ctx, `UPDATE memory_vec SET session_key=? WHERE session_key=?`, scope.GlobalMemoryScope, scope.GlobalScopeAlias)
-	}
-	return err
-}
-
-func (d *DB) ensureMemoryVecIndexForExisting(ctx context.Context) error {
-	dims, err := d.MemoryVectorDims(ctx)
-	if err != nil {
-		return err
-	}
-	if dims == 0 {
-		dims, err = d.firstMemoryVectorDim(ctx)
-		if err != nil {
-			return err
-		}
-	}
-	if dims <= 0 {
-		return nil
-	}
-	return d.initMemoryVecIndex(ctx, dims)
-}
-
-func (d *DB) MemoryVectorDims(ctx context.Context) (int, error) {
-	row := d.SQL.QueryRowContext(ctx, `SELECT dims FROM memory_vec_meta WHERE id=1`)
-	var dims int
-	if err := row.Scan(&dims); err != nil {
-		if err == sql.ErrNoRows {
-			return 0, nil
-		}
-		return 0, err
-	}
-	return dims, nil
-}
-
-func (d *DB) firstMemoryVectorDim(ctx context.Context) (int, error) {
-	row := d.SQL.QueryRowContext(ctx,
-		`SELECT COALESCE(length(embedding), 0)
-		 FROM memory_notes
-		 WHERE typeof(embedding)='blob' AND length(embedding) >= 4 AND (length(embedding) % 4)=0
-		 ORDER BY id ASC
-		 LIMIT 1`)
-	var bytes int
-	if err := row.Scan(&bytes); err != nil {
-		if err == sql.ErrNoRows {
-			return 0, nil
-		}
-		return 0, err
-	}
-	if bytes <= 0 {
-		return 0, nil
-	}
-	return bytes / 4, nil
-}
-
-func (d *DB) EnsureMemoryVecIndexWithDim(ctx context.Context, dims int) error {
-	if dims <= 0 {
-		return nil
-	}
-	existing, err := d.MemoryVectorDims(ctx)
-	if err != nil {
-		return err
-	}
-	if existing > 0 && existing != dims {
-		return nil
-	}
-	return d.initMemoryVecIndex(ctx, dims)
-}
-
-func (d *DB) initMemoryVecIndex(ctx context.Context, dims int) error {
-	if dims <= 0 {
-		return nil
-	}
-	if d == nil || d.VecSQL == nil {
-		return nil
-	}
-	tx, err := d.VecSQL.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
-	var existing int
-	if err := tx.QueryRowContext(ctx, `SELECT dims FROM memory_vec_meta WHERE id=1`).Scan(&existing); err != nil && err != sql.ErrNoRows {
-		return err
-	}
-	if existing > 0 && existing != dims {
-		return nil
-	}
-	if _, err := tx.ExecContext(ctx, `DROP TABLE IF EXISTS memory_vec`); err != nil {
-		return err
-	}
-	createSQL := fmt.Sprintf(`CREATE VIRTUAL TABLE memory_vec USING vec0(
-			note_id integer primary key,
-			session_key text partition key,
-			embedding float[%d] distance_metric=cosine,
-			+text text
-		)`, dims)
-	if _, err := tx.ExecContext(ctx, createSQL); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO memory_vec(note_id, session_key, embedding, text)
-		 SELECT id, session_key, embedding, text
-		 FROM memory_notes
-		 WHERE typeof(embedding)='blob' AND length(embedding)=?`, dims*4); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO memory_vec_meta(id, dims, updated_at)
-		 VALUES(1, ?, ?)
-		 ON CONFLICT(id) DO UPDATE SET dims=excluded.dims, updated_at=excluded.updated_at`,
-		dims, NowMS()); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
-func (d *DB) tableHasColumn(ctx context.Context, tableName, columnName string) (bool, error) {
-	rows, err := d.SQL.QueryContext(ctx, `PRAGMA table_info(`+tableName+`)`)
-	if err != nil {
-		return false, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var cid int
-		var name, ctype string
-		var notNull, pk int
-		var defaultValue any
-		if err := rows.Scan(&cid, &name, &ctype, &notNull, &defaultValue, &pk); err != nil {
-			return false, err
-		}
-		if name == columnName {
-			return true, nil
-		}
-	}
-	return false, rows.Err()
-}
-````
-
-## File: internal/skills/skills.go
-````go
-package skills
-
-import (
-	"crypto/sha1"
-	"encoding/hex"
-	"encoding/json"
-	"fmt"
-	"io/fs"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"runtime"
-	"sort"
-	"strings"
-	"time"
-
-	"or3-intern/internal/clawhub"
-
-	"gopkg.in/yaml.v3"
-)
-
-// SkillEntry describes a declared executable entrypoint from a skill manifest.
-type SkillEntry struct {
-	Name           string   `json:"name"`
-	Command        []string `json:"command"`
-	TimeoutSeconds int      `json:"timeoutSeconds"`
-	AcceptsStdin   bool     `json:"acceptsStdin"`
-}
-
-type Source string
-
-const (
-	SourceExtra     Source = "extra"
-	SourceBundled   Source = "bundled"
-	SourceManaged   Source = "managed"
-	SourceWorkspace Source = "workspace"
-)
-
-type Root struct {
-	Path     string
-	Source   Source
-	Label    string
-	Priority int
-}
-
-type EntryConfig struct {
-	Enabled *bool
-	APIKey  string
-	Env     map[string]string
-	Config  map[string]any
-}
-
-type LoadOptions struct {
-	Roots          []Root
-	Entries        map[string]EntryConfig
-	GlobalConfig   map[string]any
-	Env            map[string]string
-	AvailableTools map[string]struct{}
-	ApprovalPolicy ApprovalPolicy
-	OS             string
-}
-
-type ApprovalPolicy struct {
-	QuarantineByDefault bool
-	ApprovedSkills      map[string]struct{}
-	TrustedOwners       map[string]struct{}
-	BlockedOwners       map[string]struct{}
-	TrustedRegistries   map[string]struct{}
-}
-
-type SkillInstallSpec struct {
-	ID      string   `json:"id"`
-	Kind    string   `json:"kind"`
-	Label   string   `json:"label"`
-	Bins    []string `json:"bins"`
-	Formula string   `json:"formula"`
-	Tap     string   `json:"tap"`
-	Package string   `json:"package"`
-	Module  string   `json:"module"`
-	OS      []string `json:"os"`
-	URL     string   `json:"url"`
-}
-
-type NixPluginSpec struct {
-	Plugin  string   `json:"plugin"`
-	Systems []string `json:"systems"`
-}
-
-type SkillRequirements struct {
-	Bins    []string `json:"bins"`
-	AnyBins []string `json:"anyBins"`
-	Env     []string `json:"env"`
-	Config  []string `json:"config"`
-}
-
-type SkillRuntimeMeta struct {
-	Always     bool               `json:"always"`
-	SkillKey   string             `json:"skillKey"`
-	PrimaryEnv string             `json:"primaryEnv"`
-	Emoji      string             `json:"emoji"`
-	Homepage   string             `json:"homepage"`
-	OS         []string           `json:"os"`
-	Requires   SkillRequirements  `json:"requires"`
-	Install    []SkillInstallSpec `json:"install"`
-	Nix        *NixPluginSpec     `json:"nix"`
-}
-
-type SkillPermissions struct {
-	Shell        bool     `json:"shell" yaml:"shell"`
-	Network      bool     `json:"network" yaml:"network"`
-	Write        bool     `json:"write" yaml:"write"`
-	AllowedPaths []string `json:"paths" yaml:"paths"`
-	AllowedHosts []string `json:"hosts" yaml:"hosts"`
-}
-
-type SkillMeta struct {
-	Name        string
-	Description string
-	Homepage    string
-	Path        string
-	Dir         string
-	Location    string
-	Source      Source
-	ModTime     time.Time
-	Size        int64
-	ID          string
-	Summary     string
-	Entrypoints []SkillEntry
-
-	UserInvocable          bool
-	DisableModelInvocation bool
-	CommandDispatch        string
-	CommandTool            string
-	CommandArgMode         string
-
-	Metadata         SkillRuntimeMeta
-	Permissions      SkillPermissions
-	AllowedTools     []string
-	PermissionState  string
-	PermissionNotes  []string
-	Publisher        string
-	Registry         string
-	InstalledVersion string
-	Modified         bool
-	ScanStatus       string
-	ScanFindings     []string
-	Key              string
-	Eligible         bool
-	Disabled         bool
-	Hidden           bool
-	Missing          []string
-	Unsupported      []string
-	ParseError       string
-	RuntimeEnv       map[string]string
-
-	sourcePriority int
-	rootOrder      int
-}
-
-type Inventory struct {
-	Skills []SkillMeta
-	byName map[string]SkillMeta
-}
-
-type skillManifest struct {
-	Summary     string           `json:"summary"`
-	Entrypoints []SkillEntry     `json:"entrypoints"`
-	Tools       []string         `json:"tools"`
-	Permissions SkillPermissions `json:"permissions"`
-}
-
-type skillFrontMatter struct {
-	Name                   string           `yaml:"name"`
-	Description            string           `yaml:"description"`
-	Summary                string           `yaml:"summary"`
-	Homepage               string           `yaml:"homepage"`
-	UserInvocable          *bool            `yaml:"user-invocable"`
-	DisableModelInvocation bool             `yaml:"disable-model-invocation"`
-	CommandDispatch        string           `yaml:"command-dispatch"`
-	CommandTool            string           `yaml:"command-tool"`
-	CommandArgMode         string           `yaml:"command-arg-mode"`
-	Permissions            SkillPermissions `yaml:"permissions"`
-	Metadata               map[string]any   `yaml:"metadata"`
-}
-
-func defaultPriority(source Source) int {
-	switch source {
-	case SourceWorkspace:
-		return 40
-	case SourceManaged:
-		return 30
-	case SourceBundled:
-		return 20
-	default:
-		return 10
-	}
-}
-
-// Scan keeps the old simple API for tests and callers that only provide directories.
-func Scan(dirs []string) Inventory {
-	roots := make([]Root, 0, len(dirs))
-	for i, dir := range dirs {
-		roots = append(roots, Root{
-			Path:     dir,
-			Source:   SourceExtra,
-			Label:    dir,
-			Priority: i + 1,
-		})
-	}
-	return ScanWithOptions(LoadOptions{Roots: roots})
-}
-
-func ScanWithOptions(opts LoadOptions) Inventory {
-	if len(opts.Env) == 0 {
-		opts.Env = envMap(os.Environ())
-	}
-	if strings.TrimSpace(opts.OS) == "" {
-		opts.OS = runtime.GOOS
-	}
-
-	metaByName := map[string]SkillMeta{}
-	for i, root := range opts.Roots {
-		root = normalizeRoot(root)
-		if strings.TrimSpace(root.Path) == "" {
-			continue
-		}
-		absRoot, err := filepath.Abs(root.Path)
-		if err != nil {
-			continue
-		}
-		realRoot, err := filepath.EvalSymlinks(absRoot)
-		if err != nil {
-			continue
-		}
-		scanSkillDir(metaByName, realRoot, root, i, opts)
-		_ = filepath.WalkDir(realRoot, func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return nil
-			}
-			if d.Type()&os.ModeSymlink != 0 {
-				return nil
-			}
-			if !d.IsDir() {
-				return nil
-			}
-			if path == realRoot {
-				return nil
-			}
-			realPath, err := filepath.EvalSymlinks(path)
-			if err != nil {
-				return filepath.SkipDir
-			}
-			rel, err := filepath.Rel(realRoot, realPath)
-			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-				return filepath.SkipDir
-			}
-			if scanSkillDir(metaByName, realPath, root, i, opts) {
-				return filepath.SkipDir
-			}
-			return nil
-		})
-	}
-
-	skills := make([]SkillMeta, 0, len(metaByName))
-	for _, s := range metaByName {
-		skills = append(skills, s)
-	}
-	sort.Slice(skills, func(i, j int) bool {
-		if skills[i].Name == skills[j].Name {
-			if skills[i].sourcePriority == skills[j].sourcePriority {
-				return skills[i].Path < skills[j].Path
-			}
-			return skills[i].sourcePriority > skills[j].sourcePriority
-		}
-		return strings.ToLower(skills[i].Name) < strings.ToLower(skills[j].Name)
-	})
-	by := make(map[string]SkillMeta, len(skills))
-	for _, s := range skills {
-		by[s.Name] = s
-		by[strings.ToLower(s.Name)] = s
-	}
-	return Inventory{Skills: skills, byName: by}
-}
-
-func normalizeRoot(root Root) Root {
-	if strings.TrimSpace(root.Label) == "" {
-		root.Label = string(root.Source)
-	}
-	if root.Priority == 0 {
-		root.Priority = defaultPriority(root.Source)
-	}
-	return root
-}
-
-func scanSkillDir(metaByName map[string]SkillMeta, dir string, root Root, order int, opts LoadOptions) bool {
-	skillPath, ok := skillFileInDir(dir)
-	if !ok {
-		return false
-	}
-	meta := loadSkill(dir, skillPath, root, order, opts)
-	current, exists := metaByName[meta.Name]
-	if !exists || shouldOverride(current, meta) {
-		metaByName[meta.Name] = meta
-	}
-	return true
-}
-
-func shouldOverride(current SkillMeta, candidate SkillMeta) bool {
-	if candidate.sourcePriority != current.sourcePriority {
-		return candidate.sourcePriority > current.sourcePriority
-	}
-	if candidate.rootOrder != current.rootOrder {
-		return candidate.rootOrder > current.rootOrder
-	}
-	return candidate.Path > current.Path
-}
-
-func skillFileInDir(dir string) (string, bool) {
-	for _, name := range []string{"SKILL.md", "skill.md"} {
-		path := filepath.Join(dir, name)
-		info, err := os.Lstat(path)
-		if err != nil {
-			continue
-		}
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			continue
-		}
-		return path, true
-	}
-	return "", false
-}
-
-func loadSkill(dir, path string, root Root, order int, opts LoadOptions) SkillMeta {
-	info, _ := os.Stat(path)
-	meta := SkillMeta{
-		Name:           filepath.Base(dir),
-		Path:           path,
-		Dir:            dir,
-		Location:       dir,
-		Source:         root.Source,
-		ID:             hash(path),
-		UserInvocable:  true,
-		CommandArgMode: "raw",
-		sourcePriority: root.Priority,
-		rootOrder:      order,
-	}
-	if info != nil {
-		meta.ModTime = info.ModTime()
-		meta.Size = info.Size()
-	}
-
-	body, err := LoadBody(path, 0)
-	if err != nil {
-		meta.ParseError = err.Error()
-		meta.Hidden = true
-		applyApprovalPolicy(&meta, opts.ApprovalPolicy)
-		return meta
-	}
-	fm, rawTop, err := parseFrontMatter(body)
-	if err != nil {
-		meta.ParseError = err.Error()
-		meta.Hidden = true
-		applyApprovalPolicy(&meta, opts.ApprovalPolicy)
-		return meta
-	}
-	if strings.TrimSpace(fm.Name) != "" {
-		meta.Name = strings.TrimSpace(fm.Name)
-	}
-	meta.Description = strings.TrimSpace(firstNonEmpty(fm.Description, fm.Summary))
-	meta.Summary = meta.Description
-	meta.Homepage = strings.TrimSpace(fm.Homepage)
-	if fm.UserInvocable != nil {
-		meta.UserInvocable = *fm.UserInvocable
-	}
-	meta.DisableModelInvocation = fm.DisableModelInvocation
-	meta.Hidden = meta.DisableModelInvocation
-	meta.CommandDispatch = strings.TrimSpace(fm.CommandDispatch)
-	meta.CommandTool = strings.TrimSpace(fm.CommandTool)
-	if strings.TrimSpace(fm.CommandArgMode) != "" {
-		meta.CommandArgMode = strings.TrimSpace(fm.CommandArgMode)
-	}
-	meta.Permissions = normalizeSkillPermissions(fm.Permissions)
-	declaredTools, _ := parseDeclaredTools(rawTop["tools"])
-	meta.AllowedTools = declaredTools
-
-	manifest, err := loadManifest(dir)
-	if err != nil {
-		meta.ParseError = err.Error()
-		meta.Hidden = true
-	} else if len(manifest.Entrypoints) > 0 || len(manifest.Tools) > 0 || manifest.Permissions.Requested() || strings.TrimSpace(manifest.Summary) != "" {
-		meta.Entrypoints = manifest.Entrypoints
-		meta.AllowedTools = mergeStringLists(meta.AllowedTools, compactStrings(manifest.Tools))
-		if requested := normalizeSkillPermissions(manifest.Permissions); requested.Requested() {
-			meta.Permissions = requested
-		}
-		if strings.TrimSpace(manifest.Summary) != "" {
-			meta.Summary = strings.TrimSpace(manifest.Summary)
-		}
-		if meta.Description == "" {
-			meta.Summary = strings.TrimSpace(manifest.Summary)
-			meta.Description = meta.Summary
-		}
-	}
-
-	runtimeMeta, ok := normalizeRuntimeMetadata(fm.Metadata)
-	if ok {
-		meta.Metadata = runtimeMeta
-	}
-	if meta.Homepage == "" {
-		meta.Homepage = strings.TrimSpace(meta.Metadata.Homepage)
-	}
-	if meta.Key == "" {
-		meta.Key = strings.TrimSpace(firstNonEmpty(meta.Metadata.SkillKey, meta.Name))
-	}
-	entry := entryConfigForSkill(opts.Entries, meta)
-	meta.RuntimeEnv = buildRuntimeEnv(meta, entry, opts.Env)
-	applyOriginMetadata(&meta)
-	applyEligibility(&meta, rawTop, body, entry, opts)
-	applyApprovalPolicy(&meta, opts.ApprovalPolicy)
-	return meta
-}
-
-func applyOriginMetadata(meta *SkillMeta) {
-	if meta == nil || strings.TrimSpace(meta.Dir) == "" {
-		return
-	}
-	origin, err := clawhub.ReadOrigin(meta.Dir)
-	if err != nil {
-		if meta.Source == SourceManaged {
-			meta.PermissionNotes = append(meta.PermissionNotes, "managed skill missing origin metadata")
-		}
-		return
-	}
-	meta.Publisher = strings.TrimSpace(origin.Owner)
-	meta.Registry = strings.TrimSpace(origin.Registry)
-	meta.InstalledVersion = strings.TrimSpace(origin.InstalledVersion)
-	meta.ScanStatus = normalizeSupplyChainValue(origin.ScanStatus)
-	for _, finding := range origin.ScanFindings {
-		if summary := strings.TrimSpace(finding.Summary()); summary != "" {
-			meta.ScanFindings = append(meta.ScanFindings, summary)
-		}
-	}
-	if modified, modErr := clawhub.LocalEdits(meta.Dir); modErr == nil {
-		meta.Modified = modified
-	}
-}
-
-func normalizeSkillPermissions(raw SkillPermissions) SkillPermissions {
-	raw.AllowedPaths = compactStrings(raw.AllowedPaths)
-	raw.AllowedHosts = compactStrings(raw.AllowedHosts)
-	return raw
-}
-
-func (p SkillPermissions) Requested() bool {
-	return p.Shell || p.Network || p.Write || len(p.AllowedPaths) > 0 || len(p.AllowedHosts) > 0
-}
-
-func parseDeclaredTools(raw any) ([]string, bool) {
-	switch value := raw.(type) {
-	case nil:
-		return nil, true
-	case []string:
-		return compactStrings(value), true
-	case []any:
-		out := make([]string, 0, len(value))
-		for _, item := range value {
-			name, ok := item.(string)
-			if !ok {
-				return nil, false
-			}
-			name = strings.TrimSpace(name)
-			if name == "" {
-				continue
-			}
-			out = append(out, name)
-		}
-		return compactStrings(out), true
-	default:
-		return nil, false
-	}
-}
-
-func (p SkillPermissions) Summary() string {
-	parts := make([]string, 0, 5)
-	if p.Shell {
-		parts = append(parts, "shell")
-	}
-	if p.Network {
-		parts = append(parts, "network")
-	}
-	if p.Write {
-		parts = append(parts, "write")
-	}
-	if len(p.AllowedPaths) > 0 {
-		parts = append(parts, "paths="+strings.Join(p.AllowedPaths, ","))
-	}
-	if len(p.AllowedHosts) > 0 {
-		parts = append(parts, "hosts="+strings.Join(p.AllowedHosts, ","))
-	}
-	if len(parts) == 0 {
-		return "(none declared)"
-	}
-	return strings.Join(parts, "; ")
-}
-
-func applyApprovalPolicy(meta *SkillMeta, policy ApprovalPolicy) {
-	if meta == nil {
-		return
-	}
-	if meta.ParseError != "" {
-		meta.PermissionState = "blocked"
-		meta.PermissionNotes = append(meta.PermissionNotes, "metadata parse failed")
-		return
-	}
-	if ownerBlocked(meta, policy.BlockedOwners) {
-		meta.PermissionState = "blocked"
-		meta.PermissionNotes = append(meta.PermissionNotes, "publisher blocked by policy: "+meta.Publisher)
-		return
-	}
-	if strings.EqualFold(meta.ScanStatus, "blocked") {
-		meta.PermissionState = "blocked"
-		meta.PermissionNotes = append(meta.PermissionNotes, "install-time scan blocked this bundle")
-		meta.PermissionNotes = append(meta.PermissionNotes, meta.ScanFindings...)
-		return
-	}
-	if meta.Modified {
-		meta.PermissionState = "quarantined"
-		meta.PermissionNotes = append(meta.PermissionNotes, "local modifications detected since install")
-		return
-	}
-	if strings.EqualFold(meta.ScanStatus, "quarantined") {
-		meta.PermissionState = "quarantined"
-		meta.PermissionNotes = append(meta.PermissionNotes, "install-time scan flagged this bundle for review")
-		meta.PermissionNotes = append(meta.PermissionNotes, meta.ScanFindings...)
-		return
-	}
-	trustedPublisher := publisherTrusted(meta, policy)
-	if skillApproved(meta, policy.ApprovedSkills) || trustedPublisher {
-		meta.PermissionState = "approved"
-		if trustedPublisher {
-			meta.PermissionNotes = append(meta.PermissionNotes, "approved by trusted publisher policy")
-		} else {
-			meta.PermissionNotes = append(meta.PermissionNotes, "approved in config")
-		}
-		return
-	}
-	if meta.Source == SourceManaged && skillNeedsApproval(meta) {
-		if strings.TrimSpace(meta.Registry) == "" || strings.TrimSpace(meta.Publisher) == "" {
-			meta.PermissionState = "quarantined"
-			meta.PermissionNotes = append(meta.PermissionNotes, "managed skill is missing trusted origin details")
-			return
-		}
-		if len(policy.TrustedOwners) > 0 || len(policy.TrustedRegistries) > 0 {
-			meta.PermissionState = "quarantined"
-			meta.PermissionNotes = append(meta.PermissionNotes, "publisher or registry is not trusted by policy")
-			return
-		}
-	}
-	if skillNeedsApproval(meta) {
-		meta.PermissionState = "quarantined"
-		meta.PermissionNotes = append(meta.PermissionNotes, "operator approval required before script execution")
-		return
-	}
-	meta.PermissionState = "approved"
-}
-
-func ownerBlocked(meta *SkillMeta, blocked map[string]struct{}) bool {
-	if meta == nil || len(blocked) == 0 {
-		return false
-	}
-	_, ok := blocked[normalizeSupplyChainValue(meta.Publisher)]
-	return ok
-}
-
-func publisherTrusted(meta *SkillMeta, policy ApprovalPolicy) bool {
-	if meta == nil {
-		return false
-	}
-	anyPolicy := len(policy.TrustedOwners) > 0 || len(policy.TrustedRegistries) > 0
-	if !anyPolicy {
-		return false
-	}
-	if len(policy.TrustedOwners) > 0 {
-		if _, ok := policy.TrustedOwners[normalizeSupplyChainValue(meta.Publisher)]; !ok {
-			return false
-		}
-	}
-	if len(policy.TrustedRegistries) > 0 {
-		if _, ok := policy.TrustedRegistries[normalizeSupplyChainValue(meta.Registry)]; !ok {
-			return false
-		}
-	}
-	return true
-}
-
-func normalizeSupplyChainValue(value string) string {
-	value = strings.TrimSpace(strings.ToLower(value))
-	value = strings.TrimRight(value, "/")
-	return value
-}
-
-func skillNeedsApproval(meta *SkillMeta) bool {
-	if meta == nil {
-		return false
-	}
-	if meta.Permissions.Requested() || len(meta.Entrypoints) > 0 {
-		return true
-	}
-	return skillHasRunnableContent(meta.Dir)
-}
-
-func skillApproved(meta *SkillMeta, approved map[string]struct{}) bool {
-	if meta == nil || len(approved) == 0 {
-		return false
-	}
-	for _, key := range []string{meta.Name, meta.Key, strings.ToLower(meta.Name), strings.ToLower(meta.Key)} {
-		if _, ok := approved[key]; ok {
-			return true
-		}
-	}
-	return false
-}
-
-func loadManifest(dir string) (skillManifest, error) {
-	data, err := os.ReadFile(filepath.Join(dir, "skill.json"))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return skillManifest{}, nil
-		}
-		return skillManifest{}, err
-	}
-	var m skillManifest
-	if err := json.Unmarshal(data, &m); err != nil {
-		return skillManifest{}, fmt.Errorf("invalid skill manifest: %w", err)
-	}
-	return m, nil
-}
-
-func parseFrontMatter(content string) (skillFrontMatter, map[string]any, error) {
-	block, ok, err := frontMatterBlock(content)
-	if err != nil {
-		return skillFrontMatter{}, nil, err
-	}
-	if !ok {
-		return skillFrontMatter{}, map[string]any{}, nil
-	}
-	var raw map[string]any
-	if err := yaml.Unmarshal([]byte(block), &raw); err != nil {
-		return skillFrontMatter{}, nil, fmt.Errorf("invalid frontmatter: %w", err)
-	}
-	raw = toStringMap(raw)
-	var fm skillFrontMatter
-	if err := yaml.Unmarshal([]byte(block), &fm); err != nil {
-		return skillFrontMatter{}, nil, fmt.Errorf("invalid frontmatter: %w", err)
-	}
-	fm.Metadata = toStringMap(fm.Metadata)
-	return fm, raw, nil
-}
-
-func frontMatterBlock(content string) (string, bool, error) {
-	content = strings.ReplaceAll(content, "\r\n", "\n")
-	if !strings.HasPrefix(content, "---\n") {
-		return "", false, nil
-	}
-	rest := content[len("---\n"):]
-	end := strings.Index(rest, "\n---")
-	if end < 0 {
-		return "", false, fmt.Errorf("invalid frontmatter: missing closing delimiter")
-	}
-	block := rest[:end]
-	return block, true, nil
-}
-
-func extractFrontMatterSummary(content string) string {
-	fm, _, err := parseFrontMatter(content)
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(firstNonEmpty(fm.Summary, fm.Description))
-}
-
-func normalizeRuntimeMetadata(raw map[string]any) (SkillRuntimeMeta, bool) {
-	if len(raw) == 0 {
-		return SkillRuntimeMeta{}, false
-	}
-	var selected any
-	for _, key := range []string{"openclaw", "clawdbot", "clawdis"} {
-		if value, ok := raw[key]; ok {
-			selected = value
-			break
-		}
-	}
-	if selected == nil {
-		return SkillRuntimeMeta{}, false
-	}
-	buf, err := json.Marshal(toStringMap(selected))
-	if err != nil {
-		return SkillRuntimeMeta{}, false
-	}
-	var meta SkillRuntimeMeta
-	if err := json.Unmarshal(buf, &meta); err != nil {
-		return SkillRuntimeMeta{}, false
-	}
-	return meta, true
-}
-
-func applyEligibility(meta *SkillMeta, rawTop map[string]any, body string, entry EntryConfig, opts LoadOptions) {
-	if meta == nil {
-		return
-	}
-	if meta.ParseError != "" {
-		meta.Eligible = false
-		return
-	}
-	meta.Disabled = entry.Enabled != nil && !*entry.Enabled
-	if meta.Disabled {
-		meta.Missing = append(meta.Missing, "disabled in config")
-	}
-	meta.Unsupported = append(meta.Unsupported, detectUnsupported(*meta, rawTop, body, opts)...)
-	if meta.Metadata.Always && !meta.Disabled && len(meta.Unsupported) == 0 {
-		meta.Eligible = true
-		return
-	}
-	if len(meta.Metadata.OS) > 0 && !containsFold(meta.Metadata.OS, opts.OS) {
-		meta.Missing = append(meta.Missing, fmt.Sprintf("os mismatch: requires %s", strings.Join(meta.Metadata.OS, ", ")))
-	}
-	for _, bin := range meta.Metadata.Requires.Bins {
-		if !hasBinary(bin) {
-			meta.Missing = append(meta.Missing, "missing binary: "+bin)
-		}
-	}
-	if len(meta.Metadata.Requires.AnyBins) > 0 {
-		ok := false
-		for _, bin := range meta.Metadata.Requires.AnyBins {
-			if hasBinary(bin) {
-				ok = true
-				break
-			}
-		}
-		if !ok {
-			meta.Missing = append(meta.Missing, "missing any-of binary: "+strings.Join(meta.Metadata.Requires.AnyBins, ", "))
-		}
-	}
-	for _, envName := range meta.Metadata.Requires.Env {
-		if strings.TrimSpace(meta.RuntimeEnv[envName]) == "" {
-			meta.Missing = append(meta.Missing, "missing env: "+envName)
-		}
-	}
-	for _, key := range meta.Metadata.Requires.Config {
-		if !configTruthy(opts.GlobalConfig, entry.Config, key) {
-			meta.Missing = append(meta.Missing, "missing config: "+key)
-		}
-	}
-	meta.Eligible = !meta.Disabled && len(meta.Missing) == 0 && len(meta.Unsupported) == 0
-}
-
-func detectUnsupported(meta SkillMeta, rawTop map[string]any, body string, opts LoadOptions) []string {
-	var unsupported []string
-	if _, ok := rawTop["tools"]; ok {
-		if _, valid := parseDeclaredTools(rawTop["tools"]); !valid {
-			unsupported = append(unsupported, "frontmatter tools must be a list of string tool names")
-		}
-	}
-	if meta.Metadata.Nix != nil && strings.TrimSpace(meta.Metadata.Nix.Plugin) != "" {
-		unsupported = append(unsupported, "requires nix plugin: "+meta.Metadata.Nix.Plugin)
-	}
-	for _, toolName := range meta.AllowedTools {
-		if len(opts.AvailableTools) == 0 {
-			continue
-		}
-		if _, ok := opts.AvailableTools[toolName]; !ok {
-			unsupported = append(unsupported, "requires unsupported tool: "+toolName)
-		}
-	}
-	if meta.CommandDispatch != "" && meta.CommandDispatch != "tool" {
-		unsupported = append(unsupported, "unsupported command-dispatch: "+meta.CommandDispatch)
-	}
-	if meta.CommandDispatch == "tool" {
-		if meta.CommandTool == "" {
-			unsupported = append(unsupported, "command-dispatch tool requires command-tool")
-		} else if len(opts.AvailableTools) > 0 {
-			if _, ok := opts.AvailableTools[meta.CommandTool]; !ok {
-				unsupported = append(unsupported, "requires unsupported tool: "+meta.CommandTool)
-			}
-		}
-	}
-	if strings.Contains(body, "nodes.run") {
-		unsupported = append(unsupported, "requires unsupported tool: nodes.run")
-	}
-	return unsupported
-}
-
-func mergeStringLists(base []string, extra []string) []string {
-	out := append([]string{}, compactStrings(base)...)
-	seen := map[string]struct{}{}
-	for _, item := range out {
-		seen[item] = struct{}{}
-	}
-	for _, item := range compactStrings(extra) {
-		if _, ok := seen[item]; ok {
-			continue
-		}
-		seen[item] = struct{}{}
-		out = append(out, item)
-	}
-	return out
-}
-
-func buildRuntimeEnv(meta SkillMeta, entry EntryConfig, baseEnv map[string]string) map[string]string {
-	out := copyMap(baseEnv)
-	for k, v := range entry.Env {
-		if strings.TrimSpace(k) == "" || strings.TrimSpace(v) == "" {
-			continue
-		}
-		if strings.TrimSpace(out[k]) == "" {
-			out[k] = v
-		}
-	}
-	if meta.Metadata.PrimaryEnv != "" && strings.TrimSpace(entry.APIKey) != "" && strings.TrimSpace(out[meta.Metadata.PrimaryEnv]) == "" {
-		out[meta.Metadata.PrimaryEnv] = entry.APIKey
-	}
-	return out
-}
-
-func entryConfigForSkill(entries map[string]EntryConfig, meta SkillMeta) EntryConfig {
-	if len(entries) == 0 {
-		return EntryConfig{}
-	}
-	if entry, ok := entries[meta.Key]; ok {
-		return entry
-	}
-	return entries[meta.Name]
-}
-
-func (inv Inventory) Get(name string) (SkillMeta, bool) {
-	if strings.TrimSpace(name) == "" {
-		return SkillMeta{}, false
-	}
-	if s, ok := inv.byName[name]; ok {
-		return s, true
-	}
-	s, ok := inv.byName[strings.ToLower(name)]
-	return s, ok
-}
-
-func (inv Inventory) Summary(max int) string {
-	return summarize(inv.Skills, max)
-}
-
-func (inv Inventory) ModelSummary(max int) string {
-	filtered := make([]SkillMeta, 0, len(inv.Skills))
-	for _, skill := range inv.Skills {
-		if !skill.Eligible || skill.Hidden {
-			continue
-		}
-		filtered = append(filtered, skill)
-	}
-	if len(filtered) == 0 {
-		return "(no eligible skills found)"
-	}
-	if max <= 0 {
-		max = 50
-	}
-	lines := make([]string, 0, min(len(filtered), max)+1)
-	for i, skill := range filtered {
-		if i >= max {
-			lines = append(lines, "…")
-			break
-		}
-		desc := strings.TrimSpace(skill.Description)
-		if desc == "" {
-			desc = strings.TrimSpace(skill.Summary)
-		}
-		location := strings.TrimSpace(skill.Location)
-		if location == "" {
-			location = skill.Dir
-		}
-		lines = append(lines, fmt.Sprintf("- %s | %s | %s", skill.Name, oneLine(desc, 140), location))
-	}
-	return strings.Join(lines, "\n")
-}
-
-func summarize(skills []SkillMeta, max int) string {
-	if max <= 0 {
-		max = 50
-	}
-	lines := []string{}
-	for i, s := range skills {
-		if i >= max {
-			lines = append(lines, "…")
-			break
-		}
-		desc := strings.TrimSpace(firstNonEmpty(s.Description, s.Summary))
-		if desc == "" {
-			lines = append(lines, "- "+s.Name)
-			continue
-		}
-		lines = append(lines, "- "+s.Name+": "+oneLine(desc, 140))
-	}
-	if len(lines) == 0 {
-		return "(no skills found)"
-	}
-	return strings.Join(lines, "\n")
-}
-
-func (inv Inventory) RunEnv() map[string]string {
-	out := map[string]string{}
-	for _, skill := range inv.Skills {
-		if !skill.Eligible {
-			continue
-		}
-		for k, v := range filteredRuntimeEnv(skill.RuntimeEnv) {
-			if _, exists := out[k]; !exists {
-				out[k] = v
-			}
-		}
-	}
-	return out
-}
-
-func (inv Inventory) RunEnvForSkill(name string) map[string]string {
-	skill, ok := inv.Get(name)
-	if !ok || !skill.Eligible {
-		return nil
-	}
-	return filteredRuntimeEnv(skill.RuntimeEnv)
-}
-
-func (inv Inventory) ResolveBundlePath(name, relPath string) (string, error) {
-	skill, ok := inv.Get(name)
-	if !ok {
-		return "", fmt.Errorf("skill not found: %s", name)
-	}
-	relPath = strings.TrimSpace(relPath)
-	if relPath == "" {
-		return skill.Dir, nil
-	}
-	if filepath.IsAbs(relPath) {
-		return "", fmt.Errorf("bundle path must be relative")
-	}
-	root, err := filepath.EvalSymlinks(skill.Dir)
-	if err != nil {
-		return "", err
-	}
-	full := filepath.Join(root, relPath)
-	clean := filepath.Clean(full)
-	real, err := filepath.EvalSymlinks(clean)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			return "", err
-		}
-		real = clean
-	}
-	rel, err := filepath.Rel(root, real)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fs.ErrPermission
-	}
-	return real, nil
-}
-
-func LoadBody(path string, maxBytes int) (string, error) {
-	if maxBytes <= 0 {
-		maxBytes = 200000
-	}
-	info, err := os.Lstat(path)
-	if err != nil {
-		return "", err
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return "", fs.ErrPermission
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-	if len(b) > maxBytes {
-		b = b[:maxBytes]
-	}
-	return string(b), nil
-}
-
-func hash(s string) string {
-	h := sha1.Sum([]byte(s))
-	return hex.EncodeToString(h[:8])
-}
-
-func hasBinary(name string) bool {
-	if strings.TrimSpace(name) == "" {
-		return false
-	}
-	_, err := exec.LookPath(name)
-	return err == nil
-}
-
-func configTruthy(global map[string]any, skill map[string]any, path string) bool {
-	if truthy(lookupPath(global, path)) {
-		return true
-	}
-	return truthy(lookupPath(skill, path))
-}
-
-func lookupPath(root map[string]any, path string) any {
-	if len(root) == 0 || strings.TrimSpace(path) == "" {
-		return nil
-	}
-	var current any = root
-	for _, part := range strings.Split(path, ".") {
-		m, ok := current.(map[string]any)
-		if !ok {
-			return nil
-		}
-		current, ok = m[part]
-		if !ok {
-			return nil
-		}
-	}
-	return current
-}
-
-func truthy(v any) bool {
-	switch val := v.(type) {
-	case nil:
-		return false
-	case bool:
-		return val
-	case string:
-		return strings.TrimSpace(val) != ""
-	case float64:
-		return val != 0
-	case int:
-		return val != 0
-	case []any:
-		return len(val) > 0
-	case map[string]any:
-		return len(val) > 0
-	default:
-		return true
-	}
-}
-
-func envMap(values []string) map[string]string {
-	out := make(map[string]string, len(values))
-	for _, raw := range values {
-		key, value, ok := strings.Cut(raw, "=")
-		if !ok {
-			continue
-		}
-		out[key] = value
-	}
-	return out
-}
-
-func toStringMap(v any) map[string]any {
-	switch val := v.(type) {
-	case map[string]any:
-		out := make(map[string]any, len(val))
-		for k, child := range val {
-			out[k] = normalizeValue(child)
-		}
-		return out
-	case map[any]any:
-		out := make(map[string]any, len(val))
-		for k, child := range val {
-			out[fmt.Sprint(k)] = normalizeValue(child)
-		}
-		return out
-	default:
-		return map[string]any{}
-	}
-}
-
-func normalizeValue(v any) any {
-	switch val := v.(type) {
-	case map[string]any, map[any]any:
-		return toStringMap(val)
-	case []any:
-		out := make([]any, 0, len(val))
-		for _, item := range val {
-			out = append(out, normalizeValue(item))
-		}
-		return out
-	default:
-		return v
-	}
-}
-
-func copyMap(in map[string]string) map[string]string {
-	out := make(map[string]string, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
-	return out
-}
-
-func filteredRuntimeEnv(env map[string]string) map[string]string {
-	out := map[string]string{}
-	for k, v := range env {
-		if strings.TrimSpace(k) == "" || strings.TrimSpace(v) == "" {
-			continue
-		}
-		if strings.TrimSpace(os.Getenv(k)) != "" {
-			continue
-		}
-		out[k] = v
-	}
-	return out
-}
-
-func compactStrings(values []string) []string {
-	out := make([]string, 0, len(values))
-	seen := map[string]struct{}{}
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
-		}
-		key := strings.ToLower(value)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		out = append(out, value)
-	}
-	return out
-}
-
-func skillHasRunnableContent(dir string) bool {
-	if strings.TrimSpace(dir) == "" {
-		return false
-	}
-	found := false
-	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || found {
-			return fs.SkipAll
-		}
-		if path == dir {
-			return nil
-		}
-		if d.Type()&os.ModeSymlink != 0 {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if d.IsDir() {
-			return nil
-		}
-		name := strings.ToLower(strings.TrimSpace(d.Name()))
-		if name == "skill.md" || name == "skill.json" {
-			return nil
-		}
-		info, infoErr := d.Info()
-		if infoErr != nil || !info.Mode().IsRegular() {
-			return nil
-		}
-		ext := strings.ToLower(filepath.Ext(name))
-		if info.Mode()&0o111 != 0 || ext == ".sh" || ext == ".py" {
-			found = true
-			return fs.SkipAll
-		}
-		return nil
-	})
-	return found
-}
-
-func containsFold(values []string, target string) bool {
-	for _, value := range values {
-		if strings.EqualFold(strings.TrimSpace(value), strings.TrimSpace(target)) {
-			return true
-		}
-	}
-	return false
-}
-
-func oneLine(s string, max int) string {
-	s = strings.ReplaceAll(s, "\n", " ")
-	s = strings.Join(strings.Fields(s), " ")
-	if max > 0 && len(s) > max {
-		s = s[:max] + "…"
-	}
-	return s
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-````
-
 ## File: internal/agent/prompt.go
 ````go
 package agent
@@ -19577,6 +19149,1677 @@ func cachedEmbed(ctx context.Context, provider *providers.Client, model, input s
 }
 ````
 
+## File: internal/db/db.go
+````go
+// Package db opens and migrates the SQLite stores used by or3-intern.
+package db
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"sync"
+	"time"
+
+	"or3-intern/internal/scope"
+
+	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
+	_ "github.com/mattn/go-sqlite3"
+
+	_ "modernc.org/sqlite"
+)
+
+var sqliteVecAutoOnce sync.Once
+
+// DB holds the primary SQL connection and the sqlite-vec connection.
+type DB struct {
+	SQL     *sql.DB
+	VecSQL  *sql.DB
+	auditMu sync.Mutex
+}
+
+// Open opens path, configures both SQLite drivers, and runs migrations.
+func Open(path string) (*DB, error) {
+	primaryDSN := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)", path)
+	s, err := sql.Open("sqlite", primaryDSN)
+	if err != nil {
+		return nil, err
+	}
+	s.SetMaxOpenConns(4)
+	s.SetMaxIdleConns(4)
+
+	sqliteVecAutoOnce.Do(sqlite_vec.Auto)
+	vecDSN := fmt.Sprintf("file:%s?_busy_timeout=5000&_journal=WAL&_sync=NORMAL&_fk=1", path)
+	vec, err := sql.Open("sqlite3", vecDSN)
+	if err != nil {
+		_ = s.Close()
+		return nil, err
+	}
+	vec.SetMaxOpenConns(2)
+	vec.SetMaxIdleConns(2)
+
+	d := &DB{SQL: s, VecSQL: vec}
+	if err := d.migrate(context.Background()); err != nil {
+		_ = vec.Close()
+		_ = s.Close()
+		return nil, err
+	}
+	return d, nil
+}
+
+// Close closes both database handles and returns the first close error.
+func (d *DB) Close() error {
+	if d == nil {
+		return nil
+	}
+	var firstErr error
+	if d.VecSQL != nil {
+		if closeErr := d.VecSQL.Close(); closeErr != nil {
+			firstErr = closeErr
+		}
+	}
+	if d.SQL != nil {
+		if closeErr := d.SQL.Close(); closeErr != nil && firstErr == nil {
+			firstErr = closeErr
+		}
+	}
+	return firstErr
+}
+
+func (d *DB) migrate(ctx context.Context) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS sessions(
+			key TEXT PRIMARY KEY,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			metadata_json TEXT NOT NULL DEFAULT '{}',
+			last_consolidated_msg_id INTEGER NOT NULL DEFAULT 0
+		);`,
+		`CREATE TABLE IF NOT EXISTS messages(
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_key TEXT NOT NULL,
+			role TEXT NOT NULL,
+			content TEXT NOT NULL,
+			payload_json TEXT NOT NULL DEFAULT '{}',
+			created_at INTEGER NOT NULL,
+			FOREIGN KEY(session_key) REFERENCES sessions(key) ON DELETE CASCADE
+		);`,
+		`CREATE INDEX IF NOT EXISTS messages_session_id ON messages(session_key, id);`,
+		`CREATE TABLE IF NOT EXISTS artifacts(
+			id TEXT PRIMARY KEY,
+			session_key TEXT NOT NULL,
+			mime TEXT NOT NULL,
+			path TEXT NOT NULL,
+			size_bytes INTEGER NOT NULL,
+			created_at INTEGER NOT NULL,
+			FOREIGN KEY(session_key) REFERENCES sessions(key) ON DELETE CASCADE
+		);`,
+		`CREATE TABLE IF NOT EXISTS memory_pinned(
+			session_key TEXT NOT NULL DEFAULT '` + scope.GlobalMemoryScope + `',
+			key TEXT NOT NULL,
+			content TEXT NOT NULL,
+			updated_at INTEGER NOT NULL,
+			PRIMARY KEY(session_key, key)
+		);`,
+		`CREATE TABLE IF NOT EXISTS memory_notes(
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_key TEXT NOT NULL DEFAULT '` + scope.GlobalMemoryScope + `',
+			text TEXT NOT NULL,
+			embedding BLOB NOT NULL,
+			source_message_id INTEGER,
+			tags TEXT NOT NULL DEFAULT '',
+			created_at INTEGER NOT NULL
+		);`,
+		// FTS5
+		`CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(text, content='memory_notes', content_rowid='id');`,
+		`CREATE TRIGGER IF NOT EXISTS memory_notes_ai AFTER INSERT ON memory_notes BEGIN
+			INSERT INTO memory_fts(rowid, text) VALUES (new.id, new.text);
+		END;`,
+		`CREATE TRIGGER IF NOT EXISTS memory_notes_ad AFTER DELETE ON memory_notes BEGIN
+			INSERT INTO memory_fts(memory_fts, rowid, text) VALUES('delete', old.id, old.text);
+		END;`,
+		`CREATE TRIGGER IF NOT EXISTS memory_notes_au AFTER UPDATE ON memory_notes BEGIN
+			INSERT INTO memory_fts(memory_fts, rowid, text) VALUES('delete', old.id, old.text);
+			INSERT INTO memory_fts(rowid, text) VALUES (new.id, new.text);
+		END;`,
+		`CREATE TABLE IF NOT EXISTS subagent_jobs(
+			id TEXT PRIMARY KEY,
+			parent_session_key TEXT NOT NULL,
+			child_session_key TEXT NOT NULL,
+			channel TEXT NOT NULL,
+			reply_to TEXT NOT NULL,
+			task TEXT NOT NULL,
+			status TEXT NOT NULL,
+			result_preview TEXT NOT NULL DEFAULT '',
+			artifact_id TEXT NOT NULL DEFAULT '',
+			error_text TEXT NOT NULL DEFAULT '',
+			requested_at INTEGER NOT NULL,
+			started_at INTEGER NOT NULL DEFAULT 0,
+			finished_at INTEGER NOT NULL DEFAULT 0,
+			attempts INTEGER NOT NULL DEFAULT 0,
+			metadata_json TEXT NOT NULL DEFAULT '{}'
+		);`,
+		`CREATE INDEX IF NOT EXISTS subagent_jobs_status_requested_at ON subagent_jobs(status, requested_at);`,
+		`CREATE INDEX IF NOT EXISTS subagent_jobs_parent_session ON subagent_jobs(parent_session_key, requested_at);`,
+		`CREATE TABLE IF NOT EXISTS session_links(
+			session_key TEXT PRIMARY KEY,
+			scope_key TEXT NOT NULL,
+			linked_at INTEGER NOT NULL,
+			metadata_json TEXT NOT NULL DEFAULT '{}'
+		);`,
+		`CREATE INDEX IF NOT EXISTS session_links_scope_key ON session_links(scope_key);`,
+		`CREATE TABLE IF NOT EXISTS memory_docs(
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			scope_key TEXT NOT NULL,
+			path TEXT NOT NULL,
+			kind TEXT NOT NULL,
+			title TEXT NOT NULL DEFAULT '',
+			summary TEXT NOT NULL DEFAULT '',
+			text TEXT NOT NULL,
+			embedding BLOB,
+			hash TEXT NOT NULL,
+			mtime_ms INTEGER NOT NULL,
+			size_bytes INTEGER NOT NULL,
+			active INTEGER NOT NULL DEFAULT 1,
+			updated_at INTEGER NOT NULL,
+			UNIQUE(scope_key, path)
+		);`,
+		`CREATE INDEX IF NOT EXISTS memory_docs_scope_path ON memory_docs(scope_key, path);`,
+		`CREATE VIRTUAL TABLE IF NOT EXISTS memory_docs_fts USING fts5(title, summary, text, content='memory_docs', content_rowid='id');`,
+		`CREATE TRIGGER IF NOT EXISTS memory_docs_ai AFTER INSERT ON memory_docs BEGIN
+			INSERT INTO memory_docs_fts(rowid, title, summary, text) VALUES (new.id, new.title, new.summary, new.text);
+		END;`,
+		`CREATE TRIGGER IF NOT EXISTS memory_docs_ad AFTER DELETE ON memory_docs BEGIN
+			INSERT INTO memory_docs_fts(memory_docs_fts, rowid, title, summary, text) VALUES('delete', old.id, old.title, old.summary, old.text);
+		END;`,
+		`CREATE TRIGGER IF NOT EXISTS memory_docs_au AFTER UPDATE ON memory_docs BEGIN
+			INSERT INTO memory_docs_fts(memory_docs_fts, rowid, title, summary, text) VALUES('delete', old.id, old.title, old.summary, old.text);
+			INSERT INTO memory_docs_fts(rowid, title, summary, text) VALUES (new.id, new.title, new.summary, new.text);
+		END;`,
+		`CREATE TABLE IF NOT EXISTS memory_vec_meta(
+			id INTEGER PRIMARY KEY CHECK(id=1),
+			dims INTEGER NOT NULL DEFAULT 0,
+			updated_at INTEGER NOT NULL DEFAULT 0
+		);`,
+		`INSERT INTO memory_vec_meta(id, dims, updated_at)
+			VALUES(1, 0, 0)
+			ON CONFLICT(id) DO NOTHING;`,
+		`CREATE TABLE IF NOT EXISTS secrets(
+			name TEXT PRIMARY KEY,
+			ciphertext BLOB NOT NULL,
+			nonce BLOB NOT NULL,
+			version INTEGER NOT NULL DEFAULT 1,
+			key_version TEXT NOT NULL DEFAULT 'v1',
+			updated_at INTEGER NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS audit_events(
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			event_type TEXT NOT NULL,
+			session_key TEXT NOT NULL DEFAULT '',
+			actor TEXT NOT NULL DEFAULT '',
+			payload_json TEXT NOT NULL DEFAULT '{}',
+			prev_hash BLOB NOT NULL,
+			record_hash BLOB NOT NULL,
+			created_at INTEGER NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS audit_events_created_at ON audit_events(created_at);`,
+	}
+	for _, s := range stmts {
+		if _, err := d.SQL.ExecContext(ctx, s); err != nil {
+			return err
+		}
+	}
+	if err := d.migrateMemoryPinned(ctx); err != nil {
+		return err
+	}
+	if err := d.ensureMemoryNotesSessionColumn(ctx); err != nil {
+		return err
+	}
+	if err := d.migrateLegacyGlobalMemoryScope(ctx); err != nil {
+		return err
+	}
+	if err := d.ensureMemoryVecIndexForExisting(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+// NowMS returns the current Unix time in milliseconds.
+func NowMS() int64 { return time.Now().UnixMilli() }
+
+func (d *DB) migrateMemoryPinned(ctx context.Context) error {
+	hasSession, err := d.tableHasColumn(ctx, "memory_pinned", "session_key")
+	if err != nil {
+		return err
+	}
+	if hasSession {
+		_, err = d.SQL.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS memory_pinned_session_key_key ON memory_pinned(session_key, key);`)
+		return err
+	}
+	stmts := []string{
+		`ALTER TABLE memory_pinned RENAME TO memory_pinned_legacy;`,
+		`CREATE TABLE memory_pinned(
+			session_key TEXT NOT NULL DEFAULT '` + scope.GlobalMemoryScope + `',
+			key TEXT NOT NULL,
+			content TEXT NOT NULL,
+			updated_at INTEGER NOT NULL,
+			PRIMARY KEY(session_key, key)
+		);`,
+		`INSERT INTO memory_pinned(session_key, key, content, updated_at)
+		 SELECT '` + scope.GlobalMemoryScope + `', key, content, updated_at FROM memory_pinned_legacy;`,
+		`DROP TABLE memory_pinned_legacy;`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS memory_pinned_session_key_key ON memory_pinned(session_key, key);`,
+	}
+	for _, stmt := range stmts {
+		if _, err := d.SQL.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *DB) ensureMemoryNotesSessionColumn(ctx context.Context) error {
+	hasSession, err := d.tableHasColumn(ctx, "memory_notes", "session_key")
+	if err != nil {
+		return err
+	}
+	if !hasSession {
+		if _, err := d.SQL.ExecContext(ctx, `ALTER TABLE memory_notes ADD COLUMN session_key TEXT NOT NULL DEFAULT '`+scope.GlobalMemoryScope+`';`); err != nil {
+			return err
+		}
+	}
+	_, err = d.SQL.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS memory_notes_session_id ON memory_notes(session_key, id);`)
+	return err
+}
+
+func (d *DB) migrateLegacyGlobalMemoryScope(ctx context.Context) error {
+	if scope.GlobalMemoryScope == scope.GlobalScopeAlias {
+		return nil
+	}
+	if _, err := d.SQL.ExecContext(ctx,
+		`INSERT INTO memory_pinned(session_key, key, content, updated_at)
+		 SELECT ?, key, content, updated_at FROM memory_pinned WHERE session_key=?
+		 ON CONFLICT(session_key, key) DO UPDATE SET content=excluded.content, updated_at=excluded.updated_at`,
+		scope.GlobalMemoryScope, scope.GlobalScopeAlias); err != nil {
+		return err
+	}
+	if _, err := d.SQL.ExecContext(ctx, `DELETE FROM memory_pinned WHERE session_key=?`, scope.GlobalScopeAlias); err != nil {
+		return err
+	}
+	_, err := d.SQL.ExecContext(ctx, `UPDATE memory_notes SET session_key=? WHERE session_key=?`, scope.GlobalMemoryScope, scope.GlobalScopeAlias)
+	if err != nil {
+		return err
+	}
+	if dims, derr := d.MemoryVectorDims(ctx); derr == nil && dims > 0 && d.VecSQL != nil {
+		_, err = d.VecSQL.ExecContext(ctx, `UPDATE memory_vec SET session_key=? WHERE session_key=?`, scope.GlobalMemoryScope, scope.GlobalScopeAlias)
+	}
+	return err
+}
+
+func (d *DB) ensureMemoryVecIndexForExisting(ctx context.Context) error {
+	dims, err := d.MemoryVectorDims(ctx)
+	if err != nil {
+		return err
+	}
+	if dims == 0 {
+		dims, err = d.firstMemoryVectorDim(ctx)
+		if err != nil {
+			return err
+		}
+	}
+	if dims <= 0 {
+		return nil
+	}
+	return d.initMemoryVecIndex(ctx, dims)
+}
+
+// MemoryVectorDims reports the configured memory vector dimensionality.
+func (d *DB) MemoryVectorDims(ctx context.Context) (int, error) {
+	row := d.SQL.QueryRowContext(ctx, `SELECT dims FROM memory_vec_meta WHERE id=1`)
+	var dims int
+	if err := row.Scan(&dims); err != nil {
+		if err == sql.ErrNoRows {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return dims, nil
+}
+
+func (d *DB) firstMemoryVectorDim(ctx context.Context) (int, error) {
+	row := d.SQL.QueryRowContext(ctx,
+		`SELECT COALESCE(length(embedding), 0)
+		 FROM memory_notes
+		 WHERE typeof(embedding)='blob' AND length(embedding) >= 4 AND (length(embedding) % 4)=0
+		 ORDER BY id ASC
+		 LIMIT 1`)
+	var bytes int
+	if err := row.Scan(&bytes); err != nil {
+		if err == sql.ErrNoRows {
+			return 0, nil
+		}
+		return 0, err
+	}
+	if bytes <= 0 {
+		return 0, nil
+	}
+	return bytes / 4, nil
+}
+
+// EnsureMemoryVecIndexWithDim initializes the vector index when dims is valid.
+func (d *DB) EnsureMemoryVecIndexWithDim(ctx context.Context, dims int) error {
+	if dims <= 0 {
+		return nil
+	}
+	existing, err := d.MemoryVectorDims(ctx)
+	if err != nil {
+		return err
+	}
+	if existing > 0 && existing != dims {
+		return nil
+	}
+	return d.initMemoryVecIndex(ctx, dims)
+}
+
+func (d *DB) initMemoryVecIndex(ctx context.Context, dims int) error {
+	if dims <= 0 {
+		return nil
+	}
+	if d == nil || d.VecSQL == nil {
+		return nil
+	}
+	tx, err := d.VecSQL.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+	var existing int
+	if err := tx.QueryRowContext(ctx, `SELECT dims FROM memory_vec_meta WHERE id=1`).Scan(&existing); err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	if existing > 0 && existing != dims {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `DROP TABLE IF EXISTS memory_vec`); err != nil {
+		return err
+	}
+	createSQL := fmt.Sprintf(`CREATE VIRTUAL TABLE memory_vec USING vec0(
+			note_id integer primary key,
+			session_key text partition key,
+			embedding float[%d] distance_metric=cosine,
+			+text text
+		)`, dims)
+	if _, err := tx.ExecContext(ctx, createSQL); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO memory_vec(note_id, session_key, embedding, text)
+		 SELECT id, session_key, embedding, text
+		 FROM memory_notes
+		 WHERE typeof(embedding)='blob' AND length(embedding)=?`, dims*4); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO memory_vec_meta(id, dims, updated_at)
+		 VALUES(1, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET dims=excluded.dims, updated_at=excluded.updated_at`,
+		dims, NowMS()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (d *DB) tableHasColumn(ctx context.Context, tableName, columnName string) (bool, error) {
+	rows, err := d.SQL.QueryContext(ctx, `PRAGMA table_info(`+tableName+`)`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notNull, pk int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &defaultValue, &pk); err != nil {
+			return false, err
+		}
+		if name == columnName {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+````
+
+## File: internal/skills/skills.go
+````go
+// Package skills discovers, evaluates, and loads skill metadata from multiple roots.
+package skills
+
+import (
+	"crypto/sha1"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
+	"time"
+
+	"or3-intern/internal/clawhub"
+
+	"gopkg.in/yaml.v3"
+)
+
+// SkillEntry describes a declared executable entrypoint from a skill manifest.
+type SkillEntry struct {
+	Name           string   `json:"name"`
+	Command        []string `json:"command"`
+	TimeoutSeconds int      `json:"timeoutSeconds"`
+	AcceptsStdin   bool     `json:"acceptsStdin"`
+}
+
+type Source string
+
+const (
+	// SourceExtra marks skills loaded from explicitly supplied extra roots.
+	SourceExtra Source = "extra"
+	// SourceBundled marks skills that ship with the application.
+	SourceBundled Source = "bundled"
+	// SourceManaged marks skills installed from a remote registry.
+	SourceManaged Source = "managed"
+	// SourceWorkspace marks workspace-local skills.
+	SourceWorkspace Source = "workspace"
+)
+
+// Root describes one filesystem root scanned for skills.
+type Root struct {
+	Path     string
+	Source   Source
+	Label    string
+	Priority int
+}
+
+// EntryConfig applies per-skill runtime configuration overrides.
+type EntryConfig struct {
+	Enabled *bool
+	APIKey  string
+	Env     map[string]string
+	Config  map[string]any
+}
+
+// LoadOptions controls how skill discovery and eligibility evaluation run.
+type LoadOptions struct {
+	Roots          []Root
+	Entries        map[string]EntryConfig
+	GlobalConfig   map[string]any
+	Env            map[string]string
+	AvailableTools map[string]struct{}
+	ApprovalPolicy ApprovalPolicy
+	OS             string
+}
+
+// ApprovalPolicy describes which managed skills are trusted or blocked.
+type ApprovalPolicy struct {
+	QuarantineByDefault bool
+	ApprovedSkills      map[string]struct{}
+	TrustedOwners       map[string]struct{}
+	BlockedOwners       map[string]struct{}
+	TrustedRegistries   map[string]struct{}
+}
+
+// SkillInstallSpec describes one suggested installation route for a dependency.
+type SkillInstallSpec struct {
+	ID      string   `json:"id"`
+	Kind    string   `json:"kind"`
+	Label   string   `json:"label"`
+	Bins    []string `json:"bins"`
+	Formula string   `json:"formula"`
+	Tap     string   `json:"tap"`
+	Package string   `json:"package"`
+	Module  string   `json:"module"`
+	OS      []string `json:"os"`
+	URL     string   `json:"url"`
+}
+
+// NixPluginSpec describes an optional Nix plugin dependency.
+type NixPluginSpec struct {
+	Plugin  string   `json:"plugin"`
+	Systems []string `json:"systems"`
+}
+
+// SkillRequirements lists binary, env, and config prerequisites.
+type SkillRequirements struct {
+	Bins    []string `json:"bins"`
+	AnyBins []string `json:"anyBins"`
+	Env     []string `json:"env"`
+	Config  []string `json:"config"`
+}
+
+// SkillRuntimeMeta captures runtime metadata parsed from skill front matter.
+type SkillRuntimeMeta struct {
+	Always     bool               `json:"always"`
+	SkillKey   string             `json:"skillKey"`
+	PrimaryEnv string             `json:"primaryEnv"`
+	Emoji      string             `json:"emoji"`
+	Homepage   string             `json:"homepage"`
+	OS         []string           `json:"os"`
+	Requires   SkillRequirements  `json:"requires"`
+	Install    []SkillInstallSpec `json:"install"`
+	Nix        *NixPluginSpec     `json:"nix"`
+}
+
+// SkillPermissions describes the requested shell, network, and write permissions.
+type SkillPermissions struct {
+	Shell        bool     `json:"shell" yaml:"shell"`
+	Network      bool     `json:"network" yaml:"network"`
+	Write        bool     `json:"write" yaml:"write"`
+	AllowedPaths []string `json:"paths" yaml:"paths"`
+	AllowedHosts []string `json:"hosts" yaml:"hosts"`
+}
+
+// SkillMeta is the fully merged metadata for one discovered skill.
+type SkillMeta struct {
+	Name        string
+	Description string
+	Homepage    string
+	Path        string
+	Dir         string
+	Location    string
+	Source      Source
+	ModTime     time.Time
+	Size        int64
+	ID          string
+	Summary     string
+	Entrypoints []SkillEntry
+
+	UserInvocable          bool
+	DisableModelInvocation bool
+	CommandDispatch        string
+	CommandTool            string
+	CommandArgMode         string
+
+	Metadata         SkillRuntimeMeta
+	Permissions      SkillPermissions
+	AllowedTools     []string
+	PermissionState  string
+	PermissionNotes  []string
+	Publisher        string
+	Registry         string
+	InstalledVersion string
+	Modified         bool
+	ScanStatus       string
+	ScanFindings     []string
+	Key              string
+	Eligible         bool
+	Disabled         bool
+	Hidden           bool
+	Missing          []string
+	Unsupported      []string
+	ParseError       string
+	RuntimeEnv       map[string]string
+
+	sourcePriority int
+	rootOrder      int
+}
+
+// Inventory is the discovered skill set plus a name index.
+type Inventory struct {
+	Skills []SkillMeta
+	byName map[string]SkillMeta
+}
+
+type skillManifest struct {
+	Summary     string           `json:"summary"`
+	Entrypoints []SkillEntry     `json:"entrypoints"`
+	Tools       []string         `json:"tools"`
+	Permissions SkillPermissions `json:"permissions"`
+}
+
+type skillFrontMatter struct {
+	Name                   string           `yaml:"name"`
+	Description            string           `yaml:"description"`
+	Summary                string           `yaml:"summary"`
+	Homepage               string           `yaml:"homepage"`
+	UserInvocable          *bool            `yaml:"user-invocable"`
+	DisableModelInvocation bool             `yaml:"disable-model-invocation"`
+	CommandDispatch        string           `yaml:"command-dispatch"`
+	CommandTool            string           `yaml:"command-tool"`
+	CommandArgMode         string           `yaml:"command-arg-mode"`
+	Permissions            SkillPermissions `yaml:"permissions"`
+	Metadata               map[string]any   `yaml:"metadata"`
+}
+
+func defaultPriority(source Source) int {
+	switch source {
+	case SourceWorkspace:
+		return 40
+	case SourceManaged:
+		return 30
+	case SourceBundled:
+		return 20
+	default:
+		return 10
+	}
+}
+
+// Scan keeps the simple legacy API for callers that only provide directories.
+func Scan(dirs []string) Inventory {
+	roots := make([]Root, 0, len(dirs))
+	for i, dir := range dirs {
+		roots = append(roots, Root{
+			Path:     dir,
+			Source:   SourceExtra,
+			Label:    dir,
+			Priority: i + 1,
+		})
+	}
+	return ScanWithOptions(LoadOptions{Roots: roots})
+}
+
+// ScanWithOptions discovers skills and evaluates their runtime eligibility.
+func ScanWithOptions(opts LoadOptions) Inventory {
+	if len(opts.Env) == 0 {
+		opts.Env = envMap(os.Environ())
+	}
+	if strings.TrimSpace(opts.OS) == "" {
+		opts.OS = runtime.GOOS
+	}
+
+	metaByName := map[string]SkillMeta{}
+	for i, root := range opts.Roots {
+		root = normalizeRoot(root)
+		if strings.TrimSpace(root.Path) == "" {
+			continue
+		}
+		absRoot, err := filepath.Abs(root.Path)
+		if err != nil {
+			continue
+		}
+		realRoot, err := filepath.EvalSymlinks(absRoot)
+		if err != nil {
+			continue
+		}
+		scanSkillDir(metaByName, realRoot, root, i, opts)
+		_ = filepath.WalkDir(realRoot, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if d.Type()&os.ModeSymlink != 0 {
+				return nil
+			}
+			if !d.IsDir() {
+				return nil
+			}
+			if path == realRoot {
+				return nil
+			}
+			realPath, err := filepath.EvalSymlinks(path)
+			if err != nil {
+				return filepath.SkipDir
+			}
+			rel, err := filepath.Rel(realRoot, realPath)
+			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				return filepath.SkipDir
+			}
+			if scanSkillDir(metaByName, realPath, root, i, opts) {
+				return filepath.SkipDir
+			}
+			return nil
+		})
+	}
+
+	skills := make([]SkillMeta, 0, len(metaByName))
+	for _, s := range metaByName {
+		skills = append(skills, s)
+	}
+	sort.Slice(skills, func(i, j int) bool {
+		if skills[i].Name == skills[j].Name {
+			if skills[i].sourcePriority == skills[j].sourcePriority {
+				return skills[i].Path < skills[j].Path
+			}
+			return skills[i].sourcePriority > skills[j].sourcePriority
+		}
+		return strings.ToLower(skills[i].Name) < strings.ToLower(skills[j].Name)
+	})
+	by := make(map[string]SkillMeta, len(skills))
+	for _, s := range skills {
+		by[s.Name] = s
+		by[strings.ToLower(s.Name)] = s
+	}
+	return Inventory{Skills: skills, byName: by}
+}
+
+func normalizeRoot(root Root) Root {
+	if strings.TrimSpace(root.Label) == "" {
+		root.Label = string(root.Source)
+	}
+	if root.Priority == 0 {
+		root.Priority = defaultPriority(root.Source)
+	}
+	return root
+}
+
+func scanSkillDir(metaByName map[string]SkillMeta, dir string, root Root, order int, opts LoadOptions) bool {
+	skillPath, ok := skillFileInDir(dir)
+	if !ok {
+		return false
+	}
+	meta := loadSkill(dir, skillPath, root, order, opts)
+	current, exists := metaByName[meta.Name]
+	if !exists || shouldOverride(current, meta) {
+		metaByName[meta.Name] = meta
+	}
+	return true
+}
+
+func shouldOverride(current SkillMeta, candidate SkillMeta) bool {
+	if candidate.sourcePriority != current.sourcePriority {
+		return candidate.sourcePriority > current.sourcePriority
+	}
+	if candidate.rootOrder != current.rootOrder {
+		return candidate.rootOrder > current.rootOrder
+	}
+	return candidate.Path > current.Path
+}
+
+func skillFileInDir(dir string) (string, bool) {
+	for _, name := range []string{"SKILL.md", "skill.md"} {
+		path := filepath.Join(dir, name)
+		info, err := os.Lstat(path)
+		if err != nil {
+			continue
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			continue
+		}
+		return path, true
+	}
+	return "", false
+}
+
+func loadSkill(dir, path string, root Root, order int, opts LoadOptions) SkillMeta {
+	info, _ := os.Stat(path)
+	meta := SkillMeta{
+		Name:           filepath.Base(dir),
+		Path:           path,
+		Dir:            dir,
+		Location:       dir,
+		Source:         root.Source,
+		ID:             hash(path),
+		UserInvocable:  true,
+		CommandArgMode: "raw",
+		sourcePriority: root.Priority,
+		rootOrder:      order,
+	}
+	if info != nil {
+		meta.ModTime = info.ModTime()
+		meta.Size = info.Size()
+	}
+
+	body, err := LoadBody(path, 0)
+	if err != nil {
+		meta.ParseError = err.Error()
+		meta.Hidden = true
+		applyApprovalPolicy(&meta, opts.ApprovalPolicy)
+		return meta
+	}
+	fm, rawTop, err := parseFrontMatter(body)
+	if err != nil {
+		meta.ParseError = err.Error()
+		meta.Hidden = true
+		applyApprovalPolicy(&meta, opts.ApprovalPolicy)
+		return meta
+	}
+	if strings.TrimSpace(fm.Name) != "" {
+		meta.Name = strings.TrimSpace(fm.Name)
+	}
+	meta.Description = strings.TrimSpace(firstNonEmpty(fm.Description, fm.Summary))
+	meta.Summary = meta.Description
+	meta.Homepage = strings.TrimSpace(fm.Homepage)
+	if fm.UserInvocable != nil {
+		meta.UserInvocable = *fm.UserInvocable
+	}
+	meta.DisableModelInvocation = fm.DisableModelInvocation
+	meta.Hidden = meta.DisableModelInvocation
+	meta.CommandDispatch = strings.TrimSpace(fm.CommandDispatch)
+	meta.CommandTool = strings.TrimSpace(fm.CommandTool)
+	if strings.TrimSpace(fm.CommandArgMode) != "" {
+		meta.CommandArgMode = strings.TrimSpace(fm.CommandArgMode)
+	}
+	meta.Permissions = normalizeSkillPermissions(fm.Permissions)
+	declaredTools, _ := parseDeclaredTools(rawTop["tools"])
+	meta.AllowedTools = declaredTools
+
+	manifest, err := loadManifest(dir)
+	if err != nil {
+		meta.ParseError = err.Error()
+		meta.Hidden = true
+	} else if len(manifest.Entrypoints) > 0 || len(manifest.Tools) > 0 || manifest.Permissions.Requested() || strings.TrimSpace(manifest.Summary) != "" {
+		meta.Entrypoints = manifest.Entrypoints
+		meta.AllowedTools = mergeStringLists(meta.AllowedTools, compactStrings(manifest.Tools))
+		if requested := normalizeSkillPermissions(manifest.Permissions); requested.Requested() {
+			meta.Permissions = requested
+		}
+		if strings.TrimSpace(manifest.Summary) != "" {
+			meta.Summary = strings.TrimSpace(manifest.Summary)
+		}
+		if meta.Description == "" {
+			meta.Summary = strings.TrimSpace(manifest.Summary)
+			meta.Description = meta.Summary
+		}
+	}
+
+	runtimeMeta, ok := normalizeRuntimeMetadata(fm.Metadata)
+	if ok {
+		meta.Metadata = runtimeMeta
+	}
+	if meta.Homepage == "" {
+		meta.Homepage = strings.TrimSpace(meta.Metadata.Homepage)
+	}
+	if meta.Key == "" {
+		meta.Key = strings.TrimSpace(firstNonEmpty(meta.Metadata.SkillKey, meta.Name))
+	}
+	entry := entryConfigForSkill(opts.Entries, meta)
+	meta.RuntimeEnv = buildRuntimeEnv(meta, entry, opts.Env)
+	applyOriginMetadata(&meta)
+	applyEligibility(&meta, rawTop, body, entry, opts)
+	applyApprovalPolicy(&meta, opts.ApprovalPolicy)
+	return meta
+}
+
+func applyOriginMetadata(meta *SkillMeta) {
+	if meta == nil || strings.TrimSpace(meta.Dir) == "" {
+		return
+	}
+	origin, err := clawhub.ReadOrigin(meta.Dir)
+	if err != nil {
+		if meta.Source == SourceManaged {
+			meta.PermissionNotes = append(meta.PermissionNotes, "managed skill missing origin metadata")
+		}
+		return
+	}
+	meta.Publisher = strings.TrimSpace(origin.Owner)
+	meta.Registry = strings.TrimSpace(origin.Registry)
+	meta.InstalledVersion = strings.TrimSpace(origin.InstalledVersion)
+	meta.ScanStatus = normalizeSupplyChainValue(origin.ScanStatus)
+	for _, finding := range origin.ScanFindings {
+		if summary := strings.TrimSpace(finding.Summary()); summary != "" {
+			meta.ScanFindings = append(meta.ScanFindings, summary)
+		}
+	}
+	if modified, modErr := clawhub.LocalEdits(meta.Dir); modErr == nil {
+		meta.Modified = modified
+	}
+}
+
+func normalizeSkillPermissions(raw SkillPermissions) SkillPermissions {
+	raw.AllowedPaths = compactStrings(raw.AllowedPaths)
+	raw.AllowedHosts = compactStrings(raw.AllowedHosts)
+	return raw
+}
+
+func (p SkillPermissions) Requested() bool {
+	return p.Shell || p.Network || p.Write || len(p.AllowedPaths) > 0 || len(p.AllowedHosts) > 0
+}
+
+func parseDeclaredTools(raw any) ([]string, bool) {
+	switch value := raw.(type) {
+	case nil:
+		return nil, true
+	case []string:
+		return compactStrings(value), true
+	case []any:
+		out := make([]string, 0, len(value))
+		for _, item := range value {
+			name, ok := item.(string)
+			if !ok {
+				return nil, false
+			}
+			name = strings.TrimSpace(name)
+			if name == "" {
+				continue
+			}
+			out = append(out, name)
+		}
+		return compactStrings(out), true
+	default:
+		return nil, false
+	}
+}
+
+func (p SkillPermissions) Summary() string {
+	parts := make([]string, 0, 5)
+	if p.Shell {
+		parts = append(parts, "shell")
+	}
+	if p.Network {
+		parts = append(parts, "network")
+	}
+	if p.Write {
+		parts = append(parts, "write")
+	}
+	if len(p.AllowedPaths) > 0 {
+		parts = append(parts, "paths="+strings.Join(p.AllowedPaths, ","))
+	}
+	if len(p.AllowedHosts) > 0 {
+		parts = append(parts, "hosts="+strings.Join(p.AllowedHosts, ","))
+	}
+	if len(parts) == 0 {
+		return "(none declared)"
+	}
+	return strings.Join(parts, "; ")
+}
+
+func applyApprovalPolicy(meta *SkillMeta, policy ApprovalPolicy) {
+	if meta == nil {
+		return
+	}
+	if meta.ParseError != "" {
+		meta.PermissionState = "blocked"
+		meta.PermissionNotes = append(meta.PermissionNotes, "metadata parse failed")
+		return
+	}
+	if ownerBlocked(meta, policy.BlockedOwners) {
+		meta.PermissionState = "blocked"
+		meta.PermissionNotes = append(meta.PermissionNotes, "publisher blocked by policy: "+meta.Publisher)
+		return
+	}
+	if strings.EqualFold(meta.ScanStatus, "blocked") {
+		meta.PermissionState = "blocked"
+		meta.PermissionNotes = append(meta.PermissionNotes, "install-time scan blocked this bundle")
+		meta.PermissionNotes = append(meta.PermissionNotes, meta.ScanFindings...)
+		return
+	}
+	if meta.Modified {
+		meta.PermissionState = "quarantined"
+		meta.PermissionNotes = append(meta.PermissionNotes, "local modifications detected since install")
+		return
+	}
+	if strings.EqualFold(meta.ScanStatus, "quarantined") {
+		meta.PermissionState = "quarantined"
+		meta.PermissionNotes = append(meta.PermissionNotes, "install-time scan flagged this bundle for review")
+		meta.PermissionNotes = append(meta.PermissionNotes, meta.ScanFindings...)
+		return
+	}
+	trustedPublisher := publisherTrusted(meta, policy)
+	if skillApproved(meta, policy.ApprovedSkills) || trustedPublisher {
+		meta.PermissionState = "approved"
+		if trustedPublisher {
+			meta.PermissionNotes = append(meta.PermissionNotes, "approved by trusted publisher policy")
+		} else {
+			meta.PermissionNotes = append(meta.PermissionNotes, "approved in config")
+		}
+		return
+	}
+	if meta.Source == SourceManaged && skillNeedsApproval(meta) {
+		if strings.TrimSpace(meta.Registry) == "" || strings.TrimSpace(meta.Publisher) == "" {
+			meta.PermissionState = "quarantined"
+			meta.PermissionNotes = append(meta.PermissionNotes, "managed skill is missing trusted origin details")
+			return
+		}
+		if len(policy.TrustedOwners) > 0 || len(policy.TrustedRegistries) > 0 {
+			meta.PermissionState = "quarantined"
+			meta.PermissionNotes = append(meta.PermissionNotes, "publisher or registry is not trusted by policy")
+			return
+		}
+	}
+	if skillNeedsApproval(meta) {
+		meta.PermissionState = "quarantined"
+		meta.PermissionNotes = append(meta.PermissionNotes, "operator approval required before script execution")
+		return
+	}
+	meta.PermissionState = "approved"
+}
+
+func ownerBlocked(meta *SkillMeta, blocked map[string]struct{}) bool {
+	if meta == nil || len(blocked) == 0 {
+		return false
+	}
+	_, ok := blocked[normalizeSupplyChainValue(meta.Publisher)]
+	return ok
+}
+
+func publisherTrusted(meta *SkillMeta, policy ApprovalPolicy) bool {
+	if meta == nil {
+		return false
+	}
+	anyPolicy := len(policy.TrustedOwners) > 0 || len(policy.TrustedRegistries) > 0
+	if !anyPolicy {
+		return false
+	}
+	if len(policy.TrustedOwners) > 0 {
+		if _, ok := policy.TrustedOwners[normalizeSupplyChainValue(meta.Publisher)]; !ok {
+			return false
+		}
+	}
+	if len(policy.TrustedRegistries) > 0 {
+		if _, ok := policy.TrustedRegistries[normalizeSupplyChainValue(meta.Registry)]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeSupplyChainValue(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	value = strings.TrimRight(value, "/")
+	return value
+}
+
+func skillNeedsApproval(meta *SkillMeta) bool {
+	if meta == nil {
+		return false
+	}
+	if meta.Permissions.Requested() || len(meta.Entrypoints) > 0 {
+		return true
+	}
+	return skillHasRunnableContent(meta.Dir)
+}
+
+func skillApproved(meta *SkillMeta, approved map[string]struct{}) bool {
+	if meta == nil || len(approved) == 0 {
+		return false
+	}
+	for _, key := range []string{meta.Name, meta.Key, strings.ToLower(meta.Name), strings.ToLower(meta.Key)} {
+		if _, ok := approved[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func loadManifest(dir string) (skillManifest, error) {
+	manifestPath := filepath.Join(dir, "skill.json")
+	info, err := os.Lstat(manifestPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return skillManifest{}, nil
+		}
+		return skillManifest{}, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return skillManifest{}, fs.ErrPermission
+	}
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return skillManifest{}, err
+	}
+	var m skillManifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		return skillManifest{}, fmt.Errorf("invalid skill manifest: %w", err)
+	}
+	return m, nil
+}
+
+func parseFrontMatter(content string) (skillFrontMatter, map[string]any, error) {
+	block, ok, err := frontMatterBlock(content)
+	if err != nil {
+		return skillFrontMatter{}, nil, err
+	}
+	if !ok {
+		return skillFrontMatter{}, map[string]any{}, nil
+	}
+	var raw map[string]any
+	if err := yaml.Unmarshal([]byte(block), &raw); err != nil {
+		return skillFrontMatter{}, nil, fmt.Errorf("invalid frontmatter: %w", err)
+	}
+	raw = toStringMap(raw)
+	var fm skillFrontMatter
+	if err := yaml.Unmarshal([]byte(block), &fm); err != nil {
+		return skillFrontMatter{}, nil, fmt.Errorf("invalid frontmatter: %w", err)
+	}
+	fm.Metadata = toStringMap(fm.Metadata)
+	return fm, raw, nil
+}
+
+func frontMatterBlock(content string) (string, bool, error) {
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	if !strings.HasPrefix(content, "---\n") {
+		return "", false, nil
+	}
+	rest := content[len("---\n"):]
+	end := strings.Index(rest, "\n---")
+	if end < 0 {
+		return "", false, fmt.Errorf("invalid frontmatter: missing closing delimiter")
+	}
+	block := rest[:end]
+	return block, true, nil
+}
+
+func extractFrontMatterSummary(content string) string {
+	fm, _, err := parseFrontMatter(content)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(firstNonEmpty(fm.Summary, fm.Description))
+}
+
+func normalizeRuntimeMetadata(raw map[string]any) (SkillRuntimeMeta, bool) {
+	if len(raw) == 0 {
+		return SkillRuntimeMeta{}, false
+	}
+	var selected any
+	for _, key := range []string{"openclaw", "clawdbot", "clawdis"} {
+		if value, ok := raw[key]; ok {
+			selected = value
+			break
+		}
+	}
+	if selected == nil {
+		return SkillRuntimeMeta{}, false
+	}
+	buf, err := json.Marshal(toStringMap(selected))
+	if err != nil {
+		return SkillRuntimeMeta{}, false
+	}
+	var meta SkillRuntimeMeta
+	if err := json.Unmarshal(buf, &meta); err != nil {
+		return SkillRuntimeMeta{}, false
+	}
+	return meta, true
+}
+
+func applyEligibility(meta *SkillMeta, rawTop map[string]any, body string, entry EntryConfig, opts LoadOptions) {
+	if meta == nil {
+		return
+	}
+	if meta.ParseError != "" {
+		meta.Eligible = false
+		return
+	}
+	meta.Disabled = entry.Enabled != nil && !*entry.Enabled
+	if meta.Disabled {
+		meta.Missing = append(meta.Missing, "disabled in config")
+	}
+	meta.Unsupported = append(meta.Unsupported, detectUnsupported(*meta, rawTop, body, opts)...)
+	if meta.Metadata.Always && !meta.Disabled && len(meta.Unsupported) == 0 {
+		meta.Eligible = true
+		return
+	}
+	if len(meta.Metadata.OS) > 0 && !containsFold(meta.Metadata.OS, opts.OS) {
+		meta.Missing = append(meta.Missing, fmt.Sprintf("os mismatch: requires %s", strings.Join(meta.Metadata.OS, ", ")))
+	}
+	for _, bin := range meta.Metadata.Requires.Bins {
+		if !hasBinary(bin) {
+			meta.Missing = append(meta.Missing, "missing binary: "+bin)
+		}
+	}
+	if len(meta.Metadata.Requires.AnyBins) > 0 {
+		ok := false
+		for _, bin := range meta.Metadata.Requires.AnyBins {
+			if hasBinary(bin) {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			meta.Missing = append(meta.Missing, "missing any-of binary: "+strings.Join(meta.Metadata.Requires.AnyBins, ", "))
+		}
+	}
+	for _, envName := range meta.Metadata.Requires.Env {
+		if strings.TrimSpace(meta.RuntimeEnv[envName]) == "" {
+			meta.Missing = append(meta.Missing, "missing env: "+envName)
+		}
+	}
+	for _, key := range meta.Metadata.Requires.Config {
+		if !configTruthy(opts.GlobalConfig, entry.Config, key) {
+			meta.Missing = append(meta.Missing, "missing config: "+key)
+		}
+	}
+	meta.Eligible = !meta.Disabled && len(meta.Missing) == 0 && len(meta.Unsupported) == 0
+}
+
+func detectUnsupported(meta SkillMeta, rawTop map[string]any, body string, opts LoadOptions) []string {
+	var unsupported []string
+	if _, ok := rawTop["tools"]; ok {
+		if _, valid := parseDeclaredTools(rawTop["tools"]); !valid {
+			unsupported = append(unsupported, "frontmatter tools must be a list of string tool names")
+		}
+	}
+	if meta.Metadata.Nix != nil && strings.TrimSpace(meta.Metadata.Nix.Plugin) != "" {
+		unsupported = append(unsupported, "requires nix plugin: "+meta.Metadata.Nix.Plugin)
+	}
+	for _, toolName := range meta.AllowedTools {
+		if len(opts.AvailableTools) == 0 {
+			continue
+		}
+		if _, ok := opts.AvailableTools[toolName]; !ok {
+			unsupported = append(unsupported, "requires unsupported tool: "+toolName)
+		}
+	}
+	if meta.CommandDispatch != "" && meta.CommandDispatch != "tool" {
+		unsupported = append(unsupported, "unsupported command-dispatch: "+meta.CommandDispatch)
+	}
+	if meta.CommandDispatch == "tool" {
+		if meta.CommandTool == "" {
+			unsupported = append(unsupported, "command-dispatch tool requires command-tool")
+		} else if len(opts.AvailableTools) > 0 {
+			if _, ok := opts.AvailableTools[meta.CommandTool]; !ok {
+				unsupported = append(unsupported, "requires unsupported tool: "+meta.CommandTool)
+			}
+		}
+	}
+	if strings.Contains(body, "nodes.run") {
+		unsupported = append(unsupported, "requires unsupported tool: nodes.run")
+	}
+	return unsupported
+}
+
+func mergeStringLists(base []string, extra []string) []string {
+	out := append([]string{}, compactStrings(base)...)
+	seen := map[string]struct{}{}
+	for _, item := range out {
+		seen[item] = struct{}{}
+	}
+	for _, item := range compactStrings(extra) {
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		out = append(out, item)
+	}
+	return out
+}
+
+func buildRuntimeEnv(meta SkillMeta, entry EntryConfig, baseEnv map[string]string) map[string]string {
+	out := copyMap(baseEnv)
+	for k, v := range entry.Env {
+		if strings.TrimSpace(k) == "" || strings.TrimSpace(v) == "" {
+			continue
+		}
+		if strings.TrimSpace(out[k]) == "" {
+			out[k] = v
+		}
+	}
+	if meta.Metadata.PrimaryEnv != "" && strings.TrimSpace(entry.APIKey) != "" && strings.TrimSpace(out[meta.Metadata.PrimaryEnv]) == "" {
+		out[meta.Metadata.PrimaryEnv] = entry.APIKey
+	}
+	return out
+}
+
+func entryConfigForSkill(entries map[string]EntryConfig, meta SkillMeta) EntryConfig {
+	if len(entries) == 0 {
+		return EntryConfig{}
+	}
+	if entry, ok := entries[meta.Key]; ok {
+		return entry
+	}
+	return entries[meta.Name]
+}
+
+func (inv Inventory) Get(name string) (SkillMeta, bool) {
+	if strings.TrimSpace(name) == "" {
+		return SkillMeta{}, false
+	}
+	if s, ok := inv.byName[name]; ok {
+		return s, true
+	}
+	s, ok := inv.byName[strings.ToLower(name)]
+	return s, ok
+}
+
+func (inv Inventory) Summary(max int) string {
+	return summarize(inv.Skills, max)
+}
+
+func (inv Inventory) ModelSummary(max int) string {
+	filtered := make([]SkillMeta, 0, len(inv.Skills))
+	for _, skill := range inv.Skills {
+		if !skill.Eligible || skill.Hidden {
+			continue
+		}
+		filtered = append(filtered, skill)
+	}
+	if len(filtered) == 0 {
+		return "(no eligible skills found)"
+	}
+	if max <= 0 {
+		max = 50
+	}
+	lines := make([]string, 0, min(len(filtered), max)+1)
+	for i, skill := range filtered {
+		if i >= max {
+			lines = append(lines, "…")
+			break
+		}
+		desc := strings.TrimSpace(skill.Description)
+		if desc == "" {
+			desc = strings.TrimSpace(skill.Summary)
+		}
+		location := strings.TrimSpace(skill.Location)
+		if location == "" {
+			location = skill.Dir
+		}
+		lines = append(lines, fmt.Sprintf("- %s | %s | %s", skill.Name, oneLine(desc, 140), location))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func summarize(skills []SkillMeta, max int) string {
+	if max <= 0 {
+		max = 50
+	}
+	lines := []string{}
+	for i, s := range skills {
+		if i >= max {
+			lines = append(lines, "…")
+			break
+		}
+		desc := strings.TrimSpace(firstNonEmpty(s.Description, s.Summary))
+		if desc == "" {
+			lines = append(lines, "- "+s.Name)
+			continue
+		}
+		lines = append(lines, "- "+s.Name+": "+oneLine(desc, 140))
+	}
+	if len(lines) == 0 {
+		return "(no skills found)"
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (inv Inventory) RunEnv() map[string]string {
+	out := map[string]string{}
+	for _, skill := range inv.Skills {
+		if !skill.Eligible {
+			continue
+		}
+		for k, v := range filteredRuntimeEnv(skill.RuntimeEnv) {
+			if _, exists := out[k]; !exists {
+				out[k] = v
+			}
+		}
+	}
+	return out
+}
+
+func (inv Inventory) RunEnvForSkill(name string) map[string]string {
+	skill, ok := inv.Get(name)
+	if !ok || !skill.Eligible {
+		return nil
+	}
+	return filteredRuntimeEnv(skill.RuntimeEnv)
+}
+
+func (inv Inventory) ResolveBundlePath(name, relPath string) (string, error) {
+	skill, ok := inv.Get(name)
+	if !ok {
+		return "", fmt.Errorf("skill not found: %s", name)
+	}
+	root, err := filepath.EvalSymlinks(skill.Dir)
+	if err != nil {
+		return "", err
+	}
+	relPath = strings.TrimSpace(relPath)
+	if relPath == "" {
+		return root, nil
+	}
+	if filepath.IsAbs(relPath) {
+		return "", fmt.Errorf("bundle path must be relative")
+	}
+	full := filepath.Join(root, relPath)
+	clean := filepath.Clean(full)
+	real, err := filepath.EvalSymlinks(clean)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		real = clean
+	}
+	rel, err := filepath.Rel(root, real)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fs.ErrPermission
+	}
+	return real, nil
+}
+
+func LoadBody(path string, maxBytes int) (string, error) {
+	if maxBytes <= 0 {
+		maxBytes = 200000
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return "", fs.ErrPermission
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	if len(b) > maxBytes {
+		b = b[:maxBytes]
+	}
+	return string(b), nil
+}
+
+func hash(s string) string {
+	h := sha1.Sum([]byte(s))
+	return hex.EncodeToString(h[:8])
+}
+
+func hasBinary(name string) bool {
+	if strings.TrimSpace(name) == "" {
+		return false
+	}
+	_, err := exec.LookPath(name)
+	return err == nil
+}
+
+func configTruthy(global map[string]any, skill map[string]any, path string) bool {
+	if truthy(lookupPath(global, path)) {
+		return true
+	}
+	return truthy(lookupPath(skill, path))
+}
+
+func lookupPath(root map[string]any, path string) any {
+	if len(root) == 0 || strings.TrimSpace(path) == "" {
+		return nil
+	}
+	var current any = root
+	for _, part := range strings.Split(path, ".") {
+		m, ok := current.(map[string]any)
+		if !ok {
+			return nil
+		}
+		current, ok = m[part]
+		if !ok {
+			return nil
+		}
+	}
+	return current
+}
+
+func truthy(v any) bool {
+	switch val := v.(type) {
+	case nil:
+		return false
+	case bool:
+		return val
+	case string:
+		return strings.TrimSpace(val) != ""
+	case float64:
+		return val != 0
+	case int:
+		return val != 0
+	case []any:
+		return len(val) > 0
+	case map[string]any:
+		return len(val) > 0
+	default:
+		return true
+	}
+}
+
+func envMap(values []string) map[string]string {
+	out := make(map[string]string, len(values))
+	for _, raw := range values {
+		key, value, ok := strings.Cut(raw, "=")
+		if !ok {
+			continue
+		}
+		out[key] = value
+	}
+	return out
+}
+
+func toStringMap(v any) map[string]any {
+	switch val := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(val))
+		for k, child := range val {
+			out[k] = normalizeValue(child)
+		}
+		return out
+	case map[any]any:
+		out := make(map[string]any, len(val))
+		for k, child := range val {
+			out[fmt.Sprint(k)] = normalizeValue(child)
+		}
+		return out
+	default:
+		return map[string]any{}
+	}
+}
+
+func normalizeValue(v any) any {
+	switch val := v.(type) {
+	case map[string]any, map[any]any:
+		return toStringMap(val)
+	case []any:
+		out := make([]any, 0, len(val))
+		for _, item := range val {
+			out = append(out, normalizeValue(item))
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+func copyMap(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func filteredRuntimeEnv(env map[string]string) map[string]string {
+	out := map[string]string{}
+	for k, v := range env {
+		if strings.TrimSpace(k) == "" || strings.TrimSpace(v) == "" {
+			continue
+		}
+		if strings.TrimSpace(os.Getenv(k)) != "" {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+func compactStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		key := strings.ToLower(value)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
+func skillHasRunnableContent(dir string) bool {
+	if strings.TrimSpace(dir) == "" {
+		return false
+	}
+	found := false
+	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || found {
+			return fs.SkipAll
+		}
+		if path == dir {
+			return nil
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		name := strings.ToLower(strings.TrimSpace(d.Name()))
+		if name == "skill.md" || name == "skill.json" {
+			return nil
+		}
+		info, infoErr := d.Info()
+		if infoErr != nil || !info.Mode().IsRegular() {
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(name))
+		if info.Mode()&0o111 != 0 || ext == ".sh" || ext == ".py" {
+			found = true
+			return fs.SkipAll
+		}
+		return nil
+	})
+	return found
+}
+
+func containsFold(values []string, target string) bool {
+	for _, value := range values {
+		if strings.EqualFold(strings.TrimSpace(value), strings.TrimSpace(target)) {
+			return true
+		}
+	}
+	return false
+}
+
+func oneLine(s string, max int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.Join(strings.Fields(s), " ")
+	if max > 0 && len(s) > max {
+		s = s[:max] + "…"
+	}
+	return s
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+````
+
 ## File: internal/db/store.go
 ````go
 package db
@@ -19658,20 +20901,19 @@ func (d *DB) EnsureSession(ctx context.Context, key string) error {
 }
 
 func (d *DB) AppendMessage(ctx context.Context, sessionKey, role, content string, payload any) (int64, error) {
-	if err := d.EnsureSession(ctx, sessionKey); err != nil {
-		return 0, err
-	}
-	pb, _ := json.Marshal(payload)
-	now := NowMS()
-	res, err := d.SQL.ExecContext(ctx,
-		`INSERT INTO messages(session_key, role, content, payload_json, created_at) VALUES(?,?,?,?,?)`,
-		sessionKey, role, content, string(pb), now)
+	tx, err := d.SQL.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
-	id, _ := res.LastInsertId()
-	if _, err := d.SQL.ExecContext(ctx, `UPDATE sessions SET updated_at=? WHERE key=?`, now, sessionKey); err != nil {
-		return id, err
+	defer func() {
+		_ = tx.Rollback()
+	}()
+	id, err := appendMessageTx(ctx, tx, sessionKey, role, content, payload)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
 	}
 	return id, nil
 }
@@ -19987,8 +21229,11 @@ func (d *DB) GetConsolidationRange(ctx context.Context, sessionKey string, histo
 	row := d.SQL.QueryRowContext(ctx,
 		`SELECT last_consolidated_msg_id FROM sessions WHERE key=?`, sessionKey)
 	if scanErr := row.Scan(&lastConsolidatedID); scanErr != nil {
-		// Session row not found yet → nothing to consolidate.
-		return 0, 0, nil
+		if errors.Is(scanErr, sql.ErrNoRows) {
+			// Session row not found yet → nothing to consolidate.
+			return 0, 0, nil
+		}
+		return 0, 0, scanErr
 	}
 
 	// Oldest ID in the active window (last historyMax messages).
@@ -20684,6 +21929,8 @@ This repo uses external Go modules (including SQLite drivers, `sqlite-vec`, and 
 
 ## File: internal/config/config.go
 ````go
+// Package config defines the persisted runtime configuration and validation
+// rules for or3-intern.
 package config
 
 import (
@@ -20702,10 +21949,15 @@ import (
 type RuntimeProfile string
 
 const (
-	ProfileLocalDev            RuntimeProfile = "local-dev"
-	ProfileSingleUserHardened  RuntimeProfile = "single-user-hardened"
-	ProfileHostedService       RuntimeProfile = "hosted-service"
-	ProfileHostedNoExec        RuntimeProfile = "hosted-no-exec"
+	// ProfileLocalDev is the default profile for local development workflows.
+	ProfileLocalDev RuntimeProfile = "local-dev"
+	// ProfileSingleUserHardened tightens local defaults for a single trusted user.
+	ProfileSingleUserHardened RuntimeProfile = "single-user-hardened"
+	// ProfileHostedService enables the safeguards required for hosted operation.
+	ProfileHostedService RuntimeProfile = "hosted-service"
+	// ProfileHostedNoExec disables direct execution in hosted deployments.
+	ProfileHostedNoExec RuntimeProfile = "hosted-no-exec"
+	// ProfileHostedRemoteSandbox requires sandboxed execution for hosted use.
 	ProfileHostedRemoteSandbox RuntimeProfile = "hosted-remote-sandbox-only"
 )
 
@@ -20772,6 +22024,7 @@ func ProfileSpec(p RuntimeProfile) RuntimeProfileSpec {
 	}
 }
 
+// Config is the top-level persisted runtime configuration.
 type Config struct {
 	DBPath                 string `json:"dbPath"`
 	ArtifactsDir           string `json:"artifactsDir"`
@@ -20819,6 +22072,7 @@ type Config struct {
 	Channels  ChannelsConfig  `json:"channels"`
 }
 
+// HardeningConfig controls sandboxing, privilege gates, and per-tool quotas.
 type HardeningConfig struct {
 	GuardedTools        bool                 `json:"guardedTools"`
 	PrivilegedTools     bool                 `json:"privilegedTools"`
@@ -20830,6 +22084,7 @@ type HardeningConfig struct {
 	Quotas              HardeningQuotaConfig `json:"quotas"`
 }
 
+// SandboxConfig defines how exec-capable tools are isolated.
 type SandboxConfig struct {
 	Enabled        bool     `json:"enabled"`
 	BubblewrapPath string   `json:"bubblewrapPath"`
@@ -20837,6 +22092,7 @@ type SandboxConfig struct {
 	WritablePaths  []string `json:"writablePaths"`
 }
 
+// HardeningQuotaConfig limits how many sensitive tool calls a turn may issue.
 type HardeningQuotaConfig struct {
 	Enabled          bool `json:"enabled"`
 	MaxToolCalls     int  `json:"maxToolCalls"`
@@ -20845,6 +22101,7 @@ type HardeningQuotaConfig struct {
 	MaxSubagentCalls int  `json:"maxSubagentCalls"`
 }
 
+// ProviderConfig selects the LLM and embedding provider endpoints and limits.
 type ProviderConfig struct {
 	APIBase        string  `json:"apiBase"`
 	APIKey         string  `json:"apiKey"`
@@ -20855,6 +22112,7 @@ type ProviderConfig struct {
 	TimeoutSeconds int     `json:"timeoutSeconds"`
 }
 
+// ToolsConfig configures built-in tools and external MCP server integrations.
 type ToolsConfig struct {
 	BraveAPIKey         string                     `json:"braveApiKey"`
 	WebProxy            string                     `json:"webProxy"`
@@ -20864,19 +22122,25 @@ type ToolsConfig struct {
 	MCPServers          map[string]MCPServerConfig `json:"mcpServers"`
 }
 
+// CronConfig enables persistence for scheduled background jobs.
 type CronConfig struct {
 	Enabled   bool   `json:"enabled"`
 	StorePath string `json:"storePath"`
 }
 
+// DefaultHeartbeatSessionKey is the fallback session key used by heartbeat turns.
 const DefaultHeartbeatSessionKey = "heartbeat:default"
 
 const (
-	DefaultMCPTransport             = "stdio"
+	// DefaultMCPTransport is the default transport for MCP servers.
+	DefaultMCPTransport = "stdio"
+	// DefaultMCPConnectTimeoutSeconds is the default MCP dial timeout.
 	DefaultMCPConnectTimeoutSeconds = 10
-	DefaultMCPToolTimeoutSeconds    = 30
+	// DefaultMCPToolTimeoutSeconds is the default timeout for a single MCP tool call.
+	DefaultMCPToolTimeoutSeconds = 30
 )
 
+// MCPServerConfig describes one configured MCP server entry.
 type MCPServerConfig struct {
 	Enabled               bool              `json:"enabled"`
 	Transport             string            `json:"transport"`
@@ -20891,6 +22155,7 @@ type MCPServerConfig struct {
 	AllowInsecureHTTP     bool              `json:"allowInsecureHttp"`
 }
 
+// HeartbeatConfig controls recurring heartbeat turns sourced from a tasks file.
 type HeartbeatConfig struct {
 	Enabled         bool   `json:"enabled"`
 	IntervalMinutes int    `json:"intervalMinutes"`
@@ -20898,12 +22163,14 @@ type HeartbeatConfig struct {
 	SessionKey      string `json:"sessionKey"`
 }
 
+// ServiceConfig configures the optional authenticated service listener.
 type ServiceConfig struct {
 	Enabled bool   `json:"enabled"`
 	Listen  string `json:"listen"`
 	Secret  string `json:"secret"`
 }
 
+// SubagentsConfig limits the internal subagent queue and worker pool.
 type SubagentsConfig struct {
 	Enabled            bool `json:"enabled"`
 	MaxConcurrent      int  `json:"maxConcurrent"`
@@ -20911,6 +22178,7 @@ type SubagentsConfig struct {
 	TaskTimeoutSeconds int  `json:"taskTimeoutSeconds"`
 }
 
+// TelegramChannelConfig configures Telegram ingress and delivery.
 type TelegramChannelConfig struct {
 	Enabled        bool     `json:"enabled"`
 	OpenAccess     bool     `json:"openAccess"`
@@ -20921,6 +22189,7 @@ type TelegramChannelConfig struct {
 	AllowedChatIDs []string `json:"allowedChatIds"`
 }
 
+// SlackChannelConfig configures Slack socket-mode ingress and delivery.
 type SlackChannelConfig struct {
 	Enabled          bool     `json:"enabled"`
 	OpenAccess       bool     `json:"openAccess"`
@@ -20933,6 +22202,7 @@ type SlackChannelConfig struct {
 	RequireMention   bool     `json:"requireMention"`
 }
 
+// DiscordChannelConfig configures Discord ingress and delivery.
 type DiscordChannelConfig struct {
 	Enabled          bool     `json:"enabled"`
 	OpenAccess       bool     `json:"openAccess"`
@@ -20944,6 +22214,7 @@ type DiscordChannelConfig struct {
 	RequireMention   bool     `json:"requireMention"`
 }
 
+// WhatsAppBridgeConfig configures the external WhatsApp bridge connection.
 type WhatsAppBridgeConfig struct {
 	Enabled     bool     `json:"enabled"`
 	OpenAccess  bool     `json:"openAccess"`
@@ -20953,6 +22224,7 @@ type WhatsAppBridgeConfig struct {
 	AllowedFrom []string `json:"allowedFrom"`
 }
 
+// EmailChannelConfig configures email polling, access control, and replies.
 type EmailChannelConfig struct {
 	Enabled             bool     `json:"enabled"`
 	OpenAccess          bool     `json:"openAccess"`
@@ -20979,6 +22251,7 @@ type EmailChannelConfig struct {
 	SMTPPassword        string   `json:"smtpPassword"`
 }
 
+// ChannelsConfig groups per-channel transport settings.
 type ChannelsConfig struct {
 	Telegram TelegramChannelConfig `json:"telegram"`
 	Slack    SlackChannelConfig    `json:"slack"`
@@ -20987,6 +22260,7 @@ type ChannelsConfig struct {
 	Email    EmailChannelConfig    `json:"email"`
 }
 
+// DocIndexConfig controls workspace document indexing for retrieval.
 type DocIndexConfig struct {
 	Enabled        bool     `json:"enabled"`
 	Roots          []string `json:"roots"`
@@ -20998,6 +22272,7 @@ type DocIndexConfig struct {
 	RetrieveLimit  int      `json:"retrieveLimit"`
 }
 
+// SkillsConfig controls managed skill loading, policy, and runtime behavior.
 type SkillsConfig struct {
 	EnableExec    bool                        `json:"enableExec"`
 	MaxRunSeconds int                         `json:"maxRunSeconds"`
@@ -21008,6 +22283,7 @@ type SkillsConfig struct {
 	ClawHub       ClawHubConfig               `json:"clawHub"`
 }
 
+// SkillPolicyConfig defines which external skills are trusted or blocked.
 type SkillPolicyConfig struct {
 	QuarantineByDefault bool     `json:"quarantineByDefault"`
 	Approved            []string `json:"approved"`
@@ -21016,12 +22292,14 @@ type SkillPolicyConfig struct {
 	TrustedRegistries   []string `json:"trustedRegistries"`
 }
 
+// SkillsLoadConfig controls additional skill directories and file watching.
 type SkillsLoadConfig struct {
 	ExtraDirs       []string `json:"extraDirs"`
 	Watch           bool     `json:"watch"`
 	WatchDebounceMS int      `json:"watchDebounceMs"`
 }
 
+// SkillEntryConfig overrides configuration for a single named skill.
 type SkillEntryConfig struct {
 	Enabled *bool             `json:"enabled,omitempty"`
 	APIKey  string            `json:"apiKey"`
@@ -21029,12 +22307,14 @@ type SkillEntryConfig struct {
 	Config  map[string]any    `json:"config"`
 }
 
+// ClawHubConfig configures the default remote skill registry.
 type ClawHubConfig struct {
 	SiteURL     string `json:"siteUrl"`
 	RegistryURL string `json:"registryUrl"`
 	InstallDir  string `json:"installDir"`
 }
 
+// WebhookConfig configures the webhook trigger listener.
 type WebhookConfig struct {
 	Enabled   bool   `json:"enabled"`
 	Addr      string `json:"addr"`
@@ -21042,6 +22322,7 @@ type WebhookConfig struct {
 	MaxBodyKB int    `json:"maxBodyKB"`
 }
 
+// FileWatchConfig configures filesystem-based trigger polling.
 type FileWatchConfig struct {
 	Enabled         bool     `json:"enabled"`
 	Paths           []string `json:"paths"`
@@ -21049,21 +22330,25 @@ type FileWatchConfig struct {
 	DebounceSeconds int      `json:"debounceSeconds"`
 }
 
+// TriggerConfig groups external trigger sources.
 type TriggerConfig struct {
 	Webhook   WebhookConfig   `json:"webhook"`
 	FileWatch FileWatchConfig `json:"fileWatch"`
 }
 
+// SessionConfig controls session-sharing defaults and identity links.
 type SessionConfig struct {
 	DirectMessagesShareDefault bool                  `json:"directMessagesShareDefault"`
 	IdentityLinks              []SessionIdentityLink `json:"identityLinks"`
 }
 
+// SessionIdentityLink maps a canonical identity to equivalent peer identities.
 type SessionIdentityLink struct {
 	Canonical string   `json:"canonical"`
 	Peers     []string `json:"peers"`
 }
 
+// SecurityConfig groups secret storage, auditing, profiles, and network policy.
 type SecurityConfig struct {
 	SecretStore SecretStoreConfig    `json:"secretStore"`
 	Audit       AuditConfig          `json:"audit"`
@@ -21071,12 +22356,14 @@ type SecurityConfig struct {
 	Network     NetworkPolicyConfig  `json:"network"`
 }
 
+// SecretStoreConfig configures encrypted secret persistence.
 type SecretStoreConfig struct {
 	Enabled  bool   `json:"enabled"`
 	Required bool   `json:"required"`
 	KeyFile  string `json:"keyFile"`
 }
 
+// AuditConfig configures append-only audit logging and verification.
 type AuditConfig struct {
 	Enabled       bool   `json:"enabled"`
 	Strict        bool   `json:"strict"`
@@ -21084,6 +22371,7 @@ type AuditConfig struct {
 	VerifyOnStart bool   `json:"verifyOnStart"`
 }
 
+// AccessProfilesConfig maps channels and triggers onto named access profiles.
 type AccessProfilesConfig struct {
 	Enabled  bool                           `json:"enabled"`
 	Default  string                         `json:"default"`
@@ -21092,6 +22380,7 @@ type AccessProfilesConfig struct {
 	Profiles map[string]AccessProfileConfig `json:"profiles"`
 }
 
+// AccessProfileConfig limits tools, hosts, and write paths for a profile.
 type AccessProfileConfig struct {
 	MaxCapability  string   `json:"maxCapability"`
 	AllowedTools   []string `json:"allowedTools"`
@@ -21100,6 +22389,7 @@ type AccessProfileConfig struct {
 	AllowSubagents bool     `json:"allowSubagents"`
 }
 
+// NetworkPolicyConfig defines outbound network restrictions.
 type NetworkPolicyConfig struct {
 	Enabled       bool     `json:"enabled"`
 	DefaultDeny   bool     `json:"defaultDeny"`
@@ -21108,6 +22398,7 @@ type NetworkPolicyConfig struct {
 	AllowPrivate  bool     `json:"allowPrivate"`
 }
 
+// Default returns the baseline configuration used for new installations.
 func Default() Config {
 	home, _ := os.UserHomeDir()
 	root := filepath.Join(home, ".or3-intern")
@@ -21292,11 +22583,13 @@ func Default() Config {
 	}
 }
 
+// DefaultPath returns the default on-disk config file path.
 func DefaultPath() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".or3-intern", "config.json")
 }
 
+// ApplyEnvOverrides applies supported OR3_* environment variable overrides in place.
 func ApplyEnvOverrides(cfg *Config) {
 	if cfg == nil {
 		return
@@ -21404,6 +22697,7 @@ func ApplyEnvOverrides(cfg *Config) {
 	}
 }
 
+// Save writes cfg to path using a private file mode.
 func Save(path string, cfg Config) error {
 	if path == "" {
 		path = DefaultPath()
@@ -21417,6 +22711,7 @@ func Save(path string, cfg Config) error {
 	return os.Chmod(path, 0o600)
 }
 
+// Load reads configuration from path, creating a default file when missing.
 func Load(path string) (Config, error) {
 	cfg := Default()
 	if path == "" {
@@ -21984,6 +23279,7 @@ func hasNonEmpty(values []string) bool {
 
 ## File: internal/agent/runtime.go
 ````go
+// Package agent coordinates prompt building, tool execution, and turn delivery.
 package agent
 
 import (
@@ -22018,10 +23314,12 @@ const maxTrackedQuotaSessions = 1024
 
 type trustedToolAccessContextKey struct{}
 
+// Deliverer sends a completed response to a channel target.
 type Deliverer interface {
 	Deliver(ctx context.Context, channel, to, text string) error
 }
 
+// MetaDeliverer sends a completed response with channel-specific metadata.
 type MetaDeliverer interface {
 	DeliverWithMeta(ctx context.Context, channel, to, text string, meta map[string]any) error
 }
@@ -22031,6 +23329,7 @@ type sessionLock struct {
 	refs int
 }
 
+// Runtime executes conversational turns against the configured model and tools.
 type Runtime struct {
 	DB               *db.DB
 	Provider         *providers.Client
@@ -22069,6 +23368,7 @@ type sessionQuotaState struct {
 	LastSeen      time.Time
 }
 
+// BackgroundRunInput describes an isolated subagent-style background run.
 type BackgroundRunInput struct {
 	SessionKey       string
 	ParentSessionKey string
@@ -22080,14 +23380,11 @@ type BackgroundRunInput struct {
 	ReplyTo          string
 }
 
+// BackgroundRunResult contains the final persisted outputs of a background run.
 type BackgroundRunResult struct {
 	FinalText  string
 	Preview    string
 	ArtifactID string
-}
-
-func (r *Runtime) lockFor(key string) *sync.Mutex {
-	return &r.getSessionLock(key).mu
 }
 
 func (r *Runtime) acquireSessionLock(key string) *sessionLock {
@@ -22135,6 +23432,7 @@ func (r *Runtime) getSessionLock(key string) *sessionLock {
 	return entry
 }
 
+// Handle routes a published event into the runtime turn pipeline.
 func (r *Runtime) Handle(ctx context.Context, ev bus.Event) error {
 	ctx = r.contextWithEventProfile(ctx, ev)
 	entry := r.acquireSessionLock(ev.SessionKey)
@@ -22401,6 +23699,7 @@ func parseSkillCommand(message string) (commandName string, rawArgs string, ok b
 	return commandName, rawArgs, true
 }
 
+// BuildPromptSnapshot builds the prompt snapshot for a normal user turn.
 func (r *Runtime) BuildPromptSnapshot(ctx context.Context, sessionKey string, userMessage string) ([]providers.ChatMessage, error) {
 	if r.Builder == nil {
 		return nil, fmt.Errorf("runtime builder not configured")
@@ -22417,6 +23716,7 @@ func (r *Runtime) BuildPromptSnapshot(ctx context.Context, sessionKey string, us
 	return messages, nil
 }
 
+// BuildPromptSnapshotWithOptions builds a prompt snapshot with explicit turn options.
 func (r *Runtime) BuildPromptSnapshotWithOptions(ctx context.Context, opts BuildOptions) ([]providers.ChatMessage, error) {
 	if r.Builder == nil {
 		return nil, fmt.Errorf("runtime builder not configured")
@@ -22433,6 +23733,7 @@ func (r *Runtime) BuildPromptSnapshotWithOptions(ctx context.Context, opts Build
 	return messages, nil
 }
 
+// RunBackground executes a background task without auto-persisting a user event.
 func (r *Runtime) RunBackground(ctx context.Context, input BackgroundRunInput) (BackgroundRunResult, error) {
 	ctx = r.contextWithProfileName(ctx, strings.TrimSpace(fmt.Sprint(input.Meta["profile_name"])))
 	entry := r.acquireSessionLock(input.SessionKey)
@@ -22607,7 +23908,7 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 
 		// Tool-call turn: close any partial stream that showed text.
 		if sw != nil {
-			_ = sw.Close(ctx, contentToString(msg.Content))
+			_ = sw.Abort(ctx)
 		}
 
 		messages = append(messages, providers.ChatMessage{Role: "assistant", Content: msg.Content, ToolCalls: msg.ToolCalls})
@@ -22647,7 +23948,7 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 			messages = append(messages, providers.ChatMessage{Role: "tool", ToolCallID: tc.ID, Content: sendOut})
 		}
 	}
-	return "(no response)", false, nil
+	return "", false, fmt.Errorf("max tool loops exceeded for session %s", sessionKey)
 }
 
 func (r *Runtime) effectiveTools(ctx context.Context, fallback *tools.Registry) *tools.Registry {
@@ -22700,25 +24001,7 @@ func (r *Runtime) guardToolExecution(ctx context.Context, tool tools.Tool, capab
 	if !r.Hardening.Quotas.Enabled {
 		return nil
 	}
-	state := r.sessionQuotaState(tools.SessionFromContext(ctx))
-	if err := quotaIncrement(&state.ToolCalls, r.Hardening.Quotas.MaxToolCalls, "tool calls", tool.Name()); err != nil {
-		return err
-	}
-	switch tool.Name() {
-	case "exec", "run_skill_script":
-		if err := quotaIncrement(&state.ExecCalls, r.Hardening.Quotas.MaxExecCalls, "exec calls", tool.Name()); err != nil {
-			return err
-		}
-	case "web_fetch", "web_search":
-		if err := quotaIncrement(&state.WebCalls, r.Hardening.Quotas.MaxWebCalls, "web calls", tool.Name()); err != nil {
-			return err
-		}
-	case "spawn_subagent":
-		if err := quotaIncrement(&state.SubagentCalls, r.Hardening.Quotas.MaxSubagentCalls, "subagent calls", tool.Name()); err != nil {
-			return err
-		}
-	}
-	return nil
+	return r.incrementQuota(tools.SessionFromContext(ctx), tool.Name())
 }
 
 func (r *Runtime) enforceSkillPolicy(ctx context.Context, tool tools.Tool, params map[string]any) error {
@@ -22984,6 +24267,26 @@ func formatToolExecutionError(out string, err error) string {
 	return out + "\n\nerror: " + err.Error()
 }
 
+func (r *Runtime) incrementQuota(sessionKey string, toolName string) error {
+	r.quotaMu.Lock()
+	defer r.quotaMu.Unlock()
+
+	state := r.sessionQuotaStateLocked(sessionKey)
+	if err := quotaIncrement(&state.ToolCalls, r.Hardening.Quotas.MaxToolCalls, "tool calls", toolName); err != nil {
+		return err
+	}
+	switch toolName {
+	case "exec", "run_skill_script":
+		return quotaIncrement(&state.ExecCalls, r.Hardening.Quotas.MaxExecCalls, "exec calls", toolName)
+	case "web_fetch", "web_search":
+		return quotaIncrement(&state.WebCalls, r.Hardening.Quotas.MaxWebCalls, "web calls", toolName)
+	case "spawn_subagent":
+		return quotaIncrement(&state.SubagentCalls, r.Hardening.Quotas.MaxSubagentCalls, "subagent calls", toolName)
+	default:
+		return nil
+	}
+}
+
 func (r *Runtime) sessionQuotaState(sessionKey string) *sessionQuotaState {
 	sessionKey = strings.TrimSpace(sessionKey)
 	if sessionKey == "" {
@@ -22991,6 +24294,10 @@ func (r *Runtime) sessionQuotaState(sessionKey string) *sessionQuotaState {
 	}
 	r.quotaMu.Lock()
 	defer r.quotaMu.Unlock()
+	return r.sessionQuotaStateLocked(sessionKey)
+}
+
+func (r *Runtime) sessionQuotaStateLocked(sessionKey string) *sessionQuotaState {
 	if r.quotas == nil {
 		r.quotas = map[string]*sessionQuotaState{}
 	}
@@ -23212,6 +24519,7 @@ func toToolDefs(reg *tools.Registry) []providers.ToolDef {
 }
 
 // Cron runner helper: turns a job into a bus event message
+// CronRunner adapts the event bus into a cron.Runner.
 func CronRunner(b *bus.Bus, defaultSessionKey string) cron.Runner {
 	return func(ctx context.Context, job cron.CronJob) error {
 		_ = ctx
@@ -23232,6 +24540,7 @@ func CronRunner(b *bus.Bus, defaultSessionKey string) cron.Runner {
 	}
 }
 
+// WithTimeout derives a timeout context when sec is positive.
 func WithTimeout(ctx context.Context, sec int) (context.Context, context.CancelFunc) {
 	if sec <= 0 {
 		sec = 60

@@ -3,6 +3,7 @@ package tools
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"or3-intern/internal/approval"
 	"or3-intern/internal/skills"
 )
 
@@ -21,6 +23,7 @@ type RunSkillScript struct {
 	ChildEnvAllowlist []string
 	Sandbox           BubblewrapConfig
 	OutputMaxBytes    int
+	ApprovalBroker    *approval.Broker
 }
 
 func (t *RunSkillScript) Capability() CapabilityLevel { return CapabilityPrivileged }
@@ -87,6 +90,31 @@ func (t *RunSkillScript) Execute(ctx context.Context, params map[string]any) (st
 	if v, ok := params["timeoutSeconds"].(float64); ok && v > 0 {
 		timeout = time.Duration(int(v)) * time.Second
 	}
+	childEnv := BuildChildEnv(os.Environ(), t.ChildEnvAllowlist, EnvFromContext(ctx), "")
+	if t.ApprovalBroker != nil {
+		identity := RequesterIdentityFromContext(ctx)
+		decision, err := t.ApprovalBroker.EvaluateSkillExec(ctx, approval.SkillEvaluation{
+			SkillID:        skill.Name,
+			Version:        skill.InstalledVersion,
+			Origin:         skill.Registry,
+			TrustState:     skill.PermissionState,
+			ScriptHash:     skillCommandHash(cmd),
+			EnvBindingHash: hashEnvBinding(childEnv),
+			TimeoutSeconds: int(timeout / time.Second),
+			AgentID:        firstRequester(identity.Actor),
+			SessionID:      SessionFromContext(ctx),
+			ApprovalToken:  ApprovalTokenFromContext(ctx),
+		})
+		if err != nil {
+			return "", err
+		}
+		if !decision.Allowed {
+			if decision.RequiresApproval {
+				return "", fmt.Errorf("approval required for skill execution (request %d)", decision.RequestID)
+			}
+			return "", fmt.Errorf("skill execution blocked: %s", decision.Reason)
+		}
+	}
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -98,7 +126,7 @@ func (t *RunSkillScript) Execute(ctx context.Context, params map[string]any) (st
 		command = exec.CommandContext(runCtx, cmd[0], cmd[1:]...)
 	}
 	command.Dir = skill.Dir
-	command.Env = BuildChildEnv(os.Environ(), t.ChildEnvAllowlist, EnvFromContext(ctx), "")
+	command.Env = childEnv
 	if stdin := strings.TrimSpace(fmt.Sprint(params["stdin"])); stdin != "" {
 		command.Stdin = strings.NewReader(stdin)
 	}
@@ -227,4 +255,18 @@ func stringArgs(raw any) []string {
 		}
 	}
 	return out
+}
+
+func skillCommandHash(cmd []string) string {
+	if len(cmd) == 0 {
+		return ""
+	}
+	if info, err := os.Stat(cmd[len(cmd)-1]); err == nil && !info.IsDir() {
+		if blob, readErr := os.ReadFile(cmd[len(cmd)-1]); readErr == nil {
+			sum := sha256.Sum256(blob)
+			return fmt.Sprintf("%x", sum[:])
+		}
+	}
+	sum := sha256.Sum256([]byte(strings.Join(cmd, "\x00")))
+	return fmt.Sprintf("%x", sum[:])
 }

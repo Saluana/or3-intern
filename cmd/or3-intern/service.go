@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"or3-intern/internal/agent"
+	"or3-intern/internal/approval"
 	"or3-intern/internal/bus"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
@@ -21,9 +23,14 @@ type serviceServer struct {
 	runtime         *agent.Runtime
 	subagentManager *agent.SubagentManager
 	jobs            *agent.JobRegistry
+	broker          *approval.Broker
 }
 
 func runServiceCommand(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, jobs *agent.JobRegistry) error {
+	return runServiceCommandWithBroker(ctx, cfg, rt, subagentManager, jobs, nil)
+}
+
+func runServiceCommandWithBroker(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, jobs *agent.JobRegistry, broker *approval.Broker) error {
 	if strings.TrimSpace(cfg.Service.Secret) == "" {
 		return fmt.Errorf("service secret is required")
 	}
@@ -36,15 +43,22 @@ func runServiceCommand(ctx context.Context, cfg config.Config, rt *agent.Runtime
 	if jobs == nil {
 		jobs = agent.NewJobRegistry(0, 0)
 	}
-	server := &serviceServer{runtime: rt, subagentManager: subagentManager, jobs: jobs}
+	server := &serviceServer{runtime: rt, subagentManager: subagentManager, jobs: jobs, broker: broker}
 	mux := http.NewServeMux()
 	mux.Handle("/internal/v1/turns", http.HandlerFunc(server.handleTurns))
 	mux.Handle("/internal/v1/subagents", http.HandlerFunc(server.handleSubagents))
 	mux.Handle("/internal/v1/jobs/", http.HandlerFunc(server.handleJobs))
+	mux.Handle("/internal/v1/pairing/requests", http.HandlerFunc(server.handlePairing))
+	mux.Handle("/internal/v1/pairing/requests/", http.HandlerFunc(server.handlePairing))
+	mux.Handle("/internal/v1/pairing/exchange", http.HandlerFunc(server.handlePairing))
+	mux.Handle("/internal/v1/devices", http.HandlerFunc(server.handleDevices))
+	mux.Handle("/internal/v1/devices/", http.HandlerFunc(server.handleDevices))
+	mux.Handle("/internal/v1/approvals", http.HandlerFunc(server.handleApprovals))
+	mux.Handle("/internal/v1/approvals/", http.HandlerFunc(server.handleApprovals))
 
 	httpServer := &http.Server{
 		Addr:              cfg.Service.Listen,
-		Handler:           serviceAuthMiddleware(cfg.Service.Secret, mux),
+		Handler:           serviceAuthMiddlewareWithBroker(cfg.Service.Secret, broker, mux),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -66,6 +80,282 @@ func runServiceCommand(ctx context.Context, cfg config.Config, rt *agent.Runtime
 	}
 }
 
+func (s *serviceServer) handlePairing(w http.ResponseWriter, r *http.Request) {
+	if s.broker == nil {
+		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "approval broker unavailable"})
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/internal/v1/pairing/")
+	if path == "requests" {
+		switch r.Method {
+		case http.MethodPost:
+			var body struct {
+				Role         string         `json:"role"`
+				DisplayName  string         `json:"display_name"`
+				DisplayName2 string         `json:"displayName"`
+				Origin       string         `json:"origin"`
+				Metadata     map[string]any `json:"metadata"`
+				DeviceID     string         `json:"device_id"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid request body"})
+				return
+			}
+			req, code, err := s.broker.CreatePairingRequest(r.Context(), approval.PairingRequestInput{Role: body.Role, DisplayName: serviceFirstNonEmpty(body.DisplayName, body.DisplayName2), Origin: body.Origin, Metadata: body.Metadata, DeviceID: body.DeviceID})
+			if err != nil {
+				writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+				return
+			}
+			writeServiceJSON(w, http.StatusAccepted, map[string]any{"id": req.ID, "device_id": req.DeviceID, "role": req.Role, "display_name": req.DisplayName, "expires_at": req.ExpiresAt, "code": code})
+		case http.MethodGet:
+			if !requireServiceRole(w, r, approval.RoleOperator) {
+				return
+			}
+			items, err := s.broker.ListPairingRequests(r.Context(), r.URL.Query().Get("status"), 100)
+			if err != nil {
+				writeServiceJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+				return
+			}
+			writeServiceJSON(w, http.StatusOK, map[string]any{"items": items})
+		default:
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		}
+		return
+	}
+	if path == "exchange" {
+		if r.Method != http.MethodPost {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		var body struct {
+			RequestID int64  `json:"request_id"`
+			Code      string `json:"code"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid request body"})
+			return
+		}
+		device, token, err := s.broker.ExchangePairingCode(r.Context(), approval.PairingExchangeInput{RequestID: body.RequestID, Code: body.Code})
+		if err != nil {
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		writeServiceJSON(w, http.StatusOK, map[string]any{"device_id": device.DeviceID, "role": device.Role, "token": token})
+		return
+	}
+	if !strings.HasPrefix(path, "requests/") {
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "pairing route not found"})
+		return
+	}
+	if !requireServiceRole(w, r, approval.RoleOperator) {
+		return
+	}
+	parts := strings.Split(strings.TrimPrefix(path, "requests/"), "/")
+	if len(parts) != 2 {
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "pairing route not found"})
+		return
+	}
+	id, err := parseServiceInt64(parts[0])
+	if err != nil {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid pairing request ID"})
+		return
+	}
+	switch parts[1] {
+	case "approve":
+		if r.Method != http.MethodPost {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		req, err := s.broker.ApprovePairingRequest(r.Context(), id, serviceAuthIdentityFromContext(r.Context()).Actor)
+		if err != nil {
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		writeServiceJSON(w, http.StatusOK, map[string]any{"id": req.ID, "status": req.Status})
+	case "deny":
+		if r.Method != http.MethodPost {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		if err := s.broker.DenyPairingRequest(r.Context(), id, serviceAuthIdentityFromContext(r.Context()).Actor); err != nil {
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		writeServiceJSON(w, http.StatusOK, map[string]any{"id": id, "status": "denied"})
+	default:
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "pairing action not found"})
+	}
+}
+
+func (s *serviceServer) handleDevices(w http.ResponseWriter, r *http.Request) {
+	if s.broker == nil {
+		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "approval broker unavailable"})
+		return
+	}
+	if !requireServiceRole(w, r, approval.RoleOperator) {
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/internal/v1/devices")
+	if path == "" || path == "/" {
+		if r.Method != http.MethodGet {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		items, err := s.broker.ListDevices(r.Context(), 100)
+		if err != nil {
+			writeServiceJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+			return
+		}
+		writeServiceJSON(w, http.StatusOK, map[string]any{"items": items})
+		return
+	}
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) != 2 || parts[0] == "" {
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "device route not found"})
+		return
+	}
+	deviceID := parts[0]
+	switch parts[1] {
+	case "revoke":
+		if r.Method != http.MethodPost {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		if err := s.broker.RevokeDevice(r.Context(), deviceID, serviceAuthIdentityFromContext(r.Context()).Actor); err != nil {
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		writeServiceJSON(w, http.StatusOK, map[string]any{"device_id": deviceID, "status": "revoked"})
+	case "rotate":
+		if r.Method != http.MethodPost {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		device, err := s.broker.DB.GetPairedDevice(r.Context(), deviceID)
+		if err != nil {
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		rotated, token, err := s.broker.RotateDeviceToken(r.Context(), device.DeviceID, device.Role, device.DisplayName, device.Metadata)
+		if err != nil {
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		writeServiceJSON(w, http.StatusOK, map[string]any{"device_id": rotated.DeviceID, "token": token})
+	default:
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "device action not found"})
+	}
+}
+
+func (s *serviceServer) handleApprovals(w http.ResponseWriter, r *http.Request) {
+	if s.broker == nil {
+		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "approval broker unavailable"})
+		return
+	}
+	if !requireServiceRole(w, r, approval.RoleOperator) {
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/internal/v1/approvals")
+	if path == "" || path == "/" {
+		if r.Method != http.MethodGet {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		items, err := s.broker.ListApprovalRequests(r.Context(), r.URL.Query().Get("status"), 100)
+		if err != nil {
+			writeServiceJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+			return
+		}
+		writeServiceJSON(w, http.StatusOK, map[string]any{"items": items})
+		return
+	}
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) == 1 {
+		if r.Method != http.MethodGet {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		id, err := parseServiceInt64(parts[0])
+		if err != nil {
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid approval ID"})
+			return
+		}
+		item, err := s.broker.DB.GetApprovalRequest(r.Context(), id)
+		if err != nil {
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		writeServiceJSON(w, http.StatusOK, map[string]any{"item": item})
+		return
+	}
+	if len(parts) != 2 {
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "approval route not found"})
+		return
+	}
+	id, err := parseServiceInt64(parts[0])
+	if err != nil {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid approval ID"})
+		return
+	}
+	switch parts[1] {
+	case "approve":
+		if r.Method != http.MethodPost {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		var body struct {
+			Allowlist bool   `json:"allowlist"`
+			Note      string `json:"note"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		issued, err := s.broker.ApproveRequest(r.Context(), id, serviceAuthIdentityFromContext(r.Context()).Actor, body.Allowlist, body.Note)
+		if err != nil {
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		writeServiceJSON(w, http.StatusOK, map[string]any{"request_id": id, "token": issued.Token, "allowlist_id": issued.AllowlistID})
+	case "deny":
+		if r.Method != http.MethodPost {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		var body struct {
+			Note string `json:"note"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if err := s.broker.DenyRequest(r.Context(), id, serviceAuthIdentityFromContext(r.Context()).Actor, body.Note); err != nil {
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		writeServiceJSON(w, http.StatusOK, map[string]any{"request_id": id, "status": "denied"})
+	default:
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "approval action not found"})
+	}
+}
+
+func parseServiceInt64(raw string) (int64, error) {
+	return strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+}
+
+func serviceFirstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func serviceApprovalTokenFromRequest(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	return serviceFirstNonEmpty(
+		r.Header.Get("X-Approval-Token"),
+		r.Header.Get("X-Or3-Approval-Token"),
+	)
+}
+
 func (s *serviceServer) handleTurns(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
@@ -78,6 +368,7 @@ func (s *serviceServer) handleTurns(w http.ResponseWriter, r *http.Request) {
 	}
 	audit := serviceAuditHeadersFromRequest(r)
 	req.Meta = mergeServiceAuditMeta(req.Meta, audit)
+	req.ApprovalToken = serviceFirstNonEmpty(req.ApprovalToken, serviceApprovalTokenFromRequest(r))
 	if req.SessionKey == "" || req.Message == "" {
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "session_key and message are required"})
 		return
@@ -87,7 +378,7 @@ func (s *serviceServer) handleTurns(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithCancel(withDetachedContext(r.Context()))
 	s.jobs.AttachCancel(job.ID, cancel)
-	go s.runTurnJob(ctx, job.ID, req)
+	go s.runTurnJob(ctx, job.ID, req, serviceAuthIdentityFromContext(r.Context()))
 
 	if acceptsSSE(r) {
 		s.streamJob(w, r, job.ID)
@@ -105,11 +396,13 @@ func (s *serviceServer) handleTurns(w http.ResponseWriter, r *http.Request) {
 	writeServiceJSON(w, statusCode, buildJobResponse(snapshot))
 }
 
-func (s *serviceServer) runTurnJob(ctx context.Context, jobID string, req serviceTurnRequest) {
+func (s *serviceServer) runTurnJob(ctx context.Context, jobID string, req serviceTurnRequest, identity serviceAuthIdentity) {
 	s.jobs.Publish(jobID, "started", serviceLifecyclePayload(req.SessionKey, req.Meta, map[string]any{"status": "running"}))
 	observer := &serviceObserver{ConversationObserver: s.jobs.Observer(jobID)}
 	runCtx := agent.ContextWithConversationObserver(ctx, observer)
 	runCtx = agent.ContextWithStreamingChannel(runCtx, agent.NullStreamer{})
+	runCtx = tools.ContextWithApprovalToken(runCtx, req.ApprovalToken)
+	runCtx = tools.ContextWithRequesterIdentity(runCtx, identity.Actor, identity.Role)
 	if req.RestrictTools {
 		filtered := tools.NewRegistry()
 		if len(req.AllowedTools) > 0 {
@@ -156,6 +449,7 @@ func (s *serviceServer) handleSubagents(w http.ResponseWriter, r *http.Request) 
 	}
 	audit := serviceAuditHeadersFromRequest(r)
 	req.Meta = mergeServiceAuditMeta(req.Meta, audit)
+	req.ApprovalToken = serviceFirstNonEmpty(req.ApprovalToken, serviceApprovalTokenFromRequest(r))
 	if req.ParentSessionKey == "" || req.Task == "" {
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "parent_session_key and task are required"})
 		return
@@ -171,6 +465,9 @@ func (s *serviceServer) handleSubagents(w http.ResponseWriter, r *http.Request) 
 		ReplyTo:          req.ReplyTo,
 		Meta:             req.Meta,
 		Timeout:          time.Duration(req.TimeoutSeconds) * time.Second,
+		ApprovalToken:    req.ApprovalToken,
+		RequesterActor:   serviceAuthIdentityFromContext(r.Context()).Actor,
+		RequesterRole:    serviceAuthIdentityFromContext(r.Context()).Role,
 	})
 	if err != nil {
 		statusCode := http.StatusBadGateway

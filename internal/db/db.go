@@ -210,6 +210,76 @@ func (d *DB) migrate(ctx context.Context) error {
 			created_at INTEGER NOT NULL
 		);`,
 		`CREATE INDEX IF NOT EXISTS audit_events_created_at ON audit_events(created_at);`,
+		`CREATE TABLE IF NOT EXISTS paired_devices(
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			device_id TEXT NOT NULL UNIQUE,
+			role TEXT NOT NULL,
+			display_name TEXT NOT NULL,
+			token_hash BLOB NOT NULL,
+			status TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			last_seen_at INTEGER NOT NULL,
+			revoked_at INTEGER NOT NULL DEFAULT 0,
+			metadata_json TEXT NOT NULL DEFAULT '{}'
+		);`,
+		`CREATE INDEX IF NOT EXISTS paired_devices_status_role ON paired_devices(status, role);`,
+		`CREATE TABLE IF NOT EXISTS pairing_requests(
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			device_id TEXT NOT NULL,
+			role TEXT NOT NULL,
+			display_name TEXT NOT NULL DEFAULT '',
+			origin TEXT NOT NULL DEFAULT '',
+			pairing_code_hash BLOB NOT NULL,
+			requested_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL,
+			status TEXT NOT NULL,
+			approver_id TEXT NOT NULL DEFAULT '',
+			approved_at INTEGER NOT NULL DEFAULT 0,
+			denied_at INTEGER NOT NULL DEFAULT 0,
+			metadata_json TEXT NOT NULL DEFAULT '{}'
+		);`,
+		`CREATE INDEX IF NOT EXISTS pairing_requests_status_expires_at ON pairing_requests(status, expires_at);`,
+		`CREATE TABLE IF NOT EXISTS approval_requests(
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			type TEXT NOT NULL,
+			subject_hash TEXT NOT NULL,
+			subject_json TEXT NOT NULL,
+			requester_agent_id TEXT NOT NULL DEFAULT '',
+			requester_session_id TEXT NOT NULL DEFAULT '',
+			execution_host_id TEXT NOT NULL,
+			status TEXT NOT NULL,
+			policy_mode TEXT NOT NULL,
+			requested_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL,
+			resolved_at INTEGER NOT NULL DEFAULT 0,
+			resolver_actor_id TEXT NOT NULL DEFAULT '',
+			resolution_kind TEXT NOT NULL DEFAULT '',
+			resolution_note TEXT NOT NULL DEFAULT ''
+		);`,
+		`CREATE INDEX IF NOT EXISTS approval_requests_status_type_requested_at ON approval_requests(status, type, requested_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS approval_requests_subject_hash_host ON approval_requests(subject_hash, execution_host_id);`,
+		`CREATE TABLE IF NOT EXISTS approval_allowlists(
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			domain TEXT NOT NULL,
+			scope_json TEXT NOT NULL,
+			matcher_json TEXT NOT NULL,
+			created_by TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL DEFAULT 0,
+			disabled_at INTEGER NOT NULL DEFAULT 0
+		);`,
+		`CREATE INDEX IF NOT EXISTS approval_allowlists_domain_created_at ON approval_allowlists(domain, created_at DESC);`,
+		`CREATE TABLE IF NOT EXISTS approval_tokens(
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			approval_request_id INTEGER NOT NULL,
+			subject_hash TEXT NOT NULL,
+			issued_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL,
+			issuer TEXT NOT NULL,
+			revoked_at INTEGER NOT NULL DEFAULT 0,
+			FOREIGN KEY(approval_request_id) REFERENCES approval_requests(id) ON DELETE CASCADE
+		);`,
+		`CREATE INDEX IF NOT EXISTS approval_tokens_request_expires_at ON approval_tokens(approval_request_id, expires_at);`,
 	}
 	for _, s := range stmts {
 		if _, err := d.SQL.ExecContext(ctx, s); err != nil {

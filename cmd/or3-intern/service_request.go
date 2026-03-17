@@ -18,6 +18,7 @@ type serviceTurnRequest struct {
 	RestrictTools bool
 	Meta          map[string]any
 	ProfileName   string
+	ApprovalToken string
 }
 
 type serviceSubagentRequest struct {
@@ -31,6 +32,7 @@ type serviceSubagentRequest struct {
 	ProfileName      string
 	Channel          string
 	ReplyTo          string
+	ApprovalToken    string
 }
 
 type serviceToolPolicyPayload struct {
@@ -54,6 +56,8 @@ type serviceTurnRequestPayload struct {
 	Meta                  map[string]any            `json:"meta"`
 	ProfileName           string                    `json:"profile_name"`
 	ProfileNameCamel      string                    `json:"profileName"`
+	ApprovalToken         string                    `json:"approval_token"`
+	ApprovalTokenCamel    string                    `json:"approvalToken"`
 }
 
 type serviceSubagentRequestPayload struct {
@@ -79,6 +83,8 @@ type serviceSubagentRequestPayload struct {
 	Channel               string                    `json:"channel"`
 	ReplyTo               string                    `json:"reply_to"`
 	ReplyToCamel          string                    `json:"replyTo"`
+	ApprovalToken         string                    `json:"approval_token"`
+	ApprovalTokenCamel    string                    `json:"approvalToken"`
 }
 
 func decodeServiceTurnRequest(body io.Reader, registry *tools.Registry) (serviceTurnRequest, error) {
@@ -101,6 +107,7 @@ func decodeServiceTurnRequest(body io.Reader, registry *tools.Registry) (service
 		RestrictTools: restrictTools,
 		Meta:          cloneMapOrEmpty(payload.Meta),
 		ProfileName:   firstNonEmptyString(payload.ProfileName, payload.ProfileNameCamel),
+		ApprovalToken: firstNonEmptyString(payload.ApprovalToken, payload.ApprovalTokenCamel),
 	}, nil
 }
 
@@ -139,6 +146,7 @@ func decodeServiceSubagentRequest(body io.Reader, registry *tools.Registry) (ser
 		ProfileName:    firstNonEmptyString(payload.ProfileName, payload.ProfileNameCamel),
 		Channel:        strings.TrimSpace(payload.Channel),
 		ReplyTo:        firstNonEmptyString(payload.ReplyTo, payload.ReplyToCamel),
+		ApprovalToken:  firstNonEmptyString(payload.ApprovalToken, payload.ApprovalTokenCamel),
 	}, nil
 }
 

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"or3-intern/internal/agent"
+	"or3-intern/internal/approval"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
 	"or3-intern/internal/providers"
@@ -31,6 +32,27 @@ func (t serviceTestTool) Parameters() map[string]any { return map[string]any{} }
 func (t serviceTestTool) Schema() map[string]any     { return map[string]any{} }
 func (t serviceTestTool) Execute(context.Context, map[string]any) (string, error) {
 	return "", nil
+}
+
+type serviceContextTool struct{}
+
+func (serviceContextTool) Name() string               { return "context_probe" }
+func (serviceContextTool) Description() string        { return "context_probe" }
+func (serviceContextTool) Parameters() map[string]any { return map[string]any{} }
+func (serviceContextTool) Schema() map[string]any     { return map[string]any{} }
+func (serviceContextTool) Execute(ctx context.Context, params map[string]any) (string, error) {
+	token := tools.ApprovalTokenFromContext(ctx)
+	identity := tools.RequesterIdentityFromContext(ctx)
+	wantToken := strings.TrimSpace(fmt.Sprint(params["token"]))
+	wantActor := strings.TrimSpace(fmt.Sprint(params["actor"]))
+	wantRole := strings.TrimSpace(fmt.Sprint(params["role"]))
+	if token != wantToken {
+		return "", fmt.Errorf("approval token mismatch: got %q want %q", token, wantToken)
+	}
+	if identity.Actor != wantActor || identity.Role != wantRole {
+		return "", fmt.Errorf("requester identity mismatch: got %#v want actor=%q role=%q", identity, wantActor, wantRole)
+	}
+	return "ok", nil
 }
 
 func TestServiceAuthMiddleware_RejectsMissingBearer(t *testing.T) {
@@ -171,6 +193,22 @@ func TestDecodeServiceTurnRequest_AcceptsToolPolicyAliases(t *testing.T) {
 	}
 }
 
+func TestDecodeServiceTurnRequest_AcceptsApprovalTokenAliases(t *testing.T) {
+	registry := tools.NewRegistry()
+
+	req, err := decodeServiceTurnRequest(strings.NewReader(`{
+		"session_key":"svc:approval",
+		"message":"hello",
+		"approvalToken":"token-1"
+	}`), registry)
+	if err != nil {
+		t.Fatalf("decodeServiceTurnRequest: %v", err)
+	}
+	if req.ApprovalToken != "token-1" {
+		t.Fatalf("expected approval token alias to populate approval token, got %#v", req)
+	}
+}
+
 func TestDecodeServiceSubagentRequest_AcceptsSessionAndToolPolicyAliases(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(serviceTestTool{name: "read_file"})
@@ -293,6 +331,86 @@ func TestServiceTurns_JSONResponse(t *testing.T) {
 		if event.Data["network_session_id"] != "sess_intern" {
 			t.Fatalf("expected network_session_id in lifecycle event, got %#v", event.Data)
 		}
+	}
+}
+
+func TestServiceTurns_PropagatesApprovalContext(t *testing.T) {
+	callCount := 0
+	rt, cleanup := buildServiceTestRuntime(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		var resp providers.ChatCompletionResponse
+		if callCount == 0 {
+			resp = providers.ChatCompletionResponse{
+				Choices: []struct {
+					Message struct {
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					} `json:"message"`
+				}{{
+					Message: struct {
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					}{
+						Role: "assistant",
+						ToolCalls: []providers.ToolCall{{
+							ID:   "tc1",
+							Type: "function",
+							Function: struct {
+								Name      string `json:"name"`
+								Arguments string `json:"arguments"`
+							}{
+								Name:      "context_probe",
+								Arguments: `{"token":"approve-token-1","actor":"service:shared-secret","role":"admin"}`,
+							},
+						}},
+					},
+				}},
+			}
+		} else {
+			resp = providers.ChatCompletionResponse{
+				Choices: []struct {
+					Message struct {
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					} `json:"message"`
+				}{{
+					Message: struct {
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					}{Role: "assistant", Content: "approved"},
+				}},
+			}
+		}
+		callCount++
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("Encode: %v", err)
+		}
+	})
+	defer cleanup()
+	rt.Tools.Register(serviceContextTool{})
+	server := &serviceServer{runtime: rt, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("c", 32), server)
+	defer httpServer.Close()
+
+	req := mustServiceRequest(t, httpServer, strings.Repeat("c", 32), http.MethodPost, "/internal/v1/turns", `{"session_key":"svc:ctx","message":"hello","approval_token":"approve-token-1"}`)
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	var payload map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if payload["status"] != "completed" {
+		t.Fatalf("expected completed job, got %#v", payload)
 	}
 }
 
@@ -696,7 +814,14 @@ func newServiceTestHTTPServer(t *testing.T, secret string, server *serviceServer
 	mux.Handle("/internal/v1/turns", http.HandlerFunc(server.handleTurns))
 	mux.Handle("/internal/v1/subagents", http.HandlerFunc(server.handleSubagents))
 	mux.Handle("/internal/v1/jobs/", http.HandlerFunc(server.handleJobs))
-	return httptest.NewServer(serviceAuthMiddleware(secret, mux))
+	mux.Handle("/internal/v1/pairing/requests", http.HandlerFunc(server.handlePairing))
+	mux.Handle("/internal/v1/pairing/requests/", http.HandlerFunc(server.handlePairing))
+	mux.Handle("/internal/v1/pairing/exchange", http.HandlerFunc(server.handlePairing))
+	mux.Handle("/internal/v1/devices", http.HandlerFunc(server.handleDevices))
+	mux.Handle("/internal/v1/devices/", http.HandlerFunc(server.handleDevices))
+	mux.Handle("/internal/v1/approvals", http.HandlerFunc(server.handleApprovals))
+	mux.Handle("/internal/v1/approvals/", http.HandlerFunc(server.handleApprovals))
+	return httptest.NewServer(serviceAuthMiddlewareWithBroker(secret, server.broker, mux))
 }
 
 func mustServiceRequest(t *testing.T, server *httptest.Server, secret, method, path, body string) *http.Request {
@@ -753,6 +878,206 @@ func mustReadBody(t *testing.T, body io.Reader) string {
 		t.Fatalf("ReadAll: %v", err)
 	}
 	return string(payload)
+}
+
+func buildServiceTestBroker(t *testing.T, mutate func(*config.ApprovalConfig)) (*approval.Broker, func()) {
+	t.Helper()
+	database, err := db.Open(filepath.Join(t.TempDir(), "service-approval-test.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	approvalCfg := config.Default().Security.Approvals
+	approvalCfg.Enabled = true
+	if mutate != nil {
+		mutate(&approvalCfg)
+	}
+	broker := &approval.Broker{
+		DB:      database,
+		Config:  approvalCfg,
+		HostID:  approvalCfg.HostID,
+		SignKey: []byte(strings.Repeat("k", 32)),
+	}
+	return broker, func() {
+		database.Close()
+	}
+}
+
+func mustJSONRequest(t *testing.T, method, url, body string) *http.Request {
+	t.Helper()
+	req, err := http.NewRequest(method, url, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return req
+}
+
+func mustDecodeJSONBody(t *testing.T, body io.Reader) map[string]any {
+	t.Helper()
+	var payload map[string]any
+	if err := json.NewDecoder(body).Decode(&payload); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	return payload
+}
+
+func TestServicePairingWorkflow_AllowsUnauthenticatedBootstrapAndPairedOperatorRoutes(t *testing.T) {
+	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Pairing.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+
+	server := &serviceServer{broker: broker, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("p", 32), server)
+	defer httpServer.Close()
+
+	createReq := mustJSONRequest(t, http.MethodPost, httpServer.URL+"/internal/v1/pairing/requests", `{"role":"operator","display_name":"Ops Laptop"}`)
+	createResp, err := httpServer.Client().Do(createReq)
+	if err != nil {
+		t.Fatalf("Do create pairing: %v", err)
+	}
+	defer createResp.Body.Close()
+	if createResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("expected create pairing 202, got %d (%s)", createResp.StatusCode, mustReadBody(t, createResp.Body))
+	}
+	created := mustDecodeJSONBody(t, createResp.Body)
+	requestID := int64(created["id"].(float64))
+	code := created["code"].(string)
+
+	approveReq := mustServiceRequest(t, httpServer, strings.Repeat("p", 32), http.MethodPost, fmt.Sprintf("/internal/v1/pairing/requests/%d/approve", requestID), "")
+	approveResp, err := httpServer.Client().Do(approveReq)
+	if err != nil {
+		t.Fatalf("Do approve pairing: %v", err)
+	}
+	defer approveResp.Body.Close()
+	if approveResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected approve pairing 200, got %d (%s)", approveResp.StatusCode, mustReadBody(t, approveResp.Body))
+	}
+
+	exchangeReq := mustJSONRequest(t, http.MethodPost, httpServer.URL+"/internal/v1/pairing/exchange", fmt.Sprintf(`{"request_id":%d,"code":%q}`, requestID, code))
+	exchangeResp, err := httpServer.Client().Do(exchangeReq)
+	if err != nil {
+		t.Fatalf("Do exchange pairing: %v", err)
+	}
+	defer exchangeResp.Body.Close()
+	if exchangeResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected exchange pairing 200, got %d (%s)", exchangeResp.StatusCode, mustReadBody(t, exchangeResp.Body))
+	}
+	exchanged := mustDecodeJSONBody(t, exchangeResp.Body)
+	token := exchanged["token"].(string)
+	if token == "" {
+		t.Fatal("expected paired device token")
+	}
+
+	deviceReq := mustJSONRequest(t, http.MethodGet, httpServer.URL+"/internal/v1/devices", "")
+	deviceReq.Header.Set("Authorization", "Bearer "+token)
+	deviceResp, err := httpServer.Client().Do(deviceReq)
+	if err != nil {
+		t.Fatalf("Do list devices: %v", err)
+	}
+	defer deviceResp.Body.Close()
+	if deviceResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected paired operator device access 200, got %d (%s)", deviceResp.StatusCode, mustReadBody(t, deviceResp.Body))
+	}
+}
+
+func TestServicePairingWorkflow_RejectsNonOperatorDeviceOnOperatorRoutes(t *testing.T) {
+	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Pairing.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+
+	server := &serviceServer{broker: broker, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("r", 32), server)
+	defer httpServer.Close()
+
+	createReq := mustJSONRequest(t, http.MethodPost, httpServer.URL+"/internal/v1/pairing/requests", `{"role":"service-client","display_name":"Worker"}`)
+	createResp, err := httpServer.Client().Do(createReq)
+	if err != nil {
+		t.Fatalf("Do create pairing: %v", err)
+	}
+	defer createResp.Body.Close()
+	created := mustDecodeJSONBody(t, createResp.Body)
+	requestID := int64(created["id"].(float64))
+	code := created["code"].(string)
+
+	approveReq := mustServiceRequest(t, httpServer, strings.Repeat("r", 32), http.MethodPost, fmt.Sprintf("/internal/v1/pairing/requests/%d/approve", requestID), "")
+	approveResp, err := httpServer.Client().Do(approveReq)
+	if err != nil {
+		t.Fatalf("Do approve pairing: %v", err)
+	}
+	defer approveResp.Body.Close()
+	if approveResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected approve pairing 200, got %d (%s)", approveResp.StatusCode, mustReadBody(t, approveResp.Body))
+	}
+
+	exchangeReq := mustJSONRequest(t, http.MethodPost, httpServer.URL+"/internal/v1/pairing/exchange", fmt.Sprintf(`{"request_id":%d,"code":%q}`, requestID, code))
+	exchangeResp, err := httpServer.Client().Do(exchangeReq)
+	if err != nil {
+		t.Fatalf("Do exchange pairing: %v", err)
+	}
+	defer exchangeResp.Body.Close()
+	exchanged := mustDecodeJSONBody(t, exchangeResp.Body)
+	token := exchanged["token"].(string)
+
+	deviceReq := mustJSONRequest(t, http.MethodGet, httpServer.URL+"/internal/v1/devices", "")
+	deviceReq.Header.Set("Authorization", "Bearer "+token)
+	deviceResp, err := httpServer.Client().Do(deviceReq)
+	if err != nil {
+		t.Fatalf("Do list devices: %v", err)
+	}
+	defer deviceResp.Body.Close()
+	if deviceResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected non-operator device to be forbidden, got %d (%s)", deviceResp.StatusCode, mustReadBody(t, deviceResp.Body))
+	}
+}
+
+func TestServiceApprovals_PairedOperatorCanApprovePendingRequest(t *testing.T) {
+	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Exec.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+
+	decision, err := broker.EvaluateExec(context.Background(), approval.ExecEvaluation{
+		ExecutablePath: "/bin/echo",
+		Argv:           []string{"hello"},
+		WorkingDir:     "/tmp",
+		ToolName:       "exec",
+	})
+	if err != nil {
+		t.Fatalf("EvaluateExec: %v", err)
+	}
+	if !decision.RequiresApproval || decision.RequestID == 0 {
+		t.Fatalf("expected pending approval request, got %#v", decision)
+	}
+
+	server := &serviceServer{broker: broker, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("a", 32), server)
+	defer httpServer.Close()
+
+	_, deviceToken, err := broker.RotateDeviceToken(context.Background(), "operator-1", approval.RoleOperator, "Operator", nil)
+	if err != nil {
+		t.Fatalf("RotateDeviceToken: %v", err)
+	}
+
+	approveReq := mustJSONRequest(t, http.MethodPost, fmt.Sprintf("%s/internal/v1/approvals/%d/approve", httpServer.URL, decision.RequestID), `{"note":"approved"}`)
+	approveReq.Header.Set("Authorization", "Bearer "+deviceToken)
+	approveResp, err := httpServer.Client().Do(approveReq)
+	if err != nil {
+		t.Fatalf("Do approve approval: %v", err)
+	}
+	defer approveResp.Body.Close()
+	if approveResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected approval 200, got %d (%s)", approveResp.StatusCode, mustReadBody(t, approveResp.Body))
+	}
+	payload := mustDecodeJSONBody(t, approveResp.Body)
+	approvalToken, _ := payload["token"].(string)
+	if approvalToken == "" {
+		t.Fatal("expected approval token in response")
+	}
+	if err := broker.VerifyApprovalToken(context.Background(), approvalToken, decision.SubjectHash, broker.HostID); err != nil {
+		t.Fatalf("VerifyApprovalToken: %v", err)
+	}
 }
 
 func TestRunServiceCommand_RefusesInvalidHostedProfile(t *testing.T) {

@@ -3,13 +3,17 @@ package tools
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
+
+	"or3-intern/internal/approval"
 )
 
 type ExecTool struct {
@@ -24,6 +28,7 @@ type ExecTool struct {
 	DisableShell      bool
 	OutputMaxBytes    int
 	BlockedPatterns   []string
+	ApprovalBroker    *approval.Broker
 }
 
 const defaultExecOutputMaxBytes = 10000
@@ -118,6 +123,33 @@ func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, 
 		program = resolvedProgram
 	}
 
+	childEnv := BuildChildEnv(os.Environ(), t.ChildEnvAllowlist, EnvFromContext(ctx), t.PathAppend)
+	if t.ApprovalBroker != nil {
+		identity := RequesterIdentityFromContext(ctx)
+		evaluation := approval.ExecEvaluation{
+			ExecutablePath: program,
+			Argv:           execArgv(program, legacyCommand, params),
+			WorkingDir:     cwd,
+			EnvBindingHash: hashEnvBinding(childEnv),
+			ScriptHash:     legacyCommandHash(legacyCommand),
+			AgentID:        firstRequester(identity.Actor),
+			SessionID:      SessionFromContext(ctx),
+			ToolName:       t.Name(),
+			AccessProfile:  ActiveProfileFromContext(ctx).Name,
+			ApprovalToken:  ApprovalTokenFromContext(ctx),
+		}
+		decision, err := t.ApprovalBroker.EvaluateExec(ctx, evaluation)
+		if err != nil {
+			return "", err
+		}
+		if !decision.Allowed {
+			if decision.RequiresApproval {
+				return "", fmt.Errorf("approval required for exec (request %d)", decision.RequestID)
+			}
+			return "", fmt.Errorf("exec blocked: %s", decision.Reason)
+		}
+	}
+
 	to := t.Timeout
 	if v, ok := params["timeoutSeconds"].(float64); ok && v > 0 {
 		to = time.Duration(int(v)) * time.Second
@@ -139,7 +171,7 @@ func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, 
 		c = exec.CommandContext(cctx, program, stringArgs(params["args"])...)
 	}
 	c.Dir = cwd
-	c.Env = BuildChildEnv(os.Environ(), t.ChildEnvAllowlist, EnvFromContext(ctx), t.PathAppend)
+	c.Env = childEnv
 	var stdout, stderr bytes.Buffer
 	c.Stdout = &stdout
 	c.Stderr = &stderr
@@ -238,4 +270,39 @@ func hasPathSeparator(path string) bool {
 
 func formatCommandOutput(stdout, stderr string) string {
 	return fmt.Sprintf("stdout:\n%s\n\nstderr:\n%s", stdout, stderr)
+}
+
+func execArgv(program string, legacyCommand string, params map[string]any) []string {
+	if strings.TrimSpace(legacyCommand) != "" {
+		return []string{"bash", "-lc", legacyCommand}
+	}
+	argv := []string{program}
+	argv = append(argv, stringArgs(params["args"])...)
+	return argv
+}
+
+func legacyCommandHash(command string) string {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(command))
+	return fmt.Sprintf("%x", sum[:])
+}
+
+func hashEnvBinding(env []string) string {
+	if len(env) == 0 {
+		return ""
+	}
+	cloned := append([]string{}, env...)
+	sort.Strings(cloned)
+	sum := sha256.Sum256([]byte(strings.Join(cloned, "\n")))
+	return fmt.Sprintf("%x", sum[:])
+}
+
+func firstRequester(actor string) string {
+	if strings.TrimSpace(actor) != "" {
+		return strings.TrimSpace(actor)
+	}
+	return "local"
 }

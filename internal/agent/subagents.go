@@ -53,6 +53,9 @@ type ServiceSubagentRequest struct {
 	ReplyTo          string
 	Meta             map[string]any
 	Timeout          time.Duration
+	ApprovalToken    string
+	RequesterActor   string
+	RequesterRole    string
 }
 
 type subagentJobMetadata struct {
@@ -62,6 +65,9 @@ type subagentJobMetadata struct {
 	PromptSnapshot []providers.ChatMessage `json:"prompt_snapshot,omitempty"`
 	TimeoutSeconds int                     `json:"timeout_seconds,omitempty"`
 	ServiceMeta    map[string]any          `json:"service_meta,omitempty"`
+	ApprovalToken  string                  `json:"approval_token,omitempty"`
+	RequesterActor string                  `json:"requester_actor,omitempty"`
+	RequesterRole  string                  `json:"requester_role,omitempty"`
 }
 
 // Start launches the background workers and resumes queued jobs.
@@ -208,6 +214,9 @@ func (m *SubagentManager) EnqueueService(ctx context.Context, req ServiceSubagen
 		RestrictTools:  req.RestrictTools,
 		PromptSnapshot: append([]providers.ChatMessage{}, req.PromptSnapshot...),
 		ServiceMeta:    cloneMap(req.Meta),
+		ApprovalToken:  strings.TrimSpace(req.ApprovalToken),
+		RequesterActor: strings.TrimSpace(req.RequesterActor),
+		RequesterRole:  strings.TrimSpace(req.RequesterRole),
 	}
 	if req.Timeout > 0 {
 		metadata.TimeoutSeconds = int(req.Timeout / time.Second)
@@ -290,6 +299,8 @@ func (m *SubagentManager) executeJob(job db.SubagentJob) {
 
 func (m *SubagentManager) runJob(ctx context.Context, job db.SubagentJob) (BackgroundRunResult, error) {
 	metadata := parseSubagentJobMetadata(job.MetadataJSON)
+	ctx = tools.ContextWithApprovalToken(ctx, metadata.ApprovalToken)
+	ctx = tools.ContextWithRequesterIdentity(ctx, metadata.RequesterActor, metadata.RequesterRole)
 	promptSnapshot := append([]providers.ChatMessage{}, metadata.PromptSnapshot...)
 	var err error
 	if len(promptSnapshot) == 0 {
@@ -413,6 +424,9 @@ func parseSubagentJobMetadata(raw string) subagentJobMetadata {
 		return metadata
 	}
 	metadata.ProfileName = strings.TrimSpace(metadata.ProfileName)
+	metadata.ApprovalToken = strings.TrimSpace(metadata.ApprovalToken)
+	metadata.RequesterActor = strings.TrimSpace(metadata.RequesterActor)
+	metadata.RequesterRole = strings.TrimSpace(metadata.RequesterRole)
 	return metadata
 }
 

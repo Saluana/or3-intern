@@ -1,0 +1,234 @@
+package approval
+
+import (
+	"context"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"or3-intern/internal/config"
+	"or3-intern/internal/db"
+)
+
+func newTestBroker(t *testing.T, mutate func(*config.ApprovalConfig)) (*Broker, func()) {
+	t.Helper()
+	database, err := db.Open(filepath.Join(t.TempDir(), "approval-test.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	approvalCfg := config.Default().Security.Approvals
+	approvalCfg.Enabled = true
+	approvalCfg.HostID = "test-host"
+	if mutate != nil {
+		mutate(&approvalCfg)
+	}
+	broker := &Broker{
+		DB:      database,
+		Config:  approvalCfg,
+		HostID:  approvalCfg.HostID,
+		SignKey: []byte("0123456789abcdef0123456789abcdef"),
+		Now: func() time.Time {
+			return time.Unix(1700000000, 0).UTC()
+		},
+	}
+	return broker, func() {
+		database.Close()
+	}
+}
+
+func TestBroker_EvaluateExecReusesPendingApprovalRequest(t *testing.T) {
+	broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Exec.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+
+	input := ExecEvaluation{
+		ExecutablePath: "/bin/echo",
+		Argv:           []string{"hello"},
+		WorkingDir:     "/tmp",
+		ToolName:       "exec",
+		AgentID:        "agent-1",
+		SessionID:      "session-1",
+	}
+	first, err := broker.EvaluateExec(context.Background(), input)
+	if err != nil {
+		t.Fatalf("EvaluateExec first: %v", err)
+	}
+	second, err := broker.EvaluateExec(context.Background(), input)
+	if err != nil {
+		t.Fatalf("EvaluateExec second: %v", err)
+	}
+	if !first.RequiresApproval || first.RequestID == 0 {
+		t.Fatalf("expected first evaluation to require approval, got %#v", first)
+	}
+	if second.RequestID != first.RequestID {
+		t.Fatalf("expected duplicate request reuse, got first=%d second=%d", first.RequestID, second.RequestID)
+	}
+	if second.SubjectHash != first.SubjectHash {
+		t.Fatalf("expected stable subject hash, got %q and %q", first.SubjectHash, second.SubjectHash)
+	}
+}
+
+func TestBroker_EvaluateExec_AllowsApprovedTokenAcrossRetries(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Exec.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+	broker.Now = func() time.Time { return now }
+
+	input := ExecEvaluation{
+		ExecutablePath: "/bin/echo",
+		Argv:           []string{"hello"},
+		WorkingDir:     "/tmp",
+		ToolName:       "exec",
+		AgentID:        "agent-1",
+		SessionID:      "session-1",
+	}
+	first, err := broker.EvaluateExec(context.Background(), input)
+	if err != nil {
+		t.Fatalf("EvaluateExec first: %v", err)
+	}
+	issued, err := broker.ApproveRequest(context.Background(), first.RequestID, "cli:test", false, "ok")
+	if err != nil {
+		t.Fatalf("ApproveRequest: %v", err)
+	}
+
+	now = now.Add(2 * time.Minute)
+	retry, err := broker.EvaluateExec(context.Background(), ExecEvaluation{
+		ExecutablePath: input.ExecutablePath,
+		Argv:           append([]string{}, input.Argv...),
+		WorkingDir:     input.WorkingDir,
+		ToolName:       input.ToolName,
+		AgentID:        input.AgentID,
+		SessionID:      input.SessionID,
+		ApprovalToken:  issued.Token,
+	})
+	if err != nil {
+		t.Fatalf("EvaluateExec retry: %v", err)
+	}
+	if !retry.Allowed {
+		t.Fatalf("expected approved token to allow retry, got %#v", retry)
+	}
+}
+
+func TestBroker_PairingAndApprovalTokenRoundTrip(t *testing.T) {
+	broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Pairing.Mode = config.ApprovalModeAsk
+		cfg.Exec.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+
+	pairingReq, code, err := broker.CreatePairingRequest(context.Background(), PairingRequestInput{
+		Role:        RoleOperator,
+		DisplayName: "Ops Laptop",
+		Origin:      "service-test",
+	})
+	if err != nil {
+		t.Fatalf("CreatePairingRequest: %v", err)
+	}
+	if _, err := broker.ApprovePairingRequest(context.Background(), pairingReq.ID, "cli:test"); err != nil {
+		t.Fatalf("ApprovePairingRequest: %v", err)
+	}
+	device, deviceToken, err := broker.ExchangePairingCode(context.Background(), PairingExchangeInput{RequestID: pairingReq.ID, Code: code})
+	if err != nil {
+		t.Fatalf("ExchangePairingCode: %v", err)
+	}
+	if device.DeviceID == "" || deviceToken == "" {
+		t.Fatal("expected paired device and token")
+	}
+	if _, err := broker.AuthenticateDeviceToken(context.Background(), deviceToken, RoleOperator); err != nil {
+		t.Fatalf("AuthenticateDeviceToken: %v", err)
+	}
+
+	decision, err := broker.EvaluateExec(context.Background(), ExecEvaluation{
+		ExecutablePath: "/bin/echo",
+		Argv:           []string{"approved"},
+		WorkingDir:     "/tmp",
+		ToolName:       "exec",
+	})
+	if err != nil {
+		t.Fatalf("EvaluateExec: %v", err)
+	}
+	issued, err := broker.ApproveRequest(context.Background(), decision.RequestID, "cli:test", false, "ok")
+	if err != nil {
+		t.Fatalf("ApproveRequest: %v", err)
+	}
+	if err := broker.VerifyApprovalToken(context.Background(), issued.Token, decision.SubjectHash, broker.HostID); err != nil {
+		t.Fatalf("VerifyApprovalToken: %v", err)
+	}
+}
+
+func TestBroker_ExchangePairingCode_IsSingleUse(t *testing.T) {
+	broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Pairing.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+
+	pairingReq, code, err := broker.CreatePairingRequest(context.Background(), PairingRequestInput{
+		Role:        RoleOperator,
+		DisplayName: "Ops Laptop",
+		Origin:      "service-test",
+	})
+	if err != nil {
+		t.Fatalf("CreatePairingRequest: %v", err)
+	}
+	if _, err := broker.ApprovePairingRequest(context.Background(), pairingReq.ID, "cli:test"); err != nil {
+		t.Fatalf("ApprovePairingRequest: %v", err)
+	}
+	if _, _, err := broker.ExchangePairingCode(context.Background(), PairingExchangeInput{RequestID: pairingReq.ID, Code: code}); err != nil {
+		t.Fatalf("ExchangePairingCode first: %v", err)
+	}
+	if _, _, err := broker.ExchangePairingCode(context.Background(), PairingExchangeInput{RequestID: pairingReq.ID, Code: code}); err == nil {
+		t.Fatal("expected second exchange to fail")
+	}
+}
+
+func TestBroker_CreatePairingRequest_HonorsPairingModes(t *testing.T) {
+	t.Run("deny rejects new pairing requests", func(t *testing.T) {
+		broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
+			cfg.Pairing.Mode = config.ApprovalModeDeny
+		})
+		defer cleanup()
+
+		if _, _, err := broker.CreatePairingRequest(context.Background(), PairingRequestInput{Role: RoleOperator, DisplayName: "Ops Laptop"}); err == nil {
+			t.Fatal("expected deny mode to reject pairing requests")
+		}
+	})
+
+	t.Run("trusted auto-approves pairing requests", func(t *testing.T) {
+		broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
+			cfg.Pairing.Mode = config.ApprovalModeTrusted
+		})
+		defer cleanup()
+
+		req, _, err := broker.CreatePairingRequest(context.Background(), PairingRequestInput{Role: RoleOperator, DisplayName: "Ops Laptop"})
+		if err != nil {
+			t.Fatalf("CreatePairingRequest: %v", err)
+		}
+		if req.Status != StatusApproved {
+			t.Fatalf("expected trusted pairing request to be auto-approved, got %#v", req)
+		}
+	})
+
+	t.Run("allowlist only permits known active devices", func(t *testing.T) {
+		broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
+			cfg.Pairing.Mode = config.ApprovalModeAllowlist
+		})
+		defer cleanup()
+
+		if _, _, err := broker.RotateDeviceToken(context.Background(), "device-1", RoleOperator, "Ops Laptop", nil); err != nil {
+			t.Fatalf("RotateDeviceToken: %v", err)
+		}
+		req, _, err := broker.CreatePairingRequest(context.Background(), PairingRequestInput{Role: RoleOperator, DeviceID: "device-1", DisplayName: "Ops Laptop"})
+		if err != nil {
+			t.Fatalf("CreatePairingRequest allowlisted: %v", err)
+		}
+		if req.Status != StatusApproved {
+			t.Fatalf("expected allowlisted device to be auto-approved, got %#v", req)
+		}
+		if _, _, err := broker.CreatePairingRequest(context.Background(), PairingRequestInput{Role: RoleOperator, DeviceID: "device-2", DisplayName: "Ops Laptop"}); err == nil {
+			t.Fatal("expected unknown device to be rejected in allowlist mode")
+		}
+	})
+}

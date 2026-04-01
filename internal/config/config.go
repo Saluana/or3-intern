@@ -1149,12 +1149,7 @@ func mustJSON(v any) []byte {
 }
 
 func normalizeInboundPolicy(policy InboundPolicy) InboundPolicy {
-	switch InboundPolicy(strings.ToLower(strings.TrimSpace(string(policy)))) {
-	case "", InboundPolicyDeny, InboundPolicyAllowlist, InboundPolicyPairing:
-		return InboundPolicy(strings.ToLower(strings.TrimSpace(string(policy))))
-	default:
-		return InboundPolicy(strings.ToLower(strings.TrimSpace(string(policy))))
-	}
+	return InboundPolicy(strings.ToLower(strings.TrimSpace(string(policy))))
 }
 
 // EffectiveInboundPolicy resolves the effective ingress policy for a channel,

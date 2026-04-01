@@ -40,9 +40,13 @@ The `init` command can store provider settings in `~/.or3-intern/config.json`, s
 - `or3-intern service` run the internal authenticated HTTP API for OR3 Net
 - `or3-intern agent -m "hello"` run a one-shot turn
 - `or3-intern doctor [--strict]` print hardening warnings for the current config
+- `or3-intern capabilities [--channel name|--trigger name|--json]` inspect the effective runtime posture, ingress policy, approvals, and access profiles
 - `or3-intern secrets <set|delete|list>` manage encrypted secret refs stored in SQLite
 - `or3-intern audit [verify]` inspect or verify the append-only audit chain
 - `or3-intern skills ...` list, inspect, search, install, update, check, and remove skills
+- `or3-intern approvals <list|show|approve|deny|allowlist>` inspect and resolve approval requests
+- `or3-intern devices <list|requests|approve|deny|rotate|revoke>` inspect paired devices and legacy pairing request helpers
+- `or3-intern pairing <list|request|approve|deny|exchange>` manage first-class pairing workflows, including channel-bound identities
 - `or3-intern scope <link|list|resolve>` link multiple session keys to a shared history scope
 - `or3-intern migrate-jsonl /path/to/session.jsonl [session_key]`
 - `or3-intern version`

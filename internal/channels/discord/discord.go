@@ -17,6 +17,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"or3-intern/internal/approval"
 	"or3-intern/internal/artifacts"
 	"or3-intern/internal/bus"
 	rootchannels "or3-intern/internal/channels"
@@ -25,12 +26,13 @@ import (
 
 // Channel receives Discord gateway events and sends outbound messages.
 type Channel struct {
-	Config        config.DiscordChannelConfig
-	HTTP          *http.Client
-	Dialer        *websocket.Dialer
-	Artifacts     *artifacts.Store
-	MaxMediaBytes int
-	IsolatePeers  bool
+	Config         config.DiscordChannelConfig
+	HTTP           *http.Client
+	Dialer         *websocket.Dialer
+	Artifacts      *artifacts.Store
+	MaxMediaBytes  int
+	IsolatePeers   bool
+	ApprovalBroker *approval.Broker
 
 	mu     sync.Mutex
 	conn   *websocket.Conn
@@ -175,7 +177,7 @@ func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
 				if key := discordDedupeKey(msg); key != "" && c.ingressDeduper().IsDuplicate(key) {
 					continue
 				}
-				if !c.allowedUser(msg.Author.ID) {
+				if !c.allowedUser(ctx, msg.Author.ID) {
 					continue
 				}
 				if c.Config.RequireMention && c.botID != "" && !mentioned(msg.Mentions, c.botID) {
@@ -426,7 +428,21 @@ func (c *Channel) attachFilePart(writer *multipart.Writer, index int, mediaPath 
 	return nil
 }
 
-func (c *Channel) allowedUser(user string) bool {
+func (c *Channel) allowedUser(ctx context.Context, user string) bool {
+	switch strings.ToLower(strings.TrimSpace(string(c.Config.InboundPolicy))) {
+	case string(config.InboundPolicyDeny):
+		return false
+	case string(config.InboundPolicyPairing):
+		allowed, err := c.ApprovalBroker.IsPairedChannelIdentity(ctx, "discord", user)
+		return err == nil && allowed
+	case string(config.InboundPolicyAllowlist):
+		for _, allowed := range c.Config.AllowedUserIDs {
+			if strings.TrimSpace(allowed) == user {
+				return true
+			}
+		}
+		return false
+	}
 	if len(c.Config.AllowedUserIDs) == 0 {
 		return c.Config.OpenAccess
 	}

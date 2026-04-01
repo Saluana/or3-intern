@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"or3-intern/internal/approval"
 	"or3-intern/internal/bus"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
@@ -38,6 +39,23 @@ func baseConfig() config.EmailChannelConfig {
 		SMTPHost:            "smtp.example.com",
 		SMTPUsername:        "smtp-user@example.com",
 		SMTPPassword:        "smtp-pass",
+	}
+}
+
+func TestChannel_AllowedSenderSupportsPairingPolicy(t *testing.T) {
+	broker := &approval.Broker{DB: openEmailTestDB(t)}
+	if _, _, err := broker.RotateDeviceToken(context.Background(), "email:alice@example.com", approval.RoleOperator, "Email User", map[string]any{"channel": "email", "identity": "alice@example.com"}); err != nil {
+		t.Fatalf("RotateDeviceToken: %v", err)
+	}
+	channel := &Channel{
+		Config:         config.EmailChannelConfig{InboundPolicy: config.InboundPolicyPairing},
+		ApprovalBroker: broker,
+	}
+	if !channel.allowedSender(context.Background(), "alice@example.com") {
+		t.Fatal("expected paired email sender to be allowed")
+	}
+	if channel.allowedSender(context.Background(), "bob@example.com") {
+		t.Fatal("expected unknown email sender to be denied")
 	}
 }
 

@@ -158,7 +158,7 @@ func main() {
 	b := bus.New(256)
 	spinner := cli.NewSpinner()
 	del := cli.Deliverer{Spinner: spinner}
-	channelManager, err := buildChannelManager(cfg, del, art, cfg.MaxMediaBytes)
+	channelManager, err := buildChannelManager(cfg, del, art, cfg.MaxMediaBytes, approvalBroker)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "channel config error:", err)
 		os.Exit(1)
@@ -455,6 +455,16 @@ func main() {
 			fmt.Fprintln(os.Stderr, "devices error:", err)
 			os.Exit(1)
 		}
+	case "pairing":
+		if err := runPairingCommand(ctx, approvalBroker, args[1:], os.Stdout, os.Stderr); err != nil {
+			fmt.Fprintln(os.Stderr, "pairing error:", err)
+			os.Exit(1)
+		}
+	case "capabilities":
+		if err := runCapabilitiesCommand(cfg, approvalBroker, args[1:], os.Stdout, os.Stderr); err != nil {
+			fmt.Fprintln(os.Stderr, "capabilities error:", err)
+			os.Exit(1)
+		}
 	case "scope":
 		// or3-intern scope link <session-key> <scope-key>
 		// or3-intern scope list <scope-key>
@@ -628,29 +638,29 @@ func buildToolRegistryWithOptions(cfg config.Config, d *db.DB, prov *providers.C
 	return reg
 }
 
-func buildChannelManager(cfg config.Config, cliDeliverer cli.Deliverer, art *artifacts.Store, maxMediaBytes int) (*rootchannels.Manager, error) {
+func buildChannelManager(cfg config.Config, cliDeliverer cli.Deliverer, art *artifacts.Store, maxMediaBytes int, approvalBroker *approval.Broker) (*rootchannels.Manager, error) {
 	mgr := rootchannels.NewManager()
 	if err := mgr.Register(cli.Service{Deliverer: cliDeliverer}); err != nil {
 		return nil, err
 	}
 	if cfg.Channels.Telegram.Enabled {
-		if err := mgr.Register(&telegram.Channel{Config: cfg.Channels.Telegram, Artifacts: art, MaxMediaBytes: maxMediaBytes, IsolatePeers: cfg.Hardening.IsolateChannelPeers}); err != nil {
+		if err := mgr.Register(&telegram.Channel{Config: cfg.Channels.Telegram, Artifacts: art, MaxMediaBytes: maxMediaBytes, IsolatePeers: cfg.Hardening.IsolateChannelPeers, ApprovalBroker: approvalBroker}); err != nil {
 			return nil, err
 		}
 	}
 	if cfg.Channels.Slack.Enabled {
-		if err := mgr.Register(&slack.Channel{Config: cfg.Channels.Slack, Artifacts: art, MaxMediaBytes: maxMediaBytes, IsolatePeers: cfg.Hardening.IsolateChannelPeers}); err != nil {
+		if err := mgr.Register(&slack.Channel{Config: cfg.Channels.Slack, Artifacts: art, MaxMediaBytes: maxMediaBytes, IsolatePeers: cfg.Hardening.IsolateChannelPeers, ApprovalBroker: approvalBroker}); err != nil {
 			return nil, err
 		}
 	}
 	if cfg.Channels.Discord.Enabled {
-		if err := mgr.Register(&discord.Channel{Config: cfg.Channels.Discord, Artifacts: art, MaxMediaBytes: maxMediaBytes, IsolatePeers: cfg.Hardening.IsolateChannelPeers}); err != nil {
+		if err := mgr.Register(&discord.Channel{Config: cfg.Channels.Discord, Artifacts: art, MaxMediaBytes: maxMediaBytes, IsolatePeers: cfg.Hardening.IsolateChannelPeers, ApprovalBroker: approvalBroker}); err != nil {
 			return nil, err
 		}
 	}
 	if cfg.Channels.WhatsApp.Enabled {
 		cfg.Channels.WhatsApp.BridgeURL = whatsapp.BridgeURL(cfg.Channels.WhatsApp.BridgeURL)
-		if err := mgr.Register(&whatsapp.Channel{Config: cfg.Channels.WhatsApp, Artifacts: art, MaxMediaBytes: maxMediaBytes, IsolatePeers: cfg.Hardening.IsolateChannelPeers}); err != nil {
+		if err := mgr.Register(&whatsapp.Channel{Config: cfg.Channels.WhatsApp, Artifacts: art, MaxMediaBytes: maxMediaBytes, IsolatePeers: cfg.Hardening.IsolateChannelPeers, ApprovalBroker: approvalBroker}); err != nil {
 			return nil, err
 		}
 	}
@@ -659,7 +669,7 @@ func buildChannelManager(cfg config.Config, cliDeliverer cli.Deliverer, art *art
 		if art != nil {
 			database = art.DB
 		}
-		if err := mgr.Register(&email.Channel{Config: cfg.Channels.Email, DB: database}); err != nil {
+		if err := mgr.Register(&email.Channel{Config: cfg.Channels.Email, DB: database, ApprovalBroker: approvalBroker}); err != nil {
 			return nil, err
 		}
 	}

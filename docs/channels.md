@@ -33,7 +33,7 @@ go run ./cmd/or3-intern serve
 - inbound traffic is mapped to session keys per platform
 - outbound sending uses the same shared runtime and tool loop
 - `hardening.isolateChannelPeers=true` can isolate senders inside shared channels
-- allowlists can limit who is allowed to talk to the runtime
+- channels can use `inboundPolicy=allowlist`, `pairing`, or `deny`; when omitted, legacy `openAccess` behavior still applies
 - most channels support a default outbound destination for `send_message`
 
 ## Environment variables
@@ -63,7 +63,7 @@ OR3_EMAIL_FROM_ADDRESS=
 - enable `channels.telegram.enabled`
 - set `channels.telegram.token` or `OR3_TELEGRAM_TOKEN`
 - optionally set `defaultChatId`
-- optionally restrict traffic with `allowedChatIds`
+- optionally restrict traffic with `allowedChatIds` or `inboundPolicy=pairing`
 - polling is used; no webhook setup is required
 
 ### Slack
@@ -71,7 +71,7 @@ OR3_EMAIL_FROM_ADDRESS=
 - enable `channels.slack.enabled`
 - set `channels.slack.appToken` and `channels.slack.botToken`
 - optionally set `defaultChannelId`
-- optionally restrict traffic with `allowedUserIds`
+- optionally restrict traffic with `allowedUserIds` or `inboundPolicy=pairing`
 - `requireMention=true` is recommended in shared spaces
 - uses Socket Mode for inbound traffic and Web API for outbound messages
 
@@ -80,7 +80,7 @@ OR3_EMAIL_FROM_ADDRESS=
 - enable `channels.discord.enabled`
 - set `channels.discord.token`
 - optionally set `defaultChannelId`
-- optionally restrict traffic with `allowedUserIds`
+- optionally restrict traffic with `allowedUserIds` or `inboundPolicy=pairing`
 - `requireMention=true` is recommended in guild channels
 - uses the Gateway for inbound traffic and REST for outbound messages
 
@@ -89,18 +89,22 @@ OR3_EMAIL_FROM_ADDRESS=
 - enable `channels.whatsApp.enabled`
 - set `channels.whatsApp.bridgeUrl` or `OR3_WHATSAPP_BRIDGE_URL`
 - optionally set `channels.whatsApp.bridgeToken`
-- optionally set `defaultTo` and `allowedFrom`
+- optionally set `defaultTo`, `allowedFrom`, or `inboundPolicy=pairing`
 - requires a compatible local bridge websocket service
 
 ### Email
 
 - enable `channels.email.enabled`
 - set `channels.email.consentGranted=true` only after explicit mailbox access permission
-- choose either `openAccess=true` or a non-empty `allowedSenders` list
+- choose `inboundPolicy=pairing`, `openAccess=true`, or a non-empty `allowedSenders` list
 - configure IMAP (`imapHost`, `imapPort`, `imapUsername`, `imapPassword`, optional `imapMailbox`)
 - configure SMTP (`smtpHost`, `smtpPort`, `smtpUsername`, `smtpPassword`, optional `fromAddress`)
 - `autoReplyEnabled=false` disables automatic replies for normal inbound mail turns
 - inbound mail is polled over IMAP and outbound mail reuses thread metadata when available
+
+## Pairing-based ingress
+
+`inboundPolicy=pairing` lets a channel accept inbound traffic only from identities that already exist in the paired-device store. The new `or3-intern pairing request` helper can mint channel-bound identities such as `slack:U123` or `telegram:456`, and `or3-intern capabilities --channel <name>` shows the effective ingress policy and access profile for each channel.
 
 ## Session key formats
 

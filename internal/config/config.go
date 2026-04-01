@@ -247,77 +247,90 @@ type SubagentsConfig struct {
 	TaskTimeoutSeconds int  `json:"taskTimeoutSeconds"`
 }
 
+type InboundPolicy string
+
+const (
+	InboundPolicyDeny      InboundPolicy = "deny"
+	InboundPolicyAllowlist InboundPolicy = "allowlist"
+	InboundPolicyPairing   InboundPolicy = "pairing"
+)
+
 // TelegramChannelConfig configures Telegram ingress and delivery.
 type TelegramChannelConfig struct {
-	Enabled        bool     `json:"enabled"`
-	OpenAccess     bool     `json:"openAccess"`
-	Token          string   `json:"token"`
-	APIBase        string   `json:"apiBase"`
-	PollSeconds    int      `json:"pollSeconds"`
-	DefaultChatID  string   `json:"defaultChatId"`
-	AllowedChatIDs []string `json:"allowedChatIds"`
+	Enabled        bool          `json:"enabled"`
+	InboundPolicy  InboundPolicy `json:"inboundPolicy"`
+	OpenAccess     bool          `json:"openAccess"`
+	Token          string        `json:"token"`
+	APIBase        string        `json:"apiBase"`
+	PollSeconds    int           `json:"pollSeconds"`
+	DefaultChatID  string        `json:"defaultChatId"`
+	AllowedChatIDs []string      `json:"allowedChatIds"`
 }
 
 // SlackChannelConfig configures Slack socket-mode ingress and delivery.
 type SlackChannelConfig struct {
-	Enabled          bool     `json:"enabled"`
-	OpenAccess       bool     `json:"openAccess"`
-	AppToken         string   `json:"appToken"`
-	BotToken         string   `json:"botToken"`
-	APIBase          string   `json:"apiBase"`
-	SocketModeURL    string   `json:"socketModeUrl"`
-	DefaultChannelID string   `json:"defaultChannelId"`
-	AllowedUserIDs   []string `json:"allowedUserIds"`
-	RequireMention   bool     `json:"requireMention"`
+	Enabled          bool          `json:"enabled"`
+	InboundPolicy    InboundPolicy `json:"inboundPolicy"`
+	OpenAccess       bool          `json:"openAccess"`
+	AppToken         string        `json:"appToken"`
+	BotToken         string        `json:"botToken"`
+	APIBase          string        `json:"apiBase"`
+	SocketModeURL    string        `json:"socketModeUrl"`
+	DefaultChannelID string        `json:"defaultChannelId"`
+	AllowedUserIDs   []string      `json:"allowedUserIds"`
+	RequireMention   bool          `json:"requireMention"`
 }
 
 // DiscordChannelConfig configures Discord ingress and delivery.
 type DiscordChannelConfig struct {
-	Enabled          bool     `json:"enabled"`
-	OpenAccess       bool     `json:"openAccess"`
-	Token            string   `json:"token"`
-	APIBase          string   `json:"apiBase"`
-	GatewayURL       string   `json:"gatewayUrl"`
-	DefaultChannelID string   `json:"defaultChannelId"`
-	AllowedUserIDs   []string `json:"allowedUserIds"`
-	RequireMention   bool     `json:"requireMention"`
+	Enabled          bool          `json:"enabled"`
+	InboundPolicy    InboundPolicy `json:"inboundPolicy"`
+	OpenAccess       bool          `json:"openAccess"`
+	Token            string        `json:"token"`
+	APIBase          string        `json:"apiBase"`
+	GatewayURL       string        `json:"gatewayUrl"`
+	DefaultChannelID string        `json:"defaultChannelId"`
+	AllowedUserIDs   []string      `json:"allowedUserIds"`
+	RequireMention   bool          `json:"requireMention"`
 }
 
 // WhatsAppBridgeConfig configures the external WhatsApp bridge connection.
 type WhatsAppBridgeConfig struct {
-	Enabled     bool     `json:"enabled"`
-	OpenAccess  bool     `json:"openAccess"`
-	BridgeURL   string   `json:"bridgeUrl"`
-	BridgeToken string   `json:"bridgeToken"`
-	DefaultTo   string   `json:"defaultTo"`
-	AllowedFrom []string `json:"allowedFrom"`
+	Enabled       bool          `json:"enabled"`
+	InboundPolicy InboundPolicy `json:"inboundPolicy"`
+	OpenAccess    bool          `json:"openAccess"`
+	BridgeURL     string        `json:"bridgeUrl"`
+	BridgeToken   string        `json:"bridgeToken"`
+	DefaultTo     string        `json:"defaultTo"`
+	AllowedFrom   []string      `json:"allowedFrom"`
 }
 
 // EmailChannelConfig configures email polling, access control, and replies.
 type EmailChannelConfig struct {
-	Enabled             bool     `json:"enabled"`
-	OpenAccess          bool     `json:"openAccess"`
-	ConsentGranted      bool     `json:"consentGranted"`
-	AllowedSenders      []string `json:"allowedSenders"`
-	DefaultTo           string   `json:"defaultTo"`
-	AutoReplyEnabled    bool     `json:"autoReplyEnabled"`
-	PollIntervalSeconds int      `json:"pollIntervalSeconds"`
-	MarkSeen            bool     `json:"markSeen"`
-	MaxBodyChars        int      `json:"maxBodyChars"`
-	SubjectPrefix       string   `json:"subjectPrefix"`
-	FromAddress         string   `json:"fromAddress"`
-	IMAPMailbox         string   `json:"imapMailbox"`
-	IMAPHost            string   `json:"imapHost"`
-	IMAPPort            int      `json:"imapPort"`
-	IMAPUseSSL          bool     `json:"imapUseSSL"`
-	IMAPUsername        string   `json:"imapUsername"`
-	IMAPPassword        string   `json:"imapPassword"`
-	SMTPHost            string   `json:"smtpHost"`
-	SMTPPort            int      `json:"smtpPort"`
-	SMTPUseTLS          bool     `json:"smtpUseTLS"`
-	SMTPUseSSL          bool     `json:"smtpUseSSL"`
-	SMTPUsername        string   `json:"smtpUsername"`
-	SMTPPassword        string   `json:"smtpPassword"`
+	Enabled             bool          `json:"enabled"`
+	InboundPolicy       InboundPolicy `json:"inboundPolicy"`
+	OpenAccess          bool          `json:"openAccess"`
+	ConsentGranted      bool          `json:"consentGranted"`
+	AllowedSenders      []string      `json:"allowedSenders"`
+	DefaultTo           string        `json:"defaultTo"`
+	AutoReplyEnabled    bool          `json:"autoReplyEnabled"`
+	PollIntervalSeconds int           `json:"pollIntervalSeconds"`
+	MarkSeen            bool          `json:"markSeen"`
+	MaxBodyChars        int           `json:"maxBodyChars"`
+	SubjectPrefix       string        `json:"subjectPrefix"`
+	FromAddress         string        `json:"fromAddress"`
+	IMAPMailbox         string        `json:"imapMailbox"`
+	IMAPHost            string        `json:"imapHost"`
+	IMAPPort            int           `json:"imapPort"`
+	IMAPUseSSL          bool          `json:"imapUseSSL"`
+	IMAPUsername        string        `json:"imapUsername"`
+	IMAPPassword        string        `json:"imapPassword"`
+	SMTPHost            string        `json:"smtpHost"`
+	SMTPPort            int           `json:"smtpPort"`
+	SMTPUseTLS          bool          `json:"smtpUseTLS"`
+	SMTPUseSSL          bool          `json:"smtpUseSSL"`
+	SMTPUsername        string        `json:"smtpUsername"`
+	SMTPPassword        string        `json:"smtpPassword"`
 }
 
 // ChannelsConfig groups per-channel transport settings.
@@ -1099,6 +1112,11 @@ func Load(path string) (Config, error) {
 	if cfg.Security.Network.AllowedHosts == nil {
 		cfg.Security.Network.AllowedHosts = []string{}
 	}
+	cfg.Channels.Telegram.InboundPolicy = normalizeInboundPolicy(cfg.Channels.Telegram.InboundPolicy)
+	cfg.Channels.Slack.InboundPolicy = normalizeInboundPolicy(cfg.Channels.Slack.InboundPolicy)
+	cfg.Channels.Discord.InboundPolicy = normalizeInboundPolicy(cfg.Channels.Discord.InboundPolicy)
+	cfg.Channels.WhatsApp.InboundPolicy = normalizeInboundPolicy(cfg.Channels.WhatsApp.InboundPolicy)
+	cfg.Channels.Email.InboundPolicy = normalizeInboundPolicy(cfg.Channels.Email.InboundPolicy)
 	for name, profile := range cfg.Security.Profiles.Profiles {
 		profile.MaxCapability = strings.ToLower(strings.TrimSpace(profile.MaxCapability))
 		profile.AllowedTools = compactStrings(profile.AllowedTools)
@@ -1130,25 +1148,76 @@ func mustJSON(v any) []byte {
 	return b
 }
 
+func normalizeInboundPolicy(policy InboundPolicy) InboundPolicy {
+	switch InboundPolicy(strings.ToLower(strings.TrimSpace(string(policy)))) {
+	case "", InboundPolicyDeny, InboundPolicyAllowlist, InboundPolicyPairing:
+		return InboundPolicy(strings.ToLower(strings.TrimSpace(string(policy))))
+	default:
+		return InboundPolicy(strings.ToLower(strings.TrimSpace(string(policy))))
+	}
+}
+
+// EffectiveInboundPolicy resolves the effective ingress policy for a channel,
+// preserving legacy openAccess behavior when inboundPolicy is unset.
+func EffectiveInboundPolicy(configured InboundPolicy, openAccess bool, hasAllowlist bool) string {
+	switch normalizeInboundPolicy(configured) {
+	case InboundPolicyDeny:
+		return string(InboundPolicyDeny)
+	case InboundPolicyAllowlist:
+		if hasAllowlist {
+			return string(InboundPolicyAllowlist)
+		}
+		if openAccess {
+			return "open"
+		}
+		return string(InboundPolicyDeny)
+	case InboundPolicyPairing:
+		return string(InboundPolicyPairing)
+	}
+	if hasAllowlist {
+		return string(InboundPolicyAllowlist)
+	}
+	if openAccess {
+		return "open"
+	}
+	return string(InboundPolicyDeny)
+}
+
 func validateChannelAccess(cfg Config) error {
-	if cfg.Channels.Telegram.Enabled && !cfg.Channels.Telegram.OpenAccess && !hasNonEmpty(cfg.Channels.Telegram.AllowedChatIDs) {
-		return errors.New("telegram enabled: set channels.telegram.allowedChatIds or channels.telegram.openAccess=true")
+	cfg.Channels.Telegram.InboundPolicy = normalizeInboundPolicy(cfg.Channels.Telegram.InboundPolicy)
+	cfg.Channels.Slack.InboundPolicy = normalizeInboundPolicy(cfg.Channels.Slack.InboundPolicy)
+	cfg.Channels.Discord.InboundPolicy = normalizeInboundPolicy(cfg.Channels.Discord.InboundPolicy)
+	cfg.Channels.WhatsApp.InboundPolicy = normalizeInboundPolicy(cfg.Channels.WhatsApp.InboundPolicy)
+	cfg.Channels.Email.InboundPolicy = normalizeInboundPolicy(cfg.Channels.Email.InboundPolicy)
+	for name, policy := range map[string]InboundPolicy{
+		"channels.telegram.inboundPolicy": cfg.Channels.Telegram.InboundPolicy,
+		"channels.slack.inboundPolicy":    cfg.Channels.Slack.InboundPolicy,
+		"channels.discord.inboundPolicy":  cfg.Channels.Discord.InboundPolicy,
+		"channels.whatsApp.inboundPolicy": cfg.Channels.WhatsApp.InboundPolicy,
+		"channels.email.inboundPolicy":    cfg.Channels.Email.InboundPolicy,
+	} {
+		if policy != "" && policy != InboundPolicyDeny && policy != InboundPolicyAllowlist && policy != InboundPolicyPairing {
+			return errors.New(name + ": must be deny, allowlist, or pairing")
+		}
 	}
-	if cfg.Channels.Slack.Enabled && !cfg.Channels.Slack.OpenAccess && !hasNonEmpty(cfg.Channels.Slack.AllowedUserIDs) {
-		return errors.New("slack enabled: set channels.slack.allowedUserIds or channels.slack.openAccess=true")
+	if cfg.Channels.Telegram.Enabled && requiresChannelAllowlist(cfg.Channels.Telegram.InboundPolicy, cfg.Channels.Telegram.OpenAccess, hasNonEmpty(cfg.Channels.Telegram.AllowedChatIDs)) {
+		return errors.New("telegram enabled: set channels.telegram.allowedChatIds, channels.telegram.inboundPolicy=pairing, or channels.telegram.openAccess=true")
 	}
-	if cfg.Channels.Discord.Enabled && !cfg.Channels.Discord.OpenAccess && !hasNonEmpty(cfg.Channels.Discord.AllowedUserIDs) {
-		return errors.New("discord enabled: set channels.discord.allowedUserIds or channels.discord.openAccess=true")
+	if cfg.Channels.Slack.Enabled && requiresChannelAllowlist(cfg.Channels.Slack.InboundPolicy, cfg.Channels.Slack.OpenAccess, hasNonEmpty(cfg.Channels.Slack.AllowedUserIDs)) {
+		return errors.New("slack enabled: set channels.slack.allowedUserIds, channels.slack.inboundPolicy=pairing, or channels.slack.openAccess=true")
 	}
-	if cfg.Channels.WhatsApp.Enabled && !cfg.Channels.WhatsApp.OpenAccess && !hasNonEmpty(cfg.Channels.WhatsApp.AllowedFrom) {
-		return errors.New("whatsApp enabled: set channels.whatsApp.allowedFrom or channels.whatsApp.openAccess=true")
+	if cfg.Channels.Discord.Enabled && requiresChannelAllowlist(cfg.Channels.Discord.InboundPolicy, cfg.Channels.Discord.OpenAccess, hasNonEmpty(cfg.Channels.Discord.AllowedUserIDs)) {
+		return errors.New("discord enabled: set channels.discord.allowedUserIds, channels.discord.inboundPolicy=pairing, or channels.discord.openAccess=true")
+	}
+	if cfg.Channels.WhatsApp.Enabled && requiresChannelAllowlist(cfg.Channels.WhatsApp.InboundPolicy, cfg.Channels.WhatsApp.OpenAccess, hasNonEmpty(cfg.Channels.WhatsApp.AllowedFrom)) {
+		return errors.New("whatsApp enabled: set channels.whatsApp.allowedFrom, channels.whatsApp.inboundPolicy=pairing, or channels.whatsApp.openAccess=true")
 	}
 	if cfg.Channels.Email.Enabled {
 		if !cfg.Channels.Email.ConsentGranted {
 			return errors.New("email enabled: set channels.email.consentGranted=true after explicit permission")
 		}
-		if !cfg.Channels.Email.OpenAccess && !hasNonEmpty(cfg.Channels.Email.AllowedSenders) {
-			return errors.New("email enabled: set channels.email.allowedSenders or channels.email.openAccess=true")
+		if requiresChannelAllowlist(cfg.Channels.Email.InboundPolicy, cfg.Channels.Email.OpenAccess, hasNonEmpty(cfg.Channels.Email.AllowedSenders)) {
+			return errors.New("email enabled: set channels.email.allowedSenders, channels.email.inboundPolicy=pairing, or channels.email.openAccess=true")
 		}
 		if strings.TrimSpace(cfg.Channels.Email.IMAPHost) == "" || strings.TrimSpace(cfg.Channels.Email.IMAPUsername) == "" || strings.TrimSpace(cfg.Channels.Email.IMAPPassword) == "" {
 			return errors.New("email enabled: imapHost, imapUsername, and imapPassword are required")
@@ -1158,6 +1227,17 @@ func validateChannelAccess(cfg Config) error {
 		}
 	}
 	return nil
+}
+
+func requiresChannelAllowlist(policy InboundPolicy, openAccess bool, hasAllowlist bool) bool {
+	switch normalizeInboundPolicy(policy) {
+	case InboundPolicyAllowlist:
+		return !hasAllowlist
+	case InboundPolicyPairing, InboundPolicyDeny:
+		return false
+	default:
+		return !openAccess && !hasAllowlist
+	}
 }
 
 func validateMCPServers(servers map[string]MCPServerConfig) error {

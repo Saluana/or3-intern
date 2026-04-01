@@ -13,6 +13,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"or3-intern/internal/approval"
 	"or3-intern/internal/artifacts"
 	"or3-intern/internal/bus"
 	"or3-intern/internal/config"
@@ -112,6 +113,23 @@ func TestChannel_StartDeduplicatesRepeatedMessageID(t *testing.T) {
 	case ev := <-b.Channel():
 		t.Fatalf("expected duplicate discord event to be suppressed, got %#v", ev)
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestChannel_AllowedUserSupportsPairingPolicy(t *testing.T) {
+	broker := &approval.Broker{DB: openDiscordTestDB(t)}
+	if _, _, err := broker.RotateDeviceToken(context.Background(), "discord:U42", approval.RoleOperator, "Discord User", map[string]any{"channel": "discord", "identity": "U42"}); err != nil {
+		t.Fatalf("RotateDeviceToken: %v", err)
+	}
+	ch := &Channel{
+		Config:         config.DiscordChannelConfig{InboundPolicy: config.InboundPolicyPairing},
+		ApprovalBroker: broker,
+	}
+	if !ch.allowedUser(context.Background(), "U42") {
+		t.Fatal("expected paired discord user to be allowed")
+	}
+	if ch.allowedUser(context.Background(), "U99") {
+		t.Fatal("expected unknown discord user to be denied")
 	}
 }
 

@@ -27,6 +27,7 @@ import (
 	"github.com/emersion/go-imap/v2/imapclient"
 	xhtml "golang.org/x/net/html"
 
+	"or3-intern/internal/approval"
 	"or3-intern/internal/bus"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
@@ -67,8 +68,9 @@ type threadState struct {
 
 // Channel polls inbound email and sends outbound replies.
 type Channel struct {
-	Config config.EmailChannelConfig
-	DB     *db.DB
+	Config         config.EmailChannelConfig
+	DB             *db.DB
+	ApprovalBroker *approval.Broker
 
 	FetchMessages func(ctx context.Context) ([]InboundMessage, error)
 	SendMail      func(ctx context.Context, outbound OutboundMessage) error
@@ -191,7 +193,7 @@ func (c *Channel) pollOnce(ctx context.Context, eventBus *bus.Bus) {
 		if c.alreadyProcessed(inbound.UID, inbound.MessageID) {
 			continue
 		}
-		if !c.allowedSender(sender) {
+		if !c.allowedSender(ctx, sender) {
 			c.rememberProcessed(inbound.UID, inbound.MessageID)
 			log.Printf("email sender ignored: %s", sender)
 			continue
@@ -233,8 +235,8 @@ func (c *Channel) validate() error {
 	if !c.Config.Enabled {
 		return nil
 	}
-	if !c.Config.OpenAccess && !hasNonEmpty(c.Config.AllowedSenders) {
-		return fmt.Errorf("email enabled: set allowedSenders or openAccess=true")
+	if requiresExplicitAllowlist(c.Config.InboundPolicy, c.Config.OpenAccess, hasNonEmpty(c.Config.AllowedSenders)) {
+		return fmt.Errorf("email enabled: set allowedSenders, inboundPolicy=pairing, or openAccess=true")
 	}
 	if strings.TrimSpace(c.Config.IMAPHost) == "" || strings.TrimSpace(c.Config.IMAPUsername) == "" || strings.TrimSpace(c.Config.IMAPPassword) == "" {
 		return fmt.Errorf("email requires IMAP host, username, and password")
@@ -683,7 +685,21 @@ func formatInboundMessage(sender, subject string, sentAt time.Time, body string)
 	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
-func (c *Channel) allowedSender(sender string) bool {
+func (c *Channel) allowedSender(ctx context.Context, sender string) bool {
+	switch strings.ToLower(strings.TrimSpace(string(c.Config.InboundPolicy))) {
+	case string(config.InboundPolicyDeny):
+		return false
+	case string(config.InboundPolicyPairing):
+		allowed, err := c.ApprovalBroker.IsPairedChannelIdentity(ctx, "email", sender)
+		return err == nil && allowed
+	case string(config.InboundPolicyAllowlist):
+		for _, allowed := range c.Config.AllowedSenders {
+			if normalizeAddress(allowed) == sender {
+				return true
+			}
+		}
+		return false
+	}
 	if c.Config.OpenAccess {
 		return true
 	}
@@ -708,6 +724,17 @@ func normalizeAddress(value string) string {
 		}
 	}
 	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func requiresExplicitAllowlist(policy config.InboundPolicy, openAccess bool, hasAllowlist bool) bool {
+	switch strings.ToLower(strings.TrimSpace(string(policy))) {
+	case string(config.InboundPolicyAllowlist):
+		return !hasAllowlist
+	case string(config.InboundPolicyPairing), string(config.InboundPolicyDeny):
+		return false
+	default:
+		return !openAccess && !hasAllowlist
+	}
 }
 
 func decodeHeaderValue(value string) string {

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"or3-intern/internal/approval"
 	"or3-intern/internal/artifacts"
 	"or3-intern/internal/bus"
 	"or3-intern/internal/config"
@@ -106,6 +107,23 @@ func TestChannel_FetchUpdatesDeduplicatesRepeatedMessageID(t *testing.T) {
 	case ev := <-b.Channel():
 		t.Fatalf("expected duplicate telegram message to be suppressed, got %#v", ev)
 	default:
+	}
+}
+
+func TestChannel_AllowedChatSupportsPairingPolicy(t *testing.T) {
+	broker := &approval.Broker{DB: openTelegramTestDB(t)}
+	if _, _, err := broker.RotateDeviceToken(context.Background(), "telegram:123", approval.RoleOperator, "Telegram Chat", map[string]any{"channel": "telegram", "identity": "123"}); err != nil {
+		t.Fatalf("RotateDeviceToken: %v", err)
+	}
+	ch := &Channel{
+		Config:         config.TelegramChannelConfig{InboundPolicy: config.InboundPolicyPairing},
+		ApprovalBroker: broker,
+	}
+	if !ch.allowedChat(context.Background(), "123") {
+		t.Fatal("expected paired telegram chat to be allowed")
+	}
+	if ch.allowedChat(context.Background(), "999") {
+		t.Fatal("expected unknown telegram chat to be denied")
 	}
 }
 

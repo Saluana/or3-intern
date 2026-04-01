@@ -16,6 +16,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"or3-intern/internal/approval"
 	"or3-intern/internal/artifacts"
 	"or3-intern/internal/bus"
 	rootchannels "or3-intern/internal/channels"
@@ -24,11 +25,12 @@ import (
 
 // Channel reads and writes messages over the configured bridge websocket.
 type Channel struct {
-	Config        config.WhatsAppBridgeConfig
-	Dialer        *websocket.Dialer
-	Artifacts     *artifacts.Store
-	MaxMediaBytes int
-	IsolatePeers  bool
+	Config         config.WhatsAppBridgeConfig
+	Dialer         *websocket.Dialer
+	Artifacts      *artifacts.Store
+	MaxMediaBytes  int
+	IsolatePeers   bool
+	ApprovalBroker *approval.Broker
 
 	mu     sync.Mutex
 	conn   *websocket.Conn
@@ -146,7 +148,7 @@ func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
 		if key := whatsappDedupeKey(msg); key != "" && c.ingressDeduper().IsDuplicate(key) {
 			continue
 		}
-		if !c.allowedFrom(msg.From) {
+		if !c.allowedFrom(ctx, msg.From) {
 			continue
 		}
 		target := strings.TrimSpace(msg.Chat)
@@ -182,7 +184,21 @@ func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
 	}
 }
 
-func (c *Channel) allowedFrom(from string) bool {
+func (c *Channel) allowedFrom(ctx context.Context, from string) bool {
+	switch strings.ToLower(strings.TrimSpace(string(c.Config.InboundPolicy))) {
+	case string(config.InboundPolicyDeny):
+		return false
+	case string(config.InboundPolicyPairing):
+		allowed, err := c.ApprovalBroker.IsPairedChannelIdentity(ctx, "whatsapp", strings.TrimSpace(from))
+		return err == nil && allowed
+	case string(config.InboundPolicyAllowlist):
+		for _, allowed := range c.Config.AllowedFrom {
+			if strings.TrimSpace(allowed) == strings.TrimSpace(from) {
+				return true
+			}
+		}
+		return false
+	}
 	if len(c.Config.AllowedFrom) == 0 {
 		return c.Config.OpenAccess
 	}

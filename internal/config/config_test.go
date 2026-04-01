@@ -408,6 +408,29 @@ func TestLoad_EnabledExternalChannelAllowsExplicitOpenAccess(t *testing.T) {
 	}
 }
 
+func TestLoad_EnabledExternalChannelAllowsPairingPolicy(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	cfg := Default()
+	cfg.Channels.Slack.Enabled = true
+	cfg.Channels.Slack.InboundPolicy = InboundPolicyPairing
+
+	b, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.Channels.Slack.InboundPolicy != InboundPolicyPairing {
+		t.Fatalf("expected pairing policy, got %q", loaded.Channels.Slack.InboundPolicy)
+	}
+}
+
 func TestLoad_EmailChannelRequiresConsentAndCredentials(t *testing.T) {
 	clearConfigEnv(t)
 	dir := t.TempDir()

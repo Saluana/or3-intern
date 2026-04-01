@@ -12,6 +12,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"or3-intern/internal/approval"
 	"or3-intern/internal/artifacts"
 	"or3-intern/internal/bus"
 	"or3-intern/internal/config"
@@ -97,6 +98,23 @@ func TestChannel_StartDeduplicatesRepeatedMessageID(t *testing.T) {
 	case ev := <-b.Channel():
 		t.Fatalf("expected duplicate whatsapp event to be suppressed, got %#v", ev)
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestChannel_AllowedFromSupportsPairingPolicy(t *testing.T) {
+	broker := &approval.Broker{DB: openWhatsAppTestDB(t)}
+	if _, _, err := broker.RotateDeviceToken(context.Background(), "whatsapp:15551234", approval.RoleOperator, "WhatsApp User", map[string]any{"channel": "whatsapp", "identity": "15551234"}); err != nil {
+		t.Fatalf("RotateDeviceToken: %v", err)
+	}
+	ch := &Channel{
+		Config:         config.WhatsAppBridgeConfig{InboundPolicy: config.InboundPolicyPairing},
+		ApprovalBroker: broker,
+	}
+	if !ch.allowedFrom(context.Background(), "15551234") {
+		t.Fatal("expected paired whatsapp sender to be allowed")
+	}
+	if ch.allowedFrom(context.Background(), "15550000") {
+		t.Fatal("expected unknown whatsapp sender to be denied")
 	}
 }
 

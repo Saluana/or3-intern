@@ -88,6 +88,18 @@ Parent session contract:
 - ingress aliases (`session_key`, `intern_session_key`, `parentSessionKey`, `sessionKey`, `internSessionKey`) are compatibility shims only; they normalize to `parent_session_key` and are not used internally after decoding.
 - provider-owned metadata such as `request_id`, `workspace_id`, and `network_session_id` may accompany the request, but they do not supersede `parent_session_key`.
 
+### Approval and pairing endpoints
+
+- `GET /internal/v1/approvals` — list approval requests
+- `GET /internal/v1/approvals/{id}` — inspect one request
+- `POST /internal/v1/approvals/{id}/approve` / `deny` — resolve one request
+- `GET /internal/v1/devices` — list paired devices
+- `POST /internal/v1/devices/{deviceId}/rotate` / `revoke` — rotate or revoke a paired device token
+- `GET /internal/v1/pairing/requests` — list pairing requests
+- `POST /internal/v1/pairing/requests` — create a pairing request and one-time code
+- `POST /internal/v1/pairing/requests/{id}/approve` / `deny` — resolve a pairing request
+- `POST /internal/v1/pairing/exchange` — exchange an approved pairing code for a device token
+
 ### `GET /internal/v1/jobs/:jobId/stream`
 
 Attaches to a live SSE stream for a turn or background job.

@@ -16,8 +16,12 @@
 | Command | Purpose |
 | --- | --- |
 | `or3-intern doctor [--strict]` | Audits the current config for unsafe or inconsistent settings |
+| `or3-intern capabilities [--channel name|--trigger name|--json]` | Shows the effective runtime posture, ingress policy, approvals, and access-profile limits |
 | `or3-intern secrets <set|delete|list>` | Manages encrypted secret references stored in SQLite |
 | `or3-intern audit [verify]` | Inspects or verifies the append-only audit chain |
+| `or3-intern approvals <list|show|approve|deny|allowlist>` | Lists and resolves pending approval requests or approval allowlists |
+| `or3-intern devices <list|requests|approve|deny|rotate|revoke>` | Lists paired devices and supports device rotation/revocation plus legacy pairing request actions |
+| `or3-intern pairing <list|request|approve|deny|exchange>` | Runs the pairing workflow and can bind approvals to channel identities such as `slack:U123` |
 | `or3-intern migrate-jsonl /path/to/session.jsonl [session_key]` | Imports legacy session history |
 
 ## Skills commands

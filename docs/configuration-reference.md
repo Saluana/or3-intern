@@ -130,6 +130,14 @@ Non-CLI integrations:
 - `whatsApp`
 - `email`
 
+Each external channel now supports `inboundPolicy` in addition to the legacy `openAccess` flag:
+
+- `allowlist` — require the channel-specific allowlist field (`allowedChatIds`, `allowedUserIds`, `allowedFrom`, `allowedSenders`)
+- `pairing` — require a matching paired identity from the approval broker/device store
+- `deny` — enable outbound delivery while rejecting inbound traffic
+
+When `inboundPolicy` is omitted, the runtime preserves the existing `openAccess` / allowlist behavior for backward compatibility.
+
 See [channels.md](channels.md).
 
 ### `security`

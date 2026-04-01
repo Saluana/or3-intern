@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"or3-intern/internal/approval"
 	"or3-intern/internal/artifacts"
 	"or3-intern/internal/bus"
 	rootchannels "or3-intern/internal/channels"
@@ -25,11 +26,12 @@ import (
 
 // Channel polls Telegram updates and delivers outbound messages.
 type Channel struct {
-	Config        config.TelegramChannelConfig
-	HTTP          *http.Client
-	Artifacts     *artifacts.Store
-	MaxMediaBytes int
-	IsolatePeers  bool
+	Config         config.TelegramChannelConfig
+	HTTP           *http.Client
+	Artifacts      *artifacts.Store
+	MaxMediaBytes  int
+	IsolatePeers   bool
+	ApprovalBroker *approval.Broker
 
 	mu      sync.Mutex
 	running bool
@@ -137,7 +139,7 @@ func (c *Channel) fetchUpdates(ctx context.Context, eventBus *bus.Bus) error {
 		c.mu.Unlock()
 		msg := update.Message
 		chatID := strconv.FormatInt(msg.Chat.ID, 10)
-		if !c.allowedChat(chatID) {
+		if !c.allowedChat(ctx, chatID) {
 			continue
 		}
 		if key := telegramDedupeKey(msg); key != "" && c.ingressDeduper().IsDuplicate(key) {
@@ -181,7 +183,21 @@ func (c *Channel) fetchUpdates(ctx context.Context, eventBus *bus.Bus) error {
 	return nil
 }
 
-func (c *Channel) allowedChat(chatID string) bool {
+func (c *Channel) allowedChat(ctx context.Context, chatID string) bool {
+	switch strings.ToLower(strings.TrimSpace(string(c.Config.InboundPolicy))) {
+	case string(config.InboundPolicyDeny):
+		return false
+	case string(config.InboundPolicyPairing):
+		allowed, err := c.ApprovalBroker.IsPairedChannelIdentity(ctx, "telegram", chatID)
+		return err == nil && allowed
+	case string(config.InboundPolicyAllowlist):
+		for _, allowed := range c.Config.AllowedChatIDs {
+			if strings.TrimSpace(allowed) == chatID {
+				return true
+			}
+		}
+		return false
+	}
 	if len(c.Config.AllowedChatIDs) == 0 {
 		return c.Config.OpenAccess
 	}

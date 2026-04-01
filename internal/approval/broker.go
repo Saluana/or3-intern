@@ -528,6 +528,39 @@ func (b *Broker) ListDevices(ctx context.Context, limit int) ([]db.PairedDeviceR
 	return b.DB.ListPairedDevices(ctx, limit)
 }
 
+func (b *Broker) IsPairedChannelIdentity(ctx context.Context, channel, identity string) (bool, error) {
+	if b == nil || b.DB == nil {
+		return false, nil
+	}
+	channel = strings.ToLower(strings.TrimSpace(channel))
+	identity = strings.TrimSpace(identity)
+	if channel == "" || identity == "" {
+		return false, nil
+	}
+	for _, deviceID := range []string{channel + ":" + identity, identity} {
+		rec, err := b.DB.GetPairedDevice(ctx, deviceID)
+		if err == nil {
+			return rec.Status == StatusActive && rec.RevokedAt == 0, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return false, err
+		}
+	}
+	items, err := b.DB.ListPairedDevices(ctx, 500)
+	if err != nil {
+		return false, err
+	}
+	for _, item := range items {
+		if item.Status != StatusActive || item.RevokedAt > 0 {
+			continue
+		}
+		if pairedMetadataMatches(item.Metadata, channel, identity) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (b *Broker) AddAllowlist(ctx context.Context, domain string, scope AllowlistScope, matcher any, actor string, expiresAt int64) (db.ApprovalAllowlistRecord, error) {
 	scopeJSON, err := marshalCanonical(scope)
 	if err != nil {
@@ -622,6 +655,26 @@ func allowlistScopeMatches(scope AllowlistScope, raw string) bool {
 		return false
 	}
 	return true
+}
+
+func pairedMetadataMatches(metadata map[string]any, channel, identity string) bool {
+	if len(metadata) == 0 {
+		return false
+	}
+	compare := func(key, want string) bool {
+		if want == "" {
+			return false
+		}
+		value := strings.TrimSpace(fmt.Sprint(metadata[key]))
+		return value != "" && strings.EqualFold(value, want)
+	}
+	if compare("channel", channel) && (compare("identity", identity) || compare("sender", identity) || compare("user_id", identity) || compare("chat_id", identity) || compare("from", identity)) {
+		return true
+	}
+	if compare(channel+"_identity", identity) || compare(channel+"_user_id", identity) || compare(channel+"_chat_id", identity) || compare(channel+"_from", identity) {
+		return true
+	}
+	return false
 }
 
 func allowlistMatcherMatches(subjectType SubjectType, current any, raw string) (bool, error) {

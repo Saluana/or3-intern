@@ -106,7 +106,7 @@ func TestBuildChannelManager_RegistersEnabledChannels(t *testing.T) {
 	cfg.Channels.Email.SMTPUsername = "smtp-user"
 	cfg.Channels.Email.SMTPPassword = "smtp-pass"
 
-	mgr, err := buildChannelManager(cfg, cli.Deliverer{}, nil, 0)
+	mgr, err := buildChannelManager(cfg, cli.Deliverer{}, nil, 0, nil)
 	if err != nil {
 		t.Fatalf("buildChannelManager: %v", err)
 	}

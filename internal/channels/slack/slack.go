@@ -17,6 +17,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"or3-intern/internal/approval"
 	"or3-intern/internal/artifacts"
 	"or3-intern/internal/bus"
 	rootchannels "or3-intern/internal/channels"
@@ -25,12 +26,13 @@ import (
 
 // Channel receives Slack events over Socket Mode and sends outbound messages.
 type Channel struct {
-	Config        config.SlackChannelConfig
-	HTTP          *http.Client
-	Dialer        *websocket.Dialer
-	Artifacts     *artifacts.Store
-	MaxMediaBytes int
-	IsolatePeers  bool
+	Config         config.SlackChannelConfig
+	HTTP           *http.Client
+	Dialer         *websocket.Dialer
+	Artifacts      *artifacts.Store
+	MaxMediaBytes  int
+	IsolatePeers   bool
+	ApprovalBroker *approval.Broker
 
 	mu     sync.Mutex
 	conn   *websocket.Conn
@@ -136,7 +138,7 @@ func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
 		if ev.BotID != "" || ev.User == "" {
 			continue
 		}
-		if !c.allowedUser(ev.User) {
+		if !c.allowedUser(ctx, ev.User) {
 			continue
 		}
 		if envelope.Payload.Authorizations[0].UserID != "" && c.botID == "" {
@@ -424,7 +426,21 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func (c *Channel) allowedUser(user string) bool {
+func (c *Channel) allowedUser(ctx context.Context, user string) bool {
+	switch strings.ToLower(strings.TrimSpace(string(c.Config.InboundPolicy))) {
+	case string(config.InboundPolicyDeny):
+		return false
+	case string(config.InboundPolicyPairing):
+		allowed, err := c.ApprovalBroker.IsPairedChannelIdentity(ctx, "slack", user)
+		return err == nil && allowed
+	case string(config.InboundPolicyAllowlist):
+		for _, allowed := range c.Config.AllowedUserIDs {
+			if strings.TrimSpace(allowed) == user {
+				return true
+			}
+		}
+		return false
+	}
 	if len(c.Config.AllowedUserIDs) == 0 {
 		return c.Config.OpenAccess
 	}

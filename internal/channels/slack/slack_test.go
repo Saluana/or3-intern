@@ -13,6 +13,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"or3-intern/internal/approval"
 	"or3-intern/internal/artifacts"
 	"or3-intern/internal/bus"
 	"or3-intern/internal/config"
@@ -138,6 +139,23 @@ func TestChannel_StartDeduplicatesRepeatedEnvelope(t *testing.T) {
 	case ev := <-b.Channel():
 		t.Fatalf("expected duplicate slack event to be suppressed, got %#v", ev)
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestChannel_AllowedUserSupportsPairingPolicy(t *testing.T) {
+	broker := &approval.Broker{DB: openSlackTestDB(t)}
+	if _, _, err := broker.RotateDeviceToken(context.Background(), "slack:U42", approval.RoleOperator, "Slack User", map[string]any{"channel": "slack", "identity": "U42"}); err != nil {
+		t.Fatalf("RotateDeviceToken: %v", err)
+	}
+	ch := &Channel{
+		Config:         config.SlackChannelConfig{InboundPolicy: config.InboundPolicyPairing},
+		ApprovalBroker: broker,
+	}
+	if !ch.allowedUser(context.Background(), "U42") {
+		t.Fatal("expected paired slack user to be allowed")
+	}
+	if ch.allowedUser(context.Background(), "U99") {
+		t.Fatal("expected unknown slack user to be denied")
 	}
 }
 

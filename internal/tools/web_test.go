@@ -106,12 +106,12 @@ func TestWebFetch_MaxBytes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WebFetch: %v", err)
 	}
-	if !strings.HasPrefix(out, "status: 200 OK\n\n") {
-		t.Fatalf("expected status line, got %q", out)
-	}
 	parts := strings.SplitN(out, "\n\n", 2)
 	if len(parts) != 2 {
 		t.Fatalf("expected status/body split, got %q", out)
+	}
+	if parts[0] != "status: 200 OK" {
+		t.Fatalf("expected status line, got %q", out)
 	}
 	if len(parts[1]) != 50 {
 		t.Fatalf("expected 50-byte body, got %d bytes in %q", len(parts[1]), out)

@@ -92,6 +92,8 @@ func resolveHostWithPolicies(ctx context.Context, hostname string, policies ...H
 		return resolvedHostPlan{}, fmt.Errorf("missing host")
 	}
 	if _, err := netip.ParseAddr(normalizedHost); err != nil {
+		// Apply hostname allowlist/default-deny checks before any DNS lookup.
+		// Literal IPs keep the existing behavior and are only validated after parsing.
 		for _, p := range policies {
 			if p.EnabledPolicy() && !hostAllowed(normalizedHost, p.AllowedHosts) && p.DefaultDeny {
 				return resolvedHostPlan{}, fmt.Errorf("host denied by policy: %s", normalizedHost)

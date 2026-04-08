@@ -164,7 +164,7 @@ func TestWebFetch_PinsValidatedHostIntoDial(t *testing.T) {
 func TestWebFetch_ActiveProfileWithNoHostsDeniesByDefault(t *testing.T) {
 	tool := &WebFetch{}
 	ctx := ContextWithActiveProfile(context.Background(), ActiveProfile{Name: "no-network"})
-	_, err := tool.Execute(ctx, map[string]any{"url": testPublicFetchURLBase})
+	_, err := tool.Execute(ctx, map[string]any{"url": "http://example.com"})
 	if err == nil || !strings.Contains(err.Error(), "host denied by policy") {
 		t.Fatalf("expected profile host denial, got %v", err)
 	}

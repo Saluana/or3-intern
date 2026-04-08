@@ -87,14 +87,23 @@ func resolveURLWithPolicies(ctx context.Context, target *url.URL, policies ...Ho
 }
 
 func resolveHostWithPolicies(ctx context.Context, hostname string, policies ...HostPolicy) (resolvedHostPlan, error) {
+	normalizedHost := strings.Trim(strings.ToLower(strings.TrimSpace(hostname)), "[]")
+	if normalizedHost == "" {
+		return resolvedHostPlan{}, fmt.Errorf("missing host")
+	}
+	if _, err := netip.ParseAddr(normalizedHost); err != nil {
+		for _, p := range policies {
+			if p.EnabledPolicy() && !hostAllowed(normalizedHost, p.AllowedHosts) && p.DefaultDeny {
+				return resolvedHostPlan{}, fmt.Errorf("host denied by policy: %s", normalizedHost)
+			}
+		}
+	}
+
 	plan, err := resolveRawHost(ctx, hostname)
 	if err != nil {
 		return resolvedHostPlan{}, err
 	}
 	for _, p := range policies {
-		if p.EnabledPolicy() && !hostAllowed(plan.hostname, p.AllowedHosts) && p.DefaultDeny {
-			return resolvedHostPlan{}, fmt.Errorf("host denied by policy: %s", plan.hostname)
-		}
 		for _, ip := range plan.addrs {
 			if err := p.validateAddr(ip); err != nil {
 				return resolvedHostPlan{}, err

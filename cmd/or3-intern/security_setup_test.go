@@ -13,6 +13,7 @@ import (
 
 func TestValidateConfiguredOutboundEndpoints_IgnoresDisabledChannels(t *testing.T) {
 	cfg := config.Default()
+	cfg.Provider.APIBase = ""
 	policy := security.HostPolicy{
 		Enabled:      true,
 		DefaultDeny:  true,

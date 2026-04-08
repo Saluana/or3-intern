@@ -19,6 +19,12 @@ func TestHostPolicy_DefaultDenyBlocksUnknownHost(t *testing.T) {
 }
 
 func TestHostPolicy_AllowsWildcardHost(t *testing.T) {
+	previousLookup := lookupIPAddr
+	defer func() { lookupIPAddr = previousLookup }()
+	lookupIPAddr = func(context.Context, string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("203.0.113.10")}}, nil
+	}
+
 	policy := HostPolicy{Enabled: true, DefaultDeny: true, AllowedHosts: []string{"*.openai.com"}}
 	target, _ := url.Parse("https://api.openai.com/v1/chat/completions")
 	if err := policy.ValidateURL(context.Background(), target); err != nil {

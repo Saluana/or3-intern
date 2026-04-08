@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -54,10 +53,11 @@ func (t *WebFetch) Execute(ctx context.Context, params map[string]any) (string, 
 	if err != nil {
 		return "", err
 	}
-	if err := validateFetchURL(ctx, parsed); err != nil {
+	if err := validateFetchURL(parsed); err != nil {
 		return "", err
 	}
-	if err := validateURLAgainstPolicies(ctx, parsed, t.HostPolicy, profile); err != nil {
+	reqCtx, err := prepareWebFetchRequestContext(ctx, parsed, t.HostPolicy, profile)
+	if err != nil {
 		return "", err
 	}
 	max := t.DefaultMaxBytes
@@ -84,17 +84,22 @@ func (t *WebFetch) Execute(ctx context.Context, params map[string]any) (string, 
 		if len(via) >= defaultWebFetchMaxRedirects {
 			return fmt.Errorf("stopped after %d redirects", defaultWebFetchMaxRedirects)
 		}
-		if err := validateURLAgainstPolicies(req.Context(), req.URL, t.HostPolicy, profile); err != nil {
-			return err
-		}
 		if prevCheckRedirect != nil {
 			if err := prevCheckRedirect(req, via); err != nil {
 				return err
 			}
 		}
-		return validateFetchURL(req.Context(), req.URL)
+		if err := validateFetchURL(req.URL); err != nil {
+			return err
+		}
+		redirectCtx, err := prepareWebFetchRequestContext(req.Context(), req.URL, t.HostPolicy, profile)
+		if err != nil {
+			return err
+		}
+		*req = *req.WithContext(redirectCtx)
+		return nil
 	}
-	r, err := http.NewRequestWithContext(ctx, "GET", parsed.String(), nil)
+	r, err := http.NewRequestWithContext(reqCtx, "GET", parsed.String(), nil)
 	if err != nil {
 		return "", err
 	}
@@ -107,7 +112,7 @@ func (t *WebFetch) Execute(ctx context.Context, params map[string]any) (string, 
 	return fmt.Sprintf("status: %s\n\n%s", resp.Status, string(body)), nil
 }
 
-func validateFetchURL(ctx context.Context, target *url.URL) error {
+func validateFetchURL(target *url.URL) error {
 	if target == nil {
 		return fmt.Errorf("invalid url")
 	}
@@ -120,19 +125,6 @@ func validateFetchURL(ctx context.Context, target *url.URL) error {
 	}
 	if ip, err := netip.ParseAddr(hostname); err == nil {
 		if isBlockedFetchAddr(ip.Unmap()) {
-			return fmt.Errorf("blocked fetch target")
-		}
-		return nil
-	}
-	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, hostname)
-	if err != nil {
-		return err
-	}
-	if len(addrs) == 0 {
-		return fmt.Errorf("host did not resolve")
-	}
-	for _, addr := range addrs {
-		if ip, ok := netip.AddrFromSlice(addr.IP); ok && isBlockedFetchAddr(ip.Unmap()) {
 			return fmt.Errorf("blocked fetch target")
 		}
 	}
@@ -281,4 +273,15 @@ func validateURLAgainstPolicies(ctx context.Context, target *url.URL, policy sec
 		return nil
 	}
 	return (security.HostPolicy{Enabled: true, DefaultDeny: true, AllowedHosts: profile.AllowedHosts}).ValidateURL(ctx, target)
+}
+
+func prepareWebFetchRequestContext(ctx context.Context, target *url.URL, policy security.HostPolicy, profile ActiveProfile) (context.Context, error) {
+	policies := []security.HostPolicy{{Enabled: true}}
+	if policy.EnabledPolicy() || policy.AllowLoopback || policy.AllowPrivate {
+		policies = append(policies, policy)
+	}
+	if strings.TrimSpace(profile.Name) != "" {
+		policies = append(policies, security.HostPolicy{Enabled: true, DefaultDeny: true, AllowedHosts: profile.AllowedHosts})
+	}
+	return security.PrepareURLRequestContext(ctx, target, policies...)
 }

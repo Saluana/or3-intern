@@ -9,9 +9,9 @@
 # 2. Keep consolidation bounded, but make it structured
 
 - [ ] [Req 2] Update `internal/memory/consolidate.go` so the consolidation prompt asks for compact JSON with `summary`, `facts`, `preferences`, `goals`, and `procedures`.
-- [ ] [Req 2, Req 6] Normalize parsed output from `summary`, `facts`, `preferences`, `goals`, and `procedures` into a bounded set of note writes with validated `kind`, `status`, and `importance` values instead of trusting raw model output.
+- [ ] [Req 2, Req 6] normalize parsed output from `summary`, `facts`, `preferences`, `goals`, and `procedures` into a bounded set of note writes with validated `kind`, `status`, and `importance` values instead of trusting raw model output.
 - [ ] [Req 2] Extend the DB write path in `internal/db/store.go` so consolidation can atomically write multiple typed notes, update the canonical pinned entry, and advance `last_consolidated_msg_id`.
-- [ ] [Req 2] Keep `memory_pinned` tiny by only upserting a very small set of ultra-stable identity, preference, or long-running project facts rather than dumping all durable notes into pinned storage.
+- [ ] [Req 2] keep `memory_pinned` tiny by only upserting a very small set of ultra-stable identity, preference, or long-running project facts rather than dumping all durable notes into pinned storage.
 - [ ] [Req 2, Req 5] After successful consolidation, call the bounded stale-summary cleanup helper for the same resolved memory scope.
 - [ ] [Req 2] Add regression coverage in `internal/memory/consolidate_test.go` for structured output, malformed-output fallback, and pinned-memory minimality.
 
@@ -19,14 +19,14 @@
 
 - [ ] [Req 3, Req 6] Extend vector and FTS candidate queries in `internal/db/store.go` to return note metadata alongside text and timestamps.
 - [ ] [Req 3] Update `internal/memory/retrieve.go` so `Retrieved` carries metadata and hybrid scoring gets small bounded adjustments for `kind`, `status`, `importance`, `use_count`, and age.
-- [ ] [Req 3] Keep diversification and top-K behavior intact while ensuring stale rows are filtered or demoted and active `fact` and `procedure` notes slightly outrank otherwise similar summaries.
+- [ ] [Req 3] keep diversification and top-K behavior intact while ensuring stale rows are filtered or demoted and active `fact` and `procedure` notes slightly outrank otherwise similar summaries.
 - [ ] [Req 3] Add focused ranking tests in `internal/memory/retrieve_test.go` covering active-vs-stale ordering, importance boosts, and capped reuse effects.
 
 # 4. Add prompt digest and usage logging
 
 - [ ] [Req 3, Req 4] Update `internal/agent/prompt.go` to build a short `Memory Digest` section from top active fact/preference/goal/procedure notes while preserving the current `Pinned Memory`, `Retrieved Memory`, and `Indexed File Context` sections.
 - [ ] [Req 4] After the retrieved note set is finalized for prompt inclusion, issue a best-effort usage update for the corresponding note IDs.
-- [ ] [Req 3, Req 4, Req 6] Keep digest formatting to roughly 8-12 lines total and keep retrieved-memory formatting within existing bootstrap truncation limits and one-line formatting conventions.
+- [ ] [Req 3, Req 4, Req 6] keep digest formatting to roughly 8-12 lines total and keep retrieved-memory formatting within existing bootstrap truncation limits and one-line formatting conventions.
 - [ ] [Req 3, Req 4] Add prompt-builder tests in `internal/agent/prompt_test.go` for digest rendering, section ordering, and usage logging only for prompted note IDs.
 
 # 5. Validate cleanup behavior stays lightweight

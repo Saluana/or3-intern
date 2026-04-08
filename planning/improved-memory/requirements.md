@@ -1,6 +1,6 @@
 # Overview
 
-This plan upgrades the existing SQLite-backed memory subsystem without changing its overall shape. It keeps `memory_notes`, `memory_pinned`, the current consolidation scheduler, and the prompt-builder flow, while adding lightweight note metadata, structured consolidation output, slightly smarter retrieval ranking, prompt usage tracking, and a bounded stale-summary cleanup rule.
+This plan upgrades the existing SQLite-backed memory subsystem without changing its overall shape. It keeps `memory_notes`, `memory_pinned`, the current consolidation scheduler, and the prompt-builder flow. It adds lightweight note metadata, structured consolidation output, slightly smarter retrieval ranking, prompt usage tracking, and a bounded stale-summary cleanup rule.
 
 Scope assumptions:
 

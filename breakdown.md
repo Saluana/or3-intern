@@ -1,44 +1,41 @@
 ## Simple Architecture Breakdown (Core Layers)
 
-1. **Gateway** (The Central Hub / Control Plane)  
-   This is the single main process you run (e.g., `openclaw gateway`).  
-   - It listens for incoming messages from all your connected apps at once.  
-   - It manages sessions (so conversations stay coherent across WhatsApp → Telegram → Discord).  
-   - It handles routing: message comes in → Gateway wakes the right agent → agent thinks/acts → Gateway sends reply back through the original channel.  
-   - It also runs background stuff like heartbeats and crons.
+1. **Runtime entrypoints**
+   This repo ships one `or3-intern` binary with multiple entrypoints rather than a separate `openclaw gateway`.
+   - `or3-intern chat` runs the interactive CLI.
+   - `or3-intern serve` runs enabled channels and automation.
+   - `or3-intern service` runs the authenticated HTTP API for OR3 Net.
+   - All entrypoints feed into the same agent runtime and persistence layer.
 
-2. **Agent Runtime / Reasoning Loop** (The Brain in Action)  
-   When there's input (your message, a scheduled cron, a webhook, or a heartbeat trigger):  
-   - **Gather context** — Pulls from conversation history + persistent memory files + workspace files.  
-   - **Call the LLM** — Sends the assembled prompt to your chosen model (Claude Opus, Sonnet, etc.).  
-   - **Model decides** — Outputs normal text reply OR tool calls (e.g., "use browser to check site", "write file X", "run shell command").  
-   - **Execute tools/skills** → Loop repeats if needed (classic ReAct/agent loop: observe → think → act → repeat).  
-   - Finally streams the response back via Gateway.  
-   This loop makes it feel "smart" and capable of multi-step tasks.
+2. **Agent runtime / reasoning loop**
+   When a turn starts from chat, a channel message, a webhook, cron, heartbeat, or file watch:
+   - Session history is loaded from SQLite.
+   - Bootstrap docs, indexed workspace docs, and retrieved memory are assembled into prompt context.
+   - The model can answer directly or call tools and skills.
+   - Tool results are fed back into the loop until the turn completes.
+   - The final response is written back to history and returned through the originating surface.
 
-3. **Memory System** (What Makes It Feel Persistent)  
-   Everything is file-based (super simple, no database hassle):  
-   - Core files like `soul.md` (personality/vibe/boundaries), `identity.md` (who/what it is), `MEMORY.md` (short-term recall), `HEARTBEAT.md` (what to check periodically).  
-   - Long-term: daily logs, project folders, thematic notes in a `memory/` dir.  
-   - Agent reads these on startup/wakeup → "remembers" across restarts/sessions.  
-   - Semantic search across files for pulling relevant old info without bloating context.
+3. **Persistence and memory**
+   This system is not file-only.
+   - Conversation history, pinned memory, retrieved notes, artifacts, approvals, and other runtime state live in SQLite.
+   - Bootstrap files like `SOUL.md`, `IDENTITY.md`, `MEMORY.md`, `AGENTS.md`, `TOOLS.md`, and optional workspace docs provide additional context.
+   - Retrieval combines pinned context, vector search, and FTS keyword search.
+   - Session scopes can link multiple session keys to shared history and memory.
 
-4. **Tools & Skills** (The Hands — What Lets It Act)  
-   - Built-in tools: browser control, file ops, shell execution, voice on macOS/iOS, Canvas UI, etc.  
-   - **Skills** — Community plugins (thousands in ClawHub marketplace). These are installable extensions (e.g., GitHub integration, semantic scraping, email summarizer, custom browser stealth).  
-   - Agent decides which skill/tool to call based on descriptions (like function calling).  
-   - Very extensible — you (or community) can write new ones in code.
+4. **Tools and skills**
+   The runtime exposes built-in tools plus optional installed skills.
+   - Built-in tools cover file access, guarded command execution, web fetch/search, memory, MCP, and other runtime actions.
+   - Skills can be loaded from local bundles or managed through ClawHub-compatible flows.
+   - Hardening, approvals, quotas, and network policy constrain what tools and skills are allowed to do.
 
-5. **Proactivity / Autonomy Layer** (Why It Feels "Alive")  
-   - **Heartbeat** — Agent wakes every X minutes/hours, reads `HEARTBEAT.md`, checks for pending work (new emails, calendar, mentions), acts if needed, then sleeps.  
-   - **Cron jobs** — Precise scheduled tasks (e.g., "at 3 AM scrape report and notify me").  
-   - **Multi-agent support** — Main agent can spawn sub-agents (specialized ones for research/coding/writing) that run in parallel/isolated sessions.  
-   - Triggers: messages, schedules, webhooks, file changes → agent can start working without you prompting.
+5. **Channels, triggers, and automation**
+   The same runtime is reused across interactive and autonomous entrypoints.
+   - Channels include CLI, Telegram, Slack, Discord, Email, and a WhatsApp bridge.
+   - Triggers include webhook, file watch, cron, and heartbeat.
+   - Subagents and structured task execution run through the same shared runtime and persistence model.
 
-### Quick Summary Flow
-- You message via WhatsApp: "Summarize my emails and draft replies."  
-- Gateway receives → routes to agent session.  
-- Agent assembles context (history + MEMORY.md + email skill).  
-- LLM thinks → calls email tool + browser if needed → loops until done.  
-- Gateway sends reply + any side effects (files written, calendar events added).  
-- Later (heartbeat/cron): agent wakes independently → checks if anything new needs doing → messages you proactively.
+### Quick summary flow
+- A message or trigger arrives through CLI, a channel, or automation.
+- `or3-intern` loads session state from SQLite and gathers extra context from docs and memory.
+- The model runs, may call tools or skills, and loops until it has a final result.
+- The runtime persists the outcome and sends the response back through the original interface.

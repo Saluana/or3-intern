@@ -30,14 +30,8 @@ func (p HostPolicy) EnabledPolicy() bool {
 
 // ValidateURL checks whether target is allowed by the host policy.
 func (p HostPolicy) ValidateURL(ctx context.Context, target *url.URL) error {
-	if target == nil {
-		return fmt.Errorf("invalid url")
-	}
-	hostname := strings.TrimSpace(strings.ToLower(target.Hostname()))
-	if hostname == "" {
-		return fmt.Errorf("missing host")
-	}
-	return p.ValidateHost(ctx, hostname)
+	_, err := resolveURLWithPolicies(ctx, target, p)
+	return err
 }
 
 // ValidateEndpoint validates a URL or host:port endpoint string.
@@ -62,24 +56,73 @@ func (p HostPolicy) ValidateEndpoint(ctx context.Context, raw string) error {
 
 // ValidateHost resolves and validates hostname against the policy.
 func (p HostPolicy) ValidateHost(ctx context.Context, hostname string) error {
-	_, err := p.resolveHost(ctx, hostname)
+	_, err := resolveHostWithPolicies(ctx, hostname, p)
 	return err
 }
 
 func (p HostPolicy) resolveHost(ctx context.Context, hostname string) (resolvedHostPlan, error) {
+	return resolveHostWithPolicies(ctx, hostname, p)
+}
+
+// PrepareURLRequestContext validates target against all provided policies and
+// stores the approved resolved host plan on the returned context so transports
+// can pin the actual dial target without re-resolving.
+func PrepareURLRequestContext(ctx context.Context, target *url.URL, policies ...HostPolicy) (context.Context, error) {
+	plan, err := resolveURLWithPolicies(ctx, target, policies...)
+	if err != nil {
+		return nil, err
+	}
+	return withResolvedHostPlan(ctx, plan), nil
+}
+
+func resolveURLWithPolicies(ctx context.Context, target *url.URL, policies ...HostPolicy) (resolvedHostPlan, error) {
+	if target == nil {
+		return resolvedHostPlan{}, fmt.Errorf("invalid url")
+	}
+	hostname := strings.TrimSpace(strings.ToLower(target.Hostname()))
+	if hostname == "" {
+		return resolvedHostPlan{}, fmt.Errorf("missing host")
+	}
+	return resolveHostWithPolicies(ctx, hostname, policies...)
+}
+
+func resolveHostWithPolicies(ctx context.Context, hostname string, policies ...HostPolicy) (resolvedHostPlan, error) {
+	normalizedHost := strings.Trim(strings.ToLower(strings.TrimSpace(hostname)), "[]")
+	if normalizedHost == "" {
+		return resolvedHostPlan{}, fmt.Errorf("missing host")
+	}
+	if _, err := netip.ParseAddr(normalizedHost); err != nil {
+		// Apply hostname allowlist/default-deny checks before any DNS lookup.
+		// Literal IPs keep the existing behavior and are only validated after parsing.
+		for _, p := range policies {
+			if p.EnabledPolicy() && !hostAllowed(normalizedHost, p.AllowedHosts) && p.DefaultDeny {
+				return resolvedHostPlan{}, fmt.Errorf("host denied by policy: %s", normalizedHost)
+			}
+		}
+	}
+
+	plan, err := resolveRawHost(ctx, hostname)
+	if err != nil {
+		return resolvedHostPlan{}, err
+	}
+	for _, p := range policies {
+		for _, ip := range plan.addrs {
+			if err := p.validateAddr(ip); err != nil {
+				return resolvedHostPlan{}, err
+			}
+		}
+	}
+	return plan, nil
+}
+
+func resolveRawHost(ctx context.Context, hostname string) (resolvedHostPlan, error) {
 	hostname = strings.Trim(strings.ToLower(strings.TrimSpace(hostname)), "[]")
 	if hostname == "" {
 		return resolvedHostPlan{}, fmt.Errorf("missing host")
 	}
 	if ip, err := netip.ParseAddr(hostname); err == nil {
 		ip = ip.Unmap()
-		if err := p.validateAddr(ip); err != nil {
-			return resolvedHostPlan{}, err
-		}
 		return resolvedHostPlan{hostname: hostname, addrs: []netip.Addr{ip}}, nil
-	}
-	if p.EnabledPolicy() && !hostAllowed(hostname, p.AllowedHosts) && p.DefaultDeny {
-		return resolvedHostPlan{}, fmt.Errorf("host denied by policy: %s", hostname)
 	}
 	addrs, err := lookupIPAddr(ctx, hostname)
 	if err != nil {
@@ -95,9 +138,6 @@ func (p HostPolicy) resolveHost(ctx context.Context, hostname string) (resolvedH
 			return resolvedHostPlan{}, fmt.Errorf("host resolution failed")
 		}
 		ip = ip.Unmap()
-		if err := p.validateAddr(ip); err != nil {
-			return resolvedHostPlan{}, err
-		}
 		approved = append(approved, ip)
 	}
 	return resolvedHostPlan{hostname: hostname, addrs: approved}, nil
@@ -164,7 +204,10 @@ func WrapHTTPClient(client *http.Client, policy HostPolicy) *http.Client {
 	}
 	wrappedBase := wrapTransportWithPolicy(base, policy)
 	cloned.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		plan, err := policy.resolveHost(req.Context(), req.URL.Hostname())
+		if _, ok := resolvedHostPlanFromContext(req.Context(), req.URL.Hostname()); ok {
+			return wrappedBase.RoundTrip(req)
+		}
+		plan, err := resolveURLWithPolicies(req.Context(), req.URL, policy)
 		if err != nil {
 			return nil, err
 		}

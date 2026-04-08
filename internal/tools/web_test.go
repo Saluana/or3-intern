@@ -15,6 +15,8 @@ import (
 	"or3-intern/internal/security"
 )
 
+const testPublicFetchURLBase = "http://203.0.113.10"
+
 // ---- StripHTML ----
 
 func TestStripHTML_NoTags(t *testing.T) {
@@ -75,9 +77,9 @@ func TestWebFetch_Success(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tool := &WebFetch{HTTP: &http.Client{Transport: &urlRewriteTransport{base: srv.URL}}}
+	tool := &WebFetch{HTTP: newPinnedTestClient(t, srv.URL, nil)}
 	out, err := tool.Execute(context.Background(), map[string]any{
-		"url": "https://example.com/test",
+		"url": testPublicFetchURLBase + "/test",
 	})
 	if err != nil {
 		t.Fatalf("WebFetch: %v", err)
@@ -96,16 +98,24 @@ func TestWebFetch_MaxBytes(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tool := &WebFetch{HTTP: &http.Client{Transport: &urlRewriteTransport{base: srv.URL}}}
+	tool := &WebFetch{HTTP: newPinnedTestClient(t, srv.URL, nil)}
 	out, err := tool.Execute(context.Background(), map[string]any{
-		"url":      "https://example.com/large",
+		"url":      testPublicFetchURLBase + "/large",
 		"maxBytes": float64(50),
 	})
 	if err != nil {
 		t.Fatalf("WebFetch: %v", err)
 	}
-	// Body should be limited to 50 bytes
-	_ = out
+	parts := strings.SplitN(out, "\n\n", 2)
+	if len(parts) != 2 {
+		t.Fatalf("expected status/body split, got %q", out)
+	}
+	if parts[0] != "status: 200 OK" {
+		t.Fatalf("expected status line, got %q", out)
+	}
+	if len(parts[1]) != 50 {
+		t.Fatalf("expected 50-byte body, got %d bytes in %q", len(parts[1]), out)
+	}
 }
 
 func TestWebFetch_BlocksLocalhost(t *testing.T) {
@@ -118,7 +128,7 @@ func TestWebFetch_BlocksLocalhost(t *testing.T) {
 
 func TestWebFetch_HostPolicyDeniesUnknownHost(t *testing.T) {
 	tool := &WebFetch{HostPolicy: security.HostPolicy{Enabled: true, DefaultDeny: true, AllowedHosts: []string{"example.com"}}}
-	_, err := tool.Execute(context.Background(), map[string]any{"url": "https://api.openai.com/v1"})
+	_, err := tool.Execute(context.Background(), map[string]any{"url": testPublicFetchURLBase + "/v1"})
 	if err == nil {
 		t.Fatal("expected host policy denial")
 	}
@@ -130,33 +140,21 @@ func TestWebFetch_PinsValidatedHostIntoDial(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	serverURL, err := url.Parse(srv.URL)
-	if err != nil {
-		t.Fatalf("url.Parse: %v", err)
-	}
-
 	var dialedAddr string
 	tool := &WebFetch{
-		HTTP: &http.Client{
-			Transport: &http.Transport{
-				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-					dialedAddr = addr
-					return (&net.Dialer{}).DialContext(ctx, network, serverURL.Host)
-				},
-			},
-		},
+		HTTP:    newPinnedTestClient(t, srv.URL, &dialedAddr),
 		Timeout: 2 * time.Second,
 	}
 
-	out, err := tool.Execute(context.Background(), map[string]any{"url": "http://example.com/pinned"})
+	out, err := tool.Execute(context.Background(), map[string]any{"url": testPublicFetchURLBase + "/pinned"})
 	if err != nil {
 		t.Fatalf("WebFetch: %v", err)
 	}
 	if dialedAddr == "" {
 		t.Fatal("expected dial target to be recorded")
 	}
-	if strings.HasPrefix(dialedAddr, "example.com:") {
-		t.Fatalf("expected fetch dial to use a validated IP, got %q", dialedAddr)
+	if !strings.HasPrefix(dialedAddr, "203.0.113.10:") {
+		t.Fatalf("expected fetch dial to stay pinned to the validated request IP, got %q", dialedAddr)
 	}
 	if !strings.Contains(out, "pinned") {
 		t.Fatalf("expected test server response, got %q", out)
@@ -166,7 +164,7 @@ func TestWebFetch_PinsValidatedHostIntoDial(t *testing.T) {
 func TestWebFetch_ActiveProfileWithNoHostsDeniesByDefault(t *testing.T) {
 	tool := &WebFetch{}
 	ctx := ContextWithActiveProfile(context.Background(), ActiveProfile{Name: "no-network"})
-	_, err := tool.Execute(ctx, map[string]any{"url": "https://example.com"})
+	_, err := tool.Execute(ctx, map[string]any{"url": "http://example.com"})
 	if err == nil || !strings.Contains(err.Error(), "host denied by policy") {
 		t.Fatalf("expected profile host denial, got %v", err)
 	}
@@ -174,15 +172,15 @@ func TestWebFetch_ActiveProfileWithNoHostsDeniesByDefault(t *testing.T) {
 
 func TestWebFetch_StopsAfterDefaultRedirectLimit(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "https://example.com/loop", http.StatusFound)
+		http.Redirect(w, r, testPublicFetchURLBase+"/loop", http.StatusFound)
 	}))
 	defer srv.Close()
 
 	tool := &WebFetch{
-		HTTP:    &http.Client{Transport: &urlRewriteTransport{base: srv.URL}},
+		HTTP:    newPinnedTestClient(t, srv.URL, nil),
 		Timeout: 2 * time.Second,
 	}
-	_, err := tool.Execute(context.Background(), map[string]any{"url": "https://example.com/loop"})
+	_, err := tool.Execute(context.Background(), map[string]any{"url": testPublicFetchURLBase + "/loop"})
 	if err == nil {
 		t.Fatal("expected redirect loop to fail")
 	}
@@ -367,4 +365,22 @@ func (t *urlRewriteTransport) RoundTrip(req *http.Request) (*http.Response, erro
 	req2.URL.Scheme = "http"
 	req2.URL.Host = strings.TrimPrefix(t.base, "http://")
 	return http.DefaultTransport.RoundTrip(req2)
+}
+
+func newPinnedTestClient(t *testing.T, serverBase string, dialedAddr *string) *http.Client {
+	t.Helper()
+	serverURL, err := url.Parse(serverBase)
+	if err != nil {
+		t.Fatalf("url.Parse: %v", err)
+	}
+	return &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				if dialedAddr != nil {
+					*dialedAddr = addr
+				}
+				return (&net.Dialer{}).DialContext(ctx, network, serverURL.Host)
+			},
+		},
+	}
 }

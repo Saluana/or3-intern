@@ -47,6 +47,9 @@ cron:
 - Use cron tool for scheduled reminders.
 `
 
+// defaultDigestLineMax bounds the number of lines in the Memory Digest section.
+const defaultDigestLineMax = 10
+
 const (
 	defaultBootstrapMaxChars      = 20000
 	defaultBootstrapTotalMaxChars = 150000
@@ -149,6 +152,22 @@ func (b *Builder) BuildWithOptions(ctx context.Context, opts BuildOptions) (Prom
 	}
 	memText := formatRetrieved(retrieved)
 
+	// Build Memory Digest from top active durable-kind notes.
+	digestText := formatMemoryDigest(retrieved, defaultDigestLineMax)
+
+	// Best-effort usage logging for notes that made it into the prompt.
+	if b.DB != nil && len(retrieved) > 0 {
+		ids := make([]int64, 0, len(retrieved))
+		for _, r := range retrieved {
+			if r.ID > 0 {
+				ids = append(ids, r.ID)
+			}
+		}
+		if len(ids) > 0 {
+			_ = b.DB.TouchMemoryNotes(ctx, scopeKey, ids, db.NowMS())
+		}
+	}
+
 	// indexed doc context
 	var docContextText string
 	if b.DocRetriever != nil && strings.TrimSpace(opts.UserMessage) != "" {
@@ -205,7 +224,7 @@ func (b *Builder) BuildWithOptions(ctx context.Context, opts BuildOptions) (Prom
 		heartbeat = b.currentHeartbeatText()
 		structuredContext = formatStructuredEventContext(opts.EventMeta, structuredMax)
 	}
-	sysText := b.composeSystemPrompt(pinnedText, memText, b.IdentityText, b.StaticMemory, heartbeat, structuredContext, docContextText, workspaceContextText)
+	sysText := b.composeSystemPrompt(pinnedText, digestText, memText, b.IdentityText, b.StaticMemory, heartbeat, structuredContext, docContextText, workspaceContextText)
 	sys := []providers.ChatMessage{
 		{Role: "system", Content: sysText},
 	}
@@ -362,7 +381,7 @@ func readCappedFile(path string, maxBytes int64) ([]byte, error) {
 	return data, nil
 }
 
-func (b *Builder) composeSystemPrompt(pinnedText, memText, identityText, staticMemoryText, heartbeatText, structuredContextText, docContextText, workspaceContextText string) string {
+func (b *Builder) composeSystemPrompt(pinnedText, digestText, memText, identityText, staticMemoryText, heartbeatText, structuredContextText, docContextText, workspaceContextText string) string {
 	maxEach := b.BootstrapMaxChars
 	if maxEach <= 0 {
 		maxEach = defaultBootstrapMaxChars
@@ -412,6 +431,9 @@ func (b *Builder) composeSystemPrompt(pinnedText, memText, identityText, staticM
 		sections = append(sections, section{title: "Structured Trigger Context", text: truncateText(t, maxEach)})
 	}
 	sections = append(sections, section{title: "Pinned Memory", text: pinnedText})
+	if t := strings.TrimSpace(digestText); t != "" {
+		sections = append(sections, section{title: "Memory Digest", text: truncateText(t, maxEach)})
+	}
 	sections = append(sections, section{title: "Retrieved Memory", text: memText})
 	if t := strings.TrimSpace(workspaceContextText); t != "" {
 		sections = append(sections, section{title: "Workspace Context", text: truncateText(t, maxEach)})
@@ -483,6 +505,38 @@ func formatRetrieved(ms []memory.Retrieved) string {
 	var b strings.Builder
 	for i, m := range ms {
 		b.WriteString(fmt.Sprintf("%d) [%s] %s\n", i+1, m.Source, oneLine(m.Text, defaultRetrievedOneLineMax)))
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// digestKinds holds the note kinds that qualify for the Memory Digest section.
+var digestKinds = map[string]struct{}{
+	db.MemoryKindFact:       {},
+	db.MemoryKindPreference: {},
+	db.MemoryKindGoal:       {},
+	db.MemoryKindProcedure:  {},
+}
+
+// formatMemoryDigest builds a compact digest from top active durable-kind
+// notes in the retrieved set. It is bounded to maxLines lines.
+func formatMemoryDigest(ms []memory.Retrieved, maxLines int) string {
+	if maxLines <= 0 {
+		maxLines = defaultDigestLineMax
+	}
+	var b strings.Builder
+	count := 0
+	for _, m := range ms {
+		if _, ok := digestKinds[m.Kind]; !ok {
+			continue
+		}
+		if m.Status != "" && m.Status != db.MemoryStatusActive {
+			continue
+		}
+		b.WriteString(fmt.Sprintf("- [%s] %s\n", m.Kind, oneLine(m.Text, defaultRetrievedOneLineMax)))
+		count++
+		if count >= maxLines {
+			break
+		}
 	}
 	return strings.TrimSpace(b.String())
 }

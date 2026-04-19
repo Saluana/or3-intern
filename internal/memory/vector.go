@@ -47,10 +47,15 @@ func Cosine(a, b []float32) float64 {
 }
 
 type VecCandidate struct {
-	ID        int64
-	Text      string
-	Score     float64
-	CreatedAt int64
+	ID         int64
+	Text       string
+	Score      float64
+	CreatedAt  int64
+	Kind       string
+	Status     string
+	Importance float64
+	UseCount   int
+	LastUsedAt int64
 }
 
 type candMinHeap []VecCandidate
@@ -77,10 +82,15 @@ func VectorSearch(ctx context.Context, d *db.DB, sessionKey string, queryVec []f
 	out := make([]VecCandidate, 0, len(rows))
 	for _, row := range rows {
 		out = append(out, VecCandidate{
-			ID:        row.ID,
-			Text:      row.Text,
-			Score:     1.0 / (1.0 + row.Distance),
-			CreatedAt: row.CreatedAt,
+			ID:         row.ID,
+			Text:       row.Text,
+			Score:      1.0 / (1.0 + row.Distance),
+			CreatedAt:  row.CreatedAt,
+			Kind:       row.Kind,
+			Status:     row.Status,
+			Importance: row.Importance,
+			UseCount:   row.UseCount,
+			LastUsedAt: row.LastUsedAt,
 		})
 	}
 	return out, nil

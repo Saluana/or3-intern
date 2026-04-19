@@ -16,17 +16,39 @@ import (
 const defaultCanonicalMemoryKey = "long_term_memory"
 const canonicalMemoryInputDivisor = 2
 
+// maxConsolidationItemLen caps the length of any single item from structured
+// consolidation output to prevent prompt bloat.
+const maxConsolidationItemLen = 400
+
+// maxConsolidationItems caps the total number of typed note entries emitted
+// per consolidation pass for any single list field.
+const maxConsolidationItems = 10
+
+// staleCleanupBatchSize controls how many stale summary rows are marked per
+// cleanup pass after consolidation.
+const staleCleanupBatchSize = 20
+
 const consolidationPrompt = `You are consolidating chat memory.
 
-Return ONLY JSON with this exact shape:
-{"summary":"...", "canonical_memory":"..."}
+Return ONLY a single JSON object with this exact shape:
+{
+  "summary": "...",
+  "facts": ["...", "..."],
+  "preferences": ["...", "..."],
+  "goals": ["...", "..."],
+  "procedures": ["...", "..."]
+}
 
 Rules:
-- summary: 3-5 concise sentences describing key facts, decisions, and context from the excerpt.
-- canonical_memory: concise markdown bullet list of durable facts/preferences. Start from Existing canonical memory, keep still-true facts, and merge new stable facts.
-- If no durable facts changed, canonical_memory may equal Existing canonical memory.
+- summary: 3-5 concise sentences covering key decisions, outcomes, and context.
+- facts: stable factual items extracted from the conversation (names, versions, states). Keep each item under 300 characters.
+- preferences: durable user preferences or working-style notes. Keep each item under 300 characters.
+- goals: ongoing or stated objectives. Keep each item under 300 characters.
+- procedures: step-by-step processes or runbooks mentioned. Keep each item under 300 characters.
+- Any list may be empty ([]) when nothing relevant was observed.
+- Do not repeat items that already appear in Existing pinned memory.
 
-Existing canonical memory:
+Existing pinned memory:
 %s
 
 Conversation excerpt:
@@ -207,22 +229,23 @@ func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMa
 	if len(resp.Choices) == 0 {
 		return false, fmt.Errorf("consolidation: no choices returned")
 	}
-	summary, canonical := parseConsolidationOutput(contentToStr(resp.Choices[0].Message.Content))
-	summary = trimTo(summary, maxInputChars/canonicalMemoryInputDivisor)
-	canonical = trimTo(canonical, maxInputChars)
-	if canonical == "" {
-		canonical = currentCanonical
-	}
+	parsed := parseConsolidationOutput(contentToStr(resp.Choices[0].Message.Content))
+	summary := trimTo(parsed.Summary, maxInputChars/canonicalMemoryInputDivisor)
 
-	if summary == "" {
+	// Build canonical pinned memory from ultra-stable items only
+	// (preferences + facts), not rolling summaries.
+	canonicalText := buildCanonicalPinnedText(currentCanonical, parsed.Preferences, parsed.Facts)
+	canonicalText = trimTo(canonicalText, maxInputChars)
+
+	if summary == "" && len(parsed.Facts)+len(parsed.Preferences)+len(parsed.Goals)+len(parsed.Procedures) == 0 {
 		w := db.ConsolidationWrite{
 			SessionKey:  sessionKey,
 			ScopeKey:    memScope,
 			CursorMsgID: lastIncludedID,
 		}
-		if canonical != "" {
+		if canonicalText != "" {
 			w.CanonicalKey = canonicalKey
-			w.CanonicalText = canonical
+			w.CanonicalText = canonicalText
 		}
 		_, err := c.DB.WriteConsolidation(ctx, w)
 		if err != nil {
@@ -234,7 +257,7 @@ func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMa
 
 	embedModel := c.EmbedModel
 	var embedding []byte
-	if embedModel != "" {
+	if embedModel != "" && summary != "" {
 		vec, embedErr := c.Provider.Embed(ctx, embedModel, summary)
 		if embedErr != nil {
 			log.Printf("consolidation embed failed: %v", embedErr)
@@ -246,6 +269,9 @@ func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMa
 		embedding = make([]byte, 0)
 	}
 
+	// Build extra typed notes from structured output.
+	extraNotes := buildExtraNotes(parsed, sql.NullInt64{Int64: lastIncludedID, Valid: lastIncludedID > 0})
+
 	w := db.ConsolidationWrite{
 		SessionKey:  sessionKey,
 		ScopeKey:    memScope,
@@ -253,18 +279,25 @@ func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMa
 		Embedding:   embedding,
 		SourceMsgID: sql.NullInt64{Int64: lastIncludedID, Valid: true},
 		NoteTags:    "consolidation",
+		NoteKind:    db.MemoryKindSummary,
+		ExtraNotes:  extraNotes,
 		CursorMsgID: lastIncludedID,
 	}
-	if canonical != "" {
+	if canonicalText != "" {
 		w.CanonicalKey = canonicalKey
-		w.CanonicalText = canonical
+		w.CanonicalText = canonicalText
 	}
 	_, err = c.DB.WriteConsolidation(ctx, w)
 	if err != nil {
 		return false, fmt.Errorf("consolidation write: %w", err)
 	}
 
-	log.Printf("consolidated %d messages for session %q into memory note", len(msgs), sessionKey)
+	// Bounded stale-summary cleanup: mark old, never-used summaries as stale.
+	if _, cleanErr := c.DB.CleanupStaleMemoryNotes(ctx, memScope, db.NowMS(), staleCleanupBatchSize); cleanErr != nil {
+		log.Printf("consolidation cleanup stale notes: %v", cleanErr)
+	}
+
+	log.Printf("consolidated %d messages for session %q into memory note (+%d typed notes)", len(msgs), sessionKey, len(extraNotes))
 	return true, nil
 }
 
@@ -279,21 +312,131 @@ func contentToStr(v any) string {
 	return fmt.Sprintf("%v", v)
 }
 
+// consolidationOutput is the structured JSON shape returned by the LLM.
 type consolidationOutput struct {
-	Summary   string `json:"summary"`
-	Canonical string `json:"canonical_memory"`
+	Summary     string   `json:"summary"`
+	Facts       []string `json:"facts"`
+	Preferences []string `json:"preferences"`
+	Goals       []string `json:"goals"`
+	Procedures  []string `json:"procedures"`
+	// Legacy field: accepted as a fallback for old-format responses.
+	LegacyCanonical string `json:"canonical_memory"`
 }
 
-func parseConsolidationOutput(raw string) (summary string, canonical string) {
+// parseConsolidationOutput parses the LLM response into a structured output.
+// It first tries the new structured format, then falls back gracefully:
+//   - If the new format is present (has summary), use it.
+//   - If only the legacy {"summary","canonical_memory"} fields are present,
+//     treat canonical_memory as a preference item.
+//   - On any parse failure, return a minimal output with the raw text as summary.
+func parseConsolidationOutput(raw string) consolidationOutput {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return "", ""
+		return consolidationOutput{}
 	}
+
+	// Attempt to extract a JSON object even if the model added surrounding text.
+	jsonStr := extractJSON(raw)
+
 	var out consolidationOutput
-	if err := json.Unmarshal([]byte(raw), &out); err == nil {
-		return strings.TrimSpace(out.Summary), strings.TrimSpace(out.Canonical)
+	if jsonStr != "" {
+		if err := json.Unmarshal([]byte(jsonStr), &out); err == nil {
+			out.Summary = strings.TrimSpace(out.Summary)
+			out.Facts = sanitizeItems(out.Facts)
+			out.Preferences = sanitizeItems(out.Preferences)
+			out.Goals = sanitizeItems(out.Goals)
+			out.Procedures = sanitizeItems(out.Procedures)
+			// Absorb legacy canonical_memory as a preference if new fields missing.
+			if len(out.Facts)+len(out.Preferences)+len(out.Goals)+len(out.Procedures) == 0 &&
+				strings.TrimSpace(out.LegacyCanonical) != "" {
+				out.Preferences = []string{strings.TrimSpace(out.LegacyCanonical)}
+			}
+			if out.Summary != "" || len(out.Facts)+len(out.Preferences)+len(out.Goals)+len(out.Procedures) > 0 {
+				return out
+			}
+		}
 	}
-	return raw, ""
+
+	// Final fallback: treat the entire raw text as a summary.
+	return consolidationOutput{Summary: trimTo(raw, maxConsolidationItemLen*5)}
+}
+
+// extractJSON attempts to locate and return the first complete JSON object
+// in s. This handles models that add prose before or after the JSON.
+func extractJSON(s string) string {
+	start := strings.Index(s, "{")
+	if start < 0 {
+		return ""
+	}
+	depth := 0
+	for i := start; i < len(s); i++ {
+		switch s[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return s[start : i+1]
+			}
+		}
+	}
+	return ""
+}
+
+// sanitizeItems trims whitespace from each item, drops empties, caps length,
+// and limits total count.
+func sanitizeItems(items []string) []string {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if len(item) > maxConsolidationItemLen {
+			item = strings.TrimSpace(item[:maxConsolidationItemLen]) + "…"
+		}
+		out = append(out, item)
+		if len(out) >= maxConsolidationItems {
+			break
+		}
+	}
+	return out
+}
+
+// buildCanonicalPinnedText constructs a compact, bounded string from the
+// most durable items (preferences and facts) suitable for pinned memory.
+// It does NOT include rolling summaries.
+func buildCanonicalPinnedText(existing string, prefs, facts []string) string {
+	var sb strings.Builder
+	// Start from existing and keep it bounded.
+	existing = trimTo(existing, 2000)
+	if existing != "" {
+		sb.WriteString(existing)
+	}
+	for _, p := range prefs {
+		line := "- " + strings.TrimSpace(strings.TrimPrefix(p, "- "))
+		if sb.Len()+len(line)+1 > 2500 {
+			break
+		}
+		if sb.Len() > 0 {
+			sb.WriteString("\n")
+		}
+		sb.WriteString(line)
+	}
+	for _, f := range facts {
+		line := "- " + strings.TrimSpace(strings.TrimPrefix(f, "- "))
+		if sb.Len()+len(line)+1 > 2500 {
+			break
+		}
+		if sb.Len() > 0 {
+			sb.WriteString("\n")
+		}
+		sb.WriteString(line)
+	}
+	return strings.TrimSpace(sb.String())
 }
 
 func trimTo(s string, max int) string {
@@ -302,4 +445,38 @@ func trimTo(s string, max int) string {
 		return strings.TrimSpace(s[:max])
 	}
 	return s
+}
+
+// buildExtraNotes converts parsed structured consolidation output into a slice
+// of TypedNoteInput ready to be written alongside the summary note.
+func buildExtraNotes(parsed consolidationOutput, sourceMsgID sql.NullInt64) []db.TypedNoteInput {
+	type kindItems struct {
+		kind  string
+		items []string
+	}
+	groups := []kindItems{
+		{db.MemoryKindFact, parsed.Facts},
+		{db.MemoryKindPreference, parsed.Preferences},
+		{db.MemoryKindGoal, parsed.Goals},
+		{db.MemoryKindProcedure, parsed.Procedures},
+	}
+	out := make([]db.TypedNoteInput, 0)
+	for _, g := range groups {
+		for _, text := range g.items {
+			text = strings.TrimSpace(text)
+			if text == "" {
+				continue
+			}
+			out = append(out, db.TypedNoteInput{
+				Text:        text,
+				Embedding:   make([]byte, 0),
+				SourceMsgID: sourceMsgID,
+				Tags:        "consolidation",
+				Kind:        g.kind,
+				Status:      db.MemoryStatusActive,
+				Importance:  0,
+			})
+		}
+	}
+	return out
 }

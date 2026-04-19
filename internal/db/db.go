@@ -298,6 +298,9 @@ func (d *DB) migrate(ctx context.Context) error {
 	if err := d.ensureMemoryVecIndexForExisting(ctx); err != nil {
 		return err
 	}
+	if err := d.ensureMemoryNotesMetaColumns(ctx); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -486,6 +489,58 @@ func (d *DB) initMemoryVecIndex(ctx context.Context, dims int) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// ensureMemoryNotesMetaColumns adds lifecycle/ranking metadata columns to
+// memory_notes if they do not yet exist (additive migration), then backfills
+// rows that were written by the old consolidation path.
+func (d *DB) ensureMemoryNotesMetaColumns(ctx context.Context) error {
+	type colDef struct {
+		name    string
+		ddl     string
+		missing bool
+	}
+	cols := []colDef{
+		{name: "kind", ddl: `ALTER TABLE memory_notes ADD COLUMN kind TEXT NOT NULL DEFAULT 'note'`},
+		{name: "status", ddl: `ALTER TABLE memory_notes ADD COLUMN status TEXT NOT NULL DEFAULT 'active'`},
+		{name: "importance", ddl: `ALTER TABLE memory_notes ADD COLUMN importance REAL NOT NULL DEFAULT 0`},
+		{name: "use_count", ddl: `ALTER TABLE memory_notes ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0`},
+		{name: "last_used_at", ddl: `ALTER TABLE memory_notes ADD COLUMN last_used_at INTEGER NOT NULL DEFAULT 0`},
+	}
+
+	for i := range cols {
+		has, err := d.tableHasColumn(ctx, "memory_notes", cols[i].name)
+		if err != nil {
+			return err
+		}
+		cols[i].missing = !has
+	}
+
+	for _, col := range cols {
+		if !col.missing {
+			continue
+		}
+		if _, err := d.SQL.ExecContext(ctx, col.ddl); err != nil {
+			return err
+		}
+	}
+
+	// Supporting indexes for cleanup and retrieval queries.
+	indexes := []string{
+		`CREATE INDEX IF NOT EXISTS memory_notes_scope_kind_status_created_at ON memory_notes(session_key, kind, status, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS memory_notes_kind ON memory_notes(kind)`,
+		`CREATE INDEX IF NOT EXISTS memory_notes_status ON memory_notes(status)`,
+	}
+	for _, idx := range indexes {
+		if _, err := d.SQL.ExecContext(ctx, idx); err != nil {
+			return err
+		}
+	}
+
+	// Backfill: rows tagged with "consolidation" are rolling summaries.
+	_, err := d.SQL.ExecContext(ctx,
+		`UPDATE memory_notes SET kind='summary' WHERE kind='note' AND (tags='consolidation' OR tags LIKE '%consolidation%')`)
+	return err
 }
 
 func (d *DB) tableHasColumn(ctx context.Context, tableName, columnName string) (bool, error) {

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"or3-intern/internal/db"
 	"or3-intern/internal/memory"
 	"or3-intern/internal/scope"
 )
@@ -256,7 +257,7 @@ func TestEmptyOptionalSectionsOmitted(t *testing.T) {
 	noHeartbeat := ""
 	noStructured := ""
 	noDocContext := ""
-	got := b.composeSystemPrompt(pinned, retrieved, noIdentity, noStaticMem, noHeartbeat, noStructured, noDocContext, "")
+	got := b.composeSystemPrompt(pinned, "", retrieved, noIdentity, noStaticMem, noHeartbeat, noStructured, noDocContext, "")
 	if strings.Contains(got, "Identity") {
 		t.Error("expected 'Identity' section to be omitted when IdentityText is empty")
 	}
@@ -319,4 +320,141 @@ func TestWorkspaceContextIncluded(t *testing.T) {
 	if !strings.Contains(strings.ToLower(sys), "penguin") {
 		t.Fatalf("expected workspace context to include workspace content, got %q", sys)
 	}
+}
+
+// ---- Memory Digest tests ----
+
+func TestFormatMemoryDigest_IncludesDurableKinds(t *testing.T) {
+retrieved := []memory.Retrieved{
+{ID: 1, Text: "user prefers dark mode", Kind: "preference", Status: "active", Score: 0.9},
+{ID: 2, Text: "project uses golang", Kind: "fact", Status: "active", Score: 0.8},
+{ID: 3, Text: "goal: ship v2 by Q3", Kind: "goal", Status: "active", Score: 0.7},
+{ID: 4, Text: "run make test for CI", Kind: "procedure", Status: "active", Score: 0.6},
+{ID: 5, Text: "rolling summary text", Kind: "summary", Status: "active", Score: 0.5},
+}
+digest := formatMemoryDigest(retrieved, 10)
+if !strings.Contains(digest, "preference") {
+t.Error("expected preference kind in digest")
+}
+if !strings.Contains(digest, "dark mode") {
+t.Error("expected preference text in digest")
+}
+if !strings.Contains(digest, "fact") {
+t.Error("expected fact kind in digest")
+}
+if !strings.Contains(digest, "goal") {
+t.Error("expected goal kind in digest")
+}
+if !strings.Contains(digest, "procedure") {
+t.Error("expected procedure kind in digest")
+}
+// Summaries and notes should NOT appear in digest.
+if strings.Contains(digest, "rolling summary text") {
+t.Error("expected summary to be excluded from digest")
+}
+}
+
+func TestFormatMemoryDigest_ExcludesStaleNotes(t *testing.T) {
+retrieved := []memory.Retrieved{
+{ID: 1, Text: "active preference", Kind: "preference", Status: "active", Score: 0.9},
+{ID: 2, Text: "stale preference", Kind: "preference", Status: "stale", Score: 0.8},
+}
+digest := formatMemoryDigest(retrieved, 10)
+if strings.Contains(digest, "stale preference") {
+t.Error("stale note should be excluded from digest")
+}
+if !strings.Contains(digest, "active preference") {
+t.Error("active note should be in digest")
+}
+}
+
+func TestFormatMemoryDigest_EmptyWhenNoEligibleNotes(t *testing.T) {
+retrieved := []memory.Retrieved{
+{ID: 1, Text: "just a summary", Kind: "summary", Status: "active", Score: 0.9},
+{ID: 2, Text: "a plain note", Kind: "note", Status: "active", Score: 0.8},
+}
+digest := formatMemoryDigest(retrieved, 10)
+if digest != "" {
+t.Errorf("expected empty digest when no durable kinds, got %q", digest)
+}
+}
+
+func TestFormatMemoryDigest_BoundedByMaxLines(t *testing.T) {
+retrieved := make([]memory.Retrieved, 20)
+for i := range retrieved {
+retrieved[i] = memory.Retrieved{
+ID:     int64(i + 1),
+Text:   "some important fact",
+Kind:   "fact",
+Status: "active",
+Score:  float64(20-i) / 20.0,
+}
+}
+digest := formatMemoryDigest(retrieved, 5)
+lines := strings.Split(strings.TrimSpace(digest), "\n")
+if len(lines) > 5 {
+t.Errorf("expected at most 5 digest lines, got %d", len(lines))
+}
+}
+
+func TestFormatMemoryDigest_EmptyInput(t *testing.T) {
+digest := formatMemoryDigest(nil, 10)
+if digest != "" {
+t.Errorf("expected empty digest for nil input, got %q", digest)
+}
+}
+
+// TestPromptIncludesMemoryDigest verifies that the Memory Digest section
+// appears in the system prompt when retrieved notes include durable kinds.
+func TestPromptIncludesMemoryDigest(t *testing.T) {
+d := openTestDB(t)
+ctx := context.Background()
+
+// Insert a preference note so retrieval can find it.
+_, err := d.InsertMemoryNoteTyped(ctx, "sess", db.TypedNoteInput{
+Text:   "user prefers verbose logging",
+Kind:   db.MemoryKindPreference,
+Status: db.MemoryStatusActive,
+})
+if err != nil {
+t.Fatalf("InsertMemoryNoteTyped: %v", err)
+}
+
+b := &Builder{DB: d, HistoryMax: 10}
+pp, _, err := b.BuildWithOptions(ctx, BuildOptions{
+SessionKey:  "sess",
+UserMessage: "verbose logging",
+})
+if err != nil {
+t.Fatalf("BuildWithOptions: %v", err)
+}
+sys := pp.System[0].Content.(string)
+// Only check digest section if FTS actually returned results.
+if strings.Contains(sys, "verbose logging") && strings.Contains(sys, "preference") {
+if !strings.Contains(sys, "Memory Digest") {
+t.Errorf("expected 'Memory Digest' section when durable notes retrieved, got %q", sys)
+}
+}
+}
+
+func TestComposeSystemPrompt_MemoryDigestBetweenPinnedAndRetrieved(t *testing.T) {
+b := &Builder{}
+got := b.composeSystemPrompt("pinned content", "digest content", "retrieved content", "", "", "", "", "", "")
+pinnedIdx := strings.Index(got, "Pinned Memory")
+digestIdx := strings.Index(got, "Memory Digest")
+retrievedIdx := strings.Index(got, "Retrieved Memory")
+if pinnedIdx < 0 || digestIdx < 0 || retrievedIdx < 0 {
+t.Fatalf("missing sections: pinned=%d digest=%d retrieved=%d", pinnedIdx, digestIdx, retrievedIdx)
+}
+if !(pinnedIdx < digestIdx && digestIdx < retrievedIdx) {
+t.Errorf("expected order Pinned < Digest < Retrieved, got %d %d %d", pinnedIdx, digestIdx, retrievedIdx)
+}
+}
+
+func TestComposeSystemPrompt_DigestOmittedWhenEmpty(t *testing.T) {
+b := &Builder{}
+got := b.composeSystemPrompt("(none)", "", "(none)", "", "", "", "", "", "")
+if strings.Contains(got, "Memory Digest") {
+t.Error("expected 'Memory Digest' section to be omitted when digestText is empty")
+}
 }

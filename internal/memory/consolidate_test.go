@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -102,7 +103,7 @@ func TestConsolidator_RunOnce_PersistsNoteCursorAndCanonical(t *testing.T) {
 			t.Fatalf("AppendMessage: %v", err)
 		}
 	}
-	prov, calls := buildConsolidationProvider(t, `{"summary":"Short summary.","canonical_memory":"- prefers concise output"}`, true)
+	prov, calls := buildConsolidationProvider(t, `{"summary":"Short summary.","preferences":["prefers concise output"],"facts":[],"goals":[],"procedures":[]}`, true)
 	c := &Consolidator{
 		DB:                 d,
 		Provider:           prov,
@@ -182,7 +183,7 @@ func TestConsolidator_ArchiveAll_MultiPass(t *testing.T) {
 			t.Fatalf("AppendMessage: %v", err)
 		}
 	}
-	prov, calls := buildConsolidationProvider(t, `{"summary":"pass summary","canonical_memory":"- memory"}`, false)
+	prov, calls := buildConsolidationProvider(t, `{"summary":"pass summary","preferences":["memory"],"facts":[],"goals":[],"procedures":[]}`, false)
 	c := &Consolidator{
 		DB:                 d,
 		Provider:           prov,
@@ -214,7 +215,7 @@ func TestConsolidator_MaxInputCharsBoundsPromptAndSkipsEmbedOnFailure(t *testing
 			t.Fatalf("AppendMessage: %v", err)
 		}
 	}
-	prov, calls := buildConsolidationProvider(t, `{"summary":"bounded summary","canonical_memory":"- bounded"}`, false)
+	prov, calls := buildConsolidationProvider(t, `{"summary":"bounded summary","preferences":["bounded"],"facts":[],"goals":[],"procedures":[]}`, false)
 	c := &Consolidator{
 		DB:            d,
 		Provider:      prov,
@@ -246,7 +247,7 @@ func TestConsolidator_RunOnce_OnlyAdvancesThroughIncludedMessages(t *testing.T) 
 		}
 		ids = append(ids, id)
 	}
-	prov, _ := buildConsolidationProvider(t, `{"summary":"bounded summary","canonical_memory":"- bounded"}`, true)
+	prov, _ := buildConsolidationProvider(t, `{"summary":"bounded summary","facts":[],"preferences":["bounded"],"goals":[],"procedures":[]}`, true)
 	c := &Consolidator{
 		DB:            d,
 		Provider:      prov,
@@ -275,16 +276,17 @@ func TestConsolidator_RunOnce_OnlyAdvancesThroughIncludedMessages(t *testing.T) 
 	defer rows.Close()
 	var note db.MemoryNoteRow
 	if !rows.Next() {
-		t.Fatal("expected a memory note")
+		t.Fatal("expected at least one memory note")
 	}
 	if err := rows.Scan(&note.ID, &note.Text, &note.Embedding, &note.SourceMessageID, &note.Tags, &note.CreatedAt); err != nil {
 		t.Fatalf("rows.Scan: %v", err)
 	}
+	// The primary summary note must reference the last included message.
 	if !note.SourceMessageID.Valid || note.SourceMessageID.Int64 != ids[1] {
 		t.Fatalf("expected source message id %d, got %+v", ids[1], note.SourceMessageID)
 	}
-	if rows.Next() {
-		t.Fatal("expected exactly one memory note")
+	// Drain any additional typed notes written by structured output.
+	for rows.Next() {
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatalf("rows.Err: %v", err)
@@ -391,4 +393,250 @@ func TestContentToStr_Other(t *testing.T) {
 	if !strings.Contains(got, "42") {
 		t.Errorf("expected '42' in output, got %q", got)
 	}
+}
+
+// ---- parseConsolidationOutput tests ----
+
+func TestParseConsolidationOutput_NewFormat(t *testing.T) {
+raw := `{"summary":"session summary","facts":["golang one two two"],"preferences":["dark mode"],"goals":["ship v2"],"procedures":["run make test"]}`
+out := parseConsolidationOutput(raw)
+if out.Summary != "session summary" {
+t.Errorf("expected summary, got %q", out.Summary)
+}
+if len(out.Facts) != 1 || out.Facts[0] != "golang one two two" {
+t.Errorf("expected facts=[golang one two two], got %v", out.Facts)
+}
+if len(out.Preferences) != 1 || out.Preferences[0] != "dark mode" {
+t.Errorf("expected preferences=[dark mode], got %v", out.Preferences)
+}
+if len(out.Goals) != 1 || out.Goals[0] != "ship v2" {
+t.Errorf("expected goals=[ship v2], got %v", out.Goals)
+}
+if len(out.Procedures) != 1 || out.Procedures[0] != "run make test" {
+t.Errorf("expected procedures=[run make test], got %v", out.Procedures)
+}
+}
+
+func TestParseConsolidationOutput_LegacyFormatFallback(t *testing.T) {
+// Old-format responses (only summary + canonical_memory) should be absorbed.
+raw := `{"summary":"old summary","canonical_memory":"- prefers concise output"}`
+out := parseConsolidationOutput(raw)
+if out.Summary != "old summary" {
+t.Errorf("expected old summary, got %q", out.Summary)
+}
+// canonical_memory should become a preference.
+if len(out.Preferences) == 0 {
+t.Fatal("expected canonical_memory absorbed as preference")
+}
+if !strings.Contains(out.Preferences[0], "concise output") {
+t.Errorf("expected preference to contain 'concise output', got %v", out.Preferences)
+}
+}
+
+func TestParseConsolidationOutput_EmptyInput(t *testing.T) {
+out := parseConsolidationOutput("")
+if out.Summary != "" || len(out.Facts)+len(out.Preferences)+len(out.Goals)+len(out.Procedures) != 0 {
+t.Errorf("expected empty output for empty input, got %+v", out)
+}
+}
+
+func TestParseConsolidationOutput_MalformedJSON(t *testing.T) {
+out := parseConsolidationOutput("not json at all")
+// Fallback: raw text used as summary.
+if out.Summary == "" {
+t.Error("expected fallback summary from malformed input")
+}
+}
+
+func TestParseConsolidationOutput_ExtraProseAroundJSON(t *testing.T) {
+raw := `Here is the output: {"summary":"foo","preferences":["pref1"]} hope that helps`
+out := parseConsolidationOutput(raw)
+if out.Summary != "foo" {
+t.Errorf("expected 'foo', got %q", out.Summary)
+}
+if len(out.Preferences) == 0 || out.Preferences[0] != "pref1" {
+t.Errorf("expected preferences=[pref1], got %v", out.Preferences)
+}
+}
+
+func TestParseConsolidationOutput_ItemLengthCapped(t *testing.T) {
+longItem := strings.Repeat("x", maxConsolidationItemLen+100)
+raw := `{"summary":"s","facts":["` + longItem + `"],"preferences":[],"goals":[],"procedures":[]}`
+out := parseConsolidationOutput(raw)
+if len(out.Facts) == 0 {
+t.Fatal("expected truncated fact")
+}
+if len(out.Facts[0]) > maxConsolidationItemLen+3 { // +3 for "…"
+t.Errorf("expected fact capped to ~%d chars, got %d", maxConsolidationItemLen, len(out.Facts[0]))
+}
+}
+
+func TestParseConsolidationOutput_ItemCountCapped(t *testing.T) {
+items := make([]string, maxConsolidationItems+5)
+for i := range items {
+items[i] = strings.Repeat("x", 10)
+}
+b, _ := json.Marshal(map[string]any{
+"summary":    "s",
+"facts":      items,
+"preferences": []string{},
+"goals":       []string{},
+"procedures":  []string{},
+})
+out := parseConsolidationOutput(string(b))
+if len(out.Facts) > maxConsolidationItems {
+t.Errorf("expected facts capped to %d, got %d", maxConsolidationItems, len(out.Facts))
+}
+}
+
+// ---- buildCanonicalPinnedText tests ----
+
+func TestBuildCanonicalPinnedText_CombinesPrefsAndFacts(t *testing.T) {
+text := buildCanonicalPinnedText("- existing", []string{"dark mode"}, []string{"golang one two two"})
+if !strings.Contains(text, "existing") {
+t.Error("expected existing to be preserved")
+}
+if !strings.Contains(text, "dark mode") {
+t.Error("expected dark mode preference")
+}
+if !strings.Contains(text, "golang one two two") {
+t.Error("expected golang one two two fact")
+}
+}
+
+func TestBuildCanonicalPinnedText_EmptyInputs(t *testing.T) {
+text := buildCanonicalPinnedText("", nil, nil)
+if text != "" {
+t.Errorf("expected empty output for all-empty inputs, got %q", text)
+}
+}
+
+// ---- buildExtraNotes tests ----
+
+func TestBuildExtraNotes_AllKinds(t *testing.T) {
+parsed := consolidationOutput{
+Facts:       []string{"golang one two two"},
+Preferences: []string{"dark mode"},
+Goals:       []string{"ship v2"},
+Procedures:  []string{"run tests"},
+}
+notes := buildExtraNotes(parsed, sql.NullInt64{Int64: 42, Valid: true})
+if len(notes) != 4 {
+t.Fatalf("expected 4 notes, got %d", len(notes))
+}
+kinds := make(map[string]int)
+for _, n := range notes {
+kinds[n.Kind]++
+}
+for _, k := range []string{db.MemoryKindFact, db.MemoryKindPreference, db.MemoryKindGoal, db.MemoryKindProcedure} {
+if kinds[k] != 1 {
+t.Errorf("expected 1 note of kind %q, got %d", k, kinds[k])
+}
+}
+}
+
+func TestBuildExtraNotes_EmptyListsProduceZeroNotes(t *testing.T) {
+parsed := consolidationOutput{}
+notes := buildExtraNotes(parsed, sql.NullInt64{})
+if len(notes) != 0 {
+t.Errorf("expected no notes from empty output, got %d", len(notes))
+}
+}
+
+func TestConsolidator_RunOnce_WritesTypedNotes(t *testing.T) {
+d := openConsolidateTestDB(t)
+ctx := context.Background()
+for i := 0; i < 14; i++ {
+role := "user"
+if i%2 == 1 {
+role = "assistant"
+}
+if _, err := d.AppendMessage(ctx, "sess", role, "message", nil); err != nil {
+t.Fatalf("AppendMessage: %v", err)
+}
+}
+prov, _ := buildConsolidationProvider(t,
+`{"summary":"A summary.","facts":["golang one two two is used"],"preferences":["dark mode"],"goals":[],"procedures":[]}`,
+false)
+c := &Consolidator{
+DB:            d,
+Provider:      prov,
+WindowSize:    5,
+MaxMessages:   50,
+MaxInputChars: 12000,
+EmbedModel:    "",
+}
+didWork, err := c.RunOnce(ctx, "sess", 5, RunMode{})
+if err != nil {
+t.Fatalf("RunOnce: %v", err)
+}
+if !didWork {
+t.Fatal("expected consolidation work")
+}
+
+// Verify that typed notes were written via FTS.
+factRows, err := d.SearchFTS(ctx, "sess", "golang one two two", 5)
+if err != nil {
+t.Fatalf("SearchFTS facts: %v", err)
+}
+if len(factRows) == 0 {
+t.Fatal("expected fact note via FTS")
+}
+if factRows[0].Kind != db.MemoryKindFact {
+t.Errorf("expected kind=fact, got %q", factRows[0].Kind)
+}
+
+prefRows, err := d.SearchFTS(ctx, "sess", "dark mode", 5)
+if err != nil {
+t.Fatalf("SearchFTS prefs: %v", err)
+}
+if len(prefRows) == 0 {
+t.Fatal("expected preference note via FTS")
+}
+if prefRows[0].Kind != db.MemoryKindPreference {
+t.Errorf("expected kind=preference, got %q", prefRows[0].Kind)
+}
+}
+
+func TestConsolidator_RunOnce_CanonicalUsesPrefsAndFacts(t *testing.T) {
+d := openConsolidateTestDB(t)
+ctx := context.Background()
+for i := 0; i < 14; i++ {
+role := "user"
+if i%2 == 1 {
+role = "assistant"
+}
+if _, err := d.AppendMessage(ctx, "sess", role, "hi", nil); err != nil {
+t.Fatalf("AppendMessage: %v", err)
+}
+}
+prov, _ := buildConsolidationProvider(t,
+`{"summary":"Sess summary.","facts":["uses sqlite database"],"preferences":["prefers minimal diffs"],"goals":[],"procedures":[]}`,
+false)
+c := &Consolidator{
+DB:                 d,
+Provider:           prov,
+WindowSize:         5,
+MaxMessages:        50,
+MaxInputChars:      12000,
+CanonicalPinnedKey: "long_term_memory",
+}
+_, err := c.RunOnce(ctx, "sess", 5, RunMode{})
+if err != nil {
+t.Fatalf("RunOnce: %v", err)
+}
+pinned, ok, err := d.GetPinnedValue(ctx, "sess", "long_term_memory")
+if err != nil {
+t.Fatalf("GetPinnedValue: %v", err)
+}
+if !ok {
+t.Fatal("expected canonical pinned memory to be written")
+}
+// Pinned memory should contain preferences and facts, not just the summary.
+if !strings.Contains(pinned, "minimal diffs") {
+t.Errorf("expected preference in pinned memory, got %q", pinned)
+}
+if !strings.Contains(pinned, "sqlite database") {
+t.Errorf("expected fact in pinned memory, got %q", pinned)
+}
 }

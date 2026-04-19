@@ -90,15 +90,93 @@ Parent session contract:
 
 ### Approval and pairing endpoints
 
-- `GET /internal/v1/approvals` — list approval requests
-- `GET /internal/v1/approvals/{id}` — inspect one request
-- `POST /internal/v1/approvals/{id}/approve` / `deny` — resolve one request
-- `GET /internal/v1/devices` — list paired devices
-- `POST /internal/v1/devices/{deviceId}/rotate` / `revoke` — rotate or revoke a paired device token
-- `GET /internal/v1/pairing/requests` — list pairing requests
-- `POST /internal/v1/pairing/requests` — create a pairing request and one-time code
-- `POST /internal/v1/pairing/requests/{id}/approve` / `deny` — resolve a pairing request
-- `POST /internal/v1/pairing/exchange` — exchange an approved pairing code for a device token
+These endpoints require the approval broker to be configured (`security.approvals.enabled: true`).
+
+Authentication for these routes accepts either the existing shared-secret bearer token (admin access) or a paired device token with the `operator` role. The `POST /internal/v1/pairing/requests` and `POST /internal/v1/pairing/exchange` endpoints are unauthenticated so that remote clients can initiate the pairing flow.
+
+Audit records for operator-originated actions include `auth_kind: "shared-secret"` or `auth_kind: "paired-device"` to distinguish the authentication method.
+
+#### Pairing
+
+| Method | Path | Auth required | Description |
+| --- | --- | --- | --- |
+| `POST` | `/internal/v1/pairing/requests` | No | Create a pairing request. Returns `id`, `device_id`, `code`, `role`, `expires_at`. |
+| `GET` | `/internal/v1/pairing/requests` | Operator | List pairing requests. Optional `?status=` filter. |
+| `POST` | `/internal/v1/pairing/requests/{id}/approve` | Operator | Approve a pending pairing request. |
+| `POST` | `/internal/v1/pairing/requests/{id}/deny` | Operator | Deny a pending pairing request. |
+| `POST` | `/internal/v1/pairing/exchange` | No | Exchange an approved code for a device token. Returns `device_id`, `role`, `token`. The token is shown once. |
+
+`POST /internal/v1/pairing/requests` request body:
+
+```json
+{
+  "role": "operator",
+  "display_name": "My Laptop",
+  "origin": "optional origin metadata",
+  "device_id": "optional stable device id"
+}
+```
+
+`POST /internal/v1/pairing/exchange` request body:
+
+```json
+{
+  "request_id": 42,
+  "code": "123456"
+}
+```
+
+#### Devices
+
+| Method | Path | Auth required | Description |
+| --- | --- | --- | --- |
+| `GET` | `/internal/v1/devices` | Operator | List paired devices. |
+| `POST` | `/internal/v1/devices/{deviceId}/revoke` | Operator | Revoke a paired device. Returns `{ "device_id": "...", "status": "revoked" }`. |
+| `POST` | `/internal/v1/devices/{deviceId}/rotate` | Operator | Rotate a device token. Returns `{ "device_id": "...", "token": "..." }`. The new token is shown once. |
+
+#### Approvals
+
+| Method | Path | Auth required | Description |
+| --- | --- | --- | --- |
+| `GET` | `/internal/v1/approvals` | Operator | List approval requests. Optional `?status=` and `?type=` filters. |
+| `GET` | `/internal/v1/approvals/{id}` | Operator | Get a single approval request with full subject JSON. |
+| `POST` | `/internal/v1/approvals/{id}/approve` | Operator | Approve a pending request. Returns `{ "token": "..." }` (shown once) and optional `allowlist_id`. |
+| `POST` | `/internal/v1/approvals/{id}/deny` | Operator | Deny a pending request. |
+| `POST` | `/internal/v1/approvals/{id}/cancel` | Operator | Cancel a pending request without an approval decision. |
+| `POST` | `/internal/v1/approvals/expire` | Operator | Marks all expired pending requests as expired. |
+
+`POST /internal/v1/approvals/{id}/approve` request body:
+
+```json
+{
+  "allowlist": false,
+  "note": "approved for this session"
+}
+```
+
+Set `"allowlist": true` to also create a persistent allowlist rule from the subject.
+
+#### Approval token lifecycle
+
+1. A tool invocation triggers an approval request in `pending` status.
+2. An operator approves the request via CLI or HTTP.
+3. An approval token is returned once (never stored in plaintext server-side).
+4. The tool retries with the token in context; the broker re-derives the subject hash and verifies the token signature, host ID, and expiry.
+5. On match: execution proceeds. On mismatch or expiry: a new approval request is created.
+
+Approval tokens are HMAC-signed and include the request ID, subject hash, host ID, and expiry. They are not reusable across different execution contexts or hosts.
+
+#### Future phases (not in v1)
+
+The following capabilities are compatible with this schema and token format but are **not yet implemented**:
+
+- Chat-channel approval routing (resolve requests by replying in Telegram, Slack, etc.)
+- Web browser UI for approval resolution
+- Secret-access approval gating (`secret_access` domain)
+- Outbound-message approval gating (`message_send` domain)
+- File-transfer approval gating (`file_transfer` domain)
+- Remote-node and `or3-sandbox` verification using shared signing keys
+- Remote-node forwarding of approval decisions
 
 ### `GET /internal/v1/jobs/:jobId/stream`
 

@@ -24,6 +24,7 @@ type serviceTokenClaims struct {
 }
 
 type serviceAuthContextKey struct{}
+type serviceAuthKindContextKey struct{}
 
 type serviceAuthIdentity struct {
 	Kind   string
@@ -47,7 +48,10 @@ func serviceAuthMiddlewareWithBroker(secret string, broker *approval.Broker, nex
 			writeServiceJSON(w, http.StatusUnauthorized, map[string]any{"error": err.Error()})
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), serviceAuthContextKey{}, identity)))
+		ctx := context.WithValue(r.Context(), serviceAuthContextKey{}, identity)
+		ctx = context.WithValue(ctx, serviceAuthKindContextKey{}, identity.Kind)
+		ctx = approval.ContextWithAuditAuthKind(ctx, identity.Kind)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
@@ -75,6 +79,14 @@ func serviceAuthIdentityFromContext(ctx context.Context) serviceAuthIdentity {
 	}
 	identity, _ := ctx.Value(serviceAuthContextKey{}).(serviceAuthIdentity)
 	return identity
+}
+
+func serviceAuthKindFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	kind, _ := ctx.Value(serviceAuthKindContextKey{}).(string)
+	return kind
 }
 
 func allowsUnauthenticatedPairingRoute(r *http.Request) bool {

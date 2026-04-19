@@ -848,11 +848,61 @@ func (b *Broker) pairingAllowlistMatches(ctx context.Context, deviceID, role str
 	return device.Status == StatusActive && device.RevokedAt == 0 && device.Role == role, nil
 }
 
+// auditAuthKindKey is a context key that carries the authentication kind for
+// audit records (e.g. "shared-secret" or "paired-device").
+type auditAuthKindKey struct{}
+
+// ContextWithAuditAuthKind stamps the auth_kind into ctx so that subsequent
+// broker.audit calls include it in every payload automatically.
+func ContextWithAuditAuthKind(ctx context.Context, kind string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	kind = strings.TrimSpace(kind)
+	if kind == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, auditAuthKindKey{}, kind)
+}
+
+func auditAuthKindFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	kind, _ := ctx.Value(auditAuthKindKey{}).(string)
+	return kind
+}
+
 func (b *Broker) audit(ctx context.Context, eventType string, payload map[string]any) error {
 	if b == nil || b.Audit == nil {
 		return nil
 	}
+	if kind := auditAuthKindFromContext(ctx); kind != "" {
+		merged := make(map[string]any, len(payload)+1)
+		for k, v := range payload {
+			merged[k] = v
+		}
+		merged["auth_kind"] = kind
+		payload = merged
+	}
 	return b.Audit.Record(ctx, eventType, "", "approval", payload)
+}
+
+// AuditExecEvent records an execution lifecycle event (start, complete, fail, blocked)
+// for exec or skill_exec tools. It attaches host_id automatically and merges any
+// extra fields provided by the caller. The call is best-effort; errors are discarded.
+func (b *Broker) AuditExecEvent(ctx context.Context, eventType string, subjectHash string, extra map[string]any) {
+	if b == nil {
+		return
+	}
+	payload := map[string]any{
+		"subject_hash": subjectHash,
+		"host_id":      b.hostID(),
+	}
+	for k, v := range extra {
+		payload[k] = v
+	}
+	_ = b.audit(ctx, eventType, payload)
 }
 
 func extractSessionID(subject any) string {

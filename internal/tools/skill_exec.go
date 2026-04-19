@@ -91,6 +91,7 @@ func (t *RunSkillScript) Execute(ctx context.Context, params map[string]any) (st
 		timeout = time.Duration(int(v)) * time.Second
 	}
 	childEnv := BuildChildEnv(os.Environ(), t.ChildEnvAllowlist, EnvFromContext(ctx), "")
+	var skillSubjectHash string
 	if t.ApprovalBroker != nil {
 		identity := RequesterIdentityFromContext(ctx)
 		decision, err := t.ApprovalBroker.EvaluateSkillExec(ctx, approval.SkillEvaluation{
@@ -110,10 +111,14 @@ func (t *RunSkillScript) Execute(ctx context.Context, params map[string]any) (st
 		}
 		if !decision.Allowed {
 			if decision.RequiresApproval {
+				t.ApprovalBroker.AuditExecEvent(ctx, "skill_exec.blocked", decision.SubjectHash, map[string]any{"reason": "approval_required", "request_id": decision.RequestID})
 				return "", fmt.Errorf("approval required for skill execution (request %d)", decision.RequestID)
 			}
+			t.ApprovalBroker.AuditExecEvent(ctx, "skill_exec.blocked", decision.SubjectHash, map[string]any{"reason": decision.Reason})
 			return "", fmt.Errorf("skill execution blocked: %s", decision.Reason)
 		}
+		skillSubjectHash = decision.SubjectHash
+		t.ApprovalBroker.AuditExecEvent(ctx, "skill_exec.start", skillSubjectHash, nil)
 	}
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -148,7 +153,13 @@ func (t *RunSkillScript) Execute(ctx context.Context, params map[string]any) (st
 		er = er[:max] + "\n...[truncated]\n"
 	}
 	if err != nil {
+		if t.ApprovalBroker != nil && skillSubjectHash != "" {
+			t.ApprovalBroker.AuditExecEvent(ctx, "skill_exec.fail", skillSubjectHash, map[string]any{"error": err.Error()})
+		}
 		return formatCommandOutput(out, er), fmt.Errorf("exec failed: %w", err)
+	}
+	if t.ApprovalBroker != nil && skillSubjectHash != "" {
+		t.ApprovalBroker.AuditExecEvent(ctx, "skill_exec.complete", skillSubjectHash, nil)
 	}
 	if strings.TrimSpace(er) != "" {
 		return formatCommandOutput(out, er), nil

@@ -124,6 +124,7 @@ func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, 
 	}
 
 	childEnv := BuildChildEnv(os.Environ(), t.ChildEnvAllowlist, EnvFromContext(ctx), t.PathAppend)
+	var execSubjectHash string
 	if t.ApprovalBroker != nil {
 		identity := RequesterIdentityFromContext(ctx)
 		evaluation := approval.ExecEvaluation{
@@ -144,10 +145,14 @@ func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, 
 		}
 		if !decision.Allowed {
 			if decision.RequiresApproval {
+				t.ApprovalBroker.AuditExecEvent(ctx, "exec.blocked", decision.SubjectHash, map[string]any{"reason": "approval_required", "request_id": decision.RequestID})
 				return "", fmt.Errorf("approval required for exec (request %d)", decision.RequestID)
 			}
+			t.ApprovalBroker.AuditExecEvent(ctx, "exec.blocked", decision.SubjectHash, map[string]any{"reason": decision.Reason})
 			return "", fmt.Errorf("exec blocked: %s", decision.Reason)
 		}
+		execSubjectHash = decision.SubjectHash
+		t.ApprovalBroker.AuditExecEvent(ctx, "exec.start", execSubjectHash, nil)
 	}
 
 	to := t.Timeout
@@ -189,7 +194,13 @@ func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, 
 		er = er[:max] + "\n...[truncated]\n"
 	}
 	if err != nil {
+		if t.ApprovalBroker != nil && execSubjectHash != "" {
+			t.ApprovalBroker.AuditExecEvent(ctx, "exec.fail", execSubjectHash, map[string]any{"error": err.Error()})
+		}
 		return formatCommandOutput(out, er), fmt.Errorf("exec failed: %w", err)
+	}
+	if t.ApprovalBroker != nil && execSubjectHash != "" {
+		t.ApprovalBroker.AuditExecEvent(ctx, "exec.complete", execSubjectHash, nil)
 	}
 	if strings.TrimSpace(er) != "" {
 		return formatCommandOutput(out, er), nil

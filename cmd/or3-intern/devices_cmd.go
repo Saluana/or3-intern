@@ -89,11 +89,7 @@ func runDevicesCommand(ctx context.Context, broker *approval.Broker, args []stri
 		if deviceID == "" {
 			return fmt.Errorf("device ID required")
 		}
-		device, err := broker.DB.GetPairedDevice(ctx, deviceID)
-		if err != nil {
-			return err
-		}
-		rotated, token, err := broker.RotateDeviceToken(ctx, device.DeviceID, device.Role, device.DisplayName, device.Metadata)
+		rotated, token, err := broker.RotatePairedDeviceToken(ctx, deviceID)
 		if err != nil {
 			return err
 		}

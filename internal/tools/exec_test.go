@@ -7,6 +7,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"or3-intern/internal/approval"
+	"or3-intern/internal/config"
+	"or3-intern/internal/db"
 )
 
 func writeFakeBubblewrap(t *testing.T) string {
@@ -352,5 +356,185 @@ func TestExecTool_Schema(t *testing.T) {
 	schema := tool.Schema()
 	if schema["type"] != "function" {
 		t.Errorf("expected type 'function', got %v", schema["type"])
+	}
+}
+
+// makeTestBroker creates an approval.Broker backed by a temporary SQLite database.
+// The caller must close the returned database when done.
+func makeTestBroker(t *testing.T, mode config.ApprovalMode) *approval.Broker {
+	t.Helper()
+	database, err := db.Open(filepath.Join(t.TempDir(), "exec-broker-test.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { database.Close() })
+	cfg := config.Default().Security.Approvals
+	cfg.Enabled = true
+	cfg.HostID = "test-host"
+	cfg.Exec.Mode = mode
+	cfg.SkillExecution.Mode = mode
+	return &approval.Broker{
+		DB:      database,
+		Config:  cfg,
+		HostID:  "test-host",
+		SignKey: []byte("0123456789abcdef0123456789abcdef"),
+		Now:     func() time.Time { return time.Unix(1700000000, 0).UTC() },
+	}
+}
+
+func TestExecTool_ApprovalRequired_Blocks(t *testing.T) {
+	broker := makeTestBroker(t, config.ApprovalModeAsk)
+	tool := &ExecTool{
+		Timeout:        5 * time.Second,
+		ApprovalBroker: broker,
+	}
+	_, err := tool.Execute(context.Background(), map[string]any{
+		"program": "echo",
+		"args":    []any{"hello"},
+	})
+	if err == nil {
+		t.Fatal("expected approval-required error, got nil")
+	}
+	if !strings.Contains(err.Error(), "approval required") {
+		t.Errorf("expected 'approval required' in error, got %q", err.Error())
+	}
+}
+
+func TestExecTool_DenyMode_Blocks(t *testing.T) {
+	broker := makeTestBroker(t, config.ApprovalModeDeny)
+	tool := &ExecTool{
+		Timeout:        5 * time.Second,
+		ApprovalBroker: broker,
+	}
+	_, err := tool.Execute(context.Background(), map[string]any{
+		"program": "echo",
+		"args":    []any{"hello"},
+	})
+	if err == nil {
+		t.Fatal("expected exec blocked error, got nil")
+	}
+	if !strings.Contains(err.Error(), "blocked") {
+		t.Errorf("expected 'blocked' in error, got %q", err.Error())
+	}
+}
+
+func TestExecTool_TrustedMode_Allows(t *testing.T) {
+	broker := makeTestBroker(t, config.ApprovalModeTrusted)
+	tool := &ExecTool{
+		Timeout:        5 * time.Second,
+		ApprovalBroker: broker,
+	}
+	out, err := tool.Execute(context.Background(), map[string]any{
+		"program": "echo",
+		"args":    []any{"trusted-ok"},
+	})
+	if err != nil {
+		t.Fatalf("expected trusted mode to allow execution, got error: %v", err)
+	}
+	if !strings.Contains(out, "trusted-ok") {
+		t.Errorf("unexpected output: %q", out)
+	}
+}
+
+func TestExecTool_ApproveOnce_AllowsWithToken(t *testing.T) {
+	broker := makeTestBroker(t, config.ApprovalModeAsk)
+	tool := &ExecTool{
+		Timeout:        5 * time.Second,
+		ApprovalBroker: broker,
+	}
+	params := map[string]any{
+		"program": "echo",
+		"args":    []any{"approved"},
+	}
+	// First attempt should require approval and create a request.
+	_, err := tool.Execute(context.Background(), params)
+	if err == nil || !strings.Contains(err.Error(), "approval required") {
+		t.Fatalf("expected approval required on first attempt, got %v", err)
+	}
+
+	// Get the pending request and approve it.
+	requests, listErr := broker.ListApprovalRequests(context.Background(), "pending", 10)
+	if listErr != nil {
+		t.Fatalf("ListApprovalRequests: %v", listErr)
+	}
+	if len(requests) == 0 {
+		t.Fatal("expected at least one pending approval request")
+	}
+	issued, approveErr := broker.ApproveRequest(context.Background(), requests[0].ID, "cli:test", false, "ok")
+	if approveErr != nil {
+		t.Fatalf("ApproveRequest: %v", approveErr)
+	}
+	if issued.Token == "" {
+		t.Fatal("expected non-empty approval token")
+	}
+
+	// Second attempt with the approval token should succeed.
+	ctx := ContextWithApprovalToken(context.Background(), issued.Token)
+	out, err := tool.Execute(ctx, params)
+	if err != nil {
+		t.Fatalf("expected approved execution to succeed, got error: %v", err)
+	}
+	if !strings.Contains(out, "approved") {
+		t.Errorf("unexpected output: %q", out)
+	}
+}
+
+func TestExecTool_SubjectMismatch_Blocks(t *testing.T) {
+	broker := makeTestBroker(t, config.ApprovalModeAsk)
+	toolEcho := &ExecTool{
+		Timeout:        5 * time.Second,
+		ApprovalBroker: broker,
+	}
+	// Trigger approval for "echo approved".
+	_, _ = toolEcho.Execute(context.Background(), map[string]any{
+		"program": "echo",
+		"args":    []any{"approved"},
+	})
+	requests, _ := broker.ListApprovalRequests(context.Background(), "pending", 10)
+	if len(requests) == 0 {
+		t.Fatal("expected pending request")
+	}
+	issued, err := broker.ApproveRequest(context.Background(), requests[0].ID, "cli:test", false, "ok")
+	if err != nil {
+		t.Fatalf("ApproveRequest: %v", err)
+	}
+
+	// Use the token for a different command → subject mismatch → should require approval again.
+	ctx := ContextWithApprovalToken(context.Background(), issued.Token)
+	_, err = toolEcho.Execute(ctx, map[string]any{
+		"program": "echo",
+		"args":    []any{"different-command"},
+	})
+	if err == nil {
+		t.Fatal("expected subject-mismatch to block execution, got nil error")
+	}
+	if !strings.Contains(err.Error(), "approval required") && !strings.Contains(err.Error(), "blocked") {
+		t.Errorf("expected approval required or blocked, got %q", err.Error())
+	}
+}
+
+func TestExecTool_AllowlistMode_Allows(t *testing.T) {
+	broker := makeTestBroker(t, config.ApprovalModeAllowlist)
+	// Add an allowlist rule that matches echo.
+	_, err := broker.AddAllowlist(context.Background(), string(approval.SubjectExec),
+		approval.AllowlistScope{HostID: "test-host", Tool: "exec"},
+		approval.ExecAllowlistMatcher{ExecutablePath: ""},
+		"cli:test", 0)
+	if err != nil {
+		t.Fatalf("AddAllowlist: %v", err)
+	}
+	tool := &ExecTool{
+		Timeout:        5 * time.Second,
+		ApprovalBroker: broker,
+	}
+	out, err := tool.Execute(context.Background(), map[string]any{
+		"program": "echo",
+		"args":    []any{"allowlisted"},
+	})
+	if err != nil {
+		t.Fatalf("expected allowlist to allow execution, got error: %v", err)
+	}
+	if !strings.Contains(out, "allowlisted") {
+		t.Errorf("unexpected output: %q", out)
 	}
 }

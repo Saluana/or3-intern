@@ -24,6 +24,124 @@
 | `or3-intern pairing <list|request|approve|deny|exchange>` | Runs the pairing workflow and can bind approvals to channel identities such as `slack:U123` |
 | `or3-intern migrate-jsonl /path/to/session.jsonl [session_key]` | Imports legacy session history |
 
+### `or3-intern approvals`
+
+Manage pending approval requests and allowlist rules. All sub-commands work directly against the local SQLite database — the HTTP service does not need to be running.
+
+```
+or3-intern approvals list [status]
+```
+Lists approval requests. Optionally filter by status: `pending`, `approved`, `denied`, `expired`. Up to 100 results are returned.
+
+```
+or3-intern approvals show <id>
+```
+Shows full detail for one approval request, including subject JSON, status, policy mode, and resolution info.
+
+```
+or3-intern approvals approve <id> [--allowlist] [--note <text>]
+```
+Approves a pending request and issues a short-lived approval token. The token is printed once and can be passed to the next execution attempt via context.
+- `--allowlist` also creates a persistent allowlist rule matching the same subject, so future identical executions are pre-approved without another prompt.
+- `--note` attaches a free-text resolution note to the audit record.
+
+```
+or3-intern approvals deny <id> [--note <text>]
+```
+Denies a pending request and records the resolution in the audit chain. The blocked tool invocation returns an error to the agent.
+
+```
+or3-intern approvals allowlist list [domain]
+```
+Lists active allowlist rules. Optionally filter by domain (`exec`, `skill_execution`).
+
+```
+or3-intern approvals allowlist add --domain <exec|skill_execution> [options]
+```
+Creates a new allowlist rule. Options:
+
+| Flag | Description |
+| --- | --- |
+| `--domain` | Approval domain (`exec` or `skill_execution`). Default: `exec`. |
+| `--host` | Host scope (default: current host ID). |
+| `--tool` | Tool name scope. |
+| `--profile` | Access profile scope. |
+| `--agent` | Agent ID scope. |
+| `--program` | (exec) Exact executable path to match. |
+| `--cwd` | (exec) Working directory constraint. |
+| `--skill` | (skill_execution) Skill ID to match. |
+| `--version` | (skill_execution) Skill version constraint. |
+| `--origin` | (skill_execution) Skill origin/registry constraint. |
+| `--trust` | (skill_execution) Skill trust state constraint. |
+
+```
+or3-intern approvals allowlist remove <id>
+```
+Disables an allowlist rule by ID.
+
+### `or3-intern devices`
+
+Manage paired devices and pairing requests. All sub-commands work directly against the local SQLite database.
+
+```
+or3-intern devices list
+```
+Lists all paired devices with their status, role, and display name.
+
+```
+or3-intern devices requests [status]
+```
+Lists pairing requests. Optionally filter by status: `pending`, `approved`, `denied`, `exchanged`.
+
+```
+or3-intern devices approve <pairing-request-id>
+```
+Approves a pending pairing request. The remote client can then exchange the pairing code for a device token using the HTTP API.
+
+```
+or3-intern devices deny <pairing-request-id>
+```
+Denies a pending pairing request. The remote client receives an error on the next exchange attempt.
+
+```
+or3-intern devices revoke <device-id>
+```
+Revokes a paired device immediately. Any active bearer token for this device is invalidated on the next API request.
+
+```
+or3-intern devices rotate <device-id>
+```
+Rotates the device token and prints the new token once. The old token is invalidated. Use this to recover a potentially leaked token without re-pairing.
+
+### `or3-intern pairing`
+
+The pairing command group handles channel-identity pairing, which binds a channel user identity (e.g. `slack:U42`) to a paired device record.
+
+```
+or3-intern pairing list
+```
+Lists all pairing requests.
+
+```
+or3-intern pairing request --channel <channel> --identity <id> --name <name>
+```
+Creates a pairing request for a specific channel identity. Returns a request ID and one-time code.
+
+```
+or3-intern pairing approve <request-id>
+```
+Approves a pairing request from CLI so the remote client can exchange the code.
+
+```
+or3-intern pairing deny <request-id>
+```
+Denies a pairing request.
+
+```
+or3-intern pairing exchange <request-id> <code>
+```
+Exchanges an approved pairing code for a device token (normally done by the remote client, but available here for local testing).
+
 ## Skills commands
 
 | Command | Purpose |

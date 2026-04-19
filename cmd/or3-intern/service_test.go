@@ -19,6 +19,7 @@ import (
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
 	"or3-intern/internal/providers"
+	"or3-intern/internal/security"
 	"or3-intern/internal/tools"
 )
 
@@ -921,6 +922,16 @@ func mustDecodeJSONBody(t *testing.T, body io.Reader) map[string]any {
 	return payload
 }
 
+func readLatestAuditEvent(t *testing.T, database *db.DB) db.AuditEvent {
+	t.Helper()
+	row := database.SQL.QueryRow(`SELECT id, event_type, session_key, actor, payload_json, prev_hash, record_hash, created_at FROM audit_events ORDER BY id DESC LIMIT 1`)
+	var event db.AuditEvent
+	if err := row.Scan(&event.ID, &event.EventType, &event.SessionKey, &event.Actor, &event.PayloadJSON, &event.PrevHash, &event.RecordHash, &event.CreatedAt); err != nil {
+		t.Fatalf("scan audit event: %v", err)
+	}
+	return event
+}
+
 func TestServicePairingWorkflow_AllowsUnauthenticatedBootstrapAndPairedOperatorRoutes(t *testing.T) {
 	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
 		cfg.Pairing.Mode = config.ApprovalModeAsk
@@ -1032,6 +1043,84 @@ func TestServicePairingWorkflow_RejectsNonOperatorDeviceOnOperatorRoutes(t *test
 	}
 }
 
+func TestServicePairing_AllowlistMode_AnonymousCannotReissueExistingDeviceToken(t *testing.T) {
+	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Pairing.Mode = config.ApprovalModeAllowlist
+	})
+	defer cleanup()
+
+	if _, _, err := broker.RotateDeviceToken(context.Background(), "device-1", approval.RoleOperator, "Ops Laptop", nil); err != nil {
+		t.Fatalf("RotateDeviceToken seed: %v", err)
+	}
+
+	server := &serviceServer{broker: broker, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("l", 32), server)
+	defer httpServer.Close()
+
+	createReq := mustJSONRequest(t, http.MethodPost, httpServer.URL+"/internal/v1/pairing/requests", `{"role":"operator","device_id":"device-1","display_name":"Ops Laptop"}`)
+	createResp, err := httpServer.Client().Do(createReq)
+	if err != nil {
+		t.Fatalf("Do create pairing: %v", err)
+	}
+	defer createResp.Body.Close()
+	if createResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("expected create pairing 202, got %d (%s)", createResp.StatusCode, mustReadBody(t, createResp.Body))
+	}
+	created := mustDecodeJSONBody(t, createResp.Body)
+	requestID := int64(created["id"].(float64))
+	record, err := broker.DB.GetPairingRequest(context.Background(), requestID)
+	if err != nil {
+		t.Fatalf("GetPairingRequest: %v", err)
+	}
+	if record.Status != approval.StatusPending {
+		t.Fatalf("expected anonymous allowlist pairing to remain pending, got %#v", record)
+	}
+
+	exchangeReq := mustJSONRequest(t, http.MethodPost, httpServer.URL+"/internal/v1/pairing/exchange", fmt.Sprintf(`{"request_id":%d,"code":%q}`, requestID, created["code"].(string)))
+	exchangeResp, err := httpServer.Client().Do(exchangeReq)
+	if err != nil {
+		t.Fatalf("Do exchange pairing: %v", err)
+	}
+	defer exchangeResp.Body.Close()
+	if exchangeResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected pending exchange to fail, got %d (%s)", exchangeResp.StatusCode, mustReadBody(t, exchangeResp.Body))
+	}
+}
+
+func TestServicePairing_UnauthenticatedRoutesStampAnonymousAuditKind(t *testing.T) {
+	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Pairing.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+	broker.Audit = &security.AuditLogger{DB: broker.DB, Key: []byte(strings.Repeat("z", 32))}
+
+	server := &serviceServer{broker: broker, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("z", 32), server)
+	defer httpServer.Close()
+
+	createReq := mustJSONRequest(t, http.MethodPost, httpServer.URL+"/internal/v1/pairing/requests", `{"role":"operator","display_name":"Ops Laptop"}`)
+	createResp, err := httpServer.Client().Do(createReq)
+	if err != nil {
+		t.Fatalf("Do create pairing: %v", err)
+	}
+	defer createResp.Body.Close()
+	if createResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("expected create pairing 202, got %d (%s)", createResp.StatusCode, mustReadBody(t, createResp.Body))
+	}
+
+	event := readLatestAuditEvent(t, broker.DB)
+	if event.Actor != "anonymous" {
+		t.Fatalf("expected anonymous audit actor, got %#v", event)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
+		t.Fatalf("Unmarshal payload: %v", err)
+	}
+	if payload["auth_kind"] != "unauthenticated" {
+		t.Fatalf("expected unauthenticated auth_kind, got %#v", payload)
+	}
+}
+
 func TestServiceApprovals_PairedOperatorCanApprovePendingRequest(t *testing.T) {
 	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
 		cfg.Exec.Mode = config.ApprovalModeAsk
@@ -1077,6 +1166,118 @@ func TestServiceApprovals_PairedOperatorCanApprovePendingRequest(t *testing.T) {
 	}
 	if err := broker.VerifyApprovalToken(context.Background(), approvalToken, decision.SubjectHash, broker.HostID); err != nil {
 		t.Fatalf("VerifyApprovalToken: %v", err)
+	}
+}
+
+func TestServiceApprovals_Approve_RejectsMalformedJSON(t *testing.T) {
+	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Exec.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+
+	decision, err := broker.EvaluateExec(context.Background(), approval.ExecEvaluation{
+		ExecutablePath: "/bin/echo",
+		Argv:           []string{"hello"},
+		WorkingDir:     "/tmp",
+		ToolName:       "exec",
+	})
+	if err != nil {
+		t.Fatalf("EvaluateExec: %v", err)
+	}
+	_, deviceToken, err := broker.RotateDeviceToken(context.Background(), "operator-1", approval.RoleOperator, "Operator", nil)
+	if err != nil {
+		t.Fatalf("RotateDeviceToken: %v", err)
+	}
+
+	server := &serviceServer{broker: broker, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("m", 32), server)
+	defer httpServer.Close()
+
+	req := mustJSONRequest(t, http.MethodPost, fmt.Sprintf("%s/internal/v1/approvals/%d/approve", httpServer.URL, decision.RequestID), `{"note":`)
+	req.Header.Set("Authorization", "Bearer "+deviceToken)
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do malformed approve: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected malformed approve 400, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+}
+
+func TestServiceApprovals_Deny_RejectsMalformedJSON(t *testing.T) {
+	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Exec.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+
+	decision, err := broker.EvaluateExec(context.Background(), approval.ExecEvaluation{
+		ExecutablePath: "/bin/echo",
+		Argv:           []string{"hello"},
+		WorkingDir:     "/tmp",
+		ToolName:       "exec",
+	})
+	if err != nil {
+		t.Fatalf("EvaluateExec: %v", err)
+	}
+	_, deviceToken, err := broker.RotateDeviceToken(context.Background(), "operator-1", approval.RoleOperator, "Operator", nil)
+	if err != nil {
+		t.Fatalf("RotateDeviceToken: %v", err)
+	}
+
+	server := &serviceServer{broker: broker, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("n", 32), server)
+	defer httpServer.Close()
+
+	req := mustJSONRequest(t, http.MethodPost, fmt.Sprintf("%s/internal/v1/approvals/%d/deny", httpServer.URL, decision.RequestID), `{"note":`)
+	req.Header.Set("Authorization", "Bearer "+deviceToken)
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do malformed deny: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected malformed deny 400, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+}
+
+func TestServiceDevices_Rotate_RevokedDeviceFails(t *testing.T) {
+	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Pairing.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+
+	req, code, err := broker.CreatePairingRequest(context.Background(), approval.PairingRequestInput{
+		Role:        approval.RoleOperator,
+		DisplayName: "Ops Laptop",
+	})
+	if err != nil {
+		t.Fatalf("CreatePairingRequest: %v", err)
+	}
+	if _, err := broker.ApprovePairingRequest(context.Background(), req.ID, "cli"); err != nil {
+		t.Fatalf("ApprovePairingRequest: %v", err)
+	}
+	device, _, err := broker.ExchangePairingCode(context.Background(), approval.PairingExchangeInput{RequestID: req.ID, Code: code})
+	if err != nil {
+		t.Fatalf("ExchangePairingCode: %v", err)
+	}
+	if err := broker.RevokeDevice(context.Background(), device.DeviceID, "cli"); err != nil {
+		t.Fatalf("RevokeDevice: %v", err)
+	}
+
+	server := &serviceServer{broker: broker, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	secret := strings.Repeat("d", 32)
+	httpServer := newServiceTestHTTPServer(t, secret, server)
+	defer httpServer.Close()
+
+	rotateReq := mustServiceRequest(t, httpServer, secret, http.MethodPost, fmt.Sprintf("/internal/v1/devices/%s/rotate", device.DeviceID), "")
+	rotateResp, err := httpServer.Client().Do(rotateReq)
+	if err != nil {
+		t.Fatalf("Do rotate device: %v", err)
+	}
+	defer rotateResp.Body.Close()
+	if rotateResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected revoked rotate 400, got %d (%s)", rotateResp.StatusCode, mustReadBody(t, rotateResp.Body))
 	}
 }
 

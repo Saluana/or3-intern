@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"or3-intern/internal/approval"
+	"or3-intern/internal/config"
 	"or3-intern/internal/skills"
 )
 
@@ -135,5 +137,162 @@ func TestRunSkillScript_EmptyAllowlistFallsBackToScrubbedEnv(t *testing.T) {
 	}
 	if strings.TrimSpace(out) != "missing" {
 		t.Fatalf("expected inherited secret to be scrubbed, got %q", out)
+	}
+}
+
+func TestRunSkillScript_ApprovalRequired_Blocks(t *testing.T) {
+	broker := makeTestBroker(t, config.ApprovalModeAsk)
+	tool := &RunSkillScript{
+		Inventory:      makeExecutableSkillInventory(t),
+		Enabled:        true,
+		ApprovalBroker: broker,
+	}
+	_, err := tool.Execute(context.Background(), map[string]any{
+		"skill":      "runner",
+		"entrypoint": "hello",
+	})
+	if err == nil {
+		t.Fatal("expected approval required error, got nil")
+	}
+	if !strings.Contains(err.Error(), "approval required") {
+		t.Errorf("expected 'approval required' in error, got %q", err.Error())
+	}
+}
+
+func TestRunSkillScript_DenyMode_Blocks(t *testing.T) {
+	broker := makeTestBroker(t, config.ApprovalModeDeny)
+	tool := &RunSkillScript{
+		Inventory:      makeExecutableSkillInventory(t),
+		Enabled:        true,
+		ApprovalBroker: broker,
+	}
+	_, err := tool.Execute(context.Background(), map[string]any{
+		"skill":      "runner",
+		"entrypoint": "hello",
+	})
+	if err == nil {
+		t.Fatal("expected skill execution blocked error, got nil")
+	}
+	if !strings.Contains(err.Error(), "blocked") {
+		t.Errorf("expected 'blocked' in error, got %q", err.Error())
+	}
+}
+
+func TestRunSkillScript_TrustedMode_Allows(t *testing.T) {
+	broker := makeTestBroker(t, config.ApprovalModeTrusted)
+	tool := &RunSkillScript{
+		Inventory:      makeExecutableSkillInventory(t),
+		Enabled:        true,
+		ApprovalBroker: broker,
+	}
+	out, err := tool.Execute(context.Background(), map[string]any{
+		"skill":      "runner",
+		"entrypoint": "hello",
+	})
+	if err != nil {
+		t.Fatalf("expected trusted mode to allow skill execution, got error: %v", err)
+	}
+	if !strings.Contains(out, "script:entry") {
+		t.Errorf("unexpected output: %q", out)
+	}
+}
+
+func TestRunSkillScript_ApproveOnce_AllowsWithToken(t *testing.T) {
+	broker := makeTestBroker(t, config.ApprovalModeAsk)
+	tool := &RunSkillScript{
+		Inventory:      makeExecutableSkillInventory(t),
+		Enabled:        true,
+		ApprovalBroker: broker,
+	}
+	params := map[string]any{"skill": "runner", "entrypoint": "hello"}
+
+	// First attempt should require approval.
+	_, err := tool.Execute(context.Background(), params)
+	if err == nil || !strings.Contains(err.Error(), "approval required") {
+		t.Fatalf("expected approval required on first attempt, got %v", err)
+	}
+
+	// Approve the pending request.
+	requests, listErr := broker.ListApprovalRequests(context.Background(), "pending", 10)
+	if listErr != nil {
+		t.Fatalf("ListApprovalRequests: %v", listErr)
+	}
+	if len(requests) == 0 {
+		t.Fatal("expected at least one pending approval request")
+	}
+	issued, approveErr := broker.ApproveRequest(context.Background(), requests[0].ID, "cli:test", false, "ok")
+	if approveErr != nil {
+		t.Fatalf("ApproveRequest: %v", approveErr)
+	}
+	if issued.Token == "" {
+		t.Fatal("expected non-empty approval token")
+	}
+
+	// Second attempt with the approval token should succeed.
+	ctx := ContextWithApprovalToken(context.Background(), issued.Token)
+	out, err := tool.Execute(ctx, params)
+	if err != nil {
+		t.Fatalf("expected approved skill execution to succeed, got error: %v", err)
+	}
+	if !strings.Contains(out, "script:entry") {
+		t.Errorf("unexpected output: %q", out)
+	}
+}
+
+func TestRunSkillScript_SubjectMismatch_Blocks(t *testing.T) {
+	broker := makeTestBroker(t, config.ApprovalModeAsk)
+	inv := makeExecutableSkillInventory(t)
+	tool := &RunSkillScript{
+		Inventory:      inv,
+		Enabled:        true,
+		ApprovalBroker: broker,
+	}
+
+	// Trigger and approve a request for "hello" entrypoint.
+	_, _ = tool.Execute(context.Background(), map[string]any{"skill": "runner", "entrypoint": "hello"})
+	requests, _ := broker.ListApprovalRequests(context.Background(), "pending", 10)
+	if len(requests) == 0 {
+		t.Fatal("expected pending request")
+	}
+	issued, err := broker.ApproveRequest(context.Background(), requests[0].ID, "cli:test", false, "ok")
+	if err != nil {
+		t.Fatalf("ApproveRequest: %v", err)
+	}
+
+	// Use the "hello" token for the "runner/tool.sh" path → different subject hash → blocked.
+	ctx := ContextWithApprovalToken(context.Background(), issued.Token)
+	_, err = tool.Execute(ctx, map[string]any{"skill": "runner", "path": "tool.sh", "args": []any{"mismatch"}})
+	if err == nil {
+		t.Fatal("expected subject-mismatch to block skill execution, got nil error")
+	}
+	if !strings.Contains(err.Error(), "approval required") && !strings.Contains(err.Error(), "blocked") {
+		t.Errorf("expected approval required or blocked, got %q", err.Error())
+	}
+}
+
+func TestRunSkillScript_AllowlistMode_Allows(t *testing.T) {
+	broker := makeTestBroker(t, config.ApprovalModeAllowlist)
+	// Add an allowlist rule for the runner skill with any script hash.
+	_, err := broker.AddAllowlist(context.Background(), string(approval.SubjectSkillExec),
+		approval.AllowlistScope{HostID: "test-host", Tool: "run_skill_script"},
+		approval.SkillAllowlistMatcher{SkillID: "runner"},
+		"cli:test", 0)
+	if err != nil {
+		t.Fatalf("AddAllowlist: %v", err)
+	}
+	tool := &RunSkillScript{
+		Inventory:      makeExecutableSkillInventory(t),
+		Enabled:        true,
+		ApprovalBroker: broker,
+	}
+	out, err := tool.Execute(context.Background(), map[string]any{
+		"skill":      "runner",
+		"entrypoint": "hello",
+	})
+	if err != nil {
+		t.Fatalf("expected allowlist to allow skill execution, got error: %v", err)
+	}
+	if !strings.Contains(out, "script:entry") {
+		t.Errorf("unexpected output: %q", out)
 	}
 }

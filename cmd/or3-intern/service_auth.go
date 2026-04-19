@@ -24,6 +24,7 @@ type serviceTokenClaims struct {
 }
 
 type serviceAuthContextKey struct{}
+type serviceAuthKindContextKey struct{}
 
 type serviceAuthIdentity struct {
 	Kind   string
@@ -39,7 +40,9 @@ func serviceAuthMiddleware(secret string, next http.Handler) http.Handler {
 func serviceAuthMiddlewareWithBroker(secret string, broker *approval.Broker, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if allowsUnauthenticatedPairingRoute(r) {
-			next.ServeHTTP(w, r)
+			ctx := approval.ContextWithAuditAuthKind(r.Context(), "unauthenticated")
+			ctx = approval.ContextWithAuditActor(ctx, "anonymous")
+			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
 		identity, err := authenticateServiceRequest(secret, broker, r.Header.Get("Authorization"), time.Now(), r.Context())
@@ -47,7 +50,11 @@ func serviceAuthMiddlewareWithBroker(secret string, broker *approval.Broker, nex
 			writeServiceJSON(w, http.StatusUnauthorized, map[string]any{"error": err.Error()})
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), serviceAuthContextKey{}, identity)))
+		ctx := context.WithValue(r.Context(), serviceAuthContextKey{}, identity)
+		ctx = context.WithValue(ctx, serviceAuthKindContextKey{}, identity.Kind)
+		ctx = approval.ContextWithAuditAuthKind(ctx, identity.Kind)
+		ctx = approval.ContextWithAuditActor(ctx, identity.Actor)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
@@ -75,6 +82,14 @@ func serviceAuthIdentityFromContext(ctx context.Context) serviceAuthIdentity {
 	}
 	identity, _ := ctx.Value(serviceAuthContextKey{}).(serviceAuthIdentity)
 	return identity
+}
+
+func serviceAuthKindFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	kind, _ := ctx.Value(serviceAuthKindContextKey{}).(string)
+	return kind
 }
 
 func allowsUnauthenticatedPairingRoute(r *http.Request) bool {

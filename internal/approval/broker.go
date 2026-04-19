@@ -288,11 +288,15 @@ func (b *Broker) ApproveRequest(ctx context.Context, requestID int64, actor stri
 	}
 	nowMS := b.now().UnixMilli()
 	if req.ExpiresAt > 0 && req.ExpiresAt < nowMS {
-		_ = b.DB.UpdateApprovalRequestResolution(ctx, requestID, StatusExpired, nowMS, actor, StatusExpired, "expired before approval")
+		_, _ = b.DB.ResolveApprovalRequest(ctx, requestID, StatusPending, StatusExpired, nowMS, actor, StatusExpired, "expired before approval")
 		return IssuedApproval{}, fmt.Errorf("approval request expired")
 	}
-	if err := b.DB.UpdateApprovalRequestResolution(ctx, requestID, StatusApproved, nowMS, strings.TrimSpace(actor), resolutionKind(alwaysAllow), strings.TrimSpace(note)); err != nil {
+	resolved, err := b.DB.ResolveApprovalRequest(ctx, requestID, StatusPending, StatusApproved, nowMS, strings.TrimSpace(actor), resolutionKind(alwaysAllow), strings.TrimSpace(note))
+	if err != nil {
 		return IssuedApproval{}, err
+	}
+	if !resolved {
+		return IssuedApproval{}, fmt.Errorf("approval request is not pending")
 	}
 	allowlistID := int64(0)
 	if alwaysAllow {
@@ -314,9 +318,16 @@ func (b *Broker) DenyRequest(ctx context.Context, requestID int64, actor string,
 	if err != nil {
 		return err
 	}
+	if req.Status != StatusPending {
+		return fmt.Errorf("approval request is not pending")
+	}
 	nowMS := b.now().UnixMilli()
-	if err := b.DB.UpdateApprovalRequestResolution(ctx, requestID, StatusDenied, nowMS, strings.TrimSpace(actor), StatusDenied, strings.TrimSpace(note)); err != nil {
+	resolved, err := b.DB.ResolveApprovalRequest(ctx, requestID, StatusPending, StatusDenied, nowMS, strings.TrimSpace(actor), StatusDenied, strings.TrimSpace(note))
+	if err != nil {
 		return err
+	}
+	if !resolved {
+		return fmt.Errorf("approval request is not pending")
 	}
 	_ = b.audit(ctx, "approval.resolved", map[string]any{"request_id": requestID, "subject_hash": req.SubjectHash, "host_id": req.ExecutionHostID, "outcome": "denied", "actor": actor})
 	return nil
@@ -387,9 +398,13 @@ func (b *Broker) CreatePairingRequest(ctx context.Context, input PairingRequestI
 			_ = b.audit(ctx, "pairing.blocked", map[string]any{"device_id": deviceID, "role": role, "host_id": b.hostID(), "outcome": "blocked", "reason": "allowlist"})
 			return db.PairingRequestRecord{}, "", fmt.Errorf("pairing denied by policy")
 		}
-		status = StatusApproved
-		approverID = "policy:allowlist"
-		approvedAt = nowMS
+		if auditAuthKindFromContext(ctx) == "unauthenticated" {
+			status = StatusPending
+		} else {
+			status = StatusApproved
+			approverID = "policy:allowlist"
+			approvedAt = nowMS
+		}
 	}
 	req, err := b.DB.CreatePairingRequest(ctx, db.PairingRequestRecord{DeviceID: deviceID, Role: role, DisplayName: strings.TrimSpace(input.DisplayName), Origin: strings.TrimSpace(input.Origin), PairingCodeHash: hashBytes(code), RequestedAt: nowMS, ExpiresAt: nowMS + int64(b.Config.PairingCodeTTLSeconds*1000), Status: status, ApproverID: approverID, ApprovedAt: approvedAt, Metadata: cloneMap(input.Metadata)})
 	if err != nil {
@@ -411,8 +426,12 @@ func (b *Broker) ApprovePairingRequest(ctx context.Context, id int64, actor stri
 	if req.ExpiresAt > 0 && req.ExpiresAt < nowMS {
 		return db.PairingRequestRecord{}, fmt.Errorf("pairing request expired")
 	}
-	if err := b.DB.UpdatePairingRequestStatus(ctx, id, StatusApproved, strings.TrimSpace(actor), nowMS, 0, req.Metadata); err != nil {
+	resolved, err := b.DB.ResolvePairingRequestStatus(ctx, id, StatusPending, StatusApproved, strings.TrimSpace(actor), nowMS, 0, req.Metadata)
+	if err != nil {
 		return db.PairingRequestRecord{}, err
+	}
+	if !resolved {
+		return db.PairingRequestRecord{}, fmt.Errorf("pairing request is not pending")
 	}
 	updated, err := b.DB.GetPairingRequest(ctx, id)
 	if err != nil {
@@ -431,8 +450,12 @@ func (b *Broker) DenyPairingRequest(ctx context.Context, id int64, actor string)
 		return fmt.Errorf("pairing request is not pending")
 	}
 	nowMS := b.now().UnixMilli()
-	if err := b.DB.UpdatePairingRequestStatus(ctx, id, StatusDenied, strings.TrimSpace(actor), 0, nowMS, req.Metadata); err != nil {
+	resolved, err := b.DB.ResolvePairingRequestStatus(ctx, id, StatusPending, StatusDenied, strings.TrimSpace(actor), 0, nowMS, req.Metadata)
+	if err != nil {
 		return err
+	}
+	if !resolved {
+		return fmt.Errorf("pairing request is not pending")
 	}
 	_ = b.audit(ctx, "pairing.resolved", map[string]any{"pairing_request_id": id, "device_id": req.DeviceID, "outcome": "denied", "actor": actor, "host_id": b.hostID()})
 	return nil
@@ -516,6 +539,17 @@ func (b *Broker) RotateDeviceToken(ctx context.Context, deviceID, role, displayN
 	return device, rawToken, nil
 }
 
+func (b *Broker) RotatePairedDeviceToken(ctx context.Context, deviceID string) (db.PairedDeviceRecord, string, error) {
+	device, err := b.DB.GetPairedDevice(ctx, deviceID)
+	if err != nil {
+		return db.PairedDeviceRecord{}, "", err
+	}
+	if device.Status != StatusActive || device.RevokedAt > 0 {
+		return db.PairedDeviceRecord{}, "", fmt.Errorf("device token revoked")
+	}
+	return b.RotateDeviceToken(ctx, device.DeviceID, device.Role, device.DisplayName, cloneMap(device.Metadata))
+}
+
 func (b *Broker) ListApprovalRequests(ctx context.Context, status string, limit int) ([]db.ApprovalRequestRecord, error) {
 	return b.DB.ListApprovalRequests(ctx, status, limit)
 }
@@ -546,16 +580,21 @@ func (b *Broker) IsPairedChannelIdentity(ctx context.Context, channel, identity 
 			return false, err
 		}
 	}
-	items, err := b.DB.ListPairedDevices(ctx, 500)
-	if err != nil {
-		return false, err
-	}
-	for _, item := range items {
-		if item.Status != StatusActive || item.RevokedAt > 0 {
-			continue
+	for offset := 0; ; offset += 200 {
+		items, err := b.DB.ListPairedDevicesPage(ctx, 200, offset)
+		if err != nil {
+			return false, err
 		}
-		if pairedMetadataMatches(item.Metadata, channel, identity) {
-			return true, nil
+		for _, item := range items {
+			if item.Status != StatusActive || item.RevokedAt > 0 {
+				continue
+			}
+			if pairedMetadataMatches(item.Metadata, channel, identity) {
+				return true, nil
+			}
+		}
+		if len(items) < 200 {
+			break
 		}
 	}
 	return false, nil
@@ -848,11 +887,89 @@ func (b *Broker) pairingAllowlistMatches(ctx context.Context, deviceID, role str
 	return device.Status == StatusActive && device.RevokedAt == 0 && device.Role == role, nil
 }
 
+// auditAuthKindKey is a context key that carries the authentication kind for
+// audit records (e.g. "shared-secret" or "paired-device").
+type auditAuthKindKey struct{}
+
+type auditActorKey struct{}
+
+// ContextWithAuditAuthKind stamps the auth_kind into ctx so that subsequent
+// broker.audit calls include it in every payload automatically.
+func ContextWithAuditAuthKind(ctx context.Context, kind string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	kind = strings.TrimSpace(kind)
+	if kind == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, auditAuthKindKey{}, kind)
+}
+
+func ContextWithAuditActor(ctx context.Context, actor string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	actor = strings.TrimSpace(actor)
+	if actor == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, auditActorKey{}, actor)
+}
+
+func auditAuthKindFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	kind, _ := ctx.Value(auditAuthKindKey{}).(string)
+	return kind
+}
+
+func auditActorFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	actor, _ := ctx.Value(auditActorKey{}).(string)
+	return strings.TrimSpace(actor)
+}
+
 func (b *Broker) audit(ctx context.Context, eventType string, payload map[string]any) error {
 	if b == nil || b.Audit == nil {
 		return nil
 	}
-	return b.Audit.Record(ctx, eventType, "", "approval", payload)
+	if kind := auditAuthKindFromContext(ctx); kind != "" {
+		merged := make(map[string]any, len(payload)+1)
+		for k, v := range payload {
+			merged[k] = v
+		}
+		merged["auth_kind"] = kind
+		payload = merged
+	}
+	actor := auditActorFromContext(ctx)
+	if payloadActor, ok := payload["actor"].(string); ok && strings.TrimSpace(payloadActor) != "" {
+		actor = strings.TrimSpace(payloadActor)
+	}
+	if actor == "" {
+		actor = "approval"
+	}
+	return b.Audit.Record(ctx, eventType, "", actor, payload)
+}
+
+// AuditExecEvent records an execution lifecycle event (start, complete, fail, blocked)
+// for exec or skill_exec tools. It attaches host_id automatically and merges any
+// extra fields provided by the caller. The call is best-effort; errors are discarded.
+func (b *Broker) AuditExecEvent(ctx context.Context, eventType string, subjectHash string, extra map[string]any) {
+	if b == nil {
+		return
+	}
+	payload := map[string]any{
+		"subject_hash": subjectHash,
+		"host_id":      b.hostID(),
+	}
+	for k, v := range extra {
+		payload[k] = v
+	}
+	_ = b.audit(ctx, eventType, payload)
 }
 
 func extractSessionID(subject any) string {

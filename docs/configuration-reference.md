@@ -151,6 +151,73 @@ Phase 3 security controls:
 
 See [security-and-hardening.md](security-and-hardening.md).
 
+### `security.approvals`
+
+The approval and pairing system adds a small `approvals` block inside the `security` section. All fields have safe defaults; existing installs that omit this block continue to work unchanged.
+
+```json
+{
+  "security": {
+    "approvals": {
+      "enabled": false,
+      "hostId": "local",
+      "keyFile": "",
+      "pairingCodeTtlSeconds": 300,
+      "pendingTtlSeconds": 3600,
+      "approvalTokenTtlSeconds": 300,
+      "localAutoPairLoopback": false,
+      "pairing":        { "mode": "ask" },
+      "exec":           { "mode": "trusted" },
+      "skillExecution": { "mode": "trusted" },
+      "secretAccess":   { "mode": "trusted" },
+      "messageSend":    { "mode": "trusted" }
+    }
+  }
+}
+```
+
+#### Top-level approval fields
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | Activates the approval broker. When `false`, all approval checks pass through without enforcement. |
+| `hostId` | string | `"local"` | Stable identifier for this host. Included in approval tokens and audit events so future sandboxes and remote nodes can verify provenance. |
+| `keyFile` | string | `""` | Path to a 32-byte key file used to sign and verify approval tokens. Required when any domain uses `ask` or `allowlist` mode. |
+| `pairingCodeTtlSeconds` | int | `300` | How long a pairing code remains valid before automatic expiry. |
+| `pendingTtlSeconds` | int | `3600` | How long a pending approval request waits before expiring automatically. |
+| `approvalTokenTtlSeconds` | int | `300` | How long an issued approval token remains valid after the operator resolves the request. |
+| `localAutoPairLoopback` | bool | `false` | When `true`, automatically approves pairing requests from loopback addresses without requiring operator action. Intended for single-node local development only. |
+
+#### Approval modes
+
+Each domain under `security.approvals` accepts a `mode` field with one of these values:
+
+| Mode | Behaviour |
+| --- | --- |
+| `deny` | All execution in this domain is blocked unconditionally. Suitable for `exec` on headless hosts that should never run subprocesses. |
+| `ask` | Every execution attempt creates a pending approval request and is blocked until an operator resolves it. |
+| `allowlist` | Execution is allowed if a matching allowlist rule exists; otherwise a pending request is created. Use this to pre-approve recurring safe patterns while still gating novel ones. |
+| `trusted` | Execution is allowed without prompting an operator. An audit event is still recorded. This is the default for all domains. |
+
+#### Domain fields
+
+Configure each of these independently under `security.approvals`:
+
+| Domain key | Controls |
+| --- | --- |
+| `pairing` | Whether new device pairing requests are auto-approved, gated, or denied. |
+| `exec` | Shell and program execution via the `exec` tool. |
+| `skillExecution` | Skill script execution via `run_skill_script`. |
+| `secretAccess` | (Future) Gate on decrypting or reading a named secret. |
+| `messageSend` | (Future) Gate on sending an outbound message through a channel. |
+
+#### Upgrade notes
+
+- Existing installs do not need any approval config. All domains default to `trusted` when `enabled` is `false` or absent.
+- When you add `"enabled": true` for the first time, set every domain you want to gate explicitly; domains left unset keep `trusted` behavior.
+- `keyFile` must exist before the service starts when any domain uses `ask` or `allowlist`. Run `or3-intern doctor` to detect missing keys.
+- `hostId` should be stable and unique per host. Changing it invalidates all outstanding approval tokens issued under the old value.
+
 ### `runtimeProfile`
 
 Selects the named execution posture enforced at startup. Valid values:

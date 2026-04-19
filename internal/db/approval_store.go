@@ -130,6 +130,18 @@ func (d *DB) UpdatePairingRequestStatus(ctx context.Context, id int64, status, a
 	return err
 }
 
+func (d *DB) ResolvePairingRequestStatus(ctx context.Context, id int64, fromStatus, toStatus, approverID string, approvedAt, deniedAt int64, metadata map[string]any) (bool, error) {
+	res, err := d.SQL.ExecContext(ctx, `UPDATE pairing_requests SET status=?, approver_id=?, approved_at=?, denied_at=?, metadata_json=? WHERE id=? AND status=?`, toStatus, approverID, approvedAt, deniedAt, mustJSONMap(metadata), id, fromStatus)
+	if err != nil {
+		return false, err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return rows == 1, nil
+}
+
 func (d *DB) CompareAndSwapPairingRequestStatus(ctx context.Context, id int64, fromStatus, toStatus string) (bool, error) {
 	res, err := d.SQL.ExecContext(ctx, `UPDATE pairing_requests SET status=? WHERE id=? AND status=?`, toStatus, id, fromStatus)
 	if err != nil {
@@ -174,7 +186,21 @@ func (d *DB) ListPairedDevices(ctx context.Context, limit int) ([]PairedDeviceRe
 	if limit <= 0 || limit > 200 {
 		limit = 200
 	}
-	rows, err := d.SQL.QueryContext(ctx, `SELECT id, device_id, role, display_name, token_hash, status, created_at, last_seen_at, revoked_at, metadata_json FROM paired_devices ORDER BY id DESC LIMIT ?`, limit)
+	return d.listPairedDevicesPage(ctx, limit, 0)
+}
+
+func (d *DB) ListPairedDevicesPage(ctx context.Context, limit, offset int) ([]PairedDeviceRecord, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 200
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return d.listPairedDevicesPage(ctx, limit, offset)
+}
+
+func (d *DB) listPairedDevicesPage(ctx context.Context, limit, offset int) ([]PairedDeviceRecord, error) {
+	rows, err := d.SQL.QueryContext(ctx, `SELECT id, device_id, role, display_name, token_hash, status, created_at, last_seen_at, revoked_at, metadata_json FROM paired_devices ORDER BY id DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -264,6 +290,18 @@ func (d *DB) ListApprovalRequests(ctx context.Context, status string, limit int)
 func (d *DB) UpdateApprovalRequestResolution(ctx context.Context, id int64, status string, resolvedAt int64, actor, kind, note string) error {
 	_, err := d.SQL.ExecContext(ctx, `UPDATE approval_requests SET status=?, resolved_at=?, resolver_actor_id=?, resolution_kind=?, resolution_note=? WHERE id=?`, status, resolvedAt, actor, kind, note, id)
 	return err
+}
+
+func (d *DB) ResolveApprovalRequest(ctx context.Context, id int64, fromStatus, toStatus string, resolvedAt int64, actor, kind, note string) (bool, error) {
+	res, err := d.SQL.ExecContext(ctx, `UPDATE approval_requests SET status=?, resolved_at=?, resolver_actor_id=?, resolution_kind=?, resolution_note=? WHERE id=? AND status=?`, toStatus, resolvedAt, actor, kind, note, id, fromStatus)
+	if err != nil {
+		return false, err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return rows == 1, nil
 }
 
 func (d *DB) CreateApprovalAllowlist(ctx context.Context, input ApprovalAllowlistRecord) (ApprovalAllowlistRecord, error) {

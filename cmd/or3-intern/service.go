@@ -231,12 +231,7 @@ func (s *serviceServer) handleDevices(w http.ResponseWriter, r *http.Request) {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 			return
 		}
-		device, err := s.broker.DB.GetPairedDevice(r.Context(), deviceID)
-		if err != nil {
-			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-			return
-		}
-		rotated, token, err := s.broker.RotateDeviceToken(r.Context(), device.DeviceID, device.Role, device.DisplayName, device.Metadata)
+		rotated, token, err := s.broker.RotatePairedDeviceToken(r.Context(), deviceID)
 		if err != nil {
 			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
@@ -307,7 +302,10 @@ func (s *serviceServer) handleApprovals(w http.ResponseWriter, r *http.Request) 
 			Allowlist bool   `json:"allowlist"`
 			Note      string `json:"note"`
 		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid request body"})
+			return
+		}
 		issued, err := s.broker.ApproveRequest(r.Context(), id, serviceAuthIdentityFromContext(r.Context()).Actor, body.Allowlist, body.Note)
 		if err != nil {
 			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
@@ -322,7 +320,10 @@ func (s *serviceServer) handleApprovals(w http.ResponseWriter, r *http.Request) 
 		var body struct {
 			Note string `json:"note"`
 		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid request body"})
+			return
+		}
 		if err := s.broker.DenyRequest(r.Context(), id, serviceAuthIdentityFromContext(r.Context()).Actor, body.Note); err != nil {
 			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return

@@ -200,6 +200,28 @@ func TestRunDevicesCommand_Rotate_MissingID(t *testing.T) {
 	}
 }
 
+func TestRunDevicesCommand_Rotate_RevokedDeviceFails(t *testing.T) {
+	broker := testDevicesBroker(t)
+	ctx := context.Background()
+
+	id, code := seedPairingRequest(t, broker)
+	if _, err := broker.ApprovePairingRequest(ctx, id, "cli"); err != nil {
+		t.Fatalf("ApprovePairingRequest: %v", err)
+	}
+	device, _, err := broker.ExchangePairingCode(ctx, approval.PairingExchangeInput{RequestID: id, Code: code})
+	if err != nil {
+		t.Fatalf("ExchangePairingCode: %v", err)
+	}
+	if err := broker.RevokeDevice(ctx, device.DeviceID, "cli"); err != nil {
+		t.Fatalf("RevokeDevice: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := runDevicesCommand(ctx, broker, []string{"rotate", device.DeviceID}, &out, &out); err == nil {
+		t.Fatal("expected revoked device rotation to fail")
+	}
+}
+
 func TestRunDevicesCommand_UnknownSubcommand(t *testing.T) {
 	broker := testDevicesBroker(t)
 	var out bytes.Buffer

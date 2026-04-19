@@ -48,7 +48,15 @@
 - [x] [Req 9, Req 10] Add operator guidance for approval expiration, revoked devices, and offline CLI operation.
 - [x] [Req 13] Clearly document that web UI, chat approvals, secret-access approvals, outbound-message approvals, sandbox verification, and remote-node forwarding are compatible future phases, not hidden partial v1 behavior.
 
-# 8. Out of scope for the first implementation pass
+# 8. Post-review hardening follow-up
+
+- [x] Make approval and pairing resolution single-winner so late deny/approve races cannot overwrite already resolved requests.
+- [x] Require anonymous allowlist pairing attempts for existing devices to stay pending until an operator approves them.
+- [x] Prevent device rotation workflows from reviving revoked devices outside of a fresh pairing exchange.
+- [x] Stamp anonymous and authenticated service pairing flows with stable audit actor/auth metadata.
+- [x] Add regression tests for malformed approval JSON, revoked-device rotation, and paired-identity lookup beyond the first device page.
+
+# 9. Out of scope for the first implementation pass
 
 - [ ] Do not add a browser UI or desktop pairing client.
 - [ ] Do not gate every tool immediately; only `exec` and `run_skill_script` need full enforcement in the first pass.

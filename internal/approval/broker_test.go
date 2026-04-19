@@ -3,6 +3,7 @@ package approval
 import (
 	"context"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -231,4 +232,104 @@ func TestBroker_CreatePairingRequest_HonorsPairingModes(t *testing.T) {
 			t.Fatal("expected unknown device to be rejected in allowlist mode")
 		}
 	})
+
+	t.Run("allowlist anonymous existing device stays pending", func(t *testing.T) {
+		broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
+			cfg.Pairing.Mode = config.ApprovalModeAllowlist
+		})
+		defer cleanup()
+
+		if _, _, err := broker.RotateDeviceToken(context.Background(), "device-1", RoleOperator, "Ops Laptop", nil); err != nil {
+			t.Fatalf("RotateDeviceToken: %v", err)
+		}
+		ctx := ContextWithAuditAuthKind(context.Background(), "unauthenticated")
+		req, _, err := broker.CreatePairingRequest(ctx, PairingRequestInput{Role: RoleOperator, DeviceID: "device-1", DisplayName: "Ops Laptop"})
+		if err != nil {
+			t.Fatalf("CreatePairingRequest anonymous allowlisted: %v", err)
+		}
+		if req.Status != StatusPending {
+			t.Fatalf("expected anonymous allowlisted device to require approval, got %#v", req)
+		}
+	})
+}
+
+func TestBroker_DenyRequest_RejectsAlreadyApprovedRequest(t *testing.T) {
+	broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Exec.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+
+	decision, err := broker.EvaluateExec(context.Background(), ExecEvaluation{
+		ExecutablePath: "/bin/echo",
+		Argv:           []string{"hello"},
+		WorkingDir:     "/tmp",
+		ToolName:       "exec",
+	})
+	if err != nil {
+		t.Fatalf("EvaluateExec: %v", err)
+	}
+	if _, err := broker.ApproveRequest(context.Background(), decision.RequestID, "cli:test", false, "ok"); err != nil {
+		t.Fatalf("ApproveRequest: %v", err)
+	}
+	if err := broker.DenyRequest(context.Background(), decision.RequestID, "cli:test", "late deny"); err == nil {
+		t.Fatal("expected deny after approval to fail")
+	}
+}
+
+func TestBroker_DenyPairingRequest_RejectsAlreadyApprovedRequest(t *testing.T) {
+	broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Pairing.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+
+	req, _, err := broker.CreatePairingRequest(context.Background(), PairingRequestInput{
+		Role:        RoleOperator,
+		DisplayName: "Ops Laptop",
+	})
+	if err != nil {
+		t.Fatalf("CreatePairingRequest: %v", err)
+	}
+	if _, err := broker.ApprovePairingRequest(context.Background(), req.ID, "cli:test"); err != nil {
+		t.Fatalf("ApprovePairingRequest: %v", err)
+	}
+	if err := broker.DenyPairingRequest(context.Background(), req.ID, "cli:test"); err == nil {
+		t.Fatal("expected deny after pairing approval to fail")
+	}
+}
+
+func TestBroker_RotatePairedDeviceToken_RejectsRevokedDevice(t *testing.T) {
+	broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {})
+	defer cleanup()
+
+	device, _, err := broker.RotateDeviceToken(context.Background(), "device-1", RoleOperator, "Ops Laptop", nil)
+	if err != nil {
+		t.Fatalf("RotateDeviceToken seed: %v", err)
+	}
+	if err := broker.RevokeDevice(context.Background(), device.DeviceID, "cli:test"); err != nil {
+		t.Fatalf("RevokeDevice: %v", err)
+	}
+	if _, _, err := broker.RotatePairedDeviceToken(context.Background(), device.DeviceID); err == nil {
+		t.Fatal("expected revoked device rotation to fail")
+	}
+}
+
+func TestBroker_IsPairedChannelIdentity_FindsMatchBeyond200Rows(t *testing.T) {
+	broker, cleanup := newTestBroker(t, nil)
+	defer cleanup()
+
+	if _, _, err := broker.RotateDeviceToken(context.Background(), "legacy-device", RoleOperator, "Legacy Slack User", map[string]any{"channel": "slack", "identity": "U-old"}); err != nil {
+		t.Fatalf("RotateDeviceToken legacy: %v", err)
+	}
+	for i := 0; i < 205; i++ {
+		if _, _, err := broker.RotateDeviceToken(context.Background(), filepath.Join("device", strconv.Itoa(i)), RoleOperator, "Noise", map[string]any{"channel": "slack", "identity": "noise"}); err != nil {
+			t.Fatalf("RotateDeviceToken noise %d: %v", i, err)
+		}
+	}
+	allowed, err := broker.IsPairedChannelIdentity(context.Background(), "slack", "U-old")
+	if err != nil {
+		t.Fatalf("IsPairedChannelIdentity: %v", err)
+	}
+	if !allowed {
+		t.Fatal("expected legacy paired identity to be found beyond first page")
+	}
 }

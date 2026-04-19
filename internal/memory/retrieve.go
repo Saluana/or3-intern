@@ -12,10 +12,16 @@ import (
 
 // Retrieved is one memory hit returned from hybrid retrieval.
 type Retrieved struct {
-	Source string // pinned|vector|fts
-	ID     int64
-	Text   string
-	Score  float64
+	Source     string // pinned|vector|fts|hybrid
+	ID         int64
+	Text       string
+	Score      float64
+	Kind       string
+	Status     string
+	Importance float64
+	UseCount   int
+	CreatedAt  int64
+	LastUsedAt int64
 }
 
 // Retriever ranks vector, FTS, lexical, and recency signals into a single result set.
@@ -39,20 +45,36 @@ func (r *Retriever) Retrieve(ctx context.Context, sessionKey, query string, quer
 	if err != nil {
 		return nil, err
 	}
-	fts, _ := r.DB.SearchFTS(ctx, sessionKey, normalizeFTSQuery(query), ftsK)
+	fts, err := searchFTSWithFallback(ctx, r.DB, sessionKey, query, ftsK)
+	if err != nil {
+		return nil, err
+	}
 
 	type agg struct {
-		id        int64
-		text      string
-		v         float64
-		f         float64
-		createdAt int64
+		id         int64
+		text       string
+		v          float64
+		f          float64
+		createdAt  int64
+		kind       string
+		status     string
+		importance float64
+		useCount   int
+		lastUsedAt int64
 	}
 	m := map[int64]*agg{}
 	for _, c := range vecs {
 		a := m[c.ID]
 		if a == nil {
-			a = &agg{id: c.ID, text: c.Text}
+			a = &agg{
+				id:         c.ID,
+				text:       c.Text,
+				kind:       c.Kind,
+				status:     c.Status,
+				importance: c.Importance,
+				useCount:   c.UseCount,
+				lastUsedAt: c.LastUsedAt,
+			}
 			m[c.ID] = a
 		}
 		a.v = c.Score
@@ -63,8 +85,21 @@ func (r *Retriever) Retrieve(ctx context.Context, sessionKey, query string, quer
 	for _, f := range fts {
 		a := m[f.ID]
 		if a == nil {
-			a = &agg{id: f.ID, text: f.Text}
+			a = &agg{
+				id:         f.ID,
+				text:       f.Text,
+				kind:       f.Kind,
+				status:     f.Status,
+				importance: f.Importance,
+				useCount:   f.UseCount,
+				lastUsedAt: f.LastUsedAt,
+			}
 			m[f.ID] = a
+		} else {
+			// Prefer the metadata from FTS if vector didn't have it (both are the same row).
+			if a.kind == "" {
+				a.kind = f.Kind
+			}
 		}
 		// bm25 lower is better. Convert to a positive "higher is better".
 		a.f = 1.0 / (1.0 + f.Rank)
@@ -85,6 +120,14 @@ func (r *Retriever) Retrieve(ctx context.Context, sessionKey, query string, quer
 		lexical := lexicalOverlapScore(tokens, a.text)
 		recency := recencyScore(a.createdAt, newest)
 		score := (a.v * r.VectorWeight) + (a.f * r.FTSWeight) + (lexical * r.LexicalWeight) + (recency * r.RecencyWeight)
+
+		// Apply small bounded metadata adjustments so vector/FTS relevance
+		// still dominates while durable/active notes get a slight preference.
+		score += metadataScoreAdjust(a.kind, a.status, a.importance, a.useCount)
+		if score < 0 {
+			score = 0
+		}
+
 		src := "hybrid"
 		if a.f > 0 && a.v == 0 {
 			src = "fts"
@@ -92,7 +135,18 @@ func (r *Retriever) Retrieve(ctx context.Context, sessionKey, query string, quer
 		if a.v > 0 && a.f == 0 {
 			src = "vector"
 		}
-		raw = append(raw, Retrieved{Source: src, ID: a.id, Text: a.text, Score: score})
+		raw = append(raw, Retrieved{
+			Source:     src,
+			ID:         a.id,
+			Text:       a.text,
+			Score:      score,
+			Kind:       a.kind,
+			Status:     a.status,
+			Importance: a.importance,
+			UseCount:   a.useCount,
+			CreatedAt:  a.createdAt,
+			LastUsedAt: a.lastUsedAt,
+		})
 	}
 
 	sort.Slice(raw, func(i, j int) bool {
@@ -102,6 +156,63 @@ func (r *Retriever) Retrieve(ctx context.Context, sessionKey, query string, quer
 		return raw[i].Score > raw[j].Score
 	})
 	return diversifyRetrieved(raw, topK), nil
+}
+
+func searchFTSWithFallback(ctx context.Context, d *db.DB, sessionKey, query string, k int) ([]db.FTSCandidate, error) {
+	query = strings.TrimSpace(query)
+	if d == nil || query == "" || k <= 0 {
+		return nil, nil
+	}
+	ftsQuery := normalizeFTSQuery(query)
+	results, err := d.SearchFTS(ctx, sessionKey, ftsQuery, k)
+	if err == nil {
+		return results, nil
+	}
+	quoted := `"` + strings.ReplaceAll(query, `"`, `""`) + `"`
+	return d.SearchFTS(ctx, sessionKey, quoted, k)
+}
+
+// metadataScoreAdjust returns a small additive score correction (bounded to
+// the range [-0.10, +0.07]) based on note lifecycle metadata so that
+// relevance signals (vector/FTS) continue to dominate while active durable
+// notes are slightly preferred over stale rolling summaries.
+func metadataScoreAdjust(kind, status string, importance float64, useCount int) float64 {
+	adj := 0.0
+
+	// Status: strongly demote stale and superseded notes.
+	if status == db.MemoryStatusStale || status == db.MemoryStatusSuperseded {
+		adj -= 0.10
+	}
+
+	// Kind: durable operational kinds outrank rolling summaries slightly.
+	switch kind {
+	case db.MemoryKindFact, db.MemoryKindProcedure:
+		adj += 0.03
+	case db.MemoryKindPreference, db.MemoryKindGoal:
+		adj += 0.02
+	case db.MemoryKindSummary, db.MemoryKindEpisode:
+		adj -= 0.01
+	}
+
+	// Importance boost (bounded to [0,1] * 0.04 → [0, 0.04]).
+	if importance > 0 {
+		imp := importance
+		if imp > 1.0 {
+			imp = 1.0
+		}
+		adj += imp * 0.04
+	}
+
+	// Use-count boost: small signal, capped at 5 uses × 0.01 = 0.05 max.
+	if useCount > 0 {
+		uc := useCount
+		if uc > 5 {
+			uc = 5
+		}
+		adj += float64(uc) * 0.01
+	}
+
+	return adj
 }
 
 func retrievalTokens(query string) []string {
@@ -241,7 +352,7 @@ func normalizeFTSQuery(q string) string {
 	// simple: split on spaces, quote terms that contain punctuation
 	parts := strings.Fields(q)
 	for i, p := range parts {
-		if strings.ContainsAny(p, `":*`) {
+		if strings.ContainsAny(p, `":*()-`) {
 			parts[i] = `"` + strings.ReplaceAll(p, `"`, `""`) + `"`
 		}
 	}

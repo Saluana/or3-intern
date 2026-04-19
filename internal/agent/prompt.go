@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"mime"
 	"os"
 	"path/filepath"
@@ -47,10 +48,14 @@ cron:
 - Use cron tool for scheduled reminders.
 `
 
+// defaultDigestLineMax bounds the number of lines in the Memory Digest section.
+const defaultDigestLineMax = 10
+
 const (
 	defaultBootstrapMaxChars      = 20000
 	defaultBootstrapTotalMaxChars = 150000
 	defaultPinnedOneLineMax       = 220
+	defaultDigestOneLineMax       = 160
 	defaultRetrievedOneLineMax    = 240
 	defaultSkillsSummaryMax       = 80
 	defaultVisionMaxImages        = 4
@@ -144,10 +149,31 @@ func (b *Builder) BuildWithOptions(ctx context.Context, opts BuildOptions) (Prom
 	if b.Mem != nil && b.Provider != nil && strings.TrimSpace(opts.UserMessage) != "" {
 		vec, err := cachedEmbed(ctx, b.Provider, b.EmbedModel, opts.UserMessage)
 		if err == nil {
-			retrieved, _ = b.Mem.Retrieve(ctx, scopeKey, opts.UserMessage, vec, b.VectorK, b.FTSK, b.TopK)
+			retrieved, err = b.Mem.Retrieve(ctx, scopeKey, opts.UserMessage, vec, b.VectorK, b.FTSK, b.TopK)
+			if err != nil {
+				log.Printf("memory retrieve failed for scope %q: %v", scopeKey, err)
+				retrieved = nil
+			}
 		}
 	}
-	memText := formatRetrieved(retrieved)
+	maxEach := b.BootstrapMaxChars
+	if maxEach <= 0 {
+		maxEach = defaultBootstrapMaxChars
+	}
+	memText, retrievedIDs := formatRetrievedBounded(retrieved, maxEach)
+
+	// Build Memory Digest from top active durable-kind notes.
+	digestText, digestIDs := formatMemoryDigestBounded(retrieved, defaultDigestLineMax, maxEach)
+
+	// Best-effort usage logging for notes that made it into the prompt.
+	if b.DB != nil {
+		ids := append([]int64(nil), retrievedIDs...)
+		ids = append(ids, digestIDs...)
+		ids = uniqueInt64(ids)
+		if len(ids) > 0 {
+			_ = b.DB.TouchMemoryNotes(ctx, scopeKey, ids, db.NowMS())
+		}
+	}
 
 	// indexed doc context
 	var docContextText string
@@ -205,7 +231,7 @@ func (b *Builder) BuildWithOptions(ctx context.Context, opts BuildOptions) (Prom
 		heartbeat = b.currentHeartbeatText()
 		structuredContext = formatStructuredEventContext(opts.EventMeta, structuredMax)
 	}
-	sysText := b.composeSystemPrompt(pinnedText, memText, b.IdentityText, b.StaticMemory, heartbeat, structuredContext, docContextText, workspaceContextText)
+	sysText := b.composeSystemPrompt(pinnedText, digestText, memText, b.IdentityText, b.StaticMemory, heartbeat, structuredContext, docContextText, workspaceContextText)
 	sys := []providers.ChatMessage{
 		{Role: "system", Content: sysText},
 	}
@@ -362,7 +388,7 @@ func readCappedFile(path string, maxBytes int64) ([]byte, error) {
 	return data, nil
 }
 
-func (b *Builder) composeSystemPrompt(pinnedText, memText, identityText, staticMemoryText, heartbeatText, structuredContextText, docContextText, workspaceContextText string) string {
+func (b *Builder) composeSystemPrompt(pinnedText, digestText, memText, identityText, staticMemoryText, heartbeatText, structuredContextText, docContextText, workspaceContextText string) string {
 	maxEach := b.BootstrapMaxChars
 	if maxEach <= 0 {
 		maxEach = defaultBootstrapMaxChars
@@ -412,6 +438,9 @@ func (b *Builder) composeSystemPrompt(pinnedText, memText, identityText, staticM
 		sections = append(sections, section{title: "Structured Trigger Context", text: truncateText(t, maxEach)})
 	}
 	sections = append(sections, section{title: "Pinned Memory", text: pinnedText})
+	if t := strings.TrimSpace(digestText); t != "" {
+		sections = append(sections, section{title: "Memory Digest", text: truncateText(t, maxEach)})
+	}
 	sections = append(sections, section{title: "Retrieved Memory", text: memText})
 	if t := strings.TrimSpace(workspaceContextText); t != "" {
 		sections = append(sections, section{title: "Workspace Context", text: truncateText(t, maxEach)})
@@ -477,14 +506,97 @@ func formatPinned(m map[string]string) string {
 }
 
 func formatRetrieved(ms []memory.Retrieved) string {
+	text, _ := formatRetrievedBounded(ms, 0)
+	return text
+}
+
+func formatRetrievedBounded(ms []memory.Retrieved, maxChars int) (string, []int64) {
 	if len(ms) == 0 {
-		return "(none)"
+		return "(none)", nil
 	}
 	var b strings.Builder
+	ids := make([]int64, 0, len(ms))
 	for i, m := range ms {
-		b.WriteString(fmt.Sprintf("%d) [%s] %s\n", i+1, m.Source, oneLine(m.Text, defaultRetrievedOneLineMax)))
+		line := fmt.Sprintf("%d) [%s] %s\n", i+1, m.Source, oneLine(m.Text, defaultRetrievedOneLineMax))
+		if maxChars > 0 && b.Len()+len(line) > maxChars {
+			break
+		}
+		b.WriteString(line)
+		if m.ID > 0 {
+			ids = append(ids, m.ID)
+		}
 	}
-	return strings.TrimSpace(b.String())
+	out := strings.TrimSpace(b.String())
+	if out == "" {
+		return "(none)", nil
+	}
+	return out, ids
+}
+
+// digestKinds holds the note kinds that qualify for the Memory Digest section.
+var digestKinds = map[string]struct{}{
+	db.MemoryKindFact:       {},
+	db.MemoryKindPreference: {},
+	db.MemoryKindGoal:       {},
+	db.MemoryKindProcedure:  {},
+}
+
+// formatMemoryDigest builds a compact digest from top active durable-kind
+// notes in the retrieved set. It is bounded to maxLines lines.
+func formatMemoryDigest(ms []memory.Retrieved, maxLines int) string {
+	text, _ := formatMemoryDigestBounded(ms, maxLines, 0)
+	return text
+}
+
+func formatMemoryDigestBounded(ms []memory.Retrieved, maxLines int, maxChars int) (string, []int64) {
+	if maxLines <= 0 {
+		maxLines = defaultDigestLineMax
+	}
+	var b strings.Builder
+	ids := make([]int64, 0, maxLines)
+	count := 0
+	for _, m := range ms {
+		if _, ok := digestKinds[m.Kind]; !ok {
+			continue
+		}
+		// Treat empty status as active (notes inserted before the metadata
+		// migration retain their zero-value status field).
+		if m.Status != "" && m.Status != db.MemoryStatusActive {
+			continue
+		}
+		line := fmt.Sprintf("- [%s] %s\n", m.Kind, oneLine(m.Text, defaultDigestOneLineMax))
+		if maxChars > 0 && b.Len()+len(line) > maxChars {
+			break
+		}
+		b.WriteString(line)
+		if m.ID > 0 {
+			ids = append(ids, m.ID)
+		}
+		count++
+		if count >= maxLines {
+			break
+		}
+	}
+	return strings.TrimSpace(b.String()), ids
+}
+
+func uniqueInt64(ids []int64) []int64 {
+	if len(ids) == 0 {
+		return nil
+	}
+	seen := make(map[int64]struct{}, len(ids))
+	out := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
 }
 
 func oneLine(s string, max int) string {

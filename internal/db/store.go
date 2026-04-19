@@ -12,6 +12,31 @@ import (
 	"or3-intern/internal/scope"
 )
 
+// MemoryKind classifies the content type of a memory_notes row.
+type MemoryKind = string
+
+const (
+	MemoryKindNote       MemoryKind = "note"
+	MemoryKindSummary    MemoryKind = "summary"
+	MemoryKindFact       MemoryKind = "fact"
+	MemoryKindPreference MemoryKind = "preference"
+	MemoryKindGoal       MemoryKind = "goal"
+	MemoryKindProcedure  MemoryKind = "procedure"
+	MemoryKindEpisode    MemoryKind = "episode"
+)
+
+// MemoryStatus tracks the lifecycle state of a memory_notes row.
+type MemoryStatus = string
+
+const (
+	MemoryStatusActive     MemoryStatus = "active"
+	MemoryStatusStale      MemoryStatus = "stale"
+	MemoryStatusSuperseded MemoryStatus = "superseded"
+)
+
+// maxImportance caps the importance value stored on a memory note.
+const maxImportance = 1.0
+
 type Message struct {
 	ID          int64
 	SessionKey  string
@@ -27,13 +52,28 @@ type ConsolidationMessage struct {
 	Content string
 }
 
+// TypedNoteInput holds the data for a single typed memory note write.
+type TypedNoteInput struct {
+	Text        string
+	Embedding   []byte
+	SourceMsgID sql.NullInt64
+	Tags        string
+	Kind        string
+	Status      string
+	Importance  float64
+}
+
 type ConsolidationWrite struct {
-	SessionKey    string
-	ScopeKey      string
-	NoteText      string
-	Embedding     []byte
-	SourceMsgID   sql.NullInt64
-	NoteTags      string
+	SessionKey string
+	ScopeKey   string
+	// Primary summary note (optional).
+	NoteText    string
+	Embedding   []byte
+	SourceMsgID sql.NullInt64
+	NoteTags    string
+	NoteKind    string // defaults to MemoryKindSummary when NoteText is set
+	// Additional typed notes (facts, preferences, goals, procedures).
+	ExtraNotes    []TypedNoteInput
 	CanonicalKey  string
 	CanonicalText string
 	CursorMsgID   int64
@@ -167,22 +207,74 @@ func (d *DB) UpsertPinned(ctx context.Context, sessionKey, key, content string) 
 	return err
 }
 
+// InsertMemoryNote inserts a plain (untyped) memory note. It is a convenience
+// wrapper around InsertMemoryNoteTyped that uses safe defaults for the new metadata fields.
 func (d *DB) InsertMemoryNote(ctx context.Context, sessionKey, text string, embedding []byte, sourceMsgID sql.NullInt64, tags string) (int64, error) {
+	return d.InsertMemoryNoteTyped(ctx, sessionKey, TypedNoteInput{
+		Text:        text,
+		Embedding:   embedding,
+		SourceMsgID: sourceMsgID,
+		Tags:        tags,
+		Kind:        MemoryKindNote,
+		Status:      MemoryStatusActive,
+	})
+}
+
+// InsertMemoryNoteTyped inserts a memory note with explicit metadata fields.
+func (d *DB) InsertMemoryNoteTyped(ctx context.Context, sessionKey string, input TypedNoteInput) (int64, error) {
 	sessionKey = normalizeMemorySession(sessionKey)
-	if len(embedding) >= 4 && len(embedding)%4 == 0 {
-		if err := d.EnsureMemoryVecIndexWithDim(ctx, len(embedding)/4); err != nil {
-			return 0, err
-		}
+	kind := strings.TrimSpace(input.Kind)
+	if kind == "" {
+		kind = MemoryKindNote
+	}
+	status := strings.TrimSpace(input.Status)
+	if status == "" {
+		status = MemoryStatusActive
+	}
+	importance := input.Importance
+	if importance < 0 {
+		importance = 0
+	} else if importance > maxImportance {
+		importance = maxImportance
+	}
+	if err := d.validateMemoryEmbeddingDims(ctx, input.Embedding); err != nil {
+		return 0, err
+	}
+	emb := input.Embedding
+	if emb == nil {
+		emb = make([]byte, 0)
 	}
 	res, err := d.SQL.ExecContext(ctx,
-		`INSERT INTO memory_notes(session_key, text, embedding, source_message_id, tags, created_at) VALUES(?,?,?,?,?,?)`,
-		sessionKey, text, embedding, sourceMsgID, tags, NowMS())
+		`INSERT INTO memory_notes(session_key, text, embedding, source_message_id, tags, created_at, kind, status, importance)
+		 VALUES(?,?,?,?,?,?,?,?,?)`,
+		sessionKey, input.Text, emb, input.SourceMsgID, input.Tags, NowMS(),
+		kind, status, importance)
 	if err != nil {
 		return 0, err
 	}
 	id, _ := res.LastInsertId()
-	_ = d.upsertMemoryVec(ctx, id, sessionKey, text, embedding)
+	if err := d.upsertMemoryVec(ctx, id, sessionKey, input.Text, emb); err != nil {
+		return id, err
+	}
 	return id, nil
+}
+
+func (d *DB) validateMemoryEmbeddingDims(ctx context.Context, embedding []byte) error {
+	if len(embedding) < 4 || len(embedding)%4 != 0 {
+		return nil
+	}
+	want := len(embedding) / 4
+	dims, err := d.MemoryVectorDims(ctx)
+	if err != nil {
+		return err
+	}
+	if dims == 0 {
+		return d.EnsureMemoryVecIndexWithDim(ctx, want)
+	}
+	if dims != want {
+		return fmt.Errorf("memory vector dims mismatch: have %d want %d", dims, want)
+	}
+	return nil
 }
 
 func (d *DB) upsertMemoryVec(ctx context.Context, noteID int64, sessionKey, text string, embedding []byte) error {
@@ -206,7 +298,7 @@ func (d *DB) upsertMemoryVec(ctx context.Context, noteID int64, sessionKey, text
 		}
 	}
 	if dims != len(embedding)/4 {
-		return nil
+		return fmt.Errorf("memory vector dims mismatch: have %d want %d", dims, len(embedding)/4)
 	}
 	_, err = d.VecSQL.ExecContext(ctx,
 		`INSERT OR REPLACE INTO memory_vec(note_id, session_key, embedding, text) VALUES(?,?,?,?)`,
@@ -221,6 +313,11 @@ type MemoryNoteRow struct {
 	SourceMessageID sql.NullInt64
 	Tags            string
 	CreatedAt       int64
+	Kind            string
+	Status          string
+	Importance      float64
+	UseCount        int
+	LastUsedAt      int64
 }
 
 func (d *DB) StreamMemoryNotes(ctx context.Context, sessionKey string) (*sql.Rows, error) {
@@ -257,17 +354,27 @@ func (d *DB) StreamMemoryNotesLimit(ctx context.Context, sessionKey string, limi
 }
 
 type FTSCandidate struct {
-	ID        int64
-	Text      string
-	Rank      float64
-	CreatedAt int64
+	ID         int64
+	Text       string
+	Rank       float64
+	CreatedAt  int64
+	Kind       string
+	Status     string
+	Importance float64
+	UseCount   int
+	LastUsedAt int64
 }
 
 type VecCandidateRow struct {
-	ID        int64
-	Text      string
-	Distance  float64
-	CreatedAt int64
+	ID         int64
+	Text       string
+	Distance   float64
+	CreatedAt  int64
+	Kind       string
+	Status     string
+	Importance float64
+	UseCount   int
+	LastUsedAt int64
 }
 
 func (d *DB) SearchMemoryVectors(ctx context.Context, sessionKey string, queryVec []byte, k int) ([]VecCandidateRow, error) {
@@ -317,7 +424,9 @@ func (d *DB) SearchVecScope(ctx context.Context, sessionKey string, queryVec []b
 		return nil, nil
 	}
 	rows, err := d.VecSQL.QueryContext(ctx,
-		`SELECT memory_vec.note_id, memory_vec.text, distance, memory_notes.created_at
+		`SELECT memory_vec.note_id, memory_vec.text, distance,
+		        memory_notes.created_at, memory_notes.kind, memory_notes.status,
+		        memory_notes.importance, memory_notes.use_count, memory_notes.last_used_at
 		 FROM memory_vec
 		 JOIN memory_notes ON memory_notes.id = memory_vec.note_id
 		 WHERE memory_vec.embedding MATCH ? AND memory_vec.k = ? AND memory_vec.session_key = ?
@@ -338,7 +447,8 @@ func (d *DB) SearchVecScopeFallback(ctx context.Context, sessionKey string, quer
 		return nil, nil
 	}
 	rows, err := d.VecSQL.QueryContext(ctx,
-		`SELECT id, text, vec_distance_cosine(embedding, ?) AS distance, created_at
+		`SELECT id, text, vec_distance_cosine(embedding, ?) AS distance,
+		        created_at, kind, status, importance, use_count, last_used_at
 		 FROM memory_notes
 		 WHERE session_key=? AND typeof(embedding)='blob' AND length(embedding)=?
 		 ORDER BY distance ASC
@@ -356,7 +466,10 @@ func scanVecCandidateRows(rows *sql.Rows) ([]VecCandidateRow, error) {
 	for rows.Next() {
 		var item VecCandidateRow
 		var distance sql.NullFloat64
-		if err := rows.Scan(&item.ID, &item.Text, &distance, &item.CreatedAt); err != nil {
+		if err := rows.Scan(
+			&item.ID, &item.Text, &distance, &item.CreatedAt,
+			&item.Kind, &item.Status, &item.Importance, &item.UseCount, &item.LastUsedAt,
+		); err != nil {
 			return nil, err
 		}
 		if !distance.Valid {
@@ -372,7 +485,9 @@ func (d *DB) SearchFTS(ctx context.Context, sessionKey, query string, k int) ([]
 	sessionKey = normalizeMemorySession(sessionKey)
 	// bm25 lower is better; invert
 	rows, err := d.SQL.QueryContext(ctx,
-		`SELECT memory_fts.rowid, memory_fts.text, bm25(memory_fts) as rank, memory_notes.created_at
+		`SELECT memory_fts.rowid, memory_fts.text, bm25(memory_fts) as rank,
+		        memory_notes.created_at, memory_notes.kind, memory_notes.status,
+		        memory_notes.importance, memory_notes.use_count, memory_notes.last_used_at
 		 FROM memory_fts
 		 JOIN memory_notes ON memory_notes.id = memory_fts.rowid
 		 WHERE memory_fts MATCH ? AND memory_notes.session_key IN (?, ?)
@@ -384,14 +499,14 @@ func (d *DB) SearchFTS(ctx context.Context, sessionKey, query string, k int) ([]
 	defer rows.Close()
 	var out []FTSCandidate
 	for rows.Next() {
-		var id int64
-		var text string
-		var rank float64
-		var createdAt int64
-		if err := rows.Scan(&id, &text, &rank, &createdAt); err != nil {
+		var c FTSCandidate
+		if err := rows.Scan(
+			&c.ID, &c.Text, &c.Rank, &c.CreatedAt,
+			&c.Kind, &c.Status, &c.Importance, &c.UseCount, &c.LastUsedAt,
+		); err != nil {
 			return nil, err
 		}
-		out = append(out, FTSCandidate{ID: id, Text: text, Rank: rank, CreatedAt: createdAt})
+		out = append(out, c)
 	}
 	return out, rows.Err()
 }
@@ -483,6 +598,14 @@ func (d *DB) SetLastConsolidatedID(ctx context.Context, sessionKey string, id in
 }
 
 func (d *DB) WriteConsolidation(ctx context.Context, w ConsolidationWrite) (int64, error) {
+	if err := d.validateMemoryEmbeddingDims(ctx, w.Embedding); err != nil {
+		return 0, err
+	}
+	for _, en := range w.ExtraNotes {
+		if err := d.validateMemoryEmbeddingDims(ctx, en.Embedding); err != nil {
+			return 0, err
+		}
+	}
 	tx, err := d.SQL.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
@@ -491,19 +614,72 @@ func (d *DB) WriteConsolidation(ctx context.Context, w ConsolidationWrite) (int6
 		_ = tx.Rollback()
 	}()
 
+	scopeKey := normalizeMemorySession(w.ScopeKey)
 	var noteID int64
+
+	// Write the primary summary note if one is provided.
 	if strings.TrimSpace(w.NoteText) != "" {
-		scopeKey := normalizeMemorySession(w.ScopeKey)
+		kind := strings.TrimSpace(w.NoteKind)
+		if kind == "" {
+			kind = MemoryKindSummary
+		}
+		emb := w.Embedding
+		if emb == nil {
+			emb = make([]byte, 0)
+		}
 		res, err := tx.ExecContext(ctx,
-			`INSERT INTO memory_notes(session_key, text, embedding, source_message_id, tags, created_at) VALUES(?,?,?,?,?,?)`,
-			scopeKey, w.NoteText, w.Embedding, w.SourceMsgID, w.NoteTags, NowMS())
+			`INSERT INTO memory_notes(session_key, text, embedding, source_message_id, tags, created_at, kind, status, importance)
+			 VALUES(?,?,?,?,?,?,?,?,?)`,
+			scopeKey, w.NoteText, emb, w.SourceMsgID, w.NoteTags, NowMS(),
+			kind, MemoryStatusActive, 0.0)
 		if err != nil {
 			return 0, err
 		}
 		noteID, _ = res.LastInsertId()
 	}
+
+	// Write any additional typed notes (facts, preferences, goals, procedures).
+	type extraNoteID struct {
+		id   int64
+		text string
+		emb  []byte
+	}
+	extraIDs := make([]extraNoteID, 0, len(w.ExtraNotes))
+	for _, en := range w.ExtraNotes {
+		if strings.TrimSpace(en.Text) == "" {
+			continue
+		}
+		kind := strings.TrimSpace(en.Kind)
+		if kind == "" {
+			kind = MemoryKindNote
+		}
+		status := strings.TrimSpace(en.Status)
+		if status == "" {
+			status = MemoryStatusActive
+		}
+		importance := en.Importance
+		if importance < 0 {
+			importance = 0
+		} else if importance > maxImportance {
+			importance = maxImportance
+		}
+		emb := en.Embedding
+		if emb == nil {
+			emb = make([]byte, 0)
+		}
+		res, err := tx.ExecContext(ctx,
+			`INSERT INTO memory_notes(session_key, text, embedding, source_message_id, tags, created_at, kind, status, importance)
+			 VALUES(?,?,?,?,?,?,?,?,?)`,
+			scopeKey, en.Text, emb, en.SourceMsgID, en.Tags, NowMS(),
+			kind, status, importance)
+		if err != nil {
+			return noteID, err
+		}
+		eid, _ := res.LastInsertId()
+		extraIDs = append(extraIDs, extraNoteID{id: eid, text: en.Text, emb: emb})
+	}
+
 	if strings.TrimSpace(w.CanonicalKey) != "" {
-		scopeKey := normalizeMemorySession(w.ScopeKey)
 		_, err = tx.ExecContext(ctx,
 			`INSERT INTO memory_pinned(session_key, key, content, updated_at) VALUES(?,?,?,?)
 			 ON CONFLICT(session_key, key) DO UPDATE SET content=excluded.content, updated_at=excluded.updated_at`,
@@ -527,8 +703,16 @@ func (d *DB) WriteConsolidation(ctx context.Context, w ConsolidationWrite) (int6
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
+	// Update vector index outside the transaction (best-effort).
 	if noteID > 0 {
-		_ = d.upsertMemoryVec(ctx, noteID, normalizeMemorySession(w.ScopeKey), w.NoteText, w.Embedding)
+		emb := w.Embedding
+		if emb == nil {
+			emb = make([]byte, 0)
+		}
+		_ = d.upsertMemoryVec(ctx, noteID, scopeKey, w.NoteText, emb)
+	}
+	for _, en := range extraIDs {
+		_ = d.upsertMemoryVec(ctx, en.id, scopeKey, en.text, en.emb)
 	}
 	return noteID, nil
 }
@@ -554,6 +738,74 @@ func (d *DB) ResetSessionHistory(ctx context.Context, sessionKey string) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// TouchMemoryNotes increments use_count and sets last_used_at for the given
+// note IDs that belong to the resolved scope (global or session). It is
+// best-effort: callers should not treat errors as fatal.
+func (d *DB) TouchMemoryNotes(ctx context.Context, scopeKey string, ids []int64, usedAt int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	scopeKey = normalizeMemorySession(scopeKey)
+	placeholders := make([]string, len(ids))
+	args := make([]any, 0, len(ids)+2)
+	args = append(args, usedAt)
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+	args = append(args, scope.GlobalMemoryScope, scopeKey)
+	// Placeholders are generated internally as literal "?" strings – not from
+	// user input – so this concatenation is safe from SQL injection.
+	q := `UPDATE memory_notes SET use_count=use_count+1, last_used_at=?
+	      WHERE id IN (` + strings.Join(placeholders, ",") + `)
+	      AND session_key IN (?,?)`
+	_, err := d.SQL.ExecContext(ctx, q, args...)
+	return err
+}
+
+// staleMemoryAgeMS is the minimum age (7 days in milliseconds) before a
+// never-used summary or episode note may be marked stale by cleanup.
+const staleMemoryAgeMS = 7 * 24 * 60 * 60 * 1000
+
+// cleanupStaleBatchLimit caps how many rows may be marked stale in a single
+// cleanup pass to keep the write bounded and safe for single-process SQLite.
+const cleanupStaleBatchLimit = 50
+
+// CleanupStaleMemoryNotes marks old, never-used summary and episode notes in
+// the given scope as stale. It returns the number of rows updated. Only rows
+// that are still active, have use_count=0, and were created more than
+// staleMemoryAgeMS milliseconds before nowMS are eligible. At most
+// cleanupStaleBatchLimit rows are touched per call.
+func (d *DB) CleanupStaleMemoryNotes(ctx context.Context, scopeKey string, nowMS int64, limit int) (int, error) {
+	scopeKey = normalizeMemorySession(scopeKey)
+	if limit <= 0 {
+		limit = cleanupStaleBatchLimit
+	}
+	cutoff := nowMS - staleMemoryAgeMS
+	res, err := d.SQL.ExecContext(ctx,
+		`UPDATE memory_notes
+		 SET status=?
+		 WHERE id IN (
+		   SELECT id FROM memory_notes
+		   WHERE session_key=? AND kind IN (?,?) AND status=? AND use_count=0
+		         AND created_at < ?
+		   ORDER BY created_at ASC
+		   LIMIT ?
+		 )`,
+		MemoryStatusStale,
+		scopeKey,
+		MemoryKindSummary, MemoryKindEpisode,
+		MemoryStatusActive,
+		cutoff,
+		limit,
+	)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
 }
 
 func (d *DB) EnqueueSubagentJob(ctx context.Context, job SubagentJob) error {

@@ -17,7 +17,7 @@ func TestComposeSystemPrompt_UsesCompactEligibleSkillList(t *testing.T) {
 			},
 		},
 	}
-	got := b.composeSystemPrompt("(none)", "(none)", "", "", "", "", "", "")
+	got := b.composeSystemPrompt("(none)", "", "(none)", "", "", "", "", "", "")
 	if !strings.Contains(got, "- visible | visible desc | /tmp/visible") {
 		t.Fatalf("expected compact eligible skill line, got %q", got)
 	}

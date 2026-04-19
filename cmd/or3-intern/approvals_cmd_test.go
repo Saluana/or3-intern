@@ -25,38 +25,12 @@ func testApprovalBroker(t *testing.T) *approval.Broker {
 	cfg.HostID = "test-host"
 	cfg.Exec.Mode = config.ApprovalModeAsk
 	return &approval.Broker{
-		DB:      database,
-		Config:  cfg,
-		HostID:  "test-host",
-		SignKey:  []byte("0123456789abcdef0123456789abcdef"),
-		Now:     func() time.Time { return time.Unix(1700000000, 0).UTC() },
+		DB:     database,
+		Config: cfg,
+		HostID: "test-host",
+		SignKey: []byte("0123456789abcdef0123456789abcdef"),
+		Now:    func() time.Time { return time.Unix(1700000000, 0).UTC() },
 	}
-}
-
-// seedPendingApprovalRequest creates a pending approval request and returns its ID as string.
-func seedPendingApprovalRequest(t *testing.T, broker *approval.Broker) string {
-	t.Helper()
-	ctx := context.Background()
-	input := approval.ExecEvaluation{
-		ExecutablePath: "/bin/echo",
-		Argv:           []string{"/bin/echo", "hello"},
-		WorkingDir:     "/tmp",
-		ToolName:       "exec",
-		AgentID:        "agent-test",
-		SessionID:      "session-test",
-	}
-	decision, err := broker.EvaluateExec(ctx, input)
-	if err != nil {
-		t.Fatalf("EvaluateExec: %v", err)
-	}
-	if decision.RequestID == 0 {
-		t.Fatal("expected approval request to be created")
-	}
-	return strings.TrimSpace(itoa64(decision.RequestID))
-}
-
-func itoa64(n int64) string {
-	return strings.TrimSpace(string(rune('0'+n))) // not correct for large numbers; use fmt
 }
 
 func TestRunApprovalsCommand_NilBroker(t *testing.T) {
@@ -259,22 +233,17 @@ func TestRunApprovalAllowlistCommand_Remove(t *testing.T) {
 	broker := testApprovalBroker(t)
 	ctx := context.Background()
 
-	// Add a rule first.
-	var out bytes.Buffer
-	var errBuf bytes.Buffer
-	if err := runApprovalsCommand(ctx, broker,
-		[]string{"allowlist", "add", "--domain", "exec", "--program", "/bin/ls"},
-		&out, &errBuf); err != nil {
-		t.Fatalf("allowlist add: %v", err)
+	// Add a rule directly via the broker to get a stable ID.
+	rec, err := broker.AddAllowlist(ctx, string(approval.SubjectExec),
+		approval.AllowlistScope{HostID: "test-host", Tool: "exec"},
+		approval.ExecAllowlistMatcher{ExecutablePath: "/bin/ls"},
+		"cli", 0)
+	if err != nil {
+		t.Fatalf("AddAllowlist: %v", err)
 	}
-	// Extract the ID.
-	addedLine := out.String()
-	idStr := strings.TrimPrefix(strings.TrimSpace(addedLine), "added allowlist ")
-	if idStr == "" {
-		t.Fatalf("could not parse added allowlist id from %q", addedLine)
-	}
+	idStr := sprint64(rec.ID)
 
-	out.Reset()
+	var out bytes.Buffer
 	if err := runApprovalsCommand(ctx, broker, []string{"allowlist", "remove", idStr}, &out, &out); err != nil {
 		t.Fatalf("allowlist remove: %v", err)
 	}

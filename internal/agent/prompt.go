@@ -529,6 +529,8 @@ func formatMemoryDigest(ms []memory.Retrieved, maxLines int) string {
 		if _, ok := digestKinds[m.Kind]; !ok {
 			continue
 		}
+		// Treat empty status as active (notes inserted before the metadata
+		// migration retain their zero-value status field).
 		if m.Status != "" && m.Status != db.MemoryStatusActive {
 			continue
 		}

@@ -730,6 +730,8 @@ func (d *DB) TouchMemoryNotes(ctx context.Context, scopeKey string, ids []int64,
 		args = append(args, id)
 	}
 	args = append(args, scope.GlobalMemoryScope, scopeKey)
+	// Placeholders are generated internally as literal "?" strings – not from
+	// user input – so this concatenation is safe from SQL injection.
 	q := `UPDATE memory_notes SET use_count=use_count+1, last_used_at=?
 	      WHERE id IN (` + strings.Join(placeholders, ",") + `)
 	      AND session_key IN (?,?)`

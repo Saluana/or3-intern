@@ -466,7 +466,7 @@ out := parseConsolidationOutput(raw)
 if len(out.Facts) == 0 {
 t.Fatal("expected truncated fact")
 }
-if len(out.Facts[0]) > maxConsolidationItemLen+3 { // +3 for "…"
+if len(out.Facts[0]) > maxConsolidationItemLen+3 { // +3 for "..."
 t.Errorf("expected fact capped to ~%d chars, got %d", maxConsolidationItemLen, len(out.Facts[0]))
 }
 }

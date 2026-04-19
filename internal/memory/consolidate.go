@@ -396,7 +396,7 @@ func sanitizeItems(items []string) []string {
 			continue
 		}
 		if len(item) > maxConsolidationItemLen {
-			item = strings.TrimSpace(item[:maxConsolidationItemLen]) + "…"
+			item = strings.TrimSpace(item[:maxConsolidationItemLen]) + "..."
 		}
 		out = append(out, item)
 		if len(out) >= maxConsolidationItems {

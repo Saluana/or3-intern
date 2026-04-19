@@ -55,6 +55,7 @@ const (
 	defaultBootstrapMaxChars      = 20000
 	defaultBootstrapTotalMaxChars = 150000
 	defaultPinnedOneLineMax       = 220
+	defaultDigestOneLineMax       = 160
 	defaultRetrievedOneLineMax    = 240
 	defaultSkillsSummaryMax       = 80
 	defaultVisionMaxImages        = 4
@@ -563,7 +564,7 @@ func formatMemoryDigestBounded(ms []memory.Retrieved, maxLines int, maxChars int
 		if m.Status != "" && m.Status != db.MemoryStatusActive {
 			continue
 		}
-		line := fmt.Sprintf("- [%s] %s\n", m.Kind, oneLine(m.Text, defaultRetrievedOneLineMax))
+		line := fmt.Sprintf("- [%s] %s\n", m.Kind, oneLine(m.Text, defaultDigestOneLineMax))
 		if maxChars > 0 && b.Len()+len(line) > maxChars {
 			break
 		}

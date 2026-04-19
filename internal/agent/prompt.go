@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"mime"
 	"os"
 	"path/filepath"
@@ -147,22 +148,27 @@ func (b *Builder) BuildWithOptions(ctx context.Context, opts BuildOptions) (Prom
 	if b.Mem != nil && b.Provider != nil && strings.TrimSpace(opts.UserMessage) != "" {
 		vec, err := cachedEmbed(ctx, b.Provider, b.EmbedModel, opts.UserMessage)
 		if err == nil {
-			retrieved, _ = b.Mem.Retrieve(ctx, scopeKey, opts.UserMessage, vec, b.VectorK, b.FTSK, b.TopK)
-		}
-	}
-	memText := formatRetrieved(retrieved)
-
-	// Build Memory Digest from top active durable-kind notes.
-	digestText := formatMemoryDigest(retrieved, defaultDigestLineMax)
-
-	// Best-effort usage logging for notes that made it into the prompt.
-	if b.DB != nil && len(retrieved) > 0 {
-		ids := make([]int64, 0, len(retrieved))
-		for _, r := range retrieved {
-			if r.ID > 0 {
-				ids = append(ids, r.ID)
+			retrieved, err = b.Mem.Retrieve(ctx, scopeKey, opts.UserMessage, vec, b.VectorK, b.FTSK, b.TopK)
+			if err != nil {
+				log.Printf("memory retrieve failed for scope %q: %v", scopeKey, err)
+				retrieved = nil
 			}
 		}
+	}
+	maxEach := b.BootstrapMaxChars
+	if maxEach <= 0 {
+		maxEach = defaultBootstrapMaxChars
+	}
+	memText, retrievedIDs := formatRetrievedBounded(retrieved, maxEach)
+
+	// Build Memory Digest from top active durable-kind notes.
+	digestText, digestIDs := formatMemoryDigestBounded(retrieved, defaultDigestLineMax, maxEach)
+
+	// Best-effort usage logging for notes that made it into the prompt.
+	if b.DB != nil {
+		ids := append([]int64(nil), retrievedIDs...)
+		ids = append(ids, digestIDs...)
+		ids = uniqueInt64(ids)
 		if len(ids) > 0 {
 			_ = b.DB.TouchMemoryNotes(ctx, scopeKey, ids, db.NowMS())
 		}
@@ -499,14 +505,31 @@ func formatPinned(m map[string]string) string {
 }
 
 func formatRetrieved(ms []memory.Retrieved) string {
+	text, _ := formatRetrievedBounded(ms, 0)
+	return text
+}
+
+func formatRetrievedBounded(ms []memory.Retrieved, maxChars int) (string, []int64) {
 	if len(ms) == 0 {
-		return "(none)"
+		return "(none)", nil
 	}
 	var b strings.Builder
+	ids := make([]int64, 0, len(ms))
 	for i, m := range ms {
-		b.WriteString(fmt.Sprintf("%d) [%s] %s\n", i+1, m.Source, oneLine(m.Text, defaultRetrievedOneLineMax)))
+		line := fmt.Sprintf("%d) [%s] %s\n", i+1, m.Source, oneLine(m.Text, defaultRetrievedOneLineMax))
+		if maxChars > 0 && b.Len()+len(line) > maxChars {
+			break
+		}
+		b.WriteString(line)
+		if m.ID > 0 {
+			ids = append(ids, m.ID)
+		}
 	}
-	return strings.TrimSpace(b.String())
+	out := strings.TrimSpace(b.String())
+	if out == "" {
+		return "(none)", nil
+	}
+	return out, ids
 }
 
 // digestKinds holds the note kinds that qualify for the Memory Digest section.
@@ -520,10 +543,16 @@ var digestKinds = map[string]struct{}{
 // formatMemoryDigest builds a compact digest from top active durable-kind
 // notes in the retrieved set. It is bounded to maxLines lines.
 func formatMemoryDigest(ms []memory.Retrieved, maxLines int) string {
+	text, _ := formatMemoryDigestBounded(ms, maxLines, 0)
+	return text
+}
+
+func formatMemoryDigestBounded(ms []memory.Retrieved, maxLines int, maxChars int) (string, []int64) {
 	if maxLines <= 0 {
 		maxLines = defaultDigestLineMax
 	}
 	var b strings.Builder
+	ids := make([]int64, 0, maxLines)
 	count := 0
 	for _, m := range ms {
 		if _, ok := digestKinds[m.Kind]; !ok {
@@ -534,13 +563,39 @@ func formatMemoryDigest(ms []memory.Retrieved, maxLines int) string {
 		if m.Status != "" && m.Status != db.MemoryStatusActive {
 			continue
 		}
-		b.WriteString(fmt.Sprintf("- [%s] %s\n", m.Kind, oneLine(m.Text, defaultRetrievedOneLineMax)))
+		line := fmt.Sprintf("- [%s] %s\n", m.Kind, oneLine(m.Text, defaultRetrievedOneLineMax))
+		if maxChars > 0 && b.Len()+len(line) > maxChars {
+			break
+		}
+		b.WriteString(line)
+		if m.ID > 0 {
+			ids = append(ids, m.ID)
+		}
 		count++
 		if count >= maxLines {
 			break
 		}
 	}
-	return strings.TrimSpace(b.String())
+	return strings.TrimSpace(b.String()), ids
+}
+
+func uniqueInt64(ids []int64) []int64 {
+	if len(ids) == 0 {
+		return nil
+	}
+	seen := make(map[int64]struct{}, len(ids))
+	out := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
 }
 
 func oneLine(s string, max int) string {

@@ -54,8 +54,8 @@ type ConsolidationMessage struct {
 
 // TypedNoteInput holds the data for a single typed memory note write.
 type TypedNoteInput struct {
-	Text       string
-	Embedding  []byte
+	Text        string
+	Embedding   []byte
 	SourceMsgID sql.NullInt64
 	Tags        string
 	Kind        string
@@ -64,14 +64,14 @@ type TypedNoteInput struct {
 }
 
 type ConsolidationWrite struct {
-	SessionKey    string
-	ScopeKey      string
+	SessionKey string
+	ScopeKey   string
 	// Primary summary note (optional).
-	NoteText      string
-	Embedding     []byte
-	SourceMsgID   sql.NullInt64
-	NoteTags      string
-	NoteKind      string // defaults to MemoryKindSummary when NoteText is set
+	NoteText    string
+	Embedding   []byte
+	SourceMsgID sql.NullInt64
+	NoteTags    string
+	NoteKind    string // defaults to MemoryKindSummary when NoteText is set
 	// Additional typed notes (facts, preferences, goals, procedures).
 	ExtraNotes    []TypedNoteInput
 	CanonicalKey  string
@@ -237,10 +237,8 @@ func (d *DB) InsertMemoryNoteTyped(ctx context.Context, sessionKey string, input
 	} else if importance > maxImportance {
 		importance = maxImportance
 	}
-	if len(input.Embedding) >= 4 && len(input.Embedding)%4 == 0 {
-		if err := d.EnsureMemoryVecIndexWithDim(ctx, len(input.Embedding)/4); err != nil {
-			return 0, err
-		}
+	if err := d.validateMemoryEmbeddingDims(ctx, input.Embedding); err != nil {
+		return 0, err
 	}
 	emb := input.Embedding
 	if emb == nil {
@@ -255,8 +253,28 @@ func (d *DB) InsertMemoryNoteTyped(ctx context.Context, sessionKey string, input
 		return 0, err
 	}
 	id, _ := res.LastInsertId()
-	_ = d.upsertMemoryVec(ctx, id, sessionKey, input.Text, emb)
+	if err := d.upsertMemoryVec(ctx, id, sessionKey, input.Text, emb); err != nil {
+		return id, err
+	}
 	return id, nil
+}
+
+func (d *DB) validateMemoryEmbeddingDims(ctx context.Context, embedding []byte) error {
+	if len(embedding) < 4 || len(embedding)%4 != 0 {
+		return nil
+	}
+	want := len(embedding) / 4
+	dims, err := d.MemoryVectorDims(ctx)
+	if err != nil {
+		return err
+	}
+	if dims == 0 {
+		return d.EnsureMemoryVecIndexWithDim(ctx, want)
+	}
+	if dims != want {
+		return fmt.Errorf("memory vector dims mismatch: have %d want %d", dims, want)
+	}
+	return nil
 }
 
 func (d *DB) upsertMemoryVec(ctx context.Context, noteID int64, sessionKey, text string, embedding []byte) error {
@@ -280,7 +298,7 @@ func (d *DB) upsertMemoryVec(ctx context.Context, noteID int64, sessionKey, text
 		}
 	}
 	if dims != len(embedding)/4 {
-		return nil
+		return fmt.Errorf("memory vector dims mismatch: have %d want %d", dims, len(embedding)/4)
 	}
 	_, err = d.VecSQL.ExecContext(ctx,
 		`INSERT OR REPLACE INTO memory_vec(note_id, session_key, embedding, text) VALUES(?,?,?,?)`,
@@ -580,6 +598,14 @@ func (d *DB) SetLastConsolidatedID(ctx context.Context, sessionKey string, id in
 }
 
 func (d *DB) WriteConsolidation(ctx context.Context, w ConsolidationWrite) (int64, error) {
+	if err := d.validateMemoryEmbeddingDims(ctx, w.Embedding); err != nil {
+		return 0, err
+	}
+	for _, en := range w.ExtraNotes {
+		if err := d.validateMemoryEmbeddingDims(ctx, en.Embedding); err != nil {
+			return 0, err
+		}
+	}
 	tx, err := d.SQL.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err

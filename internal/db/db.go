@@ -460,7 +460,7 @@ func (d *DB) initMemoryVecIndex(ctx context.Context, dims int) error {
 		return err
 	}
 	if existing > 0 && existing != dims {
-		return nil
+		return fmt.Errorf("memory vector dims mismatch: have %d want %d", existing, dims)
 	}
 	if _, err := tx.ExecContext(ctx, `DROP TABLE IF EXISTS memory_vec`); err != nil {
 		return err
@@ -539,7 +539,13 @@ func (d *DB) ensureMemoryNotesMetaColumns(ctx context.Context) error {
 
 	// Backfill: rows tagged with "consolidation" are rolling summaries.
 	_, err := d.SQL.ExecContext(ctx,
-		`UPDATE memory_notes SET kind='summary' WHERE kind='note' AND (tags='consolidation' OR tags LIKE '%consolidation%')`)
+		`UPDATE memory_notes SET kind='summary'
+		 WHERE kind='note' AND (
+		 	tags='consolidation' OR
+		 	tags LIKE 'consolidation,%' OR
+		 	tags LIKE '%,consolidation' OR
+		 	tags LIKE '%,consolidation,%'
+		 )`)
 	return err
 }
 

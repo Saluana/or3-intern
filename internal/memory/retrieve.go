@@ -45,7 +45,10 @@ func (r *Retriever) Retrieve(ctx context.Context, sessionKey, query string, quer
 	if err != nil {
 		return nil, err
 	}
-	fts, _ := r.DB.SearchFTS(ctx, sessionKey, normalizeFTSQuery(query), ftsK)
+	fts, err := searchFTSWithFallback(ctx, r.DB, sessionKey, query, ftsK)
+	if err != nil {
+		return nil, err
+	}
 
 	type agg struct {
 		id         int64
@@ -153,6 +156,20 @@ func (r *Retriever) Retrieve(ctx context.Context, sessionKey, query string, quer
 		return raw[i].Score > raw[j].Score
 	})
 	return diversifyRetrieved(raw, topK), nil
+}
+
+func searchFTSWithFallback(ctx context.Context, d *db.DB, sessionKey, query string, k int) ([]db.FTSCandidate, error) {
+	query = strings.TrimSpace(query)
+	if d == nil || query == "" || k <= 0 {
+		return nil, nil
+	}
+	ftsQuery := normalizeFTSQuery(query)
+	results, err := d.SearchFTS(ctx, sessionKey, ftsQuery, k)
+	if err == nil {
+		return results, nil
+	}
+	quoted := `"` + strings.ReplaceAll(query, `"`, `""`) + `"`
+	return d.SearchFTS(ctx, sessionKey, quoted, k)
 }
 
 // metadataScoreAdjust returns a small additive score correction (bounded to
@@ -335,7 +352,7 @@ func normalizeFTSQuery(q string) string {
 	// simple: split on spaces, quote terms that contain punctuation
 	parts := strings.Fields(q)
 	for i, p := range parts {
-		if strings.ContainsAny(p, `":*`) {
+		if strings.ContainsAny(p, `":*()-`) {
 			parts[i] = `"` + strings.ReplaceAll(p, `"`, `""`) + `"`
 		}
 	}

@@ -1512,440 +1512,480 @@ func BenchmarkInsertHistory(b *testing.B) {
 // ---- Memory metadata columns and helpers ----
 
 func TestInsertMemoryNoteTyped_DefaultsAndFields(t *testing.T) {
-d := openTestDB(t)
-ctx := context.Background()
+	d := openTestDB(t)
+	ctx := context.Background()
 
-id, err := d.InsertMemoryNoteTyped(ctx, "session1", TypedNoteInput{
-Text:       "user prefers dark mode",
-Embedding:  make([]byte, 4*2),
-Kind:       MemoryKindPreference,
-Status:     MemoryStatusActive,
-Importance: 0.8,
-})
-if err != nil {
-t.Fatalf("InsertMemoryNoteTyped: %v", err)
-}
-if id <= 0 {
-t.Fatalf("expected positive id, got %d", id)
-}
+	id, err := d.InsertMemoryNoteTyped(ctx, "session1", TypedNoteInput{
+		Text:       "user prefers dark mode",
+		Embedding:  make([]byte, 4*2),
+		Kind:       MemoryKindPreference,
+		Status:     MemoryStatusActive,
+		Importance: 0.8,
+	})
+	if err != nil {
+		t.Fatalf("InsertMemoryNoteTyped: %v", err)
+	}
+	if id <= 0 {
+		t.Fatalf("expected positive id, got %d", id)
+	}
 
-// Verify via FTS (which now returns kind/status).
-results, err := d.SearchFTS(ctx, "session1", "dark mode", 5)
-if err != nil {
-t.Fatalf("SearchFTS: %v", err)
-}
-if len(results) == 0 {
-t.Fatal("expected FTS result after InsertMemoryNoteTyped")
-}
-r := results[0]
-if r.Kind != MemoryKindPreference {
-t.Errorf("expected kind=%q, got %q", MemoryKindPreference, r.Kind)
-}
-if r.Status != MemoryStatusActive {
-t.Errorf("expected status=%q, got %q", MemoryStatusActive, r.Status)
-}
-if r.Importance != 0.8 {
-t.Errorf("expected importance=0.8, got %v", r.Importance)
-}
+	// Verify via FTS (which now returns kind/status).
+	results, err := d.SearchFTS(ctx, "session1", "dark mode", 5)
+	if err != nil {
+		t.Fatalf("SearchFTS: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected FTS result after InsertMemoryNoteTyped")
+	}
+	r := results[0]
+	if r.Kind != MemoryKindPreference {
+		t.Errorf("expected kind=%q, got %q", MemoryKindPreference, r.Kind)
+	}
+	if r.Status != MemoryStatusActive {
+		t.Errorf("expected status=%q, got %q", MemoryStatusActive, r.Status)
+	}
+	if r.Importance != 0.8 {
+		t.Errorf("expected importance=0.8, got %v", r.Importance)
+	}
 }
 
 func TestInsertMemoryNoteTyped_ImportanceClamped(t *testing.T) {
-d := openTestDB(t)
-ctx := context.Background()
+	d := openTestDB(t)
+	ctx := context.Background()
 
-// Importance values outside [0,1] should be clamped.
-id, err := d.InsertMemoryNoteTyped(ctx, "sess", TypedNoteInput{
-Text:       "clamped note",
-Importance: 99.0,
-})
-if err != nil {
-t.Fatalf("InsertMemoryNoteTyped: %v", err)
-}
-if id <= 0 {
-t.Fatalf("expected positive id, got %d", id)
-}
+	// Importance values outside [0,1] should be clamped.
+	id, err := d.InsertMemoryNoteTyped(ctx, "sess", TypedNoteInput{
+		Text:       "clamped note",
+		Importance: 99.0,
+	})
+	if err != nil {
+		t.Fatalf("InsertMemoryNoteTyped: %v", err)
+	}
+	if id <= 0 {
+		t.Fatalf("expected positive id, got %d", id)
+	}
 
-rows, err := d.SearchFTS(ctx, "sess", "clamped note", 5)
-if err != nil {
-t.Fatalf("SearchFTS: %v", err)
-}
-if len(rows) == 0 {
-t.Fatal("expected FTS result")
-}
-if rows[0].Importance > maxImportance {
-t.Errorf("expected importance clamped to %v, got %v", maxImportance, rows[0].Importance)
-}
+	rows, err := d.SearchFTS(ctx, "sess", "clamped note", 5)
+	if err != nil {
+		t.Fatalf("SearchFTS: %v", err)
+	}
+	if len(rows) == 0 {
+		t.Fatal("expected FTS result")
+	}
+	if rows[0].Importance > maxImportance {
+		t.Errorf("expected importance clamped to %v, got %v", maxImportance, rows[0].Importance)
+	}
 }
 
 func TestInsertMemoryNote_BackwardCompat_DefaultKindAndStatus(t *testing.T) {
-d := openTestDB(t)
-ctx := context.Background()
+	d := openTestDB(t)
+	ctx := context.Background()
 
-id, err := d.InsertMemoryNote(ctx, "session1", "legacy compat note", make([]byte, 4), sql.NullInt64{}, "")
-if err != nil {
-t.Fatalf("InsertMemoryNote: %v", err)
-}
-if id <= 0 {
-t.Fatalf("expected positive id, got %d", id)
-}
+	id, err := d.InsertMemoryNote(ctx, "session1", "legacy compat note", make([]byte, 4), sql.NullInt64{}, "")
+	if err != nil {
+		t.Fatalf("InsertMemoryNote: %v", err)
+	}
+	if id <= 0 {
+		t.Fatalf("expected positive id, got %d", id)
+	}
 
-results, err := d.SearchFTS(ctx, "session1", "legacy compat", 5)
-if err != nil {
-t.Fatalf("SearchFTS: %v", err)
-}
-if len(results) == 0 {
-t.Fatal("expected FTS result")
-}
-if results[0].Kind != MemoryKindNote {
-t.Errorf("expected default kind=%q, got %q", MemoryKindNote, results[0].Kind)
-}
-if results[0].Status != MemoryStatusActive {
-t.Errorf("expected default status=%q, got %q", MemoryStatusActive, results[0].Status)
-}
+	results, err := d.SearchFTS(ctx, "session1", "legacy compat", 5)
+	if err != nil {
+		t.Fatalf("SearchFTS: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected FTS result")
+	}
+	if results[0].Kind != MemoryKindNote {
+		t.Errorf("expected default kind=%q, got %q", MemoryKindNote, results[0].Kind)
+	}
+	if results[0].Status != MemoryStatusActive {
+		t.Errorf("expected default status=%q, got %q", MemoryStatusActive, results[0].Status)
+	}
 }
 
 func TestTouchMemoryNotes_IncrementsUseCount(t *testing.T) {
-d := openTestDB(t)
-ctx := context.Background()
+	d := openTestDB(t)
+	ctx := context.Background()
 
-id, err := d.InsertMemoryNoteTyped(ctx, "sess", TypedNoteInput{
-Text: "important fact",
-Kind: MemoryKindFact,
-})
-if err != nil {
-t.Fatalf("InsertMemoryNoteTyped: %v", err)
-}
+	id, err := d.InsertMemoryNoteTyped(ctx, "sess", TypedNoteInput{
+		Text: "important fact",
+		Kind: MemoryKindFact,
+	})
+	if err != nil {
+		t.Fatalf("InsertMemoryNoteTyped: %v", err)
+	}
 
-now := NowMS()
-if err := d.TouchMemoryNotes(ctx, "sess", []int64{id}, now); err != nil {
-t.Fatalf("TouchMemoryNotes: %v", err)
-}
-if err := d.TouchMemoryNotes(ctx, "sess", []int64{id}, now+1); err != nil {
-t.Fatalf("TouchMemoryNotes second: %v", err)
-}
+	now := NowMS()
+	if err := d.TouchMemoryNotes(ctx, "sess", []int64{id}, now); err != nil {
+		t.Fatalf("TouchMemoryNotes: %v", err)
+	}
+	if err := d.TouchMemoryNotes(ctx, "sess", []int64{id}, now+1); err != nil {
+		t.Fatalf("TouchMemoryNotes second: %v", err)
+	}
 
-// Verify via FTS: use_count should be 2.
-results, err := d.SearchFTS(ctx, "sess", "important fact", 5)
-if err != nil {
-t.Fatalf("SearchFTS: %v", err)
-}
-if len(results) == 0 {
-t.Fatal("expected FTS result")
-}
-if results[0].UseCount != 2 {
-t.Errorf("expected use_count=2 after two touches, got %d", results[0].UseCount)
-}
-if results[0].LastUsedAt != now+1 {
-t.Errorf("expected last_used_at=%d, got %d", now+1, results[0].LastUsedAt)
-}
+	// Verify via FTS: use_count should be 2.
+	results, err := d.SearchFTS(ctx, "sess", "important fact", 5)
+	if err != nil {
+		t.Fatalf("SearchFTS: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected FTS result")
+	}
+	if results[0].UseCount != 2 {
+		t.Errorf("expected use_count=2 after two touches, got %d", results[0].UseCount)
+	}
+	if results[0].LastUsedAt != now+1 {
+		t.Errorf("expected last_used_at=%d, got %d", now+1, results[0].LastUsedAt)
+	}
 }
 
 func TestTouchMemoryNotes_RespectsScope(t *testing.T) {
-d := openTestDB(t)
-ctx := context.Background()
+	d := openTestDB(t)
+	ctx := context.Background()
 
-// Insert note in session-a.
-id, err := d.InsertMemoryNoteTyped(ctx, "session-a", TypedNoteInput{
-Text: "private note",
-Kind: MemoryKindFact,
-})
-if err != nil {
-t.Fatalf("InsertMemoryNoteTyped: %v", err)
-}
+	// Insert note in session-a.
+	id, err := d.InsertMemoryNoteTyped(ctx, "session-a", TypedNoteInput{
+		Text: "private note",
+		Kind: MemoryKindFact,
+	})
+	if err != nil {
+		t.Fatalf("InsertMemoryNoteTyped: %v", err)
+	}
 
-// Touch with session-b scope: should NOT increment session-a note.
-if err := d.TouchMemoryNotes(ctx, "session-b", []int64{id}, NowMS()); err != nil {
-t.Fatalf("TouchMemoryNotes: %v", err)
-}
+	// Touch with session-b scope: should NOT increment session-a note.
+	if err := d.TouchMemoryNotes(ctx, "session-b", []int64{id}, NowMS()); err != nil {
+		t.Fatalf("TouchMemoryNotes: %v", err)
+	}
 
-results, err := d.SearchFTS(ctx, "session-a", "private note", 5)
-if err != nil {
-t.Fatalf("SearchFTS: %v", err)
-}
-if len(results) == 0 {
-t.Fatal("expected FTS result")
-}
-if results[0].UseCount != 0 {
-t.Errorf("expected use_count=0 (cross-scope touch should be blocked), got %d", results[0].UseCount)
-}
+	results, err := d.SearchFTS(ctx, "session-a", "private note", 5)
+	if err != nil {
+		t.Fatalf("SearchFTS: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected FTS result")
+	}
+	if results[0].UseCount != 0 {
+		t.Errorf("expected use_count=0 (cross-scope touch should be blocked), got %d", results[0].UseCount)
+	}
 }
 
 func TestTouchMemoryNotes_EmptyIDsIsNoOp(t *testing.T) {
-d := openTestDB(t)
-ctx := context.Background()
-if err := d.TouchMemoryNotes(ctx, "sess", nil, NowMS()); err != nil {
-t.Fatalf("TouchMemoryNotes with empty ids: %v", err)
-}
+	d := openTestDB(t)
+	ctx := context.Background()
+	if err := d.TouchMemoryNotes(ctx, "sess", nil, NowMS()); err != nil {
+		t.Fatalf("TouchMemoryNotes with empty ids: %v", err)
+	}
 }
 
 func TestCleanupStaleMemoryNotes_MarksOldNeverUsedSummaries(t *testing.T) {
-d := openTestDB(t)
-ctx := context.Background()
+	d := openTestDB(t)
+	ctx := context.Background()
 
-// Insert an old, never-used summary note by directly inserting with a
-// created_at that is older than the stale age threshold.
-oldTime := NowMS() - staleMemoryAgeMS - 1000
-_, err := d.SQL.ExecContext(ctx,
-`INSERT INTO memory_notes(session_key, text, embedding, source_message_id, tags, created_at, kind, status, importance)
+	// Insert an old, never-used summary note by directly inserting with a
+	// created_at that is older than the stale age threshold.
+	oldTime := NowMS() - staleMemoryAgeMS - 1000
+	_, err := d.SQL.ExecContext(ctx,
+		`INSERT INTO memory_notes(session_key, text, embedding, source_message_id, tags, created_at, kind, status, importance)
  VALUES(?,?,?,?,?,?,?,?,?)`,
-"sess", "old summary", make([]byte, 4), nil, "consolidation", oldTime,
-MemoryKindSummary, MemoryStatusActive, 0.0)
-if err != nil {
-t.Fatalf("insert old summary: %v", err)
-}
+		"sess", "old summary", make([]byte, 4), nil, "consolidation", oldTime,
+		MemoryKindSummary, MemoryStatusActive, 0.0)
+	if err != nil {
+		t.Fatalf("insert old summary: %v", err)
+	}
 
-// Insert a recent never-used summary note that should NOT be touched.
-if _, err := d.InsertMemoryNoteTyped(ctx, "sess", TypedNoteInput{
-Text: "recent summary",
-Kind: MemoryKindSummary,
-}); err != nil {
-t.Fatalf("InsertMemoryNoteTyped recent: %v", err)
-}
+	// Insert a recent never-used summary note that should NOT be touched.
+	if _, err := d.InsertMemoryNoteTyped(ctx, "sess", TypedNoteInput{
+		Text: "recent summary",
+		Kind: MemoryKindSummary,
+	}); err != nil {
+		t.Fatalf("InsertMemoryNoteTyped recent: %v", err)
+	}
 
-n, err := d.CleanupStaleMemoryNotes(ctx, "sess", NowMS(), 10)
-if err != nil {
-t.Fatalf("CleanupStaleMemoryNotes: %v", err)
-}
-if n != 1 {
-t.Errorf("expected 1 row cleaned up, got %d", n)
-}
+	n, err := d.CleanupStaleMemoryNotes(ctx, "sess", NowMS(), 10)
+	if err != nil {
+		t.Fatalf("CleanupStaleMemoryNotes: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("expected 1 row cleaned up, got %d", n)
+	}
 
-// The old row should now be stale; recent row should still be active.
-results, err := d.SearchFTS(ctx, "sess", "summary", 10)
-if err != nil {
-t.Fatalf("SearchFTS after cleanup: %v", err)
-}
-for _, r := range results {
-if r.Text == "old summary" && r.Status != MemoryStatusStale {
-t.Errorf("expected old summary to be stale, got status=%q", r.Status)
-}
-if r.Text == "recent summary" && r.Status != MemoryStatusActive {
-t.Errorf("expected recent summary to remain active, got status=%q", r.Status)
-}
-}
+	// The old row should now be stale; recent row should still be active.
+	results, err := d.SearchFTS(ctx, "sess", "summary", 10)
+	if err != nil {
+		t.Fatalf("SearchFTS after cleanup: %v", err)
+	}
+	for _, r := range results {
+		if r.Text == "old summary" && r.Status != MemoryStatusStale {
+			t.Errorf("expected old summary to be stale, got status=%q", r.Status)
+		}
+		if r.Text == "recent summary" && r.Status != MemoryStatusActive {
+			t.Errorf("expected recent summary to remain active, got status=%q", r.Status)
+		}
+	}
 }
 
 func TestCleanupStaleMemoryNotes_DoesNotTouchUsedNotes(t *testing.T) {
-d := openTestDB(t)
-ctx := context.Background()
+	d := openTestDB(t)
+	ctx := context.Background()
 
-// Insert an old summary and mark it as used once.
-oldTime := NowMS() - staleMemoryAgeMS - 1000
-res, err := d.SQL.ExecContext(ctx,
-`INSERT INTO memory_notes(session_key, text, embedding, source_message_id, tags, created_at, kind, status, importance, use_count)
+	// Insert an old summary and mark it as used once.
+	oldTime := NowMS() - staleMemoryAgeMS - 1000
+	res, err := d.SQL.ExecContext(ctx,
+		`INSERT INTO memory_notes(session_key, text, embedding, source_message_id, tags, created_at, kind, status, importance, use_count)
  VALUES(?,?,?,?,?,?,?,?,?,?)`,
-"sess", "used summary", make([]byte, 4), nil, "consolidation", oldTime,
-MemoryKindSummary, MemoryStatusActive, 0.0, 1)
-if err != nil {
-t.Fatalf("insert used summary: %v", err)
-}
-_, _ = res.LastInsertId()
+		"sess", "used summary", make([]byte, 4), nil, "consolidation", oldTime,
+		MemoryKindSummary, MemoryStatusActive, 0.0, 1)
+	if err != nil {
+		t.Fatalf("insert used summary: %v", err)
+	}
+	_, _ = res.LastInsertId()
 
-n, err := d.CleanupStaleMemoryNotes(ctx, "sess", NowMS(), 10)
-if err != nil {
-t.Fatalf("CleanupStaleMemoryNotes: %v", err)
-}
-if n != 0 {
-t.Errorf("expected 0 rows cleaned (used note should be kept), got %d", n)
-}
+	n, err := d.CleanupStaleMemoryNotes(ctx, "sess", NowMS(), 10)
+	if err != nil {
+		t.Fatalf("CleanupStaleMemoryNotes: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("expected 0 rows cleaned (used note should be kept), got %d", n)
+	}
 }
 
 func TestCleanupStaleMemoryNotes_DoesNotTouchFacts(t *testing.T) {
-d := openTestDB(t)
-ctx := context.Background()
+	d := openTestDB(t)
+	ctx := context.Background()
 
-// A fact node old and never used should not be marked stale.
-oldTime := NowMS() - staleMemoryAgeMS - 1000
-_, err := d.SQL.ExecContext(ctx,
-`INSERT INTO memory_notes(session_key, text, embedding, source_message_id, tags, created_at, kind, status, importance)
+	// A fact node old and never used should not be marked stale.
+	oldTime := NowMS() - staleMemoryAgeMS - 1000
+	_, err := d.SQL.ExecContext(ctx,
+		`INSERT INTO memory_notes(session_key, text, embedding, source_message_id, tags, created_at, kind, status, importance)
  VALUES(?,?,?,?,?,?,?,?,?)`,
-"sess", "old fact", make([]byte, 4), nil, "", oldTime,
-MemoryKindFact, MemoryStatusActive, 0.0)
-if err != nil {
-t.Fatalf("insert old fact: %v", err)
-}
+		"sess", "old fact", make([]byte, 4), nil, "", oldTime,
+		MemoryKindFact, MemoryStatusActive, 0.0)
+	if err != nil {
+		t.Fatalf("insert old fact: %v", err)
+	}
 
-n, err := d.CleanupStaleMemoryNotes(ctx, "sess", NowMS(), 10)
-if err != nil {
-t.Fatalf("CleanupStaleMemoryNotes: %v", err)
-}
-if n != 0 {
-t.Errorf("expected 0 rows (facts should not be cleaned), got %d", n)
-}
+	n, err := d.CleanupStaleMemoryNotes(ctx, "sess", NowMS(), 10)
+	if err != nil {
+		t.Fatalf("CleanupStaleMemoryNotes: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("expected 0 rows (facts should not be cleaned), got %d", n)
+	}
 }
 
 func TestCleanupStaleMemoryNotes_BatchLimit(t *testing.T) {
-d := openTestDB(t)
-ctx := context.Background()
+	d := openTestDB(t)
+	ctx := context.Background()
 
-oldTime := NowMS() - staleMemoryAgeMS - 1000
-for i := 0; i < 5; i++ {
-_, err := d.SQL.ExecContext(ctx,
-`INSERT INTO memory_notes(session_key, text, embedding, source_message_id, tags, created_at, kind, status, importance)
+	oldTime := NowMS() - staleMemoryAgeMS - 1000
+	for i := 0; i < 5; i++ {
+		_, err := d.SQL.ExecContext(ctx,
+			`INSERT INTO memory_notes(session_key, text, embedding, source_message_id, tags, created_at, kind, status, importance)
  VALUES(?,?,?,?,?,?,?,?,?)`,
-"sess", fmt.Sprintf("old summary %d", i), make([]byte, 4), nil, "consolidation", oldTime,
-MemoryKindSummary, MemoryStatusActive, 0.0)
-if err != nil {
-t.Fatalf("insert old summary %d: %v", i, err)
-}
-}
+			"sess", fmt.Sprintf("old summary %d", i), make([]byte, 4), nil, "consolidation", oldTime,
+			MemoryKindSummary, MemoryStatusActive, 0.0)
+		if err != nil {
+			t.Fatalf("insert old summary %d: %v", i, err)
+		}
+	}
 
-n, err := d.CleanupStaleMemoryNotes(ctx, "sess", NowMS(), 3)
-if err != nil {
-t.Fatalf("CleanupStaleMemoryNotes: %v", err)
-}
-if n != 3 {
-t.Errorf("expected batch limit of 3 stale updates, got %d", n)
-}
+	n, err := d.CleanupStaleMemoryNotes(ctx, "sess", NowMS(), 3)
+	if err != nil {
+		t.Fatalf("CleanupStaleMemoryNotes: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("expected batch limit of 3 stale updates, got %d", n)
+	}
 }
 
 func TestMemoryNotesMetaMigration_ExistingDB(t *testing.T) {
-// Verify that Open() on a pre-existing schema without metadata columns
-// adds them correctly and the DB is usable after migration.
-dir := t.TempDir()
-path := filepath.Join(dir, "migrate_meta.db")
+	// Verify that Open() on a pre-existing schema without metadata columns
+	// adds them correctly and the DB is usable after migration.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "migrate_meta.db")
 
-rawDB, err := sql.Open("sqlite", path)
-if err != nil {
-t.Fatalf("sql.Open: %v", err)
-}
+	rawDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
 
-// Create a minimal legacy schema without kind/status/importance columns.
-legacyStmts := []string{
-`CREATE TABLE sessions(key TEXT PRIMARY KEY, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, metadata_json TEXT NOT NULL DEFAULT '{}', last_consolidated_msg_id INTEGER NOT NULL DEFAULT 0);`,
-`CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, session_key TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, payload_json TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL);`,
-`CREATE TABLE memory_pinned(key TEXT PRIMARY KEY, content TEXT NOT NULL, updated_at INTEGER NOT NULL);`,
-`CREATE TABLE memory_notes(id INTEGER PRIMARY KEY AUTOINCREMENT, session_key TEXT NOT NULL DEFAULT '__global__', text TEXT NOT NULL, embedding BLOB NOT NULL, source_message_id INTEGER, tags TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL);`,
-`CREATE VIRTUAL TABLE memory_fts USING fts5(text, content='memory_notes', content_rowid='id');`,
-`CREATE TRIGGER memory_notes_ai AFTER INSERT ON memory_notes BEGIN INSERT INTO memory_fts(rowid, text) VALUES (new.id, new.text); END;`,
-}
-for _, stmt := range legacyStmts {
-if _, err := rawDB.Exec(stmt); err != nil {
-t.Fatalf("create legacy schema: %v", err)
-}
-}
-// Seed a note tagged consolidation (should be backfilled to kind='summary').
-if _, err := rawDB.Exec(`INSERT INTO memory_notes(session_key, text, embedding, tags, created_at) VALUES('sess','legacy summary',x'00',  'consolidation',1)`); err != nil {
-t.Fatalf("seed legacy note: %v", err)
-}
-_ = rawDB.Close()
+	// Create a minimal legacy schema without kind/status/importance columns.
+	legacyStmts := []string{
+		`CREATE TABLE sessions(key TEXT PRIMARY KEY, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, metadata_json TEXT NOT NULL DEFAULT '{}', last_consolidated_msg_id INTEGER NOT NULL DEFAULT 0);`,
+		`CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, session_key TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, payload_json TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL);`,
+		`CREATE TABLE memory_pinned(key TEXT PRIMARY KEY, content TEXT NOT NULL, updated_at INTEGER NOT NULL);`,
+		`CREATE TABLE memory_notes(id INTEGER PRIMARY KEY AUTOINCREMENT, session_key TEXT NOT NULL DEFAULT '__global__', text TEXT NOT NULL, embedding BLOB NOT NULL, source_message_id INTEGER, tags TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL);`,
+		`CREATE VIRTUAL TABLE memory_fts USING fts5(text, content='memory_notes', content_rowid='id');`,
+		`CREATE TRIGGER memory_notes_ai AFTER INSERT ON memory_notes BEGIN INSERT INTO memory_fts(rowid, text) VALUES (new.id, new.text); END;`,
+	}
+	for _, stmt := range legacyStmts {
+		if _, err := rawDB.Exec(stmt); err != nil {
+			t.Fatalf("create legacy schema: %v", err)
+		}
+	}
+	// Seed a note tagged consolidation (should be backfilled to kind='summary').
+	if _, err := rawDB.Exec(`INSERT INTO memory_notes(session_key, text, embedding, tags, created_at) VALUES('sess','legacy summary',x'00','consolidation',1)`); err != nil {
+		t.Fatalf("seed legacy note: %v", err)
+	}
+	_ = rawDB.Close()
 
-// Open via the production code path to trigger migration.
-d, err := Open(path)
-if err != nil {
-t.Fatalf("Open after legacy schema: %v", err)
-}
-defer d.Close()
-ctx := context.Background()
+	// Open via the production code path to trigger migration.
+	d, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open after legacy schema: %v", err)
+	}
+	defer d.Close()
+	ctx := context.Background()
 
-// The new columns should exist and be queryable.
-results, err := d.SearchFTS(ctx, "sess", "legacy summary", 5)
-if err != nil {
-t.Fatalf("SearchFTS after migration: %v", err)
-}
-if len(results) == 0 {
-t.Fatal("expected result after migration")
-}
-r := results[0]
-// Backfill should have set kind=summary for the consolidation-tagged note.
-if r.Kind != MemoryKindSummary {
-t.Errorf("expected backfilled kind=%q, got %q", MemoryKindSummary, r.Kind)
-}
-if r.Status != MemoryStatusActive {
-t.Errorf("expected default status=%q after migration, got %q", MemoryStatusActive, r.Status)
-}
-// UseCount and Importance default to 0.
-if r.UseCount != 0 || r.Importance != 0 {
-t.Errorf("expected zero UseCount/Importance, got %d/%v", r.UseCount, r.Importance)
-}
+	// The new columns should exist and be queryable.
+	results, err := d.SearchFTS(ctx, "sess", "legacy summary", 5)
+	if err != nil {
+		t.Fatalf("SearchFTS after migration: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected result after migration")
+	}
+	r := results[0]
+	// Backfill should have set kind=summary for the consolidation-tagged note.
+	if r.Kind != MemoryKindSummary {
+		t.Errorf("expected backfilled kind=%q, got %q", MemoryKindSummary, r.Kind)
+	}
+	if r.Status != MemoryStatusActive {
+		t.Errorf("expected default status=%q after migration, got %q", MemoryStatusActive, r.Status)
+	}
+	// UseCount and Importance default to 0.
+	if r.UseCount != 0 || r.Importance != 0 {
+		t.Errorf("expected zero UseCount/Importance, got %d/%v", r.UseCount, r.Importance)
+	}
 
-// InsertMemoryNoteTyped should work after migration.
-if _, err := d.InsertMemoryNoteTyped(ctx, "sess", TypedNoteInput{
-Text: "post-migration note",
-Kind: MemoryKindFact,
-}); err != nil {
-t.Fatalf("InsertMemoryNoteTyped post-migration: %v", err)
-}
+	// InsertMemoryNoteTyped should work after migration.
+	if _, err := d.InsertMemoryNoteTyped(ctx, "sess", TypedNoteInput{
+		Text: "post-migration note",
+		Kind: MemoryKindFact,
+	}); err != nil {
+		t.Fatalf("InsertMemoryNoteTyped post-migration: %v", err)
+	}
 }
 
 func TestWriteConsolidation_WithExtraNotes(t *testing.T) {
-d := openTestDB(t)
-ctx := context.Background()
+	d := openTestDB(t)
+	ctx := context.Background()
 
-if _, err := d.AppendMessage(ctx, "sess", "user", "hello", nil); err != nil {
-t.Fatalf("AppendMessage: %v", err)
-}
+	if _, err := d.AppendMessage(ctx, "sess", "user", "hello", nil); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
 
-w := ConsolidationWrite{
-SessionKey:  "sess",
-ScopeKey:    "sess",
-NoteText:    "summary note",
-Embedding:   make([]byte, 0),
-NoteTags:    "consolidation",
-NoteKind:    MemoryKindSummary,
-CursorMsgID: 1,
-ExtraNotes: []TypedNoteInput{
-{Text: "prefers dark mode", Kind: MemoryKindPreference, Status: MemoryStatusActive},
-{Text: "goal: ship v2", Kind: MemoryKindGoal, Status: MemoryStatusActive},
-},
-}
-noteID, err := d.WriteConsolidation(ctx, w)
-if err != nil {
-t.Fatalf("WriteConsolidation: %v", err)
-}
-if noteID <= 0 {
-t.Fatalf("expected positive summary note ID, got %d", noteID)
-}
+	w := ConsolidationWrite{
+		SessionKey:  "sess",
+		ScopeKey:    "sess",
+		NoteText:    "summary note",
+		Embedding:   make([]byte, 0),
+		NoteTags:    "consolidation",
+		NoteKind:    MemoryKindSummary,
+		CursorMsgID: 1,
+		ExtraNotes: []TypedNoteInput{
+			{Text: "prefers dark mode", Kind: MemoryKindPreference, Status: MemoryStatusActive},
+			{Text: "goal: ship v2", Kind: MemoryKindGoal, Status: MemoryStatusActive},
+		},
+	}
+	noteID, err := d.WriteConsolidation(ctx, w)
+	if err != nil {
+		t.Fatalf("WriteConsolidation: %v", err)
+	}
+	if noteID <= 0 {
+		t.Fatalf("expected positive summary note ID, got %d", noteID)
+	}
 
-// Verify the preference note was written.
-prefRows, err := d.SearchFTS(ctx, "sess", "dark mode", 5)
-if err != nil {
-t.Fatalf("SearchFTS preference: %v", err)
-}
-if len(prefRows) == 0 {
-t.Fatal("expected preference note via FTS")
-}
-if prefRows[0].Kind != MemoryKindPreference {
-t.Errorf("expected kind=%q, got %q", MemoryKindPreference, prefRows[0].Kind)
-}
+	// Verify the preference note was written.
+	prefRows, err := d.SearchFTS(ctx, "sess", "dark mode", 5)
+	if err != nil {
+		t.Fatalf("SearchFTS preference: %v", err)
+	}
+	if len(prefRows) == 0 {
+		t.Fatal("expected preference note via FTS")
+	}
+	if prefRows[0].Kind != MemoryKindPreference {
+		t.Errorf("expected kind=%q, got %q", MemoryKindPreference, prefRows[0].Kind)
+	}
 
-// Verify the goal note was written.
-goalRows, err := d.SearchFTS(ctx, "sess", "ship v2", 5)
-if err != nil {
-t.Fatalf("SearchFTS goal: %v", err)
-}
-if len(goalRows) == 0 {
-t.Fatal("expected goal note via FTS")
-}
-if goalRows[0].Kind != MemoryKindGoal {
-t.Errorf("expected kind=%q, got %q", MemoryKindGoal, goalRows[0].Kind)
-}
+	// Verify the goal note was written.
+	goalRows, err := d.SearchFTS(ctx, "sess", "ship v2", 5)
+	if err != nil {
+		t.Fatalf("SearchFTS goal: %v", err)
+	}
+	if len(goalRows) == 0 {
+		t.Fatal("expected goal note via FTS")
+	}
+	if goalRows[0].Kind != MemoryKindGoal {
+		t.Errorf("expected kind=%q, got %q", MemoryKindGoal, goalRows[0].Kind)
+	}
 }
 
 func TestWriteConsolidation_EmptyExtraNoteTextIsSkipped(t *testing.T) {
-d := openTestDB(t)
-ctx := context.Background()
+	d := openTestDB(t)
+	ctx := context.Background()
 
-if _, err := d.AppendMessage(ctx, "sess", "user", "hello", nil); err != nil {
-t.Fatalf("AppendMessage: %v", err)
+	if _, err := d.AppendMessage(ctx, "sess", "user", "hello", nil); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	w := ConsolidationWrite{
+		SessionKey:  "sess",
+		ScopeKey:    "sess",
+		NoteText:    "summary",
+		Embedding:   make([]byte, 0),
+		CursorMsgID: 1,
+		ExtraNotes: []TypedNoteInput{
+			{Text: "   ", Kind: MemoryKindFact}, // should be skipped
+			{Text: "", Kind: MemoryKindGoal},    // should be skipped
+		},
+	}
+	noteID, err := d.WriteConsolidation(ctx, w)
+	if err != nil {
+		t.Fatalf("WriteConsolidation: %v", err)
+	}
+	if noteID <= 0 {
+		t.Fatalf("expected positive summary note ID, got %d", noteID)
+	}
 }
 
-w := ConsolidationWrite{
-SessionKey:  "sess",
-ScopeKey:    "sess",
-NoteText:    "summary",
-Embedding:   make([]byte, 0),
-CursorMsgID: 1,
-ExtraNotes: []TypedNoteInput{
-{Text: "   ", Kind: MemoryKindFact}, // should be skipped
-{Text: "", Kind: MemoryKindGoal},    // should be skipped
-},
+func TestInsertMemoryNoteTyped_RejectsVectorDimMismatch(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	if _, err := d.InsertMemoryNoteTyped(ctx, "sess", TypedNoteInput{
+		Text:      "first",
+		Embedding: make([]byte, 8),
+	}); err != nil {
+		t.Fatalf("InsertMemoryNoteTyped first: %v", err)
+	}
+	if _, err := d.InsertMemoryNoteTyped(ctx, "sess", TypedNoteInput{
+		Text:      "mismatch",
+		Embedding: make([]byte, 12),
+	}); err == nil {
+		t.Fatal("expected vector dim mismatch error")
+	}
 }
-noteID, err := d.WriteConsolidation(ctx, w)
-if err != nil {
-t.Fatalf("WriteConsolidation: %v", err)
-}
-if noteID <= 0 {
-t.Fatalf("expected positive summary note ID, got %d", noteID)
-}
+
+func TestWriteConsolidation_RejectsVectorDimMismatch(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	if _, err := d.InsertMemoryNoteTyped(ctx, "sess", TypedNoteInput{
+		Text:      "first",
+		Embedding: make([]byte, 8),
+	}); err != nil {
+		t.Fatalf("InsertMemoryNoteTyped first: %v", err)
+	}
+	if err := d.EnsureSession(ctx, "sess"); err != nil {
+		t.Fatalf("EnsureSession: %v", err)
+	}
+	if _, err := d.WriteConsolidation(ctx, ConsolidationWrite{
+		SessionKey:  "sess",
+		ScopeKey:    "sess",
+		NoteText:    "summary",
+		Embedding:   make([]byte, 12),
+		CursorMsgID: 0,
+	}); err == nil {
+		t.Fatal("expected vector dim mismatch error")
+	}
 }

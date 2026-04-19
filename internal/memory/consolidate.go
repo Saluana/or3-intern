@@ -177,6 +177,11 @@ func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMa
 	}
 	transcript := strings.TrimSpace(sb.String())
 	memScope := sessionKey
+	if c.DB != nil && strings.TrimSpace(sessionKey) != "" {
+		if resolved, resolveErr := c.DB.ResolveScopeKey(ctx, sessionKey); resolveErr == nil && strings.TrimSpace(resolved) != "" {
+			memScope = resolved
+		}
+	}
 	if memScope == "" || memScope == scope.GlobalMemoryScope {
 		memScope = scope.GlobalMemoryScope
 	}
@@ -411,30 +416,51 @@ func sanitizeItems(items []string) []string {
 // It does NOT include rolling summaries.
 func buildCanonicalPinnedText(existing string, prefs, facts []string) string {
 	var sb strings.Builder
+	seen := map[string]struct{}{}
+	normalizeLine := func(s string) string {
+		s = strings.TrimSpace(strings.TrimPrefix(s, "- "))
+		s = strings.ToLower(strings.Join(strings.Fields(s), " "))
+		return s
+	}
+	appendLine := func(line string) bool {
+		line = strings.TrimSpace(strings.TrimPrefix(line, "- "))
+		if line == "" {
+			return true
+		}
+		norm := normalizeLine(line)
+		if _, ok := seen[norm]; ok {
+			return true
+		}
+		formatted := "- " + line
+		if sb.Len()+len(formatted)+1 > 2500 {
+			return false
+		}
+		if sb.Len() > 0 {
+			sb.WriteString("\n")
+		}
+		sb.WriteString(formatted)
+		seen[norm] = struct{}{}
+		return true
+	}
+
 	// Start from existing and keep it bounded.
 	existing = trimTo(existing, 2000)
 	if existing != "" {
-		sb.WriteString(existing)
+		for _, line := range strings.Split(existing, "\n") {
+			if !appendLine(line) {
+				break
+			}
+		}
 	}
 	for _, p := range prefs {
-		line := "- " + strings.TrimSpace(strings.TrimPrefix(p, "- "))
-		if sb.Len()+len(line)+1 > 2500 {
+		if !appendLine(p) {
 			break
 		}
-		if sb.Len() > 0 {
-			sb.WriteString("\n")
-		}
-		sb.WriteString(line)
 	}
 	for _, f := range facts {
-		line := "- " + strings.TrimSpace(strings.TrimPrefix(f, "- "))
-		if sb.Len()+len(line)+1 > 2500 {
+		if !appendLine(f) {
 			break
 		}
-		if sb.Len() > 0 {
-			sb.WriteString("\n")
-		}
-		sb.WriteString(line)
 	}
 	return strings.TrimSpace(sb.String())
 }

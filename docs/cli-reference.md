@@ -1,15 +1,26 @@
 # CLI reference
 
+Install the CLI once if you want to use the bare `or3-intern` command shown throughout this reference:
+
+```bash
+./scripts/install-cli.sh
+or3-intern version
+```
+
+If you are running directly from a checkout without installing, replace `or3-intern` with `go run ./cmd/or3-intern`.
+
 ## Primary commands
 
 | Command | Purpose |
 | --- | --- |
 | `or3-intern init` | Guided first-run setup for config and provider settings |
+| `or3-intern config-path` | Prints the resolved config.json path |
 | `or3-intern chat` | Interactive CLI session |
 | `or3-intern serve` | Starts enabled channels, triggers, heartbeat, cron, and the shared worker runtime |
 | `or3-intern service` | Starts the authenticated internal HTTP API |
 | `or3-intern agent -m "..."` | Runs a one-shot foreground turn |
 | `or3-intern version` | Prints the binary version |
+| `or3-intern help [command]` | Shows root help or command-specific help |
 
 ## Operational and admin commands
 

@@ -46,9 +46,9 @@ Rules:
 - goals: ongoing or stated objectives. Keep each item under 300 characters.
 - procedures: step-by-step processes or runbooks mentioned. Keep each item under 300 characters.
 - Any list may be empty ([]) when nothing relevant was observed.
-- Do not repeat items that already appear in Existing pinned memory.
+- Existing pinned memory contains only ultra-stable facts and preferences. Do not repeat those items.
 
-Existing pinned memory:
+Existing pinned memory (ultra-stable only):
 %s
 
 Conversation excerpt:

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -703,5 +704,102 @@ func TestConsolidator_RunOnce_UsesResolvedScopeForPinnedAndNotes(t *testing.T) {
 	}
 	if len(results) == 0 {
 		t.Fatal("expected consolidated note retrievable from resolved scope")
+	}
+}
+
+func TestConsolidator_ArchiveAll_StaleCleanupRemainsBoundedPerPass(t *testing.T) {
+	d := openConsolidateTestDB(t)
+	ctx := context.Background()
+	for i := 0; i < 60; i++ {
+		if _, err := d.AppendMessage(ctx, "sess", "user", fmt.Sprintf("line %d", i), nil); err != nil {
+			t.Fatalf("AppendMessage: %v", err)
+		}
+	}
+
+	oldTime := db.NowMS() - (8 * 24 * 60 * 60 * 1000)
+	for i := 0; i < 200; i++ {
+		_, err := d.SQL.ExecContext(ctx,
+			`INSERT INTO memory_notes(session_key, text, embedding, source_message_id, tags, created_at, kind, status, importance)
+ VALUES(?,?,?,?,?,?,?,?,?)`,
+			"sess", fmt.Sprintf("old summary %03d", i), make([]byte, 4), nil, "consolidation", oldTime,
+			db.MemoryKindSummary, db.MemoryStatusActive, 0.0)
+		if err != nil {
+			t.Fatalf("insert old summary %d: %v", i, err)
+		}
+	}
+	for _, kind := range []db.MemoryKind{db.MemoryKindFact, db.MemoryKindPreference, db.MemoryKindGoal, db.MemoryKindProcedure} {
+		_, err := d.SQL.ExecContext(ctx,
+			`INSERT INTO memory_notes(session_key, text, embedding, source_message_id, tags, created_at, kind, status, importance)
+ VALUES(?,?,?,?,?,?,?,?,?)`,
+			"sess", fmt.Sprintf("durable %s", kind), make([]byte, 4), nil, "", oldTime,
+			kind, db.MemoryStatusActive, 0.0)
+		if err != nil {
+			t.Fatalf("insert durable %s: %v", kind, err)
+		}
+	}
+	if err := d.UpsertPinned(ctx, "sess", "long_term_memory", "keep this pinned fact"); err != nil {
+		t.Fatalf("UpsertPinned: %v", err)
+	}
+
+	prov, calls := buildConsolidationProvider(t, `{"summary":"pass summary","preferences":["memory"],"facts":[],"goals":[],"procedures":[]}`, false)
+	c := &Consolidator{
+		DB:                 d,
+		Provider:           prov,
+		WindowSize:         5,
+		MaxMessages:        10,
+		MaxInputChars:      1000,
+		CanonicalPinnedKey: "long_term_memory",
+	}
+	if err := c.ArchiveAll(ctx, "sess", 40); err != nil {
+		t.Fatalf("ArchiveAll: %v", err)
+	}
+	chatCalls := int(atomic.LoadInt32(calls.Chat))
+	if chatCalls < 2 {
+		t.Fatalf("expected multiple consolidation passes, got %d", chatCalls)
+	}
+
+	rows, err := d.SQL.QueryContext(ctx,
+		`SELECT status, COUNT(*) FROM memory_notes WHERE session_key=? AND text LIKE 'old summary %' GROUP BY status`,
+		"sess")
+	if err != nil {
+		t.Fatalf("query cleanup results: %v", err)
+	}
+	defer rows.Close()
+	statusCounts := map[string]int{}
+	for rows.Next() {
+		var status string
+		var count int
+		if err := rows.Scan(&status, &count); err != nil {
+			t.Fatalf("scan cleanup results: %v", err)
+		}
+		statusCounts[status] = count
+	}
+	staleCount := statusCounts[db.MemoryStatusStale]
+	activeCount := statusCounts[db.MemoryStatusActive]
+	if staleCount == 0 {
+		t.Fatal("expected some old summaries to be marked stale")
+	}
+	if activeCount == 0 {
+		t.Fatalf("expected bounded cleanup to leave some old summaries active; stale=%d calls=%d", staleCount, chatCalls)
+	}
+	maxCleaned := chatCalls * staleCleanupBatchSize
+	if staleCount > maxCleaned {
+		t.Fatalf("expected stale cleanup to stay bounded by passes*batch_size=%d, got %d", maxCleaned, staleCount)
+	}
+	for _, kind := range []db.MemoryKind{db.MemoryKindFact, db.MemoryKindPreference, db.MemoryKindGoal, db.MemoryKindProcedure} {
+		results, err := d.SearchFTS(ctx, "sess", fmt.Sprintf("durable %s", kind), 5)
+		if err != nil {
+			t.Fatalf("SearchFTS %s: %v", kind, err)
+		}
+		if len(results) == 0 || results[0].Status != db.MemoryStatusActive {
+			t.Fatalf("expected durable %s note to remain active, got %#v", kind, results)
+		}
+	}
+	pinned, ok, err := d.GetPinnedValue(ctx, "sess", "long_term_memory")
+	if err != nil {
+		t.Fatalf("GetPinnedValue: %v", err)
+	}
+	if !ok || !strings.Contains(pinned, "keep this pinned fact") {
+		t.Fatalf("expected pinned memory to remain available, got ok=%v value=%q", ok, pinned)
 	}
 }

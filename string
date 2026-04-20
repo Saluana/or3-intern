@@ -1,0 +1,277 @@
+{
+  "dbPath": "/Users/brendon/.or3-intern/or3-intern.sqlite",
+  "artifactsDir": "/Users/brendon/.or3-intern/artifacts",
+  "workspaceDir": "",
+  "allowedDir": "",
+  "defaultSessionKey": "cli:default",
+  "soulFile": "/Users/brendon/.or3-intern/SOUL.md",
+  "agentsFile": "/Users/brendon/.or3-intern/AGENTS.md",
+  "toolsFile": "/Users/brendon/.or3-intern/TOOLS.md",
+  "bootstrapMaxChars": 20000,
+  "bootstrapTotalMaxChars": 150000,
+  "sessionCacheLimit": 64,
+  "historyMaxMessages": 40,
+  "maxToolBytes": 24576,
+  "maxMediaBytes": 20971520,
+  "maxToolLoops": 6,
+  "memoryRetrieveLimit": 8,
+  "vectorSearchK": 8,
+  "ftsSearchK": 8,
+  "vectorScanLimit": 2000,
+  "workerCount": 4,
+  "consolidationEnabled": true,
+  "consolidationWindowSize": 10,
+  "consolidationMaxMessages": 50,
+  "consolidationMaxInputChars": 12000,
+  "consolidationAsyncTimeoutSeconds": 30,
+  "subagents": {
+    "enabled": false,
+    "maxConcurrent": 1,
+    "maxQueued": 32,
+    "taskTimeoutSeconds": 300
+  },
+  "runtimeProfile": "",
+  "identityFile": "/Users/brendon/.or3-intern/IDENTITY.md",
+  "memoryFile": "/Users/brendon/.or3-intern/MEMORY.md",
+  "docIndex": {
+    "enabled": false,
+    "roots": null,
+    "maxFiles": 100,
+    "maxFileBytes": 65536,
+    "maxChunks": 500,
+    "embedMaxBytes": 8192,
+    "refreshSeconds": 300,
+    "retrieveLimit": 5
+  },
+  "skills": {
+    "enableExec": false,
+    "maxRunSeconds": 30,
+    "managedDir": "/Users/brendon/.or3-intern/skills",
+    "policy": {
+      "quarantineByDefault": true,
+      "approved": [],
+      "trustedOwners": [],
+      "blockedOwners": [],
+      "trustedRegistries": []
+    },
+    "load": {
+      "extraDirs": null,
+      "watch": false,
+      "watchDebounceMs": 250
+    },
+    "entries": {},
+    "clawHub": {
+      "siteUrl": "https://clawhub.ai",
+      "registryUrl": "https://clawhub.ai",
+      "installDir": "skills"
+    }
+  },
+  "triggers": {
+    "webhook": {
+      "enabled": false,
+      "addr": "127.0.0.1:8765",
+      "secret": "",
+      "maxBodyKB": 64
+    },
+    "fileWatch": {
+      "enabled": false,
+      "paths": null,
+      "pollSeconds": 5,
+      "debounceSeconds": 2
+    }
+  },
+  "session": {
+    "directMessagesShareDefault": false,
+    "identityLinks": []
+  },
+  "security": {
+    "secretStore": {
+      "enabled": false,
+      "required": false,
+      "keyFile": "/Users/brendon/.or3-intern/master.key"
+    },
+    "audit": {
+      "enabled": false,
+      "strict": false,
+      "keyFile": "/Users/brendon/.or3-intern/audit.key",
+      "verifyOnStart": false
+    },
+    "approvals": {
+      "enabled": false,
+      "hostId": "local",
+      "keyFile": "/Users/brendon/.or3-intern/approvals.key",
+      "pairingCodeTtlSeconds": 300,
+      "pendingTtlSeconds": 900,
+      "approvalTokenTtlSeconds": 300,
+      "pairing": {
+        "mode": "ask"
+      },
+      "exec": {
+        "mode": "trusted"
+      },
+      "skillExecution": {
+        "mode": "trusted"
+      },
+      "secretAccess": {
+        "mode": "ask"
+      },
+      "messageSend": {
+        "mode": "ask"
+      }
+    },
+    "profiles": {
+      "enabled": false,
+      "default": "",
+      "channels": {},
+      "triggers": {},
+      "profiles": {}
+    },
+    "network": {
+      "enabled": false,
+      "defaultDeny": false,
+      "allowedHosts": [],
+      "allowLoopback": false,
+      "allowPrivate": false
+    }
+  },
+  "provider": {
+    "apiBase": "https://api.openai.com/v1",
+    "apiKey": "",
+    "model": "gpt-4.1-mini",
+    "temperature": 0,
+    "embedModel": "text-embedding-3-small",
+    "enableVision": false,
+    "timeoutSeconds": 60
+  },
+  "tools": {
+    "braveApiKey": "",
+    "webProxy": "",
+    "execTimeoutSeconds": 60,
+    "restrictToWorkspace": true,
+    "pathAppend": "",
+    "mcpServers": {}
+  },
+  "hardening": {
+    "guardedTools": false,
+    "privilegedTools": false,
+    "enableExecShell": false,
+    "execAllowedPrograms": [
+      "cat",
+      "echo",
+      "find",
+      "git",
+      "grep",
+      "head",
+      "ls",
+      "pwd",
+      "sed",
+      "tail"
+    ],
+    "childEnvAllowlist": [
+      "PATH",
+      "HOME",
+      "TMPDIR",
+      "TMP",
+      "TEMP"
+    ],
+    "isolateChannelPeers": true,
+    "sandbox": {
+      "enabled": false,
+      "bubblewrapPath": "bwrap",
+      "allowNetwork": false,
+      "writablePaths": []
+    },
+    "quotas": {
+      "enabled": true,
+      "maxToolCalls": 16,
+      "maxExecCalls": 2,
+      "maxWebCalls": 4,
+      "maxSubagentCalls": 2
+    }
+  },
+  "cron": {
+    "enabled": true,
+    "storePath": "/Users/brendon/.or3-intern/cron.json"
+  },
+  "service": {
+    "enabled": false,
+    "listen": "127.0.0.1:9100",
+    "secret": ""
+  },
+  "heartbeat": {
+    "enabled": false,
+    "intervalMinutes": 30,
+    "tasksFile": "/Users/brendon/.or3-intern/HEARTBEAT.md",
+    "sessionKey": "heartbeat:default"
+  },
+  "channels": {
+    "telegram": {
+      "enabled": false,
+      "inboundPolicy": "",
+      "openAccess": false,
+      "token": "",
+      "apiBase": "https://api.telegram.org",
+      "pollSeconds": 2,
+      "defaultChatId": "",
+      "allowedChatIds": null
+    },
+    "slack": {
+      "enabled": false,
+      "inboundPolicy": "",
+      "openAccess": false,
+      "appToken": "",
+      "botToken": "",
+      "apiBase": "https://slack.com/api",
+      "socketModeUrl": "",
+      "defaultChannelId": "",
+      "allowedUserIds": null,
+      "requireMention": true
+    },
+    "discord": {
+      "enabled": false,
+      "inboundPolicy": "",
+      "openAccess": false,
+      "token": "",
+      "apiBase": "https://discord.com/api/v10",
+      "gatewayUrl": "",
+      "defaultChannelId": "",
+      "allowedUserIds": null,
+      "requireMention": true
+    },
+    "whatsApp": {
+      "enabled": false,
+      "inboundPolicy": "",
+      "openAccess": false,
+      "bridgeUrl": "ws://127.0.0.1:3001/ws",
+      "bridgeToken": "",
+      "defaultTo": "",
+      "allowedFrom": null
+    },
+    "email": {
+      "enabled": false,
+      "inboundPolicy": "",
+      "openAccess": false,
+      "consentGranted": false,
+      "allowedSenders": null,
+      "defaultTo": "",
+      "autoReplyEnabled": false,
+      "pollIntervalSeconds": 30,
+      "markSeen": true,
+      "maxBodyChars": 4000,
+      "subjectPrefix": "Re: ",
+      "fromAddress": "",
+      "imapMailbox": "INBOX",
+      "imapHost": "",
+      "imapPort": 993,
+      "imapUseSSL": true,
+      "imapUsername": "",
+      "imapPassword": "",
+      "smtpHost": "",
+      "smtpPort": 587,
+      "smtpUseTLS": true,
+      "smtpUseSSL": false,
+      "smtpUsername": "",
+      "smtpPassword": ""
+    }
+  }
+}

@@ -435,7 +435,7 @@ func TestPromptIncludesMemoryDigest(t *testing.T) {
 	sys := pp.System[0].Content.(string)
 	// Only check digest section if FTS actually returned results.
 	if strings.Contains(sys, "verbose logging") && strings.Contains(sys, "preference") {
-		if !strings.Contains(sys, "Memory Digest") {
+		if !strings.Contains(sys, "## Memory Digest") {
 			t.Errorf("expected 'Memory Digest' section when durable notes retrieved, got %q", sys)
 		}
 	}
@@ -444,9 +444,9 @@ func TestPromptIncludesMemoryDigest(t *testing.T) {
 func TestComposeSystemPrompt_MemoryDigestBetweenPinnedAndRetrieved(t *testing.T) {
 	b := &Builder{}
 	got := b.composeSystemPrompt("pinned content", "digest content", "retrieved content", "", "", "", "", "", "")
-	pinnedIdx := strings.Index(got, "Pinned Memory")
-	digestIdx := strings.Index(got, "Memory Digest")
-	retrievedIdx := strings.Index(got, "Retrieved Memory")
+	pinnedIdx := strings.Index(got, "## Pinned Memory")
+	digestIdx := strings.Index(got, "## Memory Digest")
+	retrievedIdx := strings.Index(got, "## Retrieved Memory")
 	if pinnedIdx < 0 || digestIdx < 0 || retrievedIdx < 0 {
 		t.Fatalf("missing sections: pinned=%d digest=%d retrieved=%d", pinnedIdx, digestIdx, retrievedIdx)
 	}
@@ -458,7 +458,7 @@ func TestComposeSystemPrompt_MemoryDigestBetweenPinnedAndRetrieved(t *testing.T)
 func TestComposeSystemPrompt_DigestOmittedWhenEmpty(t *testing.T) {
 	b := &Builder{}
 	got := b.composeSystemPrompt("(none)", "", "(none)", "", "", "", "", "", "")
-	if strings.Contains(got, "Memory Digest") {
+	if strings.Contains(got, "## Memory Digest") {
 		t.Error("expected 'Memory Digest' section to be omitted when digestText is empty")
 	}
 }

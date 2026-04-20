@@ -348,6 +348,81 @@ func TestBuilder_Build_ToolCallsInHistory(t *testing.T) {
 	}
 }
 
+func TestBuilder_Build_ToolResultHistoryPreservesToolCallID(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	if _, err := d.AppendMessage(ctx, "s-tool", "user", "user msg", nil); err != nil {
+		t.Fatalf("AppendMessage user: %v", err)
+	}
+	if _, err := d.AppendMessage(ctx, "s-tool", "assistant", "", map[string]any{
+		"tool_calls": []map[string]any{
+			{"id": "tc1", "type": "function", "function": map[string]any{"name": "test_tool", "arguments": "{}"}},
+		},
+	}); err != nil {
+		t.Fatalf("AppendMessage assistant: %v", err)
+	}
+	if _, err := d.AppendMessage(ctx, "s-tool", "tool", "tool result", map[string]any{
+		"tool":         "test_tool",
+		"tool_call_id": "tc1",
+		"args":         map[string]any{},
+	}); err != nil {
+		t.Fatalf("AppendMessage tool: %v", err)
+	}
+
+	b := &Builder{DB: d, HistoryMax: 10}
+	pp, _, err := b.Build(ctx, "s-tool", "next msg")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	for _, m := range pp.History {
+		if m.Role == "tool" {
+			if m.ToolCallID != "tc1" {
+				t.Fatalf("expected tool_call_id tc1, got %#v", m)
+			}
+			return
+		}
+	}
+	t.Fatal("expected tool message in history")
+}
+
+func TestBuilder_Build_LegacyToolResultHistoryBackfillsToolCallID(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	if _, err := d.AppendMessage(ctx, "s-legacy", "user", "user msg", nil); err != nil {
+		t.Fatalf("AppendMessage user: %v", err)
+	}
+	if _, err := d.AppendMessage(ctx, "s-legacy", "assistant", "", map[string]any{
+		"tool_calls": []map[string]any{
+			{"id": "tc-legacy", "type": "function", "function": map[string]any{"name": "test_tool", "arguments": "{}"}},
+		},
+	}); err != nil {
+		t.Fatalf("AppendMessage assistant: %v", err)
+	}
+	if _, err := d.AppendMessage(ctx, "s-legacy", "tool", "tool result", map[string]any{
+		"tool": "test_tool",
+		"args": map[string]any{},
+	}); err != nil {
+		t.Fatalf("AppendMessage tool: %v", err)
+	}
+
+	b := &Builder{DB: d, HistoryMax: 10}
+	pp, _, err := b.Build(ctx, "s-legacy", "next msg")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	for _, m := range pp.History {
+		if m.Role == "tool" {
+			if m.ToolCallID != "tc-legacy" {
+				t.Fatalf("expected legacy tool message to backfill tool_call_id, got %#v", m)
+			}
+			return
+		}
+	}
+	t.Fatal("expected tool message in history")
+}
+
 func TestBuilder_Build_UserImageAttachmentWithVision(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()

@@ -43,14 +43,37 @@ const (
 )
 
 func main() {
-	var cfgPath string
-	flag.StringVar(&cfgPath, "config", "", "path to config.json")
-	flag.Parse()
+	cfgPath, args, showHelp, err := parseRootCLIArgs(os.Args[1:], os.Stderr)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	if showHelp {
+		if err := printHelpTopic(os.Stdout, helpTopicPath(args)); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		return
+	}
+	if handled, err := maybeHandleHelpRequest(args, os.Stdout); handled {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		return
+	}
 
-	args := flag.Args()
 	cmd := "chat"
 	if len(args) > 0 {
 		cmd = args[0]
+	}
+	if isHelpToken(cmd) {
+		printRootHelp(os.Stdout)
+		return
+	}
+	if cmd == "config-path" {
+		fmt.Fprintln(os.Stdout, cfgPathOrDefault(cfgPath))
+		return
 	}
 	if cmd == "init" {
 		if err := runInit(cfgPath); err != nil {

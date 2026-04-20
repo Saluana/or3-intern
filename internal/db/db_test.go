@@ -1774,6 +1774,54 @@ func TestCleanupStaleMemoryNotes_DoesNotTouchFacts(t *testing.T) {
 	}
 }
 
+func TestCleanupStaleMemoryNotes_LeavesDurableKindsAndPinnedMemoryUntouched(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	oldTime := NowMS() - staleMemoryAgeMS - 1000
+
+	for _, kind := range []MemoryKind{MemoryKindFact, MemoryKindPreference, MemoryKindGoal, MemoryKindProcedure} {
+		_, err := d.SQL.ExecContext(ctx,
+			`INSERT INTO memory_notes(session_key, text, embedding, source_message_id, tags, created_at, kind, status, importance)
+ VALUES(?,?,?,?,?,?,?,?,?)`,
+			"sess", fmt.Sprintf("old %s", kind), make([]byte, 4), nil, "", oldTime,
+			kind, MemoryStatusActive, 0.0)
+		if err != nil {
+			t.Fatalf("insert old %s: %v", kind, err)
+		}
+	}
+	if err := d.UpsertPinned(ctx, "sess", "long_term_memory", "project uses sqlite"); err != nil {
+		t.Fatalf("UpsertPinned: %v", err)
+	}
+
+	n, err := d.CleanupStaleMemoryNotes(ctx, "sess", NowMS(), 10)
+	if err != nil {
+		t.Fatalf("CleanupStaleMemoryNotes: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("expected 0 rows cleaned, got %d", n)
+	}
+
+	for _, kind := range []MemoryKind{MemoryKindFact, MemoryKindPreference, MemoryKindGoal, MemoryKindProcedure} {
+		results, err := d.SearchFTS(ctx, "sess", fmt.Sprintf("old %s", kind), 5)
+		if err != nil {
+			t.Fatalf("SearchFTS %s: %v", kind, err)
+		}
+		if len(results) == 0 {
+			t.Fatalf("expected durable note for kind %s", kind)
+		}
+		if results[0].Status != MemoryStatusActive {
+			t.Fatalf("expected %s note to remain active, got %q", kind, results[0].Status)
+		}
+	}
+	pinned, ok, err := d.GetPinnedValue(ctx, "sess", "long_term_memory")
+	if err != nil {
+		t.Fatalf("GetPinnedValue: %v", err)
+	}
+	if !ok || pinned != "project uses sqlite" {
+		t.Fatalf("expected pinned memory to remain unchanged, got ok=%v value=%q", ok, pinned)
+	}
+}
+
 func TestCleanupStaleMemoryNotes_BatchLimit(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()

@@ -131,7 +131,7 @@ func runInitWithIO(in io.Reader, out io.Writer, cfgPath, cwd string) error {
 	}
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Next step:")
-	fmt.Fprintln(out, "  go run ./cmd/or3-intern chat")
+	fmt.Fprintln(out, "  or3-intern chat")
 	return nil
 }
 

@@ -32,17 +32,17 @@
 # 5. Validate cleanup behavior stays lightweight
 
 - [x] [Req 5, Req 6] Implement the stale-memory cleanup rule in `internal/db/store.go` or an adjacent DB helper so it only touches old, never-used `summary` or `episode` rows and caps rows per pass.
-- [ ] [Req 5] Add tests proving cleanup leaves facts, preferences, goals, procedures, and pinned memory untouched.
-- [ ] [Req 5, Req 6] Add a regression test showing repeated consolidation passes remain bounded and do not trigger unbounded summary deletion scans.
+- [x] [Req 5] Add tests proving cleanup leaves facts, preferences, goals, procedures, and pinned memory untouched.
+- [x] [Req 5, Req 6] Add a regression test showing repeated consolidation passes remain bounded and do not trigger unbounded summary deletion scans.
 
 # 6. Keep the change small and repo-aligned
 
-- [ ] [Req 2, Req 3, Req 6] Review `internal/agent/prompt.go`, `internal/memory/consolidate.go`, and any inline agent instructions so wording reflects that pinned memory is for ultra-stable facts and retrieved notes now have a short digest.
-- [ ] [Req 6] Confirm no new config or env settings are required; if a constant must be introduced, keep it local to existing packages rather than expanding config.
+- [x] [Req 2, Req 3, Req 6] Review `internal/agent/prompt.go`, `internal/memory/consolidate.go`, and any inline agent instructions so wording reflects that pinned memory is for ultra-stable facts and retrieved notes now have a short digest.
+- [x] [Req 6] Confirm no new config or env settings are required; if a constant must be introduced, keep it local to existing packages rather than expanding config.
 
 # 7. Out of scope
 
-- [ ] Do not add a new memory service, graph store, wiki, or claims/evidence layer.
-- [ ] Do not add multiple retrieval engines or a separate contradiction-resolution subsystem.
-- [ ] Do not add dashboards, manual memory review UIs, or background workers beyond the current scheduler path.
-- [ ] Do not redesign session scope, prompt assembly, or pinned memory into a new architecture.
+- [x] Do not add a new memory service, graph store, wiki, or claims/evidence layer.
+- [x] Do not add multiple retrieval engines or a separate contradiction-resolution subsystem.
+- [x] Do not add dashboards, manual memory review UIs, or background workers beyond the current scheduler path.
+- [x] Do not redesign session scope, prompt assembly, or pinned memory into a new architecture.

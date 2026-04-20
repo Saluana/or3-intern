@@ -13,10 +13,19 @@
 
 ## Quick start
 
+### 0. Install the CLI if you want the bare `or3-intern` command
+
+```bash
+./scripts/install-cli.sh
+or3-intern version
+```
+
+If you prefer not to install anything yet, every example below also works with `go run ./cmd/or3-intern ...`.
+
 ### 1. Initialize the runtime
 
 ```bash
-go run ./cmd/or3-intern init
+or3-intern init
 ```
 
 The guided setup writes provider and runtime settings to `~/.or3-intern/config.json`.
@@ -24,7 +33,7 @@ The guided setup writes provider and runtime settings to `~/.or3-intern/config.j
 ### 2. Start an interactive local session
 
 ```bash
-go run ./cmd/or3-intern chat
+or3-intern chat
 ```
 
 Use this first when you want to confirm that provider configuration, storage, and prompts are working before enabling any external integrations.
@@ -32,7 +41,7 @@ Use this first when you want to confirm that provider configuration, storage, an
 ### 3. Run external channels and automation
 
 ```bash
-go run ./cmd/or3-intern serve
+or3-intern serve
 ```
 
 `serve` starts the shared runtime plus any enabled channels, triggers, heartbeat jobs, and other background workers.
@@ -40,7 +49,7 @@ go run ./cmd/or3-intern serve
 ### 4. Run internal service mode when integrating with OR3 Net
 
 ```bash
-go run ./cmd/or3-intern service
+or3-intern service
 ```
 
 This exposes the authenticated loopback HTTP API documented in [api-reference.md](api-reference.md).

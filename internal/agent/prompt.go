@@ -33,8 +33,8 @@ I am or3-intern, a personal AI assistant.
 `
 
 const DefaultAgentInstructions = `# Agent Instructions
-- Use pinned memory for stable facts.
-- Retrieve relevant memory snippets before answering.
+- Use pinned memory only for ultra-stable facts, preferences, and long-running project state.
+- Check the short Memory Digest and retrieved memory snippets before answering.
 - Keep constant RAM usage: last N messages + top K memories only.
 - Large tool outputs must spill to artifacts.
 `
@@ -201,6 +201,7 @@ func (b *Builder) BuildWithOptions(ctx context.Context, opts BuildOptions) (Prom
 	}
 	visionBudget := newVisionBudget()
 	hist := make([]providers.ChatMessage, 0, len(histRows))
+	pendingToolCallIDs := make([]string, 0)
 	for _, m := range histRows {
 		msg := providers.ChatMessage{Role: m.Role, Content: m.Content}
 		var payload map[string]any
@@ -211,6 +212,32 @@ func (b *Builder) BuildWithOptions(ctx context.Context, opts BuildOptions) (Prom
 					var tcs []providers.ToolCall
 					if err := json.Unmarshal(b, &tcs); err == nil {
 						msg.ToolCalls = tcs
+						pendingToolCallIDs = pendingToolCallIDs[:0]
+						for _, tc := range tcs {
+							if id := strings.TrimSpace(tc.ID); id != "" {
+								pendingToolCallIDs = append(pendingToolCallIDs, id)
+							}
+						}
+					}
+				}
+			}
+			if m.Role == "tool" {
+				if rawID, ok := payload["tool_call_id"]; ok {
+					msg.ToolCallID = strings.TrimSpace(fmt.Sprint(rawID))
+				}
+				if msg.ToolCallID == "" && len(pendingToolCallIDs) > 0 {
+					msg.ToolCallID = pendingToolCallIDs[0]
+				}
+				if msg.ToolCallID != "" && len(pendingToolCallIDs) > 0 {
+					if pendingToolCallIDs[0] == msg.ToolCallID {
+						pendingToolCallIDs = pendingToolCallIDs[1:]
+					} else {
+						for i, id := range pendingToolCallIDs {
+							if id == msg.ToolCallID {
+								pendingToolCallIDs = append(pendingToolCallIDs[:i], pendingToolCallIDs[i+1:]...)
+								break
+							}
+						}
 					}
 				}
 			}

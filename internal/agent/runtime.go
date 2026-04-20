@@ -655,8 +655,9 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 			}
 
 			payload := map[string]any{
-				"tool": tc.Function.Name,
-				"args": json.RawMessage([]byte(tc.Function.Arguments)),
+				"tool":         tc.Function.Name,
+				"tool_call_id": tc.ID,
+				"args":         json.RawMessage([]byte(tc.Function.Arguments)),
 			}
 			sendOut, preview, artifactID := r.boundTextResult(ctx, sessionKey, out)
 			if artifactID != "" {

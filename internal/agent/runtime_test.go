@@ -731,9 +731,142 @@ func TestRuntime_Handle_WithMCPNamedTool_UsesNormalToolPath(t *testing.T) {
 	if last.Role != "tool" || last.Content != "remote echo: hi" {
 		t.Fatalf("expected tool message with MCP output, got %#v", last)
 	}
+	if last.ToolCallID != "tc-mcp" {
+		t.Fatalf("expected tool message with tool_call_id tc-mcp, got %#v", last)
+	}
 	if len(deliver.messages) == 0 || deliver.messages[0] != "MCP done" {
 		t.Fatalf("expected final delivery after MCP tool execution, got %#v", deliver.messages)
 	}
+}
+
+func TestRuntime_Handle_NextTurnPreservesToolCallIDInHistory(t *testing.T) {
+	d := openRuntimeTestDB(t)
+
+	var thirdRequestMessages []providers.ChatMessage
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+
+		var req providers.ChatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		callCount++
+		if callCount == 3 {
+			thirdRequestMessages = append([]providers.ChatMessage(nil), req.Messages...)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		var resp providers.ChatCompletionResponse
+		switch callCount {
+		case 1:
+			resp = providers.ChatCompletionResponse{
+				Choices: []struct {
+					Message struct {
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					} `json:"message"`
+				}{
+					{
+						Message: struct {
+							Role      string               `json:"role"`
+							Content   any                  `json:"content"`
+							ToolCalls []providers.ToolCall `json:"tool_calls"`
+						}{
+							Role: "assistant",
+							ToolCalls: []providers.ToolCall{{
+								ID:   "tc-history",
+								Type: "function",
+								Function: struct {
+									Name      string `json:"name"`
+									Arguments string `json:"arguments"`
+								}{Name: "echo_tool", Arguments: `{}`},
+							}},
+						},
+					},
+				},
+			}
+		case 2:
+			resp = providers.ChatCompletionResponse{
+				Choices: []struct {
+					Message struct {
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					} `json:"message"`
+				}{
+					{
+						Message: struct {
+							Role      string               `json:"role"`
+							Content   any                  `json:"content"`
+							ToolCalls []providers.ToolCall `json:"tool_calls"`
+						}{Role: "assistant", Content: "first turn done"},
+					},
+				},
+			}
+		default:
+			resp = providers.ChatCompletionResponse{
+				Choices: []struct {
+					Message struct {
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					} `json:"message"`
+				}{
+					{
+						Message: struct {
+							Role      string               `json:"role"`
+							Content   any                  `json:"content"`
+							ToolCalls []providers.ToolCall `json:"tool_calls"`
+						}{Role: "assistant", Content: "second turn done"},
+					},
+				},
+			}
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	provider := providers.New(srv.URL, "key", 10*time.Second)
+	provider.HTTP = srv.Client()
+
+	reg := tools.NewRegistry()
+	reg.Register(&echoTool{})
+
+	rt := &Runtime{
+		DB:           d,
+		Provider:     provider,
+		Model:        "gpt-4",
+		Tools:        reg,
+		Builder:      &Builder{DB: d, HistoryMax: 10},
+		MaxToolLoops: 6,
+		Deliver:      &mockDeliverer{},
+	}
+
+	if err := rt.Handle(context.Background(), bus.Event{Type: bus.EventUserMessage, SessionKey: "sess-history", Channel: "cli", From: "user", Message: "first"}); err != nil {
+		t.Fatalf("first Handle: %v", err)
+	}
+	if err := rt.Handle(context.Background(), bus.Event{Type: bus.EventUserMessage, SessionKey: "sess-history", Channel: "cli", From: "user", Message: "second"}); err != nil {
+		t.Fatalf("second Handle: %v", err)
+	}
+	if callCount != 3 {
+		t.Fatalf("expected three provider requests, got %d", callCount)
+	}
+	if len(thirdRequestMessages) == 0 {
+		t.Fatal("expected third provider request messages")
+	}
+	for _, msg := range thirdRequestMessages {
+		if msg.Role != "tool" {
+			continue
+		}
+		if msg.ToolCallID != "tc-history" {
+			t.Fatalf("expected tool message to retain tool_call_id, got %#v", msg)
+		}
+		return
+	}
+	t.Fatal("expected tool message in third provider request")
 }
 
 // echoTool is a simple test tool for agent tests

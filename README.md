@@ -6,6 +6,18 @@ The README now stays focused on orientation and quick start. Detailed guides and
 
 ## Quick start
 
+If you want to use the bare `or3-intern` command from your shell, install it once:
+
+```bash
+./scripts/install-cli.sh
+```
+
+Then verify the binary is available:
+
+```bash
+or3-intern version
+```
+
 1. Run guided setup:
    ```bash
    go run ./cmd/or3-intern init
@@ -21,6 +33,8 @@ The README now stays focused on orientation and quick start. Detailed guides and
 
 The `init` command can store provider settings in `~/.or3-intern/config.json`, so you only need environment variables when you prefer them.
 
+Use `go run ./cmd/or3-intern ...` for ad hoc local runs, or install the binary first if you want every command in the reference to work exactly as `or3-intern ...`.
+
 ## Core features
 
 - Shared agent runtime for CLI, service mode, channels, and autonomous jobs
@@ -35,6 +49,7 @@ The `init` command can store provider settings in `~/.or3-intern/config.json`, s
 ## Commands
 
 - `or3-intern init` guided first-run setup
+- `or3-intern config-path` print the resolved config.json path
 - `or3-intern chat` interactive CLI
 - `or3-intern serve` run enabled external channels and automation
 - `or3-intern service` run the internal authenticated HTTP API for OR3 Net
@@ -50,6 +65,7 @@ The `init` command can store provider settings in `~/.or3-intern/config.json`, s
 - `or3-intern scope <link|list|resolve>` link multiple session keys to a shared history scope
 - `or3-intern migrate-jsonl /path/to/session.jsonl [session_key]`
 - `or3-intern version`
+- `or3-intern help [command]` show root or command-specific help
 
 See [CLI Reference](docs/cli-reference.md) for command details.
 

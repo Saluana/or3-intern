@@ -29,6 +29,7 @@ var rootHelpSections = []struct {
 	{
 		Title: "Primary commands",
 		Items: []helpItem{
+			{Name: "configure", Description: "Interactive configuration wizard for setup and later edits"},
 			{Name: "init", Description: "Guided first-run setup for config and provider settings"},
 			{Name: "config-path", Description: "Print the resolved config.json path"},
 			{Name: "chat", Description: "Interactive CLI session"},
@@ -61,11 +62,24 @@ var rootHelpSections = []struct {
 }
 
 var helpTopics = map[string]helpCommand{
+	"configure": {
+		Usage:   "or3-intern configure [--section provider|storage|workspace|web|channels|service] ...",
+		Summary: "Interactive configuration wizard for first-run setup and later edits.",
+		Description: []string{
+			"Loads the active config when present, shows a short summary, and prompts only for the sections you want to change.",
+			"Use repeatable --section flags for targeted updates, or run without flags to choose sections interactively.",
+		},
+		Flags: []helpItem{
+			{Name: "--section <name>", Description: "Repeatable section filter: provider, storage, workspace, web, channels, service"},
+		},
+		Examples: []string{"or3-intern configure", "or3-intern configure --section provider --section web", "or3-intern configure --section channels"},
+	},
 	"init": {
 		Usage:   "or3-intern init",
-		Summary: "Guided first-run setup.",
+		Summary: "Guided first-run setup alias.",
 		Description: []string{
-			"Prompts for provider settings, storage paths, and workspace restrictions, then writes config.json.",
+			"Runs the same configure wizard with the original first-run sections: provider, storage, workspace, and web.",
+			"Use `or3-intern configure` directly when you want channels, service, or custom section selection.",
 		},
 		Examples: []string{"or3-intern init"},
 	},
@@ -393,7 +407,7 @@ func printRootHelp(w io.Writer) {
 	printHelpItems(w, []helpItem{{Name: "--config <path>", Description: "Path to config.json"}, {Name: "-h, --help", Description: "Show help for the root command or a subcommand"}})
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, "Examples:")
-	for _, example := range []string{"or3-intern chat", "or3-intern doctor --strict", "or3-intern approvals --help", "or3-intern help skills"} {
+	for _, example := range []string{"or3-intern configure", "or3-intern chat", "or3-intern doctor --strict", "or3-intern approvals --help", "or3-intern help skills"} {
 		_, _ = fmt.Fprintf(w, "  %s\n", example)
 	}
 }

@@ -25,10 +25,10 @@ If you prefer not to install anything yet, every example below also works with `
 ### 1. Initialize the runtime
 
 ```bash
-or3-intern init
+or3-intern configure
 ```
 
-The guided setup writes provider and runtime settings to `~/.or3-intern/config.json`.
+The guided wizard writes provider and runtime settings to `~/.or3-intern/config.json`. Re-run targeted sections later with commands like `or3-intern configure --section provider --section web`.
 
 ### 2. Start an interactive local session
 
@@ -70,7 +70,7 @@ Common files and directories include:
 
 ## Recommended first-run sequence
 
-1. Run `init`
+1. Run `configure`
 2. Confirm `chat` works with a simple question
 3. Review [configuration-reference.md](configuration-reference.md)
 4. Run `or3-intern doctor --strict` before exposing channels or service mode

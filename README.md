@@ -20,18 +20,18 @@ or3-intern version
 
 1. Run guided setup:
    ```bash
-   go run ./cmd/or3-intern init
+   or3-intern configure
    ```
 2. Start an interactive local session:
    ```bash
-   go run ./cmd/or3-intern chat
+   or3-intern chat
    ```
 3. Or run enabled external channels and automation:
    ```bash
-   go run ./cmd/or3-intern serve
+   or3-intern serve
    ```
 
-The `init` command can store provider settings in `~/.or3-intern/config.json`, so you only need environment variables when you prefer them.
+The `configure` command is the recommended setup flow and supports re-running specific sections later with `--section`. The lighter `init` command still exists for the original first-run provider/storage flow.
 
 Use `go run ./cmd/or3-intern ...` for ad hoc local runs, or install the binary first if you want every command in the reference to work exactly as `or3-intern ...`.
 
@@ -48,6 +48,7 @@ Use `go run ./cmd/or3-intern ...` for ad hoc local runs, or install the binary f
 
 ## Commands
 
+- `or3-intern configure [--section ...]` interactive setup and reconfiguration wizard
 - `or3-intern init` guided first-run setup
 - `or3-intern config-path` print the resolved config.json path
 - `or3-intern chat` interactive CLI

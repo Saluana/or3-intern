@@ -73,6 +73,9 @@ func TestPrintHelpTopic_Root(t *testing.T) {
 	if !strings.Contains(got, "config-path") {
 		t.Fatalf("expected config-path command in root help, got %q", got)
 	}
+	if !strings.Contains(got, "configure") {
+		t.Fatalf("expected configure command in root help, got %q", got)
+	}
 }
 
 func TestHelpTopicPath_IgnoresFlagsAfterCommandPath(t *testing.T) {
@@ -93,6 +96,20 @@ func TestPrintHelpTopic_ConfigPath(t *testing.T) {
 	}
 	if !strings.Contains(got, "Print the resolved path to config.json") {
 		t.Fatalf("expected config-path summary, got %q", got)
+	}
+}
+
+func TestPrintHelpTopic_Configure(t *testing.T) {
+	var out bytes.Buffer
+	if err := printHelpTopic(&out, []string{"configure"}); err != nil {
+		t.Fatalf("printHelpTopic: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "or3-intern configure") {
+		t.Fatalf("expected configure usage, got %q", got)
+	}
+	if !strings.Contains(got, "provider, storage, workspace, web, channels, service") {
+		t.Fatalf("expected section list, got %q", got)
 	}
 }
 

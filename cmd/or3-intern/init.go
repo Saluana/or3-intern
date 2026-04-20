@@ -49,90 +49,15 @@ func runInit(cfgPath string) error {
 }
 
 func runInitWithIO(in io.Reader, out io.Writer, cfgPath, cwd string) error {
-	reader := bufio.NewReader(in)
-	cfg := initDefaults(cwd)
-
-	fmt.Fprintln(out, "or3-intern setup")
-	fmt.Fprintln(out, "We'll create a config file and pick defaults that work well for local testing.")
-	fmt.Fprintf(out, "Config file: %s\n\n", cfgPath)
-
-	providerChoice, err := promptChoice(reader, out,
-		"Choose your provider",
-		[]string{"1) OpenAI", "2) OpenRouter", "3) Custom OpenAI-compatible"},
-		defaultProviderChoice(cfg.Provider.APIBase),
-	)
-	if err != nil {
-		return err
-	}
-	applyProviderPreset(&cfg, providerChoice)
-
-	cfg.Provider.APIBase, err = promptString(reader, out, "API base", cfg.Provider.APIBase)
-	if err != nil {
-		return err
-	}
-	cfg.Provider.Model, err = promptString(reader, out, "Chat model", cfg.Provider.Model)
-	if err != nil {
-		return err
-	}
-	cfg.Provider.EmbedModel, err = promptString(reader, out, "Embedding model", cfg.Provider.EmbedModel)
-	if err != nil {
-		return err
-	}
-
-	saveKey, err := promptBool(reader, out, "Save API key in config.json (stored locally with restricted permissions; env vars are safer)?", strings.TrimSpace(cfg.Provider.APIKey) != "")
-	if err != nil {
-		return err
-	}
-	if saveKey {
-		cfg.Provider.APIKey, err = promptString(reader, out, "API key", cfg.Provider.APIKey)
-		if err != nil {
-			return err
-		}
-	} else {
-		cfg.Provider.APIKey = ""
-	}
-
-	cfg.DBPath, err = promptString(reader, out, "SQLite DB path", cfg.DBPath)
-	if err != nil {
-		return err
-	}
-	cfg.ArtifactsDir, err = promptString(reader, out, "Artifacts directory", cfg.ArtifactsDir)
-	if err != nil {
-		return err
-	}
-
-	restrictWorkspace, err := promptBool(reader, out, "Restrict file tools to the current workspace?", cfg.Tools.RestrictToWorkspace)
-	if err != nil {
-		return err
-	}
-	cfg.Tools.RestrictToWorkspace = restrictWorkspace
-	if restrictWorkspace {
-		cfg.WorkspaceDir = cwd
-	} else if strings.TrimSpace(cfg.WorkspaceDir) == "" {
-		cfg.WorkspaceDir = cwd
-	}
-
-	cfg.Tools.BraveAPIKey, err = promptString(reader, out, "Brave Search API key (optional)", cfg.Tools.BraveAPIKey)
-	if err != nil {
-		return err
-	}
-
-	if err := config.Save(cfgPath, cfg); err != nil {
-		return err
-	}
-
+	fmt.Fprintln(out, "or3-intern init")
+	fmt.Fprintln(out, "`init` now uses the same configure wizard under the hood with the original first-run sections.")
 	fmt.Fprintln(out)
-	fmt.Fprintf(out, "Saved config to %s\n", cfgPath)
-	fmt.Fprintf(out, "Provider: %s\n", initProviderPresets[providerChoice].label)
-	fmt.Fprintf(out, "DB: %s\n", cfg.DBPath)
-	fmt.Fprintf(out, "Artifacts: %s\n", cfg.ArtifactsDir)
-	if cfg.Tools.RestrictToWorkspace && strings.TrimSpace(cfg.WorkspaceDir) != "" {
-		fmt.Fprintf(out, "Workspace restriction: enabled (%s)\n", cfg.WorkspaceDir)
-	}
-	fmt.Fprintln(out)
-	fmt.Fprintln(out, "Next step:")
-	fmt.Fprintln(out, "  or3-intern chat")
-	return nil
+	return runConfigureWithIO(in, out, cfgPath, cwd, []string{
+		"--section", "provider",
+		"--section", "storage",
+		"--section", "workspace",
+		"--section", "web",
+	})
 }
 
 func initDefaults(cwd string) config.Config {

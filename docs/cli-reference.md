@@ -13,6 +13,7 @@ If you are running directly from a checkout without installing, replace `or3-int
 
 | Command | Purpose |
 | --- | --- |
+| `or3-intern configure [--section ...]` | Interactive setup and reconfiguration wizard for provider, storage, workspace, web, channels, and service |
 | `or3-intern init` | Guided first-run setup for config and provider settings |
 | `or3-intern config-path` | Prints the resolved config.json path |
 | `or3-intern chat` | Interactive CLI session |
@@ -21,6 +22,29 @@ If you are running directly from a checkout without installing, replace `or3-int
 | `or3-intern agent -m "..."` | Runs a one-shot foreground turn |
 | `or3-intern version` | Prints the binary version |
 | `or3-intern help [command]` | Shows root help or command-specific help |
+
+### `or3-intern configure`
+
+Interactive setup and reconfiguration wizard. It loads the active config when present, shows a summary, and lets you change only the sections you care about.
+
+Examples:
+
+```
+or3-intern configure
+or3-intern configure --section provider --section web
+or3-intern configure --section channels
+```
+
+Available sections:
+
+- `provider`
+- `storage`
+- `workspace`
+- `web`
+- `channels`
+- `service`
+
+Use `or3-intern init` if you only want the original lightweight first-run provider/storage wizard.
 
 ## Operational and admin commands
 

@@ -84,6 +84,9 @@ func TestRunInitWithIO_WritesConfig(t *testing.T) {
 	if !strings.Contains(out.String(), "Saved config") {
 		t.Fatalf("expected success output, got %q", out.String())
 	}
+	if !strings.Contains(out.String(), "or3-intern init") {
+		t.Fatalf("expected init alias banner, got %q", out.String())
+	}
 	if !strings.Contains(out.String(), "or3-intern chat") {
 		t.Fatalf("expected next-step instructions, got %q", out.String())
 	}

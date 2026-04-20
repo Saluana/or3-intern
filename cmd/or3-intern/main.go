@@ -75,6 +75,13 @@ func main() {
 		fmt.Fprintln(os.Stdout, cfgPathOrDefault(cfgPath))
 		return
 	}
+	if cmd == "configure" {
+		if err := runConfigure(cfgPath, args[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, "configure error:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if cmd == "init" {
 		if err := runInit(cfgPath); err != nil {
 			fmt.Fprintln(os.Stderr, "init error:", err)
@@ -86,6 +93,9 @@ func main() {
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "config error:", err)
+		if hint := configErrorHint(err); hint != "" {
+			fmt.Fprintln(os.Stderr, hint)
+		}
 		os.Exit(1)
 	}
 	if cmd == "doctor" {
@@ -565,6 +575,17 @@ func main() {
 		cancel()
 	}
 	_ = channelManager.StopAll(context.Background())
+}
+
+func configErrorHint(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	if strings.Contains(message, " enabled: set ") && strings.Contains(message, "inboundpolicy=pairing") {
+		return "hint: run `or3-intern configure --section channels` and choose an inbound access mode for the enabled channel"
+	}
+	return ""
 }
 
 func subagentsEnabledForCommand(cmd string, cfg config.Config) bool {

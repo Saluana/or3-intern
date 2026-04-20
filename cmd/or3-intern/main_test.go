@@ -13,6 +13,23 @@ func TestConfigErrorHint(t *testing.T) {
 	}
 }
 
+func TestCommandBootstrapBoundaries(t *testing.T) {
+	for _, cmd := range []string{"config-path", "version", "configure", "init"} {
+		if !commandHandledBeforeConfigLoad(cmd) {
+			t.Fatalf("expected %q to be handled before config load", cmd)
+		}
+	}
+	if commandHandledBeforeConfigLoad("chat") {
+		t.Fatal("expected chat to require config load")
+	}
+	if !commandHandledBeforeRuntimeBootstrap("capabilities") {
+		t.Fatal("expected capabilities to be handled before runtime bootstrap")
+	}
+	if commandHandledBeforeRuntimeBootstrap("chat") {
+		t.Fatal("expected chat to require runtime bootstrap")
+	}
+}
+
 func assertErr(text string) error {
 	return testError(text)
 }

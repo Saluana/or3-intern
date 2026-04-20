@@ -20,6 +20,9 @@ func runApprovalsCommand(ctx context.Context, broker *approval.Broker, args []st
 	}
 	switch strings.ToLower(strings.TrimSpace(args[0])) {
 	case "list":
+		if err := requireArgRange(args[1:], 0, 1, "approvals list [status]"); err != nil {
+			return err
+		}
 		status := ""
 		if len(args) > 1 {
 			status = strings.TrimSpace(args[1])
@@ -33,8 +36,8 @@ func runApprovalsCommand(ctx context.Context, broker *approval.Broker, args []st
 		}
 		return nil
 	case "show":
-		if len(args) < 2 {
-			return fmt.Errorf("usage: approvals show <id>")
+		if err := requireExactArgs(args[1:], 1, "approvals show <id>"); err != nil {
+			return err
 		}
 		id, err := strconv.ParseInt(strings.TrimSpace(args[1]), 10, 64)
 		if err != nil {
@@ -54,8 +57,8 @@ func runApprovalsCommand(ctx context.Context, broker *approval.Broker, args []st
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		if fs.NArg() < 1 {
-			return fmt.Errorf("usage: approvals approve <id> [--allowlist] [--note text]")
+		if err := requireExactFlagArgs(fs, 1, "approvals approve <id> [--allowlist] [--note text]"); err != nil {
+			return err
 		}
 		id, err := strconv.ParseInt(strings.TrimSpace(fs.Arg(0)), 10, 64)
 		if err != nil {
@@ -77,8 +80,8 @@ func runApprovalsCommand(ctx context.Context, broker *approval.Broker, args []st
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		if fs.NArg() < 1 {
-			return fmt.Errorf("usage: approvals deny <id> [--note text]")
+		if err := requireExactFlagArgs(fs, 1, "approvals deny <id> [--note text]"); err != nil {
+			return err
 		}
 		id, err := strconv.ParseInt(strings.TrimSpace(fs.Arg(0)), 10, 64)
 		if err != nil {
@@ -102,6 +105,9 @@ func runApprovalAllowlistCommand(ctx context.Context, broker *approval.Broker, a
 	}
 	switch strings.ToLower(strings.TrimSpace(args[0])) {
 	case "list":
+		if err := requireArgRange(args[1:], 0, 1, "approvals allowlist list [domain]"); err != nil {
+			return err
+		}
 		domain := ""
 		if len(args) > 1 {
 			domain = strings.TrimSpace(args[1])
@@ -115,8 +121,8 @@ func runApprovalAllowlistCommand(ctx context.Context, broker *approval.Broker, a
 		}
 		return nil
 	case "remove":
-		if len(args) < 2 {
-			return fmt.Errorf("usage: approvals allowlist remove <id>")
+		if err := requireExactArgs(args[1:], 1, "approvals allowlist remove <id>"); err != nil {
+			return err
 		}
 		id, err := strconv.ParseInt(strings.TrimSpace(args[1]), 10, 64)
 		if err != nil {
@@ -144,8 +150,12 @@ func runApprovalAllowlistCommand(ctx context.Context, broker *approval.Broker, a
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
+		if err := requireExactFlagArgs(fs, 0, "approvals allowlist add [--domain exec|skill_execution] [matcher flags]"); err != nil {
+			return err
+		}
 		scope := approval.AllowlistScope{HostID: strings.TrimSpace(*hostID), Tool: strings.TrimSpace(*toolName), Profile: strings.TrimSpace(*profile), Agent: strings.TrimSpace(*agent)}
 		var matcher any
+		domainName := strings.TrimSpace(*domain)
 		switch strings.TrimSpace(*domain) {
 		case string(approval.SubjectExec):
 			matcher = approval.ExecAllowlistMatcher{ExecutablePath: strings.TrimSpace(*program), WorkingDir: strings.TrimSpace(*cwd)}
@@ -153,6 +163,9 @@ func runApprovalAllowlistCommand(ctx context.Context, broker *approval.Broker, a
 			matcher = approval.SkillAllowlistMatcher{SkillID: strings.TrimSpace(*skillID), Version: strings.TrimSpace(*version), Origin: strings.TrimSpace(*origin), TrustState: strings.TrimSpace(*trust)}
 		default:
 			return fmt.Errorf("unsupported allowlist domain")
+		}
+		if err := approval.ValidateAllowlistMatcher(domainName, matcher); err != nil {
+			return err
 		}
 		rec, err := broker.AddAllowlist(ctx, strings.TrimSpace(*domain), scope, matcher, "cli", 0)
 		if err != nil {

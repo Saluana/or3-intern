@@ -57,6 +57,9 @@ func runSkillsCommandWithDeps(ctx context.Context, cfg config.Config, args []str
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
+		if err := requireExactFlagArgs(fs, 0, "or3-intern skills list [--eligible]"); err != nil {
+			return err
+		}
 		inv := deps.LoadInventory(deps.LoadToolNames(ctx, cfg))
 		if len(inv.Skills) == 0 {
 			_, _ = fmt.Fprintln(deps.Stdout, "(no skills found)")
@@ -85,8 +88,8 @@ func runSkillsCommandWithDeps(ctx context.Context, cfg config.Config, args []str
 		}
 		return nil
 	case "info":
-		if len(args) < 2 {
-			return fmt.Errorf("usage: or3-intern skills info <name>")
+		if err := requireExactArgs(args[1:], 1, "or3-intern skills info <name>"); err != nil {
+			return err
 		}
 		inv := deps.LoadInventory(deps.LoadToolNames(ctx, cfg))
 		skill, ok := inv.Get(args[1])
@@ -138,6 +141,9 @@ func runSkillsCommandWithDeps(ctx context.Context, cfg config.Config, args []str
 		}
 		return nil
 	case "check":
+		if err := requireExactArgs(args[1:], 0, "or3-intern skills check"); err != nil {
+			return err
+		}
 		inv := deps.LoadInventory(deps.LoadToolNames(ctx, cfg))
 		if len(inv.Skills) == 0 {
 			_, _ = fmt.Fprintln(deps.Stdout, "(no skills found)")
@@ -198,8 +204,8 @@ func runSkillsCommandWithDeps(ctx context.Context, cfg config.Config, args []str
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		if fs.NArg() < 1 {
-			return fmt.Errorf("usage: or3-intern skills install <slug> [--version v]")
+		if err := requireExactFlagArgs(fs, 1, "or3-intern skills install <slug> [--version v]"); err != nil {
+			return err
 		}
 		result, err := deps.Client.Install(ctx, fs.Arg(0), *version, resolveInstallRoot(cfg), clawhub.InstallOptions{Force: *force})
 		if err != nil {
@@ -228,14 +234,16 @@ func runSkillsCommandWithDeps(ctx context.Context, cfg config.Config, args []str
 		}
 		targets := installed
 		if !*all {
-			if fs.NArg() < 1 {
-				return fmt.Errorf("usage: or3-intern skills update <name>|--all")
+			if err := requireExactFlagArgs(fs, 1, "or3-intern skills update <name>|--all"); err != nil {
+				return err
 			}
 			match, matchErr := findInstalledSkill(installed, fs.Arg(0))
 			if matchErr != nil {
 				return matchErr
 			}
 			targets = []clawhub.InstalledSkill{match}
+		} else if err := requireExactFlagArgs(fs, 0, "or3-intern skills update <name>|--all"); err != nil {
+			return err
 		}
 		if len(targets) == 0 {
 			_, _ = fmt.Fprintln(deps.Stdout, "(no installed skills)")
@@ -269,8 +277,8 @@ func runSkillsCommandWithDeps(ctx context.Context, cfg config.Config, args []str
 		}
 		return nil
 	case "remove":
-		if len(args) < 2 {
-			return fmt.Errorf("usage: or3-intern skills remove <name>")
+		if err := requireExactArgs(args[1:], 1, "or3-intern skills remove <name>"); err != nil {
+			return err
 		}
 		root := resolveInstallRoot(cfg)
 		installed, err := clawhub.ListInstalled(root)

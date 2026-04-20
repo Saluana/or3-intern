@@ -25,11 +25,11 @@ func testApprovalBroker(t *testing.T) *approval.Broker {
 	cfg.HostID = "test-host"
 	cfg.Exec.Mode = config.ApprovalModeAsk
 	return &approval.Broker{
-		DB:     database,
-		Config: cfg,
-		HostID: "test-host",
+		DB:      database,
+		Config:  cfg,
+		HostID:  "test-host",
 		SignKey: []byte("0123456789abcdef0123456789abcdef"),
-		Now:    func() time.Time { return time.Unix(1700000000, 0).UTC() },
+		Now:     func() time.Time { return time.Unix(1700000000, 0).UTC() },
 	}
 }
 
@@ -258,6 +258,29 @@ func TestRunApprovalAllowlistCommand_UnknownSubcommand(t *testing.T) {
 	err := runApprovalsCommand(context.Background(), broker, []string{"allowlist", "unknown"}, &out, &out)
 	if err == nil {
 		t.Fatal("expected error for unknown allowlist subcommand")
+	}
+}
+
+func TestRunApprovalsCommand_RejectsExtraArgs(t *testing.T) {
+	broker := testApprovalBroker(t)
+	var out bytes.Buffer
+	for _, args := range [][]string{{"show", "1", "extra"}, {"list", "pending", "extra"}, {"allowlist", "add", "extra"}} {
+		if err := runApprovalsCommand(context.Background(), broker, args, &out, &out); err == nil {
+			t.Fatalf("expected args %v to fail", args)
+		}
+	}
+}
+
+func TestRunApprovalAllowlistCommand_RejectsEmptyMatcher(t *testing.T) {
+	broker := testApprovalBroker(t)
+	var out bytes.Buffer
+	var errBuf bytes.Buffer
+	err := runApprovalsCommand(context.Background(), broker, []string{"allowlist", "add", "--domain", "exec"}, &out, &errBuf)
+	if err == nil {
+		t.Fatal("expected empty exec allowlist matcher to fail")
+	}
+	if !strings.Contains(err.Error(), "must include at least one") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

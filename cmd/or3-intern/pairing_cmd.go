@@ -20,6 +20,9 @@ func runPairingCommand(ctx context.Context, broker *approval.Broker, args []stri
 	}
 	switch strings.ToLower(strings.TrimSpace(args[0])) {
 	case "list":
+		if err := requireArgRange(args[1:], 0, 1, "pairing list [status]"); err != nil {
+			return err
+		}
 		status := ""
 		if len(args) > 1 {
 			status = strings.TrimSpace(args[1])
@@ -42,6 +45,9 @@ func runPairingCommand(ctx context.Context, broker *approval.Broker, args []stri
 		channel := fs.String("channel", "", "channel name to bind")
 		identity := fs.String("identity", "", "channel identity to bind")
 		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if err := requireExactFlagArgs(fs, 0, "pairing request [--role role] [--name display] [--origin text] [--device id] [--channel name --identity value]"); err != nil {
 			return err
 		}
 		metadata := map[string]any{}
@@ -68,8 +74,8 @@ func runPairingCommand(ctx context.Context, broker *approval.Broker, args []stri
 		_, _ = fmt.Fprintf(stdout, "id: %d\nstatus: %s\ndevice_id: %s\nrole: %s\ncode: %s\n", req.ID, req.Status, req.DeviceID, req.Role, code)
 		return nil
 	case "approve":
-		if len(args) < 2 {
-			return fmt.Errorf("usage: pairing approve <request-id>")
+		if err := requireExactArgs(args[1:], 1, "pairing approve <request-id>"); err != nil {
+			return err
 		}
 		id, err := strconv.ParseInt(strings.TrimSpace(args[1]), 10, 64)
 		if err != nil {
@@ -82,8 +88,8 @@ func runPairingCommand(ctx context.Context, broker *approval.Broker, args []stri
 		_, _ = fmt.Fprintf(stdout, "approved pairing request %d for %s\n", req.ID, req.DeviceID)
 		return nil
 	case "deny":
-		if len(args) < 2 {
-			return fmt.Errorf("usage: pairing deny <request-id>")
+		if err := requireExactArgs(args[1:], 1, "pairing deny <request-id>"); err != nil {
+			return err
 		}
 		id, err := strconv.ParseInt(strings.TrimSpace(args[1]), 10, 64)
 		if err != nil {
@@ -95,8 +101,8 @@ func runPairingCommand(ctx context.Context, broker *approval.Broker, args []stri
 		_, _ = fmt.Fprintf(stdout, "denied pairing request %d\n", id)
 		return nil
 	case "exchange":
-		if len(args) < 3 {
-			return fmt.Errorf("usage: pairing exchange <request-id> <code>")
+		if err := requireExactArgs(args[1:], 2, "pairing exchange <request-id> <code>"); err != nil {
+			return err
 		}
 		id, err := strconv.ParseInt(strings.TrimSpace(args[1]), 10, 64)
 		if err != nil {

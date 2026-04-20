@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -37,7 +38,6 @@ func TestRunConfigureWithIO_TargetedSections(t *testing.T) {
 		"",
 		"",
 		"",
-		"y",
 		"router-key",
 		"brave-key",
 		"http://proxy.internal:8080",
@@ -200,5 +200,79 @@ func TestRunConfigureWithIO_WarnsWhenSavedConfigIsStillInvalid(t *testing.T) {
 	}
 	if strings.Contains(text, "or3-intern serve") {
 		t.Fatalf("did not expect serve next step while config is invalid, got %q", text)
+	}
+}
+
+func TestRunConfigureWithIO_SecretPromptKeepsExistingValueWithoutLeakingIt(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+
+	cfg := config.Default()
+	cfg.Provider.APIKey = "super-secret-key"
+	b, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(configPath, b, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	input := strings.NewReader(strings.Join([]string{"", "", "", "", ""}, "\n"))
+	var out strings.Builder
+	if err := runConfigureWithIO(input, &out, configPath, "/workspace/project", []string{"--section", "provider"}); err != nil {
+		t.Fatalf("runConfigureWithIO: %v", err)
+	}
+
+	loaded, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.Provider.APIKey != "super-secret-key" {
+		t.Fatalf("expected existing secret preserved, got %q", loaded.Provider.APIKey)
+	}
+	if strings.Contains(out.String(), "super-secret-key") {
+		t.Fatalf("expected output not to leak existing secret, got %q", out.String())
+	}
+}
+
+func TestRunConfigureWithIO_SecretPromptCanClearExistingValue(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+
+	cfg := config.Default()
+	cfg.Provider.APIKey = "super-secret-key"
+	b, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(configPath, b, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	input := strings.NewReader(strings.Join([]string{"", "", "", "", "clear"}, "\n"))
+	var out strings.Builder
+	if err := runConfigureWithIO(input, &out, configPath, "/workspace/project", []string{"--section", "provider"}); err != nil {
+		t.Fatalf("runConfigureWithIO: %v", err)
+	}
+
+	loaded, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.Provider.APIKey != "" {
+		t.Fatalf("expected secret cleared, got %q", loaded.Provider.APIKey)
+	}
+}
+
+func TestPromptSecretString_ExistingValueUsesSinglePromptContract(t *testing.T) {
+	reader := bufio.NewReader(strings.NewReader("replacement-value\n"))
+	var out strings.Builder
+	value, err := promptSecretString(reader, &out, "API key", "current-secret")
+	if err != nil {
+		t.Fatalf("promptSecretString: %v", err)
+	}
+	if value != "replacement-value" {
+		t.Fatalf("expected replacement value, got %q", value)
+	}
+	text := out.String()
+	if !strings.Contains(text, "leave blank to keep current") {
+		t.Fatalf("expected keep-current hint, got %q", text)
+	}
+	if strings.Contains(text, "Keep current value") {
+		t.Fatalf("expected single prompt contract, got %q", text)
 	}
 }

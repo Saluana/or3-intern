@@ -10,6 +10,16 @@ import (
 	"or3-intern/internal/security"
 )
 
+func validateStrictAuditBeforeMutation(audit *security.AuditLogger) error {
+	if audit == nil || !audit.Strict {
+		return nil
+	}
+	if audit.DB == nil || len(audit.Key) == 0 {
+		return fmt.Errorf("audit logger unavailable")
+	}
+	return nil
+}
+
 func runSecretsCommand(ctx context.Context, mgr *security.SecretManager, audit *security.AuditLogger, args []string, stdout, stderr io.Writer) error {
 	if stdout == nil {
 		stdout = os.Stdout
@@ -30,10 +40,13 @@ func runSecretsCommand(ctx context.Context, mgr *security.SecretManager, audit *
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		if fs.NArg() < 2 {
-			return fmt.Errorf("usage: or3-intern secrets set <name> <value>")
+		if err := requireExactFlagArgs(fs, 2, "or3-intern secrets set <name> <value>"); err != nil {
+			return err
 		}
 		name, value := fs.Arg(0), fs.Arg(1)
+		if err := validateStrictAuditBeforeMutation(audit); err != nil {
+			return err
+		}
 		if err := mgr.Put(ctx, name, value); err != nil {
 			return err
 		}
@@ -45,8 +58,11 @@ func runSecretsCommand(ctx context.Context, mgr *security.SecretManager, audit *
 		_, _ = fmt.Fprintf(stdout, "stored\t%s\n", name)
 		return nil
 	case "delete":
-		if len(args) < 2 {
-			return fmt.Errorf("usage: or3-intern secrets delete <name>")
+		if err := requireExactArgs(args[1:], 1, "or3-intern secrets delete <name>"); err != nil {
+			return err
+		}
+		if err := validateStrictAuditBeforeMutation(audit); err != nil {
+			return err
 		}
 		if err := mgr.Delete(ctx, args[1]); err != nil {
 			return err
@@ -59,6 +75,9 @@ func runSecretsCommand(ctx context.Context, mgr *security.SecretManager, audit *
 		_, _ = fmt.Fprintf(stdout, "deleted\t%s\n", args[1])
 		return nil
 	case "list":
+		if err := requireExactArgs(args[1:], 0, "or3-intern secrets list"); err != nil {
+			return err
+		}
 		names, err := mgr.List(ctx)
 		if err != nil {
 			return err

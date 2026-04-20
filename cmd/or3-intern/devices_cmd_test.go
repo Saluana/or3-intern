@@ -231,6 +231,16 @@ func TestRunDevicesCommand_UnknownSubcommand(t *testing.T) {
 	}
 }
 
+func TestRunDevicesCommand_RejectsExtraArgs(t *testing.T) {
+	broker := testDevicesBroker(t)
+	var out bytes.Buffer
+	for _, args := range [][]string{{"list", "extra"}, {"approve", "1", "extra"}, {"rotate", "device-1", "extra"}} {
+		if err := runDevicesCommand(context.Background(), broker, args, &out, &out); err == nil {
+			t.Fatalf("expected args %v to fail", args)
+		}
+	}
+}
+
 // TestRunDevicesCommand_CLI_ActorStamping verifies that CLI-triggered pairing
 // actions use the "cli" actor string in audit-visible state changes.
 func TestRunDevicesCommand_CLI_ActorStamping(t *testing.T) {

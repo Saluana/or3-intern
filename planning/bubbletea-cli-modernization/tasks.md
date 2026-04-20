@@ -16,7 +16,7 @@
 - [x] (Req: 1, 6, 12) Refactor [cmd/or3-intern/configure.go](cmd/or3-intern/configure.go) into pure section draft/application helpers so UI state is separate from config mutation logic.
 - [x] (Req: 1, 6, 12) Keep [cmd/or3-intern/init.go](cmd/or3-intern/init.go) as a thin first-run alias that preselects the provider/storage/workspace/web sections.
 - [x] (Req: 6, 12) Preserve current lenient repair loading behavior, but expose it via a structured warning state consumable by the TUI.
-- [ ] (Req: 3) Update [cmd/or3-intern/help.go](cmd/or3-intern/help.go) and docs so interactive vs non-interactive behavior stays discoverable.
+- [x] (Req: 3) Update [cmd/or3-intern/help.go](cmd/or3-intern/help.go) and docs so interactive vs non-interactive behavior stays discoverable.
 
 ## 4. Build the Bubble Tea configure/init experience
 - [x] (Req: 1, 2) Implement a root Bubble Tea model for `configure` with section navigation, resize handling, save/apply state, and global quit/help behavior.
@@ -34,44 +34,44 @@
 - [x] (Req: 1, 2) Implement service form state for enable toggle, listen address, and shared secret handling.
 
 ## 6. Fix configure secret handling while migrating to TUI
-- [ ] (Req: 5, 6) Replace secret-bearing prompt defaults with secret-aware field state that supports keep/replace/clear without displaying existing values.
-- [ ] (Req: 5) Apply this to provider API key, Telegram/Slack/Discord/WhatsApp tokens, email passwords, and service secret in [cmd/or3-intern/configure.go](cmd/or3-intern/configure.go) and shared helpers.
-- [ ] (Req: 6) Ensure declining to replace a configured secret preserves the current stored value rather than blanking it.
-- [ ] (Req: 5, 6) Add regression tests in [cmd/or3-intern/configure_test.go](cmd/or3-intern/configure_test.go) for hidden secrets and preserved values.
+- [x] (Req: 5, 6) Replace secret-bearing prompt defaults with secret-aware field state that supports keep/replace/clear without displaying existing values.
+- [x] (Req: 5) Apply this to provider API key, Telegram/Slack/Discord/WhatsApp tokens, email passwords, and service secret in [cmd/or3-intern/configure.go](cmd/or3-intern/configure.go) and shared helpers.
+- [x] (Req: 6) Ensure declining to replace a configured secret preserves the current stored value rather than blanking it.
+- [x] (Req: 5, 6) Add regression tests in [cmd/or3-intern/configure_test.go](cmd/or3-intern/configure_test.go) for hidden secrets and preserved values.
 
 ## 7. Tighten admin command parsing and behavior
-- [ ] (Req: 3, 7) Add a small exact-arity validation helper and apply it across fixed-shape subcommands in [cmd/or3-intern/approvals_cmd.go](cmd/or3-intern/approvals_cmd.go), [cmd/or3-intern/devices_cmd.go](cmd/or3-intern/devices_cmd.go), [cmd/or3-intern/pairing_cmd.go](cmd/or3-intern/pairing_cmd.go), [cmd/or3-intern/secrets_cmd.go](cmd/or3-intern/secrets_cmd.go), and [cmd/or3-intern/skills_cmd.go](cmd/or3-intern/skills_cmd.go).
-- [ ] (Req: 7) Add focused regression tests rejecting extra positional args in the affected command test files.
-- [ ] (Req: 1, 2, 3) Decide which human-operated admin flows get Bubble Tea entry screens first (recommended: approvals, pairing/devices) while keeping existing flag syntax intact.
+- [x] (Req: 3, 7) Add a small exact-arity validation helper and apply it across fixed-shape subcommands in [cmd/or3-intern/approvals_cmd.go](cmd/or3-intern/approvals_cmd.go), [cmd/or3-intern/devices_cmd.go](cmd/or3-intern/devices_cmd.go), [cmd/or3-intern/pairing_cmd.go](cmd/or3-intern/pairing_cmd.go), [cmd/or3-intern/secrets_cmd.go](cmd/or3-intern/secrets_cmd.go), and [cmd/or3-intern/skills_cmd.go](cmd/or3-intern/skills_cmd.go).
+- [x] (Req: 7) Add focused regression tests rejecting extra positional args in the affected command test files.
+- [x] (Req: 1, 2, 3) Decide which human-operated admin flows get Bubble Tea entry screens first (recommended: approvals, pairing/devices) while keeping existing flag syntax intact.
 
 ## 8. Fix approval/allowlist safety issues
-- [ ] (Req: 8) Add broker-side matcher validation in [internal/approval/broker.go](internal/approval/broker.go) so empty exec and skill allowlist matchers are rejected before persistence.
-- [ ] (Req: 8) Mirror validation errors in [cmd/or3-intern/approvals_cmd.go](cmd/or3-intern/approvals_cmd.go) for better CLI UX.
-- [ ] (Req: 8) Add regression tests for empty matcher rejection in both broker and CLI tests.
+- [x] (Req: 8) Add broker-side matcher validation in [internal/approval/broker.go](internal/approval/broker.go) so empty exec and skill allowlist matchers are rejected before persistence.
+- [x] (Req: 8) Mirror validation errors in [cmd/or3-intern/approvals_cmd.go](cmd/or3-intern/approvals_cmd.go) for better CLI UX.
+- [x] (Req: 8) Add regression tests for empty matcher rejection in both broker and CLI tests.
 
 ## 9. Fix secrets mutation strict-audit behavior
-- [ ] (Req: 9) Add a shared helper in the security/secret-management path that performs secret mutation and audit append as one operation, or otherwise prevalidates strict audit before mutation.
-- [ ] (Req: 9) Update [cmd/or3-intern/secrets_cmd.go](cmd/or3-intern/secrets_cmd.go) to use the safe helper.
-- [ ] (Req: 9) Add tests proving strict-audit failure does not leave set/delete mutations behind.
+- [x] (Req: 9) Add a shared helper in the security/secret-management path that performs secret mutation and audit append as one operation, or otherwise prevalidates strict audit before mutation.
+- [x] (Req: 9) Update [cmd/or3-intern/secrets_cmd.go](cmd/or3-intern/secrets_cmd.go) to use the safe helper.
+- [x] (Req: 9) Add tests proving strict-audit failure does not leave set/delete mutations behind.
 
 ## 10. Harden service request validation and pairing auth
-- [ ] (Req: 10) Tighten [cmd/or3-intern/service_request.go](cmd/or3-intern/service_request.go) to reject unknown fields and trailing JSON.
-- [ ] (Req: 10) Add request body size caps in [cmd/or3-intern/service.go](cmd/or3-intern/service.go) for pairing, turns, subagents, devices, and approvals endpoints as appropriate.
-- [ ] (Req: 10) Add server-level `ReadTimeout` and `IdleTimeout` in [cmd/or3-intern/service.go](cmd/or3-intern/service.go).
-- [ ] (Req: 11) Update [internal/approval/broker.go](internal/approval/broker.go) so unauthenticated trusted-mode pairing requests stay pending instead of auto-approved.
-- [ ] (Req: 11) Add pairing/service regression tests covering unauthenticated create/exchange behavior.
+- [x] (Req: 10) Tighten [cmd/or3-intern/service_request.go](cmd/or3-intern/service_request.go) to reject unknown fields and trailing JSON.
+- [x] (Req: 10) Add request body size caps in [cmd/or3-intern/service.go](cmd/or3-intern/service.go) for pairing, turns, subagents, devices, and approvals endpoints as appropriate.
+- [x] (Req: 10) Add server-level `ReadTimeout` and `IdleTimeout` in [cmd/or3-intern/service.go](cmd/or3-intern/service.go).
+- [x] (Req: 11) Update [internal/approval/broker.go](internal/approval/broker.go) so unauthenticated trusted-mode pairing requests stay pending instead of auto-approved.
+- [x] (Req: 11) Add pairing/service regression tests covering unauthenticated create/exchange behavior.
 
 ## 11. Strengthen CLI and TUI tests
-- [ ] (Req: 3, 4) Add a `main` command routing test slice proving `version` and `capabilities` avoid runtime bootstrap side effects.
-- [ ] (Req: 1, 2, 12) Add Bubble Tea model tests that simulate key presses for configure/init navigation, toggles, save, back, and quit-confirmation flows.
-- [ ] (Req: 2, 12) Add narrow snapshot-style tests for core screen rendering where stable visual structure matters.
-- [ ] (Req: 10, 11) Add service hardening tests for unknown fields, trailing JSON, oversized bodies, and trusted pairing.
-- [ ] (Req: 7, 8, 9) Extend current command tests for arity validation, empty matcher rejection, and strict-audit secret handling.
+- [x] (Req: 3, 4) Add a `main` command routing test slice proving `version` and `capabilities` avoid runtime bootstrap side effects.
+- [x] (Req: 1, 2, 12) Add Bubble Tea model tests that simulate key presses for configure/init navigation, toggles, save, back, and quit-confirmation flows.
+- [x] (Req: 2, 12) Add narrow snapshot-style tests for core screen rendering where stable visual structure matters.
+- [x] (Req: 10, 11) Add service hardening tests for unknown fields, trailing JSON, oversized bodies, and trusted pairing.
+- [x] (Req: 7, 8, 9) Extend current command tests for arity validation, empty matcher rejection, and strict-audit secret handling.
 
 ## 12. Documentation and rollout
-- [ ] (Req: 1, 2, 3) Update [README.md](README.md), [docs/getting-started.md](docs/getting-started.md), and [docs/cli-reference.md](docs/cli-reference.md) to describe the Bubble Tea setup flow, keybindings, and non-interactive fallbacks.
-- [ ] (Req: 3) Document when TUI mode activates vs when the CLI remains plain text for scripting.
-- [ ] (Req: 2) Add screenshots or terminal recordings later if desired, but keep core docs text-first and repo-local.
+- [x] (Req: 1, 2, 3) Update [README.md](README.md), [docs/getting-started.md](docs/getting-started.md), and [docs/cli-reference.md](docs/cli-reference.md) to describe the Bubble Tea setup flow, keybindings, and non-interactive fallbacks.
+- [x] (Req: 3) Document when TUI mode activates vs when the CLI remains plain text for scripting.
+- [x] (Req: 2) Add screenshots or terminal recordings later if desired, but keep core docs text-first and repo-local.
 
 ## 13. Out of scope
 - [ ] Do not replace the HTTP service, channel workers, or agent runtime with Bubble Tea.

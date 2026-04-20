@@ -30,6 +30,12 @@ or3-intern configure
 
 The guided wizard writes provider and runtime settings to `~/.or3-intern/config.json`. Re-run targeted sections later with commands like `or3-intern configure --section provider --section web`.
 
+When stdin and stdout are both terminals, `configure` opens the Bubble Tea setup UI. Use arrow keys to move, `enter` to select sections or fields, `space` to toggle booleans, `s` to save, and `q` to go back or quit.
+
+When input or output is redirected, piped, or otherwise non-interactive, `configure` falls back to the plain-text prompt flow. That keeps scripted installs and remote automation compatible with earlier behavior. Secret prompts stay single-step in plain-text mode: leave them blank to keep the current value, enter a new value to replace it, or type `clear` to remove the secret.
+
+`or3-intern init` follows the same activation rules, but starts with the original first-run sections: provider, storage, workspace, and web.
+
 ### 2. Start an interactive local session
 
 ```bash
@@ -75,6 +81,13 @@ Common files and directories include:
 3. Review [configuration-reference.md](configuration-reference.md)
 4. Run `or3-intern doctor --strict` before exposing channels or service mode
 5. Enable one advanced feature at a time: channels, skills, triggers, MCP, or service mode
+
+## Interactive vs scripted setup
+
+- Use `or3-intern configure` from a normal terminal when you want the full-screen Bubble Tea setup flow.
+- Use `or3-intern configure --section ...` when you want to revisit only specific areas.
+- Use redirected stdin/stdout, CI shells, or wrappers without TTYs when you want the plain-text prompts instead of the TUI.
+- Use `go run ./cmd/or3-intern ...` anywhere you do not want to install the binary yet; the same TTY detection rules still apply.
 
 ## Where to go next
 

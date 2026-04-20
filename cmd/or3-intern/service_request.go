@@ -48,6 +48,7 @@ type serviceTurnRequestPayload struct {
 	InternSessionKey      string                    `json:"intern_session_key"`
 	SessionKeyCamel       string                    `json:"sessionKey"`
 	InternSessionKeyCamel string                    `json:"internSessionKey"`
+	PlatformSessionRef    map[string]any            `json:"platform_session_ref"`
 	Message               string                    `json:"message"`
 	AllowedTools          []string                  `json:"allowed_tools"`
 	AllowedToolsCamel     []string                  `json:"allowedTools"`
@@ -153,7 +154,15 @@ func decodeServiceSubagentRequest(body io.Reader, registry *tools.Registry) (ser
 func decodeServiceRequestBody(body io.Reader, out any) error {
 	decoder := json.NewDecoder(body)
 	decoder.UseNumber()
-	return decoder.Decode(out)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(out); err != nil {
+		return err
+	}
+	var extra struct{}
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return fmt.Errorf("unexpected trailing data")
+	}
+	return nil
 }
 
 func firstToolPolicy(values ...*serviceToolPolicyPayload) *agent.ServiceToolPolicy {

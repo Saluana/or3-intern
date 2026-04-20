@@ -111,6 +111,12 @@ func TestPrintHelpTopic_Configure(t *testing.T) {
 	if !strings.Contains(got, "provider, storage, workspace, web, channels, service") {
 		t.Fatalf("expected section list, got %q", got)
 	}
+	if !strings.Contains(got, "Bubble Tea setup UI") {
+		t.Fatalf("expected configure help to mention interactive TUI mode, got %q", got)
+	}
+	if !strings.Contains(got, "plain text prompt flow") {
+		t.Fatalf("expected configure help to mention non-interactive fallback, got %q", got)
+	}
 }
 
 func TestCfgPathOrDefault(t *testing.T) {

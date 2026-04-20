@@ -71,25 +71,22 @@ func main() {
 		printRootHelp(os.Stdout)
 		return
 	}
-	if cmd == "config-path" {
-		fmt.Fprintln(os.Stdout, cfgPathOrDefault(cfgPath))
-		return
-	}
-	if cmd == "version" {
-		fmt.Println("or3-intern v1")
-		return
-	}
-	if cmd == "configure" {
-		if err := runConfigure(cfgPath, args[1:]); err != nil {
-			fmt.Fprintln(os.Stderr, "configure error:", err)
-			os.Exit(1)
-		}
-		return
-	}
-	if cmd == "init" {
-		if err := runInit(cfgPath); err != nil {
-			fmt.Fprintln(os.Stderr, "init error:", err)
-			os.Exit(1)
+	if commandHandledBeforeConfigLoad(cmd) {
+		switch cmd {
+		case "config-path":
+			fmt.Fprintln(os.Stdout, cfgPathOrDefault(cfgPath))
+		case "version":
+			fmt.Println("or3-intern v1")
+		case "configure":
+			if err := runConfigure(cfgPath, args[1:]); err != nil {
+				fmt.Fprintln(os.Stderr, "configure error:", err)
+				os.Exit(1)
+			}
+		case "init":
+			if err := runInit(cfgPath); err != nil {
+				fmt.Fprintln(os.Stderr, "init error:", err)
+				os.Exit(1)
+			}
 		}
 		return
 	}
@@ -187,10 +184,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, "approval error:", err)
 		os.Exit(1)
 	}
-	if cmd == "capabilities" {
-		if err := runCapabilitiesCommand(cfg, approvalBroker, args[1:], os.Stdout, os.Stderr); err != nil {
-			fmt.Fprintln(os.Stderr, "capabilities error:", err)
-			os.Exit(1)
+	if commandHandledBeforeRuntimeBootstrap(cmd) {
+		switch cmd {
+		case "capabilities":
+			if err := runCapabilitiesCommand(cfg, approvalBroker, args[1:], os.Stdout, os.Stderr); err != nil {
+				fmt.Fprintln(os.Stderr, "capabilities error:", err)
+				os.Exit(1)
+			}
 		}
 		return
 	}
@@ -579,6 +579,24 @@ func main() {
 		cancel()
 	}
 	_ = channelManager.StopAll(context.Background())
+}
+
+func commandHandledBeforeConfigLoad(cmd string) bool {
+	switch cmd {
+	case "config-path", "version", "configure", "init":
+		return true
+	default:
+		return false
+	}
+}
+
+func commandHandledBeforeRuntimeBootstrap(cmd string) bool {
+	switch cmd {
+	case "capabilities":
+		return true
+	default:
+		return false
+	}
 }
 
 func configErrorHint(err error) string {

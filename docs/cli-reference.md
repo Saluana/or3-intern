@@ -27,6 +27,25 @@ If you are running directly from a checkout without installing, replace `or3-int
 
 Interactive setup and reconfiguration wizard. It loads the active config when present, shows a summary, and lets you change only the sections you care about.
 
+Mode selection:
+
+- Interactive TTY: launches the Bubble Tea setup UI.
+- Non-interactive stdin/stdout: stays in the plain-text prompt flow.
+
+Plain-text secret prompt behavior:
+
+- Leave an existing secret blank to keep it.
+- Enter a new value to replace it.
+- Type `clear` to remove it.
+
+Default keybindings in TUI mode:
+
+- Arrow keys: move between sections, fields, and choices.
+- `enter`: open a section or confirm the current choice.
+- `space`: toggle boolean fields.
+- `s`: save and apply changes.
+- `q`: back out of the current screen or quit.
+
 Examples:
 
 ```
@@ -45,6 +64,10 @@ Available sections:
 - `service`
 
 Use `or3-intern init` if you only want the original lightweight first-run provider/storage wizard.
+
+### `or3-intern init`
+
+`init` is a first-run alias over `configure`. It uses the same TTY detection rules and the same Bubble Tea UI when interactive, but it preselects the original first-run sections: provider, storage, workspace, and web.
 
 ## Operational and admin commands
 

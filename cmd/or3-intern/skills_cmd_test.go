@@ -327,6 +327,22 @@ func TestBuildSkillsInventory_HostedProfilesForceQuarantineByDefault(t *testing.
 	}
 }
 
+func TestRunSkillsCommand_RejectsExtraArgs(t *testing.T) {
+	cfg := config.Default()
+	deps := skillsCommandDeps{
+		LoadToolNames: func(context.Context, config.Config) map[string]struct{} { return map[string]struct{}{} },
+		LoadInventory: func(toolNames map[string]struct{}) skills.Inventory { return skills.Inventory{} },
+	}
+	var out bytes.Buffer
+	deps.Stdout = &out
+	deps.Stderr = &out
+	for _, args := range [][]string{{"list", "extra"}, {"info", "demo", "extra"}, {"remove", "demo", "extra"}} {
+		if err := runSkillsCommandWithDeps(context.Background(), cfg, args, deps); err == nil {
+			t.Fatalf("expected args %v to fail", args)
+		}
+	}
+}
+
 func makeTestZip(t *testing.T, files map[string]string) []byte {
 	t.Helper()
 	var buf bytes.Buffer

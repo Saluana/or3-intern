@@ -80,3 +80,14 @@ func TestRunPairingCommand_RequestApproveExchangeRoundTrip(t *testing.T) {
 		t.Fatal("expected exchanged channel identity to be paired")
 	}
 }
+
+func TestRunPairingCommand_RejectsExtraArgs(t *testing.T) {
+	broker := testPairingBroker(t)
+	ctx := context.Background()
+	var out bytes.Buffer
+	for _, args := range [][]string{{"list", "pending", "extra"}, {"request", "extra"}, {"exchange", "1", "code", "extra"}} {
+		if err := runPairingCommand(ctx, broker, args, &out, &out); err == nil {
+			t.Fatalf("expected args %v to fail", args)
+		}
+	}
+}

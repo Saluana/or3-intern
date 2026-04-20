@@ -386,9 +386,13 @@ func (b *Broker) CreatePairingRequest(ctx context.Context, input PairingRequestI
 		_ = b.audit(ctx, "pairing.blocked", map[string]any{"device_id": deviceID, "role": role, "host_id": b.hostID(), "outcome": "blocked", "reason": "deny"})
 		return db.PairingRequestRecord{}, "", fmt.Errorf("pairing denied by policy")
 	case config.ApprovalModeTrusted:
-		status = StatusApproved
-		approverID = "policy:trusted"
-		approvedAt = nowMS
+		if auditAuthKindFromContext(ctx) == "unauthenticated" {
+			status = StatusPending
+		} else {
+			status = StatusApproved
+			approverID = "policy:trusted"
+			approvedAt = nowMS
+		}
 	case config.ApprovalModeAllowlist:
 		allowed, allowErr := b.pairingAllowlistMatches(ctx, deviceID, role)
 		if allowErr != nil {
@@ -601,6 +605,9 @@ func (b *Broker) IsPairedChannelIdentity(ctx context.Context, channel, identity 
 }
 
 func (b *Broker) AddAllowlist(ctx context.Context, domain string, scope AllowlistScope, matcher any, actor string, expiresAt int64) (db.ApprovalAllowlistRecord, error) {
+	if err := ValidateAllowlistMatcher(domain, matcher); err != nil {
+		return db.ApprovalAllowlistRecord{}, err
+	}
 	scopeJSON, err := marshalCanonical(scope)
 	if err != nil {
 		return db.ApprovalAllowlistRecord{}, err
@@ -723,6 +730,9 @@ func allowlistMatcherMatches(subjectType SubjectType, current any, raw string) (
 		if err := json.Unmarshal([]byte(raw), &expected); err != nil {
 			return false, err
 		}
+		if isEmptyExecAllowlistMatcher(expected) {
+			return false, nil
+		}
 		actual, _ := current.(ExecAllowlistMatcher)
 		if expected.ExecutablePath != "" && expected.ExecutablePath != actual.ExecutablePath {
 			return false, nil
@@ -751,6 +761,9 @@ func allowlistMatcherMatches(subjectType SubjectType, current any, raw string) (
 		if err := json.Unmarshal([]byte(raw), &expected); err != nil {
 			return false, err
 		}
+		if isEmptySkillAllowlistMatcher(expected) {
+			return false, nil
+		}
 		actual, _ := current.(SkillAllowlistMatcher)
 		if expected.SkillID != "" && expected.SkillID != actual.SkillID {
 			return false, nil
@@ -774,6 +787,49 @@ func allowlistMatcherMatches(subjectType SubjectType, current any, raw string) (
 	default:
 		return false, nil
 	}
+}
+
+func ValidateAllowlistMatcher(domain string, matcher any) error {
+	switch SubjectType(strings.TrimSpace(domain)) {
+	case SubjectExec:
+		candidate, ok := matcher.(ExecAllowlistMatcher)
+		if !ok {
+			return fmt.Errorf("exec allowlist matcher is invalid")
+		}
+		if isEmptyExecAllowlistMatcher(candidate) {
+			return fmt.Errorf("exec allowlist matcher must include at least one executable, path, argv, working directory, or script constraint")
+		}
+		return nil
+	case SubjectSkillExec:
+		candidate, ok := matcher.(SkillAllowlistMatcher)
+		if !ok {
+			return fmt.Errorf("skill allowlist matcher is invalid")
+		}
+		if isEmptySkillAllowlistMatcher(candidate) {
+			return fmt.Errorf("skill allowlist matcher must include at least one skill, version, origin, trust, script, or timeout constraint")
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported allowlist domain")
+	}
+}
+
+func isEmptyExecAllowlistMatcher(matcher ExecAllowlistMatcher) bool {
+	return strings.TrimSpace(matcher.ExecutablePath) == "" &&
+		strings.TrimSpace(matcher.PathGlob) == "" &&
+		len(matcher.Argv) == 0 &&
+		strings.TrimSpace(matcher.WorkingDir) == "" &&
+		strings.TrimSpace(matcher.WorkingDirPref) == "" &&
+		strings.TrimSpace(matcher.ScriptHash) == ""
+}
+
+func isEmptySkillAllowlistMatcher(matcher SkillAllowlistMatcher) bool {
+	return strings.TrimSpace(matcher.SkillID) == "" &&
+		strings.TrimSpace(matcher.Version) == "" &&
+		strings.TrimSpace(matcher.Origin) == "" &&
+		strings.TrimSpace(matcher.TrustState) == "" &&
+		strings.TrimSpace(matcher.ScriptHash) == "" &&
+		matcher.TimeoutSeconds == 0
 }
 
 func (b *Broker) createAllowlistFromRequest(ctx context.Context, req db.ApprovalRequestRecord, actor string) (int64, error) {

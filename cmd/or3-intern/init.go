@@ -152,3 +152,23 @@ func promptString(reader *bufio.Reader, out io.Writer, label, defaultValue strin
 	}
 	return line, nil
 }
+
+func promptSecretString(reader *bufio.Reader, out io.Writer, label, currentValue string) (string, error) {
+	if strings.TrimSpace(currentValue) == "" {
+		return promptString(reader, out, label, "")
+	}
+	_, _ = fmt.Fprintf(out, "%s [leave blank to keep current, type clear to remove]: ", label)
+	line, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+	line = strings.TrimSpace(line)
+	switch {
+	case line == "":
+		return currentValue, nil
+	case strings.EqualFold(line, configureSecretClearKeyword):
+		return "", nil
+	default:
+		return line, nil
+	}
+}

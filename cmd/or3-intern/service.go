@@ -26,6 +26,13 @@ type serviceServer struct {
 	broker          *approval.Broker
 }
 
+const (
+	serviceTurnsBodyLimit     int64 = 1 << 20
+	serviceSubagentsBodyLimit int64 = 1 << 20
+	servicePairingBodyLimit   int64 = 64 << 10
+	serviceApprovalBodyLimit  int64 = 64 << 10
+)
+
 func runServiceCommand(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, jobs *agent.JobRegistry) error {
 	return runServiceCommandWithBroker(ctx, cfg, rt, subagentManager, jobs, nil)
 }
@@ -60,6 +67,8 @@ func runServiceCommandWithBroker(ctx context.Context, cfg config.Config, rt *age
 		Addr:              cfg.Service.Listen,
 		Handler:           serviceAuthMiddlewareWithBroker(cfg.Service.Secret, broker, mux),
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	errCh := make(chan error, 1)
@@ -89,6 +98,7 @@ func (s *serviceServer) handlePairing(w http.ResponseWriter, r *http.Request) {
 	if path == "requests" {
 		switch r.Method {
 		case http.MethodPost:
+			limitServiceRequestBody(w, r, servicePairingBodyLimit)
 			var body struct {
 				Role         string         `json:"role"`
 				DisplayName  string         `json:"display_name"`
@@ -97,8 +107,8 @@ func (s *serviceServer) handlePairing(w http.ResponseWriter, r *http.Request) {
 				Metadata     map[string]any `json:"metadata"`
 				DeviceID     string         `json:"device_id"`
 			}
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid request body"})
+			if err := decodeServiceRequestBody(r.Body, &body); err != nil {
+				writeServiceRequestDecodeError(w, err)
 				return
 			}
 			req, code, err := s.broker.CreatePairingRequest(r.Context(), approval.PairingRequestInput{Role: body.Role, DisplayName: serviceFirstNonEmpty(body.DisplayName, body.DisplayName2), Origin: body.Origin, Metadata: body.Metadata, DeviceID: body.DeviceID})
@@ -127,12 +137,13 @@ func (s *serviceServer) handlePairing(w http.ResponseWriter, r *http.Request) {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 			return
 		}
+		limitServiceRequestBody(w, r, servicePairingBodyLimit)
 		var body struct {
 			RequestID int64  `json:"request_id"`
 			Code      string `json:"code"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid request body"})
+		if err := decodeServiceRequestBody(r.Body, &body); err != nil {
+			writeServiceRequestDecodeError(w, err)
 			return
 		}
 		device, token, err := s.broker.ExchangePairingCode(r.Context(), approval.PairingExchangeInput{RequestID: body.RequestID, Code: body.Code})
@@ -298,12 +309,13 @@ func (s *serviceServer) handleApprovals(w http.ResponseWriter, r *http.Request) 
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 			return
 		}
+		limitServiceRequestBody(w, r, serviceApprovalBodyLimit)
 		var body struct {
 			Allowlist bool   `json:"allowlist"`
 			Note      string `json:"note"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid request body"})
+		if err := decodeServiceRequestBody(r.Body, &body); err != nil {
+			writeServiceRequestDecodeError(w, err)
 			return
 		}
 		issued, err := s.broker.ApproveRequest(r.Context(), id, serviceAuthIdentityFromContext(r.Context()).Actor, body.Allowlist, body.Note)
@@ -317,11 +329,12 @@ func (s *serviceServer) handleApprovals(w http.ResponseWriter, r *http.Request) 
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 			return
 		}
+		limitServiceRequestBody(w, r, serviceApprovalBodyLimit)
 		var body struct {
 			Note string `json:"note"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid request body"})
+		if err := decodeServiceRequestBody(r.Body, &body); err != nil {
+			writeServiceRequestDecodeError(w, err)
 			return
 		}
 		if err := s.broker.DenyRequest(r.Context(), id, serviceAuthIdentityFromContext(r.Context()).Actor, body.Note); err != nil {
@@ -362,9 +375,10 @@ func (s *serviceServer) handleTurns(w http.ResponseWriter, r *http.Request) {
 		writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 		return
 	}
+	limitServiceRequestBody(w, r, serviceTurnsBodyLimit)
 	req, err := decodeServiceTurnRequest(r.Body, s.runtime.Tools)
 	if err != nil {
-		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid request body"})
+		writeServiceRequestDecodeError(w, err)
 		return
 	}
 	audit := serviceAuditHeadersFromRequest(r)
@@ -443,9 +457,10 @@ func (s *serviceServer) handleSubagents(w http.ResponseWriter, r *http.Request) 
 		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "subagent manager is not enabled"})
 		return
 	}
+	limitServiceRequestBody(w, r, serviceSubagentsBodyLimit)
 	req, err := decodeServiceSubagentRequest(r.Body, backgroundToolsRegistry(s.subagentManager))
 	if err != nil {
-		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid request body"})
+		writeServiceRequestDecodeError(w, err)
 		return
 	}
 	audit := serviceAuditHeadersFromRequest(r)
@@ -483,6 +498,21 @@ func (s *serviceServer) handleSubagents(w http.ResponseWriter, r *http.Request) 
 		"child_session_key": job.ChildSessionKey,
 		"status":            db.SubagentStatusQueued,
 	})
+}
+
+func limitServiceRequestBody(w http.ResponseWriter, r *http.Request, maxBytes int64) {
+	if r != nil && r.Body != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+	}
+}
+
+func writeServiceRequestDecodeError(w http.ResponseWriter, err error) {
+	var maxErr *http.MaxBytesError
+	if errors.As(err, &maxErr) {
+		writeServiceJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"error": "request body too large"})
+		return
+	}
+	writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid request body"})
 }
 
 func (s *serviceServer) handleJobs(w http.ResponseWriter, r *http.Request) {

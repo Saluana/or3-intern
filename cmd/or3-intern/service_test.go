@@ -245,6 +245,31 @@ func TestDecodeServiceSubagentRequest_AcceptsSessionAndToolPolicyAliases(t *test
 	}
 }
 
+func TestDecodeServiceTurnRequest_RejectsUnknownFieldsAndTrailingJSON(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(serviceTestTool{name: "read_file"})
+	for _, body := range []string{
+		`{"session_key":"svc:test","message":"hi","unexpected":true}`,
+		`{"session_key":"svc:test","message":"hi"} {"extra":true}`,
+	} {
+		if _, err := decodeServiceTurnRequest(strings.NewReader(body), registry); err == nil {
+			t.Fatalf("expected decode failure for body %q", body)
+		}
+	}
+}
+
+func TestDecodeServiceSubagentRequest_RejectsUnknownFieldsAndTrailingJSON(t *testing.T) {
+	registry := tools.NewRegistry()
+	for _, body := range []string{
+		`{"parent_session_key":"svc:test","task":"run","unexpected":true}`,
+		`{"parent_session_key":"svc:test","task":"run"} []`,
+	} {
+		if _, err := decodeServiceSubagentRequest(strings.NewReader(body), registry); err == nil {
+			t.Fatalf("expected decode failure for body %q", body)
+		}
+	}
+}
+
 func TestServiceTurns_SSEStreamsLifecycleEvents(t *testing.T) {
 	rt, cleanup := buildServiceTestRuntime(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -1084,6 +1109,59 @@ func TestServicePairing_AllowlistMode_AnonymousCannotReissueExistingDeviceToken(
 	defer exchangeResp.Body.Close()
 	if exchangeResp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected pending exchange to fail, got %d (%s)", exchangeResp.StatusCode, mustReadBody(t, exchangeResp.Body))
+	}
+}
+
+func TestServicePairing_TrustedMode_AnonymousRequestStaysPending(t *testing.T) {
+	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Pairing.Mode = config.ApprovalModeTrusted
+	})
+	defer cleanup()
+
+	server := &serviceServer{broker: broker, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("t", 32), server)
+	defer httpServer.Close()
+
+	createReq := mustJSONRequest(t, http.MethodPost, httpServer.URL+"/internal/v1/pairing/requests", `{"role":"operator","display_name":"Ops Laptop"}`)
+	createResp, err := httpServer.Client().Do(createReq)
+	if err != nil {
+		t.Fatalf("Do create pairing: %v", err)
+	}
+	defer createResp.Body.Close()
+	if createResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("expected create pairing 202, got %d (%s)", createResp.StatusCode, mustReadBody(t, createResp.Body))
+	}
+	created := mustDecodeJSONBody(t, createResp.Body)
+	requestID := int64(created["id"].(float64))
+	record, err := broker.DB.GetPairingRequest(context.Background(), requestID)
+	if err != nil {
+		t.Fatalf("GetPairingRequest: %v", err)
+	}
+	if record.Status != approval.StatusPending {
+		t.Fatalf("expected anonymous trusted pairing to remain pending, got %#v", record)
+	}
+}
+
+func TestServiceTurns_RejectsOversizedBody(t *testing.T) {
+	rt, cleanup := buildServiceTestRuntime(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintln(w, `data: {"id":"1","choices":[{"delta":{"content":"Hello"},"finish_reason":"stop"}]}`)
+		fmt.Fprintln(w, `data: [DONE]`)
+	})
+	defer cleanup()
+	server := &serviceServer{runtime: rt, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("o", 32), server)
+	defer httpServer.Close()
+
+	oversized := `{"session_key":"svc:big","message":"` + strings.Repeat("x", int(serviceTurnsBodyLimit)) + `"}`
+	req := mustServiceRequest(t, httpServer, strings.Repeat("o", 32), http.MethodPost, "/internal/v1/turns", oversized)
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do oversized turn: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
 	}
 }
 

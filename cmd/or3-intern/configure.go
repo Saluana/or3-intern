@@ -278,16 +278,8 @@ func configureProviderSection(reader *bufio.Reader, out io.Writer, cfg *config.C
 	if cfg.Provider.EmbedModel, err = promptString(reader, out, "Embedding model", cfg.Provider.EmbedModel); err != nil {
 		return err
 	}
-	saveKey, err := promptBool(reader, out, "Save API key in config.json?", strings.TrimSpace(cfg.Provider.APIKey) != "")
-	if err != nil {
-		return err
-	}
-	if saveKey {
-		cfg.Provider.APIKey, err = promptString(reader, out, "API key", cfg.Provider.APIKey)
-		return err
-	}
-	cfg.Provider.APIKey = ""
-	return nil
+	cfg.Provider.APIKey, err = promptSecretString(reader, out, "API key", cfg.Provider.APIKey)
+	return err
 }
 
 func configureStorageSection(reader *bufio.Reader, out io.Writer, cfg *config.Config) error {
@@ -322,7 +314,7 @@ func configureWorkspaceSection(reader *bufio.Reader, out io.Writer, cfg *config.
 func configureWebSection(reader *bufio.Reader, out io.Writer, cfg *config.Config) error {
 	fmt.Fprintln(out, "Web configuration")
 	var err error
-	if cfg.Tools.BraveAPIKey, err = promptString(reader, out, "Brave Search API key (optional)", cfg.Tools.BraveAPIKey); err != nil {
+	if cfg.Tools.BraveAPIKey, err = promptSecretString(reader, out, "Brave Search API key (optional)", cfg.Tools.BraveAPIKey); err != nil {
 		return err
 	}
 	if cfg.Tools.WebProxy, err = promptString(reader, out, "Web proxy URL (optional)", cfg.Tools.WebProxy); err != nil {
@@ -360,7 +352,7 @@ func configureTelegram(reader *bufio.Reader, out io.Writer, cfg *config.Config) 
 	if !enabled {
 		return nil
 	}
-	if cfg.Channels.Telegram.Token, err = promptString(reader, out, "Telegram bot token", cfg.Channels.Telegram.Token); err != nil {
+	if cfg.Channels.Telegram.Token, err = promptSecretString(reader, out, "Telegram bot token", cfg.Channels.Telegram.Token); err != nil {
 		return err
 	}
 	if cfg.Channels.Telegram.DefaultChatID, err = promptString(reader, out, "Telegram default chat ID (optional)", cfg.Channels.Telegram.DefaultChatID); err != nil {
@@ -389,10 +381,10 @@ func configureSlack(reader *bufio.Reader, out io.Writer, cfg *config.Config) err
 	if !enabled {
 		return nil
 	}
-	if cfg.Channels.Slack.AppToken, err = promptString(reader, out, "Slack app token", cfg.Channels.Slack.AppToken); err != nil {
+	if cfg.Channels.Slack.AppToken, err = promptSecretString(reader, out, "Slack app token", cfg.Channels.Slack.AppToken); err != nil {
 		return err
 	}
-	if cfg.Channels.Slack.BotToken, err = promptString(reader, out, "Slack bot token", cfg.Channels.Slack.BotToken); err != nil {
+	if cfg.Channels.Slack.BotToken, err = promptSecretString(reader, out, "Slack bot token", cfg.Channels.Slack.BotToken); err != nil {
 		return err
 	}
 	if cfg.Channels.Slack.DefaultChannelID, err = promptString(reader, out, "Slack default channel ID (optional)", cfg.Channels.Slack.DefaultChannelID); err != nil {
@@ -424,7 +416,7 @@ func configureDiscord(reader *bufio.Reader, out io.Writer, cfg *config.Config) e
 	if !enabled {
 		return nil
 	}
-	if cfg.Channels.Discord.Token, err = promptString(reader, out, "Discord bot token", cfg.Channels.Discord.Token); err != nil {
+	if cfg.Channels.Discord.Token, err = promptSecretString(reader, out, "Discord bot token", cfg.Channels.Discord.Token); err != nil {
 		return err
 	}
 	if cfg.Channels.Discord.DefaultChannelID, err = promptString(reader, out, "Discord default channel ID (optional)", cfg.Channels.Discord.DefaultChannelID); err != nil {
@@ -459,7 +451,7 @@ func configureWhatsApp(reader *bufio.Reader, out io.Writer, cfg *config.Config) 
 	if cfg.Channels.WhatsApp.BridgeURL, err = promptString(reader, out, "WhatsApp bridge URL", cfg.Channels.WhatsApp.BridgeURL); err != nil {
 		return err
 	}
-	if cfg.Channels.WhatsApp.BridgeToken, err = promptString(reader, out, "WhatsApp bridge token (optional)", cfg.Channels.WhatsApp.BridgeToken); err != nil {
+	if cfg.Channels.WhatsApp.BridgeToken, err = promptSecretString(reader, out, "WhatsApp bridge token (optional)", cfg.Channels.WhatsApp.BridgeToken); err != nil {
 		return err
 	}
 	if cfg.Channels.WhatsApp.DefaultTo, err = promptString(reader, out, "WhatsApp default recipient (optional)", cfg.Channels.WhatsApp.DefaultTo); err != nil {
@@ -497,7 +489,7 @@ func configureEmail(reader *bufio.Reader, out io.Writer, cfg *config.Config) err
 	if cfg.Channels.Email.IMAPUsername, err = promptString(reader, out, "Email IMAP username", cfg.Channels.Email.IMAPUsername); err != nil {
 		return err
 	}
-	if cfg.Channels.Email.IMAPPassword, err = promptString(reader, out, "Email IMAP password", cfg.Channels.Email.IMAPPassword); err != nil {
+	if cfg.Channels.Email.IMAPPassword, err = promptSecretString(reader, out, "Email IMAP password", cfg.Channels.Email.IMAPPassword); err != nil {
 		return err
 	}
 	if cfg.Channels.Email.SMTPHost, err = promptString(reader, out, "Email SMTP host", cfg.Channels.Email.SMTPHost); err != nil {
@@ -506,7 +498,7 @@ func configureEmail(reader *bufio.Reader, out io.Writer, cfg *config.Config) err
 	if cfg.Channels.Email.SMTPUsername, err = promptString(reader, out, "Email SMTP username", cfg.Channels.Email.SMTPUsername); err != nil {
 		return err
 	}
-	if cfg.Channels.Email.SMTPPassword, err = promptString(reader, out, "Email SMTP password", cfg.Channels.Email.SMTPPassword); err != nil {
+	if cfg.Channels.Email.SMTPPassword, err = promptSecretString(reader, out, "Email SMTP password", cfg.Channels.Email.SMTPPassword); err != nil {
 		return err
 	}
 	if cfg.Channels.Email.FromAddress, err = promptString(reader, out, "Email from address", cfg.Channels.Email.FromAddress); err != nil {
@@ -542,7 +534,7 @@ func configureServiceSection(reader *bufio.Reader, out io.Writer, cfg *config.Co
 	if cfg.Service.Listen, err = promptString(reader, out, "Service listen address", cfg.Service.Listen); err != nil {
 		return err
 	}
-	if cfg.Service.Secret, err = promptString(reader, out, "Service shared secret", cfg.Service.Secret); err != nil {
+	if cfg.Service.Secret, err = promptSecretString(reader, out, "Service shared secret", cfg.Service.Secret); err != nil {
 		return err
 	}
 	return nil

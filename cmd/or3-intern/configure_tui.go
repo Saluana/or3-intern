@@ -44,6 +44,8 @@ const (
 	configureFieldChoice
 )
 
+const configureSecretClearKeyword = "clear"
+
 type configureField struct {
 	Key         string
 	Label       string
@@ -798,7 +800,7 @@ func buildSectionFields(cfg config.Config, section, cwd string) []configureField
 			{Key: "provider_api_base", Label: "API base", Description: "OpenAI-compatible base URL.", Kind: configureFieldText, Value: cfg.Provider.APIBase, EmptyHint: "https://api.openai.com/v1"},
 			{Key: "provider_model", Label: "Chat model", Description: "Default chat model for turns.", Kind: configureFieldText, Value: cfg.Provider.Model, EmptyHint: "gpt-4.1-mini"},
 			{Key: "provider_embed", Label: "Embedding model", Description: "Model used for embeddings and retrieval.", Kind: configureFieldText, Value: cfg.Provider.EmbedModel, EmptyHint: "text-embedding-3-small"},
-			{Key: "provider_api_key", Label: "API key", Description: "Hidden secret. Leave blank while editing to keep the current value.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Provider.APIKey), SecretHint: "leave blank to keep current", EmptyHint: "not configured"},
+			{Key: "provider_api_key", Label: "API key", Description: "Hidden secret. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Provider.APIKey), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"},
 		}
 	case "storage":
 		return []configureField{{Key: "storage_db", Label: "SQLite DB path", Description: "Main runtime database.", Kind: configureFieldText, Value: cfg.DBPath, EmptyHint: ".or3/or3-intern.sqlite"}, {Key: "storage_artifacts", Label: "Artifacts directory", Description: "Large output spillover and artifacts.", Kind: configureFieldText, Value: cfg.ArtifactsDir, EmptyHint: ".or3/artifacts"}}
@@ -809,9 +811,9 @@ func buildSectionFields(cfg config.Config, section, cwd string) []configureField
 		}
 		return []configureField{{Key: "workspace_restrict", Label: "Restrict file tools", Description: "Keep file tools inside the selected workspace.", Kind: configureFieldToggle, Value: onOff(cfg.Tools.RestrictToWorkspace)}, {Key: "workspace_dir", Label: "Workspace directory", Description: "Project root for workspace-restricted file tools.", Kind: configureFieldText, Value: workspace, EmptyHint: cwd}}
 	case "web":
-		return []configureField{{Key: "web_brave", Label: "Brave Search key", Description: "Hidden secret used for Brave-backed web search.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Tools.BraveAPIKey), SecretHint: "leave blank to keep current", EmptyHint: "not configured"}, {Key: "web_proxy", Label: "Web proxy", Description: "Optional outbound proxy URL.", Kind: configureFieldText, Value: cfg.Tools.WebProxy, EmptyHint: "http://proxy.internal:8080"}}
+		return []configureField{{Key: "web_brave", Label: "Brave Search key", Description: "Hidden secret. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Tools.BraveAPIKey), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"}, {Key: "web_proxy", Label: "Web proxy", Description: "Optional outbound proxy URL.", Kind: configureFieldText, Value: cfg.Tools.WebProxy, EmptyHint: "http://proxy.internal:8080"}}
 	case "service":
-		return []configureField{{Key: "service_enabled", Label: "Enable service API", Description: "Expose the internal authenticated HTTP API.", Kind: configureFieldToggle, Value: onOff(cfg.Service.Enabled)}, {Key: "service_listen", Label: "Listen address", Description: "Bind address for the internal service.", Kind: configureFieldText, Value: cfg.Service.Listen, EmptyHint: "127.0.0.1:9100"}, {Key: "service_secret", Label: "Shared secret", Description: "Hidden secret required by service clients.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Service.Secret), SecretHint: "leave blank to keep current", EmptyHint: "not configured"}}
+		return []configureField{{Key: "service_enabled", Label: "Enable service API", Description: "Expose the internal authenticated HTTP API.", Kind: configureFieldToggle, Value: onOff(cfg.Service.Enabled)}, {Key: "service_listen", Label: "Listen address", Description: "Bind address for the internal service.", Kind: configureFieldText, Value: cfg.Service.Listen, EmptyHint: "127.0.0.1:9100"}, {Key: "service_secret", Label: "Shared secret", Description: "Hidden secret. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Service.Secret), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"}}
 	}
 	return nil
 }
@@ -821,19 +823,19 @@ func buildChannelFields(cfg config.Config, channel string) []configureField {
 	switch channel {
 	case "telegram":
 		choice := channelAccessSummary(cfg.Channels.Telegram.InboundPolicy, cfg.Channels.Telegram.OpenAccess, len(cfg.Channels.Telegram.AllowedChatIDs) > 0)
-		return []configureField{{Key: "enabled", Label: "Enable Telegram", Description: "Toggle the Telegram channel.", Kind: configureFieldToggle, Value: onOff(cfg.Channels.Telegram.Enabled)}, {Key: "token", Label: "Bot token", Description: "Hidden Telegram bot token.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Channels.Telegram.Token), SecretHint: "leave blank to keep current", EmptyHint: "not configured"}, {Key: "default_id", Label: "Default chat ID", Description: "Used by outbound send defaults.", Kind: configureFieldText, Value: cfg.Channels.Telegram.DefaultChatID, EmptyHint: "123456789"}, {Key: "access", Label: "Inbound access", Description: "Choose how inbound Telegram messages are admitted.", Kind: configureFieldChoice, Value: choice, Choices: accessChoices, ChoiceIndex: indexOfChoice(accessChoices, choice)}, {Key: "allowlist", Label: "Allowed chat IDs", Description: "Comma-separated allowlist used when access = allowlist.", Kind: configureFieldText, Value: strings.Join(allowlistPromptDefault(cfg.Channels.Telegram.AllowedChatIDs, cfg.Channels.Telegram.DefaultChatID), ","), EmptyHint: "12345,67890"}}
+		return []configureField{{Key: "enabled", Label: "Enable Telegram", Description: "Toggle the Telegram channel.", Kind: configureFieldToggle, Value: onOff(cfg.Channels.Telegram.Enabled)}, {Key: "token", Label: "Bot token", Description: "Hidden Telegram bot token. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Channels.Telegram.Token), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"}, {Key: "default_id", Label: "Default chat ID", Description: "Used by outbound send defaults.", Kind: configureFieldText, Value: cfg.Channels.Telegram.DefaultChatID, EmptyHint: "123456789"}, {Key: "access", Label: "Inbound access", Description: "Choose how inbound Telegram messages are admitted.", Kind: configureFieldChoice, Value: choice, Choices: accessChoices, ChoiceIndex: indexOfChoice(accessChoices, choice)}, {Key: "allowlist", Label: "Allowed chat IDs", Description: "Comma-separated allowlist used when access = allowlist.", Kind: configureFieldText, Value: strings.Join(allowlistPromptDefault(cfg.Channels.Telegram.AllowedChatIDs, cfg.Channels.Telegram.DefaultChatID), ","), EmptyHint: "12345,67890"}}
 	case "slack":
 		choice := channelAccessSummary(cfg.Channels.Slack.InboundPolicy, cfg.Channels.Slack.OpenAccess, len(cfg.Channels.Slack.AllowedUserIDs) > 0)
-		return []configureField{{Key: "enabled", Label: "Enable Slack", Description: "Toggle the Slack channel.", Kind: configureFieldToggle, Value: onOff(cfg.Channels.Slack.Enabled)}, {Key: "app_token", Label: "App token", Description: "Hidden Slack app token.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Channels.Slack.AppToken), SecretHint: "leave blank to keep current", EmptyHint: "not configured"}, {Key: "bot_token", Label: "Bot token", Description: "Hidden Slack bot token.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Channels.Slack.BotToken), SecretHint: "leave blank to keep current", EmptyHint: "not configured"}, {Key: "default_id", Label: "Default channel ID", Description: "Used by outbound sends.", Kind: configureFieldText, Value: cfg.Channels.Slack.DefaultChannelID, EmptyHint: "C123456"}, {Key: "require_mention", Label: "Require mention", Description: "Only react when the bot is mentioned.", Kind: configureFieldToggle, Value: onOff(cfg.Channels.Slack.RequireMention)}, {Key: "access", Label: "Inbound access", Description: "Choose how inbound Slack messages are admitted.", Kind: configureFieldChoice, Value: choice, Choices: accessChoices, ChoiceIndex: indexOfChoice(accessChoices, choice)}, {Key: "allowlist", Label: "Allowed user IDs", Description: "Comma-separated allowlist used when access = allowlist.", Kind: configureFieldText, Value: strings.Join(cfg.Channels.Slack.AllowedUserIDs, ","), EmptyHint: "U123,U456"}}
+		return []configureField{{Key: "enabled", Label: "Enable Slack", Description: "Toggle the Slack channel.", Kind: configureFieldToggle, Value: onOff(cfg.Channels.Slack.Enabled)}, {Key: "app_token", Label: "App token", Description: "Hidden Slack app token. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Channels.Slack.AppToken), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"}, {Key: "bot_token", Label: "Bot token", Description: "Hidden Slack bot token. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Channels.Slack.BotToken), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"}, {Key: "default_id", Label: "Default channel ID", Description: "Used by outbound sends.", Kind: configureFieldText, Value: cfg.Channels.Slack.DefaultChannelID, EmptyHint: "C123456"}, {Key: "require_mention", Label: "Require mention", Description: "Only react when the bot is mentioned.", Kind: configureFieldToggle, Value: onOff(cfg.Channels.Slack.RequireMention)}, {Key: "access", Label: "Inbound access", Description: "Choose how inbound Slack messages are admitted.", Kind: configureFieldChoice, Value: choice, Choices: accessChoices, ChoiceIndex: indexOfChoice(accessChoices, choice)}, {Key: "allowlist", Label: "Allowed user IDs", Description: "Comma-separated allowlist used when access = allowlist.", Kind: configureFieldText, Value: strings.Join(cfg.Channels.Slack.AllowedUserIDs, ","), EmptyHint: "U123,U456"}}
 	case "discord":
 		choice := channelAccessSummary(cfg.Channels.Discord.InboundPolicy, cfg.Channels.Discord.OpenAccess, len(cfg.Channels.Discord.AllowedUserIDs) > 0)
-		return []configureField{{Key: "enabled", Label: "Enable Discord", Description: "Toggle the Discord channel.", Kind: configureFieldToggle, Value: onOff(cfg.Channels.Discord.Enabled)}, {Key: "token", Label: "Bot token", Description: "Hidden Discord bot token.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Channels.Discord.Token), SecretHint: "leave blank to keep current", EmptyHint: "not configured"}, {Key: "default_id", Label: "Default channel ID", Description: "Used by outbound sends.", Kind: configureFieldText, Value: cfg.Channels.Discord.DefaultChannelID, EmptyHint: "123456"}, {Key: "require_mention", Label: "Require mention", Description: "Only react when the bot is mentioned.", Kind: configureFieldToggle, Value: onOff(cfg.Channels.Discord.RequireMention)}, {Key: "access", Label: "Inbound access", Description: "Choose how inbound Discord messages are admitted.", Kind: configureFieldChoice, Value: choice, Choices: accessChoices, ChoiceIndex: indexOfChoice(accessChoices, choice)}, {Key: "allowlist", Label: "Allowed user IDs", Description: "Comma-separated allowlist used when access = allowlist.", Kind: configureFieldText, Value: strings.Join(cfg.Channels.Discord.AllowedUserIDs, ","), EmptyHint: "123,456"}}
+		return []configureField{{Key: "enabled", Label: "Enable Discord", Description: "Toggle the Discord channel.", Kind: configureFieldToggle, Value: onOff(cfg.Channels.Discord.Enabled)}, {Key: "token", Label: "Bot token", Description: "Hidden Discord bot token. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Channels.Discord.Token), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"}, {Key: "default_id", Label: "Default channel ID", Description: "Used by outbound sends.", Kind: configureFieldText, Value: cfg.Channels.Discord.DefaultChannelID, EmptyHint: "123456"}, {Key: "require_mention", Label: "Require mention", Description: "Only react when the bot is mentioned.", Kind: configureFieldToggle, Value: onOff(cfg.Channels.Discord.RequireMention)}, {Key: "access", Label: "Inbound access", Description: "Choose how inbound Discord messages are admitted.", Kind: configureFieldChoice, Value: choice, Choices: accessChoices, ChoiceIndex: indexOfChoice(accessChoices, choice)}, {Key: "allowlist", Label: "Allowed user IDs", Description: "Comma-separated allowlist used when access = allowlist.", Kind: configureFieldText, Value: strings.Join(cfg.Channels.Discord.AllowedUserIDs, ","), EmptyHint: "123,456"}}
 	case "whatsapp":
 		choice := channelAccessSummary(cfg.Channels.WhatsApp.InboundPolicy, cfg.Channels.WhatsApp.OpenAccess, len(cfg.Channels.WhatsApp.AllowedFrom) > 0)
-		return []configureField{{Key: "enabled", Label: "Enable WhatsApp", Description: "Toggle the WhatsApp bridge.", Kind: configureFieldToggle, Value: onOff(cfg.Channels.WhatsApp.Enabled)}, {Key: "bridge_url", Label: "Bridge URL", Description: "WebSocket bridge endpoint.", Kind: configureFieldText, Value: cfg.Channels.WhatsApp.BridgeURL, EmptyHint: "ws://127.0.0.1:3001/ws"}, {Key: "bridge_token", Label: "Bridge token", Description: "Hidden bridge token.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Channels.WhatsApp.BridgeToken), SecretHint: "leave blank to keep current", EmptyHint: "not configured"}, {Key: "default_to", Label: "Default recipient", Description: "Used by outbound sends.", Kind: configureFieldText, Value: cfg.Channels.WhatsApp.DefaultTo, EmptyHint: "+15555555555"}, {Key: "access", Label: "Inbound access", Description: "Choose how inbound WhatsApp messages are admitted.", Kind: configureFieldChoice, Value: choice, Choices: accessChoices, ChoiceIndex: indexOfChoice(accessChoices, choice)}, {Key: "allowlist", Label: "Allowed sender IDs", Description: "Comma-separated allowlist used when access = allowlist.", Kind: configureFieldText, Value: strings.Join(cfg.Channels.WhatsApp.AllowedFrom, ","), EmptyHint: "+1555,+1666"}}
+		return []configureField{{Key: "enabled", Label: "Enable WhatsApp", Description: "Toggle the WhatsApp bridge.", Kind: configureFieldToggle, Value: onOff(cfg.Channels.WhatsApp.Enabled)}, {Key: "bridge_url", Label: "Bridge URL", Description: "WebSocket bridge endpoint.", Kind: configureFieldText, Value: cfg.Channels.WhatsApp.BridgeURL, EmptyHint: "ws://127.0.0.1:3001/ws"}, {Key: "bridge_token", Label: "Bridge token", Description: "Hidden bridge token. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Channels.WhatsApp.BridgeToken), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"}, {Key: "default_to", Label: "Default recipient", Description: "Used by outbound sends.", Kind: configureFieldText, Value: cfg.Channels.WhatsApp.DefaultTo, EmptyHint: "+15555555555"}, {Key: "access", Label: "Inbound access", Description: "Choose how inbound WhatsApp messages are admitted.", Kind: configureFieldChoice, Value: choice, Choices: accessChoices, ChoiceIndex: indexOfChoice(accessChoices, choice)}, {Key: "allowlist", Label: "Allowed sender IDs", Description: "Comma-separated allowlist used when access = allowlist.", Kind: configureFieldText, Value: strings.Join(cfg.Channels.WhatsApp.AllowedFrom, ","), EmptyHint: "+1555,+1666"}}
 	case "email":
 		choice := channelAccessSummary(cfg.Channels.Email.InboundPolicy, cfg.Channels.Email.OpenAccess, len(cfg.Channels.Email.AllowedSenders) > 0)
-		return []configureField{{Key: "enabled", Label: "Enable Email", Description: "Toggle the email channel.", Kind: configureFieldToggle, Value: onOff(cfg.Channels.Email.Enabled)}, {Key: "consent", Label: "Consent granted", Description: "Confirm consent for operating email automation.", Kind: configureFieldToggle, Value: onOff(cfg.Channels.Email.ConsentGranted)}, {Key: "imap_host", Label: "IMAP host", Description: "Inbound IMAP server.", Kind: configureFieldText, Value: cfg.Channels.Email.IMAPHost, EmptyHint: "imap.example.com"}, {Key: "imap_user", Label: "IMAP username", Description: "Inbound mailbox username.", Kind: configureFieldText, Value: cfg.Channels.Email.IMAPUsername, EmptyHint: "inbox@example.com"}, {Key: "imap_password", Label: "IMAP password", Description: "Hidden IMAP password.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Channels.Email.IMAPPassword), SecretHint: "leave blank to keep current", EmptyHint: "not configured"}, {Key: "smtp_host", Label: "SMTP host", Description: "Outbound SMTP server.", Kind: configureFieldText, Value: cfg.Channels.Email.SMTPHost, EmptyHint: "smtp.example.com"}, {Key: "smtp_user", Label: "SMTP username", Description: "Outbound SMTP username.", Kind: configureFieldText, Value: cfg.Channels.Email.SMTPUsername, EmptyHint: "sender@example.com"}, {Key: "smtp_password", Label: "SMTP password", Description: "Hidden SMTP password.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Channels.Email.SMTPPassword), SecretHint: "leave blank to keep current", EmptyHint: "not configured"}, {Key: "from_address", Label: "From address", Description: "Outbound sender address.", Kind: configureFieldText, Value: cfg.Channels.Email.FromAddress, EmptyHint: "bot@example.com"}, {Key: "default_to", Label: "Default recipient", Description: "Used by outbound sends.", Kind: configureFieldText, Value: cfg.Channels.Email.DefaultTo, EmptyHint: "ops@example.com"}, {Key: "access", Label: "Inbound access", Description: "Choose how inbound email is admitted.", Kind: configureFieldChoice, Value: choice, Choices: accessChoices, ChoiceIndex: indexOfChoice(accessChoices, choice)}, {Key: "allowlist", Label: "Allowed senders", Description: "Comma-separated allowlist used when access = allowlist.", Kind: configureFieldText, Value: strings.Join(cfg.Channels.Email.AllowedSenders, ","), EmptyHint: "owner@example.com"}}
+		return []configureField{{Key: "enabled", Label: "Enable Email", Description: "Toggle the email channel.", Kind: configureFieldToggle, Value: onOff(cfg.Channels.Email.Enabled)}, {Key: "consent", Label: "Consent granted", Description: "Confirm consent for operating email automation.", Kind: configureFieldToggle, Value: onOff(cfg.Channels.Email.ConsentGranted)}, {Key: "imap_host", Label: "IMAP host", Description: "Inbound IMAP server.", Kind: configureFieldText, Value: cfg.Channels.Email.IMAPHost, EmptyHint: "imap.example.com"}, {Key: "imap_user", Label: "IMAP username", Description: "Inbound mailbox username.", Kind: configureFieldText, Value: cfg.Channels.Email.IMAPUsername, EmptyHint: "inbox@example.com"}, {Key: "imap_password", Label: "IMAP password", Description: "Hidden IMAP password. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Channels.Email.IMAPPassword), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"}, {Key: "smtp_host", Label: "SMTP host", Description: "Outbound SMTP server.", Kind: configureFieldText, Value: cfg.Channels.Email.SMTPHost, EmptyHint: "smtp.example.com"}, {Key: "smtp_user", Label: "SMTP username", Description: "Outbound SMTP username.", Kind: configureFieldText, Value: cfg.Channels.Email.SMTPUsername, EmptyHint: "sender@example.com"}, {Key: "smtp_password", Label: "SMTP password", Description: "Hidden SMTP password. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Channels.Email.SMTPPassword), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"}, {Key: "from_address", Label: "From address", Description: "Outbound sender address.", Kind: configureFieldText, Value: cfg.Channels.Email.FromAddress, EmptyHint: "bot@example.com"}, {Key: "default_to", Label: "Default recipient", Description: "Used by outbound sends.", Kind: configureFieldText, Value: cfg.Channels.Email.DefaultTo, EmptyHint: "ops@example.com"}, {Key: "access", Label: "Inbound access", Description: "Choose how inbound email is admitted.", Kind: configureFieldChoice, Value: choice, Choices: accessChoices, ChoiceIndex: indexOfChoice(accessChoices, choice)}, {Key: "allowlist", Label: "Allowed senders", Description: "Comma-separated allowlist used when access = allowlist.", Kind: configureFieldText, Value: strings.Join(cfg.Channels.Email.AllowedSenders, ","), EmptyHint: "owner@example.com"}}
 	}
 	return nil
 }
@@ -940,11 +942,16 @@ func applyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 	if cfg == nil {
 		return false
 	}
+	clearRequested := strings.EqualFold(strings.TrimSpace(value), configureSecretClearKeyword)
 	if section == "channels" {
 		switch channel {
 		case "telegram":
 			switch fieldKey {
 			case "token":
+				if clearRequested {
+					cfg.Channels.Telegram.Token = ""
+					return true
+				}
 				if value != "" {
 					cfg.Channels.Telegram.Token = value
 				}
@@ -959,11 +966,19 @@ func applyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 		case "slack":
 			switch fieldKey {
 			case "app_token":
+				if clearRequested {
+					cfg.Channels.Slack.AppToken = ""
+					return true
+				}
 				if value != "" {
 					cfg.Channels.Slack.AppToken = value
 				}
 				return true
 			case "bot_token":
+				if clearRequested {
+					cfg.Channels.Slack.BotToken = ""
+					return true
+				}
 				if value != "" {
 					cfg.Channels.Slack.BotToken = value
 				}
@@ -978,6 +993,10 @@ func applyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 		case "discord":
 			switch fieldKey {
 			case "token":
+				if clearRequested {
+					cfg.Channels.Discord.Token = ""
+					return true
+				}
 				if value != "" {
 					cfg.Channels.Discord.Token = value
 				}
@@ -995,6 +1014,10 @@ func applyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 				cfg.Channels.WhatsApp.BridgeURL = value
 				return true
 			case "bridge_token":
+				if clearRequested {
+					cfg.Channels.WhatsApp.BridgeToken = ""
+					return true
+				}
 				if value != "" {
 					cfg.Channels.WhatsApp.BridgeToken = value
 				}
@@ -1015,6 +1038,10 @@ func applyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 				cfg.Channels.Email.IMAPUsername = value
 				return true
 			case "imap_password":
+				if clearRequested {
+					cfg.Channels.Email.IMAPPassword = ""
+					return true
+				}
 				if value != "" {
 					cfg.Channels.Email.IMAPPassword = value
 				}
@@ -1026,6 +1053,10 @@ func applyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 				cfg.Channels.Email.SMTPUsername = value
 				return true
 			case "smtp_password":
+				if clearRequested {
+					cfg.Channels.Email.SMTPPassword = ""
+					return true
+				}
 				if value != "" {
 					cfg.Channels.Email.SMTPPassword = value
 				}
@@ -1054,6 +1085,10 @@ func applyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 		cfg.Provider.EmbedModel = value
 		return true
 	case "provider_api_key":
+		if clearRequested {
+			cfg.Provider.APIKey = ""
+			return true
+		}
 		if value != "" {
 			cfg.Provider.APIKey = value
 		}
@@ -1068,6 +1103,10 @@ func applyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 		cfg.WorkspaceDir = value
 		return true
 	case "web_brave":
+		if clearRequested {
+			cfg.Tools.BraveAPIKey = ""
+			return true
+		}
 		if value != "" {
 			cfg.Tools.BraveAPIKey = value
 		}
@@ -1079,6 +1118,10 @@ func applyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 		cfg.Service.Listen = value
 		return true
 	case "service_secret":
+		if clearRequested {
+			cfg.Service.Secret = ""
+			return true
+		}
 		if value != "" {
 			cfg.Service.Secret = value
 		}

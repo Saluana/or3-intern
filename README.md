@@ -33,6 +33,8 @@ or3-intern version
 
 The `configure` command is the recommended setup flow and supports re-running specific sections later with `--section`. The lighter `init` command still exists for the original first-run provider/storage flow.
 
+On an interactive terminal, `configure` and `init` launch the Bubble Tea setup UI with arrow-key navigation, `enter` to open/select, `space` to toggle booleans, `s` to save, and `q` to back out or quit. If stdin or stdout is not a terminal, both commands automatically stay in the plain-text prompt flow so scripts and redirected input remain stable. In plain-text mode, existing secrets stay hidden: leave the field blank to keep the current value, enter a new value to replace it, or type `clear` to remove it.
+
 Use `go run ./cmd/or3-intern ...` for ad hoc local runs, or install the binary first if you want every command in the reference to work exactly as `or3-intern ...`.
 
 ## Core features
@@ -69,6 +71,8 @@ Use `go run ./cmd/or3-intern ...` for ad hoc local runs, or install the binary f
 - `or3-intern help [command]` show root or command-specific help
 
 See [CLI Reference](docs/cli-reference.md) for command details.
+
+The setup docs stay text-first in-repo. Screenshots or terminal recordings can be added later, but the written walkthroughs are the source of truth for rollout behavior and keybindings.
 
 ## Documentation
 

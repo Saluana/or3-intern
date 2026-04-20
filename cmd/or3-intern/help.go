@@ -67,6 +67,8 @@ var helpTopics = map[string]helpCommand{
 		Summary: "Interactive configuration wizard for first-run setup and later edits.",
 		Description: []string{
 			"Loads the active config when present, shows a short summary, and prompts only for the sections you want to change.",
+			"When stdin and stdout are terminals, configure opens the Bubble Tea setup UI with arrow-key navigation, enter to select, space to toggle, s to save, and q to quit.",
+			"When either side is non-interactive, configure stays in the plain text prompt flow so pipes, redirected input, and scripts keep working.",
 			"Use repeatable --section flags for targeted updates, or run without flags to choose sections interactively.",
 		},
 		Flags: []helpItem{
@@ -79,6 +81,7 @@ var helpTopics = map[string]helpCommand{
 		Summary: "Guided first-run setup alias.",
 		Description: []string{
 			"Runs the same configure wizard with the original first-run sections: provider, storage, workspace, and web.",
+			"Like configure, it opens the Bubble Tea UI only on an interactive terminal and falls back to plain text prompts when used non-interactively.",
 			"Use `or3-intern configure` directly when you want channels, service, or custom section selection.",
 		},
 		Examples: []string{"or3-intern init"},

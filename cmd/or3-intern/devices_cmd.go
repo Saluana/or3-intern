@@ -20,6 +20,9 @@ func runDevicesCommand(ctx context.Context, broker *approval.Broker, args []stri
 	}
 	switch strings.ToLower(strings.TrimSpace(args[0])) {
 	case "list":
+		if err := requireExactArgs(args[1:], 0, "devices list"); err != nil {
+			return err
+		}
 		items, err := broker.ListDevices(ctx, 100)
 		if err != nil {
 			return err
@@ -29,6 +32,9 @@ func runDevicesCommand(ctx context.Context, broker *approval.Broker, args []stri
 		}
 		return nil
 	case "requests":
+		if err := requireArgRange(args[1:], 0, 1, "devices requests [status]"); err != nil {
+			return err
+		}
 		status := ""
 		if len(args) > 1 {
 			status = strings.TrimSpace(args[1])
@@ -42,8 +48,8 @@ func runDevicesCommand(ctx context.Context, broker *approval.Broker, args []stri
 		}
 		return nil
 	case "approve":
-		if len(args) < 2 {
-			return fmt.Errorf("usage: devices approve <pairing-request-id>")
+		if err := requireExactArgs(args[1:], 1, "devices approve <pairing-request-id>"); err != nil {
+			return err
 		}
 		id, err := strconv.ParseInt(strings.TrimSpace(args[1]), 10, 64)
 		if err != nil {
@@ -56,8 +62,8 @@ func runDevicesCommand(ctx context.Context, broker *approval.Broker, args []stri
 		_, _ = fmt.Fprintf(stdout, "approved pairing request %d for %s\n", req.ID, req.DeviceID)
 		return nil
 	case "deny":
-		if len(args) < 2 {
-			return fmt.Errorf("usage: devices deny <pairing-request-id>")
+		if err := requireExactArgs(args[1:], 1, "devices deny <pairing-request-id>"); err != nil {
+			return err
 		}
 		id, err := strconv.ParseInt(strings.TrimSpace(args[1]), 10, 64)
 		if err != nil {
@@ -69,8 +75,8 @@ func runDevicesCommand(ctx context.Context, broker *approval.Broker, args []stri
 		_, _ = fmt.Fprintf(stdout, "denied pairing request %d\n", id)
 		return nil
 	case "revoke":
-		if len(args) < 2 {
-			return fmt.Errorf("usage: devices revoke <device-id>")
+		if err := requireExactArgs(args[1:], 1, "devices revoke <device-id>"); err != nil {
+			return err
 		}
 		deviceID := strings.TrimSpace(args[1])
 		if deviceID == "" {
@@ -82,8 +88,8 @@ func runDevicesCommand(ctx context.Context, broker *approval.Broker, args []stri
 		_, _ = fmt.Fprintf(stdout, "revoked device %s\n", deviceID)
 		return nil
 	case "rotate":
-		if len(args) < 2 {
-			return fmt.Errorf("usage: devices rotate <device-id>")
+		if err := requireExactArgs(args[1:], 1, "devices rotate <device-id>"); err != nil {
+			return err
 		}
 		deviceID := strings.TrimSpace(args[1])
 		if deviceID == "" {

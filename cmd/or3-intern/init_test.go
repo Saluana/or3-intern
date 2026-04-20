@@ -48,7 +48,6 @@ func TestRunInitWithIO_WritesConfig(t *testing.T) {
 		"",
 		"",
 		"",
-		"y",
 		"test-key",
 		"",
 		"",

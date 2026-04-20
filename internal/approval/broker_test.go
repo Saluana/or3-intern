@@ -197,7 +197,7 @@ func TestBroker_CreatePairingRequest_HonorsPairingModes(t *testing.T) {
 		}
 	})
 
-	t.Run("trusted auto-approves pairing requests", func(t *testing.T) {
+	t.Run("trusted authenticated pairing auto-approves requests", func(t *testing.T) {
 		broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
 			cfg.Pairing.Mode = config.ApprovalModeTrusted
 		})
@@ -209,6 +209,22 @@ func TestBroker_CreatePairingRequest_HonorsPairingModes(t *testing.T) {
 		}
 		if req.Status != StatusApproved {
 			t.Fatalf("expected trusted pairing request to be auto-approved, got %#v", req)
+		}
+	})
+
+	t.Run("trusted anonymous pairing stays pending", func(t *testing.T) {
+		broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
+			cfg.Pairing.Mode = config.ApprovalModeTrusted
+		})
+		defer cleanup()
+
+		ctx := ContextWithAuditAuthKind(context.Background(), "unauthenticated")
+		req, _, err := broker.CreatePairingRequest(ctx, PairingRequestInput{Role: RoleOperator, DisplayName: "Ops Laptop"})
+		if err != nil {
+			t.Fatalf("CreatePairingRequest: %v", err)
+		}
+		if req.Status != StatusPending {
+			t.Fatalf("expected anonymous trusted pairing request to remain pending, got %#v", req)
 		}
 	})
 
@@ -251,6 +267,18 @@ func TestBroker_CreatePairingRequest_HonorsPairingModes(t *testing.T) {
 			t.Fatalf("expected anonymous allowlisted device to require approval, got %#v", req)
 		}
 	})
+}
+
+func TestBroker_AddAllowlist_RejectsEmptyMatchers(t *testing.T) {
+	broker, cleanup := newTestBroker(t, nil)
+	defer cleanup()
+
+	if _, err := broker.AddAllowlist(context.Background(), string(SubjectExec), AllowlistScope{}, ExecAllowlistMatcher{}, "cli", 0); err == nil {
+		t.Fatal("expected empty exec matcher to be rejected")
+	}
+	if _, err := broker.AddAllowlist(context.Background(), string(SubjectSkillExec), AllowlistScope{}, SkillAllowlistMatcher{}, "cli", 0); err == nil {
+		t.Fatal("expected empty skill matcher to be rejected")
+	}
 }
 
 func TestBroker_DenyRequest_RejectsAlreadyApprovedRequest(t *testing.T) {

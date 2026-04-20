@@ -45,6 +45,13 @@ func runInit(cfgPath string) error {
 	if err != nil {
 		cwd = ""
 	}
+	if supportsInteractiveTUI(os.Stdin, os.Stdout) {
+		return runConfigureWithTUI(cfgPathOrDefault(cfgPath), cwd, []string{}, configureTUIOptions{
+			Title:      "or3-intern init",
+			Intro:      []string{"First-run setup with the essential provider, storage, workspace, and web sections."},
+			Restricted: []string{"provider", "storage", "workspace", "web"},
+		})
+	}
 	return runInitWithIO(os.Stdin, os.Stdout, cfgPathOrDefault(cfgPath), cwd)
 }
 

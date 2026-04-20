@@ -75,6 +75,10 @@ func main() {
 		fmt.Fprintln(os.Stdout, cfgPathOrDefault(cfgPath))
 		return
 	}
+	if cmd == "version" {
+		fmt.Println("or3-intern v1")
+		return
+	}
 	if cmd == "configure" {
 		if err := runConfigure(cfgPath, args[1:]); err != nil {
 			fmt.Fprintln(os.Stderr, "configure error:", err)
@@ -182,6 +186,13 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "approval error:", err)
 		os.Exit(1)
+	}
+	if cmd == "capabilities" {
+		if err := runCapabilitiesCommand(cfg, approvalBroker, args[1:], os.Stdout, os.Stderr); err != nil {
+			fmt.Fprintln(os.Stderr, "capabilities error:", err)
+			os.Exit(1)
+		}
+		return
 	}
 	timeout := time.Duration(cfg.Provider.TimeoutSeconds) * time.Second
 	prov := providers.New(cfg.Provider.APIBase, cfg.Provider.APIKey, timeout)
@@ -454,8 +465,6 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println("ok")
-	case "version":
-		fmt.Println("or3-intern v1")
 	case "skills":
 		deps := skillsCommandDeps{
 			Client: newClawHubClient(cfg),
@@ -491,11 +500,6 @@ func main() {
 	case "pairing":
 		if err := runPairingCommand(ctx, approvalBroker, args[1:], os.Stdout, os.Stderr); err != nil {
 			fmt.Fprintln(os.Stderr, "pairing error:", err)
-			os.Exit(1)
-		}
-	case "capabilities":
-		if err := runCapabilitiesCommand(cfg, approvalBroker, args[1:], os.Stdout, os.Stderr); err != nil {
-			fmt.Fprintln(os.Stderr, "capabilities error:", err)
 			os.Exit(1)
 		}
 	case "scope":

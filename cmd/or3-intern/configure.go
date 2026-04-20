@@ -54,6 +54,9 @@ func runConfigure(cfgPath string, args []string) error {
 	if err != nil {
 		cwd = ""
 	}
+	if supportsInteractiveTUI(os.Stdin, os.Stdout) {
+		return runConfigureWithTUI(cfgPathOrDefault(cfgPath), cwd, args, configureTUIOptions{})
+	}
 	return runConfigureWithIO(os.Stdin, os.Stdout, cfgPathOrDefault(cfgPath), cwd, args)
 }
 

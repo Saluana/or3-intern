@@ -1,37 +1,37 @@
 # Tasks
 
 ## 1. Add Bubble Tea foundations
-- [ ] (Req: 1, 2, 12) Add Bubble Tea ecosystem dependencies to [go.mod](go.mod): `bubbletea`, `bubbles`, and `lipgloss` with versions compatible with the current Go toolchain.
-- [ ] (Req: 1, 2, 12) Create a focused TUI implementation area under `cmd/or3-intern` or a small CLI-only internal package for Bubble Tea models, keymaps, styles, and screen routing.
-- [ ] (Req: 2, 12) Define a shared style/theme module using Lip Gloss with adaptive colors, status badges, section cards, and bordered panels.
-- [ ] (Req: 2, 12) Define keymaps/help text using Bubbles key/help support so the TUI shows modern navigation hints.
+- [x] (Req: 1, 2, 12) Add Bubble Tea ecosystem dependencies to [go.mod](go.mod): `bubbletea`, `bubbles`, and `lipgloss` with versions compatible with the current Go toolchain.
+- [x] (Req: 1, 2, 12) Create a focused TUI implementation area under `cmd/or3-intern` or a small CLI-only internal package for Bubble Tea models, keymaps, styles, and screen routing.
+- [x] (Req: 2, 12) Define a shared style/theme module using Lip Gloss with adaptive colors, status badges, section cards, and bordered panels.
+- [x] (Req: 2, 12) Define keymaps/help text using Bubbles key/help support so the TUI shows modern navigation hints.
 
 ## 2. Split CLI command routing by execution mode
-- [ ] (Req: 3, 4) Refactor [cmd/or3-intern/main.go](cmd/or3-intern/main.go) so `help`, `version`, and `config-path` return before config load and runtime bootstrap.
-- [ ] (Req: 3, 4) Refactor [cmd/or3-intern/main.go](cmd/or3-intern/main.go) so `doctor` and `capabilities` run from config/security state only, without MCP connect, channel manager build, cron start, or runtime tool bootstrap.
-- [ ] (Req: 3, 12) Add a small TTY detection helper and route interactive commands into Bubble Tea only when stdin/stdout are terminals.
-- [ ] (Req: 3, 12) Preserve existing text-mode/flag behavior for non-interactive invocations and scripts.
+- [x] (Req: 3, 4) Refactor [cmd/or3-intern/main.go](cmd/or3-intern/main.go) so `help`, `version`, and `config-path` return before config load and runtime bootstrap.
+- [x] (Req: 3, 4) Refactor [cmd/or3-intern/main.go](cmd/or3-intern/main.go) so `doctor` and `capabilities` run from config/security state only, without MCP connect, channel manager build, cron start, or runtime tool bootstrap.
+- [x] (Req: 3, 12) Add a small TTY detection helper and route interactive commands into Bubble Tea only when stdin/stdout are terminals.
+- [x] (Req: 3, 12) Preserve existing text-mode/flag behavior for non-interactive invocations and scripts.
 
 ## 3. Extract shared configure logic out of prompt code
-- [ ] (Req: 1, 6, 12) Refactor [cmd/or3-intern/configure.go](cmd/or3-intern/configure.go) into pure section draft/application helpers so UI state is separate from config mutation logic.
-- [ ] (Req: 1, 6, 12) Keep [cmd/or3-intern/init.go](cmd/or3-intern/init.go) as a thin first-run alias that preselects the provider/storage/workspace/web sections.
-- [ ] (Req: 6, 12) Preserve current lenient repair loading behavior, but expose it via a structured warning state consumable by the TUI.
+- [x] (Req: 1, 6, 12) Refactor [cmd/or3-intern/configure.go](cmd/or3-intern/configure.go) into pure section draft/application helpers so UI state is separate from config mutation logic.
+- [x] (Req: 1, 6, 12) Keep [cmd/or3-intern/init.go](cmd/or3-intern/init.go) as a thin first-run alias that preselects the provider/storage/workspace/web sections.
+- [x] (Req: 6, 12) Preserve current lenient repair loading behavior, but expose it via a structured warning state consumable by the TUI.
 - [ ] (Req: 3) Update [cmd/or3-intern/help.go](cmd/or3-intern/help.go) and docs so interactive vs non-interactive behavior stays discoverable.
 
 ## 4. Build the Bubble Tea configure/init experience
-- [ ] (Req: 1, 2) Implement a root Bubble Tea model for `configure` with section navigation, resize handling, save/apply state, and global quit/help behavior.
-- [ ] (Req: 1, 2) Implement a section picker using Bubbles `list` with status badges and descriptions for provider, storage, workspace, web, channels, and service.
-- [ ] (Req: 2) Implement boolean controls as toggle-style widgets instead of `y/n` prompts.
-- [ ] (Req: 2) Implement review/apply and success screens with styled summaries and next-step actions.
-- [ ] (Req: 2, 12) Use bounded viewports/tables for long summaries or access lists so the TUI remains responsive and low-noise.
+- [x] (Req: 1, 2) Implement a root Bubble Tea model for `configure` with section navigation, resize handling, save/apply state, and global quit/help behavior.
+- [x] (Req: 1, 2) Implement a section picker using Bubbles `list` with status badges and descriptions for provider, storage, workspace, web, channels, and service.
+- [x] (Req: 2) Implement boolean controls as toggle-style widgets instead of `y/n` prompts.
+- [x] (Req: 2) Implement review/apply and success screens with styled summaries and next-step actions.
+- [x] (Req: 2, 12) Use bounded viewports/tables for long summaries or access lists so the TUI remains responsive and low-noise.
 
 ## 5. Add per-section modern forms
-- [ ] (Req: 1, 2, 6) Implement provider form state for API base, chat model, embed model, and secret-aware API key management.
-- [ ] (Req: 1, 2) Implement storage form state for DB path and artifacts directory.
-- [ ] (Req: 1, 2) Implement workspace form state for restriction toggle and workspace directory.
-- [ ] (Req: 1, 2) Implement web form state for Brave key and proxy configuration.
-- [ ] (Req: 1, 2) Implement channels as a nested Bubble Tea submenu so users can configure Telegram/Slack/Discord/WhatsApp/Email individually instead of walking every channel every time.
-- [ ] (Req: 1, 2) Implement service form state for enable toggle, listen address, and shared secret handling.
+- [x] (Req: 1, 2, 6) Implement provider form state for API base, chat model, embed model, and secret-aware API key management.
+- [x] (Req: 1, 2) Implement storage form state for DB path and artifacts directory.
+- [x] (Req: 1, 2) Implement workspace form state for restriction toggle and workspace directory.
+- [x] (Req: 1, 2) Implement web form state for Brave key and proxy configuration.
+- [x] (Req: 1, 2) Implement channels as a nested Bubble Tea submenu so users can configure Telegram/Slack/Discord/WhatsApp/Email individually instead of walking every channel every time.
+- [x] (Req: 1, 2) Implement service form state for enable toggle, listen address, and shared secret handling.
 
 ## 6. Fix configure secret handling while migrating to TUI
 - [ ] (Req: 5, 6) Replace secret-bearing prompt defaults with secret-aware field state that supports keep/replace/clear without displaying existing values.

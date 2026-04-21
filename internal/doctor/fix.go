@@ -143,6 +143,51 @@ func ApplyInteractiveChoice(cfg *config.Config, finding Finding, choice string, 
 			cfg.Triggers.Webhook.Addr = "127.0.0.1:8765"
 			return true, nil
 		}
+	case "security.secret_store_disabled_with_integrations":
+		switch strings.ToLower(strings.TrimSpace(choice)) {
+		case "enable":
+			cfg.Security.SecretStore.Enabled = true
+			cfg.Security.SecretStore.Required = true
+			if strings.TrimSpace(cfg.Security.SecretStore.KeyFile) == "" {
+				cfg.Security.SecretStore.KeyFile = config.Default().Security.SecretStore.KeyFile
+			}
+			if _, err := security.LoadOrCreateKey(cfg.Security.SecretStore.KeyFile); err != nil {
+				return false, err
+			}
+			return true, nil
+		case "skip":
+			return false, nil
+		}
+	case "privileged-exec.sandbox_disabled":
+		switch strings.ToLower(strings.TrimSpace(choice)) {
+		case "disable_privileged":
+			cfg.Hardening.PrivilegedTools = false
+			return true, nil
+		case "enable_sandbox":
+			cfg.Hardening.Sandbox.Enabled = true
+			if strings.TrimSpace(cfg.Hardening.Sandbox.BubblewrapPath) == "" {
+				cfg.Hardening.Sandbox.BubblewrapPath = config.Default().Hardening.Sandbox.BubblewrapPath
+			}
+			return true, nil
+		case "skip":
+			return false, nil
+		}
+	case "privileged-exec.bubblewrap_missing":
+		switch strings.ToLower(strings.TrimSpace(choice)) {
+		case "disable_privileged":
+			cfg.Hardening.PrivilegedTools = false
+			cfg.Hardening.Sandbox.Enabled = false
+			return true, nil
+		case "set_path":
+			if len(allowlist) == 0 || strings.TrimSpace(allowlist[0]) == "" {
+				return false, nil
+			}
+			cfg.Hardening.Sandbox.Enabled = true
+			cfg.Hardening.Sandbox.BubblewrapPath = strings.TrimSpace(allowlist[0])
+			return true, nil
+		case "skip":
+			return false, nil
+		}
 	}
 	return false, nil
 }

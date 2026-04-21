@@ -287,6 +287,60 @@ func applySingleInteractiveDoctorFix(reader *bufio.Reader, out io.Writer, cfg *c
 			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "loopback", nil)
 			return changed, "bound webhook to loopback", err
 		}
+	case "security.secret_store_disabled_with_integrations":
+		choice, err := promptMenuChoice(reader, out, "Repair secret store for external integrations", []string{
+			"1) Enable secret store and generate a key file",
+			"2) Skip",
+		}, "1")
+		if err != nil {
+			return false, "", err
+		}
+		if choice == "1" {
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "enable", nil)
+			return changed, "enabled secret store and generated a key file", err
+		}
+	case "privileged-exec.sandbox_disabled":
+		choice, err := promptMenuChoice(reader, out, "Repair privileged tools without sandboxing", []string{
+			"1) Disable privileged tools",
+			"2) Enable Bubblewrap sandboxing",
+			"3) Skip",
+		}, "1")
+		if err != nil {
+			return false, "", err
+		}
+		switch choice {
+		case "1":
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "disable_privileged", nil)
+			return changed, "disabled privileged tools", err
+		case "2":
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "enable_sandbox", nil)
+			return changed, "enabled Bubblewrap sandboxing", err
+		default:
+			return false, "", nil
+		}
+	case "privileged-exec.bubblewrap_missing":
+		choice, err := promptMenuChoice(reader, out, "Repair missing Bubblewrap binary", []string{
+			"1) Disable privileged tools and sandboxing",
+			"2) Set Bubblewrap path manually",
+			"3) Skip",
+		}, "1")
+		if err != nil {
+			return false, "", err
+		}
+		switch choice {
+		case "1":
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "disable_privileged", nil)
+			return changed, "disabled privileged tools and sandboxing", err
+		case "2":
+			path, err := promptString(reader, out, "Bubblewrap path", cfg.Hardening.Sandbox.BubblewrapPath)
+			if err != nil {
+				return false, "", err
+			}
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "set_path", []string{path})
+			return changed, "updated Bubblewrap path", err
+		default:
+			return false, "", nil
+		}
 	}
 	return false, "", nil
 }

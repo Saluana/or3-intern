@@ -218,8 +218,8 @@ func hardeningFindings(cfg config.Config, opts Options) []Finding {
 			Severity: severityFor(opts.Mode, SeverityWarn, isHostedOrStartupMode(cfg, opts.Mode)),
 			Summary:  "privileged tools are enabled without Bubblewrap sandboxing",
 			Detail:   "Privileged exec-capable tools should run under Bubblewrap in hardened setups.",
-			FixMode:  FixModeManual,
-			FixHint:  "Enable hardening.sandbox or disable privileged tools.",
+			FixMode:  FixModeInteractive,
+			FixHint:  "Run `or3-intern doctor --fix --interactive` to disable privileged tools or enable sandboxing.",
 		})
 	}
 	if cfg.Hardening.Sandbox.Enabled && strings.TrimSpace(cfg.Hardening.Sandbox.BubblewrapPath) == "" {
@@ -241,8 +241,8 @@ func hardeningFindings(cfg config.Config, opts Options) []Finding {
 				Severity: severityFor(opts.Mode, SeverityError, isHostedOrStartupMode(cfg, opts.Mode)),
 				Summary:  "configured Bubblewrap binary is not available",
 				Detail:   strings.TrimSpace(cfg.Hardening.Sandbox.BubblewrapPath),
-				FixMode:  FixModeManual,
-				FixHint:  "Install Bubblewrap or update hardening.sandbox.bubblewrapPath.",
+				FixMode:  FixModeInteractive,
+				FixHint:  "Run `or3-intern doctor --fix --interactive` to disable privileged tools or update the Bubblewrap path.",
 			})
 		}
 	}

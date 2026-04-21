@@ -298,6 +298,96 @@ func TestRunDoctorCommand_InteractiveFixGeneratesServiceSecret(t *testing.T) {
 	}
 }
 
+func TestRunDoctorCommand_InteractiveFixEnablesSecretStoreForIntegrations(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	keyPath := filepath.Join(dir, "doctor-secret-store.key")
+
+	cfg := safeDoctorConfig()
+	cfg.Triggers.Webhook.Enabled = true
+	cfg.Triggers.Webhook.Secret = strings.Repeat("w", 32)
+	cfg.Triggers.Webhook.Addr = "127.0.0.1:8765"
+	cfg.Security.SecretStore.Enabled = false
+	cfg.Security.SecretStore.Required = false
+	cfg.Security.SecretStore.KeyFile = keyPath
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := runDoctorCommand(path, cfg, "", []string{"--fix", "--interactive"}, strings.NewReader("1\n"), &out, &out); err != nil {
+		t.Fatalf("runDoctorCommand --fix --interactive: %v", err)
+	}
+
+	loaded, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !loaded.Security.SecretStore.Enabled {
+		t.Fatal("expected secret store to be enabled")
+	}
+	if !loaded.Security.SecretStore.Required {
+		t.Fatal("expected secret store to be required")
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("expected generated secret-store key file: %v", err)
+	}
+}
+
+func TestRunDoctorCommand_InteractiveFixDisablesPrivilegedToolsWithoutSandbox(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	cfg := safeDoctorConfig()
+	cfg.Hardening.PrivilegedTools = true
+	cfg.Hardening.Sandbox.Enabled = false
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := runDoctorCommand(path, cfg, "", []string{"--fix", "--interactive"}, strings.NewReader("1\n"), &out, &out); err != nil {
+		t.Fatalf("runDoctorCommand --fix --interactive: %v", err)
+	}
+
+	loaded, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.Hardening.PrivilegedTools {
+		t.Fatal("expected privileged tools to be disabled")
+	}
+}
+
+func TestRunDoctorCommand_InteractiveFixDisablesMissingBubblewrapConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	cfg := safeDoctorConfig()
+	cfg.Hardening.PrivilegedTools = true
+	cfg.Hardening.Sandbox.Enabled = true
+	cfg.Hardening.Sandbox.BubblewrapPath = filepath.Join(dir, "missing-bwrap")
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := runDoctorCommand(path, cfg, "", []string{"--fix", "--interactive"}, strings.NewReader("1\n"), &out, &out); err != nil {
+		t.Fatalf("runDoctorCommand --fix --interactive: %v", err)
+	}
+
+	loaded, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.Hardening.PrivilegedTools {
+		t.Fatal("expected privileged tools to be disabled")
+	}
+	if loaded.Hardening.Sandbox.Enabled {
+		t.Fatal("expected sandbox to be disabled when bubblewrap is unavailable")
+	}
+}
+
 func TestDoctorFindings_ProfileHostThreshold(t *testing.T) {
 	cfg := safeDoctorConfig()
 	hosts := make([]string, 0, 11)

@@ -43,6 +43,18 @@ type openClawEmbedPlan struct {
 	fingerprint string
 }
 
+type openClawPreparedNote struct {
+	text             string
+	tags             string
+	embedding        []byte
+	embedFingerprint string
+}
+
+type openClawFileWritePlan struct {
+	path string
+	data []byte
+}
+
 func runMigrateOpenClawCommand(ctx context.Context, cfg config.Config, d *db.DB, prov *providers.Client, args []string, stdout, stderr io.Writer) error {
 	if d == nil {
 		return fmt.Errorf("db is not configured")
@@ -83,16 +95,9 @@ func runMigrateOpenClawCommand(ctx context.Context, cfg config.Config, d *db.DB,
 
 func migrateOpenClawAgent(ctx context.Context, cfg config.Config, d *db.DB, prov *providers.Client, sourceDir, memoryScope string, embedMaxBytes int) (openClawMigrationReport, error) {
 	var report openClawMigrationReport
-	absSource, err := filepath.Abs(sourceDir)
+	absSource, err := resolveOpenClawSourceDir(sourceDir)
 	if err != nil {
-		return report, fmt.Errorf("resolve source dir: %w", err)
-	}
-	info, err := os.Stat(absSource)
-	if err != nil {
-		return report, fmt.Errorf("stat source dir: %w", err)
-	}
-	if !info.IsDir() {
-		return report, fmt.Errorf("openclaw source is not a directory: %s", absSource)
+		return report, err
 	}
 	if scope.IsGlobalScopeRequest(memoryScope) || strings.TrimSpace(memoryScope) == "" {
 		memoryScope = scope.GlobalMemoryScope
@@ -104,58 +109,35 @@ func migrateOpenClawAgent(ctx context.Context, cfg config.Config, d *db.DB, prov
 	}
 
 	importTag := buildOpenClawImportTag(absSource)
-	if err := purgeImportedOpenClawMemory(ctx, d, memoryScope, importTag); err != nil {
-		return report, err
-	}
+	filePlans := make([]openClawFileWritePlan, 0, 3)
 
-	soulText, ok, err := readOptionalTextFile(filepath.Join(absSource, "SOUL.md"))
+	soulText, ok, err := readOpenClawTextFile(absSource, "SOUL.md")
 	if err != nil {
 		return report, err
 	}
 	if ok {
-		backedUp, err := writeFileWithBackup(cfg.SoulFile, []byte(soulText))
-		if err != nil {
-			return report, err
-		}
-		report.CopiedFiles++
-		if backedUp {
-			report.BackedUpFiles++
-		}
+		filePlans = append(filePlans, openClawFileWritePlan{path: cfg.SoulFile, data: []byte(soulText)})
 	}
 
-	identityText, ok, err := readOptionalTextFile(filepath.Join(absSource, "IDENTITY.md"))
+	identityText, ok, err := readOpenClawTextFile(absSource, "IDENTITY.md")
 	if err != nil {
 		return report, err
 	}
 	if ok {
-		backedUp, err := writeFileWithBackup(cfg.IdentityFile, []byte(identityText))
-		if err != nil {
-			return report, err
-		}
-		report.CopiedFiles++
-		if backedUp {
-			report.BackedUpFiles++
-		}
+		filePlans = append(filePlans, openClawFileWritePlan{path: cfg.IdentityFile, data: []byte(identityText)})
 	}
 
-	memoryText, _, err := readOptionalTextFile(filepath.Join(absSource, "MEMORY.md"))
+	memoryText, _, err := readOpenClawTextFile(absSource, "MEMORY.md")
 	if err != nil {
 		return report, err
 	}
-	userText, _, err := readOptionalTextFile(filepath.Join(absSource, "USER.md"))
+	userText, _, err := readOpenClawTextFile(absSource, "USER.md")
 	if err != nil {
 		return report, err
 	}
 	staticMemory := buildOpenClawStaticMemory(memoryText, userText)
 	if strings.TrimSpace(staticMemory) != "" {
-		backedUp, err := writeFileWithBackup(cfg.MemoryFile, []byte(staticMemory))
-		if err != nil {
-			return report, err
-		}
-		report.CopiedFiles++
-		if backedUp {
-			report.BackedUpFiles++
-		}
+		filePlans = append(filePlans, openClawFileWritePlan{path: cfg.MemoryFile, data: []byte(staticMemory)})
 	}
 
 	embedPlan, warning, err := buildOpenClawEmbedPlan(ctx, cfg, d, prov)
@@ -170,16 +152,34 @@ func migrateOpenClawAgent(ctx context.Context, cfg config.Config, d *db.DB, prov
 	if err != nil {
 		return report, err
 	}
+	var preparedNotes []openClawPreparedNote
 	for _, path := range memoryFiles {
-		counts, warnings, err := importOpenClawMemoryFile(ctx, d, prov, embedPlan, importTag, absSource, path, memoryScope, embedMaxBytes)
+		notes, warnings, err := prepareOpenClawMemoryFile(ctx, prov, embedPlan, importTag, absSource, path, embedMaxBytes)
 		if err != nil {
 			return report, err
 		}
-		report.ImportedMemoryFiles++
-		report.ImportedChunks += counts.imported
-		report.EmbeddedChunks += counts.embedded
+		if len(notes) > 0 {
+			report.ImportedMemoryFiles++
+		}
+		for _, note := range notes {
+			report.ImportedChunks++
+			if len(note.embedding) > 0 {
+				report.EmbeddedChunks++
+			}
+		}
+		preparedNotes = append(preparedNotes, notes...)
 		report.Warnings = append(report.Warnings, warnings...)
 	}
+
+	if err := replaceOpenClawImportedMemory(ctx, d, memoryScope, importTag, preparedNotes); err != nil {
+		return report, err
+	}
+	copiedFiles, backedUpFiles, err := applyOpenClawFileWrites(filePlans)
+	if err != nil {
+		return report, err
+	}
+	report.CopiedFiles = copiedFiles
+	report.BackedUpFiles = backedUpFiles
 	return report, nil
 }
 
@@ -197,49 +197,112 @@ func buildOpenClawStaticMemory(memoryText, userText string) string {
 	return strings.Join(parts, "\n\n") + "\n"
 }
 
-func readOptionalTextFile(path string) (string, bool, error) {
-	data, err := os.ReadFile(path)
+func resolveOpenClawSourceDir(sourceDir string) (string, error) {
+	absSource, err := filepath.Abs(sourceDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve source dir: %w", err)
+	}
+	absSource, err = filepath.EvalSymlinks(absSource)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize source dir: %w", err)
+	}
+	info, err := os.Stat(absSource)
+	if err != nil {
+		return "", fmt.Errorf("stat source dir: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("openclaw source is not a directory: %s", absSource)
+	}
+	return absSource, nil
+}
+
+func readOpenClawTextFile(rootDir, relativePath string) (string, bool, error) {
+	fullPath := filepath.Join(rootDir, relativePath)
+	info, err := os.Lstat(fullPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "", false, nil
 		}
-		return "", false, fmt.Errorf("read %s: %w", path, err)
+		return "", false, fmt.Errorf("stat %s: %w", fullPath, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", false, fmt.Errorf("symlinked source file is not allowed: %s", fullPath)
+	}
+	if info.IsDir() {
+		return "", false, fmt.Errorf("source file is a directory: %s", fullPath)
+	}
+	realPath, err := filepath.EvalSymlinks(fullPath)
+	if err != nil {
+		return "", false, fmt.Errorf("canonicalize %s: %w", fullPath, err)
+	}
+	if !pathWithinRoot(rootDir, realPath) {
+		return "", false, fmt.Errorf("source file escapes root: %s", fullPath)
+	}
+	data, err := os.ReadFile(realPath)
+	if err != nil {
+		return "", false, fmt.Errorf("read %s: %w", realPath, err)
 	}
 	return string(data), true, nil
 }
 
-func writeFileWithBackup(path string, data []byte) (bool, error) {
-	if strings.TrimSpace(path) == "" {
-		return false, fmt.Errorf("destination path is empty")
+func applyOpenClawFileWrites(plans []openClawFileWritePlan) (int, int, error) {
+	type previousFileState struct {
+		path   string
+		exists bool
+		data   []byte
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return false, fmt.Errorf("mkdir %s: %w", filepath.Dir(path), err)
+	applied := make([]previousFileState, 0, len(plans))
+	copiedFiles := 0
+	backedUpFiles := 0
+	restore := func() {
+		for i := len(applied) - 1; i >= 0; i-- {
+			state := applied[i]
+			if state.exists {
+				_ = os.WriteFile(state.path, state.data, 0o644)
+				continue
+			}
+			_ = os.Remove(state.path)
+		}
 	}
-	existing, err := os.ReadFile(path)
-	switch {
-	case err == nil:
-		if bytes.Equal(existing, data) {
-			return false, nil
+	for _, plan := range plans {
+		if strings.TrimSpace(plan.path) == "" {
+			restore()
+			return copiedFiles, backedUpFiles, fmt.Errorf("destination path is empty")
 		}
-		backupPath, err := nextBackupPath(path)
-		if err != nil {
-			return false, err
+		if err := os.MkdirAll(filepath.Dir(plan.path), 0o755); err != nil {
+			restore()
+			return copiedFiles, backedUpFiles, fmt.Errorf("mkdir %s: %w", filepath.Dir(plan.path), err)
 		}
-		if err := os.WriteFile(backupPath, existing, 0o644); err != nil {
-			return false, fmt.Errorf("write backup %s: %w", backupPath, err)
+		existing, err := os.ReadFile(plan.path)
+		switch {
+		case err == nil:
+			if bytes.Equal(existing, plan.data) {
+				continue
+			}
+			backupPath, err := nextBackupPath(plan.path)
+			if err != nil {
+				restore()
+				return copiedFiles, backedUpFiles, err
+			}
+			if err := os.WriteFile(backupPath, existing, 0o644); err != nil {
+				restore()
+				return copiedFiles, backedUpFiles, fmt.Errorf("write backup %s: %w", backupPath, err)
+			}
+			backedUpFiles++
+			applied = append(applied, previousFileState{path: plan.path, exists: true, data: existing})
+		case os.IsNotExist(err):
+			applied = append(applied, previousFileState{path: plan.path, exists: false})
+		default:
+			restore()
+			return copiedFiles, backedUpFiles, fmt.Errorf("read %s: %w", plan.path, err)
 		}
-		if err := os.WriteFile(path, data, 0o644); err != nil {
-			return true, fmt.Errorf("write %s: %w", path, err)
+		if err := os.WriteFile(plan.path, plan.data, 0o644); err != nil {
+			restore()
+			return copiedFiles, backedUpFiles, fmt.Errorf("write %s: %w", plan.path, err)
 		}
-		return true, nil
-	case os.IsNotExist(err):
-		if err := os.WriteFile(path, data, 0o644); err != nil {
-			return false, fmt.Errorf("write %s: %w", path, err)
-		}
-		return false, nil
-	default:
-		return false, fmt.Errorf("read %s: %w", path, err)
+		copiedFiles++
 	}
+	return copiedFiles, backedUpFiles, nil
 }
 
 func nextBackupPath(path string) (string, error) {
@@ -283,25 +346,29 @@ func buildOpenClawImportTag(sourceDir string) string {
 	return fmt.Sprintf("import:openclaw:%s-%08x", base, h.Sum32())
 }
 
-func purgeImportedOpenClawMemory(ctx context.Context, d *db.DB, memoryScope, importTag string) error {
+func listImportedOpenClawNoteIDs(ctx context.Context, d *db.DB, memoryScope, importTag string) ([]int64, error) {
 	rows, err := d.SQL.QueryContext(ctx,
 		`SELECT id FROM memory_notes WHERE session_key=? AND (tags=? OR tags LIKE ?)`,
 		memoryScope, importTag, importTag+",%")
 	if err != nil {
-		return fmt.Errorf("list prior imported memories: %w", err)
+		return nil, fmt.Errorf("list prior imported memories: %w", err)
 	}
 	defer rows.Close()
 	var ids []int64
 	for rows.Next() {
 		var id int64
 		if err := rows.Scan(&id); err != nil {
-			return fmt.Errorf("scan prior imported memories: %w", err)
+			return nil, fmt.Errorf("scan prior imported memories: %w", err)
 		}
 		ids = append(ids, id)
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate prior imported memories: %w", err)
+		return nil, fmt.Errorf("iterate prior imported memories: %w", err)
 	}
+	return ids, nil
+}
+
+func deleteOpenClawImportedNotesByID(ctx context.Context, d *db.DB, ids []int64) error {
 	for _, id := range ids {
 		if d.VecSQL != nil {
 			if _, err := d.VecSQL.ExecContext(ctx, `DELETE FROM memory_vec WHERE note_id=?`, id); err != nil && !strings.Contains(strings.ToLower(err.Error()), "no such table: memory_vec") {
@@ -311,6 +378,48 @@ func purgeImportedOpenClawMemory(ctx context.Context, d *db.DB, memoryScope, imp
 		if _, err := d.SQL.ExecContext(ctx, `DELETE FROM memory_notes WHERE id=?`, id); err != nil {
 			return fmt.Errorf("delete imported memory row %d: %w", id, err)
 		}
+	}
+	return nil
+}
+
+func replaceOpenClawImportedMemory(ctx context.Context, d *db.DB, memoryScope, importTag string, notes []openClawPreparedNote) error {
+	var newIDs []int64
+	for _, note := range notes {
+		id, err := d.InsertMemoryNoteTyped(ctx, memoryScope, db.TypedNoteInput{
+			Text:             note.text,
+			Embedding:        note.embedding,
+			EmbedFingerprint: note.embedFingerprint,
+			SourceMsgID:      sql.NullInt64{},
+			Tags:             note.tags,
+			Kind:             db.MemoryKindEpisode,
+			Status:           db.MemoryStatusActive,
+			Importance:       0.35,
+		})
+		if err != nil {
+			_ = deleteOpenClawImportedNotesByID(ctx, d, newIDs)
+			return fmt.Errorf("insert imported memory note: %w", err)
+		}
+		newIDs = append(newIDs, id)
+	}
+	existingIDs, err := listImportedOpenClawNoteIDs(ctx, d, memoryScope, importTag)
+	if err != nil {
+		_ = deleteOpenClawImportedNotesByID(ctx, d, newIDs)
+		return err
+	}
+	preserve := make(map[int64]struct{}, len(newIDs))
+	for _, id := range newIDs {
+		preserve[id] = struct{}{}
+	}
+	var oldIDs []int64
+	for _, id := range existingIDs {
+		if _, ok := preserve[id]; ok {
+			continue
+		}
+		oldIDs = append(oldIDs, id)
+	}
+	if err := deleteOpenClawImportedNotesByID(ctx, d, oldIDs); err != nil {
+		_ = deleteOpenClawImportedNotesByID(ctx, d, newIDs)
+		return err
 	}
 	return nil
 }
@@ -345,7 +454,14 @@ func buildOpenClawEmbedPlan(ctx context.Context, cfg config.Config, d *db.DB, pr
 }
 
 func collectOpenClawMemoryFiles(root string) ([]string, error) {
-	info, err := os.Stat(root)
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("canonicalize memory dir: %w", err)
+	}
+	info, err := os.Stat(realRoot)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -356,12 +472,15 @@ func collectOpenClawMemoryFiles(root string) ([]string, error) {
 		return nil, nil
 	}
 	var files []string
-	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+	err = filepath.WalkDir(realRoot, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("symlinked memory path is not allowed: %s", path)
+		}
 		if entry.IsDir() {
-			if path != root && strings.HasPrefix(entry.Name(), ".") {
+			if path != realRoot && strings.HasPrefix(entry.Name(), ".") {
 				return filepath.SkipDir
 			}
 			return nil
@@ -370,7 +489,14 @@ func collectOpenClawMemoryFiles(root string) ([]string, error) {
 			return nil
 		}
 		if strings.EqualFold(filepath.Ext(entry.Name()), ".md") {
-			files = append(files, path)
+			realPath, err := filepath.EvalSymlinks(path)
+			if err != nil {
+				return err
+			}
+			if !pathWithinRoot(realRoot, realPath) {
+				return fmt.Errorf("memory path escapes source root: %s", path)
+			}
+			files = append(files, realPath)
 		}
 		return nil
 	})
@@ -381,51 +507,35 @@ func collectOpenClawMemoryFiles(root string) ([]string, error) {
 	return files, nil
 }
 
-type openClawImportCounts struct {
-	imported int
-	embedded int
-}
-
-func importOpenClawMemoryFile(ctx context.Context, d *db.DB, prov *providers.Client, embedPlan openClawEmbedPlan, importTag, sourceRoot, filePath, memoryScope string, embedMaxBytes int) (openClawImportCounts, []string, error) {
-	var counts openClawImportCounts
+func prepareOpenClawMemoryFile(ctx context.Context, prov *providers.Client, embedPlan openClawEmbedPlan, importTag, sourceRoot, filePath string, embedMaxBytes int) ([]openClawPreparedNote, []string, error) {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
-		return counts, nil, fmt.Errorf("read memory file %s: %w", filePath, err)
+		return nil, nil, fmt.Errorf("read memory file %s: %w", filePath, err)
 	}
 	relPath, err := filepath.Rel(sourceRoot, filePath)
 	if err != nil {
 		relPath = filepath.Base(filePath)
 	}
 	chunks := buildOpenClawMemoryChunks(relPath, string(data), embedMaxBytes)
+	notes := make([]openClawPreparedNote, 0, len(chunks))
 	var warnings []string
 	for _, chunk := range chunks {
-		tags := importTag + ",source:" + strings.ReplaceAll(relPath, ",", "_")
-		input := db.TypedNoteInput{
-			Text:        chunk,
-			SourceMsgID: sql.NullInt64{},
-			Tags:        tags,
-			Kind:        db.MemoryKindEpisode,
-			Status:      db.MemoryStatusActive,
-			Importance:  0.35,
+		note := openClawPreparedNote{
+			text: chunk,
+			tags: importTag + ",source:" + strings.ReplaceAll(relPath, ",", "_"),
 		}
 		if embedPlan.enabled {
 			vec, err := prov.Embed(ctx, embedPlan.model, chunk)
 			if err != nil {
 				warnings = append(warnings, fmt.Sprintf("embedding failed for %s; imported without vectors", relPath))
 			} else {
-				input.Embedding = memory.PackFloat32(vec)
-				input.EmbedFingerprint = embedPlan.fingerprint
+				note.embedding = memory.PackFloat32(vec)
+				note.embedFingerprint = embedPlan.fingerprint
 			}
 		}
-		if _, err := d.InsertMemoryNoteTyped(ctx, memoryScope, input); err != nil {
-			return counts, warnings, fmt.Errorf("insert memory note for %s: %w", relPath, err)
-		}
-		counts.imported++
-		if len(input.Embedding) > 0 {
-			counts.embedded++
-		}
+		notes = append(notes, note)
 	}
-	return counts, warnings, nil
+	return notes, warnings, nil
 }
 
 func buildOpenClawMemoryChunks(relPath, text string, maxBytes int) []string {
@@ -563,4 +673,12 @@ func bestChunkCut(text string, maxBytes int) int {
 		i -= size
 	}
 	return best
+}
+
+func pathWithinRoot(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }

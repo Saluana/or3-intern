@@ -20,6 +20,11 @@ var (
 	ErrJobNotFound               = errors.New("job not found")
 )
 
+const (
+	defaultListLimit = 100
+	maxListLimit     = 200
+)
+
 type Service struct {
 	Config          config.Config
 	Runtime         *agent.Runtime
@@ -457,8 +462,8 @@ func firstNonEmptyString(values ...string) string {
 }
 
 func normalizeLimit(limit int) int {
-	if limit <= 0 || limit > 200 {
-		return 100
+	if limit <= 0 || limit > maxListLimit {
+		return defaultListLimit
 	}
 	return limit
 }

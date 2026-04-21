@@ -498,11 +498,11 @@ func decodeServiceAllowlistRequest(body io.Reader) (serviceAllowlistRequest, err
 		Domain:    domain,
 		Scope:     payload.Scope,
 		Matcher:   matcher,
-		ExpiresAt: maxServiceInt64(payload.ExpiresAt, payload.ExpiresAtCamel),
+		ExpiresAt: firstPositiveInt64(payload.ExpiresAt, payload.ExpiresAtCamel),
 	}, nil
 }
 
-func maxServiceInt64(values ...int64) int64 {
+func firstPositiveInt64(values ...int64) int64 {
 	for _, value := range values {
 		if value > 0 {
 			return value

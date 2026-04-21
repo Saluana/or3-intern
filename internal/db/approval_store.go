@@ -269,7 +269,7 @@ func (d *DB) ListApprovalRequestsFiltered(ctx context.Context, status, approvalT
 	}
 	query := `SELECT id, type, subject_hash, subject_json, requester_agent_id, requester_session_id, execution_host_id, status, policy_mode, requested_at, expires_at, resolved_at, resolver_actor_id, resolution_kind, resolution_note FROM approval_requests`
 	args := []any{}
-	clauses := []string{}
+	clauses := make([]string, 0, 2)
 	if strings.TrimSpace(status) != "" {
 		clauses = append(clauses, "status=?")
 		args = append(args, status)

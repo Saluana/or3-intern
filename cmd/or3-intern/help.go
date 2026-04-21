@@ -48,6 +48,7 @@ var rootHelpSections = []struct {
 			{Name: "secrets", Description: "Manage encrypted secret references stored in SQLite"},
 			{Name: "audit", Description: "Inspect or verify the append-only audit chain"},
 			{Name: "migrate-jsonl", Description: "Import legacy session history from JSONL"},
+			{Name: "migrate-openclaw", Description: "Import a local OpenClaw agent into or3-intern files and memory"},
 		},
 	},
 	{
@@ -334,6 +335,20 @@ var helpTopics = map[string]helpCommand{
 		Usage:    "or3-intern migrate-jsonl <path-to-session.jsonl> [session_key]",
 		Summary:  "Import legacy session history from a JSONL transcript.",
 		Examples: []string{"or3-intern migrate-jsonl /tmp/session.jsonl", "or3-intern migrate-jsonl /tmp/session.jsonl imported:demo"},
+	},
+	"migrate-openclaw": {
+		Usage:   "or3-intern migrate-openclaw [--scope <scope-key>] [--embed-max-bytes <n>] <openclaw-agent-dir>",
+		Summary: "Import SOUL.md, IDENTITY.md, MEMORY.md, USER.md, and daily memory notes from a local OpenClaw agent.",
+		Description: []string{
+			"Core bootstrap files are copied into the configured or3-intern destinations.",
+			"OpenClaw memory/*.md files are imported as durable memory notes using conservative chunking so embedding requests stay bounded.",
+			"The command is repeatable: previously imported OpenClaw daily notes for the same source agent are replaced before new notes are inserted.",
+		},
+		Flags: []helpItem{
+			{Name: "--scope <scope-key>", Description: "Memory scope for imported daily notes; defaults to global shared memory"},
+			{Name: "--embed-max-bytes <n>", Description: "Maximum bytes per imported memory chunk before embedding"},
+		},
+		Examples: []string{"or3-intern migrate-openclaw ~/.openclaw/agents/main", "or3-intern migrate-openclaw --scope global ~/agent-export"},
 	},
 	"version": {
 		Usage:    "or3-intern version",

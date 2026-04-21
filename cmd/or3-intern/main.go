@@ -505,6 +505,11 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println("ok")
+	case "migrate-openclaw":
+		if err := runMigrateOpenClawCommand(ctx, cfg, d, prov, args[1:], os.Stdout, os.Stderr); err != nil {
+			fmt.Fprintln(os.Stderr, "migrate-openclaw error:", err)
+			os.Exit(1)
+		}
 	case "embeddings":
 		if err := runEmbeddingsCommand(ctx, cfg, d, prov, args[1:], os.Stdout, os.Stderr); err != nil {
 			fmt.Fprintln(os.Stderr, "embeddings error:", err)

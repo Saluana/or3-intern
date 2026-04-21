@@ -84,16 +84,19 @@ func runDoctorCommand(cfgPath string, cfg config.Config, validationError string,
 		ValidationError: validationError,
 		Probe:           parsed.Probe,
 	})
+	currentValidationError := validationError
 
 	if parsed.Fix {
 		applied, fixErr := intdoctor.ApplyAutomaticFixes(cfgPath, &cfg, report, intdoctor.FixOptions{AutomaticOnly: !parsed.Interactive})
 		if fixErr != nil {
 			return fixErr
 		}
+		currentValidationError = refreshDoctorValidationError(cfgPath, currentValidationError)
 		report = intdoctor.Evaluate(cfg, intdoctor.Options{
-			Mode:       chooseDoctorMode(parsed.Strict),
-			ConfigPath: cfgPath,
-			Probe:      parsed.Probe,
+			Mode:            chooseDoctorMode(parsed.Strict),
+			ConfigPath:      cfgPath,
+			ValidationError: currentValidationError,
+			Probe:           parsed.Probe,
 		})
 		if parsed.Interactive {
 			appliedInteractive, interactiveErr := applyInteractiveDoctorFixes(stdin, stdout, cfgPath, &cfg, report)
@@ -102,10 +105,12 @@ func runDoctorCommand(cfgPath string, cfg config.Config, validationError string,
 			}
 			applied = append(applied, appliedInteractive...)
 		}
+		currentValidationError = refreshDoctorValidationError(cfgPath, currentValidationError)
 		report = intdoctor.Evaluate(cfg, intdoctor.Options{
-			Mode:       chooseDoctorMode(parsed.Strict),
-			ConfigPath: cfgPath,
-			Probe:      parsed.Probe,
+			Mode:            chooseDoctorMode(parsed.Strict),
+			ConfigPath:      cfgPath,
+			ValidationError: currentValidationError,
+			Probe:           parsed.Probe,
 		})
 		report.FixesApplied = applied
 	}
@@ -137,6 +142,16 @@ func chooseDoctorMode(strict bool) intdoctor.Mode {
 		return intdoctor.ModeStrict
 	}
 	return intdoctor.ModeAdvisory
+}
+
+func refreshDoctorValidationError(cfgPath, previous string) string {
+	if strings.TrimSpace(cfgPath) == "" {
+		return previous
+	}
+	if _, err := config.Load(cfgPath); err != nil {
+		return err.Error()
+	}
+	return ""
 }
 
 func doctorFindings(cfg config.Config) []doctorFinding {

@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 
-	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -25,7 +25,6 @@ const (
 	chatSidebarMinW    = 28
 	chatInputMinW      = 24
 	chatInputPanelH    = 3
-	chatStatusPanelH   = 2
 	chatHeaderPanelH   = 4
 	chatMessagePadding = 2
 )
@@ -38,28 +37,52 @@ type historyStore interface {
 
 type bubbleChatBridge struct {
 	events       chan tea.Msg
+	done         chan struct{}
+	closeOnce    sync.Once
 	nextStreamID atomic.Int64
 }
 
 func newBubbleChatBridge() *bubbleChatBridge {
-	return &bubbleChatBridge{events: make(chan tea.Msg, 256)}
+	return &bubbleChatBridge{events: make(chan tea.Msg, 256), done: make(chan struct{})}
 }
+
+type chatBridgeClosedMsg struct{}
 
 func (b *bubbleChatBridge) waitCmd() tea.Cmd {
 	return func() tea.Msg {
-		return <-b.events
+		if b == nil {
+			return chatBridgeClosedMsg{}
+		}
+		select {
+		case msg := <-b.events:
+			return msg
+		case <-b.done:
+			return chatBridgeClosedMsg{}
+		}
 	}
 }
 
-func (b *bubbleChatBridge) emit(msg tea.Msg) {
+func (b *bubbleChatBridge) emit(msg tea.Msg) bool {
 	if b == nil || msg == nil {
-		return
+		return false
 	}
 	select {
+	case <-b.done:
+		return false
 	case b.events <- msg:
+		return true
 	default:
-		go func() { b.events <- msg }()
+		return false
 	}
+}
+
+func (b *bubbleChatBridge) close() {
+	if b == nil {
+		return
+	}
+	b.closeOnce.Do(func() {
+		close(b.done)
+	})
 }
 
 func (b *bubbleChatBridge) newStreamID() int {
@@ -125,6 +148,8 @@ type chatKeyMap struct {
 	ClearInput key.Binding
 	ScrollUp   key.Binding
 	ScrollDown key.Binding
+	ScrollTop  key.Binding
+	ScrollEnd  key.Binding
 	Commands   key.Binding
 	Session    key.Binding
 	ClearView  key.Binding
@@ -135,8 +160,10 @@ func newChatKeyMap() chatKeyMap {
 		Send:       key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "send")),
 		Quit:       key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "quit")),
 		ClearInput: key.NewBinding(key.WithKeys("ctrl+u"), key.WithHelp("ctrl+u", "clear input")),
-		ScrollUp:   key.NewBinding(key.WithKeys("pgup", "shift+up"), key.WithHelp("pgup", "scroll up")),
-		ScrollDown: key.NewBinding(key.WithKeys("pgdown", "shift+down"), key.WithHelp("pgdn", "scroll down")),
+		ScrollUp:   key.NewBinding(key.WithKeys("pgup", "shift+up", "up"), key.WithHelp("↑/pgup", "scroll up")),
+		ScrollDown: key.NewBinding(key.WithKeys("pgdown", "shift+down", "down"), key.WithHelp("↓/pgdn", "scroll down")),
+		ScrollTop:  key.NewBinding(key.WithKeys("home"), key.WithHelp("home", "scroll to top")),
+		ScrollEnd:  key.NewBinding(key.WithKeys("end"), key.WithHelp("end", "scroll to end")),
 		Commands:   key.NewBinding(key.WithKeys("ctrl+/"), key.WithHelp("ctrl+/", "commands")),
 		Session:    key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("ctrl+s", "session info")),
 		ClearView:  key.NewBinding(key.WithKeys("ctrl+l"), key.WithHelp("ctrl+l", "clear view")),
@@ -144,11 +171,11 @@ func newChatKeyMap() chatKeyMap {
 }
 
 func (k chatKeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Send, k.Commands, k.Session, k.ClearView, k.Quit}
+	return []key.Binding{k.Send, k.ScrollUp, k.ScrollDown, k.Commands, k.Session, k.ClearView, k.Quit}
 }
 
 func (k chatKeyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{{k.Send, k.ClearInput, k.Commands, k.Session}, {k.ScrollUp, k.ScrollDown, k.ClearView, k.Quit}}
+	return [][]key.Binding{{k.Send, k.ClearInput, k.Commands, k.Session}, {k.ScrollUp, k.ScrollDown, k.ScrollTop, k.ScrollEnd}, {k.ClearView, k.Quit}}
 }
 
 type chatStyles struct {
@@ -220,7 +247,6 @@ type chatModel struct {
 	scopeSessions []string
 	viewport      viewport.Model
 	input         textinput.Model
-	help          help.Model
 	keys          chatKeyMap
 	styles        chatStyles
 	messages      []chatMessage
@@ -249,7 +275,6 @@ func newChatModel(ctx context.Context, sessionKey string, bridge *bubbleChatBrid
 		sessionKey:   strings.TrimSpace(sessionKey),
 		viewport:     vp,
 		input:        input,
-		help:         help.New(),
 		keys:         newChatKeyMap(),
 		styles:       newChatStyles(),
 		streamIndex:  map[int]int{},
@@ -270,6 +295,13 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.resize()
 		m.refreshViewport(true)
+	case tea.MouseMsg:
+		var vpCmd tea.Cmd
+		m.viewport, vpCmd = m.viewport.Update(msg)
+		cmds = append(cmds, vpCmd)
+		return m, tea.Batch(cmds...)
+	case chatBridgeClosedMsg:
+		return m, nil
 	case tea.KeyMsg:
 		handledKey := false
 		switch {
@@ -280,10 +312,16 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.input.SetValue("")
 		case key.Matches(msg, m.keys.ScrollUp):
 			handledKey = true
-			m.viewport.LineUp(4)
+			m.viewport.LineUp(3)
 		case key.Matches(msg, m.keys.ScrollDown):
 			handledKey = true
-			m.viewport.LineDown(4)
+			m.viewport.LineDown(3)
+		case key.Matches(msg, m.keys.ScrollTop):
+			handledKey = true
+			m.viewport.GotoTop()
+		case key.Matches(msg, m.keys.ScrollEnd):
+			handledKey = true
+			m.viewport.GotoBottom()
 		case key.Matches(msg, m.keys.Commands):
 			handledKey = true
 			m.appendSystem(localCommandsHelp())
@@ -366,7 +404,11 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.complete && m.pendingCount > 0 {
 			m.pendingCount--
 		}
-		m.statusText = m.statusLabel()
+		if m.pendingCount == 0 {
+			m.statusText = "Ready"
+		} else {
+			m.statusText = "Working…"
+		}
 		m.refreshViewport(true)
 		cmds = append(cmds, m.bridge.waitCmd())
 	case chatAssistantAbortMsg:
@@ -378,7 +420,11 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.pendingCount > 0 {
 			m.pendingCount--
 		}
-		m.statusText = m.statusLabel()
+		if m.pendingCount == 0 {
+			m.statusText = "Error"
+		} else {
+			m.statusText = "Working…"
+		}
 		m.refreshViewport(true)
 		cmds = append(cmds, m.bridge.waitCmd())
 	case chatNoticeMsg:
@@ -397,8 +443,10 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if strings.TrimSpace(msg.err) != "" {
 			detail = msg.err
 		}
-		m.addActivity("Result", fmt.Sprintf("%s · %s", msg.name, summarizeText(detail, 100)), "result")
-		m.statusText = m.statusLabel()
+		m.addActivity("Result", fmt.Sprintf("%s · %s", msg.name, summarizeText(detail, 80)), "result")
+		if m.pendingCount == 0 {
+			m.statusText = "Ready"
+		}
 		cmds = append(cmds, m.bridge.waitCmd())
 	}
 
@@ -427,10 +475,10 @@ func (m chatModel) View() string {
 		sidebar := m.styles.panel.Width(layout.sidebarW).Height(maxInt(7, m.viewport.Height+2)).Render(m.renderSidebar(layout.sidebarW))
 		content = lipgloss.JoinHorizontal(lipgloss.Top, transcriptPanel, "  ", sidebar)
 	}
-	inputPanel := m.styles.inputBox.Width(layout.panelWidth).Render(m.styles.panelTitle.Render("Message") + "\n" + m.input.View())
-	footer := m.styles.help.Render(m.help.View(m.keys))
-	status := m.styles.panel.Width(layout.panelWidth).Render(m.styles.status.Render(m.statusLabel()))
-	return m.styles.app.Render(lipgloss.JoinVertical(lipgloss.Left, header, "", content, "", inputPanel, status, footer))
+	inputTitle := m.styles.panelTitle.Render("Message") + "  " + m.styles.status.Render(m.statusLabel())
+	inputPanel := m.styles.inputBox.Width(layout.panelWidth).Render(inputTitle + "\n" + m.input.View())
+	footer := m.renderFooter(layout)
+	return m.styles.app.Render(lipgloss.JoinVertical(lipgloss.Left, header, content, inputPanel, footer))
 }
 
 func (m *chatModel) resize() {
@@ -469,8 +517,9 @@ func (m *chatModel) renderSidebar(width int) string {
 	if len(m.activity) == 0 {
 		sections = append(sections, m.styles.placeholder.Render("No tool activity yet."))
 	} else {
+		detailLimit := maxInt(20, width-8)
 		for _, item := range m.activity {
-			sections = append(sections, m.styles.activity.Render("• "+item.title), m.styles.muted.Render("  "+item.detail))
+			sections = append(sections, m.styles.activity.Render("• "+item.title), m.styles.muted.Render("  "+summarizeText(item.detail, detailLimit)))
 		}
 	}
 	return lipgloss.NewStyle().Width(width - 4).Render(strings.Join(sections, "\n"))
@@ -488,12 +537,26 @@ func (m *chatModel) renderSidebarCompact(width int) string {
 		sections = append(sections, m.styles.placeholder.Render("No recent tool activity."))
 	} else {
 		limit := minInt(3, len(m.activity))
+		detailLimit := maxInt(24, width-12)
 		for _, item := range m.activity[:limit] {
-			sections = append(sections, m.styles.activity.Render("• "+item.title+" · "+summarizeText(item.detail, 48)))
+			sections = append(sections, m.styles.activity.Render("• "+item.title+" · "+summarizeText(item.detail, detailLimit)))
 		}
 	}
 	sections = append(sections, "", m.styles.panelTitle.Render("Commands"), m.styles.activity.Render("/commands  /session  /scope  /clear"))
 	return lipgloss.NewStyle().Width(width - 4).Render(strings.Join(sections, "\n"))
+}
+
+func (m *chatModel) renderFooter(layout chatLayout) string {
+	line := strings.Join([]string{
+		"ctrl+/ commands",
+		"ctrl+s session",
+		"ctrl+l clear",
+		"ctrl+c quit",
+	}, " • ")
+	if layout.compact {
+		line = strings.Join([]string{"/commands", "/session", "/clear", "ctrl+c quit"}, " • ")
+	}
+	return m.styles.help.Width(layout.panelWidth).Render(truncateChatLine(line, maxInt(12, layout.panelWidth-2)))
 }
 
 func deriveChatLayout(width, height int) chatLayout {
@@ -506,14 +569,18 @@ func deriveChatLayout(width, height int) chatLayout {
 		transcriptW = maxInt(chatViewportMinW, panelWidth-chatSidebarMinW-2)
 		sidebarW = maxInt(chatSidebarMinW, panelWidth-transcriptW-2)
 	}
-	reserved := 11
+	// header(4) + transcript chrome(panel border 2 + title 1 + viewport pad 1)
+	// + input(4) + footer(1) ≈ 13. Stacked adds the sidebar block beneath
+	// the transcript so we have to reserve more vertical room for it.
+	reserved := 13
 	if stacked {
-		reserved = 16
+		if compact {
+			reserved += 6
+		} else {
+			reserved += 8
+		}
 	}
-	if compact {
-		reserved++
-	}
-	viewportH := 8
+	viewportH := 6
 	if height > 0 {
 		viewportH = maxInt(6, height-reserved)
 	}
@@ -526,6 +593,27 @@ func deriveChatLayout(width, height int) chatLayout {
 		compact:        compact,
 		compactSidebar: stacked && compact,
 	}
+}
+
+func truncateChatLine(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	if limit <= 0 {
+		return ""
+	}
+	if lipgloss.Width(value) <= limit {
+		return value
+	}
+	if limit == 1 {
+		return "…"
+	}
+	runes := []rune(value)
+	for len(runes) > 0 && lipgloss.Width(string(runes)+"…") > limit {
+		runes = runes[:len(runes)-1]
+	}
+	if len(runes) == 0 {
+		return "…"
+	}
+	return strings.TrimRight(string(runes), " ") + "…"
 }
 
 func (m *chatModel) refreshViewport(stickBottom bool) {
@@ -692,6 +780,7 @@ func loadChatHistoryCmd(ctx context.Context, store historyStore, sessionKey stri
 
 func (c *Channel) runBubbleTea(ctx context.Context) error {
 	bridge := newBubbleChatBridge()
+	defer bridge.close()
 	if c.Deliverer != nil {
 		c.Deliverer.SetBridge(bridge)
 		defer c.Deliverer.SetBridge(nil)
@@ -700,7 +789,7 @@ func (c *Channel) runBubbleTea(ctx context.Context) error {
 		return c.Bus.Publish(bus.Event{Type: bus.EventUserMessage, SessionKey: sessionKey, Channel: "cli", From: "local", Message: text})
 	}
 	model := newChatModel(ctx, c.SessionKey, bridge, c.History, publish)
-	program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithContext(ctx))
+	program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithContext(ctx))
 	_, err := program.Run()
 	return err
 }

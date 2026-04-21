@@ -44,27 +44,22 @@ func TestRunInitWithIO_WritesConfig(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	input := strings.NewReader(strings.Join([]string{
-		"2",
-		"",
-		"",
-		"",
-		"",
-		"",
-		"n",
-		"test-key",
-		"",
-		"",
-		"",
-		"",
-		"",
-		"",
-		"",
-		"",
-		"",
-		"",
-		"",
-		"",
-		"",
+		// Provider section (9 prompts)
+		"2",        // 1. provider preset -> OpenRouter
+		"",         // 2. API base (default)
+		"",         // 3. Chat model (default)
+		"",         // 4. Embedding model (default)
+		"",         // 5. Embedding dimensions (default)
+		"",         // 6. Temperature (default)
+		"",         // 7. Timeout seconds (default)
+		"n",        // 8. Enable vision (y/n)
+		"test-key", // 9. API key
+		// Storage section (7 prompts)
+		"", "", "", "", "", "", "",
+		// Workspace section (3 prompts)
+		"", "", "",
+		// Tools section (4 prompts)
+		"", "", "", "",
 	}, "\n"))
 	var out strings.Builder
 

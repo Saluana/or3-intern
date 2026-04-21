@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"or3-intern/internal/db"
 )
@@ -224,5 +225,49 @@ func TestChatModelNoticeDoesNotCorruptInput(t *testing.T) {
 	}
 	if !strings.Contains(view, "consolidation failed") {
 		t.Fatalf("expected consolidation notice text in view, got %q", view)
+	}
+}
+
+func TestChatModelFooterRemainsSingleLineInCompactLayout(t *testing.T) {
+	bridge := newBubbleChatBridge()
+	model := newChatModel(context.Background(), "cli:default", bridge, nil, func(sessionKey, text string) bool {
+		_ = sessionKey
+		_ = text
+		return true
+	})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 72, Height: 20})
+	m := updated.(chatModel)
+
+	footer := m.renderFooter(deriveChatLayout(m.width, m.height))
+	if got := lipgloss.Height(footer); got != 1 {
+		t.Fatalf("expected single-line footer, got height %d: %q", got, footer)
+	}
+	if strings.Contains(footer, "\n") {
+		t.Fatalf("expected footer without wrapping, got %q", footer)
+	}
+}
+
+func TestBubbleChatBridgeEmitReturnsFalseWhenFullOrClosed(t *testing.T) {
+	bridge := newBubbleChatBridge()
+	for i := 0; i < cap(bridge.events); i++ {
+		if ok := bridge.emit(chatNoticeMsg{text: "notice"}); !ok {
+			t.Fatalf("expected emit %d to fit in buffer", i)
+		}
+	}
+	if ok := bridge.emit(chatNoticeMsg{text: "overflow"}); ok {
+		t.Fatal("expected emit to fail when the bridge buffer is full")
+	}
+	bridge.close()
+	if ok := bridge.emit(chatNoticeMsg{text: "after-close"}); ok {
+		t.Fatal("expected emit to fail after bridge close")
+	}
+}
+
+func TestBubbleChatBridgeWaitCmdReturnsClosedMessage(t *testing.T) {
+	bridge := newBubbleChatBridge()
+	cmd := bridge.waitCmd()
+	bridge.close()
+	if msg := cmd(); msg != (chatBridgeClosedMsg{}) {
+		t.Fatalf("expected chatBridgeClosedMsg, got %T", msg)
 	}
 }

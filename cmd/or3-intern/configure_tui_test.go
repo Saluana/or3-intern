@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -134,5 +135,28 @@ func TestConfigureTUICompactEditingKeepsEditorVisible(t *testing.T) {
 	}
 	if got := model.visibleFormFieldCount(); got > 4 {
 		t.Fatalf("expected reduced visible rows in compact mode, got %d", got)
+	}
+}
+
+func TestRenderSummaryPanelMode_NoChannelsDoesNotOverwriteAutomation(t *testing.T) {
+	styles := newConfigureStyles()
+	cfg := config.Default()
+	panel := renderSummaryPanelMode(styles, cfg, "", false)
+	if !strings.Contains(panel, "Automation:") {
+		t.Fatalf("expected automation row to remain visible, got %q", panel)
+	}
+	if !strings.Contains(panel, "Channels:") || !strings.Contains(panel, "none enabled") {
+		t.Fatalf("expected no-channels fallback in channels row, got %q", panel)
+	}
+}
+
+func TestTruncateConfigureLine_PreservesUTF8(t *testing.T) {
+	value := "日本語の設定値"
+	truncated := truncateConfigureLine(value, 6)
+	if !utf8.ValidString(truncated) {
+		t.Fatalf("expected valid UTF-8 after truncation, got %q", truncated)
+	}
+	if !strings.HasSuffix(truncated, "…") {
+		t.Fatalf("expected ellipsis suffix after truncation, got %q", truncated)
 	}
 }

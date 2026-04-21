@@ -638,58 +638,129 @@ func renderFormScreen(m configureTUIModel) string {
 		return m.styles.panel.Width(layout.fullWidth).Render("No editable fields for this screen.")
 	}
 	visibleCount := m.visibleFormFieldCount()
-	start := clampInt(m.formScroll, 0, maxInt(0, len(fields)-1))
-	if start > maxInt(0, len(fields)-visibleCount) {
-		start = maxInt(0, len(fields)-visibleCount)
+	if visibleCount > len(fields) {
+		visibleCount = len(fields)
 	}
+	start := clampInt(m.formScroll, 0, maxInt(0, len(fields)-visibleCount))
 	end := minInt(len(fields), start+visibleCount)
 	visibleFields := fields[start:end]
-	rows := make([]string, 0, len(visibleFields)+2)
-	rows = append(rows, m.styles.section.Render(fmt.Sprintf("Fields %d-%d of %d", start+1, end, len(fields))))
+
+	// Inner width available inside the navigation panel after border and padding.
+	innerWidth := maxInt(20, layout.navWidth-6)
+	labelCol := minInt(maxInt(14, innerWidth/2), 28)
+	valueCol := maxInt(8, innerWidth-labelCol-3)
+
+	sectionLabel := configureSectionMeta(m.currentSection).Label
+	if sectionLabel == "" {
+		sectionLabel = strings.Title(m.currentSection)
+	}
+	if m.currentSection == "channels" && strings.TrimSpace(m.currentChannel) != "" {
+		sectionLabel = sectionLabel + " · " + strings.Title(m.currentChannel)
+	}
+
+	rows := make([]string, 0, len(visibleFields)+4)
+	rows = append(rows, m.styles.section.Render(fmt.Sprintf("%s Field %d/%d", sectionLabel, m.fieldCursor+1, len(fields))))
+	if start > 0 {
+		rows = append(rows, m.styles.muted.Render("↑ more above"))
+	}
 	for offset, field := range visibleFields {
 		i := start + offset
-		selected := i == m.fieldCursor
-		style := lipgloss.NewStyle().Padding(0, 1).BorderLeft(true).BorderStyle(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("238"))
-		labelStyle := m.styles.label
-		if selected && !m.editing {
-			style = style.BorderForeground(lipgloss.Color("212")).Background(lipgloss.Color("236"))
-			labelStyle = m.styles.highlight
-		}
-		value := field.Value
-		if value == "" {
-			value = m.styles.placeholder.Render(field.EmptyHint)
-		}
-		if field.Kind == configureFieldToggle {
-			if field.Value == "on" {
-				value = m.styles.badgeOn.Render(" ON ")
-			} else {
-				value = m.styles.badgeOff.Render(" OFF ")
-			}
-		}
-		if field.Kind == configureFieldChoice && len(field.Choices) > 0 {
-			value = m.styles.buttonAlt.Render(field.Value)
-		}
-		indicator := "  "
-		if selected {
-			indicator = m.styles.highlight.Render("▶ ")
-		}
-		rows = append(rows, style.Render(indicator+labelStyle.Render(field.Label)+"\n"+m.styles.value.Render(value)+"\n"+m.styles.muted.Render(field.Description)))
-	}
-	if start > 0 {
-		rows = append([]string{m.styles.muted.Render("↑ more above")}, rows...)
+		selected := i == m.fieldCursor && !m.editing
+		rows = append(rows, renderConfigureFieldRow(m.styles, field, selected, innerWidth, labelCol, valueCol))
 	}
 	if end < len(fields) {
 		rows = append(rows, m.styles.muted.Render("↓ more below"))
 	}
-	left := m.styles.panel.Width(layout.navWidth).Render(strings.Join(rows, "\n\n"))
-	rightContent := renderSummaryPanelMode(m.styles, m.cfg, formContextHint(m.currentSection, m.currentChannel, m.fieldCursor, len(fields)), layout.compact)
+
+	left := m.styles.panel.Width(layout.navWidth).Render(strings.Join(rows, "\n"))
+
+	rightSections := []string{renderSummaryPanelMode(m.styles, m.cfg, formContextHint(m.currentSection, m.currentChannel, m.fieldCursor, len(fields)), layout.compact)}
 	if m.editing {
-		rightContent += "\n\n" + m.styles.section.Render("Editing") + "\n" + m.textInput.View() + "\n" + m.styles.muted.Render("Enter to apply • esc to cancel")
+		rightSections = append(rightSections, m.styles.section.Render("Editing")+"\n"+m.textInput.View()+"\n"+m.styles.muted.Render("Enter to apply • esc to cancel"))
 	} else {
-		rightContent += "\n\n" + m.styles.section.Render("Selected field") + "\n" + m.styles.highlight.Render(fields[m.fieldCursor].Label)
+		selectedField := fields[m.fieldCursor]
+		desc := compactConfigureText(selectedField.Description, maxInt(40, layout.detailWidth-6))
+		rightSections = append(rightSections, m.styles.section.Render("Selected field")+"\n"+m.styles.highlight.Render(selectedField.Label)+"\n"+m.styles.muted.Render(desc))
 	}
-	right := m.styles.panel.Width(layout.detailWidth).Render(rightContent)
+	right := m.styles.panel.Width(layout.detailWidth).Render(strings.Join(rightSections, "\n\n"))
 	return renderConfigureSplitPanels(layout, left, right)
+}
+
+func renderConfigureFieldRow(styles configureStyles, field configureField, selected bool, innerWidth, labelCol, valueCol int) string {
+	label := truncateConfigureLine(field.Label, labelCol)
+	value := configureFieldDisplayValue(styles, field, valueCol)
+
+	indicator := "  "
+	labelStyle := styles.label
+	if selected {
+		indicator = styles.highlight.Render("▶ ")
+		labelStyle = styles.highlight
+	}
+
+	labelText := labelStyle.Render(label)
+	labelCell := lipgloss.NewStyle().Width(labelCol).Render(labelText)
+	valueCell := lipgloss.NewStyle().Width(valueCol).Align(lipgloss.Right).Render(value)
+	row := lipgloss.JoinHorizontal(lipgloss.Top, indicator, labelCell, " ", valueCell)
+
+	rowStyle := lipgloss.NewStyle().Width(innerWidth)
+	if selected {
+		rowStyle = rowStyle.Background(lipgloss.Color("236"))
+	}
+	rendered := rowStyle.Render(row)
+	if !selected {
+		return rendered
+	}
+	desc := truncateConfigureLine(field.Description, innerWidth-4)
+	descLine := rowStyle.Render("  " + styles.muted.Render(desc))
+	return rendered + "\n" + descLine
+}
+
+func configureFieldDisplayValue(styles configureStyles, field configureField, maxWidth int) string {
+	switch field.Kind {
+	case configureFieldToggle:
+		if field.Value == "on" {
+			return styles.badgeOn.Render("ON")
+		}
+		return styles.badgeOff.Render("OFF")
+	case configureFieldChoice:
+		val := field.Value
+		if strings.TrimSpace(val) == "" {
+			val = "-"
+		}
+		return styles.buttonAlt.Render(truncateConfigureLine(val, maxInt(4, maxWidth-2)))
+	case configureFieldSecret:
+		val := field.Value
+		if strings.TrimSpace(val) == "" {
+			return styles.placeholder.Render(truncateConfigureLine(field.EmptyHint, maxWidth))
+		}
+		return styles.value.Render(truncateConfigureLine(val, maxWidth))
+	default:
+		if strings.TrimSpace(field.Value) == "" {
+			return styles.placeholder.Render(truncateConfigureLine(field.EmptyHint, maxWidth))
+		}
+		return styles.value.Render(truncateConfigureLine(field.Value, maxWidth))
+	}
+}
+
+func truncateConfigureLine(value string, limit int) string {
+	value = strings.ReplaceAll(value, "\n", " ")
+	if limit <= 0 {
+		return ""
+	}
+	if lipgloss.Width(value) <= limit {
+		return value
+	}
+	if limit <= 1 {
+		return "…"
+	}
+	runes := []rune(value)
+	for len(runes) > 0 && lipgloss.Width(string(runes)+"…") > limit {
+		runes = runes[:len(runes)-1]
+	}
+	if len(runes) == 0 {
+		return "…"
+	}
+	return strings.TrimRight(string(runes), " ") + "…"
 }
 
 func deriveConfigureLayout(width, height int) configureLayout {
@@ -697,7 +768,7 @@ func deriveConfigureLayout(width, height int) configureLayout {
 	stacked := width > 0 && width < 110
 	compact := width > 0 && width < 82
 	short := height > 0 && height < 24
-	navWidth := maxInt(34, fullWidth/3)
+	navWidth := maxInt(40, fullWidth/2)
 	detailWidth := maxInt(34, fullWidth-navWidth-2)
 	contentWidth := detailWidth
 	if stacked {
@@ -709,22 +780,30 @@ func deriveConfigureLayout(width, height int) configureLayout {
 	if stacked {
 		listHeight = maxInt(6, minInt(12, maxInt(6, height/3)))
 	}
-	reserved := 12
+	// Budget per visible field row is ~1 line; selected field adds a
+	// description line. Reserve room for app padding, header, footer, panel
+	// chrome, form header, and scroll affordances.
+	reserved := 14
 	if stacked {
-		reserved = 20
+		// In stacked mode the snapshot panel is rendered below the form, so
+		// reserve more vertical room for it.
+		reserved += 10
 	}
 	if short {
 		reserved += 2
 	}
 	fieldRows := 6
 	if height > 0 {
-		fieldRows = (height - reserved) / 4
+		fieldRows = height - reserved
 	}
 	if compact {
 		fieldRows = minInt(fieldRows, 4)
 	}
-	if fieldRows < 2 {
-		fieldRows = 2
+	if fieldRows > 14 {
+		fieldRows = 14
+	}
+	if fieldRows < 3 {
+		fieldRows = 3
 	}
 	return configureLayout{
 		fullWidth:    fullWidth,
@@ -790,6 +869,11 @@ func renderSummaryPanelMode(styles configureStyles, cfg config.Config, hint stri
 		}
 		return strings.Join(lines, "\n")
 	}
+	channelNames := enabledChannelNames(cfg)
+	channelsLine := fmt.Sprintf("%s %s", styles.label.Render("Channels:"), styles.value.Render(strings.Join(channelNames, ", ")))
+	if len(channelNames) == 0 {
+		channelsLine = fmt.Sprintf("%s %s", styles.label.Render("Channels:"), styles.muted.Render("none enabled"))
+	}
 	providerSummary := configureProviderLabel(cfg.Provider.APIBase) + " · " + cfg.Provider.Model + " · embed=" + emptyAsNone(cfg.Provider.EmbedModel)
 	if cfg.Provider.EmbedDimensions > 0 {
 		providerSummary += fmt.Sprintf(" · dims=%d", cfg.Provider.EmbedDimensions)
@@ -804,11 +888,8 @@ func renderSummaryPanelMode(styles configureStyles, cfg config.Config, hint stri
 		fmt.Sprintf("%s %s", styles.label.Render("Security:"), styles.value.Render(fmt.Sprintf("approvals=%t · guarded=%t · network=%t", cfg.Security.Approvals.Enabled, cfg.Hardening.GuardedTools, cfg.Security.Network.Enabled))),
 		fmt.Sprintf("%s %s", styles.label.Render("Skills:"), styles.value.Render(fmt.Sprintf("exec=%t · watch=%t · quarantine=%t", cfg.Skills.EnableExec, cfg.Skills.Load.Watch, cfg.Skills.Policy.QuarantineByDefault))),
 		fmt.Sprintf("%s %s", styles.label.Render("Automation:"), styles.value.Render(fmt.Sprintf("cron=%t · heartbeat=%t · webhook=%t", cfg.Cron.Enabled, cfg.Heartbeat.Enabled, cfg.Triggers.Webhook.Enabled))),
-		fmt.Sprintf("%s %s", styles.label.Render("Channels:"), styles.value.Render(strings.Join(enabledChannelNames(cfg), ", "))),
+		channelsLine,
 		fmt.Sprintf("%s %s", styles.label.Render("Service:"), styles.value.Render(serviceSummary(cfg))),
-	}
-	if len(enabledChannelNames(cfg)) == 0 {
-		lines[8] = fmt.Sprintf("%s %s", styles.label.Render("Channels:"), styles.muted.Render("none enabled"))
 	}
 	if hint != "" {
 		lines = append(lines, "", styles.section.Render("Hint"), styles.muted.Render(hint))

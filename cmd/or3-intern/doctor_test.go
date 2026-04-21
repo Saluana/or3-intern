@@ -359,6 +359,25 @@ func TestRunDoctorCommand_InteractiveFixDisablesPrivilegedToolsWithoutSandbox(t 
 	}
 }
 
+func TestRefreshDoctorValidationErrorReloadsConfigPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	if err := os.WriteFile(path, []byte("{not-json"), 0o600); err != nil {
+		t.Fatalf("WriteFile invalid config: %v", err)
+	}
+	if got := refreshDoctorValidationError(path, "original load error"); strings.TrimSpace(got) == "" {
+		t.Fatal("expected invalid config reload to keep a validation error")
+	}
+
+	if err := config.Save(path, safeDoctorConfig()); err != nil {
+		t.Fatalf("Save valid config: %v", err)
+	}
+	if got := refreshDoctorValidationError(path, "original load error"); got != "" {
+		t.Fatalf("expected valid config reload to clear validation error, got %q", got)
+	}
+}
+
 func TestRunDoctorCommand_InteractiveFixDisablesMissingBubblewrapConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")

@@ -295,11 +295,11 @@ func TestPromptSecretString_ExistingValueUsesSinglePromptContract(t *testing.T) 
 func TestBuildSectionFields_CoversExpandedConfigAreas(t *testing.T) {
 	cfg := config.Default()
 	sections := map[string][]string{
-		"runtime":   {"runtime_default_session", "runtime_worker_count", "runtime_consolidation_enabled"},
-		"tools":     {"tools_brave", "tools_exec_timeout", "tools_path_append"},
-		"skills":    {"skills_enable_exec", "skills_quarantine", "skills_clawhub_registry"},
-		"security":  {"security_secret_store_enabled", "security_approval_exec_mode", "security_network_allowed_hosts"},
-		"hardening": {"hardening_guarded_tools", "hardening_sandbox_enabled", "hardening_max_tool_calls"},
+		"runtime":    {"runtime_default_session", "runtime_worker_count", "runtime_consolidation_enabled"},
+		"tools":      {"tools_brave", "tools_exec_timeout", "tools_path_append"},
+		"skills":     {"skills_enable_exec", "skills_quarantine", "skills_clawhub_registry"},
+		"security":   {"security_secret_store_enabled", "security_approval_exec_mode", "security_network_allowed_hosts"},
+		"hardening":  {"hardening_guarded_tools", "hardening_sandbox_enabled", "hardening_max_tool_calls"},
 		"automation": {"automation_cron_enabled", "automation_webhook_enabled", "automation_filewatch_paths"},
 	}
 	for section, wantKeys := range sections {

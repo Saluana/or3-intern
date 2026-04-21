@@ -16,7 +16,7 @@ func TestParseConfigureArgs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseConfigureArgs: %v", err)
 	}
-	if len(parsed.Sections) != 2 || parsed.Sections[0] != "provider" || parsed.Sections[1] != "web" {
+	if len(parsed.Sections) != 2 || parsed.Sections[0] != "provider" || parsed.Sections[1] != "tools" {
 		t.Fatalf("unexpected sections: %#v", parsed.Sections)
 	}
 	if _, err := parseConfigureArgs([]string{"--section", "nope"}); err == nil {
@@ -38,13 +38,18 @@ func TestRunConfigureWithIO_TargetedSections(t *testing.T) {
 		"",
 		"",
 		"",
+		"12345",
+		"",
+		"n",
 		"router-key",
 		"brave-key",
 		"http://proxy.internal:8080",
+		"75",
+		"/opt/homebrew/bin",
 	}, "\n"))
 	var out strings.Builder
 
-	if err := runConfigureWithIO(input, &out, configPath, "/workspace/project", []string{"--section", "provider", "--section", "web"}); err != nil {
+	if err := runConfigureWithIO(input, &out, configPath, "/workspace/project", []string{"--section", "provider", "--section", "tools"}); err != nil {
 		t.Fatalf("runConfigureWithIO: %v", err)
 	}
 
@@ -64,10 +69,16 @@ func TestRunConfigureWithIO_TargetedSections(t *testing.T) {
 	if cfg.Tools.WebProxy != "http://proxy.internal:8080" {
 		t.Fatalf("unexpected proxy: %q", cfg.Tools.WebProxy)
 	}
+	if cfg.Tools.ExecTimeoutSeconds != 75 {
+		t.Fatalf("unexpected exec timeout: %d", cfg.Tools.ExecTimeoutSeconds)
+	}
+	if cfg.Tools.PathAppend != "/opt/homebrew/bin" {
+		t.Fatalf("unexpected path append: %q", cfg.Tools.PathAppend)
+	}
 	if !strings.Contains(out.String(), "Configuration complete.") {
 		t.Fatalf("expected completion output, got %q", out.String())
 	}
-	if !strings.Contains(out.String(), "Saved provider settings.") || !strings.Contains(out.String(), "Saved web settings.") {
+	if !strings.Contains(out.String(), "Saved provider settings.") || !strings.Contains(out.String(), "Saved tools settings.") {
 		t.Fatalf("expected per-section save output, got %q", out.String())
 	}
 }
@@ -85,7 +96,7 @@ func TestRunConfigureWithIO_InteractiveSelection(t *testing.T) {
 		"2",
 		"/tmp/or3.sqlite",
 		"/tmp/artifacts",
-		"7",
+		"14",
 	}, "\n"))
 	var out strings.Builder
 
@@ -138,6 +149,9 @@ func TestRunConfigureWithIO_RepairsInvalidTelegramChannelConfig(t *testing.T) {
 		"y",
 		"",
 		"",
+		"",
+		"",
+		"n",
 		"2",
 		"",
 		"n",
@@ -215,6 +229,7 @@ func TestRunConfigureWithIO_SecretPromptKeepsExistingValueWithoutLeakingIt(t *te
 	}
 
 	input := strings.NewReader(strings.Join([]string{"", "", "", "", ""}, "\n"))
+	input = strings.NewReader(strings.Join([]string{"", "", "", "", "", "", "n", ""}, "\n"))
 	var out strings.Builder
 	if err := runConfigureWithIO(input, &out, configPath, "/workspace/project", []string{"--section", "provider"}); err != nil {
 		t.Fatalf("runConfigureWithIO: %v", err)
@@ -243,7 +258,7 @@ func TestRunConfigureWithIO_SecretPromptCanClearExistingValue(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	input := strings.NewReader(strings.Join([]string{"", "", "", "", "clear"}, "\n"))
+	input := strings.NewReader(strings.Join([]string{"", "", "", "", "", "", "n", "clear"}, "\n"))
 	var out strings.Builder
 	if err := runConfigureWithIO(input, &out, configPath, "/workspace/project", []string{"--section", "provider"}); err != nil {
 		t.Fatalf("runConfigureWithIO: %v", err)
@@ -274,5 +289,35 @@ func TestPromptSecretString_ExistingValueUsesSinglePromptContract(t *testing.T) 
 	}
 	if strings.Contains(text, "Keep current value") {
 		t.Fatalf("expected single prompt contract, got %q", text)
+	}
+}
+
+func TestBuildSectionFields_CoversExpandedConfigAreas(t *testing.T) {
+	cfg := config.Default()
+	sections := map[string][]string{
+		"runtime":   {"runtime_default_session", "runtime_worker_count", "runtime_consolidation_enabled"},
+		"tools":     {"tools_brave", "tools_exec_timeout", "tools_path_append"},
+		"skills":    {"skills_enable_exec", "skills_quarantine", "skills_clawhub_registry"},
+		"security":  {"security_secret_store_enabled", "security_approval_exec_mode", "security_network_allowed_hosts"},
+		"hardening": {"hardening_guarded_tools", "hardening_sandbox_enabled", "hardening_max_tool_calls"},
+		"automation": {"automation_cron_enabled", "automation_webhook_enabled", "automation_filewatch_paths"},
+	}
+	for section, wantKeys := range sections {
+		fields := buildSectionFields(cfg, section, "/workspace/project")
+		if len(fields) == 0 {
+			t.Fatalf("expected fields for %s section", section)
+		}
+		for _, want := range wantKeys {
+			found := false
+			for _, field := range fields {
+				if field.Key == want {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("expected %s field in %s section, got %#v", want, section, fields)
+			}
+		}
 	}
 }

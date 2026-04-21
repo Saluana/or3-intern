@@ -48,8 +48,8 @@ func runInit(cfgPath string) error {
 	if supportsInteractiveTUI(os.Stdin, os.Stdout) {
 		return runConfigureWithTUI(cfgPathOrDefault(cfgPath), cwd, []string{}, configureTUIOptions{
 			Title:      "or3-intern init",
-			Intro:      []string{"First-run setup with the essential provider, storage, workspace, and web sections."},
-			Restricted: []string{"provider", "storage", "workspace", "web"},
+			Intro:      []string{"First-run setup with the essential provider, storage, workspace, and tools sections."},
+			Restricted: []string{"provider", "storage", "workspace", "tools"},
 		})
 	}
 	return runInitWithIO(os.Stdin, os.Stdout, cfgPathOrDefault(cfgPath), cwd)
@@ -63,7 +63,7 @@ func runInitWithIO(in io.Reader, out io.Writer, cfgPath, cwd string) error {
 		"--section", "provider",
 		"--section", "storage",
 		"--section", "workspace",
-		"--section", "web",
+		"--section", "tools",
 	})
 }
 

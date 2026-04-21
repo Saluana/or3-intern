@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 
 	"or3-intern/internal/config"
@@ -19,11 +20,18 @@ var configureSections = []struct {
 	Label       string
 	Description string
 }{
-	{Key: "provider", Label: "Provider", Description: "Model endpoint, model names, and API key"},
-	{Key: "storage", Label: "Storage", Description: "SQLite DB path and artifacts directory"},
-	{Key: "workspace", Label: "Workspace", Description: "Workspace restriction and working directory"},
-	{Key: "web", Label: "Web", Description: "Brave Search key and outbound proxy"},
-	{Key: "channels", Label: "Channels", Description: "Telegram, Slack, Discord, WhatsApp, and Email"},
+	{Key: "provider", Label: "Provider", Description: "API endpoint, chat model, embeddings, timeouts, and provider secrets"},
+	{Key: "storage", Label: "Storage", Description: "Database, artifacts, and bootstrap file locations"},
+	{Key: "runtime", Label: "Runtime", Description: "Session defaults, memory retrieval, workers, consolidation, and subagents"},
+	{Key: "workspace", Label: "Workspace", Description: "Workspace directory and file-tool boundaries"},
+	{Key: "tools", Label: "Tools", Description: "Search, proxy, exec timeout, and PATH settings"},
+	{Key: "docindex", Label: "Doc Index", Description: "Workspace indexing and retrieval controls"},
+	{Key: "skills", Label: "Skills", Description: "Managed skills, trust policy, watch settings, and ClawHub"},
+	{Key: "security", Label: "Security", Description: "Secret store, audit, approvals, profiles, and network policy"},
+	{Key: "hardening", Label: "Hardening", Description: "Guarded tools, sandboxing, write paths, and quotas"},
+	{Key: "session", Label: "Session", Description: "Direct-message sharing and identity link mapping"},
+	{Key: "automation", Label: "Automation", Description: "Cron, heartbeat, webhook, and file-watch triggers"},
+	{Key: "channels", Label: "Channels", Description: "Telegram, Slack, Discord, WhatsApp, and Email delivery"},
 	{Key: "service", Label: "Service", Description: "Internal authenticated HTTP API listener"},
 }
 
@@ -133,7 +141,7 @@ func normalizeConfigureSections(raw []string) ([]string, error) {
 	seen := map[string]struct{}{}
 	normalized := make([]string, 0, len(raw))
 	for _, value := range raw {
-		key := strings.ToLower(strings.TrimSpace(value))
+		key := normalizeConfigureSectionKey(value)
 		if _, ok := allowed[key]; !ok {
 			options := make([]string, 0, len(configureSections))
 			for _, section := range configureSections {
@@ -148,6 +156,16 @@ func normalizeConfigureSections(raw []string) ([]string, error) {
 		normalized = append(normalized, key)
 	}
 	return normalized, nil
+}
+
+func normalizeConfigureSectionKey(value string) string {
+	key := strings.ToLower(strings.TrimSpace(value))
+	switch key {
+	case "web":
+		return "tools"
+	default:
+		return key
+	}
 }
 
 func loadConfigureConfig(cfgPath, cwd string) (config.Config, bool, string, error) {
@@ -192,7 +210,11 @@ func runConfigureInteractive(reader *bufio.Reader, out io.Writer, cfgPath, cwd s
 			break
 		}
 
-		selectedIndex := int(choice[0] - '1')
+		selectedIndex, err := strconv.Atoi(choice)
+		if err != nil || selectedIndex <= 0 || selectedIndex > len(configureSections) {
+			return fmt.Errorf("invalid section selection %q", choice)
+		}
+		selectedIndex--
 		section := configureSections[selectedIndex].Key
 		if err := runConfigureSection(reader, out, &cfg, section, cwd); err != nil {
 			return err
@@ -240,22 +262,93 @@ func promptMenuChoice(reader *bufio.Reader, out io.Writer, label string, options
 }
 
 func runConfigureSection(reader *bufio.Reader, out io.Writer, cfg *config.Config, section, cwd string) error {
+	section = normalizeConfigureSectionKey(section)
 	switch section {
-	case "provider":
-		return configureProviderSection(reader, out, cfg)
-	case "storage":
-		return configureStorageSection(reader, out, cfg)
-	case "workspace":
-		return configureWorkspaceSection(reader, out, cfg, cwd)
-	case "web":
-		return configureWebSection(reader, out, cfg)
 	case "channels":
 		return configureChannelsSection(reader, out, cfg)
-	case "service":
-		return configureServiceSection(reader, out, cfg)
+	case "provider", "storage", "runtime", "workspace", "tools", "docindex", "skills", "security", "hardening", "session", "automation", "service":
+		return configureGenericSection(reader, out, cfg, section, cwd)
 	default:
 		return fmt.Errorf("unknown configure section %q", section)
 	}
+}
+
+func configureGenericSection(reader *bufio.Reader, out io.Writer, cfg *config.Config, section, cwd string) error {
+	meta := configureSectionMeta(section)
+	fields := buildSectionFields(*cfg, section, cwd)
+	if len(fields) == 0 {
+		return fmt.Errorf("section %q has no editable fields", section)
+	}
+	if meta.Label != "" {
+		fmt.Fprintf(out, "%s configuration\n", meta.Label)
+	}
+	if meta.Description != "" {
+		fmt.Fprintf(out, "%s\n", meta.Description)
+	}
+	for _, field := range fields {
+		field = currentConfigureField(buildSectionFields(*cfg, section, cwd), field)
+		if strings.TrimSpace(field.Description) != "" {
+			fmt.Fprintf(out, "- %s\n", field.Description)
+		}
+		for {
+			switch field.Kind {
+			case configureFieldToggle:
+				value, err := promptBool(reader, out, field.Label, field.Value == "on")
+				if err != nil {
+					return err
+				}
+				setToggleFieldValue(cfg, section, "", field.Key, value)
+			case configureFieldChoice:
+				options := make([]string, 0, len(field.Choices))
+				for index, choice := range field.Choices {
+					options = append(options, fmt.Sprintf("%d) %s", index+1, choice))
+				}
+				defaultChoice := fmt.Sprintf("%d", indexOfChoice(field.Choices, field.Value)+1)
+				selection, err := promptMenuChoice(reader, out, field.Label, options, defaultChoice)
+				if err != nil {
+					return err
+				}
+				choiceIndex := clampInt(int(selection[0]-'1'), 0, len(field.Choices)-1)
+				if _, err := applyChoiceSelection(cfg, section, "", field.Key, field.Choices[choiceIndex]); err != nil {
+					fmt.Fprintf(out, "%v\n", err)
+					continue
+				}
+			case configureFieldSecret:
+				current := currentSecretValue(*cfg, section, field.Key)
+				value, err := promptSecretString(reader, out, field.Label, current)
+				if err != nil {
+					return err
+				}
+				if value == "" && strings.TrimSpace(current) != "" {
+					value = configureSecretClearKeyword
+				}
+				if _, err := applyFieldValue(cfg, section, "", field.Key, value); err != nil {
+					fmt.Fprintf(out, "%v\n", err)
+					continue
+				}
+			default:
+				value, err := promptString(reader, out, field.Label, field.Value)
+				if err != nil {
+					return err
+				}
+				if _, err := applyFieldValue(cfg, section, "", field.Key, value); err != nil {
+					fmt.Fprintf(out, "%v\n", err)
+					continue
+				}
+			}
+			break
+		}
+	}
+	return nil
+}
+
+func currentConfigureField(fields []configureField, fallback configureField) configureField {
+	for _, field := range fields {
+		if field.Key == fallback.Key {
+			return field
+		}
+	}
+	return fallback
 }
 
 func configureProviderSection(reader *bufio.Reader, out io.Writer, cfg *config.Config) error {
@@ -357,6 +450,12 @@ func configureTelegram(reader *bufio.Reader, out io.Writer, cfg *config.Config) 
 	}
 	if cfg.Channels.Telegram.DefaultChatID, err = promptString(reader, out, "Telegram default chat ID (optional)", cfg.Channels.Telegram.DefaultChatID); err != nil {
 		return err
+	}
+	if len(cfg.Channels.Telegram.AllowedChatIDs) == 0 && strings.TrimSpace(cfg.Channels.Telegram.DefaultChatID) != "" && !cfg.Channels.Telegram.OpenAccess {
+		cfg.Channels.Telegram.AllowedChatIDs = allowlistPromptDefault(cfg.Channels.Telegram.AllowedChatIDs, cfg.Channels.Telegram.DefaultChatID)
+		if cfg.Channels.Telegram.InboundPolicy == "" {
+			cfg.Channels.Telegram.InboundPolicy = config.InboundPolicyAllowlist
+		}
 	}
 	if err := configureInboundAccess(reader, out,
 		"Telegram inbound access",
@@ -552,10 +651,14 @@ func printConfigureSummary(out io.Writer, cfg config.Config) {
 		workspaceSummary = "not set"
 	}
 	fmt.Fprintln(out, "Current settings:")
-	fmt.Fprintf(out, "  Provider: %s (%s)\n", providerLabel, cfg.Provider.Model)
+	fmt.Fprintf(out, "  Provider: %s (%s · embed=%s)\n", providerLabel, cfg.Provider.Model, emptyAsNone(cfg.Provider.EmbedModel))
 	fmt.Fprintf(out, "  Storage: db=%s artifacts=%s\n", cfg.DBPath, cfg.ArtifactsDir)
+	fmt.Fprintf(out, "  Runtime: session=%s workers=%d history=%d consolidation=%t\n", cfg.DefaultSessionKey, cfg.WorkerCount, cfg.HistoryMax, cfg.ConsolidationEnabled)
 	fmt.Fprintf(out, "  Workspace: restrict=%t dir=%s\n", cfg.Tools.RestrictToWorkspace, workspaceSummary)
-	fmt.Fprintf(out, "  Web: Brave key configured=%t proxy=%s\n", strings.TrimSpace(cfg.Tools.BraveAPIKey) != "", emptyAsNone(cfg.Tools.WebProxy))
+	fmt.Fprintf(out, "  Tools: Brave key configured=%t execTimeout=%ds proxy=%s\n", strings.TrimSpace(cfg.Tools.BraveAPIKey) != "", cfg.Tools.ExecTimeoutSeconds, emptyAsNone(cfg.Tools.WebProxy))
+	fmt.Fprintf(out, "  Skills: exec=%t watch=%t dir=%s\n", cfg.Skills.EnableExec, cfg.Skills.Load.Watch, emptyAsNone(cfg.Skills.ManagedDir))
+	fmt.Fprintf(out, "  Security: secrets=%t audit=%t approvals=%t guardedTools=%t\n", cfg.Security.SecretStore.Enabled, cfg.Security.Audit.Enabled, cfg.Security.Approvals.Enabled, cfg.Hardening.GuardedTools)
+	fmt.Fprintf(out, "  Automation: cron=%t heartbeat=%t webhook=%t fileWatch=%t\n", cfg.Cron.Enabled, cfg.Heartbeat.Enabled, cfg.Triggers.Webhook.Enabled, cfg.Triggers.FileWatch.Enabled)
 	fmt.Fprintf(out, "  Channels: %s\n", channelSummary)
 	if cfg.Service.Enabled {
 		fmt.Fprintf(out, "  Service: enabled on %s\n", cfg.Service.Listen)
@@ -625,6 +728,7 @@ func printConfigureNextSteps(out io.Writer, cfg config.Config) error {
 		fmt.Fprintln(out, "Next steps:")
 		fmt.Fprintln(out, "  Configuration saved, but the config still has validation issues.")
 		fmt.Fprintf(out, "  %v\n", err)
+		fmt.Fprintln(out, "  Re-run: or3-intern configure --section security")
 		fmt.Fprintln(out, "  Re-run: or3-intern configure --section channels")
 		return nil
 	}

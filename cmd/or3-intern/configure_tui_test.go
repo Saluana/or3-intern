@@ -23,7 +23,7 @@ func TestConfigureTUIFormNavigationHighlightsSelectedField(t *testing.T) {
 		t.Fatalf("expected field cursor 2, got %d", finalModel.fieldCursor)
 	}
 	view := finalModel.View()
-	if !strings.Contains(view, "Field 3/5") {
+	if !strings.Contains(view, "Field 3/8") {
 		t.Fatalf("expected field position hint in view, got %q", view)
 	}
 	if !strings.Contains(view, "Selected field") || !strings.Contains(view, "Chat model") {
@@ -59,5 +59,20 @@ func TestConfigureTUIFormNavigationScrollsLongSections(t *testing.T) {
 	}
 	if !strings.Contains(view, "Field 9/12") {
 		t.Fatalf("expected updated field position hint, got %q", view)
+	}
+}
+
+func TestConfigureTUISectionPickerShowsExpandedSections(t *testing.T) {
+	items := buildConfigureSectionItems(config.Default(), nil)
+	var titles []string
+	for _, item := range items {
+		entry := item.(configureListItem)
+		titles = append(titles, entry.title)
+	}
+	view := strings.Join(titles, " | ")
+	for _, label := range []string{"Runtime", "Tools", "Skills", "Security", "Hardening", "Automation"} {
+		if !strings.Contains(view, label) {
+			t.Fatalf("expected %q in section picker, got %q", label, view)
+		}
 	}
 }

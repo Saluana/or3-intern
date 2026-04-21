@@ -39,6 +39,7 @@ const (
 	StatusPending   = "pending"
 	StatusApproved  = "approved"
 	StatusDenied    = "denied"
+	StatusCanceled  = "canceled"
 	StatusExpired   = "expired"
 	StatusExchanged = "exchanged"
 	StatusActive    = "active"
@@ -333,6 +334,37 @@ func (b *Broker) DenyRequest(ctx context.Context, requestID int64, actor string,
 	return nil
 }
 
+func (b *Broker) CancelRequest(ctx context.Context, requestID int64, actor string, note string) error {
+	req, err := b.DB.GetApprovalRequest(ctx, requestID)
+	if err != nil {
+		return err
+	}
+	if req.Status != StatusPending {
+		return fmt.Errorf("approval request is not pending")
+	}
+	nowMS := b.now().UnixMilli()
+	resolved, err := b.DB.ResolveApprovalRequest(ctx, requestID, StatusPending, StatusCanceled, nowMS, strings.TrimSpace(actor), StatusCanceled, strings.TrimSpace(note))
+	if err != nil {
+		return err
+	}
+	if !resolved {
+		return fmt.Errorf("approval request is not pending")
+	}
+	_ = b.audit(ctx, "approval.resolved", map[string]any{"request_id": requestID, "subject_hash": req.SubjectHash, "host_id": req.ExecutionHostID, "outcome": "canceled", "actor": actor})
+	return nil
+}
+
+func (b *Broker) ExpirePendingRequests(ctx context.Context, actor string) (int64, error) {
+	count, err := b.DB.ExpireApprovalRequests(ctx, b.now().UnixMilli(), strings.TrimSpace(actor), "expired by operator request")
+	if err != nil {
+		return 0, err
+	}
+	if count > 0 {
+		_ = b.audit(ctx, "approval.expired", map[string]any{"count": count, "actor": actor, "host_id": b.hostID()})
+	}
+	return count, nil
+}
+
 func (b *Broker) VerifyApprovalToken(ctx context.Context, token string, subjectHash string, hostID string) error {
 	claims, err := b.parseApprovalToken(token)
 	if err != nil {
@@ -555,7 +587,11 @@ func (b *Broker) RotatePairedDeviceToken(ctx context.Context, deviceID string) (
 }
 
 func (b *Broker) ListApprovalRequests(ctx context.Context, status string, limit int) ([]db.ApprovalRequestRecord, error) {
-	return b.DB.ListApprovalRequests(ctx, status, limit)
+	return b.ListApprovalRequestsFiltered(ctx, status, "", limit)
+}
+
+func (b *Broker) ListApprovalRequestsFiltered(ctx context.Context, status, approvalType string, limit int) ([]db.ApprovalRequestRecord, error) {
+	return b.DB.ListApprovalRequestsFiltered(ctx, status, approvalType, limit)
 }
 
 func (b *Broker) ListPairingRequests(ctx context.Context, status string, limit int) ([]db.PairingRequestRecord, error) {

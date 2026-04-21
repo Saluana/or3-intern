@@ -260,14 +260,26 @@ func (d *DB) FindPendingApprovalRequest(ctx context.Context, approvalType, subje
 }
 
 func (d *DB) ListApprovalRequests(ctx context.Context, status string, limit int) ([]ApprovalRequestRecord, error) {
+	return d.ListApprovalRequestsFiltered(ctx, status, "", limit)
+}
+
+func (d *DB) ListApprovalRequestsFiltered(ctx context.Context, status, approvalType string, limit int) ([]ApprovalRequestRecord, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 200
 	}
 	query := `SELECT id, type, subject_hash, subject_json, requester_agent_id, requester_session_id, execution_host_id, status, policy_mode, requested_at, expires_at, resolved_at, resolver_actor_id, resolution_kind, resolution_note FROM approval_requests`
 	args := []any{}
+	clauses := []string{}
 	if strings.TrimSpace(status) != "" {
-		query += ` WHERE status=?`
+		clauses = append(clauses, "status=?")
 		args = append(args, status)
+	}
+	if strings.TrimSpace(approvalType) != "" {
+		clauses = append(clauses, "type=?")
+		args = append(args, approvalType)
+	}
+	if len(clauses) > 0 {
+		query += ` WHERE ` + strings.Join(clauses, ` AND `)
 	}
 	query += ` ORDER BY id DESC LIMIT ?`
 	args = append(args, limit)
@@ -285,6 +297,20 @@ func (d *DB) ListApprovalRequests(ctx context.Context, status string, limit int)
 		out = append(out, rec)
 	}
 	return out, rows.Err()
+}
+
+func (d *DB) ExpireApprovalRequests(ctx context.Context, nowMS int64, actor, note string) (int64, error) {
+	res, err := d.SQL.ExecContext(ctx, `UPDATE approval_requests
+		SET status=?, resolved_at=?, resolver_actor_id=?, resolution_kind=?, resolution_note=?
+		WHERE status=? AND expires_at>0 AND expires_at<=?`, "expired", nowMS, actor, "expired", note, "pending", nowMS)
+	if err != nil {
+		return 0, err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return rows, nil
 }
 
 func (d *DB) UpdateApprovalRequestResolution(ctx context.Context, id int64, status string, resolvedAt int64, actor, kind, note string) error {

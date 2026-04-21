@@ -9,14 +9,17 @@ import (
 	"strings"
 
 	"or3-intern/internal/approval"
+	"or3-intern/internal/config"
+	"or3-intern/internal/controlplane"
 )
 
 func runApprovalsCommand(ctx context.Context, broker *approval.Broker, args []string, stdout, stderr io.Writer) error {
 	if broker == nil {
 		return fmt.Errorf("approval broker is not configured")
 	}
+	cp := controlplane.New(config.Config{}, nil, broker, nil, nil)
 	if len(args) == 0 {
-		return fmt.Errorf("usage: approvals <list|show|approve|deny|allowlist>")
+		return fmt.Errorf("usage: approvals <list|show|approve|deny|cancel|expire|allowlist>")
 	}
 	switch strings.ToLower(strings.TrimSpace(args[0])) {
 	case "list":
@@ -27,7 +30,7 @@ func runApprovalsCommand(ctx context.Context, broker *approval.Broker, args []st
 		if len(args) > 1 {
 			status = strings.TrimSpace(args[1])
 		}
-		items, err := broker.ListApprovalRequests(ctx, status, 100)
+		items, err := cp.ListApprovalRequests(ctx, controlplane.ApprovalFilter{Status: status, Limit: 100})
 		if err != nil {
 			return err
 		}
@@ -43,7 +46,7 @@ func runApprovalsCommand(ctx context.Context, broker *approval.Broker, args []st
 		if err != nil {
 			return fmt.Errorf("invalid approval ID")
 		}
-		item, err := broker.DB.GetApprovalRequest(ctx, id)
+		item, err := cp.GetApproval(ctx, id)
 		if err != nil {
 			return err
 		}
@@ -64,7 +67,7 @@ func runApprovalsCommand(ctx context.Context, broker *approval.Broker, args []st
 		if err != nil {
 			return fmt.Errorf("invalid approval ID")
 		}
-		issued, err := broker.ApproveRequest(ctx, id, "cli", *alwaysAllow, *note)
+		issued, err := cp.ApproveApproval(ctx, id, "cli", *alwaysAllow, *note)
 		if err != nil {
 			return err
 		}
@@ -87,19 +90,48 @@ func runApprovalsCommand(ctx context.Context, broker *approval.Broker, args []st
 		if err != nil {
 			return fmt.Errorf("invalid approval ID")
 		}
-		if err := broker.DenyRequest(ctx, id, "cli", *note); err != nil {
+		if err := cp.DenyApproval(ctx, id, "cli", *note); err != nil {
 			return err
 		}
 		_, _ = fmt.Fprintf(stdout, "denied %d\n", id)
 		return nil
+	case "cancel":
+		fs := flag.NewFlagSet("approvals cancel", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		note := fs.String("note", "", "resolution note")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if err := requireExactFlagArgs(fs, 1, "approvals cancel <id> [--note text]"); err != nil {
+			return err
+		}
+		id, err := strconv.ParseInt(strings.TrimSpace(fs.Arg(0)), 10, 64)
+		if err != nil {
+			return fmt.Errorf("invalid approval ID")
+		}
+		if err := cp.CancelApproval(ctx, id, "cli", *note); err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(stdout, "canceled %d\n", id)
+		return nil
+	case "expire":
+		if err := requireExactArgs(args[1:], 0, "approvals expire"); err != nil {
+			return err
+		}
+		expired, err := cp.ExpireApprovals(ctx, "cli")
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(stdout, "expired %d pending request(s)\n", expired)
+		return nil
 	case "allowlist":
-		return runApprovalAllowlistCommand(ctx, broker, args[1:], stdout, stderr)
+		return runApprovalAllowlistCommand(ctx, cp, args[1:], stdout, stderr)
 	default:
 		return fmt.Errorf("unknown approvals subcommand: %s", args[0])
 	}
 }
 
-func runApprovalAllowlistCommand(ctx context.Context, broker *approval.Broker, args []string, stdout, stderr io.Writer) error {
+func runApprovalAllowlistCommand(ctx context.Context, cp *controlplane.Service, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: approvals allowlist <list|add|remove>")
 	}
@@ -112,7 +144,7 @@ func runApprovalAllowlistCommand(ctx context.Context, broker *approval.Broker, a
 		if len(args) > 1 {
 			domain = strings.TrimSpace(args[1])
 		}
-		items, err := broker.ListAllowlists(ctx, domain, 100)
+		items, err := cp.ListAllowlists(ctx, domain, 100)
 		if err != nil {
 			return err
 		}
@@ -128,7 +160,7 @@ func runApprovalAllowlistCommand(ctx context.Context, broker *approval.Broker, a
 		if err != nil {
 			return fmt.Errorf("invalid allowlist ID")
 		}
-		if err := broker.RemoveAllowlist(ctx, id, "cli"); err != nil {
+		if err := cp.RemoveAllowlist(ctx, id, "cli"); err != nil {
 			return err
 		}
 		_, _ = fmt.Fprintf(stdout, "removed allowlist %d\n", id)
@@ -137,7 +169,7 @@ func runApprovalAllowlistCommand(ctx context.Context, broker *approval.Broker, a
 		fs := flag.NewFlagSet("approvals allowlist add", flag.ContinueOnError)
 		fs.SetOutput(stderr)
 		domain := fs.String("domain", "exec", "approval domain")
-		hostID := fs.String("host", broker.HostID, "host scope")
+		hostID := fs.String("host", cp.Broker.HostID, "host scope")
 		toolName := fs.String("tool", "", "tool scope")
 		profile := fs.String("profile", "", "profile scope")
 		agent := fs.String("agent", "", "agent scope")
@@ -167,7 +199,7 @@ func runApprovalAllowlistCommand(ctx context.Context, broker *approval.Broker, a
 		if err := approval.ValidateAllowlistMatcher(domainName, matcher); err != nil {
 			return err
 		}
-		rec, err := broker.AddAllowlist(ctx, strings.TrimSpace(*domain), scope, matcher, "cli", 0)
+		rec, err := cp.AddAllowlist(ctx, strings.TrimSpace(*domain), scope, matcher, "cli", 0)
 		if err != nil {
 			return err
 		}

@@ -155,6 +155,7 @@ func (r *Runtime) getSessionLock(key string) *sessionLock {
 
 // Handle routes a published event into the runtime turn pipeline.
 func (r *Runtime) Handle(ctx context.Context, ev bus.Event) error {
+	ctx = ContextWithConversationSession(ctx, ev.SessionKey)
 	ctx = r.contextWithEventProfile(ctx, ev)
 	entry := r.acquireSessionLock(ev.SessionKey)
 	entry.mu.Lock()
@@ -523,7 +524,8 @@ func (r *Runtime) handleNewSession(ctx context.Context, ev bus.Event) error {
 		return nil
 	}
 	if r.Deliver != nil {
-		if err := r.deliver(ctx, ev.Channel, replyTarget, "New session started.", ev.Meta); err != nil {
+		deliverCtx := ContextWithConversationAction(ctx, ConversationActionSessionReset)
+		if err := r.deliver(deliverCtx, ev.Channel, replyTarget, "New session started.", ev.Meta); err != nil {
 			log.Printf("deliver failed: %v", err)
 		}
 	}

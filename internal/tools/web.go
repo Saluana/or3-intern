@@ -78,14 +78,14 @@ func (t *WebFetch) Execute(ctx context.Context, params map[string]any) (string, 
 		copyClient := *t.HTTP
 		client = &copyClient
 	}
+	originalCheckRedirect := client.CheckRedirect
 	client = security.WrapHTTPClient(client, t.HostPolicy)
-	prevCheckRedirect := client.CheckRedirect
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= defaultWebFetchMaxRedirects {
 			return fmt.Errorf("stopped after %d redirects", defaultWebFetchMaxRedirects)
 		}
-		if prevCheckRedirect != nil {
-			if err := prevCheckRedirect(req, via); err != nil {
+		if originalCheckRedirect != nil {
+			if err := originalCheckRedirect(req, via); err != nil {
 				return err
 			}
 		}

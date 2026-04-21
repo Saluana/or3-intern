@@ -11,7 +11,13 @@ import (
 )
 
 // isTTY is true when stdout is an interactive terminal.
-var isTTY = isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
+var stdoutIsTTY = isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
+var stdinIsTTY = isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd())
+var isTTY = stdoutIsTTY
+
+func isInteractiveTTY() bool {
+	return stdinIsTTY && stdoutIsTTY
+}
 
 // ---------- ANSI helpers ----------
 

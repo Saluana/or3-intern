@@ -228,6 +228,69 @@ func TestChatModelNoticeDoesNotCorruptInput(t *testing.T) {
 	}
 }
 
+func TestChatModelNewSessionWaitsForBackendConfirmation(t *testing.T) {
+	bridge := newBubbleChatBridge()
+	model := newChatModel(context.Background(), "cli:default", bridge, nil, func(sessionKey, text string) bool {
+		return sessionKey == "cli:default" && text == "/new"
+	})
+	model.width = 110
+	model.height = 30
+	model.resize()
+	model.messages = []chatMessage{{role: "user", content: "old question"}, {role: "assistant", content: "old answer"}}
+	model.input.SetValue("/new")
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m := updated.(chatModel)
+	if len(m.messages) < 3 {
+		t.Fatalf("expected existing transcript to remain until confirmation, got %#v", m.messages)
+	}
+	if m.messages[0].content != "old question" || m.messages[1].content != "old answer" {
+		t.Fatalf("expected old transcript preserved before confirmation, got %#v", m.messages)
+	}
+	if m.statusText != "Starting new session…" {
+		t.Fatalf("expected in-progress new-session status, got %q", m.statusText)
+	}
+
+	updated, _ = m.Update(chatSessionResetMsg{sessionKey: "cli:default", notice: "New session started."})
+	m = updated.(chatModel)
+	if len(m.messages) != 0 {
+		t.Fatalf("expected transcript cleared after reset confirmation, got %#v", m.messages)
+	}
+	if m.pendingCount != 0 {
+		t.Fatalf("expected no pending turns after reset, got %d", m.pendingCount)
+	}
+	if view := m.View(); strings.Contains(view, "old question") || strings.Contains(view, "old answer") {
+		t.Fatalf("expected old transcript removed after reset, got %q", view)
+	}
+}
+
+func TestChatModelIgnoresBridgeEventsFromOtherSessions(t *testing.T) {
+	bridge := newBubbleChatBridge()
+	model := newChatModel(context.Background(), "ops:review", bridge, nil, func(sessionKey, text string) bool {
+		_ = sessionKey
+		_ = text
+		return true
+	})
+	model.width = 100
+	model.height = 28
+	model.resize()
+
+	updated, _ := model.Update(chatAssistantCloseMsg{sessionKey: "personal:notes", streamID: 1, finalText: "wrong session", complete: true})
+	updated, _ = updated.(chatModel).Update(chatToolCallMsg{sessionKey: "personal:notes", name: "read_file", arguments: "secret.txt"})
+	updated, _ = updated.(chatModel).Update(chatErrorMsg{sessionKey: "personal:notes", err: "old session failed"})
+	m := updated.(chatModel)
+
+	if len(m.messages) != 0 {
+		t.Fatalf("expected no transcript updates from another session, got %#v", m.messages)
+	}
+	if len(m.activity) != 0 {
+		t.Fatalf("expected no activity updates from another session, got %#v", m.activity)
+	}
+	if view := m.View(); strings.Contains(view, "wrong session") || strings.Contains(view, "secret.txt") || strings.Contains(view, "old session failed") {
+		t.Fatalf("expected foreign-session events to be ignored, got %q", view)
+	}
+}
+
 func TestChatModelFooterRemainsSingleLineInCompactLayout(t *testing.T) {
 	bridge := newBubbleChatBridge()
 	model := newChatModel(context.Background(), "cli:default", bridge, nil, func(sessionKey, text string) bool {

@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"net"
 	"net/url"
@@ -12,7 +13,8 @@ import (
 	"strings"
 
 	"or3-intern/internal/config"
-	"or3-intern/internal/db"
+
+	_ "modernc.org/sqlite"
 )
 
 type Options struct {
@@ -1035,8 +1037,7 @@ func runtimeProfileFindings(cfg config.Config, opts Options) []Finding {
 func probeFindings(cfg config.Config, opts Options) []Finding {
 	findings := []Finding{}
 	if strings.TrimSpace(cfg.DBPath) != "" {
-		database, err := db.Open(cfg.DBPath)
-		if err != nil {
+		if err := probeSQLiteDatabase(context.Background(), cfg.DBPath); err != nil {
 			findings = append(findings, Finding{
 				ID:       "probe.sqlite_open_failed",
 				Area:     "runtime",
@@ -1045,11 +1046,26 @@ func probeFindings(cfg config.Config, opts Options) []Finding {
 				Detail:   err.Error(),
 				FixMode:  FixModeManual,
 			})
-		} else {
-			_ = database.Close()
 		}
 	}
 	return findings
+}
+
+func probeSQLiteDatabase(ctx context.Context, path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	if _, err := os.Stat(path); err != nil {
+		return err
+	}
+	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(1000)", path)
+	database, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	return database.PingContext(ctx)
 }
 
 func validateConfigSnapshot(cfg config.Config) error {
@@ -1349,10 +1365,4 @@ func TopFindings(findings []Finding, limit int) []Finding {
 		return append([]Finding{}, findings...)
 	}
 	return append([]Finding{}, findings[:limit]...)
-}
-
-func ValidateEndpoints(ctx context.Context, cfg config.Config) error {
-	_ = ctx
-	_ = cfg
-	return nil
 }

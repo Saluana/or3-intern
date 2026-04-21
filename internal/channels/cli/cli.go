@@ -25,7 +25,7 @@ func (c *Channel) Run(ctx context.Context) error {
 	if c.SessionKey == "" {
 		c.SessionKey = "default"
 	}
-	if isTTY && c.Deliverer != nil {
+	if isInteractiveTTY() && c.Deliverer != nil {
 		return c.runBubbleTea(ctx)
 	}
 	return c.runPlaintext(ctx)
@@ -33,12 +33,16 @@ func (c *Channel) Run(ctx context.Context) error {
 
 func (c *Channel) runPlaintext(ctx context.Context) error {
 	in := bufio.NewScanner(os.Stdin)
+	in.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	fmt.Print(Banner())
 	ShowPrompt() // initial prompt
 	for {
 		// Prompt is printed either above (first iteration) or by the
 		// Deliverer after finishing a response. We block on Scan here.
 		if !in.Scan() {
+			if err := in.Err(); err != nil {
+				return err
+			}
 			return nil
 		}
 		line := strings.TrimSpace(in.Text())

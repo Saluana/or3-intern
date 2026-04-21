@@ -416,7 +416,7 @@ func main() {
 					if err != nil {
 						message := fmt.Sprintf("consolidation failed for %s: %v", sessionKey, err)
 						if del != nil {
-							del.ShowNotice(message)
+							del.ShowNoticeForSession(sessionKey, message)
 						} else {
 							log.Printf("%s", message)
 						}
@@ -839,6 +839,7 @@ func runWorkers(ctx context.Context, b *bus.Bus, rt *agent.Runtime, n int, cliDe
 		go func() {
 			for ev := range b.Channel() {
 				cctx, cancel := agent.WithTimeout(ctx, 120)
+				cctx = agent.ContextWithConversationSession(cctx, ev.SessionKey)
 				if ev.Channel == "cli" && cliDeliverer != nil {
 					if observer := cliDeliverer.Observer(); observer != nil {
 						cctx = agent.ContextWithConversationObserver(cctx, observer)
@@ -847,7 +848,7 @@ func runWorkers(ctx context.Context, b *bus.Bus, rt *agent.Runtime, n int, cliDe
 				if err := rt.Handle(cctx, ev); err != nil {
 					if ev.Channel == "cli" {
 						if cliDeliverer != nil {
-							cliDeliverer.ShowError(err)
+							cliDeliverer.ShowErrorForSession(ev.SessionKey, err)
 						}
 					} else {
 						log.Printf("handle event failed: type=%s session=%s err=%v", ev.Type, ev.SessionKey, err)

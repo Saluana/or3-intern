@@ -101,33 +101,49 @@ type chatHistoryLoadedMsg struct {
 }
 
 type chatAssistantDeltaMsg struct {
-	streamID int
-	text     string
+	sessionKey string
+	streamID   int
+	text       string
 }
 
 type chatAssistantCloseMsg struct {
-	streamID  int
-	finalText string
-	complete  bool
+	sessionKey string
+	streamID   int
+	finalText  string
+	complete   bool
 }
 
 type chatAssistantAbortMsg struct {
-	streamID int
+	sessionKey string
+	streamID   int
 }
 
-type chatErrorMsg struct{ err string }
+type chatErrorMsg struct {
+	sessionKey string
+	err        string
+}
 
-type chatNoticeMsg struct{ text string }
+type chatNoticeMsg struct {
+	sessionKey string
+	text       string
+}
+
+type chatSessionResetMsg struct {
+	sessionKey string
+	notice     string
+}
 
 type chatToolCallMsg struct {
-	name      string
-	arguments string
+	sessionKey string
+	name       string
+	arguments  string
 }
 
 type chatToolResultMsg struct {
-	name   string
-	result string
-	err    string
+	sessionKey string
+	name       string
+	result     string
+	err        string
 }
 
 type chatMessage struct {
@@ -352,16 +368,16 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 			if line == "/new" {
-				m.messages = nil
-				m.activity = nil
-				m.streamIndex = map[int]int{}
+				m.statusText = "Starting new session…"
 			}
 			m.messages = append(m.messages, chatMessage{role: "user", content: line})
 			if m.publish == nil || !m.publish(m.sessionKey, line) {
 				m.appendError("queue full — message dropped")
 			} else {
 				m.pendingCount++
-				m.statusText = "Thinking…"
+				if line != "/new" {
+					m.statusText = "Thinking…"
+				}
 			}
 			m.refreshViewport(true)
 		}
@@ -380,6 +396,10 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.refreshViewport(true)
 	case chatAssistantDeltaMsg:
+		if !m.acceptsSessionEvent(msg.sessionKey) {
+			cmds = append(cmds, m.bridge.waitCmd())
+			break
+		}
 		idx, ok := m.streamIndex[msg.streamID]
 		if !ok {
 			m.messages = append(m.messages, chatMessage{role: "assistant", pending: true})
@@ -392,6 +412,10 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshViewport(true)
 		cmds = append(cmds, m.bridge.waitCmd())
 	case chatAssistantCloseMsg:
+		if !m.acceptsSessionEvent(msg.sessionKey) {
+			cmds = append(cmds, m.bridge.waitCmd())
+			break
+		}
 		if idx, ok := m.streamIndex[msg.streamID]; ok {
 			if strings.TrimSpace(msg.finalText) != "" && strings.TrimSpace(m.messages[idx].content) == "" {
 				m.messages[idx].content = msg.finalText
@@ -412,10 +436,18 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshViewport(true)
 		cmds = append(cmds, m.bridge.waitCmd())
 	case chatAssistantAbortMsg:
+		if !m.acceptsSessionEvent(msg.sessionKey) {
+			cmds = append(cmds, m.bridge.waitCmd())
+			break
+		}
 		m.addActivity("Tool loop", "assistant stream paused while tools run", "tool")
 		m.statusText = "Using tools…"
 		cmds = append(cmds, m.bridge.waitCmd())
 	case chatErrorMsg:
+		if !m.acceptsSessionEvent(msg.sessionKey) {
+			cmds = append(cmds, m.bridge.waitCmd())
+			break
+		}
 		m.appendError(msg.err)
 		if m.pendingCount > 0 {
 			m.pendingCount--
@@ -428,17 +460,41 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshViewport(true)
 		cmds = append(cmds, m.bridge.waitCmd())
 	case chatNoticeMsg:
+		if !m.acceptsSessionEvent(msg.sessionKey) {
+			cmds = append(cmds, m.bridge.waitCmd())
+			break
+		}
 		m.addActivity("Background", summarizeText(msg.text, 100), "notice")
 		if m.pendingCount == 0 {
 			m.statusText = "Background notice"
 		}
 		m.refreshViewport(true)
 		cmds = append(cmds, m.bridge.waitCmd())
+	case chatSessionResetMsg:
+		if !m.acceptsSessionEvent(msg.sessionKey) {
+			cmds = append(cmds, m.bridge.waitCmd())
+			break
+		}
+		m.messages = nil
+		m.activity = nil
+		m.streamIndex = map[int]int{}
+		m.pendingCount = 0
+		m.statusText = fallback(strings.TrimSpace(msg.notice), "New session started.")
+		m.refreshViewport(true)
+		cmds = append(cmds, m.bridge.waitCmd())
 	case chatToolCallMsg:
+		if !m.acceptsSessionEvent(msg.sessionKey) {
+			cmds = append(cmds, m.bridge.waitCmd())
+			break
+		}
 		m.addActivity("Tool", fmt.Sprintf("%s %s", msg.name, strings.TrimSpace(msg.arguments)), "tool")
 		m.statusText = "Using tools…"
 		cmds = append(cmds, m.bridge.waitCmd())
 	case chatToolResultMsg:
+		if !m.acceptsSessionEvent(msg.sessionKey) {
+			cmds = append(cmds, m.bridge.waitCmd())
+			break
+		}
 		detail := msg.result
 		if strings.TrimSpace(msg.err) != "" {
 			detail = msg.err
@@ -631,6 +687,11 @@ func (m *chatModel) refreshViewport(stickBottom bool) {
 	if atBottom {
 		m.viewport.GotoBottom()
 	}
+}
+
+func (m *chatModel) acceptsSessionEvent(sessionKey string) bool {
+	sessionKey = strings.TrimSpace(sessionKey)
+	return sessionKey == "" || sessionKey == m.sessionKey
 }
 
 func (m *chatModel) appendSystem(text string) {
@@ -849,23 +910,23 @@ type bridgeObserver struct{ bridge *bubbleChatBridge }
 
 func (o bridgeObserver) OnTextDelta(context.Context, string) {}
 
-func (o bridgeObserver) OnToolCall(_ context.Context, name string, arguments string) {
-	o.bridge.emit(chatToolCallMsg{name: name, arguments: arguments})
+func (o bridgeObserver) OnToolCall(ctx context.Context, name string, arguments string) {
+	o.bridge.emit(chatToolCallMsg{sessionKey: agent.ConversationSessionFromContext(ctx), name: name, arguments: arguments})
 }
 
-func (o bridgeObserver) OnToolResult(_ context.Context, name string, result string, err error) {
+func (o bridgeObserver) OnToolResult(ctx context.Context, name string, result string, err error) {
 	errText := ""
 	if err != nil {
 		errText = err.Error()
 	}
-	o.bridge.emit(chatToolResultMsg{name: name, result: result, err: errText})
+	o.bridge.emit(chatToolResultMsg{sessionKey: agent.ConversationSessionFromContext(ctx), name: name, result: result, err: errText})
 }
 
 func (o bridgeObserver) OnCompletion(context.Context, string, bool) {}
 
-func (o bridgeObserver) OnError(_ context.Context, err error) {
+func (o bridgeObserver) OnError(ctx context.Context, err error) {
 	if err != nil {
-		o.bridge.emit(chatErrorMsg{err: err.Error()})
+		o.bridge.emit(chatErrorMsg{sessionKey: agent.ConversationSessionFromContext(ctx), err: err.Error()})
 	}
 }
 

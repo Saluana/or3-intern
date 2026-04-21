@@ -8,6 +8,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"or3-intern/internal/agent"
 )
 
 func TestDeliver_Basic(t *testing.T) {
@@ -167,5 +169,25 @@ func TestShowNotice_BridgeEmitsNoticeMsg(t *testing.T) {
 	}
 	if notice.text != "background consolidation failed" {
 		t.Fatalf("expected original notice text, got %q", notice.text)
+	}
+}
+
+func TestDeliver_BridgeEmitsSessionResetMsg(t *testing.T) {
+	bridge := newBubbleChatBridge()
+	d := Deliverer{}
+	d.SetBridge(bridge)
+	ctx := agent.ContextWithConversationAction(agent.ContextWithConversationSession(context.Background(), "ops:review"), agent.ConversationActionSessionReset)
+
+	if err := d.Deliver(ctx, "cli", "user", "New session started."); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+
+	msg := <-bridge.events
+	reset, ok := msg.(chatSessionResetMsg)
+	if !ok {
+		t.Fatalf("expected chatSessionResetMsg, got %T", msg)
+	}
+	if reset.sessionKey != "ops:review" {
+		t.Fatalf("expected session key to round-trip, got %q", reset.sessionKey)
 	}
 }

@@ -13,22 +13,22 @@ func RenderText(report Report) string {
 	lines := []string{
 		fmt.Sprintf("Status: %s", report.Summary.Status),
 	}
-	blocks := report.BlockingFindings()
-	if len(blocks) > 0 {
-		lines = append(lines, "", "Blockers:")
-		for _, finding := range blocks {
-			lines = append(lines, renderFindingLine(finding))
-		}
+	sections := []struct {
+		title    string
+		severity Severity
+	}{
+		{title: "Blockers:", severity: SeverityBlock},
+		{title: "Errors:", severity: SeverityError},
+		{title: "Warnings:", severity: SeverityWarn},
+		{title: "Info:", severity: SeverityInfo},
 	}
-	rest := make([]Finding, 0, len(report.Findings))
-	for _, finding := range report.Findings {
-		if finding.Severity != SeverityBlock {
-			rest = append(rest, finding)
+	for _, section := range sections {
+		items := findingsWithSeverity(report.Findings, section.severity)
+		if len(items) == 0 {
+			continue
 		}
-	}
-	if len(rest) > 0 {
-		lines = append(lines, "", "Warnings:")
-		for _, finding := range rest {
+		lines = append(lines, "", section.title)
+		for _, finding := range items {
 			lines = append(lines, renderFindingLine(finding))
 		}
 	}
@@ -75,4 +75,14 @@ func renderFindingLine(finding Finding) string {
 		line += fmt.Sprintf(" [fix=%s]", finding.FixMode)
 	}
 	return line
+}
+
+func findingsWithSeverity(findings []Finding, severity Severity) []Finding {
+	items := make([]Finding, 0, len(findings))
+	for _, finding := range findings {
+		if finding.Severity == severity {
+			items = append(items, finding)
+		}
+	}
+	return items
 }

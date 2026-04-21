@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"or3-intern/internal/agent"
 	"or3-intern/internal/bus"
 	"or3-intern/internal/channels"
 )
@@ -27,7 +28,12 @@ func (Deliverer) Stop(ctx context.Context) error { return nil }
 // Deliver renders a completed assistant response to stdout.
 func (d Deliverer) Deliver(ctx context.Context, channel, to, text string) error {
 	if d.bridge != nil {
-		d.bridge.emit(chatAssistantCloseMsg{finalText: text, complete: strings.TrimSpace(text) != ""})
+		sessionKey := agent.ConversationSessionFromContext(ctx)
+		if agent.ConversationActionFromContext(ctx) == agent.ConversationActionSessionReset {
+			d.bridge.emit(chatSessionResetMsg{sessionKey: sessionKey, notice: text})
+			return nil
+		}
+		d.bridge.emit(chatAssistantCloseMsg{sessionKey: sessionKey, finalText: text, complete: strings.TrimSpace(text) != ""})
 		return nil
 	}
 	d.stopSpinner()
@@ -54,14 +60,13 @@ func (d *Deliverer) SetBridge(bridge *bubbleChatBridge) {
 	d.bridge = bridge
 }
 
-// ShowNotice renders a non-fatal background notice without corrupting the TUI.
-func (d Deliverer) ShowNotice(text string) {
+func (d Deliverer) ShowNoticeForSession(sessionKey, text string) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return
 	}
 	if d.bridge != nil {
-		d.bridge.emit(chatNoticeMsg{text: text})
+		d.bridge.emit(chatNoticeMsg{sessionKey: strings.TrimSpace(sessionKey), text: text})
 		return
 	}
 	if d.Spinner != nil {
@@ -76,11 +81,15 @@ func (d Deliverer) ShowNotice(text string) {
 	ShowPrompt()
 }
 
-// ShowError stops spinner and renders err to the terminal.
-func (d Deliverer) ShowError(err error) {
+// ShowNotice renders a non-fatal background notice without corrupting the TUI.
+func (d Deliverer) ShowNotice(text string) {
+	d.ShowNoticeForSession("", text)
+}
+
+func (d Deliverer) ShowErrorForSession(sessionKey string, err error) {
 	if d.bridge != nil {
 		if err != nil {
-			d.bridge.emit(chatErrorMsg{err: err.Error()})
+			d.bridge.emit(chatErrorMsg{sessionKey: strings.TrimSpace(sessionKey), err: err.Error()})
 		}
 		return
 	}
@@ -100,16 +109,22 @@ func (d Deliverer) ShowError(err error) {
 	ShowPrompt()
 }
 
+// ShowError stops spinner and renders err to the terminal.
+func (d Deliverer) ShowError(err error) {
+	d.ShowErrorForSession("", err)
+}
+
 // ──────────────────────── streaming ────────────────────────
 
 // CLIStreamWriter renders incremental text deltas to stdout with styling.
 type CLIStreamWriter struct {
-	started  bool
-	closed   bool
-	aborted  bool
-	spinner  *Spinner
-	bridge   *bubbleChatBridge
-	streamID int
+	started    bool
+	closed     bool
+	aborted    bool
+	spinner    *Spinner
+	bridge     *bubbleChatBridge
+	streamID   int
+	sessionKey string
 }
 
 // WriteDelta appends one streamed text chunk to the terminal output.
@@ -123,8 +138,11 @@ func (w *CLIStreamWriter) WriteDelta(ctx context.Context, text string) error {
 		}
 		// Stop the spinner and print the response header on the first delta.
 		if w.bridge != nil {
+			if w.sessionKey == "" {
+				w.sessionKey = agent.ConversationSessionFromContext(ctx)
+			}
 			w.started = true
-			w.bridge.emit(chatAssistantDeltaMsg{streamID: w.streamID, text: text})
+			w.bridge.emit(chatAssistantDeltaMsg{sessionKey: w.sessionKey, streamID: w.streamID, text: text})
 			return nil
 		}
 		if w.spinner != nil {
@@ -138,7 +156,7 @@ func (w *CLIStreamWriter) WriteDelta(ctx context.Context, text string) error {
 		text = strings.ReplaceAll(text, "\n", "\n    ")
 	}
 	if w.bridge != nil {
-		w.bridge.emit(chatAssistantDeltaMsg{streamID: w.streamID, text: text})
+		w.bridge.emit(chatAssistantDeltaMsg{sessionKey: w.sessionKey, streamID: w.streamID, text: text})
 		return nil
 	}
 	fmt.Print(text)
@@ -152,7 +170,7 @@ func (w *CLIStreamWriter) Close(ctx context.Context, finalText string) error {
 	}
 	w.closed = true
 	if w.bridge != nil {
-		w.bridge.emit(chatAssistantCloseMsg{streamID: w.streamID, finalText: finalText, complete: w.started || strings.TrimSpace(finalText) != ""})
+		w.bridge.emit(chatAssistantCloseMsg{sessionKey: w.sessionKey, streamID: w.streamID, finalText: finalText, complete: w.started || strings.TrimSpace(finalText) != ""})
 		return nil
 	}
 	if w.started {
@@ -184,7 +202,7 @@ func (w *CLIStreamWriter) Close(ctx context.Context, finalText string) error {
 func (w *CLIStreamWriter) Abort(ctx context.Context) error {
 	w.aborted = true
 	if w.bridge != nil {
-		w.bridge.emit(chatAssistantAbortMsg{streamID: w.streamID})
+		w.bridge.emit(chatAssistantAbortMsg{sessionKey: w.sessionKey, streamID: w.streamID})
 		return nil
 	}
 	if w.started {
@@ -198,5 +216,5 @@ func (w *CLIStreamWriter) Abort(ctx context.Context) error {
 
 // BeginStream returns a stream writer for incremental CLI output.
 func (d Deliverer) BeginStream(ctx context.Context, to string, meta map[string]any) (channels.StreamWriter, error) {
-	return &CLIStreamWriter{spinner: d.Spinner, bridge: d.bridge}, nil
+	return &CLIStreamWriter{spinner: d.Spinner, bridge: d.bridge, sessionKey: agent.ConversationSessionFromContext(ctx)}, nil
 }

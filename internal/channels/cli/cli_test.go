@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -263,5 +264,94 @@ func TestChannel_Run_EOFOnStdin(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout")
+	}
+}
+
+func TestChannel_Run_LargeInputDoesNotTripScannerLimit(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+
+	oldStdin := os.Stdin
+	os.Stdin = r
+	defer func() {
+		os.Stdin = oldStdin
+		r.Close()
+	}()
+
+	b := bus.New(10)
+	ch := &Channel{Bus: b, SessionKey: "large"}
+	large := strings.Repeat("x", 128*1024)
+
+	go func() {
+		mustWriteInput(t, w, large+"\n")
+		mustWriteInput(t, w, "/exit\n")
+		_ = w.Close()
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- ch.Run(context.Background())
+	}()
+
+	select {
+	case ev := <-b.Channel():
+		if ev.Message != large {
+			t.Fatalf("expected large message to publish intact, got len=%d", len(ev.Message))
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for large message")
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("unexpected error from Run: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for Run to exit after large input")
+	}
+}
+
+func TestChannel_Run_UsesPlaintextWhenStdinIsNotTTY(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+
+	oldStdin := os.Stdin
+	oldStdoutTTY := stdoutIsTTY
+	oldStdinTTY := stdinIsTTY
+	os.Stdin = r
+	stdoutIsTTY = true
+	stdinIsTTY = false
+	defer func() {
+		os.Stdin = oldStdin
+		stdoutIsTTY = oldStdoutTTY
+		stdinIsTTY = oldStdinTTY
+		r.Close()
+	}()
+
+	b := bus.New(10)
+	ch := &Channel{Bus: b, SessionKey: "plaintext-fallback", Deliverer: &Deliverer{}}
+
+	go func() {
+		mustWriteInput(t, w, "/exit\n")
+		_ = w.Close()
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- ch.Run(context.Background())
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("unexpected error from Run: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for plaintext fallback")
 	}
 }

@@ -9,8 +9,12 @@ import (
 )
 
 type conversationObserverContextKey struct{}
+type conversationSessionContextKey struct{}
+type conversationActionContextKey struct{}
 type streamingChannelContextKey struct{}
 type toolRegistryContextKey struct{}
+
+const ConversationActionSessionReset = "session_reset"
 
 type ConversationObserver interface {
 	OnTextDelta(ctx context.Context, text string)
@@ -33,6 +37,38 @@ func conversationObserverFromContext(ctx context.Context) ConversationObserver {
 	}
 	observer, _ := ctx.Value(conversationObserverContextKey{}).(ConversationObserver)
 	return observer
+}
+
+func ContextWithConversationSession(ctx context.Context, sessionKey string) context.Context {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if ctx == nil || sessionKey == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, conversationSessionContextKey{}, sessionKey)
+}
+
+func ConversationSessionFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	sessionKey, _ := ctx.Value(conversationSessionContextKey{}).(string)
+	return strings.TrimSpace(sessionKey)
+}
+
+func ContextWithConversationAction(ctx context.Context, action string) context.Context {
+	action = strings.TrimSpace(action)
+	if ctx == nil || action == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, conversationActionContextKey{}, action)
+}
+
+func ConversationActionFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	action, _ := ctx.Value(conversationActionContextKey{}).(string)
+	return strings.TrimSpace(action)
 }
 
 func ContextWithStreamingChannel(ctx context.Context, streamer channels.StreamingChannel) context.Context {

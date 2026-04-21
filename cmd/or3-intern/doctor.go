@@ -87,7 +87,7 @@ func runDoctorCommand(cfgPath string, cfg config.Config, validationError string,
 	currentValidationError := validationError
 
 	if parsed.Fix {
-		applied, fixErr := intdoctor.ApplyAutomaticFixes(cfgPath, &cfg, report, intdoctor.FixOptions{AutomaticOnly: !parsed.Interactive})
+		applied, fixErr := intdoctor.ApplyAutomaticFixes(cfgPath, &cfg, report)
 		if fixErr != nil {
 			return fixErr
 		}
@@ -165,15 +165,6 @@ func doctorFindings(cfg config.Config) []doctorFinding {
 		})
 	}
 	return items
-}
-
-func hasDoctorWarnings(findings []doctorFinding) bool {
-	for _, finding := range findings {
-		if strings.EqualFold(finding.Level, "warn") || strings.EqualFold(finding.Level, "error") || strings.EqualFold(finding.Level, "block") {
-			return true
-		}
-	}
-	return false
 }
 
 func applyInteractiveDoctorFixes(in io.Reader, out io.Writer, cfgPath string, cfg *config.Config, report intdoctor.Report) ([]intdoctor.AppliedFix, error) {

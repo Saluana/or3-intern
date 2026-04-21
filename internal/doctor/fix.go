@@ -12,11 +12,7 @@ import (
 	"or3-intern/internal/security"
 )
 
-type FixOptions struct {
-	AutomaticOnly bool
-}
-
-func ApplyAutomaticFixes(cfgPath string, cfg *config.Config, report Report, opts FixOptions) ([]AppliedFix, error) {
+func ApplyAutomaticFixes(cfgPath string, cfg *config.Config, report Report) ([]AppliedFix, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config required")
 	}

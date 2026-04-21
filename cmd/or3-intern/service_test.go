@@ -539,11 +539,11 @@ func TestServiceJobs_MethodGuardsAndNotFound(t *testing.T) {
 			wantBody:   "job action not found",
 		},
 		{
-			name:       "malformed job path returns not found",
+			name:       "snapshot missing job returns not found",
 			method:     http.MethodGet,
 			path:       "/internal/v1/jobs/job_1",
 			wantStatus: http.StatusNotFound,
-			wantBody:   "job route not found",
+			wantBody:   "job not found",
 		},
 		{
 			name:       "subagents rejects non post",
@@ -836,18 +836,7 @@ func openServiceTestDB(t *testing.T) (*db.DB, func()) {
 
 func newServiceTestHTTPServer(t *testing.T, secret string, server *serviceServer) *httptest.Server {
 	t.Helper()
-	mux := http.NewServeMux()
-	mux.Handle("/internal/v1/turns", http.HandlerFunc(server.handleTurns))
-	mux.Handle("/internal/v1/subagents", http.HandlerFunc(server.handleSubagents))
-	mux.Handle("/internal/v1/jobs/", http.HandlerFunc(server.handleJobs))
-	mux.Handle("/internal/v1/pairing/requests", http.HandlerFunc(server.handlePairing))
-	mux.Handle("/internal/v1/pairing/requests/", http.HandlerFunc(server.handlePairing))
-	mux.Handle("/internal/v1/pairing/exchange", http.HandlerFunc(server.handlePairing))
-	mux.Handle("/internal/v1/devices", http.HandlerFunc(server.handleDevices))
-	mux.Handle("/internal/v1/devices/", http.HandlerFunc(server.handleDevices))
-	mux.Handle("/internal/v1/approvals", http.HandlerFunc(server.handleApprovals))
-	mux.Handle("/internal/v1/approvals/", http.HandlerFunc(server.handleApprovals))
-	return httptest.NewServer(serviceAuthMiddlewareWithBroker(secret, server.broker, mux))
+	return httptest.NewServer(serviceAuthMiddlewareWithBroker(secret, server.broker, newServiceMux(server)))
 }
 
 func mustServiceRequest(t *testing.T, server *httptest.Server, secret, method, path, body string) *http.Request {
@@ -1356,6 +1345,207 @@ func TestServiceDevices_Rotate_RevokedDeviceFails(t *testing.T) {
 	defer rotateResp.Body.Close()
 	if rotateResp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected revoked rotate 400, got %d (%s)", rotateResp.StatusCode, mustReadBody(t, rotateResp.Body))
+	}
+}
+
+func TestServiceApprovals_CancelRoute(t *testing.T) {
+	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Exec.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+	decision, err := broker.EvaluateExec(context.Background(), approval.ExecEvaluation{
+		ExecutablePath: "/bin/echo",
+		Argv:           []string{"hello"},
+		WorkingDir:     "/tmp",
+		ToolName:       "exec",
+	})
+	if err != nil {
+		t.Fatalf("EvaluateExec: %v", err)
+	}
+	server := &serviceServer{broker: broker, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("x", 32), server)
+	defer httpServer.Close()
+
+	req := mustJSONRequest(t, http.MethodPost, fmt.Sprintf("%s/internal/v1/approvals/%d/cancel", httpServer.URL, decision.RequestID), `{"note":"hold"}`)
+	req.Header.Set("Authorization", "Bearer "+mustIssueServiceTokenAt(t, strings.Repeat("x", 32), time.Now()))
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do cancel approval: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected cancel 200, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	item, err := broker.DB.GetApprovalRequest(context.Background(), decision.RequestID)
+	if err != nil {
+		t.Fatalf("GetApprovalRequest: %v", err)
+	}
+	if item.Status != approval.StatusCanceled {
+		t.Fatalf("expected canceled status, got %#v", item)
+	}
+}
+
+func TestServiceApprovals_ExpireRoute(t *testing.T) {
+	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Exec.Mode = config.ApprovalModeAsk
+		cfg.PendingTTLSeconds = 1
+	})
+	defer cleanup()
+	now := time.Unix(1_700_000_000, 0).UTC()
+	broker.Now = func() time.Time { return now }
+	decision, err := broker.EvaluateExec(context.Background(), approval.ExecEvaluation{
+		ExecutablePath: "/bin/echo",
+		Argv:           []string{"hello"},
+		WorkingDir:     "/tmp",
+		ToolName:       "exec",
+	})
+	if err != nil {
+		t.Fatalf("EvaluateExec: %v", err)
+	}
+	broker.Now = func() time.Time { return now.Add(5 * time.Second) }
+	server := &serviceServer{broker: broker, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("y", 32), server)
+	defer httpServer.Close()
+
+	req := mustServiceRequest(t, httpServer, strings.Repeat("y", 32), http.MethodPost, "/internal/v1/approvals/expire", "")
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do expire approvals: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected expire 200, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	payload := mustDecodeJSONBody(t, resp.Body)
+	if payload["expired"] != float64(1) {
+		t.Fatalf("expected expired count 1, got %#v", payload)
+	}
+	item, err := broker.DB.GetApprovalRequest(context.Background(), decision.RequestID)
+	if err != nil {
+		t.Fatalf("GetApprovalRequest: %v", err)
+	}
+	if item.Status != approval.StatusExpired {
+		t.Fatalf("expected expired status, got %#v", item)
+	}
+}
+
+func TestServiceApprovals_AllowlistsCRUD(t *testing.T) {
+	broker, cleanup := buildServiceTestBroker(t, nil)
+	defer cleanup()
+	server := &serviceServer{broker: broker, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	secret := strings.Repeat("g", 32)
+	httpServer := newServiceTestHTTPServer(t, secret, server)
+	defer httpServer.Close()
+
+	addReq := mustServiceRequest(t, httpServer, secret, http.MethodPost, "/internal/v1/approvals/allowlists", `{"domain":"exec","scope":{"host_id":"`+broker.HostID+`","tool":"exec"},"matcher":{"executable_path":"/bin/echo"}}`)
+	addResp, err := httpServer.Client().Do(addReq)
+	if err != nil {
+		t.Fatalf("Do add allowlist: %v", err)
+	}
+	defer addResp.Body.Close()
+	if addResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("expected add allowlist 202, got %d (%s)", addResp.StatusCode, mustReadBody(t, addResp.Body))
+	}
+	added := mustDecodeJSONBody(t, addResp.Body)
+	item, ok := added["item"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected allowlist item payload, got %#v", added)
+	}
+	id := int64(item["ID"].(float64))
+
+	listReq := mustServiceRequest(t, httpServer, secret, http.MethodGet, "/internal/v1/approvals/allowlists?domain=exec", "")
+	listResp, err := httpServer.Client().Do(listReq)
+	if err != nil {
+		t.Fatalf("Do list allowlists: %v", err)
+	}
+	defer listResp.Body.Close()
+	if listResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected list allowlists 200, got %d (%s)", listResp.StatusCode, mustReadBody(t, listResp.Body))
+	}
+
+	removeReq := mustServiceRequest(t, httpServer, secret, http.MethodPost, fmt.Sprintf("/internal/v1/approvals/allowlists/%d/remove", id), "")
+	removeResp, err := httpServer.Client().Do(removeReq)
+	if err != nil {
+		t.Fatalf("Do remove allowlist: %v", err)
+	}
+	defer removeResp.Body.Close()
+	if removeResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected remove allowlist 200, got %d (%s)", removeResp.StatusCode, mustReadBody(t, removeResp.Body))
+	}
+}
+
+func TestServiceJobs_GetSnapshotRoute(t *testing.T) {
+	jobs := agent.NewJobRegistry(time.Minute, 32)
+	server := &serviceServer{jobs: jobs}
+	job := jobs.Register("turn")
+	jobs.Publish(job.ID, "started", map[string]any{"status": "running"})
+	jobs.Complete(job.ID, "completed", map[string]any{"final_text": "done"})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/internal/v1/jobs/"+job.ID, nil)
+	server.handleJobs(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	payload := mustDecodeJSONBody(t, rec.Body)
+	if payload["final_text"] != "done" {
+		t.Fatalf("expected final_text in snapshot, got %#v", payload)
+	}
+	if _, ok := payload["events"].([]any); !ok {
+		t.Fatalf("expected events array in snapshot payload, got %#v", payload)
+	}
+}
+
+func TestServiceStatusEndpoints(t *testing.T) {
+	cfg := hostedNoExecBaseConfig()
+	cfg.Channels.Slack.Enabled = true
+	rt := &agent.Runtime{Tools: tools.NewRegistry()}
+	server := &serviceServer{config: cfg, runtime: rt, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, cfg.Service.Secret, server)
+	defer httpServer.Close()
+
+	for _, tc := range []struct {
+		path       string
+		wantStatus int
+		wantKey    string
+	}{
+		{path: "/internal/v1/health", wantStatus: http.StatusOK, wantKey: "status"},
+		{path: "/internal/v1/readiness", wantStatus: http.StatusServiceUnavailable, wantKey: "ready"},
+		{path: "/internal/v1/capabilities", wantStatus: http.StatusOK, wantKey: "runtimeProfile"},
+	} {
+		req := mustServiceRequest(t, httpServer, cfg.Service.Secret, http.MethodGet, tc.path, "")
+		resp, err := httpServer.Client().Do(req)
+		if err != nil {
+			t.Fatalf("Do %s: %v", tc.path, err)
+		}
+		if resp.StatusCode != tc.wantStatus {
+			t.Fatalf("expected %s to return %d, got %d (%s)", tc.path, tc.wantStatus, resp.StatusCode, mustReadBody(t, resp.Body))
+		}
+		payload := mustDecodeJSONBody(t, resp.Body)
+		resp.Body.Close()
+		if _, ok := payload[tc.wantKey]; !ok {
+			t.Fatalf("expected key %q in %s payload, got %#v", tc.wantKey, tc.path, payload)
+		}
+	}
+}
+
+func TestServiceStatusEndpoints_RejectNonGET(t *testing.T) {
+	server := &serviceServer{jobs: agent.NewJobRegistry(time.Minute, 32)}
+	tests := []struct {
+		path    string
+		handler func(http.ResponseWriter, *http.Request)
+	}{
+		{path: "/internal/v1/health", handler: server.handleHealth},
+		{path: "/internal/v1/readiness", handler: server.handleReadiness},
+		{path: "/internal/v1/capabilities", handler: server.handleCapabilities},
+	}
+	for _, tc := range tests {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, tc.path, nil)
+		tc.handler(rec, req)
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("expected %s to reject POST with 405, got %d (%s)", tc.path, rec.Code, rec.Body.String())
+		}
 	}
 }
 

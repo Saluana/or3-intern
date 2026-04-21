@@ -10,6 +10,11 @@ go run ./cmd/or3-intern service
 
 `or3-intern service` is a loopback/private-network API intended for integrations such as OR3 Net. It uses the same runtime, tool registry, memory system, quotas, and subagent manager as the CLI and channel entrypoints.
 
+Command boundary:
+
+- `or3-intern serve` hosts channels, triggers, workers, heartbeat, and background orchestration.
+- `or3-intern service` hosts the authenticated machine-facing control plane.
+
 ## Service configuration
 
 ```json
@@ -144,6 +149,9 @@ Audit records for operator-originated actions include `auth_kind: "shared-secret
 | `POST` | `/internal/v1/approvals/{id}/deny` | Operator | Deny a pending request. |
 | `POST` | `/internal/v1/approvals/{id}/cancel` | Operator | Cancel a pending request without an approval decision. |
 | `POST` | `/internal/v1/approvals/expire` | Operator | Marks all expired pending requests as expired. |
+| `GET` | `/internal/v1/approvals/allowlists` | Operator | List allowlist rules. Optional `?domain=` filter. |
+| `POST` | `/internal/v1/approvals/allowlists` | Operator | Create a new allowlist rule. |
+| `POST` | `/internal/v1/approvals/allowlists/{id}/remove` | Operator | Disable an allowlist rule. |
 
 `POST /internal/v1/approvals/{id}/approve` request body:
 
@@ -155,6 +163,32 @@ Audit records for operator-originated actions include `auth_kind: "shared-secret
 ```
 
 Set `"allowlist": true` to also create a persistent allowlist rule from the subject.
+
+`POST /internal/v1/approvals/{id}/cancel` request body:
+
+```json
+{
+  "note": "optional operator note"
+}
+```
+
+`POST /internal/v1/approvals/allowlists` request body:
+
+```json
+{
+  "domain": "exec",
+  "scope": {
+    "host_id": "local",
+    "tool": "exec"
+  },
+  "matcher": {
+    "executable_path": "/bin/echo"
+  },
+  "expires_at": 0
+}
+```
+
+For `skill_execution` rules, `matcher` uses the skill matcher fields (`skill_id`, `version`, `origin`, `trust_state`, `script_hash`, `timeout_seconds`).
 
 #### Approval token lifecycle
 
@@ -178,13 +212,32 @@ The following capabilities are compatible with this schema and token format but 
 - Remote-node and `or3-sandbox` verification using shared signing keys
 - Remote-node forwarding of approval decisions
 
-### `GET /internal/v1/jobs/:jobId/stream`
+### `GET /internal/v1/jobs/{jobId}`
+
+Returns the current job snapshot, including lifecycle events, timestamps, and the latest completion or error payload.
+
+### `GET /internal/v1/jobs/{jobId}/stream`
 
 Attaches to a live SSE stream for a turn or background job.
 
-### `POST /internal/v1/jobs/:jobId/abort`
+### `POST /internal/v1/jobs/{jobId}/abort`
 
 Requests cancellation of a running job when cancellation is possible.
+
+### `GET /internal/v1/health`
+
+Returns a lightweight service health report for the shared runtime and job registry.
+
+### `GET /internal/v1/readiness`
+
+Returns the current startup/readiness evaluation for `service`, including the doctor summary and findings. Returns HTTP 503 when blocking startup findings are present.
+
+### `GET /internal/v1/capabilities`
+
+Returns the same machine-readable capabilities report exposed by `or3-intern capabilities --json`. Optional filters:
+
+- `?channel=<name>`
+- `?trigger=<name>`
 
 ## Operational guidance
 

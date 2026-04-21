@@ -23,6 +23,11 @@ If you are running directly from a checkout without installing, replace `or3-int
 | `or3-intern version` | Prints the binary version |
 | `or3-intern help [command]` | Shows root help or command-specific help |
 
+Command boundary:
+
+- `or3-intern serve` is the orchestration/runtime host for channels, triggers, workers, heartbeat, and cron.
+- `or3-intern service` is the authenticated internal HTTP gateway and machine-facing control plane.
+
 ### `or3-intern configure`
 
 Interactive setup and reconfiguration wizard. It loads the active config when present, shows a summary, and lets you change only the sections you care about.
@@ -78,7 +83,7 @@ Use `or3-intern init` if you only want the original lightweight first-run provid
 | `or3-intern embeddings <status|rebuild> [memory|docs|all]` | Shows embedding compatibility status and rebuilds stored memory/doc embeddings after provider or model changes |
 | `or3-intern secrets <set|delete|list>` | Manages encrypted secret references stored in SQLite |
 | `or3-intern audit [verify]` | Inspects or verifies the append-only audit chain |
-| `or3-intern approvals <list|show|approve|deny|allowlist>` | Lists and resolves pending approval requests or approval allowlists |
+| `or3-intern approvals <list|show|approve|deny|cancel|expire|allowlist>` | Lists and resolves pending approval requests or approval allowlists |
 | `or3-intern devices <list|requests|approve|deny|rotate|revoke>` | Lists paired devices and supports device rotation/revocation plus legacy pairing request actions |
 | `or3-intern pairing <list|request|approve|deny|exchange>` | Runs the pairing workflow and can bind approvals to channel identities such as `slack:U123` |
 | `or3-intern migrate-jsonl /path/to/session.jsonl [session_key]` | Imports legacy session history |
@@ -134,7 +139,7 @@ Manage pending approval requests and allowlist rules. All sub-commands work dire
 ```
 or3-intern approvals list [status]
 ```
-Lists approval requests. Optionally filter by status: `pending`, `approved`, `denied`, `expired`. Up to 100 results are returned.
+Lists approval requests. Optionally filter by status: `pending`, `approved`, `denied`, `canceled`, `expired`. Up to 100 results are returned.
 
 ```
 or3-intern approvals show <id>
@@ -154,9 +159,19 @@ or3-intern approvals deny <id> [--note <text>]
 Denies a pending request and records the resolution in the audit chain. The blocked tool invocation returns an error to the agent.
 
 ```
+or3-intern approvals cancel <id> [--note <text>]
+```
+Cancels a pending request without approving or denying the underlying action.
+
+```
+or3-intern approvals expire
+```
+Marks every currently expired pending request as `expired` and prints how many were updated.
+
+```
 or3-intern approvals allowlist list [domain]
 ```
-Lists active allowlist rules. Optionally filter by domain (`exec`, `skill_execution`).
+Lists allowlist rules. Optionally filter by domain (`exec`, `skill_execution`).
 
 ```
 or3-intern approvals allowlist add --domain <exec|skill_execution> [options]

@@ -100,7 +100,7 @@ func rebuildMemoryEmbeddings(ctx context.Context, cfg config.Config, d *db.DB, p
 		} else if len(vec) != wantDims {
 			return fmt.Errorf("embedding dimension changed during rebuild: have %d want %d", len(vec), wantDims)
 		}
-		if err := d.ReplaceMemoryNoteEmbedding(ctx, row.ID, memory.PackFloat32(vec)); err != nil {
+		if err := d.ReplaceMemoryNoteEmbedding(ctx, row.ID, memory.PackFloat32(vec), fingerprint); err != nil {
 			return fmt.Errorf("persist memory note %d: %w", row.ID, err)
 		}
 	}
@@ -114,8 +114,12 @@ func rebuildMemoryEmbeddings(ctx context.Context, cfg config.Config, d *db.DB, p
 }
 
 func rebuildDocEmbeddings(ctx context.Context, cfg config.Config, d *db.DB, prov *providers.Client, stdout io.Writer) error {
-	if !cfg.DocIndex.Enabled || len(cfg.DocIndex.Roots) == 0 {
+	if !cfg.DocIndex.Enabled {
 		_, _ = fmt.Fprintln(stdout, "doc index not enabled; skipping docs rebuild")
+		return nil
+	}
+	if len(cfg.DocIndex.Roots) == 0 {
+		_, _ = fmt.Fprintln(stdout, "doc index has no roots configured; skipping docs rebuild")
 		return nil
 	}
 	indexer := &memory.DocIndexer{

@@ -2150,6 +2150,86 @@ func TestRuntime_HandleNewSession_FailurePreservesHistory(t *testing.T) {
 	}
 }
 
+func TestRuntime_HandleNewSession_RebuildsOnEmbeddingFingerprintSwitch(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	ctx := context.Background()
+	if _, err := d.InsertMemoryNoteTyped(ctx, "sess-new-switch", db.TypedNoteInput{
+		Text:             "legacy memory",
+		Embedding:        memory.PackFloat32([]float32{0.1}),
+		EmbedFingerprint: "https://old-provider.example|text-embedding-3-small",
+	}); err != nil {
+		t.Fatalf("InsertMemoryNoteTyped legacy: %v", err)
+	}
+	for i := 0; i < 6; i++ {
+		if _, err := d.AppendMessage(ctx, "sess-new-switch", "user", "hello", nil); err != nil {
+			t.Fatalf("AppendMessage: %v", err)
+		}
+	}
+	provServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/chat/completions":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": `{"summary":"done","facts":["new fact"]}`}}},
+			})
+		case "/embeddings":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"embedding": []float32{0.2}}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer provServer.Close()
+	prov := providers.New(provServer.URL, "k", 5*time.Second)
+	prov.HTTP = provServer.Client()
+
+	deliver := &mockDeliverer{}
+	rt := &Runtime{
+		DB:       d,
+		Provider: prov,
+		Model:    "gpt-4.1-mini",
+		Tools:    tools.NewRegistry(),
+		Builder:  &Builder{DB: d, HistoryMax: 40},
+		Deliver:  deliver,
+		Consolidator: &memory.Consolidator{
+			DB:                 d,
+			Provider:           prov,
+			EmbedModel:         "text-embedding-3-small",
+			EmbedFingerprint:   provServer.URL + "|text-embedding-3-small",
+			WindowSize:         1,
+			MaxMessages:        50,
+			MaxInputChars:      4000,
+			CanonicalPinnedKey: "long_term_memory",
+		},
+	}
+	if err := rt.Handle(ctx, bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess-new-switch",
+		Channel:    "cli",
+		From:       "user",
+		Message:    "/new",
+	}); err != nil {
+		t.Fatalf("Handle /new: %v", err)
+	}
+	msgs, err := d.GetLastMessages(ctx, "sess-new-switch", 20)
+	if err != nil {
+		t.Fatalf("GetLastMessages: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("expected messages cleared, got %d", len(msgs))
+	}
+	if len(deliver.messages) == 0 || deliver.messages[0] != "New session started." {
+		t.Fatalf("unexpected deliver messages: %#v", deliver.messages)
+	}
+	fingerprint, err := d.MemoryVectorFingerprint(ctx)
+	if err != nil {
+		t.Fatalf("MemoryVectorFingerprint: %v", err)
+	}
+	if fingerprint != provServer.URL+"|text-embedding-3-small" {
+		t.Fatalf("expected rebuilt fingerprint, got %q", fingerprint)
+	}
+}
+
 func TestRuntime_ConsolidationScheduler_SingleFlightCoalesces(t *testing.T) {
 	d := openRuntimeTestDB(t)
 	response := providers.ChatCompletionResponse{

@@ -44,6 +44,7 @@ var rootHelpSections = []struct {
 		Items: []helpItem{
 			{Name: "doctor", Description: "Diagnose readiness issues, explain risk, and repair safe local problems"},
 			{Name: "capabilities", Description: "Inspect runtime posture, ingress policy, approvals, and profiles"},
+			{Name: "embeddings", Description: "Inspect or rebuild stored memory and doc embeddings after provider/model changes"},
 			{Name: "secrets", Description: "Manage encrypted secret references stored in SQLite"},
 			{Name: "audit", Description: "Inspect or verify the append-only audit chain"},
 			{Name: "migrate-jsonl", Description: "Import legacy session history from JSONL"},
@@ -69,6 +70,7 @@ var helpTopics = map[string]helpCommand{
 			"Loads the active config when present, shows a short summary, and prompts only for the sections you want to change.",
 			"When stdin and stdout are terminals, configure opens the Bubble Tea setup UI with arrow-key navigation, enter to select, space to toggle, s to save, and q to quit.",
 			"When either side is non-interactive, configure stays in the plain text prompt flow so pipes, redirected input, and scripts keep working.",
+			"The provider section can also set an optional embedding dimensions override for providers/models that support truncated embedding vectors.",
 			"Use repeatable --section flags for targeted updates, or run without flags to choose sections interactively.",
 		},
 		Flags: []helpItem{
@@ -99,6 +101,7 @@ var helpTopics = map[string]helpCommand{
 		Summary: "Start the interactive terminal chat UI.",
 		Description: []string{
 			"This is the default command when no command is provided.",
+			"Inside chat, use /new to archive the current session into memory and then clear the live message history for a fresh conversation.",
 		},
 		Examples: []string{"or3-intern chat"},
 	},
@@ -151,6 +154,20 @@ var helpTopics = map[string]helpCommand{
 			{Name: "--json", Description: "Emit JSON instead of human-readable text"},
 		},
 		Examples: []string{"or3-intern capabilities", "or3-intern capabilities --channel slack --json"},
+	},
+	"embeddings": {
+		Usage:   "or3-intern embeddings <status|rebuild> [memory|docs|all]",
+		Summary: "Inspect or rebuild persisted embedding state after provider or embedding-model changes.",
+		Description: []string{
+			"Use status to compare the stored memory-vector fingerprint against the current provider API base and embedding model.",
+			"Use rebuild memory after changing embedding providers or models so existing long-term memory vectors are regenerated in the new embedding space.",
+			"Use rebuild docs or rebuild all when document indexing is enabled and you want indexed file embeddings refreshed too.",
+		},
+		Subcommands: []helpItem{
+			{Name: "status", Description: "Show stored vector dims, stored embedding fingerprint, current fingerprint, and mismatch status"},
+			{Name: "rebuild [memory|docs|all]", Description: "Regenerate persisted embeddings for memory notes, indexed docs, or both"},
+		},
+		Examples: []string{"or3-intern embeddings status", "or3-intern embeddings rebuild memory", "or3-intern embeddings rebuild all"},
 	},
 	"secrets": {
 		Usage:   "or3-intern secrets <set|delete|list> ...",

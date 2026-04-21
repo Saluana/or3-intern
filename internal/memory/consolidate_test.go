@@ -585,13 +585,16 @@ func TestBuildExtraNotes_AllKinds(t *testing.T) {
 		Goals:       []string{"ship v2"},
 		Procedures:  []string{"run tests"},
 	}
-	notes := buildExtraNotes(parsed, sql.NullInt64{Int64: 42, Valid: true})
+	notes := buildExtraNotes(parsed, sql.NullInt64{Int64: 42, Valid: true}, "test-provider:test-embed")
 	if len(notes) != 4 {
 		t.Fatalf("expected 4 notes, got %d", len(notes))
 	}
 	kinds := make(map[string]int)
 	for _, n := range notes {
 		kinds[n.Kind]++
+		if n.EmbedFingerprint != "test-provider:test-embed" {
+			t.Errorf("expected embed fingerprint to be copied, got %q", n.EmbedFingerprint)
+		}
 	}
 	for _, k := range []string{db.MemoryKindFact, db.MemoryKindPreference, db.MemoryKindGoal, db.MemoryKindProcedure} {
 		if kinds[k] != 1 {
@@ -602,7 +605,7 @@ func TestBuildExtraNotes_AllKinds(t *testing.T) {
 
 func TestBuildExtraNotes_EmptyListsProduceZeroNotes(t *testing.T) {
 	parsed := consolidationOutput{}
-	notes := buildExtraNotes(parsed, sql.NullInt64{})
+	notes := buildExtraNotes(parsed, sql.NullInt64{}, "")
 	if len(notes) != 0 {
 		t.Errorf("expected no notes from empty output, got %d", len(notes))
 	}

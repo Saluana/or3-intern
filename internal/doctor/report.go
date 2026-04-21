@@ -102,6 +102,16 @@ func HasFix(mode FixMode) bool {
 	return mode == FixModeAutomatic || mode == FixModeInteractive
 }
 
+func CountFixMode(findings []Finding, mode FixMode) int {
+	count := 0
+	for _, finding := range findings {
+		if finding.FixMode == mode {
+			count++
+		}
+	}
+	return count
+}
+
 func NewReport(mode Mode, findings []Finding) Report {
 	items := append([]Finding{}, findings...)
 	sort.SliceStable(items, func(i, j int) bool {

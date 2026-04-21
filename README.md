@@ -26,6 +26,7 @@ or3-intern version
    ```bash
    or3-intern chat
    ```
+   Inside chat, use `/new` when you want to archive the current conversation into memory and start with a clean live session.
 3. Or run enabled external channels and automation:
    ```bash
    or3-intern serve
@@ -33,7 +34,7 @@ or3-intern version
 
 The `configure` command is the recommended setup flow and supports re-running specific sections later with `--section`. The lighter `init` command still exists for the original first-run provider/storage flow.
 
-On an interactive terminal, `configure` and `init` launch the Bubble Tea setup UI with arrow-key navigation, `enter` to open/select, `space` to toggle booleans, `s` to save, and `q` to back out or quit. If stdin or stdout is not a terminal, both commands automatically stay in the plain-text prompt flow so scripts and redirected input remain stable. In plain-text mode, existing secrets stay hidden: leave the field blank to keep the current value, enter a new value to replace it, or type `clear` to remove it.
+On an interactive terminal, `configure` and `init` launch the Bubble Tea setup UI with arrow-key navigation, `enter` to open/select, `space` to toggle booleans, `s` to save, and `q` to back out or quit. If stdin or stdout is not a terminal, both commands automatically stay in the plain-text prompt flow so scripts and redirected input remain stable. In plain-text mode, existing secrets stay hidden: leave the field blank to keep the current value, enter a new value to replace it, or type `clear` to remove it. The provider section now also exposes an optional embedding-dimensions override for models/providers that support configurable vector sizes.
 
 Use `go run ./cmd/or3-intern ...` for ad hoc local runs, or install the binary first if you want every command in the reference to work exactly as `or3-intern ...`.
 
@@ -58,6 +59,7 @@ Use `go run ./cmd/or3-intern ...` for ad hoc local runs, or install the binary f
 - `or3-intern service` run the internal authenticated HTTP API for OR3 Net
 - `or3-intern agent -m "hello"` run a one-shot turn
 - `or3-intern doctor [--strict|--json|--fix]` diagnose readiness issues, explain risk, and repair safe local problems
+- `or3-intern embeddings <status|rebuild>` inspect or rebuild stored memory/doc embeddings after provider or embedding-model changes
 - `or3-intern capabilities [--channel name|--trigger name|--json]` inspect the effective runtime posture, ingress policy, approvals, and access profiles
 - `or3-intern secrets <set|delete|list>` manage encrypted secret refs stored in SQLite
 - `or3-intern audit [verify]` inspect or verify the append-only audit chain
@@ -94,6 +96,7 @@ The setup docs stay text-first in-repo. Screenshots or terminal recordings can b
 - Uses SQLite with WAL plus bounded connection pools for predictable low-RAM operation.
 - History is fetched with bounded queries instead of full scans.
 - Hybrid retrieval combines pinned context, vector similarity, and FTS keyword search.
+- After changing `provider.apiBase` or `provider.embedModel`, run `or3-intern embeddings status` and then `or3-intern embeddings rebuild memory` (or `all`) so stored vectors are regenerated in the new embedding space.
 - External channels are disabled by default until configured.
 - `or3-intern doctor` is the main readiness command before exposing channels, triggers, or the service API.
 

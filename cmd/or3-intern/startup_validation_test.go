@@ -78,6 +78,12 @@ func TestValidateStartupCommand_RemoteSandboxRejectsBroadLocalExecWithoutSandbox
 	if !strings.Contains(err.Error(), "Bubblewrap sandboxing") {
 		t.Fatalf("expected sandbox refusal, got %v", err)
 	}
+	if strings.Contains(err.Error(), "doctor --fix`") {
+		t.Fatalf("expected manual blocker not to recommend plain doctor --fix, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "fix the configuration manually") {
+		t.Fatalf("expected manual guidance, got %v", err)
+	}
 }
 
 func TestValidateStartupCommand_RemoteSandboxAllowsRemoteFlowWithSandbox(t *testing.T) {

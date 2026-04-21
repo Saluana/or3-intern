@@ -21,17 +21,21 @@ type Client struct {
 	APIBase    string
 	APIKey     string
 	HTTP       *http.Client
+	EmbedDimensions int
 	HostPolicy security.HostPolicy
 }
 
 // EmbeddingFingerprint identifies the embedding space used for persisted
 // vectors. It must change when either the provider endpoint or embedding model
 // changes, even if the vector dimensionality stays the same.
-func EmbeddingFingerprint(apiBase, model string) string {
+func EmbeddingFingerprint(apiBase, model string, dimensions int) string {
 	base := strings.ToLower(strings.TrimRight(strings.TrimSpace(apiBase), "/"))
 	model = strings.TrimSpace(model)
-	if base == "" && model == "" {
+	if base == "" && model == "" && dimensions <= 0 {
 		return ""
+	}
+	if dimensions > 0 {
+		return fmt.Sprintf("%s|%s|dims=%d", base, model, dimensions)
 	}
 	return base + "|" + model
 }
@@ -318,8 +322,9 @@ func mergeStreamToolCalls(existing []ToolCall, delta []ToolCall) []ToolCall {
 }
 
 type EmbeddingRequest struct {
-	Model string `json:"model"`
-	Input string `json:"input"`
+	Model      string `json:"model"`
+	Input      string `json:"input"`
+	Dimensions int    `json:"dimensions,omitempty"`
 }
 type EmbeddingResponse struct {
 	Data []struct {
@@ -329,7 +334,11 @@ type EmbeddingResponse struct {
 
 func (c *Client) Embed(ctx context.Context, model, input string) ([]float32, error) {
 	var out EmbeddingResponse
-	b, _ := json.Marshal(EmbeddingRequest{Model: model, Input: input})
+	reqBody := EmbeddingRequest{Model: model, Input: input}
+	if c != nil && c.EmbedDimensions > 0 {
+		reqBody.Dimensions = c.EmbedDimensions
+	}
+	b, _ := json.Marshal(reqBody)
 	r, err := http.NewRequestWithContext(ctx, "POST", c.APIBase+"/embeddings", bytes.NewReader(b))
 	if err != nil {
 		return nil, err

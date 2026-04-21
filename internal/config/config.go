@@ -172,13 +172,14 @@ type HardeningQuotaConfig struct {
 
 // ProviderConfig selects the LLM and embedding provider endpoints and limits.
 type ProviderConfig struct {
-	APIBase        string  `json:"apiBase"`
-	APIKey         string  `json:"apiKey"`
-	Model          string  `json:"model"`
-	Temperature    float64 `json:"temperature"`
-	EmbedModel     string  `json:"embedModel"`
-	EnableVision   bool    `json:"enableVision"`
-	TimeoutSeconds int     `json:"timeoutSeconds"`
+	APIBase         string  `json:"apiBase"`
+	APIKey          string  `json:"apiKey"`
+	Model           string  `json:"model"`
+	Temperature     float64 `json:"temperature"`
+	EmbedModel      string  `json:"embedModel"`
+	EmbedDimensions int     `json:"embedDimensions"`
+	EnableVision    bool    `json:"enableVision"`
+	TimeoutSeconds  int     `json:"timeoutSeconds"`
 }
 
 // ToolsConfig configures built-in tools and external MCP server integrations.
@@ -634,12 +635,13 @@ func Default() Config {
 			},
 		},
 		Provider: ProviderConfig{
-			APIBase:        "https://api.openai.com/v1",
-			APIKey:         os.Getenv("OPENAI_API_KEY"),
-			Model:          "gpt-4.1-mini",
-			Temperature:    0,
-			EmbedModel:     "text-embedding-3-small",
-			TimeoutSeconds: 60,
+			APIBase:         "https://api.openai.com/v1",
+			APIKey:          os.Getenv("OPENAI_API_KEY"),
+			Model:           "gpt-4.1-mini",
+			Temperature:     0,
+			EmbedModel:      "text-embedding-3-small",
+			EmbedDimensions: 0,
+			TimeoutSeconds:  60,
 		},
 		Tools: ToolsConfig{
 			BraveAPIKey:         os.Getenv("BRAVE_API_KEY"),
@@ -734,6 +736,11 @@ func ApplyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("OR3_EMBED_MODEL"); v != "" {
 		cfg.Provider.EmbedModel = v
+	}
+	if v := os.Getenv("OR3_EMBED_DIMENSIONS"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			cfg.Provider.EmbedDimensions = parsed
+		}
 	}
 	if v := os.Getenv("OR3_TELEGRAM_TOKEN"); v != "" {
 		cfg.Channels.Telegram.Token = v
@@ -860,6 +867,9 @@ func Load(path string) (Config, error) {
 	if cfg.Provider.TimeoutSeconds <= 0 {
 		cfg.Provider.TimeoutSeconds = int((60 * time.Second).Seconds())
 	}
+	if cfg.Provider.EmbedDimensions < 0 {
+		cfg.Provider.EmbedDimensions = 0
+	}
 	if cfg.DefaultSessionKey == "" {
 		cfg.DefaultSessionKey = "cli:default"
 	}
@@ -961,6 +971,13 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.DocIndex.RetrieveLimit <= 0 {
 		cfg.DocIndex.RetrieveLimit = 5
+	}
+	if cfg.DocIndex.Enabled && len(cfg.DocIndex.Roots) == 0 {
+		root := strings.TrimSpace(cfg.WorkspaceDir)
+		if root == "" {
+			root = "."
+		}
+		cfg.DocIndex.Roots = []string{root}
 	}
 	if cfg.Skills.MaxRunSeconds <= 0 {
 		cfg.Skills.MaxRunSeconds = 30

@@ -767,13 +767,20 @@ func renderSummaryPanel(styles configureStyles, cfg config.Config, hint string) 
 
 func renderSummaryPanelMode(styles configureStyles, cfg config.Config, hint string, compact bool) string {
 	if compact {
+		providerSummary := configureProviderLabel(cfg.Provider.APIBase) + " · " + cfg.Provider.Model
+		if strings.TrimSpace(cfg.Provider.EmbedModel) != "" {
+			providerSummary += " · embed=" + emptyAsNone(cfg.Provider.EmbedModel)
+		}
+		if cfg.Provider.EmbedDimensions > 0 {
+			providerSummary += fmt.Sprintf(" · dims=%d", cfg.Provider.EmbedDimensions)
+		}
 		channels := strings.Join(enabledChannelNames(cfg), ", ")
 		if strings.TrimSpace(channels) == "" {
 			channels = "none enabled"
 		}
 		lines := []string{
 			styles.section.Render("Current snapshot"),
-			fmt.Sprintf("%s %s", styles.label.Render("Provider:"), styles.value.Render(configureProviderLabel(cfg.Provider.APIBase)+" · "+cfg.Provider.Model)),
+			fmt.Sprintf("%s %s", styles.label.Render("Provider:"), styles.value.Render(providerSummary)),
 			fmt.Sprintf("%s %s", styles.label.Render("Runtime:"), styles.value.Render(fmt.Sprintf("session=%s · workers=%d", cfg.DefaultSessionKey, cfg.WorkerCount))),
 			fmt.Sprintf("%s %s", styles.label.Render("Security:"), styles.value.Render(fmt.Sprintf("approvals=%t · guarded=%t", cfg.Security.Approvals.Enabled, cfg.Hardening.GuardedTools))),
 			fmt.Sprintf("%s %s", styles.label.Render("Channels:"), styles.value.Render(channels)),
@@ -783,9 +790,13 @@ func renderSummaryPanelMode(styles configureStyles, cfg config.Config, hint stri
 		}
 		return strings.Join(lines, "\n")
 	}
+	providerSummary := configureProviderLabel(cfg.Provider.APIBase) + " · " + cfg.Provider.Model + " · embed=" + emptyAsNone(cfg.Provider.EmbedModel)
+	if cfg.Provider.EmbedDimensions > 0 {
+		providerSummary += fmt.Sprintf(" · dims=%d", cfg.Provider.EmbedDimensions)
+	}
 	lines := []string{
 		styles.section.Render("Current snapshot"),
-		fmt.Sprintf("%s %s", styles.label.Render("Provider:"), styles.value.Render(configureProviderLabel(cfg.Provider.APIBase)+" · "+cfg.Provider.Model+" · embed="+emptyAsNone(cfg.Provider.EmbedModel))),
+		fmt.Sprintf("%s %s", styles.label.Render("Provider:"), styles.value.Render(providerSummary)),
 		fmt.Sprintf("%s %s", styles.label.Render("Storage:"), styles.value.Render(cfg.DBPath+" · "+cfg.ArtifactsDir)),
 		fmt.Sprintf("%s %s", styles.label.Render("Runtime:"), styles.value.Render(fmt.Sprintf("session=%s · workers=%d · history=%d", cfg.DefaultSessionKey, cfg.WorkerCount, cfg.HistoryMax))),
 		fmt.Sprintf("%s %s", styles.label.Render("Workspace:"), styles.value.Render(fmt.Sprintf("restrict=%t · %s", cfg.Tools.RestrictToWorkspace, emptyAsNone(cfg.WorkspaceDir)))),
@@ -865,7 +876,11 @@ func channelStatus(enabled bool, policy config.InboundPolicy, openAccess, hasAll
 func sectionStatus(cfg config.Config, section string) string {
 	switch section {
 	case "provider":
-		return configureProviderLabel(cfg.Provider.APIBase) + " · " + cfg.Provider.Model + " · embed=" + emptyAsNone(cfg.Provider.EmbedModel)
+		summary := configureProviderLabel(cfg.Provider.APIBase) + " · " + cfg.Provider.Model + " · embed=" + emptyAsNone(cfg.Provider.EmbedModel)
+		if cfg.Provider.EmbedDimensions > 0 {
+			summary += fmt.Sprintf(" · dims=%d", cfg.Provider.EmbedDimensions)
+		}
+		return summary
 	case "storage":
 		return emptyAsNone(cfg.DBPath) + " · " + emptyAsNone(cfg.ArtifactsDir)
 	case "runtime":
@@ -921,6 +936,7 @@ func buildSectionFields(cfg config.Config, section, cwd string) []configureField
 			{Key: "provider_api_base", Label: "API base", Description: "OpenAI-compatible base URL.", Kind: configureFieldText, Value: cfg.Provider.APIBase, EmptyHint: "https://api.openai.com/v1"},
 			{Key: "provider_model", Label: "Chat model", Description: "Default chat model for turns.", Kind: configureFieldText, Value: cfg.Provider.Model, EmptyHint: "gpt-4.1-mini"},
 			{Key: "provider_embed", Label: "Embedding model", Description: "Model used for embeddings and retrieval.", Kind: configureFieldText, Value: cfg.Provider.EmbedModel, EmptyHint: "text-embedding-3-small"},
+			{Key: "provider_embed_dimensions", Label: "Embedding dimensions", Description: "Optional override sent to embedding providers that support dimension truncation. Use 0 for the provider default.", Kind: configureFieldText, Value: formatInt(cfg.Provider.EmbedDimensions), EmptyHint: "0"},
 			{Key: "provider_temperature", Label: "Temperature", Description: "Sampling temperature for chat turns.", Kind: configureFieldText, Value: formatFloat(cfg.Provider.Temperature), EmptyHint: "0"},
 			{Key: "provider_timeout", Label: "Timeout seconds", Description: "HTTP timeout for provider calls.", Kind: configureFieldText, Value: formatInt(cfg.Provider.TimeoutSeconds), EmptyHint: "60"},
 			{Key: "provider_vision", Label: "Enable vision", Description: "Allow image inputs when the model and runtime support it.", Kind: configureFieldToggle, Value: onOff(cfg.Provider.EnableVision)},
@@ -1348,6 +1364,8 @@ func applyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 	case "provider_embed":
 		cfg.Provider.EmbedModel = value
 		return true, nil
+	case "provider_embed_dimensions":
+		return setIntValue(&cfg.Provider.EmbedDimensions, value, fieldKey)
 	case "provider_temperature":
 		return setFloatValue(&cfg.Provider.Temperature, value, fieldKey)
 	case "provider_timeout":

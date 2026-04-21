@@ -2038,6 +2038,53 @@ func TestWriteConsolidation_RejectsVectorDimMismatch(t *testing.T) {
 	}
 }
 
+func TestOpen_MigratesLegacyVectorMetaFingerprintBeforeIndexRebuild(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "legacy_vec_meta.db")
+
+	rawDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	legacyStmts := []string{
+		`CREATE TABLE sessions(key TEXT PRIMARY KEY, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, metadata_json TEXT NOT NULL DEFAULT '{}', last_consolidated_msg_id INTEGER NOT NULL DEFAULT 0);`,
+		`CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, session_key TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, payload_json TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL);`,
+		`CREATE TABLE memory_pinned(key TEXT PRIMARY KEY, content TEXT NOT NULL, updated_at INTEGER NOT NULL);`,
+		`CREATE TABLE memory_notes(id INTEGER PRIMARY KEY AUTOINCREMENT, session_key TEXT NOT NULL DEFAULT '__global__', text TEXT NOT NULL, embedding BLOB NOT NULL, source_message_id INTEGER, tags TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL);`,
+		`CREATE VIRTUAL TABLE memory_fts USING fts5(text, content='memory_notes', content_rowid='id');`,
+		`CREATE TRIGGER memory_notes_ai AFTER INSERT ON memory_notes BEGIN INSERT INTO memory_fts(rowid, text) VALUES (new.id, new.text); END;`,
+		`CREATE TABLE memory_vec_meta(id INTEGER PRIMARY KEY CHECK(id=1), dims INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0);`,
+		`INSERT INTO memory_vec_meta(id, dims, updated_at) VALUES(1, 1, 1);`,
+	}
+	for _, stmt := range legacyStmts {
+		if _, err := rawDB.Exec(stmt); err != nil {
+			t.Fatalf("create legacy schema: %v", err)
+		}
+	}
+	if _, err := rawDB.Exec(`INSERT INTO memory_notes(session_key, text, embedding, tags, created_at) VALUES('sess','legacy vector note',x'00000000','',1)`); err != nil {
+		t.Fatalf("seed legacy note: %v", err)
+	}
+	_ = rawDB.Close()
+
+	d, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open after legacy vector metadata schema: %v", err)
+	}
+	defer d.Close()
+
+	ctx := context.Background()
+	has, err := d.tableHasColumn(ctx, "memory_vec_meta", "embed_fingerprint")
+	if err != nil {
+		t.Fatalf("tableHasColumn memory_vec_meta: %v", err)
+	}
+	if !has {
+		t.Fatal("expected memory_vec_meta.embed_fingerprint after migration")
+	}
+	if _, err := d.MemoryVectorFingerprint(ctx); err != nil {
+		t.Fatalf("MemoryVectorFingerprint after migration: %v", err)
+	}
+}
+
 func TestInsertMemoryNoteTyped_RejectsFingerprintMismatch(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
@@ -2123,5 +2170,77 @@ func TestRebuildMemoryVecIndexWithProfile_SwitchesFingerprint(t *testing.T) {
 		EmbedFingerprint: "provider-a:text-embedding-3-small",
 	}); err == nil {
 		t.Fatal("expected old fingerprint to be rejected after rebuild")
+	}
+}
+
+func TestOpen_PreservesMemoryVectorFingerprintAcrossReopen(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fingerprint_reopen.db")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	ctx := context.Background()
+	if _, err := d.InsertMemoryNoteTyped(ctx, "sess", TypedNoteInput{
+		Text:             "first",
+		Embedding:        make([]byte, 8),
+		EmbedFingerprint: "provider-a:text-embedding-3-small",
+	}); err != nil {
+		t.Fatalf("InsertMemoryNoteTyped first: %v", err)
+	}
+	if err := d.RebuildMemoryVecIndexWithProfile(ctx, 2, "provider-a:text-embedding-3-small"); err != nil {
+		t.Fatalf("RebuildMemoryVecIndexWithProfile: %v", err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	d, err = Open(path)
+	if err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	defer d.Close()
+	fingerprint, err := d.MemoryVectorFingerprint(ctx)
+	if err != nil {
+		t.Fatalf("MemoryVectorFingerprint: %v", err)
+	}
+	if fingerprint != "provider-a:text-embedding-3-small" {
+		t.Fatalf("expected fingerprint to survive reopen, got %q", fingerprint)
+	}
+}
+
+func TestRebuildMemoryVecIndexWithProfile_FiltersRowsByFingerprint(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	if _, err := d.InsertMemoryNoteTyped(ctx, "sess", TypedNoteInput{
+		Text:             "old profile",
+		Embedding:        make([]byte, 8),
+		EmbedFingerprint: "provider-a:text-embedding-3-small",
+	}); err != nil {
+		t.Fatalf("InsertMemoryNoteTyped first: %v", err)
+	}
+	if err := d.RebuildMemoryVecIndexWithProfile(ctx, 2, "provider-b:text-embedding-3-small"); err != nil {
+		t.Fatalf("RebuildMemoryVecIndexWithProfile switch: %v", err)
+	}
+	if _, err := d.InsertMemoryNoteTyped(ctx, "sess", TypedNoteInput{
+		Text:             "new profile",
+		Embedding:        make([]byte, 8),
+		EmbedFingerprint: "provider-b:text-embedding-3-small",
+	}); err != nil {
+		t.Fatalf("InsertMemoryNoteTyped second: %v", err)
+	}
+	var count int
+	if err := d.VecSQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_vec`).Scan(&count); err != nil {
+		t.Fatalf("memory_vec count: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected only current-profile rows in memory_vec, got %d", count)
+	}
+	var text string
+	if err := d.VecSQL.QueryRowContext(ctx, `SELECT text FROM memory_vec LIMIT 1`).Scan(&text); err != nil {
+		t.Fatalf("memory_vec text: %v", err)
+	}
+	if text != "new profile" {
+		t.Fatalf("expected current-profile row in memory_vec, got %q", text)
 	}
 }

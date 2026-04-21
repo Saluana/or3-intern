@@ -114,6 +114,7 @@ func (d *DB) migrate(ctx context.Context) error {
 			session_key TEXT NOT NULL DEFAULT '` + scope.GlobalMemoryScope + `',
 			text TEXT NOT NULL,
 			embedding BLOB NOT NULL,
+			embed_fingerprint TEXT NOT NULL DEFAULT '',
 			source_message_id INTEGER,
 			tags TEXT NOT NULL DEFAULT '',
 			created_at INTEGER NOT NULL
@@ -190,8 +191,8 @@ func (d *DB) migrate(ctx context.Context) error {
 			embed_fingerprint TEXT NOT NULL DEFAULT '',
 			updated_at INTEGER NOT NULL DEFAULT 0
 		);`,
-		`INSERT INTO memory_vec_meta(id, dims, embed_fingerprint, updated_at)
-			VALUES(1, 0, '', 0)
+		`INSERT INTO memory_vec_meta(id, dims, updated_at)
+			VALUES(1, 0, 0)
 			ON CONFLICT(id) DO NOTHING;`,
 		`CREATE TABLE IF NOT EXISTS secrets(
 			name TEXT PRIMARY KEY,
@@ -297,9 +298,6 @@ func (d *DB) migrate(ctx context.Context) error {
 	if err := d.migrateLegacyGlobalMemoryScope(ctx); err != nil {
 		return err
 	}
-	if err := d.ensureMemoryVecIndexForExisting(ctx); err != nil {
-		return err
-	}
 	if err := d.ensureMemoryNotesMetaColumns(ctx); err != nil {
 		return err
 	}
@@ -307,6 +305,9 @@ func (d *DB) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := d.ensureMemoryDocsEmbedFingerprintColumn(ctx); err != nil {
+		return err
+	}
+	if err := d.ensureMemoryVecIndexForExisting(ctx); err != nil {
 		return err
 	}
 	return nil
@@ -379,7 +380,13 @@ func (d *DB) migrateLegacyGlobalMemoryScope(ctx context.Context) error {
 		return err
 	}
 	if dims, derr := d.MemoryVectorDims(ctx); derr == nil && dims > 0 && d.VecSQL != nil {
-		_, err = d.VecSQL.ExecContext(ctx, `UPDATE memory_vec SET session_key=? WHERE session_key=?`, scope.GlobalMemoryScope, scope.GlobalScopeAlias)
+		var hasVec int
+		if qerr := d.VecSQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE name='memory_vec'`).Scan(&hasVec); qerr != nil {
+			return qerr
+		}
+		if hasVec > 0 {
+			_, err = d.VecSQL.ExecContext(ctx, `UPDATE memory_vec SET session_key=? WHERE session_key=?`, scope.GlobalMemoryScope, scope.GlobalScopeAlias)
+		}
 	}
 	return err
 }
@@ -398,7 +405,11 @@ func (d *DB) ensureMemoryVecIndexForExisting(ctx context.Context) error {
 	if dims <= 0 {
 		return nil
 	}
-	return d.initMemoryVecIndex(ctx, dims, "", false)
+	fingerprint, err := d.MemoryVectorFingerprint(ctx)
+	if err != nil {
+		return err
+	}
+	return d.initMemoryVecIndex(ctx, dims, fingerprint, false)
 }
 
 // MemoryVectorDims reports the configured memory vector dimensionality.
@@ -476,8 +487,8 @@ func (d *DB) RebuildMemoryVecIndexWithDim(ctx context.Context, dims int) error {
 }
 
 // RebuildMemoryVecIndexWithProfile recreates the vector index for a new
-// dimensionality/embedding fingerprint pair and repopulates it from rows whose
-// stored embeddings match the new dimensionality.
+// dimensionality/embedding fingerprint pair and repopulates it only from rows
+// whose stored embeddings match both the dimensionality and fingerprint.
 func (d *DB) RebuildMemoryVecIndexWithProfile(ctx context.Context, dims int, fingerprint string) error {
 	return d.initMemoryVecIndex(ctx, dims, fingerprint, true)
 }
@@ -519,18 +530,29 @@ func (d *DB) initMemoryVecIndex(ctx context.Context, dims int, fingerprint strin
 	if _, err := tx.ExecContext(ctx, createSQL); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO memory_vec(note_id, session_key, embedding, text)
-		 SELECT id, session_key, embedding, text
-		 FROM memory_notes
-		 WHERE typeof(embedding)='blob' AND length(embedding)=?`, dims*4); err != nil {
-		return err
+	fingerprint = strings.TrimSpace(fingerprint)
+	if fingerprint == "" {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO memory_vec(note_id, session_key, embedding, text)
+			 SELECT id, session_key, embedding, text
+			 FROM memory_notes
+			 WHERE typeof(embedding)='blob' AND length(embedding)=?`, dims*4); err != nil {
+			return err
+		}
+	} else {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO memory_vec(note_id, session_key, embedding, text)
+			 SELECT id, session_key, embedding, text
+			 FROM memory_notes
+			 WHERE typeof(embedding)='blob' AND length(embedding)=? AND embed_fingerprint=?`, dims*4, fingerprint); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO memory_vec_meta(id, dims, embed_fingerprint, updated_at)
 		 VALUES(1, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET dims=excluded.dims, embed_fingerprint=excluded.embed_fingerprint, updated_at=excluded.updated_at`,
-		dims, strings.TrimSpace(fingerprint), NowMS()); err != nil {
+		dims, fingerprint, NowMS()); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -570,6 +592,7 @@ func (d *DB) ensureMemoryNotesMetaColumns(ctx context.Context) error {
 		missing bool
 	}
 	cols := []colDef{
+		{name: "embed_fingerprint", ddl: `ALTER TABLE memory_notes ADD COLUMN embed_fingerprint TEXT NOT NULL DEFAULT ''`},
 		{name: "kind", ddl: `ALTER TABLE memory_notes ADD COLUMN kind TEXT NOT NULL DEFAULT 'note'`},
 		{name: "status", ddl: `ALTER TABLE memory_notes ADD COLUMN status TEXT NOT NULL DEFAULT 'active'`},
 		{name: "importance", ddl: `ALTER TABLE memory_notes ADD COLUMN importance REAL NOT NULL DEFAULT 0`},

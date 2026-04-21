@@ -38,6 +38,7 @@ func TestRunConfigureWithIO_TargetedSections(t *testing.T) {
 		"",
 		"",
 		"",
+		"768",
 		"12345",
 		"",
 		"n",
@@ -62,6 +63,9 @@ func TestRunConfigureWithIO_TargetedSections(t *testing.T) {
 	}
 	if cfg.Provider.APIKey != "router-key" {
 		t.Fatalf("unexpected API key: %q", cfg.Provider.APIKey)
+	}
+	if cfg.Provider.EmbedDimensions != 768 {
+		t.Fatalf("unexpected embed dimensions: %d", cfg.Provider.EmbedDimensions)
 	}
 	if cfg.Tools.BraveAPIKey != "brave-key" {
 		t.Fatalf("unexpected Brave key: %q", cfg.Tools.BraveAPIKey)
@@ -258,7 +262,7 @@ func TestRunConfigureWithIO_SecretPromptCanClearExistingValue(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	input := strings.NewReader(strings.Join([]string{"", "", "", "", "", "", "n", "clear"}, "\n"))
+	input := strings.NewReader(strings.Join([]string{"", "", "", "", "", "", "", "n", "clear"}, "\n"))
 	var out strings.Builder
 	if err := runConfigureWithIO(input, &out, configPath, "/workspace/project", []string{"--section", "provider"}); err != nil {
 		t.Fatalf("runConfigureWithIO: %v", err)

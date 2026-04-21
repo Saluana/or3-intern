@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"strconv"
 
 	"or3-intern/internal/config"
 )
@@ -151,6 +152,20 @@ func promptString(reader *bufio.Reader, out io.Writer, label, defaultValue strin
 		return defaultValue, nil
 	}
 	return line, nil
+}
+
+func promptInt(reader *bufio.Reader, out io.Writer, label string, defaultValue int) (int, error) {
+	for {
+		answer, err := promptString(reader, out, label, strconv.Itoa(defaultValue))
+		if err != nil {
+			return 0, err
+		}
+		value, err := strconv.Atoi(strings.TrimSpace(answer))
+		if err == nil {
+			return value, nil
+		}
+		fmt.Fprintln(out, "Please enter a whole number.")
+	}
 }
 
 func promptSecretString(reader *bufio.Reader, out io.Writer, label, currentValue string) (string, error) {

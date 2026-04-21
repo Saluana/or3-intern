@@ -276,7 +276,7 @@ func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMa
 	}
 
 	// Build extra typed notes from structured output.
-	extraNotes := buildExtraNotes(parsed, sql.NullInt64{Int64: lastIncludedID, Valid: lastIncludedID > 0})
+	extraNotes := buildExtraNotes(parsed, sql.NullInt64{Int64: lastIncludedID, Valid: lastIncludedID > 0}, c.EmbedFingerprint)
 
 	w := db.ConsolidationWrite{
 		SessionKey:       sessionKey,
@@ -295,12 +295,12 @@ func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMa
 		w.CanonicalText = canonicalText
 	}
 	_, err = c.DB.WriteConsolidation(ctx, w)
-	if err != nil && len(embedding) >= 4 && isMemoryVectorDimMismatchError(err) {
+	if err != nil && len(embedding) >= 4 && isMemoryVectorProfileMismatchError(err) {
 		wantDims := len(embedding) / 4
-		if rebuildErr := c.DB.RebuildMemoryVecIndexWithDim(ctx, wantDims); rebuildErr != nil {
+		if rebuildErr := c.DB.RebuildMemoryVecIndexWithProfile(ctx, wantDims, c.EmbedFingerprint); rebuildErr != nil {
 			return false, fmt.Errorf("consolidation write: %w (rebuild failed: %v)", err, rebuildErr)
 		}
-		log.Printf("consolidation memory vectors rebuilt for session %q to %d dims", sessionKey, wantDims)
+		log.Printf("consolidation memory vectors rebuilt for session %q to %d dims (%s)", sessionKey, wantDims, strings.TrimSpace(c.EmbedFingerprint))
 		_, err = c.DB.WriteConsolidation(ctx, w)
 	}
 	if err != nil {
@@ -327,11 +327,12 @@ func contentToStr(v any) string {
 	return fmt.Sprintf("%v", v)
 }
 
-func isMemoryVectorDimMismatchError(err error) bool {
+func isMemoryVectorProfileMismatchError(err error) bool {
 	if err == nil {
 		return false
 	}
-	return strings.Contains(err.Error(), "memory vector dims mismatch")
+	return strings.Contains(err.Error(), "memory vector dims mismatch") ||
+		strings.Contains(err.Error(), "memory embedding fingerprint mismatch")
 }
 
 // consolidationOutput is the structured JSON shape returned by the LLM.
@@ -492,7 +493,7 @@ func trimTo(s string, max int) string {
 
 // buildExtraNotes converts parsed structured consolidation output into a slice
 // of TypedNoteInput ready to be written alongside the summary note.
-func buildExtraNotes(parsed consolidationOutput, sourceMsgID sql.NullInt64) []db.TypedNoteInput {
+func buildExtraNotes(parsed consolidationOutput, sourceMsgID sql.NullInt64, embedFingerprint string) []db.TypedNoteInput {
 	type kindItems struct {
 		kind  string
 		items []string
@@ -511,13 +512,14 @@ func buildExtraNotes(parsed consolidationOutput, sourceMsgID sql.NullInt64) []db
 				continue
 			}
 			out = append(out, db.TypedNoteInput{
-				Text:        text,
-				Embedding:   make([]byte, 0),
-				SourceMsgID: sourceMsgID,
-				Tags:        "consolidation",
-				Kind:        g.kind,
-				Status:      db.MemoryStatusActive,
-				Importance:  0,
+				Text:             text,
+				Embedding:        make([]byte, 0),
+				EmbedFingerprint: embedFingerprint,
+				SourceMsgID:      sourceMsgID,
+				Tags:             "consolidation",
+				Kind:             g.kind,
+				Status:           db.MemoryStatusActive,
+				Importance:       0,
 			})
 		}
 	}

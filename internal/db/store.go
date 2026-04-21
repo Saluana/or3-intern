@@ -247,10 +247,11 @@ func (d *DB) InsertMemoryNoteTyped(ctx context.Context, sessionKey string, input
 	if emb == nil {
 		emb = make([]byte, 0)
 	}
+	storedFingerprint := normalizeStoredEmbeddingFingerprint(emb, input.EmbedFingerprint)
 	res, err := d.SQL.ExecContext(ctx,
-		`INSERT INTO memory_notes(session_key, text, embedding, source_message_id, tags, created_at, kind, status, importance)
-		 VALUES(?,?,?,?,?,?,?,?,?)`,
-		sessionKey, input.Text, emb, input.SourceMsgID, input.Tags, NowMS(),
+		`INSERT INTO memory_notes(session_key, text, embedding, embed_fingerprint, source_message_id, tags, created_at, kind, status, importance)
+		 VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		sessionKey, input.Text, emb, storedFingerprint, input.SourceMsgID, input.Tags, NowMS(),
 		kind, status, importance)
 	if err != nil {
 		return 0, err
@@ -260,6 +261,13 @@ func (d *DB) InsertMemoryNoteTyped(ctx context.Context, sessionKey string, input
 		return id, err
 	}
 	return id, nil
+}
+
+func normalizeStoredEmbeddingFingerprint(embedding []byte, fingerprint string) string {
+	if len(embedding) < 4 || len(embedding)%4 != 0 {
+		return ""
+	}
+	return strings.TrimSpace(fingerprint)
 }
 
 func (d *DB) validateMemoryEmbeddingDims(ctx context.Context, embedding []byte) error {
@@ -647,10 +655,11 @@ func (d *DB) WriteConsolidation(ctx context.Context, w ConsolidationWrite) (int6
 		if emb == nil {
 			emb = make([]byte, 0)
 		}
+		storedFingerprint := normalizeStoredEmbeddingFingerprint(emb, w.EmbedFingerprint)
 		res, err := tx.ExecContext(ctx,
-			`INSERT INTO memory_notes(session_key, text, embedding, source_message_id, tags, created_at, kind, status, importance)
-			 VALUES(?,?,?,?,?,?,?,?,?)`,
-			scopeKey, w.NoteText, emb, w.SourceMsgID, w.NoteTags, NowMS(),
+			`INSERT INTO memory_notes(session_key, text, embedding, embed_fingerprint, source_message_id, tags, created_at, kind, status, importance)
+			 VALUES(?,?,?,?,?,?,?,?,?,?)`,
+			scopeKey, w.NoteText, emb, storedFingerprint, w.SourceMsgID, w.NoteTags, NowMS(),
 			kind, MemoryStatusActive, 0.0)
 		if err != nil {
 			return 0, err
@@ -687,10 +696,11 @@ func (d *DB) WriteConsolidation(ctx context.Context, w ConsolidationWrite) (int6
 		if emb == nil {
 			emb = make([]byte, 0)
 		}
+		storedFingerprint := normalizeStoredEmbeddingFingerprint(emb, en.EmbedFingerprint)
 		res, err := tx.ExecContext(ctx,
-			`INSERT INTO memory_notes(session_key, text, embedding, source_message_id, tags, created_at, kind, status, importance)
-			 VALUES(?,?,?,?,?,?,?,?,?)`,
-			scopeKey, en.Text, emb, en.SourceMsgID, en.Tags, NowMS(),
+			`INSERT INTO memory_notes(session_key, text, embedding, embed_fingerprint, source_message_id, tags, created_at, kind, status, importance)
+			 VALUES(?,?,?,?,?,?,?,?,?,?)`,
+			scopeKey, en.Text, emb, storedFingerprint, en.SourceMsgID, en.Tags, NowMS(),
 			kind, status, importance)
 		if err != nil {
 			return noteID, err
@@ -763,14 +773,14 @@ func (d *DB) ListMemoryNotesForReembed(ctx context.Context) ([]MemoryNoteReembed
 	return out, rows.Err()
 }
 
-// ReplaceMemoryNoteEmbedding updates a note's stored embedding blob without
-// enforcing the current vector index profile. Callers should rebuild the vec
-// index after a bulk re-embed pass.
-func (d *DB) ReplaceMemoryNoteEmbedding(ctx context.Context, noteID int64, embedding []byte) error {
+// ReplaceMemoryNoteEmbedding updates a note's stored embedding blob and
+// fingerprint without enforcing the current vector index profile. Callers
+// should rebuild the vec index after a bulk re-embed pass.
+func (d *DB) ReplaceMemoryNoteEmbedding(ctx context.Context, noteID int64, embedding []byte, fingerprint string) error {
 	if embedding == nil {
 		embedding = make([]byte, 0)
 	}
-	_, err := d.SQL.ExecContext(ctx, `UPDATE memory_notes SET embedding=? WHERE id=?`, embedding, noteID)
+	_, err := d.SQL.ExecContext(ctx, `UPDATE memory_notes SET embedding=?, embed_fingerprint=? WHERE id=?`, embedding, normalizeStoredEmbeddingFingerprint(embedding, fingerprint), noteID)
 	return err
 }
 

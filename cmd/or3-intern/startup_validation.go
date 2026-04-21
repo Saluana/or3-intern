@@ -28,7 +28,7 @@ func validateStartupCommand(cmd string, cfg config.Config) error {
 	if len(blockers) > len(top) {
 		message += fmt.Sprintf(" (%d more blocking finding(s))", len(blockers)-len(top))
 	}
-	return startupRefusal(cmd, message)
+	return startupRefusal(cmd, message, blockers)
 }
 
 func startupDoctorMode(cmd string) intdoctor.Mode {
@@ -44,12 +44,36 @@ func startupDoctorMode(cmd string) intdoctor.Mode {
 	}
 }
 
-func startupRefusal(cmd, message string) error {
+func startupRefusal(cmd, message string, blockers []intdoctor.Finding) error {
 	cmd = strings.TrimSpace(cmd)
 	if cmd == "" {
 		cmd = "startup"
 	}
-	return fmt.Errorf("%s startup refused: %s; run `or3-intern doctor --fix` or fix the configuration", cmd, message)
+	guidance := startupFixGuidance(blockers)
+	return fmt.Errorf("%s startup refused: %s; %s", cmd, message, guidance)
+}
+
+func startupFixGuidance(blockers []intdoctor.Finding) string {
+	hasAutomatic := false
+	hasInteractive := false
+	for _, finding := range blockers {
+		switch finding.FixMode {
+		case intdoctor.FixModeAutomatic:
+			hasAutomatic = true
+		case intdoctor.FixModeInteractive:
+			hasInteractive = true
+		}
+	}
+	switch {
+	case hasAutomatic && hasInteractive:
+		return "run `or3-intern doctor --fix` for safe repairs, then `or3-intern doctor --fix --interactive` for guided ones, or fix the configuration manually"
+	case hasAutomatic:
+		return "run `or3-intern doctor --fix` or fix the configuration manually"
+	case hasInteractive:
+		return "run `or3-intern doctor --fix --interactive` or fix the configuration manually"
+	default:
+		return "fix the configuration manually"
+	}
 }
 
 func minInt(a, b int) int {

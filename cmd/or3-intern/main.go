@@ -60,7 +60,7 @@ func effectiveConsolidationTimeout(cfg config.Config) time.Duration {
 }
 
 func currentEmbedFingerprint(cfg config.Config) string {
-	return providers.EmbeddingFingerprint(cfg.Provider.APIBase, cfg.Provider.EmbedModel)
+	return providers.EmbeddingFingerprint(cfg.Provider.APIBase, cfg.Provider.EmbedModel, cfg.Provider.EmbedDimensions)
 }
 
 func main() {
@@ -226,6 +226,7 @@ func main() {
 	}
 	timeout := time.Duration(cfg.Provider.TimeoutSeconds) * time.Second
 	prov := providers.New(cfg.Provider.APIBase, cfg.Provider.APIKey, timeout)
+	prov.EmbedDimensions = cfg.Provider.EmbedDimensions
 	prov.HostPolicy = buildHostPolicy(cfg)
 	art := &artifacts.Store{Dir: cfg.ArtifactsDir, DB: d}
 

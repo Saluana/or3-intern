@@ -75,12 +75,37 @@ Use `or3-intern init` if you only want the original lightweight first-run provid
 | --- | --- |
 | `or3-intern doctor [--strict|--json|--fix]` | Diagnoses readiness issues, emits machine-readable reports, and repairs safe local problems |
 | `or3-intern capabilities [--channel name|--trigger name|--json]` | Shows the effective runtime posture, ingress policy, approvals, and access-profile limits |
+| `or3-intern embeddings <status|rebuild> [memory|docs|all]` | Shows embedding compatibility status and rebuilds stored memory/doc embeddings after provider or model changes |
 | `or3-intern secrets <set|delete|list>` | Manages encrypted secret references stored in SQLite |
 | `or3-intern audit [verify]` | Inspects or verifies the append-only audit chain |
 | `or3-intern approvals <list|show|approve|deny|allowlist>` | Lists and resolves pending approval requests or approval allowlists |
 | `or3-intern devices <list|requests|approve|deny|rotate|revoke>` | Lists paired devices and supports device rotation/revocation plus legacy pairing request actions |
 | `or3-intern pairing <list|request|approve|deny|exchange>` | Runs the pairing workflow and can bind approvals to channel identities such as `slack:U123` |
 | `or3-intern migrate-jsonl /path/to/session.jsonl [session_key]` | Imports legacy session history |
+
+### `or3-intern embeddings`
+
+Use this command after switching `provider.apiBase` or `provider.embedModel`.
+
+```
+or3-intern embeddings status
+```
+
+Prints the stored memory-vector dimensions, the stored embedding fingerprint, the current fingerprint, and whether they match.
+
+```
+or3-intern embeddings rebuild memory
+or3-intern embeddings rebuild docs
+or3-intern embeddings rebuild all
+```
+
+Rebuilds persisted embeddings in the current embedding space:
+
+- `memory` re-embeds all long-term memory notes and rebuilds the vector index.
+- `docs` re-syncs indexed files with the current embedding fingerprint.
+- `all` runs both in sequence.
+
+When chat is running, `/new` archives the current conversation before clearing live history. If you recently changed embedding providers or models, the runtime now repairs the active vector profile automatically for new archival writes, but you should still run an explicit rebuild so older memory/doc vectors are regenerated too.
 
 ### `or3-intern approvals`
 

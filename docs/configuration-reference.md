@@ -9,7 +9,7 @@
 | `dbPath`, `artifactsDir`, `workspaceDir`, `allowedDir` | Storage locations and workspace boundaries |
 | `defaultSessionKey`, `session` | Session naming and cross-session identity/scope behavior |
 | `identityFile`, `memoryFile` | Prompt bootstrap files |
-| `provider` | Model API base, model names, keys, temperature, and timeouts |
+| `provider` | Model API base, model names, embedding settings, keys, temperature, and timeouts |
 | `tools` | Local tool behavior, proxying, timeouts, workspace restrictions, and MCP servers |
 | `hardening` | Tool capability tiers, program allowlists, child environment controls, quotas, and sandboxing |
 | `skills` | Managed skill loading, per-skill config, policy, and registry settings |
@@ -53,6 +53,7 @@ Controls the LLM and embedding provider settings:
 - `apiKey`
 - `model`
 - `embedModel`
+- `embedDimensions` — optional embedding-vector size override; `0` means use the provider/model default
 - `temperature`
 - `enableVision`
 - `timeoutSeconds`

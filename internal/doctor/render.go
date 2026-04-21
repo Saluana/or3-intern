@@ -39,16 +39,28 @@ func RenderText(report Report) string {
 		}
 	}
 	fixable := 0
+	automatic := 0
+	interactive := 0
 	for _, finding := range report.Findings {
 		if HasFix(finding.FixMode) {
 			fixable++
+		}
+		if finding.FixMode == FixModeAutomatic {
+			automatic++
+		}
+		if finding.FixMode == FixModeInteractive {
+			interactive++
 		}
 	}
 	if fixable > 0 {
 		lines = append(lines, "", "Next Steps:")
 		lines = append(lines, fmt.Sprintf("- %d finding(s) have available fixes.", fixable))
-		lines = append(lines, "- Run `or3-intern doctor --fix` for safe automatic repairs.")
-		lines = append(lines, "- Run `or3-intern doctor --fix --interactive` for guided repair choices.")
+		if automatic > 0 {
+			lines = append(lines, fmt.Sprintf("- %d finding(s) support safe automatic repair via `or3-intern doctor --fix`.", automatic))
+		}
+		if interactive > 0 {
+			lines = append(lines, fmt.Sprintf("- %d finding(s) require guided repair via `or3-intern doctor --fix --interactive`.", interactive))
+		}
 	}
 	return strings.Join(lines, "\n") + "\n"
 }

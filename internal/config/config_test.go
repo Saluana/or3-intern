@@ -25,6 +25,7 @@ func clearConfigEnv(t *testing.T) {
 		"OR3_API_KEY",
 		"OR3_MODEL",
 		"OR3_EMBED_MODEL",
+		"OR3_EMBED_DIMENSIONS",
 		"OR3_TELEGRAM_TOKEN",
 		"OR3_SLACK_APP_TOKEN",
 		"OR3_SLACK_BOT_TOKEN",
@@ -92,6 +93,9 @@ func TestDefault_Values(t *testing.T) {
 	}
 	if cfg.Provider.TimeoutSeconds != 60 {
 		t.Errorf("expected TimeoutSeconds=60, got %d", cfg.Provider.TimeoutSeconds)
+	}
+	if cfg.Provider.EmbedDimensions != 0 {
+		t.Errorf("expected EmbedDimensions=0, got %d", cfg.Provider.EmbedDimensions)
 	}
 	if cfg.Provider.EnableVision {
 		t.Error("expected Provider.EnableVision=false by default")
@@ -615,6 +619,30 @@ func TestLoad_ValidFile(t *testing.T) {
 	}
 }
 
+func TestLoad_DocIndexEnabledWithoutRootsDefaultsToWorkspace(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	workspace := filepath.Join(dir, "workspace")
+
+	input := Config{
+		WorkspaceDir: workspace,
+		DocIndex: DocIndexConfig{
+			Enabled: true,
+		},
+	}
+	b, _ := json.MarshalIndent(input, "", "  ")
+	mustWriteTestFile(t, path, b)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.DocIndex.Roots) != 1 || cfg.DocIndex.Roots[0] != workspace {
+		t.Fatalf("expected doc index root to default to workspace %q, got %#v", workspace, cfg.DocIndex.Roots)
+	}
+}
+
 func TestLoad_HeartbeatDefaultsRemainBackwardCompatible(t *testing.T) {
 	clearConfigEnv(t)
 	dir := t.TempDir()
@@ -670,6 +698,7 @@ func TestLoad_EnvOverrides(t *testing.T) {
 	t.Setenv("OR3_API_KEY", "env-key")
 	t.Setenv("OR3_MODEL", "env-model")
 	t.Setenv("OR3_EMBED_MODEL", "env-embed")
+	t.Setenv("OR3_EMBED_DIMENSIONS", "768")
 	t.Setenv("OR3_API_BASE", "https://env.api")
 	t.Setenv("OR3_SUBAGENTS_ENABLED", "true")
 	t.Setenv("OR3_SUBAGENTS_MAX_CONCURRENT", "3")
@@ -691,6 +720,9 @@ func TestLoad_EnvOverrides(t *testing.T) {
 	}
 	if cfg.Provider.EmbedModel != "env-embed" {
 		t.Errorf("expected EmbedModel='env-embed', got %q", cfg.Provider.EmbedModel)
+	}
+	if cfg.Provider.EmbedDimensions != 768 {
+		t.Errorf("expected EmbedDimensions=768, got %d", cfg.Provider.EmbedDimensions)
 	}
 	if cfg.Provider.APIBase != "https://env.api" {
 		t.Errorf("expected APIBase='https://env.api', got %q", cfg.Provider.APIBase)

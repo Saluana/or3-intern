@@ -372,6 +372,9 @@ func configureProviderSection(reader *bufio.Reader, out io.Writer, cfg *config.C
 	if cfg.Provider.EmbedModel, err = promptString(reader, out, "Embedding model", cfg.Provider.EmbedModel); err != nil {
 		return err
 	}
+	if cfg.Provider.EmbedDimensions, err = promptInt(reader, out, "Embedding dimensions (0 = provider default)", cfg.Provider.EmbedDimensions); err != nil {
+		return err
+	}
 	cfg.Provider.APIKey, err = promptSecretString(reader, out, "API key", cfg.Provider.APIKey)
 	return err
 }
@@ -652,7 +655,11 @@ func printConfigureSummary(out io.Writer, cfg config.Config) {
 		workspaceSummary = "not set"
 	}
 	fmt.Fprintln(out, "Current settings:")
-	fmt.Fprintf(out, "  Provider: %s (%s · embed=%s)\n", providerLabel, cfg.Provider.Model, emptyAsNone(cfg.Provider.EmbedModel))
+	providerSummary := fmt.Sprintf("%s · embed=%s", cfg.Provider.Model, emptyAsNone(cfg.Provider.EmbedModel))
+	if cfg.Provider.EmbedDimensions > 0 {
+		providerSummary += fmt.Sprintf(" · dims=%d", cfg.Provider.EmbedDimensions)
+	}
+	fmt.Fprintf(out, "  Provider: %s (%s)\n", providerLabel, providerSummary)
 	fmt.Fprintf(out, "  Storage: db=%s artifacts=%s\n", cfg.DBPath, cfg.ArtifactsDir)
 	fmt.Fprintf(out, "  Runtime: session=%s workers=%d history=%d consolidation=%t\n", cfg.DefaultSessionKey, cfg.WorkerCount, cfg.HistoryMax, cfg.ConsolidationEnabled)
 	fmt.Fprintf(out, "  Workspace: restrict=%t dir=%s\n", cfg.Tools.RestrictToWorkspace, workspaceSummary)

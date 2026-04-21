@@ -23,7 +23,7 @@ func TestConfigureTUIFormNavigationHighlightsSelectedField(t *testing.T) {
 		t.Fatalf("expected field cursor 2, got %d", finalModel.fieldCursor)
 	}
 	view := finalModel.View()
-	if !strings.Contains(view, "Field 3/8") {
+	if !strings.Contains(view, "Field 3/9") {
 		t.Fatalf("expected field position hint in view, got %q", view)
 	}
 	if !strings.Contains(view, "Selected field") || !strings.Contains(view, "Chat model") {
@@ -106,7 +106,7 @@ func TestConfigureTUIFormStacksAndKeepsSelectedFieldVisible(t *testing.T) {
 	if !strings.Contains(view, "Selected field") {
 		t.Fatalf("expected selected field details in stacked form view, got %q", view)
 	}
-	if !strings.Contains(view, "Field 1/8") {
+	if !strings.Contains(view, "Field 1/9") {
 		t.Fatalf("expected field position hint in stacked form view, got %q", view)
 	}
 	if !deriveConfigureLayout(model.width, model.height).stacked {

@@ -370,8 +370,14 @@ func TestChat_ContextCanceled(t *testing.T) {
 
 func TestEmbed_WithAPIKey(t *testing.T) {
 	var gotAuth string
+	var gotDimensions int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
+		var req EmbeddingRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("Decode request: %v", err)
+		}
+		gotDimensions = req.Dimensions
 		w.Header().Set("Content-Type", "application/json")
 		mustEncodeResponse(t, w, EmbeddingResponse{
 			Data: []struct {
@@ -381,12 +387,15 @@ func TestEmbed_WithAPIKey(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := &Client{APIBase: srv.URL, APIKey: "my-embed-key", HTTP: srv.Client()}
+	c := &Client{APIBase: srv.URL, APIKey: "my-embed-key", HTTP: srv.Client(), EmbedDimensions: 768}
 	if _, err := c.Embed(context.Background(), "model", "text"); err != nil {
 		t.Fatalf("Embed: %v", err)
 	}
 
 	if gotAuth != "Bearer my-embed-key" {
 		t.Errorf("expected 'Bearer my-embed-key', got %q", gotAuth)
+	}
+	if gotDimensions != 768 {
+		t.Errorf("expected dimensions=768, got %d", gotDimensions)
 	}
 }

@@ -43,6 +43,7 @@ or3-intern chat
 ```
 
 Use this first when you want to confirm that provider configuration, storage, and prompts are working before enabling any external integrations.
+Inside chat, `/new` archives the current conversation into long-term memory before clearing the active message history.
 
 ### 3. Run external channels and automation
 
@@ -81,6 +82,17 @@ Common files and directories include:
 3. Review [configuration-reference.md](configuration-reference.md)
 4. Run `or3-intern doctor --strict` before exposing channels or service mode; use `or3-intern doctor --fix` for safe automatic repairs and `or3-intern doctor --fix --interactive` for guided fixes
 5. Enable one advanced feature at a time: channels, skills, triggers, MCP, or service mode
+
+## After changing embedding providers or models
+
+If you switch `provider.apiBase` or `provider.embedModel`, check and rebuild stored embeddings so older memory and indexed docs stay semantically compatible with the new provider/model pair.
+
+```bash
+or3-intern embeddings status
+or3-intern embeddings rebuild all
+```
+
+If you only need long-term memory rebuilt, use `or3-intern embeddings rebuild memory`.
 
 ## Interactive vs scripted setup
 

@@ -82,6 +82,7 @@ Use `or3-intern init` if you only want the original lightweight first-run provid
 | `or3-intern devices <list|requests|approve|deny|rotate|revoke>` | Lists paired devices and supports device rotation/revocation plus legacy pairing request actions |
 | `or3-intern pairing <list|request|approve|deny|exchange>` | Runs the pairing workflow and can bind approvals to channel identities such as `slack:U123` |
 | `or3-intern migrate-jsonl /path/to/session.jsonl [session_key]` | Imports legacy session history |
+| `or3-intern migrate-openclaw [--scope <scope-key>] <openclaw-agent-dir>` | Imports a local OpenClaw agent's soul, identity, static memory, user context, daily memory notes, and dreams |
 
 ### `or3-intern embeddings`
 
@@ -106,6 +107,25 @@ Rebuilds persisted embeddings in the current embedding space:
 - `all` runs both in sequence.
 
 When chat is running, `/new` archives the current conversation before clearing live history. If you recently changed embedding providers or models, the runtime now repairs the active vector profile automatically for new archival writes, but you should still run an explicit rebuild so older memory/doc vectors are regenerated too.
+
+### `or3-intern migrate-openclaw`
+
+Use this command when you have an OpenClaw agent workspace on disk and want to move the durable parts into the current `or3-intern` install.
+
+```bash
+or3-intern migrate-openclaw ~/.openclaw/agents/main
+```
+
+Imported data:
+
+- `SOUL.md` → configured `soulFile`
+- `IDENTITY.md` → configured `identityFile`
+- `MEMORY.md` → configured `memoryFile`
+- `USER.md` → appended into `memoryFile` under an import heading
+- `memory/*.md` → imported into durable memory notes
+- `DREAMS.md` and `memory/.dreams/*` → imported into durable memory notes as summary-style dream context
+
+Daily memory files are chunked conservatively before embedding so the importer does not send oversized embedding requests. If the current embedding fingerprint does not match the stored memory-vector fingerprint, the command still imports the notes and falls back to FTS-only memory for those imported chunks until you run `or3-intern embeddings rebuild memory`.
 
 ### `or3-intern approvals`
 

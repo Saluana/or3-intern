@@ -48,7 +48,7 @@ var rootHelpSections = []struct {
 			{Name: "secrets", Description: "Manage encrypted secret references stored in SQLite"},
 			{Name: "audit", Description: "Inspect or verify the append-only audit chain"},
 			{Name: "migrate-jsonl", Description: "Import legacy session history from JSONL"},
-			{Name: "migrate-openclaw", Description: "Import a local OpenClaw agent into or3-intern files and memory"},
+			{Name: "migrate-openclaw", Description: "Import a local OpenClaw agent into or3-intern files, daily notes, and dreams"},
 		},
 	},
 	{
@@ -338,10 +338,10 @@ var helpTopics = map[string]helpCommand{
 	},
 	"migrate-openclaw": {
 		Usage:   "or3-intern migrate-openclaw [--scope <scope-key>] [--embed-max-bytes <n>] <openclaw-agent-dir>",
-		Summary: "Import SOUL.md, IDENTITY.md, MEMORY.md, USER.md, and daily memory notes from a local OpenClaw agent.",
+		Summary: "Import SOUL.md, IDENTITY.md, MEMORY.md, USER.md, daily notes, and dreams from a local OpenClaw agent.",
 		Description: []string{
 			"Core bootstrap files are copied into the configured or3-intern destinations.",
-			"OpenClaw memory/*.md files are imported as durable memory notes using conservative chunking so embedding requests stay bounded.",
+			"OpenClaw memory/*.md files plus DREAMS.md and memory/.dreams/* are imported as durable memory notes using conservative chunking so embedding requests stay bounded.",
 			"The command is repeatable: previously imported OpenClaw daily notes for the same source agent are replaced before new notes are inserted.",
 		},
 		Flags: []helpItem{

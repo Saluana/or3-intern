@@ -21,6 +21,9 @@ func TestRunMigrateOpenClawCommand_ImportsFilesAndMemory(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(src, "memory"), 0o755); err != nil {
 		t.Fatalf("mkdir source memory dir: %v", err)
 	}
+	if err := os.MkdirAll(filepath.Join(src, "memory", ".dreams"), 0o755); err != nil {
+		t.Fatalf("mkdir dreams dir: %v", err)
+	}
 	if err := os.WriteFile(filepath.Join(src, "SOUL.md"), []byte("# Soul\nImported soul\n"), 0o644); err != nil {
 		t.Fatalf("write soul: %v", err)
 	}
@@ -33,8 +36,14 @@ func TestRunMigrateOpenClawCommand_ImportsFilesAndMemory(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(src, "USER.md"), []byte("Preferred human: Alice\n"), 0o644); err != nil {
 		t.Fatalf("write user: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(src, "DREAMS.md"), []byte("Dream summary entry\n"), 0o644); err != nil {
+		t.Fatalf("write dreams: %v", err)
+	}
 	if err := os.WriteFile(filepath.Join(src, "memory", "2026-04-20.md"), []byte("Daily note one.\n\nDaily note two.\n"), 0o644); err != nil {
 		t.Fatalf("write daily memory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "memory", ".dreams", "candidate.md"), []byte("Staged dream candidate\n"), 0o644); err != nil {
+		t.Fatalf("write staged dream: %v", err)
 	}
 
 	cfg := config.Default()
@@ -85,6 +94,7 @@ func TestRunMigrateOpenClawCommand_ImportsFilesAndMemory(t *testing.T) {
 	defer rows.Close()
 	var noteCount int
 	var joined strings.Builder
+	var sawSummary bool
 	for rows.Next() {
 		var id int64
 		var text string
@@ -108,7 +118,23 @@ func TestRunMigrateOpenClawCommand_ImportsFilesAndMemory(t *testing.T) {
 	if !strings.Contains(joined.String(), "OpenClaw memory import") || !strings.Contains(joined.String(), "Daily note one.") {
 		t.Fatalf("expected imported daily notes, got %q", joined.String())
 	}
-	if !strings.Contains(stdout.String(), "memory_files_imported: 1") || !strings.Contains(stdout.String(), "ok") {
+	if !strings.Contains(joined.String(), "Dream summary entry") || !strings.Contains(joined.String(), "Staged dream candidate") {
+		t.Fatalf("expected imported dreams content, got %q", joined.String())
+	}
+	summaryRows, err := d.SearchFTS(ctx, scope.GlobalMemoryScope, `"Dream summary entry"`, 10)
+	if err != nil {
+		t.Fatalf("SearchFTS: %v", err)
+	}
+	for _, row := range summaryRows {
+		if row.Kind == db.MemoryKindSummary {
+			sawSummary = true
+			break
+		}
+	}
+	if !sawSummary {
+		t.Fatal("expected dream imports to use summary kind")
+	}
+	if !strings.Contains(stdout.String(), "memory_files_imported: 3") || !strings.Contains(stdout.String(), "ok") {
 		t.Fatalf("expected migration summary, got %q", stdout.String())
 	}
 }

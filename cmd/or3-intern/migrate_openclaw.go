@@ -48,6 +48,8 @@ type openClawPreparedNote struct {
 	tags             string
 	embedding        []byte
 	embedFingerprint string
+	kind             string
+	importSource     string
 }
 
 type openClawFileWritePlan struct {
@@ -160,7 +162,49 @@ func migrateOpenClawAgent(ctx context.Context, cfg config.Config, d *db.DB, prov
 	}
 	var preparedNotes []openClawPreparedNote
 	for _, path := range memoryFiles {
-		notes, warnings, err := prepareOpenClawMemoryFile(ctx, prov, embedPlan, importTag, absSource, path, embedMaxBytes)
+		notes, warnings, err := prepareOpenClawMemoryFile(ctx, prov, embedPlan, importTag, absSource, path, embedMaxBytes, db.MemoryKindEpisode, "daily")
+		if err != nil {
+			return report, err
+		}
+		if len(notes) > 0 {
+			report.ImportedMemoryFiles++
+		}
+		for _, note := range notes {
+			report.ImportedChunks++
+			if len(note.embedding) > 0 {
+				report.EmbeddedChunks++
+			}
+		}
+		preparedNotes = append(preparedNotes, notes...)
+		report.Warnings = append(report.Warnings, warnings...)
+	}
+	dreamsText, ok, err := readOpenClawTextFile(absSource, "DREAMS.md")
+	if err != nil {
+		return report, err
+	}
+	if ok {
+		dreamNotes, warnings, err := prepareOpenClawMemoryText(ctx, prov, embedPlan, importTag, "DREAMS.md", dreamsText, embedMaxBytes, db.MemoryKindSummary, "dreams")
+		if err != nil {
+			return report, err
+		}
+		if len(dreamNotes) > 0 {
+			report.ImportedMemoryFiles++
+		}
+		for _, note := range dreamNotes {
+			report.ImportedChunks++
+			if len(note.embedding) > 0 {
+				report.EmbeddedChunks++
+			}
+		}
+		preparedNotes = append(preparedNotes, dreamNotes...)
+		report.Warnings = append(report.Warnings, warnings...)
+	}
+	dreamFiles, err := collectOpenClawMemoryFiles(absSource, filepath.Join(absSource, "memory", ".dreams"))
+	if err != nil {
+		return report, err
+	}
+	for _, path := range dreamFiles {
+		notes, warnings, err := prepareOpenClawMemoryFile(ctx, prov, embedPlan, importTag, absSource, path, embedMaxBytes, db.MemoryKindSummary, "dreams")
 		if err != nil {
 			return report, err
 		}
@@ -420,7 +464,7 @@ func replaceOpenClawImportedMemory(ctx context.Context, d *db.DB, memoryScope, i
 			`INSERT INTO memory_notes(session_key, text, embedding, embed_fingerprint, source_message_id, tags, created_at, kind, status, importance)
 			 VALUES(?,?,?,?,?,?,?,?,?,?)`,
 			memoryScope, note.text, emb, note.embedFingerprint, sql.NullInt64{}, note.tags, db.NowMS(),
-			db.MemoryKindEpisode, db.MemoryStatusActive, 0.35)
+			openClawNoteKind(note.kind), db.MemoryStatusActive, 0.35)
 		if err != nil {
 			return "", fmt.Errorf("insert imported memory note: %w", err)
 		}
@@ -561,7 +605,7 @@ func collectOpenClawMemoryFiles(sourceRoot, root string) ([]string, error) {
 	return files, nil
 }
 
-func prepareOpenClawMemoryFile(ctx context.Context, prov *providers.Client, embedPlan openClawEmbedPlan, importTag, sourceRoot, filePath string, embedMaxBytes int) ([]openClawPreparedNote, []string, error) {
+func prepareOpenClawMemoryFile(ctx context.Context, prov *providers.Client, embedPlan openClawEmbedPlan, importTag, sourceRoot, filePath string, embedMaxBytes int, kind, importSource string) ([]openClawPreparedNote, []string, error) {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read memory file %s: %w", filePath, err)
@@ -570,13 +614,19 @@ func prepareOpenClawMemoryFile(ctx context.Context, prov *providers.Client, embe
 	if err != nil {
 		relPath = filepath.Base(filePath)
 	}
-	chunks := buildOpenClawMemoryChunks(relPath, string(data), embedMaxBytes)
+	return prepareOpenClawMemoryText(ctx, prov, embedPlan, importTag, relPath, string(data), embedMaxBytes, kind, importSource)
+}
+
+func prepareOpenClawMemoryText(ctx context.Context, prov *providers.Client, embedPlan openClawEmbedPlan, importTag, relPath, text string, embedMaxBytes int, kind, importSource string) ([]openClawPreparedNote, []string, error) {
+	chunks := buildOpenClawMemoryChunks(relPath, text, embedMaxBytes)
 	notes := make([]openClawPreparedNote, 0, len(chunks))
 	var warnings []string
 	for _, chunk := range chunks {
 		note := openClawPreparedNote{
-			text: chunk,
-			tags: importTag + ",source:" + strings.ReplaceAll(relPath, ",", "_"),
+			text:         chunk,
+			tags:         importTag + ",source:" + strings.ReplaceAll(relPath, ",", "_") + ",type:" + strings.ReplaceAll(strings.TrimSpace(importSource), ",", "_"),
+			kind:         kind,
+			importSource: importSource,
 		}
 		if embedPlan.enabled {
 			vec, err := prov.Embed(ctx, embedPlan.model, chunk)
@@ -590,6 +640,14 @@ func prepareOpenClawMemoryFile(ctx context.Context, prov *providers.Client, embe
 		notes = append(notes, note)
 	}
 	return notes, warnings, nil
+}
+
+func openClawNoteKind(kind string) string {
+	kind = strings.TrimSpace(kind)
+	if kind == "" {
+		return db.MemoryKindEpisode
+	}
+	return kind
 }
 
 func buildOpenClawMemoryChunks(relPath, text string, maxBytes int) []string {

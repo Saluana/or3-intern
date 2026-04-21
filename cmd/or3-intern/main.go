@@ -201,7 +201,7 @@ func main() {
 
 	b := bus.New(256)
 	spinner := cli.NewSpinner()
-	del := cli.Deliverer{Spinner: spinner}
+	del := &cli.Deliverer{Spinner: spinner}
 	channelManager, err := buildChannelManager(cfg, del, art, cfg.MaxMediaBytes, approvalBroker)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "channel config error:", err)
@@ -395,8 +395,8 @@ func main() {
 	case "chat":
 		rt.Streamer = del
 		_ = channelManager.Start(ctx, "cli", b)
-		runWorkers(ctx, b, rt, cfg.WorkerCount, spinner)
-		ch := &cli.Channel{Bus: b, SessionKey: cfg.DefaultSessionKey, Spinner: spinner}
+		runWorkers(ctx, b, rt, cfg.WorkerCount, del)
+		ch := &cli.Channel{Bus: b, SessionKey: cfg.DefaultSessionKey, Spinner: spinner, Deliverer: del, History: d}
 		if err := ch.Run(ctx); err != nil {
 			fmt.Fprintln(os.Stderr, "cli error:", err)
 		}
@@ -704,7 +704,7 @@ func buildToolRegistryWithOptions(cfg config.Config, d *db.DB, prov *providers.C
 	return reg
 }
 
-func buildChannelManager(cfg config.Config, cliDeliverer cli.Deliverer, art *artifacts.Store, maxMediaBytes int, approvalBroker *approval.Broker) (*rootchannels.Manager, error) {
+func buildChannelManager(cfg config.Config, cliDeliverer *cli.Deliverer, art *artifacts.Store, maxMediaBytes int, approvalBroker *approval.Broker) (*rootchannels.Manager, error) {
 	mgr := rootchannels.NewManager()
 	if err := mgr.Register(cli.Service{Deliverer: cliDeliverer}); err != nil {
 		return nil, err
@@ -769,7 +769,7 @@ func heartbeatServiceForCommand(cmd string, cfg config.Config, eventBus *bus.Bus
 	return heartbeat.New(cfg.Heartbeat, cfg.WorkspaceDir, eventBus)
 }
 
-func runWorkers(ctx context.Context, b *bus.Bus, rt *agent.Runtime, n int, spinner *cli.Spinner) {
+func runWorkers(ctx context.Context, b *bus.Bus, rt *agent.Runtime, n int, cliDeliverer *cli.Deliverer) {
 	if n <= 0 {
 		n = 4
 	}
@@ -777,9 +777,16 @@ func runWorkers(ctx context.Context, b *bus.Bus, rt *agent.Runtime, n int, spinn
 		go func() {
 			for ev := range b.Channel() {
 				cctx, cancel := agent.WithTimeout(ctx, 120)
+				if ev.Channel == "cli" && cliDeliverer != nil {
+					if observer := cliDeliverer.Observer(); observer != nil {
+						cctx = agent.ContextWithConversationObserver(cctx, observer)
+					}
+				}
 				if err := rt.Handle(cctx, ev); err != nil {
 					if ev.Channel == "cli" {
-						cli.ShowError(spinner, err)
+						if cliDeliverer != nil {
+							cliDeliverer.ShowError(err)
+						}
 					} else {
 						log.Printf("handle event failed: type=%s session=%s err=%v", ev.Type, ev.SessionKey, err)
 					}

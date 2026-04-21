@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -128,6 +129,64 @@ func TestChat_InvalidJSON(t *testing.T) {
 	_, err := c.Chat(context.Background(), ChatCompletionRequest{})
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
+	}
+}
+
+func TestChat_RetriesTransientTruncatedJSON(t *testing.T) {
+	attempts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.Header().Set("Content-Type", "application/json")
+		if attempts == 1 {
+			fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"partial"}`)
+			return
+		}
+		mustEncodeResponse(t, w, ChatCompletionResponse{
+			Choices: []struct {
+				Message struct {
+					Role      string     `json:"role"`
+					Content   any        `json:"content"`
+					ToolCalls []ToolCall `json:"tool_calls"`
+				} `json:"message"`
+			}{
+				{
+					Message: struct {
+						Role      string     `json:"role"`
+						Content   any        `json:"content"`
+						ToolCalls []ToolCall `json:"tool_calls"`
+					}{Role: "assistant", Content: "ok after retry"},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := &Client{APIBase: srv.URL, HTTP: srv.Client()}
+	resp, err := c.Chat(context.Background(), ChatCompletionRequest{Model: "gpt-4.1-mini"})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("expected 2 attempts, got %d", attempts)
+	}
+	if got := resp.Choices[0].Message.Content; got != "ok after retry" {
+		t.Fatalf("unexpected content: %#v", got)
+	}
+}
+
+func TestChat_EmptyBodyReturnsHelpfulError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := &Client{APIBase: srv.URL, HTTP: srv.Client()}
+	_, err := c.Chat(context.Background(), ChatCompletionRequest{Model: "gpt-4.1-mini"})
+	if err == nil {
+		t.Fatal("expected error for empty body")
+	}
+	if !strings.Contains(err.Error(), "empty response body") {
+		t.Fatalf("expected helpful empty-body error, got %v", err)
 	}
 }
 

@@ -138,7 +138,7 @@ func TestBeginStream_ReturnsWriter(t *testing.T) {
 
 func TestShowError(t *testing.T) {
 	out := captureStdout(t, func() {
-		ShowError(nil, fmt.Errorf("provider error 401 Unauthorized"))
+		Deliverer{}.ShowError(fmt.Errorf("provider error 401 Unauthorized"))
 	})
 	if !strings.Contains(out, "Error: provider error 401 Unauthorized") {
 		t.Fatalf("expected rendered error, got %q", out)

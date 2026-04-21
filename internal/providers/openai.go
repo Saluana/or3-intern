@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -87,28 +88,74 @@ type ChatCompletionResponse struct {
 func (c *Client) Chat(ctx context.Context, req ChatCompletionRequest) (ChatCompletionResponse, error) {
 	var out ChatCompletionResponse
 	b, _ := json.Marshal(req)
-	r, err := http.NewRequestWithContext(ctx, "POST", c.APIBase+"/chat/completions", bytes.NewReader(b))
-	if err != nil {
-		return out, err
-	}
-	r.Header.Set("Content-Type", "application/json")
-	if c.APIKey != "" {
-		r.Header.Set("Authorization", "Bearer "+c.APIKey)
-	}
+	const maxAttempts = 2
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		r, err := http.NewRequestWithContext(ctx, "POST", c.APIBase+"/chat/completions", bytes.NewReader(b))
+		if err != nil {
+			return out, err
+		}
+		r.Header.Set("Content-Type", "application/json")
+		if c.APIKey != "" {
+			r.Header.Set("Authorization", "Bearer "+c.APIKey)
+		}
 
-	resp, err := c.do(r)
-	if err != nil {
-		return out, err
+		resp, err := c.do(r)
+		if err != nil {
+			return out, err
+		}
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		_ = resp.Body.Close()
+		if readErr != nil {
+			return out, readErr
+		}
+		if resp.StatusCode >= 300 {
+			return out, fmt.Errorf("provider error %s: %s", resp.Status, string(body))
+		}
+		if err := json.Unmarshal(body, &out); err != nil {
+			lastErr = formatProviderDecodeError(err, body)
+			if attempt < maxAttempts && isRetryableProviderDecodeError(err, body) {
+				continue
+			}
+			return out, lastErr
+		}
+		return out, nil
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	if resp.StatusCode >= 300 {
-		return out, fmt.Errorf("provider error %s: %s", resp.Status, string(body))
+	if lastErr != nil {
+		return out, lastErr
 	}
-	if err := json.Unmarshal(body, &out); err != nil {
-		return out, err
+	return out, fmt.Errorf("provider decode failed")
+}
+
+func isRetryableProviderDecodeError(err error, body []byte) bool {
+	if len(bytes.TrimSpace(body)) == 0 {
+		return true
 	}
-	return out, nil
+	var syntaxErr *json.SyntaxError
+	if errors.As(err, &syntaxErr) {
+		return true
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(msg, "unexpected end of json input")
+}
+
+func formatProviderDecodeError(err error, body []byte) error {
+	trimmed := strings.TrimSpace(string(body))
+	if trimmed == "" {
+		return fmt.Errorf("provider returned empty response body")
+	}
+	return fmt.Errorf("provider decode error: %w; body=%q", err, trimToRunes(trimmed, 240))
+}
+
+func trimToRunes(text string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	return string(runes[:limit]) + "…"
 }
 
 // ChatCompletionStreamRequest is sent when stream=true.

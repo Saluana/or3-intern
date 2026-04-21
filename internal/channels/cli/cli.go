@@ -16,6 +16,8 @@ type Channel struct {
 	Bus        *bus.Bus
 	SessionKey string
 	Spinner    *Spinner // shared with Deliverer so it can be stopped on output
+	Deliverer  *Deliverer
+	History    historyStore
 }
 
 // Run reads stdin, publishes user messages, and manages the interactive prompt.
@@ -23,6 +25,13 @@ func (c *Channel) Run(ctx context.Context) error {
 	if c.SessionKey == "" {
 		c.SessionKey = "default"
 	}
+	if isTTY && c.Deliverer != nil {
+		return c.runBubbleTea(ctx)
+	}
+	return c.runPlaintext(ctx)
+}
+
+func (c *Channel) runPlaintext(ctx context.Context) error {
 	in := bufio.NewScanner(os.Stdin)
 	fmt.Print(Banner())
 	ShowPrompt() // initial prompt

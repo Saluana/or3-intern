@@ -34,6 +34,11 @@ type callCounts struct {
 
 func buildConsolidationProvider(t *testing.T, chatBody string, embedOK bool) (*providers.Client, callCounts) {
 	t.Helper()
+	return buildConsolidationProviderWithEmbedding(t, chatBody, embedOK, []float32{0.1, 0.2})
+}
+
+func buildConsolidationProviderWithEmbedding(t *testing.T, chatBody string, embedOK bool, embedding []float32) (*providers.Client, callCounts) {
+	t.Helper()
 	var chatCalls int32
 	var embedCalls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -54,7 +59,7 @@ func buildConsolidationProvider(t *testing.T, chatBody string, embedOK bool) (*p
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"data": []map[string]any{{"embedding": []float32{0.1, 0.2}}},
+				"data": []map[string]any{{"embedding": embedding}},
 			})
 		default:
 			http.NotFound(w, r)
@@ -234,6 +239,52 @@ func TestConsolidator_MaxInputCharsBoundsPromptAndSkipsEmbedOnFailure(t *testing
 	}
 	if atomic.LoadInt32(calls.Embed) != 1 {
 		t.Fatalf("expected embed attempt, got %d", atomic.LoadInt32(calls.Embed))
+	}
+}
+
+func TestConsolidator_RunOnce_RebuildsVectorIndexOnEmbedDimChange(t *testing.T) {
+	d := openConsolidateTestDB(t)
+	ctx := context.Background()
+	if _, err := d.InsertMemoryNoteTyped(ctx, "sess", db.TypedNoteInput{
+		Text:      "existing",
+		Embedding: make([]byte, 8),
+	}); err != nil {
+		t.Fatalf("InsertMemoryNoteTyped existing: %v", err)
+	}
+	for i := 0; i < 12; i++ {
+		role := "user"
+		if i%2 == 1 {
+			role = "assistant"
+		}
+		if _, err := d.AppendMessage(ctx, "sess", role, fmt.Sprintf("msg-%d", i), nil); err != nil {
+			t.Fatalf("AppendMessage: %v", err)
+		}
+	}
+	prov, calls := buildConsolidationProviderWithEmbedding(t, `{"summary":"new summary","facts":[],"preferences":[],"goals":[],"procedures":[]}`, true, []float32{0.1, 0.2, 0.3})
+	c := &Consolidator{
+		DB:            d,
+		Provider:      prov,
+		WindowSize:    5,
+		MaxMessages:   50,
+		MaxInputChars: 12000,
+		EmbedModel:    "embed-model",
+	}
+	didWork, err := c.RunOnce(ctx, "sess", 5, RunMode{})
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !didWork {
+		t.Fatal("expected consolidation work")
+	}
+	if atomic.LoadInt32(calls.Embed) != 1 {
+		t.Fatalf("expected 1 embed call, got %d", atomic.LoadInt32(calls.Embed))
+	}
+	dims, err := d.MemoryVectorDims(ctx)
+	if err != nil {
+		t.Fatalf("MemoryVectorDims: %v", err)
+	}
+	if dims != 3 {
+		t.Fatalf("expected rebuilt dims=3, got %d", dims)
 	}
 }
 

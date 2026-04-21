@@ -45,7 +45,7 @@ func TestBuildToolRegistry_ReturnsFreshToolInstances(t *testing.T) {
 	defer d.Close()
 
 	provider := providers.New("http://example.invalid", "key", time.Second)
-	channelManager, err := buildChannelManager(cfg, cli.Deliverer{}, &artifacts.Store{Dir: t.TempDir(), DB: d}, cfg.MaxMediaBytes, nil)
+	channelManager, err := buildChannelManager(cfg, &cli.Deliverer{}, &artifacts.Store{Dir: t.TempDir(), DB: d}, cfg.MaxMediaBytes, nil)
 	if err != nil {
 		t.Fatalf("buildChannelManager: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestBuildToolRegistry_RegistersMCPTools(t *testing.T) {
 	defer d.Close()
 
 	provider := providers.New("http://example.invalid", "key", time.Second)
-	channelManager, err := buildChannelManager(cfg, cli.Deliverer{}, &artifacts.Store{Dir: t.TempDir(), DB: d}, cfg.MaxMediaBytes, nil)
+	channelManager, err := buildChannelManager(cfg, &cli.Deliverer{}, &artifacts.Store{Dir: t.TempDir(), DB: d}, cfg.MaxMediaBytes, nil)
 	if err != nil {
 		t.Fatalf("buildChannelManager: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestBuildBackgroundToolRegistry_OmitsMessagingAndSpawn(t *testing.T) {
 	defer d.Close()
 
 	provider := providers.New("http://example.invalid", "key", time.Second)
-	channelManager, err := buildChannelManager(cfg, cli.Deliverer{}, &artifacts.Store{Dir: t.TempDir(), DB: d}, cfg.MaxMediaBytes, nil)
+	channelManager, err := buildChannelManager(cfg, &cli.Deliverer{}, &artifacts.Store{Dir: t.TempDir(), DB: d}, cfg.MaxMediaBytes, nil)
 	if err != nil {
 		t.Fatalf("buildChannelManager: %v", err)
 	}

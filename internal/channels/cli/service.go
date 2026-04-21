@@ -9,7 +9,7 @@ import (
 
 // Service adapts the CLI deliverer to the shared channel manager interface.
 type Service struct {
-	Deliverer Deliverer
+	Deliverer *Deliverer
 }
 
 // Name returns the registered channel name.
@@ -34,6 +34,9 @@ func (s Service) Deliver(ctx context.Context, to, text string, meta map[string]a
 		if raw, ok := meta["media_paths"].([]string); ok && len(raw) > 0 {
 			return fmt.Errorf("cli channel does not support media attachments")
 		}
+	}
+	if s.Deliverer == nil {
+		return nil
 	}
 	return s.Deliverer.Deliver(ctx, "cli", to, text)
 }

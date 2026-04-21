@@ -2037,3 +2037,36 @@ func TestWriteConsolidation_RejectsVectorDimMismatch(t *testing.T) {
 		t.Fatal("expected vector dim mismatch error")
 	}
 }
+
+func TestRebuildMemoryVecIndexWithDim_SwitchesDimensions(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	if _, err := d.InsertMemoryNoteTyped(ctx, "sess", TypedNoteInput{
+		Text:      "first",
+		Embedding: make([]byte, 8),
+	}); err != nil {
+		t.Fatalf("InsertMemoryNoteTyped first: %v", err)
+	}
+	if err := d.RebuildMemoryVecIndexWithDim(ctx, 3); err != nil {
+		t.Fatalf("RebuildMemoryVecIndexWithDim: %v", err)
+	}
+	dims, err := d.MemoryVectorDims(ctx)
+	if err != nil {
+		t.Fatalf("MemoryVectorDims: %v", err)
+	}
+	if dims != 3 {
+		t.Fatalf("expected dims=3 after rebuild, got %d", dims)
+	}
+	if _, err := d.InsertMemoryNoteTyped(ctx, "sess", TypedNoteInput{
+		Text:      "second",
+		Embedding: make([]byte, 12),
+	}); err != nil {
+		t.Fatalf("InsertMemoryNoteTyped second: %v", err)
+	}
+	if _, err := d.InsertMemoryNoteTyped(ctx, "sess", TypedNoteInput{
+		Text:      "old-dims",
+		Embedding: make([]byte, 8),
+	}); err == nil {
+		t.Fatal("expected old dims to be rejected after rebuild")
+	}
+}

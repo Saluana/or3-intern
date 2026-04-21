@@ -390,7 +390,7 @@ func (d *DB) ensureMemoryVecIndexForExisting(ctx context.Context) error {
 	if dims <= 0 {
 		return nil
 	}
-	return d.initMemoryVecIndex(ctx, dims)
+	return d.initMemoryVecIndex(ctx, dims, false)
 }
 
 // MemoryVectorDims reports the configured memory vector dimensionality.
@@ -438,10 +438,16 @@ func (d *DB) EnsureMemoryVecIndexWithDim(ctx context.Context, dims int) error {
 	if existing > 0 && existing != dims {
 		return nil
 	}
-	return d.initMemoryVecIndex(ctx, dims)
+	return d.initMemoryVecIndex(ctx, dims, false)
 }
 
-func (d *DB) initMemoryVecIndex(ctx context.Context, dims int) error {
+// RebuildMemoryVecIndexWithDim recreates the vector index for a new embedding
+// dimensionality and repopulates it from rows whose stored embeddings match.
+func (d *DB) RebuildMemoryVecIndexWithDim(ctx context.Context, dims int) error {
+	return d.initMemoryVecIndex(ctx, dims, true)
+}
+
+func (d *DB) initMemoryVecIndex(ctx context.Context, dims int, force bool) error {
 	if dims <= 0 {
 		return nil
 	}
@@ -459,7 +465,7 @@ func (d *DB) initMemoryVecIndex(ctx context.Context, dims int) error {
 	if err := tx.QueryRowContext(ctx, `SELECT dims FROM memory_vec_meta WHERE id=1`).Scan(&existing); err != nil && err != sql.ErrNoRows {
 		return err
 	}
-	if existing > 0 && existing != dims {
+	if existing > 0 && existing != dims && !force {
 		return fmt.Errorf("memory vector dims mismatch: have %d want %d", existing, dims)
 	}
 	if _, err := tx.ExecContext(ctx, `DROP TABLE IF EXISTS memory_vec`); err != nil {

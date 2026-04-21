@@ -293,6 +293,14 @@ func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMa
 		w.CanonicalText = canonicalText
 	}
 	_, err = c.DB.WriteConsolidation(ctx, w)
+	if err != nil && len(embedding) >= 4 && isMemoryVectorDimMismatchError(err) {
+		wantDims := len(embedding) / 4
+		if rebuildErr := c.DB.RebuildMemoryVecIndexWithDim(ctx, wantDims); rebuildErr != nil {
+			return false, fmt.Errorf("consolidation write: %w (rebuild failed: %v)", err, rebuildErr)
+		}
+		log.Printf("consolidation memory vectors rebuilt for session %q to %d dims", sessionKey, wantDims)
+		_, err = c.DB.WriteConsolidation(ctx, w)
+	}
 	if err != nil {
 		return false, fmt.Errorf("consolidation write: %w", err)
 	}
@@ -315,6 +323,13 @@ func contentToStr(v any) string {
 		return s
 	}
 	return fmt.Sprintf("%v", v)
+}
+
+func isMemoryVectorDimMismatchError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "memory vector dims mismatch")
 }
 
 // consolidationOutput is the structured JSON shape returned by the LLM.

@@ -18,11 +18,11 @@ import (
 
 // Client talks to an OpenAI-compatible HTTP API.
 type Client struct {
-	APIBase    string
-	APIKey     string
-	HTTP       *http.Client
+	APIBase         string
+	APIKey          string
+	HTTP            *http.Client
 	EmbedDimensions int
-	HostPolicy security.HostPolicy
+	HostPolicy      security.HostPolicy
 }
 
 // EmbeddingFingerprint identifies the embedding space used for persisted

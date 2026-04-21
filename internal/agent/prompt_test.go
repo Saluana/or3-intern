@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -480,6 +481,47 @@ func testPromptProvider(t *testing.T) *providers.Client {
 	p := providers.New(srv.URL, "test-key", 5*time.Second)
 	p.HTTP = srv.Client()
 	return p
+}
+
+func TestCachedEmbed_FingerprintSeparatesCacheEntries(t *testing.T) {
+	promptEmbedCache.mu.Lock()
+	promptEmbedCache.entries = map[embedCacheKey]embedCacheEntry{}
+	promptEmbedCache.mu.Unlock()
+
+	var mu sync.Mutex
+	embedCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/embeddings" {
+			http.NotFound(w, r)
+			return
+		}
+		mu.Lock()
+		embedCalls++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{{"embedding": []float32{1, 0}}},
+		})
+	}))
+	defer srv.Close()
+
+	p := providers.New(srv.URL, "test-key", 5*time.Second)
+	p.HTTP = srv.Client()
+	ctx := context.Background()
+	if _, err := cachedEmbed(ctx, p, "provider-a:embed", "embed", "hello"); err != nil {
+		t.Fatalf("cachedEmbed first: %v", err)
+	}
+	if _, err := cachedEmbed(ctx, p, "provider-a:embed", "embed", "hello"); err != nil {
+		t.Fatalf("cachedEmbed second: %v", err)
+	}
+	if _, err := cachedEmbed(ctx, p, "provider-b:embed", "embed", "hello"); err != nil {
+		t.Fatalf("cachedEmbed third: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if embedCalls != 2 {
+		t.Fatalf("expected 2 embed calls across distinct fingerprints, got %d", embedCalls)
+	}
 }
 
 func TestBuildWithOptions_UsageLoggingOnlyForIncludedPromptNotes(t *testing.T) {

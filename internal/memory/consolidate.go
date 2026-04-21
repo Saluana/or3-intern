@@ -59,10 +59,11 @@ Conversation excerpt:
 // retrieval). It is safe to call MaybeConsolidate after every agent turn;
 // it is a no-op when there is nothing to consolidate.
 type Consolidator struct {
-	DB         *db.DB
-	Provider   *providers.Client
-	EmbedModel string
-	ChatModel  string
+	DB               *db.DB
+	Provider         *providers.Client
+	EmbedModel       string
+	EmbedFingerprint string
+	ChatModel        string
 	// WindowSize is the minimum number of consolidatable messages required
 	// before a consolidation run is triggered. Default: 10.
 	WindowSize int
@@ -278,15 +279,16 @@ func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMa
 	extraNotes := buildExtraNotes(parsed, sql.NullInt64{Int64: lastIncludedID, Valid: lastIncludedID > 0})
 
 	w := db.ConsolidationWrite{
-		SessionKey:  sessionKey,
-		ScopeKey:    memScope,
-		NoteText:    summary,
-		Embedding:   embedding,
-		SourceMsgID: sql.NullInt64{Int64: lastIncludedID, Valid: true},
-		NoteTags:    "consolidation",
-		NoteKind:    db.MemoryKindSummary,
-		ExtraNotes:  extraNotes,
-		CursorMsgID: lastIncludedID,
+		SessionKey:       sessionKey,
+		ScopeKey:         memScope,
+		NoteText:         summary,
+		Embedding:        embedding,
+		EmbedFingerprint: c.EmbedFingerprint,
+		SourceMsgID:      sql.NullInt64{Int64: lastIncludedID, Valid: true},
+		NoteTags:         "consolidation",
+		NoteKind:         db.MemoryKindSummary,
+		ExtraNotes:       extraNotes,
+		CursorMsgID:      lastIncludedID,
 	}
 	if canonicalText != "" {
 		w.CanonicalKey = canonicalKey

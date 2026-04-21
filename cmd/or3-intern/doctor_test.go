@@ -2,11 +2,15 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"or3-intern/internal/config"
+	"or3-intern/internal/security"
 )
 
 func TestDoctorFindings_SafeBaseline(t *testing.T) {
@@ -17,7 +21,7 @@ func TestDoctorFindings_SafeBaseline(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	if err := runDoctorCommand(cfg, nil, &out, &out); err != nil {
+	if err := runDoctorCommand("", cfg, "", nil, strings.NewReader(""), &out, &out); err != nil {
 		t.Fatalf("runDoctorCommand: %v", err)
 	}
 	if !strings.Contains(out.String(), "[ok] configuration looks safe") {
@@ -204,7 +208,7 @@ func TestRunDoctorCommand_PrintsWarnings(t *testing.T) {
 	cfg.Security.Profiles.Default = "danger"
 	cfg.Security.Profiles.Profiles["danger"] = config.AccessProfileConfig{MaxCapability: "privileged", AllowedTools: []string{"exec"}}
 	var out bytes.Buffer
-	if err := runDoctorCommand(cfg, nil, &out, &out); err != nil {
+	if err := runDoctorCommand("", cfg, "", nil, strings.NewReader(""), &out, &out); err != nil {
 		t.Fatalf("runDoctorCommand: %v", err)
 	}
 	text := out.String()
@@ -220,8 +224,77 @@ func TestRunDoctorCommand_StrictFailsOnWarnings(t *testing.T) {
 	cfg.Hardening.PrivilegedTools = true
 	cfg.Hardening.EnableExecShell = true
 	var out bytes.Buffer
-	if err := runDoctorCommand(cfg, []string{"--strict"}, &out, &out); err == nil {
+	if err := runDoctorCommand("", cfg, "", []string{"--strict"}, strings.NewReader(""), &out, &out); err == nil {
 		t.Fatal("expected strict doctor run to fail on warnings")
+	}
+}
+
+func TestRunDoctorCommand_JSONOutput(t *testing.T) {
+	cfg := safeDoctorConfig()
+	cfg.Hardening.PrivilegedTools = true
+	cfg.Hardening.EnableExecShell = true
+	var out bytes.Buffer
+	if err := runDoctorCommand("", cfg, "", []string{"--json"}, strings.NewReader(""), &out, &out); err != nil {
+		t.Fatalf("runDoctorCommand --json: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("expected JSON output, got %v (%q)", err, out.String())
+	}
+	if payload["summary"] == nil || payload["findings"] == nil {
+		t.Fatalf("expected summary and findings in JSON output, got %#v", payload)
+	}
+}
+
+func TestRunDoctorCommand_FixRepairsInvalidChannelIngress(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	cfg := config.Default()
+	cfg.WorkspaceDir = dir
+	cfg.Channels.Telegram.Enabled = true
+	cfg.Channels.Telegram.Token = "telegram-token"
+	b, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := runDoctorCommand(path, cfg, "telegram enabled: set channels.telegram.allowedChatIds, channels.telegram.inboundPolicy=pairing, or channels.telegram.openAccess=true", []string{"--fix"}, strings.NewReader(""), &out, &out); err != nil {
+		t.Fatalf("runDoctorCommand --fix: %v", err)
+	}
+
+	loaded, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load repaired config: %v", err)
+	}
+	if loaded.Channels.Telegram.InboundPolicy != config.InboundPolicyDeny {
+		t.Fatalf("expected deny inbound repair, got %q", loaded.Channels.Telegram.InboundPolicy)
+	}
+}
+
+func TestRunDoctorCommand_InteractiveFixGeneratesServiceSecret(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	cfg := safeDoctorConfig()
+	cfg.Service.Enabled = true
+	cfg.Service.Secret = ""
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := runDoctorCommand(path, cfg, "", []string{"--fix", "--interactive"}, strings.NewReader("1\n"), &out, &out); err != nil {
+		t.Fatalf("runDoctorCommand --fix --interactive: %v", err)
+	}
+
+	loaded, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if strings.TrimSpace(loaded.Service.Secret) == "" {
+		t.Fatal("expected generated service secret")
 	}
 }
 
@@ -330,7 +403,24 @@ func findingContains(findings []doctorFinding, area, match string) bool {
 
 func safeDoctorConfig() config.Config {
 	cfg := config.Default()
-	cfg.WorkspaceDir = "/workspace"
+	root, err := os.MkdirTemp("", "or3-intern-doctor-safe-*")
+	if err != nil {
+		panic(err)
+	}
+	cfg.WorkspaceDir = root
+	cfg.DBPath = root + "/or3-intern.sqlite"
+	cfg.ArtifactsDir = root + "/artifacts"
+	cfg.Security.SecretStore.KeyFile = root + "/master.key"
+	cfg.Security.Audit.KeyFile = root + "/audit.key"
+	if err := os.MkdirAll(cfg.ArtifactsDir, 0o755); err != nil {
+		panic(err)
+	}
+	if _, err := security.LoadOrCreateKey(cfg.Security.SecretStore.KeyFile); err != nil {
+		panic(err)
+	}
+	if _, err := security.LoadOrCreateKey(cfg.Security.Audit.KeyFile); err != nil {
+		panic(err)
+	}
 	cfg.Security.Audit.Enabled = true
 	cfg.Security.Audit.Strict = true
 	cfg.Security.Audit.VerifyOnStart = true

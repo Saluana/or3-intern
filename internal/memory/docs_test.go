@@ -2,12 +2,17 @@ package memory
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"or3-intern/internal/db"
+	"or3-intern/internal/providers"
 )
 
 func openDocsTestDB(t *testing.T) *db.DB {
@@ -266,5 +271,68 @@ func TestSyncRoots_Idempotent(t *testing.T) {
 	}
 	if count != 1 {
 		t.Errorf("expected 1 doc after idempotent sync, got %d", count)
+	}
+}
+
+func TestSyncRoots_ReembedsWhenFingerprintChanges(t *testing.T) {
+	d := openDocsTestDB(t)
+	ctx := context.Background()
+	root := t.TempDir()
+	filePath := filepath.Join(root, "readme.md")
+	if err := os.WriteFile(filePath, []byte("# Hello\nThis is a fingerprint test document."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	embedCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/embeddings" {
+			http.NotFound(w, r)
+			return
+		}
+		embedCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{{"embedding": []float32{1, 0}}},
+		})
+	}))
+	defer srv.Close()
+
+	p := providers.New(srv.URL, "test-key", 5*time.Second)
+	p.HTTP = srv.Client()
+
+	indexer := &DocIndexer{
+		DB:               d,
+		Provider:         p,
+		EmbedModel:       "embed",
+		EmbedFingerprint: "provider-a:embed",
+		Config:           DocIndexConfig{Roots: []string{root}},
+	}
+	if err := indexer.SyncRoots(ctx, "scope1"); err != nil {
+		t.Fatalf("first SyncRoots: %v", err)
+	}
+	if embedCalls != 1 {
+		t.Fatalf("expected 1 embed call after first sync, got %d", embedCalls)
+	}
+	if err := indexer.SyncRoots(ctx, "scope1"); err != nil {
+		t.Fatalf("second SyncRoots: %v", err)
+	}
+	if embedCalls != 1 {
+		t.Fatalf("expected no re-embed when fingerprint unchanged, got %d calls", embedCalls)
+	}
+	indexer.EmbedFingerprint = "provider-b:embed"
+	if err := indexer.SyncRoots(ctx, "scope1"); err != nil {
+		t.Fatalf("third SyncRoots: %v", err)
+	}
+	if embedCalls != 2 {
+		t.Fatalf("expected fingerprint change to trigger re-embed, got %d calls", embedCalls)
+	}
+	var fingerprint string
+	if err := d.SQL.QueryRowContext(ctx,
+		`SELECT embed_fingerprint FROM memory_docs WHERE scope_key='scope1' AND active=1 LIMIT 1`,
+	).Scan(&fingerprint); err != nil {
+		t.Fatalf("fingerprint query: %v", err)
+	}
+	if fingerprint != "provider-b:embed" {
+		t.Fatalf("expected updated fingerprint, got %q", fingerprint)
 	}
 }

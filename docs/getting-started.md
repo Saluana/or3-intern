@@ -79,7 +79,7 @@ Common files and directories include:
 1. Run `configure`
 2. Confirm `chat` works with a simple question
 3. Review [configuration-reference.md](configuration-reference.md)
-4. Run `or3-intern doctor --strict` before exposing channels or service mode
+4. Run `or3-intern doctor --strict` before exposing channels or service mode; use `or3-intern doctor --fix` for safe automatic repairs and `or3-intern doctor --fix --interactive` for guided fixes
 5. Enable one advanced feature at a time: channels, skills, triggers, MCP, or service mode
 
 ## Interactive vs scripted setup

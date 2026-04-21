@@ -293,6 +293,32 @@ func TestRetrieve_DeduplicatesNearIdenticalText(t *testing.T) {
 	}
 }
 
+func TestRetrieve_FallsBackToFTSOnFingerprintMismatch(t *testing.T) {
+	d := openRetrieveTestDB(t)
+	ctx := context.Background()
+
+	if _, err := d.InsertMemoryNoteTyped(ctx, "session1", db.TypedNoteInput{
+		Text:             "deployment checklist stable release",
+		Embedding:        PackFloat32([]float32{1, 0}),
+		EmbedFingerprint: "provider-a:text-embedding-3-small",
+	}); err != nil {
+		t.Fatalf("InsertMemoryNoteTyped: %v", err)
+	}
+
+	r := NewRetriever(d)
+	r.EmbedFingerprint = "provider-b:text-embedding-3-small"
+	results, err := r.Retrieve(ctx, "session1", "stable release", []float32{1, 0}, 10, 10, 5)
+	if err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected FTS fallback results")
+	}
+	if results[0].Source == "vector" || results[0].Source == "hybrid" {
+		t.Fatalf("expected fingerprint mismatch to disable vector ranking, got %#v", results[0])
+	}
+}
+
 // ---- metadataScoreAdjust tests ----
 
 func TestMetadataScoreAdjust_StaleNoteDemoted(t *testing.T) {

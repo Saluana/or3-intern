@@ -54,6 +54,28 @@ func (d *Deliverer) SetBridge(bridge *bubbleChatBridge) {
 	d.bridge = bridge
 }
 
+// ShowNotice renders a non-fatal background notice without corrupting the TUI.
+func (d Deliverer) ShowNotice(text string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	if d.bridge != nil {
+		d.bridge.emit(chatNoticeMsg{text: text})
+		return
+	}
+	if d.Spinner != nil {
+		d.Spinner.Stop()
+	}
+	fmt.Print(FormatResponse("Notice: " + text))
+	fmt.Println()
+	fmt.Println()
+	if sep := Separator(); sep != "" {
+		fmt.Println(sep)
+	}
+	ShowPrompt()
+}
+
 // ShowError stops spinner and renders err to the terminal.
 func (d Deliverer) ShowError(err error) {
 	if d.bridge != nil {

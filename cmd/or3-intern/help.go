@@ -42,7 +42,7 @@ var rootHelpSections = []struct {
 	{
 		Title: "Operational commands",
 		Items: []helpItem{
-			{Name: "doctor", Description: "Audit the current config for unsafe or inconsistent settings"},
+			{Name: "doctor", Description: "Diagnose readiness issues, explain risk, and repair safe local problems"},
 			{Name: "capabilities", Description: "Inspect runtime posture, ingress policy, approvals, and profiles"},
 			{Name: "secrets", Description: "Manage encrypted secret references stored in SQLite"},
 			{Name: "audit", Description: "Inspect or verify the append-only audit chain"},
@@ -123,10 +123,24 @@ var helpTopics = map[string]helpCommand{
 		Examples: []string{"or3-intern agent -m \"hello\"", "or3-intern agent -m \"summarize this repo\" -s review"},
 	},
 	"doctor": {
-		Usage:    "or3-intern doctor [--strict]",
-		Summary:  "Print hardening and configuration warnings for the current setup.",
-		Flags:    []helpItem{{Name: "--strict", Description: "Exit non-zero when warnings are found"}},
-		Examples: []string{"or3-intern doctor", "or3-intern doctor --strict"},
+		Usage:   "or3-intern doctor [--strict] [--json] [--fix] [--interactive] [--probe] [--area name] [--severity level] [--fixable-only]",
+		Summary: "Diagnose readiness and safety issues, then repair the safe ones.",
+		Description: []string{
+			"Doctor is the main readiness command for config, local runtime prerequisites, ingress posture, and hardened startup checks.",
+			"Use --fix for deterministic automatic repairs such as missing directories, key files, or conservative channel ingress defaults.",
+			"Use --fix --interactive when multiple valid repairs exist, such as choosing pairing vs allowlist for an enabled channel.",
+		},
+		Flags: []helpItem{
+			{Name: "--strict", Description: "Exit non-zero when warnings are found"},
+			{Name: "--json", Description: "Emit a structured JSON report"},
+			{Name: "--fix", Description: "Apply safe automatic fixes where available"},
+			{Name: "--interactive", Description: "Prompt for guided fixes on ambiguous findings"},
+			{Name: "--probe", Description: "Run bounded local runtime probes"},
+			{Name: "--area <name>", Description: "Repeatable area filter"},
+			{Name: "--severity <level>", Description: "Minimum severity filter: info, warn, error, block"},
+			{Name: "--fixable-only", Description: "Show only findings with available fixes"},
+		},
+		Examples: []string{"or3-intern doctor", "or3-intern doctor --strict", "or3-intern doctor --fix", "or3-intern doctor --fix --interactive", "or3-intern doctor --json --severity error"},
 	},
 	"capabilities": {
 		Usage:   "or3-intern capabilities [--channel name] [--trigger name] [--json]",

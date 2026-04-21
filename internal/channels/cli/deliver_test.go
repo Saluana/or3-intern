@@ -144,3 +144,28 @@ func TestShowError(t *testing.T) {
 		t.Fatalf("expected rendered error, got %q", out)
 	}
 }
+
+func TestShowNotice(t *testing.T) {
+	out := captureStdout(t, func() {
+		Deliverer{}.ShowNotice("background consolidation retry scheduled")
+	})
+	if !strings.Contains(out, "Notice: background consolidation retry scheduled") {
+		t.Fatalf("expected rendered notice, got %q", out)
+	}
+}
+
+func TestShowNotice_BridgeEmitsNoticeMsg(t *testing.T) {
+	bridge := newBubbleChatBridge()
+	d := Deliverer{}
+	d.SetBridge(bridge)
+	d.ShowNotice("background consolidation failed")
+
+	msg := (<-bridge.events)
+	notice, ok := msg.(chatNoticeMsg)
+	if !ok {
+		t.Fatalf("expected chatNoticeMsg, got %T", msg)
+	}
+	if notice.text != "background consolidation failed" {
+		t.Fatalf("expected original notice text, got %q", notice.text)
+	}
+}

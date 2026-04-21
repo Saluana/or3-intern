@@ -2,157 +2,46 @@ package main
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 
 	"or3-intern/internal/config"
+	intdoctor "or3-intern/internal/doctor"
 )
 
 func validateStartupCommand(cmd string, cfg config.Config) error {
 	cmd = strings.ToLower(strings.TrimSpace(cmd))
-	switch cmd {
-	case "chat", "serve", "service":
-	default:
+	mode := startupDoctorMode(cmd)
+	if mode == "" {
 		return nil
 	}
-	if err := config.ValidateProfile(cfg); err != nil {
-		return startupRefusal(cmd, err.Error())
-	}
-	if !requiresHostedStrictStartup(cmd, cfg) {
+	report := intdoctor.Evaluate(cfg, intdoctor.Options{Mode: mode})
+	if !report.HasBlockingFindings() {
 		return nil
 	}
-	findings := strictStartupFindings(cmd, cfg)
-	if len(findings) == 0 {
-		return nil
+	blockers := report.BlockingFindings()
+	top := intdoctor.TopFindings(blockers, 3)
+	parts := make([]string, 0, len(top))
+	for _, finding := range top {
+		parts = append(parts, finding.Area+": "+finding.Summary)
 	}
-	sort.SliceStable(findings, func(i, j int) bool {
-		if findings[i].Area == findings[j].Area {
-			return findings[i].Message < findings[j].Message
-		}
-		return findings[i].Area < findings[j].Area
-	})
-	messages := make([]string, 0, minInt(3, len(findings)))
-	for i := 0; i < len(findings) && i < 3; i++ {
-		messages = append(messages, findings[i].Area+": "+findings[i].Message)
+	message := strings.Join(parts, "; ")
+	if len(blockers) > len(top) {
+		message += fmt.Sprintf(" (%d more blocking finding(s))", len(blockers)-len(top))
 	}
-	msg := strings.Join(messages, "; ")
-	if len(findings) > 3 {
-		msg += fmt.Sprintf(" (%d more blocking finding(s))", len(findings)-3)
-	}
-	return startupRefusal(cmd, msg)
+	return startupRefusal(cmd, message)
 }
 
-func requiresHostedStrictStartup(cmd string, cfg config.Config) bool {
-	if !config.IsHostedProfile(cfg.RuntimeProfile) {
-		return false
-	}
-	if hasRemoteHTTPMCP(cfg) {
-		return true
-	}
+func startupDoctorMode(cmd string) intdoctor.Mode {
 	switch cmd {
-	case "service":
-		return true
+	case "chat":
+		return intdoctor.ModeStartupChat
 	case "serve":
-		return anyEnabledChannels(cfg) ||
-			cfg.Triggers.Webhook.Enabled ||
-			cfg.Triggers.FileWatch.Enabled ||
-			cfg.Heartbeat.Enabled ||
-			cfg.Cron.Enabled
-	default:
-		return false
-	}
-}
-
-func strictStartupFindings(cmd string, cfg config.Config) []doctorFinding {
-	findings := []doctorFinding{}
-	findings = append(findings, privilegedExecStartupFindings(cfg)...)
-	findings = append(findings, approvalStartupFindings(cmd, cfg)...)
-	if hasRemoteHTTPMCP(cfg) {
-		findings = append(findings, mcpFindings(cfg)...)
-		findings = append(findings, networkFindings(cfg)...)
-	}
-	switch cmd {
+		return intdoctor.ModeStartupServe
 	case "service":
-		if secret := strings.TrimSpace(cfg.Service.Secret); secret == "" {
-			findings = append(findings, doctorFinding{Level: "warn", Area: "service", Message: "service mode is enabled without a shared secret"})
-		} else if len(secret) < 24 {
-			findings = append(findings, doctorFinding{Level: "warn", Area: "service", Message: "service mode is enabled with a weak shared secret"})
-		}
-		if !isLoopbackAddr(cfg.Service.Listen) {
-			findings = append(findings, doctorFinding{Level: "warn", Area: "service", Message: "service bind address is not loopback-only"})
-		}
-	case "serve":
-		if cfg.Triggers.Webhook.Enabled {
-			findings = append(findings, webhookFindings(cfg)...)
-		}
-		if anyEnabledChannels(cfg) || cfg.Triggers.Webhook.Enabled {
-			findings = append(findings, profileFindings(cfg)...)
-			findings = append(findings, execFindings(cfg)...)
-			findings = append(findings, skillFindings(cfg)...)
-			findings = append(findings, channelExposureFindings(cfg)...)
-		}
+		return intdoctor.ModeStartupService
+	default:
+		return ""
 	}
-	return findings
-}
-
-func approvalStartupFindings(cmd string, cfg config.Config) []doctorFinding {
-	findings := []doctorFinding{}
-	if !cfg.Security.Approvals.Enabled {
-		return findings
-	}
-	if !approvalBrokerRequired(cfg) {
-		return findings
-	}
-	if strings.TrimSpace(cfg.Security.Approvals.KeyFile) == "" {
-		findings = append(findings, doctorFinding{
-			Level:   "warn",
-			Area:    "approvals",
-			Message: "approval broker keyFile is required when approvals run in ask or allowlist mode",
-		})
-	}
-	if cmd == "service" && !isLoopbackAddr(cfg.Service.Listen) && strings.TrimSpace(cfg.Security.Approvals.KeyFile) == "" {
-		findings = append(findings, doctorFinding{
-			Level:   "warn",
-			Area:    "approvals",
-			Message: "service mode is exposed beyond loopback while approvals require a broker keyFile",
-		})
-	}
-	return findings
-}
-
-func approvalBrokerRequired(cfg config.Config) bool {
-	for _, mode := range []config.ApprovalMode{
-		cfg.Security.Approvals.Pairing.Mode,
-		cfg.Security.Approvals.Exec.Mode,
-		cfg.Security.Approvals.SkillExecution.Mode,
-		cfg.Security.Approvals.SecretAccess.Mode,
-		cfg.Security.Approvals.MessageSend.Mode,
-	} {
-		switch mode {
-		case config.ApprovalModeAsk, config.ApprovalModeAllowlist:
-			return true
-		}
-	}
-	return false
-}
-
-func privilegedExecStartupFindings(cfg config.Config) []doctorFinding {
-	findings := []doctorFinding{}
-	if cfg.Hardening.PrivilegedTools && !cfg.Hardening.Sandbox.Enabled {
-		findings = append(findings, doctorFinding{
-			Level:   "warn",
-			Area:    "privileged-exec",
-			Message: "privileged tools are enabled without Bubblewrap sandboxing",
-		})
-	}
-	if (cfg.Hardening.PrivilegedTools || cfg.Hardening.GuardedTools) && len(cfg.Hardening.ExecAllowedPrograms) == 0 {
-		findings = append(findings, doctorFinding{
-			Level:   "warn",
-			Area:    "exec",
-			Message: "exec is enabled without an exec allowlist",
-		})
-	}
-	return findings
 }
 
 func startupRefusal(cmd, message string) error {
@@ -160,7 +49,7 @@ func startupRefusal(cmd, message string) error {
 	if cmd == "" {
 		cmd = "startup"
 	}
-	return fmt.Errorf("%s startup refused: %s; move risky execution to or3-sandbox or fix the profile configuration", cmd, message)
+	return fmt.Errorf("%s startup refused: %s; run `or3-intern doctor --fix` or fix the configuration", cmd, message)
 }
 
 func minInt(a, b int) int {

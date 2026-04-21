@@ -76,3 +76,63 @@ func TestConfigureTUISectionPickerShowsExpandedSections(t *testing.T) {
 		}
 	}
 }
+
+func TestDeriveConfigureLayoutStacksAndCompactsOnSmallTerminal(t *testing.T) {
+	layout := deriveConfigureLayout(78, 20)
+	if !layout.stacked {
+		t.Fatal("expected stacked layout for narrow terminal")
+	}
+	if !layout.compact {
+		t.Fatal("expected compact layout for narrow/short terminal")
+	}
+	if layout.fieldRows < 2 {
+		t.Fatalf("expected at least 2 visible rows, got %d", layout.fieldRows)
+	}
+}
+
+func TestConfigureTUIFormStacksAndKeepsSelectedFieldVisible(t *testing.T) {
+	model := newConfigureTUIModel("/tmp/config.json", "/workspace/project", config.Default(), false, "", configureTUIOptions{
+		Restricted: []string{"provider"},
+	})
+	model.currentSection = "provider"
+	model.screen = configureScreenForm
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 78, Height: 22})
+	model = updated.(configureTUIModel)
+
+	view := model.View()
+	if !strings.Contains(view, "Current snapshot") {
+		t.Fatalf("expected snapshot panel in stacked form view, got %q", view)
+	}
+	if !strings.Contains(view, "Selected field") {
+		t.Fatalf("expected selected field details in stacked form view, got %q", view)
+	}
+	if !strings.Contains(view, "Field 1/8") {
+		t.Fatalf("expected field position hint in stacked form view, got %q", view)
+	}
+	if !deriveConfigureLayout(model.width, model.height).stacked {
+		t.Fatal("expected responsive stacked mode")
+	}
+}
+
+func TestConfigureTUICompactEditingKeepsEditorVisible(t *testing.T) {
+	model := newConfigureTUIModel("/tmp/config.json", "/workspace/project", config.Default(), false, "", configureTUIOptions{
+		Restricted: []string{"provider"},
+	})
+	model.currentSection = "provider"
+	model.screen = configureScreenForm
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 74, Height: 18})
+	model = updated.(configureTUIModel)
+	field := buildSectionFields(model.cfg, "provider", model.cwd)[1]
+	model.startEditingField(field)
+
+	view := model.View()
+	if !strings.Contains(view, "Editing") {
+		t.Fatalf("expected editing panel in compact mode, got %q", view)
+	}
+	if !strings.Contains(view, "Enter to apply") {
+		t.Fatalf("expected apply/cancel help in compact mode, got %q", view)
+	}
+	if got := model.visibleFormFieldCount(); got > 4 {
+		t.Fatalf("expected reduced visible rows in compact mode, got %d", got)
+	}
+}

@@ -26,12 +26,13 @@ type Retrieved struct {
 
 // Retriever ranks vector, FTS, lexical, and recency signals into a single result set.
 type Retriever struct {
-	DB              *db.DB
-	VectorWeight    float64
-	FTSWeight       float64
-	LexicalWeight   float64
-	RecencyWeight   float64
-	VectorScanLimit int
+	DB               *db.DB
+	EmbedFingerprint string
+	VectorWeight     float64
+	FTSWeight        float64
+	LexicalWeight    float64
+	RecencyWeight    float64
+	VectorScanLimit  int
 }
 
 // NewRetriever constructs a Retriever with default ranking weights.
@@ -41,9 +42,24 @@ func NewRetriever(d *db.DB) *Retriever {
 
 // Retrieve runs hybrid retrieval and returns diversified top-k memory results.
 func (r *Retriever) Retrieve(ctx context.Context, sessionKey, query string, queryVec []float32, vectorK, ftsK, topK int) ([]Retrieved, error) {
-	vecs, err := VectorSearch(ctx, r.DB, sessionKey, queryVec, vectorK, r.VectorScanLimit)
-	if err != nil {
-		return nil, err
+	var vecs []VecCandidate
+	if strings.TrimSpace(r.EmbedFingerprint) == "" {
+		var err error
+		vecs, err = VectorSearch(ctx, r.DB, sessionKey, queryVec, vectorK, r.VectorScanLimit)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		fingerprint, err := r.DB.MemoryVectorFingerprint(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if fingerprint == strings.TrimSpace(r.EmbedFingerprint) {
+			vecs, err = VectorSearch(ctx, r.DB, sessionKey, queryVec, vectorK, r.VectorScanLimit)
+			if err != nil {
+				return nil, err
+			}
+		}
 	}
 	fts, err := searchFTSWithFallback(ctx, r.DB, sessionKey, query, ftsK)
 	if err != nil {

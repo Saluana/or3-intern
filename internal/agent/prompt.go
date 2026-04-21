@@ -66,8 +66,9 @@ const (
 )
 
 type embedCacheKey struct {
-	model string
-	input string
+	fingerprint string
+	model       string
+	input       string
 }
 
 type embedCacheEntry struct {
@@ -95,13 +96,14 @@ type BuildOptions struct {
 }
 
 type Builder struct {
-	DB           *db.DB
-	Artifacts    *artifacts.Store
-	Skills       skills.Inventory
-	Mem          *memory.Retriever
-	Provider     *providers.Client
-	EmbedModel   string
-	EnableVision bool
+	DB               *db.DB
+	Artifacts        *artifacts.Store
+	Skills           skills.Inventory
+	Mem              *memory.Retriever
+	Provider         *providers.Client
+	EmbedModel       string
+	EmbedFingerprint string
+	EnableVision     bool
 
 	Soul                   string
 	AgentInstructions      string
@@ -147,8 +149,9 @@ func (b *Builder) BuildWithOptions(ctx context.Context, opts BuildOptions) (Prom
 	// embed and retrieve
 	var retrieved []memory.Retrieved
 	if b.Mem != nil && b.Provider != nil && strings.TrimSpace(opts.UserMessage) != "" {
-		vec, err := cachedEmbed(ctx, b.Provider, b.EmbedModel, opts.UserMessage)
+		vec, err := cachedEmbed(ctx, b.Provider, b.EmbedFingerprint, b.EmbedModel, opts.UserMessage)
 		if err == nil {
+			b.Mem.EmbedFingerprint = b.EmbedFingerprint
 			retrieved, err = b.Mem.Retrieve(ctx, scopeKey, opts.UserMessage, vec, b.VectorK, b.FTSK, b.TopK)
 			if err != nil {
 				log.Printf("memory retrieve failed for scope %q: %v", scopeKey, err)
@@ -635,16 +638,17 @@ func oneLine(s string, max int) string {
 	return s
 }
 
-func cachedEmbed(ctx context.Context, provider *providers.Client, model, input string) ([]float32, error) {
+func cachedEmbed(ctx context.Context, provider *providers.Client, fingerprint, model, input string) ([]float32, error) {
 	input = strings.TrimSpace(input)
 	model = strings.TrimSpace(model)
+	fingerprint = strings.TrimSpace(fingerprint)
 	if provider == nil {
 		return nil, fmt.Errorf("provider not configured")
 	}
 	if model == "" || input == "" {
 		return provider.Embed(ctx, model, input)
 	}
-	key := embedCacheKey{model: model, input: input}
+	key := embedCacheKey{fingerprint: fingerprint, model: model, input: input}
 	now := time.Now()
 	promptEmbedCache.mu.Lock()
 	if entry, ok := promptEmbedCache.entries[key]; ok && entry.expiresAt.After(now) {

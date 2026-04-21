@@ -24,6 +24,18 @@ type Client struct {
 	HostPolicy security.HostPolicy
 }
 
+// EmbeddingFingerprint identifies the embedding space used for persisted
+// vectors. It must change when either the provider endpoint or embedding model
+// changes, even if the vector dimensionality stays the same.
+func EmbeddingFingerprint(apiBase, model string) string {
+	base := strings.ToLower(strings.TrimRight(strings.TrimSpace(apiBase), "/"))
+	model = strings.TrimSpace(model)
+	if base == "" && model == "" {
+		return ""
+	}
+	return base + "|" + model
+}
+
 // New constructs a Client for apiBase using timeout for all requests.
 func New(apiBase, apiKey string, timeout time.Duration) *Client {
 	return &Client{

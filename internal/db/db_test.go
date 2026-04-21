@@ -2038,6 +2038,25 @@ func TestWriteConsolidation_RejectsVectorDimMismatch(t *testing.T) {
 	}
 }
 
+func TestInsertMemoryNoteTyped_RejectsFingerprintMismatch(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	if _, err := d.InsertMemoryNoteTyped(ctx, "sess", TypedNoteInput{
+		Text:             "first",
+		Embedding:        make([]byte, 8),
+		EmbedFingerprint: "provider-a:text-embedding-3-small",
+	}); err != nil {
+		t.Fatalf("InsertMemoryNoteTyped first: %v", err)
+	}
+	if _, err := d.InsertMemoryNoteTyped(ctx, "sess", TypedNoteInput{
+		Text:             "mismatch",
+		Embedding:        make([]byte, 8),
+		EmbedFingerprint: "provider-b:text-embedding-3-small",
+	}); err == nil {
+		t.Fatal("expected embedding fingerprint mismatch error")
+	}
+}
+
 func TestRebuildMemoryVecIndexWithDim_SwitchesDimensions(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
@@ -2068,5 +2087,41 @@ func TestRebuildMemoryVecIndexWithDim_SwitchesDimensions(t *testing.T) {
 		Embedding: make([]byte, 8),
 	}); err == nil {
 		t.Fatal("expected old dims to be rejected after rebuild")
+	}
+}
+
+func TestRebuildMemoryVecIndexWithProfile_SwitchesFingerprint(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	if _, err := d.InsertMemoryNoteTyped(ctx, "sess", TypedNoteInput{
+		Text:             "first",
+		Embedding:        make([]byte, 8),
+		EmbedFingerprint: "provider-a:text-embedding-3-small",
+	}); err != nil {
+		t.Fatalf("InsertMemoryNoteTyped first: %v", err)
+	}
+	if err := d.RebuildMemoryVecIndexWithProfile(ctx, 2, "provider-b:text-embedding-3-small"); err != nil {
+		t.Fatalf("RebuildMemoryVecIndexWithProfile: %v", err)
+	}
+	fingerprint, err := d.MemoryVectorFingerprint(ctx)
+	if err != nil {
+		t.Fatalf("MemoryVectorFingerprint: %v", err)
+	}
+	if fingerprint != "provider-b:text-embedding-3-small" {
+		t.Fatalf("expected fingerprint to switch, got %q", fingerprint)
+	}
+	if _, err := d.InsertMemoryNoteTyped(ctx, "sess", TypedNoteInput{
+		Text:             "second",
+		Embedding:        make([]byte, 8),
+		EmbedFingerprint: "provider-b:text-embedding-3-small",
+	}); err != nil {
+		t.Fatalf("InsertMemoryNoteTyped second: %v", err)
+	}
+	if _, err := d.InsertMemoryNoteTyped(ctx, "sess", TypedNoteInput{
+		Text:             "old-profile",
+		Embedding:        make([]byte, 8),
+		EmbedFingerprint: "provider-a:text-embedding-3-small",
+	}); err == nil {
+		t.Fatal("expected old fingerprint to be rejected after rebuild")
 	}
 }

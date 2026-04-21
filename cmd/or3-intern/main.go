@@ -40,7 +40,28 @@ import (
 const (
 	schedulerMaxConsolidationPasses = 3
 	gracefulShutdownTimeout         = 5 * time.Second
+	consolidationTimeoutBuffer      = 5 * time.Second
 )
+
+func effectiveConsolidationTimeout(cfg config.Config) time.Duration {
+	asyncTimeout := time.Duration(cfg.ConsolidationAsyncTimeoutSeconds) * time.Second
+	if asyncTimeout <= 0 {
+		asyncTimeout = 30 * time.Second
+	}
+	providerTimeout := time.Duration(cfg.Provider.TimeoutSeconds) * time.Second
+	if providerTimeout <= 0 {
+		providerTimeout = 60 * time.Second
+	}
+	minimum := providerTimeout + consolidationTimeoutBuffer
+	if asyncTimeout < minimum {
+		return minimum
+	}
+	return asyncTimeout
+}
+
+func currentEmbedFingerprint(cfg config.Config) string {
+	return providers.EmbeddingFingerprint(cfg.Provider.APIBase, cfg.Provider.EmbedModel)
+}
 
 func main() {
 	cfgPath, args, showHelp, err := parseRootCLIArgs(os.Args[1:], os.Stderr)
@@ -90,6 +111,22 @@ func main() {
 		}
 		return
 	}
+	if cmd == "doctor" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			cwd = ""
+		}
+		cfg, validationError, loadErr := loadDoctorConfig(cfgPathOrDefault(cfgPath), cwd)
+		if loadErr != nil {
+			fmt.Fprintln(os.Stderr, "doctor error:", loadErr)
+			os.Exit(1)
+		}
+		if err := runDoctorCommand(cfgPathOrDefault(cfgPath), cfg, validationError, args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
+			fmt.Fprintln(os.Stderr, "doctor error:", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
@@ -98,13 +135,6 @@ func main() {
 			fmt.Fprintln(os.Stderr, hint)
 		}
 		os.Exit(1)
-	}
-	if cmd == "doctor" {
-		if err := runDoctorCommand(cfg, args[1:], os.Stdout, os.Stderr); err != nil {
-			fmt.Fprintln(os.Stderr, "doctor error:", err)
-			os.Exit(1)
-		}
-		return
 	}
 	if cfg.Tools.RestrictToWorkspace && strings.TrimSpace(cfg.WorkspaceDir) == "" {
 		if cwd, err := os.Getwd(); err == nil {
@@ -233,15 +263,17 @@ func main() {
 	}
 
 	ret := memory.NewRetriever(d)
+	ret.EmbedFingerprint = currentEmbedFingerprint(cfg)
 	ret.VectorScanLimit = cfg.VectorScanLimit
 
 	var docIndexer *memory.DocIndexer
 	var docRetriever *memory.DocRetriever
 	if cfg.DocIndex.Enabled && len(cfg.DocIndex.Roots) > 0 {
 		docIndexer = &memory.DocIndexer{
-			DB:         d,
-			Provider:   prov,
-			EmbedModel: cfg.Provider.EmbedModel,
+			DB:               d,
+			Provider:         prov,
+			EmbedModel:       cfg.Provider.EmbedModel,
+			EmbedFingerprint: currentEmbedFingerprint(cfg),
 			Config: memory.DocIndexConfig{
 				Roots:          cfg.DocIndex.Roots,
 				MaxFiles:       cfg.DocIndex.MaxFiles,
@@ -289,6 +321,7 @@ func main() {
 			Mem:                    ret,
 			Provider:               prov,
 			EmbedModel:             cfg.Provider.EmbedModel,
+			EmbedFingerprint:       currentEmbedFingerprint(cfg),
 			EnableVision:           cfg.Provider.EnableVision,
 			Soul:                   loadBootstrapFile(cfg.SoulFile, cfg.WorkspaceDir, "SOUL.md", agent.DefaultSoul),
 			AgentInstructions:      loadBootstrapFile(cfg.AgentsFile, cfg.WorkspaceDir, "AGENTS.md", agent.DefaultAgentInstructions),
@@ -362,6 +395,7 @@ func main() {
 			DB:                 d,
 			Provider:           prov,
 			EmbedModel:         cfg.Provider.EmbedModel,
+			EmbedFingerprint:   currentEmbedFingerprint(cfg),
 			ChatModel:          cfg.Provider.Model,
 			WindowSize:         cfg.ConsolidationWindowSize,
 			MaxMessages:        cfg.ConsolidationMaxMessages,
@@ -370,7 +404,7 @@ func main() {
 		}
 		rt.ConsolidationScheduler = memory.NewSchedulerWithContext(
 			ctx,
-			time.Duration(cfg.ConsolidationAsyncTimeoutSeconds)*time.Second,
+			effectiveConsolidationTimeout(cfg),
 			func(runCtx context.Context, sessionKey string) {
 				historyMax := cfg.HistoryMax
 				if historyMax <= 0 {
@@ -379,7 +413,12 @@ func main() {
 				for i := 0; i < schedulerMaxConsolidationPasses; i++ {
 					didWork, err := rt.Consolidator.RunOnce(runCtx, sessionKey, historyMax, memory.RunMode{})
 					if err != nil {
-						log.Printf("consolidation failed: session=%s err=%v", sessionKey, err)
+						message := fmt.Sprintf("consolidation failed for %s: %v", sessionKey, err)
+						if del != nil {
+							del.ShowNotice(message)
+						} else {
+							log.Printf("%s", message)
+						}
 						return
 					}
 					if !didWork {
@@ -465,6 +504,11 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println("ok")
+	case "embeddings":
+		if err := runEmbeddingsCommand(ctx, cfg, d, prov, args[1:], os.Stdout, os.Stderr); err != nil {
+			fmt.Fprintln(os.Stderr, "embeddings error:", err)
+			os.Exit(1)
+		}
 	case "skills":
 		deps := skillsCommandDeps{
 			Client: newClawHubClient(cfg),
@@ -581,6 +625,18 @@ func main() {
 	_ = channelManager.StopAll(context.Background())
 }
 
+func loadDoctorConfig(cfgPath, cwd string) (config.Config, string, error) {
+	if cfg, err := config.Load(cfgPath); err == nil {
+		return cfg, "", nil
+	} else {
+		cfg, repairErr := loadConfigureConfigLenient(cfgPath, cwd)
+		if repairErr != nil {
+			return config.Config{}, "", repairErr
+		}
+		return cfg, err.Error(), nil
+	}
+}
+
 func commandHandledBeforeConfigLoad(cmd string) bool {
 	switch cmd {
 	case "config-path", "version", "configure", "init":
@@ -671,8 +727,8 @@ func buildToolRegistryWithOptions(cfg config.Config, d *db.DB, prov *providers.C
 	reg.Register(&tools.WebFetch{HostPolicy: hostPolicy})
 	reg.Register(&tools.WebSearch{APIKey: cfg.Tools.BraveAPIKey, HostPolicy: hostPolicy})
 	reg.Register(&tools.MemorySetPinned{DB: d})
-	reg.Register(&tools.MemoryAddNote{DB: d, Provider: prov, EmbedModel: cfg.Provider.EmbedModel})
-	reg.Register(&tools.MemorySearch{DB: d, Provider: prov, EmbedModel: cfg.Provider.EmbedModel, VectorK: cfg.VectorK, FTSK: cfg.FTSK, TopK: cfg.MemoryRetrieve, VectorScanLimit: cfg.VectorScanLimit})
+	reg.Register(&tools.MemoryAddNote{DB: d, Provider: prov, EmbedModel: cfg.Provider.EmbedModel, EmbedFingerprint: currentEmbedFingerprint(cfg)})
+	reg.Register(&tools.MemorySearch{DB: d, Provider: prov, EmbedModel: cfg.Provider.EmbedModel, EmbedFingerprint: currentEmbedFingerprint(cfg), VectorK: cfg.VectorK, FTSK: cfg.FTSK, TopK: cfg.MemoryRetrieve, VectorScanLimit: cfg.VectorScanLimit})
 	reg.Register(&tools.MemoryRecent{DB: d, DefaultLimit: 10, MaxLimit: cfg.HistoryMax, MaxChars: 240})
 	reg.Register(&tools.MemoryGetPinned{DB: d, MaxChars: 400})
 	if includeSendMessage {

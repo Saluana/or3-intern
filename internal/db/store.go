@@ -54,24 +54,26 @@ type ConsolidationMessage struct {
 
 // TypedNoteInput holds the data for a single typed memory note write.
 type TypedNoteInput struct {
-	Text        string
-	Embedding   []byte
-	SourceMsgID sql.NullInt64
-	Tags        string
-	Kind        string
-	Status      string
-	Importance  float64
+	Text             string
+	Embedding        []byte
+	EmbedFingerprint string
+	SourceMsgID      sql.NullInt64
+	Tags             string
+	Kind             string
+	Status           string
+	Importance       float64
 }
 
 type ConsolidationWrite struct {
 	SessionKey string
 	ScopeKey   string
 	// Primary summary note (optional).
-	NoteText    string
-	Embedding   []byte
-	SourceMsgID sql.NullInt64
-	NoteTags    string
-	NoteKind    string // defaults to MemoryKindSummary when NoteText is set
+	NoteText         string
+	Embedding        []byte
+	EmbedFingerprint string
+	SourceMsgID      sql.NullInt64
+	NoteTags         string
+	NoteKind         string // defaults to MemoryKindSummary when NoteText is set
 	// Additional typed notes (facts, preferences, goals, procedures).
 	ExtraNotes    []TypedNoteInput
 	CanonicalKey  string
@@ -211,12 +213,13 @@ func (d *DB) UpsertPinned(ctx context.Context, sessionKey, key, content string) 
 // wrapper around InsertMemoryNoteTyped that uses safe defaults for the new metadata fields.
 func (d *DB) InsertMemoryNote(ctx context.Context, sessionKey, text string, embedding []byte, sourceMsgID sql.NullInt64, tags string) (int64, error) {
 	return d.InsertMemoryNoteTyped(ctx, sessionKey, TypedNoteInput{
-		Text:        text,
-		Embedding:   embedding,
-		SourceMsgID: sourceMsgID,
-		Tags:        tags,
-		Kind:        MemoryKindNote,
-		Status:      MemoryStatusActive,
+		Text:             text,
+		Embedding:        embedding,
+		EmbedFingerprint: "",
+		SourceMsgID:      sourceMsgID,
+		Tags:             tags,
+		Kind:             MemoryKindNote,
+		Status:           MemoryStatusActive,
 	})
 }
 
@@ -237,7 +240,7 @@ func (d *DB) InsertMemoryNoteTyped(ctx context.Context, sessionKey string, input
 	} else if importance > maxImportance {
 		importance = maxImportance
 	}
-	if err := d.validateMemoryEmbeddingDims(ctx, input.Embedding); err != nil {
+	if err := d.validateMemoryEmbeddingProfile(ctx, input.Embedding, input.EmbedFingerprint); err != nil {
 		return 0, err
 	}
 	emb := input.Embedding
@@ -260,6 +263,10 @@ func (d *DB) InsertMemoryNoteTyped(ctx context.Context, sessionKey string, input
 }
 
 func (d *DB) validateMemoryEmbeddingDims(ctx context.Context, embedding []byte) error {
+	return d.validateMemoryEmbeddingProfile(ctx, embedding, "")
+}
+
+func (d *DB) validateMemoryEmbeddingProfile(ctx context.Context, embedding []byte, fingerprint string) error {
 	if len(embedding) < 4 || len(embedding)%4 != 0 {
 		return nil
 	}
@@ -269,10 +276,22 @@ func (d *DB) validateMemoryEmbeddingDims(ctx context.Context, embedding []byte) 
 		return err
 	}
 	if dims == 0 {
-		return d.EnsureMemoryVecIndexWithDim(ctx, want)
+		return d.EnsureMemoryVecIndexWithProfile(ctx, want, fingerprint)
 	}
 	if dims != want {
 		return fmt.Errorf("memory vector dims mismatch: have %d want %d", dims, want)
+	}
+	if strings.TrimSpace(fingerprint) != "" {
+		have, err := d.MemoryVectorFingerprint(ctx)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(have) == "" {
+			return fmt.Errorf("memory embedding fingerprint mismatch: have %q want %q", "unknown", fingerprint)
+		}
+		if have != strings.TrimSpace(fingerprint) {
+			return fmt.Errorf("memory embedding fingerprint mismatch: have %q want %q", have, fingerprint)
+		}
 	}
 	return nil
 }
@@ -308,6 +327,7 @@ func (d *DB) upsertMemoryVec(ctx context.Context, noteID int64, sessionKey, text
 
 type MemoryNoteRow struct {
 	ID              int64
+	SessionKey      string
 	Text            string
 	Embedding       []byte
 	SourceMessageID sql.NullInt64
@@ -598,11 +618,11 @@ func (d *DB) SetLastConsolidatedID(ctx context.Context, sessionKey string, id in
 }
 
 func (d *DB) WriteConsolidation(ctx context.Context, w ConsolidationWrite) (int64, error) {
-	if err := d.validateMemoryEmbeddingDims(ctx, w.Embedding); err != nil {
+	if err := d.validateMemoryEmbeddingProfile(ctx, w.Embedding, w.EmbedFingerprint); err != nil {
 		return 0, err
 	}
 	for _, en := range w.ExtraNotes {
-		if err := d.validateMemoryEmbeddingDims(ctx, en.Embedding); err != nil {
+		if err := d.validateMemoryEmbeddingProfile(ctx, en.Embedding, en.EmbedFingerprint); err != nil {
 			return 0, err
 		}
 	}
@@ -715,6 +735,43 @@ func (d *DB) WriteConsolidation(ctx context.Context, w ConsolidationWrite) (int6
 		_ = d.upsertMemoryVec(ctx, en.id, scopeKey, en.text, en.emb)
 	}
 	return noteID, nil
+}
+
+type MemoryNoteReembedRow struct {
+	ID         int64
+	SessionKey string
+	Text       string
+}
+
+// ListMemoryNotesForReembed returns all note IDs and source text for bulk
+// embedding regeneration.
+func (d *DB) ListMemoryNotesForReembed(ctx context.Context) ([]MemoryNoteReembedRow, error) {
+	rows, err := d.SQL.QueryContext(ctx,
+		`SELECT id, session_key, text FROM memory_notes ORDER BY id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []MemoryNoteReembedRow
+	for rows.Next() {
+		var item MemoryNoteReembedRow
+		if err := rows.Scan(&item.ID, &item.SessionKey, &item.Text); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+// ReplaceMemoryNoteEmbedding updates a note's stored embedding blob without
+// enforcing the current vector index profile. Callers should rebuild the vec
+// index after a bulk re-embed pass.
+func (d *DB) ReplaceMemoryNoteEmbedding(ctx context.Context, noteID int64, embedding []byte) error {
+	if embedding == nil {
+		embedding = make([]byte, 0)
+	}
+	_, err := d.SQL.ExecContext(ctx, `UPDATE memory_notes SET embedding=? WHERE id=?`, embedding, noteID)
+	return err
 }
 
 func (d *DB) ResetSessionHistory(ctx context.Context, sessionKey string) error {

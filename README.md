@@ -57,7 +57,7 @@ Use `go run ./cmd/or3-intern ...` for ad hoc local runs, or install the binary f
 - `or3-intern serve` run enabled external channels and automation
 - `or3-intern service` run the internal authenticated HTTP API for OR3 Net
 - `or3-intern agent -m "hello"` run a one-shot turn
-- `or3-intern doctor [--strict]` print hardening warnings for the current config
+- `or3-intern doctor [--strict|--json|--fix]` diagnose readiness issues, explain risk, and repair safe local problems
 - `or3-intern capabilities [--channel name|--trigger name|--json]` inspect the effective runtime posture, ingress policy, approvals, and access profiles
 - `or3-intern secrets <set|delete|list>` manage encrypted secret refs stored in SQLite
 - `or3-intern audit [verify]` inspect or verify the append-only audit chain
@@ -95,7 +95,7 @@ The setup docs stay text-first in-repo. Screenshots or terminal recordings can b
 - History is fetched with bounded queries instead of full scans.
 - Hybrid retrieval combines pinned context, vector similarity, and FTS keyword search.
 - External channels are disabled by default until configured.
-- `or3-intern doctor` is the fastest way to audit an installation before exposing channels, triggers, or the service API.
+- `or3-intern doctor` is the main readiness command before exposing channels, triggers, or the service API.
 
 ## Config alignment
 

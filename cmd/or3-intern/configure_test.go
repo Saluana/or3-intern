@@ -209,7 +209,7 @@ func TestRunConfigureWithIO_WarnsWhenSavedConfigIsStillInvalid(t *testing.T) {
 	}
 
 	text := out.String()
-	if !strings.Contains(text, "Configuration saved, but the config still has validation issues.") {
+	if !strings.Contains(text, "Configuration saved, but the setup is not runnable yet.") {
 		t.Fatalf("expected invalid-config warning, got %q", text)
 	}
 	if strings.Contains(text, "or3-intern serve") {

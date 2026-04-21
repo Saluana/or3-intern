@@ -28,33 +28,36 @@ type DocIndexConfig struct {
 
 // IndexedDoc is a row from memory_docs.
 type IndexedDoc struct {
-	ID        int64
-	ScopeKey  string
-	Path      string
-	Kind      string
-	Title     string
-	Summary   string
-	Text      string
-	Embedding []byte
-	MTimeMS   int64
-	SizeBytes int64
-	Active    bool
-	UpdatedAt int64
+	ID               int64
+	ScopeKey         string
+	Path             string
+	Kind             string
+	Title            string
+	Summary          string
+	Text             string
+	Embedding        []byte
+	EmbedFingerprint string
+	MTimeMS          int64
+	SizeBytes        int64
+	Active           bool
+	UpdatedAt        int64
 }
 
 // DocIndexer syncs configured roots into the memory_docs table.
 type DocIndexer struct {
-	DB         *db.DB
-	Provider   *providers.Client
-	EmbedModel string
-	Config     DocIndexConfig
+	DB               *db.DB
+	Provider         *providers.Client
+	EmbedModel       string
+	EmbedFingerprint string
+	Config           DocIndexConfig
 }
 
 type indexedDocState struct {
-	hash      string
-	mtimeMS   int64
-	sizeBytes int64
-	active    bool
+	hash        string
+	mtimeMS     int64
+	sizeBytes   int64
+	active      bool
+	fingerprint string
 }
 
 func (x *DocIndexer) defaults() DocIndexConfig {
@@ -158,7 +161,7 @@ func (x *DocIndexer) SyncRoots(ctx context.Context, scopeKey string) error {
 			fileCount++
 			mtimeMS := info.ModTime().UnixMilli()
 			sizeBytes := info.Size()
-			if state, ok := existing[realPath]; ok && state.active && state.mtimeMS == mtimeMS && state.sizeBytes == sizeBytes {
+			if state, ok := existing[realPath]; ok && state.active && state.mtimeMS == mtimeMS && state.sizeBytes == sizeBytes && state.fingerprint == strings.TrimSpace(x.EmbedFingerprint) {
 				chunkCount++
 				return nil
 			}
@@ -169,7 +172,7 @@ func (x *DocIndexer) SyncRoots(ctx context.Context, scopeKey string) error {
 			}
 
 			h := fileHash(data)
-			if state, ok := existing[realPath]; ok && state.active && state.hash == h {
+			if state, ok := existing[realPath]; ok && state.active && state.hash == h && state.fingerprint == strings.TrimSpace(x.EmbedFingerprint) {
 				chunkCount++
 				return nil
 			}
@@ -189,14 +192,15 @@ func (x *DocIndexer) SyncRoots(ctx context.Context, scopeKey string) error {
 
 			now := db.NowMS()
 			_, err = x.DB.SQL.ExecContext(ctx,
-				`INSERT INTO memory_docs(scope_key, path, kind, title, summary, text, embedding, hash, mtime_ms, size_bytes, active, updated_at)
-                 VALUES(?,?,?,?,?,?,?,?,?,?,1,?)
+				`INSERT INTO memory_docs(scope_key, path, kind, title, summary, text, embedding, embed_fingerprint, hash, mtime_ms, size_bytes, active, updated_at)
+	                VALUES(?,?,?,?,?,?,?,?,?,?,?,1,?)
                  ON CONFLICT(scope_key, path) DO UPDATE SET
                    kind=excluded.kind, title=excluded.title, summary=excluded.summary,
                    text=excluded.text, embedding=excluded.embedding,
-                   hash=excluded.hash, mtime_ms=excluded.mtime_ms,
+	                  embed_fingerprint=excluded.embed_fingerprint,
+	                  hash=excluded.hash, mtime_ms=excluded.mtime_ms,
                    size_bytes=excluded.size_bytes, active=1, updated_at=excluded.updated_at`,
-				scopeKey, realPath, kind, title, summary, text, nullBytes(embedding), h, mtimeMS, sizeBytes, now)
+				scopeKey, realPath, kind, title, summary, text, nullBytes(embedding), strings.TrimSpace(x.EmbedFingerprint), h, mtimeMS, sizeBytes, now)
 			if err != nil {
 				return fmt.Errorf("upsert indexed doc %s: %w", realPath, err)
 			}
@@ -235,7 +239,7 @@ func (x *DocIndexer) SyncRoots(ctx context.Context, scopeKey string) error {
 
 func (x *DocIndexer) loadIndexedDocState(ctx context.Context, scopeKey string) (map[string]indexedDocState, error) {
 	rows, err := x.DB.SQL.QueryContext(ctx,
-		`SELECT path, hash, mtime_ms, size_bytes, active FROM memory_docs WHERE scope_key=?`, scopeKey)
+		`SELECT path, hash, mtime_ms, size_bytes, active, embed_fingerprint FROM memory_docs WHERE scope_key=?`, scopeKey)
 	if err != nil {
 		return nil, err
 	}
@@ -245,10 +249,11 @@ func (x *DocIndexer) loadIndexedDocState(ctx context.Context, scopeKey string) (
 		var path, hash string
 		var mtimeMS, sizeBytes int64
 		var active int
-		if err := rows.Scan(&path, &hash, &mtimeMS, &sizeBytes, &active); err != nil {
+		var fingerprint string
+		if err := rows.Scan(&path, &hash, &mtimeMS, &sizeBytes, &active, &fingerprint); err != nil {
 			return nil, err
 		}
-		out[path] = indexedDocState{hash: hash, mtimeMS: mtimeMS, sizeBytes: sizeBytes, active: active == 1}
+		out[path] = indexedDocState{hash: hash, mtimeMS: mtimeMS, sizeBytes: sizeBytes, active: active == 1, fingerprint: fingerprint}
 	}
 	return out, rows.Err()
 }
@@ -317,14 +322,15 @@ func (r *DocRetriever) RetrieveDocs(ctx context.Context, scopeKey, query string,
 func UpsertDoc(ctx context.Context, d *db.DB, scopeKey, path, kind, title, summary, text string, embedding []byte, hash string, mtimeMS, sizeBytes int64) error {
 	now := db.NowMS()
 	_, err := d.SQL.ExecContext(ctx,
-		`INSERT INTO memory_docs(scope_key, path, kind, title, summary, text, embedding, hash, mtime_ms, size_bytes, active, updated_at)
-         VALUES(?,?,?,?,?,?,?,?,?,?,1,?)
+		`INSERT INTO memory_docs(scope_key, path, kind, title, summary, text, embedding, embed_fingerprint, hash, mtime_ms, size_bytes, active, updated_at)
+	        VALUES(?,?,?,?,?,?,?,?,?,?,?,1,?)
          ON CONFLICT(scope_key, path) DO UPDATE SET
            kind=excluded.kind, title=excluded.title, summary=excluded.summary,
            text=excluded.text, embedding=excluded.embedding,
-           hash=excluded.hash, mtime_ms=excluded.mtime_ms,
+	          embed_fingerprint=excluded.embed_fingerprint,
+	          hash=excluded.hash, mtime_ms=excluded.mtime_ms,
            size_bytes=excluded.size_bytes, active=1, updated_at=excluded.updated_at`,
-		scopeKey, path, kind, title, summary, text, nullBytes(embedding), hash, mtimeMS, sizeBytes, now)
+		scopeKey, path, kind, title, summary, text, nullBytes(embedding), "", hash, mtimeMS, sizeBytes, now)
 	return err
 }
 

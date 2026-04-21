@@ -73,7 +73,7 @@ Use `or3-intern init` if you only want the original lightweight first-run provid
 
 | Command | Purpose |
 | --- | --- |
-| `or3-intern doctor [--strict]` | Audits the current config for unsafe or inconsistent settings |
+| `or3-intern doctor [--strict|--json|--fix]` | Diagnoses readiness issues, emits machine-readable reports, and repairs safe local problems |
 | `or3-intern capabilities [--channel name|--trigger name|--json]` | Shows the effective runtime posture, ingress policy, approvals, and access-profile limits |
 | `or3-intern secrets <set|delete|list>` | Manages encrypted secret references stored in SQLite |
 | `or3-intern audit [verify]` | Inspects or verifies the append-only audit chain |

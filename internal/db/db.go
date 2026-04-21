@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -186,10 +187,11 @@ func (d *DB) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS memory_vec_meta(
 			id INTEGER PRIMARY KEY CHECK(id=1),
 			dims INTEGER NOT NULL DEFAULT 0,
+			embed_fingerprint TEXT NOT NULL DEFAULT '',
 			updated_at INTEGER NOT NULL DEFAULT 0
 		);`,
-		`INSERT INTO memory_vec_meta(id, dims, updated_at)
-			VALUES(1, 0, 0)
+		`INSERT INTO memory_vec_meta(id, dims, embed_fingerprint, updated_at)
+			VALUES(1, 0, '', 0)
 			ON CONFLICT(id) DO NOTHING;`,
 		`CREATE TABLE IF NOT EXISTS secrets(
 			name TEXT PRIMARY KEY,
@@ -301,6 +303,12 @@ func (d *DB) migrate(ctx context.Context) error {
 	if err := d.ensureMemoryNotesMetaColumns(ctx); err != nil {
 		return err
 	}
+	if err := d.ensureMemoryVecMetaFingerprintColumn(ctx); err != nil {
+		return err
+	}
+	if err := d.ensureMemoryDocsEmbedFingerprintColumn(ctx); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -390,7 +398,7 @@ func (d *DB) ensureMemoryVecIndexForExisting(ctx context.Context) error {
 	if dims <= 0 {
 		return nil
 	}
-	return d.initMemoryVecIndex(ctx, dims, false)
+	return d.initMemoryVecIndex(ctx, dims, "", false)
 }
 
 // MemoryVectorDims reports the configured memory vector dimensionality.
@@ -404,6 +412,20 @@ func (d *DB) MemoryVectorDims(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	return dims, nil
+}
+
+// MemoryVectorFingerprint reports the configured embedding fingerprint for
+// persisted memory vectors.
+func (d *DB) MemoryVectorFingerprint(ctx context.Context) (string, error) {
+	row := d.SQL.QueryRowContext(ctx, `SELECT embed_fingerprint FROM memory_vec_meta WHERE id=1`)
+	var fingerprint string
+	if err := row.Scan(&fingerprint); err != nil {
+		if err == sql.ErrNoRows {
+			return "", nil
+		}
+		return "", err
+	}
+	return fingerprint, nil
 }
 
 func (d *DB) firstMemoryVectorDim(ctx context.Context) (int, error) {
@@ -428,6 +450,12 @@ func (d *DB) firstMemoryVectorDim(ctx context.Context) (int, error) {
 
 // EnsureMemoryVecIndexWithDim initializes the vector index when dims is valid.
 func (d *DB) EnsureMemoryVecIndexWithDim(ctx context.Context, dims int) error {
+	return d.EnsureMemoryVecIndexWithProfile(ctx, dims, "")
+}
+
+// EnsureMemoryVecIndexWithProfile initializes the vector index when dims and
+// the embedding fingerprint are compatible with any existing metadata.
+func (d *DB) EnsureMemoryVecIndexWithProfile(ctx context.Context, dims int, fingerprint string) error {
 	if dims <= 0 {
 		return nil
 	}
@@ -438,16 +466,23 @@ func (d *DB) EnsureMemoryVecIndexWithDim(ctx context.Context, dims int) error {
 	if existing > 0 && existing != dims {
 		return nil
 	}
-	return d.initMemoryVecIndex(ctx, dims, false)
+	return d.initMemoryVecIndex(ctx, dims, fingerprint, false)
 }
 
 // RebuildMemoryVecIndexWithDim recreates the vector index for a new embedding
 // dimensionality and repopulates it from rows whose stored embeddings match.
 func (d *DB) RebuildMemoryVecIndexWithDim(ctx context.Context, dims int) error {
-	return d.initMemoryVecIndex(ctx, dims, true)
+	return d.RebuildMemoryVecIndexWithProfile(ctx, dims, "")
 }
 
-func (d *DB) initMemoryVecIndex(ctx context.Context, dims int, force bool) error {
+// RebuildMemoryVecIndexWithProfile recreates the vector index for a new
+// dimensionality/embedding fingerprint pair and repopulates it from rows whose
+// stored embeddings match the new dimensionality.
+func (d *DB) RebuildMemoryVecIndexWithProfile(ctx context.Context, dims int, fingerprint string) error {
+	return d.initMemoryVecIndex(ctx, dims, fingerprint, true)
+}
+
+func (d *DB) initMemoryVecIndex(ctx context.Context, dims int, fingerprint string, force bool) error {
 	if dims <= 0 {
 		return nil
 	}
@@ -462,11 +497,15 @@ func (d *DB) initMemoryVecIndex(ctx context.Context, dims int, force bool) error
 		_ = tx.Rollback()
 	}()
 	var existing int
-	if err := tx.QueryRowContext(ctx, `SELECT dims FROM memory_vec_meta WHERE id=1`).Scan(&existing); err != nil && err != sql.ErrNoRows {
+	var existingFingerprint string
+	if err := tx.QueryRowContext(ctx, `SELECT dims, embed_fingerprint FROM memory_vec_meta WHERE id=1`).Scan(&existing, &existingFingerprint); err != nil && err != sql.ErrNoRows {
 		return err
 	}
 	if existing > 0 && existing != dims && !force {
 		return fmt.Errorf("memory vector dims mismatch: have %d want %d", existing, dims)
+	}
+	if existing > 0 && strings.TrimSpace(fingerprint) != "" && strings.TrimSpace(existingFingerprint) != "" && existingFingerprint != fingerprint && !force {
+		return fmt.Errorf("memory embedding fingerprint mismatch: have %q want %q", existingFingerprint, fingerprint)
 	}
 	if _, err := tx.ExecContext(ctx, `DROP TABLE IF EXISTS memory_vec`); err != nil {
 		return err
@@ -488,13 +527,37 @@ func (d *DB) initMemoryVecIndex(ctx context.Context, dims int, force bool) error
 		return err
 	}
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO memory_vec_meta(id, dims, updated_at)
-		 VALUES(1, ?, ?)
-		 ON CONFLICT(id) DO UPDATE SET dims=excluded.dims, updated_at=excluded.updated_at`,
-		dims, NowMS()); err != nil {
+		`INSERT INTO memory_vec_meta(id, dims, embed_fingerprint, updated_at)
+		 VALUES(1, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET dims=excluded.dims, embed_fingerprint=excluded.embed_fingerprint, updated_at=excluded.updated_at`,
+		dims, strings.TrimSpace(fingerprint), NowMS()); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+func (d *DB) ensureMemoryVecMetaFingerprintColumn(ctx context.Context) error {
+	has, err := d.tableHasColumn(ctx, "memory_vec_meta", "embed_fingerprint")
+	if err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	_, err = d.SQL.ExecContext(ctx, `ALTER TABLE memory_vec_meta ADD COLUMN embed_fingerprint TEXT NOT NULL DEFAULT ''`)
+	return err
+}
+
+func (d *DB) ensureMemoryDocsEmbedFingerprintColumn(ctx context.Context) error {
+	has, err := d.tableHasColumn(ctx, "memory_docs", "embed_fingerprint")
+	if err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	_, err = d.SQL.ExecContext(ctx, `ALTER TABLE memory_docs ADD COLUMN embed_fingerprint TEXT NOT NULL DEFAULT ''`)
+	return err
 }
 
 // ensureMemoryNotesMetaColumns adds lifecycle/ranking metadata columns to

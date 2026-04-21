@@ -136,3 +136,93 @@ func TestChatModelSendDoesNotLeaveNewlinesInInput(t *testing.T) {
 		t.Fatalf("expected single-line input view, got %q", m.input.View())
 	}
 }
+
+func TestDeriveChatLayoutStacksAndCompactsOnSmallTerminal(t *testing.T) {
+	layout := deriveChatLayout(78, 20)
+	if !layout.stacked {
+		t.Fatal("expected stacked layout for narrow terminal")
+	}
+	if !layout.compact {
+		t.Fatal("expected compact layout for narrow/short terminal")
+	}
+	if layout.viewportH < 6 {
+		t.Fatalf("expected minimum viewport height, got %d", layout.viewportH)
+	}
+}
+
+func TestChatModelNarrowViewKeepsTranscriptInputAndCompactStatus(t *testing.T) {
+	bridge := newBubbleChatBridge()
+	model := newChatModel(context.Background(), "cli:default", bridge, nil, func(sessionKey, text string) bool {
+		_ = sessionKey
+		_ = text
+		return true
+	})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 78, Height: 22})
+	updated, _ = updated.(chatModel).Update(chatAssistantCloseMsg{streamID: 1, finalText: "Hello world", complete: true})
+	updated, _ = updated.(chatModel).Update(chatToolCallMsg{name: "read_file", arguments: "README.md"})
+	m := updated.(chatModel)
+
+	view := m.View()
+	if !strings.Contains(view, "Conversation") || !strings.Contains(view, "Message") {
+		t.Fatalf("expected transcript and input panels in narrow view, got %q", view)
+	}
+	if !strings.Contains(view, "Recent activity") {
+		t.Fatalf("expected compact activity summary in narrow view, got %q", view)
+	}
+	if !strings.Contains(view, "Hello world") {
+		t.Fatalf("expected transcript content in narrow view, got %q", view)
+	}
+}
+
+func TestChatModelResizeKeepsTranscriptAcrossLayoutModes(t *testing.T) {
+	bridge := newBubbleChatBridge()
+	model := newChatModel(context.Background(), "cli:default", bridge, nil, func(sessionKey, text string) bool {
+		_ = sessionKey
+		_ = text
+		return true
+	})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+	updated, _ = updated.(chatModel).Update(chatAssistantCloseMsg{streamID: 1, finalText: "Persistent transcript", complete: true})
+	updated, _ = updated.(chatModel).Update(tea.WindowSizeMsg{Width: 76, Height: 20})
+	m := updated.(chatModel)
+
+	view := m.View()
+	if !strings.Contains(view, "Persistent transcript") {
+		t.Fatalf("expected transcript content after resize, got %q", view)
+	}
+	if !strings.Contains(view, "Status") {
+		t.Fatalf("expected status panel after resize, got %q", view)
+	}
+	if !deriveChatLayout(m.width, m.height).stacked {
+		t.Fatal("expected stacked mode after narrow resize")
+	}
+}
+
+func TestChatModelNoticeDoesNotCorruptInput(t *testing.T) {
+	bridge := newBubbleChatBridge()
+	model := newChatModel(context.Background(), "cli:default", bridge, nil, func(sessionKey, text string) bool {
+		_ = sessionKey
+		_ = text
+		return true
+	})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 90, Height: 24})
+	m := updated.(chatModel)
+	m.input.SetValue("still typing")
+
+	updated, _ = m.Update(chatNoticeMsg{text: "consolidation failed: context deadline exceeded"})
+	m = updated.(chatModel)
+
+	if got := m.input.Value(); got != "still typing" {
+		t.Fatalf("expected input to remain unchanged after notice, got %q", got)
+	}
+	if strings.Contains(m.input.View(), "\n") {
+		t.Fatalf("expected single-line input view after notice, got %q", m.input.View())
+	}
+	view := m.View()
+	if !strings.Contains(view, "Background") {
+		t.Fatalf("expected background activity notice in view, got %q", view)
+	}
+	if !strings.Contains(view, "consolidation failed") {
+		t.Fatalf("expected consolidation notice text in view, got %q", view)
+	}
+}

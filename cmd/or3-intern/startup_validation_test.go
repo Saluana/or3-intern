@@ -87,6 +87,7 @@ func TestValidateStartupCommand_RemoteSandboxAllowsRemoteFlowWithSandbox(t *test
 	cfg.Hardening.PrivilegedTools = true
 	cfg.Hardening.ExecAllowedPrograms = []string{"git"}
 	cfg.Hardening.Sandbox.Enabled = true
+	cfg.Hardening.Sandbox.BubblewrapPath = "sh"
 	cfg.Tools.MCPServers = map[string]config.MCPServerConfig{
 		"remote": {
 			Enabled:   true,

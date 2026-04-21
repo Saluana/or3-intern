@@ -49,9 +49,10 @@ func (t *MemorySetPinned) Execute(ctx context.Context, params map[string]any) (s
 
 type MemoryAddNote struct {
 	Base
-	DB         *db.DB
-	Provider   *providers.Client
-	EmbedModel string
+	DB               *db.DB
+	Provider         *providers.Client
+	EmbedModel       string
+	EmbedFingerprint string
 }
 
 func (t *MemoryAddNote) Name() string { return "memory_add_note" }
@@ -87,7 +88,9 @@ func (t *MemoryAddNote) Execute(ctx context.Context, params map[string]any) (str
 		return "", err
 	}
 	blob := memory.PackFloat32(vec)
-	id, err := t.DB.InsertMemoryNote(ctx, memoryScopeFromParams(ctx, params), text, blob, src, tags)
+	id, err := t.DB.InsertMemoryNoteTyped(ctx, memoryScopeFromParams(ctx, params), db.TypedNoteInput{
+		Text: text, Embedding: blob, EmbedFingerprint: t.EmbedFingerprint, SourceMsgID: src, Tags: tags,
+	})
 	if err != nil {
 		return "", err
 	}
@@ -96,13 +99,14 @@ func (t *MemoryAddNote) Execute(ctx context.Context, params map[string]any) (str
 
 type MemorySearch struct {
 	Base
-	DB              *db.DB
-	Provider        *providers.Client
-	EmbedModel      string
-	VectorK         int
-	FTSK            int
-	TopK            int
-	VectorScanLimit int
+	DB               *db.DB
+	Provider         *providers.Client
+	EmbedModel       string
+	EmbedFingerprint string
+	VectorK          int
+	FTSK             int
+	TopK             int
+	VectorScanLimit  int
 }
 
 func (t *MemorySearch) Name() string { return "memory_search" }
@@ -136,6 +140,7 @@ func (t *MemorySearch) Execute(ctx context.Context, params map[string]any) (stri
 		return "", err
 	}
 	r := memory.NewRetriever(t.DB)
+	r.EmbedFingerprint = t.EmbedFingerprint
 	r.VectorScanLimit = t.VectorScanLimit
 	got, err := r.Retrieve(ctx, memoryScopeFromParams(ctx, params), q, vec, t.VectorK, t.FTSK, topK)
 	if err != nil {

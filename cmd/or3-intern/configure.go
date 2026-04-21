@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"or3-intern/internal/config"
+	intdoctor "or3-intern/internal/doctor"
 )
 
 var configureSections = []struct {
@@ -724,16 +725,20 @@ func readConfigFile(filePath string, cfg *config.Config) error {
 }
 
 func printConfigureNextSteps(out io.Writer, cfg config.Config) error {
-	if err := validateConfigSnapshot(cfg); err != nil {
-		fmt.Fprintln(out, "Next steps:")
-		fmt.Fprintln(out, "  Configuration saved, but the config still has validation issues.")
-		fmt.Fprintf(out, "  %v\n", err)
-		fmt.Fprintln(out, "  Re-run: or3-intern configure --section security")
-		fmt.Fprintln(out, "  Re-run: or3-intern configure --section channels")
-		return nil
-	}
+	report := intdoctor.Evaluate(cfg, intdoctor.Options{Mode: intdoctor.ModeConfigurePostSave})
 
 	fmt.Fprintln(out, "Next steps:")
+	if report.HasBlockingFindings() {
+		fmt.Fprintln(out, "  Configuration saved, but the setup is not runnable yet.")
+		for _, finding := range intdoctor.TopFindings(report.BlockingFindings(), 3) {
+			fmt.Fprintf(out, "  - %s: %s\n", finding.Area, finding.Summary)
+		}
+		fmt.Fprintln(out, "  or3-intern doctor --fix")
+		fmt.Fprintln(out, "  or3-intern doctor --fix --interactive")
+		fmt.Fprintln(out, "  or3-intern configure --section security")
+		fmt.Fprintln(out, "  or3-intern configure --section channels")
+		return nil
+	}
 	fmt.Fprintln(out, "  or3-intern chat")
 	if hasEnabledChannels(cfg) || cfg.Service.Enabled {
 		fmt.Fprintln(out, "  or3-intern doctor --strict")
@@ -741,25 +746,12 @@ func printConfigureNextSteps(out io.Writer, cfg config.Config) error {
 	if hasEnabledChannels(cfg) {
 		fmt.Fprintln(out, "  or3-intern serve")
 	}
+	if report.Summary.WarnCount > 0 || report.Summary.ErrorCount > 0 {
+		for _, finding := range intdoctor.TopFindings(report.WarningsAndErrors(), 2) {
+			fmt.Fprintf(out, "  Note: %s: %s\n", finding.Area, finding.Summary)
+		}
+	}
 	return nil
-}
-
-func validateConfigSnapshot(cfg config.Config) error {
-	file, err := os.CreateTemp("", "or3-intern-config-*.json")
-	if err != nil {
-		return err
-	}
-	path := file.Name()
-	if closeErr := file.Close(); closeErr != nil {
-		_ = os.Remove(path)
-		return closeErr
-	}
-	defer os.Remove(path)
-	if err := config.Save(path, cfg); err != nil {
-		return err
-	}
-	_, err = config.Load(path)
-	return err
 }
 
 func configureInboundAccess(reader *bufio.Reader, out io.Writer, label, allowlistLabel string, allowlist []string, policy *config.InboundPolicy, openAccess *bool, target *[]string, defaultChoice string) error {

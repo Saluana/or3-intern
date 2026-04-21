@@ -94,6 +94,8 @@ type chatAssistantAbortMsg struct {
 
 type chatErrorMsg struct{ err string }
 
+type chatNoticeMsg struct{ text string }
+
 type chatToolCallMsg struct {
 	name      string
 	arguments string
@@ -169,6 +171,16 @@ type chatStyles struct {
 	badgeCool   lipgloss.Style
 	help        lipgloss.Style
 	placeholder lipgloss.Style
+}
+
+type chatLayout struct {
+	panelWidth     int
+	transcriptW    int
+	sidebarW       int
+	viewportH      int
+	stacked        bool
+	compact        bool
+	compactSidebar bool
 }
 
 func newChatStyles() chatStyles {
@@ -369,6 +381,13 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusText = m.statusLabel()
 		m.refreshViewport(true)
 		cmds = append(cmds, m.bridge.waitCmd())
+	case chatNoticeMsg:
+		m.addActivity("Background", summarizeText(msg.text, 100), "notice")
+		if m.pendingCount == 0 {
+			m.statusText = "Background notice"
+		}
+		m.refreshViewport(true)
+		cmds = append(cmds, m.bridge.waitCmd())
 	case chatToolCallMsg:
 		m.addActivity("Tool", fmt.Sprintf("%s %s", msg.name, strings.TrimSpace(msg.arguments)), "tool")
 		m.statusText = "Using tools…"
@@ -393,32 +412,47 @@ func (m chatModel) View() string {
 	if m.width == 0 || m.height == 0 {
 		return "Loading chat UI..."
 	}
-	header := m.renderHeader()
-	leftWidth := maxInt(chatViewportMinW, m.width-chatSidebarMinW-6)
-	rightWidth := maxInt(chatSidebarMinW, m.width-leftWidth-4)
-	transcriptPanel := m.styles.panel.Width(leftWidth).Height(maxInt(8, m.viewport.Height+2)).Render(m.styles.panelTitle.Render("Conversation") + "\n" + m.viewport.View())
-	sidebar := m.styles.panel.Width(rightWidth).Height(maxInt(8, m.viewport.Height+2)).Render(m.renderSidebar(rightWidth))
-	content := lipgloss.JoinHorizontal(lipgloss.Top, transcriptPanel, "  ", sidebar)
-	inputPanel := m.styles.inputBox.Width(maxInt(chatInputMinW, m.width-4)).Render(m.styles.panelTitle.Render("Message") + "\n" + m.input.View())
+	layout := deriveChatLayout(m.width, m.height)
+	header := m.renderHeader(layout)
+	transcriptPanel := m.styles.panel.Width(layout.transcriptW).Height(maxInt(7, m.viewport.Height+2)).Render(m.styles.panelTitle.Render("Conversation") + "\n" + m.viewport.View())
+	var content string
+	if layout.stacked {
+		sidebarContent := m.renderSidebar(layout.panelWidth)
+		if layout.compactSidebar {
+			sidebarContent = m.renderSidebarCompact(layout.panelWidth)
+		}
+		sidebar := m.styles.panel.Width(layout.panelWidth).Render(sidebarContent)
+		content = lipgloss.JoinVertical(lipgloss.Left, transcriptPanel, sidebar)
+	} else {
+		sidebar := m.styles.panel.Width(layout.sidebarW).Height(maxInt(7, m.viewport.Height+2)).Render(m.renderSidebar(layout.sidebarW))
+		content = lipgloss.JoinHorizontal(lipgloss.Top, transcriptPanel, "  ", sidebar)
+	}
+	inputPanel := m.styles.inputBox.Width(layout.panelWidth).Render(m.styles.panelTitle.Render("Message") + "\n" + m.input.View())
 	footer := m.styles.help.Render(m.help.View(m.keys))
-	status := m.styles.panel.Width(maxInt(chatInputMinW, m.width-4)).Render(m.styles.status.Render(m.statusLabel()))
+	status := m.styles.panel.Width(layout.panelWidth).Render(m.styles.status.Render(m.statusLabel()))
 	return m.styles.app.Render(lipgloss.JoinVertical(lipgloss.Left, header, "", content, "", inputPanel, status, footer))
 }
 
 func (m *chatModel) resize() {
-	leftWidth := maxInt(chatViewportMinW, m.width-chatSidebarMinW-6)
-	viewportHeight := maxInt(8, m.height-chatHeaderPanelH-chatInputPanelH-chatStatusPanelH-8)
-	m.viewport.Width = leftWidth - 4
-	m.viewport.Height = viewportHeight
-	m.input.Width = maxInt(chatInputMinW, m.width-10)
+	layout := deriveChatLayout(m.width, m.height)
+	m.viewport.Width = maxInt(20, layout.transcriptW-4)
+	m.viewport.Height = layout.viewportH
+	m.input.Width = maxInt(chatInputMinW, layout.panelWidth-6)
 }
 
-func (m *chatModel) renderHeader() string {
+func (m *chatModel) renderHeader(layout chatLayout) string {
 	title := m.styles.title.Render("or3-intern chat")
 	session := m.styles.badge.Render("session " + safeLabel(m.sessionKey, "default"))
 	scope := m.styles.badgeCool.Render("scope " + safeLabel(m.scopeKey, m.sessionKey))
-	subtitle := m.styles.subtitle.Render("Slash commands, live tool activity, scoped history, and a proper full-screen terminal UI.")
-	return m.styles.header.Width(maxInt(chatInputMinW, m.width-4)).Render(lipgloss.JoinVertical(lipgloss.Left, lipgloss.JoinHorizontal(lipgloss.Center, title, "  ", session, " ", scope), subtitle))
+	subtitleText := "Slash commands, live tool activity, scoped history, and a proper full-screen terminal UI."
+	if layout.compact {
+		subtitleText = "Slash commands, activity, and scoped history."
+	}
+	subtitle := m.styles.subtitle.Render(subtitleText)
+	if layout.compact {
+		return m.styles.header.Width(layout.panelWidth).Render(lipgloss.JoinVertical(lipgloss.Left, title, lipgloss.JoinHorizontal(lipgloss.Left, session, " ", scope), subtitle))
+	}
+	return m.styles.header.Width(layout.panelWidth).Render(lipgloss.JoinVertical(lipgloss.Left, lipgloss.JoinHorizontal(lipgloss.Center, title, "  ", session, " ", scope), subtitle))
 }
 
 func (m *chatModel) renderSidebar(width int) string {
@@ -440,6 +474,58 @@ func (m *chatModel) renderSidebar(width int) string {
 		}
 	}
 	return lipgloss.NewStyle().Width(width - 4).Render(strings.Join(sections, "\n"))
+}
+
+func (m *chatModel) renderSidebarCompact(width int) string {
+	sections := []string{
+		m.styles.panelTitle.Render("Status"),
+		m.styles.muted.Render("Pending: ") + fmt.Sprintf("%d", m.pendingCount),
+		m.styles.muted.Render("Scope sessions: ") + fmt.Sprintf("%d", len(m.scopeSessions)),
+		"",
+		m.styles.panelTitle.Render("Recent activity"),
+	}
+	if len(m.activity) == 0 {
+		sections = append(sections, m.styles.placeholder.Render("No recent tool activity."))
+	} else {
+		limit := minInt(3, len(m.activity))
+		for _, item := range m.activity[:limit] {
+			sections = append(sections, m.styles.activity.Render("• "+item.title+" · "+summarizeText(item.detail, 48)))
+		}
+	}
+	sections = append(sections, "", m.styles.panelTitle.Render("Commands"), m.styles.activity.Render("/commands  /session  /scope  /clear"))
+	return lipgloss.NewStyle().Width(width - 4).Render(strings.Join(sections, "\n"))
+}
+
+func deriveChatLayout(width, height int) chatLayout {
+	panelWidth := maxInt(chatInputMinW, width-4)
+	stacked := width > 0 && width < 104
+	compact := (width > 0 && width < 82) || (height > 0 && height < 24)
+	transcriptW := panelWidth
+	sidebarW := panelWidth
+	if !stacked {
+		transcriptW = maxInt(chatViewportMinW, panelWidth-chatSidebarMinW-2)
+		sidebarW = maxInt(chatSidebarMinW, panelWidth-transcriptW-2)
+	}
+	reserved := 11
+	if stacked {
+		reserved = 16
+	}
+	if compact {
+		reserved++
+	}
+	viewportH := 8
+	if height > 0 {
+		viewportH = maxInt(6, height-reserved)
+	}
+	return chatLayout{
+		panelWidth:     panelWidth,
+		transcriptW:    transcriptW,
+		sidebarW:       sidebarW,
+		viewportH:      viewportH,
+		stacked:        stacked,
+		compact:        compact,
+		compactSidebar: stacked && compact,
+	}
 }
 
 func (m *chatModel) refreshViewport(stickBottom bool) {
@@ -621,6 +707,13 @@ func (c *Channel) runBubbleTea(ctx context.Context) error {
 
 func maxInt(a, b int) int {
 	if a > b {
+		return a
+	}
+	return b
+}
+
+func minInt(a, b int) int {
+	if a < b {
 		return a
 	}
 	return b

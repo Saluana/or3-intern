@@ -24,7 +24,7 @@ Phase 2 adds tighter controls around autonomous execution and skill/script execu
 - script-capable skills default to quarantine until approved
 - heartbeat, webhook, and file-watch turns carry a bounded `structured_event`
 - privileged shell execution and `run_skill_script` can route through Bubblewrap
-- `or3-intern doctor` audits common unsafe settings and supports `--strict`
+- `or3-intern doctor` is the main readiness and repair command and supports `--strict`, `--json`, and `--fix`
 
 ## Phase 3 additions
 
@@ -55,7 +55,7 @@ Hosted profiles also bias the runtime toward explicit opt-in:
 - `hosted-no-exec` does not advertise local `exec` or `run_skill_script` capability to the skill inventory
 - `hosted-remote-sandbox-only` only advertises local exec-capable tools when Bubblewrap sandboxing is enabled
 
-`or3-intern doctor` warns when `runtimeProfile` is not set, and flags constraint violations for the active profile.
+`or3-intern doctor` warns when `runtimeProfile` is not set, flags constraint violations for the active profile, and groups blockers, warnings, and fixable findings into a single readiness report.
 
 ## Core config sections
 
@@ -195,13 +195,13 @@ When the HTTP service is not running, the exchange step (`/internal/v1/pairing/e
 
 ### Startup validation
 
-`or3-intern doctor` checks for common misconfigurations:
+`or3-intern doctor` checks for common misconfigurations and local runtime readiness problems:
 
 - `ask` or `allowlist` domains require a valid `keyFile`
 - `hostId` should be set explicitly in production deployments
 - service mode exposed beyond loopback should have approvals enabled for sensitive domains
 
-Run `or3-intern doctor --strict` to fail on any warning rather than just printing it.
+Run `or3-intern doctor --strict` to fail on any warning, `or3-intern doctor --json` for CI-friendly output, and `or3-intern doctor --fix` to apply safe automatic repairs.
 
 ### Future phases
 
@@ -223,6 +223,8 @@ Use:
 ```bash
 or3-intern doctor
 or3-intern doctor --strict
+or3-intern doctor --fix
+or3-intern doctor --fix --interactive
 ```
 
 Run this before enabling external channels, webhook listeners, privileged tools, or service mode.

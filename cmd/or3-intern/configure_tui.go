@@ -130,6 +130,18 @@ type configureStyles struct {
 	buttonAlt   lipgloss.Style
 }
 
+type configureLayout struct {
+	fullWidth    int
+	navWidth     int
+	detailWidth  int
+	stacked      bool
+	compact      bool
+	short        bool
+	fieldRows    int
+	listHeight   int
+	contentWidth int
+}
+
 func newConfigureStyles() configureStyles {
 	baseBorder := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("63")).Padding(1, 2)
 	return configureStyles{
@@ -271,9 +283,10 @@ func (m configureTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.sectionList.SetSize(maxInt(28, msg.Width/3), maxInt(10, msg.Height-10))
-		m.channelList.SetSize(maxInt(28, msg.Width/3), maxInt(10, msg.Height-10))
-		m.textInput.Width = maxInt(24, msg.Width/2)
+		layout := deriveConfigureLayout(msg.Width, msg.Height)
+		m.sectionList.SetSize(layout.navWidth, layout.listHeight)
+		m.channelList.SetSize(layout.navWidth, layout.listHeight)
+		m.textInput.Width = maxInt(20, layout.contentWidth-8)
 		m.ensureFieldCursorVisible(len(m.activeFields()))
 		return m, nil
 	case tea.KeyMsg:
@@ -510,14 +523,7 @@ func (m *configureTUIModel) ensureFieldCursorVisible(total int) {
 }
 
 func (m configureTUIModel) visibleFormFieldCount() int {
-	if m.height <= 0 {
-		return 6
-	}
-	count := (m.height - 12) / 4
-	if count < 2 {
-		return 2
-	}
-	return count
+	return deriveConfigureLayout(m.width, m.height).fieldRows
 }
 
 func (m *configureTUIModel) startEditingField(field configureField) {
@@ -581,6 +587,7 @@ func (m configureTUIModel) View() string {
 	if m.quitting {
 		return ""
 	}
+	layout := deriveConfigureLayout(m.width, m.height)
 	header := m.styles.title.Render(m.options.Title)
 	if len(m.options.Intro) == 0 {
 		if m.existed {
@@ -601,23 +608,23 @@ func (m configureTUIModel) View() string {
 	var body string
 	switch m.screen {
 	case configureScreenSections:
-		body = lipgloss.JoinHorizontal(lipgloss.Top,
-			m.styles.focused.Width(maxInt(36, m.width/3)).Render(m.sectionList.View()),
-			m.styles.panel.Width(maxInt(36, m.width-maxInt(42, m.width/3)-8)).Render(renderSummaryPanel(m.styles, m.cfg, "Pick a section on the left. Press s to review and save.")),
+		body = renderConfigureSplitPanels(layout,
+			m.styles.focused.Width(layout.navWidth).Render(m.sectionList.View()),
+			m.styles.panel.Width(layout.detailWidth).Render(renderSummaryPanelMode(m.styles, m.cfg, "Pick a section on the left. Press s to review and save.", layout.compact)),
 		)
 	case configureScreenChannels:
-		body = lipgloss.JoinHorizontal(lipgloss.Top,
-			m.styles.focused.Width(maxInt(36, m.width/3)).Render(m.channelList.View()),
-			m.styles.panel.Width(maxInt(36, m.width-maxInt(42, m.width/3)-8)).Render(renderSummaryPanel(m.styles, m.cfg, "Select a channel to edit its toggles, access policy, and defaults.")),
+		body = renderConfigureSplitPanels(layout,
+			m.styles.focused.Width(layout.navWidth).Render(m.channelList.View()),
+			m.styles.panel.Width(layout.detailWidth).Render(renderSummaryPanelMode(m.styles, m.cfg, "Select a channel to edit its toggles, access policy, and defaults.", layout.compact)),
 		)
 	case configureScreenForm:
 		body = renderFormScreen(m)
 	case configureScreenReview:
-		body = m.styles.focused.Render(renderSummaryPanel(m.styles, m.cfg, "Review the snapshot below. Press Enter or s to save, esc to go back."))
+		body = m.styles.focused.Width(layout.fullWidth).Render(renderSummaryPanelMode(m.styles, m.cfg, "Review the snapshot below. Press Enter or s to save, esc to go back.", layout.compact))
 	case configureScreenSuccess:
-		body = m.styles.focused.Render(m.styles.success.Render(m.successMessage) + "\n\n" + renderSummaryPanel(m.styles, m.cfg, renderNextStepsText(m.cfg)))
+		body = m.styles.focused.Width(layout.fullWidth).Render(m.styles.success.Render(m.successMessage) + "\n\n" + renderSummaryPanelMode(m.styles, m.cfg, renderNextStepsText(m.cfg), layout.compact))
 	case configureScreenQuitConfirm:
-		body = m.styles.focused.Render("You have unsaved changes. Quit anyway?\n\nPress y to discard changes, n or esc to continue editing.")
+		body = m.styles.focused.Width(layout.fullWidth).Render("You have unsaved changes. Quit anyway?\n\nPress y to discard changes, n or esc to continue editing.")
 	}
 
 	footer := m.styles.help.Render(m.help.View(m.keys))
@@ -625,9 +632,10 @@ func (m configureTUIModel) View() string {
 }
 
 func renderFormScreen(m configureTUIModel) string {
+	layout := deriveConfigureLayout(m.width, m.height)
 	fields := m.activeFields()
 	if len(fields) == 0 {
-		return m.styles.panel.Render("No editable fields for this screen.")
+		return m.styles.panel.Width(layout.fullWidth).Render("No editable fields for this screen.")
 	}
 	visibleCount := m.visibleFormFieldCount()
 	start := clampInt(m.formScroll, 0, maxInt(0, len(fields)-1))
@@ -673,14 +681,68 @@ func renderFormScreen(m configureTUIModel) string {
 	if end < len(fields) {
 		rows = append(rows, m.styles.muted.Render("↓ more below"))
 	}
-	left := m.styles.panel.Width(maxInt(40, m.width/2)).Render(strings.Join(rows, "\n\n"))
-	rightContent := renderSummaryPanel(m.styles, m.cfg, formContextHint(m.currentSection, m.currentChannel, m.fieldCursor, len(fields)))
+	left := m.styles.panel.Width(layout.navWidth).Render(strings.Join(rows, "\n\n"))
+	rightContent := renderSummaryPanelMode(m.styles, m.cfg, formContextHint(m.currentSection, m.currentChannel, m.fieldCursor, len(fields)), layout.compact)
 	if m.editing {
 		rightContent += "\n\n" + m.styles.section.Render("Editing") + "\n" + m.textInput.View() + "\n" + m.styles.muted.Render("Enter to apply • esc to cancel")
 	} else {
 		rightContent += "\n\n" + m.styles.section.Render("Selected field") + "\n" + m.styles.highlight.Render(fields[m.fieldCursor].Label)
 	}
-	right := m.styles.panel.Width(maxInt(34, m.width-maxInt(46, m.width/2)-8)).Render(rightContent)
+	right := m.styles.panel.Width(layout.detailWidth).Render(rightContent)
+	return renderConfigureSplitPanels(layout, left, right)
+}
+
+func deriveConfigureLayout(width, height int) configureLayout {
+	fullWidth := maxInt(36, width-4)
+	stacked := width > 0 && width < 110
+	compact := width > 0 && width < 82
+	short := height > 0 && height < 24
+	navWidth := maxInt(34, fullWidth/3)
+	detailWidth := maxInt(34, fullWidth-navWidth-2)
+	contentWidth := detailWidth
+	if stacked {
+		navWidth = fullWidth
+		detailWidth = fullWidth
+		contentWidth = fullWidth
+	}
+	listHeight := maxInt(8, height-10)
+	if stacked {
+		listHeight = maxInt(6, minInt(12, maxInt(6, height/3)))
+	}
+	reserved := 12
+	if stacked {
+		reserved = 20
+	}
+	if short {
+		reserved += 2
+	}
+	fieldRows := 6
+	if height > 0 {
+		fieldRows = (height - reserved) / 4
+	}
+	if compact {
+		fieldRows = minInt(fieldRows, 4)
+	}
+	if fieldRows < 2 {
+		fieldRows = 2
+	}
+	return configureLayout{
+		fullWidth:    fullWidth,
+		navWidth:     navWidth,
+		detailWidth:  detailWidth,
+		stacked:      stacked,
+		compact:      compact || short,
+		short:        short,
+		fieldRows:    fieldRows,
+		listHeight:   listHeight,
+		contentWidth: contentWidth,
+	}
+}
+
+func renderConfigureSplitPanels(layout configureLayout, left, right string) string {
+	if layout.stacked {
+		return lipgloss.JoinVertical(lipgloss.Left, left, right)
+	}
 	return lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 }
 
@@ -700,6 +762,27 @@ func formContextHint(section, channel string, cursor, total int) string {
 }
 
 func renderSummaryPanel(styles configureStyles, cfg config.Config, hint string) string {
+	return renderSummaryPanelMode(styles, cfg, hint, false)
+}
+
+func renderSummaryPanelMode(styles configureStyles, cfg config.Config, hint string, compact bool) string {
+	if compact {
+		channels := strings.Join(enabledChannelNames(cfg), ", ")
+		if strings.TrimSpace(channels) == "" {
+			channels = "none enabled"
+		}
+		lines := []string{
+			styles.section.Render("Current snapshot"),
+			fmt.Sprintf("%s %s", styles.label.Render("Provider:"), styles.value.Render(configureProviderLabel(cfg.Provider.APIBase)+" · "+cfg.Provider.Model)),
+			fmt.Sprintf("%s %s", styles.label.Render("Runtime:"), styles.value.Render(fmt.Sprintf("session=%s · workers=%d", cfg.DefaultSessionKey, cfg.WorkerCount))),
+			fmt.Sprintf("%s %s", styles.label.Render("Security:"), styles.value.Render(fmt.Sprintf("approvals=%t · guarded=%t", cfg.Security.Approvals.Enabled, cfg.Hardening.GuardedTools))),
+			fmt.Sprintf("%s %s", styles.label.Render("Channels:"), styles.value.Render(channels)),
+		}
+		if hint != "" {
+			lines = append(lines, "", styles.section.Render("Hint"), styles.muted.Render(compactConfigureText(hint, 140)))
+		}
+		return strings.Join(lines, "\n")
+	}
 	lines := []string{
 		styles.section.Render("Current snapshot"),
 		fmt.Sprintf("%s %s", styles.label.Render("Provider:"), styles.value.Render(configureProviderLabel(cfg.Provider.APIBase)+" · "+cfg.Provider.Model+" · embed="+emptyAsNone(cfg.Provider.EmbedModel))),
@@ -720,6 +803,14 @@ func renderSummaryPanel(styles configureStyles, cfg config.Config, hint string) 
 		lines = append(lines, "", styles.section.Render("Hint"), styles.muted.Render(hint))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func compactConfigureText(value string, limit int) string {
+	value = strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+	if len(value) <= limit || limit <= 3 {
+		return value
+	}
+	return value[:limit-1] + "…"
 }
 
 func renderNextStepsText(cfg config.Config) string {

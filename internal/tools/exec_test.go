@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -515,10 +516,19 @@ func TestExecTool_SubjectMismatch_Blocks(t *testing.T) {
 
 func TestExecTool_AllowlistMode_Allows(t *testing.T) {
 	broker := makeTestBroker(t, config.ApprovalModeAllowlist)
-	// Add an allowlist rule that matches echo.
-	_, err := broker.AddAllowlist(context.Background(), string(approval.SubjectExec),
+	resolvedEcho, err := exec.LookPath("echo")
+	if err != nil {
+		t.Fatalf("LookPath: %v", err)
+	}
+	resolvedEcho, err = filepath.EvalSymlinks(resolvedEcho)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+
+	// Add an allowlist rule that matches the canonical echo path.
+	_, err = broker.AddAllowlist(context.Background(), string(approval.SubjectExec),
 		approval.AllowlistScope{HostID: "test-host", Tool: "exec"},
-		approval.ExecAllowlistMatcher{ExecutablePath: ""},
+		approval.ExecAllowlistMatcher{ExecutablePath: resolvedEcho},
 		"cli:test", 0)
 	if err != nil {
 		t.Fatalf("AddAllowlist: %v", err)

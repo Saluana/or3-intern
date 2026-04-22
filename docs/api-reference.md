@@ -239,6 +239,53 @@ Returns the same machine-readable capabilities report exposed by `or3-intern cap
 - `?channel=<name>`
 - `?trigger=<name>`
 
+### Embeddings endpoints
+
+These routes expose the same embedding compatibility and rebuild operations used by the local CLI command.
+
+| Method | Path | Auth required | Description |
+| --- | --- | --- | --- |
+| `GET` | `/internal/v1/embeddings/status` | Operator | Returns the current embedding fingerprint/status report for persisted memory vectors and doc-index readiness. |
+| `POST` | `/internal/v1/embeddings/rebuild` | Operator | Rebuilds persisted embeddings for `memory`, `docs`, or `all`. |
+
+`POST /internal/v1/embeddings/rebuild` request body:
+
+```json
+{
+  "target": "memory"
+}
+```
+
+If `target` is omitted, the service defaults to `memory`.
+
+### Audit endpoints
+
+These routes expose the append-only audit chain status and verification flow already used by local operators.
+
+| Method | Path | Auth required | Description |
+| --- | --- | --- | --- |
+| `GET` | `/internal/v1/audit` | Operator | Returns audit configuration/runtime status plus event-count summary. |
+| `POST` | `/internal/v1/audit/verify` | Operator | Verifies the persisted audit chain and returns a machine-readable success response. |
+
+### Scope endpoints
+
+These routes expose the session-scope linking helpers used by the local `scope` CLI command.
+
+| Method | Path | Auth required | Description |
+| --- | --- | --- | --- |
+| `POST` | `/internal/v1/scope/links` | Operator | Links a physical `session_key` to a logical `scope_key`. |
+| `GET` | `/internal/v1/scope/resolve?session_key=...` | Operator | Resolves the effective logical scope for one physical session key. |
+| `GET` | `/internal/v1/scope/sessions?scope_key=...` | Operator | Lists physical session keys linked to a logical scope. |
+
+`POST /internal/v1/scope/links` request body:
+
+```json
+{
+  "session_key": "telegram:123",
+  "scope_key": "customer:acme"
+}
+```
+
 ## Operational guidance
 
 - use strong random shared secrets

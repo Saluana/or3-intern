@@ -93,6 +93,8 @@ Use `or3-intern init` if you only want the original lightweight first-run provid
 
 Use this command after switching `provider.apiBase` or `provider.embedModel`.
 
+The authenticated HTTP parity lives under `or3-intern service` at `/internal/v1/embeddings/status` and `/internal/v1/embeddings/rebuild`.
+
 ```
 or3-intern embeddings status
 ```
@@ -112,6 +114,15 @@ Rebuilds persisted embeddings in the current embedding space:
 - `all` runs both in sequence.
 
 When chat is running, `/new` archives the current conversation before clearing live history. If you recently changed embedding providers or models, the runtime now repairs the active vector profile automatically for new archival writes, but you should still run an explicit rebuild so older memory/doc vectors are regenerated too.
+
+### `or3-intern audit`
+
+```
+or3-intern audit
+or3-intern audit verify
+```
+
+Verifies the append-only audit chain locally. The authenticated HTTP parity lives under `or3-intern service` at `/internal/v1/audit` and `/internal/v1/audit/verify`.
 
 ### `or3-intern migrate-openclaw`
 
@@ -258,6 +269,16 @@ Denies a pairing request.
 ```
 or3-intern pairing exchange <request-id> <code>
 ```
+
+### `or3-intern scope`
+
+```
+or3-intern scope link <session-key> <scope-key>
+or3-intern scope list <scope-key>
+or3-intern scope resolve <session-key>
+```
+
+Links multiple physical session keys to one logical history scope and inspects those links. The authenticated HTTP parity lives under `or3-intern service` at `/internal/v1/scope/links`, `/internal/v1/scope/resolve`, and `/internal/v1/scope/sessions`.
 Exchanges an approved pairing code for a device token (normally done by the remote client, but available here for local testing).
 
 ## Skills commands

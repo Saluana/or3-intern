@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -1546,6 +1547,172 @@ func TestServiceStatusEndpoints_RejectNonGET(t *testing.T) {
 		if rec.Code != http.StatusMethodNotAllowed {
 			t.Fatalf("expected %s to reject POST with 405, got %d (%s)", tc.path, rec.Code, rec.Body.String())
 		}
+	}
+}
+
+func TestServiceEmbeddingsRoutes(t *testing.T) {
+	database, cleanup := openServiceTestDB(t)
+	defer cleanup()
+	if _, err := database.InsertMemoryNote(context.Background(), "sess-1", "hello memory", nil, sql.NullInt64{}, ""); err != nil {
+		t.Fatalf("InsertMemoryNote: %v", err)
+	}
+	providerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/embeddings" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"embedding": []float32{0.1, 0.2}}}})
+	}))
+	defer providerServer.Close()
+	provider := providers.New(providerServer.URL, "", 5*time.Second)
+	provider.HTTP = providerServer.Client()
+	cfg := config.Default()
+	cfg.Service.Secret = strings.Repeat("e", 32)
+	cfg.Provider.APIBase = providerServer.URL
+	cfg.Provider.EmbedModel = "text-embedding-3-small"
+	server := &serviceServer{config: cfg, runtime: &agent.Runtime{DB: database, Provider: provider}, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, cfg.Service.Secret, server)
+	defer httpServer.Close()
+
+	statusReq := mustServiceRequest(t, httpServer, cfg.Service.Secret, http.MethodGet, "/internal/v1/embeddings/status", "")
+	statusResp, err := httpServer.Client().Do(statusReq)
+	if err != nil {
+		t.Fatalf("Do embeddings status: %v", err)
+	}
+	defer statusResp.Body.Close()
+	if statusResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected embeddings status 200, got %d (%s)", statusResp.StatusCode, mustReadBody(t, statusResp.Body))
+	}
+	statusPayload := mustDecodeJSONBody(t, statusResp.Body)
+	if statusPayload["status"] != "ok" {
+		t.Fatalf("unexpected embeddings status payload: %#v", statusPayload)
+	}
+
+	rebuildReq := mustServiceRequest(t, httpServer, cfg.Service.Secret, http.MethodPost, "/internal/v1/embeddings/rebuild", `{"target":"memory"}`)
+	rebuildResp, err := httpServer.Client().Do(rebuildReq)
+	if err != nil {
+		t.Fatalf("Do embeddings rebuild: %v", err)
+	}
+	defer rebuildResp.Body.Close()
+	if rebuildResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected embeddings rebuild 200, got %d (%s)", rebuildResp.StatusCode, mustReadBody(t, rebuildResp.Body))
+	}
+	rebuildPayload := mustDecodeJSONBody(t, rebuildResp.Body)
+	if rebuildPayload["memoryNotesRebuilt"] != float64(1) {
+		t.Fatalf("unexpected embeddings rebuild payload: %#v", rebuildPayload)
+	}
+}
+
+func TestServiceEmbeddingsRoutes_MethodGuards(t *testing.T) {
+	server := &serviceServer{jobs: agent.NewJobRegistry(time.Minute, 32)}
+	tests := []struct {
+		method  string
+		path    string
+		handler func(http.ResponseWriter, *http.Request)
+	}{
+		{method: http.MethodPost, path: "/internal/v1/embeddings/status", handler: server.handleEmbeddings},
+		{method: http.MethodGet, path: "/internal/v1/embeddings/rebuild", handler: server.handleEmbeddings},
+	}
+	for _, tc := range tests {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(tc.method, tc.path, nil)
+		req = req.WithContext(context.WithValue(req.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Kind: "shared-secret", Actor: "service:shared-secret", Role: "admin"}))
+		tc.handler(rec, req)
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("expected %s %s to return 405, got %d (%s)", tc.method, tc.path, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestServiceAuditRoutes(t *testing.T) {
+	database, cleanup := openServiceTestDB(t)
+	defer cleanup()
+	audit := &security.AuditLogger{DB: database, Key: []byte(strings.Repeat("a", 32)), Strict: true}
+	if err := audit.Record(context.Background(), "tool.execute", "sess-1", "cli", map[string]any{"tool": "exec"}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	cfg := config.Default()
+	cfg.Service.Secret = strings.Repeat("a", 32)
+	cfg.Security.Audit.Enabled = true
+	server := &serviceServer{config: cfg, runtime: &agent.Runtime{DB: database, Audit: audit}, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, cfg.Service.Secret, server)
+	defer httpServer.Close()
+
+	statusReq := mustServiceRequest(t, httpServer, cfg.Service.Secret, http.MethodGet, "/internal/v1/audit", "")
+	statusResp, err := httpServer.Client().Do(statusReq)
+	if err != nil {
+		t.Fatalf("Do audit status: %v", err)
+	}
+	defer statusResp.Body.Close()
+	if statusResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected audit status 200, got %d (%s)", statusResp.StatusCode, mustReadBody(t, statusResp.Body))
+	}
+	statusPayload := mustDecodeJSONBody(t, statusResp.Body)
+	if statusPayload["eventCount"] != float64(1) {
+		t.Fatalf("unexpected audit status payload: %#v", statusPayload)
+	}
+
+	verifyReq := mustServiceRequest(t, httpServer, cfg.Service.Secret, http.MethodPost, "/internal/v1/audit/verify", "")
+	verifyResp, err := httpServer.Client().Do(verifyReq)
+	if err != nil {
+		t.Fatalf("Do audit verify: %v", err)
+	}
+	defer verifyResp.Body.Close()
+	if verifyResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected audit verify 200, got %d (%s)", verifyResp.StatusCode, mustReadBody(t, verifyResp.Body))
+	}
+	verifyPayload := mustDecodeJSONBody(t, verifyResp.Body)
+	if verifyPayload["verified"] != true {
+		t.Fatalf("unexpected audit verify payload: %#v", verifyPayload)
+	}
+}
+
+func TestServiceScopeRoutes(t *testing.T) {
+	database, cleanup := openServiceTestDB(t)
+	defer cleanup()
+	cfg := config.Default()
+	cfg.Service.Secret = strings.Repeat("s", 32)
+	server := &serviceServer{config: cfg, runtime: &agent.Runtime{DB: database}, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, cfg.Service.Secret, server)
+	defer httpServer.Close()
+
+	linkReq := mustServiceRequest(t, httpServer, cfg.Service.Secret, http.MethodPost, "/internal/v1/scope/links", `{"session_key":"sess-a","scope_key":"shared-1"}`)
+	linkResp, err := httpServer.Client().Do(linkReq)
+	if err != nil {
+		t.Fatalf("Do scope link: %v", err)
+	}
+	defer linkResp.Body.Close()
+	if linkResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("expected scope link 202, got %d (%s)", linkResp.StatusCode, mustReadBody(t, linkResp.Body))
+	}
+
+	resolveReq := mustServiceRequest(t, httpServer, cfg.Service.Secret, http.MethodGet, "/internal/v1/scope/resolve?session_key=sess-a", "")
+	resolveResp, err := httpServer.Client().Do(resolveReq)
+	if err != nil {
+		t.Fatalf("Do scope resolve: %v", err)
+	}
+	defer resolveResp.Body.Close()
+	if resolveResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected scope resolve 200, got %d (%s)", resolveResp.StatusCode, mustReadBody(t, resolveResp.Body))
+	}
+	resolvePayload := mustDecodeJSONBody(t, resolveResp.Body)
+	if resolvePayload["scope_key"] != "shared-1" {
+		t.Fatalf("unexpected scope resolve payload: %#v", resolvePayload)
+	}
+
+	sessionsReq := mustServiceRequest(t, httpServer, cfg.Service.Secret, http.MethodGet, "/internal/v1/scope/sessions?scope_key=shared-1", "")
+	sessionsResp, err := httpServer.Client().Do(sessionsReq)
+	if err != nil {
+		t.Fatalf("Do scope sessions: %v", err)
+	}
+	defer sessionsResp.Body.Close()
+	if sessionsResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected scope sessions 200, got %d (%s)", sessionsResp.StatusCode, mustReadBody(t, sessionsResp.Body))
+	}
+	sessionsPayload := mustDecodeJSONBody(t, sessionsResp.Body)
+	sessions, ok := sessionsPayload["sessions"].([]any)
+	if !ok || len(sessions) != 1 || sessions[0] != "sess-a" {
+		t.Fatalf("unexpected scope sessions payload: %#v", sessionsPayload)
 	}
 }
 

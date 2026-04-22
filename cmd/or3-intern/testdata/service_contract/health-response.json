@@ -1,0 +1,7 @@
+{
+  "approvalBrokerAvailable": false,
+  "jobRegistryAvailable": true,
+  "runtimeAvailable": true,
+  "status": "ok",
+  "subagentManagerEnabled": false
+}

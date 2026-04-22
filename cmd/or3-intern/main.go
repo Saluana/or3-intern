@@ -24,6 +24,7 @@ import (
 	"or3-intern/internal/channels/telegram"
 	"or3-intern/internal/channels/whatsapp"
 	"or3-intern/internal/config"
+	"or3-intern/internal/controlplane"
 	"or3-intern/internal/cron"
 	"or3-intern/internal/db"
 	"or3-intern/internal/heartbeat"
@@ -61,6 +62,14 @@ func effectiveConsolidationTimeout(cfg config.Config) time.Duration {
 
 func currentEmbedFingerprint(cfg config.Config) string {
 	return providers.EmbeddingFingerprint(cfg.Provider.APIBase, cfg.Provider.EmbedModel, cfg.Provider.EmbedDimensions)
+}
+
+func newProviderClient(cfg config.Config) *providers.Client {
+	timeout := time.Duration(cfg.Provider.TimeoutSeconds) * time.Second
+	prov := providers.New(cfg.Provider.APIBase, cfg.Provider.APIKey, timeout)
+	prov.EmbedDimensions = cfg.Provider.EmbedDimensions
+	prov.HostPolicy = buildHostPolicy(cfg)
+	return prov
 }
 
 func main() {
@@ -203,7 +212,8 @@ func main() {
 		return
 	}
 	if cmd == "audit" {
-		if err := runAuditCommand(ctx, auditLogger, args[1:], os.Stdout); err != nil {
+		cp := controlplane.NewLocal(cfg, d, nil, auditLogger, nil)
+		if err := runAuditCommand(ctx, cp, args[1:], os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, "audit error:", err)
 			os.Exit(1)
 		}
@@ -215,19 +225,24 @@ func main() {
 		os.Exit(1)
 	}
 	if commandHandledBeforeRuntimeBootstrap(cmd) {
-		switch cmd {
-		case "capabilities":
-			if err := runCapabilitiesCommand(cfg, approvalBroker, args[1:], os.Stdout, os.Stderr); err != nil {
-				fmt.Fprintln(os.Stderr, "capabilities error:", err)
+		var prov *providers.Client
+		if cmd == "embeddings" {
+			prov = newProviderClient(cfg)
+		}
+		handled, err := runPreRuntimeCommand(ctx, cmd, cfg, d, prov, auditLogger, approvalBroker, args[1:], os.Stdout, os.Stderr)
+		if handled {
+			if err != nil {
+				if isUsageError(err) {
+					fmt.Fprintln(os.Stderr, err)
+					os.Exit(2)
+				}
+				fmt.Fprintln(os.Stderr, cmd+" error:", err)
 				os.Exit(1)
 			}
+			return
 		}
-		return
 	}
-	timeout := time.Duration(cfg.Provider.TimeoutSeconds) * time.Second
-	prov := providers.New(cfg.Provider.APIBase, cfg.Provider.APIKey, timeout)
-	prov.EmbedDimensions = cfg.Provider.EmbedDimensions
-	prov.HostPolicy = buildHostPolicy(cfg)
+	prov := newProviderClient(cfg)
 	art := &artifacts.Store{Dir: cfg.ArtifactsDir, DB: d}
 
 	b := bus.New(256)
@@ -510,11 +525,6 @@ func main() {
 			fmt.Fprintln(os.Stderr, "migrate-openclaw error:", err)
 			os.Exit(1)
 		}
-	case "embeddings":
-		if err := runEmbeddingsCommand(ctx, cfg, d, prov, args[1:], os.Stdout, os.Stderr); err != nil {
-			fmt.Fprintln(os.Stderr, "embeddings error:", err)
-			os.Exit(1)
-		}
 	case "skills":
 		deps := skillsCommandDeps{
 			Client: newClawHubClient(cfg),
@@ -551,59 +561,6 @@ func main() {
 		if err := runPairingCommand(ctx, approvalBroker, args[1:], os.Stdout, os.Stderr); err != nil {
 			fmt.Fprintln(os.Stderr, "pairing error:", err)
 			os.Exit(1)
-		}
-	case "scope":
-		// or3-intern scope link <session-key> <scope-key>
-		// or3-intern scope list <scope-key>
-		fs := flag.NewFlagSet("scope", flag.ExitOnError)
-		_ = fs.Parse(args[1:])
-		scopeArgs := fs.Args()
-		if len(scopeArgs) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: or3-intern scope <link|list> ...")
-			os.Exit(2)
-		}
-		switch scopeArgs[0] {
-		case "link":
-			if len(scopeArgs) < 3 {
-				fmt.Fprintln(os.Stderr, "usage: or3-intern scope link <session-key> <scope-key>")
-				os.Exit(2)
-			}
-			if err := d.LinkSession(ctx, scopeArgs[1], scopeArgs[2], nil); err != nil {
-				fmt.Fprintln(os.Stderr, "scope link error:", err)
-				os.Exit(1)
-			}
-			fmt.Printf("Linked session %q -> scope %q\n", scopeArgs[1], scopeArgs[2])
-		case "list":
-			if len(scopeArgs) < 2 {
-				fmt.Fprintln(os.Stderr, "usage: or3-intern scope list <scope-key>")
-				os.Exit(2)
-			}
-			sessions, err := d.ListScopeSessions(ctx, scopeArgs[1])
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "scope list error:", err)
-				os.Exit(1)
-			}
-			if len(sessions) == 0 {
-				fmt.Println("(no sessions linked to scope)")
-			} else {
-				for _, s := range sessions {
-					fmt.Println(s)
-				}
-			}
-		case "resolve":
-			if len(scopeArgs) < 2 {
-				fmt.Fprintln(os.Stderr, "usage: or3-intern scope resolve <session-key>")
-				os.Exit(2)
-			}
-			scopeKey, err := d.ResolveScopeKey(ctx, scopeArgs[1])
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "scope resolve error:", err)
-				os.Exit(1)
-			}
-			fmt.Println(scopeKey)
-		default:
-			fmt.Fprintln(os.Stderr, "unknown scope subcommand:", scopeArgs[0])
-			os.Exit(2)
 		}
 	default:
 		fmt.Fprintln(os.Stderr, "unknown command:", cmd)
@@ -654,7 +611,7 @@ func commandHandledBeforeConfigLoad(cmd string) bool {
 
 func commandHandledBeforeRuntimeBootstrap(cmd string) bool {
 	switch cmd {
-	case "capabilities":
+	case "capabilities", "embeddings", "scope":
 		return true
 	default:
 		return false

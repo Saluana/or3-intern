@@ -25,6 +25,12 @@ func TestCommandBootstrapBoundaries(t *testing.T) {
 	if !commandHandledBeforeRuntimeBootstrap("capabilities") {
 		t.Fatal("expected capabilities to be handled before runtime bootstrap")
 	}
+	if !commandHandledBeforeRuntimeBootstrap("embeddings") {
+		t.Fatal("expected embeddings to be handled before runtime bootstrap")
+	}
+	if !commandHandledBeforeRuntimeBootstrap("scope") {
+		t.Fatal("expected scope to be handled before runtime bootstrap")
+	}
 	if commandHandledBeforeRuntimeBootstrap("chat") {
 		t.Fatal("expected chat to require runtime bootstrap")
 	}

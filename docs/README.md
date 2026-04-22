@@ -17,7 +17,7 @@ This directory holds the detailed guides and references that were previously pac
 
 - [Configuration reference](configuration-reference.md) — top-level config map and the major nested sections in `config.json`
 - [CLI reference](cli-reference.md) — command-by-command summary for the `or3-intern` binary
-- [Internal service API reference](api-reference.md) — authenticated HTTP endpoints for `or3-intern service`
+- [Internal service REST / HTTP API reference](api-reference.md) — authenticated machine-facing endpoints for `or3-intern service`
 
 ## Suggested reading order
 

@@ -112,11 +112,10 @@ func newServiceMux(server *serviceServer) *http.ServeMux {
 }
 
 func (s *serviceServer) control() *controlplane.Service {
-	if s.controlSvc != nil {
-		return s.controlSvc
-	}
 	s.controlOnce.Do(func() {
-		s.controlSvc = controlplane.New(s.config, s.runtime, s.broker, s.jobs, s.subagentManager)
+		if s.controlSvc == nil {
+			s.controlSvc = controlplane.New(s.config, s.runtime, s.broker, s.jobs, s.subagentManager)
+		}
 	})
 	return s.controlSvc
 }

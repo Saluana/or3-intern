@@ -18,6 +18,14 @@ func TestHostPolicy_DefaultDenyBlocksUnknownHost(t *testing.T) {
 	}
 }
 
+func TestHostPolicy_DefaultDenyBlocksUnknownLiteralIP(t *testing.T) {
+	policy := HostPolicy{Enabled: true, DefaultDeny: true, AllowedHosts: []string{"example.com"}}
+	target, _ := url.Parse("https://203.0.113.10/v1/chat/completions")
+	if err := policy.ValidateURL(context.Background(), target); err == nil {
+		t.Fatal("expected host policy denial for literal IP")
+	}
+}
+
 func TestHostPolicy_AllowsWildcardHost(t *testing.T) {
 	previousLookup := lookupIPAddr
 	defer func() { lookupIPAddr = previousLookup }()

@@ -134,6 +134,14 @@ func TestWebFetch_HostPolicyDeniesUnknownHost(t *testing.T) {
 	}
 }
 
+func TestWebFetch_HostPolicyDeniesUnknownLiteralIP(t *testing.T) {
+	tool := &WebFetch{HostPolicy: security.HostPolicy{Enabled: true, DefaultDeny: true, AllowedHosts: []string{"example.com"}}}
+	_, err := tool.Execute(context.Background(), map[string]any{"url": "http://203.0.113.10/v1"})
+	if err == nil {
+		t.Fatal("expected host policy denial")
+	}
+}
+
 func TestWebFetch_PinsValidatedHostIntoDial(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "pinned")

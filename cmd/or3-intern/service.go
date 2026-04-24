@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"or3-intern/internal/agent"
@@ -27,6 +28,8 @@ type serviceServer struct {
 	subagentManager *agent.SubagentManager
 	jobs            *agent.JobRegistry
 	broker          *approval.Broker
+	controlOnce     sync.Once
+	controlSvc      *controlplane.Service
 }
 
 const (
@@ -109,7 +112,13 @@ func newServiceMux(server *serviceServer) *http.ServeMux {
 }
 
 func (s *serviceServer) control() *controlplane.Service {
-	return controlplane.New(s.config, s.runtime, s.broker, s.jobs, s.subagentManager)
+	if s.controlSvc != nil {
+		return s.controlSvc
+	}
+	s.controlOnce.Do(func() {
+		s.controlSvc = controlplane.New(s.config, s.runtime, s.broker, s.jobs, s.subagentManager)
+	})
+	return s.controlSvc
 }
 
 func (s *serviceServer) handlePairing(w http.ResponseWriter, r *http.Request) {

@@ -57,6 +57,19 @@ func (serviceContextTool) Execute(ctx context.Context, params map[string]any) (s
 	return "ok", nil
 }
 
+func TestServiceServerControl_CachesWrapper(t *testing.T) {
+	server := &serviceServer{jobs: agent.NewJobRegistry(time.Minute, 32)}
+
+	first := server.control()
+	second := server.control()
+	if first == nil {
+		t.Fatal("expected control service")
+	}
+	if first != second {
+		t.Fatal("expected control service wrapper to be cached")
+	}
+}
+
 func TestServiceAuthMiddleware_RejectsMissingBearer(t *testing.T) {
 	handler := serviceAuthMiddleware("super-secret-super-secret", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true})

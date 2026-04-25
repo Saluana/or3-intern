@@ -40,7 +40,314 @@ func NewRetriever(d *db.DB) *Retriever {
 	return &Retriever{DB: d, VectorWeight: 0.55, FTSWeight: 0.25, LexicalWeight: 0.12, RecencyWeight: 0.08, VectorScanLimit: 2000}
 }
 
+// RetrieveOptions configures an extended retrieval call.
+type RetrieveOptions struct {
+	VectorK         int
+	FTSK            int
+	TopK            int
+	CandidateK      int
+	BudgetChars     int
+	TaskGoal        string
+	TaskKeywords    []string
+	ExcludeStatuses []string
+}
+
+// taskOverlapScore returns a small additive boost in [0, 0.1] for text that
+// overlaps with the active task goal and keywords.
+func taskOverlapScore(text, goal string, keywords []string) float64 {
+	if goal == "" && len(keywords) == 0 {
+		return 0
+	}
+	goalWords := tokenizeWords(goal)
+	for _, kw := range keywords {
+		goalWords = append(goalWords, tokenizeWords(kw)...)
+	}
+	if len(goalWords) == 0 {
+		return 0
+	}
+	goalSet := map[string]struct{}{}
+	for _, w := range goalWords {
+		goalSet[w] = struct{}{}
+	}
+	textWords := tokenizeWords(text)
+	if len(textWords) == 0 {
+		return 0
+	}
+	hits := 0
+	for _, w := range textWords {
+		if _, ok := goalSet[w]; ok {
+			hits++
+		}
+	}
+	score := (float64(hits) / float64(len(goalSet))) * 0.1
+	if score > 0.1 {
+		score = 0.1
+	}
+	return score
+}
+
+// tokenizeWords splits text into lowercase alphanumeric words of length >= 3.
+func tokenizeWords(text string) []string {
+	parts := strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
+		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9')
+	})
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if len(p) >= 3 {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// shingles3 generates character 3-grams from text (normalized to lowercase,
+// single spaces) and returns them as a set.
+func shingles3(text string) map[string]struct{} {
+	text = strings.ToLower(text)
+	text = strings.Join(strings.Fields(text), " ")
+	if len(text) < 3 {
+		return map[string]struct{}{}
+	}
+	set := make(map[string]struct{}, len(text)-2)
+	for i := 0; i <= len(text)-3; i++ {
+		set[text[i:i+3]] = struct{}{}
+	}
+	return set
+}
+
+// shinglesJaccard returns the Jaccard similarity of two shingle sets.
+func shinglesJaccard(a, b map[string]struct{}) float64 {
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+	intersection := 0
+	for k := range a {
+		if _, ok := b[k]; ok {
+			intersection++
+		}
+	}
+	union := len(a) + len(b) - intersection
+	if union == 0 {
+		return 0
+	}
+	return float64(intersection) / float64(union)
+}
+
+// packToBudget picks up to topK candidates fitting within budgetChars total
+// text length. If budgetChars <= 0, simply returns the first topK candidates.
+func packToBudget(candidates []Retrieved, topK int, budgetChars int) []Retrieved {
+	if topK <= 0 {
+		return nil
+	}
+	if budgetChars <= 0 {
+		if len(candidates) <= topK {
+			return candidates
+		}
+		return candidates[:topK]
+	}
+	out := make([]Retrieved, 0, topK)
+	total := 0
+	for _, c := range candidates {
+		if len(out) >= topK {
+			break
+		}
+		if total+len(c.Text) > budgetChars {
+			break
+		}
+		total += len(c.Text)
+		out = append(out, c)
+	}
+	return out
+}
+
+// retrieveCandidates gathers a broad candidate set, applies scoring, status
+// filtering, task-overlap boost, and shingles3 deduplication.
+func (r *Retriever) retrieveCandidates(ctx context.Context, sessionKey, query string, queryVec []float32, opts RetrieveOptions) ([]Retrieved, error) {
+	candidateK := opts.CandidateK
+	if candidateK <= 0 {
+		n := opts.TopK * 3
+		if n < 30 {
+			n = 30
+		}
+		candidateK = n
+	}
+
+	var vecs []VecCandidate
+	if strings.TrimSpace(r.EmbedFingerprint) == "" {
+		var err error
+		vecs, err = VectorSearch(ctx, r.DB, sessionKey, queryVec, candidateK, r.VectorScanLimit)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		fingerprint, err := r.DB.MemoryVectorFingerprint(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if fingerprint == strings.TrimSpace(r.EmbedFingerprint) {
+			vecs, err = VectorSearch(ctx, r.DB, sessionKey, queryVec, candidateK, r.VectorScanLimit)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	fts, err := searchFTSWithFallback(ctx, r.DB, sessionKey, query, candidateK)
+	if err != nil {
+		return nil, err
+	}
+
+	type agg struct {
+		id         int64
+		text       string
+		v          float64
+		f          float64
+		createdAt  int64
+		kind       string
+		status     string
+		importance float64
+		useCount   int
+		lastUsedAt int64
+	}
+	m := map[int64]*agg{}
+	for _, c := range vecs {
+		a := m[c.ID]
+		if a == nil {
+			a = &agg{
+				id:         c.ID,
+				text:       c.Text,
+				kind:       c.Kind,
+				status:     c.Status,
+				importance: c.Importance,
+				useCount:   c.UseCount,
+				lastUsedAt: c.LastUsedAt,
+			}
+			m[c.ID] = a
+		}
+		a.v = c.Score
+		if c.CreatedAt > a.createdAt {
+			a.createdAt = c.CreatedAt
+		}
+	}
+	for _, f := range fts {
+		a := m[f.ID]
+		if a == nil {
+			a = &agg{
+				id:         f.ID,
+				text:       f.Text,
+				kind:       f.Kind,
+				status:     f.Status,
+				importance: f.Importance,
+				useCount:   f.UseCount,
+				lastUsedAt: f.LastUsedAt,
+			}
+			m[f.ID] = a
+		} else {
+			if a.kind == "" {
+				a.kind = f.Kind
+			}
+		}
+		a.f = 1.0 / (1.0 + f.Rank)
+		if f.CreatedAt > a.createdAt {
+			a.createdAt = f.CreatedAt
+		}
+	}
+
+	// Build exclude set.
+	excludeSet := map[string]struct{}{}
+	if opts.ExcludeStatuses == nil {
+		excludeSet[db.MemoryStatusStale] = struct{}{}
+		excludeSet[db.MemoryStatusSuperseded] = struct{}{}
+		excludeSet[db.MemoryStatusExpired] = struct{}{}
+	} else {
+		for _, s := range opts.ExcludeStatuses {
+			excludeSet[s] = struct{}{}
+		}
+	}
+
+	tokens := retrievalTokens(query)
+	newest := int64(0)
+	for _, a := range m {
+		if a.createdAt > newest {
+			newest = a.createdAt
+		}
+	}
+
+	raw := make([]Retrieved, 0, len(m))
+	for _, a := range m {
+		if _, excluded := excludeSet[a.status]; excluded {
+			continue
+		}
+		lexical := lexicalOverlapScore(tokens, a.text)
+		recency := recencyScore(a.createdAt, newest)
+		score := (a.v * r.VectorWeight) + (a.f * r.FTSWeight) + (lexical * r.LexicalWeight) + (recency * r.RecencyWeight)
+		score += metadataScoreAdjust(a.kind, a.status, a.importance, a.useCount)
+		score += taskOverlapScore(a.text, opts.TaskGoal, opts.TaskKeywords)
+		if score < 0 {
+			score = 0
+		}
+		src := "hybrid"
+		if a.f > 0 && a.v == 0 {
+			src = "fts"
+		}
+		if a.v > 0 && a.f == 0 {
+			src = "vector"
+		}
+		raw = append(raw, Retrieved{
+			Source:     src,
+			ID:         a.id,
+			Text:       a.text,
+			Score:      score,
+			Kind:       a.kind,
+			Status:     a.status,
+			Importance: a.importance,
+			UseCount:   a.useCount,
+			CreatedAt:  a.createdAt,
+			LastUsedAt: a.lastUsedAt,
+		})
+	}
+
+	sort.Slice(raw, func(i, j int) bool {
+		if raw[i].Score == raw[j].Score {
+			return raw[i].ID > raw[j].ID
+		}
+		return raw[i].Score > raw[j].Score
+	})
+
+	// Shingles3 dedup: skip candidates with Jaccard > 0.7 to any already selected.
+	selected := make([]Retrieved, 0, min(candidateK, len(raw)))
+	selectedShingles := make([]map[string]struct{}, 0, candidateK)
+	for _, item := range raw {
+		if len(selected) >= candidateK {
+			break
+		}
+		sh := shingles3(item.Text)
+		duplicate := false
+		for _, existing := range selectedShingles {
+			if shinglesJaccard(sh, existing) > 0.7 {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			selected = append(selected, item)
+			selectedShingles = append(selectedShingles, sh)
+		}
+	}
+	return selected, nil
+}
+
+// RetrieveWithOptions retrieves candidates using the given options, then packs
+// them to the token/char budget.
+func (r *Retriever) RetrieveWithOptions(ctx context.Context, sessionKey, query string, queryVec []float32, opts RetrieveOptions) ([]Retrieved, error) {
+	candidates, err := r.retrieveCandidates(ctx, sessionKey, query, queryVec, opts)
+	if err != nil {
+		return nil, err
+	}
+	return packToBudget(candidates, opts.TopK, opts.BudgetChars), nil
+}
+
 // Retrieve runs hybrid retrieval and returns diversified top-k memory results.
+// It is a thin wrapper around RetrieveWithOptions for backward compatibility.
 func (r *Retriever) Retrieve(ctx context.Context, sessionKey, query string, queryVec []float32, vectorK, ftsK, topK int) ([]Retrieved, error) {
 	var vecs []VecCandidate
 	if strings.TrimSpace(r.EmbedFingerprint) == "" {

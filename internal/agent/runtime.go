@@ -216,6 +216,7 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 	}
 
 	r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, finalText, replyMeta, streamed, shouldAutoDeliver(ev))
+	r.updateTaskCard(ctx, ev.SessionKey, finalText)
 
 	// best-effort rolling consolidation of old messages into memory notes
 	if r.Consolidator != nil && r.Builder != nil && r.ConsolidationScheduler != nil {
@@ -1158,6 +1159,21 @@ func (r *Runtime) boundTextResult(ctx context.Context, sessionKey string, text s
 			log.Printf("artifact save failed: %v", err)
 			return text, preview, ""
 		}
+		// Store artifact summary as a memory note (best-effort).
+		if r.DB != nil {
+			summary := artifacts.SummaryForArtifact(text, 500)
+			scopeKey := sessionKey
+			if resolved, err2 := r.DB.ResolveScopeKey(ctx, sessionKey); err2 == nil && strings.TrimSpace(resolved) != "" {
+				scopeKey = resolved
+			}
+			_, _ = r.DB.InsertMemoryNoteTyped(ctx, scopeKey, db.TypedNoteInput{
+				Text:             summary,
+				Kind:             db.MemoryKindArtifactSummary,
+				Status:           db.MemoryStatusActive,
+				SourceArtifactID: id,
+				Summary:          summary,
+			})
+		}
 		return fmt.Sprintf("artifact_id=%s\npreview:\n%s", id, preview), preview, id
 	}
 	return text, preview, ""
@@ -1294,4 +1310,30 @@ func WithTimeout(ctx context.Context, sec int) (context.Context, context.CancelF
 		sec = 60
 	}
 	return context.WithTimeout(ctx, time.Duration(sec)*time.Second)
+}
+
+func (r *Runtime) updateTaskCard(ctx context.Context, sessionKey, assistantReply string) {
+if r.DB == nil {
+return
+}
+ts, _, err := r.DB.GetTaskState(ctx, sessionKey)
+if err != nil {
+return
+}
+if ts.SessionKey == "" {
+ts.SessionKey = sessionKey
+ts.Status = "active"
+}
+preview := assistantReply
+if len(preview) > 50 {
+preview = preview[:50]
+}
+if preview != "" {
+if ts.MessageRefs != "" {
+ts.MessageRefs = ts.MessageRefs + "\n" + preview
+} else {
+ts.MessageRefs = preview
+}
+}
+_ = r.DB.UpsertTaskState(ctx, ts)
 }

@@ -85,6 +85,7 @@ var promptEmbedCache = struct {
 type PromptParts struct {
 	System  []providers.ChatMessage
 	History []providers.ChatMessage
+	Budget  BudgetReport
 }
 
 // BuildOptions holds options for building a prompt.
@@ -444,30 +445,63 @@ func (b *Builder) composeSystemPrompt(pinnedText, digestText, memText, identityT
 	if notes == "" {
 		notes = DefaultToolNotes
 	}
+	skillsText := b.Skills.ModelSummary(skillsMax)
 
+	stable := b.renderStablePrefix(soul, identityText, inst, notes, staticMemoryText, pinnedText, skillsText, maxEach)
+	volatile := b.renderVolatileSuffix(heartbeatText, structuredContextText, digestText, memText, workspaceContextText, docContextText, maxEach)
+
+	var out strings.Builder
+	out.WriteString("# System Prompt")
+	out.WriteString(stable)
+	out.WriteString(volatile)
+	return truncateText(strings.TrimSpace(out.String()), maxTotal)
+}
+
+// renderStablePrefix builds the cache-stable prefix: SOUL.md, Identity, AGENTS.md, Static Memory, TOOLS.md, Pinned Memory, Skills Inventory.
+func (b *Builder) renderStablePrefix(soul, identityText, agentInst, toolNotes, staticMemory, pinnedText, skillsText string, maxEach int) string {
 	type section struct {
 		title string
 		text  string
 	}
-	// Build sections in order, omitting optional ones when empty.
 	sections := []section{
 		{title: "SOUL.md", text: truncateText(soul, maxEach)},
 	}
 	if t := strings.TrimSpace(identityText); t != "" {
 		sections = append(sections, section{title: "Identity", text: truncateText(t, maxEach)})
 	}
-	sections = append(sections, section{title: "AGENTS.md", text: truncateText(inst, maxEach)})
-	if t := strings.TrimSpace(staticMemoryText); t != "" {
+	sections = append(sections, section{title: "AGENTS.md", text: truncateText(agentInst, maxEach)})
+	if t := strings.TrimSpace(staticMemory); t != "" {
 		sections = append(sections, section{title: "Static Memory", text: truncateText(t, maxEach)})
 	}
-	sections = append(sections, section{title: "TOOLS.md", text: truncateText(notes, maxEach)})
+	sections = append(sections, section{title: "TOOLS.md", text: truncateText(toolNotes, maxEach)})
+	sections = append(sections, section{title: "Pinned Memory", text: pinnedText})
+	if t := strings.TrimSpace(skillsText); t != "" {
+		sections = append(sections, section{title: "Skills Inventory", text: t})
+	}
+	var out strings.Builder
+	for _, s := range sections {
+		out.WriteString("\n## ")
+		out.WriteString(s.title)
+		out.WriteString("\n")
+		out.WriteString(strings.TrimSpace(s.text))
+		out.WriteString("\n")
+	}
+	return out.String()
+}
+
+// renderVolatileSuffix builds the volatile suffix: Heartbeat, Structured Trigger Context, Memory Digest, Retrieved Memory, Workspace Context, Indexed File Context, Task Card.
+func (b *Builder) renderVolatileSuffix(heartbeatText, structuredContextText, digestText, memText, workspaceContextText, docContextText string, maxEach int) string {
+	type section struct {
+		title string
+		text  string
+	}
+	var sections []section
 	if t := strings.TrimSpace(heartbeatText); t != "" {
 		sections = append(sections, section{title: "Heartbeat", text: truncateText(t, maxEach)})
 	}
 	if t := strings.TrimSpace(structuredContextText); t != "" {
 		sections = append(sections, section{title: "Structured Trigger Context", text: truncateText(t, maxEach)})
 	}
-	sections = append(sections, section{title: "Pinned Memory", text: pinnedText})
 	if t := strings.TrimSpace(digestText); t != "" {
 		sections = append(sections, section{title: "Memory Digest", text: truncateText(t, maxEach)})
 	}
@@ -478,10 +512,7 @@ func (b *Builder) composeSystemPrompt(pinnedText, digestText, memText, identityT
 	if t := strings.TrimSpace(docContextText); t != "" {
 		sections = append(sections, section{title: "Indexed File Context", text: truncateText(t, maxEach)})
 	}
-	sections = append(sections, section{title: "Skills Inventory", text: b.Skills.ModelSummary(skillsMax)})
-
 	var out strings.Builder
-	out.WriteString("# System Prompt\n")
 	for _, s := range sections {
 		out.WriteString("\n## ")
 		out.WriteString(s.title)
@@ -489,7 +520,14 @@ func (b *Builder) composeSystemPrompt(pinnedText, digestText, memText, identityT
 		out.WriteString(strings.TrimSpace(s.text))
 		out.WriteString("\n")
 	}
-	return truncateText(strings.TrimSpace(out.String()), maxTotal)
+	return out.String()
+}
+
+// renderProviderMessages assembles the system messages from stable prefix and volatile suffix.
+func renderProviderMessages(stablePrefix, volatileSuffix string) []providers.ChatMessage {
+	return []providers.ChatMessage{
+		{Role: "system", Content: strings.TrimSpace(stablePrefix + volatileSuffix)},
+	}
 }
 
 func formatStructuredEventContext(meta map[string]any, max int) string {

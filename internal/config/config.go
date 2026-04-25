@@ -5,6 +5,7 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/url"
 	"os"
@@ -93,6 +94,35 @@ func ProfileSpec(p RuntimeProfile) RuntimeProfileSpec {
 	}
 }
 
+// ContextMode controls token budget aggressiveness.
+type ContextMode string
+
+const (
+	ContextModeQuality  ContextMode = "quality"
+	ContextModeBalanced ContextMode = "balanced"
+	ContextModePoor     ContextMode = "poor"
+	ContextModeCustom   ContextMode = "custom"
+)
+
+// ContextSectionBudgets holds per-section character caps.
+type ContextSectionBudgets struct {
+	SystemCore       int `json:"systemCore"`
+	PinnedMemory     int `json:"pinnedMemory"`
+	MemoryDigest     int `json:"memoryDigest"`
+	RetrievedMemory  int `json:"retrievedMemory"`
+	WorkspaceContext int `json:"workspaceContext"`
+	TaskCard         int `json:"taskCard"`
+	History          int `json:"history"`
+	OutputReserve    int `json:"outputReserve"`
+}
+
+// ContextConfig configures token-budget-aware context assembly.
+type ContextConfig struct {
+	Mode             ContextMode           `json:"mode"`
+	Budgets          ContextSectionBudgets `json:"budgets"`
+	TotalTokenBudget int                   `json:"totalTokenBudget"`
+}
+
 // Config is the top-level persisted runtime configuration.
 type Config struct {
 	DBPath                 string `json:"dbPath"`
@@ -138,6 +168,7 @@ type Config struct {
 	Cron      CronConfig      `json:"cron"`
 	Service   ServiceConfig   `json:"service"`
 	Heartbeat HeartbeatConfig `json:"heartbeat"`
+	Context   ContextConfig   `json:"context"`
 	Channels  ChannelsConfig  `json:"channels"`
 }
 
@@ -1585,4 +1616,68 @@ func hasNonEmpty(values []string) bool {
 		}
 	}
 	return false
+}
+
+// DefaultContextBudgets returns sensible default section budgets per mode.
+func DefaultContextBudgets(mode ContextMode) ContextSectionBudgets {
+	switch mode {
+	case ContextModePoor:
+		return ContextSectionBudgets{
+			SystemCore: 8000, PinnedMemory: 2000, MemoryDigest: 1000,
+			RetrievedMemory: 2000, WorkspaceContext: 2000, TaskCard: 1000,
+			History: 20000, OutputReserve: 2048,
+		}
+	case ContextModeBalanced:
+		return ContextSectionBudgets{
+			SystemCore: 20000, PinnedMemory: 5000, MemoryDigest: 3000,
+			RetrievedMemory: 8000, WorkspaceContext: 5000, TaskCard: 2000,
+			History: 50000, OutputReserve: 4096,
+		}
+	default: // quality
+		return ContextSectionBudgets{
+			SystemCore: 50000, PinnedMemory: 20000, MemoryDigest: 10000,
+			RetrievedMemory: 30000, WorkspaceContext: 20000, TaskCard: 5000,
+			History: 150000, OutputReserve: 8192,
+		}
+	}
+}
+
+// Validate clamps negatives to 0 and validates mode.
+// Returns an error if the mode is invalid.
+func (c *ContextConfig) Validate() error {
+	switch c.Mode {
+	case ContextModeQuality, ContextModeBalanced, ContextModePoor, ContextModeCustom, "":
+		// valid
+	default:
+		return fmt.Errorf("invalid context mode: %q", c.Mode)
+	}
+	if c.TotalTokenBudget < 0 {
+		c.TotalTokenBudget = 0
+	}
+	b := &c.Budgets
+	if b.SystemCore < 0 {
+		b.SystemCore = 0
+	}
+	if b.PinnedMemory < 0 {
+		b.PinnedMemory = 0
+	}
+	if b.MemoryDigest < 0 {
+		b.MemoryDigest = 0
+	}
+	if b.RetrievedMemory < 0 {
+		b.RetrievedMemory = 0
+	}
+	if b.WorkspaceContext < 0 {
+		b.WorkspaceContext = 0
+	}
+	if b.TaskCard < 0 {
+		b.TaskCard = 0
+	}
+	if b.History < 0 {
+		b.History = 0
+	}
+	if b.OutputReserve < 0 {
+		b.OutputReserve = 0
+	}
+	return nil
 }

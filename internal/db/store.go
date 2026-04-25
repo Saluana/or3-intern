@@ -16,13 +16,18 @@ import (
 type MemoryKind = string
 
 const (
-	MemoryKindNote       MemoryKind = "note"
-	MemoryKindSummary    MemoryKind = "summary"
-	MemoryKindFact       MemoryKind = "fact"
-	MemoryKindPreference MemoryKind = "preference"
-	MemoryKindGoal       MemoryKind = "goal"
-	MemoryKindProcedure  MemoryKind = "procedure"
-	MemoryKindEpisode    MemoryKind = "episode"
+	MemoryKindNote           MemoryKind = "note"
+	MemoryKindSummary        MemoryKind = "summary"
+	MemoryKindFact           MemoryKind = "fact"
+	MemoryKindPreference     MemoryKind = "preference"
+	MemoryKindGoal           MemoryKind = "goal"
+	MemoryKindProcedure      MemoryKind = "procedure"
+	MemoryKindEpisode        MemoryKind = "episode"
+	MemoryKindDecision        MemoryKind = "decision"
+	MemoryKindWarning         MemoryKind = "warning"
+	MemoryKindArtifactSummary MemoryKind = "artifact_summary"
+	MemoryKindFileSummary     MemoryKind = "file_summary"
+	MemoryKindTaskState       MemoryKind = "task_state"
 )
 
 // MemoryStatus tracks the lifecycle state of a memory_notes row.
@@ -62,6 +67,11 @@ type TypedNoteInput struct {
 	Kind             string
 	Status           string
 	Importance       float64
+	Summary          string
+	SourceArtifactID string
+	Confidence       float64 // 0 means use default (1.0)
+	ExpiresAt        int64   // unix millis, 0 = no expiry
+	SupersedesID     int64   // 0 = no supersession
 }
 
 type ConsolidationWrite struct {
@@ -248,11 +258,15 @@ func (d *DB) InsertMemoryNoteTyped(ctx context.Context, sessionKey string, input
 		emb = make([]byte, 0)
 	}
 	storedFingerprint := normalizeStoredEmbeddingFingerprint(emb, input.EmbedFingerprint)
+	confidence := input.Confidence
+	if confidence <= 0 {
+		confidence = 1.0
+	}
 	res, err := d.SQL.ExecContext(ctx,
-		`INSERT INTO memory_notes(session_key, text, embedding, embed_fingerprint, source_message_id, tags, created_at, kind, status, importance)
-		 VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO memory_notes(session_key, text, embedding, embed_fingerprint, source_message_id, tags, created_at, kind, status, importance, summary, source_artifact_id, confidence, expires_at, supersedes_id)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		sessionKey, input.Text, emb, storedFingerprint, input.SourceMsgID, input.Tags, NowMS(),
-		kind, status, importance)
+		kind, status, importance, input.Summary, input.SourceArtifactID, confidence, input.ExpiresAt, input.SupersedesID)
 	if err != nil {
 		return 0, err
 	}
@@ -1331,4 +1345,95 @@ func (d *DB) GetLastMessagesScoped(ctx context.Context, sessionKey string, limit
 		out = out[1:]
 	}
 	return out, nil
+}
+
+// TaskState holds the persisted active task state for a session.
+type TaskState struct {
+ID            int64
+SessionKey    string
+Goal          string
+Plan          string
+Constraints   string
+Decisions     string
+OpenQuestions string
+MessageRefs   string
+MemoryRefs    string
+ArtifactRefs  string
+ActiveFiles   string
+Status        string
+CreatedAt     int64
+UpdatedAt     int64
+}
+
+// UpsertTaskState inserts or updates the task state for a session.
+func (d *DB) UpsertTaskState(ctx context.Context, state TaskState) error {
+now := NowMS()
+if state.CreatedAt == 0 {
+state.CreatedAt = now
+}
+state.UpdatedAt = now
+_, err := d.SQL.ExecContext(ctx,
+`INSERT INTO task_state(session_key, goal, plan, constraints, decisions, open_questions,
+            message_refs, memory_refs, artifact_refs, active_files, status, created_at, updated_at)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+         ON CONFLICT(session_key) DO UPDATE SET
+            goal=excluded.goal, plan=excluded.plan, constraints=excluded.constraints,
+            decisions=excluded.decisions, open_questions=excluded.open_questions,
+            message_refs=excluded.message_refs, memory_refs=excluded.memory_refs,
+            artifact_refs=excluded.artifact_refs, active_files=excluded.active_files,
+            status=excluded.status, updated_at=excluded.updated_at`,
+state.SessionKey, state.Goal, state.Plan, state.Constraints,
+state.Decisions, state.OpenQuestions, state.MessageRefs, state.MemoryRefs,
+state.ArtifactRefs, state.ActiveFiles, state.Status, state.CreatedAt, state.UpdatedAt)
+return err
+}
+
+// GetTaskState retrieves the task state for a session.
+func (d *DB) GetTaskState(ctx context.Context, sessionKey string) (TaskState, bool, error) {
+row := d.SQL.QueryRowContext(ctx,
+`SELECT id, session_key, goal, plan, constraints, decisions, open_questions,
+            message_refs, memory_refs, artifact_refs, active_files, status, created_at, updated_at
+         FROM task_state WHERE session_key=?`, sessionKey)
+var ts TaskState
+err := row.Scan(&ts.ID, &ts.SessionKey, &ts.Goal, &ts.Plan, &ts.Constraints,
+&ts.Decisions, &ts.OpenQuestions, &ts.MessageRefs, &ts.MemoryRefs,
+&ts.ArtifactRefs, &ts.ActiveFiles, &ts.Status, &ts.CreatedAt, &ts.UpdatedAt)
+if err != nil {
+if err == sql.ErrNoRows {
+return TaskState{}, false, nil
+}
+return TaskState{}, false, err
+}
+return ts, true, nil
+}
+
+// CompleteTaskState marks the task state as completed for a session.
+func (d *DB) CompleteTaskState(ctx context.Context, sessionKey string) error {
+_, err := d.SQL.ExecContext(ctx,
+`UPDATE task_state SET status='completed', updated_at=? WHERE session_key=?`,
+NowMS(), sessionKey)
+return err
+}
+
+// MarkMemoryNoteStale marks a memory note as stale.
+func (d *DB) MarkMemoryNoteStale(ctx context.Context, id int64) error {
+_, err := d.SQL.ExecContext(ctx,
+`UPDATE memory_notes SET status=? WHERE id=?`,
+MemoryStatusStale, id)
+return err
+}
+
+// MarkMemoryNoteSuperseded marks a memory note as superseded by another note.
+func (d *DB) MarkMemoryNoteSuperseded(ctx context.Context, id int64, supersededBy int64) error {
+_, err := d.SQL.ExecContext(ctx,
+`UPDATE memory_notes SET status=?, supersedes_id=? WHERE id=?`,
+MemoryStatusSuperseded, supersededBy, id)
+return err
+}
+
+// MarkMemoryNoteExpired marks a memory note as expired.
+func (d *DB) MarkMemoryNoteExpired(ctx context.Context, id int64) error {
+_, err := d.SQL.ExecContext(ctx,
+`UPDATE memory_notes SET status='expired' WHERE id=?`, id)
+return err
 }

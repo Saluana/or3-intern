@@ -90,3 +90,15 @@ func randID() string {
 	}
 	return hex.EncodeToString(b[:])
 }
+
+// SummaryForArtifact returns a bounded text summary suitable for a memory note.
+func SummaryForArtifact(content string, maxChars int) string {
+content = strings.TrimSpace(content)
+if content == "" {
+return ""
+}
+if maxChars > 0 && len(content) > maxChars {
+return content[:maxChars] + "...[artifact summary truncated]"
+}
+return content
+}

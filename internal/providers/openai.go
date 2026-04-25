@@ -55,7 +55,8 @@ type ChatMessage struct {
 	Content    any        `json:"content,omitempty"` // string|null
 	Name       string     `json:"name,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCalls    []ToolCall `json:"tool_calls,omitempty"`
+	CacheControl string     `json:"cache_control,omitempty"`
 }
 
 // ToolDef declares a callable tool in provider request format.

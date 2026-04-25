@@ -283,6 +283,23 @@ func (d *DB) migrate(ctx context.Context) error {
 			FOREIGN KEY(approval_request_id) REFERENCES approval_requests(id) ON DELETE CASCADE
 		);`,
 		`CREATE INDEX IF NOT EXISTS approval_tokens_request_expires_at ON approval_tokens(approval_request_id, expires_at);`,
+		`CREATE TABLE IF NOT EXISTS task_state(
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_key TEXT NOT NULL,
+			goal TEXT NOT NULL DEFAULT '',
+			plan TEXT NOT NULL DEFAULT '',
+			constraints TEXT NOT NULL DEFAULT '',
+			decisions TEXT NOT NULL DEFAULT '',
+			open_questions TEXT NOT NULL DEFAULT '',
+			message_refs TEXT NOT NULL DEFAULT '',
+			memory_refs TEXT NOT NULL DEFAULT '',
+			artifact_refs TEXT NOT NULL DEFAULT '',
+			active_files TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'active',
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		);`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS task_state_session_key ON task_state(session_key);`,
 	}
 	for _, s := range stmts {
 		if _, err := d.SQL.ExecContext(ctx, s); err != nil {
@@ -299,6 +316,9 @@ func (d *DB) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := d.ensureMemoryNotesMetaColumns(ctx); err != nil {
+		return err
+	}
+	if err := d.ensureMemoryNotesExtendedColumns(ctx); err != nil {
 		return err
 	}
 	if err := d.ensureMemoryVecMetaFingerprintColumn(ctx); err != nil {
@@ -639,6 +659,29 @@ func (d *DB) ensureMemoryNotesMetaColumns(ctx context.Context) error {
 		 	tags LIKE '%,consolidation,%'
 		 )`)
 	return err
+}
+
+func (d *DB) ensureMemoryNotesExtendedColumns(ctx context.Context) error {
+	type col struct{ name, def string }
+	cols := []col{
+		{"summary", "TEXT NOT NULL DEFAULT ''"},
+		{"source_artifact_id", "TEXT NOT NULL DEFAULT ''"},
+		{"confidence", "REAL NOT NULL DEFAULT 1.0"},
+		{"expires_at", "INTEGER NOT NULL DEFAULT 0"},
+		{"supersedes_id", "INTEGER NOT NULL DEFAULT 0"},
+	}
+	for _, c := range cols {
+		has, err := d.tableHasColumn(ctx, "memory_notes", c.name)
+		if err != nil {
+			return err
+		}
+		if !has {
+			if _, err := d.SQL.ExecContext(ctx, "ALTER TABLE memory_notes ADD COLUMN "+c.name+" "+c.def); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (d *DB) tableHasColumn(ctx context.Context, tableName, columnName string) (bool, error) {

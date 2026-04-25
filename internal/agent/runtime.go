@@ -1312,7 +1312,7 @@ func WithTimeout(ctx context.Context, sec int) (context.Context, context.CancelF
 	return context.WithTimeout(ctx, time.Duration(sec)*time.Second)
 }
 
-// taskCardPreviewLen is the maximum number of bytes kept from each assistant
+// taskCardPreviewLen is the maximum number of runes kept from each assistant
 // reply when building message_refs on the task card.
 const taskCardPreviewLen = 50
 
@@ -1329,8 +1329,8 @@ func (r *Runtime) updateTaskCard(ctx context.Context, sessionKey, assistantReply
 		ts.Status = "active"
 	}
 	preview := assistantReply
-	if len(preview) > taskCardPreviewLen {
-		preview = preview[:taskCardPreviewLen]
+	if runes := []rune(preview); len(runes) > taskCardPreviewLen {
+		preview = string(runes[:taskCardPreviewLen])
 	}
 	if preview != "" {
 		if ts.MessageRefs != "" {

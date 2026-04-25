@@ -1424,11 +1424,12 @@ func (d *DB) MarkMemoryNoteStale(ctx context.Context, id int64) error {
 	return err
 }
 
-// MarkMemoryNoteSuperseded marks a memory note as superseded by another note.
-func (d *DB) MarkMemoryNoteSuperseded(ctx context.Context, id int64, supersededBy int64) error {
+// MarkMemoryNoteSuperseded marks a memory note as superseded, recording the ID
+// of the newer note that replaces it (supersedingNoteID).
+func (d *DB) MarkMemoryNoteSuperseded(ctx context.Context, id int64, supersedingNoteID int64) error {
 	_, err := d.SQL.ExecContext(ctx,
 		`UPDATE memory_notes SET status=?, supersedes_id=? WHERE id=?`,
-		MemoryStatusSuperseded, supersededBy, id)
+		MemoryStatusSuperseded, supersedingNoteID, id)
 	return err
 }
 

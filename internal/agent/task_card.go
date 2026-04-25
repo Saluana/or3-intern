@@ -55,7 +55,18 @@ func RenderTaskCard(tc TaskCard, maxChars int) string {
 	}
 	out := strings.TrimSpace(sb.String())
 	if maxChars > 0 && len(out) > maxChars {
-		return out[:maxChars] + "\n…[truncated]"
+		// Truncate at a rune boundary to avoid splitting multi-byte characters.
+		runes := []rune(out)
+		maxRunes := maxChars
+		if maxRunes > len(runes) {
+			maxRunes = len(runes)
+		}
+		truncated := string(runes[:maxRunes])
+		for len(truncated) > maxChars && maxRunes > 0 {
+			maxRunes--
+			truncated = string(runes[:maxRunes])
+		}
+		return truncated + "\n…[truncated]"
 	}
 	return out
 }

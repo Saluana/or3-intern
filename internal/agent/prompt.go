@@ -524,6 +524,8 @@ func (b *Builder) renderVolatileSuffix(heartbeatText, structuredContextText, dig
 }
 
 // renderProviderMessages assembles the system messages from stable prefix and volatile suffix.
+// It is intended for use by callers that want to pass pre-split sections directly to a provider
+// (e.g. for Anthropic prompt caching where prefix and suffix carry different CacheControl values).
 func renderProviderMessages(stablePrefix, volatileSuffix string) []providers.ChatMessage {
 	return []providers.ChatMessage{
 		{Role: "system", Content: strings.TrimSpace(stablePrefix + volatileSuffix)},

@@ -22,9 +22,25 @@ func TestProblemForFinding(t *testing.T) {
 }
 
 func TestTranslateError(t *testing.T) {
-	translated := TranslateError(errors.New("approval broker unavailable"))
-	if translated.Title == "" || translated.Command == "" {
-		t.Fatalf("unexpected translated error: %#v", translated)
+	tests := []struct {
+		err     string
+		command string
+	}{
+		{err: "approval broker unavailable", command: "or3-intern status"},
+		{err: "approval required for exec", command: "or3-intern approvals list pending"},
+		{err: "audit logger unavailable", command: "or3-intern status"},
+		{err: "unknown tool in tool_policy", command: "or3-intern settings"},
+		{err: "runtime unavailable", command: "or3-intern status"},
+		{err: "service auth missing", command: "or3-intern connect-device"},
+		{err: "workspace missing", command: "or3-intern settings --section workspace"},
+		{err: "sandbox not found", command: "or3-intern status --advanced"},
+		{err: "provider api key missing", command: "or3-intern settings --section provider"},
+	}
+	for _, tc := range tests {
+		translated := TranslateError(errors.New(tc.err))
+		if translated.Title == "" || translated.Command != tc.command || translated.Advanced == "" {
+			t.Fatalf("unexpected translated error for %q: %#v", tc.err, translated)
+		}
 	}
 }
 

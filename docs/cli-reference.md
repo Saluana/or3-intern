@@ -9,19 +9,110 @@ or3-intern version
 
 If you are running directly from a checkout without installing, replace `or3-intern` with `go run ./cmd/or3-intern`.
 
-## Primary commands
+## Simple commands
+
+| Command | Purpose |
+| --- | --- |
+| `or3-intern setup` | Guided first-run setup with scenario and safety choices |
+| `or3-intern chat` | Interactive CLI session |
+| `or3-intern status [--advanced]` | Shows a plain-language safety, access, and problems summary |
+| `or3-intern settings [--section ...] [--export path|-]` | Opens the task-based settings home and supports focused edits or config export |
+| `or3-intern connect-device [list|disconnect <device-id>|role <device-id>]` | Pairs a phone or other device using a short code and simple access levels |
+| `or3-intern help` | Shows the simple root help; use `or3-intern --advanced --help` for the full operator surface |
+
+## Advanced commands
 
 | Command | Purpose |
 | --- | --- |
 | `or3-intern configure [--section ...]` | Interactive setup and reconfiguration wizard for provider, storage, workspace, web, channels, and service |
 | `or3-intern init` | Guided first-run setup for config and provider settings |
 | `or3-intern config-path` | Prints the resolved config.json path |
-| `or3-intern chat` | Interactive CLI session |
 | `or3-intern serve` | Starts enabled channels, triggers, heartbeat, cron, and the shared worker runtime |
 | `or3-intern service` | Starts the authenticated internal HTTP API |
 | `or3-intern agent -m "..."` | Runs a one-shot foreground turn |
 | `or3-intern version` | Prints the binary version |
 | `or3-intern help [command]` | Shows root help or command-specific help |
+
+Root help behavior:
+
+- `or3-intern help` shows the short simple-command list.
+- `or3-intern --advanced --help` shows the full command catalog.
+- `or3-intern help <command>` shows detailed help for either simple or advanced commands.
+
+### `or3-intern setup`
+
+Guided setup using the product-facing mental model instead of raw config sections.
+
+```
+or3-intern setup
+```
+
+The flow asks for:
+
+- provider
+- workspace folder
+- usage scenario
+- safety mode
+
+It then applies the corresponding runtime profile, approvals, audit, service, and hardening settings before saving the config.
+
+If setup succeeds, it prints a short review covering files, commands, internet, devices, and activity log state, then asks whether to start chat next.
+
+### `or3-intern status`
+
+Shows a friendly status summary sourced from config plus doctor findings.
+
+```
+or3-intern status
+or3-intern status --advanced
+or3-intern status --fix approvals.key_path_missing
+```
+
+Default output focuses on:
+
+- effective safety mode
+- workspace/file boundaries
+- command posture
+- internet posture
+- device/connectivity readiness
+- activity log state
+- a "What OR3 can access" dashboard for files, commands, internet, apps, devices, memory, and activity log
+- problems that need attention
+
+Use `--advanced` to also print the underlying finding IDs. Use `--fix <finding-id>` for one safe automatic repair when advanced output shows a `Fix now` command.
+
+### `or3-intern settings`
+
+```
+or3-intern settings
+or3-intern settings --section safety
+or3-intern settings --section workspace
+or3-intern settings --export config.json
+```
+
+This is the user-facing entry point for revisiting setup. The default view is task-based: AI Provider, Workspace Folder, Connected Devices, Safety Level, Channels, Tools, Memory, and Advanced.
+
+Use `--section` to jump to one task area. Common sections are `provider`, `workspace`, `devices`, `safety`, `channels`, `tools`, `memory`, and `advanced`.
+
+Use `--export` when you need the raw JSON config without making JSON editing the normal path.
+
+### `or3-intern connect-device`
+
+```
+or3-intern connect-device
+or3-intern connect-device list
+or3-intern connect-device disconnect <device-id>
+or3-intern connect-device role <device-id>
+```
+
+This flow:
+
+- checks pairing/service prerequisites
+- repairs missing safe defaults such as service secret or approval key when needed
+- creates a pairing code
+- lets the user choose an access level such as chat-only, workspace access, or admin
+
+The `list` view shows connected devices with friendly role labels, last-used status, change-access guidance, and disconnect commands. `role` currently points users to disconnect/reconnect with a new access level so the role change remains explicit and safe.
 
 Command boundary:
 
@@ -74,7 +165,7 @@ Use `or3-intern init` if you only want the original lightweight first-run provid
 
 `init` is a first-run alias over `configure`. It uses the same TTY detection rules and the same Bubble Tea UI when interactive, but it preselects the original first-run sections: provider, storage, workspace, and web.
 
-## Operational and admin commands
+## Operator tools
 
 | Command | Purpose |
 | --- | --- |
@@ -150,12 +241,12 @@ Manage pending approval requests and allowlist rules. All sub-commands work dire
 ```
 or3-intern approvals list [status]
 ```
-Lists approval requests. Optionally filter by status: `pending`, `approved`, `denied`, `canceled`, `expired`. Up to 100 results are returned.
+Lists approval requests. Optionally filter by status: `pending`, `approved`, `denied`, `canceled`, `expired`. Up to 100 results are returned. The default output includes a short human summary of what OR3 wants to do.
 
 ```
 or3-intern approvals show <id>
 ```
-Shows full detail for one approval request, including subject JSON, status, policy mode, and resolution info.
+Shows one approval request with a friendly action summary and risk label, plus the raw subject details for advanced review.
 
 ```
 or3-intern approvals approve <id> [--allowlist] [--note <text>]
@@ -215,12 +306,12 @@ Manage paired devices and pairing requests. All sub-commands work directly again
 ```
 or3-intern devices list
 ```
-Lists all paired devices with their status, role, and display name.
+Lists all paired devices with their status, role, and display name, followed by friendly role and status labels.
 
 ```
 or3-intern devices requests [status]
 ```
-Lists pairing requests. Optionally filter by status: `pending`, `approved`, `denied`, `exchanged`.
+Lists pairing requests. Optionally filter by status: `pending`, `approved`, `denied`, `exchanged`. The default output includes a human summary of the requested device access.
 
 ```
 or3-intern devices approve <pairing-request-id>

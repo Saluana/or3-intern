@@ -34,8 +34,10 @@ func runConnectDeviceCommand(ctx context.Context, cfgPath string, cfg *config.Co
 			}
 			fmt.Fprintf(stdout, "Disconnected %s\n", strings.TrimSpace(args[1]))
 			return nil
+		case "role":
+			return fmt.Errorf("changing device access is not interactive yet; disconnect and reconnect the device with the new access level")
 		default:
-			return fmt.Errorf("usage: connect-device [list|disconnect <device-id>]")
+			return fmt.Errorf("usage: connect-device [list|disconnect <device-id>|role <device-id>]")
 		}
 	}
 	if cfg == nil {
@@ -106,7 +108,9 @@ func runConnectDeviceList(ctx context.Context, database *db.DB, stdout io.Writer
 		fmt.Fprintf(stdout, "\n- %s\n", view.Name)
 		fmt.Fprintf(stdout, "  Role: %s\n", view.RoleLabel)
 		fmt.Fprintf(stdout, "  Status: %s\n", view.Status)
-		fmt.Fprintf(stdout, "  Disconnect: or3-intern connect-device disconnect %s\n", view.DeviceID)
+		fmt.Fprintf(stdout, "  Last used: %s\n", view.LastUsed)
+		fmt.Fprintf(stdout, "  %s\n", view.ChangeAccessHint)
+		fmt.Fprintf(stdout, "  %s\n", view.DisconnectHint)
 	}
 	return nil
 }

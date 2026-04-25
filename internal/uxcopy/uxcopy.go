@@ -32,6 +32,13 @@ var settingLabels = map[string]SettingCopy{
 	"security.approvals.mode":   {Label: "When should OR3 ask?", Hint: "Controls prompts for commands, skills, secrets, messages, and pairing."},
 	"service.enabled":           {Label: "Allow other devices and apps to connect", Hint: "Lets phones or companion apps connect when protected by a secret."},
 	"runtimeProfile":            {Label: "Safety posture", Hint: "Advanced implementation detail behind Safety Mode."},
+	"provider":                  {Label: "AI Provider", Hint: "Endpoint, model, and API key used for chat and embeddings."},
+	"workspace":                 {Label: "Workspace Folder", Hint: "The folder OR3 should stay inside for file work."},
+	"devices":                   {Label: "Connected Devices", Hint: "Phones, apps, and service clients allowed to talk to OR3."},
+	"channels":                  {Label: "Channels", Hint: "Optional app connections such as Slack, Discord, Telegram, Email, and WhatsApp."},
+	"tools":                     {Label: "Tools", Hint: "Command execution, web access, skills, MCP, and other optional capabilities."},
+	"memory":                    {Label: "Memory", Hint: "Saved notes, conversation history, and document indexing."},
+	"advanced":                  {Label: "Advanced", Hint: "Raw config sections and export for operators."},
 }
 
 var findingCopy = map[string]ProblemCopy{
@@ -74,8 +81,16 @@ func TranslateError(err error) UserError {
 	raw := strings.TrimSpace(err.Error())
 	lower := strings.ToLower(raw)
 	switch {
+	case strings.Contains(lower, "approval required") || strings.Contains(lower, "requires approval"):
+		return UserError{Title: "OR3 needs your approval", WhatHappened: "The assistant tried to do something that your safety settings require you to approve first.", Fix: "Review the pending approval and choose allow once, always allow this kind of action, or deny.", Command: "or3-intern approvals list pending", Advanced: raw}
 	case strings.Contains(lower, "approval broker unavailable") || strings.Contains(lower, "approval broker is not configured"):
 		return UserError{Title: "Approvals are not set up yet", WhatHappened: "OR3 cannot safely approve actions because the local approval system is missing or incomplete.", Fix: "Create the local approval key and turn on approvals.", Command: "or3-intern status", Advanced: raw}
+	case strings.Contains(lower, "workspace") && (strings.Contains(lower, "missing") || strings.Contains(lower, "not exist") || strings.Contains(lower, "no such file")):
+		return UserError{Title: "Workspace folder needs attention", WhatHappened: "OR3 cannot use the configured workspace folder.", Fix: "Choose an existing folder or update the workspace setting.", Command: "or3-intern settings --section workspace", Advanced: raw}
+	case strings.Contains(lower, "sandbox") && (strings.Contains(lower, "missing") || strings.Contains(lower, "not found") || strings.Contains(lower, "unavailable")):
+		return UserError{Title: "Command sandbox is not ready", WhatHappened: "OR3 is configured to isolate risky commands, but the sandbox runtime is missing or unavailable.", Fix: "Install the sandbox dependency or choose a safety mode that does not require sandboxing.", Command: "or3-intern status --advanced", Advanced: raw}
+	case strings.Contains(lower, "provider") || strings.Contains(lower, "api key") || strings.Contains(lower, "apikey"):
+		return UserError{Title: "AI provider settings need attention", WhatHappened: "OR3 could not use the configured AI provider settings.", Fix: "Review your provider endpoint, model, and API key.", Command: "or3-intern settings --section provider", Advanced: raw}
 	case strings.Contains(lower, "runtime unavailable"):
 		return UserError{Title: "The assistant engine did not start", WhatHappened: "OR3 could not start its runtime safely.", Fix: "Check your provider settings and local runtime setup.", Command: "or3-intern status", Advanced: raw}
 	case strings.Contains(lower, "service auth missing") || strings.Contains(lower, "service secret"):

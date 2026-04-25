@@ -95,23 +95,30 @@ var helpTopics = map[string]helpCommand{
 		Examples: []string{"or3-intern setup"},
 	},
 	"settings": {
-		Usage:   "or3-intern settings",
+		Usage:   "or3-intern settings [--section provider|workspace|devices|safety|channels|tools|memory|advanced] [--export path|-] [--advanced]",
 		Summary: "Open the settings flow for reviewing and updating your setup.",
 		Description: []string{
-			"Today this reuses the existing configure wizard while the task-based settings UI is being built.",
+			"Shows a task-based settings home for AI Provider, Workspace Folder, Connected Devices, Safety Level, Channels, Tools, Memory, and Advanced.",
+			"Use --section to jump to a task, or --export to write the current advanced JSON config without making JSON editing the default path.",
 		},
-		Examples: []string{"or3-intern settings"},
+		Flags: []helpItem{
+			{Name: "--section <name>", Description: "Open a task section: provider, workspace, devices, safety, channels, tools, memory, advanced"},
+			{Name: "--export <path|->", Description: "Export current config JSON to a file or stdout"},
+			{Name: "--advanced", Description: "Show advanced settings actions on the home screen"},
+		},
+		Examples: []string{"or3-intern settings", "or3-intern settings --section safety", "or3-intern settings --export config.json"},
 	},
 	"status": {
-		Usage:   "or3-intern status [--advanced]",
+		Usage:   "or3-intern status [--advanced] [--fix finding-id]",
 		Summary: "Show a friendly safety and access summary, plus problems that need attention.",
 		Flags: []helpItem{
 			{Name: "--advanced", Description: "Include internal finding IDs in the output"},
+			{Name: "--fix <finding-id>", Description: "Apply one safe automatic repair by advanced finding ID"},
 		},
-		Examples: []string{"or3-intern status", "or3-intern status --advanced"},
+		Examples: []string{"or3-intern status", "or3-intern status --advanced", "or3-intern status --fix approvals.key_path_missing"},
 	},
 	"connect-device": {
-		Usage:    "or3-intern connect-device [list|disconnect <device-id>]",
+		Usage:    "or3-intern connect-device [list|disconnect <device-id>|role <device-id>]",
 		Summary:  "Pair a phone or other device using a short code and simple access levels.",
 		Examples: []string{"or3-intern connect-device", "or3-intern connect-device list"},
 	},

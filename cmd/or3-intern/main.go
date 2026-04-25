@@ -126,8 +126,10 @@ func main() {
 				os.Exit(1)
 			}
 		case "settings":
-			if err := runSettings(cfgPath); err != nil {
-				fmt.Fprintln(os.Stderr, "settings error:", err)
+			if err := runSettings(cfgPath, args[1:]); err != nil {
+				if translated := translateAndPrintError(err, os.Stderr); translated != nil {
+					fmt.Fprintln(os.Stderr, "settings error:", err)
+				}
 				os.Exit(1)
 			}
 		case "setup":
@@ -180,13 +182,15 @@ func main() {
 				defer database.Close()
 			}
 		}
-		detailedStatus, err := parseStatusArgs(args[1:], advancedHelp)
+		statusOptions, err := parseStatusCommandArgs(args[1:], advancedHelp)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "status error:", err)
 			os.Exit(2)
 		}
-		if err := runStatusCommand(cfg, validationError, database, os.Stdout, detailedStatus); err != nil {
-			fmt.Fprintln(os.Stderr, "status error:", err)
+		if err := runStatusCommandWithOptions(cfgPathOrDefault(cfgPath), cfg, validationError, database, os.Stdout, statusOptions); err != nil {
+			if translated := translateAndPrintError(err, os.Stderr); translated != nil {
+				fmt.Fprintln(os.Stderr, "status error:", err)
+			}
 			os.Exit(1)
 		}
 		return
@@ -194,7 +198,9 @@ func main() {
 
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "config error:", err)
+		if translated := translateAndPrintError(err, os.Stderr); translated != nil {
+			fmt.Fprintln(os.Stderr, "config error:", err)
+		}
 		if hint := configErrorHint(err); hint != "" {
 			fmt.Fprintln(os.Stderr, hint)
 		}
@@ -244,11 +250,15 @@ func main() {
 	defer stopSignals()
 	cfg, secretManager, auditLogger, err := setupSecurity(ctx, cfg, d)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "security error:", err)
+		if translated := translateAndPrintError(err, os.Stderr); translated != nil {
+			fmt.Fprintln(os.Stderr, "security error:", err)
+		}
 		os.Exit(1)
 	}
 	if err := validateStartupCommand(cmd, cfg, unsafeDev); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		if translated := translateAndPrintError(err, os.Stderr); translated != nil {
+			fmt.Fprintln(os.Stderr, err)
+		}
 		os.Exit(1)
 	}
 	if cmd == "secrets" {
@@ -276,7 +286,9 @@ func main() {
 	}
 	approvalBroker, err := setupApprovalBroker(cfg, d, auditLogger)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "approval error:", err)
+		if translated := translateAndPrintError(err, os.Stderr); translated != nil {
+			fmt.Fprintln(os.Stderr, "approval error:", err)
+		}
 		os.Exit(1)
 	}
 	if commandHandledBeforeRuntimeBootstrap(cmd) {
@@ -604,7 +616,9 @@ func main() {
 		}
 	case "approvals":
 		if err := runApprovalsCommand(ctx, approvalBroker, args[1:], os.Stdout, os.Stderr); err != nil {
-			fmt.Fprintln(os.Stderr, "approvals error:", err)
+			if translated := translateAndPrintError(err, os.Stderr); translated != nil {
+				fmt.Fprintln(os.Stderr, "approvals error:", err)
+			}
 			os.Exit(1)
 		}
 	case "devices":

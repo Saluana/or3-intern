@@ -51,7 +51,7 @@ func runStatusCommandWithOptions(cfgPath string, cfg config.Config, validationEr
 		if len(selected) == 0 {
 			return fmt.Errorf("no safe automatic repair is available for %q", args.FixID)
 		}
-		applied, err := intdoctor.ApplyAutomaticFixes(cfgPath, &cfg, intdoctor.NewReport(intdoctor.ModeAdvisory, selected), intdoctor.FixOptions{AutomaticOnly: true})
+		applied, err := intdoctor.ApplyAutomaticFixes(cfgPath, &cfg, intdoctor.NewReport(intdoctor.ModeAdvisory, selected))
 		if err != nil {
 			return err
 		}

@@ -93,12 +93,24 @@ func randID() string {
 
 // SummaryForArtifact returns a bounded text summary suitable for a memory note.
 func SummaryForArtifact(content string, maxChars int) string {
-content = strings.TrimSpace(content)
-if content == "" {
-return ""
-}
-if maxChars > 0 && len(content) > maxChars {
-return content[:maxChars] + "...[artifact summary truncated]"
-}
-return content
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return ""
+	}
+	if maxChars > 0 && len(trimmed) > maxChars {
+		// Truncate at a rune boundary to avoid splitting multi-byte characters.
+		runes := []rune(trimmed)
+		maxRunes := maxChars // conservative: rune count <= byte count
+		if maxRunes > len(runes) {
+			maxRunes = len(runes)
+		}
+		// Find rune boundary within byte budget.
+		truncated := string([]rune(trimmed)[:maxRunes])
+		for len(truncated) > maxChars && maxRunes > 0 {
+			maxRunes--
+			truncated = string([]rune(trimmed)[:maxRunes])
+		}
+		return truncated + "...[artifact summary truncated]"
+	}
+	return trimmed
 }

@@ -451,7 +451,7 @@ func (b *Builder) composeSystemPrompt(pinnedText, digestText, memText, identityT
 	volatile := b.renderVolatileSuffix(heartbeatText, structuredContextText, digestText, memText, workspaceContextText, docContextText, maxEach)
 
 	var out strings.Builder
-	out.WriteString("# System Prompt")
+	out.WriteString("# System Prompt\n")
 	out.WriteString(stable)
 	out.WriteString(volatile)
 	return truncateText(strings.TrimSpace(out.String()), maxTotal)

@@ -11,6 +11,7 @@ import (
 	"or3-intern/internal/app"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/controlplane"
+	"or3-intern/internal/db"
 	"or3-intern/internal/uxstate"
 )
 
@@ -24,28 +25,49 @@ func runApprovalsCommand(ctx context.Context, broker *approval.Broker, args []st
 	}
 	switch strings.ToLower(strings.TrimSpace(args[0])) {
 	case "list":
-		if err := requireArgRange(args[1:], 0, 1, "approvals list [status]"); err != nil {
+		fs := flag.NewFlagSet("approvals list", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		advanced := fs.Bool("advanced", false, "show raw approval details")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if err := requireArgRange(fs.Args(), 0, 1, "approvals list [--advanced] [status]"); err != nil {
 			return err
 		}
 		status := ""
-		if len(args) > 1 {
-			status = strings.TrimSpace(args[1])
+		if fs.NArg() > 0 {
+			status = strings.TrimSpace(fs.Arg(0))
 		}
 		items, err := appSvc.ListApprovalRequests(ctx, controlplane.ApprovalFilter{Status: status, Limit: 100})
 		if err != nil {
 			return err
 		}
+		if len(items) == 0 {
+			return nil
+		}
+		fmt.Fprintln(stdout, "Pending permissions")
 		for _, item := range items {
 			view := uxstate.BuildApprovalPrompt(item)
-			fmt.Fprintf(stdout, "%d\t%s\t%s\t%s\n", item.ID, item.Status, item.Type, item.SubjectHash)
-			fmt.Fprintf(stdout, "  %s: %s\n", view.Title, view.ActionSummary)
+			fmt.Fprintf(stdout, "\n%d. %s\n", item.ID, friendlyApprovalTitle(view))
+			fmt.Fprintf(stdout, "   Action: %s\n", view.ActionSummary)
+			fmt.Fprintf(stdout, "   Risk: %s. %s\n", view.RiskLabel, view.RiskExplanation)
+			fmt.Fprintf(stdout, "   Review: or3-intern approvals show %d\n", item.ID)
+			if *advanced {
+				printApprovalAdvanced(stdout, item)
+			}
 		}
 		return nil
 	case "show":
-		if err := requireExactArgs(args[1:], 1, "approvals show <id>"); err != nil {
+		fs := flag.NewFlagSet("approvals show", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		advanced := fs.Bool("advanced", false, "show raw approval details")
+		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		id, err := strconv.ParseInt(strings.TrimSpace(args[1]), 10, 64)
+		if err := requireExactFlagArgs(fs, 1, "approvals show [--advanced] <id>"); err != nil {
+			return err
+		}
+		id, err := strconv.ParseInt(strings.TrimSpace(fs.Arg(0)), 10, 64)
 		if err != nil {
 			return fmt.Errorf("invalid approval ID")
 		}
@@ -54,12 +76,16 @@ func runApprovalsCommand(ctx context.Context, broker *approval.Broker, args []st
 			return err
 		}
 		view := uxstate.BuildApprovalPrompt(item)
-		_, _ = fmt.Fprintf(stdout, "id: %d\nstatus: %s\ntype: %s\nsummary: %s\nrisk: %s\nwhy: %s\nsubject_hash: %s\npolicy_mode: %s\nsubject_json: %s\n", item.ID, item.Status, item.Type, view.ActionSummary, view.RiskLabel, view.Why, item.SubjectHash, item.PolicyMode, item.SubjectJSON)
+		printApprovalPrompt(stdout, item, view)
+		if *advanced {
+			printApprovalAdvanced(stdout, item)
+		}
 		return nil
 	case "approve":
 		fs := flag.NewFlagSet("approvals approve", flag.ContinueOnError)
 		fs.SetOutput(stderr)
 		alwaysAllow := fs.Bool("allowlist", false, "create a matching allowlist rule")
+		remember := fs.Bool("remember", false, "always allow this kind of action")
 		note := fs.String("note", "", "resolution note")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
@@ -71,7 +97,7 @@ func runApprovalsCommand(ctx context.Context, broker *approval.Broker, args []st
 		if err != nil {
 			return fmt.Errorf("invalid approval ID")
 		}
-		issued, err := appSvc.ApproveApproval(ctx, id, "cli", *alwaysAllow, *note)
+		issued, err := appSvc.ApproveApproval(ctx, id, "cli", *alwaysAllow || *remember, *note)
 		if err != nil {
 			return err
 		}
@@ -211,5 +237,64 @@ func runApprovalAllowlistCommand(ctx context.Context, appSvc *app.ServiceApp, de
 		return nil
 	default:
 		return fmt.Errorf("unknown allowlist subcommand: %s", args[0])
+	}
+}
+
+func printApprovalPrompt(stdout io.Writer, item db.ApprovalRequestRecord, view uxstate.ApprovalPromptView) {
+	fmt.Fprintln(stdout, "OR3 wants permission")
+	fmt.Fprintln(stdout, "\nAction:")
+	fmt.Fprintf(stdout, "  %s\n", friendlyApprovalAction(view))
+	if strings.TrimSpace(view.ActionSummary) != "" {
+		fmt.Fprintln(stdout, "\nCommand:")
+		fmt.Fprintf(stdout, "  %s\n", view.ActionSummary)
+	}
+	fmt.Fprintln(stdout, "\nWhy:")
+	fmt.Fprintf(stdout, "  %s\n", view.Why)
+	fmt.Fprintln(stdout, "\nRisk:")
+	fmt.Fprintf(stdout, "  %s. %s\n", view.RiskLabel, view.RiskExplanation)
+	fmt.Fprintln(stdout, "\nChoices:")
+	for index, choice := range view.ChoiceHints {
+		fmt.Fprintf(stdout, "  %d. %s\n", index+1, choice)
+	}
+	fmt.Fprintln(stdout, "\nCommands:")
+	fmt.Fprintf(stdout, "  or3-intern approvals approve %d\n", item.ID)
+	fmt.Fprintf(stdout, "  or3-intern approvals approve %d --remember\n", item.ID)
+	fmt.Fprintf(stdout, "  or3-intern approvals deny %d\n", item.ID)
+}
+
+func printApprovalAdvanced(stdout io.Writer, item db.ApprovalRequestRecord) {
+	fmt.Fprintf(stdout, "   Advanced ID: %d\n", item.ID)
+	fmt.Fprintf(stdout, "   Status: %s\n", item.Status)
+	fmt.Fprintf(stdout, "   Type: %s\n", item.Type)
+	fmt.Fprintf(stdout, "   Subject hash: %s\n", item.SubjectHash)
+	fmt.Fprintf(stdout, "   Policy mode: %s\n", item.PolicyMode)
+	fmt.Fprintf(stdout, "   Subject JSON: %s\n", item.SubjectJSON)
+}
+
+func friendlyApprovalTitle(view uxstate.ApprovalPromptView) string {
+	title := strings.TrimSpace(view.Title)
+	title = strings.TrimPrefix(title, "OR3 wants to ")
+	title = strings.TrimPrefix(title, "OR3 wants ")
+	if title == "" {
+		return "Permission needed"
+	}
+	return strings.ToUpper(title[:1]) + title[1:]
+}
+
+func friendlyApprovalAction(view uxstate.ApprovalPromptView) string {
+	title := strings.ToLower(strings.TrimSpace(view.Title))
+	switch {
+	case strings.Contains(title, "command"):
+		return "Run a command"
+	case strings.Contains(title, "skill"):
+		return "Run a skill"
+	case strings.Contains(title, "secret"):
+		return "Use a secret"
+	case strings.Contains(title, "message"):
+		return "Send a message"
+	case strings.Contains(title, "file"):
+		return "Transfer a file"
+	default:
+		return "Complete an action"
 	}
 }

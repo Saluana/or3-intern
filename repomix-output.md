@@ -63,6 +63,7 @@ cmd/
     command_args.go
     configure_tui.go
     configure.go
+    connect_device_cmd.go
     devices_cmd.go
     doctor_compat.go
     doctor.go
@@ -80,8 +81,11 @@ cmd/
     service_auth.go
     service_request.go
     service.go
+    settings_cmd.go
+    setup_cmd.go
     skills_cmd.go
     startup_validation.go
+    status_cmd.go
     tty.go
 internal/
   agent/
@@ -154,6 +158,8 @@ internal/
     workspace_context.go
   providers/
     openai.go
+  safetymode/
+    safetymode.go
   scope/
     scope.go
   security/
@@ -181,6 +187,10 @@ internal/
     structured_tasks.go
     triggers.go
     webhook.go
+  uxcopy/
+    uxcopy.go
+  uxstate/
+    uxstate.go
 scripts/
   install-cli.sh
 .env.example
@@ -198,353 +208,6 @@ string
 ````markdown
 # cron
 Use the `cron` tool to add/list/remove/run/status scheduled jobs.
-````
-
-## File: cmd/or3-intern/app_cmd.go
-````go
-package main
-
-import (
-	"or3-intern/internal/approval"
-	"or3-intern/internal/config"
-	"or3-intern/internal/controlplane"
-)
-
-func newCLIControlplane(broker *approval.Broker) *controlplane.Service {
-	return controlplane.New(config.Config{}, nil, broker, nil, nil)
-}
-````
-
-## File: internal/app/service_app.go
-````go
-package app
-
-import (
-	"context"
-	"errors"
-	"io"
-	"strings"
-	"time"
-
-	"or3-intern/internal/agent"
-	"or3-intern/internal/approval"
-	"or3-intern/internal/bus"
-	"or3-intern/internal/channels"
-	"or3-intern/internal/controlplane"
-	"or3-intern/internal/db"
-	"or3-intern/internal/providers"
-	"or3-intern/internal/tools"
-)
-
-type ServiceApp struct {
-	runtime         *agent.Runtime
-	jobs            *agent.JobRegistry
-	subagentManager *agent.SubagentManager
-	control         *controlplane.Service
-}
-
-func NewServiceApp(runtime *agent.Runtime, jobs *agent.JobRegistry, subagentManager *agent.SubagentManager, control *controlplane.Service) *ServiceApp {
-	return &ServiceApp{runtime: runtime, jobs: jobs, subagentManager: subagentManager, control: control}
-}
-
-type TurnRequest struct {
-	SessionKey    string
-	Message       string
-	Meta          map[string]any
-	AllowedTools  []string
-	RestrictTools bool
-	ProfileName   string
-	Capability    tools.CapabilityLevel
-	ApprovalToken string
-	Actor         string
-	Role          string
-	Observer      agent.ConversationObserver
-	Streamer      channels.StreamingChannel
-}
-
-func (a *ServiceApp) RunTurn(ctx context.Context, req TurnRequest) error {
-	if a == nil || a.runtime == nil {
-		return errors.New("runtime unavailable")
-	}
-	runCtx := tools.ContextWithRequestSource(ctx, tools.RequestSourceService)
-	runCtx = tools.ContextWithApprovalToken(runCtx, req.ApprovalToken)
-	runCtx = tools.ContextWithRequesterIdentity(runCtx, req.Actor, req.Role)
-	runCtx = tools.ContextWithCapabilityCeiling(runCtx, req.Capability)
-	if req.Observer != nil {
-		runCtx = agent.ContextWithConversationObserver(runCtx, req.Observer)
-	}
-	if req.Streamer != nil {
-		runCtx = agent.ContextWithStreamingChannel(runCtx, req.Streamer)
-	}
-	if req.RestrictTools {
-		filtered := tools.NewRegistry()
-		if len(req.AllowedTools) > 0 {
-			filtered = a.runtime.Tools.CloneFiltered(req.AllowedTools)
-		}
-		runCtx = agent.ContextWithToolRegistry(runCtx, filtered)
-	}
-	meta := cloneMap(req.Meta)
-	if strings.TrimSpace(req.ProfileName) != "" {
-		meta["profile_name"] = strings.TrimSpace(req.ProfileName)
-	}
-	return a.runtime.Handle(runCtx, bus.Event{
-		Type:       bus.EventUserMessage,
-		SessionKey: strings.TrimSpace(req.SessionKey),
-		Channel:    "service",
-		From:       "or3-net",
-		Message:    strings.TrimSpace(req.Message),
-		Meta:       meta,
-	})
-}
-
-type SubagentRequest struct {
-	ParentSessionKey string
-	Task             string
-	PromptSnapshot   []providers.ChatMessage
-	AllowedTools     []string
-	RestrictTools    bool
-	ProfileName      string
-	Capability       tools.CapabilityLevel
-	Channel          string
-	ReplyTo          string
-	Meta             map[string]any
-	Timeout          time.Duration
-	ApprovalToken    string
-	Actor            string
-	Role             string
-}
-
-func (a *ServiceApp) StartSubagent(ctx context.Context, req SubagentRequest) (tools.SpawnJob, error) {
-	if a == nil || a.subagentManager == nil {
-		return tools.SpawnJob{}, errors.New("subagent manager unavailable")
-	}
-	jobCtx := tools.ContextWithRequestSource(ctx, tools.RequestSourceService)
-	jobCtx = tools.ContextWithCapabilityCeiling(jobCtx, req.Capability)
-	return a.subagentManager.EnqueueService(jobCtx, agent.ServiceSubagentRequest{
-		ParentSessionKey: strings.TrimSpace(req.ParentSessionKey),
-		Task:             strings.TrimSpace(req.Task),
-		PromptSnapshot:   append([]providers.ChatMessage{}, req.PromptSnapshot...),
-		AllowedTools:     append([]string{}, req.AllowedTools...),
-		RestrictTools:    req.RestrictTools,
-		ProfileName:      strings.TrimSpace(req.ProfileName),
-		Channel:          strings.TrimSpace(req.Channel),
-		ReplyTo:          strings.TrimSpace(req.ReplyTo),
-		Meta:             cloneMap(req.Meta),
-		Timeout:          req.Timeout,
-		ApprovalToken:    strings.TrimSpace(req.ApprovalToken),
-		RequesterActor:   strings.TrimSpace(req.Actor),
-		RequesterRole:    strings.TrimSpace(req.Role),
-	})
-}
-
-func (a *ServiceApp) GetJob(jobID string) (agent.JobSnapshot, error) {
-	if a == nil || a.control == nil {
-		return agent.JobSnapshot{}, controlplane.ErrJobRegistryUnavailable
-	}
-	return a.control.GetJob(jobID)
-}
-
-func (a *ServiceApp) AbortJob(ctx context.Context, jobID string) (bool, string, error) {
-	if a == nil || a.jobs == nil {
-		return false, "", controlplane.ErrJobRegistryUnavailable
-	}
-	if a.jobs.Cancel(jobID) {
-		return true, "", nil
-	}
-	if a.subagentManager != nil {
-		if err := a.subagentManager.Abort(ctx, jobID); err == nil {
-			return true, "", nil
-		} else if strings.Contains(strings.ToLower(err.Error()), "not abortable") {
-			return false, "not_abortable", nil
-		} else {
-			if !strings.Contains(strings.ToLower(err.Error()), "not found") {
-				return false, "", err
-			}
-		}
-	}
-	snapshot, ok := a.jobs.Snapshot(jobID)
-	if !ok {
-		return false, "not_found", nil
-	}
-	if isTerminalStatus(snapshot.Status) {
-		return true, snapshot.Status, nil
-	}
-	return false, "not_abortable", nil
-}
-
-func (a *ServiceApp) WaitForJob(ctx context.Context, jobID string) (agent.JobSnapshot, bool) {
-	if a == nil || a.jobs == nil {
-		return agent.JobSnapshot{}, false
-	}
-	return a.jobs.Wait(ctx, jobID)
-}
-
-func (a *ServiceApp) SubscribeJob(jobID string) (agent.JobSnapshot, <-chan agent.JobEvent, func(), bool) {
-	if a == nil || a.jobs == nil {
-		return agent.JobSnapshot{}, nil, nil, false
-	}
-	return a.jobs.Subscribe(jobID)
-}
-
-func (a *ServiceApp) CreatePairingRequest(ctx context.Context, input approval.PairingRequestInput) (db.PairingRequestRecord, string, error) {
-	if a == nil || a.control == nil {
-		return db.PairingRequestRecord{}, "", controlplane.ErrApprovalBrokerUnavailable
-	}
-	return a.control.CreatePairingRequest(ctx, input)
-}
-
-func (a *ServiceApp) ListPairingRequests(ctx context.Context, status string, limit int) ([]db.PairingRequestRecord, error) {
-	if a == nil || a.control == nil {
-		return nil, controlplane.ErrApprovalBrokerUnavailable
-	}
-	return a.control.ListPairingRequests(ctx, status, limit)
-}
-
-func (a *ServiceApp) ApprovePairingRequest(ctx context.Context, requestID int64, actor string) (db.PairingRequestRecord, error) {
-	if a == nil || a.control == nil {
-		return db.PairingRequestRecord{}, controlplane.ErrApprovalBrokerUnavailable
-	}
-	return a.control.ApprovePairingRequest(ctx, requestID, actor)
-}
-
-func (a *ServiceApp) DenyPairingRequest(ctx context.Context, requestID int64, actor string) error {
-	if a == nil || a.control == nil {
-		return controlplane.ErrApprovalBrokerUnavailable
-	}
-	return a.control.DenyPairingRequest(ctx, requestID, actor)
-}
-
-func (a *ServiceApp) ExchangePairingCode(ctx context.Context, input approval.PairingExchangeInput) (db.PairedDeviceRecord, string, error) {
-	if a == nil || a.control == nil {
-		return db.PairedDeviceRecord{}, "", controlplane.ErrApprovalBrokerUnavailable
-	}
-	return a.control.ExchangePairingCode(ctx, input)
-}
-
-func (a *ServiceApp) ListDevices(ctx context.Context, limit int) ([]db.PairedDeviceRecord, error) {
-	if a == nil || a.control == nil {
-		return nil, controlplane.ErrApprovalBrokerUnavailable
-	}
-	return a.control.ListDevices(ctx, limit)
-}
-
-func (a *ServiceApp) RevokeDevice(ctx context.Context, deviceID, actor string) error {
-	if a == nil || a.control == nil {
-		return controlplane.ErrApprovalBrokerUnavailable
-	}
-	return a.control.RevokeDevice(ctx, deviceID, actor)
-}
-
-func (a *ServiceApp) RotateDevice(ctx context.Context, deviceID string) (db.PairedDeviceRecord, string, error) {
-	if a == nil || a.control == nil {
-		return db.PairedDeviceRecord{}, "", controlplane.ErrApprovalBrokerUnavailable
-	}
-	return a.control.RotateDevice(ctx, deviceID)
-}
-
-func (a *ServiceApp) ListApprovalRequests(ctx context.Context, filter controlplane.ApprovalFilter) ([]db.ApprovalRequestRecord, error) {
-	if a == nil || a.control == nil {
-		return nil, controlplane.ErrApprovalBrokerUnavailable
-	}
-	return a.control.ListApprovalRequests(ctx, filter)
-}
-
-func (a *ServiceApp) GetApproval(ctx context.Context, requestID int64) (db.ApprovalRequestRecord, error) {
-	if a == nil || a.control == nil {
-		return db.ApprovalRequestRecord{}, controlplane.ErrApprovalBrokerUnavailable
-	}
-	return a.control.GetApproval(ctx, requestID)
-}
-
-func (a *ServiceApp) ApproveApproval(ctx context.Context, requestID int64, actor string, allowlist bool, note string) (approval.IssuedApproval, error) {
-	if a == nil || a.control == nil {
-		return approval.IssuedApproval{}, controlplane.ErrApprovalBrokerUnavailable
-	}
-	return a.control.ApproveApproval(ctx, requestID, actor, allowlist, note)
-}
-
-func (a *ServiceApp) DenyApproval(ctx context.Context, requestID int64, actor, note string) error {
-	if a == nil || a.control == nil {
-		return controlplane.ErrApprovalBrokerUnavailable
-	}
-	return a.control.DenyApproval(ctx, requestID, actor, note)
-}
-
-func (a *ServiceApp) CancelApproval(ctx context.Context, requestID int64, actor, note string) error {
-	if a == nil || a.control == nil {
-		return controlplane.ErrApprovalBrokerUnavailable
-	}
-	return a.control.CancelApproval(ctx, requestID, actor, note)
-}
-
-func (a *ServiceApp) ExpireApprovals(ctx context.Context, actor string) (int64, error) {
-	if a == nil || a.control == nil {
-		return 0, controlplane.ErrApprovalBrokerUnavailable
-	}
-	return a.control.ExpireApprovals(ctx, actor)
-}
-
-func (a *ServiceApp) ListAllowlists(ctx context.Context, domain string, limit int) ([]db.ApprovalAllowlistRecord, error) {
-	if a == nil || a.control == nil {
-		return nil, controlplane.ErrApprovalBrokerUnavailable
-	}
-	return a.control.ListAllowlists(ctx, domain, limit)
-}
-
-func (a *ServiceApp) AddAllowlist(ctx context.Context, domain string, scope approval.AllowlistScope, matcher any, actor string, expiresAt int64) (db.ApprovalAllowlistRecord, error) {
-	if a == nil || a.control == nil {
-		return db.ApprovalAllowlistRecord{}, controlplane.ErrApprovalBrokerUnavailable
-	}
-	return a.control.AddAllowlist(ctx, domain, scope, matcher, actor, expiresAt)
-}
-
-func (a *ServiceApp) RemoveAllowlist(ctx context.Context, id int64, actor string) error {
-	if a == nil || a.control == nil {
-		return controlplane.ErrApprovalBrokerUnavailable
-	}
-	return a.control.RemoveAllowlist(ctx, id, actor)
-}
-
-func ResolveToolPolicy(base *tools.Registry, policy *agent.ServiceToolPolicy, legacyAllowed []string) ([]string, bool, error) {
-	return agent.ResolveServiceToolAllowlist(base, policy, legacyAllowed)
-}
-
-func DecodeServiceFilePayload(reader io.Reader, maxBytes int64) ([]byte, error) {
-	if reader == nil {
-		return nil, errors.New("reader is required")
-	}
-	if maxBytes <= 0 {
-		maxBytes = 1 << 20
-	}
-	data, err := io.ReadAll(io.LimitReader(reader, maxBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) > maxBytes {
-		return nil, io.ErrUnexpectedEOF
-	}
-	return data, nil
-}
-
-func cloneMap(src map[string]any) map[string]any {
-	if len(src) == 0 {
-		return map[string]any{}
-	}
-	dst := make(map[string]any, len(src))
-	for key, value := range src {
-		dst[key] = value
-	}
-	return dst
-}
-
-func isTerminalStatus(status string) bool {
-	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "completed", "failed", "aborted", db.SubagentStatusSucceeded, db.SubagentStatusInterrupted:
-		return true
-	default:
-		return false
-	}
-}
 ````
 
 ## File: internal/channels/stream.go
@@ -894,19 +557,6 @@ OR3_WHATSAPP_BRIDGE_TOKEN=
 or3-intern.exe
 ````
 
-## File: missing.md
-````markdown
-Partially Outdated
-
-Media + attachments: the file is too pessimistic. Inbound attachments exist for Telegram, Discord, Slack, and WhatsApp, and image attachments can reach the model when vision is enabled via prompt.go:248-399. What still seems missing is fuller audio/OCR/document understanding, especially transcription.
-Email and Matrix: email is implemented and wired via email.go:1-70 and main.go:752-758; Matrix still appears missing since I found no Matrix channel files.
-Richer session management controls: partly true. There is scope link/list/resolve in scope_cmd.go:1-56 plus DB reset plumbing in store.go:787, but I do not see a broader first-class session manager surface.
-Still Missing
-
-Broader provider layer: this still looks true. The provider package currently appears to be OpenAI-compatible only in openai.go:1-40.
-First-party WhatsApp bridge implementation: this still looks true. The repo has a bridge client/adapter in whatsapp.go:1-40, but I did not find a hosted bridge server implementation in the workspace.
-````
-
 ## File: cmd/or3-intern/testdata/service_contract/audit-status-response.json
 ````json
 {
@@ -950,31 +600,6 @@ First-party WhatsApp bridge implementation: this still looks true. The repo has 
 {"event":"queued","data":{"job_id":"__JOB_ID__","status":"queued"}}
 {"event":"started","data":{"job_id":"__JOB_ID__","status":"running"}}
 {"event":"completion","data":{"job_id":"__JOB_ID__","status":"completed","final_text":"done"}}
-````
-
-## File: cmd/or3-intern/testdata/service_contract/intern-turn-request.json
-````json
-{
-  "session_key": "svc:fixture",
-  "platform_session_ref": {
-    "workspace_id": "ws_fixture",
-    "client_kind": "chat",
-    "client_session_id": "thread_fixture",
-    "network_session_id": "sess_fixture",
-    "session_key": "svc:fixture"
-  },
-  "message": "hello contract",
-  "tool_policy": {
-    "mode": "allow_list",
-    "allowed_tools": ["read_file"]
-  },
-  "meta": {
-    "request_id": "req_fixture",
-    "workspace_id": "ws_fixture",
-    "network_session_id": "sess_fixture"
-  },
-  "profile_name": "ops"
-}
 ````
 
 ## File: cmd/or3-intern/testdata/service_contract/intern-turn-response.json
@@ -1029,31 +654,6 @@ data: {"final_text":"done","job_id":"__JOB_ID__","status":"completed"}
 }
 ````
 
-## File: cmd/or3-intern/testdata/service_contract/subagent-request.json
-````json
-{
-  "parentSessionKey": "svc:parent",
-  "task": "background contract task",
-  "promptSnapshot": [
-    {
-      "role": "user",
-      "content": "remember contract"
-    }
-  ],
-  "toolPolicy": {
-    "mode": "allow_list",
-    "allowedTools": ["read_file"]
-  },
-  "timeoutSeconds": 15,
-  "profileName": "ops",
-  "channel": "service",
-  "replyTo": "or3-net",
-  "meta": {
-    "trace_id": "trace-subagent"
-  }
-}
-````
-
 ## File: cmd/or3-intern/testdata/service_contract/subagent-response.json
 ````json
 {
@@ -1090,6 +690,21 @@ data: {"final_text":"done","job_id":"__JOB_ID__","status":"completed"}
   "meta": {
     "trace_id": "trace-turn"
   }
+}
+````
+
+## File: cmd/or3-intern/app_cmd.go
+````go
+package main
+
+import (
+	"or3-intern/internal/approval"
+	"or3-intern/internal/config"
+	"or3-intern/internal/controlplane"
+)
+
+func newCLIControlplane(broker *approval.Broker) *controlplane.Service {
+	return controlplane.New(config.Config{}, nil, broker, nil, nil)
 }
 ````
 
@@ -1495,6 +1110,210 @@ func runSecretsCommand(ctx context.Context, mgr *security.SecretManager, audit *
 }
 ````
 
+## File: cmd/or3-intern/setup_cmd.go
+````go
+package main
+
+import (
+	"bufio"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"or3-intern/internal/config"
+	intdoctor "or3-intern/internal/doctor"
+	"or3-intern/internal/safetymode"
+	"or3-intern/internal/security"
+	"or3-intern/internal/uxcopy"
+	"or3-intern/internal/uxstate"
+)
+
+type setupResult struct {
+	StartChat bool
+	Config    config.Config
+}
+
+func runSetup(cfgPath string) (setupResult, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = ""
+	}
+	return runSetupWithIO(os.Stdin, os.Stdout, cfgPathOrDefault(cfgPath), cwd)
+}
+
+func runSetupWithIO(in io.Reader, out io.Writer, cfgPath, cwd string) (setupResult, error) {
+	reader := bufio.NewReader(in)
+	cfg, existed, _, err := loadConfigureConfig(cfgPath, cwd)
+	if err != nil {
+		return setupResult{}, err
+	}
+	fmt.Fprintln(out, "OR3 setup")
+	if existed {
+		fmt.Fprintln(out, "Loaded your current settings. Leave answers blank to keep what you already have.")
+	} else {
+		fmt.Fprintln(out, "Let's choose a provider, a folder, and a safety level.")
+	}
+	fmt.Fprintln(out)
+
+	previousAPIBase := cfg.Provider.APIBase
+	previousModel := cfg.Provider.Model
+	previousEmbedModel := cfg.Provider.EmbedModel
+	providerChoice, err := promptChoice(reader, out, "Choose your AI provider", []string{
+		"1) OpenAI",
+		"2) OpenRouter",
+		"3) Custom OpenAI-compatible provider",
+	}, defaultProviderChoice(cfg.Provider.APIBase))
+	if err != nil {
+		return setupResult{}, err
+	}
+	applyProviderPreset(&cfg, providerChoice)
+	if existed && providerChoice == defaultProviderChoice(previousAPIBase) {
+		cfg.Provider.Model = previousModel
+		cfg.Provider.EmbedModel = previousEmbedModel
+	}
+	if providerChoice == "3" {
+		cfg.Provider.APIBase, err = promptString(reader, out, "Provider API base", cfg.Provider.APIBase)
+		if err != nil {
+			return setupResult{}, err
+		}
+	}
+	cfg.Provider.APIKey, err = promptSecretString(reader, out, "Provider API key", cfg.Provider.APIKey)
+	if err != nil {
+		return setupResult{}, err
+	}
+	cfg.WorkspaceDir, err = promptString(reader, out, "Workspace folder", firstNonEmptyString(cfg.WorkspaceDir, cwd))
+	if err != nil {
+		return setupResult{}, err
+	}
+	cfg.Tools.RestrictToWorkspace = true
+	if strings.TrimSpace(cfg.WorkspaceDir) != "" {
+		cfg.DBPath = filepath.Join(cfg.WorkspaceDir, ".or3", "or3-intern.sqlite")
+		cfg.ArtifactsDir = filepath.Join(cfg.WorkspaceDir, ".or3", "artifacts")
+	}
+
+	scenario, err := promptSetupScenario(reader, out)
+	if err != nil {
+		return setupResult{}, err
+	}
+	mode, err := promptSetupMode(reader, out, safetymode.RecommendMode(scenario))
+	if err != nil {
+		return setupResult{}, err
+	}
+	safetymode.ApplyScenario(&cfg, scenario)
+	safetymode.Apply(&cfg, mode)
+	if err := ensureSetupSecurityAssets(&cfg); err != nil {
+		return setupResult{}, err
+	}
+	if err := config.Save(cfgPath, cfg); err != nil {
+		return setupResult{}, err
+	}
+
+	report := intdoctor.Evaluate(cfg, intdoctor.Options{Mode: intdoctor.ModeConfigurePostSave, ConfigPath: cfgPath})
+	status := uxstate.BuildStatusView(cfg, report, 0, 0)
+	printSetupReview(out, status)
+	startChat, err := promptBool(reader, out, "Start chat next", true)
+	if err != nil {
+		return setupResult{}, err
+	}
+	fmt.Fprintf(out, "\nSaved setup to %s\n", cfgPath)
+	if startChat {
+		fmt.Fprintln(out, "Next: run `or3-intern chat`.")
+	} else {
+		fmt.Fprintln(out, "Next: run `or3-intern status` or `or3-intern settings` whenever you want to review your setup.")
+	}
+	return setupResult{StartChat: startChat, Config: cfg}, nil
+}
+
+func promptSetupScenario(reader *bufio.Reader, out io.Writer) (safetymode.Scenario, error) {
+	options := safetymode.ScenarioOptions()
+	menu := make([]string, 0, len(options))
+	for index, option := range options {
+		menu = append(menu, fmt.Sprintf("%d) %s", index+1, option.Label))
+	}
+	choice, err := promptMenuChoice(reader, out, "Where are you using OR3?", menu, "1")
+	if err != nil {
+		return safetymode.ScenarioAdvanced, err
+	}
+	selected := options[0].Scenario
+	for index, option := range options {
+		if choice == fmt.Sprintf("%d", index+1) {
+			selected = option.Scenario
+			break
+		}
+	}
+	return selected, nil
+}
+
+func promptSetupMode(reader *bufio.Reader, out io.Writer, recommended safetymode.Mode) (safetymode.Mode, error) {
+	defaultChoice := "2"
+	if recommended == safetymode.ModeLockedDown {
+		defaultChoice = "3"
+	}
+	choice, err := promptMenuChoice(reader, out, "Choose a safety mode", []string{
+		"1) Relaxed — Good for local testing. Fewer prompts.",
+		"2) Balanced — Recommended. Ask before risky actions.",
+		"3) Locked Down — Best for servers or shared devices.",
+	}, defaultChoice)
+	if err != nil {
+		return safetymode.ModeBalanced, err
+	}
+	switch choice {
+	case "1":
+		return safetymode.ModeRelaxed, nil
+	case "3":
+		return safetymode.ModeLockedDown, nil
+	default:
+		return safetymode.ModeBalanced, nil
+	}
+}
+
+func ensureSetupSecurityAssets(cfg *config.Config) error {
+	if cfg.Security.SecretStore.Enabled && strings.TrimSpace(cfg.Security.SecretStore.KeyFile) != "" {
+		if _, err := security.LoadOrCreateKey(cfg.Security.SecretStore.KeyFile); err != nil {
+			return err
+		}
+	}
+	if cfg.Security.Audit.Enabled && strings.TrimSpace(cfg.Security.Audit.KeyFile) != "" {
+		if _, err := security.LoadOrCreateKey(cfg.Security.Audit.KeyFile); err != nil {
+			return err
+		}
+	}
+	if cfg.Security.Approvals.Enabled && strings.TrimSpace(cfg.Security.Approvals.KeyFile) != "" {
+		if _, err := security.LoadOrCreateKey(cfg.Security.Approvals.KeyFile); err != nil {
+			return err
+		}
+	}
+	if cfg.Service.Enabled && strings.TrimSpace(cfg.Service.Secret) == "" {
+		secret, err := intdoctor.GenerateSecret()
+		if err != nil {
+			return err
+		}
+		cfg.Service.Secret = secret
+	}
+	return nil
+}
+
+func printSetupReview(out io.Writer, status uxstate.StatusView) {
+	fmt.Fprintln(out, "\nSetup review")
+	fmt.Fprintf(out, "- Safety: %s\n", status.SafetyLabel)
+	fmt.Fprintf(out, "- Files: %s\n", status.Workspace)
+	fmt.Fprintf(out, "- Commands: %s\n", status.Commands)
+	fmt.Fprintf(out, "- Internet: %s\n", status.Internet)
+	fmt.Fprintf(out, "- Devices: %s\n", status.Devices)
+	fmt.Fprintf(out, "- Activity log: %s\n", status.ActivityLog)
+	if len(status.Problems) > 0 {
+		fmt.Fprintln(out, "- A few things still need attention:")
+		for _, problem := range status.Problems {
+			fmt.Fprintf(out, "  - %s — %s\n", problem.Title, problem.RecommendedAction)
+		}
+	} else {
+		fmt.Fprintf(out, "- %s\n", uxcopy.SafetyModeSummary(safetymode.ModeBalanced))
+	}
+}
+````
+
 ## File: cmd/or3-intern/tty.go
 ````go
 package main
@@ -1555,86 +1374,335 @@ func (nullStreamWriter) Close(context.Context, string) error      { return nil }
 func (nullStreamWriter) Abort(context.Context) error              { return nil }
 ````
 
-## File: internal/agent/tool_policy.go
+## File: internal/app/service_app.go
 ````go
-package agent
+package app
 
 import (
-	"fmt"
+	"context"
+	"errors"
+	"io"
 	"strings"
+	"time"
 
+	"or3-intern/internal/agent"
+	"or3-intern/internal/approval"
+	"or3-intern/internal/bus"
+	"or3-intern/internal/channels"
+	"or3-intern/internal/controlplane"
+	"or3-intern/internal/db"
+	"or3-intern/internal/providers"
 	"or3-intern/internal/tools"
 )
 
-type ServiceToolPolicy struct {
-	Mode         string
-	AllowedTools []string
-	BlockedTools []string
+type ServiceApp struct {
+	runtime         *agent.Runtime
+	jobs            *agent.JobRegistry
+	subagentManager *agent.SubagentManager
+	control         *controlplane.Service
 }
 
-func ResolveServiceToolAllowlist(base *tools.Registry, policy *ServiceToolPolicy, legacyAllowed []string) ([]string, bool, error) {
-	if policy == nil {
-		if len(normalizeToolNames(legacyAllowed)) > 0 {
-			return nil, false, fmt.Errorf("tool_policy.mode is required")
+func NewServiceApp(runtime *agent.Runtime, jobs *agent.JobRegistry, subagentManager *agent.SubagentManager, control *controlplane.Service) *ServiceApp {
+	return &ServiceApp{runtime: runtime, jobs: jobs, subagentManager: subagentManager, control: control}
+}
+
+type TurnRequest struct {
+	SessionKey    string
+	Message       string
+	Meta          map[string]any
+	AllowedTools  []string
+	RestrictTools bool
+	ProfileName   string
+	Capability    tools.CapabilityLevel
+	ApprovalToken string
+	Actor         string
+	Role          string
+	Observer      agent.ConversationObserver
+	Streamer      channels.StreamingChannel
+}
+
+func (a *ServiceApp) RunTurn(ctx context.Context, req TurnRequest) error {
+	if a == nil || a.runtime == nil {
+		return errors.New("runtime unavailable")
+	}
+	runCtx := tools.ContextWithRequestSource(ctx, tools.RequestSourceService)
+	runCtx = tools.ContextWithApprovalToken(runCtx, req.ApprovalToken)
+	runCtx = tools.ContextWithRequesterIdentity(runCtx, req.Actor, req.Role)
+	runCtx = tools.ContextWithCapabilityCeiling(runCtx, req.Capability)
+	if req.Observer != nil {
+		runCtx = agent.ContextWithConversationObserver(runCtx, req.Observer)
+	}
+	if req.Streamer != nil {
+		runCtx = agent.ContextWithStreamingChannel(runCtx, req.Streamer)
+	}
+	if req.RestrictTools {
+		filtered := tools.NewRegistry()
+		if len(req.AllowedTools) > 0 {
+			filtered = a.runtime.Tools.CloneFiltered(req.AllowedTools)
 		}
-		return []string{}, true, nil
+		runCtx = agent.ContextWithToolRegistry(runCtx, filtered)
 	}
+	meta := cloneMap(req.Meta)
+	if strings.TrimSpace(req.ProfileName) != "" {
+		meta["profile_name"] = strings.TrimSpace(req.ProfileName)
+	}
+	return a.runtime.Handle(runCtx, bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: strings.TrimSpace(req.SessionKey),
+		Channel:    "service",
+		From:       "or3-net",
+		Message:    strings.TrimSpace(req.Message),
+		Meta:       meta,
+	})
+}
 
-	mode := strings.ToLower(strings.TrimSpace(policy.Mode))
-	allowed := normalizeToolNames(policy.AllowedTools)
-	if mode == "" {
-		return nil, false, fmt.Errorf("tool_policy mode is required")
-	}
-	if err := validateServiceToolNames(base, allowed); err != nil {
-		return nil, false, err
-	}
-	if err := validateServiceToolNames(base, normalizeToolNames(policy.BlockedTools)); err != nil {
-		return nil, false, err
-	}
+type SubagentRequest struct {
+	ParentSessionKey string
+	Task             string
+	PromptSnapshot   []providers.ChatMessage
+	AllowedTools     []string
+	RestrictTools    bool
+	ProfileName      string
+	Capability       tools.CapabilityLevel
+	Channel          string
+	ReplyTo          string
+	Meta             map[string]any
+	Timeout          time.Duration
+	ApprovalToken    string
+	Actor            string
+	Role             string
+}
 
-	switch mode {
-	case "deny_all":
-		return []string{}, true, nil
-	case "allow_list":
-		return allowed, true, nil
+func (a *ServiceApp) StartSubagent(ctx context.Context, req SubagentRequest) (tools.SpawnJob, error) {
+	if a == nil || a.subagentManager == nil {
+		return tools.SpawnJob{}, errors.New("subagent manager unavailable")
+	}
+	jobCtx := tools.ContextWithRequestSource(ctx, tools.RequestSourceService)
+	jobCtx = tools.ContextWithCapabilityCeiling(jobCtx, req.Capability)
+	return a.subagentManager.EnqueueService(jobCtx, agent.ServiceSubagentRequest{
+		ParentSessionKey: strings.TrimSpace(req.ParentSessionKey),
+		Task:             strings.TrimSpace(req.Task),
+		PromptSnapshot:   append([]providers.ChatMessage{}, req.PromptSnapshot...),
+		AllowedTools:     append([]string{}, req.AllowedTools...),
+		RestrictTools:    req.RestrictTools,
+		ProfileName:      strings.TrimSpace(req.ProfileName),
+		Channel:          strings.TrimSpace(req.Channel),
+		ReplyTo:          strings.TrimSpace(req.ReplyTo),
+		Meta:             cloneMap(req.Meta),
+		Timeout:          req.Timeout,
+		ApprovalToken:    strings.TrimSpace(req.ApprovalToken),
+		RequesterActor:   strings.TrimSpace(req.Actor),
+		RequesterRole:    strings.TrimSpace(req.Role),
+	})
+}
+
+func (a *ServiceApp) GetJob(jobID string) (agent.JobSnapshot, error) {
+	if a == nil || a.control == nil {
+		return agent.JobSnapshot{}, controlplane.ErrJobRegistryUnavailable
+	}
+	return a.control.GetJob(jobID)
+}
+
+func (a *ServiceApp) AbortJob(ctx context.Context, jobID string) (bool, string, error) {
+	if a == nil || a.jobs == nil {
+		return false, "", controlplane.ErrJobRegistryUnavailable
+	}
+	if a.jobs.Cancel(jobID) {
+		return true, "", nil
+	}
+	if a.subagentManager != nil {
+		if err := a.subagentManager.Abort(ctx, jobID); err == nil {
+			return true, "", nil
+		} else if strings.Contains(strings.ToLower(err.Error()), "not abortable") {
+			return false, "not_abortable", nil
+		} else {
+			if !strings.Contains(strings.ToLower(err.Error()), "not found") {
+				return false, "", err
+			}
+		}
+	}
+	snapshot, ok := a.jobs.Snapshot(jobID)
+	if !ok {
+		return false, "not_found", nil
+	}
+	if isTerminalStatus(snapshot.Status) {
+		return true, snapshot.Status, nil
+	}
+	return false, "not_abortable", nil
+}
+
+func (a *ServiceApp) WaitForJob(ctx context.Context, jobID string) (agent.JobSnapshot, bool) {
+	if a == nil || a.jobs == nil {
+		return agent.JobSnapshot{}, false
+	}
+	return a.jobs.Wait(ctx, jobID)
+}
+
+func (a *ServiceApp) SubscribeJob(jobID string) (agent.JobSnapshot, <-chan agent.JobEvent, func(), bool) {
+	if a == nil || a.jobs == nil {
+		return agent.JobSnapshot{}, nil, nil, false
+	}
+	return a.jobs.Subscribe(jobID)
+}
+
+func (a *ServiceApp) CreatePairingRequest(ctx context.Context, input approval.PairingRequestInput) (db.PairingRequestRecord, string, error) {
+	if a == nil || a.control == nil {
+		return db.PairingRequestRecord{}, "", controlplane.ErrApprovalBrokerUnavailable
+	}
+	return a.control.CreatePairingRequest(ctx, input)
+}
+
+func (a *ServiceApp) ListPairingRequests(ctx context.Context, status string, limit int) ([]db.PairingRequestRecord, error) {
+	if a == nil || a.control == nil {
+		return nil, controlplane.ErrApprovalBrokerUnavailable
+	}
+	return a.control.ListPairingRequests(ctx, status, limit)
+}
+
+func (a *ServiceApp) ApprovePairingRequest(ctx context.Context, requestID int64, actor string) (db.PairingRequestRecord, error) {
+	if a == nil || a.control == nil {
+		return db.PairingRequestRecord{}, controlplane.ErrApprovalBrokerUnavailable
+	}
+	return a.control.ApprovePairingRequest(ctx, requestID, actor)
+}
+
+func (a *ServiceApp) DenyPairingRequest(ctx context.Context, requestID int64, actor string) error {
+	if a == nil || a.control == nil {
+		return controlplane.ErrApprovalBrokerUnavailable
+	}
+	return a.control.DenyPairingRequest(ctx, requestID, actor)
+}
+
+func (a *ServiceApp) ExchangePairingCode(ctx context.Context, input approval.PairingExchangeInput) (db.PairedDeviceRecord, string, error) {
+	if a == nil || a.control == nil {
+		return db.PairedDeviceRecord{}, "", controlplane.ErrApprovalBrokerUnavailable
+	}
+	return a.control.ExchangePairingCode(ctx, input)
+}
+
+func (a *ServiceApp) ListDevices(ctx context.Context, limit int) ([]db.PairedDeviceRecord, error) {
+	if a == nil || a.control == nil {
+		return nil, controlplane.ErrApprovalBrokerUnavailable
+	}
+	return a.control.ListDevices(ctx, limit)
+}
+
+func (a *ServiceApp) RevokeDevice(ctx context.Context, deviceID, actor string) error {
+	if a == nil || a.control == nil {
+		return controlplane.ErrApprovalBrokerUnavailable
+	}
+	return a.control.RevokeDevice(ctx, deviceID, actor)
+}
+
+func (a *ServiceApp) RotateDevice(ctx context.Context, deviceID string) (db.PairedDeviceRecord, string, error) {
+	if a == nil || a.control == nil {
+		return db.PairedDeviceRecord{}, "", controlplane.ErrApprovalBrokerUnavailable
+	}
+	return a.control.RotateDevice(ctx, deviceID)
+}
+
+func (a *ServiceApp) ListApprovalRequests(ctx context.Context, filter controlplane.ApprovalFilter) ([]db.ApprovalRequestRecord, error) {
+	if a == nil || a.control == nil {
+		return nil, controlplane.ErrApprovalBrokerUnavailable
+	}
+	return a.control.ListApprovalRequests(ctx, filter)
+}
+
+func (a *ServiceApp) GetApproval(ctx context.Context, requestID int64) (db.ApprovalRequestRecord, error) {
+	if a == nil || a.control == nil {
+		return db.ApprovalRequestRecord{}, controlplane.ErrApprovalBrokerUnavailable
+	}
+	return a.control.GetApproval(ctx, requestID)
+}
+
+func (a *ServiceApp) ApproveApproval(ctx context.Context, requestID int64, actor string, allowlist bool, note string) (approval.IssuedApproval, error) {
+	if a == nil || a.control == nil {
+		return approval.IssuedApproval{}, controlplane.ErrApprovalBrokerUnavailable
+	}
+	return a.control.ApproveApproval(ctx, requestID, actor, allowlist, note)
+}
+
+func (a *ServiceApp) DenyApproval(ctx context.Context, requestID int64, actor, note string) error {
+	if a == nil || a.control == nil {
+		return controlplane.ErrApprovalBrokerUnavailable
+	}
+	return a.control.DenyApproval(ctx, requestID, actor, note)
+}
+
+func (a *ServiceApp) CancelApproval(ctx context.Context, requestID int64, actor, note string) error {
+	if a == nil || a.control == nil {
+		return controlplane.ErrApprovalBrokerUnavailable
+	}
+	return a.control.CancelApproval(ctx, requestID, actor, note)
+}
+
+func (a *ServiceApp) ExpireApprovals(ctx context.Context, actor string) (int64, error) {
+	if a == nil || a.control == nil {
+		return 0, controlplane.ErrApprovalBrokerUnavailable
+	}
+	return a.control.ExpireApprovals(ctx, actor)
+}
+
+func (a *ServiceApp) ListAllowlists(ctx context.Context, domain string, limit int) ([]db.ApprovalAllowlistRecord, error) {
+	if a == nil || a.control == nil {
+		return nil, controlplane.ErrApprovalBrokerUnavailable
+	}
+	return a.control.ListAllowlists(ctx, domain, limit)
+}
+
+func (a *ServiceApp) AddAllowlist(ctx context.Context, domain string, scope approval.AllowlistScope, matcher any, actor string, expiresAt int64) (db.ApprovalAllowlistRecord, error) {
+	if a == nil || a.control == nil {
+		return db.ApprovalAllowlistRecord{}, controlplane.ErrApprovalBrokerUnavailable
+	}
+	return a.control.AddAllowlist(ctx, domain, scope, matcher, actor, expiresAt)
+}
+
+func (a *ServiceApp) RemoveAllowlist(ctx context.Context, id int64, actor string) error {
+	if a == nil || a.control == nil {
+		return controlplane.ErrApprovalBrokerUnavailable
+	}
+	return a.control.RemoveAllowlist(ctx, id, actor)
+}
+
+func ResolveToolPolicy(base *tools.Registry, policy *agent.ServiceToolPolicy, legacyAllowed []string) ([]string, bool, error) {
+	return agent.ResolveServiceToolAllowlist(base, policy, legacyAllowed)
+}
+
+func DecodeServiceFilePayload(reader io.Reader, maxBytes int64) ([]byte, error) {
+	if reader == nil {
+		return nil, errors.New("reader is required")
+	}
+	if maxBytes <= 0 {
+		maxBytes = 1 << 20
+	}
+	data, err := io.ReadAll(io.LimitReader(reader, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, io.ErrUnexpectedEOF
+	}
+	return data, nil
+}
+
+func cloneMap(src map[string]any) map[string]any {
+	if len(src) == 0 {
+		return map[string]any{}
+	}
+	dst := make(map[string]any, len(src))
+	for key, value := range src {
+		dst[key] = value
+	}
+	return dst
+}
+
+func isTerminalStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "completed", "failed", "aborted", db.SubagentStatusSucceeded, db.SubagentStatusInterrupted:
+		return true
 	default:
-		return nil, false, fmt.Errorf("unsupported tool_policy mode: %s", policy.Mode)
+		return false
 	}
-}
-
-func validateServiceToolNames(base *tools.Registry, names []string) error {
-	if base == nil || len(names) == 0 {
-		return nil
-	}
-	for _, name := range names {
-		if base.Get(name) == nil {
-			return fmt.Errorf("unknown tool in tool_policy: %s", name)
-		}
-	}
-	return nil
-}
-
-func normalizeToolNames(names []string) []string {
-	if len(names) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(names))
-	seen := make(map[string]struct{}, len(names))
-	for _, name := range names {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		if _, ok := seen[name]; ok {
-			continue
-		}
-		seen[name] = struct{}{}
-		out = append(out, name)
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
 }
 ````
 
@@ -2565,6 +2633,289 @@ func workspaceTruncate(s string, max int) string {
 }
 ````
 
+## File: internal/safetymode/safetymode.go
+````go
+package safetymode
+
+import (
+	"fmt"
+	"strings"
+
+	"or3-intern/internal/config"
+)
+
+type Mode string
+
+type Scenario string
+
+type Inference struct {
+	Mode       Mode
+	BaseMode   Mode
+	IsCustom   bool
+	Drift      []string
+	Scenario   Scenario
+	Confidence string
+}
+
+const (
+	ModeRelaxed    Mode = "relaxed"
+	ModeBalanced   Mode = "balanced"
+	ModeLockedDown Mode = "locked-down"
+	ModeCustom     Mode = "custom"
+)
+
+const (
+	ScenarioSoloComputer   Scenario = "solo-computer"
+	ScenarioPhoneCompanion Scenario = "phone-companion"
+	ScenarioPrivateServer  Scenario = "private-server"
+	ScenarioHostedService  Scenario = "hosted-service"
+	ScenarioAdvanced       Scenario = "advanced"
+)
+
+type ScenarioOption struct {
+	Scenario    Scenario
+	Label       string
+	Description string
+}
+
+var scenarioOptions = []ScenarioOption{
+	{Scenario: ScenarioSoloComputer, Label: "Just me, on this computer", Description: "Local use on one computer with a single trusted user."},
+	{Scenario: ScenarioPhoneCompanion, Label: "Me and my phone", Description: "Personal use across this computer and a paired device."},
+	{Scenario: ScenarioPrivateServer, Label: "A small private server", Description: "A protected self-hosted service for a small trusted group."},
+	{Scenario: ScenarioHostedService, Label: "Public/hosted service", Description: "Internet-facing or shared hosted deployment."},
+	{Scenario: ScenarioAdvanced, Label: "Advanced/manual setup", Description: "Keep the low-level knobs visible and configure manually."},
+}
+
+func ScenarioOptions() []ScenarioOption {
+	out := make([]ScenarioOption, len(scenarioOptions))
+	copy(out, scenarioOptions)
+	return out
+}
+
+func NormalizeMode(raw string) Mode {
+	switch Mode(strings.ToLower(strings.TrimSpace(raw))) {
+	case ModeRelaxed, ModeBalanced, ModeLockedDown:
+		return Mode(strings.ToLower(strings.TrimSpace(raw)))
+	default:
+		return ModeCustom
+	}
+}
+
+func NormalizeScenario(raw string) Scenario {
+	switch Scenario(strings.ToLower(strings.TrimSpace(raw))) {
+	case ScenarioSoloComputer, ScenarioPhoneCompanion, ScenarioPrivateServer, ScenarioHostedService, ScenarioAdvanced:
+		return Scenario(strings.ToLower(strings.TrimSpace(raw)))
+	default:
+		return ScenarioAdvanced
+	}
+}
+
+func RecommendMode(scenario Scenario) Mode {
+	switch NormalizeScenario(string(scenario)) {
+	case ScenarioPrivateServer, ScenarioHostedService:
+		return ModeLockedDown
+	default:
+		return ModeBalanced
+	}
+}
+
+func ApplyScenario(cfg *config.Config, scenario Scenario) {
+	if cfg == nil {
+		return
+	}
+	switch NormalizeScenario(string(scenario)) {
+	case ScenarioSoloComputer:
+		cfg.RuntimeProfile = config.ProfileSingleUserHardened
+		cfg.Service.Enabled = false
+		cfg.Service.AllowUnauthenticatedPairing = false
+		cfg.Security.Approvals.Enabled = true
+		cfg.Security.Approvals.Pairing.Mode = config.ApprovalModeAsk
+	case ScenarioPhoneCompanion:
+		cfg.RuntimeProfile = config.ProfileSingleUserHardened
+		cfg.Service.Enabled = true
+		cfg.Service.AllowUnauthenticatedPairing = false
+		cfg.Security.Approvals.Enabled = true
+		cfg.Security.Approvals.Pairing.Mode = config.ApprovalModeAsk
+	case ScenarioPrivateServer:
+		cfg.RuntimeProfile = config.ProfileHostedService
+		cfg.Service.Enabled = true
+		cfg.Service.AllowUnauthenticatedPairing = false
+		cfg.Security.Approvals.Enabled = true
+		cfg.Security.Approvals.Pairing.Mode = config.ApprovalModeAsk
+		cfg.Security.SecretStore.Enabled = true
+		cfg.Security.SecretStore.Required = true
+		cfg.Security.Audit.Enabled = true
+		cfg.Security.Audit.Strict = true
+		cfg.Security.Audit.VerifyOnStart = true
+		cfg.Security.Network.Enabled = true
+		cfg.Security.Network.DefaultDeny = true
+		cfg.Security.Network.AllowLoopback = true
+	case ScenarioHostedService:
+		cfg.RuntimeProfile = config.ProfileHostedNoExec
+		cfg.Service.Enabled = true
+		cfg.Service.AllowUnauthenticatedPairing = false
+		cfg.Security.Approvals.Enabled = true
+		cfg.Security.Approvals.Pairing.Mode = config.ApprovalModeAsk
+		cfg.Security.SecretStore.Enabled = true
+		cfg.Security.SecretStore.Required = true
+		cfg.Security.Audit.Enabled = true
+		cfg.Security.Audit.Strict = true
+		cfg.Security.Audit.VerifyOnStart = true
+		cfg.Security.Network.Enabled = true
+		cfg.Security.Network.DefaultDeny = true
+		cfg.Security.Network.AllowLoopback = false
+		cfg.Security.Network.AllowPrivate = false
+		cfg.Hardening.EnableExecShell = false
+		cfg.Hardening.PrivilegedTools = false
+	case ScenarioAdvanced:
+	}
+}
+
+func Apply(cfg *config.Config, mode Mode) {
+	if cfg == nil {
+		return
+	}
+	defaults := config.Default()
+	cfg.Tools.RestrictToWorkspace = true
+	cfg.Hardening.Quotas = defaults.Hardening.Quotas
+	switch NormalizeMode(string(mode)) {
+	case ModeRelaxed:
+		cfg.Hardening.GuardedTools = false
+		cfg.Security.Audit.Enabled = false
+		cfg.Security.Audit.Strict = false
+		cfg.Security.Audit.VerifyOnStart = false
+		cfg.Security.Approvals.Enabled = false
+		cfg.Security.Approvals.Exec.Mode = config.ApprovalModeTrusted
+		cfg.Security.Approvals.SkillExecution.Mode = config.ApprovalModeTrusted
+		cfg.Security.Approvals.SecretAccess.Mode = config.ApprovalModeTrusted
+		cfg.Security.Approvals.MessageSend.Mode = config.ApprovalModeTrusted
+		cfg.Security.Network.Enabled = false
+		cfg.Security.Network.DefaultDeny = false
+		cfg.Hardening.Sandbox.Enabled = false
+		if cfg.RuntimeProfile == "" {
+			cfg.RuntimeProfile = config.ProfileLocalDev
+		}
+	case ModeLockedDown:
+		cfg.Hardening.GuardedTools = true
+		cfg.Hardening.PrivilegedTools = false
+		cfg.Hardening.EnableExecShell = false
+		cfg.Hardening.Sandbox.Enabled = true
+		if strings.TrimSpace(cfg.Hardening.Sandbox.BubblewrapPath) == "" {
+			cfg.Hardening.Sandbox.BubblewrapPath = defaults.Hardening.Sandbox.BubblewrapPath
+		}
+		cfg.Security.SecretStore.Enabled = true
+		cfg.Security.SecretStore.Required = true
+		cfg.Security.Audit.Enabled = true
+		cfg.Security.Audit.Strict = true
+		cfg.Security.Audit.VerifyOnStart = true
+		cfg.Security.Approvals.Enabled = true
+		cfg.Security.Approvals.Exec.Mode = config.ApprovalModeDeny
+		cfg.Security.Approvals.SkillExecution.Mode = config.ApprovalModeAsk
+		cfg.Security.Approvals.SecretAccess.Mode = config.ApprovalModeAsk
+		cfg.Security.Approvals.MessageSend.Mode = config.ApprovalModeAsk
+		cfg.Security.Approvals.Pairing.Mode = config.ApprovalModeAsk
+		cfg.Security.Network.Enabled = true
+		cfg.Security.Network.DefaultDeny = true
+		if cfg.RuntimeProfile == "" || cfg.RuntimeProfile == config.ProfileLocalDev || cfg.RuntimeProfile == config.ProfileSingleUserHardened {
+			cfg.RuntimeProfile = config.ProfileHostedNoExec
+		}
+	default:
+		cfg.Hardening.GuardedTools = true
+		cfg.Security.Audit.Enabled = true
+		cfg.Security.Audit.Strict = false
+		cfg.Security.Audit.VerifyOnStart = false
+		cfg.Security.Approvals.Enabled = true
+		cfg.Security.Approvals.Exec.Mode = config.ApprovalModeAsk
+		cfg.Security.Approvals.SkillExecution.Mode = config.ApprovalModeAsk
+		cfg.Security.Approvals.SecretAccess.Mode = config.ApprovalModeAsk
+		cfg.Security.Approvals.MessageSend.Mode = config.ApprovalModeAsk
+		cfg.Security.Approvals.Pairing.Mode = config.ApprovalModeAsk
+		cfg.Security.Network.Enabled = false
+		cfg.Security.Network.DefaultDeny = false
+		cfg.Hardening.Sandbox.Enabled = false
+		if cfg.RuntimeProfile == "" {
+			cfg.RuntimeProfile = config.ProfileSingleUserHardened
+		}
+	}
+}
+
+func Infer(cfg config.Config) Inference {
+	candidates := []Mode{ModeRelaxed, ModeBalanced, ModeLockedDown}
+	best := ModeCustom
+	bestDrift := []string{"safety posture does not match a standard mode yet"}
+	for _, candidate := range candidates {
+		drift := Drift(cfg, candidate)
+		if len(drift) == 0 {
+			return Inference{Mode: candidate, BaseMode: candidate, Scenario: InferScenario(cfg), Confidence: "exact"}
+		}
+		if best == ModeCustom || len(drift) < len(bestDrift) {
+			best = candidate
+			bestDrift = drift
+		}
+	}
+	return Inference{Mode: ModeCustom, BaseMode: best, IsCustom: true, Drift: bestDrift, Scenario: InferScenario(cfg), Confidence: "closest-match"}
+}
+
+func Drift(cfg config.Config, mode Mode) []string {
+	baseline := config.Default()
+	Apply(&baseline, mode)
+	drift := []string{}
+	if cfg.Tools.RestrictToWorkspace != baseline.Tools.RestrictToWorkspace {
+		drift = append(drift, fmt.Sprintf("workspace boundary expected %t", baseline.Tools.RestrictToWorkspace))
+	}
+	if cfg.Hardening.GuardedTools != baseline.Hardening.GuardedTools {
+		drift = append(drift, fmt.Sprintf("ask-before-risky-actions expected %t", baseline.Hardening.GuardedTools))
+	}
+	if cfg.Security.Audit.Enabled != baseline.Security.Audit.Enabled {
+		drift = append(drift, fmt.Sprintf("safety log enabled expected %t", baseline.Security.Audit.Enabled))
+	}
+	if cfg.Security.Audit.Strict != baseline.Security.Audit.Strict {
+		drift = append(drift, fmt.Sprintf("strict safety log expected %t", baseline.Security.Audit.Strict))
+	}
+	if cfg.Security.Approvals.Enabled != baseline.Security.Approvals.Enabled {
+		drift = append(drift, fmt.Sprintf("approvals enabled expected %t", baseline.Security.Approvals.Enabled))
+	}
+	if cfg.Security.Approvals.Exec.Mode != baseline.Security.Approvals.Exec.Mode {
+		drift = append(drift, fmt.Sprintf("command approval mode expected %s", baseline.Security.Approvals.Exec.Mode))
+	}
+	if cfg.Security.Network.Enabled != baseline.Security.Network.Enabled {
+		drift = append(drift, fmt.Sprintf("network policy enabled expected %t", baseline.Security.Network.Enabled))
+	}
+	if cfg.Security.Network.DefaultDeny != baseline.Security.Network.DefaultDeny {
+		drift = append(drift, fmt.Sprintf("network default deny expected %t", baseline.Security.Network.DefaultDeny))
+	}
+	if cfg.Hardening.Sandbox.Enabled != baseline.Hardening.Sandbox.Enabled {
+		drift = append(drift, fmt.Sprintf("sandbox enabled expected %t", baseline.Hardening.Sandbox.Enabled))
+	}
+	if cfg.Hardening.EnableExecShell != baseline.Hardening.EnableExecShell {
+		drift = append(drift, fmt.Sprintf("shell execution expected %t", baseline.Hardening.EnableExecShell))
+	}
+	if cfg.Hardening.PrivilegedTools != baseline.Hardening.PrivilegedTools {
+		drift = append(drift, fmt.Sprintf("privileged tools expected %t", baseline.Hardening.PrivilegedTools))
+	}
+	return drift
+}
+
+func InferScenario(cfg config.Config) Scenario {
+	switch cfg.RuntimeProfile {
+	case config.ProfileHostedService:
+		return ScenarioPrivateServer
+	case config.ProfileHostedNoExec, config.ProfileHostedRemoteSandbox:
+		return ScenarioHostedService
+	case config.ProfileSingleUserHardened:
+		if cfg.Service.Enabled {
+			return ScenarioPhoneCompanion
+		}
+		return ScenarioSoloComputer
+	default:
+		if cfg.Service.Enabled {
+			return ScenarioPhoneCompanion
+		}
+		return ScenarioSoloComputer
+	}
+}
+````
+
 ## File: internal/scope/scope.go
 ````go
 // Package scope defines shared session-scope identifiers and helpers.
@@ -3027,6 +3378,96 @@ func (t *CronTool) Execute(ctx context.Context, params map[string]any) (string, 
 }
 ````
 
+## File: internal/tools/env.go
+````go
+package tools
+
+import (
+	"os"
+	"strings"
+)
+
+var defaultChildEnvAllowlist = []string{"PATH", "HOME", "TMPDIR", "TMP", "TEMP"}
+
+func EffectiveChildEnvAllowlist(allowlist []string) []string {
+	cleaned := make([]string, 0, len(allowlist))
+	seen := map[string]struct{}{}
+	for _, name := range allowlist {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		cleaned = append(cleaned, name)
+	}
+	if len(cleaned) > 0 {
+		return cleaned
+	}
+	return append([]string{}, defaultChildEnvAllowlist...)
+}
+
+func BuildChildEnv(base []string, allowlist []string, overlay map[string]string, pathAppend string) []string {
+	values := map[string]string{}
+	order := make([]string, 0, len(base)+len(overlay)+1)
+	allowed := map[string]struct{}{}
+	for _, name := range EffectiveChildEnvAllowlist(allowlist) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		allowed[name] = struct{}{}
+	}
+	for _, raw := range base {
+		key, value, ok := strings.Cut(raw, "=")
+		if !ok {
+			continue
+		}
+		if _, ok := allowed[key]; !ok {
+			continue
+		}
+		if _, exists := values[key]; !exists {
+			order = append(order, key)
+		}
+		values[key] = value
+	}
+	for key, value := range overlay {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		if _, exists := values[key]; !exists {
+			order = append(order, key)
+		}
+		values[key] = value
+	}
+	if pathAppend != "" {
+		pathValue := values["PATH"]
+		if pathValue == "" {
+			pathValue = os.Getenv("PATH")
+		}
+		values["PATH"] = pathValue + string(os.PathListSeparator) + pathAppend
+		seen := false
+		for _, key := range order {
+			if key == "PATH" {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			order = append(order, "PATH")
+		}
+	}
+	out := make([]string, 0, len(order))
+	for _, key := range order {
+		out = append(out, key+"="+values[key])
+	}
+	return out
+}
+````
+
 ## File: internal/tools/files.go
 ````go
 package tools
@@ -3299,6 +3740,290 @@ func existingFileMode(path string, defaultMode os.FileMode) os.FileMode {
 		return 0o600
 	}
 	return defaultMode
+}
+````
+
+## File: internal/tools/memory.go
+````go
+package tools
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"sort"
+	"strings"
+
+	"or3-intern/internal/db"
+	"or3-intern/internal/memory"
+	"or3-intern/internal/providers"
+	"or3-intern/internal/scope"
+)
+
+type MemorySetPinned struct {
+	Base
+	DB *db.DB
+}
+
+func (t *MemorySetPinned) Name() string { return "memory_set_pinned" }
+func (t *MemorySetPinned) Description() string {
+	return "Upsert a pinned memory entry (always included in prompts)."
+}
+func (t *MemorySetPinned) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{
+		"key":     map[string]any{"type": "string"},
+		"content": map[string]any{"type": "string"},
+		"scope":   map[string]any{"type": "string", "description": "Optional scope override: 'global' to share across sessions"},
+	}, "required": []string{"key", "content"}}
+}
+func (t *MemorySetPinned) Schema() map[string]any {
+	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
+}
+func (t *MemorySetPinned) Execute(ctx context.Context, params map[string]any) (string, error) {
+	if t.DB == nil {
+		return "", fmt.Errorf("db not set")
+	}
+	key := stringParam(params, "key")
+	content := stringParam(params, "content")
+	if key == "" || content == "" {
+		return "", fmt.Errorf("missing key/content")
+	}
+	if err := t.DB.UpsertPinned(ctx, memoryScopeFromParams(ctx, params), key, content); err != nil {
+		return "", err
+	}
+	return "ok", nil
+}
+
+type MemoryAddNote struct {
+	Base
+	DB               *db.DB
+	Provider         *providers.Client
+	EmbedModel       string
+	EmbedFingerprint string
+}
+
+func (t *MemoryAddNote) Name() string { return "memory_add_note" }
+func (t *MemoryAddNote) Description() string {
+	return "Add a semantic memory note to the indexed memory store."
+}
+func (t *MemoryAddNote) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{
+		"text":              map[string]any{"type": "string"},
+		"tags":              map[string]any{"type": "string", "description": "comma-separated tags (optional)"},
+		"source_message_id": map[string]any{"type": "integer", "description": "source message id (optional)"},
+		"scope":             map[string]any{"type": "string", "description": "Optional scope override: 'global' to share across sessions"},
+	}, "required": []string{"text"}}
+}
+func (t *MemoryAddNote) Schema() map[string]any {
+	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
+}
+func (t *MemoryAddNote) Execute(ctx context.Context, params map[string]any) (string, error) {
+	if t.DB == nil || t.Provider == nil {
+		return "", fmt.Errorf("missing deps")
+	}
+	text := stringParam(params, "text")
+	if text == "" {
+		return "", fmt.Errorf("empty text")
+	}
+	tags := stringParam(params, "tags")
+	var src sql.NullInt64
+	if v, ok := params["source_message_id"].(float64); ok && int64(v) > 0 {
+		src = sql.NullInt64{Int64: int64(v), Valid: true}
+	}
+	vec, err := t.Provider.Embed(ctx, t.EmbedModel, text)
+	if err != nil {
+		return "", err
+	}
+	blob := memory.PackFloat32(vec)
+	id, err := t.DB.InsertMemoryNoteTyped(ctx, memoryScopeFromParams(ctx, params), db.TypedNoteInput{
+		Text: text, Embedding: blob, EmbedFingerprint: t.EmbedFingerprint, SourceMsgID: src, Tags: tags,
+	})
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("ok: %d", id), nil
+}
+
+type MemorySearch struct {
+	Base
+	DB               *db.DB
+	Provider         *providers.Client
+	EmbedModel       string
+	EmbedFingerprint string
+	VectorK          int
+	FTSK             int
+	TopK             int
+	VectorScanLimit  int
+}
+
+func (t *MemorySearch) Name() string { return "memory_search" }
+func (t *MemorySearch) Description() string {
+	return "Search long-term memory (hybrid semantic + keyword) and return top results."
+}
+func (t *MemorySearch) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{
+		"query": map[string]any{"type": "string"},
+		"topK":  map[string]any{"type": "integer"},
+		"scope": map[string]any{"type": "string", "description": "Optional scope override: 'global' to search only shared memory"},
+	}, "required": []string{"query"}}
+}
+func (t *MemorySearch) Schema() map[string]any {
+	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
+}
+func (t *MemorySearch) Execute(ctx context.Context, params map[string]any) (string, error) {
+	if t.DB == nil || t.Provider == nil {
+		return "", fmt.Errorf("missing deps")
+	}
+	q := stringParam(params, "query")
+	if q == "" {
+		return "", fmt.Errorf("empty query")
+	}
+	topK := t.TopK
+	if v, ok := params["topK"].(float64); ok && int(v) > 0 {
+		topK = int(v)
+	}
+	vec, err := t.Provider.Embed(ctx, t.EmbedModel, q)
+	if err != nil {
+		return "", err
+	}
+	r := memory.NewRetriever(t.DB)
+	r.EmbedFingerprint = t.EmbedFingerprint
+	r.VectorScanLimit = t.VectorScanLimit
+	got, err := r.Retrieve(ctx, memoryScopeFromParams(ctx, params), q, vec, t.VectorK, t.FTSK, topK)
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	for i, m := range got {
+		b.WriteString(fmt.Sprintf("%d. [%s] %.4f %s\n", i+1, m.Source, m.Score, m.Text))
+	}
+	return b.String(), nil
+}
+
+type MemoryRecent struct {
+	Base
+	DB           *db.DB
+	DefaultLimit int
+	MaxLimit     int
+	MaxChars     int
+}
+
+func (t *MemoryRecent) Name() string { return "memory_recent" }
+func (t *MemoryRecent) Description() string {
+	return "Fetch recent conversation messages from the current linked session scope."
+}
+func (t *MemoryRecent) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{
+		"limit": map[string]any{"type": "integer"},
+	}}
+}
+func (t *MemoryRecent) Schema() map[string]any {
+	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
+}
+func (t *MemoryRecent) Execute(ctx context.Context, params map[string]any) (string, error) {
+	if t.DB == nil {
+		return "", fmt.Errorf("db not set")
+	}
+	limit := boundedPositiveInt(params["limit"], t.DefaultLimit, t.MaxLimit)
+	msgs, err := t.DB.GetLastMessagesScoped(ctx, SessionFromContext(ctx), limit)
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	for i, msg := range msgs {
+		b.WriteString(fmt.Sprintf("%d. [%s/%s] %s\n", i+1, msg.SessionKey, msg.Role, compactMemoryText(msg.Content, t.MaxChars)))
+	}
+	return b.String(), nil
+}
+
+type MemoryGetPinned struct {
+	Base
+	DB       *db.DB
+	MaxChars int
+}
+
+func (t *MemoryGetPinned) Name() string { return "memory_get_pinned" }
+func (t *MemoryGetPinned) Description() string {
+	return "Read pinned memory entries for the current session, including shared global entries."
+}
+func (t *MemoryGetPinned) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{
+		"key":   map[string]any{"type": "string", "description": "Optional pinned memory key to fetch"},
+		"scope": map[string]any{"type": "string", "description": "Optional scope override: 'global' to read only shared memory"},
+	}}
+}
+func (t *MemoryGetPinned) Schema() map[string]any {
+	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
+}
+func (t *MemoryGetPinned) Execute(ctx context.Context, params map[string]any) (string, error) {
+	if t.DB == nil {
+		return "", fmt.Errorf("db not set")
+	}
+	pinned, err := t.DB.GetPinned(ctx, memoryScopeFromParams(ctx, params))
+	if err != nil {
+		return "", err
+	}
+	key := stringParam(params, "key")
+	if key != "" {
+		value, ok := pinned[key]
+		if !ok {
+			return "", nil
+		}
+		return fmt.Sprintf("%s: %s", key, compactMemoryText(value, t.MaxChars)), nil
+	}
+	keys := make([]string, 0, len(pinned))
+	for key := range pinned {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, key := range keys {
+		b.WriteString(fmt.Sprintf("%s: %s\n", key, compactMemoryText(pinned[key], t.MaxChars)))
+	}
+	return b.String(), nil
+}
+
+func memoryScopeFromParams(ctx context.Context, params map[string]any) string {
+	if requestedScope := stringParam(params, "scope"); scope.IsGlobalScopeRequest(requestedScope) {
+		return scope.GlobalMemoryScope
+	}
+	return SessionFromContext(ctx)
+}
+
+func stringParam(params map[string]any, key string) string {
+	if params == nil {
+		return ""
+	}
+	value, ok := params[key]
+	if !ok || value == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(value))
+}
+
+func boundedPositiveInt(raw any, fallback, max int) int {
+	value := fallback
+	if v, ok := raw.(float64); ok && int(v) > 0 {
+		value = int(v)
+	}
+	if max > 0 && value > max {
+		return max
+	}
+	if value < 0 {
+		return 0
+	}
+	return value
+}
+
+func compactMemoryText(text string, maxChars int) string {
+	text = strings.Join(strings.Fields(text), " ")
+	if maxChars <= 0 || len(text) <= maxChars {
+		return text
+	}
+	if maxChars <= 3 {
+		return text[:maxChars]
+	}
+	return text[:maxChars-3] + "..."
 }
 ````
 
@@ -4537,6 +5262,19 @@ require (
 )
 ````
 
+## File: missing.md
+````markdown
+Partially Outdated
+
+Media + attachments: the file is too pessimistic. Inbound attachments exist for Telegram, Discord, Slack, and WhatsApp, and image attachments can reach the model when vision is enabled via prompt.go:248-399. What still seems missing is fuller audio/OCR/document understanding, especially transcription.
+Email and Matrix: email is implemented and wired via email.go:1-70 and main.go:752-758; Matrix still appears missing since I found no Matrix channel files.
+Richer session management controls: partly true. There is scope link/list/resolve in scope_cmd.go:1-56 plus DB reset plumbing in store.go:787, but I do not see a broader first-class session manager surface.
+Still Missing
+
+Broader provider layer: this still looks true. The provider package currently appears to be OpenAI-compatible only in openai.go:1-40.
+First-party WhatsApp bridge implementation: this still looks true. The repo has a bridge client/adapter in whatsapp.go:1-40, but I did not find a hosted bridge server implementation in the workspace.
+````
+
 ## File: string
 ````
 {
@@ -4818,6 +5556,56 @@ require (
 }
 ````
 
+## File: cmd/or3-intern/testdata/service_contract/intern-turn-request.json
+````json
+{
+  "session_key": "svc:fixture",
+  "platform_session_ref": {
+    "workspace_id": "ws_fixture",
+    "client_kind": "chat",
+    "client_session_id": "thread_fixture",
+    "network_session_id": "sess_fixture",
+    "session_key": "svc:fixture"
+  },
+  "message": "hello contract",
+  "tool_policy": {
+    "mode": "allow_list",
+    "allowed_tools": ["read_file"]
+  },
+  "meta": {
+    "request_id": "req_fixture",
+    "workspace_id": "ws_fixture",
+    "network_session_id": "sess_fixture"
+  },
+  "profile_name": "ops"
+}
+````
+
+## File: cmd/or3-intern/testdata/service_contract/subagent-request.json
+````json
+{
+  "parentSessionKey": "svc:parent",
+  "task": "background contract task",
+  "promptSnapshot": [
+    {
+      "role": "user",
+      "content": "remember contract"
+    }
+  ],
+  "toolPolicy": {
+    "mode": "allow_list",
+    "allowedTools": ["read_file"]
+  },
+  "timeoutSeconds": 15,
+  "profileName": "ops",
+  "channel": "service",
+  "replyTo": "or3-net",
+  "meta": {
+    "trace_id": "trace-subagent"
+  }
+}
+````
+
 ## File: cmd/or3-intern/testdata/service_contract/turn-response.json
 ````json
 {
@@ -4917,6 +5705,182 @@ func printCapabilitiesReport(w io.Writer, report controlplane.CapabilitiesReport
 		}
 		_, _ = fmt.Fprintln(w)
 	}
+}
+````
+
+## File: cmd/or3-intern/connect_device_cmd.go
+````go
+package main
+
+import (
+	"bufio"
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+
+	"or3-intern/internal/approval"
+	"or3-intern/internal/config"
+	"or3-intern/internal/db"
+	intdoctor "or3-intern/internal/doctor"
+	"or3-intern/internal/security"
+	"or3-intern/internal/uxcopy"
+	"or3-intern/internal/uxstate"
+)
+
+func runConnectDeviceCommand(ctx context.Context, cfgPath string, cfg *config.Config, database *db.DB, broker *approval.Broker, args []string, stdout, stderr io.Writer) error {
+	if len(args) > 0 {
+		switch strings.ToLower(strings.TrimSpace(args[0])) {
+		case "list":
+			return runConnectDeviceList(ctx, database, stdout)
+		case "disconnect":
+			if len(args) != 2 {
+				return fmt.Errorf("usage: connect-device disconnect <device-id>")
+			}
+			if broker == nil {
+				return fmt.Errorf("approval broker unavailable")
+			}
+			if err := broker.RevokeDevice(ctx, strings.TrimSpace(args[1]), "cli"); err != nil {
+				return err
+			}
+			fmt.Fprintf(stdout, "Disconnected %s\n", strings.TrimSpace(args[1]))
+			return nil
+		case "role":
+			return fmt.Errorf("changing device access is not interactive yet; disconnect and reconnect the device with the new access level")
+		default:
+			return fmt.Errorf("usage: connect-device [list|disconnect <device-id>|role <device-id>]")
+		}
+	}
+	if cfg == nil {
+		return fmt.Errorf("config required")
+	}
+	if database == nil {
+		return fmt.Errorf("device storage is not available")
+	}
+	updatedBroker, err := ensureConnectDevicePrereqs(cfgPath, cfg, database, broker)
+	if err != nil {
+		return err
+	}
+	reader := bufio.NewReader(os.Stdin)
+	choice, err := promptMenuChoice(reader, stdout, "Choose what this device can do", []string{
+		"1) Chat only",
+		"2) Chat and manage files in workspace",
+		"3) Admin device",
+	}, "1")
+	if err != nil {
+		return err
+	}
+	name, err := promptString(reader, stdout, "Device name", "My device")
+	if err != nil {
+		return err
+	}
+	role := approval.RoleViewer
+	if choice == "2" {
+		role = approval.RoleOperator
+	}
+	if choice == "3" {
+		role = approval.RoleAdmin
+	}
+	req, code, err := updatedBroker.CreatePairingRequest(ctx, approval.PairingRequestInput{Role: role, DisplayName: name, Origin: "connect-device"})
+	if err != nil {
+		return err
+	}
+	if req.Status == approval.StatusPending {
+		req, err = updatedBroker.ApprovePairingRequest(ctx, req.ID, "cli")
+		if err != nil {
+			return err
+		}
+	}
+	fmt.Fprintln(stdout, "Connect a device")
+	fmt.Fprintln(stdout, "\nStep 1: Open OR3 on your phone or other device.")
+	fmt.Fprintln(stdout, "Step 2: Enter this code:")
+	fmt.Fprintf(stdout, "\n  %s\n\n", formatPairingCode(code))
+	fmt.Fprintf(stdout, "Step 3: This device will be connected as: %s\n", uxcopy.DeviceRoleLabel(role))
+	fmt.Fprintf(stdout, "Request ID: %d\n", req.ID)
+	fmt.Fprintln(stdout, "After the remote device enters the code, use `or3-intern connect-device list` to review connected devices.")
+	return nil
+}
+
+func runConnectDeviceList(ctx context.Context, database *db.DB, stdout io.Writer) error {
+	if database == nil {
+		return fmt.Errorf("device storage is not available")
+	}
+	items, err := database.ListPairedDevices(ctx, 100)
+	if err != nil {
+		return err
+	}
+	if len(items) == 0 {
+		fmt.Fprintln(stdout, "No connected devices yet.")
+		return nil
+	}
+	views := uxstate.BuildDeviceViews(items)
+	fmt.Fprintln(stdout, "Connected devices")
+	for _, view := range views {
+		fmt.Fprintf(stdout, "\n- %s\n", view.Name)
+		fmt.Fprintf(stdout, "  Role: %s\n", view.RoleLabel)
+		fmt.Fprintf(stdout, "  Status: %s\n", view.Status)
+		fmt.Fprintf(stdout, "  Last used: %s\n", view.LastUsed)
+		fmt.Fprintf(stdout, "  %s\n", view.ChangeAccessHint)
+		fmt.Fprintf(stdout, "  %s\n", view.DisconnectHint)
+	}
+	return nil
+}
+
+func ensureConnectDevicePrereqs(cfgPath string, cfg *config.Config, database *db.DB, broker *approval.Broker) (*approval.Broker, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config required")
+	}
+	changed := false
+	if !cfg.Service.Enabled {
+		cfg.Service.Enabled = true
+		changed = true
+	}
+	if strings.TrimSpace(cfg.Service.Secret) == "" {
+		secret, err := intdoctor.GenerateSecret()
+		if err != nil {
+			return nil, err
+		}
+		cfg.Service.Secret = secret
+		changed = true
+	}
+	if !cfg.Security.Approvals.Enabled {
+		cfg.Security.Approvals.Enabled = true
+		changed = true
+	}
+	if cfg.Security.Approvals.Pairing.Mode == config.ApprovalModeDeny {
+		cfg.Security.Approvals.Pairing.Mode = config.ApprovalModeAsk
+		changed = true
+	}
+	if strings.TrimSpace(cfg.Security.Approvals.KeyFile) == "" {
+		cfg.Security.Approvals.KeyFile = config.Default().Security.Approvals.KeyFile
+		changed = true
+	}
+	if _, err := security.LoadOrCreateKey(cfg.Security.Approvals.KeyFile); err != nil {
+		return nil, err
+	}
+	if changed {
+		if err := config.Save(cfgPath, *cfg); err != nil {
+			return nil, err
+		}
+	}
+	if broker != nil && broker.DB == database && strings.TrimSpace(broker.Config.KeyFile) == strings.TrimSpace(cfg.Security.Approvals.KeyFile) {
+		broker.Config = cfg.Security.Approvals
+		return broker, nil
+	}
+	key, err := os.ReadFile(cfg.Security.Approvals.KeyFile)
+	if err != nil {
+		return nil, err
+	}
+	return &approval.Broker{DB: database, Config: cfg.Security.Approvals, HostID: cfg.Security.Approvals.HostID, SignKey: key}, nil
+}
+
+func formatPairingCode(code string) string {
+	code = strings.TrimSpace(code)
+	if len(code) != 6 {
+		return code
+	}
+	return code[:3] + "-" + code[3:]
 }
 ````
 
@@ -5069,6 +6033,304 @@ func setupApprovalBroker(cfg config.Config, d *db.DB, audit *security.AuditLogge
 		return nil, nil
 	}
 	return &approval.Broker{DB: d, Audit: audit, Config: cfg.Security.Approvals, HostID: cfg.Security.Approvals.HostID, SignKey: key}, nil
+}
+````
+
+## File: cmd/or3-intern/settings_cmd.go
+````go
+package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+
+	"or3-intern/internal/config"
+	"or3-intern/internal/safetymode"
+	"or3-intern/internal/uxstate"
+)
+
+type settingsArgs struct {
+	Section  string
+	Export   string
+	Advanced bool
+}
+
+func runSettings(cfgPath string, args []string) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = ""
+	}
+	return runSettingsWithIO(os.Stdin, os.Stdout, cfgPathOrDefault(cfgPath), cwd, args)
+}
+
+func runSettingsWithIO(in io.Reader, out io.Writer, cfgPath, cwd string, args []string) error {
+	parsed, err := parseSettingsArgs(args)
+	if err != nil {
+		return err
+	}
+	cfg, existed, loadWarning, err := loadConfigureConfig(cfgPath, cwd)
+	if err != nil {
+		return err
+	}
+	if parsed.Export != "" {
+		return exportSettingsConfig(out, parsed.Export, cfg)
+	}
+	if parsed.Section != "" {
+		return runSettingsSection(bufio.NewReader(in), out, cfgPath, cwd, cfg, parsed.Section)
+	}
+	fmt.Fprintln(out, "OR3 settings")
+	if existed {
+		fmt.Fprintln(out, "Loaded your saved setup.")
+	} else {
+		fmt.Fprintln(out, "No config found yet. Run `or3-intern setup` to create one.")
+	}
+	if strings.TrimSpace(loadWarning) != "" {
+		fmt.Fprintf(out, "Repair mode: %s\n", loadWarning)
+	}
+	printSettingsHome(out, uxstate.BuildSettingsHomeView(cfg), parsed.Advanced)
+	return nil
+}
+
+func parseSettingsArgs(args []string) (settingsArgs, error) {
+	fs := flag.NewFlagSet("settings", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var parsed settingsArgs
+	fs.StringVar(&parsed.Section, "section", "", "settings section")
+	fs.StringVar(&parsed.Export, "export", "", "write current config JSON to a path, or '-' for stdout")
+	fs.BoolVar(&parsed.Advanced, "advanced", false, "show advanced settings sections")
+	if err := fs.Parse(args); err != nil {
+		return settingsArgs{}, err
+	}
+	if fs.NArg() > 0 {
+		return settingsArgs{}, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+	}
+	parsed.Section = strings.ToLower(strings.TrimSpace(parsed.Section))
+	return parsed, nil
+}
+
+func printSettingsHome(out io.Writer, view uxstate.SettingsHomeView, advanced bool) {
+	fmt.Fprintln(out, "\nSettings home")
+	for _, section := range view.Sections {
+		if section.Advanced && !advanced {
+			continue
+		}
+		fmt.Fprintf(out, "\n- %s\n", section.Title)
+		fmt.Fprintf(out, "  %s\n", section.Summary)
+		fmt.Fprintf(out, "  Change: %s\n", section.Action)
+	}
+	fmt.Fprintln(out, "\nUseful commands")
+	for _, command := range view.Commands {
+		fmt.Fprintf(out, "- %s\n", command)
+	}
+	if !advanced {
+		fmt.Fprintln(out, "- or3-intern settings --advanced")
+	}
+}
+
+func runSettingsSection(reader *bufio.Reader, out io.Writer, cfgPath, cwd string, cfg config.Config, section string) error {
+	switch section {
+	case "provider":
+		return runConfigureSectionAndSave(reader, out, cfgPath, cwd, &cfg, "provider")
+	case "workspace":
+		return runConfigureSectionAndSave(reader, out, cfgPath, cwd, &cfg, "workspace")
+	case "channels":
+		return runConfigureSectionAndSave(reader, out, cfgPath, cwd, &cfg, "channels")
+	case "tools":
+		return runConfigureSectionAndSave(reader, out, cfgPath, cwd, &cfg, "tools")
+	case "memory":
+		return runConfigureSectionAndSave(reader, out, cfgPath, cwd, &cfg, "docindex")
+	case "devices":
+		fmt.Fprintln(out, "Connected Devices")
+		fmt.Fprintln(out, "Use `or3-intern connect-device` to pair a device or `or3-intern connect-device list` to review connected devices.")
+		return nil
+	case "safety":
+		mode, err := promptSetupMode(reader, out, safetymode.Infer(cfg).BaseMode)
+		if err != nil {
+			return err
+		}
+		safetymode.Apply(&cfg, mode)
+		if err := config.Save(cfgPath, cfg); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "Saved safety mode: %s\n", mode)
+		return nil
+	case "advanced":
+		return runConfigureWithIO(reader, out, cfgPath, cwd, nil)
+	default:
+		return fmt.Errorf("unknown settings section %q", section)
+	}
+}
+
+func runConfigureSectionAndSave(reader *bufio.Reader, out io.Writer, cfgPath, cwd string, cfg *config.Config, section string) error {
+	if err := runConfigureSection(reader, out, cfg, section, cwd); err != nil {
+		return err
+	}
+	if err := config.Save(cfgPath, *cfg); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "Saved %s settings.\n", section)
+	return nil
+}
+
+func exportSettingsConfig(out io.Writer, target string, cfg config.Config) error {
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	if strings.TrimSpace(target) == "-" {
+		_, err = out.Write(data)
+		return err
+	}
+	if err := os.WriteFile(target, data, 0o600); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "Exported advanced config to %s\n", target)
+	return nil
+}
+````
+
+## File: cmd/or3-intern/status_cmd.go
+````go
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"io"
+	"strings"
+
+	"or3-intern/internal/config"
+	"or3-intern/internal/db"
+	intdoctor "or3-intern/internal/doctor"
+	"or3-intern/internal/uxcopy"
+	"or3-intern/internal/uxstate"
+)
+
+type statusArgs struct {
+	Detailed bool
+	FixID    string
+}
+
+func parseStatusArgs(args []string, rootAdvanced bool) (bool, error) {
+	parsed, err := parseStatusCommandArgs(args, rootAdvanced)
+	return parsed.Detailed, err
+}
+
+func parseStatusCommandArgs(args []string, rootAdvanced bool) (statusArgs, error) {
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	detailed := rootAdvanced
+	fixID := ""
+	fs.BoolVar(&detailed, "advanced", rootAdvanced, "include internal finding IDs")
+	fs.StringVar(&fixID, "fix", "", "apply one safe automatic fix by finding ID")
+	if err := fs.Parse(args); err != nil {
+		return statusArgs{}, err
+	}
+	if fs.NArg() > 0 {
+		return statusArgs{}, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+	}
+	return statusArgs{Detailed: detailed, FixID: strings.TrimSpace(fixID)}, nil
+}
+
+func runStatusCommandWithOptions(cfgPath string, cfg config.Config, validationError string, database *db.DB, stdout io.Writer, args statusArgs) error {
+	if args.FixID != "" {
+		report := intdoctor.Evaluate(cfg, intdoctor.Options{Mode: intdoctor.ModeAdvisory, ValidationError: validationError, ConfigPath: cfgPath})
+		selected := []intdoctor.Finding{}
+		for _, finding := range report.Findings {
+			if finding.ID == args.FixID {
+				selected = append(selected, finding)
+				break
+			}
+		}
+		if len(selected) == 0 {
+			return fmt.Errorf("unknown finding ID %q", args.FixID)
+		}
+		if selected[0].FixMode != intdoctor.FixModeAutomatic {
+			return fmt.Errorf("finding %q does not support safe automatic repair; run `or3-intern doctor --fix --interactive` if guided repair is available", args.FixID)
+		}
+		applied, err := intdoctor.ApplyAutomaticFixes(cfgPath, &cfg, intdoctor.NewReport(intdoctor.ModeAdvisory, selected), intdoctor.FixOptions{AutomaticOnly: true})
+		if err != nil {
+			return err
+		}
+		for _, fix := range applied {
+			fmt.Fprintf(stdout, "Applied fix for %s: %s\n", fix.ID, fix.Summary)
+		}
+		if len(applied) == 0 {
+			fmt.Fprintf(stdout, "No changes needed for %s.\n", args.FixID)
+		}
+		if loaded, err := config.Load(cfgPath); err == nil {
+			cfg = loaded
+		}
+	}
+	return runStatusCommand(cfg, validationError, database, stdout, args.Detailed)
+}
+
+func runStatusCommand(cfg config.Config, validationError string, database *db.DB, stdout io.Writer, detailed bool) error {
+	report := intdoctor.Evaluate(cfg, intdoctor.Options{Mode: intdoctor.ModeAdvisory, ValidationError: validationError})
+	deviceCount, pendingApprovals := 0, 0
+	if database != nil {
+		ctx := context.Background()
+		if devices, err := database.ListPairedDevices(ctx, 100); err == nil {
+			deviceCount = len(devices)
+		}
+		if approvals, err := database.ListApprovalRequests(ctx, "pending", 100); err == nil {
+			pendingApprovals = len(approvals)
+		}
+	}
+	view := uxstate.BuildStatusView(cfg, report, deviceCount, pendingApprovals)
+	fmt.Fprintln(stdout, "OR3 status")
+	fmt.Fprintf(stdout, "State: %s\n", view.Headline)
+	fmt.Fprintf(stdout, "Safety: %s — %s\n", view.SafetyLabel, view.SafetySummary)
+	fmt.Fprintf(stdout, "Files: %s\n", view.Workspace)
+	fmt.Fprintf(stdout, "Commands: %s\n", view.Commands)
+	fmt.Fprintf(stdout, "Internet: %s\n", view.Internet)
+	fmt.Fprintf(stdout, "Devices: %s\n", view.Devices)
+	fmt.Fprintf(stdout, "Activity log: %s\n", view.ActivityLog)
+	fmt.Fprintln(stdout, "\nWhat OR3 can access")
+	for _, section := range view.Access.Sections {
+		fmt.Fprintf(stdout, "- %s: %s [%s]\n", section.Name, section.Status, section.Risk)
+		fmt.Fprintf(stdout, "  Change: %s\n", section.Action)
+		if detailed {
+			fmt.Fprintf(stdout, "  Detail: %s\n", section.Detail)
+		}
+	}
+	if len(view.Problems) == 0 {
+		fmt.Fprintln(stdout, "\nEverything looks ready.")
+		return nil
+	}
+	fmt.Fprintf(stdout, "\n%d thing(s) need attention:\n", len(view.Problems))
+	for _, problem := range view.Problems {
+		fmt.Fprintf(stdout, "\n- %s\n", problem.Title)
+		fmt.Fprintf(stdout, "  Why it matters: %s\n", problem.WhyItMatters)
+		fmt.Fprintf(stdout, "  Fix: %s\n", problem.RecommendedAction)
+		fmt.Fprintln(stdout, "  Keep as-is: leave it unchanged if this is intentional, then review advanced details before exposing OR3 to other devices or channels.")
+		if detailed {
+			fmt.Fprintf(stdout, "  Advanced ID: %s\n", problem.ID)
+			if problem.FixMode == string(intdoctor.FixModeAutomatic) {
+				fmt.Fprintf(stdout, "  Fix now: or3-intern status --fix %s\n", problem.ID)
+			}
+		}
+	}
+	return nil
+}
+
+func translateAndPrintError(err error, out io.Writer) error {
+	translated := uxcopy.TranslateError(err)
+	if strings.TrimSpace(translated.Title) == "" {
+		return err
+	}
+	fmt.Fprintf(out, "%s\n\nWhat happened:\n%s\n\nFix:\n%s\n", translated.Title, translated.WhatHappened, translated.Fix)
+	if strings.TrimSpace(translated.Command) != "" {
+		fmt.Fprintf(out, "\nTry:\n%s\n", translated.Command)
+	}
+	return nil
 }
 ````
 
@@ -5387,6 +6649,89 @@ func isIntegerValue(value any) bool {
 	default:
 		return false
 	}
+}
+````
+
+## File: internal/agent/tool_policy.go
+````go
+package agent
+
+import (
+	"fmt"
+	"strings"
+
+	"or3-intern/internal/tools"
+)
+
+type ServiceToolPolicy struct {
+	Mode         string
+	AllowedTools []string
+	BlockedTools []string
+}
+
+func ResolveServiceToolAllowlist(base *tools.Registry, policy *ServiceToolPolicy, legacyAllowed []string) ([]string, bool, error) {
+	if policy == nil {
+		if len(normalizeToolNames(legacyAllowed)) > 0 {
+			return nil, false, fmt.Errorf("tool_policy.mode is required")
+		}
+		return []string{}, true, nil
+	}
+
+	mode := strings.ToLower(strings.TrimSpace(policy.Mode))
+	allowed := normalizeToolNames(policy.AllowedTools)
+	if mode == "" {
+		return nil, false, fmt.Errorf("tool_policy mode is required")
+	}
+	if err := validateServiceToolNames(base, allowed); err != nil {
+		return nil, false, err
+	}
+	if err := validateServiceToolNames(base, normalizeToolNames(policy.BlockedTools)); err != nil {
+		return nil, false, err
+	}
+
+	switch mode {
+	case "deny_all":
+		return []string{}, true, nil
+	case "allow_list":
+		return allowed, true, nil
+	default:
+		return nil, false, fmt.Errorf("unsupported tool_policy mode: %s", policy.Mode)
+	}
+}
+
+func validateServiceToolNames(base *tools.Registry, names []string) error {
+	if base == nil || len(names) == 0 {
+		return nil
+	}
+	for _, name := range names {
+		if base.Get(name) == nil {
+			return fmt.Errorf("unknown tool in tool_policy: %s", name)
+		}
+	}
+	return nil
+}
+
+func normalizeToolNames(names []string) []string {
+	if len(names) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(names))
+	seen := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 ````
 
@@ -8267,96 +9612,6 @@ func nullBytes(b []byte) any {
 }
 ````
 
-## File: internal/tools/env.go
-````go
-package tools
-
-import (
-	"os"
-	"strings"
-)
-
-var defaultChildEnvAllowlist = []string{"PATH", "HOME", "TMPDIR", "TMP", "TEMP"}
-
-func EffectiveChildEnvAllowlist(allowlist []string) []string {
-	cleaned := make([]string, 0, len(allowlist))
-	seen := map[string]struct{}{}
-	for _, name := range allowlist {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		if _, ok := seen[name]; ok {
-			continue
-		}
-		seen[name] = struct{}{}
-		cleaned = append(cleaned, name)
-	}
-	if len(cleaned) > 0 {
-		return cleaned
-	}
-	return append([]string{}, defaultChildEnvAllowlist...)
-}
-
-func BuildChildEnv(base []string, allowlist []string, overlay map[string]string, pathAppend string) []string {
-	values := map[string]string{}
-	order := make([]string, 0, len(base)+len(overlay)+1)
-	allowed := map[string]struct{}{}
-	for _, name := range EffectiveChildEnvAllowlist(allowlist) {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		allowed[name] = struct{}{}
-	}
-	for _, raw := range base {
-		key, value, ok := strings.Cut(raw, "=")
-		if !ok {
-			continue
-		}
-		if _, ok := allowed[key]; !ok {
-			continue
-		}
-		if _, exists := values[key]; !exists {
-			order = append(order, key)
-		}
-		values[key] = value
-	}
-	for key, value := range overlay {
-		key = strings.TrimSpace(key)
-		if key == "" {
-			continue
-		}
-		if _, exists := values[key]; !exists {
-			order = append(order, key)
-		}
-		values[key] = value
-	}
-	if pathAppend != "" {
-		pathValue := values["PATH"]
-		if pathValue == "" {
-			pathValue = os.Getenv("PATH")
-		}
-		values["PATH"] = pathValue + string(os.PathListSeparator) + pathAppend
-		seen := false
-		for _, key := range order {
-			if key == "PATH" {
-				seen = true
-				break
-			}
-		}
-		if !seen {
-			order = append(order, "PATH")
-		}
-	}
-	out := make([]string, 0, len(order))
-	for _, key := range order {
-		out = append(out, key+"="+values[key])
-	}
-	return out
-}
-````
-
 ## File: internal/tools/tools.go
 ````go
 // Package tools defines the shared interfaces and capability model for runtime tools.
@@ -8431,218 +9686,613 @@ func (Base) SchemaFor(name, desc string, params map[string]any) map[string]any {
 }
 ````
 
-## File: cmd/or3-intern/approvals_cmd.go
+## File: internal/uxcopy/uxcopy.go
 ````go
-package main
+package uxcopy
 
 import (
-	"context"
-	"flag"
-	"fmt"
-	"io"
-	"strconv"
 	"strings"
 
-	"or3-intern/internal/app"
-	"or3-intern/internal/approval"
-	"or3-intern/internal/controlplane"
+	"or3-intern/internal/safetymode"
 )
 
-func runApprovalsCommand(ctx context.Context, broker *approval.Broker, args []string, stdout, stderr io.Writer) error {
-	if broker == nil {
-		return fmt.Errorf("approval broker is not configured")
+type SettingCopy struct {
+	Label string
+	Hint  string
+}
+
+type ProblemCopy struct {
+	Title             string
+	WhyItMatters      string
+	RecommendedAction string
+}
+
+type UserError struct {
+	Title        string
+	WhatHappened string
+	Fix          string
+	Command      string
+	Advanced     string
+}
+
+var settingLabels = map[string]SettingCopy{
+	"tools.restrictToWorkspace": {Label: "Only let OR3 access this folder", Hint: "Prevents OR3 from reading or writing outside your chosen workspace."},
+	"hardening.guardedTools":    {Label: "Ask before risky actions", Hint: "OR3 pauses before actions that can change files, run code, or contact services."},
+	"security.audit.enabled":    {Label: "Keep a safety log", Hint: "Saves a tamper-evident record of important actions."},
+	"security.approvals.mode":   {Label: "When should OR3 ask?", Hint: "Controls prompts for commands, skills, secrets, messages, and pairing."},
+	"service.enabled":           {Label: "Allow other devices and apps to connect", Hint: "Lets phones or companion apps connect when protected by a secret."},
+	"runtimeProfile":            {Label: "Safety posture", Hint: "Advanced implementation detail behind Safety Mode."},
+	"provider":                  {Label: "AI Provider", Hint: "Endpoint, model, and API key used for chat and embeddings."},
+	"workspace":                 {Label: "Workspace Folder", Hint: "The folder OR3 should stay inside for file work."},
+	"devices":                   {Label: "Connected Devices", Hint: "Phones, apps, and service clients allowed to talk to OR3."},
+	"channels":                  {Label: "Channels", Hint: "Optional app connections such as Slack, Discord, Telegram, Email, and WhatsApp."},
+	"tools":                     {Label: "Tools", Hint: "Command execution, web access, skills, MCP, and other optional capabilities."},
+	"memory":                    {Label: "Memory", Hint: "Saved notes, conversation history, and document indexing."},
+	"advanced":                  {Label: "Advanced", Hint: "Raw config sections and export for operators."},
+}
+
+var findingCopy = map[string]ProblemCopy{
+	"security.audit_disabled":                   {Title: "Safety log is off", WhyItMatters: "Without a safety log, it is harder to review what OR3 did.", RecommendedAction: "Turn on the safety log."},
+	"security.audit_not_strict":                 {Title: "Safety log can fail open", WhyItMatters: "Important actions may continue even if the log cannot be written.", RecommendedAction: "Use stricter safety log settings."},
+	"filesystem.workspace_restriction_disabled": {Title: "Folder limits are too broad", WhyItMatters: "OR3 is not restricted to a single workspace folder.", RecommendedAction: "Restrict OR3 to your chosen workspace folder."},
+	"filesystem.workspace_dir_missing":          {Title: "Workspace folder is missing", WhyItMatters: "OR3 cannot stay inside a folder that no longer exists.", RecommendedAction: "Choose an existing workspace folder."},
+	"privileged-exec.sandbox_disabled":          {Title: "Risky tools are not isolated", WhyItMatters: "Commands could affect your computer directly.", RecommendedAction: "Use safer command settings or enable sandboxing."},
+	"service.secret_missing":                    {Title: "Connections are not protected yet", WhyItMatters: "Other devices or apps should not connect without a secret.", RecommendedAction: "Create a connection password."},
+	"service.secret_weak":                       {Title: "Connection password is too weak", WhyItMatters: "A weak shared secret is easier to guess.", RecommendedAction: "Generate a stronger connection password."},
+	"approvals.key_missing":                     {Title: "Approvals are not ready yet", WhyItMatters: "OR3 cannot safely issue approval tokens without its local signing key.", RecommendedAction: "Create the local approval key."},
+	"approvals.key_path_missing":                {Title: "Approvals are missing a key path", WhyItMatters: "OR3 needs a place to store its approval signing key.", RecommendedAction: "Choose a local approval key path."},
+	"config.validation.load":                    {Title: "Saved settings need repair", WhyItMatters: "The current config cannot be loaded normally.", RecommendedAction: "Review and repair the saved settings."},
+	"config.validation.snapshot":                {Title: "Current settings are not valid", WhyItMatters: "OR3 cannot start safely with the current configuration.", RecommendedAction: "Repair the invalid settings before starting."},
+	"runtime-profile.validation":                {Title: "Safety posture is inconsistent", WhyItMatters: "Some settings contradict the selected safety posture.", RecommendedAction: "Use a matching safety mode or repair the conflicting settings."},
+}
+
+func LabelForSetting(key string) SettingCopy {
+	if copy, ok := settingLabels[strings.TrimSpace(key)]; ok {
+		return copy
 	}
-	appSvc := app.NewServiceApp(nil, nil, nil, newCLIControlplane(broker))
-	if len(args) == 0 {
-		return fmt.Errorf("usage: approvals <list|show|approve|deny|cancel|expire|allowlist>")
+	return SettingCopy{Label: strings.TrimSpace(key), Hint: "Advanced setting."}
+}
+
+func ProblemForFinding(id, summary string) ProblemCopy {
+	if copy, ok := findingCopy[strings.TrimSpace(id)]; ok {
+		return copy
 	}
-	switch strings.ToLower(strings.TrimSpace(args[0])) {
-	case "list":
-		if err := requireArgRange(args[1:], 0, 1, "approvals list [status]"); err != nil {
-			return err
-		}
-		status := ""
-		if len(args) > 1 {
-			status = strings.TrimSpace(args[1])
-		}
-		items, err := appSvc.ListApprovalRequests(ctx, controlplane.ApprovalFilter{Status: status, Limit: 100})
-		if err != nil {
-			return err
-		}
-		for _, item := range items {
-			fmt.Fprintf(stdout, "%d\t%s\t%s\t%s\n", item.ID, item.Status, item.Type, item.SubjectHash)
-		}
-		return nil
-	case "show":
-		if err := requireExactArgs(args[1:], 1, "approvals show <id>"); err != nil {
-			return err
-		}
-		id, err := strconv.ParseInt(strings.TrimSpace(args[1]), 10, 64)
-		if err != nil {
-			return fmt.Errorf("invalid approval ID")
-		}
-		item, err := appSvc.GetApproval(ctx, id)
-		if err != nil {
-			return err
-		}
-		_, _ = fmt.Fprintf(stdout, "id: %d\nstatus: %s\ntype: %s\nsubject_hash: %s\npolicy_mode: %s\nsubject_json: %s\n", item.ID, item.Status, item.Type, item.SubjectHash, item.PolicyMode, item.SubjectJSON)
-		return nil
-	case "approve":
-		fs := flag.NewFlagSet("approvals approve", flag.ContinueOnError)
-		fs.SetOutput(stderr)
-		alwaysAllow := fs.Bool("allowlist", false, "create a matching allowlist rule")
-		note := fs.String("note", "", "resolution note")
-		if err := fs.Parse(args[1:]); err != nil {
-			return err
-		}
-		if err := requireExactFlagArgs(fs, 1, "approvals approve <id> [--allowlist] [--note text]"); err != nil {
-			return err
-		}
-		id, err := strconv.ParseInt(strings.TrimSpace(fs.Arg(0)), 10, 64)
-		if err != nil {
-			return fmt.Errorf("invalid approval ID")
-		}
-		issued, err := appSvc.ApproveApproval(ctx, id, "cli", *alwaysAllow, *note)
-		if err != nil {
-			return err
-		}
-		_, _ = fmt.Fprintf(stdout, "approved %d\ntoken: %s\n", id, issued.Token)
-		if issued.AllowlistID > 0 {
-			_, _ = fmt.Fprintf(stdout, "allowlist_id: %d\n", issued.AllowlistID)
-		}
-		return nil
-	case "deny":
-		fs := flag.NewFlagSet("approvals deny", flag.ContinueOnError)
-		fs.SetOutput(stderr)
-		note := fs.String("note", "", "resolution note")
-		if err := fs.Parse(args[1:]); err != nil {
-			return err
-		}
-		if err := requireExactFlagArgs(fs, 1, "approvals deny <id> [--note text]"); err != nil {
-			return err
-		}
-		id, err := strconv.ParseInt(strings.TrimSpace(fs.Arg(0)), 10, 64)
-		if err != nil {
-			return fmt.Errorf("invalid approval ID")
-		}
-		if err := appSvc.DenyApproval(ctx, id, "cli", *note); err != nil {
-			return err
-		}
-		_, _ = fmt.Fprintf(stdout, "denied %d\n", id)
-		return nil
-	case "cancel":
-		fs := flag.NewFlagSet("approvals cancel", flag.ContinueOnError)
-		fs.SetOutput(stderr)
-		note := fs.String("note", "", "resolution note")
-		if err := fs.Parse(args[1:]); err != nil {
-			return err
-		}
-		if err := requireExactFlagArgs(fs, 1, "approvals cancel <id> [--note text]"); err != nil {
-			return err
-		}
-		id, err := strconv.ParseInt(strings.TrimSpace(fs.Arg(0)), 10, 64)
-		if err != nil {
-			return fmt.Errorf("invalid approval ID")
-		}
-		if err := appSvc.CancelApproval(ctx, id, "cli", *note); err != nil {
-			return err
-		}
-		_, _ = fmt.Fprintf(stdout, "canceled %d\n", id)
-		return nil
-	case "expire":
-		if err := requireExactArgs(args[1:], 0, "approvals expire"); err != nil {
-			return err
-		}
-		expired, err := appSvc.ExpireApprovals(ctx, "cli")
-		if err != nil {
-			return err
-		}
-		_, _ = fmt.Fprintf(stdout, "expired %d pending request(s)\n", expired)
-		return nil
-	case "allowlist":
-		return runApprovalAllowlistCommand(ctx, appSvc, broker.HostID, args[1:], stdout, stderr)
-	default:
-		return fmt.Errorf("unknown approvals subcommand: %s", args[0])
+	return ProblemCopy{
+		Title:             fallbackTitle(summary),
+		WhyItMatters:      summary,
+		RecommendedAction: "Review this setting and apply the recommended fix.",
 	}
 }
 
-func runApprovalAllowlistCommand(ctx context.Context, appSvc *app.ServiceApp, defaultHostID string, args []string, stdout, stderr io.Writer) error {
-	if len(args) == 0 {
-		return fmt.Errorf("usage: approvals allowlist <list|add|remove>")
+func TranslateError(err error) UserError {
+	if err == nil {
+		return UserError{}
 	}
-	switch strings.ToLower(strings.TrimSpace(args[0])) {
-	case "list":
-		if err := requireArgRange(args[1:], 0, 1, "approvals allowlist list [domain]"); err != nil {
-			return err
-		}
-		domain := ""
-		if len(args) > 1 {
-			domain = strings.TrimSpace(args[1])
-		}
-		items, err := appSvc.ListAllowlists(ctx, domain, 100)
-		if err != nil {
-			return err
-		}
-		for _, item := range items {
-			fmt.Fprintf(stdout, "%d\t%s\t%s\n", item.ID, item.Domain, item.ScopeJSON)
-		}
-		return nil
-	case "remove":
-		if err := requireExactArgs(args[1:], 1, "approvals allowlist remove <id>"); err != nil {
-			return err
-		}
-		id, err := strconv.ParseInt(strings.TrimSpace(args[1]), 10, 64)
-		if err != nil {
-			return fmt.Errorf("invalid allowlist ID")
-		}
-		if err := appSvc.RemoveAllowlist(ctx, id, "cli"); err != nil {
-			return err
-		}
-		_, _ = fmt.Fprintf(stdout, "removed allowlist %d\n", id)
-		return nil
-	case "add":
-		fs := flag.NewFlagSet("approvals allowlist add", flag.ContinueOnError)
-		fs.SetOutput(stderr)
-		domain := fs.String("domain", "exec", "approval domain")
-		hostID := fs.String("host", defaultHostID, "host scope")
-		toolName := fs.String("tool", "", "tool scope")
-		profile := fs.String("profile", "", "profile scope")
-		agent := fs.String("agent", "", "agent scope")
-		program := fs.String("program", "", "exec executable path")
-		cwd := fs.String("cwd", "", "exec working directory")
-		skillID := fs.String("skill", "", "skill identifier")
-		version := fs.String("version", "", "skill version")
-		origin := fs.String("origin", "", "skill origin")
-		trust := fs.String("trust", "", "skill trust state")
-		if err := fs.Parse(args[1:]); err != nil {
-			return err
-		}
-		if err := requireExactFlagArgs(fs, 0, "approvals allowlist add [--domain exec|skill_execution] [matcher flags]"); err != nil {
-			return err
-		}
-		scope := approval.AllowlistScope{HostID: strings.TrimSpace(*hostID), Tool: strings.TrimSpace(*toolName), Profile: strings.TrimSpace(*profile), Agent: strings.TrimSpace(*agent)}
-		var matcher any
-		domainName := strings.TrimSpace(*domain)
-		switch strings.TrimSpace(*domain) {
-		case string(approval.SubjectExec):
-			matcher = approval.ExecAllowlistMatcher{ExecutablePath: strings.TrimSpace(*program), WorkingDir: strings.TrimSpace(*cwd)}
-		case string(approval.SubjectSkillExec):
-			matcher = approval.SkillAllowlistMatcher{SkillID: strings.TrimSpace(*skillID), Version: strings.TrimSpace(*version), Origin: strings.TrimSpace(*origin), TrustState: strings.TrimSpace(*trust)}
-		default:
-			return fmt.Errorf("unsupported allowlist domain")
-		}
-		if err := approval.ValidateAllowlistMatcher(domainName, matcher); err != nil {
-			return err
-		}
-		rec, err := appSvc.AddAllowlist(ctx, strings.TrimSpace(*domain), scope, matcher, "cli", 0)
-		if err != nil {
-			return err
-		}
-		_, _ = fmt.Fprintf(stdout, "added allowlist %d\n", rec.ID)
-		return nil
+	raw := strings.TrimSpace(err.Error())
+	lower := strings.ToLower(raw)
+	switch {
+	case strings.Contains(lower, "approval required") || strings.Contains(lower, "requires approval"):
+		return UserError{Title: "OR3 needs your approval", WhatHappened: "The assistant tried to do something that your safety settings require you to approve first.", Fix: "Review the pending approval and choose allow once, always allow this kind of action, or deny.", Command: "or3-intern approvals list pending", Advanced: raw}
+	case strings.Contains(lower, "approval broker unavailable") || strings.Contains(lower, "approval broker is not configured"):
+		return UserError{Title: "Approvals are not set up yet", WhatHappened: "OR3 cannot safely approve actions because the local approval system is missing or incomplete.", Fix: "Create the local approval key and turn on approvals.", Command: "or3-intern status", Advanced: raw}
+	case strings.Contains(lower, "workspace") && (strings.Contains(lower, "missing") || strings.Contains(lower, "not exist") || strings.Contains(lower, "no such file")):
+		return UserError{Title: "Workspace folder needs attention", WhatHappened: "OR3 cannot use the configured workspace folder.", Fix: "Choose an existing folder or update the workspace setting.", Command: "or3-intern settings --section workspace", Advanced: raw}
+	case strings.Contains(lower, "sandbox") && (strings.Contains(lower, "missing") || strings.Contains(lower, "not found") || strings.Contains(lower, "unavailable")):
+		return UserError{Title: "Command sandbox is not ready", WhatHappened: "OR3 is configured to isolate risky commands, but the sandbox runtime is missing or unavailable.", Fix: "Install the sandbox dependency or choose a safety mode that does not require sandboxing.", Command: "or3-intern status --advanced", Advanced: raw}
+	case strings.Contains(lower, "provider") || strings.Contains(lower, "api key") || strings.Contains(lower, "apikey"):
+		return UserError{Title: "AI provider settings need attention", WhatHappened: "OR3 could not use the configured AI provider settings.", Fix: "Review your provider endpoint, model, and API key.", Command: "or3-intern settings --section provider", Advanced: raw}
+	case strings.Contains(lower, "runtime unavailable"):
+		return UserError{Title: "The assistant engine did not start", WhatHappened: "OR3 could not start its runtime safely.", Fix: "Check your provider settings and local runtime setup.", Command: "or3-intern status", Advanced: raw}
+	case strings.Contains(lower, "service auth missing") || strings.Contains(lower, "service secret"):
+		return UserError{Title: "Connections are not protected yet", WhatHappened: "A device or service connection needs a shared secret before it can be used safely.", Fix: "Create a connection password.", Command: "or3-intern connect-device", Advanced: raw}
+	case strings.Contains(lower, "unknown tool in tool_policy"):
+		return UserError{Title: "A saved tool rule is out of date", WhatHappened: "One of your saved settings refers to a tool that no longer exists.", Fix: "Review and update the saved tool settings.", Command: "or3-intern settings", Advanced: raw}
+	case strings.Contains(lower, "audit logger unavailable"):
+		return UserError{Title: "Safety log is not ready", WhatHappened: "OR3 is trying to use the safety log, but the logger could not start.", Fix: "Repair the safety log settings or generate its key.", Command: "or3-intern status", Advanced: raw}
+	case strings.Contains(lower, "config error") || strings.Contains(lower, "validation"):
+		return UserError{Title: "Saved settings need repair", WhatHappened: "OR3 could not use the current settings as-is.", Fix: "Run setup or settings to repair them.", Command: "or3-intern setup", Advanced: raw}
 	default:
-		return fmt.Errorf("unknown allowlist subcommand: %s", args[0])
+		return UserError{Title: fallbackTitle(raw), WhatHappened: raw, Fix: "Review the details and retry.", Command: "or3-intern status", Advanced: raw}
 	}
+}
+
+func DeviceRoleLabel(role string) string {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "viewer":
+		return "Chat only"
+	case "operator":
+		return "Chat and workspace files"
+	case "admin":
+		return "Admin device"
+	default:
+		return "Connected device"
+	}
+}
+
+func SafetyModeLabel(mode safetymode.Mode, custom bool, base safetymode.Mode) string {
+	if custom {
+		if base != "" && base != safetymode.ModeCustom {
+			return "Custom based on " + strings.Title(strings.ReplaceAll(string(base), "-", " "))
+		}
+		return "Custom"
+	}
+	switch mode {
+	case safetymode.ModeRelaxed:
+		return "Relaxed"
+	case safetymode.ModeLockedDown:
+		return "Locked Down"
+	default:
+		return "Balanced"
+	}
+}
+
+func SafetyModeSummary(mode safetymode.Mode) string {
+	switch mode {
+	case safetymode.ModeRelaxed:
+		return "Good for local testing. Fewer prompts."
+	case safetymode.ModeLockedDown:
+		return "Best for servers or shared devices. Blocks dangerous actions by default."
+	default:
+		return "Recommended. Ask before risky actions."
+	}
+}
+
+func fallbackTitle(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return "Something needs attention"
+	}
+	text = strings.TrimLeft(text, "- ")
+	parts := strings.SplitN(text, ":", 2)
+	text = strings.TrimSpace(parts[0])
+	if text == "" {
+		return "Something needs attention"
+	}
+	return strings.ToUpper(text[:1]) + text[1:]
+}
+````
+
+## File: internal/uxstate/uxstate.go
+````go
+package uxstate
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+	"time"
+
+	"or3-intern/internal/approval"
+	"or3-intern/internal/config"
+	"or3-intern/internal/db"
+	intdoctor "or3-intern/internal/doctor"
+	"or3-intern/internal/safetymode"
+	"or3-intern/internal/uxcopy"
+)
+
+type StatusView struct {
+	Headline      string
+	SafetyLabel   string
+	SafetySummary string
+	Workspace     string
+	Commands      string
+	Internet      string
+	Devices       string
+	ActivityLog   string
+	Access        AccessDashboardView
+	Problems      []ProblemView
+}
+
+type ProblemView struct {
+	ID                string
+	Title             string
+	WhyItMatters      string
+	RecommendedAction string
+	Severity          string
+	FixMode           string
+}
+
+type ApprovalPromptView struct {
+	RequestID       int64
+	Title           string
+	ActionSummary   string
+	Why             string
+	RiskLabel       string
+	RiskExplanation string
+	ChoiceHints     []string
+	AdvancedDetails []string
+}
+
+type DeviceView struct {
+	DeviceID         string
+	Name             string
+	RoleLabel        string
+	Status           string
+	LastUsed         string
+	ChangeAccessHint string
+	DisconnectHint   string
+}
+
+type SettingsHomeView struct {
+	Sections []SettingsSectionView
+	Commands []string
+}
+
+type SettingsSectionView struct {
+	Key      string
+	Title    string
+	Summary  string
+	Action   string
+	Advanced bool
+}
+
+type AccessDashboardView struct {
+	Sections []AccessSectionView
+}
+
+type AccessSectionView struct {
+	Name   string
+	Status string
+	Risk   string
+	Detail string
+	Action string
+}
+
+func BuildStatusView(cfg config.Config, report intdoctor.Report, deviceCount, pendingApprovals int) StatusView {
+	inference := safetymode.Infer(cfg)
+	mode := inference.Mode
+	if inference.IsCustom && inference.BaseMode != "" {
+		mode = inference.BaseMode
+	}
+	return StatusView{
+		Headline:      headline(report),
+		SafetyLabel:   uxcopy.SafetyModeLabel(inference.Mode, inference.IsCustom, inference.BaseMode),
+		SafetySummary: uxcopy.SafetyModeSummary(mode),
+		Workspace:     workspaceSummary(cfg),
+		Commands:      commandSummary(cfg),
+		Internet:      internetSummary(cfg),
+		Devices:       deviceSummary(cfg, deviceCount, pendingApprovals),
+		ActivityLog:   activitySummary(cfg),
+		Access:        BuildAccessDashboardView(cfg, report, deviceCount, pendingApprovals),
+		Problems:      BuildProblemViews(report.Findings),
+	}
+}
+
+func BuildSettingsHomeView(cfg config.Config) SettingsHomeView {
+	inference := safetymode.Infer(cfg)
+	return SettingsHomeView{Sections: []SettingsSectionView{
+		settingsSection("provider", providerSummary(cfg), "or3-intern settings --section provider", false),
+		settingsSection("workspace", workspaceSummary(cfg), "or3-intern settings --section workspace", false),
+		settingsSection("devices", deviceSummary(cfg, 0, 0), "or3-intern connect-device", false),
+		settingsSection("runtimeProfile", uxcopy.SafetyModeLabel(inference.Mode, inference.IsCustom, inference.BaseMode), "or3-intern settings --section safety", false),
+		settingsSection("channels", channelsSummary(cfg), "or3-intern settings --section channels", false),
+		settingsSection("tools", toolsSummary(cfg), "or3-intern settings --section tools", false),
+		settingsSection("memory", memorySummary(cfg), "or3-intern settings --section memory", false),
+		settingsSection("advanced", "Raw config sections and export", "or3-intern settings --advanced", true),
+	}, Commands: []string{
+		"or3-intern settings --section provider",
+		"or3-intern settings --section workspace",
+		"or3-intern settings --section safety",
+		"or3-intern settings --export config.json",
+	}}
+}
+
+func BuildAccessDashboardView(cfg config.Config, report intdoctor.Report, deviceCount, pendingApprovals int) AccessDashboardView {
+	fileRisk := "green"
+	if !cfg.Tools.RestrictToWorkspace {
+		fileRisk = "red"
+	}
+	commandRisk := "green"
+	execAvailable := cfg.Tools.EnableExec && len(cfg.Hardening.ExecAllowedPrograms) > 0 && !config.ProfileSpec(cfg.RuntimeProfile).ForbidPrivilegedTools
+	if execAvailable && cfg.Security.Approvals.Exec.Mode == config.ApprovalModeDeny {
+		commandRisk = "green"
+	} else if execAvailable {
+		commandRisk = "yellow"
+		if !cfg.Hardening.GuardedTools && cfg.Security.Approvals.Exec.Mode == config.ApprovalModeTrusted {
+			commandRisk = "red"
+		}
+	}
+	internetRisk := "yellow"
+	if cfg.Security.Network.Enabled && cfg.Security.Network.DefaultDeny {
+		internetRisk = "green"
+	}
+	deviceRisk := "gray"
+	if cfg.Service.Enabled {
+		deviceRisk = "yellow"
+		if strings.TrimSpace(cfg.Service.Secret) != "" && !cfg.Service.AllowUnauthenticatedPairing {
+			deviceRisk = "green"
+		}
+	}
+	logRisk := "red"
+	if cfg.Security.Audit.Enabled {
+		logRisk = "green"
+	}
+	if report.HasBlockingFindings() && logRisk == "green" {
+		logRisk = "yellow"
+	}
+	return AccessDashboardView{Sections: []AccessSectionView{
+		{Name: "Files", Status: workspaceSummary(cfg), Risk: fileRisk, Detail: "Answers whether OR3 can see your whole computer or only one folder.", Action: "or3-intern settings --section workspace"},
+		{Name: "Commands", Status: commandSummary(cfg), Risk: commandRisk, Detail: "Shows whether local command execution is blocked, asks first, or follows tool defaults.", Action: "or3-intern settings --section safety"},
+		{Name: "Internet", Status: internetSummary(cfg), Risk: internetRisk, Detail: "Covers web/proxy/network-policy posture for outbound access.", Action: "or3-intern settings --section tools"},
+		{Name: "Connected Apps", Status: channelsSummary(cfg), Risk: channelsRisk(cfg), Detail: "External channel adapters stay optional and hidden until enabled.", Action: "or3-intern settings --section channels"},
+		{Name: "Connected Devices", Status: deviceSummary(cfg, deviceCount, pendingApprovals), Risk: deviceRisk, Detail: "Shows whether phones, apps, or service clients can connect.", Action: "or3-intern connect-device list"},
+		{Name: "Memory", Status: memorySummary(cfg), Risk: "yellow", Detail: "Summarizes standing memory and document indexing.", Action: "or3-intern settings --section memory"},
+		{Name: "Activity Log", Status: activitySummary(cfg), Risk: logRisk, Detail: "Shows whether important actions are recorded for review.", Action: "or3-intern status --advanced"},
+	}}
+}
+
+func BuildProblemViews(findings []intdoctor.Finding) []ProblemView {
+	out := make([]ProblemView, 0, len(findings))
+	for _, finding := range findings {
+		copy := uxcopy.ProblemForFinding(finding.ID, finding.Summary)
+		out = append(out, ProblemView{
+			ID:                finding.ID,
+			Title:             copy.Title,
+			WhyItMatters:      copy.WhyItMatters,
+			RecommendedAction: firstNonEmpty(strings.TrimSpace(finding.FixHint), copy.RecommendedAction),
+			Severity:          string(finding.Severity),
+			FixMode:           string(finding.FixMode),
+		})
+	}
+	return out
+}
+
+func BuildApprovalPrompt(item db.ApprovalRequestRecord) ApprovalPromptView {
+	view := ApprovalPromptView{
+		RequestID: item.ID,
+		Why:       "The assistant asked to do something that needs your permission.",
+		ChoiceHints: []string{
+			"Allow once",
+			"Always allow this kind of action in this folder",
+			"Deny",
+		},
+		AdvancedDetails: []string{
+			fmt.Sprintf("Request ID: %d", item.ID),
+			fmt.Sprintf("Type: %s", item.Type),
+			fmt.Sprintf("Policy mode: %s", item.PolicyMode),
+		},
+	}
+	switch item.Type {
+	case string(approval.SubjectExec):
+		var subject approval.ExecSubject
+		_ = json.Unmarshal([]byte(item.SubjectJSON), &subject)
+		command := strings.TrimSpace(strings.Join(subject.Argv, " "))
+		if command == "" {
+			command = strings.TrimSpace(subject.ExecutablePath)
+		}
+		view.Title = "OR3 wants to run a command"
+		view.ActionSummary = command
+		view.RiskLabel, view.RiskExplanation = classifyExecRisk(command)
+	case string(approval.SubjectSkillExec):
+		var subject approval.SkillExecutionSubject
+		_ = json.Unmarshal([]byte(item.SubjectJSON), &subject)
+		view.Title = "OR3 wants to run a skill"
+		view.ActionSummary = firstNonEmpty(subject.SkillID, "skill execution")
+		view.RiskLabel = "High"
+		view.RiskExplanation = "Skills can run code or change files on your behalf."
+	case string(approval.SubjectSecretAccess):
+		view.Title = "OR3 wants to use a secret"
+		view.ActionSummary = subjectSummary(item.SubjectJSON, "secret access")
+		view.RiskLabel = "High"
+		view.RiskExplanation = "Secrets can unlock private accounts or services."
+	case string(approval.SubjectMessageSend):
+		view.Title = "OR3 wants to send a message"
+		view.ActionSummary = subjectSummary(item.SubjectJSON, "message send")
+		view.RiskLabel = "Medium"
+		view.RiskExplanation = "Messages can share information with another person or service."
+	case string(approval.SubjectFileTransfer):
+		view.Title = "OR3 wants to transfer a file"
+		view.ActionSummary = subjectSummary(item.SubjectJSON, "file transfer")
+		view.RiskLabel = "Medium"
+		view.RiskExplanation = "File transfers can expose local files or import untrusted content."
+	default:
+		view.Title = "OR3 wants approval"
+		view.ActionSummary = item.Type
+		view.RiskLabel = "Medium"
+		view.RiskExplanation = "This action can change OR3 behavior or share information."
+	}
+	return view
+}
+
+func BuildDeviceViews(records []db.PairedDeviceRecord) []DeviceView {
+	out := make([]DeviceView, 0, len(records))
+	for _, record := range records {
+		out = append(out, DeviceView{
+			DeviceID:         record.DeviceID,
+			Name:             firstNonEmpty(record.DisplayName, record.DeviceID),
+			RoleLabel:        uxcopy.DeviceRoleLabel(record.Role),
+			Status:           humanStatus(record.Status),
+			LastUsed:         lastUsed(record.LastSeenAt),
+			ChangeAccessHint: "Change access: or3-intern connect-device role " + record.DeviceID,
+			DisconnectHint:   "Disconnect: or3-intern connect-device disconnect " + record.DeviceID,
+		})
+	}
+	return out
+}
+
+func settingsSection(key, summary, action string, advanced bool) SettingsSectionView {
+	copy := uxcopy.LabelForSetting(key)
+	return SettingsSectionView{Key: key, Title: copy.Label, Summary: firstNonEmpty(summary, copy.Hint), Action: action, Advanced: advanced}
+}
+
+func providerSummary(cfg config.Config) string {
+	if strings.TrimSpace(cfg.Provider.APIBase) == "" {
+		return "Provider is not configured yet"
+	}
+	return fmt.Sprintf("%s using %s", cfg.Provider.APIBase, firstNonEmpty(cfg.Provider.Model, "default model"))
+}
+
+func channelsSummary(cfg config.Config) string {
+	enabled := []string{}
+	if cfg.Channels.Telegram.Enabled {
+		enabled = append(enabled, "Telegram")
+	}
+	if cfg.Channels.Slack.Enabled {
+		enabled = append(enabled, "Slack")
+	}
+	if cfg.Channels.Discord.Enabled {
+		enabled = append(enabled, "Discord")
+	}
+	if cfg.Channels.WhatsApp.Enabled {
+		enabled = append(enabled, "WhatsApp")
+	}
+	if cfg.Channels.Email.Enabled {
+		enabled = append(enabled, "Email")
+	}
+	if len(enabled) == 0 {
+		return "No external channels enabled"
+	}
+	return strings.Join(enabled, ", ") + " enabled"
+}
+
+func channelsRisk(cfg config.Config) string {
+	if channelsSummary(cfg) == "No external channels enabled" {
+		return "gray"
+	}
+	return "yellow"
+}
+
+func toolsSummary(cfg config.Config) string {
+	parts := []string{}
+	if cfg.Tools.EnableExec {
+		parts = append(parts, "commands enabled")
+	} else {
+		parts = append(parts, "commands off")
+	}
+	if len(cfg.Tools.MCPServers) > 0 {
+		parts = append(parts, fmt.Sprintf("%d MCP server(s)", len(cfg.Tools.MCPServers)))
+	}
+	if strings.TrimSpace(cfg.Tools.BraveAPIKey) != "" {
+		parts = append(parts, "web search configured")
+	}
+	return strings.Join(parts, ", ")
+}
+
+func memorySummary(cfg config.Config) string {
+	if cfg.DocIndex.Enabled {
+		return fmt.Sprintf("Standing memory on; document indexing on for %d root(s)", len(cfg.DocIndex.Roots))
+	}
+	return "Standing memory on; document indexing off"
+}
+
+func headline(report intdoctor.Report) string {
+	if len(report.Findings) == 0 {
+		return "Ready"
+	}
+	if report.HasBlockingFindings() {
+		return "Needs attention"
+	}
+	return "Review recommended"
+}
+
+func workspaceSummary(cfg config.Config) string {
+	if cfg.Tools.RestrictToWorkspace && strings.TrimSpace(cfg.WorkspaceDir) != "" {
+		return "Only this folder: " + cfg.WorkspaceDir
+	}
+	if cfg.Tools.RestrictToWorkspace {
+		return "Restricted to your workspace folder"
+	}
+	return "Not restricted to one folder"
+}
+
+func commandSummary(cfg config.Config) string {
+	switch {
+	case cfg.Security.Approvals.Exec.Mode == config.ApprovalModeDeny:
+		return "Blocks direct commands by default"
+	case cfg.Security.Approvals.Exec.Mode == config.ApprovalModeAsk || cfg.Hardening.GuardedTools:
+		return "Ask before risky commands"
+	default:
+		return "Commands use the current local tool settings"
+	}
+}
+
+func internetSummary(cfg config.Config) string {
+	if cfg.Security.Network.Enabled && cfg.Security.Network.DefaultDeny {
+		return "Internet access is restricted"
+	}
+	if strings.TrimSpace(cfg.Tools.WebProxy) != "" {
+		return "Internet access uses a proxy"
+	}
+	return "Internet access follows the default tool settings"
+}
+
+func deviceSummary(cfg config.Config, deviceCount, pendingApprovals int) string {
+	if !cfg.Service.Enabled {
+		return "Other devices and apps cannot connect"
+	}
+	if deviceCount == 0 {
+		if pendingApprovals > 0 {
+			return fmt.Sprintf("No devices connected yet · %d approval(s) waiting", pendingApprovals)
+		}
+		return "Connections are enabled, but no devices are paired yet"
+	}
+	return fmt.Sprintf("%d connected device(s)", deviceCount)
+}
+
+func activitySummary(cfg config.Config) string {
+	if cfg.Security.Audit.Enabled {
+		if cfg.Security.Audit.Strict {
+			return "Safety log is on and strict"
+		}
+		return "Safety log is on"
+	}
+	return "Safety log is off"
+}
+
+func classifyExecRisk(command string) (string, string) {
+	lower := strings.ToLower(command)
+	switch {
+	case strings.Contains(lower, " rm ") || strings.HasPrefix(lower, "rm ") || strings.Contains(lower, "sudo") || strings.Contains(lower, "bash") || strings.Contains(lower, "sh -c"):
+		return "High", "This command can change or remove files on your computer."
+	case strings.Contains(lower, "npm install") || strings.Contains(lower, "npx ") || strings.Contains(lower, "curl") || strings.Contains(lower, "wget"):
+		return "Medium", "This command can download code or data from the internet."
+	default:
+		return "Low", "This looks like a bounded local command, but it can still affect files in your workspace."
+	}
+}
+
+func humanStatus(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case approval.StatusActive:
+		return "Connected"
+	case approval.StatusRevoked:
+		return "Disconnected"
+	case approval.StatusPending:
+		return "Waiting for approval"
+	default:
+		return strings.Title(strings.TrimSpace(status))
+	}
+}
+
+func lastUsed(epoch int64) string {
+	if epoch <= 0 {
+		return "Never used"
+	}
+	return time.Unix(epoch, 0).UTC().Format("2006-01-02 15:04 UTC")
+}
+
+func subjectSummary(subjectJSON, fallback string) string {
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(subjectJSON), &raw); err != nil {
+		return fallback
+	}
+	for _, key := range []string{"name", "secret", "secret_name", "channel", "target", "path", "file", "destination", "type"} {
+		if value, ok := raw[key]; ok {
+			if text := strings.TrimSpace(fmt.Sprint(value)); text != "" {
+				return text
+			}
+		}
+	}
+	return fallback
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return "Unnamed item"
 }
 ````
 
@@ -8731,393 +10381,6 @@ func containsSkipReason(skipped []string, want string) bool {
 		}
 	}
 	return false
-}
-````
-
-## File: cmd/or3-intern/pairing_cmd.go
-````go
-package main
-
-import (
-	"context"
-	"flag"
-	"fmt"
-	"io"
-	"strconv"
-	"strings"
-
-	"or3-intern/internal/app"
-	"or3-intern/internal/approval"
-)
-
-func runPairingCommand(ctx context.Context, broker *approval.Broker, args []string, stdout, stderr io.Writer) error {
-	if broker == nil {
-		return fmt.Errorf("approval broker is not configured")
-	}
-	appSvc := app.NewServiceApp(nil, nil, nil, newCLIControlplane(broker))
-	if len(args) == 0 {
-		return fmt.Errorf("usage: pairing <list|request|approve|deny|exchange>")
-	}
-	switch strings.ToLower(strings.TrimSpace(args[0])) {
-	case "list":
-		if err := requireArgRange(args[1:], 0, 1, "pairing list [status]"); err != nil {
-			return err
-		}
-		status := ""
-		if len(args) > 1 {
-			status = strings.TrimSpace(args[1])
-		}
-		items, err := appSvc.ListPairingRequests(ctx, status, 100)
-		if err != nil {
-			return err
-		}
-		for _, item := range items {
-			fmt.Fprintf(stdout, "%d\t%s\t%s\t%s\t%s\t%s\n", item.ID, item.Status, item.Role, item.DeviceID, item.DisplayName, item.Origin)
-		}
-		return nil
-	case "request":
-		fs := flag.NewFlagSet("pairing request", flag.ContinueOnError)
-		fs.SetOutput(stderr)
-		role := fs.String("role", approval.RoleOperator, "device role")
-		displayName := fs.String("name", "", "display name")
-		origin := fs.String("origin", "", "origin description")
-		deviceID := fs.String("device", "", "explicit device ID")
-		channel := fs.String("channel", "", "channel name to bind")
-		identity := fs.String("identity", "", "channel identity to bind")
-		if err := fs.Parse(args[1:]); err != nil {
-			return err
-		}
-		if err := requireExactFlagArgs(fs, 0, "pairing request [--role role] [--name display] [--origin text] [--device id] [--channel name --identity value]"); err != nil {
-			return err
-		}
-		metadata := map[string]any{}
-		if strings.TrimSpace(*channel) != "" || strings.TrimSpace(*identity) != "" {
-			if strings.TrimSpace(*channel) == "" || strings.TrimSpace(*identity) == "" {
-				return fmt.Errorf("pairing request: --channel and --identity must be provided together")
-			}
-			metadata["channel"] = strings.ToLower(strings.TrimSpace(*channel))
-			metadata["identity"] = strings.TrimSpace(*identity)
-			if strings.TrimSpace(*deviceID) == "" {
-				*deviceID = strings.ToLower(strings.TrimSpace(*channel)) + ":" + strings.TrimSpace(*identity)
-			}
-		}
-		req, code, err := appSvc.CreatePairingRequest(ctx, approval.PairingRequestInput{
-			Role:        strings.TrimSpace(*role),
-			DisplayName: strings.TrimSpace(*displayName),
-			Origin:      strings.TrimSpace(*origin),
-			Metadata:    metadata,
-			DeviceID:    strings.TrimSpace(*deviceID),
-		})
-		if err != nil {
-			return err
-		}
-		_, _ = fmt.Fprintf(stdout, "id: %d\nstatus: %s\ndevice_id: %s\nrole: %s\ncode: %s\n", req.ID, req.Status, req.DeviceID, req.Role, code)
-		return nil
-	case "approve":
-		if err := requireExactArgs(args[1:], 1, "pairing approve <request-id>"); err != nil {
-			return err
-		}
-		id, err := strconv.ParseInt(strings.TrimSpace(args[1]), 10, 64)
-		if err != nil {
-			return fmt.Errorf("invalid pairing request ID")
-		}
-		req, err := appSvc.ApprovePairingRequest(ctx, id, "cli")
-		if err != nil {
-			return err
-		}
-		_, _ = fmt.Fprintf(stdout, "approved pairing request %d for %s\n", req.ID, req.DeviceID)
-		return nil
-	case "deny":
-		if err := requireExactArgs(args[1:], 1, "pairing deny <request-id>"); err != nil {
-			return err
-		}
-		id, err := strconv.ParseInt(strings.TrimSpace(args[1]), 10, 64)
-		if err != nil {
-			return fmt.Errorf("invalid pairing request ID")
-		}
-		if err := appSvc.DenyPairingRequest(ctx, id, "cli"); err != nil {
-			return err
-		}
-		_, _ = fmt.Fprintf(stdout, "denied pairing request %d\n", id)
-		return nil
-	case "exchange":
-		if err := requireExactArgs(args[1:], 2, "pairing exchange <request-id> <code>"); err != nil {
-			return err
-		}
-		id, err := strconv.ParseInt(strings.TrimSpace(args[1]), 10, 64)
-		if err != nil {
-			return fmt.Errorf("invalid pairing request ID")
-		}
-		device, token, err := appSvc.ExchangePairingCode(ctx, approval.PairingExchangeInput{
-			RequestID: id,
-			Code:      strings.TrimSpace(args[2]),
-		})
-		if err != nil {
-			return err
-		}
-		_, _ = fmt.Fprintf(stdout, "paired device %s\nrole: %s\ntoken: %s\n", device.DeviceID, device.Role, token)
-		return nil
-	default:
-		return fmt.Errorf("unknown pairing subcommand: %s", args[0])
-	}
-}
-````
-
-## File: cmd/or3-intern/service_request.go
-````go
-package main
-
-import (
-	"encoding/json"
-	"fmt"
-	"io"
-	"strings"
-
-	"or3-intern/internal/agent"
-	"or3-intern/internal/app"
-	"or3-intern/internal/providers"
-	"or3-intern/internal/tools"
-)
-
-type serviceTurnRequest struct {
-	SessionKey    string
-	Message       string
-	AllowedTools  []string
-	RestrictTools bool
-	Meta          map[string]any
-	ProfileName   string
-	ApprovalToken string
-}
-
-type serviceSubagentRequest struct {
-	ParentSessionKey string
-	Task             string
-	PromptSnapshot   []providers.ChatMessage
-	AllowedTools     []string
-	RestrictTools    bool
-	TimeoutSeconds   int
-	Meta             map[string]any
-	ProfileName      string
-	Channel          string
-	ReplyTo          string
-	ApprovalToken    string
-}
-
-type serviceToolPolicyPayload struct {
-	Mode              string   `json:"mode"`
-	AllowedTools      []string `json:"allowed_tools"`
-	AllowedToolsCamel []string `json:"allowedTools"`
-	BlockedTools      []string `json:"blocked_tools"`
-	BlockedToolsCamel []string `json:"blockedTools"`
-}
-
-type serviceTurnRequestPayload struct {
-	SessionKey            string                    `json:"session_key"`
-	InternSessionKey      string                    `json:"intern_session_key"`
-	SessionKeyCamel       string                    `json:"sessionKey"`
-	InternSessionKeyCamel string                    `json:"internSessionKey"`
-	PlatformSessionRef    map[string]any            `json:"platform_session_ref"`
-	Message               string                    `json:"message"`
-	AllowedTools          []string                  `json:"allowed_tools"`
-	AllowedToolsCamel     []string                  `json:"allowedTools"`
-	ToolPolicy            *serviceToolPolicyPayload `json:"tool_policy"`
-	ToolPolicyCamel       *serviceToolPolicyPayload `json:"toolPolicy"`
-	Meta                  map[string]any            `json:"meta"`
-	ProfileName           string                    `json:"profile_name"`
-	ProfileNameCamel      string                    `json:"profileName"`
-	ApprovalToken         string                    `json:"approval_token"`
-	ApprovalTokenCamel    string                    `json:"approvalToken"`
-}
-
-type serviceSubagentRequestPayload struct {
-	ParentSessionKey      string                    `json:"parent_session_key"`
-	ParentSessionKeyCamel string                    `json:"parentSessionKey"`
-	SessionKey            string                    `json:"session_key"`
-	InternSessionKey      string                    `json:"intern_session_key"`
-	SessionKeyCamel       string                    `json:"sessionKey"`
-	InternSessionKeyCamel string                    `json:"internSessionKey"`
-	Task                  string                    `json:"task"`
-	PromptSnapshot        []providers.ChatMessage   `json:"prompt_snapshot"`
-	PromptSnapshotCamel   []providers.ChatMessage   `json:"promptSnapshot"`
-	AllowedTools          []string                  `json:"allowed_tools"`
-	AllowedToolsCamel     []string                  `json:"allowedTools"`
-	ToolPolicy            *serviceToolPolicyPayload `json:"tool_policy"`
-	ToolPolicyCamel       *serviceToolPolicyPayload `json:"toolPolicy"`
-	TimeoutSeconds        json.Number               `json:"timeout_seconds"`
-	TimeoutSecondsCamel   json.Number               `json:"timeoutSeconds"`
-	Timeout               json.Number               `json:"timeout"`
-	Meta                  map[string]any            `json:"meta"`
-	ProfileName           string                    `json:"profile_name"`
-	ProfileNameCamel      string                    `json:"profileName"`
-	Channel               string                    `json:"channel"`
-	ReplyTo               string                    `json:"reply_to"`
-	ReplyToCamel          string                    `json:"replyTo"`
-	ApprovalToken         string                    `json:"approval_token"`
-	ApprovalTokenCamel    string                    `json:"approvalToken"`
-}
-
-func decodeServiceTurnRequest(body io.Reader, registry *tools.Registry) (serviceTurnRequest, error) {
-	var payload serviceTurnRequestPayload
-	if err := decodeServiceRequestBody(body, &payload); err != nil {
-		return serviceTurnRequest{}, err
-	}
-	allowedTools, restrictTools, err := app.ResolveToolPolicy(
-		registry,
-		firstToolPolicy(payload.ToolPolicy, payload.ToolPolicyCamel),
-		firstStringSlice(payload.AllowedTools, payload.AllowedToolsCamel),
-	)
-	if err != nil {
-		return serviceTurnRequest{}, err
-	}
-	return serviceTurnRequest{
-		SessionKey:    firstNonEmptyString(payload.SessionKey, payload.InternSessionKey, payload.SessionKeyCamel, payload.InternSessionKeyCamel),
-		Message:       strings.TrimSpace(payload.Message),
-		AllowedTools:  allowedTools,
-		RestrictTools: restrictTools,
-		Meta:          cloneMapOrEmpty(payload.Meta),
-		ProfileName:   firstNonEmptyString(payload.ProfileName, payload.ProfileNameCamel),
-		ApprovalToken: firstNonEmptyString(payload.ApprovalToken, payload.ApprovalTokenCamel),
-	}, nil
-}
-
-func decodeServiceSubagentRequest(body io.Reader, registry *tools.Registry) (serviceSubagentRequest, error) {
-	var payload serviceSubagentRequestPayload
-	if err := decodeServiceRequestBody(body, &payload); err != nil {
-		return serviceSubagentRequest{}, err
-	}
-	allowedTools, restrictTools, err := app.ResolveToolPolicy(
-		registry,
-		firstToolPolicy(payload.ToolPolicy, payload.ToolPolicyCamel),
-		firstStringSlice(payload.AllowedTools, payload.AllowedToolsCamel),
-	)
-	if err != nil {
-		return serviceSubagentRequest{}, err
-	}
-	timeoutSeconds, err := firstPositiveInt(payload.TimeoutSeconds, payload.TimeoutSecondsCamel, payload.Timeout)
-	if err != nil {
-		return serviceSubagentRequest{}, err
-	}
-	return serviceSubagentRequest{
-		ParentSessionKey: firstNonEmptyString(
-			payload.ParentSessionKey,
-			payload.ParentSessionKeyCamel,
-			payload.SessionKey,
-			payload.InternSessionKey,
-			payload.SessionKeyCamel,
-			payload.InternSessionKeyCamel,
-		),
-		Task:           strings.TrimSpace(payload.Task),
-		PromptSnapshot: firstPromptSnapshot(payload.PromptSnapshot, payload.PromptSnapshotCamel),
-		AllowedTools:   allowedTools,
-		RestrictTools:  restrictTools,
-		TimeoutSeconds: timeoutSeconds,
-		Meta:           cloneMapOrEmpty(payload.Meta),
-		ProfileName:    firstNonEmptyString(payload.ProfileName, payload.ProfileNameCamel),
-		Channel:        strings.TrimSpace(payload.Channel),
-		ReplyTo:        firstNonEmptyString(payload.ReplyTo, payload.ReplyToCamel),
-		ApprovalToken:  firstNonEmptyString(payload.ApprovalToken, payload.ApprovalTokenCamel),
-	}, nil
-}
-
-func decodeServiceRequestBody(body io.Reader, out any) error {
-	decoder := json.NewDecoder(body)
-	decoder.UseNumber()
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(out); err != nil {
-		return err
-	}
-	var extra struct{}
-	if err := decoder.Decode(&extra); err != io.EOF {
-		return fmt.Errorf("unexpected trailing data")
-	}
-	return nil
-}
-
-func firstToolPolicy(values ...*serviceToolPolicyPayload) *agent.ServiceToolPolicy {
-	for _, value := range values {
-		if value == nil {
-			continue
-		}
-		return &agent.ServiceToolPolicy{
-			Mode:         strings.TrimSpace(value.Mode),
-			AllowedTools: firstStringSlice(value.AllowedTools, value.AllowedToolsCamel),
-			BlockedTools: firstStringSlice(value.BlockedTools, value.BlockedToolsCamel),
-		}
-	}
-	return nil
-}
-
-func firstNonEmptyString(values ...string) string {
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value != "" {
-			return value
-		}
-	}
-	return ""
-}
-
-func firstStringSlice(values ...[]string) []string {
-	for _, value := range values {
-		if len(value) == 0 {
-			continue
-		}
-		out := make([]string, len(value))
-		copy(out, value)
-		return out
-	}
-	return nil
-}
-
-func firstPromptSnapshot(values ...[]providers.ChatMessage) []providers.ChatMessage {
-	for _, value := range values {
-		if len(value) == 0 {
-			continue
-		}
-		out := make([]providers.ChatMessage, len(value))
-		copy(out, value)
-		return out
-	}
-	return nil
-}
-
-func firstPositiveInt(values ...json.Number) (int, error) {
-	for _, value := range values {
-		raw := strings.TrimSpace(value.String())
-		if raw == "" {
-			continue
-		}
-		n, err := value.Int64()
-		if err != nil {
-			return 0, fmt.Errorf("invalid timeout")
-		}
-		if n <= 0 {
-			continue
-		}
-		return int(n), nil
-	}
-	return 0, nil
-}
-
-func cloneMapOrEmpty(in map[string]any) map[string]any {
-	if len(in) == 0 {
-		return map[string]any{}
-	}
-	out := make(map[string]any, len(in))
-	for key, value := range in {
-		out[key] = value
-	}
-	return out
-}
-
-func backgroundToolsRegistry(manager *agent.SubagentManager) *tools.Registry {
-	if manager == nil {
-		return tools.NewRegistry()
-	}
-	if manager.BackgroundTools != nil {
-		return manager.BackgroundTools()
-	}
-	return tools.NewRegistry()
 }
 ````
 
@@ -15572,290 +16835,6 @@ func RequesterIdentityFromContext(ctx context.Context) RequesterIdentity {
 }
 ````
 
-## File: internal/tools/memory.go
-````go
-package tools
-
-import (
-	"context"
-	"database/sql"
-	"fmt"
-	"sort"
-	"strings"
-
-	"or3-intern/internal/db"
-	"or3-intern/internal/memory"
-	"or3-intern/internal/providers"
-	"or3-intern/internal/scope"
-)
-
-type MemorySetPinned struct {
-	Base
-	DB *db.DB
-}
-
-func (t *MemorySetPinned) Name() string { return "memory_set_pinned" }
-func (t *MemorySetPinned) Description() string {
-	return "Upsert a pinned memory entry (always included in prompts)."
-}
-func (t *MemorySetPinned) Parameters() map[string]any {
-	return map[string]any{"type": "object", "properties": map[string]any{
-		"key":     map[string]any{"type": "string"},
-		"content": map[string]any{"type": "string"},
-		"scope":   map[string]any{"type": "string", "description": "Optional scope override: 'global' to share across sessions"},
-	}, "required": []string{"key", "content"}}
-}
-func (t *MemorySetPinned) Schema() map[string]any {
-	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
-}
-func (t *MemorySetPinned) Execute(ctx context.Context, params map[string]any) (string, error) {
-	if t.DB == nil {
-		return "", fmt.Errorf("db not set")
-	}
-	key := stringParam(params, "key")
-	content := stringParam(params, "content")
-	if key == "" || content == "" {
-		return "", fmt.Errorf("missing key/content")
-	}
-	if err := t.DB.UpsertPinned(ctx, memoryScopeFromParams(ctx, params), key, content); err != nil {
-		return "", err
-	}
-	return "ok", nil
-}
-
-type MemoryAddNote struct {
-	Base
-	DB               *db.DB
-	Provider         *providers.Client
-	EmbedModel       string
-	EmbedFingerprint string
-}
-
-func (t *MemoryAddNote) Name() string { return "memory_add_note" }
-func (t *MemoryAddNote) Description() string {
-	return "Add a semantic memory note to the indexed memory store."
-}
-func (t *MemoryAddNote) Parameters() map[string]any {
-	return map[string]any{"type": "object", "properties": map[string]any{
-		"text":              map[string]any{"type": "string"},
-		"tags":              map[string]any{"type": "string", "description": "comma-separated tags (optional)"},
-		"source_message_id": map[string]any{"type": "integer", "description": "source message id (optional)"},
-		"scope":             map[string]any{"type": "string", "description": "Optional scope override: 'global' to share across sessions"},
-	}, "required": []string{"text"}}
-}
-func (t *MemoryAddNote) Schema() map[string]any {
-	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
-}
-func (t *MemoryAddNote) Execute(ctx context.Context, params map[string]any) (string, error) {
-	if t.DB == nil || t.Provider == nil {
-		return "", fmt.Errorf("missing deps")
-	}
-	text := stringParam(params, "text")
-	if text == "" {
-		return "", fmt.Errorf("empty text")
-	}
-	tags := stringParam(params, "tags")
-	var src sql.NullInt64
-	if v, ok := params["source_message_id"].(float64); ok && int64(v) > 0 {
-		src = sql.NullInt64{Int64: int64(v), Valid: true}
-	}
-	vec, err := t.Provider.Embed(ctx, t.EmbedModel, text)
-	if err != nil {
-		return "", err
-	}
-	blob := memory.PackFloat32(vec)
-	id, err := t.DB.InsertMemoryNoteTyped(ctx, memoryScopeFromParams(ctx, params), db.TypedNoteInput{
-		Text: text, Embedding: blob, EmbedFingerprint: t.EmbedFingerprint, SourceMsgID: src, Tags: tags,
-	})
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("ok: %d", id), nil
-}
-
-type MemorySearch struct {
-	Base
-	DB               *db.DB
-	Provider         *providers.Client
-	EmbedModel       string
-	EmbedFingerprint string
-	VectorK          int
-	FTSK             int
-	TopK             int
-	VectorScanLimit  int
-}
-
-func (t *MemorySearch) Name() string { return "memory_search" }
-func (t *MemorySearch) Description() string {
-	return "Search long-term memory (hybrid semantic + keyword) and return top results."
-}
-func (t *MemorySearch) Parameters() map[string]any {
-	return map[string]any{"type": "object", "properties": map[string]any{
-		"query": map[string]any{"type": "string"},
-		"topK":  map[string]any{"type": "integer"},
-		"scope": map[string]any{"type": "string", "description": "Optional scope override: 'global' to search only shared memory"},
-	}, "required": []string{"query"}}
-}
-func (t *MemorySearch) Schema() map[string]any {
-	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
-}
-func (t *MemorySearch) Execute(ctx context.Context, params map[string]any) (string, error) {
-	if t.DB == nil || t.Provider == nil {
-		return "", fmt.Errorf("missing deps")
-	}
-	q := stringParam(params, "query")
-	if q == "" {
-		return "", fmt.Errorf("empty query")
-	}
-	topK := t.TopK
-	if v, ok := params["topK"].(float64); ok && int(v) > 0 {
-		topK = int(v)
-	}
-	vec, err := t.Provider.Embed(ctx, t.EmbedModel, q)
-	if err != nil {
-		return "", err
-	}
-	r := memory.NewRetriever(t.DB)
-	r.EmbedFingerprint = t.EmbedFingerprint
-	r.VectorScanLimit = t.VectorScanLimit
-	got, err := r.Retrieve(ctx, memoryScopeFromParams(ctx, params), q, vec, t.VectorK, t.FTSK, topK)
-	if err != nil {
-		return "", err
-	}
-	var b strings.Builder
-	for i, m := range got {
-		b.WriteString(fmt.Sprintf("%d. [%s] %.4f %s\n", i+1, m.Source, m.Score, m.Text))
-	}
-	return b.String(), nil
-}
-
-type MemoryRecent struct {
-	Base
-	DB           *db.DB
-	DefaultLimit int
-	MaxLimit     int
-	MaxChars     int
-}
-
-func (t *MemoryRecent) Name() string { return "memory_recent" }
-func (t *MemoryRecent) Description() string {
-	return "Fetch recent conversation messages from the current linked session scope."
-}
-func (t *MemoryRecent) Parameters() map[string]any {
-	return map[string]any{"type": "object", "properties": map[string]any{
-		"limit": map[string]any{"type": "integer"},
-	}}
-}
-func (t *MemoryRecent) Schema() map[string]any {
-	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
-}
-func (t *MemoryRecent) Execute(ctx context.Context, params map[string]any) (string, error) {
-	if t.DB == nil {
-		return "", fmt.Errorf("db not set")
-	}
-	limit := boundedPositiveInt(params["limit"], t.DefaultLimit, t.MaxLimit)
-	msgs, err := t.DB.GetLastMessagesScoped(ctx, SessionFromContext(ctx), limit)
-	if err != nil {
-		return "", err
-	}
-	var b strings.Builder
-	for i, msg := range msgs {
-		b.WriteString(fmt.Sprintf("%d. [%s/%s] %s\n", i+1, msg.SessionKey, msg.Role, compactMemoryText(msg.Content, t.MaxChars)))
-	}
-	return b.String(), nil
-}
-
-type MemoryGetPinned struct {
-	Base
-	DB       *db.DB
-	MaxChars int
-}
-
-func (t *MemoryGetPinned) Name() string { return "memory_get_pinned" }
-func (t *MemoryGetPinned) Description() string {
-	return "Read pinned memory entries for the current session, including shared global entries."
-}
-func (t *MemoryGetPinned) Parameters() map[string]any {
-	return map[string]any{"type": "object", "properties": map[string]any{
-		"key":   map[string]any{"type": "string", "description": "Optional pinned memory key to fetch"},
-		"scope": map[string]any{"type": "string", "description": "Optional scope override: 'global' to read only shared memory"},
-	}}
-}
-func (t *MemoryGetPinned) Schema() map[string]any {
-	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
-}
-func (t *MemoryGetPinned) Execute(ctx context.Context, params map[string]any) (string, error) {
-	if t.DB == nil {
-		return "", fmt.Errorf("db not set")
-	}
-	pinned, err := t.DB.GetPinned(ctx, memoryScopeFromParams(ctx, params))
-	if err != nil {
-		return "", err
-	}
-	key := stringParam(params, "key")
-	if key != "" {
-		value, ok := pinned[key]
-		if !ok {
-			return "", nil
-		}
-		return fmt.Sprintf("%s: %s", key, compactMemoryText(value, t.MaxChars)), nil
-	}
-	keys := make([]string, 0, len(pinned))
-	for key := range pinned {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	var b strings.Builder
-	for _, key := range keys {
-		b.WriteString(fmt.Sprintf("%s: %s\n", key, compactMemoryText(pinned[key], t.MaxChars)))
-	}
-	return b.String(), nil
-}
-
-func memoryScopeFromParams(ctx context.Context, params map[string]any) string {
-	if requestedScope := stringParam(params, "scope"); scope.IsGlobalScopeRequest(requestedScope) {
-		return scope.GlobalMemoryScope
-	}
-	return SessionFromContext(ctx)
-}
-
-func stringParam(params map[string]any, key string) string {
-	if params == nil {
-		return ""
-	}
-	value, ok := params[key]
-	if !ok || value == nil {
-		return ""
-	}
-	return strings.TrimSpace(fmt.Sprint(value))
-}
-
-func boundedPositiveInt(raw any, fallback, max int) int {
-	value := fallback
-	if v, ok := raw.(float64); ok && int(v) > 0 {
-		value = int(v)
-	}
-	if max > 0 && value > max {
-		return max
-	}
-	if value < 0 {
-		return 0
-	}
-	return value
-}
-
-func compactMemoryText(text string, maxChars int) string {
-	text = strings.Join(strings.Fields(text), " ")
-	if maxChars <= 0 || len(text) <= maxChars {
-		return text
-	}
-	if maxChars <= 3 {
-		return text[:maxChars]
-	}
-	return text[:maxChars-3] + "..."
-}
-````
-
 ## File: internal/tools/skill_exec.go
 ````go
 package tools
@@ -16431,119 +17410,6 @@ func prepareWebFetchRequestContext(ctx context.Context, target *url.URL, policy 
 		policies = append(policies, security.HostPolicy{Enabled: true, DefaultDeny: true, AllowedHosts: profile.AllowedHosts})
 	}
 	return security.PrepareURLRequestContext(ctx, target, policies...)
-}
-````
-
-## File: cmd/or3-intern/devices_cmd.go
-````go
-package main
-
-import (
-	"context"
-	"fmt"
-	"io"
-	"strconv"
-	"strings"
-
-	"or3-intern/internal/app"
-	"or3-intern/internal/approval"
-)
-
-func runDevicesCommand(ctx context.Context, broker *approval.Broker, args []string, stdout, stderr io.Writer) error {
-	_ = stderr
-	if broker == nil {
-		return fmt.Errorf("approval broker is not configured")
-	}
-	appSvc := app.NewServiceApp(nil, nil, nil, newCLIControlplane(broker))
-	if len(args) == 0 {
-		return fmt.Errorf("usage: devices <list|requests|approve|deny|revoke|rotate>")
-	}
-	switch strings.ToLower(strings.TrimSpace(args[0])) {
-	case "list":
-		if err := requireExactArgs(args[1:], 0, "devices list"); err != nil {
-			return err
-		}
-		items, err := appSvc.ListDevices(ctx, 100)
-		if err != nil {
-			return err
-		}
-		for _, item := range items {
-			fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", item.DeviceID, item.Status, item.Role, item.DisplayName)
-		}
-		return nil
-	case "requests":
-		if err := requireArgRange(args[1:], 0, 1, "devices requests [status]"); err != nil {
-			return err
-		}
-		status := ""
-		if len(args) > 1 {
-			status = strings.TrimSpace(args[1])
-		}
-		items, err := appSvc.ListPairingRequests(ctx, status, 100)
-		if err != nil {
-			return err
-		}
-		for _, item := range items {
-			fmt.Fprintf(stdout, "%d\t%s\t%s\t%s\t%s\n", item.ID, item.Status, item.Role, item.DeviceID, item.DisplayName)
-		}
-		return nil
-	case "approve":
-		if err := requireExactArgs(args[1:], 1, "devices approve <pairing-request-id>"); err != nil {
-			return err
-		}
-		id, err := strconv.ParseInt(strings.TrimSpace(args[1]), 10, 64)
-		if err != nil {
-			return fmt.Errorf("invalid pairing request ID")
-		}
-		req, err := appSvc.ApprovePairingRequest(ctx, id, "cli")
-		if err != nil {
-			return err
-		}
-		_, _ = fmt.Fprintf(stdout, "approved pairing request %d for %s\n", req.ID, req.DeviceID)
-		return nil
-	case "deny":
-		if err := requireExactArgs(args[1:], 1, "devices deny <pairing-request-id>"); err != nil {
-			return err
-		}
-		id, err := strconv.ParseInt(strings.TrimSpace(args[1]), 10, 64)
-		if err != nil {
-			return fmt.Errorf("invalid pairing request ID")
-		}
-		if err := appSvc.DenyPairingRequest(ctx, id, "cli"); err != nil {
-			return err
-		}
-		_, _ = fmt.Fprintf(stdout, "denied pairing request %d\n", id)
-		return nil
-	case "revoke":
-		if err := requireExactArgs(args[1:], 1, "devices revoke <device-id>"); err != nil {
-			return err
-		}
-		deviceID := strings.TrimSpace(args[1])
-		if deviceID == "" {
-			return fmt.Errorf("device ID required")
-		}
-		if err := appSvc.RevokeDevice(ctx, deviceID, "cli"); err != nil {
-			return err
-		}
-		_, _ = fmt.Fprintf(stdout, "revoked device %s\n", deviceID)
-		return nil
-	case "rotate":
-		if err := requireExactArgs(args[1:], 1, "devices rotate <device-id>"); err != nil {
-			return err
-		}
-		deviceID := strings.TrimSpace(args[1])
-		if deviceID == "" {
-			return fmt.Errorf("device ID required")
-		}
-		rotated, token, err := appSvc.RotateDevice(ctx, deviceID)
-		if err != nil {
-			return err
-		}
-		_, _ = fmt.Fprintf(stdout, "rotated device %s\ntoken: %s\n", rotated.DeviceID, token)
-		return nil
-	default:
-		return fmt.Errorf("unknown devices subcommand: %s", args[0])
-	}
 }
 ````
 
@@ -17366,386 +18232,916 @@ func pathWithinRoot(root, path string) bool {
 }
 ````
 
-## File: cmd/or3-intern/service_auth.go
+## File: cmd/or3-intern/pairing_cmd.go
 ````go
 package main
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
-	"encoding/json"
+	"flag"
 	"fmt"
-	"net"
-	"net/http"
+	"io"
+	"strconv"
 	"strings"
-	"time"
 
+	"or3-intern/internal/app"
 	"or3-intern/internal/approval"
-	"or3-intern/internal/config"
 )
 
-const serviceTokenMaxAge = 5 * time.Minute
-
-type serviceTokenClaims struct {
-	IssuedAt int64  `json:"iat"`
-	Nonce    string `json:"nonce"`
-}
-
-type serviceAuthContextKey struct{}
-type serviceAuthKindContextKey struct{}
-
-type serviceAuthIdentity struct {
-	Kind   string
-	Actor  string
-	Role   string
-	Device string
-}
-
-func serviceAuthMiddleware(secret string, next http.Handler) http.Handler {
-	return serviceAuthMiddlewareWithBroker(config.Config{Service: config.ServiceConfig{Secret: secret, SharedSecretRole: approval.RoleServiceClient}}, nil, next)
-}
-
-func serviceAuthMiddlewareWithBroker(cfg config.Config, broker *approval.Broker, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if allowsUnauthenticatedPairingRoute(cfg, r) {
-			ctx := approval.ContextWithAuditAuthKind(r.Context(), "unauthenticated")
-			ctx = approval.ContextWithAuditActor(ctx, "anonymous")
-			next.ServeHTTP(w, r.WithContext(ctx))
-			return
-		}
-		identity, err := authenticateServiceRequest(cfg, broker, r.Header.Get("Authorization"), time.Now(), r.Context())
-		if err != nil {
-			writeServiceJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
-			return
-		}
-		ctx := context.WithValue(r.Context(), serviceAuthContextKey{}, identity)
-		ctx = context.WithValue(ctx, serviceAuthKindContextKey{}, identity.Kind)
-		ctx = approval.ContextWithAuditAuthKind(ctx, identity.Kind)
-		ctx = approval.ContextWithAuditActor(ctx, identity.Actor)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
-
-func authenticateServiceRequest(cfg config.Config, broker *approval.Broker, header string, now time.Time, ctx context.Context) (serviceAuthIdentity, error) {
-	if err := validateServiceAuthorization(cfg.Service.Secret, header, now); err == nil {
-		role := strings.TrimSpace(cfg.Service.SharedSecretRole)
-		if role == "" {
-			role = approval.RoleServiceClient
-		}
-		return serviceAuthIdentity{Kind: "shared-secret", Actor: "service:shared-secret", Role: role}, nil
-	}
+func runPairingCommand(ctx context.Context, broker *approval.Broker, args []string, stdout, stderr io.Writer) error {
 	if broker == nil {
-		return serviceAuthIdentity{}, fmt.Errorf("missing bearer token")
+		return fmt.Errorf("approval broker is not configured")
 	}
-	scheme, token, ok := strings.Cut(strings.TrimSpace(header), " ")
-	if !ok || !strings.EqualFold(scheme, "Bearer") || strings.TrimSpace(token) == "" {
-		return serviceAuthIdentity{}, fmt.Errorf("missing bearer token")
+	appSvc := app.NewServiceApp(nil, nil, nil, newCLIControlplane(broker))
+	if len(args) == 0 {
+		return fmt.Errorf("usage: pairing <list|request|approve|deny|exchange>")
 	}
-	device, err := broker.AuthenticateDeviceToken(ctx, token)
-	if err != nil {
-		return serviceAuthIdentity{}, err
-	}
-	return serviceAuthIdentity{Kind: "paired-device", Actor: "device:" + device.DeviceID, Role: device.Role, Device: device.DeviceID}, nil
-}
-
-func serviceAuthIdentityFromContext(ctx context.Context) serviceAuthIdentity {
-	if ctx == nil {
-		return serviceAuthIdentity{}
-	}
-	identity, _ := ctx.Value(serviceAuthContextKey{}).(serviceAuthIdentity)
-	return identity
-}
-
-func serviceAuthKindFromContext(ctx context.Context) string {
-	if ctx == nil {
-		return ""
-	}
-	kind, _ := ctx.Value(serviceAuthKindContextKey{}).(string)
-	return kind
-}
-
-func allowsUnauthenticatedPairingRoute(cfg config.Config, r *http.Request) bool {
-	if r == nil || r.URL == nil {
-		return false
-	}
-	if !cfg.Service.AllowUnauthenticatedPairing {
-		return false
-	}
-	if !serviceListenIsLoopback(cfg.Service.Listen) {
-		return false
-	}
-	if !requestRemoteIsLoopback(r.RemoteAddr) {
-		return false
-	}
-	if r.Method != http.MethodPost {
-		return false
-	}
-	path := strings.TrimSpace(r.URL.Path)
-	return path == "/internal/v1/pairing/requests" || path == "/internal/v1/pairing/exchange"
-}
-
-func requireServiceRole(w http.ResponseWriter, r *http.Request, roles ...string) bool {
-	identity := serviceAuthIdentityFromContext(r.Context())
-	if len(roles) == 0 {
-		return true
-	}
-	for _, role := range roles {
-		if serviceRoleRank(identity.Role) >= serviceRoleRank(role) {
-			return true
+	switch strings.ToLower(strings.TrimSpace(args[0])) {
+	case "list":
+		if err := requireArgRange(args[1:], 0, 1, "pairing list [status]"); err != nil {
+			return err
 		}
-	}
-	writeServiceJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
-	return false
-}
-
-func serviceRoleRank(role string) int {
-	switch strings.ToLower(strings.TrimSpace(role)) {
-	case approval.RoleAdmin:
-		return 4
-	case approval.RoleOperator:
-		return 3
-	case approval.RoleServiceClient, approval.RoleWebUI, approval.RoleNode:
-		return 2
-	case approval.RoleViewer:
-		return 1
+		status := ""
+		if len(args) > 1 {
+			status = strings.TrimSpace(args[1])
+		}
+		items, err := appSvc.ListPairingRequests(ctx, status, 100)
+		if err != nil {
+			return err
+		}
+		for _, item := range items {
+			fmt.Fprintf(stdout, "%d\t%s\t%s\t%s\t%s\t%s\n", item.ID, item.Status, item.Role, item.DeviceID, item.DisplayName, item.Origin)
+		}
+		return nil
+	case "request":
+		fs := flag.NewFlagSet("pairing request", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		role := fs.String("role", approval.RoleOperator, "device role")
+		displayName := fs.String("name", "", "display name")
+		origin := fs.String("origin", "", "origin description")
+		deviceID := fs.String("device", "", "explicit device ID")
+		channel := fs.String("channel", "", "channel name to bind")
+		identity := fs.String("identity", "", "channel identity to bind")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if err := requireExactFlagArgs(fs, 0, "pairing request [--role role] [--name display] [--origin text] [--device id] [--channel name --identity value]"); err != nil {
+			return err
+		}
+		metadata := map[string]any{}
+		if strings.TrimSpace(*channel) != "" || strings.TrimSpace(*identity) != "" {
+			if strings.TrimSpace(*channel) == "" || strings.TrimSpace(*identity) == "" {
+				return fmt.Errorf("pairing request: --channel and --identity must be provided together")
+			}
+			metadata["channel"] = strings.ToLower(strings.TrimSpace(*channel))
+			metadata["identity"] = strings.TrimSpace(*identity)
+			if strings.TrimSpace(*deviceID) == "" {
+				*deviceID = strings.ToLower(strings.TrimSpace(*channel)) + ":" + strings.TrimSpace(*identity)
+			}
+		}
+		req, code, err := appSvc.CreatePairingRequest(ctx, approval.PairingRequestInput{
+			Role:        strings.TrimSpace(*role),
+			DisplayName: strings.TrimSpace(*displayName),
+			Origin:      strings.TrimSpace(*origin),
+			Metadata:    metadata,
+			DeviceID:    strings.TrimSpace(*deviceID),
+		})
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(stdout, "id: %d\nstatus: %s\ndevice_id: %s\nrole: %s\ncode: %s\n", req.ID, req.Status, req.DeviceID, req.Role, code)
+		return nil
+	case "approve":
+		if err := requireExactArgs(args[1:], 1, "pairing approve <request-id>"); err != nil {
+			return err
+		}
+		id, err := strconv.ParseInt(strings.TrimSpace(args[1]), 10, 64)
+		if err != nil {
+			return fmt.Errorf("invalid pairing request ID")
+		}
+		req, err := appSvc.ApprovePairingRequest(ctx, id, "cli")
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(stdout, "approved pairing request %d for %s\n", req.ID, req.DeviceID)
+		return nil
+	case "deny":
+		if err := requireExactArgs(args[1:], 1, "pairing deny <request-id>"); err != nil {
+			return err
+		}
+		id, err := strconv.ParseInt(strings.TrimSpace(args[1]), 10, 64)
+		if err != nil {
+			return fmt.Errorf("invalid pairing request ID")
+		}
+		if err := appSvc.DenyPairingRequest(ctx, id, "cli"); err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(stdout, "denied pairing request %d\n", id)
+		return nil
+	case "exchange":
+		if err := requireExactArgs(args[1:], 2, "pairing exchange <request-id> <code>"); err != nil {
+			return err
+		}
+		id, err := strconv.ParseInt(strings.TrimSpace(args[1]), 10, 64)
+		if err != nil {
+			return fmt.Errorf("invalid pairing request ID")
+		}
+		device, token, err := appSvc.ExchangePairingCode(ctx, approval.PairingExchangeInput{
+			RequestID: id,
+			Code:      strings.TrimSpace(args[2]),
+		})
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(stdout, "paired device %s\nrole: %s\ntoken: %s\n", device.DeviceID, device.Role, token)
+		return nil
 	default:
-		return 0
+		return fmt.Errorf("unknown pairing subcommand: %s", args[0])
 	}
-}
-
-func serviceListenIsLoopback(addr string) bool {
-	host := strings.TrimSpace(addr)
-	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
-		host = parsedHost
-	}
-	host = strings.Trim(host, "[]")
-	if host == "" {
-		return false
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		return ip.IsLoopback()
-	}
-	return strings.EqualFold(host, "localhost")
-}
-
-func requestRemoteIsLoopback(addr string) bool {
-	host := strings.TrimSpace(addr)
-	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
-		host = parsedHost
-	}
-	host = strings.Trim(host, "[]")
-	if ip := net.ParseIP(host); ip != nil {
-		return ip.IsLoopback()
-	}
-	return strings.EqualFold(host, "localhost")
-}
-
-func validateServiceAuthorization(secret string, header string, now time.Time) error {
-	secret = strings.TrimSpace(secret)
-	if secret == "" {
-		return fmt.Errorf("service secret is not configured")
-	}
-	scheme, token, ok := strings.Cut(strings.TrimSpace(header), " ")
-	if !ok || !strings.EqualFold(scheme, "Bearer") || strings.TrimSpace(token) == "" {
-		return fmt.Errorf("missing bearer token")
-	}
-	return validateServiceBearerToken(secret, token, now)
-}
-
-func validateServiceBearerToken(secret string, token string, now time.Time) error {
-	payloadPart, signaturePart, ok := strings.Cut(strings.TrimSpace(token), ".")
-	if !ok || payloadPart == "" || signaturePart == "" {
-		return fmt.Errorf("invalid bearer token format")
-	}
-	signature, err := hex.DecodeString(signaturePart)
-	if err != nil {
-		return fmt.Errorf("invalid bearer token signature")
-	}
-	expected := signServiceToken(secret, payloadPart)
-	if !hmac.Equal(signature, expected) {
-		return fmt.Errorf("invalid bearer token signature")
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(payloadPart)
-	if err != nil {
-		return fmt.Errorf("invalid bearer token payload")
-	}
-	var claims serviceTokenClaims
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return fmt.Errorf("invalid bearer token payload")
-	}
-	if claims.IssuedAt <= 0 {
-		return fmt.Errorf("invalid bearer token timestamp")
-	}
-	issuedAt := time.Unix(claims.IssuedAt, 0)
-	if issuedAt.After(now.Add(30 * time.Second)) {
-		return fmt.Errorf("bearer token timestamp is in the future")
-	}
-	if now.Sub(issuedAt) > serviceTokenMaxAge {
-		return fmt.Errorf("bearer token expired")
-	}
-	if strings.TrimSpace(claims.Nonce) == "" {
-		return fmt.Errorf("invalid bearer token nonce")
-	}
-	return nil
-}
-
-func issueServiceBearerToken(secret string, now time.Time) (string, error) {
-	nonce, err := randomHex(12)
-	if err != nil {
-		return "", err
-	}
-	claims := serviceTokenClaims{IssuedAt: now.Unix(), Nonce: nonce}
-	payload, err := json.Marshal(claims)
-	if err != nil {
-		return "", err
-	}
-	payloadPart := base64.RawURLEncoding.EncodeToString(payload)
-	signature := hex.EncodeToString(signServiceToken(secret, payloadPart))
-	return payloadPart + "." + signature, nil
-}
-
-func signServiceToken(secret string, payloadPart string) []byte {
-	mac := hmac.New(sha256.New, []byte(secret))
-	_, _ = mac.Write([]byte(payloadPart))
-	return mac.Sum(nil)
-}
-
-func randomHex(size int) (string, error) {
-	if size <= 0 {
-		return "", nil
-	}
-	buf := make([]byte, size)
-	if _, err := rand.Read(buf); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(buf), nil
-}
-
-func withDetachedContext(ctx context.Context) context.Context {
-	if ctx == nil {
-		return context.Background()
-	}
-	return context.WithoutCancel(ctx)
 }
 ````
 
-## File: cmd/or3-intern/startup_validation.go
+## File: cmd/or3-intern/service_request.go
 ````go
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 
-	"or3-intern/internal/approval"
-	"or3-intern/internal/config"
-	intdoctor "or3-intern/internal/doctor"
+	"or3-intern/internal/agent"
+	"or3-intern/internal/app"
+	"or3-intern/internal/providers"
+	"or3-intern/internal/tools"
 )
 
-func validateStartupCommand(cmd string, cfg config.Config, unsafeDev bool) error {
-	cmd = strings.ToLower(strings.TrimSpace(cmd))
-	if unsafeDev {
-		return nil
-	}
-	if err := validateStrictServicePosture(cmd, cfg); err != nil {
-		return err
-	}
-	mode := startupDoctorMode(cmd)
-	if mode == "" {
-		return nil
-	}
-	report := intdoctor.Evaluate(cfg, intdoctor.Options{Mode: mode})
-	if !report.HasBlockingFindings() {
-		return nil
-	}
-	blockers := report.BlockingFindings()
-	top := intdoctor.TopFindings(blockers, 3)
-	parts := make([]string, 0, len(top))
-	for _, finding := range top {
-		parts = append(parts, finding.Area+": "+finding.Summary)
-	}
-	message := strings.Join(parts, "; ")
-	if len(blockers) > len(top) {
-		message += fmt.Sprintf(" (%d more blocking finding(s))", len(blockers)-len(top))
-	}
-	return startupRefusal(cmd, message, blockers)
+type serviceTurnRequest struct {
+	SessionKey    string
+	Message       string
+	AllowedTools  []string
+	RestrictTools bool
+	Meta          map[string]any
+	ProfileName   string
+	ApprovalToken string
 }
 
-func validateStrictServicePosture(cmd string, cfg config.Config) error {
-	if cmd != "service" {
-		return nil
+type serviceSubagentRequest struct {
+	ParentSessionKey string
+	Task             string
+	PromptSnapshot   []providers.ChatMessage
+	AllowedTools     []string
+	RestrictTools    bool
+	TimeoutSeconds   int
+	Meta             map[string]any
+	ProfileName      string
+	Channel          string
+	ReplyTo          string
+	ApprovalToken    string
+}
+
+type serviceToolPolicyPayload struct {
+	Mode              string   `json:"mode"`
+	AllowedTools      []string `json:"allowed_tools"`
+	AllowedToolsCamel []string `json:"allowedTools"`
+	BlockedTools      []string `json:"blocked_tools"`
+	BlockedToolsCamel []string `json:"blockedTools"`
+}
+
+type serviceTurnRequestPayload struct {
+	SessionKey            string                    `json:"session_key"`
+	InternSessionKey      string                    `json:"intern_session_key"`
+	SessionKeyCamel       string                    `json:"sessionKey"`
+	InternSessionKeyCamel string                    `json:"internSessionKey"`
+	PlatformSessionRef    map[string]any            `json:"platform_session_ref"`
+	Message               string                    `json:"message"`
+	AllowedTools          []string                  `json:"allowed_tools"`
+	AllowedToolsCamel     []string                  `json:"allowedTools"`
+	ToolPolicy            *serviceToolPolicyPayload `json:"tool_policy"`
+	ToolPolicyCamel       *serviceToolPolicyPayload `json:"toolPolicy"`
+	Meta                  map[string]any            `json:"meta"`
+	ProfileName           string                    `json:"profile_name"`
+	ProfileNameCamel      string                    `json:"profileName"`
+	ApprovalToken         string                    `json:"approval_token"`
+	ApprovalTokenCamel    string                    `json:"approvalToken"`
+}
+
+type serviceSubagentRequestPayload struct {
+	ParentSessionKey      string                    `json:"parent_session_key"`
+	ParentSessionKeyCamel string                    `json:"parentSessionKey"`
+	SessionKey            string                    `json:"session_key"`
+	InternSessionKey      string                    `json:"intern_session_key"`
+	SessionKeyCamel       string                    `json:"sessionKey"`
+	InternSessionKeyCamel string                    `json:"internSessionKey"`
+	Task                  string                    `json:"task"`
+	PromptSnapshot        []providers.ChatMessage   `json:"prompt_snapshot"`
+	PromptSnapshotCamel   []providers.ChatMessage   `json:"promptSnapshot"`
+	AllowedTools          []string                  `json:"allowed_tools"`
+	AllowedToolsCamel     []string                  `json:"allowedTools"`
+	ToolPolicy            *serviceToolPolicyPayload `json:"tool_policy"`
+	ToolPolicyCamel       *serviceToolPolicyPayload `json:"toolPolicy"`
+	TimeoutSeconds        json.Number               `json:"timeout_seconds"`
+	TimeoutSecondsCamel   json.Number               `json:"timeoutSeconds"`
+	Timeout               json.Number               `json:"timeout"`
+	Meta                  map[string]any            `json:"meta"`
+	ProfileName           string                    `json:"profile_name"`
+	ProfileNameCamel      string                    `json:"profileName"`
+	Channel               string                    `json:"channel"`
+	ReplyTo               string                    `json:"reply_to"`
+	ReplyToCamel          string                    `json:"replyTo"`
+	ApprovalToken         string                    `json:"approval_token"`
+	ApprovalTokenCamel    string                    `json:"approvalToken"`
+}
+
+func decodeServiceTurnRequest(body io.Reader, registry *tools.Registry) (serviceTurnRequest, error) {
+	var payload serviceTurnRequestPayload
+	if err := decodeServiceRequestBody(body, &payload); err != nil {
+		return serviceTurnRequest{}, err
 	}
-	if cfg.Service.AllowUnauthenticatedPairing && !serviceListenIsLoopback(cfg.Service.Listen) {
-		return fmt.Errorf("service startup refused: unauthenticated pairing requires a loopback listen address; rerun with --unsafe-dev only for local development")
+	allowedTools, restrictTools, err := app.ResolveToolPolicy(
+		registry,
+		firstToolPolicy(payload.ToolPolicy, payload.ToolPolicyCamel),
+		firstStringSlice(payload.AllowedTools, payload.AllowedToolsCamel),
+	)
+	if err != nil {
+		return serviceTurnRequest{}, err
 	}
-	role := strings.ToLower(strings.TrimSpace(cfg.Service.SharedSecretRole))
-	switch role {
-	case "", approval.RoleViewer, approval.RoleServiceClient:
-	default:
-		return fmt.Errorf("service startup refused: service.sharedSecretRole must be viewer or service-client; rerun with --unsafe-dev only for local development")
+	return serviceTurnRequest{
+		SessionKey:    firstNonEmptyString(payload.SessionKey, payload.InternSessionKey, payload.SessionKeyCamel, payload.InternSessionKeyCamel),
+		Message:       strings.TrimSpace(payload.Message),
+		AllowedTools:  allowedTools,
+		RestrictTools: restrictTools,
+		Meta:          cloneMapOrEmpty(payload.Meta),
+		ProfileName:   firstNonEmptyString(payload.ProfileName, payload.ProfileNameCamel),
+		ApprovalToken: firstNonEmptyString(payload.ApprovalToken, payload.ApprovalTokenCamel),
+	}, nil
+}
+
+func decodeServiceSubagentRequest(body io.Reader, registry *tools.Registry) (serviceSubagentRequest, error) {
+	var payload serviceSubagentRequestPayload
+	if err := decodeServiceRequestBody(body, &payload); err != nil {
+		return serviceSubagentRequest{}, err
 	}
-	switch strings.ToLower(strings.TrimSpace(cfg.Service.MaxCapability)) {
-	case "", "safe":
-	default:
-		return fmt.Errorf("service startup refused: service.maxCapability must remain safe; rerun with --unsafe-dev only for local development")
+	allowedTools, restrictTools, err := app.ResolveToolPolicy(
+		registry,
+		firstToolPolicy(payload.ToolPolicy, payload.ToolPolicyCamel),
+		firstStringSlice(payload.AllowedTools, payload.AllowedToolsCamel),
+	)
+	if err != nil {
+		return serviceSubagentRequest{}, err
+	}
+	timeoutSeconds, err := firstPositiveInt(payload.TimeoutSeconds, payload.TimeoutSecondsCamel, payload.Timeout)
+	if err != nil {
+		return serviceSubagentRequest{}, err
+	}
+	return serviceSubagentRequest{
+		ParentSessionKey: firstNonEmptyString(
+			payload.ParentSessionKey,
+			payload.ParentSessionKeyCamel,
+			payload.SessionKey,
+			payload.InternSessionKey,
+			payload.SessionKeyCamel,
+			payload.InternSessionKeyCamel,
+		),
+		Task:           strings.TrimSpace(payload.Task),
+		PromptSnapshot: firstPromptSnapshot(payload.PromptSnapshot, payload.PromptSnapshotCamel),
+		AllowedTools:   allowedTools,
+		RestrictTools:  restrictTools,
+		TimeoutSeconds: timeoutSeconds,
+		Meta:           cloneMapOrEmpty(payload.Meta),
+		ProfileName:    firstNonEmptyString(payload.ProfileName, payload.ProfileNameCamel),
+		Channel:        strings.TrimSpace(payload.Channel),
+		ReplyTo:        firstNonEmptyString(payload.ReplyTo, payload.ReplyToCamel),
+		ApprovalToken:  firstNonEmptyString(payload.ApprovalToken, payload.ApprovalTokenCamel),
+	}, nil
+}
+
+func decodeServiceRequestBody(body io.Reader, out any) error {
+	decoder := json.NewDecoder(body)
+	decoder.UseNumber()
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(out); err != nil {
+		return err
+	}
+	var extra struct{}
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return fmt.Errorf("unexpected trailing data")
 	}
 	return nil
 }
 
-func startupDoctorMode(cmd string) intdoctor.Mode {
-	switch cmd {
-	case "chat":
-		return intdoctor.ModeStartupChat
-	case "serve":
-		return intdoctor.ModeStartupServe
-	case "service":
-		return intdoctor.ModeStartupService
-	default:
-		return ""
-	}
-}
-
-func startupRefusal(cmd, message string, blockers []intdoctor.Finding) error {
-	cmd = strings.TrimSpace(cmd)
-	if cmd == "" {
-		cmd = "startup"
-	}
-	guidance := startupFixGuidance(blockers)
-	return fmt.Errorf("%s startup refused: %s; %s", cmd, message, guidance)
-}
-
-func startupFixGuidance(blockers []intdoctor.Finding) string {
-	hasAutomatic := false
-	hasInteractive := false
-	for _, finding := range blockers {
-		switch finding.FixMode {
-		case intdoctor.FixModeAutomatic:
-			hasAutomatic = true
-		case intdoctor.FixModeInteractive:
-			hasInteractive = true
+func firstToolPolicy(values ...*serviceToolPolicyPayload) *agent.ServiceToolPolicy {
+	for _, value := range values {
+		if value == nil {
+			continue
+		}
+		return &agent.ServiceToolPolicy{
+			Mode:         strings.TrimSpace(value.Mode),
+			AllowedTools: firstStringSlice(value.AllowedTools, value.AllowedToolsCamel),
+			BlockedTools: firstStringSlice(value.BlockedTools, value.BlockedToolsCamel),
 		}
 	}
-	switch {
-	case hasAutomatic && hasInteractive:
-		return "run `or3-intern doctor --fix` for safe repairs, then `or3-intern doctor --fix --interactive` for guided ones, or fix the configuration manually"
-	case hasAutomatic:
-		return "run `or3-intern doctor --fix` or fix the configuration manually"
-	case hasInteractive:
-		return "run `or3-intern doctor --fix --interactive` or fix the configuration manually"
+	return nil
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func firstStringSlice(values ...[]string) []string {
+	for _, value := range values {
+		if len(value) == 0 {
+			continue
+		}
+		out := make([]string, len(value))
+		copy(out, value)
+		return out
+	}
+	return nil
+}
+
+func firstPromptSnapshot(values ...[]providers.ChatMessage) []providers.ChatMessage {
+	for _, value := range values {
+		if len(value) == 0 {
+			continue
+		}
+		out := make([]providers.ChatMessage, len(value))
+		copy(out, value)
+		return out
+	}
+	return nil
+}
+
+func firstPositiveInt(values ...json.Number) (int, error) {
+	for _, value := range values {
+		raw := strings.TrimSpace(value.String())
+		if raw == "" {
+			continue
+		}
+		n, err := value.Int64()
+		if err != nil {
+			return 0, fmt.Errorf("invalid timeout")
+		}
+		if n <= 0 {
+			continue
+		}
+		return int(n), nil
+	}
+	return 0, nil
+}
+
+func cloneMapOrEmpty(in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return map[string]any{}
+	}
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func backgroundToolsRegistry(manager *agent.SubagentManager) *tools.Registry {
+	if manager == nil {
+		return tools.NewRegistry()
+	}
+	if manager.BackgroundTools != nil {
+		return manager.BackgroundTools()
+	}
+	return tools.NewRegistry()
+}
+````
+
+## File: cmd/or3-intern/skills_cmd.go
+````go
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"log"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"or3-intern/internal/clawhub"
+	"or3-intern/internal/config"
+	"or3-intern/internal/mcp"
+	"or3-intern/internal/skills"
+)
+
+type skillsCommandDeps struct {
+	Client        *clawhub.Client
+	LoadToolNames func(context.Context, config.Config) map[string]struct{}
+	LoadInventory func(toolNames map[string]struct{}) skills.Inventory
+	Audit         func(context.Context, string, any) error
+	Stdout        io.Writer
+	Stderr        io.Writer
+}
+
+func runSkillsCommandWithDeps(ctx context.Context, cfg config.Config, args []string, deps skillsCommandDeps) error {
+	if deps.Client == nil {
+		deps.Client = newClawHubClient(cfg)
+	}
+	if deps.LoadToolNames == nil {
+		deps.LoadToolNames = func(ctx context.Context, cfg config.Config) map[string]struct{} {
+			return loadAvailableToolNamesWithManager(ctx, cfg, nil)
+		}
+	}
+	if deps.LoadInventory == nil {
+		return fmt.Errorf("skills inventory loader not configured")
+	}
+	if deps.Stdout == nil {
+		deps.Stdout = os.Stdout
+	}
+	if deps.Stderr == nil {
+		deps.Stderr = os.Stderr
+	}
+	if len(args) == 0 {
+		return fmt.Errorf("usage: or3-intern skills <list|info|check|search|install|update|remove> ...")
+	}
+
+	switch args[0] {
+	case "list":
+		fs := flag.NewFlagSet("skills list", flag.ContinueOnError)
+		fs.SetOutput(deps.Stderr)
+		eligibleOnly := fs.Bool("eligible", false, "show only eligible skills")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if err := requireExactFlagArgs(fs, 0, "or3-intern skills list [--eligible]"); err != nil {
+			return err
+		}
+		inv := deps.LoadInventory(deps.LoadToolNames(ctx, cfg))
+		if len(inv.Skills) == 0 {
+			_, _ = fmt.Fprintln(deps.Stdout, "(no skills found)")
+			return nil
+		}
+		for _, skill := range inv.Skills {
+			if *eligibleOnly && !skill.Eligible {
+				continue
+			}
+			status := "eligible"
+			switch {
+			case skill.ParseError != "":
+				status = "parse-error"
+			case skill.Disabled:
+				status = "disabled"
+			case !skill.Eligible:
+				status = "ineligible"
+			case skill.Hidden:
+				status = "hidden"
+			}
+			permissionState := strings.TrimSpace(skill.PermissionState)
+			if permissionState == "" {
+				permissionState = "approved"
+			}
+			_, _ = fmt.Fprintf(deps.Stdout, "%s\t%s\t%s\t%s\t%s\n", skill.Name, status, permissionState, skill.Source, skill.Dir)
+		}
+		return nil
+	case "info":
+		if err := requireExactArgs(args[1:], 1, "or3-intern skills info <name>"); err != nil {
+			return err
+		}
+		inv := deps.LoadInventory(deps.LoadToolNames(ctx, cfg))
+		skill, ok := inv.Get(args[1])
+		if !ok {
+			return fmt.Errorf("skill not found: %s", args[1])
+		}
+		_, _ = fmt.Fprintf(deps.Stdout, "Name: %s\n", skill.Name)
+		_, _ = fmt.Fprintf(deps.Stdout, "Description: %s\n", skill.Description)
+		_, _ = fmt.Fprintf(deps.Stdout, "Source: %s\n", skill.Source)
+		_, _ = fmt.Fprintf(deps.Stdout, "Location: %s\n", skill.Dir)
+		if skill.Homepage != "" {
+			_, _ = fmt.Fprintf(deps.Stdout, "Homepage: %s\n", skill.Homepage)
+		}
+		_, _ = fmt.Fprintf(deps.Stdout, "Eligible: %t\n", skill.Eligible)
+		_, _ = fmt.Fprintf(deps.Stdout, "User Invocable: %t\n", skill.UserInvocable)
+		if skill.Publisher != "" {
+			_, _ = fmt.Fprintf(deps.Stdout, "Publisher: %s\n", skill.Publisher)
+		}
+		if skill.Registry != "" {
+			_, _ = fmt.Fprintf(deps.Stdout, "Registry: %s\n", skill.Registry)
+		}
+		if skill.InstalledVersion != "" {
+			_, _ = fmt.Fprintf(deps.Stdout, "Installed Version: %s\n", skill.InstalledVersion)
+		}
+		if skill.Modified {
+			_, _ = fmt.Fprintln(deps.Stdout, "Local Modifications: true")
+		}
+		if strings.TrimSpace(skill.ScanStatus) != "" {
+			_, _ = fmt.Fprintf(deps.Stdout, "Scan Status: %s\n", skill.ScanStatus)
+			printReasons(deps.Stdout, "Scan Findings", skill.ScanFindings)
+		}
+		if strings.TrimSpace(skill.PermissionState) != "" {
+			_, _ = fmt.Fprintf(deps.Stdout, "Permission State: %s\n", skill.PermissionState)
+			_, _ = fmt.Fprintf(deps.Stdout, "Declared Permissions: %s\n", skill.Permissions.Summary())
+			printReasons(deps.Stdout, "Permission Notes", skill.PermissionNotes)
+		}
+		if skill.Hidden {
+			_, _ = fmt.Fprintln(deps.Stdout, "Model Visibility: hidden")
+		}
+		if skill.CommandDispatch != "" {
+			_, _ = fmt.Fprintf(deps.Stdout, "Command Dispatch: %s\n", skill.CommandDispatch)
+			_, _ = fmt.Fprintf(deps.Stdout, "Command Tool: %s\n", skill.CommandTool)
+			_, _ = fmt.Fprintf(deps.Stdout, "Command Arg Mode: %s\n", skill.CommandArgMode)
+		}
+		printReasons(deps.Stdout, "Missing", skill.Missing)
+		printReasons(deps.Stdout, "Unsupported", skill.Unsupported)
+		if skill.ParseError != "" {
+			_, _ = fmt.Fprintf(deps.Stdout, "Parse Error: %s\n", skill.ParseError)
+		}
+		return nil
+	case "check":
+		if err := requireExactArgs(args[1:], 0, "or3-intern skills check"); err != nil {
+			return err
+		}
+		inv := deps.LoadInventory(deps.LoadToolNames(ctx, cfg))
+		if len(inv.Skills) == 0 {
+			_, _ = fmt.Fprintln(deps.Stdout, "(no skills found)")
+			return nil
+		}
+		for _, skill := range inv.Skills {
+			if skill.PermissionState == "quarantined" {
+				_, _ = fmt.Fprintf(deps.Stdout, "[quarantined] %s: %s\n", skill.Name, strings.Join(skill.PermissionNotes, "; "))
+				continue
+			}
+			if skill.PermissionState == "blocked" {
+				reasons := append([]string{}, skill.PermissionNotes...)
+				reasons = append(reasons, skill.Missing...)
+				reasons = append(reasons, skill.Unsupported...)
+				if skill.ParseError != "" {
+					reasons = append(reasons, skill.ParseError)
+				}
+				_, _ = fmt.Fprintf(deps.Stdout, "[blocked] %s: %s\n", skill.Name, strings.Join(reasons, "; "))
+				continue
+			}
+			if skill.Eligible {
+				_, _ = fmt.Fprintf(deps.Stdout, "[ok] %s\n", skill.Name)
+				continue
+			}
+			reasons := append([]string{}, skill.Missing...)
+			reasons = append(reasons, skill.Unsupported...)
+			if skill.ParseError != "" {
+				reasons = append(reasons, skill.ParseError)
+			}
+			_, _ = fmt.Fprintf(deps.Stdout, "[blocked] %s: %s\n", skill.Name, strings.Join(reasons, "; "))
+		}
+		return nil
+	case "search":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: or3-intern skills search <query>")
+		}
+		results, err := deps.Client.Search(ctx, strings.Join(args[1:], " "), 10)
+		if err != nil {
+			return err
+		}
+		if len(results) == 0 {
+			_, _ = fmt.Fprintln(deps.Stdout, "(no results)")
+			return nil
+		}
+		for _, result := range results {
+			version := result.Version
+			if version == "" {
+				version = "latest"
+			}
+			_, _ = fmt.Fprintf(deps.Stdout, "%s\t%s\t%s\n", result.Slug, version, strings.TrimSpace(result.DisplayName))
+		}
+		return nil
+	case "install":
+		fs := flag.NewFlagSet("skills install", flag.ContinueOnError)
+		fs.SetOutput(deps.Stderr)
+		version := fs.String("version", "", "skill version")
+		force := fs.Bool("force", false, "overwrite local modifications")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if err := requireExactFlagArgs(fs, 1, "or3-intern skills install <slug> [--version v]"); err != nil {
+			return err
+		}
+		result, err := deps.Client.Install(ctx, fs.Arg(0), *version, resolveInstallRoot(cfg), clawhub.InstallOptions{Force: *force})
+		if err != nil {
+			return err
+		}
+		if deps.Audit != nil {
+			if err := deps.Audit(ctx, "skill.install", map[string]any{"slug": result.Slug, "version": result.Version, "path": result.Path}); err != nil {
+				return err
+			}
+		}
+		_, _ = fmt.Fprintf(deps.Stdout, "installed\t%s\t%s\t%s\n", result.Slug, result.Version, result.Path)
+		return nil
+	case "update":
+		fs := flag.NewFlagSet("skills update", flag.ContinueOnError)
+		fs.SetOutput(deps.Stderr)
+		all := fs.Bool("all", false, "update all installed skills")
+		version := fs.String("version", "", "target version")
+		force := fs.Bool("force", false, "overwrite local modifications")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		root := resolveInstallRoot(cfg)
+		installed, err := clawhub.ListInstalled(root)
+		if err != nil {
+			return err
+		}
+		targets := installed
+		if !*all {
+			if err := requireExactFlagArgs(fs, 1, "or3-intern skills update <name>|--all"); err != nil {
+				return err
+			}
+			match, matchErr := findInstalledSkill(installed, fs.Arg(0))
+			if matchErr != nil {
+				return matchErr
+			}
+			targets = []clawhub.InstalledSkill{match}
+		} else if err := requireExactFlagArgs(fs, 0, "or3-intern skills update <name>|--all"); err != nil {
+			return err
+		}
+		if len(targets) == 0 {
+			_, _ = fmt.Fprintln(deps.Stdout, "(no installed skills)")
+			return nil
+		}
+		for _, item := range targets {
+			info, err := deps.Client.Inspect(ctx, item.Origin.Slug, *version)
+			if err != nil {
+				return err
+			}
+			targetVersion := strings.TrimSpace(*version)
+			if targetVersion == "" {
+				targetVersion = info.LatestVersion
+			}
+			if targetVersion == "" {
+				return fmt.Errorf("could not resolve latest version for %s", item.Origin.Slug)
+			}
+			if item.Origin.InstalledVersion == targetVersion {
+				_, _ = fmt.Fprintf(deps.Stdout, "up-to-date\t%s\t%s\n", item.Origin.Slug, targetVersion)
+				continue
+			}
+			if _, err := deps.Client.Install(ctx, item.Origin.Slug, targetVersion, root, clawhub.InstallOptions{Force: *force}); err != nil {
+				return err
+			}
+			if deps.Audit != nil {
+				if err := deps.Audit(ctx, "skill.update", map[string]any{"slug": item.Origin.Slug, "version": targetVersion}); err != nil {
+					return err
+				}
+			}
+			_, _ = fmt.Fprintf(deps.Stdout, "updated\t%s\t%s\n", item.Origin.Slug, targetVersion)
+		}
+		return nil
+	case "remove":
+		if err := requireExactArgs(args[1:], 1, "or3-intern skills remove <name>"); err != nil {
+			return err
+		}
+		root := resolveInstallRoot(cfg)
+		installed, err := clawhub.ListInstalled(root)
+		if err != nil {
+			return err
+		}
+		match, err := findInstalledSkill(installed, args[1])
+		if err != nil {
+			return err
+		}
+		if err := clawhub.RemoveSkill(root, match.Name); err != nil {
+			return err
+		}
+		if deps.Audit != nil {
+			if err := deps.Audit(ctx, "skill.remove", map[string]any{"name": match.Name}); err != nil {
+				return err
+			}
+		}
+		_, _ = fmt.Fprintf(deps.Stdout, "removed\t%s\n", match.Name)
+		return nil
 	default:
-		return "fix the configuration manually"
+		return fmt.Errorf("unknown skills subcommand: %s", args[0])
 	}
 }
 
-func minInt(a, b int) int {
-	if a < b {
-		return a
+func buildSkillsInventory(cfg config.Config, bundledDir string, toolNames map[string]struct{}) skills.Inventory {
+	approved := make(map[string]struct{}, len(cfg.Skills.Policy.Approved)*2)
+	for _, name := range cfg.Skills.Policy.Approved {
+		trimmed := strings.TrimSpace(name)
+		if trimmed == "" {
+			continue
+		}
+		approved[trimmed] = struct{}{}
+		approved[strings.ToLower(trimmed)] = struct{}{}
 	}
-	return b
+	trustedOwners := makePolicySet(cfg.Skills.Policy.TrustedOwners)
+	blockedOwners := makePolicySet(cfg.Skills.Policy.BlockedOwners)
+	trustedRegistries := makePolicySet(cfg.Skills.Policy.TrustedRegistries)
+	approvalPolicy := skills.ApprovalPolicy{
+		QuarantineByDefault: cfg.Skills.Policy.QuarantineByDefault || config.IsHostedProfile(cfg.RuntimeProfile),
+		ApprovedSkills:      approved,
+		TrustedOwners:       trustedOwners,
+		BlockedOwners:       blockedOwners,
+		TrustedRegistries:   trustedRegistries,
+	}
+	return skills.ScanWithOptions(skills.LoadOptions{
+		Roots:          buildSkillRoots(cfg, bundledDir),
+		Entries:        skillEntries(cfg),
+		GlobalConfig:   configMap(cfg),
+		Env:            envMap(),
+		AvailableTools: toolNames,
+		ApprovalPolicy: approvalPolicy,
+	})
+}
+
+func makePolicySet(values []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		normalized := strings.TrimRight(strings.ToLower(strings.TrimSpace(value)), "/")
+		if normalized == "" {
+			continue
+		}
+		out[normalized] = struct{}{}
+	}
+	return out
+}
+
+func loadAvailableToolNamesWithManager(ctx context.Context, cfg config.Config, manager *mcp.Manager) map[string]struct{} {
+	toolNames := filterAdvertisedToolNames(cfg, availableToolNames(cfg.Cron.Enabled, cfg.Subagents.Enabled))
+	if len(cfg.Tools.MCPServers) == 0 {
+		return toolNames
+	}
+	if manager != nil {
+		manager.SetHostPolicy(buildHostPolicy(cfg))
+		for _, name := range manager.ToolNames() {
+			toolNames[name] = struct{}{}
+		}
+		return toolNames
+	}
+	manager = mcp.NewManager(cfg.Tools.MCPServers)
+	manager.SetLogger(log.Printf)
+	manager.SetHostPolicy(buildHostPolicy(cfg))
+	if err := manager.Connect(ctx); err != nil {
+		log.Printf("mcp setup failed: %v", err)
+		return toolNames
+	}
+	defer func() {
+		if err := manager.Close(); err != nil {
+			log.Printf("mcp close failed: %v", err)
+		}
+	}()
+	for _, name := range manager.ToolNames() {
+		toolNames[name] = struct{}{}
+	}
+	return toolNames
+}
+
+func filterAdvertisedToolNames(cfg config.Config, toolNames map[string]struct{}) map[string]struct{} {
+	filtered := make(map[string]struct{}, len(toolNames))
+	for name := range toolNames {
+		filtered[name] = struct{}{}
+	}
+	if !cfg.Hardening.GuardedTools && !cfg.Hardening.PrivilegedTools {
+		delete(filtered, "exec")
+	}
+	if !cfg.Skills.EnableExec {
+		delete(filtered, "run_skill_script")
+	}
+	switch cfg.RuntimeProfile {
+	case config.ProfileHostedNoExec:
+		delete(filtered, "exec")
+		delete(filtered, "run_skill_script")
+	case config.ProfileHostedRemoteSandbox:
+		if !cfg.Hardening.Sandbox.Enabled {
+			delete(filtered, "exec")
+			delete(filtered, "run_skill_script")
+		}
+	}
+	return filtered
+}
+
+func buildSkillRoots(cfg config.Config, bundledDir string) []skills.Root {
+	var roots []skills.Root
+	for _, extra := range cfg.Skills.Load.ExtraDirs {
+		if strings.TrimSpace(extra) == "" {
+			continue
+		}
+		roots = append(roots, skills.Root{Path: extra, Source: skills.SourceExtra})
+	}
+	if strings.TrimSpace(bundledDir) != "" {
+		roots = append(roots, skills.Root{Path: bundledDir, Source: skills.SourceBundled})
+	}
+	if strings.TrimSpace(cfg.Skills.ManagedDir) != "" {
+		roots = append(roots, skills.Root{Path: cfg.Skills.ManagedDir, Source: skills.SourceManaged})
+	}
+	if strings.TrimSpace(cfg.WorkspaceDir) != "" {
+		roots = append(roots,
+			skills.Root{Path: filepath.Join(cfg.WorkspaceDir, "workspace_skills"), Source: skills.SourceExtra, Priority: 35},
+			skills.Root{Path: filepath.Join(cfg.WorkspaceDir, "skills"), Source: skills.SourceWorkspace},
+		)
+	}
+	return roots
+}
+
+func skillEntries(cfg config.Config) map[string]skills.EntryConfig {
+	out := make(map[string]skills.EntryConfig, len(cfg.Skills.Entries))
+	for key, entry := range cfg.Skills.Entries {
+		out[key] = skills.EntryConfig{
+			Enabled: entry.Enabled,
+			APIKey:  entry.APIKey,
+			Env:     entry.Env,
+			Config:  entry.Config,
+		}
+	}
+	return out
+}
+
+func configMap(cfg config.Config) map[string]any {
+	buf, _ := json.Marshal(cfg)
+	out := map[string]any{}
+	_ = json.Unmarshal(buf, &out)
+	return out
+}
+
+func envMap() map[string]string {
+	out := map[string]string{}
+	for _, raw := range os.Environ() {
+		key, value, ok := strings.Cut(raw, "=")
+		if ok {
+			out[key] = value
+		}
+	}
+	return out
+}
+
+func resolveInstallRoot(cfg config.Config) string {
+	installDir := strings.TrimSpace(cfg.Skills.ClawHub.InstallDir)
+	if installDir == "" {
+		installDir = "skills"
+	}
+	if filepath.IsAbs(installDir) {
+		return installDir
+	}
+	if strings.TrimSpace(cfg.Skills.ManagedDir) != "" {
+		return cfg.Skills.ManagedDir
+	}
+	return filepath.Join(filepath.Dir(config.DefaultPath()), installDir)
+}
+
+func availableToolNames(includeCron, includeSubagents bool) map[string]struct{} {
+	names := []string{
+		"exec",
+		"read_file",
+		"write_file",
+		"edit_file",
+		"list_dir",
+		"web_fetch",
+		"web_search",
+		"memory_set_pinned",
+		"memory_add_note",
+		"memory_search",
+		"memory_recent",
+		"memory_get_pinned",
+		"send_message",
+		"read_skill",
+		"run_skill_script",
+	}
+	if includeCron {
+		names = append(names, "cron")
+	}
+	if includeSubagents {
+		names = append(names, "spawn_subagent")
+	}
+	sort.Strings(names)
+	out := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		out[name] = struct{}{}
+	}
+	return out
+}
+
+func newClawHubClient(cfg config.Config) *clawhub.Client {
+	return clawhub.New(cfg.Skills.ClawHub.SiteURL, cfg.Skills.ClawHub.RegistryURL)
+}
+
+func findInstalledSkill(installed []clawhub.InstalledSkill, raw string) (clawhub.InstalledSkill, error) {
+	target := strings.TrimSpace(raw)
+	for _, item := range installed {
+		if item.Name == target || item.Origin.Slug == target {
+			return item, nil
+		}
+	}
+	return clawhub.InstalledSkill{}, fmt.Errorf("installed skill not found: %s", raw)
+}
+
+func printReasons(w io.Writer, label string, values []string) {
+	if len(values) == 0 {
+		return
+	}
+	_, _ = fmt.Fprintf(w, "%s: %s\n", label, strings.Join(values, "; "))
 }
 ````
 
@@ -18787,6 +20183,1233 @@ func decodeJSONMap(raw string) map[string]any {
 }
 ````
 
+## File: internal/skills/skills.go
+````go
+// Package skills discovers, evaluates, and loads skill metadata from multiple roots.
+package skills
+
+import (
+	"crypto/sha1"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
+	"time"
+
+	"or3-intern/internal/clawhub"
+
+	"gopkg.in/yaml.v3"
+)
+
+// SkillEntry describes a declared executable entrypoint from a skill manifest.
+type SkillEntry struct {
+	Name           string   `json:"name"`
+	Command        []string `json:"command"`
+	TimeoutSeconds int      `json:"timeoutSeconds"`
+	AcceptsStdin   bool     `json:"acceptsStdin"`
+}
+
+type Source string
+
+const (
+	// SourceExtra marks skills loaded from explicitly supplied extra roots.
+	SourceExtra Source = "extra"
+	// SourceBundled marks skills that ship with the application.
+	SourceBundled Source = "bundled"
+	// SourceManaged marks skills installed from a remote registry.
+	SourceManaged Source = "managed"
+	// SourceWorkspace marks workspace-local skills.
+	SourceWorkspace Source = "workspace"
+)
+
+// Root describes one filesystem root scanned for skills.
+type Root struct {
+	Path     string
+	Source   Source
+	Label    string
+	Priority int
+}
+
+// EntryConfig applies per-skill runtime configuration overrides.
+type EntryConfig struct {
+	Enabled *bool
+	APIKey  string
+	Env     map[string]string
+	Config  map[string]any
+}
+
+// LoadOptions controls how skill discovery and eligibility evaluation run.
+type LoadOptions struct {
+	Roots          []Root
+	Entries        map[string]EntryConfig
+	GlobalConfig   map[string]any
+	Env            map[string]string
+	AvailableTools map[string]struct{}
+	ApprovalPolicy ApprovalPolicy
+	OS             string
+}
+
+// ApprovalPolicy describes which managed skills are trusted or blocked.
+type ApprovalPolicy struct {
+	QuarantineByDefault bool
+	ApprovedSkills      map[string]struct{}
+	TrustedOwners       map[string]struct{}
+	BlockedOwners       map[string]struct{}
+	TrustedRegistries   map[string]struct{}
+}
+
+// SkillInstallSpec describes one suggested installation route for a dependency.
+type SkillInstallSpec struct {
+	ID      string   `json:"id"`
+	Kind    string   `json:"kind"`
+	Label   string   `json:"label"`
+	Bins    []string `json:"bins"`
+	Formula string   `json:"formula"`
+	Tap     string   `json:"tap"`
+	Package string   `json:"package"`
+	Module  string   `json:"module"`
+	OS      []string `json:"os"`
+	URL     string   `json:"url"`
+}
+
+// NixPluginSpec describes an optional Nix plugin dependency.
+type NixPluginSpec struct {
+	Plugin  string   `json:"plugin"`
+	Systems []string `json:"systems"`
+}
+
+// SkillRequirements lists binary, env, and config prerequisites.
+type SkillRequirements struct {
+	Bins    []string `json:"bins"`
+	AnyBins []string `json:"anyBins"`
+	Env     []string `json:"env"`
+	Config  []string `json:"config"`
+}
+
+// SkillRuntimeMeta captures runtime metadata parsed from skill front matter.
+type SkillRuntimeMeta struct {
+	Always     bool               `json:"always"`
+	SkillKey   string             `json:"skillKey"`
+	PrimaryEnv string             `json:"primaryEnv"`
+	Emoji      string             `json:"emoji"`
+	Homepage   string             `json:"homepage"`
+	OS         []string           `json:"os"`
+	Requires   SkillRequirements  `json:"requires"`
+	Install    []SkillInstallSpec `json:"install"`
+	Nix        *NixPluginSpec     `json:"nix"`
+}
+
+// SkillPermissions describes the requested shell, network, and write permissions.
+type SkillPermissions struct {
+	Shell        bool     `json:"shell" yaml:"shell"`
+	Network      bool     `json:"network" yaml:"network"`
+	Write        bool     `json:"write" yaml:"write"`
+	AllowedPaths []string `json:"paths" yaml:"paths"`
+	AllowedHosts []string `json:"hosts" yaml:"hosts"`
+}
+
+// SkillMeta is the fully merged metadata for one discovered skill.
+type SkillMeta struct {
+	Name        string
+	Description string
+	Homepage    string
+	Path        string
+	Dir         string
+	Location    string
+	Source      Source
+	ModTime     time.Time
+	Size        int64
+	ID          string
+	Summary     string
+	Entrypoints []SkillEntry
+
+	UserInvocable          bool
+	DisableModelInvocation bool
+	CommandDispatch        string
+	CommandTool            string
+	CommandArgMode         string
+
+	Metadata         SkillRuntimeMeta
+	Permissions      SkillPermissions
+	AllowedTools     []string
+	PermissionState  string
+	PermissionNotes  []string
+	Publisher        string
+	Registry         string
+	InstalledVersion string
+	Modified         bool
+	ScanStatus       string
+	ScanFindings     []string
+	Key              string
+	Eligible         bool
+	Disabled         bool
+	Hidden           bool
+	Missing          []string
+	Unsupported      []string
+	ParseError       string
+	RuntimeEnv       map[string]string
+
+	sourcePriority int
+	rootOrder      int
+}
+
+// Inventory is the discovered skill set plus a name index.
+type Inventory struct {
+	Skills []SkillMeta
+	byName map[string]SkillMeta
+}
+
+type skillManifest struct {
+	Summary     string           `json:"summary"`
+	Entrypoints []SkillEntry     `json:"entrypoints"`
+	Tools       []string         `json:"tools"`
+	Permissions SkillPermissions `json:"permissions"`
+}
+
+type skillFrontMatter struct {
+	Name                   string           `yaml:"name"`
+	Description            string           `yaml:"description"`
+	Summary                string           `yaml:"summary"`
+	Homepage               string           `yaml:"homepage"`
+	UserInvocable          *bool            `yaml:"user-invocable"`
+	DisableModelInvocation bool             `yaml:"disable-model-invocation"`
+	CommandDispatch        string           `yaml:"command-dispatch"`
+	CommandTool            string           `yaml:"command-tool"`
+	CommandArgMode         string           `yaml:"command-arg-mode"`
+	Permissions            SkillPermissions `yaml:"permissions"`
+	Metadata               map[string]any   `yaml:"metadata"`
+}
+
+func defaultPriority(source Source) int {
+	switch source {
+	case SourceWorkspace:
+		return 40
+	case SourceManaged:
+		return 30
+	case SourceBundled:
+		return 20
+	default:
+		return 10
+	}
+}
+
+// Scan keeps the simple legacy API for callers that only provide directories.
+func Scan(dirs []string) Inventory {
+	roots := make([]Root, 0, len(dirs))
+	for i, dir := range dirs {
+		roots = append(roots, Root{
+			Path:     dir,
+			Source:   SourceExtra,
+			Label:    dir,
+			Priority: i + 1,
+		})
+	}
+	return ScanWithOptions(LoadOptions{Roots: roots})
+}
+
+// ScanWithOptions discovers skills and evaluates their runtime eligibility.
+func ScanWithOptions(opts LoadOptions) Inventory {
+	if len(opts.Env) == 0 {
+		opts.Env = envMap(os.Environ())
+	}
+	if strings.TrimSpace(opts.OS) == "" {
+		opts.OS = runtime.GOOS
+	}
+
+	metaByName := map[string]SkillMeta{}
+	for i, root := range opts.Roots {
+		root = normalizeRoot(root)
+		if strings.TrimSpace(root.Path) == "" {
+			continue
+		}
+		absRoot, err := filepath.Abs(root.Path)
+		if err != nil {
+			continue
+		}
+		realRoot, err := filepath.EvalSymlinks(absRoot)
+		if err != nil {
+			continue
+		}
+		scanSkillDir(metaByName, realRoot, root, i, opts)
+		_ = filepath.WalkDir(realRoot, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if d.Type()&os.ModeSymlink != 0 {
+				return nil
+			}
+			if !d.IsDir() {
+				return nil
+			}
+			if path == realRoot {
+				return nil
+			}
+			realPath, err := filepath.EvalSymlinks(path)
+			if err != nil {
+				return filepath.SkipDir
+			}
+			rel, err := filepath.Rel(realRoot, realPath)
+			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				return filepath.SkipDir
+			}
+			if scanSkillDir(metaByName, realPath, root, i, opts) {
+				return filepath.SkipDir
+			}
+			return nil
+		})
+	}
+
+	skills := make([]SkillMeta, 0, len(metaByName))
+	for _, s := range metaByName {
+		skills = append(skills, s)
+	}
+	sort.Slice(skills, func(i, j int) bool {
+		if skills[i].Name == skills[j].Name {
+			if skills[i].sourcePriority == skills[j].sourcePriority {
+				return skills[i].Path < skills[j].Path
+			}
+			return skills[i].sourcePriority > skills[j].sourcePriority
+		}
+		return strings.ToLower(skills[i].Name) < strings.ToLower(skills[j].Name)
+	})
+	by := make(map[string]SkillMeta, len(skills))
+	for _, s := range skills {
+		by[s.Name] = s
+		by[strings.ToLower(s.Name)] = s
+	}
+	return Inventory{Skills: skills, byName: by}
+}
+
+func normalizeRoot(root Root) Root {
+	if strings.TrimSpace(root.Label) == "" {
+		root.Label = string(root.Source)
+	}
+	if root.Priority == 0 {
+		root.Priority = defaultPriority(root.Source)
+	}
+	return root
+}
+
+func scanSkillDir(metaByName map[string]SkillMeta, dir string, root Root, order int, opts LoadOptions) bool {
+	skillPath, ok := skillFileInDir(dir)
+	if !ok {
+		return false
+	}
+	meta := loadSkill(dir, skillPath, root, order, opts)
+	current, exists := metaByName[meta.Name]
+	if !exists || shouldOverride(current, meta) {
+		metaByName[meta.Name] = meta
+	}
+	return true
+}
+
+func shouldOverride(current SkillMeta, candidate SkillMeta) bool {
+	if candidate.sourcePriority != current.sourcePriority {
+		return candidate.sourcePriority > current.sourcePriority
+	}
+	if candidate.rootOrder != current.rootOrder {
+		return candidate.rootOrder > current.rootOrder
+	}
+	return candidate.Path > current.Path
+}
+
+func skillFileInDir(dir string) (string, bool) {
+	for _, name := range []string{"SKILL.md", "skill.md"} {
+		path := filepath.Join(dir, name)
+		info, err := os.Lstat(path)
+		if err != nil {
+			continue
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			continue
+		}
+		return path, true
+	}
+	return "", false
+}
+
+func loadSkill(dir, path string, root Root, order int, opts LoadOptions) SkillMeta {
+	info, _ := os.Stat(path)
+	meta := SkillMeta{
+		Name:           filepath.Base(dir),
+		Path:           path,
+		Dir:            dir,
+		Location:       dir,
+		Source:         root.Source,
+		ID:             hash(path),
+		UserInvocable:  true,
+		CommandArgMode: "raw",
+		sourcePriority: root.Priority,
+		rootOrder:      order,
+	}
+	if info != nil {
+		meta.ModTime = info.ModTime()
+		meta.Size = info.Size()
+	}
+
+	body, err := LoadBody(path, 0)
+	if err != nil {
+		meta.ParseError = err.Error()
+		meta.Hidden = true
+		applyApprovalPolicy(&meta, opts.ApprovalPolicy)
+		return meta
+	}
+	fm, rawTop, err := parseFrontMatter(body)
+	if err != nil {
+		meta.ParseError = err.Error()
+		meta.Hidden = true
+		applyApprovalPolicy(&meta, opts.ApprovalPolicy)
+		return meta
+	}
+	if strings.TrimSpace(fm.Name) != "" {
+		meta.Name = strings.TrimSpace(fm.Name)
+	}
+	meta.Description = strings.TrimSpace(firstNonEmpty(fm.Description, fm.Summary))
+	meta.Summary = meta.Description
+	meta.Homepage = strings.TrimSpace(fm.Homepage)
+	if fm.UserInvocable != nil {
+		meta.UserInvocable = *fm.UserInvocable
+	}
+	meta.DisableModelInvocation = fm.DisableModelInvocation
+	meta.Hidden = meta.DisableModelInvocation
+	meta.CommandDispatch = strings.TrimSpace(fm.CommandDispatch)
+	meta.CommandTool = strings.TrimSpace(fm.CommandTool)
+	if strings.TrimSpace(fm.CommandArgMode) != "" {
+		meta.CommandArgMode = strings.TrimSpace(fm.CommandArgMode)
+	}
+	meta.Permissions = normalizeSkillPermissions(fm.Permissions)
+	declaredTools, _ := parseDeclaredTools(rawTop["tools"])
+	meta.AllowedTools = declaredTools
+
+	manifest, err := loadManifest(dir)
+	if err != nil {
+		meta.ParseError = err.Error()
+		meta.Hidden = true
+	} else if len(manifest.Entrypoints) > 0 || len(manifest.Tools) > 0 || manifest.Permissions.Requested() || strings.TrimSpace(manifest.Summary) != "" {
+		meta.Entrypoints = manifest.Entrypoints
+		meta.AllowedTools = mergeStringLists(meta.AllowedTools, compactStrings(manifest.Tools))
+		if requested := normalizeSkillPermissions(manifest.Permissions); requested.Requested() {
+			meta.Permissions = requested
+		}
+		if strings.TrimSpace(manifest.Summary) != "" {
+			meta.Summary = strings.TrimSpace(manifest.Summary)
+		}
+		if meta.Description == "" {
+			meta.Summary = strings.TrimSpace(manifest.Summary)
+			meta.Description = meta.Summary
+		}
+	}
+
+	runtimeMeta, ok := normalizeRuntimeMetadata(fm.Metadata)
+	if ok {
+		meta.Metadata = runtimeMeta
+	}
+	if meta.Homepage == "" {
+		meta.Homepage = strings.TrimSpace(meta.Metadata.Homepage)
+	}
+	if meta.Key == "" {
+		meta.Key = strings.TrimSpace(firstNonEmpty(meta.Metadata.SkillKey, meta.Name))
+	}
+	entry := entryConfigForSkill(opts.Entries, meta)
+	meta.RuntimeEnv = buildRuntimeEnv(meta, entry, opts.Env)
+	applyOriginMetadata(&meta)
+	applyEligibility(&meta, rawTop, body, entry, opts)
+	applyApprovalPolicy(&meta, opts.ApprovalPolicy)
+	return meta
+}
+
+func applyOriginMetadata(meta *SkillMeta) {
+	if meta == nil || strings.TrimSpace(meta.Dir) == "" {
+		return
+	}
+	origin, err := clawhub.ReadOrigin(meta.Dir)
+	if err != nil {
+		if meta.Source == SourceManaged {
+			meta.PermissionNotes = append(meta.PermissionNotes, "managed skill missing origin metadata")
+		}
+		return
+	}
+	meta.Publisher = strings.TrimSpace(origin.Owner)
+	meta.Registry = strings.TrimSpace(origin.Registry)
+	meta.InstalledVersion = strings.TrimSpace(origin.InstalledVersion)
+	meta.ScanStatus = normalizeSupplyChainValue(origin.ScanStatus)
+	for _, finding := range origin.ScanFindings {
+		if summary := strings.TrimSpace(finding.Summary()); summary != "" {
+			meta.ScanFindings = append(meta.ScanFindings, summary)
+		}
+	}
+	if modified, modErr := clawhub.LocalEdits(meta.Dir); modErr == nil {
+		meta.Modified = modified
+	}
+}
+
+func normalizeSkillPermissions(raw SkillPermissions) SkillPermissions {
+	raw.AllowedPaths = compactStrings(raw.AllowedPaths)
+	raw.AllowedHosts = compactStrings(raw.AllowedHosts)
+	return raw
+}
+
+func (p SkillPermissions) Requested() bool {
+	return p.Shell || p.Network || p.Write || len(p.AllowedPaths) > 0 || len(p.AllowedHosts) > 0
+}
+
+func parseDeclaredTools(raw any) ([]string, bool) {
+	switch value := raw.(type) {
+	case nil:
+		return nil, true
+	case []string:
+		return compactStrings(value), true
+	case []any:
+		out := make([]string, 0, len(value))
+		for _, item := range value {
+			name, ok := item.(string)
+			if !ok {
+				return nil, false
+			}
+			name = strings.TrimSpace(name)
+			if name == "" {
+				continue
+			}
+			out = append(out, name)
+		}
+		return compactStrings(out), true
+	default:
+		return nil, false
+	}
+}
+
+func (p SkillPermissions) Summary() string {
+	parts := make([]string, 0, 5)
+	if p.Shell {
+		parts = append(parts, "shell")
+	}
+	if p.Network {
+		parts = append(parts, "network")
+	}
+	if p.Write {
+		parts = append(parts, "write")
+	}
+	if len(p.AllowedPaths) > 0 {
+		parts = append(parts, "paths="+strings.Join(p.AllowedPaths, ","))
+	}
+	if len(p.AllowedHosts) > 0 {
+		parts = append(parts, "hosts="+strings.Join(p.AllowedHosts, ","))
+	}
+	if len(parts) == 0 {
+		return "(none declared)"
+	}
+	return strings.Join(parts, "; ")
+}
+
+func applyApprovalPolicy(meta *SkillMeta, policy ApprovalPolicy) {
+	if meta == nil {
+		return
+	}
+	if meta.ParseError != "" {
+		meta.PermissionState = "blocked"
+		meta.PermissionNotes = append(meta.PermissionNotes, "metadata parse failed")
+		return
+	}
+	if ownerBlocked(meta, policy.BlockedOwners) {
+		meta.PermissionState = "blocked"
+		meta.PermissionNotes = append(meta.PermissionNotes, "publisher blocked by policy: "+meta.Publisher)
+		return
+	}
+	if strings.EqualFold(meta.ScanStatus, "blocked") {
+		meta.PermissionState = "blocked"
+		meta.PermissionNotes = append(meta.PermissionNotes, "install-time scan blocked this bundle")
+		meta.PermissionNotes = append(meta.PermissionNotes, meta.ScanFindings...)
+		return
+	}
+	if meta.Modified {
+		meta.PermissionState = "quarantined"
+		meta.PermissionNotes = append(meta.PermissionNotes, "local modifications detected since install")
+		return
+	}
+	if strings.EqualFold(meta.ScanStatus, "quarantined") {
+		meta.PermissionState = "quarantined"
+		meta.PermissionNotes = append(meta.PermissionNotes, "install-time scan flagged this bundle for review")
+		meta.PermissionNotes = append(meta.PermissionNotes, meta.ScanFindings...)
+		return
+	}
+	trustedPublisher := publisherTrusted(meta, policy)
+	if skillApproved(meta, policy.ApprovedSkills) || trustedPublisher {
+		meta.PermissionState = "approved"
+		if trustedPublisher {
+			meta.PermissionNotes = append(meta.PermissionNotes, "approved by trusted publisher policy")
+		} else {
+			meta.PermissionNotes = append(meta.PermissionNotes, "approved in config")
+		}
+		return
+	}
+	if meta.Source == SourceManaged && skillNeedsApproval(meta) {
+		if strings.TrimSpace(meta.Registry) == "" || strings.TrimSpace(meta.Publisher) == "" {
+			meta.PermissionState = "quarantined"
+			meta.PermissionNotes = append(meta.PermissionNotes, "managed skill is missing trusted origin details")
+			return
+		}
+		if len(policy.TrustedOwners) > 0 || len(policy.TrustedRegistries) > 0 {
+			meta.PermissionState = "quarantined"
+			meta.PermissionNotes = append(meta.PermissionNotes, "publisher or registry is not trusted by policy")
+			return
+		}
+	}
+	if skillNeedsApproval(meta) {
+		meta.PermissionState = "quarantined"
+		meta.PermissionNotes = append(meta.PermissionNotes, "operator approval required before script execution")
+		return
+	}
+	meta.PermissionState = "approved"
+}
+
+func ownerBlocked(meta *SkillMeta, blocked map[string]struct{}) bool {
+	if meta == nil || len(blocked) == 0 {
+		return false
+	}
+	_, ok := blocked[normalizeSupplyChainValue(meta.Publisher)]
+	return ok
+}
+
+func publisherTrusted(meta *SkillMeta, policy ApprovalPolicy) bool {
+	if meta == nil {
+		return false
+	}
+	anyPolicy := len(policy.TrustedOwners) > 0 || len(policy.TrustedRegistries) > 0
+	if !anyPolicy {
+		return false
+	}
+	if len(policy.TrustedOwners) > 0 {
+		if _, ok := policy.TrustedOwners[normalizeSupplyChainValue(meta.Publisher)]; !ok {
+			return false
+		}
+	}
+	if len(policy.TrustedRegistries) > 0 {
+		if _, ok := policy.TrustedRegistries[normalizeSupplyChainValue(meta.Registry)]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeSupplyChainValue(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	value = strings.TrimRight(value, "/")
+	return value
+}
+
+func skillNeedsApproval(meta *SkillMeta) bool {
+	if meta == nil {
+		return false
+	}
+	if meta.Permissions.Requested() || len(meta.Entrypoints) > 0 {
+		return true
+	}
+	return skillHasRunnableContent(meta.Dir)
+}
+
+func skillApproved(meta *SkillMeta, approved map[string]struct{}) bool {
+	if meta == nil || len(approved) == 0 {
+		return false
+	}
+	for _, key := range []string{meta.Name, meta.Key, strings.ToLower(meta.Name), strings.ToLower(meta.Key)} {
+		if _, ok := approved[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func loadManifest(dir string) (skillManifest, error) {
+	manifestPath := filepath.Join(dir, "skill.json")
+	info, err := os.Lstat(manifestPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return skillManifest{}, nil
+		}
+		return skillManifest{}, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return skillManifest{}, fs.ErrPermission
+	}
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return skillManifest{}, err
+	}
+	var m skillManifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		return skillManifest{}, fmt.Errorf("invalid skill manifest: %w", err)
+	}
+	return m, nil
+}
+
+func parseFrontMatter(content string) (skillFrontMatter, map[string]any, error) {
+	block, ok, err := frontMatterBlock(content)
+	if err != nil {
+		return skillFrontMatter{}, nil, err
+	}
+	if !ok {
+		return skillFrontMatter{}, map[string]any{}, nil
+	}
+	var raw map[string]any
+	if err := yaml.Unmarshal([]byte(block), &raw); err != nil {
+		return skillFrontMatter{}, nil, fmt.Errorf("invalid frontmatter: %w", err)
+	}
+	raw = toStringMap(raw)
+	var fm skillFrontMatter
+	if err := yaml.Unmarshal([]byte(block), &fm); err != nil {
+		return skillFrontMatter{}, nil, fmt.Errorf("invalid frontmatter: %w", err)
+	}
+	fm.Metadata = toStringMap(fm.Metadata)
+	return fm, raw, nil
+}
+
+func frontMatterBlock(content string) (string, bool, error) {
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	if !strings.HasPrefix(content, "---\n") {
+		return "", false, nil
+	}
+	rest := content[len("---\n"):]
+	end := strings.Index(rest, "\n---")
+	if end < 0 {
+		return "", false, fmt.Errorf("invalid frontmatter: missing closing delimiter")
+	}
+	block := rest[:end]
+	return block, true, nil
+}
+
+func extractFrontMatterSummary(content string) string {
+	fm, _, err := parseFrontMatter(content)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(firstNonEmpty(fm.Summary, fm.Description))
+}
+
+func normalizeRuntimeMetadata(raw map[string]any) (SkillRuntimeMeta, bool) {
+	if len(raw) == 0 {
+		return SkillRuntimeMeta{}, false
+	}
+	var selected any
+	for _, key := range []string{"openclaw", "clawdbot", "clawdis"} {
+		if value, ok := raw[key]; ok {
+			selected = value
+			break
+		}
+	}
+	if selected == nil {
+		return SkillRuntimeMeta{}, false
+	}
+	buf, err := json.Marshal(toStringMap(selected))
+	if err != nil {
+		return SkillRuntimeMeta{}, false
+	}
+	var meta SkillRuntimeMeta
+	if err := json.Unmarshal(buf, &meta); err != nil {
+		return SkillRuntimeMeta{}, false
+	}
+	return meta, true
+}
+
+func applyEligibility(meta *SkillMeta, rawTop map[string]any, body string, entry EntryConfig, opts LoadOptions) {
+	if meta == nil {
+		return
+	}
+	if meta.ParseError != "" {
+		meta.Eligible = false
+		return
+	}
+	meta.Disabled = entry.Enabled != nil && !*entry.Enabled
+	if meta.Disabled {
+		meta.Missing = append(meta.Missing, "disabled in config")
+	}
+	meta.Unsupported = append(meta.Unsupported, detectUnsupported(*meta, rawTop, body, opts)...)
+	if meta.Metadata.Always && !meta.Disabled && len(meta.Unsupported) == 0 {
+		meta.Eligible = true
+		return
+	}
+	if len(meta.Metadata.OS) > 0 && !containsFold(meta.Metadata.OS, opts.OS) {
+		meta.Missing = append(meta.Missing, fmt.Sprintf("os mismatch: requires %s", strings.Join(meta.Metadata.OS, ", ")))
+	}
+	for _, bin := range meta.Metadata.Requires.Bins {
+		if !hasBinary(bin) {
+			meta.Missing = append(meta.Missing, "missing binary: "+bin)
+		}
+	}
+	if len(meta.Metadata.Requires.AnyBins) > 0 {
+		ok := false
+		for _, bin := range meta.Metadata.Requires.AnyBins {
+			if hasBinary(bin) {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			meta.Missing = append(meta.Missing, "missing any-of binary: "+strings.Join(meta.Metadata.Requires.AnyBins, ", "))
+		}
+	}
+	for _, envName := range meta.Metadata.Requires.Env {
+		if strings.TrimSpace(meta.RuntimeEnv[envName]) == "" {
+			meta.Missing = append(meta.Missing, "missing env: "+envName)
+		}
+	}
+	for _, key := range meta.Metadata.Requires.Config {
+		if !configTruthy(opts.GlobalConfig, entry.Config, key) {
+			meta.Missing = append(meta.Missing, "missing config: "+key)
+		}
+	}
+	meta.Eligible = !meta.Disabled && len(meta.Missing) == 0 && len(meta.Unsupported) == 0
+}
+
+func detectUnsupported(meta SkillMeta, rawTop map[string]any, body string, opts LoadOptions) []string {
+	var unsupported []string
+	if _, ok := rawTop["tools"]; ok {
+		if _, valid := parseDeclaredTools(rawTop["tools"]); !valid {
+			unsupported = append(unsupported, "frontmatter tools must be a list of string tool names")
+		}
+	}
+	if meta.Metadata.Nix != nil && strings.TrimSpace(meta.Metadata.Nix.Plugin) != "" {
+		unsupported = append(unsupported, "requires nix plugin: "+meta.Metadata.Nix.Plugin)
+	}
+	for _, toolName := range meta.AllowedTools {
+		if len(opts.AvailableTools) == 0 {
+			continue
+		}
+		if _, ok := opts.AvailableTools[toolName]; !ok {
+			unsupported = append(unsupported, "requires unsupported tool: "+toolName)
+		}
+	}
+	if meta.CommandDispatch != "" && meta.CommandDispatch != "tool" {
+		unsupported = append(unsupported, "unsupported command-dispatch: "+meta.CommandDispatch)
+	}
+	if meta.CommandDispatch == "tool" {
+		if meta.CommandTool == "" {
+			unsupported = append(unsupported, "command-dispatch tool requires command-tool")
+		} else if len(opts.AvailableTools) > 0 {
+			if _, ok := opts.AvailableTools[meta.CommandTool]; !ok {
+				unsupported = append(unsupported, "requires unsupported tool: "+meta.CommandTool)
+			}
+		}
+	}
+	if strings.Contains(body, "nodes.run") {
+		unsupported = append(unsupported, "requires unsupported tool: nodes.run")
+	}
+	return unsupported
+}
+
+func mergeStringLists(base []string, extra []string) []string {
+	out := append([]string{}, compactStrings(base)...)
+	seen := map[string]struct{}{}
+	for _, item := range out {
+		seen[item] = struct{}{}
+	}
+	for _, item := range compactStrings(extra) {
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		out = append(out, item)
+	}
+	return out
+}
+
+func buildRuntimeEnv(meta SkillMeta, entry EntryConfig, baseEnv map[string]string) map[string]string {
+	out := copyMap(baseEnv)
+	for k, v := range entry.Env {
+		if strings.TrimSpace(k) == "" || strings.TrimSpace(v) == "" {
+			continue
+		}
+		if strings.TrimSpace(out[k]) == "" {
+			out[k] = v
+		}
+	}
+	if meta.Metadata.PrimaryEnv != "" && strings.TrimSpace(entry.APIKey) != "" && strings.TrimSpace(out[meta.Metadata.PrimaryEnv]) == "" {
+		out[meta.Metadata.PrimaryEnv] = entry.APIKey
+	}
+	return out
+}
+
+func entryConfigForSkill(entries map[string]EntryConfig, meta SkillMeta) EntryConfig {
+	if len(entries) == 0 {
+		return EntryConfig{}
+	}
+	if entry, ok := entries[meta.Key]; ok {
+		return entry
+	}
+	return entries[meta.Name]
+}
+
+func (inv Inventory) Get(name string) (SkillMeta, bool) {
+	if strings.TrimSpace(name) == "" {
+		return SkillMeta{}, false
+	}
+	if s, ok := inv.byName[name]; ok {
+		return s, true
+	}
+	s, ok := inv.byName[strings.ToLower(name)]
+	return s, ok
+}
+
+func (inv Inventory) Summary(max int) string {
+	return summarize(inv.Skills, max)
+}
+
+func (inv Inventory) ModelSummary(max int) string {
+	filtered := make([]SkillMeta, 0, len(inv.Skills))
+	for _, skill := range inv.Skills {
+		if !skill.Eligible || skill.Hidden {
+			continue
+		}
+		filtered = append(filtered, skill)
+	}
+	if len(filtered) == 0 {
+		return "(no eligible skills found)"
+	}
+	if max <= 0 {
+		max = 50
+	}
+	lines := make([]string, 0, min(len(filtered), max)+1)
+	for i, skill := range filtered {
+		if i >= max {
+			lines = append(lines, "…")
+			break
+		}
+		desc := strings.TrimSpace(skill.Description)
+		if desc == "" {
+			desc = strings.TrimSpace(skill.Summary)
+		}
+		location := strings.TrimSpace(skill.Location)
+		if location == "" {
+			location = skill.Dir
+		}
+		lines = append(lines, fmt.Sprintf("- %s | %s | %s", skill.Name, oneLine(desc, 140), location))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func summarize(skills []SkillMeta, max int) string {
+	if max <= 0 {
+		max = 50
+	}
+	lines := []string{}
+	for i, s := range skills {
+		if i >= max {
+			lines = append(lines, "…")
+			break
+		}
+		desc := strings.TrimSpace(firstNonEmpty(s.Description, s.Summary))
+		if desc == "" {
+			lines = append(lines, "- "+s.Name)
+			continue
+		}
+		lines = append(lines, "- "+s.Name+": "+oneLine(desc, 140))
+	}
+	if len(lines) == 0 {
+		return "(no skills found)"
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (inv Inventory) RunEnv() map[string]string {
+	out := map[string]string{}
+	for _, skill := range inv.Skills {
+		if !skill.Eligible {
+			continue
+		}
+		for k, v := range filteredRuntimeEnv(skill.RuntimeEnv) {
+			if _, exists := out[k]; !exists {
+				out[k] = v
+			}
+		}
+	}
+	return out
+}
+
+func (inv Inventory) RunEnvForSkill(name string) map[string]string {
+	skill, ok := inv.Get(name)
+	if !ok || !skill.Eligible {
+		return nil
+	}
+	return filteredRuntimeEnv(skill.RuntimeEnv)
+}
+
+func (inv Inventory) ResolveBundlePath(name, relPath string) (string, error) {
+	skill, ok := inv.Get(name)
+	if !ok {
+		return "", fmt.Errorf("skill not found: %s", name)
+	}
+	root, err := filepath.EvalSymlinks(skill.Dir)
+	if err != nil {
+		return "", err
+	}
+	relPath = strings.TrimSpace(relPath)
+	if relPath == "" {
+		return root, nil
+	}
+	if filepath.IsAbs(relPath) {
+		return "", fmt.Errorf("bundle path must be relative")
+	}
+	full := filepath.Join(root, relPath)
+	clean := filepath.Clean(full)
+	real, err := filepath.EvalSymlinks(clean)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		real = clean
+	}
+	rel, err := filepath.Rel(root, real)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fs.ErrPermission
+	}
+	return real, nil
+}
+
+func LoadBody(path string, maxBytes int) (string, error) {
+	if maxBytes <= 0 {
+		maxBytes = 200000
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return "", fs.ErrPermission
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	if len(b) > maxBytes {
+		b = b[:maxBytes]
+	}
+	return string(b), nil
+}
+
+func hash(s string) string {
+	h := sha1.Sum([]byte(s))
+	return hex.EncodeToString(h[:8])
+}
+
+func hasBinary(name string) bool {
+	if strings.TrimSpace(name) == "" {
+		return false
+	}
+	_, err := exec.LookPath(name)
+	return err == nil
+}
+
+func configTruthy(global map[string]any, skill map[string]any, path string) bool {
+	if truthy(lookupPath(global, path)) {
+		return true
+	}
+	return truthy(lookupPath(skill, path))
+}
+
+func lookupPath(root map[string]any, path string) any {
+	if len(root) == 0 || strings.TrimSpace(path) == "" {
+		return nil
+	}
+	var current any = root
+	for _, part := range strings.Split(path, ".") {
+		m, ok := current.(map[string]any)
+		if !ok {
+			return nil
+		}
+		current, ok = m[part]
+		if !ok {
+			return nil
+		}
+	}
+	return current
+}
+
+func truthy(v any) bool {
+	switch val := v.(type) {
+	case nil:
+		return false
+	case bool:
+		return val
+	case string:
+		return strings.TrimSpace(val) != ""
+	case float64:
+		return val != 0
+	case int:
+		return val != 0
+	case []any:
+		return len(val) > 0
+	case map[string]any:
+		return len(val) > 0
+	default:
+		return true
+	}
+}
+
+func envMap(values []string) map[string]string {
+	out := make(map[string]string, len(values))
+	for _, raw := range values {
+		key, value, ok := strings.Cut(raw, "=")
+		if !ok {
+			continue
+		}
+		out[key] = value
+	}
+	return out
+}
+
+func toStringMap(v any) map[string]any {
+	switch val := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(val))
+		for k, child := range val {
+			out[k] = normalizeValue(child)
+		}
+		return out
+	case map[any]any:
+		out := make(map[string]any, len(val))
+		for k, child := range val {
+			out[fmt.Sprint(k)] = normalizeValue(child)
+		}
+		return out
+	default:
+		return map[string]any{}
+	}
+}
+
+func normalizeValue(v any) any {
+	switch val := v.(type) {
+	case map[string]any, map[any]any:
+		return toStringMap(val)
+	case []any:
+		out := make([]any, 0, len(val))
+		for _, item := range val {
+			out = append(out, normalizeValue(item))
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+func copyMap(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func filteredRuntimeEnv(env map[string]string) map[string]string {
+	out := map[string]string{}
+	for k, v := range env {
+		if strings.TrimSpace(k) == "" || strings.TrimSpace(v) == "" {
+			continue
+		}
+		if strings.TrimSpace(os.Getenv(k)) != "" {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+func compactStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		key := strings.ToLower(value)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
+func skillHasRunnableContent(dir string) bool {
+	if strings.TrimSpace(dir) == "" {
+		return false
+	}
+	found := false
+	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || found {
+			return fs.SkipAll
+		}
+		if path == dir {
+			return nil
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		name := strings.ToLower(strings.TrimSpace(d.Name()))
+		if name == "skill.md" || name == "skill.json" {
+			return nil
+		}
+		info, infoErr := d.Info()
+		if infoErr != nil || !info.Mode().IsRegular() {
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(name))
+		if info.Mode()&0o111 != 0 || ext == ".sh" || ext == ".py" {
+			found = true
+			return fs.SkipAll
+		}
+		return nil
+	})
+	return found
+}
+
+func containsFold(values []string, target string) bool {
+	for _, value := range values {
+		if strings.EqualFold(strings.TrimSpace(value), strings.TrimSpace(target)) {
+			return true
+		}
+	}
+	return false
+}
+
+func oneLine(s string, max int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.Join(strings.Fields(s), " ")
+	if max > 0 && len(s) > max {
+		s = s[:max] + "…"
+	}
+	return s
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+````
+
 ## File: internal/tools/exec.go
 ````go
 package tools
@@ -19138,529 +21761,605 @@ func firstRequester(actor string) string {
 }
 ````
 
-## File: cmd/or3-intern/skills_cmd.go
+## File: cmd/or3-intern/approvals_cmd.go
 ````go
 package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
-	"log"
-	"os"
-	"path/filepath"
-	"sort"
+	"strconv"
 	"strings"
 
-	"or3-intern/internal/clawhub"
-	"or3-intern/internal/config"
-	"or3-intern/internal/mcp"
-	"or3-intern/internal/skills"
+	"or3-intern/internal/app"
+	"or3-intern/internal/approval"
+	"or3-intern/internal/controlplane"
+	"or3-intern/internal/uxstate"
 )
 
-type skillsCommandDeps struct {
-	Client        *clawhub.Client
-	LoadToolNames func(context.Context, config.Config) map[string]struct{}
-	LoadInventory func(toolNames map[string]struct{}) skills.Inventory
-	Audit         func(context.Context, string, any) error
-	Stdout        io.Writer
-	Stderr        io.Writer
+func runApprovalsCommand(ctx context.Context, broker *approval.Broker, args []string, stdout, stderr io.Writer) error {
+	if broker == nil {
+		return fmt.Errorf("approval broker is not configured")
+	}
+	appSvc := app.NewServiceApp(nil, nil, nil, newCLIControlplane(broker))
+	if len(args) == 0 {
+		return fmt.Errorf("usage: approvals <list|show|approve|deny|cancel|expire|allowlist>")
+	}
+	switch strings.ToLower(strings.TrimSpace(args[0])) {
+	case "list":
+		if err := requireArgRange(args[1:], 0, 1, "approvals list [status]"); err != nil {
+			return err
+		}
+		status := ""
+		if len(args) > 1 {
+			status = strings.TrimSpace(args[1])
+		}
+		items, err := appSvc.ListApprovalRequests(ctx, controlplane.ApprovalFilter{Status: status, Limit: 100})
+		if err != nil {
+			return err
+		}
+		for _, item := range items {
+			view := uxstate.BuildApprovalPrompt(item)
+			fmt.Fprintf(stdout, "%d\t%s\t%s\t%s\n", item.ID, item.Status, item.Type, item.SubjectHash)
+			fmt.Fprintf(stdout, "  %s: %s\n", view.Title, view.ActionSummary)
+		}
+		return nil
+	case "show":
+		if err := requireExactArgs(args[1:], 1, "approvals show <id>"); err != nil {
+			return err
+		}
+		id, err := strconv.ParseInt(strings.TrimSpace(args[1]), 10, 64)
+		if err != nil {
+			return fmt.Errorf("invalid approval ID")
+		}
+		item, err := appSvc.GetApproval(ctx, id)
+		if err != nil {
+			return err
+		}
+		view := uxstate.BuildApprovalPrompt(item)
+		_, _ = fmt.Fprintf(stdout, "id: %d\nstatus: %s\ntype: %s\nsummary: %s\nrisk: %s\nwhy: %s\nsubject_hash: %s\npolicy_mode: %s\nsubject_json: %s\n", item.ID, item.Status, item.Type, view.ActionSummary, view.RiskLabel, view.Why, item.SubjectHash, item.PolicyMode, item.SubjectJSON)
+		return nil
+	case "approve":
+		fs := flag.NewFlagSet("approvals approve", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		alwaysAllow := fs.Bool("allowlist", false, "create a matching allowlist rule")
+		note := fs.String("note", "", "resolution note")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if err := requireExactFlagArgs(fs, 1, "approvals approve <id> [--allowlist] [--note text]"); err != nil {
+			return err
+		}
+		id, err := strconv.ParseInt(strings.TrimSpace(fs.Arg(0)), 10, 64)
+		if err != nil {
+			return fmt.Errorf("invalid approval ID")
+		}
+		issued, err := appSvc.ApproveApproval(ctx, id, "cli", *alwaysAllow, *note)
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(stdout, "approved %d\ntoken: %s\n", id, issued.Token)
+		if issued.AllowlistID > 0 {
+			_, _ = fmt.Fprintf(stdout, "allowlist_id: %d\n", issued.AllowlistID)
+		}
+		return nil
+	case "deny":
+		fs := flag.NewFlagSet("approvals deny", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		note := fs.String("note", "", "resolution note")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if err := requireExactFlagArgs(fs, 1, "approvals deny <id> [--note text]"); err != nil {
+			return err
+		}
+		id, err := strconv.ParseInt(strings.TrimSpace(fs.Arg(0)), 10, 64)
+		if err != nil {
+			return fmt.Errorf("invalid approval ID")
+		}
+		if err := appSvc.DenyApproval(ctx, id, "cli", *note); err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(stdout, "denied %d\n", id)
+		return nil
+	case "cancel":
+		fs := flag.NewFlagSet("approvals cancel", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		note := fs.String("note", "", "resolution note")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if err := requireExactFlagArgs(fs, 1, "approvals cancel <id> [--note text]"); err != nil {
+			return err
+		}
+		id, err := strconv.ParseInt(strings.TrimSpace(fs.Arg(0)), 10, 64)
+		if err != nil {
+			return fmt.Errorf("invalid approval ID")
+		}
+		if err := appSvc.CancelApproval(ctx, id, "cli", *note); err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(stdout, "canceled %d\n", id)
+		return nil
+	case "expire":
+		if err := requireExactArgs(args[1:], 0, "approvals expire"); err != nil {
+			return err
+		}
+		expired, err := appSvc.ExpireApprovals(ctx, "cli")
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(stdout, "expired %d pending request(s)\n", expired)
+		return nil
+	case "allowlist":
+		return runApprovalAllowlistCommand(ctx, appSvc, broker.HostID, args[1:], stdout, stderr)
+	default:
+		return fmt.Errorf("unknown approvals subcommand: %s", args[0])
+	}
 }
 
-func runSkillsCommandWithDeps(ctx context.Context, cfg config.Config, args []string, deps skillsCommandDeps) error {
-	if deps.Client == nil {
-		deps.Client = newClawHubClient(cfg)
-	}
-	if deps.LoadToolNames == nil {
-		deps.LoadToolNames = func(ctx context.Context, cfg config.Config) map[string]struct{} {
-			return loadAvailableToolNamesWithManager(ctx, cfg, nil)
-		}
-	}
-	if deps.LoadInventory == nil {
-		return fmt.Errorf("skills inventory loader not configured")
-	}
-	if deps.Stdout == nil {
-		deps.Stdout = os.Stdout
-	}
-	if deps.Stderr == nil {
-		deps.Stderr = os.Stderr
-	}
+func runApprovalAllowlistCommand(ctx context.Context, appSvc *app.ServiceApp, defaultHostID string, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: or3-intern skills <list|info|check|search|install|update|remove> ...")
+		return fmt.Errorf("usage: approvals allowlist <list|add|remove>")
 	}
-
-	switch args[0] {
+	switch strings.ToLower(strings.TrimSpace(args[0])) {
 	case "list":
-		fs := flag.NewFlagSet("skills list", flag.ContinueOnError)
-		fs.SetOutput(deps.Stderr)
-		eligibleOnly := fs.Bool("eligible", false, "show only eligible skills")
-		if err := fs.Parse(args[1:]); err != nil {
+		if err := requireArgRange(args[1:], 0, 1, "approvals allowlist list [domain]"); err != nil {
 			return err
 		}
-		if err := requireExactFlagArgs(fs, 0, "or3-intern skills list [--eligible]"); err != nil {
-			return err
+		domain := ""
+		if len(args) > 1 {
+			domain = strings.TrimSpace(args[1])
 		}
-		inv := deps.LoadInventory(deps.LoadToolNames(ctx, cfg))
-		if len(inv.Skills) == 0 {
-			_, _ = fmt.Fprintln(deps.Stdout, "(no skills found)")
-			return nil
-		}
-		for _, skill := range inv.Skills {
-			if *eligibleOnly && !skill.Eligible {
-				continue
-			}
-			status := "eligible"
-			switch {
-			case skill.ParseError != "":
-				status = "parse-error"
-			case skill.Disabled:
-				status = "disabled"
-			case !skill.Eligible:
-				status = "ineligible"
-			case skill.Hidden:
-				status = "hidden"
-			}
-			permissionState := strings.TrimSpace(skill.PermissionState)
-			if permissionState == "" {
-				permissionState = "approved"
-			}
-			_, _ = fmt.Fprintf(deps.Stdout, "%s\t%s\t%s\t%s\t%s\n", skill.Name, status, permissionState, skill.Source, skill.Dir)
-		}
-		return nil
-	case "info":
-		if err := requireExactArgs(args[1:], 1, "or3-intern skills info <name>"); err != nil {
-			return err
-		}
-		inv := deps.LoadInventory(deps.LoadToolNames(ctx, cfg))
-		skill, ok := inv.Get(args[1])
-		if !ok {
-			return fmt.Errorf("skill not found: %s", args[1])
-		}
-		_, _ = fmt.Fprintf(deps.Stdout, "Name: %s\n", skill.Name)
-		_, _ = fmt.Fprintf(deps.Stdout, "Description: %s\n", skill.Description)
-		_, _ = fmt.Fprintf(deps.Stdout, "Source: %s\n", skill.Source)
-		_, _ = fmt.Fprintf(deps.Stdout, "Location: %s\n", skill.Dir)
-		if skill.Homepage != "" {
-			_, _ = fmt.Fprintf(deps.Stdout, "Homepage: %s\n", skill.Homepage)
-		}
-		_, _ = fmt.Fprintf(deps.Stdout, "Eligible: %t\n", skill.Eligible)
-		_, _ = fmt.Fprintf(deps.Stdout, "User Invocable: %t\n", skill.UserInvocable)
-		if skill.Publisher != "" {
-			_, _ = fmt.Fprintf(deps.Stdout, "Publisher: %s\n", skill.Publisher)
-		}
-		if skill.Registry != "" {
-			_, _ = fmt.Fprintf(deps.Stdout, "Registry: %s\n", skill.Registry)
-		}
-		if skill.InstalledVersion != "" {
-			_, _ = fmt.Fprintf(deps.Stdout, "Installed Version: %s\n", skill.InstalledVersion)
-		}
-		if skill.Modified {
-			_, _ = fmt.Fprintln(deps.Stdout, "Local Modifications: true")
-		}
-		if strings.TrimSpace(skill.ScanStatus) != "" {
-			_, _ = fmt.Fprintf(deps.Stdout, "Scan Status: %s\n", skill.ScanStatus)
-			printReasons(deps.Stdout, "Scan Findings", skill.ScanFindings)
-		}
-		if strings.TrimSpace(skill.PermissionState) != "" {
-			_, _ = fmt.Fprintf(deps.Stdout, "Permission State: %s\n", skill.PermissionState)
-			_, _ = fmt.Fprintf(deps.Stdout, "Declared Permissions: %s\n", skill.Permissions.Summary())
-			printReasons(deps.Stdout, "Permission Notes", skill.PermissionNotes)
-		}
-		if skill.Hidden {
-			_, _ = fmt.Fprintln(deps.Stdout, "Model Visibility: hidden")
-		}
-		if skill.CommandDispatch != "" {
-			_, _ = fmt.Fprintf(deps.Stdout, "Command Dispatch: %s\n", skill.CommandDispatch)
-			_, _ = fmt.Fprintf(deps.Stdout, "Command Tool: %s\n", skill.CommandTool)
-			_, _ = fmt.Fprintf(deps.Stdout, "Command Arg Mode: %s\n", skill.CommandArgMode)
-		}
-		printReasons(deps.Stdout, "Missing", skill.Missing)
-		printReasons(deps.Stdout, "Unsupported", skill.Unsupported)
-		if skill.ParseError != "" {
-			_, _ = fmt.Fprintf(deps.Stdout, "Parse Error: %s\n", skill.ParseError)
-		}
-		return nil
-	case "check":
-		if err := requireExactArgs(args[1:], 0, "or3-intern skills check"); err != nil {
-			return err
-		}
-		inv := deps.LoadInventory(deps.LoadToolNames(ctx, cfg))
-		if len(inv.Skills) == 0 {
-			_, _ = fmt.Fprintln(deps.Stdout, "(no skills found)")
-			return nil
-		}
-		for _, skill := range inv.Skills {
-			if skill.PermissionState == "quarantined" {
-				_, _ = fmt.Fprintf(deps.Stdout, "[quarantined] %s: %s\n", skill.Name, strings.Join(skill.PermissionNotes, "; "))
-				continue
-			}
-			if skill.PermissionState == "blocked" {
-				reasons := append([]string{}, skill.PermissionNotes...)
-				reasons = append(reasons, skill.Missing...)
-				reasons = append(reasons, skill.Unsupported...)
-				if skill.ParseError != "" {
-					reasons = append(reasons, skill.ParseError)
-				}
-				_, _ = fmt.Fprintf(deps.Stdout, "[blocked] %s: %s\n", skill.Name, strings.Join(reasons, "; "))
-				continue
-			}
-			if skill.Eligible {
-				_, _ = fmt.Fprintf(deps.Stdout, "[ok] %s\n", skill.Name)
-				continue
-			}
-			reasons := append([]string{}, skill.Missing...)
-			reasons = append(reasons, skill.Unsupported...)
-			if skill.ParseError != "" {
-				reasons = append(reasons, skill.ParseError)
-			}
-			_, _ = fmt.Fprintf(deps.Stdout, "[blocked] %s: %s\n", skill.Name, strings.Join(reasons, "; "))
-		}
-		return nil
-	case "search":
-		if len(args) < 2 {
-			return fmt.Errorf("usage: or3-intern skills search <query>")
-		}
-		results, err := deps.Client.Search(ctx, strings.Join(args[1:], " "), 10)
+		items, err := appSvc.ListAllowlists(ctx, domain, 100)
 		if err != nil {
 			return err
 		}
-		if len(results) == 0 {
-			_, _ = fmt.Fprintln(deps.Stdout, "(no results)")
-			return nil
-		}
-		for _, result := range results {
-			version := result.Version
-			if version == "" {
-				version = "latest"
-			}
-			_, _ = fmt.Fprintf(deps.Stdout, "%s\t%s\t%s\n", result.Slug, version, strings.TrimSpace(result.DisplayName))
-		}
-		return nil
-	case "install":
-		fs := flag.NewFlagSet("skills install", flag.ContinueOnError)
-		fs.SetOutput(deps.Stderr)
-		version := fs.String("version", "", "skill version")
-		force := fs.Bool("force", false, "overwrite local modifications")
-		if err := fs.Parse(args[1:]); err != nil {
-			return err
-		}
-		if err := requireExactFlagArgs(fs, 1, "or3-intern skills install <slug> [--version v]"); err != nil {
-			return err
-		}
-		result, err := deps.Client.Install(ctx, fs.Arg(0), *version, resolveInstallRoot(cfg), clawhub.InstallOptions{Force: *force})
-		if err != nil {
-			return err
-		}
-		if deps.Audit != nil {
-			if err := deps.Audit(ctx, "skill.install", map[string]any{"slug": result.Slug, "version": result.Version, "path": result.Path}); err != nil {
-				return err
-			}
-		}
-		_, _ = fmt.Fprintf(deps.Stdout, "installed\t%s\t%s\t%s\n", result.Slug, result.Version, result.Path)
-		return nil
-	case "update":
-		fs := flag.NewFlagSet("skills update", flag.ContinueOnError)
-		fs.SetOutput(deps.Stderr)
-		all := fs.Bool("all", false, "update all installed skills")
-		version := fs.String("version", "", "target version")
-		force := fs.Bool("force", false, "overwrite local modifications")
-		if err := fs.Parse(args[1:]); err != nil {
-			return err
-		}
-		root := resolveInstallRoot(cfg)
-		installed, err := clawhub.ListInstalled(root)
-		if err != nil {
-			return err
-		}
-		targets := installed
-		if !*all {
-			if err := requireExactFlagArgs(fs, 1, "or3-intern skills update <name>|--all"); err != nil {
-				return err
-			}
-			match, matchErr := findInstalledSkill(installed, fs.Arg(0))
-			if matchErr != nil {
-				return matchErr
-			}
-			targets = []clawhub.InstalledSkill{match}
-		} else if err := requireExactFlagArgs(fs, 0, "or3-intern skills update <name>|--all"); err != nil {
-			return err
-		}
-		if len(targets) == 0 {
-			_, _ = fmt.Fprintln(deps.Stdout, "(no installed skills)")
-			return nil
-		}
-		for _, item := range targets {
-			info, err := deps.Client.Inspect(ctx, item.Origin.Slug, *version)
-			if err != nil {
-				return err
-			}
-			targetVersion := strings.TrimSpace(*version)
-			if targetVersion == "" {
-				targetVersion = info.LatestVersion
-			}
-			if targetVersion == "" {
-				return fmt.Errorf("could not resolve latest version for %s", item.Origin.Slug)
-			}
-			if item.Origin.InstalledVersion == targetVersion {
-				_, _ = fmt.Fprintf(deps.Stdout, "up-to-date\t%s\t%s\n", item.Origin.Slug, targetVersion)
-				continue
-			}
-			if _, err := deps.Client.Install(ctx, item.Origin.Slug, targetVersion, root, clawhub.InstallOptions{Force: *force}); err != nil {
-				return err
-			}
-			if deps.Audit != nil {
-				if err := deps.Audit(ctx, "skill.update", map[string]any{"slug": item.Origin.Slug, "version": targetVersion}); err != nil {
-					return err
-				}
-			}
-			_, _ = fmt.Fprintf(deps.Stdout, "updated\t%s\t%s\n", item.Origin.Slug, targetVersion)
+		for _, item := range items {
+			fmt.Fprintf(stdout, "%d\t%s\t%s\n", item.ID, item.Domain, item.ScopeJSON)
 		}
 		return nil
 	case "remove":
-		if err := requireExactArgs(args[1:], 1, "or3-intern skills remove <name>"); err != nil {
+		if err := requireExactArgs(args[1:], 1, "approvals allowlist remove <id>"); err != nil {
 			return err
 		}
-		root := resolveInstallRoot(cfg)
-		installed, err := clawhub.ListInstalled(root)
+		id, err := strconv.ParseInt(strings.TrimSpace(args[1]), 10, 64)
+		if err != nil {
+			return fmt.Errorf("invalid allowlist ID")
+		}
+		if err := appSvc.RemoveAllowlist(ctx, id, "cli"); err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(stdout, "removed allowlist %d\n", id)
+		return nil
+	case "add":
+		fs := flag.NewFlagSet("approvals allowlist add", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		domain := fs.String("domain", "exec", "approval domain")
+		hostID := fs.String("host", defaultHostID, "host scope")
+		toolName := fs.String("tool", "", "tool scope")
+		profile := fs.String("profile", "", "profile scope")
+		agent := fs.String("agent", "", "agent scope")
+		program := fs.String("program", "", "exec executable path")
+		cwd := fs.String("cwd", "", "exec working directory")
+		skillID := fs.String("skill", "", "skill identifier")
+		version := fs.String("version", "", "skill version")
+		origin := fs.String("origin", "", "skill origin")
+		trust := fs.String("trust", "", "skill trust state")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if err := requireExactFlagArgs(fs, 0, "approvals allowlist add [--domain exec|skill_execution] [matcher flags]"); err != nil {
+			return err
+		}
+		scope := approval.AllowlistScope{HostID: strings.TrimSpace(*hostID), Tool: strings.TrimSpace(*toolName), Profile: strings.TrimSpace(*profile), Agent: strings.TrimSpace(*agent)}
+		var matcher any
+		domainName := strings.TrimSpace(*domain)
+		switch strings.TrimSpace(*domain) {
+		case string(approval.SubjectExec):
+			matcher = approval.ExecAllowlistMatcher{ExecutablePath: strings.TrimSpace(*program), WorkingDir: strings.TrimSpace(*cwd)}
+		case string(approval.SubjectSkillExec):
+			matcher = approval.SkillAllowlistMatcher{SkillID: strings.TrimSpace(*skillID), Version: strings.TrimSpace(*version), Origin: strings.TrimSpace(*origin), TrustState: strings.TrimSpace(*trust)}
+		default:
+			return fmt.Errorf("unsupported allowlist domain")
+		}
+		if err := approval.ValidateAllowlistMatcher(domainName, matcher); err != nil {
+			return err
+		}
+		rec, err := appSvc.AddAllowlist(ctx, strings.TrimSpace(*domain), scope, matcher, "cli", 0)
 		if err != nil {
 			return err
 		}
-		match, err := findInstalledSkill(installed, args[1])
-		if err != nil {
-			return err
-		}
-		if err := clawhub.RemoveSkill(root, match.Name); err != nil {
-			return err
-		}
-		if deps.Audit != nil {
-			if err := deps.Audit(ctx, "skill.remove", map[string]any{"name": match.Name}); err != nil {
-				return err
-			}
-		}
-		_, _ = fmt.Fprintf(deps.Stdout, "removed\t%s\n", match.Name)
+		_, _ = fmt.Fprintf(stdout, "added allowlist %d\n", rec.ID)
 		return nil
 	default:
-		return fmt.Errorf("unknown skills subcommand: %s", args[0])
+		return fmt.Errorf("unknown allowlist subcommand: %s", args[0])
 	}
 }
+````
 
-func buildSkillsInventory(cfg config.Config, bundledDir string, toolNames map[string]struct{}) skills.Inventory {
-	approved := make(map[string]struct{}, len(cfg.Skills.Policy.Approved)*2)
-	for _, name := range cfg.Skills.Policy.Approved {
-		trimmed := strings.TrimSpace(name)
-		if trimmed == "" {
-			continue
+## File: cmd/or3-intern/service_auth.go
+````go
+package main
+
+import (
+	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net"
+	"net/http"
+	"strings"
+	"time"
+
+	"or3-intern/internal/approval"
+	"or3-intern/internal/config"
+)
+
+const serviceTokenMaxAge = 5 * time.Minute
+
+type serviceTokenClaims struct {
+	IssuedAt int64  `json:"iat"`
+	Nonce    string `json:"nonce"`
+}
+
+type serviceAuthContextKey struct{}
+type serviceAuthKindContextKey struct{}
+
+type serviceAuthIdentity struct {
+	Kind   string
+	Actor  string
+	Role   string
+	Device string
+}
+
+func serviceAuthMiddleware(secret string, next http.Handler) http.Handler {
+	return serviceAuthMiddlewareWithBroker(config.Config{Service: config.ServiceConfig{Secret: secret, SharedSecretRole: approval.RoleServiceClient}}, nil, next)
+}
+
+func serviceAuthMiddlewareWithBroker(cfg config.Config, broker *approval.Broker, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if allowsUnauthenticatedPairingRoute(cfg, r) {
+			ctx := approval.ContextWithAuditAuthKind(r.Context(), "unauthenticated")
+			ctx = approval.ContextWithAuditActor(ctx, "anonymous")
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
 		}
-		approved[trimmed] = struct{}{}
-		approved[strings.ToLower(trimmed)] = struct{}{}
-	}
-	trustedOwners := makePolicySet(cfg.Skills.Policy.TrustedOwners)
-	blockedOwners := makePolicySet(cfg.Skills.Policy.BlockedOwners)
-	trustedRegistries := makePolicySet(cfg.Skills.Policy.TrustedRegistries)
-	approvalPolicy := skills.ApprovalPolicy{
-		QuarantineByDefault: cfg.Skills.Policy.QuarantineByDefault || config.IsHostedProfile(cfg.RuntimeProfile),
-		ApprovedSkills:      approved,
-		TrustedOwners:       trustedOwners,
-		BlockedOwners:       blockedOwners,
-		TrustedRegistries:   trustedRegistries,
-	}
-	return skills.ScanWithOptions(skills.LoadOptions{
-		Roots:          buildSkillRoots(cfg, bundledDir),
-		Entries:        skillEntries(cfg),
-		GlobalConfig:   configMap(cfg),
-		Env:            envMap(),
-		AvailableTools: toolNames,
-		ApprovalPolicy: approvalPolicy,
+		identity, err := authenticateServiceRequest(cfg, broker, r.Header.Get("Authorization"), time.Now(), r.Context())
+		if err != nil {
+			writeServiceJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+			return
+		}
+		ctx := context.WithValue(r.Context(), serviceAuthContextKey{}, identity)
+		ctx = context.WithValue(ctx, serviceAuthKindContextKey{}, identity.Kind)
+		ctx = approval.ContextWithAuditAuthKind(ctx, identity.Kind)
+		ctx = approval.ContextWithAuditActor(ctx, identity.Actor)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
-func makePolicySet(values []string) map[string]struct{} {
-	out := make(map[string]struct{}, len(values))
-	for _, value := range values {
-		normalized := strings.TrimRight(strings.ToLower(strings.TrimSpace(value)), "/")
-		if normalized == "" {
-			continue
+func authenticateServiceRequest(cfg config.Config, broker *approval.Broker, header string, now time.Time, ctx context.Context) (serviceAuthIdentity, error) {
+	if err := validateServiceAuthorization(cfg.Service.Secret, header, now); err == nil {
+		role := strings.TrimSpace(cfg.Service.SharedSecretRole)
+		if role == "" {
+			role = approval.RoleServiceClient
 		}
-		out[normalized] = struct{}{}
+		return serviceAuthIdentity{Kind: "shared-secret", Actor: "service:shared-secret", Role: role}, nil
 	}
-	return out
+	if broker == nil {
+		return serviceAuthIdentity{}, fmt.Errorf("missing bearer token")
+	}
+	scheme, token, ok := strings.Cut(strings.TrimSpace(header), " ")
+	if !ok || !strings.EqualFold(scheme, "Bearer") || strings.TrimSpace(token) == "" {
+		return serviceAuthIdentity{}, fmt.Errorf("missing bearer token")
+	}
+	device, err := broker.AuthenticateDeviceToken(ctx, token)
+	if err != nil {
+		return serviceAuthIdentity{}, err
+	}
+	return serviceAuthIdentity{Kind: "paired-device", Actor: "device:" + device.DeviceID, Role: device.Role, Device: device.DeviceID}, nil
 }
 
-func loadAvailableToolNamesWithManager(ctx context.Context, cfg config.Config, manager *mcp.Manager) map[string]struct{} {
-	toolNames := filterAdvertisedToolNames(cfg, availableToolNames(cfg.Cron.Enabled, cfg.Subagents.Enabled))
-	if len(cfg.Tools.MCPServers) == 0 {
-		return toolNames
+func serviceAuthIdentityFromContext(ctx context.Context) serviceAuthIdentity {
+	if ctx == nil {
+		return serviceAuthIdentity{}
 	}
-	if manager != nil {
-		manager.SetHostPolicy(buildHostPolicy(cfg))
-		for _, name := range manager.ToolNames() {
-			toolNames[name] = struct{}{}
-		}
-		return toolNames
-	}
-	manager = mcp.NewManager(cfg.Tools.MCPServers)
-	manager.SetLogger(log.Printf)
-	manager.SetHostPolicy(buildHostPolicy(cfg))
-	if err := manager.Connect(ctx); err != nil {
-		log.Printf("mcp setup failed: %v", err)
-		return toolNames
-	}
-	defer func() {
-		if err := manager.Close(); err != nil {
-			log.Printf("mcp close failed: %v", err)
-		}
-	}()
-	for _, name := range manager.ToolNames() {
-		toolNames[name] = struct{}{}
-	}
-	return toolNames
+	identity, _ := ctx.Value(serviceAuthContextKey{}).(serviceAuthIdentity)
+	return identity
 }
 
-func filterAdvertisedToolNames(cfg config.Config, toolNames map[string]struct{}) map[string]struct{} {
-	filtered := make(map[string]struct{}, len(toolNames))
-	for name := range toolNames {
-		filtered[name] = struct{}{}
+func serviceAuthKindFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
 	}
-	if !cfg.Hardening.GuardedTools && !cfg.Hardening.PrivilegedTools {
-		delete(filtered, "exec")
-	}
-	if !cfg.Skills.EnableExec {
-		delete(filtered, "run_skill_script")
-	}
-	switch cfg.RuntimeProfile {
-	case config.ProfileHostedNoExec:
-		delete(filtered, "exec")
-		delete(filtered, "run_skill_script")
-	case config.ProfileHostedRemoteSandbox:
-		if !cfg.Hardening.Sandbox.Enabled {
-			delete(filtered, "exec")
-			delete(filtered, "run_skill_script")
-		}
-	}
-	return filtered
+	kind, _ := ctx.Value(serviceAuthKindContextKey{}).(string)
+	return kind
 }
 
-func buildSkillRoots(cfg config.Config, bundledDir string) []skills.Root {
-	var roots []skills.Root
-	for _, extra := range cfg.Skills.Load.ExtraDirs {
-		if strings.TrimSpace(extra) == "" {
-			continue
-		}
-		roots = append(roots, skills.Root{Path: extra, Source: skills.SourceExtra})
+func allowsUnauthenticatedPairingRoute(cfg config.Config, r *http.Request) bool {
+	if r == nil || r.URL == nil {
+		return false
 	}
-	if strings.TrimSpace(bundledDir) != "" {
-		roots = append(roots, skills.Root{Path: bundledDir, Source: skills.SourceBundled})
+	if !cfg.Service.AllowUnauthenticatedPairing {
+		return false
 	}
-	if strings.TrimSpace(cfg.Skills.ManagedDir) != "" {
-		roots = append(roots, skills.Root{Path: cfg.Skills.ManagedDir, Source: skills.SourceManaged})
+	if !serviceListenIsLoopback(cfg.Service.Listen) {
+		return false
 	}
-	if strings.TrimSpace(cfg.WorkspaceDir) != "" {
-		roots = append(roots,
-			skills.Root{Path: filepath.Join(cfg.WorkspaceDir, "workspace_skills"), Source: skills.SourceExtra, Priority: 35},
-			skills.Root{Path: filepath.Join(cfg.WorkspaceDir, "skills"), Source: skills.SourceWorkspace},
-		)
+	if !requestRemoteIsLoopback(r.RemoteAddr) {
+		return false
 	}
-	return roots
+	if r.Method != http.MethodPost {
+		return false
+	}
+	path := strings.TrimSpace(r.URL.Path)
+	return path == "/internal/v1/pairing/requests" || path == "/internal/v1/pairing/exchange"
 }
 
-func skillEntries(cfg config.Config) map[string]skills.EntryConfig {
-	out := make(map[string]skills.EntryConfig, len(cfg.Skills.Entries))
-	for key, entry := range cfg.Skills.Entries {
-		out[key] = skills.EntryConfig{
-			Enabled: entry.Enabled,
-			APIKey:  entry.APIKey,
-			Env:     entry.Env,
-			Config:  entry.Config,
+func requireServiceRole(w http.ResponseWriter, r *http.Request, roles ...string) bool {
+	identity := serviceAuthIdentityFromContext(r.Context())
+	if len(roles) == 0 {
+		return true
+	}
+	for _, role := range roles {
+		if serviceRoleRank(identity.Role) >= serviceRoleRank(role) {
+			return true
 		}
 	}
-	return out
+	writeServiceJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
+	return false
 }
 
-func configMap(cfg config.Config) map[string]any {
-	buf, _ := json.Marshal(cfg)
-	out := map[string]any{}
-	_ = json.Unmarshal(buf, &out)
-	return out
+func serviceRoleRank(role string) int {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case approval.RoleAdmin:
+		return 4
+	case approval.RoleOperator:
+		return 3
+	case approval.RoleServiceClient, approval.RoleWebUI, approval.RoleNode:
+		return 2
+	case approval.RoleViewer:
+		return 1
+	default:
+		return 0
+	}
 }
 
-func envMap() map[string]string {
-	out := map[string]string{}
-	for _, raw := range os.Environ() {
-		key, value, ok := strings.Cut(raw, "=")
-		if ok {
-			out[key] = value
+func serviceListenIsLoopback(addr string) bool {
+	host := strings.TrimSpace(addr)
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
+	}
+	host = strings.Trim(host, "[]")
+	if host == "" {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return strings.EqualFold(host, "localhost")
+}
+
+func requestRemoteIsLoopback(addr string) bool {
+	host := strings.TrimSpace(addr)
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
+	}
+	host = strings.Trim(host, "[]")
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return strings.EqualFold(host, "localhost")
+}
+
+func validateServiceAuthorization(secret string, header string, now time.Time) error {
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		return fmt.Errorf("service secret is not configured")
+	}
+	scheme, token, ok := strings.Cut(strings.TrimSpace(header), " ")
+	if !ok || !strings.EqualFold(scheme, "Bearer") || strings.TrimSpace(token) == "" {
+		return fmt.Errorf("missing bearer token")
+	}
+	return validateServiceBearerToken(secret, token, now)
+}
+
+func validateServiceBearerToken(secret string, token string, now time.Time) error {
+	payloadPart, signaturePart, ok := strings.Cut(strings.TrimSpace(token), ".")
+	if !ok || payloadPart == "" || signaturePart == "" {
+		return fmt.Errorf("invalid bearer token format")
+	}
+	signature, err := hex.DecodeString(signaturePart)
+	if err != nil {
+		return fmt.Errorf("invalid bearer token signature")
+	}
+	expected := signServiceToken(secret, payloadPart)
+	if !hmac.Equal(signature, expected) {
+		return fmt.Errorf("invalid bearer token signature")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(payloadPart)
+	if err != nil {
+		return fmt.Errorf("invalid bearer token payload")
+	}
+	var claims serviceTokenClaims
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return fmt.Errorf("invalid bearer token payload")
+	}
+	if claims.IssuedAt <= 0 {
+		return fmt.Errorf("invalid bearer token timestamp")
+	}
+	issuedAt := time.Unix(claims.IssuedAt, 0)
+	if issuedAt.After(now.Add(30 * time.Second)) {
+		return fmt.Errorf("bearer token timestamp is in the future")
+	}
+	if now.Sub(issuedAt) > serviceTokenMaxAge {
+		return fmt.Errorf("bearer token expired")
+	}
+	if strings.TrimSpace(claims.Nonce) == "" {
+		return fmt.Errorf("invalid bearer token nonce")
+	}
+	return nil
+}
+
+func issueServiceBearerToken(secret string, now time.Time) (string, error) {
+	nonce, err := randomHex(12)
+	if err != nil {
+		return "", err
+	}
+	claims := serviceTokenClaims{IssuedAt: now.Unix(), Nonce: nonce}
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		return "", err
+	}
+	payloadPart := base64.RawURLEncoding.EncodeToString(payload)
+	signature := hex.EncodeToString(signServiceToken(secret, payloadPart))
+	return payloadPart + "." + signature, nil
+}
+
+func signServiceToken(secret string, payloadPart string) []byte {
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(payloadPart))
+	return mac.Sum(nil)
+}
+
+func randomHex(size int) (string, error) {
+	if size <= 0 {
+		return "", nil
+	}
+	buf := make([]byte, size)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
+}
+
+func withDetachedContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return context.WithoutCancel(ctx)
+}
+````
+
+## File: cmd/or3-intern/startup_validation.go
+````go
+package main
+
+import (
+	"fmt"
+	"strings"
+
+	"or3-intern/internal/approval"
+	"or3-intern/internal/config"
+	intdoctor "or3-intern/internal/doctor"
+)
+
+func validateStartupCommand(cmd string, cfg config.Config, unsafeDev bool) error {
+	cmd = strings.ToLower(strings.TrimSpace(cmd))
+	if unsafeDev {
+		return nil
+	}
+	if err := validateStrictServicePosture(cmd, cfg); err != nil {
+		return err
+	}
+	mode := startupDoctorMode(cmd)
+	if mode == "" {
+		return nil
+	}
+	report := intdoctor.Evaluate(cfg, intdoctor.Options{Mode: mode})
+	if !report.HasBlockingFindings() {
+		return nil
+	}
+	blockers := report.BlockingFindings()
+	top := intdoctor.TopFindings(blockers, 3)
+	parts := make([]string, 0, len(top))
+	for _, finding := range top {
+		parts = append(parts, finding.Area+": "+finding.Summary)
+	}
+	message := strings.Join(parts, "; ")
+	if len(blockers) > len(top) {
+		message += fmt.Sprintf(" (%d more blocking finding(s))", len(blockers)-len(top))
+	}
+	return startupRefusal(cmd, message, blockers)
+}
+
+func validateStrictServicePosture(cmd string, cfg config.Config) error {
+	if cmd != "service" {
+		return nil
+	}
+	if cfg.Service.AllowUnauthenticatedPairing && !serviceListenIsLoopback(cfg.Service.Listen) {
+		return fmt.Errorf("service startup refused: unauthenticated pairing requires a loopback listen address; rerun with --unsafe-dev only for local development")
+	}
+	role := strings.ToLower(strings.TrimSpace(cfg.Service.SharedSecretRole))
+	switch role {
+	case "", approval.RoleViewer, approval.RoleServiceClient:
+	default:
+		return fmt.Errorf("service startup refused: service.sharedSecretRole must be viewer or service-client; rerun with --unsafe-dev only for local development")
+	}
+	switch strings.ToLower(strings.TrimSpace(cfg.Service.MaxCapability)) {
+	case "", "safe":
+	default:
+		return fmt.Errorf("service startup refused: service.maxCapability must remain safe; rerun with --unsafe-dev only for local development")
+	}
+	return nil
+}
+
+func startupDoctorMode(cmd string) intdoctor.Mode {
+	switch cmd {
+	case "chat":
+		return intdoctor.ModeStartupChat
+	case "serve":
+		return intdoctor.ModeStartupServe
+	case "service":
+		return intdoctor.ModeStartupService
+	default:
+		return ""
+	}
+}
+
+func startupRefusal(cmd, message string, blockers []intdoctor.Finding) error {
+	cmd = strings.TrimSpace(cmd)
+	if cmd == "" {
+		cmd = "startup"
+	}
+	guidance := startupFixGuidance(blockers)
+	return fmt.Errorf("%s startup refused: %s; %s", cmd, message, guidance)
+}
+
+func startupFixGuidance(blockers []intdoctor.Finding) string {
+	hasAutomatic := false
+	hasInteractive := false
+	for _, finding := range blockers {
+		switch finding.FixMode {
+		case intdoctor.FixModeAutomatic:
+			hasAutomatic = true
+		case intdoctor.FixModeInteractive:
+			hasInteractive = true
 		}
 	}
-	return out
+	switch {
+	case hasAutomatic && hasInteractive:
+		return "run `or3-intern doctor --fix` for safe repairs, then `or3-intern doctor --fix --interactive` for guided ones, or fix the configuration manually"
+	case hasAutomatic:
+		return "run `or3-intern doctor --fix` or fix the configuration manually"
+	case hasInteractive:
+		return "run `or3-intern doctor --fix --interactive` or fix the configuration manually"
+	default:
+		return "fix the configuration manually"
+	}
 }
 
-func resolveInstallRoot(cfg config.Config) string {
-	installDir := strings.TrimSpace(cfg.Skills.ClawHub.InstallDir)
-	if installDir == "" {
-		installDir = "skills"
+func minInt(a, b int) int {
+	if a < b {
+		return a
 	}
-	if filepath.IsAbs(installDir) {
-		return installDir
-	}
-	if strings.TrimSpace(cfg.Skills.ManagedDir) != "" {
-		return cfg.Skills.ManagedDir
-	}
-	return filepath.Join(filepath.Dir(config.DefaultPath()), installDir)
-}
-
-func availableToolNames(includeCron, includeSubagents bool) map[string]struct{} {
-	names := []string{
-		"exec",
-		"read_file",
-		"write_file",
-		"edit_file",
-		"list_dir",
-		"web_fetch",
-		"web_search",
-		"memory_set_pinned",
-		"memory_add_note",
-		"memory_search",
-		"memory_recent",
-		"memory_get_pinned",
-		"send_message",
-		"read_skill",
-		"run_skill_script",
-	}
-	if includeCron {
-		names = append(names, "cron")
-	}
-	if includeSubagents {
-		names = append(names, "spawn_subagent")
-	}
-	sort.Strings(names)
-	out := make(map[string]struct{}, len(names))
-	for _, name := range names {
-		out[name] = struct{}{}
-	}
-	return out
-}
-
-func newClawHubClient(cfg config.Config) *clawhub.Client {
-	return clawhub.New(cfg.Skills.ClawHub.SiteURL, cfg.Skills.ClawHub.RegistryURL)
-}
-
-func findInstalledSkill(installed []clawhub.InstalledSkill, raw string) (clawhub.InstalledSkill, error) {
-	target := strings.TrimSpace(raw)
-	for _, item := range installed {
-		if item.Name == target || item.Origin.Slug == target {
-			return item, nil
-		}
-	}
-	return clawhub.InstalledSkill{}, fmt.Errorf("installed skill not found: %s", raw)
-}
-
-func printReasons(w io.Writer, label string, values []string) {
-	if len(values) == 0 {
-		return
-	}
-	_, _ = fmt.Fprintf(w, "%s: %s\n", label, strings.Join(values, "; "))
+	return b
 }
 ````
 
@@ -21581,1233 +24280,6 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 		client = security.WrapHTTPClient(client, c.HostPolicy)
 	}
 	return client.Do(req)
-}
-````
-
-## File: internal/skills/skills.go
-````go
-// Package skills discovers, evaluates, and loads skill metadata from multiple roots.
-package skills
-
-import (
-	"crypto/sha1"
-	"encoding/hex"
-	"encoding/json"
-	"fmt"
-	"io/fs"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"runtime"
-	"sort"
-	"strings"
-	"time"
-
-	"or3-intern/internal/clawhub"
-
-	"gopkg.in/yaml.v3"
-)
-
-// SkillEntry describes a declared executable entrypoint from a skill manifest.
-type SkillEntry struct {
-	Name           string   `json:"name"`
-	Command        []string `json:"command"`
-	TimeoutSeconds int      `json:"timeoutSeconds"`
-	AcceptsStdin   bool     `json:"acceptsStdin"`
-}
-
-type Source string
-
-const (
-	// SourceExtra marks skills loaded from explicitly supplied extra roots.
-	SourceExtra Source = "extra"
-	// SourceBundled marks skills that ship with the application.
-	SourceBundled Source = "bundled"
-	// SourceManaged marks skills installed from a remote registry.
-	SourceManaged Source = "managed"
-	// SourceWorkspace marks workspace-local skills.
-	SourceWorkspace Source = "workspace"
-)
-
-// Root describes one filesystem root scanned for skills.
-type Root struct {
-	Path     string
-	Source   Source
-	Label    string
-	Priority int
-}
-
-// EntryConfig applies per-skill runtime configuration overrides.
-type EntryConfig struct {
-	Enabled *bool
-	APIKey  string
-	Env     map[string]string
-	Config  map[string]any
-}
-
-// LoadOptions controls how skill discovery and eligibility evaluation run.
-type LoadOptions struct {
-	Roots          []Root
-	Entries        map[string]EntryConfig
-	GlobalConfig   map[string]any
-	Env            map[string]string
-	AvailableTools map[string]struct{}
-	ApprovalPolicy ApprovalPolicy
-	OS             string
-}
-
-// ApprovalPolicy describes which managed skills are trusted or blocked.
-type ApprovalPolicy struct {
-	QuarantineByDefault bool
-	ApprovedSkills      map[string]struct{}
-	TrustedOwners       map[string]struct{}
-	BlockedOwners       map[string]struct{}
-	TrustedRegistries   map[string]struct{}
-}
-
-// SkillInstallSpec describes one suggested installation route for a dependency.
-type SkillInstallSpec struct {
-	ID      string   `json:"id"`
-	Kind    string   `json:"kind"`
-	Label   string   `json:"label"`
-	Bins    []string `json:"bins"`
-	Formula string   `json:"formula"`
-	Tap     string   `json:"tap"`
-	Package string   `json:"package"`
-	Module  string   `json:"module"`
-	OS      []string `json:"os"`
-	URL     string   `json:"url"`
-}
-
-// NixPluginSpec describes an optional Nix plugin dependency.
-type NixPluginSpec struct {
-	Plugin  string   `json:"plugin"`
-	Systems []string `json:"systems"`
-}
-
-// SkillRequirements lists binary, env, and config prerequisites.
-type SkillRequirements struct {
-	Bins    []string `json:"bins"`
-	AnyBins []string `json:"anyBins"`
-	Env     []string `json:"env"`
-	Config  []string `json:"config"`
-}
-
-// SkillRuntimeMeta captures runtime metadata parsed from skill front matter.
-type SkillRuntimeMeta struct {
-	Always     bool               `json:"always"`
-	SkillKey   string             `json:"skillKey"`
-	PrimaryEnv string             `json:"primaryEnv"`
-	Emoji      string             `json:"emoji"`
-	Homepage   string             `json:"homepage"`
-	OS         []string           `json:"os"`
-	Requires   SkillRequirements  `json:"requires"`
-	Install    []SkillInstallSpec `json:"install"`
-	Nix        *NixPluginSpec     `json:"nix"`
-}
-
-// SkillPermissions describes the requested shell, network, and write permissions.
-type SkillPermissions struct {
-	Shell        bool     `json:"shell" yaml:"shell"`
-	Network      bool     `json:"network" yaml:"network"`
-	Write        bool     `json:"write" yaml:"write"`
-	AllowedPaths []string `json:"paths" yaml:"paths"`
-	AllowedHosts []string `json:"hosts" yaml:"hosts"`
-}
-
-// SkillMeta is the fully merged metadata for one discovered skill.
-type SkillMeta struct {
-	Name        string
-	Description string
-	Homepage    string
-	Path        string
-	Dir         string
-	Location    string
-	Source      Source
-	ModTime     time.Time
-	Size        int64
-	ID          string
-	Summary     string
-	Entrypoints []SkillEntry
-
-	UserInvocable          bool
-	DisableModelInvocation bool
-	CommandDispatch        string
-	CommandTool            string
-	CommandArgMode         string
-
-	Metadata         SkillRuntimeMeta
-	Permissions      SkillPermissions
-	AllowedTools     []string
-	PermissionState  string
-	PermissionNotes  []string
-	Publisher        string
-	Registry         string
-	InstalledVersion string
-	Modified         bool
-	ScanStatus       string
-	ScanFindings     []string
-	Key              string
-	Eligible         bool
-	Disabled         bool
-	Hidden           bool
-	Missing          []string
-	Unsupported      []string
-	ParseError       string
-	RuntimeEnv       map[string]string
-
-	sourcePriority int
-	rootOrder      int
-}
-
-// Inventory is the discovered skill set plus a name index.
-type Inventory struct {
-	Skills []SkillMeta
-	byName map[string]SkillMeta
-}
-
-type skillManifest struct {
-	Summary     string           `json:"summary"`
-	Entrypoints []SkillEntry     `json:"entrypoints"`
-	Tools       []string         `json:"tools"`
-	Permissions SkillPermissions `json:"permissions"`
-}
-
-type skillFrontMatter struct {
-	Name                   string           `yaml:"name"`
-	Description            string           `yaml:"description"`
-	Summary                string           `yaml:"summary"`
-	Homepage               string           `yaml:"homepage"`
-	UserInvocable          *bool            `yaml:"user-invocable"`
-	DisableModelInvocation bool             `yaml:"disable-model-invocation"`
-	CommandDispatch        string           `yaml:"command-dispatch"`
-	CommandTool            string           `yaml:"command-tool"`
-	CommandArgMode         string           `yaml:"command-arg-mode"`
-	Permissions            SkillPermissions `yaml:"permissions"`
-	Metadata               map[string]any   `yaml:"metadata"`
-}
-
-func defaultPriority(source Source) int {
-	switch source {
-	case SourceWorkspace:
-		return 40
-	case SourceManaged:
-		return 30
-	case SourceBundled:
-		return 20
-	default:
-		return 10
-	}
-}
-
-// Scan keeps the simple legacy API for callers that only provide directories.
-func Scan(dirs []string) Inventory {
-	roots := make([]Root, 0, len(dirs))
-	for i, dir := range dirs {
-		roots = append(roots, Root{
-			Path:     dir,
-			Source:   SourceExtra,
-			Label:    dir,
-			Priority: i + 1,
-		})
-	}
-	return ScanWithOptions(LoadOptions{Roots: roots})
-}
-
-// ScanWithOptions discovers skills and evaluates their runtime eligibility.
-func ScanWithOptions(opts LoadOptions) Inventory {
-	if len(opts.Env) == 0 {
-		opts.Env = envMap(os.Environ())
-	}
-	if strings.TrimSpace(opts.OS) == "" {
-		opts.OS = runtime.GOOS
-	}
-
-	metaByName := map[string]SkillMeta{}
-	for i, root := range opts.Roots {
-		root = normalizeRoot(root)
-		if strings.TrimSpace(root.Path) == "" {
-			continue
-		}
-		absRoot, err := filepath.Abs(root.Path)
-		if err != nil {
-			continue
-		}
-		realRoot, err := filepath.EvalSymlinks(absRoot)
-		if err != nil {
-			continue
-		}
-		scanSkillDir(metaByName, realRoot, root, i, opts)
-		_ = filepath.WalkDir(realRoot, func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return nil
-			}
-			if d.Type()&os.ModeSymlink != 0 {
-				return nil
-			}
-			if !d.IsDir() {
-				return nil
-			}
-			if path == realRoot {
-				return nil
-			}
-			realPath, err := filepath.EvalSymlinks(path)
-			if err != nil {
-				return filepath.SkipDir
-			}
-			rel, err := filepath.Rel(realRoot, realPath)
-			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-				return filepath.SkipDir
-			}
-			if scanSkillDir(metaByName, realPath, root, i, opts) {
-				return filepath.SkipDir
-			}
-			return nil
-		})
-	}
-
-	skills := make([]SkillMeta, 0, len(metaByName))
-	for _, s := range metaByName {
-		skills = append(skills, s)
-	}
-	sort.Slice(skills, func(i, j int) bool {
-		if skills[i].Name == skills[j].Name {
-			if skills[i].sourcePriority == skills[j].sourcePriority {
-				return skills[i].Path < skills[j].Path
-			}
-			return skills[i].sourcePriority > skills[j].sourcePriority
-		}
-		return strings.ToLower(skills[i].Name) < strings.ToLower(skills[j].Name)
-	})
-	by := make(map[string]SkillMeta, len(skills))
-	for _, s := range skills {
-		by[s.Name] = s
-		by[strings.ToLower(s.Name)] = s
-	}
-	return Inventory{Skills: skills, byName: by}
-}
-
-func normalizeRoot(root Root) Root {
-	if strings.TrimSpace(root.Label) == "" {
-		root.Label = string(root.Source)
-	}
-	if root.Priority == 0 {
-		root.Priority = defaultPriority(root.Source)
-	}
-	return root
-}
-
-func scanSkillDir(metaByName map[string]SkillMeta, dir string, root Root, order int, opts LoadOptions) bool {
-	skillPath, ok := skillFileInDir(dir)
-	if !ok {
-		return false
-	}
-	meta := loadSkill(dir, skillPath, root, order, opts)
-	current, exists := metaByName[meta.Name]
-	if !exists || shouldOverride(current, meta) {
-		metaByName[meta.Name] = meta
-	}
-	return true
-}
-
-func shouldOverride(current SkillMeta, candidate SkillMeta) bool {
-	if candidate.sourcePriority != current.sourcePriority {
-		return candidate.sourcePriority > current.sourcePriority
-	}
-	if candidate.rootOrder != current.rootOrder {
-		return candidate.rootOrder > current.rootOrder
-	}
-	return candidate.Path > current.Path
-}
-
-func skillFileInDir(dir string) (string, bool) {
-	for _, name := range []string{"SKILL.md", "skill.md"} {
-		path := filepath.Join(dir, name)
-		info, err := os.Lstat(path)
-		if err != nil {
-			continue
-		}
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			continue
-		}
-		return path, true
-	}
-	return "", false
-}
-
-func loadSkill(dir, path string, root Root, order int, opts LoadOptions) SkillMeta {
-	info, _ := os.Stat(path)
-	meta := SkillMeta{
-		Name:           filepath.Base(dir),
-		Path:           path,
-		Dir:            dir,
-		Location:       dir,
-		Source:         root.Source,
-		ID:             hash(path),
-		UserInvocable:  true,
-		CommandArgMode: "raw",
-		sourcePriority: root.Priority,
-		rootOrder:      order,
-	}
-	if info != nil {
-		meta.ModTime = info.ModTime()
-		meta.Size = info.Size()
-	}
-
-	body, err := LoadBody(path, 0)
-	if err != nil {
-		meta.ParseError = err.Error()
-		meta.Hidden = true
-		applyApprovalPolicy(&meta, opts.ApprovalPolicy)
-		return meta
-	}
-	fm, rawTop, err := parseFrontMatter(body)
-	if err != nil {
-		meta.ParseError = err.Error()
-		meta.Hidden = true
-		applyApprovalPolicy(&meta, opts.ApprovalPolicy)
-		return meta
-	}
-	if strings.TrimSpace(fm.Name) != "" {
-		meta.Name = strings.TrimSpace(fm.Name)
-	}
-	meta.Description = strings.TrimSpace(firstNonEmpty(fm.Description, fm.Summary))
-	meta.Summary = meta.Description
-	meta.Homepage = strings.TrimSpace(fm.Homepage)
-	if fm.UserInvocable != nil {
-		meta.UserInvocable = *fm.UserInvocable
-	}
-	meta.DisableModelInvocation = fm.DisableModelInvocation
-	meta.Hidden = meta.DisableModelInvocation
-	meta.CommandDispatch = strings.TrimSpace(fm.CommandDispatch)
-	meta.CommandTool = strings.TrimSpace(fm.CommandTool)
-	if strings.TrimSpace(fm.CommandArgMode) != "" {
-		meta.CommandArgMode = strings.TrimSpace(fm.CommandArgMode)
-	}
-	meta.Permissions = normalizeSkillPermissions(fm.Permissions)
-	declaredTools, _ := parseDeclaredTools(rawTop["tools"])
-	meta.AllowedTools = declaredTools
-
-	manifest, err := loadManifest(dir)
-	if err != nil {
-		meta.ParseError = err.Error()
-		meta.Hidden = true
-	} else if len(manifest.Entrypoints) > 0 || len(manifest.Tools) > 0 || manifest.Permissions.Requested() || strings.TrimSpace(manifest.Summary) != "" {
-		meta.Entrypoints = manifest.Entrypoints
-		meta.AllowedTools = mergeStringLists(meta.AllowedTools, compactStrings(manifest.Tools))
-		if requested := normalizeSkillPermissions(manifest.Permissions); requested.Requested() {
-			meta.Permissions = requested
-		}
-		if strings.TrimSpace(manifest.Summary) != "" {
-			meta.Summary = strings.TrimSpace(manifest.Summary)
-		}
-		if meta.Description == "" {
-			meta.Summary = strings.TrimSpace(manifest.Summary)
-			meta.Description = meta.Summary
-		}
-	}
-
-	runtimeMeta, ok := normalizeRuntimeMetadata(fm.Metadata)
-	if ok {
-		meta.Metadata = runtimeMeta
-	}
-	if meta.Homepage == "" {
-		meta.Homepage = strings.TrimSpace(meta.Metadata.Homepage)
-	}
-	if meta.Key == "" {
-		meta.Key = strings.TrimSpace(firstNonEmpty(meta.Metadata.SkillKey, meta.Name))
-	}
-	entry := entryConfigForSkill(opts.Entries, meta)
-	meta.RuntimeEnv = buildRuntimeEnv(meta, entry, opts.Env)
-	applyOriginMetadata(&meta)
-	applyEligibility(&meta, rawTop, body, entry, opts)
-	applyApprovalPolicy(&meta, opts.ApprovalPolicy)
-	return meta
-}
-
-func applyOriginMetadata(meta *SkillMeta) {
-	if meta == nil || strings.TrimSpace(meta.Dir) == "" {
-		return
-	}
-	origin, err := clawhub.ReadOrigin(meta.Dir)
-	if err != nil {
-		if meta.Source == SourceManaged {
-			meta.PermissionNotes = append(meta.PermissionNotes, "managed skill missing origin metadata")
-		}
-		return
-	}
-	meta.Publisher = strings.TrimSpace(origin.Owner)
-	meta.Registry = strings.TrimSpace(origin.Registry)
-	meta.InstalledVersion = strings.TrimSpace(origin.InstalledVersion)
-	meta.ScanStatus = normalizeSupplyChainValue(origin.ScanStatus)
-	for _, finding := range origin.ScanFindings {
-		if summary := strings.TrimSpace(finding.Summary()); summary != "" {
-			meta.ScanFindings = append(meta.ScanFindings, summary)
-		}
-	}
-	if modified, modErr := clawhub.LocalEdits(meta.Dir); modErr == nil {
-		meta.Modified = modified
-	}
-}
-
-func normalizeSkillPermissions(raw SkillPermissions) SkillPermissions {
-	raw.AllowedPaths = compactStrings(raw.AllowedPaths)
-	raw.AllowedHosts = compactStrings(raw.AllowedHosts)
-	return raw
-}
-
-func (p SkillPermissions) Requested() bool {
-	return p.Shell || p.Network || p.Write || len(p.AllowedPaths) > 0 || len(p.AllowedHosts) > 0
-}
-
-func parseDeclaredTools(raw any) ([]string, bool) {
-	switch value := raw.(type) {
-	case nil:
-		return nil, true
-	case []string:
-		return compactStrings(value), true
-	case []any:
-		out := make([]string, 0, len(value))
-		for _, item := range value {
-			name, ok := item.(string)
-			if !ok {
-				return nil, false
-			}
-			name = strings.TrimSpace(name)
-			if name == "" {
-				continue
-			}
-			out = append(out, name)
-		}
-		return compactStrings(out), true
-	default:
-		return nil, false
-	}
-}
-
-func (p SkillPermissions) Summary() string {
-	parts := make([]string, 0, 5)
-	if p.Shell {
-		parts = append(parts, "shell")
-	}
-	if p.Network {
-		parts = append(parts, "network")
-	}
-	if p.Write {
-		parts = append(parts, "write")
-	}
-	if len(p.AllowedPaths) > 0 {
-		parts = append(parts, "paths="+strings.Join(p.AllowedPaths, ","))
-	}
-	if len(p.AllowedHosts) > 0 {
-		parts = append(parts, "hosts="+strings.Join(p.AllowedHosts, ","))
-	}
-	if len(parts) == 0 {
-		return "(none declared)"
-	}
-	return strings.Join(parts, "; ")
-}
-
-func applyApprovalPolicy(meta *SkillMeta, policy ApprovalPolicy) {
-	if meta == nil {
-		return
-	}
-	if meta.ParseError != "" {
-		meta.PermissionState = "blocked"
-		meta.PermissionNotes = append(meta.PermissionNotes, "metadata parse failed")
-		return
-	}
-	if ownerBlocked(meta, policy.BlockedOwners) {
-		meta.PermissionState = "blocked"
-		meta.PermissionNotes = append(meta.PermissionNotes, "publisher blocked by policy: "+meta.Publisher)
-		return
-	}
-	if strings.EqualFold(meta.ScanStatus, "blocked") {
-		meta.PermissionState = "blocked"
-		meta.PermissionNotes = append(meta.PermissionNotes, "install-time scan blocked this bundle")
-		meta.PermissionNotes = append(meta.PermissionNotes, meta.ScanFindings...)
-		return
-	}
-	if meta.Modified {
-		meta.PermissionState = "quarantined"
-		meta.PermissionNotes = append(meta.PermissionNotes, "local modifications detected since install")
-		return
-	}
-	if strings.EqualFold(meta.ScanStatus, "quarantined") {
-		meta.PermissionState = "quarantined"
-		meta.PermissionNotes = append(meta.PermissionNotes, "install-time scan flagged this bundle for review")
-		meta.PermissionNotes = append(meta.PermissionNotes, meta.ScanFindings...)
-		return
-	}
-	trustedPublisher := publisherTrusted(meta, policy)
-	if skillApproved(meta, policy.ApprovedSkills) || trustedPublisher {
-		meta.PermissionState = "approved"
-		if trustedPublisher {
-			meta.PermissionNotes = append(meta.PermissionNotes, "approved by trusted publisher policy")
-		} else {
-			meta.PermissionNotes = append(meta.PermissionNotes, "approved in config")
-		}
-		return
-	}
-	if meta.Source == SourceManaged && skillNeedsApproval(meta) {
-		if strings.TrimSpace(meta.Registry) == "" || strings.TrimSpace(meta.Publisher) == "" {
-			meta.PermissionState = "quarantined"
-			meta.PermissionNotes = append(meta.PermissionNotes, "managed skill is missing trusted origin details")
-			return
-		}
-		if len(policy.TrustedOwners) > 0 || len(policy.TrustedRegistries) > 0 {
-			meta.PermissionState = "quarantined"
-			meta.PermissionNotes = append(meta.PermissionNotes, "publisher or registry is not trusted by policy")
-			return
-		}
-	}
-	if skillNeedsApproval(meta) {
-		meta.PermissionState = "quarantined"
-		meta.PermissionNotes = append(meta.PermissionNotes, "operator approval required before script execution")
-		return
-	}
-	meta.PermissionState = "approved"
-}
-
-func ownerBlocked(meta *SkillMeta, blocked map[string]struct{}) bool {
-	if meta == nil || len(blocked) == 0 {
-		return false
-	}
-	_, ok := blocked[normalizeSupplyChainValue(meta.Publisher)]
-	return ok
-}
-
-func publisherTrusted(meta *SkillMeta, policy ApprovalPolicy) bool {
-	if meta == nil {
-		return false
-	}
-	anyPolicy := len(policy.TrustedOwners) > 0 || len(policy.TrustedRegistries) > 0
-	if !anyPolicy {
-		return false
-	}
-	if len(policy.TrustedOwners) > 0 {
-		if _, ok := policy.TrustedOwners[normalizeSupplyChainValue(meta.Publisher)]; !ok {
-			return false
-		}
-	}
-	if len(policy.TrustedRegistries) > 0 {
-		if _, ok := policy.TrustedRegistries[normalizeSupplyChainValue(meta.Registry)]; !ok {
-			return false
-		}
-	}
-	return true
-}
-
-func normalizeSupplyChainValue(value string) string {
-	value = strings.TrimSpace(strings.ToLower(value))
-	value = strings.TrimRight(value, "/")
-	return value
-}
-
-func skillNeedsApproval(meta *SkillMeta) bool {
-	if meta == nil {
-		return false
-	}
-	if meta.Permissions.Requested() || len(meta.Entrypoints) > 0 {
-		return true
-	}
-	return skillHasRunnableContent(meta.Dir)
-}
-
-func skillApproved(meta *SkillMeta, approved map[string]struct{}) bool {
-	if meta == nil || len(approved) == 0 {
-		return false
-	}
-	for _, key := range []string{meta.Name, meta.Key, strings.ToLower(meta.Name), strings.ToLower(meta.Key)} {
-		if _, ok := approved[key]; ok {
-			return true
-		}
-	}
-	return false
-}
-
-func loadManifest(dir string) (skillManifest, error) {
-	manifestPath := filepath.Join(dir, "skill.json")
-	info, err := os.Lstat(manifestPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return skillManifest{}, nil
-		}
-		return skillManifest{}, err
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return skillManifest{}, fs.ErrPermission
-	}
-	data, err := os.ReadFile(manifestPath)
-	if err != nil {
-		return skillManifest{}, err
-	}
-	var m skillManifest
-	if err := json.Unmarshal(data, &m); err != nil {
-		return skillManifest{}, fmt.Errorf("invalid skill manifest: %w", err)
-	}
-	return m, nil
-}
-
-func parseFrontMatter(content string) (skillFrontMatter, map[string]any, error) {
-	block, ok, err := frontMatterBlock(content)
-	if err != nil {
-		return skillFrontMatter{}, nil, err
-	}
-	if !ok {
-		return skillFrontMatter{}, map[string]any{}, nil
-	}
-	var raw map[string]any
-	if err := yaml.Unmarshal([]byte(block), &raw); err != nil {
-		return skillFrontMatter{}, nil, fmt.Errorf("invalid frontmatter: %w", err)
-	}
-	raw = toStringMap(raw)
-	var fm skillFrontMatter
-	if err := yaml.Unmarshal([]byte(block), &fm); err != nil {
-		return skillFrontMatter{}, nil, fmt.Errorf("invalid frontmatter: %w", err)
-	}
-	fm.Metadata = toStringMap(fm.Metadata)
-	return fm, raw, nil
-}
-
-func frontMatterBlock(content string) (string, bool, error) {
-	content = strings.ReplaceAll(content, "\r\n", "\n")
-	if !strings.HasPrefix(content, "---\n") {
-		return "", false, nil
-	}
-	rest := content[len("---\n"):]
-	end := strings.Index(rest, "\n---")
-	if end < 0 {
-		return "", false, fmt.Errorf("invalid frontmatter: missing closing delimiter")
-	}
-	block := rest[:end]
-	return block, true, nil
-}
-
-func extractFrontMatterSummary(content string) string {
-	fm, _, err := parseFrontMatter(content)
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(firstNonEmpty(fm.Summary, fm.Description))
-}
-
-func normalizeRuntimeMetadata(raw map[string]any) (SkillRuntimeMeta, bool) {
-	if len(raw) == 0 {
-		return SkillRuntimeMeta{}, false
-	}
-	var selected any
-	for _, key := range []string{"openclaw", "clawdbot", "clawdis"} {
-		if value, ok := raw[key]; ok {
-			selected = value
-			break
-		}
-	}
-	if selected == nil {
-		return SkillRuntimeMeta{}, false
-	}
-	buf, err := json.Marshal(toStringMap(selected))
-	if err != nil {
-		return SkillRuntimeMeta{}, false
-	}
-	var meta SkillRuntimeMeta
-	if err := json.Unmarshal(buf, &meta); err != nil {
-		return SkillRuntimeMeta{}, false
-	}
-	return meta, true
-}
-
-func applyEligibility(meta *SkillMeta, rawTop map[string]any, body string, entry EntryConfig, opts LoadOptions) {
-	if meta == nil {
-		return
-	}
-	if meta.ParseError != "" {
-		meta.Eligible = false
-		return
-	}
-	meta.Disabled = entry.Enabled != nil && !*entry.Enabled
-	if meta.Disabled {
-		meta.Missing = append(meta.Missing, "disabled in config")
-	}
-	meta.Unsupported = append(meta.Unsupported, detectUnsupported(*meta, rawTop, body, opts)...)
-	if meta.Metadata.Always && !meta.Disabled && len(meta.Unsupported) == 0 {
-		meta.Eligible = true
-		return
-	}
-	if len(meta.Metadata.OS) > 0 && !containsFold(meta.Metadata.OS, opts.OS) {
-		meta.Missing = append(meta.Missing, fmt.Sprintf("os mismatch: requires %s", strings.Join(meta.Metadata.OS, ", ")))
-	}
-	for _, bin := range meta.Metadata.Requires.Bins {
-		if !hasBinary(bin) {
-			meta.Missing = append(meta.Missing, "missing binary: "+bin)
-		}
-	}
-	if len(meta.Metadata.Requires.AnyBins) > 0 {
-		ok := false
-		for _, bin := range meta.Metadata.Requires.AnyBins {
-			if hasBinary(bin) {
-				ok = true
-				break
-			}
-		}
-		if !ok {
-			meta.Missing = append(meta.Missing, "missing any-of binary: "+strings.Join(meta.Metadata.Requires.AnyBins, ", "))
-		}
-	}
-	for _, envName := range meta.Metadata.Requires.Env {
-		if strings.TrimSpace(meta.RuntimeEnv[envName]) == "" {
-			meta.Missing = append(meta.Missing, "missing env: "+envName)
-		}
-	}
-	for _, key := range meta.Metadata.Requires.Config {
-		if !configTruthy(opts.GlobalConfig, entry.Config, key) {
-			meta.Missing = append(meta.Missing, "missing config: "+key)
-		}
-	}
-	meta.Eligible = !meta.Disabled && len(meta.Missing) == 0 && len(meta.Unsupported) == 0
-}
-
-func detectUnsupported(meta SkillMeta, rawTop map[string]any, body string, opts LoadOptions) []string {
-	var unsupported []string
-	if _, ok := rawTop["tools"]; ok {
-		if _, valid := parseDeclaredTools(rawTop["tools"]); !valid {
-			unsupported = append(unsupported, "frontmatter tools must be a list of string tool names")
-		}
-	}
-	if meta.Metadata.Nix != nil && strings.TrimSpace(meta.Metadata.Nix.Plugin) != "" {
-		unsupported = append(unsupported, "requires nix plugin: "+meta.Metadata.Nix.Plugin)
-	}
-	for _, toolName := range meta.AllowedTools {
-		if len(opts.AvailableTools) == 0 {
-			continue
-		}
-		if _, ok := opts.AvailableTools[toolName]; !ok {
-			unsupported = append(unsupported, "requires unsupported tool: "+toolName)
-		}
-	}
-	if meta.CommandDispatch != "" && meta.CommandDispatch != "tool" {
-		unsupported = append(unsupported, "unsupported command-dispatch: "+meta.CommandDispatch)
-	}
-	if meta.CommandDispatch == "tool" {
-		if meta.CommandTool == "" {
-			unsupported = append(unsupported, "command-dispatch tool requires command-tool")
-		} else if len(opts.AvailableTools) > 0 {
-			if _, ok := opts.AvailableTools[meta.CommandTool]; !ok {
-				unsupported = append(unsupported, "requires unsupported tool: "+meta.CommandTool)
-			}
-		}
-	}
-	if strings.Contains(body, "nodes.run") {
-		unsupported = append(unsupported, "requires unsupported tool: nodes.run")
-	}
-	return unsupported
-}
-
-func mergeStringLists(base []string, extra []string) []string {
-	out := append([]string{}, compactStrings(base)...)
-	seen := map[string]struct{}{}
-	for _, item := range out {
-		seen[item] = struct{}{}
-	}
-	for _, item := range compactStrings(extra) {
-		if _, ok := seen[item]; ok {
-			continue
-		}
-		seen[item] = struct{}{}
-		out = append(out, item)
-	}
-	return out
-}
-
-func buildRuntimeEnv(meta SkillMeta, entry EntryConfig, baseEnv map[string]string) map[string]string {
-	out := copyMap(baseEnv)
-	for k, v := range entry.Env {
-		if strings.TrimSpace(k) == "" || strings.TrimSpace(v) == "" {
-			continue
-		}
-		if strings.TrimSpace(out[k]) == "" {
-			out[k] = v
-		}
-	}
-	if meta.Metadata.PrimaryEnv != "" && strings.TrimSpace(entry.APIKey) != "" && strings.TrimSpace(out[meta.Metadata.PrimaryEnv]) == "" {
-		out[meta.Metadata.PrimaryEnv] = entry.APIKey
-	}
-	return out
-}
-
-func entryConfigForSkill(entries map[string]EntryConfig, meta SkillMeta) EntryConfig {
-	if len(entries) == 0 {
-		return EntryConfig{}
-	}
-	if entry, ok := entries[meta.Key]; ok {
-		return entry
-	}
-	return entries[meta.Name]
-}
-
-func (inv Inventory) Get(name string) (SkillMeta, bool) {
-	if strings.TrimSpace(name) == "" {
-		return SkillMeta{}, false
-	}
-	if s, ok := inv.byName[name]; ok {
-		return s, true
-	}
-	s, ok := inv.byName[strings.ToLower(name)]
-	return s, ok
-}
-
-func (inv Inventory) Summary(max int) string {
-	return summarize(inv.Skills, max)
-}
-
-func (inv Inventory) ModelSummary(max int) string {
-	filtered := make([]SkillMeta, 0, len(inv.Skills))
-	for _, skill := range inv.Skills {
-		if !skill.Eligible || skill.Hidden {
-			continue
-		}
-		filtered = append(filtered, skill)
-	}
-	if len(filtered) == 0 {
-		return "(no eligible skills found)"
-	}
-	if max <= 0 {
-		max = 50
-	}
-	lines := make([]string, 0, min(len(filtered), max)+1)
-	for i, skill := range filtered {
-		if i >= max {
-			lines = append(lines, "…")
-			break
-		}
-		desc := strings.TrimSpace(skill.Description)
-		if desc == "" {
-			desc = strings.TrimSpace(skill.Summary)
-		}
-		location := strings.TrimSpace(skill.Location)
-		if location == "" {
-			location = skill.Dir
-		}
-		lines = append(lines, fmt.Sprintf("- %s | %s | %s", skill.Name, oneLine(desc, 140), location))
-	}
-	return strings.Join(lines, "\n")
-}
-
-func summarize(skills []SkillMeta, max int) string {
-	if max <= 0 {
-		max = 50
-	}
-	lines := []string{}
-	for i, s := range skills {
-		if i >= max {
-			lines = append(lines, "…")
-			break
-		}
-		desc := strings.TrimSpace(firstNonEmpty(s.Description, s.Summary))
-		if desc == "" {
-			lines = append(lines, "- "+s.Name)
-			continue
-		}
-		lines = append(lines, "- "+s.Name+": "+oneLine(desc, 140))
-	}
-	if len(lines) == 0 {
-		return "(no skills found)"
-	}
-	return strings.Join(lines, "\n")
-}
-
-func (inv Inventory) RunEnv() map[string]string {
-	out := map[string]string{}
-	for _, skill := range inv.Skills {
-		if !skill.Eligible {
-			continue
-		}
-		for k, v := range filteredRuntimeEnv(skill.RuntimeEnv) {
-			if _, exists := out[k]; !exists {
-				out[k] = v
-			}
-		}
-	}
-	return out
-}
-
-func (inv Inventory) RunEnvForSkill(name string) map[string]string {
-	skill, ok := inv.Get(name)
-	if !ok || !skill.Eligible {
-		return nil
-	}
-	return filteredRuntimeEnv(skill.RuntimeEnv)
-}
-
-func (inv Inventory) ResolveBundlePath(name, relPath string) (string, error) {
-	skill, ok := inv.Get(name)
-	if !ok {
-		return "", fmt.Errorf("skill not found: %s", name)
-	}
-	root, err := filepath.EvalSymlinks(skill.Dir)
-	if err != nil {
-		return "", err
-	}
-	relPath = strings.TrimSpace(relPath)
-	if relPath == "" {
-		return root, nil
-	}
-	if filepath.IsAbs(relPath) {
-		return "", fmt.Errorf("bundle path must be relative")
-	}
-	full := filepath.Join(root, relPath)
-	clean := filepath.Clean(full)
-	real, err := filepath.EvalSymlinks(clean)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			return "", err
-		}
-		real = clean
-	}
-	rel, err := filepath.Rel(root, real)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fs.ErrPermission
-	}
-	return real, nil
-}
-
-func LoadBody(path string, maxBytes int) (string, error) {
-	if maxBytes <= 0 {
-		maxBytes = 200000
-	}
-	info, err := os.Lstat(path)
-	if err != nil {
-		return "", err
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return "", fs.ErrPermission
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-	if len(b) > maxBytes {
-		b = b[:maxBytes]
-	}
-	return string(b), nil
-}
-
-func hash(s string) string {
-	h := sha1.Sum([]byte(s))
-	return hex.EncodeToString(h[:8])
-}
-
-func hasBinary(name string) bool {
-	if strings.TrimSpace(name) == "" {
-		return false
-	}
-	_, err := exec.LookPath(name)
-	return err == nil
-}
-
-func configTruthy(global map[string]any, skill map[string]any, path string) bool {
-	if truthy(lookupPath(global, path)) {
-		return true
-	}
-	return truthy(lookupPath(skill, path))
-}
-
-func lookupPath(root map[string]any, path string) any {
-	if len(root) == 0 || strings.TrimSpace(path) == "" {
-		return nil
-	}
-	var current any = root
-	for _, part := range strings.Split(path, ".") {
-		m, ok := current.(map[string]any)
-		if !ok {
-			return nil
-		}
-		current, ok = m[part]
-		if !ok {
-			return nil
-		}
-	}
-	return current
-}
-
-func truthy(v any) bool {
-	switch val := v.(type) {
-	case nil:
-		return false
-	case bool:
-		return val
-	case string:
-		return strings.TrimSpace(val) != ""
-	case float64:
-		return val != 0
-	case int:
-		return val != 0
-	case []any:
-		return len(val) > 0
-	case map[string]any:
-		return len(val) > 0
-	default:
-		return true
-	}
-}
-
-func envMap(values []string) map[string]string {
-	out := make(map[string]string, len(values))
-	for _, raw := range values {
-		key, value, ok := strings.Cut(raw, "=")
-		if !ok {
-			continue
-		}
-		out[key] = value
-	}
-	return out
-}
-
-func toStringMap(v any) map[string]any {
-	switch val := v.(type) {
-	case map[string]any:
-		out := make(map[string]any, len(val))
-		for k, child := range val {
-			out[k] = normalizeValue(child)
-		}
-		return out
-	case map[any]any:
-		out := make(map[string]any, len(val))
-		for k, child := range val {
-			out[fmt.Sprint(k)] = normalizeValue(child)
-		}
-		return out
-	default:
-		return map[string]any{}
-	}
-}
-
-func normalizeValue(v any) any {
-	switch val := v.(type) {
-	case map[string]any, map[any]any:
-		return toStringMap(val)
-	case []any:
-		out := make([]any, 0, len(val))
-		for _, item := range val {
-			out = append(out, normalizeValue(item))
-		}
-		return out
-	default:
-		return v
-	}
-}
-
-func copyMap(in map[string]string) map[string]string {
-	out := make(map[string]string, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
-	return out
-}
-
-func filteredRuntimeEnv(env map[string]string) map[string]string {
-	out := map[string]string{}
-	for k, v := range env {
-		if strings.TrimSpace(k) == "" || strings.TrimSpace(v) == "" {
-			continue
-		}
-		if strings.TrimSpace(os.Getenv(k)) != "" {
-			continue
-		}
-		out[k] = v
-	}
-	return out
-}
-
-func compactStrings(values []string) []string {
-	out := make([]string, 0, len(values))
-	seen := map[string]struct{}{}
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
-		}
-		key := strings.ToLower(value)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		out = append(out, value)
-	}
-	return out
-}
-
-func skillHasRunnableContent(dir string) bool {
-	if strings.TrimSpace(dir) == "" {
-		return false
-	}
-	found := false
-	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || found {
-			return fs.SkipAll
-		}
-		if path == dir {
-			return nil
-		}
-		if d.Type()&os.ModeSymlink != 0 {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if d.IsDir() {
-			return nil
-		}
-		name := strings.ToLower(strings.TrimSpace(d.Name()))
-		if name == "skill.md" || name == "skill.json" {
-			return nil
-		}
-		info, infoErr := d.Info()
-		if infoErr != nil || !info.Mode().IsRegular() {
-			return nil
-		}
-		ext := strings.ToLower(filepath.Ext(name))
-		if info.Mode()&0o111 != 0 || ext == ".sh" || ext == ".py" {
-			found = true
-			return fs.SkipAll
-		}
-		return nil
-	})
-	return found
-}
-
-func containsFold(values []string, target string) bool {
-	for _, value := range values {
-		if strings.EqualFold(strings.TrimSpace(value), strings.TrimSpace(target)) {
-			return true
-		}
-	}
-	return false
-}
-
-func oneLine(s string, max int) string {
-	s = strings.ReplaceAll(s, "\n", " ")
-	s = strings.Join(strings.Fields(s), " ")
-	if max > 0 && len(s) > max {
-		s = s[:max] + "…"
-	}
-	return s
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 ````
 
@@ -24885,6 +26357,126 @@ func configSnapshotsEqual(left, right config.Config) bool {
 }
 ````
 
+## File: cmd/or3-intern/devices_cmd.go
+````go
+package main
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"strconv"
+	"strings"
+
+	"or3-intern/internal/app"
+	"or3-intern/internal/approval"
+	"or3-intern/internal/uxcopy"
+	"or3-intern/internal/uxstate"
+)
+
+func runDevicesCommand(ctx context.Context, broker *approval.Broker, args []string, stdout, stderr io.Writer) error {
+	_ = stderr
+	if broker == nil {
+		return fmt.Errorf("approval broker is not configured")
+	}
+	appSvc := app.NewServiceApp(nil, nil, nil, newCLIControlplane(broker))
+	if len(args) == 0 {
+		return fmt.Errorf("usage: devices <list|requests|approve|deny|revoke|rotate>")
+	}
+	switch strings.ToLower(strings.TrimSpace(args[0])) {
+	case "list":
+		if err := requireExactArgs(args[1:], 0, "devices list"); err != nil {
+			return err
+		}
+		items, err := appSvc.ListDevices(ctx, 100)
+		if err != nil {
+			return err
+		}
+		views := uxstate.BuildDeviceViews(items)
+		for _, item := range items {
+			fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", item.DeviceID, item.Status, item.Role, item.DisplayName)
+		}
+		for _, view := range views {
+			fmt.Fprintf(stdout, "  %s · %s · %s\n", view.Name, view.RoleLabel, view.Status)
+		}
+		return nil
+	case "requests":
+		if err := requireArgRange(args[1:], 0, 1, "devices requests [status]"); err != nil {
+			return err
+		}
+		status := ""
+		if len(args) > 1 {
+			status = strings.TrimSpace(args[1])
+		}
+		items, err := appSvc.ListPairingRequests(ctx, status, 100)
+		if err != nil {
+			return err
+		}
+		for _, item := range items {
+			fmt.Fprintf(stdout, "%d\t%s\t%s\t%s\t%s\n", item.ID, item.Status, item.Role, item.DeviceID, item.DisplayName)
+			fmt.Fprintf(stdout, "  %s requested %s access\n", firstNonEmptyString(item.DisplayName, item.DeviceID), uxcopy.DeviceRoleLabel(item.Role))
+		}
+		return nil
+	case "approve":
+		if err := requireExactArgs(args[1:], 1, "devices approve <pairing-request-id>"); err != nil {
+			return err
+		}
+		id, err := strconv.ParseInt(strings.TrimSpace(args[1]), 10, 64)
+		if err != nil {
+			return fmt.Errorf("invalid pairing request ID")
+		}
+		req, err := appSvc.ApprovePairingRequest(ctx, id, "cli")
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(stdout, "approved pairing request %d for %s\n", req.ID, req.DeviceID)
+		return nil
+	case "deny":
+		if err := requireExactArgs(args[1:], 1, "devices deny <pairing-request-id>"); err != nil {
+			return err
+		}
+		id, err := strconv.ParseInt(strings.TrimSpace(args[1]), 10, 64)
+		if err != nil {
+			return fmt.Errorf("invalid pairing request ID")
+		}
+		if err := appSvc.DenyPairingRequest(ctx, id, "cli"); err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(stdout, "denied pairing request %d\n", id)
+		return nil
+	case "revoke":
+		if err := requireExactArgs(args[1:], 1, "devices revoke <device-id>"); err != nil {
+			return err
+		}
+		deviceID := strings.TrimSpace(args[1])
+		if deviceID == "" {
+			return fmt.Errorf("device ID required")
+		}
+		if err := appSvc.RevokeDevice(ctx, deviceID, "cli"); err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(stdout, "revoked device %s\n", deviceID)
+		return nil
+	case "rotate":
+		if err := requireExactArgs(args[1:], 1, "devices rotate <device-id>"); err != nil {
+			return err
+		}
+		deviceID := strings.TrimSpace(args[1])
+		if deviceID == "" {
+			return fmt.Errorf("device ID required")
+		}
+		rotated, token, err := appSvc.RotateDevice(ctx, deviceID)
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(stdout, "rotated device %s\ntoken: %s\n", rotated.DeviceID, token)
+		return nil
+	default:
+		return fmt.Errorf("unknown devices subcommand: %s", args[0])
+	}
+}
+````
+
 ## File: internal/agent/prompt.go
 ````go
 package agent
@@ -25572,1163 +27164,6 @@ func cachedEmbed(ctx context.Context, provider *providers.Client, fingerprint, m
 	}
 	promptEmbedCache.mu.Unlock()
 	return vec, nil
-}
-````
-
-## File: internal/approval/broker.go
-````go
-package approval
-
-import (
-	"context"
-	"crypto/hmac"
-	"crypto/rand"
-	"crypto/sha256"
-	"database/sql"
-	"encoding/base64"
-	"encoding/hex"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"math/big"
-	"path/filepath"
-	"slices"
-	"strings"
-	"time"
-
-	"or3-intern/internal/config"
-	"or3-intern/internal/db"
-	"or3-intern/internal/security"
-)
-
-type SubjectType string
-
-const (
-	SubjectExec         SubjectType = "exec"
-	SubjectSkillExec    SubjectType = "skill_execution"
-	SubjectSecretAccess SubjectType = "secret_access"
-	SubjectMessageSend  SubjectType = "message_send"
-	SubjectFileTransfer SubjectType = "file_transfer"
-
-	RoleViewer        = "viewer"
-	RoleOperator      = "operator"
-	RoleServiceClient = "service-client"
-	RoleWebUI         = "web-ui"
-	RoleNode          = "node"
-	RoleAdmin         = "admin"
-
-	StatusPending   = "pending"
-	StatusApproved  = "approved"
-	StatusDenied    = "denied"
-	StatusCanceled  = "canceled"
-	StatusExpired   = "expired"
-	StatusExchanged = "exchanged"
-	StatusActive    = "active"
-	StatusRevoked   = "revoked"
-)
-
-type Broker struct {
-	DB      *db.DB
-	Audit   *security.AuditLogger
-	Config  config.ApprovalConfig
-	HostID  string
-	SignKey []byte
-	Now     func() time.Time
-}
-
-type Decision struct {
-	Allowed          bool
-	RequiresApproval bool
-	RequestID        int64
-	SubjectHash      string
-	Reason           string
-}
-
-type ExecEvaluation struct {
-	ExecutablePath string
-	Argv           []string
-	WorkingDir     string
-	EnvBindingHash string
-	ScriptHash     string
-	AgentID        string
-	SessionID      string
-	ToolName       string
-	AccessProfile  string
-	SandboxID      string
-	ApprovalToken  string
-}
-
-type SkillEvaluation struct {
-	SkillID        string
-	Version        string
-	Origin         string
-	TrustState     string
-	ScriptHash     string
-	EnvBindingHash string
-	TimeoutSeconds int
-	AgentID        string
-	SessionID      string
-	ApprovalToken  string
-}
-
-type ExecSubject struct {
-	Type            string   `json:"type"`
-	ExecutionHostID string   `json:"execution_host_id"`
-	SandboxID       string   `json:"sandbox_id,omitempty"`
-	ExecutablePath  string   `json:"executable_path"`
-	Argv            []string `json:"argv"`
-	WorkingDir      string   `json:"working_dir"`
-	EnvBindingHash  string   `json:"env_binding_hash"`
-	ScriptHash      string   `json:"script_hash,omitempty"`
-	RequestingAgent string   `json:"requesting_agent_id,omitempty"`
-	SessionID       string   `json:"session_id,omitempty"`
-	ToolName        string   `json:"tool_name"`
-	AccessProfile   string   `json:"access_profile,omitempty"`
-}
-
-type SkillExecutionSubject struct {
-	Type            string `json:"type"`
-	SkillID         string `json:"skill_id"`
-	Version         string `json:"version,omitempty"`
-	Origin          string `json:"origin,omitempty"`
-	TrustState      string `json:"trust_state,omitempty"`
-	ScriptHash      string `json:"script_hash"`
-	ExecutionHostID string `json:"execution_host_id"`
-	EnvBindingHash  string `json:"env_binding_hash"`
-	TimeoutSeconds  int    `json:"timeout_seconds"`
-	RequestingAgent string `json:"requesting_agent_id,omitempty"`
-	SessionID       string `json:"session_id,omitempty"`
-}
-
-type AllowlistScope struct {
-	HostID  string `json:"host_id,omitempty"`
-	Tool    string `json:"tool,omitempty"`
-	Profile string `json:"profile,omitempty"`
-	Agent   string `json:"agent,omitempty"`
-}
-
-type ExecAllowlistMatcher struct {
-	ExecutablePath string   `json:"executable_path,omitempty"`
-	PathGlob       string   `json:"path_glob,omitempty"`
-	Argv           []string `json:"argv,omitempty"`
-	WorkingDir     string   `json:"working_dir,omitempty"`
-	WorkingDirPref string   `json:"working_dir_prefix,omitempty"`
-	ScriptHash     string   `json:"script_hash,omitempty"`
-}
-
-type SkillAllowlistMatcher struct {
-	SkillID        string `json:"skill_id,omitempty"`
-	Version        string `json:"version,omitempty"`
-	Origin         string `json:"origin,omitempty"`
-	TrustState     string `json:"trust_state,omitempty"`
-	ScriptHash     string `json:"script_hash,omitempty"`
-	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
-}
-
-type ApprovalTokenClaims struct {
-	TokenID       int64  `json:"tid"`
-	RequestID     int64  `json:"rid"`
-	SubjectHash   string `json:"sub"`
-	ExecutionHost string `json:"host"`
-	IssuedAt      int64  `json:"iat"`
-	ExpiresAt     int64  `json:"exp"`
-}
-
-type IssuedApproval struct {
-	Request     db.ApprovalRequestRecord
-	Token       string
-	AllowlistID int64
-}
-
-type PairingRequestInput struct {
-	Role        string
-	DisplayName string
-	Origin      string
-	Metadata    map[string]any
-	DeviceID    string
-}
-
-type PairingExchangeInput struct {
-	RequestID int64
-	Code      string
-}
-
-func (b *Broker) now() time.Time {
-	if b != nil && b.Now != nil {
-		return b.Now().UTC()
-	}
-	return time.Now().UTC()
-}
-
-func (b *Broker) hostID() string {
-	if b == nil {
-		return ""
-	}
-	if strings.TrimSpace(b.HostID) != "" {
-		return strings.TrimSpace(b.HostID)
-	}
-	return strings.TrimSpace(b.Config.HostID)
-}
-
-func (b *Broker) EvaluateExec(ctx context.Context, req ExecEvaluation) (Decision, error) {
-	subject := ExecSubject{
-		Type:            string(SubjectExec),
-		ExecutionHostID: b.hostID(),
-		SandboxID:       strings.TrimSpace(req.SandboxID),
-		ExecutablePath:  strings.TrimSpace(req.ExecutablePath),
-		Argv:            append([]string{}, req.Argv...),
-		WorkingDir:      strings.TrimSpace(req.WorkingDir),
-		EnvBindingHash:  strings.TrimSpace(req.EnvBindingHash),
-		ScriptHash:      strings.TrimSpace(req.ScriptHash),
-		RequestingAgent: strings.TrimSpace(req.AgentID),
-		SessionID:       strings.TrimSpace(req.SessionID),
-		ToolName:        firstNonEmpty(req.ToolName, "exec"),
-		AccessProfile:   strings.TrimSpace(req.AccessProfile),
-	}
-	return b.evaluate(ctx, SubjectExec, subject, req.ApprovalToken,
-		AllowlistScope{HostID: subject.ExecutionHostID, Tool: subject.ToolName, Profile: subject.AccessProfile, Agent: subject.RequestingAgent},
-		ExecAllowlistMatcher{ExecutablePath: subject.ExecutablePath, Argv: subject.Argv, WorkingDir: subject.WorkingDir, ScriptHash: subject.ScriptHash},
-	)
-}
-
-func (b *Broker) EvaluateSkillExec(ctx context.Context, req SkillEvaluation) (Decision, error) {
-	subject := SkillExecutionSubject{
-		Type:            string(SubjectSkillExec),
-		SkillID:         strings.TrimSpace(req.SkillID),
-		Version:         strings.TrimSpace(req.Version),
-		Origin:          strings.TrimSpace(req.Origin),
-		TrustState:      strings.TrimSpace(req.TrustState),
-		ScriptHash:      strings.TrimSpace(req.ScriptHash),
-		ExecutionHostID: b.hostID(),
-		EnvBindingHash:  strings.TrimSpace(req.EnvBindingHash),
-		TimeoutSeconds:  req.TimeoutSeconds,
-		RequestingAgent: strings.TrimSpace(req.AgentID),
-		SessionID:       strings.TrimSpace(req.SessionID),
-	}
-	return b.evaluate(ctx, SubjectSkillExec, subject, req.ApprovalToken,
-		AllowlistScope{HostID: subject.ExecutionHostID, Tool: "run_skill_script", Agent: subject.RequestingAgent},
-		SkillAllowlistMatcher{SkillID: subject.SkillID, Version: subject.Version, Origin: subject.Origin, TrustState: subject.TrustState, ScriptHash: subject.ScriptHash, TimeoutSeconds: subject.TimeoutSeconds},
-	)
-}
-
-func (b *Broker) evaluate(ctx context.Context, subjectType SubjectType, subject any, approvalToken string, scope AllowlistScope, matcher any) (Decision, error) {
-	mode := b.modeFor(subjectType)
-	subjectJSON, subjectHash, err := CanonicalSubjectHash(subject)
-	if err != nil {
-		return Decision{}, err
-	}
-	if strings.TrimSpace(approvalToken) != "" {
-		if err := b.VerifyApprovalToken(ctx, approvalToken, subjectHash, b.hostID()); err == nil {
-			return Decision{Allowed: true, SubjectHash: subjectHash, Reason: "approved_token"}, nil
-		}
-	}
-	switch mode {
-	case config.ApprovalModeTrusted:
-		_ = b.audit(ctx, "approval.trusted", map[string]any{"subject_hash": subjectHash, "host_id": b.hostID(), "type": string(subjectType), "outcome": "allowed"})
-		return Decision{Allowed: true, SubjectHash: subjectHash, Reason: "trusted"}, nil
-	case config.ApprovalModeDeny:
-		_ = b.audit(ctx, "approval.blocked", map[string]any{"subject_hash": subjectHash, "host_id": b.hostID(), "type": string(subjectType), "outcome": "blocked", "reason": "deny"})
-		return Decision{Allowed: false, SubjectHash: subjectHash, Reason: "approval denied by policy"}, nil
-	}
-	if len(b.SignKey) == 0 || b.DB == nil {
-		_ = b.audit(ctx, "approval.blocked", map[string]any{"subject_hash": subjectHash, "host_id": b.hostID(), "type": string(subjectType), "outcome": "blocked", "reason": "broker_unavailable"})
-		return Decision{Allowed: false, SubjectHash: subjectHash, Reason: "approval broker unavailable"}, nil
-	}
-	if mode == config.ApprovalModeAllowlist {
-		matched, err := b.allowlistMatches(ctx, subjectType, scope, matcher)
-		if err != nil {
-			return Decision{}, err
-		}
-		if matched {
-			_ = b.audit(ctx, "approval.allowlist_match", map[string]any{"subject_hash": subjectHash, "host_id": b.hostID(), "type": string(subjectType), "outcome": "allowed"})
-			return Decision{Allowed: true, SubjectHash: subjectHash, Reason: "allowlist"}, nil
-		}
-	}
-	nowMS := b.now().UnixMilli()
-	existing, ok, err := b.DB.FindPendingApprovalRequest(ctx, string(subjectType), subjectHash, b.hostID(), nowMS)
-	if err != nil {
-		return Decision{}, err
-	}
-	if ok {
-		return Decision{Allowed: false, RequiresApproval: true, RequestID: existing.ID, SubjectHash: subjectHash, Reason: "approval required"}, nil
-	}
-	req, err := b.DB.CreateApprovalRequest(ctx, db.ApprovalRequestRecord{Type: string(subjectType), SubjectHash: subjectHash, SubjectJSON: subjectJSON, RequesterAgentID: scope.Agent, RequesterSessionID: extractSessionID(subject), ExecutionHostID: b.hostID(), Status: StatusPending, PolicyMode: string(mode), RequestedAt: nowMS, ExpiresAt: nowMS + int64(b.Config.PendingTTLSeconds*1000)})
-	if err != nil {
-		return Decision{}, err
-	}
-	_ = b.audit(ctx, "approval.requested", map[string]any{"request_id": req.ID, "subject_hash": subjectHash, "host_id": b.hostID(), "type": string(subjectType), "policy_mode": string(mode), "outcome": "pending"})
-	return Decision{Allowed: false, RequiresApproval: true, RequestID: req.ID, SubjectHash: subjectHash, Reason: "approval required"}, nil
-}
-
-func (b *Broker) ApproveRequest(ctx context.Context, requestID int64, actor string, alwaysAllow bool, note string) (IssuedApproval, error) {
-	req, err := b.DB.GetApprovalRequest(ctx, requestID)
-	if err != nil {
-		return IssuedApproval{}, err
-	}
-	if req.Status != StatusPending {
-		return IssuedApproval{}, fmt.Errorf("approval request is not pending")
-	}
-	nowMS := b.now().UnixMilli()
-	if req.ExpiresAt > 0 && req.ExpiresAt < nowMS {
-		_, _ = b.DB.ResolveApprovalRequest(ctx, requestID, StatusPending, StatusExpired, nowMS, actor, StatusExpired, "expired before approval")
-		return IssuedApproval{}, fmt.Errorf("approval request expired")
-	}
-	resolved, err := b.DB.ResolveApprovalRequest(ctx, requestID, StatusPending, StatusApproved, nowMS, strings.TrimSpace(actor), resolutionKind(alwaysAllow), strings.TrimSpace(note))
-	if err != nil {
-		return IssuedApproval{}, err
-	}
-	if !resolved {
-		return IssuedApproval{}, fmt.Errorf("approval request is not pending")
-	}
-	allowlistID := int64(0)
-	if alwaysAllow {
-		allowlistID, err = b.createAllowlistFromRequest(ctx, req, actor)
-		if err != nil {
-			return IssuedApproval{}, err
-		}
-	}
-	token, err := b.issueTokenForRequest(ctx, req, actor)
-	if err != nil {
-		return IssuedApproval{}, err
-	}
-	_ = b.audit(ctx, "approval.resolved", map[string]any{"request_id": requestID, "subject_hash": req.SubjectHash, "host_id": req.ExecutionHostID, "outcome": "approved", "actor": actor, "allowlist_id": allowlistID})
-	return IssuedApproval{Request: req, Token: token, AllowlistID: allowlistID}, nil
-}
-
-func (b *Broker) DenyRequest(ctx context.Context, requestID int64, actor string, note string) error {
-	req, err := b.DB.GetApprovalRequest(ctx, requestID)
-	if err != nil {
-		return err
-	}
-	if req.Status != StatusPending {
-		return fmt.Errorf("approval request is not pending")
-	}
-	nowMS := b.now().UnixMilli()
-	resolved, err := b.DB.ResolveApprovalRequest(ctx, requestID, StatusPending, StatusDenied, nowMS, strings.TrimSpace(actor), StatusDenied, strings.TrimSpace(note))
-	if err != nil {
-		return err
-	}
-	if !resolved {
-		return fmt.Errorf("approval request is not pending")
-	}
-	_ = b.audit(ctx, "approval.resolved", map[string]any{"request_id": requestID, "subject_hash": req.SubjectHash, "host_id": req.ExecutionHostID, "outcome": "denied", "actor": actor})
-	return nil
-}
-
-func (b *Broker) CancelRequest(ctx context.Context, requestID int64, actor string, note string) error {
-	req, err := b.DB.GetApprovalRequest(ctx, requestID)
-	if err != nil {
-		return err
-	}
-	if req.Status != StatusPending {
-		return fmt.Errorf("approval request is not pending")
-	}
-	nowMS := b.now().UnixMilli()
-	resolved, err := b.DB.ResolveApprovalRequest(ctx, requestID, StatusPending, StatusCanceled, nowMS, strings.TrimSpace(actor), StatusCanceled, strings.TrimSpace(note))
-	if err != nil {
-		return err
-	}
-	if !resolved {
-		return fmt.Errorf("approval request is not pending")
-	}
-	_ = b.audit(ctx, "approval.resolved", map[string]any{"request_id": requestID, "subject_hash": req.SubjectHash, "host_id": req.ExecutionHostID, "outcome": "canceled", "actor": actor})
-	return nil
-}
-
-func (b *Broker) ExpirePendingRequests(ctx context.Context, actor string) (int64, error) {
-	count, err := b.DB.ExpireApprovalRequests(ctx, b.now().UnixMilli(), strings.TrimSpace(actor), "expired by operator request")
-	if err != nil {
-		return 0, err
-	}
-	if count > 0 {
-		_ = b.audit(ctx, "approval.expired", map[string]any{"count": count, "actor": actor, "host_id": b.hostID()})
-	}
-	return count, nil
-}
-
-func (b *Broker) VerifyApprovalToken(ctx context.Context, token string, subjectHash string, hostID string) error {
-	claims, err := b.parseApprovalToken(token)
-	if err != nil {
-		return err
-	}
-	now := b.now().Unix()
-	if claims.ExpiresAt < now {
-		return fmt.Errorf("approval token expired")
-	}
-	if claims.ExecutionHost != strings.TrimSpace(hostID) {
-		return fmt.Errorf("approval token host mismatch")
-	}
-	if claims.SubjectHash != strings.TrimSpace(subjectHash) {
-		return fmt.Errorf("approval token subject mismatch")
-	}
-	record, err := b.DB.GetApprovalToken(ctx, claims.TokenID)
-	if err != nil {
-		return fmt.Errorf("approval token record not found")
-	}
-	if record.RevokedAt > 0 {
-		return fmt.Errorf("approval token revoked")
-	}
-	if record.SubjectHash != claims.SubjectHash {
-		return fmt.Errorf("approval token subject mismatch")
-	}
-	return nil
-}
-
-func (b *Broker) CreatePairingRequest(ctx context.Context, input PairingRequestInput) (db.PairingRequestRecord, string, error) {
-	role := normalizeRole(input.Role)
-	if role == "" {
-		return db.PairingRequestRecord{}, "", fmt.Errorf("invalid pairing role")
-	}
-	code, err := randomDigits(6)
-	if err != nil {
-		return db.PairingRequestRecord{}, "", err
-	}
-	deviceID := strings.TrimSpace(input.DeviceID)
-	if deviceID == "" {
-		deviceID, err = randomHex(12)
-		if err != nil {
-			return db.PairingRequestRecord{}, "", err
-		}
-	}
-	nowMS := b.now().UnixMilli()
-	status := StatusPending
-	approverID := ""
-	approvedAt := int64(0)
-	switch b.pairingMode() {
-	case config.ApprovalModeDeny:
-		_ = b.audit(ctx, "pairing.blocked", map[string]any{"device_id": deviceID, "role": role, "host_id": b.hostID(), "outcome": "blocked", "reason": "deny"})
-		return db.PairingRequestRecord{}, "", fmt.Errorf("pairing denied by policy")
-	case config.ApprovalModeTrusted:
-		if auditAuthKindFromContext(ctx) == "unauthenticated" {
-			status = StatusPending
-		} else {
-			status = StatusApproved
-			approverID = "policy:trusted"
-			approvedAt = nowMS
-		}
-	case config.ApprovalModeAllowlist:
-		allowed, allowErr := b.pairingAllowlistMatches(ctx, deviceID, role)
-		if allowErr != nil {
-			return db.PairingRequestRecord{}, "", allowErr
-		}
-		if !allowed {
-			_ = b.audit(ctx, "pairing.blocked", map[string]any{"device_id": deviceID, "role": role, "host_id": b.hostID(), "outcome": "blocked", "reason": "allowlist"})
-			return db.PairingRequestRecord{}, "", fmt.Errorf("pairing denied by policy")
-		}
-		if auditAuthKindFromContext(ctx) == "unauthenticated" {
-			status = StatusPending
-		} else {
-			status = StatusApproved
-			approverID = "policy:allowlist"
-			approvedAt = nowMS
-		}
-	}
-	req, err := b.DB.CreatePairingRequest(ctx, db.PairingRequestRecord{DeviceID: deviceID, Role: role, DisplayName: strings.TrimSpace(input.DisplayName), Origin: strings.TrimSpace(input.Origin), PairingCodeHash: hashBytes(code), RequestedAt: nowMS, ExpiresAt: nowMS + int64(b.Config.PairingCodeTTLSeconds*1000), Status: status, ApproverID: approverID, ApprovedAt: approvedAt, Metadata: cloneMap(input.Metadata)})
-	if err != nil {
-		return db.PairingRequestRecord{}, "", err
-	}
-	_ = b.audit(ctx, "pairing.requested", map[string]any{"pairing_request_id": req.ID, "device_id": req.DeviceID, "role": req.Role, "host_id": b.hostID(), "outcome": req.Status})
-	return req, code, nil
-}
-
-func (b *Broker) ApprovePairingRequest(ctx context.Context, id int64, actor string) (db.PairingRequestRecord, error) {
-	req, err := b.DB.GetPairingRequest(ctx, id)
-	if err != nil {
-		return db.PairingRequestRecord{}, err
-	}
-	if req.Status != StatusPending {
-		return db.PairingRequestRecord{}, fmt.Errorf("pairing request is not pending")
-	}
-	nowMS := b.now().UnixMilli()
-	if req.ExpiresAt > 0 && req.ExpiresAt < nowMS {
-		return db.PairingRequestRecord{}, fmt.Errorf("pairing request expired")
-	}
-	resolved, err := b.DB.ResolvePairingRequestStatus(ctx, id, StatusPending, StatusApproved, strings.TrimSpace(actor), nowMS, 0, req.Metadata)
-	if err != nil {
-		return db.PairingRequestRecord{}, err
-	}
-	if !resolved {
-		return db.PairingRequestRecord{}, fmt.Errorf("pairing request is not pending")
-	}
-	updated, err := b.DB.GetPairingRequest(ctx, id)
-	if err != nil {
-		return db.PairingRequestRecord{}, err
-	}
-	_ = b.audit(ctx, "pairing.resolved", map[string]any{"pairing_request_id": id, "device_id": req.DeviceID, "outcome": "approved", "actor": actor, "host_id": b.hostID()})
-	return updated, nil
-}
-
-func (b *Broker) DenyPairingRequest(ctx context.Context, id int64, actor string) error {
-	req, err := b.DB.GetPairingRequest(ctx, id)
-	if err != nil {
-		return err
-	}
-	if req.Status != StatusPending {
-		return fmt.Errorf("pairing request is not pending")
-	}
-	nowMS := b.now().UnixMilli()
-	resolved, err := b.DB.ResolvePairingRequestStatus(ctx, id, StatusPending, StatusDenied, strings.TrimSpace(actor), 0, nowMS, req.Metadata)
-	if err != nil {
-		return err
-	}
-	if !resolved {
-		return fmt.Errorf("pairing request is not pending")
-	}
-	_ = b.audit(ctx, "pairing.resolved", map[string]any{"pairing_request_id": id, "device_id": req.DeviceID, "outcome": "denied", "actor": actor, "host_id": b.hostID()})
-	return nil
-}
-
-func (b *Broker) ExchangePairingCode(ctx context.Context, input PairingExchangeInput) (db.PairedDeviceRecord, string, error) {
-	req, ok, err := b.DB.FindPairingRequestByCodeHash(ctx, input.RequestID, hashBytes(strings.TrimSpace(input.Code)))
-	if err != nil {
-		return db.PairedDeviceRecord{}, "", err
-	}
-	if !ok {
-		return db.PairedDeviceRecord{}, "", fmt.Errorf("pairing request not found")
-	}
-	nowMS := b.now().UnixMilli()
-	if req.ExpiresAt > 0 && req.ExpiresAt < nowMS {
-		return db.PairedDeviceRecord{}, "", fmt.Errorf("pairing request expired")
-	}
-	if req.Status != StatusApproved {
-		return db.PairedDeviceRecord{}, "", fmt.Errorf("pairing request is not approved")
-	}
-	claimed, err := b.DB.CompareAndSwapPairingRequestStatus(ctx, req.ID, StatusApproved, StatusExchanged)
-	if err != nil {
-		return db.PairedDeviceRecord{}, "", err
-	}
-	if !claimed {
-		return db.PairedDeviceRecord{}, "", fmt.Errorf("pairing request is not approved")
-	}
-	device, token, err := b.RotateDeviceToken(ctx, req.DeviceID, req.Role, req.DisplayName, cloneMap(req.Metadata))
-	if err != nil {
-		_, _ = b.DB.CompareAndSwapPairingRequestStatus(ctx, req.ID, StatusExchanged, StatusApproved)
-		return db.PairedDeviceRecord{}, "", err
-	}
-	_ = b.audit(ctx, "pairing.exchanged", map[string]any{"pairing_request_id": req.ID, "device_id": device.DeviceID, "role": device.Role, "host_id": b.hostID(), "outcome": "paired"})
-	return device, token, nil
-}
-
-func (b *Broker) AuthenticateDeviceToken(ctx context.Context, rawToken string, allowedRoles ...string) (db.PairedDeviceRecord, error) {
-	device, ok, err := b.DB.FindPairedDeviceByToken(ctx, rawToken)
-	if err != nil {
-		return db.PairedDeviceRecord{}, err
-	}
-	if !ok {
-		return db.PairedDeviceRecord{}, fmt.Errorf("device token not found")
-	}
-	if device.Status != StatusActive || device.RevokedAt > 0 {
-		return db.PairedDeviceRecord{}, fmt.Errorf("device token revoked")
-	}
-	if len(allowedRoles) > 0 && !slices.Contains(allowedRoles, device.Role) {
-		return db.PairedDeviceRecord{}, fmt.Errorf("device role not allowed")
-	}
-	_ = b.DB.TouchPairedDevice(ctx, device.DeviceID, b.now().UnixMilli())
-	return device, nil
-}
-
-func (b *Broker) RevokeDevice(ctx context.Context, deviceID string, actor string) error {
-	device, err := b.DB.GetPairedDevice(ctx, deviceID)
-	if err != nil {
-		return err
-	}
-	device.Status = StatusRevoked
-	device.RevokedAt = b.now().UnixMilli()
-	device.LastSeenAt = device.RevokedAt
-	if _, err := b.DB.UpsertPairedDevice(ctx, device); err != nil {
-		return err
-	}
-	_ = b.audit(ctx, "device.revoked", map[string]any{"device_id": deviceID, "actor": actor, "host_id": b.hostID(), "outcome": "revoked"})
-	return nil
-}
-
-func (b *Broker) RotateDeviceToken(ctx context.Context, deviceID, role, displayName string, metadata map[string]any) (db.PairedDeviceRecord, string, error) {
-	rawToken, err := randomHex(24)
-	if err != nil {
-		return db.PairedDeviceRecord{}, "", err
-	}
-	nowMS := b.now().UnixMilli()
-	device, err := b.DB.UpsertPairedDevice(ctx, db.PairedDeviceRecord{DeviceID: strings.TrimSpace(deviceID), Role: normalizeRole(role), DisplayName: strings.TrimSpace(displayName), TokenHash: hashBytes(rawToken), Status: StatusActive, CreatedAt: nowMS, LastSeenAt: nowMS, Metadata: cloneMap(metadata)})
-	if err != nil {
-		return db.PairedDeviceRecord{}, "", err
-	}
-	_ = b.audit(ctx, "device.rotated", map[string]any{"device_id": device.DeviceID, "role": device.Role, "host_id": b.hostID(), "outcome": "rotated"})
-	return device, rawToken, nil
-}
-
-func (b *Broker) RotatePairedDeviceToken(ctx context.Context, deviceID string) (db.PairedDeviceRecord, string, error) {
-	device, err := b.DB.GetPairedDevice(ctx, deviceID)
-	if err != nil {
-		return db.PairedDeviceRecord{}, "", err
-	}
-	if device.Status != StatusActive || device.RevokedAt > 0 {
-		return db.PairedDeviceRecord{}, "", fmt.Errorf("device token revoked")
-	}
-	return b.RotateDeviceToken(ctx, device.DeviceID, device.Role, device.DisplayName, cloneMap(device.Metadata))
-}
-
-func (b *Broker) ListApprovalRequests(ctx context.Context, status string, limit int) ([]db.ApprovalRequestRecord, error) {
-	return b.ListApprovalRequestsFiltered(ctx, status, "", limit)
-}
-
-func (b *Broker) ListApprovalRequestsFiltered(ctx context.Context, status, approvalType string, limit int) ([]db.ApprovalRequestRecord, error) {
-	return b.DB.ListApprovalRequestsFiltered(ctx, status, approvalType, limit)
-}
-
-func (b *Broker) ListPairingRequests(ctx context.Context, status string, limit int) ([]db.PairingRequestRecord, error) {
-	return b.DB.ListPairingRequests(ctx, status, limit)
-}
-
-func (b *Broker) ListDevices(ctx context.Context, limit int) ([]db.PairedDeviceRecord, error) {
-	return b.DB.ListPairedDevices(ctx, limit)
-}
-
-func (b *Broker) IsPairedChannelIdentity(ctx context.Context, channel, identity string) (bool, error) {
-	if b == nil || b.DB == nil {
-		return false, nil
-	}
-	channel = strings.ToLower(strings.TrimSpace(channel))
-	identity = strings.TrimSpace(identity)
-	if channel == "" || identity == "" {
-		return false, nil
-	}
-	for _, deviceID := range []string{channel + ":" + identity, identity} {
-		rec, err := b.DB.GetPairedDevice(ctx, deviceID)
-		if err == nil {
-			return rec.Status == StatusActive && rec.RevokedAt == 0, nil
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return false, err
-		}
-	}
-	for offset := 0; ; offset += 200 {
-		items, err := b.DB.ListPairedDevicesPage(ctx, 200, offset)
-		if err != nil {
-			return false, err
-		}
-		for _, item := range items {
-			if item.Status != StatusActive || item.RevokedAt > 0 {
-				continue
-			}
-			if pairedMetadataMatches(item.Metadata, channel, identity) {
-				return true, nil
-			}
-		}
-		if len(items) < 200 {
-			break
-		}
-	}
-	return false, nil
-}
-
-func (b *Broker) AddAllowlist(ctx context.Context, domain string, scope AllowlistScope, matcher any, actor string, expiresAt int64) (db.ApprovalAllowlistRecord, error) {
-	if err := ValidateAllowlistMatcher(domain, matcher); err != nil {
-		return db.ApprovalAllowlistRecord{}, err
-	}
-	scopeJSON, err := marshalCanonical(scope)
-	if err != nil {
-		return db.ApprovalAllowlistRecord{}, err
-	}
-	matcherJSON, err := marshalCanonical(matcher)
-	if err != nil {
-		return db.ApprovalAllowlistRecord{}, err
-	}
-	rec, err := b.DB.CreateApprovalAllowlist(ctx, db.ApprovalAllowlistRecord{Domain: domain, ScopeJSON: scopeJSON, MatcherJSON: matcherJSON, CreatedBy: actor, CreatedAt: b.now().UnixMilli(), ExpiresAt: expiresAt})
-	if err != nil {
-		return db.ApprovalAllowlistRecord{}, err
-	}
-	_ = b.audit(ctx, "approval.allowlist_changed", map[string]any{"allowlist_id": rec.ID, "domain": domain, "actor": actor, "host_id": b.hostID(), "action": "add"})
-	return rec, nil
-}
-
-func (b *Broker) RemoveAllowlist(ctx context.Context, id int64, actor string) error {
-	if err := b.DB.DisableApprovalAllowlist(ctx, id, b.now().UnixMilli()); err != nil {
-		return err
-	}
-	_ = b.audit(ctx, "approval.allowlist_changed", map[string]any{"allowlist_id": id, "actor": actor, "host_id": b.hostID(), "action": "remove"})
-	return nil
-}
-
-func (b *Broker) ListAllowlists(ctx context.Context, domain string, limit int) ([]db.ApprovalAllowlistRecord, error) {
-	return b.DB.ListApprovalAllowlists(ctx, domain, limit)
-}
-
-func CanonicalSubjectHash(subject any) (string, string, error) {
-	payload, err := marshalCanonical(subject)
-	if err != nil {
-		return "", "", err
-	}
-	hash := sha256.Sum256([]byte(payload))
-	return payload, hex.EncodeToString(hash[:]), nil
-}
-
-func marshalCanonical(value any) (string, error) {
-	blob, err := json.Marshal(value)
-	if err != nil {
-		return "", err
-	}
-	return string(blob), nil
-}
-
-func (b *Broker) allowlistMatches(ctx context.Context, subjectType SubjectType, scope AllowlistScope, matcher any) (bool, error) {
-	records, err := b.DB.ListApprovalAllowlists(ctx, string(subjectType), 200)
-	if err != nil {
-		return false, err
-	}
-	nowMS := b.now().UnixMilli()
-	for _, record := range records {
-		if record.DisabledAt > 0 {
-			continue
-		}
-		if record.ExpiresAt > 0 && record.ExpiresAt < nowMS {
-			continue
-		}
-		if !allowlistScopeMatches(scope, record.ScopeJSON) {
-			continue
-		}
-		matched, err := allowlistMatcherMatches(subjectType, matcher, record.MatcherJSON)
-		if err != nil {
-			return false, err
-		}
-		if matched {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-func allowlistScopeMatches(scope AllowlistScope, raw string) bool {
-	if strings.TrimSpace(raw) == "" {
-		return true
-	}
-	var rec AllowlistScope
-	if err := json.Unmarshal([]byte(raw), &rec); err != nil {
-		return false
-	}
-	if rec.HostID != "" && rec.HostID != scope.HostID {
-		return false
-	}
-	if rec.Tool != "" && rec.Tool != scope.Tool {
-		return false
-	}
-	if rec.Profile != "" && rec.Profile != scope.Profile {
-		return false
-	}
-	if rec.Agent != "" && rec.Agent != scope.Agent {
-		return false
-	}
-	return true
-}
-
-func pairedMetadataMatches(metadata map[string]any, channel, identity string) bool {
-	if len(metadata) == 0 {
-		return false
-	}
-	compare := func(key, want string) bool {
-		if want == "" {
-			return false
-		}
-		value := strings.TrimSpace(fmt.Sprint(metadata[key]))
-		return value != "" && strings.EqualFold(value, want)
-	}
-	if compare("channel", channel) && (compare("identity", identity) || compare("sender", identity) || compare("user_id", identity) || compare("chat_id", identity) || compare("from", identity)) {
-		return true
-	}
-	if compare(channel+"_identity", identity) || compare(channel+"_user_id", identity) || compare(channel+"_chat_id", identity) || compare(channel+"_from", identity) {
-		return true
-	}
-	return false
-}
-
-func allowlistMatcherMatches(subjectType SubjectType, current any, raw string) (bool, error) {
-	switch subjectType {
-	case SubjectExec:
-		var expected ExecAllowlistMatcher
-		if err := json.Unmarshal([]byte(raw), &expected); err != nil {
-			return false, err
-		}
-		if isEmptyExecAllowlistMatcher(expected) {
-			return false, nil
-		}
-		actual, _ := current.(ExecAllowlistMatcher)
-		if expected.ExecutablePath != "" && expected.ExecutablePath != actual.ExecutablePath {
-			return false, nil
-		}
-		if expected.PathGlob != "" {
-			matched, err := filepath.Match(expected.PathGlob, actual.ExecutablePath)
-			if err != nil || !matched {
-				return false, err
-			}
-		}
-		if len(expected.Argv) > 0 && !slices.Equal(expected.Argv, actual.Argv) {
-			return false, nil
-		}
-		if expected.WorkingDir != "" && expected.WorkingDir != actual.WorkingDir {
-			return false, nil
-		}
-		if expected.WorkingDirPref != "" && !strings.HasPrefix(actual.WorkingDir, expected.WorkingDirPref) {
-			return false, nil
-		}
-		if expected.ScriptHash != "" && expected.ScriptHash != actual.ScriptHash {
-			return false, nil
-		}
-		return true, nil
-	case SubjectSkillExec:
-		var expected SkillAllowlistMatcher
-		if err := json.Unmarshal([]byte(raw), &expected); err != nil {
-			return false, err
-		}
-		if isEmptySkillAllowlistMatcher(expected) {
-			return false, nil
-		}
-		actual, _ := current.(SkillAllowlistMatcher)
-		if expected.SkillID != "" && expected.SkillID != actual.SkillID {
-			return false, nil
-		}
-		if expected.Version != "" && expected.Version != actual.Version {
-			return false, nil
-		}
-		if expected.Origin != "" && expected.Origin != actual.Origin {
-			return false, nil
-		}
-		if expected.TrustState != "" && expected.TrustState != actual.TrustState {
-			return false, nil
-		}
-		if expected.ScriptHash != "" && expected.ScriptHash != actual.ScriptHash {
-			return false, nil
-		}
-		if expected.TimeoutSeconds > 0 && expected.TimeoutSeconds != actual.TimeoutSeconds {
-			return false, nil
-		}
-		return true, nil
-	default:
-		return false, nil
-	}
-}
-
-func ValidateAllowlistMatcher(domain string, matcher any) error {
-	switch SubjectType(strings.TrimSpace(domain)) {
-	case SubjectExec:
-		candidate, ok := matcher.(ExecAllowlistMatcher)
-		if !ok {
-			return fmt.Errorf("exec allowlist matcher is invalid")
-		}
-		if isEmptyExecAllowlistMatcher(candidate) {
-			return fmt.Errorf("exec allowlist matcher must include at least one executable, path, argv, working directory, or script constraint")
-		}
-		return nil
-	case SubjectSkillExec:
-		candidate, ok := matcher.(SkillAllowlistMatcher)
-		if !ok {
-			return fmt.Errorf("skill allowlist matcher is invalid")
-		}
-		if isEmptySkillAllowlistMatcher(candidate) {
-			return fmt.Errorf("skill allowlist matcher must include at least one skill, version, origin, trust, script, or timeout constraint")
-		}
-		return nil
-	default:
-		return fmt.Errorf("unsupported allowlist domain")
-	}
-}
-
-func isEmptyExecAllowlistMatcher(matcher ExecAllowlistMatcher) bool {
-	return strings.TrimSpace(matcher.ExecutablePath) == "" &&
-		strings.TrimSpace(matcher.PathGlob) == "" &&
-		len(matcher.Argv) == 0 &&
-		strings.TrimSpace(matcher.WorkingDir) == "" &&
-		strings.TrimSpace(matcher.WorkingDirPref) == "" &&
-		strings.TrimSpace(matcher.ScriptHash) == ""
-}
-
-func isEmptySkillAllowlistMatcher(matcher SkillAllowlistMatcher) bool {
-	return strings.TrimSpace(matcher.SkillID) == "" &&
-		strings.TrimSpace(matcher.Version) == "" &&
-		strings.TrimSpace(matcher.Origin) == "" &&
-		strings.TrimSpace(matcher.TrustState) == "" &&
-		strings.TrimSpace(matcher.ScriptHash) == "" &&
-		matcher.TimeoutSeconds == 0
-}
-
-func (b *Broker) createAllowlistFromRequest(ctx context.Context, req db.ApprovalRequestRecord, actor string) (int64, error) {
-	switch SubjectType(req.Type) {
-	case SubjectExec:
-		var subject ExecSubject
-		if err := json.Unmarshal([]byte(req.SubjectJSON), &subject); err != nil {
-			return 0, err
-		}
-		rec, err := b.AddAllowlist(ctx, req.Type, AllowlistScope{HostID: subject.ExecutionHostID, Tool: subject.ToolName, Profile: subject.AccessProfile, Agent: subject.RequestingAgent}, ExecAllowlistMatcher{ExecutablePath: subject.ExecutablePath, Argv: subject.Argv, WorkingDir: subject.WorkingDir, ScriptHash: subject.ScriptHash}, actor, 0)
-		if err != nil {
-			return 0, err
-		}
-		return rec.ID, nil
-	case SubjectSkillExec:
-		var subject SkillExecutionSubject
-		if err := json.Unmarshal([]byte(req.SubjectJSON), &subject); err != nil {
-			return 0, err
-		}
-		rec, err := b.AddAllowlist(ctx, req.Type, AllowlistScope{HostID: subject.ExecutionHostID, Tool: "run_skill_script", Agent: subject.RequestingAgent}, SkillAllowlistMatcher{SkillID: subject.SkillID, Version: subject.Version, Origin: subject.Origin, TrustState: subject.TrustState, ScriptHash: subject.ScriptHash, TimeoutSeconds: subject.TimeoutSeconds}, actor, 0)
-		if err != nil {
-			return 0, err
-		}
-		return rec.ID, nil
-	default:
-		return 0, nil
-	}
-}
-
-func (b *Broker) issueTokenForRequest(ctx context.Context, req db.ApprovalRequestRecord, actor string) (string, error) {
-	now := b.now()
-	record, err := b.DB.CreateApprovalToken(ctx, db.ApprovalTokenRecord{ApprovalRequestID: req.ID, SubjectHash: req.SubjectHash, IssuedAt: now.UnixMilli(), ExpiresAt: now.Add(time.Duration(b.Config.ApprovalTokenTTLSeconds) * time.Second).UnixMilli(), Issuer: actor})
-	if err != nil {
-		return "", err
-	}
-	claims := ApprovalTokenClaims{TokenID: record.ID, RequestID: req.ID, SubjectHash: req.SubjectHash, ExecutionHost: req.ExecutionHostID, IssuedAt: now.Unix(), ExpiresAt: now.Add(time.Duration(b.Config.ApprovalTokenTTLSeconds) * time.Second).Unix()}
-	payload, err := json.Marshal(claims)
-	if err != nil {
-		return "", err
-	}
-	payloadPart := base64.RawURLEncoding.EncodeToString(payload)
-	signature := hex.EncodeToString(signToken(b.SignKey, payloadPart))
-	_ = b.audit(ctx, "approval.token_issued", map[string]any{"request_id": req.ID, "token_id": record.ID, "subject_hash": req.SubjectHash, "host_id": req.ExecutionHostID, "actor": actor, "outcome": "issued"})
-	return payloadPart + "." + signature, nil
-}
-
-func (b *Broker) parseApprovalToken(token string) (ApprovalTokenClaims, error) {
-	payloadPart, signaturePart, ok := strings.Cut(strings.TrimSpace(token), ".")
-	if !ok || payloadPart == "" || signaturePart == "" {
-		return ApprovalTokenClaims{}, fmt.Errorf("invalid approval token format")
-	}
-	signature, err := hex.DecodeString(signaturePart)
-	if err != nil {
-		return ApprovalTokenClaims{}, fmt.Errorf("invalid approval token signature")
-	}
-	expected := signToken(b.SignKey, payloadPart)
-	if !hmac.Equal(signature, expected) {
-		return ApprovalTokenClaims{}, fmt.Errorf("invalid approval token signature")
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(payloadPart)
-	if err != nil {
-		return ApprovalTokenClaims{}, fmt.Errorf("invalid approval token payload")
-	}
-	var claims ApprovalTokenClaims
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return ApprovalTokenClaims{}, fmt.Errorf("invalid approval token payload")
-	}
-	return claims, nil
-}
-
-func signToken(key []byte, payload string) []byte {
-	mac := hmac.New(sha256.New, key)
-	_, _ = mac.Write([]byte(payload))
-	return mac.Sum(nil)
-}
-
-func (b *Broker) modeFor(subjectType SubjectType) config.ApprovalMode {
-	switch subjectType {
-	case SubjectExec:
-		return b.Config.Exec.Mode
-	case SubjectSkillExec:
-		return b.Config.SkillExecution.Mode
-	case SubjectSecretAccess:
-		return b.Config.SecretAccess.Mode
-	case SubjectMessageSend:
-		return b.Config.MessageSend.Mode
-	default:
-		return config.ApprovalModeDeny
-	}
-}
-
-func (b *Broker) pairingMode() config.ApprovalMode {
-	if b == nil {
-		return config.ApprovalModeDeny
-	}
-	return b.Config.Pairing.Mode
-}
-
-func (b *Broker) pairingAllowlistMatches(ctx context.Context, deviceID, role string) (bool, error) {
-	deviceID = strings.TrimSpace(deviceID)
-	if deviceID == "" || b == nil || b.DB == nil {
-		return false, nil
-	}
-	device, err := b.DB.GetPairedDevice(ctx, deviceID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return false, nil
-		}
-		return false, err
-	}
-	return device.Status == StatusActive && device.RevokedAt == 0 && device.Role == role, nil
-}
-
-// auditAuthKindKey is a context key that carries the authentication kind for
-// audit records (e.g. "shared-secret" or "paired-device").
-type auditAuthKindKey struct{}
-
-type auditActorKey struct{}
-
-// ContextWithAuditAuthKind stamps the auth_kind into ctx so that subsequent
-// broker.audit calls include it in every payload automatically.
-func ContextWithAuditAuthKind(ctx context.Context, kind string) context.Context {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	kind = strings.TrimSpace(kind)
-	if kind == "" {
-		return ctx
-	}
-	return context.WithValue(ctx, auditAuthKindKey{}, kind)
-}
-
-func ContextWithAuditActor(ctx context.Context, actor string) context.Context {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	actor = strings.TrimSpace(actor)
-	if actor == "" {
-		return ctx
-	}
-	return context.WithValue(ctx, auditActorKey{}, actor)
-}
-
-func auditAuthKindFromContext(ctx context.Context) string {
-	if ctx == nil {
-		return ""
-	}
-	kind, _ := ctx.Value(auditAuthKindKey{}).(string)
-	return kind
-}
-
-func auditActorFromContext(ctx context.Context) string {
-	if ctx == nil {
-		return ""
-	}
-	actor, _ := ctx.Value(auditActorKey{}).(string)
-	return strings.TrimSpace(actor)
-}
-
-func (b *Broker) audit(ctx context.Context, eventType string, payload map[string]any) error {
-	if b == nil || b.Audit == nil {
-		return nil
-	}
-	if kind := auditAuthKindFromContext(ctx); kind != "" {
-		merged := make(map[string]any, len(payload)+1)
-		for k, v := range payload {
-			merged[k] = v
-		}
-		merged["auth_kind"] = kind
-		payload = merged
-	}
-	actor := auditActorFromContext(ctx)
-	if payloadActor, ok := payload["actor"].(string); ok && strings.TrimSpace(payloadActor) != "" {
-		actor = strings.TrimSpace(payloadActor)
-	}
-	if actor == "" {
-		actor = "approval"
-	}
-	return b.Audit.Record(ctx, eventType, "", actor, payload)
-}
-
-// AuditExecEvent records an execution lifecycle event (start, complete, fail, blocked)
-// for exec or skill_exec tools. It attaches host_id automatically and merges any
-// extra fields provided by the caller. The call is best-effort; errors are discarded.
-func (b *Broker) AuditExecEvent(ctx context.Context, eventType string, subjectHash string, extra map[string]any) {
-	if b == nil {
-		return
-	}
-	payload := map[string]any{
-		"subject_hash": subjectHash,
-		"host_id":      b.hostID(),
-	}
-	for k, v := range extra {
-		payload[k] = v
-	}
-	_ = b.audit(ctx, eventType, payload)
-}
-
-func extractSessionID(subject any) string {
-	switch value := subject.(type) {
-	case ExecSubject:
-		return value.SessionID
-	case SkillExecutionSubject:
-		return value.SessionID
-	default:
-		return ""
-	}
-}
-
-func resolutionKind(alwaysAllow bool) string {
-	if alwaysAllow {
-		return "approve_and_allowlist"
-	}
-	return "approve_once"
-}
-
-func hashBytes(raw string) []byte {
-	sum := sha256.Sum256([]byte(strings.TrimSpace(raw)))
-	return sum[:]
-}
-
-func randomHex(size int) (string, error) {
-	if size <= 0 {
-		return "", nil
-	}
-	buf := make([]byte, size)
-	if _, err := rand.Read(buf); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(buf), nil
-}
-
-func randomDigits(length int) (string, error) {
-	if length <= 0 {
-		length = 6
-	}
-	max := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(length)), nil)
-	n, err := rand.Int(rand.Reader, max)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%0*d", length, n.Int64()), nil
-}
-
-func normalizeRole(role string) string {
-	switch strings.ToLower(strings.TrimSpace(role)) {
-	case RoleViewer:
-		return RoleViewer
-	case RoleOperator:
-		return RoleOperator
-	case RoleServiceClient:
-		return RoleServiceClient
-	case RoleWebUI:
-		return RoleWebUI
-	case RoleNode:
-		return RoleNode
-	case RoleAdmin:
-		return RoleAdmin
-	default:
-		return ""
-	}
-}
-
-func cloneMap(in map[string]any) map[string]any {
-	if len(in) == 0 {
-		return map[string]any{}
-	}
-	out := make(map[string]any, len(in))
-	for key, value := range in {
-		out[key] = value
-	}
-	return out
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value != "" {
-			return value
-		}
-	}
-	return ""
 }
 ````
 
@@ -28212,699 +28647,1160 @@ func channelAccessSummary(policy config.InboundPolicy, openAccess, hasAllowlist 
 }
 ````
 
-## File: cmd/or3-intern/help.go
+## File: internal/approval/broker.go
 ````go
-package main
+package approval
 
 import (
-	"flag"
+	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
+	"math/big"
+	"path/filepath"
+	"slices"
 	"strings"
-	"text/tabwriter"
+	"time"
+
+	"or3-intern/internal/config"
+	"or3-intern/internal/db"
+	"or3-intern/internal/security"
 )
 
-type helpCommand struct {
-	Usage       string
-	Summary     string
-	Description []string
-	Subcommands []helpItem
-	Flags       []helpItem
-	Examples    []string
+type SubjectType string
+
+const (
+	SubjectExec         SubjectType = "exec"
+	SubjectSkillExec    SubjectType = "skill_execution"
+	SubjectSecretAccess SubjectType = "secret_access"
+	SubjectMessageSend  SubjectType = "message_send"
+	SubjectFileTransfer SubjectType = "file_transfer"
+
+	RoleViewer        = "viewer"
+	RoleOperator      = "operator"
+	RoleServiceClient = "service-client"
+	RoleWebUI         = "web-ui"
+	RoleNode          = "node"
+	RoleAdmin         = "admin"
+
+	StatusPending   = "pending"
+	StatusApproved  = "approved"
+	StatusDenied    = "denied"
+	StatusCanceled  = "canceled"
+	StatusExpired   = "expired"
+	StatusExchanged = "exchanged"
+	StatusActive    = "active"
+	StatusRevoked   = "revoked"
+)
+
+type Broker struct {
+	DB      *db.DB
+	Audit   *security.AuditLogger
+	Config  config.ApprovalConfig
+	HostID  string
+	SignKey []byte
+	Now     func() time.Time
 }
 
-type helpItem struct {
-	Name        string
-	Description string
+type Decision struct {
+	Allowed          bool
+	RequiresApproval bool
+	RequestID        int64
+	SubjectHash      string
+	Reason           string
 }
 
-var rootHelpSections = []struct {
-	Title string
-	Items []helpItem
-}{
-	{
-		Title: "Primary commands",
-		Items: []helpItem{
-			{Name: "configure", Description: "Interactive configuration wizard for setup and later edits"},
-			{Name: "init", Description: "Guided first-run setup for config and provider settings"},
-			{Name: "config-path", Description: "Print the resolved config.json path"},
-			{Name: "chat", Description: "Interactive CLI session"},
-			{Name: "serve", Description: "Run enabled channels, triggers, heartbeat, cron, and workers"},
-			{Name: "service", Description: "Run the authenticated internal HTTP API"},
-			{Name: "agent", Description: "Run a one-shot foreground turn"},
-			{Name: "version", Description: "Print the binary version"},
-		},
-	},
-	{
-		Title: "Operational commands",
-		Items: []helpItem{
-			{Name: "doctor", Description: "Diagnose readiness issues, explain risk, and repair safe local problems"},
-			{Name: "capabilities", Description: "Inspect runtime posture, ingress policy, approvals, and profiles"},
-			{Name: "embeddings", Description: "Inspect or rebuild stored memory and doc embeddings after provider/model changes"},
-			{Name: "secrets", Description: "Manage encrypted secret references stored in SQLite"},
-			{Name: "audit", Description: "Inspect or verify the append-only audit chain"},
-			{Name: "migrate-jsonl", Description: "Import legacy session history from JSONL"},
-			{Name: "migrate-openclaw", Description: "Import a local OpenClaw agent into or3-intern files, daily notes, and dreams"},
-		},
-	},
-	{
-		Title: "Workflow commands",
-		Items: []helpItem{
-			{Name: "skills", Description: "List, inspect, search, install, update, check, and remove skills"},
-			{Name: "approvals", Description: "Inspect and resolve approval requests and allowlists"},
-			{Name: "devices", Description: "Inspect paired devices and legacy pairing request helpers"},
-			{Name: "pairing", Description: "Manage first-class pairing workflows"},
-			{Name: "scope", Description: "Link session keys to a shared history scope"},
-		},
-	},
+type ExecEvaluation struct {
+	ExecutablePath string
+	Argv           []string
+	WorkingDir     string
+	EnvBindingHash string
+	ScriptHash     string
+	AgentID        string
+	SessionID      string
+	ToolName       string
+	AccessProfile  string
+	SandboxID      string
+	ApprovalToken  string
 }
 
-var helpTopics = map[string]helpCommand{
-	"configure": {
-		Usage:   "or3-intern configure [--section provider|storage|workspace|web|channels|service] ...",
-		Summary: "Interactive configuration wizard for first-run setup and later edits.",
-		Description: []string{
-			"Loads the active config when present, shows a short summary, and prompts only for the sections you want to change.",
-			"When stdin and stdout are terminals, configure opens the Bubble Tea setup UI with arrow-key navigation, enter to select, space to toggle, s to save, and q to quit.",
-			"When either side is non-interactive, configure stays in the plain text prompt flow so pipes, redirected input, and scripts keep working.",
-			"The provider section can also set an optional embedding dimensions override for providers/models that support truncated embedding vectors.",
-			"Use repeatable --section flags for targeted updates, or run without flags to choose sections interactively.",
-		},
-		Flags: []helpItem{
-			{Name: "--section <name>", Description: "Repeatable section filter: provider, storage, workspace, web, channels, service"},
-		},
-		Examples: []string{"or3-intern configure", "or3-intern configure --section provider --section web", "or3-intern configure --section channels"},
-	},
-	"init": {
-		Usage:   "or3-intern init",
-		Summary: "Guided first-run setup alias.",
-		Description: []string{
-			"Runs the same configure wizard with the original first-run sections: provider, storage, workspace, and web.",
-			"Like configure, it opens the Bubble Tea UI only on an interactive terminal and falls back to plain text prompts when used non-interactively.",
-			"Use `or3-intern configure` directly when you want channels, service, or custom section selection.",
-		},
-		Examples: []string{"or3-intern init"},
-	},
-	"config-path": {
-		Usage:   "or3-intern config-path",
-		Summary: "Print the resolved path to config.json.",
-		Description: []string{
-			"Respects --config when provided; otherwise prints the default path under ~/.or3-intern/.",
-		},
-		Examples: []string{"or3-intern config-path", "or3-intern --config /tmp/or3.json config-path"},
-	},
-	"chat": {
-		Usage:   "or3-intern chat",
-		Summary: "Start the interactive terminal chat UI.",
-		Description: []string{
-			"This is the default command when no command is provided.",
-			"Inside chat, use /new to archive the current session into memory and then clear the live message history for a fresh conversation.",
-		},
-		Examples: []string{"or3-intern chat"},
-	},
-	"serve": {
-		Usage:    "or3-intern serve",
-		Summary:  "Run enabled channels, triggers, heartbeat jobs, cron, and the shared worker runtime.",
-		Examples: []string{"or3-intern serve"},
-	},
-	"service": {
-		Usage:    "or3-intern service",
-		Summary:  "Run the authenticated internal HTTP API used by OR3 Net.",
-		Examples: []string{"or3-intern service"},
-	},
-	"agent": {
-		Usage:   "or3-intern agent -m <message> [-s session] [--approval-token token]",
-		Summary: "Run a one-shot foreground turn without entering interactive chat.",
-		Flags: []helpItem{
-			{Name: "-m <message>", Description: "Message to send to the agent"},
-			{Name: "-s <session>", Description: "Session key to use"},
-			{Name: "--approval-token <token>", Description: "One-shot approval token to attach to the request"},
-		},
-		Examples: []string{"or3-intern agent -m \"hello\"", "or3-intern agent -m \"summarize this repo\" -s review"},
-	},
-	"doctor": {
-		Usage:   "or3-intern doctor [--strict] [--json] [--fix] [--interactive] [--probe] [--area name] [--severity level] [--fixable-only]",
-		Summary: "Diagnose readiness and safety issues, then repair the safe ones.",
-		Description: []string{
-			"Doctor is the main readiness command for config, local runtime prerequisites, ingress posture, and hardened startup checks.",
-			"Use --fix for deterministic automatic repairs such as missing directories, key files, or conservative channel ingress defaults.",
-			"Use --fix --interactive when multiple valid repairs exist, such as choosing pairing vs allowlist for an enabled channel.",
-		},
-		Flags: []helpItem{
-			{Name: "--strict", Description: "Exit non-zero when warnings are found"},
-			{Name: "--json", Description: "Emit a structured JSON report"},
-			{Name: "--fix", Description: "Apply safe automatic fixes where available"},
-			{Name: "--interactive", Description: "Prompt for guided fixes on ambiguous findings"},
-			{Name: "--probe", Description: "Run bounded local runtime probes"},
-			{Name: "--area <name>", Description: "Repeatable area filter"},
-			{Name: "--severity <level>", Description: "Minimum severity filter: info, warn, error, block"},
-			{Name: "--fixable-only", Description: "Show only findings with available fixes"},
-		},
-		Examples: []string{"or3-intern doctor", "or3-intern doctor --strict", "or3-intern doctor --fix", "or3-intern doctor --fix --interactive", "or3-intern doctor --json --severity error"},
-	},
-	"capabilities": {
-		Usage:   "or3-intern capabilities [--channel name] [--trigger name] [--json]",
-		Summary: "Inspect the effective runtime posture, ingress policy, approvals, and access profiles.",
-		Flags: []helpItem{
-			{Name: "--channel <name>", Description: "Filter report to a specific channel"},
-			{Name: "--trigger <name>", Description: "Filter report to a specific trigger"},
-			{Name: "--json", Description: "Emit JSON instead of human-readable text"},
-		},
-		Examples: []string{"or3-intern capabilities", "or3-intern capabilities --channel slack --json"},
-	},
-	"embeddings": {
-		Usage:   "or3-intern embeddings <status|rebuild> [memory|docs|all]",
-		Summary: "Inspect or rebuild persisted embedding state after provider or embedding-model changes.",
-		Description: []string{
-			"Use status to compare the stored memory-vector fingerprint against the current provider API base and embedding model.",
-			"Use rebuild memory after changing embedding providers or models so existing long-term memory vectors are regenerated in the new embedding space.",
-			"Use rebuild docs or rebuild all when document indexing is enabled and you want indexed file embeddings refreshed too.",
-		},
-		Subcommands: []helpItem{
-			{Name: "status", Description: "Show stored vector dims, stored embedding fingerprint, current fingerprint, and mismatch status"},
-			{Name: "rebuild [memory|docs|all]", Description: "Regenerate persisted embeddings for memory notes, indexed docs, or both"},
-		},
-		Examples: []string{"or3-intern embeddings status", "or3-intern embeddings rebuild memory", "or3-intern embeddings rebuild all"},
-	},
-	"secrets": {
-		Usage:   "or3-intern secrets <set|delete|list> ...",
-		Summary: "Manage encrypted secret references stored in SQLite.",
-		Subcommands: []helpItem{
-			{Name: "set <name> <value>", Description: "Store or replace a secret"},
-			{Name: "delete <name>", Description: "Delete a stored secret"},
-			{Name: "list", Description: "List stored secret names"},
-		},
-		Examples: []string{"or3-intern secrets set provider.openai sk-...", "or3-intern secrets list"},
-	},
-	"audit": {
-		Usage:       "or3-intern audit [verify]",
-		Summary:     "Inspect or verify the append-only audit chain.",
-		Subcommands: []helpItem{{Name: "verify", Description: "Verify the audit chain and report integrity status"}},
-		Examples:    []string{"or3-intern audit", "or3-intern audit verify"},
-	},
-	"approvals": {
-		Usage:   "or3-intern approvals <list|show|approve|deny|allowlist> ...",
-		Summary: "Inspect and resolve approval requests and allowlist rules.",
-		Description: []string{
-			"All approval subcommands work directly against the local SQLite database.",
-		},
-		Subcommands: []helpItem{
-			{Name: "list [status]", Description: "List approval requests, optionally filtered by status"},
-			{Name: "show <id>", Description: "Show one approval request in detail"},
-			{Name: "approve <id> [--allowlist] [--note text]", Description: "Approve a request and optionally create a matching allowlist rule"},
-			{Name: "deny <id> [--note text]", Description: "Deny a request"},
-			{Name: "allowlist <list|add|remove>", Description: "Manage persistent allowlist rules"},
-		},
-		Examples: []string{"or3-intern approvals list pending", "or3-intern approvals approve 42 --allowlist"},
-	},
-	"approvals approve": {
-		Usage:   "or3-intern approvals approve <id> [--allowlist] [--note text]",
-		Summary: "Approve a pending approval request.",
-		Flags: []helpItem{
-			{Name: "--allowlist", Description: "Create a matching persistent allowlist rule"},
-			{Name: "--note <text>", Description: "Attach a free-text resolution note"},
-		},
-		Examples: []string{"or3-intern approvals approve 42", "or3-intern approvals approve 42 --allowlist --note \"reviewed\""},
-	},
-	"approvals deny": {
-		Usage:    "or3-intern approvals deny <id> [--note text]",
-		Summary:  "Deny a pending approval request.",
-		Flags:    []helpItem{{Name: "--note <text>", Description: "Attach a free-text resolution note"}},
-		Examples: []string{"or3-intern approvals deny 42", "or3-intern approvals deny 42 --note \"blocked\""},
-	},
-	"approvals allowlist": {
-		Usage:   "or3-intern approvals allowlist <list|add|remove> ...",
-		Summary: "Manage persistent approval allowlist rules.",
-		Subcommands: []helpItem{
-			{Name: "list [domain]", Description: "List active allowlist rules"},
-			{Name: "add [flags]", Description: "Create a new allowlist rule"},
-			{Name: "remove <id>", Description: "Disable an allowlist rule by ID"},
-		},
-		Examples: []string{"or3-intern approvals allowlist list exec", "or3-intern approvals allowlist add --domain exec --program /bin/echo"},
-	},
-	"approvals allowlist add": {
-		Usage:   "or3-intern approvals allowlist add [--domain exec|skill_execution] [flags]",
-		Summary: "Create a persistent allowlist rule.",
-		Flags: []helpItem{
-			{Name: "--domain <name>", Description: "Approval domain; defaults to exec"},
-			{Name: "--host <id>", Description: "Host scope; defaults to the current host ID"},
-			{Name: "--tool <name>", Description: "Tool scope"},
-			{Name: "--profile <name>", Description: "Access-profile scope"},
-			{Name: "--agent <id>", Description: "Agent scope"},
-			{Name: "--program <path>", Description: "Exact executable path for exec rules"},
-			{Name: "--cwd <path>", Description: "Working-directory constraint for exec rules"},
-			{Name: "--skill <id>", Description: "Skill identifier for skill_execution rules"},
-			{Name: "--version <v>", Description: "Skill version constraint"},
-			{Name: "--origin <registry>", Description: "Skill origin or registry constraint"},
-			{Name: "--trust <state>", Description: "Skill trust-state constraint"},
-		},
-		Examples: []string{"or3-intern approvals allowlist add --domain exec --program /usr/bin/git", "or3-intern approvals allowlist add --domain skill_execution --skill demo --version 1.0.0"},
-	},
-	"devices": {
-		Usage:   "or3-intern devices <list|requests|approve|deny|rotate|revoke> ...",
-		Summary: "Inspect paired devices and legacy pairing request helpers.",
-		Subcommands: []helpItem{
-			{Name: "list", Description: "List paired devices"},
-			{Name: "requests [status]", Description: "List pairing requests, optionally filtered by status"},
-			{Name: "approve <pairing-request-id>", Description: "Approve a pairing request"},
-			{Name: "deny <pairing-request-id>", Description: "Deny a pairing request"},
-			{Name: "rotate <device-id>", Description: "Rotate a device token and print the new token"},
-			{Name: "revoke <device-id>", Description: "Revoke a paired device immediately"},
-		},
-		Examples: []string{"or3-intern devices list", "or3-intern devices rotate dev_123"},
-	},
-	"pairing": {
-		Usage:   "or3-intern pairing <list|request|approve|deny|exchange> ...",
-		Summary: "Manage first-class pairing workflows, including channel-bound identities.",
-		Subcommands: []helpItem{
-			{Name: "list [status]", Description: "List pairing requests"},
-			{Name: "request [flags]", Description: "Create a pairing request"},
-			{Name: "approve <request-id>", Description: "Approve a pairing request"},
-			{Name: "deny <request-id>", Description: "Deny a pairing request"},
-			{Name: "exchange <request-id> <code>", Description: "Exchange a pairing code for a device token"},
-		},
-		Examples: []string{"or3-intern pairing list", "or3-intern pairing request --channel slack --identity U42 --name \"Slack User\""},
-	},
-	"pairing request": {
-		Usage:   "or3-intern pairing request [--role role] [--name text] [--origin text] [--device id] [--channel name --identity id]",
-		Summary: "Create a new pairing request.",
-		Flags: []helpItem{
-			{Name: "--role <role>", Description: "Device role; defaults to operator"},
-			{Name: "--name <text>", Description: "Display name"},
-			{Name: "--origin <text>", Description: "Origin description"},
-			{Name: "--device <id>", Description: "Explicit device ID"},
-			{Name: "--channel <name>", Description: "Channel name to bind"},
-			{Name: "--identity <id>", Description: "Channel identity to bind"},
-		},
-		Examples: []string{"or3-intern pairing request --name \"Laptop\"", "or3-intern pairing request --channel slack --identity U42 --name \"Slack User\""},
-	},
-	"skills": {
-		Usage:   "or3-intern skills <list|info|check|search|install|update|remove> ...",
-		Summary: "List, inspect, search, install, update, check, and remove skills.",
-		Subcommands: []helpItem{
-			{Name: "list [--eligible]", Description: "List discovered skills"},
-			{Name: "info <name>", Description: "Show metadata, permission state, and policy notes"},
-			{Name: "check", Description: "Validate available skills and report policy state"},
-			{Name: "search <query>", Description: "Search configured skill registries"},
-			{Name: "install <slug> [--version v] [--force]", Description: "Install a skill into the managed directory"},
-			{Name: "update <name>|--all [--version v] [--force]", Description: "Update one or more managed skill installs"},
-			{Name: "remove <name>", Description: "Remove a managed install"},
-		},
-		Examples: []string{"or3-intern skills list --eligible", "or3-intern skills install demo --version 1.0.0"},
-	},
-	"skills list": {
-		Usage:    "or3-intern skills list [--eligible]",
-		Summary:  "List discovered skills.",
-		Flags:    []helpItem{{Name: "--eligible", Description: "Show only eligible skills"}},
-		Examples: []string{"or3-intern skills list", "or3-intern skills list --eligible"},
-	},
-	"skills install": {
-		Usage:   "or3-intern skills install <slug> [--version v] [--force]",
-		Summary: "Install a skill into the managed directory.",
-		Flags: []helpItem{
-			{Name: "--version <v>", Description: "Install a specific skill version"},
-			{Name: "--force", Description: "Overwrite local modifications when installing"},
-		},
-		Examples: []string{"or3-intern skills install demo", "or3-intern skills install demo --version 1.0.0 --force"},
-	},
-	"skills update": {
-		Usage:   "or3-intern skills update <name>|--all [--version v] [--force]",
-		Summary: "Update one or more managed skill installs.",
-		Flags: []helpItem{
-			{Name: "--all", Description: "Update all installed skills"},
-			{Name: "--version <v>", Description: "Target version to install"},
-			{Name: "--force", Description: "Overwrite local modifications when updating"},
-		},
-		Examples: []string{"or3-intern skills update demo", "or3-intern skills update --all"},
-	},
-	"scope": {
-		Usage:   "or3-intern scope <link|list|resolve> ...",
-		Summary: "Link multiple session keys to a shared history scope.",
-		Subcommands: []helpItem{
-			{Name: "link <session-key> <scope-key>", Description: "Link a session key to a scope"},
-			{Name: "list <scope-key>", Description: "List session keys attached to a scope"},
-			{Name: "resolve <session-key>", Description: "Resolve the scope for a session key"},
-		},
-		Examples: []string{"or3-intern scope link session-a team-alpha", "or3-intern scope resolve session-a"},
-	},
-	"migrate-jsonl": {
-		Usage:    "or3-intern migrate-jsonl <path-to-session.jsonl> [session_key]",
-		Summary:  "Import legacy session history from a JSONL transcript.",
-		Examples: []string{"or3-intern migrate-jsonl /tmp/session.jsonl", "or3-intern migrate-jsonl /tmp/session.jsonl imported:demo"},
-	},
-	"migrate-openclaw": {
-		Usage:   "or3-intern migrate-openclaw [--scope <scope-key>] [--embed-max-bytes <n>] <openclaw-agent-dir>",
-		Summary: "Import SOUL.md, IDENTITY.md, MEMORY.md, USER.md, daily notes, and dreams from a local OpenClaw agent.",
-		Description: []string{
-			"Core bootstrap files are copied into the configured or3-intern destinations.",
-			"OpenClaw memory/*.md files plus DREAMS.md and memory/.dreams/* are imported as durable memory notes using conservative chunking so embedding requests stay bounded.",
-			"The command is repeatable: previously imported OpenClaw daily notes for the same source agent are replaced before new notes are inserted.",
-		},
-		Flags: []helpItem{
-			{Name: "--scope <scope-key>", Description: "Memory scope for imported daily notes; defaults to global shared memory"},
-			{Name: "--embed-max-bytes <n>", Description: "Maximum bytes per imported memory chunk before embedding"},
-		},
-		Examples: []string{"or3-intern migrate-openclaw ~/.openclaw/agents/main", "or3-intern migrate-openclaw --scope global ~/agent-export"},
-	},
-	"version": {
-		Usage:    "or3-intern version",
-		Summary:  "Print the binary version.",
-		Examples: []string{"or3-intern version"},
-	},
+type SkillEvaluation struct {
+	SkillID        string
+	Version        string
+	Origin         string
+	TrustState     string
+	ScriptHash     string
+	EnvBindingHash string
+	TimeoutSeconds int
+	AgentID        string
+	SessionID      string
+	ApprovalToken  string
 }
 
-func parseRootCLIArgs(argv []string, stderr io.Writer) (string, []string, bool, bool, error) {
-	if stderr == nil {
-		stderr = io.Discard
+type ExecSubject struct {
+	Type            string   `json:"type"`
+	ExecutionHostID string   `json:"execution_host_id"`
+	SandboxID       string   `json:"sandbox_id,omitempty"`
+	ExecutablePath  string   `json:"executable_path"`
+	Argv            []string `json:"argv"`
+	WorkingDir      string   `json:"working_dir"`
+	EnvBindingHash  string   `json:"env_binding_hash"`
+	ScriptHash      string   `json:"script_hash,omitempty"`
+	RequestingAgent string   `json:"requesting_agent_id,omitempty"`
+	SessionID       string   `json:"session_id,omitempty"`
+	ToolName        string   `json:"tool_name"`
+	AccessProfile   string   `json:"access_profile,omitempty"`
+}
+
+type SkillExecutionSubject struct {
+	Type            string `json:"type"`
+	SkillID         string `json:"skill_id"`
+	Version         string `json:"version,omitempty"`
+	Origin          string `json:"origin,omitempty"`
+	TrustState      string `json:"trust_state,omitempty"`
+	ScriptHash      string `json:"script_hash"`
+	ExecutionHostID string `json:"execution_host_id"`
+	EnvBindingHash  string `json:"env_binding_hash"`
+	TimeoutSeconds  int    `json:"timeout_seconds"`
+	RequestingAgent string `json:"requesting_agent_id,omitempty"`
+	SessionID       string `json:"session_id,omitempty"`
+}
+
+type AllowlistScope struct {
+	HostID  string `json:"host_id,omitempty"`
+	Tool    string `json:"tool,omitempty"`
+	Profile string `json:"profile,omitempty"`
+	Agent   string `json:"agent,omitempty"`
+}
+
+type ExecAllowlistMatcher struct {
+	ExecutablePath string   `json:"executable_path,omitempty"`
+	PathGlob       string   `json:"path_glob,omitempty"`
+	Argv           []string `json:"argv,omitempty"`
+	WorkingDir     string   `json:"working_dir,omitempty"`
+	WorkingDirPref string   `json:"working_dir_prefix,omitempty"`
+	ScriptHash     string   `json:"script_hash,omitempty"`
+}
+
+type SkillAllowlistMatcher struct {
+	SkillID        string `json:"skill_id,omitempty"`
+	Version        string `json:"version,omitempty"`
+	Origin         string `json:"origin,omitempty"`
+	TrustState     string `json:"trust_state,omitempty"`
+	ScriptHash     string `json:"script_hash,omitempty"`
+	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
+}
+
+type ApprovalTokenClaims struct {
+	TokenID       int64  `json:"tid"`
+	RequestID     int64  `json:"rid"`
+	SubjectHash   string `json:"sub"`
+	ExecutionHost string `json:"host"`
+	IssuedAt      int64  `json:"iat"`
+	ExpiresAt     int64  `json:"exp"`
+}
+
+type IssuedApproval struct {
+	Request     db.ApprovalRequestRecord
+	Token       string
+	AllowlistID int64
+}
+
+type PairingRequestInput struct {
+	Role        string
+	DisplayName string
+	Origin      string
+	Metadata    map[string]any
+	DeviceID    string
+}
+
+type PairingExchangeInput struct {
+	RequestID int64
+	Code      string
+}
+
+func (b *Broker) now() time.Time {
+	if b != nil && b.Now != nil {
+		return b.Now().UTC()
 	}
-	fs := flag.NewFlagSet("or3-intern", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	fs.Usage = func() {}
-	var cfgPath string
-	var showHelp bool
-	var unsafeDev bool
-	fs.StringVar(&cfgPath, "config", "", "path to config.json")
-	fs.BoolVar(&showHelp, "help", false, "show help")
-	fs.BoolVar(&showHelp, "h", false, "show help")
-	fs.BoolVar(&unsafeDev, "unsafe-dev", false, "bypass startup safety gates for local development")
-	if err := fs.Parse(argv); err != nil {
-		return "", nil, false, false, err
-	}
-	return cfgPath, fs.Args(), showHelp, unsafeDev, nil
+	return time.Now().UTC()
 }
 
-func maybeHandleHelpRequest(args []string, stdout io.Writer) (bool, error) {
-	if len(args) == 0 {
+func (b *Broker) hostID() string {
+	if b == nil {
+		return ""
+	}
+	if strings.TrimSpace(b.HostID) != "" {
+		return strings.TrimSpace(b.HostID)
+	}
+	return strings.TrimSpace(b.Config.HostID)
+}
+
+func (b *Broker) EvaluateExec(ctx context.Context, req ExecEvaluation) (Decision, error) {
+	subject := ExecSubject{
+		Type:            string(SubjectExec),
+		ExecutionHostID: b.hostID(),
+		SandboxID:       strings.TrimSpace(req.SandboxID),
+		ExecutablePath:  strings.TrimSpace(req.ExecutablePath),
+		Argv:            append([]string{}, req.Argv...),
+		WorkingDir:      strings.TrimSpace(req.WorkingDir),
+		EnvBindingHash:  strings.TrimSpace(req.EnvBindingHash),
+		ScriptHash:      strings.TrimSpace(req.ScriptHash),
+		RequestingAgent: strings.TrimSpace(req.AgentID),
+		SessionID:       strings.TrimSpace(req.SessionID),
+		ToolName:        firstNonEmpty(req.ToolName, "exec"),
+		AccessProfile:   strings.TrimSpace(req.AccessProfile),
+	}
+	return b.evaluate(ctx, SubjectExec, subject, req.ApprovalToken,
+		AllowlistScope{HostID: subject.ExecutionHostID, Tool: subject.ToolName, Profile: subject.AccessProfile, Agent: subject.RequestingAgent},
+		ExecAllowlistMatcher{ExecutablePath: subject.ExecutablePath, Argv: subject.Argv, WorkingDir: subject.WorkingDir, ScriptHash: subject.ScriptHash},
+	)
+}
+
+func (b *Broker) EvaluateSkillExec(ctx context.Context, req SkillEvaluation) (Decision, error) {
+	subject := SkillExecutionSubject{
+		Type:            string(SubjectSkillExec),
+		SkillID:         strings.TrimSpace(req.SkillID),
+		Version:         strings.TrimSpace(req.Version),
+		Origin:          strings.TrimSpace(req.Origin),
+		TrustState:      strings.TrimSpace(req.TrustState),
+		ScriptHash:      strings.TrimSpace(req.ScriptHash),
+		ExecutionHostID: b.hostID(),
+		EnvBindingHash:  strings.TrimSpace(req.EnvBindingHash),
+		TimeoutSeconds:  req.TimeoutSeconds,
+		RequestingAgent: strings.TrimSpace(req.AgentID),
+		SessionID:       strings.TrimSpace(req.SessionID),
+	}
+	return b.evaluate(ctx, SubjectSkillExec, subject, req.ApprovalToken,
+		AllowlistScope{HostID: subject.ExecutionHostID, Tool: "run_skill_script", Agent: subject.RequestingAgent},
+		SkillAllowlistMatcher{SkillID: subject.SkillID, Version: subject.Version, Origin: subject.Origin, TrustState: subject.TrustState, ScriptHash: subject.ScriptHash, TimeoutSeconds: subject.TimeoutSeconds},
+	)
+}
+
+func (b *Broker) evaluate(ctx context.Context, subjectType SubjectType, subject any, approvalToken string, scope AllowlistScope, matcher any) (Decision, error) {
+	mode := b.modeFor(subjectType)
+	subjectJSON, subjectHash, err := CanonicalSubjectHash(subject)
+	if err != nil {
+		return Decision{}, err
+	}
+	if strings.TrimSpace(approvalToken) != "" {
+		if err := b.VerifyApprovalToken(ctx, approvalToken, subjectHash, b.hostID()); err == nil {
+			return Decision{Allowed: true, SubjectHash: subjectHash, Reason: "approved_token"}, nil
+		}
+	}
+	switch mode {
+	case config.ApprovalModeTrusted:
+		_ = b.audit(ctx, "approval.trusted", map[string]any{"subject_hash": subjectHash, "host_id": b.hostID(), "type": string(subjectType), "outcome": "allowed"})
+		return Decision{Allowed: true, SubjectHash: subjectHash, Reason: "trusted"}, nil
+	case config.ApprovalModeDeny:
+		_ = b.audit(ctx, "approval.blocked", map[string]any{"subject_hash": subjectHash, "host_id": b.hostID(), "type": string(subjectType), "outcome": "blocked", "reason": "deny"})
+		return Decision{Allowed: false, SubjectHash: subjectHash, Reason: "approval denied by policy"}, nil
+	}
+	if len(b.SignKey) == 0 || b.DB == nil {
+		_ = b.audit(ctx, "approval.blocked", map[string]any{"subject_hash": subjectHash, "host_id": b.hostID(), "type": string(subjectType), "outcome": "blocked", "reason": "broker_unavailable"})
+		return Decision{Allowed: false, SubjectHash: subjectHash, Reason: "approval broker unavailable"}, nil
+	}
+	if mode == config.ApprovalModeAllowlist {
+		matched, err := b.allowlistMatches(ctx, subjectType, scope, matcher)
+		if err != nil {
+			return Decision{}, err
+		}
+		if matched {
+			_ = b.audit(ctx, "approval.allowlist_match", map[string]any{"subject_hash": subjectHash, "host_id": b.hostID(), "type": string(subjectType), "outcome": "allowed"})
+			return Decision{Allowed: true, SubjectHash: subjectHash, Reason: "allowlist"}, nil
+		}
+	}
+	nowMS := b.now().UnixMilli()
+	existing, ok, err := b.DB.FindPendingApprovalRequest(ctx, string(subjectType), subjectHash, b.hostID(), nowMS)
+	if err != nil {
+		return Decision{}, err
+	}
+	if ok {
+		return Decision{Allowed: false, RequiresApproval: true, RequestID: existing.ID, SubjectHash: subjectHash, Reason: "approval required"}, nil
+	}
+	req, err := b.DB.CreateApprovalRequest(ctx, db.ApprovalRequestRecord{Type: string(subjectType), SubjectHash: subjectHash, SubjectJSON: subjectJSON, RequesterAgentID: scope.Agent, RequesterSessionID: extractSessionID(subject), ExecutionHostID: b.hostID(), Status: StatusPending, PolicyMode: string(mode), RequestedAt: nowMS, ExpiresAt: nowMS + int64(b.Config.PendingTTLSeconds*1000)})
+	if err != nil {
+		return Decision{}, err
+	}
+	_ = b.audit(ctx, "approval.requested", map[string]any{"request_id": req.ID, "subject_hash": subjectHash, "host_id": b.hostID(), "type": string(subjectType), "policy_mode": string(mode), "outcome": "pending"})
+	return Decision{Allowed: false, RequiresApproval: true, RequestID: req.ID, SubjectHash: subjectHash, Reason: "approval required"}, nil
+}
+
+func (b *Broker) ApproveRequest(ctx context.Context, requestID int64, actor string, alwaysAllow bool, note string) (IssuedApproval, error) {
+	req, err := b.DB.GetApprovalRequest(ctx, requestID)
+	if err != nil {
+		return IssuedApproval{}, err
+	}
+	if req.Status != StatusPending {
+		return IssuedApproval{}, fmt.Errorf("approval request is not pending")
+	}
+	nowMS := b.now().UnixMilli()
+	if req.ExpiresAt > 0 && req.ExpiresAt < nowMS {
+		_, _ = b.DB.ResolveApprovalRequest(ctx, requestID, StatusPending, StatusExpired, nowMS, actor, StatusExpired, "expired before approval")
+		return IssuedApproval{}, fmt.Errorf("approval request expired")
+	}
+	resolved, err := b.DB.ResolveApprovalRequest(ctx, requestID, StatusPending, StatusApproved, nowMS, strings.TrimSpace(actor), resolutionKind(alwaysAllow), strings.TrimSpace(note))
+	if err != nil {
+		return IssuedApproval{}, err
+	}
+	if !resolved {
+		return IssuedApproval{}, fmt.Errorf("approval request is not pending")
+	}
+	allowlistID := int64(0)
+	if alwaysAllow {
+		allowlistID, err = b.createAllowlistFromRequest(ctx, req, actor)
+		if err != nil {
+			return IssuedApproval{}, err
+		}
+	}
+	token, err := b.issueTokenForRequest(ctx, req, actor)
+	if err != nil {
+		return IssuedApproval{}, err
+	}
+	_ = b.audit(ctx, "approval.resolved", map[string]any{"request_id": requestID, "subject_hash": req.SubjectHash, "host_id": req.ExecutionHostID, "outcome": "approved", "actor": actor, "allowlist_id": allowlistID})
+	return IssuedApproval{Request: req, Token: token, AllowlistID: allowlistID}, nil
+}
+
+func (b *Broker) DenyRequest(ctx context.Context, requestID int64, actor string, note string) error {
+	req, err := b.DB.GetApprovalRequest(ctx, requestID)
+	if err != nil {
+		return err
+	}
+	if req.Status != StatusPending {
+		return fmt.Errorf("approval request is not pending")
+	}
+	nowMS := b.now().UnixMilli()
+	resolved, err := b.DB.ResolveApprovalRequest(ctx, requestID, StatusPending, StatusDenied, nowMS, strings.TrimSpace(actor), StatusDenied, strings.TrimSpace(note))
+	if err != nil {
+		return err
+	}
+	if !resolved {
+		return fmt.Errorf("approval request is not pending")
+	}
+	_ = b.audit(ctx, "approval.resolved", map[string]any{"request_id": requestID, "subject_hash": req.SubjectHash, "host_id": req.ExecutionHostID, "outcome": "denied", "actor": actor})
+	return nil
+}
+
+func (b *Broker) CancelRequest(ctx context.Context, requestID int64, actor string, note string) error {
+	req, err := b.DB.GetApprovalRequest(ctx, requestID)
+	if err != nil {
+		return err
+	}
+	if req.Status != StatusPending {
+		return fmt.Errorf("approval request is not pending")
+	}
+	nowMS := b.now().UnixMilli()
+	resolved, err := b.DB.ResolveApprovalRequest(ctx, requestID, StatusPending, StatusCanceled, nowMS, strings.TrimSpace(actor), StatusCanceled, strings.TrimSpace(note))
+	if err != nil {
+		return err
+	}
+	if !resolved {
+		return fmt.Errorf("approval request is not pending")
+	}
+	_ = b.audit(ctx, "approval.resolved", map[string]any{"request_id": requestID, "subject_hash": req.SubjectHash, "host_id": req.ExecutionHostID, "outcome": "canceled", "actor": actor})
+	return nil
+}
+
+func (b *Broker) ExpirePendingRequests(ctx context.Context, actor string) (int64, error) {
+	count, err := b.DB.ExpireApprovalRequests(ctx, b.now().UnixMilli(), strings.TrimSpace(actor), "expired by operator request")
+	if err != nil {
+		return 0, err
+	}
+	if count > 0 {
+		_ = b.audit(ctx, "approval.expired", map[string]any{"count": count, "actor": actor, "host_id": b.hostID()})
+	}
+	return count, nil
+}
+
+func (b *Broker) VerifyApprovalToken(ctx context.Context, token string, subjectHash string, hostID string) error {
+	claims, err := b.parseApprovalToken(token)
+	if err != nil {
+		return err
+	}
+	now := b.now().Unix()
+	if claims.ExpiresAt < now {
+		return fmt.Errorf("approval token expired")
+	}
+	if claims.ExecutionHost != strings.TrimSpace(hostID) {
+		return fmt.Errorf("approval token host mismatch")
+	}
+	if claims.SubjectHash != strings.TrimSpace(subjectHash) {
+		return fmt.Errorf("approval token subject mismatch")
+	}
+	record, err := b.DB.GetApprovalToken(ctx, claims.TokenID)
+	if err != nil {
+		return fmt.Errorf("approval token record not found")
+	}
+	if record.RevokedAt > 0 {
+		return fmt.Errorf("approval token revoked")
+	}
+	if record.SubjectHash != claims.SubjectHash {
+		return fmt.Errorf("approval token subject mismatch")
+	}
+	return nil
+}
+
+func (b *Broker) CreatePairingRequest(ctx context.Context, input PairingRequestInput) (db.PairingRequestRecord, string, error) {
+	role := normalizeRole(input.Role)
+	if role == "" {
+		return db.PairingRequestRecord{}, "", fmt.Errorf("invalid pairing role")
+	}
+	code, err := randomDigits(6)
+	if err != nil {
+		return db.PairingRequestRecord{}, "", err
+	}
+	deviceID := strings.TrimSpace(input.DeviceID)
+	if deviceID == "" {
+		deviceID, err = randomHex(12)
+		if err != nil {
+			return db.PairingRequestRecord{}, "", err
+		}
+	}
+	nowMS := b.now().UnixMilli()
+	status := StatusPending
+	approverID := ""
+	approvedAt := int64(0)
+	switch b.pairingMode() {
+	case config.ApprovalModeDeny:
+		_ = b.audit(ctx, "pairing.blocked", map[string]any{"device_id": deviceID, "role": role, "host_id": b.hostID(), "outcome": "blocked", "reason": "deny"})
+		return db.PairingRequestRecord{}, "", fmt.Errorf("pairing denied by policy")
+	case config.ApprovalModeTrusted:
+		if auditAuthKindFromContext(ctx) == "unauthenticated" {
+			status = StatusPending
+		} else {
+			status = StatusApproved
+			approverID = "policy:trusted"
+			approvedAt = nowMS
+		}
+	case config.ApprovalModeAllowlist:
+		allowed, allowErr := b.pairingAllowlistMatches(ctx, deviceID, role)
+		if allowErr != nil {
+			return db.PairingRequestRecord{}, "", allowErr
+		}
+		if !allowed {
+			_ = b.audit(ctx, "pairing.blocked", map[string]any{"device_id": deviceID, "role": role, "host_id": b.hostID(), "outcome": "blocked", "reason": "allowlist"})
+			return db.PairingRequestRecord{}, "", fmt.Errorf("pairing denied by policy")
+		}
+		if auditAuthKindFromContext(ctx) == "unauthenticated" {
+			status = StatusPending
+		} else {
+			status = StatusApproved
+			approverID = "policy:allowlist"
+			approvedAt = nowMS
+		}
+	}
+	req, err := b.DB.CreatePairingRequest(ctx, db.PairingRequestRecord{DeviceID: deviceID, Role: role, DisplayName: strings.TrimSpace(input.DisplayName), Origin: strings.TrimSpace(input.Origin), PairingCodeHash: hashBytes(code), RequestedAt: nowMS, ExpiresAt: nowMS + int64(b.Config.PairingCodeTTLSeconds*1000), Status: status, ApproverID: approverID, ApprovedAt: approvedAt, Metadata: cloneMap(input.Metadata)})
+	if err != nil {
+		return db.PairingRequestRecord{}, "", err
+	}
+	_ = b.audit(ctx, "pairing.requested", map[string]any{"pairing_request_id": req.ID, "device_id": req.DeviceID, "role": req.Role, "host_id": b.hostID(), "outcome": req.Status})
+	return req, code, nil
+}
+
+func (b *Broker) ApprovePairingRequest(ctx context.Context, id int64, actor string) (db.PairingRequestRecord, error) {
+	req, err := b.DB.GetPairingRequest(ctx, id)
+	if err != nil {
+		return db.PairingRequestRecord{}, err
+	}
+	if req.Status != StatusPending {
+		return db.PairingRequestRecord{}, fmt.Errorf("pairing request is not pending")
+	}
+	nowMS := b.now().UnixMilli()
+	if req.ExpiresAt > 0 && req.ExpiresAt < nowMS {
+		return db.PairingRequestRecord{}, fmt.Errorf("pairing request expired")
+	}
+	resolved, err := b.DB.ResolvePairingRequestStatus(ctx, id, StatusPending, StatusApproved, strings.TrimSpace(actor), nowMS, 0, req.Metadata)
+	if err != nil {
+		return db.PairingRequestRecord{}, err
+	}
+	if !resolved {
+		return db.PairingRequestRecord{}, fmt.Errorf("pairing request is not pending")
+	}
+	updated, err := b.DB.GetPairingRequest(ctx, id)
+	if err != nil {
+		return db.PairingRequestRecord{}, err
+	}
+	_ = b.audit(ctx, "pairing.resolved", map[string]any{"pairing_request_id": id, "device_id": req.DeviceID, "outcome": "approved", "actor": actor, "host_id": b.hostID()})
+	return updated, nil
+}
+
+func (b *Broker) DenyPairingRequest(ctx context.Context, id int64, actor string) error {
+	req, err := b.DB.GetPairingRequest(ctx, id)
+	if err != nil {
+		return err
+	}
+	if req.Status != StatusPending {
+		return fmt.Errorf("pairing request is not pending")
+	}
+	nowMS := b.now().UnixMilli()
+	resolved, err := b.DB.ResolvePairingRequestStatus(ctx, id, StatusPending, StatusDenied, strings.TrimSpace(actor), 0, nowMS, req.Metadata)
+	if err != nil {
+		return err
+	}
+	if !resolved {
+		return fmt.Errorf("pairing request is not pending")
+	}
+	_ = b.audit(ctx, "pairing.resolved", map[string]any{"pairing_request_id": id, "device_id": req.DeviceID, "outcome": "denied", "actor": actor, "host_id": b.hostID()})
+	return nil
+}
+
+func (b *Broker) ExchangePairingCode(ctx context.Context, input PairingExchangeInput) (db.PairedDeviceRecord, string, error) {
+	req, ok, err := b.DB.FindPairingRequestByCodeHash(ctx, input.RequestID, hashBytes(strings.TrimSpace(input.Code)))
+	if err != nil {
+		return db.PairedDeviceRecord{}, "", err
+	}
+	if !ok {
+		return db.PairedDeviceRecord{}, "", fmt.Errorf("pairing request not found")
+	}
+	nowMS := b.now().UnixMilli()
+	if req.ExpiresAt > 0 && req.ExpiresAt < nowMS {
+		return db.PairedDeviceRecord{}, "", fmt.Errorf("pairing request expired")
+	}
+	if req.Status != StatusApproved {
+		return db.PairedDeviceRecord{}, "", fmt.Errorf("pairing request is not approved")
+	}
+	claimed, err := b.DB.CompareAndSwapPairingRequestStatus(ctx, req.ID, StatusApproved, StatusExchanged)
+	if err != nil {
+		return db.PairedDeviceRecord{}, "", err
+	}
+	if !claimed {
+		return db.PairedDeviceRecord{}, "", fmt.Errorf("pairing request is not approved")
+	}
+	device, token, err := b.RotateDeviceToken(ctx, req.DeviceID, req.Role, req.DisplayName, cloneMap(req.Metadata))
+	if err != nil {
+		_, _ = b.DB.CompareAndSwapPairingRequestStatus(ctx, req.ID, StatusExchanged, StatusApproved)
+		return db.PairedDeviceRecord{}, "", err
+	}
+	_ = b.audit(ctx, "pairing.exchanged", map[string]any{"pairing_request_id": req.ID, "device_id": device.DeviceID, "role": device.Role, "host_id": b.hostID(), "outcome": "paired"})
+	return device, token, nil
+}
+
+func (b *Broker) AuthenticateDeviceToken(ctx context.Context, rawToken string, allowedRoles ...string) (db.PairedDeviceRecord, error) {
+	device, ok, err := b.DB.FindPairedDeviceByToken(ctx, rawToken)
+	if err != nil {
+		return db.PairedDeviceRecord{}, err
+	}
+	if !ok {
+		return db.PairedDeviceRecord{}, fmt.Errorf("device token not found")
+	}
+	if device.Status != StatusActive || device.RevokedAt > 0 {
+		return db.PairedDeviceRecord{}, fmt.Errorf("device token revoked")
+	}
+	if len(allowedRoles) > 0 && !slices.Contains(allowedRoles, device.Role) {
+		return db.PairedDeviceRecord{}, fmt.Errorf("device role not allowed")
+	}
+	_ = b.DB.TouchPairedDevice(ctx, device.DeviceID, b.now().UnixMilli())
+	return device, nil
+}
+
+func (b *Broker) RevokeDevice(ctx context.Context, deviceID string, actor string) error {
+	device, err := b.DB.GetPairedDevice(ctx, deviceID)
+	if err != nil {
+		return err
+	}
+	device.Status = StatusRevoked
+	device.RevokedAt = b.now().UnixMilli()
+	device.LastSeenAt = device.RevokedAt
+	if _, err := b.DB.UpsertPairedDevice(ctx, device); err != nil {
+		return err
+	}
+	_ = b.audit(ctx, "device.revoked", map[string]any{"device_id": deviceID, "actor": actor, "host_id": b.hostID(), "outcome": "revoked"})
+	return nil
+}
+
+func (b *Broker) RotateDeviceToken(ctx context.Context, deviceID, role, displayName string, metadata map[string]any) (db.PairedDeviceRecord, string, error) {
+	rawToken, err := randomHex(24)
+	if err != nil {
+		return db.PairedDeviceRecord{}, "", err
+	}
+	nowMS := b.now().UnixMilli()
+	device, err := b.DB.UpsertPairedDevice(ctx, db.PairedDeviceRecord{DeviceID: strings.TrimSpace(deviceID), Role: normalizeRole(role), DisplayName: strings.TrimSpace(displayName), TokenHash: hashBytes(rawToken), Status: StatusActive, CreatedAt: nowMS, LastSeenAt: nowMS, Metadata: cloneMap(metadata)})
+	if err != nil {
+		return db.PairedDeviceRecord{}, "", err
+	}
+	_ = b.audit(ctx, "device.rotated", map[string]any{"device_id": device.DeviceID, "role": device.Role, "host_id": b.hostID(), "outcome": "rotated"})
+	return device, rawToken, nil
+}
+
+func (b *Broker) RotatePairedDeviceToken(ctx context.Context, deviceID string) (db.PairedDeviceRecord, string, error) {
+	device, err := b.DB.GetPairedDevice(ctx, deviceID)
+	if err != nil {
+		return db.PairedDeviceRecord{}, "", err
+	}
+	if device.Status != StatusActive || device.RevokedAt > 0 {
+		return db.PairedDeviceRecord{}, "", fmt.Errorf("device token revoked")
+	}
+	return b.RotateDeviceToken(ctx, device.DeviceID, device.Role, device.DisplayName, cloneMap(device.Metadata))
+}
+
+func (b *Broker) ListApprovalRequests(ctx context.Context, status string, limit int) ([]db.ApprovalRequestRecord, error) {
+	return b.ListApprovalRequestsFiltered(ctx, status, "", limit)
+}
+
+func (b *Broker) ListApprovalRequestsFiltered(ctx context.Context, status, approvalType string, limit int) ([]db.ApprovalRequestRecord, error) {
+	return b.DB.ListApprovalRequestsFiltered(ctx, status, approvalType, limit)
+}
+
+func (b *Broker) ListPairingRequests(ctx context.Context, status string, limit int) ([]db.PairingRequestRecord, error) {
+	return b.DB.ListPairingRequests(ctx, status, limit)
+}
+
+func (b *Broker) ListDevices(ctx context.Context, limit int) ([]db.PairedDeviceRecord, error) {
+	return b.DB.ListPairedDevices(ctx, limit)
+}
+
+func (b *Broker) IsPairedChannelIdentity(ctx context.Context, channel, identity string) (bool, error) {
+	if b == nil || b.DB == nil {
 		return false, nil
 	}
-	if strings.EqualFold(strings.TrimSpace(args[0]), "help") {
-		return true, printHelpTopic(stdout, helpTopicPath(args[1:]))
+	channel = strings.ToLower(strings.TrimSpace(channel))
+	identity = strings.TrimSpace(identity)
+	if channel == "" || identity == "" {
+		return false, nil
 	}
-	for _, arg := range args[1:] {
-		if isHelpToken(arg) {
-			return true, printHelpTopic(stdout, helpTopicPath(args))
+	for _, deviceID := range []string{channel + ":" + identity, identity} {
+		rec, err := b.DB.GetPairedDevice(ctx, deviceID)
+		if err == nil {
+			return rec.Status == StatusActive && rec.RevokedAt == 0, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return false, err
+		}
+	}
+	for offset := 0; ; offset += 200 {
+		items, err := b.DB.ListPairedDevicesPage(ctx, 200, offset)
+		if err != nil {
+			return false, err
+		}
+		for _, item := range items {
+			if item.Status != StatusActive || item.RevokedAt > 0 {
+				continue
+			}
+			if pairedMetadataMatches(item.Metadata, channel, identity) {
+				return true, nil
+			}
+		}
+		if len(items) < 200 {
+			break
 		}
 	}
 	return false, nil
 }
 
-func isHelpToken(arg string) bool {
-	switch strings.TrimSpace(arg) {
-	case "-h", "--help":
-		return true
-	default:
-		return false
+func (b *Broker) AddAllowlist(ctx context.Context, domain string, scope AllowlistScope, matcher any, actor string, expiresAt int64) (db.ApprovalAllowlistRecord, error) {
+	if err := ValidateAllowlistMatcher(domain, matcher); err != nil {
+		return db.ApprovalAllowlistRecord{}, err
 	}
+	scopeJSON, err := marshalCanonical(scope)
+	if err != nil {
+		return db.ApprovalAllowlistRecord{}, err
+	}
+	matcherJSON, err := marshalCanonical(matcher)
+	if err != nil {
+		return db.ApprovalAllowlistRecord{}, err
+	}
+	rec, err := b.DB.CreateApprovalAllowlist(ctx, db.ApprovalAllowlistRecord{Domain: domain, ScopeJSON: scopeJSON, MatcherJSON: matcherJSON, CreatedBy: actor, CreatedAt: b.now().UnixMilli(), ExpiresAt: expiresAt})
+	if err != nil {
+		return db.ApprovalAllowlistRecord{}, err
+	}
+	_ = b.audit(ctx, "approval.allowlist_changed", map[string]any{"allowlist_id": rec.ID, "domain": domain, "actor": actor, "host_id": b.hostID(), "action": "add"})
+	return rec, nil
 }
 
-func helpTopicPath(args []string) []string {
-	path := make([]string, 0, len(args))
-	for _, arg := range args {
-		arg = strings.ToLower(strings.TrimSpace(arg))
-		if arg == "" || isHelpToken(arg) || strings.HasPrefix(arg, "-") {
-			break
-		}
-		path = append(path, arg)
+func (b *Broker) RemoveAllowlist(ctx context.Context, id int64, actor string) error {
+	if err := b.DB.DisableApprovalAllowlist(ctx, id, b.now().UnixMilli()); err != nil {
+		return err
 	}
-	return path
-}
-
-func printHelpTopic(w io.Writer, path []string) error {
-	if w == nil {
-		w = io.Discard
-	}
-	if len(path) == 0 {
-		printRootHelp(w)
-		return nil
-	}
-	key, ok := bestHelpTopicKey(path)
-	if !ok {
-		return fmt.Errorf("unknown help topic: %s", strings.Join(path, " "))
-	}
-	renderHelpTopic(w, helpTopics[key])
+	_ = b.audit(ctx, "approval.allowlist_changed", map[string]any{"allowlist_id": id, "actor": actor, "host_id": b.hostID(), "action": "remove"})
 	return nil
 }
 
-func bestHelpTopicKey(path []string) (string, bool) {
-	for i := len(path); i >= 1; i-- {
-		key := strings.Join(path[:i], " ")
-		if _, ok := helpTopics[key]; ok {
-			return key, true
-		}
-	}
-	return "", false
+func (b *Broker) ListAllowlists(ctx context.Context, domain string, limit int) ([]db.ApprovalAllowlistRecord, error) {
+	return b.DB.ListApprovalAllowlists(ctx, domain, limit)
 }
 
-func printRootHelp(w io.Writer) {
-	_, _ = fmt.Fprintln(w, "or3-intern is a local-first agent runtime with chat, channels, memory, approvals, and service APIs.")
-	_, _ = fmt.Fprintln(w)
-	_, _ = fmt.Fprintln(w, "Usage:")
-	_, _ = fmt.Fprintln(w, "  or3-intern [--config path] [--unsafe-dev] <command> [options]")
-	_, _ = fmt.Fprintln(w, "  or3-intern")
-	_, _ = fmt.Fprintln(w, "  or3-intern help [command]")
-	_, _ = fmt.Fprintln(w)
-	_, _ = fmt.Fprintln(w, "Without a command, or3-intern starts interactive chat.")
-	for _, section := range rootHelpSections {
-		_, _ = fmt.Fprintln(w)
-		_, _ = fmt.Fprintf(w, "%s:\n", section.Title)
-		printHelpItems(w, section.Items)
-	}
-	_, _ = fmt.Fprintln(w)
-	_, _ = fmt.Fprintln(w, "Global flags:")
-	printHelpItems(w, []helpItem{{Name: "--config <path>", Description: "Path to config.json"}, {Name: "--unsafe-dev", Description: "Bypass startup safety gates for local development"}, {Name: "-h, --help", Description: "Show help for the root command or a subcommand"}})
-	_, _ = fmt.Fprintln(w)
-	_, _ = fmt.Fprintln(w, "Examples:")
-	for _, example := range []string{"or3-intern configure", "or3-intern chat", "or3-intern doctor --strict", "or3-intern approvals --help", "or3-intern help skills"} {
-		_, _ = fmt.Fprintf(w, "  %s\n", example)
-	}
-}
-
-func renderHelpTopic(w io.Writer, cmd helpCommand) {
-	_, _ = fmt.Fprintf(w, "Usage:\n  %s\n", cmd.Usage)
-	if strings.TrimSpace(cmd.Summary) != "" {
-		_, _ = fmt.Fprintf(w, "\n%s\n", cmd.Summary)
-	}
-	if len(cmd.Description) > 0 {
-		_, _ = fmt.Fprintln(w)
-		for _, line := range cmd.Description {
-			_, _ = fmt.Fprintln(w, line)
-		}
-	}
-	if len(cmd.Subcommands) > 0 {
-		_, _ = fmt.Fprintln(w, "\nSubcommands:")
-		printHelpItems(w, cmd.Subcommands)
-	}
-	if len(cmd.Flags) > 0 {
-		_, _ = fmt.Fprintln(w, "\nFlags:")
-		printHelpItems(w, cmd.Flags)
-	}
-	if len(cmd.Examples) > 0 {
-		_, _ = fmt.Fprintln(w, "\nExamples:")
-		for _, example := range cmd.Examples {
-			_, _ = fmt.Fprintf(w, "  %s\n", example)
-		}
-	}
-}
-
-func printHelpItems(w io.Writer, items []helpItem) {
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	for _, item := range items {
-		_, _ = fmt.Fprintf(tw, "  %s\t%s\n", item.Name, item.Description)
-	}
-	_ = tw.Flush()
-}
-````
-
-## File: cmd/or3-intern/init.go
-````go
-package main
-
-import (
-	"bufio"
-	"errors"
-	"fmt"
-	"io"
-	"os"
-	"path/filepath"
-	"strconv"
-	"strings"
-
-	"or3-intern/internal/config"
-)
-
-type initProviderPreset struct {
-	label      string
-	apiBase    string
-	model      string
-	embedModel string
-}
-
-var initProviderPresets = map[string]initProviderPreset{
-	"1": {
-		label:      "OpenAI",
-		apiBase:    "https://api.openai.com/v1",
-		model:      "gpt-4.1-mini",
-		embedModel: "text-embedding-3-small",
-	},
-	"2": {
-		label:      "OpenRouter",
-		apiBase:    "https://openrouter.ai/api/v1",
-		model:      "openai/gpt-4o-mini",
-		embedModel: "text-embedding-3-small",
-	},
-	"3": {
-		label:      "Custom OpenAI-compatible",
-		apiBase:    "https://api.openai.com/v1",
-		model:      "gpt-4.1-mini",
-		embedModel: "text-embedding-3-small",
-	},
-}
-
-func runInit(cfgPath string) error {
-	cwd, err := os.Getwd()
+func CanonicalSubjectHash(subject any) (string, string, error) {
+	payload, err := marshalCanonical(subject)
 	if err != nil {
-		cwd = ""
+		return "", "", err
 	}
-	if supportsInteractiveTUI(os.Stdin, os.Stdout) {
-		return runConfigureWithTUI(cfgPathOrDefault(cfgPath), cwd, []string{}, configureTUIOptions{
-			Title:      "or3-intern init",
-			Intro:      []string{"First-run setup with the essential provider, storage, workspace, and tools sections."},
-			Restricted: []string{"provider", "storage", "workspace", "tools"},
-		})
-	}
-	return runInitWithIO(os.Stdin, os.Stdout, cfgPathOrDefault(cfgPath), cwd)
+	hash := sha256.Sum256([]byte(payload))
+	return payload, hex.EncodeToString(hash[:]), nil
 }
 
-func runInitWithIO(in io.Reader, out io.Writer, cfgPath, cwd string) error {
-	fmt.Fprintln(out, "or3-intern init")
-	fmt.Fprintln(out, "`init` now uses the same configure wizard under the hood with the original first-run sections.")
-	fmt.Fprintln(out)
-	return runConfigureWithIO(in, out, cfgPath, cwd, []string{
-		"--section", "provider",
-		"--section", "storage",
-		"--section", "workspace",
-		"--section", "tools",
-	})
+func marshalCanonical(value any) (string, error) {
+	blob, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	return string(blob), nil
 }
 
-func initDefaults(cwd string) config.Config {
-	cfg := config.Default()
-	config.ApplyEnvOverrides(&cfg)
-	cwd = strings.TrimSpace(cwd)
-	if cwd != "" {
-		cfg.WorkspaceDir = cwd
-		cfg.DBPath = filepath.Join(cwd, ".or3", "or3-intern.sqlite")
-		cfg.ArtifactsDir = filepath.Join(cwd, ".or3", "artifacts")
-		cfg.Tools.RestrictToWorkspace = true
+func (b *Broker) allowlistMatches(ctx context.Context, subjectType SubjectType, scope AllowlistScope, matcher any) (bool, error) {
+	records, err := b.DB.ListApprovalAllowlists(ctx, string(subjectType), 200)
+	if err != nil {
+		return false, err
 	}
-	return cfg
-}
-
-func defaultProviderChoice(apiBase string) string {
-	if strings.Contains(strings.ToLower(apiBase), "openrouter.ai") {
-		return "2"
-	}
-	return "1"
-}
-
-func applyProviderPreset(cfg *config.Config, choice string) {
-	preset, ok := initProviderPresets[choice]
-	if !ok || cfg == nil {
-		return
-	}
-	cfg.Provider.APIBase = preset.apiBase
-	cfg.Provider.Model = preset.model
-	cfg.Provider.EmbedModel = preset.embedModel
-}
-
-func promptChoice(reader *bufio.Reader, out io.Writer, label string, options []string, defaultChoice string) (string, error) {
-	fmt.Fprintln(out, label)
-	for _, option := range options {
-		fmt.Fprintf(out, "  %s\n", option)
-	}
-	for {
-		answer, err := promptString(reader, out, "Selection", defaultChoice)
-		if err != nil {
-			return "", err
+	nowMS := b.now().UnixMilli()
+	for _, record := range records {
+		if record.DisabledAt > 0 {
+			continue
 		}
-		answer = strings.TrimSpace(answer)
-		if _, ok := initProviderPresets[answer]; ok {
-			return answer, nil
+		if record.ExpiresAt > 0 && record.ExpiresAt < nowMS {
+			continue
 		}
-		fmt.Fprintln(out, "Please choose 1, 2, or 3.")
-	}
-}
-
-func promptBool(reader *bufio.Reader, out io.Writer, label string, defaultValue bool) (bool, error) {
-	defaultText := "n"
-	if defaultValue {
-		defaultText = "y"
-	}
-	for {
-		answer, err := promptString(reader, out, label+" (y/n)", defaultText)
+		if !allowlistScopeMatches(scope, record.ScopeJSON) {
+			continue
+		}
+		matched, err := allowlistMatcherMatches(subjectType, matcher, record.MatcherJSON)
 		if err != nil {
 			return false, err
 		}
-		switch strings.ToLower(strings.TrimSpace(answer)) {
-		case "y", "yes":
+		if matched {
 			return true, nil
-		case "n", "no":
-			return false, nil
-		default:
-			fmt.Fprintln(out, "Please answer y or n.")
 		}
 	}
+	return false, nil
 }
 
-func promptString(reader *bufio.Reader, out io.Writer, label, defaultValue string) (string, error) {
-	if defaultValue != "" {
-		fmt.Fprintf(out, "%s [%s]: ", label, defaultValue)
-	} else {
-		fmt.Fprintf(out, "%s: ", label)
+func allowlistScopeMatches(scope AllowlistScope, raw string) bool {
+	if strings.TrimSpace(raw) == "" {
+		return true
 	}
-	line, err := reader.ReadString('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
-		return "", err
+	var rec AllowlistScope
+	if err := json.Unmarshal([]byte(raw), &rec); err != nil {
+		return false
 	}
-	line = strings.TrimSpace(line)
-	if line == "" {
-		return defaultValue, nil
+	if rec.HostID != "" && rec.HostID != scope.HostID {
+		return false
 	}
-	return line, nil
+	if rec.Tool != "" && rec.Tool != scope.Tool {
+		return false
+	}
+	if rec.Profile != "" && rec.Profile != scope.Profile {
+		return false
+	}
+	if rec.Agent != "" && rec.Agent != scope.Agent {
+		return false
+	}
+	return true
 }
 
-func promptInt(reader *bufio.Reader, out io.Writer, label string, defaultValue int) (int, error) {
-	for {
-		answer, err := promptString(reader, out, label, strconv.Itoa(defaultValue))
+func pairedMetadataMatches(metadata map[string]any, channel, identity string) bool {
+	if len(metadata) == 0 {
+		return false
+	}
+	compare := func(key, want string) bool {
+		if want == "" {
+			return false
+		}
+		value := strings.TrimSpace(fmt.Sprint(metadata[key]))
+		return value != "" && strings.EqualFold(value, want)
+	}
+	if compare("channel", channel) && (compare("identity", identity) || compare("sender", identity) || compare("user_id", identity) || compare("chat_id", identity) || compare("from", identity)) {
+		return true
+	}
+	if compare(channel+"_identity", identity) || compare(channel+"_user_id", identity) || compare(channel+"_chat_id", identity) || compare(channel+"_from", identity) {
+		return true
+	}
+	return false
+}
+
+func allowlistMatcherMatches(subjectType SubjectType, current any, raw string) (bool, error) {
+	switch subjectType {
+	case SubjectExec:
+		var expected ExecAllowlistMatcher
+		if err := json.Unmarshal([]byte(raw), &expected); err != nil {
+			return false, err
+		}
+		if isEmptyExecAllowlistMatcher(expected) {
+			return false, nil
+		}
+		actual, _ := current.(ExecAllowlistMatcher)
+		if expected.ExecutablePath != "" && expected.ExecutablePath != actual.ExecutablePath {
+			return false, nil
+		}
+		if expected.PathGlob != "" {
+			matched, err := filepath.Match(expected.PathGlob, actual.ExecutablePath)
+			if err != nil || !matched {
+				return false, err
+			}
+		}
+		if len(expected.Argv) > 0 && !slices.Equal(expected.Argv, actual.Argv) {
+			return false, nil
+		}
+		if expected.WorkingDir != "" && expected.WorkingDir != actual.WorkingDir {
+			return false, nil
+		}
+		if expected.WorkingDirPref != "" && !strings.HasPrefix(actual.WorkingDir, expected.WorkingDirPref) {
+			return false, nil
+		}
+		if expected.ScriptHash != "" && expected.ScriptHash != actual.ScriptHash {
+			return false, nil
+		}
+		return true, nil
+	case SubjectSkillExec:
+		var expected SkillAllowlistMatcher
+		if err := json.Unmarshal([]byte(raw), &expected); err != nil {
+			return false, err
+		}
+		if isEmptySkillAllowlistMatcher(expected) {
+			return false, nil
+		}
+		actual, _ := current.(SkillAllowlistMatcher)
+		if expected.SkillID != "" && expected.SkillID != actual.SkillID {
+			return false, nil
+		}
+		if expected.Version != "" && expected.Version != actual.Version {
+			return false, nil
+		}
+		if expected.Origin != "" && expected.Origin != actual.Origin {
+			return false, nil
+		}
+		if expected.TrustState != "" && expected.TrustState != actual.TrustState {
+			return false, nil
+		}
+		if expected.ScriptHash != "" && expected.ScriptHash != actual.ScriptHash {
+			return false, nil
+		}
+		if expected.TimeoutSeconds > 0 && expected.TimeoutSeconds != actual.TimeoutSeconds {
+			return false, nil
+		}
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+func ValidateAllowlistMatcher(domain string, matcher any) error {
+	switch SubjectType(strings.TrimSpace(domain)) {
+	case SubjectExec:
+		candidate, ok := matcher.(ExecAllowlistMatcher)
+		if !ok {
+			return fmt.Errorf("exec allowlist matcher is invalid")
+		}
+		if isEmptyExecAllowlistMatcher(candidate) {
+			return fmt.Errorf("exec allowlist matcher must include at least one executable, path, argv, working directory, or script constraint")
+		}
+		return nil
+	case SubjectSkillExec:
+		candidate, ok := matcher.(SkillAllowlistMatcher)
+		if !ok {
+			return fmt.Errorf("skill allowlist matcher is invalid")
+		}
+		if isEmptySkillAllowlistMatcher(candidate) {
+			return fmt.Errorf("skill allowlist matcher must include at least one skill, version, origin, trust, script, or timeout constraint")
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported allowlist domain")
+	}
+}
+
+func isEmptyExecAllowlistMatcher(matcher ExecAllowlistMatcher) bool {
+	return strings.TrimSpace(matcher.ExecutablePath) == "" &&
+		strings.TrimSpace(matcher.PathGlob) == "" &&
+		len(matcher.Argv) == 0 &&
+		strings.TrimSpace(matcher.WorkingDir) == "" &&
+		strings.TrimSpace(matcher.WorkingDirPref) == "" &&
+		strings.TrimSpace(matcher.ScriptHash) == ""
+}
+
+func isEmptySkillAllowlistMatcher(matcher SkillAllowlistMatcher) bool {
+	return strings.TrimSpace(matcher.SkillID) == "" &&
+		strings.TrimSpace(matcher.Version) == "" &&
+		strings.TrimSpace(matcher.Origin) == "" &&
+		strings.TrimSpace(matcher.TrustState) == "" &&
+		strings.TrimSpace(matcher.ScriptHash) == "" &&
+		matcher.TimeoutSeconds == 0
+}
+
+func (b *Broker) createAllowlistFromRequest(ctx context.Context, req db.ApprovalRequestRecord, actor string) (int64, error) {
+	switch SubjectType(req.Type) {
+	case SubjectExec:
+		var subject ExecSubject
+		if err := json.Unmarshal([]byte(req.SubjectJSON), &subject); err != nil {
+			return 0, err
+		}
+		rec, err := b.AddAllowlist(ctx, req.Type, AllowlistScope{HostID: subject.ExecutionHostID, Tool: subject.ToolName, Profile: subject.AccessProfile, Agent: subject.RequestingAgent}, ExecAllowlistMatcher{ExecutablePath: subject.ExecutablePath, Argv: subject.Argv, WorkingDir: subject.WorkingDir, ScriptHash: subject.ScriptHash}, actor, 0)
 		if err != nil {
 			return 0, err
 		}
-		value, err := strconv.Atoi(strings.TrimSpace(answer))
-		if err == nil {
-			return value, nil
+		return rec.ID, nil
+	case SubjectSkillExec:
+		var subject SkillExecutionSubject
+		if err := json.Unmarshal([]byte(req.SubjectJSON), &subject); err != nil {
+			return 0, err
 		}
-		fmt.Fprintln(out, "Please enter a whole number.")
+		rec, err := b.AddAllowlist(ctx, req.Type, AllowlistScope{HostID: subject.ExecutionHostID, Tool: "run_skill_script", Agent: subject.RequestingAgent}, SkillAllowlistMatcher{SkillID: subject.SkillID, Version: subject.Version, Origin: subject.Origin, TrustState: subject.TrustState, ScriptHash: subject.ScriptHash, TimeoutSeconds: subject.TimeoutSeconds}, actor, 0)
+		if err != nil {
+			return 0, err
+		}
+		return rec.ID, nil
+	default:
+		return 0, nil
 	}
 }
 
-func promptSecretString(reader *bufio.Reader, out io.Writer, label, currentValue string) (string, error) {
-	if strings.TrimSpace(currentValue) == "" {
-		return promptString(reader, out, label, "")
-	}
-	_, _ = fmt.Fprintf(out, "%s [leave blank to keep current, type clear to remove]: ", label)
-	line, err := reader.ReadString('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
+func (b *Broker) issueTokenForRequest(ctx context.Context, req db.ApprovalRequestRecord, actor string) (string, error) {
+	now := b.now()
+	record, err := b.DB.CreateApprovalToken(ctx, db.ApprovalTokenRecord{ApprovalRequestID: req.ID, SubjectHash: req.SubjectHash, IssuedAt: now.UnixMilli(), ExpiresAt: now.Add(time.Duration(b.Config.ApprovalTokenTTLSeconds) * time.Second).UnixMilli(), Issuer: actor})
+	if err != nil {
 		return "", err
 	}
-	line = strings.TrimSpace(line)
-	switch {
-	case line == "":
-		return currentValue, nil
-	case strings.EqualFold(line, configureSecretClearKeyword):
-		return "", nil
-	default:
-		return line, nil
+	claims := ApprovalTokenClaims{TokenID: record.ID, RequestID: req.ID, SubjectHash: req.SubjectHash, ExecutionHost: req.ExecutionHostID, IssuedAt: now.Unix(), ExpiresAt: now.Add(time.Duration(b.Config.ApprovalTokenTTLSeconds) * time.Second).Unix()}
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		return "", err
 	}
+	payloadPart := base64.RawURLEncoding.EncodeToString(payload)
+	signature := hex.EncodeToString(signToken(b.SignKey, payloadPart))
+	_ = b.audit(ctx, "approval.token_issued", map[string]any{"request_id": req.ID, "token_id": record.ID, "subject_hash": req.SubjectHash, "host_id": req.ExecutionHostID, "actor": actor, "outcome": "issued"})
+	return payloadPart + "." + signature, nil
+}
+
+func (b *Broker) parseApprovalToken(token string) (ApprovalTokenClaims, error) {
+	payloadPart, signaturePart, ok := strings.Cut(strings.TrimSpace(token), ".")
+	if !ok || payloadPart == "" || signaturePart == "" {
+		return ApprovalTokenClaims{}, fmt.Errorf("invalid approval token format")
+	}
+	signature, err := hex.DecodeString(signaturePart)
+	if err != nil {
+		return ApprovalTokenClaims{}, fmt.Errorf("invalid approval token signature")
+	}
+	expected := signToken(b.SignKey, payloadPart)
+	if !hmac.Equal(signature, expected) {
+		return ApprovalTokenClaims{}, fmt.Errorf("invalid approval token signature")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(payloadPart)
+	if err != nil {
+		return ApprovalTokenClaims{}, fmt.Errorf("invalid approval token payload")
+	}
+	var claims ApprovalTokenClaims
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return ApprovalTokenClaims{}, fmt.Errorf("invalid approval token payload")
+	}
+	return claims, nil
+}
+
+func signToken(key []byte, payload string) []byte {
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte(payload))
+	return mac.Sum(nil)
+}
+
+func (b *Broker) modeFor(subjectType SubjectType) config.ApprovalMode {
+	switch subjectType {
+	case SubjectExec:
+		return b.Config.Exec.Mode
+	case SubjectSkillExec:
+		return b.Config.SkillExecution.Mode
+	case SubjectSecretAccess:
+		return b.Config.SecretAccess.Mode
+	case SubjectMessageSend:
+		return b.Config.MessageSend.Mode
+	default:
+		return config.ApprovalModeDeny
+	}
+}
+
+func (b *Broker) pairingMode() config.ApprovalMode {
+	if b == nil {
+		return config.ApprovalModeDeny
+	}
+	return b.Config.Pairing.Mode
+}
+
+func (b *Broker) pairingAllowlistMatches(ctx context.Context, deviceID, role string) (bool, error) {
+	deviceID = strings.TrimSpace(deviceID)
+	if deviceID == "" || b == nil || b.DB == nil {
+		return false, nil
+	}
+	device, err := b.DB.GetPairedDevice(ctx, deviceID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	return device.Status == StatusActive && device.RevokedAt == 0 && device.Role == role, nil
+}
+
+// auditAuthKindKey is a context key that carries the authentication kind for
+// audit records (e.g. "shared-secret" or "paired-device").
+type auditAuthKindKey struct{}
+
+type auditActorKey struct{}
+
+// ContextWithAuditAuthKind stamps the auth_kind into ctx so that subsequent
+// broker.audit calls include it in every payload automatically.
+func ContextWithAuditAuthKind(ctx context.Context, kind string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	kind = strings.TrimSpace(kind)
+	if kind == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, auditAuthKindKey{}, kind)
+}
+
+func ContextWithAuditActor(ctx context.Context, actor string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	actor = strings.TrimSpace(actor)
+	if actor == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, auditActorKey{}, actor)
+}
+
+func auditAuthKindFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	kind, _ := ctx.Value(auditAuthKindKey{}).(string)
+	return kind
+}
+
+func auditActorFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	actor, _ := ctx.Value(auditActorKey{}).(string)
+	return strings.TrimSpace(actor)
+}
+
+func (b *Broker) audit(ctx context.Context, eventType string, payload map[string]any) error {
+	if b == nil || b.Audit == nil {
+		return nil
+	}
+	if kind := auditAuthKindFromContext(ctx); kind != "" {
+		merged := make(map[string]any, len(payload)+1)
+		for k, v := range payload {
+			merged[k] = v
+		}
+		merged["auth_kind"] = kind
+		payload = merged
+	}
+	actor := auditActorFromContext(ctx)
+	if payloadActor, ok := payload["actor"].(string); ok && strings.TrimSpace(payloadActor) != "" {
+		actor = strings.TrimSpace(payloadActor)
+	}
+	if actor == "" {
+		actor = "approval"
+	}
+	return b.Audit.Record(ctx, eventType, "", actor, payload)
+}
+
+// AuditExecEvent records an execution lifecycle event (start, complete, fail, blocked)
+// for exec or skill_exec tools. It attaches host_id automatically and merges any
+// extra fields provided by the caller. The call is best-effort; errors are discarded.
+func (b *Broker) AuditExecEvent(ctx context.Context, eventType string, subjectHash string, extra map[string]any) {
+	if b == nil {
+		return
+	}
+	payload := map[string]any{
+		"subject_hash": subjectHash,
+		"host_id":      b.hostID(),
+	}
+	for k, v := range extra {
+		payload[k] = v
+	}
+	_ = b.audit(ctx, eventType, payload)
+}
+
+func extractSessionID(subject any) string {
+	switch value := subject.(type) {
+	case ExecSubject:
+		return value.SessionID
+	case SkillExecutionSubject:
+		return value.SessionID
+	default:
+		return ""
+	}
+}
+
+func resolutionKind(alwaysAllow bool) string {
+	if alwaysAllow {
+		return "approve_and_allowlist"
+	}
+	return "approve_once"
+}
+
+func hashBytes(raw string) []byte {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(raw)))
+	return sum[:]
+}
+
+func randomHex(size int) (string, error) {
+	if size <= 0 {
+		return "", nil
+	}
+	buf := make([]byte, size)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
+}
+
+func randomDigits(length int) (string, error) {
+	if length <= 0 {
+		length = 6
+	}
+	max := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(length)), nil)
+	n, err := rand.Int(rand.Reader, max)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%0*d", length, n.Int64()), nil
+}
+
+func normalizeRole(role string) string {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case RoleViewer:
+		return RoleViewer
+	case RoleOperator:
+		return RoleOperator
+	case RoleServiceClient:
+		return RoleServiceClient
+	case RoleWebUI:
+		return RoleWebUI
+	case RoleNode:
+		return RoleNode
+	case RoleAdmin:
+		return RoleAdmin
+	default:
+		return ""
+	}
+}
+
+func cloneMap(in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return map[string]any{}
+	}
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 ````
 
@@ -29436,6 +30332,568 @@ func buildExtraNotes(parsed consolidationOutput, sourceMsgID sql.NullInt64, embe
 		}
 	}
 	return out
+}
+````
+
+## File: cmd/or3-intern/init.go
+````go
+package main
+
+import (
+	"bufio"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+
+	"or3-intern/internal/config"
+)
+
+type initProviderPreset struct {
+	label      string
+	apiBase    string
+	model      string
+	embedModel string
+}
+
+var initProviderPresets = map[string]initProviderPreset{
+	"1": {
+		label:      "OpenAI",
+		apiBase:    "https://api.openai.com/v1",
+		model:      "gpt-4.1-mini",
+		embedModel: "text-embedding-3-small",
+	},
+	"2": {
+		label:      "OpenRouter",
+		apiBase:    "https://openrouter.ai/api/v1",
+		model:      "openai/gpt-4o-mini",
+		embedModel: "text-embedding-3-small",
+	},
+	"3": {
+		label:      "Custom OpenAI-compatible",
+		apiBase:    "https://api.openai.com/v1",
+		model:      "gpt-4.1-mini",
+		embedModel: "text-embedding-3-small",
+	},
+}
+
+func runInit(cfgPath string) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = ""
+	}
+	if supportsInteractiveTUI(os.Stdin, os.Stdout) {
+		return runConfigureWithTUI(cfgPathOrDefault(cfgPath), cwd, []string{}, configureTUIOptions{
+			Title:      "or3-intern init",
+			Intro:      []string{"First-run setup with the essential provider, storage, workspace, and tools sections."},
+			Restricted: []string{"provider", "storage", "workspace", "tools"},
+		})
+	}
+	return runInitWithIO(os.Stdin, os.Stdout, cfgPathOrDefault(cfgPath), cwd)
+}
+
+func runInitWithIO(in io.Reader, out io.Writer, cfgPath, cwd string) error {
+	fmt.Fprintln(out, "or3-intern init")
+	fmt.Fprintln(out, "`init` now uses the same configure wizard under the hood with the original first-run sections.")
+	fmt.Fprintln(out)
+	return runConfigureWithIO(in, out, cfgPath, cwd, []string{
+		"--section", "provider",
+		"--section", "storage",
+		"--section", "workspace",
+		"--section", "tools",
+	})
+}
+
+func initDefaults(cwd string) config.Config {
+	cfg := config.Default()
+	config.ApplyEnvOverrides(&cfg)
+	cwd = strings.TrimSpace(cwd)
+	if cwd != "" {
+		cfg.WorkspaceDir = cwd
+		cfg.DBPath = filepath.Join(cwd, ".or3", "or3-intern.sqlite")
+		cfg.ArtifactsDir = filepath.Join(cwd, ".or3", "artifacts")
+		cfg.Tools.RestrictToWorkspace = true
+	}
+	return cfg
+}
+
+func defaultProviderChoice(apiBase string) string {
+	normalized := strings.ToLower(strings.TrimSpace(apiBase))
+	if strings.Contains(normalized, "openrouter.ai") {
+		return "2"
+	}
+	if normalized != "" && !strings.Contains(normalized, "api.openai.com") {
+		return "3"
+	}
+	return "1"
+}
+
+func applyProviderPreset(cfg *config.Config, choice string) {
+	preset, ok := initProviderPresets[choice]
+	if !ok || cfg == nil {
+		return
+	}
+	cfg.Provider.APIBase = preset.apiBase
+	cfg.Provider.Model = preset.model
+	cfg.Provider.EmbedModel = preset.embedModel
+}
+
+func promptChoice(reader *bufio.Reader, out io.Writer, label string, options []string, defaultChoice string) (string, error) {
+	fmt.Fprintln(out, label)
+	for _, option := range options {
+		fmt.Fprintf(out, "  %s\n", option)
+	}
+	for {
+		answer, err := promptString(reader, out, "Selection", defaultChoice)
+		if err != nil {
+			return "", err
+		}
+		answer = strings.TrimSpace(answer)
+		if _, ok := initProviderPresets[answer]; ok {
+			return answer, nil
+		}
+		fmt.Fprintln(out, "Please choose 1, 2, or 3.")
+	}
+}
+
+func promptBool(reader *bufio.Reader, out io.Writer, label string, defaultValue bool) (bool, error) {
+	defaultText := "n"
+	if defaultValue {
+		defaultText = "y"
+	}
+	for {
+		answer, err := promptString(reader, out, label+" (y/n)", defaultText)
+		if err != nil {
+			return false, err
+		}
+		switch strings.ToLower(strings.TrimSpace(answer)) {
+		case "y", "yes":
+			return true, nil
+		case "n", "no":
+			return false, nil
+		default:
+			fmt.Fprintln(out, "Please answer y or n.")
+		}
+	}
+}
+
+func promptString(reader *bufio.Reader, out io.Writer, label, defaultValue string) (string, error) {
+	if defaultValue != "" {
+		fmt.Fprintf(out, "%s [%s]: ", label, defaultValue)
+	} else {
+		fmt.Fprintf(out, "%s: ", label)
+	}
+	line, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return defaultValue, nil
+	}
+	return line, nil
+}
+
+func promptInt(reader *bufio.Reader, out io.Writer, label string, defaultValue int) (int, error) {
+	for {
+		answer, err := promptString(reader, out, label, strconv.Itoa(defaultValue))
+		if err != nil {
+			return 0, err
+		}
+		value, err := strconv.Atoi(strings.TrimSpace(answer))
+		if err == nil {
+			return value, nil
+		}
+		fmt.Fprintln(out, "Please enter a whole number.")
+	}
+}
+
+func promptSecretString(reader *bufio.Reader, out io.Writer, label, currentValue string) (string, error) {
+	if strings.TrimSpace(currentValue) == "" {
+		return promptString(reader, out, label, "")
+	}
+	_, _ = fmt.Fprintf(out, "%s [leave blank to keep current, type clear to remove]: ", label)
+	line, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+	line = strings.TrimSpace(line)
+	switch {
+	case line == "":
+		return currentValue, nil
+	case strings.EqualFold(line, configureSecretClearKeyword):
+		return "", nil
+	default:
+		return line, nil
+	}
+}
+````
+
+## File: cmd/or3-intern/doctor.go
+````go
+package main
+
+import (
+	"bufio"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+
+	"or3-intern/internal/config"
+	intdoctor "or3-intern/internal/doctor"
+)
+
+type doctorFinding struct {
+	Level   string
+	Area    string
+	Message string
+}
+
+type doctorArgs struct {
+	Strict      bool
+	JSON        bool
+	Fix         bool
+	Interactive bool
+	Probe       bool
+	Severity    intdoctor.Severity
+	Areas       []string
+	FixableOnly bool
+}
+
+func parseDoctorArgs(args []string, stderr io.Writer) (doctorArgs, error) {
+	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	strict := fs.Bool("strict", false, "exit non-zero when warnings are found")
+	jsonOut := fs.Bool("json", false, "emit structured JSON output")
+	fix := fs.Bool("fix", false, "apply safe fixes")
+	interactive := fs.Bool("interactive", false, "use guided repair prompts for ambiguous fixes")
+	probe := fs.Bool("probe", false, "run bounded local runtime probes")
+	severity := fs.String("severity", "", "minimum severity filter: info, warn, error, block")
+	fixableOnly := fs.Bool("fixable-only", false, "show only findings with available fixes")
+	var areas stringSliceFlag
+	fs.Var(&areas, "area", "repeatable area filter")
+	if err := fs.Parse(args); err != nil {
+		return doctorArgs{}, err
+	}
+	if fs.NArg() > 0 {
+		return doctorArgs{}, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+	}
+	minSeverity := intdoctor.NormalizeSeverity(*severity)
+	if *severity != "" && minSeverity == "" {
+		return doctorArgs{}, fmt.Errorf("invalid --severity %q", *severity)
+	}
+	return doctorArgs{
+		Strict:      *strict,
+		JSON:        *jsonOut,
+		Fix:         *fix,
+		Interactive: *interactive,
+		Probe:       *probe,
+		Severity:    minSeverity,
+		Areas:       []string(areas),
+		FixableOnly: *fixableOnly,
+	}, nil
+}
+
+func runDoctorCommand(cfgPath string, cfg config.Config, validationError string, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	if stdin == nil {
+		stdin = os.Stdin
+	}
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+	if stderr == nil {
+		stderr = os.Stderr
+	}
+	parsed, err := parseDoctorArgs(args, stderr)
+	if err != nil {
+		return err
+	}
+
+	report := intdoctor.Evaluate(cfg, intdoctor.Options{
+		Mode:            chooseDoctorMode(parsed.Strict),
+		ConfigPath:      cfgPath,
+		ValidationError: validationError,
+		Probe:           parsed.Probe,
+	})
+	currentValidationError := validationError
+
+	if parsed.Fix {
+		applied, fixErr := intdoctor.ApplyAutomaticFixes(cfgPath, &cfg, report, intdoctor.FixOptions{AutomaticOnly: !parsed.Interactive})
+		if fixErr != nil {
+			return fixErr
+		}
+		currentValidationError = refreshDoctorValidationError(cfgPath, currentValidationError)
+		report = intdoctor.Evaluate(cfg, intdoctor.Options{
+			Mode:            chooseDoctorMode(parsed.Strict),
+			ConfigPath:      cfgPath,
+			ValidationError: currentValidationError,
+			Probe:           parsed.Probe,
+		})
+		if parsed.Interactive {
+			appliedInteractive, interactiveErr := applyInteractiveDoctorFixes(stdin, stdout, cfgPath, &cfg, report)
+			if interactiveErr != nil {
+				return interactiveErr
+			}
+			applied = append(applied, appliedInteractive...)
+		}
+		currentValidationError = refreshDoctorValidationError(cfgPath, currentValidationError)
+		report = intdoctor.Evaluate(cfg, intdoctor.Options{
+			Mode:            chooseDoctorMode(parsed.Strict),
+			ConfigPath:      cfgPath,
+			ValidationError: currentValidationError,
+			Probe:           parsed.Probe,
+		})
+		report.FixesApplied = applied
+	}
+
+	report = report.Filter(intdoctor.FilterOptions{
+		Areas:       parsed.Areas,
+		MinSeverity: parsed.Severity,
+		FixableOnly: parsed.FixableOnly,
+	})
+
+	if parsed.JSON {
+		payload, err := intdoctor.RenderJSON(report)
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintln(stdout, string(payload))
+	} else {
+		_, _ = io.WriteString(stdout, intdoctor.RenderText(report))
+	}
+
+	if parsed.Strict && report.HasStrictFailures() {
+		return fmt.Errorf("doctor found warnings")
+	}
+	return nil
+}
+
+func chooseDoctorMode(strict bool) intdoctor.Mode {
+	if strict {
+		return intdoctor.ModeStrict
+	}
+	return intdoctor.ModeAdvisory
+}
+
+func refreshDoctorValidationError(cfgPath, previous string) string {
+	if strings.TrimSpace(cfgPath) == "" {
+		return previous
+	}
+	if _, err := config.Load(cfgPath); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
+func doctorFindings(cfg config.Config) []doctorFinding {
+	report := intdoctor.Evaluate(cfg, intdoctor.Options{Mode: intdoctor.ModeAdvisory})
+	items := make([]doctorFinding, 0, len(report.Findings))
+	for _, finding := range report.Findings {
+		items = append(items, doctorFinding{
+			Level:   string(finding.Severity),
+			Area:    finding.Area,
+			Message: finding.Summary,
+		})
+	}
+	return items
+}
+
+func hasDoctorWarnings(findings []doctorFinding) bool {
+	for _, finding := range findings {
+		if strings.EqualFold(finding.Level, "warn") || strings.EqualFold(finding.Level, "error") || strings.EqualFold(finding.Level, "block") {
+			return true
+		}
+	}
+	return false
+}
+
+func applyInteractiveDoctorFixes(in io.Reader, out io.Writer, cfgPath string, cfg *config.Config, report intdoctor.Report) ([]intdoctor.AppliedFix, error) {
+	reader := bufio.NewReader(in)
+	applied := []intdoctor.AppliedFix{}
+	for _, finding := range report.Findings {
+		if finding.FixMode != intdoctor.FixModeInteractive {
+			continue
+		}
+		changed, summary, err := applySingleInteractiveDoctorFix(reader, out, cfg, finding)
+		if err != nil {
+			return applied, err
+		}
+		if changed {
+			applied = append(applied, intdoctor.AppliedFix{ID: finding.ID, Summary: summary})
+		}
+	}
+	if len(applied) > 0 {
+		if err := config.Save(cfgPath, *cfg); err != nil {
+			return applied, err
+		}
+	}
+	return applied, nil
+}
+
+func applySingleInteractiveDoctorFix(reader *bufio.Reader, out io.Writer, cfg *config.Config, finding intdoctor.Finding) (bool, string, error) {
+	switch finding.ID {
+	case "channels.invalid_ingress":
+		channel := finding.Metadata["channel"]
+		choice, err := promptMenuChoice(reader, out, fmt.Sprintf("Repair %s inbound access", channel), []string{
+			"1) Pairing (secure default for interactive channels)",
+			"2) Allowlist (specify allowed identities now)",
+			"3) Open access",
+			"4) Deny inbound (send-only)",
+			"5) Disable channel",
+			"6) Skip",
+		}, "1")
+		if err != nil {
+			return false, "", err
+		}
+		var mode string
+		var allowlist []string
+		switch choice {
+		case "1":
+			mode = "pairing"
+		case "2":
+			mode = "allowlist"
+			text, err := promptString(reader, out, fmt.Sprintf("%s allowlist (comma-separated)", channel), "")
+			if err != nil {
+				return false, "", err
+			}
+			allowlist = splitAndCompact(text)
+		case "3":
+			mode = "open"
+		case "4":
+			mode = "deny"
+		case "5":
+			mode = "disable"
+		default:
+			return false, "", nil
+		}
+		changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, mode, allowlist)
+		if err != nil {
+			return false, "", err
+		}
+		return changed, fmt.Sprintf("updated %s inbound access", channel), nil
+	case "service.secret_missing", "service.secret_weak":
+		choice, err := promptMenuChoice(reader, out, "Repair service secret", []string{
+			"1) Generate a strong random secret",
+			"2) Disable service mode",
+			"3) Skip",
+		}, "1")
+		if err != nil {
+			return false, "", err
+		}
+		switch choice {
+		case "1":
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "generate", nil)
+			return changed, "generated a service secret", err
+		case "2":
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "disable", nil)
+			return changed, "disabled service mode", err
+		default:
+			return false, "", nil
+		}
+	case "webhook.secret_missing":
+		choice, err := promptMenuChoice(reader, out, "Repair webhook secret", []string{
+			"1) Generate a strong random secret",
+			"2) Disable webhook",
+			"3) Skip",
+		}, "1")
+		if err != nil {
+			return false, "", err
+		}
+		switch choice {
+		case "1":
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "generate", nil)
+			return changed, "generated a webhook secret", err
+		case "2":
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "disable", nil)
+			return changed, "disabled webhook", err
+		default:
+			return false, "", nil
+		}
+	case "service.public_bind":
+		choice, err := promptMenuChoice(reader, out, "Repair service bind address", []string{
+			"1) Bind to loopback",
+			"2) Skip",
+		}, "1")
+		if err != nil {
+			return false, "", err
+		}
+		if choice == "1" {
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "loopback", nil)
+			return changed, "bound service to loopback", err
+		}
+	case "webhook.public_bind":
+		choice, err := promptMenuChoice(reader, out, "Repair webhook bind address", []string{
+			"1) Bind to loopback",
+			"2) Skip",
+		}, "1")
+		if err != nil {
+			return false, "", err
+		}
+		if choice == "1" {
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "loopback", nil)
+			return changed, "bound webhook to loopback", err
+		}
+	case "security.secret_store_disabled_with_integrations":
+		choice, err := promptMenuChoice(reader, out, "Repair secret store for external integrations", []string{
+			"1) Enable secret store and generate a key file",
+			"2) Skip",
+		}, "1")
+		if err != nil {
+			return false, "", err
+		}
+		if choice == "1" {
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "enable", nil)
+			return changed, "enabled secret store and generated a key file", err
+		}
+	case "privileged-exec.sandbox_disabled":
+		choice, err := promptMenuChoice(reader, out, "Repair privileged tools without sandboxing", []string{
+			"1) Disable privileged tools",
+			"2) Enable Bubblewrap sandboxing",
+			"3) Skip",
+		}, "1")
+		if err != nil {
+			return false, "", err
+		}
+		switch choice {
+		case "1":
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "disable_privileged", nil)
+			return changed, "disabled privileged tools", err
+		case "2":
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "enable_sandbox", nil)
+			return changed, "enabled Bubblewrap sandboxing", err
+		default:
+			return false, "", nil
+		}
+	case "privileged-exec.bubblewrap_missing":
+		choice, err := promptMenuChoice(reader, out, "Repair missing Bubblewrap binary", []string{
+			"1) Disable privileged tools and sandboxing",
+			"2) Set Bubblewrap path manually",
+			"3) Skip",
+		}, "1")
+		if err != nil {
+			return false, "", err
+		}
+		switch choice {
+		case "1":
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "disable_privileged", nil)
+			return changed, "disabled privileged tools and sandboxing", err
+		case "2":
+			path, err := promptString(reader, out, "Bubblewrap path", cfg.Hardening.Sandbox.BubblewrapPath)
+			if err != nil {
+				return false, "", err
+			}
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "set_path", []string{path})
+			return changed, "updated Bubblewrap path", err
+		default:
+			return false, "", nil
+		}
+	}
+	return false, "", nil
 }
 ````
 
@@ -32743,368 +34201,566 @@ func WithTimeout(ctx context.Context, sec int) (context.Context, context.CancelF
 }
 ````
 
-## File: cmd/or3-intern/doctor.go
+## File: cmd/or3-intern/help.go
 ````go
 package main
 
 import (
-	"bufio"
 	"flag"
 	"fmt"
 	"io"
-	"os"
 	"strings"
-
-	"or3-intern/internal/config"
-	intdoctor "or3-intern/internal/doctor"
+	"text/tabwriter"
 )
 
-type doctorFinding struct {
-	Level   string
-	Area    string
-	Message string
+type helpCommand struct {
+	Usage       string
+	Summary     string
+	Description []string
+	Subcommands []helpItem
+	Flags       []helpItem
+	Examples    []string
 }
 
-type doctorArgs struct {
-	Strict      bool
-	JSON        bool
-	Fix         bool
-	Interactive bool
-	Probe       bool
-	Severity    intdoctor.Severity
-	Areas       []string
-	FixableOnly bool
+type helpItem struct {
+	Name        string
+	Description string
 }
 
-func parseDoctorArgs(args []string, stderr io.Writer) (doctorArgs, error) {
-	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	strict := fs.Bool("strict", false, "exit non-zero when warnings are found")
-	jsonOut := fs.Bool("json", false, "emit structured JSON output")
-	fix := fs.Bool("fix", false, "apply safe fixes")
-	interactive := fs.Bool("interactive", false, "use guided repair prompts for ambiguous fixes")
-	probe := fs.Bool("probe", false, "run bounded local runtime probes")
-	severity := fs.String("severity", "", "minimum severity filter: info, warn, error, block")
-	fixableOnly := fs.Bool("fixable-only", false, "show only findings with available fixes")
-	var areas stringSliceFlag
-	fs.Var(&areas, "area", "repeatable area filter")
-	if err := fs.Parse(args); err != nil {
-		return doctorArgs{}, err
-	}
-	if fs.NArg() > 0 {
-		return doctorArgs{}, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
-	}
-	minSeverity := intdoctor.NormalizeSeverity(*severity)
-	if *severity != "" && minSeverity == "" {
-		return doctorArgs{}, fmt.Errorf("invalid --severity %q", *severity)
-	}
-	return doctorArgs{
-		Strict:      *strict,
-		JSON:        *jsonOut,
-		Fix:         *fix,
-		Interactive: *interactive,
-		Probe:       *probe,
-		Severity:    minSeverity,
-		Areas:       []string(areas),
-		FixableOnly: *fixableOnly,
-	}, nil
+var rootHelpSections = []struct {
+	Title string
+	Items []helpItem
+}{
+	{
+		Title: "Simple commands",
+		Items: []helpItem{
+			{Name: "setup", Description: "Guided first-run setup with scenario and safety choices"},
+			{Name: "chat", Description: "Start chatting with OR3"},
+			{Name: "status", Description: "Check what OR3 can access and what needs attention"},
+			{Name: "settings", Description: "Review and update your settings"},
+			{Name: "connect-device", Description: "Pair a phone or other device"},
+			{Name: "help", Description: "Show help for simple or advanced commands"},
+		},
+	},
+	{
+		Title: "Advanced commands",
+		Items: []helpItem{
+			{Name: "configure", Description: "Interactive configuration wizard for setup and later edits"},
+			{Name: "init", Description: "Guided first-run setup for config and provider settings"},
+			{Name: "config-path", Description: "Print the resolved config.json path"},
+			{Name: "chat", Description: "Interactive CLI session"},
+			{Name: "serve", Description: "Run enabled channels, triggers, heartbeat, cron, and workers"},
+			{Name: "service", Description: "Run the authenticated internal HTTP API"},
+			{Name: "agent", Description: "Run a one-shot foreground turn"},
+			{Name: "version", Description: "Print the binary version"},
+		},
+	},
+	{
+		Title: "Operator tools",
+		Items: []helpItem{
+			{Name: "doctor", Description: "Diagnose readiness issues, explain risk, and repair safe local problems"},
+			{Name: "capabilities", Description: "Inspect runtime posture, ingress policy, approvals, and profiles"},
+			{Name: "embeddings", Description: "Inspect or rebuild stored memory and doc embeddings after provider/model changes"},
+			{Name: "secrets", Description: "Manage encrypted secret references stored in SQLite"},
+			{Name: "audit", Description: "Inspect or verify the append-only audit chain"},
+			{Name: "skills", Description: "List, inspect, search, install, update, check, and remove skills"},
+			{Name: "approvals", Description: "Inspect and resolve approval requests and allowlists"},
+			{Name: "devices", Description: "Inspect paired devices and legacy pairing request helpers"},
+			{Name: "pairing", Description: "Manage first-class pairing workflows"},
+			{Name: "scope", Description: "Link session keys to a shared history scope"},
+			{Name: "migrate-jsonl", Description: "Import legacy session history from JSONL"},
+			{Name: "migrate-openclaw", Description: "Import a local OpenClaw agent into or3-intern files, daily notes, and dreams"},
+		},
+	},
 }
 
-func runDoctorCommand(cfgPath string, cfg config.Config, validationError string, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
-	if stdin == nil {
-		stdin = os.Stdin
-	}
-	if stdout == nil {
-		stdout = os.Stdout
-	}
+var helpTopics = map[string]helpCommand{
+	"configure": {
+		Usage:   "or3-intern configure [--section provider|storage|workspace|web|channels|service] ...",
+		Summary: "Interactive configuration wizard for first-run setup and later edits.",
+		Description: []string{
+			"Loads the active config when present, shows a short summary, and prompts only for the sections you want to change.",
+			"When stdin and stdout are terminals, configure opens the Bubble Tea setup UI with arrow-key navigation, enter to select, space to toggle, s to save, and q to quit.",
+			"When either side is non-interactive, configure stays in the plain text prompt flow so pipes, redirected input, and scripts keep working.",
+			"The provider section can also set an optional embedding dimensions override for providers/models that support truncated embedding vectors.",
+			"Use repeatable --section flags for targeted updates, or run without flags to choose sections interactively.",
+		},
+		Flags: []helpItem{
+			{Name: "--section <name>", Description: "Repeatable section filter: provider, storage, workspace, web, channels, service"},
+		},
+		Examples: []string{"or3-intern configure", "or3-intern configure --section provider --section web", "or3-intern configure --section channels"},
+	},
+	"setup": {
+		Usage:   "or3-intern setup",
+		Summary: "Guided setup using plain-language scenario and safety choices.",
+		Description: []string{
+			"Setup asks where you are using OR3, how careful it should be, and which folder it should stay inside.",
+			"It translates those answers into the existing runtime profile, approvals, audit, service, and hardening settings.",
+		},
+		Examples: []string{"or3-intern setup"},
+	},
+	"settings": {
+		Usage:   "or3-intern settings [--section provider|workspace|devices|safety|channels|tools|memory|advanced] [--export path|-] [--advanced]",
+		Summary: "Open the settings flow for reviewing and updating your setup.",
+		Description: []string{
+			"Shows a task-based settings home for AI Provider, Workspace Folder, Connected Devices, Safety Level, Channels, Tools, Memory, and Advanced.",
+			"Use --section to jump to a task, or --export to write the current advanced JSON config without making JSON editing the default path.",
+		},
+		Flags: []helpItem{
+			{Name: "--section <name>", Description: "Open a task section: provider, workspace, devices, safety, channels, tools, memory, advanced"},
+			{Name: "--export <path|->", Description: "Export current config JSON to a file or stdout"},
+			{Name: "--advanced", Description: "Show advanced settings actions on the home screen"},
+		},
+		Examples: []string{"or3-intern settings", "or3-intern settings --section safety", "or3-intern settings --export config.json"},
+	},
+	"status": {
+		Usage:   "or3-intern status [--advanced] [--fix finding-id]",
+		Summary: "Show a friendly safety and access summary, plus problems that need attention.",
+		Flags: []helpItem{
+			{Name: "--advanced", Description: "Include internal finding IDs in the output"},
+			{Name: "--fix <finding-id>", Description: "Apply one safe automatic repair by advanced finding ID"},
+		},
+		Examples: []string{"or3-intern status", "or3-intern status --advanced", "or3-intern status --fix approvals.key_path_missing"},
+	},
+	"connect-device": {
+		Usage:    "or3-intern connect-device [list|disconnect <device-id>|role <device-id>]",
+		Summary:  "Pair a phone or other device using a short code and simple access levels.",
+		Examples: []string{"or3-intern connect-device", "or3-intern connect-device list"},
+	},
+	"init": {
+		Usage:   "or3-intern init",
+		Summary: "Guided first-run setup alias.",
+		Description: []string{
+			"Runs the same configure wizard with the original first-run sections: provider, storage, workspace, and web.",
+			"Like configure, it opens the Bubble Tea UI only on an interactive terminal and falls back to plain text prompts when used non-interactively.",
+			"Use `or3-intern configure` directly when you want channels, service, or custom section selection.",
+		},
+		Examples: []string{"or3-intern init"},
+	},
+	"config-path": {
+		Usage:   "or3-intern config-path",
+		Summary: "Print the resolved path to config.json.",
+		Description: []string{
+			"Respects --config when provided; otherwise prints the default path under ~/.or3-intern/.",
+		},
+		Examples: []string{"or3-intern config-path", "or3-intern --config /tmp/or3.json config-path"},
+	},
+	"chat": {
+		Usage:   "or3-intern chat",
+		Summary: "Start the interactive terminal chat UI.",
+		Description: []string{
+			"This is the default command when no command is provided.",
+			"Inside chat, use /new to archive the current session into memory and then clear the live message history for a fresh conversation.",
+		},
+		Examples: []string{"or3-intern chat"},
+	},
+	"serve": {
+		Usage:    "or3-intern serve",
+		Summary:  "Run enabled channels, triggers, heartbeat jobs, cron, and the shared worker runtime.",
+		Examples: []string{"or3-intern serve"},
+	},
+	"service": {
+		Usage:    "or3-intern service",
+		Summary:  "Run the authenticated internal HTTP API used by OR3 Net.",
+		Examples: []string{"or3-intern service"},
+	},
+	"agent": {
+		Usage:   "or3-intern agent -m <message> [-s session] [--approval-token token]",
+		Summary: "Run a one-shot foreground turn without entering interactive chat.",
+		Flags: []helpItem{
+			{Name: "-m <message>", Description: "Message to send to the agent"},
+			{Name: "-s <session>", Description: "Session key to use"},
+			{Name: "--approval-token <token>", Description: "One-shot approval token to attach to the request"},
+		},
+		Examples: []string{"or3-intern agent -m \"hello\"", "or3-intern agent -m \"summarize this repo\" -s review"},
+	},
+	"doctor": {
+		Usage:   "or3-intern doctor [--strict] [--json] [--fix] [--interactive] [--probe] [--area name] [--severity level] [--fixable-only]",
+		Summary: "Diagnose readiness and safety issues, then repair the safe ones.",
+		Description: []string{
+			"Doctor is the main readiness command for config, local runtime prerequisites, ingress posture, and hardened startup checks.",
+			"Use --fix for deterministic automatic repairs such as missing directories, key files, or conservative channel ingress defaults.",
+			"Use --fix --interactive when multiple valid repairs exist, such as choosing pairing vs allowlist for an enabled channel.",
+		},
+		Flags: []helpItem{
+			{Name: "--strict", Description: "Exit non-zero when warnings are found"},
+			{Name: "--json", Description: "Emit a structured JSON report"},
+			{Name: "--fix", Description: "Apply safe automatic fixes where available"},
+			{Name: "--interactive", Description: "Prompt for guided fixes on ambiguous findings"},
+			{Name: "--probe", Description: "Run bounded local runtime probes"},
+			{Name: "--area <name>", Description: "Repeatable area filter"},
+			{Name: "--severity <level>", Description: "Minimum severity filter: info, warn, error, block"},
+			{Name: "--fixable-only", Description: "Show only findings with available fixes"},
+		},
+		Examples: []string{"or3-intern doctor", "or3-intern doctor --strict", "or3-intern doctor --fix", "or3-intern doctor --fix --interactive", "or3-intern doctor --json --severity error"},
+	},
+	"capabilities": {
+		Usage:   "or3-intern capabilities [--channel name] [--trigger name] [--json]",
+		Summary: "Inspect the effective runtime posture, ingress policy, approvals, and access profiles.",
+		Flags: []helpItem{
+			{Name: "--channel <name>", Description: "Filter report to a specific channel"},
+			{Name: "--trigger <name>", Description: "Filter report to a specific trigger"},
+			{Name: "--json", Description: "Emit JSON instead of human-readable text"},
+		},
+		Examples: []string{"or3-intern capabilities", "or3-intern capabilities --channel slack --json"},
+	},
+	"embeddings": {
+		Usage:   "or3-intern embeddings <status|rebuild> [memory|docs|all]",
+		Summary: "Inspect or rebuild persisted embedding state after provider or embedding-model changes.",
+		Description: []string{
+			"Use status to compare the stored memory-vector fingerprint against the current provider API base and embedding model.",
+			"Use rebuild memory after changing embedding providers or models so existing long-term memory vectors are regenerated in the new embedding space.",
+			"Use rebuild docs or rebuild all when document indexing is enabled and you want indexed file embeddings refreshed too.",
+		},
+		Subcommands: []helpItem{
+			{Name: "status", Description: "Show stored vector dims, stored embedding fingerprint, current fingerprint, and mismatch status"},
+			{Name: "rebuild [memory|docs|all]", Description: "Regenerate persisted embeddings for memory notes, indexed docs, or both"},
+		},
+		Examples: []string{"or3-intern embeddings status", "or3-intern embeddings rebuild memory", "or3-intern embeddings rebuild all"},
+	},
+	"secrets": {
+		Usage:   "or3-intern secrets <set|delete|list> ...",
+		Summary: "Manage encrypted secret references stored in SQLite.",
+		Subcommands: []helpItem{
+			{Name: "set <name> <value>", Description: "Store or replace a secret"},
+			{Name: "delete <name>", Description: "Delete a stored secret"},
+			{Name: "list", Description: "List stored secret names"},
+		},
+		Examples: []string{"or3-intern secrets set provider.openai sk-...", "or3-intern secrets list"},
+	},
+	"audit": {
+		Usage:       "or3-intern audit [verify]",
+		Summary:     "Inspect or verify the append-only audit chain.",
+		Subcommands: []helpItem{{Name: "verify", Description: "Verify the audit chain and report integrity status"}},
+		Examples:    []string{"or3-intern audit", "or3-intern audit verify"},
+	},
+	"approvals": {
+		Usage:   "or3-intern approvals <list|show|approve|deny|allowlist> ...",
+		Summary: "Inspect and resolve approval requests and allowlist rules.",
+		Description: []string{
+			"All approval subcommands work directly against the local SQLite database.",
+		},
+		Subcommands: []helpItem{
+			{Name: "list [status]", Description: "List approval requests, optionally filtered by status"},
+			{Name: "show <id>", Description: "Show one approval request in detail"},
+			{Name: "approve <id> [--allowlist] [--note text]", Description: "Approve a request and optionally create a matching allowlist rule"},
+			{Name: "deny <id> [--note text]", Description: "Deny a request"},
+			{Name: "allowlist <list|add|remove>", Description: "Manage persistent allowlist rules"},
+		},
+		Examples: []string{"or3-intern approvals list pending", "or3-intern approvals approve 42 --allowlist"},
+	},
+	"approvals approve": {
+		Usage:   "or3-intern approvals approve <id> [--allowlist] [--note text]",
+		Summary: "Approve a pending approval request.",
+		Flags: []helpItem{
+			{Name: "--allowlist", Description: "Create a matching persistent allowlist rule"},
+			{Name: "--note <text>", Description: "Attach a free-text resolution note"},
+		},
+		Examples: []string{"or3-intern approvals approve 42", "or3-intern approvals approve 42 --allowlist --note \"reviewed\""},
+	},
+	"approvals deny": {
+		Usage:    "or3-intern approvals deny <id> [--note text]",
+		Summary:  "Deny a pending approval request.",
+		Flags:    []helpItem{{Name: "--note <text>", Description: "Attach a free-text resolution note"}},
+		Examples: []string{"or3-intern approvals deny 42", "or3-intern approvals deny 42 --note \"blocked\""},
+	},
+	"approvals allowlist": {
+		Usage:   "or3-intern approvals allowlist <list|add|remove> ...",
+		Summary: "Manage persistent approval allowlist rules.",
+		Subcommands: []helpItem{
+			{Name: "list [domain]", Description: "List active allowlist rules"},
+			{Name: "add [flags]", Description: "Create a new allowlist rule"},
+			{Name: "remove <id>", Description: "Disable an allowlist rule by ID"},
+		},
+		Examples: []string{"or3-intern approvals allowlist list exec", "or3-intern approvals allowlist add --domain exec --program /bin/echo"},
+	},
+	"approvals allowlist add": {
+		Usage:   "or3-intern approvals allowlist add [--domain exec|skill_execution] [flags]",
+		Summary: "Create a persistent allowlist rule.",
+		Flags: []helpItem{
+			{Name: "--domain <name>", Description: "Approval domain; defaults to exec"},
+			{Name: "--host <id>", Description: "Host scope; defaults to the current host ID"},
+			{Name: "--tool <name>", Description: "Tool scope"},
+			{Name: "--profile <name>", Description: "Access-profile scope"},
+			{Name: "--agent <id>", Description: "Agent scope"},
+			{Name: "--program <path>", Description: "Exact executable path for exec rules"},
+			{Name: "--cwd <path>", Description: "Working-directory constraint for exec rules"},
+			{Name: "--skill <id>", Description: "Skill identifier for skill_execution rules"},
+			{Name: "--version <v>", Description: "Skill version constraint"},
+			{Name: "--origin <registry>", Description: "Skill origin or registry constraint"},
+			{Name: "--trust <state>", Description: "Skill trust-state constraint"},
+		},
+		Examples: []string{"or3-intern approvals allowlist add --domain exec --program /usr/bin/git", "or3-intern approvals allowlist add --domain skill_execution --skill demo --version 1.0.0"},
+	},
+	"devices": {
+		Usage:   "or3-intern devices <list|requests|approve|deny|rotate|revoke> ...",
+		Summary: "Inspect paired devices and legacy pairing request helpers.",
+		Subcommands: []helpItem{
+			{Name: "list", Description: "List paired devices"},
+			{Name: "requests [status]", Description: "List pairing requests, optionally filtered by status"},
+			{Name: "approve <pairing-request-id>", Description: "Approve a pairing request"},
+			{Name: "deny <pairing-request-id>", Description: "Deny a pairing request"},
+			{Name: "rotate <device-id>", Description: "Rotate a device token and print the new token"},
+			{Name: "revoke <device-id>", Description: "Revoke a paired device immediately"},
+		},
+		Examples: []string{"or3-intern devices list", "or3-intern devices rotate dev_123"},
+	},
+	"pairing": {
+		Usage:   "or3-intern pairing <list|request|approve|deny|exchange> ...",
+		Summary: "Manage first-class pairing workflows, including channel-bound identities.",
+		Subcommands: []helpItem{
+			{Name: "list [status]", Description: "List pairing requests"},
+			{Name: "request [flags]", Description: "Create a pairing request"},
+			{Name: "approve <request-id>", Description: "Approve a pairing request"},
+			{Name: "deny <request-id>", Description: "Deny a pairing request"},
+			{Name: "exchange <request-id> <code>", Description: "Exchange a pairing code for a device token"},
+		},
+		Examples: []string{"or3-intern pairing list", "or3-intern pairing request --channel slack --identity U42 --name \"Slack User\""},
+	},
+	"pairing request": {
+		Usage:   "or3-intern pairing request [--role role] [--name text] [--origin text] [--device id] [--channel name --identity id]",
+		Summary: "Create a new pairing request.",
+		Flags: []helpItem{
+			{Name: "--role <role>", Description: "Device role; defaults to operator"},
+			{Name: "--name <text>", Description: "Display name"},
+			{Name: "--origin <text>", Description: "Origin description"},
+			{Name: "--device <id>", Description: "Explicit device ID"},
+			{Name: "--channel <name>", Description: "Channel name to bind"},
+			{Name: "--identity <id>", Description: "Channel identity to bind"},
+		},
+		Examples: []string{"or3-intern pairing request --name \"Laptop\"", "or3-intern pairing request --channel slack --identity U42 --name \"Slack User\""},
+	},
+	"skills": {
+		Usage:   "or3-intern skills <list|info|check|search|install|update|remove> ...",
+		Summary: "List, inspect, search, install, update, check, and remove skills.",
+		Subcommands: []helpItem{
+			{Name: "list [--eligible]", Description: "List discovered skills"},
+			{Name: "info <name>", Description: "Show metadata, permission state, and policy notes"},
+			{Name: "check", Description: "Validate available skills and report policy state"},
+			{Name: "search <query>", Description: "Search configured skill registries"},
+			{Name: "install <slug> [--version v] [--force]", Description: "Install a skill into the managed directory"},
+			{Name: "update <name>|--all [--version v] [--force]", Description: "Update one or more managed skill installs"},
+			{Name: "remove <name>", Description: "Remove a managed install"},
+		},
+		Examples: []string{"or3-intern skills list --eligible", "or3-intern skills install demo --version 1.0.0"},
+	},
+	"skills list": {
+		Usage:    "or3-intern skills list [--eligible]",
+		Summary:  "List discovered skills.",
+		Flags:    []helpItem{{Name: "--eligible", Description: "Show only eligible skills"}},
+		Examples: []string{"or3-intern skills list", "or3-intern skills list --eligible"},
+	},
+	"skills install": {
+		Usage:   "or3-intern skills install <slug> [--version v] [--force]",
+		Summary: "Install a skill into the managed directory.",
+		Flags: []helpItem{
+			{Name: "--version <v>", Description: "Install a specific skill version"},
+			{Name: "--force", Description: "Overwrite local modifications when installing"},
+		},
+		Examples: []string{"or3-intern skills install demo", "or3-intern skills install demo --version 1.0.0 --force"},
+	},
+	"skills update": {
+		Usage:   "or3-intern skills update <name>|--all [--version v] [--force]",
+		Summary: "Update one or more managed skill installs.",
+		Flags: []helpItem{
+			{Name: "--all", Description: "Update all installed skills"},
+			{Name: "--version <v>", Description: "Target version to install"},
+			{Name: "--force", Description: "Overwrite local modifications when updating"},
+		},
+		Examples: []string{"or3-intern skills update demo", "or3-intern skills update --all"},
+	},
+	"scope": {
+		Usage:   "or3-intern scope <link|list|resolve> ...",
+		Summary: "Link multiple session keys to a shared history scope.",
+		Subcommands: []helpItem{
+			{Name: "link <session-key> <scope-key>", Description: "Link a session key to a scope"},
+			{Name: "list <scope-key>", Description: "List session keys attached to a scope"},
+			{Name: "resolve <session-key>", Description: "Resolve the scope for a session key"},
+		},
+		Examples: []string{"or3-intern scope link session-a team-alpha", "or3-intern scope resolve session-a"},
+	},
+	"migrate-jsonl": {
+		Usage:    "or3-intern migrate-jsonl <path-to-session.jsonl> [session_key]",
+		Summary:  "Import legacy session history from a JSONL transcript.",
+		Examples: []string{"or3-intern migrate-jsonl /tmp/session.jsonl", "or3-intern migrate-jsonl /tmp/session.jsonl imported:demo"},
+	},
+	"migrate-openclaw": {
+		Usage:   "or3-intern migrate-openclaw [--scope <scope-key>] [--embed-max-bytes <n>] <openclaw-agent-dir>",
+		Summary: "Import SOUL.md, IDENTITY.md, MEMORY.md, USER.md, daily notes, and dreams from a local OpenClaw agent.",
+		Description: []string{
+			"Core bootstrap files are copied into the configured or3-intern destinations.",
+			"OpenClaw memory/*.md files plus DREAMS.md and memory/.dreams/* are imported as durable memory notes using conservative chunking so embedding requests stay bounded.",
+			"The command is repeatable: previously imported OpenClaw daily notes for the same source agent are replaced before new notes are inserted.",
+		},
+		Flags: []helpItem{
+			{Name: "--scope <scope-key>", Description: "Memory scope for imported daily notes; defaults to global shared memory"},
+			{Name: "--embed-max-bytes <n>", Description: "Maximum bytes per imported memory chunk before embedding"},
+		},
+		Examples: []string{"or3-intern migrate-openclaw ~/.openclaw/agents/main", "or3-intern migrate-openclaw --scope global ~/agent-export"},
+	},
+	"version": {
+		Usage:    "or3-intern version",
+		Summary:  "Print the binary version.",
+		Examples: []string{"or3-intern version"},
+	},
+}
+
+func parseRootCLIArgs(argv []string, stderr io.Writer) (string, []string, bool, bool, bool, error) {
 	if stderr == nil {
-		stderr = os.Stderr
+		stderr = io.Discard
 	}
-	parsed, err := parseDoctorArgs(args, stderr)
-	if err != nil {
-		return err
+	fs := flag.NewFlagSet("or3-intern", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.Usage = func() {}
+	var cfgPath string
+	var showHelp bool
+	var unsafeDev bool
+	var advanced bool
+	fs.StringVar(&cfgPath, "config", "", "path to config.json")
+	fs.BoolVar(&showHelp, "help", false, "show help")
+	fs.BoolVar(&showHelp, "h", false, "show help")
+	fs.BoolVar(&unsafeDev, "unsafe-dev", false, "bypass startup safety gates for local development")
+	fs.BoolVar(&advanced, "advanced", false, "show advanced root help")
+	if err := fs.Parse(argv); err != nil {
+		return "", nil, false, false, false, err
 	}
+	return cfgPath, fs.Args(), showHelp, unsafeDev, advanced, nil
+}
 
-	report := intdoctor.Evaluate(cfg, intdoctor.Options{
-		Mode:            chooseDoctorMode(parsed.Strict),
-		ConfigPath:      cfgPath,
-		ValidationError: validationError,
-		Probe:           parsed.Probe,
-	})
-	currentValidationError := validationError
-
-	if parsed.Fix {
-		applied, fixErr := intdoctor.ApplyAutomaticFixes(cfgPath, &cfg, report, intdoctor.FixOptions{AutomaticOnly: !parsed.Interactive})
-		if fixErr != nil {
-			return fixErr
+func maybeHandleHelpRequest(args []string, stdout io.Writer) (bool, error) {
+	if len(args) == 0 {
+		return false, nil
+	}
+	if strings.EqualFold(strings.TrimSpace(args[0]), "help") {
+		return true, printHelpTopic(stdout, helpTopicPath(args[1:]))
+	}
+	for _, arg := range args[1:] {
+		if isHelpToken(arg) {
+			return true, printHelpTopic(stdout, helpTopicPath(args))
 		}
-		currentValidationError = refreshDoctorValidationError(cfgPath, currentValidationError)
-		report = intdoctor.Evaluate(cfg, intdoctor.Options{
-			Mode:            chooseDoctorMode(parsed.Strict),
-			ConfigPath:      cfgPath,
-			ValidationError: currentValidationError,
-			Probe:           parsed.Probe,
-		})
-		if parsed.Interactive {
-			appliedInteractive, interactiveErr := applyInteractiveDoctorFixes(stdin, stdout, cfgPath, &cfg, report)
-			if interactiveErr != nil {
-				return interactiveErr
-			}
-			applied = append(applied, appliedInteractive...)
+	}
+	return false, nil
+}
+
+func isHelpToken(arg string) bool {
+	switch strings.TrimSpace(arg) {
+	case "-h", "--help":
+		return true
+	default:
+		return false
+	}
+}
+
+func helpTopicPath(args []string) []string {
+	path := make([]string, 0, len(args))
+	for _, arg := range args {
+		arg = strings.ToLower(strings.TrimSpace(arg))
+		if arg == "" || isHelpToken(arg) || strings.HasPrefix(arg, "-") {
+			break
 		}
-		currentValidationError = refreshDoctorValidationError(cfgPath, currentValidationError)
-		report = intdoctor.Evaluate(cfg, intdoctor.Options{
-			Mode:            chooseDoctorMode(parsed.Strict),
-			ConfigPath:      cfgPath,
-			ValidationError: currentValidationError,
-			Probe:           parsed.Probe,
-		})
-		report.FixesApplied = applied
+		path = append(path, arg)
 	}
+	return path
+}
 
-	report = report.Filter(intdoctor.FilterOptions{
-		Areas:       parsed.Areas,
-		MinSeverity: parsed.Severity,
-		FixableOnly: parsed.FixableOnly,
-	})
-
-	if parsed.JSON {
-		payload, err := intdoctor.RenderJSON(report)
-		if err != nil {
-			return err
-		}
-		_, _ = fmt.Fprintln(stdout, string(payload))
-	} else {
-		_, _ = io.WriteString(stdout, intdoctor.RenderText(report))
+func printHelpTopic(w io.Writer, path []string) error {
+	if w == nil {
+		w = io.Discard
 	}
-
-	if parsed.Strict && report.HasStrictFailures() {
-		return fmt.Errorf("doctor found warnings")
+	if len(path) == 0 {
+		printRootHelp(w)
+		return nil
 	}
+	key, ok := bestHelpTopicKey(path)
+	if !ok {
+		return fmt.Errorf("unknown help topic: %s", strings.Join(path, " "))
+	}
+	renderHelpTopic(w, helpTopics[key])
 	return nil
 }
 
-func chooseDoctorMode(strict bool) intdoctor.Mode {
-	if strict {
-		return intdoctor.ModeStrict
+func bestHelpTopicKey(path []string) (string, bool) {
+	for i := len(path); i >= 1; i-- {
+		key := strings.Join(path[:i], " ")
+		if _, ok := helpTopics[key]; ok {
+			return key, true
+		}
 	}
-	return intdoctor.ModeAdvisory
+	return "", false
 }
 
-func refreshDoctorValidationError(cfgPath, previous string) string {
-	if strings.TrimSpace(cfgPath) == "" {
-		return previous
-	}
-	if _, err := config.Load(cfgPath); err != nil {
-		return err.Error()
-	}
-	return ""
+func printRootHelp(w io.Writer) {
+	printRootHelpMode(w, false)
 }
 
-func doctorFindings(cfg config.Config) []doctorFinding {
-	report := intdoctor.Evaluate(cfg, intdoctor.Options{Mode: intdoctor.ModeAdvisory})
-	items := make([]doctorFinding, 0, len(report.Findings))
-	for _, finding := range report.Findings {
-		items = append(items, doctorFinding{
-			Level:   string(finding.Severity),
-			Area:    finding.Area,
-			Message: finding.Summary,
-		})
-	}
-	return items
+func printAdvancedRootHelp(w io.Writer) {
+	printRootHelpMode(w, true)
 }
 
-func hasDoctorWarnings(findings []doctorFinding) bool {
-	for _, finding := range findings {
-		if strings.EqualFold(finding.Level, "warn") || strings.EqualFold(finding.Level, "error") || strings.EqualFold(finding.Level, "block") {
-			return true
+func printRootHelpMode(w io.Writer, advanced bool) {
+	_, _ = fmt.Fprintln(w, "or3-intern is a local-first agent runtime with chat, channels, memory, approvals, and service APIs.")
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "Usage:")
+	_, _ = fmt.Fprintln(w, "  or3-intern [--config path] [--unsafe-dev] <command> [options]")
+	_, _ = fmt.Fprintln(w, "  or3-intern")
+	_, _ = fmt.Fprintln(w, "  or3-intern help [command]")
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "Without a command, or3-intern starts interactive chat.")
+	for index, section := range rootHelpSections {
+		if !advanced && index > 0 {
+			break
 		}
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintf(w, "%s:\n", section.Title)
+		printHelpItems(w, section.Items)
 	}
-	return false
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "Global flags:")
+	printHelpItems(w, []helpItem{{Name: "--config <path>", Description: "Path to config.json"}, {Name: "--unsafe-dev", Description: "Bypass startup safety gates for local development"}, {Name: "--advanced", Description: "Show the full operator command list at the root"}, {Name: "-h, --help", Description: "Show help for the root command or a subcommand"}})
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "Examples:")
+	for _, example := range []string{"or3-intern setup", "or3-intern chat", "or3-intern status", "or3-intern connect-device", "or3-intern --advanced --help"} {
+		_, _ = fmt.Fprintf(w, "  %s\n", example)
+	}
+	if !advanced {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "Use `or3-intern --advanced --help` to see the full operator command list.")
+	}
 }
 
-func applyInteractiveDoctorFixes(in io.Reader, out io.Writer, cfgPath string, cfg *config.Config, report intdoctor.Report) ([]intdoctor.AppliedFix, error) {
-	reader := bufio.NewReader(in)
-	applied := []intdoctor.AppliedFix{}
-	for _, finding := range report.Findings {
-		if finding.FixMode != intdoctor.FixModeInteractive {
-			continue
-		}
-		changed, summary, err := applySingleInteractiveDoctorFix(reader, out, cfg, finding)
-		if err != nil {
-			return applied, err
-		}
-		if changed {
-			applied = append(applied, intdoctor.AppliedFix{ID: finding.ID, Summary: summary})
+func renderHelpTopic(w io.Writer, cmd helpCommand) {
+	_, _ = fmt.Fprintf(w, "Usage:\n  %s\n", cmd.Usage)
+	if strings.TrimSpace(cmd.Summary) != "" {
+		_, _ = fmt.Fprintf(w, "\n%s\n", cmd.Summary)
+	}
+	if len(cmd.Description) > 0 {
+		_, _ = fmt.Fprintln(w)
+		for _, line := range cmd.Description {
+			_, _ = fmt.Fprintln(w, line)
 		}
 	}
-	if len(applied) > 0 {
-		if err := config.Save(cfgPath, *cfg); err != nil {
-			return applied, err
+	if len(cmd.Subcommands) > 0 {
+		_, _ = fmt.Fprintln(w, "\nSubcommands:")
+		printHelpItems(w, cmd.Subcommands)
+	}
+	if len(cmd.Flags) > 0 {
+		_, _ = fmt.Fprintln(w, "\nFlags:")
+		printHelpItems(w, cmd.Flags)
+	}
+	if len(cmd.Examples) > 0 {
+		_, _ = fmt.Fprintln(w, "\nExamples:")
+		for _, example := range cmd.Examples {
+			_, _ = fmt.Fprintf(w, "  %s\n", example)
 		}
 	}
-	return applied, nil
 }
 
-func applySingleInteractiveDoctorFix(reader *bufio.Reader, out io.Writer, cfg *config.Config, finding intdoctor.Finding) (bool, string, error) {
-	switch finding.ID {
-	case "channels.invalid_ingress":
-		channel := finding.Metadata["channel"]
-		choice, err := promptMenuChoice(reader, out, fmt.Sprintf("Repair %s inbound access", channel), []string{
-			"1) Pairing (secure default for interactive channels)",
-			"2) Allowlist (specify allowed identities now)",
-			"3) Open access",
-			"4) Deny inbound (send-only)",
-			"5) Disable channel",
-			"6) Skip",
-		}, "1")
-		if err != nil {
-			return false, "", err
-		}
-		var mode string
-		var allowlist []string
-		switch choice {
-		case "1":
-			mode = "pairing"
-		case "2":
-			mode = "allowlist"
-			text, err := promptString(reader, out, fmt.Sprintf("%s allowlist (comma-separated)", channel), "")
-			if err != nil {
-				return false, "", err
-			}
-			allowlist = splitAndCompact(text)
-		case "3":
-			mode = "open"
-		case "4":
-			mode = "deny"
-		case "5":
-			mode = "disable"
-		default:
-			return false, "", nil
-		}
-		changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, mode, allowlist)
-		if err != nil {
-			return false, "", err
-		}
-		return changed, fmt.Sprintf("updated %s inbound access", channel), nil
-	case "service.secret_missing", "service.secret_weak":
-		choice, err := promptMenuChoice(reader, out, "Repair service secret", []string{
-			"1) Generate a strong random secret",
-			"2) Disable service mode",
-			"3) Skip",
-		}, "1")
-		if err != nil {
-			return false, "", err
-		}
-		switch choice {
-		case "1":
-			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "generate", nil)
-			return changed, "generated a service secret", err
-		case "2":
-			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "disable", nil)
-			return changed, "disabled service mode", err
-		default:
-			return false, "", nil
-		}
-	case "webhook.secret_missing":
-		choice, err := promptMenuChoice(reader, out, "Repair webhook secret", []string{
-			"1) Generate a strong random secret",
-			"2) Disable webhook",
-			"3) Skip",
-		}, "1")
-		if err != nil {
-			return false, "", err
-		}
-		switch choice {
-		case "1":
-			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "generate", nil)
-			return changed, "generated a webhook secret", err
-		case "2":
-			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "disable", nil)
-			return changed, "disabled webhook", err
-		default:
-			return false, "", nil
-		}
-	case "service.public_bind":
-		choice, err := promptMenuChoice(reader, out, "Repair service bind address", []string{
-			"1) Bind to loopback",
-			"2) Skip",
-		}, "1")
-		if err != nil {
-			return false, "", err
-		}
-		if choice == "1" {
-			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "loopback", nil)
-			return changed, "bound service to loopback", err
-		}
-	case "webhook.public_bind":
-		choice, err := promptMenuChoice(reader, out, "Repair webhook bind address", []string{
-			"1) Bind to loopback",
-			"2) Skip",
-		}, "1")
-		if err != nil {
-			return false, "", err
-		}
-		if choice == "1" {
-			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "loopback", nil)
-			return changed, "bound webhook to loopback", err
-		}
-	case "security.secret_store_disabled_with_integrations":
-		choice, err := promptMenuChoice(reader, out, "Repair secret store for external integrations", []string{
-			"1) Enable secret store and generate a key file",
-			"2) Skip",
-		}, "1")
-		if err != nil {
-			return false, "", err
-		}
-		if choice == "1" {
-			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "enable", nil)
-			return changed, "enabled secret store and generated a key file", err
-		}
-	case "privileged-exec.sandbox_disabled":
-		choice, err := promptMenuChoice(reader, out, "Repair privileged tools without sandboxing", []string{
-			"1) Disable privileged tools",
-			"2) Enable Bubblewrap sandboxing",
-			"3) Skip",
-		}, "1")
-		if err != nil {
-			return false, "", err
-		}
-		switch choice {
-		case "1":
-			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "disable_privileged", nil)
-			return changed, "disabled privileged tools", err
-		case "2":
-			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "enable_sandbox", nil)
-			return changed, "enabled Bubblewrap sandboxing", err
-		default:
-			return false, "", nil
-		}
-	case "privileged-exec.bubblewrap_missing":
-		choice, err := promptMenuChoice(reader, out, "Repair missing Bubblewrap binary", []string{
-			"1) Disable privileged tools and sandboxing",
-			"2) Set Bubblewrap path manually",
-			"3) Skip",
-		}, "1")
-		if err != nil {
-			return false, "", err
-		}
-		switch choice {
-		case "1":
-			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "disable_privileged", nil)
-			return changed, "disabled privileged tools and sandboxing", err
-		case "2":
-			path, err := promptString(reader, out, "Bubblewrap path", cfg.Hardening.Sandbox.BubblewrapPath)
-			if err != nil {
-				return false, "", err
-			}
-			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "set_path", []string{path})
-			return changed, "updated Bubblewrap path", err
-		default:
-			return false, "", nil
-		}
+func printHelpItems(w io.Writer, items []helpItem) {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	for _, item := range items {
+		_, _ = fmt.Fprintf(tw, "  %s\t%s\n", item.Name, item.Description)
 	}
-	return false, "", nil
+	_ = tw.Flush()
 }
 ````
 
@@ -34724,7 +36380,7 @@ or3-intern version
 
 1. Run guided setup:
    ```bash
-   or3-intern configure
+   or3-intern setup
    ```
 2. Start an interactive local session:
    ```bash
@@ -34735,8 +36391,20 @@ or3-intern version
    ```bash
    or3-intern serve
    ```
+4. Check safety and access posture any time:
+   ```bash
+   or3-intern status
+   ```
 
-The `configure` command is the recommended setup flow and supports re-running specific sections later with `--section`. The lighter `init` command still exists for the original first-run provider/storage flow.
+The `setup` command is the recommended first-run flow. It asks for a provider, workspace folder, scenario, and safety mode, then translates those choices into the existing runtime profile, approvals, audit, service, and hardening settings.
+
+Use `settings` when you want to revisit your setup later. It opens a task-based home for AI Provider, Workspace Folder, Connected Devices, Safety Level, Channels, Tools, Memory, and Advanced:
+
+```bash
+or3-intern settings
+```
+
+The advanced `configure` command still exists and supports re-running specific sections later with `--section`. The lighter `init` command still exists for the original first-run provider/storage flow.
 
 On an interactive terminal, `configure` and `init` launch the Bubble Tea setup UI with arrow-key navigation, `enter` to open/select, `space` to toggle booleans, `s` to save, and `q` to back out or quit. If stdin or stdout is not a terminal, both commands automatically stay in the plain-text prompt flow so scripts and redirected input remain stable. In plain-text mode, existing secrets stay hidden: leave the field blank to keep the current value, enter a new value to replace it, or type `clear` to remove it. The provider section now also exposes an optional embedding-dimensions override for models/providers that support configurable vector sizes.
 
@@ -34755,10 +36423,20 @@ Use `go run ./cmd/or3-intern ...` for ad hoc local runs, or install the binary f
 
 ## Commands
 
+Simple commands:
+
+- `or3-intern setup` guided first-run setup using scenario and safety choices
+- `or3-intern chat` interactive CLI
+- `or3-intern status [--advanced]` plain-language safety and access summary
+- `or3-intern settings [--section ...] [--export path|-]` review setup, jump to focused task sections, or export config
+- `or3-intern connect-device [list|disconnect <device-id>|role <device-id>]` pair a phone or other device
+- `or3-intern help` show simple help by default; use `or3-intern --advanced --help` for the full operator surface
+
+Advanced and operator commands:
+
 - `or3-intern configure [--section ...]` interactive setup and reconfiguration wizard
 - `or3-intern init` guided first-run setup
 - `or3-intern config-path` print the resolved config.json path
-- `or3-intern chat` interactive CLI
 - `or3-intern serve` run enabled external channels and automation
 - `or3-intern service` run the internal authenticated HTTP API for OR3 Net
 - `or3-intern agent -m "hello"` run a one-shot turn
@@ -36187,12 +37865,16 @@ func newProviderClient(cfg config.Config) *providers.Client {
 }
 
 func main() {
-	cfgPath, args, showHelp, unsafeDev, err := parseRootCLIArgs(os.Args[1:], os.Stderr)
+	cfgPath, args, showHelp, unsafeDev, advancedHelp, err := parseRootCLIArgs(os.Args[1:], os.Stderr)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
 	if showHelp {
+		if len(helpTopicPath(args)) == 0 && advancedHelp {
+			printAdvancedRootHelp(os.Stdout)
+			return
+		}
 		if err := printHelpTopic(os.Stdout, helpTopicPath(args)); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(2)
@@ -36212,7 +37894,11 @@ func main() {
 		cmd = args[0]
 	}
 	if isHelpToken(cmd) {
-		printRootHelp(os.Stdout)
+		if advancedHelp {
+			printAdvancedRootHelp(os.Stdout)
+		} else {
+			printRootHelp(os.Stdout)
+		}
 		return
 	}
 	if commandHandledBeforeConfigLoad(cmd) {
@@ -36231,8 +37917,28 @@ func main() {
 				fmt.Fprintln(os.Stderr, "init error:", err)
 				os.Exit(1)
 			}
+		case "settings":
+			if err := runSettings(cfgPath, args[1:]); err != nil {
+				if translated := translateAndPrintError(err, os.Stderr); translated != nil {
+					fmt.Fprintln(os.Stderr, "settings error:", err)
+				}
+				os.Exit(1)
+			}
+		case "setup":
+			result, err := runSetup(cfgPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "setup error:", err)
+				os.Exit(1)
+			}
+			if !result.StartChat {
+				return
+			}
+			cmd = "chat"
+			args = []string{"chat"}
 		}
-		return
+		if cmd != "chat" {
+			return
+		}
 	}
 	if cmd == "doctor" {
 		cwd, err := os.Getwd()
@@ -36250,10 +37956,43 @@ func main() {
 		}
 		return
 	}
+	if cmd == "status" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			cwd = ""
+		}
+		cfg, validationError, loadErr := loadDoctorConfig(cfgPathOrDefault(cfgPath), cwd)
+		if loadErr != nil {
+			fmt.Fprintln(os.Stderr, "status error:", loadErr)
+			os.Exit(1)
+		}
+		var database *db.DB
+		if strings.TrimSpace(cfg.DBPath) != "" {
+			_ = os.MkdirAll(filepath.Dir(cfg.DBPath), 0o755)
+			if opened, openErr := db.Open(cfg.DBPath); openErr == nil {
+				database = opened
+				defer database.Close()
+			}
+		}
+		statusOptions, err := parseStatusCommandArgs(args[1:], advancedHelp)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "status error:", err)
+			os.Exit(2)
+		}
+		if err := runStatusCommandWithOptions(cfgPathOrDefault(cfgPath), cfg, validationError, database, os.Stdout, statusOptions); err != nil {
+			if translated := translateAndPrintError(err, os.Stderr); translated != nil {
+				fmt.Fprintln(os.Stderr, "status error:", err)
+			}
+			os.Exit(1)
+		}
+		return
+	}
 
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "config error:", err)
+		if translated := translateAndPrintError(err, os.Stderr); translated != nil {
+			fmt.Fprintln(os.Stderr, "config error:", err)
+		}
 		if hint := configErrorHint(err); hint != "" {
 			fmt.Fprintln(os.Stderr, hint)
 		}
@@ -36303,11 +38042,15 @@ func main() {
 	defer stopSignals()
 	cfg, secretManager, auditLogger, err := setupSecurity(ctx, cfg, d)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "security error:", err)
+		if translated := translateAndPrintError(err, os.Stderr); translated != nil {
+			fmt.Fprintln(os.Stderr, "security error:", err)
+		}
 		os.Exit(1)
 	}
 	if err := validateStartupCommand(cmd, cfg, unsafeDev); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		if translated := translateAndPrintError(err, os.Stderr); translated != nil {
+			fmt.Fprintln(os.Stderr, err)
+		}
 		os.Exit(1)
 	}
 	if cmd == "secrets" {
@@ -36335,7 +38078,9 @@ func main() {
 	}
 	approvalBroker, err := setupApprovalBroker(cfg, d, auditLogger)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "approval error:", err)
+		if translated := translateAndPrintError(err, os.Stderr); translated != nil {
+			fmt.Fprintln(os.Stderr, "approval error:", err)
+		}
 		os.Exit(1)
 	}
 	if commandHandledBeforeRuntimeBootstrap(cmd) {
@@ -36663,7 +38408,9 @@ func main() {
 		}
 	case "approvals":
 		if err := runApprovalsCommand(ctx, approvalBroker, args[1:], os.Stdout, os.Stderr); err != nil {
-			fmt.Fprintln(os.Stderr, "approvals error:", err)
+			if translated := translateAndPrintError(err, os.Stderr); translated != nil {
+				fmt.Fprintln(os.Stderr, "approvals error:", err)
+			}
 			os.Exit(1)
 		}
 	case "devices":
@@ -36674,6 +38421,14 @@ func main() {
 	case "pairing":
 		if err := runPairingCommand(ctx, approvalBroker, args[1:], os.Stdout, os.Stderr); err != nil {
 			fmt.Fprintln(os.Stderr, "pairing error:", err)
+			os.Exit(1)
+		}
+	case "connect-device":
+		if err := runConnectDeviceCommand(ctx, cfgPathOrDefault(cfgPath), &cfg, d, approvalBroker, args[1:], os.Stdout, os.Stderr); err != nil {
+			if translated := translateAndPrintError(err, os.Stderr); translated == nil {
+				os.Exit(1)
+			}
+			fmt.Fprintln(os.Stderr, "connect-device error:", err)
 			os.Exit(1)
 		}
 	default:
@@ -36716,7 +38471,7 @@ func loadDoctorConfig(cfgPath, cwd string) (config.Config, string, error) {
 
 func commandHandledBeforeConfigLoad(cmd string) bool {
 	switch cmd {
-	case "config-path", "version", "configure", "init":
+	case "config-path", "version", "configure", "init", "setup", "settings":
 		return true
 	default:
 		return false

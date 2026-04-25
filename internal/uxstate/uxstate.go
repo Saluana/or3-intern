@@ -108,7 +108,7 @@ func BuildSettingsHomeView(cfg config.Config) SettingsHomeView {
 		settingsSection("provider", providerSummary(cfg), "or3-intern settings --section provider", false),
 		settingsSection("workspace", workspaceSummary(cfg), "or3-intern settings --section workspace", false),
 		settingsSection("devices", deviceSummary(cfg, 0, 0), "or3-intern connect-device", false),
-		settingsSection("runtimeProfile", uxcopy.SafetyModeLabel(inference.Mode, inference.IsCustom, inference.BaseMode), "or3-intern settings --section safety", false),
+		{Key: "safety", Title: "Safety", Summary: uxcopy.SafetyModeLabel(inference.Mode, inference.IsCustom, inference.BaseMode), Action: "or3-intern settings --section safety"},
 		settingsSection("channels", channelsSummary(cfg), "or3-intern settings --section channels", false),
 		settingsSection("tools", toolsSummary(cfg), "or3-intern settings --section tools", false),
 		settingsSection("memory", memorySummary(cfg), "or3-intern settings --section memory", false),

@@ -63,17 +63,13 @@ Use `go run ./cmd/or3-intern ...` for ad hoc local runs, or install the binary f
 
 ## Commands
 
-Simple commands:
+Root help shows the full command catalog by default:
 
 - `or3-intern setup` guided first-run setup using scenario and safety choices
 - `or3-intern chat` interactive CLI
 - `or3-intern status [--advanced]` plain-language safety and access summary
 - `or3-intern settings [--section ...] [--export path|-]` review setup, jump to focused task sections, or export config
 - `or3-intern connect-device [list|disconnect <device-id>|role <device-id>]` pair a phone or other device
-- `or3-intern help` show simple help by default; use `or3-intern --advanced --help` for the full operator surface
-
-Advanced and operator commands:
-
 - `or3-intern configure [--section ...]` interactive setup and reconfiguration wizard
 - `or3-intern init` guided first-run setup
 - `or3-intern config-path` print the resolved config.json path

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -74,8 +73,6 @@ func initDefaults(cwd string) config.Config {
 	cwd = strings.TrimSpace(cwd)
 	if cwd != "" {
 		cfg.WorkspaceDir = cwd
-		cfg.DBPath = filepath.Join(cwd, ".or3", "or3-intern.sqlite")
-		cfg.ArtifactsDir = filepath.Join(cwd, ".or3", "artifacts")
 		cfg.Tools.RestrictToWorkspace = true
 	}
 	return cfg

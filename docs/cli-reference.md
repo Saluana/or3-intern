@@ -9,7 +9,7 @@ or3-intern version
 
 If you are running directly from a checkout without installing, replace `or3-intern` with `go run ./cmd/or3-intern`.
 
-## Simple commands
+## Commands
 
 | Command | Purpose |
 | --- | --- |
@@ -18,12 +18,7 @@ If you are running directly from a checkout without installing, replace `or3-int
 | `or3-intern status [--advanced]` | Shows a plain-language safety, access, and problems summary |
 | `or3-intern settings [--section ...] [--export path|-]` | Opens the task-based settings home and supports focused edits or config export |
 | `or3-intern connect-device [list|disconnect <device-id>|role <device-id>]` | Pairs a phone or other device using a short code and simple access levels |
-| `or3-intern help` | Shows the simple root help; use `or3-intern --advanced --help` for the full operator surface |
-
-## Advanced commands
-
-| Command | Purpose |
-| --- | --- |
+| `or3-intern help` | Shows the full root command catalog |
 | `or3-intern configure [--section ...]` | Interactive setup and reconfiguration wizard for provider, storage, workspace, web, channels, and service |
 | `or3-intern init` | Guided first-run setup for config and provider settings |
 | `or3-intern config-path` | Prints the resolved config.json path |
@@ -35,8 +30,8 @@ If you are running directly from a checkout without installing, replace `or3-int
 
 Root help behavior:
 
-- `or3-intern help` shows the short simple-command list.
-- `or3-intern --advanced --help` shows the full command catalog.
+- `or3-intern help` and `or3-intern --help` show the full command catalog.
+- `or3-intern --advanced --help` shows the same root catalog and remains accepted for compatibility.
 - `or3-intern help <command>` shows detailed help for either simple or advanced commands.
 
 ### `or3-intern setup`

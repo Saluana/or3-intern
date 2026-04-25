@@ -109,13 +109,13 @@ var helpTopics = map[string]helpCommand{
 		Examples: []string{"or3-intern settings", "or3-intern settings --section safety", "or3-intern settings --export config.json"},
 	},
 	"status": {
-		Usage:   "or3-intern status [--advanced] [--fix finding-id]",
+		Usage:   "or3-intern status [--advanced] [--fix number|all|finding-id]",
 		Summary: "Show a friendly safety and access summary, plus problems that need attention.",
 		Flags: []helpItem{
 			{Name: "--advanced", Description: "Include internal finding IDs in the output"},
-			{Name: "--fix <finding-id>", Description: "Apply one safe automatic repair by advanced finding ID"},
+			{Name: "--fix <number|all|finding-id>", Description: "Apply a safe automatic repair"},
 		},
-		Examples: []string{"or3-intern status", "or3-intern status --advanced", "or3-intern status --fix approvals.key_path_missing"},
+		Examples: []string{"or3-intern status", "or3-intern status --fix 1", "or3-intern status --fix all"},
 	},
 	"connect-device": {
 		Usage:    "or3-intern connect-device [list|disconnect <device-id>|role <device-id>]",
@@ -415,7 +415,7 @@ func parseRootCLIArgs(argv []string, stderr io.Writer) (string, []string, bool, 
 	fs.BoolVar(&showHelp, "help", false, "show help")
 	fs.BoolVar(&showHelp, "h", false, "show help")
 	fs.BoolVar(&unsafeDev, "unsafe-dev", false, "bypass startup safety gates for local development")
-	fs.BoolVar(&advanced, "advanced", false, "show advanced root help")
+	fs.BoolVar(&advanced, "advanced", false, "accepted for compatibility; root help is always complete")
 	if err := fs.Parse(argv); err != nil {
 		return "", nil, false, false, false, err
 	}
@@ -466,6 +466,10 @@ func printHelpTopic(w io.Writer, path []string) error {
 		printRootHelp(w)
 		return nil
 	}
+	if len(path) == 1 && path[0] == "advanced" {
+		printAdvancedRootHelp(w)
+		return nil
+	}
 	key, ok := bestHelpTopicKey(path)
 	if !ok {
 		return fmt.Errorf("unknown help topic: %s", strings.Join(path, " "))
@@ -485,14 +489,14 @@ func bestHelpTopicKey(path []string) (string, bool) {
 }
 
 func printRootHelp(w io.Writer) {
-	printRootHelpMode(w, false)
+	printRootHelpMode(w)
 }
 
 func printAdvancedRootHelp(w io.Writer) {
-	printRootHelpMode(w, true)
+	printRootHelpMode(w)
 }
 
-func printRootHelpMode(w io.Writer, advanced bool) {
+func printRootHelpMode(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "or3-intern is a local-first agent runtime with chat, channels, memory, approvals, and service APIs.")
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, "Usage:")
@@ -501,25 +505,18 @@ func printRootHelpMode(w io.Writer, advanced bool) {
 	_, _ = fmt.Fprintln(w, "  or3-intern help [command]")
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, "Without a command, or3-intern starts interactive chat.")
-	for index, section := range rootHelpSections {
-		if !advanced && index > 0 {
-			break
-		}
+	for _, section := range rootHelpSections {
 		_, _ = fmt.Fprintln(w)
 		_, _ = fmt.Fprintf(w, "%s:\n", section.Title)
 		printHelpItems(w, section.Items)
 	}
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, "Global flags:")
-	printHelpItems(w, []helpItem{{Name: "--config <path>", Description: "Path to config.json"}, {Name: "--unsafe-dev", Description: "Bypass startup safety gates for local development"}, {Name: "--advanced", Description: "Show the full operator command list at the root"}, {Name: "-h, --help", Description: "Show help for the root command or a subcommand"}})
+	printHelpItems(w, []helpItem{{Name: "--config <path>", Description: "Path to config.json"}, {Name: "--unsafe-dev", Description: "Bypass startup safety gates for local development"}, {Name: "--advanced", Description: "Accepted for compatibility; root help is always complete"}, {Name: "-h, --help", Description: "Show help for the root command or a subcommand"}})
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, "Examples:")
-	for _, example := range []string{"or3-intern setup", "or3-intern chat", "or3-intern status", "or3-intern connect-device", "or3-intern --advanced --help"} {
+	for _, example := range []string{"or3-intern setup", "or3-intern chat", "or3-intern status", "or3-intern connect-device", "or3-intern approvals list pending"} {
 		_, _ = fmt.Fprintf(w, "  %s\n", example)
-	}
-	if !advanced {
-		_, _ = fmt.Fprintln(w)
-		_, _ = fmt.Fprintln(w, "Use `or3-intern --advanced --help` to see the full operator command list.")
 	}
 }
 

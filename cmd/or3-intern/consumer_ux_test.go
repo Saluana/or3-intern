@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"os"
@@ -11,7 +12,9 @@ import (
 	"or3-intern/internal/approval"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
+	intdoctor "or3-intern/internal/doctor"
 	"or3-intern/internal/safetymode"
+	"or3-intern/internal/uxstate"
 )
 
 func seedConsumerConfig(t *testing.T, cfgPath, root string) config.Config {
@@ -99,6 +102,63 @@ func TestRunSetupWithIO_ScenarioToConfigResults(t *testing.T) {
 	}
 }
 
+func TestRunSetupWithIO_NewSetupDefaultsStateOutsideWorkspace(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	t.Setenv("OR3_DB_PATH", "")
+	t.Setenv("OR3_ARTIFACTS_DIR", "")
+	cfgPath := filepath.Join(tmp, "config.json")
+	workspace := filepath.Join(tmp, "workspace")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	input := strings.Join([]string{
+		"",        // provider default
+		"testkey", // API key
+		workspace, // workspace
+		"",        // recommended app folder
+		"5",       // advanced/manual scenario
+		"2",       // balanced safety
+		"n",       // do not start chat
+		"",
+	}, "\n")
+	result, err := runSetupWithIO(strings.NewReader(input), &bytes.Buffer{}, cfgPath, tmp)
+	if err != nil {
+		t.Fatalf("runSetupWithIO: %v", err)
+	}
+	if strings.Contains(result.Config.DBPath, workspace) {
+		t.Fatalf("DB path should default outside workspace, got %q", result.Config.DBPath)
+	}
+	if strings.Contains(result.Config.ArtifactsDir, workspace) {
+		t.Fatalf("artifacts path should default outside workspace, got %q", result.Config.ArtifactsDir)
+	}
+}
+
+func TestRunSetupWithIO_StartChatCopy(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "config.json")
+	seedConsumerConfig(t, cfgPath, tmp)
+	input := strings.Join([]string{"", "", "", "5", "2", "y", ""}, "\n")
+	var out bytes.Buffer
+	result, err := runSetupWithIO(strings.NewReader(input), &out, cfgPath, tmp)
+	if err != nil {
+		t.Fatalf("runSetupWithIO: %v", err)
+	}
+	if !result.StartChat || !strings.Contains(out.String(), "Starting chat now.") {
+		t.Fatalf("expected start chat copy, got start=%t output=%s", result.StartChat, out.String())
+	}
+
+	input = strings.Join([]string{"", "", "", "5", "2", "n", ""}, "\n")
+	out.Reset()
+	result, err = runSetupWithIO(strings.NewReader(input), &out, cfgPath, tmp)
+	if err != nil {
+		t.Fatalf("runSetupWithIO: %v", err)
+	}
+	if result.StartChat || !strings.Contains(out.String(), "Next: run `or3-intern chat`.") {
+		t.Fatalf("expected next chat copy, got start=%t output=%s", result.StartChat, out.String())
+	}
+}
+
 func TestRunStatusCommand_HidesAndShowsAdvancedIDs(t *testing.T) {
 	cfg := config.Default()
 	var out bytes.Buffer
@@ -141,6 +201,26 @@ func TestRunStatusCommandWithOptions_AppliesSingleAutomaticFix(t *testing.T) {
 	}
 }
 
+func TestStatusSelectFixes_NumberAndAllAndLegacyID(t *testing.T) {
+	findings := []intdoctor.Finding{
+		{ID: "first", FixMode: intdoctor.FixModeAutomatic},
+		{ID: "second", FixMode: intdoctor.FixModeManual},
+		{ID: "third", FixMode: intdoctor.FixModeAutomatic},
+	}
+	selected, _, err := selectStatusFixes(findings, "1")
+	if err != nil || len(selected) != 1 || selected[0].ID != "first" {
+		t.Fatalf("number selection failed: %#v err=%v", selected, err)
+	}
+	selected, _, err = selectStatusFixes(findings, "all")
+	if err != nil || len(selected) != 2 {
+		t.Fatalf("all selection failed: %#v err=%v", selected, err)
+	}
+	selected, _, err = selectStatusFixes(findings, "third")
+	if err != nil || len(selected) != 1 || selected[0].ID != "third" {
+		t.Fatalf("legacy ID selection failed: %#v err=%v", selected, err)
+	}
+}
+
 func TestRunSettingsWithIO_HomeExportAndSafetySection(t *testing.T) {
 	tmp := t.TempDir()
 	cfgPath := filepath.Join(tmp, "config.json")
@@ -149,7 +229,7 @@ func TestRunSettingsWithIO_HomeExportAndSafetySection(t *testing.T) {
 	if err := runSettingsWithIO(strings.NewReader(""), &out, cfgPath, tmp, nil); err != nil {
 		t.Fatalf("settings home: %v", err)
 	}
-	if !strings.Contains(out.String(), "Settings home") || !strings.Contains(out.String(), "AI Provider") || !strings.Contains(out.String(), "Safety posture") {
+	if !strings.Contains(out.String(), "Settings home") || !strings.Contains(out.String(), "AI Provider") || !strings.Contains(out.String(), "Safety") {
 		t.Fatalf("unexpected settings home: %s", out.String())
 	}
 	out.Reset()
@@ -169,6 +249,26 @@ func TestRunSettingsWithIO_HomeExportAndSafetySection(t *testing.T) {
 	}
 	if loaded.Security.Approvals.Exec.Mode != config.ApprovalModeDeny {
 		t.Fatalf("expected locked down safety to deny exec, got %q", loaded.Security.Approvals.Exec.Mode)
+	}
+}
+
+func TestPrintSetupReview_UsesActualSafetySummary(t *testing.T) {
+	for _, tc := range []struct {
+		mode safetymode.Mode
+		want string
+	}{
+		{safetymode.ModeRelaxed, "Fewer prompts"},
+		{safetymode.ModeBalanced, "Ask before risky actions"},
+		{safetymode.ModeLockedDown, "Blocks dangerous actions"},
+	} {
+		cfg := config.Default()
+		safetymode.Apply(&cfg, tc.mode)
+		status := uxstate.BuildStatusView(cfg, intdoctor.Report{}, 0, 0)
+		var out bytes.Buffer
+		printSetupReview(&out, status)
+		if !strings.Contains(out.String(), tc.want) {
+			t.Fatalf("mode %s: expected %q in %s", tc.mode, tc.want, out.String())
+		}
 	}
 }
 
@@ -211,6 +311,33 @@ func TestConnectDeviceListShowsFriendlyActions(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("expected %q in output: %s", want, text)
 		}
+	}
+}
+
+func TestConnectDeviceRoleChangesAccess(t *testing.T) {
+	tmp := t.TempDir()
+	database, err := db.Open(filepath.Join(tmp, "devices.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	broker := &approval.Broker{DB: database, Config: config.Default().Security.Approvals, HostID: "test", SignKey: []byte("0123456789abcdef0123456789abcdef")}
+	if _, _, err := broker.RotateDeviceToken(context.Background(), "device-1", approval.RoleViewer, "Phone", nil); err != nil {
+		t.Fatalf("RotateDeviceToken: %v", err)
+	}
+	var out bytes.Buffer
+	if err := runConnectDeviceRole(context.Background(), database, broker, "device-1", bufio.NewReader(strings.NewReader("2\n")), &out); err != nil {
+		t.Fatalf("runConnectDeviceRole: %v", err)
+	}
+	device, err := database.GetPairedDevice(context.Background(), "device-1")
+	if err != nil {
+		t.Fatalf("GetPairedDevice: %v", err)
+	}
+	if device.Role != approval.RoleOperator {
+		t.Fatalf("expected operator role, got %q", device.Role)
+	}
+	if !strings.Contains(out.String(), "Chat and workspace files") {
+		t.Fatalf("expected friendly role output, got %s", out.String())
 	}
 }
 

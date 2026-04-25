@@ -35,7 +35,10 @@ func runConnectDeviceCommand(ctx context.Context, cfgPath string, cfg *config.Co
 			fmt.Fprintf(stdout, "Disconnected %s\n", strings.TrimSpace(args[1]))
 			return nil
 		case "role":
-			return fmt.Errorf("changing device access is not interactive yet; disconnect and reconnect the device with the new access level")
+			if len(args) != 2 {
+				return fmt.Errorf("usage: connect-device role <device-id>")
+			}
+			return runConnectDeviceRole(ctx, database, broker, strings.TrimSpace(args[1]), bufio.NewReader(os.Stdin), stdout)
 		default:
 			return fmt.Errorf("usage: connect-device [list|disconnect <device-id>|role <device-id>]")
 		}
@@ -88,6 +91,51 @@ func runConnectDeviceCommand(ctx context.Context, cfgPath string, cfg *config.Co
 	fmt.Fprintf(stdout, "Request ID: %d\n", req.ID)
 	fmt.Fprintln(stdout, "After the remote device enters the code, use `or3-intern connect-device list` to review connected devices.")
 	return nil
+}
+
+func runConnectDeviceRole(ctx context.Context, database *db.DB, broker *approval.Broker, deviceID string, reader *bufio.Reader, stdout io.Writer) error {
+	if database == nil {
+		return fmt.Errorf("device storage is not available")
+	}
+	if broker == nil {
+		return fmt.Errorf("approval broker unavailable")
+	}
+	device, err := database.GetPairedDevice(ctx, deviceID)
+	if err != nil {
+		return fmt.Errorf("could not find that device. Run `or3-intern connect-device list` to see connected devices")
+	}
+	choice, err := promptMenuChoice(reader, stdout, "Choose new access", []string{
+		"1) Chat only",
+		"2) Chat and workspace files",
+		"3) Admin device",
+	}, roleChoiceDefault(device.Role))
+	if err != nil {
+		return err
+	}
+	role := approval.RoleViewer
+	switch choice {
+	case "2":
+		role = approval.RoleOperator
+	case "3":
+		role = approval.RoleAdmin
+	}
+	device.Role = role
+	if _, err := database.UpsertPairedDevice(ctx, device); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "Updated %s access to %s.\n", firstNonEmptyString(device.DisplayName, device.DeviceID), uxcopy.DeviceRoleLabel(role))
+	return nil
+}
+
+func roleChoiceDefault(role string) string {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case approval.RoleAdmin:
+		return "3"
+	case approval.RoleOperator:
+		return "2"
+	default:
+		return "1"
+	}
 }
 
 func runConnectDeviceList(ctx context.Context, database *db.DB, stdout io.Writer) error {

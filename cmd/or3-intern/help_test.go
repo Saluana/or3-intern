@@ -76,11 +76,14 @@ func TestPrintHelpTopic_Root(t *testing.T) {
 	if !strings.Contains(got, "or3-intern help [command]") {
 		t.Fatalf("expected root usage help, got %q", got)
 	}
-	if strings.Contains(got, "config-path") {
-		t.Fatalf("did not expect advanced commands in default root help, got %q", got)
+	if !strings.Contains(got, "config-path") {
+		t.Fatalf("expected complete root help to include advanced commands, got %q", got)
 	}
 	if !strings.Contains(got, "connect-device") {
 		t.Fatalf("expected connect-device command in root help, got %q", got)
+	}
+	if !strings.Contains(got, "doctor") || !strings.Contains(got, "pairing") {
+		t.Fatalf("expected complete root help to include operator tools, got %q", got)
 	}
 }
 

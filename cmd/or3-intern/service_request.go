@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"or3-intern/internal/agent"
+	"or3-intern/internal/app"
 	"or3-intern/internal/providers"
 	"or3-intern/internal/tools"
 )
@@ -93,7 +94,7 @@ func decodeServiceTurnRequest(body io.Reader, registry *tools.Registry) (service
 	if err := decodeServiceRequestBody(body, &payload); err != nil {
 		return serviceTurnRequest{}, err
 	}
-	allowedTools, restrictTools, err := agent.ResolveServiceToolAllowlist(
+	allowedTools, restrictTools, err := app.ResolveToolPolicy(
 		registry,
 		firstToolPolicy(payload.ToolPolicy, payload.ToolPolicyCamel),
 		firstStringSlice(payload.AllowedTools, payload.AllowedToolsCamel),
@@ -117,7 +118,7 @@ func decodeServiceSubagentRequest(body io.Reader, registry *tools.Registry) (ser
 	if err := decodeServiceRequestBody(body, &payload); err != nil {
 		return serviceSubagentRequest{}, err
 	}
-	allowedTools, restrictTools, err := agent.ResolveServiceToolAllowlist(
+	allowedTools, restrictTools, err := app.ResolveToolPolicy(
 		registry,
 		firstToolPolicy(payload.ToolPolicy, payload.ToolPolicyCamel),
 		firstStringSlice(payload.AllowedTools, payload.AllowedToolsCamel),

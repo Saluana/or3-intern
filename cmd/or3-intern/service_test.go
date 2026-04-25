@@ -233,7 +233,7 @@ func TestDecodeServiceSubagentRequest_AcceptsSessionAndToolPolicyAliases(t *test
 		"sessionKey":"svc:parent",
 		"task":"background task",
 		"promptSnapshot":[{"role":"user","content":"remember this"}],
-		"toolPolicy":{"mode":"deny_list","blockedTools":["write_file"]},
+		"toolPolicy":{"mode":"allow_list","allowedTools":["read_file"]},
 		"timeout":9,
 		"profile_name":"or3-default",
 		"channel":"service",
@@ -246,7 +246,7 @@ func TestDecodeServiceSubagentRequest_AcceptsSessionAndToolPolicyAliases(t *test
 		t.Fatalf("expected session key alias to populate parent session key, got %#v", req)
 	}
 	if !req.RestrictTools || len(req.AllowedTools) != 1 || req.AllowedTools[0] != "read_file" {
-		t.Fatalf("expected deny_list to resolve surviving tools, got %#v", req)
+		t.Fatalf("expected allow_list alias to resolve tools, got %#v", req)
 	}
 	if req.TimeoutSeconds != 9 {
 		t.Fatalf("expected timeout alias to populate timeout seconds, got %#v", req)
@@ -723,7 +723,7 @@ func TestServiceSubagents_EnqueueAndAbortQueuedJob(t *testing.T) {
 		"parent_session_key":"parent",
 		"task":"background task",
 		"prompt_snapshot":[{"role":"user","content":"remember this"}],
-		"allowed_tools":["read_file"],
+		"tool_policy":{"mode":"allow_list","allowed_tools":["read_file"]},
 		"timeout_seconds":9,
 		"meta":{"trace_id":"trace-1"},
 		"profile_name":"or3-default",
@@ -829,6 +829,8 @@ func buildServiceTestRuntime(t *testing.T, handler func(http.ResponseWriter, *ht
 		Builder:      &agent.Builder{DB: database, HistoryMax: 10},
 		MaxToolLoops: 2,
 	}
+	rt.Tools.Register(serviceTestTool{name: "read_file"})
+	rt.Tools.Register(serviceTestTool{name: "write_file"})
 	cleanup := func() {
 		providerServer.CloseClientConnections()
 		providerServer.Close()
@@ -850,7 +852,25 @@ func openServiceTestDB(t *testing.T) (*db.DB, func()) {
 
 func newServiceTestHTTPServer(t *testing.T, secret string, server *serviceServer) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(serviceAuthMiddlewareWithBroker(secret, server.broker, newServiceMux(server)))
+	server.config.Service.Secret = secret
+	if server.config.Service.SharedSecretRole == "" {
+		server.config.Service.SharedSecretRole = approval.RoleOperator
+	}
+	if server.broker != nil && strings.TrimSpace(server.config.Service.Listen) == "" {
+		server.config.Service.Listen = "127.0.0.1:0"
+	}
+	if server.broker != nil && !server.config.Service.AllowUnauthenticatedPairing {
+		server.config.Service.AllowUnauthenticatedPairing = true
+	}
+	if server.subagentManager != nil && server.subagentManager.BackgroundTools == nil {
+		server.subagentManager.BackgroundTools = func() *tools.Registry {
+			registry := tools.NewRegistry()
+			registry.Register(serviceTestTool{name: "read_file"})
+			registry.Register(serviceTestTool{name: "write_file"})
+			return registry
+		}
+	}
+	return httptest.NewServer(serviceAuthMiddlewareWithBroker(server.config, server.broker, serviceBoundaryMiddleware(server, newServiceMux(server))))
 }
 
 func mustServiceRequest(t *testing.T, server *httptest.Server, secret, method, path, body string) *http.Request {
@@ -967,6 +987,8 @@ func TestServicePairingWorkflow_AllowsUnauthenticatedBootstrapAndPairedOperatorR
 	defer cleanup()
 
 	server := &serviceServer{broker: broker, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	server.config.Service.AllowUnauthenticatedPairing = true
+	server.config.Service.Listen = "127.0.0.1:0"
 	httpServer := newServiceTestHTTPServer(t, strings.Repeat("p", 32), server)
 	defer httpServer.Close()
 
@@ -1027,6 +1049,8 @@ func TestServicePairingWorkflow_RejectsNonOperatorDeviceOnOperatorRoutes(t *test
 	defer cleanup()
 
 	server := &serviceServer{broker: broker, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	server.config.Service.AllowUnauthenticatedPairing = true
+	server.config.Service.Listen = "127.0.0.1:0"
 	httpServer := newServiceTestHTTPServer(t, strings.Repeat("r", 32), server)
 	defer httpServer.Close()
 
@@ -1581,6 +1605,7 @@ func TestServiceEmbeddingsRoutes(t *testing.T) {
 	provider.HTTP = providerServer.Client()
 	cfg := config.Default()
 	cfg.Service.Secret = strings.Repeat("e", 32)
+	cfg.Service.SharedSecretRole = approval.RoleOperator
 	cfg.Provider.APIBase = providerServer.URL
 	cfg.Provider.EmbedModel = "text-embedding-3-small"
 	server := &serviceServer{config: cfg, runtime: &agent.Runtime{DB: database, Provider: provider}, jobs: agent.NewJobRegistry(time.Minute, 32)}
@@ -1646,6 +1671,7 @@ func TestServiceAuditRoutes(t *testing.T) {
 	}
 	cfg := config.Default()
 	cfg.Service.Secret = strings.Repeat("a", 32)
+	cfg.Service.SharedSecretRole = approval.RoleOperator
 	cfg.Security.Audit.Enabled = true
 	server := &serviceServer{config: cfg, runtime: &agent.Runtime{DB: database, Audit: audit}, jobs: agent.NewJobRegistry(time.Minute, 32)}
 	httpServer := newServiceTestHTTPServer(t, cfg.Service.Secret, server)
@@ -1685,6 +1711,7 @@ func TestServiceScopeRoutes(t *testing.T) {
 	defer cleanup()
 	cfg := config.Default()
 	cfg.Service.Secret = strings.Repeat("s", 32)
+	cfg.Service.SharedSecretRole = approval.RoleOperator
 	server := &serviceServer{config: cfg, runtime: &agent.Runtime{DB: database}, jobs: agent.NewJobRegistry(time.Minute, 32)}
 	httpServer := newServiceTestHTTPServer(t, cfg.Service.Secret, server)
 	defer httpServer.Close()
@@ -1858,12 +1885,12 @@ func TestV1TurnsContractAliases(t *testing.T) {
 
 	// allowedTools camelCase alias should work the same as allowed_tools
 	t.Run("allowedTools camelCase", func(t *testing.T) {
-		req, err := decodeServiceTurnRequest(strings.NewReader(`{"session_key":"svc:key","message":"hi","allowedTools":["read_file"]}`), registry)
+		req, err := decodeServiceTurnRequest(strings.NewReader(`{"session_key":"svc:key","message":"hi","toolPolicy":{"mode":"allow_list","allowedTools":["read_file"]}}`), registry)
 		if err != nil {
 			t.Fatalf("decodeServiceTurnRequest: %v", err)
 		}
 		if !req.RestrictTools || len(req.AllowedTools) != 1 || req.AllowedTools[0] != "read_file" {
-			t.Fatalf("expected allowedTools alias to restrict to [read_file], got RestrictTools=%v AllowedTools=%v", req.RestrictTools, req.AllowedTools)
+			t.Fatalf("expected toolPolicy.allowedTools alias to restrict to [read_file], got RestrictTools=%v AllowedTools=%v", req.RestrictTools, req.AllowedTools)
 		}
 	})
 }

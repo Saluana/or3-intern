@@ -7,9 +7,8 @@ import (
 	"strconv"
 	"strings"
 
+	"or3-intern/internal/app"
 	"or3-intern/internal/approval"
-	"or3-intern/internal/config"
-	"or3-intern/internal/controlplane"
 )
 
 func runDevicesCommand(ctx context.Context, broker *approval.Broker, args []string, stdout, stderr io.Writer) error {
@@ -17,7 +16,7 @@ func runDevicesCommand(ctx context.Context, broker *approval.Broker, args []stri
 	if broker == nil {
 		return fmt.Errorf("approval broker is not configured")
 	}
-	cp := controlplane.New(config.Config{}, nil, broker, nil, nil)
+	appSvc := app.NewServiceApp(nil, nil, nil, newCLIControlplane(broker))
 	if len(args) == 0 {
 		return fmt.Errorf("usage: devices <list|requests|approve|deny|revoke|rotate>")
 	}
@@ -26,7 +25,7 @@ func runDevicesCommand(ctx context.Context, broker *approval.Broker, args []stri
 		if err := requireExactArgs(args[1:], 0, "devices list"); err != nil {
 			return err
 		}
-		items, err := cp.ListDevices(ctx, 100)
+		items, err := appSvc.ListDevices(ctx, 100)
 		if err != nil {
 			return err
 		}
@@ -42,7 +41,7 @@ func runDevicesCommand(ctx context.Context, broker *approval.Broker, args []stri
 		if len(args) > 1 {
 			status = strings.TrimSpace(args[1])
 		}
-		items, err := cp.ListPairingRequests(ctx, status, 100)
+		items, err := appSvc.ListPairingRequests(ctx, status, 100)
 		if err != nil {
 			return err
 		}
@@ -58,7 +57,7 @@ func runDevicesCommand(ctx context.Context, broker *approval.Broker, args []stri
 		if err != nil {
 			return fmt.Errorf("invalid pairing request ID")
 		}
-		req, err := cp.ApprovePairingRequest(ctx, id, "cli")
+		req, err := appSvc.ApprovePairingRequest(ctx, id, "cli")
 		if err != nil {
 			return err
 		}
@@ -72,7 +71,7 @@ func runDevicesCommand(ctx context.Context, broker *approval.Broker, args []stri
 		if err != nil {
 			return fmt.Errorf("invalid pairing request ID")
 		}
-		if err := cp.DenyPairingRequest(ctx, id, "cli"); err != nil {
+		if err := appSvc.DenyPairingRequest(ctx, id, "cli"); err != nil {
 			return err
 		}
 		_, _ = fmt.Fprintf(stdout, "denied pairing request %d\n", id)
@@ -85,7 +84,7 @@ func runDevicesCommand(ctx context.Context, broker *approval.Broker, args []stri
 		if deviceID == "" {
 			return fmt.Errorf("device ID required")
 		}
-		if err := cp.RevokeDevice(ctx, deviceID, "cli"); err != nil {
+		if err := appSvc.RevokeDevice(ctx, deviceID, "cli"); err != nil {
 			return err
 		}
 		_, _ = fmt.Fprintf(stdout, "revoked device %s\n", deviceID)
@@ -98,7 +97,7 @@ func runDevicesCommand(ctx context.Context, broker *approval.Broker, args []stri
 		if deviceID == "" {
 			return fmt.Errorf("device ID required")
 		}
-		rotated, token, err := cp.RotateDevice(ctx, deviceID)
+		rotated, token, err := appSvc.RotateDevice(ctx, deviceID)
 		if err != nil {
 			return err
 		}

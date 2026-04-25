@@ -8,8 +8,8 @@
     }
   ],
   "toolPolicy": {
-    "mode": "deny_list",
-    "blockedTools": ["write_file"]
+    "mode": "allow_list",
+    "allowedTools": ["read_file"]
   },
   "timeoutSeconds": 15,
   "profileName": "ops",

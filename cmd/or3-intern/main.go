@@ -73,7 +73,7 @@ func newProviderClient(cfg config.Config) *providers.Client {
 }
 
 func main() {
-	cfgPath, args, showHelp, err := parseRootCLIArgs(os.Args[1:], os.Stderr)
+	cfgPath, args, showHelp, unsafeDev, err := parseRootCLIArgs(os.Args[1:], os.Stderr)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
@@ -192,7 +192,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "security error:", err)
 		os.Exit(1)
 	}
-	if err := validateStartupCommand(cmd, cfg); err != nil {
+	if err := validateStartupCommand(cmd, cfg, unsafeDev); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
@@ -682,7 +682,9 @@ func buildToolRegistryWithOptions(cfg config.Config, d *db.DB, prov *providers.C
 	fileRoot := allowedRoot(cfg)
 	sandboxCfg := tools.BubblewrapConfig{Enabled: cfg.Hardening.Sandbox.Enabled, BubblewrapPath: cfg.Hardening.Sandbox.BubblewrapPath, AllowNetwork: cfg.Hardening.Sandbox.AllowNetwork, WritablePaths: append([]string{}, cfg.Hardening.Sandbox.WritablePaths...)}
 	hostPolicy := buildHostPolicy(cfg)
-	reg.Register(&tools.ExecTool{Timeout: time.Duration(cfg.Tools.ExecTimeoutSeconds) * time.Second, RestrictDir: fileRoot, PathAppend: cfg.Tools.PathAppend, AllowedPrograms: append([]string{}, cfg.Hardening.ExecAllowedPrograms...), ChildEnvAllowlist: append([]string{}, cfg.Hardening.ChildEnvAllowlist...), Sandbox: sandboxCfg, EnableLegacyShell: cfg.Hardening.EnableExecShell, ApprovalBroker: approvalBroker})
+	if shouldRegisterExecTool(cfg) {
+		reg.Register(&tools.ExecTool{Timeout: time.Duration(cfg.Tools.ExecTimeoutSeconds) * time.Second, RestrictDir: fileRoot, PathAppend: cfg.Tools.PathAppend, AllowedPrograms: append([]string{}, cfg.Hardening.ExecAllowedPrograms...), ChildEnvAllowlist: append([]string{}, cfg.Hardening.ChildEnvAllowlist...), Sandbox: sandboxCfg, EnableLegacyShell: cfg.Hardening.EnableExecShell, ApprovalBroker: approvalBroker})
+	}
 	reg.Register(&tools.ReadFile{FileTool: tools.FileTool{Root: fileRoot}})
 	reg.Register(&tools.WriteFile{FileTool: tools.FileTool{Root: fileRoot}})
 	reg.Register(&tools.EditFile{FileTool: tools.FileTool{Root: fileRoot}})
@@ -721,6 +723,20 @@ func buildToolRegistryWithOptions(cfg config.Config, d *db.DB, prov *providers.C
 		mcpRegistrar.RegisterTools(reg)
 	}
 	return reg
+}
+
+func shouldRegisterExecTool(cfg config.Config) bool {
+	if !cfg.Tools.EnableExec {
+		return false
+	}
+	if len(cfg.Hardening.ExecAllowedPrograms) == 0 {
+		return false
+	}
+	spec := config.ProfileSpec(cfg.RuntimeProfile)
+	if spec.ForbidPrivilegedTools {
+		return false
+	}
+	return true
 }
 
 func buildChannelManager(cfg config.Config, cliDeliverer *cli.Deliverer, art *artifacts.Store, maxMediaBytes int, approvalBroker *approval.Broker) (*rootchannels.Manager, error) {

@@ -15,52 +15,44 @@ type ServiceToolPolicy struct {
 
 func ResolveServiceToolAllowlist(base *tools.Registry, policy *ServiceToolPolicy, legacyAllowed []string) ([]string, bool, error) {
 	if policy == nil {
-		allowed := normalizeToolNames(legacyAllowed)
-		if len(allowed) == 0 {
-			return nil, false, nil
+		if len(normalizeToolNames(legacyAllowed)) > 0 {
+			return nil, false, fmt.Errorf("tool_policy.mode is required")
 		}
-		return allowed, true, nil
+		return []string{}, true, nil
 	}
 
 	mode := strings.ToLower(strings.TrimSpace(policy.Mode))
 	allowed := normalizeToolNames(policy.AllowedTools)
-	blocked := normalizeToolNames(policy.BlockedTools)
 	if mode == "" {
 		return nil, false, fmt.Errorf("tool_policy mode is required")
 	}
+	if err := validateServiceToolNames(base, allowed); err != nil {
+		return nil, false, err
+	}
+	if err := validateServiceToolNames(base, normalizeToolNames(policy.BlockedTools)); err != nil {
+		return nil, false, err
+	}
 
 	switch mode {
-	case "allow_all":
-		return nil, false, nil
 	case "deny_all":
 		return []string{}, true, nil
 	case "allow_list":
-		if len(allowed) == 0 {
-			return nil, false, fmt.Errorf("tool_policy allow_list requires allowed_tools")
-		}
 		return allowed, true, nil
-	case "deny_list":
-		if len(blocked) == 0 {
-			return nil, false, fmt.Errorf("tool_policy deny_list requires blocked_tools")
-		}
-		if base == nil {
-			return []string{}, true, nil
-		}
-		blockedSet := make(map[string]struct{}, len(blocked))
-		for _, name := range blocked {
-			blockedSet[name] = struct{}{}
-		}
-		resolved := make([]string, 0, len(base.Names()))
-		for _, name := range base.Names() {
-			if _, blocked := blockedSet[name]; blocked {
-				continue
-			}
-			resolved = append(resolved, name)
-		}
-		return resolved, true, nil
 	default:
 		return nil, false, fmt.Errorf("unsupported tool_policy mode: %s", policy.Mode)
 	}
+}
+
+func validateServiceToolNames(base *tools.Registry, names []string) error {
+	if base == nil || len(names) == 0 {
+		return nil
+	}
+	for _, name := range names {
+		if base.Get(name) == nil {
+			return fmt.Errorf("unknown tool in tool_policy: %s", name)
+		}
+	}
+	return nil
 }
 
 func normalizeToolNames(names []string) []string {

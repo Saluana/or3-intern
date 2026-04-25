@@ -8,16 +8,15 @@ import (
 	"strconv"
 	"strings"
 
+	"or3-intern/internal/app"
 	"or3-intern/internal/approval"
-	"or3-intern/internal/config"
-	"or3-intern/internal/controlplane"
 )
 
 func runPairingCommand(ctx context.Context, broker *approval.Broker, args []string, stdout, stderr io.Writer) error {
 	if broker == nil {
 		return fmt.Errorf("approval broker is not configured")
 	}
-	cp := controlplane.New(config.Config{}, nil, broker, nil, nil)
+	appSvc := app.NewServiceApp(nil, nil, nil, newCLIControlplane(broker))
 	if len(args) == 0 {
 		return fmt.Errorf("usage: pairing <list|request|approve|deny|exchange>")
 	}
@@ -30,7 +29,7 @@ func runPairingCommand(ctx context.Context, broker *approval.Broker, args []stri
 		if len(args) > 1 {
 			status = strings.TrimSpace(args[1])
 		}
-		items, err := cp.ListPairingRequests(ctx, status, 100)
+		items, err := appSvc.ListPairingRequests(ctx, status, 100)
 		if err != nil {
 			return err
 		}
@@ -64,7 +63,7 @@ func runPairingCommand(ctx context.Context, broker *approval.Broker, args []stri
 				*deviceID = strings.ToLower(strings.TrimSpace(*channel)) + ":" + strings.TrimSpace(*identity)
 			}
 		}
-		req, code, err := cp.CreatePairingRequest(ctx, approval.PairingRequestInput{
+		req, code, err := appSvc.CreatePairingRequest(ctx, approval.PairingRequestInput{
 			Role:        strings.TrimSpace(*role),
 			DisplayName: strings.TrimSpace(*displayName),
 			Origin:      strings.TrimSpace(*origin),
@@ -84,7 +83,7 @@ func runPairingCommand(ctx context.Context, broker *approval.Broker, args []stri
 		if err != nil {
 			return fmt.Errorf("invalid pairing request ID")
 		}
-		req, err := cp.ApprovePairingRequest(ctx, id, "cli")
+		req, err := appSvc.ApprovePairingRequest(ctx, id, "cli")
 		if err != nil {
 			return err
 		}
@@ -98,7 +97,7 @@ func runPairingCommand(ctx context.Context, broker *approval.Broker, args []stri
 		if err != nil {
 			return fmt.Errorf("invalid pairing request ID")
 		}
-		if err := cp.DenyPairingRequest(ctx, id, "cli"); err != nil {
+		if err := appSvc.DenyPairingRequest(ctx, id, "cli"); err != nil {
 			return err
 		}
 		_, _ = fmt.Fprintf(stdout, "denied pairing request %d\n", id)
@@ -111,7 +110,7 @@ func runPairingCommand(ctx context.Context, broker *approval.Broker, args []stri
 		if err != nil {
 			return fmt.Errorf("invalid pairing request ID")
 		}
-		device, token, err := cp.ExchangePairingCode(ctx, approval.PairingExchangeInput{
+		device, token, err := appSvc.ExchangePairingCode(ctx, approval.PairingExchangeInput{
 			RequestID: id,
 			Code:      strings.TrimSpace(args[2]),
 		})

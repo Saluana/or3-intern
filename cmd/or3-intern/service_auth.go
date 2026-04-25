@@ -9,11 +9,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"time"
 
 	"or3-intern/internal/approval"
+	"or3-intern/internal/config"
 )
 
 const serviceTokenMaxAge = 5 * time.Minute
@@ -34,20 +36,20 @@ type serviceAuthIdentity struct {
 }
 
 func serviceAuthMiddleware(secret string, next http.Handler) http.Handler {
-	return serviceAuthMiddlewareWithBroker(secret, nil, next)
+	return serviceAuthMiddlewareWithBroker(config.Config{Service: config.ServiceConfig{Secret: secret, SharedSecretRole: approval.RoleServiceClient}}, nil, next)
 }
 
-func serviceAuthMiddlewareWithBroker(secret string, broker *approval.Broker, next http.Handler) http.Handler {
+func serviceAuthMiddlewareWithBroker(cfg config.Config, broker *approval.Broker, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if allowsUnauthenticatedPairingRoute(r) {
+		if allowsUnauthenticatedPairingRoute(cfg, r) {
 			ctx := approval.ContextWithAuditAuthKind(r.Context(), "unauthenticated")
 			ctx = approval.ContextWithAuditActor(ctx, "anonymous")
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
-		identity, err := authenticateServiceRequest(secret, broker, r.Header.Get("Authorization"), time.Now(), r.Context())
+		identity, err := authenticateServiceRequest(cfg, broker, r.Header.Get("Authorization"), time.Now(), r.Context())
 		if err != nil {
-			writeServiceJSON(w, http.StatusUnauthorized, map[string]any{"error": err.Error()})
+			writeServiceJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 			return
 		}
 		ctx := context.WithValue(r.Context(), serviceAuthContextKey{}, identity)
@@ -58,9 +60,13 @@ func serviceAuthMiddlewareWithBroker(secret string, broker *approval.Broker, nex
 	})
 }
 
-func authenticateServiceRequest(secret string, broker *approval.Broker, header string, now time.Time, ctx context.Context) (serviceAuthIdentity, error) {
-	if err := validateServiceAuthorization(secret, header, now); err == nil {
-		return serviceAuthIdentity{Kind: "shared-secret", Actor: "service:shared-secret", Role: "admin"}, nil
+func authenticateServiceRequest(cfg config.Config, broker *approval.Broker, header string, now time.Time, ctx context.Context) (serviceAuthIdentity, error) {
+	if err := validateServiceAuthorization(cfg.Service.Secret, header, now); err == nil {
+		role := strings.TrimSpace(cfg.Service.SharedSecretRole)
+		if role == "" {
+			role = approval.RoleServiceClient
+		}
+		return serviceAuthIdentity{Kind: "shared-secret", Actor: "service:shared-secret", Role: role}, nil
 	}
 	if broker == nil {
 		return serviceAuthIdentity{}, fmt.Errorf("missing bearer token")
@@ -92,8 +98,17 @@ func serviceAuthKindFromContext(ctx context.Context) string {
 	return kind
 }
 
-func allowsUnauthenticatedPairingRoute(r *http.Request) bool {
+func allowsUnauthenticatedPairingRoute(cfg config.Config, r *http.Request) bool {
 	if r == nil || r.URL == nil {
+		return false
+	}
+	if !cfg.Service.AllowUnauthenticatedPairing {
+		return false
+	}
+	if !serviceListenIsLoopback(cfg.Service.Listen) {
+		return false
+	}
+	if !requestRemoteIsLoopback(r.RemoteAddr) {
 		return false
 	}
 	if r.Method != http.MethodPost {
@@ -105,19 +120,58 @@ func allowsUnauthenticatedPairingRoute(r *http.Request) bool {
 
 func requireServiceRole(w http.ResponseWriter, r *http.Request, roles ...string) bool {
 	identity := serviceAuthIdentityFromContext(r.Context())
-	if identity.Kind == "shared-secret" {
-		return true
-	}
 	if len(roles) == 0 {
 		return true
 	}
 	for _, role := range roles {
-		if identity.Role == role {
+		if serviceRoleRank(identity.Role) >= serviceRoleRank(role) {
 			return true
 		}
 	}
 	writeServiceJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
 	return false
+}
+
+func serviceRoleRank(role string) int {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case approval.RoleAdmin:
+		return 4
+	case approval.RoleOperator:
+		return 3
+	case approval.RoleServiceClient, approval.RoleWebUI, approval.RoleNode:
+		return 2
+	case approval.RoleViewer:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func serviceListenIsLoopback(addr string) bool {
+	host := strings.TrimSpace(addr)
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
+	}
+	host = strings.Trim(host, "[]")
+	if host == "" {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return strings.EqualFold(host, "localhost")
+}
+
+func requestRemoteIsLoopback(addr string) bool {
+	host := strings.TrimSpace(addr)
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
+	}
+	host = strings.Trim(host, "[]")
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return strings.EqualFold(host, "localhost")
 }
 
 func validateServiceAuthorization(secret string, header string, now time.Time) error {

@@ -162,6 +162,11 @@ func TestOr3NetCompatibilityFixtures_Responses(t *testing.T) {
 		defer cleanup()
 		jobs := agent.NewJobRegistry(time.Minute, 32)
 		manager := &agent.SubagentManager{DB: database, Jobs: jobs, MaxQueued: 4}
+		manager.BackgroundTools = func() *tools.Registry {
+			registry := tools.NewRegistry()
+			registry.Register(serviceTestTool{name: "read_file"})
+			return registry
+		}
 		server := &serviceServer{subagentManager: manager, jobs: jobs}
 		httpServer := newServiceTestHTTPServer(t, strings.Repeat("u", 32), server)
 		defer httpServer.Close()

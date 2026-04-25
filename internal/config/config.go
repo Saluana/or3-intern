@@ -186,6 +186,7 @@ type ProviderConfig struct {
 type ToolsConfig struct {
 	BraveAPIKey         string                     `json:"braveApiKey"`
 	WebProxy            string                     `json:"webProxy"`
+	EnableExec          bool                       `json:"enableExec"`
 	ExecTimeoutSeconds  int                        `json:"execTimeoutSeconds"`
 	RestrictToWorkspace bool                       `json:"restrictToWorkspace"`
 	PathAppend          string                     `json:"pathAppend"`
@@ -235,9 +236,13 @@ type HeartbeatConfig struct {
 
 // ServiceConfig configures the optional authenticated service listener.
 type ServiceConfig struct {
-	Enabled bool   `json:"enabled"`
-	Listen  string `json:"listen"`
-	Secret  string `json:"secret"`
+	Enabled                     bool   `json:"enabled"`
+	Listen                      string `json:"listen"`
+	Secret                      string `json:"secret"`
+	SharedSecretRole            string `json:"sharedSecretRole"`
+	MaxCapability               string `json:"maxCapability"`
+	AllowUnauthenticatedPairing bool   `json:"allowUnauthenticatedPairing"`
+	MutationRateLimitPerMinute  int    `json:"mutationRateLimitPerMinute"`
 }
 
 // SubagentsConfig limits the internal subagent queue and worker pool.
@@ -646,6 +651,7 @@ func Default() Config {
 		Tools: ToolsConfig{
 			BraveAPIKey:         os.Getenv("BRAVE_API_KEY"),
 			WebProxy:            "",
+			EnableExec:          false,
 			ExecTimeoutSeconds:  60,
 			RestrictToWorkspace: true,
 			PathAppend:          "",
@@ -674,9 +680,13 @@ func Default() Config {
 		},
 		Cron: CronConfig{Enabled: true, StorePath: filepath.Join(root, "cron.json")},
 		Service: ServiceConfig{
-			Enabled: false,
-			Listen:  "127.0.0.1:9100",
-			Secret:  "",
+			Enabled:                     false,
+			Listen:                      "127.0.0.1:9100",
+			Secret:                      "",
+			SharedSecretRole:            "service-client",
+			MaxCapability:               "safe",
+			AllowUnauthenticatedPairing: false,
+			MutationRateLimitPerMinute:  60,
 		},
 		Heartbeat: HeartbeatConfig{
 			Enabled:         false,
@@ -920,6 +930,17 @@ func Load(path string) (Config, error) {
 	}
 	if strings.TrimSpace(cfg.Service.Listen) == "" {
 		cfg.Service.Listen = Default().Service.Listen
+	}
+	cfg.Service.SharedSecretRole = normalizeServiceRole(cfg.Service.SharedSecretRole)
+	if cfg.Service.SharedSecretRole == "" {
+		cfg.Service.SharedSecretRole = Default().Service.SharedSecretRole
+	}
+	cfg.Service.MaxCapability = normalizeCapabilityValue(cfg.Service.MaxCapability)
+	if cfg.Service.MaxCapability == "" {
+		cfg.Service.MaxCapability = Default().Service.MaxCapability
+	}
+	if cfg.Service.MutationRateLimitPerMinute <= 0 {
+		cfg.Service.MutationRateLimitPerMinute = Default().Service.MutationRateLimitPerMinute
 	}
 	if cfg.Channels.Telegram.APIBase == "" {
 		cfg.Channels.Telegram.APIBase = "https://api.telegram.org"
@@ -1321,9 +1342,7 @@ func validateAccessProfiles(cfg AccessProfilesConfig) error {
 		if name == "" {
 			return errors.New("security.profiles.profiles contains an empty profile name")
 		}
-		switch profile.MaxCapability {
-		case "", "safe", "guarded", "privileged":
-		default:
+		if !isSupportedCapabilityValue(profile.MaxCapability) {
 			return errors.New("security.profiles.profiles." + name + ": unsupported maxCapability")
 		}
 	}
@@ -1344,6 +1363,38 @@ func validateAccessProfiles(cfg AccessProfilesConfig) error {
 		}
 	}
 	return nil
+}
+
+func normalizeCapabilityValue(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "safe":
+		return "safe"
+	case "guarded":
+		return "guarded"
+	case "privileged":
+		return "privileged"
+	default:
+		return ""
+	}
+}
+
+func isSupportedCapabilityValue(raw string) bool {
+	return strings.TrimSpace(raw) == "" || normalizeCapabilityValue(raw) != ""
+}
+
+func normalizeServiceRole(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "viewer":
+		return "viewer"
+	case "service-client":
+		return "service-client"
+	case "operator":
+		return "operator"
+	case "admin":
+		return "admin"
+	default:
+		return ""
+	}
 }
 
 func validateApprovals(cfg ApprovalConfig) error {

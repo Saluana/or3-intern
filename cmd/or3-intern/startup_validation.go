@@ -4,12 +4,19 @@ import (
 	"fmt"
 	"strings"
 
+	"or3-intern/internal/approval"
 	"or3-intern/internal/config"
 	intdoctor "or3-intern/internal/doctor"
 )
 
-func validateStartupCommand(cmd string, cfg config.Config) error {
+func validateStartupCommand(cmd string, cfg config.Config, unsafeDev bool) error {
 	cmd = strings.ToLower(strings.TrimSpace(cmd))
+	if unsafeDev {
+		return nil
+	}
+	if err := validateStrictServicePosture(cmd, cfg); err != nil {
+		return err
+	}
 	mode := startupDoctorMode(cmd)
 	if mode == "" {
 		return nil
@@ -29,6 +36,27 @@ func validateStartupCommand(cmd string, cfg config.Config) error {
 		message += fmt.Sprintf(" (%d more blocking finding(s))", len(blockers)-len(top))
 	}
 	return startupRefusal(cmd, message, blockers)
+}
+
+func validateStrictServicePosture(cmd string, cfg config.Config) error {
+	if cmd != "service" {
+		return nil
+	}
+	if cfg.Service.AllowUnauthenticatedPairing && !serviceListenIsLoopback(cfg.Service.Listen) {
+		return fmt.Errorf("service startup refused: unauthenticated pairing requires a loopback listen address; rerun with --unsafe-dev only for local development")
+	}
+	role := strings.ToLower(strings.TrimSpace(cfg.Service.SharedSecretRole))
+	switch role {
+	case "", approval.RoleViewer, approval.RoleServiceClient:
+	default:
+		return fmt.Errorf("service startup refused: service.sharedSecretRole must be viewer or service-client; rerun with --unsafe-dev only for local development")
+	}
+	switch strings.ToLower(strings.TrimSpace(cfg.Service.MaxCapability)) {
+	case "", "safe":
+	default:
+		return fmt.Errorf("service startup refused: service.maxCapability must remain safe; rerun with --unsafe-dev only for local development")
+	}
+	return nil
 }
 
 func startupDoctorMode(cmd string) intdoctor.Mode {

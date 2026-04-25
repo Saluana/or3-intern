@@ -357,7 +357,7 @@ var helpTopics = map[string]helpCommand{
 	},
 }
 
-func parseRootCLIArgs(argv []string, stderr io.Writer) (string, []string, bool, error) {
+func parseRootCLIArgs(argv []string, stderr io.Writer) (string, []string, bool, bool, error) {
 	if stderr == nil {
 		stderr = io.Discard
 	}
@@ -366,13 +366,15 @@ func parseRootCLIArgs(argv []string, stderr io.Writer) (string, []string, bool, 
 	fs.Usage = func() {}
 	var cfgPath string
 	var showHelp bool
+	var unsafeDev bool
 	fs.StringVar(&cfgPath, "config", "", "path to config.json")
 	fs.BoolVar(&showHelp, "help", false, "show help")
 	fs.BoolVar(&showHelp, "h", false, "show help")
+	fs.BoolVar(&unsafeDev, "unsafe-dev", false, "bypass startup safety gates for local development")
 	if err := fs.Parse(argv); err != nil {
-		return "", nil, false, err
+		return "", nil, false, false, err
 	}
-	return cfgPath, fs.Args(), showHelp, nil
+	return cfgPath, fs.Args(), showHelp, unsafeDev, nil
 }
 
 func maybeHandleHelpRequest(args []string, stdout io.Writer) (bool, error) {
@@ -441,7 +443,7 @@ func printRootHelp(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "or3-intern is a local-first agent runtime with chat, channels, memory, approvals, and service APIs.")
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, "Usage:")
-	_, _ = fmt.Fprintln(w, "  or3-intern [--config path] <command> [options]")
+	_, _ = fmt.Fprintln(w, "  or3-intern [--config path] [--unsafe-dev] <command> [options]")
 	_, _ = fmt.Fprintln(w, "  or3-intern")
 	_, _ = fmt.Fprintln(w, "  or3-intern help [command]")
 	_, _ = fmt.Fprintln(w)
@@ -453,7 +455,7 @@ func printRootHelp(w io.Writer) {
 	}
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, "Global flags:")
-	printHelpItems(w, []helpItem{{Name: "--config <path>", Description: "Path to config.json"}, {Name: "-h, --help", Description: "Show help for the root command or a subcommand"}})
+	printHelpItems(w, []helpItem{{Name: "--config <path>", Description: "Path to config.json"}, {Name: "--unsafe-dev", Description: "Bypass startup safety gates for local development"}, {Name: "-h, --help", Description: "Show help for the root command or a subcommand"}})
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, "Examples:")
 	for _, example := range []string{"or3-intern configure", "or3-intern chat", "or3-intern doctor --strict", "or3-intern approvals --help", "or3-intern help skills"} {

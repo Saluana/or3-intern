@@ -32,22 +32,16 @@ func TestResolveServiceToolAllowlist_RejectsMissingMode(t *testing.T) {
 	}
 }
 
-func TestResolveServiceToolAllowlist_DenyListUsesRegistry(t *testing.T) {
+func TestResolveServiceToolAllowlist_RejectsDenyListMode(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(&toolPolicyStubTool{name: "read_file"})
 	registry.Register(&toolPolicyStubTool{name: "exec"})
 
-	allowed, explicit, err := ResolveServiceToolAllowlist(registry, &ServiceToolPolicy{
+	_, _, err := ResolveServiceToolAllowlist(registry, &ServiceToolPolicy{
 		Mode:         "deny_list",
 		BlockedTools: []string{"exec"},
 	}, nil)
-	if err != nil {
-		t.Fatalf("ResolveServiceToolAllowlist: %v", err)
-	}
-	if !explicit {
-		t.Fatal("expected deny_list to produce an explicit allowlist")
-	}
-	if len(allowed) != 1 || allowed[0] != "read_file" {
-		t.Fatalf("expected only read_file to remain allowed, got %#v", allowed)
+	if err == nil || !strings.Contains(err.Error(), "unsupported tool_policy mode") {
+		t.Fatalf("expected deny_list to be rejected, got %v", err)
 	}
 }

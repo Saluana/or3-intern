@@ -75,6 +75,21 @@ func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, 
 	if program == "" && legacyCommand == "" {
 		return "", errors.New("missing program or command")
 	}
+	if toolsRequestIsService(ctx) {
+		if len(t.AllowedPrograms) == 0 {
+			return "", errors.New("exec has no allowed programs configured")
+		}
+		identity := RequesterIdentityFromContext(ctx)
+		if !serviceExecRoleAllowed(identity.Role) {
+			return "", errors.New("exec unavailable for this requester role")
+		}
+		if strings.TrimSpace(ApprovalTokenFromContext(ctx)) == "" {
+			return "", errors.New("service exec requires approval token")
+		}
+		if legacyCommand != "" {
+			return "", errors.New("shell command execution disabled for service requests")
+		}
+	}
 	if legacyCommand != "" {
 		if !t.EnableLegacyShell || t.DisableShell {
 			return "", errors.New("shell command execution disabled; use program + args or explicitly enable legacy shell mode")
@@ -206,6 +221,19 @@ func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, 
 		return formatCommandOutput(out, er), nil
 	}
 	return out, nil
+}
+
+func toolsRequestIsService(ctx context.Context) bool {
+	return RequestSourceFromContext(ctx) == RequestSourceService
+}
+
+func serviceExecRoleAllowed(role string) bool {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "operator", "admin":
+		return true
+	default:
+		return false
+	}
 }
 
 func allowedProgram(program string, resolved string, allowed []string) bool {

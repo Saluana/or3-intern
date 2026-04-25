@@ -31,10 +31,12 @@ const (
 	SubjectMessageSend  SubjectType = "message_send"
 	SubjectFileTransfer SubjectType = "file_transfer"
 
+	RoleViewer        = "viewer"
 	RoleOperator      = "operator"
 	RoleServiceClient = "service-client"
 	RoleWebUI         = "web-ui"
 	RoleNode          = "node"
+	RoleAdmin         = "admin"
 
 	StatusPending   = "pending"
 	StatusApproved  = "approved"
@@ -1112,6 +1114,8 @@ func randomDigits(length int) (string, error) {
 
 func normalizeRole(role string) string {
 	switch strings.ToLower(strings.TrimSpace(role)) {
+	case RoleViewer:
+		return RoleViewer
 	case RoleOperator:
 		return RoleOperator
 	case RoleServiceClient:
@@ -1120,6 +1124,8 @@ func normalizeRole(role string) string {
 		return RoleWebUI
 	case RoleNode:
 		return RoleNode
+	case RoleAdmin:
+		return RoleAdmin
 	default:
 		return ""
 	}

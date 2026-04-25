@@ -698,6 +698,9 @@ func (r *Runtime) guardToolExecution(ctx context.Context, tool tools.Tool, capab
 	if tool.Name() == "send_message" && trustedToolAccessFromContext(ctx) {
 		capability = tools.CapabilitySafe
 	}
+	if ceiling := tools.CapabilityCeilingFromContext(ctx); ceiling != "" && capabilityRank(capability) > capabilityRank(ceiling) {
+		return fmt.Errorf("tool exceeds request capability ceiling: %s", tool.Name())
+	}
 	if err := r.enforceProfile(ctx, profile, tool, capability, params); err != nil {
 		return err
 	}

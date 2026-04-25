@@ -8,7 +8,10 @@
     "session_key": "svc:fixture"
   },
   "message": "hello contract",
-  "allowed_tools": ["read_file"],
+  "tool_policy": {
+    "mode": "allow_list",
+    "allowed_tools": ["read_file"]
+  },
   "meta": {
     "request_id": "req_fixture",
     "workspace_id": "ws_fixture",

@@ -7,7 +7,7 @@ import (
 )
 
 func TestParseRootCLIArgs_RootHelp(t *testing.T) {
-	cfgPath, args, showHelp, err := parseRootCLIArgs([]string{"--config", "/tmp/config.json", "--help", "approvals"}, &bytes.Buffer{})
+	cfgPath, args, showHelp, unsafeDev, err := parseRootCLIArgs([]string{"--config", "/tmp/config.json", "--help", "approvals"}, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("parseRootCLIArgs: %v", err)
 	}
@@ -16,6 +16,9 @@ func TestParseRootCLIArgs_RootHelp(t *testing.T) {
 	}
 	if !showHelp {
 		t.Fatal("expected showHelp to be true")
+	}
+	if unsafeDev {
+		t.Fatal("expected unsafeDev to default to false")
 	}
 	if len(args) != 1 || args[0] != "approvals" {
 		t.Fatalf("expected approvals topic args, got %#v", args)

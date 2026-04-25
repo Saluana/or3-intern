@@ -7,15 +7,17 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"or3-intern/internal/agent"
+	"or3-intern/internal/app"
 	"or3-intern/internal/approval"
-	"or3-intern/internal/bus"
 	"or3-intern/internal/config"
 	"or3-intern/internal/controlplane"
 	"or3-intern/internal/db"
@@ -30,6 +32,11 @@ type serviceServer struct {
 	broker          *approval.Broker
 	controlOnce     sync.Once
 	controlSvc      *controlplane.Service
+	appOnce         sync.Once
+	appSvc          *app.ServiceApp
+	rateMu          sync.Mutex
+	rateWindow      time.Time
+	rateCounts      map[string]int
 }
 
 const (
@@ -49,7 +56,7 @@ func runServiceCommandWithBroker(ctx context.Context, cfg config.Config, rt *age
 	if strings.TrimSpace(cfg.Service.Secret) == "" {
 		return fmt.Errorf("service secret is required")
 	}
-	if err := validateStartupCommand("service", cfg); err != nil {
+	if err := validateStartupCommand("service", cfg, false); err != nil {
 		return err
 	}
 	if rt == nil {
@@ -63,7 +70,7 @@ func runServiceCommandWithBroker(ctx context.Context, cfg config.Config, rt *age
 
 	httpServer := &http.Server{
 		Addr:              cfg.Service.Listen,
-		Handler:           serviceAuthMiddlewareWithBroker(cfg.Service.Secret, broker, mux),
+		Handler:           serviceAuthMiddlewareWithBroker(cfg, broker, serviceBoundaryMiddleware(server, mux)),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		IdleTimeout:       60 * time.Second,
@@ -118,8 +125,15 @@ func (s *serviceServer) control() *controlplane.Service {
 	return s.controlSvc
 }
 
+func (s *serviceServer) app() *app.ServiceApp {
+	s.appOnce.Do(func() {
+		s.appSvc = app.NewServiceApp(s.runtime, s.jobs, s.subagentManager, s.control())
+	})
+	return s.appSvc
+}
+
 func (s *serviceServer) handlePairing(w http.ResponseWriter, r *http.Request) {
-	cp := s.control()
+	appSvc := s.app()
 	if s.broker == nil {
 		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "approval broker unavailable"})
 		return
@@ -141,9 +155,9 @@ func (s *serviceServer) handlePairing(w http.ResponseWriter, r *http.Request) {
 				writeServiceRequestDecodeError(w, err)
 				return
 			}
-			req, code, err := cp.CreatePairingRequest(r.Context(), approval.PairingRequestInput{Role: body.Role, DisplayName: serviceFirstNonEmpty(body.DisplayName, body.DisplayName2), Origin: body.Origin, Metadata: body.Metadata, DeviceID: body.DeviceID})
+			req, code, err := appSvc.CreatePairingRequest(r.Context(), approval.PairingRequestInput{Role: body.Role, DisplayName: serviceFirstNonEmpty(body.DisplayName, body.DisplayName2), Origin: body.Origin, Metadata: body.Metadata, DeviceID: body.DeviceID})
 			if err != nil {
-				writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+				writeServiceError(w, r, http.StatusBadRequest, "pairing request failed", err)
 				return
 			}
 			writeServiceJSON(w, http.StatusAccepted, map[string]any{"id": req.ID, "device_id": req.DeviceID, "role": req.Role, "display_name": req.DisplayName, "expires_at": req.ExpiresAt, "code": code})
@@ -151,9 +165,9 @@ func (s *serviceServer) handlePairing(w http.ResponseWriter, r *http.Request) {
 			if !requireServiceRole(w, r, approval.RoleOperator) {
 				return
 			}
-			items, err := cp.ListPairingRequests(r.Context(), r.URL.Query().Get("status"), 100)
+			items, err := appSvc.ListPairingRequests(r.Context(), r.URL.Query().Get("status"), 100)
 			if err != nil {
-				writeServiceJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+				writeServiceError(w, r, http.StatusBadGateway, "pairing list unavailable", err)
 				return
 			}
 			writeServiceJSON(w, http.StatusOK, map[string]any{"items": items})
@@ -176,9 +190,9 @@ func (s *serviceServer) handlePairing(w http.ResponseWriter, r *http.Request) {
 			writeServiceRequestDecodeError(w, err)
 			return
 		}
-		device, token, err := cp.ExchangePairingCode(r.Context(), approval.PairingExchangeInput{RequestID: body.RequestID, Code: body.Code})
+		device, token, err := appSvc.ExchangePairingCode(r.Context(), approval.PairingExchangeInput{RequestID: body.RequestID, Code: body.Code})
 		if err != nil {
-			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			writeServiceError(w, r, http.StatusBadRequest, "pairing exchange failed", err)
 			return
 		}
 		writeServiceJSON(w, http.StatusOK, map[string]any{"device_id": device.DeviceID, "role": device.Role, "token": token})
@@ -207,9 +221,9 @@ func (s *serviceServer) handlePairing(w http.ResponseWriter, r *http.Request) {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 			return
 		}
-		req, err := cp.ApprovePairingRequest(r.Context(), id, serviceAuthIdentityFromContext(r.Context()).Actor)
+		req, err := appSvc.ApprovePairingRequest(r.Context(), id, serviceAuthIdentityFromContext(r.Context()).Actor)
 		if err != nil {
-			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			writeServiceError(w, r, http.StatusBadRequest, "pairing approval failed", err)
 			return
 		}
 		writeServiceJSON(w, http.StatusOK, map[string]any{"id": req.ID, "status": req.Status})
@@ -218,8 +232,8 @@ func (s *serviceServer) handlePairing(w http.ResponseWriter, r *http.Request) {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 			return
 		}
-		if err := cp.DenyPairingRequest(r.Context(), id, serviceAuthIdentityFromContext(r.Context()).Actor); err != nil {
-			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		if err := appSvc.DenyPairingRequest(r.Context(), id, serviceAuthIdentityFromContext(r.Context()).Actor); err != nil {
+			writeServiceError(w, r, http.StatusBadRequest, "pairing denial failed", err)
 			return
 		}
 		writeServiceJSON(w, http.StatusOK, map[string]any{"id": id, "status": "denied"})
@@ -229,7 +243,7 @@ func (s *serviceServer) handlePairing(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *serviceServer) handleDevices(w http.ResponseWriter, r *http.Request) {
-	cp := s.control()
+	appSvc := s.app()
 	if s.broker == nil {
 		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "approval broker unavailable"})
 		return
@@ -243,9 +257,9 @@ func (s *serviceServer) handleDevices(w http.ResponseWriter, r *http.Request) {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 			return
 		}
-		items, err := cp.ListDevices(r.Context(), 100)
+		items, err := appSvc.ListDevices(r.Context(), 100)
 		if err != nil {
-			writeServiceJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+			writeServiceError(w, r, http.StatusBadGateway, "device list unavailable", err)
 			return
 		}
 		writeServiceJSON(w, http.StatusOK, map[string]any{"items": items})
@@ -263,8 +277,8 @@ func (s *serviceServer) handleDevices(w http.ResponseWriter, r *http.Request) {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 			return
 		}
-		if err := cp.RevokeDevice(r.Context(), deviceID, serviceAuthIdentityFromContext(r.Context()).Actor); err != nil {
-			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		if err := appSvc.RevokeDevice(r.Context(), deviceID, serviceAuthIdentityFromContext(r.Context()).Actor); err != nil {
+			writeServiceError(w, r, http.StatusBadRequest, "device revoke failed", err)
 			return
 		}
 		writeServiceJSON(w, http.StatusOK, map[string]any{"device_id": deviceID, "status": "revoked"})
@@ -273,9 +287,9 @@ func (s *serviceServer) handleDevices(w http.ResponseWriter, r *http.Request) {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 			return
 		}
-		rotated, token, err := cp.RotateDevice(r.Context(), deviceID)
+		rotated, token, err := appSvc.RotateDevice(r.Context(), deviceID)
 		if err != nil {
-			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			writeServiceError(w, r, http.StatusBadRequest, "device rotation failed", err)
 			return
 		}
 		writeServiceJSON(w, http.StatusOK, map[string]any{"device_id": rotated.DeviceID, "token": token})
@@ -285,7 +299,7 @@ func (s *serviceServer) handleDevices(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *serviceServer) handleApprovals(w http.ResponseWriter, r *http.Request) {
-	cp := s.control()
+	appSvc := s.app()
 	if s.broker == nil {
 		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "approval broker unavailable"})
 		return
@@ -299,13 +313,13 @@ func (s *serviceServer) handleApprovals(w http.ResponseWriter, r *http.Request) 
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 			return
 		}
-		items, err := cp.ListApprovalRequests(r.Context(), controlplane.ApprovalFilter{
+		items, err := appSvc.ListApprovalRequests(r.Context(), controlplane.ApprovalFilter{
 			Status: r.URL.Query().Get("status"),
 			Type:   r.URL.Query().Get("type"),
 			Limit:  100,
 		})
 		if err != nil {
-			writeServiceJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+			writeServiceError(w, r, http.StatusBadGateway, "approval list unavailable", err)
 			return
 		}
 		writeServiceJSON(w, http.StatusOK, map[string]any{"items": items})
@@ -317,9 +331,9 @@ func (s *serviceServer) handleApprovals(w http.ResponseWriter, r *http.Request) 
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 			return
 		}
-		expired, err := cp.ExpireApprovals(r.Context(), serviceAuthIdentityFromContext(r.Context()).Actor)
+		expired, err := appSvc.ExpireApprovals(r.Context(), serviceAuthIdentityFromContext(r.Context()).Actor)
 		if err != nil {
-			writeServiceJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+			writeServiceError(w, r, http.StatusBadGateway, "approval expiration failed", err)
 			return
 		}
 		writeServiceJSON(w, http.StatusOK, map[string]any{"expired": expired})
@@ -328,9 +342,9 @@ func (s *serviceServer) handleApprovals(w http.ResponseWriter, r *http.Request) 
 	if trimmedPath == "allowlists" {
 		switch r.Method {
 		case http.MethodGet:
-			items, err := cp.ListAllowlists(r.Context(), r.URL.Query().Get("domain"), 100)
+			items, err := appSvc.ListAllowlists(r.Context(), r.URL.Query().Get("domain"), 100)
 			if err != nil {
-				writeServiceJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+				writeServiceError(w, r, http.StatusBadGateway, "allowlist list unavailable", err)
 				return
 			}
 			writeServiceJSON(w, http.StatusOK, map[string]any{"items": items})
@@ -341,9 +355,9 @@ func (s *serviceServer) handleApprovals(w http.ResponseWriter, r *http.Request) 
 				writeServiceRequestDecodeError(w, err)
 				return
 			}
-			rec, err := cp.AddAllowlist(r.Context(), body.Domain, body.Scope, body.Matcher, serviceAuthIdentityFromContext(r.Context()).Actor, body.ExpiresAt)
+			rec, err := appSvc.AddAllowlist(r.Context(), body.Domain, body.Scope, body.Matcher, serviceAuthIdentityFromContext(r.Context()).Actor, body.ExpiresAt)
 			if err != nil {
-				writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+				writeServiceError(w, r, http.StatusBadRequest, "allowlist add failed", err)
 				return
 			}
 			writeServiceJSON(w, http.StatusAccepted, map[string]any{"item": rec})
@@ -367,8 +381,8 @@ func (s *serviceServer) handleApprovals(w http.ResponseWriter, r *http.Request) 
 			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid allowlist ID"})
 			return
 		}
-		if err := cp.RemoveAllowlist(r.Context(), id, serviceAuthIdentityFromContext(r.Context()).Actor); err != nil {
-			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		if err := appSvc.RemoveAllowlist(r.Context(), id, serviceAuthIdentityFromContext(r.Context()).Actor); err != nil {
+			writeServiceError(w, r, http.StatusBadRequest, "allowlist remove failed", err)
 			return
 		}
 		writeServiceJSON(w, http.StatusOK, map[string]any{"allowlist_id": id, "status": "removed"})
@@ -385,9 +399,9 @@ func (s *serviceServer) handleApprovals(w http.ResponseWriter, r *http.Request) 
 			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid approval ID"})
 			return
 		}
-		item, err := cp.GetApproval(r.Context(), id)
+		item, err := appSvc.GetApproval(r.Context(), id)
 		if err != nil {
-			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			writeServiceError(w, r, http.StatusBadRequest, "approval lookup failed", err)
 			return
 		}
 		writeServiceJSON(w, http.StatusOK, map[string]any{"item": item})
@@ -417,9 +431,9 @@ func (s *serviceServer) handleApprovals(w http.ResponseWriter, r *http.Request) 
 			writeServiceRequestDecodeError(w, err)
 			return
 		}
-		issued, err := cp.ApproveApproval(r.Context(), id, serviceAuthIdentityFromContext(r.Context()).Actor, body.Allowlist, body.Note)
+		issued, err := appSvc.ApproveApproval(r.Context(), id, serviceAuthIdentityFromContext(r.Context()).Actor, body.Allowlist, body.Note)
 		if err != nil {
-			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			writeServiceError(w, r, http.StatusBadRequest, "approval failed", err)
 			return
 		}
 		writeServiceJSON(w, http.StatusOK, map[string]any{"request_id": id, "token": issued.Token, "allowlist_id": issued.AllowlistID})
@@ -436,8 +450,8 @@ func (s *serviceServer) handleApprovals(w http.ResponseWriter, r *http.Request) 
 			writeServiceRequestDecodeError(w, err)
 			return
 		}
-		if err := cp.DenyApproval(r.Context(), id, serviceAuthIdentityFromContext(r.Context()).Actor, body.Note); err != nil {
-			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		if err := appSvc.DenyApproval(r.Context(), id, serviceAuthIdentityFromContext(r.Context()).Actor, body.Note); err != nil {
+			writeServiceError(w, r, http.StatusBadRequest, "approval denial failed", err)
 			return
 		}
 		writeServiceJSON(w, http.StatusOK, map[string]any{"request_id": id, "status": "denied"})
@@ -454,8 +468,8 @@ func (s *serviceServer) handleApprovals(w http.ResponseWriter, r *http.Request) 
 			writeServiceRequestDecodeError(w, err)
 			return
 		}
-		if err := cp.CancelApproval(r.Context(), id, serviceAuthIdentityFromContext(r.Context()).Actor, body.Note); err != nil {
-			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		if err := appSvc.CancelApproval(r.Context(), id, serviceAuthIdentityFromContext(r.Context()).Actor, body.Note); err != nil {
+			writeServiceError(w, r, http.StatusBadRequest, "approval cancel failed", err)
 			return
 		}
 		writeServiceJSON(w, http.StatusOK, map[string]any{"request_id": id, "status": "canceled"})
@@ -564,6 +578,10 @@ func (s *serviceServer) handleTurns(w http.ResponseWriter, r *http.Request) {
 		writeServiceRequestDecodeError(w, err)
 		return
 	}
+	if err := validateServiceToolCapabilities(s.runtime.Tools, req.AllowedTools, s.config.Service.MaxCapability); err != nil {
+		writeServiceError(w, r, http.StatusBadRequest, "requested tools exceed service capability ceiling", err)
+		return
+	}
 	audit := serviceAuditHeadersFromRequest(r)
 	req.Meta = mergeServiceAuditMeta(req.Meta, audit)
 	req.ApprovalToken = serviceFirstNonEmpty(req.ApprovalToken, serviceApprovalTokenFromRequest(r))
@@ -597,35 +615,26 @@ func (s *serviceServer) handleTurns(w http.ResponseWriter, r *http.Request) {
 func (s *serviceServer) runTurnJob(ctx context.Context, jobID string, req serviceTurnRequest, identity serviceAuthIdentity) {
 	s.jobs.Publish(jobID, "started", serviceLifecyclePayload(req.SessionKey, req.Meta, map[string]any{"status": "running"}))
 	observer := &serviceObserver{ConversationObserver: s.jobs.Observer(jobID)}
-	runCtx := agent.ContextWithConversationObserver(ctx, observer)
-	runCtx = agent.ContextWithStreamingChannel(runCtx, agent.NullStreamer{})
-	runCtx = tools.ContextWithApprovalToken(runCtx, req.ApprovalToken)
-	runCtx = tools.ContextWithRequesterIdentity(runCtx, identity.Actor, identity.Role)
-	if req.RestrictTools {
-		filtered := tools.NewRegistry()
-		if len(req.AllowedTools) > 0 {
-			filtered = s.runtime.Tools.CloneFiltered(req.AllowedTools)
-		}
-		runCtx = agent.ContextWithToolRegistry(runCtx, filtered)
-	}
-	meta := cloneServiceMeta(req.Meta)
-	if req.ProfileName != "" {
-		meta["profile_name"] = req.ProfileName
-	}
-	err := s.runtime.Handle(runCtx, bus.Event{
-		Type:       bus.EventUserMessage,
-		SessionKey: req.SessionKey,
-		Channel:    "service",
-		From:       "or3-net",
-		Message:    req.Message,
-		Meta:       meta,
+	err := s.app().RunTurn(ctx, app.TurnRequest{
+		SessionKey:    req.SessionKey,
+		Message:       req.Message,
+		Meta:          req.Meta,
+		AllowedTools:  req.AllowedTools,
+		RestrictTools: req.RestrictTools,
+		ProfileName:   req.ProfileName,
+		Capability:    tools.CapabilityLevel(s.config.Service.MaxCapability),
+		ApprovalToken: req.ApprovalToken,
+		Actor:         identity.Actor,
+		Role:          identity.Role,
+		Observer:      observer,
+		Streamer:      agent.NullStreamer{},
 	})
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
 			s.jobs.Complete(jobID, "aborted", serviceLifecyclePayload(req.SessionKey, req.Meta, map[string]any{"message": "job aborted"}))
 			return
 		}
-		s.jobs.Fail(jobID, err.Error(), serviceLifecyclePayload(req.SessionKey, req.Meta, nil))
+		s.jobs.Fail(jobID, servicePublicJobError(err), serviceLifecyclePayload(req.SessionKey, req.Meta, nil))
 		return
 	}
 	s.jobs.Complete(jobID, "completed", serviceLifecyclePayload(req.SessionKey, req.Meta, map[string]any{"final_text": observer.finalText}))
@@ -646,6 +655,10 @@ func (s *serviceServer) handleSubagents(w http.ResponseWriter, r *http.Request) 
 		writeServiceRequestDecodeError(w, err)
 		return
 	}
+	if err := validateServiceToolCapabilities(backgroundToolsRegistry(s.subagentManager), req.AllowedTools, s.config.Service.MaxCapability); err != nil {
+		writeServiceError(w, r, http.StatusBadRequest, "requested tools exceed service capability ceiling", err)
+		return
+	}
 	audit := serviceAuditHeadersFromRequest(r)
 	req.Meta = mergeServiceAuditMeta(req.Meta, audit)
 	req.ApprovalToken = serviceFirstNonEmpty(req.ApprovalToken, serviceApprovalTokenFromRequest(r))
@@ -653,27 +666,29 @@ func (s *serviceServer) handleSubagents(w http.ResponseWriter, r *http.Request) 
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "parent_session_key and task are required"})
 		return
 	}
-	job, err := s.subagentManager.EnqueueService(r.Context(), agent.ServiceSubagentRequest{
+	identity := serviceAuthIdentityFromContext(r.Context())
+	job, err := s.app().StartSubagent(r.Context(), app.SubagentRequest{
 		ParentSessionKey: req.ParentSessionKey,
 		Task:             req.Task,
 		PromptSnapshot:   req.PromptSnapshot,
 		AllowedTools:     req.AllowedTools,
 		RestrictTools:    req.RestrictTools,
 		ProfileName:      req.ProfileName,
+		Capability:       tools.CapabilityLevel(s.config.Service.MaxCapability),
 		Channel:          req.Channel,
 		ReplyTo:          req.ReplyTo,
 		Meta:             req.Meta,
 		Timeout:          time.Duration(req.TimeoutSeconds) * time.Second,
 		ApprovalToken:    req.ApprovalToken,
-		RequesterActor:   serviceAuthIdentityFromContext(r.Context()).Actor,
-		RequesterRole:    serviceAuthIdentityFromContext(r.Context()).Role,
+		Actor:            identity.Actor,
+		Role:             identity.Role,
 	})
 	if err != nil {
 		statusCode := http.StatusBadGateway
 		if err == db.ErrSubagentQueueFull {
 			statusCode = http.StatusTooManyRequests
 		}
-		writeServiceJSON(w, statusCode, map[string]any{"error": err.Error()})
+		writeServiceError(w, r, statusCode, "subagent request failed", err)
 		return
 	}
 	writeServiceJSON(w, http.StatusAccepted, map[string]any{
@@ -706,13 +721,13 @@ func (s *serviceServer) handleJobs(w http.ResponseWriter, r *http.Request) {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 			return
 		}
-		snapshot, err := s.control().GetJob(parts[0])
+		snapshot, err := s.app().GetJob(parts[0])
 		if errors.Is(err, controlplane.ErrJobNotFound) {
 			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "job not found"})
 			return
 		}
 		if err != nil {
-			writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": err.Error()})
+			writeServiceError(w, r, http.StatusServiceUnavailable, "job lookup unavailable", err)
 			return
 		}
 		writeServiceValue(w, http.StatusOK, controlplane.BuildJobSnapshotResponse(snapshot))
@@ -743,14 +758,14 @@ func (s *serviceServer) handleJobs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *serviceServer) streamJob(w http.ResponseWriter, r *http.Request, jobID string) {
-	snapshot, events, unsubscribe, ok := s.jobs.Subscribe(jobID)
+	snapshot, events, unsubscribe, ok := s.app().SubscribeJob(jobID)
 	if !ok {
 		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "job not found"})
 		return
 	}
 	defer unsubscribe()
 	if err := beginSSE(w); err != nil {
-		writeServiceJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		writeServiceError(w, r, http.StatusInternalServerError, "streaming is not supported", err)
 		return
 	}
 	for _, event := range snapshot.Events {
@@ -777,26 +792,207 @@ func (s *serviceServer) streamJob(w http.ResponseWriter, r *http.Request, jobID 
 }
 
 func (s *serviceServer) abortJob(w http.ResponseWriter, r *http.Request, jobID string) {
-	if s.jobs.Cancel(jobID) {
+	ok, status, err := s.app().AbortJob(r.Context(), jobID)
+	if err != nil {
+		writeServiceError(w, r, http.StatusServiceUnavailable, "job abort unavailable", err)
+		return
+	}
+	if ok && status == "" {
 		writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true, "job_id": jobID})
 		return
 	}
-	if s.subagentManager != nil {
-		if err := s.subagentManager.Abort(r.Context(), jobID); err == nil {
-			writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true, "job_id": jobID})
-			return
-		}
+	if ok && status != "" {
+		writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true, "job_id": jobID, "status": status})
+		return
 	}
-	snapshot, ok := s.jobs.Snapshot(jobID)
-	if !ok {
+	if status == "not_found" {
 		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "job not found"})
 		return
 	}
-	if isTerminalStatus(snapshot.Status) {
-		writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true, "job_id": jobID, "status": snapshot.Status})
+	writeServiceJSON(w, http.StatusConflict, map[string]any{"error": "job is not abortable", "job_id": jobID})
+}
+
+type serviceRequestContextKey struct{}
+
+type serviceRequestContext struct {
+	RequestID string
+}
+
+func serviceBoundaryMiddleware(server *serviceServer, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestID := strings.TrimSpace(r.Header.Get("X-Request-Id"))
+		if requestID == "" {
+			requestID = newServiceRequestID()
+		}
+		w.Header().Set("X-Request-Id", requestID)
+		ctx := context.WithValue(r.Context(), serviceRequestContextKey{}, serviceRequestContext{RequestID: requestID})
+		r = r.WithContext(ctx)
+		if server != nil && server.isMutationRequest(r) && !server.allowMutationRequest(r) {
+			writeServiceJSON(w, http.StatusTooManyRequests, serviceErrorPayload(r, "rate limit exceeded"))
+			return
+		}
+		captured := &serviceStatusRecorder{ResponseWriter: w, statusCode: http.StatusOK}
+		next.ServeHTTP(captured, r)
+		server.recordServiceAudit(r, captured.statusCode)
+	})
+}
+
+type serviceStatusRecorder struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (r *serviceStatusRecorder) WriteHeader(statusCode int) {
+	r.statusCode = statusCode
+	r.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (r *serviceStatusRecorder) Flush() {
+	if flusher, ok := r.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (s *serviceServer) isMutationRequest(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	switch r.Method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *serviceServer) allowMutationRequest(r *http.Request) bool {
+	if s == nil || r == nil {
+		return true
+	}
+	limit := s.config.Service.MutationRateLimitPerMinute
+	if limit <= 0 {
+		return true
+	}
+	actor := serviceAuthIdentityFromContext(r.Context()).Actor
+	if actor == "" {
+		actor = remoteIPKey(r.RemoteAddr)
+	}
+	now := time.Now().UTC().Truncate(time.Minute)
+	key := actor + ":" + r.URL.Path
+	s.rateMu.Lock()
+	defer s.rateMu.Unlock()
+	if s.rateCounts == nil || !s.rateWindow.Equal(now) {
+		s.rateWindow = now
+		s.rateCounts = map[string]int{}
+	}
+	s.rateCounts[key]++
+	return s.rateCounts[key] <= limit
+}
+
+func (s *serviceServer) recordServiceAudit(r *http.Request, statusCode int) {
+	if s == nil || s.runtime == nil || s.runtime.Audit == nil || r == nil {
 		return
 	}
-	writeServiceJSON(w, http.StatusConflict, map[string]any{"error": "job is not abortable", "job_id": jobID})
+	identity := serviceAuthIdentityFromContext(r.Context())
+	payload := map[string]any{
+		"path":        r.URL.Path,
+		"method":      r.Method,
+		"status_code": statusCode,
+		"request_id":  serviceRequestIDFromContext(r.Context()),
+	}
+	if remote := remoteIPKey(r.RemoteAddr); remote != "" {
+		payload["remote_addr"] = remote
+	}
+	_ = s.runtime.Audit.Record(r.Context(), "service.request", "", identity.Actor, payload)
+}
+
+func serviceRequestIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	requestCtx, _ := ctx.Value(serviceRequestContextKey{}).(serviceRequestContext)
+	return strings.TrimSpace(requestCtx.RequestID)
+}
+
+func writeServiceError(w http.ResponseWriter, r *http.Request, statusCode int, public string, err error) {
+	if err != nil {
+		log.Printf("service %s %s: %v", r.Method, r.URL.Path, err)
+	}
+	writeServiceJSON(w, statusCode, serviceErrorPayload(r, public))
+}
+
+func serviceErrorPayload(r *http.Request, public string) map[string]any {
+	payload := map[string]any{"error": strings.TrimSpace(public)}
+	if payload["error"] == "" {
+		payload["error"] = "request failed"
+	}
+	if requestID := serviceRequestIDFromContext(r.Context()); requestID != "" {
+		payload["request_id"] = requestID
+	}
+	return payload
+}
+
+func servicePublicJobError(err error) string {
+	if err == nil {
+		return "job failed"
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return "job canceled"
+	}
+	return "job failed"
+}
+
+func remoteIPKey(raw string) string {
+	addr := strings.TrimSpace(raw)
+	if addr == "" {
+		return ""
+	}
+	host := addr
+	if parsed, err := netip.ParseAddrPort(addr); err == nil {
+		return parsed.Addr().String()
+	}
+	if hostPart, _, err := net.SplitHostPort(addr); err == nil {
+		host = hostPart
+	}
+	return strings.Trim(host, "[]")
+}
+
+func newServiceRequestID() string {
+	return strconv.FormatInt(time.Now().UnixNano(), 36)
+}
+
+func validateServiceToolCapabilities(registry *tools.Registry, names []string, maxCapability string) error {
+	ceiling := tools.CapabilityLevel(strings.ToLower(strings.TrimSpace(maxCapability)))
+	if ceiling == "" || registry == nil || len(names) == 0 {
+		return nil
+	}
+	for _, name := range names {
+		toolName := strings.TrimSpace(name)
+		if toolName == "" {
+			continue
+		}
+		tool := registry.Get(toolName)
+		if tool == nil {
+			continue
+		}
+		if capabilityRank(tools.ToolCapability(tool, nil)) > capabilityRank(ceiling) {
+			return fmt.Errorf("tool exceeds service capability ceiling: %s", toolName)
+		}
+	}
+	return nil
+}
+
+func capabilityRank(level tools.CapabilityLevel) int {
+	switch level {
+	case tools.CapabilityPrivileged:
+		return 3
+	case tools.CapabilityGuarded:
+		return 2
+	case tools.CapabilitySafe:
+		return 1
+	default:
+		return 0
+	}
 }
 
 func beginSSE(w http.ResponseWriter) error {

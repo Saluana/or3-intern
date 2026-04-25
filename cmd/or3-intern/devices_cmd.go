@@ -9,6 +9,8 @@ import (
 
 	"or3-intern/internal/app"
 	"or3-intern/internal/approval"
+	"or3-intern/internal/uxcopy"
+	"or3-intern/internal/uxstate"
 )
 
 func runDevicesCommand(ctx context.Context, broker *approval.Broker, args []string, stdout, stderr io.Writer) error {
@@ -29,8 +31,12 @@ func runDevicesCommand(ctx context.Context, broker *approval.Broker, args []stri
 		if err != nil {
 			return err
 		}
+		views := uxstate.BuildDeviceViews(items)
 		for _, item := range items {
 			fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", item.DeviceID, item.Status, item.Role, item.DisplayName)
+		}
+		for _, view := range views {
+			fmt.Fprintf(stdout, "  %s · %s · %s\n", view.Name, view.RoleLabel, view.Status)
 		}
 		return nil
 	case "requests":
@@ -47,6 +53,7 @@ func runDevicesCommand(ctx context.Context, broker *approval.Broker, args []stri
 		}
 		for _, item := range items {
 			fmt.Fprintf(stdout, "%d\t%s\t%s\t%s\t%s\n", item.ID, item.Status, item.Role, item.DeviceID, item.DisplayName)
+			fmt.Fprintf(stdout, "  %s requested %s access\n", firstNonEmptyString(item.DisplayName, item.DeviceID), uxcopy.DeviceRoleLabel(item.Role))
 		}
 		return nil
 	case "approve":

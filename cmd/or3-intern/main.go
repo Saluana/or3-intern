@@ -73,12 +73,16 @@ func newProviderClient(cfg config.Config) *providers.Client {
 }
 
 func main() {
-	cfgPath, args, showHelp, unsafeDev, err := parseRootCLIArgs(os.Args[1:], os.Stderr)
+	cfgPath, args, showHelp, unsafeDev, advancedHelp, err := parseRootCLIArgs(os.Args[1:], os.Stderr)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
 	if showHelp {
+		if len(helpTopicPath(args)) == 0 && advancedHelp {
+			printAdvancedRootHelp(os.Stdout)
+			return
+		}
 		if err := printHelpTopic(os.Stdout, helpTopicPath(args)); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(2)
@@ -98,7 +102,11 @@ func main() {
 		cmd = args[0]
 	}
 	if isHelpToken(cmd) {
-		printRootHelp(os.Stdout)
+		if advancedHelp {
+			printAdvancedRootHelp(os.Stdout)
+		} else {
+			printRootHelp(os.Stdout)
+		}
 		return
 	}
 	if commandHandledBeforeConfigLoad(cmd) {
@@ -117,8 +125,26 @@ func main() {
 				fmt.Fprintln(os.Stderr, "init error:", err)
 				os.Exit(1)
 			}
+		case "settings":
+			if err := runSettings(cfgPath); err != nil {
+				fmt.Fprintln(os.Stderr, "settings error:", err)
+				os.Exit(1)
+			}
+		case "setup":
+			result, err := runSetup(cfgPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "setup error:", err)
+				os.Exit(1)
+			}
+			if !result.StartChat {
+				return
+			}
+			cmd = "chat"
+			args = []string{"chat"}
 		}
-		return
+		if cmd != "chat" {
+			return
+		}
 	}
 	if cmd == "doctor" {
 		cwd, err := os.Getwd()
@@ -132,6 +158,35 @@ func main() {
 		}
 		if err := runDoctorCommand(cfgPathOrDefault(cfgPath), cfg, validationError, args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
 			fmt.Fprintln(os.Stderr, "doctor error:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if cmd == "status" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			cwd = ""
+		}
+		cfg, validationError, loadErr := loadDoctorConfig(cfgPathOrDefault(cfgPath), cwd)
+		if loadErr != nil {
+			fmt.Fprintln(os.Stderr, "status error:", loadErr)
+			os.Exit(1)
+		}
+		var database *db.DB
+		if strings.TrimSpace(cfg.DBPath) != "" {
+			_ = os.MkdirAll(filepath.Dir(cfg.DBPath), 0o755)
+			if opened, openErr := db.Open(cfg.DBPath); openErr == nil {
+				database = opened
+				defer database.Close()
+			}
+		}
+		detailedStatus, err := parseStatusArgs(args[1:], advancedHelp)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "status error:", err)
+			os.Exit(2)
+		}
+		if err := runStatusCommand(cfg, validationError, database, os.Stdout, detailedStatus); err != nil {
+			fmt.Fprintln(os.Stderr, "status error:", err)
 			os.Exit(1)
 		}
 		return
@@ -562,6 +617,14 @@ func main() {
 			fmt.Fprintln(os.Stderr, "pairing error:", err)
 			os.Exit(1)
 		}
+	case "connect-device":
+		if err := runConnectDeviceCommand(ctx, cfgPathOrDefault(cfgPath), &cfg, d, approvalBroker, args[1:], os.Stdout, os.Stderr); err != nil {
+			if translated := translateAndPrintError(err, os.Stderr); translated == nil {
+				os.Exit(1)
+			}
+			fmt.Fprintln(os.Stderr, "connect-device error:", err)
+			os.Exit(1)
+		}
 	default:
 		fmt.Fprintln(os.Stderr, "unknown command:", cmd)
 		os.Exit(2)
@@ -602,7 +665,7 @@ func loadDoctorConfig(cfgPath, cwd string) (config.Config, string, error) {
 
 func commandHandledBeforeConfigLoad(cmd string) bool {
 	switch cmd {
-	case "config-path", "version", "configure", "init":
+	case "config-path", "version", "configure", "init", "setup", "settings":
 		return true
 	default:
 		return false

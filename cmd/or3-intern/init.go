@@ -82,8 +82,12 @@ func initDefaults(cwd string) config.Config {
 }
 
 func defaultProviderChoice(apiBase string) string {
-	if strings.Contains(strings.ToLower(apiBase), "openrouter.ai") {
+	normalized := strings.ToLower(strings.TrimSpace(apiBase))
+	if strings.Contains(normalized, "openrouter.ai") {
 		return "2"
+	}
+	if normalized != "" && !strings.Contains(normalized, "api.openai.com") {
+		return "3"
 	}
 	return "1"
 }

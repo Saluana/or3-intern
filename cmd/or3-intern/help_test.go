@@ -7,7 +7,7 @@ import (
 )
 
 func TestParseRootCLIArgs_RootHelp(t *testing.T) {
-	cfgPath, args, showHelp, unsafeDev, err := parseRootCLIArgs([]string{"--config", "/tmp/config.json", "--help", "approvals"}, &bytes.Buffer{})
+	cfgPath, args, showHelp, unsafeDev, advanced, err := parseRootCLIArgs([]string{"--config", "/tmp/config.json", "--help", "approvals"}, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("parseRootCLIArgs: %v", err)
 	}
@@ -19,6 +19,9 @@ func TestParseRootCLIArgs_RootHelp(t *testing.T) {
 	}
 	if unsafeDev {
 		t.Fatal("expected unsafeDev to default to false")
+	}
+	if advanced {
+		t.Fatal("expected advanced help to default to false")
 	}
 	if len(args) != 1 || args[0] != "approvals" {
 		t.Fatalf("expected approvals topic args, got %#v", args)
@@ -67,17 +70,17 @@ func TestPrintHelpTopic_Root(t *testing.T) {
 		t.Fatalf("printHelpTopic: %v", err)
 	}
 	got := out.String()
-	if !strings.Contains(got, "Primary commands:") {
-		t.Fatalf("expected primary commands section, got %q", got)
+	if !strings.Contains(got, "Simple commands:") {
+		t.Fatalf("expected simple commands section, got %q", got)
 	}
 	if !strings.Contains(got, "or3-intern help [command]") {
 		t.Fatalf("expected root usage help, got %q", got)
 	}
-	if !strings.Contains(got, "config-path") {
-		t.Fatalf("expected config-path command in root help, got %q", got)
+	if strings.Contains(got, "config-path") {
+		t.Fatalf("did not expect advanced commands in default root help, got %q", got)
 	}
-	if !strings.Contains(got, "configure") {
-		t.Fatalf("expected configure command in root help, got %q", got)
+	if !strings.Contains(got, "connect-device") {
+		t.Fatalf("expected connect-device command in root help, got %q", got)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"or3-intern/internal/app"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/controlplane"
+	"or3-intern/internal/uxstate"
 )
 
 func runApprovalsCommand(ctx context.Context, broker *approval.Broker, args []string, stdout, stderr io.Writer) error {
@@ -35,7 +36,9 @@ func runApprovalsCommand(ctx context.Context, broker *approval.Broker, args []st
 			return err
 		}
 		for _, item := range items {
+			view := uxstate.BuildApprovalPrompt(item)
 			fmt.Fprintf(stdout, "%d\t%s\t%s\t%s\n", item.ID, item.Status, item.Type, item.SubjectHash)
+			fmt.Fprintf(stdout, "  %s: %s\n", view.Title, view.ActionSummary)
 		}
 		return nil
 	case "show":
@@ -50,7 +53,8 @@ func runApprovalsCommand(ctx context.Context, broker *approval.Broker, args []st
 		if err != nil {
 			return err
 		}
-		_, _ = fmt.Fprintf(stdout, "id: %d\nstatus: %s\ntype: %s\nsubject_hash: %s\npolicy_mode: %s\nsubject_json: %s\n", item.ID, item.Status, item.Type, item.SubjectHash, item.PolicyMode, item.SubjectJSON)
+		view := uxstate.BuildApprovalPrompt(item)
+		_, _ = fmt.Fprintf(stdout, "id: %d\nstatus: %s\ntype: %s\nsummary: %s\nrisk: %s\nwhy: %s\nsubject_hash: %s\npolicy_mode: %s\nsubject_json: %s\n", item.ID, item.Status, item.Type, view.ActionSummary, view.RiskLabel, view.Why, item.SubjectHash, item.PolicyMode, item.SubjectJSON)
 		return nil
 	case "approve":
 		fs := flag.NewFlagSet("approvals approve", flag.ContinueOnError)

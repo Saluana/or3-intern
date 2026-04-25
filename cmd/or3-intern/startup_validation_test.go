@@ -124,9 +124,9 @@ func TestValidateStartupCommand_ServiceRejectsWeakSecret(t *testing.T) {
 
 func TestValidateStartupCommand_ServiceRejectsUnsafeSharedSecretPosture(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
+		name   string
 		mutate func(*config.Config)
-		want  string
+		want   string
 	}{
 		{
 			name: "unauthenticated pairing on remote listen",

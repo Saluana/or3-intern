@@ -111,8 +111,8 @@ var helpTopics = map[string]helpCommand{
 		Examples: []string{"or3-intern status", "or3-intern status --advanced"},
 	},
 	"connect-device": {
-		Usage:   "or3-intern connect-device [list|disconnect <device-id>]",
-		Summary: "Pair a phone or other device using a short code and simple access levels.",
+		Usage:    "or3-intern connect-device [list|disconnect <device-id>]",
+		Summary:  "Pair a phone or other device using a short code and simple access levels.",
 		Examples: []string{"or3-intern connect-device", "or3-intern connect-device list"},
 	},
 	"init": {

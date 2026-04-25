@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -157,6 +158,91 @@ func TestBroker_PairingAndApprovalTokenRoundTrip(t *testing.T) {
 	}
 	if err := broker.VerifyApprovalToken(context.Background(), issued.Token, decision.SubjectHash, broker.HostID); err != nil {
 		t.Fatalf("VerifyApprovalToken: %v", err)
+	}
+}
+
+func TestBroker_VerifyApprovalTokenRejectsMismatchTamperAndRevoked(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Exec.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+	broker.Now = func() time.Time { return now }
+
+	decision, err := broker.EvaluateExec(context.Background(), ExecEvaluation{ExecutablePath: "/bin/echo", Argv: []string{"ok"}, WorkingDir: "/tmp", ToolName: "exec"})
+	if err != nil {
+		t.Fatalf("EvaluateExec: %v", err)
+	}
+	issued, err := broker.ApproveRequest(context.Background(), decision.RequestID, "cli:test", false, "ok")
+	if err != nil {
+		t.Fatalf("ApproveRequest: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name        string
+		token       string
+		subjectHash string
+		hostID      string
+		want        string
+	}{
+		{name: "wrong host", token: issued.Token, subjectHash: decision.SubjectHash, hostID: "other-host", want: "host mismatch"},
+		{name: "wrong subject", token: issued.Token, subjectHash: "wrong-subject", hostID: broker.HostID, want: "subject mismatch"},
+		{name: "tampered signature", token: tamperApprovalTokenSignature(issued.Token), subjectHash: decision.SubjectHash, hostID: broker.HostID, want: "invalid approval token signature"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := broker.VerifyApprovalToken(context.Background(), tc.token, tc.subjectHash, tc.hostID)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected %q error, got %v", tc.want, err)
+			}
+		})
+	}
+
+	claims, err := broker.parseApprovalToken(issued.Token)
+	if err != nil {
+		t.Fatalf("parseApprovalToken: %v", err)
+	}
+	if err := broker.DB.RevokeApprovalToken(context.Background(), claims.TokenID, now.UnixMilli()); err != nil {
+		t.Fatalf("RevokeApprovalToken: %v", err)
+	}
+	if err := broker.VerifyApprovalToken(context.Background(), issued.Token, decision.SubjectHash, broker.HostID); err == nil || !strings.Contains(err.Error(), "revoked") {
+		t.Fatalf("expected revoked token failure, got %v", err)
+	}
+}
+
+func tamperApprovalTokenSignature(token string) string {
+	idx := strings.LastIndex(token, ".")
+	if idx < 0 || idx == len(token)-1 {
+		return token + "0"
+	}
+	if token[len(token)-1] == '0' {
+		return token[:len(token)-1] + "1"
+	}
+	return token[:len(token)-1] + "0"
+}
+
+func TestBroker_ExchangePairingCodeRejectsWrongCodeAndExpiredRequest(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Pairing.Mode = config.ApprovalModeAsk
+		cfg.PairingCodeTTLSeconds = 60
+	})
+	defer cleanup()
+	broker.Now = func() time.Time { return now }
+
+	req, code, err := broker.CreatePairingRequest(context.Background(), PairingRequestInput{Role: RoleOperator, DisplayName: "Ops Laptop"})
+	if err != nil {
+		t.Fatalf("CreatePairingRequest: %v", err)
+	}
+	if _, err := broker.ApprovePairingRequest(context.Background(), req.ID, "cli:test"); err != nil {
+		t.Fatalf("ApprovePairingRequest: %v", err)
+	}
+	if _, _, err := broker.ExchangePairingCode(context.Background(), PairingExchangeInput{RequestID: req.ID, Code: code + "wrong"}); err == nil {
+		t.Fatal("expected wrong pairing code to fail")
+	}
+
+	now = now.Add(2 * time.Minute)
+	if _, _, err := broker.ExchangePairingCode(context.Background(), PairingExchangeInput{RequestID: req.ID, Code: code}); err == nil || !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("expected expired pairing code failure, got %v", err)
 	}
 }
 

@@ -180,6 +180,85 @@ func TestValidateServiceAuthorization(t *testing.T) {
 	}
 }
 
+func TestServiceBoundary_RateLimitIsPerActorAndPathAndEchoesRequestID(t *testing.T) {
+	server := &serviceServer{config: config.Config{Service: config.ServiceConfig{MutationRateLimitPerMinute: 1}}}
+	var handled int
+	handler := serviceBoundaryMiddleware(server, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handled++
+		writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true})
+	}))
+
+	newReq := func(actor, path, requestID string) *http.Request {
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		if requestID != "" {
+			req.Header.Set("X-Request-Id", requestID)
+		}
+		ctx := context.WithValue(req.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Actor: actor, Role: approval.RoleOperator})
+		return req.WithContext(ctx)
+	}
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, newReq("actor-a", "/internal/v1/scope/links", "req-rate-1"))
+	if first.Code != http.StatusOK || first.Header().Get("X-Request-Id") != "req-rate-1" {
+		t.Fatalf("expected first mutation through with echoed request ID, got code=%d id=%q body=%s", first.Code, first.Header().Get("X-Request-Id"), first.Body.String())
+	}
+
+	limited := httptest.NewRecorder()
+	handler.ServeHTTP(limited, newReq("actor-a", "/internal/v1/scope/links", "req-rate-2"))
+	if limited.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected second same actor/path mutation to be rate limited, got %d (%s)", limited.Code, limited.Body.String())
+	}
+	if !strings.Contains(limited.Body.String(), "req-rate-2") {
+		t.Fatalf("expected rate limit response to include request ID, got %s", limited.Body.String())
+	}
+
+	differentPath := httptest.NewRecorder()
+	handler.ServeHTTP(differentPath, newReq("actor-a", "/internal/v1/approvals/expire", ""))
+	if differentPath.Code != http.StatusOK {
+		t.Fatalf("expected same actor on different path to pass, got %d", differentPath.Code)
+	}
+
+	differentActor := httptest.NewRecorder()
+	handler.ServeHTTP(differentActor, newReq("actor-b", "/internal/v1/scope/links", ""))
+	if differentActor.Code != http.StatusOK {
+		t.Fatalf("expected different actor on same path to pass, got %d", differentActor.Code)
+	}
+	if handled != 3 {
+		t.Fatalf("expected downstream handler to run exactly 3 times, got %d", handled)
+	}
+}
+
+func TestWriteServiceErrorRedactsInternalError(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/turns", nil)
+	req = req.WithContext(context.WithValue(req.Context(), serviceRequestContextKey{}, serviceRequestContext{RequestID: "req-redact"}))
+	rec := httptest.NewRecorder()
+
+	writeServiceError(rec, req, http.StatusBadGateway, "turn failed", fmt.Errorf("database password leaked in stack trace"))
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "turn failed") || !strings.Contains(body, "req-redact") {
+		t.Fatalf("expected public error and request ID, got %s", body)
+	}
+	if strings.Contains(body, "database password") || strings.Contains(body, "stack trace") {
+		t.Fatalf("expected internal error to be redacted, got %s", body)
+	}
+}
+
+func TestDecodeServiceSubagentRequest_RejectsInvalidTimeoutTypes(t *testing.T) {
+	registry := tools.NewRegistry()
+	for _, body := range []string{
+		`{"parent_session_key":"svc:test","task":"run","tool_policy":{"mode":"deny_all"},"timeout_seconds":1.5}`,
+		`{"parent_session_key":"svc:test","task":"run","tool_policy":{"mode":"deny_all"},"timeout_seconds":"slow"}`,
+	} {
+		if _, err := decodeServiceSubagentRequest(strings.NewReader(body), registry); err == nil {
+			t.Fatalf("expected invalid timeout to fail for body %s", body)
+		}
+	}
+}
+
 func TestDecodeServiceTurnRequest_AcceptsToolPolicyAliases(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(serviceTestTool{name: "read_file"})

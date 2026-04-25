@@ -77,6 +77,20 @@ func TestExecTool_RelativeProgramUsesCwd(t *testing.T) {
 	}
 }
 
+func TestExecTool_RejectsSymlinkCwdEscapingRestrictDir(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	link := filepath.Join(root, "escape")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	tool := &ExecTool{Timeout: 5 * time.Second, RestrictDir: root}
+	_, err := tool.Execute(context.Background(), map[string]any{"program": "pwd", "cwd": link})
+	if err == nil || !strings.Contains(err.Error(), "cwd outside allowed directory") {
+		t.Fatalf("expected symlink cwd escape to be rejected, got %v", err)
+	}
+}
+
 func TestExecTool_DisableShell(t *testing.T) {
 	tool := &ExecTool{Timeout: 5 * time.Second, DisableShell: true}
 	if _, err := tool.Execute(context.Background(), map[string]any{"command": "echo hello"}); err == nil {

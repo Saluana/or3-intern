@@ -51,6 +51,29 @@ func TestJobRegistry_FanoutAndWait(t *testing.T) {
 	}
 }
 
+func TestJobRegistry_SubscribeAfterTerminalReturnsSnapshotAndClosedChannel(t *testing.T) {
+	registry := NewJobRegistry(time.Minute, 16)
+	job := registry.RegisterWithID("job-terminal", "turn")
+	registry.Complete(job.ID, "completed", map[string]any{"final_text": "done"})
+
+	snapshot, events, unsubscribe, ok := registry.Subscribe(job.ID)
+	if !ok {
+		t.Fatal("expected terminal subscription to succeed")
+	}
+	defer unsubscribe()
+	if snapshot.Status != "completed" || len(snapshot.Events) == 0 {
+		t.Fatalf("expected completed snapshot with events, got %#v", snapshot)
+	}
+	select {
+	case _, open := <-events:
+		if open {
+			t.Fatal("expected terminal subscription channel to be closed")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected terminal subscription channel to close immediately")
+	}
+}
+
 func TestJobRegistry_CleansUpExpiredJobs(t *testing.T) {
 	registry := NewJobRegistry(time.Nanosecond, 16)
 	job := registry.Register("turn")

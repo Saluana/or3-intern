@@ -122,6 +122,51 @@ func TestValidateStartupCommand_ServiceRejectsWeakSecret(t *testing.T) {
 	}
 }
 
+func TestValidateStartupCommand_ServiceRejectsUnsafeSharedSecretPosture(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		mutate func(*config.Config)
+		want  string
+	}{
+		{
+			name: "unauthenticated pairing on remote listen",
+			mutate: func(cfg *config.Config) {
+				cfg.Service.Listen = "0.0.0.0:8080"
+				cfg.Service.AllowUnauthenticatedPairing = true
+			},
+			want: "unauthenticated pairing requires a loopback listen address",
+		},
+		{
+			name: "operator shared secret role",
+			mutate: func(cfg *config.Config) {
+				cfg.Service.SharedSecretRole = approval.RoleOperator
+			},
+			want: "service.sharedSecretRole must be viewer or service-client",
+		},
+		{
+			name: "guarded capability ceiling",
+			mutate: func(cfg *config.Config) {
+				cfg.Service.MaxCapability = "guarded"
+			},
+			want: "service.maxCapability must remain safe",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := hostedStartupConfig()
+			cfg.Service.Secret = strings.Repeat("s", 32)
+			tc.mutate(&cfg)
+
+			err := validateStartupCommand("service", cfg, false)
+			if err == nil {
+				t.Fatal("expected hosted service startup validation to fail")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
 func TestValidateStartupCommand_ServeRejectsWebhookWithoutProfile(t *testing.T) {
 	cfg := hostedStartupConfig()
 	cfg.Triggers.Webhook.Enabled = true

@@ -1084,6 +1084,56 @@ func TestSubagentJobs_Lifecycle(t *testing.T) {
 	}
 }
 
+func TestSubagentJobs_ConcurrentClaimNextClaimsOnlyOnce(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	job := SubagentJob{ID: "job-concurrent", ParentSessionKey: "parent", ChildSessionKey: "child", Task: "do work"}
+	if err := d.EnqueueSubagentJob(ctx, job); err != nil {
+		t.Fatalf("EnqueueSubagentJob: %v", err)
+	}
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	claimedIDs := make(chan string, 8)
+	errs := make(chan error, 8)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			claimed, err := d.ClaimNextSubagentJob(ctx)
+			if err != nil {
+				errs <- err
+				return
+			}
+			if claimed != nil {
+				claimedIDs <- claimed.ID
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	close(claimedIDs)
+	for err := range errs {
+		t.Fatalf("ClaimNextSubagentJob: %v", err)
+	}
+	var got []string
+	for id := range claimedIDs {
+		got = append(got, id)
+	}
+	if len(got) != 1 || got[0] != job.ID {
+		t.Fatalf("expected exactly one claimer for %q, got %#v", job.ID, got)
+	}
+	stored, ok, err := d.GetSubagentJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("GetSubagentJob: %v", err)
+	}
+	if !ok || stored.Status != SubagentStatusRunning || stored.Attempts != 1 {
+		t.Fatalf("expected single running claimed job, got ok=%v job=%#v", ok, stored)
+	}
+}
+
 func TestSubagentJobs_ReconcileRunning(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()

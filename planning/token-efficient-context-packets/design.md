@@ -2,53 +2,68 @@
 
 ## Overview
 
-or3-intern already has the right primitives for a memory hierarchy: SQLite-backed messages, pinned memory, typed consolidation notes, FTS, sqlite-vec vector search, workspace context, skills, tool guards, and artifact storage. The proposed design keeps those systems and routes every model call through a budgeted Context Packet Builder that decides what to include, summarize, reference, or prune for the next correct move.
+or3-intern already has the right primitives for a memory hierarchy: SQLite-backed messages, pinned memory, typed consolidation notes, FTS, sqlite-vec vector search, workspace context, skills, tool guards, and artifact storage. The proposed design keeps those systems and **routes every model call through a budgeted, cache-aware assembly path inside the existing `internal/agent` package**. It does not introduce a new top-level package, a new service, a new daemon, or a new external dependency.
 
-The design fits the current architecture because it is a small Go package layered between existing prompt construction and provider calls. It does not add a service, frontend, queue, or external database. It converts the current char-capped system prompt assembly in `internal/agent/prompt.go` into a sectioned packet model with explicit budgets, pressure diagnostics, dynamic retrieval packing, task state, and optional cheap-model maintenance.
+The design fits the current architecture because it is a refactor of `internal/agent.Builder.BuildWithOptions` and `composeSystemPrompt`, plus small in-place extensions to `internal/memory.Retriever`, `internal/db`, `internal/artifacts`, `internal/tools`, and `internal/config`. It converts the current char-capped system prompt assembly into a sectioned packet model with explicit budgets, pressure diagnostics, dynamic retrieval packing, task state, optional cheap-model maintenance, and a stable prefix tuned for provider prompt caching.
 
-Core idea:
+Core ideas:
 
 > Preserve rich agent identity and capability, but make every optional context source earn its place in the packet.
+>
+> Order the prompt so that the slow, expensive part of every turn is **already cached** by the provider.
+
+Non-goals (explicit):
+
+- No new top-level package such as `internal/contextpack`. New code is added as files inside the existing packages it extends.
+- No new SQLite tables when an existing table can carry the data with an added column or a new `kind` value.
+- No replacement of `internal/memory.Retriever`; it is extended in place with a new optional candidate-mode method while the existing `Retrieve` API stays.
+- No removal or rewrite of soul, identity, AGENTS, tool policy, pinned memory, or skills behavior.
 
 ## Affected areas
 
-- `internal/contextpack/` (new package)
-  - Owns `ContextPacket`, section budgets, pressure calculation, snippet packing, references, token estimation, and deterministic pruning.
-  - Keeps most new logic outside `internal/agent` so prompt building remains readable.
+All changes are in-place inside packages that already exist. The list below names the files that grow or are added inside their existing package.
 
-- `internal/agent/prompt.go`
-  - Evolves `Builder.BuildWithOptions` to request a packet from `internal/contextpack` and render it into provider messages.
-  - Preserves existing tool-call history reconstruction and vision attachment behavior.
+- `internal/agent/prompt.go` (existing, edited)
+  - `Builder.BuildWithOptions` is refactored to assemble the packet through new helpers in the same package.
+  - `composeSystemPrompt` is split into `renderStablePrefix` and `renderVolatileSuffix` so the cache boundary is explicit.
+  - Existing `PromptParts`, history reconstruction, vision attachment handling, and tool-call/result reconstruction stay byte-compatible.
 
-- `internal/agent/runtime.go` and `internal/agent/structured_autonomy.go`
-  - Update task state after turns and significant tool results.
-  - Record artifact summaries and context-pressure diagnostics where useful.
+- `internal/agent/prompt_budget.go` (new file, same package)
+  - Owns `ContextPacket`, `ContextSection`, `ContextSnippet`, `ContextRef`, `BudgetReport`, `SectionUsage`, `PruneEvent`, deterministic token estimation, section budget accounting, pressure states, and deterministic pruning.
+  - Lives next to the existing prompt code so it remains discoverable and avoids cross-package indirection.
 
-- `internal/config/config.go`
-  - Adds `Context` and optional `ContextManager` config sections.
-  - Keeps existing `HistoryMax`, `MemoryRetrieve`, `VectorK`, `FTSK`, `BootstrapMaxChars`, and `BootstrapTotalMaxChars` as compatibility inputs or deprecated aliases until the new settings are fully adopted.
+- `internal/agent/task_card.go` (new file, same package)
+  - Typed task-card struct, deterministic merge/update logic, deterministic rendering with a token budget, and DB read/write helpers that delegate to `internal/db`.
 
-- `internal/db/db.go` and `internal/db/store.go`
-  - Adds migrations and store methods for task state, message chunks/spans, artifact summaries, and richer memory metadata.
-  - Keeps current `messages`, `memory_pinned`, `memory_notes`, `memory_fts`, `memory_docs`, and `artifacts` tables intact.
+- `internal/agent/runtime.go` and `internal/agent/structured_autonomy.go` (existing, edited)
+  - Hook into task-card update points after assistant turns and significant tool results.
+  - Record artifact summaries (as `memory_notes` of `kind = 'artifact_summary'`) and emit pressure diagnostics.
 
-- `internal/memory/retrieve.go`
-  - Extends retrieval from final top-K injection to candidate retrieval plus score details.
-  - Adds task-overlap, novelty, status, expiration, confidence, and source-quality signals.
+- `internal/config/config.go` (existing, edited)
+  - Adds an optional `Context` config block and an optional `ContextManager` block.
+  - Keeps existing `HistoryMax`, `MemoryRetrieve`, `VectorK`, `FTSK`, `BootstrapMaxChars`, `BootstrapTotalMaxChars`, and `MaxToolBytes` as the source of truth when no `Context` block is set, so legacy configs are not regressed.
 
-- `internal/memory/consolidate.go`
-  - Reuses the existing structured consolidation approach for memory extraction, and later shares JSON validation helpers with cheap context manager output.
-  - Adds new kinds gradually: decision, warning, artifact_summary, file_summary where they map to durable memory.
+- `internal/db/db.go` and `internal/db/store.go` (existing, edited)
+  - Adds the `task_state` table (the only genuinely new table) and additive `ALTER TABLE memory_notes` columns guarded by existing migration helpers.
+  - **Does not** add `message_spans` or `artifact_summaries` tables in the first iteration. Span-level retrieval reuses `messages` plus consolidation summaries; artifact summaries reuse `memory_notes` + `artifacts`.
 
-- `internal/artifacts/store.go`
-  - Adds summary/preview metadata methods or companion DB store functions for large tool output artifacts.
-  - Existing binary storage stays unchanged.
+- `internal/memory/retrieve.go` (existing, edited)
+  - Adds an internal `retrieveCandidates` step (more candidates than today's top-K) and a `packToBudget` step. The existing `Retriever.Retrieve` signature stays as a thin wrapper that calls `retrieveCandidates` then `packToBudget` with current defaults, preserving every existing caller.
+  - Adds task-overlap, novelty, status, expiration, confidence, and source-quality signals to scoring.
 
-- `internal/tools/registry.go` and tool registration call sites
-  - Adds metadata for tool groups/capabilities and dynamic exposure selection.
-  - Keeps `ToolGuardFromContext` as enforcement even when a tool is exposed.
+- `internal/memory/consolidate.go` (existing, edited)
+  - Reuses the existing structured consolidation approach. New kinds (`decision`, `warning`, `artifact_summary`, `file_summary`) are added gradually; existing typed JSON validation is shared with the optional cheap context manager.
 
-- Tests under `internal/contextpack`, `internal/agent`, `internal/memory`, `internal/db`, `internal/artifacts`, and `internal/tools`.
+- `internal/artifacts/store.go` (existing, edited)
+  - Adds a small helper to write a paired `memory_notes` summary row when a large tool output is artifacted. The artifact binary store itself is unchanged.
+
+- `internal/tools/registry.go` and tool registration call sites (existing, edited)
+  - Adds optional `Group` / `Capabilities` metadata on registered tools and a deterministic selector used by the prompt builder.
+  - `ToolGuardFromContext`, approval broker, sandbox, and runtime profile checks remain authoritative at execution time.
+
+- Tests live next to the code they exercise: `internal/agent/*_test.go`, `internal/memory/*_test.go`, `internal/db/*_test.go`, `internal/config/*_test.go`, `internal/tools/*_test.go`.
+
+Files created across the whole change: roughly `internal/agent/prompt_budget.go`, `internal/agent/task_card.go`, and the matching `_test.go` files. Everything else is an in-place edit.
 
 ## Control flow / architecture
 
@@ -136,7 +151,7 @@ type ContextRef struct {
 }
 ```
 
-Protected sections:
+Protected sections (always present, with minimum budgets):
 
 - System core
 - Soul / identity / behavior
@@ -155,53 +170,62 @@ Prunable sections, in this order:
 7. Tool schemas for unlikely optional tools
 8. Task card detail beyond required fields, never the whole card
 
+### Cache-aware section ordering
+
+The renderer is split into two regions so providers (OpenAI, Anthropic, OpenRouter, etc.) can cache the expensive prefix:
+
+**Stable prefix** (eligible for provider prompt caching, byte-stable across turns within a session as long as inputs are unchanged):
+
+1. System Core (immutable runtime identity, response style, memory policy, tool-use policy)
+2. Soul (`SOUL.md` or default soul)
+3. Identity (`IDENTITY.md`)
+4. AGENTS (`AGENTS.md`)
+5. Tool Policy (`TOOLS.md`, safety notes, channel/autonomy constraints, exposed tool group notes)
+6. Static Memory (`MEMORY.md` content surfaced today)
+7. Pinned Memory (deterministic order: by `id` ASC)
+8. Tool schemas (only the exposed set; sorted by tool name; re-emitted only when the exposed set changes)
+
+**Cache breakpoint** is inserted here. For Anthropic, this is where `cache_control: {type: "ephemeral"}` is attached to the last stable system content block. For OpenAI/OpenRouter automatic prompt caching, the boundary is implicit but we still keep the prefix byte-stable so the provider's hash matches.
+
+**Volatile suffix** (changes every turn or every few turns; never cached):
+
+9. Memory Digest (derived from current scope/session state)
+10. Retrieved RAG Snippets (per-turn search results)
+11. Workspace Context (current files, doc retriever output)
+12. Heartbeat (clock, intervals) — moved out of the cached prefix
+13. Structured Trigger Context (event metadata) — moved out of the cached prefix
+14. Active Task Card (compact, but updated each turn)
+15. Recent Rolling Chat (raw history window plus unresolved tool-call/result pairs; user's latest request always retained)
+16. Output Reserve (not text; reserves generation budget)
+
+Rules that protect cache hits:
+
+- The stable prefix must not contain timestamps, random IDs, map-iteration-ordered fields, or any per-turn mutable text.
+- Tool schemas in the stable prefix are sorted by tool name and serialized through a deterministic JSON encoder.
+- The exposed tool set is recomputed per turn but only swapped into the prefix when it actually changes; minor intent shifts that do not change the set leave the prefix bytes identical.
+- A regression test renders the same packet twice in the same session with no input changes and asserts the stable-prefix bytes match exactly.
+- When `Hardening` settings, soul, identity, AGENTS, tool policy, pinned memory, or the exposed tool set genuinely change, the prefix changes and the next call rebuilds the cache (this is correct).
+
+This ordering is the single biggest token-cost lever in the plan: with provider prompt caching, the stable prefix (typically 2k-6k tokens of soul + identity + AGENTS + tool policy + static memory + pinned memory + tool schemas) is billed at a small fraction of normal input tokens after the first call, so cost reductions compound on top of the budget work below.
+
 ### How sections fit together
 
-The prompt renderer should keep a clear hierarchy:
+The prompt renderer keeps a clear hierarchy. Numbering below matches the cache-aware order above.
 
-1. `System Core`
-   - Small immutable identity of the runtime, response style, memory policy, and tool-use policy.
-   - Target: 300-800 tokens.
-
-2. `Soul / Identity / Behavior`
-   - `SOUL.md`, `IDENTITY.md`, and `AGENTS.md` content, compressed only semantically and with minimum budgets.
-   - Must not be deleted for token savings.
-
-3. `Tool Policy`
-   - Safety notes, tool constraints, output artifacting rules, channel/autonomy constraints, and current exposed tool group notes.
-
-4. `Active Task Card`
-   - Small working state for the current session.
-   - Replaces dependence on long raw rolling history for task continuity.
-
-5. `Pinned Memories`
-   - Ultra-stable facts/preferences/project rules from `memory_pinned`.
-   - Always included, capped and summarized only when above budget.
-
-6. `Memory Digest`
-   - Short stable project/session summary derived from pinned memory, high-confidence durable notes, and current scope.
-
-7. `Recent Rolling Chat`
-   - Short window of raw messages plus unresolved tool-call/result pairs.
-   - User’s latest request is always retained.
-
-8. `Retrieved RAG Snippets`
-   - Top relevant snippets after score, dedupe, novelty, lifecycle, and budget packing.
-   - Includes IDs and reasons instead of full old messages.
-
-9. `Workspace Context`
-   - Existing `memory.BuildWorkspaceContext` and `memory.DocRetriever` outputs, repacked as snippets with budgets.
-
-10. `Tool Schemas`
-    - Only schemas for exposed tools for this turn.
-    - The registry still enforces permissions at execution time.
-
-11. `Artifact References`
-    - Summaries and IDs for large tool outputs or attachments.
-    - Full content fetched only on demand.
-
-12. `Output Reserve`
-    - Not prompt text; it reserves generation budget and influences input cap.
+1. **System Core** — small immutable identity of the runtime, response style, memory policy, tool-use policy. Target: 300-800 tokens.
+2. **Soul / Identity / Behavior** — `SOUL.md`, `IDENTITY.md`, and `AGENTS.md` content, compressed only semantically and with minimum budgets. Must not be deleted for token savings.
+3. **Tool Policy** — safety notes, tool constraints, output artifacting rules, channel/autonomy constraints, exposed tool group notes.
+4. **Static Memory** — `MEMORY.md` content surfaced today by `Builder.StaticMemory`.
+5. **Pinned Memories** — ultra-stable facts/preferences/project rules from `memory_pinned`. Always included, capped and summarized only when above budget.
+6. **Tool schemas** — only schemas for exposed tools for this turn. The registry still enforces permissions at execution time. Sorted deterministically.
+7. **Memory Digest** — short stable project/session summary derived from pinned memory, high-confidence durable notes, and current scope.
+8. **Retrieved RAG Snippets** — top relevant snippets after score, dedupe, novelty, lifecycle, and budget packing. Includes IDs and reasons instead of full old messages.
+9. **Workspace Context** — existing `memory.BuildWorkspaceContext` and `memory.DocRetriever` outputs, repacked as snippets with budgets.
+10. **Heartbeat** — current clock/interval text from `Builder.currentHeartbeatText`.
+11. **Structured Trigger Context** — event metadata for triggered turns.
+12. **Active Task Card** — small working state for the current session. Replaces dependence on long raw rolling history for task continuity.
+13. **Recent Rolling Chat** — short window of raw messages plus unresolved tool-call/result pairs. User's latest request is always retained.
+14. **Artifact References** — summaries and IDs for large tool outputs or attachments. Full content fetched only on demand.
 
 ## Data and persistence
 
@@ -270,7 +294,7 @@ Mode behavior:
   - Recent history: around 10 messages plus unresolved tool pairs.
   - Retrieved memory: top 5 packed snippets.
   - Tool schemas: task-relevant groups.
-  - Recommended default for cost-sensitive users.
+  - Recommended for cost-sensitive users; opt-in.
   - Cheap context manager: above 80% pressure, task shift, low-confidence retrieval, or 8+ turns.
 
 - Quality mode:
@@ -278,6 +302,8 @@ Mode behavior:
   - Retrieved memory: top 8 packed snippets.
   - Workspace and tool budgets are larger, but still reference-first.
   - Cheap context manager: above 85% pressure or maintenance events.
+
+**First-release default is `quality`** so users upgrading from the current build do not see any silent reduction in context. `balanced` becomes the recommended default in a follow-up release once evaluation fixtures confirm parity. Users can opt into `poor`/`balanced` explicitly via config from day one.
 
 Existing fields:
 
@@ -324,32 +350,9 @@ Task card JSON shape:
 }
 ```
 
-Additive migration for message spans:
+Additive migration for message spans is **deferred**. The first iteration reuses the existing `messages` table for retrieval (already FTS-indexed via the existing memory pipeline that consolidates into `memory_notes`) plus on-demand consolidation summaries written to `memory_notes` with `kind = 'summary'`. A dedicated `message_spans` table is only added in a later iteration if measurements show that retrieving from `messages` + consolidated summaries is insufficient. This avoids carrying a second nearly-duplicate corpus and a second FTS index in every user database.
 
-```sql
-CREATE TABLE IF NOT EXISTS message_spans (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_key TEXT NOT NULL,
-    message_id INTEGER NOT NULL,
-    chunk_index INTEGER NOT NULL,
-    role TEXT NOT NULL,
-    text TEXT NOT NULL,
-    summary TEXT NOT NULL DEFAULT '',
-    entities_json TEXT NOT NULL DEFAULT '[]',
-    tags TEXT NOT NULL DEFAULT '',
-    token_estimate INTEGER NOT NULL DEFAULT 0,
-    embedding BLOB,
-    embed_fingerprint TEXT NOT NULL DEFAULT '',
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE,
-    UNIQUE(message_id, chunk_index)
-);
-CREATE INDEX IF NOT EXISTS message_spans_session_message ON message_spans(session_key, message_id, chunk_index);
-CREATE VIRTUAL TABLE IF NOT EXISTS message_spans_fts USING fts5(text, summary, content='message_spans', content_rowid='id');
-```
-
-If sqlite-vec indexing is used for spans, mirror the existing `memory_vec` pattern with `message_span_vec` or a generalized vector table. Keep this optional until the base FTS/span table is stable.
+If and when spans become justified, the table shape would mirror the existing `memory_notes` + `memory_fts` + `memory_vec` triple rather than introducing a third pattern.
 
 Additive memory metadata migration:
 
@@ -362,33 +365,23 @@ ALTER TABLE memory_notes ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE memory_notes ADD COLUMN supersedes_id INTEGER;
 ```
 
-Existing columns already include `kind`, `status`, `importance`, `use_count`, and `last_used_at` in current migrations/store logic. If any user database predates those columns, migrations must continue to add them idempotently as today.
+Each `ALTER TABLE` call is wrapped in the existing column-existence check helper so re-running migrations on already-migrated databases is a no-op. Existing rows keep all current columns and remain readable by the existing retrieval paths.
 
 Memory kinds:
 
 - `pinned`: remains in `memory_pinned`; render as part of protected pinned section.
 - `fact`, `preference`, `goal`, `procedure`, `episode`: extend current constants.
 - `decision`, `warning`, `artifact_summary`, `file_summary`: add to `db` constants for durable notes.
-- `task_state`: should primarily live in `task_state`, not `memory_notes`; only durable task lessons should become memory.
+- `task_state`: lives in the new `task_state` table, not in `memory_notes`. Only durable task lessons should ever become memory.
 
-Add artifact summaries:
+Artifact summaries reuse existing tables — no new `artifact_summaries` table:
 
-```sql
-CREATE TABLE IF NOT EXISTS artifact_summaries (
-    artifact_id TEXT PRIMARY KEY,
-    session_key TEXT NOT NULL,
-    summary TEXT NOT NULL,
-    preview TEXT NOT NULL DEFAULT '',
-    key_lines TEXT NOT NULL DEFAULT '',
-    kind TEXT NOT NULL DEFAULT '',
-    source_tool TEXT NOT NULL DEFAULT '',
-    token_estimate INTEGER NOT NULL DEFAULT 0,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    FOREIGN KEY(artifact_id) REFERENCES artifacts(id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS artifact_summaries_session_updated ON artifact_summaries(session_key, updated_at);
-```
+- The full output stays in the existing `artifacts` store.
+- A companion `memory_notes` row is written with `kind = 'artifact_summary'`, `source_artifact_id` set to the artifact ID, `summary` set to a bounded summary, `importance` reflecting how load-bearing the artifact is, `scope` matching the resolved session/scope, and `status = 'active'`.
+- This row is indexed by the existing `memory_fts` and `memory_vec` machinery, so retrieval, novelty, dedupe, and lifecycle (`stale`/`superseded`/`expired`) are already handled by current code.
+- Diagnostic queries like "all artifact summaries for this session" use the existing memory store with a kind filter; no new index needed beyond what `memory_notes` already has.
+
+This collapses what was previously planned as three new tables (`task_state`, `message_spans`, `artifact_summaries`) into one new table (`task_state`) plus additive columns on `memory_notes`.
 
 ### Session and memory-scope implications
 
@@ -399,37 +392,41 @@ CREATE INDEX IF NOT EXISTS artifact_summaries_session_updated ON artifact_summar
 
 ## Interfaces and types
 
-### Context package API
+### In-place agent helpers
+
+No new package. The new types live inside `internal/agent` (in `prompt_budget.go` and `task_card.go`) so they sit next to the existing `Builder` and `PromptParts`.
 
 ```go
-package contextpack
+package agent
 
-type Builder struct {
-    DB *db.DB
-    Artifacts *artifacts.Store
-    Mem *memory.Retriever
-    Docs *memory.DocRetriever
-    Provider *providers.Client
-    Tools *tools.Registry
-    Skills skills.Inventory
-    Config config.ContextConfig
-    WorkspaceDir string
+// in prompt_budget.go
+
+type ContextPacket struct {
+    StablePrefix []ContextSection // System Core, Soul, Identity, AGENTS, Tool Policy,
+                                  // Static Memory, Pinned Memory, Tool Schemas
+    VolatileSuffix []ContextSection // Memory Digest, Retrieved, Workspace, Heartbeat,
+                                    // Structured Trigger, Task Card, Recent History
+    RecentHistory []providers.ChatMessage
+    ToolSchemas   []providers.ToolDef // mirrored into StablePrefix as serialized text
+    OutputReserve int
+    Budget        BudgetReport
 }
 
-type BuildRequest struct {
-    SessionKey string
-    UserMessage string
-    LatestMessageID int64
-    Autonomous bool
-    EventMeta map[string]any
-    AvailableTools []string
-    ActiveFiles []string
-}
+// Build extends Builder.BuildWithOptions in place; it is called by the existing
+// public method, which still returns PromptParts so callers do not change.
+func (b *Builder) buildPacket(ctx context.Context, opts BuildOptions) (ContextPacket, []memory.Retrieved, error)
 
-func (b *Builder) Build(ctx context.Context, req BuildRequest) (ContextPacket, error)
-func RenderMessages(packet ContextPacket) []providers.ChatMessage
-func SelectTools(packet ContextPacket, reg *tools.Registry) []providers.ToolDef
+// Render produces the strings/messages currently produced by composeSystemPrompt,
+// but split so the stable prefix can be marked for provider caching.
+func renderStablePrefix(p ContextPacket) string
+func renderVolatileSuffix(p ContextPacket) string
+func renderProviderMessages(p ContextPacket, history []providers.ChatMessage, user any) []providers.ChatMessage
+
+// SelectTools is a deterministic selector used before provider request assembly.
+func (b *Builder) selectTools(opts BuildOptions, taskCard TaskCard) []providers.ToolDef
 ```
+
+`Builder.BuildWithOptions` keeps its current signature `(PromptParts, []memory.Retrieved, error)`. Internally it now does `buildPacket` then `renderProviderMessages`, and the `BudgetReport` is attached to `PromptParts` via a new optional field that defaults to zero value for callers that ignore it.
 
 ### Budget and pressure types
 
@@ -503,15 +500,15 @@ Chunking messages:
 - Summarize tool outputs immediately when above preview threshold.
 - Do not embed secrets; skip or redact spans that match secret-like patterns or come from secret-bearing tool/config sources.
 
-Candidate retrieval:
+Candidate retrieval (in-place extension of `memory.Retriever`, existing `Retrieve` API preserved as a wrapper):
 
 1. Build query from latest user request plus active task card goal/constraints/active files.
 2. Retrieve candidates from:
-   - `memory_notes` vector and FTS.
-   - `message_spans` FTS and vector if indexed.
-   - `memory_docs` doc retriever.
-   - artifact summaries when artifact refs are relevant.
-3. Retrieve more than final injection count, for example 30 candidates in balanced mode.
+   - `memory_notes` vector and FTS (existing).
+   - `memory_docs` doc retriever (existing).
+   - `memory_notes` rows of `kind = 'artifact_summary'` for artifact-relevant queries (reuses existing FTS/vector indexes).
+   - The `messages` table directly when the agent or a tool explicitly asks for a message ref. (No `message_spans` corpus in this iteration.)
+3. Retrieve more than the final injection count, for example 30 candidates in balanced mode.
 4. Merge by stable source ID.
 5. Score and dedupe.
 6. Pack snippets to budget.
@@ -757,6 +754,12 @@ Never keep huge logs in rolling history. History should contain previews and ref
   - Clamp negative budgets to defaults.
   - Reject unknown mode names except `custom` with explicit budgets.
   - Warn if protected-section budgets are below minimums.
+  - On any unrecognized field in the new `Context`/`ContextManager` blocks, fall back to legacy behavior driven by `HistoryMax`/`MemoryRetrieve`/etc., never panic.
+
+- Prompt cache regressions:
+  - A stable-prefix byte-stability test runs in CI; if it fails, the build fails.
+  - If the prefix renderer accidentally inserts a timestamp, random ID, or unsorted map iteration, the test catches it before release.
+  - Tool-schema reordering across turns is treated as a regression and gated by the same test.
 
 - Migration failures:
   - Keep migrations additive and idempotent.
@@ -804,14 +807,14 @@ Use Go’s `testing` package, temporary SQLite databases, and fake providers/too
 
 Unit tests:
 
-- `internal/contextpack/budget_test.go`
+- `internal/agent/prompt_budget_test.go`
   - `TestBudgetEnforcesSectionCaps`
   - `TestProtectedSectionsRetainedUnderEmergencyPressure`
   - `TestOutputReserveReducesInputBudget`
   - `TestPressureStatesNormalWarningHighEmergency`
   - `TestPruneEventsIncludeReasons`
 
-- `internal/contextpack/pack_test.go`
+- `internal/agent/prompt_pack_test.go`
   - `TestPacketIncludesAllRequiredSections`
   - `TestPinnedMemoryAlwaysRetained`
   - `TestSoulIdentityAndToolPolicyAlwaysRetained`
@@ -819,23 +822,24 @@ Unit tests:
   - `TestUnresolvedToolPairSurvivesHistoryPruning`
   - `TestArtifactRefsRenderedWithoutFullOutput`
 
-- `internal/contextpack/task_state_test.go`
+- `internal/agent/task_card_test.go`
   - `TestTaskCardSurvivesHistoryPruning`
   - `TestTaskCardUpdateMergesConstraintsAndRefs`
   - `TestTaskCardCapsRefsAndPlanItems`
   - `TestTaskCardDoesNotWriteTemporaryNoiseToMemory`
 
-- `internal/contextpack/compress_test.go`
+- `internal/agent/prompt_compress_test.go`
   - `TestSemanticCompressionKeepsSourceRefs`
   - `TestCamelCaseCompressionNotUsedByDefault`
 
 DB/integration tests:
 
 - `internal/db/context_schema_test.go`
-  - `TestMigrationsAddTaskStateMessageSpansArtifactSummaries`
+  - `TestMigrationsAddTaskStateAndMemoryColumns`
   - `TestExistingMemoryRowsRemainReadableAfterMigration`
   - `TestTaskStateScopedBySession`
-  - `TestArtifactSummaryCascadeOrLookupBehavior`
+  - `TestArtifactSummaryStoredAsMemoryNote` — confirms artifact summaries reuse `memory_notes` with `kind = 'artifact_summary'` and a populated `source_artifact_id`.
+  - `TestRepeatedMigrationIsNoOp` — running migrations twice on the same DB does not error and does not duplicate columns.
 
 - `internal/memory/retrieve_test.go`
   - `TestRelevantMemoryRetrievedWithTaskOverlap`
@@ -843,8 +847,10 @@ DB/integration tests:
   - `TestStaleMemoryNotInjected`
   - `TestSupersededMemoryDemoted`
   - `TestNoveltyRejectsDuplicateMemory`
-  - `TestMessageSpanRetrievalReturnsRefsNotFullHistory`
+  - `TestArtifactSummaryRetrievedViaMemoryNotes`
+  - `TestMessageRefRenderedInsteadOfFullHistory`
   - `TestFTSFallbackWhenVectorUnavailable`
+  - `TestExistingRetrieveAPIStillWorks` — calling the legacy `Retriever.Retrieve` returns the same shape and does not regress current callers.
 
 Agent/runtime tests:
 
@@ -854,6 +860,11 @@ Agent/runtime tests:
   - `TestConfigModesAffectHistoryAndRetrievalBudgets`
   - `TestLegacyHistoryMaxStillWorksWithoutContextConfig`
   - `TestArtifactedToolOutputNotRehydratedIntoHistory`
+  - `TestStablePrefixIsByteStableAcrossTurns` — renders two consecutive packets in the same session with unchanged inputs and asserts `renderStablePrefix` output is byte-identical.
+  - `TestStablePrefixExcludesHeartbeatAndTriggerMetadata` — asserts heartbeat clock and structured trigger context appear only in the volatile suffix.
+  - `TestToolSchemasSortedDeterministically` — asserts exposed tool schemas are emitted in tool-name order.
+  - `TestExposedToolSetChangeRebuildsPrefix` — asserts that when the exposed tool set changes, the prefix changes (correctness check that we did not accidentally cache stale schemas).
+  - `TestLegacyConfigRendersPacketWithoutRegression` — loads a config with no `Context` block and asserts the rendered prompt still includes `SOUL.md`, `IDENTITY.md`, `AGENTS.md`, `TOOLS.md`, pinned memory, memory digest, retrieved memory, workspace context, and skills inventory.
 
 - `internal/agent/runtime_test.go`
   - `TestLargeToolOutputSavedAsArtifactSummary`
@@ -870,7 +881,7 @@ Tool tests:
 
 Cheap manager tests:
 
-- `internal/contextpack/manager_test.go`
+- `internal/agent/context_manager_test.go`
   - `TestCheapManagerJSONValidation`
   - `TestCheapManagerRejectsUnknownFields`
   - `TestCheapManagerCannotRemoveProtectedSections`

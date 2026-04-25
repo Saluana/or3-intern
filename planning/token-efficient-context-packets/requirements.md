@@ -2,23 +2,26 @@
 
 ## Overview
 
-This plan defines a token-efficient context assembly system for or3-intern that preserves rich agent behavior while reducing average context size per model call. The implementation should replace the current mostly character-capped prompt assembly path with a budgeted Context Packet Builder that keeps soul, identity, tool policy, pinned memory, skills, project context, and safety rules intact while making memory, history, tools, workspace context, and artifacts more selective.
+This plan defines a token-efficient context assembly system for or3-intern that preserves rich agent behavior while reducing average context size per model call. It evolves the existing `internal/agent.Builder` prompt assembly into a budgeted, cache-aware Context Packet model. Soul, identity, tool policy, pinned memory, skills, project context, and safety rules stay intact; memory, history, tools, workspace context, and artifacts become more selective.
+
+The implementation must be done **in place** inside existing packages (`internal/agent`, `internal/memory`, `internal/db`, `internal/config`, `internal/artifacts`, `internal/tools`). No new top-level package is introduced. Net code growth should be modest; favor adding files inside existing packages and refactoring the current char-capped path rather than wrapping it in a new layer.
 
 Scope assumptions:
 
 - or3-intern remains a Go 1.22, CLI-first AI assistant with optional external chat channels.
 - SQLite remains the persistence layer, using the existing primary database plus sqlite-vec/sqlvec-style vector search support.
 - Existing prompt inputs such as `SOUL.md`, `IDENTITY.md`, `AGENTS.md`, `TOOLS.md`, `MEMORY.md`, skills, pinned memory, consolidation output, workspace context, and tool safety rules must not be removed to save tokens.
-- The first implementation should improve assembly, budgets, task state, retrieval packing, and artifact references before adding optional cheap-model context management.
+- Existing tables (`messages`, `memory_pinned`, `memory_notes`, `memory_fts`, `memory_docs`, `memory_vec`, `artifacts`) are reused first; new tables are added only when there is no reasonable way to reuse an existing one.
+- The first implementation should improve assembly, budgets, prefix stability for provider caching, task state, retrieval packing, and artifact references before adding optional cheap-model context management.
 - Token estimates can initially be approximate and deterministic; exact tokenizer integration can be added later if needed.
 
 ## Requirements
 
-1. The system must build every primary model call through a central Context Packet Builder.
+1. The system must build every primary model call through a single budgeted assembly path inside `internal/agent`.
    - Acceptance criteria:
-     - Agent prompt construction has a single package-level path that assembles sections for system core, soul/identity/behavior, tool policy, active task card, pinned memories, memory digest, recent rolling chat, retrieved snippets, workspace context, tool schemas, artifact references, and output reserve.
-     - Existing `internal/agent.Builder.BuildWithOptions` can consume the packet without losing existing history/tool-call compatibility.
-     - The packet exposes section usage and pruning metadata for diagnostics.
+     - `internal/agent.Builder.BuildWithOptions` and `composeSystemPrompt` are extended in place (not wrapped by a new package) to assemble explicit sections for system core, soul/identity/behavior, tool policy, pinned memories, memory digest, retrieved snippets, workspace context, tool schemas, active task card, recent rolling chat, and the user turn, plus an output reserve.
+     - The existing `PromptParts` / `providers.ChatMessage` / tool-call history shapes are preserved; current callers compile without changes.
+     - The assembly exposes section usage, estimated token counts, and pruning metadata for diagnostics, returned alongside `PromptParts` (or via an opt-in field) so logging/doctor can read it without changing other call sites.
 
 2. The system must preserve identity, soul, safety, tool policy, pinned memory, and core behavior under all budget pressure levels.
    - Acceptance criteria:
@@ -131,6 +134,29 @@ Scope assumptions:
       - Skills, structured autonomy, heartbeats/cron, channel integrations, tool loops, memory consolidation, pinned memory, workspace context, and artifacts remain usable.
       - Token efficiency comes from hierarchy, references, retrieval filtering, summaries, and dynamic exposure rather than removing behavioral systems.
 
+19. The prompt must be ordered to maximize provider prompt-cache hit rates.
+    - Acceptance criteria:
+      - The system prompt is split into a **stable prefix** (system core, soul, identity, AGENTS, tool policy, static memory, pinned memory, tool schemas) and a **volatile suffix** (memory digest, retrieved snippets, workspace context, heartbeat, structured trigger context, active task card, recent history, user turn).
+      - Volatile content such as the heartbeat clock, structured trigger metadata, current timestamps, and per-turn retrieval results never appears in the stable-prefix region.
+      - The stable-prefix region is byte-stable across turns within the same session as long as soul/identity/AGENTS/tool policy/pinned memory/exposed tool schemas are unchanged.
+      - Tool schemas are sorted deterministically and only re-emitted when the exposed tool set actually changes; minor turn-to-turn intent shifts do not reshuffle the schema list.
+      - Where a provider exposes explicit cache controls (for example Anthropic `cache_control` breakpoints, OpenAI/OpenRouter prompt caching), the renderer places the breakpoint at the boundary between stable prefix and volatile suffix.
+      - A regression test renders two consecutive packets in the same session with unchanged stable inputs and asserts that the stable-prefix bytes are identical.
+
+20. The implementation must reuse existing packages and tables instead of adding a parallel layer.
+    - Acceptance criteria:
+      - No new top-level package is introduced. New code lives in existing packages: `internal/agent`, `internal/memory`, `internal/db`, `internal/config`, `internal/artifacts`, `internal/tools`.
+      - Artifact summaries are stored using the existing `artifacts` table plus `memory_notes` rows of `kind = 'artifact_summary'` with `source_artifact_id`, rather than introducing a separate `artifact_summaries` table.
+      - Message-level retrieval is first implemented by reusing the existing `messages` table and consolidation/summary `memory_notes` rows. A dedicated `message_spans` table is explicitly out of scope for the first iteration and may only be added later if measurements show existing structures are insufficient.
+      - Net new files are kept small and added inside the package they extend (for example `internal/agent/prompt_budget.go`, `internal/agent/task_card.go`).
+
+21. The change must be strictly backward compatible for existing users on first release.
+    - Acceptance criteria:
+      - Existing `or3-intern.json` configs without any context section continue to load and produce a packet that behaves at least as well as today's prompt assembly (no regressions in pinned memory, skills, workspace context, or tool availability).
+      - Existing SQLite databases continue to open and run; all migrations are additive (`CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ... ADD COLUMN` guarded for re-run) and are no-ops on already-migrated databases.
+      - Existing session keys, scope keys, message IDs, memory IDs, artifact IDs, and channel session links remain valid.
+      - The first release defaults the new context mode to behavior closest to current defaults (effectively `quality`-leaning) so no user is silently downgraded; opting into `balanced` or `poor` is explicit.
+
 ## Non-functional constraints
 
 - Deterministic first: deterministic pruning, dedupe, scoring, and budgets should run before any model-assisted compaction.
@@ -141,3 +167,5 @@ Scope assumptions:
 - No secret leakage: prompt packets, task cards, memory summaries, artifact previews, and diagnostic budget reports must not include secrets from config or environment.
 - Bounded outputs: tool outputs, provider responses, context-manager responses, and diagnostics must be truncated or artifacted according to config.
 - Inspectable behavior: budget decisions and pruning reasons should be observable enough to debug quality regressions without dumping sensitive content.
+- Cache-friendly assembly: prompt rendering must avoid introducing per-turn jitter (timestamps, randomized ordering, map iteration order) into the stable prefix region.
+- Minimal surface area: prefer extending existing exported types over introducing new ones; avoid new packages, new daemons, new background goroutines, and new external dependencies.

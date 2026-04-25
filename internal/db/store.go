@@ -16,13 +16,13 @@ import (
 type MemoryKind = string
 
 const (
-	MemoryKindNote           MemoryKind = "note"
-	MemoryKindSummary        MemoryKind = "summary"
-	MemoryKindFact           MemoryKind = "fact"
-	MemoryKindPreference     MemoryKind = "preference"
-	MemoryKindGoal           MemoryKind = "goal"
-	MemoryKindProcedure      MemoryKind = "procedure"
-	MemoryKindEpisode        MemoryKind = "episode"
+	MemoryKindNote            MemoryKind = "note"
+	MemoryKindSummary         MemoryKind = "summary"
+	MemoryKindFact            MemoryKind = "fact"
+	MemoryKindPreference      MemoryKind = "preference"
+	MemoryKindGoal            MemoryKind = "goal"
+	MemoryKindProcedure       MemoryKind = "procedure"
+	MemoryKindEpisode         MemoryKind = "episode"
 	MemoryKindDecision        MemoryKind = "decision"
 	MemoryKindWarning         MemoryKind = "warning"
 	MemoryKindArtifactSummary MemoryKind = "artifact_summary"
@@ -37,6 +37,7 @@ const (
 	MemoryStatusActive     MemoryStatus = "active"
 	MemoryStatusStale      MemoryStatus = "stale"
 	MemoryStatusSuperseded MemoryStatus = "superseded"
+	MemoryStatusExpired    MemoryStatus = "expired"
 )
 
 // maxImportance caps the importance value stored on a memory note.
@@ -1349,31 +1350,31 @@ func (d *DB) GetLastMessagesScoped(ctx context.Context, sessionKey string, limit
 
 // TaskState holds the persisted active task state for a session.
 type TaskState struct {
-ID            int64
-SessionKey    string
-Goal          string
-Plan          string
-Constraints   string
-Decisions     string
-OpenQuestions string
-MessageRefs   string
-MemoryRefs    string
-ArtifactRefs  string
-ActiveFiles   string
-Status        string
-CreatedAt     int64
-UpdatedAt     int64
+	ID            int64
+	SessionKey    string
+	Goal          string
+	Plan          string
+	Constraints   string
+	Decisions     string
+	OpenQuestions string
+	MessageRefs   string
+	MemoryRefs    string
+	ArtifactRefs  string
+	ActiveFiles   string
+	Status        string
+	CreatedAt     int64
+	UpdatedAt     int64
 }
 
 // UpsertTaskState inserts or updates the task state for a session.
 func (d *DB) UpsertTaskState(ctx context.Context, state TaskState) error {
-now := NowMS()
-if state.CreatedAt == 0 {
-state.CreatedAt = now
-}
-state.UpdatedAt = now
-_, err := d.SQL.ExecContext(ctx,
-`INSERT INTO task_state(session_key, goal, plan, constraints, decisions, open_questions,
+	now := NowMS()
+	if state.CreatedAt == 0 {
+		state.CreatedAt = now
+	}
+	state.UpdatedAt = now
+	_, err := d.SQL.ExecContext(ctx,
+		`INSERT INTO task_state(session_key, goal, plan, constraints, decisions, open_questions,
             message_refs, memory_refs, artifact_refs, active_files, status, created_at, updated_at)
          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT(session_key) DO UPDATE SET
@@ -1382,58 +1383,58 @@ _, err := d.SQL.ExecContext(ctx,
             message_refs=excluded.message_refs, memory_refs=excluded.memory_refs,
             artifact_refs=excluded.artifact_refs, active_files=excluded.active_files,
             status=excluded.status, updated_at=excluded.updated_at`,
-state.SessionKey, state.Goal, state.Plan, state.Constraints,
-state.Decisions, state.OpenQuestions, state.MessageRefs, state.MemoryRefs,
-state.ArtifactRefs, state.ActiveFiles, state.Status, state.CreatedAt, state.UpdatedAt)
-return err
+		state.SessionKey, state.Goal, state.Plan, state.Constraints,
+		state.Decisions, state.OpenQuestions, state.MessageRefs, state.MemoryRefs,
+		state.ArtifactRefs, state.ActiveFiles, state.Status, state.CreatedAt, state.UpdatedAt)
+	return err
 }
 
 // GetTaskState retrieves the task state for a session.
 func (d *DB) GetTaskState(ctx context.Context, sessionKey string) (TaskState, bool, error) {
-row := d.SQL.QueryRowContext(ctx,
-`SELECT id, session_key, goal, plan, constraints, decisions, open_questions,
+	row := d.SQL.QueryRowContext(ctx,
+		`SELECT id, session_key, goal, plan, constraints, decisions, open_questions,
             message_refs, memory_refs, artifact_refs, active_files, status, created_at, updated_at
          FROM task_state WHERE session_key=?`, sessionKey)
-var ts TaskState
-err := row.Scan(&ts.ID, &ts.SessionKey, &ts.Goal, &ts.Plan, &ts.Constraints,
-&ts.Decisions, &ts.OpenQuestions, &ts.MessageRefs, &ts.MemoryRefs,
-&ts.ArtifactRefs, &ts.ActiveFiles, &ts.Status, &ts.CreatedAt, &ts.UpdatedAt)
-if err != nil {
-if err == sql.ErrNoRows {
-return TaskState{}, false, nil
-}
-return TaskState{}, false, err
-}
-return ts, true, nil
+	var ts TaskState
+	err := row.Scan(&ts.ID, &ts.SessionKey, &ts.Goal, &ts.Plan, &ts.Constraints,
+		&ts.Decisions, &ts.OpenQuestions, &ts.MessageRefs, &ts.MemoryRefs,
+		&ts.ArtifactRefs, &ts.ActiveFiles, &ts.Status, &ts.CreatedAt, &ts.UpdatedAt)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return TaskState{}, false, nil
+		}
+		return TaskState{}, false, err
+	}
+	return ts, true, nil
 }
 
 // CompleteTaskState marks the task state as completed for a session.
 func (d *DB) CompleteTaskState(ctx context.Context, sessionKey string) error {
-_, err := d.SQL.ExecContext(ctx,
-`UPDATE task_state SET status='completed', updated_at=? WHERE session_key=?`,
-NowMS(), sessionKey)
-return err
+	_, err := d.SQL.ExecContext(ctx,
+		`UPDATE task_state SET status='completed', updated_at=? WHERE session_key=?`,
+		NowMS(), sessionKey)
+	return err
 }
 
 // MarkMemoryNoteStale marks a memory note as stale.
 func (d *DB) MarkMemoryNoteStale(ctx context.Context, id int64) error {
-_, err := d.SQL.ExecContext(ctx,
-`UPDATE memory_notes SET status=? WHERE id=?`,
-MemoryStatusStale, id)
-return err
+	_, err := d.SQL.ExecContext(ctx,
+		`UPDATE memory_notes SET status=? WHERE id=?`,
+		MemoryStatusStale, id)
+	return err
 }
 
 // MarkMemoryNoteSuperseded marks a memory note as superseded by another note.
 func (d *DB) MarkMemoryNoteSuperseded(ctx context.Context, id int64, supersededBy int64) error {
-_, err := d.SQL.ExecContext(ctx,
-`UPDATE memory_notes SET status=?, supersedes_id=? WHERE id=?`,
-MemoryStatusSuperseded, supersededBy, id)
-return err
+	_, err := d.SQL.ExecContext(ctx,
+		`UPDATE memory_notes SET status=?, supersedes_id=? WHERE id=?`,
+		MemoryStatusSuperseded, supersededBy, id)
+	return err
 }
 
 // MarkMemoryNoteExpired marks a memory note as expired.
 func (d *DB) MarkMemoryNoteExpired(ctx context.Context, id int64) error {
-_, err := d.SQL.ExecContext(ctx,
-`UPDATE memory_notes SET status='expired' WHERE id=?`, id)
-return err
+	_, err := d.SQL.ExecContext(ctx,
+		`UPDATE memory_notes SET status=? WHERE id=?`, MemoryStatusExpired, id)
+	return err
 }

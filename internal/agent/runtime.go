@@ -1312,28 +1312,32 @@ func WithTimeout(ctx context.Context, sec int) (context.Context, context.CancelF
 	return context.WithTimeout(ctx, time.Duration(sec)*time.Second)
 }
 
+// taskCardPreviewLen is the maximum number of bytes kept from each assistant
+// reply when building message_refs on the task card.
+const taskCardPreviewLen = 50
+
 func (r *Runtime) updateTaskCard(ctx context.Context, sessionKey, assistantReply string) {
-if r.DB == nil {
-return
-}
-ts, _, err := r.DB.GetTaskState(ctx, sessionKey)
-if err != nil {
-return
-}
-if ts.SessionKey == "" {
-ts.SessionKey = sessionKey
-ts.Status = "active"
-}
-preview := assistantReply
-if len(preview) > 50 {
-preview = preview[:50]
-}
-if preview != "" {
-if ts.MessageRefs != "" {
-ts.MessageRefs = ts.MessageRefs + "\n" + preview
-} else {
-ts.MessageRefs = preview
-}
-}
-_ = r.DB.UpsertTaskState(ctx, ts)
+	if r.DB == nil {
+		return
+	}
+	ts, _, err := r.DB.GetTaskState(ctx, sessionKey)
+	if err != nil {
+		return
+	}
+	if ts.SessionKey == "" {
+		ts.SessionKey = sessionKey
+		ts.Status = "active"
+	}
+	preview := assistantReply
+	if len(preview) > taskCardPreviewLen {
+		preview = preview[:taskCardPreviewLen]
+	}
+	if preview != "" {
+		if ts.MessageRefs != "" {
+			ts.MessageRefs = ts.MessageRefs + "\n" + preview
+		} else {
+			ts.MessageRefs = preview
+		}
+	}
+	_ = r.DB.UpsertTaskState(ctx, ts)
 }

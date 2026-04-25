@@ -1,6 +1,6 @@
-# Internal service API reference
+# Internal service REST / HTTP API reference
 
-This page documents the authenticated HTTP API exposed by:
+This page documents the authenticated machine-facing REST / HTTP API exposed by:
 
 ```bash
 go run ./cmd/or3-intern service
@@ -9,6 +9,11 @@ go run ./cmd/or3-intern service
 ## Intended use
 
 `or3-intern service` is a loopback/private-network API intended for integrations such as OR3 Net. It uses the same runtime, tool registry, memory system, quotas, and subagent manager as the CLI and channel entrypoints.
+
+Command boundary:
+
+- `or3-intern serve` hosts channels, triggers, workers, heartbeat, and background orchestration.
+- `or3-intern service` hosts the authenticated machine-facing control plane.
 
 ## Service configuration
 
@@ -30,15 +35,77 @@ Environment overrides documented in the README:
 
 ## Authentication
 
-All routes require:
+Most routes require:
 
 ```http
 Authorization: Bearer <signed-token>
 ```
 
+Authentication modes:
+
+- shared-secret bearer token → full admin access
+- paired-device bearer token with `operator` role → operator/admin control-plane access
+- unauthenticated bootstrap is allowed only for:
+  - `POST /internal/v1/pairing/requests`
+  - `POST /internal/v1/pairing/exchange`
+
 The service refuses to start without `service.secret`.
 
 Keep `service.listen` on loopback or private networking only.
+
+Bearer token notes:
+
+- shared-secret bearer tokens are HMAC-signed and time-bounded
+- paired-device tokens come from the pairing flow and are validated by the approval broker
+- malformed or missing bearer tokens return `401`
+- role failures return `403`
+
+## Conventions
+
+- request and response bodies use JSON unless the route explicitly streams SSE
+- unknown JSON fields are rejected
+- trailing garbage after JSON bodies is rejected
+- validation/decode failures return `400`
+- unsupported methods return `405`
+- unknown routes return `404`
+- routes backed by unavailable subsystems return `503` when the failure is infrastructural rather than user input
+
+## Route inventory
+
+| Method | Path | Auth | Purpose |
+| --- | --- | --- | --- |
+| `POST` | `/internal/v1/turns` | Admin or Operator | Run a foreground turn and wait for JSON or attach via SSE-on-submit. |
+| `POST` | `/internal/v1/subagents` | Admin or Operator | Queue a background subagent job. |
+| `GET` | `/internal/v1/jobs/{jobId}` | Admin or Operator | Fetch current job snapshot. |
+| `GET` | `/internal/v1/jobs/{jobId}/stream` | Admin or Operator | Attach to live SSE lifecycle stream. |
+| `POST` | `/internal/v1/jobs/{jobId}/abort` | Admin or Operator | Request cancellation. |
+| `POST` | `/internal/v1/pairing/requests` | No | Start pairing bootstrap. |
+| `GET` | `/internal/v1/pairing/requests` | Operator | List pairing requests. |
+| `POST` | `/internal/v1/pairing/requests/{id}/approve` | Operator | Approve pairing request. |
+| `POST` | `/internal/v1/pairing/requests/{id}/deny` | Operator | Deny pairing request. |
+| `POST` | `/internal/v1/pairing/exchange` | No | Exchange approved pairing code for device token. |
+| `GET` | `/internal/v1/devices` | Operator | List paired devices. |
+| `POST` | `/internal/v1/devices/{deviceId}/revoke` | Operator | Revoke paired device. |
+| `POST` | `/internal/v1/devices/{deviceId}/rotate` | Operator | Rotate paired-device token. |
+| `GET` | `/internal/v1/approvals` | Operator | List approval requests. |
+| `GET` | `/internal/v1/approvals/{id}` | Operator | Fetch one approval request. |
+| `POST` | `/internal/v1/approvals/{id}/approve` | Operator | Approve request and optionally allowlist it. |
+| `POST` | `/internal/v1/approvals/{id}/deny` | Operator | Deny request. |
+| `POST` | `/internal/v1/approvals/{id}/cancel` | Operator | Cancel request without approving/denying execution. |
+| `POST` | `/internal/v1/approvals/expire` | Operator | Expire all pending requests past TTL. |
+| `GET` | `/internal/v1/approvals/allowlists` | Operator | List allowlist rules. |
+| `POST` | `/internal/v1/approvals/allowlists` | Operator | Create allowlist rule. |
+| `POST` | `/internal/v1/approvals/allowlists/{id}/remove` | Operator | Disable allowlist rule. |
+| `GET` | `/internal/v1/health` | Admin or Operator | Lightweight runtime/job health. |
+| `GET` | `/internal/v1/readiness` | Admin or Operator | Startup/readiness evaluation. |
+| `GET` | `/internal/v1/capabilities` | Admin or Operator | Effective machine-readable runtime posture. |
+| `GET` | `/internal/v1/embeddings/status` | Operator | Embedding compatibility/reporting. |
+| `POST` | `/internal/v1/embeddings/rebuild` | Operator | Rebuild memory/doc embeddings. |
+| `GET` | `/internal/v1/audit` | Operator | Audit chain status summary. |
+| `POST` | `/internal/v1/audit/verify` | Operator | Verify audit chain integrity. |
+| `POST` | `/internal/v1/scope/links` | Operator | Link session key to logical scope. |
+| `GET` | `/internal/v1/scope/resolve` | Operator | Resolve scope for one session key. |
+| `GET` | `/internal/v1/scope/sessions` | Operator | List sessions within one scope. |
 
 ## Endpoints
 
@@ -50,6 +117,8 @@ Behavior:
 
 - returns Server-Sent Events when the request sends `Accept: text/event-stream`
 - otherwise waits for completion and returns JSON
+- `X-Request-Id`, `X-Workspace-Id`, and `X-Network-Session-Id` headers are propagated into request/job lifecycle metadata
+- `X-Approval-Token` and `X-Or3-Approval-Token` are accepted as approval-token header aliases
 
 Request fields:
 
@@ -73,6 +142,19 @@ Session identity contract:
 }
 ```
 
+Synchronous JSON response shape:
+
+```json
+{
+  "job_id": "job_123",
+  "kind": "turn",
+  "status": "completed",
+  "final_text": "hello"
+}
+```
+
+If the turn fails, the same response includes `error` and typically returns `502`.
+
 ### `POST /internal/v1/subagents`
 
 Queues a background subagent job through the shared subagent manager.
@@ -87,6 +169,18 @@ Parent session contract:
 - `parent_session_key` is the canonical parent execution identity for subagent work.
 - ingress aliases (`session_key`, `intern_session_key`, `parentSessionKey`, `sessionKey`, `internSessionKey`) are compatibility shims only; they normalize to `parent_session_key` and are not used internally after decoding.
 - provider-owned metadata such as `request_id`, `workspace_id`, and `network_session_id` may accompany the request, but they do not supersede `parent_session_key`.
+
+Accepted response shape:
+
+```json
+{
+  "job_id": "job_123",
+  "child_session_key": "subagent:abc",
+  "status": "queued"
+}
+```
+
+When the subagent queue is full, the route returns `429`.
 
 ### Approval and pairing endpoints
 
@@ -144,6 +238,9 @@ Audit records for operator-originated actions include `auth_kind: "shared-secret
 | `POST` | `/internal/v1/approvals/{id}/deny` | Operator | Deny a pending request. |
 | `POST` | `/internal/v1/approvals/{id}/cancel` | Operator | Cancel a pending request without an approval decision. |
 | `POST` | `/internal/v1/approvals/expire` | Operator | Marks all expired pending requests as expired. |
+| `GET` | `/internal/v1/approvals/allowlists` | Operator | List allowlist rules. Optional `?domain=` filter. |
+| `POST` | `/internal/v1/approvals/allowlists` | Operator | Create a new allowlist rule. |
+| `POST` | `/internal/v1/approvals/allowlists/{id}/remove` | Operator | Disable an allowlist rule. |
 
 `POST /internal/v1/approvals/{id}/approve` request body:
 
@@ -155,6 +252,32 @@ Audit records for operator-originated actions include `auth_kind: "shared-secret
 ```
 
 Set `"allowlist": true` to also create a persistent allowlist rule from the subject.
+
+`POST /internal/v1/approvals/{id}/cancel` request body:
+
+```json
+{
+  "note": "optional operator note"
+}
+```
+
+`POST /internal/v1/approvals/allowlists` request body:
+
+```json
+{
+  "domain": "exec",
+  "scope": {
+    "host_id": "local",
+    "tool": "exec"
+  },
+  "matcher": {
+    "executable_path": "/bin/echo"
+  },
+  "expires_at": 0
+}
+```
+
+For `skill_execution` rules, `matcher` uses the skill matcher fields (`skill_id`, `version`, `origin`, `trust_state`, `script_hash`, `timeout_seconds`).
 
 #### Approval token lifecycle
 
@@ -178,13 +301,177 @@ The following capabilities are compatible with this schema and token format but 
 - Remote-node and `or3-sandbox` verification using shared signing keys
 - Remote-node forwarding of approval decisions
 
-### `GET /internal/v1/jobs/:jobId/stream`
+### `GET /internal/v1/jobs/{jobId}`
+
+Returns the current job snapshot, including lifecycle events, timestamps, and the latest completion or error payload.
+
+Typical response fields:
+
+- `job_id`
+- `kind`
+- `status`
+- `created_at`
+- `updated_at`
+- `events`
+- latest completion payload such as `final_text`
+- latest failure payload such as `error`
+
+### `GET /internal/v1/jobs/{jobId}/stream`
 
 Attaches to a live SSE stream for a turn or background job.
 
-### `POST /internal/v1/jobs/:jobId/abort`
+Lifecycle event types currently emitted include queued/start/completion/error transitions. Unknown job IDs return `404`.
+
+### `POST /internal/v1/jobs/{jobId}/abort`
 
 Requests cancellation of a running job when cancellation is possible.
+
+Behavior notes:
+
+- returns `200` for successful abort requests
+- returns `200` for already-completed jobs with final status
+- returns `404` for unknown jobs
+- returns `409` when a known job is not abortable
+
+### `GET /internal/v1/health`
+
+Returns a lightweight service health report for the shared runtime and job registry.
+
+Current response fields:
+
+- `status`
+- `runtimeAvailable`
+- `jobRegistryAvailable`
+- `subagentManagerEnabled`
+- `approvalBrokerAvailable`
+
+### `GET /internal/v1/readiness`
+
+Returns the current startup/readiness evaluation for `service`, including the doctor summary and findings. Returns HTTP 503 when blocking startup findings are present.
+
+Current response fields:
+
+- `status`
+- `ready`
+- `summary`
+- `findings`
+
+### `GET /internal/v1/capabilities`
+
+Returns the same machine-readable capabilities report exposed by `or3-intern capabilities --json`. Optional filters:
+
+- `?channel=<name>`
+- `?trigger=<name>`
+
+The report includes runtime profile, hosted posture, approval modes, sandbox/exec availability, network policy, enabled MCP servers, and effective channel/trigger ingress summaries.
+
+### Embeddings endpoints
+
+These routes expose the same embedding compatibility and rebuild operations used by the local CLI command.
+
+| Method | Path | Auth required | Description |
+| --- | --- | --- | --- |
+| `GET` | `/internal/v1/embeddings/status` | Operator | Returns the current embedding fingerprint/status report for persisted memory vectors and doc-index readiness. |
+| `POST` | `/internal/v1/embeddings/rebuild` | Operator | Rebuilds persisted embeddings for `memory`, `docs`, or `all`. |
+
+`POST /internal/v1/embeddings/rebuild` request body:
+
+```json
+{
+  "target": "memory"
+}
+```
+
+If `target` is omitted, the service defaults to `memory`.
+
+Request-body alias note:
+
+- `target`
+- `targetName`
+
+Current response fields:
+
+- `status`
+- `target`
+- `fingerprint`
+- `memoryNotesRebuilt`
+- `docsRebuilt`
+- `skipped`
+
+### Audit endpoints
+
+These routes expose the append-only audit chain status and verification flow already used by local operators.
+
+| Method | Path | Auth required | Description |
+| --- | --- | --- | --- |
+| `GET` | `/internal/v1/audit` | Operator | Returns audit configuration/runtime status plus event-count summary. |
+| `POST` | `/internal/v1/audit/verify` | Operator | Verifies the persisted audit chain and returns a machine-readable success response. |
+
+`GET /internal/v1/audit` response fields currently include:
+
+- `status`
+- `enabled`
+- `available`
+- `strict`
+- `verifyOnStart`
+- `eventCount`
+- latest-event summary fields when any records exist
+
+`POST /internal/v1/audit/verify` response:
+
+```json
+{
+  "verified": true,
+  "eventCount": 42
+}
+```
+
+### Scope endpoints
+
+These routes expose the session-scope linking helpers used by the local `scope` CLI command.
+
+| Method | Path | Auth required | Description |
+| --- | --- | --- | --- |
+| `POST` | `/internal/v1/scope/links` | Operator | Links a physical `session_key` to a logical `scope_key`. |
+| `GET` | `/internal/v1/scope/resolve?session_key=...` | Operator | Resolves the effective logical scope for one physical session key. |
+| `GET` | `/internal/v1/scope/sessions?scope_key=...` | Operator | Lists physical session keys linked to a logical scope. |
+
+`POST /internal/v1/scope/links` request body:
+
+```json
+{
+  "session_key": "telegram:123",
+  "scope_key": "customer:acme"
+}
+```
+
+Accepted aliases:
+
+- `session_key` / `sessionKey`
+- `scope_key` / `scopeKey`
+
+Response shapes:
+
+```json
+{
+  "session_key": "telegram:123",
+  "scope_key": "customer:acme"
+}
+```
+
+```json
+{
+  "scope_key": "customer:acme",
+  "sessions": ["telegram:123", "slack:U42"]
+}
+```
+
+```json
+{
+  "session_key": "telegram:123",
+  "scope_key": "customer:acme"
+}
+```
 
 ## Operational guidance
 

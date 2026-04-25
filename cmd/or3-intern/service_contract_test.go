@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,8 @@ import (
 	"time"
 
 	"or3-intern/internal/agent"
+	"or3-intern/internal/config"
+	"or3-intern/internal/security"
 	"or3-intern/internal/tools"
 )
 
@@ -159,6 +162,11 @@ func TestOr3NetCompatibilityFixtures_Responses(t *testing.T) {
 		defer cleanup()
 		jobs := agent.NewJobRegistry(time.Minute, 32)
 		manager := &agent.SubagentManager{DB: database, Jobs: jobs, MaxQueued: 4}
+		manager.BackgroundTools = func() *tools.Registry {
+			registry := tools.NewRegistry()
+			registry.Register(serviceTestTool{name: "read_file"})
+			return registry
+		}
 		server := &serviceServer{subagentManager: manager, jobs: jobs}
 		httpServer := newServiceTestHTTPServer(t, strings.Repeat("u", 32), server)
 		defer httpServer.Close()
@@ -229,6 +237,70 @@ func TestOr3NetCompatibilityFixtures_Responses(t *testing.T) {
 		loadFixtureJSON(t, "service_contract/job-abort-response.json", &expected)
 		if !reflect.DeepEqual(actual, expected) {
 			t.Fatalf("job abort response mismatch\nexpected: %#v\ngot: %#v", expected, actual)
+		}
+	})
+
+	t.Run("health status", func(t *testing.T) {
+		server := &serviceServer{runtime: &agent.Runtime{Tools: tools.NewRegistry()}, jobs: agent.NewJobRegistry(time.Minute, 32)}
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/internal/v1/health", nil)
+		server.handleHealth(rec, req)
+		var actual map[string]any
+		if err := json.NewDecoder(rec.Body).Decode(&actual); err != nil {
+			t.Fatalf("Decode: %v", err)
+		}
+		var expected map[string]any
+		loadFixtureJSON(t, "service_contract/health-response.json", &expected)
+		if !reflect.DeepEqual(actual, expected) {
+			t.Fatalf("health response mismatch\nexpected: %#v\ngot: %#v", expected, actual)
+		}
+	})
+
+	t.Run("embeddings status", func(t *testing.T) {
+		database, cleanup := openServiceTestDB(t)
+		defer cleanup()
+		cfg := config.Default()
+		cfg.Provider.APIBase = "http://provider.example"
+		cfg.Provider.EmbedModel = "text-embedding-3-small"
+		server := &serviceServer{config: cfg, runtime: &agent.Runtime{DB: database}, jobs: agent.NewJobRegistry(time.Minute, 32)}
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/internal/v1/embeddings/status", nil)
+		req = req.WithContext(context.WithValue(req.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Kind: "shared-secret", Actor: "service:shared-secret", Role: "admin"}))
+		server.handleEmbeddings(rec, req)
+		var actual map[string]any
+		if err := json.NewDecoder(rec.Body).Decode(&actual); err != nil {
+			t.Fatalf("Decode: %v", err)
+		}
+		var expected map[string]any
+		loadFixtureJSON(t, "service_contract/embeddings-status-response.json", &expected)
+		if !reflect.DeepEqual(actual, expected) {
+			t.Fatalf("embeddings status response mismatch\nexpected: %#v\ngot: %#v", expected, actual)
+		}
+	})
+
+	t.Run("audit status", func(t *testing.T) {
+		database, cleanup := openServiceTestDB(t)
+		defer cleanup()
+		audit := &security.AuditLogger{DB: database, Key: []byte(strings.Repeat("a", 32)), Strict: true}
+		if err := audit.Record(context.Background(), "tool.execute", "sess-1", "cli", map[string]any{"tool": "exec"}); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+		cfg := config.Default()
+		cfg.Security.Audit.Enabled = true
+		server := &serviceServer{config: cfg, runtime: &agent.Runtime{DB: database, Audit: audit}, jobs: agent.NewJobRegistry(time.Minute, 32)}
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/internal/v1/audit", nil)
+		req = req.WithContext(context.WithValue(req.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Kind: "shared-secret", Actor: "service:shared-secret", Role: "admin"}))
+		server.handleAudit(rec, req)
+		var actual map[string]any
+		if err := json.NewDecoder(rec.Body).Decode(&actual); err != nil {
+			t.Fatalf("Decode: %v", err)
+		}
+		actual["lastEventAt"] = "__LAST_EVENT_AT__"
+		var expected map[string]any
+		loadFixtureJSON(t, "service_contract/audit-status-response.json", &expected)
+		if !reflect.DeepEqual(actual, expected) {
+			t.Fatalf("audit status response mismatch\nexpected: %#v\ngot: %#v", expected, actual)
 		}
 	})
 }

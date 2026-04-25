@@ -9,19 +9,110 @@ or3-intern version
 
 If you are running directly from a checkout without installing, replace `or3-intern` with `go run ./cmd/or3-intern`.
 
-## Primary commands
+## Commands
 
 | Command | Purpose |
 | --- | --- |
+| `or3-intern setup` | Guided first-run setup with scenario and safety choices |
+| `or3-intern chat` | Interactive CLI session |
+| `or3-intern status [--advanced]` | Shows a plain-language safety, access, and problems summary |
+| `or3-intern settings [--section ...] [--export path|-]` | Opens the task-based settings home and supports focused edits or config export |
+| `or3-intern connect-device [list|disconnect <device-id>|role <device-id>]` | Pairs a phone or other device using a short code and simple access levels |
+| `or3-intern help` | Shows the full root command catalog |
 | `or3-intern configure [--section ...]` | Interactive setup and reconfiguration wizard for provider, storage, workspace, web, channels, and service |
 | `or3-intern init` | Guided first-run setup for config and provider settings |
 | `or3-intern config-path` | Prints the resolved config.json path |
-| `or3-intern chat` | Interactive CLI session |
 | `or3-intern serve` | Starts enabled channels, triggers, heartbeat, cron, and the shared worker runtime |
 | `or3-intern service` | Starts the authenticated internal HTTP API |
 | `or3-intern agent -m "..."` | Runs a one-shot foreground turn |
 | `or3-intern version` | Prints the binary version |
 | `or3-intern help [command]` | Shows root help or command-specific help |
+
+Root help behavior:
+
+- `or3-intern help` and `or3-intern --help` show the full command catalog.
+- `or3-intern --advanced --help` shows the same root catalog and remains accepted for compatibility.
+- `or3-intern help <command>` shows detailed help for either simple or advanced commands.
+
+### `or3-intern setup`
+
+Guided setup using the product-facing mental model instead of raw config sections.
+
+```
+or3-intern setup
+```
+
+The flow asks for:
+
+- provider
+- workspace folder
+- usage scenario
+- safety mode
+
+It then applies the corresponding runtime profile, approvals, audit, service, and hardening settings before saving the config.
+
+If setup succeeds, it prints a short review covering files, commands, internet, devices, and activity log state, then asks whether to start chat next.
+
+### `or3-intern status`
+
+Shows a friendly status summary sourced from config plus doctor findings.
+
+```
+or3-intern status
+or3-intern status --advanced
+or3-intern status --fix approvals.key_path_missing
+```
+
+Default output focuses on:
+
+- effective safety mode
+- workspace/file boundaries
+- command posture
+- internet posture
+- device/connectivity readiness
+- activity log state
+- a "What OR3 can access" dashboard for files, commands, internet, apps, devices, memory, and activity log
+- problems that need attention
+
+Use `--advanced` to also print the underlying finding IDs. Use `--fix <finding-id>` for one safe automatic repair when advanced output shows a `Fix now` command.
+
+### `or3-intern settings`
+
+```
+or3-intern settings
+or3-intern settings --section safety
+or3-intern settings --section workspace
+or3-intern settings --export config.json
+```
+
+This is the user-facing entry point for revisiting setup. The default view is task-based: AI Provider, Workspace Folder, Connected Devices, Safety Level, Channels, Tools, Memory, and Advanced.
+
+Use `--section` to jump to one task area. Common sections are `provider`, `workspace`, `devices`, `safety`, `channels`, `tools`, `memory`, and `advanced`.
+
+Use `--export` when you need the raw JSON config without making JSON editing the normal path.
+
+### `or3-intern connect-device`
+
+```
+or3-intern connect-device
+or3-intern connect-device list
+or3-intern connect-device disconnect <device-id>
+or3-intern connect-device role <device-id>
+```
+
+This flow:
+
+- checks pairing/service prerequisites
+- repairs missing safe defaults such as service secret or approval key when needed
+- creates a pairing code
+- lets the user choose an access level such as chat-only, workspace access, or admin
+
+The `list` view shows connected devices with friendly role labels, last-used status, change-access guidance, and disconnect commands. `role` currently points users to disconnect/reconnect with a new access level so the role change remains explicit and safe.
+
+Command boundary:
+
+- `or3-intern serve` is the orchestration/runtime host for channels, triggers, workers, heartbeat, and cron.
+- `or3-intern service` is the authenticated internal HTTP gateway and machine-facing control plane.
 
 ### `or3-intern configure`
 
@@ -69,7 +160,7 @@ Use `or3-intern init` if you only want the original lightweight first-run provid
 
 `init` is a first-run alias over `configure`. It uses the same TTY detection rules and the same Bubble Tea UI when interactive, but it preselects the original first-run sections: provider, storage, workspace, and web.
 
-## Operational and admin commands
+## Operator tools
 
 | Command | Purpose |
 | --- | --- |
@@ -78,7 +169,7 @@ Use `or3-intern init` if you only want the original lightweight first-run provid
 | `or3-intern embeddings <status|rebuild> [memory|docs|all]` | Shows embedding compatibility status and rebuilds stored memory/doc embeddings after provider or model changes |
 | `or3-intern secrets <set|delete|list>` | Manages encrypted secret references stored in SQLite |
 | `or3-intern audit [verify]` | Inspects or verifies the append-only audit chain |
-| `or3-intern approvals <list|show|approve|deny|allowlist>` | Lists and resolves pending approval requests or approval allowlists |
+| `or3-intern approvals <list|show|approve|deny|cancel|expire|allowlist>` | Lists and resolves pending approval requests or approval allowlists |
 | `or3-intern devices <list|requests|approve|deny|rotate|revoke>` | Lists paired devices and supports device rotation/revocation plus legacy pairing request actions |
 | `or3-intern pairing <list|request|approve|deny|exchange>` | Runs the pairing workflow and can bind approvals to channel identities such as `slack:U123` |
 | `or3-intern migrate-jsonl /path/to/session.jsonl [session_key]` | Imports legacy session history |
@@ -87,6 +178,8 @@ Use `or3-intern init` if you only want the original lightweight first-run provid
 ### `or3-intern embeddings`
 
 Use this command after switching `provider.apiBase` or `provider.embedModel`.
+
+The authenticated HTTP parity lives under `or3-intern service` at `/internal/v1/embeddings/status` and `/internal/v1/embeddings/rebuild`.
 
 ```
 or3-intern embeddings status
@@ -107,6 +200,15 @@ Rebuilds persisted embeddings in the current embedding space:
 - `all` runs both in sequence.
 
 When chat is running, `/new` archives the current conversation before clearing live history. If you recently changed embedding providers or models, the runtime now repairs the active vector profile automatically for new archival writes, but you should still run an explicit rebuild so older memory/doc vectors are regenerated too.
+
+### `or3-intern audit`
+
+```
+or3-intern audit
+or3-intern audit verify
+```
+
+Verifies the append-only audit chain locally. The authenticated HTTP parity lives under `or3-intern service` at `/internal/v1/audit` and `/internal/v1/audit/verify`.
 
 ### `or3-intern migrate-openclaw`
 
@@ -134,12 +236,12 @@ Manage pending approval requests and allowlist rules. All sub-commands work dire
 ```
 or3-intern approvals list [status]
 ```
-Lists approval requests. Optionally filter by status: `pending`, `approved`, `denied`, `expired`. Up to 100 results are returned.
+Lists approval requests. Optionally filter by status: `pending`, `approved`, `denied`, `canceled`, `expired`. Up to 100 results are returned. The default output includes a short human summary of what OR3 wants to do.
 
 ```
 or3-intern approvals show <id>
 ```
-Shows full detail for one approval request, including subject JSON, status, policy mode, and resolution info.
+Shows one approval request with a friendly action summary and risk label, plus the raw subject details for advanced review.
 
 ```
 or3-intern approvals approve <id> [--allowlist] [--note <text>]
@@ -154,9 +256,19 @@ or3-intern approvals deny <id> [--note <text>]
 Denies a pending request and records the resolution in the audit chain. The blocked tool invocation returns an error to the agent.
 
 ```
+or3-intern approvals cancel <id> [--note <text>]
+```
+Cancels a pending request without approving or denying the underlying action.
+
+```
+or3-intern approvals expire
+```
+Marks every currently expired pending request as `expired` and prints how many were updated.
+
+```
 or3-intern approvals allowlist list [domain]
 ```
-Lists active allowlist rules. Optionally filter by domain (`exec`, `skill_execution`).
+Lists allowlist rules. Optionally filter by domain (`exec`, `skill_execution`).
 
 ```
 or3-intern approvals allowlist add --domain <exec|skill_execution> [options]
@@ -189,12 +301,12 @@ Manage paired devices and pairing requests. All sub-commands work directly again
 ```
 or3-intern devices list
 ```
-Lists all paired devices with their status, role, and display name.
+Lists all paired devices with their status, role, and display name, followed by friendly role and status labels.
 
 ```
 or3-intern devices requests [status]
 ```
-Lists pairing requests. Optionally filter by status: `pending`, `approved`, `denied`, `exchanged`.
+Lists pairing requests. Optionally filter by status: `pending`, `approved`, `denied`, `exchanged`. The default output includes a human summary of the requested device access.
 
 ```
 or3-intern devices approve <pairing-request-id>
@@ -243,6 +355,16 @@ Denies a pairing request.
 ```
 or3-intern pairing exchange <request-id> <code>
 ```
+
+### `or3-intern scope`
+
+```
+or3-intern scope link <session-key> <scope-key>
+or3-intern scope list <scope-key>
+or3-intern scope resolve <session-key>
+```
+
+Links multiple physical session keys to one logical history scope and inspects those links. The authenticated HTTP parity lives under `or3-intern service` at `/internal/v1/scope/links`, `/internal/v1/scope/resolve`, and `/internal/v1/scope/sessions`.
 Exchanges an approved pairing code for a device token (normally done by the remote client, but available here for local testing).
 
 ## Skills commands

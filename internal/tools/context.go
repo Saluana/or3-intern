@@ -17,6 +17,8 @@ type activeProfileContextKey struct{}
 type skillPolicyContextKey struct{}
 type approvalTokenContextKey struct{}
 type requesterIdentityContextKey struct{}
+type requestSourceContextKey struct{}
+type capabilityCeilingContextKey struct{}
 
 type ToolGuard func(ctx context.Context, tool Tool, capability CapabilityLevel, params map[string]any) error
 
@@ -43,6 +45,11 @@ type RequesterIdentity struct {
 	Actor string
 	Role  string
 }
+
+const (
+	RequestSourceCLI     = "cli"
+	RequestSourceService = "service"
+)
 
 func ContextWithSession(ctx context.Context, sessionKey string) context.Context {
 	if ctx == nil {
@@ -169,6 +176,27 @@ func ContextWithRequesterIdentity(ctx context.Context, actor, role string) conte
 	return context.WithValue(ctx, requesterIdentityContextKey{}, identity)
 }
 
+func ContextWithRequestSource(ctx context.Context, source string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	source = strings.ToLower(strings.TrimSpace(source))
+	if source == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, requestSourceContextKey{}, source)
+}
+
+func ContextWithCapabilityCeiling(ctx context.Context, level CapabilityLevel) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if level == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, capabilityCeilingContextKey{}, level)
+}
+
 func SessionFromContext(ctx context.Context) string {
 	if ctx == nil {
 		return scope.GlobalMemoryScope
@@ -219,6 +247,22 @@ func EnvFromContext(ctx context.Context) map[string]string {
 		return copyEnv
 	}
 	return nil
+}
+
+func RequestSourceFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	source, _ := ctx.Value(requestSourceContextKey{}).(string)
+	return strings.ToLower(strings.TrimSpace(source))
+}
+
+func CapabilityCeilingFromContext(ctx context.Context) CapabilityLevel {
+	if ctx == nil {
+		return ""
+	}
+	level, _ := ctx.Value(capabilityCeilingContextKey{}).(CapabilityLevel)
+	return level
 }
 
 func ToolGuardFromContext(ctx context.Context) ToolGuard {

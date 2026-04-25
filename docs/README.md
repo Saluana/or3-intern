@@ -4,7 +4,7 @@ This directory holds the detailed guides and references that were previously pac
 
 ## Guides
 
-- [Getting started](getting-started.md) — first-run flow, local paths, and the quickest way to get a working install
+- [Getting started](getting-started.md) — first-run flow, simple commands, local paths, and the quickest way to get a working install
 - [Agent runtime](agent-runtime.md) — how turns move through the shared runtime across CLI, service mode, channels, and automation
 - [Memory and context](memory-and-context.md) — history, hybrid retrieval, bootstrap files, document indexing, and session scopes
 - [Channel integrations](channels.md) — Telegram, Slack, Discord, Email, and WhatsApp bridge setup and behavior
@@ -17,11 +17,12 @@ This directory holds the detailed guides and references that were previously pac
 
 - [Configuration reference](configuration-reference.md) — top-level config map and the major nested sections in `config.json`
 - [CLI reference](cli-reference.md) — command-by-command summary for the `or3-intern` binary
-- [Internal service API reference](api-reference.md) — authenticated HTTP endpoints for `or3-intern service`
+- [Internal service REST / HTTP API reference](api-reference.md) — authenticated machine-facing endpoints for `or3-intern service`
 
 ## Suggested reading order
 
 1. [Getting started](getting-started.md)
-2. [Configuration reference](configuration-reference.md)
-3. [Agent runtime](agent-runtime.md)
-4. Any feature guides relevant to the way you plan to run the system
+2. [CLI reference](cli-reference.md) for the simple vs advanced command surface
+3. [Configuration reference](configuration-reference.md) when you need raw config keys
+4. [Agent runtime](agent-runtime.md)
+5. Any feature guides relevant to the way you plan to run the system

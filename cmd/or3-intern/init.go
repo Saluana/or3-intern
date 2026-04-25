@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -74,16 +73,18 @@ func initDefaults(cwd string) config.Config {
 	cwd = strings.TrimSpace(cwd)
 	if cwd != "" {
 		cfg.WorkspaceDir = cwd
-		cfg.DBPath = filepath.Join(cwd, ".or3", "or3-intern.sqlite")
-		cfg.ArtifactsDir = filepath.Join(cwd, ".or3", "artifacts")
 		cfg.Tools.RestrictToWorkspace = true
 	}
 	return cfg
 }
 
 func defaultProviderChoice(apiBase string) string {
-	if strings.Contains(strings.ToLower(apiBase), "openrouter.ai") {
+	normalized := strings.ToLower(strings.TrimSpace(apiBase))
+	if strings.Contains(normalized, "openrouter.ai") {
 		return "2"
+	}
+	if normalized != "" && !strings.Contains(normalized, "api.openai.com") {
+		return "3"
 	}
 	return "1"
 }

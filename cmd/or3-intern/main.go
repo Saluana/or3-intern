@@ -24,6 +24,7 @@ import (
 	"or3-intern/internal/channels/telegram"
 	"or3-intern/internal/channels/whatsapp"
 	"or3-intern/internal/config"
+	"or3-intern/internal/controlplane"
 	"or3-intern/internal/cron"
 	"or3-intern/internal/db"
 	"or3-intern/internal/heartbeat"
@@ -63,13 +64,25 @@ func currentEmbedFingerprint(cfg config.Config) string {
 	return providers.EmbeddingFingerprint(cfg.Provider.APIBase, cfg.Provider.EmbedModel, cfg.Provider.EmbedDimensions)
 }
 
+func newProviderClient(cfg config.Config) *providers.Client {
+	timeout := time.Duration(cfg.Provider.TimeoutSeconds) * time.Second
+	prov := providers.New(cfg.Provider.APIBase, cfg.Provider.APIKey, timeout)
+	prov.EmbedDimensions = cfg.Provider.EmbedDimensions
+	prov.HostPolicy = buildHostPolicy(cfg)
+	return prov
+}
+
 func main() {
-	cfgPath, args, showHelp, err := parseRootCLIArgs(os.Args[1:], os.Stderr)
+	cfgPath, args, showHelp, unsafeDev, advancedHelp, err := parseRootCLIArgs(os.Args[1:], os.Stderr)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
 	if showHelp {
+		if len(helpTopicPath(args)) == 0 && advancedHelp {
+			printAdvancedRootHelp(os.Stdout)
+			return
+		}
 		if err := printHelpTopic(os.Stdout, helpTopicPath(args)); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(2)
@@ -89,7 +102,11 @@ func main() {
 		cmd = args[0]
 	}
 	if isHelpToken(cmd) {
-		printRootHelp(os.Stdout)
+		if advancedHelp {
+			printAdvancedRootHelp(os.Stdout)
+		} else {
+			printRootHelp(os.Stdout)
+		}
 		return
 	}
 	if commandHandledBeforeConfigLoad(cmd) {
@@ -108,8 +125,28 @@ func main() {
 				fmt.Fprintln(os.Stderr, "init error:", err)
 				os.Exit(1)
 			}
+		case "settings":
+			if err := runSettings(cfgPath, args[1:]); err != nil {
+				if translated := translateAndPrintError(err, os.Stderr); translated != nil {
+					fmt.Fprintln(os.Stderr, "settings error:", err)
+				}
+				os.Exit(1)
+			}
+		case "setup":
+			result, err := runSetup(cfgPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "setup error:", err)
+				os.Exit(1)
+			}
+			if !result.StartChat {
+				return
+			}
+			cmd = "chat"
+			args = []string{"chat"}
 		}
-		return
+		if cmd != "chat" {
+			return
+		}
 	}
 	if cmd == "doctor" {
 		cwd, err := os.Getwd()
@@ -127,10 +164,43 @@ func main() {
 		}
 		return
 	}
+	if cmd == "status" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			cwd = ""
+		}
+		cfg, validationError, loadErr := loadDoctorConfig(cfgPathOrDefault(cfgPath), cwd)
+		if loadErr != nil {
+			fmt.Fprintln(os.Stderr, "status error:", loadErr)
+			os.Exit(1)
+		}
+		var database *db.DB
+		if strings.TrimSpace(cfg.DBPath) != "" {
+			_ = os.MkdirAll(filepath.Dir(cfg.DBPath), 0o755)
+			if opened, openErr := db.Open(cfg.DBPath); openErr == nil {
+				database = opened
+				defer database.Close()
+			}
+		}
+		statusOptions, err := parseStatusCommandArgs(args[1:], advancedHelp)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "status error:", err)
+			os.Exit(2)
+		}
+		if err := runStatusCommandWithOptions(cfgPathOrDefault(cfgPath), cfg, validationError, database, os.Stdout, statusOptions); err != nil {
+			if translated := translateAndPrintError(err, os.Stderr); translated != nil {
+				fmt.Fprintln(os.Stderr, "status error:", err)
+			}
+			os.Exit(1)
+		}
+		return
+	}
 
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "config error:", err)
+		if translated := translateAndPrintError(err, os.Stderr); translated != nil {
+			fmt.Fprintln(os.Stderr, "config error:", err)
+		}
 		if hint := configErrorHint(err); hint != "" {
 			fmt.Fprintln(os.Stderr, hint)
 		}
@@ -180,11 +250,15 @@ func main() {
 	defer stopSignals()
 	cfg, secretManager, auditLogger, err := setupSecurity(ctx, cfg, d)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "security error:", err)
+		if translated := translateAndPrintError(err, os.Stderr); translated != nil {
+			fmt.Fprintln(os.Stderr, "security error:", err)
+		}
 		os.Exit(1)
 	}
-	if err := validateStartupCommand(cmd, cfg); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+	if err := validateStartupCommand(cmd, cfg, unsafeDev); err != nil {
+		if translated := translateAndPrintError(err, os.Stderr); translated != nil {
+			fmt.Fprintln(os.Stderr, err)
+		}
 		os.Exit(1)
 	}
 	if cmd == "secrets" {
@@ -203,7 +277,8 @@ func main() {
 		return
 	}
 	if cmd == "audit" {
-		if err := runAuditCommand(ctx, auditLogger, args[1:], os.Stdout); err != nil {
+		cp := controlplane.NewLocal(cfg, d, nil, auditLogger, nil)
+		if err := runAuditCommand(ctx, cp, args[1:], os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, "audit error:", err)
 			os.Exit(1)
 		}
@@ -211,23 +286,30 @@ func main() {
 	}
 	approvalBroker, err := setupApprovalBroker(cfg, d, auditLogger)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "approval error:", err)
+		if translated := translateAndPrintError(err, os.Stderr); translated != nil {
+			fmt.Fprintln(os.Stderr, "approval error:", err)
+		}
 		os.Exit(1)
 	}
 	if commandHandledBeforeRuntimeBootstrap(cmd) {
-		switch cmd {
-		case "capabilities":
-			if err := runCapabilitiesCommand(cfg, approvalBroker, args[1:], os.Stdout, os.Stderr); err != nil {
-				fmt.Fprintln(os.Stderr, "capabilities error:", err)
+		var prov *providers.Client
+		if cmd == "embeddings" {
+			prov = newProviderClient(cfg)
+		}
+		handled, err := runPreRuntimeCommand(ctx, cmd, cfg, d, prov, auditLogger, approvalBroker, args[1:], os.Stdout, os.Stderr)
+		if handled {
+			if err != nil {
+				if isUsageError(err) {
+					fmt.Fprintln(os.Stderr, err)
+					os.Exit(2)
+				}
+				fmt.Fprintln(os.Stderr, cmd+" error:", err)
 				os.Exit(1)
 			}
+			return
 		}
-		return
 	}
-	timeout := time.Duration(cfg.Provider.TimeoutSeconds) * time.Second
-	prov := providers.New(cfg.Provider.APIBase, cfg.Provider.APIKey, timeout)
-	prov.EmbedDimensions = cfg.Provider.EmbedDimensions
-	prov.HostPolicy = buildHostPolicy(cfg)
+	prov := newProviderClient(cfg)
 	art := &artifacts.Store{Dir: cfg.ArtifactsDir, DB: d}
 
 	b := bus.New(256)
@@ -510,11 +592,6 @@ func main() {
 			fmt.Fprintln(os.Stderr, "migrate-openclaw error:", err)
 			os.Exit(1)
 		}
-	case "embeddings":
-		if err := runEmbeddingsCommand(ctx, cfg, d, prov, args[1:], os.Stdout, os.Stderr); err != nil {
-			fmt.Fprintln(os.Stderr, "embeddings error:", err)
-			os.Exit(1)
-		}
 	case "skills":
 		deps := skillsCommandDeps{
 			Client: newClawHubClient(cfg),
@@ -539,7 +616,9 @@ func main() {
 		}
 	case "approvals":
 		if err := runApprovalsCommand(ctx, approvalBroker, args[1:], os.Stdout, os.Stderr); err != nil {
-			fmt.Fprintln(os.Stderr, "approvals error:", err)
+			if translated := translateAndPrintError(err, os.Stderr); translated != nil {
+				fmt.Fprintln(os.Stderr, "approvals error:", err)
+			}
 			os.Exit(1)
 		}
 	case "devices":
@@ -552,58 +631,13 @@ func main() {
 			fmt.Fprintln(os.Stderr, "pairing error:", err)
 			os.Exit(1)
 		}
-	case "scope":
-		// or3-intern scope link <session-key> <scope-key>
-		// or3-intern scope list <scope-key>
-		fs := flag.NewFlagSet("scope", flag.ExitOnError)
-		_ = fs.Parse(args[1:])
-		scopeArgs := fs.Args()
-		if len(scopeArgs) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: or3-intern scope <link|list> ...")
-			os.Exit(2)
-		}
-		switch scopeArgs[0] {
-		case "link":
-			if len(scopeArgs) < 3 {
-				fmt.Fprintln(os.Stderr, "usage: or3-intern scope link <session-key> <scope-key>")
-				os.Exit(2)
-			}
-			if err := d.LinkSession(ctx, scopeArgs[1], scopeArgs[2], nil); err != nil {
-				fmt.Fprintln(os.Stderr, "scope link error:", err)
+	case "connect-device":
+		if err := runConnectDeviceCommand(ctx, cfgPathOrDefault(cfgPath), &cfg, d, approvalBroker, args[1:], os.Stdout, os.Stderr); err != nil {
+			if translated := translateAndPrintError(err, os.Stderr); translated == nil {
 				os.Exit(1)
 			}
-			fmt.Printf("Linked session %q -> scope %q\n", scopeArgs[1], scopeArgs[2])
-		case "list":
-			if len(scopeArgs) < 2 {
-				fmt.Fprintln(os.Stderr, "usage: or3-intern scope list <scope-key>")
-				os.Exit(2)
-			}
-			sessions, err := d.ListScopeSessions(ctx, scopeArgs[1])
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "scope list error:", err)
-				os.Exit(1)
-			}
-			if len(sessions) == 0 {
-				fmt.Println("(no sessions linked to scope)")
-			} else {
-				for _, s := range sessions {
-					fmt.Println(s)
-				}
-			}
-		case "resolve":
-			if len(scopeArgs) < 2 {
-				fmt.Fprintln(os.Stderr, "usage: or3-intern scope resolve <session-key>")
-				os.Exit(2)
-			}
-			scopeKey, err := d.ResolveScopeKey(ctx, scopeArgs[1])
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "scope resolve error:", err)
-				os.Exit(1)
-			}
-			fmt.Println(scopeKey)
-		default:
-			fmt.Fprintln(os.Stderr, "unknown scope subcommand:", scopeArgs[0])
-			os.Exit(2)
+			fmt.Fprintln(os.Stderr, "connect-device error:", err)
+			os.Exit(1)
 		}
 	default:
 		fmt.Fprintln(os.Stderr, "unknown command:", cmd)
@@ -645,7 +679,7 @@ func loadDoctorConfig(cfgPath, cwd string) (config.Config, string, error) {
 
 func commandHandledBeforeConfigLoad(cmd string) bool {
 	switch cmd {
-	case "config-path", "version", "configure", "init":
+	case "config-path", "version", "configure", "init", "setup", "settings":
 		return true
 	default:
 		return false
@@ -654,7 +688,7 @@ func commandHandledBeforeConfigLoad(cmd string) bool {
 
 func commandHandledBeforeRuntimeBootstrap(cmd string) bool {
 	switch cmd {
-	case "capabilities":
+	case "capabilities", "embeddings", "scope":
 		return true
 	default:
 		return false
@@ -725,7 +759,9 @@ func buildToolRegistryWithOptions(cfg config.Config, d *db.DB, prov *providers.C
 	fileRoot := allowedRoot(cfg)
 	sandboxCfg := tools.BubblewrapConfig{Enabled: cfg.Hardening.Sandbox.Enabled, BubblewrapPath: cfg.Hardening.Sandbox.BubblewrapPath, AllowNetwork: cfg.Hardening.Sandbox.AllowNetwork, WritablePaths: append([]string{}, cfg.Hardening.Sandbox.WritablePaths...)}
 	hostPolicy := buildHostPolicy(cfg)
-	reg.Register(&tools.ExecTool{Timeout: time.Duration(cfg.Tools.ExecTimeoutSeconds) * time.Second, RestrictDir: fileRoot, PathAppend: cfg.Tools.PathAppend, AllowedPrograms: append([]string{}, cfg.Hardening.ExecAllowedPrograms...), ChildEnvAllowlist: append([]string{}, cfg.Hardening.ChildEnvAllowlist...), Sandbox: sandboxCfg, EnableLegacyShell: cfg.Hardening.EnableExecShell, ApprovalBroker: approvalBroker})
+	if shouldRegisterExecTool(cfg) {
+		reg.Register(&tools.ExecTool{Timeout: time.Duration(cfg.Tools.ExecTimeoutSeconds) * time.Second, RestrictDir: fileRoot, PathAppend: cfg.Tools.PathAppend, AllowedPrograms: append([]string{}, cfg.Hardening.ExecAllowedPrograms...), ChildEnvAllowlist: append([]string{}, cfg.Hardening.ChildEnvAllowlist...), Sandbox: sandboxCfg, EnableLegacyShell: cfg.Hardening.EnableExecShell, ApprovalBroker: approvalBroker})
+	}
 	reg.Register(&tools.ReadFile{FileTool: tools.FileTool{Root: fileRoot}})
 	reg.Register(&tools.WriteFile{FileTool: tools.FileTool{Root: fileRoot}})
 	reg.Register(&tools.EditFile{FileTool: tools.FileTool{Root: fileRoot}})
@@ -764,6 +800,20 @@ func buildToolRegistryWithOptions(cfg config.Config, d *db.DB, prov *providers.C
 		mcpRegistrar.RegisterTools(reg)
 	}
 	return reg
+}
+
+func shouldRegisterExecTool(cfg config.Config) bool {
+	if !cfg.Tools.EnableExec {
+		return false
+	}
+	if len(cfg.Hardening.ExecAllowedPrograms) == 0 {
+		return false
+	}
+	spec := config.ProfileSpec(cfg.RuntimeProfile)
+	if spec.ForbidPrivilegedTools {
+		return false
+	}
+	return true
 }
 
 func buildChannelManager(cfg config.Config, cliDeliverer *cli.Deliverer, art *artifacts.Store, maxMediaBytes int, approvalBroker *approval.Broker) (*rootchannels.Manager, error) {

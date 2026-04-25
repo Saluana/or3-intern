@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -54,6 +55,19 @@ func (serviceContextTool) Execute(ctx context.Context, params map[string]any) (s
 		return "", fmt.Errorf("requester identity mismatch: got %#v want actor=%q role=%q", identity, wantActor, wantRole)
 	}
 	return "ok", nil
+}
+
+func TestServiceServerControl_CachesWrapper(t *testing.T) {
+	server := &serviceServer{jobs: agent.NewJobRegistry(time.Minute, 32)}
+
+	first := server.control()
+	second := server.control()
+	if first == nil {
+		t.Fatal("expected control service")
+	}
+	if first != second {
+		t.Fatal("expected control service wrapper to be cached")
+	}
 }
 
 func TestServiceAuthMiddleware_RejectsMissingBearer(t *testing.T) {
@@ -166,6 +180,85 @@ func TestValidateServiceAuthorization(t *testing.T) {
 	}
 }
 
+func TestServiceBoundary_RateLimitIsPerActorAndPathAndEchoesRequestID(t *testing.T) {
+	server := &serviceServer{config: config.Config{Service: config.ServiceConfig{MutationRateLimitPerMinute: 1}}}
+	var handled int
+	handler := serviceBoundaryMiddleware(server, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handled++
+		writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true})
+	}))
+
+	newReq := func(actor, path, requestID string) *http.Request {
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		if requestID != "" {
+			req.Header.Set("X-Request-Id", requestID)
+		}
+		ctx := context.WithValue(req.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Actor: actor, Role: approval.RoleOperator})
+		return req.WithContext(ctx)
+	}
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, newReq("actor-a", "/internal/v1/scope/links", "req-rate-1"))
+	if first.Code != http.StatusOK || first.Header().Get("X-Request-Id") != "req-rate-1" {
+		t.Fatalf("expected first mutation through with echoed request ID, got code=%d id=%q body=%s", first.Code, first.Header().Get("X-Request-Id"), first.Body.String())
+	}
+
+	limited := httptest.NewRecorder()
+	handler.ServeHTTP(limited, newReq("actor-a", "/internal/v1/scope/links", "req-rate-2"))
+	if limited.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected second same actor/path mutation to be rate limited, got %d (%s)", limited.Code, limited.Body.String())
+	}
+	if !strings.Contains(limited.Body.String(), "req-rate-2") {
+		t.Fatalf("expected rate limit response to include request ID, got %s", limited.Body.String())
+	}
+
+	differentPath := httptest.NewRecorder()
+	handler.ServeHTTP(differentPath, newReq("actor-a", "/internal/v1/approvals/expire", ""))
+	if differentPath.Code != http.StatusOK {
+		t.Fatalf("expected same actor on different path to pass, got %d", differentPath.Code)
+	}
+
+	differentActor := httptest.NewRecorder()
+	handler.ServeHTTP(differentActor, newReq("actor-b", "/internal/v1/scope/links", ""))
+	if differentActor.Code != http.StatusOK {
+		t.Fatalf("expected different actor on same path to pass, got %d", differentActor.Code)
+	}
+	if handled != 3 {
+		t.Fatalf("expected downstream handler to run exactly 3 times, got %d", handled)
+	}
+}
+
+func TestWriteServiceErrorRedactsInternalError(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/turns", nil)
+	req = req.WithContext(context.WithValue(req.Context(), serviceRequestContextKey{}, serviceRequestContext{RequestID: "req-redact"}))
+	rec := httptest.NewRecorder()
+
+	writeServiceError(rec, req, http.StatusBadGateway, "turn failed", fmt.Errorf("database password leaked in stack trace"))
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "turn failed") || !strings.Contains(body, "req-redact") {
+		t.Fatalf("expected public error and request ID, got %s", body)
+	}
+	if strings.Contains(body, "database password") || strings.Contains(body, "stack trace") {
+		t.Fatalf("expected internal error to be redacted, got %s", body)
+	}
+}
+
+func TestDecodeServiceSubagentRequest_RejectsInvalidTimeoutTypes(t *testing.T) {
+	registry := tools.NewRegistry()
+	for _, body := range []string{
+		`{"parent_session_key":"svc:test","task":"run","tool_policy":{"mode":"deny_all"},"timeout_seconds":1.5}`,
+		`{"parent_session_key":"svc:test","task":"run","tool_policy":{"mode":"deny_all"},"timeout_seconds":"slow"}`,
+	} {
+		if _, err := decodeServiceSubagentRequest(strings.NewReader(body), registry); err == nil {
+			t.Fatalf("expected invalid timeout to fail for body %s", body)
+		}
+	}
+}
+
 func TestDecodeServiceTurnRequest_AcceptsToolPolicyAliases(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(serviceTestTool{name: "read_file"})
@@ -219,7 +312,7 @@ func TestDecodeServiceSubagentRequest_AcceptsSessionAndToolPolicyAliases(t *test
 		"sessionKey":"svc:parent",
 		"task":"background task",
 		"promptSnapshot":[{"role":"user","content":"remember this"}],
-		"toolPolicy":{"mode":"deny_list","blockedTools":["write_file"]},
+		"toolPolicy":{"mode":"allow_list","allowedTools":["read_file"]},
 		"timeout":9,
 		"profile_name":"or3-default",
 		"channel":"service",
@@ -232,7 +325,7 @@ func TestDecodeServiceSubagentRequest_AcceptsSessionAndToolPolicyAliases(t *test
 		t.Fatalf("expected session key alias to populate parent session key, got %#v", req)
 	}
 	if !req.RestrictTools || len(req.AllowedTools) != 1 || req.AllowedTools[0] != "read_file" {
-		t.Fatalf("expected deny_list to resolve surviving tools, got %#v", req)
+		t.Fatalf("expected allow_list alias to resolve tools, got %#v", req)
 	}
 	if req.TimeoutSeconds != 9 {
 		t.Fatalf("expected timeout alias to populate timeout seconds, got %#v", req)
@@ -539,11 +632,11 @@ func TestServiceJobs_MethodGuardsAndNotFound(t *testing.T) {
 			wantBody:   "job action not found",
 		},
 		{
-			name:       "malformed job path returns not found",
+			name:       "snapshot missing job returns not found",
 			method:     http.MethodGet,
 			path:       "/internal/v1/jobs/job_1",
 			wantStatus: http.StatusNotFound,
-			wantBody:   "job route not found",
+			wantBody:   "job not found",
 		},
 		{
 			name:       "subagents rejects non post",
@@ -709,7 +802,7 @@ func TestServiceSubagents_EnqueueAndAbortQueuedJob(t *testing.T) {
 		"parent_session_key":"parent",
 		"task":"background task",
 		"prompt_snapshot":[{"role":"user","content":"remember this"}],
-		"allowed_tools":["read_file"],
+		"tool_policy":{"mode":"allow_list","allowed_tools":["read_file"]},
 		"timeout_seconds":9,
 		"meta":{"trace_id":"trace-1"},
 		"profile_name":"or3-default",
@@ -815,6 +908,8 @@ func buildServiceTestRuntime(t *testing.T, handler func(http.ResponseWriter, *ht
 		Builder:      &agent.Builder{DB: database, HistoryMax: 10},
 		MaxToolLoops: 2,
 	}
+	rt.Tools.Register(serviceTestTool{name: "read_file"})
+	rt.Tools.Register(serviceTestTool{name: "write_file"})
 	cleanup := func() {
 		providerServer.CloseClientConnections()
 		providerServer.Close()
@@ -836,18 +931,25 @@ func openServiceTestDB(t *testing.T) (*db.DB, func()) {
 
 func newServiceTestHTTPServer(t *testing.T, secret string, server *serviceServer) *httptest.Server {
 	t.Helper()
-	mux := http.NewServeMux()
-	mux.Handle("/internal/v1/turns", http.HandlerFunc(server.handleTurns))
-	mux.Handle("/internal/v1/subagents", http.HandlerFunc(server.handleSubagents))
-	mux.Handle("/internal/v1/jobs/", http.HandlerFunc(server.handleJobs))
-	mux.Handle("/internal/v1/pairing/requests", http.HandlerFunc(server.handlePairing))
-	mux.Handle("/internal/v1/pairing/requests/", http.HandlerFunc(server.handlePairing))
-	mux.Handle("/internal/v1/pairing/exchange", http.HandlerFunc(server.handlePairing))
-	mux.Handle("/internal/v1/devices", http.HandlerFunc(server.handleDevices))
-	mux.Handle("/internal/v1/devices/", http.HandlerFunc(server.handleDevices))
-	mux.Handle("/internal/v1/approvals", http.HandlerFunc(server.handleApprovals))
-	mux.Handle("/internal/v1/approvals/", http.HandlerFunc(server.handleApprovals))
-	return httptest.NewServer(serviceAuthMiddlewareWithBroker(secret, server.broker, mux))
+	server.config.Service.Secret = secret
+	if server.config.Service.SharedSecretRole == "" {
+		server.config.Service.SharedSecretRole = approval.RoleOperator
+	}
+	if server.broker != nil && strings.TrimSpace(server.config.Service.Listen) == "" {
+		server.config.Service.Listen = "127.0.0.1:0"
+	}
+	if server.broker != nil && !server.config.Service.AllowUnauthenticatedPairing {
+		server.config.Service.AllowUnauthenticatedPairing = true
+	}
+	if server.subagentManager != nil && server.subagentManager.BackgroundTools == nil {
+		server.subagentManager.BackgroundTools = func() *tools.Registry {
+			registry := tools.NewRegistry()
+			registry.Register(serviceTestTool{name: "read_file"})
+			registry.Register(serviceTestTool{name: "write_file"})
+			return registry
+		}
+	}
+	return httptest.NewServer(serviceAuthMiddlewareWithBroker(server.config, server.broker, serviceBoundaryMiddleware(server, newServiceMux(server))))
 }
 
 func mustServiceRequest(t *testing.T, server *httptest.Server, secret, method, path, body string) *http.Request {
@@ -964,6 +1066,8 @@ func TestServicePairingWorkflow_AllowsUnauthenticatedBootstrapAndPairedOperatorR
 	defer cleanup()
 
 	server := &serviceServer{broker: broker, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	server.config.Service.AllowUnauthenticatedPairing = true
+	server.config.Service.Listen = "127.0.0.1:0"
 	httpServer := newServiceTestHTTPServer(t, strings.Repeat("p", 32), server)
 	defer httpServer.Close()
 
@@ -1024,6 +1128,8 @@ func TestServicePairingWorkflow_RejectsNonOperatorDeviceOnOperatorRoutes(t *test
 	defer cleanup()
 
 	server := &serviceServer{broker: broker, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	server.config.Service.AllowUnauthenticatedPairing = true
+	server.config.Service.Listen = "127.0.0.1:0"
 	httpServer := newServiceTestHTTPServer(t, strings.Repeat("r", 32), server)
 	defer httpServer.Close()
 
@@ -1359,6 +1465,376 @@ func TestServiceDevices_Rotate_RevokedDeviceFails(t *testing.T) {
 	}
 }
 
+func TestServiceApprovals_CancelRoute(t *testing.T) {
+	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Exec.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+	decision, err := broker.EvaluateExec(context.Background(), approval.ExecEvaluation{
+		ExecutablePath: "/bin/echo",
+		Argv:           []string{"hello"},
+		WorkingDir:     "/tmp",
+		ToolName:       "exec",
+	})
+	if err != nil {
+		t.Fatalf("EvaluateExec: %v", err)
+	}
+	server := &serviceServer{broker: broker, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("x", 32), server)
+	defer httpServer.Close()
+
+	req := mustJSONRequest(t, http.MethodPost, fmt.Sprintf("%s/internal/v1/approvals/%d/cancel", httpServer.URL, decision.RequestID), `{"note":"hold"}`)
+	req.Header.Set("Authorization", "Bearer "+mustIssueServiceTokenAt(t, strings.Repeat("x", 32), time.Now()))
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do cancel approval: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected cancel 200, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	item, err := broker.DB.GetApprovalRequest(context.Background(), decision.RequestID)
+	if err != nil {
+		t.Fatalf("GetApprovalRequest: %v", err)
+	}
+	if item.Status != approval.StatusCanceled {
+		t.Fatalf("expected canceled status, got %#v", item)
+	}
+}
+
+func TestServiceApprovals_ExpireRoute(t *testing.T) {
+	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Exec.Mode = config.ApprovalModeAsk
+		cfg.PendingTTLSeconds = 1
+	})
+	defer cleanup()
+	now := time.Unix(1_700_000_000, 0).UTC()
+	broker.Now = func() time.Time { return now }
+	decision, err := broker.EvaluateExec(context.Background(), approval.ExecEvaluation{
+		ExecutablePath: "/bin/echo",
+		Argv:           []string{"hello"},
+		WorkingDir:     "/tmp",
+		ToolName:       "exec",
+	})
+	if err != nil {
+		t.Fatalf("EvaluateExec: %v", err)
+	}
+	broker.Now = func() time.Time { return now.Add(5 * time.Second) }
+	server := &serviceServer{broker: broker, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("y", 32), server)
+	defer httpServer.Close()
+
+	req := mustServiceRequest(t, httpServer, strings.Repeat("y", 32), http.MethodPost, "/internal/v1/approvals/expire", "")
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do expire approvals: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected expire 200, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	payload := mustDecodeJSONBody(t, resp.Body)
+	if payload["expired"] != float64(1) {
+		t.Fatalf("expected expired count 1, got %#v", payload)
+	}
+	item, err := broker.DB.GetApprovalRequest(context.Background(), decision.RequestID)
+	if err != nil {
+		t.Fatalf("GetApprovalRequest: %v", err)
+	}
+	if item.Status != approval.StatusExpired {
+		t.Fatalf("expected expired status, got %#v", item)
+	}
+}
+
+func TestServiceApprovals_AllowlistsCRUD(t *testing.T) {
+	broker, cleanup := buildServiceTestBroker(t, nil)
+	defer cleanup()
+	server := &serviceServer{broker: broker, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	secret := strings.Repeat("g", 32)
+	httpServer := newServiceTestHTTPServer(t, secret, server)
+	defer httpServer.Close()
+
+	addReq := mustServiceRequest(t, httpServer, secret, http.MethodPost, "/internal/v1/approvals/allowlists", `{"domain":"exec","scope":{"host_id":"`+broker.HostID+`","tool":"exec"},"matcher":{"executable_path":"/bin/echo"}}`)
+	addResp, err := httpServer.Client().Do(addReq)
+	if err != nil {
+		t.Fatalf("Do add allowlist: %v", err)
+	}
+	defer addResp.Body.Close()
+	if addResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("expected add allowlist 202, got %d (%s)", addResp.StatusCode, mustReadBody(t, addResp.Body))
+	}
+	added := mustDecodeJSONBody(t, addResp.Body)
+	item, ok := added["item"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected allowlist item payload, got %#v", added)
+	}
+	id := int64(item["ID"].(float64))
+
+	listReq := mustServiceRequest(t, httpServer, secret, http.MethodGet, "/internal/v1/approvals/allowlists?domain=exec", "")
+	listResp, err := httpServer.Client().Do(listReq)
+	if err != nil {
+		t.Fatalf("Do list allowlists: %v", err)
+	}
+	defer listResp.Body.Close()
+	if listResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected list allowlists 200, got %d (%s)", listResp.StatusCode, mustReadBody(t, listResp.Body))
+	}
+
+	removeReq := mustServiceRequest(t, httpServer, secret, http.MethodPost, fmt.Sprintf("/internal/v1/approvals/allowlists/%d/remove", id), "")
+	removeResp, err := httpServer.Client().Do(removeReq)
+	if err != nil {
+		t.Fatalf("Do remove allowlist: %v", err)
+	}
+	defer removeResp.Body.Close()
+	if removeResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected remove allowlist 200, got %d (%s)", removeResp.StatusCode, mustReadBody(t, removeResp.Body))
+	}
+}
+
+func TestServiceJobs_GetSnapshotRoute(t *testing.T) {
+	jobs := agent.NewJobRegistry(time.Minute, 32)
+	server := &serviceServer{jobs: jobs}
+	job := jobs.Register("turn")
+	jobs.Publish(job.ID, "started", map[string]any{"status": "running"})
+	jobs.Complete(job.ID, "completed", map[string]any{"final_text": "done"})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/internal/v1/jobs/"+job.ID, nil)
+	server.handleJobs(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	payload := mustDecodeJSONBody(t, rec.Body)
+	if payload["final_text"] != "done" {
+		t.Fatalf("expected final_text in snapshot, got %#v", payload)
+	}
+	if _, ok := payload["events"].([]any); !ok {
+		t.Fatalf("expected events array in snapshot payload, got %#v", payload)
+	}
+}
+
+func TestServiceStatusEndpoints(t *testing.T) {
+	cfg := hostedNoExecBaseConfig()
+	cfg.Channels.Slack.Enabled = true
+	rt := &agent.Runtime{Tools: tools.NewRegistry()}
+	server := &serviceServer{config: cfg, runtime: rt, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, cfg.Service.Secret, server)
+	defer httpServer.Close()
+
+	for _, tc := range []struct {
+		path       string
+		wantStatus int
+		wantKey    string
+	}{
+		{path: "/internal/v1/health", wantStatus: http.StatusOK, wantKey: "status"},
+		{path: "/internal/v1/readiness", wantStatus: http.StatusServiceUnavailable, wantKey: "ready"},
+		{path: "/internal/v1/capabilities", wantStatus: http.StatusOK, wantKey: "runtimeProfile"},
+	} {
+		req := mustServiceRequest(t, httpServer, cfg.Service.Secret, http.MethodGet, tc.path, "")
+		resp, err := httpServer.Client().Do(req)
+		if err != nil {
+			t.Fatalf("Do %s: %v", tc.path, err)
+		}
+		if resp.StatusCode != tc.wantStatus {
+			t.Fatalf("expected %s to return %d, got %d (%s)", tc.path, tc.wantStatus, resp.StatusCode, mustReadBody(t, resp.Body))
+		}
+		payload := mustDecodeJSONBody(t, resp.Body)
+		resp.Body.Close()
+		if _, ok := payload[tc.wantKey]; !ok {
+			t.Fatalf("expected key %q in %s payload, got %#v", tc.wantKey, tc.path, payload)
+		}
+	}
+}
+
+func TestServiceStatusEndpoints_RejectNonGET(t *testing.T) {
+	server := &serviceServer{jobs: agent.NewJobRegistry(time.Minute, 32)}
+	tests := []struct {
+		path    string
+		handler func(http.ResponseWriter, *http.Request)
+	}{
+		{path: "/internal/v1/health", handler: server.handleHealth},
+		{path: "/internal/v1/readiness", handler: server.handleReadiness},
+		{path: "/internal/v1/capabilities", handler: server.handleCapabilities},
+	}
+	for _, tc := range tests {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, tc.path, nil)
+		tc.handler(rec, req)
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("expected %s to reject POST with 405, got %d (%s)", tc.path, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestServiceEmbeddingsRoutes(t *testing.T) {
+	database, cleanup := openServiceTestDB(t)
+	defer cleanup()
+	if _, err := database.InsertMemoryNote(context.Background(), "sess-1", "hello memory", nil, sql.NullInt64{}, ""); err != nil {
+		t.Fatalf("InsertMemoryNote: %v", err)
+	}
+	providerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/embeddings" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"embedding": []float32{0.1, 0.2}}}})
+	}))
+	defer providerServer.Close()
+	provider := providers.New(providerServer.URL, "", 5*time.Second)
+	provider.HTTP = providerServer.Client()
+	cfg := config.Default()
+	cfg.Service.Secret = strings.Repeat("e", 32)
+	cfg.Service.SharedSecretRole = approval.RoleOperator
+	cfg.Provider.APIBase = providerServer.URL
+	cfg.Provider.EmbedModel = "text-embedding-3-small"
+	server := &serviceServer{config: cfg, runtime: &agent.Runtime{DB: database, Provider: provider}, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, cfg.Service.Secret, server)
+	defer httpServer.Close()
+
+	statusReq := mustServiceRequest(t, httpServer, cfg.Service.Secret, http.MethodGet, "/internal/v1/embeddings/status", "")
+	statusResp, err := httpServer.Client().Do(statusReq)
+	if err != nil {
+		t.Fatalf("Do embeddings status: %v", err)
+	}
+	defer statusResp.Body.Close()
+	if statusResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected embeddings status 200, got %d (%s)", statusResp.StatusCode, mustReadBody(t, statusResp.Body))
+	}
+	statusPayload := mustDecodeJSONBody(t, statusResp.Body)
+	if statusPayload["status"] != "ok" {
+		t.Fatalf("unexpected embeddings status payload: %#v", statusPayload)
+	}
+
+	rebuildReq := mustServiceRequest(t, httpServer, cfg.Service.Secret, http.MethodPost, "/internal/v1/embeddings/rebuild", `{"target":"memory"}`)
+	rebuildResp, err := httpServer.Client().Do(rebuildReq)
+	if err != nil {
+		t.Fatalf("Do embeddings rebuild: %v", err)
+	}
+	defer rebuildResp.Body.Close()
+	if rebuildResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected embeddings rebuild 200, got %d (%s)", rebuildResp.StatusCode, mustReadBody(t, rebuildResp.Body))
+	}
+	rebuildPayload := mustDecodeJSONBody(t, rebuildResp.Body)
+	if rebuildPayload["memoryNotesRebuilt"] != float64(1) {
+		t.Fatalf("unexpected embeddings rebuild payload: %#v", rebuildPayload)
+	}
+}
+
+func TestServiceEmbeddingsRoutes_MethodGuards(t *testing.T) {
+	server := &serviceServer{jobs: agent.NewJobRegistry(time.Minute, 32)}
+	tests := []struct {
+		method  string
+		path    string
+		handler func(http.ResponseWriter, *http.Request)
+	}{
+		{method: http.MethodPost, path: "/internal/v1/embeddings/status", handler: server.handleEmbeddings},
+		{method: http.MethodGet, path: "/internal/v1/embeddings/rebuild", handler: server.handleEmbeddings},
+	}
+	for _, tc := range tests {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(tc.method, tc.path, nil)
+		req = req.WithContext(context.WithValue(req.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Kind: "shared-secret", Actor: "service:shared-secret", Role: "admin"}))
+		tc.handler(rec, req)
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("expected %s %s to return 405, got %d (%s)", tc.method, tc.path, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestServiceAuditRoutes(t *testing.T) {
+	database, cleanup := openServiceTestDB(t)
+	defer cleanup()
+	audit := &security.AuditLogger{DB: database, Key: []byte(strings.Repeat("a", 32)), Strict: true}
+	if err := audit.Record(context.Background(), "tool.execute", "sess-1", "cli", map[string]any{"tool": "exec"}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	cfg := config.Default()
+	cfg.Service.Secret = strings.Repeat("a", 32)
+	cfg.Service.SharedSecretRole = approval.RoleOperator
+	cfg.Security.Audit.Enabled = true
+	server := &serviceServer{config: cfg, runtime: &agent.Runtime{DB: database, Audit: audit}, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, cfg.Service.Secret, server)
+	defer httpServer.Close()
+
+	statusReq := mustServiceRequest(t, httpServer, cfg.Service.Secret, http.MethodGet, "/internal/v1/audit", "")
+	statusResp, err := httpServer.Client().Do(statusReq)
+	if err != nil {
+		t.Fatalf("Do audit status: %v", err)
+	}
+	defer statusResp.Body.Close()
+	if statusResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected audit status 200, got %d (%s)", statusResp.StatusCode, mustReadBody(t, statusResp.Body))
+	}
+	statusPayload := mustDecodeJSONBody(t, statusResp.Body)
+	if statusPayload["eventCount"] != float64(1) {
+		t.Fatalf("unexpected audit status payload: %#v", statusPayload)
+	}
+
+	verifyReq := mustServiceRequest(t, httpServer, cfg.Service.Secret, http.MethodPost, "/internal/v1/audit/verify", "")
+	verifyResp, err := httpServer.Client().Do(verifyReq)
+	if err != nil {
+		t.Fatalf("Do audit verify: %v", err)
+	}
+	defer verifyResp.Body.Close()
+	if verifyResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected audit verify 200, got %d (%s)", verifyResp.StatusCode, mustReadBody(t, verifyResp.Body))
+	}
+	verifyPayload := mustDecodeJSONBody(t, verifyResp.Body)
+	if verifyPayload["verified"] != true {
+		t.Fatalf("unexpected audit verify payload: %#v", verifyPayload)
+	}
+}
+
+func TestServiceScopeRoutes(t *testing.T) {
+	database, cleanup := openServiceTestDB(t)
+	defer cleanup()
+	cfg := config.Default()
+	cfg.Service.Secret = strings.Repeat("s", 32)
+	cfg.Service.SharedSecretRole = approval.RoleOperator
+	server := &serviceServer{config: cfg, runtime: &agent.Runtime{DB: database}, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, cfg.Service.Secret, server)
+	defer httpServer.Close()
+
+	linkReq := mustServiceRequest(t, httpServer, cfg.Service.Secret, http.MethodPost, "/internal/v1/scope/links", `{"session_key":"sess-a","scope_key":"shared-1"}`)
+	linkResp, err := httpServer.Client().Do(linkReq)
+	if err != nil {
+		t.Fatalf("Do scope link: %v", err)
+	}
+	defer linkResp.Body.Close()
+	if linkResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("expected scope link 202, got %d (%s)", linkResp.StatusCode, mustReadBody(t, linkResp.Body))
+	}
+
+	resolveReq := mustServiceRequest(t, httpServer, cfg.Service.Secret, http.MethodGet, "/internal/v1/scope/resolve?session_key=sess-a", "")
+	resolveResp, err := httpServer.Client().Do(resolveReq)
+	if err != nil {
+		t.Fatalf("Do scope resolve: %v", err)
+	}
+	defer resolveResp.Body.Close()
+	if resolveResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected scope resolve 200, got %d (%s)", resolveResp.StatusCode, mustReadBody(t, resolveResp.Body))
+	}
+	resolvePayload := mustDecodeJSONBody(t, resolveResp.Body)
+	if resolvePayload["scope_key"] != "shared-1" {
+		t.Fatalf("unexpected scope resolve payload: %#v", resolvePayload)
+	}
+
+	sessionsReq := mustServiceRequest(t, httpServer, cfg.Service.Secret, http.MethodGet, "/internal/v1/scope/sessions?scope_key=shared-1", "")
+	sessionsResp, err := httpServer.Client().Do(sessionsReq)
+	if err != nil {
+		t.Fatalf("Do scope sessions: %v", err)
+	}
+	defer sessionsResp.Body.Close()
+	if sessionsResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected scope sessions 200, got %d (%s)", sessionsResp.StatusCode, mustReadBody(t, sessionsResp.Body))
+	}
+	sessionsPayload := mustDecodeJSONBody(t, sessionsResp.Body)
+	sessions, ok := sessionsPayload["sessions"].([]any)
+	if !ok || len(sessions) != 1 || sessions[0] != "sess-a" {
+		t.Fatalf("unexpected scope sessions payload: %#v", sessionsPayload)
+	}
+}
+
 func TestRunServiceCommand_RefusesInvalidHostedProfile(t *testing.T) {
 	rt, cleanup := buildServiceTestRuntime(t, func(w http.ResponseWriter, r *http.Request) {})
 	defer cleanup()
@@ -1488,12 +1964,12 @@ func TestV1TurnsContractAliases(t *testing.T) {
 
 	// allowedTools camelCase alias should work the same as allowed_tools
 	t.Run("allowedTools camelCase", func(t *testing.T) {
-		req, err := decodeServiceTurnRequest(strings.NewReader(`{"session_key":"svc:key","message":"hi","allowedTools":["read_file"]}`), registry)
+		req, err := decodeServiceTurnRequest(strings.NewReader(`{"session_key":"svc:key","message":"hi","toolPolicy":{"mode":"allow_list","allowedTools":["read_file"]}}`), registry)
 		if err != nil {
 			t.Fatalf("decodeServiceTurnRequest: %v", err)
 		}
 		if !req.RestrictTools || len(req.AllowedTools) != 1 || req.AllowedTools[0] != "read_file" {
-			t.Fatalf("expected allowedTools alias to restrict to [read_file], got RestrictTools=%v AllowedTools=%v", req.RestrictTools, req.AllowedTools)
+			t.Fatalf("expected toolPolicy.allowedTools alias to restrict to [read_file], got RestrictTools=%v AllowedTools=%v", req.RestrictTools, req.AllowedTools)
 		}
 	})
 }

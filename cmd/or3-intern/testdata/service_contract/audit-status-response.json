@@ -1,0 +1,12 @@
+{
+  "status": "ok",
+  "enabled": true,
+  "available": true,
+  "strict": true,
+  "verifyOnStart": false,
+  "eventCount": 1,
+  "lastEventId": 1,
+  "lastEventType": "tool.execute",
+  "lastActor": "cli",
+  "lastEventAt": "__LAST_EVENT_AT__"
+}

@@ -381,6 +381,9 @@ func TestArmJob_KindEvery_ZeroInterval(t *testing.T) {
 	if len(jobs) != 1 {
 		t.Errorf("expected 1 job, got %d", len(jobs))
 	}
+	if _, ok := svc.entries["every-zero"]; !ok {
+		t.Fatal("expected KindEvery job to be armed in scheduler")
+	}
 }
 
 func TestArmJob_KindCron_ValidExpr(t *testing.T) {

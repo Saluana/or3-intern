@@ -142,6 +142,18 @@ func TestDefault_Values(t *testing.T) {
 	if cfg.Service.Secret != "" {
 		t.Fatalf("expected Service.Secret empty by default, got %q", cfg.Service.Secret)
 	}
+	if cfg.Service.SharedSecretRole != "service-client" {
+		t.Fatalf("expected Service.SharedSecretRole='service-client', got %q", cfg.Service.SharedSecretRole)
+	}
+	if cfg.Service.MaxCapability != "safe" {
+		t.Fatalf("expected Service.MaxCapability='safe', got %q", cfg.Service.MaxCapability)
+	}
+	if cfg.Service.AllowUnauthenticatedPairing {
+		t.Fatal("expected unauthenticated pairing to be disabled by default")
+	}
+	if cfg.Service.MutationRateLimitPerMinute != 60 {
+		t.Fatalf("expected Service.MutationRateLimitPerMinute=60, got %d", cfg.Service.MutationRateLimitPerMinute)
+	}
 	if cfg.Channels.Telegram.OpenAccess || cfg.Channels.Slack.OpenAccess || cfg.Channels.Discord.OpenAccess || cfg.Channels.WhatsApp.OpenAccess {
 		t.Error("expected external channels to default to closed access")
 	}
@@ -258,6 +270,66 @@ func TestApplyEnvOverrides_ServiceConfig(t *testing.T) {
 	}
 	if cfg.Service.Secret != "top-secret-value" {
 		t.Fatalf("unexpected service secret override: %q", cfg.Service.Secret)
+	}
+}
+
+func TestLoad_ServiceHardeningDefaultsAndNormalization(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	cfg := Default()
+	cfg.Service.SharedSecretRole = " OPERATOR "
+	cfg.Service.MaxCapability = " GUARDED "
+	cfg.Service.AllowUnauthenticatedPairing = true
+	cfg.Service.MutationRateLimitPerMinute = 0
+
+	b, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.Service.SharedSecretRole != "operator" {
+		t.Fatalf("expected normalized shared secret role, got %q", loaded.Service.SharedSecretRole)
+	}
+	if loaded.Service.MaxCapability != "guarded" {
+		t.Fatalf("expected normalized max capability, got %q", loaded.Service.MaxCapability)
+	}
+	if !loaded.Service.AllowUnauthenticatedPairing {
+		t.Fatal("expected explicit unauthenticated pairing setting to round trip")
+	}
+	if loaded.Service.MutationRateLimitPerMinute != 60 {
+		t.Fatalf("expected non-positive rate limit to default to 60, got %d", loaded.Service.MutationRateLimitPerMinute)
+	}
+}
+
+func TestLoad_ServiceHardeningInvalidValuesDefaultSafely(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	cfg := Default()
+	cfg.Service.SharedSecretRole = "root"
+	cfg.Service.MaxCapability = "god-mode"
+
+	b, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.Service.SharedSecretRole != "service-client" {
+		t.Fatalf("expected invalid shared secret role to default safely, got %q", loaded.Service.SharedSecretRole)
+	}
+	if loaded.Service.MaxCapability != "safe" {
+		t.Fatalf("expected invalid max capability to default safely, got %q", loaded.Service.MaxCapability)
 	}
 }
 

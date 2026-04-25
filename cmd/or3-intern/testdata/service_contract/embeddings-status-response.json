@@ -1,0 +1,7 @@
+{
+  "status": "ok",
+  "memoryVectorDims": 0,
+  "currentEmbedFingerprint": "http://provider.example|text-embedding-3-small",
+  "docIndexEnabled": false,
+  "docRootsConfigured": false
+}

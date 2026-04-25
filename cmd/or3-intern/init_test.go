@@ -12,7 +12,7 @@ import (
 	"or3-intern/internal/config"
 )
 
-func TestInitDefaults_UsesWorkspacePaths(t *testing.T) {
+func TestInitDefaults_UsesAppDataPaths(t *testing.T) {
 	t.Setenv("OR3_DB_PATH", "")
 	t.Setenv("OR3_ARTIFACTS_DIR", "")
 	t.Setenv("OR3_API_BASE", "")
@@ -20,11 +20,11 @@ func TestInitDefaults_UsesWorkspacePaths(t *testing.T) {
 	t.Setenv("OR3_MODEL", "")
 	t.Setenv("OR3_EMBED_MODEL", "")
 	cfg := initDefaults("/tmp/project")
-	if cfg.DBPath != "/tmp/project/.or3/or3-intern.sqlite" {
-		t.Fatalf("unexpected DB path: %q", cfg.DBPath)
+	if strings.Contains(cfg.DBPath, "/tmp/project/.or3") {
+		t.Fatalf("DB path should not default inside workspace: %q", cfg.DBPath)
 	}
-	if cfg.ArtifactsDir != "/tmp/project/.or3/artifacts" {
-		t.Fatalf("unexpected artifacts dir: %q", cfg.ArtifactsDir)
+	if strings.Contains(cfg.ArtifactsDir, "/tmp/project/.or3") {
+		t.Fatalf("artifacts dir should not default inside workspace: %q", cfg.ArtifactsDir)
 	}
 	if !cfg.Tools.RestrictToWorkspace {
 		t.Fatal("expected workspace restriction enabled")
@@ -84,8 +84,8 @@ func TestRunInitWithIO_WritesConfig(t *testing.T) {
 	if cfg.Provider.APIKey != "test-key" {
 		t.Fatalf("unexpected API key: %q", cfg.Provider.APIKey)
 	}
-	if cfg.DBPath != "/workspace/project/.or3/or3-intern.sqlite" {
-		t.Fatalf("unexpected DB path: %q", cfg.DBPath)
+	if strings.Contains(cfg.DBPath, "/workspace/project/.or3") {
+		t.Fatalf("DB path should not default inside workspace: %q", cfg.DBPath)
 	}
 	if !strings.Contains(out.String(), "Saved config") {
 		t.Fatalf("expected success output, got %q", out.String())

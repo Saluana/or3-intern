@@ -20,7 +20,7 @@ or3-intern version
 
 1. Run guided setup:
    ```bash
-   or3-intern configure
+   or3-intern setup
    ```
 2. Start an interactive local session:
    ```bash
@@ -31,8 +31,20 @@ or3-intern version
    ```bash
    or3-intern serve
    ```
+4. Check safety and access posture any time:
+   ```bash
+   or3-intern status
+   ```
 
-The `configure` command is the recommended setup flow and supports re-running specific sections later with `--section`. The lighter `init` command still exists for the original first-run provider/storage flow.
+The `setup` command is the recommended first-run flow. It asks for a provider, workspace folder, scenario, and safety mode, then translates those choices into the existing runtime profile, approvals, audit, service, and hardening settings.
+
+Use `settings` when you want to revisit your setup later. It opens a task-based home for AI Provider, Workspace Folder, Connected Devices, Safety Level, Channels, Tools, Memory, and Advanced:
+
+```bash
+or3-intern settings
+```
+
+The advanced `configure` command still exists and supports re-running specific sections later with `--section`. The lighter `init` command still exists for the original first-run provider/storage flow.
 
 On an interactive terminal, `configure` and `init` launch the Bubble Tea setup UI with arrow-key navigation, `enter` to open/select, `space` to toggle booleans, `s` to save, and `q` to back out or quit. If stdin or stdout is not a terminal, both commands automatically stay in the plain-text prompt flow so scripts and redirected input remain stable. In plain-text mode, existing secrets stay hidden: leave the field blank to keep the current value, enter a new value to replace it, or type `clear` to remove it. The provider section now also exposes an optional embedding-dimensions override for models/providers that support configurable vector sizes.
 
@@ -51,10 +63,16 @@ Use `go run ./cmd/or3-intern ...` for ad hoc local runs, or install the binary f
 
 ## Commands
 
+Root help shows the full command catalog by default:
+
+- `or3-intern setup` guided first-run setup using scenario and safety choices
+- `or3-intern chat` interactive CLI
+- `or3-intern status [--advanced]` plain-language safety and access summary
+- `or3-intern settings [--section ...] [--export path|-]` review setup, jump to focused task sections, or export config
+- `or3-intern connect-device [list|disconnect <device-id>|role <device-id>]` pair a phone or other device
 - `or3-intern configure [--section ...]` interactive setup and reconfiguration wizard
 - `or3-intern init` guided first-run setup
 - `or3-intern config-path` print the resolved config.json path
-- `or3-intern chat` interactive CLI
 - `or3-intern serve` run enabled external channels and automation
 - `or3-intern service` run the internal authenticated HTTP API for OR3 Net
 - `or3-intern agent -m "hello"` run a one-shot turn

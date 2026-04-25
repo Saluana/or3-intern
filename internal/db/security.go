@@ -37,6 +37,13 @@ type AuditEventInput struct {
 	Payload    any
 }
 
+type AuditEventSummary struct {
+	ID        int64
+	EventType string
+	Actor     string
+	CreatedAt int64
+}
+
 func (d *DB) PutSecret(ctx context.Context, name string, ciphertext, nonce []byte, version int, keyVersion string) error {
 	_, err := d.SQL.ExecContext(ctx,
 		`INSERT INTO secrets(name, ciphertext, nonce, version, key_version, updated_at) VALUES(?,?,?,?,?,?)
@@ -150,6 +157,34 @@ func (d *DB) VerifyAuditChain(ctx context.Context, key []byte) error {
 		prev = append([]byte{}, event.RecordHash...)
 	}
 	return rows.Err()
+}
+
+func (d *DB) CountAuditEvents(ctx context.Context) (int64, error) {
+	if d == nil || d.SQL == nil {
+		return 0, nil
+	}
+	row := d.SQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM audit_events`)
+	var count int64
+	if err := row.Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func (d *DB) LatestAuditEventSummary(ctx context.Context) (AuditEventSummary, bool, error) {
+	if d == nil || d.SQL == nil {
+		return AuditEventSummary{}, false, nil
+	}
+	row := d.SQL.QueryRowContext(ctx,
+		`SELECT id, event_type, actor, created_at FROM audit_events ORDER BY id DESC LIMIT 1`)
+	var item AuditEventSummary
+	if err := row.Scan(&item.ID, &item.EventType, &item.Actor, &item.CreatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return AuditEventSummary{}, false, nil
+		}
+		return AuditEventSummary{}, false, err
+	}
+	return item, true, nil
 }
 
 func computeAuditHash(key []byte, eventType, sessionKey, actor, payload string, prevHash []byte, createdAt int64) []byte {

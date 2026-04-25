@@ -75,8 +75,8 @@ func TestRunApprovalsCommand_List_ShowsPending(t *testing.T) {
 	if err := runApprovalsCommand(ctx, broker, []string{"list"}, &out, &out); err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if !strings.Contains(out.String(), "pending") {
-		t.Errorf("expected 'pending' in list output, got %q", out.String())
+	if !strings.Contains(out.String(), "Run a command") || strings.Contains(out.String(), "subject_hash") {
+		t.Errorf("expected friendly list output without raw internals, got %q", out.String())
 	}
 }
 
@@ -99,8 +99,35 @@ func TestRunApprovalsCommand_Show(t *testing.T) {
 		t.Fatalf("show: %v", err)
 	}
 	text := out.String()
-	if !strings.Contains(text, "id:") || !strings.Contains(text, "status:") {
-		t.Errorf("expected id and status in show output, got %q", text)
+	if !strings.Contains(text, "OR3 wants permission") || !strings.Contains(text, "Choices:") {
+		t.Errorf("expected friendly approval prompt, got %q", text)
+	}
+	if strings.Contains(text, "subject_hash") || strings.Contains(text, "policy_mode") || strings.Contains(text, "subject_json") {
+		t.Errorf("default approval prompt leaked internals: %q", text)
+	}
+}
+
+func TestRunApprovalsCommand_ShowAdvancedShowsInternals(t *testing.T) {
+	broker := testApprovalBroker(t)
+	ctx := context.Background()
+	decision, err := broker.EvaluateExec(ctx, approval.ExecEvaluation{
+		ExecutablePath: "/bin/echo",
+		Argv:           []string{"/bin/echo", "advanced"},
+		WorkingDir:     "/tmp",
+		ToolName:       "exec",
+	})
+	if err != nil {
+		t.Fatalf("EvaluateExec: %v", err)
+	}
+	var out bytes.Buffer
+	if err := runApprovalsCommand(ctx, broker, []string{"show", "--advanced", sprint64(decision.RequestID)}, &out, &out); err != nil {
+		t.Fatalf("show --advanced: %v", err)
+	}
+	text := out.String()
+	for _, want := range []string{"Subject hash:", "Policy mode:", "Subject JSON:"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected %q in advanced output: %s", want, text)
+		}
 	}
 }
 
@@ -184,6 +211,57 @@ func TestRunApprovalsCommand_Deny(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "denied") {
 		t.Errorf("expected 'denied' in output, got %q", out.String())
+	}
+}
+
+func TestRunApprovalsCommand_Cancel(t *testing.T) {
+	broker := testApprovalBroker(t)
+	ctx := context.Background()
+	decision, err := broker.EvaluateExec(ctx, approval.ExecEvaluation{
+		ExecutablePath: "/bin/echo",
+		Argv:           []string{"/bin/echo", "cancel-test"},
+		WorkingDir:     "/tmp",
+		ToolName:       "exec",
+	})
+	if err != nil || decision.RequestID == 0 {
+		t.Fatalf("EvaluateExec: %v", err)
+	}
+	var out bytes.Buffer
+	if err := runApprovalsCommand(ctx, broker, []string{"cancel", sprint64(decision.RequestID)}, &out, &out); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	if !strings.Contains(out.String(), "canceled") {
+		t.Errorf("expected 'canceled' in output, got %q", out.String())
+	}
+}
+
+func TestRunApprovalsCommand_Expire(t *testing.T) {
+	broker := testApprovalBroker(t)
+	broker.Config.PendingTTLSeconds = 1
+	ctx := context.Background()
+	decision, err := broker.EvaluateExec(ctx, approval.ExecEvaluation{
+		ExecutablePath: "/bin/echo",
+		Argv:           []string{"/bin/echo", "expire-test"},
+		WorkingDir:     "/tmp",
+		ToolName:       "exec",
+	})
+	if err != nil || decision.RequestID == 0 {
+		t.Fatalf("EvaluateExec: %v", err)
+	}
+	broker.Now = func() time.Time { return time.Unix(1700000010, 0).UTC() }
+	var out bytes.Buffer
+	if err := runApprovalsCommand(ctx, broker, []string{"expire"}, &out, &out); err != nil {
+		t.Fatalf("expire: %v", err)
+	}
+	if !strings.Contains(out.String(), "expired 1 pending request") {
+		t.Errorf("expected expire count in output, got %q", out.String())
+	}
+	item, err := broker.DB.GetApprovalRequest(ctx, decision.RequestID)
+	if err != nil {
+		t.Fatalf("GetApprovalRequest: %v", err)
+	}
+	if item.Status != approval.StatusExpired {
+		t.Fatalf("expected expired status, got %#v", item)
 	}
 }
 

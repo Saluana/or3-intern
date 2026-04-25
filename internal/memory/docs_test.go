@@ -193,6 +193,42 @@ func TestSyncRootsDeactivation(t *testing.T) {
 	}
 }
 
+func TestSyncRoots_SkipsSymlinkedFiles(t *testing.T) {
+	d := openDocsTestDB(t)
+	ctx := context.Background()
+	root := t.TempDir()
+	outside := t.TempDir()
+	outsideFile := filepath.Join(outside, "secret.md")
+	if err := os.WriteFile(outsideFile, []byte("# secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideFile, filepath.Join(root, "linked.md")); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "real.md"), []byte("# real"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	indexer := &DocIndexer{DB: d, Config: DocIndexConfig{Roots: []string{root}}}
+	if err := indexer.SyncRoots(ctx, "scope1"); err != nil {
+		t.Fatalf("SyncRoots: %v", err)
+	}
+	var count int
+	if err := d.SQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_docs WHERE scope_key='scope1' AND active=1`).Scan(&count); err != nil {
+		t.Fatalf("count docs: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected only real file to be indexed, got %d docs", count)
+	}
+	var path string
+	if err := d.SQL.QueryRowContext(ctx, `SELECT path FROM memory_docs WHERE scope_key='scope1' AND active=1`).Scan(&path); err != nil {
+		t.Fatalf("select doc path: %v", err)
+	}
+	if filepath.Base(path) != "real.md" {
+		t.Fatalf("expected real.md to be indexed, got %q", path)
+	}
+}
+
 func TestSyncRootsCaps(t *testing.T) {
 	d := openDocsTestDB(t)
 	ctx := context.Background()

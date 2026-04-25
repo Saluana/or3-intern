@@ -27,7 +27,18 @@ var rootHelpSections = []struct {
 	Items []helpItem
 }{
 	{
-		Title: "Primary commands",
+		Title: "Simple commands",
+		Items: []helpItem{
+			{Name: "setup", Description: "Guided first-run setup with scenario and safety choices"},
+			{Name: "chat", Description: "Start chatting with OR3"},
+			{Name: "status", Description: "Check what OR3 can access and what needs attention"},
+			{Name: "settings", Description: "Review and update your settings"},
+			{Name: "connect-device", Description: "Pair a phone or other device"},
+			{Name: "help", Description: "Show help for simple or advanced commands"},
+		},
+	},
+	{
+		Title: "Advanced commands",
 		Items: []helpItem{
 			{Name: "configure", Description: "Interactive configuration wizard for setup and later edits"},
 			{Name: "init", Description: "Guided first-run setup for config and provider settings"},
@@ -40,25 +51,20 @@ var rootHelpSections = []struct {
 		},
 	},
 	{
-		Title: "Operational commands",
+		Title: "Operator tools",
 		Items: []helpItem{
 			{Name: "doctor", Description: "Diagnose readiness issues, explain risk, and repair safe local problems"},
 			{Name: "capabilities", Description: "Inspect runtime posture, ingress policy, approvals, and profiles"},
 			{Name: "embeddings", Description: "Inspect or rebuild stored memory and doc embeddings after provider/model changes"},
 			{Name: "secrets", Description: "Manage encrypted secret references stored in SQLite"},
 			{Name: "audit", Description: "Inspect or verify the append-only audit chain"},
-			{Name: "migrate-jsonl", Description: "Import legacy session history from JSONL"},
-			{Name: "migrate-openclaw", Description: "Import a local OpenClaw agent into or3-intern files, daily notes, and dreams"},
-		},
-	},
-	{
-		Title: "Workflow commands",
-		Items: []helpItem{
 			{Name: "skills", Description: "List, inspect, search, install, update, check, and remove skills"},
 			{Name: "approvals", Description: "Inspect and resolve approval requests and allowlists"},
 			{Name: "devices", Description: "Inspect paired devices and legacy pairing request helpers"},
 			{Name: "pairing", Description: "Manage first-class pairing workflows"},
 			{Name: "scope", Description: "Link session keys to a shared history scope"},
+			{Name: "migrate-jsonl", Description: "Import legacy session history from JSONL"},
+			{Name: "migrate-openclaw", Description: "Import a local OpenClaw agent into or3-intern files, daily notes, and dreams"},
 		},
 	},
 }
@@ -78,6 +84,43 @@ var helpTopics = map[string]helpCommand{
 			{Name: "--section <name>", Description: "Repeatable section filter: provider, storage, workspace, web, channels, service"},
 		},
 		Examples: []string{"or3-intern configure", "or3-intern configure --section provider --section web", "or3-intern configure --section channels"},
+	},
+	"setup": {
+		Usage:   "or3-intern setup",
+		Summary: "Guided setup using plain-language scenario and safety choices.",
+		Description: []string{
+			"Setup asks where you are using OR3, how careful it should be, and which folder it should stay inside.",
+			"It translates those answers into the existing runtime profile, approvals, audit, service, and hardening settings.",
+		},
+		Examples: []string{"or3-intern setup"},
+	},
+	"settings": {
+		Usage:   "or3-intern settings [--section provider|workspace|devices|safety|channels|tools|memory|advanced] [--export path|-] [--advanced]",
+		Summary: "Open the settings flow for reviewing and updating your setup.",
+		Description: []string{
+			"Shows a task-based settings home for AI Provider, Workspace Folder, Connected Devices, Safety Level, Channels, Tools, Memory, and Advanced.",
+			"Use --section to jump to a task, or --export to write the current advanced JSON config without making JSON editing the default path.",
+		},
+		Flags: []helpItem{
+			{Name: "--section <name>", Description: "Open a task section: provider, workspace, devices, safety, channels, tools, memory, advanced"},
+			{Name: "--export <path|->", Description: "Export current config JSON to a file or stdout"},
+			{Name: "--advanced", Description: "Show advanced settings actions on the home screen"},
+		},
+		Examples: []string{"or3-intern settings", "or3-intern settings --section safety", "or3-intern settings --export config.json"},
+	},
+	"status": {
+		Usage:   "or3-intern status [--advanced] [--fix number|all|finding-id]",
+		Summary: "Show a friendly safety and access summary, plus problems that need attention.",
+		Flags: []helpItem{
+			{Name: "--advanced", Description: "Include internal finding IDs in the output"},
+			{Name: "--fix <number|all|finding-id>", Description: "Apply a safe automatic repair"},
+		},
+		Examples: []string{"or3-intern status", "or3-intern status --fix 1", "or3-intern status --fix all"},
+	},
+	"connect-device": {
+		Usage:    "or3-intern connect-device [list|disconnect <device-id>|role <device-id>]",
+		Summary:  "Pair a phone or other device using a short code and simple access levels.",
+		Examples: []string{"or3-intern connect-device", "or3-intern connect-device list"},
 	},
 	"init": {
 		Usage:   "or3-intern init",
@@ -357,7 +400,7 @@ var helpTopics = map[string]helpCommand{
 	},
 }
 
-func parseRootCLIArgs(argv []string, stderr io.Writer) (string, []string, bool, error) {
+func parseRootCLIArgs(argv []string, stderr io.Writer) (string, []string, bool, bool, bool, error) {
 	if stderr == nil {
 		stderr = io.Discard
 	}
@@ -366,13 +409,17 @@ func parseRootCLIArgs(argv []string, stderr io.Writer) (string, []string, bool, 
 	fs.Usage = func() {}
 	var cfgPath string
 	var showHelp bool
+	var unsafeDev bool
+	var advanced bool
 	fs.StringVar(&cfgPath, "config", "", "path to config.json")
 	fs.BoolVar(&showHelp, "help", false, "show help")
 	fs.BoolVar(&showHelp, "h", false, "show help")
+	fs.BoolVar(&unsafeDev, "unsafe-dev", false, "bypass startup safety gates for local development")
+	fs.BoolVar(&advanced, "advanced", false, "accepted for compatibility; root help is always complete")
 	if err := fs.Parse(argv); err != nil {
-		return "", nil, false, err
+		return "", nil, false, false, false, err
 	}
-	return cfgPath, fs.Args(), showHelp, nil
+	return cfgPath, fs.Args(), showHelp, unsafeDev, advanced, nil
 }
 
 func maybeHandleHelpRequest(args []string, stdout io.Writer) (bool, error) {
@@ -419,6 +466,10 @@ func printHelpTopic(w io.Writer, path []string) error {
 		printRootHelp(w)
 		return nil
 	}
+	if len(path) == 1 && path[0] == "advanced" {
+		printAdvancedRootHelp(w)
+		return nil
+	}
 	key, ok := bestHelpTopicKey(path)
 	if !ok {
 		return fmt.Errorf("unknown help topic: %s", strings.Join(path, " "))
@@ -438,10 +489,18 @@ func bestHelpTopicKey(path []string) (string, bool) {
 }
 
 func printRootHelp(w io.Writer) {
+	printRootHelpMode(w)
+}
+
+func printAdvancedRootHelp(w io.Writer) {
+	printRootHelpMode(w)
+}
+
+func printRootHelpMode(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "or3-intern is a local-first agent runtime with chat, channels, memory, approvals, and service APIs.")
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, "Usage:")
-	_, _ = fmt.Fprintln(w, "  or3-intern [--config path] <command> [options]")
+	_, _ = fmt.Fprintln(w, "  or3-intern [--config path] [--unsafe-dev] <command> [options]")
 	_, _ = fmt.Fprintln(w, "  or3-intern")
 	_, _ = fmt.Fprintln(w, "  or3-intern help [command]")
 	_, _ = fmt.Fprintln(w)
@@ -453,10 +512,10 @@ func printRootHelp(w io.Writer) {
 	}
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, "Global flags:")
-	printHelpItems(w, []helpItem{{Name: "--config <path>", Description: "Path to config.json"}, {Name: "-h, --help", Description: "Show help for the root command or a subcommand"}})
+	printHelpItems(w, []helpItem{{Name: "--config <path>", Description: "Path to config.json"}, {Name: "--unsafe-dev", Description: "Bypass startup safety gates for local development"}, {Name: "--advanced", Description: "Accepted for compatibility; root help is always complete"}, {Name: "-h, --help", Description: "Show help for the root command or a subcommand"}})
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, "Examples:")
-	for _, example := range []string{"or3-intern configure", "or3-intern chat", "or3-intern doctor --strict", "or3-intern approvals --help", "or3-intern help skills"} {
+	for _, example := range []string{"or3-intern setup", "or3-intern chat", "or3-intern status", "or3-intern connect-device", "or3-intern approvals list pending"} {
 		_, _ = fmt.Fprintf(w, "  %s\n", example)
 	}
 }

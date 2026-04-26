@@ -126,6 +126,11 @@ type Builder struct {
 	DocRetriever       *memory.DocRetriever // for indexed file context
 	DocRetrieveLimit   int                  // max docs to retrieve
 	WorkspaceDir       string
+
+	ContextMaxInputTokens      int
+	ContextOutputReserveTokens int
+	ContextSafetyMarginTokens  int
+	ContextSectionBudgets      ContextSectionBudgets
 }
 
 // Build builds a prompt snapshot. It is a convenience wrapper around BuildWithOptions.
@@ -135,6 +140,19 @@ func (b *Builder) Build(ctx context.Context, sessionKey string, userMessage stri
 
 // BuildWithOptions builds a prompt snapshot using the provided options.
 func (b *Builder) BuildWithOptions(ctx context.Context, opts BuildOptions) (PromptParts, []memory.Retrieved, error) {
+	packet, retrieved, err := b.buildPacket(ctx, opts)
+	if err != nil {
+		return PromptParts{}, nil, err
+	}
+	sys := renderProviderMessages(packet, b)
+	return PromptParts{
+		System:  sys,
+		History: packet.RecentHistory,
+		Budget:  packet.Budget,
+	}, retrieved, nil
+}
+
+func (b *Builder) buildPacket(ctx context.Context, opts BuildOptions) (ContextPacket, []memory.Retrieved, error) {
 	scopeKey := opts.SessionKey
 	if b.DB != nil && strings.TrimSpace(opts.SessionKey) != "" {
 		if resolved, err := b.DB.ResolveScopeKey(ctx, opts.SessionKey); err == nil && strings.TrimSpace(resolved) != "" {
@@ -143,7 +161,7 @@ func (b *Builder) BuildWithOptions(ctx context.Context, opts BuildOptions) (Prom
 	}
 	pinned, err := b.DB.GetPinned(ctx, scopeKey)
 	if err != nil {
-		return PromptParts{}, nil, err
+		return ContextPacket{}, nil, err
 	}
 	pinnedText := formatPinned(pinned)
 
@@ -201,7 +219,7 @@ func (b *Builder) BuildWithOptions(ctx context.Context, opts BuildOptions) (Prom
 
 	histRows, err := b.DB.GetLastMessagesScoped(ctx, opts.SessionKey, b.HistoryMax)
 	if err != nil {
-		return PromptParts{}, nil, err
+		return ContextPacket{}, nil, err
 	}
 	visionBudget := newVisionBudget()
 	hist := make([]providers.ChatMessage, 0, len(histRows))
@@ -275,15 +293,10 @@ func (b *Builder) BuildWithOptions(ctx context.Context, opts BuildOptions) (Prom
 			structuredContext = structuredContext + "\n\nactive_task_card:\n" + taskCardText
 		}
 	}
-	sysContent := b.composeSystemContent(pinnedText, digestText, memText, b.IdentityText, b.StaticMemory, heartbeat, structuredContext, docContextText, workspaceContextText)
-	sys := []providers.ChatMessage{
-		{Role: "system", Content: sysContent},
-	}
-	return PromptParts{
-		System:  sys,
-		History: hist,
-		Budget:  estimatePromptBudget(sys, hist),
-	}, retrieved, nil
+	packet := b.buildContextPacket(pinnedText, digestText, memText, b.IdentityText, b.StaticMemory, heartbeat, structuredContext, docContextText, workspaceContextText)
+	packet.RecentHistory = hist
+	packet.Budget = estimatePacketBudget(packet, b)
+	return packet, retrieved, nil
 }
 
 func (b *Builder) currentHeartbeatText() string {

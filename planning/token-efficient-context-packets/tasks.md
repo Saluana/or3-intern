@@ -18,10 +18,10 @@
 - [x] Add [internal/agent/prompt_budget.go](internal/agent/prompt_budget.go) (same package as `Builder`) with `ContextPacket`, `ContextSection`, `ContextSnippet`, `ContextRef`, `BudgetReport`, `SectionUsage`, `PruneEvent`. Requirements: 1, 13, 20.
 - [x] Implement deterministic token estimation and section budget accounting in the same file. Requirements: 3, 4, 13, 17.
 - [x] Implement pressure states: normal, warning, high pressure, and emergency compaction. Requirements: 13.
-- [ ] Implement protected-section rules so system core, soul/identity/behavior, tool policy, pinned memory, and task-card minimums cannot be dropped. Requirements: 2, 13, 15.
-- [ ] Refactor `Builder.BuildWithOptions` to call an internal `buildPacket` then `renderProviderMessages`, returning the existing `PromptParts` shape with an added optional `Budget BudgetReport` field that defaults to zero for ignoring callers. Requirements: 1, 18, 20, 21.
-- [ ] Add unit tests for section caps, protected sections, output reserve, pressure transitions, and pruning reasons. Requirements: 1, 2, 13, 17.
-- [ ] Add regression tests proving current prompt behavior remains available when no `Context` config block is set. Requirements: 2, 18, 21.
+- [x] Implement protected-section rules so system core, soul/identity/behavior, tool policy, pinned memory, and task-card minimums cannot be dropped. Requirements: 2, 13, 15.
+- [x] Refactor `Builder.BuildWithOptions` to call an internal `buildPacket` then `renderProviderMessages`, returning the existing `PromptParts` shape with an added optional `Budget BudgetReport` field that defaults to zero for ignoring callers. Requirements: 1, 18, 20, 21.
+- [x] Add unit tests for section caps, protected sections, output reserve, pressure transitions, and pruning reasons. Requirements: 1, 2, 13, 17.
+- [x] Add regression tests proving current prompt behavior remains available when no `Context` config block is set. Requirements: 2, 18, 21.
 
 ## 3. Phase 3: Configurable Modes and Budgets
 

@@ -2199,7 +2199,18 @@ func TestRuntime_HandleNewSession_Success(t *testing.T) {
 		case "/chat/completions":
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": `{"summary":"done","canonical_memory":"- fact"}`}}},
+				"choices": []map[string]any{{"message": map[string]any{
+					"role":    "assistant",
+					"content": nil,
+					"tool_calls": []map[string]any{{
+						"id":   "call_consolidate",
+						"type": "function",
+						"function": map[string]any{
+							"name":      "record_consolidated_memory",
+							"arguments": `{"summary":"done","canonical_memory":"- fact"}`,
+						},
+					}},
+				}}},
 			})
 		case "/embeddings":
 			w.Header().Set("Content-Type", "application/json")
@@ -2322,7 +2333,18 @@ func TestRuntime_HandleNewSession_RebuildsOnEmbeddingFingerprintSwitch(t *testin
 		case "/chat/completions":
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": `{"summary":"done","facts":["new fact"]}`}}},
+				"choices": []map[string]any{{"message": map[string]any{
+					"role":    "assistant",
+					"content": nil,
+					"tool_calls": []map[string]any{{
+						"id":   "call_consolidate",
+						"type": "function",
+						"function": map[string]any{
+							"name":      "record_consolidated_memory",
+							"arguments": `{"summary":"done","facts":["new fact"],"preferences":[],"goals":[],"procedures":[],"decisions":[],"warnings":[]}`,
+						},
+					}},
+				}}},
 			})
 		case "/embeddings":
 			w.Header().Set("Content-Type", "application/json")

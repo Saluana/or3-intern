@@ -28,35 +28,68 @@ const maxConsolidationItems = 10
 // cleanup pass after consolidation.
 const staleCleanupBatchSize = 20
 
-const consolidationPrompt = `You are consolidating chat memory.
+const consolidationToolName = "record_consolidated_memory"
 
-Return ONLY a single JSON object with this exact shape:
-{
-  "summary": "...",
-  "facts": ["...", "..."],
-  "preferences": ["...", "..."],
-  "goals": ["...", "..."],
-	"procedures": ["...", "..."],
-	"decisions": ["...", "..."],
-	"warnings": ["...", "..."]
-}
+const consolidationSystemPrompt = `You are consolidating chat memory.
 
-Rules:
-- summary: 3-5 concise sentences covering key decisions, outcomes, and context.
-- facts: stable factual items extracted from the conversation (names, versions, states). Keep each item under 300 characters.
-- preferences: durable user preferences or working-style notes. Keep each item under 300 characters.
-- goals: ongoing or stated objectives. Keep each item under 300 characters.
-- procedures: step-by-step processes or runbooks mentioned. Keep each item under 300 characters.
-- decisions: explicit choices or settled decisions that appear durable. Keep each item under 300 characters.
-- warnings: risks, cautions, or pitfalls clearly supported by the conversation. Keep each item under 300 characters.
-- Any list may be empty ([]) when nothing relevant was observed.
-- Existing pinned memory contains only ultra-stable facts and preferences. Do not repeat those items.
+You MUST call the record_consolidated_memory tool exactly once. Do not answer conversationally.
 
-Existing pinned memory (ultra-stable only):
+Extract only information that will help future work. Prefer concrete, reusable facts over chat filler.
+
+Keep:
+- Project state, file/module names, bugs found, fixes made, tests run, commands that worked, and unresolved blockers.
+- User preferences about style, workflow, risk tolerance, tools, or implementation choices.
+- Durable goals, accepted decisions, warnings, and repeatable procedures.
+
+Ignore:
+- Greetings, thanks, apologies, transient status updates, speculation, duplicate pinned memory, and details not supported by the excerpt.
+- Raw tool dumps unless the surrounding conversation explains the durable outcome.
+
+Tool argument rules:
+- summary: 3-5 short sentences describing what changed, what was decided, and what remains relevant.
+- facts/preferences/goals/procedures/decisions/warnings: concise standalone items under 300 characters each.
+- procedures should be actionable steps or commands, not vague descriptions.
+- warnings should name the risk and condition that triggers it.
+- Use [] when a category has no durable information. Do not invent details.`
+
+const consolidationUserPrompt = `Existing pinned memory (ultra-stable only):
 %s
 
 Conversation excerpt:
 %s`
+
+const consolidationRetryPrompt = `Your previous response did not call record_consolidated_memory with valid arguments. Call record_consolidated_memory exactly once now.`
+
+var consolidationToolDef = providers.ToolDef{
+	Type: "function",
+	Function: providers.ToolFunc{
+		Name:        consolidationToolName,
+		Description: "Persist validated structured memory extracted from a conversation excerpt.",
+		Parameters: map[string]any{
+			"type":                 "object",
+			"additionalProperties": false,
+			"properties": map[string]any{
+				"summary":     map[string]any{"type": "string"},
+				"facts":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"preferences": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"goals":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"procedures":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"decisions":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"warnings":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			},
+			"required": []string{"summary", "facts", "preferences", "goals", "procedures", "decisions", "warnings"},
+		},
+	},
+}
+
+func consolidationToolChoice() map[string]any {
+	return map[string]any{
+		"type": "function",
+		"function": map[string]any{
+			"name": consolidationToolName,
+		},
+	}
+}
 
 // Consolidator rolls up conversation messages older than the active history
 // window into durable memory notes (stored in memory_notes for vector/FTS
@@ -323,21 +356,13 @@ func (c *Consolidator) writeConsolidatedTranscript(ctx context.Context, sessionK
 	if model == "" {
 		model = "gpt-4.1-mini"
 	}
-	req := providers.ChatCompletionRequest{
-		Model: model,
-		Messages: []providers.ChatMessage{
-			{Role: "user", Content: fmt.Sprintf(consolidationPrompt, currentCanonical, transcript)},
-		},
-		Temperature: 0,
-	}
-	resp, err := c.Provider.Chat(ctx, req)
+	parsed, err := c.requestConsolidationOutput(ctx, model, currentCanonical, transcript)
 	if err != nil {
-		return fmt.Errorf("consolidation chat: %w", err)
+		if err == errEmptyConsolidationOutput {
+			return err
+		}
+		return fmt.Errorf("consolidation structured output: %w", err)
 	}
-	if len(resp.Choices) == 0 {
-		return fmt.Errorf("consolidation: no choices returned")
-	}
-	parsed := parseConsolidationOutput(contentToStr(resp.Choices[0].Message.Content))
 	summary := trimTo(parsed.Summary, maxInputChars/canonicalMemoryInputDivisor)
 
 	// Build canonical pinned memory from ultra-stable items only
@@ -399,15 +424,33 @@ func (c *Consolidator) writeConsolidatedTranscript(ctx context.Context, sessionK
 	return nil
 }
 
-// contentToStr converts a ChatMessage Content (string or other) to a plain string.
-func contentToStr(v any) string {
-	if v == nil {
-		return ""
+func (c *Consolidator) requestConsolidationOutput(ctx context.Context, model, currentCanonical, transcript string) (consolidationOutput, error) {
+	messages := []providers.ChatMessage{
+		{Role: "system", Content: consolidationSystemPrompt},
+		{Role: "user", Content: fmt.Sprintf(consolidationUserPrompt, currentCanonical, transcript)},
 	}
-	if s, ok := v.(string); ok {
-		return s
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		req := providers.ChatCompletionRequest{
+			Model:       model,
+			Messages:    messages,
+			Tools:       []providers.ToolDef{consolidationToolDef},
+			ToolChoice:  consolidationToolChoice(),
+			Temperature: 0,
+		}
+		resp, err := c.Provider.Chat(ctx, req)
+		if err != nil {
+			return consolidationOutput{}, fmt.Errorf("chat: %w", err)
+		}
+		parsed, parseErr := parseConsolidationResponse(resp)
+		if parseErr == nil {
+			return parsed, nil
+		}
+		lastErr = parseErr
+		messages = append(messages, providers.ChatMessage{Role: "user", Content: consolidationRetryPrompt})
 	}
-	return fmt.Sprintf("%v", v)
+	log.Printf("consolidation structured output rejected: %v", lastErr)
+	return consolidationOutput{}, errEmptyConsolidationOutput
 }
 
 func isMemoryVectorProfileMismatchError(err error) bool {
@@ -431,16 +474,26 @@ type consolidationOutput struct {
 	LegacyCanonical string `json:"canonical_memory"`
 }
 
-// parseConsolidationOutput parses the LLM response into a structured output.
-// It first tries the new structured format, then falls back gracefully:
-//   - If the new format is present (has summary), use it.
-//   - If only the legacy {"summary","canonical_memory"} fields are present,
-//     treat canonical_memory as a preference item.
-//   - On any parse failure, return a minimal output with the raw text as summary.
-func parseConsolidationOutput(raw string) consolidationOutput {
+func parseConsolidationResponse(resp providers.ChatCompletionResponse) (consolidationOutput, error) {
+	if len(resp.Choices) == 0 {
+		return consolidationOutput{}, fmt.Errorf("no choices returned")
+	}
+	for _, tc := range resp.Choices[0].Message.ToolCalls {
+		if strings.TrimSpace(tc.Function.Name) != consolidationToolName {
+			continue
+		}
+		return parseConsolidationOutput(tc.Function.Arguments)
+	}
+	return consolidationOutput{}, fmt.Errorf("missing %s tool call", consolidationToolName)
+}
+
+// parseConsolidationOutput parses strict structured consolidation JSON. It
+// accepts legacy canonical_memory only when otherwise valid JSON was returned.
+// Malformed JSON and plain prose are rejected so they cannot become memory.
+func parseConsolidationOutput(raw string) (consolidationOutput, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return consolidationOutput{}
+		return consolidationOutput{}, fmt.Errorf("empty consolidation output")
 	}
 
 	// Attempt to extract a JSON object even if the model added surrounding text.
@@ -462,13 +515,14 @@ func parseConsolidationOutput(raw string) consolidationOutput {
 				out.Preferences = []string{strings.TrimSpace(out.LegacyCanonical)}
 			}
 			if out.Summary != "" || len(out.Facts)+len(out.Preferences)+len(out.Goals)+len(out.Procedures)+len(out.Decisions)+len(out.Warnings) > 0 {
-				return out
+				return out, nil
 			}
+		} else {
+			return consolidationOutput{}, fmt.Errorf("invalid consolidation JSON: %w", err)
 		}
 	}
 
-	// Final fallback: treat the entire raw text as a summary.
-	return consolidationOutput{Summary: trimTo(raw, maxConsolidationItemLen*5)}
+	return consolidationOutput{}, fmt.Errorf("missing usable consolidation JSON")
 }
 
 // extractJSON attempts to locate and return the first complete JSON object

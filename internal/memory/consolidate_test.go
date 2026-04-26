@@ -49,7 +49,18 @@ func buildConsolidationProviderWithEmbedding(t *testing.T, chatBody string, embe
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"choices": []map[string]any{
-					{"message": map[string]any{"role": "assistant", "content": chatBody}},
+					{"message": map[string]any{
+						"role":    "assistant",
+						"content": nil,
+						"tool_calls": []map[string]any{{
+							"id":   "call_consolidate",
+							"type": "function",
+							"function": map[string]any{
+								"name":      consolidationToolName,
+								"arguments": chatBody,
+							},
+						}},
+					}},
 				},
 			})
 		case "/embeddings":
@@ -232,7 +243,18 @@ func TestConsolidator_ArchiveResetWindow_OnePassRecentWindow(t *testing.T) {
 			promptBody = string(body)
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": `{"summary":"reset summary","facts":["recent reset fact"],"preferences":[],"goals":[],"procedures":[],"decisions":[],"warnings":[]}`}}},
+				"choices": []map[string]any{{"message": map[string]any{
+					"role":    "assistant",
+					"content": nil,
+					"tool_calls": []map[string]any{{
+						"id":   "call_consolidate",
+						"type": "function",
+						"function": map[string]any{
+							"name":      consolidationToolName,
+							"arguments": `{"summary":"reset summary","facts":["recent reset fact"],"preferences":[],"goals":[],"procedures":[],"decisions":[],"warnings":[]}`,
+						},
+					}},
+				}}},
 			})
 		case "/embeddings":
 			w.Header().Set("Content-Type", "application/json")
@@ -282,8 +304,57 @@ func TestConsolidator_ArchiveResetWindow_EmptyOutputDoesNotBlockReset(t *testing
 	if err := c.ArchiveResetWindow(ctx, "sess", 40); err != nil {
 		t.Fatalf("ArchiveResetWindow should not block reset on empty durable output: %v", err)
 	}
-	if atomic.LoadInt32(calls.Chat) != 1 {
-		t.Fatalf("expected one chat call, got %d", atomic.LoadInt32(calls.Chat))
+	if atomic.LoadInt32(calls.Chat) != 2 {
+		t.Fatalf("expected initial call plus structured-output retry, got %d", atomic.LoadInt32(calls.Chat))
+	}
+}
+
+func TestConsolidator_ProseOutputDoesNotBecomeMemory(t *testing.T) {
+	d := openConsolidateTestDB(t)
+	ctx := context.Background()
+	for i := 0; i < 6; i++ {
+		if _, err := d.AppendMessage(ctx, "sess", "user", fmt.Sprintf("message-%d", i), nil); err != nil {
+			t.Fatalf("AppendMessage: %v", err)
+		}
+	}
+	var chatCalls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/chat/completions":
+			atomic.AddInt32(&chatCalls, 1)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"choices": []map[string]any{{"message": map[string]any{
+					"role":    "assistant",
+					"content": "Got it, thanks for the update. I'll try fetching that URL again to see if the new version handles client-side rendering better.",
+				}}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	prov := providers.New(srv.URL, "test-key", 5*time.Second)
+	prov.HTTP = srv.Client()
+	c := &Consolidator{DB: d, Provider: prov, WindowSize: 1, MaxMessages: 50, MaxInputChars: 12000}
+	didWork, err := c.RunOnce(ctx, "sess", 1, RunMode{})
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !didWork {
+		t.Fatal("expected cursor-only consolidation work")
+	}
+	if atomic.LoadInt32(&chatCalls) != 2 {
+		t.Fatalf("expected retry for missing tool call, got %d chat calls", atomic.LoadInt32(&chatCalls))
+	}
+	notes, err := d.ListMemoryNotesForReembed(ctx)
+	if err != nil {
+		t.Fatalf("ListMemoryNotesForReembed: %v", err)
+	}
+	for _, note := range notes {
+		if strings.Contains(note.Text, "Got it") {
+			t.Fatalf("prose response was saved as memory note: %#v", note)
+		}
 	}
 }
 
@@ -514,18 +585,14 @@ func TestConsolidator_RunOnce_AdaptiveTriggerOnLargeTranscript(t *testing.T) {
 	}
 }
 
-func TestContentToStr_Other(t *testing.T) {
-	got := contentToStr(42)
-	if !strings.Contains(got, "42") {
-		t.Errorf("expected '42' in output, got %q", got)
-	}
-}
-
 // ---- parseConsolidationOutput tests ----
 
 func TestParseConsolidationOutput_NewFormat(t *testing.T) {
 	raw := `{"summary":"session summary","facts":["golang one two two"],"preferences":["dark mode"],"goals":["ship v2"],"procedures":["run make test"],"decisions":["use sqlite"],"warnings":["avoid unbounded logs"]}`
-	out := parseConsolidationOutput(raw)
+	out, err := parseConsolidationOutput(raw)
+	if err != nil {
+		t.Fatalf("parseConsolidationOutput: %v", err)
+	}
 	if out.Summary != "session summary" {
 		t.Errorf("expected summary, got %q", out.Summary)
 	}
@@ -552,7 +619,10 @@ func TestParseConsolidationOutput_NewFormat(t *testing.T) {
 func TestParseConsolidationOutput_LegacyFormatFallback(t *testing.T) {
 	// Old-format responses (only summary + canonical_memory) should be absorbed.
 	raw := `{"summary":"old summary","canonical_memory":"- prefers concise output"}`
-	out := parseConsolidationOutput(raw)
+	out, err := parseConsolidationOutput(raw)
+	if err != nil {
+		t.Fatalf("parseConsolidationOutput: %v", err)
+	}
 	if out.Summary != "old summary" {
 		t.Errorf("expected old summary, got %q", out.Summary)
 	}
@@ -566,23 +636,25 @@ func TestParseConsolidationOutput_LegacyFormatFallback(t *testing.T) {
 }
 
 func TestParseConsolidationOutput_EmptyInput(t *testing.T) {
-	out := parseConsolidationOutput("")
-	if out.Summary != "" || len(out.Facts)+len(out.Preferences)+len(out.Goals)+len(out.Procedures)+len(out.Decisions)+len(out.Warnings) != 0 {
-		t.Errorf("expected empty output for empty input, got %+v", out)
+	_, err := parseConsolidationOutput("")
+	if err == nil {
+		t.Fatal("expected empty input to be rejected")
 	}
 }
 
 func TestParseConsolidationOutput_MalformedJSON(t *testing.T) {
-	out := parseConsolidationOutput("not json at all")
-	// Fallback: raw text used as summary.
-	if out.Summary == "" {
-		t.Error("expected fallback summary from malformed input")
+	_, err := parseConsolidationOutput("not json at all")
+	if err == nil {
+		t.Fatal("expected malformed prose to be rejected")
 	}
 }
 
 func TestParseConsolidationOutput_ExtraProseAroundJSON(t *testing.T) {
 	raw := `Here is the output: {"summary":"foo","preferences":["pref1"]} hope that helps`
-	out := parseConsolidationOutput(raw)
+	out, err := parseConsolidationOutput(raw)
+	if err != nil {
+		t.Fatalf("parseConsolidationOutput: %v", err)
+	}
 	if out.Summary != "foo" {
 		t.Errorf("expected 'foo', got %q", out.Summary)
 	}
@@ -594,7 +666,10 @@ func TestParseConsolidationOutput_ExtraProseAroundJSON(t *testing.T) {
 func TestParseConsolidationOutput_ItemLengthCapped(t *testing.T) {
 	longItem := strings.Repeat("x", maxConsolidationItemLen+100)
 	raw := `{"summary":"s","facts":["` + longItem + `"],"preferences":[],"goals":[],"procedures":[]}`
-	out := parseConsolidationOutput(raw)
+	out, err := parseConsolidationOutput(raw)
+	if err != nil {
+		t.Fatalf("parseConsolidationOutput: %v", err)
+	}
 	if len(out.Facts) == 0 {
 		t.Fatal("expected truncated fact")
 	}
@@ -615,7 +690,10 @@ func TestParseConsolidationOutput_ItemCountCapped(t *testing.T) {
 		"goals":       []string{},
 		"procedures":  []string{},
 	})
-	out := parseConsolidationOutput(string(b))
+	out, err := parseConsolidationOutput(string(b))
+	if err != nil {
+		t.Fatalf("parseConsolidationOutput: %v", err)
+	}
 	if len(out.Facts) > maxConsolidationItems {
 		t.Errorf("expected facts capped to %d, got %d", maxConsolidationItems, len(out.Facts))
 	}

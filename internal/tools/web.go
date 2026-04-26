@@ -10,6 +10,9 @@ import (
 	"net/netip"
 	"net/url"
 	"or3-intern/internal/security"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -20,24 +23,44 @@ type WebFetch struct {
 	Timeout         time.Duration
 	DefaultMaxBytes int
 	HostPolicy      security.HostPolicy
+	Renderer        WebRenderer
 }
 
 func (t *WebFetch) Capability() CapabilityLevel { return CapabilityGuarded }
 
 const (
 	defaultWebTimeout            = 20 * time.Second
-	defaultWebFetchMaxBytes      = 200000
+	defaultWebFetchMaxBytes      = 12000
 	defaultWebFetchMaxRedirects  = 10
 	defaultWebSearchMaxCount     = 10
 	defaultWebSearchReadMaxBytes = 1 << 20
+	defaultWebRenderWaitMS       = 0
+	maxWebRenderWaitMS           = 15000
 )
 
-func (t *WebFetch) Name() string        { return "web_fetch" }
-func (t *WebFetch) Description() string { return "Fetch a URL (GET) and return text (truncated)." }
+type WebRenderOptions struct {
+	MaxBytes  int
+	WaitUntil string
+	WaitMS    int
+	Selector  string
+}
+
+type WebRenderer interface {
+	Render(ctx context.Context, target string, opts WebRenderOptions) (string, error)
+}
+
+func (t *WebFetch) Name() string { return "web_fetch" }
+func (t *WebFetch) Description() string {
+	return "Fetch a URL and return bounded text. Set render=true for JavaScript-rendered pages when Playwright is available."
+}
 func (t *WebFetch) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
-		"url":      map[string]any{"type": "string"},
-		"maxBytes": map[string]any{"type": "integer"},
+		"url":       map[string]any{"type": "string"},
+		"maxBytes":  map[string]any{"type": "integer", "description": "Max preview bytes (default 12000)"},
+		"render":    map[string]any{"type": "boolean", "description": "Use a real browser to execute JavaScript before extracting text"},
+		"waitUntil": map[string]any{"type": "string", "enum": []string{"domcontentloaded", "load", "networkidle"}, "description": "Browser navigation wait strategy for render=true (default networkidle)"},
+		"waitMs":    map[string]any{"type": "integer", "description": "Extra milliseconds to wait after navigation for render=true (max 15000)"},
+		"selector":  map[string]any{"type": "string", "description": "Optional CSS selector to wait for before extracting text"},
 	}, "required": []string{"url"}}
 }
 func (t *WebFetch) Schema() map[string]any {
@@ -56,10 +79,6 @@ func (t *WebFetch) Execute(ctx context.Context, params map[string]any) (string, 
 	if err := validateFetchURL(parsed); err != nil {
 		return "", err
 	}
-	reqCtx, err := prepareWebFetchRequestContext(ctx, parsed, t.HostPolicy, profile)
-	if err != nil {
-		return "", err
-	}
 	max := t.DefaultMaxBytes
 	if max <= 0 {
 		max = defaultWebFetchMaxBytes
@@ -67,13 +86,47 @@ func (t *WebFetch) Execute(ctx context.Context, params map[string]any) (string, 
 	if v, ok := params["maxBytes"].(float64); ok && int(v) > 0 {
 		max = int(v)
 	}
+	render, _ := params["render"].(bool)
+	if render {
+		if err := validateURLAgainstPolicies(ctx, parsed, t.HostPolicy, profile); err != nil {
+			return "", err
+		}
+		renderer := t.Renderer
+		if renderer == nil {
+			renderer = PlaywrightRenderer{Timeout: t.effectiveTimeout()}
+		}
+		text, err := renderer.Render(ctx, parsed.String(), WebRenderOptions{
+			MaxBytes:  max,
+			WaitUntil: webFetchWaitUntil(params),
+			WaitMS:    webFetchWaitMS(params),
+			Selector:  strings.TrimSpace(fmt.Sprint(params["selector"])),
+		})
+		if err != nil {
+			return "", err
+		}
+		preview, truncated := PreviewString(text, max)
+		return EncodeToolResult(ToolResult{
+			Kind:    "web_fetch",
+			OK:      true,
+			Summary: fmt.Sprintf("Rendered %s with JavaScript enabled", parsed.String()),
+			Preview: preview,
+			Stats: map[string]any{
+				"url":        parsed.String(),
+				"mode":       "render",
+				"max_bytes":  max,
+				"truncated":  truncated,
+				"wait_until": webFetchWaitUntil(params),
+				"wait_ms":    webFetchWaitMS(params),
+			},
+		}), nil
+	}
+	reqCtx, err := prepareWebFetchRequestContext(ctx, parsed, t.HostPolicy, profile)
+	if err != nil {
+		return "", err
+	}
 	var client *http.Client
 	if t.HTTP == nil {
-		to := t.Timeout
-		if to <= 0 {
-			to = defaultWebTimeout
-		}
-		client = &http.Client{Timeout: to}
+		client = &http.Client{Timeout: t.effectiveTimeout()}
 	} else {
 		copyClient := *t.HTTP
 		client = &copyClient
@@ -108,9 +161,131 @@ func (t *WebFetch) Execute(ctx context.Context, params map[string]any) (string, 
 		return "", err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, int64(max)))
-	return fmt.Sprintf("status: %s\n\n%s", resp.Status, string(body)), nil
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, int64(max)+1))
+	truncated := len(body) > max
+	if truncated {
+		body = body[:max]
+	}
+	return EncodeToolResult(ToolResult{
+		Kind:    "web_fetch",
+		OK:      resp.StatusCode < 400,
+		Summary: fmt.Sprintf("Fetched %s with HTTP status %s", parsed.String(), resp.Status),
+		Preview: string(body),
+		Stats: map[string]any{
+			"url":          parsed.String(),
+			"mode":         "http",
+			"status":       resp.Status,
+			"status_code":  resp.StatusCode,
+			"content_type": resp.Header.Get("Content-Type"),
+			"max_bytes":    max,
+			"truncated":    truncated,
+		},
+	}), nil
 }
+
+func (t *WebFetch) effectiveTimeout() time.Duration {
+	if t.Timeout > 0 {
+		return t.Timeout
+	}
+	return defaultWebTimeout
+}
+
+func webFetchWaitUntil(params map[string]any) string {
+	waitUntil := strings.ToLower(strings.TrimSpace(fmt.Sprint(params["waitUntil"])))
+	switch waitUntil {
+	case "domcontentloaded", "load", "networkidle":
+		return waitUntil
+	default:
+		return "networkidle"
+	}
+}
+
+func webFetchWaitMS(params map[string]any) int {
+	waitMS := defaultWebRenderWaitMS
+	if v, ok := params["waitMs"].(float64); ok && int(v) > 0 {
+		waitMS = int(v)
+	}
+	if waitMS > maxWebRenderWaitMS {
+		waitMS = maxWebRenderWaitMS
+	}
+	return waitMS
+}
+
+type PlaywrightRenderer struct {
+	NodePath string
+	Timeout  time.Duration
+}
+
+func (r PlaywrightRenderer) Render(ctx context.Context, target string, opts WebRenderOptions) (string, error) {
+	nodePath := strings.TrimSpace(r.NodePath)
+	if nodePath == "" {
+		var err error
+		nodePath, err = exec.LookPath("node")
+		if err != nil {
+			return "", fmt.Errorf("render=true requires Node.js and the playwright package: %w", err)
+		}
+	}
+	timeout := r.Timeout
+	if timeout <= 0 {
+		timeout = defaultWebTimeout
+	}
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	dir, err := os.MkdirTemp("", "or3-web-render-*")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(dir)
+	scriptPath := filepath.Join(dir, "render.js")
+	if err := os.WriteFile(scriptPath, []byte(playwrightRenderScript), 0o600); err != nil {
+		return "", err
+	}
+	args := []string{scriptPath, target, opts.WaitUntil, fmt.Sprint(opts.WaitMS), strings.TrimSpace(opts.Selector)}
+	cmd := exec.CommandContext(runCtx, nodePath, args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		errText := strings.TrimSpace(stderr.String())
+		if errText == "" {
+			errText = err.Error()
+		}
+		if strings.Contains(errText, "Cannot find module 'playwright'") {
+			return "", fmt.Errorf("render=true requires the playwright npm package and installed browser binaries")
+		}
+		return "", fmt.Errorf("render failed: %s", errText)
+	}
+	return stdout.String(), nil
+}
+
+const playwrightRenderScript = `
+const target = process.argv[2];
+const waitUntil = process.argv[3] || 'networkidle';
+const waitMs = Math.max(0, Number(process.argv[4] || 0));
+const selector = process.argv[5] || '';
+
+(async () => {
+  const { chromium } = require('playwright');
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.goto(target, { waitUntil, timeout: 20000 });
+    if (selector) {
+      await page.waitForSelector(selector, { timeout: 10000 });
+    }
+    if (waitMs > 0) {
+      await page.waitForTimeout(waitMs);
+    }
+    const text = await page.evaluate(() => document.body ? document.body.innerText : document.documentElement.innerText);
+    process.stdout.write(text || '');
+  } finally {
+    await browser.close();
+  }
+})().catch((err) => {
+  process.stderr.write(err && err.stack ? err.stack : String(err));
+  process.exit(1);
+});
+`
 
 func validateFetchURL(target *url.URL) error {
 	if target == nil {

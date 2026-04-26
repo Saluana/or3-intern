@@ -84,11 +84,15 @@ func TestWebFetch_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WebFetch: %v", err)
 	}
-	if !strings.Contains(out, "hello from server") {
-		t.Errorf("expected server response in output, got %q", out)
+	var result ToolResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("parse result: %v", err)
 	}
-	if !strings.Contains(out, "200") {
-		t.Errorf("expected status 200 in output, got %q", out)
+	if !strings.Contains(result.Preview, "hello from server") {
+		t.Errorf("expected server response in preview, got %q", out)
+	}
+	if fmt.Sprint(result.Stats["status"]) != "200 OK" {
+		t.Errorf("expected status 200 in stats, got %#v", result.Stats)
 	}
 }
 
@@ -106,15 +110,52 @@ func TestWebFetch_MaxBytes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WebFetch: %v", err)
 	}
-	parts := strings.SplitN(out, "\n\n", 2)
-	if len(parts) != 2 {
-		t.Fatalf("expected status/body split, got %q", out)
+	var result ToolResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("parse result: %v", err)
 	}
-	if parts[0] != "status: 200 OK" {
-		t.Fatalf("expected status line, got %q", out)
+	if len(result.Preview) != 50 {
+		t.Fatalf("expected 50-byte preview, got %d bytes in %q", len(result.Preview), out)
 	}
-	if len(parts[1]) != 50 {
-		t.Fatalf("expected 50-byte body, got %d bytes in %q", len(parts[1]), out)
+}
+
+type fakeWebRenderer struct {
+	gotURL  string
+	gotOpts WebRenderOptions
+}
+
+func (r *fakeWebRenderer) Render(ctx context.Context, target string, opts WebRenderOptions) (string, error) {
+	_ = ctx
+	r.gotURL = target
+	r.gotOpts = opts
+	return "rendered javascript content", nil
+}
+
+func TestWebFetch_RenderedModeUsesRenderer(t *testing.T) {
+	renderer := &fakeWebRenderer{}
+	tool := &WebFetch{Renderer: renderer}
+	out, err := tool.Execute(context.Background(), map[string]any{
+		"url":       "https://example.com/app",
+		"render":    true,
+		"waitUntil": "load",
+		"waitMs":    float64(250),
+		"selector":  "#app",
+	})
+	if err != nil {
+		t.Fatalf("WebFetch render: %v", err)
+	}
+	if renderer.gotURL != "https://example.com/app" {
+		t.Fatalf("expected renderer URL, got %q", renderer.gotURL)
+	}
+	if renderer.gotOpts.WaitUntil != "load" || renderer.gotOpts.WaitMS != 250 || renderer.gotOpts.Selector != "#app" {
+		t.Fatalf("unexpected render opts: %#v", renderer.gotOpts)
+	}
+	var result ToolResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("parse result: %v", err)
+	}
+	if result.Kind != "web_fetch" || result.Preview != "rendered javascript content" || fmt.Sprint(result.Stats["mode"]) != "render" {
+		t.Fatalf("unexpected render result: %#v", result)
 	}
 }
 
@@ -165,7 +206,7 @@ func TestWebFetch_PinsValidatedHostIntoDial(t *testing.T) {
 		t.Fatalf("expected fetch dial to stay pinned to the validated request IP, got %q", dialedAddr)
 	}
 	if !strings.Contains(out, "pinned") {
-		t.Fatalf("expected test server response, got %q", out)
+		t.Fatalf("expected test server response in envelope, got %q", out)
 	}
 }
 

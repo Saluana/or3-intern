@@ -106,6 +106,9 @@ Bearer token notes:
 | `POST` | `/internal/v1/scope/links` | Operator | Link session key to logical scope. |
 | `GET` | `/internal/v1/scope/resolve` | Operator | Resolve scope for one session key. |
 | `GET` | `/internal/v1/scope/sessions` | Operator | List sessions within one scope. |
+| `GET` | `/internal/v1/configure/sections` | Operator | List configure sections and current status summaries. |
+| `GET` | `/internal/v1/configure/fields` | Operator | List editable fields for a section (and channel for `channels`). |
+| `POST` | `/internal/v1/configure/apply` | Operator | Apply one or more configure-field mutations and persist config. |
 
 ## Endpoints
 
@@ -259,7 +262,45 @@ Set `"allowlist": true` to also create a persistent allowlist rule from the subj
 {
   "note": "optional operator note"
 }
+
+### Configure endpoints
+
+These endpoints expose the same field-level configuration surface used by `or3-intern configure` / settings TUI, so remote operators can automate all section/channel edits over REST.
+
+`GET /internal/v1/configure/sections` response:
+
+```json
+{
+  "items": [
+    {
+      "key": "provider",
+      "label": "Provider",
+      "description": "API endpoint, chat model, embeddings, timeouts, and provider secrets",
+      "status": "OpenAI · gpt-4.1-mini · embed=text-embedding-3-small"
+    }
+  ]
+}
 ```
+
+`GET /internal/v1/configure/fields?section=provider` response includes the field metadata used by the TUI (`key`, `label`, `kind`, `choices`, `value`, `description`). For `section=channels`, pass `channel=<telegram|slack|discord|whatsapp|email>`.
+
+`POST /internal/v1/configure/apply` request:
+
+```json
+{
+  "changes": [
+    { "section": "provider", "field": "provider_model", "op": "set", "value": "gpt-4.1" },
+    { "section": "service", "field": "service_enabled", "op": "toggle" },
+    { "section": "channels", "channel": "slack", "field": "access", "op": "choose", "value": "allowlist" }
+  ]
+}
+```
+
+`op` values:
+
+- `set` (default): set a text/secret/list field value
+- `toggle`: flip a boolean field
+- `choose`: select one option for a choice field (for example channel `access`)
 
 `POST /internal/v1/approvals/allowlists` request body:
 

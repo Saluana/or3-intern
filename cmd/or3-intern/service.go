@@ -26,6 +26,7 @@ import (
 
 type serviceServer struct {
 	config          config.Config
+	configPath      string
 	runtime         *agent.Runtime
 	subagentManager *agent.SubagentManager
 	jobs            *agent.JobRegistry
@@ -46,6 +47,7 @@ const (
 	serviceApprovalBodyLimit   int64 = 64 << 10
 	serviceEmbeddingsBodyLimit int64 = 64 << 10
 	serviceScopeBodyLimit      int64 = 64 << 10
+	serviceConfigureBodyLimit  int64 = 256 << 10
 )
 
 func runServiceCommand(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, jobs *agent.JobRegistry) error {
@@ -65,7 +67,7 @@ func runServiceCommandWithBroker(ctx context.Context, cfg config.Config, rt *age
 	if jobs == nil {
 		jobs = agent.NewJobRegistry(0, 0)
 	}
-	server := &serviceServer{config: cfg, runtime: rt, subagentManager: subagentManager, jobs: jobs, broker: broker}
+	server := &serviceServer{config: cfg, configPath: cfgPathOrDefault(""), runtime: rt, subagentManager: subagentManager, jobs: jobs, broker: broker}
 	mux := newServiceMux(server)
 
 	httpServer := &http.Server{
@@ -115,6 +117,8 @@ func newServiceMux(server *serviceServer) *http.ServeMux {
 	mux.Handle("/internal/v1/audit/", http.HandlerFunc(server.handleAudit))
 	mux.Handle("/internal/v1/scope", http.HandlerFunc(server.handleScope))
 	mux.Handle("/internal/v1/scope/", http.HandlerFunc(server.handleScope))
+	mux.Handle("/internal/v1/configure", http.HandlerFunc(server.handleConfigure))
+	mux.Handle("/internal/v1/configure/", http.HandlerFunc(server.handleConfigure))
 	return mux
 }
 
@@ -1274,6 +1278,133 @@ func (s *serviceServer) handleScope(w http.ResponseWriter, r *http.Request) {
 		writeServiceJSON(w, http.StatusOK, map[string]any{"session_key": sessionKey, "scope_key": scopeKey})
 	default:
 		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "scope route not found"})
+	}
+}
+
+type serviceConfigureChange struct {
+	Section string `json:"section"`
+	Channel string `json:"channel"`
+	Field   string `json:"field"`
+	Op      string `json:"op"`
+	Value   string `json:"value"`
+}
+
+func (s *serviceServer) handleConfigure(w http.ResponseWriter, r *http.Request) {
+	if !requireServiceRole(w, r, approval.RoleOperator) {
+		return
+	}
+	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/internal/v1/configure"), "/")
+	switch path {
+	case "", "sections":
+		if r.Method != http.MethodGet {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		items := make([]map[string]any, 0, len(configureSections))
+		for _, section := range configureSections {
+			items = append(items, map[string]any{
+				"key":         section.Key,
+				"label":       section.Label,
+				"description": section.Description,
+				"status":      sectionStatus(s.config, section.Key),
+			})
+		}
+		writeServiceJSON(w, http.StatusOK, map[string]any{"items": items})
+	case "fields":
+		if r.Method != http.MethodGet {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		section := normalizeConfigureSectionKey(serviceFirstNonEmpty(r.URL.Query().Get("section"), r.URL.Query().Get("sectionKey")))
+		if section == "" {
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "section is required"})
+			return
+		}
+		channel := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("channel")))
+		var fields []configureField
+		if section == "channels" {
+			if channel == "" {
+				writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "channel is required for channels section"})
+				return
+			}
+			fields = buildChannelFields(s.config, channel)
+		} else {
+			fields = buildSectionFields(s.config, section, "")
+		}
+		writeServiceValue(w, http.StatusOK, map[string]any{
+			"section": section,
+			"channel": channel,
+			"fields":  fields,
+		})
+	case "apply":
+		if r.Method != http.MethodPost {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		limitServiceRequestBody(w, r, serviceConfigureBodyLimit)
+		var body struct {
+			Changes []serviceConfigureChange `json:"changes"`
+		}
+		if err := decodeServiceRequestBody(r.Body, &body); err != nil {
+			writeServiceRequestDecodeError(w, err)
+			return
+		}
+		if len(body.Changes) == 0 {
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "changes are required"})
+			return
+		}
+		next := s.config
+		for _, change := range body.Changes {
+			section := normalizeConfigureSectionKey(change.Section)
+			channel := strings.TrimSpace(change.Channel)
+			field := strings.TrimSpace(change.Field)
+			if section == "" || field == "" {
+				writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "section and field are required for each change"})
+				return
+			}
+			switch strings.ToLower(strings.TrimSpace(change.Op)) {
+			case "", "set":
+				changed, err := applyFieldValue(&next, section, channel, field, change.Value)
+				if err != nil {
+					writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+					return
+				}
+				if !changed {
+					writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "unsupported field update: " + section + "." + field})
+					return
+				}
+			case "toggle":
+				if !toggleFieldValue(&next, section, channel, field) {
+					writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "unsupported toggle field: " + section + "." + field})
+					return
+				}
+			case "choose":
+				changed, err := applyChoiceSelection(&next, section, channel, field, change.Value)
+				if err != nil {
+					writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+					return
+				}
+				if !changed {
+					writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "unsupported choice field: " + section + "." + field})
+					return
+				}
+			default:
+				writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "unsupported op"})
+				return
+			}
+		}
+		path := s.configPath
+		if strings.TrimSpace(path) == "" {
+			path = cfgPathOrDefault("")
+		}
+		if err := config.Save(path, next); err != nil {
+			writeServiceError(w, r, http.StatusBadGateway, "config save failed", err)
+			return
+		}
+		s.config = next
+		writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true, "config_path": path})
+	default:
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "configure route not found"})
 	}
 }
 

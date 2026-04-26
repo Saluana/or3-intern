@@ -163,6 +163,34 @@ func (d *DB) FindPairingRequestByCodeHash(ctx context.Context, id int64, codeHas
 	return rec, err == nil, err
 }
 
+func (d *DB) FindPairingRequestsByCodeHash(ctx context.Context, codeHash []byte, status string, limit int) ([]PairingRequestRecord, error) {
+	if limit <= 0 || limit > 10 {
+		limit = 10
+	}
+	query := `SELECT id, device_id, role, display_name, origin, pairing_code_hash, requested_at, expires_at, status, approver_id, approved_at, denied_at, metadata_json FROM pairing_requests WHERE pairing_code_hash=?`
+	args := []any{codeHash}
+	if strings.TrimSpace(status) != "" {
+		query += ` AND status=?`
+		args = append(args, strings.TrimSpace(status))
+	}
+	query += ` ORDER BY id DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := d.SQL.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []PairingRequestRecord{}
+	for rows.Next() {
+		rec, err := scanPairingRequest(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rec)
+	}
+	return out, rows.Err()
+}
+
 func (d *DB) UpsertPairedDevice(ctx context.Context, input PairedDeviceRecord) (PairedDeviceRecord, error) {
 	if strings.TrimSpace(input.DeviceID) == "" {
 		return PairedDeviceRecord{}, fmt.Errorf("device ID required")

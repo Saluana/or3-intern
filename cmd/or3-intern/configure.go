@@ -573,6 +573,16 @@ func configureServiceSection(reader *bufio.Reader, out io.Writer, cfg *config.Co
 	if cfg.Service.Secret, err = promptSecretString(reader, out, "Service shared secret", cfg.Service.Secret); err != nil {
 		return err
 	}
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Local device pairing")
+	fmt.Fprintln(out, "This lets the OR3 app in your browser or phone ask for a one-time pairing code before it already has a saved key.")
+	fmt.Fprintln(out, "Turn this on only when the service listen address stays local-only, such as 127.0.0.1 or localhost.")
+	fmt.Fprintln(out, "If you expose the service to your network, leave this off.")
+	allowPairing, err := promptBool(reader, out, "Allow first-time local device pairing?", cfg.Service.AllowUnauthenticatedPairing)
+	if err != nil {
+		return err
+	}
+	cfg.Service.AllowUnauthenticatedPairing = allowPairing
 	return nil
 }
 

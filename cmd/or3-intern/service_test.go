@@ -228,6 +228,61 @@ func TestServiceBoundary_RateLimitIsPerActorAndPathAndEchoesRequestID(t *testing
 	}
 }
 
+func TestServiceBrowserMiddleware_AllowsLoopbackPreflight(t *testing.T) {
+	cfg := config.Config{Service: config.ServiceConfig{Listen: "127.0.0.1:9100"}}
+	called := false
+	handler := serviceBrowserMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true})
+	}))
+
+	req := httptest.NewRequest(http.MethodOptions, "/internal/v1/pairing/requests", nil)
+	req.RemoteAddr = "127.0.0.1:43210"
+	req.Header.Set("Origin", "http://localhost:3000")
+	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	req.Header.Set("Access-Control-Request-Headers", "content-type")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if called {
+		t.Fatal("expected preflight to short-circuit before downstream handler")
+	}
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 preflight response, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:3000" {
+		t.Fatalf("expected allow-origin header, got %q", got)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Headers"); got != "content-type" {
+		t.Fatalf("expected allow-headers to reflect requested headers, got %q", got)
+	}
+}
+
+func TestServiceBrowserMiddleware_AddsLoopbackCORSHeadersToRequests(t *testing.T) {
+	cfg := config.Config{Service: config.ServiceConfig{Listen: "127.0.0.1:9100"}}
+	handler := serviceBrowserMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeServiceJSON(w, http.StatusAccepted, map[string]any{"ok": true})
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/pairing/requests", strings.NewReader(`{"role":"operator"}`))
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("Origin", "http://127.0.0.1:3000")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected downstream handler response, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "http://127.0.0.1:3000" {
+		t.Fatalf("expected allow-origin header, got %q", got)
+	}
+	if got := rec.Header().Get("Access-Control-Expose-Headers"); !strings.Contains(got, "X-Request-Id") {
+		t.Fatalf("expected expose headers to include X-Request-Id, got %q", got)
+	}
+}
+
 func TestWriteServiceErrorRedactsInternalError(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/internal/v1/turns", nil)
 	req = req.WithContext(context.WithValue(req.Context(), serviceRequestContextKey{}, serviceRequestContext{RequestID: "req-redact"}))
@@ -1008,7 +1063,7 @@ func newServiceTestHTTPServer(t *testing.T, secret string, server *serviceServer
 			return registry
 		}
 	}
-	return httptest.NewServer(serviceAuthMiddlewareWithBroker(server.config, server.broker, serviceBoundaryMiddleware(server, newServiceMux(server))))
+	return httptest.NewServer(serviceBrowserMiddleware(server.config, serviceAuthMiddlewareWithBroker(server.config, server.broker, serviceBoundaryMiddleware(server, newServiceMux(server)))))
 }
 
 func mustServiceRequest(t *testing.T, server *httptest.Server, secret, method, path, body string) *http.Request {

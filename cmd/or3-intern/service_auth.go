@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -39,6 +40,22 @@ func serviceAuthMiddleware(secret string, next http.Handler) http.Handler {
 	return serviceAuthMiddlewareWithBroker(config.Config{Service: config.ServiceConfig{Secret: secret, SharedSecretRole: approval.RoleServiceClient}}, nil, next)
 }
 
+func serviceBrowserMiddleware(cfg config.Config, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin, ok := serviceAllowedBrowserOrigin(cfg, r)
+		if !ok {
+			next.ServeHTTP(w, r)
+			return
+		}
+		serviceWriteCORSHeaders(w.Header(), r, origin)
+		if serviceIsCORSPreflight(r) {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func serviceAuthMiddlewareWithBroker(cfg config.Config, broker *approval.Broker, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if allowsUnauthenticatedPairingRoute(cfg, r) {
@@ -58,6 +75,79 @@ func serviceAuthMiddlewareWithBroker(cfg config.Config, broker *approval.Broker,
 		ctx = approval.ContextWithAuditActor(ctx, identity.Actor)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func serviceAllowedBrowserOrigin(cfg config.Config, r *http.Request) (string, bool) {
+	if r == nil {
+		return "", false
+	}
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return "", false
+	}
+	if !serviceListenIsLoopback(cfg.Service.Listen) {
+		return "", false
+	}
+	if strings.TrimSpace(r.RemoteAddr) != "" && !requestRemoteIsLoopback(r.RemoteAddr) {
+		return "", false
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil {
+		return "", false
+	}
+	if !strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https") {
+		return "", false
+	}
+	host := strings.TrimSpace(parsed.Hostname())
+	if host == "" {
+		return "", false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return origin, ip.IsLoopback()
+	}
+	return origin, strings.EqualFold(host, "localhost")
+}
+
+func serviceIsCORSPreflight(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if r.Method != http.MethodOptions {
+		return false
+	}
+	return strings.TrimSpace(r.Header.Get("Access-Control-Request-Method")) != ""
+}
+
+func serviceWriteCORSHeaders(header http.Header, r *http.Request, origin string) {
+	if header == nil {
+		return
+	}
+	serviceAppendVary(header, "Origin")
+	serviceAppendVary(header, "Access-Control-Request-Method")
+	serviceAppendVary(header, "Access-Control-Request-Headers")
+	header.Set("Access-Control-Allow-Origin", origin)
+	header.Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+	header.Set("Access-Control-Expose-Headers", "X-Request-Id")
+	header.Set("Access-Control-Max-Age", "600")
+	requestedHeaders := strings.TrimSpace(r.Header.Get("Access-Control-Request-Headers"))
+	if requestedHeaders == "" {
+		requestedHeaders = "Authorization, Content-Type, Accept, X-Request-Id"
+	}
+	header.Set("Access-Control-Allow-Headers", requestedHeaders)
+}
+
+func serviceAppendVary(header http.Header, value string) {
+	if header == nil || strings.TrimSpace(value) == "" {
+		return
+	}
+	for _, existing := range header.Values("Vary") {
+		for _, part := range strings.Split(existing, ",") {
+			if strings.EqualFold(strings.TrimSpace(part), value) {
+				return
+			}
+		}
+	}
+	header.Add("Vary", value)
 }
 
 func authenticateServiceRequest(cfg config.Config, broker *approval.Broker, header string, now time.Time, ctx context.Context) (serviceAuthIdentity, error) {
@@ -101,6 +191,9 @@ func serviceAuthKindFromContext(ctx context.Context) string {
 func allowsUnauthenticatedPairingRoute(cfg config.Config, r *http.Request) bool {
 	if r == nil || r.URL == nil {
 		return false
+	}
+	if serviceIsCORSPreflight(r) {
+		return true
 	}
 	if !cfg.Service.AllowUnauthenticatedPairing {
 		return false

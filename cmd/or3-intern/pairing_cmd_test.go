@@ -91,3 +91,65 @@ func TestRunPairingCommand_RejectsExtraArgs(t *testing.T) {
 		}
 	}
 }
+
+func TestRunPairingCommand_ListEmptyExplainsNextStep(t *testing.T) {
+	broker := testPairingBroker(t)
+	ctx := context.Background()
+	var out bytes.Buffer
+
+	if err := runPairingCommand(ctx, broker, []string{"list", "pending"}, &out, &out); err != nil {
+		t.Fatalf("list pending: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "No device pairing requests are waiting right now.") {
+		t.Fatalf("expected empty-state explanation, got %q", got)
+	}
+	if !strings.Contains(got, "or3-intern pairing approve-code 123456") {
+		t.Fatalf("expected approve-code explanation, got %q", got)
+	}
+}
+
+func TestRunPairingCommand_ApproveCodeApprovesVisibleCode(t *testing.T) {
+	broker := testPairingBroker(t)
+	ctx := context.Background()
+
+	var out bytes.Buffer
+	if err := runPairingCommand(ctx, broker, []string{"request", "--name", "Grandma's Phone"}, &out, &out); err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	var code string
+	for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+		if strings.HasPrefix(line, "code: ") {
+			code = strings.TrimSpace(strings.TrimPrefix(line, "code: "))
+		}
+	}
+	if code == "" {
+		t.Fatalf("missing code in output: %q", out.String())
+	}
+
+	out.Reset()
+	if err := runPairingCommand(ctx, broker, []string{"approve-code", code}, &out, &out); err != nil {
+		t.Fatalf("approve-code: %v", err)
+	}
+	if !strings.Contains(out.String(), "You can go back to the app now") {
+		t.Fatalf("expected friendly approve-code output, got %q", out.String())
+	}
+}
+
+func TestRunPairingCommand_ApproveMissingRequestExplainsID(t *testing.T) {
+	broker := testPairingBroker(t)
+	ctx := context.Background()
+	var out bytes.Buffer
+
+	err := runPairingCommand(ctx, broker, []string{"approve", "172483"}, &out, &out)
+	if err == nil {
+		t.Fatal("expected missing request to fail")
+	}
+	got := err.Error()
+	if !strings.Contains(got, "could not find pairing request 172483") {
+		t.Fatalf("expected missing-request explanation, got %q", got)
+	}
+	if !strings.Contains(got, "not the request ID") {
+		t.Fatalf("expected pairing-code clarification, got %q", got)
+	}
+}

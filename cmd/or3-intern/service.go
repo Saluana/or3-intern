@@ -192,7 +192,7 @@ func runServiceCommandWithBroker(ctx context.Context, cfg config.Config, rt *age
 
 	httpServer := &http.Server{
 		Addr:              cfg.Service.Listen,
-		Handler:           serviceAuthMiddlewareWithBroker(cfg, broker, serviceBoundaryMiddleware(server, mux)),
+		Handler:           serviceBrowserMiddleware(cfg, serviceAuthMiddlewareWithBroker(cfg, broker, serviceBoundaryMiddleware(server, mux))),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		IdleTimeout:       60 * time.Second,

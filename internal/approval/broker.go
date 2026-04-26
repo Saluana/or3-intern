@@ -479,6 +479,31 @@ func (b *Broker) ApprovePairingRequest(ctx context.Context, id int64, actor stri
 	return updated, nil
 }
 
+func (b *Broker) ApprovePairingRequestByCode(ctx context.Context, code string, actor string) (db.PairingRequestRecord, error) {
+	code = strings.TrimSpace(strings.ReplaceAll(code, "-", ""))
+	if code == "" {
+		return db.PairingRequestRecord{}, fmt.Errorf("pairing code required")
+	}
+	matches, err := b.DB.FindPairingRequestsByCodeHash(ctx, hashBytes(code), StatusPending, 2)
+	if err != nil {
+		return db.PairingRequestRecord{}, err
+	}
+	nowMS := b.now().UnixMilli()
+	active := make([]db.PairingRequestRecord, 0, len(matches))
+	for _, req := range matches {
+		if req.ExpiresAt <= 0 || req.ExpiresAt >= nowMS {
+			active = append(active, req)
+		}
+	}
+	if len(active) == 0 {
+		return db.PairingRequestRecord{}, fmt.Errorf("could not find a waiting device with that code. In the app, tap Get pairing code again and use the fresh 6-digit code")
+	}
+	if len(active) > 1 {
+		return db.PairingRequestRecord{}, fmt.Errorf("more than one waiting device has that code. Run `or3-intern pairing list pending` and approve by request ID")
+	}
+	return b.ApprovePairingRequest(ctx, active[0].ID, actor)
+}
+
 func (b *Broker) DenyPairingRequest(ctx context.Context, id int64, actor string) error {
 	req, err := b.DB.GetPairingRequest(ctx, id)
 	if err != nil {

@@ -122,6 +122,35 @@ func TestConfigureTUIFieldDescriptionsAreHelpful(t *testing.T) {
 	}
 }
 
+func TestBuildSectionFields_ServiceIncludesLocalPairingToggle(t *testing.T) {
+	fields := buildSectionFields(config.Default(), "service", "/workspace/project")
+	for _, field := range fields {
+		if field.Key == "service_allow_unauthenticated_pairing" {
+			if field.Kind != configureFieldToggle {
+				t.Fatalf("expected local pairing field to be a toggle, got %v", field.Kind)
+			}
+			if !strings.Contains(field.Description, "same computer") {
+				t.Fatalf("expected plain-language explanation for local pairing field, got %q", field.Description)
+			}
+			return
+		}
+	}
+	t.Fatal("expected service section to include local pairing toggle")
+}
+
+func TestSetToggleFieldValue_AppliesServiceLocalPairingToggle(t *testing.T) {
+	cfg := config.Default()
+	if cfg.Service.AllowUnauthenticatedPairing {
+		t.Fatal("expected default local pairing bootstrap to be off")
+	}
+	if changed := setToggleFieldValue(&cfg, "service", "", "service_allow_unauthenticated_pairing", true); !changed {
+		t.Fatal("expected local pairing bootstrap toggle to apply")
+	}
+	if !cfg.Service.AllowUnauthenticatedPairing {
+		t.Fatal("expected local pairing bootstrap to be enabled")
+	}
+}
+
 func TestDeriveConfigureLayoutStacksAndCompactsOnSmallTerminal(t *testing.T) {
 	layout := deriveConfigureLayout(78, 20)
 	if !layout.stacked {

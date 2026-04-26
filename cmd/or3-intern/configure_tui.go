@@ -1277,7 +1277,12 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 			{Key: "automation_filewatch_debounce", Label: "File-watch debounce seconds", Description: "Debounce window before emitting a trigger.", Kind: configureFieldText, Value: formatInt(cfg.Triggers.FileWatch.DebounceSeconds), EmptyHint: "2"},
 		}
 	case "service":
-		return []configureField{{Key: "service_enabled", Label: "Enable service API", Description: "Expose the internal authenticated HTTP API.", Kind: configureFieldToggle, Value: onOff(cfg.Service.Enabled)}, {Key: "service_listen", Label: "Listen address", Description: "Bind address for the internal service.", Kind: configureFieldText, Value: cfg.Service.Listen, EmptyHint: "127.0.0.1:9100"}, {Key: "service_secret", Label: "Shared secret", Description: "Hidden secret. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Service.Secret), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"}}
+		return []configureField{
+			{Key: "service_enabled", Label: "Enable service API", Description: "Expose the internal authenticated HTTP API.", Kind: configureFieldToggle, Value: onOff(cfg.Service.Enabled)},
+			{Key: "service_listen", Label: "Listen address", Description: "Bind address for the internal service.", Kind: configureFieldText, Value: cfg.Service.Listen, EmptyHint: "127.0.0.1:9100"},
+			{Key: "service_secret", Label: "Shared secret", Description: "Hidden secret. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Service.Secret), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"},
+			{Key: "service_allow_unauthenticated_pairing", Label: "Allow first-time local device pairing", Description: "Let a phone or browser on this same computer ask for a one-time pairing code before it has a saved key.", Kind: configureFieldToggle, Value: onOff(cfg.Service.AllowUnauthenticatedPairing)},
+		}
 	}
 	return nil
 }
@@ -1488,6 +1493,7 @@ var helpfulSectionFieldDescriptions = map[string]string{
 	"service_enabled":                       "Starts OR3's internal HTTP API so other local apps or devices can connect. Warning: expose it only when protected by a strong secret.",
 	"service_listen":                        "Network address for the internal service. 127.0.0.1 is local-only; 0.0.0.0 may expose OR3 to your network.",
 	"service_secret":                        "Shared secret required by service clients. Warning: a weak or leaked secret can allow unauthorized access.",
+	"service_allow_unauthenticated_pairing": "Allows a first-time phone or browser on this same computer to ask for a pairing code before it has a saved key. Warning: leave this off unless the service listen address stays local-only such as 127.0.0.1 or localhost.",
 }
 
 func helpfulChannelFieldDescription(channel, key string) string {
@@ -2161,6 +2167,8 @@ func setToggleFieldValue(cfg *config.Config, section, channel, fieldKey string, 
 		cfg.Triggers.FileWatch.Enabled = value
 	case "service_enabled":
 		cfg.Service.Enabled = value
+	case "service_allow_unauthenticated_pairing":
+		cfg.Service.AllowUnauthenticatedPairing = value
 	default:
 		return false
 	}

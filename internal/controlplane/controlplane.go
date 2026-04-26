@@ -331,6 +331,14 @@ func (s *Service) ApprovePairingRequest(ctx context.Context, requestID int64, ac
 	return broker.ApprovePairingRequest(ctx, requestID, actor)
 }
 
+func (s *Service) ApprovePairingRequestByCode(ctx context.Context, code string, actor string) (db.PairingRequestRecord, error) {
+	broker, err := s.requireBroker()
+	if err != nil {
+		return db.PairingRequestRecord{}, err
+	}
+	return broker.ApprovePairingRequestByCode(ctx, code, actor)
+}
+
 func (s *Service) DenyPairingRequest(ctx context.Context, requestID int64, actor string) error {
 	broker, err := s.requireBroker()
 	if err != nil {

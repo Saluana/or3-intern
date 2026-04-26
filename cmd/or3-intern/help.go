@@ -235,6 +235,8 @@ var helpTopics = map[string]helpCommand{
 		Summary: "Inspect and resolve approval requests and allowlist rules.",
 		Description: []string{
 			"All approval subcommands work directly against the local SQLite database.",
+			"Use this for command, secret, skill, and message permission prompts.",
+			"For phone/browser device connection requests, use `or3-intern pairing`, not `or3-intern approvals`.",
 		},
 		Subcommands: []helpItem{
 			{Name: "list [status]", Description: "List approval requests, optionally filtered by status"},
@@ -243,7 +245,7 @@ var helpTopics = map[string]helpCommand{
 			{Name: "deny <id> [--note text]", Description: "Deny a request"},
 			{Name: "allowlist <list|add|remove>", Description: "Manage persistent allowlist rules"},
 		},
-		Examples: []string{"or3-intern approvals list pending", "or3-intern approvals approve 42 --allowlist"},
+		Examples: []string{"or3-intern approvals list pending", "or3-intern approvals approve 42 --allowlist", "or3-intern pairing list pending"},
 	},
 	"approvals approve": {
 		Usage:   "or3-intern approvals approve <id> [--allowlist] [--note text]",
@@ -291,6 +293,10 @@ var helpTopics = map[string]helpCommand{
 	"devices": {
 		Usage:   "or3-intern devices <list|requests|approve|deny|rotate|revoke> ...",
 		Summary: "Inspect paired devices and legacy pairing request helpers.",
+		Description: []string{
+			"Use `devices list` after pairing is complete to review or manage connected phones, tablets, or apps.",
+			"For the actual pairing approval step, `or3-intern pairing` is the clearest command group.",
+		},
 		Subcommands: []helpItem{
 			{Name: "list", Description: "List paired devices"},
 			{Name: "requests [status]", Description: "List pairing requests, optionally filtered by status"},
@@ -302,16 +308,25 @@ var helpTopics = map[string]helpCommand{
 		Examples: []string{"or3-intern devices list", "or3-intern devices rotate dev_123"},
 	},
 	"pairing": {
-		Usage:   "or3-intern pairing <list|request|approve|deny|exchange> ...",
+		Usage:   "or3-intern pairing <list|request|approve-code|approve|deny|exchange> ...",
 		Summary: "Manage first-class pairing workflows, including channel-bound identities.",
+		Description: []string{
+			"Use this when the OR3 app or another device asks to connect.",
+			"Easiest browser/app approval flow:",
+			"1) In the app, tap 'Get pairing code'.",
+			"2) On the computer, run `or3-intern pairing approve-code 123456` using the code shown in the app.",
+			"3) Go back to the app. It should finish connecting by itself.",
+			"Advanced fallback: run `or3-intern pairing list pending`, then `or3-intern pairing approve <request-id>`.",
+		},
 		Subcommands: []helpItem{
 			{Name: "list [status]", Description: "List pairing requests"},
 			{Name: "request [flags]", Description: "Create a pairing request"},
+			{Name: "approve-code <6-digit-code>", Description: "Approve the waiting device using the code shown in the app"},
 			{Name: "approve <request-id>", Description: "Approve a pairing request"},
 			{Name: "deny <request-id>", Description: "Deny a pairing request"},
 			{Name: "exchange <request-id> <code>", Description: "Exchange a pairing code for a device token"},
 		},
-		Examples: []string{"or3-intern pairing list", "or3-intern pairing request --channel slack --identity U42 --name \"Slack User\""},
+		Examples: []string{"or3-intern pairing approve-code 123456", "or3-intern pairing list pending", "or3-intern pairing approve 12", "or3-intern pairing request --channel slack --identity U42 --name \"Slack User\""},
 	},
 	"pairing request": {
 		Usage:   "or3-intern pairing request [--role role] [--name text] [--origin text] [--device id] [--channel name --identity id]",

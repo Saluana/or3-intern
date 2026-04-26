@@ -21,7 +21,7 @@ func runApprovalsCommand(ctx context.Context, broker *approval.Broker, args []st
 	}
 	appSvc := app.NewServiceApp(nil, nil, nil, newCLIControlplane(broker))
 	if len(args) == 0 {
-		return fmt.Errorf("usage: approvals <list|show|approve|deny|cancel|expire|allowlist>")
+		return fmt.Errorf("usage: approvals <list|show|approve|deny|cancel|expire|allowlist>\n\nFor phone/browser device pairing requests, use `or3-intern pairing` instead of `or3-intern approvals`")
 	}
 	switch strings.ToLower(strings.TrimSpace(args[0])) {
 	case "list":
@@ -43,6 +43,8 @@ func runApprovalsCommand(ctx context.Context, broker *approval.Broker, args []st
 			return err
 		}
 		if len(items) == 0 {
+			fmt.Fprintln(stdout, "No pending approvals right now.")
+			fmt.Fprintln(stdout, "If you are trying to approve a phone or browser connection, use `or3-intern pairing list` instead.")
 			return nil
 		}
 		fmt.Fprintln(stdout, "Pending permissions")

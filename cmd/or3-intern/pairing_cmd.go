@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"flag"
 	"fmt"
 	"io"
@@ -18,7 +19,7 @@ func runPairingCommand(ctx context.Context, broker *approval.Broker, args []stri
 	}
 	appSvc := app.NewServiceApp(nil, nil, nil, newCLIControlplane(broker))
 	if len(args) == 0 {
-		return fmt.Errorf("usage: pairing <list|request|approve|deny|exchange>")
+		return fmt.Errorf("usage: pairing <list|request|approve|approve-code|deny|exchange>")
 	}
 	switch strings.ToLower(strings.TrimSpace(args[0])) {
 	case "list":
@@ -33,6 +34,18 @@ func runPairingCommand(ctx context.Context, broker *approval.Broker, args []stri
 		if err != nil {
 			return err
 		}
+		if len(items) == 0 {
+			fmt.Fprintln(stdout, "No device pairing requests are waiting right now.")
+			fmt.Fprintln(stdout, "")
+			fmt.Fprintln(stdout, "If the app already shows a 6-digit code, approve it with:")
+			fmt.Fprintln(stdout, "  or3-intern pairing approve-code 123456")
+			fmt.Fprintln(stdout, "")
+			fmt.Fprintln(stdout, "Use the code shown in the app instead of 123456.")
+			return nil
+		}
+		fmt.Fprintln(stdout, "Device pairing requests")
+		fmt.Fprintln(stdout, "Easiest: approve with the code shown in the app: `or3-intern pairing approve-code <code>`.")
+		fmt.Fprintln(stdout, "Advanced: use the first number with `or3-intern pairing approve <request-id>`.")
 		for _, item := range items {
 			fmt.Fprintf(stdout, "%d\t%s\t%s\t%s\t%s\t%s\n", item.ID, item.Status, item.Role, item.DeviceID, item.DisplayName, item.Origin)
 		}
@@ -85,9 +98,19 @@ func runPairingCommand(ctx context.Context, broker *approval.Broker, args []stri
 		}
 		req, err := appSvc.ApprovePairingRequest(ctx, id, "cli")
 		if err != nil {
-			return err
+			return explainPairingLookupError(err, id)
 		}
 		_, _ = fmt.Fprintf(stdout, "approved pairing request %d for %s\n", req.ID, req.DeviceID)
+		return nil
+	case "approve-code":
+		if err := requireExactArgs(args[1:], 1, "pairing approve-code <6-digit-code>"); err != nil {
+			return err
+		}
+		req, err := appSvc.ApprovePairingRequestByCode(ctx, args[1], "cli")
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(stdout, "Approved %s. You can go back to the app now; it should connect automatically.\n", firstNonEmptyString(req.DisplayName, req.DeviceID))
 		return nil
 	case "deny":
 		if err := requireExactArgs(args[1:], 1, "pairing deny <request-id>"); err != nil {
@@ -98,7 +121,7 @@ func runPairingCommand(ctx context.Context, broker *approval.Broker, args []stri
 			return fmt.Errorf("invalid pairing request ID")
 		}
 		if err := appSvc.DenyPairingRequest(ctx, id, "cli"); err != nil {
-			return err
+			return explainPairingLookupError(err, id)
 		}
 		_, _ = fmt.Fprintf(stdout, "denied pairing request %d\n", id)
 		return nil
@@ -115,11 +138,21 @@ func runPairingCommand(ctx context.Context, broker *approval.Broker, args []stri
 			Code:      strings.TrimSpace(args[2]),
 		})
 		if err != nil {
-			return err
+			return explainPairingLookupError(err, id)
 		}
 		_, _ = fmt.Fprintf(stdout, "paired device %s\nrole: %s\ntoken: %s\n", device.DeviceID, device.Role, token)
 		return nil
 	default:
 		return fmt.Errorf("unknown pairing subcommand: %s", args[0])
 	}
+}
+
+func explainPairingLookupError(err error, requestID int64) error {
+	if err == nil {
+		return nil
+	}
+	if err == sql.ErrNoRows || strings.Contains(strings.ToLower(err.Error()), "no rows in result set") {
+		return fmt.Errorf("could not find pairing request %d. Run `or3-intern pairing list` to find the request ID. The 6-digit pairing code shown in the app is not the request ID", requestID)
+	}
+	return err
 }

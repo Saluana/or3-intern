@@ -128,6 +128,34 @@ func TestPrintHelpTopic_Configure(t *testing.T) {
 	}
 }
 
+func TestPrintHelpTopic_PairingExplainsBrowserApprovalFlow(t *testing.T) {
+	var out bytes.Buffer
+	if err := printHelpTopic(&out, []string{"pairing"}); err != nil {
+		t.Fatalf("printHelpTopic pairing: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "tap 'Get pairing code'") {
+		t.Fatalf("expected step-by-step browser pairing guidance, got %q", got)
+	}
+	if !strings.Contains(got, "or3-intern pairing approve-code 123456") {
+		t.Fatalf("expected approve-code guidance, got %q", got)
+	}
+	if !strings.Contains(got, "should finish connecting by itself") {
+		t.Fatalf("expected auto-finish explanation in help, got %q", got)
+	}
+}
+
+func TestPrintHelpTopic_ApprovalsPointsDeviceUsersToPairing(t *testing.T) {
+	var out bytes.Buffer
+	if err := printHelpTopic(&out, []string{"approvals"}); err != nil {
+		t.Fatalf("printHelpTopic approvals: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "use `or3-intern pairing`") {
+		t.Fatalf("expected approvals help to redirect device pairing users, got %q", got)
+	}
+}
+
 func TestCfgPathOrDefault(t *testing.T) {
 	t.Run("explicit path", func(t *testing.T) {
 		if got := cfgPathOrDefault("/tmp/custom-config.json"); got != "/tmp/custom-config.json" {

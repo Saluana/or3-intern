@@ -188,6 +188,13 @@ func (a *ServiceApp) ApprovePairingRequest(ctx context.Context, requestID int64,
 	return a.control.ApprovePairingRequest(ctx, requestID, actor)
 }
 
+func (a *ServiceApp) ApprovePairingRequestByCode(ctx context.Context, code string, actor string) (db.PairingRequestRecord, error) {
+	if a == nil || a.control == nil {
+		return db.PairingRequestRecord{}, controlplane.ErrApprovalBrokerUnavailable
+	}
+	return a.control.ApprovePairingRequestByCode(ctx, code, actor)
+}
+
 func (a *ServiceApp) DenyPairingRequest(ctx context.Context, requestID int64, actor string) error {
 	if a == nil || a.control == nil {
 		return controlplane.ErrApprovalBrokerUnavailable

@@ -173,6 +173,7 @@ type Builder struct {
 	ContextOutputReserveTokens int
 	ContextSafetyMarginTokens  int
 	ContextSectionBudgets      ContextSectionBudgets
+	DisableTaskCard            bool
 }
 
 // Build builds a prompt snapshot. It is a convenience wrapper around BuildWithOptions.
@@ -212,7 +213,7 @@ func (b *Builder) buildPacket(ctx context.Context, opts BuildOptions) (ContextPa
 		structuredMax = defaultBootstrapMaxChars
 	}
 	taskCardText := ""
-	if b.DB != nil {
+	if b.DB != nil && !b.DisableTaskCard {
 		if card, ok, err := loadTaskCard(ctx, b.DB, opts.SessionKey); err == nil && ok {
 			taskCardText = renderTaskCard(card, structuredMax)
 		}

@@ -95,7 +95,10 @@ func TestConfigureTUIAppliesContextFields(t *testing.T) {
 	if changed, err := applyFieldValue(&cfg, "context", "", "context_manager_model", "mini-context"); err != nil || !changed {
 		t.Fatalf("apply context manager model: changed=%v err=%v", changed, err)
 	}
-	if cfg.Context.Mode != "balanced" || cfg.Context.MaxInputTokens != 12345 || !cfg.ContextManager.Enabled || cfg.ContextManager.Model != "mini-context" {
+	if changed, err := applyFieldValue(&cfg, "context", "", "context_manager_idle_prune", "120"); err != nil || !changed {
+		t.Fatalf("apply context manager idle prune: changed=%v err=%v", changed, err)
+	}
+	if cfg.Context.Mode != "balanced" || cfg.Context.MaxInputTokens != 12345 || !cfg.ContextManager.Enabled || cfg.ContextManager.Model != "mini-context" || cfg.ContextManager.IdlePruneSeconds != 120 {
 		t.Fatalf("unexpected context config: %+v manager=%+v", cfg.Context, cfg.ContextManager)
 	}
 }

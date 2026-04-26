@@ -437,18 +437,20 @@ func main() {
 			DocRetrieveLimit:       cfg.DocIndex.RetrieveLimit,
 			WorkspaceDir:           cfg.WorkspaceDir,
 		}),
-		Artifacts:           art,
-		MaxToolBytes:        cfg.MaxToolBytes,
-		MaxToolLoops:        cfg.MaxToolLoops,
-		DynamicToolExposure: cfg.ContextConfigured && cfg.Context.Tools.DynamicExpose,
-		Deliver:             delivererFunc(channelManager.Deliver),
-		DefaultScopeKey:     cfg.DefaultSessionKey,
-		LinkDirectMessages:  cfg.Session.DirectMessagesShareDefault,
-		IdentityScopeMap:    buildIdentityScopeMap(cfg),
-		Hardening:           cfg.Hardening,
-		AccessProfiles:      cfg.Security.Profiles,
-		Audit:               auditLogger,
-		ApprovalBroker:      approvalBroker,
+		Artifacts:                   art,
+		MaxToolBytes:                cfg.MaxToolBytes,
+		MaxToolLoops:                cfg.MaxToolLoops,
+		DynamicToolExposure:         cfg.ContextConfigured && cfg.Context.Tools.DynamicExpose,
+		Deliver:                     delivererFunc(channelManager.Deliver),
+		DefaultScopeKey:             cfg.DefaultSessionKey,
+		LinkDirectMessages:          cfg.Session.DirectMessagesShareDefault,
+		IdentityScopeMap:            buildIdentityScopeMap(cfg),
+		Hardening:                   cfg.Hardening,
+		AccessProfiles:              cfg.Security.Profiles,
+		Audit:                       auditLogger,
+		ApprovalBroker:              approvalBroker,
+		ContextManager:              cfg.ContextManager,
+		DisableRollingConsolidation: !cfg.ConsolidationEnabled,
 	}
 	var serviceJobs *agent.JobRegistry
 	if cmd == "service" {
@@ -489,7 +491,7 @@ func main() {
 		}
 		rt.Tools = buildRuntimeTools()
 	}
-	if cfg.ConsolidationEnabled {
+	if cfg.ConsolidationEnabled || cfg.ContextManager.Enabled {
 		rt.Consolidator = &memory.Consolidator{
 			DB:                 d,
 			Provider:           newConsolidationProviderClient(cfg),
@@ -715,6 +717,7 @@ func applyContextConfigToBuilder(cfg config.Config, builder *agent.Builder) *age
 		WorkspaceContext: cfg.Context.Sections.WorkspaceContext,
 		ToolSchemas:      cfg.Context.Sections.ToolSchemas,
 	}
+	builder.DisableTaskCard = !cfg.Context.TaskCard.Enabled
 	return builder
 }
 

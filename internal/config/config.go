@@ -201,6 +201,7 @@ type ContextManagerConfig struct {
 	Provider          string `json:"provider"`
 	Model             string `json:"model"`
 	TimeoutSeconds    int    `json:"timeoutSeconds"`
+	IdlePruneSeconds  int    `json:"idlePruneSeconds"`
 	MaxInputTokens    int    `json:"maxInputTokens"`
 	MaxOutputTokens   int    `json:"maxOutputTokens"`
 	AllowTaskUpdates  bool   `json:"allowTaskUpdates"`
@@ -809,6 +810,7 @@ func Default() Config {
 			Provider:          "",
 			Model:             "",
 			TimeoutSeconds:    15,
+			IdlePruneSeconds:  300,
 			MaxInputTokens:    1200,
 			MaxOutputTokens:   600,
 			AllowTaskUpdates:  true,
@@ -1125,6 +1127,9 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.ContextManager.TimeoutSeconds <= 0 {
 		cfg.ContextManager.TimeoutSeconds = 15
+	}
+	if cfg.ContextManager.IdlePruneSeconds <= 0 {
+		cfg.ContextManager.IdlePruneSeconds = 300
 	}
 	if cfg.ContextManager.MaxInputTokens <= 0 {
 		cfg.ContextManager.MaxInputTokens = 1200

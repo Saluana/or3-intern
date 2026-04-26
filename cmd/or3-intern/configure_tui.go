@@ -1154,6 +1154,7 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 			{Key: "context_manager_provider", Label: "Context manager provider", Description: "Optional provider override for context-manager proposals. Blank uses the main provider.", Kind: configureFieldText, Value: cfg.ContextManager.Provider, EmptyHint: cfg.Provider.APIBase},
 			{Key: "context_manager_model", Label: "Context manager model", Description: "Optional model for context-manager proposals. Blank uses deterministic pruning only.", Kind: configureFieldText, Value: cfg.ContextManager.Model, EmptyHint: "gpt-4.1-mini"},
 			{Key: "context_manager_timeout", Label: "Context manager timeout", Description: "Timeout for optional context-manager calls, in seconds.", Kind: configureFieldText, Value: formatInt(cfg.ContextManager.TimeoutSeconds), EmptyHint: "15"},
+			{Key: "context_manager_idle_prune", Label: "Idle prune seconds", Description: "Inactivity period before automatic context pruning runs. Default is 300 seconds.", Kind: configureFieldText, Value: formatInt(cfg.ContextManager.IdlePruneSeconds), EmptyHint: "300"},
 			{Key: "context_manager_max_input", Label: "Context manager max input", Description: "Input-token cap for context-manager proposals.", Kind: configureFieldText, Value: formatInt(cfg.ContextManager.MaxInputTokens), EmptyHint: "1200"},
 			{Key: "context_manager_max_output", Label: "Context manager max output", Description: "Output-token cap for context-manager proposals.", Kind: configureFieldText, Value: formatInt(cfg.ContextManager.MaxOutputTokens), EmptyHint: "600"},
 			{Key: "context_manager_allow_task_updates", Label: "Allow task updates", Description: "Allow context-manager proposals to update active task metadata.", Kind: configureFieldToggle, Value: onOff(cfg.ContextManager.AllowTaskUpdates)},
@@ -1392,6 +1393,7 @@ var helpfulSectionFieldDescriptions = map[string]string{
 	"context_manager_provider":              "Optional AI provider URL for the context manager helper. Leave blank to use the main provider. Warning: a wrong URL can break context-manager calls.",
 	"context_manager_model":                 "Optional model for the context manager helper. It should be cheap and reliable because it only helps organize context, not answer the user.",
 	"context_manager_timeout":               "How long OR3 waits for the context manager helper. Shorter timeouts avoid delays; longer timeouts give slow providers more time.",
+	"context_manager_idle_prune":            "How many idle seconds OR3 waits before archiving recent chat into memory and clearing the live context window. Default: 300 seconds.",
 	"context_manager_max_input":             "Maximum input size sent to the context manager helper. This is not the main chat budget; it is only for the helper that reviews context.",
 	"context_manager_max_output":            "Maximum output size allowed from the context manager helper. Keep this small so helper suggestions do not become noisy.",
 	"context_manager_allow_task_updates":    "Allows the context manager helper to suggest updates to the active task card. Warning: bad suggestions can make the task summary less accurate.",
@@ -1888,6 +1890,8 @@ func applyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 		return true, nil
 	case "context_manager_timeout":
 		return setIntValue(&cfg.ContextManager.TimeoutSeconds, value, fieldKey)
+	case "context_manager_idle_prune":
+		return setIntValue(&cfg.ContextManager.IdlePruneSeconds, value, fieldKey)
 	case "context_manager_max_input":
 		return setIntValue(&cfg.ContextManager.MaxInputTokens, value, fieldKey)
 	case "context_manager_max_output":

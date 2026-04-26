@@ -28,7 +28,11 @@ import (
 	"or3-intern/internal/tools"
 )
 
-const commandNewSession = "/new"
+const (
+	commandNewSession = "/new"
+	commandStatus     = "/status"
+	commandPrune      = "/prune"
+)
 
 const maxTrackedQuotaSessions = 1024
 
@@ -66,20 +70,25 @@ type Runtime struct {
 	DynamicToolExposure bool
 	Audit               *security.AuditLogger
 	ApprovalBroker      *approval.Broker
+	ContextManager      config.ContextManagerConfig
 
 	Deliver  Deliverer
 	Streamer channels.StreamingChannel
 
-	Consolidator           *memory.Consolidator
-	ConsolidationScheduler *memory.Scheduler
-	DefaultScopeKey        string
-	LinkDirectMessages     bool
-	IdentityScopeMap       map[string]string
+	Consolidator                *memory.Consolidator
+	ConsolidationScheduler      *memory.Scheduler
+	DisableRollingConsolidation bool
+	DefaultScopeKey             string
+	LinkDirectMessages          bool
+	IdentityScopeMap            map[string]string
 
-	locksMu sync.Mutex
-	locks   map[string]*sessionLock
-	quotaMu sync.Mutex
-	quotas  map[string]*sessionQuotaState
+	locksMu     sync.Mutex
+	locks       map[string]*sessionLock
+	quotaMu     sync.Mutex
+	quotas      map[string]*sessionQuotaState
+	idleMu      sync.Mutex
+	idleTimers  map[string]*time.Timer
+	idleVersion map[string]uint64
 }
 
 type sessionQuotaState struct {
@@ -164,6 +173,7 @@ func (r *Runtime) Handle(ctx context.Context, ev bus.Event) error {
 		entry.mu.Unlock()
 		r.releaseSessionLock(ev.SessionKey, entry)
 	}()
+	r.markSessionActivity(ev.SessionKey)
 	switch ev.Type {
 	case bus.EventUserMessage, bus.EventCron, bus.EventHeartbeat, bus.EventSystem, bus.EventWebhook, bus.EventFileChange:
 		return r.turn(ctx, ev)
@@ -177,6 +187,14 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 
 	if ev.Type == bus.EventUserMessage && strings.EqualFold(strings.TrimSpace(ev.Message), commandNewSession) {
 		return r.handleNewSession(ctx, ev)
+	}
+	if ev.Type == bus.EventUserMessage && strings.EqualFold(strings.TrimSpace(ev.Message), commandStatus) {
+		r.ensureSessionScope(ctx, ev)
+		return r.handleStatus(ctx, ev)
+	}
+	if ev.Type == bus.EventUserMessage && strings.EqualFold(strings.TrimSpace(ev.Message), commandPrune) {
+		r.ensureSessionScope(ctx, ev)
+		return r.handlePruneSession(ctx, ev, "manual")
 	}
 	r.ensureSessionScope(ctx, ev)
 
@@ -192,6 +210,9 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 	}
 	if handled, err := r.handleStructuredAutonomy(ctx, ev, msgID); handled || err != nil {
 		return err
+	}
+	if ev.Type == bus.EventUserMessage {
+		r.ensureTaskCardForTurn(ctx, ev)
 	}
 
 	// build prompt
@@ -219,9 +240,9 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 	r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, finalText, replyMeta, streamed, shouldAutoDeliver(ev))
 
 	// best-effort rolling consolidation of old messages into memory notes
-	if r.Consolidator != nil && r.Builder != nil && r.ConsolidationScheduler != nil {
+	if !r.DisableRollingConsolidation && r.Consolidator != nil && r.Builder != nil && r.ConsolidationScheduler != nil {
 		r.ConsolidationScheduler.Trigger(ev.SessionKey)
-	} else if r.Consolidator != nil && r.Builder != nil {
+	} else if !r.DisableRollingConsolidation && r.Consolidator != nil && r.Builder != nil {
 		historyMax := r.Builder.HistoryMax
 		if historyMax <= 0 {
 			historyMax = 40
@@ -230,8 +251,83 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 			log.Printf("consolidation failed: session=%s err=%v", ev.SessionKey, err)
 		}
 	}
+	r.scheduleIdlePrune(ctx, ev)
 
 	return nil
+}
+
+func (r *Runtime) markSessionActivity(sessionKey string) {
+	if r == nil || strings.TrimSpace(sessionKey) == "" {
+		return
+	}
+	r.idleMu.Lock()
+	defer r.idleMu.Unlock()
+	if r.idleVersion == nil {
+		r.idleVersion = map[string]uint64{}
+	}
+	r.idleVersion[sessionKey]++
+	if r.idleTimers != nil {
+		if timer := r.idleTimers[sessionKey]; timer != nil {
+			timer.Stop()
+			delete(r.idleTimers, sessionKey)
+		}
+	}
+}
+
+func (r *Runtime) scheduleIdlePrune(ctx context.Context, ev bus.Event) {
+	if r == nil || !r.ContextManager.Enabled || r.Consolidator == nil || r.DB == nil || strings.TrimSpace(ev.SessionKey) == "" {
+		return
+	}
+	delay := time.Duration(r.ContextManager.IdlePruneSeconds) * time.Second
+	if delay <= 0 {
+		delay = 5 * time.Minute
+	}
+	sessionKey := ev.SessionKey
+	channel := ev.Channel
+	replyTarget := deliveryTarget(ev)
+	meta := cloneMap(ev.Meta)
+	r.idleMu.Lock()
+	if r.idleTimers == nil {
+		r.idleTimers = map[string]*time.Timer{}
+	}
+	version := r.idleVersion[sessionKey]
+	if timer := r.idleTimers[sessionKey]; timer != nil {
+		timer.Stop()
+	}
+	r.idleTimers[sessionKey] = time.AfterFunc(delay, func() {
+		r.runIdlePrune(context.Background(), sessionKey, channel, replyTarget, meta, version)
+	})
+	r.idleMu.Unlock()
+}
+
+func (r *Runtime) runIdlePrune(ctx context.Context, sessionKey, channel, replyTarget string, meta map[string]any, expectedVersion uint64) {
+	entry := r.acquireSessionLock(sessionKey)
+	entry.mu.Lock()
+	defer func() {
+		entry.mu.Unlock()
+		r.releaseSessionLock(sessionKey, entry)
+	}()
+	if !r.sessionIdleVersionMatches(sessionKey, expectedVersion) {
+		return
+	}
+	msg, err := r.pruneSessionContext(ctx, sessionKey, "idle")
+	if err != nil {
+		msg = "Context prune skipped. Cause: " + oneLine(err.Error(), 180)
+	}
+	if r.Deliver != nil && strings.TrimSpace(channel) != "" && strings.TrimSpace(replyTarget) != "" {
+		if err := r.deliver(ctx, channel, replyTarget, msg, meta); err != nil {
+			log.Printf("deliver idle prune notice failed: %v", err)
+		}
+	}
+}
+
+func (r *Runtime) sessionIdleVersionMatches(sessionKey string, expected uint64) bool {
+	r.idleMu.Lock()
+	defer r.idleMu.Unlock()
+	if r.idleTimers != nil {
+		delete(r.idleTimers, sessionKey)
+	}
+	return r.idleVersion != nil && r.idleVersion[sessionKey] == expected
 }
 
 func (r *Runtime) ensureSessionScope(ctx context.Context, ev bus.Event) {
@@ -533,6 +629,69 @@ func (r *Runtime) handleNewSession(ctx context.Context, ev bus.Event) error {
 		}
 	}
 	return nil
+}
+
+func (r *Runtime) handlePruneSession(ctx context.Context, ev bus.Event, reason string) error {
+	msg, err := r.pruneSessionContext(ctx, ev.SessionKey, reason)
+	if err != nil {
+		log.Printf("context prune failed: session=%s err=%v", ev.SessionKey, err)
+		msg = "Context prune failed. Cause: " + oneLine(err.Error(), 180)
+	}
+	if r.Deliver != nil {
+		if derr := r.deliver(ctx, ev.Channel, deliveryTarget(ev), msg, ev.Meta); derr != nil {
+			log.Printf("deliver failed: %v", derr)
+		}
+	}
+	return nil
+}
+
+func (r *Runtime) pruneSessionContext(ctx context.Context, sessionKey, reason string) (string, error) {
+	if r == nil || r.DB == nil {
+		return "", fmt.Errorf("runtime database not configured")
+	}
+	if strings.TrimSpace(sessionKey) == "" {
+		return "", fmt.Errorf("session key required")
+	}
+	if r.Consolidator == nil || r.Consolidator.Provider == nil {
+		return "", fmt.Errorf("consolidation is not configured, so pruning would discard unsummarized history")
+	}
+	historyMax := 40
+	if r.Builder != nil && r.Builder.HistoryMax > 0 {
+		historyMax = r.Builder.HistoryMax
+	}
+	if err := r.Consolidator.ArchiveResetWindow(ctx, sessionKey, historyMax); err != nil {
+		return "", err
+	}
+	if err := r.DB.ResetSessionHistory(ctx, sessionKey); err != nil {
+		return "", err
+	}
+	label := strings.TrimSpace(reason)
+	if label == "" {
+		label = "manual"
+	}
+	return "Context pruned (" + label + "). Recent chat was archived into memory and the live context window was cleared.", nil
+}
+
+func (r *Runtime) ensureTaskCardForTurn(ctx context.Context, ev bus.Event) {
+	if r == nil || r.DB == nil || r.Builder == nil || r.Builder.DisableTaskCard || strings.TrimSpace(ev.SessionKey) == "" {
+		return
+	}
+	message := strings.TrimSpace(ev.Message)
+	if message == "" || strings.HasPrefix(message, "/") {
+		return
+	}
+	scopeKey := ev.SessionKey
+	if resolved, err := r.DB.ResolveScopeKey(ctx, ev.SessionKey); err == nil && strings.TrimSpace(resolved) != "" {
+		scopeKey = resolved
+	}
+	card, ok, _ := loadTaskCard(ctx, r.DB, ev.SessionKey)
+	if !ok || strings.TrimSpace(card.Goal) == "" {
+		card.Goal = oneLine(message, 240)
+	}
+	card.Status = "active"
+	if err := saveTaskCard(ctx, r.DB, ev.SessionKey, scopeKey, card); err != nil {
+		log.Printf("save task card before prompt failed: %v", err)
+	}
 }
 
 func contentToString(v any) string {

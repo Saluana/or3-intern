@@ -96,6 +96,11 @@ func statusOrDefault(status string) string {
 
 func renderTaskCard(card TaskCard, maxChars int) string {
 	var b strings.Builder
+	if strings.TrimSpace(card.Status) != "" {
+		b.WriteString("Status: ")
+		b.WriteString(strings.TrimSpace(card.Status))
+		b.WriteString("\n")
+	}
 	if strings.TrimSpace(card.Goal) != "" {
 		b.WriteString("Goal: ")
 		b.WriteString(strings.TrimSpace(card.Goal))
@@ -127,6 +132,9 @@ func renderTaskCard(card TaskCard, maxChars int) string {
 	}
 	if len(card.ArtifactRefs) > 0 {
 		b.WriteString(fmt.Sprintf("Refs: artifacts=%v\n", card.ArtifactRefs))
+	}
+	if len(card.MessageRefs) > 0 {
+		b.WriteString(fmt.Sprintf("Refs: messages=%v\n", card.MessageRefs))
 	}
 	if len(card.ActiveFiles) > 0 {
 		b.WriteString(fmt.Sprintf("Refs: files=%v\n", card.ActiveFiles))

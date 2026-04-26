@@ -1226,6 +1226,7 @@ func TestLoad_ContextDefaultsAndValidation(t *testing.T) {
 	cfg.Context.Pressure.HighPercent = 10
 	cfg.Context.Pressure.EmergencyPercent = 20
 	cfg.ContextManager.TimeoutSeconds = 0
+	cfg.ContextManager.IdlePruneSeconds = 0
 	if err := Save(path, cfg); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -1244,6 +1245,9 @@ func TestLoad_ContextDefaultsAndValidation(t *testing.T) {
 	}
 	if got.ContextManager.TimeoutSeconds <= 0 {
 		t.Fatalf("expected context manager timeout default, got %+v", got.ContextManager)
+	}
+	if got.ContextManager.IdlePruneSeconds != 300 {
+		t.Fatalf("expected context manager idle prune default, got %+v", got.ContextManager)
 	}
 	if !got.ContextConfigured {
 		t.Fatalf("expected context block written by Save(Default()) to be treated as configured")

@@ -146,6 +146,7 @@ var helpTopics = map[string]helpCommand{
 		Description: []string{
 			"This is the default command when no command is provided.",
 			"Inside chat, use /new to archive the current session into memory and then clear the live message history for a fresh conversation.",
+			"Use /status to inspect message counts, consolidation distance, context token pressure, retrieval settings, and tool limits.",
 		},
 		Examples: []string{"or3-intern chat"},
 	},

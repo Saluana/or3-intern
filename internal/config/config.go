@@ -132,15 +132,16 @@ type Config struct {
 	Session      SessionConfig  `json:"session"`
 	Security     SecurityConfig `json:"security"`
 
-	Provider       ProviderConfig       `json:"provider"`
-	Tools          ToolsConfig          `json:"tools"`
-	Hardening      HardeningConfig      `json:"hardening"`
-	Cron           CronConfig           `json:"cron"`
-	Service        ServiceConfig        `json:"service"`
-	Heartbeat      HeartbeatConfig      `json:"heartbeat"`
-	Channels       ChannelsConfig       `json:"channels"`
-	Context        ContextConfig        `json:"context"`
-	ContextManager ContextManagerConfig `json:"contextManager"`
+	Provider          ProviderConfig       `json:"provider"`
+	Tools             ToolsConfig          `json:"tools"`
+	Hardening         HardeningConfig      `json:"hardening"`
+	Cron              CronConfig           `json:"cron"`
+	Service           ServiceConfig        `json:"service"`
+	Heartbeat         HeartbeatConfig      `json:"heartbeat"`
+	Channels          ChannelsConfig       `json:"channels"`
+	Context           ContextConfig        `json:"context"`
+	ContextManager    ContextManagerConfig `json:"contextManager"`
+	ContextConfigured bool                 `json:"-"`
 }
 
 type ContextConfig struct {
@@ -951,6 +952,7 @@ func Save(path string, cfg Config) error {
 // Load reads configuration from path, creating a default file when missing.
 func Load(path string) (Config, error) {
 	cfg := Default()
+	cfg.ContextConfigured = false
 	if path == "" {
 		path = DefaultPath()
 	}
@@ -958,6 +960,7 @@ func Load(path string) (Config, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			cfg.ContextConfigured = true
 			if err := Save(path, cfg); err != nil {
 				return cfg, err
 			}
@@ -965,6 +968,10 @@ func Load(path string) (Config, error) {
 			return cfg, err
 		}
 	} else {
+		var top map[string]json.RawMessage
+		if err := json.Unmarshal(b, &top); err == nil {
+			_, cfg.ContextConfigured = top["context"]
+		}
 		if err := json.Unmarshal(b, &cfg); err != nil {
 			return cfg, err
 		}

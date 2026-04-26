@@ -450,7 +450,7 @@ func TestContentToStr_Other(t *testing.T) {
 // ---- parseConsolidationOutput tests ----
 
 func TestParseConsolidationOutput_NewFormat(t *testing.T) {
-	raw := `{"summary":"session summary","facts":["golang one two two"],"preferences":["dark mode"],"goals":["ship v2"],"procedures":["run make test"]}`
+	raw := `{"summary":"session summary","facts":["golang one two two"],"preferences":["dark mode"],"goals":["ship v2"],"procedures":["run make test"],"decisions":["use sqlite"],"warnings":["avoid unbounded logs"]}`
 	out := parseConsolidationOutput(raw)
 	if out.Summary != "session summary" {
 		t.Errorf("expected summary, got %q", out.Summary)
@@ -466,6 +466,12 @@ func TestParseConsolidationOutput_NewFormat(t *testing.T) {
 	}
 	if len(out.Procedures) != 1 || out.Procedures[0] != "run make test" {
 		t.Errorf("expected procedures=[run make test], got %v", out.Procedures)
+	}
+	if len(out.Decisions) != 1 || out.Decisions[0] != "use sqlite" {
+		t.Errorf("expected decisions=[use sqlite], got %v", out.Decisions)
+	}
+	if len(out.Warnings) != 1 || out.Warnings[0] != "avoid unbounded logs" {
+		t.Errorf("expected warnings=[avoid unbounded logs], got %v", out.Warnings)
 	}
 }
 
@@ -487,7 +493,7 @@ func TestParseConsolidationOutput_LegacyFormatFallback(t *testing.T) {
 
 func TestParseConsolidationOutput_EmptyInput(t *testing.T) {
 	out := parseConsolidationOutput("")
-	if out.Summary != "" || len(out.Facts)+len(out.Preferences)+len(out.Goals)+len(out.Procedures) != 0 {
+	if out.Summary != "" || len(out.Facts)+len(out.Preferences)+len(out.Goals)+len(out.Procedures)+len(out.Decisions)+len(out.Warnings) != 0 {
 		t.Errorf("expected empty output for empty input, got %+v", out)
 	}
 }
@@ -584,10 +590,12 @@ func TestBuildExtraNotes_AllKinds(t *testing.T) {
 		Preferences: []string{"dark mode"},
 		Goals:       []string{"ship v2"},
 		Procedures:  []string{"run tests"},
+		Decisions:   []string{"use sqlite"},
+		Warnings:    []string{"avoid unbounded logs"},
 	}
 	notes := buildExtraNotes(parsed, sql.NullInt64{Int64: 42, Valid: true}, "test-provider:test-embed")
-	if len(notes) != 4 {
-		t.Fatalf("expected 4 notes, got %d", len(notes))
+	if len(notes) != 6 {
+		t.Fatalf("expected 6 notes, got %d", len(notes))
 	}
 	kinds := make(map[string]int)
 	for _, n := range notes {
@@ -596,7 +604,7 @@ func TestBuildExtraNotes_AllKinds(t *testing.T) {
 			t.Errorf("expected embed fingerprint to be copied, got %q", n.EmbedFingerprint)
 		}
 	}
-	for _, k := range []string{db.MemoryKindFact, db.MemoryKindPreference, db.MemoryKindGoal, db.MemoryKindProcedure} {
+	for _, k := range []string{db.MemoryKindFact, db.MemoryKindPreference, db.MemoryKindGoal, db.MemoryKindProcedure, db.MemoryKindDecision, db.MemoryKindWarning} {
 		if kinds[k] != 1 {
 			t.Errorf("expected 1 note of kind %q, got %d", k, kinds[k])
 		}
@@ -624,7 +632,7 @@ func TestConsolidator_RunOnce_WritesTypedNotes(t *testing.T) {
 		}
 	}
 	prov, _ := buildConsolidationProvider(t,
-		`{"summary":"A summary.","facts":["golang one two two is used"],"preferences":["dark mode"],"goals":[],"procedures":[]}`,
+		`{"summary":"A summary.","facts":["golang one two two is used"],"preferences":["dark mode"],"goals":[],"procedures":[],"decisions":["use sqlite"],"warnings":["avoid unbounded logs"]}`,
 		false)
 	c := &Consolidator{
 		DB:            d,
@@ -663,6 +671,20 @@ func TestConsolidator_RunOnce_WritesTypedNotes(t *testing.T) {
 	}
 	if prefRows[0].Kind != db.MemoryKindPreference {
 		t.Errorf("expected kind=preference, got %q", prefRows[0].Kind)
+	}
+	decisionRows, err := d.SearchFTS(ctx, "sess", "use sqlite", 5)
+	if err != nil {
+		t.Fatalf("SearchFTS decisions: %v", err)
+	}
+	if len(decisionRows) == 0 || decisionRows[0].Kind != db.MemoryKindDecision {
+		t.Fatalf("expected decision note via FTS, got %#v", decisionRows)
+	}
+	warningRows, err := d.SearchFTS(ctx, "sess", "unbounded logs", 5)
+	if err != nil {
+		t.Fatalf("SearchFTS warnings: %v", err)
+	}
+	if len(warningRows) == 0 || warningRows[0].Kind != db.MemoryKindWarning {
+		t.Fatalf("expected warning note via FTS, got %#v", warningRows)
 	}
 }
 

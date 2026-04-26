@@ -397,7 +397,7 @@ func main() {
 		Model:       cfg.Provider.Model,
 		Temperature: cfg.Provider.Temperature,
 		Tools:       buildRuntimeTools(),
-		Builder: &agent.Builder{
+		Builder: applyContextConfigToBuilder(cfg, &agent.Builder{
 			DB:                     d,
 			Artifacts:              art,
 			Skills:                 inv,
@@ -421,7 +421,7 @@ func main() {
 			DocRetriever:           docRetriever,
 			DocRetrieveLimit:       cfg.DocIndex.RetrieveLimit,
 			WorkspaceDir:           cfg.WorkspaceDir,
-		},
+		}),
 		Artifacts:          art,
 		MaxToolBytes:       cfg.MaxToolBytes,
 		MaxToolLoops:       cfg.MaxToolLoops,
@@ -675,6 +675,31 @@ func loadDoctorConfig(cfgPath, cwd string) (config.Config, string, error) {
 		}
 		return cfg, err.Error(), nil
 	}
+}
+
+func applyContextConfigToBuilder(cfg config.Config, builder *agent.Builder) *agent.Builder {
+	if builder == nil {
+		return nil
+	}
+	if !cfg.ContextConfigured {
+		return builder
+	}
+	builder.ContextMaxInputTokens = cfg.Context.MaxInputTokens
+	builder.ContextOutputReserveTokens = cfg.Context.OutputReserveTokens
+	builder.ContextSafetyMarginTokens = cfg.Context.SafetyMarginTokens
+	builder.ContextSectionBudgets = agent.ContextSectionBudgets{
+		SystemCore:       cfg.Context.Sections.SystemCore,
+		SoulIdentity:     cfg.Context.Sections.SoulIdentity,
+		ToolPolicy:       cfg.Context.Sections.ToolPolicy,
+		ActiveTaskCard:   cfg.Context.Sections.ActiveTaskCard,
+		PinnedMemory:     cfg.Context.Sections.PinnedMemory,
+		MemoryDigest:     cfg.Context.Sections.MemoryDigest,
+		RecentHistory:    cfg.Context.Sections.RecentHistory,
+		RetrievedMemory:  cfg.Context.Sections.RetrievedMemory,
+		WorkspaceContext: cfg.Context.Sections.WorkspaceContext,
+		ToolSchemas:      cfg.Context.Sections.ToolSchemas,
+	}
+	return builder
 }
 
 func commandHandledBeforeConfigLoad(cmd string) bool {

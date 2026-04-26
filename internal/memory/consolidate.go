@@ -36,7 +36,9 @@ Return ONLY a single JSON object with this exact shape:
   "facts": ["...", "..."],
   "preferences": ["...", "..."],
   "goals": ["...", "..."],
-  "procedures": ["...", "..."]
+	"procedures": ["...", "..."],
+	"decisions": ["...", "..."],
+	"warnings": ["...", "..."]
 }
 
 Rules:
@@ -45,6 +47,8 @@ Rules:
 - preferences: durable user preferences or working-style notes. Keep each item under 300 characters.
 - goals: ongoing or stated objectives. Keep each item under 300 characters.
 - procedures: step-by-step processes or runbooks mentioned. Keep each item under 300 characters.
+- decisions: explicit choices or settled decisions that appear durable. Keep each item under 300 characters.
+- warnings: risks, cautions, or pitfalls clearly supported by the conversation. Keep each item under 300 characters.
 - Any list may be empty ([]) when nothing relevant was observed.
 - Existing pinned memory contains only ultra-stable facts and preferences. Do not repeat those items.
 
@@ -243,7 +247,7 @@ func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMa
 	canonicalText := buildCanonicalPinnedText(currentCanonical, parsed.Preferences, parsed.Facts)
 	canonicalText = trimTo(canonicalText, maxInputChars)
 
-	if summary == "" && len(parsed.Facts)+len(parsed.Preferences)+len(parsed.Goals)+len(parsed.Procedures) == 0 {
+	if summary == "" && len(parsed.Facts)+len(parsed.Preferences)+len(parsed.Goals)+len(parsed.Procedures)+len(parsed.Decisions)+len(parsed.Warnings) == 0 {
 		w := db.ConsolidationWrite{
 			SessionKey:  sessionKey,
 			ScopeKey:    memScope,
@@ -342,6 +346,8 @@ type consolidationOutput struct {
 	Preferences []string `json:"preferences"`
 	Goals       []string `json:"goals"`
 	Procedures  []string `json:"procedures"`
+	Decisions   []string `json:"decisions"`
+	Warnings    []string `json:"warnings"`
 	// Legacy field: accepted as a fallback for old-format responses.
 	LegacyCanonical string `json:"canonical_memory"`
 }
@@ -369,12 +375,14 @@ func parseConsolidationOutput(raw string) consolidationOutput {
 			out.Preferences = sanitizeItems(out.Preferences)
 			out.Goals = sanitizeItems(out.Goals)
 			out.Procedures = sanitizeItems(out.Procedures)
+			out.Decisions = sanitizeItems(out.Decisions)
+			out.Warnings = sanitizeItems(out.Warnings)
 			// Absorb legacy canonical_memory as a preference if new fields missing.
-			if len(out.Facts)+len(out.Preferences)+len(out.Goals)+len(out.Procedures) == 0 &&
+			if len(out.Facts)+len(out.Preferences)+len(out.Goals)+len(out.Procedures)+len(out.Decisions)+len(out.Warnings) == 0 &&
 				strings.TrimSpace(out.LegacyCanonical) != "" {
 				out.Preferences = []string{strings.TrimSpace(out.LegacyCanonical)}
 			}
-			if out.Summary != "" || len(out.Facts)+len(out.Preferences)+len(out.Goals)+len(out.Procedures) > 0 {
+			if out.Summary != "" || len(out.Facts)+len(out.Preferences)+len(out.Goals)+len(out.Procedures)+len(out.Decisions)+len(out.Warnings) > 0 {
 				return out
 			}
 		}
@@ -503,6 +511,8 @@ func buildExtraNotes(parsed consolidationOutput, sourceMsgID sql.NullInt64, embe
 		{db.MemoryKindPreference, parsed.Preferences},
 		{db.MemoryKindGoal, parsed.Goals},
 		{db.MemoryKindProcedure, parsed.Procedures},
+		{db.MemoryKindDecision, parsed.Decisions},
+		{db.MemoryKindWarning, parsed.Warnings},
 	}
 	out := make([]db.TypedNoteInput, 0)
 	for _, g := range groups {

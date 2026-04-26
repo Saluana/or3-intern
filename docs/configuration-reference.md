@@ -22,6 +22,7 @@
 | `runtimeProfile` | Named execution posture (`local-dev`, `hosted-service`, `hosted-no-exec`, etc.) |
 | `docIndex` | Opt-in document indexing for prompt-time retrieval |
 | `subagents` | Background job queueing and concurrency controls |
+| `context`, `contextManager` | Token budgeting, prompt assembly budgets, and optional cheap maintenance-model settings |
 
 ## Minimal shape
 
@@ -37,6 +38,8 @@
   "service": {},
   "channels": {},
   "security": {},
+  "context": {},
+  "contextManager": {},
   "docIndex": {},
   "subagents": {},
   "session": {}
@@ -247,6 +250,39 @@ Opt-in file indexing and retrieval:
 - `retrieveLimit`
 
 See [memory-and-context.md](memory-and-context.md).
+
+### `context`
+
+Prompt assembly and token-budget controls:
+
+- `mode`
+- `maxInputTokens`
+- `outputReserveTokens`
+- `safetyMarginTokens`
+- `sections`
+- `retrieval`
+- `pressure`
+- `tools`
+- `artifacts`
+- `taskCard`
+
+Backward-compatibility note:
+
+- When an older `config.json` has no top-level `context` block at all, the runtime preserves the legacy prompt knobs as authoritative defaults: `historyMaxMessages`, `memoryRetrieveLimit`, `vectorSearchK`, `ftsSearchK`, `bootstrapMaxChars`, `bootstrapTotalMaxChars`, and `maxToolBytes`.
+- When a `context` block is present, those explicit context budgets are applied to prompt packing while the legacy fields continue to drive adjacent runtime behavior that still uses them directly.
+
+### `contextManager`
+
+Optional low-cost maintenance-model controls:
+
+- `enabled`
+- `provider`
+- `model`
+- `timeoutSeconds`
+- `maxInputTokens`
+- `maxOutputTokens`
+- `allowTaskUpdates`
+- `allowStalePropose`
 
 ## Environment overrides called out in the README
 

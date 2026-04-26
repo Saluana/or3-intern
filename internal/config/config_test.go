@@ -1237,4 +1237,47 @@ func TestLoad_ContextDefaultsAndValidation(t *testing.T) {
 	if got.ContextManager.TimeoutSeconds <= 0 {
 		t.Fatalf("expected context manager timeout default, got %+v", got.ContextManager)
 	}
+	if !got.ContextConfigured {
+		t.Fatalf("expected context block written by Save(Default()) to be treated as configured")
+	}
+}
+
+func TestLoad_LegacyConfigWithoutContextBlockPreservesLegacyMode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	raw := `{
+	  "historyMaxMessages": 17,
+	  "memoryRetrieveLimit": 9,
+	  "vectorSearchK": 11,
+	  "ftsSearchK": 12,
+	  "bootstrapMaxChars": 1234,
+	  "bootstrapTotalMaxChars": 5678,
+	  "maxToolBytes": 4321,
+	  "provider": {"apiBase": "https://api.openai.com/v1", "model": "gpt-4.1-mini"},
+	  "tools": {},
+	  "hardening": {},
+	  "skills": {},
+	  "triggers": {},
+	  "heartbeat": {},
+	  "cron": {},
+	  "service": {},
+	  "channels": {},
+	  "security": {},
+	  "docIndex": {},
+	  "subagents": {},
+	  "session": {}
+	}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.ContextConfigured {
+		t.Fatalf("expected legacy config without context block to leave ContextConfigured=false")
+	}
+	if got.HistoryMax != 17 || got.MemoryRetrieve != 9 || got.VectorK != 11 || got.FTSK != 12 || got.BootstrapMaxChars != 1234 || got.BootstrapTotalMaxChars != 5678 || got.MaxToolBytes != 4321 {
+		t.Fatalf("expected legacy runtime knobs preserved, got %+v", got)
+	}
 }

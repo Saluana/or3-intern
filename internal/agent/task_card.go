@@ -41,6 +41,9 @@ func loadTaskCard(ctx context.Context, d *db.DB, sessionKey string) (TaskCard, b
 	_ = json.Unmarshal([]byte(row.MemoryRefsJSON), &card.MemoryRefs)
 	_ = json.Unmarshal([]byte(row.ArtifactRefsJSON), &card.ArtifactRefs)
 	_ = json.Unmarshal([]byte(row.ActiveFilesJSON), &card.ActiveFiles)
+	if strings.TrimSpace(row.ScopeKey) == "" {
+		row.ScopeKey = resolveTaskCardScope(ctx, d, sessionKey, "")
+	}
 	return card, true, nil
 }
 
@@ -52,6 +55,7 @@ func saveTaskCard(ctx context.Context, d *db.DB, sessionKey, scopeKey string, ca
 		b, _ := json.Marshal(v)
 		return string(b)
 	}
+	scopeKey = resolveTaskCardScope(ctx, d, sessionKey, scopeKey)
 	return d.UpsertActiveTaskState(ctx, db.TaskStateRow{
 		SessionKey:        sessionKey,
 		ScopeKey:          scopeKey,
@@ -67,6 +71,19 @@ func saveTaskCard(ctx context.Context, d *db.DB, sessionKey, scopeKey string, ca
 		ActiveFilesJSON:   toJSON(card.ActiveFiles),
 		MetadataJSON:      "{}",
 	})
+}
+
+func resolveTaskCardScope(ctx context.Context, d *db.DB, sessionKey, scopeKey string) string {
+	scopeKey = strings.TrimSpace(scopeKey)
+	if scopeKey != "" {
+		return scopeKey
+	}
+	if d != nil && strings.TrimSpace(sessionKey) != "" {
+		if resolved, err := d.ResolveScopeKey(ctx, sessionKey); err == nil && strings.TrimSpace(resolved) != "" {
+			return resolved
+		}
+	}
+	return strings.TrimSpace(sessionKey)
 }
 
 func statusOrDefault(status string) string {

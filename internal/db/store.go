@@ -219,23 +219,11 @@ func (d *DB) UpsertPinned(ctx context.Context, sessionKey, key, content string) 
 	return err
 }
 
-// InsertMemoryNote inserts a plain (untyped) memory note. It is a convenience
-// wrapper around InsertMemoryNoteTyped that uses safe defaults for the new metadata fields.
-func (d *DB) InsertMemoryNote(ctx context.Context, sessionKey, text string, embedding []byte, sourceMsgID sql.NullInt64, tags string) (int64, error) {
-	return d.InsertMemoryNoteTyped(ctx, sessionKey, TypedNoteInput{
-		Text:             text,
-		Embedding:        embedding,
-		EmbedFingerprint: "",
-		SourceMsgID:      sourceMsgID,
-		Tags:             tags,
-		Kind:             MemoryKindNote,
-		Status:           MemoryStatusActive,
-	})
+type execContexter interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
 }
 
-// InsertMemoryNoteTyped inserts a memory note with explicit metadata fields.
-func (d *DB) InsertMemoryNoteTyped(ctx context.Context, sessionKey string, input TypedNoteInput) (int64, error) {
-	sessionKey = normalizeMemorySession(sessionKey)
+func normalizeTypedNoteInput(input TypedNoteInput) TypedNoteInput {
 	kind := strings.TrimSpace(input.Kind)
 	if kind == "" {
 		kind = MemoryKindNote
@@ -260,32 +248,99 @@ func (d *DB) InsertMemoryNoteTyped(ctx context.Context, sessionKey string, input
 	if updatedAt <= 0 {
 		updatedAt = NowMS()
 	}
-	summary := strings.TrimSpace(input.Summary)
-	sourceArtifactID := strings.TrimSpace(input.SourceArtifactID)
-	if err := d.validateMemoryEmbeddingProfile(ctx, input.Embedding, input.EmbedFingerprint); err != nil {
-		return 0, err
-	}
 	emb := input.Embedding
 	if emb == nil {
 		emb = make([]byte, 0)
 	}
-	storedFingerprint := normalizeStoredEmbeddingFingerprint(emb, input.EmbedFingerprint)
-	res, err := d.SQL.ExecContext(ctx,
+	return TypedNoteInput{
+		Text:             input.Text,
+		Summary:          strings.TrimSpace(input.Summary),
+		Embedding:        emb,
+		EmbedFingerprint: normalizeStoredEmbeddingFingerprint(emb, input.EmbedFingerprint),
+		SourceMsgID:      input.SourceMsgID,
+		SourceArtifactID: strings.TrimSpace(input.SourceArtifactID),
+		Tags:             input.Tags,
+		Kind:             kind,
+		Status:           status,
+		Importance:       importance,
+		Confidence:       confidence,
+		UpdatedAt:        updatedAt,
+		ExpiresAt:        input.ExpiresAt,
+		SupersedesID:     input.SupersedesID,
+	}
+}
+
+func insertMemoryNoteTypedExec(ctx context.Context, execer execContexter, sessionKey string, input TypedNoteInput) (int64, error) {
+	res, err := execer.ExecContext(ctx,
 		`INSERT INTO memory_notes(
 			session_key, text, summary, embedding, embed_fingerprint, source_message_id, source_artifact_id, tags,
 			created_at, updated_at, expires_at, supersedes_id, kind, status, importance, confidence
 		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		sessionKey, input.Text, summary, emb, storedFingerprint, input.SourceMsgID, sourceArtifactID, input.Tags,
-		NowMS(), updatedAt, input.ExpiresAt, sql.NullInt64{Int64: input.SupersedesID, Valid: input.SupersedesID > 0},
-		kind, status, importance, confidence)
+		sessionKey, input.Text, input.Summary, input.Embedding, input.EmbedFingerprint, input.SourceMsgID, input.SourceArtifactID, input.Tags,
+		NowMS(), input.UpdatedAt, input.ExpiresAt, sql.NullInt64{Int64: input.SupersedesID, Valid: input.SupersedesID > 0},
+		input.Kind, input.Status, input.Importance, input.Confidence)
 	if err != nil {
 		return 0, err
 	}
 	id, _ := res.LastInsertId()
-	if err := d.upsertMemoryVec(ctx, id, sessionKey, input.Text, emb); err != nil {
+	return id, nil
+}
+
+// InsertMemoryNote inserts a plain (untyped) memory note. It is a convenience
+// wrapper around InsertMemoryNoteTyped that uses safe defaults for the new metadata fields.
+func (d *DB) InsertMemoryNote(ctx context.Context, sessionKey, text string, embedding []byte, sourceMsgID sql.NullInt64, tags string) (int64, error) {
+	return d.InsertMemoryNoteTyped(ctx, sessionKey, TypedNoteInput{
+		Text:             text,
+		Embedding:        embedding,
+		EmbedFingerprint: "",
+		SourceMsgID:      sourceMsgID,
+		Tags:             tags,
+		Kind:             MemoryKindNote,
+		Status:           MemoryStatusActive,
+	})
+}
+
+// InsertMemoryNoteTyped inserts a memory note with explicit metadata fields.
+func (d *DB) InsertMemoryNoteTyped(ctx context.Context, sessionKey string, input TypedNoteInput) (int64, error) {
+	sessionKey = normalizeMemorySession(sessionKey)
+	input = normalizeTypedNoteInput(input)
+	if err := d.validateMemoryEmbeddingProfile(ctx, input.Embedding, input.EmbedFingerprint); err != nil {
+		return 0, err
+	}
+	id, err := insertMemoryNoteTypedExec(ctx, d.SQL, sessionKey, input)
+	if err != nil {
+		return 0, err
+	}
+	if err := d.upsertMemoryVec(ctx, id, sessionKey, input.Text, input.Embedding); err != nil {
 		return id, err
 	}
 	return id, nil
+}
+
+func (d *DB) UpdateMemoryNoteTyped(ctx context.Context, noteID int64, input TypedNoteInput) error {
+	input = normalizeTypedNoteInput(input)
+	if err := d.validateMemoryEmbeddingProfile(ctx, input.Embedding, input.EmbedFingerprint); err != nil {
+		return err
+	}
+	var sessionKey string
+	if err := d.SQL.QueryRowContext(ctx, `SELECT session_key FROM memory_notes WHERE id=?`, noteID).Scan(&sessionKey); err != nil {
+		return err
+	}
+	res, err := d.SQL.ExecContext(ctx,
+		`UPDATE memory_notes SET
+			text=?, summary=?, embedding=?, embed_fingerprint=?, source_message_id=?, source_artifact_id=?, tags=?,
+			updated_at=?, expires_at=?, supersedes_id=?, kind=?, status=?, importance=?, confidence=?
+		 WHERE id=?`,
+		input.Text, input.Summary, input.Embedding, input.EmbedFingerprint, input.SourceMsgID, input.SourceArtifactID, input.Tags,
+		input.UpdatedAt, input.ExpiresAt, sql.NullInt64{Int64: input.SupersedesID, Valid: input.SupersedesID > 0},
+		input.Kind, input.Status, input.Importance, input.Confidence, noteID)
+	if err != nil {
+		return err
+	}
+	if rows, _ := res.RowsAffected(); rows == 0 {
+		return sql.ErrNoRows
+	}
+	return d.upsertMemoryVec(ctx, noteID, sessionKey, input.Text, input.Embedding)
 }
 
 func normalizeStoredEmbeddingFingerprint(embedding []byte, fingerprint string) string {
@@ -682,20 +737,25 @@ func (d *DB) WriteConsolidation(ctx context.Context, w ConsolidationWrite) (int6
 		if kind == "" {
 			kind = MemoryKindSummary
 		}
-		emb := w.Embedding
-		if emb == nil {
-			emb = make([]byte, 0)
+		primary := normalizeTypedNoteInput(TypedNoteInput{
+			Text:             w.NoteText,
+			Summary:          w.NoteText,
+			Embedding:        w.Embedding,
+			EmbedFingerprint: w.EmbedFingerprint,
+			SourceMsgID:      w.SourceMsgID,
+			Tags:             w.NoteTags,
+			Kind:             kind,
+			Status:           MemoryStatusActive,
+			Importance:       0,
+		})
+		if err := d.validateMemoryEmbeddingProfile(ctx, primary.Embedding, primary.EmbedFingerprint); err != nil {
+			return 0, err
 		}
-		storedFingerprint := normalizeStoredEmbeddingFingerprint(emb, w.EmbedFingerprint)
-		res, err := tx.ExecContext(ctx,
-			`INSERT INTO memory_notes(session_key, text, embedding, embed_fingerprint, source_message_id, tags, created_at, kind, status, importance)
-			 VALUES(?,?,?,?,?,?,?,?,?,?)`,
-			scopeKey, w.NoteText, emb, storedFingerprint, w.SourceMsgID, w.NoteTags, NowMS(),
-			kind, MemoryStatusActive, 0.0)
+		nid, err := insertMemoryNoteTypedExec(ctx, tx, scopeKey, primary)
 		if err != nil {
 			return 0, err
 		}
-		noteID, _ = res.LastInsertId()
+		noteID = nid
 	}
 
 	// Write any additional typed notes (facts, preferences, goals, procedures).
@@ -709,35 +769,15 @@ func (d *DB) WriteConsolidation(ctx context.Context, w ConsolidationWrite) (int6
 		if strings.TrimSpace(en.Text) == "" {
 			continue
 		}
-		kind := strings.TrimSpace(en.Kind)
-		if kind == "" {
-			kind = MemoryKindNote
+		en = normalizeTypedNoteInput(en)
+		if err := d.validateMemoryEmbeddingProfile(ctx, en.Embedding, en.EmbedFingerprint); err != nil {
+			return noteID, err
 		}
-		status := strings.TrimSpace(en.Status)
-		if status == "" {
-			status = MemoryStatusActive
-		}
-		importance := en.Importance
-		if importance < 0 {
-			importance = 0
-		} else if importance > maxImportance {
-			importance = maxImportance
-		}
-		emb := en.Embedding
-		if emb == nil {
-			emb = make([]byte, 0)
-		}
-		storedFingerprint := normalizeStoredEmbeddingFingerprint(emb, en.EmbedFingerprint)
-		res, err := tx.ExecContext(ctx,
-			`INSERT INTO memory_notes(session_key, text, embedding, embed_fingerprint, source_message_id, tags, created_at, kind, status, importance)
-			 VALUES(?,?,?,?,?,?,?,?,?,?)`,
-			scopeKey, en.Text, emb, storedFingerprint, en.SourceMsgID, en.Tags, NowMS(),
-			kind, status, importance)
+		eid, err := insertMemoryNoteTypedExec(ctx, tx, scopeKey, en)
 		if err != nil {
 			return noteID, err
 		}
-		eid, _ := res.LastInsertId()
-		extraIDs = append(extraIDs, extraNoteID{id: eid, text: en.Text, emb: emb})
+		extraIDs = append(extraIDs, extraNoteID{id: eid, text: en.Text, emb: en.Embedding})
 	}
 
 	if strings.TrimSpace(w.CanonicalKey) != "" {
@@ -766,11 +806,7 @@ func (d *DB) WriteConsolidation(ctx context.Context, w ConsolidationWrite) (int6
 	}
 	// Update vector index outside the transaction (best-effort).
 	if noteID > 0 {
-		emb := w.Embedding
-		if emb == nil {
-			emb = make([]byte, 0)
-		}
-		_ = d.upsertMemoryVec(ctx, noteID, scopeKey, w.NoteText, emb)
+		_ = d.upsertMemoryVec(ctx, noteID, scopeKey, w.NoteText, normalizeTypedNoteInput(TypedNoteInput{Embedding: w.Embedding}).Embedding)
 	}
 	for _, en := range extraIDs {
 		_ = d.upsertMemoryVec(ctx, en.id, scopeKey, en.text, en.emb)

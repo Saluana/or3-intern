@@ -27,10 +27,10 @@
 
 - [x] Add `ContextConfig`, `ContextSectionBudgets`, `ContextRetrievalConfig`, `ContextPressureConfig`, `ContextToolConfig`, `ContextArtifactConfig`, and `ContextTaskCardConfig` to [internal/config/config.go](internal/config/config.go). Requirements: 3, 4, 20.
 - [x] Default new configs to `quality` mode for first release so existing users are not silently downgraded; expose `poor`, `balanced`, `quality`, and `custom` as opt-in. Requirements: 3, 4, 21.
-- [ ] When no `Context` block is present, the existing `HistoryMax`, `MemoryRetrieve`, `VectorK`, `FTSK`, `BootstrapMaxChars`, `BootstrapTotalMaxChars`, and `MaxToolBytes` remain authoritative and the packet renders with parity to current behavior. Requirements: 3, 18, 21.
+- [x] When no `Context` block is present, the existing `HistoryMax`, `MemoryRetrieve`, `VectorK`, `FTSK`, `BootstrapMaxChars`, `BootstrapTotalMaxChars`, and `MaxToolBytes` remain authoritative and the packet renders with parity to current behavior. Requirements: 3, 18, 21.
 - [x] Add validation/clamping for negative budgets, too-small protected-section budgets, invalid modes, and unsafe output reserves. Requirements: 2, 3, 13.
 - [x] Add config tests for mode defaults, custom overrides, legacy config loading (no `Context` block), and invalid settings. Requirements: 3, 4, 21.
-- [ ] Update CLI settings/configuration docs after implementation fields are stable. Requirements: 3, 18.
+- [x] Update CLI settings/configuration docs after implementation fields are stable. Requirements: 3, 18.
 
 ## 4. Phase 4: Active Task Card System
 
@@ -40,17 +40,17 @@
 - [x] Implement deterministic task-card rendering with a configurable token budget and source refs. Requirements: 5, 10, 13.
 - [x] Update [internal/agent/runtime.go](internal/agent/runtime.go) to update task state after assistant turns. Requirements: 5, 18.
 - [x] Update tool-loop handling to add relevant artifact IDs, active files, and tool-run status to the task card. Requirements: 5, 12.
-- [ ] Ensure task state is session/channel isolated and respects resolved scope behavior. Requirements: 16.
-- [ ] Add tests for task-card persistence, merge behavior, history-pruning survival, bounded refs, and session isolation. Requirements: 5, 16, 17.
+- [x] Ensure task state is session/channel isolated and respects resolved scope behavior. Requirements: 16.
+- [x] Add tests for task-card persistence, merge behavior, history-pruning survival, bounded refs, and session isolation. Requirements: 5, 16, 17.
 
 ## 5. Phase 5: Memory Schema and Lifecycle Extensions
 
 - [x] Add memory kind constants for `decision`, `warning`, `artifact_summary`, and `file_summary` in `internal/db/store.go`. Requirements: 6.
 - [x] Add additive migration columns for `summary`, `source_artifact_id`, `confidence`, `updated_at`, `expires_at`, and `supersedes_id` if absent. Requirements: 6.
-- [ ] Update memory insert/update methods to preserve existing rows while accepting new metadata fields. Requirements: 6, 18.
+- [x] Update memory insert/update methods to preserve existing rows while accepting new metadata fields. Requirements: 6, 18.
 - [x] Add lifecycle helpers to mark memories active, stale, superseded, expired, or used without deleting them. Requirements: 6, 9, 15.
-- [ ] Extend consolidation output handling to optionally create decisions and warnings when clearly supported by conversation content. Requirements: 6, 14.
-- [ ] Add tests proving migrations are backward compatible and existing `memory_notes` retrieval still works. Requirements: 6, 18.
+- [x] Extend consolidation output handling to optionally create decisions and warnings when clearly supported by conversation content. Requirements: 6, 14.
+- [x] Add tests proving migrations are backward compatible and existing `memory_notes` retrieval still works. Requirements: 6, 18.
 
 ## 6. Phase 6: Artifact Summaries via Existing Tables (Spans Deferred)
 

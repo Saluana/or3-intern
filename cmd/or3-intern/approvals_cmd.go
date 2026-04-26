@@ -43,8 +43,6 @@ func runApprovalsCommand(ctx context.Context, broker *approval.Broker, args []st
 			return err
 		}
 		if len(items) == 0 {
-			fmt.Fprintln(stdout, "No pending approvals right now.")
-			fmt.Fprintln(stdout, "If you are trying to approve a phone or browser connection, use `or3-intern pairing list` instead.")
 			return nil
 		}
 		fmt.Fprintln(stdout, "Pending permissions")

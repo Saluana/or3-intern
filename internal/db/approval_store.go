@@ -163,7 +163,7 @@ func (d *DB) FindPairingRequestByCodeHash(ctx context.Context, id int64, codeHas
 	return rec, err == nil, err
 }
 
-func (d *DB) FindPairingRequestsByCodeHash(ctx context.Context, codeHash []byte, status string, limit int) ([]PairingRequestRecord, error) {
+func (d *DB) FindPairingRequestsByCodeHash(ctx context.Context, codeHash []byte, status string, nowMS int64, limit int) ([]PairingRequestRecord, error) {
 	if limit <= 0 || limit > 10 {
 		limit = 10
 	}
@@ -172,6 +172,10 @@ func (d *DB) FindPairingRequestsByCodeHash(ctx context.Context, codeHash []byte,
 	if strings.TrimSpace(status) != "" {
 		query += ` AND status=?`
 		args = append(args, strings.TrimSpace(status))
+	}
+	if nowMS > 0 {
+		query += ` AND (expires_at<=0 OR expires_at>=?)`
+		args = append(args, nowMS)
 	}
 	query += ` ORDER BY id DESC LIMIT ?`
 	args = append(args, limit)

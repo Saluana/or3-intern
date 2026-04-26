@@ -484,16 +484,10 @@ func (b *Broker) ApprovePairingRequestByCode(ctx context.Context, code string, a
 	if code == "" {
 		return db.PairingRequestRecord{}, fmt.Errorf("pairing code required")
 	}
-	matches, err := b.DB.FindPairingRequestsByCodeHash(ctx, hashBytes(code), StatusPending, 2)
+	nowMS := b.now().UnixMilli()
+	active, err := b.DB.FindPairingRequestsByCodeHash(ctx, hashBytes(code), StatusPending, nowMS, 2)
 	if err != nil {
 		return db.PairingRequestRecord{}, err
-	}
-	nowMS := b.now().UnixMilli()
-	active := make([]db.PairingRequestRecord, 0, len(matches))
-	for _, req := range matches {
-		if req.ExpiresAt <= 0 || req.ExpiresAt >= nowMS {
-			active = append(active, req)
-		}
 	}
 	if len(active) == 0 {
 		return db.PairingRequestRecord{}, fmt.Errorf("could not find a waiting device with that code. In the app, tap Get pairing code again and use the fresh 6-digit code")

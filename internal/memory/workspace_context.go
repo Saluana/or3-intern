@@ -13,9 +13,9 @@ import (
 )
 
 const (
-	defaultWorkspaceContextMaxFileBytes = 32 * 1024
+	defaultWorkspaceContextMaxFileBytes = 12 * 1024
 	defaultWorkspaceContextMaxResults   = 6
-	defaultWorkspaceContextMaxChars     = 6000
+	defaultWorkspaceContextMaxChars     = 1600
 	defaultWorkspaceContextScanLimit    = 200
 	workspaceContextCacheTTL            = 5 * time.Second
 )

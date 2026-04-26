@@ -111,7 +111,7 @@ func inferToolMetadata(name string) ToolMetadata {
 	name = strings.ToLower(strings.TrimSpace(name))
 	var groups []string
 	switch {
-	case name == "read_file" || name == "read_artifact" || name == "list_files" || name == "grep_files" || name == "search_memory" || name == "show_diff":
+	case name == "read_file" || name == "search_file" || name == "read_artifact" || name == "list_files" || name == "grep_files" || name == "search_memory" || name == "show_diff":
 		groups = []string{ToolGroupRead}
 	case strings.HasPrefix(name, "memory_"):
 		groups = []string{ToolGroupMemory, ToolGroupRead}

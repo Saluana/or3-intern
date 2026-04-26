@@ -2069,7 +2069,7 @@ func TestRuntime_BoundTextResult_ArtifactsPreviewAndID(t *testing.T) {
 	if artifactID == "" {
 		t.Fatalf("expected artifact ID for oversized tool output")
 	}
-	if !strings.Contains(stored, "artifact_id=") || !strings.Contains(stored, artifactID) {
+	if !strings.Contains(stored, `"artifact_id"`) || !strings.Contains(stored, artifactID) {
 		t.Fatalf("expected stored text to include artifact reference, got %q", stored)
 	}
 	if preview == "" || len(preview) > rt.toolPreviewBytes()+len("…[truncated]") {

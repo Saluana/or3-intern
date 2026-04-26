@@ -135,7 +135,7 @@ func TestRunSkillScript_EmptyAllowlistFallsBackToScrubbedEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	if strings.TrimSpace(out) != "missing" {
+	if !strings.Contains(out, "missing") || strings.Contains(out, "top-secret") {
 		t.Fatalf("expected inherited secret to be scrubbed, got %q", out)
 	}
 }

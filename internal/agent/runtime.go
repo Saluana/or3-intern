@@ -1270,7 +1270,16 @@ func (r *Runtime) boundTextResult(ctx context.Context, sessionKey string, text s
 				log.Printf("save task card artifact ref failed: %v", err)
 			}
 		}
-		return fmt.Sprintf("artifact_id=%s\npreview:\n%s", id, preview), preview, id
+		return tools.EncodeToolResult(tools.ToolResult{
+			Kind:       "large_tool_output",
+			OK:         true,
+			Summary:    fmt.Sprintf("Large tool output saved as artifact %s", id),
+			Preview:    preview,
+			ArtifactID: id,
+			Stats: map[string]any{
+				"bytes": len(text),
+			},
+		}), preview, id
 	}
 	return text, preview, ""
 }

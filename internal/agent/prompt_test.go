@@ -569,3 +569,48 @@ func TestBuildWithOptions_UsageLoggingOnlyForIncludedPromptNotes(t *testing.T) {
 		t.Fatalf("expected at least one excluded note to remain untouched, got %#v", rows)
 	}
 }
+
+func TestStablePrefixIsByteStableAcrossTurns(t *testing.T) {
+	b := &Builder{
+		Soul:              "Soul",
+		AgentInstructions: "Agent",
+		ToolNotes:         "Tools",
+		IdentityText:      "Identity",
+		StaticMemory:      "Static",
+	}
+	pinned := "- key: value"
+	digest := "- [fact] x"
+	retrieved := "1) [memory] y"
+	docs := "1) [file] z"
+	workspace := "workspace snippets"
+
+	first := b.renderStablePrefix(pinned, digest, retrieved, b.IdentityText, b.StaticMemory, docs, workspace)
+	second := b.renderStablePrefix(pinned, digest, retrieved, b.IdentityText, b.StaticMemory, docs, workspace)
+	if first != second {
+		t.Fatalf("expected byte-stable prefix across identical turns")
+	}
+}
+
+func TestStablePrefixExcludesHeartbeatAndTriggerMetadata(t *testing.T) {
+	b := &Builder{HeartbeatText: "tick"}
+	stable := b.renderStablePrefix("(none)", "", "(none)", "", "", "", "")
+	if strings.Contains(stable, "Heartbeat") || strings.Contains(stable, "Structured Trigger Context") {
+		t.Fatalf("stable prefix must not include volatile heartbeat or trigger metadata: %q", stable)
+	}
+	volatile := b.renderVolatileSuffix("tick", "{\"event\":\"cron\"}")
+	if !strings.Contains(volatile, "Heartbeat") || !strings.Contains(volatile, "Structured Trigger Context") {
+		t.Fatalf("volatile suffix should include heartbeat and structured context: %q", volatile)
+	}
+}
+
+func TestBuildWithOptions_PopulatesBudgetReport(t *testing.T) {
+	d := openTestDB(t)
+	b := &Builder{DB: d, HistoryMax: 10}
+	pp, _, err := b.Build(context.Background(), "sess", "hello")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if pp.Budget.EstimatedInputTokens <= 0 {
+		t.Fatalf("expected non-zero estimated token count, got %+v", pp.Budget)
+	}
+}

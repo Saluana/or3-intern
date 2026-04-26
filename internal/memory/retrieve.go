@@ -42,9 +42,17 @@ func NewRetriever(d *db.DB) *Retriever {
 
 // Retrieve runs hybrid retrieval and returns diversified top-k memory results.
 func (r *Retriever) Retrieve(ctx context.Context, sessionKey, query string, queryVec []float32, vectorK, ftsK, topK int) ([]Retrieved, error) {
+	raw, err := r.retrieveCandidates(ctx, sessionKey, query, queryVec, vectorK, ftsK)
+	if err != nil {
+		return nil, err
+	}
+	return r.packToBudget(raw, topK), nil
+}
+
+func (r *Retriever) retrieveCandidates(ctx context.Context, sessionKey, query string, queryVec []float32, vectorK, ftsK int) ([]Retrieved, error) {
 	var vecs []VecCandidate
+	var err error
 	if strings.TrimSpace(r.EmbedFingerprint) == "" {
-		var err error
 		vecs, err = VectorSearch(ctx, r.DB, sessionKey, queryVec, vectorK, r.VectorScanLimit)
 		if err != nil {
 			return nil, err
@@ -171,7 +179,11 @@ func (r *Retriever) Retrieve(ctx context.Context, sessionKey, query string, quer
 		}
 		return raw[i].Score > raw[j].Score
 	})
-	return diversifyRetrieved(raw, topK), nil
+	return raw, nil
+}
+
+func (r *Retriever) packToBudget(candidates []Retrieved, topK int) []Retrieved {
+	return diversifyRetrieved(candidates, topK)
 }
 
 func searchFTSWithFallback(ctx context.Context, d *db.DB, sessionKey, query string, k int) ([]db.FTSCandidate, error) {

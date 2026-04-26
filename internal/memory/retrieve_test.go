@@ -471,5 +471,24 @@ func TestRetrieve_StaleNotesHaveLowerScore(t *testing.T) {
 	}
 }
 
+func TestExistingRetrieveAPIStillWorks(t *testing.T) {
+	d := openRetrieveTestDB(t)
+	ctx := context.Background()
+	if _, err := d.InsertMemoryNoteTyped(ctx, "sess", db.TypedNoteInput{
+		Text: "build packet budget report",
+		Kind: db.MemoryKindFact,
+	}); err != nil {
+		t.Fatalf("InsertMemoryNoteTyped: %v", err)
+	}
+	r := NewRetriever(d)
+	results, err := r.Retrieve(ctx, "sess", "packet budget", nil, 4, 4, 3)
+	if err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatalf("expected non-empty retrieval results")
+	}
+}
+
 // ---- formatMemoryDigest (prompt builder helper) ----
 // We test through the package's internal function via a wrapper.

@@ -1126,8 +1126,20 @@ func (r *Runtime) persistAssistantReply(ctx context.Context, sessionKey string, 
 	if strings.TrimSpace(finalText) == "" {
 		finalText = "(no response)"
 	}
-	if _, err := r.DB.AppendMessage(ctx, sessionKey, "assistant", finalText, map[string]any{"in_reply_to": msgID}); err != nil {
+	assistantID, err := r.DB.AppendMessage(ctx, sessionKey, "assistant", finalText, map[string]any{"in_reply_to": msgID})
+	if err != nil {
 		log.Printf("append assistant(final) failed: %v", err)
+	} else if r.DB != nil {
+		scopeKey := sessionKey
+		if resolved, rerr := r.DB.ResolveScopeKey(ctx, sessionKey); rerr == nil && strings.TrimSpace(resolved) != "" {
+			scopeKey = resolved
+		}
+		card, _, _ := loadTaskCard(ctx, r.DB, sessionKey)
+		card.Status = "active"
+		card.MessageRefs = appendBoundedInt64(card.MessageRefs, assistantID, 12)
+		if err := saveTaskCard(ctx, r.DB, sessionKey, scopeKey, card); err != nil {
+			log.Printf("save task card failed: %v", err)
+		}
 	}
 	if autoDeliver && !streamed && r.Deliver != nil {
 		if err := r.deliver(ctx, channel, replyTarget, finalText, replyMeta); err != nil {
@@ -1157,6 +1169,29 @@ func (r *Runtime) boundTextResult(ctx context.Context, sessionKey string, text s
 		if err != nil {
 			log.Printf("artifact save failed: %v", err)
 			return text, preview, ""
+		}
+		if r.DB != nil {
+			if _, err := r.DB.InsertMemoryNoteTyped(ctx, sessionKey, db.TypedNoteInput{
+				Text:             preview,
+				Summary:          preview,
+				SourceArtifactID: id,
+				Kind:             db.MemoryKindArtifact,
+				Status:           db.MemoryStatusActive,
+				Importance:       0.2,
+				Confidence:       0.9,
+			}); err != nil {
+				log.Printf("artifact summary note save failed: %v", err)
+			}
+			scopeKey := sessionKey
+			if resolved, rerr := r.DB.ResolveScopeKey(ctx, sessionKey); rerr == nil && strings.TrimSpace(resolved) != "" {
+				scopeKey = resolved
+			}
+			card, _, _ := loadTaskCard(ctx, r.DB, sessionKey)
+			card.Status = "active"
+			card.ArtifactRefs = appendBoundedString(card.ArtifactRefs, id, 12)
+			if err := saveTaskCard(ctx, r.DB, sessionKey, scopeKey, card); err != nil {
+				log.Printf("save task card artifact ref failed: %v", err)
+			}
 		}
 		return fmt.Sprintf("artifact_id=%s\npreview:\n%s", id, preview), preview, id
 	}

@@ -85,6 +85,7 @@ var promptEmbedCache = struct {
 type PromptParts struct {
 	System  []providers.ChatMessage
 	History []providers.ChatMessage
+	Budget  BudgetReport
 }
 
 // BuildOptions holds options for building a prompt.
@@ -253,19 +254,36 @@ func (b *Builder) BuildWithOptions(ctx context.Context, opts BuildOptions) (Prom
 
 	heartbeat := ""
 	structuredContext := ""
+	taskCardText := ""
 	structuredMax := b.BootstrapMaxChars
 	if structuredMax <= 0 {
 		structuredMax = defaultBootstrapMaxChars
+	}
+	if b.DB != nil {
+		if card, ok, err := loadTaskCard(ctx, b.DB, opts.SessionKey); err == nil && ok {
+			taskCardText = renderTaskCard(card, structuredMax)
+		}
 	}
 	if opts.Autonomous {
 		heartbeat = b.currentHeartbeatText()
 		structuredContext = formatStructuredEventContext(opts.EventMeta, structuredMax)
 	}
+	if strings.TrimSpace(taskCardText) != "" {
+		if strings.TrimSpace(structuredContext) == "" {
+			structuredContext = "active_task_card:\n" + taskCardText
+		} else {
+			structuredContext = structuredContext + "\n\nactive_task_card:\n" + taskCardText
+		}
+	}
 	sysText := b.composeSystemPrompt(pinnedText, digestText, memText, b.IdentityText, b.StaticMemory, heartbeat, structuredContext, docContextText, workspaceContextText)
 	sys := []providers.ChatMessage{
 		{Role: "system", Content: sysText},
 	}
-	return PromptParts{System: sys, History: hist}, retrieved, nil
+	return PromptParts{
+		System:  sys,
+		History: hist,
+		Budget:  estimatePromptBudget(sys, hist),
+	}, retrieved, nil
 }
 
 func (b *Builder) currentHeartbeatText() string {
@@ -419,6 +437,15 @@ func readCappedFile(path string, maxBytes int64) ([]byte, error) {
 }
 
 func (b *Builder) composeSystemPrompt(pinnedText, digestText, memText, identityText, staticMemoryText, heartbeatText, structuredContextText, docContextText, workspaceContextText string) string {
+	stable := b.renderStablePrefix(pinnedText, digestText, memText, identityText, staticMemoryText, docContextText, workspaceContextText)
+	volatile := b.renderVolatileSuffix(heartbeatText, structuredContextText)
+	if strings.TrimSpace(volatile) == "" {
+		return stable
+	}
+	return strings.TrimSpace(stable + "\n\n" + volatile)
+}
+
+func (b *Builder) renderStablePrefix(pinnedText, digestText, memText, identityText, staticMemoryText, docContextText, workspaceContextText string) string {
 	maxEach := b.BootstrapMaxChars
 	if maxEach <= 0 {
 		maxEach = defaultBootstrapMaxChars
@@ -461,12 +488,6 @@ func (b *Builder) composeSystemPrompt(pinnedText, digestText, memText, identityT
 		sections = append(sections, section{title: "Static Memory", text: truncateText(t, maxEach)})
 	}
 	sections = append(sections, section{title: "TOOLS.md", text: truncateText(notes, maxEach)})
-	if t := strings.TrimSpace(heartbeatText); t != "" {
-		sections = append(sections, section{title: "Heartbeat", text: truncateText(t, maxEach)})
-	}
-	if t := strings.TrimSpace(structuredContextText); t != "" {
-		sections = append(sections, section{title: "Structured Trigger Context", text: truncateText(t, maxEach)})
-	}
 	sections = append(sections, section{title: "Pinned Memory", text: pinnedText})
 	if t := strings.TrimSpace(digestText); t != "" {
 		sections = append(sections, section{title: "Memory Digest", text: truncateText(t, maxEach)})
@@ -490,6 +511,36 @@ func (b *Builder) composeSystemPrompt(pinnedText, digestText, memText, identityT
 		out.WriteString("\n")
 	}
 	return truncateText(strings.TrimSpace(out.String()), maxTotal)
+}
+
+func (b *Builder) renderVolatileSuffix(heartbeatText, structuredContextText string) string {
+	maxEach := b.BootstrapMaxChars
+	if maxEach <= 0 {
+		maxEach = defaultBootstrapMaxChars
+	}
+	type section struct {
+		title string
+		text  string
+	}
+	var sections []section
+	if t := strings.TrimSpace(heartbeatText); t != "" {
+		sections = append(sections, section{title: "Heartbeat", text: truncateText(t, maxEach)})
+	}
+	if t := strings.TrimSpace(structuredContextText); t != "" {
+		sections = append(sections, section{title: "Structured Trigger Context", text: truncateText(t, maxEach)})
+	}
+	if len(sections) == 0 {
+		return ""
+	}
+	var out strings.Builder
+	for _, s := range sections {
+		out.WriteString("## ")
+		out.WriteString(s.title)
+		out.WriteString("\n")
+		out.WriteString(strings.TrimSpace(s.text))
+		out.WriteString("\n\n")
+	}
+	return strings.TrimSpace(out.String())
 }
 
 func formatStructuredEventContext(meta map[string]any, max int) string {

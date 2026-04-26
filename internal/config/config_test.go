@@ -1206,3 +1206,35 @@ func TestValidateProfile(t *testing.T) {
 		}
 	})
 }
+
+func TestLoad_ContextDefaultsAndValidation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	cfg := Default()
+	cfg.Context.Mode = "invalid-mode"
+	cfg.Context.MaxInputTokens = -10
+	cfg.Context.OutputReserveTokens = -1
+	cfg.Context.Pressure.WarningPercent = 0
+	cfg.Context.Pressure.HighPercent = 10
+	cfg.Context.Pressure.EmergencyPercent = 20
+	cfg.ContextManager.TimeoutSeconds = 0
+	if err := Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Context.Mode != "quality" {
+		t.Fatalf("expected invalid mode to clamp to quality, got %q", got.Context.Mode)
+	}
+	if got.Context.MaxInputTokens <= 0 || got.Context.OutputReserveTokens <= 0 {
+		t.Fatalf("expected positive context budgets, got %+v", got.Context)
+	}
+	if got.Context.Pressure.WarningPercent <= 0 || got.Context.Pressure.HighPercent <= got.Context.Pressure.WarningPercent || got.Context.Pressure.EmergencyPercent <= got.Context.Pressure.HighPercent {
+		t.Fatalf("unexpected pressure thresholds: %+v", got.Context.Pressure)
+	}
+	if got.ContextManager.TimeoutSeconds <= 0 {
+		t.Fatalf("expected context manager timeout default, got %+v", got.ContextManager)
+	}
+}

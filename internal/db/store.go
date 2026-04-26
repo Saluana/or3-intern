@@ -23,6 +23,10 @@ const (
 	MemoryKindGoal       MemoryKind = "goal"
 	MemoryKindProcedure  MemoryKind = "procedure"
 	MemoryKindEpisode    MemoryKind = "episode"
+	MemoryKindDecision   MemoryKind = "decision"
+	MemoryKindWarning    MemoryKind = "warning"
+	MemoryKindArtifact   MemoryKind = "artifact_summary"
+	MemoryKindFile       MemoryKind = "file_summary"
 )
 
 // MemoryStatus tracks the lifecycle state of a memory_notes row.
@@ -55,13 +59,19 @@ type ConsolidationMessage struct {
 // TypedNoteInput holds the data for a single typed memory note write.
 type TypedNoteInput struct {
 	Text             string
+	Summary          string
 	Embedding        []byte
 	EmbedFingerprint string
 	SourceMsgID      sql.NullInt64
+	SourceArtifactID string
 	Tags             string
 	Kind             string
 	Status           string
 	Importance       float64
+	Confidence       float64
+	UpdatedAt        int64
+	ExpiresAt        int64
+	SupersedesID     int64
 }
 
 type ConsolidationWrite struct {
@@ -240,6 +250,18 @@ func (d *DB) InsertMemoryNoteTyped(ctx context.Context, sessionKey string, input
 	} else if importance > maxImportance {
 		importance = maxImportance
 	}
+	confidence := input.Confidence
+	if confidence < 0 {
+		confidence = 0
+	} else if confidence > 1 {
+		confidence = 1
+	}
+	updatedAt := input.UpdatedAt
+	if updatedAt <= 0 {
+		updatedAt = NowMS()
+	}
+	summary := strings.TrimSpace(input.Summary)
+	sourceArtifactID := strings.TrimSpace(input.SourceArtifactID)
 	if err := d.validateMemoryEmbeddingProfile(ctx, input.Embedding, input.EmbedFingerprint); err != nil {
 		return 0, err
 	}
@@ -249,10 +271,13 @@ func (d *DB) InsertMemoryNoteTyped(ctx context.Context, sessionKey string, input
 	}
 	storedFingerprint := normalizeStoredEmbeddingFingerprint(emb, input.EmbedFingerprint)
 	res, err := d.SQL.ExecContext(ctx,
-		`INSERT INTO memory_notes(session_key, text, embedding, embed_fingerprint, source_message_id, tags, created_at, kind, status, importance)
-		 VALUES(?,?,?,?,?,?,?,?,?,?)`,
-		sessionKey, input.Text, emb, storedFingerprint, input.SourceMsgID, input.Tags, NowMS(),
-		kind, status, importance)
+		`INSERT INTO memory_notes(
+			session_key, text, summary, embedding, embed_fingerprint, source_message_id, source_artifact_id, tags,
+			created_at, updated_at, expires_at, supersedes_id, kind, status, importance, confidence
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		sessionKey, input.Text, summary, emb, storedFingerprint, input.SourceMsgID, sourceArtifactID, input.Tags,
+		NowMS(), updatedAt, input.ExpiresAt, sql.NullInt64{Int64: input.SupersedesID, Valid: input.SupersedesID > 0},
+		kind, status, importance, confidence)
 	if err != nil {
 		return 0, err
 	}
@@ -334,18 +359,24 @@ func (d *DB) upsertMemoryVec(ctx context.Context, noteID int64, sessionKey, text
 }
 
 type MemoryNoteRow struct {
-	ID              int64
-	SessionKey      string
-	Text            string
-	Embedding       []byte
-	SourceMessageID sql.NullInt64
-	Tags            string
-	CreatedAt       int64
-	Kind            string
-	Status          string
-	Importance      float64
-	UseCount        int
-	LastUsedAt      int64
+	ID               int64
+	SessionKey       string
+	Text             string
+	Summary          string
+	Embedding        []byte
+	SourceMessageID  sql.NullInt64
+	SourceArtifactID sql.NullString
+	Tags             string
+	CreatedAt        int64
+	UpdatedAt        int64
+	ExpiresAt        int64
+	SupersedesID     sql.NullInt64
+	Kind             string
+	Status           string
+	Importance       float64
+	Confidence       float64
+	UseCount         int
+	LastUsedAt       int64
 }
 
 func (d *DB) StreamMemoryNotes(ctx context.Context, sessionKey string) (*sql.Rows, error) {
@@ -829,6 +860,30 @@ func (d *DB) TouchMemoryNotes(ctx context.Context, scopeKey string, ids []int64,
 	      WHERE id IN (` + strings.Join(placeholders, ",") + `)
 	      AND session_key IN (?,?)`
 	_, err := d.SQL.ExecContext(ctx, q, args...)
+	return err
+}
+
+// UpdateMemoryNoteLifecycle updates lifecycle metadata without deleting rows.
+func (d *DB) UpdateMemoryNoteLifecycle(ctx context.Context, noteID int64, status string, supersedesID int64, expiresAt int64) error {
+	status = strings.TrimSpace(status)
+	if status == "" {
+		status = MemoryStatusActive
+	}
+	_, err := d.SQL.ExecContext(ctx,
+		`UPDATE memory_notes
+		 SET status=?, updated_at=?, supersedes_id=?, expires_at=?
+		 WHERE id=?`,
+		status, NowMS(), sql.NullInt64{Int64: supersedesID, Valid: supersedesID > 0}, expiresAt, noteID)
+	return err
+}
+
+func (d *DB) MarkMemoryNoteUsed(ctx context.Context, noteID int64, usedAt int64) error {
+	if usedAt <= 0 {
+		usedAt = NowMS()
+	}
+	_, err := d.SQL.ExecContext(ctx,
+		`UPDATE memory_notes SET use_count=use_count+1, last_used_at=?, updated_at=? WHERE id=?`,
+		usedAt, usedAt, noteID)
 	return err
 }
 

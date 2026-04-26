@@ -1175,6 +1175,15 @@ func TestRuntime_Handle_ArtifactSave(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Handle artifact: %v", err)
 	}
+	var count int
+	if err := d.SQL.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM memory_notes WHERE session_key=? AND kind=? AND source_artifact_id<>''`,
+		"sess-artifact", db.MemoryKindArtifact).Scan(&count); err != nil {
+		t.Fatalf("QueryRow artifact summary: %v", err)
+	}
+	if count == 0 {
+		t.Fatalf("expected artifact summary memory note to be written")
+	}
 }
 
 func TestRuntime_GuardToolExecution_ProfileDeniesPrivilegedTool(t *testing.T) {

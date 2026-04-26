@@ -132,13 +132,77 @@ type Config struct {
 	Session      SessionConfig  `json:"session"`
 	Security     SecurityConfig `json:"security"`
 
-	Provider  ProviderConfig  `json:"provider"`
-	Tools     ToolsConfig     `json:"tools"`
-	Hardening HardeningConfig `json:"hardening"`
-	Cron      CronConfig      `json:"cron"`
-	Service   ServiceConfig   `json:"service"`
-	Heartbeat HeartbeatConfig `json:"heartbeat"`
-	Channels  ChannelsConfig  `json:"channels"`
+	Provider       ProviderConfig       `json:"provider"`
+	Tools          ToolsConfig          `json:"tools"`
+	Hardening      HardeningConfig      `json:"hardening"`
+	Cron           CronConfig           `json:"cron"`
+	Service        ServiceConfig        `json:"service"`
+	Heartbeat      HeartbeatConfig      `json:"heartbeat"`
+	Channels       ChannelsConfig       `json:"channels"`
+	Context        ContextConfig        `json:"context"`
+	ContextManager ContextManagerConfig `json:"contextManager"`
+}
+
+type ContextConfig struct {
+	Mode                string                 `json:"mode"`
+	MaxInputTokens      int                    `json:"maxInputTokens"`
+	OutputReserveTokens int                    `json:"outputReserveTokens"`
+	SafetyMarginTokens  int                    `json:"safetyMarginTokens"`
+	Sections            ContextSectionBudgets  `json:"sections"`
+	Retrieval           ContextRetrievalConfig `json:"retrieval"`
+	Pressure            ContextPressureConfig  `json:"pressure"`
+	Tools               ContextToolConfig      `json:"tools"`
+	Artifacts           ContextArtifactConfig  `json:"artifacts"`
+	TaskCard            ContextTaskCardConfig  `json:"taskCard"`
+}
+
+type ContextSectionBudgets struct {
+	SystemCore       int `json:"systemCore"`
+	SoulIdentity     int `json:"soulIdentity"`
+	ToolPolicy       int `json:"toolPolicy"`
+	ActiveTaskCard   int `json:"activeTaskCard"`
+	PinnedMemory     int `json:"pinnedMemory"`
+	MemoryDigest     int `json:"memoryDigest"`
+	RecentHistory    int `json:"recentHistory"`
+	RetrievedMemory  int `json:"retrievedMemory"`
+	WorkspaceContext int `json:"workspaceContext"`
+	ToolSchemas      int `json:"toolSchemas"`
+}
+
+type ContextRetrievalConfig struct {
+	CandidateMultiplier int     `json:"candidateMultiplier"`
+	MinScore            float64 `json:"minScore"`
+}
+
+type ContextPressureConfig struct {
+	WarningPercent   int `json:"warningPercent"`
+	HighPercent      int `json:"highPercent"`
+	EmergencyPercent int `json:"emergencyPercent"`
+}
+
+type ContextToolConfig struct {
+	DynamicExpose bool `json:"dynamicExpose"`
+}
+
+type ContextArtifactConfig struct {
+	SummaryMaxChars int `json:"summaryMaxChars"`
+}
+
+type ContextTaskCardConfig struct {
+	Enabled      bool `json:"enabled"`
+	MaxRefs      int  `json:"maxRefs"`
+	MaxPlanItems int  `json:"maxPlanItems"`
+}
+
+type ContextManagerConfig struct {
+	Enabled           bool   `json:"enabled"`
+	Provider          string `json:"provider"`
+	Model             string `json:"model"`
+	TimeoutSeconds    int    `json:"timeoutSeconds"`
+	MaxInputTokens    int    `json:"maxInputTokens"`
+	MaxOutputTokens   int    `json:"maxOutputTokens"`
+	AllowTaskUpdates  bool   `json:"allowTaskUpdates"`
+	AllowStalePropose bool   `json:"allowStalePropose"`
 }
 
 // HardeningConfig controls sandboxing, privilege gates, and per-tool quotas.
@@ -715,6 +779,39 @@ func Default() Config {
 				SMTPUseSSL:          false,
 			},
 		},
+		Context: ContextConfig{
+			Mode:                "quality",
+			MaxInputTokens:      16000,
+			OutputReserveTokens: 1200,
+			SafetyMarginTokens:  400,
+			Sections: ContextSectionBudgets{
+				SystemCore:       800,
+				SoulIdentity:     2800,
+				ToolPolicy:       900,
+				ActiveTaskCard:   700,
+				PinnedMemory:     1200,
+				MemoryDigest:     900,
+				RecentHistory:    2200,
+				RetrievedMemory:  1500,
+				WorkspaceContext: 1200,
+				ToolSchemas:      1400,
+			},
+			Retrieval: ContextRetrievalConfig{CandidateMultiplier: 3, MinScore: 0.03},
+			Pressure:  ContextPressureConfig{WarningPercent: 70, HighPercent: 85, EmergencyPercent: 95},
+			Tools:     ContextToolConfig{DynamicExpose: true},
+			Artifacts: ContextArtifactConfig{SummaryMaxChars: 500},
+			TaskCard:  ContextTaskCardConfig{Enabled: true, MaxRefs: 12, MaxPlanItems: 8},
+		},
+		ContextManager: ContextManagerConfig{
+			Enabled:           false,
+			Provider:          "",
+			Model:             "",
+			TimeoutSeconds:    15,
+			MaxInputTokens:    1200,
+			MaxOutputTokens:   600,
+			AllowTaskUpdates:  true,
+			AllowStalePropose: true,
+		},
 	}
 }
 
@@ -977,6 +1074,52 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.DocIndex.MaxFiles <= 0 {
 		cfg.DocIndex.MaxFiles = 100
+	}
+	if strings.TrimSpace(cfg.Context.Mode) == "" {
+		cfg.Context.Mode = "quality"
+	}
+	switch cfg.Context.Mode {
+	case "poor":
+		if cfg.Context.MaxInputTokens <= 0 {
+			cfg.Context.MaxInputTokens = 5000
+		}
+	case "balanced":
+		if cfg.Context.MaxInputTokens <= 0 {
+			cfg.Context.MaxInputTokens = 8000
+		}
+	case "quality", "custom":
+		if cfg.Context.MaxInputTokens <= 0 {
+			cfg.Context.MaxInputTokens = 16000
+		}
+	default:
+		cfg.Context.Mode = "quality"
+		if cfg.Context.MaxInputTokens <= 0 {
+			cfg.Context.MaxInputTokens = 16000
+		}
+	}
+	if cfg.Context.OutputReserveTokens <= 0 {
+		cfg.Context.OutputReserveTokens = 1200
+	}
+	if cfg.Context.SafetyMarginTokens < 0 {
+		cfg.Context.SafetyMarginTokens = 0
+	}
+	if cfg.Context.Pressure.WarningPercent <= 0 {
+		cfg.Context.Pressure.WarningPercent = 70
+	}
+	if cfg.Context.Pressure.HighPercent <= cfg.Context.Pressure.WarningPercent {
+		cfg.Context.Pressure.HighPercent = cfg.Context.Pressure.WarningPercent + 10
+	}
+	if cfg.Context.Pressure.EmergencyPercent <= cfg.Context.Pressure.HighPercent {
+		cfg.Context.Pressure.EmergencyPercent = cfg.Context.Pressure.HighPercent + 10
+	}
+	if cfg.ContextManager.TimeoutSeconds <= 0 {
+		cfg.ContextManager.TimeoutSeconds = 15
+	}
+	if cfg.ContextManager.MaxInputTokens <= 0 {
+		cfg.ContextManager.MaxInputTokens = 1200
+	}
+	if cfg.ContextManager.MaxOutputTokens <= 0 {
+		cfg.ContextManager.MaxOutputTokens = 600
 	}
 	if cfg.DocIndex.MaxFileBytes <= 0 {
 		cfg.DocIndex.MaxFileBytes = 64 * 1024

@@ -109,6 +109,19 @@ Bearer token notes:
 | `GET` | `/internal/v1/configure/sections` | Operator | List configure sections and current status summaries. |
 | `GET` | `/internal/v1/configure/fields` | Operator | List editable fields for a section (and channel for `channels`). |
 | `POST` | `/internal/v1/configure/apply` | Operator | Apply one or more configure-field mutations and persist config. |
+| `GET` | `/internal/v1/files/roots` | Operator | List root-scoped folders available for browsing. |
+| `GET` | `/internal/v1/files/list` | Operator | List a directory under a configured file root. |
+| `GET` | `/internal/v1/files/stat` | Operator | Return metadata for one file or folder under a root. |
+| `GET` | `/internal/v1/files/download` | Operator | Download one file under a root. |
+| `POST` | `/internal/v1/files/upload` | Operator | Upload one file into a writable root directory without overwriting. |
+| `POST` | `/internal/v1/files/mkdir` | Operator | Create one directory under a writable root. |
+| `POST` | `/internal/v1/files/delete` | Operator | Disabled in v1; returns `403` for safety. |
+| `POST` | `/internal/v1/terminal/sessions` | Operator | Start a bounded shell session inside a configured root. |
+| `GET` | `/internal/v1/terminal/sessions/{sessionId}` | Operator | Fetch terminal session metadata and current status. |
+| `GET` | `/internal/v1/terminal/sessions/{sessionId}/stream` | Operator | Attach to live terminal SSE output and lifecycle events. |
+| `POST` | `/internal/v1/terminal/sessions/{sessionId}/input` | Operator | Send stdin to a running terminal session. |
+| `POST` | `/internal/v1/terminal/sessions/{sessionId}/resize` | Operator | Update remembered terminal size metadata. |
+| `POST` | `/internal/v1/terminal/sessions/{sessionId}/close` | Operator | Close an active terminal session. |
 
 ## Endpoints
 
@@ -341,6 +354,99 @@ The following capabilities are compatible with this schema and token format but 
 - File-transfer approval gating (`file_transfer` domain)
 - Remote-node and `or3-sandbox` verification using shared signing keys
 - Remote-node forwarding of approval decisions
+
+### File endpoints
+
+File endpoints expose a small file-portal-style browser for trusted private-network clients. Every path is resolved under a configured root and traversal outside that root is rejected.
+
+Roots are derived from `allowedDir`, `workspaceDir`, and `artifactsDir`. If none are configured, the service exposes the current working directory as `cwd`.
+
+`GET /internal/v1/files/roots` response:
+
+```json
+{
+  "items": [
+    { "id": "workspace", "label": "Workspace", "path": "/Users/me/project", "writable": true }
+  ]
+}
+```
+
+`GET /internal/v1/files/list?root_id=workspace&path=.` response:
+
+```json
+{
+  "root_id": "workspace",
+  "path": ".",
+  "entries": [
+    { "name": "README.md", "path": "README.md", "type": "file", "size": 1024, "modified_at": "2026-04-26T10:00:00Z", "mime_type": "text/markdown; charset=utf-8" }
+  ]
+}
+```
+
+`GET /internal/v1/files/stat?root_id=workspace&path=README.md` returns `{ "root_id": "workspace", "item": ... }`.
+
+`GET /internal/v1/files/download?root_id=workspace&path=README.md` streams the file with `http.ServeContent`.
+
+`POST /internal/v1/files/upload` accepts `multipart/form-data` fields `root_id`, `path`, and `file`. Uploads use create-only semantics and return `409` instead of overwriting an existing file.
+
+`POST /internal/v1/files/mkdir` request:
+
+```json
+{ "root_id": "workspace", "path": ".", "name": "Notes" }
+```
+
+`POST /internal/v1/files/delete` is intentionally disabled in v1 and returns `403`.
+
+### Terminal endpoints
+
+Terminal endpoints expose a bounded shell bridge for trusted private-network operators. Sessions are in-memory, root-scoped, capped to a small concurrent set, and expire automatically after a short TTL.
+
+Availability requirements:
+
+- operator auth
+- `hardening.guardedTools=true`
+- `hardening.privilegedTools=true`
+- `hardening.enableExecShell=true`
+- runtime profile must permit shell execution
+- runtime profiles that require sandboxed exec do not expose terminal sessions in v1
+
+`POST /internal/v1/terminal/sessions` request:
+
+```json
+{
+  "root_id": "workspace",
+  "path": ".",
+  "shell": "sh",
+  "rows": 28,
+  "cols": 100,
+  "approval_token": "optional-approved-token"
+}
+```
+
+Behavior notes:
+
+- returns `201` with a terminal session snapshot when started
+- returns `409` with `requires_approval=true` and `request_id` when exec approval policy requires confirmation
+- returns `503` when shell mode is disabled by host posture/config
+- create requests run through the same exec approval policy used by other privileged execution paths
+
+`GET /internal/v1/terminal/sessions/{sessionId}/stream` emits SSE events such as:
+
+- `snapshot`
+- `status`
+- `output`
+- `input`
+- `resize`
+- `error`
+
+Example output event:
+
+```text
+event: output
+data: {"session_id":"term_171234_1","stream":"stdout","chunk":"hello\n"}
+```
+
+`POST /internal/v1/terminal/sessions/{sessionId}/resize` currently updates client-visible metadata only; it does not yet emulate a full PTY resize.
 
 ### `GET /internal/v1/jobs/{jobId}`
 

@@ -7,9 +7,14 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,19 +30,22 @@ import (
 )
 
 type serviceServer struct {
-	config          config.Config
-	configPath      string
-	runtime         *agent.Runtime
-	subagentManager *agent.SubagentManager
-	jobs            *agent.JobRegistry
-	broker          *approval.Broker
-	controlOnce     sync.Once
-	controlSvc      *controlplane.Service
-	appOnce         sync.Once
-	appSvc          *app.ServiceApp
-	rateMu          sync.Mutex
-	rateWindow      time.Time
-	rateCounts      map[string]int
+	config           config.Config
+	configPath       string
+	runtime          *agent.Runtime
+	subagentManager  *agent.SubagentManager
+	jobs             *agent.JobRegistry
+	broker           *approval.Broker
+	controlOnce      sync.Once
+	controlSvc       *controlplane.Service
+	appOnce          sync.Once
+	appSvc           *app.ServiceApp
+	terminalMu       sync.Mutex
+	terminalSeq      int64
+	terminalSessions map[string]*serviceTerminalSession
+	rateMu           sync.Mutex
+	rateWindow       time.Time
+	rateCounts       map[string]int
 }
 
 const (
@@ -48,7 +56,119 @@ const (
 	serviceEmbeddingsBodyLimit int64 = 64 << 10
 	serviceScopeBodyLimit      int64 = 64 << 10
 	serviceConfigureBodyLimit  int64 = 256 << 10
+	serviceFileUploadBodyLimit int64 = 128 << 20
+	serviceTerminalBodyLimit   int64 = 64 << 10
+	serviceTerminalSessionTTL        = 10 * time.Minute
+	serviceTerminalMaxSessions       = 4
 )
+
+type serviceTerminalEvent struct {
+	Type string
+	Data map[string]any
+}
+
+type serviceTerminalSession struct {
+	ID            string
+	RootID        string
+	RelativePath  string
+	WorkingDir    string
+	Shell         string
+	CreatedAt     time.Time
+	ExpiresAt     time.Time
+	LastActiveAt  time.Time
+	Status        string
+	Rows          int
+	Cols          int
+	ApprovalMode  string
+	ApprovalID    int64
+	ApprovalState string
+	cmd           *exec.Cmd
+	stdin         io.WriteCloser
+	cancel        context.CancelFunc
+	mu            sync.Mutex
+	events        []serviceTerminalEvent
+	subscribers   map[chan serviceTerminalEvent]struct{}
+}
+
+func (s *serviceTerminalSession) snapshot() map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return map[string]any{
+		"session_id":     s.ID,
+		"root_id":        s.RootID,
+		"path":           s.RelativePath,
+		"cwd":            s.WorkingDir,
+		"shell":          s.Shell,
+		"created_at":     s.CreatedAt.UTC().Format(time.RFC3339),
+		"expires_at":     s.ExpiresAt.UTC().Format(time.RFC3339),
+		"last_active_at": s.LastActiveAt.UTC().Format(time.RFC3339),
+		"status":         s.Status,
+		"rows":           s.Rows,
+		"cols":           s.Cols,
+		"approval_mode":  s.ApprovalMode,
+		"approval_id":    s.ApprovalID,
+		"approval_state": s.ApprovalState,
+		"event_count":    len(s.events),
+	}
+}
+
+func (s *serviceTerminalSession) appendEvent(eventType string, data map[string]any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.LastActiveAt = time.Now().UTC()
+	if data == nil {
+		data = map[string]any{}
+	}
+	if _, ok := data["session_id"]; !ok {
+		data["session_id"] = s.ID
+	}
+	event := serviceTerminalEvent{Type: eventType, Data: data}
+	s.events = append(s.events, event)
+	for subscriber := range s.subscribers {
+		select {
+		case subscriber <- event:
+		default:
+		}
+	}
+}
+
+func (s *serviceTerminalSession) subscribe() ([]serviceTerminalEvent, chan serviceTerminalEvent, func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	history := append([]serviceTerminalEvent(nil), s.events...)
+	ch := make(chan serviceTerminalEvent, 32)
+	if s.subscribers == nil {
+		s.subscribers = map[chan serviceTerminalEvent]struct{}{}
+	}
+	s.subscribers[ch] = struct{}{}
+	return history, ch, func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		delete(s.subscribers, ch)
+		close(ch)
+	}
+}
+
+func (s *serviceTerminalSession) close(status string) {
+	s.mu.Lock()
+	if s.Status == "closed" || s.Status == "failed" || s.Status == "exited" {
+		s.mu.Unlock()
+		return
+	}
+	s.Status = status
+	stdin := s.stdin
+	cancel := s.cancel
+	s.stdin = nil
+	s.cancel = nil
+	s.mu.Unlock()
+	if stdin != nil {
+		_ = stdin.Close()
+	}
+	if cancel != nil {
+		cancel()
+	}
+	s.appendEvent("status", map[string]any{"status": status})
+}
 
 func runServiceCommand(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, jobs *agent.JobRegistry) error {
 	return runServiceCommandWithBroker(ctx, cfg, rt, subagentManager, jobs, nil)
@@ -119,6 +239,10 @@ func newServiceMux(server *serviceServer) *http.ServeMux {
 	mux.Handle("/internal/v1/scope/", http.HandlerFunc(server.handleScope))
 	mux.Handle("/internal/v1/configure", http.HandlerFunc(server.handleConfigure))
 	mux.Handle("/internal/v1/configure/", http.HandlerFunc(server.handleConfigure))
+	mux.Handle("/internal/v1/files", http.HandlerFunc(server.handleFiles))
+	mux.Handle("/internal/v1/files/", http.HandlerFunc(server.handleFiles))
+	mux.Handle("/internal/v1/terminal/sessions", http.HandlerFunc(server.handleTerminal))
+	mux.Handle("/internal/v1/terminal/sessions/", http.HandlerFunc(server.handleTerminal))
 	return mux
 }
 
@@ -300,6 +424,735 @@ func (s *serviceServer) handleDevices(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "device action not found"})
 	}
+}
+
+type serviceFileRoot struct {
+	ID       string `json:"id"`
+	Label    string `json:"label"`
+	Path     string `json:"path"`
+	Writable bool   `json:"writable"`
+}
+
+type serviceFileEntry struct {
+	Name       string `json:"name"`
+	Path       string `json:"path"`
+	Type       string `json:"type"`
+	Size       int64  `json:"size,omitempty"`
+	ModifiedAt string `json:"modified_at,omitempty"`
+	MimeType   string `json:"mime_type,omitempty"`
+}
+
+func (s *serviceServer) handleFiles(w http.ResponseWriter, r *http.Request) {
+	if !requireServiceRole(w, r, approval.RoleOperator) {
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/internal/v1/files")
+	path = strings.Trim(path, "/")
+	switch path {
+	case "roots":
+		if r.Method != http.MethodGet {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		writeServiceJSON(w, http.StatusOK, map[string]any{"items": s.serviceFileRoots()})
+	case "list":
+		if r.Method != http.MethodGet {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		s.handleFileList(w, r)
+	case "stat":
+		if r.Method != http.MethodGet {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		s.handleFileStat(w, r)
+	case "download":
+		if r.Method != http.MethodGet {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		s.handleFileDownload(w, r)
+	case "upload":
+		if r.Method != http.MethodPost {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		s.handleFileUpload(w, r)
+	case "mkdir":
+		if r.Method != http.MethodPost {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		s.handleFileMkdir(w, r)
+	case "delete":
+		writeServiceJSON(w, http.StatusForbidden, map[string]any{"error": "file deletion is disabled in v1"})
+	default:
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "file route not found"})
+	}
+}
+
+func (s *serviceServer) serviceFileRoots() []serviceFileRoot {
+	var roots []serviceFileRoot
+	add := func(id, label, path string, writable bool) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		if abs, err := filepath.Abs(path); err == nil {
+			roots = append(roots, serviceFileRoot{ID: id, Label: label, Path: abs, Writable: writable})
+		}
+	}
+	add("allowed", "Allowed Folder", s.config.AllowedDir, true)
+	add("workspace", "Workspace", s.config.WorkspaceDir, true)
+	add("artifacts", "Artifacts", s.config.ArtifactsDir, false)
+	if len(roots) == 0 {
+		if cwd, err := os.Getwd(); err == nil {
+			roots = append(roots, serviceFileRoot{ID: "cwd", Label: "Current Directory", Path: cwd, Writable: true})
+		}
+	}
+	return roots
+}
+
+func (s *serviceServer) serviceFileRootByID(id string) (serviceFileRoot, bool) {
+	for _, root := range s.serviceFileRoots() {
+		if root.ID == id {
+			return root, true
+		}
+	}
+	return serviceFileRoot{}, false
+}
+
+func (s *serviceServer) resolveServiceFilePath(rootID, relPath string) (serviceFileRoot, string, string, error) {
+	root, ok := s.serviceFileRootByID(strings.TrimSpace(rootID))
+	if !ok {
+		return serviceFileRoot{}, "", "", fmt.Errorf("unknown file root")
+	}
+	cleanRel := filepath.Clean(strings.TrimSpace(relPath))
+	if cleanRel == "." || cleanRel == string(filepath.Separator) {
+		cleanRel = "."
+	}
+	if filepath.IsAbs(cleanRel) || strings.HasPrefix(cleanRel, "..") || strings.Contains(cleanRel, string(filepath.Separator)+".."+string(filepath.Separator)) {
+		return serviceFileRoot{}, "", "", fmt.Errorf("path escapes root")
+	}
+	absRoot, err := filepath.Abs(root.Path)
+	if err != nil {
+		return serviceFileRoot{}, "", "", err
+	}
+	realRoot, err := filepath.EvalSymlinks(absRoot)
+	if err != nil {
+		return serviceFileRoot{}, "", "", err
+	}
+	absPath, err := filepath.Abs(filepath.Join(absRoot, cleanRel))
+	if err != nil {
+		return serviceFileRoot{}, "", "", err
+	}
+	realPath, err := resolveExistingServicePath(realRoot, cleanRel)
+	if err != nil {
+		return serviceFileRoot{}, "", "", err
+	}
+	rel, err := filepath.Rel(realRoot, realPath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return serviceFileRoot{}, "", "", fmt.Errorf("path escapes root")
+	}
+	displayRel, err := filepath.Rel(absRoot, absPath)
+	if err != nil || displayRel == ".." || strings.HasPrefix(displayRel, ".."+string(filepath.Separator)) {
+		return serviceFileRoot{}, "", "", fmt.Errorf("path escapes root")
+	}
+	return root, absPath, filepath.ToSlash(displayRel), nil
+}
+
+func resolveExistingServicePath(realRoot, cleanRel string) (string, error) {
+	if cleanRel == "." {
+		return realRoot, nil
+	}
+	current := realRoot
+	for _, part := range strings.Split(cleanRel, string(filepath.Separator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		next := filepath.Join(current, part)
+		evaluated, err := filepath.EvalSymlinks(next)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return next, nil
+			}
+			return "", err
+		}
+		current = evaluated
+	}
+	return current, nil
+}
+
+func (s *serviceServer) handleFileList(w http.ResponseWriter, r *http.Request) {
+	root, absPath, rel, err := s.resolveServiceFilePath(r.URL.Query().Get("root_id"), r.URL.Query().Get("path"))
+	if err != nil {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	items, err := os.ReadDir(absPath)
+	if err != nil {
+		writeServiceError(w, r, http.StatusNotFound, "directory unavailable", err)
+		return
+	}
+	entries := make([]serviceFileEntry, 0, len(items))
+	for _, item := range items {
+		info, err := item.Info()
+		if err != nil {
+			continue
+		}
+		entryType := "file"
+		if info.IsDir() {
+			entryType = "directory"
+		}
+		entryRel := filepath.ToSlash(filepath.Join(rel, item.Name()))
+		if rel == "." {
+			entryRel = item.Name()
+		}
+		entries = append(entries, serviceFileEntry{Name: item.Name(), Path: entryRel, Type: entryType, Size: info.Size(), ModifiedAt: info.ModTime().Format(time.RFC3339), MimeType: mime.TypeByExtension(filepath.Ext(item.Name()))})
+	}
+	writeServiceJSON(w, http.StatusOK, map[string]any{"root_id": root.ID, "path": rel, "entries": entries})
+}
+
+func (s *serviceServer) handleFileStat(w http.ResponseWriter, r *http.Request) {
+	root, absPath, rel, err := s.resolveServiceFilePath(r.URL.Query().Get("root_id"), r.URL.Query().Get("path"))
+	if err != nil {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	info, err := os.Stat(absPath)
+	if err != nil {
+		writeServiceError(w, r, http.StatusNotFound, "file unavailable", err)
+		return
+	}
+	entryType := "file"
+	if info.IsDir() {
+		entryType = "directory"
+	}
+	writeServiceJSON(w, http.StatusOK, map[string]any{"item": serviceFileEntry{Name: info.Name(), Path: rel, Type: entryType, Size: info.Size(), ModifiedAt: info.ModTime().Format(time.RFC3339), MimeType: mime.TypeByExtension(filepath.Ext(info.Name()))}, "root_id": root.ID})
+}
+
+func (s *serviceServer) handleFileDownload(w http.ResponseWriter, r *http.Request) {
+	_, absPath, _, err := s.resolveServiceFilePath(r.URL.Query().Get("root_id"), r.URL.Query().Get("path"))
+	if err != nil {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	file, err := os.Open(absPath)
+	if err != nil {
+		writeServiceError(w, r, http.StatusNotFound, "file unavailable", err)
+		return
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || info.IsDir() {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "download target is not a file"})
+		return
+	}
+	http.ServeContent(w, r, info.Name(), info.ModTime(), file)
+}
+
+func (s *serviceServer) handleFileUpload(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, serviceFileUploadBodyLimit)
+	if err := r.ParseMultipartForm(serviceFileUploadBodyLimit); err != nil {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid multipart upload"})
+		return
+	}
+	root, dirPath, rel, err := s.resolveServiceFilePath(r.FormValue("root_id"), r.FormValue("path"))
+	if err != nil {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	if !root.Writable {
+		writeServiceJSON(w, http.StatusForbidden, map[string]any{"error": "file root is read-only"})
+		return
+	}
+	source, header, err := r.FormFile("file")
+	if err != nil {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "missing file"})
+		return
+	}
+	defer source.Close()
+	name := filepath.Base(header.Filename)
+	if name == "." || name == string(filepath.Separator) || name == "" {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid file name"})
+		return
+	}
+	target := filepath.Join(dirPath, name)
+	out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		writeServiceError(w, r, http.StatusConflict, "file already exists or cannot be created", err)
+		return
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, source); err != nil {
+		writeServiceError(w, r, http.StatusBadGateway, "file upload failed", err)
+		return
+	}
+	writeServiceJSON(w, http.StatusCreated, map[string]any{"root_id": root.ID, "path": filepath.ToSlash(filepath.Join(rel, name)), "status": "uploaded"})
+}
+
+func (s *serviceServer) handleFileMkdir(w http.ResponseWriter, r *http.Request) {
+	limitServiceRequestBody(w, r, serviceApprovalBodyLimit)
+	var body struct {
+		RootID string `json:"root_id"`
+		Path   string `json:"path"`
+		Name   string `json:"name"`
+	}
+	if err := decodeServiceRequestBody(r.Body, &body); err != nil {
+		writeServiceRequestDecodeError(w, err)
+		return
+	}
+	root, dirPath, rel, err := s.resolveServiceFilePath(body.RootID, body.Path)
+	if err != nil {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	if !root.Writable {
+		writeServiceJSON(w, http.StatusForbidden, map[string]any{"error": "file root is read-only"})
+		return
+	}
+	name := filepath.Base(strings.TrimSpace(body.Name))
+	if name == "." || name == string(filepath.Separator) || name == "" {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid directory name"})
+		return
+	}
+	target := filepath.Join(dirPath, name)
+	if err := os.Mkdir(target, 0o700); err != nil {
+		writeServiceError(w, r, http.StatusConflict, "directory already exists or cannot be created", err)
+		return
+	}
+	writeServiceJSON(w, http.StatusCreated, map[string]any{"root_id": root.ID, "path": filepath.ToSlash(filepath.Join(rel, name)), "status": "created"})
+}
+
+func (s *serviceServer) handleTerminal(w http.ResponseWriter, r *http.Request) {
+	if !requireServiceRole(w, r, approval.RoleOperator) {
+		return
+	}
+	if !s.terminalAvailable() {
+		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "terminal mode is not enabled"})
+		return
+	}
+	s.cleanupTerminalSessions()
+	relative := strings.TrimPrefix(r.URL.Path, "/internal/v1/terminal/sessions")
+	relative = strings.Trim(relative, "/")
+	if relative == "" {
+		if r.Method != http.MethodPost {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		s.createTerminalSession(w, r)
+		return
+	}
+	parts := strings.Split(relative, "/")
+	if len(parts) == 1 {
+		if r.Method != http.MethodGet {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		s.getTerminalSession(w, r, strings.TrimSpace(parts[0]))
+		return
+	}
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" {
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "terminal route not found"})
+		return
+	}
+	sessionID := strings.TrimSpace(parts[0])
+	switch strings.TrimSpace(parts[1]) {
+	case "stream":
+		if r.Method != http.MethodGet {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		s.streamTerminalSession(w, r, sessionID)
+	case "input":
+		if r.Method != http.MethodPost {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		s.writeTerminalInput(w, r, sessionID)
+	case "resize":
+		if r.Method != http.MethodPost {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		s.resizeTerminalSession(w, r, sessionID)
+	case "close":
+		if r.Method != http.MethodPost {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		s.closeTerminalSession(w, r, sessionID)
+	default:
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "terminal action not found"})
+	}
+}
+
+func (s *serviceServer) terminalAvailable() bool {
+	if s == nil {
+		return false
+	}
+	spec := config.ProfileSpec(s.config.RuntimeProfile)
+	if spec.ForbidExecShell || spec.ForbidPrivilegedTools {
+		return false
+	}
+	if spec.RequireSandboxForExec {
+		return false
+	}
+	return s.config.Hardening.GuardedTools && s.config.Hardening.PrivilegedTools && s.config.Hardening.EnableExecShell
+}
+
+func (s *serviceServer) cleanupTerminalSessions() {
+	if s == nil {
+		return
+	}
+	now := time.Now().UTC()
+	s.terminalMu.Lock()
+	sessions := make([]*serviceTerminalSession, 0)
+	for id, session := range s.terminalSessions {
+		if session == nil || now.After(session.ExpiresAt) {
+			delete(s.terminalSessions, id)
+			if session != nil {
+				sessions = append(sessions, session)
+			}
+		}
+	}
+	s.terminalMu.Unlock()
+	for _, session := range sessions {
+		session.close("expired")
+	}
+}
+
+func (s *serviceServer) getTerminalSessionByID(sessionID string) (*serviceTerminalSession, bool) {
+	s.terminalMu.Lock()
+	defer s.terminalMu.Unlock()
+	if s.terminalSessions == nil {
+		return nil, false
+	}
+	session, ok := s.terminalSessions[sessionID]
+	if !ok || session == nil {
+		return nil, false
+	}
+	if time.Now().UTC().After(session.ExpiresAt) {
+		delete(s.terminalSessions, sessionID)
+		go session.close("expired")
+		return nil, false
+	}
+	return session, true
+}
+
+func (s *serviceServer) allocateTerminalSessionID() string {
+	s.terminalMu.Lock()
+	defer s.terminalMu.Unlock()
+	s.terminalSeq++
+	return fmt.Sprintf("term_%d_%d", time.Now().UTC().Unix(), s.terminalSeq)
+}
+
+func (s *serviceServer) createTerminalSession(w http.ResponseWriter, r *http.Request) {
+	limitServiceRequestBody(w, r, serviceTerminalBodyLimit)
+	var body struct {
+		RootID        string `json:"root_id"`
+		Path          string `json:"path"`
+		Shell         string `json:"shell"`
+		Rows          int    `json:"rows"`
+		Cols          int    `json:"cols"`
+		ApprovalToken string `json:"approval_token"`
+	}
+	if err := decodeServiceRequestBody(r.Body, &body); err != nil {
+		writeServiceRequestDecodeError(w, err)
+		return
+	}
+	root, workingDir, rel, err := s.resolveServiceFilePath(body.RootID, body.Path)
+	if err != nil {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	s.terminalMu.Lock()
+	activeSessions := len(s.terminalSessions)
+	s.terminalMu.Unlock()
+	if activeSessions >= serviceTerminalMaxSessions {
+		writeServiceJSON(w, http.StatusTooManyRequests, map[string]any{"error": "too many active terminal sessions"})
+		return
+	}
+	shellPath, err := resolveTerminalShell(strings.TrimSpace(body.Shell))
+	if err != nil {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	approvalDecision, err := s.evaluateTerminalApproval(r.Context(), shellPath, workingDir, body.ApprovalToken)
+	if err != nil {
+		writeServiceError(w, r, http.StatusBadGateway, "terminal approval failed", err)
+		return
+	}
+	if approvalDecision.RequiresApproval {
+		writeServiceJSON(w, http.StatusConflict, map[string]any{
+			"error":             "terminal session requires approval",
+			"requires_approval": true,
+			"request_id":        approvalDecision.RequestID,
+			"subject_hash":      approvalDecision.SubjectHash,
+			"reason":            approvalDecision.Reason,
+		})
+		return
+	}
+	if !approvalDecision.Allowed {
+		reason := strings.TrimSpace(approvalDecision.Reason)
+		if reason == "" {
+			reason = "terminal session denied"
+		}
+		writeServiceJSON(w, http.StatusForbidden, map[string]any{"error": reason})
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd := exec.CommandContext(ctx, shellPath)
+	cmd.Dir = workingDir
+	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		cancel()
+		writeServiceError(w, r, http.StatusBadGateway, "failed to open terminal stdin", err)
+		return
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		_ = stdin.Close()
+		cancel()
+		writeServiceError(w, r, http.StatusBadGateway, "failed to open terminal stdout", err)
+		return
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		_ = stdin.Close()
+		cancel()
+		writeServiceError(w, r, http.StatusBadGateway, "failed to open terminal stderr", err)
+		return
+	}
+	session := &serviceTerminalSession{
+		ID:            s.allocateTerminalSessionID(),
+		RootID:        root.ID,
+		RelativePath:  filepath.ToSlash(rel),
+		WorkingDir:    workingDir,
+		Shell:         shellPath,
+		CreatedAt:     time.Now().UTC(),
+		ExpiresAt:     time.Now().UTC().Add(serviceTerminalSessionTTL),
+		LastActiveAt:  time.Now().UTC(),
+		Status:        "starting",
+		Rows:          max(body.Rows, 24),
+		Cols:          max(body.Cols, 80),
+		ApprovalMode:  string(s.config.Security.Approvals.Exec.Mode),
+		ApprovalState: approvalDecision.Reason,
+		ApprovalID:    approvalDecision.RequestID,
+		cmd:           cmd,
+		stdin:         stdin,
+		cancel:        cancel,
+		subscribers:   map[chan serviceTerminalEvent]struct{}{},
+	}
+	if err := cmd.Start(); err != nil {
+		_ = stdin.Close()
+		cancel()
+		writeServiceError(w, r, http.StatusBadGateway, "failed to start terminal shell", err)
+		return
+	}
+	session.mu.Lock()
+	session.Status = "running"
+	session.mu.Unlock()
+	session.appendEvent("status", map[string]any{"status": "running"})
+	session.appendEvent("snapshot", session.snapshot())
+	s.terminalMu.Lock()
+	if s.terminalSessions == nil {
+		s.terminalSessions = map[string]*serviceTerminalSession{}
+	}
+	s.terminalSessions[session.ID] = session
+	s.terminalMu.Unlock()
+	go s.collectTerminalOutput(session, stdout, "stdout")
+	go s.collectTerminalOutput(session, stderr, "stderr")
+	go s.waitForTerminalSession(session)
+	writeServiceJSON(w, http.StatusCreated, session.snapshot())
+}
+
+func (s *serviceServer) evaluateTerminalApproval(ctx context.Context, shellPath, workingDir, approvalToken string) (approval.Decision, error) {
+	if s == nil || s.broker == nil {
+		return approval.Decision{Allowed: true, Reason: "broker_unavailable"}, nil
+	}
+	return s.broker.EvaluateExec(ctx, approval.ExecEvaluation{
+		ExecutablePath: shellPath,
+		Argv:           []string{"terminal"},
+		WorkingDir:     workingDir,
+		ToolName:       "terminal",
+		ApprovalToken:  approvalToken,
+	})
+}
+
+func resolveTerminalShell(requested string) (string, error) {
+	allowed := []string{"bash", "sh", "zsh"}
+	if requested == "" {
+		requested = strings.TrimSpace(os.Getenv("SHELL"))
+	}
+	if requested == "" {
+		requested = "/bin/sh"
+	}
+	if strings.ContainsRune(requested, filepath.Separator) {
+		base := filepath.Base(requested)
+		if !slices.Contains(allowed, base) {
+			return "", fmt.Errorf("shell is not allowed")
+		}
+		if _, err := os.Stat(requested); err != nil {
+			return "", fmt.Errorf("shell not found")
+		}
+		return requested, nil
+	}
+	if !slices.Contains(allowed, requested) {
+		return "", fmt.Errorf("shell is not allowed")
+	}
+	resolved, err := exec.LookPath(requested)
+	if err != nil {
+		return "", fmt.Errorf("shell not found")
+	}
+	return resolved, nil
+}
+
+func (s *serviceServer) collectTerminalOutput(session *serviceTerminalSession, reader io.ReadCloser, stream string) {
+	defer reader.Close()
+	buf := make([]byte, 4096)
+	for {
+		n, err := reader.Read(buf)
+		if n > 0 {
+			session.appendEvent("output", map[string]any{"stream": stream, "chunk": string(buf[:n])})
+		}
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				session.appendEvent("error", map[string]any{"stream": stream, "error": err.Error()})
+			}
+			return
+		}
+	}
+}
+
+func (s *serviceServer) waitForTerminalSession(session *serviceTerminalSession) {
+	err := session.cmd.Wait()
+	status := "exited"
+	if err != nil {
+		status = "failed"
+		session.appendEvent("error", map[string]any{"error": err.Error()})
+	}
+	session.close(status)
+}
+
+func (s *serviceServer) getTerminalSession(w http.ResponseWriter, r *http.Request, sessionID string) {
+	session, ok := s.getTerminalSessionByID(sessionID)
+	if !ok {
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "terminal session not found"})
+		return
+	}
+	writeServiceJSON(w, http.StatusOK, session.snapshot())
+}
+
+func (s *serviceServer) streamTerminalSession(w http.ResponseWriter, r *http.Request, sessionID string) {
+	session, ok := s.getTerminalSessionByID(sessionID)
+	if !ok {
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "terminal session not found"})
+		return
+	}
+	if err := beginSSE(w); err != nil {
+		writeServiceError(w, r, http.StatusInternalServerError, "streaming is not supported", err)
+		return
+	}
+	history, events, unsubscribe := session.subscribe()
+	defer unsubscribe()
+	for _, event := range history {
+		if err := writeSSEEvent(w, event.Type, event.Data); err != nil {
+			return
+		}
+	}
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case event, ok := <-events:
+			if !ok {
+				return
+			}
+			if err := writeSSEEvent(w, event.Type, event.Data); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func (s *serviceServer) writeTerminalInput(w http.ResponseWriter, r *http.Request, sessionID string) {
+	limitServiceRequestBody(w, r, serviceTerminalBodyLimit)
+	var body struct {
+		Input string `json:"input"`
+	}
+	if err := decodeServiceRequestBody(r.Body, &body); err != nil {
+		writeServiceRequestDecodeError(w, err)
+		return
+	}
+	session, ok := s.getTerminalSessionByID(sessionID)
+	if !ok {
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "terminal session not found"})
+		return
+	}
+	if body.Input == "" {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "input is required"})
+		return
+	}
+	session.mu.Lock()
+	stdin := session.stdin
+	status := session.Status
+	session.mu.Unlock()
+	if stdin == nil || status != "running" {
+		writeServiceJSON(w, http.StatusConflict, map[string]any{"error": "terminal session is not writable"})
+		return
+	}
+	if _, err := io.WriteString(stdin, body.Input); err != nil {
+		writeServiceError(w, r, http.StatusBadGateway, "failed to write terminal input", err)
+		return
+	}
+	session.appendEvent("input", map[string]any{"size": len(body.Input)})
+	writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true, "session_id": sessionID})
+}
+
+func (s *serviceServer) resizeTerminalSession(w http.ResponseWriter, r *http.Request, sessionID string) {
+	limitServiceRequestBody(w, r, serviceTerminalBodyLimit)
+	var body struct {
+		Rows int `json:"rows"`
+		Cols int `json:"cols"`
+	}
+	if err := decodeServiceRequestBody(r.Body, &body); err != nil {
+		writeServiceRequestDecodeError(w, err)
+		return
+	}
+	session, ok := s.getTerminalSessionByID(sessionID)
+	if !ok {
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "terminal session not found"})
+		return
+	}
+	session.mu.Lock()
+	if body.Rows > 0 {
+		session.Rows = body.Rows
+	}
+	if body.Cols > 0 {
+		session.Cols = body.Cols
+	}
+	session.LastActiveAt = time.Now().UTC()
+	session.ExpiresAt = time.Now().UTC().Add(serviceTerminalSessionTTL)
+	rows, cols := session.Rows, session.Cols
+	session.mu.Unlock()
+	session.appendEvent("resize", map[string]any{"rows": rows, "cols": cols})
+	writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true, "session_id": sessionID, "rows": rows, "cols": cols})
+}
+
+func (s *serviceServer) closeTerminalSession(w http.ResponseWriter, r *http.Request, sessionID string) {
+	session, ok := s.getTerminalSessionByID(sessionID)
+	if !ok {
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "terminal session not found"})
+		return
+	}
+	session.close("closed")
+	s.terminalMu.Lock()
+	delete(s.terminalSessions, sessionID)
+	s.terminalMu.Unlock()
+	writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true, "session_id": sessionID, "status": "closed"})
 }
 
 func (s *serviceServer) handleApprovals(w http.ResponseWriter, r *http.Request) {

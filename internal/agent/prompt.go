@@ -275,9 +275,9 @@ func (b *Builder) BuildWithOptions(ctx context.Context, opts BuildOptions) (Prom
 			structuredContext = structuredContext + "\n\nactive_task_card:\n" + taskCardText
 		}
 	}
-	sysText := b.composeSystemPrompt(pinnedText, digestText, memText, b.IdentityText, b.StaticMemory, heartbeat, structuredContext, docContextText, workspaceContextText)
+	sysContent := b.composeSystemContent(pinnedText, digestText, memText, b.IdentityText, b.StaticMemory, heartbeat, structuredContext, docContextText, workspaceContextText)
 	sys := []providers.ChatMessage{
-		{Role: "system", Content: sysText},
+		{Role: "system", Content: sysContent},
 	}
 	return PromptParts{
 		System:  sys,
@@ -439,6 +439,18 @@ func readCappedFile(path string, maxBytes int64) ([]byte, error) {
 func (b *Builder) composeSystemPrompt(pinnedText, digestText, memText, identityText, staticMemoryText, heartbeatText, structuredContextText, docContextText, workspaceContextText string) string {
 	stable := b.renderStablePrefix(pinnedText, digestText, memText, identityText, staticMemoryText, docContextText, workspaceContextText)
 	volatile := b.renderVolatileSuffix(heartbeatText, structuredContextText)
+	if strings.TrimSpace(volatile) == "" {
+		return stable
+	}
+	return strings.TrimSpace(stable + "\n\n" + volatile)
+}
+
+func (b *Builder) composeSystemContent(pinnedText, digestText, memText, identityText, staticMemoryText, heartbeatText, structuredContextText, docContextText, workspaceContextText string) any {
+	stable := b.renderStablePrefix(pinnedText, digestText, memText, identityText, staticMemoryText, docContextText, workspaceContextText)
+	volatile := b.renderVolatileSuffix(heartbeatText, structuredContextText)
+	if b != nil && b.Provider != nil && b.Provider.SupportsExplicitPromptCache() {
+		return providers.BuildCacheAwareSystemContent(stable, volatile)
+	}
 	if strings.TrimSpace(volatile) == "" {
 		return stable
 	}

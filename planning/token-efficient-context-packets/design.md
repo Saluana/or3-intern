@@ -208,6 +208,74 @@ Rules that protect cache hits:
 
 This ordering is the single biggest token-cost lever in the plan: with provider prompt caching, the stable prefix (typically 2k-6k tokens of soul + identity + AGENTS + tool policy + static memory + pinned memory + tool schemas) is billed at a small fraction of normal input tokens after the first call, so cost reductions compound on top of the budget work below.
 
+### Current `prompt.go` mapping (repo-grounded Phase 1 baseline)
+
+The current implementation in [internal/agent/prompt.go](internal/agent/prompt.go) already gives us a strong starting point for Phase 1.
+
+Today, `Builder.BuildWithOptions` assembles prompt inputs in this order:
+
+1. Resolve `scopeKey` from `DB.ResolveScopeKey`.
+2. Load pinned memory via `DB.GetPinned` and render it with `formatPinned`.
+3. Retrieve durable memory via `Mem.Retrieve`, then split it into:
+  - `memText` via `formatRetrievedBounded`
+  - `digestText` via `formatMemoryDigestBounded`
+4. Load indexed doc context via `DocRetriever.RetrieveDocs`.
+5. Load workspace context via `memory.BuildWorkspaceContext`.
+6. Load recent scoped history via `DB.GetLastMessagesScoped`, preserving tool-call/result pairing and vision attachment expansion.
+7. Load the task card via `loadTaskCard` and render it with `renderTaskCard`.
+8. For autonomous turns only, load:
+  - heartbeat text via `currentHeartbeatText`
+  - structured trigger metadata via `formatStructuredEventContext`
+9. Render the system prompt via `composeSystemPrompt`.
+
+Current section layout, exactly as rendered by `renderStablePrefix` / `renderVolatileSuffix` today:
+
+**Already in the stable prefix**
+
+- `SOUL.md`
+- `Identity` when `IdentityText` is non-empty
+- `AGENTS.md`
+- `Static Memory` when `Builder.StaticMemory` is non-empty
+- `TOOLS.md`
+- `Pinned Memory`
+- `Memory Digest` when durable notes were retrieved
+- `Retrieved Memory`
+- `Workspace Context` when workspace snippets are available
+- `Indexed File Context` when doc retrieval returns matches
+- `Skills Inventory`
+
+**Already in the volatile suffix**
+
+- `Heartbeat` (autonomous turns only)
+- `Structured Trigger Context`
+- `active_task_card` is currently embedded inside `Structured Trigger Context`, not rendered as its own top-level section yet
+
+**Still outside the system prompt**
+
+- Raw recent history remains in `PromptParts.History`, not in the system prompt text
+- User message content and any image attachments remain separate provider messages
+- Tool schemas are not yet serialized into the prompt path at all; they are a later provider-request concern, not a Phase 1 `prompt.go` concern
+
+**Protected content for first implementation**
+
+The following content must be treated as protected under budget pressure because it is already part of the repo's behavioral identity and is tested today:
+
+- `SOUL.md` / default soul
+- `Identity`
+- `AGENTS.md`
+- `TOOLS.md`
+- `Pinned Memory`
+- `Skills Inventory`
+
+`Memory Digest`, `Retrieved Memory`, `Workspace Context`, and `Indexed File Context` remain important but are the first stable-prefix sections that may be budget-reduced after protected content reaches minimums.
+
+Existing test coverage already proves most of this baseline and should be reused rather than rewritten:
+
+- [internal/agent/prompt_test.go](internal/agent/prompt_test.go) covers identity inclusion, static memory inclusion, section ordering (`SOUL.md` → `Identity` → `AGENTS.md`; `AGENTS.md` → `Static Memory` → `TOOLS.md`), workspace/doc context inclusion, memory digest inclusion, stable-prefix byte stability, and volatile heartbeat/trigger isolation.
+- [internal/agent/runtime_test.go](internal/agent/runtime_test.go) already covers artifact-overflow behavior by asserting that oversized tool output is stored as an artifact summary memory note rather than left inline.
+
+This is why Phase 1 can stay intentionally small: most of the foundational behavior is already present in the live codebase, so the remaining work is mainly to preserve it, measure it, and avoid regressing cache stability while later phases add budgets and retrieval packing.
+
 ### How sections fit together
 
 The prompt renderer keeps a clear hierarchy. Numbering below matches the cache-aware order above.

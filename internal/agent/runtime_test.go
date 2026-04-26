@@ -1941,6 +1941,62 @@ func TestToToolDefs_WithRegistry(t *testing.T) {
 	}
 }
 
+type alphaTool struct{ tools.Base }
+
+func (t *alphaTool) Name() string        { return "alpha_tool" }
+func (t *alphaTool) Description() string { return "alpha" }
+func (t *alphaTool) Parameters() map[string]any {
+	return map[string]any{"type": "object"}
+}
+func (t *alphaTool) Schema() map[string]any {
+	return map[string]any{"type": "function", "function": map[string]any{"name": t.Name(), "description": t.Description(), "parameters": map[string]any{"type": "object"}}}
+}
+func (t *alphaTool) Execute(ctx context.Context, params map[string]any) (string, error) {
+	return "", nil
+}
+
+func TestToToolDefs_SortsByToolNameDeterministically(t *testing.T) {
+	reg := tools.NewRegistry()
+	reg.Register(&echoTool{})
+	reg.Register(&alphaTool{})
+
+	defs := toToolDefs(reg)
+	if len(defs) != 2 {
+		t.Fatalf("expected 2 tool defs, got %d", len(defs))
+	}
+	if defs[0].Function.Name != "alpha_tool" || defs[1].Function.Name != "echo_tool" {
+		t.Fatalf("expected deterministic alphabetical ordering, got %#v", defs)
+	}
+}
+
+func TestRuntime_BoundTextResult_ArtifactsPreviewAndID(t *testing.T) {
+	d := openTestDB(t)
+	artifactsDir := t.TempDir()
+	rt := &Runtime{
+		DB:               d,
+		MaxToolBytes:     10,
+		ToolPreviewBytes: 5,
+		Artifacts:        &artifacts.Store{Dir: artifactsDir, DB: d},
+	}
+	stored, preview, artifactID := rt.boundTextResult(context.Background(), "sess-preview", "abcdefghijklmnopqrstuvwxyz")
+	if artifactID == "" {
+		t.Fatalf("expected artifact ID for oversized tool output")
+	}
+	if !strings.Contains(stored, "artifact_id=") || !strings.Contains(stored, artifactID) {
+		t.Fatalf("expected stored text to include artifact reference, got %q", stored)
+	}
+	if preview == "" || len(preview) > rt.toolPreviewBytes()+len("…[truncated]") {
+		t.Fatalf("expected bounded preview, got %q", preview)
+	}
+	storedArtifact, err := rt.Artifacts.Lookup(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("Lookup artifact: %v", err)
+	}
+	if storedArtifact.SizeBytes <= 0 {
+		t.Fatalf("expected stored artifact bytes, got %#v", storedArtifact)
+	}
+}
+
 func TestRuntime_GetSessionLock_SameKey(t *testing.T) {
 	rt := &Runtime{}
 	mu1 := &rt.getSessionLock("key1").mu

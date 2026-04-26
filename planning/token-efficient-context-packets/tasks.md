@@ -2,16 +2,16 @@
 
 ## 1. Phase 1: Cache-Stable Prefix and Low-Risk Quick Wins
 
-- [ ] Map current prompt inputs and protected sections in [internal/agent/prompt.go](internal/agent/prompt.go) and document which are stable vs volatile. Requirements: 1, 2, 18, 19.
-- [ ] Add tests that capture current inclusion of `SOUL.md`, `IDENTITY.md`, `AGENTS.md`, `TOOLS.md`, pinned memory, memory digest, retrieved memory, workspace context, and skills inventory. Requirements: 2, 18, 21.
+- [x] Map current prompt inputs and protected sections in [internal/agent/prompt.go](internal/agent/prompt.go) and document which are stable vs volatile. Requirements: 1, 2, 18, 19.
+- [x] Add tests that capture current inclusion of `SOUL.md`, `IDENTITY.md`, `AGENTS.md`, `TOOLS.md`, pinned memory, memory digest, retrieved memory, workspace context, and skills inventory. Requirements: 2, 18, 21.
 - [x] Split `composeSystemPrompt` in [internal/agent/prompt.go](internal/agent/prompt.go) into `renderStablePrefix` and `renderVolatileSuffix` without changing the rendered output bytes for the default config (golden test). Requirements: 1, 19, 21.
 - [x] Move heartbeat clock and structured trigger context out of the stable prefix region so the prefix becomes byte-stable across turns. Requirements: 19.
-- [ ] Sort tool schemas by tool name in the prefix and serialize them through a deterministic JSON encoder. Requirements: 19.
+- [x] Sort tool schemas by tool name in the prefix and serialize them through a deterministic JSON encoder. Requirements: 19.
 - [x] Add `TestStablePrefixIsByteStableAcrossTurns` and `TestStablePrefixExcludesHeartbeatAndTriggerMetadata` regression tests. Requirements: 19.
-- [ ] Wire Anthropic-style `cache_control` breakpoint placement (or equivalent provider-specific marker) at the boundary in [internal/providers](internal/providers); for providers without an explicit marker (OpenAI/OpenRouter automatic prompt caching), keep the prefix bytes stable so the provider hash matches. Requirements: 19.
-- [ ] Add artifact preview regression tests around existing `MaxToolBytes` behavior in [internal/agent](internal/agent) and [internal/artifacts](internal/artifacts). Requirements: 12, 17.
+- [x] Wire Anthropic-style `cache_control` breakpoint placement (or equivalent provider-specific marker) at the boundary in [internal/providers](internal/providers); for providers without an explicit marker (OpenAI/OpenRouter automatic prompt caching), keep the prefix bytes stable so the provider hash matches. Requirements: 19.
+- [x] Add artifact preview regression tests around existing `MaxToolBytes` behavior in [internal/agent](internal/agent) and [internal/artifacts](internal/artifacts). Requirements: 12, 17.
 - [x] Add diagnostic-only token estimation helpers using deterministic approximate counts before changing prompt rendering. Requirements: 13, 17.
-- [ ] Document that token efficiency must not remove soul, identity, pinned memory, skills, safety rules, or tool policy, and must not introduce a new top-level package. Requirements: 2, 18, 20.
+- [x] Document that token efficiency must not remove soul, identity, pinned memory, skills, safety rules, or tool policy, and must not introduce a new top-level package. Requirements: 2, 18, 20.
 
 ## 2. Phase 2: In-Place Context Packet Builder
 

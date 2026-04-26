@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -57,6 +58,31 @@ func TestPromptIncludesStaticMemory(t *testing.T) {
 	}
 	if !strings.Contains(sys, "answer is always 42") {
 		t.Errorf("expected static memory text in system prompt, got %q", sys)
+	}
+}
+
+func TestBuildWithOptions_IncludesPinnedMemoryAndSkillsInventory(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	if err := d.UpsertPinned(ctx, "sess", "project_rule", "always keep prompts deterministic"); err != nil {
+		t.Fatalf("UpsertPinned: %v", err)
+	}
+	b := &Builder{DB: d, HistoryMax: 10}
+	pp, _, err := b.Build(context.Background(), "sess", "hello")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	sys := pp.System[0].Content.(string)
+	if !strings.Contains(sys, "## Pinned Memory") || !strings.Contains(sys, "always keep prompts deterministic") {
+		t.Fatalf("expected pinned memory section and content, got %q", sys)
+	}
+	if !strings.Contains(sys, "## Skills Inventory") {
+		t.Fatalf("expected skills inventory section, got %q", sys)
+	}
+	for _, section := range []string{"## SOUL.md", "## AGENTS.md", "## TOOLS.md", "## Retrieved Memory"} {
+		if !strings.Contains(sys, section) {
+			t.Fatalf("expected section %q in system prompt, got %q", section, sys)
+		}
 	}
 }
 
@@ -600,6 +626,31 @@ func TestStablePrefixExcludesHeartbeatAndTriggerMetadata(t *testing.T) {
 	volatile := b.renderVolatileSuffix("tick", "{\"event\":\"cron\"}")
 	if !strings.Contains(volatile, "Heartbeat") || !strings.Contains(volatile, "Structured Trigger Context") {
 		t.Fatalf("volatile suffix should include heartbeat and structured context: %q", volatile)
+	}
+}
+
+func TestComposeSystemContent_UsesExplicitCacheBoundaryWhenSupported(t *testing.T) {
+	b := &Builder{
+		Provider: &providers.Client{APIBase: "https://api.anthropic.example/v1"},
+		Soul:     "Soul",
+	}
+	content := b.composeSystemContent("- key: value", "digest", "retrieved", "identity", "static", "heartbeat", "trigger", "docs", "workspace")
+	parts, ok := content.([]map[string]any)
+	if !ok {
+		t.Fatalf("expected structured content parts for explicit cache provider, got %T", content)
+	}
+	if len(parts) != 2 {
+		t.Fatalf("expected stable+volatile parts, got %#v", parts)
+	}
+	cacheControl, ok := parts[0]["cache_control"].(map[string]any)
+	if !ok || cacheControl["type"] != "ephemeral" {
+		t.Fatalf("expected cache_control breakpoint on stable prefix, got %#v", parts[0])
+	}
+	if strings.Contains(fmt.Sprint(parts[0]["text"]), "Heartbeat") || strings.Contains(fmt.Sprint(parts[0]["text"]), "Structured Trigger Context") {
+		t.Fatalf("stable part should not contain volatile sections: %#v", parts[0])
+	}
+	if !strings.Contains(fmt.Sprint(parts[1]["text"]), "Heartbeat") || !strings.Contains(fmt.Sprint(parts[1]["text"]), "Structured Trigger Context") {
+		t.Fatalf("volatile part missing heartbeat/trigger content: %#v", parts[1])
 	}
 }
 

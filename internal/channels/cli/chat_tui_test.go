@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"log"
 	"strings"
 	"testing"
 
@@ -225,6 +226,79 @@ func TestChatModelNoticeDoesNotCorruptInput(t *testing.T) {
 	}
 	if !strings.Contains(view, "consolidation failed") {
 		t.Fatalf("expected consolidation notice text in view, got %q", view)
+	}
+	if !strings.Contains(view, "Runtime") {
+		t.Fatalf("expected runtime notice in transcript, got %q", view)
+	}
+}
+
+func TestChatModelRuntimeLogMessageStaysInsideTranscript(t *testing.T) {
+	bridge := newBubbleChatBridge()
+	model := newChatModel(context.Background(), "cli:default", bridge, nil, func(sessionKey, text string) bool {
+		_ = sessionKey
+		_ = text
+		return true
+	})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 28})
+	m := updated.(chatModel)
+	m.pendingCount = 1
+	m.statusText = "Working…"
+
+	updated, _ = m.Update(chatRuntimeLogMsg{text: `2026/04/25 22:00:27 reset-archived 49 recent messages for session "cli:default" into one memory note`, kind: "notice"})
+	m = updated.(chatModel)
+
+	if m.pendingCount != 1 {
+		t.Fatalf("expected runtime notice not to change pending count, got %d", m.pendingCount)
+	}
+	view := m.View()
+	if !strings.Contains(view, "reset-archived 49 recent messages") {
+		t.Fatalf("expected runtime notice in transcript, got %q", view)
+	}
+	if !strings.Contains(view, "Runtime") {
+		t.Fatalf("expected runtime label in transcript, got %q", view)
+	}
+	if !strings.Contains(view, "Recent activity") {
+		t.Fatalf("expected sidebar to remain rendered, got %q", view)
+	}
+	if !strings.Contains(view, "Working") {
+		t.Fatalf("expected active status to remain while request is pending, got %q", view)
+	}
+}
+
+func TestCaptureBubbleTeaLogsRoutesStdlibLogsToBridge(t *testing.T) {
+	bridge := newBubbleChatBridge()
+	restore := captureBubbleTeaLogs(bridge)
+	defer restore()
+	cmd := bridge.waitCmd()
+
+	log.Printf("reset-archived 49 recent messages")
+
+	msg := cmd()
+	runtimeMsg, ok := msg.(chatRuntimeLogMsg)
+	if !ok {
+		t.Fatalf("expected chatRuntimeLogMsg, got %T", msg)
+	}
+	if runtimeMsg.kind != "notice" {
+		t.Fatalf("expected notice log kind, got %q", runtimeMsg.kind)
+	}
+	if !strings.Contains(runtimeMsg.text, "reset-archived 49 recent messages") {
+		t.Fatalf("expected routed log text, got %q", runtimeMsg.text)
+	}
+}
+
+func TestClassifyRuntimeLogLine(t *testing.T) {
+	tests := []struct {
+		text string
+		want string
+	}{
+		{text: "2026/04/25 reset-archived 49 recent messages", want: "notice"},
+		{text: "2026/04/25 consolidation failed: context deadline exceeded", want: "error"},
+		{text: "2026/04/25 warning: provider timeout is high", want: "error"},
+	}
+	for _, tc := range tests {
+		if got := classifyRuntimeLogLine(tc.text); got != tc.want {
+			t.Fatalf("classifyRuntimeLogLine(%q) = %q, want %q", tc.text, got, tc.want)
+		}
 	}
 }
 

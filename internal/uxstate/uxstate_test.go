@@ -91,10 +91,13 @@ func TestBuildDeviceViewsFormatsLastUsed(t *testing.T) {
 func TestBuildSettingsHomeView(t *testing.T) {
 	cfg := config.Default()
 	view := BuildSettingsHomeView(cfg)
-	if len(view.Sections) != 8 {
+	if len(view.Sections) != 9 {
 		t.Fatalf("expected settings sections, got %#v", view.Sections)
 	}
 	if view.Sections[0].Title != "AI Provider" {
 		t.Fatalf("expected provider first, got %#v", view.Sections[0])
+	}
+	if view.Sections[7].Title != "Context" || view.Sections[7].Advanced || !strings.Contains(view.Sections[7].Action, "--section context") {
+		t.Fatalf("expected visible context settings section, got %#v", view.Sections[7])
 	}
 }

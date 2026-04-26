@@ -8,10 +8,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"or3-intern/internal/artifacts"
+	"or3-intern/internal/db"
 	"or3-intern/internal/security"
 )
 
@@ -84,11 +87,15 @@ func TestWebFetch_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WebFetch: %v", err)
 	}
-	if !strings.Contains(out, "hello from server") {
-		t.Errorf("expected server response in output, got %q", out)
+	var result ToolResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("parse result: %v", err)
 	}
-	if !strings.Contains(out, "200") {
-		t.Errorf("expected status 200 in output, got %q", out)
+	if !strings.Contains(result.Preview, "hello from server") {
+		t.Errorf("expected server response in preview, got %q", out)
+	}
+	if fmt.Sprint(result.Stats["status"]) != "200 OK" {
+		t.Errorf("expected status 200 in stats, got %#v", result.Stats)
 	}
 }
 
@@ -106,15 +113,159 @@ func TestWebFetch_MaxBytes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WebFetch: %v", err)
 	}
-	parts := strings.SplitN(out, "\n\n", 2)
-	if len(parts) != 2 {
-		t.Fatalf("expected status/body split, got %q", out)
+	var result ToolResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("parse result: %v", err)
 	}
-	if parts[0] != "status: 200 OK" {
-		t.Fatalf("expected status line, got %q", out)
+	if len(result.Preview) != 50 {
+		t.Fatalf("expected 50-byte preview, got %d bytes in %q", len(result.Preview), out)
 	}
-	if len(parts[1]) != 50 {
-		t.Fatalf("expected 50-byte body, got %d bytes in %q", len(parts[1]), out)
+}
+
+func TestWebFetch_HTMLAutoConvertsToMarkdownArtifact(t *testing.T) {
+	d, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	store := &artifacts.Store{Dir: t.TempDir(), DB: d}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, `<html><head><title>Example</title><script>alert("bad")</script></head><body><h1>Hello</h1><p>Readable body.</p></body></html>`)
+	}))
+	defer srv.Close()
+
+	tool := &WebFetch{HTTP: newPinnedTestClient(t, srv.URL, nil), Timeout: 2 * time.Second, Store: store}
+	out, err := tool.Execute(ContextWithSession(context.Background(), "sess"), map[string]any{
+		"url":      testPublicFetchURLBase + "/page",
+		"maxBytes": float64(80),
+	})
+	if err != nil {
+		t.Fatalf("WebFetch: %v", err)
+	}
+	var result ToolResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("parse result: %v", err)
+	}
+	if result.Kind != "web_fetch" || result.ArtifactID == "" {
+		t.Fatalf("expected web_fetch artifact result, got %#v", result)
+	}
+	if fmt.Sprint(result.Stats["mode"]) != "markdown" {
+		t.Fatalf("expected markdown mode, got %#v", result.Stats)
+	}
+	if strings.Contains(result.Preview, "alert") || !strings.Contains(result.Preview, "Hello") {
+		t.Fatalf("expected cleaned markdown preview, got %q", result.Preview)
+	}
+	read, err := (&ReadArtifact{Store: store, MaxReadBytes: 2000}).Execute(ContextWithSession(context.Background(), "sess"), map[string]any{"artifact_id": result.ArtifactID})
+	if err != nil {
+		t.Fatalf("read artifact: %v", err)
+	}
+	if !strings.Contains(read, "Readable body") || strings.Contains(read, "alert") {
+		t.Fatalf("expected cleaned markdown artifact, got %q", read)
+	}
+}
+
+func TestWebFetch_HTMLRawBypass(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, `<html><body><main><h1>Hello</h1><script>alert("bad")</script><p>Readable body.</p></main></body></html>`)
+	}))
+	defer srv.Close()
+
+	tool := &WebFetch{HTTP: newPinnedTestClient(t, srv.URL, nil), Timeout: 2 * time.Second}
+	out, err := tool.Execute(context.Background(), map[string]any{
+		"url": testPublicFetchURLBase + "/raw",
+		"raw": true,
+	})
+	if err != nil {
+		t.Fatalf("WebFetch: %v", err)
+	}
+	var result ToolResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("parse result: %v", err)
+	}
+	if result.ArtifactID != "" {
+		t.Fatalf("expected no artifact for raw bypass, got %#v", result)
+	}
+	if fmt.Sprint(result.Stats["mode"]) != "raw" {
+		t.Fatalf("expected raw mode, got %#v", result.Stats)
+	}
+	if !strings.Contains(result.Preview, "<h1>Hello</h1>") || !strings.Contains(result.Preview, `alert("bad")`) {
+		t.Fatalf("expected literal raw html preview, got %q", result.Preview)
+	}
+}
+
+func TestWebFetch_HTMLErrorDoesNotCreateArtifact(t *testing.T) {
+	d, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	store := &artifacts.Store{Dir: t.TempDir(), DB: d}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `<html><body><main><h1>Not Found</h1><p>Missing page.</p></main></body></html>`)
+	}))
+	defer srv.Close()
+
+	tool := &WebFetch{HTTP: newPinnedTestClient(t, srv.URL, nil), Timeout: 2 * time.Second, Store: store}
+	out, err := tool.Execute(ContextWithSession(context.Background(), "sess"), map[string]any{
+		"url":      testPublicFetchURLBase + "/missing",
+		"maxBytes": float64(80),
+	})
+	if err != nil {
+		t.Fatalf("WebFetch: %v", err)
+	}
+	var result ToolResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("parse result: %v", err)
+	}
+	if result.ArtifactID != "" || result.OK {
+		t.Fatalf("expected failed fetch without artifact, got %#v", result)
+	}
+	if fmt.Sprint(result.Stats["mode"]) != "html_text" || !strings.Contains(result.Preview, "Not Found Missing page.") {
+		t.Fatalf("expected cleaned failure preview, got %#v / %q", result.Stats, result.Preview)
+	}
+}
+
+type fakeWebRenderer struct {
+	gotURL  string
+	gotOpts WebRenderOptions
+}
+
+func (r *fakeWebRenderer) Render(ctx context.Context, target string, opts WebRenderOptions) (string, error) {
+	_ = ctx
+	r.gotURL = target
+	r.gotOpts = opts
+	return "rendered javascript content", nil
+}
+
+func TestWebFetch_RenderedModeUsesRenderer(t *testing.T) {
+	renderer := &fakeWebRenderer{}
+	tool := &WebFetch{Renderer: renderer}
+	out, err := tool.Execute(context.Background(), map[string]any{
+		"url":       "https://example.com/app",
+		"render":    true,
+		"waitUntil": "load",
+		"waitMs":    float64(250),
+		"selector":  "#app",
+	})
+	if err != nil {
+		t.Fatalf("WebFetch render: %v", err)
+	}
+	if renderer.gotURL != "https://example.com/app" {
+		t.Fatalf("expected renderer URL, got %q", renderer.gotURL)
+	}
+	if renderer.gotOpts.WaitUntil != "load" || renderer.gotOpts.WaitMS != 250 || renderer.gotOpts.Selector != "#app" {
+		t.Fatalf("unexpected render opts: %#v", renderer.gotOpts)
+	}
+	var result ToolResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("parse result: %v", err)
+	}
+	if result.Kind != "web_fetch" || result.Preview != "rendered javascript content" || fmt.Sprint(result.Stats["mode"]) != "render" {
+		t.Fatalf("unexpected render result: %#v", result)
 	}
 }
 
@@ -165,7 +316,7 @@ func TestWebFetch_PinsValidatedHostIntoDial(t *testing.T) {
 		t.Fatalf("expected fetch dial to stay pinned to the validated request IP, got %q", dialedAddr)
 	}
 	if !strings.Contains(out, "pinned") {
-		t.Fatalf("expected test server response, got %q", out)
+		t.Fatalf("expected test server response in envelope, got %q", out)
 	}
 }
 

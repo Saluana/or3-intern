@@ -58,6 +58,47 @@ type ChatMessage struct {
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 }
 
+// SupportsExplicitPromptCache reports whether the configured endpoint is known
+// to accept Anthropic-style cache-control metadata on message content blocks.
+// The default OpenAI-compatible path remains unchanged when this is false.
+func (c *Client) SupportsExplicitPromptCache() bool {
+	if c == nil {
+		return false
+	}
+	base := strings.ToLower(strings.TrimSpace(c.APIBase))
+	return strings.Contains(base, "anthropic") || strings.Contains(base, "claude")
+}
+
+// BuildCacheAwareSystemContent returns a system-message content payload that
+// preserves a stable prefix boundary for providers that understand explicit
+// cache-control metadata. Callers should use this only when
+// SupportsExplicitPromptCache returns true; otherwise a plain concatenated
+// string should be sent for maximum compatibility.
+func BuildCacheAwareSystemContent(stable, volatile string) any {
+	stable = strings.TrimSpace(stable)
+	volatile = strings.TrimSpace(volatile)
+	parts := make([]map[string]any, 0, 2)
+	if stable != "" {
+		parts = append(parts, map[string]any{
+			"type": "text",
+			"text": stable,
+			"cache_control": map[string]any{
+				"type": "ephemeral",
+			},
+		})
+	}
+	if volatile != "" {
+		parts = append(parts, map[string]any{
+			"type": "text",
+			"text": volatile,
+		})
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return parts
+}
+
 // ToolDef declares a callable tool in provider request format.
 type ToolDef struct {
 	Type     string   `json:"type"`

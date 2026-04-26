@@ -54,6 +54,8 @@ type VecCandidate struct {
 	Kind       string
 	Status     string
 	Importance float64
+	Confidence float64
+	ExpiresAt  int64
 	UseCount   int
 	LastUsedAt int64
 }
@@ -89,6 +91,8 @@ func VectorSearch(ctx context.Context, d *db.DB, sessionKey string, queryVec []f
 			Kind:       row.Kind,
 			Status:     row.Status,
 			Importance: row.Importance,
+			Confidence: row.Confidence,
+			ExpiresAt:  row.ExpiresAt,
 			UseCount:   row.UseCount,
 			LastUsedAt: row.LastUsedAt,
 		})

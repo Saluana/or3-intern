@@ -36,7 +36,9 @@ If you prefer not to install anything yet, every example below also works with `
 or3-intern setup
 ```
 
-`setup` is the recommended first-run flow. It writes provider and runtime settings to `~/.or3-intern/config.json`, asks where you are using OR3, and lets you choose a safety mode before saving.
+`setup` is the first-run flow. If you run `or3-intern`, `or3-intern chat`, or another command before a config file exists, OR3 starts this setup automatically and then continues with the command you asked for.
+
+Setup writes provider and runtime settings to `~/.or3-intern/config.json`, explains each choice in plain language, asks where you are using OR3, and lets you choose a safety mode before saving.
 
 The setup review summarizes:
 

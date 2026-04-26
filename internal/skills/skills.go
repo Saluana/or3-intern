@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -985,7 +986,7 @@ func (inv Inventory) ResolveBundlePath(name, relPath string) (string, error) {
 
 func LoadBody(path string, maxBytes int) (string, error) {
 	if maxBytes <= 0 {
-		maxBytes = 200000
+		maxBytes = 6000
 	}
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -994,7 +995,12 @@ func LoadBody(path string, maxBytes int) (string, error) {
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return "", fs.ErrPermission
 	}
-	b, err := os.ReadFile(path)
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, int64(maxBytes)+1))
 	if err != nil {
 		return "", err
 	}

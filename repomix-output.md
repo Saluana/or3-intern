@@ -92,11 +92,13 @@ internal/
   agent/
     job_registry.go
     noop_streamer.go
+    prompt_budget.go
     prompt.go
     runtime.go
     service_runtime_context.go
     structured_autonomy.go
     subagents.go
+    task_card.go
     tool_policy.go
   app/
     service_app.go
@@ -141,6 +143,7 @@ internal/
     db.go
     security.go
     store.go
+    task_state.go
   doctor/
     engine.go
     fix.go
@@ -209,6 +212,29 @@ string
 ````markdown
 # cron
 Use the `cron` tool to add/list/remove/run/status scheduled jobs.
+````
+
+## File: internal/agent/noop_streamer.go
+````go
+package agent
+
+import (
+	"context"
+
+	"or3-intern/internal/channels"
+)
+
+type NullStreamer struct{}
+
+type nullStreamWriter struct{}
+
+func (NullStreamer) BeginStream(context.Context, string, map[string]any) (channels.StreamWriter, error) {
+	return nullStreamWriter{}, nil
+}
+
+func (nullStreamWriter) WriteDelta(context.Context, string) error { return nil }
+func (nullStreamWriter) Close(context.Context, string) error      { return nil }
+func (nullStreamWriter) Abort(context.Context) error              { return nil }
 ````
 
 ## File: internal/agent/structured_autonomy.go
@@ -1515,6 +1541,108 @@ func stringSlice(raw any) ([]string, error) {
 	default:
 		return nil, fmt.Errorf("media must be an array of strings")
 	}
+}
+````
+
+## File: internal/tools/registry.go
+````go
+package tools
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"sort"
+	"strings"
+)
+
+type Registry struct {
+	tools map[string]Tool
+}
+
+func NewRegistry() *Registry {
+	return &Registry{tools: map[string]Tool{}}
+}
+
+func (r *Registry) Register(t Tool)      { r.tools[t.Name()] = t }
+func (r *Registry) Get(name string) Tool { return r.tools[name] }
+func (r *Registry) Names() []string {
+	out := make([]string, 0, len(r.tools))
+	for k := range r.tools {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (r *Registry) Definitions() []map[string]any {
+	names := r.Names()
+	out := make([]map[string]any, 0, len(names))
+	for _, name := range names {
+		out = append(out, r.tools[name].Schema())
+	}
+	return out
+}
+
+func (r *Registry) CloneFiltered(allowed []string) *Registry {
+	if r == nil {
+		return NewRegistry()
+	}
+	if len(allowed) == 0 {
+		clone := NewRegistry()
+		for _, name := range r.Names() {
+			clone.Register(r.tools[name])
+		}
+		return clone
+	}
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, name := range allowed {
+		trimmed := strings.TrimSpace(name)
+		if trimmed == "" {
+			continue
+		}
+		allowedSet[trimmed] = struct{}{}
+	}
+	clone := NewRegistry()
+	for _, name := range r.Names() {
+		if _, ok := allowedSet[name]; !ok {
+			continue
+		}
+		clone.Register(r.tools[name])
+	}
+	return clone
+}
+
+func (r *Registry) Execute(ctx context.Context, name string, argsJSON string) (string, error) {
+	t := r.tools[name]
+	if t == nil {
+		return "", fmt.Errorf("tool '%s' not found", name)
+	}
+	var params map[string]any
+	if argsJSON == "" {
+		params = map[string]any{}
+	} else {
+		if err := json.Unmarshal([]byte(argsJSON), &params); err != nil {
+			return "", fmt.Errorf("invalid tool args: %w", err)
+		}
+	}
+	return r.ExecuteParams(ctx, name, params)
+}
+
+func (r *Registry) ExecuteParams(ctx context.Context, name string, params map[string]any) (string, error) {
+	t := r.tools[name]
+	if t == nil {
+		return "", fmt.Errorf("tool '%s' not found", name)
+	}
+	if params == nil {
+		params = map[string]any{}
+	}
+	if guard := ToolGuardFromContext(ctx); guard != nil {
+		if err := guard(ctx, t, ToolCapability(t, params), params); err != nil {
+			return "", err
+		}
+	}
+	return t.Execute(ctx, params)
 }
 ````
 
@@ -3214,27 +3342,535 @@ func isTerminalFile(file *os.File) bool {
 }
 ````
 
-## File: internal/agent/noop_streamer.go
+## File: internal/agent/job_registry.go
 ````go
 package agent
 
 import (
 	"context"
-
-	"or3-intern/internal/channels"
+	"crypto/rand"
+	"encoding/hex"
+	"sync"
+	"time"
 )
 
-type NullStreamer struct{}
+const (
+	defaultJobRetention   = 2 * time.Minute
+	defaultMaxTrackedJobs = 256
+	defaultMaxJobEvents   = 256
+	jobSubscriberBuffer   = 128
+)
 
-type nullStreamWriter struct{}
-
-func (NullStreamer) BeginStream(context.Context, string, map[string]any) (channels.StreamWriter, error) {
-	return nullStreamWriter{}, nil
+type JobEvent struct {
+	Sequence int64          `json:"sequence"`
+	Type     string         `json:"type"`
+	Data     map[string]any `json:"data"`
 }
 
-func (nullStreamWriter) WriteDelta(context.Context, string) error { return nil }
-func (nullStreamWriter) Close(context.Context, string) error      { return nil }
-func (nullStreamWriter) Abort(context.Context) error              { return nil }
+type JobSnapshot struct {
+	ID        string     `json:"id"`
+	Kind      string     `json:"kind"`
+	Status    string     `json:"status"`
+	Events    []JobEvent `json:"events"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
+}
+
+type JobRegistry struct {
+	mu         sync.Mutex
+	jobs       map[string]*jobEntry
+	retention  time.Duration
+	maxTracked int
+	maxEvents  int
+}
+
+type jobEntry struct {
+	id          string
+	kind        string
+	status      string
+	events      []JobEvent
+	subscribers map[int]chan JobEvent
+	nextSubID   int
+	nextSeq     int64
+	cancel      context.CancelFunc
+	done        chan struct{}
+	terminal    bool
+	createdAt   time.Time
+	updatedAt   time.Time
+}
+
+type JobObserver struct {
+	registry *JobRegistry
+	jobID    string
+}
+
+func NewJobRegistry(retention time.Duration, maxTracked int) *JobRegistry {
+	if retention <= 0 {
+		retention = defaultJobRetention
+	}
+	if maxTracked <= 0 {
+		maxTracked = defaultMaxTrackedJobs
+	}
+	return &JobRegistry{
+		jobs:       map[string]*jobEntry{},
+		retention:  retention,
+		maxTracked: maxTracked,
+		maxEvents:  defaultMaxJobEvents,
+	}
+}
+
+func (r *JobRegistry) Register(kind string) JobSnapshot {
+	return r.RegisterWithID(newServiceJobID(), kind)
+}
+
+func (r *JobRegistry) RegisterWithID(id string, kind string) JobSnapshot {
+	now := time.Now()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.cleanupLocked(now)
+	entry := &jobEntry{
+		id:          id,
+		kind:        kind,
+		status:      "queued",
+		subscribers: map[int]chan JobEvent{},
+		done:        make(chan struct{}),
+		createdAt:   now,
+		updatedAt:   now,
+	}
+	r.jobs[id] = entry
+	return snapshotForEntry(entry)
+}
+
+func (r *JobRegistry) AttachCancel(id string, cancel context.CancelFunc) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entry := r.jobs[id]
+	if entry == nil {
+		return false
+	}
+	entry.cancel = cancel
+	entry.updatedAt = time.Now()
+	return true
+}
+
+func (r *JobRegistry) Cancel(id string) bool {
+	r.mu.Lock()
+	entry := r.jobs[id]
+	if entry == nil {
+		r.mu.Unlock()
+		return false
+	}
+	cancel := entry.cancel
+	r.mu.Unlock()
+	if cancel == nil {
+		return false
+	}
+	cancel()
+	return true
+}
+
+func (r *JobRegistry) Publish(id string, eventType string, data map[string]any) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entry := r.jobs[id]
+	if entry == nil {
+		return false
+	}
+	if data == nil {
+		data = map[string]any{}
+	}
+	if _, ok := data["job_id"]; !ok {
+		data["job_id"] = id
+	}
+	now := time.Now()
+	entry.updatedAt = now
+	if status, ok := data["status"].(string); ok && status != "" {
+		entry.status = status
+	}
+	entry.nextSeq++
+	event := JobEvent{Sequence: entry.nextSeq, Type: eventType, Data: cloneEventData(data)}
+	entry.events = append(entry.events, event)
+	if r.maxEvents > 0 && len(entry.events) > r.maxEvents {
+		entry.events = append([]JobEvent(nil), entry.events[len(entry.events)-r.maxEvents:]...)
+	}
+	for _, ch := range entry.subscribers {
+		select {
+		case ch <- event:
+		default:
+		}
+	}
+	return true
+}
+
+func (r *JobRegistry) Complete(id string, status string, data map[string]any) bool {
+	if data == nil {
+		data = map[string]any{}
+	}
+	if status == "" {
+		status = "completed"
+	}
+	data["status"] = status
+	if !r.Publish(id, "completion", data) {
+		return false
+	}
+	r.markTerminal(id, status)
+	return true
+}
+
+func (r *JobRegistry) Fail(id string, message string, data map[string]any) bool {
+	if data == nil {
+		data = map[string]any{}
+	}
+	if message != "" {
+		data["message"] = message
+	}
+	data["status"] = "failed"
+	if !r.Publish(id, "error", data) {
+		return false
+	}
+	r.markTerminal(id, "failed")
+	return true
+}
+
+func (r *JobRegistry) markTerminal(id string, status string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entry := r.jobs[id]
+	if entry == nil || entry.terminal {
+		return
+	}
+	entry.status = status
+	entry.terminal = true
+	entry.updatedAt = time.Now()
+	close(entry.done)
+	for subID, ch := range entry.subscribers {
+		close(ch)
+		delete(entry.subscribers, subID)
+	}
+}
+
+func (r *JobRegistry) Subscribe(id string) (JobSnapshot, <-chan JobEvent, func(), bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entry := r.jobs[id]
+	if entry == nil {
+		return JobSnapshot{}, nil, nil, false
+	}
+	snapshot := snapshotForEntry(entry)
+	if entry.terminal {
+		ch := make(chan JobEvent)
+		close(ch)
+		return snapshot, ch, func() {}, true
+	}
+	entry.nextSubID++
+	subID := entry.nextSubID
+	ch := make(chan JobEvent, jobSubscriberBuffer)
+	entry.subscribers[subID] = ch
+	unsubscribe := func() {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		current := r.jobs[id]
+		if current == nil {
+			return
+		}
+		sub, ok := current.subscribers[subID]
+		if !ok {
+			return
+		}
+		close(sub)
+		delete(current.subscribers, subID)
+	}
+	return snapshot, ch, unsubscribe, true
+}
+
+func (r *JobRegistry) Snapshot(id string) (JobSnapshot, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entry := r.jobs[id]
+	if entry == nil {
+		return JobSnapshot{}, false
+	}
+	return snapshotForEntry(entry), true
+}
+
+func (r *JobRegistry) Wait(ctx context.Context, id string) (JobSnapshot, bool) {
+	r.mu.Lock()
+	entry := r.jobs[id]
+	if entry == nil {
+		r.mu.Unlock()
+		return JobSnapshot{}, false
+	}
+	done := entry.done
+	terminal := entry.terminal
+	r.mu.Unlock()
+	if !terminal {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return JobSnapshot{}, false
+		}
+	}
+	return r.Snapshot(id)
+}
+
+func (r *JobRegistry) Observer(jobID string) ConversationObserver {
+	return JobObserver{registry: r, jobID: jobID}
+}
+
+func (o JobObserver) OnTextDelta(_ context.Context, text string) {
+	if o.registry == nil || text == "" {
+		return
+	}
+	o.registry.Publish(o.jobID, "text_delta", map[string]any{"content": text})
+}
+
+func (o JobObserver) OnToolCall(_ context.Context, name string, arguments string) {
+	if o.registry == nil {
+		return
+	}
+	o.registry.Publish(o.jobID, "tool_call", map[string]any{"name": name, "arguments": arguments})
+}
+
+func (o JobObserver) OnToolResult(_ context.Context, name string, result string, err error) {
+	if o.registry == nil {
+		return
+	}
+	data := map[string]any{"name": name, "result": result}
+	if err != nil {
+		data["error"] = err.Error()
+	}
+	o.registry.Publish(o.jobID, "tool_result", data)
+}
+
+func (o JobObserver) OnCompletion(_ context.Context, finalText string, streamed bool) {
+	if o.registry == nil {
+		return
+	}
+	o.registry.Publish(o.jobID, "assistant", map[string]any{"content": finalText, "streamed": streamed})
+}
+
+func (o JobObserver) OnError(_ context.Context, err error) {
+	if o.registry == nil || err == nil {
+		return
+	}
+	o.registry.Publish(o.jobID, "runtime_error", map[string]any{"message": err.Error()})
+}
+
+func (r *JobRegistry) cleanupLocked(now time.Time) {
+	for id, entry := range r.jobs {
+		if entry == nil {
+			delete(r.jobs, id)
+			continue
+		}
+		if entry.terminal && now.Sub(entry.updatedAt) > r.retention {
+			delete(r.jobs, id)
+		}
+	}
+	for len(r.jobs) > r.maxTracked {
+		oldestID := ""
+		var oldest time.Time
+		for id, entry := range r.jobs {
+			if entry == nil || !entry.terminal {
+				continue
+			}
+			if oldestID == "" || entry.updatedAt.Before(oldest) {
+				oldestID = id
+				oldest = entry.updatedAt
+			}
+		}
+		if oldestID == "" {
+			break
+		}
+		delete(r.jobs, oldestID)
+	}
+}
+
+func snapshotForEntry(entry *jobEntry) JobSnapshot {
+	events := make([]JobEvent, len(entry.events))
+	for i, event := range entry.events {
+		events[i] = JobEvent{
+			Sequence: event.Sequence,
+			Type:     event.Type,
+			Data:     cloneEventData(event.Data),
+		}
+	}
+	return JobSnapshot{
+		ID:        entry.id,
+		Kind:      entry.kind,
+		Status:    entry.status,
+		Events:    events,
+		CreatedAt: entry.createdAt,
+		UpdatedAt: entry.updatedAt,
+	}
+}
+
+func cloneEventData(in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return map[string]any{}
+	}
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func newServiceJobID() string {
+	var raw [12]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "svc-job"
+	}
+	return "svc-" + hex.EncodeToString(raw[:])
+}
+````
+
+## File: internal/agent/task_card.go
+````go
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+
+	"or3-intern/internal/db"
+)
+
+type TaskCard struct {
+	Goal          string   `json:"goal"`
+	Plan          []string `json:"plan"`
+	Constraints   []string `json:"constraints"`
+	Decisions     []string `json:"decisions"`
+	OpenQuestions []string `json:"open_questions"`
+	MessageRefs   []int64  `json:"message_refs"`
+	MemoryRefs    []int64  `json:"memory_refs"`
+	ArtifactRefs  []string `json:"artifact_refs"`
+	ActiveFiles   []string `json:"active_files"`
+	Status        string   `json:"status"`
+}
+
+func loadTaskCard(ctx context.Context, d *db.DB, sessionKey string) (TaskCard, bool, error) {
+	if d == nil || strings.TrimSpace(sessionKey) == "" {
+		return TaskCard{}, false, nil
+	}
+	row, ok, err := d.GetActiveTaskState(ctx, sessionKey)
+	if err != nil || !ok {
+		return TaskCard{}, false, err
+	}
+	var card TaskCard
+	card.Goal = row.Goal
+	card.Status = row.Status
+	_ = json.Unmarshal([]byte(row.PlanJSON), &card.Plan)
+	_ = json.Unmarshal([]byte(row.ConstraintsJSON), &card.Constraints)
+	_ = json.Unmarshal([]byte(row.DecisionsJSON), &card.Decisions)
+	_ = json.Unmarshal([]byte(row.OpenQuestionsJSON), &card.OpenQuestions)
+	_ = json.Unmarshal([]byte(row.MessageRefsJSON), &card.MessageRefs)
+	_ = json.Unmarshal([]byte(row.MemoryRefsJSON), &card.MemoryRefs)
+	_ = json.Unmarshal([]byte(row.ArtifactRefsJSON), &card.ArtifactRefs)
+	_ = json.Unmarshal([]byte(row.ActiveFilesJSON), &card.ActiveFiles)
+	return card, true, nil
+}
+
+func saveTaskCard(ctx context.Context, d *db.DB, sessionKey, scopeKey string, card TaskCard) error {
+	if d == nil || strings.TrimSpace(sessionKey) == "" {
+		return nil
+	}
+	toJSON := func(v any) string {
+		b, _ := json.Marshal(v)
+		return string(b)
+	}
+	return d.UpsertActiveTaskState(ctx, db.TaskStateRow{
+		SessionKey:        sessionKey,
+		ScopeKey:          scopeKey,
+		Status:            statusOrDefault(card.Status),
+		Goal:              strings.TrimSpace(card.Goal),
+		PlanJSON:          toJSON(card.Plan),
+		ConstraintsJSON:   toJSON(card.Constraints),
+		DecisionsJSON:     toJSON(card.Decisions),
+		OpenQuestionsJSON: toJSON(card.OpenQuestions),
+		MessageRefsJSON:   toJSON(card.MessageRefs),
+		MemoryRefsJSON:    toJSON(card.MemoryRefs),
+		ArtifactRefsJSON:  toJSON(card.ArtifactRefs),
+		ActiveFilesJSON:   toJSON(card.ActiveFiles),
+		MetadataJSON:      "{}",
+	})
+}
+
+func statusOrDefault(status string) string {
+	status = strings.TrimSpace(status)
+	if status == "" {
+		return "active"
+	}
+	return status
+}
+
+func renderTaskCard(card TaskCard, maxChars int) string {
+	var b strings.Builder
+	if strings.TrimSpace(card.Goal) != "" {
+		b.WriteString("Goal: ")
+		b.WriteString(strings.TrimSpace(card.Goal))
+		b.WriteString("\n")
+	}
+	for _, v := range card.Constraints {
+		if strings.TrimSpace(v) == "" {
+			continue
+		}
+		b.WriteString("Constraint: ")
+		b.WriteString(strings.TrimSpace(v))
+		b.WriteString("\n")
+	}
+	for _, v := range card.Decisions {
+		if strings.TrimSpace(v) == "" {
+			continue
+		}
+		b.WriteString("Decision: ")
+		b.WriteString(strings.TrimSpace(v))
+		b.WriteString("\n")
+	}
+	for _, v := range card.OpenQuestions {
+		if strings.TrimSpace(v) == "" {
+			continue
+		}
+		b.WriteString("Open Question: ")
+		b.WriteString(strings.TrimSpace(v))
+		b.WriteString("\n")
+	}
+	if len(card.ArtifactRefs) > 0 {
+		b.WriteString(fmt.Sprintf("Refs: artifacts=%v\n", card.ArtifactRefs))
+	}
+	if len(card.ActiveFiles) > 0 {
+		b.WriteString(fmt.Sprintf("Refs: files=%v\n", card.ActiveFiles))
+	}
+	out := strings.TrimSpace(b.String())
+	if maxChars > 0 && len(out) > maxChars {
+		return strings.TrimSpace(out[:maxChars]) + "\n…[truncated]"
+	}
+	return out
+}
+
+func appendBoundedInt64(values []int64, id int64, max int) []int64 {
+	if id <= 0 {
+		return values
+	}
+	out := append(values, id)
+	if max > 0 && len(out) > max {
+		out = out[len(out)-max:]
+	}
+	return out
+}
+
+func appendBoundedString(values []string, value string, max int) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return values
+	}
+	out := append(values, value)
+	if max > 0 && len(out) > max {
+		out = out[len(out)-max:]
+	}
+	return out
+}
 ````
 
 ## File: internal/app/service_app.go
@@ -4749,6 +5385,126 @@ func urlEncode(s string) string {
 }
 ````
 
+## File: internal/db/task_state.go
+````go
+package db
+
+import (
+	"context"
+	"database/sql"
+)
+
+type TaskStateRow struct {
+	ID                int64
+	SessionKey        string
+	ScopeKey          string
+	Status            string
+	Goal              string
+	PlanJSON          string
+	ConstraintsJSON   string
+	DecisionsJSON     string
+	OpenQuestionsJSON string
+	MessageRefsJSON   string
+	MemoryRefsJSON    string
+	ArtifactRefsJSON  string
+	ActiveFilesJSON   string
+	MetadataJSON      string
+	CreatedAt         int64
+	UpdatedAt         int64
+}
+
+func (d *DB) UpsertActiveTaskState(ctx context.Context, row TaskStateRow) error {
+	now := NowMS()
+	if row.UpdatedAt <= 0 {
+		row.UpdatedAt = now
+	}
+	if row.CreatedAt <= 0 {
+		row.CreatedAt = now
+	}
+	_, err := d.SQL.ExecContext(ctx, `
+INSERT INTO task_state(
+	session_key, scope_key, status, goal, plan_json, constraints_json, decisions_json,
+	open_questions_json, message_refs_json, memory_refs_json, artifact_refs_json, active_files_json,
+	metadata_json, created_at, updated_at
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+ON CONFLICT(id) DO UPDATE SET
+	goal=excluded.goal,
+	plan_json=excluded.plan_json,
+	constraints_json=excluded.constraints_json,
+	decisions_json=excluded.decisions_json,
+	open_questions_json=excluded.open_questions_json,
+	message_refs_json=excluded.message_refs_json,
+	memory_refs_json=excluded.memory_refs_json,
+	artifact_refs_json=excluded.artifact_refs_json,
+	active_files_json=excluded.active_files_json,
+	metadata_json=excluded.metadata_json,
+	status=excluded.status,
+	scope_key=excluded.scope_key,
+	updated_at=excluded.updated_at`,
+		row.SessionKey, row.ScopeKey, row.Status, row.Goal, row.PlanJSON, row.ConstraintsJSON, row.DecisionsJSON,
+		row.OpenQuestionsJSON, row.MessageRefsJSON, row.MemoryRefsJSON, row.ArtifactRefsJSON, row.ActiveFilesJSON,
+		row.MetadataJSON, row.CreatedAt, row.UpdatedAt)
+	if err == nil {
+		return nil
+	}
+	// Fallback upsert by logical key (session,status=active) when no id is present.
+	_, err = d.SQL.ExecContext(ctx, `
+INSERT INTO task_state(
+	session_key, scope_key, status, goal, plan_json, constraints_json, decisions_json,
+	open_questions_json, message_refs_json, memory_refs_json, artifact_refs_json, active_files_json,
+	metadata_json, created_at, updated_at
+)
+SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+WHERE NOT EXISTS (SELECT 1 FROM task_state WHERE session_key=? AND status='active')`,
+		row.SessionKey, row.ScopeKey, row.Status, row.Goal, row.PlanJSON, row.ConstraintsJSON, row.DecisionsJSON,
+		row.OpenQuestionsJSON, row.MessageRefsJSON, row.MemoryRefsJSON, row.ArtifactRefsJSON, row.ActiveFilesJSON,
+		row.MetadataJSON, row.CreatedAt, row.UpdatedAt,
+		row.SessionKey)
+	if err != nil {
+		return err
+	}
+	_, err = d.SQL.ExecContext(ctx, `
+UPDATE task_state SET
+	scope_key=?, goal=?, plan_json=?, constraints_json=?, decisions_json=?, open_questions_json=?,
+	message_refs_json=?, memory_refs_json=?, artifact_refs_json=?, active_files_json=?, metadata_json=?, updated_at=?
+WHERE session_key=? AND status='active'`,
+		row.ScopeKey, row.Goal, row.PlanJSON, row.ConstraintsJSON, row.DecisionsJSON, row.OpenQuestionsJSON,
+		row.MessageRefsJSON, row.MemoryRefsJSON, row.ArtifactRefsJSON, row.ActiveFilesJSON, row.MetadataJSON, row.UpdatedAt,
+		row.SessionKey)
+	return err
+}
+
+func (d *DB) GetActiveTaskState(ctx context.Context, sessionKey string) (TaskStateRow, bool, error) {
+	var row TaskStateRow
+	err := d.SQL.QueryRowContext(ctx, `
+SELECT id, session_key, scope_key, status, goal, plan_json, constraints_json, decisions_json,
+	open_questions_json, message_refs_json, memory_refs_json, artifact_refs_json, active_files_json,
+	metadata_json, created_at, updated_at
+FROM task_state
+WHERE session_key=? AND status='active'
+ORDER BY updated_at DESC
+LIMIT 1`, sessionKey).Scan(
+		&row.ID, &row.SessionKey, &row.ScopeKey, &row.Status, &row.Goal, &row.PlanJSON, &row.ConstraintsJSON, &row.DecisionsJSON,
+		&row.OpenQuestionsJSON, &row.MessageRefsJSON, &row.MemoryRefsJSON, &row.ArtifactRefsJSON, &row.ActiveFilesJSON,
+		&row.MetadataJSON, &row.CreatedAt, &row.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return TaskStateRow{}, false, nil
+	}
+	if err != nil {
+		return TaskStateRow{}, false, err
+	}
+	return row, true, nil
+}
+
+func (d *DB) CompleteActiveTaskState(ctx context.Context, sessionKey string) error {
+	_, err := d.SQL.ExecContext(ctx,
+		`UPDATE task_state SET status='completed', updated_at=? WHERE session_key=? AND status='active'`,
+		NowMS(), sessionKey)
+	return err
+}
+````
+
 ## File: internal/heartbeat/service.go
 ````go
 // Package heartbeat publishes recurring review events derived from a tasks file.
@@ -6173,108 +6929,6 @@ func compactMemoryText(text string, maxChars int) string {
 }
 ````
 
-## File: internal/tools/registry.go
-````go
-package tools
-
-import (
-	"context"
-	"encoding/json"
-	"fmt"
-	"sort"
-	"strings"
-)
-
-type Registry struct {
-	tools map[string]Tool
-}
-
-func NewRegistry() *Registry {
-	return &Registry{tools: map[string]Tool{}}
-}
-
-func (r *Registry) Register(t Tool)      { r.tools[t.Name()] = t }
-func (r *Registry) Get(name string) Tool { return r.tools[name] }
-func (r *Registry) Names() []string {
-	out := make([]string, 0, len(r.tools))
-	for k := range r.tools {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
-
-func (r *Registry) Definitions() []map[string]any {
-	names := r.Names()
-	out := make([]map[string]any, 0, len(names))
-	for _, name := range names {
-		out = append(out, r.tools[name].Schema())
-	}
-	return out
-}
-
-func (r *Registry) CloneFiltered(allowed []string) *Registry {
-	if r == nil {
-		return NewRegistry()
-	}
-	if len(allowed) == 0 {
-		clone := NewRegistry()
-		for _, name := range r.Names() {
-			clone.Register(r.tools[name])
-		}
-		return clone
-	}
-	allowedSet := make(map[string]struct{}, len(allowed))
-	for _, name := range allowed {
-		trimmed := strings.TrimSpace(name)
-		if trimmed == "" {
-			continue
-		}
-		allowedSet[trimmed] = struct{}{}
-	}
-	clone := NewRegistry()
-	for _, name := range r.Names() {
-		if _, ok := allowedSet[name]; !ok {
-			continue
-		}
-		clone.Register(r.tools[name])
-	}
-	return clone
-}
-
-func (r *Registry) Execute(ctx context.Context, name string, argsJSON string) (string, error) {
-	t := r.tools[name]
-	if t == nil {
-		return "", fmt.Errorf("tool '%s' not found", name)
-	}
-	var params map[string]any
-	if argsJSON == "" {
-		params = map[string]any{}
-	} else {
-		if err := json.Unmarshal([]byte(argsJSON), &params); err != nil {
-			return "", fmt.Errorf("invalid tool args: %w", err)
-		}
-	}
-	return r.ExecuteParams(ctx, name, params)
-}
-
-func (r *Registry) ExecuteParams(ctx context.Context, name string, params map[string]any) (string, error) {
-	t := r.tools[name]
-	if t == nil {
-		return "", fmt.Errorf("tool '%s' not found", name)
-	}
-	if params == nil {
-		params = map[string]any{}
-	}
-	if guard := ToolGuardFromContext(ctx); guard != nil {
-		if err := guard(ctx, t, ToolCapability(t, params), params); err != nil {
-			return "", err
-		}
-	}
-	return t.Execute(ctx, params)
-}
-````
-
 ## File: internal/triggers/triggers.go
 ````go
 // Package triggers defines shared metadata for webhook and filewatch events.
@@ -7387,6 +8041,530 @@ func printSetupReview(out io.Writer, status uxstate.StatusView) {
 		}
 		fmt.Fprintf(out, "- %s\n", uxcopy.SafetyModeSummary(inferenceMode))
 	}
+}
+````
+
+## File: internal/agent/prompt_budget.go
+````go
+package agent
+
+import (
+	"fmt"
+	"strings"
+
+	"or3-intern/internal/providers"
+)
+
+// BudgetReport contains deterministic prompt sizing diagnostics.
+type BudgetReport struct {
+	EstimatedInputTokens int
+	SystemTokens         int
+	HistoryTokens        int
+	OutputReserveTokens  int
+	MaxInputTokens       int
+	BudgetUsedPercent    float64
+	Pressure             string
+	Sections             []SectionUsage
+	Pruned               []PruneEvent
+	Rejected             []string
+}
+
+type ContextRef struct {
+	Kind string
+	ID   string
+}
+
+type ContextSnippet struct {
+	Text   string
+	Score  float64
+	Reason string
+	Ref    ContextRef
+}
+
+type ContextSection struct {
+	Name      string
+	Text      string
+	Protected bool
+	Required  bool
+	TokenCap  int
+	MinTokens int
+	Snippets  []ContextSnippet
+}
+
+type ContextPacket struct {
+	StableSections   []ContextSection
+	VolatileSections []ContextSection
+	RecentHistory    []providers.ChatMessage
+	OutputReserve    int
+	MaxInputTokens   int
+	SafetyMargin     int
+	Budget           BudgetReport
+}
+
+type SectionUsage struct {
+	Name            string
+	EstimatedTokens int
+	LimitTokens     int
+	Protected       bool
+	Truncated       bool
+}
+
+type PruneEvent struct {
+	Section     string
+	Reason      string
+	TokensSaved int
+	Ref         ContextRef
+}
+
+type ContextSectionBudgets struct {
+	SystemCore       int
+	SoulIdentity     int
+	ToolPolicy       int
+	ActiveTaskCard   int
+	PinnedMemory     int
+	MemoryDigest     int
+	RecentHistory    int
+	RetrievedMemory  int
+	WorkspaceContext int
+	ToolSchemas      int
+}
+
+const (
+	defaultContextMaxInputTokens      = 16000
+	defaultContextOutputReserveTokens = 1200
+	defaultContextSafetyMarginTokens  = 400
+)
+
+func estimatePromptBudget(system, history []providers.ChatMessage) BudgetReport {
+	systemTokens := estimateMessagesTokens(system)
+	historyTokens := estimateMessagesTokens(history)
+	return BudgetReport{
+		EstimatedInputTokens: systemTokens + historyTokens,
+		SystemTokens:         systemTokens,
+		HistoryTokens:        historyTokens,
+		Pressure:             pressureState(systemTokens + historyTokens),
+	}
+}
+
+func pressureState(tokens int) string {
+	switch {
+	case tokens >= 12000:
+		return "emergency"
+	case tokens >= 9000:
+		return "high"
+	case tokens >= 7000:
+		return "warning"
+	default:
+		return "normal"
+	}
+}
+
+func pressureStateForBudget(used, max int) string {
+	if max <= 0 {
+		return pressureState(used)
+	}
+	pct := used * 100 / max
+	switch {
+	case pct >= 95:
+		return "emergency"
+	case pct >= 85:
+		return "high"
+	case pct >= 70:
+		return "warning"
+	default:
+		return "normal"
+	}
+}
+
+func (b *Builder) buildContextPacket(pinnedText, digestText, memText, identityText, staticMemoryText, heartbeatText, structuredContextText, docContextText, workspaceContextText string) ContextPacket {
+	budgets := b.contextSectionBudgets()
+	maxEach := b.BootstrapMaxChars
+	if maxEach <= 0 {
+		maxEach = defaultBootstrapMaxChars
+	}
+	skillsMax := b.SkillsSummaryMax
+	if skillsMax <= 0 {
+		skillsMax = defaultSkillsSummaryMax
+	}
+
+	soul := strings.TrimSpace(b.Soul)
+	if soul == "" {
+		soul = DefaultSoul
+	}
+	inst := strings.TrimSpace(b.AgentInstructions)
+	if inst == "" {
+		inst = DefaultAgentInstructions
+	}
+	notes := strings.TrimSpace(b.ToolNotes)
+	if notes == "" {
+		notes = DefaultToolNotes
+	}
+
+	packet := ContextPacket{
+		MaxInputTokens: b.contextMaxInputTokens(),
+		OutputReserve:  b.contextOutputReserveTokens(),
+		SafetyMargin:   b.contextSafetyMarginTokens(),
+	}
+	packet.StableSections = append(packet.StableSections,
+		budgetSection("SOUL.md", soul, true, budgets.SoulIdentity, minProtectedTokens(budgets.SoulIdentity), maxEach),
+	)
+	if t := strings.TrimSpace(identityText); t != "" {
+		packet.StableSections = append(packet.StableSections, budgetSection("Identity", t, true, budgets.SoulIdentity, minProtectedTokens(budgets.SoulIdentity), maxEach))
+	}
+	packet.StableSections = append(packet.StableSections,
+		budgetSection("AGENTS.md", inst, true, budgets.SoulIdentity, minProtectedTokens(budgets.SoulIdentity), maxEach),
+	)
+	if t := strings.TrimSpace(staticMemoryText); t != "" {
+		packet.StableSections = append(packet.StableSections, budgetSection("Static Memory", t, false, 0, 0, maxEach))
+	}
+	packet.StableSections = append(packet.StableSections,
+		budgetSection("TOOLS.md", notes, true, budgets.ToolPolicy, minProtectedTokens(budgets.ToolPolicy), maxEach),
+		budgetSection("Pinned Memory", pinnedText, true, budgets.PinnedMemory, minProtectedTokens(budgets.PinnedMemory), maxEach),
+	)
+	if t := strings.TrimSpace(digestText); t != "" {
+		packet.StableSections = append(packet.StableSections, budgetSection("Memory Digest", t, false, budgets.MemoryDigest, 0, maxEach))
+	}
+	packet.StableSections = append(packet.StableSections, budgetSection("Retrieved Memory", memText, false, budgets.RetrievedMemory, 0, maxEach))
+	if t := strings.TrimSpace(workspaceContextText); t != "" {
+		packet.StableSections = append(packet.StableSections, budgetSection("Workspace Context", t, false, budgets.WorkspaceContext, 0, maxEach))
+	}
+	if t := strings.TrimSpace(docContextText); t != "" {
+		packet.StableSections = append(packet.StableSections, budgetSection("Indexed File Context", t, false, budgets.WorkspaceContext, 0, maxEach))
+	}
+	packet.StableSections = append(packet.StableSections, budgetSection("Skills Inventory", b.Skills.ModelSummary(skillsMax), false, budgets.ToolSchemas, 0, maxEach))
+
+	if t := strings.TrimSpace(heartbeatText); t != "" {
+		packet.VolatileSections = append(packet.VolatileSections, budgetSection("Heartbeat", t, false, 0, 0, maxEach))
+	}
+	if t := strings.TrimSpace(structuredContextText); t != "" {
+		protected := strings.Contains(t, "active_task_card:")
+		packet.VolatileSections = append(packet.VolatileSections, budgetSection("Structured Trigger Context", t, protected, budgets.ActiveTaskCard, minProtectedTokens(budgets.ActiveTaskCard), maxEach))
+	}
+	return packet
+}
+
+func (b *Builder) contextMaxInputTokens() int {
+	if b != nil && b.ContextMaxInputTokens > 0 {
+		return b.ContextMaxInputTokens
+	}
+	return defaultContextMaxInputTokens
+}
+
+func (b *Builder) contextOutputReserveTokens() int {
+	if b != nil && b.ContextOutputReserveTokens > 0 {
+		return b.ContextOutputReserveTokens
+	}
+	return defaultContextOutputReserveTokens
+}
+
+func (b *Builder) contextSafetyMarginTokens() int {
+	if b != nil && b.ContextSafetyMarginTokens > 0 {
+		return b.ContextSafetyMarginTokens
+	}
+	return defaultContextSafetyMarginTokens
+}
+
+func (b *Builder) contextSectionBudgets() ContextSectionBudgets {
+	if b == nil {
+		return ContextSectionBudgets{}
+	}
+	return b.ContextSectionBudgets
+}
+
+func minProtectedTokens(cap int) int {
+	if cap <= 0 {
+		return 1
+	}
+	if cap < 64 {
+		return cap
+	}
+	return cap / 4
+}
+
+func budgetSection(name, text string, protected bool, tokenCap, minTokens, maxChars int) ContextSection {
+	text = strings.TrimSpace(text)
+	section := ContextSection{Name: name, Text: text, Protected: protected, Required: protected, TokenCap: tokenCap, MinTokens: minTokens}
+	if tokenCap <= 0 || text == "" {
+		return section
+	}
+	limit := tokenCap
+	if protected && minTokens > limit {
+		limit = minTokens
+	}
+	section.Text = truncateTextToTokens(truncateText(text, maxChars), limit)
+	return section
+}
+
+func truncateTextToTokens(text string, maxTokens int) string {
+	text = strings.TrimSpace(text)
+	if maxTokens <= 0 || estimateTextTokens(text) <= maxTokens {
+		return text
+	}
+	maxChars := maxTokens * 4
+	if maxChars <= 0 || maxChars >= len(text) {
+		return text
+	}
+	return strings.TrimSpace(text[:maxChars]) + "\n...[truncated]"
+}
+
+func renderStablePrefix(p ContextPacket) string {
+	var out strings.Builder
+	out.WriteString("# System Prompt\n")
+	for _, s := range p.StableSections {
+		out.WriteString("\n## ")
+		out.WriteString(s.Name)
+		out.WriteString("\n")
+		out.WriteString(strings.TrimSpace(s.Text))
+		out.WriteString("\n")
+	}
+	return strings.TrimSpace(out.String())
+}
+
+func renderVolatileSuffix(p ContextPacket) string {
+	var out strings.Builder
+	for _, s := range p.VolatileSections {
+		out.WriteString("## ")
+		out.WriteString(s.Name)
+		out.WriteString("\n")
+		out.WriteString(strings.TrimSpace(s.Text))
+		out.WriteString("\n\n")
+	}
+	return strings.TrimSpace(out.String())
+}
+
+func renderProviderMessages(p ContextPacket, b *Builder) []providers.ChatMessage {
+	stable := renderStablePrefix(p)
+	volatile := renderVolatileSuffix(p)
+	var content any
+	if b != nil && b.Provider != nil && b.Provider.SupportsExplicitPromptCache() {
+		content = providers.BuildCacheAwareSystemContent(stable, volatile)
+	} else if strings.TrimSpace(volatile) == "" {
+		content = stable
+	} else {
+		content = strings.TrimSpace(stable + "\n\n" + volatile)
+	}
+	return []providers.ChatMessage{{Role: "system", Content: content}}
+}
+
+func estimatePacketBudget(packet ContextPacket, b *Builder) BudgetReport {
+	sys := renderProviderMessages(packet, b)
+	systemTokens := estimateMessagesTokens(sys)
+	historyTokens := estimateMessagesTokens(packet.RecentHistory)
+	used := systemTokens + historyTokens
+	maxInput := packet.MaxInputTokens
+	if maxInput <= 0 {
+		maxInput = defaultContextMaxInputTokens
+	}
+	outputReserve := packet.OutputReserve
+	if outputReserve <= 0 {
+		outputReserve = defaultContextOutputReserveTokens
+	}
+	usable := maxInput - outputReserve - packet.SafetyMargin
+	if usable <= 0 {
+		usable = maxInput
+	}
+	report := BudgetReport{
+		EstimatedInputTokens: used,
+		SystemTokens:         systemTokens,
+		HistoryTokens:        historyTokens,
+		OutputReserveTokens:  outputReserve,
+		MaxInputTokens:       maxInput,
+		Pressure:             pressureStateForBudget(used+outputReserve, maxInput),
+		Sections:             make([]SectionUsage, 0, len(packet.StableSections)+len(packet.VolatileSections)+1),
+	}
+	if maxInput > 0 {
+		report.BudgetUsedPercent = float64(used+outputReserve) / float64(maxInput) * 100
+	}
+	for _, s := range append(append([]ContextSection{}, packet.StableSections...), packet.VolatileSections...) {
+		tokens := estimateTextTokens(s.Text)
+		truncated := s.TokenCap > 0 && estimateTextTokens(strings.TrimSuffix(s.Text, "\n...[truncated]")) >= s.TokenCap && strings.Contains(s.Text, "[truncated]")
+		report.Sections = append(report.Sections, SectionUsage{
+			Name:            s.Name,
+			EstimatedTokens: tokens,
+			LimitTokens:     s.TokenCap,
+			Protected:       s.Protected,
+			Truncated:       truncated,
+		})
+		if strings.Contains(s.Text, "[truncated]") {
+			report.Pruned = append(report.Pruned, PruneEvent{
+				Section:     s.Name,
+				Reason:      "section token cap",
+				TokensSaved: max(0, tokens-s.TokenCap),
+			})
+		}
+	}
+	report.Sections = append(report.Sections, SectionUsage{
+		Name:            "Recent History",
+		EstimatedTokens: historyTokens,
+		LimitTokens:     0,
+	})
+	if used > usable {
+		report.Pruned = append(report.Pruned, PruneEvent{
+			Section:     "Prompt",
+			Reason:      "input budget exceeded after output reserve",
+			TokensSaved: used - usable,
+		})
+	}
+	return report
+}
+
+func estimateMessagesTokens(msgs []providers.ChatMessage) int {
+	total := 0
+	for _, msg := range msgs {
+		// Deterministic rough estimate: ~1 token per 4 chars + small framing cost.
+		total += 4
+		total += estimateTextTokens(msg.Role)
+		total += estimateTextTokens(messageContentString(msg.Content))
+		total += estimateTextTokens(msg.Name)
+		total += estimateTextTokens(msg.ToolCallID)
+	}
+	return total
+}
+
+func estimateTextTokens(s string) int {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+	return (len(s) + 3) / 4
+}
+
+func messageContentString(content any) string {
+	switch v := content.(type) {
+	case string:
+		return v
+	case nil:
+		return ""
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+````
+
+## File: internal/agent/service_runtime_context.go
+````go
+package agent
+
+import (
+	"context"
+	"strings"
+
+	"or3-intern/internal/channels"
+	"or3-intern/internal/tools"
+)
+
+type conversationObserverContextKey struct{}
+type conversationSessionContextKey struct{}
+type conversationActionContextKey struct{}
+type streamingChannelContextKey struct{}
+type toolRegistryContextKey struct{}
+
+const ConversationActionSessionReset = "session_reset"
+
+type ConversationObserver interface {
+	OnTextDelta(ctx context.Context, text string)
+	OnToolCall(ctx context.Context, name string, arguments string)
+	OnToolResult(ctx context.Context, name string, result string, err error)
+	OnCompletion(ctx context.Context, finalText string, streamed bool)
+	OnError(ctx context.Context, err error)
+}
+
+func ContextWithConversationObserver(ctx context.Context, observer ConversationObserver) context.Context {
+	if observer == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, conversationObserverContextKey{}, observer)
+}
+
+func conversationObserverFromContext(ctx context.Context) ConversationObserver {
+	if ctx == nil {
+		return nil
+	}
+	observer, _ := ctx.Value(conversationObserverContextKey{}).(ConversationObserver)
+	return observer
+}
+
+func ContextWithConversationSession(ctx context.Context, sessionKey string) context.Context {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if ctx == nil || sessionKey == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, conversationSessionContextKey{}, sessionKey)
+}
+
+func ConversationSessionFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	sessionKey, _ := ctx.Value(conversationSessionContextKey{}).(string)
+	return strings.TrimSpace(sessionKey)
+}
+
+func ContextWithConversationAction(ctx context.Context, action string) context.Context {
+	action = strings.TrimSpace(action)
+	if ctx == nil || action == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, conversationActionContextKey{}, action)
+}
+
+func ConversationActionFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	action, _ := ctx.Value(conversationActionContextKey{}).(string)
+	return strings.TrimSpace(action)
+}
+
+func ContextWithStreamingChannel(ctx context.Context, streamer channels.StreamingChannel) context.Context {
+	if streamer == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, streamingChannelContextKey{}, streamer)
+}
+
+func streamingChannelFromContext(ctx context.Context) channels.StreamingChannel {
+	if ctx == nil {
+		return nil
+	}
+	streamer, _ := ctx.Value(streamingChannelContextKey{}).(channels.StreamingChannel)
+	return streamer
+}
+
+func ContextWithToolRegistry(ctx context.Context, reg *tools.Registry) context.Context {
+	if reg == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, toolRegistryContextKey{}, reg)
+}
+
+func toolRegistryFromContext(ctx context.Context) *tools.Registry {
+	if ctx == nil {
+		return nil
+	}
+	reg, _ := ctx.Value(toolRegistryContextKey{}).(*tools.Registry)
+	return reg
+}
+
+func toolRegistryWithAllowlist(base *tools.Registry, allowed []string, restrict bool) *tools.Registry {
+	if base == nil {
+		return tools.NewRegistry()
+	}
+	trimmed := make([]string, 0, len(allowed))
+	for _, name := range allowed {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		trimmed = append(trimmed, name)
+	}
+	if !restrict {
+		return base
+	}
+	if len(trimmed) == 0 {
+		return tools.NewRegistry()
+	}
+	return base.CloneFiltered(trimmed)
 }
 ````
 
@@ -11338,685 +12516,6 @@ func printReasons(w io.Writer, label string, values []string) {
 		return
 	}
 	_, _ = fmt.Fprintf(w, "%s: %s\n", label, strings.Join(values, "; "))
-}
-````
-
-## File: cmd/or3-intern/status_cmd.go
-````go
-package main
-
-import (
-	"context"
-	"flag"
-	"fmt"
-	"io"
-	"strconv"
-	"strings"
-
-	"or3-intern/internal/config"
-	"or3-intern/internal/db"
-	intdoctor "or3-intern/internal/doctor"
-	"or3-intern/internal/uxcopy"
-	"or3-intern/internal/uxstate"
-)
-
-type statusArgs struct {
-	Detailed bool
-	FixID    string
-}
-
-func parseStatusArgs(args []string, rootAdvanced bool) (bool, error) {
-	parsed, err := parseStatusCommandArgs(args, rootAdvanced)
-	return parsed.Detailed, err
-}
-
-func parseStatusCommandArgs(args []string, rootAdvanced bool) (statusArgs, error) {
-	fs := flag.NewFlagSet("status", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	detailed := rootAdvanced
-	fixID := ""
-	fs.BoolVar(&detailed, "advanced", rootAdvanced, "include internal finding IDs")
-	fs.StringVar(&fixID, "fix", "", "apply one safe automatic fix by finding ID")
-	if err := fs.Parse(args); err != nil {
-		return statusArgs{}, err
-	}
-	if fs.NArg() > 0 {
-		return statusArgs{}, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
-	}
-	return statusArgs{Detailed: detailed, FixID: strings.TrimSpace(fixID)}, nil
-}
-
-func runStatusCommandWithOptions(cfgPath string, cfg config.Config, validationError string, database *db.DB, stdout io.Writer, args statusArgs) error {
-	if args.FixID != "" {
-		report := intdoctor.Evaluate(cfg, intdoctor.Options{Mode: intdoctor.ModeAdvisory, ValidationError: validationError, ConfigPath: cfgPath})
-		selected, label, err := selectStatusFixes(report.Findings, args.FixID)
-		if err != nil {
-			return err
-		}
-		if len(selected) == 0 {
-			return fmt.Errorf("no safe automatic repair is available for %q", args.FixID)
-		}
-		applied, err := intdoctor.ApplyAutomaticFixes(cfgPath, &cfg, intdoctor.NewReport(intdoctor.ModeAdvisory, selected), intdoctor.FixOptions{AutomaticOnly: true})
-		if err != nil {
-			return err
-		}
-		for _, fix := range applied {
-			fmt.Fprintf(stdout, "Applied fix for %s: %s\n", fix.ID, fix.Summary)
-		}
-		if len(applied) == 0 {
-			fmt.Fprintf(stdout, "No changes needed for %s.\n", label)
-		}
-		if loaded, err := config.Load(cfgPath); err == nil {
-			cfg = loaded
-		}
-	}
-	return runStatusCommand(cfg, validationError, database, stdout, args.Detailed)
-}
-
-func runStatusCommand(cfg config.Config, validationError string, database *db.DB, stdout io.Writer, detailed bool) error {
-	report := intdoctor.Evaluate(cfg, intdoctor.Options{Mode: intdoctor.ModeAdvisory, ValidationError: validationError})
-	deviceCount, pendingApprovals := 0, 0
-	if database != nil {
-		ctx := context.Background()
-		if devices, err := database.ListPairedDevices(ctx, 100); err == nil {
-			deviceCount = len(devices)
-		}
-		if approvals, err := database.ListApprovalRequests(ctx, "pending", 100); err == nil {
-			pendingApprovals = len(approvals)
-		}
-	}
-	view := uxstate.BuildStatusView(cfg, report, deviceCount, pendingApprovals)
-	fmt.Fprintln(stdout, "OR3 status")
-	fmt.Fprintf(stdout, "State: %s\n", view.Headline)
-	fmt.Fprintf(stdout, "Safety: %s — %s\n", view.SafetyLabel, view.SafetySummary)
-	fmt.Fprintf(stdout, "Files: %s\n", view.Workspace)
-	fmt.Fprintf(stdout, "Commands: %s\n", view.Commands)
-	fmt.Fprintf(stdout, "Internet: %s\n", view.Internet)
-	fmt.Fprintf(stdout, "Devices: %s\n", view.Devices)
-	fmt.Fprintf(stdout, "Activity log: %s\n", view.ActivityLog)
-	fmt.Fprintln(stdout, "\nWhat OR3 can access")
-	for _, section := range view.Access.Sections {
-		fmt.Fprintf(stdout, "- %s: %s [%s]\n", section.Name, section.Status, section.Risk)
-		fmt.Fprintf(stdout, "  Change: %s\n", section.Action)
-		if detailed {
-			fmt.Fprintf(stdout, "  Detail: %s\n", section.Detail)
-		}
-	}
-	if len(view.Problems) == 0 {
-		fmt.Fprintln(stdout, "\nEverything looks ready.")
-		return nil
-	}
-	fmt.Fprintf(stdout, "\n%d thing(s) need attention:\n", len(view.Problems))
-	for index, problem := range view.Problems {
-		number := index + 1
-		fmt.Fprintf(stdout, "\n%d. %s\n", number, problem.Title)
-		fmt.Fprintf(stdout, "  Why it matters: %s\n", problem.WhyItMatters)
-		fmt.Fprintf(stdout, "  Fix: %s\n", problem.RecommendedAction)
-		if problem.FixMode == string(intdoctor.FixModeAutomatic) {
-			fmt.Fprintf(stdout, "  Run: or3-intern status --fix %d\n", number)
-		}
-		fmt.Fprintln(stdout, "  Keep as-is: leave it unchanged if this is intentional, then review advanced details before exposing OR3 to other devices or channels.")
-		if detailed {
-			fmt.Fprintf(stdout, "  Advanced ID: %s\n", problem.ID)
-			if problem.FixMode == string(intdoctor.FixModeAutomatic) {
-				fmt.Fprintf(stdout, "  Fix now: or3-intern status --fix %s\n", problem.ID)
-			}
-		}
-	}
-	return nil
-}
-
-func selectStatusFixes(findings []intdoctor.Finding, raw string) ([]intdoctor.Finding, string, error) {
-	raw = strings.TrimSpace(raw)
-	if strings.EqualFold(raw, "all") {
-		selected := []intdoctor.Finding{}
-		for _, finding := range findings {
-			if finding.FixMode == intdoctor.FixModeAutomatic {
-				selected = append(selected, finding)
-			}
-		}
-		return selected, "all", nil
-	}
-	if index, err := strconv.Atoi(raw); err == nil {
-		if index < 1 || index > len(findings) {
-			return nil, raw, fmt.Errorf("unknown problem number %q", raw)
-		}
-		finding := findings[index-1]
-		if finding.FixMode != intdoctor.FixModeAutomatic {
-			return nil, raw, fmt.Errorf("problem %d does not support safe automatic repair; run `or3-intern doctor --fix --interactive` if guided repair is available", index)
-		}
-		return []intdoctor.Finding{finding}, raw, nil
-	}
-	for _, finding := range findings {
-		if finding.ID == raw {
-			if finding.FixMode != intdoctor.FixModeAutomatic {
-				return nil, raw, fmt.Errorf("finding %q does not support safe automatic repair; run `or3-intern doctor --fix --interactive` if guided repair is available", raw)
-			}
-			return []intdoctor.Finding{finding}, raw, nil
-		}
-	}
-	return nil, raw, fmt.Errorf("unknown finding ID %q", raw)
-}
-
-func translateAndPrintError(err error, out io.Writer) error {
-	translated := uxcopy.TranslateError(err)
-	if strings.TrimSpace(translated.Title) == "" {
-		return err
-	}
-	fmt.Fprintf(out, "%s\n\nWhat happened:\n%s\n\nFix:\n%s\n", translated.Title, translated.WhatHappened, translated.Fix)
-	if strings.TrimSpace(translated.Command) != "" {
-		fmt.Fprintf(out, "\nTry:\n%s\n", translated.Command)
-	}
-	return nil
-}
-````
-
-## File: internal/agent/job_registry.go
-````go
-package agent
-
-import (
-	"context"
-	"crypto/rand"
-	"encoding/hex"
-	"sync"
-	"time"
-)
-
-const (
-	defaultJobRetention   = 2 * time.Minute
-	defaultMaxTrackedJobs = 256
-	defaultMaxJobEvents   = 256
-	jobSubscriberBuffer   = 128
-)
-
-type JobEvent struct {
-	Sequence int64          `json:"sequence"`
-	Type     string         `json:"type"`
-	Data     map[string]any `json:"data"`
-}
-
-type JobSnapshot struct {
-	ID        string     `json:"id"`
-	Kind      string     `json:"kind"`
-	Status    string     `json:"status"`
-	Events    []JobEvent `json:"events"`
-	CreatedAt time.Time  `json:"created_at"`
-	UpdatedAt time.Time  `json:"updated_at"`
-}
-
-type JobRegistry struct {
-	mu         sync.Mutex
-	jobs       map[string]*jobEntry
-	retention  time.Duration
-	maxTracked int
-	maxEvents  int
-}
-
-type jobEntry struct {
-	id          string
-	kind        string
-	status      string
-	events      []JobEvent
-	subscribers map[int]chan JobEvent
-	nextSubID   int
-	nextSeq     int64
-	cancel      context.CancelFunc
-	done        chan struct{}
-	terminal    bool
-	createdAt   time.Time
-	updatedAt   time.Time
-}
-
-type JobObserver struct {
-	registry *JobRegistry
-	jobID    string
-}
-
-func NewJobRegistry(retention time.Duration, maxTracked int) *JobRegistry {
-	if retention <= 0 {
-		retention = defaultJobRetention
-	}
-	if maxTracked <= 0 {
-		maxTracked = defaultMaxTrackedJobs
-	}
-	return &JobRegistry{
-		jobs:       map[string]*jobEntry{},
-		retention:  retention,
-		maxTracked: maxTracked,
-		maxEvents:  defaultMaxJobEvents,
-	}
-}
-
-func (r *JobRegistry) Register(kind string) JobSnapshot {
-	return r.RegisterWithID(newServiceJobID(), kind)
-}
-
-func (r *JobRegistry) RegisterWithID(id string, kind string) JobSnapshot {
-	now := time.Now()
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.cleanupLocked(now)
-	entry := &jobEntry{
-		id:          id,
-		kind:        kind,
-		status:      "queued",
-		subscribers: map[int]chan JobEvent{},
-		done:        make(chan struct{}),
-		createdAt:   now,
-		updatedAt:   now,
-	}
-	r.jobs[id] = entry
-	return snapshotForEntry(entry)
-}
-
-func (r *JobRegistry) AttachCancel(id string, cancel context.CancelFunc) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	entry := r.jobs[id]
-	if entry == nil {
-		return false
-	}
-	entry.cancel = cancel
-	entry.updatedAt = time.Now()
-	return true
-}
-
-func (r *JobRegistry) Cancel(id string) bool {
-	r.mu.Lock()
-	entry := r.jobs[id]
-	if entry == nil {
-		r.mu.Unlock()
-		return false
-	}
-	cancel := entry.cancel
-	r.mu.Unlock()
-	if cancel == nil {
-		return false
-	}
-	cancel()
-	return true
-}
-
-func (r *JobRegistry) Publish(id string, eventType string, data map[string]any) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	entry := r.jobs[id]
-	if entry == nil {
-		return false
-	}
-	if data == nil {
-		data = map[string]any{}
-	}
-	if _, ok := data["job_id"]; !ok {
-		data["job_id"] = id
-	}
-	now := time.Now()
-	entry.updatedAt = now
-	if status, ok := data["status"].(string); ok && status != "" {
-		entry.status = status
-	}
-	entry.nextSeq++
-	event := JobEvent{Sequence: entry.nextSeq, Type: eventType, Data: cloneEventData(data)}
-	entry.events = append(entry.events, event)
-	if r.maxEvents > 0 && len(entry.events) > r.maxEvents {
-		entry.events = append([]JobEvent(nil), entry.events[len(entry.events)-r.maxEvents:]...)
-	}
-	for _, ch := range entry.subscribers {
-		select {
-		case ch <- event:
-		default:
-		}
-	}
-	return true
-}
-
-func (r *JobRegistry) Complete(id string, status string, data map[string]any) bool {
-	if data == nil {
-		data = map[string]any{}
-	}
-	if status == "" {
-		status = "completed"
-	}
-	data["status"] = status
-	if !r.Publish(id, "completion", data) {
-		return false
-	}
-	r.markTerminal(id, status)
-	return true
-}
-
-func (r *JobRegistry) Fail(id string, message string, data map[string]any) bool {
-	if data == nil {
-		data = map[string]any{}
-	}
-	if message != "" {
-		data["message"] = message
-	}
-	data["status"] = "failed"
-	if !r.Publish(id, "error", data) {
-		return false
-	}
-	r.markTerminal(id, "failed")
-	return true
-}
-
-func (r *JobRegistry) markTerminal(id string, status string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	entry := r.jobs[id]
-	if entry == nil || entry.terminal {
-		return
-	}
-	entry.status = status
-	entry.terminal = true
-	entry.updatedAt = time.Now()
-	close(entry.done)
-	for subID, ch := range entry.subscribers {
-		close(ch)
-		delete(entry.subscribers, subID)
-	}
-}
-
-func (r *JobRegistry) Subscribe(id string) (JobSnapshot, <-chan JobEvent, func(), bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	entry := r.jobs[id]
-	if entry == nil {
-		return JobSnapshot{}, nil, nil, false
-	}
-	snapshot := snapshotForEntry(entry)
-	if entry.terminal {
-		ch := make(chan JobEvent)
-		close(ch)
-		return snapshot, ch, func() {}, true
-	}
-	entry.nextSubID++
-	subID := entry.nextSubID
-	ch := make(chan JobEvent, jobSubscriberBuffer)
-	entry.subscribers[subID] = ch
-	unsubscribe := func() {
-		r.mu.Lock()
-		defer r.mu.Unlock()
-		current := r.jobs[id]
-		if current == nil {
-			return
-		}
-		sub, ok := current.subscribers[subID]
-		if !ok {
-			return
-		}
-		close(sub)
-		delete(current.subscribers, subID)
-	}
-	return snapshot, ch, unsubscribe, true
-}
-
-func (r *JobRegistry) Snapshot(id string) (JobSnapshot, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	entry := r.jobs[id]
-	if entry == nil {
-		return JobSnapshot{}, false
-	}
-	return snapshotForEntry(entry), true
-}
-
-func (r *JobRegistry) Wait(ctx context.Context, id string) (JobSnapshot, bool) {
-	r.mu.Lock()
-	entry := r.jobs[id]
-	if entry == nil {
-		r.mu.Unlock()
-		return JobSnapshot{}, false
-	}
-	done := entry.done
-	terminal := entry.terminal
-	r.mu.Unlock()
-	if !terminal {
-		select {
-		case <-done:
-		case <-ctx.Done():
-			return JobSnapshot{}, false
-		}
-	}
-	return r.Snapshot(id)
-}
-
-func (r *JobRegistry) Observer(jobID string) ConversationObserver {
-	return JobObserver{registry: r, jobID: jobID}
-}
-
-func (o JobObserver) OnTextDelta(_ context.Context, text string) {
-	if o.registry == nil || text == "" {
-		return
-	}
-	o.registry.Publish(o.jobID, "text_delta", map[string]any{"content": text})
-}
-
-func (o JobObserver) OnToolCall(_ context.Context, name string, arguments string) {
-	if o.registry == nil {
-		return
-	}
-	o.registry.Publish(o.jobID, "tool_call", map[string]any{"name": name, "arguments": arguments})
-}
-
-func (o JobObserver) OnToolResult(_ context.Context, name string, result string, err error) {
-	if o.registry == nil {
-		return
-	}
-	data := map[string]any{"name": name, "result": result}
-	if err != nil {
-		data["error"] = err.Error()
-	}
-	o.registry.Publish(o.jobID, "tool_result", data)
-}
-
-func (o JobObserver) OnCompletion(_ context.Context, finalText string, streamed bool) {
-	if o.registry == nil {
-		return
-	}
-	o.registry.Publish(o.jobID, "assistant", map[string]any{"content": finalText, "streamed": streamed})
-}
-
-func (o JobObserver) OnError(_ context.Context, err error) {
-	if o.registry == nil || err == nil {
-		return
-	}
-	o.registry.Publish(o.jobID, "runtime_error", map[string]any{"message": err.Error()})
-}
-
-func (r *JobRegistry) cleanupLocked(now time.Time) {
-	for id, entry := range r.jobs {
-		if entry == nil {
-			delete(r.jobs, id)
-			continue
-		}
-		if entry.terminal && now.Sub(entry.updatedAt) > r.retention {
-			delete(r.jobs, id)
-		}
-	}
-	for len(r.jobs) > r.maxTracked {
-		oldestID := ""
-		var oldest time.Time
-		for id, entry := range r.jobs {
-			if entry == nil || !entry.terminal {
-				continue
-			}
-			if oldestID == "" || entry.updatedAt.Before(oldest) {
-				oldestID = id
-				oldest = entry.updatedAt
-			}
-		}
-		if oldestID == "" {
-			break
-		}
-		delete(r.jobs, oldestID)
-	}
-}
-
-func snapshotForEntry(entry *jobEntry) JobSnapshot {
-	events := make([]JobEvent, len(entry.events))
-	for i, event := range entry.events {
-		events[i] = JobEvent{
-			Sequence: event.Sequence,
-			Type:     event.Type,
-			Data:     cloneEventData(event.Data),
-		}
-	}
-	return JobSnapshot{
-		ID:        entry.id,
-		Kind:      entry.kind,
-		Status:    entry.status,
-		Events:    events,
-		CreatedAt: entry.createdAt,
-		UpdatedAt: entry.updatedAt,
-	}
-}
-
-func cloneEventData(in map[string]any) map[string]any {
-	if len(in) == 0 {
-		return map[string]any{}
-	}
-	out := make(map[string]any, len(in))
-	for key, value := range in {
-		out[key] = value
-	}
-	return out
-}
-
-func newServiceJobID() string {
-	var raw [12]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		return "svc-job"
-	}
-	return "svc-" + hex.EncodeToString(raw[:])
-}
-````
-
-## File: internal/agent/service_runtime_context.go
-````go
-package agent
-
-import (
-	"context"
-	"strings"
-
-	"or3-intern/internal/channels"
-	"or3-intern/internal/tools"
-)
-
-type conversationObserverContextKey struct{}
-type conversationSessionContextKey struct{}
-type conversationActionContextKey struct{}
-type streamingChannelContextKey struct{}
-type toolRegistryContextKey struct{}
-
-const ConversationActionSessionReset = "session_reset"
-
-type ConversationObserver interface {
-	OnTextDelta(ctx context.Context, text string)
-	OnToolCall(ctx context.Context, name string, arguments string)
-	OnToolResult(ctx context.Context, name string, result string, err error)
-	OnCompletion(ctx context.Context, finalText string, streamed bool)
-	OnError(ctx context.Context, err error)
-}
-
-func ContextWithConversationObserver(ctx context.Context, observer ConversationObserver) context.Context {
-	if observer == nil {
-		return ctx
-	}
-	return context.WithValue(ctx, conversationObserverContextKey{}, observer)
-}
-
-func conversationObserverFromContext(ctx context.Context) ConversationObserver {
-	if ctx == nil {
-		return nil
-	}
-	observer, _ := ctx.Value(conversationObserverContextKey{}).(ConversationObserver)
-	return observer
-}
-
-func ContextWithConversationSession(ctx context.Context, sessionKey string) context.Context {
-	sessionKey = strings.TrimSpace(sessionKey)
-	if ctx == nil || sessionKey == "" {
-		return ctx
-	}
-	return context.WithValue(ctx, conversationSessionContextKey{}, sessionKey)
-}
-
-func ConversationSessionFromContext(ctx context.Context) string {
-	if ctx == nil {
-		return ""
-	}
-	sessionKey, _ := ctx.Value(conversationSessionContextKey{}).(string)
-	return strings.TrimSpace(sessionKey)
-}
-
-func ContextWithConversationAction(ctx context.Context, action string) context.Context {
-	action = strings.TrimSpace(action)
-	if ctx == nil || action == "" {
-		return ctx
-	}
-	return context.WithValue(ctx, conversationActionContextKey{}, action)
-}
-
-func ConversationActionFromContext(ctx context.Context) string {
-	if ctx == nil {
-		return ""
-	}
-	action, _ := ctx.Value(conversationActionContextKey{}).(string)
-	return strings.TrimSpace(action)
-}
-
-func ContextWithStreamingChannel(ctx context.Context, streamer channels.StreamingChannel) context.Context {
-	if streamer == nil {
-		return ctx
-	}
-	return context.WithValue(ctx, streamingChannelContextKey{}, streamer)
-}
-
-func streamingChannelFromContext(ctx context.Context) channels.StreamingChannel {
-	if ctx == nil {
-		return nil
-	}
-	streamer, _ := ctx.Value(streamingChannelContextKey{}).(channels.StreamingChannel)
-	return streamer
-}
-
-func ContextWithToolRegistry(ctx context.Context, reg *tools.Registry) context.Context {
-	if reg == nil {
-		return ctx
-	}
-	return context.WithValue(ctx, toolRegistryContextKey{}, reg)
-}
-
-func toolRegistryFromContext(ctx context.Context) *tools.Registry {
-	if ctx == nil {
-		return nil
-	}
-	reg, _ := ctx.Value(toolRegistryContextKey{}).(*tools.Registry)
-	return reg
-}
-
-func toolRegistryWithAllowlist(base *tools.Registry, allowed []string, restrict bool) *tools.Registry {
-	if base == nil {
-		return tools.NewRegistry()
-	}
-	trimmed := make([]string, 0, len(allowed))
-	for _, name := range allowed {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		trimmed = append(trimmed, name)
-	}
-	if !restrict {
-		return base
-	}
-	if len(trimmed) == 0 {
-		return tools.NewRegistry()
-	}
-	return base.CloneFiltered(trimmed)
 }
 ````
 
@@ -19930,6 +20429,273 @@ func runPairingCommand(ctx context.Context, broker *approval.Broker, args []stri
 }
 ````
 
+## File: cmd/or3-intern/service_auth.go
+````go
+package main
+
+import (
+	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net"
+	"net/http"
+	"strings"
+	"time"
+
+	"or3-intern/internal/approval"
+	"or3-intern/internal/config"
+)
+
+const serviceTokenMaxAge = 5 * time.Minute
+
+type serviceTokenClaims struct {
+	IssuedAt int64  `json:"iat"`
+	Nonce    string `json:"nonce"`
+}
+
+type serviceAuthContextKey struct{}
+type serviceAuthKindContextKey struct{}
+
+type serviceAuthIdentity struct {
+	Kind   string
+	Actor  string
+	Role   string
+	Device string
+}
+
+func serviceAuthMiddleware(secret string, next http.Handler) http.Handler {
+	return serviceAuthMiddlewareWithBroker(config.Config{Service: config.ServiceConfig{Secret: secret, SharedSecretRole: approval.RoleServiceClient}}, nil, next)
+}
+
+func serviceAuthMiddlewareWithBroker(cfg config.Config, broker *approval.Broker, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if allowsUnauthenticatedPairingRoute(cfg, r) {
+			ctx := approval.ContextWithAuditAuthKind(r.Context(), "unauthenticated")
+			ctx = approval.ContextWithAuditActor(ctx, "anonymous")
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+		identity, err := authenticateServiceRequest(cfg, broker, r.Header.Get("Authorization"), time.Now(), r.Context())
+		if err != nil {
+			writeServiceJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+			return
+		}
+		ctx := context.WithValue(r.Context(), serviceAuthContextKey{}, identity)
+		ctx = context.WithValue(ctx, serviceAuthKindContextKey{}, identity.Kind)
+		ctx = approval.ContextWithAuditAuthKind(ctx, identity.Kind)
+		ctx = approval.ContextWithAuditActor(ctx, identity.Actor)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func authenticateServiceRequest(cfg config.Config, broker *approval.Broker, header string, now time.Time, ctx context.Context) (serviceAuthIdentity, error) {
+	if err := validateServiceAuthorization(cfg.Service.Secret, header, now); err == nil {
+		role := strings.TrimSpace(cfg.Service.SharedSecretRole)
+		if role == "" {
+			role = approval.RoleServiceClient
+		}
+		return serviceAuthIdentity{Kind: "shared-secret", Actor: "service:shared-secret", Role: role}, nil
+	}
+	if broker == nil {
+		return serviceAuthIdentity{}, fmt.Errorf("missing bearer token")
+	}
+	scheme, token, ok := strings.Cut(strings.TrimSpace(header), " ")
+	if !ok || !strings.EqualFold(scheme, "Bearer") || strings.TrimSpace(token) == "" {
+		return serviceAuthIdentity{}, fmt.Errorf("missing bearer token")
+	}
+	device, err := broker.AuthenticateDeviceToken(ctx, token)
+	if err != nil {
+		return serviceAuthIdentity{}, err
+	}
+	return serviceAuthIdentity{Kind: "paired-device", Actor: "device:" + device.DeviceID, Role: device.Role, Device: device.DeviceID}, nil
+}
+
+func serviceAuthIdentityFromContext(ctx context.Context) serviceAuthIdentity {
+	if ctx == nil {
+		return serviceAuthIdentity{}
+	}
+	identity, _ := ctx.Value(serviceAuthContextKey{}).(serviceAuthIdentity)
+	return identity
+}
+
+func serviceAuthKindFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	kind, _ := ctx.Value(serviceAuthKindContextKey{}).(string)
+	return kind
+}
+
+func allowsUnauthenticatedPairingRoute(cfg config.Config, r *http.Request) bool {
+	if r == nil || r.URL == nil {
+		return false
+	}
+	if !cfg.Service.AllowUnauthenticatedPairing {
+		return false
+	}
+	if !serviceListenIsLoopback(cfg.Service.Listen) {
+		return false
+	}
+	if !requestRemoteIsLoopback(r.RemoteAddr) {
+		return false
+	}
+	if r.Method != http.MethodPost {
+		return false
+	}
+	path := strings.TrimSpace(r.URL.Path)
+	return path == "/internal/v1/pairing/requests" || path == "/internal/v1/pairing/exchange"
+}
+
+func requireServiceRole(w http.ResponseWriter, r *http.Request, roles ...string) bool {
+	identity := serviceAuthIdentityFromContext(r.Context())
+	if len(roles) == 0 {
+		return true
+	}
+	for _, role := range roles {
+		if serviceRoleRank(identity.Role) >= serviceRoleRank(role) {
+			return true
+		}
+	}
+	writeServiceJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
+	return false
+}
+
+func serviceRoleRank(role string) int {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case approval.RoleAdmin:
+		return 4
+	case approval.RoleOperator:
+		return 3
+	case approval.RoleServiceClient, approval.RoleWebUI, approval.RoleNode:
+		return 2
+	case approval.RoleViewer:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func serviceListenIsLoopback(addr string) bool {
+	host := strings.TrimSpace(addr)
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
+	}
+	host = strings.Trim(host, "[]")
+	if host == "" {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return strings.EqualFold(host, "localhost")
+}
+
+func requestRemoteIsLoopback(addr string) bool {
+	host := strings.TrimSpace(addr)
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
+	}
+	host = strings.Trim(host, "[]")
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return strings.EqualFold(host, "localhost")
+}
+
+func validateServiceAuthorization(secret string, header string, now time.Time) error {
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		return fmt.Errorf("service secret is not configured")
+	}
+	scheme, token, ok := strings.Cut(strings.TrimSpace(header), " ")
+	if !ok || !strings.EqualFold(scheme, "Bearer") || strings.TrimSpace(token) == "" {
+		return fmt.Errorf("missing bearer token")
+	}
+	return validateServiceBearerToken(secret, token, now)
+}
+
+func validateServiceBearerToken(secret string, token string, now time.Time) error {
+	payloadPart, signaturePart, ok := strings.Cut(strings.TrimSpace(token), ".")
+	if !ok || payloadPart == "" || signaturePart == "" {
+		return fmt.Errorf("invalid bearer token format")
+	}
+	signature, err := hex.DecodeString(signaturePart)
+	if err != nil {
+		return fmt.Errorf("invalid bearer token signature")
+	}
+	expected := signServiceToken(secret, payloadPart)
+	if !hmac.Equal(signature, expected) {
+		return fmt.Errorf("invalid bearer token signature")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(payloadPart)
+	if err != nil {
+		return fmt.Errorf("invalid bearer token payload")
+	}
+	var claims serviceTokenClaims
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return fmt.Errorf("invalid bearer token payload")
+	}
+	if claims.IssuedAt <= 0 {
+		return fmt.Errorf("invalid bearer token timestamp")
+	}
+	issuedAt := time.Unix(claims.IssuedAt, 0)
+	if issuedAt.After(now.Add(30 * time.Second)) {
+		return fmt.Errorf("bearer token timestamp is in the future")
+	}
+	if now.Sub(issuedAt) > serviceTokenMaxAge {
+		return fmt.Errorf("bearer token expired")
+	}
+	if strings.TrimSpace(claims.Nonce) == "" {
+		return fmt.Errorf("invalid bearer token nonce")
+	}
+	return nil
+}
+
+func issueServiceBearerToken(secret string, now time.Time) (string, error) {
+	nonce, err := randomHex(12)
+	if err != nil {
+		return "", err
+	}
+	claims := serviceTokenClaims{IssuedAt: now.Unix(), Nonce: nonce}
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		return "", err
+	}
+	payloadPart := base64.RawURLEncoding.EncodeToString(payload)
+	signature := hex.EncodeToString(signServiceToken(secret, payloadPart))
+	return payloadPart + "." + signature, nil
+}
+
+func signServiceToken(secret string, payloadPart string) []byte {
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(payloadPart))
+	return mac.Sum(nil)
+}
+
+func randomHex(size int) (string, error) {
+	if size <= 0 {
+		return "", nil
+	}
+	buf := make([]byte, size)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
+}
+
+func withDetachedContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return context.WithoutCancel(ctx)
+}
+````
+
 ## File: cmd/or3-intern/service_request.go
 ````go
 package main
@@ -20185,6 +20951,736 @@ func backgroundToolsRegistry(manager *agent.SubagentManager) *tools.Registry {
 		return manager.BackgroundTools()
 	}
 	return tools.NewRegistry()
+}
+````
+
+## File: cmd/or3-intern/status_cmd.go
+````go
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"io"
+	"strconv"
+	"strings"
+
+	"or3-intern/internal/config"
+	"or3-intern/internal/db"
+	intdoctor "or3-intern/internal/doctor"
+	"or3-intern/internal/uxcopy"
+	"or3-intern/internal/uxstate"
+)
+
+type statusArgs struct {
+	Detailed bool
+	FixID    string
+}
+
+func parseStatusArgs(args []string, rootAdvanced bool) (bool, error) {
+	parsed, err := parseStatusCommandArgs(args, rootAdvanced)
+	return parsed.Detailed, err
+}
+
+func parseStatusCommandArgs(args []string, rootAdvanced bool) (statusArgs, error) {
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	detailed := rootAdvanced
+	fixID := ""
+	fs.BoolVar(&detailed, "advanced", rootAdvanced, "include internal finding IDs")
+	fs.StringVar(&fixID, "fix", "", "apply one safe automatic fix by finding ID")
+	if err := fs.Parse(args); err != nil {
+		return statusArgs{}, err
+	}
+	if fs.NArg() > 0 {
+		return statusArgs{}, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+	}
+	return statusArgs{Detailed: detailed, FixID: strings.TrimSpace(fixID)}, nil
+}
+
+func runStatusCommandWithOptions(cfgPath string, cfg config.Config, validationError string, database *db.DB, stdout io.Writer, args statusArgs) error {
+	if args.FixID != "" {
+		report := intdoctor.Evaluate(cfg, intdoctor.Options{Mode: intdoctor.ModeAdvisory, ValidationError: validationError, ConfigPath: cfgPath})
+		selected, label, err := selectStatusFixes(report.Findings, args.FixID)
+		if err != nil {
+			return err
+		}
+		if len(selected) == 0 {
+			return fmt.Errorf("no safe automatic repair is available for %q", args.FixID)
+		}
+		applied, err := intdoctor.ApplyAutomaticFixes(cfgPath, &cfg, intdoctor.NewReport(intdoctor.ModeAdvisory, selected))
+		if err != nil {
+			return err
+		}
+		for _, fix := range applied {
+			fmt.Fprintf(stdout, "Applied fix for %s: %s\n", fix.ID, fix.Summary)
+		}
+		if len(applied) == 0 {
+			fmt.Fprintf(stdout, "No changes needed for %s.\n", label)
+		}
+		if loaded, err := config.Load(cfgPath); err == nil {
+			cfg = loaded
+		}
+	}
+	return runStatusCommand(cfg, validationError, database, stdout, args.Detailed)
+}
+
+func runStatusCommand(cfg config.Config, validationError string, database *db.DB, stdout io.Writer, detailed bool) error {
+	report := intdoctor.Evaluate(cfg, intdoctor.Options{Mode: intdoctor.ModeAdvisory, ValidationError: validationError})
+	deviceCount, pendingApprovals := 0, 0
+	if database != nil {
+		ctx := context.Background()
+		if devices, err := database.ListPairedDevices(ctx, 100); err == nil {
+			deviceCount = len(devices)
+		}
+		if approvals, err := database.ListApprovalRequests(ctx, "pending", 100); err == nil {
+			pendingApprovals = len(approvals)
+		}
+	}
+	view := uxstate.BuildStatusView(cfg, report, deviceCount, pendingApprovals)
+	fmt.Fprintln(stdout, "OR3 status")
+	fmt.Fprintf(stdout, "State: %s\n", view.Headline)
+	fmt.Fprintf(stdout, "Safety: %s — %s\n", view.SafetyLabel, view.SafetySummary)
+	fmt.Fprintf(stdout, "Files: %s\n", view.Workspace)
+	fmt.Fprintf(stdout, "Commands: %s\n", view.Commands)
+	fmt.Fprintf(stdout, "Internet: %s\n", view.Internet)
+	fmt.Fprintf(stdout, "Devices: %s\n", view.Devices)
+	fmt.Fprintf(stdout, "Activity log: %s\n", view.ActivityLog)
+	fmt.Fprintln(stdout, "\nWhat OR3 can access")
+	for _, section := range view.Access.Sections {
+		fmt.Fprintf(stdout, "- %s: %s [%s]\n", section.Name, section.Status, section.Risk)
+		fmt.Fprintf(stdout, "  Change: %s\n", section.Action)
+		if detailed {
+			fmt.Fprintf(stdout, "  Detail: %s\n", section.Detail)
+		}
+	}
+	if len(view.Problems) == 0 {
+		fmt.Fprintln(stdout, "\nEverything looks ready.")
+		return nil
+	}
+	fmt.Fprintf(stdout, "\n%d thing(s) need attention:\n", len(view.Problems))
+	for index, problem := range view.Problems {
+		number := index + 1
+		fmt.Fprintf(stdout, "\n%d. %s\n", number, problem.Title)
+		fmt.Fprintf(stdout, "  Why it matters: %s\n", problem.WhyItMatters)
+		fmt.Fprintf(stdout, "  Fix: %s\n", problem.RecommendedAction)
+		if problem.FixMode == string(intdoctor.FixModeAutomatic) {
+			fmt.Fprintf(stdout, "  Run: or3-intern status --fix %d\n", number)
+		}
+		fmt.Fprintln(stdout, "  Keep as-is: leave it unchanged if this is intentional, then review advanced details before exposing OR3 to other devices or channels.")
+		if detailed {
+			fmt.Fprintf(stdout, "  Advanced ID: %s\n", problem.ID)
+			if problem.FixMode == string(intdoctor.FixModeAutomatic) {
+				fmt.Fprintf(stdout, "  Fix now: or3-intern status --fix %s\n", problem.ID)
+			}
+		}
+	}
+	return nil
+}
+
+func selectStatusFixes(findings []intdoctor.Finding, raw string) ([]intdoctor.Finding, string, error) {
+	raw = strings.TrimSpace(raw)
+	if strings.EqualFold(raw, "all") {
+		selected := []intdoctor.Finding{}
+		for _, finding := range findings {
+			if finding.FixMode == intdoctor.FixModeAutomatic {
+				selected = append(selected, finding)
+			}
+		}
+		return selected, "all", nil
+	}
+	if index, err := strconv.Atoi(raw); err == nil {
+		if index < 1 || index > len(findings) {
+			return nil, raw, fmt.Errorf("unknown problem number %q", raw)
+		}
+		finding := findings[index-1]
+		if finding.FixMode != intdoctor.FixModeAutomatic {
+			return nil, raw, fmt.Errorf("problem %d does not support safe automatic repair; run `or3-intern doctor --fix --interactive` if guided repair is available", index)
+		}
+		return []intdoctor.Finding{finding}, raw, nil
+	}
+	for _, finding := range findings {
+		if finding.ID == raw {
+			if finding.FixMode != intdoctor.FixModeAutomatic {
+				return nil, raw, fmt.Errorf("finding %q does not support safe automatic repair; run `or3-intern doctor --fix --interactive` if guided repair is available", raw)
+			}
+			return []intdoctor.Finding{finding}, raw, nil
+		}
+	}
+	return nil, raw, fmt.Errorf("unknown finding ID %q", raw)
+}
+
+func translateAndPrintError(err error, out io.Writer) error {
+	translated := uxcopy.TranslateError(err)
+	if strings.TrimSpace(translated.Title) == "" {
+		return err
+	}
+	fmt.Fprintf(out, "%s\n\nWhat happened:\n%s\n\nFix:\n%s\n", translated.Title, translated.WhatHappened, translated.Fix)
+	if strings.TrimSpace(translated.Command) != "" {
+		fmt.Fprintf(out, "\nTry:\n%s\n", translated.Command)
+	}
+	return nil
+}
+````
+
+## File: internal/agent/subagents.go
+````go
+package agent
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"strings"
+	"sync"
+	"time"
+
+	"or3-intern/internal/db"
+	"or3-intern/internal/providers"
+	"or3-intern/internal/tools"
+)
+
+const (
+	subagentClaimRetryDelay = 25 * time.Millisecond
+	subagentFinalizeTimeout = 5 * time.Second
+)
+
+// SubagentManager queues and runs background subagent jobs.
+type SubagentManager struct {
+	DB              *db.DB
+	Runtime         *Runtime
+	Deliver         Deliverer
+	MaxConcurrent   int
+	MaxQueued       int
+	TaskTimeout     time.Duration
+	BackgroundTools func() *tools.Registry
+	Jobs            *JobRegistry
+
+	mu       sync.Mutex
+	started  bool
+	ctx      context.Context
+	cancel   context.CancelFunc
+	notifyCh chan struct{}
+	wg       sync.WaitGroup
+}
+
+// ServiceSubagentRequest describes a service-originated subagent request.
+type ServiceSubagentRequest struct {
+	ParentSessionKey string
+	Task             string
+	PromptSnapshot   []providers.ChatMessage
+	AllowedTools     []string
+	RestrictTools    bool
+	ProfileName      string
+	Channel          string
+	ReplyTo          string
+	Meta             map[string]any
+	Timeout          time.Duration
+	ApprovalToken    string
+	RequesterActor   string
+	RequesterRole    string
+}
+
+type subagentJobMetadata struct {
+	ProfileName    string                  `json:"profile_name,omitempty"`
+	AllowedTools   []string                `json:"allowed_tools,omitempty"`
+	RestrictTools  bool                    `json:"restrict_tools,omitempty"`
+	PromptSnapshot []providers.ChatMessage `json:"prompt_snapshot,omitempty"`
+	TimeoutSeconds int                     `json:"timeout_seconds,omitempty"`
+	ServiceMeta    map[string]any          `json:"service_meta,omitempty"`
+	ApprovalToken  string                  `json:"approval_token,omitempty"`
+	RequesterActor string                  `json:"requester_actor,omitempty"`
+	RequesterRole  string                  `json:"requester_role,omitempty"`
+}
+
+// Start launches the background workers and resumes queued jobs.
+func (m *SubagentManager) Start(ctx context.Context) error {
+	if m == nil {
+		return fmt.Errorf("subagent manager is nil")
+	}
+	if m.DB == nil {
+		return fmt.Errorf("subagent db not configured")
+	}
+	if m.Runtime == nil {
+		return fmt.Errorf("subagent runtime not configured")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.started {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if m.MaxConcurrent <= 0 {
+		m.MaxConcurrent = 1
+	}
+	if m.MaxQueued <= 0 {
+		m.MaxQueued = 32
+	}
+	if m.TaskTimeout <= 0 {
+		m.TaskTimeout = 5 * time.Minute
+	}
+	running, err := m.DB.ListRunningSubagentJobs(ctx)
+	if err != nil {
+		return err
+	}
+	queued, err := m.DB.ListQueuedSubagentJobs(ctx)
+	if err != nil {
+		return err
+	}
+	m.ctx, m.cancel = context.WithCancel(ctx)
+	m.notifyCh = make(chan struct{}, m.MaxConcurrent)
+	m.started = true
+	for i := 0; i < m.MaxConcurrent; i++ {
+		m.wg.Add(1)
+		go m.workerLoop()
+	}
+	for _, job := range running {
+		m.reconcileInterruptedJob(job, "subagent interrupted during restart")
+	}
+	if len(queued) > 0 {
+		m.signalN(min(len(queued), m.MaxConcurrent))
+	}
+	return nil
+}
+
+// Stop cancels workers and waits for them to exit.
+func (m *SubagentManager) Stop(ctx context.Context) error {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	if !m.started {
+		m.mu.Unlock()
+		return nil
+	}
+	cancel := m.cancel
+	m.started = false
+	m.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	done := make(chan struct{})
+	go func() {
+		m.wg.Wait()
+		close(done)
+	}()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Enqueue stores a tool-originated subagent request and signals workers.
+func (m *SubagentManager) Enqueue(ctx context.Context, req tools.SpawnRequest) (tools.SpawnJob, error) {
+	if m == nil || m.DB == nil {
+		return tools.SpawnJob{}, fmt.Errorf("background subagents disabled")
+	}
+	task := strings.TrimSpace(req.Task)
+	if task == "" {
+		return tools.SpawnJob{}, fmt.Errorf("empty task")
+	}
+	parentSessionKey := strings.TrimSpace(req.ParentSessionKey)
+	if parentSessionKey == "" {
+		return tools.SpawnJob{}, fmt.Errorf("missing parent session")
+	}
+	jobID := newSubagentID()
+	metadata := map[string]any{}
+	if profileName := strings.TrimSpace(req.ProfileName); profileName != "" {
+		metadata["profile_name"] = profileName
+	}
+	metadataJSON := mustMetadataJSON(metadata)
+	job := db.SubagentJob{
+		ID:               jobID,
+		ParentSessionKey: parentSessionKey,
+		ChildSessionKey:  childSessionKey(parentSessionKey, jobID),
+		Channel:          strings.TrimSpace(req.Channel),
+		ReplyTo:          strings.TrimSpace(req.To),
+		Task:             task,
+		Status:           db.SubagentStatusQueued,
+		MetadataJSON:     metadataJSON,
+	}
+	if err := m.DB.EnqueueSubagentJobLimited(ctx, job, m.MaxQueued); err != nil {
+		return tools.SpawnJob{}, err
+	}
+	if m.Jobs != nil {
+		m.Jobs.RegisterWithID(job.ID, "subagent")
+		m.Jobs.Publish(job.ID, "queued", map[string]any{"status": db.SubagentStatusQueued, "child_session_key": job.ChildSessionKey})
+	}
+	m.signal()
+	return tools.SpawnJob{ID: job.ID, ChildSessionKey: job.ChildSessionKey}, nil
+}
+
+// EnqueueService stores a service-originated subagent request and signals workers.
+func (m *SubagentManager) EnqueueService(ctx context.Context, req ServiceSubagentRequest) (tools.SpawnJob, error) {
+	if m == nil || m.DB == nil {
+		return tools.SpawnJob{}, fmt.Errorf("background subagents disabled")
+	}
+	parentSessionKey := strings.TrimSpace(req.ParentSessionKey)
+	if parentSessionKey == "" {
+		return tools.SpawnJob{}, fmt.Errorf("missing parent session")
+	}
+	task := strings.TrimSpace(req.Task)
+	if task == "" {
+		return tools.SpawnJob{}, fmt.Errorf("empty task")
+	}
+	jobID := newSubagentID()
+	metadata := subagentJobMetadata{
+		ProfileName:    strings.TrimSpace(req.ProfileName),
+		AllowedTools:   append([]string{}, req.AllowedTools...),
+		RestrictTools:  req.RestrictTools,
+		PromptSnapshot: append([]providers.ChatMessage{}, req.PromptSnapshot...),
+		ServiceMeta:    cloneMap(req.Meta),
+		ApprovalToken:  strings.TrimSpace(req.ApprovalToken),
+		RequesterActor: strings.TrimSpace(req.RequesterActor),
+		RequesterRole:  strings.TrimSpace(req.RequesterRole),
+	}
+	if req.Timeout > 0 {
+		metadata.TimeoutSeconds = int(req.Timeout / time.Second)
+	}
+	job := db.SubagentJob{
+		ID:               jobID,
+		ParentSessionKey: parentSessionKey,
+		ChildSessionKey:  childSessionKey(parentSessionKey, jobID),
+		Channel:          strings.TrimSpace(req.Channel),
+		ReplyTo:          strings.TrimSpace(req.ReplyTo),
+		Task:             task,
+		Status:           db.SubagentStatusQueued,
+		MetadataJSON:     mustMetadataJSON(metadata),
+	}
+	if err := m.DB.EnqueueSubagentJobLimited(ctx, job, m.MaxQueued); err != nil {
+		return tools.SpawnJob{}, err
+	}
+	if m.Jobs != nil {
+		m.Jobs.RegisterWithID(job.ID, "subagent")
+		m.Jobs.Publish(job.ID, "queued", serviceLifecycleEventPayload(metadata.ServiceMeta, map[string]any{"status": db.SubagentStatusQueued, "child_session_key": job.ChildSessionKey}))
+	}
+	m.signal()
+	return tools.SpawnJob{ID: job.ID, ChildSessionKey: job.ChildSessionKey}, nil
+}
+
+func (m *SubagentManager) workerLoop() {
+	defer m.wg.Done()
+	for {
+		ran, err := m.runOnce()
+		if err != nil {
+			if !errors.Is(err, context.Canceled) {
+				log.Printf("subagent worker error: %v", err)
+			}
+		}
+		if ran {
+			continue
+		}
+		select {
+		case <-m.ctx.Done():
+			return
+		case <-m.notifyCh:
+		case <-time.After(subagentClaimRetryDelay):
+		}
+	}
+}
+
+func (m *SubagentManager) runOnce() (bool, error) {
+	job, err := m.DB.ClaimNextSubagentJob(m.ctx)
+	if err != nil || job == nil {
+		return false, err
+	}
+	m.executeJob(*job)
+	return true, nil
+}
+
+func (m *SubagentManager) executeJob(job db.SubagentJob) {
+	timeout := m.jobTimeout(job)
+	runCtx, cancel := context.WithTimeout(m.ctx, timeout)
+	defer cancel()
+	metadata := parseSubagentJobMetadata(job.MetadataJSON)
+	if m.Jobs != nil {
+		m.Jobs.AttachCancel(job.ID, cancel)
+		m.Jobs.Publish(job.ID, "started", serviceLifecycleEventPayload(metadata.ServiceMeta, map[string]any{"status": db.SubagentStatusRunning, "child_session_key": job.ChildSessionKey}))
+	}
+	result, err := m.runJob(runCtx, job)
+	if err != nil {
+		reason := strings.TrimSpace(err.Error())
+		switch {
+		case errors.Is(err, context.Canceled), errors.Is(runCtx.Err(), context.Canceled):
+			m.finalizeJob(runCtx, job, db.SubagentStatusInterrupted, "", "", reasonOrDefault(reason, "subagent interrupted"), true)
+		case errors.Is(err, context.DeadlineExceeded), errors.Is(runCtx.Err(), context.DeadlineExceeded):
+			m.finalizeJob(runCtx, job, db.SubagentStatusFailed, "", "", reasonOrDefault(reason, "subagent timed out"), true)
+		default:
+			m.finalizeJob(runCtx, job, db.SubagentStatusFailed, "", "", reasonOrDefault(reason, "subagent failed"), true)
+		}
+		return
+	}
+	m.finalizeJob(runCtx, job, db.SubagentStatusSucceeded, result.Preview, result.ArtifactID, "", true)
+}
+
+func (m *SubagentManager) runJob(ctx context.Context, job db.SubagentJob) (BackgroundRunResult, error) {
+	metadata := parseSubagentJobMetadata(job.MetadataJSON)
+	ctx = tools.ContextWithApprovalToken(ctx, metadata.ApprovalToken)
+	ctx = tools.ContextWithRequesterIdentity(ctx, metadata.RequesterActor, metadata.RequesterRole)
+	promptSnapshot := append([]providers.ChatMessage{}, metadata.PromptSnapshot...)
+	var err error
+	if len(promptSnapshot) == 0 {
+		promptSnapshot, err = m.Runtime.BuildPromptSnapshot(ctx, job.ParentSessionKey, job.Task)
+		if err != nil {
+			return BackgroundRunResult{}, err
+		}
+	}
+	if m.Jobs != nil {
+		ctx = ContextWithConversationObserver(ctx, m.Jobs.Observer(job.ID))
+		ctx = ContextWithStreamingChannel(ctx, NullStreamer{})
+	}
+	return m.Runtime.RunBackground(ctx, BackgroundRunInput{
+		SessionKey:       job.ChildSessionKey,
+		ParentSessionKey: job.ParentSessionKey,
+		Task:             job.Task,
+		PromptSnapshot:   promptSnapshot,
+		Tools:            toolRegistryWithAllowlist(m.backgroundTools(), metadata.AllowedTools, metadata.RestrictTools),
+		Meta: map[string]any{
+			"subagent_job_id":    job.ID,
+			"parent_session_key": job.ParentSessionKey,
+			"profile_name":       metadata.ProfileName,
+		},
+		Channel: job.Channel,
+		ReplyTo: job.ReplyTo,
+	})
+}
+
+func (m *SubagentManager) backgroundTools() *tools.Registry {
+	if m.BackgroundTools != nil {
+		return m.BackgroundTools()
+	}
+	return tools.NewRegistry()
+}
+
+func (m *SubagentManager) finalizeJob(baseCtx context.Context, job db.SubagentJob, status string, preview string, artifactID string, errText string, deliver bool) {
+	finalizeCtx, cancel := boundedContext(baseCtx, subagentFinalizeTimeout)
+	defer cancel()
+	success := status == db.SubagentStatusSucceeded
+	text := formatParentSubagentSummary(job, success, preview, artifactID, errText)
+	metadata := parseSubagentJobMetadata(job.MetadataJSON)
+	payload := map[string]any{
+		"subagent_job_id": job.ID,
+		"child_session":   job.ChildSessionKey,
+		"status":          status,
+	}
+	if artifactID != "" {
+		payload["artifact_id"] = artifactID
+	}
+	if err := m.DB.FinalizeSubagentJob(finalizeCtx, job, status, preview, artifactID, errText, text, payload); err != nil {
+		log.Printf("finalize subagent failed: job=%s err=%v", job.ID, err)
+		return
+	}
+	if m.Jobs != nil {
+		if status == db.SubagentStatusSucceeded {
+			m.Jobs.Complete(job.ID, status, serviceLifecycleEventPayload(metadata.ServiceMeta, map[string]any{"preview": preview, "artifact_id": artifactID, "child_session_key": job.ChildSessionKey}))
+		} else if status == db.SubagentStatusInterrupted {
+			m.Jobs.Complete(job.ID, "aborted", serviceLifecycleEventPayload(metadata.ServiceMeta, map[string]any{"message": errText, "child_session_key": job.ChildSessionKey}))
+		} else {
+			m.Jobs.Fail(job.ID, errText, serviceLifecycleEventPayload(metadata.ServiceMeta, map[string]any{"child_session_key": job.ChildSessionKey}))
+		}
+	}
+	if deliver {
+		m.deliverCompletion(finalizeCtx, job, success, preview, artifactID, errText)
+	}
+}
+
+// Abort cancels the running or queued subagent job with id.
+func (m *SubagentManager) Abort(ctx context.Context, id string) error {
+	if m == nil || m.DB == nil {
+		return fmt.Errorf("background subagents disabled")
+	}
+	if m.Jobs != nil && m.Jobs.Cancel(id) {
+		return nil
+	}
+	job, ok, err := m.DB.AbortQueuedSubagentJob(ctx, id, "subagent aborted before execution")
+	if err != nil {
+		return err
+	}
+	if !ok {
+		stored, exists, lookupErr := m.DB.GetSubagentJob(ctx, id)
+		if lookupErr != nil {
+			return lookupErr
+		}
+		if !exists {
+			return fmt.Errorf("job not found")
+		}
+		if stored.Status == db.SubagentStatusQueued {
+			return fmt.Errorf("job is not abortable")
+		}
+		return fmt.Errorf("job is not abortable")
+	}
+	if m.Jobs != nil {
+		m.Jobs.Complete(id, "aborted", map[string]any{"message": "subagent aborted before execution", "child_session_key": job.ChildSessionKey})
+	}
+	return nil
+}
+
+func (m *SubagentManager) jobTimeout(job db.SubagentJob) time.Duration {
+	metadata := parseSubagentJobMetadata(job.MetadataJSON)
+	if metadata.TimeoutSeconds > 0 {
+		return time.Duration(metadata.TimeoutSeconds) * time.Second
+	}
+	if m.TaskTimeout <= 0 {
+		return 5 * time.Minute
+	}
+	return m.TaskTimeout
+}
+
+func parseSubagentJobMetadata(raw string) subagentJobMetadata {
+	if strings.TrimSpace(raw) == "" {
+		return subagentJobMetadata{}
+	}
+	var metadata subagentJobMetadata
+	if err := json.Unmarshal([]byte(raw), &metadata); err != nil {
+		var legacy map[string]any
+		if legacyErr := json.Unmarshal([]byte(raw), &legacy); legacyErr != nil {
+			return subagentJobMetadata{}
+		}
+		metadata.ProfileName = strings.TrimSpace(fmt.Sprint(legacy["profile_name"]))
+		return metadata
+	}
+	metadata.ProfileName = strings.TrimSpace(metadata.ProfileName)
+	metadata.ApprovalToken = strings.TrimSpace(metadata.ApprovalToken)
+	metadata.RequesterActor = strings.TrimSpace(metadata.RequesterActor)
+	metadata.RequesterRole = strings.TrimSpace(metadata.RequesterRole)
+	return metadata
+}
+
+func serviceLifecycleEventPayload(serviceMeta map[string]any, payload map[string]any) map[string]any {
+	out := map[string]any{}
+	for key, value := range payload {
+		out[key] = value
+	}
+	for _, key := range []string{"request_id", "workspace_id", "network_session_id"} {
+		if value, ok := serviceMeta[key]; ok {
+			out[key] = value
+		}
+	}
+	return out
+}
+
+func mustMetadataJSON(payload any) string {
+	if payload == nil {
+		return "{}"
+	}
+	b, err := json.Marshal(payload)
+	if err != nil || len(b) == 0 {
+		return "{}"
+	}
+	return string(b)
+}
+
+func (m *SubagentManager) reconcileInterruptedJob(job db.SubagentJob, reason string) {
+	m.finalizeJob(m.ctx, job, db.SubagentStatusInterrupted, "", "", reasonOrDefault(reason, "subagent interrupted during restart"), false)
+}
+
+func (m *SubagentManager) deliverCompletion(ctx context.Context, job db.SubagentJob, success bool, preview string, artifactID string, errText string) {
+	deliverer := m.Deliver
+	if deliverer == nil && m.Runtime != nil {
+		deliverer = m.Runtime.Deliver
+	}
+	if deliverer == nil || strings.TrimSpace(job.Channel) == "" || strings.TrimSpace(job.ReplyTo) == "" {
+		return
+	}
+	text := formatDeliverySubagentSummary(job, success, preview, artifactID, errText)
+	if err := deliverer.Deliver(ctx, job.Channel, job.ReplyTo, text); err != nil {
+		log.Printf("subagent delivery failed: job=%s err=%v", job.ID, err)
+	}
+}
+
+func (m *SubagentManager) signal() {
+	m.signalN(1)
+}
+
+func (m *SubagentManager) signalN(n int) {
+	if n <= 0 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.started || m.notifyCh == nil {
+		return
+	}
+	for i := 0; i < n; i++ {
+		select {
+		case m.notifyCh <- struct{}{}:
+		default:
+			return
+		}
+	}
+}
+
+func boundedContext(base context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if base == nil {
+		base = context.Background()
+	} else {
+		base = context.WithoutCancel(base)
+	}
+	if timeout <= 0 {
+		return context.WithCancel(base)
+	}
+	return context.WithTimeout(base, timeout)
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func childSessionKey(parentSessionKey, jobID string) string {
+	return parentSessionKey + ":subagent:" + jobID
+}
+
+func newSubagentID() string {
+	var raw [12]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return fmt.Sprintf("job-%d", time.Now().UnixNano())
+	}
+	return "job-" + hex.EncodeToString(raw[:])
+}
+
+func reasonOrDefault(reason string, fallback string) string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return fallback
+	}
+	return reason
+}
+
+func formatParentSubagentSummary(job db.SubagentJob, success bool, preview string, artifactID string, errText string) string {
+	if success {
+		text := fmt.Sprintf("Background job %s completed: %s", job.ID, preview)
+		if artifactID != "" {
+			text += fmt.Sprintf("\nartifact_id=%s", artifactID)
+		}
+		return text
+	}
+	return fmt.Sprintf("Background job %s failed: %s", job.ID, reasonOrDefault(errText, "unknown error"))
+}
+
+func formatDeliverySubagentSummary(job db.SubagentJob, success bool, preview string, artifactID string, errText string) string {
+	if success {
+		text := fmt.Sprintf("Background job %s finished. %s", job.ID, preview)
+		if artifactID != "" {
+			text += fmt.Sprintf("\nartifact_id=%s", artifactID)
+		}
+		return text
+	}
+	return fmt.Sprintf("Background job %s failed. %s", job.ID, reasonOrDefault(errText, "unknown error"))
 }
 ````
 
@@ -23231,273 +24727,6 @@ func prepareWebFetchRequestContext(ctx context.Context, target *url.URL, policy 
 }
 ````
 
-## File: cmd/or3-intern/service_auth.go
-````go
-package main
-
-import (
-	"context"
-	"crypto/hmac"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
-	"encoding/json"
-	"fmt"
-	"net"
-	"net/http"
-	"strings"
-	"time"
-
-	"or3-intern/internal/approval"
-	"or3-intern/internal/config"
-)
-
-const serviceTokenMaxAge = 5 * time.Minute
-
-type serviceTokenClaims struct {
-	IssuedAt int64  `json:"iat"`
-	Nonce    string `json:"nonce"`
-}
-
-type serviceAuthContextKey struct{}
-type serviceAuthKindContextKey struct{}
-
-type serviceAuthIdentity struct {
-	Kind   string
-	Actor  string
-	Role   string
-	Device string
-}
-
-func serviceAuthMiddleware(secret string, next http.Handler) http.Handler {
-	return serviceAuthMiddlewareWithBroker(config.Config{Service: config.ServiceConfig{Secret: secret, SharedSecretRole: approval.RoleServiceClient}}, nil, next)
-}
-
-func serviceAuthMiddlewareWithBroker(cfg config.Config, broker *approval.Broker, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if allowsUnauthenticatedPairingRoute(cfg, r) {
-			ctx := approval.ContextWithAuditAuthKind(r.Context(), "unauthenticated")
-			ctx = approval.ContextWithAuditActor(ctx, "anonymous")
-			next.ServeHTTP(w, r.WithContext(ctx))
-			return
-		}
-		identity, err := authenticateServiceRequest(cfg, broker, r.Header.Get("Authorization"), time.Now(), r.Context())
-		if err != nil {
-			writeServiceJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
-			return
-		}
-		ctx := context.WithValue(r.Context(), serviceAuthContextKey{}, identity)
-		ctx = context.WithValue(ctx, serviceAuthKindContextKey{}, identity.Kind)
-		ctx = approval.ContextWithAuditAuthKind(ctx, identity.Kind)
-		ctx = approval.ContextWithAuditActor(ctx, identity.Actor)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
-
-func authenticateServiceRequest(cfg config.Config, broker *approval.Broker, header string, now time.Time, ctx context.Context) (serviceAuthIdentity, error) {
-	if err := validateServiceAuthorization(cfg.Service.Secret, header, now); err == nil {
-		role := strings.TrimSpace(cfg.Service.SharedSecretRole)
-		if role == "" {
-			role = approval.RoleServiceClient
-		}
-		return serviceAuthIdentity{Kind: "shared-secret", Actor: "service:shared-secret", Role: role}, nil
-	}
-	if broker == nil {
-		return serviceAuthIdentity{}, fmt.Errorf("missing bearer token")
-	}
-	scheme, token, ok := strings.Cut(strings.TrimSpace(header), " ")
-	if !ok || !strings.EqualFold(scheme, "Bearer") || strings.TrimSpace(token) == "" {
-		return serviceAuthIdentity{}, fmt.Errorf("missing bearer token")
-	}
-	device, err := broker.AuthenticateDeviceToken(ctx, token)
-	if err != nil {
-		return serviceAuthIdentity{}, err
-	}
-	return serviceAuthIdentity{Kind: "paired-device", Actor: "device:" + device.DeviceID, Role: device.Role, Device: device.DeviceID}, nil
-}
-
-func serviceAuthIdentityFromContext(ctx context.Context) serviceAuthIdentity {
-	if ctx == nil {
-		return serviceAuthIdentity{}
-	}
-	identity, _ := ctx.Value(serviceAuthContextKey{}).(serviceAuthIdentity)
-	return identity
-}
-
-func serviceAuthKindFromContext(ctx context.Context) string {
-	if ctx == nil {
-		return ""
-	}
-	kind, _ := ctx.Value(serviceAuthKindContextKey{}).(string)
-	return kind
-}
-
-func allowsUnauthenticatedPairingRoute(cfg config.Config, r *http.Request) bool {
-	if r == nil || r.URL == nil {
-		return false
-	}
-	if !cfg.Service.AllowUnauthenticatedPairing {
-		return false
-	}
-	if !serviceListenIsLoopback(cfg.Service.Listen) {
-		return false
-	}
-	if !requestRemoteIsLoopback(r.RemoteAddr) {
-		return false
-	}
-	if r.Method != http.MethodPost {
-		return false
-	}
-	path := strings.TrimSpace(r.URL.Path)
-	return path == "/internal/v1/pairing/requests" || path == "/internal/v1/pairing/exchange"
-}
-
-func requireServiceRole(w http.ResponseWriter, r *http.Request, roles ...string) bool {
-	identity := serviceAuthIdentityFromContext(r.Context())
-	if len(roles) == 0 {
-		return true
-	}
-	for _, role := range roles {
-		if serviceRoleRank(identity.Role) >= serviceRoleRank(role) {
-			return true
-		}
-	}
-	writeServiceJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
-	return false
-}
-
-func serviceRoleRank(role string) int {
-	switch strings.ToLower(strings.TrimSpace(role)) {
-	case approval.RoleAdmin:
-		return 4
-	case approval.RoleOperator:
-		return 3
-	case approval.RoleServiceClient, approval.RoleWebUI, approval.RoleNode:
-		return 2
-	case approval.RoleViewer:
-		return 1
-	default:
-		return 0
-	}
-}
-
-func serviceListenIsLoopback(addr string) bool {
-	host := strings.TrimSpace(addr)
-	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
-		host = parsedHost
-	}
-	host = strings.Trim(host, "[]")
-	if host == "" {
-		return false
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		return ip.IsLoopback()
-	}
-	return strings.EqualFold(host, "localhost")
-}
-
-func requestRemoteIsLoopback(addr string) bool {
-	host := strings.TrimSpace(addr)
-	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
-		host = parsedHost
-	}
-	host = strings.Trim(host, "[]")
-	if ip := net.ParseIP(host); ip != nil {
-		return ip.IsLoopback()
-	}
-	return strings.EqualFold(host, "localhost")
-}
-
-func validateServiceAuthorization(secret string, header string, now time.Time) error {
-	secret = strings.TrimSpace(secret)
-	if secret == "" {
-		return fmt.Errorf("service secret is not configured")
-	}
-	scheme, token, ok := strings.Cut(strings.TrimSpace(header), " ")
-	if !ok || !strings.EqualFold(scheme, "Bearer") || strings.TrimSpace(token) == "" {
-		return fmt.Errorf("missing bearer token")
-	}
-	return validateServiceBearerToken(secret, token, now)
-}
-
-func validateServiceBearerToken(secret string, token string, now time.Time) error {
-	payloadPart, signaturePart, ok := strings.Cut(strings.TrimSpace(token), ".")
-	if !ok || payloadPart == "" || signaturePart == "" {
-		return fmt.Errorf("invalid bearer token format")
-	}
-	signature, err := hex.DecodeString(signaturePart)
-	if err != nil {
-		return fmt.Errorf("invalid bearer token signature")
-	}
-	expected := signServiceToken(secret, payloadPart)
-	if !hmac.Equal(signature, expected) {
-		return fmt.Errorf("invalid bearer token signature")
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(payloadPart)
-	if err != nil {
-		return fmt.Errorf("invalid bearer token payload")
-	}
-	var claims serviceTokenClaims
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return fmt.Errorf("invalid bearer token payload")
-	}
-	if claims.IssuedAt <= 0 {
-		return fmt.Errorf("invalid bearer token timestamp")
-	}
-	issuedAt := time.Unix(claims.IssuedAt, 0)
-	if issuedAt.After(now.Add(30 * time.Second)) {
-		return fmt.Errorf("bearer token timestamp is in the future")
-	}
-	if now.Sub(issuedAt) > serviceTokenMaxAge {
-		return fmt.Errorf("bearer token expired")
-	}
-	if strings.TrimSpace(claims.Nonce) == "" {
-		return fmt.Errorf("invalid bearer token nonce")
-	}
-	return nil
-}
-
-func issueServiceBearerToken(secret string, now time.Time) (string, error) {
-	nonce, err := randomHex(12)
-	if err != nil {
-		return "", err
-	}
-	claims := serviceTokenClaims{IssuedAt: now.Unix(), Nonce: nonce}
-	payload, err := json.Marshal(claims)
-	if err != nil {
-		return "", err
-	}
-	payloadPart := base64.RawURLEncoding.EncodeToString(payload)
-	signature := hex.EncodeToString(signServiceToken(secret, payloadPart))
-	return payloadPart + "." + signature, nil
-}
-
-func signServiceToken(secret string, payloadPart string) []byte {
-	mac := hmac.New(sha256.New, []byte(secret))
-	_, _ = mac.Write([]byte(payloadPart))
-	return mac.Sum(nil)
-}
-
-func randomHex(size int) (string, error) {
-	if size <= 0 {
-		return "", nil
-	}
-	buf := make([]byte, size)
-	if _, err := rand.Read(buf); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(buf), nil
-}
-
-func withDetachedContext(ctx context.Context) context.Context {
-	if ctx == nil {
-		return context.Background()
-	}
-	return context.WithoutCancel(ctx)
-}
-````
-
 ## File: cmd/or3-intern/startup_validation.go
 ````go
 package main
@@ -23611,566 +24840,6 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
-}
-````
-
-## File: internal/agent/subagents.go
-````go
-package agent
-
-import (
-	"context"
-	"crypto/rand"
-	"encoding/hex"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"log"
-	"strings"
-	"sync"
-	"time"
-
-	"or3-intern/internal/db"
-	"or3-intern/internal/providers"
-	"or3-intern/internal/tools"
-)
-
-const (
-	subagentClaimRetryDelay = 25 * time.Millisecond
-	subagentFinalizeTimeout = 5 * time.Second
-)
-
-// SubagentManager queues and runs background subagent jobs.
-type SubagentManager struct {
-	DB              *db.DB
-	Runtime         *Runtime
-	Deliver         Deliverer
-	MaxConcurrent   int
-	MaxQueued       int
-	TaskTimeout     time.Duration
-	BackgroundTools func() *tools.Registry
-	Jobs            *JobRegistry
-
-	mu       sync.Mutex
-	started  bool
-	ctx      context.Context
-	cancel   context.CancelFunc
-	notifyCh chan struct{}
-	wg       sync.WaitGroup
-}
-
-// ServiceSubagentRequest describes a service-originated subagent request.
-type ServiceSubagentRequest struct {
-	ParentSessionKey string
-	Task             string
-	PromptSnapshot   []providers.ChatMessage
-	AllowedTools     []string
-	RestrictTools    bool
-	ProfileName      string
-	Channel          string
-	ReplyTo          string
-	Meta             map[string]any
-	Timeout          time.Duration
-	ApprovalToken    string
-	RequesterActor   string
-	RequesterRole    string
-}
-
-type subagentJobMetadata struct {
-	ProfileName    string                  `json:"profile_name,omitempty"`
-	AllowedTools   []string                `json:"allowed_tools,omitempty"`
-	RestrictTools  bool                    `json:"restrict_tools,omitempty"`
-	PromptSnapshot []providers.ChatMessage `json:"prompt_snapshot,omitempty"`
-	TimeoutSeconds int                     `json:"timeout_seconds,omitempty"`
-	ServiceMeta    map[string]any          `json:"service_meta,omitempty"`
-	ApprovalToken  string                  `json:"approval_token,omitempty"`
-	RequesterActor string                  `json:"requester_actor,omitempty"`
-	RequesterRole  string                  `json:"requester_role,omitempty"`
-}
-
-// Start launches the background workers and resumes queued jobs.
-func (m *SubagentManager) Start(ctx context.Context) error {
-	if m == nil {
-		return fmt.Errorf("subagent manager is nil")
-	}
-	if m.DB == nil {
-		return fmt.Errorf("subagent db not configured")
-	}
-	if m.Runtime == nil {
-		return fmt.Errorf("subagent runtime not configured")
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.started {
-		return nil
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if m.MaxConcurrent <= 0 {
-		m.MaxConcurrent = 1
-	}
-	if m.MaxQueued <= 0 {
-		m.MaxQueued = 32
-	}
-	if m.TaskTimeout <= 0 {
-		m.TaskTimeout = 5 * time.Minute
-	}
-	running, err := m.DB.ListRunningSubagentJobs(ctx)
-	if err != nil {
-		return err
-	}
-	queued, err := m.DB.ListQueuedSubagentJobs(ctx)
-	if err != nil {
-		return err
-	}
-	m.ctx, m.cancel = context.WithCancel(ctx)
-	m.notifyCh = make(chan struct{}, m.MaxConcurrent)
-	m.started = true
-	for i := 0; i < m.MaxConcurrent; i++ {
-		m.wg.Add(1)
-		go m.workerLoop()
-	}
-	for _, job := range running {
-		m.reconcileInterruptedJob(job, "subagent interrupted during restart")
-	}
-	if len(queued) > 0 {
-		m.signalN(min(len(queued), m.MaxConcurrent))
-	}
-	return nil
-}
-
-// Stop cancels workers and waits for them to exit.
-func (m *SubagentManager) Stop(ctx context.Context) error {
-	if m == nil {
-		return nil
-	}
-	m.mu.Lock()
-	if !m.started {
-		m.mu.Unlock()
-		return nil
-	}
-	cancel := m.cancel
-	m.started = false
-	m.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-	done := make(chan struct{})
-	go func() {
-		m.wg.Wait()
-		close(done)
-	}()
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-// Enqueue stores a tool-originated subagent request and signals workers.
-func (m *SubagentManager) Enqueue(ctx context.Context, req tools.SpawnRequest) (tools.SpawnJob, error) {
-	if m == nil || m.DB == nil {
-		return tools.SpawnJob{}, fmt.Errorf("background subagents disabled")
-	}
-	task := strings.TrimSpace(req.Task)
-	if task == "" {
-		return tools.SpawnJob{}, fmt.Errorf("empty task")
-	}
-	parentSessionKey := strings.TrimSpace(req.ParentSessionKey)
-	if parentSessionKey == "" {
-		return tools.SpawnJob{}, fmt.Errorf("missing parent session")
-	}
-	jobID := newSubagentID()
-	metadata := map[string]any{}
-	if profileName := strings.TrimSpace(req.ProfileName); profileName != "" {
-		metadata["profile_name"] = profileName
-	}
-	metadataJSON := mustMetadataJSON(metadata)
-	job := db.SubagentJob{
-		ID:               jobID,
-		ParentSessionKey: parentSessionKey,
-		ChildSessionKey:  childSessionKey(parentSessionKey, jobID),
-		Channel:          strings.TrimSpace(req.Channel),
-		ReplyTo:          strings.TrimSpace(req.To),
-		Task:             task,
-		Status:           db.SubagentStatusQueued,
-		MetadataJSON:     metadataJSON,
-	}
-	if err := m.DB.EnqueueSubagentJobLimited(ctx, job, m.MaxQueued); err != nil {
-		return tools.SpawnJob{}, err
-	}
-	if m.Jobs != nil {
-		m.Jobs.RegisterWithID(job.ID, "subagent")
-		m.Jobs.Publish(job.ID, "queued", map[string]any{"status": db.SubagentStatusQueued, "child_session_key": job.ChildSessionKey})
-	}
-	m.signal()
-	return tools.SpawnJob{ID: job.ID, ChildSessionKey: job.ChildSessionKey}, nil
-}
-
-// EnqueueService stores a service-originated subagent request and signals workers.
-func (m *SubagentManager) EnqueueService(ctx context.Context, req ServiceSubagentRequest) (tools.SpawnJob, error) {
-	if m == nil || m.DB == nil {
-		return tools.SpawnJob{}, fmt.Errorf("background subagents disabled")
-	}
-	parentSessionKey := strings.TrimSpace(req.ParentSessionKey)
-	if parentSessionKey == "" {
-		return tools.SpawnJob{}, fmt.Errorf("missing parent session")
-	}
-	task := strings.TrimSpace(req.Task)
-	if task == "" {
-		return tools.SpawnJob{}, fmt.Errorf("empty task")
-	}
-	jobID := newSubagentID()
-	metadata := subagentJobMetadata{
-		ProfileName:    strings.TrimSpace(req.ProfileName),
-		AllowedTools:   append([]string{}, req.AllowedTools...),
-		RestrictTools:  req.RestrictTools,
-		PromptSnapshot: append([]providers.ChatMessage{}, req.PromptSnapshot...),
-		ServiceMeta:    cloneMap(req.Meta),
-		ApprovalToken:  strings.TrimSpace(req.ApprovalToken),
-		RequesterActor: strings.TrimSpace(req.RequesterActor),
-		RequesterRole:  strings.TrimSpace(req.RequesterRole),
-	}
-	if req.Timeout > 0 {
-		metadata.TimeoutSeconds = int(req.Timeout / time.Second)
-	}
-	job := db.SubagentJob{
-		ID:               jobID,
-		ParentSessionKey: parentSessionKey,
-		ChildSessionKey:  childSessionKey(parentSessionKey, jobID),
-		Channel:          strings.TrimSpace(req.Channel),
-		ReplyTo:          strings.TrimSpace(req.ReplyTo),
-		Task:             task,
-		Status:           db.SubagentStatusQueued,
-		MetadataJSON:     mustMetadataJSON(metadata),
-	}
-	if err := m.DB.EnqueueSubagentJobLimited(ctx, job, m.MaxQueued); err != nil {
-		return tools.SpawnJob{}, err
-	}
-	if m.Jobs != nil {
-		m.Jobs.RegisterWithID(job.ID, "subagent")
-		m.Jobs.Publish(job.ID, "queued", serviceLifecycleEventPayload(metadata.ServiceMeta, map[string]any{"status": db.SubagentStatusQueued, "child_session_key": job.ChildSessionKey}))
-	}
-	m.signal()
-	return tools.SpawnJob{ID: job.ID, ChildSessionKey: job.ChildSessionKey}, nil
-}
-
-func (m *SubagentManager) workerLoop() {
-	defer m.wg.Done()
-	for {
-		ran, err := m.runOnce()
-		if err != nil {
-			if !errors.Is(err, context.Canceled) {
-				log.Printf("subagent worker error: %v", err)
-			}
-		}
-		if ran {
-			continue
-		}
-		select {
-		case <-m.ctx.Done():
-			return
-		case <-m.notifyCh:
-		case <-time.After(subagentClaimRetryDelay):
-		}
-	}
-}
-
-func (m *SubagentManager) runOnce() (bool, error) {
-	job, err := m.DB.ClaimNextSubagentJob(m.ctx)
-	if err != nil || job == nil {
-		return false, err
-	}
-	m.executeJob(*job)
-	return true, nil
-}
-
-func (m *SubagentManager) executeJob(job db.SubagentJob) {
-	timeout := m.jobTimeout(job)
-	runCtx, cancel := context.WithTimeout(m.ctx, timeout)
-	defer cancel()
-	metadata := parseSubagentJobMetadata(job.MetadataJSON)
-	if m.Jobs != nil {
-		m.Jobs.AttachCancel(job.ID, cancel)
-		m.Jobs.Publish(job.ID, "started", serviceLifecycleEventPayload(metadata.ServiceMeta, map[string]any{"status": db.SubagentStatusRunning, "child_session_key": job.ChildSessionKey}))
-	}
-	result, err := m.runJob(runCtx, job)
-	if err != nil {
-		reason := strings.TrimSpace(err.Error())
-		switch {
-		case errors.Is(err, context.Canceled), errors.Is(runCtx.Err(), context.Canceled):
-			m.finalizeJob(runCtx, job, db.SubagentStatusInterrupted, "", "", reasonOrDefault(reason, "subagent interrupted"), true)
-		case errors.Is(err, context.DeadlineExceeded), errors.Is(runCtx.Err(), context.DeadlineExceeded):
-			m.finalizeJob(runCtx, job, db.SubagentStatusFailed, "", "", reasonOrDefault(reason, "subagent timed out"), true)
-		default:
-			m.finalizeJob(runCtx, job, db.SubagentStatusFailed, "", "", reasonOrDefault(reason, "subagent failed"), true)
-		}
-		return
-	}
-	m.finalizeJob(runCtx, job, db.SubagentStatusSucceeded, result.Preview, result.ArtifactID, "", true)
-}
-
-func (m *SubagentManager) runJob(ctx context.Context, job db.SubagentJob) (BackgroundRunResult, error) {
-	metadata := parseSubagentJobMetadata(job.MetadataJSON)
-	ctx = tools.ContextWithApprovalToken(ctx, metadata.ApprovalToken)
-	ctx = tools.ContextWithRequesterIdentity(ctx, metadata.RequesterActor, metadata.RequesterRole)
-	promptSnapshot := append([]providers.ChatMessage{}, metadata.PromptSnapshot...)
-	var err error
-	if len(promptSnapshot) == 0 {
-		promptSnapshot, err = m.Runtime.BuildPromptSnapshot(ctx, job.ParentSessionKey, job.Task)
-		if err != nil {
-			return BackgroundRunResult{}, err
-		}
-	}
-	if m.Jobs != nil {
-		ctx = ContextWithConversationObserver(ctx, m.Jobs.Observer(job.ID))
-		ctx = ContextWithStreamingChannel(ctx, NullStreamer{})
-	}
-	return m.Runtime.RunBackground(ctx, BackgroundRunInput{
-		SessionKey:       job.ChildSessionKey,
-		ParentSessionKey: job.ParentSessionKey,
-		Task:             job.Task,
-		PromptSnapshot:   promptSnapshot,
-		Tools:            toolRegistryWithAllowlist(m.backgroundTools(), metadata.AllowedTools, metadata.RestrictTools),
-		Meta: map[string]any{
-			"subagent_job_id":    job.ID,
-			"parent_session_key": job.ParentSessionKey,
-			"profile_name":       metadata.ProfileName,
-		},
-		Channel: job.Channel,
-		ReplyTo: job.ReplyTo,
-	})
-}
-
-func (m *SubagentManager) backgroundTools() *tools.Registry {
-	if m.BackgroundTools != nil {
-		return m.BackgroundTools()
-	}
-	return tools.NewRegistry()
-}
-
-func (m *SubagentManager) finalizeJob(baseCtx context.Context, job db.SubagentJob, status string, preview string, artifactID string, errText string, deliver bool) {
-	finalizeCtx, cancel := boundedContext(baseCtx, subagentFinalizeTimeout)
-	defer cancel()
-	success := status == db.SubagentStatusSucceeded
-	text := formatParentSubagentSummary(job, success, preview, artifactID, errText)
-	metadata := parseSubagentJobMetadata(job.MetadataJSON)
-	payload := map[string]any{
-		"subagent_job_id": job.ID,
-		"child_session":   job.ChildSessionKey,
-		"status":          status,
-	}
-	if artifactID != "" {
-		payload["artifact_id"] = artifactID
-	}
-	if err := m.DB.FinalizeSubagentJob(finalizeCtx, job, status, preview, artifactID, errText, text, payload); err != nil {
-		log.Printf("finalize subagent failed: job=%s err=%v", job.ID, err)
-		return
-	}
-	if m.Jobs != nil {
-		if status == db.SubagentStatusSucceeded {
-			m.Jobs.Complete(job.ID, status, serviceLifecycleEventPayload(metadata.ServiceMeta, map[string]any{"preview": preview, "artifact_id": artifactID, "child_session_key": job.ChildSessionKey}))
-		} else if status == db.SubagentStatusInterrupted {
-			m.Jobs.Complete(job.ID, "aborted", serviceLifecycleEventPayload(metadata.ServiceMeta, map[string]any{"message": errText, "child_session_key": job.ChildSessionKey}))
-		} else {
-			m.Jobs.Fail(job.ID, errText, serviceLifecycleEventPayload(metadata.ServiceMeta, map[string]any{"child_session_key": job.ChildSessionKey}))
-		}
-	}
-	if deliver {
-		m.deliverCompletion(finalizeCtx, job, success, preview, artifactID, errText)
-	}
-}
-
-// Abort cancels the running or queued subagent job with id.
-func (m *SubagentManager) Abort(ctx context.Context, id string) error {
-	if m == nil || m.DB == nil {
-		return fmt.Errorf("background subagents disabled")
-	}
-	if m.Jobs != nil && m.Jobs.Cancel(id) {
-		return nil
-	}
-	job, ok, err := m.DB.AbortQueuedSubagentJob(ctx, id, "subagent aborted before execution")
-	if err != nil {
-		return err
-	}
-	if !ok {
-		stored, exists, lookupErr := m.DB.GetSubagentJob(ctx, id)
-		if lookupErr != nil {
-			return lookupErr
-		}
-		if !exists {
-			return fmt.Errorf("job not found")
-		}
-		if stored.Status == db.SubagentStatusQueued {
-			return fmt.Errorf("job is not abortable")
-		}
-		return fmt.Errorf("job is not abortable")
-	}
-	if m.Jobs != nil {
-		m.Jobs.Complete(id, "aborted", map[string]any{"message": "subagent aborted before execution", "child_session_key": job.ChildSessionKey})
-	}
-	return nil
-}
-
-func (m *SubagentManager) jobTimeout(job db.SubagentJob) time.Duration {
-	metadata := parseSubagentJobMetadata(job.MetadataJSON)
-	if metadata.TimeoutSeconds > 0 {
-		return time.Duration(metadata.TimeoutSeconds) * time.Second
-	}
-	if m.TaskTimeout <= 0 {
-		return 5 * time.Minute
-	}
-	return m.TaskTimeout
-}
-
-func parseSubagentJobMetadata(raw string) subagentJobMetadata {
-	if strings.TrimSpace(raw) == "" {
-		return subagentJobMetadata{}
-	}
-	var metadata subagentJobMetadata
-	if err := json.Unmarshal([]byte(raw), &metadata); err != nil {
-		var legacy map[string]any
-		if legacyErr := json.Unmarshal([]byte(raw), &legacy); legacyErr != nil {
-			return subagentJobMetadata{}
-		}
-		metadata.ProfileName = strings.TrimSpace(fmt.Sprint(legacy["profile_name"]))
-		return metadata
-	}
-	metadata.ProfileName = strings.TrimSpace(metadata.ProfileName)
-	metadata.ApprovalToken = strings.TrimSpace(metadata.ApprovalToken)
-	metadata.RequesterActor = strings.TrimSpace(metadata.RequesterActor)
-	metadata.RequesterRole = strings.TrimSpace(metadata.RequesterRole)
-	return metadata
-}
-
-func serviceLifecycleEventPayload(serviceMeta map[string]any, payload map[string]any) map[string]any {
-	out := map[string]any{}
-	for key, value := range payload {
-		out[key] = value
-	}
-	for _, key := range []string{"request_id", "workspace_id", "network_session_id"} {
-		if value, ok := serviceMeta[key]; ok {
-			out[key] = value
-		}
-	}
-	return out
-}
-
-func mustMetadataJSON(payload any) string {
-	if payload == nil {
-		return "{}"
-	}
-	b, err := json.Marshal(payload)
-	if err != nil || len(b) == 0 {
-		return "{}"
-	}
-	return string(b)
-}
-
-func (m *SubagentManager) reconcileInterruptedJob(job db.SubagentJob, reason string) {
-	m.finalizeJob(m.ctx, job, db.SubagentStatusInterrupted, "", "", reasonOrDefault(reason, "subagent interrupted during restart"), false)
-}
-
-func (m *SubagentManager) deliverCompletion(ctx context.Context, job db.SubagentJob, success bool, preview string, artifactID string, errText string) {
-	deliverer := m.Deliver
-	if deliverer == nil && m.Runtime != nil {
-		deliverer = m.Runtime.Deliver
-	}
-	if deliverer == nil || strings.TrimSpace(job.Channel) == "" || strings.TrimSpace(job.ReplyTo) == "" {
-		return
-	}
-	text := formatDeliverySubagentSummary(job, success, preview, artifactID, errText)
-	if err := deliverer.Deliver(ctx, job.Channel, job.ReplyTo, text); err != nil {
-		log.Printf("subagent delivery failed: job=%s err=%v", job.ID, err)
-	}
-}
-
-func (m *SubagentManager) signal() {
-	m.signalN(1)
-}
-
-func (m *SubagentManager) signalN(n int) {
-	if n <= 0 {
-		return
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if !m.started || m.notifyCh == nil {
-		return
-	}
-	for i := 0; i < n; i++ {
-		select {
-		case m.notifyCh <- struct{}{}:
-		default:
-			return
-		}
-	}
-}
-
-func boundedContext(base context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
-	if base == nil {
-		base = context.Background()
-	} else {
-		base = context.WithoutCancel(base)
-	}
-	if timeout <= 0 {
-		return context.WithCancel(base)
-	}
-	return context.WithTimeout(base, timeout)
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func childSessionKey(parentSessionKey, jobID string) string {
-	return parentSessionKey + ":subagent:" + jobID
-}
-
-func newSubagentID() string {
-	var raw [12]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		return fmt.Sprintf("job-%d", time.Now().UnixNano())
-	}
-	return "job-" + hex.EncodeToString(raw[:])
-}
-
-func reasonOrDefault(reason string, fallback string) string {
-	reason = strings.TrimSpace(reason)
-	if reason == "" {
-		return fallback
-	}
-	return reason
-}
-
-func formatParentSubagentSummary(job db.SubagentJob, success bool, preview string, artifactID string, errText string) string {
-	if success {
-		text := fmt.Sprintf("Background job %s completed: %s", job.ID, preview)
-		if artifactID != "" {
-			text += fmt.Sprintf("\nartifact_id=%s", artifactID)
-		}
-		return text
-	}
-	return fmt.Sprintf("Background job %s failed: %s", job.ID, reasonOrDefault(errText, "unknown error"))
-}
-
-func formatDeliverySubagentSummary(job db.SubagentJob, success bool, preview string, artifactID string, errText string) string {
-	if success {
-		text := fmt.Sprintf("Background job %s finished. %s", job.ID, preview)
-		if artifactID != "" {
-			text += fmt.Sprintf("\nartifact_id=%s", artifactID)
-		}
-		return text
-	}
-	return fmt.Sprintf("Background job %s failed. %s", job.ID, reasonOrDefault(errText, "unknown error"))
 }
 ````
 
@@ -24395,768 +25064,6 @@ func (w *CLIStreamWriter) Abort(ctx context.Context) error {
 // BeginStream returns a stream writer for incremental CLI output.
 func (d Deliverer) BeginStream(ctx context.Context, to string, meta map[string]any) (channels.StreamWriter, error) {
 	return &CLIStreamWriter{spinner: d.Spinner, bridge: d.bridge, sessionKey: agent.ConversationSessionFromContext(ctx)}, nil
-}
-````
-
-## File: internal/memory/retrieve.go
-````go
-// Package memory retrieves and consolidates long-lived memory entries.
-package memory
-
-import (
-	"context"
-	"math"
-	"sort"
-	"strings"
-
-	"or3-intern/internal/db"
-)
-
-// Retrieved is one memory hit returned from hybrid retrieval.
-type Retrieved struct {
-	Source     string // pinned|vector|fts|hybrid
-	ID         int64
-	Text       string
-	Score      float64
-	Kind       string
-	Status     string
-	Importance float64
-	UseCount   int
-	CreatedAt  int64
-	LastUsedAt int64
-}
-
-// Retriever ranks vector, FTS, lexical, and recency signals into a single result set.
-type Retriever struct {
-	DB               *db.DB
-	EmbedFingerprint string
-	VectorWeight     float64
-	FTSWeight        float64
-	LexicalWeight    float64
-	RecencyWeight    float64
-	VectorScanLimit  int
-}
-
-// NewRetriever constructs a Retriever with default ranking weights.
-func NewRetriever(d *db.DB) *Retriever {
-	return &Retriever{DB: d, VectorWeight: 0.55, FTSWeight: 0.25, LexicalWeight: 0.12, RecencyWeight: 0.08, VectorScanLimit: 2000}
-}
-
-// Retrieve runs hybrid retrieval and returns diversified top-k memory results.
-func (r *Retriever) Retrieve(ctx context.Context, sessionKey, query string, queryVec []float32, vectorK, ftsK, topK int) ([]Retrieved, error) {
-	var vecs []VecCandidate
-	if strings.TrimSpace(r.EmbedFingerprint) == "" {
-		var err error
-		vecs, err = VectorSearch(ctx, r.DB, sessionKey, queryVec, vectorK, r.VectorScanLimit)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		fingerprint, err := r.DB.MemoryVectorFingerprint(ctx)
-		if err != nil {
-			return nil, err
-		}
-		if fingerprint == strings.TrimSpace(r.EmbedFingerprint) {
-			vecs, err = VectorSearch(ctx, r.DB, sessionKey, queryVec, vectorK, r.VectorScanLimit)
-			if err != nil {
-				return nil, err
-			}
-		}
-	}
-	fts, err := searchFTSWithFallback(ctx, r.DB, sessionKey, query, ftsK)
-	if err != nil {
-		return nil, err
-	}
-
-	type agg struct {
-		id         int64
-		text       string
-		v          float64
-		f          float64
-		createdAt  int64
-		kind       string
-		status     string
-		importance float64
-		useCount   int
-		lastUsedAt int64
-	}
-	m := map[int64]*agg{}
-	for _, c := range vecs {
-		a := m[c.ID]
-		if a == nil {
-			a = &agg{
-				id:         c.ID,
-				text:       c.Text,
-				kind:       c.Kind,
-				status:     c.Status,
-				importance: c.Importance,
-				useCount:   c.UseCount,
-				lastUsedAt: c.LastUsedAt,
-			}
-			m[c.ID] = a
-		}
-		a.v = c.Score
-		if c.CreatedAt > a.createdAt {
-			a.createdAt = c.CreatedAt
-		}
-	}
-	for _, f := range fts {
-		a := m[f.ID]
-		if a == nil {
-			a = &agg{
-				id:         f.ID,
-				text:       f.Text,
-				kind:       f.Kind,
-				status:     f.Status,
-				importance: f.Importance,
-				useCount:   f.UseCount,
-				lastUsedAt: f.LastUsedAt,
-			}
-			m[f.ID] = a
-		} else {
-			// Prefer the metadata from FTS if vector didn't have it (both are the same row).
-			if a.kind == "" {
-				a.kind = f.Kind
-			}
-		}
-		// bm25 lower is better. Convert to a positive "higher is better".
-		a.f = 1.0 / (1.0 + f.Rank)
-		if f.CreatedAt > a.createdAt {
-			a.createdAt = f.CreatedAt
-		}
-	}
-
-	raw := make([]Retrieved, 0, len(m))
-	tokens := retrievalTokens(query)
-	newest := int64(0)
-	for _, a := range m {
-		if a.createdAt > newest {
-			newest = a.createdAt
-		}
-	}
-	for _, a := range m {
-		lexical := lexicalOverlapScore(tokens, a.text)
-		recency := recencyScore(a.createdAt, newest)
-		score := (a.v * r.VectorWeight) + (a.f * r.FTSWeight) + (lexical * r.LexicalWeight) + (recency * r.RecencyWeight)
-
-		// Apply small bounded metadata adjustments so vector/FTS relevance
-		// still dominates while durable/active notes get a slight preference.
-		score += metadataScoreAdjust(a.kind, a.status, a.importance, a.useCount)
-		if score < 0 {
-			score = 0
-		}
-
-		src := "hybrid"
-		if a.f > 0 && a.v == 0 {
-			src = "fts"
-		}
-		if a.v > 0 && a.f == 0 {
-			src = "vector"
-		}
-		raw = append(raw, Retrieved{
-			Source:     src,
-			ID:         a.id,
-			Text:       a.text,
-			Score:      score,
-			Kind:       a.kind,
-			Status:     a.status,
-			Importance: a.importance,
-			UseCount:   a.useCount,
-			CreatedAt:  a.createdAt,
-			LastUsedAt: a.lastUsedAt,
-		})
-	}
-
-	sort.Slice(raw, func(i, j int) bool {
-		if raw[i].Score == raw[j].Score {
-			return raw[i].ID > raw[j].ID
-		}
-		return raw[i].Score > raw[j].Score
-	})
-	return diversifyRetrieved(raw, topK), nil
-}
-
-func searchFTSWithFallback(ctx context.Context, d *db.DB, sessionKey, query string, k int) ([]db.FTSCandidate, error) {
-	query = strings.TrimSpace(query)
-	if d == nil || query == "" || k <= 0 {
-		return nil, nil
-	}
-	ftsQuery := normalizeFTSQuery(query)
-	results, err := d.SearchFTS(ctx, sessionKey, ftsQuery, k)
-	if err == nil {
-		return results, nil
-	}
-	quoted := `"` + strings.ReplaceAll(query, `"`, `""`) + `"`
-	return d.SearchFTS(ctx, sessionKey, quoted, k)
-}
-
-// metadataScoreAdjust returns a small additive score correction (bounded to
-// the range [-0.10, +0.07]) based on note lifecycle metadata so that
-// relevance signals (vector/FTS) continue to dominate while active durable
-// notes are slightly preferred over stale rolling summaries.
-func metadataScoreAdjust(kind, status string, importance float64, useCount int) float64 {
-	adj := 0.0
-
-	// Status: strongly demote stale and superseded notes.
-	if status == db.MemoryStatusStale || status == db.MemoryStatusSuperseded {
-		adj -= 0.10
-	}
-
-	// Kind: durable operational kinds outrank rolling summaries slightly.
-	switch kind {
-	case db.MemoryKindFact, db.MemoryKindProcedure:
-		adj += 0.03
-	case db.MemoryKindPreference, db.MemoryKindGoal:
-		adj += 0.02
-	case db.MemoryKindSummary, db.MemoryKindEpisode:
-		adj -= 0.01
-	}
-
-	// Importance boost (bounded to [0,1] * 0.04 → [0, 0.04]).
-	if importance > 0 {
-		imp := importance
-		if imp > 1.0 {
-			imp = 1.0
-		}
-		adj += imp * 0.04
-	}
-
-	// Use-count boost: small signal, capped at 5 uses × 0.01 = 0.05 max.
-	if useCount > 0 {
-		uc := useCount
-		if uc > 5 {
-			uc = 5
-		}
-		adj += float64(uc) * 0.01
-	}
-
-	return adj
-}
-
-func retrievalTokens(query string) []string {
-	parts := strings.FieldsFunc(strings.ToLower(query), func(r rune) bool {
-		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9')
-	})
-	seen := map[string]struct{}{}
-	out := make([]string, 0, len(parts))
-	for _, part := range parts {
-		if len(part) < 3 {
-			continue
-		}
-		if _, ok := seen[part]; ok {
-			continue
-		}
-		seen[part] = struct{}{}
-		out = append(out, part)
-	}
-	return out
-}
-
-func lexicalOverlapScore(tokens []string, text string) float64 {
-	if len(tokens) == 0 {
-		return 0
-	}
-	lower := strings.ToLower(text)
-	hits := 0
-	for _, token := range tokens {
-		if strings.Contains(lower, token) {
-			hits++
-		}
-	}
-	return float64(hits) / float64(len(tokens))
-}
-
-func recencyScore(createdAt, newest int64) float64 {
-	if createdAt <= 0 || newest <= 0 || createdAt >= newest {
-		return 1
-	}
-	ageHours := float64(newest-createdAt) / (1000 * 60 * 60)
-	if ageHours <= 0 {
-		return 1
-	}
-	return math.Exp(-ageHours / (24 * 14))
-}
-
-func diversifyRetrieved(items []Retrieved, topK int) []Retrieved {
-	if topK <= 0 || len(items) == 0 {
-		return nil
-	}
-	selected := make([]Retrieved, 0, min(topK, len(items)))
-	seenCanonical := map[string]struct{}{}
-	sourceCounts := map[string]int{}
-	for _, item := range items {
-		canonical := canonicalRetrievedText(item.Text)
-		if canonical != "" {
-			if _, ok := seenCanonical[canonical]; ok {
-				continue
-			}
-			duplicate := false
-			for _, existing := range selected {
-				if similarRetrievedText(existing.Text, item.Text) {
-					duplicate = true
-					break
-				}
-			}
-			if duplicate {
-				continue
-			}
-		}
-		penalty := 1.0 / float64(sourceCounts[item.Source]+1)
-		item.Score = item.Score * (0.85 + 0.15*penalty)
-		selected = append(selected, item)
-		if canonical != "" {
-			seenCanonical[canonical] = struct{}{}
-		}
-		sourceCounts[item.Source]++
-		if len(selected) >= topK {
-			break
-		}
-	}
-	sort.Slice(selected, func(i, j int) bool {
-		if selected[i].Score == selected[j].Score {
-			return selected[i].ID > selected[j].ID
-		}
-		return selected[i].Score > selected[j].Score
-	})
-	return selected
-}
-
-func canonicalRetrievedText(text string) string {
-	text = strings.ToLower(strings.Join(strings.Fields(text), " "))
-	if len(text) > 180 {
-		text = text[:180]
-	}
-	return text
-}
-
-func similarRetrievedText(a, b string) bool {
-	ac := canonicalRetrievedText(a)
-	bc := canonicalRetrievedText(b)
-	if ac == "" || bc == "" {
-		return false
-	}
-	if ac == bc {
-		return true
-	}
-	at := retrievalTokens(ac)
-	bt := retrievalTokens(bc)
-	if len(at) == 0 || len(bt) == 0 {
-		return false
-	}
-	set := map[string]struct{}{}
-	for _, token := range at {
-		set[token] = struct{}{}
-	}
-	shared := 0
-	union := len(set)
-	for _, token := range bt {
-		if _, ok := set[token]; ok {
-			shared++
-			continue
-		}
-		union++
-	}
-	if union == 0 {
-		return false
-	}
-	return float64(shared)/float64(union) >= 0.8
-}
-
-func normalizeFTSQuery(q string) string {
-	q = strings.TrimSpace(q)
-	if q == "" {
-		return ""
-	}
-	// simple: split on spaces, quote terms that contain punctuation
-	parts := strings.Fields(q)
-	for i, p := range parts {
-		if strings.ContainsAny(p, `":*()-`) {
-			parts[i] = `"` + strings.ReplaceAll(p, `"`, `""`) + `"`
-		}
-	}
-	return strings.Join(parts, " ")
-}
-````
-
-## File: internal/providers/openai.go
-````go
-// Package providers wraps the OpenAI-compatible chat and embedding APIs used by or3-intern.
-package providers
-
-import (
-	"bufio"
-	"bytes"
-	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
-	"net/http"
-	"strings"
-	"time"
-
-	"or3-intern/internal/security"
-)
-
-// Client talks to an OpenAI-compatible HTTP API.
-type Client struct {
-	APIBase         string
-	APIKey          string
-	HTTP            *http.Client
-	EmbedDimensions int
-	HostPolicy      security.HostPolicy
-}
-
-// EmbeddingFingerprint identifies the embedding space used for persisted
-// vectors. It must change when either the provider endpoint or embedding model
-// changes, even if the vector dimensionality stays the same.
-func EmbeddingFingerprint(apiBase, model string, dimensions int) string {
-	base := strings.ToLower(strings.TrimRight(strings.TrimSpace(apiBase), "/"))
-	model = strings.TrimSpace(model)
-	if base == "" && model == "" && dimensions <= 0 {
-		return ""
-	}
-	if dimensions > 0 {
-		return fmt.Sprintf("%s|%s|dims=%d", base, model, dimensions)
-	}
-	return base + "|" + model
-}
-
-// New constructs a Client for apiBase using timeout for all requests.
-func New(apiBase, apiKey string, timeout time.Duration) *Client {
-	return &Client{
-		APIBase: apiBase,
-		APIKey:  apiKey,
-		HTTP:    &http.Client{Timeout: timeout},
-	}
-}
-
-// ChatMessage is one message sent to or returned from the provider.
-type ChatMessage struct {
-	Role       string     `json:"role"`
-	Content    any        `json:"content,omitempty"` // string|null
-	Name       string     `json:"name,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-}
-
-// ToolDef declares a callable tool in provider request format.
-type ToolDef struct {
-	Type     string   `json:"type"`
-	Function ToolFunc `json:"function"`
-}
-type ToolFunc struct {
-	Name        string `json:"name"`
-	Description string `json:"description,omitempty"`
-	Parameters  any    `json:"parameters,omitempty"`
-}
-
-// ToolCall is one tool invocation requested by the provider.
-type ToolCall struct {
-	ID       string `json:"id"`
-	Index    int    `json:"index"`
-	Type     string `json:"type"`
-	Function struct {
-		Name      string `json:"name"`
-		Arguments string `json:"arguments"`
-	} `json:"function"`
-}
-
-// ChatCompletionRequest is the non-streaming chat completion payload.
-type ChatCompletionRequest struct {
-	Model       string        `json:"model"`
-	Messages    []ChatMessage `json:"messages"`
-	Tools       []ToolDef     `json:"tools,omitempty"`
-	ToolChoice  any           `json:"tool_choice,omitempty"`
-	Temperature float64       `json:"temperature,omitempty"`
-}
-
-// ChatCompletionResponse is the normalized response from a chat completion.
-type ChatCompletionResponse struct {
-	Choices []struct {
-		Message struct {
-			Role      string     `json:"role"`
-			Content   any        `json:"content"`
-			ToolCalls []ToolCall `json:"tool_calls"`
-		} `json:"message"`
-	} `json:"choices"`
-}
-
-// Chat performs a non-streaming chat completion request.
-func (c *Client) Chat(ctx context.Context, req ChatCompletionRequest) (ChatCompletionResponse, error) {
-	var out ChatCompletionResponse
-	b, _ := json.Marshal(req)
-	const maxAttempts = 2
-	var lastErr error
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		r, err := http.NewRequestWithContext(ctx, "POST", c.APIBase+"/chat/completions", bytes.NewReader(b))
-		if err != nil {
-			return out, err
-		}
-		r.Header.Set("Content-Type", "application/json")
-		if c.APIKey != "" {
-			r.Header.Set("Authorization", "Bearer "+c.APIKey)
-		}
-
-		resp, err := c.do(r)
-		if err != nil {
-			return out, err
-		}
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-		_ = resp.Body.Close()
-		if readErr != nil {
-			return out, readErr
-		}
-		if resp.StatusCode >= 300 {
-			return out, fmt.Errorf("provider error %s: %s", resp.Status, string(body))
-		}
-		if err := json.Unmarshal(body, &out); err != nil {
-			lastErr = formatProviderDecodeError(err, body)
-			if attempt < maxAttempts && isRetryableProviderDecodeError(err, body) {
-				continue
-			}
-			return out, lastErr
-		}
-		return out, nil
-	}
-	if lastErr != nil {
-		return out, lastErr
-	}
-	return out, fmt.Errorf("provider decode failed")
-}
-
-func isRetryableProviderDecodeError(err error, body []byte) bool {
-	if len(bytes.TrimSpace(body)) == 0 {
-		return true
-	}
-	var syntaxErr *json.SyntaxError
-	if errors.As(err, &syntaxErr) {
-		return true
-	}
-	msg := strings.ToLower(strings.TrimSpace(err.Error()))
-	return strings.Contains(msg, "unexpected end of json input")
-}
-
-func formatProviderDecodeError(err error, body []byte) error {
-	trimmed := strings.TrimSpace(string(body))
-	if trimmed == "" {
-		return fmt.Errorf("provider returned empty response body")
-	}
-	return fmt.Errorf("provider decode error: %w; body=%q", err, trimToRunes(trimmed, 240))
-}
-
-func trimToRunes(text string, limit int) string {
-	if limit <= 0 {
-		return ""
-	}
-	runes := []rune(text)
-	if len(runes) <= limit {
-		return text
-	}
-	return string(runes[:limit]) + "…"
-}
-
-// ChatCompletionStreamRequest is sent when stream=true.
-type ChatCompletionStreamRequest struct {
-	Model       string        `json:"model"`
-	Messages    []ChatMessage `json:"messages"`
-	Tools       []ToolDef     `json:"tools,omitempty"`
-	ToolChoice  any           `json:"tool_choice,omitempty"`
-	Temperature float64       `json:"temperature,omitempty"`
-	Stream      bool          `json:"stream"`
-}
-
-// ChatStreamDelta is one incremental SSE delta from a streamed completion.
-type ChatStreamDelta struct {
-	Role      string     `json:"role"`
-	Content   string     `json:"content"`
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
-}
-
-// ChatStreamChoice is one choice entry from a streamed completion chunk.
-type ChatStreamChoice struct {
-	Index        int             `json:"index"`
-	Delta        ChatStreamDelta `json:"delta"`
-	FinishReason string          `json:"finish_reason"`
-}
-
-// ChatStreamChunk is one SSE payload from a streamed completion.
-type ChatStreamChunk struct {
-	ID      string             `json:"id"`
-	Choices []ChatStreamChoice `json:"choices"`
-}
-
-// ChatStream sends the request with stream=true, calls onDelta for each text
-// delta, and returns the fully accumulated completion response.
-func (c *Client) ChatStream(ctx context.Context, req ChatCompletionRequest, onDelta func(text string)) (ChatCompletionResponse, error) {
-	streamReq := ChatCompletionStreamRequest{
-		Model:       req.Model,
-		Messages:    req.Messages,
-		Tools:       req.Tools,
-		ToolChoice:  req.ToolChoice,
-		Temperature: req.Temperature,
-		Stream:      true,
-	}
-	b, _ := json.Marshal(streamReq)
-	r, err := http.NewRequestWithContext(ctx, "POST", c.APIBase+"/chat/completions", bytes.NewReader(b))
-	if err != nil {
-		return ChatCompletionResponse{}, err
-	}
-	r.Header.Set("Content-Type", "application/json")
-	r.Header.Set("Accept", "text/event-stream")
-	if c.APIKey != "" {
-		r.Header.Set("Authorization", "Bearer "+c.APIKey)
-	}
-
-	resp, err := c.do(r)
-	if err != nil {
-		return ChatCompletionResponse{}, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-		return ChatCompletionResponse{}, fmt.Errorf("provider error %s: %s", resp.Status, string(body))
-	}
-
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	var contentBuilder strings.Builder
-	var finalToolCalls []ToolCall
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-		data := strings.TrimPrefix(line, "data: ")
-		if data == "[DONE]" {
-			break
-		}
-		var chunk ChatStreamChunk
-		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			continue
-		}
-		if len(chunk.Choices) == 0 {
-			continue
-		}
-		delta := chunk.Choices[0].Delta
-		if delta.Content != "" {
-			contentBuilder.WriteString(delta.Content)
-			if onDelta != nil {
-				onDelta(delta.Content)
-			}
-		}
-		if len(delta.ToolCalls) > 0 {
-			finalToolCalls = mergeStreamToolCalls(finalToolCalls, delta.ToolCalls)
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return ChatCompletionResponse{}, err
-	}
-
-	out := ChatCompletionResponse{
-		Choices: []struct {
-			Message struct {
-				Role      string     `json:"role"`
-				Content   any        `json:"content"`
-				ToolCalls []ToolCall `json:"tool_calls"`
-			} `json:"message"`
-		}{
-			{
-				Message: struct {
-					Role      string     `json:"role"`
-					Content   any        `json:"content"`
-					ToolCalls []ToolCall `json:"tool_calls"`
-				}{
-					Role:      "assistant",
-					Content:   contentBuilder.String(),
-					ToolCalls: finalToolCalls,
-				},
-			},
-		},
-	}
-	return out, nil
-}
-
-// mergeStreamToolCalls accumulates tool-call deltas arriving over SSE.
-// OpenAI streaming sends each piece as {index, partial args}; we expand the
-// slice to the required index and concatenate name/arguments incrementally.
-func mergeStreamToolCalls(existing []ToolCall, delta []ToolCall) []ToolCall {
-	for _, d := range delta {
-		idx := d.Index
-		for len(existing) <= idx {
-			existing = append(existing, ToolCall{})
-		}
-		existing[idx].Function.Arguments += d.Function.Arguments
-		if d.Function.Name != "" {
-			existing[idx].Function.Name += d.Function.Name
-		}
-		if d.ID != "" {
-			existing[idx].ID = d.ID
-		}
-		if d.Type != "" {
-			existing[idx].Type = d.Type
-		}
-		existing[idx].Index = idx
-	}
-	return existing
-}
-
-type EmbeddingRequest struct {
-	Model      string `json:"model"`
-	Input      string `json:"input"`
-	Dimensions int    `json:"dimensions,omitempty"`
-}
-type EmbeddingResponse struct {
-	Data []struct {
-		Embedding []float32 `json:"embedding"`
-	} `json:"data"`
-}
-
-func (c *Client) Embed(ctx context.Context, model, input string) ([]float32, error) {
-	var out EmbeddingResponse
-	reqBody := EmbeddingRequest{Model: model, Input: input}
-	if c != nil && c.EmbedDimensions > 0 {
-		reqBody.Dimensions = c.EmbedDimensions
-	}
-	b, _ := json.Marshal(reqBody)
-	r, err := http.NewRequestWithContext(ctx, "POST", c.APIBase+"/embeddings", bytes.NewReader(b))
-	if err != nil {
-		return nil, err
-	}
-	r.Header.Set("Content-Type", "application/json")
-	if c.APIKey != "" {
-		r.Header.Set("Authorization", "Bearer "+c.APIKey)
-	}
-
-	resp, err := c.do(r)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
-	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("provider error %s: %s", resp.Status, string(body))
-	}
-	if err := json.Unmarshal(body, &out); err != nil {
-		return nil, err
-	}
-	if len(out.Data) == 0 {
-		return nil, fmt.Errorf("no embedding returned")
-	}
-	return out.Data[0].Embedding, nil
-}
-
-func (c *Client) do(req *http.Request) (*http.Response, error) {
-	client := c.HTTP
-	if client == nil {
-		client = &http.Client{Timeout: 60 * time.Second}
-	}
-	if c.HostPolicy.EnabledPolicy() {
-		client = security.WrapHTTPClient(client, c.HostPolicy)
-	}
-	return client.Do(req)
 }
 ````
 
@@ -27958,693 +27865,818 @@ func runDevicesCommand(ctx context.Context, broker *approval.Broker, args []stri
 }
 ````
 
-## File: internal/agent/prompt.go
+## File: internal/memory/retrieve.go
 ````go
-package agent
+// Package memory retrieves and consolidates long-lived memory entries.
+package memory
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
-	"fmt"
-	"io"
-	"log"
-	"mime"
-	"os"
-	"path/filepath"
+	"math"
 	"sort"
 	"strings"
-	"sync"
-	"time"
 
-	"or3-intern/internal/artifacts"
 	"or3-intern/internal/db"
-	"or3-intern/internal/heartbeat"
-	"or3-intern/internal/memory"
-	"or3-intern/internal/providers"
-	"or3-intern/internal/scope"
-	"or3-intern/internal/skills"
-	"or3-intern/internal/triggers"
 )
 
-const DefaultSoul = `# Soul
-I am or3-intern, a personal AI assistant.
-- Be clear and direct
-- Prefer deterministic, bounded work
-- Use tools when needed; keep outputs short
-`
-
-const DefaultAgentInstructions = `# Agent Instructions
-- Use pinned memory only for ultra-stable facts, preferences, and long-running project state.
-- Check the short Memory Digest and retrieved memory snippets before answering.
-- Keep constant RAM usage: last N messages + top K memories only.
-- Large tool outputs must spill to artifacts.
-`
-
-const DefaultToolNotes = `# Tool Usage Notes
-exec:
-- Commands have a timeout
-- Dangerous commands blocked
-- Output truncated
-cron:
-- Use cron tool for scheduled reminders.
-`
-
-// defaultDigestLineMax bounds the number of lines in the Memory Digest section.
-const defaultDigestLineMax = 10
-
-const (
-	defaultBootstrapMaxChars      = 20000
-	defaultBootstrapTotalMaxChars = 150000
-	defaultPinnedOneLineMax       = 220
-	defaultDigestOneLineMax       = 160
-	defaultRetrievedOneLineMax    = 240
-	defaultSkillsSummaryMax       = 80
-	defaultVisionMaxImages        = 4
-	defaultVisionMaxImageBytes    = 4 << 20
-	defaultVisionTotalBytes       = 8 << 20
-	embedCacheTTL                 = 5 * time.Minute
-	embedCacheMaxEntries          = 128
-)
-
-type embedCacheKey struct {
-	fingerprint string
-	model       string
-	input       string
+// Retrieved is one memory hit returned from hybrid retrieval.
+type Retrieved struct {
+	Source     string // pinned|vector|fts|hybrid
+	ID         int64
+	Text       string
+	Score      float64
+	Kind       string
+	Status     string
+	Importance float64
+	UseCount   int
+	CreatedAt  int64
+	LastUsedAt int64
 }
 
-type embedCacheEntry struct {
-	vec       []float32
-	expiresAt time.Time
-	usedAt    time.Time
-}
-
-var promptEmbedCache = struct {
-	mu      sync.Mutex
-	entries map[embedCacheKey]embedCacheEntry
-}{entries: map[embedCacheKey]embedCacheEntry{}}
-
-type PromptParts struct {
-	System  []providers.ChatMessage
-	History []providers.ChatMessage
-}
-
-// BuildOptions holds options for building a prompt.
-type BuildOptions struct {
-	SessionKey  string
-	UserMessage string
-	Autonomous  bool // true for cron/webhook/file-change events
-	EventMeta   map[string]any
-}
-
-type Builder struct {
+// Retriever ranks vector, FTS, lexical, and recency signals into a single result set.
+type Retriever struct {
 	DB               *db.DB
-	Artifacts        *artifacts.Store
-	Skills           skills.Inventory
-	Mem              *memory.Retriever
-	Provider         *providers.Client
-	EmbedModel       string
 	EmbedFingerprint string
-	EnableVision     bool
-
-	Soul                   string
-	AgentInstructions      string
-	ToolNotes              string
-	BootstrapMaxChars      int
-	BootstrapTotalMaxChars int
-	SkillsSummaryMax       int
-
-	HistoryMax int
-	VectorK    int
-	FTSK       int
-	TopK       int
-
-	// New fields for lightweight OpenClaw parity
-	IdentityText       string               // content of IDENTITY.md
-	StaticMemory       string               // content of MEMORY.md
-	HeartbeatText      string               // content of HEARTBEAT.md – injected only for autonomous turns
-	HeartbeatTasksFile string               // configured heartbeat file path for per-turn refresh
-	DocRetriever       *memory.DocRetriever // for indexed file context
-	DocRetrieveLimit   int                  // max docs to retrieve
-	WorkspaceDir       string
+	VectorWeight     float64
+	FTSWeight        float64
+	LexicalWeight    float64
+	RecencyWeight    float64
+	VectorScanLimit  int
 }
 
-// Build builds a prompt snapshot. It is a convenience wrapper around BuildWithOptions.
-func (b *Builder) Build(ctx context.Context, sessionKey string, userMessage string) (PromptParts, []memory.Retrieved, error) {
-	return b.BuildWithOptions(ctx, BuildOptions{SessionKey: sessionKey, UserMessage: userMessage})
+// NewRetriever constructs a Retriever with default ranking weights.
+func NewRetriever(d *db.DB) *Retriever {
+	return &Retriever{DB: d, VectorWeight: 0.55, FTSWeight: 0.25, LexicalWeight: 0.12, RecencyWeight: 0.08, VectorScanLimit: 2000}
 }
 
-// BuildWithOptions builds a prompt snapshot using the provided options.
-func (b *Builder) BuildWithOptions(ctx context.Context, opts BuildOptions) (PromptParts, []memory.Retrieved, error) {
-	scopeKey := opts.SessionKey
-	if b.DB != nil && strings.TrimSpace(opts.SessionKey) != "" {
-		if resolved, err := b.DB.ResolveScopeKey(ctx, opts.SessionKey); err == nil && strings.TrimSpace(resolved) != "" {
-			scopeKey = resolved
-		}
-	}
-	pinned, err := b.DB.GetPinned(ctx, scopeKey)
+// Retrieve runs hybrid retrieval and returns diversified top-k memory results.
+func (r *Retriever) Retrieve(ctx context.Context, sessionKey, query string, queryVec []float32, vectorK, ftsK, topK int) ([]Retrieved, error) {
+	raw, err := r.retrieveCandidates(ctx, sessionKey, query, queryVec, vectorK, ftsK)
 	if err != nil {
-		return PromptParts{}, nil, err
+		return nil, err
 	}
-	pinnedText := formatPinned(pinned)
+	return r.packToBudget(raw, topK), nil
+}
 
-	// embed and retrieve
-	var retrieved []memory.Retrieved
-	if b.Mem != nil && b.Provider != nil && strings.TrimSpace(opts.UserMessage) != "" {
-		vec, err := cachedEmbed(ctx, b.Provider, b.EmbedFingerprint, b.EmbedModel, opts.UserMessage)
-		if err == nil {
-			b.Mem.EmbedFingerprint = b.EmbedFingerprint
-			retrieved, err = b.Mem.Retrieve(ctx, scopeKey, opts.UserMessage, vec, b.VectorK, b.FTSK, b.TopK)
+func (r *Retriever) retrieveCandidates(ctx context.Context, sessionKey, query string, queryVec []float32, vectorK, ftsK int) ([]Retrieved, error) {
+	var vecs []VecCandidate
+	var err error
+	if strings.TrimSpace(r.EmbedFingerprint) == "" {
+		vecs, err = VectorSearch(ctx, r.DB, sessionKey, queryVec, vectorK, r.VectorScanLimit)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		fingerprint, err := r.DB.MemoryVectorFingerprint(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if fingerprint == strings.TrimSpace(r.EmbedFingerprint) {
+			vecs, err = VectorSearch(ctx, r.DB, sessionKey, queryVec, vectorK, r.VectorScanLimit)
 			if err != nil {
-				log.Printf("memory retrieve failed for scope %q: %v", scopeKey, err)
-				retrieved = nil
+				return nil, err
 			}
 		}
 	}
-	maxEach := b.BootstrapMaxChars
-	if maxEach <= 0 {
-		maxEach = defaultBootstrapMaxChars
-	}
-	memText, retrievedIDs := formatRetrievedBounded(retrieved, maxEach)
-
-	// Build Memory Digest from top active durable-kind notes.
-	digestText, digestIDs := formatMemoryDigestBounded(retrieved, defaultDigestLineMax, maxEach)
-
-	// Best-effort usage logging for notes that made it into the prompt.
-	if b.DB != nil {
-		ids := append([]int64(nil), retrievedIDs...)
-		ids = append(ids, digestIDs...)
-		ids = uniqueInt64(ids)
-		if len(ids) > 0 {
-			_ = b.DB.TouchMemoryNotes(ctx, scopeKey, ids, db.NowMS())
-		}
-	}
-
-	// indexed doc context
-	var docContextText string
-	if b.DocRetriever != nil && strings.TrimSpace(opts.UserMessage) != "" {
-		limit := b.DocRetrieveLimit
-		if limit <= 0 {
-			limit = 5
-		}
-		docs, _ := b.DocRetriever.RetrieveDocs(ctx, scope.GlobalMemoryScope, opts.UserMessage, limit)
-		if len(docs) > 0 {
-			var sb strings.Builder
-			for i, d := range docs {
-				sb.WriteString(fmt.Sprintf("%d) [%s] %s\n", i+1, d.Path, d.Excerpt))
-			}
-			docContextText = strings.TrimSpace(sb.String())
-		}
-	}
-	workspaceContextText := memory.BuildWorkspaceContext(memory.WorkspaceContextConfig{
-		WorkspaceDir: b.WorkspaceDir,
-	}, opts.UserMessage)
-
-	histRows, err := b.DB.GetLastMessagesScoped(ctx, opts.SessionKey, b.HistoryMax)
+	fts, err := searchFTSWithFallback(ctx, r.DB, sessionKey, query, ftsK)
 	if err != nil {
-		return PromptParts{}, nil, err
-	}
-	visionBudget := newVisionBudget()
-	hist := make([]providers.ChatMessage, 0, len(histRows))
-	pendingToolCallIDs := make([]string, 0)
-	for _, m := range histRows {
-		msg := providers.ChatMessage{Role: m.Role, Content: m.Content}
-		var payload map[string]any
-		if err := json.Unmarshal([]byte(m.PayloadJSON), &payload); err == nil {
-			if m.Role == "assistant" {
-				if raw, ok := payload["tool_calls"]; ok {
-					b, _ := json.Marshal(raw)
-					var tcs []providers.ToolCall
-					if err := json.Unmarshal(b, &tcs); err == nil {
-						msg.ToolCalls = tcs
-						pendingToolCallIDs = pendingToolCallIDs[:0]
-						for _, tc := range tcs {
-							if id := strings.TrimSpace(tc.ID); id != "" {
-								pendingToolCallIDs = append(pendingToolCallIDs, id)
-							}
-						}
-					}
-				}
-			}
-			if m.Role == "tool" {
-				if rawID, ok := payload["tool_call_id"]; ok {
-					msg.ToolCallID = strings.TrimSpace(fmt.Sprint(rawID))
-				}
-				if msg.ToolCallID == "" && len(pendingToolCallIDs) > 0 {
-					msg.ToolCallID = pendingToolCallIDs[0]
-				}
-				if msg.ToolCallID != "" && len(pendingToolCallIDs) > 0 {
-					if pendingToolCallIDs[0] == msg.ToolCallID {
-						pendingToolCallIDs = pendingToolCallIDs[1:]
-					} else {
-						for i, id := range pendingToolCallIDs {
-							if id == msg.ToolCallID {
-								pendingToolCallIDs = append(pendingToolCallIDs[:i], pendingToolCallIDs[i+1:]...)
-								break
-							}
-						}
-					}
-				}
-			}
-			if m.Role == "user" {
-				msg.Content = b.buildUserContent(ctx, m.Content, attachmentsFromPayload(payload), visionBudget)
-			}
-		}
-		hist = append(hist, msg)
+		return nil, err
 	}
 
-	heartbeat := ""
-	structuredContext := ""
-	structuredMax := b.BootstrapMaxChars
-	if structuredMax <= 0 {
-		structuredMax = defaultBootstrapMaxChars
+	type agg struct {
+		id         int64
+		text       string
+		v          float64
+		f          float64
+		createdAt  int64
+		kind       string
+		status     string
+		importance float64
+		useCount   int
+		lastUsedAt int64
 	}
-	if opts.Autonomous {
-		heartbeat = b.currentHeartbeatText()
-		structuredContext = formatStructuredEventContext(opts.EventMeta, structuredMax)
+	m := map[int64]*agg{}
+	for _, c := range vecs {
+		a := m[c.ID]
+		if a == nil {
+			a = &agg{
+				id:         c.ID,
+				text:       c.Text,
+				kind:       c.Kind,
+				status:     c.Status,
+				importance: c.Importance,
+				useCount:   c.UseCount,
+				lastUsedAt: c.LastUsedAt,
+			}
+			m[c.ID] = a
+		}
+		a.v = c.Score
+		if c.CreatedAt > a.createdAt {
+			a.createdAt = c.CreatedAt
+		}
 	}
-	sysText := b.composeSystemPrompt(pinnedText, digestText, memText, b.IdentityText, b.StaticMemory, heartbeat, structuredContext, docContextText, workspaceContextText)
-	sys := []providers.ChatMessage{
-		{Role: "system", Content: sysText},
+	for _, f := range fts {
+		a := m[f.ID]
+		if a == nil {
+			a = &agg{
+				id:         f.ID,
+				text:       f.Text,
+				kind:       f.Kind,
+				status:     f.Status,
+				importance: f.Importance,
+				useCount:   f.UseCount,
+				lastUsedAt: f.LastUsedAt,
+			}
+			m[f.ID] = a
+		} else {
+			// Prefer the metadata from FTS if vector didn't have it (both are the same row).
+			if a.kind == "" {
+				a.kind = f.Kind
+			}
+		}
+		// bm25 lower is better. Convert to a positive "higher is better".
+		a.f = 1.0 / (1.0 + f.Rank)
+		if f.CreatedAt > a.createdAt {
+			a.createdAt = f.CreatedAt
+		}
 	}
-	return PromptParts{System: sys, History: hist}, retrieved, nil
+
+	raw := make([]Retrieved, 0, len(m))
+	tokens := retrievalTokens(query)
+	newest := int64(0)
+	for _, a := range m {
+		if a.createdAt > newest {
+			newest = a.createdAt
+		}
+	}
+	for _, a := range m {
+		lexical := lexicalOverlapScore(tokens, a.text)
+		recency := recencyScore(a.createdAt, newest)
+		score := (a.v * r.VectorWeight) + (a.f * r.FTSWeight) + (lexical * r.LexicalWeight) + (recency * r.RecencyWeight)
+
+		// Apply small bounded metadata adjustments so vector/FTS relevance
+		// still dominates while durable/active notes get a slight preference.
+		score += metadataScoreAdjust(a.kind, a.status, a.importance, a.useCount)
+		if score < 0 {
+			score = 0
+		}
+
+		src := "hybrid"
+		if a.f > 0 && a.v == 0 {
+			src = "fts"
+		}
+		if a.v > 0 && a.f == 0 {
+			src = "vector"
+		}
+		raw = append(raw, Retrieved{
+			Source:     src,
+			ID:         a.id,
+			Text:       a.text,
+			Score:      score,
+			Kind:       a.kind,
+			Status:     a.status,
+			Importance: a.importance,
+			UseCount:   a.useCount,
+			CreatedAt:  a.createdAt,
+			LastUsedAt: a.lastUsedAt,
+		})
+	}
+
+	sort.Slice(raw, func(i, j int) bool {
+		if raw[i].Score == raw[j].Score {
+			return raw[i].ID > raw[j].ID
+		}
+		return raw[i].Score > raw[j].Score
+	})
+	return raw, nil
 }
 
-func (b *Builder) currentHeartbeatText() string {
-	if b == nil {
-		return ""
-	}
-	if path, text, err := heartbeat.LoadTasksFile(b.HeartbeatTasksFile, b.WorkspaceDir); err == nil && strings.TrimSpace(path) != "" {
-		if heartbeat.HasActiveInstructions(text) {
-			return text
-		}
-		return ""
-	}
-	return strings.TrimSpace(b.HeartbeatText)
+func (r *Retriever) packToBudget(candidates []Retrieved, topK int) []Retrieved {
+	return diversifyRetrieved(candidates, topK)
 }
 
-func attachmentsFromPayload(payload map[string]any) []artifacts.Attachment {
-	if len(payload) == 0 {
-		return nil
+func searchFTSWithFallback(ctx context.Context, d *db.DB, sessionKey, query string, k int) ([]db.FTSCandidate, error) {
+	query = strings.TrimSpace(query)
+	if d == nil || query == "" || k <= 0 {
+		return nil, nil
 	}
-	raw := payload["attachments"]
-	if raw == nil {
-		if meta, ok := payload["meta"].(map[string]any); ok {
-			raw = meta["attachments"]
+	ftsQuery := normalizeFTSQuery(query)
+	results, err := d.SearchFTS(ctx, sessionKey, ftsQuery, k)
+	if err == nil {
+		return results, nil
+	}
+	quoted := `"` + strings.ReplaceAll(query, `"`, `""`) + `"`
+	return d.SearchFTS(ctx, sessionKey, quoted, k)
+}
+
+// metadataScoreAdjust returns a small additive score correction (bounded to
+// the range [-0.10, +0.07]) based on note lifecycle metadata so that
+// relevance signals (vector/FTS) continue to dominate while active durable
+// notes are slightly preferred over stale rolling summaries.
+func metadataScoreAdjust(kind, status string, importance float64, useCount int) float64 {
+	adj := 0.0
+
+	// Status: strongly demote stale and superseded notes.
+	if status == db.MemoryStatusStale || status == db.MemoryStatusSuperseded {
+		adj -= 0.10
+	}
+
+	// Kind: durable operational kinds outrank rolling summaries slightly.
+	switch kind {
+	case db.MemoryKindFact, db.MemoryKindProcedure:
+		adj += 0.03
+	case db.MemoryKindPreference, db.MemoryKindGoal:
+		adj += 0.02
+	case db.MemoryKindSummary, db.MemoryKindEpisode:
+		adj -= 0.01
+	}
+
+	// Importance boost (bounded to [0,1] * 0.04 → [0, 0.04]).
+	if importance > 0 {
+		imp := importance
+		if imp > 1.0 {
+			imp = 1.0
 		}
+		adj += imp * 0.04
 	}
-	if raw == nil {
-		return nil
+
+	// Use-count boost: small signal, capped at 5 uses × 0.01 = 0.05 max.
+	if useCount > 0 {
+		uc := useCount
+		if uc > 5 {
+			uc = 5
+		}
+		adj += float64(uc) * 0.01
 	}
-	b, _ := json.Marshal(raw)
-	var atts []artifacts.Attachment
-	if err := json.Unmarshal(b, &atts); err != nil {
-		return nil
-	}
-	out := make([]artifacts.Attachment, 0, len(atts))
-	for _, att := range atts {
-		if strings.TrimSpace(att.ArtifactID) == "" {
+
+	return adj
+}
+
+func retrievalTokens(query string) []string {
+	parts := strings.FieldsFunc(strings.ToLower(query), func(r rune) bool {
+		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9')
+	})
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if len(part) < 3 {
 			continue
 		}
-		if strings.TrimSpace(att.Filename) == "" {
-			att.Filename = "attachment"
+		if _, ok := seen[part]; ok {
+			continue
 		}
-		if strings.TrimSpace(att.Kind) == "" {
-			att.Kind = artifacts.DetectKind(att.Filename, att.Mime)
-		}
-		out = append(out, att)
+		seen[part] = struct{}{}
+		out = append(out, part)
 	}
 	return out
 }
 
-type visionBudget struct {
-	remainingImages int
-	remainingBytes  int64
+func lexicalOverlapScore(tokens []string, text string) float64 {
+	if len(tokens) == 0 {
+		return 0
+	}
+	lower := strings.ToLower(text)
+	hits := 0
+	for _, token := range tokens {
+		if strings.Contains(lower, token) {
+			hits++
+		}
+	}
+	return float64(hits) / float64(len(tokens))
 }
 
-func newVisionBudget() *visionBudget {
-	return &visionBudget{
-		remainingImages: defaultVisionMaxImages,
-		remainingBytes:  defaultVisionTotalBytes,
+func recencyScore(createdAt, newest int64) float64 {
+	if createdAt <= 0 || newest <= 0 || createdAt >= newest {
+		return 1
+	}
+	ageHours := float64(newest-createdAt) / (1000 * 60 * 60)
+	if ageHours <= 0 {
+		return 1
+	}
+	return math.Exp(-ageHours / (24 * 14))
+}
+
+func diversifyRetrieved(items []Retrieved, topK int) []Retrieved {
+	if topK <= 0 || len(items) == 0 {
+		return nil
+	}
+	selected := make([]Retrieved, 0, min(topK, len(items)))
+	seenCanonical := map[string]struct{}{}
+	sourceCounts := map[string]int{}
+	for _, item := range items {
+		canonical := canonicalRetrievedText(item.Text)
+		if canonical != "" {
+			if _, ok := seenCanonical[canonical]; ok {
+				continue
+			}
+			duplicate := false
+			for _, existing := range selected {
+				if similarRetrievedText(existing.Text, item.Text) {
+					duplicate = true
+					break
+				}
+			}
+			if duplicate {
+				continue
+			}
+		}
+		penalty := 1.0 / float64(sourceCounts[item.Source]+1)
+		item.Score = item.Score * (0.85 + 0.15*penalty)
+		selected = append(selected, item)
+		if canonical != "" {
+			seenCanonical[canonical] = struct{}{}
+		}
+		sourceCounts[item.Source]++
+		if len(selected) >= topK {
+			break
+		}
+	}
+	sort.Slice(selected, func(i, j int) bool {
+		if selected[i].Score == selected[j].Score {
+			return selected[i].ID > selected[j].ID
+		}
+		return selected[i].Score > selected[j].Score
+	})
+	return selected
+}
+
+func canonicalRetrievedText(text string) string {
+	text = strings.ToLower(strings.Join(strings.Fields(text), " "))
+	if len(text) > 180 {
+		text = text[:180]
+	}
+	return text
+}
+
+func similarRetrievedText(a, b string) bool {
+	ac := canonicalRetrievedText(a)
+	bc := canonicalRetrievedText(b)
+	if ac == "" || bc == "" {
+		return false
+	}
+	if ac == bc {
+		return true
+	}
+	at := retrievalTokens(ac)
+	bt := retrievalTokens(bc)
+	if len(at) == 0 || len(bt) == 0 {
+		return false
+	}
+	set := map[string]struct{}{}
+	for _, token := range at {
+		set[token] = struct{}{}
+	}
+	shared := 0
+	union := len(set)
+	for _, token := range bt {
+		if _, ok := set[token]; ok {
+			shared++
+			continue
+		}
+		union++
+	}
+	if union == 0 {
+		return false
+	}
+	return float64(shared)/float64(union) >= 0.8
+}
+
+func normalizeFTSQuery(q string) string {
+	q = strings.TrimSpace(q)
+	if q == "" {
+		return ""
+	}
+	// simple: split on spaces, quote terms that contain punctuation
+	parts := strings.Fields(q)
+	for i, p := range parts {
+		if strings.ContainsAny(p, `":*()-`) {
+			parts[i] = `"` + strings.ReplaceAll(p, `"`, `""`) + `"`
+		}
+	}
+	return strings.Join(parts, " ")
+}
+````
+
+## File: internal/providers/openai.go
+````go
+// Package providers wraps the OpenAI-compatible chat and embedding APIs used by or3-intern.
+package providers
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
+	"or3-intern/internal/security"
+)
+
+// Client talks to an OpenAI-compatible HTTP API.
+type Client struct {
+	APIBase         string
+	APIKey          string
+	HTTP            *http.Client
+	EmbedDimensions int
+	HostPolicy      security.HostPolicy
+}
+
+// EmbeddingFingerprint identifies the embedding space used for persisted
+// vectors. It must change when either the provider endpoint or embedding model
+// changes, even if the vector dimensionality stays the same.
+func EmbeddingFingerprint(apiBase, model string, dimensions int) string {
+	base := strings.ToLower(strings.TrimRight(strings.TrimSpace(apiBase), "/"))
+	model = strings.TrimSpace(model)
+	if base == "" && model == "" && dimensions <= 0 {
+		return ""
+	}
+	if dimensions > 0 {
+		return fmt.Sprintf("%s|%s|dims=%d", base, model, dimensions)
+	}
+	return base + "|" + model
+}
+
+// New constructs a Client for apiBase using timeout for all requests.
+func New(apiBase, apiKey string, timeout time.Duration) *Client {
+	return &Client{
+		APIBase: apiBase,
+		APIKey:  apiKey,
+		HTTP:    &http.Client{Timeout: timeout},
 	}
 }
 
-func (b *Builder) buildUserContent(ctx context.Context, text string, atts []artifacts.Attachment, budget *visionBudget) any {
-	if !b.EnableVision || b.Artifacts == nil || len(atts) == 0 {
-		return text
+// ChatMessage is one message sent to or returned from the provider.
+type ChatMessage struct {
+	Role       string     `json:"role"`
+	Content    any        `json:"content,omitempty"` // string|null
+	Name       string     `json:"name,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+}
+
+// SupportsExplicitPromptCache reports whether the configured endpoint is known
+// to accept Anthropic-style cache-control metadata on message content blocks.
+// The default OpenAI-compatible path remains unchanged when this is false.
+func (c *Client) SupportsExplicitPromptCache() bool {
+	if c == nil {
+		return false
 	}
-	parts := make([]map[string]any, 0, len(atts)+1)
-	imageParts := 0
-	if strings.TrimSpace(text) != "" {
+	base := strings.ToLower(strings.TrimSpace(c.APIBase))
+	return strings.Contains(base, "anthropic") || strings.Contains(base, "claude")
+}
+
+// BuildCacheAwareSystemContent returns a system-message content payload that
+// preserves a stable prefix boundary for providers that understand explicit
+// cache-control metadata. Callers should use this only when
+// SupportsExplicitPromptCache returns true; otherwise a plain concatenated
+// string should be sent for maximum compatibility.
+func BuildCacheAwareSystemContent(stable, volatile string) any {
+	stable = strings.TrimSpace(stable)
+	volatile = strings.TrimSpace(volatile)
+	parts := make([]map[string]any, 0, 2)
+	if stable != "" {
 		parts = append(parts, map[string]any{
 			"type": "text",
-			"text": text,
+			"text": stable,
+			"cache_control": map[string]any{
+				"type": "ephemeral",
+			},
 		})
 	}
-	for _, att := range atts {
-		if strings.TrimSpace(att.Kind) != artifacts.KindImage && !strings.HasPrefix(strings.ToLower(strings.TrimSpace(att.Mime)), "image/") {
-			continue
-		}
-		part, ok := b.imagePart(ctx, att, budget)
-		if !ok {
-			continue
-		}
-		parts = append(parts, part)
-		imageParts++
+	if volatile != "" {
+		parts = append(parts, map[string]any{
+			"type": "text",
+			"text": volatile,
+		})
 	}
-	if imageParts == 0 {
-		return text
+	if len(parts) == 0 {
+		return ""
 	}
 	return parts
 }
 
-func (b *Builder) imagePart(ctx context.Context, att artifacts.Attachment, budget *visionBudget) (map[string]any, bool) {
-	if budget == nil || budget.remainingImages <= 0 || budget.remainingBytes <= 0 {
-		return nil, false
-	}
-	stored, err := b.Artifacts.Lookup(ctx, att.ArtifactID)
-	if err != nil {
-		return nil, false
-	}
-	sizeBytes := stored.SizeBytes
-	if sizeBytes <= 0 {
-		info, err := os.Stat(stored.Path)
+// ToolDef declares a callable tool in provider request format.
+type ToolDef struct {
+	Type     string   `json:"type"`
+	Function ToolFunc `json:"function"`
+}
+type ToolFunc struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Parameters  any    `json:"parameters,omitempty"`
+}
+
+// ToolCall is one tool invocation requested by the provider.
+type ToolCall struct {
+	ID       string `json:"id"`
+	Index    int    `json:"index"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+// ChatCompletionRequest is the non-streaming chat completion payload.
+type ChatCompletionRequest struct {
+	Model       string        `json:"model"`
+	Messages    []ChatMessage `json:"messages"`
+	Tools       []ToolDef     `json:"tools,omitempty"`
+	ToolChoice  any           `json:"tool_choice,omitempty"`
+	Temperature float64       `json:"temperature,omitempty"`
+}
+
+// ChatCompletionResponse is the normalized response from a chat completion.
+type ChatCompletionResponse struct {
+	Choices []struct {
+		Message struct {
+			Role      string     `json:"role"`
+			Content   any        `json:"content"`
+			ToolCalls []ToolCall `json:"tool_calls"`
+		} `json:"message"`
+	} `json:"choices"`
+}
+
+// Chat performs a non-streaming chat completion request.
+func (c *Client) Chat(ctx context.Context, req ChatCompletionRequest) (ChatCompletionResponse, error) {
+	var out ChatCompletionResponse
+	b, _ := json.Marshal(req)
+	const maxAttempts = 2
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		r, err := http.NewRequestWithContext(ctx, "POST", c.APIBase+"/chat/completions", bytes.NewReader(b))
 		if err != nil {
-			return nil, false
+			return out, err
 		}
-		sizeBytes = info.Size()
+		r.Header.Set("Content-Type", "application/json")
+		if c.APIKey != "" {
+			r.Header.Set("Authorization", "Bearer "+c.APIKey)
+		}
+
+		resp, err := c.do(r)
+		if err != nil {
+			return out, err
+		}
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		_ = resp.Body.Close()
+		if readErr != nil {
+			return out, readErr
+		}
+		if resp.StatusCode >= 300 {
+			return out, fmt.Errorf("provider error %s: %s", resp.Status, string(body))
+		}
+		if err := json.Unmarshal(body, &out); err != nil {
+			lastErr = formatProviderDecodeError(err, body)
+			if attempt < maxAttempts && isRetryableProviderDecodeError(err, body) {
+				continue
+			}
+			return out, lastErr
+		}
+		return out, nil
 	}
-	if sizeBytes <= 0 || sizeBytes > defaultVisionMaxImageBytes || sizeBytes > budget.remainingBytes {
-		return nil, false
+	if lastErr != nil {
+		return out, lastErr
 	}
-	data, err := readCappedFile(stored.Path, defaultVisionMaxImageBytes)
-	if err != nil {
-		return nil, false
-	}
-	if int64(len(data)) > budget.remainingBytes {
-		return nil, false
-	}
-	mimeType := strings.TrimSpace(stored.Mime)
-	if mimeType == "" {
-		mimeType = strings.TrimSpace(att.Mime)
-	}
-	if mimeType == "" {
-		mimeType = mime.TypeByExtension(filepath.Ext(stored.Path))
-	}
-	if !strings.HasPrefix(strings.ToLower(mimeType), "image/") {
-		return nil, false
-	}
-	budget.remainingImages--
-	budget.remainingBytes -= int64(len(data))
-	return map[string]any{
-		"type": "image_url",
-		"image_url": map[string]any{
-			"url": "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data),
-		},
-	}, true
+	return out, fmt.Errorf("provider decode failed")
 }
 
-func readCappedFile(path string, maxBytes int64) ([]byte, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
+func isRetryableProviderDecodeError(err error, body []byte) bool {
+	if len(bytes.TrimSpace(body)) == 0 {
+		return true
 	}
-	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
-	if err != nil {
-		return nil, err
+	var syntaxErr *json.SyntaxError
+	if errors.As(err, &syntaxErr) {
+		return true
 	}
-	if int64(len(data)) > maxBytes {
-		return nil, fmt.Errorf("file exceeds vision limit")
-	}
-	return data, nil
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(msg, "unexpected end of json input")
 }
 
-func (b *Builder) composeSystemPrompt(pinnedText, digestText, memText, identityText, staticMemoryText, heartbeatText, structuredContextText, docContextText, workspaceContextText string) string {
-	maxEach := b.BootstrapMaxChars
-	if maxEach <= 0 {
-		maxEach = defaultBootstrapMaxChars
+func formatProviderDecodeError(err error, body []byte) error {
+	trimmed := strings.TrimSpace(string(body))
+	if trimmed == "" {
+		return fmt.Errorf("provider returned empty response body")
 	}
-	maxTotal := b.BootstrapTotalMaxChars
-	if maxTotal <= 0 {
-		maxTotal = defaultBootstrapTotalMaxChars
-	}
-	skillsMax := b.SkillsSummaryMax
-	if skillsMax <= 0 {
-		skillsMax = defaultSkillsSummaryMax
-	}
-
-	soul := strings.TrimSpace(b.Soul)
-	if soul == "" {
-		soul = DefaultSoul
-	}
-	inst := strings.TrimSpace(b.AgentInstructions)
-	if inst == "" {
-		inst = DefaultAgentInstructions
-	}
-	notes := strings.TrimSpace(b.ToolNotes)
-	if notes == "" {
-		notes = DefaultToolNotes
-	}
-
-	type section struct {
-		title string
-		text  string
-	}
-	// Build sections in order, omitting optional ones when empty.
-	sections := []section{
-		{title: "SOUL.md", text: truncateText(soul, maxEach)},
-	}
-	if t := strings.TrimSpace(identityText); t != "" {
-		sections = append(sections, section{title: "Identity", text: truncateText(t, maxEach)})
-	}
-	sections = append(sections, section{title: "AGENTS.md", text: truncateText(inst, maxEach)})
-	if t := strings.TrimSpace(staticMemoryText); t != "" {
-		sections = append(sections, section{title: "Static Memory", text: truncateText(t, maxEach)})
-	}
-	sections = append(sections, section{title: "TOOLS.md", text: truncateText(notes, maxEach)})
-	if t := strings.TrimSpace(heartbeatText); t != "" {
-		sections = append(sections, section{title: "Heartbeat", text: truncateText(t, maxEach)})
-	}
-	if t := strings.TrimSpace(structuredContextText); t != "" {
-		sections = append(sections, section{title: "Structured Trigger Context", text: truncateText(t, maxEach)})
-	}
-	sections = append(sections, section{title: "Pinned Memory", text: pinnedText})
-	if t := strings.TrimSpace(digestText); t != "" {
-		sections = append(sections, section{title: "Memory Digest", text: truncateText(t, maxEach)})
-	}
-	sections = append(sections, section{title: "Retrieved Memory", text: memText})
-	if t := strings.TrimSpace(workspaceContextText); t != "" {
-		sections = append(sections, section{title: "Workspace Context", text: truncateText(t, maxEach)})
-	}
-	if t := strings.TrimSpace(docContextText); t != "" {
-		sections = append(sections, section{title: "Indexed File Context", text: truncateText(t, maxEach)})
-	}
-	sections = append(sections, section{title: "Skills Inventory", text: b.Skills.ModelSummary(skillsMax)})
-
-	var out strings.Builder
-	out.WriteString("# System Prompt\n")
-	for _, s := range sections {
-		out.WriteString("\n## ")
-		out.WriteString(s.title)
-		out.WriteString("\n")
-		out.WriteString(strings.TrimSpace(s.text))
-		out.WriteString("\n")
-	}
-	return truncateText(strings.TrimSpace(out.String()), maxTotal)
+	return fmt.Errorf("provider decode error: %w; body=%q", err, trimToRunes(trimmed, 240))
 }
 
-func formatStructuredEventContext(meta map[string]any, max int) string {
-	if len(meta) == 0 {
+func trimToRunes(text string, limit int) string {
+	if limit <= 0 {
 		return ""
 	}
-	raw, ok := meta[triggers.MetaKeyStructuredEvent]
-	if !ok {
-		return ""
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
 	}
-	return truncateText(triggers.StructuredEventJSON(raw), max)
+	return string(runes[:limit]) + "…"
 }
 
-func truncateText(s string, max int) string {
-	s = strings.TrimSpace(s)
-	if max > 0 && len(s) > max {
-		return strings.TrimSpace(s[:max]) + "\n…[truncated]"
-	}
-	return s
+// ChatCompletionStreamRequest is sent when stream=true.
+type ChatCompletionStreamRequest struct {
+	Model       string        `json:"model"`
+	Messages    []ChatMessage `json:"messages"`
+	Tools       []ToolDef     `json:"tools,omitempty"`
+	ToolChoice  any           `json:"tool_choice,omitempty"`
+	Temperature float64       `json:"temperature,omitempty"`
+	Stream      bool          `json:"stream"`
 }
 
-func formatPinned(m map[string]string) string {
-	if len(m) == 0 {
-		return "(none)"
-	}
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	var b strings.Builder
-	for _, k := range keys {
-		v := strings.TrimSpace(m[k])
-		if v == "" {
-			continue
-		}
-		b.WriteString(fmt.Sprintf("- %s: %s\n", k, oneLine(v, defaultPinnedOneLineMax)))
-	}
-	s := strings.TrimSpace(b.String())
-	if s == "" {
-		return "(none)"
-	}
-	return s
+// ChatStreamDelta is one incremental SSE delta from a streamed completion.
+type ChatStreamDelta struct {
+	Role      string     `json:"role"`
+	Content   string     `json:"content"`
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 }
 
-func formatRetrieved(ms []memory.Retrieved) string {
-	text, _ := formatRetrievedBounded(ms, 0)
-	return text
+// ChatStreamChoice is one choice entry from a streamed completion chunk.
+type ChatStreamChoice struct {
+	Index        int             `json:"index"`
+	Delta        ChatStreamDelta `json:"delta"`
+	FinishReason string          `json:"finish_reason"`
 }
 
-func formatRetrievedBounded(ms []memory.Retrieved, maxChars int) (string, []int64) {
-	if len(ms) == 0 {
-		return "(none)", nil
-	}
-	var b strings.Builder
-	ids := make([]int64, 0, len(ms))
-	for i, m := range ms {
-		line := fmt.Sprintf("%d) [%s] %s\n", i+1, m.Source, oneLine(m.Text, defaultRetrievedOneLineMax))
-		if maxChars > 0 && b.Len()+len(line) > maxChars {
-			break
-		}
-		b.WriteString(line)
-		if m.ID > 0 {
-			ids = append(ids, m.ID)
-		}
-	}
-	out := strings.TrimSpace(b.String())
-	if out == "" {
-		return "(none)", nil
-	}
-	return out, ids
+// ChatStreamChunk is one SSE payload from a streamed completion.
+type ChatStreamChunk struct {
+	ID      string             `json:"id"`
+	Choices []ChatStreamChoice `json:"choices"`
 }
 
-// digestKinds holds the note kinds that qualify for the Memory Digest section.
-var digestKinds = map[string]struct{}{
-	db.MemoryKindFact:       {},
-	db.MemoryKindPreference: {},
-	db.MemoryKindGoal:       {},
-	db.MemoryKindProcedure:  {},
-}
-
-// formatMemoryDigest builds a compact digest from top active durable-kind
-// notes in the retrieved set. It is bounded to maxLines lines.
-func formatMemoryDigest(ms []memory.Retrieved, maxLines int) string {
-	text, _ := formatMemoryDigestBounded(ms, maxLines, 0)
-	return text
-}
-
-func formatMemoryDigestBounded(ms []memory.Retrieved, maxLines int, maxChars int) (string, []int64) {
-	if maxLines <= 0 {
-		maxLines = defaultDigestLineMax
+// ChatStream sends the request with stream=true, calls onDelta for each text
+// delta, and returns the fully accumulated completion response.
+func (c *Client) ChatStream(ctx context.Context, req ChatCompletionRequest, onDelta func(text string)) (ChatCompletionResponse, error) {
+	streamReq := ChatCompletionStreamRequest{
+		Model:       req.Model,
+		Messages:    req.Messages,
+		Tools:       req.Tools,
+		ToolChoice:  req.ToolChoice,
+		Temperature: req.Temperature,
+		Stream:      true,
 	}
-	var b strings.Builder
-	ids := make([]int64, 0, maxLines)
-	count := 0
-	for _, m := range ms {
-		if _, ok := digestKinds[m.Kind]; !ok {
-			continue
-		}
-		// Treat empty status as active (notes inserted before the metadata
-		// migration retain their zero-value status field).
-		if m.Status != "" && m.Status != db.MemoryStatusActive {
-			continue
-		}
-		line := fmt.Sprintf("- [%s] %s\n", m.Kind, oneLine(m.Text, defaultDigestOneLineMax))
-		if maxChars > 0 && b.Len()+len(line) > maxChars {
-			break
-		}
-		b.WriteString(line)
-		if m.ID > 0 {
-			ids = append(ids, m.ID)
-		}
-		count++
-		if count >= maxLines {
-			break
-		}
-	}
-	return strings.TrimSpace(b.String()), ids
-}
-
-func uniqueInt64(ids []int64) []int64 {
-	if len(ids) == 0 {
-		return nil
-	}
-	seen := make(map[int64]struct{}, len(ids))
-	out := make([]int64, 0, len(ids))
-	for _, id := range ids {
-		if id <= 0 {
-			continue
-		}
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		seen[id] = struct{}{}
-		out = append(out, id)
-	}
-	return out
-}
-
-func oneLine(s string, max int) string {
-	s = strings.ReplaceAll(s, "\n", " ")
-	s = strings.Join(strings.Fields(s), " ")
-	if max > 0 && len(s) > max {
-		s = s[:max] + "…"
-	}
-	return s
-}
-
-func cachedEmbed(ctx context.Context, provider *providers.Client, fingerprint, model, input string) ([]float32, error) {
-	input = strings.TrimSpace(input)
-	model = strings.TrimSpace(model)
-	fingerprint = strings.TrimSpace(fingerprint)
-	if provider == nil {
-		return nil, fmt.Errorf("provider not configured")
-	}
-	if model == "" || input == "" {
-		return provider.Embed(ctx, model, input)
-	}
-	key := embedCacheKey{fingerprint: fingerprint, model: model, input: input}
-	now := time.Now()
-	promptEmbedCache.mu.Lock()
-	if entry, ok := promptEmbedCache.entries[key]; ok && entry.expiresAt.After(now) {
-		entry.usedAt = now
-		promptEmbedCache.entries[key] = entry
-		vec := append([]float32(nil), entry.vec...)
-		promptEmbedCache.mu.Unlock()
-		return vec, nil
-	}
-	promptEmbedCache.mu.Unlock()
-
-	vec, err := provider.Embed(ctx, model, input)
+	b, _ := json.Marshal(streamReq)
+	r, err := http.NewRequestWithContext(ctx, "POST", c.APIBase+"/chat/completions", bytes.NewReader(b))
 	if err != nil {
-		return nil, err
+		return ChatCompletionResponse{}, err
 	}
-	promptEmbedCache.mu.Lock()
-	if len(promptEmbedCache.entries) >= embedCacheMaxEntries {
-		var oldestKey embedCacheKey
-		var oldest time.Time
-		for k, entry := range promptEmbedCache.entries {
-			if oldest.IsZero() || entry.usedAt.Before(oldest) {
-				oldest = entry.usedAt
-				oldestKey = k
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Accept", "text/event-stream")
+	if c.APIKey != "" {
+		r.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
+
+	resp, err := c.do(r)
+	if err != nil {
+		return ChatCompletionResponse{}, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		return ChatCompletionResponse{}, fmt.Errorf("provider error %s: %s", resp.Status, string(body))
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	var contentBuilder strings.Builder
+	var finalToolCalls []ToolCall
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			break
+		}
+		var chunk ChatStreamChunk
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			continue
+		}
+		if len(chunk.Choices) == 0 {
+			continue
+		}
+		delta := chunk.Choices[0].Delta
+		if delta.Content != "" {
+			contentBuilder.WriteString(delta.Content)
+			if onDelta != nil {
+				onDelta(delta.Content)
 			}
 		}
-		delete(promptEmbedCache.entries, oldestKey)
+		if len(delta.ToolCalls) > 0 {
+			finalToolCalls = mergeStreamToolCalls(finalToolCalls, delta.ToolCalls)
+		}
 	}
-	promptEmbedCache.entries[key] = embedCacheEntry{
-		vec:       append([]float32(nil), vec...),
-		expiresAt: now.Add(embedCacheTTL),
-		usedAt:    now,
+	if err := scanner.Err(); err != nil {
+		return ChatCompletionResponse{}, err
 	}
-	promptEmbedCache.mu.Unlock()
-	return vec, nil
+
+	out := ChatCompletionResponse{
+		Choices: []struct {
+			Message struct {
+				Role      string     `json:"role"`
+				Content   any        `json:"content"`
+				ToolCalls []ToolCall `json:"tool_calls"`
+			} `json:"message"`
+		}{
+			{
+				Message: struct {
+					Role      string     `json:"role"`
+					Content   any        `json:"content"`
+					ToolCalls []ToolCall `json:"tool_calls"`
+				}{
+					Role:      "assistant",
+					Content:   contentBuilder.String(),
+					ToolCalls: finalToolCalls,
+				},
+			},
+		},
+	}
+	return out, nil
+}
+
+// mergeStreamToolCalls accumulates tool-call deltas arriving over SSE.
+// OpenAI streaming sends each piece as {index, partial args}; we expand the
+// slice to the required index and concatenate name/arguments incrementally.
+func mergeStreamToolCalls(existing []ToolCall, delta []ToolCall) []ToolCall {
+	for _, d := range delta {
+		idx := d.Index
+		for len(existing) <= idx {
+			existing = append(existing, ToolCall{})
+		}
+		existing[idx].Function.Arguments += d.Function.Arguments
+		if d.Function.Name != "" {
+			existing[idx].Function.Name += d.Function.Name
+		}
+		if d.ID != "" {
+			existing[idx].ID = d.ID
+		}
+		if d.Type != "" {
+			existing[idx].Type = d.Type
+		}
+		existing[idx].Index = idx
+	}
+	return existing
+}
+
+type EmbeddingRequest struct {
+	Model      string `json:"model"`
+	Input      string `json:"input"`
+	Dimensions int    `json:"dimensions,omitempty"`
+}
+type EmbeddingResponse struct {
+	Data []struct {
+		Embedding []float32 `json:"embedding"`
+	} `json:"data"`
+}
+
+func (c *Client) Embed(ctx context.Context, model, input string) ([]float32, error) {
+	var out EmbeddingResponse
+	reqBody := EmbeddingRequest{Model: model, Input: input}
+	if c != nil && c.EmbedDimensions > 0 {
+		reqBody.Dimensions = c.EmbedDimensions
+	}
+	b, _ := json.Marshal(reqBody)
+	r, err := http.NewRequestWithContext(ctx, "POST", c.APIBase+"/embeddings", bytes.NewReader(b))
+	if err != nil {
+		return nil, err
+	}
+	r.Header.Set("Content-Type", "application/json")
+	if c.APIKey != "" {
+		r.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
+
+	resp, err := c.do(r)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("provider error %s: %s", resp.Status, string(body))
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, err
+	}
+	if len(out.Data) == 0 {
+		return nil, fmt.Errorf("no embedding returned")
+	}
+	return out.Data[0].Embedding, nil
+}
+
+func (c *Client) do(req *http.Request) (*http.Response, error) {
+	client := c.HTTP
+	if client == nil {
+		client = &http.Client{Timeout: 60 * time.Second}
+	}
+	if c.HostPolicy.EnabledPolicy() {
+		client = security.WrapHTTPClient(client, c.HostPolicy)
+	}
+	return client.Do(req)
 }
 ````
 
@@ -31136,6 +31168,362 @@ func buildExtraNotes(parsed consolidationOutput, sourceMsgID sql.NullInt64, embe
 }
 ````
 
+## File: cmd/or3-intern/doctor.go
+````go
+package main
+
+import (
+	"bufio"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+
+	"or3-intern/internal/config"
+	intdoctor "or3-intern/internal/doctor"
+)
+
+type doctorFinding struct {
+	Level   string
+	Area    string
+	Message string
+}
+
+type doctorArgs struct {
+	Strict      bool
+	JSON        bool
+	Fix         bool
+	Interactive bool
+	Probe       bool
+	Severity    intdoctor.Severity
+	Areas       []string
+	FixableOnly bool
+}
+
+func parseDoctorArgs(args []string, stderr io.Writer) (doctorArgs, error) {
+	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	strict := fs.Bool("strict", false, "exit non-zero when warnings are found")
+	jsonOut := fs.Bool("json", false, "emit structured JSON output")
+	fix := fs.Bool("fix", false, "apply safe fixes")
+	interactive := fs.Bool("interactive", false, "use guided repair prompts for ambiguous fixes")
+	probe := fs.Bool("probe", false, "run bounded local runtime probes")
+	severity := fs.String("severity", "", "minimum severity filter: info, warn, error, block")
+	fixableOnly := fs.Bool("fixable-only", false, "show only findings with available fixes")
+	var areas stringSliceFlag
+	fs.Var(&areas, "area", "repeatable area filter")
+	if err := fs.Parse(args); err != nil {
+		return doctorArgs{}, err
+	}
+	if fs.NArg() > 0 {
+		return doctorArgs{}, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+	}
+	minSeverity := intdoctor.NormalizeSeverity(*severity)
+	if *severity != "" && minSeverity == "" {
+		return doctorArgs{}, fmt.Errorf("invalid --severity %q", *severity)
+	}
+	return doctorArgs{
+		Strict:      *strict,
+		JSON:        *jsonOut,
+		Fix:         *fix,
+		Interactive: *interactive,
+		Probe:       *probe,
+		Severity:    minSeverity,
+		Areas:       []string(areas),
+		FixableOnly: *fixableOnly,
+	}, nil
+}
+
+func runDoctorCommand(cfgPath string, cfg config.Config, validationError string, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	if stdin == nil {
+		stdin = os.Stdin
+	}
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+	if stderr == nil {
+		stderr = os.Stderr
+	}
+	parsed, err := parseDoctorArgs(args, stderr)
+	if err != nil {
+		return err
+	}
+
+	report := intdoctor.Evaluate(cfg, intdoctor.Options{
+		Mode:            chooseDoctorMode(parsed.Strict),
+		ConfigPath:      cfgPath,
+		ValidationError: validationError,
+		Probe:           parsed.Probe,
+	})
+	currentValidationError := validationError
+
+	if parsed.Fix {
+		applied, fixErr := intdoctor.ApplyAutomaticFixes(cfgPath, &cfg, report)
+		if fixErr != nil {
+			return fixErr
+		}
+		currentValidationError = refreshDoctorValidationError(cfgPath, currentValidationError)
+		report = intdoctor.Evaluate(cfg, intdoctor.Options{
+			Mode:            chooseDoctorMode(parsed.Strict),
+			ConfigPath:      cfgPath,
+			ValidationError: currentValidationError,
+			Probe:           parsed.Probe,
+		})
+		if parsed.Interactive {
+			appliedInteractive, interactiveErr := applyInteractiveDoctorFixes(stdin, stdout, cfgPath, &cfg, report)
+			if interactiveErr != nil {
+				return interactiveErr
+			}
+			applied = append(applied, appliedInteractive...)
+		}
+		currentValidationError = refreshDoctorValidationError(cfgPath, currentValidationError)
+		report = intdoctor.Evaluate(cfg, intdoctor.Options{
+			Mode:            chooseDoctorMode(parsed.Strict),
+			ConfigPath:      cfgPath,
+			ValidationError: currentValidationError,
+			Probe:           parsed.Probe,
+		})
+		report.FixesApplied = applied
+	}
+
+	report = report.Filter(intdoctor.FilterOptions{
+		Areas:       parsed.Areas,
+		MinSeverity: parsed.Severity,
+		FixableOnly: parsed.FixableOnly,
+	})
+
+	if parsed.JSON {
+		payload, err := intdoctor.RenderJSON(report)
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintln(stdout, string(payload))
+	} else {
+		_, _ = io.WriteString(stdout, intdoctor.RenderText(report))
+	}
+
+	if parsed.Strict && report.HasStrictFailures() {
+		return fmt.Errorf("doctor found warnings")
+	}
+	return nil
+}
+
+func chooseDoctorMode(strict bool) intdoctor.Mode {
+	if strict {
+		return intdoctor.ModeStrict
+	}
+	return intdoctor.ModeAdvisory
+}
+
+func refreshDoctorValidationError(cfgPath, previous string) string {
+	if strings.TrimSpace(cfgPath) == "" {
+		return previous
+	}
+	if _, err := config.Load(cfgPath); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
+func doctorFindings(cfg config.Config) []doctorFinding {
+	report := intdoctor.Evaluate(cfg, intdoctor.Options{Mode: intdoctor.ModeAdvisory})
+	items := make([]doctorFinding, 0, len(report.Findings))
+	for _, finding := range report.Findings {
+		items = append(items, doctorFinding{
+			Level:   string(finding.Severity),
+			Area:    finding.Area,
+			Message: finding.Summary,
+		})
+	}
+	return items
+}
+
+func applyInteractiveDoctorFixes(in io.Reader, out io.Writer, cfgPath string, cfg *config.Config, report intdoctor.Report) ([]intdoctor.AppliedFix, error) {
+	reader := bufio.NewReader(in)
+	applied := []intdoctor.AppliedFix{}
+	for _, finding := range report.Findings {
+		if finding.FixMode != intdoctor.FixModeInteractive {
+			continue
+		}
+		changed, summary, err := applySingleInteractiveDoctorFix(reader, out, cfg, finding)
+		if err != nil {
+			return applied, err
+		}
+		if changed {
+			applied = append(applied, intdoctor.AppliedFix{ID: finding.ID, Summary: summary})
+		}
+	}
+	if len(applied) > 0 {
+		if err := config.Save(cfgPath, *cfg); err != nil {
+			return applied, err
+		}
+	}
+	return applied, nil
+}
+
+func applySingleInteractiveDoctorFix(reader *bufio.Reader, out io.Writer, cfg *config.Config, finding intdoctor.Finding) (bool, string, error) {
+	switch finding.ID {
+	case "channels.invalid_ingress":
+		channel := finding.Metadata["channel"]
+		choice, err := promptMenuChoice(reader, out, fmt.Sprintf("Repair %s inbound access", channel), []string{
+			"1) Pairing (secure default for interactive channels)",
+			"2) Allowlist (specify allowed identities now)",
+			"3) Open access",
+			"4) Deny inbound (send-only)",
+			"5) Disable channel",
+			"6) Skip",
+		}, "1")
+		if err != nil {
+			return false, "", err
+		}
+		var mode string
+		var allowlist []string
+		switch choice {
+		case "1":
+			mode = "pairing"
+		case "2":
+			mode = "allowlist"
+			text, err := promptString(reader, out, fmt.Sprintf("%s allowlist (comma-separated)", channel), "")
+			if err != nil {
+				return false, "", err
+			}
+			allowlist = splitAndCompact(text)
+		case "3":
+			mode = "open"
+		case "4":
+			mode = "deny"
+		case "5":
+			mode = "disable"
+		default:
+			return false, "", nil
+		}
+		changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, mode, allowlist)
+		if err != nil {
+			return false, "", err
+		}
+		return changed, fmt.Sprintf("updated %s inbound access", channel), nil
+	case "service.secret_missing", "service.secret_weak":
+		choice, err := promptMenuChoice(reader, out, "Repair service secret", []string{
+			"1) Generate a strong random secret",
+			"2) Disable service mode",
+			"3) Skip",
+		}, "1")
+		if err != nil {
+			return false, "", err
+		}
+		switch choice {
+		case "1":
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "generate", nil)
+			return changed, "generated a service secret", err
+		case "2":
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "disable", nil)
+			return changed, "disabled service mode", err
+		default:
+			return false, "", nil
+		}
+	case "webhook.secret_missing":
+		choice, err := promptMenuChoice(reader, out, "Repair webhook secret", []string{
+			"1) Generate a strong random secret",
+			"2) Disable webhook",
+			"3) Skip",
+		}, "1")
+		if err != nil {
+			return false, "", err
+		}
+		switch choice {
+		case "1":
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "generate", nil)
+			return changed, "generated a webhook secret", err
+		case "2":
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "disable", nil)
+			return changed, "disabled webhook", err
+		default:
+			return false, "", nil
+		}
+	case "service.public_bind":
+		choice, err := promptMenuChoice(reader, out, "Repair service bind address", []string{
+			"1) Bind to loopback",
+			"2) Skip",
+		}, "1")
+		if err != nil {
+			return false, "", err
+		}
+		if choice == "1" {
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "loopback", nil)
+			return changed, "bound service to loopback", err
+		}
+	case "webhook.public_bind":
+		choice, err := promptMenuChoice(reader, out, "Repair webhook bind address", []string{
+			"1) Bind to loopback",
+			"2) Skip",
+		}, "1")
+		if err != nil {
+			return false, "", err
+		}
+		if choice == "1" {
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "loopback", nil)
+			return changed, "bound webhook to loopback", err
+		}
+	case "security.secret_store_disabled_with_integrations":
+		choice, err := promptMenuChoice(reader, out, "Repair secret store for external integrations", []string{
+			"1) Enable secret store and generate a key file",
+			"2) Skip",
+		}, "1")
+		if err != nil {
+			return false, "", err
+		}
+		if choice == "1" {
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "enable", nil)
+			return changed, "enabled secret store and generated a key file", err
+		}
+	case "privileged-exec.sandbox_disabled":
+		choice, err := promptMenuChoice(reader, out, "Repair privileged tools without sandboxing", []string{
+			"1) Disable privileged tools",
+			"2) Enable Bubblewrap sandboxing",
+			"3) Skip",
+		}, "1")
+		if err != nil {
+			return false, "", err
+		}
+		switch choice {
+		case "1":
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "disable_privileged", nil)
+			return changed, "disabled privileged tools", err
+		case "2":
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "enable_sandbox", nil)
+			return changed, "enabled Bubblewrap sandboxing", err
+		default:
+			return false, "", nil
+		}
+	case "privileged-exec.bubblewrap_missing":
+		choice, err := promptMenuChoice(reader, out, "Repair missing Bubblewrap binary", []string{
+			"1) Disable privileged tools and sandboxing",
+			"2) Set Bubblewrap path manually",
+			"3) Skip",
+		}, "1")
+		if err != nil {
+			return false, "", err
+		}
+		switch choice {
+		case "1":
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "disable_privileged", nil)
+			return changed, "disabled privileged tools and sandboxing", err
+		case "2":
+			path, err := promptString(reader, out, "Bubblewrap path", cfg.Hardening.Sandbox.BubblewrapPath)
+			if err != nil {
+				return false, "", err
+			}
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "set_path", []string{path})
+			return changed, "updated Bubblewrap path", err
+		default:
+			return false, "", nil
+		}
+	}
+	return false, "", nil
+}
+````
+
 ## File: internal/agent/runtime.go
 ````go
 // Package agent coordinates prompt building, tool execution, and turn delivery.
@@ -32266,8 +32654,20 @@ func (r *Runtime) persistAssistantReply(ctx context.Context, sessionKey string, 
 	if strings.TrimSpace(finalText) == "" {
 		finalText = "(no response)"
 	}
-	if _, err := r.DB.AppendMessage(ctx, sessionKey, "assistant", finalText, map[string]any{"in_reply_to": msgID}); err != nil {
+	assistantID, err := r.DB.AppendMessage(ctx, sessionKey, "assistant", finalText, map[string]any{"in_reply_to": msgID})
+	if err != nil {
 		log.Printf("append assistant(final) failed: %v", err)
+	} else if r.DB != nil {
+		scopeKey := sessionKey
+		if resolved, rerr := r.DB.ResolveScopeKey(ctx, sessionKey); rerr == nil && strings.TrimSpace(resolved) != "" {
+			scopeKey = resolved
+		}
+		card, _, _ := loadTaskCard(ctx, r.DB, sessionKey)
+		card.Status = "active"
+		card.MessageRefs = appendBoundedInt64(card.MessageRefs, assistantID, 12)
+		if err := saveTaskCard(ctx, r.DB, sessionKey, scopeKey, card); err != nil {
+			log.Printf("save task card failed: %v", err)
+		}
 	}
 	if autoDeliver && !streamed && r.Deliver != nil {
 		if err := r.deliver(ctx, channel, replyTarget, finalText, replyMeta); err != nil {
@@ -32297,6 +32697,29 @@ func (r *Runtime) boundTextResult(ctx context.Context, sessionKey string, text s
 		if err != nil {
 			log.Printf("artifact save failed: %v", err)
 			return text, preview, ""
+		}
+		if r.DB != nil {
+			if _, err := r.DB.InsertMemoryNoteTyped(ctx, sessionKey, db.TypedNoteInput{
+				Text:             preview,
+				Summary:          preview,
+				SourceArtifactID: id,
+				Kind:             db.MemoryKindArtifact,
+				Status:           db.MemoryStatusActive,
+				Importance:       0.2,
+				Confidence:       0.9,
+			}); err != nil {
+				log.Printf("artifact summary note save failed: %v", err)
+			}
+			scopeKey := sessionKey
+			if resolved, rerr := r.DB.ResolveScopeKey(ctx, sessionKey); rerr == nil && strings.TrimSpace(resolved) != "" {
+				scopeKey = resolved
+			}
+			card, _, _ := loadTaskCard(ctx, r.DB, sessionKey)
+			card.Status = "active"
+			card.ArtifactRefs = appendBoundedString(card.ArtifactRefs, id, 12)
+			if err := saveTaskCard(ctx, r.DB, sessionKey, scopeKey, card); err != nil {
+				log.Printf("save task card artifact ref failed: %v", err)
+			}
 		}
 		return fmt.Sprintf("artifact_id=%s\npreview:\n%s", id, preview), preview, id
 	}
@@ -32434,6 +32857,966 @@ func WithTimeout(ctx context.Context, sec int) (context.Context, context.CancelF
 		sec = 60
 	}
 	return context.WithTimeout(ctx, time.Duration(sec)*time.Second)
+}
+````
+
+## File: cmd/or3-intern/init.go
+````go
+package main
+
+import (
+	"bufio"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"strconv"
+	"strings"
+
+	"or3-intern/internal/config"
+)
+
+type initProviderPreset struct {
+	label      string
+	apiBase    string
+	model      string
+	embedModel string
+}
+
+var initProviderPresets = map[string]initProviderPreset{
+	"1": {
+		label:      "OpenAI",
+		apiBase:    "https://api.openai.com/v1",
+		model:      "gpt-4.1-mini",
+		embedModel: "text-embedding-3-small",
+	},
+	"2": {
+		label:      "OpenRouter",
+		apiBase:    "https://openrouter.ai/api/v1",
+		model:      "openai/gpt-4o-mini",
+		embedModel: "text-embedding-3-small",
+	},
+	"3": {
+		label:      "Custom OpenAI-compatible",
+		apiBase:    "https://api.openai.com/v1",
+		model:      "gpt-4.1-mini",
+		embedModel: "text-embedding-3-small",
+	},
+}
+
+func runInit(cfgPath string) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = ""
+	}
+	if supportsInteractiveTUI(os.Stdin, os.Stdout) {
+		return runConfigureWithTUI(cfgPathOrDefault(cfgPath), cwd, []string{}, configureTUIOptions{
+			Title:      "or3-intern init",
+			Intro:      []string{"First-run setup with the essential provider, storage, workspace, and tools sections."},
+			Restricted: []string{"provider", "storage", "workspace", "tools"},
+		})
+	}
+	return runInitWithIO(os.Stdin, os.Stdout, cfgPathOrDefault(cfgPath), cwd)
+}
+
+func runInitWithIO(in io.Reader, out io.Writer, cfgPath, cwd string) error {
+	fmt.Fprintln(out, "or3-intern init")
+	fmt.Fprintln(out, "`init` now uses the same configure wizard under the hood with the original first-run sections.")
+	fmt.Fprintln(out)
+	return runConfigureWithIO(in, out, cfgPath, cwd, []string{
+		"--section", "provider",
+		"--section", "storage",
+		"--section", "workspace",
+		"--section", "tools",
+	})
+}
+
+func initDefaults(cwd string) config.Config {
+	cfg := config.Default()
+	config.ApplyEnvOverrides(&cfg)
+	cwd = strings.TrimSpace(cwd)
+	if cwd != "" {
+		cfg.WorkspaceDir = cwd
+		cfg.Tools.RestrictToWorkspace = true
+	}
+	return cfg
+}
+
+func defaultProviderChoice(apiBase string) string {
+	normalized := strings.ToLower(strings.TrimSpace(apiBase))
+	if strings.Contains(normalized, "openrouter.ai") {
+		return "2"
+	}
+	if normalized != "" && !strings.Contains(normalized, "api.openai.com") {
+		return "3"
+	}
+	return "1"
+}
+
+func applyProviderPreset(cfg *config.Config, choice string) {
+	preset, ok := initProviderPresets[choice]
+	if !ok || cfg == nil {
+		return
+	}
+	cfg.Provider.APIBase = preset.apiBase
+	cfg.Provider.Model = preset.model
+	cfg.Provider.EmbedModel = preset.embedModel
+}
+
+func promptChoice(reader *bufio.Reader, out io.Writer, label string, options []string, defaultChoice string) (string, error) {
+	fmt.Fprintln(out, label)
+	for _, option := range options {
+		fmt.Fprintf(out, "  %s\n", option)
+	}
+	for {
+		answer, err := promptString(reader, out, "Selection", defaultChoice)
+		if err != nil {
+			return "", err
+		}
+		answer = strings.TrimSpace(answer)
+		if _, ok := initProviderPresets[answer]; ok {
+			return answer, nil
+		}
+		fmt.Fprintln(out, "Please choose 1, 2, or 3.")
+	}
+}
+
+func promptBool(reader *bufio.Reader, out io.Writer, label string, defaultValue bool) (bool, error) {
+	defaultText := "n"
+	if defaultValue {
+		defaultText = "y"
+	}
+	for {
+		answer, err := promptString(reader, out, label+" (y/n)", defaultText)
+		if err != nil {
+			return false, err
+		}
+		switch strings.ToLower(strings.TrimSpace(answer)) {
+		case "y", "yes":
+			return true, nil
+		case "n", "no":
+			return false, nil
+		default:
+			fmt.Fprintln(out, "Please answer y or n.")
+		}
+	}
+}
+
+func promptString(reader *bufio.Reader, out io.Writer, label, defaultValue string) (string, error) {
+	if defaultValue != "" {
+		fmt.Fprintf(out, "%s [%s]: ", label, defaultValue)
+	} else {
+		fmt.Fprintf(out, "%s: ", label)
+	}
+	line, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return defaultValue, nil
+	}
+	return line, nil
+}
+
+func promptInt(reader *bufio.Reader, out io.Writer, label string, defaultValue int) (int, error) {
+	for {
+		answer, err := promptString(reader, out, label, strconv.Itoa(defaultValue))
+		if err != nil {
+			return 0, err
+		}
+		value, err := strconv.Atoi(strings.TrimSpace(answer))
+		if err == nil {
+			return value, nil
+		}
+		fmt.Fprintln(out, "Please enter a whole number.")
+	}
+}
+
+func promptSecretString(reader *bufio.Reader, out io.Writer, label, currentValue string) (string, error) {
+	if strings.TrimSpace(currentValue) == "" {
+		return promptString(reader, out, label, "")
+	}
+	_, _ = fmt.Fprintf(out, "%s [leave blank to keep current, type clear to remove]: ", label)
+	line, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+	line = strings.TrimSpace(line)
+	switch {
+	case line == "":
+		return currentValue, nil
+	case strings.EqualFold(line, configureSecretClearKeyword):
+		return "", nil
+	default:
+		return line, nil
+	}
+}
+````
+
+## File: internal/agent/prompt.go
+````go
+package agent
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"mime"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"or3-intern/internal/artifacts"
+	"or3-intern/internal/db"
+	"or3-intern/internal/heartbeat"
+	"or3-intern/internal/memory"
+	"or3-intern/internal/providers"
+	"or3-intern/internal/scope"
+	"or3-intern/internal/skills"
+	"or3-intern/internal/triggers"
+)
+
+const DefaultSoul = `# Soul
+I am or3-intern, a personal AI assistant.
+- Be clear and direct
+- Prefer deterministic, bounded work
+- Use tools when needed; keep outputs short
+`
+
+const DefaultAgentInstructions = `# Agent Instructions
+- Use pinned memory only for ultra-stable facts, preferences, and long-running project state.
+- Check the short Memory Digest and retrieved memory snippets before answering.
+- Keep constant RAM usage: last N messages + top K memories only.
+- Large tool outputs must spill to artifacts.
+`
+
+const DefaultToolNotes = `# Tool Usage Notes
+exec:
+- Commands have a timeout
+- Dangerous commands blocked
+- Output truncated
+cron:
+- Use cron tool for scheduled reminders.
+`
+
+// defaultDigestLineMax bounds the number of lines in the Memory Digest section.
+const defaultDigestLineMax = 10
+
+const (
+	defaultBootstrapMaxChars      = 20000
+	defaultBootstrapTotalMaxChars = 150000
+	defaultPinnedOneLineMax       = 220
+	defaultDigestOneLineMax       = 160
+	defaultRetrievedOneLineMax    = 240
+	defaultSkillsSummaryMax       = 80
+	defaultVisionMaxImages        = 4
+	defaultVisionMaxImageBytes    = 4 << 20
+	defaultVisionTotalBytes       = 8 << 20
+	embedCacheTTL                 = 5 * time.Minute
+	embedCacheMaxEntries          = 128
+)
+
+type embedCacheKey struct {
+	fingerprint string
+	model       string
+	input       string
+}
+
+type embedCacheEntry struct {
+	vec       []float32
+	expiresAt time.Time
+	usedAt    time.Time
+}
+
+var promptEmbedCache = struct {
+	mu      sync.Mutex
+	entries map[embedCacheKey]embedCacheEntry
+}{entries: map[embedCacheKey]embedCacheEntry{}}
+
+type PromptParts struct {
+	System  []providers.ChatMessage
+	History []providers.ChatMessage
+	Budget  BudgetReport
+}
+
+// BuildOptions holds options for building a prompt.
+type BuildOptions struct {
+	SessionKey  string
+	UserMessage string
+	Autonomous  bool // true for cron/webhook/file-change events
+	EventMeta   map[string]any
+}
+
+type Builder struct {
+	DB               *db.DB
+	Artifacts        *artifacts.Store
+	Skills           skills.Inventory
+	Mem              *memory.Retriever
+	Provider         *providers.Client
+	EmbedModel       string
+	EmbedFingerprint string
+	EnableVision     bool
+
+	Soul                   string
+	AgentInstructions      string
+	ToolNotes              string
+	BootstrapMaxChars      int
+	BootstrapTotalMaxChars int
+	SkillsSummaryMax       int
+
+	HistoryMax int
+	VectorK    int
+	FTSK       int
+	TopK       int
+
+	// New fields for lightweight OpenClaw parity
+	IdentityText       string               // content of IDENTITY.md
+	StaticMemory       string               // content of MEMORY.md
+	HeartbeatText      string               // content of HEARTBEAT.md – injected only for autonomous turns
+	HeartbeatTasksFile string               // configured heartbeat file path for per-turn refresh
+	DocRetriever       *memory.DocRetriever // for indexed file context
+	DocRetrieveLimit   int                  // max docs to retrieve
+	WorkspaceDir       string
+
+	ContextMaxInputTokens      int
+	ContextOutputReserveTokens int
+	ContextSafetyMarginTokens  int
+	ContextSectionBudgets      ContextSectionBudgets
+}
+
+// Build builds a prompt snapshot. It is a convenience wrapper around BuildWithOptions.
+func (b *Builder) Build(ctx context.Context, sessionKey string, userMessage string) (PromptParts, []memory.Retrieved, error) {
+	return b.BuildWithOptions(ctx, BuildOptions{SessionKey: sessionKey, UserMessage: userMessage})
+}
+
+// BuildWithOptions builds a prompt snapshot using the provided options.
+func (b *Builder) BuildWithOptions(ctx context.Context, opts BuildOptions) (PromptParts, []memory.Retrieved, error) {
+	packet, retrieved, err := b.buildPacket(ctx, opts)
+	if err != nil {
+		return PromptParts{}, nil, err
+	}
+	sys := renderProviderMessages(packet, b)
+	return PromptParts{
+		System:  sys,
+		History: packet.RecentHistory,
+		Budget:  packet.Budget,
+	}, retrieved, nil
+}
+
+func (b *Builder) buildPacket(ctx context.Context, opts BuildOptions) (ContextPacket, []memory.Retrieved, error) {
+	scopeKey := opts.SessionKey
+	if b.DB != nil && strings.TrimSpace(opts.SessionKey) != "" {
+		if resolved, err := b.DB.ResolveScopeKey(ctx, opts.SessionKey); err == nil && strings.TrimSpace(resolved) != "" {
+			scopeKey = resolved
+		}
+	}
+	pinned, err := b.DB.GetPinned(ctx, scopeKey)
+	if err != nil {
+		return ContextPacket{}, nil, err
+	}
+	pinnedText := formatPinned(pinned)
+
+	// embed and retrieve
+	var retrieved []memory.Retrieved
+	if b.Mem != nil && b.Provider != nil && strings.TrimSpace(opts.UserMessage) != "" {
+		vec, err := cachedEmbed(ctx, b.Provider, b.EmbedFingerprint, b.EmbedModel, opts.UserMessage)
+		if err == nil {
+			b.Mem.EmbedFingerprint = b.EmbedFingerprint
+			retrieved, err = b.Mem.Retrieve(ctx, scopeKey, opts.UserMessage, vec, b.VectorK, b.FTSK, b.TopK)
+			if err != nil {
+				log.Printf("memory retrieve failed for scope %q: %v", scopeKey, err)
+				retrieved = nil
+			}
+		}
+	}
+	maxEach := b.BootstrapMaxChars
+	if maxEach <= 0 {
+		maxEach = defaultBootstrapMaxChars
+	}
+	memText, retrievedIDs := formatRetrievedBounded(retrieved, maxEach)
+
+	// Build Memory Digest from top active durable-kind notes.
+	digestText, digestIDs := formatMemoryDigestBounded(retrieved, defaultDigestLineMax, maxEach)
+
+	// Best-effort usage logging for notes that made it into the prompt.
+	if b.DB != nil {
+		ids := append([]int64(nil), retrievedIDs...)
+		ids = append(ids, digestIDs...)
+		ids = uniqueInt64(ids)
+		if len(ids) > 0 {
+			_ = b.DB.TouchMemoryNotes(ctx, scopeKey, ids, db.NowMS())
+		}
+	}
+
+	// indexed doc context
+	var docContextText string
+	if b.DocRetriever != nil && strings.TrimSpace(opts.UserMessage) != "" {
+		limit := b.DocRetrieveLimit
+		if limit <= 0 {
+			limit = 5
+		}
+		docs, _ := b.DocRetriever.RetrieveDocs(ctx, scope.GlobalMemoryScope, opts.UserMessage, limit)
+		if len(docs) > 0 {
+			var sb strings.Builder
+			for i, d := range docs {
+				sb.WriteString(fmt.Sprintf("%d) [%s] %s\n", i+1, d.Path, d.Excerpt))
+			}
+			docContextText = strings.TrimSpace(sb.String())
+		}
+	}
+	workspaceContextText := memory.BuildWorkspaceContext(memory.WorkspaceContextConfig{
+		WorkspaceDir: b.WorkspaceDir,
+	}, opts.UserMessage)
+
+	histRows, err := b.DB.GetLastMessagesScoped(ctx, opts.SessionKey, b.HistoryMax)
+	if err != nil {
+		return ContextPacket{}, nil, err
+	}
+	visionBudget := newVisionBudget()
+	hist := make([]providers.ChatMessage, 0, len(histRows))
+	pendingToolCallIDs := make([]string, 0)
+	for _, m := range histRows {
+		msg := providers.ChatMessage{Role: m.Role, Content: m.Content}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(m.PayloadJSON), &payload); err == nil {
+			if m.Role == "assistant" {
+				if raw, ok := payload["tool_calls"]; ok {
+					b, _ := json.Marshal(raw)
+					var tcs []providers.ToolCall
+					if err := json.Unmarshal(b, &tcs); err == nil {
+						msg.ToolCalls = tcs
+						pendingToolCallIDs = pendingToolCallIDs[:0]
+						for _, tc := range tcs {
+							if id := strings.TrimSpace(tc.ID); id != "" {
+								pendingToolCallIDs = append(pendingToolCallIDs, id)
+							}
+						}
+					}
+				}
+			}
+			if m.Role == "tool" {
+				if rawID, ok := payload["tool_call_id"]; ok {
+					msg.ToolCallID = strings.TrimSpace(fmt.Sprint(rawID))
+				}
+				if msg.ToolCallID == "" && len(pendingToolCallIDs) > 0 {
+					msg.ToolCallID = pendingToolCallIDs[0]
+				}
+				if msg.ToolCallID != "" && len(pendingToolCallIDs) > 0 {
+					if pendingToolCallIDs[0] == msg.ToolCallID {
+						pendingToolCallIDs = pendingToolCallIDs[1:]
+					} else {
+						for i, id := range pendingToolCallIDs {
+							if id == msg.ToolCallID {
+								pendingToolCallIDs = append(pendingToolCallIDs[:i], pendingToolCallIDs[i+1:]...)
+								break
+							}
+						}
+					}
+				}
+			}
+			if m.Role == "user" {
+				msg.Content = b.buildUserContent(ctx, m.Content, attachmentsFromPayload(payload), visionBudget)
+			}
+		}
+		hist = append(hist, msg)
+	}
+
+	heartbeat := ""
+	structuredContext := ""
+	taskCardText := ""
+	structuredMax := b.BootstrapMaxChars
+	if structuredMax <= 0 {
+		structuredMax = defaultBootstrapMaxChars
+	}
+	if b.DB != nil {
+		if card, ok, err := loadTaskCard(ctx, b.DB, opts.SessionKey); err == nil && ok {
+			taskCardText = renderTaskCard(card, structuredMax)
+		}
+	}
+	if opts.Autonomous {
+		heartbeat = b.currentHeartbeatText()
+		structuredContext = formatStructuredEventContext(opts.EventMeta, structuredMax)
+	}
+	if strings.TrimSpace(taskCardText) != "" {
+		if strings.TrimSpace(structuredContext) == "" {
+			structuredContext = "active_task_card:\n" + taskCardText
+		} else {
+			structuredContext = structuredContext + "\n\nactive_task_card:\n" + taskCardText
+		}
+	}
+	packet := b.buildContextPacket(pinnedText, digestText, memText, b.IdentityText, b.StaticMemory, heartbeat, structuredContext, docContextText, workspaceContextText)
+	packet.RecentHistory = hist
+	packet.Budget = estimatePacketBudget(packet, b)
+	return packet, retrieved, nil
+}
+
+func (b *Builder) currentHeartbeatText() string {
+	if b == nil {
+		return ""
+	}
+	if path, text, err := heartbeat.LoadTasksFile(b.HeartbeatTasksFile, b.WorkspaceDir); err == nil && strings.TrimSpace(path) != "" {
+		if heartbeat.HasActiveInstructions(text) {
+			return text
+		}
+		return ""
+	}
+	return strings.TrimSpace(b.HeartbeatText)
+}
+
+func attachmentsFromPayload(payload map[string]any) []artifacts.Attachment {
+	if len(payload) == 0 {
+		return nil
+	}
+	raw := payload["attachments"]
+	if raw == nil {
+		if meta, ok := payload["meta"].(map[string]any); ok {
+			raw = meta["attachments"]
+		}
+	}
+	if raw == nil {
+		return nil
+	}
+	b, _ := json.Marshal(raw)
+	var atts []artifacts.Attachment
+	if err := json.Unmarshal(b, &atts); err != nil {
+		return nil
+	}
+	out := make([]artifacts.Attachment, 0, len(atts))
+	for _, att := range atts {
+		if strings.TrimSpace(att.ArtifactID) == "" {
+			continue
+		}
+		if strings.TrimSpace(att.Filename) == "" {
+			att.Filename = "attachment"
+		}
+		if strings.TrimSpace(att.Kind) == "" {
+			att.Kind = artifacts.DetectKind(att.Filename, att.Mime)
+		}
+		out = append(out, att)
+	}
+	return out
+}
+
+type visionBudget struct {
+	remainingImages int
+	remainingBytes  int64
+}
+
+func newVisionBudget() *visionBudget {
+	return &visionBudget{
+		remainingImages: defaultVisionMaxImages,
+		remainingBytes:  defaultVisionTotalBytes,
+	}
+}
+
+func (b *Builder) buildUserContent(ctx context.Context, text string, atts []artifacts.Attachment, budget *visionBudget) any {
+	if !b.EnableVision || b.Artifacts == nil || len(atts) == 0 {
+		return text
+	}
+	parts := make([]map[string]any, 0, len(atts)+1)
+	imageParts := 0
+	if strings.TrimSpace(text) != "" {
+		parts = append(parts, map[string]any{
+			"type": "text",
+			"text": text,
+		})
+	}
+	for _, att := range atts {
+		if strings.TrimSpace(att.Kind) != artifacts.KindImage && !strings.HasPrefix(strings.ToLower(strings.TrimSpace(att.Mime)), "image/") {
+			continue
+		}
+		part, ok := b.imagePart(ctx, att, budget)
+		if !ok {
+			continue
+		}
+		parts = append(parts, part)
+		imageParts++
+	}
+	if imageParts == 0 {
+		return text
+	}
+	return parts
+}
+
+func (b *Builder) imagePart(ctx context.Context, att artifacts.Attachment, budget *visionBudget) (map[string]any, bool) {
+	if budget == nil || budget.remainingImages <= 0 || budget.remainingBytes <= 0 {
+		return nil, false
+	}
+	stored, err := b.Artifacts.Lookup(ctx, att.ArtifactID)
+	if err != nil {
+		return nil, false
+	}
+	sizeBytes := stored.SizeBytes
+	if sizeBytes <= 0 {
+		info, err := os.Stat(stored.Path)
+		if err != nil {
+			return nil, false
+		}
+		sizeBytes = info.Size()
+	}
+	if sizeBytes <= 0 || sizeBytes > defaultVisionMaxImageBytes || sizeBytes > budget.remainingBytes {
+		return nil, false
+	}
+	data, err := readCappedFile(stored.Path, defaultVisionMaxImageBytes)
+	if err != nil {
+		return nil, false
+	}
+	if int64(len(data)) > budget.remainingBytes {
+		return nil, false
+	}
+	mimeType := strings.TrimSpace(stored.Mime)
+	if mimeType == "" {
+		mimeType = strings.TrimSpace(att.Mime)
+	}
+	if mimeType == "" {
+		mimeType = mime.TypeByExtension(filepath.Ext(stored.Path))
+	}
+	if !strings.HasPrefix(strings.ToLower(mimeType), "image/") {
+		return nil, false
+	}
+	budget.remainingImages--
+	budget.remainingBytes -= int64(len(data))
+	return map[string]any{
+		"type": "image_url",
+		"image_url": map[string]any{
+			"url": "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data),
+		},
+	}, true
+}
+
+func readCappedFile(path string, maxBytes int64) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("file exceeds vision limit")
+	}
+	return data, nil
+}
+
+func (b *Builder) composeSystemPrompt(pinnedText, digestText, memText, identityText, staticMemoryText, heartbeatText, structuredContextText, docContextText, workspaceContextText string) string {
+	stable := b.renderStablePrefix(pinnedText, digestText, memText, identityText, staticMemoryText, docContextText, workspaceContextText)
+	volatile := b.renderVolatileSuffix(heartbeatText, structuredContextText)
+	if strings.TrimSpace(volatile) == "" {
+		return stable
+	}
+	return strings.TrimSpace(stable + "\n\n" + volatile)
+}
+
+func (b *Builder) composeSystemContent(pinnedText, digestText, memText, identityText, staticMemoryText, heartbeatText, structuredContextText, docContextText, workspaceContextText string) any {
+	stable := b.renderStablePrefix(pinnedText, digestText, memText, identityText, staticMemoryText, docContextText, workspaceContextText)
+	volatile := b.renderVolatileSuffix(heartbeatText, structuredContextText)
+	if b != nil && b.Provider != nil && b.Provider.SupportsExplicitPromptCache() {
+		return providers.BuildCacheAwareSystemContent(stable, volatile)
+	}
+	if strings.TrimSpace(volatile) == "" {
+		return stable
+	}
+	return strings.TrimSpace(stable + "\n\n" + volatile)
+}
+
+func (b *Builder) renderStablePrefix(pinnedText, digestText, memText, identityText, staticMemoryText, docContextText, workspaceContextText string) string {
+	maxEach := b.BootstrapMaxChars
+	if maxEach <= 0 {
+		maxEach = defaultBootstrapMaxChars
+	}
+	maxTotal := b.BootstrapTotalMaxChars
+	if maxTotal <= 0 {
+		maxTotal = defaultBootstrapTotalMaxChars
+	}
+	skillsMax := b.SkillsSummaryMax
+	if skillsMax <= 0 {
+		skillsMax = defaultSkillsSummaryMax
+	}
+
+	soul := strings.TrimSpace(b.Soul)
+	if soul == "" {
+		soul = DefaultSoul
+	}
+	inst := strings.TrimSpace(b.AgentInstructions)
+	if inst == "" {
+		inst = DefaultAgentInstructions
+	}
+	notes := strings.TrimSpace(b.ToolNotes)
+	if notes == "" {
+		notes = DefaultToolNotes
+	}
+
+	type section struct {
+		title string
+		text  string
+	}
+	// Build sections in order, omitting optional ones when empty.
+	sections := []section{
+		{title: "SOUL.md", text: truncateText(soul, maxEach)},
+	}
+	if t := strings.TrimSpace(identityText); t != "" {
+		sections = append(sections, section{title: "Identity", text: truncateText(t, maxEach)})
+	}
+	sections = append(sections, section{title: "AGENTS.md", text: truncateText(inst, maxEach)})
+	if t := strings.TrimSpace(staticMemoryText); t != "" {
+		sections = append(sections, section{title: "Static Memory", text: truncateText(t, maxEach)})
+	}
+	sections = append(sections, section{title: "TOOLS.md", text: truncateText(notes, maxEach)})
+	sections = append(sections, section{title: "Pinned Memory", text: pinnedText})
+	if t := strings.TrimSpace(digestText); t != "" {
+		sections = append(sections, section{title: "Memory Digest", text: truncateText(t, maxEach)})
+	}
+	sections = append(sections, section{title: "Retrieved Memory", text: memText})
+	if t := strings.TrimSpace(workspaceContextText); t != "" {
+		sections = append(sections, section{title: "Workspace Context", text: truncateText(t, maxEach)})
+	}
+	if t := strings.TrimSpace(docContextText); t != "" {
+		sections = append(sections, section{title: "Indexed File Context", text: truncateText(t, maxEach)})
+	}
+	sections = append(sections, section{title: "Skills Inventory", text: b.Skills.ModelSummary(skillsMax)})
+
+	var out strings.Builder
+	out.WriteString("# System Prompt\n")
+	for _, s := range sections {
+		out.WriteString("\n## ")
+		out.WriteString(s.title)
+		out.WriteString("\n")
+		out.WriteString(strings.TrimSpace(s.text))
+		out.WriteString("\n")
+	}
+	return truncateText(strings.TrimSpace(out.String()), maxTotal)
+}
+
+func (b *Builder) renderVolatileSuffix(heartbeatText, structuredContextText string) string {
+	maxEach := b.BootstrapMaxChars
+	if maxEach <= 0 {
+		maxEach = defaultBootstrapMaxChars
+	}
+	type section struct {
+		title string
+		text  string
+	}
+	var sections []section
+	if t := strings.TrimSpace(heartbeatText); t != "" {
+		sections = append(sections, section{title: "Heartbeat", text: truncateText(t, maxEach)})
+	}
+	if t := strings.TrimSpace(structuredContextText); t != "" {
+		sections = append(sections, section{title: "Structured Trigger Context", text: truncateText(t, maxEach)})
+	}
+	if len(sections) == 0 {
+		return ""
+	}
+	var out strings.Builder
+	for _, s := range sections {
+		out.WriteString("## ")
+		out.WriteString(s.title)
+		out.WriteString("\n")
+		out.WriteString(strings.TrimSpace(s.text))
+		out.WriteString("\n\n")
+	}
+	return strings.TrimSpace(out.String())
+}
+
+func formatStructuredEventContext(meta map[string]any, max int) string {
+	if len(meta) == 0 {
+		return ""
+	}
+	raw, ok := meta[triggers.MetaKeyStructuredEvent]
+	if !ok {
+		return ""
+	}
+	return truncateText(triggers.StructuredEventJSON(raw), max)
+}
+
+func truncateText(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if max > 0 && len(s) > max {
+		return strings.TrimSpace(s[:max]) + "\n…[truncated]"
+	}
+	return s
+}
+
+func formatPinned(m map[string]string) string {
+	if len(m) == 0 {
+		return "(none)"
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		v := strings.TrimSpace(m[k])
+		if v == "" {
+			continue
+		}
+		b.WriteString(fmt.Sprintf("- %s: %s\n", k, oneLine(v, defaultPinnedOneLineMax)))
+	}
+	s := strings.TrimSpace(b.String())
+	if s == "" {
+		return "(none)"
+	}
+	return s
+}
+
+func formatRetrieved(ms []memory.Retrieved) string {
+	text, _ := formatRetrievedBounded(ms, 0)
+	return text
+}
+
+func formatRetrievedBounded(ms []memory.Retrieved, maxChars int) (string, []int64) {
+	if len(ms) == 0 {
+		return "(none)", nil
+	}
+	var b strings.Builder
+	ids := make([]int64, 0, len(ms))
+	for i, m := range ms {
+		line := fmt.Sprintf("%d) [%s] %s\n", i+1, m.Source, oneLine(m.Text, defaultRetrievedOneLineMax))
+		if maxChars > 0 && b.Len()+len(line) > maxChars {
+			break
+		}
+		b.WriteString(line)
+		if m.ID > 0 {
+			ids = append(ids, m.ID)
+		}
+	}
+	out := strings.TrimSpace(b.String())
+	if out == "" {
+		return "(none)", nil
+	}
+	return out, ids
+}
+
+// digestKinds holds the note kinds that qualify for the Memory Digest section.
+var digestKinds = map[string]struct{}{
+	db.MemoryKindFact:       {},
+	db.MemoryKindPreference: {},
+	db.MemoryKindGoal:       {},
+	db.MemoryKindProcedure:  {},
+}
+
+// formatMemoryDigest builds a compact digest from top active durable-kind
+// notes in the retrieved set. It is bounded to maxLines lines.
+func formatMemoryDigest(ms []memory.Retrieved, maxLines int) string {
+	text, _ := formatMemoryDigestBounded(ms, maxLines, 0)
+	return text
+}
+
+func formatMemoryDigestBounded(ms []memory.Retrieved, maxLines int, maxChars int) (string, []int64) {
+	if maxLines <= 0 {
+		maxLines = defaultDigestLineMax
+	}
+	var b strings.Builder
+	ids := make([]int64, 0, maxLines)
+	count := 0
+	for _, m := range ms {
+		if _, ok := digestKinds[m.Kind]; !ok {
+			continue
+		}
+		// Treat empty status as active (notes inserted before the metadata
+		// migration retain their zero-value status field).
+		if m.Status != "" && m.Status != db.MemoryStatusActive {
+			continue
+		}
+		line := fmt.Sprintf("- [%s] %s\n", m.Kind, oneLine(m.Text, defaultDigestOneLineMax))
+		if maxChars > 0 && b.Len()+len(line) > maxChars {
+			break
+		}
+		b.WriteString(line)
+		if m.ID > 0 {
+			ids = append(ids, m.ID)
+		}
+		count++
+		if count >= maxLines {
+			break
+		}
+	}
+	return strings.TrimSpace(b.String()), ids
+}
+
+func uniqueInt64(ids []int64) []int64 {
+	if len(ids) == 0 {
+		return nil
+	}
+	seen := make(map[int64]struct{}, len(ids))
+	out := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
+func oneLine(s string, max int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.Join(strings.Fields(s), " ")
+	if max > 0 && len(s) > max {
+		s = s[:max] + "…"
+	}
+	return s
+}
+
+func cachedEmbed(ctx context.Context, provider *providers.Client, fingerprint, model, input string) ([]float32, error) {
+	input = strings.TrimSpace(input)
+	model = strings.TrimSpace(model)
+	fingerprint = strings.TrimSpace(fingerprint)
+	if provider == nil {
+		return nil, fmt.Errorf("provider not configured")
+	}
+	if model == "" || input == "" {
+		return provider.Embed(ctx, model, input)
+	}
+	key := embedCacheKey{fingerprint: fingerprint, model: model, input: input}
+	now := time.Now()
+	promptEmbedCache.mu.Lock()
+	if entry, ok := promptEmbedCache.entries[key]; ok && entry.expiresAt.After(now) {
+		entry.usedAt = now
+		promptEmbedCache.entries[key] = entry
+		vec := append([]float32(nil), entry.vec...)
+		promptEmbedCache.mu.Unlock()
+		return vec, nil
+	}
+	promptEmbedCache.mu.Unlock()
+
+	vec, err := provider.Embed(ctx, model, input)
+	if err != nil {
+		return nil, err
+	}
+	promptEmbedCache.mu.Lock()
+	if len(promptEmbedCache.entries) >= embedCacheMaxEntries {
+		var oldestKey embedCacheKey
+		var oldest time.Time
+		for k, entry := range promptEmbedCache.entries {
+			if oldest.IsZero() || entry.usedAt.Before(oldest) {
+				oldest = entry.usedAt
+				oldestKey = k
+			}
+		}
+		delete(promptEmbedCache.entries, oldestKey)
+	}
+	promptEmbedCache.entries[key] = embedCacheEntry{
+		vec:       append([]float32(nil), vec...),
+		expiresAt: now.Add(embedCacheTTL),
+		usedAt:    now,
+	}
+	promptEmbedCache.mu.Unlock()
+	return vec, nil
 }
 ````
 
@@ -32598,6 +33981,25 @@ func (d *DB) migrate(ctx context.Context) error {
 			metadata_json TEXT NOT NULL DEFAULT '{}'
 		);`,
 		`CREATE INDEX IF NOT EXISTS session_links_scope_key ON session_links(scope_key);`,
+		`CREATE TABLE IF NOT EXISTS task_state(
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_key TEXT NOT NULL,
+			scope_key TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'active',
+			goal TEXT NOT NULL DEFAULT '',
+			plan_json TEXT NOT NULL DEFAULT '[]',
+			constraints_json TEXT NOT NULL DEFAULT '[]',
+			decisions_json TEXT NOT NULL DEFAULT '[]',
+			open_questions_json TEXT NOT NULL DEFAULT '[]',
+			message_refs_json TEXT NOT NULL DEFAULT '[]',
+			memory_refs_json TEXT NOT NULL DEFAULT '[]',
+			artifact_refs_json TEXT NOT NULL DEFAULT '[]',
+			active_files_json TEXT NOT NULL DEFAULT '[]',
+			metadata_json TEXT NOT NULL DEFAULT '{}',
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS task_state_session_status ON task_state(session_key, status, updated_at DESC);`,
 		`CREATE TABLE IF NOT EXISTS memory_docs(
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			scope_key TEXT NOT NULL,
@@ -33037,6 +34439,12 @@ func (d *DB) ensureMemoryNotesMetaColumns(ctx context.Context) error {
 		{name: "kind", ddl: `ALTER TABLE memory_notes ADD COLUMN kind TEXT NOT NULL DEFAULT 'note'`},
 		{name: "status", ddl: `ALTER TABLE memory_notes ADD COLUMN status TEXT NOT NULL DEFAULT 'active'`},
 		{name: "importance", ddl: `ALTER TABLE memory_notes ADD COLUMN importance REAL NOT NULL DEFAULT 0`},
+		{name: "summary", ddl: `ALTER TABLE memory_notes ADD COLUMN summary TEXT NOT NULL DEFAULT ''`},
+		{name: "source_artifact_id", ddl: `ALTER TABLE memory_notes ADD COLUMN source_artifact_id TEXT NOT NULL DEFAULT ''`},
+		{name: "confidence", ddl: `ALTER TABLE memory_notes ADD COLUMN confidence REAL NOT NULL DEFAULT 0`},
+		{name: "updated_at", ddl: `ALTER TABLE memory_notes ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0`},
+		{name: "expires_at", ddl: `ALTER TABLE memory_notes ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0`},
+		{name: "supersedes_id", ddl: `ALTER TABLE memory_notes ADD COLUMN supersedes_id INTEGER`},
 		{name: "use_count", ddl: `ALTER TABLE memory_notes ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0`},
 		{name: "last_used_at", ddl: `ALTER TABLE memory_notes ADD COLUMN last_used_at INTEGER NOT NULL DEFAULT 0`},
 	}
@@ -33063,6 +34471,7 @@ func (d *DB) ensureMemoryNotesMetaColumns(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS memory_notes_scope_kind_status_created_at ON memory_notes(session_key, kind, status, created_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS memory_notes_kind ON memory_notes(kind)`,
 		`CREATE INDEX IF NOT EXISTS memory_notes_status ON memory_notes(status)`,
+		`CREATE INDEX IF NOT EXISTS memory_notes_source_artifact_id ON memory_notes(source_artifact_id)`,
 	}
 	for _, idx := range indexes {
 		if _, err := d.SQL.ExecContext(ctx, idx); err != nil {
@@ -33071,14 +34480,17 @@ func (d *DB) ensureMemoryNotesMetaColumns(ctx context.Context) error {
 	}
 
 	// Backfill: rows tagged with "consolidation" are rolling summaries.
-	_, err := d.SQL.ExecContext(ctx,
+	if _, err := d.SQL.ExecContext(ctx,
 		`UPDATE memory_notes SET kind='summary'
 		 WHERE kind='note' AND (
 		 	tags='consolidation' OR
 		 	tags LIKE 'consolidation,%' OR
 		 	tags LIKE '%,consolidation' OR
 		 	tags LIKE '%,consolidation,%'
-		 )`)
+		 )`); err != nil {
+		return err
+	}
+	_, err := d.SQL.ExecContext(ctx, `UPDATE memory_notes SET updated_at=created_at WHERE updated_at<=0`)
 	return err
 }
 
@@ -33131,6 +34543,10 @@ const (
 	MemoryKindGoal       MemoryKind = "goal"
 	MemoryKindProcedure  MemoryKind = "procedure"
 	MemoryKindEpisode    MemoryKind = "episode"
+	MemoryKindDecision   MemoryKind = "decision"
+	MemoryKindWarning    MemoryKind = "warning"
+	MemoryKindArtifact   MemoryKind = "artifact_summary"
+	MemoryKindFile       MemoryKind = "file_summary"
 )
 
 // MemoryStatus tracks the lifecycle state of a memory_notes row.
@@ -33163,13 +34579,19 @@ type ConsolidationMessage struct {
 // TypedNoteInput holds the data for a single typed memory note write.
 type TypedNoteInput struct {
 	Text             string
+	Summary          string
 	Embedding        []byte
 	EmbedFingerprint string
 	SourceMsgID      sql.NullInt64
+	SourceArtifactID string
 	Tags             string
 	Kind             string
 	Status           string
 	Importance       float64
+	Confidence       float64
+	UpdatedAt        int64
+	ExpiresAt        int64
+	SupersedesID     int64
 }
 
 type ConsolidationWrite struct {
@@ -33348,6 +34770,18 @@ func (d *DB) InsertMemoryNoteTyped(ctx context.Context, sessionKey string, input
 	} else if importance > maxImportance {
 		importance = maxImportance
 	}
+	confidence := input.Confidence
+	if confidence < 0 {
+		confidence = 0
+	} else if confidence > 1 {
+		confidence = 1
+	}
+	updatedAt := input.UpdatedAt
+	if updatedAt <= 0 {
+		updatedAt = NowMS()
+	}
+	summary := strings.TrimSpace(input.Summary)
+	sourceArtifactID := strings.TrimSpace(input.SourceArtifactID)
 	if err := d.validateMemoryEmbeddingProfile(ctx, input.Embedding, input.EmbedFingerprint); err != nil {
 		return 0, err
 	}
@@ -33357,10 +34791,13 @@ func (d *DB) InsertMemoryNoteTyped(ctx context.Context, sessionKey string, input
 	}
 	storedFingerprint := normalizeStoredEmbeddingFingerprint(emb, input.EmbedFingerprint)
 	res, err := d.SQL.ExecContext(ctx,
-		`INSERT INTO memory_notes(session_key, text, embedding, embed_fingerprint, source_message_id, tags, created_at, kind, status, importance)
-		 VALUES(?,?,?,?,?,?,?,?,?,?)`,
-		sessionKey, input.Text, emb, storedFingerprint, input.SourceMsgID, input.Tags, NowMS(),
-		kind, status, importance)
+		`INSERT INTO memory_notes(
+			session_key, text, summary, embedding, embed_fingerprint, source_message_id, source_artifact_id, tags,
+			created_at, updated_at, expires_at, supersedes_id, kind, status, importance, confidence
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		sessionKey, input.Text, summary, emb, storedFingerprint, input.SourceMsgID, sourceArtifactID, input.Tags,
+		NowMS(), updatedAt, input.ExpiresAt, sql.NullInt64{Int64: input.SupersedesID, Valid: input.SupersedesID > 0},
+		kind, status, importance, confidence)
 	if err != nil {
 		return 0, err
 	}
@@ -33442,18 +34879,24 @@ func (d *DB) upsertMemoryVec(ctx context.Context, noteID int64, sessionKey, text
 }
 
 type MemoryNoteRow struct {
-	ID              int64
-	SessionKey      string
-	Text            string
-	Embedding       []byte
-	SourceMessageID sql.NullInt64
-	Tags            string
-	CreatedAt       int64
-	Kind            string
-	Status          string
-	Importance      float64
-	UseCount        int
-	LastUsedAt      int64
+	ID               int64
+	SessionKey       string
+	Text             string
+	Summary          string
+	Embedding        []byte
+	SourceMessageID  sql.NullInt64
+	SourceArtifactID sql.NullString
+	Tags             string
+	CreatedAt        int64
+	UpdatedAt        int64
+	ExpiresAt        int64
+	SupersedesID     sql.NullInt64
+	Kind             string
+	Status           string
+	Importance       float64
+	Confidence       float64
+	UseCount         int
+	LastUsedAt       int64
 }
 
 func (d *DB) StreamMemoryNotes(ctx context.Context, sessionKey string) (*sql.Rows, error) {
@@ -33937,6 +35380,30 @@ func (d *DB) TouchMemoryNotes(ctx context.Context, scopeKey string, ids []int64,
 	      WHERE id IN (` + strings.Join(placeholders, ",") + `)
 	      AND session_key IN (?,?)`
 	_, err := d.SQL.ExecContext(ctx, q, args...)
+	return err
+}
+
+// UpdateMemoryNoteLifecycle updates lifecycle metadata without deleting rows.
+func (d *DB) UpdateMemoryNoteLifecycle(ctx context.Context, noteID int64, status string, supersedesID int64, expiresAt int64) error {
+	status = strings.TrimSpace(status)
+	if status == "" {
+		status = MemoryStatusActive
+	}
+	_, err := d.SQL.ExecContext(ctx,
+		`UPDATE memory_notes
+		 SET status=?, updated_at=?, supersedes_id=?, expires_at=?
+		 WHERE id=?`,
+		status, NowMS(), sql.NullInt64{Int64: supersedesID, Valid: supersedesID > 0}, expiresAt, noteID)
+	return err
+}
+
+func (d *DB) MarkMemoryNoteUsed(ctx context.Context, noteID int64, usedAt int64) error {
+	if usedAt <= 0 {
+		usedAt = NowMS()
+	}
+	_, err := d.SQL.ExecContext(ctx,
+		`UPDATE memory_notes SET use_count=use_count+1, last_used_at=?, updated_at=? WHERE id=?`,
+		usedAt, usedAt, noteID)
 	return err
 }
 
@@ -34442,556 +35909,6 @@ func (d *DB) GetLastMessagesScoped(ctx context.Context, sessionKey string, limit
 }
 ````
 
-## File: cmd/or3-intern/doctor.go
-````go
-package main
-
-import (
-	"bufio"
-	"flag"
-	"fmt"
-	"io"
-	"os"
-	"strings"
-
-	"or3-intern/internal/config"
-	intdoctor "or3-intern/internal/doctor"
-)
-
-type doctorFinding struct {
-	Level   string
-	Area    string
-	Message string
-}
-
-type doctorArgs struct {
-	Strict      bool
-	JSON        bool
-	Fix         bool
-	Interactive bool
-	Probe       bool
-	Severity    intdoctor.Severity
-	Areas       []string
-	FixableOnly bool
-}
-
-func parseDoctorArgs(args []string, stderr io.Writer) (doctorArgs, error) {
-	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	strict := fs.Bool("strict", false, "exit non-zero when warnings are found")
-	jsonOut := fs.Bool("json", false, "emit structured JSON output")
-	fix := fs.Bool("fix", false, "apply safe fixes")
-	interactive := fs.Bool("interactive", false, "use guided repair prompts for ambiguous fixes")
-	probe := fs.Bool("probe", false, "run bounded local runtime probes")
-	severity := fs.String("severity", "", "minimum severity filter: info, warn, error, block")
-	fixableOnly := fs.Bool("fixable-only", false, "show only findings with available fixes")
-	var areas stringSliceFlag
-	fs.Var(&areas, "area", "repeatable area filter")
-	if err := fs.Parse(args); err != nil {
-		return doctorArgs{}, err
-	}
-	if fs.NArg() > 0 {
-		return doctorArgs{}, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
-	}
-	minSeverity := intdoctor.NormalizeSeverity(*severity)
-	if *severity != "" && minSeverity == "" {
-		return doctorArgs{}, fmt.Errorf("invalid --severity %q", *severity)
-	}
-	return doctorArgs{
-		Strict:      *strict,
-		JSON:        *jsonOut,
-		Fix:         *fix,
-		Interactive: *interactive,
-		Probe:       *probe,
-		Severity:    minSeverity,
-		Areas:       []string(areas),
-		FixableOnly: *fixableOnly,
-	}, nil
-}
-
-func runDoctorCommand(cfgPath string, cfg config.Config, validationError string, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
-	if stdin == nil {
-		stdin = os.Stdin
-	}
-	if stdout == nil {
-		stdout = os.Stdout
-	}
-	if stderr == nil {
-		stderr = os.Stderr
-	}
-	parsed, err := parseDoctorArgs(args, stderr)
-	if err != nil {
-		return err
-	}
-
-	report := intdoctor.Evaluate(cfg, intdoctor.Options{
-		Mode:            chooseDoctorMode(parsed.Strict),
-		ConfigPath:      cfgPath,
-		ValidationError: validationError,
-		Probe:           parsed.Probe,
-	})
-	currentValidationError := validationError
-
-	if parsed.Fix {
-		applied, fixErr := intdoctor.ApplyAutomaticFixes(cfgPath, &cfg, report)
-		if fixErr != nil {
-			return fixErr
-		}
-		currentValidationError = refreshDoctorValidationError(cfgPath, currentValidationError)
-		report = intdoctor.Evaluate(cfg, intdoctor.Options{
-			Mode:            chooseDoctorMode(parsed.Strict),
-			ConfigPath:      cfgPath,
-			ValidationError: currentValidationError,
-			Probe:           parsed.Probe,
-		})
-		if parsed.Interactive {
-			appliedInteractive, interactiveErr := applyInteractiveDoctorFixes(stdin, stdout, cfgPath, &cfg, report)
-			if interactiveErr != nil {
-				return interactiveErr
-			}
-			applied = append(applied, appliedInteractive...)
-		}
-		currentValidationError = refreshDoctorValidationError(cfgPath, currentValidationError)
-		report = intdoctor.Evaluate(cfg, intdoctor.Options{
-			Mode:            chooseDoctorMode(parsed.Strict),
-			ConfigPath:      cfgPath,
-			ValidationError: currentValidationError,
-			Probe:           parsed.Probe,
-		})
-		report.FixesApplied = applied
-	}
-
-	report = report.Filter(intdoctor.FilterOptions{
-		Areas:       parsed.Areas,
-		MinSeverity: parsed.Severity,
-		FixableOnly: parsed.FixableOnly,
-	})
-
-	if parsed.JSON {
-		payload, err := intdoctor.RenderJSON(report)
-		if err != nil {
-			return err
-		}
-		_, _ = fmt.Fprintln(stdout, string(payload))
-	} else {
-		_, _ = io.WriteString(stdout, intdoctor.RenderText(report))
-	}
-
-	if parsed.Strict && report.HasStrictFailures() {
-		return fmt.Errorf("doctor found warnings")
-	}
-	return nil
-}
-
-func chooseDoctorMode(strict bool) intdoctor.Mode {
-	if strict {
-		return intdoctor.ModeStrict
-	}
-	return intdoctor.ModeAdvisory
-}
-
-func refreshDoctorValidationError(cfgPath, previous string) string {
-	if strings.TrimSpace(cfgPath) == "" {
-		return previous
-	}
-	if _, err := config.Load(cfgPath); err != nil {
-		return err.Error()
-	}
-	return ""
-}
-
-func doctorFindings(cfg config.Config) []doctorFinding {
-	report := intdoctor.Evaluate(cfg, intdoctor.Options{Mode: intdoctor.ModeAdvisory})
-	items := make([]doctorFinding, 0, len(report.Findings))
-	for _, finding := range report.Findings {
-		items = append(items, doctorFinding{
-			Level:   string(finding.Severity),
-			Area:    finding.Area,
-			Message: finding.Summary,
-		})
-	}
-	return items
-}
-
-func applyInteractiveDoctorFixes(in io.Reader, out io.Writer, cfgPath string, cfg *config.Config, report intdoctor.Report) ([]intdoctor.AppliedFix, error) {
-	reader := bufio.NewReader(in)
-	applied := []intdoctor.AppliedFix{}
-	for _, finding := range report.Findings {
-		if finding.FixMode != intdoctor.FixModeInteractive {
-			continue
-		}
-		changed, summary, err := applySingleInteractiveDoctorFix(reader, out, cfg, finding)
-		if err != nil {
-			return applied, err
-		}
-		if changed {
-			applied = append(applied, intdoctor.AppliedFix{ID: finding.ID, Summary: summary})
-		}
-	}
-	if len(applied) > 0 {
-		if err := config.Save(cfgPath, *cfg); err != nil {
-			return applied, err
-		}
-	}
-	return applied, nil
-}
-
-func applySingleInteractiveDoctorFix(reader *bufio.Reader, out io.Writer, cfg *config.Config, finding intdoctor.Finding) (bool, string, error) {
-	switch finding.ID {
-	case "channels.invalid_ingress":
-		channel := finding.Metadata["channel"]
-		choice, err := promptMenuChoice(reader, out, fmt.Sprintf("Repair %s inbound access", channel), []string{
-			"1) Pairing (secure default for interactive channels)",
-			"2) Allowlist (specify allowed identities now)",
-			"3) Open access",
-			"4) Deny inbound (send-only)",
-			"5) Disable channel",
-			"6) Skip",
-		}, "1")
-		if err != nil {
-			return false, "", err
-		}
-		var mode string
-		var allowlist []string
-		switch choice {
-		case "1":
-			mode = "pairing"
-		case "2":
-			mode = "allowlist"
-			text, err := promptString(reader, out, fmt.Sprintf("%s allowlist (comma-separated)", channel), "")
-			if err != nil {
-				return false, "", err
-			}
-			allowlist = splitAndCompact(text)
-		case "3":
-			mode = "open"
-		case "4":
-			mode = "deny"
-		case "5":
-			mode = "disable"
-		default:
-			return false, "", nil
-		}
-		changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, mode, allowlist)
-		if err != nil {
-			return false, "", err
-		}
-		return changed, fmt.Sprintf("updated %s inbound access", channel), nil
-	case "service.secret_missing", "service.secret_weak":
-		choice, err := promptMenuChoice(reader, out, "Repair service secret", []string{
-			"1) Generate a strong random secret",
-			"2) Disable service mode",
-			"3) Skip",
-		}, "1")
-		if err != nil {
-			return false, "", err
-		}
-		switch choice {
-		case "1":
-			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "generate", nil)
-			return changed, "generated a service secret", err
-		case "2":
-			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "disable", nil)
-			return changed, "disabled service mode", err
-		default:
-			return false, "", nil
-		}
-	case "webhook.secret_missing":
-		choice, err := promptMenuChoice(reader, out, "Repair webhook secret", []string{
-			"1) Generate a strong random secret",
-			"2) Disable webhook",
-			"3) Skip",
-		}, "1")
-		if err != nil {
-			return false, "", err
-		}
-		switch choice {
-		case "1":
-			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "generate", nil)
-			return changed, "generated a webhook secret", err
-		case "2":
-			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "disable", nil)
-			return changed, "disabled webhook", err
-		default:
-			return false, "", nil
-		}
-	case "service.public_bind":
-		choice, err := promptMenuChoice(reader, out, "Repair service bind address", []string{
-			"1) Bind to loopback",
-			"2) Skip",
-		}, "1")
-		if err != nil {
-			return false, "", err
-		}
-		if choice == "1" {
-			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "loopback", nil)
-			return changed, "bound service to loopback", err
-		}
-	case "webhook.public_bind":
-		choice, err := promptMenuChoice(reader, out, "Repair webhook bind address", []string{
-			"1) Bind to loopback",
-			"2) Skip",
-		}, "1")
-		if err != nil {
-			return false, "", err
-		}
-		if choice == "1" {
-			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "loopback", nil)
-			return changed, "bound webhook to loopback", err
-		}
-	case "security.secret_store_disabled_with_integrations":
-		choice, err := promptMenuChoice(reader, out, "Repair secret store for external integrations", []string{
-			"1) Enable secret store and generate a key file",
-			"2) Skip",
-		}, "1")
-		if err != nil {
-			return false, "", err
-		}
-		if choice == "1" {
-			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "enable", nil)
-			return changed, "enabled secret store and generated a key file", err
-		}
-	case "privileged-exec.sandbox_disabled":
-		choice, err := promptMenuChoice(reader, out, "Repair privileged tools without sandboxing", []string{
-			"1) Disable privileged tools",
-			"2) Enable Bubblewrap sandboxing",
-			"3) Skip",
-		}, "1")
-		if err != nil {
-			return false, "", err
-		}
-		switch choice {
-		case "1":
-			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "disable_privileged", nil)
-			return changed, "disabled privileged tools", err
-		case "2":
-			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "enable_sandbox", nil)
-			return changed, "enabled Bubblewrap sandboxing", err
-		default:
-			return false, "", nil
-		}
-	case "privileged-exec.bubblewrap_missing":
-		choice, err := promptMenuChoice(reader, out, "Repair missing Bubblewrap binary", []string{
-			"1) Disable privileged tools and sandboxing",
-			"2) Set Bubblewrap path manually",
-			"3) Skip",
-		}, "1")
-		if err != nil {
-			return false, "", err
-		}
-		switch choice {
-		case "1":
-			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "disable_privileged", nil)
-			return changed, "disabled privileged tools and sandboxing", err
-		case "2":
-			path, err := promptString(reader, out, "Bubblewrap path", cfg.Hardening.Sandbox.BubblewrapPath)
-			if err != nil {
-				return false, "", err
-			}
-			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "set_path", []string{path})
-			return changed, "updated Bubblewrap path", err
-		default:
-			return false, "", nil
-		}
-	}
-	return false, "", nil
-}
-````
-
-## File: cmd/or3-intern/init.go
-````go
-package main
-
-import (
-	"bufio"
-	"errors"
-	"fmt"
-	"io"
-	"os"
-	"strconv"
-	"strings"
-
-	"or3-intern/internal/config"
-)
-
-type initProviderPreset struct {
-	label      string
-	apiBase    string
-	model      string
-	embedModel string
-}
-
-var initProviderPresets = map[string]initProviderPreset{
-	"1": {
-		label:      "OpenAI",
-		apiBase:    "https://api.openai.com/v1",
-		model:      "gpt-4.1-mini",
-		embedModel: "text-embedding-3-small",
-	},
-	"2": {
-		label:      "OpenRouter",
-		apiBase:    "https://openrouter.ai/api/v1",
-		model:      "openai/gpt-4o-mini",
-		embedModel: "text-embedding-3-small",
-	},
-	"3": {
-		label:      "Custom OpenAI-compatible",
-		apiBase:    "https://api.openai.com/v1",
-		model:      "gpt-4.1-mini",
-		embedModel: "text-embedding-3-small",
-	},
-}
-
-func runInit(cfgPath string) error {
-	cwd, err := os.Getwd()
-	if err != nil {
-		cwd = ""
-	}
-	if supportsInteractiveTUI(os.Stdin, os.Stdout) {
-		return runConfigureWithTUI(cfgPathOrDefault(cfgPath), cwd, []string{}, configureTUIOptions{
-			Title:      "or3-intern init",
-			Intro:      []string{"First-run setup with the essential provider, storage, workspace, and tools sections."},
-			Restricted: []string{"provider", "storage", "workspace", "tools"},
-		})
-	}
-	return runInitWithIO(os.Stdin, os.Stdout, cfgPathOrDefault(cfgPath), cwd)
-}
-
-func runInitWithIO(in io.Reader, out io.Writer, cfgPath, cwd string) error {
-	fmt.Fprintln(out, "or3-intern init")
-	fmt.Fprintln(out, "`init` now uses the same configure wizard under the hood with the original first-run sections.")
-	fmt.Fprintln(out)
-	return runConfigureWithIO(in, out, cfgPath, cwd, []string{
-		"--section", "provider",
-		"--section", "storage",
-		"--section", "workspace",
-		"--section", "tools",
-	})
-}
-
-func initDefaults(cwd string) config.Config {
-	cfg := config.Default()
-	config.ApplyEnvOverrides(&cfg)
-	cwd = strings.TrimSpace(cwd)
-	if cwd != "" {
-		cfg.WorkspaceDir = cwd
-		cfg.Tools.RestrictToWorkspace = true
-	}
-	return cfg
-}
-
-func defaultProviderChoice(apiBase string) string {
-	normalized := strings.ToLower(strings.TrimSpace(apiBase))
-	if strings.Contains(normalized, "openrouter.ai") {
-		return "2"
-	}
-	if normalized != "" && !strings.Contains(normalized, "api.openai.com") {
-		return "3"
-	}
-	return "1"
-}
-
-func applyProviderPreset(cfg *config.Config, choice string) {
-	preset, ok := initProviderPresets[choice]
-	if !ok || cfg == nil {
-		return
-	}
-	cfg.Provider.APIBase = preset.apiBase
-	cfg.Provider.Model = preset.model
-	cfg.Provider.EmbedModel = preset.embedModel
-}
-
-func promptChoice(reader *bufio.Reader, out io.Writer, label string, options []string, defaultChoice string) (string, error) {
-	fmt.Fprintln(out, label)
-	for _, option := range options {
-		fmt.Fprintf(out, "  %s\n", option)
-	}
-	for {
-		answer, err := promptString(reader, out, "Selection", defaultChoice)
-		if err != nil {
-			return "", err
-		}
-		answer = strings.TrimSpace(answer)
-		if _, ok := initProviderPresets[answer]; ok {
-			return answer, nil
-		}
-		fmt.Fprintln(out, "Please choose 1, 2, or 3.")
-	}
-}
-
-func promptBool(reader *bufio.Reader, out io.Writer, label string, defaultValue bool) (bool, error) {
-	defaultText := "n"
-	if defaultValue {
-		defaultText = "y"
-	}
-	for {
-		answer, err := promptString(reader, out, label+" (y/n)", defaultText)
-		if err != nil {
-			return false, err
-		}
-		switch strings.ToLower(strings.TrimSpace(answer)) {
-		case "y", "yes":
-			return true, nil
-		case "n", "no":
-			return false, nil
-		default:
-			fmt.Fprintln(out, "Please answer y or n.")
-		}
-	}
-}
-
-func promptString(reader *bufio.Reader, out io.Writer, label, defaultValue string) (string, error) {
-	if defaultValue != "" {
-		fmt.Fprintf(out, "%s [%s]: ", label, defaultValue)
-	} else {
-		fmt.Fprintf(out, "%s: ", label)
-	}
-	line, err := reader.ReadString('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
-		return "", err
-	}
-	line = strings.TrimSpace(line)
-	if line == "" {
-		return defaultValue, nil
-	}
-	return line, nil
-}
-
-func promptInt(reader *bufio.Reader, out io.Writer, label string, defaultValue int) (int, error) {
-	for {
-		answer, err := promptString(reader, out, label, strconv.Itoa(defaultValue))
-		if err != nil {
-			return 0, err
-		}
-		value, err := strconv.Atoi(strings.TrimSpace(answer))
-		if err == nil {
-			return value, nil
-		}
-		fmt.Fprintln(out, "Please enter a whole number.")
-	}
-}
-
-func promptSecretString(reader *bufio.Reader, out io.Writer, label, currentValue string) (string, error) {
-	if strings.TrimSpace(currentValue) == "" {
-		return promptString(reader, out, label, "")
-	}
-	_, _ = fmt.Fprintf(out, "%s [leave blank to keep current, type clear to remove]: ", label)
-	line, err := reader.ReadString('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
-		return "", err
-	}
-	line = strings.TrimSpace(line)
-	switch {
-	case line == "":
-		return currentValue, nil
-	case strings.EqualFold(line, configureSecretClearKeyword):
-		return "", nil
-	default:
-		return line, nil
-	}
-}
-````
-
 ## File: internal/config/config.go
 ````go
 // Package config defines the persisted runtime configuration and validation
@@ -35128,13 +36045,77 @@ type Config struct {
 	Session      SessionConfig  `json:"session"`
 	Security     SecurityConfig `json:"security"`
 
-	Provider  ProviderConfig  `json:"provider"`
-	Tools     ToolsConfig     `json:"tools"`
-	Hardening HardeningConfig `json:"hardening"`
-	Cron      CronConfig      `json:"cron"`
-	Service   ServiceConfig   `json:"service"`
-	Heartbeat HeartbeatConfig `json:"heartbeat"`
-	Channels  ChannelsConfig  `json:"channels"`
+	Provider       ProviderConfig       `json:"provider"`
+	Tools          ToolsConfig          `json:"tools"`
+	Hardening      HardeningConfig      `json:"hardening"`
+	Cron           CronConfig           `json:"cron"`
+	Service        ServiceConfig        `json:"service"`
+	Heartbeat      HeartbeatConfig      `json:"heartbeat"`
+	Channels       ChannelsConfig       `json:"channels"`
+	Context        ContextConfig        `json:"context"`
+	ContextManager ContextManagerConfig `json:"contextManager"`
+}
+
+type ContextConfig struct {
+	Mode                string                 `json:"mode"`
+	MaxInputTokens      int                    `json:"maxInputTokens"`
+	OutputReserveTokens int                    `json:"outputReserveTokens"`
+	SafetyMarginTokens  int                    `json:"safetyMarginTokens"`
+	Sections            ContextSectionBudgets  `json:"sections"`
+	Retrieval           ContextRetrievalConfig `json:"retrieval"`
+	Pressure            ContextPressureConfig  `json:"pressure"`
+	Tools               ContextToolConfig      `json:"tools"`
+	Artifacts           ContextArtifactConfig  `json:"artifacts"`
+	TaskCard            ContextTaskCardConfig  `json:"taskCard"`
+}
+
+type ContextSectionBudgets struct {
+	SystemCore       int `json:"systemCore"`
+	SoulIdentity     int `json:"soulIdentity"`
+	ToolPolicy       int `json:"toolPolicy"`
+	ActiveTaskCard   int `json:"activeTaskCard"`
+	PinnedMemory     int `json:"pinnedMemory"`
+	MemoryDigest     int `json:"memoryDigest"`
+	RecentHistory    int `json:"recentHistory"`
+	RetrievedMemory  int `json:"retrievedMemory"`
+	WorkspaceContext int `json:"workspaceContext"`
+	ToolSchemas      int `json:"toolSchemas"`
+}
+
+type ContextRetrievalConfig struct {
+	CandidateMultiplier int     `json:"candidateMultiplier"`
+	MinScore            float64 `json:"minScore"`
+}
+
+type ContextPressureConfig struct {
+	WarningPercent   int `json:"warningPercent"`
+	HighPercent      int `json:"highPercent"`
+	EmergencyPercent int `json:"emergencyPercent"`
+}
+
+type ContextToolConfig struct {
+	DynamicExpose bool `json:"dynamicExpose"`
+}
+
+type ContextArtifactConfig struct {
+	SummaryMaxChars int `json:"summaryMaxChars"`
+}
+
+type ContextTaskCardConfig struct {
+	Enabled      bool `json:"enabled"`
+	MaxRefs      int  `json:"maxRefs"`
+	MaxPlanItems int  `json:"maxPlanItems"`
+}
+
+type ContextManagerConfig struct {
+	Enabled           bool   `json:"enabled"`
+	Provider          string `json:"provider"`
+	Model             string `json:"model"`
+	TimeoutSeconds    int    `json:"timeoutSeconds"`
+	MaxInputTokens    int    `json:"maxInputTokens"`
+	MaxOutputTokens   int    `json:"maxOutputTokens"`
+	AllowTaskUpdates  bool   `json:"allowTaskUpdates"`
+	AllowStalePropose bool   `json:"allowStalePropose"`
 }
 
 // HardeningConfig controls sandboxing, privilege gates, and per-tool quotas.
@@ -35711,6 +36692,39 @@ func Default() Config {
 				SMTPUseSSL:          false,
 			},
 		},
+		Context: ContextConfig{
+			Mode:                "quality",
+			MaxInputTokens:      16000,
+			OutputReserveTokens: 1200,
+			SafetyMarginTokens:  400,
+			Sections: ContextSectionBudgets{
+				SystemCore:       800,
+				SoulIdentity:     2800,
+				ToolPolicy:       900,
+				ActiveTaskCard:   700,
+				PinnedMemory:     1200,
+				MemoryDigest:     900,
+				RecentHistory:    2200,
+				RetrievedMemory:  1500,
+				WorkspaceContext: 1200,
+				ToolSchemas:      1400,
+			},
+			Retrieval: ContextRetrievalConfig{CandidateMultiplier: 3, MinScore: 0.03},
+			Pressure:  ContextPressureConfig{WarningPercent: 70, HighPercent: 85, EmergencyPercent: 95},
+			Tools:     ContextToolConfig{DynamicExpose: true},
+			Artifacts: ContextArtifactConfig{SummaryMaxChars: 500},
+			TaskCard:  ContextTaskCardConfig{Enabled: true, MaxRefs: 12, MaxPlanItems: 8},
+		},
+		ContextManager: ContextManagerConfig{
+			Enabled:           false,
+			Provider:          "",
+			Model:             "",
+			TimeoutSeconds:    15,
+			MaxInputTokens:    1200,
+			MaxOutputTokens:   600,
+			AllowTaskUpdates:  true,
+			AllowStalePropose: true,
+		},
 	}
 }
 
@@ -35973,6 +36987,52 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.DocIndex.MaxFiles <= 0 {
 		cfg.DocIndex.MaxFiles = 100
+	}
+	if strings.TrimSpace(cfg.Context.Mode) == "" {
+		cfg.Context.Mode = "quality"
+	}
+	switch cfg.Context.Mode {
+	case "poor":
+		if cfg.Context.MaxInputTokens <= 0 {
+			cfg.Context.MaxInputTokens = 5000
+		}
+	case "balanced":
+		if cfg.Context.MaxInputTokens <= 0 {
+			cfg.Context.MaxInputTokens = 8000
+		}
+	case "quality", "custom":
+		if cfg.Context.MaxInputTokens <= 0 {
+			cfg.Context.MaxInputTokens = 16000
+		}
+	default:
+		cfg.Context.Mode = "quality"
+		if cfg.Context.MaxInputTokens <= 0 {
+			cfg.Context.MaxInputTokens = 16000
+		}
+	}
+	if cfg.Context.OutputReserveTokens <= 0 {
+		cfg.Context.OutputReserveTokens = 1200
+	}
+	if cfg.Context.SafetyMarginTokens < 0 {
+		cfg.Context.SafetyMarginTokens = 0
+	}
+	if cfg.Context.Pressure.WarningPercent <= 0 {
+		cfg.Context.Pressure.WarningPercent = 70
+	}
+	if cfg.Context.Pressure.HighPercent <= cfg.Context.Pressure.WarningPercent {
+		cfg.Context.Pressure.HighPercent = cfg.Context.Pressure.WarningPercent + 10
+	}
+	if cfg.Context.Pressure.EmergencyPercent <= cfg.Context.Pressure.HighPercent {
+		cfg.Context.Pressure.EmergencyPercent = cfg.Context.Pressure.HighPercent + 10
+	}
+	if cfg.ContextManager.TimeoutSeconds <= 0 {
+		cfg.ContextManager.TimeoutSeconds = 15
+	}
+	if cfg.ContextManager.MaxInputTokens <= 0 {
+		cfg.ContextManager.MaxInputTokens = 1200
+	}
+	if cfg.ContextManager.MaxOutputTokens <= 0 {
+		cfg.ContextManager.MaxOutputTokens = 600
 	}
 	if cfg.DocIndex.MaxFileBytes <= 0 {
 		cfg.DocIndex.MaxFileBytes = 64 * 1024
@@ -36584,6 +37644,140 @@ func hasNonEmpty(values []string) bool {
 }
 ````
 
+## File: README.md
+````markdown
+# or3-intern (v1)
+
+`or3-intern` is a Go rewrite of nanobot with SQLite persistence, hybrid long-term memory retrieval, external channel integrations, autonomous triggers, and a hardened tool runtime.
+
+The README now stays focused on orientation and quick start. Detailed guides and references live under [`docs/`](docs/README.md).
+
+## Quick start
+
+If you want to use the bare `or3-intern` command from your shell, install it once:
+
+```bash
+./scripts/install-cli.sh
+```
+
+Then verify the binary is available:
+
+```bash
+or3-intern version
+```
+
+1. Run guided setup:
+   ```bash
+   or3-intern setup
+   ```
+2. Start an interactive local session:
+   ```bash
+   or3-intern chat
+   ```
+   Inside chat, use `/new` when you want to archive the current conversation into memory and start with a clean live session.
+3. Or run enabled external channels and automation:
+   ```bash
+   or3-intern serve
+   ```
+4. Check safety and access posture any time:
+   ```bash
+   or3-intern status
+   ```
+
+The `setup` command is the recommended first-run flow. It asks for a provider, workspace folder, scenario, and safety mode, then translates those choices into the existing runtime profile, approvals, audit, service, and hardening settings.
+
+Use `settings` when you want to revisit your setup later. It opens a task-based home for AI Provider, Workspace Folder, Connected Devices, Safety Level, Channels, Tools, Memory, and Advanced:
+
+```bash
+or3-intern settings
+```
+
+The advanced `configure` command still exists and supports re-running specific sections later with `--section`. The lighter `init` command still exists for the original first-run provider/storage flow.
+
+On an interactive terminal, `configure` and `init` launch the Bubble Tea setup UI with arrow-key navigation, `enter` to open/select, `space` to toggle booleans, `s` to save, and `q` to back out or quit. If stdin or stdout is not a terminal, both commands automatically stay in the plain-text prompt flow so scripts and redirected input remain stable. In plain-text mode, existing secrets stay hidden: leave the field blank to keep the current value, enter a new value to replace it, or type `clear` to remove it. The provider section now also exposes an optional embedding-dimensions override for models/providers that support configurable vector sizes.
+
+Use `go run ./cmd/or3-intern ...` for ad hoc local runs, or install the binary first if you want every command in the reference to work exactly as `or3-intern ...`.
+
+## Core features
+
+- Shared agent runtime for CLI, service mode, channels, and autonomous jobs
+- SQLite-backed history with hybrid memory retrieval and document indexing
+- External channels for Telegram, Slack, Discord, Email, and a local WhatsApp bridge
+- ClawHub/OpenClaw-compatible skills with trust and quarantine controls
+- Webhook, file-watch, heartbeat, and cron-based automation
+- Phase-based hardening, audit, secret store, profile, and network controls
+- Set `runtimeProfile` to `local-dev`, `hosted-service`, `hosted-no-exec`, or `hosted-remote-sandbox-only` to select the intended execution posture — see [docs/security-and-hardening.md](docs/security-and-hardening.md).
+- Optional MCP tool integrations over stdio, SSE, and streamable HTTP
+
+## Commands
+
+Root help shows the full command catalog by default:
+
+- `or3-intern setup` guided first-run setup using scenario and safety choices
+- `or3-intern chat` interactive CLI
+- `or3-intern status [--advanced]` plain-language safety and access summary
+- `or3-intern settings [--section ...] [--export path|-]` review setup, jump to focused task sections, or export config
+- `or3-intern connect-device [list|disconnect <device-id>|role <device-id>]` pair a phone or other device
+- `or3-intern configure [--section ...]` interactive setup and reconfiguration wizard
+- `or3-intern init` guided first-run setup
+- `or3-intern config-path` print the resolved config.json path
+- `or3-intern serve` run enabled external channels and automation
+- `or3-intern service` run the internal authenticated HTTP API for OR3 Net
+- `or3-intern agent -m "hello"` run a one-shot turn
+- `or3-intern doctor [--strict|--json|--fix]` diagnose readiness issues, explain risk, and repair safe local problems
+- `or3-intern embeddings <status|rebuild>` inspect or rebuild stored memory/doc embeddings after provider or embedding-model changes
+- `or3-intern capabilities [--channel name|--trigger name|--json]` inspect the effective runtime posture, ingress policy, approvals, and access profiles
+- `or3-intern secrets <set|delete|list>` manage encrypted secret refs stored in SQLite
+- `or3-intern audit [verify]` inspect or verify the append-only audit chain
+- `or3-intern skills ...` list, inspect, search, install, update, check, and remove skills
+- `or3-intern approvals <list|show|approve|deny|allowlist>` inspect and resolve approval requests
+- `or3-intern devices <list|requests|approve|deny|rotate|revoke>` inspect paired devices and legacy pairing request helpers
+- `or3-intern pairing <list|request|approve|deny|exchange>` manage first-class pairing workflows, including channel-bound identities
+- `or3-intern scope <link|list|resolve>` link multiple session keys to a shared history scope
+- `or3-intern migrate-jsonl /path/to/session.jsonl [session_key]`
+- `or3-intern version`
+- `or3-intern help [command]` show root or command-specific help
+
+See [CLI Reference](docs/cli-reference.md) for command details.
+
+The setup docs stay text-first in-repo. Screenshots or terminal recordings can be added later, but the written walkthroughs are the source of truth for rollout behavior and keybindings.
+
+## Documentation
+
+- [Documentation index](docs/README.md)
+- [Getting started](docs/getting-started.md)
+- [Configuration reference](docs/configuration-reference.md)
+- [CLI reference](docs/cli-reference.md)
+- [Agent runtime](docs/agent-runtime.md)
+- [Memory and context](docs/memory-and-context.md)
+- [Channel integrations](docs/channels.md)
+- [Skills](docs/skills.md)
+- [Triggers and automation](docs/triggers-and-automation.md)
+- [Security and hardening](docs/security-and-hardening.md)
+- [MCP tool integrations](docs/mcp-tool-integrations.md)
+- [Internal service API reference](docs/api-reference.md)
+
+## Operational notes
+
+- Uses SQLite with WAL plus bounded connection pools for predictable low-RAM operation.
+- History is fetched with bounded queries instead of full scans.
+- Hybrid retrieval combines pinned context, vector similarity, and FTS keyword search.
+- After changing `provider.apiBase` or `provider.embedModel`, run `or3-intern embeddings status` and then `or3-intern embeddings rebuild memory` (or `all`) so stored vectors are regenerated in the new embedding space.
+- External channels are disabled by default until configured.
+- `or3-intern doctor` is the main readiness command before exposing channels, triggers, or the service API.
+
+## Config alignment
+
+- Native runtime settings come from process env plus `~/.or3-intern/config.json`; treat env as the authoritative override layer for service-mode deployments.
+- Cross-repo deployment tooling should reserve the `OR3_INTERN_*` prefix, then translate those values into repo-native config before launching `or3-intern`.
+- The shared deployment-key mapping for `or3-net` ⇄ `or3-intern` service credentials is documented in [../or3-net/planning/platform-standardization/config-alignment.md](../or3-net/planning/platform-standardization/config-alignment.md).
+- Frozen service fixture coverage is enforced via [.github/workflows/contracts.yml](.github/workflows/contracts.yml).
+
+## Dependencies
+
+This repo uses external Go modules (including SQLite drivers, `sqlite-vec`, and the cron parser). If you are building in an offline environment, vendor the modules ahead of time.
+````
+
 ## File: cmd/or3-intern/help.go
 ````go
 package main
@@ -37142,140 +38336,6 @@ func printHelpItems(w io.Writer, items []helpItem) {
 	}
 	_ = tw.Flush()
 }
-````
-
-## File: README.md
-````markdown
-# or3-intern (v1)
-
-`or3-intern` is a Go rewrite of nanobot with SQLite persistence, hybrid long-term memory retrieval, external channel integrations, autonomous triggers, and a hardened tool runtime.
-
-The README now stays focused on orientation and quick start. Detailed guides and references live under [`docs/`](docs/README.md).
-
-## Quick start
-
-If you want to use the bare `or3-intern` command from your shell, install it once:
-
-```bash
-./scripts/install-cli.sh
-```
-
-Then verify the binary is available:
-
-```bash
-or3-intern version
-```
-
-1. Run guided setup:
-   ```bash
-   or3-intern setup
-   ```
-2. Start an interactive local session:
-   ```bash
-   or3-intern chat
-   ```
-   Inside chat, use `/new` when you want to archive the current conversation into memory and start with a clean live session.
-3. Or run enabled external channels and automation:
-   ```bash
-   or3-intern serve
-   ```
-4. Check safety and access posture any time:
-   ```bash
-   or3-intern status
-   ```
-
-The `setup` command is the recommended first-run flow. It asks for a provider, workspace folder, scenario, and safety mode, then translates those choices into the existing runtime profile, approvals, audit, service, and hardening settings.
-
-Use `settings` when you want to revisit your setup later. It opens a task-based home for AI Provider, Workspace Folder, Connected Devices, Safety Level, Channels, Tools, Memory, and Advanced:
-
-```bash
-or3-intern settings
-```
-
-The advanced `configure` command still exists and supports re-running specific sections later with `--section`. The lighter `init` command still exists for the original first-run provider/storage flow.
-
-On an interactive terminal, `configure` and `init` launch the Bubble Tea setup UI with arrow-key navigation, `enter` to open/select, `space` to toggle booleans, `s` to save, and `q` to back out or quit. If stdin or stdout is not a terminal, both commands automatically stay in the plain-text prompt flow so scripts and redirected input remain stable. In plain-text mode, existing secrets stay hidden: leave the field blank to keep the current value, enter a new value to replace it, or type `clear` to remove it. The provider section now also exposes an optional embedding-dimensions override for models/providers that support configurable vector sizes.
-
-Use `go run ./cmd/or3-intern ...` for ad hoc local runs, or install the binary first if you want every command in the reference to work exactly as `or3-intern ...`.
-
-## Core features
-
-- Shared agent runtime for CLI, service mode, channels, and autonomous jobs
-- SQLite-backed history with hybrid memory retrieval and document indexing
-- External channels for Telegram, Slack, Discord, Email, and a local WhatsApp bridge
-- ClawHub/OpenClaw-compatible skills with trust and quarantine controls
-- Webhook, file-watch, heartbeat, and cron-based automation
-- Phase-based hardening, audit, secret store, profile, and network controls
-- Set `runtimeProfile` to `local-dev`, `hosted-service`, `hosted-no-exec`, or `hosted-remote-sandbox-only` to select the intended execution posture — see [docs/security-and-hardening.md](docs/security-and-hardening.md).
-- Optional MCP tool integrations over stdio, SSE, and streamable HTTP
-
-## Commands
-
-Root help shows the full command catalog by default:
-
-- `or3-intern setup` guided first-run setup using scenario and safety choices
-- `or3-intern chat` interactive CLI
-- `or3-intern status [--advanced]` plain-language safety and access summary
-- `or3-intern settings [--section ...] [--export path|-]` review setup, jump to focused task sections, or export config
-- `or3-intern connect-device [list|disconnect <device-id>|role <device-id>]` pair a phone or other device
-- `or3-intern configure [--section ...]` interactive setup and reconfiguration wizard
-- `or3-intern init` guided first-run setup
-- `or3-intern config-path` print the resolved config.json path
-- `or3-intern serve` run enabled external channels and automation
-- `or3-intern service` run the internal authenticated HTTP API for OR3 Net
-- `or3-intern agent -m "hello"` run a one-shot turn
-- `or3-intern doctor [--strict|--json|--fix]` diagnose readiness issues, explain risk, and repair safe local problems
-- `or3-intern embeddings <status|rebuild>` inspect or rebuild stored memory/doc embeddings after provider or embedding-model changes
-- `or3-intern capabilities [--channel name|--trigger name|--json]` inspect the effective runtime posture, ingress policy, approvals, and access profiles
-- `or3-intern secrets <set|delete|list>` manage encrypted secret refs stored in SQLite
-- `or3-intern audit [verify]` inspect or verify the append-only audit chain
-- `or3-intern skills ...` list, inspect, search, install, update, check, and remove skills
-- `or3-intern approvals <list|show|approve|deny|allowlist>` inspect and resolve approval requests
-- `or3-intern devices <list|requests|approve|deny|rotate|revoke>` inspect paired devices and legacy pairing request helpers
-- `or3-intern pairing <list|request|approve|deny|exchange>` manage first-class pairing workflows, including channel-bound identities
-- `or3-intern scope <link|list|resolve>` link multiple session keys to a shared history scope
-- `or3-intern migrate-jsonl /path/to/session.jsonl [session_key]`
-- `or3-intern version`
-- `or3-intern help [command]` show root or command-specific help
-
-See [CLI Reference](docs/cli-reference.md) for command details.
-
-The setup docs stay text-first in-repo. Screenshots or terminal recordings can be added later, but the written walkthroughs are the source of truth for rollout behavior and keybindings.
-
-## Documentation
-
-- [Documentation index](docs/README.md)
-- [Getting started](docs/getting-started.md)
-- [Configuration reference](docs/configuration-reference.md)
-- [CLI reference](docs/cli-reference.md)
-- [Agent runtime](docs/agent-runtime.md)
-- [Memory and context](docs/memory-and-context.md)
-- [Channel integrations](docs/channels.md)
-- [Skills](docs/skills.md)
-- [Triggers and automation](docs/triggers-and-automation.md)
-- [Security and hardening](docs/security-and-hardening.md)
-- [MCP tool integrations](docs/mcp-tool-integrations.md)
-- [Internal service API reference](docs/api-reference.md)
-
-## Operational notes
-
-- Uses SQLite with WAL plus bounded connection pools for predictable low-RAM operation.
-- History is fetched with bounded queries instead of full scans.
-- Hybrid retrieval combines pinned context, vector similarity, and FTS keyword search.
-- After changing `provider.apiBase` or `provider.embedModel`, run `or3-intern embeddings status` and then `or3-intern embeddings rebuild memory` (or `all`) so stored vectors are regenerated in the new embedding space.
-- External channels are disabled by default until configured.
-- `or3-intern doctor` is the main readiness command before exposing channels, triggers, or the service API.
-
-## Config alignment
-
-- Native runtime settings come from process env plus `~/.or3-intern/config.json`; treat env as the authoritative override layer for service-mode deployments.
-- Cross-repo deployment tooling should reserve the `OR3_INTERN_*` prefix, then translate those values into repo-native config before launching `or3-intern`.
-- The shared deployment-key mapping for `or3-net` ⇄ `or3-intern` service credentials is documented in [../or3-net/planning/platform-standardization/config-alignment.md](../or3-net/planning/platform-standardization/config-alignment.md).
-- Frozen service fixture coverage is enforced via [.github/workflows/contracts.yml](.github/workflows/contracts.yml).
-
-## Dependencies
-
-This repo uses external Go modules (including SQLite drivers, `sqlite-vec`, and the cron parser). If you are building in an offline environment, vendor the modules ahead of time.
 ````
 
 ## File: cmd/or3-intern/service.go

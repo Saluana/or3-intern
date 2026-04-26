@@ -28,7 +28,11 @@ import (
 	"or3-intern/internal/tools"
 )
 
-const commandNewSession = "/new"
+const (
+	commandNewSession = "/new"
+	commandStatus     = "/status"
+	commandPrune      = "/prune"
+)
 
 const maxTrackedQuotaSessions = 1024
 
@@ -51,34 +55,41 @@ type sessionLock struct {
 
 // Runtime executes conversational turns against the configured model and tools.
 type Runtime struct {
-	DB               *db.DB
-	Provider         *providers.Client
-	Model            string
-	Temperature      float64
-	Tools            *tools.Registry
-	Hardening        config.HardeningConfig
-	AccessProfiles   config.AccessProfilesConfig
-	Builder          *Builder
-	Artifacts        *artifacts.Store
-	MaxToolBytes     int
-	MaxToolLoops     int
-	ToolPreviewBytes int
-	Audit            *security.AuditLogger
-	ApprovalBroker   *approval.Broker
+	DB                     *db.DB
+	Provider               *providers.Client
+	Model                  string
+	Temperature            float64
+	Tools                  *tools.Registry
+	Hardening              config.HardeningConfig
+	AccessProfiles         config.AccessProfilesConfig
+	Builder                *Builder
+	Artifacts              *artifacts.Store
+	MaxToolBytes           int
+	MaxToolLoops           int
+	ToolPreviewBytes       int
+	DynamicToolExposure    bool
+	Audit                  *security.AuditLogger
+	ApprovalBroker         *approval.Broker
+	ContextManager         config.ContextManagerConfig
+	ContextManagerProvider *providers.Client
 
 	Deliver  Deliverer
 	Streamer channels.StreamingChannel
 
-	Consolidator           *memory.Consolidator
-	ConsolidationScheduler *memory.Scheduler
-	DefaultScopeKey        string
-	LinkDirectMessages     bool
-	IdentityScopeMap       map[string]string
+	Consolidator                *memory.Consolidator
+	ConsolidationScheduler      *memory.Scheduler
+	DisableRollingConsolidation bool
+	DefaultScopeKey             string
+	LinkDirectMessages          bool
+	IdentityScopeMap            map[string]string
 
-	locksMu sync.Mutex
-	locks   map[string]*sessionLock
-	quotaMu sync.Mutex
-	quotas  map[string]*sessionQuotaState
+	locksMu     sync.Mutex
+	locks       map[string]*sessionLock
+	quotaMu     sync.Mutex
+	quotas      map[string]*sessionQuotaState
+	idleMu      sync.Mutex
+	idleTimers  map[string]*time.Timer
+	idleVersion map[string]uint64
 }
 
 type sessionQuotaState struct {
@@ -163,6 +174,7 @@ func (r *Runtime) Handle(ctx context.Context, ev bus.Event) error {
 		entry.mu.Unlock()
 		r.releaseSessionLock(ev.SessionKey, entry)
 	}()
+	r.markSessionActivity(ev.SessionKey)
 	switch ev.Type {
 	case bus.EventUserMessage, bus.EventCron, bus.EventHeartbeat, bus.EventSystem, bus.EventWebhook, bus.EventFileChange:
 		return r.turn(ctx, ev)
@@ -176,6 +188,14 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 
 	if ev.Type == bus.EventUserMessage && strings.EqualFold(strings.TrimSpace(ev.Message), commandNewSession) {
 		return r.handleNewSession(ctx, ev)
+	}
+	if ev.Type == bus.EventUserMessage && strings.EqualFold(strings.TrimSpace(ev.Message), commandStatus) {
+		r.ensureSessionScope(ctx, ev)
+		return r.handleStatus(ctx, ev)
+	}
+	if ev.Type == bus.EventUserMessage && strings.EqualFold(strings.TrimSpace(ev.Message), commandPrune) {
+		r.ensureSessionScope(ctx, ev)
+		return r.handlePruneSession(ctx, ev, "manual")
 	}
 	r.ensureSessionScope(ctx, ev)
 
@@ -191,6 +211,9 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 	}
 	if handled, err := r.handleStructuredAutonomy(ctx, ev, msgID); handled || err != nil {
 		return err
+	}
+	if ev.Type == bus.EventUserMessage {
+		r.ensureTaskCardForTurn(ctx, ev)
 	}
 
 	// build prompt
@@ -218,9 +241,9 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 	r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, finalText, replyMeta, streamed, shouldAutoDeliver(ev))
 
 	// best-effort rolling consolidation of old messages into memory notes
-	if r.Consolidator != nil && r.Builder != nil && r.ConsolidationScheduler != nil {
+	if !r.DisableRollingConsolidation && r.Consolidator != nil && r.Builder != nil && r.ConsolidationScheduler != nil {
 		r.ConsolidationScheduler.Trigger(ev.SessionKey)
-	} else if r.Consolidator != nil && r.Builder != nil {
+	} else if !r.DisableRollingConsolidation && r.Consolidator != nil && r.Builder != nil {
 		historyMax := r.Builder.HistoryMax
 		if historyMax <= 0 {
 			historyMax = 40
@@ -229,8 +252,83 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 			log.Printf("consolidation failed: session=%s err=%v", ev.SessionKey, err)
 		}
 	}
+	r.scheduleIdlePrune(ctx, ev)
 
 	return nil
+}
+
+func (r *Runtime) markSessionActivity(sessionKey string) {
+	if r == nil || strings.TrimSpace(sessionKey) == "" {
+		return
+	}
+	r.idleMu.Lock()
+	defer r.idleMu.Unlock()
+	if r.idleVersion == nil {
+		r.idleVersion = map[string]uint64{}
+	}
+	r.idleVersion[sessionKey]++
+	if r.idleTimers != nil {
+		if timer := r.idleTimers[sessionKey]; timer != nil {
+			timer.Stop()
+			delete(r.idleTimers, sessionKey)
+		}
+	}
+}
+
+func (r *Runtime) scheduleIdlePrune(ctx context.Context, ev bus.Event) {
+	if r == nil || !r.ContextManager.Enabled || r.Consolidator == nil || r.DB == nil || strings.TrimSpace(ev.SessionKey) == "" {
+		return
+	}
+	delay := time.Duration(r.ContextManager.IdlePruneSeconds) * time.Second
+	if delay <= 0 {
+		delay = 5 * time.Minute
+	}
+	sessionKey := ev.SessionKey
+	channel := ev.Channel
+	replyTarget := deliveryTarget(ev)
+	meta := cloneMap(ev.Meta)
+	r.idleMu.Lock()
+	if r.idleTimers == nil {
+		r.idleTimers = map[string]*time.Timer{}
+	}
+	version := r.idleVersion[sessionKey]
+	if timer := r.idleTimers[sessionKey]; timer != nil {
+		timer.Stop()
+	}
+	r.idleTimers[sessionKey] = time.AfterFunc(delay, func() {
+		r.runIdlePrune(context.Background(), sessionKey, channel, replyTarget, meta, version)
+	})
+	r.idleMu.Unlock()
+}
+
+func (r *Runtime) runIdlePrune(ctx context.Context, sessionKey, channel, replyTarget string, meta map[string]any, expectedVersion uint64) {
+	entry := r.acquireSessionLock(sessionKey)
+	entry.mu.Lock()
+	defer func() {
+		entry.mu.Unlock()
+		r.releaseSessionLock(sessionKey, entry)
+	}()
+	if !r.sessionIdleVersionMatches(sessionKey, expectedVersion) {
+		return
+	}
+	msg, err := r.pruneSessionContext(ctx, sessionKey, "idle")
+	if err != nil {
+		msg = "Context prune skipped. Cause: " + oneLine(err.Error(), 180)
+	}
+	if r.Deliver != nil && strings.TrimSpace(channel) != "" && strings.TrimSpace(replyTarget) != "" {
+		if err := r.deliver(ctx, channel, replyTarget, msg, meta); err != nil {
+			log.Printf("deliver idle prune notice failed: %v", err)
+		}
+	}
+}
+
+func (r *Runtime) sessionIdleVersionMatches(sessionKey string, expected uint64) bool {
+	r.idleMu.Lock()
+	defer r.idleMu.Unlock()
+	if r.idleTimers != nil {
+		delete(r.idleTimers, sessionKey)
+	}
+	return r.idleVersion != nil && r.idleVersion[sessionKey] == expected
 }
 
 func (r *Runtime) ensureSessionScope(ctx context.Context, ev bus.Event) {
@@ -504,8 +602,9 @@ func (r *Runtime) handleNewSession(ctx context.Context, ev bus.Event) error {
 		if historyMax <= 0 {
 			historyMax = 40
 		}
-		if err := r.Consolidator.ArchiveAll(ctx, ev.SessionKey, historyMax); err != nil {
-			msg := "Memory archival failed, session not cleared. Please try again."
+		if err := r.Consolidator.ArchiveResetWindow(ctx, ev.SessionKey, historyMax); err != nil {
+			log.Printf("new session archive failed: session=%s err=%v", ev.SessionKey, err)
+			msg := "Memory archival failed, session not cleared. Cause: " + oneLine(err.Error(), 180)
 			if r.Deliver != nil {
 				if derr := r.deliver(ctx, ev.Channel, replyTarget, msg, ev.Meta); derr != nil {
 					log.Printf("deliver failed: %v", derr)
@@ -515,7 +614,8 @@ func (r *Runtime) handleNewSession(ctx context.Context, ev bus.Event) error {
 		}
 	}
 	if err := r.DB.ResetSessionHistory(ctx, ev.SessionKey); err != nil {
-		msg := "New session failed. Please try again."
+		log.Printf("new session reset failed: session=%s err=%v", ev.SessionKey, err)
+		msg := "New session failed. Cause: " + oneLine(err.Error(), 180)
 		if r.Deliver != nil {
 			if derr := r.deliver(ctx, ev.Channel, replyTarget, msg, ev.Meta); derr != nil {
 				log.Printf("deliver failed: %v", derr)
@@ -530,6 +630,236 @@ func (r *Runtime) handleNewSession(ctx context.Context, ev bus.Event) error {
 		}
 	}
 	return nil
+}
+
+func (r *Runtime) handlePruneSession(ctx context.Context, ev bus.Event, reason string) error {
+	msg, err := r.pruneSessionContext(ctx, ev.SessionKey, reason)
+	if err != nil {
+		log.Printf("context prune failed: session=%s err=%v", ev.SessionKey, err)
+		msg = "Context prune failed. Cause: " + oneLine(err.Error(), 180)
+	}
+	if r.Deliver != nil {
+		if derr := r.deliver(ctx, ev.Channel, deliveryTarget(ev), msg, ev.Meta); derr != nil {
+			log.Printf("deliver failed: %v", derr)
+		}
+	}
+	return nil
+}
+
+func (r *Runtime) pruneSessionContext(ctx context.Context, sessionKey, reason string) (string, error) {
+	if r == nil || r.DB == nil {
+		return "", fmt.Errorf("runtime database not configured")
+	}
+	if strings.TrimSpace(sessionKey) == "" {
+		return "", fmt.Errorf("session key required")
+	}
+	if r.ContextManager.Enabled {
+		return r.compactSessionContextWithModel(ctx, sessionKey, reason)
+	}
+	if r.Consolidator == nil || r.Consolidator.Provider == nil {
+		return "", fmt.Errorf("consolidation is not configured, so pruning would discard unsummarized history")
+	}
+	historyMax := 40
+	if r.Builder != nil && r.Builder.HistoryMax > 0 {
+		historyMax = r.Builder.HistoryMax
+	}
+	if err := r.Consolidator.ArchiveResetWindow(ctx, sessionKey, historyMax); err != nil {
+		return "", err
+	}
+	if err := r.DB.ResetSessionHistory(ctx, sessionKey); err != nil {
+		return "", err
+	}
+	label := strings.TrimSpace(reason)
+	if label == "" {
+		label = "manual"
+	}
+	return "Context pruned (" + label + "). Recent chat was archived into memory and the live context window was cleared.", nil
+}
+
+func (r *Runtime) compactSessionContextWithModel(ctx context.Context, sessionKey, reason string) (string, error) {
+	provider := r.contextManagerProvider()
+	if provider == nil {
+		return "", fmt.Errorf("context manager provider not configured")
+	}
+	scopeKey := sessionKey
+	if resolved, err := r.DB.ResolveScopeKey(ctx, sessionKey); err == nil && strings.TrimSpace(resolved) != "" {
+		scopeKey = resolved
+	}
+	input, existingCutoff, err := r.buildContextManagerPruneInput(ctx, sessionKey, scopeKey, reason)
+	if err != nil {
+		return "", err
+	}
+	if len(input.Messages) == 0 {
+		return "Context prune skipped. There are no live messages to compact.", nil
+	}
+	proposal, err := requestContextManagerCompaction(ctx, provider, r.contextManagerModel(), input)
+	if err != nil {
+		return "", err
+	}
+	policy := ContextManagerPolicy{Enabled: true, AllowTaskUpdates: r.ContextManager.AllowTaskUpdates, AllowStalePropose: r.ContextManager.AllowStalePropose, ScopeKey: scopeKey}
+	if err := validateContextManagerProposal(proposal, policy); err != nil {
+		return "", err
+	}
+	if proposal.Compaction == nil || proposal.Compaction.CompactThroughMessageID <= existingCutoff {
+		return "Context prune skipped. The model found no additional context that was safe to compact.", nil
+	}
+	resolvedCutoff, cutoffAdjusted, err := normalizeCompactionCutoff(proposal.Compaction.CompactThroughMessageID, input.Messages)
+	if err != nil {
+		return "", err
+	}
+	refs, _ := json.Marshal(proposal.Compaction.Refs)
+	if err := r.DB.UpsertContextCompaction(ctx, db.ContextCompaction{
+		ScopeKey:        scopeKey,
+		SessionKey:      sessionKey,
+		Summary:         proposal.Compaction.Summary,
+		CutoffMessageID: resolvedCutoff,
+		MessageRefsJSON: string(refs),
+	}); err != nil {
+		return "", err
+	}
+	if proposal.TaskCardUpdates != nil && r.ContextManager.AllowTaskUpdates {
+		card, _, _ := loadTaskCard(ctx, r.DB, sessionKey)
+		card = applyContextManagerTaskUpdate(card, *proposal.TaskCardUpdates)
+		if err := saveTaskCard(ctx, r.DB, sessionKey, scopeKey, card); err != nil {
+			log.Printf("context manager task-card update failed: %v", err)
+		}
+	}
+	message := fmt.Sprintf("Context pruned (%s). The model compacted live prompt history through message %d; raw chat history was preserved.", nonEmptyLabel(reason, "manual"), resolvedCutoff)
+	if cutoffAdjusted {
+		message += " The requested cutoff was normalized to the nearest valid message in the provided context window."
+	}
+	return message, nil
+}
+
+func (r *Runtime) buildContextManagerPruneInput(ctx context.Context, sessionKey, scopeKey, reason string) (contextManagerPruneInput, int64, error) {
+	historyMax := 40
+	if r.Builder != nil && r.Builder.HistoryMax > 0 {
+		historyMax = r.Builder.HistoryMax
+	}
+	limit := historyMax * 2
+	if limit < 40 {
+		limit = 40
+	}
+	if limit > 120 {
+		limit = 120
+	}
+	rows, err := r.DB.GetLastMessagesScoped(ctx, sessionKey, limit)
+	if err != nil {
+		return contextManagerPruneInput{}, 0, err
+	}
+	var existing db.ContextCompaction
+	var existingCutoff int64
+	if row, ok, err := r.DB.GetContextCompaction(ctx, scopeKey); err == nil && ok {
+		existing = row
+		existingCutoff = row.CutoffMessageID
+	}
+	maxChars := r.ContextManager.MaxInputTokens * 4
+	if maxChars <= 0 {
+		maxChars = 12000
+	}
+	messages := make([]contextManagerMessage, 0, len(rows))
+	used := 0
+	for _, row := range rows {
+		if row.ID <= existingCutoff {
+			continue
+		}
+		content := oneLine(row.Content, 1200)
+		entryCost := len(content) + 80
+		if used+entryCost > maxChars && len(messages) > 0 {
+			break
+		}
+		messages = append(messages, contextManagerMessage{ID: row.ID, SessionKey: row.SessionKey, Role: row.Role, Content: content, CreatedAt: row.CreatedAt})
+		used += entryCost
+	}
+	taskCardText := ""
+	if r.Builder == nil || !r.Builder.DisableTaskCard {
+		if card, ok, err := loadTaskCard(ctx, r.DB, sessionKey); err == nil && ok {
+			taskCardText = renderTaskCard(card, 3000)
+		}
+	}
+	return contextManagerPruneInput{
+		Reason:          nonEmptyLabel(reason, "manual"),
+		SessionKey:      sessionKey,
+		ScopeKey:        scopeKey,
+		ExistingSummary: existing.Summary,
+		TaskCard:        taskCardText,
+		Messages:        messages,
+	}, existingCutoff, nil
+}
+
+func (r *Runtime) contextManagerProvider() *providers.Client {
+	if r == nil {
+		return nil
+	}
+	if r.ContextManagerProvider != nil {
+		return r.ContextManagerProvider
+	}
+	if r.Consolidator != nil && r.Consolidator.Provider != nil {
+		return r.Consolidator.Provider
+	}
+	return r.Provider
+}
+
+func (r *Runtime) contextManagerModel() string {
+	if r == nil {
+		return ""
+	}
+	if model := strings.TrimSpace(r.ContextManager.Model); model != "" {
+		return model
+	}
+	if r.Consolidator != nil && strings.TrimSpace(r.Consolidator.ChatModel) != "" {
+		return r.Consolidator.ChatModel
+	}
+	return r.Model
+}
+
+func normalizeCompactionCutoff(cutoff int64, messages []contextManagerMessage) (int64, bool, error) {
+	if cutoff <= 0 {
+		return 0, false, nil
+	}
+	var nearestLower int64
+	for _, msg := range messages {
+		if msg.ID == cutoff {
+			return cutoff, false, nil
+		}
+		if msg.ID < cutoff && msg.ID > nearestLower {
+			nearestLower = msg.ID
+		}
+	}
+	if nearestLower > 0 {
+		return nearestLower, true, nil
+	}
+	return 0, false, fmt.Errorf("compaction cutoff %d was not in the provided context window", cutoff)
+}
+
+func nonEmptyLabel(value, fallbackValue string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallbackValue
+	}
+	return value
+}
+
+func (r *Runtime) ensureTaskCardForTurn(ctx context.Context, ev bus.Event) {
+	if r == nil || r.DB == nil || r.Builder == nil || r.Builder.DisableTaskCard || strings.TrimSpace(ev.SessionKey) == "" {
+		return
+	}
+	message := strings.TrimSpace(ev.Message)
+	if message == "" || strings.HasPrefix(message, "/") {
+		return
+	}
+	scopeKey := ev.SessionKey
+	if resolved, err := r.DB.ResolveScopeKey(ctx, ev.SessionKey); err == nil && strings.TrimSpace(resolved) != "" {
+		scopeKey = resolved
+	}
+	card, ok, _ := loadTaskCard(ctx, r.DB, ev.SessionKey)
+	if !ok || strings.TrimSpace(card.Goal) == "" {
+		card.Goal = oneLine(message, 240)
+	}
+	card.Status = "active"
+	if err := saveTaskCard(ctx, r.DB, ev.SessionKey, scopeKey, card); err != nil {
+		log.Printf("save task card before prompt failed: %v", err)
+	}
 }
 
 func contentToString(v any) string {
@@ -562,7 +892,7 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 		req := providers.ChatCompletionRequest{
 			Model:       r.Model,
 			Messages:    messages,
-			Tools:       toToolDefs(reg),
+			Tools:       toToolDefs(r.exposedToolsForTurn(reg, messages, channel)),
 			Temperature: r.Temperature,
 		}
 
@@ -685,6 +1015,79 @@ func (r *Runtime) effectiveTools(ctx context.Context, fallback *tools.Registry) 
 	return fallback
 }
 
+func (r *Runtime) exposedToolsForTurn(reg *tools.Registry, messages []providers.ChatMessage, channel string) *tools.Registry {
+	if reg == nil || r == nil || !r.DynamicToolExposure {
+		return reg
+	}
+	intent := latestUserText(messages) + " " + strings.TrimSpace(channel)
+	groups := selectedToolGroups(intent)
+	allowed := map[string]struct{}{}
+	for _, name := range reg.Names() {
+		meta := reg.Metadata(name)
+		if meta.Hidden || hasGroup(meta.Groups, tools.ToolGroupHidden) {
+			continue
+		}
+		if hasAnyGroup(meta.Groups, groups) {
+			allowed[name] = struct{}{}
+		}
+	}
+	return reg.CloneSelected(allowed)
+}
+
+func latestUserText(messages []providers.ChatMessage) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			return contentToString(messages[i].Content)
+		}
+	}
+	return ""
+}
+
+func selectedToolGroups(intent string) map[string]struct{} {
+	lower := strings.ToLower(intent)
+	groups := map[string]struct{}{
+		tools.ToolGroupRead:   {},
+		tools.ToolGroupMemory: {},
+	}
+	if strings.Contains(lower, "write") || strings.Contains(lower, "edit") || strings.Contains(lower, "modify") || strings.Contains(lower, "create file") || strings.Contains(lower, "patch") {
+		groups[tools.ToolGroupWrite] = struct{}{}
+	}
+	if strings.Contains(lower, "run") || strings.Contains(lower, "exec") || strings.Contains(lower, "command") || strings.Contains(lower, "shell") || strings.Contains(lower, "test") || strings.Contains(lower, "build") {
+		groups[tools.ToolGroupExec] = struct{}{}
+	}
+	if strings.Contains(lower, "http") || strings.Contains(lower, "web") || strings.Contains(lower, "url") || strings.Contains(lower, "search") || strings.Contains(lower, "internet") {
+		groups[tools.ToolGroupWeb] = struct{}{}
+	}
+	if strings.Contains(lower, "cron") || strings.Contains(lower, "schedule") || strings.Contains(lower, "remind") {
+		groups[tools.ToolGroupCron] = struct{}{}
+	}
+	if strings.Contains(lower, "skill") {
+		groups[tools.ToolGroupSkills] = struct{}{}
+	}
+	if strings.TrimSpace(intent) != "" {
+		groups[tools.ToolGroupChannels] = struct{}{}
+	}
+	return groups
+}
+
+func hasAnyGroup(groups []string, allowed map[string]struct{}) bool {
+	for _, group := range groups {
+		if _, ok := allowed[group]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func hasGroup(groups []string, want string) bool {
+	for _, group := range groups {
+		if group == want {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *Runtime) streamerForContext(ctx context.Context) channels.StreamingChannel {
 	if streamer := streamingChannelFromContext(ctx); streamer != nil {
 		return streamer
@@ -781,7 +1184,7 @@ func (r *Runtime) enforceSkillPolicy(ctx context.Context, tool tools.Tool, param
 				return err
 			}
 		}
-	case "web_fetch":
+	case "web_fetch", "web_fetch_markdown":
 		if !policy.AllowNetwork {
 			return fmt.Errorf("network denied by skill policy: %s", tool.Name())
 		}
@@ -930,7 +1333,7 @@ func (r *Runtime) enforceProfile(ctx context.Context, profile tools.ActiveProfil
 		}
 	}
 	switch tool.Name() {
-	case "web_fetch":
+	case "web_fetch", "web_fetch_markdown":
 		parsed, err := url.Parse(strings.TrimSpace(fmt.Sprint(params["url"])))
 		if err != nil {
 			return err
@@ -999,7 +1402,7 @@ func summarizeToolParams(toolName string, params map[string]any) map[string]any 
 		summary["entrypoint"] = strings.TrimSpace(fmt.Sprint(params["entrypoint"]))
 	case "spawn_subagent":
 		summary["task"] = previewText(strings.TrimSpace(fmt.Sprint(params["task"])), 120)
-	case "web_fetch":
+	case "web_fetch", "web_fetch_markdown":
 		summary["url"] = strings.TrimSpace(fmt.Sprint(params["url"]))
 	}
 	return summary
@@ -1026,7 +1429,7 @@ func (r *Runtime) incrementQuota(sessionKey string, toolName string) error {
 	switch toolName {
 	case "exec", "run_skill_script":
 		return quotaIncrement(&state.ExecCalls, r.Hardening.Quotas.MaxExecCalls, "exec calls", toolName)
-	case "web_fetch", "web_search":
+	case "web_fetch", "web_fetch_markdown", "web_search":
 		return quotaIncrement(&state.WebCalls, r.Hardening.Quotas.MaxWebCalls, "web calls", toolName)
 	case "spawn_subagent":
 		return quotaIncrement(&state.SubagentCalls, r.Hardening.Quotas.MaxSubagentCalls, "subagent calls", toolName)
@@ -1126,8 +1529,20 @@ func (r *Runtime) persistAssistantReply(ctx context.Context, sessionKey string, 
 	if strings.TrimSpace(finalText) == "" {
 		finalText = "(no response)"
 	}
-	if _, err := r.DB.AppendMessage(ctx, sessionKey, "assistant", finalText, map[string]any{"in_reply_to": msgID}); err != nil {
+	assistantID, err := r.DB.AppendMessage(ctx, sessionKey, "assistant", finalText, map[string]any{"in_reply_to": msgID})
+	if err != nil {
 		log.Printf("append assistant(final) failed: %v", err)
+	} else if r.DB != nil {
+		scopeKey := sessionKey
+		if resolved, rerr := r.DB.ResolveScopeKey(ctx, sessionKey); rerr == nil && strings.TrimSpace(resolved) != "" {
+			scopeKey = resolved
+		}
+		card, _, _ := loadTaskCard(ctx, r.DB, sessionKey)
+		card.Status = "active"
+		card.MessageRefs = appendBoundedInt64(card.MessageRefs, assistantID, 12)
+		if err := saveTaskCard(ctx, r.DB, sessionKey, scopeKey, card); err != nil {
+			log.Printf("save task card failed: %v", err)
+		}
 	}
 	if autoDeliver && !streamed && r.Deliver != nil {
 		if err := r.deliver(ctx, channel, replyTarget, finalText, replyMeta); err != nil {
@@ -1158,7 +1573,40 @@ func (r *Runtime) boundTextResult(ctx context.Context, sessionKey string, text s
 			log.Printf("artifact save failed: %v", err)
 			return text, preview, ""
 		}
-		return fmt.Sprintf("artifact_id=%s\npreview:\n%s", id, preview), preview, id
+		if r.DB != nil {
+			summary := buildArtifactSummary(id, "text/plain", preview, int64(len(text)))
+			if _, err := r.DB.InsertMemoryNoteTyped(ctx, sessionKey, db.TypedNoteInput{
+				Text:             summary,
+				Summary:          compactSemanticJSON(db.MemoryKindArtifact, preview, []string{"artifact:" + id}),
+				SourceArtifactID: id,
+				Kind:             db.MemoryKindArtifact,
+				Status:           db.MemoryStatusActive,
+				Importance:       0.2,
+				Confidence:       0.9,
+			}); err != nil {
+				log.Printf("artifact summary note save failed: %v", err)
+			}
+			scopeKey := sessionKey
+			if resolved, rerr := r.DB.ResolveScopeKey(ctx, sessionKey); rerr == nil && strings.TrimSpace(resolved) != "" {
+				scopeKey = resolved
+			}
+			card, _, _ := loadTaskCard(ctx, r.DB, sessionKey)
+			card.Status = "active"
+			card.ArtifactRefs = appendBoundedString(card.ArtifactRefs, id, 12)
+			if err := saveTaskCard(ctx, r.DB, sessionKey, scopeKey, card); err != nil {
+				log.Printf("save task card artifact ref failed: %v", err)
+			}
+		}
+		return tools.EncodeToolResult(tools.ToolResult{
+			Kind:       "large_tool_output",
+			OK:         true,
+			Summary:    fmt.Sprintf("Large tool output saved as artifact %s", id),
+			Preview:    preview,
+			ArtifactID: id,
+			Stats: map[string]any{
+				"bytes": len(text),
+			},
+		}), preview, id
 	}
 	return text, preview, ""
 }

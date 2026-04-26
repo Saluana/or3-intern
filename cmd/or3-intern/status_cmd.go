@@ -51,7 +51,7 @@ func runStatusCommandWithOptions(cfgPath string, cfg config.Config, validationEr
 		if len(selected) == 0 {
 			return fmt.Errorf("no safe automatic repair is available for %q", args.FixID)
 		}
-		applied, err := intdoctor.ApplyAutomaticFixes(cfgPath, &cfg, intdoctor.NewReport(intdoctor.ModeAdvisory, selected), intdoctor.FixOptions{AutomaticOnly: true})
+		applied, err := intdoctor.ApplyAutomaticFixes(cfgPath, &cfg, intdoctor.NewReport(intdoctor.ModeAdvisory, selected))
 		if err != nil {
 			return err
 		}
@@ -89,6 +89,9 @@ func runStatusCommand(cfg config.Config, validationError string, database *db.DB
 	fmt.Fprintf(stdout, "Internet: %s\n", view.Internet)
 	fmt.Fprintf(stdout, "Devices: %s\n", view.Devices)
 	fmt.Fprintf(stdout, "Activity log: %s\n", view.ActivityLog)
+	if detailed {
+		fmt.Fprintf(stdout, "Context: mode=%s maxInputTokens=%d outputReserve=%d dynamicTools=%v\n", cfg.Context.Mode, cfg.Context.MaxInputTokens, cfg.Context.OutputReserveTokens, cfg.Context.Tools.DynamicExpose)
+	}
 	fmt.Fprintln(stdout, "\nWhat OR3 can access")
 	for _, section := range view.Access.Sections {
 		fmt.Fprintf(stdout, "- %s: %s [%s]\n", section.Name, section.Status, section.Risk)

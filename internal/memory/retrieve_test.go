@@ -28,17 +28,20 @@ func TestNewRetriever(t *testing.T) {
 	if r == nil {
 		t.Fatal("expected non-nil retriever")
 	}
-	if r.VectorWeight != 0.55 {
-		t.Errorf("expected VectorWeight=0.55, got %v", r.VectorWeight)
+	if r.VectorWeight != 0.50 {
+		t.Errorf("expected VectorWeight=0.50, got %v", r.VectorWeight)
 	}
-	if r.FTSWeight != 0.25 {
-		t.Errorf("expected FTSWeight=0.25, got %v", r.FTSWeight)
+	if r.FTSWeight != 0.22 {
+		t.Errorf("expected FTSWeight=0.22, got %v", r.FTSWeight)
 	}
 	if r.LexicalWeight != 0.12 {
 		t.Errorf("expected LexicalWeight=0.12, got %v", r.LexicalWeight)
 	}
 	if r.RecencyWeight != 0.08 {
 		t.Errorf("expected RecencyWeight=0.08, got %v", r.RecencyWeight)
+	}
+	if r.TaskWeight != 0.08 {
+		t.Errorf("expected TaskWeight=0.08, got %v", r.TaskWeight)
 	}
 	if r.VectorScanLimit != 2000 {
 		t.Errorf("expected VectorScanLimit=2000, got %d", r.VectorScanLimit)
@@ -85,6 +88,53 @@ func TestRetrieve_WithVectorResults(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected 'vector match' in results")
+	}
+}
+
+func TestRetrieve_DistinctiveQueryRejectsVectorOnlyNoise(t *testing.T) {
+	d := openRetrieveTestDB(t)
+	ctx := context.Background()
+
+	if _, err := d.InsertMemoryNote(ctx, "session1", "Brave search article conversion tools and tacos", PackFloat32([]float32{1.0, 0.0}), sql.NullInt64{}, ""); err != nil {
+		t.Fatalf("InsertMemoryNote noisy: %v", err)
+	}
+	if _, err := d.InsertMemoryNote(ctx, "session1", "EcoPros company research notes", PackFloat32([]float32{0.9, 0.1}), sql.NullInt64{}, ""); err != nil {
+		t.Fatalf("InsertMemoryNote topical: %v", err)
+	}
+
+	r := NewRetriever(d)
+	results, err := r.Retrieve(ctx, "session1", "Look into EcoPros", []float32{1.0, 0.0}, 5, 0, 10)
+	if err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+	if len(results) == 0 || !strings.Contains(results[0].Text, "EcoPros") {
+		t.Fatalf("expected topical EcoPros memory ranked first, got %+v", results)
+	}
+	for _, result := range results[1:] {
+		if strings.Contains(result.Text, "tacos") && result.Score >= results[0].Score {
+			t.Fatalf("expected noisy vector-only memory to rank below topical result, got %+v", results)
+		}
+	}
+}
+
+func TestRetrieve_DistinctiveQueryKeepsStrongSemanticAliasMatch(t *testing.T) {
+	d := openRetrieveTestDB(t)
+	ctx := context.Background()
+
+	if _, err := d.InsertMemoryNote(ctx, "session1", "EP diligence checklist and account notes", PackFloat32([]float32{1.0, 0.0}), sql.NullInt64{}, ""); err != nil {
+		t.Fatalf("InsertMemoryNote alias: %v", err)
+	}
+
+	r := NewRetriever(d)
+	results, err := r.Retrieve(ctx, "session1", "Look into EcoPros", []float32{1.0, 0.0}, 5, 0, 10)
+	if err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+	if len(results) == 0 || !strings.Contains(results[0].Text, "EP diligence") {
+		t.Fatalf("expected strong semantic alias match to survive, got %+v", results)
+	}
+	if results[0].Reason != "semantic match with weak lexical support" {
+		t.Fatalf("expected semantic-match reason, got %+v", results[0])
 	}
 }
 
@@ -468,6 +518,91 @@ func TestRetrieve_StaleNotesHaveLowerScore(t *testing.T) {
 	}
 	if staleScore >= activeScore {
 		t.Errorf("expected stale note score (%v) < active note score (%v)", staleScore, activeScore)
+	}
+}
+
+func TestExistingRetrieveAPIStillWorks(t *testing.T) {
+	d := openRetrieveTestDB(t)
+	ctx := context.Background()
+	if _, err := d.InsertMemoryNoteTyped(ctx, "sess", db.TypedNoteInput{
+		Text: "build packet budget report",
+		Kind: db.MemoryKindFact,
+	}); err != nil {
+		t.Fatalf("InsertMemoryNoteTyped: %v", err)
+	}
+	r := NewRetriever(d)
+	results, err := r.Retrieve(ctx, "sess", "packet budget", nil, 4, 4, 3)
+	if err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatalf("expected non-empty retrieval results")
+	}
+}
+
+func TestRetrieve_IncludesIndexedDocCandidates(t *testing.T) {
+	d := openRetrieveTestDB(t)
+	ctx := context.Background()
+	if err := UpsertDoc(ctx, d, "sess", "/repo/docs/runbook.md", "markdown", "Runbook", "", "deploy packet cache safely", nil, "hash", 1, 32); err != nil {
+		t.Fatalf("UpsertDoc: %v", err)
+	}
+	r := NewRetriever(d)
+	results, err := r.Retrieve(ctx, "sess", "packet cache", nil, 0, 5, 5)
+	if err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+	found := false
+	for _, result := range results {
+		if result.Source == "doc" && strings.Contains(result.Ref, "runbook.md") {
+			found = true
+			if result.Kind != db.MemoryKindFile || result.Reason == "" {
+				t.Fatalf("expected file kind and reason, got %+v", result)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected doc candidate, got %+v", results)
+	}
+}
+
+func TestRetrieve_RejectsExpiredLowConfidenceAndStaleCandidates(t *testing.T) {
+	d := openRetrieveTestDB(t)
+	ctx := context.Background()
+	_, _ = d.InsertMemoryNoteTyped(ctx, "sess", db.TypedNoteInput{Text: "active packet cache note", Kind: db.MemoryKindFact, Confidence: 0.9})
+	_, _ = d.InsertMemoryNoteTyped(ctx, "sess", db.TypedNoteInput{Text: "low confidence packet cache", Kind: db.MemoryKindFact, Confidence: 0.1})
+	_, _ = d.InsertMemoryNoteTyped(ctx, "sess", db.TypedNoteInput{Text: "expired packet cache", Kind: db.MemoryKindFact, Confidence: 0.9, ExpiresAt: db.NowMS() - 1})
+	_, _ = d.InsertMemoryNoteTyped(ctx, "sess", db.TypedNoteInput{Text: "stale packet cache", Kind: db.MemoryKindFact, Status: db.MemoryStatusStale, Confidence: 0.9})
+	r := NewRetriever(d)
+	results, err := r.Retrieve(ctx, "sess", "packet cache", nil, 0, 10, 10)
+	if err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+	for _, result := range results {
+		if strings.Contains(result.Text, "low confidence") || strings.Contains(result.Text, "expired") || strings.Contains(result.Text, "stale") {
+			t.Fatalf("expected rejected lifecycle candidates to be excluded, got %+v", results)
+		}
+	}
+	joined := strings.Join(r.LastRejected, "\n")
+	for _, want := range []string{"low confidence", "expired", "lifecycle status stale"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("expected reject reason %q in %q", want, joined)
+		}
+	}
+}
+
+func TestRetrieve_TaskContextBoostsOverlap(t *testing.T) {
+	d := openRetrieveTestDB(t)
+	ctx := context.Background()
+	_, _ = d.InsertMemoryNoteTyped(ctx, "sess", db.TypedNoteInput{Text: "budget database backup rotation", Kind: db.MemoryKindFact})
+	_, _ = d.InsertMemoryNoteTyped(ctx, "sess", db.TypedNoteInput{Text: "budget frontend cache packet", Kind: db.MemoryKindFact})
+	r := NewRetriever(d)
+	r.TaskContext = "Goal: tune frontend cache packet budget"
+	results, err := r.Retrieve(ctx, "sess", "budget", nil, 0, 10, 2)
+	if err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+	if len(results) == 0 || !strings.Contains(results[0].Text, "frontend cache") || results[0].Reason != "matches current task" {
+		t.Fatalf("expected task-overlap candidate first, got %+v", results)
 	}
 }
 

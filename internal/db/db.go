@@ -157,6 +157,35 @@ func (d *DB) migrate(ctx context.Context) error {
 			metadata_json TEXT NOT NULL DEFAULT '{}'
 		);`,
 		`CREATE INDEX IF NOT EXISTS session_links_scope_key ON session_links(scope_key);`,
+		`CREATE TABLE IF NOT EXISTS task_state(
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_key TEXT NOT NULL,
+			scope_key TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'active',
+			goal TEXT NOT NULL DEFAULT '',
+			plan_json TEXT NOT NULL DEFAULT '[]',
+			constraints_json TEXT NOT NULL DEFAULT '[]',
+			decisions_json TEXT NOT NULL DEFAULT '[]',
+			open_questions_json TEXT NOT NULL DEFAULT '[]',
+			message_refs_json TEXT NOT NULL DEFAULT '[]',
+			memory_refs_json TEXT NOT NULL DEFAULT '[]',
+			artifact_refs_json TEXT NOT NULL DEFAULT '[]',
+			active_files_json TEXT NOT NULL DEFAULT '[]',
+			metadata_json TEXT NOT NULL DEFAULT '{}',
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS task_state_session_status ON task_state(session_key, status, updated_at DESC);`,
+		`CREATE TABLE IF NOT EXISTS context_compactions(
+			scope_key TEXT PRIMARY KEY,
+			session_key TEXT NOT NULL,
+			summary TEXT NOT NULL DEFAULT '',
+			cutoff_message_id INTEGER NOT NULL DEFAULT 0,
+			message_refs_json TEXT NOT NULL DEFAULT '[]',
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS context_compactions_session_key ON context_compactions(session_key);`,
 		`CREATE TABLE IF NOT EXISTS memory_docs(
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			scope_key TEXT NOT NULL,
@@ -596,6 +625,12 @@ func (d *DB) ensureMemoryNotesMetaColumns(ctx context.Context) error {
 		{name: "kind", ddl: `ALTER TABLE memory_notes ADD COLUMN kind TEXT NOT NULL DEFAULT 'note'`},
 		{name: "status", ddl: `ALTER TABLE memory_notes ADD COLUMN status TEXT NOT NULL DEFAULT 'active'`},
 		{name: "importance", ddl: `ALTER TABLE memory_notes ADD COLUMN importance REAL NOT NULL DEFAULT 0`},
+		{name: "summary", ddl: `ALTER TABLE memory_notes ADD COLUMN summary TEXT NOT NULL DEFAULT ''`},
+		{name: "source_artifact_id", ddl: `ALTER TABLE memory_notes ADD COLUMN source_artifact_id TEXT NOT NULL DEFAULT ''`},
+		{name: "confidence", ddl: `ALTER TABLE memory_notes ADD COLUMN confidence REAL NOT NULL DEFAULT 0`},
+		{name: "updated_at", ddl: `ALTER TABLE memory_notes ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0`},
+		{name: "expires_at", ddl: `ALTER TABLE memory_notes ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0`},
+		{name: "supersedes_id", ddl: `ALTER TABLE memory_notes ADD COLUMN supersedes_id INTEGER`},
 		{name: "use_count", ddl: `ALTER TABLE memory_notes ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0`},
 		{name: "last_used_at", ddl: `ALTER TABLE memory_notes ADD COLUMN last_used_at INTEGER NOT NULL DEFAULT 0`},
 	}
@@ -622,6 +657,7 @@ func (d *DB) ensureMemoryNotesMetaColumns(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS memory_notes_scope_kind_status_created_at ON memory_notes(session_key, kind, status, created_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS memory_notes_kind ON memory_notes(kind)`,
 		`CREATE INDEX IF NOT EXISTS memory_notes_status ON memory_notes(status)`,
+		`CREATE INDEX IF NOT EXISTS memory_notes_source_artifact_id ON memory_notes(source_artifact_id)`,
 	}
 	for _, idx := range indexes {
 		if _, err := d.SQL.ExecContext(ctx, idx); err != nil {
@@ -630,14 +666,17 @@ func (d *DB) ensureMemoryNotesMetaColumns(ctx context.Context) error {
 	}
 
 	// Backfill: rows tagged with "consolidation" are rolling summaries.
-	_, err := d.SQL.ExecContext(ctx,
+	if _, err := d.SQL.ExecContext(ctx,
 		`UPDATE memory_notes SET kind='summary'
 		 WHERE kind='note' AND (
 		 	tags='consolidation' OR
 		 	tags LIKE 'consolidation,%' OR
 		 	tags LIKE '%,consolidation' OR
 		 	tags LIKE '%,consolidation,%'
-		 )`)
+		 )`); err != nil {
+		return err
+	}
+	_, err := d.SQL.ExecContext(ctx, `UPDATE memory_notes SET updated_at=created_at WHERE updated_at<=0`)
 	return err
 }
 

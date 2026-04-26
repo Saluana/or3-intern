@@ -1627,6 +1627,45 @@ func TestInsertMemoryNoteTyped_ImportanceClamped(t *testing.T) {
 	}
 }
 
+func TestUpdateMemoryNoteTyped_PreservesRichMetadata(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	id, err := d.InsertMemoryNoteTyped(ctx, "sess", TypedNoteInput{
+		Text:             "initial note",
+		Summary:          "initial summary",
+		SourceArtifactID: "art-1",
+		Kind:             MemoryKindFact,
+		Status:           MemoryStatusActive,
+		Confidence:       0.4,
+	})
+	if err != nil {
+		t.Fatalf("InsertMemoryNoteTyped: %v", err)
+	}
+	if err := d.UpdateMemoryNoteTyped(ctx, id, TypedNoteInput{
+		Text:             "updated note",
+		Summary:          "updated summary",
+		SourceArtifactID: "art-2",
+		Kind:             MemoryKindDecision,
+		Status:           MemoryStatusSuperseded,
+		Importance:       0.7,
+		Confidence:       0.9,
+		ExpiresAt:        12345,
+		SupersedesID:     99,
+	}); err != nil {
+		t.Fatalf("UpdateMemoryNoteTyped: %v", err)
+	}
+	var got MemoryNoteRow
+	if err := d.SQL.QueryRowContext(ctx, `SELECT id, session_key, text, summary, embedding, source_message_id, source_artifact_id, tags, created_at, updated_at, expires_at, supersedes_id, kind, status, importance, confidence, use_count, last_used_at FROM memory_notes WHERE id=?`, id).Scan(
+		&got.ID, &got.SessionKey, &got.Text, &got.Summary, &got.Embedding, &got.SourceMessageID, &got.SourceArtifactID, &got.Tags,
+		&got.CreatedAt, &got.UpdatedAt, &got.ExpiresAt, &got.SupersedesID, &got.Kind, &got.Status, &got.Importance, &got.Confidence, &got.UseCount, &got.LastUsedAt,
+	); err != nil {
+		t.Fatalf("QueryRow: %v", err)
+	}
+	if got.Text != "updated note" || got.Summary != "updated summary" || !got.SourceArtifactID.Valid || got.SourceArtifactID.String != "art-2" || got.Kind != MemoryKindDecision || got.Status != MemoryStatusSuperseded || got.Importance != 0.7 || got.Confidence != 0.9 || got.ExpiresAt != 12345 || !got.SupersedesID.Valid || got.SupersedesID.Int64 != 99 {
+		t.Fatalf("unexpected updated row: %+v", got)
+	}
+}
+
 func TestInsertMemoryNote_BackwardCompat_DefaultKindAndStatus(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
@@ -2017,6 +2056,46 @@ func TestWriteConsolidation_WithExtraNotes(t *testing.T) {
 	}
 	if goalRows[0].Kind != MemoryKindGoal {
 		t.Errorf("expected kind=%q, got %q", MemoryKindGoal, goalRows[0].Kind)
+	}
+}
+
+func TestWriteConsolidation_PreservesExtraNoteMetadata(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	if _, err := d.AppendMessage(ctx, "sess", "user", "hello", nil); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+	_, err := d.WriteConsolidation(ctx, ConsolidationWrite{
+		SessionKey:  "sess",
+		ScopeKey:    "sess",
+		NoteText:    "summary",
+		CursorMsgID: 1,
+		ExtraNotes: []TypedNoteInput{{
+			Text:             "decision note",
+			Summary:          "decision summary",
+			SourceArtifactID: "art-42",
+			Kind:             MemoryKindDecision,
+			Status:           MemoryStatusActive,
+			Importance:       0.6,
+			Confidence:       0.8,
+			ExpiresAt:        555,
+			SupersedesID:     12,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("WriteConsolidation: %v", err)
+	}
+	var summary, sourceArtifact, kind, status string
+	var importance, confidence float64
+	var expiresAt int64
+	var supersedesID sql.NullInt64
+	if err := d.SQL.QueryRowContext(ctx, `SELECT summary, source_artifact_id, kind, status, importance, confidence, expires_at, supersedes_id FROM memory_notes WHERE text=?`, "decision note").Scan(
+		&summary, &sourceArtifact, &kind, &status, &importance, &confidence, &expiresAt, &supersedesID,
+	); err != nil {
+		t.Fatalf("QueryRow metadata: %v", err)
+	}
+	if summary != "decision summary" || sourceArtifact != "art-42" || kind != MemoryKindDecision || status != MemoryStatusActive || importance != 0.6 || confidence != 0.8 || expiresAt != 555 || !supersedesID.Valid || supersedesID.Int64 != 12 {
+		t.Fatalf("unexpected persisted metadata: summary=%q artifact=%q kind=%q status=%q importance=%v confidence=%v expires=%d supersedes=%+v", summary, sourceArtifact, kind, status, importance, confidence, expiresAt, supersedesID)
 	}
 }
 

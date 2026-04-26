@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -48,7 +49,18 @@ func buildConsolidationProviderWithEmbedding(t *testing.T, chatBody string, embe
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"choices": []map[string]any{
-					{"message": map[string]any{"role": "assistant", "content": chatBody}},
+					{"message": map[string]any{
+						"role":    "assistant",
+						"content": nil,
+						"tool_calls": []map[string]any{{
+							"id":   "call_consolidate",
+							"type": "function",
+							"function": map[string]any{
+								"name":      consolidationToolName,
+								"arguments": chatBody,
+							},
+						}},
+					}},
 				},
 			})
 		case "/embeddings":
@@ -69,6 +81,57 @@ func buildConsolidationProviderWithEmbedding(t *testing.T, chatBody string, embe
 	p := providers.New(srv.URL, "test-key", 5*time.Second)
 	p.HTTP = srv.Client()
 	return p, callCounts{Chat: &chatCalls, Embed: &embedCalls}
+}
+
+func TestConsolidator_ToolChoiceRequiredFallsBackWhenRouterRejects(t *testing.T) {
+	var chatCalls int32
+	var sawRequired bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		atomic.AddInt32(&chatCalls, 1)
+		body, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(body), `"tool_choice":"required"`) {
+			sawRequired = true
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":{"message":"No endpoints found that support the provided 'tool_choice' value","code":404}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{"message": map[string]any{
+				"role":    "assistant",
+				"content": nil,
+				"tool_calls": []map[string]any{{
+					"id":   "call_consolidate",
+					"type": "function",
+					"function": map[string]any{
+						"name":      consolidationToolName,
+						"arguments": `{"summary":"fallback summary","facts":[],"preferences":[],"goals":[],"procedures":[],"decisions":[],"warnings":[]}`,
+					},
+				}},
+			}}},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	prov := providers.New(srv.URL, "test-key", 5*time.Second)
+	prov.HTTP = srv.Client()
+	c := &Consolidator{Provider: prov}
+	out, err := c.requestConsolidationOutput(context.Background(), "model", "", "user: hello")
+	if err != nil {
+		t.Fatalf("requestConsolidationOutput: %v", err)
+	}
+	if !sawRequired {
+		t.Fatal("expected initial request to use tool_choice=required")
+	}
+	if atomic.LoadInt32(&chatCalls) != 2 {
+		t.Fatalf("expected required attempt plus fallback attempt, got %d", atomic.LoadInt32(&chatCalls))
+	}
+	if out.Summary != "fallback summary" {
+		t.Fatalf("unexpected parsed summary: %#v", out)
+	}
 }
 
 func TestConsolidator_NilProvider(t *testing.T) {
@@ -210,6 +273,139 @@ func TestConsolidator_ArchiveAll_MultiPass(t *testing.T) {
 	}
 	if atomic.LoadInt32(calls.Chat) < 2 {
 		t.Fatalf("expected multiple chat calls for multipass archive, got %d", atomic.LoadInt32(calls.Chat))
+	}
+}
+
+func TestConsolidator_ArchiveResetWindow_OnePassRecentWindow(t *testing.T) {
+	d := openConsolidateTestDB(t)
+	ctx := context.Background()
+	for i := 0; i < 120; i++ {
+		if _, err := d.AppendMessage(ctx, "sess", "user", fmt.Sprintf("line-%03d", i), nil); err != nil {
+			t.Fatalf("AppendMessage: %v", err)
+		}
+	}
+	var chatCalls int32
+	var promptBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/chat/completions":
+			atomic.AddInt32(&chatCalls, 1)
+			body, _ := io.ReadAll(r.Body)
+			promptBody = string(body)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"choices": []map[string]any{{"message": map[string]any{
+					"role":    "assistant",
+					"content": nil,
+					"tool_calls": []map[string]any{{
+						"id":   "call_consolidate",
+						"type": "function",
+						"function": map[string]any{
+							"name":      consolidationToolName,
+							"arguments": `{"summary":"reset summary","facts":["recent reset fact"],"preferences":[],"goals":[],"procedures":[],"decisions":[],"warnings":[]}`,
+						},
+					}},
+				}}},
+			})
+		case "/embeddings":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"embedding": []float32{0.1, 0.2}}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	prov := providers.New(srv.URL, "test-key", 5*time.Second)
+	prov.HTTP = srv.Client()
+	c := &Consolidator{
+		DB:                 d,
+		Provider:           prov,
+		WindowSize:         10,
+		MaxMessages:        25,
+		MaxInputChars:      4000,
+		EmbedModel:         "embed-model",
+		CanonicalPinnedKey: "long_term_memory",
+	}
+	if err := c.ArchiveResetWindow(ctx, "sess", 40); err != nil {
+		t.Fatalf("ArchiveResetWindow: %v", err)
+	}
+	if atomic.LoadInt32(&chatCalls) != 1 {
+		t.Fatalf("expected one reset archive chat call, got %d", atomic.LoadInt32(&chatCalls))
+	}
+	if strings.Contains(promptBody, "line-000") || !strings.Contains(promptBody, "line-119") {
+		t.Fatalf("expected reset archive to summarize recent window, prompt=%s", promptBody)
+	}
+	notes, err := d.ListMemoryNotesForReembed(ctx)
+	if err != nil {
+		t.Fatalf("ListMemoryNotesForReembed: %v", err)
+	}
+	if len(notes) == 0 {
+		t.Fatalf("expected reset archive memory notes")
+	}
+}
+
+func TestConsolidator_ArchiveResetWindow_EmptyOutputDoesNotBlockReset(t *testing.T) {
+	d := openConsolidateTestDB(t)
+	ctx := context.Background()
+	if _, err := d.AppendMessage(ctx, "sess", "user", "hello", nil); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+	prov, calls := buildConsolidationProvider(t, `{}`, false)
+	c := &Consolidator{DB: d, Provider: prov, WindowSize: 1, MaxMessages: 50, MaxInputChars: 12000}
+	if err := c.ArchiveResetWindow(ctx, "sess", 40); err != nil {
+		t.Fatalf("ArchiveResetWindow should not block reset on empty durable output: %v", err)
+	}
+	if atomic.LoadInt32(calls.Chat) != 2 {
+		t.Fatalf("expected initial call plus structured-output retry, got %d", atomic.LoadInt32(calls.Chat))
+	}
+}
+
+func TestConsolidator_ProseOutputDoesNotBecomeMemory(t *testing.T) {
+	d := openConsolidateTestDB(t)
+	ctx := context.Background()
+	for i := 0; i < 6; i++ {
+		if _, err := d.AppendMessage(ctx, "sess", "user", fmt.Sprintf("message-%d", i), nil); err != nil {
+			t.Fatalf("AppendMessage: %v", err)
+		}
+	}
+	var chatCalls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/chat/completions":
+			atomic.AddInt32(&chatCalls, 1)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"choices": []map[string]any{{"message": map[string]any{
+					"role":    "assistant",
+					"content": "Got it, thanks for the update. I'll try fetching that URL again to see if the new version handles client-side rendering better.",
+				}}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	prov := providers.New(srv.URL, "test-key", 5*time.Second)
+	prov.HTTP = srv.Client()
+	c := &Consolidator{DB: d, Provider: prov, WindowSize: 1, MaxMessages: 50, MaxInputChars: 12000}
+	didWork, err := c.RunOnce(ctx, "sess", 1, RunMode{})
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !didWork {
+		t.Fatal("expected cursor-only consolidation work")
+	}
+	if atomic.LoadInt32(&chatCalls) != 2 {
+		t.Fatalf("expected retry for missing tool call, got %d chat calls", atomic.LoadInt32(&chatCalls))
+	}
+	notes, err := d.ListMemoryNotesForReembed(ctx)
+	if err != nil {
+		t.Fatalf("ListMemoryNotesForReembed: %v", err)
+	}
+	for _, note := range notes {
+		if strings.Contains(note.Text, "Got it") {
+			t.Fatalf("prose response was saved as memory note: %#v", note)
+		}
 	}
 }
 
@@ -440,18 +636,14 @@ func TestConsolidator_RunOnce_AdaptiveTriggerOnLargeTranscript(t *testing.T) {
 	}
 }
 
-func TestContentToStr_Other(t *testing.T) {
-	got := contentToStr(42)
-	if !strings.Contains(got, "42") {
-		t.Errorf("expected '42' in output, got %q", got)
-	}
-}
-
 // ---- parseConsolidationOutput tests ----
 
 func TestParseConsolidationOutput_NewFormat(t *testing.T) {
-	raw := `{"summary":"session summary","facts":["golang one two two"],"preferences":["dark mode"],"goals":["ship v2"],"procedures":["run make test"]}`
-	out := parseConsolidationOutput(raw)
+	raw := `{"summary":"session summary","facts":["golang one two two"],"preferences":["dark mode"],"goals":["ship v2"],"procedures":["run make test"],"decisions":["use sqlite"],"warnings":["avoid unbounded logs"]}`
+	out, err := parseConsolidationOutput(raw)
+	if err != nil {
+		t.Fatalf("parseConsolidationOutput: %v", err)
+	}
 	if out.Summary != "session summary" {
 		t.Errorf("expected summary, got %q", out.Summary)
 	}
@@ -467,12 +659,57 @@ func TestParseConsolidationOutput_NewFormat(t *testing.T) {
 	if len(out.Procedures) != 1 || out.Procedures[0] != "run make test" {
 		t.Errorf("expected procedures=[run make test], got %v", out.Procedures)
 	}
+	if len(out.Decisions) != 1 || out.Decisions[0] != "use sqlite" {
+		t.Errorf("expected decisions=[use sqlite], got %v", out.Decisions)
+	}
+	if len(out.Warnings) != 1 || out.Warnings[0] != "avoid unbounded logs" {
+		t.Errorf("expected warnings=[avoid unbounded logs], got %v", out.Warnings)
+	}
+}
+
+func TestParseConsolidationOutput_CoercesSingleStringItems(t *testing.T) {
+	raw := `{"summary":"session summary","facts":"single fact","preferences":"single preference","goals":"single goal","procedures":"single procedure","decisions":"single decision","warnings":"single warning"}`
+	out, err := parseConsolidationOutput(raw)
+	if err != nil {
+		t.Fatalf("parseConsolidationOutput: %v", err)
+	}
+	if len(out.Facts) != 1 || out.Facts[0] != "single fact" {
+		t.Errorf("expected facts single string to be coerced, got %v", out.Facts)
+	}
+	if len(out.Preferences) != 1 || out.Preferences[0] != "single preference" {
+		t.Errorf("expected preferences single string to be coerced, got %v", out.Preferences)
+	}
+	if len(out.Goals) != 1 || out.Goals[0] != "single goal" {
+		t.Errorf("expected goals single string to be coerced, got %v", out.Goals)
+	}
+	if len(out.Procedures) != 1 || out.Procedures[0] != "single procedure" {
+		t.Errorf("expected procedures single string to be coerced, got %v", out.Procedures)
+	}
+	if len(out.Decisions) != 1 || out.Decisions[0] != "single decision" {
+		t.Errorf("expected decisions single string to be coerced, got %v", out.Decisions)
+	}
+	if len(out.Warnings) != 1 || out.Warnings[0] != "single warning" {
+		t.Errorf("expected warnings single string to be coerced, got %v", out.Warnings)
+	}
+}
+
+func TestParseConsolidationOutput_RejectsNonStringItems(t *testing.T) {
+	_, err := parseConsolidationOutput(`{"summary":"session summary","facts":{"text":"bad"}}`)
+	if err == nil {
+		t.Fatal("expected non-string facts value to be rejected")
+	}
+	if !strings.Contains(err.Error(), "facts") {
+		t.Fatalf("expected error to identify facts field, got %v", err)
+	}
 }
 
 func TestParseConsolidationOutput_LegacyFormatFallback(t *testing.T) {
 	// Old-format responses (only summary + canonical_memory) should be absorbed.
 	raw := `{"summary":"old summary","canonical_memory":"- prefers concise output"}`
-	out := parseConsolidationOutput(raw)
+	out, err := parseConsolidationOutput(raw)
+	if err != nil {
+		t.Fatalf("parseConsolidationOutput: %v", err)
+	}
 	if out.Summary != "old summary" {
 		t.Errorf("expected old summary, got %q", out.Summary)
 	}
@@ -486,23 +723,25 @@ func TestParseConsolidationOutput_LegacyFormatFallback(t *testing.T) {
 }
 
 func TestParseConsolidationOutput_EmptyInput(t *testing.T) {
-	out := parseConsolidationOutput("")
-	if out.Summary != "" || len(out.Facts)+len(out.Preferences)+len(out.Goals)+len(out.Procedures) != 0 {
-		t.Errorf("expected empty output for empty input, got %+v", out)
+	_, err := parseConsolidationOutput("")
+	if err == nil {
+		t.Fatal("expected empty input to be rejected")
 	}
 }
 
 func TestParseConsolidationOutput_MalformedJSON(t *testing.T) {
-	out := parseConsolidationOutput("not json at all")
-	// Fallback: raw text used as summary.
-	if out.Summary == "" {
-		t.Error("expected fallback summary from malformed input")
+	_, err := parseConsolidationOutput("not json at all")
+	if err == nil {
+		t.Fatal("expected malformed prose to be rejected")
 	}
 }
 
 func TestParseConsolidationOutput_ExtraProseAroundJSON(t *testing.T) {
 	raw := `Here is the output: {"summary":"foo","preferences":["pref1"]} hope that helps`
-	out := parseConsolidationOutput(raw)
+	out, err := parseConsolidationOutput(raw)
+	if err != nil {
+		t.Fatalf("parseConsolidationOutput: %v", err)
+	}
 	if out.Summary != "foo" {
 		t.Errorf("expected 'foo', got %q", out.Summary)
 	}
@@ -514,7 +753,10 @@ func TestParseConsolidationOutput_ExtraProseAroundJSON(t *testing.T) {
 func TestParseConsolidationOutput_ItemLengthCapped(t *testing.T) {
 	longItem := strings.Repeat("x", maxConsolidationItemLen+100)
 	raw := `{"summary":"s","facts":["` + longItem + `"],"preferences":[],"goals":[],"procedures":[]}`
-	out := parseConsolidationOutput(raw)
+	out, err := parseConsolidationOutput(raw)
+	if err != nil {
+		t.Fatalf("parseConsolidationOutput: %v", err)
+	}
 	if len(out.Facts) == 0 {
 		t.Fatal("expected truncated fact")
 	}
@@ -535,7 +777,10 @@ func TestParseConsolidationOutput_ItemCountCapped(t *testing.T) {
 		"goals":       []string{},
 		"procedures":  []string{},
 	})
-	out := parseConsolidationOutput(string(b))
+	out, err := parseConsolidationOutput(string(b))
+	if err != nil {
+		t.Fatalf("parseConsolidationOutput: %v", err)
+	}
 	if len(out.Facts) > maxConsolidationItems {
 		t.Errorf("expected facts capped to %d, got %d", maxConsolidationItems, len(out.Facts))
 	}
@@ -584,10 +829,12 @@ func TestBuildExtraNotes_AllKinds(t *testing.T) {
 		Preferences: []string{"dark mode"},
 		Goals:       []string{"ship v2"},
 		Procedures:  []string{"run tests"},
+		Decisions:   []string{"use sqlite"},
+		Warnings:    []string{"avoid unbounded logs"},
 	}
 	notes := buildExtraNotes(parsed, sql.NullInt64{Int64: 42, Valid: true}, "test-provider:test-embed")
-	if len(notes) != 4 {
-		t.Fatalf("expected 4 notes, got %d", len(notes))
+	if len(notes) != 6 {
+		t.Fatalf("expected 6 notes, got %d", len(notes))
 	}
 	kinds := make(map[string]int)
 	for _, n := range notes {
@@ -596,7 +843,7 @@ func TestBuildExtraNotes_AllKinds(t *testing.T) {
 			t.Errorf("expected embed fingerprint to be copied, got %q", n.EmbedFingerprint)
 		}
 	}
-	for _, k := range []string{db.MemoryKindFact, db.MemoryKindPreference, db.MemoryKindGoal, db.MemoryKindProcedure} {
+	for _, k := range []string{db.MemoryKindFact, db.MemoryKindPreference, db.MemoryKindGoal, db.MemoryKindProcedure, db.MemoryKindDecision, db.MemoryKindWarning} {
 		if kinds[k] != 1 {
 			t.Errorf("expected 1 note of kind %q, got %d", k, kinds[k])
 		}
@@ -624,7 +871,7 @@ func TestConsolidator_RunOnce_WritesTypedNotes(t *testing.T) {
 		}
 	}
 	prov, _ := buildConsolidationProvider(t,
-		`{"summary":"A summary.","facts":["golang one two two is used"],"preferences":["dark mode"],"goals":[],"procedures":[]}`,
+		`{"summary":"A summary.","facts":["golang one two two is used"],"preferences":["dark mode"],"goals":[],"procedures":[],"decisions":["use sqlite"],"warnings":["avoid unbounded logs"]}`,
 		false)
 	c := &Consolidator{
 		DB:            d,
@@ -663,6 +910,20 @@ func TestConsolidator_RunOnce_WritesTypedNotes(t *testing.T) {
 	}
 	if prefRows[0].Kind != db.MemoryKindPreference {
 		t.Errorf("expected kind=preference, got %q", prefRows[0].Kind)
+	}
+	decisionRows, err := d.SearchFTS(ctx, "sess", "use sqlite", 5)
+	if err != nil {
+		t.Fatalf("SearchFTS decisions: %v", err)
+	}
+	if len(decisionRows) == 0 || decisionRows[0].Kind != db.MemoryKindDecision {
+		t.Fatalf("expected decision note via FTS, got %#v", decisionRows)
+	}
+	warningRows, err := d.SearchFTS(ctx, "sess", "unbounded logs", 5)
+	if err != nil {
+		t.Fatalf("SearchFTS warnings: %v", err)
+	}
+	if len(warningRows) == 0 || warningRows[0].Kind != db.MemoryKindWarning {
+		t.Fatalf("expected warning note via FTS, got %#v", warningRows)
 	}
 }
 

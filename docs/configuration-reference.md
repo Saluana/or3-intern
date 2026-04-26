@@ -7,7 +7,7 @@
 | Key | Purpose |
 | --- | --- |
 | `dbPath`, `artifactsDir`, `workspaceDir`, `allowedDir` | Storage locations and workspace boundaries |
-| `defaultSessionKey`, `session` | Session naming and cross-session identity/scope behavior |
+| `defaultSessionKey`, `session`, `consolidationModel` | Session naming, cross-session identity/scope behavior, and optional memory-compaction model override |
 | `identityFile`, `memoryFile` | Prompt bootstrap files |
 | `provider` | Model API base, model names, embedding settings, keys, temperature, and timeouts |
 | `tools` | Local tool behavior, proxying, timeouts, workspace restrictions, and MCP servers |
@@ -22,6 +22,7 @@
 | `runtimeProfile` | Named execution posture (`local-dev`, `hosted-service`, `hosted-no-exec`, etc.) |
 | `docIndex` | Opt-in document indexing for prompt-time retrieval |
 | `subagents` | Background job queueing and concurrency controls |
+| `context`, `contextManager` | Token budgeting, prompt assembly budgets, and optional cheap maintenance-model settings |
 
 ## Minimal shape
 
@@ -37,6 +38,8 @@
   "service": {},
   "channels": {},
   "security": {},
+  "context": {},
+  "contextManager": {},
   "docIndex": {},
   "subagents": {},
   "session": {}
@@ -248,6 +251,50 @@ Opt-in file indexing and retrieval:
 
 See [memory-and-context.md](memory-and-context.md).
 
+### Runtime and consolidation
+
+The top-level runtime knobs include conversation history, retrieval, tool-loop limits, and memory consolidation behavior:
+
+- `historyMaxMessages`, `memoryRetrieveLimit`, `vectorSearchK`, `ftsSearchK`
+- `maxToolLoops`, `maxToolBytes`, `maxMediaBytes`
+- `consolidationEnabled`, `consolidationWindowSize`, `consolidationMaxMessages`, `consolidationMaxInputChars`, `consolidationAsyncTimeoutSeconds`
+- `consolidationModel` — optional model used for memory consolidation and `/new` archival; blank falls back to `provider.model`
+
+Override `consolidationModel` with the `OR3_CONSOLIDATION_MODEL` environment variable.
+
+### `context`
+
+Prompt assembly and token-budget controls:
+
+- `mode`
+- `maxInputTokens`
+- `outputReserveTokens`
+- `safetyMarginTokens`
+- `sections`
+- `retrieval`
+- `pressure`
+- `tools`
+- `artifacts`
+- `taskCard`
+
+Backward-compatibility note:
+
+- When an older `config.json` has no top-level `context` block at all, the runtime preserves the legacy prompt knobs as authoritative defaults: `historyMaxMessages`, `memoryRetrieveLimit`, `vectorSearchK`, `ftsSearchK`, `bootstrapMaxChars`, `bootstrapTotalMaxChars`, and `maxToolBytes`.
+- When a `context` block is present, those explicit context budgets are applied to prompt packing while the legacy fields continue to drive adjacent runtime behavior that still uses them directly.
+
+### `contextManager`
+
+Optional low-cost maintenance-model controls:
+
+- `enabled`
+- `provider`
+- `model`
+- `timeoutSeconds`
+- `maxInputTokens`
+- `maxOutputTokens`
+- `allowTaskUpdates`
+- `allowStalePropose`
+
 ## Environment overrides called out in the README
 
 The codebase documents these direct environment overrides for service and channel setup:
@@ -255,6 +302,7 @@ The codebase documents these direct environment overrides for service and channe
 - `OR3_SERVICE_ENABLED`
 - `OR3_SERVICE_LISTEN`
 - `OR3_SERVICE_SECRET`
+- `OR3_CONSOLIDATION_MODEL`
 - `OR3_TELEGRAM_TOKEN`
 - `OR3_SLACK_APP_TOKEN`
 - `OR3_SLACK_BOT_TOKEN`

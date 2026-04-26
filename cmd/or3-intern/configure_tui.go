@@ -679,11 +679,39 @@ func renderFormScreen(m configureTUIModel) string {
 		rightSections = append(rightSections, m.styles.section.Render("Editing")+"\n"+m.textInput.View()+"\n"+m.styles.muted.Render("Enter to apply • esc to cancel"))
 	} else {
 		selectedField := fields[m.fieldCursor]
-		desc := compactConfigureText(selectedField.Description, maxInt(40, layout.detailWidth-6))
-		rightSections = append(rightSections, m.styles.section.Render("Selected field")+"\n"+m.styles.highlight.Render(selectedField.Label)+"\n"+m.styles.muted.Render(desc))
+		rightSections = append(rightSections, renderSelectedFieldPanel(m.styles, selectedField, maxInt(40, layout.detailWidth-6)))
 	}
 	right := m.styles.panel.Width(layout.detailWidth).Render(strings.Join(rightSections, "\n\n"))
 	return renderConfigureSplitPanels(layout, left, right)
+}
+
+func renderSelectedFieldPanel(styles configureStyles, field configureField, width int) string {
+	value := selectedFieldValue(field)
+	lines := []string{
+		styles.section.Render("Selected field"),
+		styles.highlight.Render(field.Label),
+		styles.label.Render("Current value: ") + styles.value.Render(truncateConfigureLine(value, width-15)),
+	}
+	if strings.TrimSpace(field.Description) != "" {
+		lines = append(lines, "")
+		for _, line := range wrapConfigureText(field.Description, width) {
+			lines = append(lines, styles.muted.Render(line))
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func selectedFieldValue(field configureField) string {
+	if field.Kind == configureFieldSecret && strings.TrimSpace(field.Value) != "" {
+		return field.Value
+	}
+	if strings.TrimSpace(field.Value) != "" {
+		return field.Value
+	}
+	if strings.TrimSpace(field.EmptyHint) != "" {
+		return "not set (default/example: " + field.EmptyHint + ")"
+	}
+	return "not set"
 }
 
 func renderConfigureFieldRow(styles configureStyles, field configureField, selected bool, innerWidth, labelCol, valueCol int) string {
@@ -761,6 +789,26 @@ func truncateConfigureLine(value string, limit int) string {
 		return "…"
 	}
 	return strings.TrimRight(string(runes), " ") + "…"
+}
+
+func wrapConfigureText(value string, width int) []string {
+	width = maxInt(20, width)
+	words := strings.Fields(strings.ReplaceAll(value, "\n", " "))
+	if len(words) == 0 {
+		return nil
+	}
+	lines := make([]string, 0, 4)
+	current := words[0]
+	for _, word := range words[1:] {
+		if lipgloss.Width(current)+1+lipgloss.Width(word) <= width {
+			current += " " + word
+			continue
+		}
+		lines = append(lines, current)
+		current = word
+	}
+	lines = append(lines, current)
+	return lines
 }
 
 func deriveConfigureLayout(width, height int) configureLayout {
@@ -966,6 +1014,8 @@ func sectionStatus(cfg config.Config, section string) string {
 		return emptyAsNone(cfg.DBPath) + " · " + emptyAsNone(cfg.ArtifactsDir)
 	case "runtime":
 		return fmt.Sprintf("session=%s · workers=%d · consolidation=%t", cfg.DefaultSessionKey, cfg.WorkerCount, cfg.ConsolidationEnabled)
+	case "context":
+		return fmt.Sprintf("mode=%s · maxInput=%d · dynamicTools=%t", cfg.Context.Mode, cfg.Context.MaxInputTokens, cfg.Context.Tools.DynamicExpose)
 	case "workspace":
 		return fmt.Sprintf("restrict=%t · %s", cfg.Tools.RestrictToWorkspace, emptyAsNone(cfg.WorkspaceDir))
 	case "tools":
@@ -1009,6 +1059,10 @@ func (m configureTUIModel) activeFields() []configureField {
 }
 
 func buildSectionFields(cfg config.Config, section, cwd string) []configureField {
+	return withHelpfulFieldDescriptions(section, "", buildSectionFieldsRaw(cfg, section, cwd))
+}
+
+func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureField {
 	switch section {
 	case "provider":
 		preset := providerPresetLabel(cfg.Provider.APIBase)
@@ -1055,6 +1109,7 @@ func buildSectionFields(cfg config.Config, section, cwd string) []configureField
 			{Key: "runtime_vector_scan_limit", Label: "Vector scan limit", Description: "Upper bound for vector scoring work during retrieval.", Kind: configureFieldText, Value: formatInt(cfg.VectorScanLimit), EmptyHint: "2000"},
 			{Key: "runtime_worker_count", Label: "Worker count", Description: "Concurrent runtime workers processing queued events.", Kind: configureFieldText, Value: formatInt(cfg.WorkerCount), EmptyHint: "4"},
 			{Key: "runtime_consolidation_enabled", Label: "Enable consolidation", Description: "Summarize older messages into durable memory notes.", Kind: configureFieldToggle, Value: onOff(cfg.ConsolidationEnabled)},
+			{Key: "runtime_consolidation_model", Label: "Consolidation model", Description: "Optional faster/cheaper model used for memory consolidation and /new archival. Blank uses the chat model.", Kind: configureFieldText, Value: cfg.ConsolidationModel, EmptyHint: cfg.Provider.Model},
 			{Key: "runtime_consolidation_window", Label: "Consolidation window size", Description: "Minimum message window before a consolidation run starts.", Kind: configureFieldText, Value: formatInt(cfg.ConsolidationWindowSize), EmptyHint: "10"},
 			{Key: "runtime_consolidation_max_messages", Label: "Consolidation max messages", Description: "Max messages summarized in one consolidation pass.", Kind: configureFieldText, Value: formatInt(cfg.ConsolidationMaxMessages), EmptyHint: "50"},
 			{Key: "runtime_consolidation_max_input_chars", Label: "Consolidation max input chars", Description: "Prompt budget for consolidation transcript input.", Kind: configureFieldText, Value: formatInt(cfg.ConsolidationMaxInputChars), EmptyHint: "12000"},
@@ -1063,6 +1118,47 @@ func buildSectionFields(cfg config.Config, section, cwd string) []configureField
 			{Key: "runtime_subagents_max_concurrent", Label: "Subagents max concurrent", Description: "Maximum concurrent subagents.", Kind: configureFieldText, Value: formatInt(cfg.Subagents.MaxConcurrent), EmptyHint: "1"},
 			{Key: "runtime_subagents_max_queued", Label: "Subagents max queued", Description: "Maximum queued subagent tasks.", Kind: configureFieldText, Value: formatInt(cfg.Subagents.MaxQueued), EmptyHint: "32"},
 			{Key: "runtime_subagents_timeout", Label: "Subagents timeout seconds", Description: "Timeout for each subagent task.", Kind: configureFieldText, Value: formatInt(cfg.Subagents.TaskTimeoutSeconds), EmptyHint: "300"},
+		}
+	case "context":
+		modeChoices := []string{"poor", "balanced", "quality", "custom"}
+		modeValue := cfg.Context.Mode
+		if strings.TrimSpace(modeValue) == "" {
+			modeValue = "quality"
+		}
+		return []configureField{
+			{Key: "context_mode", Label: "Context mode", Description: "Packet budget preset. Existing configs stay quality-leaning unless changed.", Kind: configureFieldChoice, Value: modeValue, Choices: modeChoices, ChoiceIndex: indexOfChoice(modeChoices, modeValue)},
+			{Key: "context_max_input_tokens", Label: "Max input tokens", Description: "Approximate total input-token budget for prompt packets.", Kind: configureFieldText, Value: formatInt(cfg.Context.MaxInputTokens), EmptyHint: "16000"},
+			{Key: "context_output_reserve", Label: "Output reserve tokens", Description: "Tokens reserved for model output before packing input sections.", Kind: configureFieldText, Value: formatInt(cfg.Context.OutputReserveTokens), EmptyHint: "1200"},
+			{Key: "context_safety_margin", Label: "Safety margin tokens", Description: "Extra buffer retained below the configured model input budget.", Kind: configureFieldText, Value: formatInt(cfg.Context.SafetyMarginTokens), EmptyHint: "400"},
+			{Key: "context_dynamic_tools", Label: "Dynamic tool schemas", Description: "Expose only likely tool schemas each turn while runtime guards still enforce policy.", Kind: configureFieldToggle, Value: onOff(cfg.Context.Tools.DynamicExpose)},
+			{Key: "context_retrieval_multiplier", Label: "Candidate multiplier", Description: "How many retrieval candidates to consider before budgeted packing.", Kind: configureFieldText, Value: formatInt(cfg.Context.Retrieval.CandidateMultiplier), EmptyHint: "3"},
+			{Key: "context_retrieval_min_score", Label: "Minimum retrieval score", Description: "Minimum score for memory/document candidates before packing.", Kind: configureFieldText, Value: formatFloat(cfg.Context.Retrieval.MinScore), EmptyHint: "0.03"},
+			{Key: "context_pressure_warning", Label: "Pressure warning percent", Description: "Context utilization level that starts soft pressure warnings.", Kind: configureFieldText, Value: formatInt(cfg.Context.Pressure.WarningPercent), EmptyHint: "70"},
+			{Key: "context_pressure_high", Label: "Pressure high percent", Description: "Context utilization level that triggers stronger compression.", Kind: configureFieldText, Value: formatInt(cfg.Context.Pressure.HighPercent), EmptyHint: "85"},
+			{Key: "context_pressure_emergency", Label: "Pressure emergency percent", Description: "Context utilization level that triggers emergency pruning.", Kind: configureFieldText, Value: formatInt(cfg.Context.Pressure.EmergencyPercent), EmptyHint: "95"},
+			{Key: "context_section_system_core", Label: "System core budget", Description: "Section budget for core system instructions.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.SystemCore), EmptyHint: "1200"},
+			{Key: "context_section_soul_identity", Label: "Soul identity budget", Description: "Section budget for identity and soul bootstrap material.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.SoulIdentity), EmptyHint: "1200"},
+			{Key: "context_section_tool_policy", Label: "Tool policy budget", Description: "Section budget for tool policy and safety guidance.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.ToolPolicy), EmptyHint: "900"},
+			{Key: "context_section_active_task_card", Label: "Active task card budget", Description: "Section budget for current goal, plan, decisions, refs, and active files.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.ActiveTaskCard), EmptyHint: "800"},
+			{Key: "context_section_pinned_memory", Label: "Pinned memory budget", Description: "Section budget for pinned durable memory.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.PinnedMemory), EmptyHint: "900"},
+			{Key: "context_section_recent_history", Label: "Recent history budget", Description: "Section budget for recent conversation history.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.RecentHistory), EmptyHint: "2200"},
+			{Key: "context_section_retrieved_memory", Label: "Retrieved memory budget", Description: "Section budget for retrieved memory snippets.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.RetrievedMemory), EmptyHint: "1500"},
+			{Key: "context_section_memory_digest", Label: "Memory digest budget", Description: "Section budget for durable memory digest lines.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.MemoryDigest), EmptyHint: "900"},
+			{Key: "context_section_workspace", Label: "Workspace context budget", Description: "Section budget for workspace context and indexed docs.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.WorkspaceContext), EmptyHint: "1200"},
+			{Key: "context_section_tool_schemas", Label: "Tool schema budget", Description: "Section budget for exposed tool schemas.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.ToolSchemas), EmptyHint: "1400"},
+			{Key: "context_task_card_enabled", Label: "Task card", Description: "Track current goal, plan, decisions, refs, and active files across turns.", Kind: configureFieldToggle, Value: onOff(cfg.Context.TaskCard.Enabled)},
+			{Key: "context_task_card_max_refs", Label: "Task card max refs", Description: "Maximum source refs retained on the active task card.", Kind: configureFieldText, Value: formatInt(cfg.Context.TaskCard.MaxRefs), EmptyHint: "12"},
+			{Key: "context_task_card_max_plan", Label: "Task card max plan items", Description: "Maximum active plan items retained on the task card.", Kind: configureFieldText, Value: formatInt(cfg.Context.TaskCard.MaxPlanItems), EmptyHint: "8"},
+			{Key: "context_artifact_summary_chars", Label: "Artifact summary chars", Description: "Bounded artifact/tool-output summary size stored for retrieval.", Kind: configureFieldText, Value: formatInt(cfg.Context.Artifacts.SummaryMaxChars), EmptyHint: "500"},
+			{Key: "context_manager_enabled", Label: "Context manager", Description: "Enable optional low-cost maintenance-model proposals.", Kind: configureFieldToggle, Value: onOff(cfg.ContextManager.Enabled)},
+			{Key: "context_manager_provider", Label: "Context manager provider", Description: "Optional provider override for context-manager proposals. Blank uses the main provider.", Kind: configureFieldText, Value: cfg.ContextManager.Provider, EmptyHint: cfg.Provider.APIBase},
+			{Key: "context_manager_model", Label: "Context manager model", Description: "Optional model for context-manager proposals. Blank uses deterministic pruning only.", Kind: configureFieldText, Value: cfg.ContextManager.Model, EmptyHint: "gpt-4.1-mini"},
+			{Key: "context_manager_timeout", Label: "Context manager timeout", Description: "Timeout for optional context-manager calls, in seconds.", Kind: configureFieldText, Value: formatInt(cfg.ContextManager.TimeoutSeconds), EmptyHint: "15"},
+			{Key: "context_manager_idle_prune", Label: "Idle prune seconds", Description: "Inactivity period before automatic context pruning runs. Default is 300 seconds.", Kind: configureFieldText, Value: formatInt(cfg.ContextManager.IdlePruneSeconds), EmptyHint: "300"},
+			{Key: "context_manager_max_input", Label: "Context manager max input", Description: "Input-token cap for context-manager proposals.", Kind: configureFieldText, Value: formatInt(cfg.ContextManager.MaxInputTokens), EmptyHint: "1200"},
+			{Key: "context_manager_max_output", Label: "Context manager max output", Description: "Output-token cap for context-manager proposals.", Kind: configureFieldText, Value: formatInt(cfg.ContextManager.MaxOutputTokens), EmptyHint: "600"},
+			{Key: "context_manager_allow_task_updates", Label: "Allow task updates", Description: "Allow context-manager proposals to update active task metadata.", Kind: configureFieldToggle, Value: onOff(cfg.ContextManager.AllowTaskUpdates)},
+			{Key: "context_manager_allow_stale_propose", Label: "Allow stale proposals", Description: "Allow proposals even when the manager works from slightly stale state.", Kind: configureFieldToggle, Value: onOff(cfg.ContextManager.AllowStalePropose)},
 		}
 	case "workspace":
 		workspace := cfg.WorkspaceDir
@@ -1187,6 +1283,10 @@ func buildSectionFields(cfg config.Config, section, cwd string) []configureField
 }
 
 func buildChannelFields(cfg config.Config, channel string) []configureField {
+	return withHelpfulFieldDescriptions("channels", channel, buildChannelFieldsRaw(cfg, channel))
+}
+
+func buildChannelFieldsRaw(cfg config.Config, channel string) []configureField {
 	accessChoices := []string{"pairing", "allowlist", "open", "deny"}
 	switch channel {
 	case "telegram":
@@ -1206,6 +1306,221 @@ func buildChannelFields(cfg config.Config, channel string) []configureField {
 		return []configureField{{Key: "enabled", Label: "Enable Email", Description: "Toggle the email channel.", Kind: configureFieldToggle, Value: onOff(cfg.Channels.Email.Enabled)}, {Key: "consent", Label: "Consent granted", Description: "Confirm consent for operating email automation.", Kind: configureFieldToggle, Value: onOff(cfg.Channels.Email.ConsentGranted)}, {Key: "imap_host", Label: "IMAP host", Description: "Inbound IMAP server.", Kind: configureFieldText, Value: cfg.Channels.Email.IMAPHost, EmptyHint: "imap.example.com"}, {Key: "imap_user", Label: "IMAP username", Description: "Inbound mailbox username.", Kind: configureFieldText, Value: cfg.Channels.Email.IMAPUsername, EmptyHint: "inbox@example.com"}, {Key: "imap_password", Label: "IMAP password", Description: "Hidden IMAP password. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Channels.Email.IMAPPassword), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"}, {Key: "smtp_host", Label: "SMTP host", Description: "Outbound SMTP server.", Kind: configureFieldText, Value: cfg.Channels.Email.SMTPHost, EmptyHint: "smtp.example.com"}, {Key: "smtp_user", Label: "SMTP username", Description: "Outbound SMTP username.", Kind: configureFieldText, Value: cfg.Channels.Email.SMTPUsername, EmptyHint: "sender@example.com"}, {Key: "smtp_password", Label: "SMTP password", Description: "Hidden SMTP password. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Channels.Email.SMTPPassword), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"}, {Key: "from_address", Label: "From address", Description: "Outbound sender address.", Kind: configureFieldText, Value: cfg.Channels.Email.FromAddress, EmptyHint: "bot@example.com"}, {Key: "default_to", Label: "Default recipient", Description: "Used by outbound sends.", Kind: configureFieldText, Value: cfg.Channels.Email.DefaultTo, EmptyHint: "ops@example.com"}, {Key: "access", Label: "Inbound access", Description: "Choose how inbound email is admitted.", Kind: configureFieldChoice, Value: choice, Choices: accessChoices, ChoiceIndex: indexOfChoice(accessChoices, choice)}, {Key: "allowlist", Label: "Allowed senders", Description: "Comma-separated allowlist used when access = allowlist.", Kind: configureFieldText, Value: strings.Join(cfg.Channels.Email.AllowedSenders, ","), EmptyHint: "owner@example.com"}}
 	}
 	return nil
+}
+
+func withHelpfulFieldDescriptions(section, channel string, fields []configureField) []configureField {
+	for i := range fields {
+		if desc := helpfulFieldDescription(section, channel, fields[i].Key); desc != "" {
+			fields[i].Description = desc
+		}
+	}
+	return fields
+}
+
+func helpfulFieldDescription(section, channel, key string) string {
+	if section == "channels" {
+		return helpfulChannelFieldDescription(channel, key)
+	}
+	return helpfulSectionFieldDescriptions[key]
+}
+
+var helpfulSectionFieldDescriptions = map[string]string{
+	"provider_preset":                       "Choose the company or service OR3 uses for AI. OpenAI and OpenRouter fill in known defaults. Choose Custom only if you already have a compatible API URL.",
+	"provider_api_base":                     "The web address OR3 sends AI requests to. Warning: if this is wrong, chat, memory cleanup, and embeddings can stop working.",
+	"provider_model":                        "The main AI model used to answer you. Bigger models may be smarter but slower or more expensive. Warning: a model name your provider does not support will break chat.",
+	"provider_embed":                        "The model used to turn text into searchable memory. This must match your provider. Warning: changing it can require rebuilding memory and document embeddings.",
+	"provider_embed_dimensions":             "Advanced: requested size for memory-search vectors. Most users should leave this at 0. Warning: changing it can make existing memory vectors incompatible until rebuilt.",
+	"provider_temperature":                  "Controls how varied the assistant's wording is. 0 is focused and repeatable; higher values are more creative but less predictable.",
+	"provider_timeout":                      "How long OR3 waits for the AI provider before giving up. Increase this for slow models; lower values fail faster when the provider hangs.",
+	"provider_vision":                       "Lets OR3 send images to the AI model when the model supports vision. Leave off if your provider or model cannot read images.",
+	"provider_api_key":                      "Secret key used to access your AI provider. It is hidden on screen. Warning: deleting or mistyping it will prevent OR3 from contacting the provider.",
+	"storage_db":                            "Where OR3 stores conversation history, memory, approvals, devices, and other local state. Warning: changing this path can make existing history seem missing unless you move the database too.",
+	"storage_artifacts":                     "Folder for large saved outputs, attachments, and files that are too large to keep directly in chat. Warning: changing it can make older artifact links unavailable.",
+	"storage_soul":                          "Optional text file that describes OR3's core personality or operating instructions. Keep it readable and trustworthy because it is added to prompts.",
+	"storage_agents":                        "Optional text file for extra instructions about how OR3 should behave in this environment. Bad instructions here can confuse every chat.",
+	"storage_tools":                         "Optional text file with notes about available tools. Use it for reminders, not secrets, because it can be included in prompts.",
+	"storage_identity":                      "Optional identity file that tells OR3 who or what it represents. Keep this stable; changes can alter how the assistant introduces or reasons about itself.",
+	"storage_memory":                        "Optional static memory file always available to OR3. Use for durable facts you want remembered; avoid private secrets unless you intend them to be prompt-visible.",
+	"runtime_default_session":               "The default conversation space for local chat. Messages with the same session key share history and memory context.",
+	"runtime_profile":                       "A preset safety posture. Hosted profiles are stricter for servers; local-dev is more permissive. Warning: changing this can enable or block tools at startup.",
+	"runtime_bootstrap_max_chars":           "Maximum text OR3 reads from each instruction or memory file. Lower values make prompts smaller; higher values include more background but cost more tokens.",
+	"runtime_bootstrap_total_chars":         "Maximum combined text OR3 reads from all bootstrap files. Warning: setting this too high can make every request slower and more expensive.",
+	"runtime_session_cache":                 "How many active conversations OR3 keeps ready in memory. Most users should leave this alone unless running many separate sessions.",
+	"runtime_history_max":                   "How many recent chat messages stay directly visible to the AI. Lower values are faster; higher values preserve more short-term context but use more tokens.",
+	"runtime_max_tool_bytes":                "Maximum size of a tool result kept directly in chat. Larger results may be saved as artifacts instead. Warning: very high values can overwhelm the AI prompt.",
+	"runtime_max_media_bytes":               "Largest image or attachment OR3 will accept. Warning: raising this can use more disk space and memory.",
+	"runtime_max_tool_loops":                "Maximum number of tool-use rounds OR3 can do for one request. Higher values allow more complex work but can run longer or cost more.",
+	"runtime_memory_retrieve":               "How many saved memory items OR3 may add to a prompt. Higher values can improve recall but may add old or distracting context.",
+	"runtime_vector_k":                      "Advanced memory search setting: how many meaning-based memory matches to consider. Most users should leave this near the default.",
+	"runtime_fts_k":                         "Advanced memory search setting: how many keyword-based memory matches to consider. Most users should leave this near the default.",
+	"runtime_vector_scan_limit":             "Advanced performance limit for memory search. Higher values may find better matches but can slow retrieval on large memory stores.",
+	"runtime_worker_count":                  "How many background workers can process queued events. Increase only if OR3 is serving many channels or automations; too high can increase load.",
+	"runtime_consolidation_enabled":         "Lets OR3 summarize older conversation history into durable memory. Turning it off can make long-term recall worse, but may reduce background AI calls.",
+	"runtime_consolidation_model":           "Optional model used only for memory summarizing and the /new archive step. Leave blank to use the chat model. Warning: an unsupported model breaks memory cleanup.",
+	"runtime_consolidation_window":          "How many older messages should build up before OR3 tries to summarize them. Lower values summarize more often; higher values wait longer.",
+	"runtime_consolidation_max_messages":    "Maximum messages summarized in one memory-cleanup pass. Higher values can improve summaries but make each cleanup slower.",
+	"runtime_consolidation_max_input_chars": "Maximum transcript text sent to the memory-summary model. Higher values preserve more detail but cost more and can timeout on small models.",
+	"runtime_consolidation_async_timeout":   "How long background memory cleanup may run before OR3 gives up. Increase this if summaries timeout on slower providers.",
+	"runtime_subagents_enabled":             "Allows OR3 to start helper agents for separate subtasks. Warning: enabling this can increase AI usage and should stay off unless you need parallel work.",
+	"runtime_subagents_max_concurrent":      "How many helper agents may run at the same time. Higher values can be faster but cost more and use more provider capacity.",
+	"runtime_subagents_max_queued":          "How many helper-agent tasks may wait in line. Large queues can hide work that will run later, so keep this modest.",
+	"runtime_subagents_timeout":             "Maximum time one helper-agent task may run. Longer timeouts help complex jobs finish but may leave expensive work running longer.",
+	"context_mode":                          "Overall prompt-budget preset. Quality includes more context; poor is smaller and cheaper; custom preserves your manual budget values.",
+	"context_max_input_tokens":              "Approximate total room available for instructions, memory, tools, documents, and recent chat before OR3 asks the model to answer. Warning: too high may exceed your model limit and fail.",
+	"context_output_reserve":                "Room saved for the AI's answer. If this is too low, replies may be cut short; if too high, OR3 has less room for context.",
+	"context_safety_margin":                 "Extra empty space kept as a buffer so prompts do not accidentally exceed the model limit. Most users should keep a safety margin.",
+	"context_dynamic_tools":                 "Shows the AI only the tools that seem relevant to the current request, while backend safety rules still apply. This usually makes prompts smaller and less confusing.",
+	"context_retrieval_multiplier":          "How many extra memory candidates OR3 checks before choosing what fits. Higher values may find better memories but can slow searches.",
+	"context_retrieval_min_score":           "How relevant a memory must be before OR3 includes it. Higher values are stricter; too high can make OR3 forget useful context.",
+	"context_pressure_warning":              "Prompt fullness percentage where OR3 starts being careful about space. Lower values make it compress earlier.",
+	"context_pressure_high":                 "Prompt fullness percentage where OR3 becomes more aggressive about trimming less important context.",
+	"context_pressure_emergency":            "Prompt fullness percentage where OR3 may drop low-priority context to avoid model errors. Warning: setting this too high can cause over-limit failures.",
+	"context_section_system_core":           "Space reserved for core system rules that keep OR3 safe and consistent. Warning: setting this too low can remove important operating instructions.",
+	"context_section_soul_identity":         "Space reserved for identity/personality bootstrap files. Lower this if those files are large and crowd out chat history.",
+	"context_section_tool_policy":           "Space reserved for safety rules about tool use. Warning: too low can remove guidance about when tools are allowed.",
+	"context_section_active_task_card":      "Space reserved for the current goal, plan, decisions, files, and references. This helps OR3 stay oriented across long tasks.",
+	"context_section_pinned_memory":         "Space reserved for high-priority saved memory. Lower values reduce durable recall; higher values leave less room for recent chat.",
+	"context_section_recent_history":        "Space reserved for recent conversation messages. Higher values help continuity; lower values make OR3 rely more on summaries.",
+	"context_section_retrieved_memory":      "Space reserved for memories found by search. Higher values improve recall but can bring in stale or less relevant details.",
+	"context_section_memory_digest":         "Space reserved for compact memory summaries. This gives OR3 a quick overview without loading every memory item.",
+	"context_section_workspace":             "Space reserved for workspace/document snippets. Increase if OR3 needs more project files in context; decrease if prompts feel crowded.",
+	"context_section_tool_schemas":          "Space reserved for tool descriptions shown to the AI. Warning: too low can hide tools; too high crowds out chat and memory.",
+	"context_task_card_enabled":             "Keeps a small running note of the current task, plan, decisions, references, and active files so long jobs stay coherent.",
+	"context_task_card_max_refs":            "Maximum references kept on the task card. Higher values remember more links/files but use more prompt space.",
+	"context_task_card_max_plan":            "Maximum plan items kept on the task card. Higher values help detailed projects; lower values keep the prompt cleaner.",
+	"context_artifact_summary_chars":        "Maximum characters saved when OR3 summarizes a large artifact or tool output for later recall. Higher values keep more detail but use more storage/context.",
+	"context_manager_enabled":               "The context manager is an optional helper that suggests what to keep, trim, or update in OR3's working context. Leave off unless you want experimental automatic context maintenance.",
+	"context_manager_provider":              "Optional AI provider URL for the context manager helper. Leave blank to use the main provider. Warning: a wrong URL can break context-manager calls.",
+	"context_manager_model":                 "Optional model for the context manager helper. It should be cheap and reliable because it only helps organize context, not answer the user.",
+	"context_manager_timeout":               "How long OR3 waits for the context manager helper. Shorter timeouts avoid delays; longer timeouts give slow providers more time.",
+	"context_manager_idle_prune":            "How many idle seconds OR3 waits before archiving recent chat into memory and clearing the live context window. Default: 300 seconds.",
+	"context_manager_max_input":             "Maximum input size sent to the context manager helper. This is not the main chat budget; it is only for the helper that reviews context.",
+	"context_manager_max_output":            "Maximum output size allowed from the context manager helper. Keep this small so helper suggestions do not become noisy.",
+	"context_manager_allow_task_updates":    "Allows the context manager helper to suggest updates to the active task card. Warning: bad suggestions can make the task summary less accurate.",
+	"context_manager_allow_stale_propose":   "Allows context-manager suggestions even if they may be based on slightly older state. Leave on for responsiveness; turn off if you prefer stricter freshness.",
+	"workspace_restrict":                    "Keeps file tools inside the selected workspace folder. Strongly recommended. Warning: turning this off may let OR3 read or write outside this project when tools allow it.",
+	"workspace_dir":                         "The main folder OR3 should treat as your project. File tools and document indexing usually work relative to this folder.",
+	"workspace_allowed_dir":                 "Optional extra folder OR3 may access. Leave blank unless you intentionally need a second allowed location.",
+	"tools_brave":                           "Secret key for Brave web search. Leave blank if you do not use Brave search. Warning: removing it disables that search provider.",
+	"tools_web_proxy":                       "Optional proxy server for web requests. Only set this if your network requires it; a wrong proxy can break web access.",
+	"tools_exec_timeout":                    "How long local command tools may run before they are stopped. Higher values help long builds; lower values prevent stuck commands.",
+	"tools_path_append":                     "Extra folders added to PATH for command tools. Warning: adding untrusted folders can make OR3 run unexpected programs.",
+	"docindex_enabled":                      "Indexes selected workspace files so OR3 can find relevant project docs. This improves answers but uses storage and embedding calls.",
+	"docindex_roots":                        "Folders, relative to the workspace, that OR3 should index. Warning: avoid private or huge folders unless you want them searchable by OR3.",
+	"docindex_max_files":                    "Maximum files indexed per root. Lower values are faster; higher values cover more of a large project.",
+	"docindex_max_file_bytes":               "Largest file OR3 will index. Lower values skip big generated files; higher values may slow indexing.",
+	"docindex_max_chunks":                   "Maximum text chunks stored from indexed files. Higher values improve coverage but use more storage and embeddings.",
+	"docindex_embed_max_bytes":              "Maximum text from one file sent for embeddings. Higher values improve search for large files but cost more.",
+	"docindex_refresh_seconds":              "How often OR3 refreshes the document index while running. Lower values update faster but do more background work.",
+	"docindex_retrieve_limit":               "How many document snippets OR3 may add to a prompt. Higher values give more project context but can crowd out conversation.",
+	"skills_enable_exec":                    "Allows installed skills to run commands when policy permits. Warning: only enable this for skills you trust.",
+	"skills_max_run_seconds":                "Maximum time a skill command may run. Lower values stop stuck skills sooner; higher values help long-running skills finish.",
+	"skills_managed_dir":                    "Folder where OR3 stores installed or managed skills. Changing it can make installed skills seem missing unless you move them too.",
+	"skills_quarantine":                     "Requires new external skills to be reviewed before they are trusted. Strongly recommended for safety.",
+	"skills_approved":                       "Specific skill IDs that are pre-approved. Warning: only list skills you trust because they may access tools according to their permissions.",
+	"skills_trusted_owners":                 "Skill publishers trusted by default. Warning: trusting an owner can trust future skills from that owner.",
+	"skills_blocked_owners":                 "Skill publishers OR3 should refuse to install or use. Use this to block sources you do not trust.",
+	"skills_trusted_registries":             "Skill registries OR3 may trust. Warning: only add registries you control or trust.",
+	"skills_extra_dirs":                     "Additional local folders scanned for skills. Warning: skills in these folders may become available to OR3.",
+	"skills_watch":                          "Automatically reloads skills when files change. Useful during development; turn off if you want changes to require restart.",
+	"skills_watch_debounce":                 "Delay before reloading changed skill files. Higher values avoid repeated reloads while files are still being saved.",
+	"skills_clawhub_site":                   "Human-facing ClawHub website URL used in messages and help text. Most users should leave this alone.",
+	"skills_clawhub_registry":               "Machine-readable registry URL used to fetch skill metadata. Warning: a wrong or untrusted registry can break or risk skill installs.",
+	"skills_clawhub_install":                "Subfolder name used when installing fetched skills. Change only if you know where you want remote skills stored.",
+	"security_secret_store_enabled":         "Stores sensitive secrets encrypted in the local database instead of only in config files. Recommended when using service mode or channels.",
+	"security_secret_store_required":        "Refuses to start if encrypted secret storage is unavailable. Safer, but warning: misconfigured keys can block startup.",
+	"security_secret_store_key_file":        "File containing the encryption key for stored secrets. Warning: losing this key can make encrypted secrets unreadable.",
+	"security_audit_enabled":                "Records important actions in a tamper-evident safety log so you can review what OR3 did.",
+	"security_audit_strict":                 "Stops sensitive work if the audit log cannot be written. Safer, but warning: disk or permission problems can block operations.",
+	"security_audit_key_file":               "File containing the signing key for audit records. Warning: losing or replacing it can affect audit verification.",
+	"security_audit_verify_on_start":        "Checks the audit log at startup for tampering or corruption. Safer, but may slow startup on large logs.",
+	"security_approvals_enabled":            "Turns on approval workflows for risky actions, device pairing, secrets, messages, and commands. Recommended for shared or hosted setups.",
+	"security_approvals_host_id":            "Stable name for this OR3 host when creating approvals and pairing tokens. Warning: changing it can invalidate outstanding approvals.",
+	"security_approvals_key_file":           "File containing the signing key for approvals and pairing. Warning: losing it can prevent approval tokens from validating.",
+	"security_approvals_pairing_ttl":        "How long a device/channel pairing code remains valid, in seconds. Shorter is safer; longer is easier during setup.",
+	"security_approvals_pending_ttl":        "How long a pending approval waits before expiring. Shorter reduces stale approvals; longer gives humans more time to respond.",
+	"security_approvals_token_ttl":          "How long a one-time approval token can be used. Shorter is safer; too short can be annoying during manual workflows.",
+	"security_approval_pairing_mode":        "Controls whether new devices and channels are denied, ask for approval, use an allowlist, or are trusted. Warning: trusted is more permissive.",
+	"security_approval_exec_mode":           "Controls approvals for local command execution. Warning: trusted command execution can change files or run programs without asking.",
+	"security_approval_skill_mode":          "Controls approvals for skills that run code or commands. Warning: trusted skills can perform powerful actions without asking.",
+	"security_approval_secret_mode":         "Controls approvals for reading stored secrets. Warning: trusted access can expose sensitive credentials to tools or channels.",
+	"security_approval_message_mode":        "Controls approvals for sending messages through channels. Warning: trusted mode can let OR3 send outbound messages without asking.",
+	"security_profiles_enabled":             "Applies named safety profiles to different channels or triggers. Useful for giving public channels less power than local chat.",
+	"security_profiles_default":             "Fallback profile used when no channel or trigger-specific profile matches. Warning: a permissive default affects many entry points.",
+	"security_profiles_channels":            "Maps channels to safety profiles, such as telegram=guarded. Warning: mistakes can give a channel more access than intended.",
+	"security_profiles_triggers":            "Maps automation triggers to safety profiles, such as webhook=guarded. Warning: webhooks should usually have restrictive profiles.",
+	"security_network_enabled":              "Turns on outbound network rules for web, provider, and MCP traffic. Useful for hosted or locked-down setups.",
+	"security_network_default_deny":         "Blocks outbound network access unless a host is explicitly allowed. Safer, but warning: missing hosts can break providers and channels.",
+	"security_network_allowed_hosts":        "Hosts OR3 may contact when network policy is active. Warning: add only hosts you trust and need.",
+	"security_network_allow_loopback":       "Allows OR3 to contact services on this same computer, such as localhost. Usually needed for local tools and bridges.",
+	"security_network_allow_private":        "Allows OR3 to contact private network addresses. Warning: enable only if OR3 must reach internal services on your LAN/VPC.",
+	"hardening_guarded_tools":               "Allows medium-risk tools like file writes and web fetches when policy permits. Turning this off blocks many useful actions.",
+	"hardening_privileged_tools":            "Allows high-risk tools in addition to guarded tools. Warning: enable only in trusted environments.",
+	"hardening_exec_shell":                  "Allows shell-style command execution. Warning: shells are powerful and can run destructive commands if other safeguards allow them.",
+	"hardening_isolate_channel_peers":       "Keeps identities from different channels separated so one sender does not inherit another sender's access. Recommended for safety.",
+	"hardening_exec_allowed_programs":       "List of programs command tools may run. Warning: adding powerful programs like sh, bash, rm, or sudo increases risk.",
+	"hardening_child_env_allowlist":         "Environment variables passed to child commands. Warning: do not include variables that contain secrets unless you intend commands to see them.",
+	"hardening_sandbox_enabled":             "Runs command-capable tools in a restricted sandbox when available. Recommended for safer command execution.",
+	"hardening_sandbox_bwrap":               "Path to the bubblewrap sandbox program. Warning: a wrong path can make sandboxed command execution fail.",
+	"hardening_sandbox_allow_network":       "Allows sandboxed commands to use the network. Warning: leaving this on can let commands download or upload data.",
+	"hardening_sandbox_writable_paths":      "Folders sandboxed commands may write to. Warning: only include folders you are comfortable letting commands modify.",
+	"hardening_quotas_enabled":              "Limits how many sensitive tool calls OR3 can make per request. Recommended to prevent runaway tool use.",
+	"hardening_max_tool_calls":              "Maximum total tool calls for one request. Higher values allow bigger jobs but can run longer and cost more.",
+	"hardening_max_exec_calls":              "Maximum command-execution calls for one request. Keep low unless you regularly need multi-step command workflows.",
+	"hardening_max_web_calls":               "Maximum web calls for one request. Higher values allow broader research but can be slower and noisier.",
+	"hardening_max_subagent_calls":          "Maximum helper-agent starts for one request. Higher values can multiply cost and background work.",
+	"session_direct_messages_share_default": "Makes direct messages share the default memory/session scope. Warning: turn off if different people or channels should not share context.",
+	"session_identity_links":                "Maps multiple channel identities to one person or workspace identity. Warning: wrong links can merge separate users' context.",
+	"automation_cron_enabled":               "Enables saved scheduled jobs. Warning: scheduled jobs can cause OR3 to act later without you actively typing a request.",
+	"automation_cron_store_path":            "File where scheduled jobs are saved. Changing it can make existing scheduled jobs disappear unless you move the file.",
+	"automation_heartbeat_enabled":          "Lets OR3 run recurring maintenance prompts from a task file. Warning: this can generate AI calls on a schedule.",
+	"automation_heartbeat_interval":         "How often heartbeat maintenance runs, in minutes. Lower values run more often and may increase cost.",
+	"automation_heartbeat_tasks_file":       "Markdown file listing recurring heartbeat tasks. Warning: tasks in this file can cause automated assistant work.",
+	"automation_heartbeat_session":          "Session used for heartbeat work. Keeping a separate session helps automated tasks avoid polluting normal chat history.",
+	"automation_webhook_enabled":            "Allows external HTTP requests to trigger OR3. Warning: enable only with a strong secret and restrictive safety profile.",
+	"automation_webhook_addr":               "Address where the webhook server listens. Binding to 127.0.0.1 is local-only; 0.0.0.0 may expose it to your network.",
+	"automation_webhook_secret":             "Secret required for webhook callers. Warning: weak or missing secrets can let others trigger OR3.",
+	"automation_webhook_max_body_kb":        "Largest webhook request OR3 accepts. Lower values reduce abuse risk; higher values allow larger payloads.",
+	"automation_filewatch_enabled":          "Lets OR3 react when watched files change. Warning: this can trigger work automatically when files are saved.",
+	"automation_filewatch_paths":            "Files or folders watched for changes. Warning: watching busy folders can create lots of events.",
+	"automation_filewatch_poll_seconds":     "How often OR3 checks watched files. Lower values react faster but use more background work.",
+	"automation_filewatch_debounce":         "How long OR3 waits after a file change before acting. Higher values avoid duplicate events while files are still being written.",
+	"service_enabled":                       "Starts OR3's internal HTTP API so other local apps or devices can connect. Warning: expose it only when protected by a strong secret.",
+	"service_listen":                        "Network address for the internal service. 127.0.0.1 is local-only; 0.0.0.0 may expose OR3 to your network.",
+	"service_secret":                        "Shared secret required by service clients. Warning: a weak or leaked secret can allow unauthorized access.",
+}
+
+func helpfulChannelFieldDescription(channel, key string) string {
+	channelLabel := strings.Title(channel)
+	switch key {
+	case "enabled":
+		return "Turns on the " + channelLabel + " connection. Warning: once enabled, OR3 may receive or send messages through this channel depending on the access settings."
+	case "token", "app_token", "bot_token", "bridge_token", "imap_password", "smtp_password":
+		return "Secret credential used to connect to " + channelLabel + ". It is hidden on screen. Warning: deleting or mistyping it will break this channel."
+	case "default_id", "default_to":
+		return "Default destination used when OR3 sends a message and no specific recipient is provided. Warning: wrong values can send messages to the wrong place."
+	case "require_mention":
+		return "Only respond when the bot is directly mentioned. Recommended in busy shared rooms so OR3 does not answer every message."
+	case "access":
+		return "Controls who may send inbound messages to OR3. Pairing and allowlist are safer; open access is convenient but risky on shared channels."
+	case "allowlist":
+		return "Comma-separated list of sender or chat IDs allowed when inbound access is set to allowlist. Warning: leave no spaces or typos if you rely on this for safety."
+	case "bridge_url":
+		return "WebSocket address of the WhatsApp bridge service. Warning: a wrong URL prevents WhatsApp from connecting."
+	case "consent":
+		return "Confirms you have permission to let OR3 read and send email for this mailbox. Keep off unless the mailbox owner has agreed."
+	case "imap_host":
+		return "Mail server OR3 reads incoming email from. Ask your email provider for the IMAP host if you are unsure."
+	case "imap_user":
+		return "Username for reading incoming email. This is often the full email address."
+	case "smtp_host":
+		return "Mail server OR3 uses to send email. Ask your email provider for the SMTP host if you are unsure."
+	case "smtp_user":
+		return "Username for sending email. This is often the full email address."
+	case "from_address":
+		return "Email address shown as the sender for outbound messages. Warning: it should match the mailbox or your provider may reject mail."
+	}
+	return ""
 }
 
 func toggleFieldValue(cfg *config.Config, section, channel, fieldKey string) bool {
@@ -1508,6 +1823,9 @@ func applyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 		return setIntValue(&cfg.VectorScanLimit, value, fieldKey)
 	case "runtime_worker_count":
 		return setIntValue(&cfg.WorkerCount, value, fieldKey)
+	case "runtime_consolidation_model":
+		cfg.ConsolidationModel = value
+		return true, nil
 	case "runtime_consolidation_window":
 		return setIntValue(&cfg.ConsolidationWindowSize, value, fieldKey)
 	case "runtime_consolidation_max_messages":
@@ -1522,6 +1840,62 @@ func applyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 		return setIntValue(&cfg.Subagents.MaxQueued, value, fieldKey)
 	case "runtime_subagents_timeout":
 		return setIntValue(&cfg.Subagents.TaskTimeoutSeconds, value, fieldKey)
+	case "context_max_input_tokens":
+		return setIntValue(&cfg.Context.MaxInputTokens, value, fieldKey)
+	case "context_output_reserve":
+		return setIntValue(&cfg.Context.OutputReserveTokens, value, fieldKey)
+	case "context_safety_margin":
+		return setIntValue(&cfg.Context.SafetyMarginTokens, value, fieldKey)
+	case "context_retrieval_multiplier":
+		return setIntValue(&cfg.Context.Retrieval.CandidateMultiplier, value, fieldKey)
+	case "context_retrieval_min_score":
+		return setFloatValue(&cfg.Context.Retrieval.MinScore, value, fieldKey)
+	case "context_pressure_warning":
+		return setIntValue(&cfg.Context.Pressure.WarningPercent, value, fieldKey)
+	case "context_pressure_high":
+		return setIntValue(&cfg.Context.Pressure.HighPercent, value, fieldKey)
+	case "context_pressure_emergency":
+		return setIntValue(&cfg.Context.Pressure.EmergencyPercent, value, fieldKey)
+	case "context_section_system_core":
+		return setIntValue(&cfg.Context.Sections.SystemCore, value, fieldKey)
+	case "context_section_soul_identity":
+		return setIntValue(&cfg.Context.Sections.SoulIdentity, value, fieldKey)
+	case "context_section_tool_policy":
+		return setIntValue(&cfg.Context.Sections.ToolPolicy, value, fieldKey)
+	case "context_section_active_task_card":
+		return setIntValue(&cfg.Context.Sections.ActiveTaskCard, value, fieldKey)
+	case "context_section_pinned_memory":
+		return setIntValue(&cfg.Context.Sections.PinnedMemory, value, fieldKey)
+	case "context_section_recent_history":
+		return setIntValue(&cfg.Context.Sections.RecentHistory, value, fieldKey)
+	case "context_section_retrieved_memory":
+		return setIntValue(&cfg.Context.Sections.RetrievedMemory, value, fieldKey)
+	case "context_section_memory_digest":
+		return setIntValue(&cfg.Context.Sections.MemoryDigest, value, fieldKey)
+	case "context_section_workspace":
+		return setIntValue(&cfg.Context.Sections.WorkspaceContext, value, fieldKey)
+	case "context_section_tool_schemas":
+		return setIntValue(&cfg.Context.Sections.ToolSchemas, value, fieldKey)
+	case "context_task_card_max_refs":
+		return setIntValue(&cfg.Context.TaskCard.MaxRefs, value, fieldKey)
+	case "context_task_card_max_plan":
+		return setIntValue(&cfg.Context.TaskCard.MaxPlanItems, value, fieldKey)
+	case "context_artifact_summary_chars":
+		return setIntValue(&cfg.Context.Artifacts.SummaryMaxChars, value, fieldKey)
+	case "context_manager_provider":
+		cfg.ContextManager.Provider = value
+		return true, nil
+	case "context_manager_model":
+		cfg.ContextManager.Model = value
+		return true, nil
+	case "context_manager_timeout":
+		return setIntValue(&cfg.ContextManager.TimeoutSeconds, value, fieldKey)
+	case "context_manager_idle_prune":
+		return setIntValue(&cfg.ContextManager.IdlePruneSeconds, value, fieldKey)
+	case "context_manager_max_input":
+		return setIntValue(&cfg.ContextManager.MaxInputTokens, value, fieldKey)
+	case "context_manager_max_output":
+		return setIntValue(&cfg.ContextManager.MaxOutputTokens, value, fieldKey)
 	case "workspace_dir":
 		cfg.WorkspaceDir = value
 		return true, nil
@@ -1719,6 +2093,16 @@ func setToggleFieldValue(cfg *config.Config, section, channel, fieldKey string, 
 		cfg.ConsolidationEnabled = value
 	case "runtime_subagents_enabled":
 		cfg.Subagents.Enabled = value
+	case "context_dynamic_tools":
+		cfg.Context.Tools.DynamicExpose = value
+	case "context_task_card_enabled":
+		cfg.Context.TaskCard.Enabled = value
+	case "context_manager_enabled":
+		cfg.ContextManager.Enabled = value
+	case "context_manager_allow_task_updates":
+		cfg.ContextManager.AllowTaskUpdates = value
+	case "context_manager_allow_stale_propose":
+		cfg.ContextManager.AllowStalePropose = value
 	case "workspace_restrict":
 		cfg.Tools.RestrictToWorkspace = value
 	case "docindex_enabled":
@@ -1808,6 +2192,9 @@ func applyChoiceSelection(cfg *config.Config, section, channel, fieldKey, choice
 		} else {
 			cfg.RuntimeProfile = config.RuntimeProfile(choice)
 		}
+		return true, nil
+	case "context_mode":
+		cfg.Context.Mode = choice
 		return true, nil
 	case "security_approval_pairing_mode":
 		cfg.Security.Approvals.Pairing.Mode = config.ApprovalMode(choice)

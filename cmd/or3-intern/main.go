@@ -64,9 +64,39 @@ func currentEmbedFingerprint(cfg config.Config) string {
 	return providers.EmbeddingFingerprint(cfg.Provider.APIBase, cfg.Provider.EmbedModel, cfg.Provider.EmbedDimensions)
 }
 
+func effectiveConsolidationModel(cfg config.Config) string {
+	if model := strings.TrimSpace(cfg.ConsolidationModel); model != "" {
+		return model
+	}
+	return cfg.Provider.Model
+}
+
 func newProviderClient(cfg config.Config) *providers.Client {
 	timeout := time.Duration(cfg.Provider.TimeoutSeconds) * time.Second
 	prov := providers.New(cfg.Provider.APIBase, cfg.Provider.APIKey, timeout)
+	prov.EmbedDimensions = cfg.Provider.EmbedDimensions
+	prov.HostPolicy = buildHostPolicy(cfg)
+	return prov
+}
+
+func newConsolidationProviderClient(cfg config.Config) *providers.Client {
+	timeout := effectiveConsolidationTimeout(cfg)
+	prov := providers.New(cfg.Provider.APIBase, cfg.Provider.APIKey, timeout)
+	prov.EmbedDimensions = cfg.Provider.EmbedDimensions
+	prov.HostPolicy = buildHostPolicy(cfg)
+	return prov
+}
+
+func newContextManagerProviderClient(cfg config.Config) *providers.Client {
+	timeout := time.Duration(cfg.ContextManager.TimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	apiBase := strings.TrimSpace(cfg.ContextManager.Provider)
+	if apiBase == "" {
+		apiBase = cfg.Provider.APIBase
+	}
+	prov := providers.New(apiBase, cfg.Provider.APIKey, timeout)
 	prov.EmbedDimensions = cfg.Provider.EmbedDimensions
 	prov.HostPolicy = buildHostPolicy(cfg)
 	return prov
@@ -145,6 +175,14 @@ func main() {
 			args = []string{"chat"}
 		}
 		if cmd != "chat" {
+			return
+		}
+	}
+	if setupRan, err := maybeRunFirstRunSetup(cfgPath, cmd, args); err != nil {
+		fmt.Fprintln(os.Stderr, "setup error:", err)
+		os.Exit(1)
+	} else if setupRan {
+		if cmd == "chat" {
 			return
 		}
 	}
@@ -397,7 +435,7 @@ func main() {
 		Model:       cfg.Provider.Model,
 		Temperature: cfg.Provider.Temperature,
 		Tools:       buildRuntimeTools(),
-		Builder: &agent.Builder{
+		Builder: applyContextConfigToBuilder(cfg, &agent.Builder{
 			DB:                     d,
 			Artifacts:              art,
 			Skills:                 inv,
@@ -421,18 +459,24 @@ func main() {
 			DocRetriever:           docRetriever,
 			DocRetrieveLimit:       cfg.DocIndex.RetrieveLimit,
 			WorkspaceDir:           cfg.WorkspaceDir,
-		},
-		Artifacts:          art,
-		MaxToolBytes:       cfg.MaxToolBytes,
-		MaxToolLoops:       cfg.MaxToolLoops,
-		Deliver:            delivererFunc(channelManager.Deliver),
-		DefaultScopeKey:    cfg.DefaultSessionKey,
-		LinkDirectMessages: cfg.Session.DirectMessagesShareDefault,
-		IdentityScopeMap:   buildIdentityScopeMap(cfg),
-		Hardening:          cfg.Hardening,
-		AccessProfiles:     cfg.Security.Profiles,
-		Audit:              auditLogger,
-		ApprovalBroker:     approvalBroker,
+		}),
+		Artifacts:                   art,
+		MaxToolBytes:                cfg.MaxToolBytes,
+		MaxToolLoops:                cfg.MaxToolLoops,
+		DynamicToolExposure:         cfg.ContextConfigured && cfg.Context.Tools.DynamicExpose,
+		Deliver:                     delivererFunc(channelManager.Deliver),
+		DefaultScopeKey:             cfg.DefaultSessionKey,
+		LinkDirectMessages:          cfg.Session.DirectMessagesShareDefault,
+		IdentityScopeMap:            buildIdentityScopeMap(cfg),
+		Hardening:                   cfg.Hardening,
+		AccessProfiles:              cfg.Security.Profiles,
+		Audit:                       auditLogger,
+		ApprovalBroker:              approvalBroker,
+		ContextManager:              cfg.ContextManager,
+		DisableRollingConsolidation: !cfg.ConsolidationEnabled,
+	}
+	if cfg.ContextManager.Enabled {
+		rt.ContextManagerProvider = newContextManagerProviderClient(cfg)
 	}
 	var serviceJobs *agent.JobRegistry
 	if cmd == "service" {
@@ -473,13 +517,13 @@ func main() {
 		}
 		rt.Tools = buildRuntimeTools()
 	}
-	if cfg.ConsolidationEnabled {
+	if cfg.ConsolidationEnabled || cfg.ContextManager.Enabled {
 		rt.Consolidator = &memory.Consolidator{
 			DB:                 d,
-			Provider:           prov,
+			Provider:           newConsolidationProviderClient(cfg),
 			EmbedModel:         cfg.Provider.EmbedModel,
 			EmbedFingerprint:   currentEmbedFingerprint(cfg),
-			ChatModel:          cfg.Provider.Model,
+			ChatModel:          effectiveConsolidationModel(cfg),
 			WindowSize:         cfg.ConsolidationWindowSize,
 			MaxMessages:        cfg.ConsolidationMaxMessages,
 			MaxInputChars:      cfg.ConsolidationMaxInputChars,
@@ -677,6 +721,32 @@ func loadDoctorConfig(cfgPath, cwd string) (config.Config, string, error) {
 	}
 }
 
+func applyContextConfigToBuilder(cfg config.Config, builder *agent.Builder) *agent.Builder {
+	if builder == nil {
+		return nil
+	}
+	if !cfg.ContextConfigured {
+		return builder
+	}
+	builder.ContextMaxInputTokens = cfg.Context.MaxInputTokens
+	builder.ContextOutputReserveTokens = cfg.Context.OutputReserveTokens
+	builder.ContextSafetyMarginTokens = cfg.Context.SafetyMarginTokens
+	builder.ContextSectionBudgets = agent.ContextSectionBudgets{
+		SystemCore:       cfg.Context.Sections.SystemCore,
+		SoulIdentity:     cfg.Context.Sections.SoulIdentity,
+		ToolPolicy:       cfg.Context.Sections.ToolPolicy,
+		ActiveTaskCard:   cfg.Context.Sections.ActiveTaskCard,
+		PinnedMemory:     cfg.Context.Sections.PinnedMemory,
+		MemoryDigest:     cfg.Context.Sections.MemoryDigest,
+		RecentHistory:    cfg.Context.Sections.RecentHistory,
+		RetrievedMemory:  cfg.Context.Sections.RetrievedMemory,
+		WorkspaceContext: cfg.Context.Sections.WorkspaceContext,
+		ToolSchemas:      cfg.Context.Sections.ToolSchemas,
+	}
+	builder.DisableTaskCard = !cfg.Context.TaskCard.Enabled
+	return builder
+}
+
 func commandHandledBeforeConfigLoad(cmd string) bool {
 	switch cmd {
 	case "config-path", "version", "configure", "init", "setup", "settings":
@@ -684,6 +754,50 @@ func commandHandledBeforeConfigLoad(cmd string) bool {
 	default:
 		return false
 	}
+}
+
+func maybeRunFirstRunSetup(cfgPath, cmd string, args []string) (bool, error) {
+	path := cfgPathOrDefault(cfgPath)
+	if _, err := os.Stat(path); err == nil {
+		return false, nil
+	} else if !os.IsNotExist(err) {
+		return false, err
+	}
+	next := firstRunNextStep(cmd, args)
+	result, err := runSetupWithIOOptions(os.Stdin, os.Stdout, path, currentWorkingDir(), setupOptions{
+		AskStartChat:     cmd == "chat",
+		StartChatDefault: true,
+		CompletionNext:   next,
+		AutoInvoked:      true,
+	})
+	if err != nil {
+		return true, err
+	}
+	if cmd == "chat" && !result.StartChat {
+		return true, nil
+	}
+	return false, nil
+}
+
+func firstRunNextStep(cmd string, args []string) string {
+	if cmd == "" {
+		cmd = "chat"
+	}
+	if cmd == "chat" {
+		return "run `or3-intern chat`"
+	}
+	if len(args) == 0 {
+		return fmt.Sprintf("continuing with `or3-intern %s`", cmd)
+	}
+	return fmt.Sprintf("continuing with `or3-intern %s`", strings.Join(args, " "))
+}
+
+func currentWorkingDir() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return cwd
 }
 
 func commandHandledBeforeRuntimeBootstrap(cmd string) bool {
@@ -763,10 +877,13 @@ func buildToolRegistryWithOptions(cfg config.Config, d *db.DB, prov *providers.C
 		reg.Register(&tools.ExecTool{Timeout: time.Duration(cfg.Tools.ExecTimeoutSeconds) * time.Second, RestrictDir: fileRoot, PathAppend: cfg.Tools.PathAppend, AllowedPrograms: append([]string{}, cfg.Hardening.ExecAllowedPrograms...), ChildEnvAllowlist: append([]string{}, cfg.Hardening.ChildEnvAllowlist...), Sandbox: sandboxCfg, EnableLegacyShell: cfg.Hardening.EnableExecShell, ApprovalBroker: approvalBroker})
 	}
 	reg.Register(&tools.ReadFile{FileTool: tools.FileTool{Root: fileRoot}})
+	reg.Register(&tools.SearchFile{FileTool: tools.FileTool{Root: fileRoot}})
+	reg.Register(&tools.ReadArtifact{Store: &artifacts.Store{Dir: cfg.ArtifactsDir, DB: d}, MaxReadBytes: int64(cfg.MaxToolBytes)})
 	reg.Register(&tools.WriteFile{FileTool: tools.FileTool{Root: fileRoot}})
 	reg.Register(&tools.EditFile{FileTool: tools.FileTool{Root: fileRoot}})
 	reg.Register(&tools.ListDir{FileTool: tools.FileTool{Root: fileRoot}})
-	reg.Register(&tools.WebFetch{HostPolicy: hostPolicy})
+	reg.Register(&tools.WebFetch{HostPolicy: hostPolicy, Store: &artifacts.Store{Dir: cfg.ArtifactsDir, DB: d}})
+	reg.Register(&tools.WebFetchMarkdown{HostPolicy: hostPolicy, Store: &artifacts.Store{Dir: cfg.ArtifactsDir, DB: d}})
 	reg.Register(&tools.WebSearch{APIKey: cfg.Tools.BraveAPIKey, HostPolicy: hostPolicy})
 	reg.Register(&tools.MemorySetPinned{DB: d})
 	reg.Register(&tools.MemoryAddNote{DB: d, Provider: prov, EmbedModel: cfg.Provider.EmbedModel, EmbedFingerprint: currentEmbedFingerprint(cfg)})

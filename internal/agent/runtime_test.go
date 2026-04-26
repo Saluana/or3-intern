@@ -62,6 +62,88 @@ func buildChatServer(t *testing.T, response providers.ChatCompletionResponse) (*
 	return srv, c
 }
 
+func chatTextResponse(text string) providers.ChatCompletionResponse {
+	return providers.ChatCompletionResponse{
+		Choices: []struct {
+			Message struct {
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			} `json:"message"`
+		}{
+			{
+				Message: struct {
+					Role      string               `json:"role"`
+					Content   any                  `json:"content"`
+					ToolCalls []providers.ToolCall `json:"tool_calls"`
+				}{Role: "assistant", Content: text},
+			},
+		},
+	}
+}
+
+func consolidationResponse(summary string) providers.ChatCompletionResponse {
+	args := fmt.Sprintf(`{"summary":%q,"facts":[],"preferences":[],"goals":[],"procedures":[],"decisions":[],"warnings":[]}`, summary)
+	return providers.ChatCompletionResponse{
+		Choices: []struct {
+			Message struct {
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			} `json:"message"`
+		}{
+			{
+				Message: struct {
+					Role      string               `json:"role"`
+					Content   any                  `json:"content"`
+					ToolCalls []providers.ToolCall `json:"tool_calls"`
+				}{
+					Role: "assistant",
+					ToolCalls: []providers.ToolCall{{
+						ID:   "tc-consolidate",
+						Type: "function",
+						Function: struct {
+							Name      string `json:"name"`
+							Arguments string `json:"arguments"`
+						}{Name: "record_consolidated_memory", Arguments: args},
+					}},
+				},
+			},
+		},
+	}
+}
+
+func contextCompactionResponse(summary string, cutoff int64) providers.ChatCompletionResponse {
+	args := fmt.Sprintf(`{"compaction":{"summary":%q,"refs":["messages:1-%d"],"compact_through_message_id":%d}}`, summary, cutoff, cutoff)
+	return providers.ChatCompletionResponse{
+		Choices: []struct {
+			Message struct {
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			} `json:"message"`
+		}{
+			{
+				Message: struct {
+					Role      string               `json:"role"`
+					Content   any                  `json:"content"`
+					ToolCalls []providers.ToolCall `json:"tool_calls"`
+				}{
+					Role: "assistant",
+					ToolCalls: []providers.ToolCall{{
+						ID:   "tc-compact",
+						Type: "function",
+						Function: struct {
+							Name      string `json:"name"`
+							Arguments string `json:"arguments"`
+						}{Name: contextManagerCompactToolName, Arguments: args},
+					}},
+				},
+			},
+		},
+	}
+}
+
 func openRuntimeTestDB(t *testing.T) *db.DB {
 	t.Helper()
 	d, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
@@ -128,6 +210,228 @@ func TestRuntime_Handle_UserMessage(t *testing.T) {
 	}
 	if deliver.messages[0] != "Hello there!" {
 		t.Errorf("expected 'Hello there!', got %q", deliver.messages[0])
+	}
+}
+
+func TestRuntime_Handle_PruneArchivesAndClearsLiveHistory(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	_, provider := buildChatServer(t, consolidationResponse("pruned chat summary"))
+	deliver := &mockDeliverer{}
+	rt := buildSimpleRuntime(t, provider, d, deliver)
+	rt.Consolidator = &memory.Consolidator{DB: d, Provider: provider, ChatModel: "gpt-4", MaxMessages: 20}
+
+	if _, err := d.AppendMessage(context.Background(), "sess-prune", "user", "old task details", nil); err != nil {
+		t.Fatalf("AppendMessage user: %v", err)
+	}
+	if _, err := d.AppendMessage(context.Background(), "sess-prune", "assistant", "old answer", nil); err != nil {
+		t.Fatalf("AppendMessage assistant: %v", err)
+	}
+	if err := saveTaskCard(context.Background(), d, "sess-prune", "", TaskCard{Goal: "keep active task", Status: "active"}); err != nil {
+		t.Fatalf("saveTaskCard: %v", err)
+	}
+
+	if err := rt.Handle(context.Background(), bus.Event{Type: bus.EventUserMessage, SessionKey: "sess-prune", Channel: "cli", From: "user", Message: "/prune"}); err != nil {
+		t.Fatalf("Handle /prune: %v", err)
+	}
+	msgs, err := d.GetLastMessages(context.Background(), "sess-prune", 10)
+	if err != nil {
+		t.Fatalf("GetLastMessages: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("expected live history cleared after prune, got %#v", msgs)
+	}
+	if card, ok, err := loadTaskCard(context.Background(), d, "sess-prune"); err != nil || !ok || card.Goal != "keep active task" {
+		t.Fatalf("expected task card preserved, ok=%v card=%+v err=%v", ok, card, err)
+	}
+	if len(deliver.messages) == 0 || !strings.Contains(deliver.messages[0], "Context pruned (manual)") {
+		t.Fatalf("expected prune delivery notice, got %#v", deliver.messages)
+	}
+}
+
+func TestRuntime_Handle_PruneUsesContextManagerCompactionWithoutDeletingHistory(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	ctx := context.Background()
+	firstID, err := d.AppendMessage(ctx, "sess-compact", "user", "throwaway greeting", nil)
+	if err != nil {
+		t.Fatalf("AppendMessage first: %v", err)
+	}
+	cutoffID, err := d.AppendMessage(ctx, "sess-compact", "assistant", "old implementation details that should be compacted", nil)
+	if err != nil {
+		t.Fatalf("AppendMessage second: %v", err)
+	}
+	if cutoffID <= firstID {
+		t.Fatalf("expected increasing message IDs")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var req providers.ChatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		payload := contentToString(req.Messages[len(req.Messages)-1].Content)
+		if !strings.Contains(payload, `"messages"`) || !strings.Contains(payload, "old implementation details") {
+			t.Fatalf("expected context manager JSON to include chat messages, got %s", payload)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(contextCompactionResponse("Old implementation details were resolved; continue with the current pruning design.", cutoffID))
+	}))
+	defer srv.Close()
+	provider := providers.New(srv.URL, "key", 10*time.Second)
+	provider.HTTP = srv.Client()
+	deliver := &mockDeliverer{}
+	rt := buildSimpleRuntime(t, provider, d, deliver)
+	rt.ContextManager = config.ContextManagerConfig{Enabled: true, MaxInputTokens: 1200, AllowTaskUpdates: true}
+	rt.ContextManagerProvider = provider
+
+	if err := rt.Handle(ctx, bus.Event{Type: bus.EventUserMessage, SessionKey: "sess-compact", Channel: "cli", From: "user", Message: "/prune"}); err != nil {
+		t.Fatalf("Handle /prune: %v", err)
+	}
+	msgs, err := d.GetLastMessages(ctx, "sess-compact", 10)
+	if err != nil {
+		t.Fatalf("GetLastMessages: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("expected raw history preserved, got %#v", msgs)
+	}
+	compaction, ok, err := d.GetContextCompaction(ctx, "sess-compact")
+	if err != nil || !ok {
+		t.Fatalf("expected compaction row, ok=%v err=%v", ok, err)
+	}
+	if compaction.CutoffMessageID != cutoffID || !strings.Contains(compaction.Summary, "resolved") {
+		t.Fatalf("unexpected compaction: %+v", compaction)
+	}
+	if len(deliver.messages) == 0 || !strings.Contains(deliver.messages[0], "raw chat history was preserved") {
+		t.Fatalf("expected model prune delivery notice, got %#v", deliver.messages)
+	}
+	snapshot, err := rt.BuildPromptSnapshot(ctx, "sess-compact", "next task")
+	if err != nil {
+		t.Fatalf("BuildPromptSnapshot: %v", err)
+	}
+	systemText := contentToString(snapshot[0].Content)
+	if !strings.Contains(systemText, "compacted_chat_context") || !strings.Contains(systemText, "continue with the current pruning design") {
+		t.Fatalf("expected compaction summary in prompt, got %s", systemText)
+	}
+	for _, msg := range snapshot {
+		if contentToString(msg.Content) == "old implementation details that should be compacted" {
+			t.Fatalf("expected compacted message omitted from prompt snapshot: %#v", snapshot)
+		}
+	}
+}
+
+func TestRuntime_Handle_PruneNormalizesInvalidCutoffToNearestProvidedMessage(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	ctx := context.Background()
+	if _, err := d.AppendMessage(ctx, "sess-normalize", "user", "first", nil); err != nil {
+		t.Fatalf("AppendMessage first: %v", err)
+	}
+	if _, err := d.AppendMessage(ctx, "sess-normalize", "assistant", "second", nil); err != nil {
+		t.Fatalf("AppendMessage second: %v", err)
+	}
+	thirdID, err := d.AppendMessage(ctx, "sess-normalize", "user", "third", nil)
+	if err != nil {
+		t.Fatalf("AppendMessage third: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(contextCompactionResponse("compact older turns", thirdID+10))
+	}))
+	defer srv.Close()
+	provider := providers.New(srv.URL, "key", 10*time.Second)
+	provider.HTTP = srv.Client()
+	deliver := &mockDeliverer{}
+	rt := buildSimpleRuntime(t, provider, d, deliver)
+	rt.ContextManager = config.ContextManagerConfig{Enabled: true, MaxInputTokens: 1200}
+	rt.ContextManagerProvider = provider
+
+	if err := rt.Handle(ctx, bus.Event{Type: bus.EventUserMessage, SessionKey: "sess-normalize", Channel: "cli", From: "user", Message: "/prune"}); err != nil {
+		t.Fatalf("Handle /prune: %v", err)
+	}
+	compaction, ok, err := d.GetContextCompaction(ctx, "sess-normalize")
+	if err != nil || !ok {
+		t.Fatalf("expected compaction row, ok=%v err=%v", ok, err)
+	}
+	if compaction.CutoffMessageID != thirdID {
+		t.Fatalf("expected normalized cutoff %d, got %+v", thirdID, compaction)
+	}
+	if len(deliver.messages) == 0 || !strings.Contains(deliver.messages[0], "normalized") {
+		t.Fatalf("expected normalization notice, got %#v", deliver.messages)
+	}
+}
+
+func TestRuntime_IdlePruneCompactsAfterInactivity(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	callCount := int32(0)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		count := atomic.AddInt32(&callCount, 1)
+		w.Header().Set("Content-Type", "application/json")
+		if count == 1 {
+			_ = json.NewEncoder(w).Encode(chatTextResponse("done"))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(contextCompactionResponse("Idle context was compacted after the completed task.", 2))
+	}))
+	defer srv.Close()
+	provider := providers.New(srv.URL, "key", 10*time.Second)
+	provider.HTTP = srv.Client()
+	deliver := &mockDeliverer{}
+	rt := buildSimpleRuntime(t, provider, d, deliver)
+	rt.Consolidator = &memory.Consolidator{DB: d, Provider: provider, ChatModel: "gpt-4", MaxMessages: 20}
+	rt.ContextManager = config.ContextManagerConfig{Enabled: true, IdlePruneSeconds: 1}
+	rt.ContextManagerProvider = provider
+
+	if err := rt.Handle(context.Background(), bus.Event{Type: bus.EventUserMessage, SessionKey: "sess-idle", Channel: "cli", From: "user", Message: "please do this"}); err != nil {
+		t.Fatalf("Handle user: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		compaction, ok, err := d.GetContextCompaction(context.Background(), "sess-idle")
+		if err != nil {
+			t.Fatalf("GetContextCompaction: %v", err)
+		}
+		if ok && compaction.CutoffMessageID == 2 && atomic.LoadInt32(&callCount) >= 2 {
+			msgs, err := d.GetLastMessages(context.Background(), "sess-idle", 10)
+			if err != nil {
+				t.Fatalf("GetLastMessages: %v", err)
+			}
+			if len(msgs) != 2 {
+				t.Fatalf("expected idle prune to preserve raw history, got %#v", msgs)
+			}
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("expected idle prune to compact prompt context, provider calls=%d", atomic.LoadInt32(&callCount))
+}
+
+func TestRuntime_Handle_UserMessageInjectsTaskCardBeforePrompt(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	var captured providers.ChatCompletionRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(chatTextResponse("ok"))
+	}))
+	defer srv.Close()
+	provider := providers.New(srv.URL, "key", 10*time.Second)
+	provider.HTTP = srv.Client()
+	rt := buildSimpleRuntime(t, provider, d, &mockDeliverer{})
+
+	if err := rt.Handle(context.Background(), bus.Event{Type: bus.EventUserMessage, SessionKey: "sess-task", Channel: "cli", From: "user", Message: "ship the task card audit fix"}); err != nil {
+		t.Fatalf("Handle user: %v", err)
+	}
+	if len(captured.Messages) == 0 {
+		t.Fatal("expected captured provider request")
+	}
+	systemText := contentToString(captured.Messages[0].Content)
+	if !strings.Contains(systemText, "active_task_card:") || !strings.Contains(systemText, "Goal: ship the task card audit fix") {
+		t.Fatalf("expected active task card in system prompt, got %s", systemText)
 	}
 }
 
@@ -1175,6 +1479,15 @@ func TestRuntime_Handle_ArtifactSave(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Handle artifact: %v", err)
 	}
+	var count int
+	if err := d.SQL.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM memory_notes WHERE session_key=? AND kind=? AND source_artifact_id<>''`,
+		"sess-artifact", db.MemoryKindArtifact).Scan(&count); err != nil {
+		t.Fatalf("QueryRow artifact summary: %v", err)
+	}
+	if count == 0 {
+		t.Fatalf("expected artifact summary memory note to be written")
+	}
 }
 
 func TestRuntime_GuardToolExecution_ProfileDeniesPrivilegedTool(t *testing.T) {
@@ -1932,6 +2245,149 @@ func TestToToolDefs_WithRegistry(t *testing.T) {
 	}
 }
 
+type alphaTool struct{ tools.Base }
+
+func (t *alphaTool) Name() string        { return "alpha_tool" }
+func (t *alphaTool) Description() string { return "alpha" }
+func (t *alphaTool) Parameters() map[string]any {
+	return map[string]any{"type": "object"}
+}
+func (t *alphaTool) Schema() map[string]any {
+	return map[string]any{"type": "function", "function": map[string]any{"name": t.Name(), "description": t.Description(), "parameters": map[string]any{"type": "object"}}}
+}
+func (t *alphaTool) Execute(ctx context.Context, params map[string]any) (string, error) {
+	return "", nil
+}
+
+func TestToToolDefs_SortsByToolNameDeterministically(t *testing.T) {
+	reg := tools.NewRegistry()
+	reg.Register(&echoTool{})
+	reg.Register(&alphaTool{})
+
+	defs := toToolDefs(reg)
+	if len(defs) != 2 {
+		t.Fatalf("expected 2 tool defs, got %d", len(defs))
+	}
+	if defs[0].Function.Name != "alpha_tool" || defs[1].Function.Name != "echo_tool" {
+		t.Fatalf("expected deterministic alphabetical ordering, got %#v", defs)
+	}
+}
+
+func TestDynamicToolExposureSelectsIntentGroups(t *testing.T) {
+	reg := tools.NewRegistry()
+	reg.Register(&alphaTool{})
+	reg.Register(&namedRuntimeTool{name: "write_file"})
+	reg.Register(&namedRuntimeTool{name: "exec"})
+	reg.Register(&namedRuntimeTool{name: "web_fetch"})
+	rt := &Runtime{DynamicToolExposure: true}
+	exposed := rt.exposedToolsForTurn(reg, []providers.ChatMessage{{Role: "user", Content: "please edit the config file"}}, "")
+	defs := toToolDefs(exposed)
+	names := make([]string, 0, len(defs))
+	for _, def := range defs {
+		names = append(names, def.Function.Name)
+	}
+	if !containsString(names, "write_file") || containsString(names, "exec") || containsString(names, "web_fetch") {
+		t.Fatalf("expected write intent to expose write tools without exec/web, got %v", names)
+	}
+}
+
+func TestUnchangedExposedToolsLeavesPrefixIdentical(t *testing.T) {
+	reg := tools.NewRegistry()
+	reg.Register(&namedRuntimeTool{name: "read_file"})
+	reg.Register(&namedRuntimeTool{name: "write_file"})
+	rt := &Runtime{DynamicToolExposure: true}
+	first := toToolDefs(rt.exposedToolsForTurn(reg, []providers.ChatMessage{{Role: "user", Content: "edit the config"}}, ""))
+	second := toToolDefs(rt.exposedToolsForTurn(reg, []providers.ChatMessage{{Role: "user", Content: "modify the config"}}, ""))
+	if fmt.Sprint(first) != fmt.Sprint(second) {
+		t.Fatalf("expected unchanged exposed write tool set to stay stable, first=%#v second=%#v", first, second)
+	}
+}
+
+func TestExposedToolSetChangeRebuildsPrefix(t *testing.T) {
+	reg := tools.NewRegistry()
+	reg.Register(&namedRuntimeTool{name: "read_file"})
+	reg.Register(&namedRuntimeTool{name: "write_file"})
+	reg.Register(&namedRuntimeTool{name: "web_fetch"})
+	rt := &Runtime{DynamicToolExposure: true}
+	readDefs := toToolDefs(rt.exposedToolsForTurn(reg, []providers.ChatMessage{{Role: "user", Content: "inspect the file"}}, ""))
+	webDefs := toToolDefs(rt.exposedToolsForTurn(reg, []providers.ChatMessage{{Role: "user", Content: "fetch this url"}}, ""))
+	if fmt.Sprint(readDefs) == fmt.Sprint(webDefs) || !toolDefsContain(webDefs, "web_fetch") {
+		t.Fatalf("expected web intent to change exposed schemas, read=%#v web=%#v", readDefs, webDefs)
+	}
+}
+
+func TestDynamicToolExposureDoesNotExposeUnknownToolsByDefault(t *testing.T) {
+	reg := tools.NewRegistry()
+	reg.Register(&namedRuntimeTool{name: "read_file"})
+	reg.Register(&namedRuntimeTool{name: "spawn_subagent"})
+	rt := &Runtime{DynamicToolExposure: true}
+	defs := toToolDefs(rt.exposedToolsForTurn(reg, []providers.ChatMessage{{Role: "user", Content: "inspect the file"}}, ""))
+	if toolDefsContain(defs, "spawn_subagent") {
+		t.Fatalf("expected unknown tool to stay hidden from default read exposure, got %#v", defs)
+	}
+}
+
+type namedRuntimeTool struct {
+	tools.Base
+	name string
+}
+
+func (t *namedRuntimeTool) Name() string               { return t.name }
+func (t *namedRuntimeTool) Description() string        { return t.name }
+func (t *namedRuntimeTool) Parameters() map[string]any { return map[string]any{"type": "object"} }
+func (t *namedRuntimeTool) Schema() map[string]any {
+	return t.SchemaFor(t.name, t.name, t.Parameters())
+}
+func (t *namedRuntimeTool) Execute(ctx context.Context, params map[string]any) (string, error) {
+	return "ok", nil
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func toolDefsContain(defs []providers.ToolDef, want string) bool {
+	for _, def := range defs {
+		if def.Function.Name == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestRuntime_BoundTextResult_ArtifactsPreviewAndID(t *testing.T) {
+	d := openTestDB(t)
+	artifactsDir := t.TempDir()
+	rt := &Runtime{
+		DB:               d,
+		MaxToolBytes:     10,
+		ToolPreviewBytes: 5,
+		Artifacts:        &artifacts.Store{Dir: artifactsDir, DB: d},
+	}
+	stored, preview, artifactID := rt.boundTextResult(context.Background(), "sess-preview", "abcdefghijklmnopqrstuvwxyz")
+	if artifactID == "" {
+		t.Fatalf("expected artifact ID for oversized tool output")
+	}
+	if !strings.Contains(stored, `"artifact_id"`) || !strings.Contains(stored, artifactID) {
+		t.Fatalf("expected stored text to include artifact reference, got %q", stored)
+	}
+	if preview == "" || len(preview) > rt.toolPreviewBytes()+len("…[truncated]") {
+		t.Fatalf("expected bounded preview, got %q", preview)
+	}
+	storedArtifact, err := rt.Artifacts.Lookup(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("Lookup artifact: %v", err)
+	}
+	if storedArtifact.SizeBytes <= 0 {
+		t.Fatalf("expected stored artifact bytes, got %#v", storedArtifact)
+	}
+}
+
 func TestRuntime_GetSessionLock_SameKey(t *testing.T) {
 	rt := &Runtime{}
 	mu1 := &rt.getSessionLock("key1").mu
@@ -2047,7 +2503,18 @@ func TestRuntime_HandleNewSession_Success(t *testing.T) {
 		case "/chat/completions":
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": `{"summary":"done","canonical_memory":"- fact"}`}}},
+				"choices": []map[string]any{{"message": map[string]any{
+					"role":    "assistant",
+					"content": nil,
+					"tool_calls": []map[string]any{{
+						"id":   "call_consolidate",
+						"type": "function",
+						"function": map[string]any{
+							"name":      "record_consolidated_memory",
+							"arguments": `{"summary":"done","canonical_memory":"- fact"}`,
+						},
+					}},
+				}}},
 			})
 		case "/embeddings":
 			w.Header().Set("Content-Type", "application/json")
@@ -2145,8 +2612,76 @@ func TestRuntime_HandleNewSession_FailurePreservesHistory(t *testing.T) {
 	if len(msgs) == 0 {
 		t.Fatal("expected history preserved on archive failure")
 	}
-	if len(deliver.messages) == 0 || !strings.Contains(deliver.messages[0], "Memory archival failed") {
+	if len(deliver.messages) == 0 || !strings.Contains(deliver.messages[0], "Memory archival failed") || !strings.Contains(deliver.messages[0], "bad gateway") {
 		t.Fatalf("expected archival failure message, got %#v", deliver.messages)
+	}
+}
+
+func TestRuntime_HandleStatusReportsRuntimeSnapshotWithoutPersisting(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	ctx := context.Background()
+	for _, msg := range []struct {
+		role    string
+		content string
+	}{
+		{"user", "first"},
+		{"assistant", "reply"},
+		{"user", "second"},
+	} {
+		if _, err := d.AppendMessage(ctx, "sess-status", msg.role, msg.content, nil); err != nil {
+			t.Fatalf("AppendMessage: %v", err)
+		}
+	}
+	deliver := &mockDeliverer{}
+	rt := &Runtime{
+		DB: d,
+		Builder: &Builder{
+			DB:                         d,
+			HistoryMax:                 4,
+			ContextMaxInputTokens:      1000,
+			ContextOutputReserveTokens: 100,
+			ContextSafetyMarginTokens:  50,
+			VectorK:                    8,
+			FTSK:                       6,
+			TopK:                       5,
+		},
+		Deliver:      deliver,
+		MaxToolLoops: 3,
+		MaxToolBytes: 4096,
+		Consolidator: &memory.Consolidator{DB: d, WindowSize: 2, MaxMessages: 50, MaxInputChars: 4000},
+	}
+	if err := rt.Handle(ctx, bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess-status",
+		Channel:    "cli",
+		From:       "user",
+		Message:    "/status",
+	}); err != nil {
+		t.Fatalf("Handle /status: %v", err)
+	}
+	if len(deliver.messages) != 1 {
+		t.Fatalf("expected one status delivery, got %#v", deliver.messages)
+	}
+	status := deliver.messages[0]
+	for _, want := range []string{
+		"Runtime status",
+		"Context budget",
+		"Consolidation",
+		"messages until consolidation",
+		"tokens until usable budget",
+		"Retrieval and tools",
+		"memory retrieval: topK=5 vectorK=8 ftsK=6",
+	} {
+		if !strings.Contains(status, want) {
+			t.Fatalf("expected %q in status output:\n%s", want, status)
+		}
+	}
+	count, err := countMessagesForSessions(ctx, d, []string{"sess-status"})
+	if err != nil {
+		t.Fatalf("countMessagesForSessions: %v", err)
+	}
+	if count != 3 {
+		t.Fatalf("expected /status not to persist, message count=%d", count)
 	}
 }
 
@@ -2170,7 +2705,18 @@ func TestRuntime_HandleNewSession_RebuildsOnEmbeddingFingerprintSwitch(t *testin
 		case "/chat/completions":
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": `{"summary":"done","facts":["new fact"]}`}}},
+				"choices": []map[string]any{{"message": map[string]any{
+					"role":    "assistant",
+					"content": nil,
+					"tool_calls": []map[string]any{{
+						"id":   "call_consolidate",
+						"type": "function",
+						"function": map[string]any{
+							"name":      "record_consolidated_memory",
+							"arguments": `{"summary":"done","facts":["new fact"],"preferences":[],"goals":[],"procedures":[],"decisions":[],"warnings":[]}`,
+						},
+					}},
+				}}},
 			})
 		case "/embeddings":
 			w.Header().Set("Content-Type", "application/json")

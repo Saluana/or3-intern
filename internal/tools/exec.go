@@ -31,7 +31,10 @@ type ExecTool struct {
 	ApprovalBroker    *approval.Broker
 }
 
-const defaultExecOutputMaxBytes = 10000
+const (
+	defaultExecStdoutPreviewBytes = 12000
+	defaultExecStderrPreviewBytes = 8000
+)
 
 func (t *ExecTool) Name() string { return "exec" }
 func (t *ExecTool) Description() string {
@@ -198,29 +201,25 @@ func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, 
 	err = c.Run()
 	out := stdout.String()
 	er := stderr.String()
-	max := t.OutputMaxBytes
-	if max <= 0 {
-		max = defaultExecOutputMaxBytes
+	stdoutMax := defaultExecStdoutPreviewBytes
+	stderrMax := defaultExecStderrPreviewBytes
+	if t.OutputMaxBytes > 0 {
+		stdoutMax = t.OutputMaxBytes
+		stderrMax = t.OutputMaxBytes
 	}
-	if len(out) > max {
-		out = out[:max] + "\n...[truncated]\n"
-	}
-	if len(er) > max {
-		er = er[:max] + "\n...[truncated]\n"
-	}
+	stdoutPreview, stdoutTruncated := PreviewString(out, stdoutMax)
+	stderrPreview, stderrTruncated := PreviewString(er, stderrMax)
+	resultOutput := formatExecResult(stdoutPreview, stderrPreview, stdoutTruncated, stderrTruncated, len(out), len(er))
 	if err != nil {
 		if t.ApprovalBroker != nil && execSubjectHash != "" {
 			t.ApprovalBroker.AuditExecEvent(ctx, "exec.fail", execSubjectHash, map[string]any{"error": err.Error()})
 		}
-		return formatCommandOutput(out, er), fmt.Errorf("exec failed: %w", err)
+		return resultOutput, fmt.Errorf("exec failed: %w", err)
 	}
 	if t.ApprovalBroker != nil && execSubjectHash != "" {
 		t.ApprovalBroker.AuditExecEvent(ctx, "exec.complete", execSubjectHash, nil)
 	}
-	if strings.TrimSpace(er) != "" {
-		return formatCommandOutput(out, er), nil
-	}
-	return out, nil
+	return resultOutput, nil
 }
 
 func toolsRequestIsService(ctx context.Context) bool {
@@ -309,6 +308,25 @@ func hasPathSeparator(path string) bool {
 
 func formatCommandOutput(stdout, stderr string) string {
 	return fmt.Sprintf("stdout:\n%s\n\nstderr:\n%s", stdout, stderr)
+}
+
+func formatExecResult(stdout, stderr string, stdoutTruncated, stderrTruncated bool, stdoutBytes, stderrBytes int) string {
+	preview := strings.TrimSpace(formatCommandOutput(stdout, stderr))
+	if strings.TrimSpace(stdout) == "" && strings.TrimSpace(stderr) == "" {
+		preview = formatCommandOutput("", "")
+	}
+	return EncodeToolResult(ToolResult{
+		Kind:    "exec",
+		OK:      true,
+		Summary: "Command completed with bounded stdout/stderr previews",
+		Preview: preview,
+		Stats: map[string]any{
+			"stdout_bytes":     stdoutBytes,
+			"stderr_bytes":     stderrBytes,
+			"stdout_truncated": stdoutTruncated,
+			"stderr_truncated": stderrTruncated,
+		},
+	})
 }
 
 func execArgv(program string, legacyCommand string, params map[string]any) []string {

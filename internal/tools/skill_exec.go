@@ -142,29 +142,25 @@ func (t *RunSkillScript) Execute(ctx context.Context, params map[string]any) (st
 
 	out := stdout.String()
 	er := stderr.String()
-	max := t.OutputMaxBytes
-	if max <= 0 {
-		max = defaultExecOutputMaxBytes
+	stdoutMax := defaultExecStdoutPreviewBytes
+	stderrMax := defaultExecStderrPreviewBytes
+	if t.OutputMaxBytes > 0 {
+		stdoutMax = t.OutputMaxBytes
+		stderrMax = t.OutputMaxBytes
 	}
-	if len(out) > max {
-		out = out[:max] + "\n...[truncated]\n"
-	}
-	if len(er) > max {
-		er = er[:max] + "\n...[truncated]\n"
-	}
+	stdoutPreview, stdoutTruncated := PreviewString(out, stdoutMax)
+	stderrPreview, stderrTruncated := PreviewString(er, stderrMax)
+	resultOutput := formatExecResult(stdoutPreview, stderrPreview, stdoutTruncated, stderrTruncated, len(out), len(er))
 	if err != nil {
 		if t.ApprovalBroker != nil && skillSubjectHash != "" {
 			t.ApprovalBroker.AuditExecEvent(ctx, "skill_exec.fail", skillSubjectHash, map[string]any{"error": err.Error()})
 		}
-		return formatCommandOutput(out, er), fmt.Errorf("exec failed: %w", err)
+		return resultOutput, fmt.Errorf("exec failed: %w", err)
 	}
 	if t.ApprovalBroker != nil && skillSubjectHash != "" {
 		t.ApprovalBroker.AuditExecEvent(ctx, "skill_exec.complete", skillSubjectHash, nil)
 	}
-	if strings.TrimSpace(er) != "" {
-		return formatCommandOutput(out, er), nil
-	}
-	return out, nil
+	return resultOutput, nil
 }
 
 func (t *RunSkillScript) commandForSkill(skill skills.SkillMeta, params map[string]any) ([]string, error) {

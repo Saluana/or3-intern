@@ -34,6 +34,49 @@ func TestNew(t *testing.T) {
 	}
 }
 
+func TestClient_SupportsExplicitPromptCache(t *testing.T) {
+	if !(&Client{APIBase: "https://api.anthropic.example/v1"}).SupportsExplicitPromptCache() {
+		t.Fatal("expected anthropic-like endpoint to support explicit prompt cache")
+	}
+	if (&Client{APIBase: "https://api.openai.example/v1"}).SupportsExplicitPromptCache() {
+		t.Fatal("did not expect generic openai endpoint to claim explicit prompt cache support")
+	}
+}
+
+func TestBuildCacheAwareSystemContent(t *testing.T) {
+	content := BuildCacheAwareSystemContent("stable", "volatile")
+	parts, ok := content.([]map[string]any)
+	if !ok {
+		t.Fatalf("expected structured content parts, got %T", content)
+	}
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 parts, got %#v", parts)
+	}
+	if fmt.Sprint(parts[0]["text"]) != "stable" {
+		t.Fatalf("expected stable part first, got %#v", parts[0])
+	}
+	cc, ok := parts[0]["cache_control"].(map[string]any)
+	if !ok || cc["type"] != "ephemeral" {
+		t.Fatalf("expected cache_control metadata, got %#v", parts[0])
+	}
+	if fmt.Sprint(parts[1]["text"]) != "volatile" {
+		t.Fatalf("expected volatile part second, got %#v", parts[1])
+	}
+
+	stableOnly := BuildCacheAwareSystemContent("stable", "")
+	parts, ok = stableOnly.([]map[string]any)
+	if !ok {
+		t.Fatalf("expected structured stable-only content, got %T", stableOnly)
+	}
+	if len(parts) != 1 {
+		t.Fatalf("expected 1 stable-only part, got %#v", parts)
+	}
+	cc, ok = parts[0]["cache_control"].(map[string]any)
+	if !ok || cc["type"] != "ephemeral" {
+		t.Fatalf("expected stable-only cache_control metadata, got %#v", parts[0])
+	}
+}
+
 func TestChat_Success(t *testing.T) {
 	response := ChatCompletionResponse{
 		Choices: []struct {

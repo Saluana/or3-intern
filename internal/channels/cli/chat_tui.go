@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
+	"log"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -126,6 +128,12 @@ type chatErrorMsg struct {
 type chatNoticeMsg struct {
 	sessionKey string
 	text       string
+}
+
+type chatRuntimeLogMsg struct {
+	sessionKey string
+	text       string
+	kind       string
 }
 
 type chatSessionResetMsg struct {
@@ -369,13 +377,17 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if line == "/new" {
 				m.statusText = "Starting new session…"
+			} else if line == "/prune" {
+				m.statusText = "Pruning context…"
+			} else if line == "/status" {
+				m.statusText = "Loading status…"
 			}
 			m.messages = append(m.messages, chatMessage{role: "user", content: line})
 			if m.publish == nil || !m.publish(m.sessionKey, line) {
 				m.appendError("queue full — message dropped")
 			} else {
 				m.pendingCount++
-				if line != "/new" {
+				if line != "/new" && line != "/status" && line != "/prune" {
 					m.statusText = "Thinking…"
 				}
 			}
@@ -464,10 +476,37 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.bridge.waitCmd())
 			break
 		}
+		m.appendSystem("Runtime\n" + strings.TrimSpace(msg.text))
 		m.addActivity("Background", summarizeText(msg.text, 100), "notice")
 		if m.pendingCount == 0 {
 			m.statusText = "Background notice"
 		}
+		m.refreshViewport(true)
+		cmds = append(cmds, m.bridge.waitCmd())
+	case chatRuntimeLogMsg:
+		if !m.acceptsSessionEvent(msg.sessionKey) {
+			cmds = append(cmds, m.bridge.waitCmd())
+			break
+		}
+		text := strings.TrimSpace(msg.text)
+		if text == "" {
+			cmds = append(cmds, m.bridge.waitCmd())
+			break
+		}
+		title := "Runtime"
+		if msg.kind == "error" {
+			title = "Runtime error"
+			m.messages = append(m.messages, chatMessage{role: "error", content: title + "\n" + text})
+			if m.pendingCount == 0 {
+				m.statusText = "Runtime error"
+			}
+		} else {
+			m.appendSystem(title + "\n" + text)
+			if m.pendingCount == 0 {
+				m.statusText = "Runtime notice"
+			}
+		}
+		m.addActivity(title, summarizeText(text, 100), msg.kind)
 		m.refreshViewport(true)
 		cmds = append(cmds, m.bridge.waitCmd())
 	case chatSessionResetMsg:
@@ -566,7 +605,7 @@ func (m *chatModel) renderSidebar(width int) string {
 		m.styles.muted.Render("Scope sessions: ") + fmt.Sprintf("%d", len(m.scopeSessions)),
 		"",
 		m.styles.panelTitle.Render("Slash commands"),
-		m.styles.activity.Render("/commands  /session  /session <key>\n/scope  /clear  /new  /exit"),
+		m.styles.activity.Render("/commands  /status  /session  /session <key>\n/scope  /clear  /new  /prune  /exit"),
 		"",
 		m.styles.panelTitle.Render("Recent activity"),
 	}
@@ -799,8 +838,10 @@ func localCommandsHelp() string {
 		"/session             Show current session and scope",
 		"/session <key>       Switch to another session and load its history",
 		"/scope               Show all sessions linked to the current scope",
+		"/status              Show runtime context, memory, and token budget status",
 		"/clear               Clear only the current on-screen transcript",
 		"/new                 Clear backend history for the current session",
+		"/prune               Archive recent chat into memory and clear live context",
 		"/exit or /quit       Leave chat",
 		"Any other slash command is forwarded to the runtime, including skill commands.",
 	}, "\n")
@@ -846,6 +887,8 @@ func (c *Channel) runBubbleTea(ctx context.Context) error {
 		c.Deliverer.SetBridge(bridge)
 		defer c.Deliverer.SetBridge(nil)
 	}
+	restoreLogs := captureBubbleTeaLogs(bridge)
+	defer restoreLogs()
 	publish := func(sessionKey, text string) bool {
 		return c.Bus.Publish(bus.Event{Type: bus.EventUserMessage, SessionKey: sessionKey, Channel: "cli", From: "local", Message: text})
 	}
@@ -907,6 +950,54 @@ func nonEmptyOrDefault(values, fallbackValues []string) []string {
 }
 
 type bridgeObserver struct{ bridge *bubbleChatBridge }
+
+type bridgeLogWriter struct{ bridge *bubbleChatBridge }
+
+func (w bridgeLogWriter) Write(p []byte) (int, error) {
+	text := strings.TrimSpace(string(p))
+	if text == "" || w.bridge == nil {
+		return len(p), nil
+	}
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		w.bridge.emit(chatRuntimeLogMsg{sessionKey: "", text: line, kind: classifyRuntimeLogLine(line)})
+	}
+	return len(p), nil
+}
+
+func captureBubbleTeaLogs(bridge *bubbleChatBridge) func() {
+	if bridge == nil {
+		return func() {}
+	}
+	prevWriter := log.Writer()
+	log.SetOutput(io.MultiWriter(bridgeLogWriter{bridge: bridge}))
+	return func() {
+		log.SetOutput(prevWriter)
+	}
+}
+
+func classifyRuntimeLogLine(text string) string {
+	text = strings.ToLower(strings.TrimSpace(text))
+	switch {
+	case text == "":
+		return "notice"
+	case strings.Contains(text, " panic") || strings.Contains(text, "panic:"):
+		return "error"
+	case strings.Contains(text, " fatal") || strings.Contains(text, "fatal:"):
+		return "error"
+	case strings.Contains(text, " error") || strings.Contains(text, "error:"):
+		return "error"
+	case strings.Contains(text, " failed") || strings.Contains(text, "failed:"):
+		return "error"
+	case strings.Contains(text, " warning") || strings.Contains(text, "warning:"):
+		return "error"
+	default:
+		return "notice"
+	}
+}
 
 func (o bridgeObserver) OnTextDelta(context.Context, string) {}
 

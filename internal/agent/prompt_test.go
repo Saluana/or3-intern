@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -57,6 +58,31 @@ func TestPromptIncludesStaticMemory(t *testing.T) {
 	}
 	if !strings.Contains(sys, "answer is always 42") {
 		t.Errorf("expected static memory text in system prompt, got %q", sys)
+	}
+}
+
+func TestBuildWithOptions_IncludesPinnedMemoryAndSkillsInventory(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	if err := d.UpsertPinned(ctx, "sess", "project_rule", "always keep prompts deterministic"); err != nil {
+		t.Fatalf("UpsertPinned: %v", err)
+	}
+	b := &Builder{DB: d, HistoryMax: 10}
+	pp, _, err := b.Build(context.Background(), "sess", "hello")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	sys := pp.System[0].Content.(string)
+	if !strings.Contains(sys, "## Pinned Memory") || !strings.Contains(sys, "always keep prompts deterministic") {
+		t.Fatalf("expected pinned memory section and content, got %q", sys)
+	}
+	if !strings.Contains(sys, "## Skills Inventory") {
+		t.Fatalf("expected skills inventory section, got %q", sys)
+	}
+	for _, section := range []string{"## SOUL.md", "## AGENTS.md", "## TOOLS.md", "## Retrieved Memory"} {
+		if !strings.Contains(sys, section) {
+			t.Fatalf("expected section %q in system prompt, got %q", section, sys)
+		}
 	}
 }
 
@@ -338,20 +364,20 @@ func TestFormatMemoryDigest_IncludesDurableKinds(t *testing.T) {
 		{ID: 5, Text: "rolling summary text", Kind: "summary", Status: "active", Score: 0.5},
 	}
 	digest := formatMemoryDigest(retrieved, 10)
-	if !strings.Contains(digest, "preference") {
-		t.Error("expected preference kind in digest")
+	if !strings.Contains(digest, "Preference:") {
+		t.Error("expected readable preference label in digest")
 	}
 	if !strings.Contains(digest, "dark mode") {
 		t.Error("expected preference text in digest")
 	}
-	if !strings.Contains(digest, "fact") {
-		t.Error("expected fact kind in digest")
+	if !strings.Contains(digest, "Fact:") {
+		t.Error("expected readable fact label in digest")
 	}
-	if !strings.Contains(digest, "goal") {
-		t.Error("expected goal kind in digest")
+	if !strings.Contains(digest, "Goal:") {
+		t.Error("expected readable goal label in digest")
 	}
-	if !strings.Contains(digest, "procedure") {
-		t.Error("expected procedure kind in digest")
+	if !strings.Contains(digest, "Procedure:") {
+		t.Error("expected readable procedure label in digest")
 	}
 	// Summaries and notes should NOT appear in digest.
 	if strings.Contains(digest, "rolling summary text") {
@@ -567,5 +593,75 @@ func TestBuildWithOptions_UsageLoggingOnlyForIncludedPromptNotes(t *testing.T) {
 	}
 	if untouched == 0 {
 		t.Fatalf("expected at least one excluded note to remain untouched, got %#v", rows)
+	}
+}
+
+func TestStablePrefixIsByteStableAcrossTurns(t *testing.T) {
+	b := &Builder{
+		Soul:              "Soul",
+		AgentInstructions: "Agent",
+		ToolNotes:         "Tools",
+		IdentityText:      "Identity",
+		StaticMemory:      "Static",
+	}
+	pinned := "- key: value"
+	digest := "- [fact] x"
+	retrieved := "1) [memory] y"
+	docs := "1) [file] z"
+	workspace := "workspace snippets"
+
+	first := b.renderStablePrefix(pinned, digest, retrieved, b.IdentityText, b.StaticMemory, docs, workspace)
+	second := b.renderStablePrefix(pinned, digest, retrieved, b.IdentityText, b.StaticMemory, docs, workspace)
+	if first != second {
+		t.Fatalf("expected byte-stable prefix across identical turns")
+	}
+}
+
+func TestStablePrefixExcludesHeartbeatAndTriggerMetadata(t *testing.T) {
+	b := &Builder{HeartbeatText: "tick"}
+	stable := b.renderStablePrefix("(none)", "", "(none)", "", "", "", "")
+	if strings.Contains(stable, "Heartbeat") || strings.Contains(stable, "Structured Trigger Context") {
+		t.Fatalf("stable prefix must not include volatile heartbeat or trigger metadata: %q", stable)
+	}
+	volatile := b.renderVolatileSuffix("tick", "{\"event\":\"cron\"}")
+	if !strings.Contains(volatile, "Heartbeat") || !strings.Contains(volatile, "Structured Trigger Context") {
+		t.Fatalf("volatile suffix should include heartbeat and structured context: %q", volatile)
+	}
+}
+
+func TestComposeSystemContent_UsesExplicitCacheBoundaryWhenSupported(t *testing.T) {
+	b := &Builder{
+		Provider: &providers.Client{APIBase: "https://api.anthropic.example/v1"},
+		Soul:     "Soul",
+	}
+	content := b.composeSystemContent("- key: value", "digest", "retrieved", "identity", "static", "heartbeat", "trigger", "docs", "workspace")
+	parts, ok := content.([]map[string]any)
+	if !ok {
+		t.Fatalf("expected structured content parts for explicit cache provider, got %T", content)
+	}
+	if len(parts) != 2 {
+		t.Fatalf("expected stable+volatile parts, got %#v", parts)
+	}
+	cacheControl, ok := parts[0]["cache_control"].(map[string]any)
+	if !ok || cacheControl["type"] != "ephemeral" {
+		t.Fatalf("expected cache_control breakpoint on stable prefix, got %#v", parts[0])
+	}
+	if strings.Contains(fmt.Sprint(parts[0]["text"]), "Heartbeat") || strings.Contains(fmt.Sprint(parts[0]["text"]), "Structured Trigger Context") {
+		t.Fatalf("stable part should not contain volatile sections: %#v", parts[0])
+	}
+	if !strings.Contains(fmt.Sprint(parts[1]["text"]), "Heartbeat") || !strings.Contains(fmt.Sprint(parts[1]["text"]), "Structured Trigger Context") {
+		t.Fatalf("volatile part missing heartbeat/trigger content: %#v", parts[1])
+	}
+}
+
+func TestBuildWithOptions_PopulatesBudgetReport(t *testing.T) {
+	d := openTestDB(t)
+	b := &Builder{DB: d, HistoryMax: 10}
+	pp, _, err := b.Build(context.Background(), "sess", "hello")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if pp.Budget.EstimatedInputTokens <= 0 {
+		t.Fatalf("expected non-zero estimated token count, got %+v", pp.Budget)
 	}
 }

@@ -13,7 +13,7 @@ import (
 	"or3-intern/internal/config"
 )
 
-const structuredFileReadMaxBytes = 64 * 1024
+const structuredFileReadMaxBytes = 12 * 1024
 
 type FileWatcher struct {
 	Config     config.FileWatchConfig

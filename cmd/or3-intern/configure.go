@@ -24,6 +24,7 @@ var configureSections = []struct {
 	{Key: "provider", Label: "Provider", Description: "API endpoint, chat model, embeddings, timeouts, and provider secrets"},
 	{Key: "storage", Label: "Storage", Description: "Database, artifacts, and bootstrap file locations"},
 	{Key: "runtime", Label: "Runtime", Description: "Session defaults, memory retrieval, workers, consolidation, and subagents"},
+	{Key: "context", Label: "Context", Description: "Token budgets, packet mode, dynamic tools, task card, and context manager"},
 	{Key: "workspace", Label: "Workspace", Description: "Workspace directory and file-tool boundaries"},
 	{Key: "tools", Label: "Tools", Description: "Search, proxy, exec timeout, and PATH settings"},
 	{Key: "docindex", Label: "Doc Index", Description: "Workspace indexing and retrieval controls"},
@@ -267,7 +268,7 @@ func runConfigureSection(reader *bufio.Reader, out io.Writer, cfg *config.Config
 	switch section {
 	case "channels":
 		return configureChannelsSection(reader, out, cfg)
-	case "provider", "storage", "runtime", "workspace", "tools", "docindex", "skills", "security", "hardening", "session", "automation", "service":
+	case "provider", "storage", "runtime", "context", "workspace", "tools", "docindex", "skills", "security", "hardening", "session", "automation", "service":
 		return configureGenericSection(reader, out, cfg, section, cwd)
 	default:
 		return fmt.Errorf("unknown configure section %q", section)
@@ -593,7 +594,8 @@ func printConfigureSummary(out io.Writer, cfg config.Config) {
 	}
 	fmt.Fprintf(out, "  Provider: %s (%s)\n", providerLabel, providerSummary)
 	fmt.Fprintf(out, "  Storage: db=%s artifacts=%s\n", cfg.DBPath, cfg.ArtifactsDir)
-	fmt.Fprintf(out, "  Runtime: session=%s workers=%d history=%d consolidation=%t\n", cfg.DefaultSessionKey, cfg.WorkerCount, cfg.HistoryMax, cfg.ConsolidationEnabled)
+	fmt.Fprintf(out, "  Runtime: session=%s workers=%d history=%d consolidation=%t model=%s\n", cfg.DefaultSessionKey, cfg.WorkerCount, cfg.HistoryMax, cfg.ConsolidationEnabled, emptyAsNone(cfg.ConsolidationModel))
+	fmt.Fprintf(out, "  Context: mode=%s maxInput=%d dynamicTools=%t taskCard=%t\n", cfg.Context.Mode, cfg.Context.MaxInputTokens, cfg.Context.Tools.DynamicExpose, cfg.Context.TaskCard.Enabled)
 	fmt.Fprintf(out, "  Workspace: restrict=%t dir=%s\n", cfg.Tools.RestrictToWorkspace, workspaceSummary)
 	fmt.Fprintf(out, "  Tools: Brave key configured=%t execTimeout=%ds proxy=%s\n", strings.TrimSpace(cfg.Tools.BraveAPIKey) != "", cfg.Tools.ExecTimeoutSeconds, emptyAsNone(cfg.Tools.WebProxy))
 	fmt.Fprintf(out, "  Skills: exec=%t watch=%t dir=%s\n", cfg.Skills.EnableExec, cfg.Skills.Load.Watch, emptyAsNone(cfg.Skills.ManagedDir))

@@ -28,31 +28,79 @@ const maxConsolidationItems = 10
 // cleanup pass after consolidation.
 const staleCleanupBatchSize = 20
 
-const consolidationPrompt = `You are consolidating chat memory.
+const consolidationToolName = "record_consolidated_memory"
 
-Return ONLY a single JSON object with this exact shape:
-{
-  "summary": "...",
-  "facts": ["...", "..."],
-  "preferences": ["...", "..."],
-  "goals": ["...", "..."],
-  "procedures": ["...", "..."]
-}
+const consolidationSystemPrompt = `You are consolidating chat memory.
 
-Rules:
-- summary: 3-5 concise sentences covering key decisions, outcomes, and context.
-- facts: stable factual items extracted from the conversation (names, versions, states). Keep each item under 300 characters.
-- preferences: durable user preferences or working-style notes. Keep each item under 300 characters.
-- goals: ongoing or stated objectives. Keep each item under 300 characters.
-- procedures: step-by-step processes or runbooks mentioned. Keep each item under 300 characters.
-- Any list may be empty ([]) when nothing relevant was observed.
-- Existing pinned memory contains only ultra-stable facts and preferences. Do not repeat those items.
+You MUST call the record_consolidated_memory tool exactly once. Do not answer conversationally.
 
-Existing pinned memory (ultra-stable only):
+Extract only information that will help future work. Prefer concrete, reusable facts over chat filler.
+
+Process:
+1. Read the whole excerpt once to understand the task and outcome.
+2. Identify what a future assistant would need to remember to continue work safely.
+3. Separate durable information into the correct fields.
+4. Drop anything temporary, emotional, duplicated, or unsupported.
+5. If a field has no useful durable information, set it to [].
+
+Keep:
+- Project state, file/module names, bugs found, fixes made, tests run, commands that worked, and unresolved blockers.
+- User preferences about style, workflow, risk tolerance, tools, or implementation choices.
+- Durable goals, accepted decisions, warnings, and repeatable procedures.
+
+Ignore:
+- Greetings, thanks, apologies, transient status updates, speculation, duplicate pinned memory, and details not supported by the excerpt.
+- Raw tool dumps unless the surrounding conversation explains the durable outcome.
+
+Tool argument rules:
+- summary: 3-5 short sentences describing what changed, what was decided, and what remains relevant.
+- facts: stable project/user/environment facts, versions, file names, or current states.
+- preferences: how the user wants work done, communication style, quality bar, tools, or risk tolerance.
+- goals: active objectives that remain useful after this turn.
+- procedures: repeatable steps, commands, checks, or runbooks.
+- decisions: choices that were accepted or settled.
+- warnings: risks, pitfalls, failed approaches, or conditions that require caution.
+- facts, preferences, goals, procedures, decisions, and warnings MUST always be JSON arrays of strings, even when there is only one item.
+- Every list item must be standalone, specific, and under 300 characters.
+- procedures should be actionable steps or commands, not vague descriptions.
+- warnings should name the risk and condition that triggers it.
+- Use [] when a category has no durable information. Do not invent details.`
+
+const consolidationUserPrompt = `Existing pinned memory (ultra-stable only):
 %s
 
 Conversation excerpt:
 %s`
+
+const consolidationRetryPrompt = `Your previous response did not call record_consolidated_memory with valid arguments. Call record_consolidated_memory exactly once now.`
+
+var consolidationToolDef = providers.ToolDef{
+	Type: "function",
+	Function: providers.ToolFunc{
+		Name:        consolidationToolName,
+		Description: "Persist validated structured memory extracted from a conversation excerpt.",
+		Parameters: map[string]any{
+			"type":                 "object",
+			"additionalProperties": false,
+			"properties": map[string]any{
+				"summary":     map[string]any{"type": "string"},
+				"facts":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"preferences": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"goals":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"procedures":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"decisions":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"warnings":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			},
+			"required": []string{"summary", "facts", "preferences", "goals", "procedures", "decisions", "warnings"},
+		},
+	},
+}
+
+func consolidationToolChoice() any {
+	// There is only one consolidation tool, so "required" is equivalent to
+	// forcing the named tool but works with more OpenAI-compatible routers.
+	return "required"
+}
 
 // Consolidator rolls up conversation messages older than the active history
 // window into durable memory notes (stored in memory_notes for vector/FTS
@@ -102,6 +150,64 @@ func (c *Consolidator) ArchiveAll(ctx context.Context, sessionKey string, histor
 	return fmt.Errorf("archive-all exceeded max passes")
 }
 
+// ArchiveResetWindow performs one bounded archival pass over the most recent
+// session messages. It is intended for /new, where reset latency must be
+// predictable and normal background consolidation can continue preserving older
+// history over time.
+func (c *Consolidator) ArchiveResetWindow(ctx context.Context, sessionKey string, historyMax int) error {
+	if c.Provider == nil {
+		return nil
+	}
+	maxMessages := c.MaxMessages
+	if maxMessages <= 0 {
+		maxMessages = 50
+	}
+	if historyMax > maxMessages {
+		maxMessages = historyMax
+	}
+	maxInputChars := c.MaxInputChars
+	if maxInputChars <= 0 {
+		maxInputChars = 12000
+	}
+	canonicalKey := strings.TrimSpace(c.CanonicalPinnedKey)
+	if canonicalKey == "" {
+		canonicalKey = defaultCanonicalMemoryKey
+	}
+
+	rows, err := c.DB.GetLastMessages(ctx, sessionKey, maxMessages)
+	if err != nil {
+		return fmt.Errorf("reset archive messages: %w", err)
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	msgs := make([]db.ConsolidationMessage, 0, len(rows))
+	var lastCandidateID int64
+	for _, row := range rows {
+		msgs = append(msgs, db.ConsolidationMessage{ID: row.ID, Role: row.Role, Content: row.Content})
+		if row.ID > lastCandidateID {
+			lastCandidateID = row.ID
+		}
+	}
+	transcript, lastIncludedID := buildConsolidationTranscript(msgs, maxInputChars)
+	if transcript == "" {
+		return nil
+	}
+	if lastIncludedID == 0 {
+		lastIncludedID = lastCandidateID
+	}
+	memScope := c.resolveMemoryScope(ctx, sessionKey)
+	if err := c.writeConsolidatedTranscript(ctx, sessionKey, memScope, canonicalKey, transcript, lastIncludedID, maxInputChars, "reset_archive"); err != nil {
+		if err == errEmptyConsolidationOutput {
+			log.Printf("reset archive produced no durable memory for session %q; continuing reset", sessionKey)
+			return nil
+		}
+		return err
+	}
+	log.Printf("reset-archived %d recent messages for session %q into one memory note", len(msgs), sessionKey)
+	return nil
+}
+
 // RunOnce performs a single bounded consolidation pass.
 func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMax int, mode RunMode) (bool, error) {
 	if c.Provider == nil {
@@ -147,7 +253,65 @@ func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMa
 	}
 	lastCandidateID := msgs[len(msgs)-1].ID
 
-	// Build a plain-text conversation transcript.
+	transcript, lastIncludedID := buildConsolidationTranscript(msgs, maxInputChars)
+	memScope := c.resolveMemoryScope(ctx, sessionKey)
+	if transcript == "" {
+		_, err := c.DB.WriteConsolidation(ctx, db.ConsolidationWrite{
+			SessionKey:  sessionKey,
+			ScopeKey:    memScope,
+			CursorMsgID: lastCandidateID,
+		})
+		if err != nil {
+			return false, fmt.Errorf("consolidation advance cursor: %w", err)
+		}
+		return true, nil
+	}
+	shouldConsolidate := mode.ArchiveAll || len(msgs) >= windowSize
+	if !shouldConsolidate {
+		adaptiveTriggerChars := maxInputChars / canonicalMemoryInputDivisor
+		if adaptiveTriggerChars <= 0 {
+			adaptiveTriggerChars = 1
+		}
+		if len(msgs) >= maxMessages || len(transcript) >= adaptiveTriggerChars {
+			shouldConsolidate = true
+		}
+	}
+	if !shouldConsolidate {
+		return false, nil
+	}
+	if err := c.writeConsolidatedTranscript(ctx, sessionKey, memScope, canonicalKey, transcript, lastIncludedID, maxInputChars, "consolidation"); err != nil {
+		if err == errEmptyConsolidationOutput {
+			currentCanonical, _, getErr := c.DB.GetPinnedValue(ctx, memScope, canonicalKey)
+			if getErr != nil {
+				return false, fmt.Errorf("consolidation get canonical memory: %w", getErr)
+			}
+			canonicalText := trimTo(currentCanonical, maxInputChars)
+			w := db.ConsolidationWrite{
+				SessionKey:  sessionKey,
+				ScopeKey:    memScope,
+				CursorMsgID: lastIncludedID,
+			}
+			if canonicalText != "" {
+				w.CanonicalKey = canonicalKey
+				w.CanonicalText = canonicalText
+			}
+			_, err := c.DB.WriteConsolidation(ctx, w)
+			if err != nil {
+				return false, fmt.Errorf("consolidation update cursor: %w", err)
+			}
+			log.Printf("consolidated %d messages for session %q (cursor-only)", len(msgs), sessionKey)
+			return true, nil
+		}
+		return false, err
+	}
+
+	log.Printf("consolidated %d messages for session %q", len(msgs), sessionKey)
+	return true, nil
+}
+
+var errEmptyConsolidationOutput = fmt.Errorf("empty consolidation output")
+
+func buildConsolidationTranscript(msgs []db.ConsolidationMessage, maxInputChars int) (string, int64) {
 	var sb strings.Builder
 	var lastIncludedID int64
 	for _, m := range msgs {
@@ -176,7 +340,10 @@ func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMa
 		sb.WriteString("\n")
 		lastIncludedID = m.ID
 	}
-	transcript := strings.TrimSpace(sb.String())
+	return strings.TrimSpace(sb.String()), lastIncludedID
+}
+
+func (c *Consolidator) resolveMemoryScope(ctx context.Context, sessionKey string) string {
 	memScope := sessionKey
 	if c.DB != nil && strings.TrimSpace(sessionKey) != "" {
 		if resolved, resolveErr := c.DB.ResolveScopeKey(ctx, sessionKey); resolveErr == nil && strings.TrimSpace(resolved) != "" {
@@ -186,34 +353,13 @@ func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMa
 	if memScope == "" || memScope == scope.GlobalMemoryScope {
 		memScope = scope.GlobalMemoryScope
 	}
-	if transcript == "" {
-		_, err := c.DB.WriteConsolidation(ctx, db.ConsolidationWrite{
-			SessionKey:  sessionKey,
-			ScopeKey:    memScope,
-			CursorMsgID: lastCandidateID,
-		})
-		if err != nil {
-			return false, fmt.Errorf("consolidation advance cursor: %w", err)
-		}
-		return true, nil
-	}
-	shouldConsolidate := mode.ArchiveAll || len(msgs) >= windowSize
-	if !shouldConsolidate {
-		adaptiveTriggerChars := maxInputChars / canonicalMemoryInputDivisor
-		if adaptiveTriggerChars <= 0 {
-			adaptiveTriggerChars = 1
-		}
-		if len(msgs) >= maxMessages || len(transcript) >= adaptiveTriggerChars {
-			shouldConsolidate = true
-		}
-	}
-	if !shouldConsolidate {
-		return false, nil
-	}
+	return memScope
+}
 
+func (c *Consolidator) writeConsolidatedTranscript(ctx context.Context, sessionKey, memScope, canonicalKey, transcript string, lastIncludedID int64, maxInputChars int, noteTags string) error {
 	currentCanonical, _, err := c.DB.GetPinnedValue(ctx, memScope, canonicalKey)
 	if err != nil {
-		return false, fmt.Errorf("consolidation get canonical memory: %w", err)
+		return fmt.Errorf("consolidation get canonical memory: %w", err)
 	}
 	currentCanonical = trimTo(currentCanonical, maxInputChars/canonicalMemoryInputDivisor)
 
@@ -221,21 +367,13 @@ func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMa
 	if model == "" {
 		model = "gpt-4.1-mini"
 	}
-	req := providers.ChatCompletionRequest{
-		Model: model,
-		Messages: []providers.ChatMessage{
-			{Role: "user", Content: fmt.Sprintf(consolidationPrompt, currentCanonical, transcript)},
-		},
-		Temperature: 0,
-	}
-	resp, err := c.Provider.Chat(ctx, req)
+	parsed, err := c.requestConsolidationOutput(ctx, model, currentCanonical, transcript)
 	if err != nil {
-		return false, fmt.Errorf("consolidation chat: %w", err)
+		if err == errEmptyConsolidationOutput {
+			return err
+		}
+		return fmt.Errorf("consolidation structured output: %w", err)
 	}
-	if len(resp.Choices) == 0 {
-		return false, fmt.Errorf("consolidation: no choices returned")
-	}
-	parsed := parseConsolidationOutput(contentToStr(resp.Choices[0].Message.Content))
 	summary := trimTo(parsed.Summary, maxInputChars/canonicalMemoryInputDivisor)
 
 	// Build canonical pinned memory from ultra-stable items only
@@ -243,22 +381,8 @@ func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMa
 	canonicalText := buildCanonicalPinnedText(currentCanonical, parsed.Preferences, parsed.Facts)
 	canonicalText = trimTo(canonicalText, maxInputChars)
 
-	if summary == "" && len(parsed.Facts)+len(parsed.Preferences)+len(parsed.Goals)+len(parsed.Procedures) == 0 {
-		w := db.ConsolidationWrite{
-			SessionKey:  sessionKey,
-			ScopeKey:    memScope,
-			CursorMsgID: lastIncludedID,
-		}
-		if canonicalText != "" {
-			w.CanonicalKey = canonicalKey
-			w.CanonicalText = canonicalText
-		}
-		_, err := c.DB.WriteConsolidation(ctx, w)
-		if err != nil {
-			return false, fmt.Errorf("consolidation update cursor: %w", err)
-		}
-		log.Printf("consolidated %d messages for session %q (cursor-only)", len(msgs), sessionKey)
-		return true, nil
+	if summary == "" && len(parsed.Facts)+len(parsed.Preferences)+len(parsed.Goals)+len(parsed.Procedures)+len(parsed.Decisions)+len(parsed.Warnings) == 0 {
+		return errEmptyConsolidationOutput
 	}
 
 	embedModel := c.EmbedModel
@@ -275,9 +399,7 @@ func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMa
 		embedding = make([]byte, 0)
 	}
 
-	// Build extra typed notes from structured output.
 	extraNotes := buildExtraNotes(parsed, sql.NullInt64{Int64: lastIncludedID, Valid: lastIncludedID > 0}, c.EmbedFingerprint)
-
 	w := db.ConsolidationWrite{
 		SessionKey:       sessionKey,
 		ScopeKey:         memScope,
@@ -285,7 +407,7 @@ func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMa
 		Embedding:        embedding,
 		EmbedFingerprint: c.EmbedFingerprint,
 		SourceMsgID:      sql.NullInt64{Int64: lastIncludedID, Valid: true},
-		NoteTags:         "consolidation",
+		NoteTags:         noteTags,
 		NoteKind:         db.MemoryKindSummary,
 		ExtraNotes:       extraNotes,
 		CursorMsgID:      lastIncludedID,
@@ -298,33 +420,70 @@ func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMa
 	if err != nil && len(embedding) >= 4 && isMemoryVectorProfileMismatchError(err) {
 		wantDims := len(embedding) / 4
 		if rebuildErr := c.DB.RebuildMemoryVecIndexWithProfile(ctx, wantDims, c.EmbedFingerprint); rebuildErr != nil {
-			return false, fmt.Errorf("consolidation write: %w (rebuild failed: %v)", err, rebuildErr)
+			return fmt.Errorf("consolidation write: %w (rebuild failed: %v)", err, rebuildErr)
 		}
 		log.Printf("consolidation memory vectors rebuilt for session %q to %d dims (%s)", sessionKey, wantDims, strings.TrimSpace(c.EmbedFingerprint))
 		_, err = c.DB.WriteConsolidation(ctx, w)
 	}
 	if err != nil {
-		return false, fmt.Errorf("consolidation write: %w", err)
+		return fmt.Errorf("consolidation write: %w", err)
 	}
 
-	// Bounded stale-summary cleanup: mark old, never-used summaries as stale.
 	if _, cleanErr := c.DB.CleanupStaleMemoryNotes(ctx, memScope, db.NowMS(), staleCleanupBatchSize); cleanErr != nil {
 		log.Printf("consolidation cleanup stale notes: %v", cleanErr)
 	}
-
-	log.Printf("consolidated %d messages for session %q into memory note (+%d typed notes)", len(msgs), sessionKey, len(extraNotes))
-	return true, nil
+	return nil
 }
 
-// contentToStr converts a ChatMessage Content (string or other) to a plain string.
-func contentToStr(v any) string {
-	if v == nil {
-		return ""
+func (c *Consolidator) requestConsolidationOutput(ctx context.Context, model, currentCanonical, transcript string) (consolidationOutput, error) {
+	messages := []providers.ChatMessage{
+		{Role: "system", Content: consolidationSystemPrompt},
+		{Role: "user", Content: fmt.Sprintf(consolidationUserPrompt, currentCanonical, transcript)},
 	}
-	if s, ok := v.(string); ok {
-		return s
+	var lastErr error
+	toolChoiceAllowed := true
+	for attempt := 0; attempt < 2; attempt++ {
+		req := providers.ChatCompletionRequest{
+			Model:       model,
+			Messages:    messages,
+			Tools:       []providers.ToolDef{consolidationToolDef},
+			Temperature: 0,
+		}
+		if toolChoiceAllowed {
+			req.ToolChoice = consolidationToolChoice()
+		}
+		resp, err := c.Provider.Chat(ctx, req)
+		if err != nil && toolChoiceAllowed && providerRejectedToolChoice(err) {
+			toolChoiceAllowed = false
+			req.ToolChoice = nil
+			resp, err = c.Provider.Chat(ctx, req)
+		}
+		if err != nil {
+			return consolidationOutput{}, fmt.Errorf("chat: %w", err)
+		}
+		parsed, parseErr := parseConsolidationResponse(resp)
+		if parseErr == nil {
+			return parsed, nil
+		}
+		lastErr = parseErr
+		messages = append(messages, providers.ChatMessage{Role: "user", Content: consolidationRetryPrompt})
 	}
-	return fmt.Sprintf("%v", v)
+	log.Printf("consolidation structured output rejected: %v", lastErr)
+	return consolidationOutput{}, errEmptyConsolidationOutput
+}
+
+func providerRejectedToolChoice(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if !strings.Contains(msg, "tool_choice") {
+		return false
+	}
+	return strings.Contains(msg, "no endpoints") ||
+		strings.Contains(msg, "not support") ||
+		strings.Contains(msg, "unsupported") ||
+		strings.Contains(msg, "invalid")
 }
 
 func isMemoryVectorProfileMismatchError(err error) bool {
@@ -342,20 +501,43 @@ type consolidationOutput struct {
 	Preferences []string `json:"preferences"`
 	Goals       []string `json:"goals"`
 	Procedures  []string `json:"procedures"`
+	Decisions   []string `json:"decisions"`
+	Warnings    []string `json:"warnings"`
 	// Legacy field: accepted as a fallback for old-format responses.
 	LegacyCanonical string `json:"canonical_memory"`
 }
 
-// parseConsolidationOutput parses the LLM response into a structured output.
-// It first tries the new structured format, then falls back gracefully:
-//   - If the new format is present (has summary), use it.
-//   - If only the legacy {"summary","canonical_memory"} fields are present,
-//     treat canonical_memory as a preference item.
-//   - On any parse failure, return a minimal output with the raw text as summary.
-func parseConsolidationOutput(raw string) consolidationOutput {
+type flexibleConsolidationOutput struct {
+	Summary         string          `json:"summary"`
+	Facts           json.RawMessage `json:"facts"`
+	Preferences     json.RawMessage `json:"preferences"`
+	Goals           json.RawMessage `json:"goals"`
+	Procedures      json.RawMessage `json:"procedures"`
+	Decisions       json.RawMessage `json:"decisions"`
+	Warnings        json.RawMessage `json:"warnings"`
+	LegacyCanonical string          `json:"canonical_memory"`
+}
+
+func parseConsolidationResponse(resp providers.ChatCompletionResponse) (consolidationOutput, error) {
+	if len(resp.Choices) == 0 {
+		return consolidationOutput{}, fmt.Errorf("no choices returned")
+	}
+	for _, tc := range resp.Choices[0].Message.ToolCalls {
+		if strings.TrimSpace(tc.Function.Name) != consolidationToolName {
+			continue
+		}
+		return parseConsolidationOutput(tc.Function.Arguments)
+	}
+	return consolidationOutput{}, fmt.Errorf("missing %s tool call", consolidationToolName)
+}
+
+// parseConsolidationOutput parses strict structured consolidation JSON. It
+// accepts legacy canonical_memory only when otherwise valid JSON was returned.
+// Malformed JSON and plain prose are rejected so they cannot become memory.
+func parseConsolidationOutput(raw string) (consolidationOutput, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return consolidationOutput{}
+		return consolidationOutput{}, fmt.Errorf("empty consolidation output")
 	}
 
 	// Attempt to extract a JSON object even if the model added surrounding text.
@@ -363,25 +545,67 @@ func parseConsolidationOutput(raw string) consolidationOutput {
 
 	var out consolidationOutput
 	if jsonStr != "" {
-		if err := json.Unmarshal([]byte(jsonStr), &out); err == nil {
-			out.Summary = strings.TrimSpace(out.Summary)
-			out.Facts = sanitizeItems(out.Facts)
-			out.Preferences = sanitizeItems(out.Preferences)
-			out.Goals = sanitizeItems(out.Goals)
-			out.Procedures = sanitizeItems(out.Procedures)
-			// Absorb legacy canonical_memory as a preference if new fields missing.
-			if len(out.Facts)+len(out.Preferences)+len(out.Goals)+len(out.Procedures) == 0 &&
-				strings.TrimSpace(out.LegacyCanonical) != "" {
-				out.Preferences = []string{strings.TrimSpace(out.LegacyCanonical)}
+		if parsed, err := decodeConsolidationJSON(jsonStr); err == nil {
+			out = parsed
+			if out.Summary != "" || len(out.Facts)+len(out.Preferences)+len(out.Goals)+len(out.Procedures)+len(out.Decisions)+len(out.Warnings) > 0 {
+				return out, nil
 			}
-			if out.Summary != "" || len(out.Facts)+len(out.Preferences)+len(out.Goals)+len(out.Procedures) > 0 {
-				return out
-			}
+		} else {
+			return consolidationOutput{}, fmt.Errorf("invalid consolidation JSON: %w", err)
 		}
 	}
 
-	// Final fallback: treat the entire raw text as a summary.
-	return consolidationOutput{Summary: trimTo(raw, maxConsolidationItemLen*5)}
+	return consolidationOutput{}, fmt.Errorf("missing usable consolidation JSON")
+}
+
+func decodeConsolidationJSON(jsonStr string) (consolidationOutput, error) {
+	var raw flexibleConsolidationOutput
+	if err := json.Unmarshal([]byte(jsonStr), &raw); err != nil {
+		return consolidationOutput{}, err
+	}
+	out := consolidationOutput{
+		Summary:         strings.TrimSpace(raw.Summary),
+		LegacyCanonical: strings.TrimSpace(raw.LegacyCanonical),
+	}
+	var err error
+	if out.Facts, err = parseConsolidationItems(raw.Facts); err != nil {
+		return consolidationOutput{}, fmt.Errorf("facts: %w", err)
+	}
+	if out.Preferences, err = parseConsolidationItems(raw.Preferences); err != nil {
+		return consolidationOutput{}, fmt.Errorf("preferences: %w", err)
+	}
+	if out.Goals, err = parseConsolidationItems(raw.Goals); err != nil {
+		return consolidationOutput{}, fmt.Errorf("goals: %w", err)
+	}
+	if out.Procedures, err = parseConsolidationItems(raw.Procedures); err != nil {
+		return consolidationOutput{}, fmt.Errorf("procedures: %w", err)
+	}
+	if out.Decisions, err = parseConsolidationItems(raw.Decisions); err != nil {
+		return consolidationOutput{}, fmt.Errorf("decisions: %w", err)
+	}
+	if out.Warnings, err = parseConsolidationItems(raw.Warnings); err != nil {
+		return consolidationOutput{}, fmt.Errorf("warnings: %w", err)
+	}
+	// Absorb legacy canonical_memory as a preference if new fields missing.
+	if len(out.Facts)+len(out.Preferences)+len(out.Goals)+len(out.Procedures)+len(out.Decisions)+len(out.Warnings) == 0 && out.LegacyCanonical != "" {
+		out.Preferences = []string{out.LegacyCanonical}
+	}
+	return out, nil
+}
+
+func parseConsolidationItems(raw json.RawMessage) ([]string, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	var items []string
+	if err := json.Unmarshal(raw, &items); err == nil {
+		return sanitizeItems(items), nil
+	}
+	var single string
+	if err := json.Unmarshal(raw, &single); err == nil {
+		return sanitizeItems([]string{single}), nil
+	}
+	return nil, fmt.Errorf("expected string or []string")
 }
 
 // extractJSON attempts to locate and return the first complete JSON object
@@ -503,6 +727,8 @@ func buildExtraNotes(parsed consolidationOutput, sourceMsgID sql.NullInt64, embe
 		{db.MemoryKindPreference, parsed.Preferences},
 		{db.MemoryKindGoal, parsed.Goals},
 		{db.MemoryKindProcedure, parsed.Procedures},
+		{db.MemoryKindDecision, parsed.Decisions},
+		{db.MemoryKindWarning, parsed.Warnings},
 	}
 	out := make([]db.TypedNoteInput, 0)
 	for _, g := range groups {

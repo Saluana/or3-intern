@@ -16,6 +16,15 @@ func mustWriteFile(t *testing.T, path string, data []byte, mode os.FileMode) {
 	}
 }
 
+func mustDecodeToolResult(t *testing.T, out string) ToolResult {
+	t.Helper()
+	var result ToolResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("parse tool result: %v\n%s", err, out)
+	}
+	return result
+}
+
 // ---- safePath ----
 
 func TestSafePath_Valid(t *testing.T) {
@@ -96,8 +105,9 @@ func TestReadFile_OK(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	if out != "hello file" {
-		t.Errorf("expected 'hello file', got %q", out)
+	result := mustDecodeToolResult(t, out)
+	if result.Preview != "hello file" {
+		t.Errorf("expected preview 'hello file', got %q", result.Preview)
 	}
 }
 
@@ -122,8 +132,9 @@ func TestReadFile_Truncation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	if len(out) != 100 {
-		t.Errorf("expected 100 bytes, got %d", len(out))
+	result := mustDecodeToolResult(t, out)
+	if len(result.Preview) != 100 {
+		t.Errorf("expected 100 preview bytes, got %d", len(result.Preview))
 	}
 }
 
@@ -352,12 +363,13 @@ func TestListDir_OK(t *testing.T) {
 		t.Fatalf("ListDir: %v", err)
 	}
 
+	result := mustDecodeToolResult(t, out)
 	var entries []struct {
 		Name  string `json:"name"`
 		IsDir bool   `json:"isDir"`
 		Size  int64  `json:"size"`
 	}
-	if err := json.Unmarshal([]byte(out), &entries); err != nil {
+	if err := json.Unmarshal([]byte(result.Preview), &entries); err != nil {
 		t.Fatalf("parse output: %v", err)
 	}
 	if len(entries) != 3 {
@@ -379,8 +391,9 @@ func TestListDir_MaxEntries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListDir: %v", err)
 	}
+	result := mustDecodeToolResult(t, out)
 	var entries []any
-	if err := json.Unmarshal([]byte(out), &entries); err != nil {
+	if err := json.Unmarshal([]byte(result.Preview), &entries); err != nil {
 		t.Fatalf("parse output: %v", err)
 	}
 	if len(entries) != 2 {

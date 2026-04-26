@@ -30,6 +30,9 @@ func TestConfigureTUIFormNavigationHighlightsSelectedField(t *testing.T) {
 	if !strings.Contains(view, "Selected field") || !strings.Contains(view, "Chat model") {
 		t.Fatalf("expected selected field summary for Chat model, got %q", view)
 	}
+	if !strings.Contains(view, "Current value:") || !strings.Contains(view, "main AI model") {
+		t.Fatalf("expected selected field panel to show current value and plain-language help, got %q", view)
+	}
 	if !strings.Contains(view, "▶ ") {
 		t.Fatalf("expected visible selection indicator, got %q", view)
 	}
@@ -71,9 +74,50 @@ func TestConfigureTUISectionPickerShowsExpandedSections(t *testing.T) {
 		titles = append(titles, entry.title)
 	}
 	view := strings.Join(titles, " | ")
-	for _, label := range []string{"Runtime", "Tools", "Skills", "Security", "Hardening", "Automation"} {
+	for _, label := range []string{"Runtime", "Context", "Tools", "Skills", "Security", "Hardening", "Automation"} {
 		if !strings.Contains(view, label) {
 			t.Fatalf("expected %q in section picker, got %q", label, view)
+		}
+	}
+}
+
+func TestConfigureTUIAppliesContextFields(t *testing.T) {
+	cfg := config.Default()
+	if changed, err := applyChoiceSelection(&cfg, "context", "", "context_mode", "balanced"); err != nil || !changed {
+		t.Fatalf("apply context mode: changed=%v err=%v", changed, err)
+	}
+	if changed, err := applyFieldValue(&cfg, "context", "", "context_max_input_tokens", "12345"); err != nil || !changed {
+		t.Fatalf("apply context max input: changed=%v err=%v", changed, err)
+	}
+	if changed := setToggleFieldValue(&cfg, "context", "", "context_manager_enabled", true); !changed {
+		t.Fatal("expected context manager toggle to apply")
+	}
+	if changed, err := applyFieldValue(&cfg, "context", "", "context_manager_model", "mini-context"); err != nil || !changed {
+		t.Fatalf("apply context manager model: changed=%v err=%v", changed, err)
+	}
+	if changed, err := applyFieldValue(&cfg, "context", "", "context_manager_idle_prune", "120"); err != nil || !changed {
+		t.Fatalf("apply context manager idle prune: changed=%v err=%v", changed, err)
+	}
+	if cfg.Context.Mode != "balanced" || cfg.Context.MaxInputTokens != 12345 || !cfg.ContextManager.Enabled || cfg.ContextManager.Model != "mini-context" || cfg.ContextManager.IdlePruneSeconds != 120 {
+		t.Fatalf("unexpected context config: %+v manager=%+v", cfg.Context, cfg.ContextManager)
+	}
+}
+
+func TestConfigureTUIFieldDescriptionsAreHelpful(t *testing.T) {
+	cfg := config.Default()
+	sections := []string{"provider", "storage", "runtime", "context", "workspace", "tools", "docindex", "skills", "security", "hardening", "session", "automation", "service"}
+	for _, section := range sections {
+		for _, field := range buildSectionFields(cfg, section, "/workspace/project") {
+			if len(strings.Fields(field.Description)) < 8 {
+				t.Fatalf("expected helpful description for %s/%s, got %q", section, field.Key, field.Description)
+			}
+		}
+	}
+	for _, channel := range []string{"telegram", "slack", "discord", "whatsapp", "email"} {
+		for _, field := range buildChannelFields(cfg, channel) {
+			if len(strings.Fields(field.Description)) < 8 {
+				t.Fatalf("expected helpful description for %s/%s, got %q", channel, field.Key, field.Description)
+			}
 		}
 	}
 }

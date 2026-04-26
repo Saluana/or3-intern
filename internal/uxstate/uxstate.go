@@ -112,11 +112,13 @@ func BuildSettingsHomeView(cfg config.Config) SettingsHomeView {
 		settingsSection("channels", channelsSummary(cfg), "or3-intern settings --section channels", false),
 		settingsSection("tools", toolsSummary(cfg), "or3-intern settings --section tools", false),
 		settingsSection("memory", memorySummary(cfg), "or3-intern settings --section memory", false),
+		settingsSection("context", contextSummary(cfg), "or3-intern settings --section context", false),
 		settingsSection("advanced", "Raw config sections and export", "or3-intern settings --advanced", true),
 	}, Commands: []string{
 		"or3-intern settings --section provider",
 		"or3-intern settings --section workspace",
 		"or3-intern settings --section safety",
+		"or3-intern settings --section context",
 		"or3-intern settings --export config.json",
 	}}
 }
@@ -160,7 +162,7 @@ func BuildAccessDashboardView(cfg config.Config, report intdoctor.Report, device
 		{Name: "Internet", Status: internetSummary(cfg), Risk: internetRisk, Detail: "Covers web/proxy/network-policy posture for outbound access.", Action: "or3-intern settings --section tools"},
 		{Name: "Connected Apps", Status: channelsSummary(cfg), Risk: channelsRisk(cfg), Detail: "External channel adapters stay optional and hidden until enabled.", Action: "or3-intern settings --section channels"},
 		{Name: "Connected Devices", Status: deviceSummary(cfg, deviceCount, pendingApprovals), Risk: deviceRisk, Detail: "Shows whether phones, apps, or service clients can connect.", Action: "or3-intern connect-device list"},
-		{Name: "Memory", Status: memorySummary(cfg), Risk: "yellow", Detail: "Summarizes standing memory and document indexing.", Action: "or3-intern settings --section memory"},
+		{Name: "Memory", Status: memorySummary(cfg), Risk: "yellow", Detail: "Summarizes standing memory, document indexing, and prompt context packing.", Action: "or3-intern settings --section memory"},
 		{Name: "Activity Log", Status: activitySummary(cfg), Risk: logRisk, Detail: "Shows whether important actions are recorded for review.", Action: "or3-intern status --advanced"},
 	}}
 }
@@ -317,6 +319,19 @@ func memorySummary(cfg config.Config) string {
 		return fmt.Sprintf("Standing memory on; document indexing on for %d root(s)", len(cfg.DocIndex.Roots))
 	}
 	return "Standing memory on; document indexing off"
+}
+
+func contextSummary(cfg config.Config) string {
+	dynamic := "dynamic tools off"
+	if cfg.Context.Tools.DynamicExpose {
+		dynamic = "dynamic tools on"
+	}
+	manager := "manager off"
+	if cfg.ContextManager.Enabled {
+		manager = "manager on"
+	}
+	mode := firstNonEmpty(strings.TrimSpace(cfg.Context.Mode), "quality")
+	return fmt.Sprintf("%s mode; %d max input tokens; %s; %s", mode, cfg.Context.MaxInputTokens, dynamic, manager)
 }
 
 func headline(report intdoctor.Report) string {

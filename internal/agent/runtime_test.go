@@ -2297,7 +2297,7 @@ func TestRuntime_HandleNewSession_FailurePreservesHistory(t *testing.T) {
 	if len(msgs) == 0 {
 		t.Fatal("expected history preserved on archive failure")
 	}
-	if len(deliver.messages) == 0 || !strings.Contains(deliver.messages[0], "Memory archival failed") {
+	if len(deliver.messages) == 0 || !strings.Contains(deliver.messages[0], "Memory archival failed") || !strings.Contains(deliver.messages[0], "bad gateway") {
 		t.Fatalf("expected archival failure message, got %#v", deliver.messages)
 	}
 }

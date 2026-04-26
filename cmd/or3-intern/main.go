@@ -64,8 +64,23 @@ func currentEmbedFingerprint(cfg config.Config) string {
 	return providers.EmbeddingFingerprint(cfg.Provider.APIBase, cfg.Provider.EmbedModel, cfg.Provider.EmbedDimensions)
 }
 
+func effectiveConsolidationModel(cfg config.Config) string {
+	if model := strings.TrimSpace(cfg.ConsolidationModel); model != "" {
+		return model
+	}
+	return cfg.Provider.Model
+}
+
 func newProviderClient(cfg config.Config) *providers.Client {
 	timeout := time.Duration(cfg.Provider.TimeoutSeconds) * time.Second
+	prov := providers.New(cfg.Provider.APIBase, cfg.Provider.APIKey, timeout)
+	prov.EmbedDimensions = cfg.Provider.EmbedDimensions
+	prov.HostPolicy = buildHostPolicy(cfg)
+	return prov
+}
+
+func newConsolidationProviderClient(cfg config.Config) *providers.Client {
+	timeout := effectiveConsolidationTimeout(cfg)
 	prov := providers.New(cfg.Provider.APIBase, cfg.Provider.APIKey, timeout)
 	prov.EmbedDimensions = cfg.Provider.EmbedDimensions
 	prov.HostPolicy = buildHostPolicy(cfg)
@@ -477,10 +492,10 @@ func main() {
 	if cfg.ConsolidationEnabled {
 		rt.Consolidator = &memory.Consolidator{
 			DB:                 d,
-			Provider:           prov,
+			Provider:           newConsolidationProviderClient(cfg),
 			EmbedModel:         cfg.Provider.EmbedModel,
 			EmbedFingerprint:   currentEmbedFingerprint(cfg),
-			ChatModel:          cfg.Provider.Model,
+			ChatModel:          effectiveConsolidationModel(cfg),
 			WindowSize:         cfg.ConsolidationWindowSize,
 			MaxMessages:        cfg.ConsolidationMaxMessages,
 			MaxInputChars:      cfg.ConsolidationMaxInputChars,

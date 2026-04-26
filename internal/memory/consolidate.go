@@ -106,6 +106,64 @@ func (c *Consolidator) ArchiveAll(ctx context.Context, sessionKey string, histor
 	return fmt.Errorf("archive-all exceeded max passes")
 }
 
+// ArchiveResetWindow performs one bounded archival pass over the most recent
+// session messages. It is intended for /new, where reset latency must be
+// predictable and normal background consolidation can continue preserving older
+// history over time.
+func (c *Consolidator) ArchiveResetWindow(ctx context.Context, sessionKey string, historyMax int) error {
+	if c.Provider == nil {
+		return nil
+	}
+	maxMessages := c.MaxMessages
+	if maxMessages <= 0 {
+		maxMessages = 50
+	}
+	if historyMax > maxMessages {
+		maxMessages = historyMax
+	}
+	maxInputChars := c.MaxInputChars
+	if maxInputChars <= 0 {
+		maxInputChars = 12000
+	}
+	canonicalKey := strings.TrimSpace(c.CanonicalPinnedKey)
+	if canonicalKey == "" {
+		canonicalKey = defaultCanonicalMemoryKey
+	}
+
+	rows, err := c.DB.GetLastMessages(ctx, sessionKey, maxMessages)
+	if err != nil {
+		return fmt.Errorf("reset archive messages: %w", err)
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	msgs := make([]db.ConsolidationMessage, 0, len(rows))
+	var lastCandidateID int64
+	for _, row := range rows {
+		msgs = append(msgs, db.ConsolidationMessage{ID: row.ID, Role: row.Role, Content: row.Content})
+		if row.ID > lastCandidateID {
+			lastCandidateID = row.ID
+		}
+	}
+	transcript, lastIncludedID := buildConsolidationTranscript(msgs, maxInputChars)
+	if transcript == "" {
+		return nil
+	}
+	if lastIncludedID == 0 {
+		lastIncludedID = lastCandidateID
+	}
+	memScope := c.resolveMemoryScope(ctx, sessionKey)
+	if err := c.writeConsolidatedTranscript(ctx, sessionKey, memScope, canonicalKey, transcript, lastIncludedID, maxInputChars, "reset_archive"); err != nil {
+		if err == errEmptyConsolidationOutput {
+			log.Printf("reset archive produced no durable memory for session %q; continuing reset", sessionKey)
+			return nil
+		}
+		return err
+	}
+	log.Printf("reset-archived %d recent messages for session %q into one memory note", len(msgs), sessionKey)
+	return nil
+}
+
 // RunOnce performs a single bounded consolidation pass.
 func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMax int, mode RunMode) (bool, error) {
 	if c.Provider == nil {
@@ -151,7 +209,65 @@ func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMa
 	}
 	lastCandidateID := msgs[len(msgs)-1].ID
 
-	// Build a plain-text conversation transcript.
+	transcript, lastIncludedID := buildConsolidationTranscript(msgs, maxInputChars)
+	memScope := c.resolveMemoryScope(ctx, sessionKey)
+	if transcript == "" {
+		_, err := c.DB.WriteConsolidation(ctx, db.ConsolidationWrite{
+			SessionKey:  sessionKey,
+			ScopeKey:    memScope,
+			CursorMsgID: lastCandidateID,
+		})
+		if err != nil {
+			return false, fmt.Errorf("consolidation advance cursor: %w", err)
+		}
+		return true, nil
+	}
+	shouldConsolidate := mode.ArchiveAll || len(msgs) >= windowSize
+	if !shouldConsolidate {
+		adaptiveTriggerChars := maxInputChars / canonicalMemoryInputDivisor
+		if adaptiveTriggerChars <= 0 {
+			adaptiveTriggerChars = 1
+		}
+		if len(msgs) >= maxMessages || len(transcript) >= adaptiveTriggerChars {
+			shouldConsolidate = true
+		}
+	}
+	if !shouldConsolidate {
+		return false, nil
+	}
+	if err := c.writeConsolidatedTranscript(ctx, sessionKey, memScope, canonicalKey, transcript, lastIncludedID, maxInputChars, "consolidation"); err != nil {
+		if err == errEmptyConsolidationOutput {
+			currentCanonical, _, getErr := c.DB.GetPinnedValue(ctx, memScope, canonicalKey)
+			if getErr != nil {
+				return false, fmt.Errorf("consolidation get canonical memory: %w", getErr)
+			}
+			canonicalText := trimTo(currentCanonical, maxInputChars)
+			w := db.ConsolidationWrite{
+				SessionKey:  sessionKey,
+				ScopeKey:    memScope,
+				CursorMsgID: lastIncludedID,
+			}
+			if canonicalText != "" {
+				w.CanonicalKey = canonicalKey
+				w.CanonicalText = canonicalText
+			}
+			_, err := c.DB.WriteConsolidation(ctx, w)
+			if err != nil {
+				return false, fmt.Errorf("consolidation update cursor: %w", err)
+			}
+			log.Printf("consolidated %d messages for session %q (cursor-only)", len(msgs), sessionKey)
+			return true, nil
+		}
+		return false, err
+	}
+
+	log.Printf("consolidated %d messages for session %q", len(msgs), sessionKey)
+	return true, nil
+}
+
+var errEmptyConsolidationOutput = fmt.Errorf("empty consolidation output")
+
+func buildConsolidationTranscript(msgs []db.ConsolidationMessage, maxInputChars int) (string, int64) {
 	var sb strings.Builder
 	var lastIncludedID int64
 	for _, m := range msgs {
@@ -180,7 +296,10 @@ func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMa
 		sb.WriteString("\n")
 		lastIncludedID = m.ID
 	}
-	transcript := strings.TrimSpace(sb.String())
+	return strings.TrimSpace(sb.String()), lastIncludedID
+}
+
+func (c *Consolidator) resolveMemoryScope(ctx context.Context, sessionKey string) string {
 	memScope := sessionKey
 	if c.DB != nil && strings.TrimSpace(sessionKey) != "" {
 		if resolved, resolveErr := c.DB.ResolveScopeKey(ctx, sessionKey); resolveErr == nil && strings.TrimSpace(resolved) != "" {
@@ -190,34 +309,13 @@ func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMa
 	if memScope == "" || memScope == scope.GlobalMemoryScope {
 		memScope = scope.GlobalMemoryScope
 	}
-	if transcript == "" {
-		_, err := c.DB.WriteConsolidation(ctx, db.ConsolidationWrite{
-			SessionKey:  sessionKey,
-			ScopeKey:    memScope,
-			CursorMsgID: lastCandidateID,
-		})
-		if err != nil {
-			return false, fmt.Errorf("consolidation advance cursor: %w", err)
-		}
-		return true, nil
-	}
-	shouldConsolidate := mode.ArchiveAll || len(msgs) >= windowSize
-	if !shouldConsolidate {
-		adaptiveTriggerChars := maxInputChars / canonicalMemoryInputDivisor
-		if adaptiveTriggerChars <= 0 {
-			adaptiveTriggerChars = 1
-		}
-		if len(msgs) >= maxMessages || len(transcript) >= adaptiveTriggerChars {
-			shouldConsolidate = true
-		}
-	}
-	if !shouldConsolidate {
-		return false, nil
-	}
+	return memScope
+}
 
+func (c *Consolidator) writeConsolidatedTranscript(ctx context.Context, sessionKey, memScope, canonicalKey, transcript string, lastIncludedID int64, maxInputChars int, noteTags string) error {
 	currentCanonical, _, err := c.DB.GetPinnedValue(ctx, memScope, canonicalKey)
 	if err != nil {
-		return false, fmt.Errorf("consolidation get canonical memory: %w", err)
+		return fmt.Errorf("consolidation get canonical memory: %w", err)
 	}
 	currentCanonical = trimTo(currentCanonical, maxInputChars/canonicalMemoryInputDivisor)
 
@@ -234,10 +332,10 @@ func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMa
 	}
 	resp, err := c.Provider.Chat(ctx, req)
 	if err != nil {
-		return false, fmt.Errorf("consolidation chat: %w", err)
+		return fmt.Errorf("consolidation chat: %w", err)
 	}
 	if len(resp.Choices) == 0 {
-		return false, fmt.Errorf("consolidation: no choices returned")
+		return fmt.Errorf("consolidation: no choices returned")
 	}
 	parsed := parseConsolidationOutput(contentToStr(resp.Choices[0].Message.Content))
 	summary := trimTo(parsed.Summary, maxInputChars/canonicalMemoryInputDivisor)
@@ -248,21 +346,7 @@ func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMa
 	canonicalText = trimTo(canonicalText, maxInputChars)
 
 	if summary == "" && len(parsed.Facts)+len(parsed.Preferences)+len(parsed.Goals)+len(parsed.Procedures)+len(parsed.Decisions)+len(parsed.Warnings) == 0 {
-		w := db.ConsolidationWrite{
-			SessionKey:  sessionKey,
-			ScopeKey:    memScope,
-			CursorMsgID: lastIncludedID,
-		}
-		if canonicalText != "" {
-			w.CanonicalKey = canonicalKey
-			w.CanonicalText = canonicalText
-		}
-		_, err := c.DB.WriteConsolidation(ctx, w)
-		if err != nil {
-			return false, fmt.Errorf("consolidation update cursor: %w", err)
-		}
-		log.Printf("consolidated %d messages for session %q (cursor-only)", len(msgs), sessionKey)
-		return true, nil
+		return errEmptyConsolidationOutput
 	}
 
 	embedModel := c.EmbedModel
@@ -279,9 +363,7 @@ func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMa
 		embedding = make([]byte, 0)
 	}
 
-	// Build extra typed notes from structured output.
 	extraNotes := buildExtraNotes(parsed, sql.NullInt64{Int64: lastIncludedID, Valid: lastIncludedID > 0}, c.EmbedFingerprint)
-
 	w := db.ConsolidationWrite{
 		SessionKey:       sessionKey,
 		ScopeKey:         memScope,
@@ -289,7 +371,7 @@ func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMa
 		Embedding:        embedding,
 		EmbedFingerprint: c.EmbedFingerprint,
 		SourceMsgID:      sql.NullInt64{Int64: lastIncludedID, Valid: true},
-		NoteTags:         "consolidation",
+		NoteTags:         noteTags,
 		NoteKind:         db.MemoryKindSummary,
 		ExtraNotes:       extraNotes,
 		CursorMsgID:      lastIncludedID,
@@ -302,22 +384,19 @@ func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMa
 	if err != nil && len(embedding) >= 4 && isMemoryVectorProfileMismatchError(err) {
 		wantDims := len(embedding) / 4
 		if rebuildErr := c.DB.RebuildMemoryVecIndexWithProfile(ctx, wantDims, c.EmbedFingerprint); rebuildErr != nil {
-			return false, fmt.Errorf("consolidation write: %w (rebuild failed: %v)", err, rebuildErr)
+			return fmt.Errorf("consolidation write: %w (rebuild failed: %v)", err, rebuildErr)
 		}
 		log.Printf("consolidation memory vectors rebuilt for session %q to %d dims (%s)", sessionKey, wantDims, strings.TrimSpace(c.EmbedFingerprint))
 		_, err = c.DB.WriteConsolidation(ctx, w)
 	}
 	if err != nil {
-		return false, fmt.Errorf("consolidation write: %w", err)
+		return fmt.Errorf("consolidation write: %w", err)
 	}
 
-	// Bounded stale-summary cleanup: mark old, never-used summaries as stale.
 	if _, cleanErr := c.DB.CleanupStaleMemoryNotes(ctx, memScope, db.NowMS(), staleCleanupBatchSize); cleanErr != nil {
 		log.Printf("consolidation cleanup stale notes: %v", cleanErr)
 	}
-
-	log.Printf("consolidated %d messages for session %q into memory note (+%d typed notes)", len(msgs), sessionKey, len(extraNotes))
-	return true, nil
+	return nil
 }
 
 // contentToStr converts a ChatMessage Content (string or other) to a plain string.

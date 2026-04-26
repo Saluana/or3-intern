@@ -117,6 +117,7 @@ type Config struct {
 	WorkerCount            int    `json:"workerCount"`
 
 	ConsolidationEnabled             bool            `json:"consolidationEnabled"`
+	ConsolidationModel               string          `json:"consolidationModel"`
 	ConsolidationWindowSize          int             `json:"consolidationWindowSize"`
 	ConsolidationMaxMessages         int             `json:"consolidationMaxMessages"`
 	ConsolidationMaxInputChars       int             `json:"consolidationMaxInputChars"`
@@ -841,6 +842,9 @@ func ApplyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("OR3_MODEL"); v != "" {
 		cfg.Provider.Model = v
+	}
+	if v := os.Getenv("OR3_CONSOLIDATION_MODEL"); v != "" {
+		cfg.ConsolidationModel = v
 	}
 	if v := os.Getenv("OR3_EMBED_MODEL"); v != "" {
 		cfg.Provider.EmbedModel = v

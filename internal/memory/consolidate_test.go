@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -210,6 +211,79 @@ func TestConsolidator_ArchiveAll_MultiPass(t *testing.T) {
 	}
 	if atomic.LoadInt32(calls.Chat) < 2 {
 		t.Fatalf("expected multiple chat calls for multipass archive, got %d", atomic.LoadInt32(calls.Chat))
+	}
+}
+
+func TestConsolidator_ArchiveResetWindow_OnePassRecentWindow(t *testing.T) {
+	d := openConsolidateTestDB(t)
+	ctx := context.Background()
+	for i := 0; i < 120; i++ {
+		if _, err := d.AppendMessage(ctx, "sess", "user", fmt.Sprintf("line-%03d", i), nil); err != nil {
+			t.Fatalf("AppendMessage: %v", err)
+		}
+	}
+	var chatCalls int32
+	var promptBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/chat/completions":
+			atomic.AddInt32(&chatCalls, 1)
+			body, _ := io.ReadAll(r.Body)
+			promptBody = string(body)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": `{"summary":"reset summary","facts":["recent reset fact"],"preferences":[],"goals":[],"procedures":[],"decisions":[],"warnings":[]}`}}},
+			})
+		case "/embeddings":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"embedding": []float32{0.1, 0.2}}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	prov := providers.New(srv.URL, "test-key", 5*time.Second)
+	prov.HTTP = srv.Client()
+	c := &Consolidator{
+		DB:                 d,
+		Provider:           prov,
+		WindowSize:         10,
+		MaxMessages:        25,
+		MaxInputChars:      4000,
+		EmbedModel:         "embed-model",
+		CanonicalPinnedKey: "long_term_memory",
+	}
+	if err := c.ArchiveResetWindow(ctx, "sess", 40); err != nil {
+		t.Fatalf("ArchiveResetWindow: %v", err)
+	}
+	if atomic.LoadInt32(&chatCalls) != 1 {
+		t.Fatalf("expected one reset archive chat call, got %d", atomic.LoadInt32(&chatCalls))
+	}
+	if strings.Contains(promptBody, "line-000") || !strings.Contains(promptBody, "line-119") {
+		t.Fatalf("expected reset archive to summarize recent window, prompt=%s", promptBody)
+	}
+	notes, err := d.ListMemoryNotesForReembed(ctx)
+	if err != nil {
+		t.Fatalf("ListMemoryNotesForReembed: %v", err)
+	}
+	if len(notes) == 0 {
+		t.Fatalf("expected reset archive memory notes")
+	}
+}
+
+func TestConsolidator_ArchiveResetWindow_EmptyOutputDoesNotBlockReset(t *testing.T) {
+	d := openConsolidateTestDB(t)
+	ctx := context.Background()
+	if _, err := d.AppendMessage(ctx, "sess", "user", "hello", nil); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+	prov, calls := buildConsolidationProvider(t, `{}`, false)
+	c := &Consolidator{DB: d, Provider: prov, WindowSize: 1, MaxMessages: 50, MaxInputChars: 12000}
+	if err := c.ArchiveResetWindow(ctx, "sess", 40); err != nil {
+		t.Fatalf("ArchiveResetWindow should not block reset on empty durable output: %v", err)
+	}
+	if atomic.LoadInt32(calls.Chat) != 1 {
+		t.Fatalf("expected one chat call, got %d", atomic.LoadInt32(calls.Chat))
 	}
 }
 

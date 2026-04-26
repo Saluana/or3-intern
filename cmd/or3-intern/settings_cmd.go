@@ -138,6 +138,11 @@ func runSettingsSection(reader *bufio.Reader, out io.Writer, cfgPath, cwd string
 			return runConfigureWithTUI(cfgPath, cwd, []string{"--section", "docindex"}, settingsConfigureOptions("Memory"))
 		}
 		return runConfigureSectionAndSave(reader, out, cfgPath, cwd, &cfg, "docindex")
+	case "context":
+		if interactive {
+			return runConfigureWithTUI(cfgPath, cwd, []string{"--section", "context"}, settingsConfigureOptions("Context"))
+		}
+		return runConfigureSectionAndSave(reader, out, cfgPath, cwd, &cfg, "context")
 	case "devices":
 		return runSettingsDevices(reader, out, cfgPath, &cfg, interactive)
 	case "safety":

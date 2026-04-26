@@ -7,7 +7,7 @@
 | Key | Purpose |
 | --- | --- |
 | `dbPath`, `artifactsDir`, `workspaceDir`, `allowedDir` | Storage locations and workspace boundaries |
-| `defaultSessionKey`, `session` | Session naming and cross-session identity/scope behavior |
+| `defaultSessionKey`, `session`, `consolidationModel` | Session naming, cross-session identity/scope behavior, and optional memory-compaction model override |
 | `identityFile`, `memoryFile` | Prompt bootstrap files |
 | `provider` | Model API base, model names, embedding settings, keys, temperature, and timeouts |
 | `tools` | Local tool behavior, proxying, timeouts, workspace restrictions, and MCP servers |
@@ -251,6 +251,17 @@ Opt-in file indexing and retrieval:
 
 See [memory-and-context.md](memory-and-context.md).
 
+### Runtime and consolidation
+
+The top-level runtime knobs include conversation history, retrieval, tool-loop limits, and memory consolidation behavior:
+
+- `historyMaxMessages`, `memoryRetrieveLimit`, `vectorSearchK`, `ftsSearchK`
+- `maxToolLoops`, `maxToolBytes`, `maxMediaBytes`
+- `consolidationEnabled`, `consolidationWindowSize`, `consolidationMaxMessages`, `consolidationMaxInputChars`, `consolidationAsyncTimeoutSeconds`
+- `consolidationModel` — optional model used for memory consolidation and `/new` archival; blank falls back to `provider.model`
+
+Override `consolidationModel` with the `OR3_CONSOLIDATION_MODEL` environment variable.
+
 ### `context`
 
 Prompt assembly and token-budget controls:
@@ -291,6 +302,7 @@ The codebase documents these direct environment overrides for service and channe
 - `OR3_SERVICE_ENABLED`
 - `OR3_SERVICE_LISTEN`
 - `OR3_SERVICE_SECRET`
+- `OR3_CONSOLIDATION_MODEL`
 - `OR3_TELEGRAM_TOKEN`
 - `OR3_SLACK_APP_TOKEN`
 - `OR3_SLACK_BOT_TOKEN`

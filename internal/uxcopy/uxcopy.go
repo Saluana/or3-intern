@@ -38,6 +38,7 @@ var settingLabels = map[string]SettingCopy{
 	"channels":                  {Label: "Channels", Hint: "Optional app connections such as Slack, Discord, Telegram, Email, and WhatsApp."},
 	"tools":                     {Label: "Tools", Hint: "Command execution, web access, skills, MCP, and other optional capabilities."},
 	"memory":                    {Label: "Memory", Hint: "Saved notes, conversation history, and document indexing."},
+	"context":                   {Label: "Context", Hint: "Token budgets, memory packing, dynamic tools, and context-manager behavior."},
 	"advanced":                  {Label: "Advanced", Hint: "Raw config sections and export for operators."},
 }
 

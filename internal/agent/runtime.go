@@ -505,8 +505,9 @@ func (r *Runtime) handleNewSession(ctx context.Context, ev bus.Event) error {
 		if historyMax <= 0 {
 			historyMax = 40
 		}
-		if err := r.Consolidator.ArchiveAll(ctx, ev.SessionKey, historyMax); err != nil {
-			msg := "Memory archival failed, session not cleared. Please try again."
+		if err := r.Consolidator.ArchiveResetWindow(ctx, ev.SessionKey, historyMax); err != nil {
+			log.Printf("new session archive failed: session=%s err=%v", ev.SessionKey, err)
+			msg := "Memory archival failed, session not cleared. Cause: " + oneLine(err.Error(), 180)
 			if r.Deliver != nil {
 				if derr := r.deliver(ctx, ev.Channel, replyTarget, msg, ev.Meta); derr != nil {
 					log.Printf("deliver failed: %v", derr)
@@ -516,7 +517,8 @@ func (r *Runtime) handleNewSession(ctx context.Context, ev bus.Event) error {
 		}
 	}
 	if err := r.DB.ResetSessionHistory(ctx, ev.SessionKey); err != nil {
-		msg := "New session failed. Please try again."
+		log.Printf("new session reset failed: session=%s err=%v", ev.SessionKey, err)
+		msg := "New session failed. Cause: " + oneLine(err.Error(), 180)
 		if r.Deliver != nil {
 			if derr := r.deliver(ctx, ev.Channel, replyTarget, msg, ev.Meta); derr != nil {
 				log.Printf("deliver failed: %v", derr)

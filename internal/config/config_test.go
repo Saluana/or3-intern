@@ -24,6 +24,7 @@ func clearConfigEnv(t *testing.T) {
 		"OR3_API_BASE",
 		"OR3_API_KEY",
 		"OR3_MODEL",
+		"OR3_CONSOLIDATION_MODEL",
 		"OR3_EMBED_MODEL",
 		"OR3_EMBED_DIMENSIONS",
 		"OR3_TELEGRAM_TOKEN",
@@ -87,6 +88,9 @@ func TestDefault_Values(t *testing.T) {
 	}
 	if cfg.Provider.Model != "gpt-4.1-mini" {
 		t.Errorf("expected Model='gpt-4.1-mini', got %q", cfg.Provider.Model)
+	}
+	if cfg.ConsolidationModel != "" {
+		t.Errorf("expected ConsolidationModel to default empty for provider-model fallback, got %q", cfg.ConsolidationModel)
 	}
 	if cfg.Provider.APIBase != "https://api.openai.com/v1" {
 		t.Errorf("expected APIBase='https://api.openai.com/v1', got %q", cfg.Provider.APIBase)
@@ -769,6 +773,7 @@ func TestLoad_EnvOverrides(t *testing.T) {
 	t.Setenv("OR3_DB_PATH", "/env/test.db")
 	t.Setenv("OR3_API_KEY", "env-key")
 	t.Setenv("OR3_MODEL", "env-model")
+	t.Setenv("OR3_CONSOLIDATION_MODEL", "env-consolidation-model")
 	t.Setenv("OR3_EMBED_MODEL", "env-embed")
 	t.Setenv("OR3_EMBED_DIMENSIONS", "768")
 	t.Setenv("OR3_API_BASE", "https://env.api")
@@ -789,6 +794,9 @@ func TestLoad_EnvOverrides(t *testing.T) {
 	}
 	if cfg.Provider.Model != "env-model" {
 		t.Errorf("expected Model='env-model', got %q", cfg.Provider.Model)
+	}
+	if cfg.ConsolidationModel != "env-consolidation-model" {
+		t.Errorf("expected ConsolidationModel='env-consolidation-model', got %q", cfg.ConsolidationModel)
 	}
 	if cfg.Provider.EmbedModel != "env-embed" {
 		t.Errorf("expected EmbedModel='env-embed', got %q", cfg.Provider.EmbedModel)

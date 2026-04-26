@@ -82,12 +82,13 @@ Use `--advanced` to also print the underlying finding IDs. Use `--fix <finding-i
 or3-intern settings
 or3-intern settings --section safety
 or3-intern settings --section workspace
+or3-intern settings --section context
 or3-intern settings --export config.json
 ```
 
-This is the user-facing entry point for revisiting setup. The default view is task-based: AI Provider, Workspace Folder, Connected Devices, Safety Level, Channels, Tools, Memory, and Advanced.
+This is the user-facing entry point for revisiting setup. The default view is task-based: AI Provider, Workspace Folder, Connected Devices, Safety Level, Channels, Tools, Memory, Context, and Advanced.
 
-Use `--section` to jump to one task area. Common sections are `provider`, `workspace`, `devices`, `safety`, `channels`, `tools`, `memory`, and `advanced`.
+Use `--section` to jump to one task area. Common sections are `provider`, `workspace`, `devices`, `safety`, `channels`, `tools`, `memory`, `context`, and `advanced`.
 
 Use `--export` when you need the raw JSON config without making JSON editing the normal path.
 
@@ -143,6 +144,7 @@ Examples:
 or3-intern configure
 or3-intern configure --section provider --section web
 or3-intern configure --section channels
+or3-intern configure --section context
 ```
 
 Available sections:
@@ -150,8 +152,17 @@ Available sections:
 - `provider`
 - `storage`
 - `workspace`
+- `runtime`
+- `context`
 - `web`
 - `channels`
+- `tools`
+- `docindex`
+- `skills`
+- `security`
+- `hardening`
+- `session`
+- `automation`
 - `service`
 
 Use `or3-intern init` if you only want the original lightweight first-run provider/storage wizard.

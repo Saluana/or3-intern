@@ -25,6 +25,13 @@ import (
 	"or3-intern/internal/triggers"
 )
 
+type retrievedMemoryLine struct{ memory.Retrieved }
+
+func (m retrievedMemoryLine) memoryKind() string { return m.Kind }
+func (m retrievedMemoryLine) memoryID() int64    { return m.ID }
+func (m retrievedMemoryLine) memoryText() string { return m.Text }
+func (m retrievedMemoryLine) memoryRef() string  { return m.Ref }
+
 const DefaultSoul = `# Soul
 I am or3-intern, a personal AI assistant.
 - Be clear and direct
@@ -165,17 +172,32 @@ func (b *Builder) buildPacket(ctx context.Context, opts BuildOptions) (ContextPa
 	}
 	pinnedText := formatPinned(pinned)
 
+	structuredMax := b.BootstrapMaxChars
+	if structuredMax <= 0 {
+		structuredMax = defaultBootstrapMaxChars
+	}
+	taskCardText := ""
+	if b.DB != nil {
+		if card, ok, err := loadTaskCard(ctx, b.DB, opts.SessionKey); err == nil && ok {
+			taskCardText = renderTaskCard(card, structuredMax)
+		}
+	}
+
 	// embed and retrieve
 	var retrieved []memory.Retrieved
+	var rejected []string
 	if b.Mem != nil && b.Provider != nil && strings.TrimSpace(opts.UserMessage) != "" {
 		vec, err := cachedEmbed(ctx, b.Provider, b.EmbedFingerprint, b.EmbedModel, opts.UserMessage)
 		if err == nil {
-			b.Mem.EmbedFingerprint = b.EmbedFingerprint
-			retrieved, err = b.Mem.Retrieve(ctx, scopeKey, opts.UserMessage, vec, b.VectorK, b.FTSK, b.TopK)
+			mem := *b.Mem
+			mem.EmbedFingerprint = b.EmbedFingerprint
+			mem.TaskContext = taskCardText
+			retrieved, err = mem.Retrieve(ctx, scopeKey, opts.UserMessage, vec, b.VectorK, b.FTSK, b.TopK)
 			if err != nil {
 				log.Printf("memory retrieve failed for scope %q: %v", scopeKey, err)
 				retrieved = nil
 			}
+			rejected = append(rejected, mem.LastRejected...)
 		}
 	}
 	maxEach := b.BootstrapMaxChars
@@ -272,16 +294,6 @@ func (b *Builder) buildPacket(ctx context.Context, opts BuildOptions) (ContextPa
 
 	heartbeat := ""
 	structuredContext := ""
-	taskCardText := ""
-	structuredMax := b.BootstrapMaxChars
-	if structuredMax <= 0 {
-		structuredMax = defaultBootstrapMaxChars
-	}
-	if b.DB != nil {
-		if card, ok, err := loadTaskCard(ctx, b.DB, opts.SessionKey); err == nil && ok {
-			taskCardText = renderTaskCard(card, structuredMax)
-		}
-	}
 	if opts.Autonomous {
 		heartbeat = b.currentHeartbeatText()
 		structuredContext = formatStructuredEventContext(opts.EventMeta, structuredMax)
@@ -296,6 +308,9 @@ func (b *Builder) buildPacket(ctx context.Context, opts BuildOptions) (ContextPa
 	packet := b.buildContextPacket(pinnedText, digestText, memText, b.IdentityText, b.StaticMemory, heartbeat, structuredContext, docContextText, workspaceContextText)
 	packet.RecentHistory = hist
 	packet.Budget = estimatePacketBudget(packet, b)
+	if len(rejected) > 0 {
+		packet.Budget.Rejected = append(packet.Budget.Rejected, rejected...)
+	}
 	return packet, retrieved, nil
 }
 
@@ -623,9 +638,27 @@ func formatRetrievedBounded(ms []memory.Retrieved, maxChars int) (string, []int6
 	var b strings.Builder
 	ids := make([]int64, 0, len(ms))
 	for i, m := range ms {
-		line := fmt.Sprintf("%d) [%s] %s\n", i+1, m.Source, oneLine(m.Text, defaultRetrievedOneLineMax))
+		kind := strings.TrimSpace(m.Kind)
+		if kind == "" {
+			kind = "note"
+		}
+		ref := strings.TrimSpace(m.Ref)
+		if ref == "" && m.ID > 0 {
+			ref = fmt.Sprintf("memory:%d", m.ID)
+		}
+		if ref == "" {
+			ref = m.Source
+		}
+		reason := strings.TrimSpace(m.Reason)
+		if reason == "" {
+			reason = "retrieved"
+		}
+		line := fmt.Sprintf("%d) [%s score=%.3f ref=%s reason=%s] %s\n", i+1, kind, m.Score, ref, reason, oneLine(m.Text, defaultRetrievedOneLineMax))
 		if maxChars > 0 && b.Len()+len(line) > maxChars {
-			break
+			if b.Len() > 0 {
+				break
+			}
+			line = strings.TrimSpace(truncateText(line, maxChars)) + "\n"
 		}
 		b.WriteString(line)
 		if m.ID > 0 {
@@ -670,9 +703,12 @@ func formatMemoryDigestBounded(ms []memory.Retrieved, maxLines int, maxChars int
 		if m.Status != "" && m.Status != db.MemoryStatusActive {
 			continue
 		}
-		line := fmt.Sprintf("- [%s] %s\n", m.Kind, oneLine(m.Text, defaultDigestOneLineMax))
+		line := renderSemanticMemoryDigestLine(retrievedMemoryLine{m}) + "\n"
 		if maxChars > 0 && b.Len()+len(line) > maxChars {
-			break
+			if b.Len() > 0 {
+				break
+			}
+			line = strings.TrimSpace(truncateText(line, maxChars)) + "\n"
 		}
 		b.WriteString(line)
 		if m.ID > 0 {

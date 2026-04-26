@@ -92,6 +92,35 @@ func TestRegistry_Definitions(t *testing.T) {
 	}
 }
 
+func TestRegistry_MetadataInfersGroups(t *testing.T) {
+	r := NewRegistry()
+	r.Register(&mockTool{name: "read_file", desc: ""})
+	r.Register(&mockTool{name: "write_file", desc: ""})
+	r.Register(&mockTool{name: "web_fetch", desc: ""})
+	r.Register(&mockTool{name: "spawn_subagent", desc: ""})
+	if !containsGroup(r.Metadata("read_file").Groups, ToolGroupRead) {
+		t.Fatalf("expected read_file read group")
+	}
+	if !containsGroup(r.Metadata("write_file").Groups, ToolGroupWrite) {
+		t.Fatalf("expected write_file write group")
+	}
+	if !containsGroup(r.Metadata("web_fetch").Groups, ToolGroupWeb) {
+		t.Fatalf("expected web_fetch web group")
+	}
+	if containsGroup(r.Metadata("spawn_subagent").Groups, ToolGroupRead) {
+		t.Fatalf("expected unknown tool to avoid implicit read group")
+	}
+}
+
+func containsGroup(groups []string, want string) bool {
+	for _, group := range groups {
+		if group == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestRegistry_Execute_Success(t *testing.T) {
 	r := NewRegistry()
 	r.Register(&mockTool{name: "test_tool", desc: ""})

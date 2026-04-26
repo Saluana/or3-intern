@@ -364,20 +364,20 @@ func TestFormatMemoryDigest_IncludesDurableKinds(t *testing.T) {
 		{ID: 5, Text: "rolling summary text", Kind: "summary", Status: "active", Score: 0.5},
 	}
 	digest := formatMemoryDigest(retrieved, 10)
-	if !strings.Contains(digest, "preference") {
-		t.Error("expected preference kind in digest")
+	if !strings.Contains(digest, "Preference:") {
+		t.Error("expected readable preference label in digest")
 	}
 	if !strings.Contains(digest, "dark mode") {
 		t.Error("expected preference text in digest")
 	}
-	if !strings.Contains(digest, "fact") {
-		t.Error("expected fact kind in digest")
+	if !strings.Contains(digest, "Fact:") {
+		t.Error("expected readable fact label in digest")
 	}
-	if !strings.Contains(digest, "goal") {
-		t.Error("expected goal kind in digest")
+	if !strings.Contains(digest, "Goal:") {
+		t.Error("expected readable goal label in digest")
 	}
-	if !strings.Contains(digest, "procedure") {
-		t.Error("expected procedure kind in digest")
+	if !strings.Contains(digest, "Procedure:") {
+		t.Error("expected readable procedure label in digest")
 	}
 	// Summaries and notes should NOT appear in digest.
 	if strings.Contains(digest, "rolling summary text") {

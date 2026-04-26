@@ -422,17 +422,18 @@ func main() {
 			DocRetrieveLimit:       cfg.DocIndex.RetrieveLimit,
 			WorkspaceDir:           cfg.WorkspaceDir,
 		}),
-		Artifacts:          art,
-		MaxToolBytes:       cfg.MaxToolBytes,
-		MaxToolLoops:       cfg.MaxToolLoops,
-		Deliver:            delivererFunc(channelManager.Deliver),
-		DefaultScopeKey:    cfg.DefaultSessionKey,
-		LinkDirectMessages: cfg.Session.DirectMessagesShareDefault,
-		IdentityScopeMap:   buildIdentityScopeMap(cfg),
-		Hardening:          cfg.Hardening,
-		AccessProfiles:     cfg.Security.Profiles,
-		Audit:              auditLogger,
-		ApprovalBroker:     approvalBroker,
+		Artifacts:           art,
+		MaxToolBytes:        cfg.MaxToolBytes,
+		MaxToolLoops:        cfg.MaxToolLoops,
+		DynamicToolExposure: cfg.ContextConfigured && cfg.Context.Tools.DynamicExpose,
+		Deliver:             delivererFunc(channelManager.Deliver),
+		DefaultScopeKey:     cfg.DefaultSessionKey,
+		LinkDirectMessages:  cfg.Session.DirectMessagesShareDefault,
+		IdentityScopeMap:    buildIdentityScopeMap(cfg),
+		Hardening:           cfg.Hardening,
+		AccessProfiles:      cfg.Security.Profiles,
+		Audit:               auditLogger,
+		ApprovalBroker:      approvalBroker,
 	}
 	var serviceJobs *agent.JobRegistry
 	if cmd == "service" {
@@ -788,6 +789,7 @@ func buildToolRegistryWithOptions(cfg config.Config, d *db.DB, prov *providers.C
 		reg.Register(&tools.ExecTool{Timeout: time.Duration(cfg.Tools.ExecTimeoutSeconds) * time.Second, RestrictDir: fileRoot, PathAppend: cfg.Tools.PathAppend, AllowedPrograms: append([]string{}, cfg.Hardening.ExecAllowedPrograms...), ChildEnvAllowlist: append([]string{}, cfg.Hardening.ChildEnvAllowlist...), Sandbox: sandboxCfg, EnableLegacyShell: cfg.Hardening.EnableExecShell, ApprovalBroker: approvalBroker})
 	}
 	reg.Register(&tools.ReadFile{FileTool: tools.FileTool{Root: fileRoot}})
+	reg.Register(&tools.ReadArtifact{Store: &artifacts.Store{Dir: cfg.ArtifactsDir, DB: d}, MaxReadBytes: int64(cfg.MaxToolBytes)})
 	reg.Register(&tools.WriteFile{FileTool: tools.FileTool{Root: fileRoot}})
 	reg.Register(&tools.EditFile{FileTool: tools.FileTool{Root: fileRoot}})
 	reg.Register(&tools.ListDir{FileTool: tools.FileTool{Root: fileRoot}})

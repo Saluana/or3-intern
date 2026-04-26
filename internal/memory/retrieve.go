@@ -3,11 +3,13 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"sort"
 	"strings"
 
 	"or3-intern/internal/db"
+	"or3-intern/internal/scope"
 )
 
 // Retrieved is one memory hit returned from hybrid retrieval.
@@ -19,9 +21,13 @@ type Retrieved struct {
 	Kind       string
 	Status     string
 	Importance float64
+	Confidence float64
+	ExpiresAt  int64
 	UseCount   int
 	CreatedAt  int64
 	LastUsedAt int64
+	Ref        string
+	Reason     string
 }
 
 // Retriever ranks vector, FTS, lexical, and recency signals into a single result set.
@@ -32,12 +38,15 @@ type Retriever struct {
 	FTSWeight        float64
 	LexicalWeight    float64
 	RecencyWeight    float64
+	TaskWeight       float64
 	VectorScanLimit  int
+	TaskContext      string
+	LastRejected     []string
 }
 
 // NewRetriever constructs a Retriever with default ranking weights.
 func NewRetriever(d *db.DB) *Retriever {
-	return &Retriever{DB: d, VectorWeight: 0.55, FTSWeight: 0.25, LexicalWeight: 0.12, RecencyWeight: 0.08, VectorScanLimit: 2000}
+	return &Retriever{DB: d, VectorWeight: 0.50, FTSWeight: 0.22, LexicalWeight: 0.12, RecencyWeight: 0.08, TaskWeight: 0.08, VectorScanLimit: 2000}
 }
 
 // Retrieve runs hybrid retrieval and returns diversified top-k memory results.
@@ -50,6 +59,7 @@ func (r *Retriever) Retrieve(ctx context.Context, sessionKey, query string, quer
 }
 
 func (r *Retriever) retrieveCandidates(ctx context.Context, sessionKey, query string, queryVec []float32, vectorK, ftsK int) ([]Retrieved, error) {
+	r.LastRejected = nil
 	var vecs []VecCandidate
 	var err error
 	if strings.TrimSpace(r.EmbedFingerprint) == "" {
@@ -79,12 +89,16 @@ func (r *Retriever) retrieveCandidates(ctx context.Context, sessionKey, query st
 		text       string
 		v          float64
 		f          float64
+		doc        float64
 		createdAt  int64
 		kind       string
 		status     string
 		importance float64
+		confidence float64
+		expiresAt  int64
 		useCount   int
 		lastUsedAt int64
+		ref        string
 	}
 	m := map[int64]*agg{}
 	for _, c := range vecs {
@@ -96,8 +110,11 @@ func (r *Retriever) retrieveCandidates(ctx context.Context, sessionKey, query st
 				kind:       c.Kind,
 				status:     c.Status,
 				importance: c.Importance,
+				confidence: c.Confidence,
+				expiresAt:  c.ExpiresAt,
 				useCount:   c.UseCount,
 				lastUsedAt: c.LastUsedAt,
+				ref:        fmt.Sprintf("memory:%d", c.ID),
 			}
 			m[c.ID] = a
 		}
@@ -115,8 +132,11 @@ func (r *Retriever) retrieveCandidates(ctx context.Context, sessionKey, query st
 				kind:       f.Kind,
 				status:     f.Status,
 				importance: f.Importance,
+				confidence: f.Confidence,
+				expiresAt:  f.ExpiresAt,
 				useCount:   f.UseCount,
 				lastUsedAt: f.LastUsedAt,
+				ref:        fmt.Sprintf("memory:%d", f.ID),
 			}
 			m[f.ID] = a
 		} else {
@@ -131,9 +151,25 @@ func (r *Retriever) retrieveCandidates(ctx context.Context, sessionKey, query st
 			a.createdAt = f.CreatedAt
 		}
 	}
+	if ftsK > 0 {
+		docs, _ := retrieveDocCandidates(ctx, r.DB, sessionKey, query, ftsK)
+		for i, doc := range docs {
+			id := -int64(i + 1)
+			m[id] = &agg{
+				id:        id,
+				text:      doc.Excerpt,
+				doc:       doc.Score,
+				createdAt: db.NowMS(),
+				kind:      db.MemoryKindFile,
+				status:    db.MemoryStatusActive,
+				ref:       "file:" + doc.Path,
+			}
+		}
+	}
 
 	raw := make([]Retrieved, 0, len(m))
 	tokens := retrievalTokens(query)
+	taskTokens := retrievalTokens(r.TaskContext)
 	newest := int64(0)
 	for _, a := range m {
 		if a.createdAt > newest {
@@ -142,8 +178,9 @@ func (r *Retriever) retrieveCandidates(ctx context.Context, sessionKey, query st
 	}
 	for _, a := range m {
 		lexical := lexicalOverlapScore(tokens, a.text)
+		task := lexicalOverlapScore(taskTokens, a.text)
 		recency := recencyScore(a.createdAt, newest)
-		score := (a.v * r.VectorWeight) + (a.f * r.FTSWeight) + (lexical * r.LexicalWeight) + (recency * r.RecencyWeight)
+		score := (a.v * r.VectorWeight) + (a.f * r.FTSWeight) + (a.doc * r.FTSWeight) + (lexical * r.LexicalWeight) + (task * r.TaskWeight) + (recency * r.RecencyWeight)
 
 		// Apply small bounded metadata adjustments so vector/FTS relevance
 		// still dominates while durable/active notes get a slight preference.
@@ -159,6 +196,17 @@ func (r *Retriever) retrieveCandidates(ctx context.Context, sessionKey, query st
 		if a.v > 0 && a.f == 0 {
 			src = "vector"
 		}
+		if a.doc > 0 {
+			src = "doc"
+		}
+		reason := "ranked by relevance"
+		if task > 0 {
+			reason = "matches current task"
+		} else if lexical > 0 {
+			reason = "matches query terms"
+		} else if a.doc > 0 {
+			reason = "indexed document match"
+		}
 		raw = append(raw, Retrieved{
 			Source:     src,
 			ID:         a.id,
@@ -167,9 +215,13 @@ func (r *Retriever) retrieveCandidates(ctx context.Context, sessionKey, query st
 			Kind:       a.kind,
 			Status:     a.status,
 			Importance: a.importance,
+			Confidence: a.confidence,
+			ExpiresAt:  a.expiresAt,
 			UseCount:   a.useCount,
 			CreatedAt:  a.createdAt,
 			LastUsedAt: a.lastUsedAt,
+			Ref:        a.ref,
+			Reason:     reason,
 		})
 	}
 
@@ -183,7 +235,35 @@ func (r *Retriever) retrieveCandidates(ctx context.Context, sessionKey, query st
 }
 
 func (r *Retriever) packToBudget(candidates []Retrieved, topK int) []Retrieved {
-	return diversifyRetrieved(candidates, topK)
+	return r.diversifyRetrieved(candidates, topK)
+}
+
+func retrieveDocCandidates(ctx context.Context, d *db.DB, sessionKey, query string, topK int) ([]RetrievedDoc, error) {
+	if d == nil || strings.TrimSpace(query) == "" || topK <= 0 {
+		return nil, nil
+	}
+	retriever := &DocRetriever{DB: d}
+	scopes := []string{scope.GlobalMemoryScope}
+	if trimmed := strings.TrimSpace(sessionKey); trimmed != "" && trimmed != scope.GlobalMemoryScope {
+		scopes = append(scopes, trimmed)
+	}
+	seen := map[string]struct{}{}
+	out := make([]RetrievedDoc, 0, topK*len(scopes))
+	for _, docScope := range scopes {
+		docs, err := retriever.RetrieveDocs(ctx, docScope, query, topK)
+		if err != nil {
+			continue
+		}
+		for _, doc := range docs {
+			key := doc.Path + "\x00" + doc.Excerpt
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, doc)
+		}
+	}
+	return out, nil
 }
 
 func searchFTSWithFallback(ctx context.Context, d *db.DB, sessionKey, query string, k int) ([]db.FTSCandidate, error) {
@@ -287,7 +367,7 @@ func recencyScore(createdAt, newest int64) float64 {
 	return math.Exp(-ageHours / (24 * 14))
 }
 
-func diversifyRetrieved(items []Retrieved, topK int) []Retrieved {
+func (r *Retriever) diversifyRetrieved(items []Retrieved, topK int) []Retrieved {
 	if topK <= 0 || len(items) == 0 {
 		return nil
 	}
@@ -295,9 +375,14 @@ func diversifyRetrieved(items []Retrieved, topK int) []Retrieved {
 	seenCanonical := map[string]struct{}{}
 	sourceCounts := map[string]int{}
 	for _, item := range items {
+		if reject := retrievalRejectReason(item); reject != "" {
+			r.LastRejected = append(r.LastRejected, fmt.Sprintf("%s %s: %s", item.Ref, oneLineForReject(item.Text), reject))
+			continue
+		}
 		canonical := canonicalRetrievedText(item.Text)
 		if canonical != "" {
 			if _, ok := seenCanonical[canonical]; ok {
+				r.LastRejected = append(r.LastRejected, fmt.Sprintf("%s: duplicate", item.Ref))
 				continue
 			}
 			duplicate := false
@@ -308,6 +393,7 @@ func diversifyRetrieved(items []Retrieved, topK int) []Retrieved {
 				}
 			}
 			if duplicate {
+				r.LastRejected = append(r.LastRejected, fmt.Sprintf("%s: near-duplicate", item.Ref))
 				continue
 			}
 		}
@@ -329,6 +415,27 @@ func diversifyRetrieved(items []Retrieved, topK int) []Retrieved {
 		return selected[i].Score > selected[j].Score
 	})
 	return selected
+}
+
+func retrievalRejectReason(item Retrieved) string {
+	if item.Status == db.MemoryStatusStale || item.Status == db.MemoryStatusSuperseded {
+		return "lifecycle status " + item.Status
+	}
+	if item.ExpiresAt > 0 && item.ExpiresAt <= db.NowMS() {
+		return "expired"
+	}
+	if item.Confidence > 0 && item.Confidence < 0.2 {
+		return "low confidence"
+	}
+	return ""
+}
+
+func oneLineForReject(text string) string {
+	text = strings.Join(strings.Fields(text), " ")
+	if len(text) > 80 {
+		return text[:80] + "..."
+	}
+	return text
 }
 
 func canonicalRetrievedText(text string) string {

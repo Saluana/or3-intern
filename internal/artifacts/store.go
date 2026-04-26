@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +20,14 @@ import (
 type Store struct {
 	Dir string
 	DB  *db.DB
+}
+
+// ReadResult contains a bounded artifact read authorized for a session.
+type ReadResult struct {
+	Artifact  StoredArtifact
+	Content   string
+	Truncated bool
+	ReadBytes int
 }
 
 // Save writes data to disk and returns the stored artifact ID.
@@ -81,6 +90,88 @@ func (s *Store) Lookup(ctx context.Context, artifactID string) (StoredArtifact, 
 		return StoredArtifact{}, err
 	}
 	return stored, nil
+}
+
+// ReadCapped reads at most maxBytes from artifactID after checking that the
+// artifact belongs to the caller's session or resolved scope.
+func (s *Store) ReadCapped(ctx context.Context, sessionKey, artifactID string, maxBytes int64) (ReadResult, error) {
+	if maxBytes <= 0 {
+		maxBytes = 200000
+	}
+	stored, err := s.Lookup(ctx, artifactID)
+	if err != nil {
+		return ReadResult{}, err
+	}
+	if !s.sessionCanRead(ctx, sessionKey, stored.SessionKey) {
+		return ReadResult{}, fmt.Errorf("artifact not available for session")
+	}
+	path, err := s.safeStoredPath(stored.Path)
+	if err != nil {
+		return ReadResult{}, err
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return ReadResult{}, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
+	if err != nil {
+		return ReadResult{}, err
+	}
+	truncated := int64(len(data)) > maxBytes
+	if truncated {
+		data = data[:maxBytes]
+	}
+	return ReadResult{Artifact: stored, Content: string(data), Truncated: truncated, ReadBytes: len(data)}, nil
+}
+
+func (s *Store) sessionCanRead(ctx context.Context, requestSession, artifactSession string) bool {
+	requestSession = strings.TrimSpace(requestSession)
+	artifactSession = strings.TrimSpace(artifactSession)
+	if requestSession == "" || artifactSession == "" {
+		return false
+	}
+	if requestSession == artifactSession {
+		return true
+	}
+	if s.DB == nil {
+		return false
+	}
+	resolved, err := s.DB.ResolveScopeKey(ctx, requestSession)
+	if err != nil || strings.TrimSpace(resolved) == "" {
+		return false
+	}
+	return strings.TrimSpace(resolved) == artifactSession
+}
+
+func (s *Store) safeStoredPath(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", fmt.Errorf("artifact path missing")
+	}
+	if strings.TrimSpace(s.Dir) == "" {
+		return "", fmt.Errorf("artifacts dir not set")
+	}
+	root, err := filepath.Abs(s.Dir)
+	if err != nil {
+		return "", err
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", err
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	if evaluated, evalErr := filepath.EvalSymlinks(abs); evalErr == nil {
+		abs = evaluated
+	}
+	rel, err := filepath.Rel(root, abs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("artifact path outside store")
+	}
+	return abs, nil
 }
 
 func randID() string {

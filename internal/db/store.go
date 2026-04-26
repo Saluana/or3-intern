@@ -475,6 +475,8 @@ type FTSCandidate struct {
 	Kind       string
 	Status     string
 	Importance float64
+	Confidence float64
+	ExpiresAt  int64
 	UseCount   int
 	LastUsedAt int64
 }
@@ -487,6 +489,8 @@ type VecCandidateRow struct {
 	Kind       string
 	Status     string
 	Importance float64
+	Confidence float64
+	ExpiresAt  int64
 	UseCount   int
 	LastUsedAt int64
 }
@@ -540,7 +544,8 @@ func (d *DB) SearchVecScope(ctx context.Context, sessionKey string, queryVec []b
 	rows, err := d.VecSQL.QueryContext(ctx,
 		`SELECT memory_vec.note_id, memory_vec.text, distance,
 		        memory_notes.created_at, memory_notes.kind, memory_notes.status,
-		        memory_notes.importance, memory_notes.use_count, memory_notes.last_used_at
+		        memory_notes.importance, memory_notes.confidence, memory_notes.expires_at,
+		        memory_notes.use_count, memory_notes.last_used_at
 		 FROM memory_vec
 		 JOIN memory_notes ON memory_notes.id = memory_vec.note_id
 		 WHERE memory_vec.embedding MATCH ? AND memory_vec.k = ? AND memory_vec.session_key = ?
@@ -562,7 +567,7 @@ func (d *DB) SearchVecScopeFallback(ctx context.Context, sessionKey string, quer
 	}
 	rows, err := d.VecSQL.QueryContext(ctx,
 		`SELECT id, text, vec_distance_cosine(embedding, ?) AS distance,
-		        created_at, kind, status, importance, use_count, last_used_at
+		        created_at, kind, status, importance, confidence, expires_at, use_count, last_used_at
 		 FROM memory_notes
 		 WHERE session_key=? AND typeof(embedding)='blob' AND length(embedding)=?
 		 ORDER BY distance ASC
@@ -582,7 +587,7 @@ func scanVecCandidateRows(rows *sql.Rows) ([]VecCandidateRow, error) {
 		var distance sql.NullFloat64
 		if err := rows.Scan(
 			&item.ID, &item.Text, &distance, &item.CreatedAt,
-			&item.Kind, &item.Status, &item.Importance, &item.UseCount, &item.LastUsedAt,
+			&item.Kind, &item.Status, &item.Importance, &item.Confidence, &item.ExpiresAt, &item.UseCount, &item.LastUsedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -601,7 +606,8 @@ func (d *DB) SearchFTS(ctx context.Context, sessionKey, query string, k int) ([]
 	rows, err := d.SQL.QueryContext(ctx,
 		`SELECT memory_fts.rowid, memory_fts.text, bm25(memory_fts) as rank,
 		        memory_notes.created_at, memory_notes.kind, memory_notes.status,
-		        memory_notes.importance, memory_notes.use_count, memory_notes.last_used_at
+		        memory_notes.importance, memory_notes.confidence, memory_notes.expires_at,
+		        memory_notes.use_count, memory_notes.last_used_at
 		 FROM memory_fts
 		 JOIN memory_notes ON memory_notes.id = memory_fts.rowid
 		 WHERE memory_fts MATCH ? AND memory_notes.session_key IN (?, ?)
@@ -616,7 +622,7 @@ func (d *DB) SearchFTS(ctx context.Context, sessionKey, query string, k int) ([]
 		var c FTSCandidate
 		if err := rows.Scan(
 			&c.ID, &c.Text, &c.Rank, &c.CreatedAt,
-			&c.Kind, &c.Status, &c.Importance, &c.UseCount, &c.LastUsedAt,
+			&c.Kind, &c.Status, &c.Importance, &c.Confidence, &c.ExpiresAt, &c.UseCount, &c.LastUsedAt,
 		); err != nil {
 			return nil, err
 		}

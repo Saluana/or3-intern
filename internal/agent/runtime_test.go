@@ -1969,6 +1969,93 @@ func TestToToolDefs_SortsByToolNameDeterministically(t *testing.T) {
 	}
 }
 
+func TestDynamicToolExposureSelectsIntentGroups(t *testing.T) {
+	reg := tools.NewRegistry()
+	reg.Register(&alphaTool{})
+	reg.Register(&namedRuntimeTool{name: "write_file"})
+	reg.Register(&namedRuntimeTool{name: "exec"})
+	reg.Register(&namedRuntimeTool{name: "web_fetch"})
+	rt := &Runtime{DynamicToolExposure: true}
+	exposed := rt.exposedToolsForTurn(reg, []providers.ChatMessage{{Role: "user", Content: "please edit the config file"}}, "")
+	defs := toToolDefs(exposed)
+	names := make([]string, 0, len(defs))
+	for _, def := range defs {
+		names = append(names, def.Function.Name)
+	}
+	if !containsString(names, "write_file") || containsString(names, "exec") || containsString(names, "web_fetch") {
+		t.Fatalf("expected write intent to expose write tools without exec/web, got %v", names)
+	}
+}
+
+func TestUnchangedExposedToolsLeavesPrefixIdentical(t *testing.T) {
+	reg := tools.NewRegistry()
+	reg.Register(&namedRuntimeTool{name: "read_file"})
+	reg.Register(&namedRuntimeTool{name: "write_file"})
+	rt := &Runtime{DynamicToolExposure: true}
+	first := toToolDefs(rt.exposedToolsForTurn(reg, []providers.ChatMessage{{Role: "user", Content: "edit the config"}}, ""))
+	second := toToolDefs(rt.exposedToolsForTurn(reg, []providers.ChatMessage{{Role: "user", Content: "modify the config"}}, ""))
+	if fmt.Sprint(first) != fmt.Sprint(second) {
+		t.Fatalf("expected unchanged exposed write tool set to stay stable, first=%#v second=%#v", first, second)
+	}
+}
+
+func TestExposedToolSetChangeRebuildsPrefix(t *testing.T) {
+	reg := tools.NewRegistry()
+	reg.Register(&namedRuntimeTool{name: "read_file"})
+	reg.Register(&namedRuntimeTool{name: "write_file"})
+	reg.Register(&namedRuntimeTool{name: "web_fetch"})
+	rt := &Runtime{DynamicToolExposure: true}
+	readDefs := toToolDefs(rt.exposedToolsForTurn(reg, []providers.ChatMessage{{Role: "user", Content: "inspect the file"}}, ""))
+	webDefs := toToolDefs(rt.exposedToolsForTurn(reg, []providers.ChatMessage{{Role: "user", Content: "fetch this url"}}, ""))
+	if fmt.Sprint(readDefs) == fmt.Sprint(webDefs) || !toolDefsContain(webDefs, "web_fetch") {
+		t.Fatalf("expected web intent to change exposed schemas, read=%#v web=%#v", readDefs, webDefs)
+	}
+}
+
+func TestDynamicToolExposureDoesNotExposeUnknownToolsByDefault(t *testing.T) {
+	reg := tools.NewRegistry()
+	reg.Register(&namedRuntimeTool{name: "read_file"})
+	reg.Register(&namedRuntimeTool{name: "spawn_subagent"})
+	rt := &Runtime{DynamicToolExposure: true}
+	defs := toToolDefs(rt.exposedToolsForTurn(reg, []providers.ChatMessage{{Role: "user", Content: "inspect the file"}}, ""))
+	if toolDefsContain(defs, "spawn_subagent") {
+		t.Fatalf("expected unknown tool to stay hidden from default read exposure, got %#v", defs)
+	}
+}
+
+type namedRuntimeTool struct {
+	tools.Base
+	name string
+}
+
+func (t *namedRuntimeTool) Name() string               { return t.name }
+func (t *namedRuntimeTool) Description() string        { return t.name }
+func (t *namedRuntimeTool) Parameters() map[string]any { return map[string]any{"type": "object"} }
+func (t *namedRuntimeTool) Schema() map[string]any {
+	return t.SchemaFor(t.name, t.name, t.Parameters())
+}
+func (t *namedRuntimeTool) Execute(ctx context.Context, params map[string]any) (string, error) {
+	return "ok", nil
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func toolDefsContain(defs []providers.ToolDef, want string) bool {
+	for _, def := range defs {
+		if def.Function.Name == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestRuntime_BoundTextResult_ArtifactsPreviewAndID(t *testing.T) {
 	d := openTestDB(t)
 	artifactsDir := t.TempDir()

@@ -165,6 +165,27 @@ func TestStore_SaveNamedAndLookup(t *testing.T) {
 	}
 }
 
+func TestStore_ReadCapped_ChecksSessionAndBoundsContent(t *testing.T) {
+	d := openTestDB(t)
+	dir := t.TempDir()
+	ctx := context.Background()
+	store := &Store{Dir: dir, DB: d}
+	id, err := store.Save(ctx, "sess", "text/plain", []byte("abcdef"))
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := store.ReadCapped(ctx, "sess", id, 3)
+	if err != nil {
+		t.Fatalf("ReadCapped: %v", err)
+	}
+	if got.Content != "abc" || !got.Truncated || got.ReadBytes != 3 {
+		t.Fatalf("expected bounded truncated read, got %+v", got)
+	}
+	if _, err := store.ReadCapped(ctx, "other", id, 3); err == nil {
+		t.Fatalf("expected cross-session read to be denied")
+	}
+}
+
 func TestStore_Save_CreatesSessionAutomatically(t *testing.T) {
 	d := openTestDB(t)
 	dir := t.TempDir()

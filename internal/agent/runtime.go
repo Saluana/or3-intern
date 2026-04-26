@@ -51,20 +51,21 @@ type sessionLock struct {
 
 // Runtime executes conversational turns against the configured model and tools.
 type Runtime struct {
-	DB               *db.DB
-	Provider         *providers.Client
-	Model            string
-	Temperature      float64
-	Tools            *tools.Registry
-	Hardening        config.HardeningConfig
-	AccessProfiles   config.AccessProfilesConfig
-	Builder          *Builder
-	Artifacts        *artifacts.Store
-	MaxToolBytes     int
-	MaxToolLoops     int
-	ToolPreviewBytes int
-	Audit            *security.AuditLogger
-	ApprovalBroker   *approval.Broker
+	DB                  *db.DB
+	Provider            *providers.Client
+	Model               string
+	Temperature         float64
+	Tools               *tools.Registry
+	Hardening           config.HardeningConfig
+	AccessProfiles      config.AccessProfilesConfig
+	Builder             *Builder
+	Artifacts           *artifacts.Store
+	MaxToolBytes        int
+	MaxToolLoops        int
+	ToolPreviewBytes    int
+	DynamicToolExposure bool
+	Audit               *security.AuditLogger
+	ApprovalBroker      *approval.Broker
 
 	Deliver  Deliverer
 	Streamer channels.StreamingChannel
@@ -562,7 +563,7 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 		req := providers.ChatCompletionRequest{
 			Model:       r.Model,
 			Messages:    messages,
-			Tools:       toToolDefs(reg),
+			Tools:       toToolDefs(r.exposedToolsForTurn(reg, messages, channel)),
 			Temperature: r.Temperature,
 		}
 
@@ -683,6 +684,79 @@ func (r *Runtime) effectiveTools(ctx context.Context, fallback *tools.Registry) 
 		return tools.NewRegistry()
 	}
 	return fallback
+}
+
+func (r *Runtime) exposedToolsForTurn(reg *tools.Registry, messages []providers.ChatMessage, channel string) *tools.Registry {
+	if reg == nil || r == nil || !r.DynamicToolExposure {
+		return reg
+	}
+	intent := latestUserText(messages) + " " + strings.TrimSpace(channel)
+	groups := selectedToolGroups(intent)
+	allowed := map[string]struct{}{}
+	for _, name := range reg.Names() {
+		meta := reg.Metadata(name)
+		if meta.Hidden || hasGroup(meta.Groups, tools.ToolGroupHidden) {
+			continue
+		}
+		if hasAnyGroup(meta.Groups, groups) {
+			allowed[name] = struct{}{}
+		}
+	}
+	return reg.CloneSelected(allowed)
+}
+
+func latestUserText(messages []providers.ChatMessage) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			return contentToString(messages[i].Content)
+		}
+	}
+	return ""
+}
+
+func selectedToolGroups(intent string) map[string]struct{} {
+	lower := strings.ToLower(intent)
+	groups := map[string]struct{}{
+		tools.ToolGroupRead:   {},
+		tools.ToolGroupMemory: {},
+	}
+	if strings.Contains(lower, "write") || strings.Contains(lower, "edit") || strings.Contains(lower, "modify") || strings.Contains(lower, "create file") || strings.Contains(lower, "patch") {
+		groups[tools.ToolGroupWrite] = struct{}{}
+	}
+	if strings.Contains(lower, "run") || strings.Contains(lower, "exec") || strings.Contains(lower, "command") || strings.Contains(lower, "shell") || strings.Contains(lower, "test") || strings.Contains(lower, "build") {
+		groups[tools.ToolGroupExec] = struct{}{}
+	}
+	if strings.Contains(lower, "http") || strings.Contains(lower, "web") || strings.Contains(lower, "url") || strings.Contains(lower, "search") || strings.Contains(lower, "internet") {
+		groups[tools.ToolGroupWeb] = struct{}{}
+	}
+	if strings.Contains(lower, "cron") || strings.Contains(lower, "schedule") || strings.Contains(lower, "remind") {
+		groups[tools.ToolGroupCron] = struct{}{}
+	}
+	if strings.Contains(lower, "skill") {
+		groups[tools.ToolGroupSkills] = struct{}{}
+	}
+	if strings.TrimSpace(intent) != "" {
+		groups[tools.ToolGroupChannels] = struct{}{}
+	}
+	return groups
+}
+
+func hasAnyGroup(groups []string, allowed map[string]struct{}) bool {
+	for _, group := range groups {
+		if _, ok := allowed[group]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func hasGroup(groups []string, want string) bool {
+	for _, group := range groups {
+		if group == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Runtime) streamerForContext(ctx context.Context) channels.StreamingChannel {
@@ -1171,9 +1245,10 @@ func (r *Runtime) boundTextResult(ctx context.Context, sessionKey string, text s
 			return text, preview, ""
 		}
 		if r.DB != nil {
+			summary := buildArtifactSummary(id, "text/plain", preview, int64(len(text)))
 			if _, err := r.DB.InsertMemoryNoteTyped(ctx, sessionKey, db.TypedNoteInput{
-				Text:             preview,
-				Summary:          preview,
+				Text:             summary,
+				Summary:          compactSemanticJSON(db.MemoryKindArtifact, preview, []string{"artifact:" + id}),
 				SourceArtifactID: id,
 				Kind:             db.MemoryKindArtifact,
 				Status:           db.MemoryStatusActive,

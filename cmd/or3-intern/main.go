@@ -87,6 +87,21 @@ func newConsolidationProviderClient(cfg config.Config) *providers.Client {
 	return prov
 }
 
+func newContextManagerProviderClient(cfg config.Config) *providers.Client {
+	timeout := time.Duration(cfg.ContextManager.TimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	apiBase := strings.TrimSpace(cfg.ContextManager.Provider)
+	if apiBase == "" {
+		apiBase = cfg.Provider.APIBase
+	}
+	prov := providers.New(apiBase, cfg.Provider.APIKey, timeout)
+	prov.EmbedDimensions = cfg.Provider.EmbedDimensions
+	prov.HostPolicy = buildHostPolicy(cfg)
+	return prov
+}
+
 func main() {
 	cfgPath, args, showHelp, unsafeDev, advancedHelp, err := parseRootCLIArgs(os.Args[1:], os.Stderr)
 	if err != nil {
@@ -160,6 +175,14 @@ func main() {
 			args = []string{"chat"}
 		}
 		if cmd != "chat" {
+			return
+		}
+	}
+	if setupRan, err := maybeRunFirstRunSetup(cfgPath, cmd, args); err != nil {
+		fmt.Fprintln(os.Stderr, "setup error:", err)
+		os.Exit(1)
+	} else if setupRan {
+		if cmd == "chat" {
 			return
 		}
 	}
@@ -452,6 +475,9 @@ func main() {
 		ContextManager:              cfg.ContextManager,
 		DisableRollingConsolidation: !cfg.ConsolidationEnabled,
 	}
+	if cfg.ContextManager.Enabled {
+		rt.ContextManagerProvider = newContextManagerProviderClient(cfg)
+	}
 	var serviceJobs *agent.JobRegistry
 	if cmd == "service" {
 		serviceJobs = agent.NewJobRegistry(0, 0)
@@ -728,6 +754,50 @@ func commandHandledBeforeConfigLoad(cmd string) bool {
 	default:
 		return false
 	}
+}
+
+func maybeRunFirstRunSetup(cfgPath, cmd string, args []string) (bool, error) {
+	path := cfgPathOrDefault(cfgPath)
+	if _, err := os.Stat(path); err == nil {
+		return false, nil
+	} else if !os.IsNotExist(err) {
+		return false, err
+	}
+	next := firstRunNextStep(cmd, args)
+	result, err := runSetupWithIOOptions(os.Stdin, os.Stdout, path, currentWorkingDir(), setupOptions{
+		AskStartChat:     cmd == "chat",
+		StartChatDefault: true,
+		CompletionNext:   next,
+		AutoInvoked:      true,
+	})
+	if err != nil {
+		return true, err
+	}
+	if cmd == "chat" && !result.StartChat {
+		return true, nil
+	}
+	return false, nil
+}
+
+func firstRunNextStep(cmd string, args []string) string {
+	if cmd == "" {
+		cmd = "chat"
+	}
+	if cmd == "chat" {
+		return "run `or3-intern chat`"
+	}
+	if len(args) == 0 {
+		return fmt.Sprintf("continuing with `or3-intern %s`", cmd)
+	}
+	return fmt.Sprintf("continuing with `or3-intern %s`", strings.Join(args, " "))
+}
+
+func currentWorkingDir() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return cwd
 }
 
 func commandHandledBeforeRuntimeBootstrap(cmd string) bool {

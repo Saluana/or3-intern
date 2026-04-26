@@ -55,22 +55,23 @@ type sessionLock struct {
 
 // Runtime executes conversational turns against the configured model and tools.
 type Runtime struct {
-	DB                  *db.DB
-	Provider            *providers.Client
-	Model               string
-	Temperature         float64
-	Tools               *tools.Registry
-	Hardening           config.HardeningConfig
-	AccessProfiles      config.AccessProfilesConfig
-	Builder             *Builder
-	Artifacts           *artifacts.Store
-	MaxToolBytes        int
-	MaxToolLoops        int
-	ToolPreviewBytes    int
-	DynamicToolExposure bool
-	Audit               *security.AuditLogger
-	ApprovalBroker      *approval.Broker
-	ContextManager      config.ContextManagerConfig
+	DB                     *db.DB
+	Provider               *providers.Client
+	Model                  string
+	Temperature            float64
+	Tools                  *tools.Registry
+	Hardening              config.HardeningConfig
+	AccessProfiles         config.AccessProfilesConfig
+	Builder                *Builder
+	Artifacts              *artifacts.Store
+	MaxToolBytes           int
+	MaxToolLoops           int
+	ToolPreviewBytes       int
+	DynamicToolExposure    bool
+	Audit                  *security.AuditLogger
+	ApprovalBroker         *approval.Broker
+	ContextManager         config.ContextManagerConfig
+	ContextManagerProvider *providers.Client
 
 	Deliver  Deliverer
 	Streamer channels.StreamingChannel
@@ -652,6 +653,9 @@ func (r *Runtime) pruneSessionContext(ctx context.Context, sessionKey, reason st
 	if strings.TrimSpace(sessionKey) == "" {
 		return "", fmt.Errorf("session key required")
 	}
+	if r.ContextManager.Enabled {
+		return r.compactSessionContextWithModel(ctx, sessionKey, reason)
+	}
 	if r.Consolidator == nil || r.Consolidator.Provider == nil {
 		return "", fmt.Errorf("consolidation is not configured, so pruning would discard unsummarized history")
 	}
@@ -670,6 +674,170 @@ func (r *Runtime) pruneSessionContext(ctx context.Context, sessionKey, reason st
 		label = "manual"
 	}
 	return "Context pruned (" + label + "). Recent chat was archived into memory and the live context window was cleared.", nil
+}
+
+func (r *Runtime) compactSessionContextWithModel(ctx context.Context, sessionKey, reason string) (string, error) {
+	provider := r.contextManagerProvider()
+	if provider == nil {
+		return "", fmt.Errorf("context manager provider not configured")
+	}
+	scopeKey := sessionKey
+	if resolved, err := r.DB.ResolveScopeKey(ctx, sessionKey); err == nil && strings.TrimSpace(resolved) != "" {
+		scopeKey = resolved
+	}
+	input, existingCutoff, err := r.buildContextManagerPruneInput(ctx, sessionKey, scopeKey, reason)
+	if err != nil {
+		return "", err
+	}
+	if len(input.Messages) == 0 {
+		return "Context prune skipped. There are no live messages to compact.", nil
+	}
+	proposal, err := requestContextManagerCompaction(ctx, provider, r.contextManagerModel(), input)
+	if err != nil {
+		return "", err
+	}
+	policy := ContextManagerPolicy{Enabled: true, AllowTaskUpdates: r.ContextManager.AllowTaskUpdates, AllowStalePropose: r.ContextManager.AllowStalePropose, ScopeKey: scopeKey}
+	if err := validateContextManagerProposal(proposal, policy); err != nil {
+		return "", err
+	}
+	if proposal.Compaction == nil || proposal.Compaction.CompactThroughMessageID <= existingCutoff {
+		return "Context prune skipped. The model found no additional context that was safe to compact.", nil
+	}
+	resolvedCutoff, cutoffAdjusted, err := normalizeCompactionCutoff(proposal.Compaction.CompactThroughMessageID, input.Messages)
+	if err != nil {
+		return "", err
+	}
+	refs, _ := json.Marshal(proposal.Compaction.Refs)
+	if err := r.DB.UpsertContextCompaction(ctx, db.ContextCompaction{
+		ScopeKey:        scopeKey,
+		SessionKey:      sessionKey,
+		Summary:         proposal.Compaction.Summary,
+		CutoffMessageID: resolvedCutoff,
+		MessageRefsJSON: string(refs),
+	}); err != nil {
+		return "", err
+	}
+	if proposal.TaskCardUpdates != nil && r.ContextManager.AllowTaskUpdates {
+		card, _, _ := loadTaskCard(ctx, r.DB, sessionKey)
+		card = applyContextManagerTaskUpdate(card, *proposal.TaskCardUpdates)
+		if err := saveTaskCard(ctx, r.DB, sessionKey, scopeKey, card); err != nil {
+			log.Printf("context manager task-card update failed: %v", err)
+		}
+	}
+	message := fmt.Sprintf("Context pruned (%s). The model compacted live prompt history through message %d; raw chat history was preserved.", nonEmptyLabel(reason, "manual"), resolvedCutoff)
+	if cutoffAdjusted {
+		message += " The requested cutoff was normalized to the nearest valid message in the provided context window."
+	}
+	return message, nil
+}
+
+func (r *Runtime) buildContextManagerPruneInput(ctx context.Context, sessionKey, scopeKey, reason string) (contextManagerPruneInput, int64, error) {
+	historyMax := 40
+	if r.Builder != nil && r.Builder.HistoryMax > 0 {
+		historyMax = r.Builder.HistoryMax
+	}
+	limit := historyMax * 2
+	if limit < 40 {
+		limit = 40
+	}
+	if limit > 120 {
+		limit = 120
+	}
+	rows, err := r.DB.GetLastMessagesScoped(ctx, sessionKey, limit)
+	if err != nil {
+		return contextManagerPruneInput{}, 0, err
+	}
+	var existing db.ContextCompaction
+	var existingCutoff int64
+	if row, ok, err := r.DB.GetContextCompaction(ctx, scopeKey); err == nil && ok {
+		existing = row
+		existingCutoff = row.CutoffMessageID
+	}
+	maxChars := r.ContextManager.MaxInputTokens * 4
+	if maxChars <= 0 {
+		maxChars = 12000
+	}
+	messages := make([]contextManagerMessage, 0, len(rows))
+	used := 0
+	for _, row := range rows {
+		if row.ID <= existingCutoff {
+			continue
+		}
+		content := oneLine(row.Content, 1200)
+		entryCost := len(content) + 80
+		if used+entryCost > maxChars && len(messages) > 0 {
+			break
+		}
+		messages = append(messages, contextManagerMessage{ID: row.ID, SessionKey: row.SessionKey, Role: row.Role, Content: content, CreatedAt: row.CreatedAt})
+		used += entryCost
+	}
+	taskCardText := ""
+	if r.Builder == nil || !r.Builder.DisableTaskCard {
+		if card, ok, err := loadTaskCard(ctx, r.DB, sessionKey); err == nil && ok {
+			taskCardText = renderTaskCard(card, 3000)
+		}
+	}
+	return contextManagerPruneInput{
+		Reason:          nonEmptyLabel(reason, "manual"),
+		SessionKey:      sessionKey,
+		ScopeKey:        scopeKey,
+		ExistingSummary: existing.Summary,
+		TaskCard:        taskCardText,
+		Messages:        messages,
+	}, existingCutoff, nil
+}
+
+func (r *Runtime) contextManagerProvider() *providers.Client {
+	if r == nil {
+		return nil
+	}
+	if r.ContextManagerProvider != nil {
+		return r.ContextManagerProvider
+	}
+	if r.Consolidator != nil && r.Consolidator.Provider != nil {
+		return r.Consolidator.Provider
+	}
+	return r.Provider
+}
+
+func (r *Runtime) contextManagerModel() string {
+	if r == nil {
+		return ""
+	}
+	if model := strings.TrimSpace(r.ContextManager.Model); model != "" {
+		return model
+	}
+	if r.Consolidator != nil && strings.TrimSpace(r.Consolidator.ChatModel) != "" {
+		return r.Consolidator.ChatModel
+	}
+	return r.Model
+}
+
+func normalizeCompactionCutoff(cutoff int64, messages []contextManagerMessage) (int64, bool, error) {
+	if cutoff <= 0 {
+		return 0, false, nil
+	}
+	var nearestLower int64
+	for _, msg := range messages {
+		if msg.ID == cutoff {
+			return cutoff, false, nil
+		}
+		if msg.ID < cutoff && msg.ID > nearestLower {
+			nearestLower = msg.ID
+		}
+	}
+	if nearestLower > 0 {
+		return nearestLower, true, nil
+	}
+	return 0, false, fmt.Errorf("compaction cutoff %d was not in the provided context window", cutoff)
+}
+
+func nonEmptyLabel(value, fallbackValue string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallbackValue
+	}
+	return value
 }
 
 func (r *Runtime) ensureTaskCardForTurn(ctx context.Context, ev bus.Event) {

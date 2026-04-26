@@ -52,6 +52,18 @@ func TestContextManagerStaleProposalScopeAndActionGuards(t *testing.T) {
 	}
 }
 
+func TestContextManagerCompactionValidation(t *testing.T) {
+	policy := ContextManagerPolicy{Enabled: true, AllowTaskUpdates: true, ScopeKey: "sess"}
+	missingSummary := ContextManagerProposal{Compaction: &CompactionProposal{CompactThroughMessageID: 42}}
+	if err := validateContextManagerProposal(missingSummary, policy); err == nil {
+		t.Fatalf("expected compaction summary requirement")
+	}
+	valid := ContextManagerProposal{Compaction: &CompactionProposal{Summary: "old context resolved", CompactThroughMessageID: 42, Refs: []string{"messages:1-42"}}}
+	if err := validateContextManagerProposal(valid, policy); err != nil {
+		t.Fatalf("expected valid compaction proposal: %v", err)
+	}
+}
+
 func TestContextManagerTriggersAndFallback(t *testing.T) {
 	policy := ContextManagerPolicy{Enabled: true, AllowedTriggers: []ContextManagerTrigger{ContextTriggerOverBudget}}
 	if !shouldTriggerContextManager(policy, ContextTriggerOverBudget, BudgetReport{Pressure: "high"}, 0) {
@@ -63,5 +75,23 @@ func TestContextManagerTriggersAndFallback(t *testing.T) {
 	fallback := deterministicContextManagerFallback(BudgetReport{})
 	if len(fallback) == 0 || !strings.Contains(fallback[0].Reason, "deterministic") {
 		t.Fatalf("expected deterministic fallback reason, got %+v", fallback)
+	}
+}
+
+func TestNormalizeCompactionCutoff(t *testing.T) {
+	messages := []contextManagerMessage{{ID: 400}, {ID: 404}, {ID: 406}}
+	cutoff, adjusted, err := normalizeCompactionCutoff(405, messages)
+	if err != nil {
+		t.Fatalf("normalizeCompactionCutoff: %v", err)
+	}
+	if cutoff != 404 || !adjusted {
+		t.Fatalf("expected cutoff 404 adjusted=true, got cutoff=%d adjusted=%v", cutoff, adjusted)
+	}
+	cutoff, adjusted, err = normalizeCompactionCutoff(406, messages)
+	if err != nil {
+		t.Fatalf("normalizeCompactionCutoff exact: %v", err)
+	}
+	if cutoff != 406 || adjusted {
+		t.Fatalf("expected exact cutoff without adjustment, got cutoff=%d adjusted=%v", cutoff, adjusted)
 	}
 }

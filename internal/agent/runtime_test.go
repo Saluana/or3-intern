@@ -113,6 +113,37 @@ func consolidationResponse(summary string) providers.ChatCompletionResponse {
 	}
 }
 
+func contextCompactionResponse(summary string, cutoff int64) providers.ChatCompletionResponse {
+	args := fmt.Sprintf(`{"compaction":{"summary":%q,"refs":["messages:1-%d"],"compact_through_message_id":%d}}`, summary, cutoff, cutoff)
+	return providers.ChatCompletionResponse{
+		Choices: []struct {
+			Message struct {
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			} `json:"message"`
+		}{
+			{
+				Message: struct {
+					Role      string               `json:"role"`
+					Content   any                  `json:"content"`
+					ToolCalls []providers.ToolCall `json:"tool_calls"`
+				}{
+					Role: "assistant",
+					ToolCalls: []providers.ToolCall{{
+						ID:   "tc-compact",
+						Type: "function",
+						Function: struct {
+							Name      string `json:"name"`
+							Arguments string `json:"arguments"`
+						}{Name: contextManagerCompactToolName, Arguments: args},
+					}},
+				},
+			},
+		},
+	}
+}
+
 func openRuntimeTestDB(t *testing.T) *db.DB {
 	t.Helper()
 	d, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
@@ -217,7 +248,119 @@ func TestRuntime_Handle_PruneArchivesAndClearsLiveHistory(t *testing.T) {
 	}
 }
 
-func TestRuntime_IdlePruneArchivesAfterInactivity(t *testing.T) {
+func TestRuntime_Handle_PruneUsesContextManagerCompactionWithoutDeletingHistory(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	ctx := context.Background()
+	firstID, err := d.AppendMessage(ctx, "sess-compact", "user", "throwaway greeting", nil)
+	if err != nil {
+		t.Fatalf("AppendMessage first: %v", err)
+	}
+	cutoffID, err := d.AppendMessage(ctx, "sess-compact", "assistant", "old implementation details that should be compacted", nil)
+	if err != nil {
+		t.Fatalf("AppendMessage second: %v", err)
+	}
+	if cutoffID <= firstID {
+		t.Fatalf("expected increasing message IDs")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var req providers.ChatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		payload := contentToString(req.Messages[len(req.Messages)-1].Content)
+		if !strings.Contains(payload, `"messages"`) || !strings.Contains(payload, "old implementation details") {
+			t.Fatalf("expected context manager JSON to include chat messages, got %s", payload)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(contextCompactionResponse("Old implementation details were resolved; continue with the current pruning design.", cutoffID))
+	}))
+	defer srv.Close()
+	provider := providers.New(srv.URL, "key", 10*time.Second)
+	provider.HTTP = srv.Client()
+	deliver := &mockDeliverer{}
+	rt := buildSimpleRuntime(t, provider, d, deliver)
+	rt.ContextManager = config.ContextManagerConfig{Enabled: true, MaxInputTokens: 1200, AllowTaskUpdates: true}
+	rt.ContextManagerProvider = provider
+
+	if err := rt.Handle(ctx, bus.Event{Type: bus.EventUserMessage, SessionKey: "sess-compact", Channel: "cli", From: "user", Message: "/prune"}); err != nil {
+		t.Fatalf("Handle /prune: %v", err)
+	}
+	msgs, err := d.GetLastMessages(ctx, "sess-compact", 10)
+	if err != nil {
+		t.Fatalf("GetLastMessages: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("expected raw history preserved, got %#v", msgs)
+	}
+	compaction, ok, err := d.GetContextCompaction(ctx, "sess-compact")
+	if err != nil || !ok {
+		t.Fatalf("expected compaction row, ok=%v err=%v", ok, err)
+	}
+	if compaction.CutoffMessageID != cutoffID || !strings.Contains(compaction.Summary, "resolved") {
+		t.Fatalf("unexpected compaction: %+v", compaction)
+	}
+	if len(deliver.messages) == 0 || !strings.Contains(deliver.messages[0], "raw chat history was preserved") {
+		t.Fatalf("expected model prune delivery notice, got %#v", deliver.messages)
+	}
+	snapshot, err := rt.BuildPromptSnapshot(ctx, "sess-compact", "next task")
+	if err != nil {
+		t.Fatalf("BuildPromptSnapshot: %v", err)
+	}
+	systemText := contentToString(snapshot[0].Content)
+	if !strings.Contains(systemText, "compacted_chat_context") || !strings.Contains(systemText, "continue with the current pruning design") {
+		t.Fatalf("expected compaction summary in prompt, got %s", systemText)
+	}
+	for _, msg := range snapshot {
+		if contentToString(msg.Content) == "old implementation details that should be compacted" {
+			t.Fatalf("expected compacted message omitted from prompt snapshot: %#v", snapshot)
+		}
+	}
+}
+
+func TestRuntime_Handle_PruneNormalizesInvalidCutoffToNearestProvidedMessage(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	ctx := context.Background()
+	if _, err := d.AppendMessage(ctx, "sess-normalize", "user", "first", nil); err != nil {
+		t.Fatalf("AppendMessage first: %v", err)
+	}
+	if _, err := d.AppendMessage(ctx, "sess-normalize", "assistant", "second", nil); err != nil {
+		t.Fatalf("AppendMessage second: %v", err)
+	}
+	thirdID, err := d.AppendMessage(ctx, "sess-normalize", "user", "third", nil)
+	if err != nil {
+		t.Fatalf("AppendMessage third: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(contextCompactionResponse("compact older turns", thirdID+10))
+	}))
+	defer srv.Close()
+	provider := providers.New(srv.URL, "key", 10*time.Second)
+	provider.HTTP = srv.Client()
+	deliver := &mockDeliverer{}
+	rt := buildSimpleRuntime(t, provider, d, deliver)
+	rt.ContextManager = config.ContextManagerConfig{Enabled: true, MaxInputTokens: 1200}
+	rt.ContextManagerProvider = provider
+
+	if err := rt.Handle(ctx, bus.Event{Type: bus.EventUserMessage, SessionKey: "sess-normalize", Channel: "cli", From: "user", Message: "/prune"}); err != nil {
+		t.Fatalf("Handle /prune: %v", err)
+	}
+	compaction, ok, err := d.GetContextCompaction(ctx, "sess-normalize")
+	if err != nil || !ok {
+		t.Fatalf("expected compaction row, ok=%v err=%v", ok, err)
+	}
+	if compaction.CutoffMessageID != thirdID {
+		t.Fatalf("expected normalized cutoff %d, got %+v", thirdID, compaction)
+	}
+	if len(deliver.messages) == 0 || !strings.Contains(deliver.messages[0], "normalized") {
+		t.Fatalf("expected normalization notice, got %#v", deliver.messages)
+	}
+}
+
+func TestRuntime_IdlePruneCompactsAfterInactivity(t *testing.T) {
 	d := openRuntimeTestDB(t)
 	callCount := int32(0)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -228,7 +371,7 @@ func TestRuntime_IdlePruneArchivesAfterInactivity(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(chatTextResponse("done"))
 			return
 		}
-		_ = json.NewEncoder(w).Encode(consolidationResponse("idle summary"))
+		_ = json.NewEncoder(w).Encode(contextCompactionResponse("Idle context was compacted after the completed task.", 2))
 	}))
 	defer srv.Close()
 	provider := providers.New(srv.URL, "key", 10*time.Second)
@@ -237,22 +380,30 @@ func TestRuntime_IdlePruneArchivesAfterInactivity(t *testing.T) {
 	rt := buildSimpleRuntime(t, provider, d, deliver)
 	rt.Consolidator = &memory.Consolidator{DB: d, Provider: provider, ChatModel: "gpt-4", MaxMessages: 20}
 	rt.ContextManager = config.ContextManagerConfig{Enabled: true, IdlePruneSeconds: 1}
+	rt.ContextManagerProvider = provider
 
 	if err := rt.Handle(context.Background(), bus.Event{Type: bus.EventUserMessage, SessionKey: "sess-idle", Channel: "cli", From: "user", Message: "please do this"}); err != nil {
 		t.Fatalf("Handle user: %v", err)
 	}
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		msgs, err := d.GetLastMessages(context.Background(), "sess-idle", 10)
+		compaction, ok, err := d.GetContextCompaction(context.Background(), "sess-idle")
 		if err != nil {
-			t.Fatalf("GetLastMessages: %v", err)
+			t.Fatalf("GetContextCompaction: %v", err)
 		}
-		if len(msgs) == 0 && atomic.LoadInt32(&callCount) >= 2 {
+		if ok && compaction.CutoffMessageID == 2 && atomic.LoadInt32(&callCount) >= 2 {
+			msgs, err := d.GetLastMessages(context.Background(), "sess-idle", 10)
+			if err != nil {
+				t.Fatalf("GetLastMessages: %v", err)
+			}
+			if len(msgs) != 2 {
+				t.Fatalf("expected idle prune to preserve raw history, got %#v", msgs)
+			}
 			return
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	t.Fatalf("expected idle prune to clear history, provider calls=%d", atomic.LoadInt32(&callCount))
+	t.Fatalf("expected idle prune to compact prompt context, provider calls=%d", atomic.LoadInt32(&callCount))
 }
 
 func TestRuntime_Handle_UserMessageInjectsTaskCardBeforePrompt(t *testing.T) {

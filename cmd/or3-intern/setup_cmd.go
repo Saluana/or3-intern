@@ -22,31 +22,57 @@ type setupResult struct {
 	Config    config.Config
 }
 
+type setupOptions struct {
+	AskStartChat     bool
+	StartChatDefault bool
+	CompletionNext   string
+	AutoInvoked      bool
+}
+
 func runSetup(cfgPath string) (setupResult, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		cwd = ""
 	}
-	return runSetupWithIO(os.Stdin, os.Stdout, cfgPathOrDefault(cfgPath), cwd)
+	return runSetupWithIOOptions(os.Stdin, os.Stdout, cfgPathOrDefault(cfgPath), cwd, setupOptions{
+		AskStartChat:     true,
+		StartChatDefault: true,
+		CompletionNext:   "run `or3-intern chat`",
+	})
 }
 
 func runSetupWithIO(in io.Reader, out io.Writer, cfgPath, cwd string) (setupResult, error) {
+	return runSetupWithIOOptions(in, out, cfgPath, cwd, setupOptions{
+		AskStartChat:     true,
+		StartChatDefault: true,
+		CompletionNext:   "run `or3-intern chat`",
+	})
+}
+
+func runSetupWithIOOptions(in io.Reader, out io.Writer, cfgPath, cwd string, options setupOptions) (setupResult, error) {
 	reader := bufio.NewReader(in)
 	cfg, existed, _, err := loadConfigureConfig(cfgPath, cwd)
 	if err != nil {
 		return setupResult{}, err
 	}
 	fmt.Fprintln(out, "OR3 setup")
+	if options.AutoInvoked {
+		fmt.Fprintln(out, "No saved setup was found, so OR3 will create one before continuing.")
+		fmt.Fprintln(out, "This only needs to happen once. You can change these choices later with `or3-intern settings`.")
+	}
 	if existed {
 		fmt.Fprintln(out, "Loaded your current settings. Leave answers blank to keep what you already have.")
 	} else {
-		fmt.Fprintln(out, "Let's choose a provider, a folder, and a safety level.")
+		fmt.Fprintln(out, "We'll choose three basics: the AI service to use, the folder OR3 may work in, and how cautious OR3 should be.")
 	}
+	fmt.Fprintf(out, "Config file: %s\n", cfgPath)
 	fmt.Fprintln(out)
 
 	previousAPIBase := cfg.Provider.APIBase
 	previousModel := cfg.Provider.Model
 	previousEmbedModel := cfg.Provider.EmbedModel
+	fmt.Fprintln(out, "Step 1 of 4: AI provider")
+	fmt.Fprintln(out, "The provider is the outside AI service OR3 sends your messages to. OR3 keeps the rest of its working files on this computer.")
 	providerChoice, err := promptChoice(reader, out, "Choose your AI provider", []string{
 		"1) OpenAI",
 		"2) OpenRouter",
@@ -67,19 +93,27 @@ func runSetupWithIO(in io.Reader, out io.Writer, cfgPath, cwd string) (setupResu
 		}
 	}
 	fmt.Fprintln(out, providerAPIKeyHelp(providerChoice))
+	fmt.Fprintln(out, "This key is like a password for billing and access to that AI service. OR3 stores it in your local config file, not in the project folder.")
 	cfg.Provider.APIKey, err = promptSecretString(reader, out, "API key", cfg.Provider.APIKey)
 	if err != nil {
 		return setupResult{}, err
 	}
 	if strings.TrimSpace(cfg.Provider.APIKey) == "" && strings.TrimSpace(os.Getenv(providerAPIKeyEnv(providerChoice))) == "" {
-		fmt.Fprintln(out, "No API key found. Setup can be saved, but chat will not work until you add one.")
+		fmt.Fprintln(out, "No API key found. Setup can still be saved, but chat will not be able to contact the AI provider until you add one.")
+	} else {
+		fmt.Fprintln(out, "Provider step complete.")
 	}
+
+	fmt.Fprintln(out, "\nStep 2 of 4: Workspace folder")
+	fmt.Fprintln(out, "The workspace is the folder OR3 is allowed to read and edit. Choosing a specific folder gives OR3 a clear boundary.")
 	cfg.WorkspaceDir, err = promptString(reader, out, "Workspace folder", firstNonEmptyString(cfg.WorkspaceDir, cwd))
 	if err != nil {
 		return setupResult{}, err
 	}
 	cfg.Tools.RestrictToWorkspace = true
+	fmt.Fprintf(out, "File access will be limited to: %s\n", cfg.WorkspaceDir)
 	if !existed {
+		fmt.Fprintln(out, "\nOR3 also needs a small private place for its database, logs, and generated files.")
 		storageChoice, err := promptMenuChoice(reader, out, "Where should OR3 store its own data?", []string{
 			"1) Recommended: OR3 app folder",
 			"2) Inside this workspace folder",
@@ -95,11 +129,16 @@ func runSetupWithIO(in io.Reader, out io.Writer, cfgPath, cwd string) (setupResu
 		cfg.DBPath = filepath.Join(cfg.WorkspaceDir, ".or3", "or3-intern.sqlite")
 		cfg.ArtifactsDir = filepath.Join(cfg.WorkspaceDir, ".or3", "artifacts")
 	}
+	fmt.Fprintf(out, "OR3 data will be stored at: %s\n", cfg.DBPath)
 
+	fmt.Fprintln(out, "\nStep 3 of 4: How OR3 will be used")
+	fmt.Fprintln(out, "This decides whether OR3 should prepare for only this computer, a paired phone, or a service that other devices can reach.")
 	scenario, err := promptSetupScenario(reader, out)
 	if err != nil {
 		return setupResult{}, err
 	}
+	fmt.Fprintln(out, "\nStep 4 of 4: Safety level")
+	fmt.Fprintln(out, "The safety level controls when OR3 asks before doing sensitive things, such as running local commands, using secrets, or sending messages.")
 	mode, err := promptSetupMode(reader, out, safetymode.RecommendMode(scenario))
 	if err != nil {
 		return setupResult{}, err
@@ -118,15 +157,18 @@ func runSetupWithIO(in io.Reader, out io.Writer, cfgPath, cwd string) (setupResu
 	report := intdoctor.Evaluate(cfg, intdoctor.Options{Mode: intdoctor.ModeConfigurePostSave, ConfigPath: cfgPath})
 	status := uxstate.BuildStatusView(cfg, report, 0, 0)
 	printSetupReview(out, status)
-	startChat, err := promptBool(reader, out, "Start chat next", true)
-	if err != nil {
-		return setupResult{}, err
+	startChat := false
+	if options.AskStartChat {
+		startChat, err = promptBool(reader, out, "Start chat next", options.StartChatDefault)
+		if err != nil {
+			return setupResult{}, err
+		}
 	}
 	fmt.Fprintln(out, "\nSaved setup.")
 	if startChat {
 		fmt.Fprintln(out, "Starting chat now.")
-	} else {
-		fmt.Fprintln(out, "Next: run `or3-intern chat`.")
+	} else if strings.TrimSpace(options.CompletionNext) != "" {
+		fmt.Fprintf(out, "Next: %s.\n", options.CompletionNext)
 	}
 	return setupResult{StartChat: startChat, Config: cfg}, nil
 }

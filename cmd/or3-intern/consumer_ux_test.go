@@ -159,6 +159,46 @@ func TestRunSetupWithIO_StartChatCopy(t *testing.T) {
 	}
 }
 
+func TestRunSetupWithIOOptions_AutoSetupContinuesOriginalCommand(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "config.json")
+	workspace := filepath.Join(tmp, "workspace")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	input := strings.Join([]string{
+		"",        // provider default
+		"testkey", // API key
+		workspace, // workspace
+		"",        // recommended app folder
+		"1",       // solo computer
+		"2",       // balanced safety
+		"",
+	}, "\n")
+	var out bytes.Buffer
+	result, err := runSetupWithIOOptions(strings.NewReader(input), &out, cfgPath, tmp, setupOptions{
+		CompletionNext: "continuing with `or3-intern status`",
+		AutoInvoked:    true,
+	})
+	if err != nil {
+		t.Fatalf("runSetupWithIOOptions: %v", err)
+	}
+	if result.StartChat {
+		t.Fatal("auto setup for another command should not start chat")
+	}
+	text := out.String()
+	for _, want := range []string{
+		"No saved setup was found",
+		"Step 1 of 4: AI provider",
+		"Step 4 of 4: Safety level",
+		"Next: continuing with `or3-intern status`.",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected %q in output: %s", want, text)
+		}
+	}
+}
+
 func TestRunStatusCommand_HidesAndShowsAdvancedIDs(t *testing.T) {
 	cfg := config.Default()
 	var out bytes.Buffer

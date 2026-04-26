@@ -176,6 +176,16 @@ func (d *DB) migrate(ctx context.Context) error {
 			updated_at INTEGER NOT NULL
 		);`,
 		`CREATE INDEX IF NOT EXISTS task_state_session_status ON task_state(session_key, status, updated_at DESC);`,
+		`CREATE TABLE IF NOT EXISTS context_compactions(
+			scope_key TEXT PRIMARY KEY,
+			session_key TEXT NOT NULL,
+			summary TEXT NOT NULL DEFAULT '',
+			cutoff_message_id INTEGER NOT NULL DEFAULT 0,
+			message_refs_json TEXT NOT NULL DEFAULT '[]',
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS context_compactions_session_key ON context_compactions(session_key);`,
 		`CREATE TABLE IF NOT EXISTS memory_docs(
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			scope_key TEXT NOT NULL,

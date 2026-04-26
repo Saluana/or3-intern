@@ -218,6 +218,14 @@ func (b *Builder) buildPacket(ctx context.Context, opts BuildOptions) (ContextPa
 			taskCardText = renderTaskCard(card, structuredMax)
 		}
 	}
+	compactionText := ""
+	var compactionCutoff int64
+	if b.DB != nil {
+		if compaction, ok, err := b.DB.GetContextCompaction(ctx, scopeKey); err == nil && ok {
+			compactionCutoff = compaction.CutoffMessageID
+			compactionText = renderContextCompaction(compaction, structuredMax)
+		}
+	}
 
 	// embed and retrieve
 	var retrieved []memory.Retrieved
@@ -279,6 +287,15 @@ func (b *Builder) buildPacket(ctx context.Context, opts BuildOptions) (ContextPa
 	if err != nil {
 		return ContextPacket{}, nil, err
 	}
+	if compactionCutoff > 0 {
+		filtered := histRows[:0]
+		for _, row := range histRows {
+			if row.ID > compactionCutoff {
+				filtered = append(filtered, row)
+			}
+		}
+		histRows = filtered
+	}
 	visionBudget := newVisionBudget()
 	hist := make([]providers.ChatMessage, 0, len(histRows))
 	pendingToolCallIDs := make([]string, 0)
@@ -339,6 +356,13 @@ func (b *Builder) buildPacket(ctx context.Context, opts BuildOptions) (ContextPa
 			structuredContext = "active_task_card:\n" + taskCardText
 		} else {
 			structuredContext = structuredContext + "\n\nactive_task_card:\n" + taskCardText
+		}
+	}
+	if strings.TrimSpace(compactionText) != "" {
+		if strings.TrimSpace(structuredContext) == "" {
+			structuredContext = "compacted_chat_context:\n" + compactionText
+		} else {
+			structuredContext = structuredContext + "\n\ncompacted_chat_context:\n" + compactionText
 		}
 	}
 	packet := b.buildContextPacket(pinnedText, digestText, memText, b.IdentityText, b.StaticMemory, heartbeat, structuredContext, docContextText, workspaceContextText)

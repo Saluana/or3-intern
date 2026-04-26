@@ -56,6 +56,16 @@ type ConsolidationMessage struct {
 	Content string
 }
 
+type ContextCompaction struct {
+	ScopeKey        string
+	SessionKey      string
+	Summary         string
+	CutoffMessageID int64
+	MessageRefsJSON string
+	CreatedAt       int64
+	UpdatedAt       int64
+}
+
 // TypedNoteInput holds the data for a single typed memory note write.
 type TypedNoteInput struct {
 	Text             string
@@ -171,6 +181,51 @@ func (d *DB) GetLastMessages(ctx context.Context, sessionKey string, limit int) 
 		out = out[1:]
 	}
 	return out, rows.Err()
+}
+
+func (d *DB) UpsertContextCompaction(ctx context.Context, row ContextCompaction) error {
+	scopeKey := strings.TrimSpace(row.ScopeKey)
+	if scopeKey == "" {
+		return fmt.Errorf("scope key required")
+	}
+	sessionKey := strings.TrimSpace(row.SessionKey)
+	if sessionKey == "" {
+		sessionKey = scopeKey
+	}
+	refs := strings.TrimSpace(row.MessageRefsJSON)
+	if refs == "" {
+		refs = "[]"
+	}
+	now := NowMS()
+	_, err := d.SQL.ExecContext(ctx, `INSERT INTO context_compactions(
+		scope_key, session_key, summary, cutoff_message_id, message_refs_json, created_at, updated_at
+	) VALUES(?,?,?,?,?,?,?)
+	ON CONFLICT(scope_key) DO UPDATE SET
+		session_key=excluded.session_key,
+		summary=excluded.summary,
+		cutoff_message_id=excluded.cutoff_message_id,
+		message_refs_json=excluded.message_refs_json,
+		updated_at=excluded.updated_at`,
+		scopeKey, sessionKey, strings.TrimSpace(row.Summary), row.CutoffMessageID, refs, now, now)
+	return err
+}
+
+func (d *DB) GetContextCompaction(ctx context.Context, scopeKey string) (ContextCompaction, bool, error) {
+	scopeKey = strings.TrimSpace(scopeKey)
+	if scopeKey == "" {
+		return ContextCompaction{}, false, nil
+	}
+	var row ContextCompaction
+	err := d.SQL.QueryRowContext(ctx, `SELECT scope_key, session_key, summary, cutoff_message_id, message_refs_json, created_at, updated_at
+		FROM context_compactions WHERE scope_key=?`, scopeKey).Scan(
+		&row.ScopeKey, &row.SessionKey, &row.Summary, &row.CutoffMessageID, &row.MessageRefsJSON, &row.CreatedAt, &row.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return ContextCompaction{}, false, nil
+	}
+	if err != nil {
+		return ContextCompaction{}, false, err
+	}
+	return row, true, nil
 }
 
 func (d *DB) GetPinned(ctx context.Context, sessionKey string) (map[string]string, error) {

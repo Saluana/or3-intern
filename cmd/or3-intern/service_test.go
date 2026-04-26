@@ -287,6 +287,65 @@ func TestDecodeServiceTurnRequest_AcceptsToolPolicyAliases(t *testing.T) {
 	}
 }
 
+func TestServiceConfigureFields_ReturnsSectionFields(t *testing.T) {
+	server := &serviceServer{config: config.Default()}
+	req := httptest.NewRequest(http.MethodGet, "/internal/v1/configure/fields?section=provider", nil)
+	req = req.WithContext(context.WithValue(req.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Actor: "ops", Role: approval.RoleOperator}))
+	rec := httptest.NewRecorder()
+
+	server.handleConfigure(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	fields, ok := body["fields"].([]any)
+	if !ok || len(fields) == 0 {
+		t.Fatalf("expected fields array, got %#v", body["fields"])
+	}
+}
+
+func TestServiceConfigureApply_PersistsConfigChanges(t *testing.T) {
+	cfg := config.Default()
+	cfgPath := filepath.Join(t.TempDir(), "or3-intern.json")
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	server := &serviceServer{config: cfg, configPath: cfgPath}
+	reqBody := strings.NewReader(`{
+		"changes":[
+			{"section":"provider","field":"provider_model","op":"set","value":"gpt-4.1"},
+			{"section":"service","field":"service_enabled","op":"toggle"},
+			{"section":"channels","channel":"slack","field":"access","op":"choose","value":"allowlist"}
+		]
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/configure/apply", reqBody)
+	req = req.WithContext(context.WithValue(req.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Actor: "ops", Role: approval.RoleOperator}))
+	rec := httptest.NewRecorder()
+
+	server.handleConfigure(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	loaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if loaded.Provider.Model != "gpt-4.1" {
+		t.Fatalf("expected provider model update, got %q", loaded.Provider.Model)
+	}
+	if !loaded.Service.Enabled {
+		t.Fatal("expected service_enabled toggle to set true")
+	}
+	if loaded.Channels.Slack.InboundPolicy != config.InboundPolicyAllowlist {
+		t.Fatalf("expected slack allowlist policy, got %q", loaded.Channels.Slack.InboundPolicy)
+	}
+}
+
 func TestDecodeServiceTurnRequest_AcceptsApprovalTokenAliases(t *testing.T) {
 	registry := tools.NewRegistry()
 

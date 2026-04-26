@@ -22,6 +22,7 @@ func (t *ReadArtifact) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
 		"artifact_id": map[string]any{"type": "string"},
 		"maxBytes":    map[string]any{"type": "integer", "description": "Max bytes to read (default bounded by runtime config)"},
+		"offset":      map[string]any{"type": "integer", "description": "Byte offset to start reading from, useful for reading later chunks of large artifacts"},
 	}, "required": []string{"artifact_id"}}
 }
 func (t *ReadArtifact) Schema() map[string]any {
@@ -39,7 +40,11 @@ func (t *ReadArtifact) Execute(ctx context.Context, params map[string]any) (stri
 	if v, ok := params["maxBytes"].(float64); ok && int64(v) > 0 {
 		maxBytes = int64(v)
 	}
-	result, err := t.Store.ReadCapped(ctx, SessionFromContext(ctx), artifactID, maxBytes)
+	offset := int64(0)
+	if v, ok := params["offset"].(float64); ok && int64(v) > 0 {
+		offset = int64(v)
+	}
+	result, err := t.Store.ReadCappedFrom(ctx, SessionFromContext(ctx), artifactID, offset, maxBytes)
 	if err != nil {
 		return "", err
 	}
@@ -47,6 +52,6 @@ func (t *ReadArtifact) Execute(ctx context.Context, params map[string]any) (stri
 	if result.Truncated {
 		marker = "\n...[truncated]"
 	}
-	return fmt.Sprintf("artifact_id: %s\nsession_key: %s\nmime: %s\nsize_bytes: %d\nread_bytes: %d\n\n%s%s",
-		result.Artifact.ID, result.Artifact.SessionKey, result.Artifact.Mime, result.Artifact.SizeBytes, result.ReadBytes, result.Content, marker), nil
+	return fmt.Sprintf("artifact_id: %s\nsession_key: %s\nmime: %s\nsize_bytes: %d\noffset: %d\nread_bytes: %d\n\n%s%s",
+		result.Artifact.ID, result.Artifact.SessionKey, result.Artifact.Mime, result.Artifact.SizeBytes, offset, result.ReadBytes, result.Content, marker), nil
 }

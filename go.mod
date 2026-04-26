@@ -3,6 +3,8 @@ module or3-intern
 go 1.24.2
 
 require (
+	github.com/JohannesKaufmann/html-to-markdown v1.6.0
+	github.com/PuerkitoBio/goquery v1.9.2
 	github.com/asg017/sqlite-vec-go-bindings v0.1.6
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
@@ -13,12 +15,13 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.34
 	github.com/modelcontextprotocol/go-sdk v0.8.0
 	github.com/robfig/cron/v3 v3.0.1
-	golang.org/x/net v0.6.0
+	golang.org/x/net v0.25.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.33.1
 )
 
 require (
+	github.com/andybalholm/cascadia v1.3.2 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/charmbracelet/colorprofile v0.4.1 // indirect
@@ -48,7 +51,8 @@ require (
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	golang.org/x/sys v0.40.0 // indirect
-	golang.org/x/text v0.14.0 // indirect
+	golang.org/x/text v0.15.0 // indirect
+	gopkg.in/yaml.v2 v2.4.0 // indirect
 	modernc.org/gc/v3 v3.0.0-20240107210532-573471604cb6 // indirect
 	modernc.org/libc v1.55.3 // indirect
 	modernc.org/mathutil v1.6.0 // indirect

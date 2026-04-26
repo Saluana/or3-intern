@@ -91,6 +91,53 @@ func TestRetrieve_WithVectorResults(t *testing.T) {
 	}
 }
 
+func TestRetrieve_DistinctiveQueryRejectsVectorOnlyNoise(t *testing.T) {
+	d := openRetrieveTestDB(t)
+	ctx := context.Background()
+
+	if _, err := d.InsertMemoryNote(ctx, "session1", "Brave search article conversion tools and tacos", PackFloat32([]float32{1.0, 0.0}), sql.NullInt64{}, ""); err != nil {
+		t.Fatalf("InsertMemoryNote noisy: %v", err)
+	}
+	if _, err := d.InsertMemoryNote(ctx, "session1", "EcoPros company research notes", PackFloat32([]float32{0.9, 0.1}), sql.NullInt64{}, ""); err != nil {
+		t.Fatalf("InsertMemoryNote topical: %v", err)
+	}
+
+	r := NewRetriever(d)
+	results, err := r.Retrieve(ctx, "session1", "Look into EcoPros", []float32{1.0, 0.0}, 5, 0, 10)
+	if err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+	if len(results) == 0 || !strings.Contains(results[0].Text, "EcoPros") {
+		t.Fatalf("expected topical EcoPros memory ranked first, got %+v", results)
+	}
+	for _, result := range results[1:] {
+		if strings.Contains(result.Text, "tacos") && result.Score >= results[0].Score {
+			t.Fatalf("expected noisy vector-only memory to rank below topical result, got %+v", results)
+		}
+	}
+}
+
+func TestRetrieve_DistinctiveQueryKeepsStrongSemanticAliasMatch(t *testing.T) {
+	d := openRetrieveTestDB(t)
+	ctx := context.Background()
+
+	if _, err := d.InsertMemoryNote(ctx, "session1", "EP diligence checklist and account notes", PackFloat32([]float32{1.0, 0.0}), sql.NullInt64{}, ""); err != nil {
+		t.Fatalf("InsertMemoryNote alias: %v", err)
+	}
+
+	r := NewRetriever(d)
+	results, err := r.Retrieve(ctx, "session1", "Look into EcoPros", []float32{1.0, 0.0}, 5, 0, 10)
+	if err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+	if len(results) == 0 || !strings.Contains(results[0].Text, "EP diligence") {
+		t.Fatalf("expected strong semantic alias match to survive, got %+v", results)
+	}
+	if results[0].Reason != "semantic match with weak lexical support" {
+		t.Fatalf("expected semantic-match reason, got %+v", results[0])
+	}
+}
+
 func TestRetrieve_SourceLabels(t *testing.T) {
 	d := openRetrieveTestDB(t)
 	ctx := context.Background()

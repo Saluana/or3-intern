@@ -83,6 +83,57 @@ func buildConsolidationProviderWithEmbedding(t *testing.T, chatBody string, embe
 	return p, callCounts{Chat: &chatCalls, Embed: &embedCalls}
 }
 
+func TestConsolidator_ToolChoiceRequiredFallsBackWhenRouterRejects(t *testing.T) {
+	var chatCalls int32
+	var sawRequired bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		atomic.AddInt32(&chatCalls, 1)
+		body, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(body), `"tool_choice":"required"`) {
+			sawRequired = true
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":{"message":"No endpoints found that support the provided 'tool_choice' value","code":404}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{"message": map[string]any{
+				"role":    "assistant",
+				"content": nil,
+				"tool_calls": []map[string]any{{
+					"id":   "call_consolidate",
+					"type": "function",
+					"function": map[string]any{
+						"name":      consolidationToolName,
+						"arguments": `{"summary":"fallback summary","facts":[],"preferences":[],"goals":[],"procedures":[],"decisions":[],"warnings":[]}`,
+					},
+				}},
+			}}},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	prov := providers.New(srv.URL, "test-key", 5*time.Second)
+	prov.HTTP = srv.Client()
+	c := &Consolidator{Provider: prov}
+	out, err := c.requestConsolidationOutput(context.Background(), "model", "", "user: hello")
+	if err != nil {
+		t.Fatalf("requestConsolidationOutput: %v", err)
+	}
+	if !sawRequired {
+		t.Fatal("expected initial request to use tool_choice=required")
+	}
+	if atomic.LoadInt32(&chatCalls) != 2 {
+		t.Fatalf("expected required attempt plus fallback attempt, got %d", atomic.LoadInt32(&chatCalls))
+	}
+	if out.Summary != "fallback summary" {
+		t.Fatalf("unexpected parsed summary: %#v", out)
+	}
+}
+
 func TestConsolidator_NilProvider(t *testing.T) {
 	d := openConsolidateTestDB(t)
 	c := &Consolidator{DB: d}
@@ -613,6 +664,42 @@ func TestParseConsolidationOutput_NewFormat(t *testing.T) {
 	}
 	if len(out.Warnings) != 1 || out.Warnings[0] != "avoid unbounded logs" {
 		t.Errorf("expected warnings=[avoid unbounded logs], got %v", out.Warnings)
+	}
+}
+
+func TestParseConsolidationOutput_CoercesSingleStringItems(t *testing.T) {
+	raw := `{"summary":"session summary","facts":"single fact","preferences":"single preference","goals":"single goal","procedures":"single procedure","decisions":"single decision","warnings":"single warning"}`
+	out, err := parseConsolidationOutput(raw)
+	if err != nil {
+		t.Fatalf("parseConsolidationOutput: %v", err)
+	}
+	if len(out.Facts) != 1 || out.Facts[0] != "single fact" {
+		t.Errorf("expected facts single string to be coerced, got %v", out.Facts)
+	}
+	if len(out.Preferences) != 1 || out.Preferences[0] != "single preference" {
+		t.Errorf("expected preferences single string to be coerced, got %v", out.Preferences)
+	}
+	if len(out.Goals) != 1 || out.Goals[0] != "single goal" {
+		t.Errorf("expected goals single string to be coerced, got %v", out.Goals)
+	}
+	if len(out.Procedures) != 1 || out.Procedures[0] != "single procedure" {
+		t.Errorf("expected procedures single string to be coerced, got %v", out.Procedures)
+	}
+	if len(out.Decisions) != 1 || out.Decisions[0] != "single decision" {
+		t.Errorf("expected decisions single string to be coerced, got %v", out.Decisions)
+	}
+	if len(out.Warnings) != 1 || out.Warnings[0] != "single warning" {
+		t.Errorf("expected warnings single string to be coerced, got %v", out.Warnings)
+	}
+}
+
+func TestParseConsolidationOutput_RejectsNonStringItems(t *testing.T) {
+	_, err := parseConsolidationOutput(`{"summary":"session summary","facts":{"text":"bad"}}`)
+	if err == nil {
+		t.Fatal("expected non-string facts value to be rejected")
+	}
+	if !strings.Contains(err.Error(), "facts") {
+		t.Fatalf("expected error to identify facts field, got %v", err)
 	}
 }
 

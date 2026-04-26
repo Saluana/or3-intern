@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"or3-intern/internal/artifacts"
 	"or3-intern/internal/security"
 	"os"
 	"os/exec"
@@ -19,11 +20,14 @@ import (
 
 type WebFetch struct {
 	Base
-	HTTP            *http.Client
-	Timeout         time.Duration
-	DefaultMaxBytes int
-	HostPolicy      security.HostPolicy
-	Renderer        WebRenderer
+	HTTP               *http.Client
+	Timeout            time.Duration
+	DefaultMaxBytes    int
+	HTMLSourceMaxBytes int
+	HostPolicy         security.HostPolicy
+	Renderer           WebRenderer
+	Store              *artifacts.Store
+	Converter          *HTMLConverter
 }
 
 func (t *WebFetch) Capability() CapabilityLevel { return CapabilityGuarded }
@@ -51,12 +55,13 @@ type WebRenderer interface {
 
 func (t *WebFetch) Name() string { return "web_fetch" }
 func (t *WebFetch) Description() string {
-	return "Fetch a URL and return bounded text. Set render=true for JavaScript-rendered pages when Playwright is available."
+	return "Fetch a URL and return bounded text. HTML pages are converted to Markdown artifacts by default to avoid blowing up context; set raw=true only when you explicitly need the literal response bytes. Set render=true for JavaScript-rendered pages when Playwright is available."
 }
 func (t *WebFetch) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
 		"url":       map[string]any{"type": "string"},
-		"maxBytes":  map[string]any{"type": "integer", "description": "Max preview bytes (default 12000)"},
+		"maxBytes":  map[string]any{"type": "integer", "description": "Max preview bytes returned directly (default 12000)"},
+		"raw":       map[string]any{"type": "boolean", "description": "Bypass Markdown artifact conversion and return the literal response bytes, including raw HTML when present"},
 		"render":    map[string]any{"type": "boolean", "description": "Use a real browser to execute JavaScript before extracting text"},
 		"waitUntil": map[string]any{"type": "string", "enum": []string{"domcontentloaded", "load", "networkidle"}, "description": "Browser navigation wait strategy for render=true (default networkidle)"},
 		"waitMs":    map[string]any{"type": "integer", "description": "Extra milliseconds to wait after navigation for render=true (max 15000)"},
@@ -86,6 +91,7 @@ func (t *WebFetch) Execute(ctx context.Context, params map[string]any) (string, 
 	if v, ok := params["maxBytes"].(float64); ok && int(v) > 0 {
 		max = int(v)
 	}
+	raw, _ := params["raw"].(bool)
 	render, _ := params["render"].(bool)
 	if render {
 		if err := validateURLAgainstPolicies(ctx, parsed, t.HostPolicy, profile); err != nil {
@@ -161,26 +167,69 @@ func (t *WebFetch) Execute(ctx context.Context, params map[string]any) (string, 
 		return "", err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, int64(max)+1))
-	truncated := len(body) > max
-	if truncated {
-		body = body[:max]
+	contentType := resp.Header.Get("Content-Type")
+	readLimit := int64(max) + 1
+	info := StreamInfo{MIMEType: contentType, Extension: strings.ToLower(filepath.Ext(parsed.Path)), Filename: filepath.Base(parsed.Path), Charset: htmlCharsetFromContentType(contentType), URL: parsed.String()}
+	if !raw && t.shouldAutoConvertHTML(info) {
+		readLimit = int64(t.htmlSourceLimit()) + 1
 	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, readLimit))
+	sourceTruncated := int64(len(body)) >= readLimit
+	if sourceTruncated {
+		body = body[:readLimit-1]
+	}
+	if !raw && t.shouldAutoConvertHTML(info) {
+		result, err := buildMarkdownFetchResult(ctx, t.Store, t.Converter, parsed, resp.Status, resp.StatusCode, contentType, body, sourceTruncated, max, "web_fetch")
+		if err == nil {
+			return EncodeToolResult(result), nil
+		}
+	}
+	previewSource := string(body)
+	mode := "http"
+	if isHTMLContent(info) && !raw {
+		previewSource = CleanHTMLForLLM(previewSource)
+		mode = "html_text"
+	} else if raw {
+		mode = "raw"
+	}
+	preview, previewTruncated := PreviewString(previewSource, max)
 	return EncodeToolResult(ToolResult{
 		Kind:    "web_fetch",
 		OK:      resp.StatusCode < 400,
 		Summary: fmt.Sprintf("Fetched %s with HTTP status %s", parsed.String(), resp.Status),
-		Preview: string(body),
+		Preview: preview,
 		Stats: map[string]any{
 			"url":          parsed.String(),
-			"mode":         "http",
+			"mode":         mode,
 			"status":       resp.Status,
 			"status_code":  resp.StatusCode,
-			"content_type": resp.Header.Get("Content-Type"),
+			"content_type": contentType,
 			"max_bytes":    max,
-			"truncated":    truncated,
+			"truncated":    previewTruncated || sourceTruncated,
 		},
 	}), nil
+}
+
+func (t *WebFetch) shouldAutoConvertHTML(info StreamInfo) bool {
+	if t == nil || t.Store == nil {
+		return false
+	}
+	return isHTMLContent(info)
+}
+
+func isHTMLContent(info StreamInfo) bool {
+	return NewHTMLConverter().Accepts(info)
+}
+
+func (t *WebFetch) htmlSourceLimit() int {
+	limit := t.HTMLSourceMaxBytes
+	if limit <= 0 {
+		limit = defaultWebMarkdownMaxSourceBytes
+	}
+	if limit > maxWebMarkdownSourceBytes {
+		limit = maxWebMarkdownSourceBytes
+	}
+	return limit
 }
 
 func (t *WebFetch) effectiveTimeout() time.Duration {
@@ -418,7 +467,7 @@ func (t *WebSearch) Execute(ctx context.Context, params map[string]any) (string,
 	return string(b), nil
 }
 
-// Optional: simple text extract from HTML (very rough)
+// StripHTML removes tag text without parsing; it is only a fallback for malformed input.
 func StripHTML(s string) string {
 	var b bytes.Buffer
 	in := false

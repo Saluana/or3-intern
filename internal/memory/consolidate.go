@@ -36,6 +36,13 @@ You MUST call the record_consolidated_memory tool exactly once. Do not answer co
 
 Extract only information that will help future work. Prefer concrete, reusable facts over chat filler.
 
+Process:
+1. Read the whole excerpt once to understand the task and outcome.
+2. Identify what a future assistant would need to remember to continue work safely.
+3. Separate durable information into the correct fields.
+4. Drop anything temporary, emotional, duplicated, or unsupported.
+5. If a field has no useful durable information, set it to [].
+
 Keep:
 - Project state, file/module names, bugs found, fixes made, tests run, commands that worked, and unresolved blockers.
 - User preferences about style, workflow, risk tolerance, tools, or implementation choices.
@@ -47,7 +54,14 @@ Ignore:
 
 Tool argument rules:
 - summary: 3-5 short sentences describing what changed, what was decided, and what remains relevant.
-- facts/preferences/goals/procedures/decisions/warnings: concise standalone items under 300 characters each.
+- facts: stable project/user/environment facts, versions, file names, or current states.
+- preferences: how the user wants work done, communication style, quality bar, tools, or risk tolerance.
+- goals: active objectives that remain useful after this turn.
+- procedures: repeatable steps, commands, checks, or runbooks.
+- decisions: choices that were accepted or settled.
+- warnings: risks, pitfalls, failed approaches, or conditions that require caution.
+- facts, preferences, goals, procedures, decisions, and warnings MUST always be JSON arrays of strings, even when there is only one item.
+- Every list item must be standalone, specific, and under 300 characters.
 - procedures should be actionable steps or commands, not vague descriptions.
 - warnings should name the risk and condition that triggers it.
 - Use [] when a category has no durable information. Do not invent details.`
@@ -82,13 +96,10 @@ var consolidationToolDef = providers.ToolDef{
 	},
 }
 
-func consolidationToolChoice() map[string]any {
-	return map[string]any{
-		"type": "function",
-		"function": map[string]any{
-			"name": consolidationToolName,
-		},
-	}
+func consolidationToolChoice() any {
+	// There is only one consolidation tool, so "required" is equivalent to
+	// forcing the named tool but works with more OpenAI-compatible routers.
+	return "required"
 }
 
 // Consolidator rolls up conversation messages older than the active history
@@ -430,15 +441,23 @@ func (c *Consolidator) requestConsolidationOutput(ctx context.Context, model, cu
 		{Role: "user", Content: fmt.Sprintf(consolidationUserPrompt, currentCanonical, transcript)},
 	}
 	var lastErr error
+	toolChoiceAllowed := true
 	for attempt := 0; attempt < 2; attempt++ {
 		req := providers.ChatCompletionRequest{
 			Model:       model,
 			Messages:    messages,
 			Tools:       []providers.ToolDef{consolidationToolDef},
-			ToolChoice:  consolidationToolChoice(),
 			Temperature: 0,
 		}
+		if toolChoiceAllowed {
+			req.ToolChoice = consolidationToolChoice()
+		}
 		resp, err := c.Provider.Chat(ctx, req)
+		if err != nil && toolChoiceAllowed && providerRejectedToolChoice(err) {
+			toolChoiceAllowed = false
+			req.ToolChoice = nil
+			resp, err = c.Provider.Chat(ctx, req)
+		}
 		if err != nil {
 			return consolidationOutput{}, fmt.Errorf("chat: %w", err)
 		}
@@ -451,6 +470,20 @@ func (c *Consolidator) requestConsolidationOutput(ctx context.Context, model, cu
 	}
 	log.Printf("consolidation structured output rejected: %v", lastErr)
 	return consolidationOutput{}, errEmptyConsolidationOutput
+}
+
+func providerRejectedToolChoice(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if !strings.Contains(msg, "tool_choice") {
+		return false
+	}
+	return strings.Contains(msg, "no endpoints") ||
+		strings.Contains(msg, "not support") ||
+		strings.Contains(msg, "unsupported") ||
+		strings.Contains(msg, "invalid")
 }
 
 func isMemoryVectorProfileMismatchError(err error) bool {
@@ -472,6 +505,17 @@ type consolidationOutput struct {
 	Warnings    []string `json:"warnings"`
 	// Legacy field: accepted as a fallback for old-format responses.
 	LegacyCanonical string `json:"canonical_memory"`
+}
+
+type flexibleConsolidationOutput struct {
+	Summary         string          `json:"summary"`
+	Facts           json.RawMessage `json:"facts"`
+	Preferences     json.RawMessage `json:"preferences"`
+	Goals           json.RawMessage `json:"goals"`
+	Procedures      json.RawMessage `json:"procedures"`
+	Decisions       json.RawMessage `json:"decisions"`
+	Warnings        json.RawMessage `json:"warnings"`
+	LegacyCanonical string          `json:"canonical_memory"`
 }
 
 func parseConsolidationResponse(resp providers.ChatCompletionResponse) (consolidationOutput, error) {
@@ -501,19 +545,8 @@ func parseConsolidationOutput(raw string) (consolidationOutput, error) {
 
 	var out consolidationOutput
 	if jsonStr != "" {
-		if err := json.Unmarshal([]byte(jsonStr), &out); err == nil {
-			out.Summary = strings.TrimSpace(out.Summary)
-			out.Facts = sanitizeItems(out.Facts)
-			out.Preferences = sanitizeItems(out.Preferences)
-			out.Goals = sanitizeItems(out.Goals)
-			out.Procedures = sanitizeItems(out.Procedures)
-			out.Decisions = sanitizeItems(out.Decisions)
-			out.Warnings = sanitizeItems(out.Warnings)
-			// Absorb legacy canonical_memory as a preference if new fields missing.
-			if len(out.Facts)+len(out.Preferences)+len(out.Goals)+len(out.Procedures)+len(out.Decisions)+len(out.Warnings) == 0 &&
-				strings.TrimSpace(out.LegacyCanonical) != "" {
-				out.Preferences = []string{strings.TrimSpace(out.LegacyCanonical)}
-			}
+		if parsed, err := decodeConsolidationJSON(jsonStr); err == nil {
+			out = parsed
 			if out.Summary != "" || len(out.Facts)+len(out.Preferences)+len(out.Goals)+len(out.Procedures)+len(out.Decisions)+len(out.Warnings) > 0 {
 				return out, nil
 			}
@@ -523,6 +556,56 @@ func parseConsolidationOutput(raw string) (consolidationOutput, error) {
 	}
 
 	return consolidationOutput{}, fmt.Errorf("missing usable consolidation JSON")
+}
+
+func decodeConsolidationJSON(jsonStr string) (consolidationOutput, error) {
+	var raw flexibleConsolidationOutput
+	if err := json.Unmarshal([]byte(jsonStr), &raw); err != nil {
+		return consolidationOutput{}, err
+	}
+	out := consolidationOutput{
+		Summary:         strings.TrimSpace(raw.Summary),
+		LegacyCanonical: strings.TrimSpace(raw.LegacyCanonical),
+	}
+	var err error
+	if out.Facts, err = parseConsolidationItems(raw.Facts); err != nil {
+		return consolidationOutput{}, fmt.Errorf("facts: %w", err)
+	}
+	if out.Preferences, err = parseConsolidationItems(raw.Preferences); err != nil {
+		return consolidationOutput{}, fmt.Errorf("preferences: %w", err)
+	}
+	if out.Goals, err = parseConsolidationItems(raw.Goals); err != nil {
+		return consolidationOutput{}, fmt.Errorf("goals: %w", err)
+	}
+	if out.Procedures, err = parseConsolidationItems(raw.Procedures); err != nil {
+		return consolidationOutput{}, fmt.Errorf("procedures: %w", err)
+	}
+	if out.Decisions, err = parseConsolidationItems(raw.Decisions); err != nil {
+		return consolidationOutput{}, fmt.Errorf("decisions: %w", err)
+	}
+	if out.Warnings, err = parseConsolidationItems(raw.Warnings); err != nil {
+		return consolidationOutput{}, fmt.Errorf("warnings: %w", err)
+	}
+	// Absorb legacy canonical_memory as a preference if new fields missing.
+	if len(out.Facts)+len(out.Preferences)+len(out.Goals)+len(out.Procedures)+len(out.Decisions)+len(out.Warnings) == 0 && out.LegacyCanonical != "" {
+		out.Preferences = []string{out.LegacyCanonical}
+	}
+	return out, nil
+}
+
+func parseConsolidationItems(raw json.RawMessage) ([]string, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	var items []string
+	if err := json.Unmarshal(raw, &items); err == nil {
+		return sanitizeItems(items), nil
+	}
+	var single string
+	if err := json.Unmarshal(raw, &single); err == nil {
+		return sanitizeItems([]string{single}), nil
+	}
+	return nil, fmt.Errorf("expected string or []string")
 }
 
 // extractJSON attempts to locate and return the first complete JSON object

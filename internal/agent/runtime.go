@@ -857,7 +857,7 @@ func (r *Runtime) enforceSkillPolicy(ctx context.Context, tool tools.Tool, param
 				return err
 			}
 		}
-	case "web_fetch":
+	case "web_fetch", "web_fetch_markdown":
 		if !policy.AllowNetwork {
 			return fmt.Errorf("network denied by skill policy: %s", tool.Name())
 		}
@@ -1006,7 +1006,7 @@ func (r *Runtime) enforceProfile(ctx context.Context, profile tools.ActiveProfil
 		}
 	}
 	switch tool.Name() {
-	case "web_fetch":
+	case "web_fetch", "web_fetch_markdown":
 		parsed, err := url.Parse(strings.TrimSpace(fmt.Sprint(params["url"])))
 		if err != nil {
 			return err
@@ -1075,7 +1075,7 @@ func summarizeToolParams(toolName string, params map[string]any) map[string]any 
 		summary["entrypoint"] = strings.TrimSpace(fmt.Sprint(params["entrypoint"]))
 	case "spawn_subagent":
 		summary["task"] = previewText(strings.TrimSpace(fmt.Sprint(params["task"])), 120)
-	case "web_fetch":
+	case "web_fetch", "web_fetch_markdown":
 		summary["url"] = strings.TrimSpace(fmt.Sprint(params["url"]))
 	}
 	return summary
@@ -1102,7 +1102,7 @@ func (r *Runtime) incrementQuota(sessionKey string, toolName string) error {
 	switch toolName {
 	case "exec", "run_skill_script":
 		return quotaIncrement(&state.ExecCalls, r.Hardening.Quotas.MaxExecCalls, "exec calls", toolName)
-	case "web_fetch", "web_search":
+	case "web_fetch", "web_fetch_markdown", "web_search":
 		return quotaIncrement(&state.WebCalls, r.Hardening.Quotas.MaxWebCalls, "web calls", toolName)
 	case "spawn_subagent":
 		return quotaIncrement(&state.SubagentCalls, r.Hardening.Quotas.MaxSubagentCalls, "subagent calls", toolName)

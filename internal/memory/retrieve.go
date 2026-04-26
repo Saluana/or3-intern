@@ -44,6 +44,11 @@ type Retriever struct {
 	LastRejected     []string
 }
 
+const (
+	unsupportedDistinctiveVectorPenalty = 0.12
+	minUnsupportedVectorScore           = 0.35
+)
+
 // NewRetriever constructs a Retriever with default ranking weights.
 func NewRetriever(d *db.DB) *Retriever {
 	return &Retriever{DB: d, VectorWeight: 0.50, FTSWeight: 0.22, LexicalWeight: 0.12, RecencyWeight: 0.08, TaskWeight: 0.08, VectorScanLimit: 2000}
@@ -169,6 +174,7 @@ func (r *Retriever) retrieveCandidates(ctx context.Context, sessionKey, query st
 
 	raw := make([]Retrieved, 0, len(m))
 	tokens := retrievalTokens(query)
+	distinctiveTokens := distinctiveRetrievalTokens(query)
 	taskTokens := retrievalTokens(r.TaskContext)
 	newest := int64(0)
 	for _, a := range m {
@@ -178,9 +184,18 @@ func (r *Retriever) retrieveCandidates(ctx context.Context, sessionKey, query st
 	}
 	for _, a := range m {
 		lexical := lexicalOverlapScore(tokens, a.text)
+		distinctiveLexical := lexicalOverlapScore(distinctiveTokens, a.text)
 		task := lexicalOverlapScore(taskTokens, a.text)
 		recency := recencyScore(a.createdAt, newest)
+		missingDistinctiveSupport := len(distinctiveTokens) > 0 && a.f == 0 && a.doc == 0 && distinctiveLexical == 0 && task == 0
+		if missingDistinctiveSupport && a.v < minUnsupportedVectorScore {
+			r.LastRejected = append(r.LastRejected, fmt.Sprintf("%s %s: weak vector support and missing distinctive query term", a.ref, oneLineForReject(a.text)))
+			continue
+		}
 		score := (a.v * r.VectorWeight) + (a.f * r.FTSWeight) + (a.doc * r.FTSWeight) + (lexical * r.LexicalWeight) + (task * r.TaskWeight) + (recency * r.RecencyWeight)
+		if missingDistinctiveSupport {
+			score -= unsupportedDistinctiveVectorPenalty
+		}
 
 		// Apply small bounded metadata adjustments so vector/FTS relevance
 		// still dominates while durable/active notes get a slight preference.
@@ -206,6 +221,8 @@ func (r *Retriever) retrieveCandidates(ctx context.Context, sessionKey, query st
 			reason = "matches query terms"
 		} else if a.doc > 0 {
 			reason = "indexed document match"
+		} else if missingDistinctiveSupport {
+			reason = "semantic match with weak lexical support"
 		}
 		raw = append(raw, Retrieved{
 			Source:     src,
@@ -340,6 +357,52 @@ func retrievalTokens(query string) []string {
 		out = append(out, part)
 	}
 	return out
+}
+
+func distinctiveRetrievalTokens(query string) []string {
+	parts := strings.FieldsFunc(query, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z') && !(r >= 'A' && r <= 'Z') && !(r >= '0' && r <= '9')
+	})
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if len(part) < 3 || !isDistinctiveRetrievalToken(part) {
+			continue
+		}
+		token := strings.ToLower(part)
+		if _, ok := seen[token]; ok {
+			continue
+		}
+		seen[token] = struct{}{}
+		out = append(out, token)
+	}
+	return out
+}
+
+func isDistinctiveRetrievalToken(token string) bool {
+	letters := 0
+	upper := 0
+	lower := 0
+	digits := 0
+	for _, r := range token {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			letters++
+			upper++
+		case r >= 'a' && r <= 'z':
+			letters++
+			lower++
+		case r >= '0' && r <= '9':
+			digits++
+		}
+	}
+	if digits > 0 && letters > 0 {
+		return true
+	}
+	if upper >= 2 {
+		return true
+	}
+	return upper > 0 && lower > 0 && token != strings.ToLower(token)
 }
 
 func lexicalOverlapScore(tokens []string, text string) float64 {

@@ -95,8 +95,17 @@ func (s *Store) Lookup(ctx context.Context, artifactID string) (StoredArtifact, 
 // ReadCapped reads at most maxBytes from artifactID after checking that the
 // artifact belongs to the caller's session or resolved scope.
 func (s *Store) ReadCapped(ctx context.Context, sessionKey, artifactID string, maxBytes int64) (ReadResult, error) {
+	return s.ReadCappedFrom(ctx, sessionKey, artifactID, 0, maxBytes)
+}
+
+// ReadCappedFrom reads at most maxBytes from artifactID starting at offset
+// after checking that the artifact belongs to the caller's session or resolved scope.
+func (s *Store) ReadCappedFrom(ctx context.Context, sessionKey, artifactID string, offset, maxBytes int64) (ReadResult, error) {
 	if maxBytes <= 0 {
 		maxBytes = 200000
+	}
+	if offset < 0 {
+		offset = 0
 	}
 	stored, err := s.Lookup(ctx, artifactID)
 	if err != nil {
@@ -114,6 +123,11 @@ func (s *Store) ReadCapped(ctx context.Context, sessionKey, artifactID string, m
 		return ReadResult{}, err
 	}
 	defer f.Close()
+	if offset > 0 {
+		if _, err := f.Seek(offset, io.SeekStart); err != nil {
+			return ReadResult{}, err
+		}
+	}
 	data, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
 	if err != nil {
 		return ReadResult{}, err

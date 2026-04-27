@@ -277,17 +277,30 @@ func (c *Client) ChatStream(ctx context.Context, req ChatCompletionRequest, onDe
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 		return ChatCompletionResponse{}, fmt.Errorf("provider error %s: %s", resp.Status, string(body))
 	}
+	if !strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		if readErr != nil {
+			return ChatCompletionResponse{}, readErr
+		}
+		var out ChatCompletionResponse
+		if err := json.Unmarshal(body, &out); err != nil {
+			return ChatCompletionResponse{}, formatProviderDecodeError(err, body)
+		}
+		return out, nil
+	}
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	var contentBuilder strings.Builder
 	var finalToolCalls []ToolCall
+	sawData := false
 
 	for scanner.Scan() {
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
+		sawData = true
 		data := strings.TrimPrefix(line, "data: ")
 		if data == "[DONE]" {
 			break
@@ -312,6 +325,9 @@ func (c *Client) ChatStream(ctx context.Context, req ChatCompletionRequest, onDe
 	}
 	if err := scanner.Err(); err != nil {
 		return ChatCompletionResponse{}, err
+	}
+	if !sawData {
+		return ChatCompletionResponse{}, fmt.Errorf("provider stream returned no data events")
 	}
 
 	out := ChatCompletionResponse{

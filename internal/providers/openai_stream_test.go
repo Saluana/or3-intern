@@ -66,6 +66,36 @@ func TestChatStream_NilOnDelta(t *testing.T) {
 	}
 }
 
+func TestChatStream_FallsBackToJSONResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"plain json"}}]}`)
+	}))
+	t.Cleanup(srv.Close)
+	c := New(srv.URL, "key", 0)
+	c.HTTP = srv.Client()
+
+	resp, err := c.ChatStream(context.Background(), ChatCompletionRequest{Model: "m"}, nil)
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+	if resp.Choices[0].Message.Content != "plain json" {
+		t.Fatalf("expected JSON fallback response, got %#v", resp.Choices[0].Message.Content)
+	}
+}
+
+func TestChatStream_EmptySSEReturnsError(t *testing.T) {
+	_, c := sseServer(t, []string{`: keep-alive`})
+
+	_, err := c.ChatStream(context.Background(), ChatCompletionRequest{Model: "m"}, nil)
+	if err == nil {
+		t.Fatal("expected empty SSE stream to fail")
+	}
+	if !strings.Contains(err.Error(), "no data events") {
+		t.Fatalf("expected no data events error, got %v", err)
+	}
+}
+
 func TestChatStream_HTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)

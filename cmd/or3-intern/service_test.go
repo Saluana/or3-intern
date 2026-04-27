@@ -363,6 +363,52 @@ func TestServiceConfigureFields_ReturnsSectionFields(t *testing.T) {
 	}
 }
 
+func TestServiceConfigureFields_UsesFrontendFriendlyShape(t *testing.T) {
+	server := &serviceServer{config: config.Default()}
+	req := httptest.NewRequest(http.MethodGet, "/internal/v1/configure/fields?section=runtime", nil)
+	req = req.WithContext(context.WithValue(req.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Actor: "ops", Role: approval.RoleOperator}))
+	rec := httptest.NewRecorder()
+
+	server.handleConfigure(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Fields []map[string]any `json:"fields"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(body.Fields) == 0 {
+		t.Fatal("expected fields to be returned")
+	}
+	first := body.Fields[0]
+	if _, ok := first["label"].(string); !ok {
+		t.Fatalf("expected lowercase label field, got %#v", first)
+	}
+	if _, exists := first["Label"]; exists {
+		t.Fatalf("expected no Go-style Label key, got %#v", first)
+	}
+
+	var toggle map[string]any
+	for _, field := range body.Fields {
+		if field["key"] == "runtime_consolidation_enabled" {
+			toggle = field
+			break
+		}
+	}
+	if toggle == nil {
+		t.Fatalf("expected runtime_consolidation_enabled field, got %#v", body.Fields)
+	}
+	if toggle["kind"] != "toggle" {
+		t.Fatalf("expected toggle kind, got %#v", toggle["kind"])
+	}
+	if _, ok := toggle["value"].(bool); !ok {
+		t.Fatalf("expected boolean toggle value, got %#v", toggle["value"])
+	}
+}
+
 func TestServiceConfigureApply_PersistsConfigChanges(t *testing.T) {
 	cfg := config.Default()
 	cfgPath := filepath.Join(t.TempDir(), "or3-intern.json")

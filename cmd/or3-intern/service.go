@@ -442,6 +442,12 @@ type serviceFileEntry struct {
 	MimeType   string `json:"mime_type,omitempty"`
 }
 
+type serviceFileSearchItem struct {
+	serviceFileEntry
+	RootID    string `json:"root_id"`
+	RootLabel string `json:"root_label"`
+}
+
 func (s *serviceServer) handleFiles(w http.ResponseWriter, r *http.Request) {
 	if !requireServiceRole(w, r, approval.RoleOperator) {
 		return
@@ -461,6 +467,12 @@ func (s *serviceServer) handleFiles(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleFileList(w, r)
+	case "search":
+		if r.Method != http.MethodGet {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		s.handleFileSearch(w, r)
 	case "stat":
 		if r.Method != http.MethodGet {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
@@ -521,6 +533,21 @@ func (s *serviceServer) serviceFileRootByID(id string) (serviceFileRoot, bool) {
 		}
 	}
 	return serviceFileRoot{}, false
+}
+
+func (s *serviceServer) defaultSearchFileRoot() (serviceFileRoot, bool) {
+	roots := s.serviceFileRoots()
+	for _, id := range []string{"workspace", "allowed", "cwd"} {
+		for _, root := range roots {
+			if root.ID == id {
+				return root, true
+			}
+		}
+	}
+	if len(roots) == 0 {
+		return serviceFileRoot{}, false
+	}
+	return roots[0], true
 }
 
 func (s *serviceServer) resolveServiceFilePath(rootID, relPath string) (serviceFileRoot, string, string, error) {
@@ -612,6 +639,106 @@ func (s *serviceServer) handleFileList(w http.ResponseWriter, r *http.Request) {
 		entries = append(entries, serviceFileEntry{Name: item.Name(), Path: entryRel, Type: entryType, Size: info.Size(), ModifiedAt: info.ModTime().Format(time.RFC3339), MimeType: mime.TypeByExtension(filepath.Ext(item.Name()))})
 	}
 	writeServiceJSON(w, http.StatusOK, map[string]any{"root_id": root.ID, "path": rel, "entries": entries})
+}
+
+func (s *serviceServer) handleFileSearch(w http.ResponseWriter, r *http.Request) {
+	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	limit := parsePositiveInt(r.URL.Query().Get("limit"), 20)
+	if limit > 50 {
+		limit = 50
+	}
+	rootID := strings.TrimSpace(r.URL.Query().Get("root_id"))
+	root := serviceFileRoot{}
+	var ok bool
+	if rootID == "" {
+		root, ok = s.defaultSearchFileRoot()
+	} else {
+		root, ok = s.serviceFileRootByID(rootID)
+	}
+	if !ok {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "unknown file root"})
+		return
+	}
+
+	_, absRoot, _, err := s.resolveServiceFilePath(root.ID, ".")
+	if err != nil {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+
+	items := make([]serviceFileSearchItem, 0, limit)
+	visited := 0
+	const maxVisited = 5000
+	_ = filepath.WalkDir(absRoot, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil || path == absRoot {
+			return nil
+		}
+		name := entry.Name()
+		if entry.IsDir() && isIgnoredSearchDir(name) {
+			return filepath.SkipDir
+		}
+		visited++
+		if visited > maxVisited {
+			return filepath.SkipAll
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(absRoot, path)
+		if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return nil
+		}
+		slashRel := filepath.ToSlash(rel)
+		if query != "" && !fileSearchMatches(query, name, slashRel) {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return nil
+		}
+		items = append(items, serviceFileSearchItem{
+			serviceFileEntry: serviceFileEntry{Name: name, Path: slashRel, Type: "file", Size: info.Size(), ModifiedAt: info.ModTime().Format(time.RFC3339), MimeType: mime.TypeByExtension(filepath.Ext(name))},
+			RootID:           root.ID,
+			RootLabel:        root.Label,
+		})
+		if len(items) >= limit {
+			return filepath.SkipAll
+		}
+		return nil
+	})
+
+	writeServiceJSON(w, http.StatusOK, map[string]any{"root_id": root.ID, "query": query, "items": items})
+}
+
+func parsePositiveInt(raw string, fallback int) int {
+	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || value <= 0 {
+		return fallback
+	}
+	return value
+}
+
+func isIgnoredSearchDir(name string) bool {
+	switch name {
+	case ".git", ".hg", ".svn", "node_modules", ".nuxt", ".output", "dist", "build", "coverage", ".cache", "vendor":
+		return true
+	default:
+		return false
+	}
+}
+
+func fileSearchMatches(query, name, path string) bool {
+	if query == "" {
+		return true
+	}
+	lowerName := strings.ToLower(name)
+	lowerPath := strings.ToLower(path)
+	for _, token := range strings.Fields(query) {
+		if !strings.Contains(lowerName, token) && !strings.Contains(lowerPath, token) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *serviceServer) handleFileStat(w http.ResponseWriter, r *http.Request) {
@@ -2142,6 +2269,54 @@ type serviceConfigureChange struct {
 	Value   string `json:"value"`
 }
 
+type serviceConfigureField struct {
+	Key         string   `json:"key"`
+	Label       string   `json:"label"`
+	Description string   `json:"description,omitempty"`
+	Kind        string   `json:"kind"`
+	Value       any      `json:"value,omitempty"`
+	Choices     []string `json:"choices,omitempty"`
+	EmptyHint   string   `json:"emptyHint,omitempty"`
+	Placeholder string   `json:"placeholder,omitempty"`
+}
+
+func serviceConfigureFieldKind(kind configureFieldKind) string {
+	switch kind {
+	case configureFieldSecret:
+		return "secret"
+	case configureFieldToggle:
+		return "toggle"
+	case configureFieldChoice:
+		return "choice"
+	default:
+		return "text"
+	}
+}
+
+func serviceConfigureFieldValue(field configureField) any {
+	if field.Kind == configureFieldToggle {
+		return strings.EqualFold(strings.TrimSpace(field.Value), "on")
+	}
+	return field.Value
+}
+
+func toServiceConfigureFields(fields []configureField) []serviceConfigureField {
+	result := make([]serviceConfigureField, 0, len(fields))
+	for _, field := range fields {
+		result = append(result, serviceConfigureField{
+			Key:         field.Key,
+			Label:       field.Label,
+			Description: field.Description,
+			Kind:        serviceConfigureFieldKind(field.Kind),
+			Value:       serviceConfigureFieldValue(field),
+			Choices:     append([]string{}, field.Choices...),
+			EmptyHint:   field.EmptyHint,
+			Placeholder: field.EmptyHint,
+		})
+	}
+	return result
+}
+
 func (s *serviceServer) handleConfigure(w http.ResponseWriter, r *http.Request) {
 	if !requireServiceRole(w, r, approval.RoleOperator) {
 		return
@@ -2187,7 +2362,7 @@ func (s *serviceServer) handleConfigure(w http.ResponseWriter, r *http.Request) 
 		writeServiceValue(w, http.StatusOK, map[string]any{
 			"section": section,
 			"channel": channel,
-			"fields":  fields,
+			"fields":  toServiceConfigureFields(fields),
 		})
 	case "apply":
 		if r.Method != http.MethodPost {

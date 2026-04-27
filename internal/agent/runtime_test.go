@@ -213,6 +213,61 @@ func TestRuntime_Handle_UserMessage(t *testing.T) {
 	}
 }
 
+func TestRuntime_Handle_XMLToolCallMarkupExecutesTool(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	tool := &requiredTextTool{}
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		if callCount == 1 {
+			_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","content":"<tool_call><function=required_text_tool><parameter=text>hello from markup</tool_call>"}}]}`)
+			return
+		}
+		var req providers.ChatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if len(req.Messages) < 2 || req.Messages[len(req.Messages)-1].Role != "tool" {
+			t.Fatalf("expected tool result in follow-up request, got %#v", req.Messages)
+		}
+		_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","content":"final after tool"}}]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	provider := providers.New(srv.URL, "test-key", 10*time.Second)
+	provider.HTTP = srv.Client()
+	deliver := &mockDeliverer{}
+	rt := buildSimpleRuntime(t, provider, d, deliver)
+	rt.Tools.Register(tool)
+
+	err := rt.Handle(context.Background(), bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess-markup-tool",
+		Channel:    "cli",
+		From:       "user",
+		Message:    "use markup tool",
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if !tool.called {
+		t.Fatal("expected XML-style tool call markup to execute the tool")
+	}
+	if len(deliver.messages) != 1 || deliver.messages[0] != "final after tool" {
+		t.Fatalf("expected final response after tool, got %#v", deliver.messages)
+	}
+	msgs, err := d.GetLastMessages(context.Background(), "sess-markup-tool", 10)
+	if err != nil {
+		t.Fatalf("GetLastMessages: %v", err)
+	}
+	for _, msg := range msgs {
+		if strings.Contains(msg.Content, "<tool_call>") {
+			t.Fatalf("expected persisted messages to omit raw tool markup, got %#v", msgs)
+		}
+	}
+}
+
 func TestRuntime_Handle_PruneArchivesAndClearsLiveHistory(t *testing.T) {
 	d := openRuntimeTestDB(t)
 	_, provider := buildChatServer(t, consolidationResponse("pruned chat summary"))

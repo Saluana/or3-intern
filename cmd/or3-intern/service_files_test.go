@@ -64,3 +64,33 @@ func TestResolveServiceFilePathRejectsSymlinkEscape(t *testing.T) {
 		t.Fatal("expected symlink escape to be rejected")
 	}
 }
+
+func TestFileSearchMatchesAllQueryTokens(t *testing.T) {
+	if !fileSearchMatches("runtime go", "runtime.go", "internal/agent/runtime.go") {
+		t.Fatal("expected filename/path tokens to match")
+	}
+	if fileSearchMatches("runtime missing", "runtime.go", "internal/agent/runtime.go") {
+		t.Fatal("expected unmatched token to fail")
+	}
+}
+
+func TestDefaultSearchFileRootPrefersWorkspace(t *testing.T) {
+	tmp := t.TempDir()
+	workspace := filepath.Join(tmp, "workspace")
+	allowed := filepath.Join(tmp, "allowed")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	if err := os.MkdirAll(allowed, 0o755); err != nil {
+		t.Fatalf("create allowed: %v", err)
+	}
+	server := &serviceServer{config: config.Config{AllowedDir: allowed, WorkspaceDir: workspace}}
+
+	root, ok := server.defaultSearchFileRoot()
+	if !ok {
+		t.Fatal("expected default root")
+	}
+	if root.ID != "workspace" {
+		t.Fatalf("expected workspace root, got %+v", root)
+	}
+}

@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"log"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +37,23 @@ const (
 )
 
 const maxTrackedQuotaSessions = 1024
+
+var toolMarkupPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?is)<tool_call>[\s\S]*?</tool_call>`),
+	regexp.MustCompile(`(?is)<tool_call[\s\S]*$`),
+	regexp.MustCompile(`(?i)</?tool_call>`),
+	regexp.MustCompile(`(?i)<function=[^>]*>`),
+	regexp.MustCompile(`(?is)<function=[\s\S]*$`),
+	regexp.MustCompile(`(?i)<parameter=[^>]*>`),
+	regexp.MustCompile(`(?is)<parameter[\s\S]*$`),
+}
+
+var (
+	toolMarkupBlockPattern     = regexp.MustCompile(`(?is)<tool_call\b[^>]*>(.*?)</tool_call>`)
+	toolMarkupFunctionPattern  = regexp.MustCompile(`(?is)<function=([^>\s]+)>\s*`)
+	toolMarkupParameterPattern = regexp.MustCompile(`(?is)<parameter=([^>\s]+)>\s*`)
+	toolMarkupClosingPattern   = regexp.MustCompile(`(?is)</(?:parameter|function)>\s*$`)
+)
 
 type trustedToolAccessContextKey struct{}
 
@@ -873,6 +892,90 @@ func contentToString(v any) string {
 	return string(b)
 }
 
+func sanitizeToolTurnContent(text string) string {
+	cleaned := text
+	for _, pattern := range toolMarkupPatterns {
+		cleaned = pattern.ReplaceAllString(cleaned, "")
+	}
+	return strings.TrimSpace(cleaned)
+}
+
+func parseToolMarkupCalls(text string, idPrefix string) []providers.ToolCall {
+	matches := toolMarkupBlockPattern.FindAllStringSubmatch(text, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	out := make([]providers.ToolCall, 0, len(matches))
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		block := match[1]
+		functionMatch := toolMarkupFunctionPattern.FindStringSubmatch(block)
+		if len(functionMatch) < 2 {
+			continue
+		}
+		name := strings.TrimSpace(html.UnescapeString(functionMatch[1]))
+		if name == "" {
+			continue
+		}
+		params := parseToolMarkupParams(block)
+		args, err := json.Marshal(params)
+		if err != nil {
+			continue
+		}
+		index := len(out)
+		tc := providers.ToolCall{
+			ID:    fmt.Sprintf("%s_%d", idPrefix, index+1),
+			Index: index,
+			Type:  "function",
+		}
+		tc.Function.Name = name
+		tc.Function.Arguments = string(args)
+		out = append(out, tc)
+	}
+	return out
+}
+
+func parseToolMarkupParams(block string) map[string]any {
+	params := map[string]any{}
+	matches := toolMarkupParameterPattern.FindAllStringSubmatchIndex(block, -1)
+	for i, match := range matches {
+		if len(match) < 4 {
+			continue
+		}
+		name := strings.TrimSpace(html.UnescapeString(block[match[2]:match[3]]))
+		if name == "" {
+			continue
+		}
+		start := match[1]
+		end := len(block)
+		if i+1 < len(matches) {
+			end = matches[i+1][0]
+		}
+		value := strings.TrimSpace(block[start:end])
+		value = strings.TrimSpace(toolMarkupClosingPattern.ReplaceAllString(value, ""))
+		params[name] = parseToolMarkupParamValue(html.UnescapeString(value))
+	}
+	return params
+}
+
+func parseToolMarkupParamValue(value string) any {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	first := value[0]
+	if !strings.ContainsRune(`{["-0123456789tfn`, rune(first)) {
+		return value
+	}
+	var parsed any
+	if err := json.Unmarshal([]byte(value), &parsed); err == nil {
+		return parsed
+	}
+	return value
+}
+
 func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventType, sessionKey string, messages []providers.ChatMessage, reg *tools.Registry, channel string, replyTo string, replyMeta map[string]any) (string, bool, error) {
 	if reg == nil {
 		reg = tools.NewRegistry()
@@ -945,6 +1048,14 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 		}
 		msg := resp.Choices[0].Message
 		if len(msg.ToolCalls) == 0 {
+			if raw, ok := msg.Content.(string); ok {
+				if calls := parseToolMarkupCalls(raw, fmt.Sprintf("markup_%d", loop+1)); len(calls) > 0 {
+					msg.ToolCalls = calls
+					msg.Content = sanitizeToolTurnContent(raw)
+				}
+			}
+		}
+		if len(msg.ToolCalls) == 0 {
 			finalText := strings.TrimSpace(contentToString(msg.Content))
 			if sw != nil {
 				_ = sw.Close(ctx, finalText)
@@ -964,8 +1075,13 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 			_ = sw.Abort(ctx)
 		}
 
-		messages = append(messages, providers.ChatMessage{Role: "assistant", Content: msg.Content, ToolCalls: msg.ToolCalls})
-		if _, err := r.DB.AppendMessage(ctx, sessionKey, "assistant", contentToString(msg.Content), map[string]any{"tool_calls": msg.ToolCalls}); err != nil {
+		toolTurnContent := msg.Content
+		if raw, ok := msg.Content.(string); ok {
+			toolTurnContent = sanitizeToolTurnContent(raw)
+		}
+
+		messages = append(messages, providers.ChatMessage{Role: "assistant", Content: toolTurnContent, ToolCalls: msg.ToolCalls})
+		if _, err := r.DB.AppendMessage(ctx, sessionKey, "assistant", sanitizeToolTurnContent(contentToString(msg.Content)), map[string]any{"tool_calls": msg.ToolCalls}); err != nil {
 			log.Printf("append assistant(tool_calls) failed: %v", err)
 		}
 

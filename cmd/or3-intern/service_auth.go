@@ -87,6 +87,15 @@ func serviceAuthMiddlewareWithBroker(cfg config.Config, broker *approval.Broker,
 			return
 		}
 		requirement := serviceRouteRequirementForRequest(cfg, r)
+		if requirement.Sensitivity == serviceRoutePublic {
+			identity := serviceAuthIdentity{Kind: "public", Actor: "anonymous"}
+			ctx := context.WithValue(r.Context(), serviceAuthContextKey{}, identity)
+			ctx = context.WithValue(ctx, serviceAuthKindContextKey{}, identity.Kind)
+			ctx = approval.ContextWithAuditAuthKind(ctx, identity.Kind)
+			ctx = approval.ContextWithAuditActor(ctx, identity.Actor)
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
 		identity, err := authenticateServiceRequest(cfg, broker, authSvc, r.Header.Get("Authorization"), time.Now(), r.Context())
 		if err != nil {
 			if challenge := serviceAuthChallengeError(cfg, authSvc, requirement, serviceAuthIdentity{}, err); challenge != nil {
@@ -280,14 +289,14 @@ func serviceRouteRequirementForRequest(cfg config.Config, r *http.Request) servi
 	path := strings.TrimSpace(r.URL.Path)
 	method := r.Method
 	switch {
-	case path == "/internal/v1/health", path == "/internal/v1/ready", path == "/internal/v1/capabilities":
+	case path == "/internal/v1/health", path == "/internal/v1/ready":
 		return serviceRouteRequirement{Sensitivity: serviceRoutePublic}
 	case path == "/internal/v1/auth/capabilities":
 		return serviceRouteRequirement{Sensitivity: serviceRoutePublic}
 	case path == "/internal/v1/auth/passkeys/login/begin", path == "/internal/v1/auth/passkeys/login/finish":
-		return serviceRouteRequirement{Sensitivity: serviceRoutePublic}
+		return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
 	case path == "/internal/v1/auth/passkeys/registration/begin", path == "/internal/v1/auth/passkeys/registration/finish":
-		return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, SessionOnly: true}
+		return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
 	case path == "/internal/v1/auth/session" || path == "/internal/v1/auth/session/revoke":
 		return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, SessionOnly: true}
 	case path == "/internal/v1/auth/step-up/begin" || path == "/internal/v1/auth/step-up/finish":
@@ -297,6 +306,28 @@ func serviceRouteRequirementForRequest(cfg config.Config, r *http.Request) servi
 			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, SessionOnly: true}
 		}
 		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "recent passkey verification required"}
+	case path == "/internal/v1/devices":
+		return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
+	case strings.HasPrefix(path, "/internal/v1/devices/"):
+		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "device management requires recent passkey verification"}
+	case path == "/internal/v1/configure" || strings.HasPrefix(path, "/internal/v1/configure/"):
+		if method == http.MethodGet {
+			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
+		}
+		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "configuration changes require recent passkey verification"}
+	case path == "/internal/v1/files" || strings.HasPrefix(path, "/internal/v1/files/"):
+		relative := strings.Trim(strings.TrimPrefix(path, "/internal/v1/files"), "/")
+		if method == http.MethodGet || relative == "roots" || relative == "list" || relative == "search" || relative == "stat" || relative == "download" {
+			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
+		}
+		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "file changes require recent passkey verification"}
+	case path == "/internal/v1/terminal/sessions" || strings.HasPrefix(path, "/internal/v1/terminal/sessions/"):
+		if method == http.MethodGet && !strings.Contains(strings.TrimPrefix(path, "/internal/v1/terminal/sessions/"), "/input") {
+			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
+		}
+		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "terminal access requires recent passkey verification"}
+	case path == "/internal/v1/approvals" || strings.HasPrefix(path, "/internal/v1/approvals/"):
+		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "approval changes require recent passkey verification"}
 	case method == http.MethodDelete || method == http.MethodPatch || method == http.MethodPut:
 		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, Reason: "recent passkey verification required"}
 	default:
@@ -310,6 +341,9 @@ func serviceRouteRequirementForRequest(cfg config.Config, r *http.Request) servi
 
 func serviceAuthChallengeError(cfg config.Config, authSvc *auth.Service, requirement serviceRouteRequirement, identity serviceAuthIdentity, authErr error) *auth.Error {
 	if requirement.Sensitivity == serviceRoutePublic {
+		return nil
+	}
+	if !cfg.Auth.Enabled {
 		return nil
 	}
 	mode := string(cfg.Auth.EnforcementMode)

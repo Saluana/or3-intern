@@ -2200,7 +2200,7 @@ func (s *serviceServer) handleAuth(w http.ResponseWriter, r *http.Request) {
 			writeServiceRequestDecodeError(w, err)
 			return
 		}
-		response, err := api.BeginPasskeyRegistration(r.Context(), auth.BeginRegistrationRequest{DeviceID: identity.Device, DisplayName: body.DisplayName, Reason: body.Reason})
+		response, err := api.BeginPasskeyRegistration(r.Context(), auth.BeginRegistrationRequest{DeviceID: identity.Device, DisplayName: body.DisplayName, Reason: body.Reason, SessionToken: sessionToken})
 		if err != nil {
 			writeServiceAuthError(w, r, err)
 			return
@@ -2225,7 +2225,7 @@ func (s *serviceServer) handleAuth(w http.ResponseWriter, r *http.Request) {
 			writeServiceRequestDecodeError(w, err)
 			return
 		}
-		record, err := api.FinishPasskeyRegistration(r.Context(), auth.FinishRegistrationRequest{CeremonyID: body.CeremonyID, Body: body.Credential, Nickname: body.Nickname})
+		record, err := api.FinishPasskeyRegistration(r.Context(), auth.FinishRegistrationRequest{CeremonyID: body.CeremonyID, Body: body.Credential, Nickname: body.Nickname, SessionToken: sessionToken})
 		if err != nil {
 			writeServiceAuthError(w, r, err)
 			return

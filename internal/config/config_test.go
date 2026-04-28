@@ -257,6 +257,39 @@ func TestLoad_RejectsUnknownApprovalMode(t *testing.T) {
 	}
 }
 
+func TestValidateAuthConfigRejectsUnsafeRPAndOrigins(t *testing.T) {
+	base := AuthConfig{
+		Enabled:                   true,
+		RPID:                      "or3.chat",
+		RPDisplayName:             "OR3",
+		AllowedOrigins:            []string{"https://or3.chat"},
+		SessionIdleTTLSeconds:     300,
+		SessionAbsoluteTTLSeconds: 3600,
+		StepUpTTLSeconds:          120,
+		FallbackPolicy:            AuthFallbackPairedTokenPlusWarn,
+		EnforcementMode:           AuthEnforcementWarn,
+	}
+	tests := []struct {
+		name string
+		edit func(*AuthConfig)
+	}{
+		{name: "rp id is url", edit: func(cfg *AuthConfig) { cfg.RPID = "https://or3.chat" }},
+		{name: "rp id is raw ip", edit: func(cfg *AuthConfig) { cfg.RPID = "192.168.1.2" }},
+		{name: "wildcard origin", edit: func(cfg *AuthConfig) { cfg.AllowedOrigins = []string{"https://*.or3.chat"} }},
+		{name: "http production origin", edit: func(cfg *AuthConfig) { cfg.AllowedOrigins = []string{"http://or3.chat"} }},
+		{name: "origin outside rp id", edit: func(cfg *AuthConfig) { cfg.AllowedOrigins = []string{"https://example.com"} }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := base
+			tc.edit(&cfg)
+			if err := validateAuthConfig(cfg); err == nil {
+				t.Fatal("expected auth config validation to reject unsafe RP/origin")
+			}
+		})
+	}
+}
+
 func TestApplyEnvOverrides_ServiceConfig(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := Default()

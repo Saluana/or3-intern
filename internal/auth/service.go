@@ -75,9 +75,10 @@ type Service struct {
 }
 
 type BeginRegistrationRequest struct {
-	DeviceID    string
-	DisplayName string
-	Reason      string
+	DeviceID     string
+	DisplayName  string
+	Reason       string
+	SessionToken string
 }
 
 type BeginCeremonyResponse struct {
@@ -86,9 +87,10 @@ type BeginCeremonyResponse struct {
 }
 
 type FinishRegistrationRequest struct {
-	CeremonyID string
-	Body       []byte
-	Nickname   string
+	CeremonyID   string
+	Body         []byte
+	Nickname     string
+	SessionToken string
 }
 
 type BeginLoginRequest struct {
@@ -168,6 +170,9 @@ func (s *Service) BeginRegistration(ctx context.Context, req BeginRegistrationRe
 	if err != nil {
 		return nil, err
 	}
+	if err := s.requireRegistrationAuthorization(ctx, user.ID, req.SessionToken); err != nil {
+		return nil, err
+	}
 	creation, session, err := s.webauthn.BeginRegistration(
 		waUser,
 		libwebauthn.WithResidentKeyRequirement(protocol.ResidentKeyRequirementRequired),
@@ -200,6 +205,9 @@ func (s *Service) FinishRegistration(ctx context.Context, req FinishRegistration
 	if err != nil {
 		return db.PasskeyCredentialRecord{}, err
 	}
+	if err := s.requireRegistrationAuthorization(ctx, user.ID, req.SessionToken); err != nil {
+		return db.PasskeyCredentialRecord{}, err
+	}
 	credential, err := s.webauthn.FinishRegistration(waUser, *session, newJSONRequest(req.Body))
 	if err != nil {
 		_ = s.db.MarkWebAuthnCeremonyFailure(ctx, ceremony.ID, safeErrorReason(err), s.now().UnixMilli())
@@ -217,6 +225,9 @@ func (s *Service) FinishRegistration(ctx context.Context, req FinishRegistration
 func (s *Service) BeginLogin(ctx context.Context, req BeginLoginRequest) (*BeginCeremonyResponse, error) {
 	if err := s.requireEnabled(); err != nil {
 		return nil, err
+	}
+	if strings.TrimSpace(req.DeviceID) == "" {
+		return nil, ErrPasskeyRequired
 	}
 	assertion, session, err := s.webauthn.BeginDiscoverableLogin(libwebauthn.WithUserVerification(protocol.VerificationRequired))
 	if err != nil {
@@ -236,6 +247,9 @@ func (s *Service) BeginLogin(ctx context.Context, req BeginLoginRequest) (*Begin
 func (s *Service) FinishLogin(ctx context.Context, req FinishLoginRequest) (LoginResult, error) {
 	if err := s.requireEnabled(); err != nil {
 		return LoginResult{}, err
+	}
+	if strings.TrimSpace(req.DeviceID) == "" {
+		return LoginResult{}, ErrPasskeyRequired
 	}
 	ceremony, session, err := s.consumeCeremony(ctx, req.CeremonyID, CeremonyTypeLogin)
 	if err != nil {
@@ -610,6 +624,27 @@ func (s *Service) resolveRole(ctx context.Context, deviceID, fallback string) st
 		}
 	}
 	return firstNonEmpty(fallback, approval.RoleAdmin)
+}
+
+func (s *Service) requireRegistrationAuthorization(ctx context.Context, userID, sessionToken string) error {
+	credentials, err := s.db.ListPasskeyCredentialsByUser(ctx, firstNonEmpty(userID, DefaultUserID), false)
+	if err != nil {
+		return err
+	}
+	if len(credentials) == 0 {
+		return nil
+	}
+	claims, err := s.ValidateSessionToken(ctx, sessionToken)
+	if err != nil {
+		return err
+	}
+	if claims.User.ID != firstNonEmpty(userID, DefaultUserID) {
+		return ErrPasskeyRequired
+	}
+	if !s.hasRecentStepUp(claims.Session) {
+		return ErrRecentStepUp
+	}
+	return nil
 }
 
 func (s *Service) hasRecentStepUp(session db.AuthSessionRecord) bool {

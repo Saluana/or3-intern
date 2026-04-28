@@ -1024,6 +1024,8 @@ func sectionStatus(cfg config.Config, section string) string {
 		return fmt.Sprintf("enabled=%t · roots=%d · retrieve=%d", cfg.DocIndex.Enabled, len(cfg.DocIndex.Roots), cfg.DocIndex.RetrieveLimit)
 	case "skills":
 		return fmt.Sprintf("exec=%t · watch=%t · quarantine=%t", cfg.Skills.EnableExec, cfg.Skills.Load.Watch, cfg.Skills.Policy.QuarantineByDefault)
+	case "auth":
+		return fmt.Sprintf("enabled=%t · mode=%s · rp=%s", cfg.Auth.Enabled, cfg.Auth.EnforcementMode, emptyAsNone(cfg.Auth.RPID))
 	case "security":
 		return fmt.Sprintf("approvals=%t · audit=%t · network=%t", cfg.Security.Approvals.Enabled, cfg.Security.Audit.Enabled, cfg.Security.Network.Enabled)
 	case "hardening":
@@ -1204,6 +1206,23 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 			{Key: "skills_clawhub_site", Label: "ClawHub site URL", Description: "Human-facing ClawHub site URL.", Kind: configureFieldText, Value: cfg.Skills.ClawHub.SiteURL, EmptyHint: "https://clawhub.ai"},
 			{Key: "skills_clawhub_registry", Label: "ClawHub registry URL", Description: "Registry base URL used for remote skill operations.", Kind: configureFieldText, Value: cfg.Skills.ClawHub.RegistryURL, EmptyHint: "https://clawhub.ai"},
 			{Key: "skills_clawhub_install", Label: "ClawHub install dir", Description: "Install subdirectory used for fetched skills.", Kind: configureFieldText, Value: cfg.Skills.ClawHub.InstallDir, EmptyHint: "skills"},
+		}
+	case "auth":
+		modeChoices := []string{"off", "warn", "enforce-sensitive", "enforce-session"}
+		fallbackChoices := []string{"paired-token-only", "paired-token-plus-warning", "admin-recovery-only"}
+		return []configureField{
+			{Key: "auth_enabled", Label: "Enable auth", Description: "Enable passkey/session auth support for the service API.", Kind: configureFieldToggle, Value: onOff(cfg.Auth.Enabled)},
+			{Key: "auth_rp_id", Label: "RP ID", Description: "WebAuthn relying-party ID.", Kind: configureFieldText, Value: cfg.Auth.RPID, EmptyHint: "or3.chat"},
+			{Key: "auth_rp_display_name", Label: "RP display name", Description: "Human-readable name shown in passkey prompts.", Kind: configureFieldText, Value: cfg.Auth.RPDisplayName, EmptyHint: "OR3"},
+			{Key: "auth_allowed_origins", Label: "Allowed origins", Description: "Comma-separated exact origins allowed for WebAuthn.", Kind: configureFieldText, Value: strings.Join(cfg.Auth.AllowedOrigins, ","), EmptyHint: "https://or3.chat,https://app.or3.chat"},
+			{Key: "auth_related_origins", Label: "Related origins", Description: "Comma-separated exact related origins for narrow multi-origin setups.", Kind: configureFieldText, Value: strings.Join(cfg.Auth.RelatedOrigins, ","), EmptyHint: "https://auth.or3.chat"},
+			{Key: "auth_session_idle_ttl", Label: "Session idle TTL seconds", Description: "Idle expiration for auth sessions.", Kind: configureFieldText, Value: formatInt(cfg.Auth.SessionIdleTTLSeconds), EmptyHint: "1800"},
+			{Key: "auth_session_absolute_ttl", Label: "Session absolute TTL seconds", Description: "Absolute expiration for auth sessions.", Kind: configureFieldText, Value: formatInt(cfg.Auth.SessionAbsoluteTTLSeconds), EmptyHint: "43200"},
+			{Key: "auth_step_up_ttl", Label: "Step-up TTL seconds", Description: "Recent-auth window for sensitive actions.", Kind: configureFieldText, Value: formatInt(cfg.Auth.StepUpTTLSeconds), EmptyHint: "300"},
+			{Key: "auth_fallback_policy", Label: "Fallback policy", Description: "Compatibility policy for pairing-only clients.", Kind: configureFieldChoice, Value: cfg.Auth.FallbackPolicy, Choices: fallbackChoices, ChoiceIndex: indexOfChoice(fallbackChoices, cfg.Auth.FallbackPolicy)},
+			{Key: "auth_enforcement_mode", Label: "Enforcement mode", Description: "Auth rollout enforcement level.", Kind: configureFieldChoice, Value: string(cfg.Auth.EnforcementMode), Choices: modeChoices, ChoiceIndex: indexOfChoice(modeChoices, string(cfg.Auth.EnforcementMode))},
+			{Key: "auth_allow_paired_token_fallback", Label: "Allow paired-token fallback", Description: "Permit paired-device token compatibility when policy allows it.", Kind: configureFieldToggle, Value: onOff(cfg.Auth.AllowPairedTokenFallback)},
+			{Key: "auth_require_passkey_for_sensitive", Label: "Require passkey for sensitive routes", Description: "Require recent passkey verification for high-risk routes.", Kind: configureFieldToggle, Value: onOff(cfg.Auth.RequirePasskeyForSensitive)},
 		}
 	case "security":
 		approvalChoices := []string{"deny", "ask", "allowlist", "trusted"}
@@ -1432,6 +1451,18 @@ var helpfulSectionFieldDescriptions = map[string]string{
 	"skills_clawhub_site":                   "Human-facing ClawHub website URL used in messages and help text. Most users should leave this alone.",
 	"skills_clawhub_registry":               "Machine-readable registry URL used to fetch skill metadata. Warning: a wrong or untrusted registry can break or risk skill installs.",
 	"skills_clawhub_install":                "Subfolder name used when installing fetched skills. Change only if you know where you want remote skills stored.",
+	"auth_enabled":                          "Turns on passkey/session auth support for the service API. Keep this off until RP ID and allowed origins are configured correctly.",
+	"auth_rp_id":                            "The relying-party ID used for passkeys, such as or3.chat or localhost. Warning: this must be a real domain, not a URL or raw IP.",
+	"auth_rp_display_name":                  "Human-readable relying-party name shown during passkey prompts.",
+	"auth_allowed_origins":                  "Exact web origins allowed to begin and finish WebAuthn ceremonies. Warning: wildcards and insecure non-localhost origins are rejected.",
+	"auth_related_origins":                  "Optional extra exact origins allowed for narrow multi-origin deployments. Keep this list small and controlled.",
+	"auth_session_idle_ttl":                 "How long an auth session may sit idle before OR3 requires another passkey login.",
+	"auth_session_absolute_ttl":             "Maximum lifetime of an auth session even if the app stays active.",
+	"auth_step_up_ttl":                      "How long recent verification stays valid for sensitive actions such as terminal, files, and settings changes.",
+	"auth_fallback_policy":                  "Controls what older pairing-only clients may do while auth is enabled.",
+	"auth_enforcement_mode":                 "Controls rollout behavior: off, warn, enforce-sensitive, or enforce-session.",
+	"auth_allow_paired_token_fallback":      "Allows paired-device tokens to keep working for compatibility when policy permits.",
+	"auth_require_passkey_for_sensitive":    "Marks high-risk routes as requiring recent passkey verification when auth is active.",
 	"security_secret_store_enabled":         "Stores sensitive secrets encrypted in the local database instead of only in config files. Recommended when using service mode or channels.",
 	"security_secret_store_required":        "Refuses to start if encrypted secret storage is unavailable. Safer, but warning: misconfigured keys can block startup.",
 	"security_secret_store_key_file":        "File containing the encryption key for stored secrets. Warning: losing this key can make encrypted secrets unreadable.",
@@ -1971,6 +2002,24 @@ func applyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 	case "skills_clawhub_install":
 		cfg.Skills.ClawHub.InstallDir = value
 		return true, nil
+	case "auth_rp_id":
+		cfg.Auth.RPID = value
+		return true, nil
+	case "auth_rp_display_name":
+		cfg.Auth.RPDisplayName = value
+		return true, nil
+	case "auth_allowed_origins":
+		cfg.Auth.AllowedOrigins = splitAndCompact(value)
+		return true, nil
+	case "auth_related_origins":
+		cfg.Auth.RelatedOrigins = splitAndCompact(value)
+		return true, nil
+	case "auth_session_idle_ttl":
+		return setIntValue(&cfg.Auth.SessionIdleTTLSeconds, value, fieldKey)
+	case "auth_session_absolute_ttl":
+		return setIntValue(&cfg.Auth.SessionAbsoluteTTLSeconds, value, fieldKey)
+	case "auth_step_up_ttl":
+		return setIntValue(&cfg.Auth.StepUpTTLSeconds, value, fieldKey)
 	case "security_secret_store_key_file":
 		cfg.Security.SecretStore.KeyFile = value
 		return true, nil
@@ -2119,6 +2168,12 @@ func setToggleFieldValue(cfg *config.Config, section, channel, fieldKey string, 
 		cfg.Skills.Policy.QuarantineByDefault = value
 	case "skills_watch":
 		cfg.Skills.Load.Watch = value
+	case "auth_enabled":
+		cfg.Auth.Enabled = value
+	case "auth_allow_paired_token_fallback":
+		cfg.Auth.AllowPairedTokenFallback = value
+	case "auth_require_passkey_for_sensitive":
+		cfg.Auth.RequirePasskeyForSensitive = value
 	case "security_secret_store_enabled":
 		cfg.Security.SecretStore.Enabled = value
 	case "security_secret_store_required":
@@ -2203,6 +2258,12 @@ func applyChoiceSelection(cfg *config.Config, section, channel, fieldKey, choice
 		return true, nil
 	case "context_mode":
 		cfg.Context.Mode = choice
+		return true, nil
+	case "auth_fallback_policy":
+		cfg.Auth.FallbackPolicy = choice
+		return true, nil
+	case "auth_enforcement_mode":
+		cfg.Auth.EnforcementMode = config.AuthEnforcementMode(choice)
 		return true, nil
 	case "security_approval_pairing_mode":
 		cfg.Security.Approvals.Pairing.Mode = config.ApprovalMode(choice)

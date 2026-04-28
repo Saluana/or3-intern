@@ -1109,7 +1109,7 @@ func newServiceTestHTTPServer(t *testing.T, secret string, server *serviceServer
 			return registry
 		}
 	}
-	return httptest.NewServer(serviceBrowserMiddleware(server.config, serviceAuthMiddlewareWithBroker(server.config, server.broker, serviceBoundaryMiddleware(server, newServiceMux(server)))))
+	return httptest.NewServer(serviceBrowserMiddleware(server.config, serviceAuthMiddlewareWithBroker(server.config, server.broker, server.app().Auth(), serviceBoundaryMiddleware(server, newServiceMux(server)))))
 }
 
 func mustServiceRequest(t *testing.T, server *httptest.Server, secret, method, path, body string) *http.Request {

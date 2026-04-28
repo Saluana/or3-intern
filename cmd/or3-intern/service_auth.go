@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"or3-intern/internal/approval"
+	"or3-intern/internal/auth"
 	"or3-intern/internal/config"
 )
 
@@ -30,14 +32,34 @@ type serviceAuthContextKey struct{}
 type serviceAuthKindContextKey struct{}
 
 type serviceAuthIdentity struct {
-	Kind   string
-	Actor  string
-	Role   string
-	Device string
+	Kind      string
+	Actor     string
+	Role      string
+	Device    string
+	User      string
+	Session   string
+	StepUpAt  int64
+	StepUpOK  bool
+	Challenge string
+}
+
+type serviceRouteSensitivity int
+
+const (
+	serviceRoutePublic serviceRouteSensitivity = iota
+	serviceRouteLowRisk
+	serviceRouteSensitive
+)
+
+type serviceRouteRequirement struct {
+	Sensitivity serviceRouteSensitivity
+	SessionOnly bool
+	StepUpOnly  bool
+	Reason      string
 }
 
 func serviceAuthMiddleware(secret string, next http.Handler) http.Handler {
-	return serviceAuthMiddlewareWithBroker(config.Config{Service: config.ServiceConfig{Secret: secret, SharedSecretRole: approval.RoleServiceClient}}, nil, next)
+	return serviceAuthMiddlewareWithBroker(config.Config{Service: config.ServiceConfig{Secret: secret, SharedSecretRole: approval.RoleServiceClient}}, nil, nil, next)
 }
 
 func serviceBrowserMiddleware(cfg config.Config, next http.Handler) http.Handler {
@@ -56,7 +78,7 @@ func serviceBrowserMiddleware(cfg config.Config, next http.Handler) http.Handler
 	})
 }
 
-func serviceAuthMiddlewareWithBroker(cfg config.Config, broker *approval.Broker, next http.Handler) http.Handler {
+func serviceAuthMiddlewareWithBroker(cfg config.Config, broker *approval.Broker, authSvc *auth.Service, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if allowsUnauthenticatedPairingRoute(cfg, r) {
 			ctx := approval.ContextWithAuditAuthKind(r.Context(), "unauthenticated")
@@ -64,10 +86,29 @@ func serviceAuthMiddlewareWithBroker(cfg config.Config, broker *approval.Broker,
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
-		identity, err := authenticateServiceRequest(cfg, broker, r.Header.Get("Authorization"), time.Now(), r.Context())
+		requirement := serviceRouteRequirementForRequest(cfg, r)
+		identity, err := authenticateServiceRequest(cfg, broker, authSvc, r.Header.Get("Authorization"), time.Now(), r.Context())
 		if err != nil {
+			if challenge := serviceAuthChallengeError(cfg, authSvc, requirement, serviceAuthIdentity{}, err); challenge != nil {
+				serviceAuditAuthEvent(authSvc, r.Context(), "auth.policy.denied", serviceAuthIdentity{Actor: "anonymous"}, map[string]any{"path": r.URL.Path, "method": r.Method, "code": challenge.Code})
+				writeServiceAuthError(w, r, challenge)
+				return
+			}
 			writeServiceJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 			return
+		}
+		if challenge := serviceAuthChallengeError(cfg, authSvc, requirement, identity, nil); challenge != nil {
+			if strings.EqualFold(string(cfg.Auth.EnforcementMode), string(config.AuthEnforcementWarn)) {
+				serviceAuditAuthEvent(authSvc, r.Context(), "auth.policy.warn", identity, map[string]any{"path": r.URL.Path, "method": r.Method, "code": challenge.Code})
+				w.Header().Set("X-Or3-Auth-Warning", challenge.Code)
+				if strings.TrimSpace(challenge.Message) != "" {
+					w.Header().Set("X-Or3-Auth-Reason", challenge.Message)
+				}
+			} else {
+				serviceAuditAuthEvent(authSvc, r.Context(), "auth.policy.denied", identity, map[string]any{"path": r.URL.Path, "method": r.Method, "code": challenge.Code})
+				writeServiceAuthError(w, r, challenge)
+				return
+			}
 		}
 		ctx := context.WithValue(r.Context(), serviceAuthContextKey{}, identity)
 		ctx = context.WithValue(ctx, serviceAuthKindContextKey{}, identity.Kind)
@@ -150,7 +191,7 @@ func serviceAppendVary(header http.Header, value string) {
 	header.Add("Vary", value)
 }
 
-func authenticateServiceRequest(cfg config.Config, broker *approval.Broker, header string, now time.Time, ctx context.Context) (serviceAuthIdentity, error) {
+func authenticateServiceRequest(cfg config.Config, broker *approval.Broker, authSvc *auth.Service, header string, now time.Time, ctx context.Context) (serviceAuthIdentity, error) {
 	if err := validateServiceAuthorization(cfg.Service.Secret, header, now); err == nil {
 		role := strings.TrimSpace(cfg.Service.SharedSecretRole)
 		if role == "" {
@@ -158,18 +199,38 @@ func authenticateServiceRequest(cfg config.Config, broker *approval.Broker, head
 		}
 		return serviceAuthIdentity{Kind: "shared-secret", Actor: "service:shared-secret", Role: role}, nil
 	}
-	if broker == nil {
-		return serviceAuthIdentity{}, fmt.Errorf("missing bearer token")
-	}
 	scheme, token, ok := strings.Cut(strings.TrimSpace(header), " ")
 	if !ok || !strings.EqualFold(scheme, "Bearer") || strings.TrimSpace(token) == "" {
 		return serviceAuthIdentity{}, fmt.Errorf("missing bearer token")
 	}
-	device, err := broker.AuthenticateDeviceToken(ctx, token)
-	if err != nil {
+	if broker != nil {
+		device, err := broker.AuthenticateDeviceToken(ctx, token)
+		if err == nil {
+			return serviceAuthIdentity{Kind: "paired-device", Actor: "device:" + device.DeviceID, Role: device.Role, Device: device.DeviceID}, nil
+		}
+	}
+	if authSvc != nil && authSvc.Enabled() {
+		claims, err := authSvc.ValidateSessionToken(ctx, token)
+		if err == nil {
+			actor := "user:" + claims.User.ID
+			if strings.TrimSpace(claims.Session.DeviceID) != "" {
+				actor = actor + ":device:" + claims.Session.DeviceID
+			}
+			return serviceAuthIdentity{
+				Kind:      "auth-session",
+				Actor:     actor,
+				Role:      claims.Role,
+				Device:    claims.Session.DeviceID,
+				User:      claims.User.ID,
+				Session:   claims.Session.ID,
+				StepUpAt:  claims.Session.LastStepUpAt,
+				StepUpOK:  authSvc.HasRecentStepUp(claims.Session),
+				Challenge: token,
+			}, nil
+		}
 		return serviceAuthIdentity{}, err
 	}
-	return serviceAuthIdentity{Kind: "paired-device", Actor: "device:" + device.DeviceID, Role: device.Role, Device: device.DeviceID}, nil
+	return serviceAuthIdentity{}, fmt.Errorf("invalid bearer token")
 }
 
 func serviceAuthIdentityFromContext(ctx context.Context) serviceAuthIdentity {
@@ -209,6 +270,101 @@ func allowsUnauthenticatedPairingRoute(cfg config.Config, r *http.Request) bool 
 	}
 	path := strings.TrimSpace(r.URL.Path)
 	return path == "/internal/v1/pairing/requests" || path == "/internal/v1/pairing/exchange"
+}
+
+func serviceRouteRequirementForRequest(cfg config.Config, r *http.Request) serviceRouteRequirement {
+	requirement := serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
+	if r == nil || r.URL == nil {
+		return requirement
+	}
+	path := strings.TrimSpace(r.URL.Path)
+	method := r.Method
+	switch {
+	case path == "/internal/v1/health", path == "/internal/v1/ready", path == "/internal/v1/capabilities":
+		return serviceRouteRequirement{Sensitivity: serviceRoutePublic}
+	case path == "/internal/v1/auth/capabilities":
+		return serviceRouteRequirement{Sensitivity: serviceRoutePublic}
+	case path == "/internal/v1/auth/passkeys/login/begin", path == "/internal/v1/auth/passkeys/login/finish":
+		return serviceRouteRequirement{Sensitivity: serviceRoutePublic}
+	case path == "/internal/v1/auth/passkeys/registration/begin", path == "/internal/v1/auth/passkeys/registration/finish":
+		return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, SessionOnly: true}
+	case path == "/internal/v1/auth/session" || path == "/internal/v1/auth/session/revoke":
+		return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, SessionOnly: true}
+	case path == "/internal/v1/auth/step-up/begin" || path == "/internal/v1/auth/step-up/finish":
+		return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, SessionOnly: true}
+	case strings.HasPrefix(path, "/internal/v1/auth/passkeys"):
+		if method == http.MethodGet && path == "/internal/v1/auth/passkeys" {
+			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, SessionOnly: true}
+		}
+		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "recent passkey verification required"}
+	case method == http.MethodDelete || method == http.MethodPatch || method == http.MethodPut:
+		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, Reason: "recent passkey verification required"}
+	default:
+		mode := string(cfg.Auth.EnforcementMode)
+		if strings.EqualFold(mode, string(config.AuthEnforcementSession)) {
+			requirement.SessionOnly = true
+		}
+		return requirement
+	}
+}
+
+func serviceAuthChallengeError(cfg config.Config, authSvc *auth.Service, requirement serviceRouteRequirement, identity serviceAuthIdentity, authErr error) *auth.Error {
+	if requirement.Sensitivity == serviceRoutePublic {
+		return nil
+	}
+	mode := string(cfg.Auth.EnforcementMode)
+	if strings.EqualFold(mode, string(config.AuthEnforcementOff)) {
+		return nil
+	}
+	if authErr != nil {
+		var typed *auth.Error
+		if errors.As(authErr, &typed) {
+			return typed
+		}
+		if authSvc == nil || !authSvc.Enabled() {
+			return auth.ErrAuthDisabled
+		}
+		if requirement.SessionOnly || strings.EqualFold(mode, string(config.AuthEnforcementSession)) {
+			return auth.ErrSessionRequired
+		}
+		if requirement.Sensitivity == serviceRouteSensitive {
+			return auth.ErrPasskeyRequired
+		}
+		return nil
+	}
+	if strings.EqualFold(identity.Kind, "shared-secret") {
+		return nil
+	}
+	enforceSession := requirement.SessionOnly || strings.EqualFold(mode, string(config.AuthEnforcementSession))
+	if enforceSession && identity.Kind != "auth-session" {
+		return auth.ErrSessionRequired
+	}
+	if requirement.Sensitivity != serviceRouteSensitive {
+		return nil
+	}
+	if identity.Kind != "auth-session" {
+		return auth.ErrPasskeyRequired
+	}
+	if requirement.StepUpOnly || strings.TrimSpace(requirement.Reason) != "" {
+		if !identity.StepUpOK {
+			return auth.ErrRecentStepUp
+		}
+	}
+	return nil
+}
+
+func serviceAuditAuthEvent(authSvc *auth.Service, ctx context.Context, eventType string, identity serviceAuthIdentity, payload map[string]any) {
+	if authSvc == nil {
+		return
+	}
+	actor := strings.TrimSpace(identity.User)
+	if actor == "" {
+		actor = strings.TrimSpace(identity.Actor)
+	}
+	if actor == "" {
+		actor = "anonymous"
+	}
+	authSvc.Audit(ctx, eventType, actor, payload)
 }
 
 func requireServiceRole(w http.ResponseWriter, r *http.Request, roles ...string) bool {

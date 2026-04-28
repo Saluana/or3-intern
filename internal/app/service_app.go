@@ -9,8 +9,10 @@ import (
 
 	"or3-intern/internal/agent"
 	"or3-intern/internal/approval"
+	"or3-intern/internal/auth"
 	"or3-intern/internal/bus"
 	"or3-intern/internal/channels"
+	"or3-intern/internal/config"
 	"or3-intern/internal/controlplane"
 	"or3-intern/internal/db"
 	"or3-intern/internal/providers"
@@ -22,10 +24,17 @@ type ServiceApp struct {
 	jobs            *agent.JobRegistry
 	subagentManager *agent.SubagentManager
 	control         *controlplane.Service
+	auth            *auth.Service
 }
 
-func NewServiceApp(runtime *agent.Runtime, jobs *agent.JobRegistry, subagentManager *agent.SubagentManager, control *controlplane.Service) *ServiceApp {
-	return &ServiceApp{runtime: runtime, jobs: jobs, subagentManager: subagentManager, control: control}
+func NewServiceApp(cfg config.Config, runtime *agent.Runtime, jobs *agent.JobRegistry, subagentManager *agent.SubagentManager, control *controlplane.Service) *ServiceApp {
+	app := &ServiceApp{runtime: runtime, jobs: jobs, subagentManager: subagentManager, control: control}
+	if control != nil {
+		if authSvc, err := auth.NewService(cfg, control.DB, control.Audit); err == nil {
+			app.auth = authSvc
+		}
+	}
+	return app
 }
 
 type TurnRequest struct {
@@ -277,6 +286,90 @@ func (a *ServiceApp) ListAllowlists(ctx context.Context, domain string, limit in
 		return nil, controlplane.ErrApprovalBrokerUnavailable
 	}
 	return a.control.ListAllowlists(ctx, domain, limit)
+}
+
+func (a *ServiceApp) Auth() *auth.Service {
+	if a == nil {
+		return nil
+	}
+	return a.auth
+}
+
+func (a *ServiceApp) BeginPasskeyRegistration(ctx context.Context, req auth.BeginRegistrationRequest) (*auth.BeginCeremonyResponse, error) {
+	if a == nil || a.auth == nil {
+		return nil, auth.ErrAuthDisabled
+	}
+	return a.auth.BeginRegistration(ctx, req)
+}
+
+func (a *ServiceApp) FinishPasskeyRegistration(ctx context.Context, req auth.FinishRegistrationRequest) (db.PasskeyCredentialRecord, error) {
+	if a == nil || a.auth == nil {
+		return db.PasskeyCredentialRecord{}, auth.ErrAuthDisabled
+	}
+	return a.auth.FinishRegistration(ctx, req)
+}
+
+func (a *ServiceApp) BeginPasskeyLogin(ctx context.Context, req auth.BeginLoginRequest) (*auth.BeginCeremonyResponse, error) {
+	if a == nil || a.auth == nil {
+		return nil, auth.ErrAuthDisabled
+	}
+	return a.auth.BeginLogin(ctx, req)
+}
+
+func (a *ServiceApp) FinishPasskeyLogin(ctx context.Context, req auth.FinishLoginRequest) (auth.LoginResult, error) {
+	if a == nil || a.auth == nil {
+		return auth.LoginResult{}, auth.ErrAuthDisabled
+	}
+	return a.auth.FinishLogin(ctx, req)
+}
+
+func (a *ServiceApp) BeginStepUp(ctx context.Context, req auth.BeginStepUpRequest) (*auth.BeginCeremonyResponse, error) {
+	if a == nil || a.auth == nil {
+		return nil, auth.ErrAuthDisabled
+	}
+	return a.auth.BeginStepUp(ctx, req)
+}
+
+func (a *ServiceApp) FinishStepUp(ctx context.Context, req auth.FinishStepUpRequest) (db.AuthSessionRecord, error) {
+	if a == nil || a.auth == nil {
+		return db.AuthSessionRecord{}, auth.ErrAuthDisabled
+	}
+	return a.auth.FinishStepUp(ctx, req)
+}
+
+func (a *ServiceApp) ValidateAuthSession(ctx context.Context, token string) (auth.SessionClaims, error) {
+	if a == nil || a.auth == nil {
+		return auth.SessionClaims{}, auth.ErrAuthDisabled
+	}
+	return a.auth.ValidateSessionToken(ctx, token)
+}
+
+func (a *ServiceApp) RevokeAuthSession(ctx context.Context, token, reason string) error {
+	if a == nil || a.auth == nil {
+		return auth.ErrAuthDisabled
+	}
+	return a.auth.RevokeSessionToken(ctx, token, reason)
+}
+
+func (a *ServiceApp) ListPasskeys(ctx context.Context, userID string) ([]db.PasskeyCredentialRecord, error) {
+	if a == nil || a.auth == nil {
+		return nil, auth.ErrAuthDisabled
+	}
+	return a.auth.ListPasskeys(ctx, userID)
+}
+
+func (a *ServiceApp) RenamePasskey(ctx context.Context, passkeyID, nickname string) error {
+	if a == nil || a.auth == nil {
+		return auth.ErrAuthDisabled
+	}
+	return a.auth.RenamePasskey(ctx, passkeyID, nickname)
+}
+
+func (a *ServiceApp) RevokePasskey(ctx context.Context, sessionToken, passkeyID, reason string) error {
+	if a == nil || a.auth == nil {
+		return auth.ErrAuthDisabled
+	}
+	return a.auth.RevokePasskey(ctx, sessionToken, passkeyID, reason)
 }
 
 func (a *ServiceApp) AddAllowlist(ctx context.Context, domain string, scope approval.AllowlistScope, matcher any, actor string, expiresAt int64) (db.ApprovalAllowlistRecord, error) {

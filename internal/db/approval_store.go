@@ -1,6 +1,7 @@
 package db
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -200,10 +201,42 @@ func (d *DB) UpsertPairedDevice(ctx context.Context, input PairedDeviceRecord) (
 		return PairedDeviceRecord{}, fmt.Errorf("device ID required")
 	}
 	metadataJSON := mustJSONMap(input.Metadata)
-	_, err := d.SQL.ExecContext(ctx, `INSERT INTO paired_devices(device_id, role, display_name, token_hash, status, created_at, last_seen_at, revoked_at, metadata_json)
+	tx, err := d.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return PairedDeviceRecord{}, err
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+	previous, prevErr := scanPairedDevice(tx.QueryRowContext(ctx, `SELECT id, device_id, role, display_name, token_hash, status, created_at, last_seen_at, revoked_at, metadata_json FROM paired_devices WHERE device_id=?`, strings.TrimSpace(input.DeviceID)))
+	if prevErr != nil && !errors.Is(prevErr, sql.ErrNoRows) {
+		return PairedDeviceRecord{}, prevErr
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO paired_devices(device_id, role, display_name, token_hash, status, created_at, last_seen_at, revoked_at, metadata_json)
 		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(device_id) DO UPDATE SET role=excluded.role, display_name=excluded.display_name, token_hash=excluded.token_hash, status=excluded.status, last_seen_at=excluded.last_seen_at, revoked_at=excluded.revoked_at, metadata_json=excluded.metadata_json`, input.DeviceID, input.Role, input.DisplayName, input.TokenHash, input.Status, input.CreatedAt, input.LastSeenAt, input.RevokedAt, metadataJSON)
 	if err != nil {
+		return PairedDeviceRecord{}, err
+	}
+	shouldRevokeSessions := false
+	if prevErr == nil {
+		shouldRevokeSessions = input.RevokedAt > 0 || !bytes.Equal(previous.TokenHash, input.TokenHash)
+	}
+	if shouldRevokeSessions {
+		reason := "device-token-rotated"
+		revokedAt := input.LastSeenAt
+		if revokedAt <= 0 {
+			revokedAt = NowMS()
+		}
+		if input.RevokedAt > 0 {
+			reason = "device-revoked"
+			revokedAt = input.RevokedAt
+		}
+		if _, err := revokeAuthSessionsByDeviceExec(ctx, tx, input.DeviceID, reason, revokedAt); err != nil {
+			return PairedDeviceRecord{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		return PairedDeviceRecord{}, err
 	}
 	return d.GetPairedDevice(ctx, input.DeviceID)

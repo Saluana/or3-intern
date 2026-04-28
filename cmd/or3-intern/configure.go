@@ -29,6 +29,7 @@ var configureSections = []struct {
 	{Key: "tools", Label: "Tools", Description: "Search, proxy, exec timeout, and PATH settings"},
 	{Key: "docindex", Label: "Doc Index", Description: "Workspace indexing and retrieval controls"},
 	{Key: "skills", Label: "Skills", Description: "Managed skills, trust policy, watch settings, and ClawHub"},
+	{Key: "auth", Label: "Auth", Description: "Passkeys, WebAuthn origins, sessions, step-up, and fallback policy"},
 	{Key: "security", Label: "Security", Description: "Secret store, audit, approvals, profiles, and network policy"},
 	{Key: "hardening", Label: "Hardening", Description: "Guarded tools, sandboxing, write paths, and quotas"},
 	{Key: "session", Label: "Session", Description: "Direct-message sharing and identity link mapping"},
@@ -268,7 +269,7 @@ func runConfigureSection(reader *bufio.Reader, out io.Writer, cfg *config.Config
 	switch section {
 	case "channels":
 		return configureChannelsSection(reader, out, cfg)
-	case "provider", "storage", "runtime", "context", "workspace", "tools", "docindex", "skills", "security", "hardening", "session", "automation", "service":
+	case "provider", "storage", "runtime", "context", "workspace", "tools", "docindex", "skills", "auth", "security", "hardening", "session", "automation", "service":
 		return configureGenericSection(reader, out, cfg, section, cwd)
 	default:
 		return fmt.Errorf("unknown configure section %q", section)
@@ -609,6 +610,7 @@ func printConfigureSummary(out io.Writer, cfg config.Config) {
 	fmt.Fprintf(out, "  Workspace: restrict=%t dir=%s\n", cfg.Tools.RestrictToWorkspace, workspaceSummary)
 	fmt.Fprintf(out, "  Tools: Brave key configured=%t execTimeout=%ds proxy=%s\n", strings.TrimSpace(cfg.Tools.BraveAPIKey) != "", cfg.Tools.ExecTimeoutSeconds, emptyAsNone(cfg.Tools.WebProxy))
 	fmt.Fprintf(out, "  Skills: exec=%t watch=%t dir=%s\n", cfg.Skills.EnableExec, cfg.Skills.Load.Watch, emptyAsNone(cfg.Skills.ManagedDir))
+	fmt.Fprintf(out, "  Auth: enabled=%t mode=%s stepUp=%ds fallback=%s\n", cfg.Auth.Enabled, cfg.Auth.EnforcementMode, cfg.Auth.StepUpTTLSeconds, emptyAsNone(cfg.Auth.FallbackPolicy))
 	fmt.Fprintf(out, "  Security: secrets=%t audit=%t approvals=%t guardedTools=%t\n", cfg.Security.SecretStore.Enabled, cfg.Security.Audit.Enabled, cfg.Security.Approvals.Enabled, cfg.Hardening.GuardedTools)
 	fmt.Fprintf(out, "  Automation: cron=%t heartbeat=%t webhook=%t fileWatch=%t\n", cfg.Cron.Enabled, cfg.Heartbeat.Enabled, cfg.Triggers.Webhook.Enabled, cfg.Triggers.FileWatch.Enabled)
 	fmt.Fprintf(out, "  Channels: %s\n", channelSummary)

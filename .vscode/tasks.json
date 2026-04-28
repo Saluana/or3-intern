@@ -21,6 +21,28 @@
 				"/Users/brendon/Documents/or3-intern/internal/approval/broker_test.go"
 			],
 			"isBackground": false
+		},
+		{
+			"label": "Go mod tidy auth deps",
+			"type": "shell",
+			"command": "go",
+			"args": [
+				"mod",
+				"tidy"
+			],
+			"isBackground": false,
+			"group": "build"
+		},
+		{
+			"label": "Build Go workspace auth",
+			"type": "shell",
+			"command": "go",
+			"args": [
+				"build",
+				"./..."
+			],
+			"isBackground": false,
+			"group": "build"
 		}
 	]
 }

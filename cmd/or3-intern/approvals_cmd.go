@@ -10,6 +10,7 @@ import (
 
 	"or3-intern/internal/app"
 	"or3-intern/internal/approval"
+	"or3-intern/internal/config"
 	"or3-intern/internal/controlplane"
 	"or3-intern/internal/db"
 	"or3-intern/internal/uxstate"
@@ -19,7 +20,7 @@ func runApprovalsCommand(ctx context.Context, broker *approval.Broker, args []st
 	if broker == nil {
 		return fmt.Errorf("approval broker is not configured")
 	}
-	appSvc := app.NewServiceApp(nil, nil, nil, newCLIControlplane(broker))
+	appSvc := app.NewServiceApp(config.Config{}, nil, nil, nil, newCLIControlplane(broker))
 	if len(args) == 0 {
 		return fmt.Errorf("usage: approvals <list|show|approve|deny|cancel|expire|allowlist>\n\nFor phone/browser device pairing requests, use `or3-intern pairing` instead of `or3-intern approvals`")
 	}

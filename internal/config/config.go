@@ -5,6 +5,7 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/url"
 	"os"
@@ -131,6 +132,7 @@ type Config struct {
 	Skills       SkillsConfig   `json:"skills"`
 	Triggers     TriggerConfig  `json:"triggers"`
 	Session      SessionConfig  `json:"session"`
+	Auth         AuthConfig     `json:"auth"`
 	Security     SecurityConfig `json:"security"`
 
 	Provider          ProviderConfig       `json:"provider"`
@@ -503,6 +505,34 @@ type SessionIdentityLink struct {
 	Peers     []string `json:"peers"`
 }
 
+type AuthEnforcementMode string
+
+const (
+	AuthEnforcementOff              AuthEnforcementMode = "off"
+	AuthEnforcementWarn             AuthEnforcementMode = "warn"
+	AuthEnforcementSensitive        AuthEnforcementMode = "enforce-sensitive"
+	AuthEnforcementSession          AuthEnforcementMode = "enforce-session"
+	AuthFallbackPairedTokenOnly     string              = "paired-token-only"
+	AuthFallbackPairedTokenPlusWarn string              = "paired-token-plus-warning"
+	AuthFallbackAdminRecoveryOnly   string              = "admin-recovery-only"
+)
+
+// AuthConfig configures passkey, session, and recent-auth behavior for the service API.
+type AuthConfig struct {
+	Enabled                    bool                `json:"enabled"`
+	RPID                       string              `json:"rpId"`
+	RPDisplayName              string              `json:"rpDisplayName"`
+	AllowedOrigins             []string            `json:"allowedOrigins"`
+	RelatedOrigins             []string            `json:"relatedOrigins"`
+	SessionIdleTTLSeconds      int                 `json:"sessionIdleTtlSeconds"`
+	SessionAbsoluteTTLSeconds  int                 `json:"sessionAbsoluteTtlSeconds"`
+	StepUpTTLSeconds           int                 `json:"stepUpTtlSeconds"`
+	FallbackPolicy             string              `json:"fallbackPolicy"`
+	EnforcementMode            AuthEnforcementMode `json:"enforcementMode"`
+	AllowPairedTokenFallback   bool                `json:"allowPairedTokenFallback"`
+	RequirePasskeyForSensitive bool                `json:"requirePasskeyForSensitive"`
+}
+
 type ApprovalMode string
 
 const (
@@ -665,6 +695,20 @@ func Default() Config {
 		Session: SessionConfig{
 			DirectMessagesShareDefault: false,
 			IdentityLinks:              []SessionIdentityLink{},
+		},
+		Auth: AuthConfig{
+			Enabled:                    false,
+			RPID:                       "",
+			RPDisplayName:              "OR3",
+			AllowedOrigins:             []string{},
+			RelatedOrigins:             []string{},
+			SessionIdleTTLSeconds:      1800,
+			SessionAbsoluteTTLSeconds:  43200,
+			StepUpTTLSeconds:           300,
+			FallbackPolicy:             AuthFallbackPairedTokenPlusWarn,
+			EnforcementMode:            AuthEnforcementOff,
+			AllowPairedTokenFallback:   true,
+			RequirePasskeyForSensitive: true,
 		},
 		Security: SecurityConfig{
 			SecretStore: SecretStoreConfig{
@@ -935,6 +979,54 @@ func ApplyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("OR3_SERVICE_SECRET"); v != "" {
 		cfg.Service.Secret = v
+	}
+	if v := os.Getenv("OR3_AUTH_ENABLED"); v != "" {
+		if parsed, err := strconv.ParseBool(v); err == nil {
+			cfg.Auth.Enabled = parsed
+		}
+	}
+	if v := os.Getenv("OR3_AUTH_RP_ID"); v != "" {
+		cfg.Auth.RPID = v
+	}
+	if v := os.Getenv("OR3_AUTH_RP_DISPLAY_NAME"); v != "" {
+		cfg.Auth.RPDisplayName = v
+	}
+	if v := os.Getenv("OR3_AUTH_ALLOWED_ORIGINS"); v != "" {
+		cfg.Auth.AllowedOrigins = compactStrings(strings.Split(v, ","))
+	}
+	if v := os.Getenv("OR3_AUTH_RELATED_ORIGINS"); v != "" {
+		cfg.Auth.RelatedOrigins = compactStrings(strings.Split(v, ","))
+	}
+	if v := os.Getenv("OR3_AUTH_SESSION_IDLE_TTL_SECONDS"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			cfg.Auth.SessionIdleTTLSeconds = parsed
+		}
+	}
+	if v := os.Getenv("OR3_AUTH_SESSION_ABSOLUTE_TTL_SECONDS"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			cfg.Auth.SessionAbsoluteTTLSeconds = parsed
+		}
+	}
+	if v := os.Getenv("OR3_AUTH_STEP_UP_TTL_SECONDS"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			cfg.Auth.StepUpTTLSeconds = parsed
+		}
+	}
+	if v := os.Getenv("OR3_AUTH_FALLBACK_POLICY"); v != "" {
+		cfg.Auth.FallbackPolicy = v
+	}
+	if v := os.Getenv("OR3_AUTH_ENFORCEMENT_MODE"); v != "" {
+		cfg.Auth.EnforcementMode = AuthEnforcementMode(v)
+	}
+	if v := os.Getenv("OR3_AUTH_ALLOW_PAIRED_TOKEN_FALLBACK"); v != "" {
+		if parsed, err := strconv.ParseBool(v); err == nil {
+			cfg.Auth.AllowPairedTokenFallback = parsed
+		}
+	}
+	if v := os.Getenv("OR3_AUTH_REQUIRE_PASSKEY_FOR_SENSITIVE"); v != "" {
+		if parsed, err := strconv.ParseBool(v); err == nil {
+			cfg.Auth.RequirePasskeyForSensitive = parsed
+		}
 	}
 	if v := os.Getenv("OR3_RUNTIME_PROFILE"); v != "" {
 		cfg.RuntimeProfile = RuntimeProfile(strings.ToLower(strings.TrimSpace(v)))
@@ -1271,6 +1363,35 @@ func Load(path string) (Config, error) {
 	if cfg.Session.IdentityLinks == nil {
 		cfg.Session.IdentityLinks = []SessionIdentityLink{}
 	}
+	if strings.TrimSpace(cfg.Auth.RPDisplayName) == "" {
+		cfg.Auth.RPDisplayName = Default().Auth.RPDisplayName
+	}
+	if cfg.Auth.AllowedOrigins == nil {
+		cfg.Auth.AllowedOrigins = []string{}
+	}
+	if cfg.Auth.RelatedOrigins == nil {
+		cfg.Auth.RelatedOrigins = []string{}
+	}
+	cfg.Auth.AllowedOrigins = compactStrings(cfg.Auth.AllowedOrigins)
+	cfg.Auth.RelatedOrigins = compactStrings(cfg.Auth.RelatedOrigins)
+	if cfg.Auth.SessionIdleTTLSeconds <= 0 {
+		cfg.Auth.SessionIdleTTLSeconds = Default().Auth.SessionIdleTTLSeconds
+	}
+	if cfg.Auth.SessionAbsoluteTTLSeconds <= 0 {
+		cfg.Auth.SessionAbsoluteTTLSeconds = Default().Auth.SessionAbsoluteTTLSeconds
+	}
+	if cfg.Auth.StepUpTTLSeconds <= 0 {
+		cfg.Auth.StepUpTTLSeconds = Default().Auth.StepUpTTLSeconds
+	}
+	cfg.Auth.FallbackPolicy = normalizeAuthFallbackPolicy(cfg.Auth.FallbackPolicy)
+	if cfg.Auth.FallbackPolicy == "" {
+		cfg.Auth.FallbackPolicy = Default().Auth.FallbackPolicy
+	}
+	if normalizedMode := normalizeAuthEnforcementMode(cfg.Auth.EnforcementMode); normalizedMode != "" {
+		cfg.Auth.EnforcementMode = normalizedMode
+	} else {
+		cfg.Auth.EnforcementMode = Default().Auth.EnforcementMode
+	}
 	if strings.TrimSpace(cfg.Security.SecretStore.KeyFile) == "" {
 		cfg.Security.SecretStore.KeyFile = Default().Security.SecretStore.KeyFile
 	}
@@ -1331,6 +1452,9 @@ func Load(path string) (Config, error) {
 		return cfg, err
 	}
 	if err := validateApprovals(cfg.Security.Approvals); err != nil {
+		return cfg, err
+	}
+	if err := validateAuthConfig(cfg.Auth); err != nil {
 		return cfg, err
 	}
 	cfg.RuntimeProfile = RuntimeProfile(strings.ToLower(strings.TrimSpace(string(cfg.RuntimeProfile))))
@@ -1570,6 +1694,117 @@ func validateApprovals(cfg ApprovalConfig) error {
 		if !isValidApprovalMode(mode) {
 			return errors.New("security.approvals." + name + ": unsupported mode")
 		}
+	}
+	return nil
+}
+
+func normalizeAuthEnforcementMode(mode AuthEnforcementMode) AuthEnforcementMode {
+	switch AuthEnforcementMode(strings.ToLower(strings.TrimSpace(string(mode)))) {
+	case AuthEnforcementOff:
+		return AuthEnforcementOff
+	case AuthEnforcementWarn:
+		return AuthEnforcementWarn
+	case AuthEnforcementSensitive:
+		return AuthEnforcementSensitive
+	case AuthEnforcementSession:
+		return AuthEnforcementSession
+	default:
+		return ""
+	}
+}
+
+func normalizeAuthFallbackPolicy(policy string) string {
+	switch strings.ToLower(strings.TrimSpace(policy)) {
+	case AuthFallbackPairedTokenOnly:
+		return AuthFallbackPairedTokenOnly
+	case AuthFallbackPairedTokenPlusWarn:
+		return AuthFallbackPairedTokenPlusWarn
+	case AuthFallbackAdminRecoveryOnly:
+		return AuthFallbackAdminRecoveryOnly
+	default:
+		return ""
+	}
+}
+
+func validateAuthConfig(cfg AuthConfig) error {
+	if cfg.SessionIdleTTLSeconds <= 0 {
+		return errors.New("auth.sessionIdleTtlSeconds must be greater than zero")
+	}
+	if cfg.SessionAbsoluteTTLSeconds <= 0 {
+		return errors.New("auth.sessionAbsoluteTtlSeconds must be greater than zero")
+	}
+	if cfg.SessionAbsoluteTTLSeconds < cfg.SessionIdleTTLSeconds {
+		return errors.New("auth.sessionAbsoluteTtlSeconds must be greater than or equal to auth.sessionIdleTtlSeconds")
+	}
+	if cfg.StepUpTTLSeconds <= 0 {
+		return errors.New("auth.stepUpTtlSeconds must be greater than zero")
+	}
+	if normalizeAuthFallbackPolicy(cfg.FallbackPolicy) == "" {
+		return errors.New("auth.fallbackPolicy must be paired-token-only, paired-token-plus-warning, or admin-recovery-only")
+	}
+	if normalizeAuthEnforcementMode(cfg.EnforcementMode) == "" {
+		return errors.New("auth.enforcementMode must be off, warn, enforce-sensitive, or enforce-session")
+	}
+	if !cfg.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(cfg.RPID) == "" {
+		return errors.New("auth.rpId is required when auth.enabled=true")
+	}
+	if len(cfg.AllowedOrigins) == 0 {
+		return errors.New("auth.allowedOrigins is required when auth.enabled=true")
+	}
+	rpid := strings.ToLower(strings.TrimSpace(cfg.RPID))
+	if strings.Contains(rpid, "://") {
+		return errors.New("auth.rpId must be a domain, not a URL")
+	}
+	if strings.Contains(rpid, "*") {
+		return errors.New("auth.rpId must not contain wildcards")
+	}
+	if ip := net.ParseIP(strings.Trim(rpid, "[]")); ip != nil {
+		return errors.New("auth.rpId must not be a raw IP address")
+	}
+	for _, origin := range append(append([]string{}, cfg.AllowedOrigins...), cfg.RelatedOrigins...) {
+		if err := validateAuthOrigin(rpid, origin); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateAuthOrigin(rpid, origin string) error {
+	origin = strings.TrimSpace(origin)
+	if origin == "" {
+		return errors.New("auth origins must not be empty")
+	}
+	if strings.Contains(origin, "*") {
+		return fmt.Errorf("auth origin %q must not contain wildcards", origin)
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return fmt.Errorf("auth origin %q is invalid", origin)
+	}
+	if u.Hostname() == "" {
+		return fmt.Errorf("auth origin %q must include a hostname", origin)
+	}
+	host := strings.ToLower(strings.TrimSpace(u.Hostname()))
+	if ip := net.ParseIP(strings.Trim(host, "[]")); ip != nil {
+		return fmt.Errorf("auth origin %q must not use a raw IP address", origin)
+	}
+	if strings.EqualFold(u.Scheme, "http") {
+		if host != "localhost" || rpid != "localhost" {
+			return fmt.Errorf("auth origin %q is insecure; only localhost development may use http", origin)
+		}
+		return nil
+	}
+	if !strings.EqualFold(u.Scheme, "https") {
+		return fmt.Errorf("auth origin %q must use https or localhost http", origin)
+	}
+	if rpid == "localhost" {
+		return fmt.Errorf("auth origin %q cannot be used with localhost rpId", origin)
+	}
+	if host != rpid && !strings.HasSuffix(host, "."+rpid) {
+		return fmt.Errorf("auth origin %q does not match rpId %q", origin, rpid)
 	}
 	return nil
 }

@@ -47,6 +47,29 @@ func (m *mockDeliverer) DeliverWithMeta(ctx context.Context, channel, to, text s
 	return m.Deliver(ctx, channel, to, text)
 }
 
+type captureConversationObserver struct {
+	toolCalls   []string
+	toolResults []string
+	toolErrors  []string
+}
+
+func (o *captureConversationObserver) OnTextDelta(context.Context, string) {}
+
+func (o *captureConversationObserver) OnToolCall(_ context.Context, name string, _ string) {
+	o.toolCalls = append(o.toolCalls, name)
+}
+
+func (o *captureConversationObserver) OnToolResult(_ context.Context, name string, _ string, err error) {
+	o.toolResults = append(o.toolResults, name)
+	if err != nil {
+		o.toolErrors = append(o.toolErrors, err.Error())
+	}
+}
+
+func (o *captureConversationObserver) OnCompletion(context.Context, string, bool) {}
+
+func (o *captureConversationObserver) OnError(context.Context, error) {}
+
 // buildChatServer creates a test HTTP server that responds to /chat/completions
 func buildChatServer(t *testing.T, response providers.ChatCompletionResponse) (*httptest.Server, *providers.Client) {
 	t.Helper()
@@ -265,6 +288,177 @@ func TestRuntime_Handle_XMLToolCallMarkupExecutesTool(t *testing.T) {
 		if strings.Contains(msg.Content, "<tool_call>") {
 			t.Fatalf("expected persisted messages to omit raw tool markup, got %#v", msgs)
 		}
+	}
+}
+
+func TestRuntime_Handle_UnavailableLegacyToolMarkupRetriesWithoutToolError(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		if callCount == 1 {
+			_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","content":"<tool_call><function=memory><parameter=action>list</tool_call>"}}]}`)
+			return
+		}
+		var req providers.ChatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if len(req.Messages) == 0 || req.Messages[len(req.Messages)-1].Role != "system" {
+			t.Fatalf("expected unavailable tool correction before retry, got %#v", req.Messages)
+		}
+		if !strings.Contains(contentToString(req.Messages[len(req.Messages)-1].Content), "memory") {
+			t.Fatalf("expected correction to mention unavailable tool, got %#v", req.Messages[len(req.Messages)-1])
+		}
+		_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","content":"final without tool"}}]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	provider := providers.New(srv.URL, "test-key", 10*time.Second)
+	provider.HTTP = srv.Client()
+	deliver := &mockDeliverer{}
+	rt := buildSimpleRuntime(t, provider, d, deliver)
+	observer := &captureConversationObserver{}
+	ctx := ContextWithConversationObserver(context.Background(), observer)
+
+	err := rt.Handle(ctx, bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess-unavailable-markup-tool",
+		Channel:    "cli",
+		From:       "user",
+		Message:    "use unavailable markup tool",
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if callCount != 2 {
+		t.Fatalf("expected retry after unavailable markup tool, got %d provider calls", callCount)
+	}
+	if len(deliver.messages) != 1 || deliver.messages[0] != "final without tool" {
+		t.Fatalf("expected final response after retry, got %#v", deliver.messages)
+	}
+	if len(observer.toolCalls) != 1 || observer.toolCalls[0] != "memory" {
+		t.Fatalf("expected unavailable tool call to be observable, got %#v", observer.toolCalls)
+	}
+	if len(observer.toolErrors) != 1 || !strings.Contains(observer.toolErrors[0], "not available") {
+		t.Fatalf("expected unavailable tool error to be observable, got %#v", observer.toolErrors)
+	}
+	msgs, err := d.GetLastMessages(context.Background(), "sess-unavailable-markup-tool", 10)
+	if err != nil {
+		t.Fatalf("GetLastMessages: %v", err)
+	}
+	for _, msg := range msgs {
+		if msg.Role == "tool" || strings.Contains(msg.Content, "tool 'memory' not found") {
+			t.Fatalf("expected unavailable markup not to produce a tool error, got %#v", msgs)
+		}
+	}
+}
+
+func TestRuntime_Handle_DSMLToolMarkupRetriesWithoutLeakingMarkup(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		if callCount == 1 {
+			_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","content":"<｜DSML｜tool_calls><｜DSML｜invoke name=\"exec\"><｜DSML｜parameter name=\"command\" string=\"true\">echo \"tools test\"</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>"}}]}`)
+			return
+		}
+		var req providers.ChatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if len(req.Messages) == 0 || req.Messages[len(req.Messages)-1].Role != "system" {
+			t.Fatalf("expected unavailable tool correction before retry, got %#v", req.Messages)
+		}
+		_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","content":"final after dsml retry"}}]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	provider := providers.New(srv.URL, "test-key", 10*time.Second)
+	provider.HTTP = srv.Client()
+	deliver := &mockDeliverer{}
+	rt := buildSimpleRuntime(t, provider, d, deliver)
+	observer := &captureConversationObserver{}
+	ctx := ContextWithConversationObserver(context.Background(), observer)
+
+	err := rt.Handle(ctx, bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess-dsml-tool",
+		Channel:    "cli",
+		From:       "user",
+		Message:    "use dsml tool",
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if callCount != 2 {
+		t.Fatalf("expected retry after unavailable DSML tool, got %d provider calls", callCount)
+	}
+	if len(observer.toolCalls) != 1 || observer.toolCalls[0] != "exec" {
+		t.Fatalf("expected DSML exec call to be observable, got %#v", observer.toolCalls)
+	}
+	if len(deliver.messages) != 1 || strings.Contains(deliver.messages[0], "DSML") {
+		t.Fatalf("expected final response without DSML markup, got %#v", deliver.messages)
+	}
+	msgs, err := d.GetLastMessages(context.Background(), "sess-dsml-tool", 10)
+	if err != nil {
+		t.Fatalf("GetLastMessages: %v", err)
+	}
+	for _, msg := range msgs {
+		if strings.Contains(msg.Content, "DSML") {
+			t.Fatalf("expected persisted messages to omit DSML markup, got %#v", msgs)
+		}
+	}
+}
+
+func TestRuntime_Handle_DSMLSearchAliasUsesWebSearch(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	tool := &requiredQueryTool{}
+	dsml := `<｜DSML｜tool_calls><｜DSML｜invoke name="search"><｜DSML｜parameter name="query" string="true">family lawyer Vancouver</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>`
+	if calls := parseToolMarkupCalls(dsml, "test"); len(calls) != 1 || calls[0].Function.Name != "search" {
+		t.Fatalf("expected DSML search markup to parse, got %#v", calls)
+	}
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		if callCount == 1 {
+			_ = json.NewEncoder(w).Encode(chatTextResponse(dsml))
+			return
+		}
+		var req providers.ChatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if len(req.Messages) < 2 || req.Messages[len(req.Messages)-1].Role != "tool" {
+			t.Fatalf("expected tool result in follow-up request, got %#v", req.Messages)
+		}
+		_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","content":"final after search"}}]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	provider := providers.New(srv.URL, "test-key", 10*time.Second)
+	provider.HTTP = srv.Client()
+	deliver := &mockDeliverer{}
+	rt := buildSimpleRuntime(t, provider, d, deliver)
+	rt.Tools.Register(tool)
+
+	if err := rt.Handle(context.Background(), bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess-dsml-search",
+		Channel:    "cli",
+		From:       "user",
+		Message:    "search the web",
+	}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if !tool.called {
+		t.Fatal("expected DSML search alias to execute web_search")
+	}
+	if tool.lastQuery != "family lawyer Vancouver" {
+		t.Fatalf("expected query argument to be forwarded, got %q", tool.lastQuery)
 	}
 }
 
@@ -1321,6 +1515,33 @@ func (rtt *requiredTextTool) Execute(ctx context.Context, params map[string]any)
 }
 func (rtt *requiredTextTool) Schema() map[string]any {
 	return rtt.SchemaFor(rtt.Name(), rtt.Description(), rtt.Parameters())
+}
+
+type requiredQueryTool struct {
+	tools.Base
+	called    bool
+	lastQuery string
+}
+
+func (rqt *requiredQueryTool) Name() string        { return "web_search" }
+func (rqt *requiredQueryTool) Description() string { return "requires string query input" }
+func (rqt *requiredQueryTool) Parameters() map[string]any {
+	return map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"required":             []any{"query"},
+		"properties": map[string]any{
+			"query": map[string]any{"type": "string"},
+		},
+	}
+}
+func (rqt *requiredQueryTool) Execute(ctx context.Context, params map[string]any) (string, error) {
+	rqt.called = true
+	rqt.lastQuery = fmt.Sprint(params["query"])
+	return rqt.lastQuery, nil
+}
+func (rqt *requiredQueryTool) Schema() map[string]any {
+	return rqt.SchemaFor(rqt.Name(), rqt.Description(), rqt.Parameters())
 }
 
 func TestFormatToolExecutionError_PreservesOutput(t *testing.T) {
@@ -2382,6 +2603,22 @@ func TestDynamicToolExposureDoesNotExposeUnknownToolsByDefault(t *testing.T) {
 	}
 }
 
+func TestDynamicToolExposureToolInventoryIntentExposesRegisteredToolGroups(t *testing.T) {
+	reg := tools.NewRegistry()
+	reg.Register(&namedRuntimeTool{name: "read_file"})
+	reg.Register(&namedRuntimeTool{name: "write_file"})
+	reg.Register(&namedRuntimeTool{name: "exec"})
+	reg.Register(&namedRuntimeTool{name: "web_fetch"})
+	reg.Register(&namedRuntimeTool{name: "cron"})
+	rt := &Runtime{DynamicToolExposure: true}
+	defs := toToolDefs(rt.exposedToolsForTurn(reg, []providers.ChatMessage{{Role: "user", Content: "what tools are available?"}}, "service"))
+	for _, name := range []string{"read_file", "write_file", "exec", "web_fetch", "cron"} {
+		if !toolDefsContain(defs, name) {
+			t.Fatalf("expected tool inventory intent to expose %s, got %#v", name, defs)
+		}
+	}
+}
+
 type namedRuntimeTool struct {
 	tools.Base
 	name string
@@ -2609,6 +2846,36 @@ func TestRuntime_HandleNewSession_Success(t *testing.T) {
 		t.Fatalf("Handle /new: %v", err)
 	}
 	msgs, err := d.GetLastMessages(ctx, "sess-new", 20)
+	if err != nil {
+		t.Fatalf("GetLastMessages: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("expected messages cleared, got %d", len(msgs))
+	}
+	if len(deliver.messages) == 0 || deliver.messages[0] != "New session started." {
+		t.Fatalf("unexpected deliver messages: %#v", deliver.messages)
+	}
+}
+
+func TestRuntime_HandleClearAliasesNewSession(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	ctx := context.Background()
+	if _, err := d.AppendMessage(ctx, "sess-clear", "user", "bad DSML context", nil); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+	deliver := &mockDeliverer{}
+	rt := buildSimpleRuntime(t, nil, d, deliver)
+
+	if err := rt.Handle(ctx, bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess-clear",
+		Channel:    "cli",
+		From:       "user",
+		Message:    "/clear",
+	}); err != nil {
+		t.Fatalf("Handle /clear: %v", err)
+	}
+	msgs, err := d.GetLastMessages(ctx, "sess-clear", 20)
 	if err != nil {
 		t.Fatalf("GetLastMessages: %v", err)
 	}

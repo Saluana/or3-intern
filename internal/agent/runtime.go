@@ -32,6 +32,7 @@ import (
 
 const (
 	commandNewSession = "/new"
+	commandClear      = "/clear"
 	commandStatus     = "/status"
 	commandPrune      = "/prune"
 )
@@ -46,6 +47,9 @@ var toolMarkupPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?is)<function=[\s\S]*$`),
 	regexp.MustCompile(`(?i)<parameter=[^>]*>`),
 	regexp.MustCompile(`(?is)<parameter[\s\S]*$`),
+	regexp.MustCompile(`(?is)<\s*[|｜]\s*DSML\s*[|｜]\s*tool_calls\s*>[\s\S]*?<\s*/\s*[|｜]\s*DSML\s*[|｜]\s*tool_calls\s*>`),
+	regexp.MustCompile(`(?is)<\s*[|｜]\s*DSML\s*[|｜]\s*tool_calls[\s\S]*$`),
+	regexp.MustCompile(`(?is)<\s*/?\s*[|｜]\s*DSML\s*[|｜]\s*(?:invoke|parameter)[^>]*>`),
 }
 
 var (
@@ -53,6 +57,10 @@ var (
 	toolMarkupFunctionPattern  = regexp.MustCompile(`(?is)<function=([^>\s]+)>\s*`)
 	toolMarkupParameterPattern = regexp.MustCompile(`(?is)<parameter=([^>\s]+)>\s*`)
 	toolMarkupClosingPattern   = regexp.MustCompile(`(?is)</(?:parameter|function)>\s*$`)
+	dsmlToolCallsBlockPattern  = regexp.MustCompile(`(?is)<\s*[|｜]\s*DSML\s*[|｜]\s*tool_calls\s*>(.*?)<\s*/\s*[|｜]\s*DSML\s*[|｜]\s*tool_calls\s*>`)
+	dsmlInvokePattern          = regexp.MustCompile(`(?is)<\s*[|｜]\s*DSML\s*[|｜]\s*invoke\b([^>]*)>(.*?)<\s*/\s*[|｜]\s*DSML\s*[|｜]\s*invoke\s*>`)
+	dsmlParameterPattern       = regexp.MustCompile(`(?is)<\s*[|｜]\s*DSML\s*[|｜]\s*parameter\b([^>]*)>(.*?)<\s*/\s*[|｜]\s*DSML\s*[|｜]\s*parameter\s*>`)
+	markupNameAttrPattern      = regexp.MustCompile(`(?is)\bname\s*=\s*(?:"([^"]*)"|'([^']*)')`)
 )
 
 type trustedToolAccessContextKey struct{}
@@ -205,7 +213,7 @@ func (r *Runtime) Handle(ctx context.Context, ev bus.Event) error {
 func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 	defer releaseEvent(ev)
 
-	if ev.Type == bus.EventUserMessage && strings.EqualFold(strings.TrimSpace(ev.Message), commandNewSession) {
+	if ev.Type == bus.EventUserMessage && isNewSessionCommand(ev.Message) {
 		return r.handleNewSession(ctx, ev)
 	}
 	if ev.Type == bus.EventUserMessage && strings.EqualFold(strings.TrimSpace(ev.Message), commandStatus) {
@@ -274,6 +282,11 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 	r.scheduleIdlePrune(ctx, ev)
 
 	return nil
+}
+
+func isNewSessionCommand(message string) bool {
+	message = strings.TrimSpace(message)
+	return strings.EqualFold(message, commandNewSession) || strings.EqualFold(message, commandClear)
 }
 
 func (r *Runtime) markSessionActivity(sessionKey string) {
@@ -902,9 +915,6 @@ func sanitizeToolTurnContent(text string) string {
 
 func parseToolMarkupCalls(text string, idPrefix string) []providers.ToolCall {
 	matches := toolMarkupBlockPattern.FindAllStringSubmatch(text, -1)
-	if len(matches) == 0 {
-		return nil
-	}
 	out := make([]providers.ToolCall, 0, len(matches))
 	for _, match := range matches {
 		if len(match) < 2 {
@@ -934,7 +944,118 @@ func parseToolMarkupCalls(text string, idPrefix string) []providers.ToolCall {
 		tc.Function.Arguments = string(args)
 		out = append(out, tc)
 	}
+	for _, match := range dsmlToolCallsBlockPattern.FindAllStringSubmatch(text, -1) {
+		if len(match) < 2 {
+			continue
+		}
+		out = append(out, parseDSMLToolMarkupCalls(match[1], idPrefix, len(out))...)
+	}
 	return out
+}
+
+func parseDSMLToolMarkupCalls(block string, idPrefix string, offset int) []providers.ToolCall {
+	matches := dsmlInvokePattern.FindAllStringSubmatch(block, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	out := make([]providers.ToolCall, 0, len(matches))
+	for _, match := range matches {
+		if len(match) < 3 {
+			continue
+		}
+		name := markupNameAttr(match[1])
+		if name == "" {
+			continue
+		}
+		params := parseDSMLToolMarkupParams(match[2])
+		args, err := json.Marshal(params)
+		if err != nil {
+			continue
+		}
+		index := offset + len(out)
+		tc := providers.ToolCall{
+			ID:    fmt.Sprintf("%s_%d", idPrefix, index+1),
+			Index: index,
+			Type:  "function",
+		}
+		tc.Function.Name = name
+		tc.Function.Arguments = string(args)
+		out = append(out, tc)
+	}
+	return out
+}
+
+func parseDSMLToolMarkupParams(block string) map[string]any {
+	params := map[string]any{}
+	matches := dsmlParameterPattern.FindAllStringSubmatch(block, -1)
+	for _, match := range matches {
+		if len(match) < 3 {
+			continue
+		}
+		name := markupNameAttr(match[1])
+		if name == "" {
+			continue
+		}
+		params[name] = parseToolMarkupParamValue(html.UnescapeString(match[2]))
+	}
+	return params
+}
+
+func markupNameAttr(attrs string) string {
+	match := markupNameAttrPattern.FindStringSubmatch(attrs)
+	if len(match) < 3 {
+		return ""
+	}
+	name := match[1]
+	if name == "" {
+		name = match[2]
+	}
+	return strings.TrimSpace(html.UnescapeString(name))
+}
+
+func availableToolCalls(calls []providers.ToolCall, reg *tools.Registry) []providers.ToolCall {
+	if len(calls) == 0 || reg == nil {
+		return nil
+	}
+	out := make([]providers.ToolCall, 0, len(calls))
+	for _, call := range calls {
+		name := strings.TrimSpace(call.Function.Name)
+		if name == "search" && reg.Get("web_search") != nil {
+			name = "web_search"
+		}
+		if name == "" || reg.Get(name) == nil {
+			continue
+		}
+		call.Function.Name = name
+		call.Index = len(out)
+		out = append(out, call)
+	}
+	return out
+}
+
+func unavailableToolCallPrompt(calls []providers.ToolCall, reg *tools.Registry) string {
+	names := make([]string, 0, len(calls))
+	seen := map[string]struct{}{}
+	for _, call := range calls {
+		name := strings.TrimSpace(call.Function.Name)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	available := []string{}
+	if reg != nil {
+		available = reg.Names()
+	}
+	return fmt.Sprintf(
+		"The previous assistant response attempted unavailable tool call(s): %s. Continue by answering directly or by using only currently advertised tool names: %s.",
+		strings.Join(names, ", "),
+		strings.Join(available, ", "),
+	)
 }
 
 func parseToolMarkupParams(block string) map[string]any {
@@ -992,10 +1113,11 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 		maxLoops = 6
 	}
 	for loop := 0; loop < maxLoops; loop++ {
+		turnTools := r.exposedToolsForTurn(reg, messages, channel)
 		req := providers.ChatCompletionRequest{
 			Model:       r.Model,
 			Messages:    messages,
-			Tools:       toToolDefs(r.exposedToolsForTurn(reg, messages, channel)),
+			Tools:       toToolDefs(turnTools),
 			Temperature: r.Temperature,
 		}
 
@@ -1055,6 +1177,26 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 				}
 			}
 		}
+		if len(msg.ToolCalls) > 0 {
+			availableCalls := availableToolCalls(msg.ToolCalls, turnTools)
+			if len(availableCalls) == 0 {
+				if sw != nil {
+					_ = sw.Abort(ctx)
+				}
+				for _, tc := range msg.ToolCalls {
+					if observer != nil {
+						observer.OnToolCall(ctx, tc.Function.Name, tc.Function.Arguments)
+						observer.OnToolResult(ctx, tc.Function.Name, "", fmt.Errorf("tool not available in this turn"))
+					}
+				}
+				messages = append(messages, providers.ChatMessage{
+					Role:    "system",
+					Content: unavailableToolCallPrompt(msg.ToolCalls, turnTools),
+				})
+				continue
+			}
+			msg.ToolCalls = availableCalls
+		}
 		if len(msg.ToolCalls) == 0 {
 			finalText := strings.TrimSpace(contentToString(msg.Content))
 			if sw != nil {
@@ -1094,7 +1236,7 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 			toolCtx = tools.ContextWithDeliveryMeta(toolCtx, replyMeta)
 			toolCtx = r.contextWithTrustedToolAccess(toolCtx, bus.Event{Type: eventType, SessionKey: sessionKey, Channel: channel})
 			toolCtx = tools.ContextWithToolGuard(toolCtx, r.guardToolExecution)
-			out, err := reg.Execute(toolCtx, tc.Function.Name, tc.Function.Arguments)
+			out, err := turnTools.Execute(toolCtx, tc.Function.Name, tc.Function.Arguments)
 			if observer != nil {
 				observer.OnToolResult(ctx, tc.Function.Name, out, err)
 			}
@@ -1164,6 +1306,16 @@ func selectedToolGroups(intent string) map[string]struct{} {
 	groups := map[string]struct{}{
 		tools.ToolGroupRead:   {},
 		tools.ToolGroupMemory: {},
+	}
+	if strings.Contains(lower, "tool") || strings.Contains(lower, "capabilit") || strings.Contains(lower, "what can you do") {
+		groups[tools.ToolGroupWrite] = struct{}{}
+		groups[tools.ToolGroupExec] = struct{}{}
+		groups[tools.ToolGroupWeb] = struct{}{}
+		groups[tools.ToolGroupCron] = struct{}{}
+		groups[tools.ToolGroupSkills] = struct{}{}
+		groups[tools.ToolGroupChannels] = struct{}{}
+		groups[tools.ToolGroupMCP] = struct{}{}
+		groups[tools.ToolGroupService] = struct{}{}
 	}
 	if strings.Contains(lower, "write") || strings.Contains(lower, "edit") || strings.Contains(lower, "modify") || strings.Contains(lower, "create file") || strings.Contains(lower, "patch") {
 		groups[tools.ToolGroupWrite] = struct{}{}

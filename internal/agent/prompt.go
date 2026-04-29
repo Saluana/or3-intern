@@ -79,6 +79,10 @@ exec:
 - Commands have timeouts and policy checks.
 - Output is previewed. If output is too broad, rerun with a narrower command.
 
+memory:
+- Use the advertised memory tools by exact name. Common names are memory_search, memory_recent, memory_get_pinned, memory_add_note, and memory_set_pinned.
+- Do not call a generic tool named memory.
+
 web:
 - Use web_fetch as the default fetch tool.
 - web_fetch automatically converts HTML pages into Markdown artifacts to avoid dumping raw HTML into context; use raw=true only when literal response bytes are required.
@@ -87,7 +91,7 @@ web:
 - Use selector or waitMs when the important content loads late.
 
 cron:
-- Use cron only for scheduled reminders or recurring tasks.
+- Use cron only for scheduled reminders or recurring tasks, and only when cron is advertised as an available tool.
 `
 
 // defaultDigestLineMax bounds the number of lines in the Memory Digest section.

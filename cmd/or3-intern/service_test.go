@@ -319,6 +319,58 @@ func TestServiceBrowserMiddleware_AddsLoopbackCORSHeadersToRequests(t *testing.T
 	}
 }
 
+func TestServiceBrowserMiddleware_AddsTrustedTailscaleCORSHeadersToRemoteAppRequests(t *testing.T) {
+	cfg := config.Config{Service: config.ServiceConfig{
+		Listen:                "100.64.0.42:9100",
+		TrustedBrowserOrigins: []string{"http://100.64.0.42:3060", "http://100.64.0.42:3070"},
+		TrustedBrowserCIDRs:   []string{"100.64.0.0/10"},
+	}}
+	handler := serviceBrowserMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeServiceJSON(w, http.StatusAccepted, map[string]any{"ok": true})
+	}))
+
+	req := httptest.NewRequest(http.MethodOptions, "/internal/v1/turns", nil)
+	req.RemoteAddr = "100.64.0.42:54321"
+	req.Header.Set("Origin", "http://100.64.0.42:3060")
+	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 preflight response, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "http://100.64.0.42:3060" {
+		t.Fatalf("expected trusted Tailscale allow-origin header, got %q", got)
+	}
+}
+
+func TestServiceBrowserMiddleware_TrustedPairingOriginsRemainBrowserCORSFallback(t *testing.T) {
+	cfg := config.Config{Service: config.ServiceConfig{
+		Listen:                "100.64.0.42:9100",
+		TrustedPairingOrigins: []string{"http://100.64.0.42:3060"},
+		TrustedPairingCIDRs:   []string{"100.64.0.0/10"},
+	}}
+	handler := serviceBrowserMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeServiceJSON(w, http.StatusAccepted, map[string]any{"ok": true})
+	}))
+
+	req := httptest.NewRequest(http.MethodOptions, "/internal/v1/turns", nil)
+	req.RemoteAddr = "100.64.0.42:54321"
+	req.Header.Set("Origin", "http://100.64.0.42:3060")
+	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected legacy trusted pairing origin to allow browser preflight, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "http://100.64.0.42:3060" {
+		t.Fatalf("expected trusted pairing allow-origin fallback, got %q", got)
+	}
+}
+
 func TestWriteServiceErrorRedactsInternalError(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/internal/v1/turns", nil)
 	req = req.WithContext(context.WithValue(req.Context(), serviceRequestContextKey{}, serviceRequestContext{RequestID: "req-redact"}))
@@ -335,6 +387,23 @@ func TestWriteServiceErrorRedactsInternalError(t *testing.T) {
 	}
 	if strings.Contains(body, "database password") || strings.Contains(body, "stack trace") {
 		t.Fatalf("expected internal error to be redacted, got %s", body)
+	}
+}
+
+func TestServicePublicPairingExchangeError_OnlyExposesPairingState(t *testing.T) {
+	for _, message := range []string{
+		"pairing request not found",
+		"pairing request expired",
+		"pairing request is not approved",
+	} {
+		got, ok := servicePublicPairingExchangeError(fmt.Errorf("%s", message))
+		if !ok || got != message {
+			t.Fatalf("expected public pairing error %q, got %q ok=%v", message, got, ok)
+		}
+	}
+
+	if got, ok := servicePublicPairingExchangeError(fmt.Errorf("database password leaked")); ok || got != "" {
+		t.Fatalf("expected internal pairing exchange error to be redacted, got %q ok=%v", got, ok)
 	}
 }
 

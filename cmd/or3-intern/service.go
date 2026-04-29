@@ -350,7 +350,11 @@ func (s *serviceServer) handlePairing(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			s.recordServiceAuthFailure(r, "pairing")
 			s.recordServiceAuthFailure(r, pairingScope)
-			writeServiceError(w, r, http.StatusBadRequest, "pairing exchange failed", err)
+			if message, ok := servicePublicPairingExchangeError(err); ok {
+				writeServiceJSON(w, http.StatusBadRequest, serviceErrorPayload(r, message))
+			} else {
+				writeServiceError(w, r, http.StatusBadRequest, "pairing exchange failed", err)
+			}
 			return
 		}
 		s.clearServiceAuthFailures(r, "pairing")
@@ -1866,6 +1870,7 @@ func serviceBoundaryMiddleware(server *serviceServer, next http.Handler) http.Ha
 		}
 		captured := &serviceStatusRecorder{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(captured, r)
+		log.Printf("service %s %s -> %d", r.Method, r.URL.Path, captured.statusCode)
 		server.recordServiceAudit(r, captured.statusCode)
 	})
 }
@@ -1952,6 +1957,19 @@ func writeServiceError(w http.ResponseWriter, r *http.Request, statusCode int, p
 		log.Printf("service %s %s: %v", r.Method, r.URL.Path, err)
 	}
 	writeServiceJSON(w, statusCode, serviceErrorPayload(r, public))
+}
+
+func servicePublicPairingExchangeError(err error) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+	message := strings.TrimSpace(err.Error())
+	switch message {
+	case "pairing request not found", "pairing request expired", "pairing request is not approved":
+		return message, true
+	default:
+		return "", false
+	}
 }
 
 func serviceErrorPayload(r *http.Request, public string) map[string]any {

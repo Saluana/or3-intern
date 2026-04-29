@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -49,6 +50,11 @@ func clearConfigEnv(t *testing.T) {
 		"OR3_SERVICE_ENABLED",
 		"OR3_SERVICE_LISTEN",
 		"OR3_SERVICE_SECRET",
+		"OR3_SERVICE_ALLOW_REMOTE_UNAUTHENTICATED_PAIRING",
+		"OR3_SERVICE_TRUSTED_BROWSER_ORIGINS",
+		"OR3_SERVICE_TRUSTED_BROWSER_CIDRS",
+		"OR3_SERVICE_TRUSTED_PAIRING_ORIGINS",
+		"OR3_SERVICE_TRUSTED_PAIRING_CIDRS",
 		"OR3_RUNTIME_PROFILE",
 	} {
 		t.Setenv(key, "")
@@ -154,6 +160,9 @@ func TestDefault_Values(t *testing.T) {
 	}
 	if cfg.Service.AllowUnauthenticatedPairing {
 		t.Fatal("expected unauthenticated pairing to be disabled by default")
+	}
+	if len(cfg.Service.TrustedBrowserOrigins) != 0 || len(cfg.Service.TrustedBrowserCIDRs) != 0 {
+		t.Fatalf("expected trusted browser allowlists to default empty, got origins=%v cidrs=%v", cfg.Service.TrustedBrowserOrigins, cfg.Service.TrustedBrowserCIDRs)
 	}
 	if cfg.Service.MutationRateLimitPerMinute != 60 {
 		t.Fatalf("expected Service.MutationRateLimitPerMinute=60, got %d", cfg.Service.MutationRateLimitPerMinute)
@@ -296,6 +305,8 @@ func TestApplyEnvOverrides_ServiceConfig(t *testing.T) {
 	t.Setenv("OR3_SERVICE_ENABLED", "true")
 	t.Setenv("OR3_SERVICE_LISTEN", "127.0.0.1:9200")
 	t.Setenv("OR3_SERVICE_SECRET", "top-secret-value")
+	t.Setenv("OR3_SERVICE_TRUSTED_BROWSER_ORIGINS", "http://100.64.0.42:3060, https://app.example.test ")
+	t.Setenv("OR3_SERVICE_TRUSTED_BROWSER_CIDRS", "100.64.0.0/10,192.168.1.10")
 
 	ApplyEnvOverrides(&cfg)
 
@@ -307,6 +318,12 @@ func TestApplyEnvOverrides_ServiceConfig(t *testing.T) {
 	}
 	if cfg.Service.Secret != "top-secret-value" {
 		t.Fatalf("unexpected service secret override: %q", cfg.Service.Secret)
+	}
+	if got, want := cfg.Service.TrustedBrowserOrigins, []string{"http://100.64.0.42:3060", "https://app.example.test"}; !slices.Equal(got, want) {
+		t.Fatalf("unexpected trusted browser origins override: got %v want %v", got, want)
+	}
+	if got, want := cfg.Service.TrustedBrowserCIDRs, []string{"100.64.0.0/10", "192.168.1.10"}; !slices.Equal(got, want) {
+		t.Fatalf("unexpected trusted browser CIDRs override: got %v want %v", got, want)
 	}
 }
 
@@ -338,6 +355,9 @@ func TestLoad_ServiceHardeningDefaultsAndNormalization(t *testing.T) {
 	}
 	if !loaded.Service.AllowUnauthenticatedPairing {
 		t.Fatal("expected explicit unauthenticated pairing setting to round trip")
+	}
+	if loaded.Service.TrustedBrowserOrigins == nil || loaded.Service.TrustedBrowserCIDRs == nil {
+		t.Fatalf("expected trusted browser allowlists to be normalized to empty slices, got origins=%v cidrs=%v", loaded.Service.TrustedBrowserOrigins, loaded.Service.TrustedBrowserCIDRs)
 	}
 	if loaded.Service.MutationRateLimitPerMinute != 60 {
 		t.Fatalf("expected non-positive rate limit to default to 60, got %d", loaded.Service.MutationRateLimitPerMinute)

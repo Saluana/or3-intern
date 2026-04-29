@@ -121,6 +121,8 @@ Internal service mode settings:
 - `enabled`
 - `listen`
 - `secret`
+- `trustedBrowserOrigins` — exact browser origins allowed for non-loopback service API calls
+- `trustedBrowserCIDRs` — remote client IPs or CIDR ranges allowed with trusted browser origins
 
 See [api-reference.md](api-reference.md).
 
@@ -302,6 +304,8 @@ The codebase documents these direct environment overrides for service and channe
 - `OR3_SERVICE_ENABLED`
 - `OR3_SERVICE_LISTEN`
 - `OR3_SERVICE_SECRET`
+- `OR3_SERVICE_TRUSTED_BROWSER_ORIGINS`
+- `OR3_SERVICE_TRUSTED_BROWSER_CIDRS`
 - `OR3_CONSOLIDATION_MODEL`
 - `OR3_TELEGRAM_TOKEN`
 - `OR3_SLACK_APP_TOKEN`

@@ -305,13 +305,18 @@ type HeartbeatConfig struct {
 
 // ServiceConfig configures the optional authenticated service listener.
 type ServiceConfig struct {
-	Enabled                     bool   `json:"enabled"`
-	Listen                      string `json:"listen"`
-	Secret                      string `json:"secret"`
-	SharedSecretRole            string `json:"sharedSecretRole"`
-	MaxCapability               string `json:"maxCapability"`
-	AllowUnauthenticatedPairing bool   `json:"allowUnauthenticatedPairing"`
-	MutationRateLimitPerMinute  int    `json:"mutationRateLimitPerMinute"`
+	Enabled                           bool     `json:"enabled"`
+	Listen                            string   `json:"listen"`
+	Secret                            string   `json:"secret"`
+	SharedSecretRole                  string   `json:"sharedSecretRole"`
+	MaxCapability                     string   `json:"maxCapability"`
+	AllowUnauthenticatedPairing       bool     `json:"allowUnauthenticatedPairing"`
+	AllowRemoteUnauthenticatedPairing bool     `json:"allowRemoteUnauthenticatedPairing"`
+	TrustedBrowserOrigins             []string `json:"trustedBrowserOrigins"`
+	TrustedBrowserCIDRs               []string `json:"trustedBrowserCIDRs"`
+	TrustedPairingOrigins             []string `json:"trustedPairingOrigins"`
+	TrustedPairingCIDRs               []string `json:"trustedPairingCIDRs"`
+	MutationRateLimitPerMinute        int      `json:"mutationRateLimitPerMinute"`
 }
 
 // SubagentsConfig limits the internal subagent queue and worker pool.
@@ -791,13 +796,18 @@ func Default() Config {
 		},
 		Cron: CronConfig{Enabled: true, StorePath: filepath.Join(root, "cron.json")},
 		Service: ServiceConfig{
-			Enabled:                     false,
-			Listen:                      "127.0.0.1:9100",
-			Secret:                      "",
-			SharedSecretRole:            "service-client",
-			MaxCapability:               "safe",
-			AllowUnauthenticatedPairing: false,
-			MutationRateLimitPerMinute:  60,
+			Enabled:                           false,
+			Listen:                            "127.0.0.1:9100",
+			Secret:                            "",
+			SharedSecretRole:                  "service-client",
+			MaxCapability:                     "safe",
+			AllowUnauthenticatedPairing:       false,
+			AllowRemoteUnauthenticatedPairing: false,
+			TrustedBrowserOrigins:             []string{},
+			TrustedBrowserCIDRs:               []string{},
+			TrustedPairingOrigins:             []string{},
+			TrustedPairingCIDRs:               []string{},
+			MutationRateLimitPerMinute:        60,
 		},
 		Heartbeat: HeartbeatConfig{
 			Enabled:         false,
@@ -980,6 +990,23 @@ func ApplyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("OR3_SERVICE_SECRET"); v != "" {
 		cfg.Service.Secret = v
 	}
+	if v := os.Getenv("OR3_SERVICE_ALLOW_REMOTE_UNAUTHENTICATED_PAIRING"); v != "" {
+		if parsed, err := strconv.ParseBool(v); err == nil {
+			cfg.Service.AllowRemoteUnauthenticatedPairing = parsed
+		}
+	}
+	if v := os.Getenv("OR3_SERVICE_TRUSTED_BROWSER_ORIGINS"); v != "" {
+		cfg.Service.TrustedBrowserOrigins = compactStrings(strings.Split(v, ","))
+	}
+	if v := os.Getenv("OR3_SERVICE_TRUSTED_BROWSER_CIDRS"); v != "" {
+		cfg.Service.TrustedBrowserCIDRs = compactStrings(strings.Split(v, ","))
+	}
+	if v := os.Getenv("OR3_SERVICE_TRUSTED_PAIRING_ORIGINS"); v != "" {
+		cfg.Service.TrustedPairingOrigins = compactStrings(strings.Split(v, ","))
+	}
+	if v := os.Getenv("OR3_SERVICE_TRUSTED_PAIRING_CIDRS"); v != "" {
+		cfg.Service.TrustedPairingCIDRs = compactStrings(strings.Split(v, ","))
+	}
 	if v := os.Getenv("OR3_AUTH_ENABLED"); v != "" {
 		if parsed, err := strconv.ParseBool(v); err == nil {
 			cfg.Auth.Enabled = parsed
@@ -1141,6 +1168,22 @@ func Load(path string) (Config, error) {
 	if cfg.Service.MaxCapability == "" {
 		cfg.Service.MaxCapability = Default().Service.MaxCapability
 	}
+	if cfg.Service.TrustedBrowserOrigins == nil {
+		cfg.Service.TrustedBrowserOrigins = []string{}
+	}
+	if cfg.Service.TrustedBrowserCIDRs == nil {
+		cfg.Service.TrustedBrowserCIDRs = []string{}
+	}
+	if cfg.Service.TrustedPairingOrigins == nil {
+		cfg.Service.TrustedPairingOrigins = []string{}
+	}
+	if cfg.Service.TrustedPairingCIDRs == nil {
+		cfg.Service.TrustedPairingCIDRs = []string{}
+	}
+	cfg.Service.TrustedBrowserOrigins = compactStrings(cfg.Service.TrustedBrowserOrigins)
+	cfg.Service.TrustedBrowserCIDRs = compactStrings(cfg.Service.TrustedBrowserCIDRs)
+	cfg.Service.TrustedPairingOrigins = compactStrings(cfg.Service.TrustedPairingOrigins)
+	cfg.Service.TrustedPairingCIDRs = compactStrings(cfg.Service.TrustedPairingCIDRs)
 	if cfg.Service.MutationRateLimitPerMinute <= 0 {
 		cfg.Service.MutationRateLimitPerMinute = Default().Service.MutationRateLimitPerMinute
 	}

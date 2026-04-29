@@ -1301,6 +1301,8 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 			{Key: "service_listen", Label: "Listen address", Description: "Bind address for the internal service.", Kind: configureFieldText, Value: cfg.Service.Listen, EmptyHint: "127.0.0.1:9100"},
 			{Key: "service_secret", Label: "Shared secret", Description: "Hidden secret. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Service.Secret), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"},
 			{Key: "service_allow_unauthenticated_pairing", Label: "Allow first-time local device pairing", Description: "Let a phone or browser on this same computer ask for a one-time pairing code before it has a saved key.", Kind: configureFieldToggle, Value: onOff(cfg.Service.AllowUnauthenticatedPairing)},
+			{Key: "service_trusted_browser_origins", Label: "Trusted app origins", Description: "Comma-separated browser origins allowed to call the service API from a private-network app.", Kind: configureFieldText, Value: strings.Join(cfg.Service.TrustedBrowserOrigins, ","), EmptyHint: "http://100.x.y.z:3060,http://app.local:3060"},
+			{Key: "service_trusted_browser_cidrs", Label: "Trusted app CIDRs", Description: "Comma-separated remote IPs or CIDRs allowed to use trusted app origins.", Kind: configureFieldText, Value: strings.Join(cfg.Service.TrustedBrowserCIDRs, ","), EmptyHint: "100.64.0.0/10,192.168.1.0/24"},
 		}
 	}
 	return nil
@@ -1525,6 +1527,8 @@ var helpfulSectionFieldDescriptions = map[string]string{
 	"service_listen":                        "Network address for the internal service. 127.0.0.1 is local-only; 0.0.0.0 may expose OR3 to your network.",
 	"service_secret":                        "Shared secret required by service clients. Warning: a weak or leaked secret can allow unauthorized access.",
 	"service_allow_unauthenticated_pairing": "Allows a first-time phone or browser on this same computer to ask for a pairing code before it has a saved key. Warning: leave this off unless the service listen address stays local-only such as 127.0.0.1 or localhost.",
+	"service_trusted_browser_origins":       "Exact browser origins allowed to make service API calls from a private-network app. Add only origins you control, including the scheme and port.",
+	"service_trusted_browser_cidrs":         "Remote client IPs or CIDR ranges allowed with trusted app origins. Use narrow ranges when possible; Tailscale is usually 100.64.0.0/10.",
 }
 
 func helpfulChannelFieldDescription(channel, key string) string {
@@ -2128,6 +2132,12 @@ func applyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 		if value != "" {
 			cfg.Service.Secret = value
 		}
+		return true, nil
+	case "service_trusted_browser_origins":
+		cfg.Service.TrustedBrowserOrigins = splitAndCompact(value)
+		return true, nil
+	case "service_trusted_browser_cidrs":
+		cfg.Service.TrustedBrowserCIDRs = splitAndCompact(value)
 		return true, nil
 	default:
 		return false, nil

@@ -22,16 +22,22 @@ Command boundary:
   "service": {
     "enabled": true,
     "listen": "127.0.0.1:9100",
-    "secret": "replace-with-a-long-random-shared-secret"
+    "secret": "replace-with-a-long-random-shared-secret",
+    "trustedBrowserOrigins": ["http://100.x.y.z:3060"],
+    "trustedBrowserCIDRs": ["100.64.0.0/10"]
   }
 }
 ```
+
+`trustedBrowserOrigins` is an exact-origin CORS allowlist for browser apps that call the authenticated service API from a non-loopback private-network address. `trustedBrowserCIDRs` limits which remote client IPs can use those origins. Both fields accept multiple entries.
 
 Environment overrides documented in the README:
 
 - `OR3_SERVICE_ENABLED`
 - `OR3_SERVICE_LISTEN`
 - `OR3_SERVICE_SECRET`
+- `OR3_SERVICE_TRUSTED_BROWSER_ORIGINS`
+- `OR3_SERVICE_TRUSTED_BROWSER_CIDRS`
 
 ## Authentication
 

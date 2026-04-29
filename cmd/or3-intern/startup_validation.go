@@ -42,8 +42,8 @@ func validateStrictServicePosture(cmd string, cfg config.Config) error {
 	if cmd != "service" {
 		return nil
 	}
-	if cfg.Service.AllowUnauthenticatedPairing && !serviceListenIsLoopback(cfg.Service.Listen) {
-		return fmt.Errorf("service startup refused: unauthenticated pairing requires a loopback listen address; rerun with --unsafe-dev only for local development")
+	if cfg.Service.AllowUnauthenticatedPairing && !serviceListenIsLoopback(cfg.Service.Listen) && !cfg.Service.AllowRemoteUnauthenticatedPairing {
+		return fmt.Errorf("service startup refused: unauthenticated pairing requires a loopback listen address unless service.allowRemoteUnauthenticatedPairing is enabled with trusted origins and CIDRs; rerun with --unsafe-dev only for local development")
 	}
 	role := strings.ToLower(strings.TrimSpace(cfg.Service.SharedSecretRole))
 	switch role {

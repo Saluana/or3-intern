@@ -254,12 +254,6 @@ func serviceAllowedBrowserOrigin(cfg config.Config, r *http.Request) (string, bo
 	if origin == "" {
 		return "", false
 	}
-	if !serviceListenIsLoopback(cfg.Service.Listen) {
-		return "", false
-	}
-	if strings.TrimSpace(r.RemoteAddr) != "" && !requestRemoteIsLoopback(r.RemoteAddr) {
-		return "", false
-	}
 	parsed, err := url.Parse(origin)
 	if err != nil {
 		return "", false
@@ -267,14 +261,102 @@ func serviceAllowedBrowserOrigin(cfg config.Config, r *http.Request) (string, bo
 	if !strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https") {
 		return "", false
 	}
+	if serviceOriginIsLoopback(parsed) && serviceListenIsLoopback(cfg.Service.Listen) && (strings.TrimSpace(r.RemoteAddr) == "" || requestRemoteIsLoopback(r.RemoteAddr)) {
+		return origin, true
+	}
+	if serviceTrustedBrowserRequest(cfg, r, parsed) {
+		return origin, true
+	}
+	return "", false
+}
+
+func serviceOriginIsLoopback(parsed *url.URL) bool {
+	if parsed == nil {
+		return false
+	}
 	host := strings.TrimSpace(parsed.Hostname())
 	if host == "" {
-		return "", false
+		return false
 	}
 	if ip := net.ParseIP(host); ip != nil {
-		return origin, ip.IsLoopback()
+		return ip.IsLoopback()
 	}
-	return origin, strings.EqualFold(host, "localhost")
+	return strings.EqualFold(host, "localhost")
+}
+
+func serviceTrustedBrowserRequest(cfg config.Config, r *http.Request, parsedOrigin *url.URL) bool {
+	if r == nil || parsedOrigin == nil {
+		return false
+	}
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if !serviceOriginInAllowlist(origin, serviceTrustedBrowserOrigins(cfg)) {
+		return false
+	}
+	return requestRemoteInCIDRAllowlist(r.RemoteAddr, serviceTrustedBrowserCIDRs(cfg))
+}
+
+func serviceTrustedRemotePairingRequest(cfg config.Config, r *http.Request, parsedOrigin *url.URL) bool {
+	if !serviceIsPairingRoute(r) {
+		return false
+	}
+	if !cfg.Service.AllowRemoteUnauthenticatedPairing || r == nil || parsedOrigin == nil {
+		return false
+	}
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if !serviceOriginInAllowlist(origin, cfg.Service.TrustedPairingOrigins) {
+		return false
+	}
+	return requestRemoteInCIDRAllowlist(r.RemoteAddr, cfg.Service.TrustedPairingCIDRs)
+}
+
+func serviceTrustedBrowserOrigins(cfg config.Config) []string {
+	origins := append([]string{}, cfg.Service.TrustedBrowserOrigins...)
+	origins = append(origins, cfg.Service.TrustedPairingOrigins...)
+	return origins
+}
+
+func serviceTrustedBrowserCIDRs(cfg config.Config) []string {
+	cidrs := append([]string{}, cfg.Service.TrustedBrowserCIDRs...)
+	cidrs = append(cidrs, cfg.Service.TrustedPairingCIDRs...)
+	return cidrs
+}
+
+func serviceOriginInAllowlist(origin string, allowlist []string) bool {
+	origin = strings.TrimRight(strings.TrimSpace(origin), "/")
+	if origin == "" {
+		return false
+	}
+	for _, allowed := range allowlist {
+		if strings.EqualFold(origin, strings.TrimRight(strings.TrimSpace(allowed), "/")) {
+			return true
+		}
+	}
+	return false
+}
+
+func requestRemoteInCIDRAllowlist(addr string, allowlist []string) bool {
+	host := strings.TrimSpace(addr)
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
+	}
+	host = strings.Trim(host, "[]")
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	for _, allowed := range allowlist {
+		allowed = strings.TrimSpace(allowed)
+		if allowed == "" {
+			continue
+		}
+		if _, network, err := net.ParseCIDR(allowed); err == nil && network.Contains(ip) {
+			return true
+		}
+		if allowedIP := net.ParseIP(allowed); allowedIP != nil && allowedIP.Equal(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func serviceIsCORSPreflight(r *http.Request) bool {
@@ -387,13 +469,24 @@ func allowsUnauthenticatedPairingRoute(cfg config.Config, r *http.Request) bool 
 	if !cfg.Service.AllowUnauthenticatedPairing {
 		return false
 	}
-	if !serviceListenIsLoopback(cfg.Service.Listen) {
-		return false
-	}
-	if !requestRemoteIsLoopback(r.RemoteAddr) {
-		return false
-	}
 	if r.Method != http.MethodPost {
+		return false
+	}
+	if !serviceIsPairingRoute(r) {
+		return false
+	}
+	if serviceListenIsLoopback(cfg.Service.Listen) && requestRemoteIsLoopback(r.RemoteAddr) {
+		return true
+	}
+	origin, err := url.Parse(strings.TrimSpace(r.Header.Get("Origin")))
+	if err != nil {
+		return false
+	}
+	return serviceTrustedRemotePairingRequest(cfg, r, origin)
+}
+
+func serviceIsPairingRoute(r *http.Request) bool {
+	if r == nil || r.URL == nil {
 		return false
 	}
 	path := strings.TrimSpace(r.URL.Path)

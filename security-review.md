@@ -31,15 +31,6 @@ No critical vulnerabilities were identified.
 
 ---
 
-### H4: No Rate Limiting on Authentication Failures
-
-**Location:** `cmd/or3-intern/service_auth.go`, `cmd/or3-intern/service.go`
-
-**Finding:** No rate limiting observed in the auth middleware. The server struct has `rateMu`/`rateWindow`/`rateCounts` fields (suggesting partial implementation), but they are not enforced during auth validation.
-
-**Impact:** Brute-force risk for bearer tokens, session tokens, and pairing codes.
-
-**Fix:** Implement per-IP and per-account rate limiting with exponential backoff on auth endpoints.
 
 ---
 

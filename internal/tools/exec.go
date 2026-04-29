@@ -38,7 +38,7 @@ const (
 
 func (t *ExecTool) Name() string { return "exec" }
 func (t *ExecTool) Description() string {
-	return "Run an allowed program with safety limits. Output is truncated. Legacy shell commands require explicit opt-in."
+	return "Run an allowed program with approval, sandbox, and allowlist controls. Output is truncated. Legacy shell commands require explicit opt-in; blocked shell patterns are only a safety net."
 }
 func (t *ExecTool) Parameters() map[string]any {
 	return map[string]any{
@@ -64,6 +64,10 @@ func (t *ExecTool) CapabilityForParams(params map[string]any) CapabilityLevel {
 	return CapabilityGuarded
 }
 
+// defaultBlockedPatterns is a legacy-shell tripwire, not a security boundary.
+// Keep exec policy in the approval broker, program allowlist, sandbox, service
+// shell ban, and runtime profile controls; shell substring matching is easy to
+// bypass and only catches common accidents.
 var defaultBlockedPatterns = []string{
 	"rm -rf", "mkfs", "dd ", "shutdown", "reboot", "poweroff", ":(){", ">|", "chown -R /", "chmod -R 777 /",
 }
@@ -104,7 +108,7 @@ func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, 
 		}
 		for _, b := range patterns {
 			if strings.Contains(lc, b) {
-				return "", fmt.Errorf("blocked command pattern: %q", b)
+				return "", fmt.Errorf("blocked legacy shell safety-net pattern: %q", b)
 			}
 		}
 	}

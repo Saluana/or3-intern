@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -42,11 +44,18 @@ type serviceServer struct {
 	appOnce          sync.Once
 	appSvc           *app.ServiceApp
 	terminalMu       sync.Mutex
-	terminalSeq      int64
 	terminalSessions map[string]*serviceTerminalSession
 	rateMu           sync.Mutex
 	rateWindow       time.Time
 	rateCounts       map[string]int
+	authFailureMu    sync.Mutex
+	authFailures     map[string]serviceAuthFailureState
+}
+
+type serviceAuthFailureState struct {
+	Count        int
+	FirstAttempt time.Time
+	BlockedUntil time.Time
 }
 
 const (
@@ -194,7 +203,7 @@ func runServiceCommandWithBroker(ctx context.Context, cfg config.Config, rt *age
 
 	httpServer := &http.Server{
 		Addr:              cfg.Service.Listen,
-		Handler:           serviceBrowserMiddleware(cfg, serviceAuthMiddlewareWithBroker(cfg, broker, authSvc, serviceBoundaryMiddleware(server, mux))),
+		Handler:           serviceBrowserMiddleware(cfg, serviceAuthMiddlewareWithBrokerAndLimiter(cfg, broker, authSvc, server, serviceBoundaryMiddleware(server, mux))),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		IdleTimeout:       60 * time.Second,
@@ -319,6 +328,10 @@ func (s *serviceServer) handlePairing(w http.ResponseWriter, r *http.Request) {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 			return
 		}
+		if retryAfter := s.serviceAuthRetryAfter(r, "pairing"); retryAfter > 0 {
+			writeServiceAuthRateLimit(w, r, retryAfter)
+			return
+		}
 		limitServiceRequestBody(w, r, servicePairingBodyLimit)
 		var body struct {
 			RequestID int64  `json:"request_id"`
@@ -328,11 +341,20 @@ func (s *serviceServer) handlePairing(w http.ResponseWriter, r *http.Request) {
 			writeServiceRequestDecodeError(w, err)
 			return
 		}
+		pairingScope := fmt.Sprintf("pairing:%d", body.RequestID)
+		if retryAfter := s.serviceAuthRetryAfter(r, pairingScope); retryAfter > 0 {
+			writeServiceAuthRateLimit(w, r, retryAfter)
+			return
+		}
 		device, token, err := appSvc.ExchangePairingCode(r.Context(), approval.PairingExchangeInput{RequestID: body.RequestID, Code: body.Code})
 		if err != nil {
+			s.recordServiceAuthFailure(r, "pairing")
+			s.recordServiceAuthFailure(r, pairingScope)
 			writeServiceError(w, r, http.StatusBadRequest, "pairing exchange failed", err)
 			return
 		}
+		s.clearServiceAuthFailures(r, "pairing")
+		s.clearServiceAuthFailures(r, pairingScope)
 		writeServiceJSON(w, http.StatusOK, map[string]any{"device_id": device.DeviceID, "role": device.Role, "token": token})
 		return
 	}
@@ -811,7 +833,7 @@ func (s *serviceServer) handleFileUpload(w http.ResponseWriter, r *http.Request)
 	}
 	defer source.Close()
 	name := filepath.Base(header.Filename)
-	if name == "." || name == string(filepath.Separator) || name == "" {
+	if name == "." || name == ".." || name == string(filepath.Separator) || name == "" {
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid file name"})
 		return
 	}
@@ -978,11 +1000,21 @@ func (s *serviceServer) getTerminalSessionByID(sessionID string) (*serviceTermin
 	return session, true
 }
 
-func (s *serviceServer) allocateTerminalSessionID() string {
-	s.terminalMu.Lock()
-	defer s.terminalMu.Unlock()
-	s.terminalSeq++
-	return fmt.Sprintf("term_%d_%d", time.Now().UTC().Unix(), s.terminalSeq)
+func (s *serviceServer) allocateTerminalSessionID() (string, error) {
+	for range 8 {
+		b := make([]byte, 12)
+		if _, err := rand.Read(b); err != nil {
+			return "", err
+		}
+		id := "term_" + hex.EncodeToString(b)
+		s.terminalMu.Lock()
+		_, exists := s.terminalSessions[id]
+		s.terminalMu.Unlock()
+		if !exists {
+			return id, nil
+		}
+	}
+	return "", fmt.Errorf("failed to allocate unique terminal session id")
 }
 
 func (s *serviceServer) createTerminalSession(w http.ResponseWriter, r *http.Request) {
@@ -1063,8 +1095,15 @@ func (s *serviceServer) createTerminalSession(w http.ResponseWriter, r *http.Req
 		writeServiceError(w, r, http.StatusBadGateway, "failed to open terminal stderr", err)
 		return
 	}
+	sessionID, err := s.allocateTerminalSessionID()
+	if err != nil {
+		_ = stdin.Close()
+		cancel()
+		writeServiceError(w, r, http.StatusInternalServerError, "failed to allocate terminal session", err)
+		return
+	}
 	session := &serviceTerminalSession{
-		ID:            s.allocateTerminalSessionID(),
+		ID:            sessionID,
 		RootID:        root.ID,
 		RelativePath:  filepath.ToSlash(rel),
 		WorkingDir:    workingDir,

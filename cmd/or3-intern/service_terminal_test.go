@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -161,6 +162,31 @@ func TestServiceTerminalSessionLifecycle(t *testing.T) {
 	if closeResp.StatusCode != http.StatusOK && closeResp.StatusCode != http.StatusNotFound {
 		body, _ := io.ReadAll(closeResp.Body)
 		t.Fatalf("expected 200/404 from close, got %d: %s", closeResp.StatusCode, string(body))
+	}
+}
+
+func TestAllocateTerminalSessionIDUsesRandomHexID(t *testing.T) {
+	server := &serviceServer{}
+	id1, err := server.allocateTerminalSessionID()
+	if err != nil {
+		t.Fatalf("allocate first id: %v", err)
+	}
+	id2, err := server.allocateTerminalSessionID()
+	if err != nil {
+		t.Fatalf("allocate second id: %v", err)
+	}
+	pattern := regexp.MustCompile(`^term_[0-9a-f]{24}$`)
+	if !pattern.MatchString(id1) {
+		t.Fatalf("expected random hex terminal id, got %q", id1)
+	}
+	if !pattern.MatchString(id2) {
+		t.Fatalf("expected random hex terminal id, got %q", id2)
+	}
+	if id1 == id2 {
+		t.Fatalf("expected unique terminal ids, got duplicate %q", id1)
+	}
+	if regexp.MustCompile(`^term_\d+_\d+$`).MatchString(id1) {
+		t.Fatalf("terminal id still uses predictable sequence format: %q", id1)
 	}
 }
 

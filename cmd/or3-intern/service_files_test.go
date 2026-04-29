@@ -1,6 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -62,6 +66,51 @@ func TestResolveServiceFilePathRejectsSymlinkEscape(t *testing.T) {
 	_, _, _, err := server.resolveServiceFilePath("allowed", "outside/secret.txt")
 	if err == nil {
 		t.Fatal("expected symlink escape to be rejected")
+	}
+}
+
+func TestHandleFileUploadRejectsParentDirectoryFilename(t *testing.T) {
+	tmp := t.TempDir()
+	uploadDir := filepath.Join(tmp, "uploads")
+	if err := os.Mkdir(uploadDir, 0o755); err != nil {
+		t.Fatalf("create upload dir: %v", err)
+	}
+	server := &serviceServer{config: config.Config{AllowedDir: uploadDir}}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("root_id", "allowed"); err != nil {
+		t.Fatalf("write root field: %v", err)
+	}
+	if err := writer.WriteField("path", "."); err != nil {
+		t.Fatalf("write path field: %v", err)
+	}
+	part, err := writer.CreateFormFile("file", "..")
+	if err != nil {
+		t.Fatalf("create file part: %v", err)
+	}
+	if _, err := part.Write([]byte("payload")); err != nil {
+		t.Fatalf("write file part: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/files/upload", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rec := httptest.NewRecorder()
+
+	server.handleFileUpload(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d", http.StatusBadRequest, rec.Code)
+	}
+	info, err := os.Stat(tmp)
+	if err != nil {
+		t.Fatalf("stat parent dir: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("expected parent path to remain a directory")
 	}
 }
 

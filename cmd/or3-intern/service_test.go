@@ -84,6 +84,42 @@ func TestServiceAuthMiddleware_RejectsMissingBearer(t *testing.T) {
 	}
 }
 
+func TestServiceAuthMiddleware_RateLimitsFailedBearerAttempts(t *testing.T) {
+	cfg := config.Config{Service: config.ServiceConfig{Secret: strings.Repeat("s", 32), SharedSecretRole: approval.RoleServiceClient}}
+	server := &serviceServer{config: cfg}
+	var handled int
+	handler := serviceAuthMiddlewareWithBrokerAndLimiter(cfg, nil, nil, server, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handled++
+		writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true})
+	}))
+
+	for i := 0; i < serviceAuthFailureThreshold+1; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/internal/v1/turns", nil)
+		req.RemoteAddr = "203.0.113.10:1234"
+		req.Header.Set("Authorization", "Bearer invalid-token")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: expected 401, got %d (%s)", i+1, rec.Code, rec.Body.String())
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/internal/v1/turns", nil)
+	req.RemoteAddr = "203.0.113.10:1234"
+	req.Header.Set("Authorization", "Bearer invalid-token")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 after repeated auth failures, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Retry-After") == "" {
+		t.Fatalf("expected Retry-After header")
+	}
+	if handled != 0 {
+		t.Fatalf("expected unauthorized requests not to reach handler, got %d calls", handled)
+	}
+}
+
 func TestValidateServiceAuthorization(t *testing.T) {
 	secret := strings.Repeat("s", 32)
 	now := time.Unix(1_700_000_000, 0)
@@ -1109,7 +1145,7 @@ func newServiceTestHTTPServer(t *testing.T, secret string, server *serviceServer
 			return registry
 		}
 	}
-	return httptest.NewServer(serviceBrowserMiddleware(server.config, serviceAuthMiddlewareWithBroker(server.config, server.broker, server.app().Auth(), serviceBoundaryMiddleware(server, newServiceMux(server)))))
+	return httptest.NewServer(serviceBrowserMiddleware(server.config, serviceAuthMiddlewareWithBrokerAndLimiter(server.config, server.broker, server.app().Auth(), server, serviceBoundaryMiddleware(server, newServiceMux(server)))))
 }
 
 func mustServiceRequest(t *testing.T, server *httptest.Server, secret, method, path, body string) *http.Request {

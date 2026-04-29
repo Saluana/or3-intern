@@ -93,6 +93,56 @@ func TestSafePath_BlocksSymlinkEscape(t *testing.T) {
 	}
 }
 
+func TestValidateOpenedPathDetectsPathSwap(t *testing.T) {
+	root := t.TempDir()
+	p := filepath.Join(root, "target.txt")
+	mustWriteFile(t, p, []byte("first"), 0o644)
+	tool := &FileTool{Root: root}
+
+	f, err := os.Open(p)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		t.Fatalf("Stat opened file: %v", err)
+	}
+	if err := os.Remove(p); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	mustWriteFile(t, p, []byte("second"), 0o644)
+
+	if err := tool.validateOpenedPath(p, info); err == nil {
+		t.Fatal("expected swapped path to be rejected")
+	}
+}
+
+func TestOpenSafeWriteRejectsSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.txt")
+	mustWriteFile(t, secret, []byte("secret"), 0o644)
+	link := filepath.Join(root, "escape.txt")
+	if err := os.Symlink(secret, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	tool := &FileTool{Root: root}
+	f, err := tool.openSafeWrite(link, 0o600)
+	if err == nil {
+		f.Close()
+		t.Fatal("expected symlink escape to be rejected")
+	}
+	got, err := os.ReadFile(secret)
+	if err != nil {
+		t.Fatalf("ReadFile secret: %v", err)
+	}
+	if string(got) != "secret" {
+		t.Fatalf("expected escaped target to remain unchanged, got %q", string(got))
+	}
+}
+
 // ---- ReadFile ----
 
 func TestReadFile_OK(t *testing.T) {

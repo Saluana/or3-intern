@@ -51,6 +51,85 @@ func (t *FileTool) safePath(p string) (string, error) {
 	return abs, nil
 }
 
+func (t *FileTool) validatePathInRoot(abs string) error {
+	if t.Root == "" {
+		return nil
+	}
+	root, err := filepath.Abs(t.Root)
+	if err != nil {
+		return err
+	}
+	root, err = canonicalizeRoot(root)
+	if err != nil {
+		return err
+	}
+	resolved, err := canonicalizePath(abs)
+	if err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(root, resolved)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("path outside allowed root")
+	}
+	return nil
+}
+
+func (t *FileTool) openSafeRead(path string) (*os.File, os.FileInfo, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, nil, err
+	}
+	if err := t.validateOpenedPath(path, info); err != nil {
+		f.Close()
+		return nil, nil, err
+	}
+	return f, info, nil
+}
+
+func (t *FileTool) openSafeWrite(path string, perm os.FileMode) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, perm)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if err := t.validateOpenedPath(path, info); err != nil {
+		f.Close()
+		return nil, err
+	}
+	if err := f.Truncate(0); err != nil {
+		f.Close()
+		return nil, err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+func (t *FileTool) validateOpenedPath(path string, openedInfo os.FileInfo) error {
+	if err := t.validatePathInRoot(path); err != nil {
+		return err
+	}
+	currentInfo, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(openedInfo, currentInfo) {
+		return fmt.Errorf("path changed during file operation")
+	}
+	return nil
+}
+
 func canonicalizeRoot(root string) (string, error) {
 	if _, err := os.Stat(root); err != nil {
 		return "", err
@@ -122,36 +201,32 @@ func (t *ReadFile) Execute(ctx context.Context, params map[string]any) (string, 
 	if mode == "" || mode == "<nil>" {
 		mode = "preview"
 	}
-	info, err := os.Stat(p)
+	f, info, err := t.openSafeRead(p)
 	if err != nil {
 		return "", err
 	}
+	defer f.Close()
 	switch mode {
 	case "preview", "full":
-		return t.readPreview(p, info.Size(), max, mode)
+		return t.readPreview(f, p, info.Size(), max, mode)
 	case "range":
 		start := intParam(params, "startLine", 1)
 		end := intParam(params, "endLine", start)
-		return readLineRange(p, info.Size(), start, end, max)
+		return readLineRange(f, p, info.Size(), start, end, max)
 	case "grep":
 		pattern := strings.TrimSpace(fmt.Sprint(params["pattern"]))
 		if pattern == "" || pattern == "<nil>" {
 			return "", fmt.Errorf("missing pattern")
 		}
-		return grepFile(p, info.Size(), pattern, max)
+		return grepFile(f, p, info.Size(), pattern, max)
 	case "outline":
-		return outlineFile(p, info.Size(), max)
+		return outlineFile(f, p, info.Size(), max)
 	default:
 		return "", fmt.Errorf("unsupported read_file mode: %s", mode)
 	}
 }
 
-func (t *ReadFile) readPreview(path string, size int64, max int, mode string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
+func (t *ReadFile) readPreview(f *os.File, path string, size int64, max int, mode string) (string, error) {
 	b, err := io.ReadAll(io.LimitReader(f, int64(max)+1))
 	if err != nil {
 		return "", err
@@ -203,15 +278,16 @@ func (t *SearchFile) Execute(ctx context.Context, params map[string]any) (string
 	if err != nil {
 		return "", err
 	}
-	info, err := os.Stat(p)
-	if err != nil {
-		return "", err
-	}
 	pattern := strings.TrimSpace(fmt.Sprint(params["pattern"]))
 	if pattern == "" || pattern == "<nil>" {
 		return "", fmt.Errorf("missing pattern")
 	}
-	return grepFile(p, info.Size(), pattern, intParam(params, "maxBytes", defaultReadFileMaxBytes))
+	f, info, err := t.openSafeRead(p)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	return grepFile(f, p, info.Size(), pattern, intParam(params, "maxBytes", defaultReadFileMaxBytes))
 }
 
 type WriteFile struct{ FileTool }
@@ -241,7 +317,12 @@ func (t *WriteFile) Execute(ctx context.Context, params map[string]any) (string,
 			return "", err
 		}
 	}
-	if err := os.WriteFile(p, []byte(content), existingFileMode(p, 0o600)); err != nil {
+	out, err := t.openSafeWrite(p, existingFileMode(p, 0o600))
+	if err != nil {
+		return "", err
+	}
+	defer out.Close()
+	if _, err := out.Write([]byte(content)); err != nil {
 		return "", err
 	}
 	return "ok", nil
@@ -276,9 +357,17 @@ func (t *EditFile) Execute(ctx context.Context, params map[string]any) (string, 
 	if err != nil {
 		return "", err
 	}
-	b, err := os.ReadFile(p)
+	in, _, err := t.openSafeRead(p)
 	if err != nil {
 		return "", err
+	}
+	b, err := io.ReadAll(in)
+	closeErr := in.Close()
+	if err != nil {
+		return "", err
+	}
+	if closeErr != nil {
+		return "", closeErr
 	}
 	s := string(b)
 	rawEdits, _ := params["edits"].([]any)
@@ -296,7 +385,12 @@ func (t *EditFile) Execute(ctx context.Context, params map[string]any) (string, 
 			s = strings.Replace(s, find, replace, count)
 		}
 	}
-	if err := os.WriteFile(p, []byte(s), existingFileMode(p, 0)); err != nil {
+	out, err := t.openSafeWrite(p, existingFileMode(p, 0))
+	if err != nil {
+		return "", err
+	}
+	defer out.Close()
+	if _, err := out.Write([]byte(s)); err != nil {
 		return "", err
 	}
 	return "ok", nil
@@ -320,7 +414,12 @@ func (t *ListDir) Execute(ctx context.Context, params map[string]any) (string, e
 	if err != nil {
 		return "", err
 	}
-	ents, err := os.ReadDir(p)
+	f, _, err := t.openSafeRead(p)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	ents, err := f.ReadDir(-1)
 	if err != nil {
 		return "", err
 	}
@@ -361,18 +460,13 @@ func (t *ListDir) Execute(ctx context.Context, params map[string]any) (string, e
 	}), nil
 }
 
-func readLineRange(path string, size int64, start, end, max int) (string, error) {
+func readLineRange(f *os.File, path string, size int64, start, end, max int) (string, error) {
 	if start <= 0 {
 		start = 1
 	}
 	if end < start {
 		end = start
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
 	var b strings.Builder
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -413,12 +507,7 @@ func readLineRange(path string, size int64, start, end, max int) (string, error)
 	}), nil
 }
 
-func grepFile(path string, size int64, pattern string, max int) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
+func grepFile(f *os.File, path string, size int64, pattern string, max int) (string, error) {
 	var b strings.Builder
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -457,12 +546,7 @@ func grepFile(path string, size int64, pattern string, max int) (string, error) 
 	}), nil
 }
 
-func outlineFile(path string, size int64, max int) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
+func outlineFile(f *os.File, path string, size int64, max int) (string, error) {
 	var b strings.Builder
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)

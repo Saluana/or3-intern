@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,6 +23,11 @@ import (
 )
 
 const serviceTokenMaxAge = 5 * time.Minute
+const (
+	serviceAuthFailureWindow     = 10 * time.Minute
+	serviceAuthFailureThreshold  = 5
+	serviceAuthFailureMaxBackoff = 5 * time.Minute
+)
 
 type serviceTokenClaims struct {
 	IssuedAt int64  `json:"iat"`
@@ -79,6 +85,10 @@ func serviceBrowserMiddleware(cfg config.Config, next http.Handler) http.Handler
 }
 
 func serviceAuthMiddlewareWithBroker(cfg config.Config, broker *approval.Broker, authSvc *auth.Service, next http.Handler) http.Handler {
+	return serviceAuthMiddlewareWithBrokerAndLimiter(cfg, broker, authSvc, nil, next)
+}
+
+func serviceAuthMiddlewareWithBrokerAndLimiter(cfg config.Config, broker *approval.Broker, authSvc *auth.Service, server *serviceServer, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if allowsUnauthenticatedPairingRoute(cfg, r) {
 			ctx := approval.ContextWithAuditAuthKind(r.Context(), "unauthenticated")
@@ -96,8 +106,13 @@ func serviceAuthMiddlewareWithBroker(cfg config.Config, broker *approval.Broker,
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
+		if retryAfter := server.serviceAuthRetryAfter(r, "auth"); retryAfter > 0 {
+			writeServiceAuthRateLimit(w, r, retryAfter)
+			return
+		}
 		identity, err := authenticateServiceRequest(cfg, broker, authSvc, r.Header.Get("Authorization"), time.Now(), r.Context())
 		if err != nil {
+			server.recordServiceAuthFailure(r, "auth")
 			if challenge := serviceAuthChallengeError(cfg, authSvc, requirement, serviceAuthIdentity{}, err); challenge != nil {
 				serviceAuditAuthEvent(authSvc, r.Context(), "auth.policy.denied", serviceAuthIdentity{Actor: "anonymous"}, map[string]any{"path": r.URL.Path, "method": r.Method, "code": challenge.Code})
 				writeServiceAuthError(w, r, challenge)
@@ -106,6 +121,7 @@ func serviceAuthMiddlewareWithBroker(cfg config.Config, broker *approval.Broker,
 			writeServiceJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 			return
 		}
+		server.clearServiceAuthFailures(r, "auth")
 		if challenge := serviceAuthChallengeError(cfg, authSvc, requirement, identity, nil); challenge != nil {
 			if strings.EqualFold(string(cfg.Auth.EnforcementMode), string(config.AuthEnforcementWarn)) {
 				serviceAuditAuthEvent(authSvc, r.Context(), "auth.policy.warn", identity, map[string]any{"path": r.URL.Path, "method": r.Method, "code": challenge.Code})
@@ -125,6 +141,109 @@ func serviceAuthMiddlewareWithBroker(cfg config.Config, broker *approval.Broker,
 		ctx = approval.ContextWithAuditActor(ctx, identity.Actor)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func (s *serviceServer) serviceAuthRetryAfter(r *http.Request, scope string) int {
+	if s == nil || r == nil {
+		return 0
+	}
+	now := time.Now().UTC()
+	keys := serviceAuthFailureKeys(r, scope)
+	s.authFailureMu.Lock()
+	defer s.authFailureMu.Unlock()
+	for _, key := range keys {
+		state, ok := s.authFailures[key]
+		if !ok {
+			continue
+		}
+		if now.Sub(state.FirstAttempt) > serviceAuthFailureWindow {
+			delete(s.authFailures, key)
+			continue
+		}
+		if state.BlockedUntil.After(now) {
+			return int(time.Until(state.BlockedUntil).Seconds()) + 1
+		}
+	}
+	return 0
+}
+
+func (s *serviceServer) recordServiceAuthFailure(r *http.Request, scope string) {
+	if s == nil || r == nil {
+		return
+	}
+	now := time.Now().UTC()
+	keys := serviceAuthFailureKeys(r, scope)
+	s.authFailureMu.Lock()
+	defer s.authFailureMu.Unlock()
+	if s.authFailures == nil {
+		s.authFailures = map[string]serviceAuthFailureState{}
+	}
+	for _, key := range keys {
+		state := s.authFailures[key]
+		if state.FirstAttempt.IsZero() || now.Sub(state.FirstAttempt) > serviceAuthFailureWindow {
+			state = serviceAuthFailureState{FirstAttempt: now}
+		}
+		state.Count++
+		if state.Count > serviceAuthFailureThreshold {
+			excess := state.Count - serviceAuthFailureThreshold
+			backoff := time.Duration(1<<min(excess-1, 8)) * time.Second
+			if backoff > serviceAuthFailureMaxBackoff {
+				backoff = serviceAuthFailureMaxBackoff
+			}
+			state.BlockedUntil = now.Add(backoff)
+		}
+		s.authFailures[key] = state
+	}
+}
+
+func (s *serviceServer) clearServiceAuthFailures(r *http.Request, scope string) {
+	if s == nil || r == nil {
+		return
+	}
+	keys := serviceAuthFailureKeys(r, scope)
+	s.authFailureMu.Lock()
+	defer s.authFailureMu.Unlock()
+	for _, key := range keys {
+		delete(s.authFailures, key)
+	}
+}
+
+func serviceAuthFailureKeys(r *http.Request, scope string) []string {
+	scope = strings.TrimSpace(scope)
+	if scope == "" {
+		scope = "auth"
+	}
+	ip := remoteIPKey(r.RemoteAddr)
+	keys := make([]string, 0, 2)
+	if ip != "" {
+		keys = append(keys, scope+":ip:"+ip)
+	}
+	if credential := serviceAuthCredentialKey(r); credential != "" {
+		keys = append(keys, scope+":credential:"+credential)
+	}
+	return keys
+}
+
+func serviceAuthCredentialKey(r *http.Request) string {
+	credential := serviceFirstNonEmpty(
+		strings.TrimSpace(r.Header.Get("Authorization")),
+		strings.TrimSpace(r.Header.Get("X-Or3-Session")),
+		strings.TrimSpace(r.Header.Get("X-Auth-Session")),
+		strings.TrimSpace(r.URL.Query().Get("session_token")),
+	)
+	if credential == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(credential))
+	return hex.EncodeToString(sum[:12])
+}
+
+func writeServiceAuthRateLimit(w http.ResponseWriter, r *http.Request, retryAfter int) {
+	if retryAfter <= 0 {
+		retryAfter = 1
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+	writeServiceJSON(w, http.StatusTooManyRequests, map[string]any{"error": "too many authentication attempts", "retry_after_seconds": retryAfter})
 }
 
 func serviceAllowedBrowserOrigin(cfg config.Config, r *http.Request) (string, bool) {

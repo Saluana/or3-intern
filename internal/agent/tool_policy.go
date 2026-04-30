@@ -18,7 +18,7 @@ func ResolveServiceToolAllowlist(base *tools.Registry, policy *ServiceToolPolicy
 		if len(normalizeToolNames(legacyAllowed)) > 0 {
 			return nil, false, fmt.Errorf("tool_policy.mode is required")
 		}
-		return []string{}, true, nil
+		return nil, false, nil
 	}
 
 	mode := strings.ToLower(strings.TrimSpace(policy.Mode))
@@ -34,9 +34,27 @@ func ResolveServiceToolAllowlist(base *tools.Registry, policy *ServiceToolPolicy
 	}
 
 	switch mode {
+	case "allow_all":
+		return nil, false, nil
 	case "deny_all":
 		return []string{}, true, nil
 	case "allow_list":
+		return allowed, true, nil
+	case "deny_list":
+		blocked := make(map[string]struct{}, len(policy.BlockedTools))
+		for _, name := range normalizeToolNames(policy.BlockedTools) {
+			blocked[name] = struct{}{}
+		}
+		if base == nil {
+			return nil, false, nil
+		}
+		allowed := make([]string, 0, len(base.Names()))
+		for _, name := range base.Names() {
+			if _, ok := blocked[name]; ok {
+				continue
+			}
+			allowed = append(allowed, name)
+		}
 		return allowed, true, nil
 	default:
 		return nil, false, fmt.Errorf("unsupported tool_policy mode: %s", policy.Mode)

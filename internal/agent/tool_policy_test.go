@@ -32,17 +32,33 @@ func TestResolveServiceToolAllowlist_RejectsMissingMode(t *testing.T) {
 	}
 }
 
-func TestResolveServiceToolAllowlist_RejectsDenyListMode(t *testing.T) {
+func TestResolveServiceToolAllowlist_AllowAllDoesNotRestrict(t *testing.T) {
+	allowed, explicit, err := ResolveServiceToolAllowlist(nil, &ServiceToolPolicy{Mode: "allow_all"}, nil)
+	if err != nil {
+		t.Fatalf("ResolveServiceToolAllowlist: %v", err)
+	}
+	if explicit || len(allowed) != 0 {
+		t.Fatalf("expected allow_all to avoid restriction, got explicit=%v allowed=%#v", explicit, allowed)
+	}
+}
+
+func TestResolveServiceToolAllowlist_DenyListMode(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(&toolPolicyStubTool{name: "read_file"})
 	registry.Register(&toolPolicyStubTool{name: "exec"})
 
-	_, _, err := ResolveServiceToolAllowlist(registry, &ServiceToolPolicy{
+	allowed, explicit, err := ResolveServiceToolAllowlist(registry, &ServiceToolPolicy{
 		Mode:         "deny_list",
 		BlockedTools: []string{"exec"},
 	}, nil)
-	if err == nil || !strings.Contains(err.Error(), "unsupported tool_policy mode") {
-		t.Fatalf("expected deny_list to be rejected, got %v", err)
+	if err != nil {
+		t.Fatalf("ResolveServiceToolAllowlist: %v", err)
+	}
+	if !explicit {
+		t.Fatal("expected deny_list to produce an explicit restriction")
+	}
+	if len(allowed) != 1 || allowed[0] != "read_file" {
+		t.Fatalf("expected deny_list to remove exec, got %#v", allowed)
 	}
 }
 
@@ -76,13 +92,13 @@ func TestResolveServiceToolAllowlist_BlockedToolsAreValidatedButNotAppliedInAllo
 	}
 }
 
-func TestResolveServiceToolAllowlist_DenyDefaultAndLegacyFailure(t *testing.T) {
+func TestResolveServiceToolAllowlist_DefaultAllowAllAndLegacyFailure(t *testing.T) {
 	allowed, explicit, err := ResolveServiceToolAllowlist(nil, nil, nil)
 	if err != nil {
 		t.Fatalf("ResolveServiceToolAllowlist nil policy: %v", err)
 	}
-	if !explicit || len(allowed) != 0 {
-		t.Fatalf("expected nil policy to deny all with explicit restriction, got explicit=%v allowed=%#v", explicit, allowed)
+	if explicit || allowed != nil {
+		t.Fatalf("expected nil policy to allow all without restriction, got explicit=%v allowed=%#v", explicit, allowed)
 	}
 	if _, _, err := ResolveServiceToolAllowlist(nil, nil, []string{"read_file"}); err == nil || !strings.Contains(err.Error(), "tool_policy.mode is required") {
 		t.Fatalf("expected legacy allowed_tools without tool_policy to fail, got %v", err)

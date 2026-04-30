@@ -603,6 +603,36 @@ func TestDecodeServiceSubagentRequest_AcceptsSessionAndToolPolicyAliases(t *test
 	}
 }
 
+func TestDecodeServiceTurnRequest_AllowsDocumentedToolPolicyModes(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(serviceTestTool{name: "read_file"})
+	registry.Register(serviceTestTool{name: "exec"})
+
+	allowAll, err := decodeServiceTurnRequest(strings.NewReader(`{
+		"session_key":"svc:key",
+		"message":"hi",
+		"tool_policy":{"mode":"allow_all"}
+	}`), registry)
+	if err != nil {
+		t.Fatalf("decode allow_all: %v", err)
+	}
+	if allowAll.RestrictTools || len(allowAll.AllowedTools) != 0 {
+		t.Fatalf("expected allow_all to avoid tool restriction, got %#v", allowAll)
+	}
+
+	denyList, err := decodeServiceTurnRequest(strings.NewReader(`{
+		"session_key":"svc:key",
+		"message":"hi",
+		"tool_policy":{"mode":"deny_list","blocked_tools":["exec"]}
+	}`), registry)
+	if err != nil {
+		t.Fatalf("decode deny_list: %v", err)
+	}
+	if !denyList.RestrictTools || len(denyList.AllowedTools) != 1 || denyList.AllowedTools[0] != "read_file" {
+		t.Fatalf("expected deny_list to expose only read_file, got %#v", denyList)
+	}
+}
+
 func TestDecodeServiceTurnRequest_RejectsUnknownFieldsAndTrailingJSON(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(serviceTestTool{name: "read_file"})

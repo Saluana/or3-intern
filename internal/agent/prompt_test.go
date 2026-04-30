@@ -620,12 +620,26 @@ func TestStablePrefixIsByteStableAcrossTurns(t *testing.T) {
 func TestStablePrefixExcludesHeartbeatAndTriggerMetadata(t *testing.T) {
 	b := &Builder{HeartbeatText: "tick"}
 	stable := b.renderStablePrefix("(none)", "", "(none)", "", "", "", "")
-	if strings.Contains(stable, "Heartbeat") || strings.Contains(stable, "Structured Trigger Context") {
+	if strings.Contains(stable, "Heartbeat") || strings.Contains(stable, "Structured Trigger Context") || strings.Contains(stable, "Runtime Context") {
 		t.Fatalf("stable prefix must not include volatile heartbeat or trigger metadata: %q", stable)
 	}
 	volatile := b.renderVolatileSuffix("tick", "{\"event\":\"cron\"}")
-	if !strings.Contains(volatile, "Heartbeat") || !strings.Contains(volatile, "Structured Trigger Context") {
-		t.Fatalf("volatile suffix should include heartbeat and structured context: %q", volatile)
+	if !strings.Contains(volatile, "Heartbeat") || !strings.Contains(volatile, "Structured Trigger Context") || !strings.Contains(volatile, "Runtime Context") {
+		t.Fatalf("volatile suffix should include runtime, heartbeat, and structured context: %q", volatile)
+	}
+}
+
+func TestVolatileSuffixIncludesDateAndWorkingDirectory(t *testing.T) {
+	b := &Builder{WorkspaceDir: "/tmp/or3-workspace"}
+	volatile := b.renderVolatileSuffix("", "")
+	if !strings.Contains(volatile, "Runtime Context") {
+		t.Fatalf("expected runtime context section, got %q", volatile)
+	}
+	if !strings.Contains(volatile, time.Now().Format("2006-01-02")) {
+		t.Fatalf("expected current date in runtime context, got %q", volatile)
+	}
+	if !strings.Contains(volatile, "/tmp/or3-workspace") {
+		t.Fatalf("expected working directory in runtime context, got %q", volatile)
 	}
 }
 

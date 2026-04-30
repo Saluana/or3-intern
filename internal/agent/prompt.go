@@ -627,6 +627,9 @@ func (b *Builder) renderVolatileSuffix(heartbeatText, structuredContextText stri
 		text  string
 	}
 	var sections []section
+	if t := strings.TrimSpace(b.renderRuntimeContext()); t != "" {
+		sections = append(sections, section{title: "Runtime Context", text: truncateText(t, maxEach)})
+	}
 	if t := strings.TrimSpace(heartbeatText); t != "" {
 		sections = append(sections, section{title: "Heartbeat", text: truncateText(t, maxEach)})
 	}
@@ -645,6 +648,22 @@ func (b *Builder) renderVolatileSuffix(heartbeatText, structuredContextText stri
 		out.WriteString("\n\n")
 	}
 	return strings.TrimSpace(out.String())
+}
+
+func (b *Builder) renderRuntimeContext() string {
+	workingDir := strings.TrimSpace(b.WorkspaceDir)
+	if workingDir == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			workingDir = strings.TrimSpace(cwd)
+		}
+	}
+	if workingDir == "" {
+		workingDir = "(unknown)"
+	}
+	return strings.TrimSpace(strings.Join([]string{
+		"Current date: " + time.Now().Format("2006-01-02"),
+		"Working directory: " + workingDir,
+	}, "\n"))
 }
 
 func formatStructuredEventContext(meta map[string]any, max int) string {

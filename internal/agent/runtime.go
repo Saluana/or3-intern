@@ -53,14 +53,16 @@ var toolMarkupPatterns = []*regexp.Regexp{
 }
 
 var (
-	toolMarkupBlockPattern     = regexp.MustCompile(`(?is)<tool_call\b[^>]*>(.*?)</tool_call>`)
-	toolMarkupFunctionPattern  = regexp.MustCompile(`(?is)<function=([^>\s]+)>\s*`)
-	toolMarkupParameterPattern = regexp.MustCompile(`(?is)<parameter=([^>\s]+)>\s*`)
-	toolMarkupClosingPattern   = regexp.MustCompile(`(?is)</(?:parameter|function)>\s*$`)
-	dsmlToolCallsBlockPattern  = regexp.MustCompile(`(?is)<\s*[|｜]\s*DSML\s*[|｜]\s*tool_calls\s*>(.*?)<\s*/\s*[|｜]\s*DSML\s*[|｜]\s*tool_calls\s*>`)
-	dsmlInvokePattern          = regexp.MustCompile(`(?is)<\s*[|｜]\s*DSML\s*[|｜]\s*invoke\b([^>]*)>(.*?)<\s*/\s*[|｜]\s*DSML\s*[|｜]\s*invoke\s*>`)
-	dsmlParameterPattern       = regexp.MustCompile(`(?is)<\s*[|｜]\s*DSML\s*[|｜]\s*parameter\b([^>]*)>(.*?)<\s*/\s*[|｜]\s*DSML\s*[|｜]\s*parameter\s*>`)
-	markupNameAttrPattern      = regexp.MustCompile(`(?is)\bname\s*=\s*(?:"([^"]*)"|'([^']*)')`)
+	toolMarkupBlockPattern            = regexp.MustCompile(`(?is)<tool_call\b[^>]*>(.*?)</tool_call>`)
+	toolMarkupFunctionPattern         = regexp.MustCompile(`(?is)<function=([^>\s]+)>\s*`)
+	toolMarkupParameterPattern        = regexp.MustCompile(`(?is)<parameter=([^>\s]+)>\s*`)
+	toolMarkupClosingPattern          = regexp.MustCompile(`(?is)</(?:parameter|function)>\s*$`)
+	toolMarkupNameElementPattern      = regexp.MustCompile(`(?is)<name>\s*(.*?)\s*</name>`)
+	toolMarkupArgumentsElementPattern = regexp.MustCompile(`(?is)<arguments>\s*(.*?)\s*</arguments>`)
+	dsmlToolCallsBlockPattern         = regexp.MustCompile(`(?is)<\s*[|｜]\s*DSML\s*[|｜]\s*tool_calls\s*>(.*?)<\s*/\s*[|｜]\s*DSML\s*[|｜]\s*tool_calls\s*>`)
+	dsmlInvokePattern                 = regexp.MustCompile(`(?is)<\s*[|｜]\s*DSML\s*[|｜]\s*invoke\b([^>]*)>(.*?)<\s*/\s*[|｜]\s*DSML\s*[|｜]\s*invoke\s*>`)
+	dsmlParameterPattern              = regexp.MustCompile(`(?is)<\s*[|｜]\s*DSML\s*[|｜]\s*parameter\b([^>]*)>(.*?)<\s*/\s*[|｜]\s*DSML\s*[|｜]\s*parameter\s*>`)
+	markupNameAttrPattern             = regexp.MustCompile(`(?is)\bname\s*=\s*(?:"([^"]*)"|'([^']*)')`)
 )
 
 type trustedToolAccessContextKey struct{}
@@ -921,17 +923,8 @@ func parseToolMarkupCalls(text string, idPrefix string) []providers.ToolCall {
 			continue
 		}
 		block := match[1]
-		functionMatch := toolMarkupFunctionPattern.FindStringSubmatch(block)
-		if len(functionMatch) < 2 {
-			continue
-		}
-		name := strings.TrimSpace(html.UnescapeString(functionMatch[1]))
-		if name == "" {
-			continue
-		}
-		params := parseToolMarkupParams(block)
-		args, err := json.Marshal(params)
-		if err != nil {
+		name, args, ok := parseToolMarkupBlock(block)
+		if !ok {
 			continue
 		}
 		index := len(out)
@@ -941,7 +934,7 @@ func parseToolMarkupCalls(text string, idPrefix string) []providers.ToolCall {
 			Type:  "function",
 		}
 		tc.Function.Name = name
-		tc.Function.Arguments = string(args)
+		tc.Function.Arguments = args
 		out = append(out, tc)
 	}
 	for _, match := range dsmlToolCallsBlockPattern.FindAllStringSubmatch(text, -1) {
@@ -951,6 +944,70 @@ func parseToolMarkupCalls(text string, idPrefix string) []providers.ToolCall {
 		out = append(out, parseDSMLToolMarkupCalls(match[1], idPrefix, len(out))...)
 	}
 	return out
+}
+
+func parseToolMarkupBlock(block string) (string, string, bool) {
+	block = strings.TrimSpace(html.UnescapeString(block))
+	if block == "" {
+		return "", "", false
+	}
+	var object map[string]any
+	if err := json.Unmarshal([]byte(block), &object); err == nil {
+		name := strings.TrimSpace(fmt.Sprint(object["name"]))
+		if name == "" {
+			return "", "", false
+		}
+		args := object["arguments"]
+		if args == nil {
+			args = map[string]any{}
+		}
+		encoded, err := json.Marshal(args)
+		if err != nil {
+			return "", "", false
+		}
+		return name, string(encoded), true
+	}
+	if nameMatch := toolMarkupNameElementPattern.FindStringSubmatch(block); len(nameMatch) >= 2 {
+		name := strings.TrimSpace(html.UnescapeString(nameMatch[1]))
+		if name == "" {
+			return "", "", false
+		}
+		args := "{}"
+		if argsMatch := toolMarkupArgumentsElementPattern.FindStringSubmatch(block); len(argsMatch) >= 2 {
+			argText := strings.TrimSpace(html.UnescapeString(argsMatch[1]))
+			if argText != "" {
+				var parsed any
+				if err := json.Unmarshal([]byte(argText), &parsed); err == nil {
+					encoded, err := json.Marshal(parsed)
+					if err != nil {
+						return "", "", false
+					}
+					args = string(encoded)
+				} else {
+					encoded, err := json.Marshal(map[string]any{"value": argText})
+					if err != nil {
+						return "", "", false
+					}
+					args = string(encoded)
+				}
+			}
+		}
+		return name, args, true
+	}
+	functionMatch := toolMarkupFunctionPattern.FindStringSubmatch(block)
+	if len(functionMatch) < 2 {
+		return "", "", false
+	}
+	name := strings.TrimSpace(html.UnescapeString(functionMatch[1]))
+	if name == "" {
+		return "", "", false
+	}
+	params := parseToolMarkupParams(block)
+	args, err := json.Marshal(params)
+	if err != nil {
+		return "", "", false
+	}
+	return name, string(args), true
 }
 
 func parseDSMLToolMarkupCalls(block string, idPrefix string, offset int) []providers.ToolCall {

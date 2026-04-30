@@ -291,6 +291,98 @@ func TestRuntime_Handle_XMLToolCallMarkupExecutesTool(t *testing.T) {
 	}
 }
 
+func TestRuntime_Handle_JSONToolCallMarkupExecutesTool(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	tool := &requiredTextTool{}
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		if callCount == 1 {
+			_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","content":"<tool_call>{\"name\":\"required_text_tool\",\"arguments\":{\"text\":\"hello from json markup\"}}</tool_call>"}}]}`)
+			return
+		}
+		var req providers.ChatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if len(req.Messages) < 2 || req.Messages[len(req.Messages)-1].Role != "tool" {
+			t.Fatalf("expected tool result in follow-up request, got %#v", req.Messages)
+		}
+		_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","content":"final after json markup tool"}}]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	provider := providers.New(srv.URL, "test-key", 10*time.Second)
+	provider.HTTP = srv.Client()
+	deliver := &mockDeliverer{}
+	rt := buildSimpleRuntime(t, provider, d, deliver)
+	rt.Tools.Register(tool)
+
+	err := rt.Handle(context.Background(), bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess-json-markup-tool",
+		Channel:    "cli",
+		From:       "user",
+		Message:    "use json markup tool",
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if !tool.called {
+		t.Fatal("expected JSON tool call markup to execute the tool")
+	}
+	if len(deliver.messages) != 1 || deliver.messages[0] != "final after json markup tool" {
+		t.Fatalf("expected final response after tool, got %#v", deliver.messages)
+	}
+}
+
+func TestRuntime_Handle_NameArgumentsToolCallMarkupExecutesTool(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	tool := &requiredTextTool{}
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		if callCount == 1 {
+			_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","content":"<tool_call><name>required_text_tool</name><arguments>{\"text\":\"hello from name args markup\"}</arguments></tool_call>"}}]}`)
+			return
+		}
+		var req providers.ChatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if len(req.Messages) < 2 || req.Messages[len(req.Messages)-1].Role != "tool" {
+			t.Fatalf("expected tool result in follow-up request, got %#v", req.Messages)
+		}
+		_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","content":"final after name args markup tool"}}]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	provider := providers.New(srv.URL, "test-key", 10*time.Second)
+	provider.HTTP = srv.Client()
+	deliver := &mockDeliverer{}
+	rt := buildSimpleRuntime(t, provider, d, deliver)
+	rt.Tools.Register(tool)
+
+	err := rt.Handle(context.Background(), bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess-name-args-markup-tool",
+		Channel:    "cli",
+		From:       "user",
+		Message:    "use name args markup tool",
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if !tool.called {
+		t.Fatal("expected name/arguments tool call markup to execute the tool")
+	}
+	if len(deliver.messages) != 1 || deliver.messages[0] != "final after name args markup tool" {
+		t.Fatalf("expected final response after tool, got %#v", deliver.messages)
+	}
+}
+
 func TestRuntime_Handle_UnavailableLegacyToolMarkupRetriesWithoutToolError(t *testing.T) {
 	d := openRuntimeTestDB(t)
 	callCount := 0

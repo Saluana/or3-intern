@@ -9,12 +9,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
 type FileTool struct {
 	Base
-	Root string // allowed root (optional)
+	Root      string // allowed read root (optional)
+	WriteRoot string // allowed write root (optional; falls back to Root)
 }
 
 const (
@@ -23,6 +25,14 @@ const (
 )
 
 func (t *FileTool) safePath(p string) (string, error) {
+	return t.safePathForRoot(p, t.Root)
+}
+
+func (t *FileTool) safeWritePath(p string) (string, error) {
+	return t.safePathForRoot(p, t.effectiveWriteRoot())
+}
+
+func (t *FileTool) safePathForRoot(p, rootPath string) (string, error) {
 	if strings.TrimSpace(p) == "" {
 		return "", errors.New("missing path")
 	}
@@ -34,8 +44,8 @@ func (t *FileTool) safePath(p string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if t.Root != "" {
-		root, err := filepath.Abs(t.Root)
+	if rootPath != "" {
+		root, err := filepath.Abs(rootPath)
 		if err != nil {
 			return "", err
 		}
@@ -52,10 +62,25 @@ func (t *FileTool) safePath(p string) (string, error) {
 }
 
 func (t *FileTool) validatePathInRoot(abs string) error {
-	if t.Root == "" {
+	return validatePathInRoot(t.Root, abs)
+}
+
+func (t *FileTool) validatePathInWriteRoot(abs string) error {
+	return validatePathInRoot(t.effectiveWriteRoot(), abs)
+}
+
+func (t *FileTool) effectiveWriteRoot() string {
+	if strings.TrimSpace(t.WriteRoot) != "" {
+		return t.WriteRoot
+	}
+	return t.Root
+}
+
+func validatePathInRoot(rootPath, abs string) error {
+	if rootPath == "" {
 		return nil
 	}
-	root, err := filepath.Abs(t.Root)
+	root, err := filepath.Abs(rootPath)
 	if err != nil {
 		return err
 	}
@@ -101,7 +126,7 @@ func (t *FileTool) openSafeWrite(path string, perm os.FileMode) (*os.File, error
 		f.Close()
 		return nil, err
 	}
-	if err := t.validateOpenedPath(path, info); err != nil {
+	if err := t.validateOpenedWritePath(path, info); err != nil {
 		f.Close()
 		return nil, err
 	}
@@ -120,7 +145,22 @@ func (t *FileTool) validateOpenedPath(path string, openedInfo os.FileInfo) error
 	if err := t.validatePathInRoot(path); err != nil {
 		return err
 	}
-	currentInfo, err := os.Stat(path)
+	return validateOpenedPathUnchanged(path, openedInfo)
+}
+
+func (t *FileTool) validateOpenedWritePath(path string, openedInfo os.FileInfo) error {
+	if err := t.validatePathInWriteRoot(path); err != nil {
+		return err
+	}
+	return validateOpenedPathUnchanged(path, openedInfo)
+}
+
+func validateOpenedPathUnchanged(path string, openedInfo os.FileInfo) error {
+	resolved, err := canonicalizePath(path)
+	if err != nil {
+		return err
+	}
+	currentInfo, err := os.Stat(resolved)
 	if err != nil {
 		return err
 	}
@@ -170,8 +210,10 @@ func canonicalizePath(abs string) (string, error) {
 
 type ReadFile struct{ FileTool }
 
-func (t *ReadFile) Name() string        { return "read_file" }
-func (t *ReadFile) Description() string { return "Read a UTF-8 text file." }
+func (t *ReadFile) Name() string { return "read_file" }
+func (t *ReadFile) Description() string {
+	return "Read a UTF-8 text file. Prefer outline, grep, or range for targeted inspection; use full only when narrower modes are not enough."
+}
 func (t *ReadFile) CapabilityForParams(params map[string]any) CapabilityLevel {
 	if strings.EqualFold(strings.TrimSpace(fmt.Sprint(params["mode"])), "full") {
 		return CapabilityGuarded
@@ -260,7 +302,7 @@ type SearchFile struct{ FileTool }
 
 func (t *SearchFile) Name() string { return "search_file" }
 func (t *SearchFile) Description() string {
-	return "Search a UTF-8 text file and return bounded matching lines."
+	return "Search a UTF-8 text file and return bounded matching lines. Use this when you know a pattern and do not need a broader file read."
 }
 func (t *SearchFile) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
@@ -294,7 +336,9 @@ type WriteFile struct{ FileTool }
 
 func (t *WriteFile) Capability() CapabilityLevel { return CapabilityGuarded }
 func (t *WriteFile) Name() string                { return "write_file" }
-func (t *WriteFile) Description() string         { return "Write text to a file (overwrites)." }
+func (t *WriteFile) Description() string {
+	return "Write or replace a text file. Prefer edit_file for local changes to an existing file; use mkdirs only when intentionally creating a new path."
+}
 func (t *WriteFile) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
 		"path":    map[string]any{"type": "string"},
@@ -306,7 +350,7 @@ func (t *WriteFile) Schema() map[string]any {
 	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
 }
 func (t *WriteFile) Execute(ctx context.Context, params map[string]any) (string, error) {
-	p, err := t.safePath(fmt.Sprint(params["path"]))
+	p, err := t.safeWritePath(fmt.Sprint(params["path"]))
 	if err != nil {
 		return "", err
 	}
@@ -333,7 +377,7 @@ type EditFile struct{ FileTool }
 func (t *EditFile) Capability() CapabilityLevel { return CapabilityGuarded }
 func (t *EditFile) Name() string                { return "edit_file" }
 func (t *EditFile) Description() string {
-	return "Edit a text file by applying a list of find/replace operations."
+	return "Edit an existing text file by applying find/replace operations. Prefer this over write_file for localized changes."
 }
 func (t *EditFile) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
@@ -353,7 +397,7 @@ func (t *EditFile) Schema() map[string]any {
 	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
 }
 func (t *EditFile) Execute(ctx context.Context, params map[string]any) (string, error) {
-	p, err := t.safePath(fmt.Sprint(params["path"]))
+	p, err := t.safeWritePath(fmt.Sprint(params["path"]))
 	if err != nil {
 		return "", err
 	}
@@ -398,12 +442,14 @@ func (t *EditFile) Execute(ctx context.Context, params map[string]any) (string, 
 
 type ListDir struct{ FileTool }
 
-func (t *ListDir) Name() string        { return "list_dir" }
-func (t *ListDir) Description() string { return "List directory entries." }
+func (t *ListDir) Name() string { return "list_dir" }
+func (t *ListDir) Description() string {
+	return "List files and folders in a directory without recursion. Use this before read_file when navigating an unfamiliar tree."
+}
 func (t *ListDir) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
-		"path": map[string]any{"type": "string"},
-		"max":  map[string]any{"type": "integer"},
+		"path": map[string]any{"type": "string", "description": "Directory path to list"},
+		"max":  map[string]any{"type": "integer", "description": "Maximum entries to return (default 80)"},
 	}, "required": []string{"path"}}
 }
 func (t *ListDir) Schema() map[string]any {
@@ -414,19 +460,29 @@ func (t *ListDir) Execute(ctx context.Context, params map[string]any) (string, e
 	if err != nil {
 		return "", err
 	}
-	f, _, err := t.openSafeRead(p)
+	f, info, err := t.openSafeRead(p)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
-	ents, err := f.ReadDir(-1)
-	if err != nil {
+	if !info.IsDir() {
+		return "", fmt.Errorf("path is not a directory: %s", p)
+	}
+	max := intParam(params, "max", defaultListDirMaxEntries)
+	ents, err := f.ReadDir(max + 1)
+	if err != nil && !errors.Is(err, io.EOF) {
 		return "", err
 	}
-	max := defaultListDirMaxEntries
-	if v, ok := params["max"].(float64); ok && int(v) > 0 {
-		max = int(v)
+	truncated := len(ents) > max
+	if truncated {
+		ents = ents[:max]
 	}
+	sort.Slice(ents, func(i, j int) bool {
+		if ents[i].IsDir() != ents[j].IsDir() {
+			return ents[i].IsDir()
+		}
+		return ents[i].Name() < ents[j].Name()
+	})
 	type entry struct {
 		Name  string `json:"name"`
 		IsDir bool   `json:"isDir"`
@@ -448,14 +504,13 @@ func (t *ListDir) Execute(ctx context.Context, params map[string]any) (string, e
 	return EncodeToolResult(ToolResult{
 		Kind:    "list_dir",
 		OK:      true,
-		Summary: fmt.Sprintf("Listed %d of %d entries in %s", len(out), len(ents), p),
+		Summary: fmt.Sprintf("Listed %d entries in %s", len(out), p),
 		Preview: string(b),
 		Stats: map[string]any{
 			"path":      p,
 			"returned":  len(out),
-			"total":     len(ents),
 			"max":       max,
-			"truncated": len(ents) > len(out),
+			"truncated": truncated,
 		},
 	}), nil
 }

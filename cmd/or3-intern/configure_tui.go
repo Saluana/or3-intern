@@ -931,7 +931,7 @@ func renderSummaryPanelMode(styles configureStyles, cfg config.Config, hint stri
 		fmt.Sprintf("%s %s", styles.label.Render("Provider:"), styles.value.Render(providerSummary)),
 		fmt.Sprintf("%s %s", styles.label.Render("Storage:"), styles.value.Render(cfg.DBPath+" · "+cfg.ArtifactsDir)),
 		fmt.Sprintf("%s %s", styles.label.Render("Runtime:"), styles.value.Render(fmt.Sprintf("session=%s · workers=%d · history=%d", cfg.DefaultSessionKey, cfg.WorkerCount, cfg.HistoryMax))),
-		fmt.Sprintf("%s %s", styles.label.Render("Workspace:"), styles.value.Render(fmt.Sprintf("restrict=%t · %s", cfg.Tools.RestrictToWorkspace, emptyAsNone(cfg.WorkspaceDir)))),
+		fmt.Sprintf("%s %s", styles.label.Render("Workspace:"), styles.value.Render(fmt.Sprintf("restrict=%t · fullRead=%t · %s", cfg.Tools.RestrictToWorkspace, cfg.Tools.AllowFullFileRead, emptyAsNone(cfg.WorkspaceDir)))),
 		fmt.Sprintf("%s %s", styles.label.Render("Tools:"), styles.value.Render(fmt.Sprintf("Brave=%t · exec=%ds · proxy=%s", strings.TrimSpace(cfg.Tools.BraveAPIKey) != "", cfg.Tools.ExecTimeoutSeconds, emptyAsNone(cfg.Tools.WebProxy)))),
 		fmt.Sprintf("%s %s", styles.label.Render("Security:"), styles.value.Render(fmt.Sprintf("approvals=%t · guarded=%t · network=%t", cfg.Security.Approvals.Enabled, cfg.Hardening.GuardedTools, cfg.Security.Network.Enabled))),
 		fmt.Sprintf("%s %s", styles.label.Render("Skills:"), styles.value.Render(fmt.Sprintf("exec=%t · watch=%t · quarantine=%t", cfg.Skills.EnableExec, cfg.Skills.Load.Watch, cfg.Skills.Policy.QuarantineByDefault))),
@@ -1017,7 +1017,7 @@ func sectionStatus(cfg config.Config, section string) string {
 	case "context":
 		return fmt.Sprintf("mode=%s · maxInput=%d · dynamicTools=%t", cfg.Context.Mode, cfg.Context.MaxInputTokens, cfg.Context.Tools.DynamicExpose)
 	case "workspace":
-		return fmt.Sprintf("restrict=%t · %s", cfg.Tools.RestrictToWorkspace, emptyAsNone(cfg.WorkspaceDir))
+		return fmt.Sprintf("restrict=%t · fullRead=%t · %s", cfg.Tools.RestrictToWorkspace, cfg.Tools.AllowFullFileRead, emptyAsNone(cfg.WorkspaceDir))
 	case "tools":
 		return fmt.Sprintf("Brave=%t · exec=%ds", strings.TrimSpace(cfg.Tools.BraveAPIKey) != "", cfg.Tools.ExecTimeoutSeconds)
 	case "docindex":
@@ -1169,6 +1169,7 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 		}
 		return []configureField{
 			{Key: "workspace_restrict", Label: "Restrict file tools", Description: "Keep file tools inside the selected workspace.", Kind: configureFieldToggle, Value: onOff(cfg.Tools.RestrictToWorkspace)},
+			{Key: "workspace_allow_full_read", Label: "Read outside workspace", Description: "Allow read/list/search across the computer while writes stay in the workspace.", Kind: configureFieldToggle, Value: onOff(cfg.Tools.AllowFullFileRead)},
 			{Key: "workspace_dir", Label: "Workspace directory", Description: "Project root for workspace-restricted file tools.", Kind: configureFieldText, Value: workspace, EmptyHint: cwd},
 			{Key: "workspace_allowed_dir", Label: "Allowed directory", Description: "Optional additional allowed root used by some flows and integrations.", Kind: configureFieldText, Value: cfg.AllowedDir, EmptyHint: cwd},
 		}
@@ -1200,6 +1201,8 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 			{Key: "skills_trusted_owners", Label: "Trusted owners", Description: "Comma-separated owners trusted by default.", Kind: configureFieldText, Value: strings.Join(cfg.Skills.Policy.TrustedOwners, ","), EmptyHint: "your-org"},
 			{Key: "skills_blocked_owners", Label: "Blocked owners", Description: "Comma-separated owners blocked from install/use.", Kind: configureFieldText, Value: strings.Join(cfg.Skills.Policy.BlockedOwners, ","), EmptyHint: "untrusted-owner"},
 			{Key: "skills_trusted_registries", Label: "Trusted registries", Description: "Comma-separated trusted skill registries.", Kind: configureFieldText, Value: strings.Join(cfg.Skills.Policy.TrustedRegistries, ","), EmptyHint: "https://clawhub.ai"},
+			{Key: "skills_global_dir", Label: "Global skills directory", Description: "Shared user-level skills scanned for every OR3 agent.", Kind: configureFieldText, Value: cfg.Skills.Load.GlobalDir, EmptyHint: "~/.agents/skills"},
+			{Key: "skills_global_disabled", Label: "Disable global skills", Description: "Stop scanning the shared user-level skills directory.", Kind: configureFieldToggle, Value: onOff(cfg.Skills.Load.DisableGlobalDir)},
 			{Key: "skills_extra_dirs", Label: "Extra directories", Description: "Comma-separated directories scanned for skills.", Kind: configureFieldText, Value: strings.Join(cfg.Skills.Load.ExtraDirs, ","), EmptyHint: "vendor/skills"},
 			{Key: "skills_watch", Label: "Watch skill directories", Description: "Reload skills automatically when files change.", Kind: configureFieldToggle, Value: onOff(cfg.Skills.Load.Watch)},
 			{Key: "skills_watch_debounce", Label: "Watch debounce ms", Description: "Delay before reloading changed skill files.", Kind: configureFieldText, Value: formatInt(cfg.Skills.Load.WatchDebounceMS), EmptyHint: "250"},
@@ -1267,11 +1270,16 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 			{Key: "hardening_sandbox_bwrap", Label: "Bubblewrap path", Description: "Path to the bubblewrap executable.", Kind: configureFieldText, Value: cfg.Hardening.Sandbox.BubblewrapPath, EmptyHint: "bwrap"},
 			{Key: "hardening_sandbox_allow_network", Label: "Sandbox allow network", Description: "Permit outbound networking from inside the sandbox.", Kind: configureFieldToggle, Value: onOff(cfg.Hardening.Sandbox.AllowNetwork)},
 			{Key: "hardening_sandbox_writable_paths", Label: "Sandbox writable paths", Description: "Comma-separated writable paths made available inside the sandbox.", Kind: configureFieldText, Value: strings.Join(cfg.Hardening.Sandbox.WritablePaths, ","), EmptyHint: "/tmp,/var/tmp"},
-			{Key: "hardening_quotas_enabled", Label: "Enable hardening quotas", Description: "Enforce per-turn quotas on sensitive tool categories.", Kind: configureFieldToggle, Value: onOff(cfg.Hardening.Quotas.Enabled)},
-			{Key: "hardening_max_tool_calls", Label: "Max tool calls", Description: "Total tool-call quota per turn.", Kind: configureFieldText, Value: formatInt(cfg.Hardening.Quotas.MaxToolCalls), EmptyHint: "16"},
-			{Key: "hardening_max_exec_calls", Label: "Max exec calls", Description: "Exec-call quota per turn.", Kind: configureFieldText, Value: formatInt(cfg.Hardening.Quotas.MaxExecCalls), EmptyHint: "2"},
-			{Key: "hardening_max_web_calls", Label: "Max web calls", Description: "Web-call quota per turn.", Kind: configureFieldText, Value: formatInt(cfg.Hardening.Quotas.MaxWebCalls), EmptyHint: "4"},
-			{Key: "hardening_max_subagent_calls", Label: "Max subagent calls", Description: "Subagent-call quota per turn.", Kind: configureFieldText, Value: formatInt(cfg.Hardening.Quotas.MaxSubagentCalls), EmptyHint: "2"},
+			{Key: "hardening_quotas_enabled", Label: "Enable hardening quotas", Description: "Enforce per-message and per-session quotas on sensitive tool categories.", Kind: configureFieldToggle, Value: onOff(cfg.Hardening.Quotas.Enabled)},
+			{Key: "hardening_quota_exceeded_action", Label: "Quota exceeded action", Description: "What to do when a quota is reached: ask or fail.", Kind: configureFieldText, Value: string(cfg.Hardening.Quotas.ExceededAction), EmptyHint: "ask"},
+			{Key: "hardening_max_tool_calls", Label: "Max tool calls per message", Description: "Total tool-call quota per message.", Kind: configureFieldText, Value: formatInt(cfg.Hardening.Quotas.MaxToolCalls), EmptyHint: "16"},
+			{Key: "hardening_max_exec_calls", Label: "Max exec calls per message", Description: "Exec-call quota per message.", Kind: configureFieldText, Value: formatInt(cfg.Hardening.Quotas.MaxExecCalls), EmptyHint: "2"},
+			{Key: "hardening_max_web_calls", Label: "Max web calls per message", Description: "Web-call quota per message.", Kind: configureFieldText, Value: formatInt(cfg.Hardening.Quotas.MaxWebCalls), EmptyHint: "4"},
+			{Key: "hardening_max_subagent_calls", Label: "Max subagent calls per message", Description: "Subagent-call quota per message.", Kind: configureFieldText, Value: formatInt(cfg.Hardening.Quotas.MaxSubagentCalls), EmptyHint: "2"},
+			{Key: "hardening_max_session_tool_calls", Label: "Max tool calls per session", Description: "Total tool-call quota per session.", Kind: configureFieldText, Value: formatInt(cfg.Hardening.Quotas.MaxSessionToolCalls), EmptyHint: "256"},
+			{Key: "hardening_max_session_exec_calls", Label: "Max exec calls per session", Description: "Exec-call quota per session.", Kind: configureFieldText, Value: formatInt(cfg.Hardening.Quotas.MaxSessionExecCalls), EmptyHint: "32"},
+			{Key: "hardening_max_session_web_calls", Label: "Max web calls per session", Description: "Web-call quota per session.", Kind: configureFieldText, Value: formatInt(cfg.Hardening.Quotas.MaxSessionWebCalls), EmptyHint: "64"},
+			{Key: "hardening_max_session_subagent_calls", Label: "Max subagent calls per session", Description: "Subagent-call quota per session.", Kind: configureFieldText, Value: formatInt(cfg.Hardening.Quotas.MaxSessionSubagentCalls), EmptyHint: "16"},
 		}
 	case "session":
 		return []configureField{
@@ -1425,6 +1433,7 @@ var helpfulSectionFieldDescriptions = map[string]string{
 	"context_manager_allow_task_updates":    "Allows the context manager helper to suggest updates to the active task card. Warning: bad suggestions can make the task summary less accurate.",
 	"context_manager_allow_stale_propose":   "Allows context-manager suggestions even if they may be based on slightly older state. Leave on for responsiveness; turn off if you prefer stricter freshness.",
 	"workspace_restrict":                    "Keeps file tools inside the selected workspace folder. Strongly recommended. Warning: turning this off may let OR3 read or write outside this project when tools allow it.",
+	"workspace_allow_full_read":             "Lets OR3 read, list, and search files outside the workspace while write and edit tools remain restricted to the workspace.",
 	"workspace_dir":                         "The main folder OR3 should treat as your project. File tools and document indexing usually work relative to this folder.",
 	"workspace_allowed_dir":                 "Optional extra folder OR3 may access. Leave blank unless you intentionally need a second allowed location.",
 	"tools_brave":                           "Secret key for Brave web search. Leave blank if you do not use Brave search. Warning: removing it disables that search provider.",
@@ -1447,6 +1456,8 @@ var helpfulSectionFieldDescriptions = map[string]string{
 	"skills_trusted_owners":                 "Skill publishers trusted by default. Warning: trusting an owner can trust future skills from that owner.",
 	"skills_blocked_owners":                 "Skill publishers OR3 should refuse to install or use. Use this to block sources you do not trust.",
 	"skills_trusted_registries":             "Skill registries OR3 may trust. Warning: only add registries you control or trust.",
+	"skills_global_dir":                     "Shared user-level folder scanned for skills available to every OR3 agent. Defaults to ~/.agents/skills.",
+	"skills_global_disabled":                "Turns off the shared ~/.agents/skills scan without deleting any installed skills.",
 	"skills_extra_dirs":                     "Additional local folders scanned for skills. Warning: skills in these folders may become available to OR3.",
 	"skills_watch":                          "Automatically reloads skills when files change. Useful during development; turn off if you want changes to require restart.",
 	"skills_watch_debounce":                 "Delay before reloading changed skill files. Higher values avoid repeated reloads while files are still being saved.",
@@ -1502,11 +1513,16 @@ var helpfulSectionFieldDescriptions = map[string]string{
 	"hardening_sandbox_bwrap":               "Path to the bubblewrap sandbox program. Warning: a wrong path can make sandboxed command execution fail.",
 	"hardening_sandbox_allow_network":       "Allows sandboxed commands to use the network. Warning: leaving this on can let commands download or upload data.",
 	"hardening_sandbox_writable_paths":      "Folders sandboxed commands may write to. Warning: only include folders you are comfortable letting commands modify.",
-	"hardening_quotas_enabled":              "Limits how many sensitive tool calls OR3 can make per request. Recommended to prevent runaway tool use.",
-	"hardening_max_tool_calls":              "Maximum total tool calls for one request. Higher values allow bigger jobs but can run longer and cost more.",
-	"hardening_max_exec_calls":              "Maximum command-execution calls for one request. Keep low unless you regularly need multi-step command workflows.",
-	"hardening_max_web_calls":               "Maximum web calls for one request. Higher values allow broader research but can be slower and noisier.",
-	"hardening_max_subagent_calls":          "Maximum helper-agent starts for one request. Higher values can multiply cost and background work.",
+	"hardening_quotas_enabled":              "Limits how many sensitive tool calls OR3 can make per message and per session. Recommended to prevent runaway tool use.",
+	"hardening_quota_exceeded_action":       "What happens when a quota is reached. Use ask to create an approval request, or fail to stop immediately.",
+	"hardening_max_tool_calls":              "Maximum total tool calls for one message. Higher values allow bigger jobs but can run longer and cost more.",
+	"hardening_max_exec_calls":              "Maximum command-execution calls for one message. Keep low unless you regularly need multi-step command workflows.",
+	"hardening_max_web_calls":               "Maximum web calls for one message. Higher values allow broader research but can be slower and noisier.",
+	"hardening_max_subagent_calls":          "Maximum helper-agent starts for one message. Higher values can multiply cost and background work.",
+	"hardening_max_session_tool_calls":      "Maximum total tool calls across one session before approval or failure.",
+	"hardening_max_session_exec_calls":      "Maximum command-execution calls across one session before approval or failure.",
+	"hardening_max_session_web_calls":       "Maximum web calls across one session before approval or failure.",
+	"hardening_max_session_subagent_calls":  "Maximum helper-agent starts across one session before approval or failure.",
 	"session_direct_messages_share_default": "Makes direct messages share the default memory/session scope. Warning: turn off if different people or channels should not share context.",
 	"session_identity_links":                "Maps multiple channel identities to one person or workspace identity. Warning: wrong links can merge separate users' context.",
 	"automation_cron_enabled":               "Enables saved scheduled jobs. Warning: scheduled jobs can cause OR3 to act later without you actively typing a request.",
@@ -1992,6 +2008,9 @@ func applyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 	case "skills_trusted_registries":
 		cfg.Skills.Policy.TrustedRegistries = splitAndCompact(value)
 		return true, nil
+	case "skills_global_dir":
+		cfg.Skills.Load.GlobalDir = value
+		return true, nil
 	case "skills_extra_dirs":
 		cfg.Skills.Load.ExtraDirs = splitAndCompact(value)
 		return true, nil
@@ -2074,6 +2093,13 @@ func applyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 	case "hardening_sandbox_writable_paths":
 		cfg.Hardening.Sandbox.WritablePaths = splitAndCompact(value)
 		return true, nil
+	case "hardening_quota_exceeded_action":
+		action := config.QuotaExceededAction(strings.ToLower(strings.TrimSpace(value)))
+		if action != config.QuotaExceededActionAsk && action != config.QuotaExceededActionFail {
+			return false, fmt.Errorf("%s must be ask or fail", fieldKey)
+		}
+		cfg.Hardening.Quotas.ExceededAction = action
+		return true, nil
 	case "hardening_max_tool_calls":
 		return setIntValue(&cfg.Hardening.Quotas.MaxToolCalls, value, fieldKey)
 	case "hardening_max_exec_calls":
@@ -2082,6 +2108,14 @@ func applyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 		return setIntValue(&cfg.Hardening.Quotas.MaxWebCalls, value, fieldKey)
 	case "hardening_max_subagent_calls":
 		return setIntValue(&cfg.Hardening.Quotas.MaxSubagentCalls, value, fieldKey)
+	case "hardening_max_session_tool_calls":
+		return setIntValue(&cfg.Hardening.Quotas.MaxSessionToolCalls, value, fieldKey)
+	case "hardening_max_session_exec_calls":
+		return setIntValue(&cfg.Hardening.Quotas.MaxSessionExecCalls, value, fieldKey)
+	case "hardening_max_session_web_calls":
+		return setIntValue(&cfg.Hardening.Quotas.MaxSessionWebCalls, value, fieldKey)
+	case "hardening_max_session_subagent_calls":
+		return setIntValue(&cfg.Hardening.Quotas.MaxSessionSubagentCalls, value, fieldKey)
 	case "session_identity_links":
 		links, err := parseIdentityLinks(value)
 		if err != nil {
@@ -2170,12 +2204,16 @@ func setToggleFieldValue(cfg *config.Config, section, channel, fieldKey string, 
 		cfg.ContextManager.AllowStalePropose = value
 	case "workspace_restrict":
 		cfg.Tools.RestrictToWorkspace = value
+	case "workspace_allow_full_read":
+		cfg.Tools.AllowFullFileRead = value
 	case "docindex_enabled":
 		cfg.DocIndex.Enabled = value
 	case "skills_enable_exec":
 		cfg.Skills.EnableExec = value
 	case "skills_quarantine":
 		cfg.Skills.Policy.QuarantineByDefault = value
+	case "skills_global_disabled":
+		cfg.Skills.Load.DisableGlobalDir = value
 	case "skills_watch":
 		cfg.Skills.Load.Watch = value
 	case "auth_enabled":

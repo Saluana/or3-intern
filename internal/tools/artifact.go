@@ -16,7 +16,7 @@ type ReadArtifact struct {
 
 func (t *ReadArtifact) Name() string { return "read_artifact" }
 func (t *ReadArtifact) Description() string {
-	return "Fetch bounded artifact content by artifact ID for the current authorized session."
+	return "Read bounded artifact content by artifact_id from an earlier tool result. Use this when a prior tool spilled large output into an artifact."
 }
 func (t *ReadArtifact) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{

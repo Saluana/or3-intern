@@ -367,6 +367,40 @@ func TestBroker_AddAllowlist_RejectsEmptyMatchers(t *testing.T) {
 	}
 }
 
+func TestBroker_EvaluateToolQuota_AsksAndAcceptsApprovedToken(t *testing.T) {
+	broker, cleanup := newTestBroker(t, nil)
+	defer cleanup()
+
+	input := ToolQuotaEvaluation{
+		Scope:     "session",
+		LimitName: "web_calls",
+		ToolName:  "web_search",
+		Current:   64,
+		Limit:     64,
+		AgentID:   "agent-1",
+		SessionID: "session-1",
+	}
+	first, err := broker.EvaluateToolQuota(context.Background(), input, config.ApprovalModeAsk)
+	if err != nil {
+		t.Fatalf("EvaluateToolQuota first: %v", err)
+	}
+	if !first.RequiresApproval || first.RequestID == 0 {
+		t.Fatalf("expected quota approval request, got %#v", first)
+	}
+	issued, err := broker.ApproveRequest(context.Background(), first.RequestID, "cli:test", false, "continue")
+	if err != nil {
+		t.Fatalf("ApproveRequest: %v", err)
+	}
+	input.ApprovalToken = issued.Token
+	retry, err := broker.EvaluateToolQuota(context.Background(), input, config.ApprovalModeAsk)
+	if err != nil {
+		t.Fatalf("EvaluateToolQuota retry: %v", err)
+	}
+	if !retry.Allowed {
+		t.Fatalf("expected approved quota token to allow retry, got %#v", retry)
+	}
+}
+
 func TestBroker_DenyRequest_RejectsAlreadyApprovedRequest(t *testing.T) {
 	broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
 		cfg.Exec.Mode = config.ApprovalModeAsk

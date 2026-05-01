@@ -188,6 +188,46 @@ func TestScanWithOptions_ParseErrorDoesNotBreakInventory(t *testing.T) {
 	}
 }
 
+func TestScanWithOptions_UsesProvidedEnvPathForBinaryChecks(t *testing.T) {
+	root := t.TempDir()
+	binDir := t.TempDir()
+	required := "skill-bin"
+	script := "#!/bin/sh\nexit 0\n"
+	if runtime.GOOS == "windows" {
+		script = "@echo off\r\nexit /b 0\r\n"
+	}
+	executableName := required
+	if runtime.GOOS == "windows" {
+		executableName += ".cmd"
+	}
+	if err := os.WriteFile(filepath.Join(binDir, executableName), []byte(script), 0o755); err != nil {
+		t.Fatalf("write executable: %v", err)
+	}
+	makeSkillBundle(t, root, "needs-bin", fmt.Sprintf(`---
+name: needs-bin
+metadata:
+  openclaw:
+    requires:
+      bins: [%q]
+---
+# Needs Bin
+`, required))
+	t.Setenv("PATH", "/usr/bin:/bin")
+	inv := ScanWithOptions(LoadOptions{
+		Roots: []Root{{Path: root, Source: SourceWorkspace}},
+		Env: map[string]string{
+			"PATH": binDir,
+		},
+	})
+	skill, ok := inv.Get("needs-bin")
+	if !ok {
+		t.Fatal("expected skill")
+	}
+	if !skill.Eligible {
+		t.Fatalf("expected provided PATH to satisfy binary requirement, missing=%v", skill.Missing)
+	}
+}
+
 func TestInventory_ModelSummary_EligibleVisibleOnly(t *testing.T) {
 	root := t.TempDir()
 	makeSkillBundle(t, root, "visible", "---\nname: visible\ndescription: visible desc\n---\n# Visible")

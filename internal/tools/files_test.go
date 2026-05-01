@@ -203,6 +203,31 @@ func TestReadFile_Name(t *testing.T) {
 	}
 }
 
+func TestFileToolsAllowBroadReadButRestrictWrites(t *testing.T) {
+	workspace := t.TempDir()
+	outside := t.TempDir()
+	outsideFile := filepath.Join(outside, "outside.txt")
+	mustWriteFile(t, outsideFile, []byte("outside content"), 0o644)
+
+	readTool := &ReadFile{FileTool: FileTool{Root: "", WriteRoot: workspace}}
+	out, err := readTool.Execute(context.Background(), map[string]any{"path": outsideFile})
+	if err != nil {
+		t.Fatalf("ReadFile outside workspace: %v", err)
+	}
+	result := mustDecodeToolResult(t, out)
+	if result.Preview != "outside content" {
+		t.Fatalf("expected outside content, got %q", result.Preview)
+	}
+
+	writeTool := &WriteFile{FileTool: FileTool{Root: "", WriteRoot: workspace}}
+	if _, err := writeTool.Execute(context.Background(), map[string]any{"path": filepath.Join(outside, "write.txt"), "content": "nope"}); err == nil {
+		t.Fatal("expected write outside workspace to be rejected")
+	}
+	if _, err := writeTool.Execute(context.Background(), map[string]any{"path": filepath.Join(workspace, "write.txt"), "content": "ok"}); err != nil {
+		t.Fatalf("expected write inside workspace to succeed: %v", err)
+	}
+}
+
 func TestReadFile_Schema(t *testing.T) {
 	tool := &ReadFile{}
 	schema := tool.Schema()
@@ -401,9 +426,12 @@ func TestEditFile_NoEdits(t *testing.T) {
 
 func TestListDir_OK(t *testing.T) {
 	dir := t.TempDir()
-	mustWriteFile(t, filepath.Join(dir, "a.txt"), []byte("a"), 0o644)
 	mustWriteFile(t, filepath.Join(dir, "b.txt"), []byte("b"), 0o644)
-	if err := os.MkdirAll(filepath.Join(dir, "subdir"), 0o755); err != nil {
+	mustWriteFile(t, filepath.Join(dir, "a.txt"), []byte("a"), 0o644)
+	if err := os.MkdirAll(filepath.Join(dir, "z-subdir"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "m-subdir"), 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
 
@@ -422,8 +450,18 @@ func TestListDir_OK(t *testing.T) {
 	if err := json.Unmarshal([]byte(result.Preview), &entries); err != nil {
 		t.Fatalf("parse output: %v", err)
 	}
-	if len(entries) != 3 {
-		t.Errorf("expected 3 entries, got %d", len(entries))
+	if len(entries) != 4 {
+		t.Fatalf("expected 4 entries, got %d", len(entries))
+	}
+	gotNames := []string{entries[0].Name, entries[1].Name, entries[2].Name, entries[3].Name}
+	wantNames := []string{"m-subdir", "z-subdir", "a.txt", "b.txt"}
+	for i := range wantNames {
+		if gotNames[i] != wantNames[i] {
+			t.Fatalf("expected directories first then names sorted %v, got %v", wantNames, gotNames)
+		}
+	}
+	if !entries[0].IsDir || !entries[1].IsDir || entries[2].IsDir || entries[3].IsDir {
+		t.Fatalf("expected directory flags to match entries, got %#v", entries)
 	}
 }
 
@@ -449,6 +487,9 @@ func TestListDir_MaxEntries(t *testing.T) {
 	if len(entries) != 2 {
 		t.Errorf("expected 2 entries with max=2, got %d", len(entries))
 	}
+	if truncated, _ := result.Stats["truncated"].(bool); !truncated {
+		t.Fatalf("expected truncated stats for max=2, got %#v", result.Stats)
+	}
 }
 
 func TestListDir_NotFound(t *testing.T) {
@@ -456,6 +497,21 @@ func TestListDir_NotFound(t *testing.T) {
 	_, err := tool.Execute(context.Background(), map[string]any{"path": "/nonexistent/directory"})
 	if err == nil {
 		t.Fatal("expected error for missing directory")
+	}
+}
+
+func TestListDir_RejectsFile(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "file.txt")
+	mustWriteFile(t, p, []byte("content"), 0o644)
+
+	tool := &ListDir{}
+	_, err := tool.Execute(context.Background(), map[string]any{"path": p})
+	if err == nil {
+		t.Fatal("expected error for file path")
+	}
+	if !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("expected not-a-directory error, got %q", err.Error())
 	}
 }
 

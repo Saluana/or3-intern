@@ -34,6 +34,8 @@ type Source string
 const (
 	// SourceExtra marks skills loaded from explicitly supplied extra roots.
 	SourceExtra Source = "extra"
+	// SourceGlobal marks skills loaded from the shared user-level skills root.
+	SourceGlobal Source = "global"
 	// SourceBundled marks skills that ship with the application.
 	SourceBundled Source = "bundled"
 	// SourceManaged marks skills installed from a remote registry.
@@ -206,6 +208,8 @@ func defaultPriority(source Source) int {
 		return 40
 	case SourceManaged:
 		return 30
+	case SourceGlobal:
+		return 25
 	case SourceBundled:
 		return 20
 	default:
@@ -750,15 +754,17 @@ func applyEligibility(meta *SkillMeta, rawTop map[string]any, body string, entry
 	if len(meta.Metadata.OS) > 0 && !containsFold(meta.Metadata.OS, opts.OS) {
 		meta.Missing = append(meta.Missing, fmt.Sprintf("os mismatch: requires %s", strings.Join(meta.Metadata.OS, ", ")))
 	}
+	binaryPath := effectiveBinaryPath(opts)
+	pathExt := effectivePathExt(opts.Env)
 	for _, bin := range meta.Metadata.Requires.Bins {
-		if !hasBinary(bin) {
+		if !hasBinary(bin, binaryPath, pathExt) {
 			meta.Missing = append(meta.Missing, "missing binary: "+bin)
 		}
 	}
 	if len(meta.Metadata.Requires.AnyBins) > 0 {
 		ok := false
 		for _, bin := range meta.Metadata.Requires.AnyBins {
-			if hasBinary(bin) {
+			if hasBinary(bin, binaryPath, pathExt) {
 				ok = true
 				break
 			}
@@ -1015,16 +1021,128 @@ func hash(s string) string {
 	return hex.EncodeToString(h[:8])
 }
 
-func hasBinary(name string) bool {
+func effectiveBinaryPath(opts LoadOptions) string {
+	if value := strings.TrimSpace(opts.Env["PATH"]); value != "" {
+		return value
+	}
+	return os.Getenv("PATH")
+}
+
+func effectivePathExt(env map[string]string) string {
+	if value := strings.TrimSpace(env["PATHEXT"]); value != "" {
+		return value
+	}
+	return os.Getenv("PATHEXT")
+}
+
+func hasBinary(name, pathValue, pathExt string) bool {
 	if strings.TrimSpace(name) == "" {
 		return false
 	}
-	_, err := exec.LookPath(name)
-	return err == nil
+	if pathValue == "" {
+		_, err := exec.LookPath(name)
+		return err == nil
+	}
+	if containsPathSeparator(name) {
+		return executableFileExists(name, pathExt)
+	}
+	for _, dir := range filepath.SplitList(pathValue) {
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			continue
+		}
+		candidate := filepath.Join(dir, name)
+		for _, path := range executableCandidates(candidate, pathExt) {
+			if executableFileExists(path, pathExt) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func containsPathSeparator(name string) bool {
+	if strings.ContainsRune(name, filepath.Separator) {
+		return true
+	}
+	return filepath.Separator != '/' && strings.ContainsRune(name, '/')
+}
+
+func executableCandidates(path, pathExt string) []string {
+	candidates := []string{path}
+	if runtime.GOOS != "windows" {
+		return candidates
+	}
+	if ext := strings.TrimSpace(filepath.Ext(path)); ext != "" {
+		return candidates
+	}
+	seen := map[string]struct{}{strings.ToLower(path): {}}
+	for _, ext := range windowsPathExts(pathExt) {
+		candidate := path + ext
+		key := strings.ToLower(candidate)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		candidates = append(candidates, candidate)
+	}
+	return candidates
+}
+
+func executableFileExists(path, pathExt string) bool {
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return windowsExecutablePath(path, pathExt)
+	}
+	return info.Mode()&0o111 != 0
+}
+
+func windowsExecutablePath(path, pathExt string) bool {
+	ext := strings.TrimSpace(filepath.Ext(path))
+	if ext == "" {
+		return false
+	}
+	for _, allowed := range windowsPathExts(pathExt) {
+		if strings.EqualFold(ext, allowed) {
+			return true
+		}
+	}
+	return false
+}
+
+func windowsPathExts(pathExt string) []string {
+	if strings.TrimSpace(pathExt) == "" {
+		pathExt = ".COM;.EXE;.BAT;.CMD"
+	}
+	rawExts := strings.Split(pathExt, ";")
+	out := make([]string, 0, len(rawExts))
+	seen := map[string]struct{}{}
+	for _, ext := range rawExts {
+		ext = strings.TrimSpace(ext)
+		if ext == "" {
+			continue
+		}
+		if !strings.HasPrefix(ext, ".") {
+			ext = "." + ext
+		}
+		key := strings.ToLower(ext)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, ext)
+	}
+	return out
 }
 
 func configTruthy(global map[string]any, skill map[string]any, path string) bool {
 	if truthy(lookupPath(global, path)) {
+		return true
+	}
+	if truthy(skill[path]) {
 		return true
 	}
 	return truthy(lookupPath(skill, path))

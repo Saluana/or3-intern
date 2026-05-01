@@ -42,7 +42,7 @@ func TestRunMigrateOpenClawCommand_ImportsFilesAndMemory(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(src, "memory", "2026-04-20.md"), []byte("Daily note one.\n\nDaily note two.\n"), 0o644); err != nil {
 		t.Fatalf("write daily memory: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(src, "memory", ".dreams", "candidate.md"), []byte("Staged dream candidate\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(src, "memory", ".dreams", "candidate.json"), []byte(`{"summary":"Staged dream candidate"}`+"\n"), 0o644); err != nil {
 		t.Fatalf("write staged dream: %v", err)
 	}
 

@@ -328,7 +328,7 @@ func buildSkillsInventory(cfg config.Config, bundledDir string, toolNames map[st
 		Roots:          buildSkillRoots(cfg, bundledDir),
 		Entries:        skillEntries(cfg),
 		GlobalConfig:   configMap(cfg),
-		Env:            envMap(),
+		Env:            skillEnvMap(cfg),
 		AvailableTools: toolNames,
 		ApprovalPolicy: approvalPolicy,
 	})
@@ -408,6 +408,9 @@ func buildSkillRoots(cfg config.Config, bundledDir string) []skills.Root {
 		}
 		roots = append(roots, skills.Root{Path: extra, Source: skills.SourceExtra})
 	}
+	if !cfg.Skills.Load.DisableGlobalDir && strings.TrimSpace(cfg.Skills.Load.GlobalDir) != "" {
+		roots = append(roots, skills.Root{Path: cfg.Skills.Load.GlobalDir, Source: skills.SourceGlobal})
+	}
 	if strings.TrimSpace(bundledDir) != "" {
 		roots = append(roots, skills.Root{Path: bundledDir, Source: skills.SourceBundled})
 	}
@@ -451,6 +454,21 @@ func envMap() map[string]string {
 			out[key] = value
 		}
 	}
+	return out
+}
+
+func skillEnvMap(cfg config.Config) map[string]string {
+	out := envMap()
+	pathAppend := strings.TrimSpace(cfg.Tools.PathAppend)
+	if pathAppend == "" {
+		return out
+	}
+	currentPath := strings.TrimSpace(out["PATH"])
+	if currentPath == "" {
+		out["PATH"] = pathAppend
+		return out
+	}
+	out["PATH"] = currentPath + string(os.PathListSeparator) + pathAppend
 	return out
 }
 

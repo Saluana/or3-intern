@@ -16,7 +16,7 @@ type ReadSkill struct {
 
 func (t *ReadSkill) Name() string { return "read_skill" }
 func (t *ReadSkill) Description() string {
-	return "Read a bounded skill summary or preview by name (for ClawHub-compatible SKILL.md usage)."
+	return "Read a bounded skill summary, outline, or preview by name. Prefer outline or preview first; use full only when the summary is not enough."
 }
 func (t *ReadSkill) CapabilityForParams(params map[string]any) CapabilityLevel {
 	if strings.EqualFold(strings.TrimSpace(fmt.Sprint(params["mode"])), "full") {

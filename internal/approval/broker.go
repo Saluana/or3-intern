@@ -30,6 +30,7 @@ const (
 	SubjectSecretAccess SubjectType = "secret_access"
 	SubjectMessageSend  SubjectType = "message_send"
 	SubjectFileTransfer SubjectType = "file_transfer"
+	SubjectToolQuota    SubjectType = "tool_quota"
 
 	RoleViewer        = "viewer"
 	RoleOperator      = "operator"
@@ -92,6 +93,17 @@ type SkillEvaluation struct {
 	ApprovalToken  string
 }
 
+type ToolQuotaEvaluation struct {
+	Scope         string
+	LimitName     string
+	ToolName      string
+	Current       int
+	Limit         int
+	AgentID       string
+	SessionID     string
+	ApprovalToken string
+}
+
 type ExecSubject struct {
 	Type            string   `json:"type"`
 	ExecutionHostID string   `json:"execution_host_id"`
@@ -117,6 +129,18 @@ type SkillExecutionSubject struct {
 	ExecutionHostID string `json:"execution_host_id"`
 	EnvBindingHash  string `json:"env_binding_hash"`
 	TimeoutSeconds  int    `json:"timeout_seconds"`
+	RequestingAgent string `json:"requesting_agent_id,omitempty"`
+	SessionID       string `json:"session_id,omitempty"`
+}
+
+type ToolQuotaSubject struct {
+	Type            string `json:"type"`
+	ExecutionHostID string `json:"execution_host_id"`
+	Scope           string `json:"scope"`
+	LimitName       string `json:"limit_name"`
+	ToolName        string `json:"tool_name"`
+	Current         int    `json:"current"`
+	Limit           int    `json:"limit"`
 	RequestingAgent string `json:"requesting_agent_id,omitempty"`
 	SessionID       string `json:"session_id,omitempty"`
 }
@@ -232,8 +256,30 @@ func (b *Broker) EvaluateSkillExec(ctx context.Context, req SkillEvaluation) (De
 	)
 }
 
+func (b *Broker) EvaluateToolQuota(ctx context.Context, req ToolQuotaEvaluation, mode config.ApprovalMode) (Decision, error) {
+	subject := ToolQuotaSubject{
+		Type:            string(SubjectToolQuota),
+		ExecutionHostID: b.hostID(),
+		Scope:           strings.TrimSpace(req.Scope),
+		LimitName:       strings.TrimSpace(req.LimitName),
+		ToolName:        strings.TrimSpace(req.ToolName),
+		Current:         req.Current,
+		Limit:           req.Limit,
+		RequestingAgent: strings.TrimSpace(req.AgentID),
+		SessionID:       strings.TrimSpace(req.SessionID),
+	}
+	return b.evaluateWithMode(ctx, SubjectToolQuota, subject, req.ApprovalToken, mode,
+		AllowlistScope{HostID: subject.ExecutionHostID, Tool: subject.ToolName, Agent: subject.RequestingAgent},
+		nil,
+	)
+}
+
 func (b *Broker) evaluate(ctx context.Context, subjectType SubjectType, subject any, approvalToken string, scope AllowlistScope, matcher any) (Decision, error) {
 	mode := b.modeFor(subjectType)
+	return b.evaluateWithMode(ctx, subjectType, subject, approvalToken, mode, scope, matcher)
+}
+
+func (b *Broker) evaluateWithMode(ctx context.Context, subjectType SubjectType, subject any, approvalToken string, mode config.ApprovalMode, scope AllowlistScope, matcher any) (Decision, error) {
 	subjectJSON, subjectHash, err := CanonicalSubjectHash(subject)
 	if err != nil {
 		return Decision{}, err
@@ -255,7 +301,7 @@ func (b *Broker) evaluate(ctx context.Context, subjectType SubjectType, subject 
 		_ = b.audit(ctx, "approval.blocked", map[string]any{"subject_hash": subjectHash, "host_id": b.hostID(), "type": string(subjectType), "outcome": "blocked", "reason": "broker_unavailable"})
 		return Decision{Allowed: false, SubjectHash: subjectHash, Reason: "approval broker unavailable"}, nil
 	}
-	if mode == config.ApprovalModeAllowlist {
+	if mode == config.ApprovalModeAsk || mode == config.ApprovalModeAllowlist {
 		matched, err := b.allowlistMatches(ctx, subjectType, scope, matcher)
 		if err != nil {
 			return Decision{}, err
@@ -1090,6 +1136,8 @@ func extractSessionID(subject any) string {
 	case ExecSubject:
 		return value.SessionID
 	case SkillExecutionSubject:
+		return value.SessionID
+	case ToolQuotaSubject:
 		return value.SessionID
 	default:
 		return ""

@@ -31,7 +31,7 @@ func (t *RunSkillScript) Capability() CapabilityLevel { return CapabilityPrivile
 func (t *RunSkillScript) Name() string { return "run_skill_script" }
 
 func (t *RunSkillScript) Description() string {
-	return "Run a skill-local script or declared entrypoint without shell interpolation."
+	return "Run an approved skill-local script or declared entrypoint without shell interpolation. Prefer read_skill first unless execution is actually required."
 }
 
 func (t *RunSkillScript) Parameters() map[string]any {

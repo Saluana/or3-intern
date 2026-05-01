@@ -164,11 +164,18 @@ func (r *Runtime) writeRuntimeSettingsStatus(ctx context.Context, sb *strings.Bu
 	fmt.Fprintf(sb, "- max tool loops: %d\n", r.MaxToolLoops)
 	fmt.Fprintf(sb, "- max tool output bytes: %d\n", r.MaxToolBytes)
 	if r.Hardening.Quotas.Enabled {
-		fmt.Fprintf(sb, "- turn quotas: tools=%d exec=%d web=%d subagents=%d\n",
+		fmt.Fprintf(sb, "- quota action on limit: %s\n", r.Hardening.Quotas.ExceededAction)
+		fmt.Fprintf(sb, "- message quotas: tools=%d exec=%d web=%d subagents=%d\n",
 			r.Hardening.Quotas.MaxToolCalls,
 			r.Hardening.Quotas.MaxExecCalls,
 			r.Hardening.Quotas.MaxWebCalls,
 			r.Hardening.Quotas.MaxSubagentCalls,
+		)
+		fmt.Fprintf(sb, "- session quotas: tools=%d exec=%d web=%d subagents=%d\n",
+			r.Hardening.Quotas.MaxSessionToolCalls,
+			r.Hardening.Quotas.MaxSessionExecCalls,
+			r.Hardening.Quotas.MaxSessionWebCalls,
+			r.Hardening.Quotas.MaxSessionSubagentCalls,
 		)
 	}
 	activeNotes, _ := countMemoryRows(ctx, r.DB, "memory_notes", "session_key", []string{scopeKey, scope.GlobalMemoryScope}, "status='active'")

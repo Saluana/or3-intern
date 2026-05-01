@@ -156,7 +156,7 @@ func migrateOpenClawAgent(ctx context.Context, cfg config.Config, d *db.DB, prov
 		report.Warnings = append(report.Warnings, warning)
 	}
 
-	memoryFiles, err := collectOpenClawMemoryFiles(absSource, filepath.Join(absSource, "memory"))
+	memoryFiles, err := collectOpenClawMemoryFiles(absSource, filepath.Join(absSource, "memory"), false)
 	if err != nil {
 		return report, err
 	}
@@ -199,7 +199,7 @@ func migrateOpenClawAgent(ctx context.Context, cfg config.Config, d *db.DB, prov
 		preparedNotes = append(preparedNotes, dreamNotes...)
 		report.Warnings = append(report.Warnings, warnings...)
 	}
-	dreamFiles, err := collectOpenClawMemoryFiles(absSource, filepath.Join(absSource, "memory", ".dreams"))
+	dreamFiles, err := collectOpenClawMemoryFiles(absSource, filepath.Join(absSource, "memory", ".dreams"), true)
 	if err != nil {
 		return report, err
 	}
@@ -545,7 +545,7 @@ func buildOpenClawEmbedPlan(ctx context.Context, cfg config.Config, d *db.DB, pr
 	return plan, "", nil
 }
 
-func collectOpenClawMemoryFiles(sourceRoot, root string) ([]string, error) {
+func collectOpenClawMemoryFiles(sourceRoot, root string, includeAllRegularFiles bool) ([]string, error) {
 	info, err := os.Lstat(root)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -586,7 +586,7 @@ func collectOpenClawMemoryFiles(sourceRoot, root string) ([]string, error) {
 		if strings.HasPrefix(entry.Name(), ".") {
 			return nil
 		}
-		if strings.EqualFold(filepath.Ext(entry.Name()), ".md") {
+		if includeAllRegularFiles || strings.EqualFold(filepath.Ext(entry.Name()), ".md") {
 			realPath, err := filepath.EvalSymlinks(path)
 			if err != nil {
 				return err

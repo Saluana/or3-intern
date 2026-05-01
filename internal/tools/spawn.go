@@ -35,7 +35,7 @@ func (t *SpawnSubagent) Capability() CapabilityLevel { return CapabilityGuarded 
 func (t *SpawnSubagent) Name() string { return "spawn_subagent" }
 
 func (t *SpawnSubagent) Description() string {
-	return "Queue a longer background task and return immediately with a stable job ID."
+	return "Queue a longer background task and return immediately with a stable job ID. Use this for long-running or parallel work, not quick synchronous steps."
 }
 
 func (t *SpawnSubagent) Parameters() map[string]any {

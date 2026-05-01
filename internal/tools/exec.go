@@ -38,7 +38,7 @@ const (
 
 func (t *ExecTool) Name() string { return "exec" }
 func (t *ExecTool) Description() string {
-	return "Run an allowed program with approval, sandbox, and allowlist controls. Output is truncated. Legacy shell commands require explicit opt-in; blocked shell patterns are only a safety net."
+	return "Run an allowed program with approval, sandbox, and allowlist controls. Prefer program plus args over shell commands; output is bounded and legacy shell mode is a last resort."
 }
 func (t *ExecTool) Parameters() map[string]any {
 	return map[string]any{

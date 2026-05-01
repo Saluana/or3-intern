@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -21,6 +22,7 @@ import (
 	"or3-intern/internal/db"
 	"or3-intern/internal/providers"
 	"or3-intern/internal/security"
+	"or3-intern/internal/skills"
 	"or3-intern/internal/tools"
 )
 
@@ -549,6 +551,77 @@ func TestServiceConfigureApply_PersistsConfigChanges(t *testing.T) {
 	}
 	if loaded.Channels.Slack.InboundPolicy != config.InboundPolicyAllowlist {
 		t.Fatalf("expected slack allowlist policy, got %q", loaded.Channels.Slack.InboundPolicy)
+	}
+}
+
+func TestServiceSkills_ListAndUpdateSettings(t *testing.T) {
+	cfg := config.Default()
+	cfgPath := filepath.Join(t.TempDir(), "or3-intern.json")
+	globalRoot := filepath.Join(t.TempDir(), "agents-skills")
+	skillDir := filepath.Join(globalRoot, "demo")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("create skill dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(`---
+name: demo
+description: Demo shared skill
+metadata:
+  openclaw:
+    primaryEnv: DEMO_API_KEY
+    requires:
+      config: [demo.enabled]
+---
+# Demo
+`), 0o644); err != nil {
+		t.Fatalf("write skill: %v", err)
+	}
+	cfg.Skills.Load.GlobalDir = globalRoot
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	reg := tools.NewRegistry()
+	reg.Register(&tools.ReadSkill{})
+	rt := &agent.Runtime{Builder: &agent.Builder{}, Tools: reg}
+	server := &serviceServer{config: cfg, configPath: cfgPath, runtime: rt}
+
+	req := httptest.NewRequest(http.MethodGet, "/internal/v1/skills", nil)
+	req = req.WithContext(context.WithValue(req.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Actor: "ops", Role: approval.RoleOperator}))
+	rec := httptest.NewRecorder()
+	server.handleSkills(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	var listBody struct {
+		Items []serviceSkillItem `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &listBody); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(listBody.Items) != 1 || listBody.Items[0].Name != "demo" || listBody.Items[0].Source != string(skills.SourceGlobal) {
+		t.Fatalf("expected demo global skill, got %#v", listBody.Items)
+	}
+
+	reqBody := strings.NewReader(`{"enabled":false,"apiKey":"secret-value","config":{"demo.enabled":true}}`)
+	req = httptest.NewRequest(http.MethodPost, "/internal/v1/skills/demo/settings", reqBody)
+	req = req.WithContext(context.WithValue(req.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Actor: "ops", Role: approval.RoleOperator}))
+	rec = httptest.NewRecorder()
+	server.handleSkills(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected update 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	loaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	entry := loaded.Skills.Entries["demo"]
+	if entry.Enabled == nil || *entry.Enabled || entry.APIKey != "secret-value" || entry.Config["demo.enabled"] != true {
+		t.Fatalf("expected persisted skill settings, got %#v", entry)
+	}
+	if skill, ok := rt.Builder.Skills.Get("demo"); !ok || !skill.Disabled {
+		t.Fatalf("expected runtime skill inventory to refresh disabled demo, got %#v ok=%t", skill, ok)
+	}
+	if readSkill, ok := reg.Get("read_skill").(*tools.ReadSkill); !ok || readSkill.Inventory == nil {
+		t.Fatalf("expected read_skill inventory pointer to refresh")
 	}
 }
 

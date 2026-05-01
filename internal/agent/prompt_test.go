@@ -86,6 +86,23 @@ func TestBuildWithOptions_IncludesPinnedMemoryAndSkillsInventory(t *testing.T) {
 	}
 }
 
+func TestDefaultToolNotesCoverCoreBuiltins(t *testing.T) {
+	for _, want := range []string{
+		"Use list_dir before reading a directory",
+		"Use read_artifact when another tool returns an artifact_id",
+		"Use memory_recent for recent conversation context",
+		"Use web_search to discover candidate URLs",
+		"Prefer program + args over shell command strings",
+		"Use send_message only when delivery is part of the task",
+		"Use spawn_subagent for longer background work",
+		"Use cron only for scheduled reminders or recurring tasks",
+	} {
+		if !strings.Contains(DefaultToolNotes, want) {
+			t.Fatalf("expected default tool notes to include %q, got %q", want, DefaultToolNotes)
+		}
+	}
+}
+
 // TestHeartbeatOnlyForAutonomous verifies that HeartbeatText only appears when Autonomous=true.
 func TestHeartbeatOnlyForAutonomous(t *testing.T) {
 	d := openTestDB(t)

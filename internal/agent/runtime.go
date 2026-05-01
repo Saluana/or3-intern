@@ -4,6 +4,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"log"
@@ -82,6 +83,8 @@ type sessionLock struct {
 	refs int
 }
 
+type messageQuotaCountersContextKey struct{}
+
 // Runtime executes conversational turns against the configured model and tools.
 type Runtime struct {
 	DB                     *db.DB
@@ -122,11 +125,15 @@ type Runtime struct {
 }
 
 type sessionQuotaState struct {
+	Session  quotaCounters
+	LastSeen time.Time
+}
+
+type quotaCounters struct {
 	ToolCalls     int
 	ExecCalls     int
 	WebCalls      int
 	SubagentCalls int
-	LastSeen      time.Time
 }
 
 // BackgroundRunInput describes an isolated subagent-style background run.
@@ -1165,6 +1172,7 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 			scopeKey = resolved
 		}
 	}
+	messageQuotas := &quotaCounters{}
 	maxLoops := r.MaxToolLoops
 	if maxLoops <= 0 {
 		maxLoops = 6
@@ -1292,6 +1300,7 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 			toolCtx = tools.ContextWithDelivery(toolCtx, channel, replyTo)
 			toolCtx = tools.ContextWithDeliveryMeta(toolCtx, replyMeta)
 			toolCtx = r.contextWithTrustedToolAccess(toolCtx, bus.Event{Type: eventType, SessionKey: sessionKey, Channel: channel})
+			toolCtx = context.WithValue(toolCtx, messageQuotaCountersContextKey{}, messageQuotas)
 			toolCtx = tools.ContextWithToolGuard(toolCtx, r.guardToolExecution)
 			out, err := turnTools.Execute(toolCtx, tc.Function.Name, tc.Function.Arguments)
 			if observer != nil {
@@ -1463,7 +1472,7 @@ func (r *Runtime) guardToolExecution(ctx context.Context, tool tools.Tool, capab
 	if !r.Hardening.Quotas.Enabled {
 		return nil
 	}
-	return r.incrementQuota(tools.SessionFromContext(ctx), tool.Name())
+	return r.incrementQuota(ctx, tools.SessionFromContext(ctx), tool.Name())
 }
 
 func (r *Runtime) approvalModeForTool(toolName string) config.ApprovalMode {
@@ -1743,24 +1752,149 @@ func formatToolExecutionError(out string, err error) string {
 	return out + "\n\nerror: " + err.Error()
 }
 
-func (r *Runtime) incrementQuota(sessionKey string, toolName string) error {
-	r.quotaMu.Lock()
-	defer r.quotaMu.Unlock()
+type quotaCheck struct {
+	Scope     string
+	Name      string
+	Label     string
+	ConfigKey string
+	Current   int
+	Limit     int
+}
 
+func (r *Runtime) incrementQuota(ctx context.Context, sessionKey string, toolName string) error {
+	r.quotaMu.Lock()
 	state := r.sessionQuotaStateLocked(sessionKey)
-	if err := quotaIncrement(&state.ToolCalls, r.Hardening.Quotas.MaxToolCalls, "tool calls", toolName); err != nil {
-		return err
+	message := messageQuotaCountersFromContext(ctx)
+	checks := r.quotaChecks(message, &state.Session, toolName)
+	for _, check := range checks {
+		if check.Limit > 0 && check.Current >= check.Limit {
+			r.quotaMu.Unlock()
+			if err := r.handleQuotaExceeded(ctx, sessionKey, toolName, check); err != nil {
+				return err
+			}
+			r.quotaMu.Lock()
+			state = r.sessionQuotaStateLocked(sessionKey)
+			message = messageQuotaCountersFromContext(ctx)
+			incrementQuotaCounters(message, toolName)
+			incrementQuotaCounters(&state.Session, toolName)
+			r.quotaMu.Unlock()
+			return nil
+		}
+	}
+	incrementQuotaCounters(message, toolName)
+	incrementQuotaCounters(&state.Session, toolName)
+	r.quotaMu.Unlock()
+	return nil
+}
+
+func (r *Runtime) quotaChecks(message *quotaCounters, session *quotaCounters, toolName string) []quotaCheck {
+	cfg := r.Hardening.Quotas
+	checks := []quotaCheck{
+		{Scope: "message", Name: "tool_calls", Label: "per-message total tool-call", ConfigKey: "hardening.quotas.maxToolCalls", Current: message.ToolCalls, Limit: cfg.MaxToolCalls},
+		{Scope: "session", Name: "tool_calls", Label: "per-session total tool-call", ConfigKey: "hardening.quotas.maxSessionToolCalls", Current: session.ToolCalls, Limit: cfg.MaxSessionToolCalls},
 	}
 	switch toolName {
 	case "exec", "run_skill_script":
-		return quotaIncrement(&state.ExecCalls, r.Hardening.Quotas.MaxExecCalls, "exec calls", toolName)
+		checks = append(checks,
+			quotaCheck{Scope: "message", Name: "exec_calls", Label: "per-message exec-call", ConfigKey: "hardening.quotas.maxExecCalls", Current: message.ExecCalls, Limit: cfg.MaxExecCalls},
+			quotaCheck{Scope: "session", Name: "exec_calls", Label: "per-session exec-call", ConfigKey: "hardening.quotas.maxSessionExecCalls", Current: session.ExecCalls, Limit: cfg.MaxSessionExecCalls},
+		)
 	case "web_fetch", "web_fetch_markdown", "web_search":
-		return quotaIncrement(&state.WebCalls, r.Hardening.Quotas.MaxWebCalls, "web calls", toolName)
+		checks = append(checks,
+			quotaCheck{Scope: "message", Name: "web_calls", Label: "per-message web-call", ConfigKey: "hardening.quotas.maxWebCalls", Current: message.WebCalls, Limit: cfg.MaxWebCalls},
+			quotaCheck{Scope: "session", Name: "web_calls", Label: "per-session web-call", ConfigKey: "hardening.quotas.maxSessionWebCalls", Current: session.WebCalls, Limit: cfg.MaxSessionWebCalls},
+		)
 	case "spawn_subagent":
-		return quotaIncrement(&state.SubagentCalls, r.Hardening.Quotas.MaxSubagentCalls, "subagent calls", toolName)
-	default:
+		checks = append(checks,
+			quotaCheck{Scope: "message", Name: "subagent_calls", Label: "per-message subagent-call", ConfigKey: "hardening.quotas.maxSubagentCalls", Current: message.SubagentCalls, Limit: cfg.MaxSubagentCalls},
+			quotaCheck{Scope: "session", Name: "subagent_calls", Label: "per-session subagent-call", ConfigKey: "hardening.quotas.maxSessionSubagentCalls", Current: session.SubagentCalls, Limit: cfg.MaxSessionSubagentCalls},
+		)
+	}
+	return checks
+}
+
+func (r *Runtime) handleQuotaExceeded(ctx context.Context, sessionKey string, toolName string, check quotaCheck) error {
+	if r.Hardening.Quotas.ExceededAction == config.QuotaExceededActionFail {
+		return quotaExceededError(toolName, check, "hard limit reached")
+	}
+	if r.ApprovalBroker == nil {
+		return quotaExceededError(toolName, check, "approval is configured, but the approval broker is unavailable")
+	}
+	identity := tools.RequesterIdentityFromContext(ctx)
+	decision, err := r.ApprovalBroker.EvaluateToolQuota(ctx, approval.ToolQuotaEvaluation{
+		Scope:         check.Scope,
+		LimitName:     check.Name,
+		ToolName:      toolName,
+		Current:       check.Current,
+		Limit:         check.Limit,
+		AgentID:       firstNonEmptyString(identity.Actor, "runtime"),
+		SessionID:     sessionKey,
+		ApprovalToken: tools.ApprovalTokenFromContext(ctx),
+	}, config.ApprovalModeAsk)
+	if err != nil {
+		return err
+	}
+	if decision.Allowed {
+		if r.Audit != nil {
+			_ = r.Audit.Record(ctx, "quota.override", sessionKey, "approval", map[string]any{
+				"tool":         toolName,
+				"scope":        check.Scope,
+				"limit":        check.Name,
+				"current":      check.Current,
+				"max":          check.Limit,
+				"subject_hash": decision.SubjectHash,
+			})
+		}
 		return nil
 	}
+	if decision.RequiresApproval {
+		return fmt.Errorf("%s Approve request %d, then retry with the issued approval token.", quotaExceededMessage(toolName, check, "approval required"), decision.RequestID)
+	}
+	return quotaExceededError(toolName, check, decision.Reason)
+}
+
+func messageQuotaCountersFromContext(ctx context.Context) *quotaCounters {
+	if ctx != nil {
+		if counters, ok := ctx.Value(messageQuotaCountersContextKey{}).(*quotaCounters); ok && counters != nil {
+			return counters
+		}
+	}
+	return &quotaCounters{}
+}
+
+func incrementQuotaCounters(counters *quotaCounters, toolName string) {
+	if counters == nil {
+		return
+	}
+	counters.ToolCalls++
+	switch toolName {
+	case "exec", "run_skill_script":
+		counters.ExecCalls++
+	case "web_fetch", "web_fetch_markdown", "web_search":
+		counters.WebCalls++
+	case "spawn_subagent":
+		counters.SubagentCalls++
+	}
+}
+
+func quotaExceededError(toolName string, check quotaCheck, reason string) error {
+	return errors.New(quotaExceededMessage(toolName, check, reason))
+}
+
+func quotaExceededMessage(toolName string, check quotaCheck, reason string) string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "limit reached"
+	}
+	return fmt.Sprintf("tool quota reached for %s: %s limit %d/%d while executing %s (%s). Increase %s or set hardening.quotas.exceededAction to ask/fail as appropriate.",
+		check.Scope,
+		check.Label,
+		check.Current,
+		check.Limit,
+		toolName,
+		reason,
+		check.ConfigKey,
+	)
 }
 
 func (r *Runtime) sessionQuotaState(sessionKey string) *sessionQuotaState {
@@ -1832,15 +1966,13 @@ func (r *Runtime) evictQuotaStateLocked() {
 	}
 }
 
-func quotaIncrement(current *int, limit int, label string, toolName string) error {
-	if current == nil || limit <= 0 {
-		return nil
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
 	}
-	if *current >= limit {
-		return fmt.Errorf("quota exceeded for %s while executing %s", label, toolName)
-	}
-	*current = *current + 1
-	return nil
+	return ""
 }
 
 func (r *Runtime) skillRunEnvFor(name string) map[string]string {

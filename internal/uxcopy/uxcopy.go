@@ -27,6 +27,7 @@ type UserError struct {
 
 var settingLabels = map[string]SettingCopy{
 	"tools.restrictToWorkspace": {Label: "Only let OR3 access this folder", Hint: "Prevents OR3 from reading or writing outside your chosen workspace."},
+	"tools.allowFullFileRead":   {Label: "Let OR3 read outside this folder", Hint: "Allows broad read/search access while writes stay confined to the workspace."},
 	"hardening.guardedTools":    {Label: "Ask before risky actions", Hint: "OR3 pauses before actions that can change files, run code, or contact services."},
 	"security.audit.enabled":    {Label: "Keep a safety log", Hint: "Saves a tamper-evident record of important actions."},
 	"security.approvals.mode":   {Label: "When should OR3 ask?", Hint: "Controls prompts for commands, skills, secrets, messages, and pairing."},

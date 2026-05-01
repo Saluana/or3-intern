@@ -202,7 +202,8 @@ func hardeningFindings(cfg config.Config, opts Options) []Finding {
 			FixMode:  FixModeManual,
 		})
 	}
-	if cfg.Hardening.Quotas.MaxToolCalls <= 0 || cfg.Hardening.Quotas.MaxExecCalls <= 0 || cfg.Hardening.Quotas.MaxWebCalls <= 0 || cfg.Hardening.Quotas.MaxSubagentCalls <= 0 {
+	if cfg.Hardening.Quotas.MaxToolCalls <= 0 || cfg.Hardening.Quotas.MaxExecCalls <= 0 || cfg.Hardening.Quotas.MaxWebCalls <= 0 || cfg.Hardening.Quotas.MaxSubagentCalls <= 0 ||
+		cfg.Hardening.Quotas.MaxSessionToolCalls <= 0 || cfg.Hardening.Quotas.MaxSessionExecCalls <= 0 || cfg.Hardening.Quotas.MaxSessionWebCalls <= 0 || cfg.Hardening.Quotas.MaxSessionSubagentCalls <= 0 {
 		findings = append(findings, Finding{
 			ID:       "quotas.unset",
 			Area:     "quotas",

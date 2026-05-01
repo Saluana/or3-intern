@@ -13,7 +13,7 @@ Phase 1 establishes the baseline runtime posture:
 - child processes receive a scrubbed environment allowlist
 - `exec` prefers `program` plus `args`
 - legacy shell execution is disabled unless `hardening.enableExecShell=true`
-- tool calls are checked against capability tiers and bounded per-session quotas
+- tool calls are checked against capability tiers and bounded per-message plus per-session quotas
 - channel peers can be isolated by sender with `hardening.isolateChannelPeers=true`
 
 ## Phase 2 additions
@@ -79,6 +79,22 @@ Named execution posture; selects startup validation rules. One of: `local-dev`, 
 - `enabled`
 - `required`
 - `keyFile`
+
+### `hardening.quotas`
+
+Quota controls bound runaway tool use at two levels:
+
+- per-message limits stop one request from making too many tool calls
+- per-session limits stop a long-running conversation from accumulating unbounded tool use
+
+When a limit is reached, `exceededAction` controls the behavior:
+
+| Action | Effect |
+| --- | --- |
+| `ask` | Create or reuse a pending `tool_quota` approval request and return a message with the approval request ID. This is the default. |
+| `fail` | Stop immediately with a hard quota error. |
+
+Default per-message limits are `maxToolCalls=16`, `maxExecCalls=2`, `maxWebCalls=4`, and `maxSubagentCalls=2`. Default per-session limits are intentionally higher: `maxSessionToolCalls=256`, `maxSessionExecCalls=32`, `maxSessionWebCalls=64`, and `maxSessionSubagentCalls=16`.
 
 ### `security.audit`
 

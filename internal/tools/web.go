@@ -387,7 +387,7 @@ func (t *WebSearch) Capability() CapabilityLevel { return CapabilitySafe }
 
 func (t *WebSearch) Name() string { return "web_search" }
 func (t *WebSearch) Description() string {
-	return "Search the web (Brave Search API) and return top results."
+	return "Search the web and return top results. Use this to discover candidate URLs first, then follow up with web_fetch for the page content you actually need."
 }
 func (t *WebSearch) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{

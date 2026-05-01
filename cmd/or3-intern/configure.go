@@ -607,7 +607,7 @@ func printConfigureSummary(out io.Writer, cfg config.Config) {
 	fmt.Fprintf(out, "  Storage: db=%s artifacts=%s\n", cfg.DBPath, cfg.ArtifactsDir)
 	fmt.Fprintf(out, "  Runtime: session=%s workers=%d history=%d consolidation=%t model=%s\n", cfg.DefaultSessionKey, cfg.WorkerCount, cfg.HistoryMax, cfg.ConsolidationEnabled, emptyAsNone(cfg.ConsolidationModel))
 	fmt.Fprintf(out, "  Context: mode=%s maxInput=%d dynamicTools=%t taskCard=%t\n", cfg.Context.Mode, cfg.Context.MaxInputTokens, cfg.Context.Tools.DynamicExpose, cfg.Context.TaskCard.Enabled)
-	fmt.Fprintf(out, "  Workspace: restrict=%t dir=%s\n", cfg.Tools.RestrictToWorkspace, workspaceSummary)
+	fmt.Fprintf(out, "  Workspace: restrict=%t fullRead=%t dir=%s\n", cfg.Tools.RestrictToWorkspace, cfg.Tools.AllowFullFileRead, workspaceSummary)
 	fmt.Fprintf(out, "  Tools: Brave key configured=%t execTimeout=%ds proxy=%s\n", strings.TrimSpace(cfg.Tools.BraveAPIKey) != "", cfg.Tools.ExecTimeoutSeconds, emptyAsNone(cfg.Tools.WebProxy))
 	fmt.Fprintf(out, "  Skills: exec=%t watch=%t dir=%s\n", cfg.Skills.EnableExec, cfg.Skills.Load.Watch, emptyAsNone(cfg.Skills.ManagedDir))
 	fmt.Fprintf(out, "  Auth: enabled=%t mode=%s stepUp=%ds fallback=%s\n", cfg.Auth.Enabled, cfg.Auth.EnforcementMode, cfg.Auth.StepUpTTLSeconds, emptyAsNone(cfg.Auth.FallbackPolicy))

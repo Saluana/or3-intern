@@ -346,9 +346,15 @@ func headline(report intdoctor.Report) string {
 
 func workspaceSummary(cfg config.Config) string {
 	if cfg.Tools.RestrictToWorkspace && strings.TrimSpace(cfg.WorkspaceDir) != "" {
+		if cfg.Tools.AllowFullFileRead {
+			return "Reads computer; writes only: " + cfg.WorkspaceDir
+		}
 		return "Only this folder: " + cfg.WorkspaceDir
 	}
 	if cfg.Tools.RestrictToWorkspace {
+		if cfg.Tools.AllowFullFileRead {
+			return "Reads computer; writes restricted to workspace"
+		}
 		return "Restricted to your workspace folder"
 	}
 	return "Not restricted to one folder"

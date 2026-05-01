@@ -79,12 +79,12 @@ service_launch_args() {
   local -a args=()
   local unsafe_dev="${OR3_SERVICE_UNSAFE_DEV:-false}"
   unsafe_dev="$(printf '%s' "$unsafe_dev" | tr '[:upper:]' '[:lower:]')"
-  args+=("service")
   case "$unsafe_dev" in
     1|true|yes|on)
       args+=("--unsafe-dev")
       ;;
   esac
+  args+=("service")
   printf '%s\n' "${args[@]}"
 }
 
@@ -262,7 +262,7 @@ case "$action" in
     ;;
   restart)
     stop_service true
-    if find_service_pids >/dev/null 2>&1; then
+    if [[ -n "$(find_service_pids)" ]]; then
       print_status
       exit 0
     fi

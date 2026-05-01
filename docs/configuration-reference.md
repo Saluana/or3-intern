@@ -69,8 +69,11 @@ Controls local tool execution and optional MCP registration:
 - `webProxy`
 - `execTimeoutSeconds`
 - `restrictToWorkspace`
+- `allowFullFileRead`
 - `pathAppend`
 - `mcpServers`
+
+`allowFullFileRead` keeps write/edit operations restricted to the workspace while allowing read/list/search file tools to inspect paths outside the workspace. It is off by default and only takes effect when `restrictToWorkspace` remains enabled.
 
 See [mcp-tool-integrations.md](mcp-tool-integrations.md) for the MCP-specific settings.
 
@@ -88,6 +91,24 @@ Core runtime safety controls:
 - `quotas`
 
 See [security-and-hardening.md](security-and-hardening.md) for rollout guidance.
+
+#### `hardening.quotas`
+
+`hardening.quotas` limits tool use per message and per session. Per-message settings use the existing keys:
+
+- `maxToolCalls`
+- `maxExecCalls`
+- `maxWebCalls`
+- `maxSubagentCalls`
+
+Per-session settings use:
+
+- `maxSessionToolCalls`
+- `maxSessionExecCalls`
+- `maxSessionWebCalls`
+- `maxSessionSubagentCalls`
+
+`exceededAction` controls what happens when either scope reaches a limit. The default is `ask`, which creates a pending `tool_quota` approval request and returns the request ID so an operator can approve continuation. Set it to `fail` to keep the older hard-stop behavior.
 
 ### `skills`
 

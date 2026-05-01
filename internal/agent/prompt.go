@@ -62,11 +62,17 @@ Work rules:
 `
 
 const DefaultToolNotes = `# Tool Usage Notes
+Prefer the narrowest, lowest-capability tool or mode that will answer the question. If preview, range, grep, outline, or search is enough, use that before broader reads or writes.
+
 Files:
+- Use list_dir before reading a directory or when you need to discover what files exist.
 - For unknown files, first use search_file or read_file mode=outline.
 - Use read_file mode=grep to find matching lines.
 - Use read_file mode=range for exact code sections.
-- Use preview only for small files or broad orientation.
+- Use preview only for small files or quick orientation.
+- Use read_file mode=full only when narrower reads are not enough; it is broader and may require a higher capability ceiling.
+- Use edit_file for focused changes to existing files. Use write_file when replacing or creating the whole file intentionally.
+- Use read_artifact when another tool returns an artifact_id instead of trying to repeat the original broad operation.
 - Use read_skill mode=outline first. Read full skill content only when the outline is not enough.
 
 Tool results:
@@ -75,23 +81,39 @@ Tool results:
 - If artifact_id exists, use it only when the missing detail is actually needed.
 - Prefer narrower follow-up reads over asking for huge output.
 
-exec:
-- Commands have timeouts and policy checks.
-- Output is previewed. If output is too broad, rerun with a narrower command.
-
 memory:
-- Use the advertised memory tools by exact name. Common names are memory_search, memory_recent, memory_get_pinned, memory_add_note, and memory_set_pinned.
-- Do not call a generic tool named memory.
+- Use memory_recent for recent conversation context.
+- Use memory_get_pinned for durable session/global facts that should already matter.
+- Use memory_search for semantic recall when you have a topic or fact to recover.
+- Use memory_add_note only for durable facts, decisions, or lessons worth retrieving later; not for temporary scratch notes.
+- Use memory_set_pinned only for facts that should consistently appear in future prompts.
 
 web:
-- Use web_fetch as the default fetch tool.
+- Use web_search to discover candidate URLs when you do not already have one.
+- Use web_fetch as the default way to read a specific URL.
+- Use web_fetch_markdown only when you specifically need explicit HTML-to-Markdown artifact control.
 - web_fetch automatically converts HTML pages into Markdown artifacts to avoid dumping raw HTML into context; use raw=true only when literal response bytes are required.
-- Use web_fetch_markdown only when you specifically need explicit HTML-to-Markdown source-byte controls.
 - Use render=true for JavaScript-heavy pages.
 - Use selector or waitMs when the important content loads late.
 
+exec:
+- Prefer program + args over shell command strings.
+- Commands have timeouts, policy checks, and bounded output.
+- Output is previewed. If output is too broad, rerun with a narrower command.
+- Use run_skill_script only for approved skills when a skill actually needs code execution; prefer read_skill first.
+
+messaging/subagents:
+- Use send_message only when delivery is part of the task, especially for reminders, scheduled follow-ups, or proactive outbound updates.
+- Use reply_in_thread only when you want to reuse the current thread/target.
+- Use spawn_subagent for longer background work or parallelizable tasks; do not use it for quick synchronous steps you can do directly.
+
 cron:
 - Use cron only for scheduled reminders or recurring tasks, and only when cron is advertised as an available tool.
+- Do not use cron for work that should happen immediately in the current turn.
+
+Tool names:
+- Use the advertised tool names exactly as shown.
+- Do not invent generic tool names like memory, files, browser, or shell when specific built-ins exist.
 `
 
 // defaultDigestLineMax bounds the number of lines in the Memory Digest section.
@@ -534,7 +556,11 @@ func (b *Builder) composeSystemPrompt(pinnedText, digestText, memText, identityT
 	if strings.TrimSpace(volatile) == "" {
 		return stable
 	}
-	return strings.TrimSpace(stable + "\n\n" + volatile)
+	maxTotal := b.BootstrapTotalMaxChars
+	if maxTotal <= 0 {
+		maxTotal = defaultBootstrapTotalMaxChars
+	}
+	return truncateText(strings.TrimSpace(stable+"\n\n"+volatile), maxTotal)
 }
 
 func (b *Builder) composeSystemContent(pinnedText, digestText, memText, identityText, staticMemoryText, heartbeatText, structuredContextText, docContextText, workspaceContextText string) any {
@@ -546,7 +572,11 @@ func (b *Builder) composeSystemContent(pinnedText, digestText, memText, identity
 	if strings.TrimSpace(volatile) == "" {
 		return stable
 	}
-	return strings.TrimSpace(stable + "\n\n" + volatile)
+	maxTotal := b.BootstrapTotalMaxChars
+	if maxTotal <= 0 {
+		maxTotal = defaultBootstrapTotalMaxChars
+	}
+	return truncateText(strings.TrimSpace(stable+"\n\n"+volatile), maxTotal)
 }
 
 func (b *Builder) renderStablePrefix(pinnedText, digestText, memText, identityText, staticMemoryText, docContextText, workspaceContextText string) string {

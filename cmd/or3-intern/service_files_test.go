@@ -25,6 +25,34 @@ func TestServiceFileRootsUseConfiguredDirs(t *testing.T) {
 	}
 }
 
+func TestServiceFileRootsExposeComputerReadOnlyWhenFullReadEnabled(t *testing.T) {
+	workspace := t.TempDir()
+	allowed := t.TempDir()
+	server := &serviceServer{config: config.Config{
+		WorkspaceDir: workspace,
+		AllowedDir:   allowed,
+		Tools: config.ToolsConfig{
+			RestrictToWorkspace: true,
+			AllowFullFileRead:   true,
+		},
+	}}
+
+	roots := server.serviceFileRoots()
+	byID := map[string]serviceFileRoot{}
+	for _, root := range roots {
+		byID[root.ID] = root
+	}
+	if root, ok := byID["computer"]; !ok || root.Writable {
+		t.Fatalf("expected read-only computer root, got %+v", root)
+	}
+	if root, ok := byID["allowed"]; !ok || root.Writable {
+		t.Fatalf("expected allowed root to become read-only, got %+v", root)
+	}
+	if root, ok := byID["workspace"]; !ok || !root.Writable {
+		t.Fatalf("expected writable workspace root, got %+v", root)
+	}
+}
+
 func TestResolveServiceFilePathRejectsTraversal(t *testing.T) {
 	tmp := t.TempDir()
 	server := &serviceServer{config: config.Config{AllowedDir: tmp}}

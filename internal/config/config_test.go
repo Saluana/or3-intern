@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -122,6 +123,9 @@ func TestDefault_Values(t *testing.T) {
 	if !cfg.Tools.RestrictToWorkspace {
 		t.Error("expected RestrictToWorkspace=true by default")
 	}
+	if cfg.Tools.AllowFullFileRead {
+		t.Error("expected AllowFullFileRead=false by default")
+	}
 	if cfg.ConsolidationMaxMessages != 50 {
 		t.Errorf("expected ConsolidationMaxMessages=50, got %d", cfg.ConsolidationMaxMessages)
 	}
@@ -208,6 +212,9 @@ func TestDefault_Values(t *testing.T) {
 	}
 	if !cfg.Skills.Policy.QuarantineByDefault {
 		t.Fatal("expected skills to quarantine by default")
+	}
+	if !strings.HasSuffix(cfg.Skills.Load.GlobalDir, filepath.Join(".agents", "skills")) {
+		t.Fatalf("expected default global skills dir to be ~/.agents/skills, got %q", cfg.Skills.Load.GlobalDir)
 	}
 	if cfg.Hardening.Sandbox.BubblewrapPath != "bwrap" {
 		t.Fatalf("expected default bubblewrap path, got %q", cfg.Hardening.Sandbox.BubblewrapPath)
@@ -402,11 +409,16 @@ func TestLoad_HardeningDefaultsAndOverrides(t *testing.T) {
 	cfg.Hardening.ExecAllowedPrograms = []string{"go", "git"}
 	cfg.Hardening.ChildEnvAllowlist = []string{"PATH"}
 	cfg.Hardening.Quotas = HardeningQuotaConfig{
-		Enabled:          true,
-		MaxToolCalls:     3,
-		MaxExecCalls:     1,
-		MaxWebCalls:      2,
-		MaxSubagentCalls: 1,
+		Enabled:                 true,
+		ExceededAction:          QuotaExceededActionFail,
+		MaxToolCalls:            3,
+		MaxExecCalls:            1,
+		MaxWebCalls:             2,
+		MaxSubagentCalls:        1,
+		MaxSessionToolCalls:     30,
+		MaxSessionExecCalls:     10,
+		MaxSessionWebCalls:      20,
+		MaxSessionSubagentCalls: 5,
 	}
 
 	b, _ := json.MarshalIndent(cfg, "", "  ")
@@ -427,7 +439,9 @@ func TestLoad_HardeningDefaultsAndOverrides(t *testing.T) {
 	if got := loaded.Hardening.ChildEnvAllowlist; len(got) != 1 || got[0] != "PATH" {
 		t.Fatalf("unexpected child env allowlist: %#v", got)
 	}
-	if loaded.Hardening.Quotas.MaxToolCalls != 3 || loaded.Hardening.Quotas.MaxExecCalls != 1 || loaded.Hardening.Quotas.MaxWebCalls != 2 || loaded.Hardening.Quotas.MaxSubagentCalls != 1 {
+	if loaded.Hardening.Quotas.ExceededAction != QuotaExceededActionFail ||
+		loaded.Hardening.Quotas.MaxToolCalls != 3 || loaded.Hardening.Quotas.MaxExecCalls != 1 || loaded.Hardening.Quotas.MaxWebCalls != 2 || loaded.Hardening.Quotas.MaxSubagentCalls != 1 ||
+		loaded.Hardening.Quotas.MaxSessionToolCalls != 30 || loaded.Hardening.Quotas.MaxSessionExecCalls != 10 || loaded.Hardening.Quotas.MaxSessionWebCalls != 20 || loaded.Hardening.Quotas.MaxSessionSubagentCalls != 5 {
 		t.Fatalf("unexpected quota overrides: %+v", loaded.Hardening.Quotas)
 	}
 }

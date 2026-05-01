@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"or3-intern/internal/approval"
 	"or3-intern/internal/artifacts"
 	"or3-intern/internal/bus"
 	"or3-intern/internal/channels"
@@ -2042,6 +2043,7 @@ func TestRuntime_Handle_ToolQuotaExceeded(t *testing.T) {
 	reg := tools.NewRegistry()
 	reg.Register(&echoTool{})
 	hardening := config.Default().Hardening
+	hardening.Quotas.ExceededAction = config.QuotaExceededActionFail
 	hardening.Quotas.MaxToolCalls = 1
 	rt := &Runtime{DB: d, Provider: provider, Model: "gpt-4", Tools: reg, Builder: &Builder{DB: d, HistoryMax: 10}, MaxToolLoops: 4, Deliver: &mockDeliverer{}, Hardening: hardening}
 	if err := rt.Handle(context.Background(), bus.Event{Type: bus.EventUserMessage, SessionKey: "sess-quota", Message: "hit quota"}); err != nil {
@@ -2053,7 +2055,7 @@ func TestRuntime_Handle_ToolQuotaExceeded(t *testing.T) {
 	}
 	found := false
 	for _, msg := range msgs {
-		if msg.Role == "tool" && strings.Contains(msg.Content, "quota exceeded") {
+		if msg.Role == "tool" && strings.Contains(msg.Content, "tool quota reached") && strings.Contains(msg.Content, "hard limit reached") {
 			found = true
 		}
 	}
@@ -2125,7 +2127,7 @@ func TestRuntime_IncrementQuota_IsSerializedPerScope(t *testing.T) {
 	for i := 0; i < workers; i++ {
 		go func() {
 			<-start
-			errCh <- rt.incrementQuota("shared-scope", "echo_tool")
+			errCh <- rt.incrementQuota(context.Background(), "shared-scope", "echo_tool")
 		}()
 	}
 	close(start)
@@ -2136,8 +2138,83 @@ func TestRuntime_IncrementQuota_IsSerializedPerScope(t *testing.T) {
 	}
 
 	state := rt.sessionQuotaState("shared-scope")
-	if state.ToolCalls != workers {
-		t.Fatalf("expected %d serialized tool calls, got %d", workers, state.ToolCalls)
+	if state.Session.ToolCalls != workers {
+		t.Fatalf("expected %d serialized tool calls, got %d", workers, state.Session.ToolCalls)
+	}
+}
+
+func TestRuntime_IncrementQuota_SeparatesMessageAndSessionLimits(t *testing.T) {
+	hardening := config.Default().Hardening
+	hardening.Quotas.ExceededAction = config.QuotaExceededActionFail
+	hardening.Quotas.MaxToolCalls = 1
+	hardening.Quotas.MaxSessionToolCalls = 2
+	rt := &Runtime{Hardening: hardening}
+
+	msg1 := &quotaCounters{}
+	ctx1 := context.WithValue(context.Background(), messageQuotaCountersContextKey{}, msg1)
+	if err := rt.incrementQuota(ctx1, "quota-scope", "echo_tool"); err != nil {
+		t.Fatalf("first message increment: %v", err)
+	}
+	if err := rt.incrementQuota(ctx1, "quota-scope", "echo_tool"); err == nil || !strings.Contains(err.Error(), "per-message total tool-call") {
+		t.Fatalf("expected per-message limit, got %v", err)
+	}
+
+	msg2 := &quotaCounters{}
+	ctx2 := context.WithValue(context.Background(), messageQuotaCountersContextKey{}, msg2)
+	if err := rt.incrementQuota(ctx2, "quota-scope", "echo_tool"); err != nil {
+		t.Fatalf("new message should reset message quota: %v", err)
+	}
+	if err := rt.incrementQuota(context.WithValue(context.Background(), messageQuotaCountersContextKey{}, &quotaCounters{}), "quota-scope", "echo_tool"); err == nil || !strings.Contains(err.Error(), "per-session total tool-call") {
+		t.Fatalf("expected per-session limit, got %v", err)
+	}
+}
+
+func TestRuntime_IncrementQuota_AsksApprovalAndAcceptsApprovedToken(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	hardening := config.Default().Hardening
+	hardening.Quotas.ExceededAction = config.QuotaExceededActionAsk
+	hardening.Quotas.MaxToolCalls = 1
+	hardening.Quotas.MaxSessionToolCalls = 100
+	approvalCfg := config.Default().Security.Approvals
+	approvalCfg.HostID = "quota-test-host"
+	broker := &approval.Broker{
+		DB:      d,
+		Config:  approvalCfg,
+		HostID:  approvalCfg.HostID,
+		SignKey: []byte("0123456789abcdef0123456789abcdef"),
+		Now: func() time.Time {
+			return time.Unix(1_700_000_000, 0).UTC()
+		},
+	}
+	rt := &Runtime{DB: d, Hardening: hardening, ApprovalBroker: broker}
+
+	message := &quotaCounters{}
+	ctx := context.WithValue(context.Background(), messageQuotaCountersContextKey{}, message)
+	ctx = tools.ContextWithRequesterIdentity(ctx, "agent-1", approval.RoleOperator)
+	if err := rt.incrementQuota(ctx, "quota-approval-scope", "echo_tool"); err != nil {
+		t.Fatalf("first increment: %v", err)
+	}
+	err := rt.incrementQuota(ctx, "quota-approval-scope", "echo_tool")
+	if err == nil || !strings.Contains(err.Error(), "Approve request") {
+		t.Fatalf("expected approval request, got %v", err)
+	}
+	pending, err := d.ListApprovalRequestsFiltered(context.Background(), approval.StatusPending, string(approval.SubjectToolQuota), 1)
+	if err != nil {
+		t.Fatalf("ListApprovalRequests: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("expected one pending quota approval, got %#v", pending)
+	}
+	issued, err := broker.ApproveRequest(context.Background(), pending[0].ID, "cli:test", false, "continue")
+	if err != nil {
+		t.Fatalf("ApproveRequest: %v", err)
+	}
+	ctx = tools.ContextWithApprovalToken(ctx, issued.Token)
+	if err := rt.incrementQuota(ctx, "quota-approval-scope", "echo_tool"); err != nil {
+		t.Fatalf("approved quota increment: %v", err)
+	}
+	if message.ToolCalls != 2 {
+		t.Fatalf("expected approved increment to continue message counter, got %#v", message)
 	}
 }
 
@@ -2644,6 +2721,7 @@ func TestToToolDefs_SortsByToolNameDeterministically(t *testing.T) {
 func TestDynamicToolExposureSelectsIntentGroups(t *testing.T) {
 	reg := tools.NewRegistry()
 	reg.Register(&alphaTool{})
+	reg.Register(&namedRuntimeTool{name: "list_dir"})
 	reg.Register(&namedRuntimeTool{name: "write_file"})
 	reg.Register(&namedRuntimeTool{name: "exec"})
 	reg.Register(&namedRuntimeTool{name: "web_fetch"})
@@ -2656,6 +2734,21 @@ func TestDynamicToolExposureSelectsIntentGroups(t *testing.T) {
 	}
 	if !containsString(names, "write_file") || containsString(names, "exec") || containsString(names, "web_fetch") {
 		t.Fatalf("expected write intent to expose write tools without exec/web, got %v", names)
+	}
+}
+
+func TestDynamicToolExposureReadIntentIncludesListDir(t *testing.T) {
+	reg := tools.NewRegistry()
+	reg.Register(&namedRuntimeTool{name: "read_file"})
+	reg.Register(&namedRuntimeTool{name: "list_dir"})
+	reg.Register(&namedRuntimeTool{name: "write_file"})
+	rt := &Runtime{DynamicToolExposure: true}
+	defs := toToolDefs(rt.exposedToolsForTurn(reg, []providers.ChatMessage{{Role: "user", Content: "inspect the project files"}}, ""))
+	if !toolDefsContain(defs, "read_file") || !toolDefsContain(defs, "list_dir") {
+		t.Fatalf("expected read intent to expose read_file and list_dir, got %#v", defs)
+	}
+	if toolDefsContain(defs, "write_file") {
+		t.Fatalf("expected read intent to omit write_file, got %#v", defs)
 	}
 }
 

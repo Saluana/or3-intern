@@ -26,7 +26,7 @@ func (t *SendMessage) Capability() CapabilityLevel { return CapabilityGuarded }
 
 func (t *SendMessage) Name() string { return "send_message" }
 func (t *SendMessage) Description() string {
-	return "Send a message via a configured channel (for reminders/cron or proactive messages)."
+	return "Send a message via a configured channel. Use this when delivery is part of the task, such as reminders, scheduled follow-ups, or proactive updates."
 }
 func (t *SendMessage) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{

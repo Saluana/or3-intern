@@ -185,6 +185,9 @@ func (b *Builder) buildContextPacket(pinnedText, digestText, memText, identityTe
 	}
 	packet.StableSections = append(packet.StableSections, budgetSection("Skills Inventory", b.Skills.ModelSummary(skillsMax), false, budgets.ToolSchemas, 0, maxEach))
 
+	if t := strings.TrimSpace(b.renderRuntimeContext()); t != "" {
+		packet.VolatileSections = append(packet.VolatileSections, budgetSection("Runtime Context", t, false, 0, 0, maxEach))
+	}
 	if t := strings.TrimSpace(heartbeatText); t != "" {
 		packet.VolatileSections = append(packet.VolatileSections, budgetSection("Heartbeat", t, false, 0, 0, maxEach))
 	}

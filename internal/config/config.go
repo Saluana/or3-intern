@@ -230,13 +230,25 @@ type SandboxConfig struct {
 	WritablePaths  []string `json:"writablePaths"`
 }
 
-// HardeningQuotaConfig limits how many sensitive tool calls a turn may issue.
+type QuotaExceededAction string
+
+const (
+	QuotaExceededActionAsk  QuotaExceededAction = "ask"
+	QuotaExceededActionFail QuotaExceededAction = "fail"
+)
+
+// HardeningQuotaConfig limits how many sensitive tool calls a message and session may issue.
 type HardeningQuotaConfig struct {
-	Enabled          bool `json:"enabled"`
-	MaxToolCalls     int  `json:"maxToolCalls"`
-	MaxExecCalls     int  `json:"maxExecCalls"`
-	MaxWebCalls      int  `json:"maxWebCalls"`
-	MaxSubagentCalls int  `json:"maxSubagentCalls"`
+	Enabled                 bool                `json:"enabled"`
+	ExceededAction          QuotaExceededAction `json:"exceededAction"`
+	MaxToolCalls            int                 `json:"maxToolCalls"`
+	MaxExecCalls            int                 `json:"maxExecCalls"`
+	MaxWebCalls             int                 `json:"maxWebCalls"`
+	MaxSubagentCalls        int                 `json:"maxSubagentCalls"`
+	MaxSessionToolCalls     int                 `json:"maxSessionToolCalls"`
+	MaxSessionExecCalls     int                 `json:"maxSessionExecCalls"`
+	MaxSessionWebCalls      int                 `json:"maxSessionWebCalls"`
+	MaxSessionSubagentCalls int                 `json:"maxSessionSubagentCalls"`
 }
 
 // ProviderConfig selects the LLM and embedding provider endpoints and limits.
@@ -258,6 +270,7 @@ type ToolsConfig struct {
 	EnableExec          bool                       `json:"enableExec"`
 	ExecTimeoutSeconds  int                        `json:"execTimeoutSeconds"`
 	RestrictToWorkspace bool                       `json:"restrictToWorkspace"`
+	AllowFullFileRead   bool                       `json:"allowFullFileRead"`
 	PathAppend          string                     `json:"pathAppend"`
 	MCPServers          map[string]MCPServerConfig `json:"mcpServers"`
 }
@@ -456,9 +469,11 @@ type SkillPolicyConfig struct {
 
 // SkillsLoadConfig controls additional skill directories and file watching.
 type SkillsLoadConfig struct {
-	ExtraDirs       []string `json:"extraDirs"`
-	Watch           bool     `json:"watch"`
-	WatchDebounceMS int      `json:"watchDebounceMs"`
+	ExtraDirs        []string `json:"extraDirs"`
+	GlobalDir        string   `json:"globalDir"`
+	DisableGlobalDir bool     `json:"disableGlobalDir"`
+	Watch            bool     `json:"watch"`
+	WatchDebounceMS  int      `json:"watchDebounceMs"`
 }
 
 // SkillEntryConfig overrides configuration for a single named skill.
@@ -675,6 +690,7 @@ func Default() Config {
 				TrustedRegistries:   []string{},
 			},
 			Load: SkillsLoadConfig{
+				GlobalDir:       filepath.Join(home, ".agents", "skills"),
 				Watch:           false,
 				WatchDebounceMS: 250,
 			},
@@ -770,6 +786,7 @@ func Default() Config {
 			EnableExec:          false,
 			ExecTimeoutSeconds:  60,
 			RestrictToWorkspace: true,
+			AllowFullFileRead:   false,
 			PathAppend:          "",
 			MCPServers:          map[string]MCPServerConfig{},
 		},
@@ -787,11 +804,16 @@ func Default() Config {
 				WritablePaths:  []string{},
 			},
 			Quotas: HardeningQuotaConfig{
-				Enabled:          true,
-				MaxToolCalls:     16,
-				MaxExecCalls:     2,
-				MaxWebCalls:      4,
-				MaxSubagentCalls: 2,
+				Enabled:                 true,
+				ExceededAction:          QuotaExceededActionAsk,
+				MaxToolCalls:            16,
+				MaxExecCalls:            2,
+				MaxWebCalls:             4,
+				MaxSubagentCalls:        2,
+				MaxSessionToolCalls:     256,
+				MaxSessionExecCalls:     32,
+				MaxSessionWebCalls:      64,
+				MaxSessionSubagentCalls: 16,
 			},
 		},
 		Cron: CronConfig{Enabled: true, StorePath: filepath.Join(root, "cron.json")},
@@ -1303,6 +1325,11 @@ func Load(path string) (Config, error) {
 	if cfg.Skills.Load.WatchDebounceMS <= 0 {
 		cfg.Skills.Load.WatchDebounceMS = 250
 	}
+	if strings.TrimSpace(cfg.Skills.Load.GlobalDir) == "" {
+		if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+			cfg.Skills.Load.GlobalDir = filepath.Join(home, ".agents", "skills")
+		}
+	}
 	if cfg.Skills.Policy.Approved == nil {
 		cfg.Skills.Policy.Approved = []string{}
 	}
@@ -1337,6 +1364,7 @@ func Load(path string) (Config, error) {
 	if cfg.Hardening.Sandbox.WritablePaths == nil {
 		cfg.Hardening.Sandbox.WritablePaths = []string{}
 	}
+	cfg.Hardening.Quotas.ExceededAction = normalizeQuotaExceededAction(cfg.Hardening.Quotas.ExceededAction, Default().Hardening.Quotas.ExceededAction)
 	if cfg.Hardening.Quotas.MaxToolCalls <= 0 {
 		cfg.Hardening.Quotas.MaxToolCalls = Default().Hardening.Quotas.MaxToolCalls
 	}
@@ -1348,6 +1376,18 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.Hardening.Quotas.MaxSubagentCalls <= 0 {
 		cfg.Hardening.Quotas.MaxSubagentCalls = Default().Hardening.Quotas.MaxSubagentCalls
+	}
+	if cfg.Hardening.Quotas.MaxSessionToolCalls <= 0 {
+		cfg.Hardening.Quotas.MaxSessionToolCalls = Default().Hardening.Quotas.MaxSessionToolCalls
+	}
+	if cfg.Hardening.Quotas.MaxSessionExecCalls <= 0 {
+		cfg.Hardening.Quotas.MaxSessionExecCalls = Default().Hardening.Quotas.MaxSessionExecCalls
+	}
+	if cfg.Hardening.Quotas.MaxSessionWebCalls <= 0 {
+		cfg.Hardening.Quotas.MaxSessionWebCalls = Default().Hardening.Quotas.MaxSessionWebCalls
+	}
+	if cfg.Hardening.Quotas.MaxSessionSubagentCalls <= 0 {
+		cfg.Hardening.Quotas.MaxSessionSubagentCalls = Default().Hardening.Quotas.MaxSessionSubagentCalls
 	}
 	for name, server := range cfg.Tools.MCPServers {
 		server.Transport = strings.ToLower(strings.TrimSpace(server.Transport))
@@ -1945,6 +1985,19 @@ func IsHostedProfile(p RuntimeProfile) bool {
 		return true
 	}
 	return false
+}
+
+func normalizeQuotaExceededAction(action QuotaExceededAction, fallback QuotaExceededAction) QuotaExceededAction {
+	normalized := QuotaExceededAction(strings.ToLower(strings.TrimSpace(string(action))))
+	if normalized == "" {
+		return fallback
+	}
+	switch normalized {
+	case QuotaExceededActionAsk, QuotaExceededActionFail:
+		return normalized
+	default:
+		return fallback
+	}
 }
 
 func compactStrings(values []string) []string {

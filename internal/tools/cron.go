@@ -17,7 +17,7 @@ type CronTool struct {
 
 func (t *CronTool) Name() string { return "cron" }
 func (t *CronTool) Description() string {
-	return "Manage scheduled jobs: add/list/remove/run/status."
+	return "Manage scheduled jobs: add, list, remove, run, or inspect status. Use this for future or recurring work, not immediate one-turn actions."
 }
 func (t *CronTool) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{

@@ -140,6 +140,7 @@ func Apply(cfg *config.Config, mode Mode) {
 	}
 	defaults := config.Default()
 	cfg.Tools.RestrictToWorkspace = true
+	cfg.Tools.AllowFullFileRead = false
 	cfg.Hardening.Quotas = defaults.Hardening.Quotas
 	switch NormalizeMode(string(mode)) {
 	case ModeRelaxed:
@@ -225,6 +226,9 @@ func Drift(cfg config.Config, mode Mode) []string {
 	drift := []string{}
 	if cfg.Tools.RestrictToWorkspace != baseline.Tools.RestrictToWorkspace {
 		drift = append(drift, fmt.Sprintf("workspace boundary expected %t", baseline.Tools.RestrictToWorkspace))
+	}
+	if cfg.Tools.AllowFullFileRead != baseline.Tools.AllowFullFileRead {
+		drift = append(drift, fmt.Sprintf("full file read access expected %t", baseline.Tools.AllowFullFileRead))
 	}
 	if cfg.Hardening.GuardedTools != baseline.Hardening.GuardedTools {
 		drift = append(drift, fmt.Sprintf("ask-before-risky-actions expected %t", baseline.Hardening.GuardedTools))

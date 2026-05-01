@@ -356,7 +356,7 @@ func TestExecTool_Description(t *testing.T) {
 	if tool.Description() == "" {
 		t.Error("expected non-empty description")
 	}
-	if !strings.Contains(tool.Description(), "approval") || !strings.Contains(tool.Description(), "safety net") {
+	if !strings.Contains(tool.Description(), "approval") || !strings.Contains(tool.Description(), "program plus args") {
 		t.Fatalf("expected description to clarify exec controls, got %q", tool.Description())
 	}
 }

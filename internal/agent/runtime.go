@@ -1892,7 +1892,8 @@ func (r *Runtime) boundTextResult(ctx context.Context, sessionKey string, text s
 		return "(no response)", "(no response)", ""
 	}
 	preview = previewText(text, r.toolPreviewBytes())
-	if r.MaxToolBytes > 0 && len(text) > r.MaxToolBytes && r.Artifacts != nil {
+	shouldStoreArtifact := r.Artifacts != nil && (preview != text || (r.MaxToolBytes > 0 && len(text) > r.MaxToolBytes))
+	if shouldStoreArtifact {
 		id, err := r.Artifacts.Save(ctx, sessionKey, "text/plain", []byte(text))
 		if err != nil {
 			log.Printf("artifact save failed: %v", err)

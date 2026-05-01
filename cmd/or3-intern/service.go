@@ -231,7 +231,9 @@ func newServiceMux(server *serviceServer) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("/internal/v1/turns", http.HandlerFunc(server.handleTurns))
 	mux.Handle("/internal/v1/subagents", http.HandlerFunc(server.handleSubagents))
+	mux.Handle("/internal/v1/subagents/", http.HandlerFunc(server.handleSubagents))
 	mux.Handle("/internal/v1/jobs/", http.HandlerFunc(server.handleJobs))
+	mux.Handle("/internal/v1/artifacts/", http.HandlerFunc(server.handleArtifacts))
 	mux.Handle("/internal/v1/pairing/requests", http.HandlerFunc(server.handlePairing))
 	mux.Handle("/internal/v1/pairing/requests/", http.HandlerFunc(server.handlePairing))
 	mux.Handle("/internal/v1/pairing/exchange", http.HandlerFunc(server.handlePairing))
@@ -1678,6 +1680,21 @@ func (s *serviceServer) runTurnJob(ctx context.Context, jobID string, req servic
 }
 
 func (s *serviceServer) handleSubagents(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/internal/v1/subagents/") {
+		if r.Method != http.MethodGet {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		jobID := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/internal/v1/subagents/"))
+		if jobID == "" || strings.Contains(jobID, "/") {
+			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "subagent job not found"})
+			return
+		}
+		if !s.writePersistedSubagentJobSnapshot(w, r, jobID) {
+			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "subagent job not found"})
+		}
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		s.handleSubagentsList(w, r)
@@ -1787,6 +1804,71 @@ func writeServiceRequestDecodeError(w http.ResponseWriter, err error) {
 	writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid request body"})
 }
 
+func (s *serviceServer) handleArtifacts(w http.ResponseWriter, r *http.Request) {
+	if !requireServiceRole(w, r, approval.RoleOperator) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	relative := strings.TrimPrefix(r.URL.Path, "/internal/v1/artifacts/")
+	artifactID := strings.TrimSpace(strings.Trim(relative, "/"))
+	if artifactID == "" || strings.Contains(artifactID, "/") {
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "artifact not found"})
+		return
+	}
+	if s.runtime == nil || s.runtime.Artifacts == nil {
+		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "artifacts unavailable"})
+		return
+	}
+	q := r.URL.Query()
+	sessionKey := serviceFirstNonEmpty(q.Get("session_key"), q.Get("sessionKey"))
+	if sessionKey == "" {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "session_key is required"})
+		return
+	}
+	const defaultMaxBytes int64 = 200_000
+	const hardCapBytes int64 = 2_000_000
+	maxBytes := defaultMaxBytes
+	if raw := strings.TrimSpace(q.Get("max_bytes")); raw != "" {
+		if parsed, err := strconv.ParseInt(raw, 10, 64); err == nil && parsed > 0 {
+			maxBytes = parsed
+		}
+	}
+	if maxBytes > hardCapBytes {
+		maxBytes = hardCapBytes
+	}
+	var offset int64
+	if raw := strings.TrimSpace(q.Get("offset")); raw != "" {
+		if parsed, err := strconv.ParseInt(raw, 10, 64); err == nil && parsed > 0 {
+			offset = parsed
+		}
+	}
+	result, err := s.runtime.Artifacts.ReadCappedFrom(r.Context(), sessionKey, artifactID, offset, maxBytes)
+	if err != nil {
+		msg := err.Error()
+		switch {
+		case strings.Contains(msg, "not found"):
+			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "artifact not found"})
+		case strings.Contains(msg, "not available for session"):
+			writeServiceJSON(w, http.StatusForbidden, map[string]any{"error": "artifact not available for session"})
+		default:
+			writeServiceError(w, r, http.StatusInternalServerError, "artifact read failed", err)
+		}
+		return
+	}
+	writeServiceJSON(w, http.StatusOK, map[string]any{
+		"id":         result.Artifact.ID,
+		"mime":       result.Artifact.Mime,
+		"size_bytes": result.Artifact.SizeBytes,
+		"offset":     offset,
+		"read_bytes": result.ReadBytes,
+		"truncated":  result.Truncated,
+		"content":    result.Content,
+	})
+}
+
 func (s *serviceServer) handleJobs(w http.ResponseWriter, r *http.Request) {
 	relative := strings.TrimPrefix(r.URL.Path, "/internal/v1/jobs/")
 	parts := strings.Split(strings.Trim(relative, "/"), "/")
@@ -1795,13 +1877,17 @@ func (s *serviceServer) handleJobs(w http.ResponseWriter, r *http.Request) {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 			return
 		}
-		snapshot, err := s.app().GetJob(parts[0])
-		if errors.Is(err, controlplane.ErrJobNotFound) {
-			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "job not found"})
-			return
-		}
+		jobID := strings.TrimSpace(parts[0])
+		snapshot, err := s.app().GetJob(jobID)
 		if err != nil {
-			writeServiceError(w, r, http.StatusServiceUnavailable, "job lookup unavailable", err)
+			if s.writePersistedSubagentJobSnapshot(w, r, jobID) {
+				return
+			}
+			if !errors.Is(err, controlplane.ErrJobNotFound) {
+				writeServiceError(w, r, http.StatusServiceUnavailable, "job lookup unavailable", err)
+				return
+			}
+			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "job not found"})
 			return
 		}
 		writeServiceValue(w, http.StatusOK, controlplane.BuildJobSnapshotResponse(snapshot))
@@ -1829,6 +1915,130 @@ func (s *serviceServer) handleJobs(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "job action not found"})
 	}
+}
+
+func (s *serviceServer) writePersistedSubagentJobSnapshot(w http.ResponseWriter, r *http.Request, jobID string) bool {
+	store := s.control().DB
+	if store == nil {
+		return false
+	}
+	job, ok, err := store.GetSubagentJob(r.Context(), jobID)
+	if err != nil {
+		writeServiceError(w, r, http.StatusServiceUnavailable, "subagent history unavailable", err)
+		return true
+	}
+	if !ok {
+		return false
+	}
+	response := controlplane.BuildSubagentJobResponse(job)
+	if requestedAt, ok := response["requested_at"]; ok {
+		response["created_at"] = requestedAt
+	}
+	if preview := strings.TrimSpace(job.ResultPreview); preview != "" {
+		response["final_text"] = preview
+	}
+	if strings.TrimSpace(job.ArtifactID) == "" {
+		if fullText := s.persistedSubagentFinalText(r.Context(), store, job); strings.TrimSpace(fullText) != "" {
+			response["final_text"] = fullText
+		}
+	}
+	response["events"] = s.persistedSubagentEvents(r.Context(), store, job)
+	writeServiceValue(w, http.StatusOK, response)
+	return true
+}
+
+func (s *serviceServer) persistedSubagentFinalText(ctx context.Context, store *db.DB, job db.SubagentJob) string {
+	if store == nil || strings.TrimSpace(job.ChildSessionKey) == "" {
+		return ""
+	}
+	messages, err := store.GetLastMessages(ctx, job.ChildSessionKey, 50)
+	if err != nil {
+		log.Printf("load persisted subagent final text failed: job=%s err=%v", job.ID, err)
+		return ""
+	}
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg := messages[i]
+		if msg.Role == "assistant" && strings.TrimSpace(msg.Content) != "" {
+			return msg.Content
+		}
+	}
+	return ""
+}
+
+func (s *serviceServer) persistedSubagentEvents(ctx context.Context, store *db.DB, job db.SubagentJob) []agent.JobEvent {
+	if store == nil || strings.TrimSpace(job.ChildSessionKey) == "" {
+		return []agent.JobEvent{}
+	}
+	messages, err := store.GetLastMessages(ctx, job.ChildSessionKey, 100)
+	if err != nil {
+		log.Printf("load persisted subagent events failed: job=%s err=%v", job.ID, err)
+		return []agent.JobEvent{}
+	}
+	events := make([]agent.JobEvent, 0)
+	var sequence int64
+	emit := func(eventType string, data map[string]any) {
+		sequence++
+		events = append(events, agent.JobEvent{Sequence: sequence, Type: eventType, Data: data})
+	}
+	for _, msg := range messages {
+		payload := decodeServiceJSONMap(msg.PayloadJSON)
+		switch msg.Role {
+		case "assistant":
+			rawCalls, ok := payload["tool_calls"].([]any)
+			if !ok {
+				continue
+			}
+			for _, raw := range rawCalls {
+				call, ok := raw.(map[string]any)
+				if !ok {
+					continue
+				}
+				function, _ := call["function"].(map[string]any)
+				name := strings.TrimSpace(fmt.Sprint(function["name"]))
+				if name == "" || name == "<nil>" {
+					name = strings.TrimSpace(fmt.Sprint(call["name"]))
+				}
+				arguments := strings.TrimSpace(fmt.Sprint(function["arguments"]))
+				if arguments == "<nil>" {
+					arguments = ""
+				}
+				data := map[string]any{"name": name, "arguments": arguments}
+				if id := strings.TrimSpace(fmt.Sprint(call["id"])); id != "" && id != "<nil>" {
+					data["tool_call_id"] = id
+				}
+				emit("tool_call", data)
+			}
+		case "tool":
+			name := strings.TrimSpace(fmt.Sprint(payload["tool"]))
+			if name == "" || name == "<nil>" {
+				name = "tool"
+			}
+			result := strings.TrimSpace(msg.Content)
+			if preview := strings.TrimSpace(fmt.Sprint(payload["preview"])); preview != "" && preview != "<nil>" {
+				result = preview
+			}
+			data := map[string]any{"name": name, "result": result}
+			if id := strings.TrimSpace(fmt.Sprint(payload["tool_call_id"])); id != "" && id != "<nil>" {
+				data["tool_call_id"] = id
+			}
+			if artifactID := strings.TrimSpace(fmt.Sprint(payload["artifact_id"])); artifactID != "" && artifactID != "<nil>" {
+				data["artifact_id"] = artifactID
+			}
+			emit("tool_result", data)
+		}
+	}
+	return events
+}
+
+func decodeServiceJSONMap(raw string) map[string]any {
+	out := map[string]any{}
+	if strings.TrimSpace(raw) == "" {
+		return out
+	}
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return map[string]any{}
+	}
+	return out
 }
 
 func (s *serviceServer) streamJob(w http.ResponseWriter, r *http.Request, jobID string) {

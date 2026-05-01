@@ -58,11 +58,11 @@ const (
 )
 
 type serviceRouteRequirement struct {
-	Sensitivity serviceRouteSensitivity
-	SessionOnly bool
+	Sensitivity         serviceRouteSensitivity
+	SessionOnly         bool
 	BypassGlobalSession bool
-	StepUpOnly  bool
-	Reason      string
+	StepUpOnly          bool
+	Reason              string
 }
 
 func serviceAuthMiddleware(secret string, next http.Handler) http.Handler {

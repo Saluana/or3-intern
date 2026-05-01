@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"os"
 	"strings"
 
 	"or3-intern/internal/approval"
@@ -9,7 +11,13 @@ import (
 	intdoctor "or3-intern/internal/doctor"
 )
 
+var startupWarningWriter io.Writer = os.Stderr
+
 func validateStartupCommand(cmd string, cfg config.Config, unsafeDev bool) error {
+	return validateStartupCommandWithOptions(cmd, cfg, unsafeDev, true)
+}
+
+func validateStartupCommandWithOptions(cmd string, cfg config.Config, unsafeDev bool, emitWarnings bool) error {
 	cmd = strings.ToLower(strings.TrimSpace(cmd))
 	if unsafeDev {
 		return nil
@@ -22,10 +30,15 @@ func validateStartupCommand(cmd string, cfg config.Config, unsafeDev bool) error
 		return nil
 	}
 	report := intdoctor.Evaluate(cfg, intdoctor.Options{Mode: mode})
-	if !report.HasBlockingFindings() {
+	blockers := report.BlockingFindings()
+	warnings := startupNonBlockingWarnings(blockers)
+	if emitWarnings && len(warnings) > 0 {
+		emitStartupWarnings(cmd, warnings)
+	}
+	blockers = startupBlockingFindings(blockers)
+	if len(blockers) == 0 {
 		return nil
 	}
-	blockers := report.BlockingFindings()
 	top := intdoctor.TopFindings(blockers, 3)
 	parts := make([]string, 0, len(top))
 	for _, finding := range top {
@@ -36,6 +49,57 @@ func validateStartupCommand(cmd string, cfg config.Config, unsafeDev bool) error
 		message += fmt.Sprintf(" (%d more blocking finding(s))", len(blockers)-len(top))
 	}
 	return startupRefusal(cmd, message, blockers)
+}
+
+func startupBlockingFindings(findings []intdoctor.Finding) []intdoctor.Finding {
+	filtered := make([]intdoctor.Finding, 0, len(findings))
+	for _, finding := range findings {
+		if startupWarningOnlyFinding(finding) {
+			continue
+		}
+		filtered = append(filtered, finding)
+	}
+	return filtered
+}
+
+func startupNonBlockingWarnings(findings []intdoctor.Finding) []intdoctor.Finding {
+	warnings := make([]intdoctor.Finding, 0, 1)
+	for _, finding := range findings {
+		if startupWarningOnlyFinding(finding) {
+			warnings = append(warnings, finding)
+		}
+	}
+	return warnings
+}
+
+func startupWarningOnlyFinding(finding intdoctor.Finding) bool {
+	switch finding.ID {
+	case "privileged-exec.sandbox_disabled":
+		return true
+	default:
+		return false
+	}
+}
+
+func emitStartupWarnings(cmd string, warnings []intdoctor.Finding) {
+	if startupWarningWriter == nil || len(warnings) == 0 {
+		return
+	}
+	cmd = strings.TrimSpace(cmd)
+	if cmd == "" {
+		cmd = "startup"
+	}
+	for _, warning := range warnings {
+		message := strings.TrimSpace(warning.Summary)
+		if detail := strings.TrimSpace(warning.Detail); detail != "" {
+			message += ": " + detail
+		}
+		guidance := strings.TrimSpace(warning.FixHint)
+		if guidance == "" {
+			guidance = "Disable privileged tools or enable sandboxing before using this in a less-trusted environment."
+		}
+		fmt.Fprintf(startupWarningWriter, "warning: %s startup continuing without sandbox protection: %s; %s\n", cmd, message, guidance)
+	}
 }
 
 func validateStrictServicePosture(cmd string, cfg config.Config) error {

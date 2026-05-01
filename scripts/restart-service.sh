@@ -70,8 +70,20 @@ service_port() {
 }
 
 ensure_binary() {
-  if [[ "$rebuild" == true || ! -x "$repo_root/or3-intern" ]]; then
-    (cd "$repo_root" && go build -o "$repo_root/or3-intern" ./cmd/or3-intern)
+  local binary="$repo_root/or3-intern"
+  local needs_rebuild=false
+
+  if [[ "$rebuild" == true || ! -x "$binary" ]]; then
+    needs_rebuild=true
+  elif find "$repo_root/cmd" "$repo_root/internal" -type f -name '*.go' -newer "$binary" -print -quit | grep -q .; then
+    needs_rebuild=true
+  elif [[ "$repo_root/go.mod" -nt "$binary" || "$repo_root/go.sum" -nt "$binary" ]]; then
+    needs_rebuild=true
+  fi
+
+  if [[ "$needs_rebuild" == true ]]; then
+    echo "Building or3-intern binary..."
+    (cd "$repo_root" && go build -o "$binary" ./cmd/or3-intern)
   fi
 }
 

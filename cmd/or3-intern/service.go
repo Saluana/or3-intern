@@ -190,7 +190,7 @@ func runServiceCommandWithBroker(ctx context.Context, cfg config.Config, rt *age
 	if strings.TrimSpace(cfg.Service.Secret) == "" {
 		return fmt.Errorf("service secret is required")
 	}
-	if err := validateStartupCommand("service", cfg, false); err != nil {
+	if err := validateStartupCommandWithOptions("service", cfg, false, false); err != nil {
 		return err
 	}
 	if rt == nil {

@@ -1236,6 +1236,108 @@ func TestSubagentJobs_EnqueueWithLimit(t *testing.T) {
 	}
 }
 
+func TestSubagentJobs_ListSubagentJobs(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	now := NowMS()
+	enqueue := func(id, parent, status string, requestedAt, finishedAt int64) {
+		t.Helper()
+		job := SubagentJob{
+			ID:               id,
+			ParentSessionKey: parent,
+			ChildSessionKey:  parent + ":subagent:" + id,
+			Task:             "task " + id,
+			Status:           status,
+			RequestedAt:      requestedAt,
+			FinishedAt:       finishedAt,
+			MetadataJSON:     `{"secret":"do-not-leak"}`,
+		}
+		if err := d.EnqueueSubagentJob(ctx, job); err != nil {
+			t.Fatalf("EnqueueSubagentJob %s: %v", id, err)
+		}
+	}
+	enqueue("a-queued", "alice", SubagentStatusQueued, now-3000, 0)
+	enqueue("b-running", "alice", SubagentStatusRunning, now-2000, 0)
+	enqueue("c-succeeded", "bob", SubagentStatusSucceeded, now-5000, now-1000)
+	enqueue("d-failed", "alice", SubagentStatusFailed, now-4500, now-500)
+	enqueue("e-interrupted", "alice", SubagentStatusInterrupted, now-4000, now-100)
+
+	t.Run("default returns newest first", func(t *testing.T) {
+		jobs, err := d.ListSubagentJobs(ctx, SubagentJobFilter{})
+		if err != nil {
+			t.Fatalf("ListSubagentJobs: %v", err)
+		}
+		if len(jobs) != 5 {
+			t.Fatalf("want 5 jobs, got %d", len(jobs))
+		}
+		if jobs[0].ID != "e-interrupted" {
+			t.Fatalf("want newest activity first, got %s", jobs[0].ID)
+		}
+	})
+
+	t.Run("active filter", func(t *testing.T) {
+		jobs, err := d.ListSubagentJobs(ctx, SubagentJobFilter{Status: "active"})
+		if err != nil {
+			t.Fatalf("ListSubagentJobs active: %v", err)
+		}
+		if len(jobs) != 2 {
+			t.Fatalf("want 2 active jobs, got %d", len(jobs))
+		}
+		for _, job := range jobs {
+			if job.Status != SubagentStatusQueued && job.Status != SubagentStatusRunning {
+				t.Fatalf("unexpected status %q in active filter", job.Status)
+			}
+		}
+	})
+
+	t.Run("terminal filter", func(t *testing.T) {
+		jobs, err := d.ListSubagentJobs(ctx, SubagentJobFilter{Status: "terminal"})
+		if err != nil {
+			t.Fatalf("ListSubagentJobs terminal: %v", err)
+		}
+		if len(jobs) != 3 {
+			t.Fatalf("want 3 terminal jobs, got %d", len(jobs))
+		}
+	})
+
+	t.Run("specific status filter", func(t *testing.T) {
+		jobs, err := d.ListSubagentJobs(ctx, SubagentJobFilter{Status: SubagentStatusFailed})
+		if err != nil {
+			t.Fatalf("ListSubagentJobs failed: %v", err)
+		}
+		if len(jobs) != 1 || jobs[0].ID != "d-failed" {
+			t.Fatalf("want d-failed, got %#v", jobs)
+		}
+	})
+
+	t.Run("parent session filter", func(t *testing.T) {
+		jobs, err := d.ListSubagentJobs(ctx, SubagentJobFilter{ParentSessionKey: "bob"})
+		if err != nil {
+			t.Fatalf("ListSubagentJobs parent: %v", err)
+		}
+		if len(jobs) != 1 || jobs[0].ID != "c-succeeded" {
+			t.Fatalf("want c-succeeded, got %#v", jobs)
+		}
+	})
+
+	t.Run("limit applied", func(t *testing.T) {
+		jobs, err := d.ListSubagentJobs(ctx, SubagentJobFilter{Limit: 2})
+		if err != nil {
+			t.Fatalf("ListSubagentJobs limit: %v", err)
+		}
+		if len(jobs) != 2 {
+			t.Fatalf("want 2 jobs, got %d", len(jobs))
+		}
+	})
+
+	t.Run("invalid status rejected", func(t *testing.T) {
+		_, err := d.ListSubagentJobs(ctx, SubagentJobFilter{Status: "bogus"})
+		if err == nil {
+			t.Fatal("expected error for invalid status filter")
+		}
+	})
+}
+
 func TestSubagentJobs_FinalizePersistsSummaryAtomically(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()

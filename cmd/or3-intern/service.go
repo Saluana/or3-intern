@@ -1678,7 +1678,13 @@ func (s *serviceServer) runTurnJob(ctx context.Context, jobID string, req servic
 }
 
 func (s *serviceServer) handleSubagents(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
+	switch r.Method {
+	case http.MethodGet:
+		s.handleSubagentsList(w, r)
+		return
+	case http.MethodPost:
+		// fall through
+	default:
 		writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 		return
 	}
@@ -1733,6 +1739,37 @@ func (s *serviceServer) handleSubagents(w http.ResponseWriter, r *http.Request) 
 		"child_session_key": job.ChildSessionKey,
 		"status":            db.SubagentStatusQueued,
 	})
+}
+
+func (s *serviceServer) handleSubagentsList(w http.ResponseWriter, r *http.Request) {
+	store := s.control().DB
+	if store == nil {
+		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "subagent history is not available"})
+		return
+	}
+	query := r.URL.Query()
+	filter := db.SubagentJobFilter{
+		Status:           strings.TrimSpace(query.Get("status")),
+		ParentSessionKey: strings.TrimSpace(query.Get("parent_session_key")),
+	}
+	if rawLimit := strings.TrimSpace(query.Get("limit")); rawLimit != "" {
+		parsed, err := strconv.Atoi(rawLimit)
+		if err != nil || parsed <= 0 {
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "limit must be a positive integer"})
+			return
+		}
+		filter.Limit = parsed
+	}
+	jobs, err := store.ListSubagentJobs(r.Context(), filter)
+	if err != nil {
+		if strings.Contains(err.Error(), "invalid subagent status filter") {
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		writeServiceError(w, r, http.StatusServiceUnavailable, "subagent history unavailable", err)
+		return
+	}
+	writeServiceValue(w, http.StatusOK, controlplane.BuildSubagentJobListResponse(jobs))
 }
 
 func limitServiceRequestBody(w http.ResponseWriter, r *http.Request, maxBytes int64) {

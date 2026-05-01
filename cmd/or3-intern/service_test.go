@@ -935,10 +935,17 @@ func TestServiceJobs_MethodGuardsAndNotFound(t *testing.T) {
 		},
 		{
 			name:       "subagents rejects non post",
-			method:     http.MethodGet,
+			method:     http.MethodDelete,
 			path:       "/internal/v1/subagents",
 			wantStatus: http.StatusMethodNotAllowed,
 			wantBody:   "method not allowed",
+		},
+		{
+			name:       "subagents list requires database",
+			method:     http.MethodGet,
+			path:       "/internal/v1/subagents",
+			wantStatus: http.StatusServiceUnavailable,
+			wantBody:   "subagent history is not available",
 		},
 	}
 
@@ -1184,6 +1191,112 @@ func TestServiceSubagents_EnqueueAndAbortQueuedJob(t *testing.T) {
 	if !ok || stored.Status != db.SubagentStatusInterrupted {
 		t.Fatalf("expected interrupted subagent after abort, got %#v ok=%v", stored, ok)
 	}
+}
+
+func TestServiceSubagents_ListReturnsSanitizedHistory(t *testing.T) {
+	database, cleanup := openServiceTestDB(t)
+	defer cleanup()
+	jobs := agent.NewJobRegistry(time.Minute, 32)
+	manager := &agent.SubagentManager{DB: database, Jobs: jobs, MaxQueued: 4}
+	rt := &agent.Runtime{DB: database}
+	server := &serviceServer{runtime: rt, subagentManager: manager, jobs: jobs}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("l", 32), server)
+	defer httpServer.Close()
+
+	ctx := context.Background()
+	now := db.NowMS()
+	seed := []db.SubagentJob{
+		{ID: "list-a", ParentSessionKey: "alice", ChildSessionKey: "alice:s:a", Task: "research X", Status: db.SubagentStatusQueued, RequestedAt: now - 3000, MetadataJSON: `{"secret":"do-not-leak"}`},
+		{ID: "list-b", ParentSessionKey: "bob", ChildSessionKey: "bob:s:b", Task: "draft email", Status: db.SubagentStatusSucceeded, RequestedAt: now - 5000, FinishedAt: now - 1000, ResultPreview: "draft ready", MetadataJSON: `{"secret":"do-not-leak"}`},
+	}
+	for _, job := range seed {
+		if err := database.EnqueueSubagentJob(ctx, job); err != nil {
+			t.Fatalf("EnqueueSubagentJob %s: %v", job.ID, err)
+		}
+		if job.Status == db.SubagentStatusSucceeded {
+			if err := database.MarkSubagentSucceeded(ctx, job.ID, job.ResultPreview, ""); err != nil {
+				t.Fatalf("MarkSubagentSucceeded: %v", err)
+			}
+		}
+	}
+
+	req := mustServiceRequest(t, httpServer, strings.Repeat("l", 32), http.MethodGet, "/internal/v1/subagents?limit=10", "")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do list: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	body := mustReadBody(t, resp.Body)
+	if strings.Contains(body, "do-not-leak") {
+		t.Fatalf("response leaked metadata_json: %s", body)
+	}
+	if !strings.Contains(body, "list-a") || !strings.Contains(body, "list-b") {
+		t.Fatalf("expected both jobs in response: %s", body)
+	}
+	if !strings.Contains(body, `"kind":"subagent"`) {
+		t.Fatalf("expected sanitized kind in response: %s", body)
+	}
+	if !strings.Contains(body, `"task":"research X"`) || !strings.Contains(body, `"task":"draft email"`) {
+		t.Fatalf("expected task labels in response: %s", body)
+	}
+
+	t.Run("status filter", func(t *testing.T) {
+		req := mustServiceRequest(t, httpServer, strings.Repeat("l", 32), http.MethodGet, "/internal/v1/subagents?status=terminal", "")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("Do list terminal: %v", err)
+		}
+		defer resp.Body.Close()
+		body := mustReadBody(t, resp.Body)
+		if strings.Contains(body, "list-a") {
+			t.Fatalf("queued job should not appear in terminal filter: %s", body)
+		}
+		if !strings.Contains(body, "list-b") {
+			t.Fatalf("succeeded job should appear in terminal filter: %s", body)
+		}
+	})
+
+	t.Run("invalid status rejected", func(t *testing.T) {
+		req := mustServiceRequest(t, httpServer, strings.Repeat("l", 32), http.MethodGet, "/internal/v1/subagents?status=bogus", "")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("Do list bogus: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("expected 400 for bogus status, got %d", resp.StatusCode)
+		}
+	})
+
+	t.Run("invalid limit rejected", func(t *testing.T) {
+		req := mustServiceRequest(t, httpServer, strings.Repeat("l", 32), http.MethodGet, "/internal/v1/subagents?limit=zero", "")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("Do list bad limit: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("expected 400 for non-numeric limit, got %d", resp.StatusCode)
+		}
+	})
+
+	t.Run("requires authorization", func(t *testing.T) {
+		anonReq, err := http.NewRequest(http.MethodGet, httpServer.URL+"/internal/v1/subagents", nil)
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		resp, err := http.DefaultClient.Do(anonReq)
+		if err != nil {
+			t.Fatalf("Do anon: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("expected 401, got %d", resp.StatusCode)
+		}
+	})
 }
 
 func buildServiceTestRuntime(t *testing.T, handler func(http.ResponseWriter, *http.Request)) (*agent.Runtime, func()) {

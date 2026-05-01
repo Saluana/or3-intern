@@ -1137,6 +1137,92 @@ func (d *DB) listSubagentJobsByStatus(ctx context.Context, status string) ([]Sub
 	return out, rows.Err()
 }
 
+// SubagentJobFilter narrows ListSubagentJobs results.
+//
+// Status accepts the database-native subagent statuses
+// (queued, running, succeeded, failed, interrupted) plus the convenience
+// values "active" (queued or running) and "terminal" (succeeded, failed,
+// interrupted). An empty Status returns all rows.
+type SubagentJobFilter struct {
+	Status           string
+	ParentSessionKey string
+	Limit            int
+}
+
+// SubagentJobListDefaultLimit is the default row count returned when no
+// limit is specified.
+const SubagentJobListDefaultLimit = 50
+
+// SubagentJobListMaxLimit caps the maximum row count to keep the response
+// bounded for mobile clients.
+const SubagentJobListMaxLimit = 100
+
+// ListSubagentJobs returns persisted subagent jobs ordered newest first.
+// It uses a stable sort key (max of requested_at/started_at/finished_at)
+// so completed jobs appear above older queued ones.
+func (d *DB) ListSubagentJobs(ctx context.Context, filter SubagentJobFilter) ([]SubagentJob, error) {
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = SubagentJobListDefaultLimit
+	}
+	if limit > SubagentJobListMaxLimit {
+		limit = SubagentJobListMaxLimit
+	}
+
+	clauses := []string{}
+	args := []any{}
+
+	switch strings.ToLower(strings.TrimSpace(filter.Status)) {
+	case "":
+		// no filter
+	case "active":
+		clauses = append(clauses, "status IN (?, ?)")
+		args = append(args, SubagentStatusQueued, SubagentStatusRunning)
+	case "terminal":
+		clauses = append(clauses, "status IN (?, ?, ?)")
+		args = append(args, SubagentStatusSucceeded, SubagentStatusFailed, SubagentStatusInterrupted)
+	case SubagentStatusQueued, SubagentStatusRunning, SubagentStatusSucceeded, SubagentStatusFailed, SubagentStatusInterrupted:
+		clauses = append(clauses, "status=?")
+		args = append(args, strings.ToLower(strings.TrimSpace(filter.Status)))
+	default:
+		return nil, fmt.Errorf("invalid subagent status filter %q", filter.Status)
+	}
+
+	if parent := strings.TrimSpace(filter.ParentSessionKey); parent != "" {
+		clauses = append(clauses, "parent_session_key=?")
+		args = append(args, parent)
+	}
+
+	where := ""
+	if len(clauses) > 0 {
+		where = "WHERE " + strings.Join(clauses, " AND ")
+	}
+	args = append(args, limit)
+
+	// Order by the most recent activity timestamp so finished jobs sort
+	// alongside their queued/started counterparts in a single timeline.
+	query := `SELECT id, parent_session_key, child_session_key, channel, reply_to, task, status,
+			result_preview, artifact_id, error_text, requested_at, started_at, finished_at, attempts, metadata_json
+		 FROM subagent_jobs ` + where + `
+		 ORDER BY MAX(requested_at, started_at, finished_at) DESC, id DESC
+		 LIMIT ?`
+
+	rows, err := d.SQL.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]SubagentJob, 0, limit)
+	for rows.Next() {
+		job, err := scanSubagentJob(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, job)
+	}
+	return out, rows.Err()
+}
+
 func (d *DB) MarkSubagentRunning(ctx context.Context, id string) error {
 	now := NowMS()
 	_, err := d.SQL.ExecContext(ctx,

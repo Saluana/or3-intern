@@ -75,6 +75,7 @@ Root help shows the full command catalog by default:
 - `or3-intern config-path` print the resolved config.json path
 - `or3-intern serve` run enabled external channels and automation
 - `or3-intern service` run the internal authenticated HTTP API for OR3 Net
+- `scripts/restart-service.sh [restart|start|stop|status]` manage a repo-run `or3-intern service` process without retyping the full command
 - `or3-intern agent -m "hello"` run a one-shot turn
 - `or3-intern doctor [--strict|--json|--fix]` diagnose readiness issues, explain risk, and repair safe local problems
 - `or3-intern embeddings <status|rebuild>` inspect or rebuild stored memory/doc embeddings after provider or embedding-model changes

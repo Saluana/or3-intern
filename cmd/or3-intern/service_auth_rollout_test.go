@@ -77,6 +77,8 @@ func TestServiceAuthMiddleware_RolloutModesForLegacyPairedTokens(t *testing.T) {
 		{name: "enforce sensitive blocks paired token without passkey", mode: config.AuthEnforcementSensitive, path: "/internal/v1/configure/security", method: http.MethodPost, wantStatus: http.StatusUnauthorized, wantCode: auth.CodeSessionRequired},
 		{name: "enforce sensitive keeps low risk paired token workflow", mode: config.AuthEnforcementSensitive, path: "/internal/v1/turns", method: http.MethodPost, wantStatus: http.StatusOK},
 		{name: "enforce session blocks low risk paired token without session", mode: config.AuthEnforcementSession, path: "/internal/v1/turns", method: http.MethodPost, wantStatus: http.StatusUnauthorized, wantCode: auth.CodeSessionRequired},
+		{name: "enforce session allows paired token for passkey login begin", mode: config.AuthEnforcementSession, path: "/internal/v1/auth/passkeys/login/begin", method: http.MethodPost, wantStatus: http.StatusOK},
+		{name: "enforce session allows paired token for passkey login finish", mode: config.AuthEnforcementSession, path: "/internal/v1/auth/passkeys/login/finish", method: http.MethodPost, wantStatus: http.StatusOK},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -147,6 +149,7 @@ func TestServiceRouteRequirementForRequest_SensitivityMatrix(t *testing.T) {
 		stepUpOnly  bool
 	}{
 		{method: http.MethodGet, path: "/internal/v1/auth/capabilities", want: serviceRoutePublic},
+		{method: http.MethodGet, path: "/internal/v1/readiness", want: serviceRoutePublic},
 		{method: http.MethodGet, path: "/internal/v1/capabilities", want: serviceRouteLowRisk},
 		{method: http.MethodPost, path: "/internal/v1/auth/passkeys/login/begin", want: serviceRouteLowRisk},
 		{method: http.MethodPost, path: "/internal/v1/auth/passkeys/login/finish", want: serviceRouteLowRisk},
@@ -168,6 +171,24 @@ func TestServiceRouteRequirementForRequest_SensitivityMatrix(t *testing.T) {
 				t.Fatalf("unexpected requirement: got %#v", got)
 			}
 		})
+	}
+}
+
+func TestServiceAuthMiddleware_PublicReadinessDoesNotRequireBearer(t *testing.T) {
+	cfg := rolloutAuthTestConfig(config.AuthEnforcementSession)
+	handler := serviceAuthMiddlewareWithBroker(cfg, nil, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := serviceAuthKindFromContext(r.Context()); got != "public" {
+			t.Fatalf("expected public auth kind, got %q", got)
+		}
+		writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true})
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/internal/v1/readiness", nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rec.Code, rec.Body.String())
 	}
 }
 

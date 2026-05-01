@@ -60,6 +60,7 @@ const (
 type serviceRouteRequirement struct {
 	Sensitivity serviceRouteSensitivity
 	SessionOnly bool
+	BypassGlobalSession bool
 	StepUpOnly  bool
 	Reason      string
 }
@@ -501,12 +502,12 @@ func serviceRouteRequirementForRequest(cfg config.Config, r *http.Request) servi
 	path := strings.TrimSpace(r.URL.Path)
 	method := r.Method
 	switch {
-	case path == "/internal/v1/health", path == "/internal/v1/ready":
+	case path == "/internal/v1/health", path == "/internal/v1/ready", path == "/internal/v1/readiness":
 		return serviceRouteRequirement{Sensitivity: serviceRoutePublic}
 	case path == "/internal/v1/auth/capabilities":
 		return serviceRouteRequirement{Sensitivity: serviceRoutePublic}
 	case path == "/internal/v1/auth/passkeys/login/begin", path == "/internal/v1/auth/passkeys/login/finish":
-		return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
+		return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, BypassGlobalSession: true}
 	case path == "/internal/v1/auth/passkeys/registration/begin", path == "/internal/v1/auth/passkeys/registration/finish":
 		return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
 	case path == "/internal/v1/auth/session" || path == "/internal/v1/auth/session/revoke":
@@ -570,7 +571,7 @@ func serviceAuthChallengeError(cfg config.Config, authSvc *auth.Service, require
 		if authSvc == nil || !authSvc.Enabled() {
 			return auth.ErrAuthDisabled
 		}
-		if requirement.SessionOnly || strings.EqualFold(mode, string(config.AuthEnforcementSession)) {
+		if requirement.SessionOnly || (strings.EqualFold(mode, string(config.AuthEnforcementSession)) && !requirement.BypassGlobalSession) {
 			return auth.ErrSessionRequired
 		}
 		if requirement.Sensitivity == serviceRouteSensitive {
@@ -581,7 +582,7 @@ func serviceAuthChallengeError(cfg config.Config, authSvc *auth.Service, require
 	if strings.EqualFold(identity.Kind, "shared-secret") {
 		return nil
 	}
-	enforceSession := requirement.SessionOnly || strings.EqualFold(mode, string(config.AuthEnforcementSession))
+	enforceSession := requirement.SessionOnly || (strings.EqualFold(mode, string(config.AuthEnforcementSession)) && !requirement.BypassGlobalSession)
 	if enforceSession && identity.Kind != "auth-session" {
 		return auth.ErrSessionRequired
 	}

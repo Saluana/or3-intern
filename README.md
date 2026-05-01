@@ -19,22 +19,22 @@ or3-intern version
 ```
 
 1. Run guided setup:
-   ```bash
-   or3-intern setup
-   ```
+    ```bash
+    or3-intern setup
+    ```
 2. Start an interactive local session:
-   ```bash
-   or3-intern chat
-   ```
-   Inside chat, use `/new` when you want to archive the current conversation into memory and start with a clean live session.
+    ```bash
+    or3-intern chat
+    ```
+    Inside chat, use `/new` when you want to archive the current conversation into memory and start with a clean live session.
 3. Or run enabled external channels and automation:
-   ```bash
-   or3-intern serve
-   ```
+    ```bash
+    or3-intern serve
+    ```
 4. Check safety and access posture any time:
-   ```bash
-   or3-intern status
-   ```
+    ```bash
+    or3-intern status
+    ```
 
 The `setup` command is the recommended first-run flow. It asks for a provider, workspace folder, scenario, and safety mode, then translates those choices into the existing runtime profile, approvals, audit, service, and hardening settings.
 

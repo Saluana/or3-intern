@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -132,18 +133,19 @@ type SkillPermissions struct {
 
 // SkillMeta is the fully merged metadata for one discovered skill.
 type SkillMeta struct {
-	Name        string
-	Description string
-	Homepage    string
-	Path        string
-	Dir         string
-	Location    string
-	Source      Source
-	ModTime     time.Time
-	Size        int64
-	ID          string
-	Summary     string
-	Entrypoints []SkillEntry
+	Name         string
+	Description  string
+	Homepage     string
+	Path         string
+	Dir          string
+	Location     string
+	Source       Source
+	ModTime      time.Time
+	Size         int64
+	ID           string
+	Summary      string
+	Entrypoints  []SkillEntry
+	Dependencies []string
 
 	UserInvocable          bool
 	DisableModelInvocation bool
@@ -287,6 +289,7 @@ func ScanWithOptions(opts LoadOptions) Inventory {
 	for _, s := range metaByName {
 		skills = append(skills, s)
 	}
+	applySkillDependencyEligibility(skills)
 	sort.Slice(skills, func(i, j int) bool {
 		if skills[i].Name == skills[j].Name {
 			if skills[i].sourcePriority == skills[j].sourcePriority {
@@ -391,6 +394,7 @@ func loadSkill(dir, path string, root Root, order int, opts LoadOptions) SkillMe
 	meta.Description = strings.TrimSpace(firstNonEmpty(fm.Description, fm.Summary))
 	meta.Summary = meta.Description
 	meta.Homepage = strings.TrimSpace(fm.Homepage)
+	meta.Dependencies = detectSkillDependencies(body)
 	if fm.UserInvocable != nil {
 		meta.UserInvocable = *fm.UserInvocable
 	}
@@ -440,6 +444,96 @@ func loadSkill(dir, path string, root Root, order int, opts LoadOptions) SkillMe
 	applyEligibility(&meta, rawTop, body, entry, opts)
 	applyApprovalPolicy(&meta, opts.ApprovalPolicy)
 	return meta
+}
+
+var (
+	relativeSkillRefPattern = regexp.MustCompile(`\.\./([A-Za-z0-9][A-Za-z0-9_.-]*)/SKILL\.md`)
+	backtickSkillRefPattern = regexp.MustCompile("`([A-Za-z0-9][A-Za-z0-9_.-]*)`")
+)
+
+func detectSkillDependencies(body string) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	add := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" || strings.HasPrefix(name, "-") {
+			return
+		}
+		lower := strings.ToLower(name)
+		if _, ok := seen[lower]; ok {
+			return
+		}
+		seen[lower] = struct{}{}
+		out = append(out, name)
+	}
+	for _, match := range relativeSkillRefPattern.FindAllStringSubmatch(body, -1) {
+		if len(match) > 1 {
+			add(match[1])
+		}
+	}
+	for _, line := range strings.Split(body, "\n") {
+		lower := strings.ToLower(line)
+		if !strings.Contains(lower, "prerequisite") && !(strings.Contains(lower, "load") && strings.Contains(lower, "skill")) {
+			continue
+		}
+		for _, match := range backtickSkillRefPattern.FindAllStringSubmatch(line, -1) {
+			if len(match) > 1 {
+				add(match[1])
+			}
+		}
+	}
+	return out
+}
+
+func applySkillDependencyEligibility(skills []SkillMeta) {
+	if len(skills) == 0 {
+		return
+	}
+	byName := map[string]int{}
+	for i, skill := range skills {
+		byName[strings.ToLower(skill.Name)] = i
+	}
+	changed := true
+	for changed {
+		changed = false
+		for i := range skills {
+			if len(skills[i].Dependencies) == 0 {
+				continue
+			}
+			for _, dep := range skills[i].Dependencies {
+				dep = strings.TrimSpace(dep)
+				if dep == "" || strings.EqualFold(dep, skills[i].Name) {
+					continue
+				}
+				depIdx, ok := byName[strings.ToLower(dep)]
+				if !ok {
+					if appendMissingReason(&skills[i], "missing skill dependency: "+dep) {
+						changed = true
+					}
+					continue
+				}
+				if !skills[depIdx].Eligible || skills[depIdx].Hidden {
+					if appendMissingReason(&skills[i], "unavailable skill dependency: "+dep) {
+						changed = true
+					}
+				}
+			}
+		}
+	}
+}
+
+func appendMissingReason(skill *SkillMeta, reason string) bool {
+	if skill == nil || strings.TrimSpace(reason) == "" {
+		return false
+	}
+	for _, existing := range skill.Missing {
+		if existing == reason {
+			return false
+		}
+	}
+	skill.Missing = append(skill.Missing, reason)
+	skill.Eligible = false
+	return true
 }
 
 func applyOriginMetadata(meta *SkillMeta) {
@@ -795,6 +889,11 @@ func detectUnsupported(meta SkillMeta, rawTop map[string]any, body string, opts 
 	}
 	if meta.Metadata.Nix != nil && strings.TrimSpace(meta.Metadata.Nix.Plugin) != "" {
 		unsupported = append(unsupported, "requires nix plugin: "+meta.Metadata.Nix.Plugin)
+	}
+	if len(meta.Metadata.Requires.Bins) > 0 && len(opts.AvailableTools) > 0 {
+		if _, ok := opts.AvailableTools["exec"]; !ok {
+			unsupported = append(unsupported, "requires exec tool for local binary: "+strings.Join(meta.Metadata.Requires.Bins, ", "))
+		}
 	}
 	for _, toolName := range meta.AllowedTools {
 		if len(opts.AvailableTools) == 0 {

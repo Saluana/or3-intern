@@ -70,7 +70,7 @@ Files:
 - Use read_file mode=grep to find matching lines.
 - Use read_file mode=range for exact code sections.
 - Use preview only for small files or quick orientation.
-- Use read_file mode=full only when narrower reads are not enough; it is broader and may require a higher capability ceiling.
+- Use read_file mode=full when you need the whole bounded file; it is a safe read-only operation.
 - Use edit_file for focused changes to existing files. Use write_file when replacing or creating the whole file intentionally.
 - Use read_artifact when another tool returns an artifact_id instead of trying to repeat the original broad operation.
 - Use read_skill mode=outline first. Read full skill content only when the outline is not enough.
@@ -80,6 +80,7 @@ Tool results:
 - Treat preview as partial.
 - If artifact_id exists, use it only when the missing detail is actually needed.
 - Prefer narrower follow-up reads over asking for huge output.
+- The advertised tool schemas for this turn are the authority. Do not assume hidden tools or higher-capability modes are available.
 
 memory:
 - Use memory_recent for recent conversation context.
@@ -101,6 +102,7 @@ exec:
 - Commands have timeouts, policy checks, and bounded output.
 - Output is previewed. If output is too broad, rerun with a narrower command.
 - Use run_skill_script only for approved skills when a skill actually needs code execution; prefer read_skill first.
+- If a skill describes CLI commands but no exec/script tool is advertised, do not guess files or hidden scripts; state that execution is unavailable in this turn.
 
 messaging/subagents:
 - Use send_message only when delivery is part of the task, especially for reminders, scheduled follow-ups, or proactive outbound updates.

@@ -43,6 +43,7 @@ type serviceServer struct {
 	subagentManager  *agent.SubagentManager
 	jobs             *agent.JobRegistry
 	broker           *approval.Broker
+	unsafeDev        bool
 	controlOnce      sync.Once
 	controlSvc       *controlplane.Service
 	appOnce          sync.Once
@@ -191,10 +192,14 @@ func runServiceCommand(ctx context.Context, cfg config.Config, rt *agent.Runtime
 }
 
 func runServiceCommandWithBroker(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, jobs *agent.JobRegistry, broker *approval.Broker) error {
+	return runServiceCommandWithBrokerOptions(ctx, cfg, rt, subagentManager, jobs, broker, false)
+}
+
+func runServiceCommandWithBrokerOptions(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, jobs *agent.JobRegistry, broker *approval.Broker, unsafeDev bool) error {
 	if strings.TrimSpace(cfg.Service.Secret) == "" {
 		return fmt.Errorf("service secret is required")
 	}
-	if err := validateStartupCommandWithOptions("service", cfg, false, false); err != nil {
+	if err := validateStartupCommandWithOptions("service", cfg, unsafeDev, false); err != nil {
 		return err
 	}
 	if rt == nil {
@@ -203,7 +208,7 @@ func runServiceCommandWithBroker(ctx context.Context, cfg config.Config, rt *age
 	if jobs == nil {
 		jobs = agent.NewJobRegistry(0, 0)
 	}
-	server := &serviceServer{config: cfg, configPath: cfgPathOrDefault(""), runtime: rt, subagentManager: subagentManager, jobs: jobs, broker: broker}
+	server := &serviceServer{config: cfg, configPath: cfgPathOrDefault(""), runtime: rt, subagentManager: subagentManager, jobs: jobs, broker: broker, unsafeDev: unsafeDev}
 	authSvc := server.app().Auth()
 	mux := newServiceMux(server)
 
@@ -258,6 +263,8 @@ func newServiceMux(server *serviceServer) *http.ServeMux {
 	mux.Handle("/internal/v1/health", http.HandlerFunc(server.handleHealth))
 	mux.Handle("/internal/v1/readiness", http.HandlerFunc(server.handleReadiness))
 	mux.Handle("/internal/v1/capabilities", http.HandlerFunc(server.handleCapabilities))
+	mux.Handle("/internal/v1/app/bootstrap", http.HandlerFunc(server.handleApp))
+	mux.Handle("/internal/v1/actions/", http.HandlerFunc(server.handleActions))
 	mux.Handle("/internal/v1/embeddings", http.HandlerFunc(server.handleEmbeddings))
 	mux.Handle("/internal/v1/embeddings/", http.HandlerFunc(server.handleEmbeddings))
 	mux.Handle("/internal/v1/audit", http.HandlerFunc(server.handleAudit))
@@ -840,16 +847,13 @@ func isTextLikeExtension(name string) bool {
 }
 
 func serviceFileTextAllowed(name, mimeType string, content []byte) bool {
-	if len(content) == 0 {
-		return true
-	}
 	if bytes.IndexByte(content, 0) >= 0 || !utf8.Valid(content) {
 		return false
 	}
 	if isTextLikeMime(mimeType) || isTextLikeExtension(name) {
 		return true
 	}
-	return true
+	return false
 }
 
 func (s *serviceServer) handleFileStat(w http.ResponseWriter, r *http.Request) {
@@ -1893,6 +1897,11 @@ func (s *serviceServer) runTurnJob(ctx context.Context, jobID string, req servic
 			s.jobs.Complete(jobID, "aborted", serviceLifecyclePayload(req.SessionKey, req.Meta, map[string]any{"message": "job aborted"}))
 			return
 		}
+		if fallback, ok := serviceTurnFallbackText(err, observer); ok {
+			observer.finalText = fallback
+			s.jobs.Complete(jobID, "completed", serviceLifecyclePayload(req.SessionKey, req.Meta, map[string]any{"final_text": fallback, "degraded": true}))
+			return
+		}
 		s.jobs.Fail(jobID, servicePublicJobError(err), serviceLifecyclePayload(req.SessionKey, req.Meta, nil))
 		return
 	}
@@ -2135,6 +2144,341 @@ func (s *serviceServer) handleJobs(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "job action not found"})
 	}
+}
+
+type serviceAppBootstrapWarning struct {
+	Code     string `json:"code"`
+	Message  string `json:"message"`
+	Severity string `json:"severity"`
+}
+
+type serviceAppActionDescriptor struct {
+	ID              string `json:"id"`
+	Title           string `json:"title"`
+	Available       bool   `json:"available"`
+	DisabledReason  string `json:"disabled_reason,omitempty"`
+	SessionRequired bool   `json:"session_required,omitempty"`
+	StepUpRequired  bool   `json:"step_up_required,omitempty"`
+	ApprovalLikely  bool   `json:"approval_likely,omitempty"`
+}
+
+type serviceAppBootstrapResponse struct {
+	Host struct {
+		ID          string `json:"id,omitempty"`
+		DisplayName string `json:"display_name,omitempty"`
+		Version     string `json:"version,omitempty"`
+	} `json:"host"`
+	Pairing struct {
+		Paired   bool   `json:"paired"`
+		DeviceID string `json:"device_id,omitempty"`
+		Role     string `json:"role,omitempty"`
+	} `json:"pairing"`
+	Auth struct {
+		SessionRequired bool `json:"session_required"`
+		SessionActive   bool `json:"session_active"`
+		StepUpActive    bool `json:"step_up_active"`
+		Capabilities    struct {
+			PasskeysSupported bool `json:"passkeys_supported"`
+			StepUpSupported   bool `json:"step_up_supported"`
+		} `json:"capabilities"`
+	} `json:"auth"`
+	Status struct {
+		Health       *controlplane.HealthReport       `json:"health,omitempty"`
+		Readiness    *controlplane.ReadinessReport    `json:"readiness,omitempty"`
+		Capabilities *controlplane.CapabilitiesReport `json:"capabilities,omitempty"`
+		Summary      string                           `json:"summary"`
+		Warnings     []serviceAppBootstrapWarning     `json:"warnings,omitempty"`
+	} `json:"status"`
+	Counts struct {
+		PendingApprovals int `json:"pending_approvals"`
+		ActiveJobs       int `json:"active_jobs"`
+		ActiveTerminals  int `json:"active_terminals,omitempty"`
+	} `json:"counts"`
+	Actions  []serviceAppActionDescriptor `json:"actions"`
+	Features struct {
+		AppBootstrap   bool `json:"app_bootstrap"`
+		AppEvents      bool `json:"app_events"`
+		AppActions     bool `json:"app_actions"`
+		FileMetadataV2 bool `json:"file_metadata_v2"`
+	} `json:"features"`
+}
+
+type serviceActionResponse struct {
+	ActionID    string `json:"action_id"`
+	Status      string `json:"status"`
+	Message     string `json:"message,omitempty"`
+	ApprovalID  int64  `json:"approval_id,omitempty"`
+	OperationID string `json:"operation_id,omitempty"`
+}
+
+func (s *serviceServer) handleApp(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/internal/v1/app/bootstrap" {
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "app route not found"})
+		return
+	}
+	if r.Method != http.MethodGet {
+		writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	writeServiceValue(w, http.StatusOK, s.buildAppBootstrap(r))
+}
+
+func (s *serviceServer) handleActions(w http.ResponseWriter, r *http.Request) {
+	relative := strings.Trim(strings.TrimPrefix(r.URL.Path, "/internal/v1/actions/"), "/")
+	if relative == "" {
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "action route not found"})
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	switch relative {
+	case "restart-service":
+		s.handleRestartServiceAction(w, r)
+	default:
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "action not found"})
+	}
+}
+
+func (s *serviceServer) buildAppBootstrap(r *http.Request) serviceAppBootstrapResponse {
+	var response serviceAppBootstrapResponse
+
+	identity := serviceAuthIdentityFromContext(r.Context())
+	authSvc := s.app().Auth()
+	hostID := s.control().GetCapabilities("", "").HostID
+	hostName, _ := os.Hostname()
+	if strings.TrimSpace(hostName) == "" {
+		hostName = "or3-intern host"
+	}
+
+	response.Host.ID = hostID
+	response.Host.DisplayName = hostName
+	response.Features.AppBootstrap = true
+	response.Features.AppEvents = false
+	response.Features.AppActions = true
+	response.Features.FileMetadataV2 = false
+
+	response.Pairing.Paired = identity.Kind == "paired-device" || identity.Kind == "auth-session"
+	response.Pairing.DeviceID = identity.Device
+	response.Pairing.Role = identity.Role
+
+	response.Auth.SessionRequired = s.config.Auth.EnforcementMode == config.AuthEnforcementSession
+	response.Auth.SessionActive = identity.Kind == "auth-session"
+	response.Auth.StepUpActive = identity.StepUpOK
+	response.Auth.Capabilities.PasskeysSupported = authSvc != nil && authSvc.Enabled()
+	response.Auth.Capabilities.StepUpSupported = s.config.Auth.Enabled && s.config.Auth.RequirePasskeyForSensitive
+
+	health := s.control().GetHealth()
+	readiness := s.control().GetReadiness()
+	capabilities := s.control().GetCapabilities("", "")
+	response.Status.Health = &health
+	response.Status.Readiness = &readiness
+	response.Status.Capabilities = &capabilities
+	response.Status.Summary = serviceBootstrapSummary(health, readiness)
+
+	warnings := make([]serviceAppBootstrapWarning, 0, 6)
+	if !health.RuntimeAvailable {
+		warnings = append(warnings, serviceAppBootstrapWarning{Code: "runtime_unavailable", Message: "The OR3 runtime is not available right now.", Severity: "error"})
+	}
+	if !health.JobRegistryAvailable {
+		warnings = append(warnings, serviceAppBootstrapWarning{Code: "job_registry_unavailable", Message: "Live job tracking is limited right now.", Severity: "warning"})
+	}
+	if !health.ApprovalBrokerAvailable {
+		warnings = append(warnings, serviceAppBootstrapWarning{Code: "approval_broker_unavailable", Message: "Approval workflows are unavailable right now.", Severity: "warning"})
+	}
+	if !readiness.Ready {
+		warnings = append(warnings, serviceAppBootstrapWarning{Code: "host_not_ready", Message: "This computer still has readiness issues to resolve.", Severity: "warning"})
+	}
+	if response.Pairing.Paired && !response.Auth.SessionActive {
+		warnings = append(warnings, serviceAppBootstrapWarning{Code: "session_not_active", Message: "Passkey sign-in is still required for protected actions.", Severity: "info"})
+	}
+	response.Status.Warnings = warnings
+
+	response.Counts.PendingApprovals = s.bootstrapPendingApprovalCount(r.Context())
+	response.Counts.ActiveJobs = s.bootstrapActiveJobCount(r.Context())
+	response.Counts.ActiveTerminals = s.bootstrapActiveTerminalCount()
+
+	response.Actions = []serviceAppActionDescriptor{
+		s.restartActionDescriptor(),
+	}
+	return response
+}
+
+func serviceBootstrapSummary(health controlplane.HealthReport, readiness controlplane.ReadinessReport) string {
+	if !health.RuntimeAvailable {
+		return "offline"
+	}
+	if !readiness.Ready || strings.EqualFold(health.Status, "degraded") {
+		return "degraded"
+	}
+	return "ready"
+}
+
+func (s *serviceServer) bootstrapPendingApprovalCount(ctx context.Context) int {
+	if s == nil || s.broker == nil {
+		return 0
+	}
+	items, err := s.broker.ListApprovalRequestsFiltered(ctx, approval.StatusPending, "", 200)
+	if err != nil {
+		return 0
+	}
+	return len(items)
+}
+
+func (s *serviceServer) bootstrapActiveJobCount(ctx context.Context) int {
+	if s == nil || s.control() == nil || s.control().DB == nil {
+		return 0
+	}
+	items, err := s.control().DB.ListSubagentJobs(ctx, db.SubagentJobFilter{Status: "active", Limit: 200})
+	if err != nil {
+		return 0
+	}
+	return len(items)
+}
+
+func (s *serviceServer) bootstrapActiveTerminalCount() int {
+	if s == nil {
+		return 0
+	}
+	s.cleanupTerminalSessions()
+	s.terminalMu.Lock()
+	defer s.terminalMu.Unlock()
+	return len(s.terminalSessions)
+}
+
+func (s *serviceServer) restartActionDescriptor() serviceAppActionDescriptor {
+	descriptor := serviceAppActionDescriptor{
+		ID:              "restart-service",
+		Title:           "Restart service",
+		SessionRequired: true,
+		StepUpRequired:  true,
+	}
+	if s != nil && s.broker != nil && strings.EqualFold(string(s.config.Security.Approvals.Exec.Mode), string(config.ApprovalModeAsk)) {
+		descriptor.ApprovalLikely = true
+	}
+	if !s.terminalAvailable() {
+		descriptor.DisabledReason = "Shell access is turned off on this computer."
+		return descriptor
+	}
+	_, _, ok := s.findServiceRestartScript()
+	if !ok {
+		descriptor.DisabledReason = "The restart script is not available on this computer."
+		return descriptor
+	}
+	descriptor.Available = true
+	return descriptor
+}
+
+func (s *serviceServer) handleRestartServiceAction(w http.ResponseWriter, r *http.Request) {
+	descriptor := s.restartActionDescriptor()
+	if !descriptor.Available {
+		writeServiceJSON(w, http.StatusServiceUnavailable, serviceErrorPayload(r, serviceFirstNonEmpty(descriptor.DisabledReason, "restart is not available on this computer")))
+		return
+	}
+	scriptPath, workingDir, ok := s.findServiceRestartScript()
+	if !ok {
+		writeServiceJSON(w, http.StatusServiceUnavailable, serviceErrorPayload(r, "restart is not available on this computer"))
+		return
+	}
+	shellPath, err := resolveTerminalShell("sh")
+	if err != nil {
+		writeServiceError(w, r, http.StatusServiceUnavailable, "restart shell is not available", err)
+		return
+	}
+	decision, err := s.evaluateTerminalApproval(r.Context(), shellPath, workingDir, "")
+	if err != nil {
+		writeServiceError(w, r, http.StatusBadGateway, "restart approval failed", err)
+		return
+	}
+	if decision.RequiresApproval {
+		writeServiceValue(w, http.StatusConflict, serviceActionResponse{
+			ActionID:   "restart-service",
+			Status:     "approval_required",
+			Message:    "restart service requires approval",
+			ApprovalID: decision.RequestID,
+		})
+		return
+	}
+	if !decision.Allowed {
+		reason := strings.TrimSpace(decision.Reason)
+		if reason == "" {
+			reason = "restart service denied"
+		}
+		writeServiceJSON(w, http.StatusForbidden, serviceErrorPayload(r, reason))
+		return
+	}
+	if err := startDetachedServiceRestart(scriptPath, workingDir, s.unsafeDev); err != nil {
+		writeServiceError(w, r, http.StatusBadGateway, "restart failed to start", err)
+		return
+	}
+	writeServiceValue(w, http.StatusAccepted, serviceActionResponse{
+		ActionID:    "restart-service",
+		Status:      "accepted",
+		Message:     "restart requested",
+		OperationID: newServiceRequestID(),
+	})
+}
+
+func startDetachedServiceRestart(scriptPath, workingDir string, unsafeDev bool) error {
+	scriptPath = strings.TrimSpace(scriptPath)
+	workingDir = strings.TrimSpace(workingDir)
+	if scriptPath == "" || workingDir == "" {
+		return fmt.Errorf("restart script is unavailable")
+	}
+	cmd := exec.Command(scriptPath, "restart")
+	cmd.Dir = workingDir
+	if unsafeDev {
+		cmd.Env = append(os.Environ(), "OR3_SERVICE_UNSAFE_DEV=true")
+	}
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	return cmd.Start()
+}
+
+func (s *serviceServer) findServiceRestartScript() (scriptPath string, workingDir string, ok bool) {
+	for _, dir := range serviceRestartSearchDirs() {
+		script := filepath.Join(dir, "scripts", "restart-service.sh")
+		info, err := os.Stat(script)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		if info.Mode()&0o111 == 0 {
+			continue
+		}
+		return script, dir, true
+	}
+	return "", "", false
+}
+
+func serviceRestartSearchDirs() []string {
+	candidates := make([]string, 0, 8)
+	appendDir := func(dir string) {
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			return
+		}
+		dir = filepath.Clean(dir)
+		for _, existing := range candidates {
+			if existing == dir {
+				return
+			}
+		}
+		candidates = append(candidates, dir)
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		appendDir(cwd)
+		appendDir(filepath.Join(cwd, "..", "or3-intern"))
+		appendDir(filepath.Join(cwd, "or3-intern"))
+	}
+	if exe, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exe)
+		appendDir(exeDir)
+		appendDir(filepath.Join(exeDir, ".."))
+		appendDir(filepath.Join(exeDir, "..", "or3-intern"))
+		appendDir(filepath.Join(exeDir, "or3-intern"))
+	}
+	return candidates
 }
 
 func (s *serviceServer) writePersistedSubagentJobSnapshot(w http.ResponseWriter, r *http.Request, jobID string) bool {
@@ -2496,6 +2840,23 @@ func servicePublicJobError(err error) string {
 		return "job canceled"
 	}
 	return "job failed"
+}
+
+func serviceTurnFallbackText(err error, observer *serviceObserver) (string, bool) {
+	if err == nil || !strings.Contains(err.Error(), "max tool loops exceeded") {
+		return "", false
+	}
+	message := "I couldn't finish that because the tool calls kept failing or looping."
+	if observer != nil {
+		lastToolError := strings.TrimSpace(observer.lastToolError)
+		if lastToolError != "" {
+			if len(lastToolError) > 180 {
+				lastToolError = lastToolError[:180] + "..."
+			}
+			message += " Last tool error: " + lastToolError
+		}
+	}
+	return message, true
 }
 
 func remoteIPKey(raw string) string {
@@ -3080,11 +3441,46 @@ func (s *serviceServer) handleScope(w http.ResponseWriter, r *http.Request) {
 }
 
 type serviceConfigureChange struct {
-	Section string `json:"section"`
-	Channel string `json:"channel"`
-	Field   string `json:"field"`
-	Op      string `json:"op"`
-	Value   string `json:"value"`
+	Section string               `json:"section"`
+	Channel string               `json:"channel"`
+	Field   string               `json:"field"`
+	Op      string               `json:"op"`
+	Value   configureChangeValue `json:"value"`
+}
+
+type configureChangeValue string
+
+func (v *configureChangeValue) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		*v = ""
+		return nil
+	}
+	var text string
+	if err := json.Unmarshal(data, &text); err == nil {
+		*v = configureChangeValue(text)
+		return nil
+	}
+	var flag bool
+	if err := json.Unmarshal(data, &flag); err == nil {
+		if flag {
+			*v = "true"
+		} else {
+			*v = "false"
+		}
+		return nil
+	}
+	var number json.Number
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.UseNumber()
+	if err := decoder.Decode(&number); err == nil {
+		*v = configureChangeValue(number.String())
+		return nil
+	}
+	return fmt.Errorf("configure change value must be a string, boolean, number, or null")
+}
+
+func (v configureChangeValue) String() string {
+	return string(v)
 }
 
 type serviceConfigureField struct {
@@ -3493,7 +3889,7 @@ func (s *serviceServer) handleConfigure(w http.ResponseWriter, r *http.Request) 
 			}
 			switch strings.ToLower(strings.TrimSpace(change.Op)) {
 			case "", "set":
-				changed, err := applyFieldValue(&next, section, channel, field, change.Value)
+				changed, err := applyFieldValue(&next, section, channel, field, change.Value.String())
 				if err != nil {
 					writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 					return
@@ -3508,7 +3904,7 @@ func (s *serviceServer) handleConfigure(w http.ResponseWriter, r *http.Request) 
 					return
 				}
 			case "choose":
-				changed, err := applyChoiceSelection(&next, section, channel, field, change.Value)
+				changed, err := applyChoiceSelection(&next, section, channel, field, change.Value.String())
 				if err != nil {
 					writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 					return
@@ -3539,12 +3935,22 @@ func (s *serviceServer) handleConfigure(w http.ResponseWriter, r *http.Request) 
 
 type serviceObserver struct {
 	agent.ConversationObserver
-	finalText string
+	finalText     string
+	lastToolError string
 }
 
 func (o *serviceObserver) OnCompletion(ctx context.Context, finalText string, streamed bool) {
 	o.finalText = finalText
 	if o.ConversationObserver != nil {
 		o.ConversationObserver.OnCompletion(ctx, finalText, streamed)
+	}
+}
+
+func (o *serviceObserver) OnToolResult(ctx context.Context, name string, out string, err error) {
+	if err != nil {
+		o.lastToolError = err.Error()
+	}
+	if o.ConversationObserver != nil {
+		o.ConversationObserver.OnToolResult(ctx, name, out, err)
 	}
 }

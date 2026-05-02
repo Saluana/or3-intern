@@ -52,6 +52,27 @@ func TestServiceAuthMiddleware_InternalCapabilitiesRequiresBearer(t *testing.T) 
 	}
 }
 
+func TestServiceAuthMiddleware_AppBootstrapRequiresBearer(t *testing.T) {
+	cfg := rolloutAuthTestConfig(config.AuthEnforcementWarn)
+	database, cleanup := openServiceTestDB(t)
+	defer cleanup()
+	authSvc, err := auth.NewService(cfg, database, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	handler := serviceAuthMiddlewareWithBroker(cfg, nil, authSvc, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true})
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/internal/v1/app/bootstrap", nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d (%s)", rec.Code, rec.Body.String())
+	}
+}
+
 func TestServiceAuthMiddleware_RolloutModesForLegacyPairedTokens(t *testing.T) {
 	ctx := context.Background()
 	database, cleanup := openServiceTestDB(t)
@@ -151,6 +172,7 @@ func TestServiceRouteRequirementForRequest_SensitivityMatrix(t *testing.T) {
 		{method: http.MethodGet, path: "/internal/v1/auth/capabilities", want: serviceRoutePublic},
 		{method: http.MethodGet, path: "/internal/v1/readiness", want: serviceRoutePublic},
 		{method: http.MethodGet, path: "/internal/v1/capabilities", want: serviceRouteLowRisk},
+		{method: http.MethodGet, path: "/internal/v1/app/bootstrap", want: serviceRouteLowRisk},
 		{method: http.MethodPost, path: "/internal/v1/auth/passkeys/login/begin", want: serviceRouteLowRisk},
 		{method: http.MethodPost, path: "/internal/v1/auth/passkeys/login/finish", want: serviceRouteLowRisk},
 		{method: http.MethodPost, path: "/internal/v1/auth/passkeys/registration/begin", want: serviceRouteLowRisk},
@@ -159,11 +181,13 @@ func TestServiceRouteRequirementForRequest_SensitivityMatrix(t *testing.T) {
 		{method: http.MethodGet, path: "/internal/v1/files/read", want: serviceRouteLowRisk},
 		{method: http.MethodPost, path: "/internal/v1/files/upload", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
 		{method: http.MethodPut, path: "/internal/v1/files/write", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
+		{method: http.MethodGet, path: "/internal/v1/terminal/sessions/term-1/stream", want: serviceRouteLowRisk, sessionOnly: true},
 		{method: http.MethodPost, path: "/internal/v1/terminal/sessions", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
 		{method: http.MethodPost, path: "/internal/v1/terminal/sessions/term-1/input", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
 		{method: http.MethodPost, path: "/internal/v1/approvals/12/approve", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
 		{method: http.MethodPost, path: "/internal/v1/devices/device-1/revoke", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
 		{method: http.MethodPost, path: "/internal/v1/configure/security", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
+		{method: http.MethodPost, path: "/internal/v1/actions/restart-service", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {

@@ -20,7 +20,7 @@ type FileTool struct {
 }
 
 const (
-	defaultReadFileMaxBytes  = 12000
+	defaultReadFileMaxBytes  = 64 * 1024
 	defaultListDirMaxEntries = 80
 )
 
@@ -212,22 +212,19 @@ type ReadFile struct{ FileTool }
 
 func (t *ReadFile) Name() string { return "read_file" }
 func (t *ReadFile) Description() string {
-	return "Read a UTF-8 text file from the allowed workspace. Default mode=preview is the safest general choice. Use mode=outline to understand a file cheaply, mode=grep when looking for a symbol/string, and mode=range after you know line numbers. Avoid mode=full unless the user explicitly needs the whole bounded file; full is a guarded read and may fail under a safe-only capability ceiling."
+	return "Read a UTF-8 text file from the allowed workspace. Default mode=preview is the safest general choice. Use mode=outline to understand a file cheaply, mode=grep when looking for a symbol/string, and mode=range after you know line numbers. Use mode=full when the whole bounded file is needed."
 }
 func (t *ReadFile) CapabilityForParams(params map[string]any) CapabilityLevel {
-	if strings.EqualFold(strings.TrimSpace(fmt.Sprint(params["mode"])), "full") {
-		return CapabilityGuarded
-	}
 	return CapabilitySafe
 }
 func (t *ReadFile) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
 		"path":      map[string]any{"type": "string", "description": "File path to read. Use an absolute path or a path relative to the current workspace; the path must stay inside the allowed read root."},
-		"mode":      map[string]any{"type": "string", "enum": []string{"preview", "full", "range", "grep", "outline"}, "description": "Read mode. Omit for preview. Safe modes are preview, outline, grep, and range. full is guarded: only use it when narrower safe modes are insufficient or when the request explicitly allows guarded tools."},
+		"mode":      map[string]any{"type": "string", "enum": []string{"preview", "full", "range", "grep", "outline"}, "description": "Read mode. Omit for preview. All modes are safe read-only operations. Use full when the whole bounded file is needed."},
 		"startLine": map[string]any{"type": "integer", "description": "For mode=range only: 1-based first line to return. Use with endLine after an outline/grep/preview identifies the area you need."},
 		"endLine":   map[string]any{"type": "integer", "description": "For mode=range only: 1-based last line to return, inclusive. Keep ranges focused to avoid unnecessary output."},
 		"pattern":   map[string]any{"type": "string", "description": "For mode=grep only: substring or regex pattern to search for, such as a function name, type name, config key, or exact error text."},
-		"maxBytes":  map[string]any{"type": "integer", "description": "Maximum bytes returned directly for preview/grep/range/outline/full. Omit for default 12000; increasing this does not make mode=full safe."},
+		"maxBytes":  map[string]any{"type": "integer", "description": "Maximum bytes returned directly for preview/grep/range/outline/full. Omit for default 65536."},
 	}, "required": []string{"path"}}
 }
 func (t *ReadFile) Schema() map[string]any {
@@ -308,7 +305,7 @@ func (t *SearchFile) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
 		"path":     map[string]any{"type": "string", "description": "File path to search. Use an absolute path or workspace-relative path inside the allowed read root."},
 		"pattern":  map[string]any{"type": "string", "description": "Substring or regex pattern to find. Choose a specific term rather than a broad word when possible."},
-		"maxBytes": map[string]any{"type": "integer", "description": "Maximum bytes of matching-line output returned directly. Omit for default 12000."},
+		"maxBytes": map[string]any{"type": "integer", "description": "Maximum bytes of matching-line output returned directly. Omit for default 65536."},
 	}, "required": []string{"path", "pattern"}}
 }
 func (t *SearchFile) Schema() map[string]any {

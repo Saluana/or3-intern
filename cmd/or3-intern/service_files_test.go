@@ -196,6 +196,23 @@ func TestHandleFileReadRejectsBinaryContent(t *testing.T) {
 	}
 }
 
+func TestHandleFileReadRejectsUnsupportedTextFile(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "payload.bin")
+	if err := os.WriteFile(path, []byte("plain text but unsupported extension"), 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	server := &serviceServer{config: config.Config{AllowedDir: tmp}}
+	req := httptest.NewRequest(http.MethodGet, "/internal/v1/files/read?root_id=allowed&path=payload.bin", nil)
+	rec := httptest.NewRecorder()
+
+	server.handleFileRead(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (%s)", rec.Code, rec.Body.String())
+	}
+}
+
 func TestHandleFileWriteCreatesAndOverwritesTextFiles(t *testing.T) {
 	tmp := t.TempDir()
 	server := &serviceServer{config: config.Config{AllowedDir: tmp}}
@@ -301,6 +318,28 @@ func TestHandleFileWriteRejectsReadonlyRoot(t *testing.T) {
 
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("expected 403, got %d (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleFileWriteRejectsUnsupportedTextFile(t *testing.T) {
+	tmp := t.TempDir()
+	server := &serviceServer{config: config.Config{AllowedDir: tmp}}
+	body, _ := json.Marshal(map[string]any{
+		"root_id": "allowed",
+		"path":    "payload.bin",
+		"content": "plain text but unsupported extension",
+		"create":  true,
+	})
+	req := httptest.NewRequest(http.MethodPut, "/internal/v1/files/write", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	server.handleFileWrite(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "payload.bin")); !os.IsNotExist(err) {
+		t.Fatalf("expected unsupported file not to be written, stat err=%v", err)
 	}
 }
 

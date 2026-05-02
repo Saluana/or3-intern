@@ -188,6 +188,36 @@ func TestReadFile_Truncation(t *testing.T) {
 	}
 }
 
+func TestReadFile_DefaultBudgetReadsAverageSizedFile(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "average.txt")
+	content := strings.Repeat("read-file-default-budget\n", 900)
+	mustWriteFile(t, p, []byte(content), 0o644)
+
+	tool := &ReadFile{}
+	out, err := tool.Execute(context.Background(), map[string]any{
+		"path": p,
+		"mode": "full",
+	})
+	if err != nil {
+		t.Fatalf("ReadFile full: %v", err)
+	}
+	result := mustDecodeToolResult(t, out)
+	if result.Preview != content {
+		t.Fatalf("expected full default read, got %d bytes want %d", len(result.Preview), len(content))
+	}
+	if truncated, _ := result.Stats["truncated"].(bool); truncated {
+		t.Fatalf("expected default full read not to truncate")
+	}
+}
+
+func TestReadFile_FullModeIsSafe(t *testing.T) {
+	tool := &ReadFile{}
+	if got := ToolCapability(tool, map[string]any{"mode": "full"}); got != CapabilitySafe {
+		t.Fatalf("expected full mode to be safe, got %s", got)
+	}
+}
+
 func TestReadFile_EmptyPath(t *testing.T) {
 	tool := &ReadFile{}
 	_, err := tool.Execute(context.Background(), map[string]any{"path": ""})

@@ -72,8 +72,8 @@ func TestDefault_Values(t *testing.T) {
 	if cfg.HistoryMax != 40 {
 		t.Errorf("expected HistoryMax=40, got %d", cfg.HistoryMax)
 	}
-	if cfg.MaxToolBytes != 24*1024 {
-		t.Errorf("expected MaxToolBytes=%d, got %d", 24*1024, cfg.MaxToolBytes)
+	if cfg.MaxToolBytes != DefaultMaxToolBytes {
+		t.Errorf("expected MaxToolBytes=%d, got %d", DefaultMaxToolBytes, cfg.MaxToolBytes)
 	}
 	if cfg.MaxMediaBytes != 20*1024*1024 {
 		t.Errorf("expected MaxMediaBytes=%d, got %d", 20*1024*1024, cfg.MaxMediaBytes)
@@ -972,8 +972,8 @@ func TestLoad_ZeroValues_GetDefaults(t *testing.T) {
 	if cfg.HistoryMax != 40 {
 		t.Errorf("expected HistoryMax=40, got %d", cfg.HistoryMax)
 	}
-	if cfg.MaxToolBytes != 24*1024 {
-		t.Errorf("expected MaxToolBytes=%d, got %d", 24*1024, cfg.MaxToolBytes)
+	if cfg.MaxToolBytes != DefaultMaxToolBytes {
+		t.Errorf("expected MaxToolBytes=%d, got %d", DefaultMaxToolBytes, cfg.MaxToolBytes)
 	}
 	if cfg.MaxToolLoops != 6 {
 		t.Errorf("expected MaxToolLoops=6, got %d", cfg.MaxToolLoops)

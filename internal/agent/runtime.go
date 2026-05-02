@@ -1178,7 +1178,7 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 		maxLoops = 6
 	}
 	for loop := 0; loop < maxLoops; loop++ {
-		turnTools := r.exposedToolsForTurn(reg, messages, channel)
+		turnTools := r.exposedToolsForTurn(ctx, reg, messages, channel)
 		req := providers.ChatCompletionRequest{
 			Model:       r.Model,
 			Messages:    messages,
@@ -1324,9 +1324,37 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 				log.Printf("append tool message failed: %v", err)
 			}
 			messages = append(messages, providers.ChatMessage{Role: "tool", ToolCallID: tc.ID, Content: sendOut})
+			if finalText := terminalToolResultText(tc.Function.Name, out); finalText != "" {
+				if observer != nil {
+					observer.OnCompletion(ctx, finalText, false)
+				}
+				return finalText, false, nil
+			}
 		}
 	}
 	return "", false, fmt.Errorf("max tool loops exceeded for session %s", sessionKey)
+}
+
+func terminalToolResultText(toolName string, out string) string {
+	if strings.TrimSpace(toolName) != "read_skill" || strings.TrimSpace(out) == "" {
+		return ""
+	}
+	var result struct {
+		OK      *bool  `json:"ok"`
+		Kind    string `json:"kind"`
+		Summary string `json:"summary"`
+	}
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		return ""
+	}
+	if result.OK == nil || *result.OK || result.Kind != "skill_read" {
+		return ""
+	}
+	summary := strings.TrimSpace(result.Summary)
+	if summary == "" || !strings.Contains(strings.ToLower(summary), "unavailable") {
+		return ""
+	}
+	return summary + ". I can't complete that with the tools currently available in this turn."
 }
 
 func (r *Runtime) effectiveTools(ctx context.Context, fallback *tools.Registry) *tools.Registry {
@@ -1339,21 +1367,52 @@ func (r *Runtime) effectiveTools(ctx context.Context, fallback *tools.Registry) 
 	return fallback
 }
 
-func (r *Runtime) exposedToolsForTurn(reg *tools.Registry, messages []providers.ChatMessage, channel string) *tools.Registry {
-	if reg == nil || r == nil || !r.DynamicToolExposure {
+func (r *Runtime) exposedToolsForTurn(ctx context.Context, reg *tools.Registry, messages []providers.ChatMessage, channel string) *tools.Registry {
+	if reg == nil {
 		return reg
+	}
+	filtered := r.filterToolsForContext(ctx, reg)
+	if r == nil || !r.DynamicToolExposure {
+		return filtered
 	}
 	intent := latestUserText(messages) + " " + strings.TrimSpace(channel)
 	groups := selectedToolGroups(intent)
 	allowed := map[string]struct{}{}
-	for _, name := range reg.Names() {
-		meta := reg.Metadata(name)
+	for _, name := range filtered.Names() {
+		meta := filtered.Metadata(name)
 		if meta.Hidden || hasGroup(meta.Groups, tools.ToolGroupHidden) {
 			continue
 		}
 		if hasAnyGroup(meta.Groups, groups) {
 			allowed[name] = struct{}{}
 		}
+	}
+	return filtered.CloneSelected(allowed)
+}
+
+func (r *Runtime) filterToolsForContext(ctx context.Context, reg *tools.Registry) *tools.Registry {
+	if reg == nil {
+		return reg
+	}
+	ceiling := tools.CapabilityCeilingFromContext(ctx)
+	profile := tools.ActiveProfileFromContext(ctx)
+	if strings.TrimSpace(profile.Name) != "" {
+		if ceiling == "" || capabilityRank(profile.MaxCapability) < capabilityRank(ceiling) {
+			ceiling = profile.MaxCapability
+		}
+	}
+	allowed := map[string]struct{}{}
+	profileAllowed := profile.AllowedTools
+	for _, name := range reg.Names() {
+		if len(profileAllowed) > 0 {
+			if _, ok := profileAllowed[name]; !ok {
+				continue
+			}
+		}
+		if ceiling != "" && capabilityRank(tools.ToolCapability(reg.Get(name), nil)) > capabilityRank(ceiling) {
+			continue
+		}
+		allowed[name] = struct{}{}
 	}
 	return reg.CloneSelected(allowed)
 }
@@ -2071,7 +2130,10 @@ func (r *Runtime) boundTextResult(ctx context.Context, sessionKey string, text s
 
 func (r *Runtime) toolPreviewBytes() int {
 	if r.ToolPreviewBytes <= 0 {
-		return 500
+		if r.MaxToolBytes > 0 {
+			return r.MaxToolBytes
+		}
+		return config.DefaultMaxToolBytes
 	}
 	return r.ToolPreviewBytes
 }

@@ -593,7 +593,7 @@ func main() {
 		<-ctx.Done()
 	case "service":
 		runWorkers(ctx, b, rt, cfg.WorkerCount, nil)
-		if err := runServiceCommandWithBroker(ctx, cfg, rt, subagentManager, serviceJobs, approvalBroker); err != nil {
+		if err := runServiceCommandWithBrokerOptions(ctx, cfg, rt, subagentManager, serviceJobs, approvalBroker, unsafeDev); err != nil {
 			fmt.Fprintln(os.Stderr, "service error:", err)
 			os.Exit(1)
 		}
@@ -906,7 +906,9 @@ func buildToolRegistryWithOptions(cfg config.Config, d *db.DB, prov *providers.C
 	}
 	if inv != nil {
 		reg.Register(&tools.ReadSkill{Inventory: inv})
-		reg.Register(&tools.RunSkillScript{Inventory: inv, Enabled: cfg.Skills.EnableExec, Timeout: time.Duration(cfg.Skills.MaxRunSeconds) * time.Second, ChildEnvAllowlist: append([]string{}, cfg.Hardening.ChildEnvAllowlist...), Sandbox: sandboxCfg, ApprovalBroker: approvalBroker})
+		if cfg.Skills.EnableExec {
+			reg.Register(&tools.RunSkillScript{Inventory: inv, Enabled: true, Timeout: time.Duration(cfg.Skills.MaxRunSeconds) * time.Second, ChildEnvAllowlist: append([]string{}, cfg.Hardening.ChildEnvAllowlist...), Sandbox: sandboxCfg, ApprovalBroker: approvalBroker})
+		}
 	}
 	if cronSvc != nil {
 		reg.Register(&tools.CronTool{Svc: cronSvc})

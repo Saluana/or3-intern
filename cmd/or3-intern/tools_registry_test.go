@@ -109,6 +109,33 @@ func TestBuildToolRegistry_RegistersMCPTools(t *testing.T) {
 	}
 }
 
+func TestBuildToolRegistry_OmitsDisabledSkillExecTool(t *testing.T) {
+	cfg := config.Default()
+	cfg.WorkspaceDir = t.TempDir()
+	cfg.Skills.EnableExec = false
+
+	d, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer d.Close()
+
+	provider := providers.New("http://example.invalid", "key", time.Second)
+	channelManager, err := buildChannelManager(cfg, &cli.Deliverer{}, &artifacts.Store{Dir: t.TempDir(), DB: d}, cfg.MaxMediaBytes, nil)
+	if err != nil {
+		t.Fatalf("buildChannelManager: %v", err)
+	}
+	inv := skills.Inventory{}
+
+	reg := buildToolRegistry(cfg, d, provider, channelManager, &inv, nil, nil, nil, nil)
+	if reg.Get("read_skill") == nil {
+		t.Fatal("expected read_skill to remain registered")
+	}
+	if reg.Get("run_skill_script") != nil {
+		t.Fatal("expected run_skill_script to be omitted when skill execution is disabled")
+	}
+}
+
 func TestBuildBackgroundToolRegistry_OmitsMessagingAndSpawn(t *testing.T) {
 	cfg := config.Default()
 	cfg.WorkspaceDir = t.TempDir()

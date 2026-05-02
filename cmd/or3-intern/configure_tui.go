@@ -1102,7 +1102,7 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 			{Key: "runtime_bootstrap_total_chars", Label: "Bootstrap total max chars", Description: "Total bootstrap prompt budget across files.", Kind: configureFieldText, Value: formatInt(cfg.BootstrapTotalMaxChars), EmptyHint: "150000"},
 			{Key: "runtime_session_cache", Label: "Session cache limit", Description: "Cached session count for runtime state.", Kind: configureFieldText, Value: formatInt(cfg.SessionCache), EmptyHint: "64"},
 			{Key: "runtime_history_max", Label: "History max messages", Description: "Conversation messages retained in active prompt history.", Kind: configureFieldText, Value: formatInt(cfg.HistoryMax), EmptyHint: "40"},
-			{Key: "runtime_max_tool_bytes", Label: "Max tool bytes", Description: "Max tool output bytes before truncation.", Kind: configureFieldText, Value: formatInt(cfg.MaxToolBytes), EmptyHint: "24576"},
+			{Key: "runtime_max_tool_bytes", Label: "Max tool bytes", Description: "Max tool output bytes before artifact spillover.", Kind: configureFieldText, Value: formatInt(cfg.MaxToolBytes), EmptyHint: "98304"},
 			{Key: "runtime_max_media_bytes", Label: "Max media bytes", Description: "Largest media payload accepted by the runtime.", Kind: configureFieldText, Value: formatInt(cfg.MaxMediaBytes), EmptyHint: "20971520"},
 			{Key: "runtime_max_tool_loops", Label: "Max tool loops", Description: "Maximum assistant tool-call rounds per turn.", Kind: configureFieldText, Value: formatInt(cfg.MaxToolLoops), EmptyHint: "6"},
 			{Key: "runtime_memory_retrieve", Label: "Memory retrieve limit", Description: "How many long-term memory hits are injected into prompts.", Kind: configureFieldText, Value: formatInt(cfg.MemoryRetrieve), EmptyHint: "8"},
@@ -1177,6 +1177,7 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 		return []configureField{
 			{Key: "tools_brave", Label: "Brave Search key", Description: "Hidden secret for Brave web search. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Tools.BraveAPIKey), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"},
 			{Key: "tools_web_proxy", Label: "Web proxy", Description: "Optional outbound proxy URL for web access.", Kind: configureFieldText, Value: cfg.Tools.WebProxy, EmptyHint: "http://proxy.internal:8080"},
+			{Key: "tools_enable_exec", Label: "Enable exec tool", Description: "Register the built-in exec tool so approved local programs can run.", Kind: configureFieldToggle, Value: onOff(cfg.Tools.EnableExec)},
 			{Key: "tools_exec_timeout", Label: "Exec timeout seconds", Description: "Default timeout for built-in exec-capable tools.", Kind: configureFieldText, Value: formatInt(cfg.Tools.ExecTimeoutSeconds), EmptyHint: "60"},
 			{Key: "tools_path_append", Label: "PATH append", Description: "Extra PATH entries appended for child process execution.", Kind: configureFieldText, Value: cfg.Tools.PathAppend, EmptyHint: "/opt/homebrew/bin"},
 		}
@@ -1304,10 +1305,12 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 			{Key: "automation_filewatch_debounce", Label: "File-watch debounce seconds", Description: "Debounce window before emitting a trigger.", Kind: configureFieldText, Value: formatInt(cfg.Triggers.FileWatch.DebounceSeconds), EmptyHint: "2"},
 		}
 	case "service":
+		capabilityChoices := []string{"safe", "guarded", "privileged"}
 		return []configureField{
 			{Key: "service_enabled", Label: "Enable service API", Description: "Expose the internal authenticated HTTP API.", Kind: configureFieldToggle, Value: onOff(cfg.Service.Enabled)},
 			{Key: "service_listen", Label: "Listen address", Description: "Bind address for the internal service.", Kind: configureFieldText, Value: cfg.Service.Listen, EmptyHint: "127.0.0.1:9100"},
 			{Key: "service_secret", Label: "Shared secret", Description: "Hidden secret. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Service.Secret), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"},
+			{Key: "service_max_capability", Label: "Service max capability", Description: "Highest tool capability level the app/service API may request.", Kind: configureFieldChoice, Value: cfg.Service.MaxCapability, Choices: capabilityChoices, ChoiceIndex: indexOfChoice(capabilityChoices, cfg.Service.MaxCapability)},
 			{Key: "service_allow_unauthenticated_pairing", Label: "Allow first-time local device pairing", Description: "Let a phone or browser on this same computer ask for a one-time pairing code before it has a saved key.", Kind: configureFieldToggle, Value: onOff(cfg.Service.AllowUnauthenticatedPairing)},
 			{Key: "service_trusted_browser_origins", Label: "Trusted app origins", Description: "Comma-separated browser origins allowed to call the service API from a private-network app.", Kind: configureFieldText, Value: strings.Join(cfg.Service.TrustedBrowserOrigins, ","), EmptyHint: "http://100.x.y.z:3060,http://app.local:3060"},
 			{Key: "service_trusted_browser_cidrs", Label: "Trusted app CIDRs", Description: "Comma-separated remote IPs or CIDRs allowed to use trusted app origins.", Kind: configureFieldText, Value: strings.Join(cfg.Service.TrustedBrowserCIDRs, ","), EmptyHint: "100.64.0.0/10,192.168.1.0/24"},
@@ -1971,6 +1974,13 @@ func applyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 	case "tools_web_proxy":
 		cfg.Tools.WebProxy = value
 		return true, nil
+	case "tools_enable_exec":
+		enabled, err := parseBoolValue(value, fieldKey)
+		if err != nil {
+			return false, err
+		}
+		cfg.Tools.EnableExec = enabled
+		return true, nil
 	case "tools_exec_timeout":
 		return setIntValue(&cfg.Tools.ExecTimeoutSeconds, value, fieldKey)
 	case "tools_path_append":
@@ -2167,6 +2177,13 @@ func applyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 			cfg.Service.Secret = value
 		}
 		return true, nil
+	case "service_max_capability":
+		normalized := normalizeConfigureCapability(value)
+		if normalized == "" {
+			return false, fmt.Errorf("%s must be safe, guarded, or privileged", fieldKey)
+		}
+		cfg.Service.MaxCapability = normalized
+		return true, nil
 	case "service_trusted_browser_origins":
 		cfg.Service.TrustedBrowserOrigins = splitAndCompact(value)
 		return true, nil
@@ -2206,6 +2223,8 @@ func setToggleFieldValue(cfg *config.Config, section, channel, fieldKey string, 
 		cfg.Tools.RestrictToWorkspace = value
 	case "workspace_allow_full_read":
 		cfg.Tools.AllowFullFileRead = value
+	case "tools_enable_exec":
+		cfg.Tools.EnableExec = value
 	case "docindex_enabled":
 		cfg.DocIndex.Enabled = value
 	case "skills_enable_exec":
@@ -2313,6 +2332,13 @@ func applyChoiceSelection(cfg *config.Config, section, channel, fieldKey, choice
 	case "auth_enforcement_mode":
 		cfg.Auth.EnforcementMode = config.AuthEnforcementMode(choice)
 		return true, nil
+	case "service_max_capability":
+		normalized := normalizeConfigureCapability(choice)
+		if normalized == "" {
+			return false, fmt.Errorf("service_max_capability must be safe, guarded, or privileged")
+		}
+		cfg.Service.MaxCapability = normalized
+		return true, nil
 	case "security_approval_pairing_mode":
 		cfg.Security.Approvals.Pairing.Mode = config.ApprovalMode(choice)
 		return true, nil
@@ -2370,6 +2396,30 @@ func setFloatValue(target *float64, value string, field string) (bool, error) {
 	}
 	*target = parsed
 	return true, nil
+}
+
+func parseBoolValue(value string, field string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "t", "yes", "y", "on", "enabled":
+		return true, nil
+	case "0", "false", "f", "no", "n", "off", "disabled":
+		return false, nil
+	default:
+		return false, fmt.Errorf("invalid boolean for %s: %q", field, value)
+	}
+}
+
+func normalizeConfigureCapability(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "safe":
+		return "safe"
+	case "guarded":
+		return "guarded"
+	case "privileged":
+		return "privileged"
+	default:
+		return ""
+	}
 }
 
 func formatInt(value int) string { return strconv.Itoa(value) }

@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -526,6 +527,9 @@ func TestServiceConfigureApply_PersistsConfigChanges(t *testing.T) {
 	reqBody := strings.NewReader(`{
 		"changes":[
 			{"section":"provider","field":"provider_model","op":"set","value":"gpt-4.1"},
+			{"section":"tools","field":"tools_enable_exec","op":"set","value":true},
+			{"section":"tools","field":"tools_exec_timeout","op":"set","value":45},
+			{"section":"service","field":"service_max_capability","op":"set","value":"guarded"},
 			{"section":"service","field":"service_enabled","op":"toggle"},
 			{"section":"channels","channel":"slack","field":"access","op":"choose","value":"allowlist"}
 		]
@@ -548,6 +552,15 @@ func TestServiceConfigureApply_PersistsConfigChanges(t *testing.T) {
 	}
 	if !loaded.Service.Enabled {
 		t.Fatal("expected service_enabled toggle to set true")
+	}
+	if !loaded.Tools.EnableExec {
+		t.Fatal("expected tools_enable_exec boolean set to enable exec")
+	}
+	if loaded.Tools.ExecTimeoutSeconds != 45 {
+		t.Fatalf("expected numeric exec timeout update, got %d", loaded.Tools.ExecTimeoutSeconds)
+	}
+	if loaded.Service.MaxCapability != "guarded" {
+		t.Fatalf("expected service max capability guarded, got %q", loaded.Service.MaxCapability)
 	}
 	if loaded.Channels.Slack.InboundPolicy != config.InboundPolicyAllowlist {
 		t.Fatalf("expected slack allowlist policy, got %q", loaded.Channels.Slack.InboundPolicy)
@@ -1399,6 +1412,110 @@ func buildServiceTestRuntime(t *testing.T, handler func(http.ResponseWriter, *ht
 	return rt, cleanup
 }
 
+func TestServiceTurns_MaxToolLoopsReturnsFallbackResponse(t *testing.T) {
+	callCount := 0
+	rt, cleanup := buildServiceTestRuntime(t, func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		resp := providers.ChatCompletionResponse{
+			Choices: []struct {
+				Message struct {
+					Role      string               `json:"role"`
+					Content   any                  `json:"content"`
+					ToolCalls []providers.ToolCall `json:"tool_calls"`
+				} `json:"message"`
+			}{{
+				Message: struct {
+					Role      string               `json:"role"`
+					Content   any                  `json:"content"`
+					ToolCalls []providers.ToolCall `json:"tool_calls"`
+				}{
+					Role: "assistant",
+					ToolCalls: []providers.ToolCall{{
+						ID:   fmt.Sprintf("loop-%d", callCount),
+						Type: "function",
+						Function: struct {
+							Name      string `json:"name"`
+							Arguments string `json:"arguments"`
+						}{
+							Name:      "read_file",
+							Arguments: `{}`,
+						},
+					}},
+				},
+			}},
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("Encode: %v", err)
+		}
+	})
+	defer cleanup()
+
+	server := &serviceServer{runtime: rt, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("t", 32), server)
+	defer httpServer.Close()
+
+	body := `{"session_key":"svc:loop-fallback","message":"loop forever","meta":{"request_id":"req-loop-fallback"}}`
+	req := mustServiceRequest(t, httpServer, strings.Repeat("t", 32), http.MethodPost, "/internal/v1/turns", body)
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	payload := mustDecodeJSONBody(t, resp.Body)
+	if got := fmt.Sprint(payload["status"]); got != "completed" {
+		t.Fatalf("expected completed status, got %#v", payload)
+	}
+	finalText := fmt.Sprint(payload["final_text"])
+	if !strings.Contains(finalText, "tool calls kept failing or looping") {
+		t.Fatalf("expected fallback final_text, got %#v", payload)
+	}
+}
+
+func mustUseServiceTestWorkingDir(t *testing.T, dir string) {
+	t.Helper()
+	current, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(current); err != nil {
+			t.Fatalf("restore cwd: %v", err)
+		}
+	})
+}
+
+func writeServiceTestRestartScript(t *testing.T, dir string, body string) string {
+	t.Helper()
+	scriptDir := filepath.Join(dir, "scripts")
+	if err := os.MkdirAll(scriptDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll script dir: %v", err)
+	}
+	scriptPath := filepath.Join(scriptDir, "restart-service.sh")
+	if err := os.WriteFile(scriptPath, []byte(body), 0o755); err != nil {
+		t.Fatalf("WriteFile restart script: %v", err)
+	}
+	return scriptPath
+}
+
+func waitForFile(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", path)
+}
+
 func openServiceTestDB(t *testing.T) (*db.DB, func()) {
 	t.Helper()
 	database, err := db.Open(filepath.Join(t.TempDir(), "service-test.db"))
@@ -2127,6 +2244,219 @@ func TestServiceStatusEndpoints(t *testing.T) {
 	}
 }
 
+func TestServiceAppBootstrapRoute_PairedOperatorWithoutSession(t *testing.T) {
+	workDir := t.TempDir()
+	mustUseServiceTestWorkingDir(t, workDir)
+	writeServiceTestRestartScript(t, workDir, "#!/bin/sh\nexit 0\n")
+
+	rt, cleanupRuntime := buildServiceTestRuntime(t, func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	})
+	defer cleanupRuntime()
+	broker, cleanupBroker := buildServiceTestBroker(t, nil)
+	defer cleanupBroker()
+
+	cfg := rolloutAuthTestConfig(config.AuthEnforcementSession)
+	cfg.Service.Secret = strings.Repeat("b", 32)
+	cfg.Service.SharedSecretRole = approval.RoleOperator
+	cfg.Hardening.EnableExecShell = true
+	cfg.Hardening.PrivilegedTools = true
+	cfg.Hardening.GuardedTools = true
+
+	server := &serviceServer{
+		config:  cfg,
+		runtime: rt,
+		jobs:    agent.NewJobRegistry(time.Minute, 32),
+		broker:  broker,
+	}
+	httpServer := newServiceTestHTTPServer(t, cfg.Service.Secret, server)
+	defer httpServer.Close()
+
+	_, deviceToken, err := broker.RotateDeviceToken(context.Background(), "operator-1", approval.RoleOperator, "Operator", nil)
+	if err != nil {
+		t.Fatalf("RotateDeviceToken: %v", err)
+	}
+
+	req := mustJSONRequest(t, http.MethodGet, httpServer.URL+"/internal/v1/app/bootstrap", "")
+	req.Header.Set("Authorization", "Bearer "+deviceToken)
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do bootstrap: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected bootstrap 200, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	payload := mustDecodeJSONBody(t, resp.Body)
+	pairing, _ := payload["pairing"].(map[string]any)
+	authState, _ := payload["auth"].(map[string]any)
+	actions, _ := payload["actions"].([]any)
+	if pairing["paired"] != true || pairing["device_id"] != "operator-1" {
+		t.Fatalf("expected paired operator payload, got %#v", payload)
+	}
+	if authState["session_active"] != false || authState["session_required"] != true {
+		t.Fatalf("expected paired-without-session auth state, got %#v", authState)
+	}
+	if len(actions) != 1 {
+		t.Fatalf("expected one action descriptor, got %#v", actions)
+	}
+	action, _ := actions[0].(map[string]any)
+	if action["id"] != "restart-service" || action["available"] != true || action["session_required"] != true || action["step_up_required"] != true {
+		t.Fatalf("unexpected restart action descriptor: %#v", action)
+	}
+}
+
+func TestServiceAppBootstrapRoute_DegradedWarnings(t *testing.T) {
+	cfg := config.Default()
+	cfg.Service.Secret = strings.Repeat("d", 32)
+	cfg.Service.SharedSecretRole = approval.RoleOperator
+	server := &serviceServer{config: cfg, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, cfg.Service.Secret, server)
+	defer httpServer.Close()
+
+	req := mustServiceRequest(t, httpServer, cfg.Service.Secret, http.MethodGet, "/internal/v1/app/bootstrap", "")
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do bootstrap: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected bootstrap 200, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	payload := mustDecodeJSONBody(t, resp.Body)
+	status, _ := payload["status"].(map[string]any)
+	if status["summary"] != "offline" {
+		t.Fatalf("expected offline summary, got %#v", status)
+	}
+	warnings, _ := status["warnings"].([]any)
+	if len(warnings) == 0 {
+		t.Fatalf("expected warnings in degraded bootstrap payload, got %#v", payload)
+	}
+}
+
+func TestServiceRestartActionRoute_StartsScript(t *testing.T) {
+	workDir := t.TempDir()
+	mustUseServiceTestWorkingDir(t, workDir)
+	marker := filepath.Join(workDir, "restart-ran")
+	writeServiceTestRestartScript(t, workDir, "#!/bin/sh\nprintf 'ok' > "+strconv.Quote(marker)+"\n")
+
+	cfg := config.Default()
+	cfg.Service.Secret = strings.Repeat("r", 32)
+	cfg.Service.SharedSecretRole = approval.RoleOperator
+	cfg.Hardening.EnableExecShell = true
+	cfg.Hardening.PrivilegedTools = true
+	cfg.Hardening.GuardedTools = true
+	server := &serviceServer{config: cfg, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, cfg.Service.Secret, server)
+	defer httpServer.Close()
+
+	req := mustServiceRequest(t, httpServer, cfg.Service.Secret, http.MethodPost, "/internal/v1/actions/restart-service", `{}`)
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do restart action: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("expected restart action 202, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	payload := mustDecodeJSONBody(t, resp.Body)
+	if payload["action_id"] != "restart-service" || payload["status"] != "accepted" {
+		t.Fatalf("unexpected restart action payload: %#v", payload)
+	}
+	waitForFile(t, marker)
+}
+
+func TestServiceRestartActionRoute_PreservesUnsafeDevMode(t *testing.T) {
+	workDir := t.TempDir()
+	mustUseServiceTestWorkingDir(t, workDir)
+	marker := filepath.Join(workDir, "restart-env")
+	writeServiceTestRestartScript(t, workDir, "#!/bin/sh\nprintf '%s' \"$OR3_SERVICE_UNSAFE_DEV\" > "+strconv.Quote(marker)+"\n")
+
+	cfg := config.Default()
+	cfg.Service.Secret = strings.Repeat("r", 32)
+	cfg.Service.SharedSecretRole = approval.RoleOperator
+	cfg.Hardening.EnableExecShell = true
+	cfg.Hardening.PrivilegedTools = true
+	cfg.Hardening.GuardedTools = true
+	server := &serviceServer{config: cfg, jobs: agent.NewJobRegistry(time.Minute, 32), unsafeDev: true}
+	httpServer := newServiceTestHTTPServer(t, cfg.Service.Secret, server)
+	defer httpServer.Close()
+
+	req := mustServiceRequest(t, httpServer, cfg.Service.Secret, http.MethodPost, "/internal/v1/actions/restart-service", `{}`)
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do restart action: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("expected restart action 202, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	waitForFile(t, marker)
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != "true" {
+		t.Fatalf("expected restart action to preserve unsafe-dev env, got %q", string(data))
+	}
+}
+
+func TestServiceRestartActionRoute_RequiresApprovalWhenExecModeAsks(t *testing.T) {
+	workDir := t.TempDir()
+	mustUseServiceTestWorkingDir(t, workDir)
+	writeServiceTestRestartScript(t, workDir, "#!/bin/sh\nexit 0\n")
+
+	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Exec.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+
+	cfg := config.Default()
+	cfg.Service.Secret = strings.Repeat("q", 32)
+	cfg.Service.SharedSecretRole = approval.RoleOperator
+	cfg.Hardening.EnableExecShell = true
+	cfg.Hardening.PrivilegedTools = true
+	cfg.Hardening.GuardedTools = true
+	cfg.Security.Approvals = broker.Config
+
+	server := &serviceServer{config: cfg, jobs: agent.NewJobRegistry(time.Minute, 32), broker: broker}
+	httpServer := newServiceTestHTTPServer(t, cfg.Service.Secret, server)
+	defer httpServer.Close()
+
+	req := mustServiceRequest(t, httpServer, cfg.Service.Secret, http.MethodPost, "/internal/v1/actions/restart-service", `{}`)
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do restart action: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected restart action 409, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	payload := mustDecodeJSONBody(t, resp.Body)
+	if payload["status"] != "approval_required" {
+		t.Fatalf("unexpected approval payload: %#v", payload)
+	}
+}
+
+func TestServiceRestartActionRoute_DisabledWithoutShellAccess(t *testing.T) {
+	cfg := config.Default()
+	cfg.Service.Secret = strings.Repeat("u", 32)
+	cfg.Service.SharedSecretRole = approval.RoleOperator
+	server := &serviceServer{config: cfg, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, cfg.Service.Secret, server)
+	defer httpServer.Close()
+
+	req := mustServiceRequest(t, httpServer, cfg.Service.Secret, http.MethodPost, "/internal/v1/actions/restart-service", `{}`)
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do restart action: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected restart action 503, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+}
+
 func TestServiceStatusEndpoints_RejectNonGET(t *testing.T) {
 	server := &serviceServer{jobs: agent.NewJobRegistry(time.Minute, 32)}
 	tests := []struct {
@@ -2370,6 +2700,27 @@ func TestRunServiceCommand_HostedNoExec_RefusesExecShell(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "startup refused") {
 		t.Fatalf("expected 'startup refused' in error, got: %v", err)
+	}
+}
+
+func TestRunServiceCommandWithBrokerOptions_AllowsUnsafeDevOverride(t *testing.T) {
+	cfg := config.Default()
+	cfg.Service.Secret = strings.Repeat("x", 32)
+	cfg.Service.Listen = "127.0.0.1:0"
+	cfg.Service.MaxCapability = "guarded"
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err := runServiceCommandWithBrokerOptions(ctx, cfg, nil, nil, nil, nil, true)
+	if err == nil {
+		t.Fatal("expected runtime error after unsafe-dev bypass, got nil")
+	}
+	if strings.Contains(err.Error(), "service.maxCapability must remain safe") {
+		t.Fatalf("unsafe-dev should bypass strict service posture, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "runtime not configured") {
+		t.Fatalf("expected to reach runtime validation after bypass, got: %v", err)
 	}
 }
 

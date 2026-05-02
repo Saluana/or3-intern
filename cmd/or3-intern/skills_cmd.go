@@ -381,6 +381,9 @@ func filterAdvertisedToolNames(cfg config.Config, toolNames map[string]struct{})
 	for name := range toolNames {
 		filtered[name] = struct{}{}
 	}
+	if !shouldRegisterExecTool(cfg) {
+		delete(filtered, "exec")
+	}
 	if !cfg.Hardening.GuardedTools && !cfg.Hardening.PrivilegedTools {
 		delete(filtered, "exec")
 	}
@@ -490,10 +493,13 @@ func availableToolNames(includeCron, includeSubagents bool) map[string]struct{} 
 	names := []string{
 		"exec",
 		"read_file",
+		"search_file",
+		"read_artifact",
 		"write_file",
 		"edit_file",
 		"list_dir",
 		"web_fetch",
+		"web_fetch_markdown",
 		"web_search",
 		"memory_set_pinned",
 		"memory_add_note",

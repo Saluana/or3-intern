@@ -16,19 +16,13 @@ type ReadSkill struct {
 
 func (t *ReadSkill) Name() string { return "read_skill" }
 func (t *ReadSkill) Description() string {
-	return "Read a bounded skill summary, outline, or preview by skill name. Use mode=outline or mode=preview first to learn workflow instructions. Avoid mode=full unless the smaller views are insufficient; full is guarded and may fail under a safe-only capability ceiling."
-}
-func (t *ReadSkill) CapabilityForParams(params map[string]any) CapabilityLevel {
-	if strings.EqualFold(strings.TrimSpace(fmt.Sprint(params["mode"])), "full") {
-		return CapabilityGuarded
-	}
-	return CapabilitySafe
+	return "Read a bounded skill summary, outline, preview, or full content by skill name. Use mode=outline or mode=preview first to learn workflow instructions. Use mode=full when the whole bounded skill file is needed."
 }
 func (t *ReadSkill) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
 		"name":     map[string]any{"type": "string", "description": "Skill name exactly as listed in the skill inventory."},
-		"mode":     map[string]any{"type": "string", "enum": []string{"preview", "full", "outline"}, "description": "Read mode. Omit for preview. Safe modes are preview and outline. full is guarded: use only when the smaller safe modes do not contain enough instruction detail."},
-		"maxBytes": map[string]any{"type": "integer", "description": "Maximum bytes returned directly. Omit for default 6000; increasing this does not make mode=full safe."},
+		"mode":     map[string]any{"type": "string", "enum": []string{"preview", "full", "outline"}, "description": "Read mode. Omit for preview. All modes are safe read-only operations. Use full when the whole bounded skill file is needed."},
+		"maxBytes": map[string]any{"type": "integer", "description": "Maximum bytes returned directly. Omit for default 6000."},
 	}, "required": []string{"name"}}
 }
 func (t *ReadSkill) Schema() map[string]any {
@@ -47,6 +41,31 @@ func (t *ReadSkill) Execute(ctx context.Context, params map[string]any) (string,
 	s, ok := t.Inventory.Get(name)
 	if !ok {
 		return "", fmt.Errorf("skill not found: %s", name)
+	}
+	if !s.Eligible || s.Hidden {
+		reasons := append([]string{}, s.Missing...)
+		reasons = append(reasons, s.Unsupported...)
+		if s.ParseError != "" {
+			reasons = append(reasons, s.ParseError)
+		}
+		if len(reasons) == 0 {
+			reasons = append(reasons, "not eligible")
+		}
+		return EncodeToolResult(ToolResult{
+			Kind:    "skill_read",
+			OK:      false,
+			Summary: fmt.Sprintf("Skill %s is unavailable: %s", s.Name, strings.Join(reasons, "; ")),
+			Stats: map[string]any{
+				"name":        s.Name,
+				"source":      string(s.Source),
+				"dir":         s.Dir,
+				"path":        s.Path,
+				"eligible":    s.Eligible,
+				"hidden":      s.Hidden,
+				"missing":     s.Missing,
+				"unsupported": s.Unsupported,
+			},
+		}), nil
 	}
 	maxBytes := t.MaxBytes
 	if maxBytes <= 0 {
@@ -116,6 +135,9 @@ func skillOutline(s skills.SkillMeta, body string) string {
 	}
 	if len(s.AllowedTools) > 0 {
 		fmt.Fprintf(&b, "inputs/tools: %s\n", strings.Join(s.AllowedTools, ", "))
+	}
+	if len(s.Dependencies) > 0 {
+		fmt.Fprintf(&b, "dependencies: %s\n", strings.Join(s.Dependencies, ", "))
 	}
 	if len(s.Entrypoints) > 0 {
 		names := make([]string, 0, len(s.Entrypoints))

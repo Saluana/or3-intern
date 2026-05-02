@@ -19,6 +19,9 @@ import (
 type RuntimeProfile string
 
 const (
+	// DefaultMaxToolBytes is the default direct tool-result budget before artifact spillover.
+	DefaultMaxToolBytes = 96 * 1024
+
 	// ProfileLocalDev is the default profile for local development workflows.
 	ProfileLocalDev RuntimeProfile = "local-dev"
 	// ProfileSingleUserHardened tightens local defaults for a single trusted user.
@@ -650,7 +653,7 @@ func Default() Config {
 		BootstrapTotalMaxChars:           150000,
 		SessionCache:                     64,
 		HistoryMax:                       40,
-		MaxToolBytes:                     24 * 1024,
+		MaxToolBytes:                     DefaultMaxToolBytes,
 		MaxMediaBytes:                    20 * 1024 * 1024,
 		MaxToolLoops:                     6,
 		MemoryRetrieve:                   8,
@@ -1144,7 +1147,7 @@ func Load(path string) (Config, error) {
 		cfg.HistoryMax = 40
 	}
 	if cfg.MaxToolBytes <= 0 {
-		cfg.MaxToolBytes = 24 * 1024
+		cfg.MaxToolBytes = DefaultMaxToolBytes
 	}
 	if cfg.MaxMediaBytes <= 0 {
 		cfg.MaxMediaBytes = 20 * 1024 * 1024

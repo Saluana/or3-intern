@@ -24,6 +24,15 @@ func makeSkillBundle(t *testing.T, root, name, body string) string {
 	return dir
 }
 
+func testContainsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestScan_Empty(t *testing.T) {
 	inv := Scan(nil)
 	if len(inv.Skills) != 0 {
@@ -143,6 +152,93 @@ func TestInventory_Get_NotFound(t *testing.T) {
 	_, ok := inv.Get("nonexistent")
 	if ok {
 		t.Error("expected 'nonexistent' to not be found")
+	}
+}
+
+func TestScan_MissingRelativeSkillDependencyMakesSkillIneligible(t *testing.T) {
+	dir := t.TempDir()
+	makeSkillBundle(t, dir, "needs-shared", "# Needs Shared\n\n> **PREREQUISITE:** Read `../shared/SKILL.md` first.")
+
+	inv := Scan([]string{dir})
+	skill, ok := inv.Get("needs-shared")
+	if !ok {
+		t.Fatal("expected needs-shared skill")
+	}
+	if skill.Eligible {
+		t.Fatalf("expected skill with missing dependency to be ineligible: %+v", skill)
+	}
+	if !testContainsString(skill.Missing, "missing skill dependency: shared") {
+		t.Fatalf("expected missing dependency reason, got %+v", skill.Missing)
+	}
+	if strings.Contains(inv.ModelSummary(10), "needs-shared") {
+		t.Fatalf("expected missing dependency skill to be hidden from model summary")
+	}
+}
+
+func TestScan_PresentSkillDependencyKeepsSkillEligible(t *testing.T) {
+	dir := t.TempDir()
+	makeSkillBundle(t, dir, "shared", "# Shared")
+	makeSkillBundle(t, dir, "needs-shared", "# Needs Shared\n\n> **PREREQUISITE:** Read `../shared/SKILL.md` first.")
+
+	inv := Scan([]string{dir})
+	skill, ok := inv.Get("needs-shared")
+	if !ok {
+		t.Fatal("expected needs-shared skill")
+	}
+	if !skill.Eligible {
+		t.Fatalf("expected present dependency to keep skill eligible: %+v", skill)
+	}
+	if !testContainsString(skill.Dependencies, "shared") {
+		t.Fatalf("expected dependency metadata, got %+v", skill.Dependencies)
+	}
+}
+
+func TestScan_BacktickPrerequisiteSkillDependency(t *testing.T) {
+	dir := t.TempDir()
+	makeSkillBundle(t, dir, "recipe", "> **PREREQUISITE:** Load the following skills to execute this recipe: `gws-tasks`, `gws-gmail`")
+	makeSkillBundle(t, dir, "gws-tasks", "# Tasks")
+
+	inv := Scan([]string{dir})
+	skill, ok := inv.Get("recipe")
+	if !ok {
+		t.Fatal("expected recipe skill")
+	}
+	if skill.Eligible {
+		t.Fatalf("expected missing backtick prerequisite to make skill ineligible: %+v", skill)
+	}
+	if !testContainsString(skill.Missing, "missing skill dependency: gws-gmail") {
+		t.Fatalf("expected missing gws-gmail dependency, got %+v", skill.Missing)
+	}
+}
+
+func TestScan_LocalBinaryRequirementNeedsExecTool(t *testing.T) {
+	dir := t.TempDir()
+	makeSkillBundle(t, dir, "cli-skill", `---
+metadata:
+  openclaw:
+    requires:
+      bins: [gws]
+---
+# CLI Skill`)
+
+	inv := ScanWithOptions(LoadOptions{
+		Roots:          []Root{{Path: dir, Source: SourceWorkspace}},
+		AvailableTools: map[string]struct{}{"read_skill": {}},
+	})
+	skill := inv.Skills[0]
+	if skill.Eligible {
+		t.Fatalf("expected local binary skill to be ineligible without exec: %+v", skill)
+	}
+	if !testContainsString(skill.Unsupported, "requires exec tool for local binary: gws") {
+		t.Fatalf("expected missing exec reason, got %+v", skill.Unsupported)
+	}
+
+	inv = ScanWithOptions(LoadOptions{
+		Roots:          []Root{{Path: dir, Source: SourceWorkspace}},
+		AvailableTools: map[string]struct{}{"read_skill": {}, "exec": {}},
+	})
+	if !inv.Skills[0].Eligible {
+		t.Fatalf("expected local binary skill to be eligible when exec is available: %+v", inv.Skills[0])
 	}
 }
 

@@ -273,6 +273,7 @@ case "$action" in
     start_service
     ;;
   restart)
+    ensure_binary
     stop_service true
     if [[ -n "$(find_service_pids)" ]]; then
       print_status

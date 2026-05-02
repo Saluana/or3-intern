@@ -31,6 +31,22 @@ type ExecTool struct {
 	ApprovalBroker    *approval.Broker
 }
 
+type ApprovalRequiredError struct {
+	ToolName  string
+	RequestID int64
+}
+
+func (e *ApprovalRequiredError) Error() string {
+	toolName := strings.TrimSpace(e.ToolName)
+	if toolName == "" {
+		toolName = "tool"
+	}
+	if e.RequestID > 0 {
+		return fmt.Sprintf("approval required for %s (request %d)", toolName, e.RequestID)
+	}
+	return fmt.Sprintf("approval required for %s", toolName)
+}
+
 const (
 	defaultExecStdoutPreviewBytes = 12000
 	defaultExecStderrPreviewBytes = 8000
@@ -64,6 +80,16 @@ func (t *ExecTool) CapabilityForParams(params map[string]any) CapabilityLevel {
 	return CapabilityGuarded
 }
 
+func (t *ExecTool) CapabilityForContextParams(ctx context.Context, params map[string]any) CapabilityLevel {
+	if strings.TrimSpace(fmt.Sprint(params["command"])) != "" && fmt.Sprint(params["command"]) != "<nil>" {
+		if toolsRequestIsService(ctx) {
+			return CapabilityGuarded
+		}
+		return CapabilityPrivileged
+	}
+	return CapabilityGuarded
+}
+
 // defaultBlockedPatterns is a legacy-shell tripwire, not a security boundary.
 // Keep exec policy in the approval broker, program allowlist, sandbox, service
 // shell ban, and runtime profile controls; shell substring matching is easy to
@@ -79,6 +105,15 @@ func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, 
 	}
 	legacyCommand, _ := params["command"].(string)
 	legacyCommand = strings.TrimSpace(legacyCommand)
+	if toolsRequestIsService(ctx) && legacyCommand != "" && program == "" {
+		parsedProgram, parsedArgs, err := parseServiceDirectCommand(legacyCommand)
+		if err != nil {
+			return "", fmt.Errorf("shell command execution disabled for service requests; use program + args: %w", err)
+		}
+		program = parsedProgram
+		params = cloneParamsWithArgs(params, parsedArgs)
+		legacyCommand = ""
+	}
 	if program == "" && legacyCommand == "" {
 		return "", errors.New("missing program or command")
 	}
@@ -89,9 +124,6 @@ func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, 
 		identity := RequesterIdentityFromContext(ctx)
 		if !serviceExecRoleAllowed(identity.Role) {
 			return "", errors.New("exec unavailable for this requester role")
-		}
-		if strings.TrimSpace(ApprovalTokenFromContext(ctx)) == "" {
-			return "", errors.New("service exec requires approval token")
 		}
 		if legacyCommand != "" {
 			return "", errors.New("shell command execution disabled for service requests")
@@ -168,7 +200,7 @@ func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, 
 		if !decision.Allowed {
 			if decision.RequiresApproval {
 				t.ApprovalBroker.AuditExecEvent(ctx, "exec.blocked", decision.SubjectHash, map[string]any{"reason": "approval_required", "request_id": decision.RequestID})
-				return "", fmt.Errorf("approval required for exec (request %d)", decision.RequestID)
+				return "", &ApprovalRequiredError{ToolName: t.Name(), RequestID: decision.RequestID}
 			}
 			t.ApprovalBroker.AuditExecEvent(ctx, "exec.blocked", decision.SubjectHash, map[string]any{"reason": decision.Reason})
 			return "", fmt.Errorf("exec blocked: %s", decision.Reason)
@@ -237,6 +269,88 @@ func serviceExecRoleAllowed(role string) bool {
 	default:
 		return false
 	}
+}
+
+func parseServiceDirectCommand(command string) (string, []string, error) {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return "", nil, errors.New("empty command")
+	}
+	if strings.ContainsAny(command, ";&|<>\n\r`()$") {
+		return "", nil, errors.New("shell syntax is not allowed in service exec")
+	}
+	parts, err := splitDirectCommand(command)
+	if err != nil {
+		return "", nil, err
+	}
+	if len(parts) == 0 || strings.TrimSpace(parts[0]) == "" {
+		return "", nil, errors.New("missing program")
+	}
+	return parts[0], parts[1:], nil
+}
+
+func splitDirectCommand(command string) ([]string, error) {
+	var parts []string
+	var current strings.Builder
+	var quote rune
+	escaped := false
+	for _, r := range command {
+		if escaped {
+			current.WriteRune(r)
+			escaped = false
+			continue
+		}
+		if r == '\\' {
+			escaped = true
+			continue
+		}
+		if quote != 0 {
+			if r == quote {
+				quote = 0
+				continue
+			}
+			current.WriteRune(r)
+			continue
+		}
+		if r == '\'' || r == '"' {
+			quote = r
+			continue
+		}
+		if r == ' ' || r == '\t' {
+			if current.Len() > 0 {
+				parts = append(parts, current.String())
+				current.Reset()
+			}
+			continue
+		}
+		current.WriteRune(r)
+	}
+	if escaped {
+		return nil, errors.New("unfinished escape in command")
+	}
+	if quote != 0 {
+		return nil, errors.New("unterminated quote in command")
+	}
+	if current.Len() > 0 {
+		parts = append(parts, current.String())
+	}
+	return parts, nil
+}
+
+func cloneParamsWithArgs(params map[string]any, args []string) map[string]any {
+	cloned := make(map[string]any, len(params)+1)
+	for key, value := range params {
+		if key == "command" {
+			continue
+		}
+		cloned[key] = value
+	}
+	values := make([]any, 0, len(args))
+	for _, arg := range args {
+		values = append(values, arg)
+	}
+	cloned["args"] = values
+	return cloned
 }
 
 func allowedProgram(program string, resolved string, allowed []string) bool {

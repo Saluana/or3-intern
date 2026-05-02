@@ -1872,6 +1872,20 @@ func TestRuntime_GuardToolExecution_ProfileDeniesPrivilegedTool(t *testing.T) {
 	}
 }
 
+func TestRuntime_GuardToolExecution_SafeProfileAllowsReadFileFull(t *testing.T) {
+	rt := &Runtime{}
+	ctx := tools.ContextWithActiveProfile(context.Background(), tools.ActiveProfile{
+		Name:          "safe-only",
+		MaxCapability: tools.CapabilitySafe,
+		AllowedTools:  map[string]struct{}{"read_file": {}},
+	})
+	params := map[string]any{"mode": "full"}
+	err := rt.guardToolExecution(ctx, &tools.ReadFile{}, tools.ToolCapability(&tools.ReadFile{}, params), params)
+	if err != nil {
+		t.Fatalf("expected safe profile to allow read_file full, got %v", err)
+	}
+}
+
 func TestRuntime_GuardToolExecution_ProfileDeniesSubagents(t *testing.T) {
 	rt := &Runtime{}
 	ctx := tools.ContextWithActiveProfile(context.Background(), tools.ActiveProfile{
@@ -2726,7 +2740,7 @@ func TestDynamicToolExposureSelectsIntentGroups(t *testing.T) {
 	reg.Register(&namedRuntimeTool{name: "exec"})
 	reg.Register(&namedRuntimeTool{name: "web_fetch"})
 	rt := &Runtime{DynamicToolExposure: true}
-	exposed := rt.exposedToolsForTurn(reg, []providers.ChatMessage{{Role: "user", Content: "please edit the config file"}}, "")
+	exposed := rt.exposedToolsForTurn(context.Background(), reg, []providers.ChatMessage{{Role: "user", Content: "please edit the config file"}}, "")
 	defs := toToolDefs(exposed)
 	names := make([]string, 0, len(defs))
 	for _, def := range defs {
@@ -2743,7 +2757,7 @@ func TestDynamicToolExposureReadIntentIncludesListDir(t *testing.T) {
 	reg.Register(&namedRuntimeTool{name: "list_dir"})
 	reg.Register(&namedRuntimeTool{name: "write_file"})
 	rt := &Runtime{DynamicToolExposure: true}
-	defs := toToolDefs(rt.exposedToolsForTurn(reg, []providers.ChatMessage{{Role: "user", Content: "inspect the project files"}}, ""))
+	defs := toToolDefs(rt.exposedToolsForTurn(context.Background(), reg, []providers.ChatMessage{{Role: "user", Content: "inspect the project files"}}, ""))
 	if !toolDefsContain(defs, "read_file") || !toolDefsContain(defs, "list_dir") {
 		t.Fatalf("expected read intent to expose read_file and list_dir, got %#v", defs)
 	}
@@ -2757,8 +2771,8 @@ func TestUnchangedExposedToolsLeavesPrefixIdentical(t *testing.T) {
 	reg.Register(&namedRuntimeTool{name: "read_file"})
 	reg.Register(&namedRuntimeTool{name: "write_file"})
 	rt := &Runtime{DynamicToolExposure: true}
-	first := toToolDefs(rt.exposedToolsForTurn(reg, []providers.ChatMessage{{Role: "user", Content: "edit the config"}}, ""))
-	second := toToolDefs(rt.exposedToolsForTurn(reg, []providers.ChatMessage{{Role: "user", Content: "modify the config"}}, ""))
+	first := toToolDefs(rt.exposedToolsForTurn(context.Background(), reg, []providers.ChatMessage{{Role: "user", Content: "edit the config"}}, ""))
+	second := toToolDefs(rt.exposedToolsForTurn(context.Background(), reg, []providers.ChatMessage{{Role: "user", Content: "modify the config"}}, ""))
 	if fmt.Sprint(first) != fmt.Sprint(second) {
 		t.Fatalf("expected unchanged exposed write tool set to stay stable, first=%#v second=%#v", first, second)
 	}
@@ -2770,8 +2784,8 @@ func TestExposedToolSetChangeRebuildsPrefix(t *testing.T) {
 	reg.Register(&namedRuntimeTool{name: "write_file"})
 	reg.Register(&namedRuntimeTool{name: "web_fetch"})
 	rt := &Runtime{DynamicToolExposure: true}
-	readDefs := toToolDefs(rt.exposedToolsForTurn(reg, []providers.ChatMessage{{Role: "user", Content: "inspect the file"}}, ""))
-	webDefs := toToolDefs(rt.exposedToolsForTurn(reg, []providers.ChatMessage{{Role: "user", Content: "fetch this url"}}, ""))
+	readDefs := toToolDefs(rt.exposedToolsForTurn(context.Background(), reg, []providers.ChatMessage{{Role: "user", Content: "inspect the file"}}, ""))
+	webDefs := toToolDefs(rt.exposedToolsForTurn(context.Background(), reg, []providers.ChatMessage{{Role: "user", Content: "fetch this url"}}, ""))
 	if fmt.Sprint(readDefs) == fmt.Sprint(webDefs) || !toolDefsContain(webDefs, "web_fetch") {
 		t.Fatalf("expected web intent to change exposed schemas, read=%#v web=%#v", readDefs, webDefs)
 	}
@@ -2782,7 +2796,7 @@ func TestDynamicToolExposureDoesNotExposeUnknownToolsByDefault(t *testing.T) {
 	reg.Register(&namedRuntimeTool{name: "read_file"})
 	reg.Register(&namedRuntimeTool{name: "spawn_subagent"})
 	rt := &Runtime{DynamicToolExposure: true}
-	defs := toToolDefs(rt.exposedToolsForTurn(reg, []providers.ChatMessage{{Role: "user", Content: "inspect the file"}}, ""))
+	defs := toToolDefs(rt.exposedToolsForTurn(context.Background(), reg, []providers.ChatMessage{{Role: "user", Content: "inspect the file"}}, ""))
 	if toolDefsContain(defs, "spawn_subagent") {
 		t.Fatalf("expected unknown tool to stay hidden from default read exposure, got %#v", defs)
 	}
@@ -2796,11 +2810,46 @@ func TestDynamicToolExposureToolInventoryIntentExposesRegisteredToolGroups(t *te
 	reg.Register(&namedRuntimeTool{name: "web_fetch"})
 	reg.Register(&namedRuntimeTool{name: "cron"})
 	rt := &Runtime{DynamicToolExposure: true}
-	defs := toToolDefs(rt.exposedToolsForTurn(reg, []providers.ChatMessage{{Role: "user", Content: "what tools are available?"}}, "service"))
+	defs := toToolDefs(rt.exposedToolsForTurn(context.Background(), reg, []providers.ChatMessage{{Role: "user", Content: "what tools are available?"}}, "service"))
 	for _, name := range []string{"read_file", "write_file", "exec", "web_fetch", "cron"} {
 		if !toolDefsContain(defs, name) {
 			t.Fatalf("expected tool inventory intent to expose %s, got %#v", name, defs)
 		}
+	}
+}
+
+func TestDynamicToolExposureRespectsCapabilityCeiling(t *testing.T) {
+	reg := tools.NewRegistry()
+	reg.Register(&namedRuntimeTool{name: "read_file"})
+	reg.Register(&guardedNamedRuntimeTool{namedRuntimeTool{name: "write_file"}})
+	reg.Register(&guardedNamedRuntimeTool{namedRuntimeTool{name: "run_skill_script"}})
+	rt := &Runtime{DynamicToolExposure: true}
+	ctx := tools.ContextWithCapabilityCeiling(context.Background(), tools.CapabilitySafe)
+	defs := toToolDefs(rt.exposedToolsForTurn(ctx, reg, []providers.ChatMessage{{Role: "user", Content: "what tools are available?"}}, "service"))
+	if !toolDefsContain(defs, "read_file") {
+		t.Fatalf("expected safe tool to remain exposed, got %#v", defs)
+	}
+	if toolDefsContain(defs, "write_file") || toolDefsContain(defs, "run_skill_script") {
+		t.Fatalf("expected guarded tools to be hidden under safe ceiling, got %#v", defs)
+	}
+}
+
+func TestDynamicToolExposureRespectsProfileAllowlist(t *testing.T) {
+	reg := tools.NewRegistry()
+	reg.Register(&namedRuntimeTool{name: "read_file"})
+	reg.Register(&namedRuntimeTool{name: "list_dir"})
+	rt := &Runtime{DynamicToolExposure: true}
+	ctx := tools.ContextWithActiveProfile(context.Background(), tools.ActiveProfile{
+		Name:          "read-file-only",
+		MaxCapability: tools.CapabilitySafe,
+		AllowedTools:  map[string]struct{}{"read_file": {}},
+	})
+	defs := toToolDefs(rt.exposedToolsForTurn(ctx, reg, []providers.ChatMessage{{Role: "user", Content: "inspect the project files"}}, "service"))
+	if !toolDefsContain(defs, "read_file") {
+		t.Fatalf("expected allowed profile tool to remain exposed, got %#v", defs)
+	}
+	if toolDefsContain(defs, "list_dir") {
+		t.Fatalf("expected profile-disallowed tool to be hidden, got %#v", defs)
 	}
 }
 
@@ -2818,6 +2867,10 @@ func (t *namedRuntimeTool) Schema() map[string]any {
 func (t *namedRuntimeTool) Execute(ctx context.Context, params map[string]any) (string, error) {
 	return "ok", nil
 }
+
+type guardedNamedRuntimeTool struct{ namedRuntimeTool }
+
+func (t *guardedNamedRuntimeTool) Capability() tools.CapabilityLevel { return tools.CapabilityGuarded }
 
 func containsString(values []string, want string) bool {
 	for _, value := range values {
@@ -2862,6 +2915,31 @@ func TestRuntime_BoundTextResult_ArtifactsPreviewAndID(t *testing.T) {
 	}
 	if storedArtifact.SizeBytes <= 0 {
 		t.Fatalf("expected stored artifact bytes, got %#v", storedArtifact)
+	}
+}
+
+func TestRuntime_ToolPreviewBytesDefaultsToMaxToolBytes(t *testing.T) {
+	rt := &Runtime{MaxToolBytes: 12345}
+	if got := rt.toolPreviewBytes(); got != 12345 {
+		t.Fatalf("expected preview bytes to inherit MaxToolBytes, got %d", got)
+	}
+}
+
+func TestRuntime_ToolPreviewBytesHasUsefulFallback(t *testing.T) {
+	rt := &Runtime{}
+	if got := rt.toolPreviewBytes(); got != config.DefaultMaxToolBytes {
+		t.Fatalf("expected preview bytes fallback %d, got %d", config.DefaultMaxToolBytes, got)
+	}
+}
+
+func TestTerminalToolResultTextForUnavailableSkill(t *testing.T) {
+	out := `{"kind":"skill_read","ok":false,"summary":"Skill gws-tasks is unavailable: requires exec tool for local binary: gws"}`
+	got := terminalToolResultText("read_skill", out)
+	if !strings.Contains(got, "Skill gws-tasks is unavailable") {
+		t.Fatalf("expected unavailable skill text, got %q", got)
+	}
+	if got := terminalToolResultText("read_file", out); got != "" {
+		t.Fatalf("expected non-skill tool result to be ignored, got %q", got)
 	}
 }
 

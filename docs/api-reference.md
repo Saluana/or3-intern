@@ -105,6 +105,8 @@ Bearer token notes:
 | `GET` | `/internal/v1/health` | Admin or Operator | Lightweight runtime/job health. |
 | `GET` | `/internal/v1/readiness` | Admin or Operator | Startup/readiness evaluation. |
 | `GET` | `/internal/v1/capabilities` | Admin or Operator | Effective machine-readable runtime posture. |
+| `GET` | `/internal/v1/app/bootstrap` | Admin or Operator | Return an app-shaped host overview with pairing/auth/status/count/action summaries. |
+| `POST` | `/internal/v1/actions/restart-service` | Operator | Request a structured service restart without opening a terminal session. |
 | `GET` | `/internal/v1/embeddings/status` | Operator | Embedding compatibility/reporting. |
 | `POST` | `/internal/v1/embeddings/rebuild` | Operator | Rebuild memory/doc embeddings. |
 | `GET` | `/internal/v1/audit` | Operator | Audit chain status summary. |
@@ -203,6 +205,35 @@ Accepted response shape:
 ```
 
 When the subagent queue is full, the route returns `429`.
+
+### `GET /internal/v1/app/bootstrap`
+
+Returns an app-shaped summary that composes pairing, auth, runtime state, counts, and action descriptors for `or3-app`.
+
+Response fields include:
+
+- `host` with host identity summary
+- `pairing` with paired device state for the current caller
+- `auth` with session and step-up status plus auth capability hints
+- `status` with health, readiness, capabilities, summary, and warning list
+- `counts` with pending approvals and active job/terminal counts
+- `actions` with app action descriptors such as `restart-service`
+- `features` with app-surface capability flags
+
+This route is summary-oriented and complements, rather than replaces, the more detailed health, readiness, capabilities, approvals, and job routes.
+
+### `POST /internal/v1/actions/restart-service`
+
+Requests a service restart through a structured action route.
+
+Behavior:
+
+- follows the same authorization model as the rest of the service surface
+- uses the sensitive-route auth policy for paired-device sessions (`session` + `step-up`)
+- preserves approval behavior by checking whether terminal-style exec access would require approval first
+- returns `202` with `{ "action_id": "restart-service", "status": "accepted" }` when the restart script was launched
+- returns `409` with `approval_id` when approval is required first
+- returns `503` when shell access or the restart script is unavailable on the host
 
 ### Approval and pairing endpoints
 

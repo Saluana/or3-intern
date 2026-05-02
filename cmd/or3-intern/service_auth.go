@@ -523,6 +523,10 @@ func serviceRouteRequirementForRequest(cfg config.Config, r *http.Request) servi
 		return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
 	case strings.HasPrefix(path, "/internal/v1/devices/"):
 		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "device management requires recent passkey verification"}
+	case path == "/internal/v1/app/bootstrap":
+		return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, BypassGlobalSession: true}
+	case path == "/internal/v1/actions/restart-service":
+		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "restarting the service requires recent passkey verification"}
 	case path == "/internal/v1/configure" || strings.HasPrefix(path, "/internal/v1/configure/"):
 		if method == http.MethodGet {
 			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
@@ -541,7 +545,7 @@ func serviceRouteRequirementForRequest(cfg config.Config, r *http.Request) servi
 		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "file changes require recent passkey verification"}
 	case path == "/internal/v1/terminal/sessions" || strings.HasPrefix(path, "/internal/v1/terminal/sessions/"):
 		if method == http.MethodGet && !strings.Contains(strings.TrimPrefix(path, "/internal/v1/terminal/sessions/"), "/input") {
-			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
+			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, SessionOnly: true}
 		}
 		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "terminal access requires recent passkey verification"}
 	case path == "/internal/v1/approvals" || strings.HasPrefix(path, "/internal/v1/approvals/"):

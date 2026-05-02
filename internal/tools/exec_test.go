@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -416,6 +417,20 @@ func TestExecTool_ApprovalRequired_Blocks(t *testing.T) {
 	if !strings.Contains(err.Error(), "approval required") {
 		t.Errorf("expected 'approval required' in error, got %q", err.Error())
 	}
+	var approvalErr *ApprovalRequiredError
+	if !errors.As(err, &approvalErr) {
+		t.Fatalf("expected ApprovalRequiredError, got %T", err)
+	}
+	if approvalErr.RequestID <= 0 {
+		t.Fatalf("expected approval request ID, got %d", approvalErr.RequestID)
+	}
+	requests, err := broker.ListApprovalRequests(context.Background(), "pending", 10)
+	if err != nil {
+		t.Fatalf("ListApprovalRequests: %v", err)
+	}
+	if len(requests) != 1 || requests[0].ID != approvalErr.RequestID {
+		t.Fatalf("expected pending request %d, got %+v", approvalErr.RequestID, requests)
+	}
 }
 
 func TestExecTool_DenyMode_Blocks(t *testing.T) {
@@ -563,5 +578,108 @@ func TestExecTool_AllowlistMode_Allows(t *testing.T) {
 	}
 	if !strings.Contains(out, "allowlisted") {
 		t.Errorf("unexpected output: %q", out)
+	}
+}
+
+func serviceExecContext() context.Context {
+	ctx := ContextWithRequestSource(context.Background(), RequestSourceService)
+	ctx = ContextWithRequesterIdentity(ctx, "test-operator", "operator")
+	ctx = ContextWithApprovalToken(ctx, "approved-token")
+	return ctx
+}
+
+func serviceExecContextWithoutApproval() context.Context {
+	ctx := ContextWithRequestSource(context.Background(), RequestSourceService)
+	ctx = ContextWithRequesterIdentity(ctx, "test-operator", "operator")
+	return ctx
+}
+
+func TestExecServiceWithoutApprovalTokenCreatesApprovalRequest(t *testing.T) {
+	broker := makeTestBroker(t, config.ApprovalModeAsk)
+	tool := &ExecTool{
+		Timeout:         time.Second,
+		AllowedPrograms: []string{"echo"},
+		ApprovalBroker:  broker,
+	}
+
+	_, err := tool.Execute(serviceExecContextWithoutApproval(), map[string]any{
+		"command": `echo "needs approval"`,
+	})
+	if err == nil {
+		t.Fatal("expected approval-required error")
+	}
+	var approvalErr *ApprovalRequiredError
+	if !errors.As(err, &approvalErr) {
+		t.Fatalf("expected ApprovalRequiredError, got %T: %v", err, err)
+	}
+	if approvalErr.RequestID <= 0 {
+		t.Fatalf("expected approval request ID, got %d", approvalErr.RequestID)
+	}
+	if strings.Contains(err.Error(), "requires approval token") {
+		t.Fatalf("service exec should create an approval request instead of hard-failing: %v", err)
+	}
+}
+
+func TestExecCapabilityForContext_ServiceCommandIsGuarded(t *testing.T) {
+	tool := &ExecTool{}
+	params := map[string]any{"command": `echo "hello world"`}
+
+	if got := ToolCapability(tool, params); got != CapabilityPrivileged {
+		t.Fatalf("expected non-service command to stay privileged, got %s", got)
+	}
+	if got := ToolCapabilityForContext(serviceExecContext(), tool, params); got != CapabilityGuarded {
+		t.Fatalf("expected service command to be guarded, got %s", got)
+	}
+}
+
+func TestExecServiceCommandRunsAsDirectProgram(t *testing.T) {
+	tool := &ExecTool{
+		Timeout:         time.Second,
+		AllowedPrograms: []string{"echo"},
+	}
+
+	out, err := tool.Execute(serviceExecContext(), map[string]any{"command": `echo "hello world"`})
+	if err != nil {
+		t.Fatalf("Execute service command: %v", err)
+	}
+	if !strings.Contains(out, "hello world") {
+		t.Fatalf("expected echo output, got %q", out)
+	}
+}
+
+func TestExecServiceCommandPassesGuardedRegistryCeiling(t *testing.T) {
+	registry := NewRegistry()
+	registry.Register(&ExecTool{
+		Timeout:         time.Second,
+		AllowedPrograms: []string{"echo"},
+	})
+	ctx := ContextWithToolGuard(serviceExecContext(), func(_ context.Context, _ Tool, capability CapabilityLevel, _ map[string]any) error {
+		if capability != CapabilityGuarded {
+			t.Fatalf("expected guarded capability, got %s", capability)
+		}
+		return nil
+	})
+
+	out, err := registry.ExecuteParams(ctx, "exec", map[string]any{"command": `echo "hello ceiling"`})
+	if err != nil {
+		t.Fatalf("ExecuteParams: %v", err)
+	}
+	if !strings.Contains(out, "hello ceiling") {
+		t.Fatalf("expected echo output, got %q", out)
+	}
+}
+
+func TestExecServiceCommandRejectsShellSyntax(t *testing.T) {
+	tool := &ExecTool{
+		Timeout:         time.Second,
+		AllowedPrograms: []string{"echo"},
+	}
+
+	_, err := tool.Execute(serviceExecContext(), map[string]any{"command": `echo hello && echo goodbye`})
+	if err == nil {
+		t.Fatal("expected shell syntax to be rejected")
+	}
+	if !strings.Contains(err.Error(), "shell syntax is not allowed") {
+		t.Fatalf("expected shell syntax error, got %v", err)
 	}
 }

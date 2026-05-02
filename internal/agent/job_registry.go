@@ -4,8 +4,11 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"sync"
 	"time"
+
+	"or3-intern/internal/tools"
 )
 
 const (
@@ -292,6 +295,12 @@ func (o JobObserver) OnToolResult(_ context.Context, name string, result string,
 	data := map[string]any{"name": name, "result": result}
 	if err != nil {
 		data["error"] = err.Error()
+		var approvalErr *tools.ApprovalRequiredError
+		if errors.As(err, &approvalErr) {
+			data["code"] = "approval_required"
+			data["request_id"] = approvalErr.RequestID
+			data["approval_id"] = approvalErr.RequestID
+		}
 	}
 	o.registry.Publish(o.jobID, "tool_result", data)
 }

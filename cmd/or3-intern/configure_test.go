@@ -45,6 +45,7 @@ func TestRunConfigureWithIO_TargetedSections(t *testing.T) {
 		"router-key",
 		"brave-key",
 		"http://proxy.internal:8080",
+		"",
 		"75",
 		"/opt/homebrew/bin",
 	}, "\n"))

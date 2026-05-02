@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"or3-intern/internal/tools"
 )
 
 func TestJobRegistry_FanoutAndWait(t *testing.T) {
@@ -124,5 +126,34 @@ func TestJobRegistry_BoundsPerJobEventHistory(t *testing.T) {
 	}
 	if snapshot.Events[0].Sequence != 3 || snapshot.Events[2].Sequence != 5 {
 		t.Fatalf("expected trimmed history to retain newest sequence numbers, got %#v", snapshot.Events)
+	}
+}
+
+func TestJobObserverToolResultIncludesApprovalRequestID(t *testing.T) {
+	registry := NewJobRegistry(0, 0)
+	job := registry.Register("turn")
+	observer := registry.Observer(job.ID)
+
+	observer.OnToolResult(context.Background(), "exec", "", &tools.ApprovalRequiredError{
+		ToolName:  "exec",
+		RequestID: 42,
+	})
+
+	snapshot, ok := registry.Snapshot(job.ID)
+	if !ok {
+		t.Fatal("expected job snapshot")
+	}
+	if len(snapshot.Events) != 1 {
+		t.Fatalf("expected one event, got %d", len(snapshot.Events))
+	}
+	data := snapshot.Events[0].Data
+	if data["code"] != "approval_required" {
+		t.Fatalf("expected approval_required code, got %+v", data)
+	}
+	if data["request_id"] != int64(42) {
+		t.Fatalf("expected request_id 42, got %+v", data)
+	}
+	if data["approval_id"] != int64(42) {
+		t.Fatalf("expected approval_id 42, got %+v", data)
 	}
 }

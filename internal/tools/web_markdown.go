@@ -192,6 +192,10 @@ func buildMarkdownFetchResult(ctx context.Context, store *artifacts.Store, conve
 			OK:      false,
 			Summary: fmt.Sprintf("Fetch failed for %s with HTTP status %s", parsed.String(), status),
 			Preview: preview,
+			Advice: []string{
+				"Check whether the URL is correct and publicly reachable, or use web_search first if you still need to discover the right page.",
+				"If you only need the raw response instead of Markdown conversion, use web_fetch.",
+			},
 			Stats: map[string]any{
 				"url":               parsed.String(),
 				"mode":              "html_text",
@@ -224,6 +228,9 @@ func buildMarkdownFetchResult(ctx context.Context, store *artifacts.Store, conve
 		Summary:    fmt.Sprintf("Fetched %s, converted HTML to Markdown, and saved it as artifact %s. Use read_artifact with this artifact_id to read only the parts needed.", parsed.String(), artifactID),
 		Preview:    preview,
 		ArtifactID: artifactID,
+		Advice: []string{
+			"Use read_artifact with the returned artifact_id and an offset when the converted page is too large to inspect in one call.",
+		},
 		Stats: map[string]any{
 			"url":               parsed.String(),
 			"mode":              "markdown",

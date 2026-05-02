@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -54,7 +55,7 @@ const (
 
 func (t *ExecTool) Name() string { return "exec" }
 func (t *ExecTool) Description() string {
-	return "Run an allowed local program with approval, sandbox, and allowlist controls. This is guarded when using program plus args. The legacy command field runs through a shell, is privileged, and may be disabled; avoid command unless the user explicitly needs shell syntax and privileged tools are allowed."
+	return "Run an allowed local program with approval, sandbox, and allowlist controls. This is guarded when using program plus args. The legacy command field runs through a shell, is privileged, and may be disabled; avoid command unless the user explicitly needs shell syntax and privileged tools are allowed. When a workspace restriction is configured, omit cwd to run in that workspace root or pass a cwd inside it."
 }
 func (t *ExecTool) Parameters() map[string]any {
 	return map[string]any{
@@ -98,6 +99,28 @@ var defaultBlockedPatterns = []string{
 	"rm -rf", "mkfs", "dd ", "shutdown", "reboot", "poweroff", ":(){", ">|", "chown -R /", "chmod -R 777 /",
 }
 
+func resolveExecWorkingDir(requested string, restrictDir string) (string, error) {
+	requested = strings.TrimSpace(requested)
+	if requested == "" || requested == "<nil>" {
+		if strings.TrimSpace(restrictDir) != "" {
+			return restrictDir, nil
+		}
+		return os.Getwd()
+	}
+	if filepath.IsAbs(requested) {
+		return requested, nil
+	}
+	base := strings.TrimSpace(restrictDir)
+	if base == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", err
+		}
+		base = cwd
+	}
+	return filepath.Join(base, requested), nil
+}
+
 func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, error) {
 	program := strings.TrimSpace(fmt.Sprint(params["program"]))
 	if program == "<nil>" {
@@ -111,7 +134,7 @@ func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, 
 			return "", fmt.Errorf("shell command execution disabled for service requests; use program + args: %w", err)
 		}
 		program = parsedProgram
-		params = cloneParamsWithArgs(params, parsedArgs)
+		params = cloneParamsWithArgs(params, append(parsedArgs, stringArgs(params["args"])...))
 		legacyCommand = ""
 	}
 	if program == "" && legacyCommand == "" {
@@ -144,10 +167,11 @@ func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, 
 			}
 		}
 	}
-	cwd, _ := params["cwd"].(string)
-	if cwd == "" {
-		cwd, _ = os.Getwd()
+	cwd, err := resolveExecWorkingDir(fmt.Sprint(params["cwd"]), t.RestrictDir)
+	if err != nil {
+		return "", err
 	}
+	childEnv := BuildChildEnv(os.Environ(), t.ChildEnvAllowlist, EnvFromContext(ctx), t.PathAppend)
 	if t.RestrictDir != "" {
 		abs, err := filepath.Abs(cwd)
 		if err != nil {
@@ -163,11 +187,14 @@ func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, 
 		}
 		rel, err := filepath.Rel(root, abs)
 		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return "", fmt.Errorf("cwd outside allowed directory")
+			return "", fmt.Errorf("cwd outside allowed directory: %s (allowed root: %s)", abs, root)
 		}
 	}
+	if toolsRequestIsService(ctx) && legacyCommand == "" && strings.EqualFold(program, "which") {
+		return executeServiceWhich(params, cwd, childEnv)
+	}
 	if program != "" {
-		resolvedProgram, err := resolveExecutable(program, cwd)
+		resolvedProgram, err := resolveExecutable(program, cwd, childEnv)
 		if err != nil {
 			return "", err
 		}
@@ -177,7 +204,6 @@ func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, 
 		program = resolvedProgram
 	}
 
-	childEnv := BuildChildEnv(os.Environ(), t.ChildEnvAllowlist, EnvFromContext(ctx), t.PathAppend)
 	var execSubjectHash string
 	if t.ApprovalBroker != nil {
 		identity := RequesterIdentityFromContext(ctx)
@@ -217,7 +243,6 @@ func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, 
 	defer cancel()
 
 	var c *exec.Cmd
-	var err error
 	if legacyCommand != "" {
 		c, err = commandWithSandbox(cctx, t.Sandbox, cwd, []string{"bash", "-lc", legacyCommand})
 		if err != nil {
@@ -379,7 +404,7 @@ func allowedProgram(program string, resolved string, allowed []string) bool {
 	return false
 }
 
-func resolveExecutable(program string, cwd string) (string, error) {
+func resolveExecutable(program string, cwd string, env []string) (string, error) {
 	program = strings.TrimSpace(program)
 	if program == "" {
 		return "", fmt.Errorf("missing program")
@@ -398,11 +423,118 @@ func resolveExecutable(program string, cwd string) (string, error) {
 		}
 		return canonicalExecutablePath(program)
 	}
-	resolved, err := exec.LookPath(program)
+	resolved, err := lookPathWithEnv(program, env)
 	if err != nil {
 		return "", err
 	}
 	return canonicalExecutablePath(resolved)
+}
+
+func executeServiceWhich(params map[string]any, cwd string, env []string) (string, error) {
+	targets := stringArgs(params["args"])
+	if len(targets) == 0 {
+		return "", errors.New("which requires at least one program name")
+	}
+	found := make([]string, 0, len(targets))
+	missing := make([]string, 0)
+	for _, target := range targets {
+		resolved, err := resolveExecutable(target, cwd, env)
+		if err != nil {
+			missing = append(missing, target)
+			continue
+		}
+		found = append(found, resolved)
+	}
+	previewParts := make([]string, 0, 2)
+	if len(found) > 0 {
+		previewParts = append(previewParts, strings.Join(found, "\n"))
+	}
+	if len(missing) > 0 {
+		previewParts = append(previewParts, fmt.Sprintf("not found: %s", strings.Join(missing, ", ")))
+	}
+	summary := "Executable lookup on the effective child PATH"
+	if len(missing) > 0 {
+		summary = "Some executables were not found on the effective child PATH"
+	}
+	return EncodeToolResult(ToolResult{
+		Kind:    "exec_lookup",
+		OK:      len(missing) == 0,
+		Summary: summary,
+		Preview: strings.TrimSpace(strings.Join(previewParts, "\n\n")),
+	}), nil
+}
+
+func lookPathWithEnv(program string, env []string) (string, error) {
+	pathValue := envValue(env, "PATH")
+	if strings.TrimSpace(pathValue) == "" {
+		return exec.LookPath(program)
+	}
+	dirs := filepath.SplitList(pathValue)
+	if runtime.GOOS == "windows" {
+		return lookPathWindows(program, dirs, envValue(env, "PATHEXT"))
+	}
+	for _, dir := range dirs {
+		if dir = strings.TrimSpace(dir); dir == "" {
+			continue
+		}
+		candidate := filepath.Join(dir, program)
+		if isExecutablePath(candidate) {
+			return candidate, nil
+		}
+	}
+	return "", &exec.Error{Name: program, Err: exec.ErrNotFound}
+}
+
+func lookPathWindows(program string, dirs []string, pathExt string) (string, error) {
+	extensions := []string{""}
+	if filepath.Ext(program) == "" {
+		for _, ext := range filepath.SplitList(strings.ReplaceAll(pathExt, ";", string(os.PathListSeparator))) {
+			ext = strings.TrimSpace(ext)
+			if ext == "" {
+				continue
+			}
+			if !strings.HasPrefix(ext, ".") {
+				ext = "." + ext
+			}
+			extensions = append(extensions, ext)
+		}
+		if len(extensions) == 1 {
+			extensions = append(extensions, ".com", ".exe", ".bat", ".cmd")
+		}
+	}
+	for _, dir := range dirs {
+		if dir = strings.TrimSpace(dir); dir == "" {
+			continue
+		}
+		for _, ext := range extensions {
+			candidate := filepath.Join(dir, program) + ext
+			if isExecutablePath(candidate) {
+				return candidate, nil
+			}
+		}
+	}
+	return "", &exec.Error{Name: program, Err: exec.ErrNotFound}
+}
+
+func isExecutablePath(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return true
+	}
+	return info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0
+}
+
+func envValue(env []string, key string) string {
+	for _, raw := range env {
+		name, value, ok := strings.Cut(raw, "=")
+		if ok && name == key {
+			return value
+		}
+	}
+	return ""
 }
 
 func canonicalExecutablePath(path string) (string, error) {

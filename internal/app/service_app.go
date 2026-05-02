@@ -2,7 +2,9 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"time"
@@ -52,25 +54,46 @@ type TurnRequest struct {
 	Streamer      channels.StreamingChannel
 }
 
+func (a *ServiceApp) serviceRunContext(ctx context.Context, sessionKey, profileName, approvalToken, actor, role string, capability tools.CapabilityLevel, observer agent.ConversationObserver, streamer channels.StreamingChannel) context.Context {
+	runCtx := tools.ContextWithRequestSource(ctx, tools.RequestSourceService)
+	runCtx = tools.ContextWithSession(runCtx, strings.TrimSpace(sessionKey))
+	runCtx = tools.ContextWithApprovalToken(runCtx, approvalToken)
+	runCtx = tools.ContextWithRequesterIdentity(runCtx, actor, role)
+	runCtx = tools.ContextWithCapabilityCeiling(runCtx, capability)
+	if a != nil && a.runtime != nil {
+		runCtx = a.runtime.ContextWithProfileName(runCtx, profileName)
+		runCtx = tools.ContextWithToolGuard(runCtx, a.runtime.GuardToolExecution)
+	}
+	if observer != nil {
+		runCtx = agent.ContextWithConversationObserver(runCtx, observer)
+	}
+	if streamer != nil {
+		runCtx = agent.ContextWithStreamingChannel(runCtx, streamer)
+	}
+	return runCtx
+}
+
+func (a *ServiceApp) serviceToolRegistry(allowedTools []string, restrictTools bool) *tools.Registry {
+	if a == nil || a.runtime == nil {
+		return nil
+	}
+	if !restrictTools {
+		return a.runtime.Tools
+	}
+	filtered := tools.NewRegistry()
+	if len(allowedTools) > 0 {
+		filtered = a.runtime.Tools.CloneFiltered(allowedTools)
+	}
+	return filtered
+}
+
 func (a *ServiceApp) RunTurn(ctx context.Context, req TurnRequest) error {
 	if a == nil || a.runtime == nil {
 		return errors.New("runtime unavailable")
 	}
-	runCtx := tools.ContextWithRequestSource(ctx, tools.RequestSourceService)
-	runCtx = tools.ContextWithApprovalToken(runCtx, req.ApprovalToken)
-	runCtx = tools.ContextWithRequesterIdentity(runCtx, req.Actor, req.Role)
-	runCtx = tools.ContextWithCapabilityCeiling(runCtx, req.Capability)
-	if req.Observer != nil {
-		runCtx = agent.ContextWithConversationObserver(runCtx, req.Observer)
-	}
-	if req.Streamer != nil {
-		runCtx = agent.ContextWithStreamingChannel(runCtx, req.Streamer)
-	}
+	runCtx := a.serviceRunContext(ctx, req.SessionKey, req.ProfileName, req.ApprovalToken, req.Actor, req.Role, req.Capability, req.Observer, req.Streamer)
 	if req.RestrictTools {
-		filtered := tools.NewRegistry()
-		if len(req.AllowedTools) > 0 {
-			filtered = a.runtime.Tools.CloneFiltered(req.AllowedTools)
-		}
+		filtered := a.serviceToolRegistry(req.AllowedTools, req.RestrictTools)
 		runCtx = agent.ContextWithToolRegistry(runCtx, filtered)
 	}
 	meta := cloneMap(req.Meta)
@@ -85,6 +108,177 @@ func (a *ServiceApp) RunTurn(ctx context.Context, req TurnRequest) error {
 		Message:    strings.TrimSpace(req.Message),
 		Meta:       meta,
 	})
+}
+
+type ReplayToolCallRequest struct {
+	SessionKey    string
+	ToolName      string
+	ArgumentsJSON string
+	AllowedTools  []string
+	RestrictTools bool
+	ProfileName   string
+	Capability    tools.CapabilityLevel
+	ApprovalToken string
+	Actor         string
+	Role          string
+	Observer      agent.ConversationObserver
+}
+
+func (a *ServiceApp) ReplayToolCall(ctx context.Context, req ReplayToolCallRequest) (string, error) {
+	if a == nil || a.runtime == nil {
+		return "", errors.New("runtime unavailable")
+	}
+	registry := a.serviceToolRegistry(req.AllowedTools, req.RestrictTools)
+	if registry == nil {
+		return "", errors.New("tool registry unavailable")
+	}
+	toolName := strings.TrimSpace(req.ToolName)
+	if toolName == "" {
+		return "", errors.New("tool name is required")
+	}
+	argsJSON := strings.TrimSpace(req.ArgumentsJSON)
+	if argsJSON == "" {
+		argsJSON = "{}"
+	}
+	runCtx := a.serviceRunContext(ctx, req.SessionKey, req.ProfileName, req.ApprovalToken, req.Actor, req.Role, req.Capability, req.Observer, nil)
+	if req.RestrictTools {
+		runCtx = agent.ContextWithToolRegistry(runCtx, registry)
+	}
+	if req.Observer != nil {
+		req.Observer.OnToolCall(runCtx, toolName, argsJSON)
+	}
+	out, err := registry.Execute(runCtx, toolName, argsJSON)
+	if err != nil {
+		var params map[string]any
+		_ = json.Unmarshal([]byte(argsJSON), &params)
+		out = tools.EncodeToolFailure(toolName, params, out, err)
+	}
+	if req.Observer != nil {
+		req.Observer.OnToolResult(runCtx, toolName, out, err)
+	}
+	if err != nil {
+		return "", err
+	}
+	if a.runtime.DB == nil || a.runtime.Builder == nil || a.runtime.Provider == nil {
+		finalText := summarizeReplayToolResult(toolName, out)
+		if req.Observer != nil {
+			req.Observer.OnCompletion(runCtx, finalText, false)
+		}
+		return finalText, nil
+	}
+	toolCallID, findErr := a.findReplayToolCallID(runCtx, req.SessionKey, toolName, argsJSON)
+	if findErr != nil {
+		return "", findErr
+	}
+	if a.runtime.DB != nil && strings.TrimSpace(req.SessionKey) != "" {
+		payload := map[string]any{
+			"name":      toolName,
+			"replayed":  true,
+			"args_json": argsJSON,
+		}
+		if strings.TrimSpace(toolCallID) != "" {
+			payload["tool_call_id"] = toolCallID
+		}
+		if _, err := a.runtime.DB.AppendMessage(runCtx, req.SessionKey, "tool", out, payload); err != nil {
+			return "", err
+		}
+	}
+	if err := a.runtime.Handle(runCtx, bus.Event{
+		Type:       bus.EventSystem,
+		SessionKey: strings.TrimSpace(req.SessionKey),
+		Channel:    "service",
+		From:       "or3-net",
+		Message:    replayContinuationPrompt(toolName),
+		Meta: map[string]any{
+			"approved_tool_replay": true,
+			"tool_name":            toolName,
+		},
+	}); err != nil {
+		return "", err
+	}
+	return "", nil
+}
+
+func summarizeReplayToolResult(toolName string, out string) string {
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return fmt.Sprintf("%s completed.", strings.TrimSpace(toolName))
+	}
+	var result tools.ToolResult
+	if err := json.Unmarshal([]byte(out), &result); err == nil {
+		parts := make([]string, 0, 3)
+		if preview := strings.TrimSpace(result.Preview); preview != "" {
+			parts = append(parts, preview)
+		}
+		if len(parts) == 0 {
+			if summary := strings.TrimSpace(result.Summary); summary != "" {
+				parts = append(parts, summary)
+			}
+		}
+		if artifactID := strings.TrimSpace(result.ArtifactID); artifactID != "" {
+			parts = append(parts, fmt.Sprintf("artifact: %s", artifactID))
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, "\n\n")
+		}
+	}
+	return out
+}
+
+func (a *ServiceApp) findReplayToolCallID(ctx context.Context, sessionKey, toolName, argsJSON string) (string, error) {
+	if a == nil || a.runtime == nil || a.runtime.Builder == nil {
+		return "", nil
+	}
+	pp, _, err := a.runtime.Builder.BuildWithOptions(ctx, agent.BuildOptions{
+		SessionKey: strings.TrimSpace(sessionKey),
+	})
+	if err != nil {
+		return "", err
+	}
+	wantArgs := canonicalReplayArgs(argsJSON)
+	for i := len(pp.History) - 1; i >= 0; i-- {
+		msg := pp.History[i]
+		if msg.Role != "assistant" || len(msg.ToolCalls) == 0 {
+			continue
+		}
+		for j := len(msg.ToolCalls) - 1; j >= 0; j-- {
+			tc := msg.ToolCalls[j]
+			if strings.TrimSpace(tc.Function.Name) != strings.TrimSpace(toolName) {
+				continue
+			}
+			if wantArgs != "" && canonicalReplayArgs(tc.Function.Arguments) != wantArgs {
+				continue
+			}
+			if id := strings.TrimSpace(tc.ID); id != "" {
+				return id, nil
+			}
+		}
+	}
+	return "", nil
+}
+
+func canonicalReplayArgs(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	var decoded any
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		return raw
+	}
+	encoded, err := json.Marshal(decoded)
+	if err != nil {
+		return raw
+	}
+	return string(encoded)
+}
+
+func replayContinuationPrompt(toolName string) string {
+	name := strings.TrimSpace(toolName)
+	if name == "" {
+		name = "tool"
+	}
+	return fmt.Sprintf("Approval was granted for the previously requested %s call. The exact approved tool call has now been executed and its latest result is already in the conversation. Continue the same task from that result. Do not stop just because the approved tool call succeeded, and do not repeat the same %s call unless it is still necessary.", name, name)
 }
 
 type SubagentRequest struct {

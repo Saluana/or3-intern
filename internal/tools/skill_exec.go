@@ -268,12 +268,30 @@ func skillCommandHash(cmd []string) string {
 	if len(cmd) == 0 {
 		return ""
 	}
-	if info, err := os.Stat(cmd[len(cmd)-1]); err == nil && !info.IsDir() {
-		if blob, readErr := os.ReadFile(cmd[len(cmd)-1]); readErr == nil {
+	if scriptPath := skillCommandHashSource(cmd); scriptPath != "" {
+		if blob, readErr := os.ReadFile(scriptPath); readErr == nil {
 			sum := sha256.Sum256(blob)
 			return fmt.Sprintf("%x", sum[:])
 		}
 	}
 	sum := sha256.Sum256([]byte(strings.Join(cmd, "\x00")))
 	return fmt.Sprintf("%x", sum[:])
+}
+
+func skillCommandHashSource(cmd []string) string {
+	for _, token := range cmd {
+		token = strings.TrimSpace(token)
+		if token == "" {
+			continue
+		}
+		if !hasPathSeparator(token) && filepath.Ext(token) == "" {
+			continue
+		}
+		info, err := os.Stat(token)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		return token
+	}
+	return ""
 }

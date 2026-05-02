@@ -276,14 +276,19 @@ func (t *ReadFile) readPreview(f *os.File, path string, size int64, max int, mod
 	}
 	preview := string(b)
 	summary := fmt.Sprintf("Read %s from %s", mode, path)
+	advice := []string(nil)
 	if truncated {
 		summary = fmt.Sprintf("Read bounded %s from %s; output truncated", mode, path)
+		if mode == "full" {
+			advice = TruncationAdvice("read_file_full", path)
+		}
 	}
 	return EncodeToolResult(ToolResult{
 		Kind:    "file_read",
 		OK:      true,
 		Summary: summary,
 		Preview: preview,
+		Advice:  advice,
 		Stats: map[string]any{
 			"path":      path,
 			"mode":      mode,
@@ -503,6 +508,12 @@ func (t *ListDir) Execute(ctx context.Context, params map[string]any) (string, e
 		OK:      true,
 		Summary: fmt.Sprintf("Listed %d entries in %s", len(out), p),
 		Preview: string(b),
+		Advice: func() []string {
+			if truncated {
+				return TruncationAdvice("list_dir", p)
+			}
+			return nil
+		}(),
 		Stats: map[string]any{
 			"path":      p,
 			"returned":  len(out),
@@ -547,6 +558,12 @@ func readLineRange(f *os.File, path string, size int64, start, end, max int) (st
 		OK:      true,
 		Summary: fmt.Sprintf("Read lines %d-%d from %s", start, end, path),
 		Preview: strings.TrimRight(b.String(), "\n"),
+		Advice: func() []string {
+			if truncated {
+				return TruncationAdvice("read_file_range", path)
+			}
+			return nil
+		}(),
 		Stats: map[string]any{
 			"path":       path,
 			"mode":       "range",
@@ -587,6 +604,12 @@ func grepFile(f *os.File, path string, size int64, pattern string, max int) (str
 		OK:      true,
 		Summary: fmt.Sprintf("Found %d matching lines in %s", matches, path),
 		Preview: strings.TrimRight(b.String(), "\n"),
+		Advice: func() []string {
+			if truncated {
+				return TruncationAdvice("search_file", path)
+			}
+			return nil
+		}(),
 		Stats: map[string]any{
 			"path":      path,
 			"pattern":   pattern,
@@ -626,6 +649,12 @@ func outlineFile(f *os.File, path string, size int64, max int) (string, error) {
 		OK:      true,
 		Summary: fmt.Sprintf("Outlined %d structural lines in %s", entries, path),
 		Preview: strings.TrimRight(b.String(), "\n"),
+		Advice: func() []string {
+			if truncated {
+				return TruncationAdvice("read_file_outline", path)
+			}
+			return nil
+		}(),
 		Stats: map[string]any{
 			"path":      path,
 			"bytes":     size,

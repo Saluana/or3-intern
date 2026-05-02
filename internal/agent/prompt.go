@@ -101,6 +101,7 @@ exec:
 - Prefer program + args over shell command strings.
 - Commands have timeouts, policy checks, and bounded output.
 - Output is previewed. If output is too broad, rerun with a narrower command.
+- Omit cwd unless you need a subdirectory; when cwd is set, keep it inside the stated working directory/workspace.
 - Use run_skill_script only for approved skills when a skill actually needs code execution; prefer read_skill first.
 - If a skill describes CLI commands but no exec/script tool is advertised, do not guess files or hidden scripts; state that execution is unavailable in this turn.
 

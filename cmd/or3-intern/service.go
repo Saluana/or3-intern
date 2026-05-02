@@ -1878,23 +1878,45 @@ func (s *serviceServer) handleTurns(w http.ResponseWriter, r *http.Request) {
 func (s *serviceServer) runTurnJob(ctx context.Context, jobID string, req serviceTurnRequest, identity serviceAuthIdentity) {
 	s.jobs.Publish(jobID, "started", serviceLifecyclePayload(req.SessionKey, req.Meta, map[string]any{"status": "running"}))
 	observer := &serviceObserver{ConversationObserver: s.jobs.Observer(jobID)}
-	err := s.app().RunTurn(ctx, app.TurnRequest{
-		SessionKey:    req.SessionKey,
-		Message:       req.Message,
-		Meta:          req.Meta,
-		AllowedTools:  req.AllowedTools,
-		RestrictTools: req.RestrictTools,
-		ProfileName:   req.ProfileName,
-		Capability:    tools.CapabilityLevel(s.config.Service.MaxCapability),
-		ApprovalToken: req.ApprovalToken,
-		Actor:         identity.Actor,
-		Role:          identity.Role,
-		Observer:      observer,
-		Streamer:      agent.NullStreamer{},
-	})
+	var err error
+	if req.ReplayToolCall != nil {
+		_, err = s.app().ReplayToolCall(ctx, app.ReplayToolCallRequest{
+			SessionKey:    req.SessionKey,
+			ToolName:      req.ReplayToolCall.Name,
+			ArgumentsJSON: req.ReplayToolCall.ArgumentsJSON,
+			AllowedTools:  req.AllowedTools,
+			RestrictTools: req.RestrictTools,
+			ProfileName:   req.ProfileName,
+			Capability:    tools.CapabilityLevel(s.config.Service.MaxCapability),
+			ApprovalToken: req.ApprovalToken,
+			Actor:         identity.Actor,
+			Role:          identity.Role,
+			Observer:      observer,
+		})
+	} else {
+		err = s.app().RunTurn(ctx, app.TurnRequest{
+			SessionKey:    req.SessionKey,
+			Message:       req.Message,
+			Meta:          req.Meta,
+			AllowedTools:  req.AllowedTools,
+			RestrictTools: req.RestrictTools,
+			ProfileName:   req.ProfileName,
+			Capability:    tools.CapabilityLevel(s.config.Service.MaxCapability),
+			ApprovalToken: req.ApprovalToken,
+			Actor:         identity.Actor,
+			Role:          identity.Role,
+			Observer:      observer,
+			Streamer:      agent.NullStreamer{},
+		})
+	}
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
 			s.jobs.Complete(jobID, "aborted", serviceLifecyclePayload(req.SessionKey, req.Meta, map[string]any{"message": "job aborted"}))
+			return
+		}
+		var approvalErr *tools.ApprovalRequiredError
+		if errors.As(err, &approvalErr) {
+			s.jobs.Complete(jobID, "approval_required", serviceApprovalRequiredPayload(req.SessionKey, req.Meta, approvalErr))
 			return
 		}
 		if fallback, ok := serviceTurnFallbackText(err, observer); ok {
@@ -2174,9 +2196,12 @@ type serviceAppBootstrapResponse struct {
 		Role     string `json:"role,omitempty"`
 	} `json:"pairing"`
 	Auth struct {
-		SessionRequired bool `json:"session_required"`
-		SessionActive   bool `json:"session_active"`
-		StepUpActive    bool `json:"step_up_active"`
+		SessionRequired bool   `json:"session_required"`
+		SessionActive   bool   `json:"session_active"`
+		StepUpActive    bool   `json:"step_up_active"`
+		Kind            string `json:"kind,omitempty"`
+		Role            string `json:"role,omitempty"`
+		ExecAllowed     bool   `json:"exec_allowed"`
 		Capabilities    struct {
 			PasskeysSupported bool `json:"passkeys_supported"`
 			StepUpSupported   bool `json:"step_up_supported"`
@@ -2266,6 +2291,9 @@ func (s *serviceServer) buildAppBootstrap(r *http.Request) serviceAppBootstrapRe
 	response.Auth.SessionRequired = s.config.Auth.EnforcementMode == config.AuthEnforcementSession
 	response.Auth.SessionActive = identity.Kind == "auth-session"
 	response.Auth.StepUpActive = identity.StepUpOK
+	response.Auth.Kind = identity.Kind
+	response.Auth.Role = identity.Role
+	response.Auth.ExecAllowed = s.config.Tools.EnableExec && serviceBootstrapExecAllowed(identity.Role)
 	response.Auth.Capabilities.PasskeysSupported = authSvc != nil && authSvc.Enabled()
 	response.Auth.Capabilities.StepUpSupported = s.config.Auth.Enabled && s.config.Auth.RequirePasskeyForSensitive
 
@@ -2293,6 +2321,13 @@ func (s *serviceServer) buildAppBootstrap(r *http.Request) serviceAppBootstrapRe
 	if response.Pairing.Paired && !response.Auth.SessionActive {
 		warnings = append(warnings, serviceAppBootstrapWarning{Code: "session_not_active", Message: "Passkey sign-in is still required for protected actions.", Severity: "info"})
 	}
+	if response.Auth.Kind == "shared-secret" && !response.Auth.ExecAllowed {
+		warnings = append(warnings, serviceAppBootstrapWarning{
+			Code:     "shared_secret_limited",
+			Message:  "This connection is using the shared service secret as service-client. Read-only API calls work, but exec and approvals need a paired operator or admin device.",
+			Severity: "warning",
+		})
+	}
 	response.Status.Warnings = warnings
 
 	response.Counts.PendingApprovals = s.bootstrapPendingApprovalCount(r.Context())
@@ -2313,6 +2348,15 @@ func serviceBootstrapSummary(health controlplane.HealthReport, readiness control
 		return "degraded"
 	}
 	return "ready"
+}
+
+func serviceBootstrapExecAllowed(role string) bool {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "operator", "admin":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *serviceServer) bootstrapPendingApprovalCount(ctx context.Context) int {
@@ -2840,6 +2884,27 @@ func servicePublicJobError(err error) string {
 		return "job canceled"
 	}
 	return "job failed"
+}
+
+func serviceApprovalRequiredPayload(sessionKey string, meta map[string]any, err *tools.ApprovalRequiredError) map[string]any {
+	message := "approval is required before this tool can continue"
+	var requestID int64
+	if err != nil {
+		if trimmed := strings.TrimSpace(err.Error()); trimmed != "" {
+			message = trimmed
+		}
+		requestID = err.RequestID
+	}
+	payload := serviceLifecyclePayload(sessionKey, meta, map[string]any{
+		"status":  "approval_required",
+		"code":    "approval_required",
+		"message": message,
+	})
+	if requestID > 0 {
+		payload["request_id"] = requestID
+		payload["approval_id"] = requestID
+	}
+	return payload
 }
 
 func serviceTurnFallbackText(err error, observer *serviceObserver) (string, bool) {

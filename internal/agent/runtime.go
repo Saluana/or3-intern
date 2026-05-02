@@ -526,7 +526,7 @@ func (r *Runtime) dispatchExplicitSkillTool(ctx context.Context, ev bus.Event, s
 	}
 	out, err := r.Tools.ExecuteParams(toolCtx, skill.CommandTool, params)
 	if err != nil {
-		out = formatToolExecutionError(out, err)
+		out = formatToolExecutionError(skill.CommandTool, params, out, err)
 	}
 	payload := map[string]any{
 		"tool":        skill.CommandTool,
@@ -1249,9 +1249,12 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 					_ = sw.Abort(ctx)
 				}
 				for _, tc := range msg.ToolCalls {
+					var parsedParams map[string]any
+					_ = json.Unmarshal([]byte(tc.Function.Arguments), &parsedParams)
+					toolOut := formatToolExecutionError(tc.Function.Name, parsedParams, "", fmt.Errorf("tool not available in this turn"))
 					if observer != nil {
 						observer.OnToolCall(ctx, tc.Function.Name, tc.Function.Arguments)
-						observer.OnToolResult(ctx, tc.Function.Name, "", fmt.Errorf("tool not available in this turn"))
+						observer.OnToolResult(ctx, tc.Function.Name, toolOut, fmt.Errorf("tool not available in this turn"))
 					}
 				}
 				messages = append(messages, providers.ChatMessage{
@@ -1303,11 +1306,13 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 			toolCtx = context.WithValue(toolCtx, messageQuotaCountersContextKey{}, messageQuotas)
 			toolCtx = tools.ContextWithToolGuard(toolCtx, r.guardToolExecution)
 			out, err := turnTools.Execute(toolCtx, tc.Function.Name, tc.Function.Arguments)
+			if err != nil {
+				var parsedParams map[string]any
+				_ = json.Unmarshal([]byte(tc.Function.Arguments), &parsedParams)
+				out = formatToolExecutionError(tc.Function.Name, parsedParams, out, err)
+			}
 			if observer != nil {
 				observer.OnToolResult(ctx, tc.Function.Name, out, err)
-			}
-			if err != nil {
-				out = formatToolExecutionError(out, err)
 			}
 
 			payload := map[string]any{
@@ -1324,6 +1329,10 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 				log.Printf("append tool message failed: %v", err)
 			}
 			messages = append(messages, providers.ChatMessage{Role: "tool", ToolCallID: tc.ID, Content: sendOut})
+			var approvalErr *tools.ApprovalRequiredError
+			if errors.As(err, &approvalErr) {
+				return "", false, err
+			}
 			if finalText := terminalToolResultText(tc.Function.Name, out); finalText != "" {
 				if observer != nil {
 					observer.OnCompletion(ctx, finalText, false)
@@ -1534,6 +1543,10 @@ func (r *Runtime) guardToolExecution(ctx context.Context, tool tools.Tool, capab
 	return r.incrementQuota(ctx, tools.SessionFromContext(ctx), tool.Name())
 }
 
+func (r *Runtime) GuardToolExecution(ctx context.Context, tool tools.Tool, capability tools.CapabilityLevel, params map[string]any) error {
+	return r.guardToolExecution(ctx, tool, capability, params)
+}
+
 func (r *Runtime) approvalModeForTool(toolName string) config.ApprovalMode {
 	if r == nil || r.ApprovalBroker == nil {
 		return config.ApprovalModeTrusted
@@ -1639,6 +1652,10 @@ func (r *Runtime) contextWithProfileName(ctx context.Context, name string) conte
 		return ctx
 	}
 	return tools.ContextWithActiveProfile(ctx, profile)
+}
+
+func (r *Runtime) ContextWithProfileName(ctx context.Context, name string) context.Context {
+	return r.contextWithProfileName(ctx, name)
 }
 
 func (r *Runtime) profileNameForEvent(ev bus.Event) string {
@@ -1801,14 +1818,11 @@ func summarizeToolParams(toolName string, params map[string]any) map[string]any 
 	return summary
 }
 
-func formatToolExecutionError(out string, err error) string {
+func formatToolExecutionError(toolName string, params map[string]any, out string, err error) string {
 	if err == nil {
 		return out
 	}
-	if strings.TrimSpace(out) == "" {
-		return "tool error: " + err.Error()
-	}
-	return out + "\n\nerror: " + err.Error()
+	return tools.EncodeToolFailure(toolName, params, out, err)
 }
 
 type quotaCheck struct {

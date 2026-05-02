@@ -119,6 +119,10 @@ func serviceAuthMiddlewareWithBrokerAndLimiter(cfg config.Config, broker *approv
 				writeServiceAuthError(w, r, challenge)
 				return
 			}
+			if serviceIsPairingRoute(r) && cfg.Service.AllowUnauthenticatedPairing {
+				writeServicePairingAuthError(w, r, cfg)
+				return
+			}
 			writeServiceJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 			return
 		}
@@ -142,6 +146,18 @@ func serviceAuthMiddlewareWithBrokerAndLimiter(cfg config.Config, broker *approv
 		ctx = approval.ContextWithAuditActor(ctx, identity.Actor)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func writeServicePairingAuthError(w http.ResponseWriter, r *http.Request, cfg config.Config) {
+	payload := serviceErrorPayload(r, "unauthenticated pairing is only allowed from this computer or a trusted browser origin")
+	payload["code"] = "trusted_pairing_required"
+	if !cfg.Service.AllowRemoteUnauthenticatedPairing {
+		payload["error"] = "unauthenticated pairing is only available from the local computer right now"
+		payload["code"] = "local_pairing_required"
+	} else if len(cfg.Service.TrustedPairingOrigins) > 0 {
+		payload["trusted_origins"] = append([]string{}, cfg.Service.TrustedPairingOrigins...)
+	}
+	writeServiceJSON(w, http.StatusUnauthorized, payload)
 }
 
 func (s *serviceServer) serviceAuthRetryAfter(r *http.Request, scope string) int {

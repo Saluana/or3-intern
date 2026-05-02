@@ -56,7 +56,7 @@ func (r *Runtime) handleStructuredAutonomy(ctx context.Context, ev bus.Event, ms
 			"task_index":      index,
 		}
 		if err != nil {
-			out = formatToolExecutionError(out, err)
+			out = formatToolExecutionError(toolName, params, out, err)
 			failures = append(failures, fmt.Sprintf("#%d %s: %v", index+1, toolName, err))
 		} else {
 			succeeded++

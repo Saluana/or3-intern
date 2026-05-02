@@ -60,6 +60,26 @@ func (serviceContextTool) Execute(ctx context.Context, params map[string]any) (s
 	return "ok", nil
 }
 
+type serviceReplayTool struct{}
+
+func (serviceReplayTool) Name() string               { return "replay_probe" }
+func (serviceReplayTool) Description() string        { return "replay_probe" }
+func (serviceReplayTool) Parameters() map[string]any { return map[string]any{} }
+func (serviceReplayTool) Schema() map[string]any     { return map[string]any{} }
+func (serviceReplayTool) Execute(_ context.Context, params map[string]any) (string, error) {
+	return fmt.Sprintf("replayed:%s", strings.TrimSpace(fmt.Sprint(params["value"]))), nil
+}
+
+type serviceApprovalTool struct{}
+
+func (serviceApprovalTool) Name() string               { return "exec" }
+func (serviceApprovalTool) Description() string        { return "exec approval probe" }
+func (serviceApprovalTool) Parameters() map[string]any { return map[string]any{} }
+func (serviceApprovalTool) Schema() map[string]any     { return map[string]any{} }
+func (serviceApprovalTool) Execute(context.Context, map[string]any) (string, error) {
+	return "", &tools.ApprovalRequiredError{ToolName: "exec", RequestID: 77}
+}
+
 func TestServiceServerControl_CachesWrapper(t *testing.T) {
 	server := &serviceServer{jobs: agent.NewJobRegistry(time.Minute, 32)}
 
@@ -120,6 +140,33 @@ func TestServiceAuthMiddleware_RateLimitsFailedBearerAttempts(t *testing.T) {
 	}
 	if handled != 0 {
 		t.Fatalf("expected unauthorized requests not to reach handler, got %d calls", handled)
+	}
+}
+
+func TestServiceAuthMiddleware_PairingUnauthorizedExplainsTrustedOrigin(t *testing.T) {
+	cfg := config.Default()
+	cfg.Service.Secret = strings.Repeat("p", 32)
+	cfg.Service.AllowUnauthenticatedPairing = true
+	cfg.Service.AllowRemoteUnauthenticatedPairing = true
+	cfg.Service.TrustedPairingOrigins = []string{"http://trusted.example"}
+	handler := serviceAuthMiddlewareWithBrokerAndLimiter(cfg, nil, nil, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("pairing request should not reach handler")
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/pairing/requests", strings.NewReader(`{"role":"operator"}`))
+	req.RemoteAddr = "203.0.113.10:1234"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	payload := mustDecodeJSONBody(t, rec.Body)
+	if payload["code"] != "trusted_pairing_required" {
+		t.Fatalf("expected trusted pairing guidance, got %#v", payload)
+	}
+	origins, _ := payload["trusted_origins"].([]any)
+	if len(origins) != 1 || origins[0] != "http://trusted.example" {
+		t.Fatalf("expected trusted origin list, got %#v", payload)
 	}
 }
 
@@ -914,6 +961,109 @@ func TestServiceTurns_PropagatesApprovalContext(t *testing.T) {
 	}
 }
 
+func TestServiceTurns_ReplayToolCallContinuesConversation(t *testing.T) {
+	callCount := 0
+	rt, cleanup := buildServiceTestRuntime(t, func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		var req providers.ChatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("Decode provider request: %v", err)
+		}
+		if len(req.Messages) < 2 {
+			t.Fatalf("expected replay continuation prompt, got %#v", req.Messages)
+		}
+		last := req.Messages[len(req.Messages)-1]
+		if last.Role != "user" || !strings.Contains(fmt.Sprint(last.Content), "Approval was granted") {
+			t.Fatalf("expected continuation prompt after replay, got %#v", last)
+		}
+		foundReplayToolResult := false
+		for _, msg := range req.Messages {
+			if msg.Role != "tool" {
+				continue
+			}
+			if strings.Contains(fmt.Sprint(msg.Content), "replayed:ok") {
+				foundReplayToolResult = true
+				break
+			}
+		}
+		if !foundReplayToolResult {
+			t.Fatalf("expected replayed tool result in prompt history, got %#v", req.Messages)
+		}
+		resp := providers.ChatCompletionResponse{
+			Choices: []struct {
+				Message struct {
+					Role      string               `json:"role"`
+					Content   any                  `json:"content"`
+					ToolCalls []providers.ToolCall `json:"tool_calls"`
+				} `json:"message"`
+			}{{
+				Message: struct {
+					Role      string               `json:"role"`
+					Content   any                  `json:"content"`
+					ToolCalls []providers.ToolCall `json:"tool_calls"`
+				}{Role: "assistant", Content: "continued after replay"},
+			}},
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("Encode response: %v", err)
+		}
+	})
+	defer cleanup()
+	rt.Tools.Register(serviceReplayTool{})
+	if _, err := rt.DB.AppendMessage(context.Background(), "svc:replay", "user", "resume approved tool", nil); err != nil {
+		t.Fatalf("Append user: %v", err)
+	}
+	if _, err := rt.DB.AppendMessage(context.Background(), "svc:replay", "assistant", "", map[string]any{
+		"tool_calls": []providers.ToolCall{{
+			ID:   "tc-replay",
+			Type: "function",
+			Function: struct {
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			}{
+				Name:      "replay_probe",
+				Arguments: `{"value":"ok"}`,
+			},
+		}},
+	}); err != nil {
+		t.Fatalf("Append assistant tool call: %v", err)
+	}
+	if _, err := rt.DB.AppendMessage(context.Background(), "svc:replay", "tool", tools.EncodeToolFailure("replay_probe", map[string]any{"value": "ok"}, "", &tools.ApprovalRequiredError{ToolName: "replay_probe", RequestID: 99}), map[string]any{
+		"tool_call_id": "tc-replay",
+	}); err != nil {
+		t.Fatalf("Append approval-required tool result: %v", err)
+	}
+	server := &serviceServer{
+		config: config.Config{
+			Tools:   config.ToolsConfig{EnableExec: true},
+			Service: config.ServiceConfig{Secret: strings.Repeat("r", 32), MaxCapability: string(tools.CapabilityGuarded)},
+		},
+		runtime: rt,
+		jobs:    agent.NewJobRegistry(time.Minute, 32),
+	}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("r", 32), server)
+	defer httpServer.Close()
+
+	body := `{"session_key":"svc:replay","message":"resume approved tool","replay_tool_call":{"name":"replay_probe","arguments_json":"{\"value\":\"ok\"}"}}`
+	req := mustServiceRequest(t, httpServer, strings.Repeat("r", 32), http.MethodPost, "/internal/v1/turns", body)
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	payload := mustDecodeJSONBody(t, resp.Body)
+	if payload["final_text"] != "continued after replay" {
+		t.Fatalf("expected continued final text, got %#v", payload)
+	}
+	if callCount != 1 {
+		t.Fatalf("expected one provider continuation call, got %d", callCount)
+	}
+}
+
 func TestServiceTurns_JSONFailureStatus(t *testing.T) {
 	rt, cleanup := buildServiceTestRuntime(t, func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "provider down", http.StatusBadGateway)
@@ -941,6 +1091,43 @@ func TestServiceTurns_JSONFailureStatus(t *testing.T) {
 	}
 	if payload["error"] == "" {
 		t.Fatalf("expected error in response, got %#v", payload)
+	}
+}
+
+func TestServiceTurns_JSONApprovalRequiredStatus(t *testing.T) {
+	callCount := 0
+	rt, cleanup := buildServiceTestRuntime(t, func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		if callCount > 1 {
+			t.Fatalf("provider should not be called again after approval is required")
+		}
+		_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"tc-exec","type":"function","function":{"name":"exec","arguments":"{\"program\":\"pwd\"}"}}]}}]}`)
+	})
+	defer cleanup()
+	rt.Tools.Register(serviceApprovalTool{})
+	server := &serviceServer{runtime: rt, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("a", 32), server)
+	defer httpServer.Close()
+
+	req := mustServiceRequest(t, httpServer, strings.Repeat("a", 32), http.MethodPost, "/internal/v1/turns", `{"session_key":"svc:approval","message":"run pwd"}`)
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	payload := mustDecodeJSONBody(t, resp.Body)
+	if payload["status"] != "approval_required" {
+		t.Fatalf("expected approval_required status, got %#v", payload)
+	}
+	if payload["request_id"] != float64(77) && payload["request_id"] != int64(77) {
+		t.Fatalf("expected request id 77, got %#v", payload)
+	}
+	if callCount != 1 {
+		t.Fatalf("expected one provider call before pause, got %d", callCount)
 	}
 }
 
@@ -2303,6 +2490,48 @@ func TestServiceAppBootstrapRoute_PairedOperatorWithoutSession(t *testing.T) {
 	action, _ := actions[0].(map[string]any)
 	if action["id"] != "restart-service" || action["available"] != true || action["session_required"] != true || action["step_up_required"] != true {
 		t.Fatalf("unexpected restart action descriptor: %#v", action)
+	}
+}
+
+func TestServiceAppBootstrapRoute_SharedSecretWarnsAboutLimitedExec(t *testing.T) {
+	cfg := config.Default()
+	cfg.Service.Secret = strings.Repeat("e", 32)
+	cfg.Service.SharedSecretRole = approval.RoleServiceClient
+	cfg.Tools.EnableExec = true
+	server := &serviceServer{config: cfg, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, cfg.Service.Secret, server)
+	defer httpServer.Close()
+
+	req := mustJSONRequest(t, http.MethodGet, httpServer.URL+"/internal/v1/app/bootstrap", "")
+	req.Header.Set("Authorization", "Bearer "+mustIssueServiceTokenAt(t, cfg.Service.Secret, time.Now()))
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do bootstrap: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected bootstrap 200, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	payload := mustDecodeJSONBody(t, resp.Body)
+	authState, _ := payload["auth"].(map[string]any)
+	status, _ := payload["status"].(map[string]any)
+	warnings, _ := status["warnings"].([]any)
+	if authState["kind"] != "shared-secret" || authState["role"] != string(approval.RoleServiceClient) || authState["exec_allowed"] != false {
+		t.Fatalf("expected shared-secret auth details, got %#v", authState)
+	}
+	if len(warnings) == 0 {
+		t.Fatalf("expected bootstrap warnings, got %#v", payload)
+	}
+	foundWarning := false
+	for _, raw := range warnings {
+		warning, _ := raw.(map[string]any)
+		if warning["code"] == "shared_secret_limited" {
+			foundWarning = true
+			break
+		}
+	}
+	if !foundWarning {
+		t.Fatalf("expected limited shared-secret warning, got %#v", warnings)
 	}
 }
 

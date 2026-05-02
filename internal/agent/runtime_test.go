@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -1637,13 +1638,168 @@ func (rqt *requiredQueryTool) Schema() map[string]any {
 	return rqt.SchemaFor(rqt.Name(), rqt.Description(), rqt.Parameters())
 }
 
-func TestFormatToolExecutionError_PreservesOutput(t *testing.T) {
-	got := formatToolExecutionError("stdout:\nfailed test\n\nstderr:\nboom", fmt.Errorf("exec failed: exit status 1"))
-	if !strings.Contains(got, "stdout:\nfailed test") {
-		t.Fatalf("expected tool output to be preserved, got %q", got)
+type failingReadFileTool struct{ tools.Base }
+
+func (tft *failingReadFileTool) Name() string        { return "read_file" }
+func (tft *failingReadFileTool) Description() string { return "fails for testing" }
+func (tft *failingReadFileTool) Parameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"path": map[string]any{"type": "string"},
+			"mode": map[string]any{"type": "string"},
+		},
 	}
-	if !strings.Contains(got, "error: exec failed: exit status 1") {
-		t.Fatalf("expected error text to be appended, got %q", got)
+}
+func (tft *failingReadFileTool) Execute(ctx context.Context, params map[string]any) (string, error) {
+	return "", fmt.Errorf("file exceeds max bytes")
+}
+func (tft *failingReadFileTool) Schema() map[string]any {
+	return tft.SchemaFor(tft.Name(), tft.Description(), tft.Parameters())
+}
+
+type approvalExecTool struct{ tools.Base }
+
+func (aet *approvalExecTool) Name() string        { return "exec" }
+func (aet *approvalExecTool) Description() string { return "approval test exec" }
+func (aet *approvalExecTool) Parameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"program": map[string]any{"type": "string"},
+		},
+	}
+}
+func (aet *approvalExecTool) Execute(context.Context, map[string]any) (string, error) {
+	return "", &tools.ApprovalRequiredError{ToolName: "exec", RequestID: 42}
+}
+func (aet *approvalExecTool) Schema() map[string]any {
+	return aet.SchemaFor(aet.Name(), aet.Description(), aet.Parameters())
+}
+
+func TestFormatToolExecutionError_PreservesOutput(t *testing.T) {
+	toolOut := tools.EncodeToolResult(tools.ToolResult{
+		Kind:    "exec",
+		OK:      true,
+		Summary: "Command completed with bounded stdout/stderr previews",
+		Preview: "stdout:\nfailed test\n\nstderr:\nboom",
+	})
+	got := formatToolExecutionError("exec", map[string]any{"program": "go", "args": []any{"test"}}, toolOut, fmt.Errorf("exec failed: exit status 1"))
+	result, ok := tools.DecodeToolResult(got)
+	if !ok {
+		t.Fatalf("expected structured tool failure result, got %q", got)
+	}
+	if result.OK {
+		t.Fatalf("expected failure result, got %#v", result)
+	}
+	if !strings.Contains(result.Preview, "stdout:\nfailed test") {
+		t.Fatalf("expected tool preview to be preserved, got %#v", result)
+	}
+	if !strings.Contains(result.Summary, "exec failed: exit status 1") {
+		t.Fatalf("expected error text in summary, got %#v", result)
+	}
+	if len(result.Advice) == 0 {
+		t.Fatalf("expected recovery advice, got %#v", result)
+	}
+}
+
+func TestRuntime_ToolFailureBecomesStructuredToolMessage(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	tool := &failingReadFileTool{}
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		if callCount == 1 {
+			_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"tc-read","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"big.txt\",\"mode\":\"full\"}"}}]}}]}`)
+			return
+		}
+		var req providers.ChatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if len(req.Messages) < 2 {
+			t.Fatalf("expected follow-up request with tool result, got %#v", req.Messages)
+		}
+		last := req.Messages[len(req.Messages)-1]
+		if last.Role != "tool" {
+			t.Fatalf("expected tool role message, got %#v", last)
+		}
+		content, ok := last.Content.(string)
+		if !ok {
+			t.Fatalf("expected string tool content, got %#v", last.Content)
+		}
+		result, ok := tools.DecodeToolResult(content)
+		if !ok {
+			t.Fatalf("expected structured tool result, got %q", content)
+		}
+		if result.OK {
+			t.Fatalf("expected failed tool result, got %#v", result)
+		}
+		if len(result.Advice) == 0 {
+			t.Fatalf("expected recovery advice in tool message, got %#v", result)
+		}
+		_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","content":"handled tool failure"}}]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	provider := providers.New(srv.URL, "test-key", 10*time.Second)
+	provider.HTTP = srv.Client()
+	deliver := &mockDeliverer{}
+	rt := buildSimpleRuntime(t, provider, d, deliver)
+	rt.Tools.Register(tool)
+
+	err := rt.Handle(context.Background(), bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess-tool-failure",
+		Channel:    "cli",
+		From:       "user",
+		Message:    "read the file",
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if callCount != 2 {
+		t.Fatalf("expected tool retry loop to make two provider calls, got %d", callCount)
+	}
+}
+
+func TestRuntime_ApprovalRequiredHaltsToolLoop(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	tool := &approvalExecTool{}
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		if callCount > 1 {
+			t.Fatalf("provider should not be called again after approval is required")
+		}
+		_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"tc-exec","type":"function","function":{"name":"exec","arguments":"{\"program\":\"pwd\"}"}}]}}]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	provider := providers.New(srv.URL, "test-key", 10*time.Second)
+	provider.HTTP = srv.Client()
+	deliver := &mockDeliverer{}
+	rt := buildSimpleRuntime(t, provider, d, deliver)
+	rt.Tools.Register(tool)
+
+	err := rt.Handle(context.Background(), bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess-approval-required",
+		Channel:    "cli",
+		From:       "user",
+		Message:    "run pwd",
+	})
+	var approvalErr *tools.ApprovalRequiredError
+	if !errors.As(err, &approvalErr) {
+		t.Fatalf("expected approval-required error, got %v", err)
+	}
+	if approvalErr.RequestID != 42 {
+		t.Fatalf("expected request id 42, got %#v", approvalErr)
+	}
+	if callCount != 1 {
+		t.Fatalf("expected one provider call before pausing, got %d", callCount)
 	}
 }
 

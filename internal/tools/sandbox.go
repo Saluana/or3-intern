@@ -30,7 +30,7 @@ func commandWithSandbox(ctx context.Context, cfg BubblewrapConfig, cwd string, c
 	if _, err := exec.LookPath(bwrap); err != nil {
 		return nil, fmt.Errorf("bubblewrap unavailable: %w", err)
 	}
-	resolvedCommand, err := resolveExecutable(command[0], cwd)
+	resolvedCommand, err := resolveExecutable(command[0], cwd, os.Environ())
 	if err != nil {
 		return nil, err
 	}

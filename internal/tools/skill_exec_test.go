@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -259,14 +260,70 @@ func TestRunSkillScript_SubjectMismatch_Blocks(t *testing.T) {
 		t.Fatalf("ApproveRequest: %v", err)
 	}
 
-	// Use the "hello" token for the "runner/tool.sh" path → different subject hash → blocked.
+	// Use the "hello" token with a different timeout → different approval subject → blocked.
 	ctx := ContextWithApprovalToken(context.Background(), issued.Token)
-	_, err = tool.Execute(ctx, map[string]any{"skill": "runner", "path": "tool.sh", "args": []any{"mismatch"}})
+	_, err = tool.Execute(ctx, map[string]any{
+		"skill":          "runner",
+		"path":           "tool.sh",
+		"args":           []any{"mismatch"},
+		"timeoutSeconds": 45.0,
+	})
 	if err == nil {
 		t.Fatal("expected subject-mismatch to block skill execution, got nil error")
 	}
 	if !strings.Contains(err.Error(), "approval required") && !strings.Contains(err.Error(), "blocked") {
 		t.Errorf("expected approval required or blocked, got %q", err.Error())
+	}
+}
+
+func TestSkillCommandHash_IgnoresAppendedArgsForScriptHash(t *testing.T) {
+	inv := makeExecutableSkillInventory(t)
+	skill, ok := inv.Get("runner")
+	if !ok {
+		t.Fatal("expected runner skill")
+	}
+	tool := &RunSkillScript{Inventory: inv, Enabled: true}
+
+	baseCmd, err := tool.commandForSkill(skill, map[string]any{
+		"skill":      "runner",
+		"entrypoint": "hello",
+	})
+	if err != nil {
+		t.Fatalf("commandForSkill base: %v", err)
+	}
+	withArgsCmd, err := tool.commandForSkill(skill, map[string]any{
+		"skill":      "runner",
+		"entrypoint": "hello",
+		"args":       []any{"tail"},
+	})
+	if err != nil {
+		t.Fatalf("commandForSkill with args: %v", err)
+	}
+
+	if got, want := skillCommandHash(baseCmd), skillCommandHash(withArgsCmd); got != want {
+		t.Fatalf("expected identical script hashes, got %q vs %q", got, want)
+	}
+}
+
+func TestSkillCommandHashSource_PicksScriptInsteadOfTrailingArg(t *testing.T) {
+	inv := makeExecutableSkillInventory(t)
+	skill, ok := inv.Get("runner")
+	if !ok {
+		t.Fatal("expected runner skill")
+	}
+	tool := &RunSkillScript{Inventory: inv, Enabled: true}
+	cmd, err := tool.commandForSkill(skill, map[string]any{
+		"skill": "runner",
+		"path":  "tool.sh",
+		"args":  []any{"tail"},
+	})
+	if err != nil {
+		t.Fatalf("commandForSkill: %v", err)
+	}
+	got := skillCommandHashSource(cmd)
+	if got == "" || filepath.Base(got) != "tool.sh" {
+		raw, _ := json.Marshal(cmd)
+		t.Fatalf("expected tool.sh hash source, got %q from %s", got, raw)
 	}
 }
 

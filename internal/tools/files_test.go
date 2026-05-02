@@ -520,6 +520,32 @@ func TestListDir_MaxEntries(t *testing.T) {
 	if truncated, _ := result.Stats["truncated"].(bool); !truncated {
 		t.Fatalf("expected truncated stats for max=2, got %#v", result.Stats)
 	}
+	if len(result.Advice) == 0 {
+		t.Fatalf("expected truncation advice for bounded directory listing, got %#v", result)
+	}
+}
+
+func TestReadFile_FullTruncationIncludesAdvice(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "large.txt")
+	mustWriteFile(t, path, []byte(strings.Repeat("x", 200)), 0o644)
+
+	tool := &ReadFile{}
+	out, err := tool.Execute(context.Background(), map[string]any{
+		"path":     path,
+		"mode":     "full",
+		"maxBytes": float64(32),
+	})
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	result := mustDecodeToolResult(t, out)
+	if !result.OK {
+		t.Fatalf("expected successful bounded read, got %#v", result)
+	}
+	if len(result.Advice) == 0 {
+		t.Fatalf("expected guidance for truncated full reads, got %#v", result)
+	}
 }
 
 func TestListDir_NotFound(t *testing.T) {

@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -269,6 +270,47 @@ func TestExecTool_RestrictDir_Inside(t *testing.T) {
 	}
 	if !strings.Contains(out, "ok") {
 		t.Errorf("expected 'ok' in output, got %q", out)
+	}
+}
+
+func TestExecTool_RestrictDir_DefaultsCwdToRestrictDir(t *testing.T) {
+	dir := t.TempDir()
+	tool := &ExecTool{
+		Timeout:           5 * time.Second,
+		EnableLegacyShell: true,
+		RestrictDir:       dir,
+	}
+	out, err := tool.Execute(context.Background(), map[string]any{
+		"command": "pwd",
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !strings.Contains(out, dir) {
+		t.Fatalf("expected pwd to run inside restrict dir, got %q", out)
+	}
+}
+
+func TestExecTool_RestrictDir_ResolvesRelativeCwdFromRestrictDir(t *testing.T) {
+	dir := t.TempDir()
+	child := filepath.Join(dir, "child")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	tool := &ExecTool{
+		Timeout:           5 * time.Second,
+		EnableLegacyShell: true,
+		RestrictDir:       dir,
+	}
+	out, err := tool.Execute(context.Background(), map[string]any{
+		"command": "pwd",
+		"cwd":     "child",
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !strings.Contains(out, child) {
+		t.Fatalf("expected pwd to run inside child dir, got %q", out)
 	}
 }
 
@@ -647,6 +689,24 @@ func TestExecServiceCommandRunsAsDirectProgram(t *testing.T) {
 	}
 }
 
+func TestExecServiceCommandMergesExplicitArgs(t *testing.T) {
+	tool := &ExecTool{
+		Timeout:         time.Second,
+		AllowedPrograms: []string{"echo"},
+	}
+
+	out, err := tool.Execute(serviceExecContext(), map[string]any{
+		"command": "echo",
+		"args":    []any{"hello", "world"},
+	})
+	if err != nil {
+		t.Fatalf("Execute service command with explicit args: %v", err)
+	}
+	if !strings.Contains(out, "hello world") {
+		t.Fatalf("expected echo output with merged args, got %q", out)
+	}
+}
+
 func TestExecServiceCommandPassesGuardedRegistryCeiling(t *testing.T) {
 	registry := NewRegistry()
 	registry.Register(&ExecTool{
@@ -681,5 +741,59 @@ func TestExecServiceCommandRejectsShellSyntax(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "shell syntax is not allowed") {
 		t.Fatalf("expected shell syntax error, got %v", err)
+	}
+}
+
+func TestExecServiceResolvesProgramFromPathAppend(t *testing.T) {
+	binDir := t.TempDir()
+	programName := "pathappendcmd"
+	script := filepath.Join(binDir, programName)
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho from-appended-path\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	tool := &ExecTool{
+		Timeout:         time.Second,
+		PathAppend:      binDir,
+		AllowedPrograms: []string{programName},
+	}
+
+	out, err := tool.Execute(serviceExecContext(), map[string]any{"program": programName})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !strings.Contains(out, "from-appended-path") {
+		t.Fatalf("expected appended-path execution output, got %q", out)
+	}
+}
+
+func TestExecServiceWhichUsesEffectiveChildPath(t *testing.T) {
+	binDir := t.TempDir()
+	programName := "whichpathcmd"
+	script := filepath.Join(binDir, programName)
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho gws\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	tool := &ExecTool{
+		Timeout:         time.Second,
+		PathAppend:      binDir,
+		AllowedPrograms: []string{"echo"},
+	}
+
+	out, err := tool.Execute(serviceExecContext(), map[string]any{
+		"program": "which",
+		"args":    []any{programName},
+	})
+	if err != nil {
+		t.Fatalf("Execute which alias: %v", err)
+	}
+	var result ToolResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("Unmarshal ToolResult: %v", err)
+	}
+	if !result.OK {
+		t.Fatalf("expected successful lookup, got %#v", result)
+	}
+	if !strings.Contains(result.Preview, script) {
+		t.Fatalf("expected preview to include %q, got %#v", script, result)
 	}
 }

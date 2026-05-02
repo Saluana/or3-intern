@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -13,13 +14,14 @@ import (
 )
 
 type serviceTurnRequest struct {
-	SessionKey    string
-	Message       string
-	AllowedTools  []string
-	RestrictTools bool
-	Meta          map[string]any
-	ProfileName   string
-	ApprovalToken string
+	SessionKey     string
+	Message        string
+	AllowedTools   []string
+	RestrictTools  bool
+	Meta           map[string]any
+	ProfileName    string
+	ApprovalToken  string
+	ReplayToolCall *serviceReplayToolCall
 }
 
 type serviceSubagentRequest struct {
@@ -44,22 +46,37 @@ type serviceToolPolicyPayload struct {
 	BlockedToolsCamel []string `json:"blockedTools"`
 }
 
+type serviceReplayToolCall struct {
+	Name          string
+	ArgumentsJSON string
+}
+
+type serviceReplayToolCallPayload struct {
+	Name               string          `json:"name"`
+	Arguments          json.RawMessage `json:"arguments"`
+	ArgumentsCamel     json.RawMessage `json:"argumentsCamel"`
+	ArgumentsJSON      string          `json:"arguments_json"`
+	ArgumentsJSONCamel string          `json:"argumentsJson"`
+}
+
 type serviceTurnRequestPayload struct {
-	SessionKey            string                    `json:"session_key"`
-	InternSessionKey      string                    `json:"intern_session_key"`
-	SessionKeyCamel       string                    `json:"sessionKey"`
-	InternSessionKeyCamel string                    `json:"internSessionKey"`
-	PlatformSessionRef    map[string]any            `json:"platform_session_ref"`
-	Message               string                    `json:"message"`
-	AllowedTools          []string                  `json:"allowed_tools"`
-	AllowedToolsCamel     []string                  `json:"allowedTools"`
-	ToolPolicy            *serviceToolPolicyPayload `json:"tool_policy"`
-	ToolPolicyCamel       *serviceToolPolicyPayload `json:"toolPolicy"`
-	Meta                  map[string]any            `json:"meta"`
-	ProfileName           string                    `json:"profile_name"`
-	ProfileNameCamel      string                    `json:"profileName"`
-	ApprovalToken         string                    `json:"approval_token"`
-	ApprovalTokenCamel    string                    `json:"approvalToken"`
+	SessionKey            string                        `json:"session_key"`
+	InternSessionKey      string                        `json:"intern_session_key"`
+	SessionKeyCamel       string                        `json:"sessionKey"`
+	InternSessionKeyCamel string                        `json:"internSessionKey"`
+	PlatformSessionRef    map[string]any                `json:"platform_session_ref"`
+	Message               string                        `json:"message"`
+	AllowedTools          []string                      `json:"allowed_tools"`
+	AllowedToolsCamel     []string                      `json:"allowedTools"`
+	ToolPolicy            *serviceToolPolicyPayload     `json:"tool_policy"`
+	ToolPolicyCamel       *serviceToolPolicyPayload     `json:"toolPolicy"`
+	Meta                  map[string]any                `json:"meta"`
+	ProfileName           string                        `json:"profile_name"`
+	ProfileNameCamel      string                        `json:"profileName"`
+	ApprovalToken         string                        `json:"approval_token"`
+	ApprovalTokenCamel    string                        `json:"approvalToken"`
+	ReplayToolCall        *serviceReplayToolCallPayload `json:"replay_tool_call"`
+	ReplayToolCallCamel   *serviceReplayToolCallPayload `json:"replayToolCall"`
 }
 
 type serviceSubagentRequestPayload struct {
@@ -102,14 +119,19 @@ func decodeServiceTurnRequest(body io.Reader, registry *tools.Registry) (service
 	if err != nil {
 		return serviceTurnRequest{}, err
 	}
+	replayToolCall, err := firstReplayToolCall(payload.ReplayToolCall, payload.ReplayToolCallCamel)
+	if err != nil {
+		return serviceTurnRequest{}, err
+	}
 	return serviceTurnRequest{
-		SessionKey:    firstNonEmptyString(payload.SessionKey, payload.InternSessionKey, payload.SessionKeyCamel, payload.InternSessionKeyCamel),
-		Message:       strings.TrimSpace(payload.Message),
-		AllowedTools:  allowedTools,
-		RestrictTools: restrictTools,
-		Meta:          cloneMapOrEmpty(payload.Meta),
-		ProfileName:   firstNonEmptyString(payload.ProfileName, payload.ProfileNameCamel),
-		ApprovalToken: firstNonEmptyString(payload.ApprovalToken, payload.ApprovalTokenCamel),
+		SessionKey:     firstNonEmptyString(payload.SessionKey, payload.InternSessionKey, payload.SessionKeyCamel, payload.InternSessionKeyCamel),
+		Message:        strings.TrimSpace(payload.Message),
+		AllowedTools:   allowedTools,
+		RestrictTools:  restrictTools,
+		Meta:           cloneMapOrEmpty(payload.Meta),
+		ProfileName:    firstNonEmptyString(payload.ProfileName, payload.ProfileNameCamel),
+		ApprovalToken:  firstNonEmptyString(payload.ApprovalToken, payload.ApprovalTokenCamel),
+		ReplayToolCall: replayToolCall,
 	}, nil
 }
 
@@ -178,6 +200,35 @@ func firstToolPolicy(values ...*serviceToolPolicyPayload) *agent.ServiceToolPoli
 		}
 	}
 	return nil
+}
+
+func firstReplayToolCall(values ...*serviceReplayToolCallPayload) (*serviceReplayToolCall, error) {
+	for _, value := range values {
+		if value == nil {
+			continue
+		}
+		name := strings.TrimSpace(value.Name)
+		if name == "" {
+			return nil, errors.New("replay_tool_call.name is required")
+		}
+		argsJSON := strings.TrimSpace(firstNonEmptyString(value.ArgumentsJSON, value.ArgumentsJSONCamel))
+		if argsJSON == "" {
+			raw := value.Arguments
+			if len(raw) == 0 {
+				raw = value.ArgumentsCamel
+			}
+			argsJSON = strings.TrimSpace(string(raw))
+		}
+		if argsJSON == "" {
+			argsJSON = "{}"
+		}
+		var params map[string]any
+		if err := json.Unmarshal([]byte(argsJSON), &params); err != nil {
+			return nil, fmt.Errorf("invalid replay_tool_call arguments: %w", err)
+		}
+		return &serviceReplayToolCall{Name: name, ArgumentsJSON: argsJSON}, nil
+	}
+	return nil, nil
 }
 
 func firstNonEmptyString(values ...string) string {

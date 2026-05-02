@@ -55,6 +55,10 @@ func (t *ReadSkill) Execute(ctx context.Context, params map[string]any) (string,
 			Kind:    "skill_read",
 			OK:      false,
 			Summary: fmt.Sprintf("Skill %s is unavailable: %s", s.Name, strings.Join(reasons, "; ")),
+			Advice: []string{
+				"Choose an eligible installed skill name and prefer read_skill mode=outline or mode=preview before attempting execution.",
+				"If the skill is hidden, missing dependencies, or unsupported in this environment, use a different installed skill or complete the task without that skill.",
+			},
 			Stats: map[string]any{
 				"name":        s.Name,
 				"source":      string(s.Source),
@@ -95,6 +99,12 @@ func (t *ReadSkill) Execute(ctx context.Context, params map[string]any) (string,
 		OK:      true,
 		Summary: skillSummary(s, mode, truncated),
 		Preview: preview,
+		Advice: func() []string {
+			if truncated && mode == "full" {
+				return TruncationAdvice("read_skill_full", s.Name)
+			}
+			return nil
+		}(),
 		Stats: map[string]any{
 			"name":        s.Name,
 			"source":      string(s.Source),

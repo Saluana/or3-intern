@@ -996,8 +996,8 @@ func (s *serviceServer) handleFileWrite(w http.ResponseWriter, r *http.Request) 
 		}
 		if body.ExpectedRevision != "" && body.ExpectedRevision != serviceFileRevision(existingInfo) {
 			writeServiceJSON(w, http.StatusConflict, map[string]any{
-				"error":           "file has changed on disk",
-				"modified_at":     existingInfo.ModTime().UTC().Format(time.RFC3339),
+				"error":            "file has changed on disk",
+				"modified_at":      existingInfo.ModTime().UTC().Format(time.RFC3339),
 				"current_revision": serviceFileRevision(existingInfo),
 			})
 			return

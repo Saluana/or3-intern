@@ -1536,3 +1536,10 @@ warning: service startup continuing without sandbox protection: privileged tools
 2026/05/01 17:12:05 service GET /internal/v1/approvals -> 200
 2026/05/01 17:12:20 service GET /internal/v1/approvals -> 200
 2026/05/01 17:12:35 service GET /internal/v1/approvals -> 200
+2026/05/01 17:12:50 service GET /internal/v1/approvals -> 200
+2026/05/01 17:12:55 service GET /internal/v1/approvals -> 200
+2026/05/01 17:12:55 service GET /internal/v1/configure/fields -> 200
+2026/05/01 17:12:55 service GET /internal/v1/approvals -> 200
+2026/05/01 17:12:56 service GET /internal/v1/approvals -> 200
+2026/05/01 17:13:10 service GET /internal/v1/approvals -> 200
+2026/05/01 17:13:25 service GET /internal/v1/approvals -> 200

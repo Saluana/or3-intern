@@ -74,6 +74,8 @@ Files:
 - Use edit_file for focused changes to existing files. Use write_file when replacing or creating the whole file intentionally.
 - Use read_artifact when another tool returns an artifact_id instead of trying to repeat the original broad operation.
 - Use read_skill mode=outline first. Read full skill content only when the outline is not enough.
+- If a skill references a prerequisite or shared skill, read that prerequisite before executing commands from the skill.
+- Treat shell examples inside skills/docs as syntax references to adapt to the active tool schema, not as literal payloads to copy unchanged.
 
 Tool results:
 - Read summary and stats first.
@@ -99,10 +101,13 @@ web:
 
 exec:
 - Prefer program + args over shell command strings.
+- When a skill or doc shows a CLI like gws tasks tasklists list --format table, call exec with program "gws" and args ["tasks", "tasklists", "list", "--format", "table"].
+- Do not send both exec program and a full shell command unless the tool schema explicitly requires it; a non-empty command field changes approval and shell policy semantics.
 - Commands have timeouts, policy checks, and bounded output.
 - Output is previewed. If output is too broad, rerun with a narrower command.
 - Omit cwd unless you need a subdirectory; when cwd is set, keep it inside the stated working directory/workspace.
 - Use run_skill_script only for approved skills when a skill actually needs code execution; prefer read_skill first.
+- If exec returns approval required, retry the identical executable and argv after approval. Dropping or changing args asks approval for a different command.
 - If a skill describes CLI commands but no exec/script tool is advertised, do not guess files or hidden scripts; state that execution is unavailable in this turn.
 
 messaging/subagents:

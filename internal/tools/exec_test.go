@@ -707,6 +707,42 @@ func TestExecServiceCommandMergesExplicitArgs(t *testing.T) {
 	}
 }
 
+func TestExecServiceCommandNormalizesMatchingProgramAndCommand(t *testing.T) {
+	tool := &ExecTool{
+		Timeout:         time.Second,
+		AllowedPrograms: []string{"echo"},
+	}
+
+	out, err := tool.Execute(serviceExecContext(), map[string]any{
+		"program": "echo",
+		"command": `echo "hello world"`,
+	})
+	if err != nil {
+		t.Fatalf("Execute service command with matching program+command: %v", err)
+	}
+	if !strings.Contains(out, "hello world") {
+		t.Fatalf("expected echo output, got %q", out)
+	}
+}
+
+func TestExecServiceCommandRejectsProgramCommandMismatch(t *testing.T) {
+	tool := &ExecTool{
+		Timeout:         time.Second,
+		AllowedPrograms: []string{"echo", "printf"},
+	}
+
+	_, err := tool.Execute(serviceExecContext(), map[string]any{
+		"program": "echo",
+		"command": "printf hello",
+	})
+	if err == nil {
+		t.Fatal("expected mismatch error")
+	}
+	if !strings.Contains(err.Error(), "program/command mismatch") {
+		t.Fatalf("expected mismatch error, got %v", err)
+	}
+}
+
 func TestExecServiceCommandPassesGuardedRegistryCeiling(t *testing.T) {
 	registry := NewRegistry()
 	registry.Register(&ExecTool{

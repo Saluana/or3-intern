@@ -57,7 +57,7 @@ func EncodeToolFailure(toolName string, params map[string]any, out string, err e
 		result.Kind = normalizedToolResultKind(toolName)
 	}
 	result.OK = false
-	result.Summary = fmt.Sprintf("%s failed: %s", firstNonEmptyToolName(toolName), errText)
+	result.Summary = toolFailureSummary(toolName, errText, result, out)
 	result.Advice = appendUniqueAdvice(result.Advice, toolFailureAdvice(toolName, params, errText)...)
 	if result.Stats == nil {
 		result.Stats = map[string]any{}
@@ -91,6 +91,121 @@ func firstNonEmptyToolName(toolName string) string {
 		return "tool"
 	}
 	return toolName
+}
+
+func toolFailureSummary(toolName string, errText string, result ToolResult, rawOut string) string {
+	base := trimRedundantToolFailurePrefix(toolName, errText)
+	if base == "" {
+		base = strings.TrimSpace(errText)
+	}
+	if detail := toolFailureDetail(toolName, result, rawOut); detail != "" && !strings.Contains(strings.ToLower(base), strings.ToLower(detail)) {
+		if base == "" {
+			base = detail
+		} else {
+			base = base + ": " + detail
+		}
+	}
+	if base == "" {
+		base = "unknown error"
+	}
+	return fmt.Sprintf("%s failed: %s", firstNonEmptyToolName(toolName), base)
+}
+
+func trimRedundantToolFailurePrefix(toolName string, errText string) string {
+	toolName = strings.ToLower(strings.TrimSpace(toolName))
+	errText = strings.TrimSpace(errText)
+	if toolName == "" || errText == "" {
+		return errText
+	}
+	prefix := toolName + " failed:"
+	if strings.HasPrefix(strings.ToLower(errText), prefix) {
+		return strings.TrimSpace(errText[len(prefix):])
+	}
+	return errText
+}
+
+func toolFailureDetail(toolName string, result ToolResult, rawOut string) string {
+	switch strings.TrimSpace(toolName) {
+	case "exec":
+		preview := strings.TrimSpace(result.Preview)
+		if preview == "" {
+			preview = strings.TrimSpace(rawOut)
+		}
+		return extractExecFailureDetail(preview)
+	default:
+		return ""
+	}
+}
+
+func extractExecFailureDetail(preview string) string {
+	preview = strings.TrimSpace(strings.ReplaceAll(preview, "\r\n", "\n"))
+	if preview == "" {
+		return ""
+	}
+	stdout, stderr := splitExecPreview(preview)
+	if line := firstMeaningfulFailureLine(stderr); line != "" {
+		return line
+	}
+	if line := firstMeaningfulFailureLine(stdout); line != "" {
+		return line
+	}
+	return firstMeaningfulFailureLine(preview)
+}
+
+func splitExecPreview(preview string) (string, string) {
+	const stdoutPrefix = "stdout:\n"
+	const stderrMarker = "\n\nstderr:\n"
+	if !strings.HasPrefix(preview, stdoutPrefix) {
+		return preview, ""
+	}
+	body := strings.TrimPrefix(preview, stdoutPrefix)
+	parts := strings.SplitN(body, stderrMarker, 2)
+	stdout := strings.TrimSpace(parts[0])
+	if len(parts) == 1 {
+		return stdout, ""
+	}
+	return stdout, strings.TrimSpace(parts[1])
+}
+
+func firstMeaningfulFailureLine(block string) string {
+	lines := strings.Split(strings.TrimSpace(block), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "error[") {
+			return line
+		}
+	}
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || line == "{" || line == "}" || line == "[" || line == "]" {
+			continue
+		}
+		if strings.HasPrefix(line, "stdout:") || strings.HasPrefix(line, "stderr:") {
+			continue
+		}
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "failed") || strings.Contains(lower, "error") || strings.Contains(lower, "invalid") || strings.Contains(lower, "denied") || strings.Contains(lower, "not found") || strings.Contains(lower, "permission") || strings.Contains(lower, "timeout") || strings.Contains(lower, "auth") {
+			return strings.Trim(line, `",`)
+		}
+		if strings.Contains(line, `"message":`) {
+			line = strings.TrimSpace(strings.TrimPrefix(line, `"message":`))
+			line = strings.Trim(line, `",`)
+			if line != "" {
+				return line
+			}
+		}
+	}
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || line == "{" || line == "}" || line == "[" || line == "]" {
+			continue
+		}
+		if strings.HasPrefix(line, "stdout:") || strings.HasPrefix(line, "stderr:") {
+			continue
+		}
+		return strings.Trim(line, `",`)
+	}
+	return ""
 }
 
 func appendUniqueAdvice(existing []string, additional ...string) []string {
@@ -203,6 +318,7 @@ func toolFailureAdvice(toolName string, params map[string]any, errText string) [
 		advice := []string{"Prefer program + args over command strings, and keep the request to one direct program invocation."}
 		if strings.Contains(lowerErr, "approval required") {
 			advice = append(advice, "Wait for approval, then retry the exact same tool call so the approval token matches the same subject.")
+			advice = append(advice, "For exec, keep the same program and args after approval; changing argv creates a different approval subject.")
 		}
 		if strings.Contains(lowerErr, "shell command execution disabled") || strings.Contains(lowerErr, "shell syntax is not allowed") {
 			advice = append(advice, "Split shell pipelines into separate direct exec calls, or use a single program invocation with explicit args.")

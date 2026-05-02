@@ -70,6 +70,17 @@ func (serviceReplayTool) Execute(_ context.Context, params map[string]any) (stri
 	return fmt.Sprintf("replayed:%s", strings.TrimSpace(fmt.Sprint(params["value"]))), nil
 }
 
+type serviceReplayFailingTool struct{}
+
+func (serviceReplayFailingTool) Name() string               { return "replay_probe" }
+func (serviceReplayFailingTool) Description() string        { return "replay_probe" }
+func (serviceReplayFailingTool) Parameters() map[string]any { return map[string]any{} }
+func (serviceReplayFailingTool) Schema() map[string]any     { return map[string]any{} }
+func (serviceReplayFailingTool) Execute(_ context.Context, params map[string]any) (string, error) {
+	value := strings.TrimSpace(fmt.Sprint(params["value"]))
+	return fmt.Sprintf("stdout:\n\n\nstderr:\nreplay failed for %s", value), fmt.Errorf("exec failed: exit status 3")
+}
+
 type countingReplayTool struct {
 	count *int
 }
@@ -1072,6 +1083,112 @@ func TestServiceTurns_ReplayToolCallContinuesConversation(t *testing.T) {
 	}
 	payload := mustDecodeJSONBody(t, resp.Body)
 	if payload["final_text"] != "continued after replay" {
+		t.Fatalf("expected continued final text, got %#v", payload)
+	}
+	if callCount != 1 {
+		t.Fatalf("expected one provider continuation call, got %d", callCount)
+	}
+}
+
+func TestServiceTurns_ReplayToolCallFailureStillContinuesConversation(t *testing.T) {
+	callCount := 0
+	rt, cleanup := buildServiceTestRuntime(t, func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		var req providers.ChatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("Decode provider request: %v", err)
+		}
+		if len(req.Messages) < 2 {
+			t.Fatalf("expected replay continuation prompt, got %#v", req.Messages)
+		}
+		last := req.Messages[len(req.Messages)-1]
+		if last.Role != "user" || !strings.Contains(fmt.Sprint(last.Content), "Approval was granted") {
+			t.Fatalf("expected continuation prompt after replay, got %#v", last)
+		}
+		foundReplayFailure := false
+		for _, msg := range req.Messages {
+			if msg.Role != "tool" {
+				continue
+			}
+			text := fmt.Sprint(msg.Content)
+			if strings.Contains(text, "exec failed: exit status 3") && strings.Contains(text, "replay failed for bad") {
+				foundReplayFailure = true
+				break
+			}
+		}
+		if !foundReplayFailure {
+			t.Fatalf("expected replayed tool failure in prompt history, got %#v", req.Messages)
+		}
+		resp := providers.ChatCompletionResponse{
+			Choices: []struct {
+				Message struct {
+					Role      string               `json:"role"`
+					Content   any                  `json:"content"`
+					ToolCalls []providers.ToolCall `json:"tool_calls"`
+				} `json:"message"`
+			}{
+				{
+					Message: struct {
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					}{Role: "assistant", Content: "continued after replay failure"},
+				},
+			},
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("Encode response: %v", err)
+		}
+	})
+	defer cleanup()
+	rt.Tools.Register(serviceReplayFailingTool{})
+	if _, err := rt.DB.AppendMessage(context.Background(), "svc:replay-fail", "user", "resume approved tool", nil); err != nil {
+		t.Fatalf("Append user: %v", err)
+	}
+	if _, err := rt.DB.AppendMessage(context.Background(), "svc:replay-fail", "assistant", "", map[string]any{
+		"tool_calls": []providers.ToolCall{{
+			ID:   "tc-replay-fail",
+			Type: "function",
+			Function: struct {
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			}{
+				Name:      "replay_probe",
+				Arguments: `{"value":"bad"}`,
+			},
+		}},
+	}); err != nil {
+		t.Fatalf("Append assistant tool call: %v", err)
+	}
+	if _, err := rt.DB.AppendMessage(context.Background(), "svc:replay-fail", "tool", tools.EncodeToolFailure("replay_probe", map[string]any{"value": "bad"}, "", &tools.ApprovalRequiredError{ToolName: "replay_probe", RequestID: 99}), map[string]any{
+		"tool_call_id": "tc-replay-fail",
+	}); err != nil {
+		t.Fatalf("Append approval-required tool result: %v", err)
+	}
+	server := &serviceServer{
+		config: config.Config{
+			Tools:   config.ToolsConfig{EnableExec: true},
+			Service: config.ServiceConfig{Secret: strings.Repeat("r", 32), MaxCapability: string(tools.CapabilityGuarded)},
+		},
+		runtime: rt,
+		jobs:    agent.NewJobRegistry(time.Minute, 32),
+	}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("r", 32), server)
+	defer httpServer.Close()
+
+	body := `{"session_key":"svc:replay-fail","message":"resume approved tool","replay_tool_call":{"name":"replay_probe","arguments_json":"{\"value\":\"bad\"}"}}`
+	req := mustServiceRequest(t, httpServer, strings.Repeat("r", 32), http.MethodPost, "/internal/v1/turns", body)
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	payload := mustDecodeJSONBody(t, resp.Body)
+	if payload["final_text"] != "continued after replay failure" {
 		t.Fatalf("expected continued final text, got %#v", payload)
 	}
 	if callCount != 1 {

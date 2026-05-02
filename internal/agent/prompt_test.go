@@ -93,6 +93,8 @@ func TestDefaultToolNotesCoverCoreBuiltins(t *testing.T) {
 		"Use memory_recent for recent conversation context",
 		"Use web_search to discover candidate URLs",
 		"Prefer program + args over shell command strings",
+		"When a skill or doc shows a CLI like",
+		"retry the identical executable and argv after approval",
 		"Use send_message only when delivery is part of the task",
 		"Use spawn_subagent for longer background work",
 		"Use cron only for scheduled reminders or recurring tasks",

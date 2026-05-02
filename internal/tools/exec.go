@@ -55,15 +55,15 @@ const (
 
 func (t *ExecTool) Name() string { return "exec" }
 func (t *ExecTool) Description() string {
-	return "Run an allowed local program with approval, sandbox, and allowlist controls. This is guarded when using program plus args. The legacy command field runs through a shell, is privileged, and may be disabled; avoid command unless the user explicitly needs shell syntax and privileged tools are allowed. When a workspace restriction is configured, omit cwd to run in that workspace root or pass a cwd inside it."
+	return "Run an allowed local program with approval, sandbox, and allowlist controls. Prefer program plus args. When adapting a CLI example from a skill or doc, put the executable in program and each token in args. The legacy command field runs through a shell, changes approval semantics, and may be disabled; avoid command unless shell syntax is explicitly required. After approval-required failures, retry the identical executable and argv. When a workspace restriction is configured, omit cwd to run in that workspace root or pass a cwd inside it."
 }
 func (t *ExecTool) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"program":        map[string]any{"type": "string", "description": "Executable name or path to run, such as rg, git, go, npm, or node. Prefer this field over command."},
-			"args":           map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Arguments passed directly to program without shell parsing. Put each flag/path as its own array item."},
-			"command":        map[string]any{"type": "string", "description": "Legacy shell command string. This makes the call privileged and may be rejected by capability ceilings or service policy; use program+args instead whenever possible."},
+			"program":        map[string]any{"type": "string", "description": "Executable name or path to run, such as rg, git, go, npm, node, or gws. For a CLI like `gws tasks tasklists list --format table`, set program to `gws`. Prefer this field over command."},
+			"args":           map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Arguments passed directly to program without shell parsing. Put each flag/path as its own array item. For the gws example, use [`tasks`, `tasklists`, `list`, `--format`, `table`]."},
+			"command":        map[string]any{"type": "string", "description": "Legacy shell command string. This enables shell parsing, may be rejected by service policy, and changes approval semantics. Do not send a full command line here when program+args can express the same call."},
 			"cwd":            map[string]any{"type": "string", "description": "Working directory for the process. Omit to use the current workspace; must satisfy any configured directory restrictions."},
 			"timeoutSeconds": map[string]any{"type": "integer", "description": "Optional timeout override in seconds. Use only for commands expected to run longer than the default."},
 		},
@@ -128,12 +128,16 @@ func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, 
 	}
 	legacyCommand, _ := params["command"].(string)
 	legacyCommand = strings.TrimSpace(legacyCommand)
-	if toolsRequestIsService(ctx) && legacyCommand != "" && program == "" {
+	if toolsRequestIsService(ctx) && legacyCommand != "" {
 		parsedProgram, parsedArgs, err := parseServiceDirectCommand(legacyCommand)
 		if err != nil {
 			return "", fmt.Errorf("shell command execution disabled for service requests; use program + args: %w", err)
 		}
-		program = parsedProgram
+		if program == "" {
+			program = parsedProgram
+		} else if !serviceDirectProgramMatches(program, parsedProgram) {
+			return "", fmt.Errorf("service exec program/command mismatch: program=%q command executable=%q", program, parsedProgram)
+		}
 		params = cloneParamsWithArgs(params, append(parsedArgs, stringArgs(params["args"])...))
 		legacyCommand = ""
 	}
@@ -376,6 +380,18 @@ func cloneParamsWithArgs(params map[string]any, args []string) map[string]any {
 	}
 	cloned["args"] = values
 	return cloned
+}
+
+func serviceDirectProgramMatches(program string, parsedProgram string) bool {
+	program = strings.TrimSpace(program)
+	parsedProgram = strings.TrimSpace(parsedProgram)
+	if program == "" || parsedProgram == "" {
+		return false
+	}
+	if program == parsedProgram {
+		return true
+	}
+	return filepath.Base(program) == filepath.Base(parsedProgram)
 }
 
 func allowedProgram(program string, resolved string, allowed []string) bool {

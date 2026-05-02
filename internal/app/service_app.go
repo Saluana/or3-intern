@@ -169,7 +169,13 @@ func (a *ServiceApp) ReplayToolCall(ctx context.Context, req ReplayToolCallReque
 		req.Observer.OnToolResult(runCtx, toolName, out, err)
 	}
 	if err != nil {
-		return "", err
+		var approvalErr *tools.ApprovalRequiredError
+		if errors.As(err, &approvalErr) {
+			return "", err
+		}
+		if !fullReplayHistory {
+			return "", err
+		}
 	}
 	if !fullReplayHistory {
 		finalText := summarizeReplayToolResult(toolName, out)

@@ -31,23 +31,23 @@ func (t *RunSkillScript) Capability() CapabilityLevel { return CapabilityPrivile
 func (t *RunSkillScript) Name() string { return "run_skill_script" }
 
 func (t *RunSkillScript) Description() string {
-	return "Run an approved skill-local script or declared entrypoint without shell interpolation. Prefer read_skill first unless execution is actually required."
+	return "Run an approved skill-local script or declared entrypoint without shell interpolation. This is privileged. Prefer read_skill first, and only execute when the skill instructions require a script or the user explicitly asked for the action."
 }
 
 func (t *RunSkillScript) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"skill":      map[string]any{"type": "string", "description": "Skill name from inventory"},
-			"path":       map[string]any{"type": "string", "description": "Bundle-relative script path"},
-			"entrypoint": map[string]any{"type": "string", "description": "Named skill.json entrypoint"},
+			"skill":      map[string]any{"type": "string", "description": "Skill name exactly as listed in the inventory. The skill must be approved for execution."},
+			"path":       map[string]any{"type": "string", "description": "Bundle-relative script path to run. Use either path or entrypoint, not both."},
+			"entrypoint": map[string]any{"type": "string", "description": "Named skill.json entrypoint to run. Use this when the skill declares an entrypoint instead of a raw script path."},
 			"args": map[string]any{
 				"type":        "array",
 				"items":       map[string]any{"type": "string"},
-				"description": "Optional argument list",
+				"description": "Optional argument list passed without shell interpolation. Put each flag/path as its own array item.",
 			},
-			"stdin":          map[string]any{"type": "string", "description": "Optional stdin text"},
-			"timeoutSeconds": map[string]any{"type": "integer", "description": "Optional timeout override"},
+			"stdin":          map[string]any{"type": "string", "description": "Optional stdin text for the script or entrypoint."},
+			"timeoutSeconds": map[string]any{"type": "integer", "description": "Optional timeout override in seconds."},
 		},
 		"required": []string{"skill"},
 	}

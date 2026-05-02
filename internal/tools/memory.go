@@ -24,8 +24,8 @@ func (t *MemorySetPinned) Description() string {
 }
 func (t *MemorySetPinned) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
-		"key":     map[string]any{"type": "string"},
-		"content": map[string]any{"type": "string"},
+		"key":     map[string]any{"type": "string", "description": "Stable short key for the pinned memory, such as user_name, coding_style, or project_rule."},
+		"content": map[string]any{"type": "string", "description": "Durable fact, rule, or preference to keep pinned in prompts. Do not store temporary scratch notes here."},
 		"scope":   map[string]any{"type": "string", "description": "Optional scope override: 'global' to share across sessions"},
 	}, "required": []string{"key", "content"}}
 }
@@ -61,9 +61,9 @@ func (t *MemoryAddNote) Description() string {
 }
 func (t *MemoryAddNote) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
-		"text":              map[string]any{"type": "string"},
-		"tags":              map[string]any{"type": "string", "description": "comma-separated tags (optional)"},
-		"source_message_id": map[string]any{"type": "integer", "description": "source message id (optional)"},
+		"text":              map[string]any{"type": "string", "description": "Durable memory note text. Store stable facts, decisions, or preferences; do not store short-lived task scratch."},
+		"tags":              map[string]any{"type": "string", "description": "Optional comma-separated tags to help future retrieval, such as project,coding,preference."},
+		"source_message_id": map[string]any{"type": "integer", "description": "Optional source message id when the note came directly from a known conversation message."},
 		"scope":             map[string]any{"type": "string", "description": "Optional scope override: 'global' to share across sessions"},
 	}, "required": []string{"text"}}
 }
@@ -115,8 +115,8 @@ func (t *MemorySearch) Description() string {
 }
 func (t *MemorySearch) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
-		"query": map[string]any{"type": "string"},
-		"topK":  map[string]any{"type": "integer"},
+		"query": map[string]any{"type": "string", "description": "Topic or fact to retrieve from long-term memory. Use specific project names, people, decisions, or preferences."},
+		"topK":  map[string]any{"type": "integer", "description": "Maximum matching memory notes to return. Omit for the configured default."},
 		"scope": map[string]any{"type": "string", "description": "Optional scope override: 'global' to search only shared memory"},
 	}, "required": []string{"query"}}
 }
@@ -167,7 +167,7 @@ func (t *MemoryRecent) Description() string {
 }
 func (t *MemoryRecent) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
-		"limit": map[string]any{"type": "integer"},
+		"limit": map[string]any{"type": "integer", "description": "Number of recent messages to return from the linked session. Omit for default; keep small unless more conversation context is needed."},
 	}}
 }
 func (t *MemoryRecent) Schema() map[string]any {

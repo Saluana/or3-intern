@@ -16,7 +16,7 @@ type ReadSkill struct {
 
 func (t *ReadSkill) Name() string { return "read_skill" }
 func (t *ReadSkill) Description() string {
-	return "Read a bounded skill summary, outline, or preview by name. Prefer outline or preview first; use full only when the summary is not enough."
+	return "Read a bounded skill summary, outline, or preview by skill name. Use mode=outline or mode=preview first to learn workflow instructions. Avoid mode=full unless the smaller views are insufficient; full is guarded and may fail under a safe-only capability ceiling."
 }
 func (t *ReadSkill) CapabilityForParams(params map[string]any) CapabilityLevel {
 	if strings.EqualFold(strings.TrimSpace(fmt.Sprint(params["mode"])), "full") {
@@ -26,9 +26,9 @@ func (t *ReadSkill) CapabilityForParams(params map[string]any) CapabilityLevel {
 }
 func (t *ReadSkill) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
-		"name":     map[string]any{"type": "string", "description": "Skill name from inventory"},
-		"mode":     map[string]any{"type": "string", "enum": []string{"preview", "full", "outline"}, "description": "Read mode (default preview). full is still bounded and may spill to an artifact at runtime."},
-		"maxBytes": map[string]any{"type": "integer", "description": "Max preview bytes (default 6000)"},
+		"name":     map[string]any{"type": "string", "description": "Skill name exactly as listed in the skill inventory."},
+		"mode":     map[string]any{"type": "string", "enum": []string{"preview", "full", "outline"}, "description": "Read mode. Omit for preview. Safe modes are preview and outline. full is guarded: use only when the smaller safe modes do not contain enough instruction detail."},
+		"maxBytes": map[string]any{"type": "integer", "description": "Maximum bytes returned directly. Omit for default 6000; increasing this does not make mode=full safe."},
 	}, "required": []string{"name"}}
 }
 func (t *ReadSkill) Schema() map[string]any {

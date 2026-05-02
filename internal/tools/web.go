@@ -55,17 +55,17 @@ type WebRenderer interface {
 
 func (t *WebFetch) Name() string { return "web_fetch" }
 func (t *WebFetch) Description() string {
-	return "Fetch a URL and return bounded text. HTML pages are converted to Markdown artifacts by default to avoid blowing up context; set raw=true only when you explicitly need the literal response bytes. Set render=true for JavaScript-rendered pages when Playwright is available."
+	return "Fetch a known HTTP(S) URL and return bounded page/file text. This is guarded network access. Use web_search first if you do not already have the URL. HTML pages are converted to Markdown artifacts by default to avoid blowing up context; set raw=true only when you explicitly need literal response bytes. Set render=true only for JavaScript-rendered pages when plain fetching misses the content."
 }
 func (t *WebFetch) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
-		"url":       map[string]any{"type": "string"},
-		"maxBytes":  map[string]any{"type": "integer", "description": "Max preview bytes returned directly (default 12000)"},
-		"raw":       map[string]any{"type": "boolean", "description": "Bypass Markdown artifact conversion and return the literal response bytes, including raw HTML when present"},
-		"render":    map[string]any{"type": "boolean", "description": "Use a real browser to execute JavaScript before extracting text"},
-		"waitUntil": map[string]any{"type": "string", "enum": []string{"domcontentloaded", "load", "networkidle"}, "description": "Browser navigation wait strategy for render=true (default networkidle)"},
-		"waitMs":    map[string]any{"type": "integer", "description": "Extra milliseconds to wait after navigation for render=true (max 15000)"},
-		"selector":  map[string]any{"type": "string", "description": "Optional CSS selector to wait for before extracting text"},
+		"url":       map[string]any{"type": "string", "description": "Full http:// or https:// URL to fetch. Do not pass search terms here; use web_search for discovery."},
+		"maxBytes":  map[string]any{"type": "integer", "description": "Maximum preview bytes returned directly. Omit for default 12000; larger HTML output may be saved as an artifact instead."},
+		"raw":       map[string]any{"type": "boolean", "description": "When true, bypass Markdown conversion and return literal response bytes, including raw HTML. Leave false unless raw source is specifically needed."},
+		"render":    map[string]any{"type": "boolean", "description": "When true, use a browser to execute JavaScript before extracting text. Slower and more fragile; use only after normal fetch does not expose the needed content."},
+		"waitUntil": map[string]any{"type": "string", "enum": []string{"domcontentloaded", "load", "networkidle"}, "description": "For render=true only: browser navigation wait strategy. Omit for networkidle."},
+		"waitMs":    map[string]any{"type": "integer", "description": "For render=true only: extra milliseconds to wait after navigation, capped at 15000."},
+		"selector":  map[string]any{"type": "string", "description": "For render=true only: optional CSS selector to wait for before extracting text, such as main or article."},
 	}, "required": []string{"url"}}
 }
 func (t *WebFetch) Schema() map[string]any {
@@ -387,12 +387,12 @@ func (t *WebSearch) Capability() CapabilityLevel { return CapabilitySafe }
 
 func (t *WebSearch) Name() string { return "web_search" }
 func (t *WebSearch) Description() string {
-	return "Search the web and return top results. Use this to discover candidate URLs first, then follow up with web_fetch for the page content you actually need."
+	return "Search the public web and return a small list of candidate result URLs with titles/snippets. This is for URL discovery, not for reading page contents. After choosing a result, call web_fetch with that exact URL if content is needed. Keep queries specific and avoid using this when the answer is already available in the conversation or local files."
 }
 func (t *WebSearch) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
-		"query": map[string]any{"type": "string"},
-		"count": map[string]any{"type": "integer", "description": "max results (default 5)"},
+		"query": map[string]any{"type": "string", "description": "Search query text. Include the product/project/person name and the fact you need; for exact phrases or errors, include the exact words."},
+		"count": map[string]any{"type": "integer", "description": "Maximum results to return. Omit for default 5; hard cap is 10. Use fewer results when one or two likely URLs are enough."},
 	}, "required": []string{"query"}}
 }
 func (t *WebSearch) Schema() map[string]any {

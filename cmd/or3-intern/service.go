@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -22,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"or3-intern/internal/agent"
 	"or3-intern/internal/app"
@@ -69,6 +71,8 @@ const (
 	serviceScopeBodyLimit      int64 = 64 << 10
 	serviceConfigureBodyLimit  int64 = 256 << 10
 	serviceFileUploadBodyLimit int64 = 128 << 20
+	serviceFileTextReadLimit   int64 = 1 << 20
+	serviceFileTextWriteLimit  int64 = 1 << 20
 	serviceTerminalBodyLimit   int64 = 64 << 10
 	serviceTerminalSessionTTL        = 10 * time.Minute
 	serviceTerminalMaxSessions       = 4
@@ -490,6 +494,18 @@ type serviceFileSearchItem struct {
 	RootLabel string `json:"root_label"`
 }
 
+type serviceFileReadResponse struct {
+	RootID     string `json:"root_id"`
+	Path       string `json:"path"`
+	Name       string `json:"name"`
+	MimeType   string `json:"mime_type,omitempty"`
+	Size       int64  `json:"size"`
+	ModifiedAt string `json:"modified_at"`
+	Revision   string `json:"revision"`
+	Writable   bool   `json:"writable"`
+	Content    string `json:"content"`
+}
+
 func (s *serviceServer) handleFiles(w http.ResponseWriter, r *http.Request) {
 	if !requireServiceRole(w, r, approval.RoleOperator) {
 		return
@@ -521,12 +537,24 @@ func (s *serviceServer) handleFiles(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleFileStat(w, r)
+	case "read":
+		if r.Method != http.MethodGet {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		s.handleFileRead(w, r)
 	case "download":
 		if r.Method != http.MethodGet {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 			return
 		}
 		s.handleFileDownload(w, r)
+	case "write":
+		if r.Method != http.MethodPut {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		s.handleFileWrite(w, r)
 	case "upload":
 		if r.Method != http.MethodPost {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
@@ -787,6 +815,43 @@ func fileSearchMatches(query, name, path string) bool {
 	return true
 }
 
+func serviceFileRevision(info os.FileInfo) string {
+	if info == nil {
+		return ""
+	}
+	return fmt.Sprintf("%d:%d", info.ModTime().UTC().UnixNano(), info.Size())
+}
+
+func isTextLikeMime(mimeType string) bool {
+	mimeType = strings.ToLower(strings.TrimSpace(mimeType))
+	if strings.HasPrefix(mimeType, "text/") {
+		return true
+	}
+	return strings.Contains(mimeType, "json") || strings.Contains(mimeType, "xml") || strings.Contains(mimeType, "javascript") || strings.Contains(mimeType, "yaml") || strings.Contains(mimeType, "toml")
+}
+
+func isTextLikeExtension(name string) bool {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".md", ".markdown", ".txt", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".env", ".csv", ".ts", ".tsx", ".js", ".jsx", ".vue", ".go", ".py", ".rb", ".php", ".java", ".kt", ".swift", ".sql", ".html", ".css", ".scss", ".sh":
+		return true
+	default:
+		return false
+	}
+}
+
+func serviceFileTextAllowed(name, mimeType string, content []byte) bool {
+	if len(content) == 0 {
+		return true
+	}
+	if bytes.IndexByte(content, 0) >= 0 || !utf8.Valid(content) {
+		return false
+	}
+	if isTextLikeMime(mimeType) || isTextLikeExtension(name) {
+		return true
+	}
+	return true
+}
+
 func (s *serviceServer) handleFileStat(w http.ResponseWriter, r *http.Request) {
 	root, absPath, rel, err := s.resolveServiceFilePath(r.URL.Query().Get("root_id"), r.URL.Query().Get("path"))
 	if err != nil {
@@ -803,6 +868,48 @@ func (s *serviceServer) handleFileStat(w http.ResponseWriter, r *http.Request) {
 		entryType = "directory"
 	}
 	writeServiceJSON(w, http.StatusOK, map[string]any{"item": serviceFileEntry{Name: info.Name(), Path: rel, Type: entryType, Size: info.Size(), ModifiedAt: info.ModTime().Format(time.RFC3339), MimeType: mime.TypeByExtension(filepath.Ext(info.Name()))}, "root_id": root.ID})
+}
+
+func (s *serviceServer) handleFileRead(w http.ResponseWriter, r *http.Request) {
+	root, absPath, rel, err := s.resolveServiceFilePath(r.URL.Query().Get("root_id"), r.URL.Query().Get("path"))
+	if err != nil {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	info, err := os.Stat(absPath)
+	if err != nil {
+		writeServiceError(w, r, http.StatusNotFound, "file unavailable", err)
+		return
+	}
+	if info.IsDir() {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "read target is not a file"})
+		return
+	}
+	if info.Size() > serviceFileTextReadLimit {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "file is too large for inline editing"})
+		return
+	}
+	content, err := os.ReadFile(absPath)
+	if err != nil {
+		writeServiceError(w, r, http.StatusBadGateway, "file read failed", err)
+		return
+	}
+	mimeType := mime.TypeByExtension(filepath.Ext(info.Name()))
+	if !serviceFileTextAllowed(info.Name(), mimeType, content) {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "file is not a supported text document"})
+		return
+	}
+	writeServiceJSON(w, http.StatusOK, map[string]any{
+		"root_id":     root.ID,
+		"path":        rel,
+		"name":        info.Name(),
+		"mime_type":   mimeType,
+		"size":        info.Size(),
+		"modified_at": info.ModTime().UTC().Format(time.RFC3339),
+		"revision":    serviceFileRevision(info),
+		"writable":    root.Writable,
+		"content":     string(content),
+	})
 }
 
 func (s *serviceServer) handleFileDownload(w http.ResponseWriter, r *http.Request) {
@@ -823,6 +930,111 @@ func (s *serviceServer) handleFileDownload(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	http.ServeContent(w, r, info.Name(), info.ModTime(), file)
+}
+
+func (s *serviceServer) handleFileWrite(w http.ResponseWriter, r *http.Request) {
+	limitServiceRequestBody(w, r, serviceFileTextWriteLimit)
+	var body struct {
+		RootID           string `json:"root_id"`
+		Path             string `json:"path"`
+		Content          string `json:"content"`
+		ExpectedRevision string `json:"expected_revision"`
+		Create           bool   `json:"create"`
+	}
+	if err := decodeServiceRequestBody(r.Body, &body); err != nil {
+		writeServiceRequestDecodeError(w, err)
+		return
+	}
+	root, absPath, rel, err := s.resolveServiceFilePath(body.RootID, body.Path)
+	if err != nil {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	if !root.Writable {
+		writeServiceJSON(w, http.StatusForbidden, map[string]any{"error": "file root is read-only"})
+		return
+	}
+	contentBytes := []byte(body.Content)
+	if int64(len(contentBytes)) > serviceFileTextWriteLimit {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "file is too large for inline editing"})
+		return
+	}
+	name := filepath.Base(absPath)
+	mimeType := mime.TypeByExtension(filepath.Ext(name))
+	if !serviceFileTextAllowed(name, mimeType, contentBytes) {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "file is not a supported text document"})
+		return
+	}
+	parent := filepath.Dir(absPath)
+	parentInfo, err := os.Stat(parent)
+	if err != nil || !parentInfo.IsDir() {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "parent directory does not exist"})
+		return
+	}
+	existingInfo, statErr := os.Stat(absPath)
+	if statErr == nil && existingInfo.IsDir() {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "write target is not a file"})
+		return
+	}
+	status := http.StatusOK
+	resultStatus := "written"
+	if statErr != nil {
+		if !errors.Is(statErr, os.ErrNotExist) {
+			writeServiceError(w, r, http.StatusBadGateway, "file stat failed", statErr)
+			return
+		}
+		if !body.Create {
+			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "file does not exist"})
+			return
+		}
+		status = http.StatusCreated
+		resultStatus = "created"
+	} else {
+		if body.Create {
+			writeServiceJSON(w, http.StatusConflict, map[string]any{"error": "file already exists"})
+			return
+		}
+		if body.ExpectedRevision != "" && body.ExpectedRevision != serviceFileRevision(existingInfo) {
+			writeServiceJSON(w, http.StatusConflict, map[string]any{
+				"error":           "file has changed on disk",
+				"modified_at":     existingInfo.ModTime().UTC().Format(time.RFC3339),
+				"current_revision": serviceFileRevision(existingInfo),
+			})
+			return
+		}
+	}
+	tmp, err := os.CreateTemp(parent, ".or3-write-*")
+	if err != nil {
+		writeServiceError(w, r, http.StatusBadGateway, "could not prepare file write", err)
+		return
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(contentBytes); err != nil {
+		_ = tmp.Close()
+		writeServiceError(w, r, http.StatusBadGateway, "file write failed", err)
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		writeServiceError(w, r, http.StatusBadGateway, "file write failed", err)
+		return
+	}
+	if err := os.Rename(tmpName, absPath); err != nil {
+		writeServiceError(w, r, http.StatusBadGateway, "file write failed", err)
+		return
+	}
+	updatedInfo, err := os.Stat(absPath)
+	if err != nil {
+		writeServiceError(w, r, http.StatusBadGateway, "file stat failed", err)
+		return
+	}
+	writeServiceJSON(w, status, map[string]any{
+		"root_id":     root.ID,
+		"path":        rel,
+		"status":      resultStatus,
+		"modified_at": updatedInfo.ModTime().UTC().Format(time.RFC3339),
+		"revision":    serviceFileRevision(updatedInfo),
+	})
 }
 
 func (s *serviceServer) handleFileUpload(w http.ResponseWriter, r *http.Request) {

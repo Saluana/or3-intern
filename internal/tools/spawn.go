@@ -35,16 +35,16 @@ func (t *SpawnSubagent) Capability() CapabilityLevel { return CapabilityGuarded 
 func (t *SpawnSubagent) Name() string { return "spawn_subagent" }
 
 func (t *SpawnSubagent) Description() string {
-	return "Queue a longer background task and return immediately with a stable job ID. Use this for long-running or parallel work, not quick synchronous steps."
+	return "Queue a longer background subagent task and return immediately with a stable job ID. This is guarded. Use it for long-running or parallel work that can continue independently; do not use it for quick steps that should be handled in the current turn."
 }
 
 func (t *SpawnSubagent) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"task":    map[string]any{"type": "string", "description": "Task for the background subagent"},
-			"channel": map[string]any{"type": "string", "description": "Optional delivery channel override"},
-			"to":      map[string]any{"type": "string", "description": "Optional recipient override"},
+			"task":    map[string]any{"type": "string", "description": "Complete, self-contained task instructions for the background subagent, including expected output and relevant constraints."},
+			"channel": map[string]any{"type": "string", "description": "Optional delivery channel override. Omit to inherit the current/default channel."},
+			"to":      map[string]any{"type": "string", "description": "Optional recipient override. Omit to inherit the current/default recipient."},
 		},
 		"required": []string{"task"},
 	}

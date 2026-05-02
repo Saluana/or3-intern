@@ -37,14 +37,14 @@ func (t *WebFetchMarkdown) Capability() CapabilityLevel { return CapabilityGuard
 func (t *WebFetchMarkdown) Name() string { return "web_fetch_markdown" }
 
 func (t *WebFetchMarkdown) Description() string {
-	return "Fetch an HTML page, convert it to Markdown, save it as an artifact, and return a compact preview plus artifact_id for read_artifact. Use this when you want explicit HTML-to-Markdown controls; web_fetch already does this automatically for HTML by default."
+	return "Fetch a known HTML page URL, convert it to Markdown, save the full Markdown as an artifact, and return a compact preview plus artifact_id for read_artifact. This is guarded network access. Use web_fetch for ordinary page reading; use this when you specifically want an artifact and explicit HTML-to-Markdown size controls."
 }
 
 func (t *WebFetchMarkdown) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
-		"url":            map[string]any{"type": "string"},
-		"maxSourceBytes": map[string]any{"type": "integer", "description": "Maximum HTML bytes to fetch and convert (default 2MiB, max 10MiB)"},
-		"previewBytes":   map[string]any{"type": "integer", "description": "Markdown preview bytes returned directly (default 2000)"},
+		"url":            map[string]any{"type": "string", "description": "Full http:// or https:// HTML page URL to fetch. Use web_search first if you only have search terms."},
+		"maxSourceBytes": map[string]any{"type": "integer", "description": "Maximum HTML bytes to fetch and convert. Omit for default 2MiB; capped at 10MiB."},
+		"previewBytes":   map[string]any{"type": "integer", "description": "Markdown preview bytes returned directly. Omit for default 2000; use read_artifact with the returned artifact_id for more."},
 	}, "required": []string{"url"}}
 }
 

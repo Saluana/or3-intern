@@ -212,7 +212,7 @@ type ReadFile struct{ FileTool }
 
 func (t *ReadFile) Name() string { return "read_file" }
 func (t *ReadFile) Description() string {
-	return "Read a UTF-8 text file. Prefer outline, grep, or range for targeted inspection; use full only when narrower modes are not enough."
+	return "Read a UTF-8 text file from the allowed workspace. Default mode=preview is the safest general choice. Use mode=outline to understand a file cheaply, mode=grep when looking for a symbol/string, and mode=range after you know line numbers. Avoid mode=full unless the user explicitly needs the whole bounded file; full is a guarded read and may fail under a safe-only capability ceiling."
 }
 func (t *ReadFile) CapabilityForParams(params map[string]any) CapabilityLevel {
 	if strings.EqualFold(strings.TrimSpace(fmt.Sprint(params["mode"])), "full") {
@@ -222,12 +222,12 @@ func (t *ReadFile) CapabilityForParams(params map[string]any) CapabilityLevel {
 }
 func (t *ReadFile) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
-		"path":      map[string]any{"type": "string"},
-		"mode":      map[string]any{"type": "string", "enum": []string{"preview", "full", "range", "grep", "outline"}, "description": "Read mode (default preview). full is still bounded and may spill to an artifact at runtime."},
-		"startLine": map[string]any{"type": "integer", "description": "1-based start line for range mode"},
-		"endLine":   map[string]any{"type": "integer", "description": "1-based end line for range mode"},
-		"pattern":   map[string]any{"type": "string", "description": "Substring or regex pattern for grep mode"},
-		"maxBytes":  map[string]any{"type": "integer", "description": "Max preview bytes (default 12000)"},
+		"path":      map[string]any{"type": "string", "description": "File path to read. Use an absolute path or a path relative to the current workspace; the path must stay inside the allowed read root."},
+		"mode":      map[string]any{"type": "string", "enum": []string{"preview", "full", "range", "grep", "outline"}, "description": "Read mode. Omit for preview. Safe modes are preview, outline, grep, and range. full is guarded: only use it when narrower safe modes are insufficient or when the request explicitly allows guarded tools."},
+		"startLine": map[string]any{"type": "integer", "description": "For mode=range only: 1-based first line to return. Use with endLine after an outline/grep/preview identifies the area you need."},
+		"endLine":   map[string]any{"type": "integer", "description": "For mode=range only: 1-based last line to return, inclusive. Keep ranges focused to avoid unnecessary output."},
+		"pattern":   map[string]any{"type": "string", "description": "For mode=grep only: substring or regex pattern to search for, such as a function name, type name, config key, or exact error text."},
+		"maxBytes":  map[string]any{"type": "integer", "description": "Maximum bytes returned directly for preview/grep/range/outline/full. Omit for default 12000; increasing this does not make mode=full safe."},
 	}, "required": []string{"path"}}
 }
 func (t *ReadFile) Schema() map[string]any {
@@ -302,13 +302,13 @@ type SearchFile struct{ FileTool }
 
 func (t *SearchFile) Name() string { return "search_file" }
 func (t *SearchFile) Description() string {
-	return "Search a UTF-8 text file and return bounded matching lines. Use this when you know a pattern and do not need a broader file read."
+	return "Search one UTF-8 text file and return bounded matching lines. Use this instead of read_file mode=full when you know a symbol, string, error message, or config key and only need matching context."
 }
 func (t *SearchFile) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
-		"path":     map[string]any{"type": "string"},
-		"pattern":  map[string]any{"type": "string"},
-		"maxBytes": map[string]any{"type": "integer", "description": "Max preview bytes (default 12000)"},
+		"path":     map[string]any{"type": "string", "description": "File path to search. Use an absolute path or workspace-relative path inside the allowed read root."},
+		"pattern":  map[string]any{"type": "string", "description": "Substring or regex pattern to find. Choose a specific term rather than a broad word when possible."},
+		"maxBytes": map[string]any{"type": "integer", "description": "Maximum bytes of matching-line output returned directly. Omit for default 12000."},
 	}, "required": []string{"path", "pattern"}}
 }
 func (t *SearchFile) Schema() map[string]any {
@@ -337,13 +337,13 @@ type WriteFile struct{ FileTool }
 func (t *WriteFile) Capability() CapabilityLevel { return CapabilityGuarded }
 func (t *WriteFile) Name() string                { return "write_file" }
 func (t *WriteFile) Description() string {
-	return "Write or replace a text file. Prefer edit_file for local changes to an existing file; use mkdirs only when intentionally creating a new path."
+	return "Create or completely replace a text file in the allowed write root. This is guarded because it overwrites the target file. Prefer edit_file for small changes to an existing file; use write_file when creating a new file or intentionally replacing all content."
 }
 func (t *WriteFile) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
-		"path":    map[string]any{"type": "string"},
-		"content": map[string]any{"type": "string"},
-		"mkdirs":  map[string]any{"type": "boolean"},
+		"path":    map[string]any{"type": "string", "description": "Destination file path inside the allowed write root. Existing content at this path will be replaced."},
+		"content": map[string]any{"type": "string", "description": "Complete new file contents, not a patch or partial snippet."},
+		"mkdirs":  map[string]any{"type": "boolean", "description": "Set true only when parent directories should be created for a new path."},
 	}, "required": []string{"path", "content"}}
 }
 func (t *WriteFile) Schema() map[string]any {
@@ -377,17 +377,17 @@ type EditFile struct{ FileTool }
 func (t *EditFile) Capability() CapabilityLevel { return CapabilityGuarded }
 func (t *EditFile) Name() string                { return "edit_file" }
 func (t *EditFile) Description() string {
-	return "Edit an existing text file by applying find/replace operations. Prefer this over write_file for localized changes."
+	return "Edit an existing text file by applying exact find/replace operations inside the allowed write root. This is guarded. Prefer it over write_file for localized changes, and make each find string specific enough to avoid accidental replacements."
 }
 func (t *EditFile) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
-		"path": map[string]any{"type": "string"},
+		"path": map[string]any{"type": "string", "description": "Existing file path to edit inside the allowed write root."},
 		"edits": map[string]any{"type": "array", "items": map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"find":    map[string]any{"type": "string"},
-				"replace": map[string]any{"type": "string"},
-				"count":   map[string]any{"type": "integer", "description": "max replacements (0=all)"},
+				"find":    map[string]any{"type": "string", "description": "Exact text to replace. Include enough surrounding context when needed so the match is unique."},
+				"replace": map[string]any{"type": "string", "description": "Replacement text for the matched find string."},
+				"count":   map[string]any{"type": "integer", "description": "Maximum replacements for this edit. Omit or use 0 for all matches; use 1 for a unique targeted edit."},
 			},
 			"required": []string{"find", "replace"},
 		}},
@@ -444,12 +444,12 @@ type ListDir struct{ FileTool }
 
 func (t *ListDir) Name() string { return "list_dir" }
 func (t *ListDir) Description() string {
-	return "List files and folders in a directory without recursion. Use this before read_file when navigating an unfamiliar tree."
+	return "List files and folders in one directory without recursion. Use this before read_file when navigating an unfamiliar tree or choosing which file to inspect."
 }
 func (t *ListDir) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
-		"path": map[string]any{"type": "string", "description": "Directory path to list"},
-		"max":  map[string]any{"type": "integer", "description": "Maximum entries to return (default 80)"},
+		"path": map[string]any{"type": "string", "description": "Directory path to list. Use an absolute path or workspace-relative path inside the allowed read root."},
+		"max":  map[string]any{"type": "integer", "description": "Maximum entries to return. Omit for default 80; increase only when a directory listing is truncated."},
 	}, "required": []string{"path"}}
 }
 func (t *ListDir) Schema() map[string]any {

@@ -38,17 +38,17 @@ const (
 
 func (t *ExecTool) Name() string { return "exec" }
 func (t *ExecTool) Description() string {
-	return "Run an allowed program with approval, sandbox, and allowlist controls. Prefer program plus args over shell commands; output is bounded and legacy shell mode is a last resort."
+	return "Run an allowed local program with approval, sandbox, and allowlist controls. This is guarded when using program plus args. The legacy command field runs through a shell, is privileged, and may be disabled; avoid command unless the user explicitly needs shell syntax and privileged tools are allowed."
 }
 func (t *ExecTool) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"program":        map[string]any{"type": "string", "description": "Program to run"},
-			"args":           map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Program arguments"},
-			"command":        map[string]any{"type": "string", "description": "Legacy shell command to run (privileged, explicit opt-in only)"},
-			"cwd":            map[string]any{"type": "string", "description": "Working directory (optional)"},
-			"timeoutSeconds": map[string]any{"type": "integer", "description": "Override timeout (optional)"},
+			"program":        map[string]any{"type": "string", "description": "Executable name or path to run, such as rg, git, go, npm, or node. Prefer this field over command."},
+			"args":           map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Arguments passed directly to program without shell parsing. Put each flag/path as its own array item."},
+			"command":        map[string]any{"type": "string", "description": "Legacy shell command string. This makes the call privileged and may be rejected by capability ceilings or service policy; use program+args instead whenever possible."},
+			"cwd":            map[string]any{"type": "string", "description": "Working directory for the process. Omit to use the current workspace; must satisfy any configured directory restrictions."},
+			"timeoutSeconds": map[string]any{"type": "integer", "description": "Optional timeout override in seconds. Use only for commands expected to run longer than the default."},
 		},
 		"required": []string{},
 	}

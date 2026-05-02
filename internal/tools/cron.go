@@ -17,14 +17,14 @@ type CronTool struct {
 
 func (t *CronTool) Name() string { return "cron" }
 func (t *CronTool) Description() string {
-	return "Manage scheduled jobs: add, list, remove, run, or inspect status. Use this for future or recurring work, not immediate one-turn actions."
+	return "Manage scheduled jobs: add, list, remove, run now, or inspect scheduler status. Use this for future or recurring work, not immediate one-turn actions."
 }
 func (t *CronTool) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
-		"action": map[string]any{"type": "string", "enum": []any{"add", "list", "remove", "run", "status"}},
-		"job":    map[string]any{"type": "object", "description": "job object for add"},
-		"id":     map[string]any{"type": "string", "description": "job id for remove/run"},
-		"force":  map[string]any{"type": "boolean", "description": "force run"},
+		"action": map[string]any{"type": "string", "enum": []any{"add", "list", "remove", "run", "status"}, "description": "Operation to perform: list/status need no other fields; add needs job; remove/run need id."},
+		"job":    map[string]any{"type": "object", "description": "Job object for action=add, including schedule and payload. Omit for other actions."},
+		"id":     map[string]any{"type": "string", "description": "Existing job id for action=remove or action=run."},
+		"force":  map[string]any{"type": "boolean", "description": "For action=run only: run even if normal scheduler checks would skip it."},
 	}, "required": []string{"action"}}
 }
 func (t *CronTool) Schema() map[string]any {

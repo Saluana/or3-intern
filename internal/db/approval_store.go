@@ -467,6 +467,18 @@ func (d *DB) RevokeApprovalToken(ctx context.Context, id int64, revokedAt int64)
 	return err
 }
 
+func (d *DB) ConsumeApprovalToken(ctx context.Context, id int64, revokedAt int64) (bool, error) {
+	res, err := d.SQL.ExecContext(ctx, `UPDATE approval_tokens SET revoked_at=? WHERE id=? AND revoked_at=0`, revokedAt, id)
+	if err != nil {
+		return false, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
+}
+
 func mustJSONMap(value map[string]any) string {
 	if len(value) == 0 {
 		return "{}"

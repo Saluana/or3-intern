@@ -144,6 +144,18 @@ func (a *ServiceApp) ReplayToolCall(ctx context.Context, req ReplayToolCallReque
 	if req.RestrictTools {
 		runCtx = agent.ContextWithToolRegistry(runCtx, registry)
 	}
+	toolCallID := ""
+	fullReplayHistory := a.runtime.DB != nil && a.runtime.Builder != nil && a.runtime.Provider != nil
+	if fullReplayHistory {
+		var findErr error
+		toolCallID, findErr = a.findReplayToolCallID(runCtx, req.SessionKey, toolName, argsJSON)
+		if findErr != nil {
+			return "", findErr
+		}
+		if strings.TrimSpace(toolCallID) == "" {
+			return "", fmt.Errorf("approved replay rejected: no matching prior assistant tool call")
+		}
+	}
 	if req.Observer != nil {
 		req.Observer.OnToolCall(runCtx, toolName, argsJSON)
 	}
@@ -159,16 +171,12 @@ func (a *ServiceApp) ReplayToolCall(ctx context.Context, req ReplayToolCallReque
 	if err != nil {
 		return "", err
 	}
-	if a.runtime.DB == nil || a.runtime.Builder == nil || a.runtime.Provider == nil {
+	if !fullReplayHistory {
 		finalText := summarizeReplayToolResult(toolName, out)
 		if req.Observer != nil {
 			req.Observer.OnCompletion(runCtx, finalText, false)
 		}
 		return finalText, nil
-	}
-	toolCallID, findErr := a.findReplayToolCallID(runCtx, req.SessionKey, toolName, argsJSON)
-	if findErr != nil {
-		return "", findErr
 	}
 	if a.runtime.DB != nil && strings.TrimSpace(req.SessionKey) != "" {
 		payload := map[string]any{

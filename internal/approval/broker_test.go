@@ -112,6 +112,46 @@ func TestBroker_EvaluateExec_AllowsApprovedTokenAcrossRetries(t *testing.T) {
 	if !retry.Allowed {
 		t.Fatalf("expected approved token to allow retry, got %#v", retry)
 	}
+
+	reuse, err := broker.EvaluateExec(context.Background(), ExecEvaluation{
+		ExecutablePath: input.ExecutablePath,
+		Argv:           append([]string{}, input.Argv...),
+		WorkingDir:     input.WorkingDir,
+		ToolName:       input.ToolName,
+		AgentID:        input.AgentID,
+		SessionID:      input.SessionID,
+		ApprovalToken:  issued.Token,
+	})
+	if err != nil {
+		t.Fatalf("EvaluateExec reused token: %v", err)
+	}
+	if reuse.Allowed || !reuse.RequiresApproval || reuse.RequestID == first.RequestID {
+		t.Fatalf("expected consumed token to require a fresh approval, got %#v", reuse)
+	}
+}
+
+func TestBroker_VerifyApprovalTokenConsumesToken(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Exec.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+	broker.Now = func() time.Time { return now }
+
+	decision, err := broker.EvaluateExec(context.Background(), ExecEvaluation{ExecutablePath: "/bin/echo", Argv: []string{"ok"}, WorkingDir: "/tmp", ToolName: "exec"})
+	if err != nil {
+		t.Fatalf("EvaluateExec: %v", err)
+	}
+	issued, err := broker.ApproveRequest(context.Background(), decision.RequestID, "cli:test", false, "ok")
+	if err != nil {
+		t.Fatalf("ApproveRequest: %v", err)
+	}
+	if err := broker.VerifyApprovalToken(context.Background(), issued.Token, decision.SubjectHash, broker.HostID); err != nil {
+		t.Fatalf("VerifyApprovalToken first use: %v", err)
+	}
+	if err := broker.VerifyApprovalToken(context.Background(), issued.Token, decision.SubjectHash, broker.HostID); err == nil || !strings.Contains(err.Error(), "already used or revoked") {
+		t.Fatalf("expected consumed token failure, got %v", err)
+	}
 }
 
 func TestBroker_PairingAndApprovalTokenRoundTrip(t *testing.T) {

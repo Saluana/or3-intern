@@ -70,6 +70,21 @@ func (serviceReplayTool) Execute(_ context.Context, params map[string]any) (stri
 	return fmt.Sprintf("replayed:%s", strings.TrimSpace(fmt.Sprint(params["value"]))), nil
 }
 
+type countingReplayTool struct {
+	count *int
+}
+
+func (countingReplayTool) Name() string               { return "replay_probe" }
+func (countingReplayTool) Description() string        { return "replay_probe" }
+func (countingReplayTool) Parameters() map[string]any { return map[string]any{} }
+func (countingReplayTool) Schema() map[string]any     { return map[string]any{} }
+func (t countingReplayTool) Execute(_ context.Context, params map[string]any) (string, error) {
+	if t.count != nil {
+		*t.count = *t.count + 1
+	}
+	return fmt.Sprintf("replayed:%s", strings.TrimSpace(fmt.Sprint(params["value"]))), nil
+}
+
 type serviceApprovalTool struct{}
 
 func (serviceApprovalTool) Name() string               { return "exec" }
@@ -1061,6 +1076,89 @@ func TestServiceTurns_ReplayToolCallContinuesConversation(t *testing.T) {
 	}
 	if callCount != 1 {
 		t.Fatalf("expected one provider continuation call, got %d", callCount)
+	}
+}
+
+func TestServiceTurns_ReplayToolCallRequiresPriorAssistantCall(t *testing.T) {
+	rt, cleanup := buildServiceTestRuntime(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("provider should not be called for rejected replay")
+	})
+	defer cleanup()
+	executions := 0
+	rt.Tools.Register(countingReplayTool{count: &executions})
+	server := &serviceServer{
+		config: config.Config{
+			Service: config.ServiceConfig{Secret: strings.Repeat("r", 32), MaxCapability: string(tools.CapabilityGuarded)},
+		},
+		runtime: rt,
+		jobs:    agent.NewJobRegistry(time.Minute, 32),
+	}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("r", 32), server)
+	defer httpServer.Close()
+
+	body := `{"session_key":"svc:missing-prior-tool-call","message":"resume approved tool","replay_tool_call":{"name":"replay_probe","arguments_json":"{\"value\":\"ok\"}"}}`
+	req := mustServiceRequest(t, httpServer, strings.Repeat("r", 32), http.MethodPost, "/internal/v1/turns", body)
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	if executions != 0 {
+		t.Fatalf("replay tool executed without a prior assistant tool call")
+	}
+	payload := mustDecodeJSONBody(t, resp.Body)
+	if !strings.Contains(fmt.Sprint(payload["error"]), "job failed") {
+		t.Fatalf("expected public job failure, got %#v", payload)
+	}
+}
+
+func TestServiceTurns_ReplayToolCallRejectsChangedArguments(t *testing.T) {
+	rt, cleanup := buildServiceTestRuntime(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("provider should not be called for rejected replay")
+	})
+	defer cleanup()
+	executions := 0
+	rt.Tools.Register(countingReplayTool{count: &executions})
+	if _, err := rt.DB.AppendMessage(context.Background(), "svc:changed-replay", "assistant", "", map[string]any{
+		"tool_calls": []providers.ToolCall{{
+			ID:   "tc-replay",
+			Type: "function",
+			Function: struct {
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			}{
+				Name:      "replay_probe",
+				Arguments: `{"value":"approved"}`,
+			},
+		}},
+	}); err != nil {
+		t.Fatalf("Append assistant tool call: %v", err)
+	}
+	server := &serviceServer{
+		config: config.Config{
+			Service: config.ServiceConfig{Secret: strings.Repeat("r", 32), MaxCapability: string(tools.CapabilityGuarded)},
+		},
+		runtime: rt,
+		jobs:    agent.NewJobRegistry(time.Minute, 32),
+	}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("r", 32), server)
+	defer httpServer.Close()
+
+	body := `{"session_key":"svc:changed-replay","message":"resume approved tool","replay_tool_call":{"name":"replay_probe","arguments_json":"{\"value\":\"changed\"}"}}`
+	req := mustServiceRequest(t, httpServer, strings.Repeat("r", 32), http.MethodPost, "/internal/v1/turns", body)
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	if executions != 0 {
+		t.Fatalf("replay tool executed with changed arguments")
 	}
 }
 

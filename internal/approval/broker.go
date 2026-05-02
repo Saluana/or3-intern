@@ -428,15 +428,29 @@ func (b *Broker) VerifyApprovalToken(ctx context.Context, token string, subjectH
 	if claims.SubjectHash != strings.TrimSpace(subjectHash) {
 		return fmt.Errorf("approval token subject mismatch")
 	}
+	if b.DB == nil {
+		return fmt.Errorf("approval token store unavailable")
+	}
 	record, err := b.DB.GetApprovalToken(ctx, claims.TokenID)
 	if err != nil {
 		return fmt.Errorf("approval token record not found")
 	}
 	if record.RevokedAt > 0 {
-		return fmt.Errorf("approval token revoked")
+		return fmt.Errorf("approval token already used or revoked")
 	}
 	if record.SubjectHash != claims.SubjectHash {
 		return fmt.Errorf("approval token subject mismatch")
+	}
+	nowMS := b.now().UnixMilli()
+	if record.ExpiresAt > 0 && record.ExpiresAt < nowMS {
+		return fmt.Errorf("approval token expired")
+	}
+	consumed, err := b.DB.ConsumeApprovalToken(ctx, claims.TokenID, nowMS)
+	if err != nil {
+		return err
+	}
+	if !consumed {
+		return fmt.Errorf("approval token already used or revoked")
 	}
 	return nil
 }

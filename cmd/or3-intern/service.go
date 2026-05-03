@@ -25,6 +25,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/creack/pty"
+
 	"or3-intern/internal/agent"
 	"or3-intern/internal/app"
 	"or3-intern/internal/approval"
@@ -100,6 +102,7 @@ type serviceTerminalSession struct {
 	ApprovalID    int64
 	ApprovalState string
 	cmd           *exec.Cmd
+	ptyFile       *os.File
 	stdin         io.WriteCloser
 	cancel        context.CancelFunc
 	mu            sync.Mutex
@@ -175,16 +178,37 @@ func (s *serviceTerminalSession) close(status string) {
 	s.Status = status
 	stdin := s.stdin
 	cancel := s.cancel
+	ptyFile := s.ptyFile
 	s.stdin = nil
 	s.cancel = nil
+	s.ptyFile = nil
 	s.mu.Unlock()
-	if stdin != nil {
+	if stdin != nil && stdin != ptyFile {
 		_ = stdin.Close()
+	}
+	if ptyFile != nil {
+		_ = ptyFile.Close()
 	}
 	if cancel != nil {
 		cancel()
 	}
 	s.appendEvent("status", map[string]any{"status": status})
+}
+
+func clampTerminalRows(rows int) int {
+	rows = max(rows, 24)
+	if rows > 200 {
+		return 200
+	}
+	return rows
+}
+
+func clampTerminalCols(cols int) int {
+	cols = max(cols, 80)
+	if cols > 400 {
+		return 400
+	}
+	return cols
 }
 
 func runServiceCommand(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, jobs *agent.JobRegistry) error {
@@ -1305,29 +1329,17 @@ func (s *serviceServer) createTerminalSession(w http.ResponseWriter, r *http.Req
 	cmd := exec.CommandContext(ctx, shellPath)
 	cmd.Dir = workingDir
 	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
-	stdin, err := cmd.StdinPipe()
+	rows := clampTerminalRows(body.Rows)
+	cols := clampTerminalCols(body.Cols)
+	ptyFile, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)})
 	if err != nil {
 		cancel()
-		writeServiceError(w, r, http.StatusBadGateway, "failed to open terminal stdin", err)
-		return
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		_ = stdin.Close()
-		cancel()
-		writeServiceError(w, r, http.StatusBadGateway, "failed to open terminal stdout", err)
-		return
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		_ = stdin.Close()
-		cancel()
-		writeServiceError(w, r, http.StatusBadGateway, "failed to open terminal stderr", err)
+		writeServiceError(w, r, http.StatusBadGateway, "failed to allocate terminal pty", err)
 		return
 	}
 	sessionID, err := s.allocateTerminalSessionID()
 	if err != nil {
-		_ = stdin.Close()
+		_ = ptyFile.Close()
 		cancel()
 		writeServiceError(w, r, http.StatusInternalServerError, "failed to allocate terminal session", err)
 		return
@@ -1341,26 +1353,18 @@ func (s *serviceServer) createTerminalSession(w http.ResponseWriter, r *http.Req
 		CreatedAt:     time.Now().UTC(),
 		ExpiresAt:     time.Now().UTC().Add(serviceTerminalSessionTTL),
 		LastActiveAt:  time.Now().UTC(),
-		Status:        "starting",
-		Rows:          max(body.Rows, 24),
-		Cols:          max(body.Cols, 80),
+		Status:        "running",
+		Rows:          rows,
+		Cols:          cols,
 		ApprovalMode:  string(s.config.Security.Approvals.Exec.Mode),
 		ApprovalState: approvalDecision.Reason,
 		ApprovalID:    approvalDecision.RequestID,
 		cmd:           cmd,
-		stdin:         stdin,
+		ptyFile:       ptyFile,
+		stdin:         ptyFile, // PTY master is read+write; tests rely on stdin being a WriteCloser
 		cancel:        cancel,
 		subscribers:   map[chan serviceTerminalEvent]struct{}{},
 	}
-	if err := cmd.Start(); err != nil {
-		_ = stdin.Close()
-		cancel()
-		writeServiceError(w, r, http.StatusBadGateway, "failed to start terminal shell", err)
-		return
-	}
-	session.mu.Lock()
-	session.Status = "running"
-	session.mu.Unlock()
 	session.appendEvent("status", map[string]any{"status": "running"})
 	session.appendEvent("snapshot", session.snapshot())
 	s.terminalMu.Lock()
@@ -1369,8 +1373,7 @@ func (s *serviceServer) createTerminalSession(w http.ResponseWriter, r *http.Req
 	}
 	s.terminalSessions[session.ID] = session
 	s.terminalMu.Unlock()
-	go s.collectTerminalOutput(session, stdout, "stdout")
-	go s.collectTerminalOutput(session, stderr, "stderr")
+	go s.collectTerminalOutput(session, ptyFile, "pty")
 	go s.waitForTerminalSession(session)
 	writeServiceJSON(w, http.StatusCreated, session.snapshot())
 }
@@ -1535,15 +1538,22 @@ func (s *serviceServer) resizeTerminalSession(w http.ResponseWriter, r *http.Req
 	}
 	session.mu.Lock()
 	if body.Rows > 0 {
-		session.Rows = body.Rows
+		session.Rows = clampTerminalRows(body.Rows)
 	}
 	if body.Cols > 0 {
-		session.Cols = body.Cols
+		session.Cols = clampTerminalCols(body.Cols)
 	}
 	session.LastActiveAt = time.Now().UTC()
 	session.ExpiresAt = time.Now().UTC().Add(serviceTerminalSessionTTL)
 	rows, cols := session.Rows, session.Cols
+	ptyFile := session.ptyFile
 	session.mu.Unlock()
+	if ptyFile != nil && rows > 0 && cols > 0 {
+		if err := pty.Setsize(ptyFile, &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)}); err != nil {
+			writeServiceError(w, r, http.StatusBadGateway, "failed to resize terminal pty", err)
+			return
+		}
+	}
 	session.appendEvent("resize", map[string]any{"rows": rows, "cols": cols})
 	writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true, "session_id": sessionID, "rows": rows, "cols": cols})
 }

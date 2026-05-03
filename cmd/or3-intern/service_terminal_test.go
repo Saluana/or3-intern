@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/creack/pty"
+
 	"or3-intern/internal/approval"
 	"or3-intern/internal/config"
 )
@@ -236,5 +238,76 @@ func TestWriteTerminalInputAcceptsNewlineOnlyInput(t *testing.T) {
 	}
 	if writer.String() != "\n" {
 		t.Fatalf("expected newline input, got %q", writer.String())
+	}
+}
+
+func TestResizeTerminalSessionClampsRowsCols(t *testing.T) {
+	ptmx, tty, err := pty.Open()
+	if err != nil {
+		t.Fatalf("pty.Open: %v", err)
+	}
+	defer ptmx.Close()
+	defer tty.Close()
+
+	session := &serviceTerminalSession{
+		ID:          "term-resize",
+		Status:      "running",
+		Rows:        24,
+		Cols:        80,
+		ExpiresAt:   time.Now().Add(time.Minute),
+		ptyFile:     ptmx,
+		subscribers: map[chan serviceTerminalEvent]struct{}{},
+	}
+	server := &serviceServer{terminalSessions: map[string]*serviceTerminalSession{session.ID: session}}
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/terminal/sessions/term-resize/resize", strings.NewReader(`{"rows":999999,"cols":888888}`))
+	rec := httptest.NewRecorder()
+
+	server.resizeTerminalSession(rec, req, session.ID)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if session.Rows != 200 || session.Cols != 400 {
+		t.Fatalf("expected clamped size 200x400, got %dx%d", session.Rows, session.Cols)
+	}
+	if !strings.Contains(rec.Body.String(), `"rows":200`) || !strings.Contains(rec.Body.String(), `"cols":400`) {
+		t.Fatalf("expected clamped response body, got %s", rec.Body.String())
+	}
+}
+
+func TestResizeTerminalSessionReturnsErrorWhenPTYResizeFails(t *testing.T) {
+	ptmx, tty, err := pty.Open()
+	if err != nil {
+		t.Fatalf("pty.Open: %v", err)
+	}
+	_ = tty.Close()
+	if err := ptmx.Close(); err != nil {
+		t.Fatalf("close ptmx: %v", err)
+	}
+
+	session := &serviceTerminalSession{
+		ID:          "term-resize-error",
+		Status:      "running",
+		Rows:        24,
+		Cols:        80,
+		ExpiresAt:   time.Now().Add(time.Minute),
+		ptyFile:     ptmx,
+		subscribers: map[chan serviceTerminalEvent]struct{}{},
+	}
+	server := &serviceServer{terminalSessions: map[string]*serviceTerminalSession{session.ID: session}}
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/terminal/sessions/term-resize-error/resize", strings.NewReader(`{"rows":40,"cols":120}`))
+	rec := httptest.NewRecorder()
+
+	server.resizeTerminalSession(rec, req, session.ID)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d: %s", rec.Code, rec.Body.String())
+	}
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	for _, event := range session.events {
+		if event.Type == "resize" {
+			t.Fatalf("unexpected resize event after PTY resize failure")
+		}
 	}
 }

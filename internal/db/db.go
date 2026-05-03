@@ -432,6 +432,45 @@ func (d *DB) migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS skill_run_plans_session_status ON skill_run_plans(requester_session_id, status, created_at DESC);`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS skill_run_plans_active_session_plan_hash ON skill_run_plans(requester_session_id, plan_hash)
 			WHERE status IN ('prepared', 'planned', 'pending_approval', 'awaiting_resume', 'approved', 'running');`,
+		`CREATE TABLE IF NOT EXISTS agent_cli_runs(
+			id TEXT PRIMARY KEY,
+			job_id TEXT NOT NULL UNIQUE,
+			parent_session_key TEXT NOT NULL,
+			runner_id TEXT NOT NULL,
+			task TEXT NOT NULL,
+			cwd TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			mode TEXT NOT NULL,
+			isolation TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL,
+			pid INTEGER NOT NULL DEFAULT 0,
+			requested_at INTEGER NOT NULL,
+			started_at INTEGER NOT NULL DEFAULT 0,
+			completed_at INTEGER NOT NULL DEFAULT 0,
+			timeout_seconds INTEGER NOT NULL DEFAULT 0,
+			exit_code INTEGER,
+			stdout_preview TEXT NOT NULL DEFAULT '',
+			stderr_preview TEXT NOT NULL DEFAULT '',
+			final_text_preview TEXT NOT NULL DEFAULT '',
+			error_message TEXT NOT NULL DEFAULT '',
+			attempts INTEGER NOT NULL DEFAULT 0,
+			meta_json TEXT NOT NULL DEFAULT '{}'
+		);`,
+		`CREATE TABLE IF NOT EXISTS agent_cli_events(
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			run_id TEXT NOT NULL,
+			job_id TEXT NOT NULL,
+			seq INTEGER NOT NULL,
+			ts TEXT NOT NULL,
+			type TEXT NOT NULL,
+			stream TEXT NOT NULL DEFAULT '',
+			chunk TEXT NOT NULL DEFAULT '',
+			payload_json TEXT NOT NULL DEFAULT '',
+			UNIQUE(run_id, seq)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_cli_runs_status_requested_at ON agent_cli_runs(status, requested_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_cli_runs_parent ON agent_cli_runs(parent_session_key, requested_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_cli_events_job_seq ON agent_cli_events(job_id, seq);`,
 	}
 	for _, s := range stmts {
 		if _, err := d.SQL.ExecContext(ctx, s); err != nil {

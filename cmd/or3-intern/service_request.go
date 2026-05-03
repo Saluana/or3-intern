@@ -38,6 +38,32 @@ type serviceSubagentRequest struct {
 	ApprovalToken    string
 }
 
+type serviceAgentRunRequest struct {
+	ParentSessionKey string
+	RunnerID         string
+	Task             string
+	TimeoutSeconds   int
+	Cwd              string
+	Model            string
+	Mode             string
+	Isolation        string
+	MaxTurns         int
+	Meta             map[string]any
+}
+
+type serviceAgentRunRequestPayload struct {
+	ParentSessionKey string         `json:"parent_session_key"`
+	RunnerID         string         `json:"runner_id"`
+	Task             string         `json:"task"`
+	TimeoutSeconds   json.Number    `json:"timeout_seconds"`
+	Cwd              string         `json:"cwd"`
+	Model            string         `json:"model"`
+	Mode             string         `json:"mode"`
+	Isolation        string         `json:"isolation"`
+	MaxTurns         json.Number    `json:"max_turns"`
+	Meta             map[string]any `json:"meta"`
+}
+
 type serviceToolPolicyPayload struct {
 	Mode              string   `json:"mode"`
 	AllowedTools      []string `json:"allowed_tools"`
@@ -171,6 +197,64 @@ func decodeServiceSubagentRequest(body io.Reader, registry *tools.Registry) (ser
 		Channel:        strings.TrimSpace(payload.Channel),
 		ReplyTo:        firstNonEmptyString(payload.ReplyTo, payload.ReplyToCamel),
 		ApprovalToken:  firstNonEmptyString(payload.ApprovalToken, payload.ApprovalTokenCamel),
+	}, nil
+}
+
+func decodeServiceAgentRunRequest(body io.Reader) (serviceAgentRunRequest, error) {
+	var payload serviceAgentRunRequestPayload
+	if err := decodeServiceRequestBody(body, &payload); err != nil {
+		return serviceAgentRunRequest{}, err
+	}
+
+	parentSessionKey := strings.TrimSpace(payload.ParentSessionKey)
+	if parentSessionKey == "" {
+		return serviceAgentRunRequest{}, errors.New("parent_session_key is required")
+	}
+
+	runnerID := strings.TrimSpace(payload.RunnerID)
+	if runnerID == "" {
+		return serviceAgentRunRequest{}, errors.New("runner_id is required")
+	}
+
+	task := strings.TrimSpace(payload.Task)
+	if task == "" {
+		return serviceAgentRunRequest{}, errors.New("task is required")
+	}
+
+	timeoutSeconds := 0
+	if ts := strings.TrimSpace(payload.TimeoutSeconds.String()); ts != "" {
+		n, err := payload.TimeoutSeconds.Int64()
+		if err != nil {
+			return serviceAgentRunRequest{}, fmt.Errorf("invalid timeout_seconds: %w", err)
+		}
+		timeoutSeconds = int(n)
+	}
+
+	maxTurns := 0
+	if mt := strings.TrimSpace(payload.MaxTurns.String()); mt != "" {
+		n, err := payload.MaxTurns.Int64()
+		if err != nil {
+			return serviceAgentRunRequest{}, fmt.Errorf("invalid max_turns: %w", err)
+		}
+		maxTurns = int(n)
+	}
+
+	cwd := strings.TrimSpace(payload.Cwd)
+	model := strings.TrimSpace(payload.Model)
+	mode := strings.TrimSpace(payload.Mode)
+	isolation := strings.TrimSpace(payload.Isolation)
+
+	return serviceAgentRunRequest{
+		ParentSessionKey: parentSessionKey,
+		RunnerID:         runnerID,
+		Task:             task,
+		TimeoutSeconds:   timeoutSeconds,
+		Cwd:              cwd,
+		Model:            model,
+		Mode:             mode,
+		Isolation:        isolation,
+		MaxTurns:         maxTurns,
+		Meta:             cloneMapOrEmpty(payload.Meta),
 	}, nil
 }
 

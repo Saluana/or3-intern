@@ -127,8 +127,9 @@ type Config struct {
 	ConsolidationMaxMessages         int             `json:"consolidationMaxMessages"`
 	ConsolidationMaxInputChars       int             `json:"consolidationMaxInputChars"`
 	ConsolidationAsyncTimeoutSeconds int             `json:"consolidationAsyncTimeoutSeconds"`
-	Subagents                        SubagentsConfig `json:"subagents"`
-	RuntimeProfile                   RuntimeProfile  `json:"runtimeProfile"`
+	Subagents                        SubagentsConfig  `json:"subagents"`
+	AgentCLI                         AgentCLIConfig   `json:"agentCLI"`
+	RuntimeProfile                   RuntimeProfile   `json:"runtimeProfile"`
 
 	IdentityFile string         `json:"identityFile"`
 	MemoryFile   string         `json:"memoryFile"`
@@ -342,6 +343,23 @@ type SubagentsConfig struct {
 	MaxConcurrent      int  `json:"maxConcurrent"`
 	MaxQueued          int  `json:"maxQueued"`
 	TaskTimeoutSeconds int  `json:"taskTimeoutSeconds"`
+}
+
+// AgentCLIConfig controls the external agent CLI delegation subsystem.
+type AgentCLIConfig struct {
+	Enabled                 bool     `json:"enabled"`
+	DisabledRunners         []string `json:"disabledRunners"`
+	MaxConcurrent           int      `json:"maxConcurrent"`
+	MaxQueued               int      `json:"maxQueued"`
+	DefaultTimeoutSeconds   int      `json:"defaultTimeoutSeconds"`
+	MaxTimeoutSeconds       int      `json:"maxTimeoutSeconds"`
+	AllowSandboxAuto        bool     `json:"allowSandboxAuto"`
+	DefaultMode             string   `json:"defaultMode"`
+	DefaultIsolation        string   `json:"defaultIsolation"`
+	EventChunkMaxBytes      int      `json:"eventChunkMaxBytes"`
+	PreviewMaxBytes         int      `json:"previewMaxBytes"`
+	MaxPersistedOutputBytes int64    `json:"maxPersistedOutputBytes"`
+	ChildEnvAllowlist       []string `json:"childEnvAllowlist"`
 }
 
 type InboundPolicy string
@@ -673,6 +691,21 @@ func Default() Config {
 			MaxConcurrent:      1,
 			MaxQueued:          32,
 			TaskTimeoutSeconds: 300,
+		},
+		AgentCLI: AgentCLIConfig{
+			Enabled:                 false,
+			DisabledRunners:         []string{},
+			MaxConcurrent:           1,
+			MaxQueued:               16,
+			DefaultTimeoutSeconds:   900,
+			MaxTimeoutSeconds:       7200,
+			AllowSandboxAuto:        false,
+			DefaultMode:             "safe_edit",
+			DefaultIsolation:        "host_workspace_write",
+			EventChunkMaxBytes:      16384,
+			PreviewMaxBytes:         65536,
+			MaxPersistedOutputBytes: 10485760,
+			ChildEnvAllowlist:       []string{"PATH", "HOME", "TMPDIR", "TMP", "TEMP"},
 		},
 		DocIndex: DocIndexConfig{
 			Enabled:        false,
@@ -1006,6 +1039,45 @@ func ApplyEnvOverrides(cfg *Config) {
 			cfg.Subagents.TaskTimeoutSeconds = parsed
 		}
 	}
+	if v := os.Getenv("OR3_AGENT_CLI_ENABLED"); v != "" {
+		if parsed, err := strconv.ParseBool(v); err == nil {
+			cfg.AgentCLI.Enabled = parsed
+		}
+	}
+	if v := os.Getenv("OR3_AGENT_CLI_DISABLED_RUNNERS"); v != "" {
+		cfg.AgentCLI.DisabledRunners = compactStrings(strings.Split(v, ","))
+	}
+	if v := os.Getenv("OR3_AGENT_CLI_MAX_CONCURRENT"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			cfg.AgentCLI.MaxConcurrent = parsed
+		}
+	}
+	if v := os.Getenv("OR3_AGENT_CLI_MAX_QUEUED"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			cfg.AgentCLI.MaxQueued = parsed
+		}
+	}
+	if v := os.Getenv("OR3_AGENT_CLI_DEFAULT_TIMEOUT_SECONDS"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			cfg.AgentCLI.DefaultTimeoutSeconds = parsed
+		}
+	}
+	if v := os.Getenv("OR3_AGENT_CLI_MAX_TIMEOUT_SECONDS"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			cfg.AgentCLI.MaxTimeoutSeconds = parsed
+		}
+	}
+	if v := os.Getenv("OR3_AGENT_CLI_ALLOW_SANDBOX_AUTO"); v != "" {
+		if parsed, err := strconv.ParseBool(v); err == nil {
+			cfg.AgentCLI.AllowSandboxAuto = parsed
+		}
+	}
+	if v := os.Getenv("OR3_AGENT_CLI_DEFAULT_MODE"); v != "" {
+		cfg.AgentCLI.DefaultMode = v
+	}
+	if v := os.Getenv("OR3_AGENT_CLI_DEFAULT_ISOLATION"); v != "" {
+		cfg.AgentCLI.DefaultIsolation = v
+	}
 	if v := os.Getenv("OR3_SERVICE_ENABLED"); v != "" {
 		if parsed, err := strconv.ParseBool(v); err == nil {
 			cfg.Service.Enabled = parsed
@@ -1184,6 +1256,50 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.Subagents.TaskTimeoutSeconds <= 0 {
 		cfg.Subagents.TaskTimeoutSeconds = 300
+	}
+	if cfg.AgentCLI.MaxConcurrent <= 0 {
+		cfg.AgentCLI.MaxConcurrent = 1
+	}
+	if cfg.AgentCLI.MaxQueued <= 0 {
+		cfg.AgentCLI.MaxQueued = 16
+	}
+	if cfg.AgentCLI.DefaultTimeoutSeconds <= 0 {
+		cfg.AgentCLI.DefaultTimeoutSeconds = 900
+	}
+	if cfg.AgentCLI.DefaultTimeoutSeconds < 30 {
+		cfg.AgentCLI.DefaultTimeoutSeconds = 30
+	}
+	if cfg.AgentCLI.MaxTimeoutSeconds <= 0 {
+		cfg.AgentCLI.MaxTimeoutSeconds = 7200
+	}
+	if cfg.AgentCLI.MaxTimeoutSeconds < 30 {
+		cfg.AgentCLI.MaxTimeoutSeconds = 30
+	}
+	if cfg.AgentCLI.EventChunkMaxBytes <= 0 {
+		cfg.AgentCLI.EventChunkMaxBytes = 16384
+	}
+	if cfg.AgentCLI.PreviewMaxBytes <= 0 {
+		cfg.AgentCLI.PreviewMaxBytes = 65536
+	}
+	if cfg.AgentCLI.MaxPersistedOutputBytes <= 0 {
+		cfg.AgentCLI.MaxPersistedOutputBytes = 10485760
+	}
+	if strings.TrimSpace(cfg.AgentCLI.DefaultMode) == "" {
+		cfg.AgentCLI.DefaultMode = "safe_edit"
+	} else {
+		cfg.AgentCLI.DefaultMode = strings.TrimSpace(cfg.AgentCLI.DefaultMode)
+	}
+	if strings.TrimSpace(cfg.AgentCLI.DefaultIsolation) == "" {
+		cfg.AgentCLI.DefaultIsolation = "host_workspace_write"
+	} else {
+		cfg.AgentCLI.DefaultIsolation = strings.TrimSpace(cfg.AgentCLI.DefaultIsolation)
+	}
+	if cfg.AgentCLI.DisabledRunners == nil {
+		cfg.AgentCLI.DisabledRunners = []string{}
+	}
+	cfg.AgentCLI.DisabledRunners = compactStrings(cfg.AgentCLI.DisabledRunners)
+	if len(cfg.AgentCLI.ChildEnvAllowlist) == 0 {
+		cfg.AgentCLI.ChildEnvAllowlist = []string{"PATH", "HOME", "TMPDIR", "TMP", "TEMP"}
 	}
 	if strings.TrimSpace(cfg.Service.Listen) == "" {
 		cfg.Service.Listen = Default().Service.Listen
@@ -1544,6 +1660,9 @@ func Load(path string) (Config, error) {
 		return cfg, err
 	}
 	if err := validateAuthConfig(cfg.Auth); err != nil {
+		return cfg, err
+	}
+	if err := validateAgentCLIConfig(cfg.AgentCLI); err != nil {
 		return cfg, err
 	}
 	cfg.RuntimeProfile = RuntimeProfile(strings.ToLower(strings.TrimSpace(string(cfg.RuntimeProfile))))
@@ -2072,6 +2191,25 @@ func networkAllowlistTooBroad(hosts []string) bool {
 		}
 	}
 	return false
+}
+
+func validateAgentCLIConfig(cfg AgentCLIConfig) error {
+	mode := strings.TrimSpace(cfg.DefaultMode)
+	switch mode {
+	case "review", "safe_edit", "sandbox_auto":
+	default:
+		return errors.New("agentCLI.defaultMode must be review, safe_edit, or sandbox_auto")
+	}
+	iso := strings.TrimSpace(cfg.DefaultIsolation)
+	switch iso {
+	case "host_readonly", "host_workspace_write", "sandbox_workspace_write", "sandbox_dangerous":
+	default:
+		return errors.New("agentCLI.defaultIsolation must be host_readonly, host_workspace_write, sandbox_workspace_write, or sandbox_dangerous")
+	}
+	if mode == "sandbox_auto" && iso != "sandbox_dangerous" {
+		return errors.New("agentCLI.defaultMode=sandbox_auto requires agentCLI.defaultIsolation=sandbox_dangerous")
+	}
+	return nil
 }
 
 func hasNonEmpty(values []string) bool {

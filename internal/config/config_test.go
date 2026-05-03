@@ -150,6 +150,39 @@ func TestDefault_Values(t *testing.T) {
 	if cfg.Subagents.TaskTimeoutSeconds != 300 {
 		t.Errorf("expected Subagents.TaskTimeoutSeconds=300, got %d", cfg.Subagents.TaskTimeoutSeconds)
 	}
+	if cfg.AgentCLI.Enabled {
+		t.Error("expected AgentCLI.Enabled=false by default")
+	}
+	if cfg.AgentCLI.MaxConcurrent != 1 {
+		t.Errorf("expected AgentCLI.MaxConcurrent=1, got %d", cfg.AgentCLI.MaxConcurrent)
+	}
+	if cfg.AgentCLI.MaxQueued != 16 {
+		t.Errorf("expected AgentCLI.MaxQueued=16, got %d", cfg.AgentCLI.MaxQueued)
+	}
+	if cfg.AgentCLI.DefaultTimeoutSeconds != 900 {
+		t.Errorf("expected AgentCLI.DefaultTimeoutSeconds=900, got %d", cfg.AgentCLI.DefaultTimeoutSeconds)
+	}
+	if cfg.AgentCLI.MaxTimeoutSeconds != 7200 {
+		t.Errorf("expected AgentCLI.MaxTimeoutSeconds=7200, got %d", cfg.AgentCLI.MaxTimeoutSeconds)
+	}
+	if cfg.AgentCLI.AllowSandboxAuto {
+		t.Error("expected AgentCLI.AllowSandboxAuto=false by default")
+	}
+	if cfg.AgentCLI.DefaultMode != "safe_edit" {
+		t.Errorf("expected AgentCLI.DefaultMode=safe_edit, got %q", cfg.AgentCLI.DefaultMode)
+	}
+	if cfg.AgentCLI.DefaultIsolation != "host_workspace_write" {
+		t.Errorf("expected AgentCLI.DefaultIsolation=host_workspace_write, got %q", cfg.AgentCLI.DefaultIsolation)
+	}
+	if cfg.AgentCLI.EventChunkMaxBytes != 16384 {
+		t.Errorf("expected AgentCLI.EventChunkMaxBytes=16384, got %d", cfg.AgentCLI.EventChunkMaxBytes)
+	}
+	if cfg.AgentCLI.PreviewMaxBytes != 65536 {
+		t.Errorf("expected AgentCLI.PreviewMaxBytes=65536, got %d", cfg.AgentCLI.PreviewMaxBytes)
+	}
+	if cfg.AgentCLI.MaxPersistedOutputBytes != 10485760 {
+		t.Errorf("expected AgentCLI.MaxPersistedOutputBytes=10485760, got %d", cfg.AgentCLI.MaxPersistedOutputBytes)
+	}
 	if cfg.Service.Enabled {
 		t.Error("expected Service.Enabled=false by default")
 	}
@@ -913,6 +946,221 @@ func TestLoad_SubagentNormalization(t *testing.T) {
 	}
 	if cfg.Subagents.MaxConcurrent != 1 || cfg.Subagents.MaxQueued != 32 || cfg.Subagents.TaskTimeoutSeconds != 300 {
 		t.Fatalf("expected normalized subagent defaults, got %+v", cfg.Subagents)
+	}
+}
+
+func TestLoad_AgentCLINormalization(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	input := Default()
+	input.AgentCLI.MaxConcurrent = 0
+	input.AgentCLI.MaxQueued = 0
+	input.AgentCLI.DefaultTimeoutSeconds = 0
+	input.AgentCLI.MaxTimeoutSeconds = 0
+	input.AgentCLI.EventChunkMaxBytes = 0
+	input.AgentCLI.PreviewMaxBytes = 0
+	input.AgentCLI.MaxPersistedOutputBytes = 0
+	input.AgentCLI.DefaultMode = ""
+	input.AgentCLI.DefaultIsolation = ""
+	input.AgentCLI.DisabledRunners = nil
+	input.AgentCLI.ChildEnvAllowlist = nil
+	b, _ := json.MarshalIndent(input, "", "  ")
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AgentCLI.MaxConcurrent != 1 || cfg.AgentCLI.MaxQueued != 16 ||
+		cfg.AgentCLI.DefaultTimeoutSeconds != 900 || cfg.AgentCLI.MaxTimeoutSeconds != 7200 {
+		t.Fatalf("expected normalized agent CLI defaults, got %+v", cfg.AgentCLI)
+	}
+	if cfg.AgentCLI.EventChunkMaxBytes != 16384 {
+		t.Errorf("expected EventChunkMaxBytes=16384, got %d", cfg.AgentCLI.EventChunkMaxBytes)
+	}
+	if cfg.AgentCLI.PreviewMaxBytes != 65536 {
+		t.Errorf("expected PreviewMaxBytes=65536, got %d", cfg.AgentCLI.PreviewMaxBytes)
+	}
+	if cfg.AgentCLI.MaxPersistedOutputBytes != 10485760 {
+		t.Errorf("expected MaxPersistedOutputBytes=10485760, got %d", cfg.AgentCLI.MaxPersistedOutputBytes)
+	}
+	if cfg.AgentCLI.DefaultMode != "safe_edit" {
+		t.Errorf("expected DefaultMode=safe_edit, got %q", cfg.AgentCLI.DefaultMode)
+	}
+	if cfg.AgentCLI.DefaultIsolation != "host_workspace_write" {
+		t.Errorf("expected DefaultIsolation=host_workspace_write, got %q", cfg.AgentCLI.DefaultIsolation)
+	}
+	if cfg.AgentCLI.DisabledRunners == nil {
+		t.Error("expected DisabledRunners to default to empty slice, got nil")
+	}
+	if len(cfg.AgentCLI.ChildEnvAllowlist) == 0 {
+		t.Error("expected ChildEnvAllowlist to have defaults")
+	}
+}
+
+func TestLoad_AgentCLIDefaultTimeoutClamped(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	input := Default()
+	input.AgentCLI.DefaultTimeoutSeconds = 5
+	b, _ := json.MarshalIndent(input, "", "  ")
+	mustWriteTestFile(t, path, b)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AgentCLI.DefaultTimeoutSeconds != 30 {
+		t.Errorf("expected timeout clamped to 30, got %d", cfg.AgentCLI.DefaultTimeoutSeconds)
+	}
+}
+
+func TestLoad_AgentCLIDisabledRunnersEnvOverride(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	b, _ := json.MarshalIndent(Default(), "", "  ")
+	mustWriteTestFile(t, path, b)
+
+	t.Setenv("OR3_AGENT_CLI_DISABLED_RUNNERS", "opencode,codex, claude ")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	expected := []string{"opencode", "codex", "claude"}
+	if len(cfg.AgentCLI.DisabledRunners) != len(expected) {
+		t.Fatalf("expected %d disabled runners, got %d: %v", len(expected), len(cfg.AgentCLI.DisabledRunners), cfg.AgentCLI.DisabledRunners)
+	}
+	for _, want := range expected {
+		if !slices.Contains(cfg.AgentCLI.DisabledRunners, want) {
+			t.Errorf("expected %q in DisabledRunners, got %v", want, cfg.AgentCLI.DisabledRunners)
+		}
+	}
+}
+
+func TestLoad_AgentCLIEnvOverrides(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	b, _ := json.MarshalIndent(Default(), "", "  ")
+	mustWriteTestFile(t, path, b)
+
+	t.Setenv("OR3_AGENT_CLI_ENABLED", "true")
+	t.Setenv("OR3_AGENT_CLI_MAX_CONCURRENT", "3")
+	t.Setenv("OR3_AGENT_CLI_MAX_QUEUED", "8")
+	t.Setenv("OR3_AGENT_CLI_DEFAULT_TIMEOUT_SECONDS", "600")
+	t.Setenv("OR3_AGENT_CLI_MAX_TIMEOUT_SECONDS", "3600")
+	t.Setenv("OR3_AGENT_CLI_ALLOW_SANDBOX_AUTO", "true")
+	t.Setenv("OR3_AGENT_CLI_DEFAULT_MODE", "review")
+	t.Setenv("OR3_AGENT_CLI_DEFAULT_ISOLATION", "host_readonly")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.AgentCLI.Enabled {
+		t.Error("expected AgentCLI.Enabled=true")
+	}
+	if cfg.AgentCLI.MaxConcurrent != 3 {
+		t.Errorf("expected MaxConcurrent=3, got %d", cfg.AgentCLI.MaxConcurrent)
+	}
+	if cfg.AgentCLI.MaxQueued != 8 {
+		t.Errorf("expected MaxQueued=8, got %d", cfg.AgentCLI.MaxQueued)
+	}
+	if cfg.AgentCLI.DefaultTimeoutSeconds != 600 {
+		t.Errorf("expected DefaultTimeoutSeconds=600, got %d", cfg.AgentCLI.DefaultTimeoutSeconds)
+	}
+	if cfg.AgentCLI.MaxTimeoutSeconds != 3600 {
+		t.Errorf("expected MaxTimeoutSeconds=3600, got %d", cfg.AgentCLI.MaxTimeoutSeconds)
+	}
+	if !cfg.AgentCLI.AllowSandboxAuto {
+		t.Error("expected AllowSandboxAuto=true")
+	}
+	if cfg.AgentCLI.DefaultMode != "review" {
+		t.Errorf("expected DefaultMode=review, got %q", cfg.AgentCLI.DefaultMode)
+	}
+	if cfg.AgentCLI.DefaultIsolation != "host_readonly" {
+		t.Errorf("expected DefaultIsolation=host_readonly, got %q", cfg.AgentCLI.DefaultIsolation)
+	}
+}
+
+func TestLoad_AgentCLIRejectsInvalidMode(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	input := Default()
+	input.AgentCLI.DefaultMode = "invalid_mode"
+	b, _ := json.MarshalIndent(input, "", "  ")
+	mustWriteTestFile(t, path, b)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for invalid mode")
+	}
+	if !strings.Contains(err.Error(), "agentCLI.defaultMode") {
+		t.Errorf("expected mode error, got %v", err)
+	}
+}
+
+func TestLoad_AgentCLIRejectsInvalidIsolation(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	input := Default()
+	input.AgentCLI.DefaultIsolation = "invalid_isolation"
+	b, _ := json.MarshalIndent(input, "", "  ")
+	mustWriteTestFile(t, path, b)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for invalid isolation")
+	}
+	if !strings.Contains(err.Error(), "agentCLI.defaultIsolation") {
+		t.Errorf("expected isolation error, got %v", err)
+	}
+}
+
+func TestLoad_AgentCLISandboxAutoRequiresDangerousIsolation(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	input := Default()
+	input.AgentCLI.DefaultMode = "sandbox_auto"
+	input.AgentCLI.DefaultIsolation = "host_readonly"
+	b, _ := json.MarshalIndent(input, "", "  ")
+	mustWriteTestFile(t, path, b)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for sandbox_auto without sandbox_dangerous")
+	}
+	if !strings.Contains(err.Error(), "sandbox_dangerous") {
+		t.Errorf("expected isolation mismatch error, got %v", err)
+	}
+}
+
+func TestLoad_AgentCLITrimsModeAndIsolationWhitespace(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	input := Default()
+	input.AgentCLI.DefaultMode = "  review  "
+	input.AgentCLI.DefaultIsolation = "  host_readonly  "
+	b, _ := json.MarshalIndent(input, "", "  ")
+	mustWriteTestFile(t, path, b)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AgentCLI.DefaultMode != "review" {
+		t.Errorf("expected trimmed mode=review, got %q", cfg.AgentCLI.DefaultMode)
+	}
+	if cfg.AgentCLI.DefaultIsolation != "host_readonly" {
+		t.Errorf("expected trimmed isolation=host_readonly, got %q", cfg.AgentCLI.DefaultIsolation)
 	}
 }
 

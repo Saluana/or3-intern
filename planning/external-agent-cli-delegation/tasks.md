@@ -2,46 +2,46 @@
 
 ## 1. Configuration and bootstrap
 
-- [ ] Add `AgentCLIConfig` to `internal/config/config.go` with safe defaults for enablement, disabled runners, concurrency, queue size, timeout limits, mode/isolation defaults, chunk/preview limits, and persisted-output cap. (Req: 4, 5, 10, 13)
-- [ ] Add env overrides for `OR3_AGENT_CLI_*` keys using the existing `ApplyEnvOverrides` style. (Req: 13)
-- [ ] Normalize and validate `AgentCLIConfig` in config finalization, clamping timeout/chunk/preview/concurrency values and defaulting mode/isolation safely. (Req: 9, 10, 13)
-- [ ] Add config tests for defaults, env overrides, disabled runners, timeout clamping, and `allowSandboxAuto=false` by default. (Req: 4, 5, 13)
+- [x] Add `AgentCLIConfig` to `internal/config/config.go` with safe defaults for enablement, disabled runners, concurrency, queue size, timeout limits, mode/isolation defaults, chunk/preview limits, and persisted-output cap. (Req: 4, 5, 10, 13)
+- [x] Add env overrides for `OR3_AGENT_CLI_*` keys using the existing `ApplyEnvOverrides` style. (Req: 13)
+- [x] Normalize and validate `AgentCLIConfig` in config finalization, clamping timeout/chunk/preview/concurrency values and defaulting mode/isolation safely. (Req: 9, 10, 13)
+- [x] Add config tests for defaults, env overrides, disabled runners, timeout clamping, and `allowSandboxAuto=false` by default. (Req: 4, 5, 13)
 - [ ] Wire an `AgentCLIManager` into service startup in `cmd/or3-intern/main.go` only when the feature is enabled, similar to `SubagentManager`. (Req: 8, 9, 13)
 
 ## 2. SQLite schema and store methods
 
-- [ ] Add additive migrations for `agent_cli_runs`, `agent_cli_events`, and their indexes in `internal/db/db.go`. (Req: 8, 10)
-- [ ] Add `AgentCLIRun`, `AgentCLIEvent`, status constants, and queue-full errors in `internal/db/store.go` near existing subagent types. (Req: 8, 9)
-- [ ] Implement enqueue, limited enqueue, get by run/job ID, queued/running lists, claim-next, abort queued, mark interrupted, append event, list events after sequence, and finalize methods. (Req: 8, 9, 10)
-- [ ] Ensure enqueue creates/updates the parent session with `EnsureSession` semantics but does not create a child chat session in v1. (Req: 8)
-- [ ] Add DB tests for table creation, lifecycle, concurrent claim, event ordering, `after_seq`, restart reconciliation, and legacy migration compatibility. (Req: 8, 9, 10)
+- [x] Add additive migrations for `agent_cli_runs`, `agent_cli_events`, and their indexes in `internal/db/db.go`. (Req: 8, 10)
+- [x] Add `AgentCLIRun`, `AgentCLIEvent`, status constants, and queue-full errors in `internal/db/store.go` near existing subagent types. (Req: 8, 9)
+- [x] Implement enqueue, limited enqueue, get by run/job ID, queued/running lists, claim-next, abort queued, mark interrupted, append event, list events after sequence, and finalize methods. (Req: 8, 9, 10)
+- [x] Ensure enqueue creates/updates the parent session with `EnsureSession` semantics but does not create a child chat session in v1. (Req: 8)
+- [x] Add DB tests for table creation, lifecycle, concurrent claim, event ordering, `after_seq`, restart reconciliation, and legacy migration compatibility. (Req: 8, 9, 10)
 
 ## 3. Runner registry and detection
 
-- [ ] Create `internal/agentcli` with runner IDs, statuses, auth statuses, support flags, runner specs, registry, and detection helpers. (Req: 1, 6)
-- [ ] Implement `exec.LookPath` binary detection separately from version/help probing and auth probing. (Req: 1)
-- [ ] Add short-timeout detection commands for OpenCode, Codex, Claude, and Gemini. (Req: 1)
-- [ ] Add auth checks for OpenCode, Codex, and Claude; mark Gemini auth as unknown when help/version works. (Req: 1)
-- [ ] Include `or3-intern` as an always-available runner option in detection responses. (Req: 14)
-- [ ] Add fake-binary detection tests for missing, disabled, version failure, auth ready, auth missing, and Gemini `auth_unknown`. (Req: 1)
+- [x] Create `internal/agentcli` with runner IDs, statuses, auth statuses, support flags, runner specs, registry, and detection helpers. (Req: 1, 6)
+- [x] Implement `exec.LookPath` binary detection separately from version/help probing and auth probing. (Req: 1)
+- [x] Add short-timeout detection commands for OpenCode, Codex, Claude, and Gemini. (Req: 1)
+- [x] Add auth checks for OpenCode, Codex, and Claude; mark Gemini auth as unknown when help/version works. (Req: 1)
+- [x] Include `or3-intern` as an always-available runner option in detection responses. (Req: 14)
+- [x] Add fake-binary detection tests for missing, disabled, version failure, auth ready, auth missing, and Gemini `auth_unknown`. (Req: 1)
 
 ## 4. Typed request and policy validation
 
-- [ ] Add strict service request decoding for `POST /internal/v1/agent-runs` in `cmd/or3-intern/service_request.go`. (Req: 6, 12)
-- [ ] Support snake_case and current service compatibility aliases only where intentional; reject unknown fields. (Req: 6)
-- [ ] Validate required `parent_session_key`, `runner_id`, and `task`; trim task but preserve internal prompt characters. (Req: 2, 3, 6)
-- [ ] Validate `cwd` against configured workspace/file roots and reject paths outside allowed roots. (Req: 6, 12)
-- [ ] Implement mode/isolation validation so `sandbox_auto` requires `sandbox_dangerous` and enabled sandbox policy. (Req: 4, 5)
-- [ ] Add tests for unsupported runner, unsupported mode, host dangerous rejection, disabled sandbox auto rejection, invalid cwd, timeout bounds, and unknown JSON fields. (Req: 4, 5, 6, 12)
+- [x] Add strict service request decoding for `POST /internal/v1/agent-runs` in `cmd/or3-intern/service_request.go`. (Req: 6, 12)
+- [x] Support snake_case and current service compatibility aliases only where intentional; reject unknown fields. (Req: 6)
+- [x] Validate required `parent_session_key`, `runner_id`, and `task`; trim task but preserve internal prompt characters. (Req: 2, 3, 6)
+- [x] Validate `cwd` against configured workspace/file roots and reject paths outside allowed roots. (Req: 6, 12)
+- [x] Implement mode/isolation validation so `sandbox_auto` requires `sandbox_dangerous` and enabled sandbox policy. (Req: 4, 5)
+- [x] Add tests for unsupported runner, unsupported mode, host dangerous rejection, disabled sandbox auto rejection, invalid cwd, timeout bounds, and unknown JSON fields. (Req: 4, 5, 6, 12)
 
 ## 5. Runner adapters and argv builders
 
-- [ ] Implement OpenCode adapter with `run --format json`, optional `--model`, and dangerous flag only for sandbox auto. (Req: 2, 3, 4, 7)
-- [ ] Implement Codex adapter with `exec --json --color never`, safe sandbox/approval flags, optional model, conditional git check skipping, and no `--full-auto`. (Req: 2, 3, 4, 7)
-- [ ] Implement Claude adapter with `--bare -p`, `stream-json`, verbose partial messages, permission-mode mapping, optional model, and optional `max_turns`. (Req: 2, 3, 4, 6, 7)
-- [ ] Implement Gemini adapter with `--prompt`, `--output-format json`, approval-mode mapping, optional model, and no duplicate yolo flags. (Req: 2, 3, 4, 7)
-- [ ] Add adapter tests asserting exact argv arrays for default, review, safe edit, and sandbox auto modes. (Req: 2, 3, 4)
-- [ ] Add shell-metacharacter tests showing prompts such as `"; rm -rf /"`, backticks, and `$()` remain one argv element. (Req: 3)
+- [x] Implement OpenCode adapter with `run --format json`, optional `--model`, and dangerous flag only for sandbox auto. (Req: 2, 3, 4, 7)
+- [x] Implement Codex adapter with `exec --json --color never`, safe sandbox/approval flags, optional model, conditional git check skipping, and no `--full-auto`. (Req: 2, 3, 4, 7)
+- [x] Implement Claude adapter with `--bare -p`, `stream-json`, verbose partial messages, permission-mode mapping, optional model, and optional `max_turns`. (Req: 2, 3, 4, 6, 7)
+- [x] Implement Gemini adapter with `--prompt`, `--output-format json`, approval-mode mapping, optional model, and no duplicate yolo flags. (Req: 2, 3, 4, 7)
+- [x] Add adapter tests asserting exact argv arrays for default, review, safe edit, and sandbox auto modes. (Req: 2, 3, 4)
+- [x] Add shell-metacharacter tests showing prompts such as `"; rm -rf /"`, backticks, and `$()` remain one argv element. (Req: 3)
 
 ## 6. Environment and sandbox handling
 

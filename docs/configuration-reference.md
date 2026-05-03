@@ -279,9 +279,11 @@ See [memory-and-context.md](memory-and-context.md).
 The top-level runtime knobs include conversation history, retrieval, tool-loop limits, and memory consolidation behavior:
 
 - `historyMaxMessages`, `memoryRetrieveLimit`, `vectorSearchK`, `ftsSearchK`
-- `maxToolLoops`, `maxToolBytes`, `maxMediaBytes`
+- `maxToolLoops`, `maxToolLoopsExceededAction`, `maxToolBytes`, `maxMediaBytes`
 - `consolidationEnabled`, `consolidationWindowSize`, `consolidationMaxMessages`, `consolidationMaxInputChars`, `consolidationAsyncTimeoutSeconds`
 - `consolidationModel` — optional model used for memory consolidation and `/new` archival; blank falls back to `provider.model`
+
+When `maxToolLoops` is exhausted, `maxToolLoopsExceededAction` controls whether the runtime pauses for approval (`ask`, default) or stops immediately (`fail`). If approvals are unavailable, `ask` falls back to the existing hard-stop/degraded response path.
 
 Override `consolidationModel` with the `OR3_CONSOLIDATION_MODEL` environment variable.
 

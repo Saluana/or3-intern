@@ -463,6 +463,7 @@ func main() {
 		Artifacts:                   art,
 		MaxToolBytes:                cfg.MaxToolBytes,
 		MaxToolLoops:                cfg.MaxToolLoops,
+		MaxToolLoopsExceededAction:  cfg.MaxToolLoopsExceededAction,
 		DynamicToolExposure:         cfg.ContextConfigured && cfg.Context.Tools.DynamicExpose,
 		Deliver:                     delivererFunc(channelManager.Deliver),
 		DefaultScopeKey:             cfg.DefaultSessionKey,

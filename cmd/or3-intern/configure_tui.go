@@ -1105,6 +1105,7 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 			{Key: "runtime_max_tool_bytes", Label: "Max tool bytes", Description: "Max tool output bytes before artifact spillover.", Kind: configureFieldText, Value: formatInt(cfg.MaxToolBytes), EmptyHint: "98304"},
 			{Key: "runtime_max_media_bytes", Label: "Max media bytes", Description: "Largest media payload accepted by the runtime.", Kind: configureFieldText, Value: formatInt(cfg.MaxMediaBytes), EmptyHint: "20971520"},
 			{Key: "runtime_max_tool_loops", Label: "Max tool loops", Description: "Maximum assistant tool-call rounds per turn.", Kind: configureFieldText, Value: formatInt(cfg.MaxToolLoops), EmptyHint: "6"},
+			{Key: "runtime_max_tool_loops_exceeded_action", Label: "Tool loop limit action", Description: "What to do when the runtime hits the max tool-loop budget: ask or fail.", Kind: configureFieldText, Value: string(cfg.MaxToolLoopsExceededAction), EmptyHint: "ask"},
 			{Key: "runtime_memory_retrieve", Label: "Memory retrieve limit", Description: "How many long-term memory hits are injected into prompts.", Kind: configureFieldText, Value: formatInt(cfg.MemoryRetrieve), EmptyHint: "8"},
 			{Key: "runtime_vector_k", Label: "Vector search K", Description: "Semantic memory candidate count before ranking.", Kind: configureFieldText, Value: formatInt(cfg.VectorK), EmptyHint: "8"},
 			{Key: "runtime_fts_k", Label: "FTS search K", Description: "Keyword memory candidate count before ranking.", Kind: configureFieldText, Value: formatInt(cfg.FTSK), EmptyHint: "8"},
@@ -1518,6 +1519,7 @@ var helpfulSectionFieldDescriptions = map[string]string{
 	"hardening_sandbox_writable_paths":      "Folders sandboxed commands may write to. Warning: only include folders you are comfortable letting commands modify.",
 	"hardening_quotas_enabled":              "Limits how many sensitive tool calls OR3 can make per message and per session. Recommended to prevent runaway tool use.",
 	"hardening_quota_exceeded_action":       "What happens when a quota is reached. Use ask to create an approval request, or fail to stop immediately.",
+	"runtime_max_tool_loops_exceeded_action": "What happens when the runtime exhausts its tool-call rounds for one turn. Use ask to pause for approval, or fail to stop immediately.",
 	"hardening_max_tool_calls":              "Maximum total tool calls for one message. Higher values allow bigger jobs but can run longer and cost more.",
 	"hardening_max_exec_calls":              "Maximum command-execution calls for one message. Keep low unless you regularly need multi-step command workflows.",
 	"hardening_max_web_calls":               "Maximum web calls for one message. Higher values allow broader research but can be slower and noisier.",
@@ -1873,6 +1875,13 @@ func applyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 		return setIntValue(&cfg.MaxMediaBytes, value, fieldKey)
 	case "runtime_max_tool_loops":
 		return setIntValue(&cfg.MaxToolLoops, value, fieldKey)
+	case "runtime_max_tool_loops_exceeded_action":
+		action := config.QuotaExceededAction(strings.ToLower(strings.TrimSpace(value)))
+		if action != config.QuotaExceededActionAsk && action != config.QuotaExceededActionFail {
+			return false, fmt.Errorf("%s must be ask or fail", fieldKey)
+		}
+		cfg.MaxToolLoopsExceededAction = action
+		return true, nil
 	case "runtime_memory_retrieve":
 		return setIntValue(&cfg.MemoryRetrieve, value, fieldKey)
 	case "runtime_vector_k":

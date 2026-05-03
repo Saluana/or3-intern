@@ -2286,6 +2286,141 @@ func TestRuntime_ExecuteConversation_ReturnsErrorWhenToolLoopBudgetExhausted(t *
 	}
 }
 
+func TestRuntime_ExecuteConversation_AsksApprovalWhenToolLoopLimitHit(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	approvalCfg := config.Default().Security.Approvals
+	approvalCfg.HostID = "loop-test-host"
+	broker := &approval.Broker{
+		DB:      d,
+		Config:  approvalCfg,
+		HostID:  approvalCfg.HostID,
+		SignKey: []byte("0123456789abcdef0123456789abcdef"),
+		Now: func() time.Time {
+			return time.Unix(1_700_000_000, 0).UTC()
+		},
+	}
+
+	loopCalls := 0
+	loopServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		loopCalls++
+		w.Header().Set("Content-Type", "application/json")
+		resp := providers.ChatCompletionResponse{Choices: []struct {
+			Message struct {
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			} `json:"message"`
+		}{{Message: struct {
+			Role      string               `json:"role"`
+			Content   any                  `json:"content"`
+			ToolCalls []providers.ToolCall `json:"tool_calls"`
+		}{
+			Role: "assistant",
+			ToolCalls: []providers.ToolCall{{ID: fmt.Sprintf("loop-%d", loopCalls), Type: "function", Function: struct {
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			}{Name: "echo_tool", Arguments: `{}`}}},
+		}}}}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer loopServer.Close()
+
+	loopProvider := providers.New(loopServer.URL, "key", 10*time.Second)
+	loopProvider.HTTP = loopServer.Client()
+	reg := tools.NewRegistry()
+	reg.Register(&echoTool{})
+	rt := &Runtime{
+		DB:                         d,
+		Provider:                   loopProvider,
+		Model:                      "gpt-4",
+		Tools:                      reg,
+		Builder:                    &Builder{DB: d, HistoryMax: 10},
+		MaxToolLoops:               2,
+		MaxToolLoopsExceededAction: config.QuotaExceededActionAsk,
+		ApprovalBroker:             broker,
+	}
+
+	ctx := tools.ContextWithRequesterIdentity(context.Background(), "agent-1", approval.RoleOperator)
+	_, _, err := rt.executeConversation(ctx, bus.EventUserMessage, "sess-loop-approval", []providers.ChatMessage{{Role: "user", Content: "loop until approved"}}, reg, "cli", "user", nil)
+	if err == nil {
+		t.Fatal("expected approval request when loop limit is hit")
+	}
+	var approvalErr *tools.ApprovalRequiredError
+	if !errors.As(err, &approvalErr) || approvalErr.RequestID == 0 {
+		t.Fatalf("expected approval-required error, got %T: %v", err, err)
+	}
+	if loopCalls != 2 {
+		t.Fatalf("expected loop budget to stop before a third provider call, got %d", loopCalls)
+	}
+
+	pending, err := d.ListApprovalRequestsFiltered(context.Background(), approval.StatusPending, string(approval.SubjectToolQuota), 1)
+	if err != nil {
+		t.Fatalf("ListApprovalRequests: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("expected one pending loop approval, got %#v", pending)
+	}
+	issued, err := broker.ApproveRequest(context.Background(), pending[0].ID, "cli:test", false, "continue")
+	if err != nil {
+		t.Fatalf("ApproveRequest: %v", err)
+	}
+
+	successCalls := 0
+	successServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		successCalls++
+		w.Header().Set("Content-Type", "application/json")
+		if successCalls <= 3 {
+			resp := providers.ChatCompletionResponse{Choices: []struct {
+				Message struct {
+					Role      string               `json:"role"`
+					Content   any                  `json:"content"`
+					ToolCalls []providers.ToolCall `json:"tool_calls"`
+				} `json:"message"`
+			}{{Message: struct {
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			}{
+				Role: "assistant",
+				ToolCalls: []providers.ToolCall{{ID: fmt.Sprintf("retry-%d", successCalls), Type: "function", Function: struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				}{Name: "echo_tool", Arguments: `{}`}}},
+			}}}}
+			_ = json.NewEncoder(w).Encode(resp)
+			return
+		}
+		resp := providers.ChatCompletionResponse{Choices: []struct {
+			Message struct {
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			} `json:"message"`
+		}{{Message: struct {
+			Role      string               `json:"role"`
+			Content   any                  `json:"content"`
+			ToolCalls []providers.ToolCall `json:"tool_calls"`
+		}{Role: "assistant", Content: "done"}}}}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer successServer.Close()
+	successProvider := providers.New(successServer.URL, "key", 10*time.Second)
+	successProvider.HTTP = successServer.Client()
+	rt.Provider = successProvider
+
+	ctx = tools.ContextWithApprovalToken(ctx, issued.Token)
+	finalText, _, err := rt.executeConversation(ctx, bus.EventUserMessage, "sess-loop-approval", []providers.ChatMessage{{Role: "user", Content: "loop until approved"}}, reg, "cli", "user", nil)
+	if err != nil {
+		t.Fatalf("expected approved retry to continue, got %v", err)
+	}
+	if finalText != "done" {
+		t.Fatalf("expected final text after approved continuation, got %q", finalText)
+	}
+	if successCalls != 4 {
+		t.Fatalf("expected approved retry to use one extra tool-loop block, got %d provider calls", successCalls)
+	}
+}
+
 func TestRuntime_IncrementQuota_IsSerializedPerScope(t *testing.T) {
 	hardening := config.Default().Hardening
 	hardening.Quotas.MaxToolCalls = 1000

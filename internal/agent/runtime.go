@@ -98,6 +98,7 @@ type Runtime struct {
 	Artifacts              *artifacts.Store
 	MaxToolBytes           int
 	MaxToolLoops           int
+	MaxToolLoopsExceededAction config.QuotaExceededAction
 	ToolPreviewBytes       int
 	DynamicToolExposure    bool
 	Audit                  *security.AuditLogger
@@ -1177,7 +1178,14 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 	if maxLoops <= 0 {
 		maxLoops = 6
 	}
-	for loop := 0; loop < maxLoops; loop++ {
+	loopLimit := maxLoops
+	for loop := 0; ; loop++ {
+		if loop >= loopLimit {
+			if err := r.handleToolLoopLimitExceeded(ctx, sessionKey, loopLimit); err != nil {
+				return "", false, err
+			}
+			loopLimit += maxLoops
+		}
 		turnTools := r.exposedToolsForTurn(ctx, reg, messages, channel)
 		req := providers.ChatCompletionRequest{
 			Model:       r.Model,
@@ -1341,7 +1349,61 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 			}
 		}
 	}
-	return "", false, fmt.Errorf("max tool loops exceeded for session %s", sessionKey)
+}
+
+func (r *Runtime) handleToolLoopLimitExceeded(ctx context.Context, sessionKey string, currentLimit int) error {
+	if r.effectiveToolLoopLimitAction() == config.QuotaExceededActionFail {
+		return toolLoopLimitExceededError(sessionKey, currentLimit, "hard limit reached")
+	}
+	if r.ApprovalBroker == nil {
+		return toolLoopLimitExceededError(sessionKey, currentLimit, "approval is configured, but the approval broker is unavailable")
+	}
+	identity := tools.RequesterIdentityFromContext(ctx)
+	decision, err := r.ApprovalBroker.EvaluateToolQuota(ctx, approval.ToolQuotaEvaluation{
+		Scope:         "message",
+		LimitName:     "tool_loops",
+		ToolName:      "tool loop continuation",
+		Current:       currentLimit,
+		Limit:         currentLimit,
+		AgentID:       firstNonEmptyString(identity.Actor, "runtime"),
+		SessionID:     sessionKey,
+		ApprovalToken: tools.ApprovalTokenFromContext(ctx),
+	}, config.ApprovalModeAsk)
+	if err != nil {
+		return err
+	}
+	if decision.Allowed {
+		if r.Audit != nil {
+			_ = r.Audit.Record(ctx, "tool_loop.override", sessionKey, "approval", map[string]any{
+				"limit":        currentLimit,
+				"subject_hash": decision.SubjectHash,
+			})
+		}
+		return nil
+	}
+	if decision.RequiresApproval {
+		return &tools.ApprovalRequiredError{ToolName: "tool loop continuation", RequestID: decision.RequestID}
+	}
+	return toolLoopLimitExceededError(sessionKey, currentLimit, decision.Reason)
+}
+
+func toolLoopLimitExceededError(sessionKey string, currentLimit int, reason string) error {
+	resolvedSession := strings.TrimSpace(sessionKey)
+	if resolvedSession == "" {
+		resolvedSession = "unknown"
+	}
+	message := fmt.Sprintf("max tool loops exceeded for session %s after %d rounds", resolvedSession, currentLimit)
+	if trimmed := strings.TrimSpace(reason); trimmed != "" {
+		message += fmt.Sprintf(" (%s)", trimmed)
+	}
+	return errors.New(message)
+}
+
+func (r *Runtime) effectiveToolLoopLimitAction() config.QuotaExceededAction {
+	if strings.EqualFold(string(r.MaxToolLoopsExceededAction), string(config.QuotaExceededActionFail)) {
+		return config.QuotaExceededActionFail
+	}
+	return config.QuotaExceededActionAsk
 }
 
 func terminalToolResultText(toolName string, out string) string {

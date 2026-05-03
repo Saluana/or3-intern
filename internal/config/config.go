@@ -114,6 +114,7 @@ type Config struct {
 	MaxToolBytes           int    `json:"maxToolBytes"`
 	MaxMediaBytes          int    `json:"maxMediaBytes"`
 	MaxToolLoops           int    `json:"maxToolLoops"`
+	MaxToolLoopsExceededAction QuotaExceededAction `json:"maxToolLoopsExceededAction"`
 	MemoryRetrieve         int    `json:"memoryRetrieveLimit"`
 	VectorK                int    `json:"vectorSearchK"`
 	FTSK                   int    `json:"ftsSearchK"`
@@ -656,6 +657,7 @@ func Default() Config {
 		MaxToolBytes:                     DefaultMaxToolBytes,
 		MaxMediaBytes:                    20 * 1024 * 1024,
 		MaxToolLoops:                     6,
+		MaxToolLoopsExceededAction:       QuotaExceededActionAsk,
 		MemoryRetrieve:                   8,
 		VectorK:                          8,
 		FTSK:                             8,
@@ -1155,6 +1157,7 @@ func Load(path string) (Config, error) {
 	if cfg.MaxToolLoops <= 0 {
 		cfg.MaxToolLoops = 6
 	}
+	cfg.MaxToolLoopsExceededAction = normalizeQuotaExceededAction(cfg.MaxToolLoopsExceededAction, Default().MaxToolLoopsExceededAction)
 	if cfg.VectorScanLimit <= 0 {
 		cfg.VectorScanLimit = 2000
 	}

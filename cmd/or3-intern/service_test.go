@@ -1926,6 +1926,81 @@ func TestServiceTurns_MaxToolLoopsReturnsFallbackResponse(t *testing.T) {
 	}
 }
 
+func TestServiceTurns_MaxToolLoopsRequestsApprovalWhenBrokerAvailable(t *testing.T) {
+	callCount := 0
+	rt, cleanup := buildServiceTestRuntime(t, func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		resp := providers.ChatCompletionResponse{
+			Choices: []struct {
+				Message struct {
+					Role      string               `json:"role"`
+					Content   any                  `json:"content"`
+					ToolCalls []providers.ToolCall `json:"tool_calls"`
+				} `json:"message"`
+			}{
+				{Message: struct {
+					Role      string               `json:"role"`
+					Content   any                  `json:"content"`
+					ToolCalls []providers.ToolCall `json:"tool_calls"`
+				}{
+					Role: "assistant",
+					ToolCalls: []providers.ToolCall{{
+						ID:   fmt.Sprintf("loop-%d", callCount),
+						Type: "function",
+						Function: struct {
+							Name      string `json:"name"`
+							Arguments string `json:"arguments"`
+						}{Name: "read_file", Arguments: `{}`},
+					}},
+				}},
+			},
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("Encode: %v", err)
+		}
+	})
+	defer cleanup()
+
+	approvalCfg := config.Default().Security.Approvals
+	approvalCfg.HostID = "svc-loop-host"
+	rt.MaxToolLoopsExceededAction = config.QuotaExceededActionAsk
+	rt.ApprovalBroker = &approval.Broker{
+		DB:      rt.DB,
+		Config:  approvalCfg,
+		HostID:  approvalCfg.HostID,
+		SignKey: []byte("0123456789abcdef0123456789abcdef"),
+		Now: func() time.Time {
+			return time.Unix(1_700_000_000, 0).UTC()
+		},
+	}
+
+	server := &serviceServer{runtime: rt, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("t", 32), server)
+	defer httpServer.Close()
+
+	body := `{"session_key":"svc:loop-approval","message":"loop forever"}`
+	req := mustServiceRequest(t, httpServer, strings.Repeat("t", 32), http.MethodPost, "/internal/v1/turns", body)
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	payload := mustDecodeJSONBody(t, resp.Body)
+	if payload["status"] != "approval_required" {
+		t.Fatalf("expected approval_required status, got %#v", payload)
+	}
+	if payload["request_id"] == nil {
+		t.Fatalf("expected request id in payload, got %#v", payload)
+	}
+	if callCount != 2 {
+		t.Fatalf("expected 2 provider calls before approval pause, got %d", callCount)
+	}
+}
+
 func mustUseServiceTestWorkingDir(t *testing.T, dir string) {
 	t.Helper()
 	current, err := os.Getwd()

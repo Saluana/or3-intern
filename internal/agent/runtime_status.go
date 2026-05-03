@@ -162,6 +162,7 @@ func (r *Runtime) writeRuntimeSettingsStatus(ctx context.Context, sb *strings.Bu
 	}
 	fmt.Fprintf(sb, "- dynamic tool exposure: %v\n", r.DynamicToolExposure)
 	fmt.Fprintf(sb, "- max tool loops: %d\n", r.MaxToolLoops)
+	fmt.Fprintf(sb, "- tool loop limit action: %s\n", r.effectiveToolLoopLimitAction())
 	fmt.Fprintf(sb, "- max tool output bytes: %d\n", r.MaxToolBytes)
 	if r.Hardening.Quotas.Enabled {
 		fmt.Fprintf(sb, "- quota action on limit: %s\n", r.Hardening.Quotas.ExceededAction)

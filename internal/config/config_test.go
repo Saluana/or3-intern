@@ -81,6 +81,9 @@ func TestDefault_Values(t *testing.T) {
 	if cfg.MaxToolLoops != 6 {
 		t.Errorf("expected MaxToolLoops=6, got %d", cfg.MaxToolLoops)
 	}
+	if cfg.MaxToolLoopsExceededAction != QuotaExceededActionAsk {
+		t.Errorf("expected MaxToolLoopsExceededAction=ask, got %q", cfg.MaxToolLoopsExceededAction)
+	}
 	if cfg.VectorK != 8 {
 		t.Errorf("expected VectorK=8, got %d", cfg.VectorK)
 	}
@@ -729,10 +732,11 @@ func TestLoad_ValidFile(t *testing.T) {
 	path := filepath.Join(dir, "config.json")
 
 	input := Config{
-		DBPath:            "/tmp/test.db",
-		DefaultSessionKey: "test:session",
-		HistoryMax:        20,
-		MaxToolLoops:      3,
+		DBPath:                     "/tmp/test.db",
+		DefaultSessionKey:          "test:session",
+		HistoryMax:                 20,
+		MaxToolLoops:               3,
+		MaxToolLoopsExceededAction: QuotaExceededActionFail,
 		Provider: ProviderConfig{
 			APIBase:        "https://custom.api",
 			TimeoutSeconds: 30,
@@ -753,6 +757,9 @@ func TestLoad_ValidFile(t *testing.T) {
 	}
 	if cfg.HistoryMax != 20 {
 		t.Errorf("expected HistoryMax=20, got %d", cfg.HistoryMax)
+	}
+	if cfg.MaxToolLoopsExceededAction != QuotaExceededActionFail {
+		t.Errorf("expected MaxToolLoopsExceededAction=fail, got %q", cfg.MaxToolLoopsExceededAction)
 	}
 	if cfg.MaxMediaBytes != Default().MaxMediaBytes {
 		t.Errorf("expected missing MaxMediaBytes to default to %d, got %d", Default().MaxMediaBytes, cfg.MaxMediaBytes)

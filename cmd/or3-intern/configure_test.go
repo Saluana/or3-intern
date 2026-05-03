@@ -300,7 +300,7 @@ func TestPromptSecretString_ExistingValueUsesSinglePromptContract(t *testing.T) 
 func TestBuildSectionFields_CoversExpandedConfigAreas(t *testing.T) {
 	cfg := config.Default()
 	sections := map[string][]string{
-		"runtime":    {"runtime_default_session", "runtime_worker_count", "runtime_consolidation_enabled", "runtime_consolidation_model"},
+		"runtime":    {"runtime_default_session", "runtime_worker_count", "runtime_max_tool_loops_exceeded_action", "runtime_consolidation_enabled", "runtime_consolidation_model"},
 		"context":    {"context_mode", "context_max_input_tokens", "context_dynamic_tools", "context_manager_enabled"},
 		"tools":      {"tools_brave", "tools_exec_timeout", "tools_path_append"},
 		"skills":     {"skills_enable_exec", "skills_quarantine", "skills_global_dir", "skills_clawhub_registry"},

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -24,6 +25,7 @@ func testApprovalBroker(t *testing.T) *approval.Broker {
 	cfg.Enabled = true
 	cfg.HostID = "test-host"
 	cfg.Exec.Mode = config.ApprovalModeAsk
+	cfg.SkillExecution.Mode = config.ApprovalModeAsk
 	return &approval.Broker{
 		DB:      database,
 		Config:  cfg,
@@ -163,6 +165,82 @@ func TestRunApprovalsCommand_Approve(t *testing.T) {
 	}
 	if !strings.Contains(text, "token:") {
 		t.Errorf("expected 'token:' in output, got %q", text)
+	}
+}
+
+func TestRunApprovalsCommand_Approve_LookupFailureWarnsButStillSucceeds(t *testing.T) {
+	broker := testApprovalBroker(t)
+	ctx := context.Background()
+	decision, err := broker.EvaluateExec(ctx, approval.ExecEvaluation{
+		ExecutablePath: "/bin/echo",
+		Argv:           []string{"/bin/echo", "approve-warning"},
+		WorkingDir:     "/tmp",
+		ToolName:       "exec",
+	})
+	if err != nil || decision.RequestID == 0 {
+		t.Fatalf("EvaluateExec: %v (id=%d)", err, decision.RequestID)
+	}
+	prevLookup := approvalSkillRunPlanLookup
+	approvalSkillRunPlanLookup = func(context.Context, *db.DB, int64, int) ([]db.SkillRunPlanRecord, error) {
+		return nil, errors.New("lookup down")
+	}
+	defer func() { approvalSkillRunPlanLookup = prevLookup }()
+
+	var out bytes.Buffer
+	var errBuf bytes.Buffer
+	if err := runApprovalsCommand(ctx, broker, []string{"approve", sprint64(decision.RequestID)}, &out, &errBuf); err != nil {
+		t.Fatalf("approve with lookup warning: %v", err)
+	}
+	if !strings.Contains(out.String(), "token:") {
+		t.Fatalf("expected token in stdout, got %q", out.String())
+	}
+	if !strings.Contains(errBuf.String(), "warning: approval succeeded, but linked skill plan lookup failed: lookup down") {
+		t.Fatalf("expected warning on stderr, got %q", errBuf.String())
+	}
+}
+
+func TestRunApprovalsCommand_Approve_PrintsPlanIDWhenPresent(t *testing.T) {
+	broker := testApprovalBroker(t)
+	ctx := context.Background()
+	plan, err := broker.DB.CreateSkillRunPlan(ctx, db.SkillRunPlanRecord{
+		ID:              "srp_test_plan",
+		SkillID:         "runner",
+		SkillDir:        "/tmp/runner",
+		Entrypoint:      "hello",
+		TimeoutSeconds:  30,
+		CommandJSON:     `["bash","/tmp/runner/tool.sh"]`,
+		ScriptHash:      "script-hash",
+		EnvBindingHash:  "env-hash",
+		PlanHash:        "plan-hash",
+		ExecutionHostID: "test-host",
+		Status:          "prepared",
+		CreatedAt:       1,
+	})
+	if err != nil {
+		t.Fatalf("CreateSkillRunPlan: %v", err)
+	}
+	decision, err := broker.EvaluateSkillExec(ctx, approval.SkillEvaluation{
+		SkillID:        "runner",
+		PlanID:         plan.ID,
+		PlanHash:       plan.PlanHash,
+		ScriptHash:     plan.ScriptHash,
+		EnvBindingHash: plan.EnvBindingHash,
+		TimeoutSeconds: plan.TimeoutSeconds,
+	})
+	if err != nil {
+		t.Fatalf("EvaluateSkillExec: %v", err)
+	}
+	if err := broker.DB.UpdateSkillRunPlanApproval(ctx, plan.ID, decision.RequestID, decision.SubjectHash, "pending_approval", 2); err != nil {
+		t.Fatalf("UpdateSkillRunPlanApproval: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := runApprovalsCommand(ctx, broker, []string{"approve", sprint64(decision.RequestID)}, &out, &out); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	text := out.String()
+	if !strings.Contains(text, "plan_id: srp_test_plan") {
+		t.Fatalf("expected plan_id in output, got %q", text)
 	}
 }
 

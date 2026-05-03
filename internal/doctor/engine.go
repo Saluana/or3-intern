@@ -472,7 +472,7 @@ func webhookFindings(cfg config.Config, opts Options) []Finding {
 			Summary:  fmt.Sprintf("webhook can reach exec shell mode via profile %q", profileName),
 		})
 	}
-	if cfg.Skills.EnableExec && profileAllowsPrivileged(profile) && profileAllowsTool(profile, "run_skill_script") {
+	if cfg.Skills.EnableExec && profileAllowsPrivileged(profile) && (profileAllowsTool(profile, "run_skill") || profileAllowsTool(profile, "run_skill_script")) {
 		findings = append(findings, Finding{
 			ID:       "webhook.skill_exec_exposure",
 			Area:     "webhook",
@@ -803,7 +803,7 @@ func skillFindings(cfg config.Config, opts Options) []Finding {
 		})
 	}
 	if cfg.Triggers.Webhook.Enabled {
-		if _, profile, ok := resolveEffectiveProfile(cfg, "webhook", "webhook"); !ok || (profileAllowsPrivileged(profile) && profileAllowsTool(profile, "run_skill_script")) {
+		if _, profile, ok := resolveEffectiveProfile(cfg, "webhook", "webhook"); !ok || (profileAllowsPrivileged(profile) && (profileAllowsTool(profile, "run_skill") || profileAllowsTool(profile, "run_skill_script"))) {
 			findings = append(findings, Finding{
 				ID:       "skills.webhook_reachable",
 				Area:     "skills",
@@ -894,7 +894,7 @@ func publicChannelExposureFindings(cfg config.Config, opts Options, channel stri
 			Summary:  fmt.Sprintf("open-access channel can reach exec shell mode via profile %q", profileName),
 		})
 	}
-	if cfg.Skills.EnableExec && profileAllowsPrivileged(profile) && profileAllowsTool(profile, "run_skill_script") {
+	if cfg.Skills.EnableExec && profileAllowsPrivileged(profile) && (profileAllowsTool(profile, "run_skill") || profileAllowsTool(profile, "run_skill_script")) {
 		findings = append(findings, Finding{
 			ID:       "channels.open_access_skill_exec",
 			Area:     channel,
@@ -1260,7 +1260,7 @@ func publicIngressCanReachSkillExec(cfg config.Config) bool {
 		if !ok {
 			return cfg.Hardening.PrivilegedTools
 		}
-		if profileAllowsPrivileged(profile) && profileAllowsTool(profile, "run_skill_script") {
+		if profileAllowsPrivileged(profile) && (profileAllowsTool(profile, "run_skill") || profileAllowsTool(profile, "run_skill_script")) {
 			return true
 		}
 	}

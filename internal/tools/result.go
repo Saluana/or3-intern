@@ -11,9 +11,12 @@ import (
 type ToolResult struct {
 	Kind       string         `json:"kind"`
 	OK         bool           `json:"ok"`
+	Status     string         `json:"status,omitempty"`
 	Summary    string         `json:"summary,omitempty"`
 	Preview    string         `json:"preview,omitempty"`
 	ArtifactID string         `json:"artifact_id,omitempty"`
+	PlanID     string         `json:"plan_id,omitempty"`
+	RequestID  int64          `json:"request_id,omitempty"`
 	Advice     []string       `json:"advice,omitempty"`
 	Stats      map[string]any `json:"stats,omitempty"`
 }
@@ -333,10 +336,10 @@ func toolFailureAdvice(toolName string, params map[string]any, errText string) [
 			advice = append(advice, "Omit cwd to use the workspace default, or provide a cwd inside the allowed workspace root.")
 		}
 		return appendUniqueAdvice(common, advice...)
-	case "run_skill_script":
+	case "run_skill", "run_skill_script":
 		advice := []string{"Use read_skill first to inspect the skill instructions and available entrypoints before executing a script."}
 		if strings.Contains(lowerErr, "requires approval") || strings.Contains(lowerErr, "approval required") {
-			advice = append(advice, "Wait for approval, then retry the same skill name, entrypoint/path, and timeout so the approval token matches.")
+			advice = append(advice, "Wait for approval, then retry the same skill name, entrypoint/path, and timeout or resume the returned plan_id so the approval token matches the frozen plan.")
 		}
 		if strings.Contains(lowerErr, "skill not found") {
 			advice = append(advice, "Retry with the exact installed skill name.")

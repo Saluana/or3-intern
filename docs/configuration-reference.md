@@ -4,45 +4,45 @@
 
 ## Top-level sections
 
-| Key | Purpose |
-| --- | --- |
-| `dbPath`, `artifactsDir`, `workspaceDir`, `allowedDir` | Storage locations and workspace boundaries |
-| `defaultSessionKey`, `session`, `consolidationModel` | Session naming, cross-session identity/scope behavior, and optional memory-compaction model override |
-| `identityFile`, `memoryFile` | Prompt bootstrap files |
-| `provider` | Model API base, model names, embedding settings, keys, temperature, and timeouts |
-| `tools` | Local tool behavior, proxying, timeouts, workspace restrictions, and MCP servers |
-| `hardening` | Tool capability tiers, program allowlists, child environment controls, quotas, and sandboxing |
-| `skills` | Managed skill loading, per-skill config, policy, and registry settings |
-| `triggers` | Webhook and file-watch automation |
-| `heartbeat` | Timer-driven autonomous turns |
-| `cron` | Scheduled job storage and execution |
-| `service` | Internal authenticated HTTP API settings |
-| `channels` | Telegram, Slack, Discord, WhatsApp bridge, and Email configuration |
-| `security` | Secret store, audit, access profiles, and outbound network policy |
-| `runtimeProfile` | Named execution posture (`local-dev`, `hosted-service`, `hosted-no-exec`, etc.) |
-| `docIndex` | Opt-in document indexing for prompt-time retrieval |
-| `subagents` | Background job queueing and concurrency controls |
-| `context`, `contextManager` | Token budgeting, prompt assembly budgets, and optional cheap maintenance-model settings |
+| Key                                                    | Purpose                                                                                              |
+| ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
+| `dbPath`, `artifactsDir`, `workspaceDir`, `allowedDir` | Storage locations and workspace boundaries                                                           |
+| `defaultSessionKey`, `session`, `consolidationModel`   | Session naming, cross-session identity/scope behavior, and optional memory-compaction model override |
+| `identityFile`, `memoryFile`                           | Prompt bootstrap files                                                                               |
+| `provider`                                             | Model API base, model names, embedding settings, keys, temperature, and timeouts                     |
+| `tools`                                                | Local tool behavior, proxying, timeouts, workspace restrictions, and MCP servers                     |
+| `hardening`                                            | Tool capability tiers, program allowlists, child environment controls, quotas, and sandboxing        |
+| `skills`                                               | Managed skill loading, per-skill config, policy, and registry settings                               |
+| `triggers`                                             | Webhook and file-watch automation                                                                    |
+| `heartbeat`                                            | Timer-driven autonomous turns                                                                        |
+| `cron`                                                 | Scheduled job storage and execution                                                                  |
+| `service`                                              | Internal authenticated HTTP API settings                                                             |
+| `channels`                                             | Telegram, Slack, Discord, WhatsApp bridge, and Email configuration                                   |
+| `security`                                             | Secret store, audit, access profiles, and outbound network policy                                    |
+| `runtimeProfile`                                       | Named execution posture (`local-dev`, `hosted-service`, `hosted-no-exec`, etc.)                      |
+| `docIndex`                                             | Opt-in document indexing for prompt-time retrieval                                                   |
+| `subagents`                                            | Background job queueing and concurrency controls                                                     |
+| `context`, `contextManager`                            | Token budgeting, prompt assembly budgets, and optional cheap maintenance-model settings              |
 
 ## Minimal shape
 
 ```json
 {
-  "provider": {},
-  "tools": {},
-  "hardening": {},
-  "skills": {},
-  "triggers": {},
-  "heartbeat": {},
-  "cron": {},
-  "service": {},
-  "channels": {},
-  "security": {},
-  "context": {},
-  "contextManager": {},
-  "docIndex": {},
-  "subagents": {},
-  "session": {}
+    "provider": {},
+    "tools": {},
+    "hardening": {},
+    "skills": {},
+    "triggers": {},
+    "heartbeat": {},
+    "cron": {},
+    "service": {},
+    "channels": {},
+    "security": {},
+    "context": {},
+    "contextManager": {},
+    "docIndex": {},
+    "subagents": {},
+    "session": {}
 }
 ```
 
@@ -184,59 +184,59 @@ The approval and pairing system adds a small `approvals` block inside the `secur
 
 ```json
 {
-  "security": {
-    "approvals": {
-      "enabled": false,
-      "hostId": "local",
-      "keyFile": "",
-      "pairingCodeTtlSeconds": 300,
-      "pendingTtlSeconds": 3600,
-      "approvalTokenTtlSeconds": 300,
-      "localAutoPairLoopback": false,
-      "pairing":        { "mode": "ask" },
-      "exec":           { "mode": "trusted" },
-      "skillExecution": { "mode": "trusted" },
-      "secretAccess":   { "mode": "trusted" },
-      "messageSend":    { "mode": "trusted" }
+    "security": {
+        "approvals": {
+            "enabled": false,
+            "hostId": "local",
+            "keyFile": "",
+            "pairingCodeTtlSeconds": 300,
+            "pendingTtlSeconds": 3600,
+            "approvalTokenTtlSeconds": 300,
+            "localAutoPairLoopback": false,
+            "pairing": { "mode": "ask" },
+            "exec": { "mode": "trusted" },
+            "skillExecution": { "mode": "trusted" },
+            "secretAccess": { "mode": "trusted" },
+            "messageSend": { "mode": "trusted" }
+        }
     }
-  }
 }
 ```
 
 #### Top-level approval fields
 
-| Field | Type | Default | Description |
-| --- | --- | --- | --- |
-| `enabled` | bool | `false` | Activates the approval broker. When `false`, all approval checks pass through without enforcement. |
-| `hostId` | string | `"local"` | Stable identifier for this host. Included in approval tokens and audit events so future sandboxes and remote nodes can verify provenance. |
-| `keyFile` | string | `""` | Path to a 32-byte key file used to sign and verify approval tokens. Required when any domain uses `ask` or `allowlist` mode. |
-| `pairingCodeTtlSeconds` | int | `300` | How long a pairing code remains valid before automatic expiry. |
-| `pendingTtlSeconds` | int | `3600` | How long a pending approval request waits before expiring automatically. |
-| `approvalTokenTtlSeconds` | int | `300` | How long an issued approval token remains valid after the operator resolves the request. |
-| `localAutoPairLoopback` | bool | `false` | When `true`, automatically approves pairing requests from loopback addresses without requiring operator action. Intended for single-node local development only. |
+| Field                     | Type   | Default   | Description                                                                                                                                                      |
+| ------------------------- | ------ | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`                 | bool   | `false`   | Activates the approval broker. When `false`, all approval checks pass through without enforcement.                                                               |
+| `hostId`                  | string | `"local"` | Stable identifier for this host. Included in approval tokens and audit events so future sandboxes and remote nodes can verify provenance.                        |
+| `keyFile`                 | string | `""`      | Path to a 32-byte key file used to sign and verify approval tokens. Required when any domain uses `ask` or `allowlist` mode.                                     |
+| `pairingCodeTtlSeconds`   | int    | `300`     | How long a pairing code remains valid before automatic expiry.                                                                                                   |
+| `pendingTtlSeconds`       | int    | `3600`    | How long a pending approval request waits before expiring automatically.                                                                                         |
+| `approvalTokenTtlSeconds` | int    | `300`     | How long an issued approval token remains valid after the operator resolves the request.                                                                         |
+| `localAutoPairLoopback`   | bool   | `false`   | When `true`, automatically approves pairing requests from loopback addresses without requiring operator action. Intended for single-node local development only. |
 
 #### Approval modes
 
 Each domain under `security.approvals` accepts a `mode` field with one of these values:
 
-| Mode | Behaviour |
-| --- | --- |
-| `deny` | All execution in this domain is blocked unconditionally. Suitable for `exec` on headless hosts that should never run subprocesses. |
-| `ask` | Every execution attempt creates a pending approval request and is blocked until an operator resolves it. |
+| Mode        | Behaviour                                                                                                                                                                        |
+| ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `deny`      | All execution in this domain is blocked unconditionally. Suitable for `exec` on headless hosts that should never run subprocesses.                                               |
+| `ask`       | Every execution attempt creates a pending approval request and is blocked until an operator resolves it.                                                                         |
 | `allowlist` | Execution is allowed if a matching allowlist rule exists; otherwise a pending request is created. Use this to pre-approve recurring safe patterns while still gating novel ones. |
-| `trusted` | Execution is allowed without prompting an operator. An audit event is still recorded. This is the default for all domains. |
+| `trusted`   | Execution is allowed without prompting an operator. An audit event is still recorded. This is the default for all domains.                                                       |
 
 #### Domain fields
 
 Configure each of these independently under `security.approvals`:
 
-| Domain key | Controls |
-| --- | --- |
-| `pairing` | Whether new device pairing requests are auto-approved, gated, or denied. |
-| `exec` | Shell and program execution via the `exec` tool. |
-| `skillExecution` | Skill script execution via `run_skill_script`. |
-| `secretAccess` | (Future) Gate on decrypting or reading a named secret. |
-| `messageSend` | (Future) Gate on sending an outbound message through a channel. |
+| Domain key       | Controls                                                                   |
+| ---------------- | -------------------------------------------------------------------------- |
+| `pairing`        | Whether new device pairing requests are auto-approved, gated, or denied.   |
+| `exec`           | Shell and program execution via the `exec` tool.                           |
+| `skillExecution` | Skill execution via `run_skill` and the legacy `run_skill_script` wrapper. |
+| `secretAccess`   | (Future) Gate on decrypting or reading a named secret.                     |
+| `messageSend`    | (Future) Gate on sending an outbound message through a channel.            |
 
 #### Upgrade notes
 

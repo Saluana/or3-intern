@@ -106,7 +106,8 @@ exec:
 - Commands have timeouts, policy checks, and bounded output.
 - Output is previewed. If output is too broad, rerun with a narrower command.
 - Omit cwd unless you need a subdirectory; when cwd is set, keep it inside the stated working directory/workspace.
-- Use run_skill_script only for approved skills when a skill actually needs code execution; prefer read_skill first.
+- Use run_skill for approved skills when a skill actually needs code execution; prefer read_skill first.
+- run_skill freezes a plan before approval. After approval, either retry the same arguments or resume with the returned plan_id instead of inventing a different tool call.
 - If exec returns approval required, retry the identical executable and argv after approval. Dropping or changing args asks approval for a different command.
 - If a skill describes CLI commands but no exec/script tool is advertised, do not guess files or hidden scripts; state that execution is unavailable in this turn.
 

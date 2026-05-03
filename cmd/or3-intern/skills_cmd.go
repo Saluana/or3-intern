@@ -388,15 +388,18 @@ func filterAdvertisedToolNames(cfg config.Config, toolNames map[string]struct{})
 		delete(filtered, "exec")
 	}
 	if !cfg.Skills.EnableExec {
+		delete(filtered, "run_skill")
 		delete(filtered, "run_skill_script")
 	}
 	switch cfg.RuntimeProfile {
 	case config.ProfileHostedNoExec:
 		delete(filtered, "exec")
+		delete(filtered, "run_skill")
 		delete(filtered, "run_skill_script")
 	case config.ProfileHostedRemoteSandbox:
 		if !cfg.Hardening.Sandbox.Enabled {
 			delete(filtered, "exec")
+			delete(filtered, "run_skill")
 			delete(filtered, "run_skill_script")
 		}
 	}
@@ -508,6 +511,7 @@ func availableToolNames(includeCron, includeSubagents bool) map[string]struct{} 
 		"memory_get_pinned",
 		"send_message",
 		"read_skill",
+		"run_skill",
 		"run_skill_script",
 	}
 	if includeCron {

@@ -2978,6 +2978,7 @@ func TestDynamicToolExposureRespectsCapabilityCeiling(t *testing.T) {
 	reg := tools.NewRegistry()
 	reg.Register(&namedRuntimeTool{name: "read_file"})
 	reg.Register(&guardedNamedRuntimeTool{namedRuntimeTool{name: "write_file"}})
+	reg.Register(&guardedNamedRuntimeTool{namedRuntimeTool{name: "run_skill"}})
 	reg.Register(&guardedNamedRuntimeTool{namedRuntimeTool{name: "run_skill_script"}})
 	rt := &Runtime{DynamicToolExposure: true}
 	ctx := tools.ContextWithCapabilityCeiling(context.Background(), tools.CapabilitySafe)
@@ -2985,7 +2986,7 @@ func TestDynamicToolExposureRespectsCapabilityCeiling(t *testing.T) {
 	if !toolDefsContain(defs, "read_file") {
 		t.Fatalf("expected safe tool to remain exposed, got %#v", defs)
 	}
-	if toolDefsContain(defs, "write_file") || toolDefsContain(defs, "run_skill_script") {
+	if toolDefsContain(defs, "write_file") || toolDefsContain(defs, "run_skill") || toolDefsContain(defs, "run_skill_script") {
 		t.Fatalf("expected guarded tools to be hidden under safe ceiling, got %#v", defs)
 	}
 }

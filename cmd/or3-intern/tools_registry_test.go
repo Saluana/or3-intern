@@ -131,6 +131,9 @@ func TestBuildToolRegistry_OmitsDisabledSkillExecTool(t *testing.T) {
 	if reg.Get("read_skill") == nil {
 		t.Fatal("expected read_skill to remain registered")
 	}
+	if reg.Get("run_skill") != nil {
+		t.Fatal("expected run_skill to be omitted when skill execution is disabled")
+	}
 	if reg.Get("run_skill_script") != nil {
 		t.Fatal("expected run_skill_script to be omitted when skill execution is disabled")
 	}

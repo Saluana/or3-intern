@@ -38,6 +38,56 @@ func newTestBroker(t *testing.T, mutate func(*config.ApprovalConfig)) (*Broker, 
 	}
 }
 
+func createLinkedPendingSkillRunPlan(t *testing.T, broker *Broker, planID string) (db.SkillRunPlanRecord, Decision) {
+	t.Helper()
+	ctx := context.Background()
+	plan, err := broker.DB.CreateSkillRunPlan(ctx, db.SkillRunPlanRecord{
+		ID:              planID,
+		SkillID:         "runner",
+		Version:         "1.0.0",
+		Origin:          "workspace",
+		TrustState:      "approved",
+		SkillDir:        "/tmp/runner",
+		Entrypoint:      "hello",
+		ArgsJSON:        `[]`,
+		TimeoutSeconds:  30,
+		CommandJSON:     `["bash","/tmp/runner/tool.sh"]`,
+		ScriptHash:      "script-hash",
+		EnvBindingHash:  "env-hash",
+		PlanHash:        "plan-hash-" + planID,
+		ExecutionHostID: "test-host",
+		Status:          string(db.SkillRunStatusPlanned),
+		CreatedAt:       1,
+	})
+	if err != nil {
+		t.Fatalf("CreateSkillRunPlan: %v", err)
+	}
+	decision, err := broker.EvaluateSkillExec(ctx, SkillEvaluation{
+		SkillID:        plan.SkillID,
+		Version:        plan.Version,
+		Origin:         plan.Origin,
+		TrustState:     plan.TrustState,
+		ToolName:       "run_skill",
+		PlanID:         plan.ID,
+		PlanHash:       plan.PlanHash,
+		ScriptHash:     plan.ScriptHash,
+		EnvBindingHash: plan.EnvBindingHash,
+		TimeoutSeconds: plan.TimeoutSeconds,
+		AgentID:        "agent-1",
+		SessionID:      "session-1",
+	})
+	if err != nil {
+		t.Fatalf("EvaluateSkillExec: %v", err)
+	}
+	if !decision.RequiresApproval || decision.RequestID == 0 {
+		t.Fatalf("expected pending approval decision, got %#v", decision)
+	}
+	if err := broker.DB.UpdateSkillRunPlanApproval(ctx, plan.ID, decision.RequestID, decision.SubjectHash, string(db.SkillRunStatusPendingApproval), 2); err != nil {
+		t.Fatalf("UpdateSkillRunPlanApproval: %v", err)
+	}
+	return plan, decision
+}
+
 func TestBroker_EvaluateExecReusesPendingApprovalRequest(t *testing.T) {
 	broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
 		cfg.Exec.Mode = config.ApprovalModeAsk
@@ -127,6 +177,285 @@ func TestBroker_EvaluateExec_AllowsApprovedTokenAcrossRetries(t *testing.T) {
 	}
 	if reuse.Allowed || !reuse.RequiresApproval || reuse.RequestID == first.RequestID {
 		t.Fatalf("expected consumed token to require a fresh approval, got %#v", reuse)
+	}
+}
+
+func TestBroker_EvaluateSkillExec_BindsApprovalToFrozenPlan(t *testing.T) {
+	broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.SkillExecution.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+
+	input := SkillEvaluation{
+		SkillID:        "runner",
+		Version:        "1.0.0",
+		Origin:         "workspace",
+		TrustState:     "approved",
+		PlanID:         "srp_one",
+		PlanHash:       "plan-hash-one",
+		ScriptHash:     "script-hash",
+		EnvBindingHash: "env-hash",
+		TimeoutSeconds: 30,
+		AgentID:        "agent-1",
+		SessionID:      "session-1",
+	}
+	first, err := broker.EvaluateSkillExec(context.Background(), input)
+	if err != nil {
+		t.Fatalf("EvaluateSkillExec first: %v", err)
+	}
+	second, err := broker.EvaluateSkillExec(context.Background(), input)
+	if err != nil {
+		t.Fatalf("EvaluateSkillExec second: %v", err)
+	}
+	if !first.RequiresApproval || first.RequestID == 0 {
+		t.Fatalf("expected first evaluation to require approval, got %#v", first)
+	}
+	if second.RequestID != first.RequestID || second.SubjectHash != first.SubjectHash {
+		t.Fatalf("expected identical frozen plan to reuse approval request, got first=%#v second=%#v", first, second)
+	}
+
+	differentPlan, err := broker.EvaluateSkillExec(context.Background(), SkillEvaluation{
+		SkillID:        input.SkillID,
+		Version:        input.Version,
+		Origin:         input.Origin,
+		TrustState:     input.TrustState,
+		PlanID:         "srp_two",
+		PlanHash:       "plan-hash-two",
+		ScriptHash:     input.ScriptHash,
+		EnvBindingHash: input.EnvBindingHash,
+		TimeoutSeconds: input.TimeoutSeconds,
+		AgentID:        input.AgentID,
+		SessionID:      input.SessionID,
+	})
+	if err != nil {
+		t.Fatalf("EvaluateSkillExec different plan: %v", err)
+	}
+	if differentPlan.RequestID == first.RequestID || differentPlan.SubjectHash == first.SubjectHash {
+		t.Fatalf("expected different frozen plan identity to produce a new subject, got first=%#v different=%#v", first, differentPlan)
+	}
+
+	issued, err := broker.ApproveRequest(context.Background(), first.RequestID, "cli:test", false, "ok")
+	if err != nil {
+		t.Fatalf("ApproveRequest: %v", err)
+	}
+	retry, err := broker.EvaluateSkillExec(context.Background(), SkillEvaluation{
+		SkillID:        input.SkillID,
+		Version:        input.Version,
+		Origin:         input.Origin,
+		TrustState:     input.TrustState,
+		ToolName:       "run_skill",
+		PlanID:         input.PlanID,
+		PlanHash:       input.PlanHash,
+		ScriptHash:     input.ScriptHash,
+		EnvBindingHash: input.EnvBindingHash,
+		TimeoutSeconds: input.TimeoutSeconds,
+		AgentID:        input.AgentID,
+		SessionID:      input.SessionID,
+		ApprovalToken:  issued.Token,
+	})
+	if err != nil {
+		t.Fatalf("EvaluateSkillExec retry: %v", err)
+	}
+	if !retry.Allowed {
+		t.Fatalf("expected approved frozen plan token to allow retry, got %#v", retry)
+	}
+	if retry.RequestID != first.RequestID {
+		t.Fatalf("expected approved token retry to preserve request ID %d, got %#v", first.RequestID, retry)
+	}
+
+	mismatch, err := broker.EvaluateSkillExec(context.Background(), SkillEvaluation{
+		SkillID:        input.SkillID,
+		Version:        input.Version,
+		Origin:         input.Origin,
+		TrustState:     input.TrustState,
+		PlanID:         "srp_one",
+		PlanHash:       "plan-hash-mutated",
+		ScriptHash:     input.ScriptHash,
+		EnvBindingHash: input.EnvBindingHash,
+		TimeoutSeconds: input.TimeoutSeconds,
+		AgentID:        input.AgentID,
+		SessionID:      input.SessionID,
+		ApprovalToken:  issued.Token,
+	})
+	if err != nil {
+		t.Fatalf("EvaluateSkillExec mismatch: %v", err)
+	}
+	if mismatch.Allowed || !mismatch.RequiresApproval {
+		t.Fatalf("expected mutated frozen plan to require new approval, got %#v", mismatch)
+	}
+}
+
+func TestBroker_ApproveSkillRequest_AllowlistBindsToFrozenPlan(t *testing.T) {
+	broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.SkillExecution.Mode = config.ApprovalModeAllowlist
+	})
+	defer cleanup()
+
+	first, err := broker.EvaluateSkillExec(context.Background(), SkillEvaluation{
+		SkillID:        "runner",
+		Version:        "1.0.0",
+		Origin:         "workspace",
+		TrustState:     "approved",
+		ToolName:       "run_skill",
+		PlanID:         "srp_one",
+		PlanHash:       "plan-hash-one",
+		ScriptHash:     "script-hash",
+		EnvBindingHash: "env-hash",
+		TimeoutSeconds: 30,
+		AgentID:        "agent-1",
+		SessionID:      "session-1",
+	})
+	if err != nil {
+		t.Fatalf("EvaluateSkillExec first: %v", err)
+	}
+	if !first.RequiresApproval || first.RequestID == 0 {
+		t.Fatalf("expected pending approval request, got %#v", first)
+	}
+	if _, err := broker.ApproveRequest(context.Background(), first.RequestID, "cli:test", true, "always allow exact plan"); err != nil {
+		t.Fatalf("ApproveRequest: %v", err)
+	}
+	allowed, err := broker.EvaluateSkillExec(context.Background(), SkillEvaluation{
+		SkillID:        "runner",
+		Version:        "1.0.0",
+		Origin:         "workspace",
+		TrustState:     "approved",
+		ToolName:       "run_skill",
+		PlanID:         "srp_one",
+		PlanHash:       "plan-hash-one",
+		ScriptHash:     "script-hash",
+		EnvBindingHash: "env-hash",
+		TimeoutSeconds: 30,
+		AgentID:        "agent-1",
+		SessionID:      "session-1",
+	})
+	if err != nil {
+		t.Fatalf("EvaluateSkillExec allowed: %v", err)
+	}
+	if !allowed.Allowed {
+		t.Fatalf("expected exact frozen plan to match allowlist, got %#v", allowed)
+	}
+	mutatedPlan, err := broker.EvaluateSkillExec(context.Background(), SkillEvaluation{
+		SkillID:        "runner",
+		Version:        "1.0.0",
+		Origin:         "workspace",
+		TrustState:     "approved",
+		ToolName:       "run_skill",
+		PlanID:         "srp_two",
+		PlanHash:       "plan-hash-two",
+		ScriptHash:     "script-hash",
+		EnvBindingHash: "env-hash",
+		TimeoutSeconds: 30,
+		AgentID:        "agent-1",
+		SessionID:      "session-1",
+	})
+	if err != nil {
+		t.Fatalf("EvaluateSkillExec mutated plan: %v", err)
+	}
+	if mutatedPlan.Allowed || !mutatedPlan.RequiresApproval {
+		t.Fatalf("expected changed plan hash to require approval, got %#v", mutatedPlan)
+	}
+	mutatedEnv, err := broker.EvaluateSkillExec(context.Background(), SkillEvaluation{
+		SkillID:        "runner",
+		Version:        "1.0.0",
+		Origin:         "workspace",
+		TrustState:     "approved",
+		ToolName:       "run_skill",
+		PlanID:         "srp_one",
+		PlanHash:       "plan-hash-one",
+		ScriptHash:     "script-hash",
+		EnvBindingHash: "env-hash-two",
+		TimeoutSeconds: 30,
+		AgentID:        "agent-1",
+		SessionID:      "session-1",
+	})
+	if err != nil {
+		t.Fatalf("EvaluateSkillExec mutated env: %v", err)
+	}
+	if mutatedEnv.Allowed || !mutatedEnv.RequiresApproval {
+		t.Fatalf("expected changed env binding to require approval, got %#v", mutatedEnv)
+	}
+}
+
+func TestBroker_ApproveRequest_UpdatesLinkedSkillRunPlanStatus(t *testing.T) {
+	broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.SkillExecution.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+
+	plan, decision := createLinkedPendingSkillRunPlan(t, broker, "srp_approve")
+	if _, err := broker.ApproveRequest(context.Background(), decision.RequestID, "cli:test", false, "ok"); err != nil {
+		t.Fatalf("ApproveRequest: %v", err)
+	}
+	stored, err := broker.DB.GetSkillRunPlan(context.Background(), plan.ID)
+	if err != nil {
+		t.Fatalf("GetSkillRunPlan: %v", err)
+	}
+	if stored.Status != string(db.SkillRunStatusApproved) {
+		t.Fatalf("expected approved plan status, got %#v", stored)
+	}
+}
+
+func TestBroker_DenyRequest_UpdatesLinkedSkillRunPlanStatus(t *testing.T) {
+	broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.SkillExecution.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+
+	plan, decision := createLinkedPendingSkillRunPlan(t, broker, "srp_deny")
+	if err := broker.DenyRequest(context.Background(), decision.RequestID, "cli:test", "nope"); err != nil {
+		t.Fatalf("DenyRequest: %v", err)
+	}
+	stored, err := broker.DB.GetSkillRunPlan(context.Background(), plan.ID)
+	if err != nil {
+		t.Fatalf("GetSkillRunPlan: %v", err)
+	}
+	if stored.Status != string(db.SkillRunStatusDenied) {
+		t.Fatalf("expected denied plan status, got %#v", stored)
+	}
+}
+
+func TestBroker_CancelRequest_UpdatesLinkedSkillRunPlanStatus(t *testing.T) {
+	broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.SkillExecution.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+
+	plan, decision := createLinkedPendingSkillRunPlan(t, broker, "srp_cancel")
+	if err := broker.CancelRequest(context.Background(), decision.RequestID, "cli:test", "stop"); err != nil {
+		t.Fatalf("CancelRequest: %v", err)
+	}
+	stored, err := broker.DB.GetSkillRunPlan(context.Background(), plan.ID)
+	if err != nil {
+		t.Fatalf("GetSkillRunPlan: %v", err)
+	}
+	if stored.Status != string(db.SkillRunStatusCancelled) {
+		t.Fatalf("expected cancelled plan status, got %#v", stored)
+	}
+}
+
+func TestBroker_ExpirePendingRequests_UpdatesLinkedSkillRunPlanStatus(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.SkillExecution.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+	broker.Now = func() time.Time { return now }
+
+	plan, _ := createLinkedPendingSkillRunPlan(t, broker, "srp_expire")
+	now = now.Add(time.Duration(broker.Config.PendingTTLSeconds+1) * time.Second)
+	expired, err := broker.ExpirePendingRequests(context.Background(), "cli:test")
+	if err != nil {
+		t.Fatalf("ExpirePendingRequests: %v", err)
+	}
+	if expired != 1 {
+		t.Fatalf("expected 1 expired request, got %d", expired)
+	}
+	stored, err := broker.DB.GetSkillRunPlan(context.Background(), plan.ID)
+	if err != nil {
+		t.Fatalf("GetSkillRunPlan: %v", err)
+	}
+	if stored.Status != string(db.SkillRunStatusExpired) {
+		t.Fatalf("expected expired plan status, got %#v", stored)
 	}
 }
 

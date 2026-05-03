@@ -2353,6 +2353,126 @@ func TestServiceApprovals_PairedOperatorCanApprovePendingRequest(t *testing.T) {
 	}
 }
 
+func TestServiceApprovals_Approve_ReturnsPlanIDsWhenPresent(t *testing.T) {
+	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.SkillExecution.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+
+	plan, err := broker.DB.CreateSkillRunPlan(context.Background(), db.SkillRunPlanRecord{
+		ID:              "srp_service_plan",
+		SkillID:         "runner",
+		SkillDir:        "/tmp/runner",
+		Entrypoint:      "hello",
+		TimeoutSeconds:  30,
+		CommandJSON:     `["bash","/tmp/runner/tool.sh"]`,
+		ScriptHash:      "script-hash",
+		EnvBindingHash:  "env-hash",
+		PlanHash:        "plan-hash",
+		ExecutionHostID: "test-host",
+		Status:          "prepared",
+		CreatedAt:       1,
+	})
+	if err != nil {
+		t.Fatalf("CreateSkillRunPlan: %v", err)
+	}
+	decision, err := broker.EvaluateSkillExec(context.Background(), approval.SkillEvaluation{
+		SkillID:        "runner",
+		PlanID:         plan.ID,
+		PlanHash:       plan.PlanHash,
+		ScriptHash:     plan.ScriptHash,
+		EnvBindingHash: plan.EnvBindingHash,
+		TimeoutSeconds: plan.TimeoutSeconds,
+	})
+	if err != nil {
+		t.Fatalf("EvaluateSkillExec: %v", err)
+	}
+	if err := broker.DB.UpdateSkillRunPlanApproval(context.Background(), plan.ID, decision.RequestID, decision.SubjectHash, "pending_approval", 2); err != nil {
+		t.Fatalf("UpdateSkillRunPlanApproval: %v", err)
+	}
+
+	server := &serviceServer{broker: broker, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("a", 32), server)
+	defer httpServer.Close()
+
+	_, deviceToken, err := broker.RotateDeviceToken(context.Background(), "operator-1", approval.RoleOperator, "Operator", nil)
+	if err != nil {
+		t.Fatalf("RotateDeviceToken: %v", err)
+	}
+
+	approveReq := mustJSONRequest(t, http.MethodPost, fmt.Sprintf("%s/internal/v1/approvals/%d/approve", httpServer.URL, decision.RequestID), `{"note":"approved"}`)
+	approveReq.Header.Set("Authorization", "Bearer "+deviceToken)
+	approveResp, err := httpServer.Client().Do(approveReq)
+	if err != nil {
+		t.Fatalf("Do approve approval: %v", err)
+	}
+	defer approveResp.Body.Close()
+	if approveResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected approval 200, got %d (%s)", approveResp.StatusCode, mustReadBody(t, approveResp.Body))
+	}
+	payload := mustDecodeJSONBody(t, approveResp.Body)
+	if payload["plan_id"] != plan.ID {
+		t.Fatalf("expected plan_id %q, got %#v", plan.ID, payload)
+	}
+	planIDs, _ := payload["plan_ids"].([]any)
+	if len(planIDs) != 1 || planIDs[0] != plan.ID {
+		t.Fatalf("expected plan_ids to include %q, got %#v", plan.ID, payload)
+	}
+}
+
+func TestServiceApprovals_Approve_PlanLookupFailureWarnsButStillSucceeds(t *testing.T) {
+	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Exec.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+
+	decision, err := broker.EvaluateExec(context.Background(), approval.ExecEvaluation{
+		ExecutablePath: "/bin/echo",
+		Argv:           []string{"hello"},
+		WorkingDir:     "/tmp",
+		ToolName:       "exec",
+	})
+	if err != nil {
+		t.Fatalf("EvaluateExec: %v", err)
+	}
+	_, deviceToken, err := broker.RotateDeviceToken(context.Background(), "operator-1", approval.RoleOperator, "Operator", nil)
+	if err != nil {
+		t.Fatalf("RotateDeviceToken: %v", err)
+	}
+	prevLookup := approvalSkillRunPlanLookup
+	approvalSkillRunPlanLookup = func(context.Context, *db.DB, int64, int) ([]db.SkillRunPlanRecord, error) {
+		return nil, fmt.Errorf("lookup down")
+	}
+	defer func() { approvalSkillRunPlanLookup = prevLookup }()
+
+	server := &serviceServer{broker: broker, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("w", 32), server)
+	defer httpServer.Close()
+
+	req := mustJSONRequest(t, http.MethodPost, fmt.Sprintf("%s/internal/v1/approvals/%d/approve", httpServer.URL, decision.RequestID), `{"note":"approved"}`)
+	req.Header.Set("Authorization", "Bearer "+deviceToken)
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do approve: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected approval 200, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	payload := mustDecodeJSONBody(t, resp.Body)
+	if strings.TrimSpace(fmt.Sprint(payload["token"])) == "" {
+		t.Fatalf("expected token in response, got %#v", payload)
+	}
+	warnings, _ := payload["warnings"].([]any)
+	if len(warnings) != 1 {
+		t.Fatalf("expected one warning, got %#v", payload)
+	}
+	warning, _ := warnings[0].(map[string]any)
+	if warning["code"] != "plan_lookup_failed" {
+		t.Fatalf("expected plan lookup warning, got %#v", payload)
+	}
+}
+
 func TestServiceApprovals_Approve_RejectsMalformedJSON(t *testing.T) {
 	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
 		cfg.Exec.Mode = config.ApprovalModeAsk

@@ -16,6 +16,13 @@ import (
 	"or3-intern/internal/uxstate"
 )
 
+var approvalSkillRunPlanLookup = func(ctx context.Context, database *db.DB, requestID int64, limit int) ([]db.SkillRunPlanRecord, error) {
+	if database == nil {
+		return nil, nil
+	}
+	return database.ListSkillRunPlansByApprovalRequest(ctx, requestID, limit)
+}
+
 func runApprovalsCommand(ctx context.Context, broker *approval.Broker, args []string, stdout, stderr io.Writer) error {
 	if broker == nil {
 		return fmt.Errorf("approval broker is not configured")
@@ -103,6 +110,18 @@ func runApprovalsCommand(ctx context.Context, broker *approval.Broker, args []st
 			return err
 		}
 		_, _ = fmt.Fprintf(stdout, "approved %d\ntoken: %s\n", id, issued.Token)
+		if broker.DB != nil {
+			plans, err := approvalSkillRunPlanLookup(ctx, broker.DB, id, 20)
+			if err != nil {
+				_, _ = fmt.Fprintf(stderr, "warning: %s\n", approvalPlanLookupWarning(err))
+			} else {
+				if len(plans) == 1 {
+					_, _ = fmt.Fprintf(stdout, "plan_id: %s\n", plans[0].ID)
+				} else if len(plans) > 1 {
+					_, _ = fmt.Fprintf(stdout, "plan_ids: %s\n", joinSkillRunPlanIDs(plans))
+				}
+			}
+		}
 		if issued.AllowlistID > 0 {
 			_, _ = fmt.Fprintf(stdout, "allowlist_id: %d\n", issued.AllowlistID)
 		}
@@ -298,4 +317,19 @@ func friendlyApprovalAction(view uxstate.ApprovalPromptView) string {
 	default:
 		return "Complete an action"
 	}
+}
+
+func joinSkillRunPlanIDs(plans []db.SkillRunPlanRecord) string {
+	ids := make([]string, 0, len(plans))
+	for _, plan := range plans {
+		if strings.TrimSpace(plan.ID) == "" {
+			continue
+		}
+		ids = append(ids, strings.TrimSpace(plan.ID))
+	}
+	return strings.Join(ids, ", ")
+}
+
+func approvalPlanLookupWarning(err error) string {
+	return fmt.Sprintf("approval succeeded, but linked skill plan lookup failed: %v", err)
 }

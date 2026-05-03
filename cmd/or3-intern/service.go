@@ -1699,7 +1699,31 @@ func (s *serviceServer) handleApprovals(w http.ResponseWriter, r *http.Request) 
 			writeServiceError(w, r, http.StatusBadRequest, "approval failed", err)
 			return
 		}
-		writeServiceJSON(w, http.StatusOK, map[string]any{"request_id": id, "token": issued.Token, "allowlist_id": issued.AllowlistID})
+		response := map[string]any{"request_id": id, "token": issued.Token, "allowlist_id": issued.AllowlistID}
+		if s.broker != nil && s.broker.DB != nil {
+			plans, err := approvalSkillRunPlanLookup(r.Context(), s.broker.DB, id, 20)
+			if err != nil {
+				response["warnings"] = []map[string]any{{
+					"code":    "plan_lookup_failed",
+					"message": approvalPlanLookupWarning(err),
+				}}
+			} else {
+				if len(plans) == 1 {
+					response["plan_id"] = plans[0].ID
+				}
+				if len(plans) > 0 {
+					ids := make([]string, 0, len(plans))
+					for _, plan := range plans {
+						if strings.TrimSpace(plan.ID) == "" {
+							continue
+						}
+						ids = append(ids, strings.TrimSpace(plan.ID))
+					}
+					response["plan_ids"] = ids
+				}
+			}
+		}
+		writeServiceJSON(w, http.StatusOK, response)
 	case "deny":
 		if r.Method != http.MethodPost {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
@@ -3753,6 +3777,9 @@ func (s *serviceServer) applyServiceSkillsInventory(inv skills.Inventory) {
 		return
 	}
 	if tool, ok := s.runtime.Tools.Get("read_skill").(*tools.ReadSkill); ok {
+		tool.Inventory = &s.runtime.Builder.Skills
+	}
+	if tool, ok := s.runtime.Tools.Get("run_skill").(*tools.RunSkill); ok {
 		tool.Inventory = &s.runtime.Builder.Skills
 	}
 	if tool, ok := s.runtime.Tools.Get("run_skill_script").(*tools.RunSkillScript); ok {

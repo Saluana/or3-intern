@@ -94,6 +94,8 @@ func TestDefaultToolNotesCoverCoreBuiltins(t *testing.T) {
 		"Use web_search to discover candidate URLs",
 		"Prefer program + args over shell command strings",
 		"When a skill or doc shows a CLI like",
+		"Use run_skill for approved skills",
+		"run_skill freezes a plan before approval",
 		"retry the identical executable and argv after approval",
 		"Use send_message only when delivery is part of the task",
 		"Use spawn_subagent for longer background work",

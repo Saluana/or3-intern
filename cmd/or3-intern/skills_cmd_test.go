@@ -285,6 +285,9 @@ func TestFilterAdvertisedToolNames_HostedNoExecHidesExecTools(t *testing.T) {
 	if _, ok := got["exec"]; ok {
 		t.Fatalf("expected exec to be hidden in hosted-no-exec, got %#v", got)
 	}
+	if _, ok := got["run_skill"]; ok {
+		t.Fatalf("expected run_skill to be hidden in hosted-no-exec, got %#v", got)
+	}
 	if _, ok := got["run_skill_script"]; ok {
 		t.Fatalf("expected run_skill_script to be hidden in hosted-no-exec, got %#v", got)
 	}
@@ -301,6 +304,9 @@ func TestFilterAdvertisedToolNames_RemoteSandboxRequiresSandboxForExecTools(t *t
 	if _, ok := got["exec"]; ok {
 		t.Fatalf("expected exec to be hidden without sandbox, got %#v", got)
 	}
+	if _, ok := got["run_skill"]; ok {
+		t.Fatalf("expected run_skill to be hidden without sandbox, got %#v", got)
+	}
 	if _, ok := got["run_skill_script"]; ok {
 		t.Fatalf("expected run_skill_script to be hidden without sandbox, got %#v", got)
 	}
@@ -309,6 +315,9 @@ func TestFilterAdvertisedToolNames_RemoteSandboxRequiresSandboxForExecTools(t *t
 	got = filterAdvertisedToolNames(cfg, availableToolNames(false, false))
 	if _, ok := got["exec"]; !ok {
 		t.Fatalf("expected exec to return when sandbox is enabled, got %#v", got)
+	}
+	if _, ok := got["run_skill"]; !ok {
+		t.Fatalf("expected run_skill to return when sandbox is enabled, got %#v", got)
 	}
 	if _, ok := got["run_skill_script"]; !ok {
 		t.Fatalf("expected run_skill_script to return when sandbox is enabled, got %#v", got)

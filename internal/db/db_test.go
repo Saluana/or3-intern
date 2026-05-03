@@ -164,7 +164,7 @@ func TestOpen_InvalidPath(t *testing.T) {
 func TestOpen_CreatesApprovalAndPairingTables(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
-	for _, table := range []string{"paired_devices", "pairing_requests", "approval_requests", "approval_allowlists", "approval_tokens"} {
+	for _, table := range []string{"paired_devices", "pairing_requests", "approval_requests", "approval_allowlists", "approval_tokens", "skill_run_plans"} {
 		row := d.SQL.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table)
 		var name string
 		if err := row.Scan(&name); err != nil {
@@ -200,6 +200,9 @@ func TestApprovalStore_RoundTripAndReopen(t *testing.T) {
 	}
 	if _, err := d.CreateApprovalAllowlist(ctx, ApprovalAllowlistRecord{Domain: "exec", ScopeJSON: `{"host_id":"local"}`, MatcherJSON: `{"program":"echo"}`, CreatedBy: "cli", CreatedAt: 5}); err != nil {
 		t.Fatalf("CreateApprovalAllowlist: %v", err)
+	}
+	if _, err := d.CreateSkillRunPlan(ctx, SkillRunPlanRecord{SkillID: "runner", SkillDir: "/tmp/runner", Entrypoint: "hello", TimeoutSeconds: 30, CommandJSON: `["bash","/tmp/runner/tool.sh"]`, ScriptHash: "hash", EnvBindingHash: "env", PlanHash: "plan", ExecutionHostID: "local", Status: "pending_approval", CreatedAt: 6}); err != nil {
+		t.Fatalf("CreateSkillRunPlan: %v", err)
 	}
 	if _, err := d.UpsertPairedDevice(ctx, PairedDeviceRecord{DeviceID: pairing.DeviceID, Role: pairing.Role, DisplayName: pairing.DisplayName, TokenHash: []byte("token"), Status: "active", CreatedAt: 6, LastSeenAt: 6}); err != nil {
 		t.Fatalf("UpsertPairedDevice: %v", err)

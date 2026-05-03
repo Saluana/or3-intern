@@ -117,7 +117,7 @@ func inferToolMetadata(name string) ToolMetadata {
 		groups = []string{ToolGroupMemory, ToolGroupRead}
 	case name == "write_file" || name == "edit_file":
 		groups = []string{ToolGroupWrite}
-	case name == "exec" || name == "run_skill_script":
+	case name == "exec" || name == "run_skill" || name == "run_skill_script":
 		groups = []string{ToolGroupExec}
 	case strings.HasPrefix(name, "web_"):
 		groups = []string{ToolGroupWeb}

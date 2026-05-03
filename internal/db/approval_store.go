@@ -378,6 +378,23 @@ func (d *DB) ExpireApprovalRequests(ctx context.Context, nowMS int64, actor, not
 	return rows, nil
 }
 
+func (d *DB) ListExpiredPendingApprovalRequestIDs(ctx context.Context, nowMS int64) ([]int64, error) {
+	rows, err := d.SQL.QueryContext(ctx, `SELECT id FROM approval_requests WHERE status=? AND expires_at>0 AND expires_at<=? ORDER BY id ASC`, "pending", nowMS)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]int64, 0)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 func (d *DB) UpdateApprovalRequestResolution(ctx context.Context, id int64, status string, resolvedAt int64, actor, kind, note string) error {
 	_, err := d.SQL.ExecContext(ctx, `UPDATE approval_requests SET status=?, resolved_at=?, resolver_actor_id=?, resolution_kind=?, resolution_note=? WHERE id=?`, status, resolvedAt, actor, kind, note, id)
 	return err

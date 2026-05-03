@@ -907,7 +907,8 @@ func buildToolRegistryWithOptions(cfg config.Config, d *db.DB, prov *providers.C
 	if inv != nil {
 		reg.Register(&tools.ReadSkill{Inventory: inv})
 		if cfg.Skills.EnableExec {
-			reg.Register(&tools.RunSkillScript{Inventory: inv, Enabled: true, Timeout: time.Duration(cfg.Skills.MaxRunSeconds) * time.Second, ChildEnvAllowlist: append([]string{}, cfg.Hardening.ChildEnvAllowlist...), Sandbox: sandboxCfg, ApprovalBroker: approvalBroker})
+			reg.Register(&tools.RunSkill{RunSkillScript: tools.RunSkillScript{Inventory: inv, Enabled: true, Timeout: time.Duration(cfg.Skills.MaxRunSeconds) * time.Second, ChildEnvAllowlist: append([]string{}, cfg.Hardening.ChildEnvAllowlist...), Sandbox: sandboxCfg, ApprovalBroker: approvalBroker, DB: d}})
+			reg.Register(&tools.RunSkillScript{Inventory: inv, Enabled: true, Timeout: time.Duration(cfg.Skills.MaxRunSeconds) * time.Second, ChildEnvAllowlist: append([]string{}, cfg.Hardening.ChildEnvAllowlist...), Sandbox: sandboxCfg, ApprovalBroker: approvalBroker, DB: d})
 		}
 	}
 	if cronSvc != nil {

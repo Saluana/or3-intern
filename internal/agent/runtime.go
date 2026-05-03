@@ -1520,7 +1520,7 @@ func (r *Runtime) guardToolExecution(ctx context.Context, tool tools.Tool, capab
 	if capability == tools.CapabilityPrivileged && !r.Hardening.PrivilegedTools {
 		return fmt.Errorf("tool requires privileged access: %s", tool.Name())
 	}
-	if r.ApprovalBroker != nil && (tool.Name() == "exec" || tool.Name() == "run_skill_script") {
+	if r.ApprovalBroker != nil && (tool.Name() == "exec" || tool.Name() == "run_skill" || tool.Name() == "run_skill_script") {
 		if mode := r.approvalModeForTool(tool.Name()); mode == config.ApprovalModeAsk || mode == config.ApprovalModeAllowlist || mode == config.ApprovalModeDeny {
 			if len(r.ApprovalBroker.SignKey) == 0 {
 				return fmt.Errorf("approval broker unavailable for %s", tool.Name())
@@ -1554,7 +1554,7 @@ func (r *Runtime) approvalModeForTool(toolName string) config.ApprovalMode {
 	switch toolName {
 	case "exec":
 		return r.ApprovalBroker.Config.Exec.Mode
-	case "run_skill_script":
+	case "run_skill", "run_skill_script":
 		return r.ApprovalBroker.Config.SkillExecution.Mode
 	default:
 		return config.ApprovalModeTrusted
@@ -1572,7 +1572,7 @@ func (r *Runtime) enforceSkillPolicy(ctx context.Context, tool tools.Tool, param
 		}
 	}
 	switch tool.Name() {
-	case "exec", "run_skill_script":
+	case "exec", "run_skill", "run_skill_script":
 		if !policy.AllowExecution {
 			return fmt.Errorf("execution denied by skill policy: %s", tool.Name())
 		}
@@ -1631,7 +1631,7 @@ func skillPolicyForSkill(skill skills.SkillMeta) tools.SkillPolicy {
 	return tools.SkillPolicy{
 		Name:           skill.Name,
 		AllowedTools:   allowed,
-		AllowExecution: skill.Permissions.Shell || (strings.EqualFold(skill.CommandDispatch, "tool") && (strings.EqualFold(skill.CommandTool, "exec") || strings.EqualFold(skill.CommandTool, "run_skill_script"))),
+		AllowExecution: skill.Permissions.Shell || (strings.EqualFold(skill.CommandDispatch, "tool") && (strings.EqualFold(skill.CommandTool, "exec") || strings.EqualFold(skill.CommandTool, "run_skill") || strings.EqualFold(skill.CommandTool, "run_skill_script"))),
 		AllowNetwork:   skill.Permissions.Network,
 		AllowWrite:     skill.Permissions.Write,
 		AllowedHosts:   append([]string{}, skill.Permissions.AllowedHosts...),
@@ -1807,9 +1807,10 @@ func summarizeToolParams(toolName string, params map[string]any) map[string]any 
 	case "exec":
 		summary["program"] = strings.TrimSpace(fmt.Sprint(params["program"]))
 		summary["cwd"] = strings.TrimSpace(fmt.Sprint(params["cwd"]))
-	case "run_skill_script":
+	case "run_skill", "run_skill_script":
 		summary["skill"] = strings.TrimSpace(fmt.Sprint(params["skill"]))
 		summary["entrypoint"] = strings.TrimSpace(fmt.Sprint(params["entrypoint"]))
+		summary["plan_id"] = strings.TrimSpace(fmt.Sprint(params["plan_id"]))
 	case "spawn_subagent":
 		summary["task"] = previewText(strings.TrimSpace(fmt.Sprint(params["task"])), 120)
 	case "web_fetch", "web_fetch_markdown":
@@ -1867,7 +1868,7 @@ func (r *Runtime) quotaChecks(message *quotaCounters, session *quotaCounters, to
 		{Scope: "session", Name: "tool_calls", Label: "per-session total tool-call", ConfigKey: "hardening.quotas.maxSessionToolCalls", Current: session.ToolCalls, Limit: cfg.MaxSessionToolCalls},
 	}
 	switch toolName {
-	case "exec", "run_skill_script":
+	case "exec", "run_skill", "run_skill_script":
 		checks = append(checks,
 			quotaCheck{Scope: "message", Name: "exec_calls", Label: "per-message exec-call", ConfigKey: "hardening.quotas.maxExecCalls", Current: message.ExecCalls, Limit: cfg.MaxExecCalls},
 			quotaCheck{Scope: "session", Name: "exec_calls", Label: "per-session exec-call", ConfigKey: "hardening.quotas.maxSessionExecCalls", Current: session.ExecCalls, Limit: cfg.MaxSessionExecCalls},
@@ -1941,7 +1942,7 @@ func incrementQuotaCounters(counters *quotaCounters, toolName string) {
 	}
 	counters.ToolCalls++
 	switch toolName {
-	case "exec", "run_skill_script":
+	case "exec", "run_skill", "run_skill_script":
 		counters.ExecCalls++
 	case "web_fetch", "web_fetch_markdown", "web_search":
 		counters.WebCalls++

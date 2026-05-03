@@ -399,6 +399,39 @@ func (d *DB) migrate(ctx context.Context) error {
 			FOREIGN KEY(approval_request_id) REFERENCES approval_requests(id) ON DELETE CASCADE
 		);`,
 		`CREATE INDEX IF NOT EXISTS approval_tokens_request_expires_at ON approval_tokens(approval_request_id, expires_at);`,
+		`CREATE TABLE IF NOT EXISTS skill_run_plans(
+			id TEXT PRIMARY KEY,
+			skill_id TEXT NOT NULL,
+			version TEXT NOT NULL DEFAULT '',
+			origin TEXT NOT NULL DEFAULT '',
+			trust_state TEXT NOT NULL DEFAULT '',
+			skill_dir TEXT NOT NULL DEFAULT '',
+			relative_path TEXT NOT NULL DEFAULT '',
+			entrypoint TEXT NOT NULL DEFAULT '',
+			args_json TEXT NOT NULL DEFAULT '[]',
+			stdin_text TEXT NOT NULL DEFAULT '',
+			timeout_seconds INTEGER NOT NULL DEFAULT 0,
+			command_json TEXT NOT NULL DEFAULT '[]',
+			script_hash TEXT NOT NULL DEFAULT '',
+			env_binding_hash TEXT NOT NULL DEFAULT '',
+			plan_hash TEXT NOT NULL DEFAULT '',
+			subject_hash TEXT NOT NULL DEFAULT '',
+			requester_agent_id TEXT NOT NULL DEFAULT '',
+			requester_session_id TEXT NOT NULL DEFAULT '',
+			execution_host_id TEXT NOT NULL DEFAULT '',
+			approval_request_id INTEGER,
+			status TEXT NOT NULL DEFAULT '',
+			result_json TEXT NOT NULL DEFAULT '',
+			last_error TEXT NOT NULL DEFAULT '',
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL DEFAULT 0,
+			FOREIGN KEY(approval_request_id) REFERENCES approval_requests(id) ON DELETE SET NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS skill_run_plans_status_created_at ON skill_run_plans(status, created_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS skill_run_plans_approval_request_id ON skill_run_plans(approval_request_id);`,
+		`CREATE INDEX IF NOT EXISTS skill_run_plans_session_status ON skill_run_plans(requester_session_id, status, created_at DESC);`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS skill_run_plans_active_session_plan_hash ON skill_run_plans(requester_session_id, plan_hash)
+			WHERE status IN ('prepared', 'planned', 'pending_approval', 'awaiting_resume', 'approved', 'running');`,
 	}
 	for _, s := range stmts {
 		if _, err := d.SQL.ExecContext(ctx, s); err != nil {
@@ -421,6 +454,9 @@ func (d *DB) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := d.ensureMemoryDocsEmbedFingerprintColumn(ctx); err != nil {
+		return err
+	}
+	if err := d.ensureSkillRunPlanColumns(ctx); err != nil {
 		return err
 	}
 	if err := d.ensureMemoryVecIndexForExisting(ctx); err != nil {
@@ -696,6 +732,29 @@ func (d *DB) ensureMemoryDocsEmbedFingerprintColumn(ctx context.Context) error {
 	}
 	_, err = d.SQL.ExecContext(ctx, `ALTER TABLE memory_docs ADD COLUMN embed_fingerprint TEXT NOT NULL DEFAULT ''`)
 	return err
+}
+
+func (d *DB) ensureSkillRunPlanColumns(ctx context.Context) error {
+	cols := []struct {
+		name string
+		ddl  string
+	}{
+		{name: "stdin_nonce", ddl: `ALTER TABLE skill_run_plans ADD COLUMN stdin_nonce BLOB NOT NULL DEFAULT X''`},
+		{name: "stdin_sha256", ddl: `ALTER TABLE skill_run_plans ADD COLUMN stdin_sha256 TEXT NOT NULL DEFAULT ''`},
+	}
+	for _, col := range cols {
+		has, err := d.tableHasColumn(ctx, "skill_run_plans", col.name)
+		if err != nil {
+			return err
+		}
+		if has {
+			continue
+		}
+		if _, err := d.SQL.ExecContext(ctx, col.ddl); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ensureMemoryNotesMetaColumns adds lifecycle/ranking metadata columns to

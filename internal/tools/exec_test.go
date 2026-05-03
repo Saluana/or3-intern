@@ -423,12 +423,19 @@ func TestExecTool_Schema(t *testing.T) {
 // makeTestBroker creates an approval.Broker backed by a temporary SQLite database.
 // The caller must close the returned database when done.
 func makeTestBroker(t *testing.T, mode config.ApprovalMode) *approval.Broker {
+	return makeTestBrokerWithDB(t, mode, nil)
+}
+
+func makeTestBrokerWithDB(t *testing.T, mode config.ApprovalMode, database *db.DB) *approval.Broker {
 	t.Helper()
-	database, err := db.Open(filepath.Join(t.TempDir(), "exec-broker-test.db"))
-	if err != nil {
-		t.Fatalf("db.Open: %v", err)
+	if database == nil {
+		var err error
+		database, err = db.Open(filepath.Join(t.TempDir(), "exec-broker-test.db"))
+		if err != nil {
+			t.Fatalf("db.Open: %v", err)
+		}
+		t.Cleanup(func() { database.Close() })
 	}
-	t.Cleanup(func() { database.Close() })
 	cfg := config.Default().Security.Approvals
 	cfg.Enabled = true
 	cfg.HostID = "test-host"

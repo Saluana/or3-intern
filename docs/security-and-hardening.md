@@ -23,7 +23,7 @@ Phase 2 adds tighter controls around autonomous execution and skill/script execu
 - skills declare permission metadata and tool allowlists
 - script-capable skills default to quarantine until approved
 - heartbeat, webhook, and file-watch turns carry a bounded `structured_event`
-- privileged shell execution and `run_skill_script` can route through Bubblewrap
+- privileged shell execution plus `run_skill` and `run_skill_script` can route through Bubblewrap
 - `or3-intern doctor` is the main readiness and repair command and supports `--strict`, `--json`, and `--fix`
 
 ## Phase 3 additions
@@ -39,12 +39,12 @@ Phase 3 adds stronger operational controls:
 
 Set `runtimeProfile` in `config.json` (or override with `OR3_RUNTIME_PROFILE`) to declare the intended execution posture:
 
-| Profile | Intent |
-| --- | --- |
-| `local-dev` | Permissive defaults for local development; no additional security requirements enforced. |
-| `single-user-hardened` | Personal server with tighter defaults; recommended for self-hosted single-user deployments. |
-| `hosted-service` | Multi-user or public-facing service; secret-store, audit, and network policy are all required at startup. |
-| `hosted-no-exec` | Hosted service with shell execution disabled; `enableExecShell` and `privilegedTools` are forbidden. |
+| Profile                      | Intent                                                                                                          |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `local-dev`                  | Permissive defaults for local development; no additional security requirements enforced.                        |
+| `single-user-hardened`       | Personal server with tighter defaults; recommended for self-hosted single-user deployments.                     |
+| `hosted-service`             | Multi-user or public-facing service; secret-store, audit, and network policy are all required at startup.       |
+| `hosted-no-exec`             | Hosted service with shell execution disabled; `enableExecShell` and `privilegedTools` are forbidden.            |
 | `hosted-remote-sandbox-only` | Hosted service where exec is only permitted inside a sandbox; startup fails if exec is enabled without sandbox. |
 
 Hosted profiles (`hosted-*`) run strict validation at startup — `or3-intern serve` and `or3-intern service` will refuse to start if `security.secretStore`, `security.audit`, or `security.network` are absent or disabled.
@@ -52,7 +52,7 @@ Hosted profiles (`hosted-*`) run strict validation at startup — `or3-intern se
 Hosted profiles also bias the runtime toward explicit opt-in:
 
 - executable skills stay quarantined by default even if `skills.policy.quarantineByDefault` is unset
-- `hosted-no-exec` does not advertise local `exec` or `run_skill_script` capability to the skill inventory
+- `hosted-no-exec` does not advertise local `exec`, `run_skill`, or `run_skill_script` capability to the skill inventory
 - `hosted-remote-sandbox-only` only advertises local exec-capable tools when Bubblewrap sandboxing is enabled
 
 `or3-intern doctor` warns when `runtimeProfile` is not set, flags constraint violations for the active profile, and groups blockers, warnings, and fixable findings into a single readiness report.
@@ -89,10 +89,10 @@ Quota controls bound runaway tool use at two levels:
 
 When a limit is reached, `exceededAction` controls the behavior:
 
-| Action | Effect |
-| --- | --- |
-| `ask` | Create or reuse a pending `tool_quota` approval request and return a message with the approval request ID. This is the default. |
-| `fail` | Stop immediately with a hard quota error. |
+| Action | Effect                                                                                                                          |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------- |
+| `ask`  | Create or reuse a pending `tool_quota` approval request and return a message with the approval request ID. This is the default. |
+| `fail` | Stop immediately with a hard quota error.                                                                                       |
 
 Default per-message limits are `maxToolCalls=16`, `maxExecCalls=2`, `maxWebCalls=4`, and `maxSubagentCalls=2`. Default per-session limits are intentionally higher: `maxSessionToolCalls=256`, `maxSessionExecCalls=32`, `maxSessionWebCalls=64`, and `maxSessionSubagentCalls=16`.
 
@@ -141,7 +141,9 @@ The README's rollout guidance recommends:
 Phase 4 adds an explicit approval and pairing layer for runtime execution and device access:
 
 - a single internal approval broker owns all approval state, allowlist rules, and audit events
-- `exec` and `run_skill_script` enforce approval in the host-local execution path, not only in planning
+- `exec`, `run_skill`, and `run_skill_script` enforce approval in the host-local execution path, not only in planning
+- `run_skill` freezes a persistent SkillRunPlan before approval, then binds the approval token to that plan instead of to a regenerated post-approval tool call
+- preflight failures after approval are explicit drift checks, not silent retries: skill metadata, script contents, sandbox setup, and environment bindings must still match the frozen plan
 - remote operator and service clients pair with the host using a six-digit one-time code exchanged through the existing service listener
 - short-lived HMAC-signed approval tokens bind to the canonical subject hash and host ID
 - paired device tokens are stored hashed and immediately invalidated on revocation or rotation
@@ -153,12 +155,12 @@ See [Configuration reference — security.approvals](configuration-reference.md#
 
 Each domain (`exec`, `skillExecution`, `pairing`, etc.) can be set independently:
 
-| Mode | Effect |
-| --- | --- |
-| `deny` | Execution is blocked unconditionally. |
-| `ask` | Execution is blocked until an operator resolves the pending request. |
+| Mode        | Effect                                                                              |
+| ----------- | ----------------------------------------------------------------------------------- |
+| `deny`      | Execution is blocked unconditionally.                                               |
+| `ask`       | Execution is blocked until an operator resolves the pending request.                |
 | `allowlist` | Execution is allowed if a matching rule exists; otherwise blocked pending approval. |
-| `trusted` | Execution is allowed and audited without prompting. |
+| `trusted`   | Execution is allowed and audited without prompting.                                 |
 
 ### Canonical subject binding
 

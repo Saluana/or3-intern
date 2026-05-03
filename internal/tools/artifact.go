@@ -16,13 +16,13 @@ type ReadArtifact struct {
 
 func (t *ReadArtifact) Name() string { return "read_artifact" }
 func (t *ReadArtifact) Description() string {
-	return "Fetch bounded artifact content by artifact ID for the current authorized session."
+	return "Read bounded artifact content by artifact_id from an earlier tool result. Use this after read_file, web_fetch, or web_fetch_markdown reports that large output was saved as an artifact. For large artifacts, read in chunks with offset instead of requesting everything at once."
 }
 func (t *ReadArtifact) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
-		"artifact_id": map[string]any{"type": "string"},
-		"maxBytes":    map[string]any{"type": "integer", "description": "Max bytes to read (default bounded by runtime config)"},
-		"offset":      map[string]any{"type": "integer", "description": "Byte offset to start reading from, useful for reading later chunks of large artifacts"},
+		"artifact_id": map[string]any{"type": "string", "description": "Artifact identifier exactly as returned by a previous tool result."},
+		"maxBytes":    map[string]any{"type": "integer", "description": "Maximum bytes to read from the artifact. Omit to use the runtime default cap."},
+		"offset":      map[string]any{"type": "integer", "description": "Byte offset to start reading from. Use 0 or omit for the beginning; increase by prior read_bytes to continue a large artifact."},
 	}, "required": []string{"artifact_id"}}
 }
 func (t *ReadArtifact) Schema() map[string]any {

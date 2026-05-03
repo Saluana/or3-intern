@@ -8,18 +8,26 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	"or3-intern/internal/approval"
+	"or3-intern/internal/auth"
 	"or3-intern/internal/config"
 )
 
 const serviceTokenMaxAge = 5 * time.Minute
+const (
+	serviceAuthFailureWindow     = 10 * time.Minute
+	serviceAuthFailureThreshold  = 5
+	serviceAuthFailureMaxBackoff = 5 * time.Minute
+)
 
 type serviceTokenClaims struct {
 	IssuedAt int64  `json:"iat"`
@@ -30,14 +38,35 @@ type serviceAuthContextKey struct{}
 type serviceAuthKindContextKey struct{}
 
 type serviceAuthIdentity struct {
-	Kind   string
-	Actor  string
-	Role   string
-	Device string
+	Kind      string
+	Actor     string
+	Role      string
+	Device    string
+	User      string
+	Session   string
+	StepUpAt  int64
+	StepUpOK  bool
+	Challenge string
+}
+
+type serviceRouteSensitivity int
+
+const (
+	serviceRoutePublic serviceRouteSensitivity = iota
+	serviceRouteLowRisk
+	serviceRouteSensitive
+)
+
+type serviceRouteRequirement struct {
+	Sensitivity         serviceRouteSensitivity
+	SessionOnly         bool
+	BypassGlobalSession bool
+	StepUpOnly          bool
+	Reason              string
 }
 
 func serviceAuthMiddleware(secret string, next http.Handler) http.Handler {
-	return serviceAuthMiddlewareWithBroker(config.Config{Service: config.ServiceConfig{Secret: secret, SharedSecretRole: approval.RoleServiceClient}}, nil, next)
+	return serviceAuthMiddlewareWithBroker(config.Config{Service: config.ServiceConfig{Secret: secret, SharedSecretRole: approval.RoleServiceClient}}, nil, nil, next)
 }
 
 func serviceBrowserMiddleware(cfg config.Config, next http.Handler) http.Handler {
@@ -56,7 +85,11 @@ func serviceBrowserMiddleware(cfg config.Config, next http.Handler) http.Handler
 	})
 }
 
-func serviceAuthMiddlewareWithBroker(cfg config.Config, broker *approval.Broker, next http.Handler) http.Handler {
+func serviceAuthMiddlewareWithBroker(cfg config.Config, broker *approval.Broker, authSvc *auth.Service, next http.Handler) http.Handler {
+	return serviceAuthMiddlewareWithBrokerAndLimiter(cfg, broker, authSvc, nil, next)
+}
+
+func serviceAuthMiddlewareWithBrokerAndLimiter(cfg config.Config, broker *approval.Broker, authSvc *auth.Service, server *serviceServer, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if allowsUnauthenticatedPairingRoute(cfg, r) {
 			ctx := approval.ContextWithAuditAuthKind(r.Context(), "unauthenticated")
@@ -64,10 +97,48 @@ func serviceAuthMiddlewareWithBroker(cfg config.Config, broker *approval.Broker,
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
-		identity, err := authenticateServiceRequest(cfg, broker, r.Header.Get("Authorization"), time.Now(), r.Context())
+		requirement := serviceRouteRequirementForRequest(cfg, r)
+		if requirement.Sensitivity == serviceRoutePublic {
+			identity := serviceAuthIdentity{Kind: "public", Actor: "anonymous"}
+			ctx := context.WithValue(r.Context(), serviceAuthContextKey{}, identity)
+			ctx = context.WithValue(ctx, serviceAuthKindContextKey{}, identity.Kind)
+			ctx = approval.ContextWithAuditAuthKind(ctx, identity.Kind)
+			ctx = approval.ContextWithAuditActor(ctx, identity.Actor)
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+		if retryAfter := server.serviceAuthRetryAfter(r, "auth"); retryAfter > 0 {
+			writeServiceAuthRateLimit(w, r, retryAfter)
+			return
+		}
+		identity, err := authenticateServiceRequest(cfg, broker, authSvc, r.Header.Get("Authorization"), time.Now(), r.Context())
 		if err != nil {
+			server.recordServiceAuthFailure(r, "auth")
+			if challenge := serviceAuthChallengeError(cfg, authSvc, requirement, serviceAuthIdentity{}, err); challenge != nil {
+				serviceAuditAuthEvent(authSvc, r.Context(), "auth.policy.denied", serviceAuthIdentity{Actor: "anonymous"}, map[string]any{"path": r.URL.Path, "method": r.Method, "code": challenge.Code})
+				writeServiceAuthError(w, r, challenge)
+				return
+			}
+			if serviceIsPairingRoute(r) && cfg.Service.AllowUnauthenticatedPairing {
+				writeServicePairingAuthError(w, r, cfg)
+				return
+			}
 			writeServiceJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 			return
+		}
+		server.clearServiceAuthFailures(r, "auth")
+		if challenge := serviceAuthChallengeError(cfg, authSvc, requirement, identity, nil); challenge != nil {
+			if strings.EqualFold(string(cfg.Auth.EnforcementMode), string(config.AuthEnforcementWarn)) {
+				serviceAuditAuthEvent(authSvc, r.Context(), "auth.policy.warn", identity, map[string]any{"path": r.URL.Path, "method": r.Method, "code": challenge.Code})
+				w.Header().Set("X-Or3-Auth-Warning", challenge.Code)
+				if strings.TrimSpace(challenge.Message) != "" {
+					w.Header().Set("X-Or3-Auth-Reason", challenge.Message)
+				}
+			} else {
+				serviceAuditAuthEvent(authSvc, r.Context(), "auth.policy.denied", identity, map[string]any{"path": r.URL.Path, "method": r.Method, "code": challenge.Code})
+				writeServiceAuthError(w, r, challenge)
+				return
+			}
 		}
 		ctx := context.WithValue(r.Context(), serviceAuthContextKey{}, identity)
 		ctx = context.WithValue(ctx, serviceAuthKindContextKey{}, identity.Kind)
@@ -75,6 +146,121 @@ func serviceAuthMiddlewareWithBroker(cfg config.Config, broker *approval.Broker,
 		ctx = approval.ContextWithAuditActor(ctx, identity.Actor)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func writeServicePairingAuthError(w http.ResponseWriter, r *http.Request, cfg config.Config) {
+	payload := serviceErrorPayload(r, "unauthenticated pairing is only allowed from this computer or a trusted browser origin")
+	payload["code"] = "trusted_pairing_required"
+	if !cfg.Service.AllowRemoteUnauthenticatedPairing {
+		payload["error"] = "unauthenticated pairing is only available from the local computer right now"
+		payload["code"] = "local_pairing_required"
+	} else if len(cfg.Service.TrustedPairingOrigins) > 0 {
+		payload["trusted_origins"] = append([]string{}, cfg.Service.TrustedPairingOrigins...)
+	}
+	writeServiceJSON(w, http.StatusUnauthorized, payload)
+}
+
+func (s *serviceServer) serviceAuthRetryAfter(r *http.Request, scope string) int {
+	if s == nil || r == nil {
+		return 0
+	}
+	now := time.Now().UTC()
+	keys := serviceAuthFailureKeys(r, scope)
+	s.authFailureMu.Lock()
+	defer s.authFailureMu.Unlock()
+	for _, key := range keys {
+		state, ok := s.authFailures[key]
+		if !ok {
+			continue
+		}
+		if now.Sub(state.FirstAttempt) > serviceAuthFailureWindow {
+			delete(s.authFailures, key)
+			continue
+		}
+		if state.BlockedUntil.After(now) {
+			return int(time.Until(state.BlockedUntil).Seconds()) + 1
+		}
+	}
+	return 0
+}
+
+func (s *serviceServer) recordServiceAuthFailure(r *http.Request, scope string) {
+	if s == nil || r == nil {
+		return
+	}
+	now := time.Now().UTC()
+	keys := serviceAuthFailureKeys(r, scope)
+	s.authFailureMu.Lock()
+	defer s.authFailureMu.Unlock()
+	if s.authFailures == nil {
+		s.authFailures = map[string]serviceAuthFailureState{}
+	}
+	for _, key := range keys {
+		state := s.authFailures[key]
+		if state.FirstAttempt.IsZero() || now.Sub(state.FirstAttempt) > serviceAuthFailureWindow {
+			state = serviceAuthFailureState{FirstAttempt: now}
+		}
+		state.Count++
+		if state.Count > serviceAuthFailureThreshold {
+			excess := state.Count - serviceAuthFailureThreshold
+			backoff := time.Duration(1<<min(excess-1, 8)) * time.Second
+			if backoff > serviceAuthFailureMaxBackoff {
+				backoff = serviceAuthFailureMaxBackoff
+			}
+			state.BlockedUntil = now.Add(backoff)
+		}
+		s.authFailures[key] = state
+	}
+}
+
+func (s *serviceServer) clearServiceAuthFailures(r *http.Request, scope string) {
+	if s == nil || r == nil {
+		return
+	}
+	keys := serviceAuthFailureKeys(r, scope)
+	s.authFailureMu.Lock()
+	defer s.authFailureMu.Unlock()
+	for _, key := range keys {
+		delete(s.authFailures, key)
+	}
+}
+
+func serviceAuthFailureKeys(r *http.Request, scope string) []string {
+	scope = strings.TrimSpace(scope)
+	if scope == "" {
+		scope = "auth"
+	}
+	ip := remoteIPKey(r.RemoteAddr)
+	keys := make([]string, 0, 2)
+	if ip != "" {
+		keys = append(keys, scope+":ip:"+ip)
+	}
+	if credential := serviceAuthCredentialKey(r); credential != "" {
+		keys = append(keys, scope+":credential:"+credential)
+	}
+	return keys
+}
+
+func serviceAuthCredentialKey(r *http.Request) string {
+	credential := serviceFirstNonEmpty(
+		strings.TrimSpace(r.Header.Get("Authorization")),
+		strings.TrimSpace(r.Header.Get("X-Or3-Session")),
+		strings.TrimSpace(r.Header.Get("X-Auth-Session")),
+		strings.TrimSpace(r.URL.Query().Get("session_token")),
+	)
+	if credential == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(credential))
+	return hex.EncodeToString(sum[:12])
+}
+
+func writeServiceAuthRateLimit(w http.ResponseWriter, r *http.Request, retryAfter int) {
+	if retryAfter <= 0 {
+		retryAfter = 1
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+	writeServiceJSON(w, http.StatusTooManyRequests, map[string]any{"error": "too many authentication attempts", "retry_after_seconds": retryAfter})
 }
 
 func serviceAllowedBrowserOrigin(cfg config.Config, r *http.Request) (string, bool) {
@@ -85,12 +271,6 @@ func serviceAllowedBrowserOrigin(cfg config.Config, r *http.Request) (string, bo
 	if origin == "" {
 		return "", false
 	}
-	if !serviceListenIsLoopback(cfg.Service.Listen) {
-		return "", false
-	}
-	if strings.TrimSpace(r.RemoteAddr) != "" && !requestRemoteIsLoopback(r.RemoteAddr) {
-		return "", false
-	}
 	parsed, err := url.Parse(origin)
 	if err != nil {
 		return "", false
@@ -98,14 +278,102 @@ func serviceAllowedBrowserOrigin(cfg config.Config, r *http.Request) (string, bo
 	if !strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https") {
 		return "", false
 	}
+	if serviceOriginIsLoopback(parsed) && serviceListenIsLoopback(cfg.Service.Listen) && (strings.TrimSpace(r.RemoteAddr) == "" || requestRemoteIsLoopback(r.RemoteAddr)) {
+		return origin, true
+	}
+	if serviceTrustedBrowserRequest(cfg, r, parsed) {
+		return origin, true
+	}
+	return "", false
+}
+
+func serviceOriginIsLoopback(parsed *url.URL) bool {
+	if parsed == nil {
+		return false
+	}
 	host := strings.TrimSpace(parsed.Hostname())
 	if host == "" {
-		return "", false
+		return false
 	}
 	if ip := net.ParseIP(host); ip != nil {
-		return origin, ip.IsLoopback()
+		return ip.IsLoopback()
 	}
-	return origin, strings.EqualFold(host, "localhost")
+	return strings.EqualFold(host, "localhost")
+}
+
+func serviceTrustedBrowserRequest(cfg config.Config, r *http.Request, parsedOrigin *url.URL) bool {
+	if r == nil || parsedOrigin == nil {
+		return false
+	}
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if !serviceOriginInAllowlist(origin, serviceTrustedBrowserOrigins(cfg)) {
+		return false
+	}
+	return requestRemoteInCIDRAllowlist(r.RemoteAddr, serviceTrustedBrowserCIDRs(cfg))
+}
+
+func serviceTrustedRemotePairingRequest(cfg config.Config, r *http.Request, parsedOrigin *url.URL) bool {
+	if !serviceIsPairingRoute(r) {
+		return false
+	}
+	if !cfg.Service.AllowRemoteUnauthenticatedPairing || r == nil || parsedOrigin == nil {
+		return false
+	}
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if !serviceOriginInAllowlist(origin, cfg.Service.TrustedPairingOrigins) {
+		return false
+	}
+	return requestRemoteInCIDRAllowlist(r.RemoteAddr, cfg.Service.TrustedPairingCIDRs)
+}
+
+func serviceTrustedBrowserOrigins(cfg config.Config) []string {
+	origins := append([]string{}, cfg.Service.TrustedBrowserOrigins...)
+	origins = append(origins, cfg.Service.TrustedPairingOrigins...)
+	return origins
+}
+
+func serviceTrustedBrowserCIDRs(cfg config.Config) []string {
+	cidrs := append([]string{}, cfg.Service.TrustedBrowserCIDRs...)
+	cidrs = append(cidrs, cfg.Service.TrustedPairingCIDRs...)
+	return cidrs
+}
+
+func serviceOriginInAllowlist(origin string, allowlist []string) bool {
+	origin = strings.TrimRight(strings.TrimSpace(origin), "/")
+	if origin == "" {
+		return false
+	}
+	for _, allowed := range allowlist {
+		if strings.EqualFold(origin, strings.TrimRight(strings.TrimSpace(allowed), "/")) {
+			return true
+		}
+	}
+	return false
+}
+
+func requestRemoteInCIDRAllowlist(addr string, allowlist []string) bool {
+	host := strings.TrimSpace(addr)
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
+	}
+	host = strings.Trim(host, "[]")
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	for _, allowed := range allowlist {
+		allowed = strings.TrimSpace(allowed)
+		if allowed == "" {
+			continue
+		}
+		if _, network, err := net.ParseCIDR(allowed); err == nil && network.Contains(ip) {
+			return true
+		}
+		if allowedIP := net.ParseIP(allowed); allowedIP != nil && allowedIP.Equal(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func serviceIsCORSPreflight(r *http.Request) bool {
@@ -150,7 +418,7 @@ func serviceAppendVary(header http.Header, value string) {
 	header.Add("Vary", value)
 }
 
-func authenticateServiceRequest(cfg config.Config, broker *approval.Broker, header string, now time.Time, ctx context.Context) (serviceAuthIdentity, error) {
+func authenticateServiceRequest(cfg config.Config, broker *approval.Broker, authSvc *auth.Service, header string, now time.Time, ctx context.Context) (serviceAuthIdentity, error) {
 	if err := validateServiceAuthorization(cfg.Service.Secret, header, now); err == nil {
 		role := strings.TrimSpace(cfg.Service.SharedSecretRole)
 		if role == "" {
@@ -158,18 +426,38 @@ func authenticateServiceRequest(cfg config.Config, broker *approval.Broker, head
 		}
 		return serviceAuthIdentity{Kind: "shared-secret", Actor: "service:shared-secret", Role: role}, nil
 	}
-	if broker == nil {
-		return serviceAuthIdentity{}, fmt.Errorf("missing bearer token")
-	}
 	scheme, token, ok := strings.Cut(strings.TrimSpace(header), " ")
 	if !ok || !strings.EqualFold(scheme, "Bearer") || strings.TrimSpace(token) == "" {
 		return serviceAuthIdentity{}, fmt.Errorf("missing bearer token")
 	}
-	device, err := broker.AuthenticateDeviceToken(ctx, token)
-	if err != nil {
+	if broker != nil {
+		device, err := broker.AuthenticateDeviceToken(ctx, token)
+		if err == nil {
+			return serviceAuthIdentity{Kind: "paired-device", Actor: "device:" + device.DeviceID, Role: device.Role, Device: device.DeviceID}, nil
+		}
+	}
+	if authSvc != nil && authSvc.Enabled() {
+		claims, err := authSvc.ValidateSessionToken(ctx, token)
+		if err == nil {
+			actor := "user:" + claims.User.ID
+			if strings.TrimSpace(claims.Session.DeviceID) != "" {
+				actor = actor + ":device:" + claims.Session.DeviceID
+			}
+			return serviceAuthIdentity{
+				Kind:      "auth-session",
+				Actor:     actor,
+				Role:      claims.Role,
+				Device:    claims.Session.DeviceID,
+				User:      claims.User.ID,
+				Session:   claims.Session.ID,
+				StepUpAt:  claims.Session.LastStepUpAt,
+				StepUpOK:  authSvc.HasRecentStepUp(claims.Session),
+				Challenge: token,
+			}, nil
+		}
 		return serviceAuthIdentity{}, err
 	}
-	return serviceAuthIdentity{Kind: "paired-device", Actor: "device:" + device.DeviceID, Role: device.Role, Device: device.DeviceID}, nil
+	return serviceAuthIdentity{}, fmt.Errorf("invalid bearer token")
 }
 
 func serviceAuthIdentityFromContext(ctx context.Context) serviceAuthIdentity {
@@ -198,17 +486,157 @@ func allowsUnauthenticatedPairingRoute(cfg config.Config, r *http.Request) bool 
 	if !cfg.Service.AllowUnauthenticatedPairing {
 		return false
 	}
-	if !serviceListenIsLoopback(cfg.Service.Listen) {
-		return false
-	}
-	if !requestRemoteIsLoopback(r.RemoteAddr) {
-		return false
-	}
 	if r.Method != http.MethodPost {
+		return false
+	}
+	if !serviceIsPairingRoute(r) {
+		return false
+	}
+	if serviceListenIsLoopback(cfg.Service.Listen) && requestRemoteIsLoopback(r.RemoteAddr) {
+		return true
+	}
+	origin, err := url.Parse(strings.TrimSpace(r.Header.Get("Origin")))
+	if err != nil {
+		return false
+	}
+	return serviceTrustedRemotePairingRequest(cfg, r, origin)
+}
+
+func serviceIsPairingRoute(r *http.Request) bool {
+	if r == nil || r.URL == nil {
 		return false
 	}
 	path := strings.TrimSpace(r.URL.Path)
 	return path == "/internal/v1/pairing/requests" || path == "/internal/v1/pairing/exchange"
+}
+
+func serviceRouteRequirementForRequest(cfg config.Config, r *http.Request) serviceRouteRequirement {
+	requirement := serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
+	if r == nil || r.URL == nil {
+		return requirement
+	}
+	path := strings.TrimSpace(r.URL.Path)
+	method := r.Method
+	switch {
+	case path == "/internal/v1/health", path == "/internal/v1/ready", path == "/internal/v1/readiness":
+		return serviceRouteRequirement{Sensitivity: serviceRoutePublic}
+	case path == "/internal/v1/auth/capabilities":
+		return serviceRouteRequirement{Sensitivity: serviceRoutePublic}
+	case path == "/internal/v1/auth/passkeys/login/begin", path == "/internal/v1/auth/passkeys/login/finish":
+		return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, BypassGlobalSession: true}
+	case path == "/internal/v1/auth/passkeys/registration/begin", path == "/internal/v1/auth/passkeys/registration/finish":
+		return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
+	case path == "/internal/v1/auth/session" || path == "/internal/v1/auth/session/revoke":
+		return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, SessionOnly: true}
+	case path == "/internal/v1/auth/step-up/begin" || path == "/internal/v1/auth/step-up/finish":
+		return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, SessionOnly: true}
+	case strings.HasPrefix(path, "/internal/v1/auth/passkeys"):
+		if method == http.MethodGet && path == "/internal/v1/auth/passkeys" {
+			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, SessionOnly: true}
+		}
+		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "recent passkey verification required"}
+	case path == "/internal/v1/devices":
+		return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
+	case strings.HasPrefix(path, "/internal/v1/devices/"):
+		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "device management requires recent passkey verification"}
+	case path == "/internal/v1/app/bootstrap":
+		return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, BypassGlobalSession: true}
+	case path == "/internal/v1/actions/restart-service":
+		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "restarting the service requires recent passkey verification"}
+	case path == "/internal/v1/configure" || strings.HasPrefix(path, "/internal/v1/configure/"):
+		if method == http.MethodGet {
+			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
+		}
+		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "configuration changes require recent passkey verification"}
+	case path == "/internal/v1/skills" || strings.HasPrefix(path, "/internal/v1/skills/"):
+		if method == http.MethodGet {
+			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
+		}
+		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "skill settings require recent passkey verification"}
+	case path == "/internal/v1/files" || strings.HasPrefix(path, "/internal/v1/files/"):
+		relative := strings.Trim(strings.TrimPrefix(path, "/internal/v1/files"), "/")
+		if method == http.MethodGet || relative == "roots" || relative == "list" || relative == "search" || relative == "stat" || relative == "read" || relative == "download" {
+			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
+		}
+		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "file changes require recent passkey verification"}
+	case path == "/internal/v1/terminal/sessions" || strings.HasPrefix(path, "/internal/v1/terminal/sessions/"):
+		if method == http.MethodGet && !strings.Contains(strings.TrimPrefix(path, "/internal/v1/terminal/sessions/"), "/input") {
+			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, SessionOnly: true}
+		}
+		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "terminal access requires recent passkey verification"}
+	case path == "/internal/v1/approvals" || strings.HasPrefix(path, "/internal/v1/approvals/"):
+		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "approval changes require recent passkey verification"}
+	case method == http.MethodDelete || method == http.MethodPatch || method == http.MethodPut:
+		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, Reason: "recent passkey verification required"}
+	default:
+		mode := string(cfg.Auth.EnforcementMode)
+		if strings.EqualFold(mode, string(config.AuthEnforcementSession)) {
+			requirement.SessionOnly = true
+		}
+		return requirement
+	}
+}
+
+func serviceAuthChallengeError(cfg config.Config, authSvc *auth.Service, requirement serviceRouteRequirement, identity serviceAuthIdentity, authErr error) *auth.Error {
+	if requirement.Sensitivity == serviceRoutePublic {
+		return nil
+	}
+	if !cfg.Auth.Enabled {
+		return nil
+	}
+	mode := string(cfg.Auth.EnforcementMode)
+	if strings.EqualFold(mode, string(config.AuthEnforcementOff)) {
+		return nil
+	}
+	if authErr != nil {
+		var typed *auth.Error
+		if errors.As(authErr, &typed) {
+			return typed
+		}
+		if authSvc == nil || !authSvc.Enabled() {
+			return auth.ErrAuthDisabled
+		}
+		if requirement.SessionOnly || (strings.EqualFold(mode, string(config.AuthEnforcementSession)) && !requirement.BypassGlobalSession) {
+			return auth.ErrSessionRequired
+		}
+		if requirement.Sensitivity == serviceRouteSensitive {
+			return auth.ErrPasskeyRequired
+		}
+		return nil
+	}
+	if strings.EqualFold(identity.Kind, "shared-secret") {
+		return nil
+	}
+	enforceSession := requirement.SessionOnly || (strings.EqualFold(mode, string(config.AuthEnforcementSession)) && !requirement.BypassGlobalSession)
+	if enforceSession && identity.Kind != "auth-session" {
+		return auth.ErrSessionRequired
+	}
+	if requirement.Sensitivity != serviceRouteSensitive {
+		return nil
+	}
+	if identity.Kind != "auth-session" {
+		return auth.ErrPasskeyRequired
+	}
+	if requirement.StepUpOnly || strings.TrimSpace(requirement.Reason) != "" {
+		if !identity.StepUpOK {
+			return auth.ErrRecentStepUp
+		}
+	}
+	return nil
+}
+
+func serviceAuditAuthEvent(authSvc *auth.Service, ctx context.Context, eventType string, identity serviceAuthIdentity, payload map[string]any) {
+	if authSvc == nil {
+		return
+	}
+	actor := strings.TrimSpace(identity.User)
+	if actor == "" {
+		actor = strings.TrimSpace(identity.Actor)
+	}
+	if actor == "" {
+		actor = "anonymous"
+	}
+	authSvc.Audit(ctx, eventType, actor, payload)
 }
 
 func requireServiceRole(w http.ResponseWriter, r *http.Request, roles ...string) bool {

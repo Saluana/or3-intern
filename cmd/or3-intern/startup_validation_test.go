@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
@@ -66,24 +67,51 @@ func TestValidateStartupCommand_HostedNoExecAllowsRemoteMCPWithSafeNetworkPostur
 	}
 }
 
-func TestValidateStartupCommand_RemoteSandboxRejectsBroadLocalExecWithoutSandbox(t *testing.T) {
+func TestValidateStartupCommand_RemoteSandboxWarnsButAllowsBroadLocalExecWithoutSandbox(t *testing.T) {
 	cfg := hostedStartupConfig()
 	cfg.RuntimeProfile = config.ProfileHostedRemoteSandbox
 	cfg.Service.Secret = strings.Repeat("s", 32)
 	cfg.Hardening.PrivilegedTools = true
+	var warnings bytes.Buffer
+	prev := startupWarningWriter
+	startupWarningWriter = &warnings
+	defer func() { startupWarningWriter = prev }()
+
+	err := validateStartupCommand("service", cfg, false)
+	if err != nil {
+		t.Fatalf("expected hosted-remote-sandbox-only startup validation to warn and continue, got %v", err)
+	}
+	text := warnings.String()
+	if !strings.Contains(text, "warning: service startup continuing without sandbox protection") {
+		t.Fatalf("expected startup warning, got %q", text)
+	}
+	if !strings.Contains(text, "privileged tools are enabled without Bubblewrap sandboxing") {
+		t.Fatalf("expected Bubblewrap warning summary, got %q", text)
+	}
+	if !strings.Contains(text, "doctor --fix --interactive") {
+		t.Fatalf("expected interactive guidance, got %q", text)
+	}
+}
+
+func TestValidateStartupCommand_StillRejectsOtherBlockersWhenSandboxWarningPresent(t *testing.T) {
+	cfg := hostedStartupConfig()
+	cfg.RuntimeProfile = config.ProfileHostedRemoteSandbox
+	cfg.Service.Secret = "short-secret"
+	cfg.Hardening.PrivilegedTools = true
+	var warnings bytes.Buffer
+	prev := startupWarningWriter
+	startupWarningWriter = &warnings
+	defer func() { startupWarningWriter = prev }()
 
 	err := validateStartupCommand("service", cfg, false)
 	if err == nil {
-		t.Fatal("expected hosted-remote-sandbox-only startup validation to fail")
+		t.Fatal("expected weak secret to remain a startup blocker")
 	}
-	if !strings.Contains(err.Error(), "Bubblewrap sandboxing") {
-		t.Fatalf("expected sandbox refusal, got %v", err)
+	if !strings.Contains(err.Error(), "weak shared secret") {
+		t.Fatalf("expected weak shared secret blocker, got %v", err)
 	}
-	if strings.Contains(err.Error(), "doctor --fix`") {
-		t.Fatalf("expected manual blocker not to recommend plain doctor --fix, got %v", err)
-	}
-	if !strings.Contains(err.Error(), "fix the configuration manually") {
-		t.Fatalf("expected manual guidance, got %v", err)
+	if !strings.Contains(warnings.String(), "without sandbox protection") {
+		t.Fatalf("expected sandbox warning to still be emitted, got %q", warnings.String())
 	}
 }
 

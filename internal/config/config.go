@@ -5,6 +5,7 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/url"
 	"os"
@@ -18,6 +19,9 @@ import (
 type RuntimeProfile string
 
 const (
+	// DefaultMaxToolBytes is the default direct tool-result budget before artifact spillover.
+	DefaultMaxToolBytes = 96 * 1024
+
 	// ProfileLocalDev is the default profile for local development workflows.
 	ProfileLocalDev RuntimeProfile = "local-dev"
 	// ProfileSingleUserHardened tightens local defaults for a single trusted user.
@@ -95,26 +99,27 @@ func ProfileSpec(p RuntimeProfile) RuntimeProfileSpec {
 
 // Config is the top-level persisted runtime configuration.
 type Config struct {
-	DBPath                 string `json:"dbPath"`
-	ArtifactsDir           string `json:"artifactsDir"`
-	WorkspaceDir           string `json:"workspaceDir"`
-	AllowedDir             string `json:"allowedDir"`
-	DefaultSessionKey      string `json:"defaultSessionKey"`
-	SoulFile               string `json:"soulFile"`
-	AgentsFile             string `json:"agentsFile"`
-	ToolsFile              string `json:"toolsFile"`
-	BootstrapMaxChars      int    `json:"bootstrapMaxChars"`
-	BootstrapTotalMaxChars int    `json:"bootstrapTotalMaxChars"`
-	SessionCache           int    `json:"sessionCacheLimit"`
-	HistoryMax             int    `json:"historyMaxMessages"`
-	MaxToolBytes           int    `json:"maxToolBytes"`
-	MaxMediaBytes          int    `json:"maxMediaBytes"`
-	MaxToolLoops           int    `json:"maxToolLoops"`
-	MemoryRetrieve         int    `json:"memoryRetrieveLimit"`
-	VectorK                int    `json:"vectorSearchK"`
-	FTSK                   int    `json:"ftsSearchK"`
-	VectorScanLimit        int    `json:"vectorScanLimit"`
-	WorkerCount            int    `json:"workerCount"`
+	DBPath                     string              `json:"dbPath"`
+	ArtifactsDir               string              `json:"artifactsDir"`
+	WorkspaceDir               string              `json:"workspaceDir"`
+	AllowedDir                 string              `json:"allowedDir"`
+	DefaultSessionKey          string              `json:"defaultSessionKey"`
+	SoulFile                   string              `json:"soulFile"`
+	AgentsFile                 string              `json:"agentsFile"`
+	ToolsFile                  string              `json:"toolsFile"`
+	BootstrapMaxChars          int                 `json:"bootstrapMaxChars"`
+	BootstrapTotalMaxChars     int                 `json:"bootstrapTotalMaxChars"`
+	SessionCache               int                 `json:"sessionCacheLimit"`
+	HistoryMax                 int                 `json:"historyMaxMessages"`
+	MaxToolBytes               int                 `json:"maxToolBytes"`
+	MaxMediaBytes              int                 `json:"maxMediaBytes"`
+	MaxToolLoops               int                 `json:"maxToolLoops"`
+	MaxToolLoopsExceededAction QuotaExceededAction `json:"maxToolLoopsExceededAction"`
+	MemoryRetrieve             int                 `json:"memoryRetrieveLimit"`
+	VectorK                    int                 `json:"vectorSearchK"`
+	FTSK                       int                 `json:"ftsSearchK"`
+	VectorScanLimit            int                 `json:"vectorScanLimit"`
+	WorkerCount                int                 `json:"workerCount"`
 
 	ConsolidationEnabled             bool            `json:"consolidationEnabled"`
 	ConsolidationModel               string          `json:"consolidationModel"`
@@ -131,6 +136,7 @@ type Config struct {
 	Skills       SkillsConfig   `json:"skills"`
 	Triggers     TriggerConfig  `json:"triggers"`
 	Session      SessionConfig  `json:"session"`
+	Auth         AuthConfig     `json:"auth"`
 	Security     SecurityConfig `json:"security"`
 
 	Provider          ProviderConfig       `json:"provider"`
@@ -228,13 +234,25 @@ type SandboxConfig struct {
 	WritablePaths  []string `json:"writablePaths"`
 }
 
-// HardeningQuotaConfig limits how many sensitive tool calls a turn may issue.
+type QuotaExceededAction string
+
+const (
+	QuotaExceededActionAsk  QuotaExceededAction = "ask"
+	QuotaExceededActionFail QuotaExceededAction = "fail"
+)
+
+// HardeningQuotaConfig limits how many sensitive tool calls a message and session may issue.
 type HardeningQuotaConfig struct {
-	Enabled          bool `json:"enabled"`
-	MaxToolCalls     int  `json:"maxToolCalls"`
-	MaxExecCalls     int  `json:"maxExecCalls"`
-	MaxWebCalls      int  `json:"maxWebCalls"`
-	MaxSubagentCalls int  `json:"maxSubagentCalls"`
+	Enabled                 bool                `json:"enabled"`
+	ExceededAction          QuotaExceededAction `json:"exceededAction"`
+	MaxToolCalls            int                 `json:"maxToolCalls"`
+	MaxExecCalls            int                 `json:"maxExecCalls"`
+	MaxWebCalls             int                 `json:"maxWebCalls"`
+	MaxSubagentCalls        int                 `json:"maxSubagentCalls"`
+	MaxSessionToolCalls     int                 `json:"maxSessionToolCalls"`
+	MaxSessionExecCalls     int                 `json:"maxSessionExecCalls"`
+	MaxSessionWebCalls      int                 `json:"maxSessionWebCalls"`
+	MaxSessionSubagentCalls int                 `json:"maxSessionSubagentCalls"`
 }
 
 // ProviderConfig selects the LLM and embedding provider endpoints and limits.
@@ -256,6 +274,7 @@ type ToolsConfig struct {
 	EnableExec          bool                       `json:"enableExec"`
 	ExecTimeoutSeconds  int                        `json:"execTimeoutSeconds"`
 	RestrictToWorkspace bool                       `json:"restrictToWorkspace"`
+	AllowFullFileRead   bool                       `json:"allowFullFileRead"`
 	PathAppend          string                     `json:"pathAppend"`
 	MCPServers          map[string]MCPServerConfig `json:"mcpServers"`
 }
@@ -303,13 +322,18 @@ type HeartbeatConfig struct {
 
 // ServiceConfig configures the optional authenticated service listener.
 type ServiceConfig struct {
-	Enabled                     bool   `json:"enabled"`
-	Listen                      string `json:"listen"`
-	Secret                      string `json:"secret"`
-	SharedSecretRole            string `json:"sharedSecretRole"`
-	MaxCapability               string `json:"maxCapability"`
-	AllowUnauthenticatedPairing bool   `json:"allowUnauthenticatedPairing"`
-	MutationRateLimitPerMinute  int    `json:"mutationRateLimitPerMinute"`
+	Enabled                           bool     `json:"enabled"`
+	Listen                            string   `json:"listen"`
+	Secret                            string   `json:"secret"`
+	SharedSecretRole                  string   `json:"sharedSecretRole"`
+	MaxCapability                     string   `json:"maxCapability"`
+	AllowUnauthenticatedPairing       bool     `json:"allowUnauthenticatedPairing"`
+	AllowRemoteUnauthenticatedPairing bool     `json:"allowRemoteUnauthenticatedPairing"`
+	TrustedBrowserOrigins             []string `json:"trustedBrowserOrigins"`
+	TrustedBrowserCIDRs               []string `json:"trustedBrowserCIDRs"`
+	TrustedPairingOrigins             []string `json:"trustedPairingOrigins"`
+	TrustedPairingCIDRs               []string `json:"trustedPairingCIDRs"`
+	MutationRateLimitPerMinute        int      `json:"mutationRateLimitPerMinute"`
 }
 
 // SubagentsConfig limits the internal subagent queue and worker pool.
@@ -449,9 +473,11 @@ type SkillPolicyConfig struct {
 
 // SkillsLoadConfig controls additional skill directories and file watching.
 type SkillsLoadConfig struct {
-	ExtraDirs       []string `json:"extraDirs"`
-	Watch           bool     `json:"watch"`
-	WatchDebounceMS int      `json:"watchDebounceMs"`
+	ExtraDirs        []string `json:"extraDirs"`
+	GlobalDir        string   `json:"globalDir"`
+	DisableGlobalDir bool     `json:"disableGlobalDir"`
+	Watch            bool     `json:"watch"`
+	WatchDebounceMS  int      `json:"watchDebounceMs"`
 }
 
 // SkillEntryConfig overrides configuration for a single named skill.
@@ -501,6 +527,34 @@ type SessionConfig struct {
 type SessionIdentityLink struct {
 	Canonical string   `json:"canonical"`
 	Peers     []string `json:"peers"`
+}
+
+type AuthEnforcementMode string
+
+const (
+	AuthEnforcementOff              AuthEnforcementMode = "off"
+	AuthEnforcementWarn             AuthEnforcementMode = "warn"
+	AuthEnforcementSensitive        AuthEnforcementMode = "enforce-sensitive"
+	AuthEnforcementSession          AuthEnforcementMode = "enforce-session"
+	AuthFallbackPairedTokenOnly     string              = "paired-token-only"
+	AuthFallbackPairedTokenPlusWarn string              = "paired-token-plus-warning"
+	AuthFallbackAdminRecoveryOnly   string              = "admin-recovery-only"
+)
+
+// AuthConfig configures passkey, session, and recent-auth behavior for the service API.
+type AuthConfig struct {
+	Enabled                    bool                `json:"enabled"`
+	RPID                       string              `json:"rpId"`
+	RPDisplayName              string              `json:"rpDisplayName"`
+	AllowedOrigins             []string            `json:"allowedOrigins"`
+	RelatedOrigins             []string            `json:"relatedOrigins"`
+	SessionIdleTTLSeconds      int                 `json:"sessionIdleTtlSeconds"`
+	SessionAbsoluteTTLSeconds  int                 `json:"sessionAbsoluteTtlSeconds"`
+	StepUpTTLSeconds           int                 `json:"stepUpTtlSeconds"`
+	FallbackPolicy             string              `json:"fallbackPolicy"`
+	EnforcementMode            AuthEnforcementMode `json:"enforcementMode"`
+	AllowPairedTokenFallback   bool                `json:"allowPairedTokenFallback"`
+	RequirePasskeyForSensitive bool                `json:"requirePasskeyForSensitive"`
 }
 
 type ApprovalMode string
@@ -600,9 +654,10 @@ func Default() Config {
 		BootstrapTotalMaxChars:           150000,
 		SessionCache:                     64,
 		HistoryMax:                       40,
-		MaxToolBytes:                     24 * 1024,
+		MaxToolBytes:                     DefaultMaxToolBytes,
 		MaxMediaBytes:                    20 * 1024 * 1024,
 		MaxToolLoops:                     6,
+		MaxToolLoopsExceededAction:       QuotaExceededActionAsk,
 		MemoryRetrieve:                   8,
 		VectorK:                          8,
 		FTSK:                             8,
@@ -640,6 +695,7 @@ func Default() Config {
 				TrustedRegistries:   []string{},
 			},
 			Load: SkillsLoadConfig{
+				GlobalDir:       filepath.Join(home, ".agents", "skills"),
 				Watch:           false,
 				WatchDebounceMS: 250,
 			},
@@ -665,6 +721,20 @@ func Default() Config {
 		Session: SessionConfig{
 			DirectMessagesShareDefault: false,
 			IdentityLinks:              []SessionIdentityLink{},
+		},
+		Auth: AuthConfig{
+			Enabled:                    false,
+			RPID:                       "",
+			RPDisplayName:              "OR3",
+			AllowedOrigins:             []string{},
+			RelatedOrigins:             []string{},
+			SessionIdleTTLSeconds:      1800,
+			SessionAbsoluteTTLSeconds:  43200,
+			StepUpTTLSeconds:           300,
+			FallbackPolicy:             AuthFallbackPairedTokenPlusWarn,
+			EnforcementMode:            AuthEnforcementOff,
+			AllowPairedTokenFallback:   true,
+			RequirePasskeyForSensitive: true,
 		},
 		Security: SecurityConfig{
 			SecretStore: SecretStoreConfig{
@@ -721,6 +791,7 @@ func Default() Config {
 			EnableExec:          false,
 			ExecTimeoutSeconds:  60,
 			RestrictToWorkspace: true,
+			AllowFullFileRead:   false,
 			PathAppend:          "",
 			MCPServers:          map[string]MCPServerConfig{},
 		},
@@ -738,22 +809,32 @@ func Default() Config {
 				WritablePaths:  []string{},
 			},
 			Quotas: HardeningQuotaConfig{
-				Enabled:          true,
-				MaxToolCalls:     16,
-				MaxExecCalls:     2,
-				MaxWebCalls:      4,
-				MaxSubagentCalls: 2,
+				Enabled:                 true,
+				ExceededAction:          QuotaExceededActionAsk,
+				MaxToolCalls:            16,
+				MaxExecCalls:            2,
+				MaxWebCalls:             4,
+				MaxSubagentCalls:        2,
+				MaxSessionToolCalls:     256,
+				MaxSessionExecCalls:     32,
+				MaxSessionWebCalls:      64,
+				MaxSessionSubagentCalls: 16,
 			},
 		},
 		Cron: CronConfig{Enabled: true, StorePath: filepath.Join(root, "cron.json")},
 		Service: ServiceConfig{
-			Enabled:                     false,
-			Listen:                      "127.0.0.1:9100",
-			Secret:                      "",
-			SharedSecretRole:            "service-client",
-			MaxCapability:               "safe",
-			AllowUnauthenticatedPairing: false,
-			MutationRateLimitPerMinute:  60,
+			Enabled:                           false,
+			Listen:                            "127.0.0.1:9100",
+			Secret:                            "",
+			SharedSecretRole:                  "service-client",
+			MaxCapability:                     "safe",
+			AllowUnauthenticatedPairing:       false,
+			AllowRemoteUnauthenticatedPairing: false,
+			TrustedBrowserOrigins:             []string{},
+			TrustedBrowserCIDRs:               []string{},
+			TrustedPairingOrigins:             []string{},
+			TrustedPairingCIDRs:               []string{},
+			MutationRateLimitPerMinute:        60,
 		},
 		Heartbeat: HeartbeatConfig{
 			Enabled:         false,
@@ -936,6 +1017,71 @@ func ApplyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("OR3_SERVICE_SECRET"); v != "" {
 		cfg.Service.Secret = v
 	}
+	if v := os.Getenv("OR3_SERVICE_ALLOW_REMOTE_UNAUTHENTICATED_PAIRING"); v != "" {
+		if parsed, err := strconv.ParseBool(v); err == nil {
+			cfg.Service.AllowRemoteUnauthenticatedPairing = parsed
+		}
+	}
+	if v := os.Getenv("OR3_SERVICE_TRUSTED_BROWSER_ORIGINS"); v != "" {
+		cfg.Service.TrustedBrowserOrigins = compactStrings(strings.Split(v, ","))
+	}
+	if v := os.Getenv("OR3_SERVICE_TRUSTED_BROWSER_CIDRS"); v != "" {
+		cfg.Service.TrustedBrowserCIDRs = compactStrings(strings.Split(v, ","))
+	}
+	if v := os.Getenv("OR3_SERVICE_TRUSTED_PAIRING_ORIGINS"); v != "" {
+		cfg.Service.TrustedPairingOrigins = compactStrings(strings.Split(v, ","))
+	}
+	if v := os.Getenv("OR3_SERVICE_TRUSTED_PAIRING_CIDRS"); v != "" {
+		cfg.Service.TrustedPairingCIDRs = compactStrings(strings.Split(v, ","))
+	}
+	if v := os.Getenv("OR3_AUTH_ENABLED"); v != "" {
+		if parsed, err := strconv.ParseBool(v); err == nil {
+			cfg.Auth.Enabled = parsed
+		}
+	}
+	if v := os.Getenv("OR3_AUTH_RP_ID"); v != "" {
+		cfg.Auth.RPID = v
+	}
+	if v := os.Getenv("OR3_AUTH_RP_DISPLAY_NAME"); v != "" {
+		cfg.Auth.RPDisplayName = v
+	}
+	if v := os.Getenv("OR3_AUTH_ALLOWED_ORIGINS"); v != "" {
+		cfg.Auth.AllowedOrigins = compactStrings(strings.Split(v, ","))
+	}
+	if v := os.Getenv("OR3_AUTH_RELATED_ORIGINS"); v != "" {
+		cfg.Auth.RelatedOrigins = compactStrings(strings.Split(v, ","))
+	}
+	if v := os.Getenv("OR3_AUTH_SESSION_IDLE_TTL_SECONDS"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			cfg.Auth.SessionIdleTTLSeconds = parsed
+		}
+	}
+	if v := os.Getenv("OR3_AUTH_SESSION_ABSOLUTE_TTL_SECONDS"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			cfg.Auth.SessionAbsoluteTTLSeconds = parsed
+		}
+	}
+	if v := os.Getenv("OR3_AUTH_STEP_UP_TTL_SECONDS"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			cfg.Auth.StepUpTTLSeconds = parsed
+		}
+	}
+	if v := os.Getenv("OR3_AUTH_FALLBACK_POLICY"); v != "" {
+		cfg.Auth.FallbackPolicy = v
+	}
+	if v := os.Getenv("OR3_AUTH_ENFORCEMENT_MODE"); v != "" {
+		cfg.Auth.EnforcementMode = AuthEnforcementMode(v)
+	}
+	if v := os.Getenv("OR3_AUTH_ALLOW_PAIRED_TOKEN_FALLBACK"); v != "" {
+		if parsed, err := strconv.ParseBool(v); err == nil {
+			cfg.Auth.AllowPairedTokenFallback = parsed
+		}
+	}
+	if v := os.Getenv("OR3_AUTH_REQUIRE_PASSKEY_FOR_SENSITIVE"); v != "" {
+		if parsed, err := strconv.ParseBool(v); err == nil {
+			cfg.Auth.RequirePasskeyForSensitive = parsed
+		}
+	}
 	if v := os.Getenv("OR3_RUNTIME_PROFILE"); v != "" {
 		cfg.RuntimeProfile = RuntimeProfile(strings.ToLower(strings.TrimSpace(v)))
 	}
@@ -1003,7 +1149,7 @@ func Load(path string) (Config, error) {
 		cfg.HistoryMax = 40
 	}
 	if cfg.MaxToolBytes <= 0 {
-		cfg.MaxToolBytes = 24 * 1024
+		cfg.MaxToolBytes = DefaultMaxToolBytes
 	}
 	if cfg.MaxMediaBytes <= 0 {
 		cfg.MaxMediaBytes = 20 * 1024 * 1024
@@ -1011,6 +1157,7 @@ func Load(path string) (Config, error) {
 	if cfg.MaxToolLoops <= 0 {
 		cfg.MaxToolLoops = 6
 	}
+	cfg.MaxToolLoopsExceededAction = normalizeQuotaExceededAction(cfg.MaxToolLoopsExceededAction, Default().MaxToolLoopsExceededAction)
 	if cfg.VectorScanLimit <= 0 {
 		cfg.VectorScanLimit = 2000
 	}
@@ -1049,6 +1196,22 @@ func Load(path string) (Config, error) {
 	if cfg.Service.MaxCapability == "" {
 		cfg.Service.MaxCapability = Default().Service.MaxCapability
 	}
+	if cfg.Service.TrustedBrowserOrigins == nil {
+		cfg.Service.TrustedBrowserOrigins = []string{}
+	}
+	if cfg.Service.TrustedBrowserCIDRs == nil {
+		cfg.Service.TrustedBrowserCIDRs = []string{}
+	}
+	if cfg.Service.TrustedPairingOrigins == nil {
+		cfg.Service.TrustedPairingOrigins = []string{}
+	}
+	if cfg.Service.TrustedPairingCIDRs == nil {
+		cfg.Service.TrustedPairingCIDRs = []string{}
+	}
+	cfg.Service.TrustedBrowserOrigins = compactStrings(cfg.Service.TrustedBrowserOrigins)
+	cfg.Service.TrustedBrowserCIDRs = compactStrings(cfg.Service.TrustedBrowserCIDRs)
+	cfg.Service.TrustedPairingOrigins = compactStrings(cfg.Service.TrustedPairingOrigins)
+	cfg.Service.TrustedPairingCIDRs = compactStrings(cfg.Service.TrustedPairingCIDRs)
 	if cfg.Service.MutationRateLimitPerMinute <= 0 {
 		cfg.Service.MutationRateLimitPerMinute = Default().Service.MutationRateLimitPerMinute
 	}
@@ -1168,6 +1331,11 @@ func Load(path string) (Config, error) {
 	if cfg.Skills.Load.WatchDebounceMS <= 0 {
 		cfg.Skills.Load.WatchDebounceMS = 250
 	}
+	if strings.TrimSpace(cfg.Skills.Load.GlobalDir) == "" {
+		if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+			cfg.Skills.Load.GlobalDir = filepath.Join(home, ".agents", "skills")
+		}
+	}
 	if cfg.Skills.Policy.Approved == nil {
 		cfg.Skills.Policy.Approved = []string{}
 	}
@@ -1202,6 +1370,7 @@ func Load(path string) (Config, error) {
 	if cfg.Hardening.Sandbox.WritablePaths == nil {
 		cfg.Hardening.Sandbox.WritablePaths = []string{}
 	}
+	cfg.Hardening.Quotas.ExceededAction = normalizeQuotaExceededAction(cfg.Hardening.Quotas.ExceededAction, Default().Hardening.Quotas.ExceededAction)
 	if cfg.Hardening.Quotas.MaxToolCalls <= 0 {
 		cfg.Hardening.Quotas.MaxToolCalls = Default().Hardening.Quotas.MaxToolCalls
 	}
@@ -1213,6 +1382,18 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.Hardening.Quotas.MaxSubagentCalls <= 0 {
 		cfg.Hardening.Quotas.MaxSubagentCalls = Default().Hardening.Quotas.MaxSubagentCalls
+	}
+	if cfg.Hardening.Quotas.MaxSessionToolCalls <= 0 {
+		cfg.Hardening.Quotas.MaxSessionToolCalls = Default().Hardening.Quotas.MaxSessionToolCalls
+	}
+	if cfg.Hardening.Quotas.MaxSessionExecCalls <= 0 {
+		cfg.Hardening.Quotas.MaxSessionExecCalls = Default().Hardening.Quotas.MaxSessionExecCalls
+	}
+	if cfg.Hardening.Quotas.MaxSessionWebCalls <= 0 {
+		cfg.Hardening.Quotas.MaxSessionWebCalls = Default().Hardening.Quotas.MaxSessionWebCalls
+	}
+	if cfg.Hardening.Quotas.MaxSessionSubagentCalls <= 0 {
+		cfg.Hardening.Quotas.MaxSessionSubagentCalls = Default().Hardening.Quotas.MaxSessionSubagentCalls
 	}
 	for name, server := range cfg.Tools.MCPServers {
 		server.Transport = strings.ToLower(strings.TrimSpace(server.Transport))
@@ -1270,6 +1451,35 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.Session.IdentityLinks == nil {
 		cfg.Session.IdentityLinks = []SessionIdentityLink{}
+	}
+	if strings.TrimSpace(cfg.Auth.RPDisplayName) == "" {
+		cfg.Auth.RPDisplayName = Default().Auth.RPDisplayName
+	}
+	if cfg.Auth.AllowedOrigins == nil {
+		cfg.Auth.AllowedOrigins = []string{}
+	}
+	if cfg.Auth.RelatedOrigins == nil {
+		cfg.Auth.RelatedOrigins = []string{}
+	}
+	cfg.Auth.AllowedOrigins = compactStrings(cfg.Auth.AllowedOrigins)
+	cfg.Auth.RelatedOrigins = compactStrings(cfg.Auth.RelatedOrigins)
+	if cfg.Auth.SessionIdleTTLSeconds <= 0 {
+		cfg.Auth.SessionIdleTTLSeconds = Default().Auth.SessionIdleTTLSeconds
+	}
+	if cfg.Auth.SessionAbsoluteTTLSeconds <= 0 {
+		cfg.Auth.SessionAbsoluteTTLSeconds = Default().Auth.SessionAbsoluteTTLSeconds
+	}
+	if cfg.Auth.StepUpTTLSeconds <= 0 {
+		cfg.Auth.StepUpTTLSeconds = Default().Auth.StepUpTTLSeconds
+	}
+	cfg.Auth.FallbackPolicy = normalizeAuthFallbackPolicy(cfg.Auth.FallbackPolicy)
+	if cfg.Auth.FallbackPolicy == "" {
+		cfg.Auth.FallbackPolicy = Default().Auth.FallbackPolicy
+	}
+	if normalizedMode := normalizeAuthEnforcementMode(cfg.Auth.EnforcementMode); normalizedMode != "" {
+		cfg.Auth.EnforcementMode = normalizedMode
+	} else {
+		cfg.Auth.EnforcementMode = Default().Auth.EnforcementMode
 	}
 	if strings.TrimSpace(cfg.Security.SecretStore.KeyFile) == "" {
 		cfg.Security.SecretStore.KeyFile = Default().Security.SecretStore.KeyFile
@@ -1331,6 +1541,9 @@ func Load(path string) (Config, error) {
 		return cfg, err
 	}
 	if err := validateApprovals(cfg.Security.Approvals); err != nil {
+		return cfg, err
+	}
+	if err := validateAuthConfig(cfg.Auth); err != nil {
 		return cfg, err
 	}
 	cfg.RuntimeProfile = RuntimeProfile(strings.ToLower(strings.TrimSpace(string(cfg.RuntimeProfile))))
@@ -1574,6 +1787,117 @@ func validateApprovals(cfg ApprovalConfig) error {
 	return nil
 }
 
+func normalizeAuthEnforcementMode(mode AuthEnforcementMode) AuthEnforcementMode {
+	switch AuthEnforcementMode(strings.ToLower(strings.TrimSpace(string(mode)))) {
+	case AuthEnforcementOff:
+		return AuthEnforcementOff
+	case AuthEnforcementWarn:
+		return AuthEnforcementWarn
+	case AuthEnforcementSensitive:
+		return AuthEnforcementSensitive
+	case AuthEnforcementSession:
+		return AuthEnforcementSession
+	default:
+		return ""
+	}
+}
+
+func normalizeAuthFallbackPolicy(policy string) string {
+	switch strings.ToLower(strings.TrimSpace(policy)) {
+	case AuthFallbackPairedTokenOnly:
+		return AuthFallbackPairedTokenOnly
+	case AuthFallbackPairedTokenPlusWarn:
+		return AuthFallbackPairedTokenPlusWarn
+	case AuthFallbackAdminRecoveryOnly:
+		return AuthFallbackAdminRecoveryOnly
+	default:
+		return ""
+	}
+}
+
+func validateAuthConfig(cfg AuthConfig) error {
+	if cfg.SessionIdleTTLSeconds <= 0 {
+		return errors.New("auth.sessionIdleTtlSeconds must be greater than zero")
+	}
+	if cfg.SessionAbsoluteTTLSeconds <= 0 {
+		return errors.New("auth.sessionAbsoluteTtlSeconds must be greater than zero")
+	}
+	if cfg.SessionAbsoluteTTLSeconds < cfg.SessionIdleTTLSeconds {
+		return errors.New("auth.sessionAbsoluteTtlSeconds must be greater than or equal to auth.sessionIdleTtlSeconds")
+	}
+	if cfg.StepUpTTLSeconds <= 0 {
+		return errors.New("auth.stepUpTtlSeconds must be greater than zero")
+	}
+	if normalizeAuthFallbackPolicy(cfg.FallbackPolicy) == "" {
+		return errors.New("auth.fallbackPolicy must be paired-token-only, paired-token-plus-warning, or admin-recovery-only")
+	}
+	if normalizeAuthEnforcementMode(cfg.EnforcementMode) == "" {
+		return errors.New("auth.enforcementMode must be off, warn, enforce-sensitive, or enforce-session")
+	}
+	if !cfg.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(cfg.RPID) == "" {
+		return errors.New("auth.rpId is required when auth.enabled=true")
+	}
+	if len(cfg.AllowedOrigins) == 0 {
+		return errors.New("auth.allowedOrigins is required when auth.enabled=true")
+	}
+	rpid := strings.ToLower(strings.TrimSpace(cfg.RPID))
+	if strings.Contains(rpid, "://") {
+		return errors.New("auth.rpId must be a domain, not a URL")
+	}
+	if strings.Contains(rpid, "*") {
+		return errors.New("auth.rpId must not contain wildcards")
+	}
+	if ip := net.ParseIP(strings.Trim(rpid, "[]")); ip != nil {
+		return errors.New("auth.rpId must not be a raw IP address")
+	}
+	for _, origin := range append(append([]string{}, cfg.AllowedOrigins...), cfg.RelatedOrigins...) {
+		if err := validateAuthOrigin(rpid, origin); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateAuthOrigin(rpid, origin string) error {
+	origin = strings.TrimSpace(origin)
+	if origin == "" {
+		return errors.New("auth origins must not be empty")
+	}
+	if strings.Contains(origin, "*") {
+		return fmt.Errorf("auth origin %q must not contain wildcards", origin)
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return fmt.Errorf("auth origin %q is invalid", origin)
+	}
+	if u.Hostname() == "" {
+		return fmt.Errorf("auth origin %q must include a hostname", origin)
+	}
+	host := strings.ToLower(strings.TrimSpace(u.Hostname()))
+	if ip := net.ParseIP(strings.Trim(host, "[]")); ip != nil {
+		return fmt.Errorf("auth origin %q must not use a raw IP address", origin)
+	}
+	if strings.EqualFold(u.Scheme, "http") {
+		if host != "localhost" || rpid != "localhost" {
+			return fmt.Errorf("auth origin %q is insecure; only localhost development may use http", origin)
+		}
+		return nil
+	}
+	if !strings.EqualFold(u.Scheme, "https") {
+		return fmt.Errorf("auth origin %q must use https or localhost http", origin)
+	}
+	if rpid == "localhost" {
+		return fmt.Errorf("auth origin %q cannot be used with localhost rpId", origin)
+	}
+	if host != rpid && !strings.HasSuffix(host, "."+rpid) {
+		return fmt.Errorf("auth origin %q does not match rpId %q", origin, rpid)
+	}
+	return nil
+}
+
 func normalizeApprovalMode(mode ApprovalMode, fallback ApprovalMode) ApprovalMode {
 	normalized := ApprovalMode(strings.ToLower(strings.TrimSpace(string(mode))))
 	if normalized == "" {
@@ -1667,6 +1991,19 @@ func IsHostedProfile(p RuntimeProfile) bool {
 		return true
 	}
 	return false
+}
+
+func normalizeQuotaExceededAction(action QuotaExceededAction, fallback QuotaExceededAction) QuotaExceededAction {
+	normalized := QuotaExceededAction(strings.ToLower(strings.TrimSpace(string(action))))
+	if normalized == "" {
+		return fallback
+	}
+	switch normalized {
+	case QuotaExceededActionAsk, QuotaExceededActionFail:
+		return normalized
+	default:
+		return fallback
+	}
 }
 
 func compactStrings(values []string) []string {

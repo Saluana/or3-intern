@@ -138,6 +138,38 @@ func TestBuildSectionFields_ServiceIncludesLocalPairingToggle(t *testing.T) {
 	t.Fatal("expected service section to include local pairing toggle")
 }
 
+func TestBuildSectionFields_ToolsExposeExecToggle(t *testing.T) {
+	fields := buildSectionFields(config.Default(), "tools", "/workspace/project")
+	for _, field := range fields {
+		if field.Key == "tools_enable_exec" {
+			if field.Kind != configureFieldToggle {
+				t.Fatalf("expected exec field to be a toggle, got %v", field.Kind)
+			}
+			if !strings.Contains(field.Description, "built-in exec tool") {
+				t.Fatalf("expected plain-language explanation for exec field, got %q", field.Description)
+			}
+			return
+		}
+	}
+	t.Fatal("expected tools section to include exec toggle")
+}
+
+func TestBuildSectionFields_ServiceIncludesMaxCapabilityChoice(t *testing.T) {
+	fields := buildSectionFields(config.Default(), "service", "/workspace/project")
+	for _, field := range fields {
+		if field.Key == "service_max_capability" {
+			if field.Kind != configureFieldChoice {
+				t.Fatalf("expected service max capability to be a choice, got %v", field.Kind)
+			}
+			if strings.Join(field.Choices, ",") != "safe,guarded,privileged" {
+				t.Fatalf("unexpected capability choices: %v", field.Choices)
+			}
+			return
+		}
+	}
+	t.Fatal("expected service section to include max capability choice")
+}
+
 func TestSetToggleFieldValue_AppliesServiceLocalPairingToggle(t *testing.T) {
 	cfg := config.Default()
 	if cfg.Service.AllowUnauthenticatedPairing {
@@ -148,6 +180,28 @@ func TestSetToggleFieldValue_AppliesServiceLocalPairingToggle(t *testing.T) {
 	}
 	if !cfg.Service.AllowUnauthenticatedPairing {
 		t.Fatal("expected local pairing bootstrap to be enabled")
+	}
+}
+
+func TestConfigureTUIToolsExecAndServiceCapabilityApply(t *testing.T) {
+	cfg := config.Default()
+	if changed := setToggleFieldValue(&cfg, "tools", "", "tools_enable_exec", true); !changed {
+		t.Fatal("expected tools exec toggle to apply")
+	}
+	if !cfg.Tools.EnableExec {
+		t.Fatal("expected exec tool to be enabled")
+	}
+	if changed, err := applyChoiceSelection(&cfg, "service", "", "service_max_capability", "guarded"); err != nil || !changed {
+		t.Fatalf("apply service max capability choice: changed=%v err=%v", changed, err)
+	}
+	if cfg.Service.MaxCapability != "guarded" {
+		t.Fatalf("expected service max capability guarded, got %q", cfg.Service.MaxCapability)
+	}
+	if changed, err := applyFieldValue(&cfg, "tools", "", "tools_enable_exec", "off"); err != nil || !changed {
+		t.Fatalf("apply tools exec field: changed=%v err=%v", changed, err)
+	}
+	if cfg.Tools.EnableExec {
+		t.Fatal("expected exec tool to be disabled")
 	}
 }
 

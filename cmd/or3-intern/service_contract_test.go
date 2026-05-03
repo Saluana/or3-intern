@@ -55,7 +55,15 @@ func TestOr3NetCompatibilityFixtures_RequestDecoding(t *testing.T) {
 		if err != nil {
 			t.Fatalf("decodeServiceTurnRequest: %v", err)
 		}
-		got := serviceTurnRequestFixture(actual)
+		got := serviceTurnRequestFixture{
+			SessionKey:    actual.SessionKey,
+			Message:       actual.Message,
+			AllowedTools:  actual.AllowedTools,
+			RestrictTools: actual.RestrictTools,
+			Meta:          actual.Meta,
+			ProfileName:   actual.ProfileName,
+			ApprovalToken: actual.ApprovalToken,
+		}
 		if !reflect.DeepEqual(got, expected) {
 			t.Fatalf("decoded turn request mismatch\nexpected: %#v\ngot: %#v", expected, got)
 		}

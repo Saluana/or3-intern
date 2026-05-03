@@ -110,6 +110,46 @@ User-invocable skills can be triggered explicitly:
 
 For `command-dispatch: tool`, the runtime forwards the raw argument string directly to the selected tool. Otherwise the runtime starts a normal model turn seeded with the selected `SKILL.md`.
 
+## Skill execution
+
+Use `run_skill` as the preferred execution tool when a skill needs a local script or entrypoint.
+
+- `run_skill` performs preflight before approval, freezes a persistent SkillRunPlan, and returns structured states such as `pending_approval`, `preflight_failed`, `succeeded`, and `failed`.
+- When approval is required, the result includes a `plan_id`. After approval, callers can resume the same frozen plan either by retrying the same arguments or by calling `run_skill` with that `plan_id`.
+- `run_skill_script` still exists as a compatibility wrapper, but it now runs through the same frozen-plan path.
+
+### Preflight drift checks
+
+`preflight_failed` means the plan could no longer be executed safely after it was frozen. Common causes are:
+
+- the skill metadata changed or the skill is no longer approved
+- the entrypoint or script contents changed
+- the current environment binding no longer matches the one captured in the plan
+- sandbox prerequisites changed between planning and execution
+
+When that happens, create a new plan instead of forcing the old one through approval.
+
+### Adding entrypoints
+
+Define reusable skill entrypoints in `skill.json`:
+
+```json
+{
+    "entrypoints": [
+        {
+            "name": "hello",
+            "command": ["./tool.sh", "entry"]
+        }
+    ]
+}
+```
+
+Guidance:
+
+- keep entrypoint names stable because approvals and caller prompts reference them
+- prefer entrypoints over raw bundle paths when the skill has a supported command surface
+- use `{baseDir}` in manifest commands when an entrypoint needs an absolute path inside the skill bundle
+
 ## Related documentation
 
 - [CLI reference](cli-reference.md)

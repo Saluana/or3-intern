@@ -10,7 +10,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +23,7 @@ import (
 	"or3-intern/internal/db"
 	"or3-intern/internal/providers"
 	"or3-intern/internal/security"
+	"or3-intern/internal/skills"
 	"or3-intern/internal/tools"
 )
 
@@ -57,6 +60,52 @@ func (serviceContextTool) Execute(ctx context.Context, params map[string]any) (s
 	return "ok", nil
 }
 
+type serviceReplayTool struct{}
+
+func (serviceReplayTool) Name() string               { return "replay_probe" }
+func (serviceReplayTool) Description() string        { return "replay_probe" }
+func (serviceReplayTool) Parameters() map[string]any { return map[string]any{} }
+func (serviceReplayTool) Schema() map[string]any     { return map[string]any{} }
+func (serviceReplayTool) Execute(_ context.Context, params map[string]any) (string, error) {
+	return fmt.Sprintf("replayed:%s", strings.TrimSpace(fmt.Sprint(params["value"]))), nil
+}
+
+type serviceReplayFailingTool struct{}
+
+func (serviceReplayFailingTool) Name() string               { return "replay_probe" }
+func (serviceReplayFailingTool) Description() string        { return "replay_probe" }
+func (serviceReplayFailingTool) Parameters() map[string]any { return map[string]any{} }
+func (serviceReplayFailingTool) Schema() map[string]any     { return map[string]any{} }
+func (serviceReplayFailingTool) Execute(_ context.Context, params map[string]any) (string, error) {
+	value := strings.TrimSpace(fmt.Sprint(params["value"]))
+	return fmt.Sprintf("stdout:\n\n\nstderr:\nreplay failed for %s", value), fmt.Errorf("exec failed: exit status 3")
+}
+
+type countingReplayTool struct {
+	count *int
+}
+
+func (countingReplayTool) Name() string               { return "replay_probe" }
+func (countingReplayTool) Description() string        { return "replay_probe" }
+func (countingReplayTool) Parameters() map[string]any { return map[string]any{} }
+func (countingReplayTool) Schema() map[string]any     { return map[string]any{} }
+func (t countingReplayTool) Execute(_ context.Context, params map[string]any) (string, error) {
+	if t.count != nil {
+		*t.count = *t.count + 1
+	}
+	return fmt.Sprintf("replayed:%s", strings.TrimSpace(fmt.Sprint(params["value"]))), nil
+}
+
+type serviceApprovalTool struct{}
+
+func (serviceApprovalTool) Name() string               { return "exec" }
+func (serviceApprovalTool) Description() string        { return "exec approval probe" }
+func (serviceApprovalTool) Parameters() map[string]any { return map[string]any{} }
+func (serviceApprovalTool) Schema() map[string]any     { return map[string]any{} }
+func (serviceApprovalTool) Execute(context.Context, map[string]any) (string, error) {
+	return "", &tools.ApprovalRequiredError{ToolName: "exec", RequestID: 77}
+}
+
 func TestServiceServerControl_CachesWrapper(t *testing.T) {
 	server := &serviceServer{jobs: agent.NewJobRegistry(time.Minute, 32)}
 
@@ -81,6 +130,69 @@ func TestServiceAuthMiddleware_RejectsMissingBearer(t *testing.T) {
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestServiceAuthMiddleware_RateLimitsFailedBearerAttempts(t *testing.T) {
+	cfg := config.Config{Service: config.ServiceConfig{Secret: strings.Repeat("s", 32), SharedSecretRole: approval.RoleServiceClient}}
+	server := &serviceServer{config: cfg}
+	var handled int
+	handler := serviceAuthMiddlewareWithBrokerAndLimiter(cfg, nil, nil, server, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handled++
+		writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true})
+	}))
+
+	for i := 0; i < serviceAuthFailureThreshold+1; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/internal/v1/turns", nil)
+		req.RemoteAddr = "203.0.113.10:1234"
+		req.Header.Set("Authorization", "Bearer invalid-token")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: expected 401, got %d (%s)", i+1, rec.Code, rec.Body.String())
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/internal/v1/turns", nil)
+	req.RemoteAddr = "203.0.113.10:1234"
+	req.Header.Set("Authorization", "Bearer invalid-token")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 after repeated auth failures, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Retry-After") == "" {
+		t.Fatalf("expected Retry-After header")
+	}
+	if handled != 0 {
+		t.Fatalf("expected unauthorized requests not to reach handler, got %d calls", handled)
+	}
+}
+
+func TestServiceAuthMiddleware_PairingUnauthorizedExplainsTrustedOrigin(t *testing.T) {
+	cfg := config.Default()
+	cfg.Service.Secret = strings.Repeat("p", 32)
+	cfg.Service.AllowUnauthenticatedPairing = true
+	cfg.Service.AllowRemoteUnauthenticatedPairing = true
+	cfg.Service.TrustedPairingOrigins = []string{"http://trusted.example"}
+	handler := serviceAuthMiddlewareWithBrokerAndLimiter(cfg, nil, nil, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("pairing request should not reach handler")
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/pairing/requests", strings.NewReader(`{"role":"operator"}`))
+	req.RemoteAddr = "203.0.113.10:1234"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	payload := mustDecodeJSONBody(t, rec.Body)
+	if payload["code"] != "trusted_pairing_required" {
+		t.Fatalf("expected trusted pairing guidance, got %#v", payload)
+	}
+	origins, _ := payload["trusted_origins"].([]any)
+	if len(origins) != 1 || origins[0] != "http://trusted.example" {
+		t.Fatalf("expected trusted origin list, got %#v", payload)
 	}
 }
 
@@ -228,6 +340,55 @@ func TestServiceBoundary_RateLimitIsPerActorAndPathAndEchoesRequestID(t *testing
 	}
 }
 
+func TestTerminalInteractiveMutationsBypassGenericMutationLimiter(t *testing.T) {
+	server := &serviceServer{config: config.Config{Service: config.ServiceConfig{MutationRateLimitPerMinute: 1}}}
+
+	inputReq1 := httptest.NewRequest(http.MethodPost, "/internal/v1/terminal/sessions/term-1/input", nil)
+	inputReq1.RemoteAddr = "127.0.0.1:1234"
+	if !server.isTerminalInteractiveMutation(inputReq1) {
+		t.Fatal("expected terminal input to be classified as interactive mutation")
+	}
+	if server.isMutationRequest(inputReq1) {
+		t.Fatal("expected terminal input to bypass generic mutation limiting")
+	}
+
+	inputReq2 := httptest.NewRequest(http.MethodPost, "/internal/v1/terminal/sessions/term-1/input", nil)
+	inputReq2.RemoteAddr = "127.0.0.1:1234"
+	if server.isMutationRequest(inputReq2) {
+		t.Fatal("expected repeated terminal input to keep bypassing generic mutation limiting")
+	}
+
+	resizeReq := httptest.NewRequest(http.MethodPost, "/internal/v1/terminal/sessions/term-1/resize", nil)
+	resizeReq.RemoteAddr = "127.0.0.1:1234"
+	if !server.isTerminalInteractiveMutation(resizeReq) {
+		t.Fatal("expected terminal resize to be classified as interactive mutation")
+	}
+	if server.isMutationRequest(resizeReq) {
+		t.Fatal("expected terminal resize to bypass generic mutation limiting")
+	}
+
+	closeReq1 := httptest.NewRequest(http.MethodPost, "/internal/v1/terminal/sessions/term-1/close", nil)
+	closeReq1.RemoteAddr = "127.0.0.1:1234"
+	if server.isTerminalInteractiveMutation(closeReq1) {
+		t.Fatal("did not expect terminal close to bypass generic mutation limiting")
+	}
+	if !server.isMutationRequest(closeReq1) {
+		t.Fatal("expected terminal close to remain a generic mutation")
+	}
+	if !server.allowMutationRequest(closeReq1) {
+		t.Fatal("expected first terminal close request to be allowed")
+	}
+
+	closeReq2 := httptest.NewRequest(http.MethodPost, "/internal/v1/terminal/sessions/term-1/close", nil)
+	closeReq2.RemoteAddr = "127.0.0.1:1234"
+	if !server.isMutationRequest(closeReq2) {
+		t.Fatal("expected second terminal close to remain subject to limiting")
+	}
+	if server.allowMutationRequest(closeReq2) {
+		t.Fatal("expected second terminal close request to be rate limited")
+	}
+}
+
 func TestServiceBrowserMiddleware_AllowsLoopbackPreflight(t *testing.T) {
 	cfg := config.Config{Service: config.ServiceConfig{Listen: "127.0.0.1:9100"}}
 	called := false
@@ -283,6 +444,58 @@ func TestServiceBrowserMiddleware_AddsLoopbackCORSHeadersToRequests(t *testing.T
 	}
 }
 
+func TestServiceBrowserMiddleware_AddsTrustedTailscaleCORSHeadersToRemoteAppRequests(t *testing.T) {
+	cfg := config.Config{Service: config.ServiceConfig{
+		Listen:                "100.64.0.42:9100",
+		TrustedBrowserOrigins: []string{"http://100.64.0.42:3060", "http://100.64.0.42:3070"},
+		TrustedBrowserCIDRs:   []string{"100.64.0.0/10"},
+	}}
+	handler := serviceBrowserMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeServiceJSON(w, http.StatusAccepted, map[string]any{"ok": true})
+	}))
+
+	req := httptest.NewRequest(http.MethodOptions, "/internal/v1/turns", nil)
+	req.RemoteAddr = "100.64.0.42:54321"
+	req.Header.Set("Origin", "http://100.64.0.42:3060")
+	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 preflight response, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "http://100.64.0.42:3060" {
+		t.Fatalf("expected trusted Tailscale allow-origin header, got %q", got)
+	}
+}
+
+func TestServiceBrowserMiddleware_TrustedPairingOriginsRemainBrowserCORSFallback(t *testing.T) {
+	cfg := config.Config{Service: config.ServiceConfig{
+		Listen:                "100.64.0.42:9100",
+		TrustedPairingOrigins: []string{"http://100.64.0.42:3060"},
+		TrustedPairingCIDRs:   []string{"100.64.0.0/10"},
+	}}
+	handler := serviceBrowserMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeServiceJSON(w, http.StatusAccepted, map[string]any{"ok": true})
+	}))
+
+	req := httptest.NewRequest(http.MethodOptions, "/internal/v1/turns", nil)
+	req.RemoteAddr = "100.64.0.42:54321"
+	req.Header.Set("Origin", "http://100.64.0.42:3060")
+	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected legacy trusted pairing origin to allow browser preflight, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "http://100.64.0.42:3060" {
+		t.Fatalf("expected trusted pairing allow-origin fallback, got %q", got)
+	}
+}
+
 func TestWriteServiceErrorRedactsInternalError(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/internal/v1/turns", nil)
 	req = req.WithContext(context.WithValue(req.Context(), serviceRequestContextKey{}, serviceRequestContext{RequestID: "req-redact"}))
@@ -299,6 +512,23 @@ func TestWriteServiceErrorRedactsInternalError(t *testing.T) {
 	}
 	if strings.Contains(body, "database password") || strings.Contains(body, "stack trace") {
 		t.Fatalf("expected internal error to be redacted, got %s", body)
+	}
+}
+
+func TestServicePublicPairingExchangeError_OnlyExposesPairingState(t *testing.T) {
+	for _, message := range []string{
+		"pairing request not found",
+		"pairing request expired",
+		"pairing request is not approved",
+	} {
+		got, ok := servicePublicPairingExchangeError(fmt.Errorf("%s", message))
+		if !ok || got != message {
+			t.Fatalf("expected public pairing error %q, got %q ok=%v", message, got, ok)
+		}
+	}
+
+	if got, ok := servicePublicPairingExchangeError(fmt.Errorf("database password leaked")); ok || got != "" {
+		t.Fatalf("expected internal pairing exchange error to be redacted, got %q ok=%v", got, ok)
 	}
 }
 
@@ -419,6 +649,9 @@ func TestServiceConfigureApply_PersistsConfigChanges(t *testing.T) {
 	reqBody := strings.NewReader(`{
 		"changes":[
 			{"section":"provider","field":"provider_model","op":"set","value":"gpt-4.1"},
+			{"section":"tools","field":"tools_enable_exec","op":"set","value":true},
+			{"section":"tools","field":"tools_exec_timeout","op":"set","value":45},
+			{"section":"service","field":"service_max_capability","op":"set","value":"guarded"},
 			{"section":"service","field":"service_enabled","op":"toggle"},
 			{"section":"channels","channel":"slack","field":"access","op":"choose","value":"allowlist"}
 		]
@@ -442,8 +675,88 @@ func TestServiceConfigureApply_PersistsConfigChanges(t *testing.T) {
 	if !loaded.Service.Enabled {
 		t.Fatal("expected service_enabled toggle to set true")
 	}
+	if !loaded.Tools.EnableExec {
+		t.Fatal("expected tools_enable_exec boolean set to enable exec")
+	}
+	if loaded.Tools.ExecTimeoutSeconds != 45 {
+		t.Fatalf("expected numeric exec timeout update, got %d", loaded.Tools.ExecTimeoutSeconds)
+	}
+	if loaded.Service.MaxCapability != "guarded" {
+		t.Fatalf("expected service max capability guarded, got %q", loaded.Service.MaxCapability)
+	}
 	if loaded.Channels.Slack.InboundPolicy != config.InboundPolicyAllowlist {
 		t.Fatalf("expected slack allowlist policy, got %q", loaded.Channels.Slack.InboundPolicy)
+	}
+}
+
+func TestServiceSkills_ListAndUpdateSettings(t *testing.T) {
+	cfg := config.Default()
+	cfgPath := filepath.Join(t.TempDir(), "or3-intern.json")
+	globalRoot := filepath.Join(t.TempDir(), "agents-skills")
+	skillDir := filepath.Join(globalRoot, "demo")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("create skill dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(`---
+name: demo
+description: Demo shared skill
+metadata:
+  openclaw:
+    primaryEnv: DEMO_API_KEY
+    requires:
+      config: [demo.enabled]
+---
+# Demo
+`), 0o644); err != nil {
+		t.Fatalf("write skill: %v", err)
+	}
+	cfg.Skills.Load.GlobalDir = globalRoot
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	reg := tools.NewRegistry()
+	reg.Register(&tools.ReadSkill{})
+	rt := &agent.Runtime{Builder: &agent.Builder{}, Tools: reg}
+	server := &serviceServer{config: cfg, configPath: cfgPath, runtime: rt}
+
+	req := httptest.NewRequest(http.MethodGet, "/internal/v1/skills", nil)
+	req = req.WithContext(context.WithValue(req.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Actor: "ops", Role: approval.RoleOperator}))
+	rec := httptest.NewRecorder()
+	server.handleSkills(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	var listBody struct {
+		Items []serviceSkillItem `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &listBody); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(listBody.Items) != 1 || listBody.Items[0].Name != "demo" || listBody.Items[0].Source != string(skills.SourceGlobal) {
+		t.Fatalf("expected demo global skill, got %#v", listBody.Items)
+	}
+
+	reqBody := strings.NewReader(`{"enabled":false,"apiKey":"secret-value","config":{"demo.enabled":true}}`)
+	req = httptest.NewRequest(http.MethodPost, "/internal/v1/skills/demo/settings", reqBody)
+	req = req.WithContext(context.WithValue(req.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Actor: "ops", Role: approval.RoleOperator}))
+	rec = httptest.NewRecorder()
+	server.handleSkills(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected update 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	loaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	entry := loaded.Skills.Entries["demo"]
+	if entry.Enabled == nil || *entry.Enabled || entry.APIKey != "secret-value" || entry.Config["demo.enabled"] != true {
+		t.Fatalf("expected persisted skill settings, got %#v", entry)
+	}
+	if skill, ok := rt.Builder.Skills.Get("demo"); !ok || !skill.Disabled {
+		t.Fatalf("expected runtime skill inventory to refresh disabled demo, got %#v ok=%t", skill, ok)
+	}
+	if readSkill, ok := reg.Get("read_skill").(*tools.ReadSkill); !ok || readSkill.Inventory == nil {
+		t.Fatalf("expected read_skill inventory pointer to refresh")
 	}
 }
 
@@ -495,6 +808,36 @@ func TestDecodeServiceSubagentRequest_AcceptsSessionAndToolPolicyAliases(t *test
 	}
 	if req.ReplyTo != "or3-net" {
 		t.Fatalf("expected replyTo alias to populate reply target, got %#v", req)
+	}
+}
+
+func TestDecodeServiceTurnRequest_AllowsDocumentedToolPolicyModes(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(serviceTestTool{name: "read_file"})
+	registry.Register(serviceTestTool{name: "exec"})
+
+	allowAll, err := decodeServiceTurnRequest(strings.NewReader(`{
+		"session_key":"svc:key",
+		"message":"hi",
+		"tool_policy":{"mode":"allow_all"}
+	}`), registry)
+	if err != nil {
+		t.Fatalf("decode allow_all: %v", err)
+	}
+	if allowAll.RestrictTools || len(allowAll.AllowedTools) != 0 {
+		t.Fatalf("expected allow_all to avoid tool restriction, got %#v", allowAll)
+	}
+
+	denyList, err := decodeServiceTurnRequest(strings.NewReader(`{
+		"session_key":"svc:key",
+		"message":"hi",
+		"tool_policy":{"mode":"deny_list","blocked_tools":["exec"]}
+	}`), registry)
+	if err != nil {
+		t.Fatalf("decode deny_list: %v", err)
+	}
+	if !denyList.RestrictTools || len(denyList.AllowedTools) != 1 || denyList.AllowedTools[0] != "read_file" {
+		t.Fatalf("expected deny_list to expose only read_file, got %#v", denyList)
 	}
 }
 
@@ -693,6 +1036,298 @@ func TestServiceTurns_PropagatesApprovalContext(t *testing.T) {
 	}
 }
 
+func TestServiceTurns_ReplayToolCallContinuesConversation(t *testing.T) {
+	callCount := 0
+	rt, cleanup := buildServiceTestRuntime(t, func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		var req providers.ChatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("Decode provider request: %v", err)
+		}
+		if len(req.Messages) < 2 {
+			t.Fatalf("expected replay continuation prompt, got %#v", req.Messages)
+		}
+		last := req.Messages[len(req.Messages)-1]
+		if last.Role != "user" || !strings.Contains(fmt.Sprint(last.Content), "Approval was granted") {
+			t.Fatalf("expected continuation prompt after replay, got %#v", last)
+		}
+		foundReplayToolResult := false
+		for _, msg := range req.Messages {
+			if msg.Role != "tool" {
+				continue
+			}
+			if strings.Contains(fmt.Sprint(msg.Content), "replayed:ok") {
+				foundReplayToolResult = true
+				break
+			}
+		}
+		if !foundReplayToolResult {
+			t.Fatalf("expected replayed tool result in prompt history, got %#v", req.Messages)
+		}
+		resp := providers.ChatCompletionResponse{
+			Choices: []struct {
+				Message struct {
+					Role      string               `json:"role"`
+					Content   any                  `json:"content"`
+					ToolCalls []providers.ToolCall `json:"tool_calls"`
+				} `json:"message"`
+			}{{
+				Message: struct {
+					Role      string               `json:"role"`
+					Content   any                  `json:"content"`
+					ToolCalls []providers.ToolCall `json:"tool_calls"`
+				}{Role: "assistant", Content: "continued after replay"},
+			}},
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("Encode response: %v", err)
+		}
+	})
+	defer cleanup()
+	rt.Tools.Register(serviceReplayTool{})
+	if _, err := rt.DB.AppendMessage(context.Background(), "svc:replay", "user", "resume approved tool", nil); err != nil {
+		t.Fatalf("Append user: %v", err)
+	}
+	if _, err := rt.DB.AppendMessage(context.Background(), "svc:replay", "assistant", "", map[string]any{
+		"tool_calls": []providers.ToolCall{{
+			ID:   "tc-replay",
+			Type: "function",
+			Function: struct {
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			}{
+				Name:      "replay_probe",
+				Arguments: `{"value":"ok"}`,
+			},
+		}},
+	}); err != nil {
+		t.Fatalf("Append assistant tool call: %v", err)
+	}
+	if _, err := rt.DB.AppendMessage(context.Background(), "svc:replay", "tool", tools.EncodeToolFailure("replay_probe", map[string]any{"value": "ok"}, "", &tools.ApprovalRequiredError{ToolName: "replay_probe", RequestID: 99}), map[string]any{
+		"tool_call_id": "tc-replay",
+	}); err != nil {
+		t.Fatalf("Append approval-required tool result: %v", err)
+	}
+	server := &serviceServer{
+		config: config.Config{
+			Tools:   config.ToolsConfig{EnableExec: true},
+			Service: config.ServiceConfig{Secret: strings.Repeat("r", 32), MaxCapability: string(tools.CapabilityGuarded)},
+		},
+		runtime: rt,
+		jobs:    agent.NewJobRegistry(time.Minute, 32),
+	}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("r", 32), server)
+	defer httpServer.Close()
+
+	body := `{"session_key":"svc:replay","message":"resume approved tool","replay_tool_call":{"name":"replay_probe","arguments_json":"{\"value\":\"ok\"}"}}`
+	req := mustServiceRequest(t, httpServer, strings.Repeat("r", 32), http.MethodPost, "/internal/v1/turns", body)
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	payload := mustDecodeJSONBody(t, resp.Body)
+	if payload["final_text"] != "continued after replay" {
+		t.Fatalf("expected continued final text, got %#v", payload)
+	}
+	if callCount != 1 {
+		t.Fatalf("expected one provider continuation call, got %d", callCount)
+	}
+}
+
+func TestServiceTurns_ReplayToolCallFailureStillContinuesConversation(t *testing.T) {
+	callCount := 0
+	rt, cleanup := buildServiceTestRuntime(t, func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		var req providers.ChatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("Decode provider request: %v", err)
+		}
+		if len(req.Messages) < 2 {
+			t.Fatalf("expected replay continuation prompt, got %#v", req.Messages)
+		}
+		last := req.Messages[len(req.Messages)-1]
+		if last.Role != "user" || !strings.Contains(fmt.Sprint(last.Content), "Approval was granted") {
+			t.Fatalf("expected continuation prompt after replay, got %#v", last)
+		}
+		foundReplayFailure := false
+		for _, msg := range req.Messages {
+			if msg.Role != "tool" {
+				continue
+			}
+			text := fmt.Sprint(msg.Content)
+			if strings.Contains(text, "exec failed: exit status 3") && strings.Contains(text, "replay failed for bad") {
+				foundReplayFailure = true
+				break
+			}
+		}
+		if !foundReplayFailure {
+			t.Fatalf("expected replayed tool failure in prompt history, got %#v", req.Messages)
+		}
+		resp := providers.ChatCompletionResponse{
+			Choices: []struct {
+				Message struct {
+					Role      string               `json:"role"`
+					Content   any                  `json:"content"`
+					ToolCalls []providers.ToolCall `json:"tool_calls"`
+				} `json:"message"`
+			}{
+				{
+					Message: struct {
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					}{Role: "assistant", Content: "continued after replay failure"},
+				},
+			},
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("Encode response: %v", err)
+		}
+	})
+	defer cleanup()
+	rt.Tools.Register(serviceReplayFailingTool{})
+	if _, err := rt.DB.AppendMessage(context.Background(), "svc:replay-fail", "user", "resume approved tool", nil); err != nil {
+		t.Fatalf("Append user: %v", err)
+	}
+	if _, err := rt.DB.AppendMessage(context.Background(), "svc:replay-fail", "assistant", "", map[string]any{
+		"tool_calls": []providers.ToolCall{{
+			ID:   "tc-replay-fail",
+			Type: "function",
+			Function: struct {
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			}{
+				Name:      "replay_probe",
+				Arguments: `{"value":"bad"}`,
+			},
+		}},
+	}); err != nil {
+		t.Fatalf("Append assistant tool call: %v", err)
+	}
+	if _, err := rt.DB.AppendMessage(context.Background(), "svc:replay-fail", "tool", tools.EncodeToolFailure("replay_probe", map[string]any{"value": "bad"}, "", &tools.ApprovalRequiredError{ToolName: "replay_probe", RequestID: 99}), map[string]any{
+		"tool_call_id": "tc-replay-fail",
+	}); err != nil {
+		t.Fatalf("Append approval-required tool result: %v", err)
+	}
+	server := &serviceServer{
+		config: config.Config{
+			Tools:   config.ToolsConfig{EnableExec: true},
+			Service: config.ServiceConfig{Secret: strings.Repeat("r", 32), MaxCapability: string(tools.CapabilityGuarded)},
+		},
+		runtime: rt,
+		jobs:    agent.NewJobRegistry(time.Minute, 32),
+	}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("r", 32), server)
+	defer httpServer.Close()
+
+	body := `{"session_key":"svc:replay-fail","message":"resume approved tool","replay_tool_call":{"name":"replay_probe","arguments_json":"{\"value\":\"bad\"}"}}`
+	req := mustServiceRequest(t, httpServer, strings.Repeat("r", 32), http.MethodPost, "/internal/v1/turns", body)
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	payload := mustDecodeJSONBody(t, resp.Body)
+	if payload["final_text"] != "continued after replay failure" {
+		t.Fatalf("expected continued final text, got %#v", payload)
+	}
+	if callCount != 1 {
+		t.Fatalf("expected one provider continuation call, got %d", callCount)
+	}
+}
+
+func TestServiceTurns_ReplayToolCallRequiresPriorAssistantCall(t *testing.T) {
+	rt, cleanup := buildServiceTestRuntime(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("provider should not be called for rejected replay")
+	})
+	defer cleanup()
+	executions := 0
+	rt.Tools.Register(countingReplayTool{count: &executions})
+	server := &serviceServer{
+		config: config.Config{
+			Service: config.ServiceConfig{Secret: strings.Repeat("r", 32), MaxCapability: string(tools.CapabilityGuarded)},
+		},
+		runtime: rt,
+		jobs:    agent.NewJobRegistry(time.Minute, 32),
+	}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("r", 32), server)
+	defer httpServer.Close()
+
+	body := `{"session_key":"svc:missing-prior-tool-call","message":"resume approved tool","replay_tool_call":{"name":"replay_probe","arguments_json":"{\"value\":\"ok\"}"}}`
+	req := mustServiceRequest(t, httpServer, strings.Repeat("r", 32), http.MethodPost, "/internal/v1/turns", body)
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	if executions != 0 {
+		t.Fatalf("replay tool executed without a prior assistant tool call")
+	}
+	payload := mustDecodeJSONBody(t, resp.Body)
+	if !strings.Contains(fmt.Sprint(payload["error"]), "job failed") {
+		t.Fatalf("expected public job failure, got %#v", payload)
+	}
+}
+
+func TestServiceTurns_ReplayToolCallRejectsChangedArguments(t *testing.T) {
+	rt, cleanup := buildServiceTestRuntime(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("provider should not be called for rejected replay")
+	})
+	defer cleanup()
+	executions := 0
+	rt.Tools.Register(countingReplayTool{count: &executions})
+	if _, err := rt.DB.AppendMessage(context.Background(), "svc:changed-replay", "assistant", "", map[string]any{
+		"tool_calls": []providers.ToolCall{{
+			ID:   "tc-replay",
+			Type: "function",
+			Function: struct {
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			}{
+				Name:      "replay_probe",
+				Arguments: `{"value":"approved"}`,
+			},
+		}},
+	}); err != nil {
+		t.Fatalf("Append assistant tool call: %v", err)
+	}
+	server := &serviceServer{
+		config: config.Config{
+			Service: config.ServiceConfig{Secret: strings.Repeat("r", 32), MaxCapability: string(tools.CapabilityGuarded)},
+		},
+		runtime: rt,
+		jobs:    agent.NewJobRegistry(time.Minute, 32),
+	}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("r", 32), server)
+	defer httpServer.Close()
+
+	body := `{"session_key":"svc:changed-replay","message":"resume approved tool","replay_tool_call":{"name":"replay_probe","arguments_json":"{\"value\":\"changed\"}"}}`
+	req := mustServiceRequest(t, httpServer, strings.Repeat("r", 32), http.MethodPost, "/internal/v1/turns", body)
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	if executions != 0 {
+		t.Fatalf("replay tool executed with changed arguments")
+	}
+}
+
 func TestServiceTurns_JSONFailureStatus(t *testing.T) {
 	rt, cleanup := buildServiceTestRuntime(t, func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "provider down", http.StatusBadGateway)
@@ -720,6 +1355,43 @@ func TestServiceTurns_JSONFailureStatus(t *testing.T) {
 	}
 	if payload["error"] == "" {
 		t.Fatalf("expected error in response, got %#v", payload)
+	}
+}
+
+func TestServiceTurns_JSONApprovalRequiredStatus(t *testing.T) {
+	callCount := 0
+	rt, cleanup := buildServiceTestRuntime(t, func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		if callCount > 1 {
+			t.Fatalf("provider should not be called again after approval is required")
+		}
+		_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"tc-exec","type":"function","function":{"name":"exec","arguments":"{\"program\":\"pwd\"}"}}]}}]}`)
+	})
+	defer cleanup()
+	rt.Tools.Register(serviceApprovalTool{})
+	server := &serviceServer{runtime: rt, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("a", 32), server)
+	defer httpServer.Close()
+
+	req := mustServiceRequest(t, httpServer, strings.Repeat("a", 32), http.MethodPost, "/internal/v1/turns", `{"session_key":"svc:approval","message":"run pwd"}`)
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	payload := mustDecodeJSONBody(t, resp.Body)
+	if payload["status"] != "approval_required" {
+		t.Fatalf("expected approval_required status, got %#v", payload)
+	}
+	if payload["request_id"] != float64(77) && payload["request_id"] != int64(77) {
+		t.Fatalf("expected request id 77, got %#v", payload)
+	}
+	if callCount != 1 {
+		t.Fatalf("expected one provider call before pause, got %d", callCount)
 	}
 }
 
@@ -800,10 +1472,17 @@ func TestServiceJobs_MethodGuardsAndNotFound(t *testing.T) {
 		},
 		{
 			name:       "subagents rejects non post",
-			method:     http.MethodGet,
+			method:     http.MethodDelete,
 			path:       "/internal/v1/subagents",
 			wantStatus: http.StatusMethodNotAllowed,
 			wantBody:   "method not allowed",
+		},
+		{
+			name:       "subagents list requires database",
+			method:     http.MethodGet,
+			path:       "/internal/v1/subagents",
+			wantStatus: http.StatusServiceUnavailable,
+			wantBody:   "subagent history is not available",
 		},
 	}
 
@@ -1051,6 +1730,112 @@ func TestServiceSubagents_EnqueueAndAbortQueuedJob(t *testing.T) {
 	}
 }
 
+func TestServiceSubagents_ListReturnsSanitizedHistory(t *testing.T) {
+	database, cleanup := openServiceTestDB(t)
+	defer cleanup()
+	jobs := agent.NewJobRegistry(time.Minute, 32)
+	manager := &agent.SubagentManager{DB: database, Jobs: jobs, MaxQueued: 4}
+	rt := &agent.Runtime{DB: database}
+	server := &serviceServer{runtime: rt, subagentManager: manager, jobs: jobs}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("l", 32), server)
+	defer httpServer.Close()
+
+	ctx := context.Background()
+	now := db.NowMS()
+	seed := []db.SubagentJob{
+		{ID: "list-a", ParentSessionKey: "alice", ChildSessionKey: "alice:s:a", Task: "research X", Status: db.SubagentStatusQueued, RequestedAt: now - 3000, MetadataJSON: `{"secret":"do-not-leak"}`},
+		{ID: "list-b", ParentSessionKey: "bob", ChildSessionKey: "bob:s:b", Task: "draft email", Status: db.SubagentStatusSucceeded, RequestedAt: now - 5000, FinishedAt: now - 1000, ResultPreview: "draft ready", MetadataJSON: `{"secret":"do-not-leak"}`},
+	}
+	for _, job := range seed {
+		if err := database.EnqueueSubagentJob(ctx, job); err != nil {
+			t.Fatalf("EnqueueSubagentJob %s: %v", job.ID, err)
+		}
+		if job.Status == db.SubagentStatusSucceeded {
+			if err := database.MarkSubagentSucceeded(ctx, job.ID, job.ResultPreview, ""); err != nil {
+				t.Fatalf("MarkSubagentSucceeded: %v", err)
+			}
+		}
+	}
+
+	req := mustServiceRequest(t, httpServer, strings.Repeat("l", 32), http.MethodGet, "/internal/v1/subagents?limit=10", "")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do list: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	body := mustReadBody(t, resp.Body)
+	if strings.Contains(body, "do-not-leak") {
+		t.Fatalf("response leaked metadata_json: %s", body)
+	}
+	if !strings.Contains(body, "list-a") || !strings.Contains(body, "list-b") {
+		t.Fatalf("expected both jobs in response: %s", body)
+	}
+	if !strings.Contains(body, `"kind":"subagent"`) {
+		t.Fatalf("expected sanitized kind in response: %s", body)
+	}
+	if !strings.Contains(body, `"task":"research X"`) || !strings.Contains(body, `"task":"draft email"`) {
+		t.Fatalf("expected task labels in response: %s", body)
+	}
+
+	t.Run("status filter", func(t *testing.T) {
+		req := mustServiceRequest(t, httpServer, strings.Repeat("l", 32), http.MethodGet, "/internal/v1/subagents?status=terminal", "")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("Do list terminal: %v", err)
+		}
+		defer resp.Body.Close()
+		body := mustReadBody(t, resp.Body)
+		if strings.Contains(body, "list-a") {
+			t.Fatalf("queued job should not appear in terminal filter: %s", body)
+		}
+		if !strings.Contains(body, "list-b") {
+			t.Fatalf("succeeded job should appear in terminal filter: %s", body)
+		}
+	})
+
+	t.Run("invalid status rejected", func(t *testing.T) {
+		req := mustServiceRequest(t, httpServer, strings.Repeat("l", 32), http.MethodGet, "/internal/v1/subagents?status=bogus", "")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("Do list bogus: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("expected 400 for bogus status, got %d", resp.StatusCode)
+		}
+	})
+
+	t.Run("invalid limit rejected", func(t *testing.T) {
+		req := mustServiceRequest(t, httpServer, strings.Repeat("l", 32), http.MethodGet, "/internal/v1/subagents?limit=zero", "")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("Do list bad limit: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("expected 400 for non-numeric limit, got %d", resp.StatusCode)
+		}
+	})
+
+	t.Run("requires authorization", func(t *testing.T) {
+		anonReq, err := http.NewRequest(http.MethodGet, httpServer.URL+"/internal/v1/subagents", nil)
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		resp, err := http.DefaultClient.Do(anonReq)
+		if err != nil {
+			t.Fatalf("Do anon: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("expected 401, got %d", resp.StatusCode)
+		}
+	})
+}
+
 func buildServiceTestRuntime(t *testing.T, handler func(http.ResponseWriter, *http.Request)) (*agent.Runtime, func()) {
 	t.Helper()
 	database, err := db.Open(filepath.Join(t.TempDir(), "service-test.db"))
@@ -1076,6 +1861,185 @@ func buildServiceTestRuntime(t *testing.T, handler func(http.ResponseWriter, *ht
 		database.Close()
 	}
 	return rt, cleanup
+}
+
+func TestServiceTurns_MaxToolLoopsReturnsFallbackResponse(t *testing.T) {
+	callCount := 0
+	rt, cleanup := buildServiceTestRuntime(t, func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		resp := providers.ChatCompletionResponse{
+			Choices: []struct {
+				Message struct {
+					Role      string               `json:"role"`
+					Content   any                  `json:"content"`
+					ToolCalls []providers.ToolCall `json:"tool_calls"`
+				} `json:"message"`
+			}{{
+				Message: struct {
+					Role      string               `json:"role"`
+					Content   any                  `json:"content"`
+					ToolCalls []providers.ToolCall `json:"tool_calls"`
+				}{
+					Role: "assistant",
+					ToolCalls: []providers.ToolCall{{
+						ID:   fmt.Sprintf("loop-%d", callCount),
+						Type: "function",
+						Function: struct {
+							Name      string `json:"name"`
+							Arguments string `json:"arguments"`
+						}{
+							Name:      "read_file",
+							Arguments: `{}`,
+						},
+					}},
+				},
+			}},
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("Encode: %v", err)
+		}
+	})
+	defer cleanup()
+
+	server := &serviceServer{runtime: rt, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("t", 32), server)
+	defer httpServer.Close()
+
+	body := `{"session_key":"svc:loop-fallback","message":"loop forever","meta":{"request_id":"req-loop-fallback"}}`
+	req := mustServiceRequest(t, httpServer, strings.Repeat("t", 32), http.MethodPost, "/internal/v1/turns", body)
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	payload := mustDecodeJSONBody(t, resp.Body)
+	if got := fmt.Sprint(payload["status"]); got != "completed" {
+		t.Fatalf("expected completed status, got %#v", payload)
+	}
+	finalText := fmt.Sprint(payload["final_text"])
+	if !strings.Contains(finalText, "tool calls kept failing or looping") {
+		t.Fatalf("expected fallback final_text, got %#v", payload)
+	}
+}
+
+func TestServiceTurns_MaxToolLoopsRequestsApprovalWhenBrokerAvailable(t *testing.T) {
+	callCount := 0
+	rt, cleanup := buildServiceTestRuntime(t, func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		resp := providers.ChatCompletionResponse{
+			Choices: []struct {
+				Message struct {
+					Role      string               `json:"role"`
+					Content   any                  `json:"content"`
+					ToolCalls []providers.ToolCall `json:"tool_calls"`
+				} `json:"message"`
+			}{
+				{Message: struct {
+					Role      string               `json:"role"`
+					Content   any                  `json:"content"`
+					ToolCalls []providers.ToolCall `json:"tool_calls"`
+				}{
+					Role: "assistant",
+					ToolCalls: []providers.ToolCall{{
+						ID:   fmt.Sprintf("loop-%d", callCount),
+						Type: "function",
+						Function: struct {
+							Name      string `json:"name"`
+							Arguments string `json:"arguments"`
+						}{Name: "read_file", Arguments: `{}`},
+					}},
+				}},
+			},
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("Encode: %v", err)
+		}
+	})
+	defer cleanup()
+
+	approvalCfg := config.Default().Security.Approvals
+	approvalCfg.HostID = "svc-loop-host"
+	rt.MaxToolLoopsExceededAction = config.QuotaExceededActionAsk
+	rt.ApprovalBroker = &approval.Broker{
+		DB:      rt.DB,
+		Config:  approvalCfg,
+		HostID:  approvalCfg.HostID,
+		SignKey: []byte("0123456789abcdef0123456789abcdef"),
+		Now: func() time.Time {
+			return time.Unix(1_700_000_000, 0).UTC()
+		},
+	}
+
+	server := &serviceServer{runtime: rt, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("t", 32), server)
+	defer httpServer.Close()
+
+	body := `{"session_key":"svc:loop-approval","message":"loop forever"}`
+	req := mustServiceRequest(t, httpServer, strings.Repeat("t", 32), http.MethodPost, "/internal/v1/turns", body)
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	payload := mustDecodeJSONBody(t, resp.Body)
+	if payload["status"] != "approval_required" {
+		t.Fatalf("expected approval_required status, got %#v", payload)
+	}
+	if payload["request_id"] == nil {
+		t.Fatalf("expected request id in payload, got %#v", payload)
+	}
+	if callCount != 2 {
+		t.Fatalf("expected 2 provider calls before approval pause, got %d", callCount)
+	}
+}
+
+func mustUseServiceTestWorkingDir(t *testing.T, dir string) {
+	t.Helper()
+	current, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(current); err != nil {
+			t.Fatalf("restore cwd: %v", err)
+		}
+	})
+}
+
+func writeServiceTestRestartScript(t *testing.T, dir string, body string) string {
+	t.Helper()
+	scriptDir := filepath.Join(dir, "scripts")
+	if err := os.MkdirAll(scriptDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll script dir: %v", err)
+	}
+	scriptPath := filepath.Join(scriptDir, "restart-service.sh")
+	if err := os.WriteFile(scriptPath, []byte(body), 0o755); err != nil {
+		t.Fatalf("WriteFile restart script: %v", err)
+	}
+	return scriptPath
+}
+
+func waitForFile(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", path)
 }
 
 func openServiceTestDB(t *testing.T) (*db.DB, func()) {
@@ -1109,7 +2073,7 @@ func newServiceTestHTTPServer(t *testing.T, secret string, server *serviceServer
 			return registry
 		}
 	}
-	return httptest.NewServer(serviceBrowserMiddleware(server.config, serviceAuthMiddlewareWithBroker(server.config, server.broker, serviceBoundaryMiddleware(server, newServiceMux(server)))))
+	return httptest.NewServer(serviceBrowserMiddleware(server.config, serviceAuthMiddlewareWithBrokerAndLimiter(server.config, server.broker, server.app().Auth(), server, serviceBoundaryMiddleware(server, newServiceMux(server)))))
 }
 
 func mustServiceRequest(t *testing.T, server *httptest.Server, secret, method, path, body string) *http.Request {
@@ -1513,6 +2477,126 @@ func TestServiceApprovals_PairedOperatorCanApprovePendingRequest(t *testing.T) {
 	}
 }
 
+func TestServiceApprovals_Approve_ReturnsPlanIDsWhenPresent(t *testing.T) {
+	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.SkillExecution.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+
+	plan, err := broker.DB.CreateSkillRunPlan(context.Background(), db.SkillRunPlanRecord{
+		ID:              "srp_service_plan",
+		SkillID:         "runner",
+		SkillDir:        "/tmp/runner",
+		Entrypoint:      "hello",
+		TimeoutSeconds:  30,
+		CommandJSON:     `["bash","/tmp/runner/tool.sh"]`,
+		ScriptHash:      "script-hash",
+		EnvBindingHash:  "env-hash",
+		PlanHash:        "plan-hash",
+		ExecutionHostID: "test-host",
+		Status:          "prepared",
+		CreatedAt:       1,
+	})
+	if err != nil {
+		t.Fatalf("CreateSkillRunPlan: %v", err)
+	}
+	decision, err := broker.EvaluateSkillExec(context.Background(), approval.SkillEvaluation{
+		SkillID:        "runner",
+		PlanID:         plan.ID,
+		PlanHash:       plan.PlanHash,
+		ScriptHash:     plan.ScriptHash,
+		EnvBindingHash: plan.EnvBindingHash,
+		TimeoutSeconds: plan.TimeoutSeconds,
+	})
+	if err != nil {
+		t.Fatalf("EvaluateSkillExec: %v", err)
+	}
+	if err := broker.DB.UpdateSkillRunPlanApproval(context.Background(), plan.ID, decision.RequestID, decision.SubjectHash, "pending_approval", 2); err != nil {
+		t.Fatalf("UpdateSkillRunPlanApproval: %v", err)
+	}
+
+	server := &serviceServer{broker: broker, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("a", 32), server)
+	defer httpServer.Close()
+
+	_, deviceToken, err := broker.RotateDeviceToken(context.Background(), "operator-1", approval.RoleOperator, "Operator", nil)
+	if err != nil {
+		t.Fatalf("RotateDeviceToken: %v", err)
+	}
+
+	approveReq := mustJSONRequest(t, http.MethodPost, fmt.Sprintf("%s/internal/v1/approvals/%d/approve", httpServer.URL, decision.RequestID), `{"note":"approved"}`)
+	approveReq.Header.Set("Authorization", "Bearer "+deviceToken)
+	approveResp, err := httpServer.Client().Do(approveReq)
+	if err != nil {
+		t.Fatalf("Do approve approval: %v", err)
+	}
+	defer approveResp.Body.Close()
+	if approveResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected approval 200, got %d (%s)", approveResp.StatusCode, mustReadBody(t, approveResp.Body))
+	}
+	payload := mustDecodeJSONBody(t, approveResp.Body)
+	if payload["plan_id"] != plan.ID {
+		t.Fatalf("expected plan_id %q, got %#v", plan.ID, payload)
+	}
+	planIDs, _ := payload["plan_ids"].([]any)
+	if len(planIDs) != 1 || planIDs[0] != plan.ID {
+		t.Fatalf("expected plan_ids to include %q, got %#v", plan.ID, payload)
+	}
+}
+
+func TestServiceApprovals_Approve_PlanLookupFailureWarnsButStillSucceeds(t *testing.T) {
+	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Exec.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+
+	decision, err := broker.EvaluateExec(context.Background(), approval.ExecEvaluation{
+		ExecutablePath: "/bin/echo",
+		Argv:           []string{"hello"},
+		WorkingDir:     "/tmp",
+		ToolName:       "exec",
+	})
+	if err != nil {
+		t.Fatalf("EvaluateExec: %v", err)
+	}
+	_, deviceToken, err := broker.RotateDeviceToken(context.Background(), "operator-1", approval.RoleOperator, "Operator", nil)
+	if err != nil {
+		t.Fatalf("RotateDeviceToken: %v", err)
+	}
+	prevLookup := approvalSkillRunPlanLookup
+	approvalSkillRunPlanLookup = func(context.Context, *db.DB, int64, int) ([]db.SkillRunPlanRecord, error) {
+		return nil, fmt.Errorf("lookup down")
+	}
+	defer func() { approvalSkillRunPlanLookup = prevLookup }()
+
+	server := &serviceServer{broker: broker, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("w", 32), server)
+	defer httpServer.Close()
+
+	req := mustJSONRequest(t, http.MethodPost, fmt.Sprintf("%s/internal/v1/approvals/%d/approve", httpServer.URL, decision.RequestID), `{"note":"approved"}`)
+	req.Header.Set("Authorization", "Bearer "+deviceToken)
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do approve: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected approval 200, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	payload := mustDecodeJSONBody(t, resp.Body)
+	if strings.TrimSpace(fmt.Sprint(payload["token"])) == "" {
+		t.Fatalf("expected token in response, got %#v", payload)
+	}
+	warnings, _ := payload["warnings"].([]any)
+	if len(warnings) != 1 {
+		t.Fatalf("expected one warning, got %#v", payload)
+	}
+	warning, _ := warnings[0].(map[string]any)
+	if warning["code"] != "plan_lookup_failed" {
+		t.Fatalf("expected plan lookup warning, got %#v", payload)
+	}
+}
+
 func TestServiceApprovals_Approve_RejectsMalformedJSON(t *testing.T) {
 	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
 		cfg.Exec.Mode = config.ApprovalModeAsk
@@ -1806,6 +2890,261 @@ func TestServiceStatusEndpoints(t *testing.T) {
 	}
 }
 
+func TestServiceAppBootstrapRoute_PairedOperatorWithoutSession(t *testing.T) {
+	workDir := t.TempDir()
+	mustUseServiceTestWorkingDir(t, workDir)
+	writeServiceTestRestartScript(t, workDir, "#!/bin/sh\nexit 0\n")
+
+	rt, cleanupRuntime := buildServiceTestRuntime(t, func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	})
+	defer cleanupRuntime()
+	broker, cleanupBroker := buildServiceTestBroker(t, nil)
+	defer cleanupBroker()
+
+	cfg := rolloutAuthTestConfig(config.AuthEnforcementSession)
+	cfg.Service.Secret = strings.Repeat("b", 32)
+	cfg.Service.SharedSecretRole = approval.RoleOperator
+	cfg.Hardening.EnableExecShell = true
+	cfg.Hardening.PrivilegedTools = true
+	cfg.Hardening.GuardedTools = true
+
+	server := &serviceServer{
+		config:  cfg,
+		runtime: rt,
+		jobs:    agent.NewJobRegistry(time.Minute, 32),
+		broker:  broker,
+	}
+	httpServer := newServiceTestHTTPServer(t, cfg.Service.Secret, server)
+	defer httpServer.Close()
+
+	_, deviceToken, err := broker.RotateDeviceToken(context.Background(), "operator-1", approval.RoleOperator, "Operator", nil)
+	if err != nil {
+		t.Fatalf("RotateDeviceToken: %v", err)
+	}
+
+	req := mustJSONRequest(t, http.MethodGet, httpServer.URL+"/internal/v1/app/bootstrap", "")
+	req.Header.Set("Authorization", "Bearer "+deviceToken)
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do bootstrap: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected bootstrap 200, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	payload := mustDecodeJSONBody(t, resp.Body)
+	pairing, _ := payload["pairing"].(map[string]any)
+	authState, _ := payload["auth"].(map[string]any)
+	actions, _ := payload["actions"].([]any)
+	if pairing["paired"] != true || pairing["device_id"] != "operator-1" {
+		t.Fatalf("expected paired operator payload, got %#v", payload)
+	}
+	if authState["session_active"] != false || authState["session_required"] != true {
+		t.Fatalf("expected paired-without-session auth state, got %#v", authState)
+	}
+	if len(actions) != 1 {
+		t.Fatalf("expected one action descriptor, got %#v", actions)
+	}
+	action, _ := actions[0].(map[string]any)
+	if action["id"] != "restart-service" || action["available"] != true || action["session_required"] != true || action["step_up_required"] != true {
+		t.Fatalf("unexpected restart action descriptor: %#v", action)
+	}
+}
+
+func TestServiceAppBootstrapRoute_SharedSecretWarnsAboutLimitedExec(t *testing.T) {
+	cfg := config.Default()
+	cfg.Service.Secret = strings.Repeat("e", 32)
+	cfg.Service.SharedSecretRole = approval.RoleServiceClient
+	cfg.Tools.EnableExec = true
+	server := &serviceServer{config: cfg, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, cfg.Service.Secret, server)
+	defer httpServer.Close()
+
+	req := mustJSONRequest(t, http.MethodGet, httpServer.URL+"/internal/v1/app/bootstrap", "")
+	req.Header.Set("Authorization", "Bearer "+mustIssueServiceTokenAt(t, cfg.Service.Secret, time.Now()))
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do bootstrap: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected bootstrap 200, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	payload := mustDecodeJSONBody(t, resp.Body)
+	authState, _ := payload["auth"].(map[string]any)
+	status, _ := payload["status"].(map[string]any)
+	warnings, _ := status["warnings"].([]any)
+	if authState["kind"] != "shared-secret" || authState["role"] != string(approval.RoleServiceClient) || authState["exec_allowed"] != false {
+		t.Fatalf("expected shared-secret auth details, got %#v", authState)
+	}
+	if len(warnings) == 0 {
+		t.Fatalf("expected bootstrap warnings, got %#v", payload)
+	}
+	foundWarning := false
+	for _, raw := range warnings {
+		warning, _ := raw.(map[string]any)
+		if warning["code"] == "shared_secret_limited" {
+			foundWarning = true
+			break
+		}
+	}
+	if !foundWarning {
+		t.Fatalf("expected limited shared-secret warning, got %#v", warnings)
+	}
+}
+
+func TestServiceAppBootstrapRoute_DegradedWarnings(t *testing.T) {
+	cfg := config.Default()
+	cfg.Service.Secret = strings.Repeat("d", 32)
+	cfg.Service.SharedSecretRole = approval.RoleOperator
+	server := &serviceServer{config: cfg, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, cfg.Service.Secret, server)
+	defer httpServer.Close()
+
+	req := mustServiceRequest(t, httpServer, cfg.Service.Secret, http.MethodGet, "/internal/v1/app/bootstrap", "")
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do bootstrap: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected bootstrap 200, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	payload := mustDecodeJSONBody(t, resp.Body)
+	status, _ := payload["status"].(map[string]any)
+	if status["summary"] != "offline" {
+		t.Fatalf("expected offline summary, got %#v", status)
+	}
+	warnings, _ := status["warnings"].([]any)
+	if len(warnings) == 0 {
+		t.Fatalf("expected warnings in degraded bootstrap payload, got %#v", payload)
+	}
+}
+
+func TestServiceRestartActionRoute_StartsScript(t *testing.T) {
+	workDir := t.TempDir()
+	mustUseServiceTestWorkingDir(t, workDir)
+	marker := filepath.Join(workDir, "restart-ran")
+	writeServiceTestRestartScript(t, workDir, "#!/bin/sh\nprintf 'ok' > "+strconv.Quote(marker)+"\n")
+
+	cfg := config.Default()
+	cfg.Service.Secret = strings.Repeat("r", 32)
+	cfg.Service.SharedSecretRole = approval.RoleOperator
+	cfg.Hardening.EnableExecShell = true
+	cfg.Hardening.PrivilegedTools = true
+	cfg.Hardening.GuardedTools = true
+	server := &serviceServer{config: cfg, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, cfg.Service.Secret, server)
+	defer httpServer.Close()
+
+	req := mustServiceRequest(t, httpServer, cfg.Service.Secret, http.MethodPost, "/internal/v1/actions/restart-service", `{}`)
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do restart action: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("expected restart action 202, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	payload := mustDecodeJSONBody(t, resp.Body)
+	if payload["action_id"] != "restart-service" || payload["status"] != "accepted" {
+		t.Fatalf("unexpected restart action payload: %#v", payload)
+	}
+	waitForFile(t, marker)
+}
+
+func TestServiceRestartActionRoute_PreservesUnsafeDevMode(t *testing.T) {
+	workDir := t.TempDir()
+	mustUseServiceTestWorkingDir(t, workDir)
+	marker := filepath.Join(workDir, "restart-env")
+	writeServiceTestRestartScript(t, workDir, "#!/bin/sh\nprintf '%s' \"$OR3_SERVICE_UNSAFE_DEV\" > "+strconv.Quote(marker)+"\n")
+
+	cfg := config.Default()
+	cfg.Service.Secret = strings.Repeat("r", 32)
+	cfg.Service.SharedSecretRole = approval.RoleOperator
+	cfg.Hardening.EnableExecShell = true
+	cfg.Hardening.PrivilegedTools = true
+	cfg.Hardening.GuardedTools = true
+	server := &serviceServer{config: cfg, jobs: agent.NewJobRegistry(time.Minute, 32), unsafeDev: true}
+	httpServer := newServiceTestHTTPServer(t, cfg.Service.Secret, server)
+	defer httpServer.Close()
+
+	req := mustServiceRequest(t, httpServer, cfg.Service.Secret, http.MethodPost, "/internal/v1/actions/restart-service", `{}`)
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do restart action: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("expected restart action 202, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	waitForFile(t, marker)
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != "true" {
+		t.Fatalf("expected restart action to preserve unsafe-dev env, got %q", string(data))
+	}
+}
+
+func TestServiceRestartActionRoute_RequiresApprovalWhenExecModeAsks(t *testing.T) {
+	workDir := t.TempDir()
+	mustUseServiceTestWorkingDir(t, workDir)
+	writeServiceTestRestartScript(t, workDir, "#!/bin/sh\nexit 0\n")
+
+	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Exec.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+
+	cfg := config.Default()
+	cfg.Service.Secret = strings.Repeat("q", 32)
+	cfg.Service.SharedSecretRole = approval.RoleOperator
+	cfg.Hardening.EnableExecShell = true
+	cfg.Hardening.PrivilegedTools = true
+	cfg.Hardening.GuardedTools = true
+	cfg.Security.Approvals = broker.Config
+
+	server := &serviceServer{config: cfg, jobs: agent.NewJobRegistry(time.Minute, 32), broker: broker}
+	httpServer := newServiceTestHTTPServer(t, cfg.Service.Secret, server)
+	defer httpServer.Close()
+
+	req := mustServiceRequest(t, httpServer, cfg.Service.Secret, http.MethodPost, "/internal/v1/actions/restart-service", `{}`)
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do restart action: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected restart action 409, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	payload := mustDecodeJSONBody(t, resp.Body)
+	if payload["status"] != "approval_required" {
+		t.Fatalf("unexpected approval payload: %#v", payload)
+	}
+}
+
+func TestServiceRestartActionRoute_DisabledWithoutShellAccess(t *testing.T) {
+	cfg := config.Default()
+	cfg.Service.Secret = strings.Repeat("u", 32)
+	cfg.Service.SharedSecretRole = approval.RoleOperator
+	server := &serviceServer{config: cfg, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, cfg.Service.Secret, server)
+	defer httpServer.Close()
+
+	req := mustServiceRequest(t, httpServer, cfg.Service.Secret, http.MethodPost, "/internal/v1/actions/restart-service", `{}`)
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do restart action: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected restart action 503, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+}
+
 func TestServiceStatusEndpoints_RejectNonGET(t *testing.T) {
 	server := &serviceServer{jobs: agent.NewJobRegistry(time.Minute, 32)}
 	tests := []struct {
@@ -2049,6 +3388,27 @@ func TestRunServiceCommand_HostedNoExec_RefusesExecShell(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "startup refused") {
 		t.Fatalf("expected 'startup refused' in error, got: %v", err)
+	}
+}
+
+func TestRunServiceCommandWithBrokerOptions_AllowsUnsafeDevOverride(t *testing.T) {
+	cfg := config.Default()
+	cfg.Service.Secret = strings.Repeat("x", 32)
+	cfg.Service.Listen = "127.0.0.1:0"
+	cfg.Service.MaxCapability = "guarded"
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err := runServiceCommandWithBrokerOptions(ctx, cfg, nil, nil, nil, nil, true)
+	if err == nil {
+		t.Fatal("expected runtime error after unsafe-dev bypass, got nil")
+	}
+	if strings.Contains(err.Error(), "service.maxCapability must remain safe") {
+		t.Fatalf("unsafe-dev should bypass strict service posture, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "runtime not configured") {
+		t.Fatalf("expected to reach runtime validation after bypass, got: %v", err)
 	}
 }
 

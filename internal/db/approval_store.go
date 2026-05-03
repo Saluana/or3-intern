@@ -1,6 +1,7 @@
 package db
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -200,10 +201,42 @@ func (d *DB) UpsertPairedDevice(ctx context.Context, input PairedDeviceRecord) (
 		return PairedDeviceRecord{}, fmt.Errorf("device ID required")
 	}
 	metadataJSON := mustJSONMap(input.Metadata)
-	_, err := d.SQL.ExecContext(ctx, `INSERT INTO paired_devices(device_id, role, display_name, token_hash, status, created_at, last_seen_at, revoked_at, metadata_json)
+	tx, err := d.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return PairedDeviceRecord{}, err
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+	previous, prevErr := scanPairedDevice(tx.QueryRowContext(ctx, `SELECT id, device_id, role, display_name, token_hash, status, created_at, last_seen_at, revoked_at, metadata_json FROM paired_devices WHERE device_id=?`, strings.TrimSpace(input.DeviceID)))
+	if prevErr != nil && !errors.Is(prevErr, sql.ErrNoRows) {
+		return PairedDeviceRecord{}, prevErr
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO paired_devices(device_id, role, display_name, token_hash, status, created_at, last_seen_at, revoked_at, metadata_json)
 		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(device_id) DO UPDATE SET role=excluded.role, display_name=excluded.display_name, token_hash=excluded.token_hash, status=excluded.status, last_seen_at=excluded.last_seen_at, revoked_at=excluded.revoked_at, metadata_json=excluded.metadata_json`, input.DeviceID, input.Role, input.DisplayName, input.TokenHash, input.Status, input.CreatedAt, input.LastSeenAt, input.RevokedAt, metadataJSON)
 	if err != nil {
+		return PairedDeviceRecord{}, err
+	}
+	shouldRevokeSessions := false
+	if prevErr == nil {
+		shouldRevokeSessions = input.RevokedAt > 0 || !bytes.Equal(previous.TokenHash, input.TokenHash)
+	}
+	if shouldRevokeSessions {
+		reason := "device-token-rotated"
+		revokedAt := input.LastSeenAt
+		if revokedAt <= 0 {
+			revokedAt = NowMS()
+		}
+		if input.RevokedAt > 0 {
+			reason = "device-revoked"
+			revokedAt = input.RevokedAt
+		}
+		if _, err := revokeAuthSessionsByDeviceExec(ctx, tx, input.DeviceID, reason, revokedAt); err != nil {
+			return PairedDeviceRecord{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		return PairedDeviceRecord{}, err
 	}
 	return d.GetPairedDevice(ctx, input.DeviceID)
@@ -345,6 +378,23 @@ func (d *DB) ExpireApprovalRequests(ctx context.Context, nowMS int64, actor, not
 	return rows, nil
 }
 
+func (d *DB) ListExpiredPendingApprovalRequestIDs(ctx context.Context, nowMS int64) ([]int64, error) {
+	rows, err := d.SQL.QueryContext(ctx, `SELECT id FROM approval_requests WHERE status=? AND expires_at>0 AND expires_at<=? ORDER BY id ASC`, "pending", nowMS)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]int64, 0)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 func (d *DB) UpdateApprovalRequestResolution(ctx context.Context, id int64, status string, resolvedAt int64, actor, kind, note string) error {
 	_, err := d.SQL.ExecContext(ctx, `UPDATE approval_requests SET status=?, resolved_at=?, resolver_actor_id=?, resolution_kind=?, resolution_note=? WHERE id=?`, status, resolvedAt, actor, kind, note, id)
 	return err
@@ -432,6 +482,18 @@ func (d *DB) GetApprovalToken(ctx context.Context, id int64) (ApprovalTokenRecor
 func (d *DB) RevokeApprovalToken(ctx context.Context, id int64, revokedAt int64) error {
 	_, err := d.SQL.ExecContext(ctx, `UPDATE approval_tokens SET revoked_at=? WHERE id=?`, revokedAt, id)
 	return err
+}
+
+func (d *DB) ConsumeApprovalToken(ctx context.Context, id int64, revokedAt int64) (bool, error) {
+	res, err := d.SQL.ExecContext(ctx, `UPDATE approval_tokens SET revoked_at=? WHERE id=? AND revoked_at=0`, revokedAt, id)
+	if err != nil {
+		return false, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
 }
 
 func mustJSONMap(value map[string]any) string {

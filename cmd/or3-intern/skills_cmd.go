@@ -328,7 +328,7 @@ func buildSkillsInventory(cfg config.Config, bundledDir string, toolNames map[st
 		Roots:          buildSkillRoots(cfg, bundledDir),
 		Entries:        skillEntries(cfg),
 		GlobalConfig:   configMap(cfg),
-		Env:            envMap(),
+		Env:            skillEnvMap(cfg),
 		AvailableTools: toolNames,
 		ApprovalPolicy: approvalPolicy,
 	})
@@ -381,19 +381,25 @@ func filterAdvertisedToolNames(cfg config.Config, toolNames map[string]struct{})
 	for name := range toolNames {
 		filtered[name] = struct{}{}
 	}
+	if !shouldRegisterExecTool(cfg) {
+		delete(filtered, "exec")
+	}
 	if !cfg.Hardening.GuardedTools && !cfg.Hardening.PrivilegedTools {
 		delete(filtered, "exec")
 	}
 	if !cfg.Skills.EnableExec {
+		delete(filtered, "run_skill")
 		delete(filtered, "run_skill_script")
 	}
 	switch cfg.RuntimeProfile {
 	case config.ProfileHostedNoExec:
 		delete(filtered, "exec")
+		delete(filtered, "run_skill")
 		delete(filtered, "run_skill_script")
 	case config.ProfileHostedRemoteSandbox:
 		if !cfg.Hardening.Sandbox.Enabled {
 			delete(filtered, "exec")
+			delete(filtered, "run_skill")
 			delete(filtered, "run_skill_script")
 		}
 	}
@@ -407,6 +413,9 @@ func buildSkillRoots(cfg config.Config, bundledDir string) []skills.Root {
 			continue
 		}
 		roots = append(roots, skills.Root{Path: extra, Source: skills.SourceExtra})
+	}
+	if !cfg.Skills.Load.DisableGlobalDir && strings.TrimSpace(cfg.Skills.Load.GlobalDir) != "" {
+		roots = append(roots, skills.Root{Path: cfg.Skills.Load.GlobalDir, Source: skills.SourceGlobal})
 	}
 	if strings.TrimSpace(bundledDir) != "" {
 		roots = append(roots, skills.Root{Path: bundledDir, Source: skills.SourceBundled})
@@ -454,6 +463,21 @@ func envMap() map[string]string {
 	return out
 }
 
+func skillEnvMap(cfg config.Config) map[string]string {
+	out := envMap()
+	pathAppend := strings.TrimSpace(cfg.Tools.PathAppend)
+	if pathAppend == "" {
+		return out
+	}
+	currentPath := strings.TrimSpace(out["PATH"])
+	if currentPath == "" {
+		out["PATH"] = pathAppend
+		return out
+	}
+	out["PATH"] = currentPath + string(os.PathListSeparator) + pathAppend
+	return out
+}
+
 func resolveInstallRoot(cfg config.Config) string {
 	installDir := strings.TrimSpace(cfg.Skills.ClawHub.InstallDir)
 	if installDir == "" {
@@ -472,10 +496,13 @@ func availableToolNames(includeCron, includeSubagents bool) map[string]struct{} 
 	names := []string{
 		"exec",
 		"read_file",
+		"search_file",
+		"read_artifact",
 		"write_file",
 		"edit_file",
 		"list_dir",
 		"web_fetch",
+		"web_fetch_markdown",
 		"web_search",
 		"memory_set_pinned",
 		"memory_add_note",
@@ -484,6 +511,7 @@ func availableToolNames(includeCron, includeSubagents bool) map[string]struct{} 
 		"memory_get_pinned",
 		"send_message",
 		"read_skill",
+		"run_skill",
 		"run_skill_script",
 	}
 	if includeCron {

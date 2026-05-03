@@ -2,15 +2,19 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"time"
 
 	"or3-intern/internal/agent"
 	"or3-intern/internal/approval"
+	"or3-intern/internal/auth"
 	"or3-intern/internal/bus"
 	"or3-intern/internal/channels"
+	"or3-intern/internal/config"
 	"or3-intern/internal/controlplane"
 	"or3-intern/internal/db"
 	"or3-intern/internal/providers"
@@ -22,10 +26,17 @@ type ServiceApp struct {
 	jobs            *agent.JobRegistry
 	subagentManager *agent.SubagentManager
 	control         *controlplane.Service
+	auth            *auth.Service
 }
 
-func NewServiceApp(runtime *agent.Runtime, jobs *agent.JobRegistry, subagentManager *agent.SubagentManager, control *controlplane.Service) *ServiceApp {
-	return &ServiceApp{runtime: runtime, jobs: jobs, subagentManager: subagentManager, control: control}
+func NewServiceApp(cfg config.Config, runtime *agent.Runtime, jobs *agent.JobRegistry, subagentManager *agent.SubagentManager, control *controlplane.Service) *ServiceApp {
+	app := &ServiceApp{runtime: runtime, jobs: jobs, subagentManager: subagentManager, control: control}
+	if control != nil {
+		if authSvc, err := auth.NewService(cfg, control.DB, control.Audit); err == nil {
+			app.auth = authSvc
+		}
+	}
+	return app
 }
 
 type TurnRequest struct {
@@ -43,25 +54,46 @@ type TurnRequest struct {
 	Streamer      channels.StreamingChannel
 }
 
+func (a *ServiceApp) serviceRunContext(ctx context.Context, sessionKey, profileName, approvalToken, actor, role string, capability tools.CapabilityLevel, observer agent.ConversationObserver, streamer channels.StreamingChannel) context.Context {
+	runCtx := tools.ContextWithRequestSource(ctx, tools.RequestSourceService)
+	runCtx = tools.ContextWithSession(runCtx, strings.TrimSpace(sessionKey))
+	runCtx = tools.ContextWithApprovalToken(runCtx, approvalToken)
+	runCtx = tools.ContextWithRequesterIdentity(runCtx, actor, role)
+	runCtx = tools.ContextWithCapabilityCeiling(runCtx, capability)
+	if a != nil && a.runtime != nil {
+		runCtx = a.runtime.ContextWithProfileName(runCtx, profileName)
+		runCtx = tools.ContextWithToolGuard(runCtx, a.runtime.GuardToolExecution)
+	}
+	if observer != nil {
+		runCtx = agent.ContextWithConversationObserver(runCtx, observer)
+	}
+	if streamer != nil {
+		runCtx = agent.ContextWithStreamingChannel(runCtx, streamer)
+	}
+	return runCtx
+}
+
+func (a *ServiceApp) serviceToolRegistry(allowedTools []string, restrictTools bool) *tools.Registry {
+	if a == nil || a.runtime == nil {
+		return nil
+	}
+	if !restrictTools {
+		return a.runtime.Tools
+	}
+	filtered := tools.NewRegistry()
+	if len(allowedTools) > 0 {
+		filtered = a.runtime.Tools.CloneFiltered(allowedTools)
+	}
+	return filtered
+}
+
 func (a *ServiceApp) RunTurn(ctx context.Context, req TurnRequest) error {
 	if a == nil || a.runtime == nil {
 		return errors.New("runtime unavailable")
 	}
-	runCtx := tools.ContextWithRequestSource(ctx, tools.RequestSourceService)
-	runCtx = tools.ContextWithApprovalToken(runCtx, req.ApprovalToken)
-	runCtx = tools.ContextWithRequesterIdentity(runCtx, req.Actor, req.Role)
-	runCtx = tools.ContextWithCapabilityCeiling(runCtx, req.Capability)
-	if req.Observer != nil {
-		runCtx = agent.ContextWithConversationObserver(runCtx, req.Observer)
-	}
-	if req.Streamer != nil {
-		runCtx = agent.ContextWithStreamingChannel(runCtx, req.Streamer)
-	}
+	runCtx := a.serviceRunContext(ctx, req.SessionKey, req.ProfileName, req.ApprovalToken, req.Actor, req.Role, req.Capability, req.Observer, req.Streamer)
 	if req.RestrictTools {
-		filtered := tools.NewRegistry()
-		if len(req.AllowedTools) > 0 {
-			filtered = a.runtime.Tools.CloneFiltered(req.AllowedTools)
-		}
+		filtered := a.serviceToolRegistry(req.AllowedTools, req.RestrictTools)
 		runCtx = agent.ContextWithToolRegistry(runCtx, filtered)
 	}
 	meta := cloneMap(req.Meta)
@@ -76,6 +108,191 @@ func (a *ServiceApp) RunTurn(ctx context.Context, req TurnRequest) error {
 		Message:    strings.TrimSpace(req.Message),
 		Meta:       meta,
 	})
+}
+
+type ReplayToolCallRequest struct {
+	SessionKey    string
+	ToolName      string
+	ArgumentsJSON string
+	AllowedTools  []string
+	RestrictTools bool
+	ProfileName   string
+	Capability    tools.CapabilityLevel
+	ApprovalToken string
+	Actor         string
+	Role          string
+	Observer      agent.ConversationObserver
+}
+
+func (a *ServiceApp) ReplayToolCall(ctx context.Context, req ReplayToolCallRequest) (string, error) {
+	if a == nil || a.runtime == nil {
+		return "", errors.New("runtime unavailable")
+	}
+	registry := a.serviceToolRegistry(req.AllowedTools, req.RestrictTools)
+	if registry == nil {
+		return "", errors.New("tool registry unavailable")
+	}
+	toolName := strings.TrimSpace(req.ToolName)
+	if toolName == "" {
+		return "", errors.New("tool name is required")
+	}
+	argsJSON := strings.TrimSpace(req.ArgumentsJSON)
+	if argsJSON == "" {
+		argsJSON = "{}"
+	}
+	runCtx := a.serviceRunContext(ctx, req.SessionKey, req.ProfileName, req.ApprovalToken, req.Actor, req.Role, req.Capability, req.Observer, nil)
+	if req.RestrictTools {
+		runCtx = agent.ContextWithToolRegistry(runCtx, registry)
+	}
+	toolCallID := ""
+	fullReplayHistory := a.runtime.DB != nil && a.runtime.Builder != nil && a.runtime.Provider != nil
+	if fullReplayHistory {
+		var findErr error
+		toolCallID, findErr = a.findReplayToolCallID(runCtx, req.SessionKey, toolName, argsJSON)
+		if findErr != nil {
+			return "", findErr
+		}
+		if strings.TrimSpace(toolCallID) == "" {
+			return "", fmt.Errorf("approved replay rejected: no matching prior assistant tool call")
+		}
+	}
+	if req.Observer != nil {
+		req.Observer.OnToolCall(runCtx, toolName, argsJSON)
+	}
+	out, err := registry.Execute(runCtx, toolName, argsJSON)
+	if err != nil {
+		var params map[string]any
+		_ = json.Unmarshal([]byte(argsJSON), &params)
+		out = tools.EncodeToolFailure(toolName, params, out, err)
+	}
+	if req.Observer != nil {
+		req.Observer.OnToolResult(runCtx, toolName, out, err)
+	}
+	if err != nil {
+		var approvalErr *tools.ApprovalRequiredError
+		if errors.As(err, &approvalErr) {
+			return "", err
+		}
+		if !fullReplayHistory {
+			return "", err
+		}
+	}
+	if !fullReplayHistory {
+		finalText := summarizeReplayToolResult(toolName, out)
+		if req.Observer != nil {
+			req.Observer.OnCompletion(runCtx, finalText, false)
+		}
+		return finalText, nil
+	}
+	if a.runtime.DB != nil && strings.TrimSpace(req.SessionKey) != "" {
+		payload := map[string]any{
+			"name":      toolName,
+			"replayed":  true,
+			"args_json": argsJSON,
+		}
+		if strings.TrimSpace(toolCallID) != "" {
+			payload["tool_call_id"] = toolCallID
+		}
+		if _, err := a.runtime.DB.AppendMessage(runCtx, req.SessionKey, "tool", out, payload); err != nil {
+			return "", err
+		}
+	}
+	if err := a.runtime.Handle(runCtx, bus.Event{
+		Type:       bus.EventSystem,
+		SessionKey: strings.TrimSpace(req.SessionKey),
+		Channel:    "service",
+		From:       "or3-net",
+		Message:    replayContinuationPrompt(toolName),
+		Meta: map[string]any{
+			"approved_tool_replay": true,
+			"tool_name":            toolName,
+		},
+	}); err != nil {
+		return "", err
+	}
+	return "", nil
+}
+
+func summarizeReplayToolResult(toolName string, out string) string {
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return fmt.Sprintf("%s completed.", strings.TrimSpace(toolName))
+	}
+	var result tools.ToolResult
+	if err := json.Unmarshal([]byte(out), &result); err == nil {
+		parts := make([]string, 0, 3)
+		if preview := strings.TrimSpace(result.Preview); preview != "" {
+			parts = append(parts, preview)
+		}
+		if len(parts) == 0 {
+			if summary := strings.TrimSpace(result.Summary); summary != "" {
+				parts = append(parts, summary)
+			}
+		}
+		if artifactID := strings.TrimSpace(result.ArtifactID); artifactID != "" {
+			parts = append(parts, fmt.Sprintf("artifact: %s", artifactID))
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, "\n\n")
+		}
+	}
+	return out
+}
+
+func (a *ServiceApp) findReplayToolCallID(ctx context.Context, sessionKey, toolName, argsJSON string) (string, error) {
+	if a == nil || a.runtime == nil || a.runtime.Builder == nil {
+		return "", nil
+	}
+	pp, _, err := a.runtime.Builder.BuildWithOptions(ctx, agent.BuildOptions{
+		SessionKey: strings.TrimSpace(sessionKey),
+	})
+	if err != nil {
+		return "", err
+	}
+	wantArgs := canonicalReplayArgs(argsJSON)
+	for i := len(pp.History) - 1; i >= 0; i-- {
+		msg := pp.History[i]
+		if msg.Role != "assistant" || len(msg.ToolCalls) == 0 {
+			continue
+		}
+		for j := len(msg.ToolCalls) - 1; j >= 0; j-- {
+			tc := msg.ToolCalls[j]
+			if strings.TrimSpace(tc.Function.Name) != strings.TrimSpace(toolName) {
+				continue
+			}
+			if wantArgs != "" && canonicalReplayArgs(tc.Function.Arguments) != wantArgs {
+				continue
+			}
+			if id := strings.TrimSpace(tc.ID); id != "" {
+				return id, nil
+			}
+		}
+	}
+	return "", nil
+}
+
+func canonicalReplayArgs(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	var decoded any
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		return raw
+	}
+	encoded, err := json.Marshal(decoded)
+	if err != nil {
+		return raw
+	}
+	return string(encoded)
+}
+
+func replayContinuationPrompt(toolName string) string {
+	name := strings.TrimSpace(toolName)
+	if name == "" {
+		name = "tool"
+	}
+	return fmt.Sprintf("Approval was granted for the previously requested %s call. The exact approved tool call has now been executed and its latest result is already in the conversation. Continue the same task from that result. Do not stop just because the approved tool call succeeded, and do not repeat the same %s call unless it is still necessary.", name, name)
 }
 
 type SubagentRequest struct {
@@ -277,6 +494,90 @@ func (a *ServiceApp) ListAllowlists(ctx context.Context, domain string, limit in
 		return nil, controlplane.ErrApprovalBrokerUnavailable
 	}
 	return a.control.ListAllowlists(ctx, domain, limit)
+}
+
+func (a *ServiceApp) Auth() *auth.Service {
+	if a == nil {
+		return nil
+	}
+	return a.auth
+}
+
+func (a *ServiceApp) BeginPasskeyRegistration(ctx context.Context, req auth.BeginRegistrationRequest) (*auth.BeginCeremonyResponse, error) {
+	if a == nil || a.auth == nil {
+		return nil, auth.ErrAuthDisabled
+	}
+	return a.auth.BeginRegistration(ctx, req)
+}
+
+func (a *ServiceApp) FinishPasskeyRegistration(ctx context.Context, req auth.FinishRegistrationRequest) (db.PasskeyCredentialRecord, error) {
+	if a == nil || a.auth == nil {
+		return db.PasskeyCredentialRecord{}, auth.ErrAuthDisabled
+	}
+	return a.auth.FinishRegistration(ctx, req)
+}
+
+func (a *ServiceApp) BeginPasskeyLogin(ctx context.Context, req auth.BeginLoginRequest) (*auth.BeginCeremonyResponse, error) {
+	if a == nil || a.auth == nil {
+		return nil, auth.ErrAuthDisabled
+	}
+	return a.auth.BeginLogin(ctx, req)
+}
+
+func (a *ServiceApp) FinishPasskeyLogin(ctx context.Context, req auth.FinishLoginRequest) (auth.LoginResult, error) {
+	if a == nil || a.auth == nil {
+		return auth.LoginResult{}, auth.ErrAuthDisabled
+	}
+	return a.auth.FinishLogin(ctx, req)
+}
+
+func (a *ServiceApp) BeginStepUp(ctx context.Context, req auth.BeginStepUpRequest) (*auth.BeginCeremonyResponse, error) {
+	if a == nil || a.auth == nil {
+		return nil, auth.ErrAuthDisabled
+	}
+	return a.auth.BeginStepUp(ctx, req)
+}
+
+func (a *ServiceApp) FinishStepUp(ctx context.Context, req auth.FinishStepUpRequest) (db.AuthSessionRecord, error) {
+	if a == nil || a.auth == nil {
+		return db.AuthSessionRecord{}, auth.ErrAuthDisabled
+	}
+	return a.auth.FinishStepUp(ctx, req)
+}
+
+func (a *ServiceApp) ValidateAuthSession(ctx context.Context, token string) (auth.SessionClaims, error) {
+	if a == nil || a.auth == nil {
+		return auth.SessionClaims{}, auth.ErrAuthDisabled
+	}
+	return a.auth.ValidateSessionToken(ctx, token)
+}
+
+func (a *ServiceApp) RevokeAuthSession(ctx context.Context, token, reason string) error {
+	if a == nil || a.auth == nil {
+		return auth.ErrAuthDisabled
+	}
+	return a.auth.RevokeSessionToken(ctx, token, reason)
+}
+
+func (a *ServiceApp) ListPasskeys(ctx context.Context, userID string) ([]db.PasskeyCredentialRecord, error) {
+	if a == nil || a.auth == nil {
+		return nil, auth.ErrAuthDisabled
+	}
+	return a.auth.ListPasskeys(ctx, userID)
+}
+
+func (a *ServiceApp) RenamePasskey(ctx context.Context, passkeyID, nickname string) error {
+	if a == nil || a.auth == nil {
+		return auth.ErrAuthDisabled
+	}
+	return a.auth.RenamePasskey(ctx, passkeyID, nickname)
+}
+
+func (a *ServiceApp) RevokePasskey(ctx context.Context, sessionToken, passkeyID, reason string) error {
+	if a == nil || a.auth == nil {
+		return auth.ErrAuthDisabled
+	}
+	return a.auth.RevokePasskey(ctx, sessionToken, passkeyID, reason)
 }
 
 func (a *ServiceApp) AddAllowlist(ctx context.Context, domain string, scope approval.AllowlistScope, matcher any, actor string, expiresAt int64) (db.ApprovalAllowlistRecord, error) {

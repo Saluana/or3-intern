@@ -463,6 +463,7 @@ func main() {
 		Artifacts:                   art,
 		MaxToolBytes:                cfg.MaxToolBytes,
 		MaxToolLoops:                cfg.MaxToolLoops,
+		MaxToolLoopsExceededAction:  cfg.MaxToolLoopsExceededAction,
 		DynamicToolExposure:         cfg.ContextConfigured && cfg.Context.Tools.DynamicExpose,
 		Deliver:                     delivererFunc(channelManager.Deliver),
 		DefaultScopeKey:             cfg.DefaultSessionKey,
@@ -593,7 +594,7 @@ func main() {
 		<-ctx.Done()
 	case "service":
 		runWorkers(ctx, b, rt, cfg.WorkerCount, nil)
-		if err := runServiceCommandWithBroker(ctx, cfg, rt, subagentManager, serviceJobs, approvalBroker); err != nil {
+		if err := runServiceCommandWithBrokerOptions(ctx, cfg, rt, subagentManager, serviceJobs, approvalBroker, unsafeDev); err != nil {
 			fmt.Fprintln(os.Stderr, "service error:", err)
 			os.Exit(1)
 		}
@@ -870,18 +871,19 @@ func buildBackgroundToolRegistry(cfg config.Config, d *db.DB, prov *providers.Cl
 
 func buildToolRegistryWithOptions(cfg config.Config, d *db.DB, prov *providers.Client, channelManager *rootchannels.Manager, inv *skills.Inventory, cronSvc *cron.Service, spawnManager tools.SpawnEnqueuer, mcpRegistrar mcpToolRegistrar, approvalBroker *approval.Broker, includeSendMessage bool) *tools.Registry {
 	reg := tools.NewRegistry()
-	fileRoot := allowedRoot(cfg)
+	fileWriteRoot := allowedRoot(cfg)
+	fileReadRoot := allowedReadRoot(cfg)
 	sandboxCfg := tools.BubblewrapConfig{Enabled: cfg.Hardening.Sandbox.Enabled, BubblewrapPath: cfg.Hardening.Sandbox.BubblewrapPath, AllowNetwork: cfg.Hardening.Sandbox.AllowNetwork, WritablePaths: append([]string{}, cfg.Hardening.Sandbox.WritablePaths...)}
 	hostPolicy := buildHostPolicy(cfg)
 	if shouldRegisterExecTool(cfg) {
-		reg.Register(&tools.ExecTool{Timeout: time.Duration(cfg.Tools.ExecTimeoutSeconds) * time.Second, RestrictDir: fileRoot, PathAppend: cfg.Tools.PathAppend, AllowedPrograms: append([]string{}, cfg.Hardening.ExecAllowedPrograms...), ChildEnvAllowlist: append([]string{}, cfg.Hardening.ChildEnvAllowlist...), Sandbox: sandboxCfg, EnableLegacyShell: cfg.Hardening.EnableExecShell, ApprovalBroker: approvalBroker})
+		reg.Register(&tools.ExecTool{Timeout: time.Duration(cfg.Tools.ExecTimeoutSeconds) * time.Second, RestrictDir: fileWriteRoot, PathAppend: cfg.Tools.PathAppend, AllowedPrograms: append([]string{}, cfg.Hardening.ExecAllowedPrograms...), ChildEnvAllowlist: append([]string{}, cfg.Hardening.ChildEnvAllowlist...), Sandbox: sandboxCfg, EnableLegacyShell: cfg.Hardening.EnableExecShell, ApprovalBroker: approvalBroker})
 	}
-	reg.Register(&tools.ReadFile{FileTool: tools.FileTool{Root: fileRoot}})
-	reg.Register(&tools.SearchFile{FileTool: tools.FileTool{Root: fileRoot}})
+	reg.Register(&tools.ReadFile{FileTool: tools.FileTool{Root: fileReadRoot, WriteRoot: fileWriteRoot}})
+	reg.Register(&tools.SearchFile{FileTool: tools.FileTool{Root: fileReadRoot, WriteRoot: fileWriteRoot}})
 	reg.Register(&tools.ReadArtifact{Store: &artifacts.Store{Dir: cfg.ArtifactsDir, DB: d}, MaxReadBytes: int64(cfg.MaxToolBytes)})
-	reg.Register(&tools.WriteFile{FileTool: tools.FileTool{Root: fileRoot}})
-	reg.Register(&tools.EditFile{FileTool: tools.FileTool{Root: fileRoot}})
-	reg.Register(&tools.ListDir{FileTool: tools.FileTool{Root: fileRoot}})
+	reg.Register(&tools.WriteFile{FileTool: tools.FileTool{Root: fileReadRoot, WriteRoot: fileWriteRoot}})
+	reg.Register(&tools.EditFile{FileTool: tools.FileTool{Root: fileReadRoot, WriteRoot: fileWriteRoot}})
+	reg.Register(&tools.ListDir{FileTool: tools.FileTool{Root: fileReadRoot, WriteRoot: fileWriteRoot}})
 	reg.Register(&tools.WebFetch{HostPolicy: hostPolicy, Store: &artifacts.Store{Dir: cfg.ArtifactsDir, DB: d}})
 	reg.Register(&tools.WebFetchMarkdown{HostPolicy: hostPolicy, Store: &artifacts.Store{Dir: cfg.ArtifactsDir, DB: d}})
 	reg.Register(&tools.WebSearch{APIKey: cfg.Tools.BraveAPIKey, HostPolicy: hostPolicy})
@@ -898,14 +900,17 @@ func buildToolRegistryWithOptions(cfg config.Config, d *db.DB, prov *providers.C
 				}
 				return channelManager.DeliverWithMeta(ctx, channel, to, text, meta)
 			},
-			AllowedRoot:   fileRoot,
+			AllowedRoot:   fileWriteRoot,
 			ArtifactsDir:  cfg.ArtifactsDir,
 			MaxMediaBytes: cfg.MaxMediaBytes,
 		})
 	}
 	if inv != nil {
 		reg.Register(&tools.ReadSkill{Inventory: inv})
-		reg.Register(&tools.RunSkillScript{Inventory: inv, Enabled: cfg.Skills.EnableExec, Timeout: time.Duration(cfg.Skills.MaxRunSeconds) * time.Second, ChildEnvAllowlist: append([]string{}, cfg.Hardening.ChildEnvAllowlist...), Sandbox: sandboxCfg, ApprovalBroker: approvalBroker})
+		if cfg.Skills.EnableExec {
+			reg.Register(&tools.RunSkill{RunSkillScript: tools.RunSkillScript{Inventory: inv, Enabled: true, Timeout: time.Duration(cfg.Skills.MaxRunSeconds) * time.Second, ChildEnvAllowlist: append([]string{}, cfg.Hardening.ChildEnvAllowlist...), Sandbox: sandboxCfg, ApprovalBroker: approvalBroker, DB: d}})
+			reg.Register(&tools.RunSkillScript{Inventory: inv, Enabled: true, Timeout: time.Duration(cfg.Skills.MaxRunSeconds) * time.Second, ChildEnvAllowlist: append([]string{}, cfg.Hardening.ChildEnvAllowlist...), Sandbox: sandboxCfg, ApprovalBroker: approvalBroker, DB: d})
+		}
 	}
 	if cronSvc != nil {
 		reg.Register(&tools.CronTool{Svc: cronSvc})
@@ -989,6 +994,13 @@ func allowedRoot(cfg config.Config) string {
 		return cfg.AllowedDir
 	}
 	return ""
+}
+
+func allowedReadRoot(cfg config.Config) string {
+	if cfg.Tools.RestrictToWorkspace && cfg.Tools.AllowFullFileRead {
+		return ""
+	}
+	return allowedRoot(cfg)
 }
 
 func heartbeatServiceForCommand(cmd string, cfg config.Config, eventBus *bus.Bus) *heartbeat.Service {

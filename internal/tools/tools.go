@@ -36,10 +36,26 @@ type CapabilityForParamsReporter interface {
 	CapabilityForParams(params map[string]any) CapabilityLevel
 }
 
+// CapabilityForContextParamsReporter reports a context-aware capability level.
+type CapabilityForContextParamsReporter interface {
+	CapabilityForContextParams(ctx context.Context, params map[string]any) CapabilityLevel
+}
+
 // ToolCapability returns the effective capability level for t and params.
 func ToolCapability(t Tool, params map[string]any) CapabilityLevel {
+	return ToolCapabilityForContext(context.Background(), t, params)
+}
+
+// ToolCapabilityForContext returns the effective capability level for t and params
+// using request context when a tool has source-specific capability behavior.
+func ToolCapabilityForContext(ctx context.Context, t Tool, params map[string]any) CapabilityLevel {
 	if t == nil {
 		return CapabilitySafe
+	}
+	if dynamic, ok := t.(CapabilityForContextParamsReporter); ok {
+		if level := dynamic.CapabilityForContextParams(ctx, params); level != "" {
+			return level
+		}
 	}
 	if dynamic, ok := t.(CapabilityForParamsReporter); ok {
 		if level := dynamic.CapabilityForParams(params); level != "" {

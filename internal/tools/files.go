@@ -9,20 +9,30 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
 type FileTool struct {
 	Base
-	Root string // allowed root (optional)
+	Root      string // allowed read root (optional)
+	WriteRoot string // allowed write root (optional; falls back to Root)
 }
 
 const (
-	defaultReadFileMaxBytes  = 12000
+	defaultReadFileMaxBytes  = 64 * 1024
 	defaultListDirMaxEntries = 80
 )
 
 func (t *FileTool) safePath(p string) (string, error) {
+	return t.safePathForRoot(p, t.Root)
+}
+
+func (t *FileTool) safeWritePath(p string) (string, error) {
+	return t.safePathForRoot(p, t.effectiveWriteRoot())
+}
+
+func (t *FileTool) safePathForRoot(p, rootPath string) (string, error) {
 	if strings.TrimSpace(p) == "" {
 		return "", errors.New("missing path")
 	}
@@ -34,8 +44,8 @@ func (t *FileTool) safePath(p string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if t.Root != "" {
-		root, err := filepath.Abs(t.Root)
+	if rootPath != "" {
+		root, err := filepath.Abs(rootPath)
 		if err != nil {
 			return "", err
 		}
@@ -49,6 +59,115 @@ func (t *FileTool) safePath(p string) (string, error) {
 		}
 	}
 	return abs, nil
+}
+
+func (t *FileTool) validatePathInRoot(abs string) error {
+	return validatePathInRoot(t.Root, abs)
+}
+
+func (t *FileTool) validatePathInWriteRoot(abs string) error {
+	return validatePathInRoot(t.effectiveWriteRoot(), abs)
+}
+
+func (t *FileTool) effectiveWriteRoot() string {
+	if strings.TrimSpace(t.WriteRoot) != "" {
+		return t.WriteRoot
+	}
+	return t.Root
+}
+
+func validatePathInRoot(rootPath, abs string) error {
+	if rootPath == "" {
+		return nil
+	}
+	root, err := filepath.Abs(rootPath)
+	if err != nil {
+		return err
+	}
+	root, err = canonicalizeRoot(root)
+	if err != nil {
+		return err
+	}
+	resolved, err := canonicalizePath(abs)
+	if err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(root, resolved)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("path outside allowed root")
+	}
+	return nil
+}
+
+func (t *FileTool) openSafeRead(path string) (*os.File, os.FileInfo, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, nil, err
+	}
+	if err := t.validateOpenedPath(path, info); err != nil {
+		f.Close()
+		return nil, nil, err
+	}
+	return f, info, nil
+}
+
+func (t *FileTool) openSafeWrite(path string, perm os.FileMode) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, perm)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if err := t.validateOpenedWritePath(path, info); err != nil {
+		f.Close()
+		return nil, err
+	}
+	if err := f.Truncate(0); err != nil {
+		f.Close()
+		return nil, err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+func (t *FileTool) validateOpenedPath(path string, openedInfo os.FileInfo) error {
+	if err := t.validatePathInRoot(path); err != nil {
+		return err
+	}
+	return validateOpenedPathUnchanged(path, openedInfo)
+}
+
+func (t *FileTool) validateOpenedWritePath(path string, openedInfo os.FileInfo) error {
+	if err := t.validatePathInWriteRoot(path); err != nil {
+		return err
+	}
+	return validateOpenedPathUnchanged(path, openedInfo)
+}
+
+func validateOpenedPathUnchanged(path string, openedInfo os.FileInfo) error {
+	resolved, err := canonicalizePath(path)
+	if err != nil {
+		return err
+	}
+	currentInfo, err := os.Stat(resolved)
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(openedInfo, currentInfo) {
+		return fmt.Errorf("path changed during file operation")
+	}
+	return nil
 }
 
 func canonicalizeRoot(root string) (string, error) {
@@ -91,22 +210,21 @@ func canonicalizePath(abs string) (string, error) {
 
 type ReadFile struct{ FileTool }
 
-func (t *ReadFile) Name() string        { return "read_file" }
-func (t *ReadFile) Description() string { return "Read a UTF-8 text file." }
+func (t *ReadFile) Name() string { return "read_file" }
+func (t *ReadFile) Description() string {
+	return "Read a UTF-8 text file from the allowed workspace. Default mode=preview is the safest general choice. Use mode=outline to understand a file cheaply, mode=grep when looking for a symbol/string, and mode=range after you know line numbers. Use mode=full when the whole bounded file is needed."
+}
 func (t *ReadFile) CapabilityForParams(params map[string]any) CapabilityLevel {
-	if strings.EqualFold(strings.TrimSpace(fmt.Sprint(params["mode"])), "full") {
-		return CapabilityGuarded
-	}
 	return CapabilitySafe
 }
 func (t *ReadFile) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
-		"path":      map[string]any{"type": "string"},
-		"mode":      map[string]any{"type": "string", "enum": []string{"preview", "full", "range", "grep", "outline"}, "description": "Read mode (default preview). full is still bounded and may spill to an artifact at runtime."},
-		"startLine": map[string]any{"type": "integer", "description": "1-based start line for range mode"},
-		"endLine":   map[string]any{"type": "integer", "description": "1-based end line for range mode"},
-		"pattern":   map[string]any{"type": "string", "description": "Substring or regex pattern for grep mode"},
-		"maxBytes":  map[string]any{"type": "integer", "description": "Max preview bytes (default 12000)"},
+		"path":      map[string]any{"type": "string", "description": "File path to read. Use an absolute path or a path relative to the current workspace; the path must stay inside the allowed read root."},
+		"mode":      map[string]any{"type": "string", "enum": []string{"preview", "full", "range", "grep", "outline"}, "description": "Read mode. Omit for preview. All modes are safe read-only operations. Use full when the whole bounded file is needed."},
+		"startLine": map[string]any{"type": "integer", "description": "For mode=range only: 1-based first line to return. Use with endLine after an outline/grep/preview identifies the area you need."},
+		"endLine":   map[string]any{"type": "integer", "description": "For mode=range only: 1-based last line to return, inclusive. Keep ranges focused to avoid unnecessary output."},
+		"pattern":   map[string]any{"type": "string", "description": "For mode=grep only: substring or regex pattern to search for, such as a function name, type name, config key, or exact error text."},
+		"maxBytes":  map[string]any{"type": "integer", "description": "Maximum bytes returned directly for preview/grep/range/outline/full. Omit for default 65536."},
 	}, "required": []string{"path"}}
 }
 func (t *ReadFile) Schema() map[string]any {
@@ -122,36 +240,32 @@ func (t *ReadFile) Execute(ctx context.Context, params map[string]any) (string, 
 	if mode == "" || mode == "<nil>" {
 		mode = "preview"
 	}
-	info, err := os.Stat(p)
+	f, info, err := t.openSafeRead(p)
 	if err != nil {
 		return "", err
 	}
+	defer f.Close()
 	switch mode {
 	case "preview", "full":
-		return t.readPreview(p, info.Size(), max, mode)
+		return t.readPreview(f, p, info.Size(), max, mode)
 	case "range":
 		start := intParam(params, "startLine", 1)
 		end := intParam(params, "endLine", start)
-		return readLineRange(p, info.Size(), start, end, max)
+		return readLineRange(f, p, info.Size(), start, end, max)
 	case "grep":
 		pattern := strings.TrimSpace(fmt.Sprint(params["pattern"]))
 		if pattern == "" || pattern == "<nil>" {
 			return "", fmt.Errorf("missing pattern")
 		}
-		return grepFile(p, info.Size(), pattern, max)
+		return grepFile(f, p, info.Size(), pattern, max)
 	case "outline":
-		return outlineFile(p, info.Size(), max)
+		return outlineFile(f, p, info.Size(), max)
 	default:
 		return "", fmt.Errorf("unsupported read_file mode: %s", mode)
 	}
 }
 
-func (t *ReadFile) readPreview(path string, size int64, max int, mode string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
+func (t *ReadFile) readPreview(f *os.File, path string, size int64, max int, mode string) (string, error) {
 	b, err := io.ReadAll(io.LimitReader(f, int64(max)+1))
 	if err != nil {
 		return "", err
@@ -162,14 +276,19 @@ func (t *ReadFile) readPreview(path string, size int64, max int, mode string) (s
 	}
 	preview := string(b)
 	summary := fmt.Sprintf("Read %s from %s", mode, path)
+	advice := []string(nil)
 	if truncated {
 		summary = fmt.Sprintf("Read bounded %s from %s; output truncated", mode, path)
+		if mode == "full" {
+			advice = TruncationAdvice("read_file_full", path)
+		}
 	}
 	return EncodeToolResult(ToolResult{
 		Kind:    "file_read",
 		OK:      true,
 		Summary: summary,
 		Preview: preview,
+		Advice:  advice,
 		Stats: map[string]any{
 			"path":      path,
 			"mode":      mode,
@@ -185,13 +304,13 @@ type SearchFile struct{ FileTool }
 
 func (t *SearchFile) Name() string { return "search_file" }
 func (t *SearchFile) Description() string {
-	return "Search a UTF-8 text file and return bounded matching lines."
+	return "Search one UTF-8 text file and return bounded matching lines. Use this instead of read_file mode=full when you know a symbol, string, error message, or config key and only need matching context."
 }
 func (t *SearchFile) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
-		"path":     map[string]any{"type": "string"},
-		"pattern":  map[string]any{"type": "string"},
-		"maxBytes": map[string]any{"type": "integer", "description": "Max preview bytes (default 12000)"},
+		"path":     map[string]any{"type": "string", "description": "File path to search. Use an absolute path or workspace-relative path inside the allowed read root."},
+		"pattern":  map[string]any{"type": "string", "description": "Substring or regex pattern to find. Choose a specific term rather than a broad word when possible."},
+		"maxBytes": map[string]any{"type": "integer", "description": "Maximum bytes of matching-line output returned directly. Omit for default 65536."},
 	}, "required": []string{"path", "pattern"}}
 }
 func (t *SearchFile) Schema() map[string]any {
@@ -203,34 +322,37 @@ func (t *SearchFile) Execute(ctx context.Context, params map[string]any) (string
 	if err != nil {
 		return "", err
 	}
-	info, err := os.Stat(p)
-	if err != nil {
-		return "", err
-	}
 	pattern := strings.TrimSpace(fmt.Sprint(params["pattern"]))
 	if pattern == "" || pattern == "<nil>" {
 		return "", fmt.Errorf("missing pattern")
 	}
-	return grepFile(p, info.Size(), pattern, intParam(params, "maxBytes", defaultReadFileMaxBytes))
+	f, info, err := t.openSafeRead(p)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	return grepFile(f, p, info.Size(), pattern, intParam(params, "maxBytes", defaultReadFileMaxBytes))
 }
 
 type WriteFile struct{ FileTool }
 
 func (t *WriteFile) Capability() CapabilityLevel { return CapabilityGuarded }
 func (t *WriteFile) Name() string                { return "write_file" }
-func (t *WriteFile) Description() string         { return "Write text to a file (overwrites)." }
+func (t *WriteFile) Description() string {
+	return "Create or completely replace a text file in the allowed write root. This is guarded because it overwrites the target file. Prefer edit_file for small changes to an existing file; use write_file when creating a new file or intentionally replacing all content."
+}
 func (t *WriteFile) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
-		"path":    map[string]any{"type": "string"},
-		"content": map[string]any{"type": "string"},
-		"mkdirs":  map[string]any{"type": "boolean"},
+		"path":    map[string]any{"type": "string", "description": "Destination file path inside the allowed write root. Existing content at this path will be replaced."},
+		"content": map[string]any{"type": "string", "description": "Complete new file contents, not a patch or partial snippet."},
+		"mkdirs":  map[string]any{"type": "boolean", "description": "Set true only when parent directories should be created for a new path."},
 	}, "required": []string{"path", "content"}}
 }
 func (t *WriteFile) Schema() map[string]any {
 	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
 }
 func (t *WriteFile) Execute(ctx context.Context, params map[string]any) (string, error) {
-	p, err := t.safePath(fmt.Sprint(params["path"]))
+	p, err := t.safeWritePath(fmt.Sprint(params["path"]))
 	if err != nil {
 		return "", err
 	}
@@ -241,7 +363,12 @@ func (t *WriteFile) Execute(ctx context.Context, params map[string]any) (string,
 			return "", err
 		}
 	}
-	if err := os.WriteFile(p, []byte(content), existingFileMode(p, 0o600)); err != nil {
+	out, err := t.openSafeWrite(p, existingFileMode(p, 0o600))
+	if err != nil {
+		return "", err
+	}
+	defer out.Close()
+	if _, err := out.Write([]byte(content)); err != nil {
 		return "", err
 	}
 	return "ok", nil
@@ -252,17 +379,17 @@ type EditFile struct{ FileTool }
 func (t *EditFile) Capability() CapabilityLevel { return CapabilityGuarded }
 func (t *EditFile) Name() string                { return "edit_file" }
 func (t *EditFile) Description() string {
-	return "Edit a text file by applying a list of find/replace operations."
+	return "Edit an existing text file by applying exact find/replace operations inside the allowed write root. This is guarded. Prefer it over write_file for localized changes, and make each find string specific enough to avoid accidental replacements."
 }
 func (t *EditFile) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
-		"path": map[string]any{"type": "string"},
+		"path": map[string]any{"type": "string", "description": "Existing file path to edit inside the allowed write root."},
 		"edits": map[string]any{"type": "array", "items": map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"find":    map[string]any{"type": "string"},
-				"replace": map[string]any{"type": "string"},
-				"count":   map[string]any{"type": "integer", "description": "max replacements (0=all)"},
+				"find":    map[string]any{"type": "string", "description": "Exact text to replace. Include enough surrounding context when needed so the match is unique."},
+				"replace": map[string]any{"type": "string", "description": "Replacement text for the matched find string."},
+				"count":   map[string]any{"type": "integer", "description": "Maximum replacements for this edit. Omit or use 0 for all matches; use 1 for a unique targeted edit."},
 			},
 			"required": []string{"find", "replace"},
 		}},
@@ -272,13 +399,21 @@ func (t *EditFile) Schema() map[string]any {
 	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
 }
 func (t *EditFile) Execute(ctx context.Context, params map[string]any) (string, error) {
-	p, err := t.safePath(fmt.Sprint(params["path"]))
+	p, err := t.safeWritePath(fmt.Sprint(params["path"]))
 	if err != nil {
 		return "", err
 	}
-	b, err := os.ReadFile(p)
+	in, _, err := t.openSafeRead(p)
 	if err != nil {
 		return "", err
+	}
+	b, err := io.ReadAll(in)
+	closeErr := in.Close()
+	if err != nil {
+		return "", err
+	}
+	if closeErr != nil {
+		return "", closeErr
 	}
 	s := string(b)
 	rawEdits, _ := params["edits"].([]any)
@@ -296,7 +431,12 @@ func (t *EditFile) Execute(ctx context.Context, params map[string]any) (string, 
 			s = strings.Replace(s, find, replace, count)
 		}
 	}
-	if err := os.WriteFile(p, []byte(s), existingFileMode(p, 0)); err != nil {
+	out, err := t.openSafeWrite(p, existingFileMode(p, 0))
+	if err != nil {
+		return "", err
+	}
+	defer out.Close()
+	if _, err := out.Write([]byte(s)); err != nil {
 		return "", err
 	}
 	return "ok", nil
@@ -304,12 +444,14 @@ func (t *EditFile) Execute(ctx context.Context, params map[string]any) (string, 
 
 type ListDir struct{ FileTool }
 
-func (t *ListDir) Name() string        { return "list_dir" }
-func (t *ListDir) Description() string { return "List directory entries." }
+func (t *ListDir) Name() string { return "list_dir" }
+func (t *ListDir) Description() string {
+	return "List files and folders in one directory without recursion. Use this before read_file when navigating an unfamiliar tree or choosing which file to inspect."
+}
 func (t *ListDir) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
-		"path": map[string]any{"type": "string"},
-		"max":  map[string]any{"type": "integer"},
+		"path": map[string]any{"type": "string", "description": "Directory path to list. Use an absolute path or workspace-relative path inside the allowed read root."},
+		"max":  map[string]any{"type": "integer", "description": "Maximum entries to return. Omit for default 80; increase only when a directory listing is truncated."},
 	}, "required": []string{"path"}}
 }
 func (t *ListDir) Schema() map[string]any {
@@ -320,14 +462,29 @@ func (t *ListDir) Execute(ctx context.Context, params map[string]any) (string, e
 	if err != nil {
 		return "", err
 	}
-	ents, err := os.ReadDir(p)
+	f, info, err := t.openSafeRead(p)
 	if err != nil {
 		return "", err
 	}
-	max := defaultListDirMaxEntries
-	if v, ok := params["max"].(float64); ok && int(v) > 0 {
-		max = int(v)
+	defer f.Close()
+	if !info.IsDir() {
+		return "", fmt.Errorf("path is not a directory: %s", p)
 	}
+	max := intParam(params, "max", defaultListDirMaxEntries)
+	ents, err := f.ReadDir(max + 1)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+	truncated := len(ents) > max
+	if truncated {
+		ents = ents[:max]
+	}
+	sort.Slice(ents, func(i, j int) bool {
+		if ents[i].IsDir() != ents[j].IsDir() {
+			return ents[i].IsDir()
+		}
+		return ents[i].Name() < ents[j].Name()
+	})
 	type entry struct {
 		Name  string `json:"name"`
 		IsDir bool   `json:"isDir"`
@@ -349,30 +506,30 @@ func (t *ListDir) Execute(ctx context.Context, params map[string]any) (string, e
 	return EncodeToolResult(ToolResult{
 		Kind:    "list_dir",
 		OK:      true,
-		Summary: fmt.Sprintf("Listed %d of %d entries in %s", len(out), len(ents), p),
+		Summary: fmt.Sprintf("Listed %d entries in %s", len(out), p),
 		Preview: string(b),
+		Advice: func() []string {
+			if truncated {
+				return TruncationAdvice("list_dir", p)
+			}
+			return nil
+		}(),
 		Stats: map[string]any{
 			"path":      p,
 			"returned":  len(out),
-			"total":     len(ents),
 			"max":       max,
-			"truncated": len(ents) > len(out),
+			"truncated": truncated,
 		},
 	}), nil
 }
 
-func readLineRange(path string, size int64, start, end, max int) (string, error) {
+func readLineRange(f *os.File, path string, size int64, start, end, max int) (string, error) {
 	if start <= 0 {
 		start = 1
 	}
 	if end < start {
 		end = start
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
 	var b strings.Builder
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -401,6 +558,12 @@ func readLineRange(path string, size int64, start, end, max int) (string, error)
 		OK:      true,
 		Summary: fmt.Sprintf("Read lines %d-%d from %s", start, end, path),
 		Preview: strings.TrimRight(b.String(), "\n"),
+		Advice: func() []string {
+			if truncated {
+				return TruncationAdvice("read_file_range", path)
+			}
+			return nil
+		}(),
 		Stats: map[string]any{
 			"path":       path,
 			"mode":       "range",
@@ -413,12 +576,7 @@ func readLineRange(path string, size int64, start, end, max int) (string, error)
 	}), nil
 }
 
-func grepFile(path string, size int64, pattern string, max int) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
+func grepFile(f *os.File, path string, size int64, pattern string, max int) (string, error) {
 	var b strings.Builder
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -446,6 +604,12 @@ func grepFile(path string, size int64, pattern string, max int) (string, error) 
 		OK:      true,
 		Summary: fmt.Sprintf("Found %d matching lines in %s", matches, path),
 		Preview: strings.TrimRight(b.String(), "\n"),
+		Advice: func() []string {
+			if truncated {
+				return TruncationAdvice("search_file", path)
+			}
+			return nil
+		}(),
 		Stats: map[string]any{
 			"path":      path,
 			"pattern":   pattern,
@@ -457,12 +621,7 @@ func grepFile(path string, size int64, pattern string, max int) (string, error) 
 	}), nil
 }
 
-func outlineFile(path string, size int64, max int) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
+func outlineFile(f *os.File, path string, size int64, max int) (string, error) {
 	var b strings.Builder
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -490,6 +649,12 @@ func outlineFile(path string, size int64, max int) (string, error) {
 		OK:      true,
 		Summary: fmt.Sprintf("Outlined %d structural lines in %s", entries, path),
 		Preview: strings.TrimRight(b.String(), "\n"),
+		Advice: func() []string {
+			if truncated {
+				return TruncationAdvice("read_file_outline", path)
+			}
+			return nil
+		}(),
 		Stats: map[string]any{
 			"path":      path,
 			"bytes":     size,

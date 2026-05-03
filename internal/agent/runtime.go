@@ -4,6 +4,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"log"
@@ -32,6 +33,7 @@ import (
 
 const (
 	commandNewSession = "/new"
+	commandClear      = "/clear"
 	commandStatus     = "/status"
 	commandPrune      = "/prune"
 )
@@ -46,13 +48,22 @@ var toolMarkupPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?is)<function=[\s\S]*$`),
 	regexp.MustCompile(`(?i)<parameter=[^>]*>`),
 	regexp.MustCompile(`(?is)<parameter[\s\S]*$`),
+	regexp.MustCompile(`(?is)<\s*[|｜]\s*DSML\s*[|｜]\s*tool_calls\s*>[\s\S]*?<\s*/\s*[|｜]\s*DSML\s*[|｜]\s*tool_calls\s*>`),
+	regexp.MustCompile(`(?is)<\s*[|｜]\s*DSML\s*[|｜]\s*tool_calls[\s\S]*$`),
+	regexp.MustCompile(`(?is)<\s*/?\s*[|｜]\s*DSML\s*[|｜]\s*(?:invoke|parameter)[^>]*>`),
 }
 
 var (
-	toolMarkupBlockPattern     = regexp.MustCompile(`(?is)<tool_call\b[^>]*>(.*?)</tool_call>`)
-	toolMarkupFunctionPattern  = regexp.MustCompile(`(?is)<function=([^>\s]+)>\s*`)
-	toolMarkupParameterPattern = regexp.MustCompile(`(?is)<parameter=([^>\s]+)>\s*`)
-	toolMarkupClosingPattern   = regexp.MustCompile(`(?is)</(?:parameter|function)>\s*$`)
+	toolMarkupBlockPattern            = regexp.MustCompile(`(?is)<tool_call\b[^>]*>(.*?)</tool_call>`)
+	toolMarkupFunctionPattern         = regexp.MustCompile(`(?is)<function=([^>\s]+)>\s*`)
+	toolMarkupParameterPattern        = regexp.MustCompile(`(?is)<parameter=([^>\s]+)>\s*`)
+	toolMarkupClosingPattern          = regexp.MustCompile(`(?is)</(?:parameter|function)>\s*$`)
+	toolMarkupNameElementPattern      = regexp.MustCompile(`(?is)<name>\s*(.*?)\s*</name>`)
+	toolMarkupArgumentsElementPattern = regexp.MustCompile(`(?is)<arguments>\s*(.*?)\s*</arguments>`)
+	dsmlToolCallsBlockPattern         = regexp.MustCompile(`(?is)<\s*[|｜]\s*DSML\s*[|｜]\s*tool_calls\s*>(.*?)<\s*/\s*[|｜]\s*DSML\s*[|｜]\s*tool_calls\s*>`)
+	dsmlInvokePattern                 = regexp.MustCompile(`(?is)<\s*[|｜]\s*DSML\s*[|｜]\s*invoke\b([^>]*)>(.*?)<\s*/\s*[|｜]\s*DSML\s*[|｜]\s*invoke\s*>`)
+	dsmlParameterPattern              = regexp.MustCompile(`(?is)<\s*[|｜]\s*DSML\s*[|｜]\s*parameter\b([^>]*)>(.*?)<\s*/\s*[|｜]\s*DSML\s*[|｜]\s*parameter\s*>`)
+	markupNameAttrPattern             = regexp.MustCompile(`(?is)\bname\s*=\s*(?:"([^"]*)"|'([^']*)')`)
 )
 
 type trustedToolAccessContextKey struct{}
@@ -72,25 +83,28 @@ type sessionLock struct {
 	refs int
 }
 
+type messageQuotaCountersContextKey struct{}
+
 // Runtime executes conversational turns against the configured model and tools.
 type Runtime struct {
-	DB                     *db.DB
-	Provider               *providers.Client
-	Model                  string
-	Temperature            float64
-	Tools                  *tools.Registry
-	Hardening              config.HardeningConfig
-	AccessProfiles         config.AccessProfilesConfig
-	Builder                *Builder
-	Artifacts              *artifacts.Store
-	MaxToolBytes           int
-	MaxToolLoops           int
-	ToolPreviewBytes       int
-	DynamicToolExposure    bool
-	Audit                  *security.AuditLogger
-	ApprovalBroker         *approval.Broker
-	ContextManager         config.ContextManagerConfig
-	ContextManagerProvider *providers.Client
+	DB                         *db.DB
+	Provider                   *providers.Client
+	Model                      string
+	Temperature                float64
+	Tools                      *tools.Registry
+	Hardening                  config.HardeningConfig
+	AccessProfiles             config.AccessProfilesConfig
+	Builder                    *Builder
+	Artifacts                  *artifacts.Store
+	MaxToolBytes               int
+	MaxToolLoops               int
+	MaxToolLoopsExceededAction config.QuotaExceededAction
+	ToolPreviewBytes           int
+	DynamicToolExposure        bool
+	Audit                      *security.AuditLogger
+	ApprovalBroker             *approval.Broker
+	ContextManager             config.ContextManagerConfig
+	ContextManagerProvider     *providers.Client
 
 	Deliver  Deliverer
 	Streamer channels.StreamingChannel
@@ -112,11 +126,15 @@ type Runtime struct {
 }
 
 type sessionQuotaState struct {
+	Session  quotaCounters
+	LastSeen time.Time
+}
+
+type quotaCounters struct {
 	ToolCalls     int
 	ExecCalls     int
 	WebCalls      int
 	SubagentCalls int
-	LastSeen      time.Time
 }
 
 // BackgroundRunInput describes an isolated subagent-style background run.
@@ -205,7 +223,7 @@ func (r *Runtime) Handle(ctx context.Context, ev bus.Event) error {
 func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 	defer releaseEvent(ev)
 
-	if ev.Type == bus.EventUserMessage && strings.EqualFold(strings.TrimSpace(ev.Message), commandNewSession) {
+	if ev.Type == bus.EventUserMessage && isNewSessionCommand(ev.Message) {
 		return r.handleNewSession(ctx, ev)
 	}
 	if ev.Type == bus.EventUserMessage && strings.EqualFold(strings.TrimSpace(ev.Message), commandStatus) {
@@ -274,6 +292,11 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 	r.scheduleIdlePrune(ctx, ev)
 
 	return nil
+}
+
+func isNewSessionCommand(message string) bool {
+	message = strings.TrimSpace(message)
+	return strings.EqualFold(message, commandNewSession) || strings.EqualFold(message, commandClear)
 }
 
 func (r *Runtime) markSessionActivity(sessionKey string) {
@@ -504,7 +527,7 @@ func (r *Runtime) dispatchExplicitSkillTool(ctx context.Context, ev bus.Event, s
 	}
 	out, err := r.Tools.ExecuteParams(toolCtx, skill.CommandTool, params)
 	if err != nil {
-		out = formatToolExecutionError(out, err)
+		out = formatToolExecutionError(skill.CommandTool, params, out, err)
 	}
 	payload := map[string]any{
 		"tool":        skill.CommandTool,
@@ -902,29 +925,119 @@ func sanitizeToolTurnContent(text string) string {
 
 func parseToolMarkupCalls(text string, idPrefix string) []providers.ToolCall {
 	matches := toolMarkupBlockPattern.FindAllStringSubmatch(text, -1)
-	if len(matches) == 0 {
-		return nil
-	}
 	out := make([]providers.ToolCall, 0, len(matches))
 	for _, match := range matches {
 		if len(match) < 2 {
 			continue
 		}
 		block := match[1]
-		functionMatch := toolMarkupFunctionPattern.FindStringSubmatch(block)
-		if len(functionMatch) < 2 {
+		name, args, ok := parseToolMarkupBlock(block)
+		if !ok {
 			continue
 		}
-		name := strings.TrimSpace(html.UnescapeString(functionMatch[1]))
+		index := len(out)
+		tc := providers.ToolCall{
+			ID:    fmt.Sprintf("%s_%d", idPrefix, index+1),
+			Index: index,
+			Type:  "function",
+		}
+		tc.Function.Name = name
+		tc.Function.Arguments = args
+		out = append(out, tc)
+	}
+	for _, match := range dsmlToolCallsBlockPattern.FindAllStringSubmatch(text, -1) {
+		if len(match) < 2 {
+			continue
+		}
+		out = append(out, parseDSMLToolMarkupCalls(match[1], idPrefix, len(out))...)
+	}
+	return out
+}
+
+func parseToolMarkupBlock(block string) (string, string, bool) {
+	block = strings.TrimSpace(html.UnescapeString(block))
+	if block == "" {
+		return "", "", false
+	}
+	var object map[string]any
+	if err := json.Unmarshal([]byte(block), &object); err == nil {
+		name := strings.TrimSpace(fmt.Sprint(object["name"]))
+		if name == "" {
+			return "", "", false
+		}
+		args := object["arguments"]
+		if args == nil {
+			args = map[string]any{}
+		}
+		encoded, err := json.Marshal(args)
+		if err != nil {
+			return "", "", false
+		}
+		return name, string(encoded), true
+	}
+	if nameMatch := toolMarkupNameElementPattern.FindStringSubmatch(block); len(nameMatch) >= 2 {
+		name := strings.TrimSpace(html.UnescapeString(nameMatch[1]))
+		if name == "" {
+			return "", "", false
+		}
+		args := "{}"
+		if argsMatch := toolMarkupArgumentsElementPattern.FindStringSubmatch(block); len(argsMatch) >= 2 {
+			argText := strings.TrimSpace(html.UnescapeString(argsMatch[1]))
+			if argText != "" {
+				var parsed any
+				if err := json.Unmarshal([]byte(argText), &parsed); err == nil {
+					encoded, err := json.Marshal(parsed)
+					if err != nil {
+						return "", "", false
+					}
+					args = string(encoded)
+				} else {
+					encoded, err := json.Marshal(map[string]any{"value": argText})
+					if err != nil {
+						return "", "", false
+					}
+					args = string(encoded)
+				}
+			}
+		}
+		return name, args, true
+	}
+	functionMatch := toolMarkupFunctionPattern.FindStringSubmatch(block)
+	if len(functionMatch) < 2 {
+		return "", "", false
+	}
+	name := strings.TrimSpace(html.UnescapeString(functionMatch[1]))
+	if name == "" {
+		return "", "", false
+	}
+	params := parseToolMarkupParams(block)
+	args, err := json.Marshal(params)
+	if err != nil {
+		return "", "", false
+	}
+	return name, string(args), true
+}
+
+func parseDSMLToolMarkupCalls(block string, idPrefix string, offset int) []providers.ToolCall {
+	matches := dsmlInvokePattern.FindAllStringSubmatch(block, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	out := make([]providers.ToolCall, 0, len(matches))
+	for _, match := range matches {
+		if len(match) < 3 {
+			continue
+		}
+		name := markupNameAttr(match[1])
 		if name == "" {
 			continue
 		}
-		params := parseToolMarkupParams(block)
+		params := parseDSMLToolMarkupParams(match[2])
 		args, err := json.Marshal(params)
 		if err != nil {
 			continue
 		}
-		index := len(out)
+		index := offset + len(out)
 		tc := providers.ToolCall{
 			ID:    fmt.Sprintf("%s_%d", idPrefix, index+1),
 			Index: index,
@@ -935,6 +1048,79 @@ func parseToolMarkupCalls(text string, idPrefix string) []providers.ToolCall {
 		out = append(out, tc)
 	}
 	return out
+}
+
+func parseDSMLToolMarkupParams(block string) map[string]any {
+	params := map[string]any{}
+	matches := dsmlParameterPattern.FindAllStringSubmatch(block, -1)
+	for _, match := range matches {
+		if len(match) < 3 {
+			continue
+		}
+		name := markupNameAttr(match[1])
+		if name == "" {
+			continue
+		}
+		params[name] = parseToolMarkupParamValue(html.UnescapeString(match[2]))
+	}
+	return params
+}
+
+func markupNameAttr(attrs string) string {
+	match := markupNameAttrPattern.FindStringSubmatch(attrs)
+	if len(match) < 3 {
+		return ""
+	}
+	name := match[1]
+	if name == "" {
+		name = match[2]
+	}
+	return strings.TrimSpace(html.UnescapeString(name))
+}
+
+func availableToolCalls(calls []providers.ToolCall, reg *tools.Registry) []providers.ToolCall {
+	if len(calls) == 0 || reg == nil {
+		return nil
+	}
+	out := make([]providers.ToolCall, 0, len(calls))
+	for _, call := range calls {
+		name := strings.TrimSpace(call.Function.Name)
+		if name == "search" && reg.Get("web_search") != nil {
+			name = "web_search"
+		}
+		if name == "" || reg.Get(name) == nil {
+			continue
+		}
+		call.Function.Name = name
+		call.Index = len(out)
+		out = append(out, call)
+	}
+	return out
+}
+
+func unavailableToolCallPrompt(calls []providers.ToolCall, reg *tools.Registry) string {
+	names := make([]string, 0, len(calls))
+	seen := map[string]struct{}{}
+	for _, call := range calls {
+		name := strings.TrimSpace(call.Function.Name)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	available := []string{}
+	if reg != nil {
+		available = reg.Names()
+	}
+	return fmt.Sprintf(
+		"The previous assistant response attempted unavailable tool call(s): %s. Continue by answering directly or by using only currently advertised tool names: %s.",
+		strings.Join(names, ", "),
+		strings.Join(available, ", "),
+	)
 }
 
 func parseToolMarkupParams(block string) map[string]any {
@@ -987,15 +1173,24 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 			scopeKey = resolved
 		}
 	}
+	messageQuotas := &quotaCounters{}
 	maxLoops := r.MaxToolLoops
 	if maxLoops <= 0 {
 		maxLoops = 6
 	}
-	for loop := 0; loop < maxLoops; loop++ {
+	loopLimit := maxLoops
+	for loop := 0; ; loop++ {
+		if loop >= loopLimit {
+			if err := r.handleToolLoopLimitExceeded(ctx, sessionKey, loopLimit); err != nil {
+				return "", false, err
+			}
+			loopLimit += maxLoops
+		}
+		turnTools := r.exposedToolsForTurn(ctx, reg, messages, channel)
 		req := providers.ChatCompletionRequest{
 			Model:       r.Model,
 			Messages:    messages,
-			Tools:       toToolDefs(r.exposedToolsForTurn(reg, messages, channel)),
+			Tools:       toToolDefs(turnTools),
 			Temperature: r.Temperature,
 		}
 
@@ -1055,6 +1250,29 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 				}
 			}
 		}
+		if len(msg.ToolCalls) > 0 {
+			availableCalls := availableToolCalls(msg.ToolCalls, turnTools)
+			if len(availableCalls) == 0 {
+				if sw != nil {
+					_ = sw.Abort(ctx)
+				}
+				for _, tc := range msg.ToolCalls {
+					var parsedParams map[string]any
+					_ = json.Unmarshal([]byte(tc.Function.Arguments), &parsedParams)
+					toolOut := formatToolExecutionError(tc.Function.Name, parsedParams, "", fmt.Errorf("tool not available in this turn"))
+					if observer != nil {
+						observer.OnToolCall(ctx, tc.Function.Name, tc.Function.Arguments)
+						observer.OnToolResult(ctx, tc.Function.Name, toolOut, fmt.Errorf("tool not available in this turn"))
+					}
+				}
+				messages = append(messages, providers.ChatMessage{
+					Role:    "system",
+					Content: unavailableToolCallPrompt(msg.ToolCalls, turnTools),
+				})
+				continue
+			}
+			msg.ToolCalls = availableCalls
+		}
 		if len(msg.ToolCalls) == 0 {
 			finalText := strings.TrimSpace(contentToString(msg.Content))
 			if sw != nil {
@@ -1093,13 +1311,16 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 			toolCtx = tools.ContextWithDelivery(toolCtx, channel, replyTo)
 			toolCtx = tools.ContextWithDeliveryMeta(toolCtx, replyMeta)
 			toolCtx = r.contextWithTrustedToolAccess(toolCtx, bus.Event{Type: eventType, SessionKey: sessionKey, Channel: channel})
+			toolCtx = context.WithValue(toolCtx, messageQuotaCountersContextKey{}, messageQuotas)
 			toolCtx = tools.ContextWithToolGuard(toolCtx, r.guardToolExecution)
-			out, err := reg.Execute(toolCtx, tc.Function.Name, tc.Function.Arguments)
+			out, err := turnTools.Execute(toolCtx, tc.Function.Name, tc.Function.Arguments)
+			if err != nil {
+				var parsedParams map[string]any
+				_ = json.Unmarshal([]byte(tc.Function.Arguments), &parsedParams)
+				out = formatToolExecutionError(tc.Function.Name, parsedParams, out, err)
+			}
 			if observer != nil {
 				observer.OnToolResult(ctx, tc.Function.Name, out, err)
-			}
-			if err != nil {
-				out = formatToolExecutionError(out, err)
 			}
 
 			payload := map[string]any{
@@ -1116,9 +1337,95 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 				log.Printf("append tool message failed: %v", err)
 			}
 			messages = append(messages, providers.ChatMessage{Role: "tool", ToolCallID: tc.ID, Content: sendOut})
+			var approvalErr *tools.ApprovalRequiredError
+			if errors.As(err, &approvalErr) {
+				return "", false, err
+			}
+			if finalText := terminalToolResultText(tc.Function.Name, out); finalText != "" {
+				if observer != nil {
+					observer.OnCompletion(ctx, finalText, false)
+				}
+				return finalText, false, nil
+			}
 		}
 	}
-	return "", false, fmt.Errorf("max tool loops exceeded for session %s", sessionKey)
+}
+
+func (r *Runtime) handleToolLoopLimitExceeded(ctx context.Context, sessionKey string, currentLimit int) error {
+	if r.effectiveToolLoopLimitAction() == config.QuotaExceededActionFail {
+		return toolLoopLimitExceededError(sessionKey, currentLimit, "hard limit reached")
+	}
+	if r.ApprovalBroker == nil {
+		return toolLoopLimitExceededError(sessionKey, currentLimit, "approval is configured, but the approval broker is unavailable")
+	}
+	identity := tools.RequesterIdentityFromContext(ctx)
+	decision, err := r.ApprovalBroker.EvaluateToolQuota(ctx, approval.ToolQuotaEvaluation{
+		Scope:         "message",
+		LimitName:     "tool_loops",
+		ToolName:      "tool loop continuation",
+		Current:       currentLimit,
+		Limit:         currentLimit,
+		AgentID:       firstNonEmptyString(identity.Actor, "runtime"),
+		SessionID:     sessionKey,
+		ApprovalToken: tools.ApprovalTokenFromContext(ctx),
+	}, config.ApprovalModeAsk)
+	if err != nil {
+		return err
+	}
+	if decision.Allowed {
+		if r.Audit != nil {
+			_ = r.Audit.Record(ctx, "tool_loop.override", sessionKey, "approval", map[string]any{
+				"limit":        currentLimit,
+				"subject_hash": decision.SubjectHash,
+			})
+		}
+		return nil
+	}
+	if decision.RequiresApproval {
+		return &tools.ApprovalRequiredError{ToolName: "tool loop continuation", RequestID: decision.RequestID}
+	}
+	return toolLoopLimitExceededError(sessionKey, currentLimit, decision.Reason)
+}
+
+func toolLoopLimitExceededError(sessionKey string, currentLimit int, reason string) error {
+	resolvedSession := strings.TrimSpace(sessionKey)
+	if resolvedSession == "" {
+		resolvedSession = "unknown"
+	}
+	message := fmt.Sprintf("max tool loops exceeded for session %s after %d rounds", resolvedSession, currentLimit)
+	if trimmed := strings.TrimSpace(reason); trimmed != "" {
+		message += fmt.Sprintf(" (%s)", trimmed)
+	}
+	return errors.New(message)
+}
+
+func (r *Runtime) effectiveToolLoopLimitAction() config.QuotaExceededAction {
+	if strings.EqualFold(string(r.MaxToolLoopsExceededAction), string(config.QuotaExceededActionFail)) {
+		return config.QuotaExceededActionFail
+	}
+	return config.QuotaExceededActionAsk
+}
+
+func terminalToolResultText(toolName string, out string) string {
+	if strings.TrimSpace(toolName) != "read_skill" || strings.TrimSpace(out) == "" {
+		return ""
+	}
+	var result struct {
+		OK      *bool  `json:"ok"`
+		Kind    string `json:"kind"`
+		Summary string `json:"summary"`
+	}
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		return ""
+	}
+	if result.OK == nil || *result.OK || result.Kind != "skill_read" {
+		return ""
+	}
+	summary := strings.TrimSpace(result.Summary)
+	if summary == "" || !strings.Contains(strings.ToLower(summary), "unavailable") {
+		return ""
+	}
+	return summary + ". I can't complete that with the tools currently available in this turn."
 }
 
 func (r *Runtime) effectiveTools(ctx context.Context, fallback *tools.Registry) *tools.Registry {
@@ -1131,21 +1438,52 @@ func (r *Runtime) effectiveTools(ctx context.Context, fallback *tools.Registry) 
 	return fallback
 }
 
-func (r *Runtime) exposedToolsForTurn(reg *tools.Registry, messages []providers.ChatMessage, channel string) *tools.Registry {
-	if reg == nil || r == nil || !r.DynamicToolExposure {
+func (r *Runtime) exposedToolsForTurn(ctx context.Context, reg *tools.Registry, messages []providers.ChatMessage, channel string) *tools.Registry {
+	if reg == nil {
 		return reg
+	}
+	filtered := r.filterToolsForContext(ctx, reg)
+	if r == nil || !r.DynamicToolExposure {
+		return filtered
 	}
 	intent := latestUserText(messages) + " " + strings.TrimSpace(channel)
 	groups := selectedToolGroups(intent)
 	allowed := map[string]struct{}{}
-	for _, name := range reg.Names() {
-		meta := reg.Metadata(name)
+	for _, name := range filtered.Names() {
+		meta := filtered.Metadata(name)
 		if meta.Hidden || hasGroup(meta.Groups, tools.ToolGroupHidden) {
 			continue
 		}
 		if hasAnyGroup(meta.Groups, groups) {
 			allowed[name] = struct{}{}
 		}
+	}
+	return filtered.CloneSelected(allowed)
+}
+
+func (r *Runtime) filterToolsForContext(ctx context.Context, reg *tools.Registry) *tools.Registry {
+	if reg == nil {
+		return reg
+	}
+	ceiling := tools.CapabilityCeilingFromContext(ctx)
+	profile := tools.ActiveProfileFromContext(ctx)
+	if strings.TrimSpace(profile.Name) != "" {
+		if ceiling == "" || capabilityRank(profile.MaxCapability) < capabilityRank(ceiling) {
+			ceiling = profile.MaxCapability
+		}
+	}
+	allowed := map[string]struct{}{}
+	profileAllowed := profile.AllowedTools
+	for _, name := range reg.Names() {
+		if len(profileAllowed) > 0 {
+			if _, ok := profileAllowed[name]; !ok {
+				continue
+			}
+		}
+		if ceiling != "" && capabilityRank(tools.ToolCapability(reg.Get(name), nil)) > capabilityRank(ceiling) {
+			continue
+		}
+		allowed[name] = struct{}{}
 	}
 	return reg.CloneSelected(allowed)
 }
@@ -1164,6 +1502,16 @@ func selectedToolGroups(intent string) map[string]struct{} {
 	groups := map[string]struct{}{
 		tools.ToolGroupRead:   {},
 		tools.ToolGroupMemory: {},
+	}
+	if strings.Contains(lower, "tool") || strings.Contains(lower, "capabilit") || strings.Contains(lower, "what can you do") {
+		groups[tools.ToolGroupWrite] = struct{}{}
+		groups[tools.ToolGroupExec] = struct{}{}
+		groups[tools.ToolGroupWeb] = struct{}{}
+		groups[tools.ToolGroupCron] = struct{}{}
+		groups[tools.ToolGroupSkills] = struct{}{}
+		groups[tools.ToolGroupChannels] = struct{}{}
+		groups[tools.ToolGroupMCP] = struct{}{}
+		groups[tools.ToolGroupService] = struct{}{}
 	}
 	if strings.Contains(lower, "write") || strings.Contains(lower, "edit") || strings.Contains(lower, "modify") || strings.Contains(lower, "create file") || strings.Contains(lower, "patch") {
 		groups[tools.ToolGroupWrite] = struct{}{}
@@ -1234,7 +1582,7 @@ func (r *Runtime) guardToolExecution(ctx context.Context, tool tools.Tool, capab
 	if capability == tools.CapabilityPrivileged && !r.Hardening.PrivilegedTools {
 		return fmt.Errorf("tool requires privileged access: %s", tool.Name())
 	}
-	if r.ApprovalBroker != nil && (tool.Name() == "exec" || tool.Name() == "run_skill_script") {
+	if r.ApprovalBroker != nil && (tool.Name() == "exec" || tool.Name() == "run_skill" || tool.Name() == "run_skill_script") {
 		if mode := r.approvalModeForTool(tool.Name()); mode == config.ApprovalModeAsk || mode == config.ApprovalModeAllowlist || mode == config.ApprovalModeDeny {
 			if len(r.ApprovalBroker.SignKey) == 0 {
 				return fmt.Errorf("approval broker unavailable for %s", tool.Name())
@@ -1254,7 +1602,11 @@ func (r *Runtime) guardToolExecution(ctx context.Context, tool tools.Tool, capab
 	if !r.Hardening.Quotas.Enabled {
 		return nil
 	}
-	return r.incrementQuota(tools.SessionFromContext(ctx), tool.Name())
+	return r.incrementQuota(ctx, tools.SessionFromContext(ctx), tool.Name())
+}
+
+func (r *Runtime) GuardToolExecution(ctx context.Context, tool tools.Tool, capability tools.CapabilityLevel, params map[string]any) error {
+	return r.guardToolExecution(ctx, tool, capability, params)
 }
 
 func (r *Runtime) approvalModeForTool(toolName string) config.ApprovalMode {
@@ -1264,7 +1616,7 @@ func (r *Runtime) approvalModeForTool(toolName string) config.ApprovalMode {
 	switch toolName {
 	case "exec":
 		return r.ApprovalBroker.Config.Exec.Mode
-	case "run_skill_script":
+	case "run_skill", "run_skill_script":
 		return r.ApprovalBroker.Config.SkillExecution.Mode
 	default:
 		return config.ApprovalModeTrusted
@@ -1282,7 +1634,7 @@ func (r *Runtime) enforceSkillPolicy(ctx context.Context, tool tools.Tool, param
 		}
 	}
 	switch tool.Name() {
-	case "exec", "run_skill_script":
+	case "exec", "run_skill", "run_skill_script":
 		if !policy.AllowExecution {
 			return fmt.Errorf("execution denied by skill policy: %s", tool.Name())
 		}
@@ -1341,7 +1693,7 @@ func skillPolicyForSkill(skill skills.SkillMeta) tools.SkillPolicy {
 	return tools.SkillPolicy{
 		Name:           skill.Name,
 		AllowedTools:   allowed,
-		AllowExecution: skill.Permissions.Shell || (strings.EqualFold(skill.CommandDispatch, "tool") && (strings.EqualFold(skill.CommandTool, "exec") || strings.EqualFold(skill.CommandTool, "run_skill_script"))),
+		AllowExecution: skill.Permissions.Shell || (strings.EqualFold(skill.CommandDispatch, "tool") && (strings.EqualFold(skill.CommandTool, "exec") || strings.EqualFold(skill.CommandTool, "run_skill") || strings.EqualFold(skill.CommandTool, "run_skill_script"))),
 		AllowNetwork:   skill.Permissions.Network,
 		AllowWrite:     skill.Permissions.Write,
 		AllowedHosts:   append([]string{}, skill.Permissions.AllowedHosts...),
@@ -1362,6 +1714,10 @@ func (r *Runtime) contextWithProfileName(ctx context.Context, name string) conte
 		return ctx
 	}
 	return tools.ContextWithActiveProfile(ctx, profile)
+}
+
+func (r *Runtime) ContextWithProfileName(ctx context.Context, name string) context.Context {
+	return r.contextWithProfileName(ctx, name)
 }
 
 func (r *Runtime) profileNameForEvent(ev bus.Event) string {
@@ -1513,9 +1869,10 @@ func summarizeToolParams(toolName string, params map[string]any) map[string]any 
 	case "exec":
 		summary["program"] = strings.TrimSpace(fmt.Sprint(params["program"]))
 		summary["cwd"] = strings.TrimSpace(fmt.Sprint(params["cwd"]))
-	case "run_skill_script":
+	case "run_skill", "run_skill_script":
 		summary["skill"] = strings.TrimSpace(fmt.Sprint(params["skill"]))
 		summary["entrypoint"] = strings.TrimSpace(fmt.Sprint(params["entrypoint"]))
+		summary["plan_id"] = strings.TrimSpace(fmt.Sprint(params["plan_id"]))
 	case "spawn_subagent":
 		summary["task"] = previewText(strings.TrimSpace(fmt.Sprint(params["task"])), 120)
 	case "web_fetch", "web_fetch_markdown":
@@ -1524,34 +1881,156 @@ func summarizeToolParams(toolName string, params map[string]any) map[string]any 
 	return summary
 }
 
-func formatToolExecutionError(out string, err error) string {
+func formatToolExecutionError(toolName string, params map[string]any, out string, err error) string {
 	if err == nil {
 		return out
 	}
-	if strings.TrimSpace(out) == "" {
-		return "tool error: " + err.Error()
-	}
-	return out + "\n\nerror: " + err.Error()
+	return tools.EncodeToolFailure(toolName, params, out, err)
 }
 
-func (r *Runtime) incrementQuota(sessionKey string, toolName string) error {
-	r.quotaMu.Lock()
-	defer r.quotaMu.Unlock()
+type quotaCheck struct {
+	Scope     string
+	Name      string
+	Label     string
+	ConfigKey string
+	Current   int
+	Limit     int
+}
 
+func (r *Runtime) incrementQuota(ctx context.Context, sessionKey string, toolName string) error {
+	r.quotaMu.Lock()
 	state := r.sessionQuotaStateLocked(sessionKey)
-	if err := quotaIncrement(&state.ToolCalls, r.Hardening.Quotas.MaxToolCalls, "tool calls", toolName); err != nil {
-		return err
+	message := messageQuotaCountersFromContext(ctx)
+	checks := r.quotaChecks(message, &state.Session, toolName)
+	for _, check := range checks {
+		if check.Limit > 0 && check.Current >= check.Limit {
+			r.quotaMu.Unlock()
+			if err := r.handleQuotaExceeded(ctx, sessionKey, toolName, check); err != nil {
+				return err
+			}
+			r.quotaMu.Lock()
+			state = r.sessionQuotaStateLocked(sessionKey)
+			message = messageQuotaCountersFromContext(ctx)
+			incrementQuotaCounters(message, toolName)
+			incrementQuotaCounters(&state.Session, toolName)
+			r.quotaMu.Unlock()
+			return nil
+		}
+	}
+	incrementQuotaCounters(message, toolName)
+	incrementQuotaCounters(&state.Session, toolName)
+	r.quotaMu.Unlock()
+	return nil
+}
+
+func (r *Runtime) quotaChecks(message *quotaCounters, session *quotaCounters, toolName string) []quotaCheck {
+	cfg := r.Hardening.Quotas
+	checks := []quotaCheck{
+		{Scope: "message", Name: "tool_calls", Label: "per-message total tool-call", ConfigKey: "hardening.quotas.maxToolCalls", Current: message.ToolCalls, Limit: cfg.MaxToolCalls},
+		{Scope: "session", Name: "tool_calls", Label: "per-session total tool-call", ConfigKey: "hardening.quotas.maxSessionToolCalls", Current: session.ToolCalls, Limit: cfg.MaxSessionToolCalls},
 	}
 	switch toolName {
-	case "exec", "run_skill_script":
-		return quotaIncrement(&state.ExecCalls, r.Hardening.Quotas.MaxExecCalls, "exec calls", toolName)
+	case "exec", "run_skill", "run_skill_script":
+		checks = append(checks,
+			quotaCheck{Scope: "message", Name: "exec_calls", Label: "per-message exec-call", ConfigKey: "hardening.quotas.maxExecCalls", Current: message.ExecCalls, Limit: cfg.MaxExecCalls},
+			quotaCheck{Scope: "session", Name: "exec_calls", Label: "per-session exec-call", ConfigKey: "hardening.quotas.maxSessionExecCalls", Current: session.ExecCalls, Limit: cfg.MaxSessionExecCalls},
+		)
 	case "web_fetch", "web_fetch_markdown", "web_search":
-		return quotaIncrement(&state.WebCalls, r.Hardening.Quotas.MaxWebCalls, "web calls", toolName)
+		checks = append(checks,
+			quotaCheck{Scope: "message", Name: "web_calls", Label: "per-message web-call", ConfigKey: "hardening.quotas.maxWebCalls", Current: message.WebCalls, Limit: cfg.MaxWebCalls},
+			quotaCheck{Scope: "session", Name: "web_calls", Label: "per-session web-call", ConfigKey: "hardening.quotas.maxSessionWebCalls", Current: session.WebCalls, Limit: cfg.MaxSessionWebCalls},
+		)
 	case "spawn_subagent":
-		return quotaIncrement(&state.SubagentCalls, r.Hardening.Quotas.MaxSubagentCalls, "subagent calls", toolName)
-	default:
+		checks = append(checks,
+			quotaCheck{Scope: "message", Name: "subagent_calls", Label: "per-message subagent-call", ConfigKey: "hardening.quotas.maxSubagentCalls", Current: message.SubagentCalls, Limit: cfg.MaxSubagentCalls},
+			quotaCheck{Scope: "session", Name: "subagent_calls", Label: "per-session subagent-call", ConfigKey: "hardening.quotas.maxSessionSubagentCalls", Current: session.SubagentCalls, Limit: cfg.MaxSessionSubagentCalls},
+		)
+	}
+	return checks
+}
+
+func (r *Runtime) handleQuotaExceeded(ctx context.Context, sessionKey string, toolName string, check quotaCheck) error {
+	if r.Hardening.Quotas.ExceededAction == config.QuotaExceededActionFail {
+		return quotaExceededError(toolName, check, "hard limit reached")
+	}
+	if r.ApprovalBroker == nil {
+		return quotaExceededError(toolName, check, "approval is configured, but the approval broker is unavailable")
+	}
+	identity := tools.RequesterIdentityFromContext(ctx)
+	decision, err := r.ApprovalBroker.EvaluateToolQuota(ctx, approval.ToolQuotaEvaluation{
+		Scope:         check.Scope,
+		LimitName:     check.Name,
+		ToolName:      toolName,
+		Current:       check.Current,
+		Limit:         check.Limit,
+		AgentID:       firstNonEmptyString(identity.Actor, "runtime"),
+		SessionID:     sessionKey,
+		ApprovalToken: tools.ApprovalTokenFromContext(ctx),
+	}, config.ApprovalModeAsk)
+	if err != nil {
+		return err
+	}
+	if decision.Allowed {
+		if r.Audit != nil {
+			_ = r.Audit.Record(ctx, "quota.override", sessionKey, "approval", map[string]any{
+				"tool":         toolName,
+				"scope":        check.Scope,
+				"limit":        check.Name,
+				"current":      check.Current,
+				"max":          check.Limit,
+				"subject_hash": decision.SubjectHash,
+			})
+		}
 		return nil
 	}
+	if decision.RequiresApproval {
+		return fmt.Errorf("%s Approve request %d, then retry with the issued approval token.", quotaExceededMessage(toolName, check, "approval required"), decision.RequestID)
+	}
+	return quotaExceededError(toolName, check, decision.Reason)
+}
+
+func messageQuotaCountersFromContext(ctx context.Context) *quotaCounters {
+	if ctx != nil {
+		if counters, ok := ctx.Value(messageQuotaCountersContextKey{}).(*quotaCounters); ok && counters != nil {
+			return counters
+		}
+	}
+	return &quotaCounters{}
+}
+
+func incrementQuotaCounters(counters *quotaCounters, toolName string) {
+	if counters == nil {
+		return
+	}
+	counters.ToolCalls++
+	switch toolName {
+	case "exec", "run_skill", "run_skill_script":
+		counters.ExecCalls++
+	case "web_fetch", "web_fetch_markdown", "web_search":
+		counters.WebCalls++
+	case "spawn_subagent":
+		counters.SubagentCalls++
+	}
+}
+
+func quotaExceededError(toolName string, check quotaCheck, reason string) error {
+	return errors.New(quotaExceededMessage(toolName, check, reason))
+}
+
+func quotaExceededMessage(toolName string, check quotaCheck, reason string) string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "limit reached"
+	}
+	return fmt.Sprintf("tool quota reached for %s: %s limit %d/%d while executing %s (%s). Increase %s or set hardening.quotas.exceededAction to ask/fail as appropriate.",
+		check.Scope,
+		check.Label,
+		check.Current,
+		check.Limit,
+		toolName,
+		reason,
+		check.ConfigKey,
+	)
 }
 
 func (r *Runtime) sessionQuotaState(sessionKey string) *sessionQuotaState {
@@ -1623,15 +2102,13 @@ func (r *Runtime) evictQuotaStateLocked() {
 	}
 }
 
-func quotaIncrement(current *int, limit int, label string, toolName string) error {
-	if current == nil || limit <= 0 {
-		return nil
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
 	}
-	if *current >= limit {
-		return fmt.Errorf("quota exceeded for %s while executing %s", label, toolName)
-	}
-	*current = *current + 1
-	return nil
+	return ""
 }
 
 func (r *Runtime) skillRunEnvFor(name string) map[string]string {
@@ -1683,7 +2160,8 @@ func (r *Runtime) boundTextResult(ctx context.Context, sessionKey string, text s
 		return "(no response)", "(no response)", ""
 	}
 	preview = previewText(text, r.toolPreviewBytes())
-	if r.MaxToolBytes > 0 && len(text) > r.MaxToolBytes && r.Artifacts != nil {
+	shouldStoreArtifact := r.Artifacts != nil && (preview != text || (r.MaxToolBytes > 0 && len(text) > r.MaxToolBytes))
+	if shouldStoreArtifact {
 		id, err := r.Artifacts.Save(ctx, sessionKey, "text/plain", []byte(text))
 		if err != nil {
 			log.Printf("artifact save failed: %v", err)
@@ -1729,7 +2207,10 @@ func (r *Runtime) boundTextResult(ctx context.Context, sessionKey string, text s
 
 func (r *Runtime) toolPreviewBytes() int {
 	if r.ToolPreviewBytes <= 0 {
-		return 500
+		if r.MaxToolBytes > 0 {
+			return r.MaxToolBytes
+		}
+		return config.DefaultMaxToolBytes
 	}
 	return r.ToolPreviewBytes
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"or3-intern/internal/agent"
 	"or3-intern/internal/approval"
@@ -864,6 +865,68 @@ func BuildJobSnapshotResponse(snapshot agent.JobSnapshot) map[string]any {
 	response["updated_at"] = snapshot.UpdatedAt
 	response["events"] = snapshot.Events
 	return response
+}
+
+// BuildSubagentJobResponse converts a persisted subagent_jobs row into a
+// sanitized JSON map for the agents API. It deliberately omits raw metadata
+// JSON, approval tokens, and any internal scratch fields.
+func BuildSubagentJobResponse(job db.SubagentJob) map[string]any {
+	out := map[string]any{
+		"job_id":             job.ID,
+		"kind":               "subagent",
+		"parent_session_key": job.ParentSessionKey,
+		"child_session_key":  job.ChildSessionKey,
+		"task":               job.Task,
+		"status":             job.Status,
+		"requested_at":       formatSubagentTime(job.RequestedAt),
+		"updated_at":         formatSubagentTime(latestSubagentTimestamp(job)),
+	}
+	if preview := strings.TrimSpace(job.ResultPreview); preview != "" {
+		out["result_preview"] = preview
+	}
+	if artifact := strings.TrimSpace(job.ArtifactID); artifact != "" {
+		out["artifact_id"] = artifact
+	}
+	if errText := strings.TrimSpace(job.ErrorText); errText != "" {
+		out["error"] = errText
+	}
+	if job.StartedAt > 0 {
+		out["started_at"] = formatSubagentTime(job.StartedAt)
+	}
+	if job.FinishedAt > 0 {
+		out["finished_at"] = formatSubagentTime(job.FinishedAt)
+	}
+	if job.Attempts > 0 {
+		out["attempts"] = job.Attempts
+	}
+	return out
+}
+
+// BuildSubagentJobListResponse renders a list of persisted subagent jobs.
+func BuildSubagentJobListResponse(jobs []db.SubagentJob) map[string]any {
+	items := make([]map[string]any, 0, len(jobs))
+	for _, job := range jobs {
+		items = append(items, BuildSubagentJobResponse(job))
+	}
+	return map[string]any{"items": items}
+}
+
+func latestSubagentTimestamp(job db.SubagentJob) int64 {
+	latest := job.RequestedAt
+	if job.StartedAt > latest {
+		latest = job.StartedAt
+	}
+	if job.FinishedAt > latest {
+		latest = job.FinishedAt
+	}
+	return latest
+}
+
+func formatSubagentTime(ms int64) string {
+	if ms <= 0 {
+		return ""
+	}
+	return time.UnixMilli(ms).UTC().Format(time.RFC3339)
 }
 
 func DescribeUnavailable(err error) error {

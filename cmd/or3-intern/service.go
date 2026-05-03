@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,13 +23,18 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
+
+	"github.com/creack/pty"
 
 	"or3-intern/internal/agent"
 	"or3-intern/internal/app"
 	"or3-intern/internal/approval"
+	"or3-intern/internal/auth"
 	"or3-intern/internal/config"
 	"or3-intern/internal/controlplane"
 	"or3-intern/internal/db"
+	"or3-intern/internal/skills"
 	"or3-intern/internal/tools"
 )
 
@@ -36,16 +45,24 @@ type serviceServer struct {
 	subagentManager  *agent.SubagentManager
 	jobs             *agent.JobRegistry
 	broker           *approval.Broker
+	unsafeDev        bool
 	controlOnce      sync.Once
 	controlSvc       *controlplane.Service
 	appOnce          sync.Once
 	appSvc           *app.ServiceApp
 	terminalMu       sync.Mutex
-	terminalSeq      int64
 	terminalSessions map[string]*serviceTerminalSession
 	rateMu           sync.Mutex
 	rateWindow       time.Time
 	rateCounts       map[string]int
+	authFailureMu    sync.Mutex
+	authFailures     map[string]serviceAuthFailureState
+}
+
+type serviceAuthFailureState struct {
+	Count        int
+	FirstAttempt time.Time
+	BlockedUntil time.Time
 }
 
 const (
@@ -57,6 +74,8 @@ const (
 	serviceScopeBodyLimit      int64 = 64 << 10
 	serviceConfigureBodyLimit  int64 = 256 << 10
 	serviceFileUploadBodyLimit int64 = 128 << 20
+	serviceFileTextReadLimit   int64 = 1 << 20
+	serviceFileTextWriteLimit  int64 = 1 << 20
 	serviceTerminalBodyLimit   int64 = 64 << 10
 	serviceTerminalSessionTTL        = 10 * time.Minute
 	serviceTerminalMaxSessions       = 4
@@ -83,6 +102,7 @@ type serviceTerminalSession struct {
 	ApprovalID    int64
 	ApprovalState string
 	cmd           *exec.Cmd
+	ptyFile       *os.File
 	stdin         io.WriteCloser
 	cancel        context.CancelFunc
 	mu            sync.Mutex
@@ -115,7 +135,9 @@ func (s *serviceTerminalSession) snapshot() map[string]any {
 func (s *serviceTerminalSession) appendEvent(eventType string, data map[string]any) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.LastActiveAt = time.Now().UTC()
+	now := time.Now().UTC()
+	s.LastActiveAt = now
+	s.ExpiresAt = now.Add(serviceTerminalSessionTTL)
 	if data == nil {
 		data = map[string]any{}
 	}
@@ -158,11 +180,16 @@ func (s *serviceTerminalSession) close(status string) {
 	s.Status = status
 	stdin := s.stdin
 	cancel := s.cancel
+	ptyFile := s.ptyFile
 	s.stdin = nil
 	s.cancel = nil
+	s.ptyFile = nil
 	s.mu.Unlock()
-	if stdin != nil {
+	if stdin != nil && stdin != ptyFile {
 		_ = stdin.Close()
+	}
+	if ptyFile != nil {
+		_ = ptyFile.Close()
 	}
 	if cancel != nil {
 		cancel()
@@ -170,15 +197,35 @@ func (s *serviceTerminalSession) close(status string) {
 	s.appendEvent("status", map[string]any{"status": status})
 }
 
+func clampTerminalRows(rows int) int {
+	rows = max(rows, 24)
+	if rows > 200 {
+		return 200
+	}
+	return rows
+}
+
+func clampTerminalCols(cols int) int {
+	cols = max(cols, 80)
+	if cols > 400 {
+		return 400
+	}
+	return cols
+}
+
 func runServiceCommand(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, jobs *agent.JobRegistry) error {
 	return runServiceCommandWithBroker(ctx, cfg, rt, subagentManager, jobs, nil)
 }
 
 func runServiceCommandWithBroker(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, jobs *agent.JobRegistry, broker *approval.Broker) error {
+	return runServiceCommandWithBrokerOptions(ctx, cfg, rt, subagentManager, jobs, broker, false)
+}
+
+func runServiceCommandWithBrokerOptions(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, jobs *agent.JobRegistry, broker *approval.Broker, unsafeDev bool) error {
 	if strings.TrimSpace(cfg.Service.Secret) == "" {
 		return fmt.Errorf("service secret is required")
 	}
-	if err := validateStartupCommand("service", cfg, false); err != nil {
+	if err := validateStartupCommandWithOptions("service", cfg, unsafeDev, false); err != nil {
 		return err
 	}
 	if rt == nil {
@@ -187,12 +234,13 @@ func runServiceCommandWithBroker(ctx context.Context, cfg config.Config, rt *age
 	if jobs == nil {
 		jobs = agent.NewJobRegistry(0, 0)
 	}
-	server := &serviceServer{config: cfg, configPath: cfgPathOrDefault(""), runtime: rt, subagentManager: subagentManager, jobs: jobs, broker: broker}
+	server := &serviceServer{config: cfg, configPath: cfgPathOrDefault(""), runtime: rt, subagentManager: subagentManager, jobs: jobs, broker: broker, unsafeDev: unsafeDev}
+	authSvc := server.app().Auth()
 	mux := newServiceMux(server)
 
 	httpServer := &http.Server{
 		Addr:              cfg.Service.Listen,
-		Handler:           serviceBrowserMiddleware(cfg, serviceAuthMiddlewareWithBroker(cfg, broker, serviceBoundaryMiddleware(server, mux))),
+		Handler:           serviceBrowserMiddleware(cfg, serviceAuthMiddlewareWithBrokerAndLimiter(cfg, broker, authSvc, server, serviceBoundaryMiddleware(server, mux))),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		IdleTimeout:       60 * time.Second,
@@ -220,7 +268,9 @@ func newServiceMux(server *serviceServer) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("/internal/v1/turns", http.HandlerFunc(server.handleTurns))
 	mux.Handle("/internal/v1/subagents", http.HandlerFunc(server.handleSubagents))
+	mux.Handle("/internal/v1/subagents/", http.HandlerFunc(server.handleSubagents))
 	mux.Handle("/internal/v1/jobs/", http.HandlerFunc(server.handleJobs))
+	mux.Handle("/internal/v1/artifacts/", http.HandlerFunc(server.handleArtifacts))
 	mux.Handle("/internal/v1/pairing/requests", http.HandlerFunc(server.handlePairing))
 	mux.Handle("/internal/v1/pairing/requests/", http.HandlerFunc(server.handlePairing))
 	mux.Handle("/internal/v1/pairing/exchange", http.HandlerFunc(server.handlePairing))
@@ -228,9 +278,19 @@ func newServiceMux(server *serviceServer) *http.ServeMux {
 	mux.Handle("/internal/v1/devices/", http.HandlerFunc(server.handleDevices))
 	mux.Handle("/internal/v1/approvals", http.HandlerFunc(server.handleApprovals))
 	mux.Handle("/internal/v1/approvals/", http.HandlerFunc(server.handleApprovals))
+	mux.Handle("/internal/v1/auth/capabilities", http.HandlerFunc(server.handleAuth))
+	mux.Handle("/internal/v1/auth/session", http.HandlerFunc(server.handleAuth))
+	mux.Handle("/internal/v1/auth/session/", http.HandlerFunc(server.handleAuth))
+	mux.Handle("/internal/v1/auth/passkeys", http.HandlerFunc(server.handleAuth))
+	mux.Handle("/internal/v1/auth/passkeys/", http.HandlerFunc(server.handleAuth))
+	mux.Handle("/internal/v1/auth/passkeys/registration/", http.HandlerFunc(server.handleAuth))
+	mux.Handle("/internal/v1/auth/passkeys/login/", http.HandlerFunc(server.handleAuth))
+	mux.Handle("/internal/v1/auth/step-up/", http.HandlerFunc(server.handleAuth))
 	mux.Handle("/internal/v1/health", http.HandlerFunc(server.handleHealth))
 	mux.Handle("/internal/v1/readiness", http.HandlerFunc(server.handleReadiness))
 	mux.Handle("/internal/v1/capabilities", http.HandlerFunc(server.handleCapabilities))
+	mux.Handle("/internal/v1/app/bootstrap", http.HandlerFunc(server.handleApp))
+	mux.Handle("/internal/v1/actions/", http.HandlerFunc(server.handleActions))
 	mux.Handle("/internal/v1/embeddings", http.HandlerFunc(server.handleEmbeddings))
 	mux.Handle("/internal/v1/embeddings/", http.HandlerFunc(server.handleEmbeddings))
 	mux.Handle("/internal/v1/audit", http.HandlerFunc(server.handleAudit))
@@ -239,6 +299,8 @@ func newServiceMux(server *serviceServer) *http.ServeMux {
 	mux.Handle("/internal/v1/scope/", http.HandlerFunc(server.handleScope))
 	mux.Handle("/internal/v1/configure", http.HandlerFunc(server.handleConfigure))
 	mux.Handle("/internal/v1/configure/", http.HandlerFunc(server.handleConfigure))
+	mux.Handle("/internal/v1/skills", http.HandlerFunc(server.handleSkills))
+	mux.Handle("/internal/v1/skills/", http.HandlerFunc(server.handleSkills))
 	mux.Handle("/internal/v1/files", http.HandlerFunc(server.handleFiles))
 	mux.Handle("/internal/v1/files/", http.HandlerFunc(server.handleFiles))
 	mux.Handle("/internal/v1/terminal/sessions", http.HandlerFunc(server.handleTerminal))
@@ -255,7 +317,7 @@ func (s *serviceServer) control() *controlplane.Service {
 
 func (s *serviceServer) app() *app.ServiceApp {
 	s.appOnce.Do(func() {
-		s.appSvc = app.NewServiceApp(s.runtime, s.jobs, s.subagentManager, s.control())
+		s.appSvc = app.NewServiceApp(s.config, s.runtime, s.jobs, s.subagentManager, s.control())
 	})
 	return s.appSvc
 }
@@ -309,6 +371,10 @@ func (s *serviceServer) handlePairing(w http.ResponseWriter, r *http.Request) {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 			return
 		}
+		if retryAfter := s.serviceAuthRetryAfter(r, "pairing"); retryAfter > 0 {
+			writeServiceAuthRateLimit(w, r, retryAfter)
+			return
+		}
 		limitServiceRequestBody(w, r, servicePairingBodyLimit)
 		var body struct {
 			RequestID int64  `json:"request_id"`
@@ -318,11 +384,24 @@ func (s *serviceServer) handlePairing(w http.ResponseWriter, r *http.Request) {
 			writeServiceRequestDecodeError(w, err)
 			return
 		}
-		device, token, err := appSvc.ExchangePairingCode(r.Context(), approval.PairingExchangeInput{RequestID: body.RequestID, Code: body.Code})
-		if err != nil {
-			writeServiceError(w, r, http.StatusBadRequest, "pairing exchange failed", err)
+		pairingScope := fmt.Sprintf("pairing:%d", body.RequestID)
+		if retryAfter := s.serviceAuthRetryAfter(r, pairingScope); retryAfter > 0 {
+			writeServiceAuthRateLimit(w, r, retryAfter)
 			return
 		}
+		device, token, err := appSvc.ExchangePairingCode(r.Context(), approval.PairingExchangeInput{RequestID: body.RequestID, Code: body.Code})
+		if err != nil {
+			s.recordServiceAuthFailure(r, "pairing")
+			s.recordServiceAuthFailure(r, pairingScope)
+			if message, ok := servicePublicPairingExchangeError(err); ok {
+				writeServiceJSON(w, http.StatusBadRequest, serviceErrorPayload(r, message))
+			} else {
+				writeServiceError(w, r, http.StatusBadRequest, "pairing exchange failed", err)
+			}
+			return
+		}
+		s.clearServiceAuthFailures(r, "pairing")
+		s.clearServiceAuthFailures(r, pairingScope)
 		writeServiceJSON(w, http.StatusOK, map[string]any{"device_id": device.DeviceID, "role": device.Role, "token": token})
 		return
 	}
@@ -448,6 +527,18 @@ type serviceFileSearchItem struct {
 	RootLabel string `json:"root_label"`
 }
 
+type serviceFileReadResponse struct {
+	RootID     string `json:"root_id"`
+	Path       string `json:"path"`
+	Name       string `json:"name"`
+	MimeType   string `json:"mime_type,omitempty"`
+	Size       int64  `json:"size"`
+	ModifiedAt string `json:"modified_at"`
+	Revision   string `json:"revision"`
+	Writable   bool   `json:"writable"`
+	Content    string `json:"content"`
+}
+
 func (s *serviceServer) handleFiles(w http.ResponseWriter, r *http.Request) {
 	if !requireServiceRole(w, r, approval.RoleOperator) {
 		return
@@ -479,12 +570,24 @@ func (s *serviceServer) handleFiles(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleFileStat(w, r)
+	case "read":
+		if r.Method != http.MethodGet {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		s.handleFileRead(w, r)
 	case "download":
 		if r.Method != http.MethodGet {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 			return
 		}
 		s.handleFileDownload(w, r)
+	case "write":
+		if r.Method != http.MethodPut {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		s.handleFileWrite(w, r)
 	case "upload":
 		if r.Method != http.MethodPost {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
@@ -506,6 +609,7 @@ func (s *serviceServer) handleFiles(w http.ResponseWriter, r *http.Request) {
 
 func (s *serviceServer) serviceFileRoots() []serviceFileRoot {
 	var roots []serviceFileRoot
+	splitReadWrite := s.config.Tools.RestrictToWorkspace && s.config.Tools.AllowFullFileRead
 	add := func(id, label, path string, writable bool) {
 		path = strings.TrimSpace(path)
 		if path == "" {
@@ -515,12 +619,15 @@ func (s *serviceServer) serviceFileRoots() []serviceFileRoot {
 			roots = append(roots, serviceFileRoot{ID: id, Label: label, Path: abs, Writable: writable})
 		}
 	}
-	add("allowed", "Allowed Folder", s.config.AllowedDir, true)
+	if splitReadWrite {
+		add("computer", "Computer", string(filepath.Separator), false)
+	}
+	add("allowed", "Allowed Folder", s.config.AllowedDir, !splitReadWrite)
 	add("workspace", "Workspace", s.config.WorkspaceDir, true)
 	add("artifacts", "Artifacts", s.config.ArtifactsDir, false)
 	if len(roots) == 0 {
 		if cwd, err := os.Getwd(); err == nil {
-			roots = append(roots, serviceFileRoot{ID: "cwd", Label: "Current Directory", Path: cwd, Writable: true})
+			roots = append(roots, serviceFileRoot{ID: "cwd", Label: "Current Directory", Path: cwd, Writable: !splitReadWrite})
 		}
 	}
 	return roots
@@ -537,7 +644,7 @@ func (s *serviceServer) serviceFileRootByID(id string) (serviceFileRoot, bool) {
 
 func (s *serviceServer) defaultSearchFileRoot() (serviceFileRoot, bool) {
 	roots := s.serviceFileRoots()
-	for _, id := range []string{"workspace", "allowed", "cwd"} {
+	for _, id := range []string{"workspace", "allowed", "computer", "cwd"} {
 		for _, root := range roots {
 			if root.ID == id {
 				return root, true
@@ -741,6 +848,40 @@ func fileSearchMatches(query, name, path string) bool {
 	return true
 }
 
+func serviceFileRevision(info os.FileInfo) string {
+	if info == nil {
+		return ""
+	}
+	return fmt.Sprintf("%d:%d", info.ModTime().UTC().UnixNano(), info.Size())
+}
+
+func isTextLikeMime(mimeType string) bool {
+	mimeType = strings.ToLower(strings.TrimSpace(mimeType))
+	if strings.HasPrefix(mimeType, "text/") {
+		return true
+	}
+	return strings.Contains(mimeType, "json") || strings.Contains(mimeType, "xml") || strings.Contains(mimeType, "javascript") || strings.Contains(mimeType, "yaml") || strings.Contains(mimeType, "toml")
+}
+
+func isTextLikeExtension(name string) bool {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".md", ".markdown", ".txt", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".env", ".csv", ".ts", ".tsx", ".js", ".jsx", ".vue", ".go", ".py", ".rb", ".php", ".java", ".kt", ".swift", ".sql", ".html", ".css", ".scss", ".sh":
+		return true
+	default:
+		return false
+	}
+}
+
+func serviceFileTextAllowed(name, mimeType string, content []byte) bool {
+	if bytes.IndexByte(content, 0) >= 0 || !utf8.Valid(content) {
+		return false
+	}
+	if isTextLikeMime(mimeType) || isTextLikeExtension(name) {
+		return true
+	}
+	return false
+}
+
 func (s *serviceServer) handleFileStat(w http.ResponseWriter, r *http.Request) {
 	root, absPath, rel, err := s.resolveServiceFilePath(r.URL.Query().Get("root_id"), r.URL.Query().Get("path"))
 	if err != nil {
@@ -757,6 +898,48 @@ func (s *serviceServer) handleFileStat(w http.ResponseWriter, r *http.Request) {
 		entryType = "directory"
 	}
 	writeServiceJSON(w, http.StatusOK, map[string]any{"item": serviceFileEntry{Name: info.Name(), Path: rel, Type: entryType, Size: info.Size(), ModifiedAt: info.ModTime().Format(time.RFC3339), MimeType: mime.TypeByExtension(filepath.Ext(info.Name()))}, "root_id": root.ID})
+}
+
+func (s *serviceServer) handleFileRead(w http.ResponseWriter, r *http.Request) {
+	root, absPath, rel, err := s.resolveServiceFilePath(r.URL.Query().Get("root_id"), r.URL.Query().Get("path"))
+	if err != nil {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	info, err := os.Stat(absPath)
+	if err != nil {
+		writeServiceError(w, r, http.StatusNotFound, "file unavailable", err)
+		return
+	}
+	if info.IsDir() {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "read target is not a file"})
+		return
+	}
+	if info.Size() > serviceFileTextReadLimit {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "file is too large for inline editing"})
+		return
+	}
+	content, err := os.ReadFile(absPath)
+	if err != nil {
+		writeServiceError(w, r, http.StatusBadGateway, "file read failed", err)
+		return
+	}
+	mimeType := mime.TypeByExtension(filepath.Ext(info.Name()))
+	if !serviceFileTextAllowed(info.Name(), mimeType, content) {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "file is not a supported text document"})
+		return
+	}
+	writeServiceJSON(w, http.StatusOK, map[string]any{
+		"root_id":     root.ID,
+		"path":        rel,
+		"name":        info.Name(),
+		"mime_type":   mimeType,
+		"size":        info.Size(),
+		"modified_at": info.ModTime().UTC().Format(time.RFC3339),
+		"revision":    serviceFileRevision(info),
+		"writable":    root.Writable,
+		"content":     string(content),
+	})
 }
 
 func (s *serviceServer) handleFileDownload(w http.ResponseWriter, r *http.Request) {
@@ -777,6 +960,111 @@ func (s *serviceServer) handleFileDownload(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	http.ServeContent(w, r, info.Name(), info.ModTime(), file)
+}
+
+func (s *serviceServer) handleFileWrite(w http.ResponseWriter, r *http.Request) {
+	limitServiceRequestBody(w, r, serviceFileTextWriteLimit)
+	var body struct {
+		RootID           string `json:"root_id"`
+		Path             string `json:"path"`
+		Content          string `json:"content"`
+		ExpectedRevision string `json:"expected_revision"`
+		Create           bool   `json:"create"`
+	}
+	if err := decodeServiceRequestBody(r.Body, &body); err != nil {
+		writeServiceRequestDecodeError(w, err)
+		return
+	}
+	root, absPath, rel, err := s.resolveServiceFilePath(body.RootID, body.Path)
+	if err != nil {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	if !root.Writable {
+		writeServiceJSON(w, http.StatusForbidden, map[string]any{"error": "file root is read-only"})
+		return
+	}
+	contentBytes := []byte(body.Content)
+	if int64(len(contentBytes)) > serviceFileTextWriteLimit {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "file is too large for inline editing"})
+		return
+	}
+	name := filepath.Base(absPath)
+	mimeType := mime.TypeByExtension(filepath.Ext(name))
+	if !serviceFileTextAllowed(name, mimeType, contentBytes) {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "file is not a supported text document"})
+		return
+	}
+	parent := filepath.Dir(absPath)
+	parentInfo, err := os.Stat(parent)
+	if err != nil || !parentInfo.IsDir() {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "parent directory does not exist"})
+		return
+	}
+	existingInfo, statErr := os.Stat(absPath)
+	if statErr == nil && existingInfo.IsDir() {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "write target is not a file"})
+		return
+	}
+	status := http.StatusOK
+	resultStatus := "written"
+	if statErr != nil {
+		if !errors.Is(statErr, os.ErrNotExist) {
+			writeServiceError(w, r, http.StatusBadGateway, "file stat failed", statErr)
+			return
+		}
+		if !body.Create {
+			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "file does not exist"})
+			return
+		}
+		status = http.StatusCreated
+		resultStatus = "created"
+	} else {
+		if body.Create {
+			writeServiceJSON(w, http.StatusConflict, map[string]any{"error": "file already exists"})
+			return
+		}
+		if body.ExpectedRevision != "" && body.ExpectedRevision != serviceFileRevision(existingInfo) {
+			writeServiceJSON(w, http.StatusConflict, map[string]any{
+				"error":            "file has changed on disk",
+				"modified_at":      existingInfo.ModTime().UTC().Format(time.RFC3339),
+				"current_revision": serviceFileRevision(existingInfo),
+			})
+			return
+		}
+	}
+	tmp, err := os.CreateTemp(parent, ".or3-write-*")
+	if err != nil {
+		writeServiceError(w, r, http.StatusBadGateway, "could not prepare file write", err)
+		return
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(contentBytes); err != nil {
+		_ = tmp.Close()
+		writeServiceError(w, r, http.StatusBadGateway, "file write failed", err)
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		writeServiceError(w, r, http.StatusBadGateway, "file write failed", err)
+		return
+	}
+	if err := os.Rename(tmpName, absPath); err != nil {
+		writeServiceError(w, r, http.StatusBadGateway, "file write failed", err)
+		return
+	}
+	updatedInfo, err := os.Stat(absPath)
+	if err != nil {
+		writeServiceError(w, r, http.StatusBadGateway, "file stat failed", err)
+		return
+	}
+	writeServiceJSON(w, status, map[string]any{
+		"root_id":     root.ID,
+		"path":        rel,
+		"status":      resultStatus,
+		"modified_at": updatedInfo.ModTime().UTC().Format(time.RFC3339),
+		"revision":    serviceFileRevision(updatedInfo),
+	})
 }
 
 func (s *serviceServer) handleFileUpload(w http.ResponseWriter, r *http.Request) {
@@ -801,7 +1089,7 @@ func (s *serviceServer) handleFileUpload(w http.ResponseWriter, r *http.Request)
 	}
 	defer source.Close()
 	name := filepath.Base(header.Filename)
-	if name == "." || name == string(filepath.Separator) || name == "" {
+	if name == "." || name == ".." || name == string(filepath.Separator) || name == "" {
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid file name"})
 		return
 	}
@@ -864,11 +1152,14 @@ func (s *serviceServer) handleTerminal(w http.ResponseWriter, r *http.Request) {
 	relative := strings.TrimPrefix(r.URL.Path, "/internal/v1/terminal/sessions")
 	relative = strings.Trim(relative, "/")
 	if relative == "" {
-		if r.Method != http.MethodPost {
+		switch r.Method {
+		case http.MethodGet:
+			s.listTerminalSessions(w, r)
+		case http.MethodPost:
+			s.createTerminalSession(w, r)
+		default:
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
-			return
 		}
-		s.createTerminalSession(w, r)
 		return
 	}
 	parts := strings.Split(relative, "/")
@@ -913,6 +1204,50 @@ func (s *serviceServer) handleTerminal(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "terminal action not found"})
 	}
+}
+
+func (s *serviceServer) listTerminalSessions(w http.ResponseWriter, _ *http.Request) {
+	if s == nil {
+		writeServiceJSON(w, http.StatusOK, map[string]any{"items": []map[string]any{}})
+		return
+	}
+	s.terminalMu.Lock()
+	sessions := make([]*serviceTerminalSession, 0, len(s.terminalSessions))
+	for _, session := range s.terminalSessions {
+		if session != nil && session.Status == "running" {
+			sessions = append(sessions, session)
+		}
+	}
+	s.terminalMu.Unlock()
+	slices.SortFunc(sessions, func(left, right *serviceTerminalSession) int {
+		if left == nil && right == nil {
+			return 0
+		}
+		if left == nil {
+			return 1
+		}
+		if right == nil {
+			return -1
+		}
+		if left.LastActiveAt.After(right.LastActiveAt) {
+			return -1
+		}
+		if left.LastActiveAt.Before(right.LastActiveAt) {
+			return 1
+		}
+		if left.CreatedAt.After(right.CreatedAt) {
+			return -1
+		}
+		if left.CreatedAt.Before(right.CreatedAt) {
+			return 1
+		}
+		return strings.Compare(left.ID, right.ID)
+	})
+	items := make([]map[string]any, 0, len(sessions))
+	for _, session := range sessions {
+		items = append(items, session.snapshot())
+	}
+	writeServiceJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 func (s *serviceServer) terminalAvailable() bool {
@@ -968,11 +1303,21 @@ func (s *serviceServer) getTerminalSessionByID(sessionID string) (*serviceTermin
 	return session, true
 }
 
-func (s *serviceServer) allocateTerminalSessionID() string {
-	s.terminalMu.Lock()
-	defer s.terminalMu.Unlock()
-	s.terminalSeq++
-	return fmt.Sprintf("term_%d_%d", time.Now().UTC().Unix(), s.terminalSeq)
+func (s *serviceServer) allocateTerminalSessionID() (string, error) {
+	for range 8 {
+		b := make([]byte, 12)
+		if _, err := rand.Read(b); err != nil {
+			return "", err
+		}
+		id := "term_" + hex.EncodeToString(b)
+		s.terminalMu.Lock()
+		_, exists := s.terminalSessions[id]
+		s.terminalMu.Unlock()
+		if !exists {
+			return id, nil
+		}
+	}
+	return "", fmt.Errorf("failed to allocate unique terminal session id")
 }
 
 func (s *serviceServer) createTerminalSession(w http.ResponseWriter, r *http.Request) {
@@ -1030,31 +1375,31 @@ func (s *serviceServer) createTerminalSession(w http.ResponseWriter, r *http.Req
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, shellPath)
+	shellArgs := terminalShellArgs(shellPath)
+	cmd := exec.CommandContext(ctx, shellPath, shellArgs...)
 	cmd.Dir = workingDir
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
-	stdin, err := cmd.StdinPipe()
+	cmd.Env = append(os.Environ(),
+		"TERM=xterm-256color",
+		"COLORTERM=truecolor",
+		"SHELL="+shellPath,
+	)
+	rows := clampTerminalRows(body.Rows)
+	cols := clampTerminalCols(body.Cols)
+	ptyFile, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)})
 	if err != nil {
 		cancel()
-		writeServiceError(w, r, http.StatusBadGateway, "failed to open terminal stdin", err)
+		writeServiceError(w, r, http.StatusBadGateway, "failed to allocate terminal pty", err)
 		return
 	}
-	stdout, err := cmd.StdoutPipe()
+	sessionID, err := s.allocateTerminalSessionID()
 	if err != nil {
-		_ = stdin.Close()
+		_ = ptyFile.Close()
 		cancel()
-		writeServiceError(w, r, http.StatusBadGateway, "failed to open terminal stdout", err)
-		return
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		_ = stdin.Close()
-		cancel()
-		writeServiceError(w, r, http.StatusBadGateway, "failed to open terminal stderr", err)
+		writeServiceError(w, r, http.StatusInternalServerError, "failed to allocate terminal session", err)
 		return
 	}
 	session := &serviceTerminalSession{
-		ID:            s.allocateTerminalSessionID(),
+		ID:            sessionID,
 		RootID:        root.ID,
 		RelativePath:  filepath.ToSlash(rel),
 		WorkingDir:    workingDir,
@@ -1062,26 +1407,18 @@ func (s *serviceServer) createTerminalSession(w http.ResponseWriter, r *http.Req
 		CreatedAt:     time.Now().UTC(),
 		ExpiresAt:     time.Now().UTC().Add(serviceTerminalSessionTTL),
 		LastActiveAt:  time.Now().UTC(),
-		Status:        "starting",
-		Rows:          max(body.Rows, 24),
-		Cols:          max(body.Cols, 80),
+		Status:        "running",
+		Rows:          rows,
+		Cols:          cols,
 		ApprovalMode:  string(s.config.Security.Approvals.Exec.Mode),
 		ApprovalState: approvalDecision.Reason,
 		ApprovalID:    approvalDecision.RequestID,
 		cmd:           cmd,
-		stdin:         stdin,
+		ptyFile:       ptyFile,
+		stdin:         ptyFile, // PTY master is read+write; tests rely on stdin being a WriteCloser
 		cancel:        cancel,
 		subscribers:   map[chan serviceTerminalEvent]struct{}{},
 	}
-	if err := cmd.Start(); err != nil {
-		_ = stdin.Close()
-		cancel()
-		writeServiceError(w, r, http.StatusBadGateway, "failed to start terminal shell", err)
-		return
-	}
-	session.mu.Lock()
-	session.Status = "running"
-	session.mu.Unlock()
 	session.appendEvent("status", map[string]any{"status": "running"})
 	session.appendEvent("snapshot", session.snapshot())
 	s.terminalMu.Lock()
@@ -1090,10 +1427,20 @@ func (s *serviceServer) createTerminalSession(w http.ResponseWriter, r *http.Req
 	}
 	s.terminalSessions[session.ID] = session
 	s.terminalMu.Unlock()
-	go s.collectTerminalOutput(session, stdout, "stdout")
-	go s.collectTerminalOutput(session, stderr, "stderr")
+	go s.collectTerminalOutput(session, ptyFile, "pty")
 	go s.waitForTerminalSession(session)
 	writeServiceJSON(w, http.StatusCreated, session.snapshot())
+}
+
+func terminalShellArgs(shellPath string) []string {
+	switch filepath.Base(shellPath) {
+	case "bash", "zsh":
+		return []string{"-il"}
+	case "sh":
+		return []string{"-i"}
+	default:
+		return nil
+	}
 }
 
 func (s *serviceServer) evaluateTerminalApproval(ctx context.Context, shellPath, workingDir, approvalToken string) (approval.Decision, error) {
@@ -1256,15 +1603,22 @@ func (s *serviceServer) resizeTerminalSession(w http.ResponseWriter, r *http.Req
 	}
 	session.mu.Lock()
 	if body.Rows > 0 {
-		session.Rows = body.Rows
+		session.Rows = clampTerminalRows(body.Rows)
 	}
 	if body.Cols > 0 {
-		session.Cols = body.Cols
+		session.Cols = clampTerminalCols(body.Cols)
 	}
 	session.LastActiveAt = time.Now().UTC()
 	session.ExpiresAt = time.Now().UTC().Add(serviceTerminalSessionTTL)
 	rows, cols := session.Rows, session.Cols
+	ptyFile := session.ptyFile
 	session.mu.Unlock()
+	if ptyFile != nil && rows > 0 && cols > 0 {
+		if err := pty.Setsize(ptyFile, &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)}); err != nil {
+			writeServiceError(w, r, http.StatusBadGateway, "failed to resize terminal pty", err)
+			return
+		}
+	}
 	session.appendEvent("resize", map[string]any{"rows": rows, "cols": cols})
 	writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true, "session_id": sessionID, "rows": rows, "cols": cols})
 }
@@ -1420,7 +1774,31 @@ func (s *serviceServer) handleApprovals(w http.ResponseWriter, r *http.Request) 
 			writeServiceError(w, r, http.StatusBadRequest, "approval failed", err)
 			return
 		}
-		writeServiceJSON(w, http.StatusOK, map[string]any{"request_id": id, "token": issued.Token, "allowlist_id": issued.AllowlistID})
+		response := map[string]any{"request_id": id, "token": issued.Token, "allowlist_id": issued.AllowlistID}
+		if s.broker != nil && s.broker.DB != nil {
+			plans, err := approvalSkillRunPlanLookup(r.Context(), s.broker.DB, id, 20)
+			if err != nil {
+				response["warnings"] = []map[string]any{{
+					"code":    "plan_lookup_failed",
+					"message": approvalPlanLookupWarning(err),
+				}}
+			} else {
+				if len(plans) == 1 {
+					response["plan_id"] = plans[0].ID
+				}
+				if len(plans) > 0 {
+					ids := make([]string, 0, len(plans))
+					for _, plan := range plans {
+						if strings.TrimSpace(plan.ID) == "" {
+							continue
+						}
+						ids = append(ids, strings.TrimSpace(plan.ID))
+					}
+					response["plan_ids"] = ids
+				}
+			}
+		}
+		writeServiceJSON(w, http.StatusOK, response)
 	case "deny":
 		if r.Method != http.MethodPost {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
@@ -1599,23 +1977,50 @@ func (s *serviceServer) handleTurns(w http.ResponseWriter, r *http.Request) {
 func (s *serviceServer) runTurnJob(ctx context.Context, jobID string, req serviceTurnRequest, identity serviceAuthIdentity) {
 	s.jobs.Publish(jobID, "started", serviceLifecyclePayload(req.SessionKey, req.Meta, map[string]any{"status": "running"}))
 	observer := &serviceObserver{ConversationObserver: s.jobs.Observer(jobID)}
-	err := s.app().RunTurn(ctx, app.TurnRequest{
-		SessionKey:    req.SessionKey,
-		Message:       req.Message,
-		Meta:          req.Meta,
-		AllowedTools:  req.AllowedTools,
-		RestrictTools: req.RestrictTools,
-		ProfileName:   req.ProfileName,
-		Capability:    tools.CapabilityLevel(s.config.Service.MaxCapability),
-		ApprovalToken: req.ApprovalToken,
-		Actor:         identity.Actor,
-		Role:          identity.Role,
-		Observer:      observer,
-		Streamer:      agent.NullStreamer{},
-	})
+	var err error
+	if req.ReplayToolCall != nil {
+		_, err = s.app().ReplayToolCall(ctx, app.ReplayToolCallRequest{
+			SessionKey:    req.SessionKey,
+			ToolName:      req.ReplayToolCall.Name,
+			ArgumentsJSON: req.ReplayToolCall.ArgumentsJSON,
+			AllowedTools:  req.AllowedTools,
+			RestrictTools: req.RestrictTools,
+			ProfileName:   req.ProfileName,
+			Capability:    tools.CapabilityLevel(s.config.Service.MaxCapability),
+			ApprovalToken: req.ApprovalToken,
+			Actor:         identity.Actor,
+			Role:          identity.Role,
+			Observer:      observer,
+		})
+	} else {
+		err = s.app().RunTurn(ctx, app.TurnRequest{
+			SessionKey:    req.SessionKey,
+			Message:       req.Message,
+			Meta:          req.Meta,
+			AllowedTools:  req.AllowedTools,
+			RestrictTools: req.RestrictTools,
+			ProfileName:   req.ProfileName,
+			Capability:    tools.CapabilityLevel(s.config.Service.MaxCapability),
+			ApprovalToken: req.ApprovalToken,
+			Actor:         identity.Actor,
+			Role:          identity.Role,
+			Observer:      observer,
+			Streamer:      agent.NullStreamer{},
+		})
+	}
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
 			s.jobs.Complete(jobID, "aborted", serviceLifecyclePayload(req.SessionKey, req.Meta, map[string]any{"message": "job aborted"}))
+			return
+		}
+		var approvalErr *tools.ApprovalRequiredError
+		if errors.As(err, &approvalErr) {
+			s.jobs.Complete(jobID, "approval_required", serviceApprovalRequiredPayload(req.SessionKey, req.Meta, approvalErr))
+			return
+		}
+		if fallback, ok := serviceTurnFallbackText(err, observer); ok {
+			observer.finalText = fallback
+			s.jobs.Complete(jobID, "completed", serviceLifecyclePayload(req.SessionKey, req.Meta, map[string]any{"final_text": fallback, "degraded": true}))
 			return
 		}
 		s.jobs.Fail(jobID, servicePublicJobError(err), serviceLifecyclePayload(req.SessionKey, req.Meta, nil))
@@ -1625,7 +2030,28 @@ func (s *serviceServer) runTurnJob(ctx context.Context, jobID string, req servic
 }
 
 func (s *serviceServer) handleSubagents(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
+	if strings.HasPrefix(r.URL.Path, "/internal/v1/subagents/") {
+		if r.Method != http.MethodGet {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		jobID := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/internal/v1/subagents/"))
+		if jobID == "" || strings.Contains(jobID, "/") {
+			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "subagent job not found"})
+			return
+		}
+		if !s.writePersistedSubagentJobSnapshot(w, r, jobID) {
+			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "subagent job not found"})
+		}
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		s.handleSubagentsList(w, r)
+		return
+	case http.MethodPost:
+		// fall through
+	default:
 		writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 		return
 	}
@@ -1682,6 +2108,37 @@ func (s *serviceServer) handleSubagents(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+func (s *serviceServer) handleSubagentsList(w http.ResponseWriter, r *http.Request) {
+	store := s.control().DB
+	if store == nil {
+		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "subagent history is not available"})
+		return
+	}
+	query := r.URL.Query()
+	filter := db.SubagentJobFilter{
+		Status:           strings.TrimSpace(query.Get("status")),
+		ParentSessionKey: strings.TrimSpace(query.Get("parent_session_key")),
+	}
+	if rawLimit := strings.TrimSpace(query.Get("limit")); rawLimit != "" {
+		parsed, err := strconv.Atoi(rawLimit)
+		if err != nil || parsed <= 0 {
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "limit must be a positive integer"})
+			return
+		}
+		filter.Limit = parsed
+	}
+	jobs, err := store.ListSubagentJobs(r.Context(), filter)
+	if err != nil {
+		if strings.Contains(err.Error(), "invalid subagent status filter") {
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		writeServiceError(w, r, http.StatusServiceUnavailable, "subagent history unavailable", err)
+		return
+	}
+	writeServiceValue(w, http.StatusOK, controlplane.BuildSubagentJobListResponse(jobs))
+}
+
 func limitServiceRequestBody(w http.ResponseWriter, r *http.Request, maxBytes int64) {
 	if r != nil && r.Body != nil {
 		r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
@@ -1697,6 +2154,71 @@ func writeServiceRequestDecodeError(w http.ResponseWriter, err error) {
 	writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid request body"})
 }
 
+func (s *serviceServer) handleArtifacts(w http.ResponseWriter, r *http.Request) {
+	if !requireServiceRole(w, r, approval.RoleOperator) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	relative := strings.TrimPrefix(r.URL.Path, "/internal/v1/artifacts/")
+	artifactID := strings.TrimSpace(strings.Trim(relative, "/"))
+	if artifactID == "" || strings.Contains(artifactID, "/") {
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "artifact not found"})
+		return
+	}
+	if s.runtime == nil || s.runtime.Artifacts == nil {
+		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "artifacts unavailable"})
+		return
+	}
+	q := r.URL.Query()
+	sessionKey := serviceFirstNonEmpty(q.Get("session_key"), q.Get("sessionKey"))
+	if sessionKey == "" {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "session_key is required"})
+		return
+	}
+	const defaultMaxBytes int64 = 200_000
+	const hardCapBytes int64 = 2_000_000
+	maxBytes := defaultMaxBytes
+	if raw := strings.TrimSpace(q.Get("max_bytes")); raw != "" {
+		if parsed, err := strconv.ParseInt(raw, 10, 64); err == nil && parsed > 0 {
+			maxBytes = parsed
+		}
+	}
+	if maxBytes > hardCapBytes {
+		maxBytes = hardCapBytes
+	}
+	var offset int64
+	if raw := strings.TrimSpace(q.Get("offset")); raw != "" {
+		if parsed, err := strconv.ParseInt(raw, 10, 64); err == nil && parsed > 0 {
+			offset = parsed
+		}
+	}
+	result, err := s.runtime.Artifacts.ReadCappedFrom(r.Context(), sessionKey, artifactID, offset, maxBytes)
+	if err != nil {
+		msg := err.Error()
+		switch {
+		case strings.Contains(msg, "not found"):
+			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "artifact not found"})
+		case strings.Contains(msg, "not available for session"):
+			writeServiceJSON(w, http.StatusForbidden, map[string]any{"error": "artifact not available for session"})
+		default:
+			writeServiceError(w, r, http.StatusInternalServerError, "artifact read failed", err)
+		}
+		return
+	}
+	writeServiceJSON(w, http.StatusOK, map[string]any{
+		"id":         result.Artifact.ID,
+		"mime":       result.Artifact.Mime,
+		"size_bytes": result.Artifact.SizeBytes,
+		"offset":     offset,
+		"read_bytes": result.ReadBytes,
+		"truncated":  result.Truncated,
+		"content":    result.Content,
+	})
+}
+
 func (s *serviceServer) handleJobs(w http.ResponseWriter, r *http.Request) {
 	relative := strings.TrimPrefix(r.URL.Path, "/internal/v1/jobs/")
 	parts := strings.Split(strings.Trim(relative, "/"), "/")
@@ -1705,13 +2227,17 @@ func (s *serviceServer) handleJobs(w http.ResponseWriter, r *http.Request) {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 			return
 		}
-		snapshot, err := s.app().GetJob(parts[0])
-		if errors.Is(err, controlplane.ErrJobNotFound) {
-			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "job not found"})
-			return
-		}
+		jobID := strings.TrimSpace(parts[0])
+		snapshot, err := s.app().GetJob(jobID)
 		if err != nil {
-			writeServiceError(w, r, http.StatusServiceUnavailable, "job lookup unavailable", err)
+			if s.writePersistedSubagentJobSnapshot(w, r, jobID) {
+				return
+			}
+			if !errors.Is(err, controlplane.ErrJobNotFound) {
+				writeServiceError(w, r, http.StatusServiceUnavailable, "job lookup unavailable", err)
+				return
+			}
+			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "job not found"})
 			return
 		}
 		writeServiceValue(w, http.StatusOK, controlplane.BuildJobSnapshotResponse(snapshot))
@@ -1739,6 +2265,487 @@ func (s *serviceServer) handleJobs(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "job action not found"})
 	}
+}
+
+type serviceAppBootstrapWarning struct {
+	Code     string `json:"code"`
+	Message  string `json:"message"`
+	Severity string `json:"severity"`
+}
+
+type serviceAppActionDescriptor struct {
+	ID              string `json:"id"`
+	Title           string `json:"title"`
+	Available       bool   `json:"available"`
+	DisabledReason  string `json:"disabled_reason,omitempty"`
+	SessionRequired bool   `json:"session_required,omitempty"`
+	StepUpRequired  bool   `json:"step_up_required,omitempty"`
+	ApprovalLikely  bool   `json:"approval_likely,omitempty"`
+}
+
+type serviceAppBootstrapResponse struct {
+	Host struct {
+		ID          string `json:"id,omitempty"`
+		DisplayName string `json:"display_name,omitempty"`
+		Version     string `json:"version,omitempty"`
+	} `json:"host"`
+	Pairing struct {
+		Paired   bool   `json:"paired"`
+		DeviceID string `json:"device_id,omitempty"`
+		Role     string `json:"role,omitempty"`
+	} `json:"pairing"`
+	Auth struct {
+		SessionRequired bool   `json:"session_required"`
+		SessionActive   bool   `json:"session_active"`
+		StepUpActive    bool   `json:"step_up_active"`
+		Kind            string `json:"kind,omitempty"`
+		Role            string `json:"role,omitempty"`
+		ExecAllowed     bool   `json:"exec_allowed"`
+		Capabilities    struct {
+			PasskeysSupported bool `json:"passkeys_supported"`
+			StepUpSupported   bool `json:"step_up_supported"`
+		} `json:"capabilities"`
+	} `json:"auth"`
+	Status struct {
+		Health       *controlplane.HealthReport       `json:"health,omitempty"`
+		Readiness    *controlplane.ReadinessReport    `json:"readiness,omitempty"`
+		Capabilities *controlplane.CapabilitiesReport `json:"capabilities,omitempty"`
+		Summary      string                           `json:"summary"`
+		Warnings     []serviceAppBootstrapWarning     `json:"warnings,omitempty"`
+	} `json:"status"`
+	Counts struct {
+		PendingApprovals int `json:"pending_approvals"`
+		ActiveJobs       int `json:"active_jobs"`
+		ActiveTerminals  int `json:"active_terminals,omitempty"`
+	} `json:"counts"`
+	Actions  []serviceAppActionDescriptor `json:"actions"`
+	Features struct {
+		AppBootstrap   bool `json:"app_bootstrap"`
+		AppEvents      bool `json:"app_events"`
+		AppActions     bool `json:"app_actions"`
+		FileMetadataV2 bool `json:"file_metadata_v2"`
+	} `json:"features"`
+}
+
+type serviceActionResponse struct {
+	ActionID    string `json:"action_id"`
+	Status      string `json:"status"`
+	Message     string `json:"message,omitempty"`
+	ApprovalID  int64  `json:"approval_id,omitempty"`
+	OperationID string `json:"operation_id,omitempty"`
+}
+
+func (s *serviceServer) handleApp(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/internal/v1/app/bootstrap" {
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "app route not found"})
+		return
+	}
+	if r.Method != http.MethodGet {
+		writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	writeServiceValue(w, http.StatusOK, s.buildAppBootstrap(r))
+}
+
+func (s *serviceServer) handleActions(w http.ResponseWriter, r *http.Request) {
+	relative := strings.Trim(strings.TrimPrefix(r.URL.Path, "/internal/v1/actions/"), "/")
+	if relative == "" {
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "action route not found"})
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	switch relative {
+	case "restart-service":
+		s.handleRestartServiceAction(w, r)
+	default:
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "action not found"})
+	}
+}
+
+func (s *serviceServer) buildAppBootstrap(r *http.Request) serviceAppBootstrapResponse {
+	var response serviceAppBootstrapResponse
+
+	identity := serviceAuthIdentityFromContext(r.Context())
+	authSvc := s.app().Auth()
+	hostID := s.control().GetCapabilities("", "").HostID
+	hostName, _ := os.Hostname()
+	if strings.TrimSpace(hostName) == "" {
+		hostName = "or3-intern host"
+	}
+
+	response.Host.ID = hostID
+	response.Host.DisplayName = hostName
+	response.Features.AppBootstrap = true
+	response.Features.AppEvents = false
+	response.Features.AppActions = true
+	response.Features.FileMetadataV2 = false
+
+	response.Pairing.Paired = identity.Kind == "paired-device" || identity.Kind == "auth-session"
+	response.Pairing.DeviceID = identity.Device
+	response.Pairing.Role = identity.Role
+
+	response.Auth.SessionRequired = s.config.Auth.EnforcementMode == config.AuthEnforcementSession
+	response.Auth.SessionActive = identity.Kind == "auth-session"
+	response.Auth.StepUpActive = identity.StepUpOK
+	response.Auth.Kind = identity.Kind
+	response.Auth.Role = identity.Role
+	response.Auth.ExecAllowed = s.config.Tools.EnableExec && serviceBootstrapExecAllowed(identity.Role)
+	response.Auth.Capabilities.PasskeysSupported = authSvc != nil && authSvc.Enabled()
+	response.Auth.Capabilities.StepUpSupported = s.config.Auth.Enabled && s.config.Auth.RequirePasskeyForSensitive
+
+	health := s.control().GetHealth()
+	readiness := s.control().GetReadiness()
+	capabilities := s.control().GetCapabilities("", "")
+	response.Status.Health = &health
+	response.Status.Readiness = &readiness
+	response.Status.Capabilities = &capabilities
+	response.Status.Summary = serviceBootstrapSummary(health, readiness)
+
+	warnings := make([]serviceAppBootstrapWarning, 0, 6)
+	if !health.RuntimeAvailable {
+		warnings = append(warnings, serviceAppBootstrapWarning{Code: "runtime_unavailable", Message: "The OR3 runtime is not available right now.", Severity: "error"})
+	}
+	if !health.JobRegistryAvailable {
+		warnings = append(warnings, serviceAppBootstrapWarning{Code: "job_registry_unavailable", Message: "Live job tracking is limited right now.", Severity: "warning"})
+	}
+	if !health.ApprovalBrokerAvailable {
+		warnings = append(warnings, serviceAppBootstrapWarning{Code: "approval_broker_unavailable", Message: "Approval workflows are unavailable right now.", Severity: "warning"})
+	}
+	if !readiness.Ready {
+		warnings = append(warnings, serviceAppBootstrapWarning{Code: "host_not_ready", Message: "This computer still has readiness issues to resolve.", Severity: "warning"})
+	}
+	if response.Pairing.Paired && !response.Auth.SessionActive {
+		warnings = append(warnings, serviceAppBootstrapWarning{Code: "session_not_active", Message: "Passkey sign-in is still required for protected actions.", Severity: "info"})
+	}
+	if response.Auth.Kind == "shared-secret" && !response.Auth.ExecAllowed {
+		warnings = append(warnings, serviceAppBootstrapWarning{
+			Code:     "shared_secret_limited",
+			Message:  "This connection is using the shared service secret as service-client. Read-only API calls work, but exec and approvals need a paired operator or admin device.",
+			Severity: "warning",
+		})
+	}
+	response.Status.Warnings = warnings
+
+	response.Counts.PendingApprovals = s.bootstrapPendingApprovalCount(r.Context())
+	response.Counts.ActiveJobs = s.bootstrapActiveJobCount(r.Context())
+	response.Counts.ActiveTerminals = s.bootstrapActiveTerminalCount()
+
+	response.Actions = []serviceAppActionDescriptor{
+		s.restartActionDescriptor(),
+	}
+	return response
+}
+
+func serviceBootstrapSummary(health controlplane.HealthReport, readiness controlplane.ReadinessReport) string {
+	if !health.RuntimeAvailable {
+		return "offline"
+	}
+	if !readiness.Ready || strings.EqualFold(health.Status, "degraded") {
+		return "degraded"
+	}
+	return "ready"
+}
+
+func serviceBootstrapExecAllowed(role string) bool {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "operator", "admin":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *serviceServer) bootstrapPendingApprovalCount(ctx context.Context) int {
+	if s == nil || s.broker == nil {
+		return 0
+	}
+	items, err := s.broker.ListApprovalRequestsFiltered(ctx, approval.StatusPending, "", 200)
+	if err != nil {
+		return 0
+	}
+	return len(items)
+}
+
+func (s *serviceServer) bootstrapActiveJobCount(ctx context.Context) int {
+	if s == nil || s.control() == nil || s.control().DB == nil {
+		return 0
+	}
+	items, err := s.control().DB.ListSubagentJobs(ctx, db.SubagentJobFilter{Status: "active", Limit: 200})
+	if err != nil {
+		return 0
+	}
+	return len(items)
+}
+
+func (s *serviceServer) bootstrapActiveTerminalCount() int {
+	if s == nil {
+		return 0
+	}
+	s.cleanupTerminalSessions()
+	s.terminalMu.Lock()
+	defer s.terminalMu.Unlock()
+	return len(s.terminalSessions)
+}
+
+func (s *serviceServer) restartActionDescriptor() serviceAppActionDescriptor {
+	descriptor := serviceAppActionDescriptor{
+		ID:              "restart-service",
+		Title:           "Restart service",
+		SessionRequired: true,
+		StepUpRequired:  true,
+	}
+	if s != nil && s.broker != nil && strings.EqualFold(string(s.config.Security.Approvals.Exec.Mode), string(config.ApprovalModeAsk)) {
+		descriptor.ApprovalLikely = true
+	}
+	if !s.terminalAvailable() {
+		descriptor.DisabledReason = "Shell access is turned off on this computer."
+		return descriptor
+	}
+	_, _, ok := s.findServiceRestartScript()
+	if !ok {
+		descriptor.DisabledReason = "The restart script is not available on this computer."
+		return descriptor
+	}
+	descriptor.Available = true
+	return descriptor
+}
+
+func (s *serviceServer) handleRestartServiceAction(w http.ResponseWriter, r *http.Request) {
+	descriptor := s.restartActionDescriptor()
+	if !descriptor.Available {
+		writeServiceJSON(w, http.StatusServiceUnavailable, serviceErrorPayload(r, serviceFirstNonEmpty(descriptor.DisabledReason, "restart is not available on this computer")))
+		return
+	}
+	scriptPath, workingDir, ok := s.findServiceRestartScript()
+	if !ok {
+		writeServiceJSON(w, http.StatusServiceUnavailable, serviceErrorPayload(r, "restart is not available on this computer"))
+		return
+	}
+	shellPath, err := resolveTerminalShell("sh")
+	if err != nil {
+		writeServiceError(w, r, http.StatusServiceUnavailable, "restart shell is not available", err)
+		return
+	}
+	decision, err := s.evaluateTerminalApproval(r.Context(), shellPath, workingDir, "")
+	if err != nil {
+		writeServiceError(w, r, http.StatusBadGateway, "restart approval failed", err)
+		return
+	}
+	if decision.RequiresApproval {
+		writeServiceValue(w, http.StatusConflict, serviceActionResponse{
+			ActionID:   "restart-service",
+			Status:     "approval_required",
+			Message:    "restart service requires approval",
+			ApprovalID: decision.RequestID,
+		})
+		return
+	}
+	if !decision.Allowed {
+		reason := strings.TrimSpace(decision.Reason)
+		if reason == "" {
+			reason = "restart service denied"
+		}
+		writeServiceJSON(w, http.StatusForbidden, serviceErrorPayload(r, reason))
+		return
+	}
+	if err := startDetachedServiceRestart(scriptPath, workingDir, s.unsafeDev); err != nil {
+		writeServiceError(w, r, http.StatusBadGateway, "restart failed to start", err)
+		return
+	}
+	writeServiceValue(w, http.StatusAccepted, serviceActionResponse{
+		ActionID:    "restart-service",
+		Status:      "accepted",
+		Message:     "restart requested",
+		OperationID: newServiceRequestID(),
+	})
+}
+
+func startDetachedServiceRestart(scriptPath, workingDir string, unsafeDev bool) error {
+	scriptPath = strings.TrimSpace(scriptPath)
+	workingDir = strings.TrimSpace(workingDir)
+	if scriptPath == "" || workingDir == "" {
+		return fmt.Errorf("restart script is unavailable")
+	}
+	cmd := exec.Command(scriptPath, "restart")
+	cmd.Dir = workingDir
+	if unsafeDev {
+		cmd.Env = append(os.Environ(), "OR3_SERVICE_UNSAFE_DEV=true")
+	}
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	return cmd.Start()
+}
+
+func (s *serviceServer) findServiceRestartScript() (scriptPath string, workingDir string, ok bool) {
+	for _, dir := range serviceRestartSearchDirs() {
+		script := filepath.Join(dir, "scripts", "restart-service.sh")
+		info, err := os.Stat(script)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		if info.Mode()&0o111 == 0 {
+			continue
+		}
+		return script, dir, true
+	}
+	return "", "", false
+}
+
+func serviceRestartSearchDirs() []string {
+	candidates := make([]string, 0, 8)
+	appendDir := func(dir string) {
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			return
+		}
+		dir = filepath.Clean(dir)
+		for _, existing := range candidates {
+			if existing == dir {
+				return
+			}
+		}
+		candidates = append(candidates, dir)
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		appendDir(cwd)
+		appendDir(filepath.Join(cwd, "..", "or3-intern"))
+		appendDir(filepath.Join(cwd, "or3-intern"))
+	}
+	if exe, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exe)
+		appendDir(exeDir)
+		appendDir(filepath.Join(exeDir, ".."))
+		appendDir(filepath.Join(exeDir, "..", "or3-intern"))
+		appendDir(filepath.Join(exeDir, "or3-intern"))
+	}
+	return candidates
+}
+
+func (s *serviceServer) writePersistedSubagentJobSnapshot(w http.ResponseWriter, r *http.Request, jobID string) bool {
+	store := s.control().DB
+	if store == nil {
+		return false
+	}
+	job, ok, err := store.GetSubagentJob(r.Context(), jobID)
+	if err != nil {
+		writeServiceError(w, r, http.StatusServiceUnavailable, "subagent history unavailable", err)
+		return true
+	}
+	if !ok {
+		return false
+	}
+	response := controlplane.BuildSubagentJobResponse(job)
+	if requestedAt, ok := response["requested_at"]; ok {
+		response["created_at"] = requestedAt
+	}
+	if preview := strings.TrimSpace(job.ResultPreview); preview != "" {
+		response["final_text"] = preview
+	}
+	if strings.TrimSpace(job.ArtifactID) == "" {
+		if fullText := s.persistedSubagentFinalText(r.Context(), store, job); strings.TrimSpace(fullText) != "" {
+			response["final_text"] = fullText
+		}
+	}
+	response["events"] = s.persistedSubagentEvents(r.Context(), store, job)
+	writeServiceValue(w, http.StatusOK, response)
+	return true
+}
+
+func (s *serviceServer) persistedSubagentFinalText(ctx context.Context, store *db.DB, job db.SubagentJob) string {
+	if store == nil || strings.TrimSpace(job.ChildSessionKey) == "" {
+		return ""
+	}
+	messages, err := store.GetLastMessages(ctx, job.ChildSessionKey, 50)
+	if err != nil {
+		log.Printf("load persisted subagent final text failed: job=%s err=%v", job.ID, err)
+		return ""
+	}
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg := messages[i]
+		if msg.Role == "assistant" && strings.TrimSpace(msg.Content) != "" {
+			return msg.Content
+		}
+	}
+	return ""
+}
+
+func (s *serviceServer) persistedSubagentEvents(ctx context.Context, store *db.DB, job db.SubagentJob) []agent.JobEvent {
+	if store == nil || strings.TrimSpace(job.ChildSessionKey) == "" {
+		return []agent.JobEvent{}
+	}
+	messages, err := store.GetLastMessages(ctx, job.ChildSessionKey, 100)
+	if err != nil {
+		log.Printf("load persisted subagent events failed: job=%s err=%v", job.ID, err)
+		return []agent.JobEvent{}
+	}
+	events := make([]agent.JobEvent, 0)
+	var sequence int64
+	emit := func(eventType string, data map[string]any) {
+		sequence++
+		events = append(events, agent.JobEvent{Sequence: sequence, Type: eventType, Data: data})
+	}
+	for _, msg := range messages {
+		payload := decodeServiceJSONMap(msg.PayloadJSON)
+		switch msg.Role {
+		case "assistant":
+			rawCalls, ok := payload["tool_calls"].([]any)
+			if !ok {
+				continue
+			}
+			for _, raw := range rawCalls {
+				call, ok := raw.(map[string]any)
+				if !ok {
+					continue
+				}
+				function, _ := call["function"].(map[string]any)
+				name := strings.TrimSpace(fmt.Sprint(function["name"]))
+				if name == "" || name == "<nil>" {
+					name = strings.TrimSpace(fmt.Sprint(call["name"]))
+				}
+				arguments := strings.TrimSpace(fmt.Sprint(function["arguments"]))
+				if arguments == "<nil>" {
+					arguments = ""
+				}
+				data := map[string]any{"name": name, "arguments": arguments}
+				if id := strings.TrimSpace(fmt.Sprint(call["id"])); id != "" && id != "<nil>" {
+					data["tool_call_id"] = id
+				}
+				emit("tool_call", data)
+			}
+		case "tool":
+			name := strings.TrimSpace(fmt.Sprint(payload["tool"]))
+			if name == "" || name == "<nil>" {
+				name = "tool"
+			}
+			result := strings.TrimSpace(msg.Content)
+			if preview := strings.TrimSpace(fmt.Sprint(payload["preview"])); preview != "" && preview != "<nil>" {
+				result = preview
+			}
+			data := map[string]any{"name": name, "result": result}
+			if id := strings.TrimSpace(fmt.Sprint(payload["tool_call_id"])); id != "" && id != "<nil>" {
+				data["tool_call_id"] = id
+			}
+			if artifactID := strings.TrimSpace(fmt.Sprint(payload["artifact_id"])); artifactID != "" && artifactID != "<nil>" {
+				data["artifact_id"] = artifactID
+			}
+			emit("tool_result", data)
+		}
+	}
+	return events
+}
+
+func decodeServiceJSONMap(raw string) map[string]any {
+	out := map[string]any{}
+	if strings.TrimSpace(raw) == "" {
+		return out
+	}
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return map[string]any{}
+	}
+	return out
 }
 
 func (s *serviceServer) streamJob(w http.ResponseWriter, r *http.Request, jobID string) {
@@ -1817,6 +2824,7 @@ func serviceBoundaryMiddleware(server *serviceServer, next http.Handler) http.Ha
 		}
 		captured := &serviceStatusRecorder{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(captured, r)
+		log.Printf("service %s %s -> %d", r.Method, r.URL.Path, captured.statusCode)
 		server.recordServiceAudit(r, captured.statusCode)
 	})
 }
@@ -1841,12 +2849,26 @@ func (s *serviceServer) isMutationRequest(r *http.Request) bool {
 	if r == nil {
 		return false
 	}
+	if s.isTerminalInteractiveMutation(r) {
+		return false
+	}
 	switch r.Method {
 	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
 		return true
 	default:
 		return false
 	}
+}
+
+func (s *serviceServer) isTerminalInteractiveMutation(r *http.Request) bool {
+	if r == nil || r.Method != http.MethodPost {
+		return false
+	}
+	path := strings.TrimSpace(r.URL.Path)
+	if !strings.HasPrefix(path, "/internal/v1/terminal/sessions/") {
+		return false
+	}
+	return strings.HasSuffix(path, "/input") || strings.HasSuffix(path, "/resize")
 }
 
 func (s *serviceServer) allowMutationRequest(r *http.Request) bool {
@@ -1905,6 +2927,19 @@ func writeServiceError(w http.ResponseWriter, r *http.Request, statusCode int, p
 	writeServiceJSON(w, statusCode, serviceErrorPayload(r, public))
 }
 
+func servicePublicPairingExchangeError(err error) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+	message := strings.TrimSpace(err.Error())
+	switch message {
+	case "pairing request not found", "pairing request expired", "pairing request is not approved":
+		return message, true
+	default:
+		return "", false
+	}
+}
+
 func serviceErrorPayload(r *http.Request, public string) map[string]any {
 	payload := map[string]any{"error": strings.TrimSpace(public)}
 	if payload["error"] == "" {
@@ -1916,6 +2951,44 @@ func serviceErrorPayload(r *http.Request, public string) map[string]any {
 	return payload
 }
 
+func writeServiceAuthError(w http.ResponseWriter, r *http.Request, err error) {
+	if err != nil {
+		log.Printf("service %s %s auth: %v", r.Method, r.URL.Path, err)
+	}
+	var authErr *auth.Error
+	if errors.As(err, &authErr) {
+		payload := serviceErrorPayload(r, authErr.Message)
+		payload["code"] = authErr.Code
+		if authErr.RetryAfter > 0 {
+			payload["retry_after_seconds"] = authErr.RetryAfter
+		}
+		writeServiceJSON(w, authErr.Status, payload)
+		return
+	}
+	status := http.StatusBadRequest
+	message := "auth request failed"
+	switch {
+	case errors.Is(err, auth.ErrInvalidCeremony):
+		status = http.StatusBadRequest
+		message = "invalid or expired auth challenge"
+	case errors.Is(err, auth.ErrRecoveryRequired):
+		status = http.StatusConflict
+		message = err.Error()
+	}
+	writeServiceJSON(w, status, serviceErrorPayload(r, message))
+}
+
+func serviceAuthSessionToken(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	return serviceFirstNonEmpty(
+		strings.TrimSpace(r.Header.Get("X-Or3-Session")),
+		strings.TrimSpace(r.Header.Get("X-Auth-Session")),
+		strings.TrimSpace(r.URL.Query().Get("session_token")),
+	)
+}
+
 func servicePublicJobError(err error) string {
 	if err == nil {
 		return "job failed"
@@ -1924,6 +2997,44 @@ func servicePublicJobError(err error) string {
 		return "job canceled"
 	}
 	return "job failed"
+}
+
+func serviceApprovalRequiredPayload(sessionKey string, meta map[string]any, err *tools.ApprovalRequiredError) map[string]any {
+	message := "approval is required before this tool can continue"
+	var requestID int64
+	if err != nil {
+		if trimmed := strings.TrimSpace(err.Error()); trimmed != "" {
+			message = trimmed
+		}
+		requestID = err.RequestID
+	}
+	payload := serviceLifecyclePayload(sessionKey, meta, map[string]any{
+		"status":  "approval_required",
+		"code":    "approval_required",
+		"message": message,
+	})
+	if requestID > 0 {
+		payload["request_id"] = requestID
+		payload["approval_id"] = requestID
+	}
+	return payload
+}
+
+func serviceTurnFallbackText(err error, observer *serviceObserver) (string, bool) {
+	if err == nil || !strings.Contains(err.Error(), "max tool loops exceeded") {
+		return "", false
+	}
+	message := "I couldn't finish that because the tool calls kept failing or looping."
+	if observer != nil {
+		lastToolError := strings.TrimSpace(observer.lastToolError)
+		if lastToolError != "" {
+			if len(lastToolError) > 180 {
+				lastToolError = lastToolError[:180] + "..."
+			}
+			message += " Last tool error: " + lastToolError
+		}
+	}
+	return message, true
 }
 
 func remoteIPKey(raw string) string {
@@ -2111,6 +3222,252 @@ func (s *serviceServer) handleCapabilities(w http.ResponseWriter, r *http.Reques
 	writeServiceValue(w, http.StatusOK, s.control().GetCapabilities(r.URL.Query().Get("channel"), r.URL.Query().Get("trigger")))
 }
 
+func (s *serviceServer) handleAuth(w http.ResponseWriter, r *http.Request) {
+	relative := strings.Trim(strings.TrimPrefix(r.URL.Path, "/internal/v1/auth"), "/")
+	api := s.app()
+	identity := serviceAuthIdentityFromContext(r.Context())
+	sessionToken := serviceAuthSessionToken(r)
+	switch relative {
+	case "capabilities":
+		if r.Method != http.MethodGet {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		writeServiceValue(w, http.StatusOK, map[string]any{
+			"passkeysEnabled":            s.config.Auth.Enabled,
+			"passkeyMode":                string(s.config.Auth.EnforcementMode),
+			"rpId":                       s.config.Auth.RPID,
+			"origins":                    append([]string{}, s.config.Auth.AllowedOrigins...),
+			"webauthnAvailable":          api.Auth() != nil && api.Auth().Enabled(),
+			"sessionRequired":            s.config.Auth.EnforcementMode == config.AuthEnforcementSession,
+			"stepUpRequiredForSensitive": s.config.Auth.RequirePasskeyForSensitive,
+			"secureStorageRecommended":   true,
+			"fallbackPolicy":             s.config.Auth.FallbackPolicy,
+			"sessionHeader":              "X-Or3-Session",
+		})
+		return
+	case "passkeys/registration/begin":
+		if r.Method != http.MethodPost {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		if !requireServiceRole(w, r, approval.RoleOperator) {
+			return
+		}
+		limitServiceRequestBody(w, r, servicePairingBodyLimit)
+		var body struct {
+			DisplayName string `json:"displayName"`
+			Reason      string `json:"reason"`
+		}
+		if err := decodeServiceRequestBody(r.Body, &body); err != nil && !errors.Is(err, io.EOF) {
+			writeServiceRequestDecodeError(w, err)
+			return
+		}
+		response, err := api.BeginPasskeyRegistration(r.Context(), auth.BeginRegistrationRequest{DeviceID: identity.Device, DisplayName: body.DisplayName, Reason: body.Reason, SessionToken: sessionToken})
+		if err != nil {
+			writeServiceAuthError(w, r, err)
+			return
+		}
+		writeServiceValue(w, http.StatusOK, response)
+		return
+	case "passkeys/registration/finish":
+		if r.Method != http.MethodPost {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		if !requireServiceRole(w, r, approval.RoleOperator) {
+			return
+		}
+		limitServiceRequestBody(w, r, servicePairingBodyLimit)
+		var body struct {
+			CeremonyID string          `json:"ceremonyId"`
+			Credential json.RawMessage `json:"credential"`
+			Nickname   string          `json:"nickname"`
+		}
+		if err := decodeServiceRequestBody(r.Body, &body); err != nil {
+			writeServiceRequestDecodeError(w, err)
+			return
+		}
+		record, err := api.FinishPasskeyRegistration(r.Context(), auth.FinishRegistrationRequest{CeremonyID: body.CeremonyID, Body: body.Credential, Nickname: body.Nickname, SessionToken: sessionToken})
+		if err != nil {
+			writeServiceAuthError(w, r, err)
+			return
+		}
+		writeServiceValue(w, http.StatusOK, map[string]any{"passkey": record})
+		return
+	case "passkeys/login/begin":
+		if r.Method != http.MethodPost {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		limitServiceRequestBody(w, r, servicePairingBodyLimit)
+		var body struct {
+			Reason string `json:"reason"`
+		}
+		if err := decodeServiceRequestBody(r.Body, &body); err != nil && !errors.Is(err, io.EOF) {
+			writeServiceRequestDecodeError(w, err)
+			return
+		}
+		response, err := api.BeginPasskeyLogin(r.Context(), auth.BeginLoginRequest{DeviceID: identity.Device, Reason: body.Reason})
+		if err != nil {
+			writeServiceAuthError(w, r, err)
+			return
+		}
+		writeServiceValue(w, http.StatusOK, response)
+		return
+	case "passkeys/login/finish":
+		if r.Method != http.MethodPost {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		limitServiceRequestBody(w, r, servicePairingBodyLimit)
+		var body struct {
+			CeremonyID string          `json:"ceremonyId"`
+			Credential json.RawMessage `json:"credential"`
+		}
+		if err := decodeServiceRequestBody(r.Body, &body); err != nil {
+			writeServiceRequestDecodeError(w, err)
+			return
+		}
+		result, err := api.FinishPasskeyLogin(r.Context(), auth.FinishLoginRequest{CeremonyID: body.CeremonyID, Body: body.Credential, DeviceID: identity.Device, FallbackRole: identity.Role})
+		if err != nil {
+			writeServiceAuthError(w, r, err)
+			return
+		}
+		writeServiceValue(w, http.StatusOK, result)
+		return
+	case "step-up/begin":
+		if r.Method != http.MethodPost {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		limitServiceRequestBody(w, r, servicePairingBodyLimit)
+		var body struct {
+			Reason string `json:"reason"`
+		}
+		if err := decodeServiceRequestBody(r.Body, &body); err != nil && !errors.Is(err, io.EOF) {
+			writeServiceRequestDecodeError(w, err)
+			return
+		}
+		response, err := api.BeginStepUp(r.Context(), auth.BeginStepUpRequest{SessionToken: sessionToken, Reason: body.Reason})
+		if err != nil {
+			writeServiceAuthError(w, r, err)
+			return
+		}
+		writeServiceValue(w, http.StatusOK, response)
+		return
+	case "step-up/finish":
+		if r.Method != http.MethodPost {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		limitServiceRequestBody(w, r, servicePairingBodyLimit)
+		var body struct {
+			CeremonyID string          `json:"ceremonyId"`
+			Credential json.RawMessage `json:"credential"`
+			Reason     string          `json:"reason"`
+		}
+		if err := decodeServiceRequestBody(r.Body, &body); err != nil {
+			writeServiceRequestDecodeError(w, err)
+			return
+		}
+		session, err := api.FinishStepUp(r.Context(), auth.FinishStepUpRequest{SessionToken: sessionToken, CeremonyID: body.CeremonyID, Body: body.Credential, Reason: body.Reason})
+		if err != nil {
+			writeServiceAuthError(w, r, err)
+			return
+		}
+		writeServiceValue(w, http.StatusOK, map[string]any{"session": session})
+		return
+	case "session":
+		if r.Method != http.MethodGet {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		claims, err := api.ValidateAuthSession(r.Context(), sessionToken)
+		if err != nil {
+			writeServiceAuthError(w, r, err)
+			return
+		}
+		writeServiceValue(w, http.StatusOK, map[string]any{"session": claims.Session, "user": claims.User, "role": claims.Role})
+		return
+	case "session/revoke":
+		if r.Method != http.MethodPost {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		limitServiceRequestBody(w, r, servicePairingBodyLimit)
+		var body struct {
+			Reason string `json:"reason"`
+		}
+		if err := decodeServiceRequestBody(r.Body, &body); err != nil && !errors.Is(err, io.EOF) {
+			writeServiceRequestDecodeError(w, err)
+			return
+		}
+		if err := api.RevokeAuthSession(r.Context(), sessionToken, body.Reason); err != nil {
+			writeServiceAuthError(w, r, err)
+			return
+		}
+		writeServiceValue(w, http.StatusOK, map[string]any{"status": "revoked"})
+		return
+	case "passkeys":
+		if r.Method != http.MethodGet {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		claims, err := api.ValidateAuthSession(r.Context(), sessionToken)
+		if err != nil {
+			writeServiceAuthError(w, r, err)
+			return
+		}
+		items, err := api.ListPasskeys(r.Context(), claims.User.ID)
+		if err != nil {
+			writeServiceAuthError(w, r, err)
+			return
+		}
+		writeServiceValue(w, http.StatusOK, map[string]any{"items": items})
+		return
+	default:
+		if strings.HasPrefix(relative, "passkeys/") {
+			rest := strings.TrimPrefix(relative, "passkeys/")
+			parts := strings.Split(strings.Trim(rest, "/"), "/")
+			if len(parts) >= 1 && strings.TrimSpace(parts[0]) != "" {
+				passkeyID := parts[0]
+				switch {
+				case len(parts) == 1 && r.Method == http.MethodPatch:
+					var body struct {
+						Nickname string `json:"nickname"`
+					}
+					if err := decodeServiceRequestBody(r.Body, &body); err != nil {
+						writeServiceRequestDecodeError(w, err)
+						return
+					}
+					if err := api.RenamePasskey(r.Context(), passkeyID, body.Nickname); err != nil {
+						writeServiceAuthError(w, r, err)
+						return
+					}
+					writeServiceValue(w, http.StatusOK, map[string]any{"id": passkeyID, "nickname": body.Nickname})
+					return
+				case len(parts) == 2 && parts[1] == "revoke" && r.Method == http.MethodPost:
+					var body struct {
+						Reason string `json:"reason"`
+					}
+					if err := decodeServiceRequestBody(r.Body, &body); err != nil && !errors.Is(err, io.EOF) {
+						writeServiceRequestDecodeError(w, err)
+						return
+					}
+					if err := api.RevokePasskey(r.Context(), sessionToken, passkeyID, body.Reason); err != nil {
+						writeServiceAuthError(w, r, err)
+						return
+					}
+					writeServiceValue(w, http.StatusOK, map[string]any{"id": passkeyID, "status": "revoked"})
+					return
+				}
+			}
+		}
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "auth route not found"})
+	}
+}
+
 func (s *serviceServer) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 	if !requireServiceRole(w, r, approval.RoleOperator) {
 		return
@@ -2262,11 +3619,46 @@ func (s *serviceServer) handleScope(w http.ResponseWriter, r *http.Request) {
 }
 
 type serviceConfigureChange struct {
-	Section string `json:"section"`
-	Channel string `json:"channel"`
-	Field   string `json:"field"`
-	Op      string `json:"op"`
-	Value   string `json:"value"`
+	Section string               `json:"section"`
+	Channel string               `json:"channel"`
+	Field   string               `json:"field"`
+	Op      string               `json:"op"`
+	Value   configureChangeValue `json:"value"`
+}
+
+type configureChangeValue string
+
+func (v *configureChangeValue) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		*v = ""
+		return nil
+	}
+	var text string
+	if err := json.Unmarshal(data, &text); err == nil {
+		*v = configureChangeValue(text)
+		return nil
+	}
+	var flag bool
+	if err := json.Unmarshal(data, &flag); err == nil {
+		if flag {
+			*v = "true"
+		} else {
+			*v = "false"
+		}
+		return nil
+	}
+	var number json.Number
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.UseNumber()
+	if err := decoder.Decode(&number); err == nil {
+		*v = configureChangeValue(number.String())
+		return nil
+	}
+	return fmt.Errorf("configure change value must be a string, boolean, number, or null")
+}
+
+func (v configureChangeValue) String() string {
+	return string(v)
 }
 
 type serviceConfigureField struct {
@@ -2315,6 +3707,292 @@ func toServiceConfigureFields(fields []configureField) []serviceConfigureField {
 		})
 	}
 	return result
+}
+
+type serviceSkillItem struct {
+	Name             string   `json:"name"`
+	Key              string   `json:"key"`
+	Description      string   `json:"description,omitempty"`
+	Summary          string   `json:"summary,omitempty"`
+	Homepage         string   `json:"homepage,omitempty"`
+	Source           string   `json:"source"`
+	Location         string   `json:"location"`
+	Eligible         bool     `json:"eligible"`
+	Disabled         bool     `json:"disabled"`
+	Hidden           bool     `json:"hidden"`
+	Status           string   `json:"status"`
+	PermissionState  string   `json:"permission_state"`
+	PermissionNotes  []string `json:"permission_notes,omitempty"`
+	Missing          []string `json:"missing,omitempty"`
+	Unsupported      []string `json:"unsupported,omitempty"`
+	ParseError       string   `json:"parse_error,omitempty"`
+	UserInvocable    bool     `json:"user_invocable"`
+	PrimaryEnv       string   `json:"primary_env,omitempty"`
+	RequiredEnv      []string `json:"required_env,omitempty"`
+	ConfigFields     []string `json:"config_fields,omitempty"`
+	APIKeyConfigured bool     `json:"api_key_configured"`
+}
+
+type serviceSkillRoot struct {
+	Path    string `json:"path"`
+	Source  string `json:"source"`
+	Enabled bool   `json:"enabled"`
+}
+
+type serviceSkillSettingsRequest struct {
+	Enabled     *bool             `json:"enabled"`
+	APIKey      *string           `json:"api_key"`
+	APIKeyCamel *string           `json:"apiKey"`
+	Env         map[string]string `json:"env"`
+	Config      map[string]any    `json:"config"`
+}
+
+func (s *serviceServer) handleSkills(w http.ResponseWriter, r *http.Request) {
+	if !requireServiceRole(w, r, approval.RoleOperator) {
+		return
+	}
+	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/internal/v1/skills"), "/")
+	if path == "" {
+		if r.Method != http.MethodGet {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		inv := s.serviceSkillsInventory(r.Context(), s.config)
+		writeServiceValue(w, http.StatusOK, map[string]any{
+			"items":                 serviceSkillItems(inv, s.config),
+			"roots":                 serviceSkillRoots(s.config),
+			"global_dir":            s.config.Skills.Load.GlobalDir,
+			"global_skills_enabled": !s.config.Skills.Load.DisableGlobalDir,
+		})
+		return
+	}
+	parts := strings.Split(path, "/")
+	if len(parts) != 2 || parts[1] != "settings" {
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "skills route not found"})
+		return
+	}
+	if r.Method != http.MethodPost && r.Method != http.MethodPatch {
+		writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	name, err := url.PathUnescape(parts[0])
+	if err != nil || strings.TrimSpace(name) == "" {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid skill name"})
+		return
+	}
+	s.handleSkillSettingsUpdate(w, r, name)
+}
+
+func (s *serviceServer) handleSkillSettingsUpdate(w http.ResponseWriter, r *http.Request, name string) {
+	limitServiceRequestBody(w, r, serviceConfigureBodyLimit)
+	var body serviceSkillSettingsRequest
+	if err := decodeServiceRequestBody(r.Body, &body); err != nil {
+		writeServiceRequestDecodeError(w, err)
+		return
+	}
+	inv := s.serviceSkillsInventory(r.Context(), s.config)
+	skill, ok := inv.Get(name)
+	if !ok {
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "skill not found"})
+		return
+	}
+	next := s.config
+	if next.Skills.Entries == nil {
+		next.Skills.Entries = map[string]config.SkillEntryConfig{}
+	}
+	entryKey := serviceSkillEntryKey(skill)
+	entry := next.Skills.Entries[entryKey]
+	if body.Enabled != nil {
+		enabled := *body.Enabled
+		entry.Enabled = &enabled
+	}
+	if apiKey := firstStringPointer(body.APIKey, body.APIKeyCamel); apiKey != nil {
+		entry.APIKey = *apiKey
+	}
+	if body.Env != nil {
+		entry.Env = mergeServiceSkillEnv(entry.Env, body.Env)
+	}
+	if body.Config != nil {
+		entry.Config = mergeServiceSkillConfig(entry.Config, body.Config)
+	}
+	next.Skills.Entries[entryKey] = entry
+	path := s.configPath
+	if strings.TrimSpace(path) == "" {
+		path = cfgPathOrDefault("")
+	}
+	if err := config.Save(path, next); err != nil {
+		writeServiceError(w, r, http.StatusBadGateway, "skill settings save failed", err)
+		return
+	}
+	s.config = next
+	updated := s.serviceSkillsInventory(r.Context(), next)
+	s.applyServiceSkillsInventory(updated)
+	itemSkill, _ := updated.Get(skill.Name)
+	writeServiceValue(w, http.StatusOK, map[string]any{
+		"ok":          true,
+		"config_path": path,
+		"skill":       serviceSkillItemFromMeta(itemSkill, next),
+	})
+}
+
+func (s *serviceServer) serviceSkillsInventory(ctx context.Context, cfg config.Config) skills.Inventory {
+	return buildSkillsInventory(cfg, s.serviceBundledSkillsDir(), s.serviceAvailableToolNames(ctx, cfg))
+}
+
+func (s *serviceServer) serviceAvailableToolNames(ctx context.Context, cfg config.Config) map[string]struct{} {
+	toolNames := filterAdvertisedToolNames(cfg, availableToolNames(cfg.Cron.Enabled, cfg.Subagents.Enabled))
+	if s.runtime != nil && s.runtime.Tools != nil {
+		for _, name := range s.runtime.Tools.Names() {
+			toolNames[name] = struct{}{}
+		}
+	}
+	return toolNames
+}
+
+func (s *serviceServer) serviceBundledSkillsDir() string {
+	cfgPath := strings.TrimSpace(s.configPath)
+	if cfgPath == "" {
+		cfgPath = cfgPathOrDefault("")
+	}
+	return filepath.Join(filepath.Dir(cfgPath), "builtin_skills")
+}
+
+func (s *serviceServer) applyServiceSkillsInventory(inv skills.Inventory) {
+	if s.runtime == nil || s.runtime.Builder == nil {
+		return
+	}
+	s.runtime.Builder.Skills = inv
+	if s.runtime.Tools == nil {
+		return
+	}
+	if tool, ok := s.runtime.Tools.Get("read_skill").(*tools.ReadSkill); ok {
+		tool.Inventory = &s.runtime.Builder.Skills
+	}
+	if tool, ok := s.runtime.Tools.Get("run_skill").(*tools.RunSkill); ok {
+		tool.Inventory = &s.runtime.Builder.Skills
+	}
+	if tool, ok := s.runtime.Tools.Get("run_skill_script").(*tools.RunSkillScript); ok {
+		tool.Inventory = &s.runtime.Builder.Skills
+	}
+}
+
+func serviceSkillRoots(cfg config.Config) []serviceSkillRoot {
+	roots := buildSkillRoots(cfg, "")
+	out := make([]serviceSkillRoot, 0, len(roots))
+	for _, root := range roots {
+		out = append(out, serviceSkillRoot{
+			Path:    root.Path,
+			Source:  string(root.Source),
+			Enabled: strings.TrimSpace(root.Path) != "",
+		})
+	}
+	return out
+}
+
+func serviceSkillItems(inv skills.Inventory, cfg config.Config) []serviceSkillItem {
+	items := make([]serviceSkillItem, 0, len(inv.Skills))
+	for _, skill := range inv.Skills {
+		items = append(items, serviceSkillItemFromMeta(skill, cfg))
+	}
+	return items
+}
+
+func serviceSkillItemFromMeta(skill skills.SkillMeta, cfg config.Config) serviceSkillItem {
+	entry := cfg.Skills.Entries[serviceSkillEntryKey(skill)]
+	permissionState := strings.TrimSpace(skill.PermissionState)
+	if permissionState == "" {
+		permissionState = "approved"
+	}
+	return serviceSkillItem{
+		Name:             skill.Name,
+		Key:              serviceSkillEntryKey(skill),
+		Description:      skill.Description,
+		Summary:          skill.Summary,
+		Homepage:         skill.Homepage,
+		Source:           string(skill.Source),
+		Location:         skill.Dir,
+		Eligible:         skill.Eligible,
+		Disabled:         skill.Disabled,
+		Hidden:           skill.Hidden,
+		Status:           serviceSkillStatus(skill),
+		PermissionState:  permissionState,
+		PermissionNotes:  append([]string{}, skill.PermissionNotes...),
+		Missing:          append([]string{}, skill.Missing...),
+		Unsupported:      append([]string{}, skill.Unsupported...),
+		ParseError:       skill.ParseError,
+		UserInvocable:    skill.UserInvocable,
+		PrimaryEnv:       skill.Metadata.PrimaryEnv,
+		RequiredEnv:      append([]string{}, skill.Metadata.Requires.Env...),
+		ConfigFields:     append([]string{}, skill.Metadata.Requires.Config...),
+		APIKeyConfigured: strings.TrimSpace(entry.APIKey) != "",
+	}
+}
+
+func serviceSkillEntryKey(skill skills.SkillMeta) string {
+	if strings.TrimSpace(skill.Key) != "" {
+		return strings.TrimSpace(skill.Key)
+	}
+	return strings.TrimSpace(skill.Name)
+}
+
+func serviceSkillStatus(skill skills.SkillMeta) string {
+	switch {
+	case strings.TrimSpace(skill.ParseError) != "":
+		return "parse-error"
+	case skill.Disabled:
+		return "disabled"
+	case skill.Hidden:
+		return "hidden"
+	case !skill.Eligible:
+		return "ineligible"
+	default:
+		return "eligible"
+	}
+}
+
+func firstStringPointer(values ...*string) *string {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+func mergeServiceSkillEnv(current map[string]string, updates map[string]string) map[string]string {
+	if current == nil {
+		current = map[string]string{}
+	}
+	for key, value := range updates {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		if strings.TrimSpace(value) == "" {
+			delete(current, key)
+			continue
+		}
+		current[key] = value
+	}
+	return current
+}
+
+func mergeServiceSkillConfig(current map[string]any, updates map[string]any) map[string]any {
+	if current == nil {
+		current = map[string]any{}
+	}
+	for key, value := range updates {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		if value == nil {
+			delete(current, key)
+			continue
+		}
+		current[key] = value
+	}
+	return current
 }
 
 func (s *serviceServer) handleConfigure(w http.ResponseWriter, r *http.Request) {
@@ -2392,7 +4070,7 @@ func (s *serviceServer) handleConfigure(w http.ResponseWriter, r *http.Request) 
 			}
 			switch strings.ToLower(strings.TrimSpace(change.Op)) {
 			case "", "set":
-				changed, err := applyFieldValue(&next, section, channel, field, change.Value)
+				changed, err := applyFieldValue(&next, section, channel, field, change.Value.String())
 				if err != nil {
 					writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 					return
@@ -2407,7 +4085,7 @@ func (s *serviceServer) handleConfigure(w http.ResponseWriter, r *http.Request) 
 					return
 				}
 			case "choose":
-				changed, err := applyChoiceSelection(&next, section, channel, field, change.Value)
+				changed, err := applyChoiceSelection(&next, section, channel, field, change.Value.String())
 				if err != nil {
 					writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 					return
@@ -2438,12 +4116,22 @@ func (s *serviceServer) handleConfigure(w http.ResponseWriter, r *http.Request) 
 
 type serviceObserver struct {
 	agent.ConversationObserver
-	finalText string
+	finalText     string
+	lastToolError string
 }
 
 func (o *serviceObserver) OnCompletion(ctx context.Context, finalText string, streamed bool) {
 	o.finalText = finalText
 	if o.ConversationObserver != nil {
 		o.ConversationObserver.OnCompletion(ctx, finalText, streamed)
+	}
+}
+
+func (o *serviceObserver) OnToolResult(ctx context.Context, name string, out string, err error) {
+	if err != nil {
+		o.lastToolError = err.Error()
+	}
+	if o.ConversationObserver != nil {
+		o.ConversationObserver.OnToolResult(ctx, name, out, err)
 	}
 }

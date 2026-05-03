@@ -26,21 +26,21 @@ func (t *SendMessage) Capability() CapabilityLevel { return CapabilityGuarded }
 
 func (t *SendMessage) Name() string { return "send_message" }
 func (t *SendMessage) Description() string {
-	return "Send a message via a configured channel (for reminders/cron or proactive messages)."
+	return "Send a message or attachment via a configured delivery channel. This is guarded. Use it only when delivery outside the current assistant response is part of the task, such as reminders, scheduled follow-ups, or proactive updates."
 }
 func (t *SendMessage) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
-		"channel": map[string]any{"type": "string"},
-		"to":      map[string]any{"type": "string"},
-		"text":    map[string]any{"type": "string"},
+		"channel": map[string]any{"type": "string", "description": "Optional channel override, such as slack, discord, telegram, whatsapp, or email. Omit to use the current/default channel."},
+		"to":      map[string]any{"type": "string", "description": "Optional recipient override. Omit to use the current/default recipient."},
+		"text":    map[string]any{"type": "string", "description": "Message body to send. Required unless media is provided."},
 		"reply_in_thread": map[string]any{
 			"type":        "boolean",
-			"description": "When true, reuse the current channel's reply/thread metadata for the outgoing message.",
+			"description": "When true, reuse the current channel's reply/thread metadata. Do not set to true when also changing channel or recipient.",
 		},
 		"media": map[string]any{
 			"type":        "array",
 			"items":       map[string]any{"type": "string"},
-			"description": "Optional local file paths to send as attachments.",
+			"description": "Optional local file paths to send as attachments. Paths must be allowed and each file must fit the configured media limit.",
 		},
 	}, "required": []string{}}
 }

@@ -111,13 +111,13 @@ func inferToolMetadata(name string) ToolMetadata {
 	name = strings.ToLower(strings.TrimSpace(name))
 	var groups []string
 	switch {
-	case name == "read_file" || name == "search_file" || name == "read_artifact" || name == "list_files" || name == "grep_files" || name == "search_memory" || name == "show_diff":
+	case name == "read_file" || name == "search_file" || name == "read_artifact" || name == "list_dir" || name == "list_files" || name == "grep_files" || name == "search_memory" || name == "show_diff":
 		groups = []string{ToolGroupRead}
 	case strings.HasPrefix(name, "memory_"):
 		groups = []string{ToolGroupMemory, ToolGroupRead}
 	case name == "write_file" || name == "edit_file":
 		groups = []string{ToolGroupWrite}
-	case name == "exec" || name == "run_skill_script":
+	case name == "exec" || name == "run_skill" || name == "run_skill_script":
 		groups = []string{ToolGroupExec}
 	case strings.HasPrefix(name, "web_"):
 		groups = []string{ToolGroupWeb}
@@ -189,7 +189,7 @@ func (r *Registry) ExecuteParams(ctx context.Context, name string, params map[st
 		params = map[string]any{}
 	}
 	if guard := ToolGuardFromContext(ctx); guard != nil {
-		if err := guard(ctx, t, ToolCapability(t, params), params); err != nil {
+		if err := guard(ctx, t, ToolCapabilityForContext(ctx, t, params), params); err != nil {
 			return "", err
 		}
 	}

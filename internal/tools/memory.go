@@ -20,12 +20,12 @@ type MemorySetPinned struct {
 
 func (t *MemorySetPinned) Name() string { return "memory_set_pinned" }
 func (t *MemorySetPinned) Description() string {
-	return "Upsert a pinned memory entry (always included in prompts)."
+	return "Upsert a pinned memory entry that should consistently appear in prompts. Reserve this for durable facts, rules, or preferences."
 }
 func (t *MemorySetPinned) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
-		"key":     map[string]any{"type": "string"},
-		"content": map[string]any{"type": "string"},
+		"key":     map[string]any{"type": "string", "description": "Stable short key for the pinned memory, such as user_name, coding_style, or project_rule."},
+		"content": map[string]any{"type": "string", "description": "Durable fact, rule, or preference to keep pinned in prompts. Do not store temporary scratch notes here."},
 		"scope":   map[string]any{"type": "string", "description": "Optional scope override: 'global' to share across sessions"},
 	}, "required": []string{"key", "content"}}
 }
@@ -57,13 +57,13 @@ type MemoryAddNote struct {
 
 func (t *MemoryAddNote) Name() string { return "memory_add_note" }
 func (t *MemoryAddNote) Description() string {
-	return "Add a semantic memory note to the indexed memory store."
+	return "Add a semantic memory note to long-term memory. Use this for durable facts or decisions, not temporary scratch context."
 }
 func (t *MemoryAddNote) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
-		"text":              map[string]any{"type": "string"},
-		"tags":              map[string]any{"type": "string", "description": "comma-separated tags (optional)"},
-		"source_message_id": map[string]any{"type": "integer", "description": "source message id (optional)"},
+		"text":              map[string]any{"type": "string", "description": "Durable memory note text. Store stable facts, decisions, or preferences; do not store short-lived task scratch."},
+		"tags":              map[string]any{"type": "string", "description": "Optional comma-separated tags to help future retrieval, such as project,coding,preference."},
+		"source_message_id": map[string]any{"type": "integer", "description": "Optional source message id when the note came directly from a known conversation message."},
 		"scope":             map[string]any{"type": "string", "description": "Optional scope override: 'global' to share across sessions"},
 	}, "required": []string{"text"}}
 }
@@ -111,12 +111,12 @@ type MemorySearch struct {
 
 func (t *MemorySearch) Name() string { return "memory_search" }
 func (t *MemorySearch) Description() string {
-	return "Search long-term memory (hybrid semantic + keyword) and return top results."
+	return "Search long-term memory with hybrid semantic and keyword retrieval. Use this when you need to recover prior facts, decisions, or context by topic."
 }
 func (t *MemorySearch) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
-		"query": map[string]any{"type": "string"},
-		"topK":  map[string]any{"type": "integer"},
+		"query": map[string]any{"type": "string", "description": "Topic or fact to retrieve from long-term memory. Use specific project names, people, decisions, or preferences."},
+		"topK":  map[string]any{"type": "integer", "description": "Maximum matching memory notes to return. Omit for the configured default."},
 		"scope": map[string]any{"type": "string", "description": "Optional scope override: 'global' to search only shared memory"},
 	}, "required": []string{"query"}}
 }
@@ -163,11 +163,11 @@ type MemoryRecent struct {
 
 func (t *MemoryRecent) Name() string { return "memory_recent" }
 func (t *MemoryRecent) Description() string {
-	return "Fetch recent conversation messages from the current linked session scope."
+	return "Fetch recent conversation messages from the current linked session scope. Use this for immediate conversational context, not durable recall."
 }
 func (t *MemoryRecent) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
-		"limit": map[string]any{"type": "integer"},
+		"limit": map[string]any{"type": "integer", "description": "Number of recent messages to return from the linked session. Omit for default; keep small unless more conversation context is needed."},
 	}}
 }
 func (t *MemoryRecent) Schema() map[string]any {
@@ -197,7 +197,7 @@ type MemoryGetPinned struct {
 
 func (t *MemoryGetPinned) Name() string { return "memory_get_pinned" }
 func (t *MemoryGetPinned) Description() string {
-	return "Read pinned memory entries for the current session, including shared global entries."
+	return "Read pinned memory entries for the current session, including shared global entries. Use this for durable facts that should already matter."
 }
 func (t *MemoryGetPinned) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{

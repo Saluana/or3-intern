@@ -78,6 +78,30 @@ func TestReadSkill_Success(t *testing.T) {
 	}
 }
 
+func TestReadSkill_UnavailableSkillReturnsStructuredResult(t *testing.T) {
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, "needs_missing")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("> **PREREQUISITE:** Read `../missing/SKILL.md` first."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	inv := skills.Scan([]string{dir})
+	tool := &ReadSkill{Inventory: &inv}
+
+	out, err := tool.Execute(context.Background(), map[string]any{"name": "needs_missing"})
+	if err != nil {
+		t.Fatalf("ReadSkill: %v", err)
+	}
+	if !strings.Contains(out, `"ok": false`) {
+		t.Fatalf("expected unavailable result, got %q", out)
+	}
+	if !strings.Contains(out, "missing skill dependency: missing") {
+		t.Fatalf("expected missing dependency reason, got %q", out)
+	}
+}
+
 func TestReadSkill_MaxBytes(t *testing.T) {
 	dir := t.TempDir()
 	skillDir := filepath.Join(dir, "big_skill")
@@ -119,6 +143,13 @@ func TestReadSkill_MaxBytesParam(t *testing.T) {
 		t.Fatalf("ReadSkill: %v", err)
 	}
 	_ = out
+}
+
+func TestReadSkill_FullModeIsSafe(t *testing.T) {
+	tool := &ReadSkill{}
+	if got := ToolCapability(tool, map[string]any{"mode": "full"}); got != CapabilitySafe {
+		t.Fatalf("expected full mode to be safe, got %s", got)
+	}
 }
 
 func TestReadSkill_Name(t *testing.T) {

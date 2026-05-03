@@ -121,6 +121,8 @@ or3-intern service
 ```
 
 This exposes the authenticated loopback HTTP API documented in [api-reference.md](api-reference.md).
+If you are running the repo checkout directly, [scripts/restart-service.sh](../scripts/restart-service.sh) gives you a reusable `start|stop|restart|status` helper for service mode and will auto-load `.env` when present.
+If you want to reach service mode over your tailnet instead of keeping it loopback-only, see [tailscale-service-guide.md](tailscale-service-guide.md).
 
 ## Important local paths
 

@@ -101,6 +101,10 @@ func toolRegistryFromContext(ctx context.Context) *tools.Registry {
 	return reg
 }
 
+func ToolRegistryFromContext(ctx context.Context) *tools.Registry {
+	return toolRegistryFromContext(ctx)
+}
+
 func toolRegistryWithAllowlist(base *tools.Registry, allowed []string, restrict bool) *tools.Registry {
 	if base == nil {
 		return tools.NewRegistry()

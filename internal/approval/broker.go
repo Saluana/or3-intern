@@ -30,6 +30,7 @@ const (
 	SubjectSecretAccess SubjectType = "secret_access"
 	SubjectMessageSend  SubjectType = "message_send"
 	SubjectFileTransfer SubjectType = "file_transfer"
+	SubjectToolQuota    SubjectType = "tool_quota"
 
 	RoleViewer        = "viewer"
 	RoleOperator      = "operator"
@@ -84,12 +85,26 @@ type SkillEvaluation struct {
 	Version        string
 	Origin         string
 	TrustState     string
+	ToolName       string
+	PlanID         string
+	PlanHash       string
 	ScriptHash     string
 	EnvBindingHash string
 	TimeoutSeconds int
 	AgentID        string
 	SessionID      string
 	ApprovalToken  string
+}
+
+type ToolQuotaEvaluation struct {
+	Scope         string
+	LimitName     string
+	ToolName      string
+	Current       int
+	Limit         int
+	AgentID       string
+	SessionID     string
+	ApprovalToken string
 }
 
 type ExecSubject struct {
@@ -113,10 +128,25 @@ type SkillExecutionSubject struct {
 	Version         string `json:"version,omitempty"`
 	Origin          string `json:"origin,omitempty"`
 	TrustState      string `json:"trust_state,omitempty"`
+	ToolName        string `json:"tool_name,omitempty"`
+	PlanID          string `json:"plan_id,omitempty"`
+	PlanHash        string `json:"plan_hash,omitempty"`
 	ScriptHash      string `json:"script_hash"`
 	ExecutionHostID string `json:"execution_host_id"`
 	EnvBindingHash  string `json:"env_binding_hash"`
 	TimeoutSeconds  int    `json:"timeout_seconds"`
+	RequestingAgent string `json:"requesting_agent_id,omitempty"`
+	SessionID       string `json:"session_id,omitempty"`
+}
+
+type ToolQuotaSubject struct {
+	Type            string `json:"type"`
+	ExecutionHostID string `json:"execution_host_id"`
+	Scope           string `json:"scope"`
+	LimitName       string `json:"limit_name"`
+	ToolName        string `json:"tool_name"`
+	Current         int    `json:"current"`
+	Limit           int    `json:"limit"`
 	RequestingAgent string `json:"requesting_agent_id,omitempty"`
 	SessionID       string `json:"session_id,omitempty"`
 }
@@ -142,7 +172,9 @@ type SkillAllowlistMatcher struct {
 	Version        string `json:"version,omitempty"`
 	Origin         string `json:"origin,omitempty"`
 	TrustState     string `json:"trust_state,omitempty"`
+	PlanHash       string `json:"plan_hash,omitempty"`
 	ScriptHash     string `json:"script_hash,omitempty"`
+	EnvBindingHash string `json:"env_binding_hash,omitempty"`
 	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
 }
 
@@ -219,6 +251,9 @@ func (b *Broker) EvaluateSkillExec(ctx context.Context, req SkillEvaluation) (De
 		Version:         strings.TrimSpace(req.Version),
 		Origin:          strings.TrimSpace(req.Origin),
 		TrustState:      strings.TrimSpace(req.TrustState),
+		ToolName:        firstNonEmpty(req.ToolName, "run_skill"),
+		PlanID:          strings.TrimSpace(req.PlanID),
+		PlanHash:        strings.TrimSpace(req.PlanHash),
 		ScriptHash:      strings.TrimSpace(req.ScriptHash),
 		ExecutionHostID: b.hostID(),
 		EnvBindingHash:  strings.TrimSpace(req.EnvBindingHash),
@@ -227,20 +262,42 @@ func (b *Broker) EvaluateSkillExec(ctx context.Context, req SkillEvaluation) (De
 		SessionID:       strings.TrimSpace(req.SessionID),
 	}
 	return b.evaluate(ctx, SubjectSkillExec, subject, req.ApprovalToken,
-		AllowlistScope{HostID: subject.ExecutionHostID, Tool: "run_skill_script", Agent: subject.RequestingAgent},
-		SkillAllowlistMatcher{SkillID: subject.SkillID, Version: subject.Version, Origin: subject.Origin, TrustState: subject.TrustState, ScriptHash: subject.ScriptHash, TimeoutSeconds: subject.TimeoutSeconds},
+		AllowlistScope{HostID: subject.ExecutionHostID, Tool: subject.ToolName, Agent: subject.RequestingAgent},
+		SkillAllowlistMatcher{SkillID: subject.SkillID, Version: subject.Version, Origin: subject.Origin, TrustState: subject.TrustState, PlanHash: subject.PlanHash, ScriptHash: subject.ScriptHash, EnvBindingHash: subject.EnvBindingHash, TimeoutSeconds: subject.TimeoutSeconds},
+	)
+}
+
+func (b *Broker) EvaluateToolQuota(ctx context.Context, req ToolQuotaEvaluation, mode config.ApprovalMode) (Decision, error) {
+	subject := ToolQuotaSubject{
+		Type:            string(SubjectToolQuota),
+		ExecutionHostID: b.hostID(),
+		Scope:           strings.TrimSpace(req.Scope),
+		LimitName:       strings.TrimSpace(req.LimitName),
+		ToolName:        strings.TrimSpace(req.ToolName),
+		Current:         req.Current,
+		Limit:           req.Limit,
+		RequestingAgent: strings.TrimSpace(req.AgentID),
+		SessionID:       strings.TrimSpace(req.SessionID),
+	}
+	return b.evaluateWithMode(ctx, SubjectToolQuota, subject, req.ApprovalToken, mode,
+		AllowlistScope{HostID: subject.ExecutionHostID, Tool: subject.ToolName, Agent: subject.RequestingAgent},
+		nil,
 	)
 }
 
 func (b *Broker) evaluate(ctx context.Context, subjectType SubjectType, subject any, approvalToken string, scope AllowlistScope, matcher any) (Decision, error) {
 	mode := b.modeFor(subjectType)
+	return b.evaluateWithMode(ctx, subjectType, subject, approvalToken, mode, scope, matcher)
+}
+
+func (b *Broker) evaluateWithMode(ctx context.Context, subjectType SubjectType, subject any, approvalToken string, mode config.ApprovalMode, scope AllowlistScope, matcher any) (Decision, error) {
 	subjectJSON, subjectHash, err := CanonicalSubjectHash(subject)
 	if err != nil {
 		return Decision{}, err
 	}
 	if strings.TrimSpace(approvalToken) != "" {
-		if err := b.VerifyApprovalToken(ctx, approvalToken, subjectHash, b.hostID()); err == nil {
-			return Decision{Allowed: true, SubjectHash: subjectHash, Reason: "approved_token"}, nil
+		if claims, err := b.VerifyApprovalTokenClaims(ctx, approvalToken, subjectHash, b.hostID()); err == nil {
+			return Decision{Allowed: true, RequestID: claims.RequestID, SubjectHash: subjectHash, Reason: "approved_token"}, nil
 		}
 	}
 	switch mode {
@@ -255,7 +312,7 @@ func (b *Broker) evaluate(ctx context.Context, subjectType SubjectType, subject 
 		_ = b.audit(ctx, "approval.blocked", map[string]any{"subject_hash": subjectHash, "host_id": b.hostID(), "type": string(subjectType), "outcome": "blocked", "reason": "broker_unavailable"})
 		return Decision{Allowed: false, SubjectHash: subjectHash, Reason: "approval broker unavailable"}, nil
 	}
-	if mode == config.ApprovalModeAllowlist {
+	if mode == config.ApprovalModeAsk || mode == config.ApprovalModeAllowlist {
 		matched, err := b.allowlistMatches(ctx, subjectType, scope, matcher)
 		if err != nil {
 			return Decision{}, err
@@ -301,6 +358,7 @@ func (b *Broker) ApproveRequest(ctx context.Context, requestID int64, actor stri
 	if !resolved {
 		return IssuedApproval{}, fmt.Errorf("approval request is not pending")
 	}
+	b.syncSkillRunPlanResolution(ctx, requestID, db.SkillRunStatusApproved, "")
 	allowlistID := int64(0)
 	if alwaysAllow {
 		allowlistID, err = b.createAllowlistFromRequest(ctx, req, actor)
@@ -332,6 +390,7 @@ func (b *Broker) DenyRequest(ctx context.Context, requestID int64, actor string,
 	if !resolved {
 		return fmt.Errorf("approval request is not pending")
 	}
+	b.syncSkillRunPlanResolution(ctx, requestID, db.SkillRunStatusDenied, firstNonEmpty(note, "approval denied"))
 	_ = b.audit(ctx, "approval.resolved", map[string]any{"request_id": requestID, "subject_hash": req.SubjectHash, "host_id": req.ExecutionHostID, "outcome": "denied", "actor": actor})
 	return nil
 }
@@ -352,14 +411,23 @@ func (b *Broker) CancelRequest(ctx context.Context, requestID int64, actor strin
 	if !resolved {
 		return fmt.Errorf("approval request is not pending")
 	}
+	b.syncSkillRunPlanResolution(ctx, requestID, db.SkillRunStatusCancelled, firstNonEmpty(note, "approval canceled"))
 	_ = b.audit(ctx, "approval.resolved", map[string]any{"request_id": requestID, "subject_hash": req.SubjectHash, "host_id": req.ExecutionHostID, "outcome": "canceled", "actor": actor})
 	return nil
 }
 
 func (b *Broker) ExpirePendingRequests(ctx context.Context, actor string) (int64, error) {
-	count, err := b.DB.ExpireApprovalRequests(ctx, b.now().UnixMilli(), strings.TrimSpace(actor), "expired by operator request")
+	nowMS := b.now().UnixMilli()
+	requestIDs, err := b.DB.ListExpiredPendingApprovalRequestIDs(ctx, nowMS)
 	if err != nil {
 		return 0, err
+	}
+	count, err := b.DB.ExpireApprovalRequests(ctx, nowMS, strings.TrimSpace(actor), "expired by operator request")
+	if err != nil {
+		return 0, err
+	}
+	for _, requestID := range requestIDs {
+		b.syncSkillRunPlanResolution(ctx, requestID, db.SkillRunStatusExpired, "approval expired")
 	}
 	if count > 0 {
 		_ = b.audit(ctx, "approval.expired", map[string]any{"count": count, "actor": actor, "host_id": b.hostID()})
@@ -367,32 +435,65 @@ func (b *Broker) ExpirePendingRequests(ctx context.Context, actor string) (int64
 	return count, nil
 }
 
+func (b *Broker) syncSkillRunPlanResolution(ctx context.Context, requestID int64, status string, lastError string) {
+	if b == nil || b.DB == nil || requestID <= 0 {
+		return
+	}
+	if _, err := b.DB.UpdateSkillRunPlansByApprovalRequest(ctx, requestID, []string{string(db.SkillRunStatusPendingApproval)}, status, strings.TrimSpace(lastError), b.now().UnixMilli()); err != nil {
+		_ = b.audit(ctx, "approval.plan_sync_failed", map[string]any{
+			"request_id": requestID,
+			"status":     strings.TrimSpace(status),
+			"error":      err.Error(),
+			"host_id":    b.hostID(),
+		})
+	}
+}
+
 func (b *Broker) VerifyApprovalToken(ctx context.Context, token string, subjectHash string, hostID string) error {
+	_, err := b.VerifyApprovalTokenClaims(ctx, token, subjectHash, hostID)
+	return err
+}
+
+func (b *Broker) VerifyApprovalTokenClaims(ctx context.Context, token string, subjectHash string, hostID string) (ApprovalTokenClaims, error) {
 	claims, err := b.parseApprovalToken(token)
 	if err != nil {
-		return err
+		return ApprovalTokenClaims{}, err
 	}
 	now := b.now().Unix()
 	if claims.ExpiresAt < now {
-		return fmt.Errorf("approval token expired")
+		return ApprovalTokenClaims{}, fmt.Errorf("approval token expired")
 	}
 	if claims.ExecutionHost != strings.TrimSpace(hostID) {
-		return fmt.Errorf("approval token host mismatch")
+		return ApprovalTokenClaims{}, fmt.Errorf("approval token host mismatch")
 	}
 	if claims.SubjectHash != strings.TrimSpace(subjectHash) {
-		return fmt.Errorf("approval token subject mismatch")
+		return ApprovalTokenClaims{}, fmt.Errorf("approval token subject mismatch")
+	}
+	if b.DB == nil {
+		return ApprovalTokenClaims{}, fmt.Errorf("approval token store unavailable")
 	}
 	record, err := b.DB.GetApprovalToken(ctx, claims.TokenID)
 	if err != nil {
-		return fmt.Errorf("approval token record not found")
+		return ApprovalTokenClaims{}, fmt.Errorf("approval token record not found")
 	}
 	if record.RevokedAt > 0 {
-		return fmt.Errorf("approval token revoked")
+		return ApprovalTokenClaims{}, fmt.Errorf("approval token already used or revoked")
 	}
 	if record.SubjectHash != claims.SubjectHash {
-		return fmt.Errorf("approval token subject mismatch")
+		return ApprovalTokenClaims{}, fmt.Errorf("approval token subject mismatch")
 	}
-	return nil
+	nowMS := b.now().UnixMilli()
+	if record.ExpiresAt > 0 && record.ExpiresAt < nowMS {
+		return ApprovalTokenClaims{}, fmt.Errorf("approval token expired")
+	}
+	consumed, err := b.DB.ConsumeApprovalToken(ctx, claims.TokenID, nowMS)
+	if err != nil {
+		return ApprovalTokenClaims{}, err
+	}
+	if !consumed {
+		return ApprovalTokenClaims{}, fmt.Errorf("approval token already used or revoked")
+	}
+	return claims, nil
 }
 
 func (b *Broker) CreatePairingRequest(ctx context.Context, input PairingRequestInput) (db.PairingRequestRecord, string, error) {
@@ -834,7 +935,13 @@ func allowlistMatcherMatches(subjectType SubjectType, current any, raw string) (
 		if expected.TrustState != "" && expected.TrustState != actual.TrustState {
 			return false, nil
 		}
+		if expected.PlanHash != "" && expected.PlanHash != actual.PlanHash {
+			return false, nil
+		}
 		if expected.ScriptHash != "" && expected.ScriptHash != actual.ScriptHash {
+			return false, nil
+		}
+		if expected.EnvBindingHash != "" && expected.EnvBindingHash != actual.EnvBindingHash {
 			return false, nil
 		}
 		if expected.TimeoutSeconds > 0 && expected.TimeoutSeconds != actual.TimeoutSeconds {
@@ -863,7 +970,7 @@ func ValidateAllowlistMatcher(domain string, matcher any) error {
 			return fmt.Errorf("skill allowlist matcher is invalid")
 		}
 		if isEmptySkillAllowlistMatcher(candidate) {
-			return fmt.Errorf("skill allowlist matcher must include at least one skill, version, origin, trust, script, or timeout constraint")
+			return fmt.Errorf("skill allowlist matcher must include at least one skill, version, origin, trust, plan, script, environment, or timeout constraint")
 		}
 		return nil
 	default:
@@ -885,7 +992,9 @@ func isEmptySkillAllowlistMatcher(matcher SkillAllowlistMatcher) bool {
 		strings.TrimSpace(matcher.Version) == "" &&
 		strings.TrimSpace(matcher.Origin) == "" &&
 		strings.TrimSpace(matcher.TrustState) == "" &&
+		strings.TrimSpace(matcher.PlanHash) == "" &&
 		strings.TrimSpace(matcher.ScriptHash) == "" &&
+		strings.TrimSpace(matcher.EnvBindingHash) == "" &&
 		matcher.TimeoutSeconds == 0
 }
 
@@ -906,7 +1015,7 @@ func (b *Broker) createAllowlistFromRequest(ctx context.Context, req db.Approval
 		if err := json.Unmarshal([]byte(req.SubjectJSON), &subject); err != nil {
 			return 0, err
 		}
-		rec, err := b.AddAllowlist(ctx, req.Type, AllowlistScope{HostID: subject.ExecutionHostID, Tool: "run_skill_script", Agent: subject.RequestingAgent}, SkillAllowlistMatcher{SkillID: subject.SkillID, Version: subject.Version, Origin: subject.Origin, TrustState: subject.TrustState, ScriptHash: subject.ScriptHash, TimeoutSeconds: subject.TimeoutSeconds}, actor, 0)
+		rec, err := b.AddAllowlist(ctx, req.Type, AllowlistScope{HostID: subject.ExecutionHostID, Tool: subject.ToolName, Agent: subject.RequestingAgent}, SkillAllowlistMatcher{SkillID: subject.SkillID, Version: subject.Version, Origin: subject.Origin, TrustState: subject.TrustState, PlanHash: subject.PlanHash, ScriptHash: subject.ScriptHash, EnvBindingHash: subject.EnvBindingHash, TimeoutSeconds: subject.TimeoutSeconds}, actor, 0)
 		if err != nil {
 			return 0, err
 		}
@@ -1090,6 +1199,8 @@ func extractSessionID(subject any) string {
 	case ExecSubject:
 		return value.SessionID
 	case SkillExecutionSubject:
+		return value.SessionID
+	case ToolQuotaSubject:
 		return value.SessionID
 	default:
 		return ""

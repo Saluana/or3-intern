@@ -2,7 +2,7 @@
 
 `or3-intern` is a Go rewrite of nanobot with SQLite persistence, hybrid long-term memory retrieval, external channel integrations, autonomous triggers, and a hardened tool runtime.
 
-The README now stays focused on orientation and quick start. Detailed guides and references live under [`docs/`](docs/README.md).
+The README now stays focused on orientation and quick start. Detailed guides and references live under `docs/`.
 
 ## Quick start
 
@@ -19,19 +19,27 @@ or3-intern version
 ```
 
 1. Run guided setup:
+
    ```bash
    or3-intern setup
    ```
+
 2. Start an interactive local session:
+
    ```bash
    or3-intern chat
    ```
+
    Inside chat, use `/new` when you want to archive the current conversation into memory and start with a clean live session.
+
 3. Or run enabled external channels and automation:
+
    ```bash
    or3-intern serve
    ```
+
 4. Check safety and access posture any time:
+
    ```bash
    or3-intern status
    ```
@@ -58,7 +66,7 @@ Use `go run ./cmd/or3-intern ...` for ad hoc local runs, or install the binary f
 - ClawHub/OpenClaw-compatible skills with trust and quarantine controls
 - Webhook, file-watch, heartbeat, and cron-based automation
 - Phase-based hardening, audit, secret store, profile, and network controls
-- Set `runtimeProfile` to `local-dev`, `hosted-service`, `hosted-no-exec`, or `hosted-remote-sandbox-only` to select the intended execution posture — see [docs/security-and-hardening.md](docs/security-and-hardening.md).
+- Set `runtimeProfile` to `local-dev`, `hosted-service`, `hosted-no-exec`, or `hosted-remote-sandbox-only` to select the intended execution posture — see docs/security-and-hardening.md.
 - Optional MCP tool integrations over stdio, SSE, and streamable HTTP
 
 ## Commands
@@ -75,6 +83,7 @@ Root help shows the full command catalog by default:
 - `or3-intern config-path` print the resolved config.json path
 - `or3-intern serve` run enabled external channels and automation
 - `or3-intern service` run the internal authenticated HTTP API for OR3 Net
+- `scripts/restart-service.sh [restart|start|stop|status]` manage a repo-run `or3-intern service` process without retyping the full command
 - `or3-intern agent -m "hello"` run a one-shot turn
 - `or3-intern doctor [--strict|--json|--fix]` diagnose readiness issues, explain risk, and repair safe local problems
 - `or3-intern embeddings <status|rebuild>` inspect or rebuild stored memory/doc embeddings after provider or embedding-model changes
@@ -90,24 +99,24 @@ Root help shows the full command catalog by default:
 - `or3-intern version`
 - `or3-intern help [command]` show root or command-specific help
 
-See [CLI Reference](docs/cli-reference.md) for command details.
+See CLI Reference for command details.
 
 The setup docs stay text-first in-repo. Screenshots or terminal recordings can be added later, but the written walkthroughs are the source of truth for rollout behavior and keybindings.
 
 ## Documentation
 
-- [Documentation index](docs/README.md)
-- [Getting started](docs/getting-started.md)
-- [Configuration reference](docs/configuration-reference.md)
-- [CLI reference](docs/cli-reference.md)
-- [Agent runtime](docs/agent-runtime.md)
-- [Memory and context](docs/memory-and-context.md)
-- [Channel integrations](docs/channels.md)
-- [Skills](docs/skills.md)
-- [Triggers and automation](docs/triggers-and-automation.md)
-- [Security and hardening](docs/security-and-hardening.md)
-- [MCP tool integrations](docs/mcp-tool-integrations.md)
-- [Internal service API reference](docs/api-reference.md)
+- Documentation index
+- Getting started
+- Configuration reference
+- CLI reference
+- Agent runtime
+- Memory and context
+- Channel integrations
+- Skills
+- Triggers and automation
+- Security and hardening
+- MCP tool integrations
+- Internal service API reference
 
 ## Operational notes
 
@@ -122,8 +131,8 @@ The setup docs stay text-first in-repo. Screenshots or terminal recordings can b
 
 - Native runtime settings come from process env plus `~/.or3-intern/config.json`; treat env as the authoritative override layer for service-mode deployments.
 - Cross-repo deployment tooling should reserve the `OR3_INTERN_*` prefix, then translate those values into repo-native config before launching `or3-intern`.
-- The shared deployment-key mapping for `or3-net` ⇄ `or3-intern` service credentials is documented in [../or3-net/planning/platform-standardization/config-alignment.md](../or3-net/planning/platform-standardization/config-alignment.md).
-- Frozen service fixture coverage is enforced via [.github/workflows/contracts.yml](.github/workflows/contracts.yml).
+- The shared deployment-key mapping for `or3-net` ⇄ `or3-intern` service credentials is documented in ../or3-net/planning/platform-standardization/config-alignment.md.
+- Frozen service fixture coverage is enforced via .github/workflows/contracts.yml.
 
 ## Dependencies
 

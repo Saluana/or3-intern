@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -34,6 +35,8 @@ type Source string
 const (
 	// SourceExtra marks skills loaded from explicitly supplied extra roots.
 	SourceExtra Source = "extra"
+	// SourceGlobal marks skills loaded from the shared user-level skills root.
+	SourceGlobal Source = "global"
 	// SourceBundled marks skills that ship with the application.
 	SourceBundled Source = "bundled"
 	// SourceManaged marks skills installed from a remote registry.
@@ -130,18 +133,19 @@ type SkillPermissions struct {
 
 // SkillMeta is the fully merged metadata for one discovered skill.
 type SkillMeta struct {
-	Name        string
-	Description string
-	Homepage    string
-	Path        string
-	Dir         string
-	Location    string
-	Source      Source
-	ModTime     time.Time
-	Size        int64
-	ID          string
-	Summary     string
-	Entrypoints []SkillEntry
+	Name         string
+	Description  string
+	Homepage     string
+	Path         string
+	Dir          string
+	Location     string
+	Source       Source
+	ModTime      time.Time
+	Size         int64
+	ID           string
+	Summary      string
+	Entrypoints  []SkillEntry
+	Dependencies []string
 
 	UserInvocable          bool
 	DisableModelInvocation bool
@@ -206,6 +210,8 @@ func defaultPriority(source Source) int {
 		return 40
 	case SourceManaged:
 		return 30
+	case SourceGlobal:
+		return 25
 	case SourceBundled:
 		return 20
 	default:
@@ -283,6 +289,7 @@ func ScanWithOptions(opts LoadOptions) Inventory {
 	for _, s := range metaByName {
 		skills = append(skills, s)
 	}
+	applySkillDependencyEligibility(skills)
 	sort.Slice(skills, func(i, j int) bool {
 		if skills[i].Name == skills[j].Name {
 			if skills[i].sourcePriority == skills[j].sourcePriority {
@@ -387,6 +394,7 @@ func loadSkill(dir, path string, root Root, order int, opts LoadOptions) SkillMe
 	meta.Description = strings.TrimSpace(firstNonEmpty(fm.Description, fm.Summary))
 	meta.Summary = meta.Description
 	meta.Homepage = strings.TrimSpace(fm.Homepage)
+	meta.Dependencies = detectSkillDependencies(body)
 	if fm.UserInvocable != nil {
 		meta.UserInvocable = *fm.UserInvocable
 	}
@@ -436,6 +444,96 @@ func loadSkill(dir, path string, root Root, order int, opts LoadOptions) SkillMe
 	applyEligibility(&meta, rawTop, body, entry, opts)
 	applyApprovalPolicy(&meta, opts.ApprovalPolicy)
 	return meta
+}
+
+var (
+	relativeSkillRefPattern = regexp.MustCompile(`\.\./([A-Za-z0-9][A-Za-z0-9_.-]*)/SKILL\.md`)
+	backtickSkillRefPattern = regexp.MustCompile("`([A-Za-z0-9][A-Za-z0-9_.-]*)`")
+)
+
+func detectSkillDependencies(body string) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	add := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" || strings.HasPrefix(name, "-") {
+			return
+		}
+		lower := strings.ToLower(name)
+		if _, ok := seen[lower]; ok {
+			return
+		}
+		seen[lower] = struct{}{}
+		out = append(out, name)
+	}
+	for _, match := range relativeSkillRefPattern.FindAllStringSubmatch(body, -1) {
+		if len(match) > 1 {
+			add(match[1])
+		}
+	}
+	for _, line := range strings.Split(body, "\n") {
+		lower := strings.ToLower(line)
+		if !strings.Contains(lower, "prerequisite") && !(strings.Contains(lower, "load") && strings.Contains(lower, "skill")) {
+			continue
+		}
+		for _, match := range backtickSkillRefPattern.FindAllStringSubmatch(line, -1) {
+			if len(match) > 1 {
+				add(match[1])
+			}
+		}
+	}
+	return out
+}
+
+func applySkillDependencyEligibility(skills []SkillMeta) {
+	if len(skills) == 0 {
+		return
+	}
+	byName := map[string]int{}
+	for i, skill := range skills {
+		byName[strings.ToLower(skill.Name)] = i
+	}
+	changed := true
+	for changed {
+		changed = false
+		for i := range skills {
+			if len(skills[i].Dependencies) == 0 {
+				continue
+			}
+			for _, dep := range skills[i].Dependencies {
+				dep = strings.TrimSpace(dep)
+				if dep == "" || strings.EqualFold(dep, skills[i].Name) {
+					continue
+				}
+				depIdx, ok := byName[strings.ToLower(dep)]
+				if !ok {
+					if appendMissingReason(&skills[i], "missing skill dependency: "+dep) {
+						changed = true
+					}
+					continue
+				}
+				if !skills[depIdx].Eligible || skills[depIdx].Hidden {
+					if appendMissingReason(&skills[i], "unavailable skill dependency: "+dep) {
+						changed = true
+					}
+				}
+			}
+		}
+	}
+}
+
+func appendMissingReason(skill *SkillMeta, reason string) bool {
+	if skill == nil || strings.TrimSpace(reason) == "" {
+		return false
+	}
+	for _, existing := range skill.Missing {
+		if existing == reason {
+			return false
+		}
+	}
+	skill.Missing = append(skill.Missing, reason)
+	skill.Eligible = false
+	return true
 }
 
 func applyOriginMetadata(meta *SkillMeta) {
@@ -750,15 +848,17 @@ func applyEligibility(meta *SkillMeta, rawTop map[string]any, body string, entry
 	if len(meta.Metadata.OS) > 0 && !containsFold(meta.Metadata.OS, opts.OS) {
 		meta.Missing = append(meta.Missing, fmt.Sprintf("os mismatch: requires %s", strings.Join(meta.Metadata.OS, ", ")))
 	}
+	binaryPath := effectiveBinaryPath(opts)
+	pathExt := effectivePathExt(opts.Env)
 	for _, bin := range meta.Metadata.Requires.Bins {
-		if !hasBinary(bin) {
+		if !hasBinary(bin, binaryPath, pathExt) {
 			meta.Missing = append(meta.Missing, "missing binary: "+bin)
 		}
 	}
 	if len(meta.Metadata.Requires.AnyBins) > 0 {
 		ok := false
 		for _, bin := range meta.Metadata.Requires.AnyBins {
-			if hasBinary(bin) {
+			if hasBinary(bin, binaryPath, pathExt) {
 				ok = true
 				break
 			}
@@ -789,6 +889,11 @@ func detectUnsupported(meta SkillMeta, rawTop map[string]any, body string, opts 
 	}
 	if meta.Metadata.Nix != nil && strings.TrimSpace(meta.Metadata.Nix.Plugin) != "" {
 		unsupported = append(unsupported, "requires nix plugin: "+meta.Metadata.Nix.Plugin)
+	}
+	if len(meta.Metadata.Requires.Bins) > 0 && len(opts.AvailableTools) > 0 {
+		if _, ok := opts.AvailableTools["exec"]; !ok {
+			unsupported = append(unsupported, "requires exec tool for local binary: "+strings.Join(meta.Metadata.Requires.Bins, ", "))
+		}
 	}
 	for _, toolName := range meta.AllowedTools {
 		if len(opts.AvailableTools) == 0 {
@@ -1015,16 +1120,128 @@ func hash(s string) string {
 	return hex.EncodeToString(h[:8])
 }
 
-func hasBinary(name string) bool {
+func effectiveBinaryPath(opts LoadOptions) string {
+	if value := strings.TrimSpace(opts.Env["PATH"]); value != "" {
+		return value
+	}
+	return os.Getenv("PATH")
+}
+
+func effectivePathExt(env map[string]string) string {
+	if value := strings.TrimSpace(env["PATHEXT"]); value != "" {
+		return value
+	}
+	return os.Getenv("PATHEXT")
+}
+
+func hasBinary(name, pathValue, pathExt string) bool {
 	if strings.TrimSpace(name) == "" {
 		return false
 	}
-	_, err := exec.LookPath(name)
-	return err == nil
+	if pathValue == "" {
+		_, err := exec.LookPath(name)
+		return err == nil
+	}
+	if containsPathSeparator(name) {
+		return executableFileExists(name, pathExt)
+	}
+	for _, dir := range filepath.SplitList(pathValue) {
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			continue
+		}
+		candidate := filepath.Join(dir, name)
+		for _, path := range executableCandidates(candidate, pathExt) {
+			if executableFileExists(path, pathExt) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func containsPathSeparator(name string) bool {
+	if strings.ContainsRune(name, filepath.Separator) {
+		return true
+	}
+	return filepath.Separator != '/' && strings.ContainsRune(name, '/')
+}
+
+func executableCandidates(path, pathExt string) []string {
+	candidates := []string{path}
+	if runtime.GOOS != "windows" {
+		return candidates
+	}
+	if ext := strings.TrimSpace(filepath.Ext(path)); ext != "" {
+		return candidates
+	}
+	seen := map[string]struct{}{strings.ToLower(path): {}}
+	for _, ext := range windowsPathExts(pathExt) {
+		candidate := path + ext
+		key := strings.ToLower(candidate)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		candidates = append(candidates, candidate)
+	}
+	return candidates
+}
+
+func executableFileExists(path, pathExt string) bool {
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return windowsExecutablePath(path, pathExt)
+	}
+	return info.Mode()&0o111 != 0
+}
+
+func windowsExecutablePath(path, pathExt string) bool {
+	ext := strings.TrimSpace(filepath.Ext(path))
+	if ext == "" {
+		return false
+	}
+	for _, allowed := range windowsPathExts(pathExt) {
+		if strings.EqualFold(ext, allowed) {
+			return true
+		}
+	}
+	return false
+}
+
+func windowsPathExts(pathExt string) []string {
+	if strings.TrimSpace(pathExt) == "" {
+		pathExt = ".COM;.EXE;.BAT;.CMD"
+	}
+	rawExts := strings.Split(pathExt, ";")
+	out := make([]string, 0, len(rawExts))
+	seen := map[string]struct{}{}
+	for _, ext := range rawExts {
+		ext = strings.TrimSpace(ext)
+		if ext == "" {
+			continue
+		}
+		if !strings.HasPrefix(ext, ".") {
+			ext = "." + ext
+		}
+		key := strings.ToLower(ext)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, ext)
+	}
+	return out
 }
 
 func configTruthy(global map[string]any, skill map[string]any, path string) bool {
 	if truthy(lookupPath(global, path)) {
+		return true
+	}
+	if truthy(skill[path]) {
 		return true
 	}
 	return truthy(lookupPath(skill, path))

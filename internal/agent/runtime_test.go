@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"or3-intern/internal/approval"
 	"or3-intern/internal/artifacts"
 	"or3-intern/internal/bus"
 	"or3-intern/internal/channels"
@@ -46,6 +48,29 @@ func (m *mockDeliverer) DeliverWithMeta(ctx context.Context, channel, to, text s
 	m.meta = channels.CloneMeta(meta)
 	return m.Deliver(ctx, channel, to, text)
 }
+
+type captureConversationObserver struct {
+	toolCalls   []string
+	toolResults []string
+	toolErrors  []string
+}
+
+func (o *captureConversationObserver) OnTextDelta(context.Context, string) {}
+
+func (o *captureConversationObserver) OnToolCall(_ context.Context, name string, _ string) {
+	o.toolCalls = append(o.toolCalls, name)
+}
+
+func (o *captureConversationObserver) OnToolResult(_ context.Context, name string, _ string, err error) {
+	o.toolResults = append(o.toolResults, name)
+	if err != nil {
+		o.toolErrors = append(o.toolErrors, err.Error())
+	}
+}
+
+func (o *captureConversationObserver) OnCompletion(context.Context, string, bool) {}
+
+func (o *captureConversationObserver) OnError(context.Context, error) {}
 
 // buildChatServer creates a test HTTP server that responds to /chat/completions
 func buildChatServer(t *testing.T, response providers.ChatCompletionResponse) (*httptest.Server, *providers.Client) {
@@ -265,6 +290,269 @@ func TestRuntime_Handle_XMLToolCallMarkupExecutesTool(t *testing.T) {
 		if strings.Contains(msg.Content, "<tool_call>") {
 			t.Fatalf("expected persisted messages to omit raw tool markup, got %#v", msgs)
 		}
+	}
+}
+
+func TestRuntime_Handle_JSONToolCallMarkupExecutesTool(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	tool := &requiredTextTool{}
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		if callCount == 1 {
+			_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","content":"<tool_call>{\"name\":\"required_text_tool\",\"arguments\":{\"text\":\"hello from json markup\"}}</tool_call>"}}]}`)
+			return
+		}
+		var req providers.ChatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if len(req.Messages) < 2 || req.Messages[len(req.Messages)-1].Role != "tool" {
+			t.Fatalf("expected tool result in follow-up request, got %#v", req.Messages)
+		}
+		_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","content":"final after json markup tool"}}]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	provider := providers.New(srv.URL, "test-key", 10*time.Second)
+	provider.HTTP = srv.Client()
+	deliver := &mockDeliverer{}
+	rt := buildSimpleRuntime(t, provider, d, deliver)
+	rt.Tools.Register(tool)
+
+	err := rt.Handle(context.Background(), bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess-json-markup-tool",
+		Channel:    "cli",
+		From:       "user",
+		Message:    "use json markup tool",
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if !tool.called {
+		t.Fatal("expected JSON tool call markup to execute the tool")
+	}
+	if len(deliver.messages) != 1 || deliver.messages[0] != "final after json markup tool" {
+		t.Fatalf("expected final response after tool, got %#v", deliver.messages)
+	}
+}
+
+func TestRuntime_Handle_NameArgumentsToolCallMarkupExecutesTool(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	tool := &requiredTextTool{}
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		if callCount == 1 {
+			_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","content":"<tool_call><name>required_text_tool</name><arguments>{\"text\":\"hello from name args markup\"}</arguments></tool_call>"}}]}`)
+			return
+		}
+		var req providers.ChatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if len(req.Messages) < 2 || req.Messages[len(req.Messages)-1].Role != "tool" {
+			t.Fatalf("expected tool result in follow-up request, got %#v", req.Messages)
+		}
+		_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","content":"final after name args markup tool"}}]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	provider := providers.New(srv.URL, "test-key", 10*time.Second)
+	provider.HTTP = srv.Client()
+	deliver := &mockDeliverer{}
+	rt := buildSimpleRuntime(t, provider, d, deliver)
+	rt.Tools.Register(tool)
+
+	err := rt.Handle(context.Background(), bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess-name-args-markup-tool",
+		Channel:    "cli",
+		From:       "user",
+		Message:    "use name args markup tool",
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if !tool.called {
+		t.Fatal("expected name/arguments tool call markup to execute the tool")
+	}
+	if len(deliver.messages) != 1 || deliver.messages[0] != "final after name args markup tool" {
+		t.Fatalf("expected final response after tool, got %#v", deliver.messages)
+	}
+}
+
+func TestRuntime_Handle_UnavailableLegacyToolMarkupRetriesWithoutToolError(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		if callCount == 1 {
+			_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","content":"<tool_call><function=memory><parameter=action>list</tool_call>"}}]}`)
+			return
+		}
+		var req providers.ChatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if len(req.Messages) == 0 || req.Messages[len(req.Messages)-1].Role != "system" {
+			t.Fatalf("expected unavailable tool correction before retry, got %#v", req.Messages)
+		}
+		if !strings.Contains(contentToString(req.Messages[len(req.Messages)-1].Content), "memory") {
+			t.Fatalf("expected correction to mention unavailable tool, got %#v", req.Messages[len(req.Messages)-1])
+		}
+		_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","content":"final without tool"}}]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	provider := providers.New(srv.URL, "test-key", 10*time.Second)
+	provider.HTTP = srv.Client()
+	deliver := &mockDeliverer{}
+	rt := buildSimpleRuntime(t, provider, d, deliver)
+	observer := &captureConversationObserver{}
+	ctx := ContextWithConversationObserver(context.Background(), observer)
+
+	err := rt.Handle(ctx, bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess-unavailable-markup-tool",
+		Channel:    "cli",
+		From:       "user",
+		Message:    "use unavailable markup tool",
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if callCount != 2 {
+		t.Fatalf("expected retry after unavailable markup tool, got %d provider calls", callCount)
+	}
+	if len(deliver.messages) != 1 || deliver.messages[0] != "final without tool" {
+		t.Fatalf("expected final response after retry, got %#v", deliver.messages)
+	}
+	if len(observer.toolCalls) != 1 || observer.toolCalls[0] != "memory" {
+		t.Fatalf("expected unavailable tool call to be observable, got %#v", observer.toolCalls)
+	}
+	if len(observer.toolErrors) != 1 || !strings.Contains(observer.toolErrors[0], "not available") {
+		t.Fatalf("expected unavailable tool error to be observable, got %#v", observer.toolErrors)
+	}
+	msgs, err := d.GetLastMessages(context.Background(), "sess-unavailable-markup-tool", 10)
+	if err != nil {
+		t.Fatalf("GetLastMessages: %v", err)
+	}
+	for _, msg := range msgs {
+		if msg.Role == "tool" || strings.Contains(msg.Content, "tool 'memory' not found") {
+			t.Fatalf("expected unavailable markup not to produce a tool error, got %#v", msgs)
+		}
+	}
+}
+
+func TestRuntime_Handle_DSMLToolMarkupRetriesWithoutLeakingMarkup(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		if callCount == 1 {
+			_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","content":"<｜DSML｜tool_calls><｜DSML｜invoke name=\"exec\"><｜DSML｜parameter name=\"command\" string=\"true\">echo \"tools test\"</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>"}}]}`)
+			return
+		}
+		var req providers.ChatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if len(req.Messages) == 0 || req.Messages[len(req.Messages)-1].Role != "system" {
+			t.Fatalf("expected unavailable tool correction before retry, got %#v", req.Messages)
+		}
+		_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","content":"final after dsml retry"}}]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	provider := providers.New(srv.URL, "test-key", 10*time.Second)
+	provider.HTTP = srv.Client()
+	deliver := &mockDeliverer{}
+	rt := buildSimpleRuntime(t, provider, d, deliver)
+	observer := &captureConversationObserver{}
+	ctx := ContextWithConversationObserver(context.Background(), observer)
+
+	err := rt.Handle(ctx, bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess-dsml-tool",
+		Channel:    "cli",
+		From:       "user",
+		Message:    "use dsml tool",
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if callCount != 2 {
+		t.Fatalf("expected retry after unavailable DSML tool, got %d provider calls", callCount)
+	}
+	if len(observer.toolCalls) != 1 || observer.toolCalls[0] != "exec" {
+		t.Fatalf("expected DSML exec call to be observable, got %#v", observer.toolCalls)
+	}
+	if len(deliver.messages) != 1 || strings.Contains(deliver.messages[0], "DSML") {
+		t.Fatalf("expected final response without DSML markup, got %#v", deliver.messages)
+	}
+	msgs, err := d.GetLastMessages(context.Background(), "sess-dsml-tool", 10)
+	if err != nil {
+		t.Fatalf("GetLastMessages: %v", err)
+	}
+	for _, msg := range msgs {
+		if strings.Contains(msg.Content, "DSML") {
+			t.Fatalf("expected persisted messages to omit DSML markup, got %#v", msgs)
+		}
+	}
+}
+
+func TestRuntime_Handle_DSMLSearchAliasUsesWebSearch(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	tool := &requiredQueryTool{}
+	dsml := `<｜DSML｜tool_calls><｜DSML｜invoke name="search"><｜DSML｜parameter name="query" string="true">family lawyer Vancouver</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>`
+	if calls := parseToolMarkupCalls(dsml, "test"); len(calls) != 1 || calls[0].Function.Name != "search" {
+		t.Fatalf("expected DSML search markup to parse, got %#v", calls)
+	}
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		if callCount == 1 {
+			_ = json.NewEncoder(w).Encode(chatTextResponse(dsml))
+			return
+		}
+		var req providers.ChatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if len(req.Messages) < 2 || req.Messages[len(req.Messages)-1].Role != "tool" {
+			t.Fatalf("expected tool result in follow-up request, got %#v", req.Messages)
+		}
+		_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","content":"final after search"}}]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	provider := providers.New(srv.URL, "test-key", 10*time.Second)
+	provider.HTTP = srv.Client()
+	deliver := &mockDeliverer{}
+	rt := buildSimpleRuntime(t, provider, d, deliver)
+	rt.Tools.Register(tool)
+
+	if err := rt.Handle(context.Background(), bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess-dsml-search",
+		Channel:    "cli",
+		From:       "user",
+		Message:    "search the web",
+	}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if !tool.called {
+		t.Fatal("expected DSML search alias to execute web_search")
+	}
+	if tool.lastQuery != "family lawyer Vancouver" {
+		t.Fatalf("expected query argument to be forwarded, got %q", tool.lastQuery)
 	}
 }
 
@@ -1323,13 +1611,195 @@ func (rtt *requiredTextTool) Schema() map[string]any {
 	return rtt.SchemaFor(rtt.Name(), rtt.Description(), rtt.Parameters())
 }
 
-func TestFormatToolExecutionError_PreservesOutput(t *testing.T) {
-	got := formatToolExecutionError("stdout:\nfailed test\n\nstderr:\nboom", fmt.Errorf("exec failed: exit status 1"))
-	if !strings.Contains(got, "stdout:\nfailed test") {
-		t.Fatalf("expected tool output to be preserved, got %q", got)
+type requiredQueryTool struct {
+	tools.Base
+	called    bool
+	lastQuery string
+}
+
+func (rqt *requiredQueryTool) Name() string        { return "web_search" }
+func (rqt *requiredQueryTool) Description() string { return "requires string query input" }
+func (rqt *requiredQueryTool) Parameters() map[string]any {
+	return map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"required":             []any{"query"},
+		"properties": map[string]any{
+			"query": map[string]any{"type": "string"},
+		},
 	}
-	if !strings.Contains(got, "error: exec failed: exit status 1") {
-		t.Fatalf("expected error text to be appended, got %q", got)
+}
+func (rqt *requiredQueryTool) Execute(ctx context.Context, params map[string]any) (string, error) {
+	rqt.called = true
+	rqt.lastQuery = fmt.Sprint(params["query"])
+	return rqt.lastQuery, nil
+}
+func (rqt *requiredQueryTool) Schema() map[string]any {
+	return rqt.SchemaFor(rqt.Name(), rqt.Description(), rqt.Parameters())
+}
+
+type failingReadFileTool struct{ tools.Base }
+
+func (tft *failingReadFileTool) Name() string        { return "read_file" }
+func (tft *failingReadFileTool) Description() string { return "fails for testing" }
+func (tft *failingReadFileTool) Parameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"path": map[string]any{"type": "string"},
+			"mode": map[string]any{"type": "string"},
+		},
+	}
+}
+func (tft *failingReadFileTool) Execute(ctx context.Context, params map[string]any) (string, error) {
+	return "", fmt.Errorf("file exceeds max bytes")
+}
+func (tft *failingReadFileTool) Schema() map[string]any {
+	return tft.SchemaFor(tft.Name(), tft.Description(), tft.Parameters())
+}
+
+type approvalExecTool struct{ tools.Base }
+
+func (aet *approvalExecTool) Name() string        { return "exec" }
+func (aet *approvalExecTool) Description() string { return "approval test exec" }
+func (aet *approvalExecTool) Parameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"program": map[string]any{"type": "string"},
+		},
+	}
+}
+func (aet *approvalExecTool) Execute(context.Context, map[string]any) (string, error) {
+	return "", &tools.ApprovalRequiredError{ToolName: "exec", RequestID: 42}
+}
+func (aet *approvalExecTool) Schema() map[string]any {
+	return aet.SchemaFor(aet.Name(), aet.Description(), aet.Parameters())
+}
+
+func TestFormatToolExecutionError_PreservesOutput(t *testing.T) {
+	toolOut := tools.EncodeToolResult(tools.ToolResult{
+		Kind:    "exec",
+		OK:      true,
+		Summary: "Command completed with bounded stdout/stderr previews",
+		Preview: "stdout:\nfailed test\n\nstderr:\nboom",
+	})
+	got := formatToolExecutionError("exec", map[string]any{"program": "go", "args": []any{"test"}}, toolOut, fmt.Errorf("exec failed: exit status 1"))
+	result, ok := tools.DecodeToolResult(got)
+	if !ok {
+		t.Fatalf("expected structured tool failure result, got %q", got)
+	}
+	if result.OK {
+		t.Fatalf("expected failure result, got %#v", result)
+	}
+	if !strings.Contains(result.Preview, "stdout:\nfailed test") {
+		t.Fatalf("expected tool preview to be preserved, got %#v", result)
+	}
+	if !strings.Contains(result.Summary, "exec failed: exit status 1") {
+		t.Fatalf("expected error text in summary, got %#v", result)
+	}
+	if len(result.Advice) == 0 {
+		t.Fatalf("expected recovery advice, got %#v", result)
+	}
+}
+
+func TestRuntime_ToolFailureBecomesStructuredToolMessage(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	tool := &failingReadFileTool{}
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		if callCount == 1 {
+			_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"tc-read","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"big.txt\",\"mode\":\"full\"}"}}]}}]}`)
+			return
+		}
+		var req providers.ChatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if len(req.Messages) < 2 {
+			t.Fatalf("expected follow-up request with tool result, got %#v", req.Messages)
+		}
+		last := req.Messages[len(req.Messages)-1]
+		if last.Role != "tool" {
+			t.Fatalf("expected tool role message, got %#v", last)
+		}
+		content, ok := last.Content.(string)
+		if !ok {
+			t.Fatalf("expected string tool content, got %#v", last.Content)
+		}
+		result, ok := tools.DecodeToolResult(content)
+		if !ok {
+			t.Fatalf("expected structured tool result, got %q", content)
+		}
+		if result.OK {
+			t.Fatalf("expected failed tool result, got %#v", result)
+		}
+		if len(result.Advice) == 0 {
+			t.Fatalf("expected recovery advice in tool message, got %#v", result)
+		}
+		_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","content":"handled tool failure"}}]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	provider := providers.New(srv.URL, "test-key", 10*time.Second)
+	provider.HTTP = srv.Client()
+	deliver := &mockDeliverer{}
+	rt := buildSimpleRuntime(t, provider, d, deliver)
+	rt.Tools.Register(tool)
+
+	err := rt.Handle(context.Background(), bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess-tool-failure",
+		Channel:    "cli",
+		From:       "user",
+		Message:    "read the file",
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if callCount != 2 {
+		t.Fatalf("expected tool retry loop to make two provider calls, got %d", callCount)
+	}
+}
+
+func TestRuntime_ApprovalRequiredHaltsToolLoop(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	tool := &approvalExecTool{}
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		if callCount > 1 {
+			t.Fatalf("provider should not be called again after approval is required")
+		}
+		_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"tc-exec","type":"function","function":{"name":"exec","arguments":"{\"program\":\"pwd\"}"}}]}}]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	provider := providers.New(srv.URL, "test-key", 10*time.Second)
+	provider.HTTP = srv.Client()
+	deliver := &mockDeliverer{}
+	rt := buildSimpleRuntime(t, provider, d, deliver)
+	rt.Tools.Register(tool)
+
+	err := rt.Handle(context.Background(), bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess-approval-required",
+		Channel:    "cli",
+		From:       "user",
+		Message:    "run pwd",
+	})
+	var approvalErr *tools.ApprovalRequiredError
+	if !errors.As(err, &approvalErr) {
+		t.Fatalf("expected approval-required error, got %v", err)
+	}
+	if approvalErr.RequestID != 42 {
+		t.Fatalf("expected request id 42, got %#v", approvalErr)
+	}
+	if callCount != 1 {
+		t.Fatalf("expected one provider call before pausing, got %d", callCount)
 	}
 }
 
@@ -1558,6 +2028,20 @@ func TestRuntime_GuardToolExecution_ProfileDeniesPrivilegedTool(t *testing.T) {
 	}
 }
 
+func TestRuntime_GuardToolExecution_SafeProfileAllowsReadFileFull(t *testing.T) {
+	rt := &Runtime{}
+	ctx := tools.ContextWithActiveProfile(context.Background(), tools.ActiveProfile{
+		Name:          "safe-only",
+		MaxCapability: tools.CapabilitySafe,
+		AllowedTools:  map[string]struct{}{"read_file": {}},
+	})
+	params := map[string]any{"mode": "full"}
+	err := rt.guardToolExecution(ctx, &tools.ReadFile{}, tools.ToolCapability(&tools.ReadFile{}, params), params)
+	if err != nil {
+		t.Fatalf("expected safe profile to allow read_file full, got %v", err)
+	}
+}
+
 func TestRuntime_GuardToolExecution_ProfileDeniesSubagents(t *testing.T) {
 	rt := &Runtime{}
 	ctx := tools.ContextWithActiveProfile(context.Background(), tools.ActiveProfile{
@@ -1729,6 +2213,7 @@ func TestRuntime_Handle_ToolQuotaExceeded(t *testing.T) {
 	reg := tools.NewRegistry()
 	reg.Register(&echoTool{})
 	hardening := config.Default().Hardening
+	hardening.Quotas.ExceededAction = config.QuotaExceededActionFail
 	hardening.Quotas.MaxToolCalls = 1
 	rt := &Runtime{DB: d, Provider: provider, Model: "gpt-4", Tools: reg, Builder: &Builder{DB: d, HistoryMax: 10}, MaxToolLoops: 4, Deliver: &mockDeliverer{}, Hardening: hardening}
 	if err := rt.Handle(context.Background(), bus.Event{Type: bus.EventUserMessage, SessionKey: "sess-quota", Message: "hit quota"}); err != nil {
@@ -1740,7 +2225,7 @@ func TestRuntime_Handle_ToolQuotaExceeded(t *testing.T) {
 	}
 	found := false
 	for _, msg := range msgs {
-		if msg.Role == "tool" && strings.Contains(msg.Content, "quota exceeded") {
+		if msg.Role == "tool" && strings.Contains(msg.Content, "tool quota reached") && strings.Contains(msg.Content, "hard limit reached") {
 			found = true
 		}
 	}
@@ -1801,6 +2286,141 @@ func TestRuntime_ExecuteConversation_ReturnsErrorWhenToolLoopBudgetExhausted(t *
 	}
 }
 
+func TestRuntime_ExecuteConversation_AsksApprovalWhenToolLoopLimitHit(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	approvalCfg := config.Default().Security.Approvals
+	approvalCfg.HostID = "loop-test-host"
+	broker := &approval.Broker{
+		DB:      d,
+		Config:  approvalCfg,
+		HostID:  approvalCfg.HostID,
+		SignKey: []byte("0123456789abcdef0123456789abcdef"),
+		Now: func() time.Time {
+			return time.Unix(1_700_000_000, 0).UTC()
+		},
+	}
+
+	loopCalls := 0
+	loopServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		loopCalls++
+		w.Header().Set("Content-Type", "application/json")
+		resp := providers.ChatCompletionResponse{Choices: []struct {
+			Message struct {
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			} `json:"message"`
+		}{{Message: struct {
+			Role      string               `json:"role"`
+			Content   any                  `json:"content"`
+			ToolCalls []providers.ToolCall `json:"tool_calls"`
+		}{
+			Role: "assistant",
+			ToolCalls: []providers.ToolCall{{ID: fmt.Sprintf("loop-%d", loopCalls), Type: "function", Function: struct {
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			}{Name: "echo_tool", Arguments: `{}`}}},
+		}}}}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer loopServer.Close()
+
+	loopProvider := providers.New(loopServer.URL, "key", 10*time.Second)
+	loopProvider.HTTP = loopServer.Client()
+	reg := tools.NewRegistry()
+	reg.Register(&echoTool{})
+	rt := &Runtime{
+		DB:                         d,
+		Provider:                   loopProvider,
+		Model:                      "gpt-4",
+		Tools:                      reg,
+		Builder:                    &Builder{DB: d, HistoryMax: 10},
+		MaxToolLoops:               2,
+		MaxToolLoopsExceededAction: config.QuotaExceededActionAsk,
+		ApprovalBroker:             broker,
+	}
+
+	ctx := tools.ContextWithRequesterIdentity(context.Background(), "agent-1", approval.RoleOperator)
+	_, _, err := rt.executeConversation(ctx, bus.EventUserMessage, "sess-loop-approval", []providers.ChatMessage{{Role: "user", Content: "loop until approved"}}, reg, "cli", "user", nil)
+	if err == nil {
+		t.Fatal("expected approval request when loop limit is hit")
+	}
+	var approvalErr *tools.ApprovalRequiredError
+	if !errors.As(err, &approvalErr) || approvalErr.RequestID == 0 {
+		t.Fatalf("expected approval-required error, got %T: %v", err, err)
+	}
+	if loopCalls != 2 {
+		t.Fatalf("expected loop budget to stop before a third provider call, got %d", loopCalls)
+	}
+
+	pending, err := d.ListApprovalRequestsFiltered(context.Background(), approval.StatusPending, string(approval.SubjectToolQuota), 1)
+	if err != nil {
+		t.Fatalf("ListApprovalRequests: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("expected one pending loop approval, got %#v", pending)
+	}
+	issued, err := broker.ApproveRequest(context.Background(), pending[0].ID, "cli:test", false, "continue")
+	if err != nil {
+		t.Fatalf("ApproveRequest: %v", err)
+	}
+
+	successCalls := 0
+	successServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		successCalls++
+		w.Header().Set("Content-Type", "application/json")
+		if successCalls <= 3 {
+			resp := providers.ChatCompletionResponse{Choices: []struct {
+				Message struct {
+					Role      string               `json:"role"`
+					Content   any                  `json:"content"`
+					ToolCalls []providers.ToolCall `json:"tool_calls"`
+				} `json:"message"`
+			}{{Message: struct {
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			}{
+				Role: "assistant",
+				ToolCalls: []providers.ToolCall{{ID: fmt.Sprintf("retry-%d", successCalls), Type: "function", Function: struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				}{Name: "echo_tool", Arguments: `{}`}}},
+			}}}}
+			_ = json.NewEncoder(w).Encode(resp)
+			return
+		}
+		resp := providers.ChatCompletionResponse{Choices: []struct {
+			Message struct {
+				Role      string               `json:"role"`
+				Content   any                  `json:"content"`
+				ToolCalls []providers.ToolCall `json:"tool_calls"`
+			} `json:"message"`
+		}{{Message: struct {
+			Role      string               `json:"role"`
+			Content   any                  `json:"content"`
+			ToolCalls []providers.ToolCall `json:"tool_calls"`
+		}{Role: "assistant", Content: "done"}}}}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer successServer.Close()
+	successProvider := providers.New(successServer.URL, "key", 10*time.Second)
+	successProvider.HTTP = successServer.Client()
+	rt.Provider = successProvider
+
+	ctx = tools.ContextWithApprovalToken(ctx, issued.Token)
+	finalText, _, err := rt.executeConversation(ctx, bus.EventUserMessage, "sess-loop-approval", []providers.ChatMessage{{Role: "user", Content: "loop until approved"}}, reg, "cli", "user", nil)
+	if err != nil {
+		t.Fatalf("expected approved retry to continue, got %v", err)
+	}
+	if finalText != "done" {
+		t.Fatalf("expected final text after approved continuation, got %q", finalText)
+	}
+	if successCalls != 4 {
+		t.Fatalf("expected approved retry to use one extra tool-loop block, got %d provider calls", successCalls)
+	}
+}
+
 func TestRuntime_IncrementQuota_IsSerializedPerScope(t *testing.T) {
 	hardening := config.Default().Hardening
 	hardening.Quotas.MaxToolCalls = 1000
@@ -1812,7 +2432,7 @@ func TestRuntime_IncrementQuota_IsSerializedPerScope(t *testing.T) {
 	for i := 0; i < workers; i++ {
 		go func() {
 			<-start
-			errCh <- rt.incrementQuota("shared-scope", "echo_tool")
+			errCh <- rt.incrementQuota(context.Background(), "shared-scope", "echo_tool")
 		}()
 	}
 	close(start)
@@ -1823,8 +2443,83 @@ func TestRuntime_IncrementQuota_IsSerializedPerScope(t *testing.T) {
 	}
 
 	state := rt.sessionQuotaState("shared-scope")
-	if state.ToolCalls != workers {
-		t.Fatalf("expected %d serialized tool calls, got %d", workers, state.ToolCalls)
+	if state.Session.ToolCalls != workers {
+		t.Fatalf("expected %d serialized tool calls, got %d", workers, state.Session.ToolCalls)
+	}
+}
+
+func TestRuntime_IncrementQuota_SeparatesMessageAndSessionLimits(t *testing.T) {
+	hardening := config.Default().Hardening
+	hardening.Quotas.ExceededAction = config.QuotaExceededActionFail
+	hardening.Quotas.MaxToolCalls = 1
+	hardening.Quotas.MaxSessionToolCalls = 2
+	rt := &Runtime{Hardening: hardening}
+
+	msg1 := &quotaCounters{}
+	ctx1 := context.WithValue(context.Background(), messageQuotaCountersContextKey{}, msg1)
+	if err := rt.incrementQuota(ctx1, "quota-scope", "echo_tool"); err != nil {
+		t.Fatalf("first message increment: %v", err)
+	}
+	if err := rt.incrementQuota(ctx1, "quota-scope", "echo_tool"); err == nil || !strings.Contains(err.Error(), "per-message total tool-call") {
+		t.Fatalf("expected per-message limit, got %v", err)
+	}
+
+	msg2 := &quotaCounters{}
+	ctx2 := context.WithValue(context.Background(), messageQuotaCountersContextKey{}, msg2)
+	if err := rt.incrementQuota(ctx2, "quota-scope", "echo_tool"); err != nil {
+		t.Fatalf("new message should reset message quota: %v", err)
+	}
+	if err := rt.incrementQuota(context.WithValue(context.Background(), messageQuotaCountersContextKey{}, &quotaCounters{}), "quota-scope", "echo_tool"); err == nil || !strings.Contains(err.Error(), "per-session total tool-call") {
+		t.Fatalf("expected per-session limit, got %v", err)
+	}
+}
+
+func TestRuntime_IncrementQuota_AsksApprovalAndAcceptsApprovedToken(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	hardening := config.Default().Hardening
+	hardening.Quotas.ExceededAction = config.QuotaExceededActionAsk
+	hardening.Quotas.MaxToolCalls = 1
+	hardening.Quotas.MaxSessionToolCalls = 100
+	approvalCfg := config.Default().Security.Approvals
+	approvalCfg.HostID = "quota-test-host"
+	broker := &approval.Broker{
+		DB:      d,
+		Config:  approvalCfg,
+		HostID:  approvalCfg.HostID,
+		SignKey: []byte("0123456789abcdef0123456789abcdef"),
+		Now: func() time.Time {
+			return time.Unix(1_700_000_000, 0).UTC()
+		},
+	}
+	rt := &Runtime{DB: d, Hardening: hardening, ApprovalBroker: broker}
+
+	message := &quotaCounters{}
+	ctx := context.WithValue(context.Background(), messageQuotaCountersContextKey{}, message)
+	ctx = tools.ContextWithRequesterIdentity(ctx, "agent-1", approval.RoleOperator)
+	if err := rt.incrementQuota(ctx, "quota-approval-scope", "echo_tool"); err != nil {
+		t.Fatalf("first increment: %v", err)
+	}
+	err := rt.incrementQuota(ctx, "quota-approval-scope", "echo_tool")
+	if err == nil || !strings.Contains(err.Error(), "Approve request") {
+		t.Fatalf("expected approval request, got %v", err)
+	}
+	pending, err := d.ListApprovalRequestsFiltered(context.Background(), approval.StatusPending, string(approval.SubjectToolQuota), 1)
+	if err != nil {
+		t.Fatalf("ListApprovalRequests: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("expected one pending quota approval, got %#v", pending)
+	}
+	issued, err := broker.ApproveRequest(context.Background(), pending[0].ID, "cli:test", false, "continue")
+	if err != nil {
+		t.Fatalf("ApproveRequest: %v", err)
+	}
+	ctx = tools.ContextWithApprovalToken(ctx, issued.Token)
+	if err := rt.incrementQuota(ctx, "quota-approval-scope", "echo_tool"); err != nil {
+		t.Fatalf("approved quota increment: %v", err)
+	}
+	if message.ToolCalls != 2 {
+		t.Fatalf("expected approved increment to continue message counter, got %#v", message)
 	}
 }
 
@@ -2331,11 +3026,12 @@ func TestToToolDefs_SortsByToolNameDeterministically(t *testing.T) {
 func TestDynamicToolExposureSelectsIntentGroups(t *testing.T) {
 	reg := tools.NewRegistry()
 	reg.Register(&alphaTool{})
+	reg.Register(&namedRuntimeTool{name: "list_dir"})
 	reg.Register(&namedRuntimeTool{name: "write_file"})
 	reg.Register(&namedRuntimeTool{name: "exec"})
 	reg.Register(&namedRuntimeTool{name: "web_fetch"})
 	rt := &Runtime{DynamicToolExposure: true}
-	exposed := rt.exposedToolsForTurn(reg, []providers.ChatMessage{{Role: "user", Content: "please edit the config file"}}, "")
+	exposed := rt.exposedToolsForTurn(context.Background(), reg, []providers.ChatMessage{{Role: "user", Content: "please edit the config file"}}, "")
 	defs := toToolDefs(exposed)
 	names := make([]string, 0, len(defs))
 	for _, def := range defs {
@@ -2346,13 +3042,28 @@ func TestDynamicToolExposureSelectsIntentGroups(t *testing.T) {
 	}
 }
 
+func TestDynamicToolExposureReadIntentIncludesListDir(t *testing.T) {
+	reg := tools.NewRegistry()
+	reg.Register(&namedRuntimeTool{name: "read_file"})
+	reg.Register(&namedRuntimeTool{name: "list_dir"})
+	reg.Register(&namedRuntimeTool{name: "write_file"})
+	rt := &Runtime{DynamicToolExposure: true}
+	defs := toToolDefs(rt.exposedToolsForTurn(context.Background(), reg, []providers.ChatMessage{{Role: "user", Content: "inspect the project files"}}, ""))
+	if !toolDefsContain(defs, "read_file") || !toolDefsContain(defs, "list_dir") {
+		t.Fatalf("expected read intent to expose read_file and list_dir, got %#v", defs)
+	}
+	if toolDefsContain(defs, "write_file") {
+		t.Fatalf("expected read intent to omit write_file, got %#v", defs)
+	}
+}
+
 func TestUnchangedExposedToolsLeavesPrefixIdentical(t *testing.T) {
 	reg := tools.NewRegistry()
 	reg.Register(&namedRuntimeTool{name: "read_file"})
 	reg.Register(&namedRuntimeTool{name: "write_file"})
 	rt := &Runtime{DynamicToolExposure: true}
-	first := toToolDefs(rt.exposedToolsForTurn(reg, []providers.ChatMessage{{Role: "user", Content: "edit the config"}}, ""))
-	second := toToolDefs(rt.exposedToolsForTurn(reg, []providers.ChatMessage{{Role: "user", Content: "modify the config"}}, ""))
+	first := toToolDefs(rt.exposedToolsForTurn(context.Background(), reg, []providers.ChatMessage{{Role: "user", Content: "edit the config"}}, ""))
+	second := toToolDefs(rt.exposedToolsForTurn(context.Background(), reg, []providers.ChatMessage{{Role: "user", Content: "modify the config"}}, ""))
 	if fmt.Sprint(first) != fmt.Sprint(second) {
 		t.Fatalf("expected unchanged exposed write tool set to stay stable, first=%#v second=%#v", first, second)
 	}
@@ -2364,8 +3075,8 @@ func TestExposedToolSetChangeRebuildsPrefix(t *testing.T) {
 	reg.Register(&namedRuntimeTool{name: "write_file"})
 	reg.Register(&namedRuntimeTool{name: "web_fetch"})
 	rt := &Runtime{DynamicToolExposure: true}
-	readDefs := toToolDefs(rt.exposedToolsForTurn(reg, []providers.ChatMessage{{Role: "user", Content: "inspect the file"}}, ""))
-	webDefs := toToolDefs(rt.exposedToolsForTurn(reg, []providers.ChatMessage{{Role: "user", Content: "fetch this url"}}, ""))
+	readDefs := toToolDefs(rt.exposedToolsForTurn(context.Background(), reg, []providers.ChatMessage{{Role: "user", Content: "inspect the file"}}, ""))
+	webDefs := toToolDefs(rt.exposedToolsForTurn(context.Background(), reg, []providers.ChatMessage{{Role: "user", Content: "fetch this url"}}, ""))
 	if fmt.Sprint(readDefs) == fmt.Sprint(webDefs) || !toolDefsContain(webDefs, "web_fetch") {
 		t.Fatalf("expected web intent to change exposed schemas, read=%#v web=%#v", readDefs, webDefs)
 	}
@@ -2376,9 +3087,61 @@ func TestDynamicToolExposureDoesNotExposeUnknownToolsByDefault(t *testing.T) {
 	reg.Register(&namedRuntimeTool{name: "read_file"})
 	reg.Register(&namedRuntimeTool{name: "spawn_subagent"})
 	rt := &Runtime{DynamicToolExposure: true}
-	defs := toToolDefs(rt.exposedToolsForTurn(reg, []providers.ChatMessage{{Role: "user", Content: "inspect the file"}}, ""))
+	defs := toToolDefs(rt.exposedToolsForTurn(context.Background(), reg, []providers.ChatMessage{{Role: "user", Content: "inspect the file"}}, ""))
 	if toolDefsContain(defs, "spawn_subagent") {
 		t.Fatalf("expected unknown tool to stay hidden from default read exposure, got %#v", defs)
+	}
+}
+
+func TestDynamicToolExposureToolInventoryIntentExposesRegisteredToolGroups(t *testing.T) {
+	reg := tools.NewRegistry()
+	reg.Register(&namedRuntimeTool{name: "read_file"})
+	reg.Register(&namedRuntimeTool{name: "write_file"})
+	reg.Register(&namedRuntimeTool{name: "exec"})
+	reg.Register(&namedRuntimeTool{name: "web_fetch"})
+	reg.Register(&namedRuntimeTool{name: "cron"})
+	rt := &Runtime{DynamicToolExposure: true}
+	defs := toToolDefs(rt.exposedToolsForTurn(context.Background(), reg, []providers.ChatMessage{{Role: "user", Content: "what tools are available?"}}, "service"))
+	for _, name := range []string{"read_file", "write_file", "exec", "web_fetch", "cron"} {
+		if !toolDefsContain(defs, name) {
+			t.Fatalf("expected tool inventory intent to expose %s, got %#v", name, defs)
+		}
+	}
+}
+
+func TestDynamicToolExposureRespectsCapabilityCeiling(t *testing.T) {
+	reg := tools.NewRegistry()
+	reg.Register(&namedRuntimeTool{name: "read_file"})
+	reg.Register(&guardedNamedRuntimeTool{namedRuntimeTool{name: "write_file"}})
+	reg.Register(&guardedNamedRuntimeTool{namedRuntimeTool{name: "run_skill"}})
+	reg.Register(&guardedNamedRuntimeTool{namedRuntimeTool{name: "run_skill_script"}})
+	rt := &Runtime{DynamicToolExposure: true}
+	ctx := tools.ContextWithCapabilityCeiling(context.Background(), tools.CapabilitySafe)
+	defs := toToolDefs(rt.exposedToolsForTurn(ctx, reg, []providers.ChatMessage{{Role: "user", Content: "what tools are available?"}}, "service"))
+	if !toolDefsContain(defs, "read_file") {
+		t.Fatalf("expected safe tool to remain exposed, got %#v", defs)
+	}
+	if toolDefsContain(defs, "write_file") || toolDefsContain(defs, "run_skill") || toolDefsContain(defs, "run_skill_script") {
+		t.Fatalf("expected guarded tools to be hidden under safe ceiling, got %#v", defs)
+	}
+}
+
+func TestDynamicToolExposureRespectsProfileAllowlist(t *testing.T) {
+	reg := tools.NewRegistry()
+	reg.Register(&namedRuntimeTool{name: "read_file"})
+	reg.Register(&namedRuntimeTool{name: "list_dir"})
+	rt := &Runtime{DynamicToolExposure: true}
+	ctx := tools.ContextWithActiveProfile(context.Background(), tools.ActiveProfile{
+		Name:          "read-file-only",
+		MaxCapability: tools.CapabilitySafe,
+		AllowedTools:  map[string]struct{}{"read_file": {}},
+	})
+	defs := toToolDefs(rt.exposedToolsForTurn(ctx, reg, []providers.ChatMessage{{Role: "user", Content: "inspect the project files"}}, "service"))
+	if !toolDefsContain(defs, "read_file") {
+		t.Fatalf("expected allowed profile tool to remain exposed, got %#v", defs)
+	}
+	if toolDefsContain(defs, "list_dir") {
+		t.Fatalf("expected profile-disallowed tool to be hidden, got %#v", defs)
 	}
 }
 
@@ -2396,6 +3159,10 @@ func (t *namedRuntimeTool) Schema() map[string]any {
 func (t *namedRuntimeTool) Execute(ctx context.Context, params map[string]any) (string, error) {
 	return "ok", nil
 }
+
+type guardedNamedRuntimeTool struct{ namedRuntimeTool }
+
+func (t *guardedNamedRuntimeTool) Capability() tools.CapabilityLevel { return tools.CapabilityGuarded }
 
 func containsString(values []string, want string) bool {
 	for _, value := range values {
@@ -2440,6 +3207,31 @@ func TestRuntime_BoundTextResult_ArtifactsPreviewAndID(t *testing.T) {
 	}
 	if storedArtifact.SizeBytes <= 0 {
 		t.Fatalf("expected stored artifact bytes, got %#v", storedArtifact)
+	}
+}
+
+func TestRuntime_ToolPreviewBytesDefaultsToMaxToolBytes(t *testing.T) {
+	rt := &Runtime{MaxToolBytes: 12345}
+	if got := rt.toolPreviewBytes(); got != 12345 {
+		t.Fatalf("expected preview bytes to inherit MaxToolBytes, got %d", got)
+	}
+}
+
+func TestRuntime_ToolPreviewBytesHasUsefulFallback(t *testing.T) {
+	rt := &Runtime{}
+	if got := rt.toolPreviewBytes(); got != config.DefaultMaxToolBytes {
+		t.Fatalf("expected preview bytes fallback %d, got %d", config.DefaultMaxToolBytes, got)
+	}
+}
+
+func TestTerminalToolResultTextForUnavailableSkill(t *testing.T) {
+	out := `{"kind":"skill_read","ok":false,"summary":"Skill gws-tasks is unavailable: requires exec tool for local binary: gws"}`
+	got := terminalToolResultText("read_skill", out)
+	if !strings.Contains(got, "Skill gws-tasks is unavailable") {
+		t.Fatalf("expected unavailable skill text, got %q", got)
+	}
+	if got := terminalToolResultText("read_file", out); got != "" {
+		t.Fatalf("expected non-skill tool result to be ignored, got %q", got)
 	}
 }
 
@@ -2609,6 +3401,36 @@ func TestRuntime_HandleNewSession_Success(t *testing.T) {
 		t.Fatalf("Handle /new: %v", err)
 	}
 	msgs, err := d.GetLastMessages(ctx, "sess-new", 20)
+	if err != nil {
+		t.Fatalf("GetLastMessages: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("expected messages cleared, got %d", len(msgs))
+	}
+	if len(deliver.messages) == 0 || deliver.messages[0] != "New session started." {
+		t.Fatalf("unexpected deliver messages: %#v", deliver.messages)
+	}
+}
+
+func TestRuntime_HandleClearAliasesNewSession(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	ctx := context.Background()
+	if _, err := d.AppendMessage(ctx, "sess-clear", "user", "bad DSML context", nil); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+	deliver := &mockDeliverer{}
+	rt := buildSimpleRuntime(t, nil, d, deliver)
+
+	if err := rt.Handle(ctx, bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess-clear",
+		Channel:    "cli",
+		From:       "user",
+		Message:    "/clear",
+	}); err != nil {
+		t.Fatalf("Handle /clear: %v", err)
+	}
+	msgs, err := d.GetLastMessages(ctx, "sess-clear", 20)
 	if err != nil {
 		t.Fatalf("GetLastMessages: %v", err)
 	}

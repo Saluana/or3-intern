@@ -54,7 +54,7 @@ func TestBuildToolRegistry_ReturnsFreshToolInstances(t *testing.T) {
 	reg1 := buildToolRegistry(cfg, d, provider, channelManager, &inv, nil, stubSpawnManager{}, nil, nil)
 	reg2 := buildToolRegistry(cfg, d, provider, channelManager, &inv, nil, stubSpawnManager{}, nil, nil)
 
-	for _, name := range []string{"read_file", "memory_search", "memory_recent", "memory_get_pinned", "send_message", "spawn_subagent"} {
+	for _, name := range []string{"read_file", "list_dir", "memory_search", "memory_recent", "memory_get_pinned", "send_message", "spawn_subagent"} {
 		tool1 := reg1.Get(name)
 		tool2 := reg2.Get(name)
 		if tool1 == nil || tool2 == nil {
@@ -63,6 +63,20 @@ func TestBuildToolRegistry_ReturnsFreshToolInstances(t *testing.T) {
 		if fmt.Sprintf("%p", tool1) == fmt.Sprintf("%p", tool2) {
 			t.Fatalf("expected fresh instance for %q", name)
 		}
+	}
+}
+
+func TestAllowedReadRootAllowsFullReadWhenWritesRestricted(t *testing.T) {
+	cfg := config.Default()
+	cfg.WorkspaceDir = t.TempDir()
+	cfg.Tools.RestrictToWorkspace = true
+	cfg.Tools.AllowFullFileRead = true
+
+	if got := allowedReadRoot(cfg); got != "" {
+		t.Fatalf("expected unrestricted read root, got %q", got)
+	}
+	if got := allowedRoot(cfg); got != cfg.WorkspaceDir {
+		t.Fatalf("expected write root to remain workspace, got %q", got)
 	}
 }
 
@@ -95,6 +109,36 @@ func TestBuildToolRegistry_RegistersMCPTools(t *testing.T) {
 	}
 }
 
+func TestBuildToolRegistry_OmitsDisabledSkillExecTool(t *testing.T) {
+	cfg := config.Default()
+	cfg.WorkspaceDir = t.TempDir()
+	cfg.Skills.EnableExec = false
+
+	d, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer d.Close()
+
+	provider := providers.New("http://example.invalid", "key", time.Second)
+	channelManager, err := buildChannelManager(cfg, &cli.Deliverer{}, &artifacts.Store{Dir: t.TempDir(), DB: d}, cfg.MaxMediaBytes, nil)
+	if err != nil {
+		t.Fatalf("buildChannelManager: %v", err)
+	}
+	inv := skills.Inventory{}
+
+	reg := buildToolRegistry(cfg, d, provider, channelManager, &inv, nil, nil, nil, nil)
+	if reg.Get("read_skill") == nil {
+		t.Fatal("expected read_skill to remain registered")
+	}
+	if reg.Get("run_skill") != nil {
+		t.Fatal("expected run_skill to be omitted when skill execution is disabled")
+	}
+	if reg.Get("run_skill_script") != nil {
+		t.Fatal("expected run_skill_script to be omitted when skill execution is disabled")
+	}
+}
+
 func TestBuildBackgroundToolRegistry_OmitsMessagingAndSpawn(t *testing.T) {
 	cfg := config.Default()
 	cfg.WorkspaceDir = t.TempDir()
@@ -121,6 +165,9 @@ func TestBuildBackgroundToolRegistry_OmitsMessagingAndSpawn(t *testing.T) {
 	}
 	if reg.Get("read_file") == nil {
 		t.Fatal("expected background registry to retain work tools")
+	}
+	if reg.Get("list_dir") == nil {
+		t.Fatal("expected background registry to retain directory listing tool")
 	}
 }
 

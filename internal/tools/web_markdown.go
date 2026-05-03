@@ -37,14 +37,14 @@ func (t *WebFetchMarkdown) Capability() CapabilityLevel { return CapabilityGuard
 func (t *WebFetchMarkdown) Name() string { return "web_fetch_markdown" }
 
 func (t *WebFetchMarkdown) Description() string {
-	return "Fetch an HTML page, convert it to Markdown, save it as an artifact, and return a compact preview plus artifact_id for read_artifact. Use this when you want explicit HTML-to-Markdown controls; web_fetch already does this automatically for HTML by default."
+	return "Fetch a known HTML page URL, convert it to Markdown, save the full Markdown as an artifact, and return a compact preview plus artifact_id for read_artifact. This is guarded network access. Use web_fetch for ordinary page reading; use this when you specifically want an artifact and explicit HTML-to-Markdown size controls."
 }
 
 func (t *WebFetchMarkdown) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
-		"url":            map[string]any{"type": "string"},
-		"maxSourceBytes": map[string]any{"type": "integer", "description": "Maximum HTML bytes to fetch and convert (default 2MiB, max 10MiB)"},
-		"previewBytes":   map[string]any{"type": "integer", "description": "Markdown preview bytes returned directly (default 2000)"},
+		"url":            map[string]any{"type": "string", "description": "Full http:// or https:// HTML page URL to fetch. Use web_search first if you only have search terms."},
+		"maxSourceBytes": map[string]any{"type": "integer", "description": "Maximum HTML bytes to fetch and convert. Omit for default 2MiB; capped at 10MiB."},
+		"previewBytes":   map[string]any{"type": "integer", "description": "Markdown preview bytes returned directly. Omit for default 2000; use read_artifact with the returned artifact_id for more."},
 	}, "required": []string{"url"}}
 }
 
@@ -192,6 +192,10 @@ func buildMarkdownFetchResult(ctx context.Context, store *artifacts.Store, conve
 			OK:      false,
 			Summary: fmt.Sprintf("Fetch failed for %s with HTTP status %s", parsed.String(), status),
 			Preview: preview,
+			Advice: []string{
+				"Check whether the URL is correct and publicly reachable, or use web_search first if you still need to discover the right page.",
+				"If you only need the raw response instead of Markdown conversion, use web_fetch.",
+			},
 			Stats: map[string]any{
 				"url":               parsed.String(),
 				"mode":              "html_text",
@@ -224,6 +228,9 @@ func buildMarkdownFetchResult(ctx context.Context, store *artifacts.Store, conve
 		Summary:    fmt.Sprintf("Fetched %s, converted HTML to Markdown, and saved it as artifact %s. Use read_artifact with this artifact_id to read only the parts needed.", parsed.String(), artifactID),
 		Preview:    preview,
 		ArtifactID: artifactID,
+		Advice: []string{
+			"Use read_artifact with the returned artifact_id and an offset when the converted page is too large to inspect in one call.",
+		},
 		Stats: map[string]any{
 			"url":               parsed.String(),
 			"mode":              "markdown",

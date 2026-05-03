@@ -93,6 +93,56 @@ func TestSafePath_BlocksSymlinkEscape(t *testing.T) {
 	}
 }
 
+func TestValidateOpenedPathDetectsPathSwap(t *testing.T) {
+	root := t.TempDir()
+	p := filepath.Join(root, "target.txt")
+	mustWriteFile(t, p, []byte("first"), 0o644)
+	tool := &FileTool{Root: root}
+
+	f, err := os.Open(p)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		t.Fatalf("Stat opened file: %v", err)
+	}
+	if err := os.Remove(p); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	mustWriteFile(t, p, []byte("second"), 0o644)
+
+	if err := tool.validateOpenedPath(p, info); err == nil {
+		t.Fatal("expected swapped path to be rejected")
+	}
+}
+
+func TestOpenSafeWriteRejectsSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.txt")
+	mustWriteFile(t, secret, []byte("secret"), 0o644)
+	link := filepath.Join(root, "escape.txt")
+	if err := os.Symlink(secret, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	tool := &FileTool{Root: root}
+	f, err := tool.openSafeWrite(link, 0o600)
+	if err == nil {
+		f.Close()
+		t.Fatal("expected symlink escape to be rejected")
+	}
+	got, err := os.ReadFile(secret)
+	if err != nil {
+		t.Fatalf("ReadFile secret: %v", err)
+	}
+	if string(got) != "secret" {
+		t.Fatalf("expected escaped target to remain unchanged, got %q", string(got))
+	}
+}
+
 // ---- ReadFile ----
 
 func TestReadFile_OK(t *testing.T) {
@@ -138,6 +188,36 @@ func TestReadFile_Truncation(t *testing.T) {
 	}
 }
 
+func TestReadFile_DefaultBudgetReadsAverageSizedFile(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "average.txt")
+	content := strings.Repeat("read-file-default-budget\n", 900)
+	mustWriteFile(t, p, []byte(content), 0o644)
+
+	tool := &ReadFile{}
+	out, err := tool.Execute(context.Background(), map[string]any{
+		"path": p,
+		"mode": "full",
+	})
+	if err != nil {
+		t.Fatalf("ReadFile full: %v", err)
+	}
+	result := mustDecodeToolResult(t, out)
+	if result.Preview != content {
+		t.Fatalf("expected full default read, got %d bytes want %d", len(result.Preview), len(content))
+	}
+	if truncated, _ := result.Stats["truncated"].(bool); truncated {
+		t.Fatalf("expected default full read not to truncate")
+	}
+}
+
+func TestReadFile_FullModeIsSafe(t *testing.T) {
+	tool := &ReadFile{}
+	if got := ToolCapability(tool, map[string]any{"mode": "full"}); got != CapabilitySafe {
+		t.Fatalf("expected full mode to be safe, got %s", got)
+	}
+}
+
 func TestReadFile_EmptyPath(t *testing.T) {
 	tool := &ReadFile{}
 	_, err := tool.Execute(context.Background(), map[string]any{"path": ""})
@@ -150,6 +230,31 @@ func TestReadFile_Name(t *testing.T) {
 	tool := &ReadFile{}
 	if tool.Name() != "read_file" {
 		t.Errorf("expected 'read_file', got %q", tool.Name())
+	}
+}
+
+func TestFileToolsAllowBroadReadButRestrictWrites(t *testing.T) {
+	workspace := t.TempDir()
+	outside := t.TempDir()
+	outsideFile := filepath.Join(outside, "outside.txt")
+	mustWriteFile(t, outsideFile, []byte("outside content"), 0o644)
+
+	readTool := &ReadFile{FileTool: FileTool{Root: "", WriteRoot: workspace}}
+	out, err := readTool.Execute(context.Background(), map[string]any{"path": outsideFile})
+	if err != nil {
+		t.Fatalf("ReadFile outside workspace: %v", err)
+	}
+	result := mustDecodeToolResult(t, out)
+	if result.Preview != "outside content" {
+		t.Fatalf("expected outside content, got %q", result.Preview)
+	}
+
+	writeTool := &WriteFile{FileTool: FileTool{Root: "", WriteRoot: workspace}}
+	if _, err := writeTool.Execute(context.Background(), map[string]any{"path": filepath.Join(outside, "write.txt"), "content": "nope"}); err == nil {
+		t.Fatal("expected write outside workspace to be rejected")
+	}
+	if _, err := writeTool.Execute(context.Background(), map[string]any{"path": filepath.Join(workspace, "write.txt"), "content": "ok"}); err != nil {
+		t.Fatalf("expected write inside workspace to succeed: %v", err)
 	}
 }
 
@@ -351,9 +456,12 @@ func TestEditFile_NoEdits(t *testing.T) {
 
 func TestListDir_OK(t *testing.T) {
 	dir := t.TempDir()
-	mustWriteFile(t, filepath.Join(dir, "a.txt"), []byte("a"), 0o644)
 	mustWriteFile(t, filepath.Join(dir, "b.txt"), []byte("b"), 0o644)
-	if err := os.MkdirAll(filepath.Join(dir, "subdir"), 0o755); err != nil {
+	mustWriteFile(t, filepath.Join(dir, "a.txt"), []byte("a"), 0o644)
+	if err := os.MkdirAll(filepath.Join(dir, "z-subdir"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "m-subdir"), 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
 
@@ -372,8 +480,18 @@ func TestListDir_OK(t *testing.T) {
 	if err := json.Unmarshal([]byte(result.Preview), &entries); err != nil {
 		t.Fatalf("parse output: %v", err)
 	}
-	if len(entries) != 3 {
-		t.Errorf("expected 3 entries, got %d", len(entries))
+	if len(entries) != 4 {
+		t.Fatalf("expected 4 entries, got %d", len(entries))
+	}
+	gotNames := []string{entries[0].Name, entries[1].Name, entries[2].Name, entries[3].Name}
+	wantNames := []string{"m-subdir", "z-subdir", "a.txt", "b.txt"}
+	for i := range wantNames {
+		if gotNames[i] != wantNames[i] {
+			t.Fatalf("expected directories first then names sorted %v, got %v", wantNames, gotNames)
+		}
+	}
+	if !entries[0].IsDir || !entries[1].IsDir || entries[2].IsDir || entries[3].IsDir {
+		t.Fatalf("expected directory flags to match entries, got %#v", entries)
 	}
 }
 
@@ -399,6 +517,35 @@ func TestListDir_MaxEntries(t *testing.T) {
 	if len(entries) != 2 {
 		t.Errorf("expected 2 entries with max=2, got %d", len(entries))
 	}
+	if truncated, _ := result.Stats["truncated"].(bool); !truncated {
+		t.Fatalf("expected truncated stats for max=2, got %#v", result.Stats)
+	}
+	if len(result.Advice) == 0 {
+		t.Fatalf("expected truncation advice for bounded directory listing, got %#v", result)
+	}
+}
+
+func TestReadFile_FullTruncationIncludesAdvice(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "large.txt")
+	mustWriteFile(t, path, []byte(strings.Repeat("x", 200)), 0o644)
+
+	tool := &ReadFile{}
+	out, err := tool.Execute(context.Background(), map[string]any{
+		"path":     path,
+		"mode":     "full",
+		"maxBytes": float64(32),
+	})
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	result := mustDecodeToolResult(t, out)
+	if !result.OK {
+		t.Fatalf("expected successful bounded read, got %#v", result)
+	}
+	if len(result.Advice) == 0 {
+		t.Fatalf("expected guidance for truncated full reads, got %#v", result)
+	}
 }
 
 func TestListDir_NotFound(t *testing.T) {
@@ -406,6 +553,21 @@ func TestListDir_NotFound(t *testing.T) {
 	_, err := tool.Execute(context.Background(), map[string]any{"path": "/nonexistent/directory"})
 	if err == nil {
 		t.Fatal("expected error for missing directory")
+	}
+}
+
+func TestListDir_RejectsFile(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "file.txt")
+	mustWriteFile(t, p, []byte("content"), 0o644)
+
+	tool := &ListDir{}
+	_, err := tool.Execute(context.Background(), map[string]any{"path": p})
+	if err == nil {
+		t.Fatal("expected error for file path")
+	}
+	if !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("expected not-a-directory error, got %q", err.Error())
 	}
 }
 

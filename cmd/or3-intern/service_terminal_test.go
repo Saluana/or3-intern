@@ -6,9 +6,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/creack/pty"
 
 	"or3-intern/internal/approval"
 	"or3-intern/internal/config"
@@ -164,6 +168,31 @@ func TestServiceTerminalSessionLifecycle(t *testing.T) {
 	}
 }
 
+func TestAllocateTerminalSessionIDUsesRandomHexID(t *testing.T) {
+	server := &serviceServer{}
+	id1, err := server.allocateTerminalSessionID()
+	if err != nil {
+		t.Fatalf("allocate first id: %v", err)
+	}
+	id2, err := server.allocateTerminalSessionID()
+	if err != nil {
+		t.Fatalf("allocate second id: %v", err)
+	}
+	pattern := regexp.MustCompile(`^term_[0-9a-f]{24}$`)
+	if !pattern.MatchString(id1) {
+		t.Fatalf("expected random hex terminal id, got %q", id1)
+	}
+	if !pattern.MatchString(id2) {
+		t.Fatalf("expected random hex terminal id, got %q", id2)
+	}
+	if id1 == id2 {
+		t.Fatalf("expected unique terminal ids, got duplicate %q", id1)
+	}
+	if regexp.MustCompile(`^term_\d+_\d+$`).MatchString(id1) {
+		t.Fatalf("terminal id still uses predictable sequence format: %q", id1)
+	}
+}
+
 func TestCollectTerminalOutputStreamsPartialChunks(t *testing.T) {
 	reader, writer := io.Pipe()
 	session := &serviceTerminalSession{ID: "test", subscribers: map[chan serviceTerminalEvent]struct{}{}}
@@ -210,5 +239,194 @@ func TestWriteTerminalInputAcceptsNewlineOnlyInput(t *testing.T) {
 	}
 	if writer.String() != "\n" {
 		t.Fatalf("expected newline input, got %q", writer.String())
+	}
+}
+
+func TestWriteTerminalInputRefreshesSessionExpiry(t *testing.T) {
+	writer := &serviceTerminalTestWriteCloser{}
+	oldExpiry := time.Now().Add(2 * time.Second).UTC()
+	session := &serviceTerminalSession{
+		ID:          "term-refresh-input",
+		Status:      "running",
+		ExpiresAt:   oldExpiry,
+		stdin:       writer,
+		subscribers: map[chan serviceTerminalEvent]struct{}{},
+	}
+	server := &serviceServer{terminalSessions: map[string]*serviceTerminalSession{session.ID: session}}
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/terminal/sessions/term-refresh-input/input", strings.NewReader(`{"input":"echo hi\n"}`))
+	rec := httptest.NewRecorder()
+
+	server.writeTerminalInput(rec, req, session.ID)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if !session.ExpiresAt.After(oldExpiry) {
+		t.Fatalf("expected session expiry to refresh, old=%s new=%s", oldExpiry, session.ExpiresAt)
+	}
+	if session.LastActiveAt.IsZero() {
+		t.Fatal("expected last active time to be updated")
+	}
+}
+
+func TestAppendTerminalOutputRefreshesSessionExpiry(t *testing.T) {
+	oldExpiry := time.Now().Add(2 * time.Second).UTC()
+	session := &serviceTerminalSession{
+		ID:          "term-refresh-output",
+		ExpiresAt:   oldExpiry,
+		subscribers: map[chan serviceTerminalEvent]struct{}{},
+	}
+
+	session.appendEvent("output", map[string]any{"chunk": "prompt> "})
+
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if !session.ExpiresAt.After(oldExpiry) {
+		t.Fatalf("expected output to refresh session expiry, old=%s new=%s", oldExpiry, session.ExpiresAt)
+	}
+	if session.LastActiveAt.IsZero() {
+		t.Fatal("expected last active time to be updated")
+	}
+}
+
+func TestListTerminalSessionsReturnsMostRecentFirst(t *testing.T) {
+	now := time.Now().UTC()
+	server := &serviceServer{terminalSessions: map[string]*serviceTerminalSession{
+		"term-old": {
+			ID:           "term-old",
+			Shell:        "/bin/zsh",
+			WorkingDir:   "/tmp/old",
+			RelativePath: ".",
+			RootID:       "workspace",
+			CreatedAt:    now.Add(-2 * time.Minute),
+			LastActiveAt: now.Add(-90 * time.Second),
+			ExpiresAt:    now.Add(time.Minute),
+			Status:       "running",
+			Rows:         24,
+			Cols:         80,
+		},
+		"term-new": {
+			ID:           "term-new",
+			Shell:        "/bin/zsh",
+			WorkingDir:   "/tmp/new",
+			RelativePath: ".",
+			RootID:       "workspace",
+			CreatedAt:    now.Add(-time.Minute),
+			LastActiveAt: now,
+			ExpiresAt:    now.Add(time.Minute),
+			Status:       "running",
+			Rows:         24,
+			Cols:         80,
+		},
+	}}
+	req := httptest.NewRequest(http.MethodGet, "/internal/v1/terminal/sessions", nil)
+	rec := httptest.NewRecorder()
+
+	server.listTerminalSessions(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if len(body.Items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(body.Items))
+	}
+	if got := body.Items[0]["session_id"]; got != "term-new" {
+		t.Fatalf("expected newest session first, got %v", got)
+	}
+}
+
+func TestTerminalShellArgs(t *testing.T) {
+	tests := []struct {
+		shell string
+		want  []string
+	}{
+		{shell: "/bin/zsh", want: []string{"-il"}},
+		{shell: "/bin/bash", want: []string{"-il"}},
+		{shell: "/bin/sh", want: []string{"-i"}},
+	}
+	for _, tt := range tests {
+		got := terminalShellArgs(tt.shell)
+		if !slices.Equal(got, tt.want) {
+			t.Fatalf("terminalShellArgs(%q) = %v, want %v", tt.shell, got, tt.want)
+		}
+	}
+}
+
+func TestResizeTerminalSessionClampsRowsCols(t *testing.T) {
+	ptmx, tty, err := pty.Open()
+	if err != nil {
+		t.Fatalf("pty.Open: %v", err)
+	}
+	defer ptmx.Close()
+	defer tty.Close()
+
+	session := &serviceTerminalSession{
+		ID:          "term-resize",
+		Status:      "running",
+		Rows:        24,
+		Cols:        80,
+		ExpiresAt:   time.Now().Add(time.Minute),
+		ptyFile:     ptmx,
+		subscribers: map[chan serviceTerminalEvent]struct{}{},
+	}
+	server := &serviceServer{terminalSessions: map[string]*serviceTerminalSession{session.ID: session}}
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/terminal/sessions/term-resize/resize", strings.NewReader(`{"rows":999999,"cols":888888}`))
+	rec := httptest.NewRecorder()
+
+	server.resizeTerminalSession(rec, req, session.ID)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if session.Rows != 200 || session.Cols != 400 {
+		t.Fatalf("expected clamped size 200x400, got %dx%d", session.Rows, session.Cols)
+	}
+	if !strings.Contains(rec.Body.String(), `"rows":200`) || !strings.Contains(rec.Body.String(), `"cols":400`) {
+		t.Fatalf("expected clamped response body, got %s", rec.Body.String())
+	}
+}
+
+func TestResizeTerminalSessionReturnsErrorWhenPTYResizeFails(t *testing.T) {
+	ptmx, tty, err := pty.Open()
+	if err != nil {
+		t.Fatalf("pty.Open: %v", err)
+	}
+	_ = tty.Close()
+	if err := ptmx.Close(); err != nil {
+		t.Fatalf("close ptmx: %v", err)
+	}
+
+	session := &serviceTerminalSession{
+		ID:          "term-resize-error",
+		Status:      "running",
+		Rows:        24,
+		Cols:        80,
+		ExpiresAt:   time.Now().Add(time.Minute),
+		ptyFile:     ptmx,
+		subscribers: map[chan serviceTerminalEvent]struct{}{},
+	}
+	server := &serviceServer{terminalSessions: map[string]*serviceTerminalSession{session.ID: session}}
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/terminal/sessions/term-resize-error/resize", strings.NewReader(`{"rows":40,"cols":120}`))
+	rec := httptest.NewRecorder()
+
+	server.resizeTerminalSession(rec, req, session.ID)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d: %s", rec.Code, rec.Body.String())
+	}
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	for _, event := range session.events {
+		if event.Type == "resize" {
+			t.Fatalf("unexpected resize event after PTY resize failure")
+		}
 	}
 }

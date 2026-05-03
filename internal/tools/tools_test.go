@@ -95,11 +95,15 @@ func TestRegistry_Definitions(t *testing.T) {
 func TestRegistry_MetadataInfersGroups(t *testing.T) {
 	r := NewRegistry()
 	r.Register(&mockTool{name: "read_file", desc: ""})
+	r.Register(&mockTool{name: "list_dir", desc: ""})
 	r.Register(&mockTool{name: "write_file", desc: ""})
 	r.Register(&mockTool{name: "web_fetch", desc: ""})
 	r.Register(&mockTool{name: "spawn_subagent", desc: ""})
 	if !containsGroup(r.Metadata("read_file").Groups, ToolGroupRead) {
 		t.Fatalf("expected read_file read group")
+	}
+	if !containsGroup(r.Metadata("list_dir").Groups, ToolGroupRead) {
+		t.Fatalf("expected list_dir read group")
 	}
 	if !containsGroup(r.Metadata("write_file").Groups, ToolGroupWrite) {
 		t.Fatalf("expected write_file write group")

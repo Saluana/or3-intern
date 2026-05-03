@@ -2,6 +2,8 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -271,6 +273,47 @@ func TestExecTool_RestrictDir_Inside(t *testing.T) {
 	}
 }
 
+func TestExecTool_RestrictDir_DefaultsCwdToRestrictDir(t *testing.T) {
+	dir := t.TempDir()
+	tool := &ExecTool{
+		Timeout:           5 * time.Second,
+		EnableLegacyShell: true,
+		RestrictDir:       dir,
+	}
+	out, err := tool.Execute(context.Background(), map[string]any{
+		"command": "pwd",
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !strings.Contains(out, dir) {
+		t.Fatalf("expected pwd to run inside restrict dir, got %q", out)
+	}
+}
+
+func TestExecTool_RestrictDir_ResolvesRelativeCwdFromRestrictDir(t *testing.T) {
+	dir := t.TempDir()
+	child := filepath.Join(dir, "child")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	tool := &ExecTool{
+		Timeout:           5 * time.Second,
+		EnableLegacyShell: true,
+		RestrictDir:       dir,
+	}
+	out, err := tool.Execute(context.Background(), map[string]any{
+		"command": "pwd",
+		"cwd":     "child",
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !strings.Contains(out, child) {
+		t.Fatalf("expected pwd to run inside child dir, got %q", out)
+	}
+}
+
 func TestExecTool_RestrictDir_Outside(t *testing.T) {
 	dir := t.TempDir()
 	tool := &ExecTool{
@@ -356,6 +399,9 @@ func TestExecTool_Description(t *testing.T) {
 	if tool.Description() == "" {
 		t.Error("expected non-empty description")
 	}
+	if !strings.Contains(tool.Description(), "approval") || !strings.Contains(tool.Description(), "program plus args") {
+		t.Fatalf("expected description to clarify exec controls, got %q", tool.Description())
+	}
 }
 
 func TestExecTool_Parameters(t *testing.T) {
@@ -377,12 +423,19 @@ func TestExecTool_Schema(t *testing.T) {
 // makeTestBroker creates an approval.Broker backed by a temporary SQLite database.
 // The caller must close the returned database when done.
 func makeTestBroker(t *testing.T, mode config.ApprovalMode) *approval.Broker {
+	return makeTestBrokerWithDB(t, mode, nil)
+}
+
+func makeTestBrokerWithDB(t *testing.T, mode config.ApprovalMode, database *db.DB) *approval.Broker {
 	t.Helper()
-	database, err := db.Open(filepath.Join(t.TempDir(), "exec-broker-test.db"))
-	if err != nil {
-		t.Fatalf("db.Open: %v", err)
+	if database == nil {
+		var err error
+		database, err = db.Open(filepath.Join(t.TempDir(), "exec-broker-test.db"))
+		if err != nil {
+			t.Fatalf("db.Open: %v", err)
+		}
+		t.Cleanup(func() { database.Close() })
 	}
-	t.Cleanup(func() { database.Close() })
 	cfg := config.Default().Security.Approvals
 	cfg.Enabled = true
 	cfg.HostID = "test-host"
@@ -412,6 +465,20 @@ func TestExecTool_ApprovalRequired_Blocks(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "approval required") {
 		t.Errorf("expected 'approval required' in error, got %q", err.Error())
+	}
+	var approvalErr *ApprovalRequiredError
+	if !errors.As(err, &approvalErr) {
+		t.Fatalf("expected ApprovalRequiredError, got %T", err)
+	}
+	if approvalErr.RequestID <= 0 {
+		t.Fatalf("expected approval request ID, got %d", approvalErr.RequestID)
+	}
+	requests, err := broker.ListApprovalRequests(context.Background(), "pending", 10)
+	if err != nil {
+		t.Fatalf("ListApprovalRequests: %v", err)
+	}
+	if len(requests) != 1 || requests[0].ID != approvalErr.RequestID {
+		t.Fatalf("expected pending request %d, got %+v", approvalErr.RequestID, requests)
 	}
 }
 
@@ -560,5 +627,216 @@ func TestExecTool_AllowlistMode_Allows(t *testing.T) {
 	}
 	if !strings.Contains(out, "allowlisted") {
 		t.Errorf("unexpected output: %q", out)
+	}
+}
+
+func serviceExecContext() context.Context {
+	ctx := ContextWithRequestSource(context.Background(), RequestSourceService)
+	ctx = ContextWithRequesterIdentity(ctx, "test-operator", "operator")
+	ctx = ContextWithApprovalToken(ctx, "approved-token")
+	return ctx
+}
+
+func serviceExecContextWithoutApproval() context.Context {
+	ctx := ContextWithRequestSource(context.Background(), RequestSourceService)
+	ctx = ContextWithRequesterIdentity(ctx, "test-operator", "operator")
+	return ctx
+}
+
+func TestExecServiceWithoutApprovalTokenCreatesApprovalRequest(t *testing.T) {
+	broker := makeTestBroker(t, config.ApprovalModeAsk)
+	tool := &ExecTool{
+		Timeout:         time.Second,
+		AllowedPrograms: []string{"echo"},
+		ApprovalBroker:  broker,
+	}
+
+	_, err := tool.Execute(serviceExecContextWithoutApproval(), map[string]any{
+		"command": `echo "needs approval"`,
+	})
+	if err == nil {
+		t.Fatal("expected approval-required error")
+	}
+	var approvalErr *ApprovalRequiredError
+	if !errors.As(err, &approvalErr) {
+		t.Fatalf("expected ApprovalRequiredError, got %T: %v", err, err)
+	}
+	if approvalErr.RequestID <= 0 {
+		t.Fatalf("expected approval request ID, got %d", approvalErr.RequestID)
+	}
+	if strings.Contains(err.Error(), "requires approval token") {
+		t.Fatalf("service exec should create an approval request instead of hard-failing: %v", err)
+	}
+}
+
+func TestExecCapabilityForContext_ServiceCommandIsGuarded(t *testing.T) {
+	tool := &ExecTool{}
+	params := map[string]any{"command": `echo "hello world"`}
+
+	if got := ToolCapability(tool, params); got != CapabilityPrivileged {
+		t.Fatalf("expected non-service command to stay privileged, got %s", got)
+	}
+	if got := ToolCapabilityForContext(serviceExecContext(), tool, params); got != CapabilityGuarded {
+		t.Fatalf("expected service command to be guarded, got %s", got)
+	}
+}
+
+func TestExecServiceCommandRunsAsDirectProgram(t *testing.T) {
+	tool := &ExecTool{
+		Timeout:         time.Second,
+		AllowedPrograms: []string{"echo"},
+	}
+
+	out, err := tool.Execute(serviceExecContext(), map[string]any{"command": `echo "hello world"`})
+	if err != nil {
+		t.Fatalf("Execute service command: %v", err)
+	}
+	if !strings.Contains(out, "hello world") {
+		t.Fatalf("expected echo output, got %q", out)
+	}
+}
+
+func TestExecServiceCommandMergesExplicitArgs(t *testing.T) {
+	tool := &ExecTool{
+		Timeout:         time.Second,
+		AllowedPrograms: []string{"echo"},
+	}
+
+	out, err := tool.Execute(serviceExecContext(), map[string]any{
+		"command": "echo",
+		"args":    []any{"hello", "world"},
+	})
+	if err != nil {
+		t.Fatalf("Execute service command with explicit args: %v", err)
+	}
+	if !strings.Contains(out, "hello world") {
+		t.Fatalf("expected echo output with merged args, got %q", out)
+	}
+}
+
+func TestExecServiceCommandNormalizesMatchingProgramAndCommand(t *testing.T) {
+	tool := &ExecTool{
+		Timeout:         time.Second,
+		AllowedPrograms: []string{"echo"},
+	}
+
+	out, err := tool.Execute(serviceExecContext(), map[string]any{
+		"program": "echo",
+		"command": `echo "hello world"`,
+	})
+	if err != nil {
+		t.Fatalf("Execute service command with matching program+command: %v", err)
+	}
+	if !strings.Contains(out, "hello world") {
+		t.Fatalf("expected echo output, got %q", out)
+	}
+}
+
+func TestExecServiceCommandRejectsProgramCommandMismatch(t *testing.T) {
+	tool := &ExecTool{
+		Timeout:         time.Second,
+		AllowedPrograms: []string{"echo", "printf"},
+	}
+
+	_, err := tool.Execute(serviceExecContext(), map[string]any{
+		"program": "echo",
+		"command": "printf hello",
+	})
+	if err == nil {
+		t.Fatal("expected mismatch error")
+	}
+	if !strings.Contains(err.Error(), "program/command mismatch") {
+		t.Fatalf("expected mismatch error, got %v", err)
+	}
+}
+
+func TestExecServiceCommandPassesGuardedRegistryCeiling(t *testing.T) {
+	registry := NewRegistry()
+	registry.Register(&ExecTool{
+		Timeout:         time.Second,
+		AllowedPrograms: []string{"echo"},
+	})
+	ctx := ContextWithToolGuard(serviceExecContext(), func(_ context.Context, _ Tool, capability CapabilityLevel, _ map[string]any) error {
+		if capability != CapabilityGuarded {
+			t.Fatalf("expected guarded capability, got %s", capability)
+		}
+		return nil
+	})
+
+	out, err := registry.ExecuteParams(ctx, "exec", map[string]any{"command": `echo "hello ceiling"`})
+	if err != nil {
+		t.Fatalf("ExecuteParams: %v", err)
+	}
+	if !strings.Contains(out, "hello ceiling") {
+		t.Fatalf("expected echo output, got %q", out)
+	}
+}
+
+func TestExecServiceCommandRejectsShellSyntax(t *testing.T) {
+	tool := &ExecTool{
+		Timeout:         time.Second,
+		AllowedPrograms: []string{"echo"},
+	}
+
+	_, err := tool.Execute(serviceExecContext(), map[string]any{"command": `echo hello && echo goodbye`})
+	if err == nil {
+		t.Fatal("expected shell syntax to be rejected")
+	}
+	if !strings.Contains(err.Error(), "shell syntax is not allowed") {
+		t.Fatalf("expected shell syntax error, got %v", err)
+	}
+}
+
+func TestExecServiceResolvesProgramFromPathAppend(t *testing.T) {
+	binDir := t.TempDir()
+	programName := "pathappendcmd"
+	script := filepath.Join(binDir, programName)
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho from-appended-path\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	tool := &ExecTool{
+		Timeout:         time.Second,
+		PathAppend:      binDir,
+		AllowedPrograms: []string{programName},
+	}
+
+	out, err := tool.Execute(serviceExecContext(), map[string]any{"program": programName})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !strings.Contains(out, "from-appended-path") {
+		t.Fatalf("expected appended-path execution output, got %q", out)
+	}
+}
+
+func TestExecServiceWhichUsesEffectiveChildPath(t *testing.T) {
+	binDir := t.TempDir()
+	programName := "whichpathcmd"
+	script := filepath.Join(binDir, programName)
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho gws\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	tool := &ExecTool{
+		Timeout:         time.Second,
+		PathAppend:      binDir,
+		AllowedPrograms: []string{"echo"},
+	}
+
+	out, err := tool.Execute(serviceExecContext(), map[string]any{
+		"program": "which",
+		"args":    []any{programName},
+	})
+	if err != nil {
+		t.Fatalf("Execute which alias: %v", err)
+	}
+	var result ToolResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("Unmarshal ToolResult: %v", err)
+	}
+	if !result.OK {
+		t.Fatalf("expected successful lookup, got %#v", result)
+	}
+	if !strings.Contains(result.Preview, script) {
+		t.Fatalf("expected preview to include %q, got %#v", script, result)
 	}
 }

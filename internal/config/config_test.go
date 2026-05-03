@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -49,6 +51,11 @@ func clearConfigEnv(t *testing.T) {
 		"OR3_SERVICE_ENABLED",
 		"OR3_SERVICE_LISTEN",
 		"OR3_SERVICE_SECRET",
+		"OR3_SERVICE_ALLOW_REMOTE_UNAUTHENTICATED_PAIRING",
+		"OR3_SERVICE_TRUSTED_BROWSER_ORIGINS",
+		"OR3_SERVICE_TRUSTED_BROWSER_CIDRS",
+		"OR3_SERVICE_TRUSTED_PAIRING_ORIGINS",
+		"OR3_SERVICE_TRUSTED_PAIRING_CIDRS",
 		"OR3_RUNTIME_PROFILE",
 	} {
 		t.Setenv(key, "")
@@ -65,14 +72,17 @@ func TestDefault_Values(t *testing.T) {
 	if cfg.HistoryMax != 40 {
 		t.Errorf("expected HistoryMax=40, got %d", cfg.HistoryMax)
 	}
-	if cfg.MaxToolBytes != 24*1024 {
-		t.Errorf("expected MaxToolBytes=%d, got %d", 24*1024, cfg.MaxToolBytes)
+	if cfg.MaxToolBytes != DefaultMaxToolBytes {
+		t.Errorf("expected MaxToolBytes=%d, got %d", DefaultMaxToolBytes, cfg.MaxToolBytes)
 	}
 	if cfg.MaxMediaBytes != 20*1024*1024 {
 		t.Errorf("expected MaxMediaBytes=%d, got %d", 20*1024*1024, cfg.MaxMediaBytes)
 	}
 	if cfg.MaxToolLoops != 6 {
 		t.Errorf("expected MaxToolLoops=6, got %d", cfg.MaxToolLoops)
+	}
+	if cfg.MaxToolLoopsExceededAction != QuotaExceededActionAsk {
+		t.Errorf("expected MaxToolLoopsExceededAction=ask, got %q", cfg.MaxToolLoopsExceededAction)
 	}
 	if cfg.VectorK != 8 {
 		t.Errorf("expected VectorK=8, got %d", cfg.VectorK)
@@ -116,6 +126,9 @@ func TestDefault_Values(t *testing.T) {
 	if !cfg.Tools.RestrictToWorkspace {
 		t.Error("expected RestrictToWorkspace=true by default")
 	}
+	if cfg.Tools.AllowFullFileRead {
+		t.Error("expected AllowFullFileRead=false by default")
+	}
 	if cfg.ConsolidationMaxMessages != 50 {
 		t.Errorf("expected ConsolidationMaxMessages=50, got %d", cfg.ConsolidationMaxMessages)
 	}
@@ -154,6 +167,9 @@ func TestDefault_Values(t *testing.T) {
 	}
 	if cfg.Service.AllowUnauthenticatedPairing {
 		t.Fatal("expected unauthenticated pairing to be disabled by default")
+	}
+	if len(cfg.Service.TrustedBrowserOrigins) != 0 || len(cfg.Service.TrustedBrowserCIDRs) != 0 {
+		t.Fatalf("expected trusted browser allowlists to default empty, got origins=%v cidrs=%v", cfg.Service.TrustedBrowserOrigins, cfg.Service.TrustedBrowserCIDRs)
 	}
 	if cfg.Service.MutationRateLimitPerMinute != 60 {
 		t.Fatalf("expected Service.MutationRateLimitPerMinute=60, got %d", cfg.Service.MutationRateLimitPerMinute)
@@ -199,6 +215,9 @@ func TestDefault_Values(t *testing.T) {
 	}
 	if !cfg.Skills.Policy.QuarantineByDefault {
 		t.Fatal("expected skills to quarantine by default")
+	}
+	if !strings.HasSuffix(cfg.Skills.Load.GlobalDir, filepath.Join(".agents", "skills")) {
+		t.Fatalf("expected default global skills dir to be ~/.agents/skills, got %q", cfg.Skills.Load.GlobalDir)
 	}
 	if cfg.Hardening.Sandbox.BubblewrapPath != "bwrap" {
 		t.Fatalf("expected default bubblewrap path, got %q", cfg.Hardening.Sandbox.BubblewrapPath)
@@ -257,12 +276,47 @@ func TestLoad_RejectsUnknownApprovalMode(t *testing.T) {
 	}
 }
 
+func TestValidateAuthConfigRejectsUnsafeRPAndOrigins(t *testing.T) {
+	base := AuthConfig{
+		Enabled:                   true,
+		RPID:                      "or3.chat",
+		RPDisplayName:             "OR3",
+		AllowedOrigins:            []string{"https://or3.chat"},
+		SessionIdleTTLSeconds:     300,
+		SessionAbsoluteTTLSeconds: 3600,
+		StepUpTTLSeconds:          120,
+		FallbackPolicy:            AuthFallbackPairedTokenPlusWarn,
+		EnforcementMode:           AuthEnforcementWarn,
+	}
+	tests := []struct {
+		name string
+		edit func(*AuthConfig)
+	}{
+		{name: "rp id is url", edit: func(cfg *AuthConfig) { cfg.RPID = "https://or3.chat" }},
+		{name: "rp id is raw ip", edit: func(cfg *AuthConfig) { cfg.RPID = "192.168.1.2" }},
+		{name: "wildcard origin", edit: func(cfg *AuthConfig) { cfg.AllowedOrigins = []string{"https://*.or3.chat"} }},
+		{name: "http production origin", edit: func(cfg *AuthConfig) { cfg.AllowedOrigins = []string{"http://or3.chat"} }},
+		{name: "origin outside rp id", edit: func(cfg *AuthConfig) { cfg.AllowedOrigins = []string{"https://example.com"} }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := base
+			tc.edit(&cfg)
+			if err := validateAuthConfig(cfg); err == nil {
+				t.Fatal("expected auth config validation to reject unsafe RP/origin")
+			}
+		})
+	}
+}
+
 func TestApplyEnvOverrides_ServiceConfig(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := Default()
 	t.Setenv("OR3_SERVICE_ENABLED", "true")
 	t.Setenv("OR3_SERVICE_LISTEN", "127.0.0.1:9200")
 	t.Setenv("OR3_SERVICE_SECRET", "top-secret-value")
+	t.Setenv("OR3_SERVICE_TRUSTED_BROWSER_ORIGINS", "http://100.64.0.42:3060, https://app.example.test ")
+	t.Setenv("OR3_SERVICE_TRUSTED_BROWSER_CIDRS", "100.64.0.0/10,192.168.1.10")
 
 	ApplyEnvOverrides(&cfg)
 
@@ -274,6 +328,12 @@ func TestApplyEnvOverrides_ServiceConfig(t *testing.T) {
 	}
 	if cfg.Service.Secret != "top-secret-value" {
 		t.Fatalf("unexpected service secret override: %q", cfg.Service.Secret)
+	}
+	if got, want := cfg.Service.TrustedBrowserOrigins, []string{"http://100.64.0.42:3060", "https://app.example.test"}; !slices.Equal(got, want) {
+		t.Fatalf("unexpected trusted browser origins override: got %v want %v", got, want)
+	}
+	if got, want := cfg.Service.TrustedBrowserCIDRs, []string{"100.64.0.0/10", "192.168.1.10"}; !slices.Equal(got, want) {
+		t.Fatalf("unexpected trusted browser CIDRs override: got %v want %v", got, want)
 	}
 }
 
@@ -305,6 +365,9 @@ func TestLoad_ServiceHardeningDefaultsAndNormalization(t *testing.T) {
 	}
 	if !loaded.Service.AllowUnauthenticatedPairing {
 		t.Fatal("expected explicit unauthenticated pairing setting to round trip")
+	}
+	if loaded.Service.TrustedBrowserOrigins == nil || loaded.Service.TrustedBrowserCIDRs == nil {
+		t.Fatalf("expected trusted browser allowlists to be normalized to empty slices, got origins=%v cidrs=%v", loaded.Service.TrustedBrowserOrigins, loaded.Service.TrustedBrowserCIDRs)
 	}
 	if loaded.Service.MutationRateLimitPerMinute != 60 {
 		t.Fatalf("expected non-positive rate limit to default to 60, got %d", loaded.Service.MutationRateLimitPerMinute)
@@ -349,11 +412,16 @@ func TestLoad_HardeningDefaultsAndOverrides(t *testing.T) {
 	cfg.Hardening.ExecAllowedPrograms = []string{"go", "git"}
 	cfg.Hardening.ChildEnvAllowlist = []string{"PATH"}
 	cfg.Hardening.Quotas = HardeningQuotaConfig{
-		Enabled:          true,
-		MaxToolCalls:     3,
-		MaxExecCalls:     1,
-		MaxWebCalls:      2,
-		MaxSubagentCalls: 1,
+		Enabled:                 true,
+		ExceededAction:          QuotaExceededActionFail,
+		MaxToolCalls:            3,
+		MaxExecCalls:            1,
+		MaxWebCalls:             2,
+		MaxSubagentCalls:        1,
+		MaxSessionToolCalls:     30,
+		MaxSessionExecCalls:     10,
+		MaxSessionWebCalls:      20,
+		MaxSessionSubagentCalls: 5,
 	}
 
 	b, _ := json.MarshalIndent(cfg, "", "  ")
@@ -374,7 +442,9 @@ func TestLoad_HardeningDefaultsAndOverrides(t *testing.T) {
 	if got := loaded.Hardening.ChildEnvAllowlist; len(got) != 1 || got[0] != "PATH" {
 		t.Fatalf("unexpected child env allowlist: %#v", got)
 	}
-	if loaded.Hardening.Quotas.MaxToolCalls != 3 || loaded.Hardening.Quotas.MaxExecCalls != 1 || loaded.Hardening.Quotas.MaxWebCalls != 2 || loaded.Hardening.Quotas.MaxSubagentCalls != 1 {
+	if loaded.Hardening.Quotas.ExceededAction != QuotaExceededActionFail ||
+		loaded.Hardening.Quotas.MaxToolCalls != 3 || loaded.Hardening.Quotas.MaxExecCalls != 1 || loaded.Hardening.Quotas.MaxWebCalls != 2 || loaded.Hardening.Quotas.MaxSubagentCalls != 1 ||
+		loaded.Hardening.Quotas.MaxSessionToolCalls != 30 || loaded.Hardening.Quotas.MaxSessionExecCalls != 10 || loaded.Hardening.Quotas.MaxSessionWebCalls != 20 || loaded.Hardening.Quotas.MaxSessionSubagentCalls != 5 {
 		t.Fatalf("unexpected quota overrides: %+v", loaded.Hardening.Quotas)
 	}
 }
@@ -662,10 +732,11 @@ func TestLoad_ValidFile(t *testing.T) {
 	path := filepath.Join(dir, "config.json")
 
 	input := Config{
-		DBPath:            "/tmp/test.db",
-		DefaultSessionKey: "test:session",
-		HistoryMax:        20,
-		MaxToolLoops:      3,
+		DBPath:                     "/tmp/test.db",
+		DefaultSessionKey:          "test:session",
+		HistoryMax:                 20,
+		MaxToolLoops:               3,
+		MaxToolLoopsExceededAction: QuotaExceededActionFail,
 		Provider: ProviderConfig{
 			APIBase:        "https://custom.api",
 			TimeoutSeconds: 30,
@@ -686,6 +757,9 @@ func TestLoad_ValidFile(t *testing.T) {
 	}
 	if cfg.HistoryMax != 20 {
 		t.Errorf("expected HistoryMax=20, got %d", cfg.HistoryMax)
+	}
+	if cfg.MaxToolLoopsExceededAction != QuotaExceededActionFail {
+		t.Errorf("expected MaxToolLoopsExceededAction=fail, got %q", cfg.MaxToolLoopsExceededAction)
 	}
 	if cfg.MaxMediaBytes != Default().MaxMediaBytes {
 		t.Errorf("expected missing MaxMediaBytes to default to %d, got %d", Default().MaxMediaBytes, cfg.MaxMediaBytes)
@@ -905,8 +979,8 @@ func TestLoad_ZeroValues_GetDefaults(t *testing.T) {
 	if cfg.HistoryMax != 40 {
 		t.Errorf("expected HistoryMax=40, got %d", cfg.HistoryMax)
 	}
-	if cfg.MaxToolBytes != 24*1024 {
-		t.Errorf("expected MaxToolBytes=%d, got %d", 24*1024, cfg.MaxToolBytes)
+	if cfg.MaxToolBytes != DefaultMaxToolBytes {
+		t.Errorf("expected MaxToolBytes=%d, got %d", DefaultMaxToolBytes, cfg.MaxToolBytes)
 	}
 	if cfg.MaxToolLoops != 6 {
 		t.Errorf("expected MaxToolLoops=6, got %d", cfg.MaxToolLoops)

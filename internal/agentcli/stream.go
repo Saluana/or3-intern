@@ -11,20 +11,20 @@ import (
 )
 
 type outputCollector struct {
-	stdout   *ringBuffer
-	stderr   *ringBuffer
+	stdout *ringBuffer
+	stderr *ringBuffer
 }
 
 func newOutputCollector(maxBytes int) *outputCollector {
 	return &outputCollector{
-		stdout:   newRingBuffer(maxBytes),
-		stderr:   newRingBuffer(maxBytes),
+		stdout: newRingBuffer(maxBytes),
+		stderr: newRingBuffer(maxBytes),
 	}
 }
 
 type ringBuffer struct {
-	buf []byte
-	pos int
+	buf  []byte
+	pos  int
 	full bool
 }
 

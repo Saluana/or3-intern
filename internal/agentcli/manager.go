@@ -341,11 +341,11 @@ func (m *Manager) executeRun(run db.AgentCLIRun) {
 	if m.Jobs != nil {
 		m.Jobs.AttachCancel(run.JobID, cancel)
 		m.Jobs.Publish(run.JobID, "started", map[string]any{
-			"status":     db.AgentCLIStatusRunning,
-			"runner_id":  run.RunnerID,
-			"run_id":     run.ID,
-			"mode":       run.Mode,
-			"isolation":  run.Isolation,
+			"status":    db.AgentCLIStatusRunning,
+			"runner_id": run.RunnerID,
+			"run_id":    run.ID,
+			"mode":      run.Mode,
+			"isolation": run.Isolation,
 		})
 	}
 
@@ -399,12 +399,12 @@ func (m *Manager) executeRun(run db.AgentCLIRun) {
 		"cwd":          cmdSpec.Cwd,
 	})
 	m.persistEvent(run, AgentRunEvent{
-		Type:    "started",
-		TS:      startedTS,
-		Seq:     0,
-		JobID:   run.JobID,
+		Type:     "started",
+		TS:       startedTS,
+		Seq:      0,
+		JobID:    run.JobID,
 		RunnerID: run.RunnerID,
-		Payload: startedPayload,
+		Payload:  startedPayload,
 	})
 
 	if m.Jobs != nil {
@@ -449,8 +449,8 @@ func (m *Manager) executeRun(run db.AgentCLIRun) {
 
 	// Emit completion event
 	completionPayload, _ := json.Marshal(map[string]any{
-		"exit_code":     out.ExitCode,
-		"duration_ms":   out.DurationMS,
+		"exit_code":      out.ExitCode,
+		"duration_ms":    out.DurationMS,
 		"stdout_preview": truncateString(out.StdoutPreview, 200),
 		"stderr_preview": truncateString(out.StderrPreview, 200),
 	})
@@ -509,12 +509,12 @@ func (m *Manager) finalizeRun(ctx context.Context, run db.AgentCLIRun, status, e
 		switch status {
 		case db.AgentCLIStatusSucceeded:
 			m.Jobs.Complete(run.JobID, status, map[string]any{
-				"runner_id":       run.RunnerID,
-				"run_id":          run.ID,
-				"stdout_preview":  fin.StdoutPreview,
-				"stderr_preview":  fin.StderrPreview,
-				"exit_code":       fin.ExitCode,
-				"duration_ms":     out.DurationMS,
+				"runner_id":      run.RunnerID,
+				"run_id":         run.ID,
+				"stdout_preview": fin.StdoutPreview,
+				"stderr_preview": fin.StderrPreview,
+				"exit_code":      fin.ExitCode,
+				"duration_ms":    out.DurationMS,
 			})
 		case db.AgentCLIStatusFailed, db.AgentCLIStatusTimedOut:
 			m.Jobs.Fail(run.JobID, errMsg, map[string]any{
@@ -553,9 +553,9 @@ func (m *Manager) persistEvent(run db.AgentCLIRun, e AgentRunEvent) {
 func (m *Manager) reconcileInterruptedRun(run db.AgentCLIRun, reason string) {
 	ctx := context.Background()
 	fin := db.AgentCLIFinalizeInput{
-		Status:      db.AgentCLIStatusAborted,
+		Status:       db.AgentCLIStatusAborted,
 		ErrorMessage: reason,
-		CompletedAt: db.NowMS(),
+		CompletedAt:  db.NowMS(),
 	}
 	_ = m.DB.FinalizeAgentCLIRun(ctx, run.ID, fin)
 	if m.Jobs != nil {
@@ -595,14 +595,14 @@ func (m *Manager) signalN(n int) {
 
 func eventToMap(e AgentRunEvent) map[string]any {
 	return map[string]any{
-		"type":      e.Type,
-		"seq":       e.Seq,
-		"stream":    e.Stream,
-		"chunk":     e.Chunk,
-		"runner_id": e.RunnerID,
-		"job_id":    e.JobID,
-		"status":    e.Status,
-		"message":   e.Message,
+		"type":        e.Type,
+		"seq":         e.Seq,
+		"stream":      e.Stream,
+		"chunk":       e.Chunk,
+		"runner_id":   e.RunnerID,
+		"job_id":      e.JobID,
+		"status":      e.Status,
+		"message":     e.Message,
 		"duration_ms": e.DurationMS,
 	}
 }

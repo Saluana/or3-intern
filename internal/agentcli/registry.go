@@ -24,12 +24,12 @@ func AllRunners() []RunnerSpec {
 			VersionArgs: []string{"--version"},
 			AuthCheck:   &SmallCommandSpec{Args: []string{"auth", "list"}, Timeout: 3},
 			Supports: RunnerSupports{
-				StructuredOutput:     true,
-				StreamingJSON:        true,
-				ModelFlag:            true,
-				SafeSandboxFlag:      false,
-				DangerousBypassFlag:  true,
-				StdinPrompt:          false,
+				StructuredOutput:    true,
+				StreamingJSON:       true,
+				ModelFlag:           true,
+				SafeSandboxFlag:     false,
+				DangerousBypassFlag: true,
+				StdinPrompt:         false,
 			},
 		},
 		{
@@ -39,13 +39,13 @@ func AllRunners() []RunnerSpec {
 			VersionArgs: []string{"--help"},
 			AuthCheck:   &SmallCommandSpec{Args: []string{"login", "status"}, Timeout: 3},
 			Supports: RunnerSupports{
-				StructuredOutput:     true,
-				StreamingJSON:        true,
-				ModelFlag:            true,
-				PermissionsMode:      false,
-				SafeSandboxFlag:      true,
-				DangerousBypassFlag:  true,
-				StdinPrompt:          false,
+				StructuredOutput:    true,
+				StreamingJSON:       true,
+				ModelFlag:           true,
+				PermissionsMode:     false,
+				SafeSandboxFlag:     true,
+				DangerousBypassFlag: true,
+				StdinPrompt:         false,
 			},
 		},
 		{
@@ -55,13 +55,13 @@ func AllRunners() []RunnerSpec {
 			VersionArgs: []string{"--version"},
 			AuthCheck:   &SmallCommandSpec{Args: []string{"auth", "status"}, Timeout: 3},
 			Supports: RunnerSupports{
-				StructuredOutput:     true,
-				StreamingJSON:        true,
-				ModelFlag:            true,
-				PermissionsMode:      true,
-				SafeSandboxFlag:      false,
-				DangerousBypassFlag:  true,
-				StdinPrompt:          false,
+				StructuredOutput:    true,
+				StreamingJSON:       true,
+				ModelFlag:           true,
+				PermissionsMode:     true,
+				SafeSandboxFlag:     false,
+				DangerousBypassFlag: true,
+				StdinPrompt:         false,
 			},
 		},
 		{
@@ -71,13 +71,13 @@ func AllRunners() []RunnerSpec {
 			VersionArgs: []string{"--version"},
 			AuthCheck:   nil,
 			Supports: RunnerSupports{
-				StructuredOutput:     true,
-				StreamingJSON:        false,
-				ModelFlag:            true,
-				PermissionsMode:      true,
-				SafeSandboxFlag:      false,
-				DangerousBypassFlag:  true,
-				StdinPrompt:          false,
+				StructuredOutput:    true,
+				StreamingJSON:       false,
+				ModelFlag:           true,
+				PermissionsMode:     true,
+				SafeSandboxFlag:     false,
+				DangerousBypassFlag: true,
+				StdinPrompt:         false,
 			},
 		},
 		{
@@ -87,13 +87,13 @@ func AllRunners() []RunnerSpec {
 			VersionArgs: nil,
 			AuthCheck:   nil,
 			Supports: RunnerSupports{
-				StructuredOutput:     false,
-				StreamingJSON:        false,
-				ModelFlag:            true,
+				StructuredOutput:    false,
+				StreamingJSON:       false,
+				ModelFlag:           true,
 				PermissionsMode:     false,
-				SafeSandboxFlag:      false,
-				DangerousBypassFlag:  false,
-				StdinPrompt:          false,
+				SafeSandboxFlag:     false,
+				DangerousBypassFlag: false,
+				StdinPrompt:         false,
 			},
 		},
 	}
@@ -101,20 +101,20 @@ func AllRunners() []RunnerSpec {
 
 // RunnerRegistry maps runner IDs to their specs and adapters.
 type RunnerRegistry struct {
-	mu      sync.RWMutex
-	specs   map[RunnerID]RunnerSpec
-	adapters map[RunnerID]RunnerAdapter
+	mu          sync.RWMutex
+	specs       map[RunnerID]RunnerSpec
+	adapters    map[RunnerID]RunnerAdapter
 	detectCache map[RunnerID]runnerDetectCacheEntry
-	now        func() time.Time
+	now         func() time.Time
 }
 
 // NewRunnerRegistry creates a registry from a set of specs and optional adapters.
 func NewRunnerRegistry(specs []RunnerSpec, adapters []RunnerAdapter) *RunnerRegistry {
 	r := &RunnerRegistry{
-		specs:   make(map[RunnerID]RunnerSpec, len(specs)),
-		adapters: make(map[RunnerID]RunnerAdapter),
+		specs:       make(map[RunnerID]RunnerSpec, len(specs)),
+		adapters:    make(map[RunnerID]RunnerAdapter),
 		detectCache: make(map[RunnerID]runnerDetectCacheEntry),
-		now:        time.Now,
+		now:         time.Now,
 	}
 	for _, s := range specs {
 		r.specs[s.ID] = s
@@ -312,17 +312,17 @@ func NewGeminiAdapter() *GeminiAdapter {
 	return &GeminiAdapter{spec: geminiSpec()}
 }
 
-func openCodeSpec() RunnerSpec  { return findSpec(AllRunners(), RunnerOpenCode) }
-func codexSpec() RunnerSpec     { return findSpec(AllRunners(), RunnerCodex) }
-func claudeSpec() RunnerSpec    { return findSpec(AllRunners(), RunnerClaude) }
-func geminiSpec() RunnerSpec    { return findSpec(AllRunners(), RunnerGemini) }
+func openCodeSpec() RunnerSpec { return findSpec(AllRunners(), RunnerOpenCode) }
+func codexSpec() RunnerSpec    { return findSpec(AllRunners(), RunnerCodex) }
+func claudeSpec() RunnerSpec   { return findSpec(AllRunners(), RunnerClaude) }
+func geminiSpec() RunnerSpec   { return findSpec(AllRunners(), RunnerGemini) }
 
 // OpenCodeAdapter builds argv for OpenCode CLI.
 type OpenCodeAdapter struct{ spec RunnerSpec }
 
-func (a *OpenCodeAdapter) ID() RunnerID                    { return RunnerOpenCode }
-func (a *OpenCodeAdapter) DisplayName() string              { return "OpenCode" }
-func (a *OpenCodeAdapter) Spec() RunnerSpec                 { return a.spec }
+func (a *OpenCodeAdapter) ID() RunnerID        { return RunnerOpenCode }
+func (a *OpenCodeAdapter) DisplayName() string { return "OpenCode" }
+func (a *OpenCodeAdapter) Spec() RunnerSpec    { return a.spec }
 func (a *OpenCodeAdapter) Detect(ctx context.Context, opts DetectOptions) RunnerInfo {
 	return Detect(ctx, a.spec, opts)
 }
@@ -349,9 +349,9 @@ func (a *OpenCodeAdapter) BuildCommand(req AgentRunRequest) (CommandSpec, error)
 // CodexAdapter builds argv for Codex CLI.
 type CodexAdapter struct{ spec RunnerSpec }
 
-func (a *CodexAdapter) ID() RunnerID                    { return RunnerCodex }
-func (a *CodexAdapter) DisplayName() string              { return "Codex" }
-func (a *CodexAdapter) Spec() RunnerSpec                 { return a.spec }
+func (a *CodexAdapter) ID() RunnerID        { return RunnerCodex }
+func (a *CodexAdapter) DisplayName() string { return "Codex" }
+func (a *CodexAdapter) Spec() RunnerSpec    { return a.spec }
 func (a *CodexAdapter) Detect(ctx context.Context, opts DetectOptions) RunnerInfo {
 	return Detect(ctx, a.spec, opts)
 }
@@ -390,9 +390,9 @@ func (a *CodexAdapter) BuildCommand(req AgentRunRequest) (CommandSpec, error) {
 // ClaudeAdapter builds argv for Claude Code CLI.
 type ClaudeAdapter struct{ spec RunnerSpec }
 
-func (a *ClaudeAdapter) ID() RunnerID                    { return RunnerClaude }
-func (a *ClaudeAdapter) DisplayName() string              { return "Claude Code" }
-func (a *ClaudeAdapter) Spec() RunnerSpec                 { return a.spec }
+func (a *ClaudeAdapter) ID() RunnerID        { return RunnerClaude }
+func (a *ClaudeAdapter) DisplayName() string { return "Claude Code" }
+func (a *ClaudeAdapter) Spec() RunnerSpec    { return a.spec }
 func (a *ClaudeAdapter) Detect(ctx context.Context, opts DetectOptions) RunnerInfo {
 	return Detect(ctx, a.spec, opts)
 }
@@ -436,9 +436,9 @@ func (a *ClaudeAdapter) BuildCommand(req AgentRunRequest) (CommandSpec, error) {
 // GeminiAdapter builds argv for Gemini CLI.
 type GeminiAdapter struct{ spec RunnerSpec }
 
-func (a *GeminiAdapter) ID() RunnerID                    { return RunnerGemini }
-func (a *GeminiAdapter) DisplayName() string              { return "Gemini CLI" }
-func (a *GeminiAdapter) Spec() RunnerSpec                 { return a.spec }
+func (a *GeminiAdapter) ID() RunnerID        { return RunnerGemini }
+func (a *GeminiAdapter) DisplayName() string { return "Gemini CLI" }
+func (a *GeminiAdapter) Spec() RunnerSpec    { return a.spec }
 func (a *GeminiAdapter) Detect(ctx context.Context, opts DetectOptions) RunnerInfo {
 	return Detect(ctx, a.spec, opts)
 }

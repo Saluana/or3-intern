@@ -16,7 +16,7 @@ const DefaultPreviewMaxBytes = 65536
 
 // ProcessManager launches external CLI processes and streams output events.
 type ProcessManager struct {
-	ChunkMaxBytes  int
+	ChunkMaxBytes   int
 	PreviewMaxBytes int
 }
 
@@ -29,7 +29,7 @@ func NewProcessManager(chunkMaxBytes, previewMaxBytes int) *ProcessManager {
 		previewMaxBytes = DefaultPreviewMaxBytes
 	}
 	return &ProcessManager{
-		ChunkMaxBytes:  chunkMaxBytes,
+		ChunkMaxBytes:   chunkMaxBytes,
 		PreviewMaxBytes: previewMaxBytes,
 	}
 }

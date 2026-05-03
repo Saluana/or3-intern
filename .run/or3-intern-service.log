@@ -2440,3 +2440,6 @@ warning: service startup continuing without sandbox protection: privileged tools
 2026/05/02 20:41:21 service GET /internal/v1/approvals -> 200
 warning: service startup continuing without sandbox protection: privileged tools are enabled without Bubblewrap sandboxing: Privileged exec-capable tools should run under Bubblewrap in hardened setups.; Run `or3-intern doctor --fix --interactive` to disable privileged tools or enable sandboxing.
 2026/05/03 08:37:56 or3-intern service listening on 127.0.0.1:9100
+2026/05/03 08:41:18 service GET /internal/v1/approvals -> 200
+2026/05/03 08:41:18 service GET /internal/v1/subagents -> 200
+2026/05/03 08:41:18 service GET /internal/v1/app/bootstrap -> 200

@@ -135,7 +135,9 @@ func (s *serviceTerminalSession) snapshot() map[string]any {
 func (s *serviceTerminalSession) appendEvent(eventType string, data map[string]any) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.LastActiveAt = time.Now().UTC()
+	now := time.Now().UTC()
+	s.LastActiveAt = now
+	s.ExpiresAt = now.Add(serviceTerminalSessionTTL)
 	if data == nil {
 		data = map[string]any{}
 	}
@@ -1150,11 +1152,14 @@ func (s *serviceServer) handleTerminal(w http.ResponseWriter, r *http.Request) {
 	relative := strings.TrimPrefix(r.URL.Path, "/internal/v1/terminal/sessions")
 	relative = strings.Trim(relative, "/")
 	if relative == "" {
-		if r.Method != http.MethodPost {
+		switch r.Method {
+		case http.MethodGet:
+			s.listTerminalSessions(w, r)
+		case http.MethodPost:
+			s.createTerminalSession(w, r)
+		default:
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
-			return
 		}
-		s.createTerminalSession(w, r)
 		return
 	}
 	parts := strings.Split(relative, "/")
@@ -1199,6 +1204,50 @@ func (s *serviceServer) handleTerminal(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "terminal action not found"})
 	}
+}
+
+func (s *serviceServer) listTerminalSessions(w http.ResponseWriter, _ *http.Request) {
+	if s == nil {
+		writeServiceJSON(w, http.StatusOK, map[string]any{"items": []map[string]any{}})
+		return
+	}
+	s.terminalMu.Lock()
+	sessions := make([]*serviceTerminalSession, 0, len(s.terminalSessions))
+	for _, session := range s.terminalSessions {
+		if session != nil && session.Status == "running" {
+			sessions = append(sessions, session)
+		}
+	}
+	s.terminalMu.Unlock()
+	slices.SortFunc(sessions, func(left, right *serviceTerminalSession) int {
+		if left == nil && right == nil {
+			return 0
+		}
+		if left == nil {
+			return 1
+		}
+		if right == nil {
+			return -1
+		}
+		if left.LastActiveAt.After(right.LastActiveAt) {
+			return -1
+		}
+		if left.LastActiveAt.Before(right.LastActiveAt) {
+			return 1
+		}
+		if left.CreatedAt.After(right.CreatedAt) {
+			return -1
+		}
+		if left.CreatedAt.Before(right.CreatedAt) {
+			return 1
+		}
+		return strings.Compare(left.ID, right.ID)
+	})
+	items := make([]map[string]any, 0, len(sessions))
+	for _, session := range sessions {
+		items = append(items, session.snapshot())
+	}
+	writeServiceJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 func (s *serviceServer) terminalAvailable() bool {
@@ -1326,9 +1375,14 @@ func (s *serviceServer) createTerminalSession(w http.ResponseWriter, r *http.Req
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, shellPath)
+	shellArgs := terminalShellArgs(shellPath)
+	cmd := exec.CommandContext(ctx, shellPath, shellArgs...)
 	cmd.Dir = workingDir
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+	cmd.Env = append(os.Environ(),
+		"TERM=xterm-256color",
+		"COLORTERM=truecolor",
+		"SHELL="+shellPath,
+	)
 	rows := clampTerminalRows(body.Rows)
 	cols := clampTerminalCols(body.Cols)
 	ptyFile, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)})
@@ -1376,6 +1430,17 @@ func (s *serviceServer) createTerminalSession(w http.ResponseWriter, r *http.Req
 	go s.collectTerminalOutput(session, ptyFile, "pty")
 	go s.waitForTerminalSession(session)
 	writeServiceJSON(w, http.StatusCreated, session.snapshot())
+}
+
+func terminalShellArgs(shellPath string) []string {
+	switch filepath.Base(shellPath) {
+	case "bash", "zsh":
+		return []string{"-il"}
+	case "sh":
+		return []string{"-i"}
+	default:
+		return nil
+	}
 }
 
 func (s *serviceServer) evaluateTerminalApproval(ctx context.Context, shellPath, workingDir, approvalToken string) (approval.Decision, error) {
@@ -2784,12 +2849,26 @@ func (s *serviceServer) isMutationRequest(r *http.Request) bool {
 	if r == nil {
 		return false
 	}
+	if s.isTerminalInteractiveMutation(r) {
+		return false
+	}
 	switch r.Method {
 	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
 		return true
 	default:
 		return false
 	}
+}
+
+func (s *serviceServer) isTerminalInteractiveMutation(r *http.Request) bool {
+	if r == nil || r.Method != http.MethodPost {
+		return false
+	}
+	path := strings.TrimSpace(r.URL.Path)
+	if !strings.HasPrefix(path, "/internal/v1/terminal/sessions/") {
+		return false
+	}
+	return strings.HasSuffix(path, "/input") || strings.HasSuffix(path, "/resize")
 }
 
 func (s *serviceServer) allowMutationRequest(r *http.Request) bool {

@@ -340,6 +340,55 @@ func TestServiceBoundary_RateLimitIsPerActorAndPathAndEchoesRequestID(t *testing
 	}
 }
 
+func TestTerminalInteractiveMutationsBypassGenericMutationLimiter(t *testing.T) {
+	server := &serviceServer{config: config.Config{Service: config.ServiceConfig{MutationRateLimitPerMinute: 1}}}
+
+	inputReq1 := httptest.NewRequest(http.MethodPost, "/internal/v1/terminal/sessions/term-1/input", nil)
+	inputReq1.RemoteAddr = "127.0.0.1:1234"
+	if !server.isTerminalInteractiveMutation(inputReq1) {
+		t.Fatal("expected terminal input to be classified as interactive mutation")
+	}
+	if server.isMutationRequest(inputReq1) {
+		t.Fatal("expected terminal input to bypass generic mutation limiting")
+	}
+
+	inputReq2 := httptest.NewRequest(http.MethodPost, "/internal/v1/terminal/sessions/term-1/input", nil)
+	inputReq2.RemoteAddr = "127.0.0.1:1234"
+	if server.isMutationRequest(inputReq2) {
+		t.Fatal("expected repeated terminal input to keep bypassing generic mutation limiting")
+	}
+
+	resizeReq := httptest.NewRequest(http.MethodPost, "/internal/v1/terminal/sessions/term-1/resize", nil)
+	resizeReq.RemoteAddr = "127.0.0.1:1234"
+	if !server.isTerminalInteractiveMutation(resizeReq) {
+		t.Fatal("expected terminal resize to be classified as interactive mutation")
+	}
+	if server.isMutationRequest(resizeReq) {
+		t.Fatal("expected terminal resize to bypass generic mutation limiting")
+	}
+
+	closeReq1 := httptest.NewRequest(http.MethodPost, "/internal/v1/terminal/sessions/term-1/close", nil)
+	closeReq1.RemoteAddr = "127.0.0.1:1234"
+	if server.isTerminalInteractiveMutation(closeReq1) {
+		t.Fatal("did not expect terminal close to bypass generic mutation limiting")
+	}
+	if !server.isMutationRequest(closeReq1) {
+		t.Fatal("expected terminal close to remain a generic mutation")
+	}
+	if !server.allowMutationRequest(closeReq1) {
+		t.Fatal("expected first terminal close request to be allowed")
+	}
+
+	closeReq2 := httptest.NewRequest(http.MethodPost, "/internal/v1/terminal/sessions/term-1/close", nil)
+	closeReq2.RemoteAddr = "127.0.0.1:1234"
+	if !server.isMutationRequest(closeReq2) {
+		t.Fatal("expected second terminal close to remain subject to limiting")
+	}
+	if server.allowMutationRequest(closeReq2) {
+		t.Fatal("expected second terminal close request to be rate limited")
+	}
+}
+
 func TestServiceBrowserMiddleware_AllowsLoopbackPreflight(t *testing.T) {
 	cfg := config.Config{Service: config.ServiceConfig{Listen: "127.0.0.1:9100"}}
 	called := false

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -238,6 +239,124 @@ func TestWriteTerminalInputAcceptsNewlineOnlyInput(t *testing.T) {
 	}
 	if writer.String() != "\n" {
 		t.Fatalf("expected newline input, got %q", writer.String())
+	}
+}
+
+func TestWriteTerminalInputRefreshesSessionExpiry(t *testing.T) {
+	writer := &serviceTerminalTestWriteCloser{}
+	oldExpiry := time.Now().Add(2 * time.Second).UTC()
+	session := &serviceTerminalSession{
+		ID:          "term-refresh-input",
+		Status:      "running",
+		ExpiresAt:   oldExpiry,
+		stdin:       writer,
+		subscribers: map[chan serviceTerminalEvent]struct{}{},
+	}
+	server := &serviceServer{terminalSessions: map[string]*serviceTerminalSession{session.ID: session}}
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/terminal/sessions/term-refresh-input/input", strings.NewReader(`{"input":"echo hi\n"}`))
+	rec := httptest.NewRecorder()
+
+	server.writeTerminalInput(rec, req, session.ID)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if !session.ExpiresAt.After(oldExpiry) {
+		t.Fatalf("expected session expiry to refresh, old=%s new=%s", oldExpiry, session.ExpiresAt)
+	}
+	if session.LastActiveAt.IsZero() {
+		t.Fatal("expected last active time to be updated")
+	}
+}
+
+func TestAppendTerminalOutputRefreshesSessionExpiry(t *testing.T) {
+	oldExpiry := time.Now().Add(2 * time.Second).UTC()
+	session := &serviceTerminalSession{
+		ID:          "term-refresh-output",
+		ExpiresAt:   oldExpiry,
+		subscribers: map[chan serviceTerminalEvent]struct{}{},
+	}
+
+	session.appendEvent("output", map[string]any{"chunk": "prompt> "})
+
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if !session.ExpiresAt.After(oldExpiry) {
+		t.Fatalf("expected output to refresh session expiry, old=%s new=%s", oldExpiry, session.ExpiresAt)
+	}
+	if session.LastActiveAt.IsZero() {
+		t.Fatal("expected last active time to be updated")
+	}
+}
+
+func TestListTerminalSessionsReturnsMostRecentFirst(t *testing.T) {
+	now := time.Now().UTC()
+	server := &serviceServer{terminalSessions: map[string]*serviceTerminalSession{
+		"term-old": {
+			ID:           "term-old",
+			Shell:        "/bin/zsh",
+			WorkingDir:   "/tmp/old",
+			RelativePath: ".",
+			RootID:       "workspace",
+			CreatedAt:    now.Add(-2 * time.Minute),
+			LastActiveAt: now.Add(-90 * time.Second),
+			ExpiresAt:    now.Add(time.Minute),
+			Status:       "running",
+			Rows:         24,
+			Cols:         80,
+		},
+		"term-new": {
+			ID:           "term-new",
+			Shell:        "/bin/zsh",
+			WorkingDir:   "/tmp/new",
+			RelativePath: ".",
+			RootID:       "workspace",
+			CreatedAt:    now.Add(-time.Minute),
+			LastActiveAt: now,
+			ExpiresAt:    now.Add(time.Minute),
+			Status:       "running",
+			Rows:         24,
+			Cols:         80,
+		},
+	}}
+	req := httptest.NewRequest(http.MethodGet, "/internal/v1/terminal/sessions", nil)
+	rec := httptest.NewRecorder()
+
+	server.listTerminalSessions(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if len(body.Items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(body.Items))
+	}
+	if got := body.Items[0]["session_id"]; got != "term-new" {
+		t.Fatalf("expected newest session first, got %v", got)
+	}
+}
+
+func TestTerminalShellArgs(t *testing.T) {
+	tests := []struct {
+		shell string
+		want  []string
+	}{
+		{shell: "/bin/zsh", want: []string{"-il"}},
+		{shell: "/bin/bash", want: []string{"-il"}},
+		{shell: "/bin/sh", want: []string{"-i"}},
+	}
+	for _, tt := range tests {
+		got := terminalShellArgs(tt.shell)
+		if !slices.Equal(got, tt.want) {
+			t.Fatalf("terminalShellArgs(%q) = %v, want %v", tt.shell, got, tt.want)
+		}
 	}
 }
 

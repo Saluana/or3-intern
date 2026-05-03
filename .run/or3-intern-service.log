@@ -1662,3 +1662,779 @@ service error: service startup refused: service.maxCapability must remain safe; 
 2026/05/02 07:56:16 service GET /internal/v1/configure/fields -> 200
 2026/05/02 07:56:23 service GET /internal/v1/approvals -> 200
 2026/05/02 07:57:54 service GET /internal/v1/approvals -> 200
+warning: service startup continuing without sandbox protection: privileged tools are enabled without Bubblewrap sandboxing: Privileged exec-capable tools should run under Bubblewrap in hardened setups.; Run `or3-intern doctor --fix --interactive` to disable privileged tools or enable sandboxing.
+2026/05/02 20:07:22 or3-intern service listening on 127.0.0.1:9100
+2026/05/02 20:07:28 service GET /internal/v1/approvals -> 200
+2026/05/02 20:07:43 service GET /internal/v1/approvals -> 200
+2026/05/02 20:07:58 service GET /internal/v1/approvals -> 200
+2026/05/02 20:08:13 service GET /internal/v1/approvals -> 200
+2026/05/02 20:08:20 service POST /internal/v1/pairing/requests -> 202
+2026/05/02 20:08:23 service POST /internal/v1/pairing/exchange -> 400
+2026/05/02 20:08:25 service POST /internal/v1/pairing/exchange -> 400
+2026/05/02 20:08:28 service POST /internal/v1/pairing/exchange -> 200
+2026/05/02 20:08:28 service GET /internal/v1/approvals -> 200
+2026/05/02 20:08:32 service GET /internal/v1/approvals -> 200
+2026/05/02 20:08:32 service GET /internal/v1/approvals -> 200
+2026/05/02 20:08:32 service GET /internal/v1/app/bootstrap -> 200
+2026/05/02 20:08:35 service GET /internal/v1/approvals -> 200
+2026/05/02 20:08:35 service GET /internal/v1/files/roots -> 200
+2026/05/02 20:08:35 service GET /internal/v1/files/list -> 200
+2026/05/02 20:08:35 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-02.md: no such file or directory
+2026/05/02 20:08:35 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:08:35 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-01.md: no such file or directory
+2026/05/02 20:08:35 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory: no such file or directory
+2026/05/02 20:08:35 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:08:35 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:08:35 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/MEMORY.md: no such file or directory
+2026/05/02 20:08:35 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:08:35 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/SOUL.md: no such file or directory
+2026/05/02 20:08:35 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:08:35 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/USER.md: no such file or directory
+2026/05/02 20:08:35 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:08:35 service GET /internal/v1/files/list -> 200
+2026/05/02 20:08:35 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/MEMORY.md: no such file or directory
+2026/05/02 20:08:35 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:08:35 service GET /internal/v1/embeddings/status -> 200
+2026/05/02 20:08:35 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-01.md: no such file or directory
+2026/05/02 20:08:35 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:08:35 service GET /internal/v1/audit -> 200
+2026/05/02 20:08:35 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory: no such file or directory
+2026/05/02 20:08:35 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:08:35 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/SOUL.md: no such file or directory
+2026/05/02 20:08:35 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:08:35 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-02.md: no such file or directory
+2026/05/02 20:08:35 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:08:35 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/USER.md: no such file or directory
+2026/05/02 20:08:35 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:08:43 service GET /internal/v1/approvals -> 200
+2026/05/02 20:08:44 service GET /internal/v1/files/download -> 200
+2026/05/02 20:08:50 service GET /internal/v1/files/roots -> 200
+2026/05/02 20:08:50 service GET /internal/v1/approvals -> 200
+2026/05/02 20:08:50 service GET /internal/v1/files/list -> 200
+2026/05/02 20:08:50 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/MEMORY.md: no such file or directory
+2026/05/02 20:08:50 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:08:50 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-01.md: no such file or directory
+2026/05/02 20:08:50 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-02.md: no such file or directory
+2026/05/02 20:08:50 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:08:50 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/USER.md: no such file or directory
+2026/05/02 20:08:50 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:08:50 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:08:50 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/SOUL.md: no such file or directory
+2026/05/02 20:08:50 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:08:50 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory: no such file or directory
+2026/05/02 20:08:50 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:08:50 service GET /internal/v1/files/list -> 200
+2026/05/02 20:08:50 service GET /internal/v1/audit -> 200
+2026/05/02 20:08:50 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory: no such file or directory
+2026/05/02 20:08:50 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:08:50 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-01.md: no such file or directory
+2026/05/02 20:08:50 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/SOUL.md: no such file or directory
+2026/05/02 20:08:50 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:08:50 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:08:50 service GET /internal/v1/embeddings/status -> 200
+2026/05/02 20:08:50 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/MEMORY.md: no such file or directory
+2026/05/02 20:08:50 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:08:50 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/USER.md: no such file or directory
+2026/05/02 20:08:50 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:08:50 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-02.md: no such file or directory
+2026/05/02 20:08:50 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:08:58 service GET /internal/v1/approvals -> 200
+2026/05/02 20:08:58 service GET /internal/v1/files/read -> 200
+2026/05/02 20:08:58 service GET /internal/v1/approvals -> 200
+2026/05/02 20:09:13 service GET /internal/v1/approvals -> 200
+2026/05/02 20:09:28 service GET /internal/v1/approvals -> 200
+2026/05/02 20:09:28 service GET /internal/v1/approvals -> 200
+2026/05/02 20:09:43 service GET /internal/v1/approvals -> 200
+2026/05/02 20:09:58 service GET /internal/v1/approvals -> 200
+2026/05/02 20:10:13 service GET /internal/v1/approvals -> 200
+2026/05/02 20:10:28 service GET /internal/v1/approvals -> 200
+2026/05/02 20:10:43 service GET /internal/v1/approvals -> 200
+2026/05/02 20:10:58 service GET /internal/v1/approvals -> 200
+2026/05/02 20:11:13 service GET /internal/v1/approvals -> 200
+2026/05/02 20:11:28 service GET /internal/v1/approvals -> 200
+2026/05/02 20:11:28 service GET /internal/v1/approvals -> 200
+2026/05/02 20:11:43 service GET /internal/v1/approvals -> 200
+2026/05/02 20:11:43 service GET /internal/v1/approvals -> 200
+2026/05/02 20:11:56 service GET /internal/v1/approvals -> 200
+2026/05/02 20:11:56 service GET /internal/v1/files/read -> 200
+2026/05/02 20:11:58 service GET /internal/v1/approvals -> 200
+2026/05/02 20:12:10 service PUT /internal/v1/files/write -> 200
+2026/05/02 20:12:11 service GET /internal/v1/approvals -> 200
+2026/05/02 20:12:13 service GET /internal/v1/approvals -> 200
+2026/05/02 20:12:26 service GET /internal/v1/approvals -> 200
+2026/05/02 20:12:28 service GET /internal/v1/approvals -> 200
+2026/05/02 20:12:43 service GET /internal/v1/approvals -> 200
+2026/05/02 20:12:56 service GET /internal/v1/approvals -> 200
+2026/05/02 20:12:58 service GET /internal/v1/approvals -> 200
+2026/05/02 20:13:11 service GET /internal/v1/approvals -> 200
+2026/05/02 20:13:13 service GET /internal/v1/approvals -> 200
+2026/05/02 20:13:24 service GET /internal/v1/approvals -> 200
+2026/05/02 20:13:24 service GET /internal/v1/files/roots -> 200
+2026/05/02 20:13:24 service GET /internal/v1/files/list -> 200
+2026/05/02 20:13:24 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/MEMORY.md: no such file or directory
+2026/05/02 20:13:24 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:13:24 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-02.md: no such file or directory
+2026/05/02 20:13:24 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:13:24 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/SOUL.md: no such file or directory
+2026/05/02 20:13:24 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-01.md: no such file or directory
+2026/05/02 20:13:24 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:13:24 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/USER.md: no such file or directory
+2026/05/02 20:13:24 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory: no such file or directory
+2026/05/02 20:13:24 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:13:24 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:13:24 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:13:24 service GET /internal/v1/files/list -> 200
+2026/05/02 20:13:24 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/MEMORY.md: no such file or directory
+2026/05/02 20:13:24 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-01.md: no such file or directory
+2026/05/02 20:13:24 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:13:24 service GET /internal/v1/audit -> 200
+2026/05/02 20:13:24 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:13:24 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-02.md: no such file or directory
+2026/05/02 20:13:24 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:13:24 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory: no such file or directory
+2026/05/02 20:13:24 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:13:24 service GET /internal/v1/embeddings/status -> 200
+2026/05/02 20:13:24 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/SOUL.md: no such file or directory
+2026/05/02 20:13:24 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:13:24 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/USER.md: no such file or directory
+2026/05/02 20:13:24 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:13:28 service GET /internal/v1/approvals -> 200
+2026/05/02 20:13:31 service GET /internal/v1/approvals -> 200
+2026/05/02 20:13:31 service GET /internal/v1/files/read -> 200
+2026/05/02 20:13:43 service GET /internal/v1/approvals -> 200
+2026/05/02 20:13:46 service GET /internal/v1/approvals -> 200
+2026/05/02 20:13:55 service PUT /internal/v1/files/write -> 200
+2026/05/02 20:13:58 service GET /internal/v1/approvals -> 200
+2026/05/02 20:14:01 service GET /internal/v1/approvals -> 200
+2026/05/02 20:14:13 service GET /internal/v1/approvals -> 200
+2026/05/02 20:14:16 service GET /internal/v1/approvals -> 200
+2026/05/02 20:14:28 service GET /internal/v1/approvals -> 200
+2026/05/02 20:14:43 service GET /internal/v1/approvals -> 200
+2026/05/02 20:14:46 service GET /internal/v1/approvals -> 200
+2026/05/02 20:14:47 service GET /internal/v1/approvals -> 200
+2026/05/02 20:14:47 service GET /internal/v1/files/roots -> 200
+2026/05/02 20:14:47 service GET /internal/v1/files/list -> 200
+2026/05/02 20:14:47 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-02.md: no such file or directory
+2026/05/02 20:14:47 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:14:47 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/MEMORY.md: no such file or directory
+2026/05/02 20:14:47 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:14:47 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory: no such file or directory
+2026/05/02 20:14:47 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:14:47 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/SOUL.md: no such file or directory
+2026/05/02 20:14:47 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:14:47 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/USER.md: no such file or directory
+2026/05/02 20:14:47 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:14:47 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-01.md: no such file or directory
+2026/05/02 20:14:47 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:14:47 service GET /internal/v1/files/list -> 200
+2026/05/02 20:14:47 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-01.md: no such file or directory
+2026/05/02 20:14:47 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:14:47 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory: no such file or directory
+2026/05/02 20:14:47 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:14:47 service GET /internal/v1/audit -> 200
+2026/05/02 20:14:47 service GET /internal/v1/embeddings/status -> 200
+2026/05/02 20:14:47 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-02.md: no such file or directory
+2026/05/02 20:14:47 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:14:47 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/MEMORY.md: no such file or directory
+2026/05/02 20:14:47 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:14:47 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/SOUL.md: no such file or directory
+2026/05/02 20:14:47 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:14:47 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/USER.md: no such file or directory
+2026/05/02 20:14:47 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:14:58 service GET /internal/v1/approvals -> 200
+2026/05/02 20:15:00 service GET /internal/v1/files/list -> 200
+2026/05/02 20:15:00 service GET /internal/v1/files/list -> 200
+2026/05/02 20:15:02 service GET /internal/v1/approvals -> 200
+2026/05/02 20:15:02 service GET /internal/v1/files/download -> 200
+2026/05/02 20:15:04 service GET /internal/v1/approvals -> 200
+2026/05/02 20:15:04 service GET /internal/v1/files/read -> 200
+2026/05/02 20:15:13 service GET /internal/v1/approvals -> 200
+2026/05/02 20:15:18 service GET /internal/v1/approvals -> 200
+2026/05/02 20:15:18 service GET /internal/v1/files/roots -> 200
+2026/05/02 20:15:18 service GET /internal/v1/files/list -> 200
+2026/05/02 20:15:18 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/MEMORY.md: no such file or directory
+2026/05/02 20:15:18 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:15:18 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/USER.md: no such file or directory
+2026/05/02 20:15:18 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:15:18 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-01.md: no such file or directory
+2026/05/02 20:15:18 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:15:18 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-02.md: no such file or directory
+2026/05/02 20:15:18 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:15:18 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory: no such file or directory
+2026/05/02 20:15:18 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:15:18 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/SOUL.md: no such file or directory
+2026/05/02 20:15:18 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:15:18 service GET /internal/v1/files/list -> 200
+2026/05/02 20:15:19 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/MEMORY.md: no such file or directory
+2026/05/02 20:15:19 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:15:19 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-01.md: no such file or directory
+2026/05/02 20:15:19 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:15:19 service GET /internal/v1/audit -> 200
+2026/05/02 20:15:19 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory: no such file or directory
+2026/05/02 20:15:19 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:15:19 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-02.md: no such file or directory
+2026/05/02 20:15:19 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:15:19 service GET /internal/v1/embeddings/status -> 200
+2026/05/02 20:15:19 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/USER.md: no such file or directory
+2026/05/02 20:15:19 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:15:19 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/SOUL.md: no such file or directory
+2026/05/02 20:15:19 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:15:24 service GET /internal/v1/files/list -> 200
+2026/05/02 20:15:28 service GET /internal/v1/files/download -> 200
+2026/05/02 20:15:28 service GET /internal/v1/approvals -> 200
+2026/05/02 20:15:30 service GET /internal/v1/files/list -> 200
+2026/05/02 20:15:33 service GET /internal/v1/files/download -> 200
+2026/05/02 20:15:33 service GET /internal/v1/approvals -> 200
+2026/05/02 20:15:43 service GET /internal/v1/approvals -> 200
+2026/05/02 20:15:48 service GET /internal/v1/approvals -> 200
+2026/05/02 20:15:58 service GET /internal/v1/approvals -> 200
+2026/05/02 20:16:13 service GET /internal/v1/approvals -> 200
+2026/05/02 20:16:18 service GET /internal/v1/approvals -> 200
+2026/05/02 20:16:20 service GET /internal/v1/approvals -> 200
+2026/05/02 20:16:20 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:16:20 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:16:20 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:16:20 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:16:20 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:16:20 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:16:20 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:16:20 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:16:20 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:16:20 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:16:20 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:16:20 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:16:20 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:16:20 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:16:20 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:16:20 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:16:20 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:16:20 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:16:20 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:16:20 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:16:20 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:16:20 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:16:23 service GET /internal/v1/approvals -> 200
+2026/05/02 20:16:24 service GET /internal/v1/approvals -> 200
+2026/05/02 20:16:24 service GET /internal/v1/files/roots -> 200
+2026/05/02 20:16:24 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/.prompts: no such file or directory
+2026/05/02 20:16:24 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:16:24 service POST /internal/v1/files/mkdir -> 201
+2026/05/02 20:16:24 service GET /internal/v1/files/list -> 200
+2026/05/02 20:16:27 service GET /internal/v1/files/roots -> 200
+2026/05/02 20:16:27 service GET /internal/v1/files/stat -> 200
+2026/05/02 20:16:27 service GET /internal/v1/files/list -> 200
+2026/05/02 20:16:27 service PUT /internal/v1/files/write -> 201
+2026/05/02 20:16:27 service GET /internal/v1/approvals -> 200
+2026/05/02 20:16:27 service GET /internal/v1/files/read -> 200
+2026/05/02 20:16:28 service GET /internal/v1/approvals -> 200
+2026/05/02 20:16:35 service PUT /internal/v1/files/write -> 200
+2026/05/02 20:16:42 service GET /internal/v1/approvals -> 200
+2026/05/02 20:16:43 service PUT /internal/v1/files/write -> 201
+2026/05/02 20:16:43 service GET /internal/v1/approvals -> 200
+2026/05/02 20:16:57 service GET /internal/v1/approvals -> 200
+2026/05/02 20:16:58 service GET /internal/v1/approvals -> 200
+2026/05/02 20:17:13 service GET /internal/v1/approvals -> 200
+2026/05/02 20:17:27 service GET /internal/v1/approvals -> 200
+2026/05/02 20:17:28 service GET /internal/v1/approvals -> 200
+2026/05/02 20:17:43 service GET /internal/v1/approvals -> 200
+2026/05/02 20:17:57 service GET /internal/v1/approvals -> 200
+2026/05/02 20:17:58 service GET /internal/v1/approvals -> 200
+2026/05/02 20:17:59 service GET /internal/v1/approvals -> 200
+2026/05/02 20:17:59 service GET /internal/v1/files/roots -> 200
+2026/05/02 20:17:59 service GET /internal/v1/files/stat -> 200
+2026/05/02 20:17:59 service GET /internal/v1/files/list -> 200
+2026/05/02 20:17:59 service GET /internal/v1/files/read -> 200
+2026/05/02 20:17:59 service GET /internal/v1/files/read -> 200
+2026/05/02 20:18:01 service GET /internal/v1/approvals -> 200
+2026/05/02 20:18:01 service GET /internal/v1/files/read -> 200
+2026/05/02 20:18:02 service GET /internal/v1/approvals -> 200
+2026/05/02 20:18:02 service GET /internal/v1/files/roots -> 200
+2026/05/02 20:18:02 service GET /internal/v1/files/stat -> 200
+2026/05/02 20:18:02 service GET /internal/v1/files/list -> 200
+2026/05/02 20:18:02 service GET /internal/v1/files/read -> 200
+2026/05/02 20:18:02 service GET /internal/v1/files/read -> 200
+2026/05/02 20:18:04 service GET /internal/v1/approvals -> 200
+2026/05/02 20:18:04 service GET /internal/v1/files/read -> 200
+2026/05/02 20:18:05 service GET /internal/v1/approvals -> 200
+2026/05/02 20:18:05 service GET /internal/v1/files/roots -> 200
+2026/05/02 20:18:05 service GET /internal/v1/files/stat -> 200
+2026/05/02 20:18:05 service GET /internal/v1/files/list -> 200
+2026/05/02 20:18:05 service GET /internal/v1/files/read -> 200
+2026/05/02 20:18:05 service GET /internal/v1/files/read -> 200
+2026/05/02 20:18:11 service GET /internal/v1/files/read -> 200
+2026/05/02 20:18:11 service GET /internal/v1/approvals -> 200
+2026/05/02 20:18:13 service GET /internal/v1/approvals -> 200
+2026/05/02 20:18:26 service GET /internal/v1/approvals -> 200
+2026/05/02 20:18:28 service GET /internal/v1/approvals -> 200
+2026/05/02 20:18:30 service GET /internal/v1/files/search -> 200
+2026/05/02 20:18:31 service GET /internal/v1/files/search -> 200
+2026/05/02 20:18:31 service GET /internal/v1/files/search -> 200
+2026/05/02 20:18:31 service GET /internal/v1/files/search -> 200
+2026/05/02 20:18:31 service GET /internal/v1/files/search -> 200
+2026/05/02 20:18:41 service GET /internal/v1/approvals -> 200
+2026/05/02 20:18:43 service GET /internal/v1/approvals -> 200
+2026/05/02 20:18:54 service POST /internal/v1/turns -> 200
+2026/05/02 20:18:54 service GET /internal/v1/jobs/svc-0e85adc3e1776c79a1d4ac80 -> 200
+2026/05/02 20:18:56 service GET /internal/v1/approvals -> 200
+2026/05/02 20:18:58 service GET /internal/v1/approvals -> 200
+2026/05/02 20:19:11 service GET /internal/v1/approvals -> 200
+2026/05/02 20:19:26 service GET /internal/v1/approvals -> 200
+2026/05/02 20:19:27 service GET /internal/v1/approvals -> 200
+2026/05/02 20:19:27 service GET /internal/v1/subagents -> 200
+2026/05/02 20:19:27 service GET /internal/v1/app/bootstrap -> 200
+2026/05/02 20:19:28 service GET /internal/v1/approvals -> 200
+2026/05/02 20:19:29 service GET /internal/v1/approvals -> 200
+2026/05/02 20:19:29 service GET /internal/v1/approvals -> 200
+2026/05/02 20:19:29 service GET /internal/v1/app/bootstrap -> 200
+2026/05/02 20:19:47 service GET /internal/v1/approvals -> 200
+2026/05/02 20:19:47 service GET /internal/v1/files/roots -> 200
+2026/05/02 20:19:47 service GET /internal/v1/files/list -> 200
+2026/05/02 20:19:47 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/SOUL.md: no such file or directory
+2026/05/02 20:19:47 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:19:47 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory: no such file or directory
+2026/05/02 20:19:47 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:19:47 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-01.md: no such file or directory
+2026/05/02 20:19:47 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:19:47 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-02.md: no such file or directory
+2026/05/02 20:19:47 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:19:47 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/MEMORY.md: no such file or directory
+2026/05/02 20:19:47 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:19:47 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/USER.md: no such file or directory
+2026/05/02 20:19:47 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:19:47 service GET /internal/v1/files/list -> 200
+2026/05/02 20:19:47 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/MEMORY.md: no such file or directory
+2026/05/02 20:19:47 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:19:47 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-01.md: no such file or directory
+2026/05/02 20:19:47 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:19:47 service GET /internal/v1/audit -> 200
+2026/05/02 20:19:47 service GET /internal/v1/embeddings/status -> 200
+2026/05/02 20:19:47 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory: no such file or directory
+2026/05/02 20:19:47 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:19:47 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-02.md: no such file or directory
+2026/05/02 20:19:47 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:19:47 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/SOUL.md: no such file or directory
+2026/05/02 20:19:47 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:19:47 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/USER.md: no such file or directory
+2026/05/02 20:19:47 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:19:50 service GET /internal/v1/approvals -> 200
+2026/05/02 20:19:50 service GET /internal/v1/approvals -> 200
+2026/05/02 20:19:50 service GET /internal/v1/app/bootstrap -> 200
+2026/05/02 20:19:52 service GET /internal/v1/files/roots -> 200
+2026/05/02 20:19:52 service GET /internal/v1/approvals -> 200
+2026/05/02 20:19:52 service GET /internal/v1/files/list -> 200
+2026/05/02 20:19:52 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-02.md: no such file or directory
+2026/05/02 20:19:52 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:19:52 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory: no such file or directory
+2026/05/02 20:19:52 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:19:52 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-01.md: no such file or directory
+2026/05/02 20:19:52 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:19:52 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/MEMORY.md: no such file or directory
+2026/05/02 20:19:52 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:19:52 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/USER.md: no such file or directory
+2026/05/02 20:19:52 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/SOUL.md: no such file or directory
+2026/05/02 20:19:52 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:19:52 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:19:52 service GET /internal/v1/files/list -> 200
+2026/05/02 20:19:52 service GET /internal/v1/embeddings/status -> 200
+2026/05/02 20:19:52 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/MEMORY.md: no such file or directory
+2026/05/02 20:19:52 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:19:52 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-02.md: no such file or directory
+2026/05/02 20:19:52 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:19:52 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-01.md: no such file or directory
+2026/05/02 20:19:52 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:19:52 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory: no such file or directory
+2026/05/02 20:19:52 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:19:52 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/SOUL.md: no such file or directory
+2026/05/02 20:19:52 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:19:52 service GET /internal/v1/audit -> 200
+2026/05/02 20:19:52 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/USER.md: no such file or directory
+2026/05/02 20:19:52 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:19:57 service GET /internal/v1/files/download -> 200
+2026/05/02 20:19:59 service GET /internal/v1/approvals -> 200
+2026/05/02 20:19:59 service GET /internal/v1/files/read -> 200
+2026/05/02 20:20:29 service GET /internal/v1/approvals -> 200
+2026/05/02 20:20:31 service PUT /internal/v1/files/write -> 201
+2026/05/02 20:20:41 service GET /internal/v1/approvals -> 200
+2026/05/02 20:20:43 service GET /internal/v1/approvals -> 200
+2026/05/02 20:20:43 service GET /internal/v1/approvals -> 200
+2026/05/02 20:20:43 service GET /internal/v1/approvals -> 200
+2026/05/02 20:20:43 service GET /internal/v1/approvals/allowlists -> 200
+2026/05/02 20:20:45 service GET /internal/v1/approvals -> 200
+2026/05/02 20:20:45 service GET /internal/v1/subagents -> 200
+2026/05/02 20:20:45 service GET /internal/v1/app/bootstrap -> 200
+2026/05/02 20:20:45 service GET /internal/v1/approvals -> 200
+2026/05/02 20:20:45 service GET /internal/v1/approvals -> 200
+2026/05/02 20:20:45 service GET /internal/v1/app/bootstrap -> 200
+2026/05/02 20:20:50 service GET /internal/v1/files/roots -> 200
+2026/05/02 20:20:50 service GET /internal/v1/approvals -> 200
+2026/05/02 20:20:50 service GET /internal/v1/files/list -> 200
+2026/05/02 20:20:50 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/MEMORY.md: no such file or directory
+2026/05/02 20:20:50 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:20:50 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-02.md: no such file or directory
+2026/05/02 20:20:50 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:20:50 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-01.md: no such file or directory
+2026/05/02 20:20:50 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:20:50 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/SOUL.md: no such file or directory
+2026/05/02 20:20:50 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:20:50 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory: no such file or directory
+2026/05/02 20:20:50 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:20:50 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/USER.md: no such file or directory
+2026/05/02 20:20:50 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:20:50 service GET /internal/v1/files/list -> 200
+2026/05/02 20:20:50 service GET /internal/v1/audit -> 200
+2026/05/02 20:20:50 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/MEMORY.md: no such file or directory
+2026/05/02 20:20:50 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-01.md: no such file or directory
+2026/05/02 20:20:50 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:20:50 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:20:50 service GET /internal/v1/embeddings/status -> 200
+2026/05/02 20:20:50 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-02.md: no such file or directory
+2026/05/02 20:20:50 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory: no such file or directory
+2026/05/02 20:20:50 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:20:50 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:20:50 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/SOUL.md: no such file or directory
+2026/05/02 20:20:50 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:20:50 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/USER.md: no such file or directory
+2026/05/02 20:20:50 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:20:52 service GET /internal/v1/approvals -> 200
+2026/05/02 20:20:52 service GET /internal/v1/subagents -> 200
+2026/05/02 20:20:52 service GET /internal/v1/app/bootstrap -> 200
+2026/05/02 20:20:52 service GET /internal/v1/approvals -> 200
+2026/05/02 20:20:55 service GET /internal/v1/approvals -> 200
+2026/05/02 20:20:55 service GET /internal/v1/approvals -> 200
+2026/05/02 20:20:55 service GET /internal/v1/app/bootstrap -> 200
+2026/05/02 20:20:56 service GET /internal/v1/files/roots -> 200
+2026/05/02 20:20:56 service GET /internal/v1/approvals -> 200
+2026/05/02 20:20:56 service GET /internal/v1/files/list -> 200
+2026/05/02 20:20:56 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/MEMORY.md: no such file or directory
+2026/05/02 20:20:56 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:20:56 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-01.md: no such file or directory
+2026/05/02 20:20:56 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:20:56 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/SOUL.md: no such file or directory
+2026/05/02 20:20:56 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:20:56 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/USER.md: no such file or directory
+2026/05/02 20:20:56 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:20:56 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-02.md: no such file or directory
+2026/05/02 20:20:56 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:20:56 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory: no such file or directory
+2026/05/02 20:20:56 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:20:56 service GET /internal/v1/files/list -> 200
+2026/05/02 20:20:56 service GET /internal/v1/audit -> 200
+2026/05/02 20:20:56 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-01.md: no such file or directory
+2026/05/02 20:20:56 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:20:56 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-02.md: no such file or directory
+2026/05/02 20:20:56 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:20:56 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/MEMORY.md: no such file or directory
+2026/05/02 20:20:56 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:20:56 service GET /internal/v1/embeddings/status -> 200
+2026/05/02 20:20:56 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory: no such file or directory
+2026/05/02 20:20:56 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:20:56 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/USER.md: no such file or directory
+2026/05/02 20:20:56 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:20:56 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/SOUL.md: no such file or directory
+2026/05/02 20:20:56 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:20:57 service GET /internal/v1/approvals -> 200
+2026/05/02 20:21:01 service GET /internal/v1/approvals -> 200
+2026/05/02 20:21:01 service GET /internal/v1/approvals -> 200
+2026/05/02 20:21:01 service GET /internal/v1/app/bootstrap -> 200
+2026/05/02 20:21:03 service GET /internal/v1/approvals -> 200
+2026/05/02 20:21:03 service GET /internal/v1/files/roots -> 200
+2026/05/02 20:21:03 service GET /internal/v1/files/list -> 200
+2026/05/02 20:21:03 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/MEMORY.md: no such file or directory
+2026/05/02 20:21:03 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:21:03 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-01.md: no such file or directory
+2026/05/02 20:21:03 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:21:03 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory: no such file or directory
+2026/05/02 20:21:03 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:21:03 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/SOUL.md: no such file or directory
+2026/05/02 20:21:03 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:21:03 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/USER.md: no such file or directory
+2026/05/02 20:21:03 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:21:03 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-02.md: no such file or directory
+2026/05/02 20:21:03 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:21:03 service GET /internal/v1/files/list -> 200
+2026/05/02 20:21:03 service GET /internal/v1/embeddings/status -> 200
+2026/05/02 20:21:03 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-01.md: no such file or directory
+2026/05/02 20:21:03 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:21:03 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory: no such file or directory
+2026/05/02 20:21:03 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:21:03 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/SOUL.md: no such file or directory
+2026/05/02 20:21:03 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:21:03 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/USER.md: no such file or directory
+2026/05/02 20:21:03 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:21:03 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-02.md: no such file or directory
+2026/05/02 20:21:03 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:21:03 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/MEMORY.md: no such file or directory
+2026/05/02 20:21:03 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:21:03 service GET /internal/v1/audit -> 200
+2026/05/02 20:21:08 service GET /internal/v1/files/download -> 200
+2026/05/02 20:21:10 service GET /internal/v1/approvals -> 200
+2026/05/02 20:21:10 service GET /internal/v1/files/read -> 200
+2026/05/02 20:21:25 service GET /internal/v1/approvals -> 200
+2026/05/02 20:21:40 service GET /internal/v1/approvals -> 200
+2026/05/02 20:22:10 service GET /internal/v1/approvals -> 200
+2026/05/02 20:22:11 service GET /internal/v1/approvals -> 200
+2026/05/02 20:22:11 service GET /internal/v1/files/roots -> 200
+2026/05/02 20:22:12 service GET /internal/v1/files/list -> 200
+2026/05/02 20:22:12 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/MEMORY.md: no such file or directory
+2026/05/02 20:22:12 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:22:12 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-01.md: no such file or directory
+2026/05/02 20:22:12 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:22:12 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/SOUL.md: no such file or directory
+2026/05/02 20:22:12 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:22:12 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-02.md: no such file or directory
+2026/05/02 20:22:12 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:22:12 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory: no such file or directory
+2026/05/02 20:22:12 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:22:12 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/USER.md: no such file or directory
+2026/05/02 20:22:12 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:22:12 service GET /internal/v1/files/list -> 200
+2026/05/02 20:22:12 service GET /internal/v1/embeddings/status -> 200
+2026/05/02 20:22:12 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-02.md: no such file or directory
+2026/05/02 20:22:12 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:22:12 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-01.md: no such file or directory
+2026/05/02 20:22:12 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:22:12 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/USER.md: no such file or directory
+2026/05/02 20:22:12 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:22:12 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/SOUL.md: no such file or directory
+2026/05/02 20:22:12 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:22:12 service GET /internal/v1/audit -> 200
+2026/05/02 20:22:12 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/MEMORY.md: no such file or directory
+2026/05/02 20:22:12 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:22:12 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory: no such file or directory
+2026/05/02 20:22:12 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:22:15 service GET /internal/v1/files/download -> 304
+2026/05/02 20:22:42 service GET /internal/v1/approvals -> 200
+2026/05/02 20:22:50 service GET /internal/v1/approvals -> 200
+2026/05/02 20:22:51 service GET /internal/v1/approvals -> 200
+2026/05/02 20:22:51 service GET /internal/v1/subagents -> 200
+2026/05/02 20:22:51 service GET /internal/v1/app/bootstrap -> 200
+2026/05/02 20:22:52 service GET /internal/v1/approvals -> 200
+2026/05/02 20:22:52 service GET /internal/v1/approvals -> 200
+2026/05/02 20:22:52 service GET /internal/v1/app/bootstrap -> 200
+2026/05/02 20:23:02 service GET /internal/v1/approvals -> 200
+2026/05/02 20:23:02 service GET /internal/v1/approvals -> 200
+2026/05/02 20:23:02 service GET /internal/v1/app/bootstrap -> 200
+2026/05/02 20:23:27 service GET /internal/v1/approvals -> 200
+2026/05/02 20:23:27 service GET /internal/v1/approvals -> 200
+2026/05/02 20:23:27 service GET /internal/v1/app/bootstrap -> 200
+2026/05/02 20:23:57 service GET /internal/v1/approvals -> 200
+2026/05/02 20:23:58 service GET /internal/v1/files/roots -> 200
+2026/05/02 20:23:58 service GET /internal/v1/approvals -> 200
+2026/05/02 20:23:58 service GET /internal/v1/files/list -> 200
+2026/05/02 20:23:58 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/MEMORY.md: no such file or directory
+2026/05/02 20:23:58 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:23:58 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-01.md: no such file or directory
+2026/05/02 20:23:58 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:23:58 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory: no such file or directory
+2026/05/02 20:23:58 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:23:58 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/SOUL.md: no such file or directory
+2026/05/02 20:23:58 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:23:58 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-02.md: no such file or directory
+2026/05/02 20:23:58 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:23:58 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/USER.md: no such file or directory
+2026/05/02 20:23:58 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:23:58 service GET /internal/v1/files/list -> 200
+2026/05/02 20:23:58 service GET /internal/v1/audit -> 200
+2026/05/02 20:23:58 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-02.md: no such file or directory
+2026/05/02 20:23:58 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/MEMORY.md: no such file or directory
+2026/05/02 20:23:58 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:23:58 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:23:58 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-01.md: no such file or directory
+2026/05/02 20:23:58 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:23:58 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory: no such file or directory
+2026/05/02 20:23:58 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:23:58 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/USER.md: no such file or directory
+2026/05/02 20:23:58 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:23:58 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/SOUL.md: no such file or directory
+2026/05/02 20:23:58 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:23:58 service GET /internal/v1/embeddings/status -> 200
+2026/05/02 20:24:04 service GET /internal/v1/approvals -> 200
+2026/05/02 20:24:04 service GET /internal/v1/files/read -> 200
+2026/05/02 20:24:19 service GET /internal/v1/approvals -> 200
+2026/05/02 20:25:19 service GET /internal/v1/approvals -> 200
+2026/05/02 20:25:22 service GET /internal/v1/approvals -> 200
+2026/05/02 20:25:22 service GET /internal/v1/files/read -> 200
+2026/05/02 20:25:52 service GET /internal/v1/approvals -> 200
+2026/05/02 20:26:07 service GET /internal/v1/approvals -> 200
+2026/05/02 20:26:22 service GET /internal/v1/approvals -> 200
+2026/05/02 20:26:24 service PUT /internal/v1/files/write -> 200
+2026/05/02 20:26:27 service PUT /internal/v1/files/write -> 200
+2026/05/02 20:27:07 service GET /internal/v1/approvals -> 200
+2026/05/02 20:27:09 service GET /internal/v1/approvals -> 200
+2026/05/02 20:27:09 service GET /internal/v1/files/read -> 200
+2026/05/02 20:28:58 service POST /internal/v1/pairing/requests -> 202
+2026/05/02 20:29:00 service POST /internal/v1/pairing/exchange -> 400
+2026/05/02 20:29:01 service POST /internal/v1/pairing/requests -> 202
+2026/05/02 20:29:04 service POST /internal/v1/pairing/exchange -> 400
+2026/05/02 20:29:06 service POST /internal/v1/pairing/exchange -> 400
+2026/05/02 20:29:09 service POST /internal/v1/pairing/exchange -> 400
+2026/05/02 20:29:09 service POST /internal/v1/pairing/exchange -> 400
+2026/05/02 20:29:11 service POST /internal/v1/pairing/exchange -> 400
+2026/05/02 20:29:11 service POST /internal/v1/pairing/exchange -> 429
+2026/05/02 20:29:11 service POST /internal/v1/pairing/exchange -> 429
+2026/05/02 20:29:14 service POST /internal/v1/pairing/exchange -> 400
+2026/05/02 20:29:15 service POST /internal/v1/pairing/exchange -> 429
+2026/05/02 20:29:15 service POST /internal/v1/pairing/exchange -> 429
+2026/05/02 20:29:15 service POST /internal/v1/pairing/exchange -> 429
+2026/05/02 20:29:16 service POST /internal/v1/pairing/exchange -> 429
+2026/05/02 20:29:16 service POST /internal/v1/pairing/exchange -> 429
+2026/05/02 20:29:16 service POST /internal/v1/pairing/exchange -> 400
+2026/05/02 20:29:18 service POST /internal/v1/pairing/exchange -> 429
+2026/05/02 20:29:21 service POST /internal/v1/pairing/requests -> 202
+2026/05/02 20:29:24 service POST /internal/v1/pairing/exchange -> 400
+2026/05/02 20:29:26 service POST /internal/v1/pairing/exchange -> 429
+2026/05/02 20:29:29 service POST /internal/v1/pairing/exchange -> 429
+2026/05/02 20:29:41 service POST /internal/v1/pairing/exchange -> 200
+2026/05/02 20:29:42 service POST /internal/v1/pairing/requests -> 202
+2026/05/02 20:29:44 service GET /internal/v1/approvals -> 200
+2026/05/02 20:29:44 service POST /internal/v1/pairing/exchange -> 400
+2026/05/02 20:29:45 service GET /internal/v1/approvals -> 200
+2026/05/02 20:29:45 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:29:45 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:29:45 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:29:45 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:29:45 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:29:45 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:29:45 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:29:45 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:29:45 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:29:45 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:29:45 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:29:45 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:29:45 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:29:45 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:29:45 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:29:45 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:29:45 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:29:45 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:29:45 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:29:45 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:29:45 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:29:45 service GET /internal/v1/configure/fields -> 200
+2026/05/02 20:29:53 service GET /internal/v1/approvals -> 200
+2026/05/02 20:29:53 service GET /internal/v1/approvals -> 200
+2026/05/02 20:29:53 service GET /internal/v1/app/bootstrap -> 200
+2026/05/02 20:29:58 service GET /internal/v1/approvals -> 200
+2026/05/02 20:29:58 service GET /internal/v1/files/roots -> 200
+2026/05/02 20:29:58 service GET /internal/v1/files/list -> 200
+2026/05/02 20:29:58 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/MEMORY.md: no such file or directory
+2026/05/02 20:29:58 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:29:58 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-02.md: no such file or directory
+2026/05/02 20:29:58 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:29:58 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/SOUL.md: no such file or directory
+2026/05/02 20:29:58 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:29:58 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/USER.md: no such file or directory
+2026/05/02 20:29:58 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:29:58 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory: no such file or directory
+2026/05/02 20:29:58 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:29:58 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-01.md: no such file or directory
+2026/05/02 20:29:58 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:29:58 service GET /internal/v1/files/list -> 200
+2026/05/02 20:29:58 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/MEMORY.md: no such file or directory
+2026/05/02 20:29:58 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:29:58 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory: no such file or directory
+2026/05/02 20:29:58 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:29:58 service GET /internal/v1/embeddings/status -> 200
+2026/05/02 20:29:58 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/SOUL.md: no such file or directory
+2026/05/02 20:29:58 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:29:58 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-01.md: no such file or directory
+2026/05/02 20:29:58 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:29:58 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-02.md: no such file or directory
+2026/05/02 20:29:58 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:29:58 service GET /internal/v1/audit -> 200
+2026/05/02 20:29:58 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/USER.md: no such file or directory
+2026/05/02 20:29:58 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:30:04 service GET /internal/v1/files/list -> 200
+2026/05/02 20:30:05 service GET /internal/v1/files/download -> 200
+2026/05/02 20:30:10 service GET /internal/v1/approvals -> 200
+2026/05/02 20:30:10 service GET /internal/v1/files/read -> 200
+2026/05/02 20:30:25 service GET /internal/v1/approvals -> 200
+2026/05/02 20:30:40 service GET /internal/v1/approvals -> 200
+2026/05/02 20:30:55 service GET /internal/v1/approvals -> 200
+2026/05/02 20:31:10 service GET /internal/v1/approvals -> 200
+2026/05/02 20:31:25 service GET /internal/v1/approvals -> 200
+2026/05/02 20:31:40 service GET /internal/v1/approvals -> 200
+2026/05/02 20:31:55 service GET /internal/v1/approvals -> 200
+2026/05/02 20:31:56 service GET /internal/v1/approvals -> 200
+2026/05/02 20:32:10 service GET /internal/v1/approvals -> 200
+2026/05/02 20:32:24 service GET /internal/v1/approvals -> 200
+2026/05/02 20:32:25 service GET /internal/v1/approvals -> 200
+2026/05/02 20:32:40 service GET /internal/v1/approvals -> 200
+2026/05/02 20:32:55 service GET /internal/v1/approvals -> 200
+2026/05/02 20:32:55 service GET /internal/v1/approvals -> 200
+2026/05/02 20:33:10 service GET /internal/v1/approvals -> 200
+2026/05/02 20:33:25 service GET /internal/v1/approvals -> 200
+2026/05/02 20:33:40 service GET /internal/v1/approvals -> 200
+2026/05/02 20:33:55 service GET /internal/v1/approvals -> 200
+2026/05/02 20:33:55 service GET /internal/v1/approvals -> 200
+2026/05/02 20:34:10 service GET /internal/v1/approvals -> 200
+2026/05/02 20:34:25 service GET /internal/v1/approvals -> 200
+2026/05/02 20:34:40 service GET /internal/v1/approvals -> 200
+2026/05/02 20:34:55 service GET /internal/v1/approvals -> 200
+2026/05/02 20:35:09 service GET /internal/v1/approvals -> 200
+2026/05/02 20:35:10 service GET /internal/v1/approvals -> 200
+2026/05/02 20:35:24 service GET /internal/v1/approvals -> 200
+2026/05/02 20:35:25 service GET /internal/v1/approvals -> 200
+2026/05/02 20:35:40 service GET /internal/v1/approvals -> 200
+2026/05/02 20:35:50 service GET /internal/v1/approvals -> 200
+2026/05/02 20:35:50 service GET /internal/v1/files/read -> 200
+2026/05/02 20:35:50 service GET /internal/v1/approvals -> 200
+2026/05/02 20:35:50 service GET /internal/v1/files/read -> 200
+2026/05/02 20:36:05 service GET /internal/v1/approvals -> 200
+2026/05/02 20:36:20 service GET /internal/v1/approvals -> 200
+2026/05/02 20:36:35 service GET /internal/v1/approvals -> 200
+2026/05/02 20:36:35 service GET /internal/v1/approvals -> 200
+2026/05/02 20:36:50 service GET /internal/v1/approvals -> 200
+2026/05/02 20:37:05 service GET /internal/v1/approvals -> 200
+2026/05/02 20:37:20 service GET /internal/v1/approvals -> 200
+2026/05/02 20:37:35 service GET /internal/v1/approvals -> 200
+2026/05/02 20:37:50 service GET /internal/v1/approvals -> 200
+2026/05/02 20:38:05 service GET /internal/v1/approvals -> 200
+2026/05/02 20:38:20 service GET /internal/v1/approvals -> 200
+2026/05/02 20:38:35 service GET /internal/v1/approvals -> 200
+2026/05/02 20:38:50 service GET /internal/v1/approvals -> 200
+2026/05/02 20:39:05 service GET /internal/v1/approvals -> 200
+2026/05/02 20:39:10 service GET /internal/v1/approvals -> 200
+2026/05/02 20:39:20 service GET /internal/v1/approvals -> 200
+2026/05/02 20:39:20 service GET /internal/v1/files/roots -> 200
+2026/05/02 20:39:20 service GET /internal/v1/files/list -> 200
+2026/05/02 20:39:20 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-02.md: no such file or directory
+2026/05/02 20:39:20 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:39:20 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory: no such file or directory
+2026/05/02 20:39:20 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/SOUL.md: no such file or directory
+2026/05/02 20:39:20 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:39:20 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:39:20 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-01.md: no such file or directory
+2026/05/02 20:39:20 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:39:20 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/USER.md: no such file or directory
+2026/05/02 20:39:20 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:39:20 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/MEMORY.md: no such file or directory
+2026/05/02 20:39:20 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:39:20 service GET /internal/v1/files/list -> 200
+2026/05/02 20:39:20 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/MEMORY.md: no such file or directory
+2026/05/02 20:39:20 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:39:20 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-01.md: no such file or directory
+2026/05/02 20:39:20 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:39:20 service GET /internal/v1/embeddings/status -> 200
+2026/05/02 20:39:20 service GET /internal/v1/audit -> 200
+2026/05/02 20:39:20 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory/2026-05-02.md: no such file or directory
+2026/05/02 20:39:20 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:39:20 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/memory: no such file or directory
+2026/05/02 20:39:20 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:39:20 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/SOUL.md: no such file or directory
+2026/05/02 20:39:20 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:39:20 service GET /internal/v1/files/stat: stat /Users/brendon/Documents/or3-intern/USER.md: no such file or directory
+2026/05/02 20:39:20 service GET /internal/v1/files/stat -> 404
+2026/05/02 20:39:20 service GET /internal/v1/approvals -> 200
+2026/05/02 20:39:21 service GET /internal/v1/approvals -> 200
+2026/05/02 20:39:21 service GET /internal/v1/files/read -> 200
+2026/05/02 20:39:36 service GET /internal/v1/approvals -> 200
+2026/05/02 20:39:51 service GET /internal/v1/approvals -> 200
+2026/05/02 20:40:05 service GET /internal/v1/approvals -> 200
+2026/05/02 20:40:06 service GET /internal/v1/approvals -> 200
+2026/05/02 20:40:20 service GET /internal/v1/approvals -> 200
+2026/05/02 20:40:21 service GET /internal/v1/approvals -> 200
+2026/05/02 20:40:36 service GET /internal/v1/approvals -> 200
+2026/05/02 20:40:51 service GET /internal/v1/approvals -> 200
+2026/05/02 20:41:06 service GET /internal/v1/approvals -> 200
+2026/05/02 20:41:21 service GET /internal/v1/approvals -> 200

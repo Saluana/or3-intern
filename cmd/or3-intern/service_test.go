@@ -2624,7 +2624,7 @@ func TestServiceApprovals_Approve_StartsResumeJobWhenBlockedTurnExists(t *testin
 		Provider: provider,
 		Model:    "gpt-4",
 		Tools:    registry,
-		Builder:  &agent.Builder{DB: broker.DB, HistoryMax: 20},
+		Builder:  &agent.Builder{DB: broker.DB, HistoryMax: 2},
 	}
 	server := &serviceServer{broker: broker, runtime: rt, jobs: agent.NewJobRegistry(time.Minute, 32)}
 	httpServer := newServiceTestHTTPServer(t, strings.Repeat("a", 32), server)
@@ -2668,6 +2668,9 @@ func TestServiceApprovals_Approve_StartsResumeJobWhenBlockedTurnExists(t *testin
 	resumeJobID, _ := payload["resume_job_id"].(string)
 	if strings.TrimSpace(resumeJobID) == "" {
 		t.Fatalf("expected resume_job_id in response, got %#v", payload)
+	}
+	if payload["session_key"] != "sess-approval-resume" {
+		t.Fatalf("expected session_key for resume job routing, got %#v", payload)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

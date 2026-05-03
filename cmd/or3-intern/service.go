@@ -1775,6 +1775,9 @@ func (s *serviceServer) handleApprovals(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		response := map[string]any{"request_id": id, "token": issued.Token, "allowlist_id": issued.AllowlistID}
+		if sessionKey := strings.TrimSpace(issued.Request.RequesterSessionID); sessionKey != "" {
+			response["session_key"] = sessionKey
+		}
 		warnings := make([]map[string]any, 0, 2)
 		if s.broker != nil && s.broker.DB != nil {
 			plans, err := approvalSkillRunPlanLookup(r.Context(), s.broker.DB, id, 20)
@@ -2075,7 +2078,7 @@ func (s *serviceServer) runApprovedResumeJob(ctx context.Context, jobID string, 
 	}
 	s.jobs.Publish(jobID, "started", serviceLifecyclePayload(sessionKey, meta, map[string]any{"status": "running"}))
 	observer := &serviceObserver{ConversationObserver: s.jobs.Observer(jobID)}
-	_, err := s.app().ResumeApprovedRequest(ctx, app.ResumeApprovedRequest{
+	finalText, err := s.app().ResumeApprovedRequest(ctx, app.ResumeApprovedRequest{
 		IssuedApproval: issued,
 		Capability:     tools.CapabilityLevel(s.config.Service.MaxCapability),
 		Actor:          identity.Actor,
@@ -2099,6 +2102,9 @@ func (s *serviceServer) runApprovedResumeJob(ctx context.Context, jobID string, 
 		}
 		s.jobs.Fail(jobID, servicePublicJobError(err), serviceLifecyclePayload(sessionKey, meta, nil))
 		return
+	}
+	if strings.TrimSpace(observer.finalText) == "" {
+		observer.finalText = strings.TrimSpace(finalText)
 	}
 	s.jobs.Complete(jobID, "completed", serviceLifecyclePayload(sessionKey, meta, map[string]any{"final_text": observer.finalText}))
 }

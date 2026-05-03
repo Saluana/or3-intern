@@ -141,6 +141,13 @@ type replayToolCallTarget struct {
 	AlreadyResumed bool
 }
 
+type replayHistoryMessage struct {
+	Role       string
+	Content    string
+	ToolCallID string
+	ToolCalls  []providers.ToolCall
+}
+
 func (a *ServiceApp) ReplayToolCall(ctx context.Context, req ReplayToolCallRequest) (string, error) {
 	if a == nil || a.runtime == nil {
 		return "", errors.New("runtime unavailable")
@@ -273,7 +280,11 @@ func (a *ServiceApp) ResumeApprovedRequest(ctx context.Context, req ResumeApprov
 			return finalText, nil
 		}
 		if strings.TrimSpace(target.ToolCallID) == "" {
-			return "", nil
+			finalText := "Approval was granted, but the original blocked tool call could not be found to resume. Please retry the request if it is still needed."
+			if req.Observer != nil {
+				req.Observer.OnCompletion(ctx, finalText, false)
+			}
+			return finalText, nil
 		}
 		return a.ReplayToolCall(ctx, ReplayToolCallRequest{
 			SessionKey:        sessionKey,
@@ -364,37 +375,31 @@ func (a *ServiceApp) findReplayToolCallID(ctx context.Context, sessionKey, toolN
 }
 
 func (a *ServiceApp) findApprovalReplayTarget(ctx context.Context, sessionKey string, requestID int64) (replayToolCallTarget, error) {
-	if a == nil || a.runtime == nil || a.runtime.Builder == nil || requestID <= 0 {
+	if a == nil || a.runtime == nil || requestID <= 0 {
 		return replayToolCallTarget{}, nil
 	}
-	pp, _, err := a.runtime.Builder.BuildWithOptions(ctx, agent.BuildOptions{
-		SessionKey: strings.TrimSpace(sessionKey),
-	})
+	history, err := a.approvalReplayHistory(ctx, sessionKey)
 	if err != nil {
 		return replayToolCallTarget{}, err
 	}
-	for i := len(pp.History) - 1; i >= 0; i-- {
-		msg := pp.History[i]
+	for i := len(history) - 1; i >= 0; i-- {
+		msg := history[i]
 		if msg.Role != "tool" || strings.TrimSpace(msg.ToolCallID) == "" {
 			continue
 		}
-		content, ok := msg.Content.(string)
-		if !ok {
-			continue
-		}
-		result, ok := tools.DecodeToolResult(content)
+		result, ok := tools.DecodeToolResult(msg.Content)
 		if !ok || result.RequestID != requestID {
 			continue
 		}
 		toolCallID := strings.TrimSpace(msg.ToolCallID)
-		for j := i + 1; j < len(pp.History); j++ {
-			later := pp.History[j]
+		for j := i + 1; j < len(history); j++ {
+			later := history[j]
 			if later.Role == "tool" && strings.TrimSpace(later.ToolCallID) == toolCallID {
 				return replayToolCallTarget{ToolCallID: toolCallID, AlreadyResumed: true}, nil
 			}
 		}
 		for j := i - 1; j >= 0; j-- {
-			prior := pp.History[j]
+			prior := history[j]
 			if prior.Role != "assistant" || len(prior.ToolCalls) == 0 {
 				continue
 			}
@@ -413,6 +418,118 @@ func (a *ServiceApp) findApprovalReplayTarget(ctx context.Context, sessionKey st
 		return replayToolCallTarget{}, fmt.Errorf("approved replay rejected: no matching prior assistant tool call for request %d", requestID)
 	}
 	return replayToolCallTarget{}, nil
+}
+
+func (a *ServiceApp) approvalReplayHistory(ctx context.Context, sessionKey string) ([]replayHistoryMessage, error) {
+	history, err := a.rawSessionReplayHistory(ctx, sessionKey, 250)
+	if err != nil {
+		return nil, err
+	}
+	if len(history) > 0 || a == nil || a.runtime == nil || a.runtime.Builder == nil {
+		return history, nil
+	}
+	pp, _, err := a.runtime.Builder.BuildWithOptions(ctx, agent.BuildOptions{
+		SessionKey: strings.TrimSpace(sessionKey),
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]replayHistoryMessage, 0, len(pp.History))
+	for _, msg := range pp.History {
+		content, _ := msg.Content.(string)
+		out = append(out, replayHistoryMessage{
+			Role:       msg.Role,
+			Content:    content,
+			ToolCallID: msg.ToolCallID,
+			ToolCalls:  msg.ToolCalls,
+		})
+	}
+	return out, nil
+}
+
+func (a *ServiceApp) rawSessionReplayHistory(ctx context.Context, sessionKey string, limit int) ([]replayHistoryMessage, error) {
+	if a == nil || a.runtime == nil || a.runtime.DB == nil || a.runtime.DB.SQL == nil {
+		return nil, nil
+	}
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 250
+	}
+	rows, err := a.runtime.DB.SQL.QueryContext(ctx,
+		`SELECT role, content, payload_json FROM messages WHERE session_key=? ORDER BY id DESC LIMIT ?`, sessionKey, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	history := make([]replayHistoryMessage, 0, limit)
+	for rows.Next() {
+		var role, content, payloadJSON string
+		if err := rows.Scan(&role, &content, &payloadJSON); err != nil {
+			return nil, err
+		}
+		msg := replayHistoryMessage{Role: role, Content: content}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(payloadJSON), &payload); err == nil {
+			switch role {
+			case "assistant":
+				if raw, ok := payload["tool_calls"]; ok {
+					b, _ := json.Marshal(raw)
+					_ = json.Unmarshal(b, &msg.ToolCalls)
+				}
+			case "tool":
+				if rawID, ok := payload["tool_call_id"]; ok {
+					msg.ToolCallID = strings.TrimSpace(fmt.Sprint(rawID))
+				}
+			}
+		}
+		history = append(history, msg)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i, j := 0, len(history)-1; i < j; i, j = i+1, j-1 {
+		history[i], history[j] = history[j], history[i]
+	}
+	backfillReplayToolCallIDs(history)
+	return history, nil
+}
+
+func backfillReplayToolCallIDs(history []replayHistoryMessage) {
+	pendingToolCallIDs := make([]string, 0)
+	for i := range history {
+		msg := &history[i]
+		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
+			pendingToolCallIDs = pendingToolCallIDs[:0]
+			for _, tc := range msg.ToolCalls {
+				if id := strings.TrimSpace(tc.ID); id != "" {
+					pendingToolCallIDs = append(pendingToolCallIDs, id)
+				}
+			}
+			continue
+		}
+		if msg.Role != "tool" {
+			continue
+		}
+		if msg.ToolCallID == "" && len(pendingToolCallIDs) > 0 {
+			msg.ToolCallID = pendingToolCallIDs[0]
+		}
+		if msg.ToolCallID == "" || len(pendingToolCallIDs) == 0 {
+			continue
+		}
+		if pendingToolCallIDs[0] == msg.ToolCallID {
+			pendingToolCallIDs = pendingToolCallIDs[1:]
+			continue
+		}
+		for j, id := range pendingToolCallIDs {
+			if id == msg.ToolCallID {
+				pendingToolCallIDs = append(pendingToolCallIDs[:j], pendingToolCallIDs[j+1:]...)
+				break
+			}
+		}
+	}
 }
 
 func canonicalReplayArgs(raw string) string {

@@ -87,24 +87,24 @@ type messageQuotaCountersContextKey struct{}
 
 // Runtime executes conversational turns against the configured model and tools.
 type Runtime struct {
-	DB                     *db.DB
-	Provider               *providers.Client
-	Model                  string
-	Temperature            float64
-	Tools                  *tools.Registry
-	Hardening              config.HardeningConfig
-	AccessProfiles         config.AccessProfilesConfig
-	Builder                *Builder
-	Artifacts              *artifacts.Store
-	MaxToolBytes           int
-	MaxToolLoops           int
+	DB                         *db.DB
+	Provider                   *providers.Client
+	Model                      string
+	Temperature                float64
+	Tools                      *tools.Registry
+	Hardening                  config.HardeningConfig
+	AccessProfiles             config.AccessProfilesConfig
+	Builder                    *Builder
+	Artifacts                  *artifacts.Store
+	MaxToolBytes               int
+	MaxToolLoops               int
 	MaxToolLoopsExceededAction config.QuotaExceededAction
-	ToolPreviewBytes       int
-	DynamicToolExposure    bool
-	Audit                  *security.AuditLogger
-	ApprovalBroker         *approval.Broker
-	ContextManager         config.ContextManagerConfig
-	ContextManagerProvider *providers.Client
+	ToolPreviewBytes           int
+	DynamicToolExposure        bool
+	Audit                      *security.AuditLogger
+	ApprovalBroker             *approval.Broker
+	ContextManager             config.ContextManagerConfig
+	ContextManagerProvider     *providers.Client
 
 	Deliver  Deliverer
 	Streamer channels.StreamingChannel

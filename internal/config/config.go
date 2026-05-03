@@ -99,27 +99,27 @@ func ProfileSpec(p RuntimeProfile) RuntimeProfileSpec {
 
 // Config is the top-level persisted runtime configuration.
 type Config struct {
-	DBPath                 string `json:"dbPath"`
-	ArtifactsDir           string `json:"artifactsDir"`
-	WorkspaceDir           string `json:"workspaceDir"`
-	AllowedDir             string `json:"allowedDir"`
-	DefaultSessionKey      string `json:"defaultSessionKey"`
-	SoulFile               string `json:"soulFile"`
-	AgentsFile             string `json:"agentsFile"`
-	ToolsFile              string `json:"toolsFile"`
-	BootstrapMaxChars      int    `json:"bootstrapMaxChars"`
-	BootstrapTotalMaxChars int    `json:"bootstrapTotalMaxChars"`
-	SessionCache           int    `json:"sessionCacheLimit"`
-	HistoryMax             int    `json:"historyMaxMessages"`
-	MaxToolBytes           int    `json:"maxToolBytes"`
-	MaxMediaBytes          int    `json:"maxMediaBytes"`
-	MaxToolLoops           int    `json:"maxToolLoops"`
+	DBPath                     string              `json:"dbPath"`
+	ArtifactsDir               string              `json:"artifactsDir"`
+	WorkspaceDir               string              `json:"workspaceDir"`
+	AllowedDir                 string              `json:"allowedDir"`
+	DefaultSessionKey          string              `json:"defaultSessionKey"`
+	SoulFile                   string              `json:"soulFile"`
+	AgentsFile                 string              `json:"agentsFile"`
+	ToolsFile                  string              `json:"toolsFile"`
+	BootstrapMaxChars          int                 `json:"bootstrapMaxChars"`
+	BootstrapTotalMaxChars     int                 `json:"bootstrapTotalMaxChars"`
+	SessionCache               int                 `json:"sessionCacheLimit"`
+	HistoryMax                 int                 `json:"historyMaxMessages"`
+	MaxToolBytes               int                 `json:"maxToolBytes"`
+	MaxMediaBytes              int                 `json:"maxMediaBytes"`
+	MaxToolLoops               int                 `json:"maxToolLoops"`
 	MaxToolLoopsExceededAction QuotaExceededAction `json:"maxToolLoopsExceededAction"`
-	MemoryRetrieve         int    `json:"memoryRetrieveLimit"`
-	VectorK                int    `json:"vectorSearchK"`
-	FTSK                   int    `json:"ftsSearchK"`
-	VectorScanLimit        int    `json:"vectorScanLimit"`
-	WorkerCount            int    `json:"workerCount"`
+	MemoryRetrieve             int                 `json:"memoryRetrieveLimit"`
+	VectorK                    int                 `json:"vectorSearchK"`
+	FTSK                       int                 `json:"ftsSearchK"`
+	VectorScanLimit            int                 `json:"vectorScanLimit"`
+	WorkerCount                int                 `json:"workerCount"`
 
 	ConsolidationEnabled             bool            `json:"consolidationEnabled"`
 	ConsolidationModel               string          `json:"consolidationModel"`

@@ -3562,7 +3562,7 @@ func TestRunServiceCommand_RefusesInvalidHostedProfile(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	err := runServiceCommand(ctx, cfg, rt, nil, nil)
+	err := runServiceCommand(ctx, cfg, rt, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error for misconfigured hosted profile, got nil")
 	}
@@ -3595,7 +3595,7 @@ func TestRunServiceCommand_HostedNoExec_RefusesExecShell(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	err := runServiceCommand(ctx, cfg, nil, nil, nil)
+	err := runServiceCommand(ctx, cfg, nil, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error for hosted-no-exec with enableExecShell=true, got nil")
 	}
@@ -3613,7 +3613,7 @@ func TestRunServiceCommandWithBrokerOptions_AllowsUnsafeDevOverride(t *testing.T
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	err := runServiceCommandWithBrokerOptions(ctx, cfg, nil, nil, nil, nil, true)
+	err := runServiceCommandWithBrokerOptions(ctx, cfg, nil, nil, nil, nil, nil, true)
 	if err == nil {
 		t.Fatal("expected runtime error after unsafe-dev bypass, got nil")
 	}
@@ -3632,7 +3632,7 @@ func TestRunServiceCommand_HostedNoExec_RefusesPrivilegedTools(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	err := runServiceCommand(ctx, cfg, nil, nil, nil)
+	err := runServiceCommand(ctx, cfg, nil, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error for hosted-no-exec with privilegedTools=true, got nil")
 	}
@@ -3650,7 +3650,7 @@ func TestRunServiceCommand_HostedNoExec_AllowsCleanConfig(t *testing.T) {
 	// Profile validation runs before the runtime nil check, so a nil runtime
 	// here means we reach "runtime not configured" only if profile checks pass.
 	// If profile validation had rejected the config it would return "startup refused".
-	err := runServiceCommand(ctx, cfg, nil, nil, nil)
+	err := runServiceCommand(ctx, cfg, nil, nil, nil, nil)
 	if err != nil && strings.Contains(err.Error(), "startup refused") {
 		t.Fatalf("clean hosted-no-exec config should not be refused, got: %v", err)
 	}

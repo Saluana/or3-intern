@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"or3-intern/internal/agent"
+	"or3-intern/internal/agentcli"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/auth"
 	"or3-intern/internal/bus"
@@ -22,15 +23,20 @@ import (
 )
 
 type ServiceApp struct {
-	runtime         *agent.Runtime
-	jobs            *agent.JobRegistry
-	subagentManager *agent.SubagentManager
-	control         *controlplane.Service
-	auth            *auth.Service
+	runtime          *agent.Runtime
+	jobs             *agent.JobRegistry
+	subagentManager  *agent.SubagentManager
+	agentCLIManager  *agentcli.Manager
+	control          *controlplane.Service
+	auth             *auth.Service
 }
 
 func NewServiceApp(cfg config.Config, runtime *agent.Runtime, jobs *agent.JobRegistry, subagentManager *agent.SubagentManager, control *controlplane.Service) *ServiceApp {
-	app := &ServiceApp{runtime: runtime, jobs: jobs, subagentManager: subagentManager, control: control}
+	return NewServiceAppWithAgentCLI(cfg, runtime, jobs, subagentManager, nil, control)
+}
+
+func NewServiceAppWithAgentCLI(cfg config.Config, runtime *agent.Runtime, jobs *agent.JobRegistry, subagentManager *agent.SubagentManager, agentCLIManager *agentcli.Manager, control *controlplane.Service) *ServiceApp {
+	app := &ServiceApp{runtime: runtime, jobs: jobs, subagentManager: subagentManager, agentCLIManager: agentCLIManager, control: control}
 	if control != nil {
 		if authSvc, err := auth.NewService(cfg, control.DB, control.Audit); err == nil {
 			app.auth = authSvc
@@ -625,6 +631,13 @@ func (a *ServiceApp) AbortJob(ctx context.Context, jobID string) (bool, string, 
 			}
 		}
 	}
+	if a.agentCLIManager != nil {
+		if err := a.agentCLIManager.Abort(ctx, jobID); err == nil {
+			return true, "", nil
+		} else if strings.Contains(strings.ToLower(err.Error()), "not abortable") {
+			return false, "not_abortable", nil
+		}
+	}
 	snapshot, ok := a.jobs.Snapshot(jobID)
 	if !ok {
 		return false, "not_found", nil
@@ -633,6 +646,51 @@ func (a *ServiceApp) AbortJob(ctx context.Context, jobID string) (bool, string, 
 		return true, snapshot.Status, nil
 	}
 	return false, "not_abortable", nil
+}
+
+// DetectAgentCLIRunners returns runner info for all registered external CLIs.
+func (a *ServiceApp) DetectAgentCLIRunners(ctx context.Context) ([]agentcli.RunnerInfo, error) {
+	if a == nil || a.agentCLIManager == nil {
+		return nil, fmt.Errorf("agent CLI manager is not available")
+	}
+	if a.agentCLIManager.Registry == nil {
+		return nil, fmt.Errorf("runner registry is not configured")
+	}
+	return a.agentCLIManager.Registry.DetectAll(ctx, agentcli.DetectOptions{
+		DisabledRunners: a.agentCLIManager.Cfg.DisabledRunners,
+	}), nil
+}
+
+// StartAgentCLIRun enqueues a new external CLI run.
+func (a *ServiceApp) StartAgentCLIRun(ctx context.Context, req agentcli.AgentRunRequest) (db.AgentCLIRun, error) {
+	if a == nil || a.agentCLIManager == nil {
+		return db.AgentCLIRun{}, fmt.Errorf("agent CLI manager is not available")
+	}
+	return a.agentCLIManager.Enqueue(ctx, req)
+}
+
+// GetAgentCLIRun reads a persisted CLI run by run ID or job ID.
+func (a *ServiceApp) GetAgentCLIRun(ctx context.Context, id string) (db.AgentCLIRun, bool, error) {
+	if a == nil || a.agentCLIManager == nil || a.agentCLIManager.DB == nil {
+		return db.AgentCLIRun{}, false, fmt.Errorf("agent CLI manager is not available")
+	}
+	return a.agentCLIManager.DB.GetAgentCLIRun(ctx, id)
+}
+
+// ListAgentCLIEvents lists persisted events for a job.
+func (a *ServiceApp) ListAgentCLIEvents(ctx context.Context, jobID string, afterSeq int64, limit int) ([]db.AgentCLIEvent, error) {
+	if a == nil || a.agentCLIManager == nil || a.agentCLIManager.DB == nil {
+		return nil, fmt.Errorf("agent CLI manager is not available")
+	}
+	return a.agentCLIManager.DB.ListAgentCLIEvents(ctx, jobID, afterSeq, limit)
+}
+
+// AbortAgentCLIRun cancels an external CLI job.
+func (a *ServiceApp) AbortAgentCLIRun(ctx context.Context, jobID string) error {
+	if a == nil || a.agentCLIManager == nil {
+		return fmt.Errorf("agent CLI manager is not available")
+	}
+	return a.agentCLIManager.Abort(ctx, jobID)
 }
 
 func (a *ServiceApp) WaitForJob(ctx context.Context, jobID string) (agent.JobSnapshot, bool) {

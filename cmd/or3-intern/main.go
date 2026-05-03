@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"or3-intern/internal/agent"
+	"or3-intern/internal/agentcli"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/artifacts"
 	"or3-intern/internal/bus"
@@ -375,6 +376,7 @@ func main() {
 	inv := buildSkillsInventory(cfg, builtin, toolNames)
 	var cronSvc *cron.Service
 	var subagentManager *agent.SubagentManager
+	var agentCLIManager *agentcli.Manager
 	enableSubagents := subagentsEnabledForCommand(cmd, cfg)
 	buildRuntimeTools := func() *tools.Registry {
 		return buildToolRegistry(cfg, d, prov, channelManager, &inv, cronSvc, subagentManager, mcpManager, approvalBroker)
@@ -518,6 +520,21 @@ func main() {
 		}
 		rt.Tools = buildRuntimeTools()
 	}
+	if cfg.AgentCLI.Enabled {
+		agentCLIManager = &agentcli.Manager{
+			DB:            d,
+			Jobs:          serviceJobs,
+			Cfg:           cfg.AgentCLI,
+			MaxConcurrent: cfg.AgentCLI.MaxConcurrent,
+			MaxQueued:     cfg.AgentCLI.MaxQueued,
+			TaskTimeout:   time.Duration(cfg.AgentCLI.DefaultTimeoutSeconds) * time.Second,
+			Registry:      agentcli.NewDefaultRegistry(),
+		}
+		if err := agentCLIManager.Start(ctx); err != nil {
+			fmt.Fprintln(os.Stderr, "agent CLI manager error:", err)
+			os.Exit(1)
+		}
+	}
 	if cfg.ConsolidationEnabled || cfg.ContextManager.Enabled {
 		rt.Consolidator = &memory.Consolidator{
 			DB:                 d,
@@ -594,7 +611,7 @@ func main() {
 		<-ctx.Done()
 	case "service":
 		runWorkers(ctx, b, rt, cfg.WorkerCount, nil)
-		if err := runServiceCommandWithBrokerOptions(ctx, cfg, rt, subagentManager, serviceJobs, approvalBroker, unsafeDev); err != nil {
+		if err := runServiceCommandWithBrokerOptions(ctx, cfg, rt, subagentManager, agentCLIManager, serviceJobs, approvalBroker, unsafeDev); err != nil {
 			fmt.Fprintln(os.Stderr, "service error:", err)
 			os.Exit(1)
 		}

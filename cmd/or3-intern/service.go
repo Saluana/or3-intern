@@ -28,6 +28,7 @@ import (
 	"github.com/creack/pty"
 
 	"or3-intern/internal/agent"
+	"or3-intern/internal/agentcli"
 	"or3-intern/internal/app"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/auth"
@@ -43,6 +44,7 @@ type serviceServer struct {
 	configPath       string
 	runtime          *agent.Runtime
 	subagentManager  *agent.SubagentManager
+	agentCLIManager  *agentcli.Manager
 	jobs             *agent.JobRegistry
 	broker           *approval.Broker
 	unsafeDev        bool
@@ -76,7 +78,8 @@ const (
 	serviceFileUploadBodyLimit int64 = 128 << 20
 	serviceFileTextReadLimit   int64 = 1 << 20
 	serviceFileTextWriteLimit  int64 = 1 << 20
-	serviceTerminalBodyLimit   int64 = 64 << 10
+	serviceTerminalBodyLimit    int64 = 64 << 10
+	serviceAgentRunsBodyLimit   int64 = 256 << 10
 	serviceTerminalSessionTTL        = 10 * time.Minute
 	serviceTerminalMaxSessions       = 4
 )
@@ -213,15 +216,15 @@ func clampTerminalCols(cols int) int {
 	return cols
 }
 
-func runServiceCommand(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, jobs *agent.JobRegistry) error {
-	return runServiceCommandWithBroker(ctx, cfg, rt, subagentManager, jobs, nil)
+func runServiceCommand(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, agentCLIManager *agentcli.Manager, jobs *agent.JobRegistry) error {
+	return runServiceCommandWithBroker(ctx, cfg, rt, subagentManager, agentCLIManager, jobs, nil)
 }
 
-func runServiceCommandWithBroker(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, jobs *agent.JobRegistry, broker *approval.Broker) error {
-	return runServiceCommandWithBrokerOptions(ctx, cfg, rt, subagentManager, jobs, broker, false)
+func runServiceCommandWithBroker(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, agentCLIManager *agentcli.Manager, jobs *agent.JobRegistry, broker *approval.Broker) error {
+	return runServiceCommandWithBrokerOptions(ctx, cfg, rt, subagentManager, agentCLIManager, jobs, broker, false)
 }
 
-func runServiceCommandWithBrokerOptions(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, jobs *agent.JobRegistry, broker *approval.Broker, unsafeDev bool) error {
+func runServiceCommandWithBrokerOptions(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, agentCLIManager *agentcli.Manager, jobs *agent.JobRegistry, broker *approval.Broker, unsafeDev bool) error {
 	if strings.TrimSpace(cfg.Service.Secret) == "" {
 		return fmt.Errorf("service secret is required")
 	}
@@ -234,7 +237,7 @@ func runServiceCommandWithBrokerOptions(ctx context.Context, cfg config.Config, 
 	if jobs == nil {
 		jobs = agent.NewJobRegistry(0, 0)
 	}
-	server := &serviceServer{config: cfg, configPath: cfgPathOrDefault(""), runtime: rt, subagentManager: subagentManager, jobs: jobs, broker: broker, unsafeDev: unsafeDev}
+	server := &serviceServer{config: cfg, configPath: cfgPathOrDefault(""), runtime: rt, subagentManager: subagentManager, agentCLIManager: agentCLIManager, jobs: jobs, broker: broker, unsafeDev: unsafeDev}
 	authSvc := server.app().Auth()
 	mux := newServiceMux(server)
 
@@ -303,8 +306,11 @@ func newServiceMux(server *serviceServer) *http.ServeMux {
 	mux.Handle("/internal/v1/skills/", http.HandlerFunc(server.handleSkills))
 	mux.Handle("/internal/v1/files", http.HandlerFunc(server.handleFiles))
 	mux.Handle("/internal/v1/files/", http.HandlerFunc(server.handleFiles))
-	mux.Handle("/internal/v1/terminal/sessions", http.HandlerFunc(server.handleTerminal))
+	mux.Handle("/internal/v1/terminal/sessions",  http.HandlerFunc(server.handleTerminal))
 	mux.Handle("/internal/v1/terminal/sessions/", http.HandlerFunc(server.handleTerminal))
+	mux.Handle("/internal/v1/agent-runners", http.HandlerFunc(server.handleAgentRunners))
+	mux.Handle("/internal/v1/agent-runs",    http.HandlerFunc(server.handleAgentRuns))
+	mux.Handle("/internal/v1/agent-runs/",   http.HandlerFunc(server.handleAgentRuns))
 	return mux
 }
 
@@ -317,7 +323,7 @@ func (s *serviceServer) control() *controlplane.Service {
 
 func (s *serviceServer) app() *app.ServiceApp {
 	s.appOnce.Do(func() {
-		s.appSvc = app.NewServiceApp(s.config, s.runtime, s.jobs, s.subagentManager, s.control())
+		s.appSvc = app.NewServiceAppWithAgentCLI(s.config, s.runtime, s.jobs, s.subagentManager, s.agentCLIManager, s.control())
 	})
 	return s.appSvc
 }
@@ -2324,6 +2330,9 @@ func (s *serviceServer) handleJobs(w http.ResponseWriter, r *http.Request) {
 			if s.writePersistedSubagentJobSnapshot(w, r, jobID) {
 				return
 			}
+			if s.writePersistedAgentCLIRunSnapshot(w, r, jobID) {
+				return
+			}
 			if !errors.Is(err, controlplane.ErrJobNotFound) {
 				writeServiceError(w, r, http.StatusServiceUnavailable, "job lookup unavailable", err)
 				return
@@ -2743,6 +2752,55 @@ func (s *serviceServer) writePersistedSubagentJobSnapshot(w http.ResponseWriter,
 	response["events"] = s.persistedSubagentEvents(r.Context(), store, job)
 	writeServiceValue(w, http.StatusOK, response)
 	return true
+}
+
+func (s *serviceServer) writePersistedAgentCLIRunSnapshot(w http.ResponseWriter, r *http.Request, jobID string) bool {
+	store := s.control().DB
+	if store == nil {
+		return false
+	}
+	run, ok, err := store.GetAgentCLIRun(r.Context(), jobID)
+	if err != nil {
+		writeServiceError(w, r, http.StatusServiceUnavailable, "agent CLI run history unavailable", err)
+		return true
+	}
+	if !ok {
+		return false
+	}
+	response := controlplane.BuildAgentCLIRunResponse(run)
+	if requestedAt, ok := response["requested_at"]; ok {
+		response["created_at"] = requestedAt
+	}
+	events, _ := store.ListAgentCLIEvents(r.Context(), run.JobID, 0, 100)
+	response["events"] = s.agentCLIEventsToJobEvents(events)
+	writeServiceValue(w, http.StatusOK, response)
+	return true
+}
+
+func (s *serviceServer) agentCLIEventsToJobEvents(events []db.AgentCLIEvent) []agent.JobEvent {
+	out := make([]agent.JobEvent, 0, len(events))
+	for _, e := range events {
+		payload := map[string]any{
+			"type":   e.Type,
+			"seq":    e.Seq,
+			"stream": e.Stream,
+			"chunk":  e.Chunk,
+		}
+		if e.PayloadJSON != "" {
+			var raw map[string]any
+			if err := json.Unmarshal([]byte(e.PayloadJSON), &raw); err == nil {
+				for k, v := range raw {
+					payload[k] = v
+				}
+			}
+		}
+		out = append(out, agent.JobEvent{
+			Sequence: e.Seq,
+			Type:     e.Type,
+			Data:     payload,
+		})
+	}
+	return out
 }
 
 func (s *serviceServer) persistedSubagentFinalText(ctx context.Context, store *db.DB, job db.SubagentJob) string {
@@ -4311,4 +4369,141 @@ func (o *serviceObserver) OnToolResult(ctx context.Context, name string, out str
 	if o.ConversationObserver != nil {
 		o.ConversationObserver.OnToolResult(ctx, name, out, err)
 	}
+}
+
+func (s *serviceServer) handleAgentRunners(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	appSvc := s.app()
+	detected, err := appSvc.DetectAgentCLIRunners(r.Context())
+	if err != nil {
+		writeServiceError(w, r, http.StatusServiceUnavailable, "agent runner detection unavailable", err)
+		return
+	}
+	writeServiceValue(w, http.StatusOK, map[string]any{"runners": detected})
+}
+
+func (s *serviceServer) handleAgentRuns(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/internal/v1/agent-runs" || r.URL.Path == "/internal/v1/agent-runs/" {
+		switch r.Method {
+		case http.MethodGet:
+			s.handleAgentRunsList(w, r)
+		case http.MethodPost:
+			s.handleAgentRunsStart(w, r)
+		default:
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		}
+		return
+	}
+	relative := strings.TrimPrefix(r.URL.Path, "/internal/v1/agent-runs/")
+	parts := strings.SplitN(strings.Trim(relative, "/"), "/", 2)
+	runID := strings.TrimSpace(parts[0])
+	if runID == "" {
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
+		return
+	}
+	if len(parts) == 2 && parts[1] == "events" {
+		s.handleAgentRunEvents(w, r, runID)
+		return
+	}
+	if r.Method != http.MethodGet {
+		writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	s.handleAgentRunRead(w, r, runID)
+}
+
+func (s *serviceServer) handleAgentRunsList(w http.ResponseWriter, r *http.Request) {
+	// For now, list recent runs under the default session
+	store := s.control().DB
+	if store == nil {
+		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "database unavailable"})
+		return
+	}
+	runs, err := store.ListQueuedAgentCLIRuns(r.Context())
+	if err != nil {
+		writeServiceError(w, r, http.StatusServiceUnavailable, "agent runs list unavailable", err)
+		return
+	}
+	writeServiceValue(w, http.StatusOK, controlplane.BuildAgentCLIRunListResponse(runs))
+}
+
+func (s *serviceServer) handleAgentRunsStart(w http.ResponseWriter, r *http.Request) {
+	limitServiceRequestBody(w, r, serviceAgentRunsBodyLimit)
+	req, err := decodeServiceAgentRunRequest(r.Body)
+	if err != nil {
+		writeServiceRequestDecodeError(w, err)
+		return
+	}
+	agentReq := agentcli.AgentRunRequest{
+		ParentSessionKey: req.ParentSessionKey,
+		RunnerID:         req.RunnerID,
+		Task:             req.Task,
+		TimeoutSeconds:   req.TimeoutSeconds,
+		Cwd:              req.Cwd,
+		Model:            req.Model,
+		Mode:             req.Mode,
+		Isolation:        req.Isolation,
+		MaxTurns:         req.MaxTurns,
+		Meta:             req.Meta,
+	}
+	run, err := s.app().StartAgentCLIRun(r.Context(), agentReq)
+	if err != nil {
+		writeServiceError(w, r, http.StatusBadRequest, "agent run rejected", err)
+		return
+	}
+	writeServiceJSON(w, http.StatusAccepted, map[string]any{
+		"job_id":  run.JobID,
+		"run_id":  run.ID,
+		"status":  run.Status,
+	})
+}
+
+func (s *serviceServer) handleAgentRunRead(w http.ResponseWriter, r *http.Request, id string) {
+	store := s.control().DB
+	if store == nil {
+		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "database unavailable"})
+		return
+	}
+	run, ok, err := store.GetAgentCLIRun(r.Context(), id)
+	if err != nil {
+		writeServiceError(w, r, http.StatusServiceUnavailable, "agent run lookup unavailable", err)
+		return
+	}
+	if !ok {
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "run not found"})
+		return
+	}
+	writeServiceValue(w, http.StatusOK, controlplane.BuildAgentCLIRunResponse(run))
+}
+
+func (s *serviceServer) handleAgentRunEvents(w http.ResponseWriter, r *http.Request, runID string) {
+	afterSeq := int64(0)
+	if afterStr := r.URL.Query().Get("after_seq"); afterStr != "" {
+		if n, err := strconv.ParseInt(afterStr, 10, 64); err == nil {
+			afterSeq = n
+		}
+	}
+	store := s.control().DB
+	if store == nil {
+		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "database unavailable"})
+		return
+	}
+	run, ok, err := store.GetAgentCLIRun(r.Context(), runID)
+	if err != nil {
+		writeServiceError(w, r, http.StatusServiceUnavailable, "agent run lookup unavailable", err)
+		return
+	}
+	if !ok {
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "run not found"})
+		return
+	}
+	events, err := store.ListAgentCLIEvents(r.Context(), run.JobID, afterSeq, 200)
+	if err != nil {
+		writeServiceError(w, r, http.StatusServiceUnavailable, "agent events unavailable", err)
+		return
+	}
+	writeServiceValue(w, http.StatusOK, controlplane.BuildAgentCLIEventListResponse(events))
 }

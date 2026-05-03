@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -944,4 +945,99 @@ func DescribeUnavailable(err error) error {
 	default:
 		return err
 	}
+}
+
+// BuildAgentCLIRunResponse converts a persisted agent_cli_runs row into a
+// sanitized JSON map for the agents API.
+func BuildAgentCLIRunResponse(run db.AgentCLIRun) map[string]any {
+	out := map[string]any{
+		"job_id":             run.JobID,
+		"run_id":             run.ID,
+		"kind":               "agent_cli:" + run.RunnerID,
+		"runner_id":          run.RunnerID,
+		"parent_session_key": run.ParentSessionKey,
+		"task":               run.Task,
+		"mode":               run.Mode,
+		"isolation":          run.Isolation,
+		"status":             run.Status,
+		"requested_at":       formatAgentCLITime(run.RequestedAt),
+		"updated_at":         formatAgentCLITime(latestAgentCLITimestamp(run)),
+	}
+	if preview := strings.TrimSpace(run.StdoutPreview); preview != "" {
+		out["output_preview"] = preview
+	}
+	if preview := strings.TrimSpace(run.FinalTextPreview); preview != "" {
+		out["final_text_preview"] = preview
+	}
+	if errPreview := strings.TrimSpace(run.StderrPreview); errPreview != "" {
+		out["error_preview"] = errPreview
+	}
+	if errMsg := strings.TrimSpace(run.ErrorMessage); errMsg != "" {
+		out["error"] = errMsg
+	}
+	if run.StartedAt > 0 {
+		out["started_at"] = formatAgentCLITime(run.StartedAt)
+	}
+	if run.CompletedAt > 0 {
+		out["completed_at"] = formatAgentCLITime(run.CompletedAt)
+	}
+	if run.TimeoutSeconds > 0 {
+		out["timeout_seconds"] = run.TimeoutSeconds
+	}
+	if run.ExitCode.Valid {
+		out["exit_code"] = run.ExitCode.Int64
+	}
+	if run.Attempts > 0 {
+		out["attempts"] = run.Attempts
+	}
+	if model := strings.TrimSpace(run.Model); model != "" {
+		out["model"] = model
+	}
+	return out
+}
+
+// BuildAgentCLIRunListResponse renders a list of persisted agent CLI runs.
+func BuildAgentCLIRunListResponse(runs []db.AgentCLIRun) map[string]any {
+	items := make([]map[string]any, 0, len(runs))
+	for _, run := range runs {
+		items = append(items, BuildAgentCLIRunResponse(run))
+	}
+	return map[string]any{"items": items}
+}
+
+// BuildAgentCLIEventListResponse renders a list of persisted agent CLI events.
+func BuildAgentCLIEventListResponse(events []db.AgentCLIEvent) map[string]any {
+	items := make([]map[string]any, 0, len(events))
+	for _, e := range events {
+		item := map[string]any{
+			"seq":    e.Seq,
+			"ts":     e.TS,
+			"type":   e.Type,
+			"stream": e.Stream,
+			"chunk":  e.Chunk,
+		}
+		if e.PayloadJSON != "" {
+			item["payload"] = json.RawMessage(e.PayloadJSON)
+		}
+		items = append(items, item)
+	}
+	return map[string]any{"events": items}
+}
+
+func latestAgentCLITimestamp(run db.AgentCLIRun) int64 {
+	latest := run.RequestedAt
+	if run.StartedAt > latest {
+		latest = run.StartedAt
+	}
+	if run.CompletedAt > latest {
+		latest = run.CompletedAt
+	}
+	return latest
+}
+
+func formatAgentCLITime(ms int64) string {
+	if ms <= 0 {
+		return ""
+	}
+	return time.UnixMilli(ms).UTC().Format(time.RFC3339)
 }

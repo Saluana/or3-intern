@@ -20,6 +20,7 @@ import (
 	"or3-intern/internal/agent"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/config"
+	"or3-intern/internal/cron"
 	"or3-intern/internal/db"
 	"or3-intern/internal/providers"
 	"or3-intern/internal/security"
@@ -729,6 +730,86 @@ func TestServiceConfigureApply_PersistsConfigChanges(t *testing.T) {
 	}
 	if loaded.Channels.Slack.InboundPolicy != config.InboundPolicyAllowlist {
 		t.Fatalf("expected slack allowlist policy, got %q", loaded.Channels.Slack.InboundPolicy)
+	}
+}
+
+func TestServiceCron_CRUDAndRun(t *testing.T) {
+	cfg := config.Default()
+	cfg.Cron.Enabled = true
+	cfg.Cron.StorePath = filepath.Join(t.TempDir(), "cron.json")
+	runs := 0
+	cronSvc := cron.New(cfg.Cron.StorePath, func(ctx context.Context, job cron.CronJob) error {
+		runs++
+		return nil
+	})
+	if err := cronSvc.Start(); err != nil {
+		t.Fatalf("cron start: %v", err)
+	}
+	t.Cleanup(cronSvc.Stop)
+	server := &serviceServer{config: cfg, cronSvc: cronSvc}
+
+	createReq := httptest.NewRequest(http.MethodPost, "/internal/v1/cron/jobs", strings.NewReader(`{
+		"name":"Morning summary",
+		"schedule":{"kind":"every","every_ms":3600000},
+		"payload":{"kind":"agent_turn","message":"Summarize overnight changes","session_key":"cron:test"}
+	}`))
+	createReq = createReq.WithContext(context.WithValue(createReq.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Actor: "ops", Role: approval.RoleOperator}))
+	createRec := httptest.NewRecorder()
+	server.handleCron(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d (%s)", createRec.Code, createRec.Body.String())
+	}
+	created := mustDecodeJSONBody(t, createRec.Body)
+	jobBody, ok := created["job"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected job body, got %#v", created)
+	}
+	jobID, _ := jobBody["id"].(string)
+	if jobID == "" {
+		t.Fatalf("expected generated job id, got %#v", jobBody)
+	}
+	if jobBody["enabled"] != true {
+		t.Fatalf("expected default enabled job, got %#v", jobBody["enabled"])
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/internal/v1/cron/jobs", nil)
+	listReq = listReq.WithContext(context.WithValue(listReq.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Actor: "ops", Role: approval.RoleOperator}))
+	listRec := httptest.NewRecorder()
+	server.handleCron(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", listRec.Code, listRec.Body.String())
+	}
+	listed := mustDecodeJSONBody(t, listRec.Body)
+	items, ok := listed["items"].([]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("expected one cron job, got %#v", listed)
+	}
+
+	pauseReq := httptest.NewRequest(http.MethodPost, "/internal/v1/cron/jobs/"+jobID+"/pause", nil)
+	pauseReq = pauseReq.WithContext(context.WithValue(pauseReq.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Actor: "ops", Role: approval.RoleOperator}))
+	pauseRec := httptest.NewRecorder()
+	server.handleCron(pauseRec, pauseReq)
+	if pauseRec.Code != http.StatusOK {
+		t.Fatalf("expected pause 200, got %d (%s)", pauseRec.Code, pauseRec.Body.String())
+	}
+
+	runReq := httptest.NewRequest(http.MethodPost, "/internal/v1/cron/jobs/"+jobID+"/run", nil)
+	runReq = runReq.WithContext(context.WithValue(runReq.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Actor: "ops", Role: approval.RoleOperator}))
+	runRec := httptest.NewRecorder()
+	server.handleCron(runRec, runReq)
+	if runRec.Code != http.StatusOK {
+		t.Fatalf("expected run 200, got %d (%s)", runRec.Code, runRec.Body.String())
+	}
+	if runs != 1 {
+		t.Fatalf("expected manual run to call runner once, got %d", runs)
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/internal/v1/cron/jobs/"+jobID, nil)
+	deleteReq = deleteReq.WithContext(context.WithValue(deleteReq.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Actor: "ops", Role: approval.RoleOperator}))
+	deleteRec := httptest.NewRecorder()
+	server.handleCron(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("expected delete 200, got %d (%s)", deleteRec.Code, deleteRec.Body.String())
 	}
 }
 

@@ -56,11 +56,11 @@
 
 ## 11. Documentation and manual verification
 
-- [ ] Update `docs/api-reference.md` with `/agent-runners`, `/agent-runs`, event payloads, mode/isolation policy, and cancellation semantics. (Req: 12, 14)
-- [ ] Update `docs/security-and-hardening.md` with external CLI child-process risks, safe defaults, env stripping, and sandbox-auto restrictions. (Req: 4, 5, 11, 12)
-- [ ] Update `docs/configuration-reference.md` with `agentCLI` config and `OR3_AGENT_CLI_*` env vars. (Req: 13)
-- [ ] Add manual verification notes for real OpenCode, Codex, Claude, and Gemini commands before enabling structured parsers beyond best-effort. (Req: 7)
-- [ ] Run focused Go tests for new packages, then `go test ./...`, then the existing `go build ./...` task. (Req: all)
+- [x] Update `docs/api-reference.md` with `/agent-runners`, `/agent-runs`, event payloads, mode/isolation policy, and cancellation semantics. (Req: 12, 14)
+- [x] Update `docs/security-and-hardening.md` with external CLI child-process risks, safe defaults, env stripping, and sandbox-auto restrictions. (Req: 4, 5, 11, 12)
+- [x] Update `docs/configuration-reference.md` with `agentCLI` config and `OR3_AGENT_CLI_*` env vars. (Req: 13)
+- [x] Add manual verification notes for real OpenCode, Codex, Claude, and Gemini commands before enabling structured parsers beyond best-effort. (Req: 7)
+- [x] Run focused Go tests for new packages, then `go test ./...`, then the existing `go build ./...` task. (Req: all)
 
 ## Out of scope for v1
 

@@ -247,6 +247,50 @@ or3-intern doctor --fix --interactive
 
 Run this before enabling external channels, webhook listeners, privileged tools, or service mode.
 
+## External agent CLI delegation
+
+The external agent CLI subsystem spawns child processes (OpenCode, Codex, Claude, Gemini) from the service. The following controls apply:
+
+### Safe defaults
+
+- The subsystem is **disabled by default** (`agentCLI.enabled: false`).
+- The default mode is `safe_edit` — non-interactive edits with each CLI's built-in safety flags. No full-autonomy/yolo behaviour.
+- `sandbox_auto` mode is rejected unless `agentCLI.allowSandboxAuto: true` **and** the isolation is `sandbox_dangerous` (a true sandbox runtime, not the host filesystem).
+- Host-machine runs are strictly limited to `review` (read-only) and `safe_edit` (workspace write only).
+
+### Environment sanitization
+
+- Child processes receive a **scrubbed environment allowlist**. The default list includes `PATH`, `HOME`, and `TMPDIR` so CLIs can find their auth/config directories, but forces `NO_COLOR=1` and `TERM=dumb`.
+- The following are **explicitly stripped** even if they appear in the configured allowlist:
+
+  | Blocked key | Reason |
+  |-------------|--------|
+  | `OR3_INTERNAL_TOKEN` | Internal service authentication |
+  | `OR3_PAIRING_SECRET` | Device pairing secret |
+  | `OR3_NODE_SECRET` | Node identity secret |
+  | `OR3_SERVICE_SECRET` | Service shared secret |
+  | `OR3_API_KEY` | Provider API key |
+  | `OPENAI_API_KEY` | Provider API key |
+
+- Child env is built via `tools.BuildChildEnv` with an overlay, never shell interpolation.
+- `argv_preview` in API responses and events is a redacted copy of the command arguments; raw command lines are never returned.
+
+### Process lifecycle
+
+- Every run runs under `exec.CommandContext`, not a shell. Prompt text remains a single `argv` element regardless of metacharacters.
+- On Unix, child processes are placed in their own process group (`Setpgid: true`). Cancellation sends `SIGTERM` to the group, then `SIGKILL` after a 2-second grace period.
+- Run timeouts are bounded: request minimum 30 seconds, server-side maximum 7200 seconds, default 900 seconds.
+- On service restart, queued runs resume and previously-running runs are marked `aborted` — child processes cannot be safely reattached.
+
+### Output bounding
+
+- Event chunks are capped at 16 KiB before publication or storage.
+- Stdout and stderr previews retain at most 64 KiB each (ring buffer).
+- Persisted full output is bounded by `agentCLI.maxPersistedOutputBytes` (default 10 MiB).
+- Truncation is explicit: `output_truncated` events record dropped byte counts.
+
+## Doctor command
+
 ## Related documentation
 
 - [Configuration reference](configuration-reference.md)
@@ -259,6 +303,7 @@ Run this before enabling external channels, webhook listeners, privileged tools,
 
 - `internal/security/`
 - `internal/approval/`
+- `internal/agentcli/` (runner registry, env sanitization, process manager)
 - `cmd/or3-intern/doctor.go`
 - `cmd/or3-intern/security_setup.go`
 - `cmd/or3-intern/approvals_cmd.go`

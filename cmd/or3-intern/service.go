@@ -34,6 +34,7 @@ import (
 	"or3-intern/internal/auth"
 	"or3-intern/internal/config"
 	"or3-intern/internal/controlplane"
+	"or3-intern/internal/cron"
 	"or3-intern/internal/db"
 	"or3-intern/internal/skills"
 	"or3-intern/internal/tools"
@@ -43,6 +44,7 @@ type serviceServer struct {
 	config           config.Config
 	configPath       string
 	runtime          *agent.Runtime
+	cronSvc          *cron.Service
 	subagentManager  *agent.SubagentManager
 	agentCLIManager  *agentcli.Manager
 	jobs             *agent.JobRegistry
@@ -78,8 +80,9 @@ const (
 	serviceFileUploadBodyLimit int64 = 128 << 20
 	serviceFileTextReadLimit   int64 = 1 << 20
 	serviceFileTextWriteLimit  int64 = 1 << 20
-	serviceTerminalBodyLimit    int64 = 64 << 10
-	serviceAgentRunsBodyLimit   int64 = 256 << 10
+	serviceTerminalBodyLimit   int64 = 64 << 10
+	serviceAgentRunsBodyLimit  int64 = 256 << 10
+	serviceCronBodyLimit       int64 = 64 << 10
 	serviceTerminalSessionTTL        = 10 * time.Minute
 	serviceTerminalMaxSessions       = 4
 )
@@ -225,6 +228,10 @@ func runServiceCommandWithBroker(ctx context.Context, cfg config.Config, rt *age
 }
 
 func runServiceCommandWithBrokerOptions(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, agentCLIManager *agentcli.Manager, jobs *agent.JobRegistry, broker *approval.Broker, unsafeDev bool) error {
+	return runServiceCommandWithBrokerOptionsAndCron(ctx, cfg, rt, subagentManager, agentCLIManager, jobs, broker, unsafeDev, nil)
+}
+
+func runServiceCommandWithBrokerOptionsAndCron(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, agentCLIManager *agentcli.Manager, jobs *agent.JobRegistry, broker *approval.Broker, unsafeDev bool, cronSvc *cron.Service) error {
 	if strings.TrimSpace(cfg.Service.Secret) == "" {
 		return fmt.Errorf("service secret is required")
 	}
@@ -237,7 +244,7 @@ func runServiceCommandWithBrokerOptions(ctx context.Context, cfg config.Config, 
 	if jobs == nil {
 		jobs = agent.NewJobRegistry(0, 0)
 	}
-	server := &serviceServer{config: cfg, configPath: cfgPathOrDefault(""), runtime: rt, subagentManager: subagentManager, agentCLIManager: agentCLIManager, jobs: jobs, broker: broker, unsafeDev: unsafeDev}
+	server := &serviceServer{config: cfg, configPath: cfgPathOrDefault(""), runtime: rt, cronSvc: cronSvc, subagentManager: subagentManager, agentCLIManager: agentCLIManager, jobs: jobs, broker: broker, unsafeDev: unsafeDev}
 	authSvc := server.app().Auth()
 	mux := newServiceMux(server)
 
@@ -294,6 +301,8 @@ func newServiceMux(server *serviceServer) *http.ServeMux {
 	mux.Handle("/internal/v1/capabilities", http.HandlerFunc(server.handleCapabilities))
 	mux.Handle("/internal/v1/app/bootstrap", http.HandlerFunc(server.handleApp))
 	mux.Handle("/internal/v1/actions/", http.HandlerFunc(server.handleActions))
+	mux.Handle("/internal/v1/cron", http.HandlerFunc(server.handleCron))
+	mux.Handle("/internal/v1/cron/", http.HandlerFunc(server.handleCron))
 	mux.Handle("/internal/v1/embeddings", http.HandlerFunc(server.handleEmbeddings))
 	mux.Handle("/internal/v1/embeddings/", http.HandlerFunc(server.handleEmbeddings))
 	mux.Handle("/internal/v1/audit", http.HandlerFunc(server.handleAudit))
@@ -306,11 +315,11 @@ func newServiceMux(server *serviceServer) *http.ServeMux {
 	mux.Handle("/internal/v1/skills/", http.HandlerFunc(server.handleSkills))
 	mux.Handle("/internal/v1/files", http.HandlerFunc(server.handleFiles))
 	mux.Handle("/internal/v1/files/", http.HandlerFunc(server.handleFiles))
-	mux.Handle("/internal/v1/terminal/sessions",  http.HandlerFunc(server.handleTerminal))
+	mux.Handle("/internal/v1/terminal/sessions", http.HandlerFunc(server.handleTerminal))
 	mux.Handle("/internal/v1/terminal/sessions/", http.HandlerFunc(server.handleTerminal))
 	mux.Handle("/internal/v1/agent-runners", http.HandlerFunc(server.handleAgentRunners))
-	mux.Handle("/internal/v1/agent-runs",    http.HandlerFunc(server.handleAgentRuns))
-	mux.Handle("/internal/v1/agent-runs/",   http.HandlerFunc(server.handleAgentRuns))
+	mux.Handle("/internal/v1/agent-runs", http.HandlerFunc(server.handleAgentRuns))
+	mux.Handle("/internal/v1/agent-runs/", http.HandlerFunc(server.handleAgentRuns))
 	return mux
 }
 
@@ -4349,6 +4358,243 @@ func (s *serviceServer) handleConfigure(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
+func (s *serviceServer) handleCron(w http.ResponseWriter, r *http.Request) {
+	if !requireServiceRole(w, r, approval.RoleOperator) {
+		return
+	}
+	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/internal/v1/cron"), "/")
+	if path == "" {
+		path = "status"
+	}
+	switch path {
+	case "status":
+		if r.Method != http.MethodGet {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		status := map[string]any{"enabled": s.config.Cron.Enabled, "available": s.cronSvc != nil}
+		if s.cronSvc != nil {
+			schedulerStatus, err := s.cronSvc.Status()
+			if err != nil {
+				writeServiceError(w, r, http.StatusBadGateway, "cron status unavailable", err)
+				return
+			}
+			for key, value := range schedulerStatus {
+				status[key] = value
+			}
+		}
+		writeServiceJSON(w, http.StatusOK, status)
+	case "jobs":
+		svc := s.requireCronService(w)
+		if svc == nil {
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			jobs, err := svc.List()
+			if err != nil {
+				writeServiceError(w, r, http.StatusBadGateway, "cron jobs unavailable", err)
+				return
+			}
+			writeServiceJSON(w, http.StatusOK, map[string]any{"items": jobs})
+		case http.MethodPost:
+			limitServiceRequestBody(w, r, serviceCronBodyLimit)
+			job, err := decodeServiceCronJobRequest(r.Body, true)
+			if err != nil {
+				writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+				return
+			}
+			if err := svc.Add(job); err != nil {
+				writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+				return
+			}
+			jobs, _ := svc.List()
+			created := findServiceCronJob(jobs, job.ID)
+			if created == nil && len(jobs) > 0 {
+				created = &jobs[len(jobs)-1]
+			}
+			writeServiceJSON(w, http.StatusCreated, map[string]any{"job": created})
+		default:
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		}
+	default:
+		if !strings.HasPrefix(path, "jobs/") {
+			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "cron route not found"})
+			return
+		}
+		svc := s.requireCronService(w)
+		if svc == nil {
+			return
+		}
+		parts := strings.Split(strings.TrimPrefix(path, "jobs/"), "/")
+		if len(parts) == 0 || strings.TrimSpace(parts[0]) == "" {
+			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "cron job route not found"})
+			return
+		}
+		id := strings.TrimSpace(parts[0])
+		if len(parts) == 1 {
+			s.handleCronJob(w, r, svc, id)
+			return
+		}
+		if len(parts) != 2 {
+			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "cron job route not found"})
+			return
+		}
+		s.handleCronJobAction(w, r, svc, id, parts[1])
+	}
+}
+
+func (s *serviceServer) requireCronService(w http.ResponseWriter) *cron.Service {
+	if s.cronSvc == nil {
+		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "cron service unavailable", "enabled": s.config.Cron.Enabled})
+		return nil
+	}
+	return s.cronSvc
+}
+
+func (s *serviceServer) handleCronJob(w http.ResponseWriter, r *http.Request, svc *cron.Service, id string) {
+	switch r.Method {
+	case http.MethodGet:
+		jobs, err := svc.List()
+		if err != nil {
+			writeServiceError(w, r, http.StatusBadGateway, "cron jobs unavailable", err)
+			return
+		}
+		job := findServiceCronJob(jobs, id)
+		if job == nil {
+			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "cron job not found"})
+			return
+		}
+		writeServiceJSON(w, http.StatusOK, map[string]any{"job": job})
+	case http.MethodPatch, http.MethodPut:
+		limitServiceRequestBody(w, r, serviceCronBodyLimit)
+		job, err := decodeServiceCronJobRequest(r.Body, false)
+		if err != nil {
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		found, updated, err := svc.Update(id, job)
+		if err != nil {
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		if !found {
+			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "cron job not found"})
+			return
+		}
+		writeServiceJSON(w, http.StatusOK, map[string]any{"job": updated})
+	case http.MethodDelete:
+		found, err := svc.Remove(id)
+		if err != nil {
+			writeServiceError(w, r, http.StatusBadGateway, "cron job delete failed", err)
+			return
+		}
+		if !found {
+			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "cron job not found"})
+			return
+		}
+		writeServiceJSON(w, http.StatusOK, map[string]any{"id": id, "status": "deleted"})
+	default:
+		writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+	}
+}
+
+func (s *serviceServer) handleCronJobAction(w http.ResponseWriter, r *http.Request, svc *cron.Service, id string, action string) {
+	if r.Method != http.MethodPost {
+		writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	switch action {
+	case "run":
+		limitServiceRequestBody(w, r, serviceCronBodyLimit)
+		force := serviceCronRunForce(r.Body)
+		found, err := svc.RunNow(r.Context(), id, force)
+		if err != nil {
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		if !found {
+			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "cron job not found or disabled"})
+			return
+		}
+		writeServiceJSON(w, http.StatusOK, map[string]any{"id": id, "status": "ran"})
+	case "pause":
+		s.writeCronEnabledState(w, svc, id, false)
+	case "resume":
+		s.writeCronEnabledState(w, svc, id, true)
+	default:
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "cron action not found"})
+	}
+}
+
+func (s *serviceServer) writeCronEnabledState(w http.ResponseWriter, svc *cron.Service, id string, enabled bool) {
+	found, job, err := svc.SetEnabled(id, enabled)
+	if err != nil {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	if !found {
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "cron job not found"})
+		return
+	}
+	writeServiceJSON(w, http.StatusOK, map[string]any{"job": job})
+}
+
+func decodeServiceCronJobRequest(body io.Reader, defaultEnabled bool) (cron.CronJob, error) {
+	var raw map[string]json.RawMessage
+	if err := decodeServiceRequestBody(body, &raw); err != nil {
+		return cron.CronJob{}, err
+	}
+	if len(raw) == 0 {
+		return cron.CronJob{}, fmt.Errorf("job is required")
+	}
+	jobRaw, ok := raw["job"]
+	if !ok {
+		b, err := json.Marshal(raw)
+		if err != nil {
+			return cron.CronJob{}, err
+		}
+		jobRaw = b
+	}
+	var job cron.CronJob
+	if err := json.Unmarshal(jobRaw, &job); err != nil {
+		return cron.CronJob{}, err
+	}
+	if defaultEnabled {
+		var jobMap map[string]json.RawMessage
+		if err := json.Unmarshal(jobRaw, &jobMap); err == nil {
+			if _, hasEnabled := jobMap["enabled"]; !hasEnabled {
+				job.Enabled = true
+			}
+		}
+	}
+	if job.Payload.Kind == "" {
+		job.Payload.Kind = "agent_turn"
+	}
+	return job, nil
+}
+
+func serviceCronRunForce(body io.Reader) bool {
+	force := true
+	var raw map[string]json.RawMessage
+	if err := decodeServiceRequestBody(body, &raw); err != nil || len(raw) == 0 {
+		return force
+	}
+	if value, ok := raw["force"]; ok {
+		_ = json.Unmarshal(value, &force)
+	}
+	return force
+}
+
+func findServiceCronJob(jobs []cron.CronJob, id string) *cron.CronJob {
+	for i := range jobs {
+		if jobs[i].ID == id {
+			return &jobs[i]
+		}
+	}
+	return nil
+}
+
 type serviceObserver struct {
 	agent.ConversationObserver
 	finalText     string
@@ -4455,9 +4701,9 @@ func (s *serviceServer) handleAgentRunsStart(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	writeServiceJSON(w, http.StatusAccepted, map[string]any{
-		"job_id":  run.JobID,
-		"run_id":  run.ID,
-		"status":  run.Status,
+		"job_id": run.JobID,
+		"run_id": run.ID,
+		"status": run.Status,
 	})
 }
 

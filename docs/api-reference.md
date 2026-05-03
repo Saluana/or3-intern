@@ -102,11 +102,25 @@ Bearer token notes:
 | `GET` | `/internal/v1/approvals/allowlists` | Operator | List allowlist rules. |
 | `POST` | `/internal/v1/approvals/allowlists` | Operator | Create allowlist rule. |
 | `POST` | `/internal/v1/approvals/allowlists/{id}/remove` | Operator | Disable allowlist rule. |
+| `GET` | `/internal/v1/agent-runners` | Admin or Operator | Enumerate installed external agent CLIs and their readiness states. |
+| `POST` | `/internal/v1/agent-runs` | Admin or Operator | Enqueue a background run on an external agent CLI (OpenCode, Codex, Claude, or Gemini). |
+| `GET` | `/internal/v1/agent-runs` | Admin or Operator | List recent agent CLI runs. |
+| `GET` | `/internal/v1/agent-runs/{id}` | Admin or Operator | Read a persisted CLI run by run ID (acr_…) or job ID. |
+| `GET` | `/internal/v1/agent-runs/{id}/events?after_seq=N` | Admin or Operator | Fetch durable events for a CLI run (supports reconnect). |
 | `GET` | `/internal/v1/health` | Admin or Operator | Lightweight runtime/job health. |
 | `GET` | `/internal/v1/readiness` | Admin or Operator | Startup/readiness evaluation. |
 | `GET` | `/internal/v1/capabilities` | Admin or Operator | Effective machine-readable runtime posture. |
 | `GET` | `/internal/v1/app/bootstrap` | Admin or Operator | Return an app-shaped host overview with pairing/auth/status/count/action summaries. |
 | `POST` | `/internal/v1/actions/restart-service` | Operator | Request a structured service restart without opening a terminal session. |
+| `GET` | `/internal/v1/cron/status` | Operator | Return scheduler availability, job count, and next wake time. |
+| `GET` | `/internal/v1/cron/jobs` | Operator | List scheduled jobs. |
+| `POST` | `/internal/v1/cron/jobs` | Operator | Create a scheduled job. |
+| `GET` | `/internal/v1/cron/jobs/{id}` | Operator | Fetch one scheduled job. |
+| `PATCH` | `/internal/v1/cron/jobs/{id}` | Operator | Replace one scheduled job definition. |
+| `POST` | `/internal/v1/cron/jobs/{id}/run` | Operator | Run one scheduled job immediately. |
+| `POST` | `/internal/v1/cron/jobs/{id}/pause` | Operator | Pause one scheduled job. |
+| `POST` | `/internal/v1/cron/jobs/{id}/resume` | Operator | Resume one scheduled job. |
+| `DELETE` | `/internal/v1/cron/jobs/{id}` | Operator | Delete one scheduled job. |
 | `GET` | `/internal/v1/embeddings/status` | Operator | Embedding compatibility/reporting. |
 | `POST` | `/internal/v1/embeddings/rebuild` | Operator | Rebuild memory/doc embeddings. |
 | `GET` | `/internal/v1/audit` | Operator | Audit chain status summary. |
@@ -206,6 +220,162 @@ Accepted response shape:
 
 When the subagent queue is full, the route returns `429`.
 
+### External Agent CLI Delegation
+
+The external agent CLI subsystem allows `or3-intern` to queue and supervise non-interactive runs of OpenCode, Codex, Claude Code, and Gemini CLI from the internal service API. Each run is a child process managed by a dedicated worker pool, with output streamed through the existing job registry and persisted in SQLite.
+
+#### Mode and isolation policy
+
+Every run specifies a **mode** and an **isolation** boundary:
+
+| Mode | Isolation required | Behaviour |
+|------|-------------------|-----------|
+| `review` | `host_readonly` or `sandbox_workspace_write` | Read-only analysis; no filesystem mutations. |
+| `safe_edit` | `host_workspace_write` or `sandbox_workspace_write` | Non-interactive edits with the CLI's built-in safety flags. |
+| `sandbox_auto` | `sandbox_dangerous` | Full autonomy inside a sandbox; rejected unless `agentCLI.allowSandboxAuto` is `true`. |
+
+The default mode is `safe_edit` with `host_workspace_write` isolation. `sandbox_auto` is rejected on host machines regardless of config — it requires a true sandbox runtime.
+
+#### Runner readiness
+
+Each external CLI has four possible states:
+
+| Status          | Meaning |
+|-----------------|---------|
+| `available`     | Binary found, version probe passed, auth is ready. |
+| `missing`       | Binary not on `PATH`. |
+| `auth_missing`  | Binary found but required auth check failed. |
+| `disabled_by_config` | Runner listed in `agentCLI.disabledRunners`. |
+
+### `GET /internal/v1/agent-runners`
+
+Returns the detection status for every registered runner, including `or3-intern` as an always-available default:
+
+```json
+{
+  "runners": [
+    {
+      "id": "or3-intern",
+      "display_name": "OR3 Intern",
+      "status": "available",
+      "auth_status": "ready"
+    },
+    {
+      "id": "opencode",
+      "display_name": "OpenCode",
+      "binary_name": "opencode",
+      "binary_path": "/usr/local/bin/opencode",
+      "version": "opencode 1.0.0",
+      "status": "available",
+      "auth_status": "ready"
+    }
+  ]
+}
+```
+
+### `POST /internal/v1/agent-runs`
+
+Enqueues a background external CLI run. Request fields (all snake_case, `DisallowUnknownFields`):
+
+| Field                | Type    | Required | Default                  |
+|----------------------|---------|----------|--------------------------|
+| `parent_session_key` | string  | **yes**  |                          |
+| `runner_id`          | string  | **yes**  |                          |
+| `task`               | string  | **yes**  |                          |
+| `timeout_seconds`    | number  | no       | `agentCLI.defaultTimeoutSeconds` (900) |
+| `cwd`                | string  | no       | service working directory |
+| `model`              | string  | no       |                          |
+| `mode`               | string  | no       | `agentCLI.defaultMode` (`safe_edit`) |
+| `isolation`          | string  | no       | `agentCLI.defaultIsolation` (`host_workspace_write`) |
+| `max_turns`          | number  | no       |                          |
+| `meta`               | object  | no       |                          |
+
+Example:
+
+```json
+{
+  "parent_session_key": "session-123",
+  "runner_id": "codex",
+  "task": "fix the failing auth test in src/auth_test.go",
+  "timeout_seconds": 600,
+  "mode": "safe_edit",
+  "isolation": "host_workspace_write",
+  "max_turns": 5
+}
+```
+
+Accepted response:
+
+```json
+{
+  "job_id": "job-agentcli-abc123def456",
+  "run_id": "acr_abc123def456",
+  "status": "queued"
+}
+```
+
+The run is also registered in the in-memory `JobRegistry` with kind `agent_cli:<runner_id>`, so `/internal/v1/jobs/{job_id}/stream` and `/internal/v1/jobs/{job_id}/abort` apply without any additional wiring.
+
+### `GET /internal/v1/agent-runs/{id}`
+
+Returns a persisted CLI run snapshot by run ID (`acr_…`) or job ID:
+
+```json
+{
+  "job_id": "job-agentcli-abc123def456",
+  "run_id": "acr_abc123def456",
+  "kind": "agent_cli:codex",
+  "runner_id": "codex",
+  "parent_session_key": "session-123",
+  "task": "fix the failing auth test",
+  "mode": "safe_edit",
+  "isolation": "host_workspace_write",
+  "status": "succeeded",
+  "exit_code": 0,
+  "output_preview": "Fixed the auth test by...",
+  "requested_at": "2025-06-01T12:00:00Z",
+  "started_at": "2025-06-01T12:00:01Z",
+  "completed_at": "2025-06-01T12:10:30Z",
+  "timeout_seconds": 600,
+  "attempts": 1
+}
+```
+
+### `GET /internal/v1/agent-runs/{id}/events?after_seq=N`
+
+Fetches durable persisted events for a CLI run. The `after_seq` parameter supports reconnect after the in-memory job registry has expired.
+
+Event types emitted:
+
+| Type | Contents |
+|------|----------|
+| `started` | `job_id`, `runner_id`, `argv_preview`, `cwd` |
+| `output` | `seq`, `stream` (`stdout` or `stderr`), `chunk` |
+| `structured` | `seq`, `payload` (JSON/JSONL line parsed from stdout) |
+| `completion` | `exit_code`, `status`, `stdout_preview`, `stderr_preview`, `duration_ms` |
+| `error` | `message` |
+
+Events carry monotonic sequence numbers and RFC 3339 timestamps.
+
+### Cancellation and abort
+
+External CLI runs are cancellable through two paths:
+
+- **Running jobs:** `POST /internal/v1/jobs/{job_id}/abort` triggers the registered cancel function. On Unix the process group receives SIGTERM followed by SIGKILL after a 2-second grace period; on Windows only the direct process is killed.
+- **Queued jobs:** The abort falls through to the persisted DB layer and marks the run as `aborted` before a worker ever claims it.
+
+After cancellation the run status is `aborted` and the job registry emits a `completion` event with status `aborted`.
+
+### Job fallback chain
+
+`GET /internal/v1/jobs/{job_id}` resolves in this order:
+
+1. In-memory `JobRegistry` snapshot.
+2. Persisted `subagent_jobs` row.
+3. Persisted `agent_cli_runs` row.
+
+This means clients can look up external CLI runs through the same `/internal/v1/jobs/{job_id}` endpoint that serves subagent and turn jobs — no dedicated route required.
+
 ### `GET /internal/v1/app/bootstrap`
 
 Returns an app-shaped summary that composes pairing, auth, runtime state, counts, and action descriptors for `or3-app`.
@@ -234,6 +404,51 @@ Behavior:
 - returns `202` with `{ "action_id": "restart-service", "status": "accepted" }` when the restart script was launched
 - returns `409` with `approval_id` when approval is required first
 - returns `503` when shell access or the restart script is unavailable on the host
+
+### Cron job endpoints
+
+These routes manage the same persisted cron store and live scheduler used by the `cron` tool. They are intended for UI clients such as `or3-app`.
+
+Schedule shapes:
+
+```json
+{ "kind": "at", "at_ms": 1788300000000 }
+{ "kind": "every", "every_ms": 3600000 }
+{ "kind": "cron", "expr": "0 9 * * 1-5", "tz": "America/Los_Angeles" }
+```
+
+Create/update job shape:
+
+```json
+{
+  "name": "Morning summary",
+  "enabled": true,
+  "schedule": { "kind": "cron", "expr": "0 9 * * 1-5" },
+  "payload": {
+    "kind": "agent_turn",
+    "message": "Summarize overnight changes.",
+    "session_key": "cron:default"
+  },
+  "delete_after_run": false
+}
+```
+
+Job responses include scheduler state:
+
+```json
+{
+  "job": {
+    "id": "abc123",
+    "name": "Morning summary",
+    "enabled": true,
+    "state": {
+      "next_run_at_ms": 1788300000000,
+      "last_run_at_ms": 1788213600000,
+      "last_status": "ok"
+    }
+  }
+}
+```
 
 ### Approval and pairing endpoints
 
@@ -527,6 +742,7 @@ Current response fields:
 - `runtimeAvailable`
 - `jobRegistryAvailable`
 - `subagentManagerEnabled`
+- `agentCLIManagerEnabled`
 - `approvalBrokerAvailable`
 
 ### `GET /internal/v1/readiness`
@@ -674,6 +890,9 @@ Response shapes:
 
 - `cmd/or3-intern/service.go`
 - `cmd/or3-intern/service_auth.go`
+- `internal/agentcli/` (runner registry, adapters, process manager, worker pool)
+- `internal/controlplane/controlplane.go` (response builders)
+- `internal/app/service_app.go` (ServiceApp delegation)
 
 ## Compatibility contract
 

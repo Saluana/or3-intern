@@ -22,6 +22,7 @@
 | `runtimeProfile`                                       | Named execution posture (`local-dev`, `hosted-service`, `hosted-no-exec`, etc.)                      |
 | `docIndex`                                             | Opt-in document indexing for prompt-time retrieval                                                   |
 | `subagents`                                            | Background job queueing and concurrency controls                                                     |
+| `agentCLI`                                             | External agent CLI delegation: runner discovery, worker pool, timeouts, and sandboxing               |
 | `context`, `contextManager`                            | Token budgeting, prompt assembly budgets, and optional cheap maintenance-model settings              |
 
 ## Minimal shape
@@ -42,6 +43,7 @@
     "contextManager": {},
     "docIndex": {},
     "subagents": {},
+    "agentCLI": {},
     "session": {}
 }
 ```
@@ -319,6 +321,51 @@ Optional low-cost maintenance-model controls:
 - `maxOutputTokens`
 - `allowTaskUpdates`
 - `allowStalePropose`
+
+### `agentCLI`
+
+Controls the external agent CLI delegation subsystem. All fields are under the `agentCLI` key in `config.json`.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Feature gate. Must be `true` for any agent CLI functionality. |
+| `disabledRunners` | string[] | `[]` | Runner IDs to block from discovery and execution (e.g. `["opencode", "gemini"]`). |
+| `maxConcurrent` | int | `1` | Maximum worker goroutines running external CLIs simultaneously. |
+| `maxQueued` | int | `16` | Maximum queued runs before the endpoint returns `429`. |
+| `defaultTimeoutSeconds` | int | `900` | Per-run timeout when the request omits `timeout_seconds`. Minimum 30, default 900. |
+| `maxTimeoutSeconds` | int | `7200` | Hard server-side cap on any requested timeout. Minimum 30, default 7200. |
+| `allowSandboxAuto` | bool | `false` | If `true`, permits `sandbox_auto` mode when isolation is `sandbox_dangerous`. |
+| `defaultMode` | string | `"safe_edit"` | Mode used when the request omits `mode`. Must be `review`, `safe_edit`, or `sandbox_auto`. |
+| `defaultIsolation` | string | `"host_workspace_write"` | Isolation used when the request omits `isolation`. Must be `host_readonly`, `host_workspace_write`, `sandbox_workspace_write`, or `sandbox_dangerous`. |
+| `eventChunkMaxBytes` | int | `16384` | Maximum size of a single output event chunk (16 KiB). |
+| `previewMaxBytes` | int | `65536` | Retained stdout/stderr ring-buffer preview size (64 KiB). |
+| `maxPersistedOutputBytes` | int64 | `10485760` | Total persisted output cap before truncation (10 MiB). |
+| `childEnvAllowlist` | string[] | `["PATH","HOME","TMPDIR","TMP","TEMP"]` | Environment variables passed through to child CLI processes. |
+
+Environment variable overrides follow the existing `OR3_*` pattern:
+
+| Env var | Maps to |
+|---------|---------|
+| `OR3_AGENT_CLI_ENABLED` | `agentCLI.enabled` (bool) |
+| `OR3_AGENT_CLI_DISABLED_RUNNERS` | `agentCLI.disabledRunners` (comma-separated string) |
+| `OR3_AGENT_CLI_MAX_CONCURRENT` | `agentCLI.maxConcurrent` (int) |
+| `OR3_AGENT_CLI_MAX_QUEUED` | `agentCLI.maxQueued` (int) |
+| `OR3_AGENT_CLI_DEFAULT_TIMEOUT_SECONDS` | `agentCLI.defaultTimeoutSeconds` (int) |
+| `OR3_AGENT_CLI_MAX_TIMEOUT_SECONDS` | `agentCLI.maxTimeoutSeconds` (int) |
+| `OR3_AGENT_CLI_ALLOW_SANDBOX_AUTO` | `agentCLI.allowSandboxAuto` (bool) |
+| `OR3_AGENT_CLI_DEFAULT_MODE` | `agentCLI.defaultMode` (string) |
+| `OR3_AGENT_CLI_DEFAULT_ISOLATION` | `agentCLI.defaultIsolation` (string) |
+
+Example minimal enablement:
+
+```json
+{
+  "agentCLI": {
+    "enabled": true,
+    "maxConcurrent": 2
+  }
+}
+```
 
 ## Environment overrides called out in the README
 

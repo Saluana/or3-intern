@@ -411,8 +411,8 @@ func TestArmJob_KindCron_InvalidExpr(t *testing.T) {
 	mustStartService(t, svc)
 	defer svc.Stop()
 
-	// Invalid cron expr - should log but not panic
-	mustAddJob(t, svc, CronJob{
+	// Invalid cron expr should be rejected before persistence.
+	err := svc.Add(CronJob{
 		ID:      "bad-expr",
 		Enabled: true,
 		Schedule: CronSchedule{
@@ -420,10 +420,13 @@ func TestArmJob_KindCron_InvalidExpr(t *testing.T) {
 			Expr: "not a valid cron expression at all",
 		},
 	})
+	if err == nil {
+		t.Fatal("expected invalid cron expression error")
+	}
 
 	jobs, _ := svc.List()
-	if len(jobs) != 1 {
-		t.Errorf("expected 1 job (still added, just not scheduled), got %d", len(jobs))
+	if len(jobs) != 0 {
+		t.Errorf("expected invalid job to be rejected, got %d jobs", len(jobs))
 	}
 }
 

@@ -3,6 +3,7 @@ package agentcli
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
 	"strings"
 	"sync/atomic"
@@ -10,14 +11,12 @@ import (
 )
 
 type outputCollector struct {
-	maxBytes int
 	stdout   *ringBuffer
 	stderr   *ringBuffer
 }
 
 func newOutputCollector(maxBytes int) *outputCollector {
 	return &outputCollector{
-		maxBytes: maxBytes,
 		stdout:   newRingBuffer(maxBytes),
 		stderr:   newRingBuffer(maxBytes),
 	}
@@ -55,10 +54,10 @@ func (r *ringBuffer) String() string {
 	return string(r.buf[r.pos:]) + string(r.buf[:r.pos])
 }
 
-func readStream(r io.Reader, doneCh <-chan struct{}, stream string, chunkMaxBytes int, seq *int64, collector *outputCollector, onEvent func(AgentRunEvent), outputMode OutputMode) {
+func readStream(r io.Reader, stream string, chunkMaxBytes int, seq *int64, collector *outputCollector, onEvent func(AgentRunEvent), outputMode OutputMode) {
 	scanner := bufio.NewScanner(r)
 	scanner.Split(bufio.ScanLines)
-	scanner.Buffer(make([]byte, chunkMaxBytes), chunkMaxBytes)
+	scanner.Buffer(make([]byte, chunkMaxBytes+1), chunkMaxBytes+1)
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -89,12 +88,21 @@ func readStream(r io.Reader, doneCh <-chan struct{}, stream string, chunkMaxByte
 		}
 
 		if stream == "stdout" && (outputMode == OutputJSONL || outputMode == OutputJSON) {
-			emitStructuredIfValid(onEvent, seq, string(lineCopy), outputMode)
+			emitStructuredIfValid(onEvent, seq, string(lineCopy))
 		}
+	}
+
+	if err := scanner.Err(); err != nil && onEvent != nil {
+		onEvent(AgentRunEvent{
+			Type:    "error",
+			Seq:     atomic.AddInt64(seq, 1),
+			TS:      time.Now().UTC().Format(time.RFC3339Nano),
+			Message: fmt.Sprintf("%s stream read: %v", stream, err),
+		})
 	}
 }
 
-func emitStructuredIfValid(onEvent func(AgentRunEvent), seq *int64, raw string, mode OutputMode) {
+func emitStructuredIfValid(onEvent func(AgentRunEvent), seq *int64, raw string) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return
@@ -129,24 +137,4 @@ func splitChunks(data string, maxBytes int) []string {
 		chunks = append(chunks, data)
 	}
 	return chunks
-}
-
-func chunkAndStream(data string, maxBytes int, seq *int64, stream string, onEvent func(AgentRunEvent)) {
-	for _, chunk := range splitChunks(data, maxBytes) {
-		seqNum := atomic.AddInt64(seq, 1)
-		if onEvent != nil {
-			onEvent(AgentRunEvent{
-				Type:   "output",
-				Seq:    seqNum,
-				TS:     time.Now().UTC().Format(time.RFC3339Nano),
-				Stream: stream,
-				Chunk:  chunk,
-			})
-		}
-	}
-}
-
-type streamResult struct {
-	stream string
-	data   string
 }

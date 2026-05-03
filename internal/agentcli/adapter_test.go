@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"testing"
+	"time"
 )
 
 func TestOpenCodeAdapter_DefaultArgs(t *testing.T) {
@@ -445,6 +446,35 @@ func TestRegistry_DetectAll(t *testing.T) {
 	}
 	if results[0].Status != RunnerStatusAvailable {
 		t.Errorf("expected available, got %q", results[0].Status)
+	}
+}
+
+func TestRegistry_DetectAllPopulatesCache(t *testing.T) {
+	dir := t.TempDir()
+	writeFakeBinary(t, dir, "cachedcli", `echo "cachedcli v1.0.0"; exit 0`)
+
+	origPath := os.Getenv("PATH")
+	if origPath == "" {
+		t.Setenv("PATH", dir)
+	} else {
+		t.Setenv("PATH", dir+string(os.PathListSeparator)+origPath)
+	}
+
+	reg := NewRunnerRegistry([]RunnerSpec{{
+		ID:          "cached-runner",
+		DisplayName: "Cached",
+		Binary:      "cachedcli",
+		VersionArgs: []string{"--version"},
+	}}, nil)
+
+	reg.DetectAll(context.Background(), DetectOptions{})
+
+	info, ok := reg.DetectCached("cached-runner", time.Minute)
+	if !ok {
+		t.Fatal("expected cached runner detection result")
+	}
+	if info.Status != RunnerStatusAvailable {
+		t.Fatalf("expected available cached status, got %q", info.Status)
 	}
 }
 

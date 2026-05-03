@@ -2780,7 +2780,10 @@ func (s *serviceServer) writePersistedAgentCLIRunSnapshot(w http.ResponseWriter,
 	if requestedAt, ok := response["requested_at"]; ok {
 		response["created_at"] = requestedAt
 	}
-	events, _ := store.ListAgentCLIEvents(r.Context(), run.JobID, 0, 100)
+	events, err := store.ListAgentCLIEvents(r.Context(), run.JobID, 0, 100)
+	if err != nil {
+		log.Printf("load persisted agent CLI events failed: job=%s err=%v", run.JobID, err)
+	}
 	response["events"] = s.agentCLIEventsToJobEvents(events)
 	writeServiceValue(w, http.StatusOK, response)
 	return true

@@ -5,7 +5,14 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
+	"time"
 )
+
+type runnerDetectCacheEntry struct {
+	info       RunnerInfo
+	fetchedAt  time.Time
+	refreshing bool
+}
 
 // AllRunners returns the standard runner specs for all supported external CLIs.
 func AllRunners() []RunnerSpec {
@@ -97,6 +104,8 @@ type RunnerRegistry struct {
 	mu      sync.RWMutex
 	specs   map[RunnerID]RunnerSpec
 	adapters map[RunnerID]RunnerAdapter
+	detectCache map[RunnerID]runnerDetectCacheEntry
+	now        func() time.Time
 }
 
 // NewRunnerRegistry creates a registry from a set of specs and optional adapters.
@@ -104,6 +113,8 @@ func NewRunnerRegistry(specs []RunnerSpec, adapters []RunnerAdapter) *RunnerRegi
 	r := &RunnerRegistry{
 		specs:   make(map[RunnerID]RunnerSpec, len(specs)),
 		adapters: make(map[RunnerID]RunnerAdapter),
+		detectCache: make(map[RunnerID]runnerDetectCacheEntry),
+		now:        time.Now,
 	}
 	for _, s := range specs {
 		r.specs[s.ID] = s
@@ -151,7 +162,65 @@ func (r *RunnerRegistry) DetectAll(ctx context.Context, opts DetectOptions) []Ru
 		}(i, spec)
 	}
 	wg.Wait()
+	r.storeDetectResults(results)
 	return results
+}
+
+// DetectCached returns a recent cached detection result when available.
+func (r *RunnerRegistry) DetectCached(id RunnerID, ttl time.Duration) (RunnerInfo, bool) {
+	if ttl <= 0 {
+		return RunnerInfo{}, false
+	}
+	r.mu.RLock()
+	entry, ok := r.detectCache[id]
+	now := r.now
+	r.mu.RUnlock()
+	if !ok || entry.fetchedAt.IsZero() || now().Sub(entry.fetchedAt) > ttl {
+		return RunnerInfo{}, false
+	}
+	return entry.info, true
+}
+
+// RefreshDetectAsync refreshes detection for a runner in the background.
+func (r *RunnerRegistry) RefreshDetectAsync(id RunnerID, opts DetectOptions) {
+	r.mu.Lock()
+	spec, ok := r.specs[id]
+	if !ok {
+		r.mu.Unlock()
+		return
+	}
+	entry := r.detectCache[id]
+	if entry.refreshing {
+		r.mu.Unlock()
+		return
+	}
+	entry.refreshing = true
+	r.detectCache[id] = entry
+	stateNow := r.now
+	r.mu.Unlock()
+
+	go func(spec RunnerSpec) {
+		info := Detect(context.Background(), spec, opts)
+		r.mu.Lock()
+		r.detectCache[id] = runnerDetectCacheEntry{
+			info:      info,
+			fetchedAt: stateNow(),
+		}
+		r.mu.Unlock()
+	}(spec)
+}
+
+// RefreshAllAsync refreshes detection for all registered runners in the background.
+func (r *RunnerRegistry) RefreshAllAsync(opts DetectOptions) {
+	r.mu.RLock()
+	ids := make([]RunnerID, 0, len(r.specs))
+	for id := range r.specs {
+		ids = append(ids, id)
+	}
+	r.mu.RUnlock()
+	for _, id := range ids {
+		r.RefreshDetectAsync(id, opts)
+	}
 }
 
 // BuildCommand builds a command for the given request using the matching adapter.
@@ -209,6 +278,18 @@ func findSpec(specs []RunnerSpec, id RunnerID) RunnerSpec {
 		}
 	}
 	return RunnerSpec{ID: id, Binary: string(id)}
+}
+
+func (r *RunnerRegistry) storeDetectResults(results []RunnerInfo) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := r.now()
+	for _, result := range results {
+		r.detectCache[RunnerID(result.ID)] = runnerDetectCacheEntry{
+			info:      result,
+			fetchedAt: now,
+		}
+	}
 }
 
 // NewOpenCodeAdapter creates an OpenCode adapter wired to the standard spec.

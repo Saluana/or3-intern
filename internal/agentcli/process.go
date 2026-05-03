@@ -2,9 +2,9 @@ package agentcli
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os/exec"
+	"sync"
 	"time"
 )
 
@@ -76,14 +76,19 @@ func (p *ProcessManager) Run(ctx context.Context, spec CommandSpec, onEvent func
 
 	var seq int64
 	collector := newOutputCollector(p.PreviewMaxBytes)
-
-	doneCh := make(chan struct{})
-
-	go readStream(stdoutPipe, doneCh, "stdout", p.ChunkMaxBytes, &seq, collector, onEvent, spec.OutputMode)
-	go readStream(stderrPipe, doneCh, "stderr", p.ChunkMaxBytes, &seq, collector, onEvent, OutputPlain)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		readStream(stdoutPipe, "stdout", p.ChunkMaxBytes, &seq, collector, onEvent, spec.OutputMode)
+	}()
+	go func() {
+		defer wg.Done()
+		readStream(stderrPipe, "stderr", p.ChunkMaxBytes, &seq, collector, onEvent, OutputPlain)
+	}()
 
 	waitErr := cmd.Wait()
-	close(doneCh)
+	wg.Wait()
 
 	var exitCode int
 	if waitErr != nil {
@@ -119,18 +124,4 @@ func emitError(onEvent func(AgentRunEvent), seq int64, msg string) {
 		TS:      time.Now().UTC().Format(time.RFC3339Nano),
 		Message: msg,
 	})
-}
-
-func stripPartialJSON(lines []string) []string {
-	if len(lines) == 0 {
-		return lines
-	}
-	last := lines[len(lines)-1]
-	if json.Valid([]byte(last)) {
-		return lines
-	}
-	if len(lines) == 1 {
-		return nil
-	}
-	return lines[:len(lines)-1]
 }

@@ -5,6 +5,7 @@ package agentcli
 import (
 	"os/exec"
 	"syscall"
+	"time"
 )
 
 func (p *ProcessManager) setProcessGroup(cmd *exec.Cmd) {
@@ -18,11 +19,12 @@ func KillProcessGroup(cmd *exec.Cmd) error {
 	}
 	pgid, err := syscall.Getpgid(cmd.Process.Pid)
 	if err != nil {
-		return err
+		return nil
 	}
 	// SIGTERM to the negative process group id
 	_ = syscall.Kill(-pgid, syscall.SIGTERM)
 	// SIGKILL after a grace period
+	time.Sleep(2 * time.Second)
 	_ = syscall.Kill(-pgid, syscall.SIGKILL)
 	return nil
 }

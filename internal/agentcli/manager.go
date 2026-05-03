@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"or3-intern/internal/agent"
@@ -21,6 +22,7 @@ import (
 const (
 	agentCLIClaimRetryDelay = 25 * time.Millisecond
 	agentCLIFinalizeTimeout = 5 * time.Second
+	agentCLIDetectCacheTTL  = 30 * time.Second
 )
 
 // Manager queues and runs external agent CLI jobs.
@@ -74,6 +76,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	if m.Registry == nil {
 		m.Registry = NewDefaultRegistry()
 	}
+	m.Registry.RefreshAllAsync(DetectOptions{DisabledRunners: m.Cfg.DisabledRunners})
 	running, err := m.DB.ListRunningAgentCLIRuns(ctx)
 	if err != nil {
 		return err
@@ -135,7 +138,8 @@ func (m *Manager) Enqueue(ctx context.Context, req AgentRunRequest) (db.AgentCLI
 	if m == nil || m.DB == nil {
 		return db.AgentCLIRun{}, fmt.Errorf("agent CLI manager is not available")
 	}
-	if !m.Cfg.Enabled {
+	cfg := m.configSnapshot()
+	if !cfg.Enabled {
 		return db.AgentCLIRun{}, fmt.Errorf("agent CLI delegation is disabled")
 	}
 	parentSessionKey := strings.TrimSpace(req.ParentSessionKey)
@@ -154,37 +158,41 @@ func (m *Manager) Enqueue(ctx context.Context, req AgentRunRequest) (db.AgentCLI
 	// Default and normalize mode/isolation
 	mode := req.Mode
 	if mode == "" {
-		mode = m.Cfg.DefaultMode
+		mode = cfg.DefaultMode
 	}
 	isolation := req.Isolation
 	if isolation == "" {
-		isolation = m.Cfg.DefaultIsolation
+		isolation = cfg.DefaultIsolation
 	}
 
 	// Validate policy
-	if err := ValidateRunPolicy(RunnerMode(mode), RunIsolation(isolation), m.Cfg.AllowSandboxAuto); err != nil {
+	if err := ValidateRunPolicy(RunnerMode(mode), RunIsolation(isolation), cfg.AllowSandboxAuto); err != nil {
 		return db.AgentCLIRun{}, fmt.Errorf("policy validation: %w", err)
 	}
 
 	// Check runner readiness
 	if m.Registry != nil {
-		spec, ok := m.Registry.Spec(RunnerID(runnerID))
-		if !ok {
+		if _, ok := m.Registry.Spec(RunnerID(runnerID)); !ok {
 			return db.AgentCLIRun{}, fmt.Errorf("unknown runner %q", runnerID)
 		}
+		if isRunnerDisabled(RunnerID(runnerID), cfg.DisabledRunners) {
+			return db.AgentCLIRun{}, fmt.Errorf("runner %q is disabled by config", runnerID)
+		}
 		if RunnerID(runnerID) != RunnerOR3 {
-			info := Detect(ctx, spec, DetectOptions{
-				DisabledRunners: m.Cfg.DisabledRunners,
-			})
-			switch info.Status {
-			case RunnerStatusDisabledByConfig:
-				return db.AgentCLIRun{}, fmt.Errorf("runner %q is disabled by config", runnerID)
-			case RunnerStatusMissing:
-				return db.AgentCLIRun{}, fmt.Errorf("runner %q is not installed", runnerID)
-			case RunnerStatusAuthMissing:
-				return db.AgentCLIRun{}, fmt.Errorf("runner %q is not authenticated", runnerID)
-			case RunnerStatusError:
-				return db.AgentCLIRun{}, fmt.Errorf("runner %q is not functional", runnerID)
+			detectOpts := DetectOptions{DisabledRunners: cfg.DisabledRunners}
+			if info, ok := m.Registry.DetectCached(RunnerID(runnerID), agentCLIDetectCacheTTL); ok {
+				switch info.Status {
+				case RunnerStatusDisabledByConfig:
+					return db.AgentCLIRun{}, fmt.Errorf("runner %q is disabled by config", runnerID)
+				case RunnerStatusMissing:
+					return db.AgentCLIRun{}, fmt.Errorf("runner %q is not installed", runnerID)
+				case RunnerStatusAuthMissing:
+					return db.AgentCLIRun{}, fmt.Errorf("runner %q is not authenticated", runnerID)
+				case RunnerStatusError:
+					return db.AgentCLIRun{}, fmt.Errorf("runner %q is not functional", runnerID)
+				}
+			} else {
+				m.Registry.RefreshDetectAsync(RunnerID(runnerID), detectOpts)
 			}
 		}
 	}
@@ -192,10 +200,10 @@ func (m *Manager) Enqueue(ctx context.Context, req AgentRunRequest) (db.AgentCLI
 	// Default timeout
 	timeoutSeconds := req.TimeoutSeconds
 	if timeoutSeconds <= 0 {
-		timeoutSeconds = m.Cfg.DefaultTimeoutSeconds
+		timeoutSeconds = cfg.DefaultTimeoutSeconds
 	}
-	if timeoutSeconds > m.Cfg.MaxTimeoutSeconds {
-		timeoutSeconds = m.Cfg.MaxTimeoutSeconds
+	if timeoutSeconds > cfg.MaxTimeoutSeconds {
+		timeoutSeconds = cfg.MaxTimeoutSeconds
 	}
 
 	// Default cwd
@@ -358,9 +366,6 @@ func (m *Manager) executeRun(run db.AgentCLIRun) {
 				switch v := mt.(type) {
 				case float64:
 					req.MaxTurns = int(v)
-				case json.Number:
-					n, _ := v.Int64()
-					req.MaxTurns = int(n)
 				}
 			}
 		}
@@ -381,7 +386,7 @@ func (m *Manager) executeRun(run db.AgentCLIRun) {
 	// Build child environment — use os.Environ() as the base so PATH, HOME,
 	// and TMPDIR are preserved through the allowlist filter.
 	if len(cmdSpec.Env) == 0 {
-		cmdSpec.Env = BuildAgentCLIEnv(os.Environ(), m.Cfg.ChildEnvAllowlist, nil)
+		cmdSpec.Env = BuildAgentCLIEnv(os.Environ(), m.configSnapshot().ChildEnvAllowlist, nil)
 	}
 
 	// Emit started event with argv preview
@@ -415,7 +420,8 @@ func (m *Manager) executeRun(run db.AgentCLIRun) {
 	// Run the process
 	pm := m.Process
 	if pm == nil {
-		pm = NewProcessManager(m.Cfg.EventChunkMaxBytes, m.Cfg.PreviewMaxBytes)
+		cfg := m.configSnapshot()
+		pm = NewProcessManager(cfg.EventChunkMaxBytes, cfg.PreviewMaxBytes)
 	}
 
 	var eventSeq int64
@@ -485,13 +491,14 @@ func (m *Manager) executeRun(run db.AgentCLIRun) {
 func (m *Manager) finalizeRun(ctx context.Context, run db.AgentCLIRun, status, errMsg string, out ProcessOutput) {
 	finalizeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), agentCLIFinalizeTimeout)
 	defer cancel()
+	cfg := m.configSnapshot()
 
 	fin := db.AgentCLIFinalizeInput{
 		Status:           status,
 		ExitCode:         out.ExitCode,
-		StdoutPreview:    truncateString(out.StdoutPreview, m.Cfg.PreviewMaxBytes),
-		StderrPreview:    truncateString(out.StderrPreview, m.Cfg.PreviewMaxBytes),
-		FinalTextPreview: truncateString(out.FinalTextPreview, m.Cfg.PreviewMaxBytes),
+		StdoutPreview:    truncateString(out.StdoutPreview, cfg.PreviewMaxBytes),
+		StderrPreview:    truncateString(out.StderrPreview, cfg.PreviewMaxBytes),
+		FinalTextPreview: truncateString(out.FinalTextPreview, cfg.PreviewMaxBytes),
 		ErrorMessage:     errMsg,
 		CompletedAt:      db.NowMS(),
 	}
@@ -623,8 +630,20 @@ func minInt(a, b int) int {
 }
 
 func atomicIncrement(i *int64) int64 {
-	// Simple increment for single-goroutine use during event emission.
-	// In the run loop this is only called from one goroutine at a time.
-	*i++
-	return *i
+	return atomic.AddInt64(i, 1)
+}
+
+func (m *Manager) configSnapshot() config.AgentCLIConfig {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.Cfg
+}
+
+func isRunnerDisabled(id RunnerID, disabled []string) bool {
+	for _, candidate := range disabled {
+		if strings.EqualFold(strings.TrimSpace(candidate), string(id)) {
+			return true
+		}
+	}
+	return false
 }

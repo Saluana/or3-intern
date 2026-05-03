@@ -2,6 +2,7 @@ package tools
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -67,6 +68,11 @@ func EncodeToolFailure(toolName string, params map[string]any, out string, err e
 	}
 	result.Stats["tool"] = toolName
 	result.Stats["error"] = errText
+	var approvalErr *ApprovalRequiredError
+	if errors.As(err, &approvalErr) {
+		result.Status = "approval_required"
+		result.RequestID = approvalErr.RequestID
+	}
 	if result.Preview == "" && strings.TrimSpace(out) != "" {
 		result.Preview = strings.TrimSpace(out)
 	}

@@ -272,6 +272,10 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 	replyMeta := channels.ReplyMeta(ev.Meta)
 	finalText, streamed, err := r.executeConversation(ctx, ev.Type, ev.SessionKey, messages, r.effectiveTools(ctx, r.Tools), ev.Channel, replyTarget, replyMeta)
 	if err != nil {
+		var approvalErr *tools.ApprovalRequiredError
+		if errors.As(err, &approvalErr) && strings.TrimSpace(finalText) != "" {
+			r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, finalText, replyMeta, streamed, shouldAutoDeliver(ev))
+		}
 		return err
 	}
 
@@ -1339,7 +1343,8 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 			messages = append(messages, providers.ChatMessage{Role: "tool", ToolCallID: tc.ID, Content: sendOut})
 			var approvalErr *tools.ApprovalRequiredError
 			if errors.As(err, &approvalErr) {
-				return "", false, err
+				finalText, streamed := r.narrateApprovalRequired(ctx, messages)
+				return finalText, streamed, err
 			}
 			if finalText := terminalToolResultText(tc.Function.Name, out); finalText != "" {
 				if observer != nil {
@@ -1349,6 +1354,32 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 			}
 		}
 	}
+}
+
+func (r *Runtime) narrateApprovalRequired(ctx context.Context, messages []providers.ChatMessage) (string, bool) {
+	if r == nil || r.Provider == nil {
+		return "", false
+	}
+	prompt := append(append([]providers.ChatMessage{}, messages...), providers.ChatMessage{
+		Role:    "system",
+		Content: "The last tool result indicates that approval is required before work can continue. Briefly explain to the user what needs approval and why. Do not call any tools. Keep the reply short and concrete.",
+	})
+	resp, err := r.Provider.Chat(ctx, providers.ChatCompletionRequest{
+		Model:       r.Model,
+		Messages:    prompt,
+		Temperature: r.Temperature,
+	})
+	if err != nil || len(resp.Choices) == 0 {
+		return "", false
+	}
+	finalText := strings.TrimSpace(contentToString(resp.Choices[0].Message.Content))
+	if finalText == "" {
+		return "", false
+	}
+	if observer := conversationObserverFromContext(ctx); observer != nil {
+		observer.OnCompletion(ctx, finalText, false)
+	}
+	return finalText, false
 }
 
 func (r *Runtime) handleToolLoopLimitExceeded(ctx context.Context, sessionKey string, currentLimit int) error {

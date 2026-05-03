@@ -1771,17 +1771,18 @@ func (s *serviceServer) handleApprovals(w http.ResponseWriter, r *http.Request) 
 		}
 		issued, err := appSvc.ApproveApproval(r.Context(), id, serviceAuthIdentityFromContext(r.Context()).Actor, body.Allowlist, body.Note)
 		if err != nil {
-			writeServiceError(w, r, http.StatusBadRequest, "approval failed", err)
+			s.writeServiceApprovalActionError(w, r, http.StatusBadRequest, id, "approve", "approval failed", err)
 			return
 		}
 		response := map[string]any{"request_id": id, "token": issued.Token, "allowlist_id": issued.AllowlistID}
+		warnings := make([]map[string]any, 0, 2)
 		if s.broker != nil && s.broker.DB != nil {
 			plans, err := approvalSkillRunPlanLookup(r.Context(), s.broker.DB, id, 20)
 			if err != nil {
-				response["warnings"] = []map[string]any{{
+				warnings = append(warnings, map[string]any{
 					"code":    "plan_lookup_failed",
 					"message": approvalPlanLookupWarning(err),
-				}}
+				})
 			} else {
 				if len(plans) == 1 {
 					response["plan_id"] = plans[0].ID
@@ -1798,6 +1799,18 @@ func (s *serviceServer) handleApprovals(w http.ResponseWriter, r *http.Request) 
 				}
 			}
 		}
+		resumeJobID, err := s.startApprovedResumeJob(r.Context(), issued, serviceAuthIdentityFromContext(r.Context()))
+		if err != nil {
+			warnings = append(warnings, map[string]any{
+				"code":    "resume_start_failed",
+				"message": approvalResumeWarning(err),
+			})
+		} else if strings.TrimSpace(resumeJobID) != "" {
+			response["resume_job_id"] = resumeJobID
+		}
+		if len(warnings) > 0 {
+			response["warnings"] = warnings
+		}
 		writeServiceJSON(w, http.StatusOK, response)
 	case "deny":
 		if r.Method != http.MethodPost {
@@ -1813,7 +1826,7 @@ func (s *serviceServer) handleApprovals(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		if err := appSvc.DenyApproval(r.Context(), id, serviceAuthIdentityFromContext(r.Context()).Actor, body.Note); err != nil {
-			writeServiceError(w, r, http.StatusBadRequest, "approval denial failed", err)
+			s.writeServiceApprovalActionError(w, r, http.StatusBadRequest, id, "deny", "approval denial failed", err)
 			return
 		}
 		writeServiceJSON(w, http.StatusOK, map[string]any{"request_id": id, "status": "denied"})
@@ -1831,7 +1844,7 @@ func (s *serviceServer) handleApprovals(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		if err := appSvc.CancelApproval(r.Context(), id, serviceAuthIdentityFromContext(r.Context()).Actor, body.Note); err != nil {
-			writeServiceError(w, r, http.StatusBadRequest, "approval cancel failed", err)
+			s.writeServiceApprovalActionError(w, r, http.StatusBadRequest, id, "cancel", "approval cancel failed", err)
 			return
 		}
 		writeServiceJSON(w, http.StatusOK, map[string]any{"request_id": id, "status": "canceled"})
@@ -2027,6 +2040,78 @@ func (s *serviceServer) runTurnJob(ctx context.Context, jobID string, req servic
 		return
 	}
 	s.jobs.Complete(jobID, "completed", serviceLifecyclePayload(req.SessionKey, req.Meta, map[string]any{"final_text": observer.finalText}))
+}
+
+func (s *serviceServer) startApprovedResumeJob(ctx context.Context, issued approval.IssuedApproval, identity serviceAuthIdentity) (string, error) {
+	if s == nil || s.jobs == nil || s.app() == nil {
+		return "", nil
+	}
+	sessionKey := strings.TrimSpace(issued.Request.RequesterSessionID)
+	if sessionKey == "" {
+		return "", nil
+	}
+	switch strings.TrimSpace(issued.Request.Type) {
+	case string(approval.SubjectExec), string(approval.SubjectSkillExec), string(approval.SubjectToolQuota):
+	default:
+		return "", nil
+	}
+	job := s.jobs.Register("turn")
+	meta := map[string]any{
+		"approval_request_id": issued.Request.ID,
+		"approved_resume":     true,
+	}
+	s.jobs.Publish(job.ID, "queued", serviceLifecyclePayload(sessionKey, meta, map[string]any{"status": "queued"}))
+	runCtx, cancel := context.WithCancel(withDetachedContext(ctx))
+	s.jobs.AttachCancel(job.ID, cancel)
+	go s.runApprovedResumeJob(runCtx, job.ID, issued, identity)
+	return job.ID, nil
+}
+
+func (s *serviceServer) runApprovedResumeJob(ctx context.Context, jobID string, issued approval.IssuedApproval, identity serviceAuthIdentity) {
+	sessionKey := strings.TrimSpace(issued.Request.RequesterSessionID)
+	meta := map[string]any{
+		"approval_request_id": issued.Request.ID,
+		"approved_resume":     true,
+	}
+	s.jobs.Publish(jobID, "started", serviceLifecyclePayload(sessionKey, meta, map[string]any{"status": "running"}))
+	observer := &serviceObserver{ConversationObserver: s.jobs.Observer(jobID)}
+	_, err := s.app().ResumeApprovedRequest(ctx, app.ResumeApprovedRequest{
+		IssuedApproval: issued,
+		Capability:     tools.CapabilityLevel(s.config.Service.MaxCapability),
+		Actor:          identity.Actor,
+		Role:           identity.Role,
+		Observer:       observer,
+	})
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+			s.jobs.Complete(jobID, "aborted", serviceLifecyclePayload(sessionKey, meta, map[string]any{"message": "job aborted"}))
+			return
+		}
+		var approvalErr *tools.ApprovalRequiredError
+		if errors.As(err, &approvalErr) {
+			s.jobs.Complete(jobID, "approval_required", serviceApprovalRequiredPayload(sessionKey, meta, approvalErr))
+			return
+		}
+		if fallback, ok := serviceTurnFallbackText(err, observer); ok {
+			observer.finalText = fallback
+			s.jobs.Complete(jobID, "completed", serviceLifecyclePayload(sessionKey, meta, map[string]any{"final_text": fallback, "degraded": true}))
+			return
+		}
+		s.jobs.Fail(jobID, servicePublicJobError(err), serviceLifecyclePayload(sessionKey, meta, nil))
+		return
+	}
+	s.jobs.Complete(jobID, "completed", serviceLifecyclePayload(sessionKey, meta, map[string]any{"final_text": observer.finalText}))
+}
+
+func approvalResumeWarning(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := strings.TrimSpace(err.Error())
+	if message == "" {
+		return "Approved, but the automatic resume did not start."
+	}
+	return fmt.Sprintf("Approved, but the automatic resume did not start: %s", message)
 }
 
 func (s *serviceServer) handleSubagents(w http.ResponseWriter, r *http.Request) {
@@ -2938,6 +3023,92 @@ func servicePublicPairingExchangeError(err error) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+func approvalActionPastTense(action string) string {
+	switch strings.TrimSpace(action) {
+	case "approve":
+		return "approved"
+	case "deny":
+		return "denied"
+	case "cancel":
+		return "canceled"
+	default:
+		return "updated"
+	}
+}
+
+func approvalActionExpiredMessage(action string) string {
+	return fmt.Sprintf("This approval request expired before it could be %s. Refresh the approvals list and rerun the request if it is still needed.", approvalActionPastTense(action))
+}
+
+func approvalActionResolvedMessage(status string) string {
+	switch strings.TrimSpace(status) {
+	case approval.StatusApproved:
+		return "This approval request was already approved. Refresh the approvals list to see its latest status."
+	case approval.StatusDenied:
+		return "This approval request was already denied. Refresh the approvals list to see its latest status."
+	case approval.StatusCanceled:
+		return "This approval request was already canceled. Refresh the approvals list to see its latest status."
+	case approval.StatusExpired:
+		return "This approval request already expired. Refresh the approvals list and rerun the request if it is still needed."
+	default:
+		return fmt.Sprintf("This approval request is %s and can no longer be changed. Refresh the approvals list to see its latest status.", strings.TrimSpace(status))
+	}
+}
+
+func (s *serviceServer) servicePublicApprovalActionError(ctx context.Context, requestID int64, action string, err error) (string, string, bool) {
+	if err == nil {
+		return "", "", false
+	}
+	message := strings.TrimSpace(err.Error())
+	if message == "" {
+		return "", "", false
+	}
+	switch message {
+	case "approval request expired":
+		return approvalActionExpiredMessage(action), approval.StatusExpired, true
+	case "approval request not found":
+		return "This approval request no longer exists.", "", true
+	case "approval request is not pending":
+		status := ""
+		if s != nil && s.broker != nil && s.broker.DB != nil {
+			rec, lookupErr := s.broker.DB.GetApprovalRequest(ctx, requestID)
+			if lookupErr == nil {
+				status = strings.TrimSpace(rec.Status)
+			}
+		}
+		switch status {
+		case approval.StatusExpired:
+			return approvalActionExpiredMessage(action), status, true
+		case approval.StatusApproved, approval.StatusDenied, approval.StatusCanceled:
+			return approvalActionResolvedMessage(status), status, true
+		case "":
+			return "This approval request is no longer waiting for action. Refresh the approvals list to see its latest status.", "", true
+		default:
+			return approvalActionResolvedMessage(status), status, true
+		}
+	default:
+		return "", "", false
+	}
+}
+
+func (s *serviceServer) writeServiceApprovalActionError(w http.ResponseWriter, r *http.Request, statusCode int, approvalID int64, action, fallback string, err error) {
+	if err != nil {
+		log.Printf("service %s %s: %v", r.Method, r.URL.Path, err)
+	}
+	public := strings.TrimSpace(fallback)
+	approvalStatus := ""
+	if mapped, status, ok := s.servicePublicApprovalActionError(r.Context(), approvalID, action, err); ok {
+		public = mapped
+		approvalStatus = status
+	}
+	payload := serviceErrorPayload(r, public)
+	payload["approval_id"] = approvalID
+	if strings.TrimSpace(approvalStatus) != "" {
+		payload["approval_status"] = approvalStatus
+	}
+	writeServiceJSON(w, statusCode, payload)
 }
 
 func serviceErrorPayload(r *http.Request, public string) map[string]any {

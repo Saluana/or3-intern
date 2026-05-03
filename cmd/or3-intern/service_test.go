@@ -532,6 +532,49 @@ func TestServicePublicPairingExchangeError_OnlyExposesPairingState(t *testing.T)
 	}
 }
 
+func TestServicePublicApprovalActionError_ExposesExpiredStatus(t *testing.T) {
+	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Exec.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+
+	decision, err := broker.EvaluateExec(context.Background(), approval.ExecEvaluation{
+		ExecutablePath: "/bin/echo",
+		Argv:           []string{"hello"},
+		WorkingDir:     "/tmp",
+		ToolName:       "exec",
+	})
+	if err != nil {
+		t.Fatalf("EvaluateExec: %v", err)
+	}
+	if err := broker.DB.UpdateApprovalRequestResolution(
+		context.Background(),
+		decision.RequestID,
+		approval.StatusExpired,
+		time.Now().UnixMilli(),
+		"system",
+		approval.StatusExpired,
+		"expired during test",
+	); err != nil {
+		t.Fatalf("UpdateApprovalRequestResolution: %v", err)
+	}
+
+	server := &serviceServer{broker: broker, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	message, status, ok := server.servicePublicApprovalActionError(context.Background(), decision.RequestID, "approve", fmt.Errorf("approval request is not pending"))
+	if !ok {
+		t.Fatal("expected public approval action error")
+	}
+	if status != approval.StatusExpired {
+		t.Fatalf("expected expired status, got %q", status)
+	}
+	if !strings.Contains(message, "expired before it could be approved") {
+		t.Fatalf("expected expired approval message, got %q", message)
+	}
+	if strings.Contains(message, "database") {
+		t.Fatalf("expected safe public approval message, got %q", message)
+	}
+}
+
 func TestDecodeServiceSubagentRequest_RejectsInvalidTimeoutTypes(t *testing.T) {
 	registry := tools.NewRegistry()
 	for _, body := range []string{
@@ -2544,6 +2587,113 @@ func TestServiceApprovals_Approve_ReturnsPlanIDsWhenPresent(t *testing.T) {
 	}
 }
 
+func TestServiceApprovals_Approve_StartsResumeJobWhenBlockedTurnExists(t *testing.T) {
+	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Exec.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+
+	decision, err := broker.EvaluateExec(context.Background(), approval.ExecEvaluation{
+		ExecutablePath: "/bin/echo",
+		Argv:           []string{"hello"},
+		WorkingDir:     "/tmp",
+		ToolName:       "exec",
+		SessionID:      "sess-approval-resume",
+	})
+	if err != nil {
+		t.Fatalf("EvaluateExec: %v", err)
+	}
+	if !decision.RequiresApproval || decision.RequestID == 0 {
+		t.Fatalf("expected pending approval request, got %#v", decision)
+	}
+
+	providerCalls := 0
+	chatServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","content":"continued after service approval"}}]}`)
+	}))
+	defer chatServer.Close()
+
+	provider := providers.New(chatServer.URL, "test-key", 10*time.Second)
+	provider.HTTP = chatServer.Client()
+	registry := tools.NewRegistry()
+	registry.Register(serviceReplayTool{})
+	rt := &agent.Runtime{
+		DB:       broker.DB,
+		Provider: provider,
+		Model:    "gpt-4",
+		Tools:    registry,
+		Builder:  &agent.Builder{DB: broker.DB, HistoryMax: 20},
+	}
+	server := &serviceServer{broker: broker, runtime: rt, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("a", 32), server)
+	defer httpServer.Close()
+
+	toolCall := providers.ToolCall{
+		ID:   "tc-approve-resume",
+		Type: "function",
+		Function: struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		}{Name: "replay_probe", Arguments: `{"value":"hello"}`},
+	}
+	if _, err := broker.DB.AppendMessage(context.Background(), "sess-approval-resume", "user", "run it", nil); err != nil {
+		t.Fatalf("AppendMessage user: %v", err)
+	}
+	if _, err := broker.DB.AppendMessage(context.Background(), "sess-approval-resume", "assistant", "", map[string]any{"tool_calls": []providers.ToolCall{toolCall}}); err != nil {
+		t.Fatalf("AppendMessage assistant: %v", err)
+	}
+	blocked := tools.EncodeToolFailure("replay_probe", map[string]any{"value": "hello"}, "", &tools.ApprovalRequiredError{ToolName: "replay_probe", RequestID: decision.RequestID})
+	if _, err := broker.DB.AppendMessage(context.Background(), "sess-approval-resume", "tool", blocked, map[string]any{"tool_call_id": "tc-approve-resume"}); err != nil {
+		t.Fatalf("AppendMessage tool: %v", err)
+	}
+
+	_, deviceToken, err := broker.RotateDeviceToken(context.Background(), "operator-1", approval.RoleOperator, "Operator", nil)
+	if err != nil {
+		t.Fatalf("RotateDeviceToken: %v", err)
+	}
+
+	approveReq := mustJSONRequest(t, http.MethodPost, fmt.Sprintf("%s/internal/v1/approvals/%d/approve", httpServer.URL, decision.RequestID), `{"note":"approved"}`)
+	approveReq.Header.Set("Authorization", "Bearer "+deviceToken)
+	approveResp, err := httpServer.Client().Do(approveReq)
+	if err != nil {
+		t.Fatalf("Do approve approval: %v", err)
+	}
+	defer approveResp.Body.Close()
+	if approveResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected approval 200, got %d (%s)", approveResp.StatusCode, mustReadBody(t, approveResp.Body))
+	}
+	payload := mustDecodeJSONBody(t, approveResp.Body)
+	resumeJobID, _ := payload["resume_job_id"].(string)
+	if strings.TrimSpace(resumeJobID) == "" {
+		t.Fatalf("expected resume_job_id in response, got %#v", payload)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	snapshot, ok := server.jobs.Wait(ctx, resumeJobID)
+	if !ok {
+		t.Fatalf("expected resume job %q to complete", resumeJobID)
+	}
+	if snapshot.Status != "completed" {
+		t.Fatalf("expected completed resume job, got %#v", snapshot)
+	}
+	if providerCalls != 1 {
+		t.Fatalf("expected one continuation provider call, got %d", providerCalls)
+	}
+	foundAssistant := false
+	for _, event := range snapshot.Events {
+		if event.Type == "assistant" && event.Data["content"] == "continued after service approval" {
+			foundAssistant = true
+			break
+		}
+	}
+	if !foundAssistant {
+		t.Fatalf("expected assistant continuation event, got %#v", snapshot.Events)
+	}
+}
+
 func TestServiceApprovals_Approve_PlanLookupFailureWarnsButStillSucceeds(t *testing.T) {
 	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
 		cfg.Exec.Mode = config.ApprovalModeAsk
@@ -2594,6 +2744,66 @@ func TestServiceApprovals_Approve_PlanLookupFailureWarnsButStillSucceeds(t *test
 	warning, _ := warnings[0].(map[string]any)
 	if warning["code"] != "plan_lookup_failed" {
 		t.Fatalf("expected plan lookup warning, got %#v", payload)
+	}
+}
+
+func TestServiceApprovals_Approve_ExpiredRequestReturnsHelpfulMessage(t *testing.T) {
+	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Exec.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+
+	decision, err := broker.EvaluateExec(context.Background(), approval.ExecEvaluation{
+		ExecutablePath: "/bin/echo",
+		Argv:           []string{"hello"},
+		WorkingDir:     "/tmp",
+		ToolName:       "exec",
+	})
+	if err != nil {
+		t.Fatalf("EvaluateExec: %v", err)
+	}
+	if err := broker.DB.UpdateApprovalRequestResolution(
+		context.Background(),
+		decision.RequestID,
+		approval.StatusExpired,
+		time.Now().UnixMilli(),
+		"system",
+		approval.StatusExpired,
+		"expired during test",
+	); err != nil {
+		t.Fatalf("UpdateApprovalRequestResolution: %v", err)
+	}
+
+	_, deviceToken, err := broker.RotateDeviceToken(context.Background(), "operator-1", approval.RoleOperator, "Operator", nil)
+	if err != nil {
+		t.Fatalf("RotateDeviceToken: %v", err)
+	}
+
+	server := &serviceServer{broker: broker, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("e", 32), server)
+	defer httpServer.Close()
+
+	req := mustJSONRequest(t, http.MethodPost, fmt.Sprintf("%s/internal/v1/approvals/%d/approve", httpServer.URL, decision.RequestID), `{"note":"approved"}`)
+	req.Header.Set("Authorization", "Bearer "+deviceToken)
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do approve: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected approval 400, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	payload := mustDecodeJSONBody(t, resp.Body)
+	if payload["approval_status"] != approval.StatusExpired {
+		t.Fatalf("expected expired approval_status, got %#v", payload)
+	}
+	errText := fmt.Sprint(payload["error"])
+	if !strings.Contains(errText, "expired before it could be approved") {
+		t.Fatalf("expected helpful expired error, got %#v", payload)
+	}
+	approvalID := fmt.Sprint(payload["approval_id"])
+	if approvalID != fmt.Sprint(decision.RequestID) {
+		t.Fatalf("expected approval_id %d, got %#v", decision.RequestID, payload)
 	}
 }
 

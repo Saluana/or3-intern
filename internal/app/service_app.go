@@ -111,17 +111,34 @@ func (a *ServiceApp) RunTurn(ctx context.Context, req TurnRequest) error {
 }
 
 type ReplayToolCallRequest struct {
-	SessionKey    string
-	ToolName      string
-	ArgumentsJSON string
-	AllowedTools  []string
-	RestrictTools bool
-	ProfileName   string
-	Capability    tools.CapabilityLevel
-	ApprovalToken string
-	Actor         string
-	Role          string
-	Observer      agent.ConversationObserver
+	SessionKey        string
+	ToolName          string
+	ArgumentsJSON     string
+	ApprovalRequestID int64
+	AllowedTools      []string
+	RestrictTools     bool
+	ProfileName       string
+	Capability        tools.CapabilityLevel
+	ApprovalToken     string
+	Actor             string
+	Role              string
+	Observer          agent.ConversationObserver
+}
+
+type ResumeApprovedRequest struct {
+	IssuedApproval approval.IssuedApproval
+	ProfileName    string
+	Capability     tools.CapabilityLevel
+	Actor          string
+	Role           string
+	Observer       agent.ConversationObserver
+}
+
+type replayToolCallTarget struct {
+	ToolName       string
+	ArgumentsJSON  string
+	ToolCallID     string
+	AlreadyResumed bool
 }
 
 func (a *ServiceApp) ReplayToolCall(ctx context.Context, req ReplayToolCallRequest) (string, error) {
@@ -147,13 +164,33 @@ func (a *ServiceApp) ReplayToolCall(ctx context.Context, req ReplayToolCallReque
 	toolCallID := ""
 	fullReplayHistory := a.runtime.DB != nil && a.runtime.Builder != nil && a.runtime.Provider != nil
 	if fullReplayHistory {
-		var findErr error
-		toolCallID, findErr = a.findReplayToolCallID(runCtx, req.SessionKey, toolName, argsJSON)
-		if findErr != nil {
-			return "", findErr
-		}
-		if strings.TrimSpace(toolCallID) == "" {
-			return "", fmt.Errorf("approved replay rejected: no matching prior assistant tool call")
+		if req.ApprovalRequestID > 0 {
+			target, findErr := a.findApprovalReplayTarget(runCtx, req.SessionKey, req.ApprovalRequestID)
+			if findErr != nil {
+				return "", findErr
+			}
+			if target.AlreadyResumed {
+				finalText := "Approval was already applied. The latest tool result is already in the conversation."
+				if req.Observer != nil {
+					req.Observer.OnCompletion(runCtx, finalText, false)
+				}
+				return finalText, nil
+			}
+			toolName = strings.TrimSpace(target.ToolName)
+			argsJSON = strings.TrimSpace(target.ArgumentsJSON)
+			toolCallID = strings.TrimSpace(target.ToolCallID)
+			if toolName == "" || toolCallID == "" {
+				return "", fmt.Errorf("approved replay rejected: no matching blocked tool call for request %d", req.ApprovalRequestID)
+			}
+		} else {
+			var findErr error
+			toolCallID, findErr = a.findReplayToolCallID(runCtx, req.SessionKey, toolName, argsJSON)
+			if findErr != nil {
+				return "", findErr
+			}
+			if strings.TrimSpace(toolCallID) == "" {
+				return "", fmt.Errorf("approved replay rejected: no matching prior assistant tool call")
+			}
 		}
 	}
 	if req.Observer != nil {
@@ -211,6 +248,61 @@ func (a *ServiceApp) ReplayToolCall(ctx context.Context, req ReplayToolCallReque
 		return "", err
 	}
 	return "", nil
+}
+
+func (a *ServiceApp) ResumeApprovedRequest(ctx context.Context, req ResumeApprovedRequest) (string, error) {
+	if a == nil || a.runtime == nil {
+		return "", errors.New("runtime unavailable")
+	}
+	issued := req.IssuedApproval
+	sessionKey := strings.TrimSpace(issued.Request.RequesterSessionID)
+	if sessionKey == "" {
+		return "", nil
+	}
+	switch strings.TrimSpace(issued.Request.Type) {
+	case string(approval.SubjectExec), string(approval.SubjectSkillExec):
+		target, err := a.findApprovalReplayTarget(ctx, sessionKey, issued.Request.ID)
+		if err != nil {
+			return "", err
+		}
+		if target.AlreadyResumed {
+			finalText := "Approval was already applied. The latest tool result is already in the conversation."
+			if req.Observer != nil {
+				req.Observer.OnCompletion(ctx, finalText, false)
+			}
+			return finalText, nil
+		}
+		if strings.TrimSpace(target.ToolCallID) == "" {
+			return "", nil
+		}
+		return a.ReplayToolCall(ctx, ReplayToolCallRequest{
+			SessionKey:        sessionKey,
+			ToolName:          target.ToolName,
+			ArgumentsJSON:     target.ArgumentsJSON,
+			ApprovalRequestID: issued.Request.ID,
+			ProfileName:       req.ProfileName,
+			Capability:        req.Capability,
+			ApprovalToken:     issued.Token,
+			Actor:             req.Actor,
+			Role:              req.Role,
+			Observer:          req.Observer,
+		})
+	case string(approval.SubjectToolQuota):
+		runCtx := a.serviceRunContext(ctx, sessionKey, req.ProfileName, issued.Token, req.Actor, req.Role, req.Capability, req.Observer, nil)
+		return "", a.runtime.Handle(runCtx, bus.Event{
+			Type:       bus.EventSystem,
+			SessionKey: sessionKey,
+			Channel:    "service",
+			From:       "or3-net",
+			Message:    toolQuotaApprovalContinuationPrompt(),
+			Meta: map[string]any{
+				"approved_tool_quota": true,
+				"approval_request_id": issued.Request.ID,
+			},
+		})
+	default:
+		return "", nil
+	}
 }
 
 func summarizeReplayToolResult(toolName string, out string) string {
@@ -271,6 +363,58 @@ func (a *ServiceApp) findReplayToolCallID(ctx context.Context, sessionKey, toolN
 	return "", nil
 }
 
+func (a *ServiceApp) findApprovalReplayTarget(ctx context.Context, sessionKey string, requestID int64) (replayToolCallTarget, error) {
+	if a == nil || a.runtime == nil || a.runtime.Builder == nil || requestID <= 0 {
+		return replayToolCallTarget{}, nil
+	}
+	pp, _, err := a.runtime.Builder.BuildWithOptions(ctx, agent.BuildOptions{
+		SessionKey: strings.TrimSpace(sessionKey),
+	})
+	if err != nil {
+		return replayToolCallTarget{}, err
+	}
+	for i := len(pp.History) - 1; i >= 0; i-- {
+		msg := pp.History[i]
+		if msg.Role != "tool" || strings.TrimSpace(msg.ToolCallID) == "" {
+			continue
+		}
+		content, ok := msg.Content.(string)
+		if !ok {
+			continue
+		}
+		result, ok := tools.DecodeToolResult(content)
+		if !ok || result.RequestID != requestID {
+			continue
+		}
+		toolCallID := strings.TrimSpace(msg.ToolCallID)
+		for j := i + 1; j < len(pp.History); j++ {
+			later := pp.History[j]
+			if later.Role == "tool" && strings.TrimSpace(later.ToolCallID) == toolCallID {
+				return replayToolCallTarget{ToolCallID: toolCallID, AlreadyResumed: true}, nil
+			}
+		}
+		for j := i - 1; j >= 0; j-- {
+			prior := pp.History[j]
+			if prior.Role != "assistant" || len(prior.ToolCalls) == 0 {
+				continue
+			}
+			for k := len(prior.ToolCalls) - 1; k >= 0; k-- {
+				tc := prior.ToolCalls[k]
+				if strings.TrimSpace(tc.ID) != toolCallID {
+					continue
+				}
+				return replayToolCallTarget{
+					ToolName:      strings.TrimSpace(tc.Function.Name),
+					ArgumentsJSON: strings.TrimSpace(tc.Function.Arguments),
+					ToolCallID:    toolCallID,
+				}, nil
+			}
+		}
+		return replayToolCallTarget{}, fmt.Errorf("approved replay rejected: no matching prior assistant tool call for request %d", requestID)
+	}
+	return replayToolCallTarget{}, nil
+}
+
 func canonicalReplayArgs(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -293,6 +437,10 @@ func replayContinuationPrompt(toolName string) string {
 		name = "tool"
 	}
 	return fmt.Sprintf("Approval was granted for the previously requested %s call. The exact approved tool call has now been executed and its latest result is already in the conversation. Continue the same task from that result. Do not stop just because the approved tool call succeeded, and do not repeat the same %s call unless it is still necessary.", name, name)
+}
+
+func toolQuotaApprovalContinuationPrompt() string {
+	return "Approval was granted for the previously requested continuation. Continue the same task from the existing conversation state. Use the latest tool results already in the conversation, and do not repeat the same failing or blocked path unless it is still necessary."
 }
 
 type SubagentRequest struct {

@@ -37,3 +37,17 @@ func TestEncodeToolFailureTrimsDuplicateToolPrefix(t *testing.T) {
 		t.Fatalf("expected duplicate prefix to be trimmed, got %#v", result)
 	}
 }
+
+func TestEncodeToolFailurePreservesApprovalRequestID(t *testing.T) {
+	got := EncodeToolFailure("exec", nil, "", &ApprovalRequiredError{ToolName: "exec", RequestID: 42})
+	result, ok := DecodeToolResult(got)
+	if !ok {
+		t.Fatalf("expected structured tool result, got %q", got)
+	}
+	if result.Status != "approval_required" {
+		t.Fatalf("expected approval_required status, got %#v", result)
+	}
+	if result.RequestID != 42 {
+		t.Fatalf("expected request id 42, got %#v", result)
+	}
+}

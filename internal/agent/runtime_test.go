@@ -1764,17 +1764,18 @@ func TestRuntime_ToolFailureBecomesStructuredToolMessage(t *testing.T) {
 	}
 }
 
-func TestRuntime_ApprovalRequiredHaltsToolLoop(t *testing.T) {
+func TestRuntime_ApprovalRequiredNarratesBeforePausing(t *testing.T) {
 	d := openRuntimeTestDB(t)
 	tool := &approvalExecTool{}
 	callCount := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount++
 		w.Header().Set("Content-Type", "application/json")
-		if callCount > 1 {
-			t.Fatalf("provider should not be called again after approval is required")
+		if callCount == 1 {
+			_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"tc-exec","type":"function","function":{"name":"exec","arguments":"{\"program\":\"pwd\"}"}}]}}]}`)
+			return
 		}
-		_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"tc-exec","type":"function","function":{"name":"exec","arguments":"{\"program\":\"pwd\"}"}}]}}]}`)
+		_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","content":"I need approval to run pwd before I can continue."}}]}`)
 	}))
 	t.Cleanup(srv.Close)
 
@@ -1798,8 +1799,68 @@ func TestRuntime_ApprovalRequiredHaltsToolLoop(t *testing.T) {
 	if approvalErr.RequestID != 42 {
 		t.Fatalf("expected request id 42, got %#v", approvalErr)
 	}
-	if callCount != 1 {
-		t.Fatalf("expected one provider call before pausing, got %d", callCount)
+	if callCount != 2 {
+		t.Fatalf("expected narration round before pausing, got %d provider calls", callCount)
+	}
+	pp, _, err := rt.Builder.BuildWithOptions(context.Background(), BuildOptions{SessionKey: "sess-approval-required"})
+	if err != nil {
+		t.Fatalf("BuildWithOptions: %v", err)
+	}
+	if len(pp.History) == 0 {
+		t.Fatal("expected persisted history")
+	}
+	last := pp.History[len(pp.History)-1]
+	content, ok := last.Content.(string)
+	if last.Role != "assistant" || !ok || !strings.Contains(content, "I need approval to run pwd") {
+		t.Fatalf("expected persisted approval narration, got %#v", last)
+	}
+}
+
+func TestRuntime_ApprovalRequiredStillPausesWhenNarrationFails(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	tool := &approvalExecTool{}
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if callCount == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"tc-exec","type":"function","function":{"name":"exec","arguments":"{\"program\":\"pwd\"}"}}]}}]}`)
+			return
+		}
+		http.Error(w, "boom", http.StatusBadGateway)
+	}))
+	t.Cleanup(srv.Close)
+
+	provider := providers.New(srv.URL, "test-key", 10*time.Second)
+	provider.HTTP = srv.Client()
+	deliver := &mockDeliverer{}
+	rt := buildSimpleRuntime(t, provider, d, deliver)
+	rt.Tools.Register(tool)
+
+	err := rt.Handle(context.Background(), bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess-approval-narration-fails",
+		Channel:    "cli",
+		From:       "user",
+		Message:    "run pwd",
+	})
+	var approvalErr *tools.ApprovalRequiredError
+	if !errors.As(err, &approvalErr) {
+		t.Fatalf("expected approval-required error, got %v", err)
+	}
+	if callCount != 2 {
+		t.Fatalf("expected narration attempt before pausing, got %d provider calls", callCount)
+	}
+	pp, _, err := rt.Builder.BuildWithOptions(context.Background(), BuildOptions{SessionKey: "sess-approval-narration-fails"})
+	if err != nil {
+		t.Fatalf("BuildWithOptions: %v", err)
+	}
+	if len(pp.History) == 0 {
+		t.Fatal("expected persisted history")
+	}
+	last := pp.History[len(pp.History)-1]
+	if last.Role != "tool" {
+		t.Fatalf("expected last persisted message to remain the blocked tool result, got %#v", last)
 	}
 }
 

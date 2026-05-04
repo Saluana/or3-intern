@@ -48,7 +48,13 @@ type ProcessOutput struct {
 func (p *ProcessManager) Run(ctx context.Context, spec CommandSpec, onEvent func(AgentRunEvent)) ProcessOutput {
 	startedAt := time.Now()
 
-	cmd := exec.CommandContext(ctx, spec.Binary, spec.Args...)
+	binary, err := ResolveExecutable(spec.Binary, spec.Env)
+	if err != nil {
+		emitError(onEvent, 0, fmt.Sprintf("resolve executable %q: %v", spec.Binary, err))
+		return ProcessOutput{ExitCode: -1, DurationMS: time.Since(startedAt).Milliseconds()}
+	}
+
+	cmd := exec.CommandContext(ctx, binary, spec.Args...)
 	cmd.Stdin = nil
 	if spec.Cwd != "" {
 		cmd.Dir = spec.Cwd
@@ -75,7 +81,7 @@ func (p *ProcessManager) Run(ctx context.Context, spec CommandSpec, onEvent func
 	}
 
 	var seq int64
-	collector := newOutputCollector(p.PreviewMaxBytes)
+	collector := newOutputCollector(p.PreviewMaxBytes, spec.RunnerID)
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
@@ -109,6 +115,11 @@ func (p *ProcessManager) Run(ctx context.Context, spec CommandSpec, onEvent func
 		StderrPreview:    collector.stderr.String(),
 		FinalTextPreview: collector.stdout.String(),
 		DurationMS:       durMS,
+	}
+	if collector.extractor != nil {
+		if finalText := collector.extractor.Text(); finalText != "" {
+			out.FinalTextPreview = finalText
+		}
 	}
 
 	return out

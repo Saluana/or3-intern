@@ -36,6 +36,7 @@ var configureSections = []struct {
 	{Key: "automation", Label: "Automation", Description: "Cron, heartbeat, webhook, and file-watch triggers"},
 	{Key: "channels", Label: "Channels", Description: "Telegram, Slack, Discord, WhatsApp, and Email delivery"},
 	{Key: "service", Label: "Service", Description: "Internal authenticated HTTP API listener"},
+	{Key: "agentCLI", Label: "External CLI Agents", Description: "External agent CLI delegation, runner discovery, and sandbox controls"},
 }
 
 type configureArgs struct {
@@ -269,7 +270,7 @@ func runConfigureSection(reader *bufio.Reader, out io.Writer, cfg *config.Config
 	switch section {
 	case "channels":
 		return configureChannelsSection(reader, out, cfg)
-	case "provider", "storage", "runtime", "context", "workspace", "tools", "docindex", "skills", "auth", "security", "hardening", "session", "automation", "service":
+	case "provider", "storage", "runtime", "context", "workspace", "tools", "docindex", "skills", "auth", "security", "hardening", "session", "automation", "service", "agentcli":
 		return configureGenericSection(reader, out, cfg, section, cwd)
 	default:
 		return fmt.Errorf("unknown configure section %q", section)

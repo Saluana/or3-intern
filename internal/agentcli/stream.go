@@ -11,14 +11,16 @@ import (
 )
 
 type outputCollector struct {
-	stdout *ringBuffer
-	stderr *ringBuffer
+	stdout    *ringBuffer
+	stderr    *ringBuffer
+	extractor *finalTextExtractor
 }
 
-func newOutputCollector(maxBytes int) *outputCollector {
+func newOutputCollector(maxBytes int, runnerID RunnerID) *outputCollector {
 	return &outputCollector{
-		stdout: newRingBuffer(maxBytes),
-		stderr: newRingBuffer(maxBytes),
+		stdout:    newRingBuffer(maxBytes),
+		stderr:    newRingBuffer(maxBytes),
+		extractor: newFinalTextExtractor(runnerID),
 	}
 }
 
@@ -88,7 +90,7 @@ func readStream(r io.Reader, stream string, chunkMaxBytes int, seq *int64, colle
 		}
 
 		if stream == "stdout" && (outputMode == OutputJSONL || outputMode == OutputJSON) {
-			emitStructuredIfValid(onEvent, seq, string(lineCopy))
+			emitStructuredIfValid(onEvent, seq, collector, string(lineCopy))
 		}
 	}
 
@@ -102,7 +104,7 @@ func readStream(r io.Reader, stream string, chunkMaxBytes int, seq *int64, colle
 	}
 }
 
-func emitStructuredIfValid(onEvent func(AgentRunEvent), seq *int64, raw string) {
+func emitStructuredIfValid(onEvent func(AgentRunEvent), seq *int64, collector *outputCollector, raw string) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return
@@ -110,6 +112,9 @@ func emitStructuredIfValid(onEvent func(AgentRunEvent), seq *int64, raw string) 
 	var payload json.RawMessage
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
 		return
+	}
+	if collector != nil && collector.extractor != nil {
+		collector.extractor.Consider(payload)
 	}
 	if onEvent != nil {
 		onEvent(AgentRunEvent{

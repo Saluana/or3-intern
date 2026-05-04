@@ -1559,6 +1559,51 @@ func (d *DB) ListRunningAgentCLIRuns(ctx context.Context) ([]AgentCLIRun, error)
 	return d.listAgentCLIRunsByStatus(ctx, AgentCLIStatusRunning)
 }
 
+func (d *DB) ListAgentCLIRuns(ctx context.Context, filter AgentCLIRunFilter) ([]AgentCLIRun, error) {
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = AgentCLIRunListDefaultLimit
+	}
+	if limit > AgentCLIRunListMaxLimit {
+		limit = AgentCLIRunListMaxLimit
+	}
+
+	query := `SELECT id, job_id, parent_session_key, runner_id, task, cwd, model, mode, isolation, status,
+			pid, requested_at, started_at, completed_at, timeout_seconds,
+			exit_code, stdout_preview, stderr_preview, final_text_preview, error_message, attempts, meta_json
+		 FROM agent_cli_runs`
+	var conditions []string
+	var args []any
+	if status := strings.TrimSpace(filter.Status); status != "" {
+		conditions = append(conditions, "status=?")
+		args = append(args, status)
+	}
+	if session := strings.TrimSpace(filter.ParentSessionKey); session != "" {
+		conditions = append(conditions, "parent_session_key=?")
+		args = append(args, session)
+	}
+	if len(conditions) > 0 {
+		query += " WHERE " + strings.Join(conditions, " AND ")
+	}
+	query += " ORDER BY requested_at DESC, id DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := d.SQL.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AgentCLIRun
+	for rows.Next() {
+		run, err := scanAgentCLIRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, run)
+	}
+	return out, rows.Err()
+}
+
 func (d *DB) listAgentCLIRunsByStatus(ctx context.Context, status string) ([]AgentCLIRun, error) {
 	rows, err := d.SQL.QueryContext(ctx,
 		`SELECT id, job_id, parent_session_key, runner_id, task, cwd, model, mode, isolation, status,

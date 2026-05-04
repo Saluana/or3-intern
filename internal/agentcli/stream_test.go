@@ -8,7 +8,7 @@ import (
 func TestReadStream_AllowsExactChunkSizedLine(t *testing.T) {
 	chunkMaxBytes := 16
 	line := strings.Repeat("x", chunkMaxBytes)
-	collector := newOutputCollector(64)
+	collector := newOutputCollector(64, "")
 	var seq int64
 	var events []AgentRunEvent
 

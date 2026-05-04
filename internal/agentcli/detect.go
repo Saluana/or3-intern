@@ -30,7 +30,7 @@ func Detect(ctx context.Context, spec RunnerSpec, opts DetectOptions) RunnerInfo
 		}
 	}
 
-	path, err := exec.LookPath(spec.Binary)
+	path, err := ResolveExecutable(spec.Binary, opts.Env)
 	if err != nil {
 		info.Status = RunnerStatusMissing
 		return info

@@ -66,6 +66,26 @@ func TestDetect_VersionSuccess(t *testing.T) {
 	}
 }
 
+func TestDetect_UsesOptionsEnvPath(t *testing.T) {
+	dir := t.TempDir()
+	writeFakeBinary(t, dir, "fakecli-env", `echo "fakecli-env v1.2.3"`)
+	t.Setenv("PATH", t.TempDir())
+
+	spec := RunnerSpec{
+		ID:          "fakecli-env",
+		DisplayName: "FakeCLI Env",
+		Binary:      "fakecli-env",
+		VersionArgs: []string{"--version"},
+	}
+	info := Detect(context.Background(), spec, DetectOptions{Env: []string{"PATH=" + dir}})
+	if info.Status != RunnerStatusAvailable {
+		t.Fatalf("expected available via options env PATH, got %q", info.Status)
+	}
+	if info.BinaryPath == "" || !strings.Contains(info.BinaryPath, "fakecli-env") {
+		t.Fatalf("expected resolved binary path, got %q", info.BinaryPath)
+	}
+}
+
 func TestDetect_VersionFailure(t *testing.T) {
 	dir := t.TempDir()
 	writeFakeBinary(t, dir, "badcli", `echo "error" >&2; exit 1`)

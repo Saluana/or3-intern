@@ -4665,13 +4665,25 @@ func (s *serviceServer) handleAgentRuns(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *serviceServer) handleAgentRunsList(w http.ResponseWriter, r *http.Request) {
-	// For now, list recent runs under the default session
 	store := s.control().DB
 	if store == nil {
 		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "database unavailable"})
 		return
 	}
-	runs, err := store.ListQueuedAgentCLIRuns(r.Context())
+	limit := 0
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid limit"})
+			return
+		}
+		limit = n
+	}
+	runs, err := store.ListAgentCLIRuns(r.Context(), db.AgentCLIRunFilter{
+		Status:           strings.TrimSpace(r.URL.Query().Get("status")),
+		ParentSessionKey: strings.TrimSpace(r.URL.Query().Get("parent_session_key")),
+		Limit:            limit,
+	})
 	if err != nil {
 		writeServiceError(w, r, http.StatusServiceUnavailable, "agent runs list unavailable", err)
 		return

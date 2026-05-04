@@ -88,12 +88,12 @@ type SmallCommandSpec struct {
 
 // RunnerSpec describes a runner: binary name, detection commands, and capabilities.
 type RunnerSpec struct {
-	ID          RunnerID       `json:"id"`
-	DisplayName string         `json:"displayName"`
-	Binary      string         `json:"binary"`
-	VersionArgs []string       `json:"versionArgs"`
+	ID          RunnerID          `json:"id"`
+	DisplayName string            `json:"displayName"`
+	Binary      string            `json:"binary"`
+	VersionArgs []string          `json:"versionArgs"`
 	AuthCheck   *SmallCommandSpec `json:"authCheck,omitempty"`
-	Supports    RunnerSupports `json:"supports"`
+	Supports    RunnerSupports    `json:"supports"`
 }
 
 // RunnerInfo is the detection result returned by the API.
@@ -126,6 +126,7 @@ type AgentRunRequest struct {
 
 // CommandSpec is the executable command built by an adapter.
 type CommandSpec struct {
+	RunnerID      RunnerID   `json:"runnerId,omitempty"`
 	Binary        string     `json:"binary"`
 	Args          []string   `json:"args"`
 	Env           []string   `json:"env,omitempty"`
@@ -163,7 +164,7 @@ type RunnerAdapter interface {
 
 // DetectOptions control detection behavior.
 type DetectOptions struct {
-	WorkDir        string
-	Env            []string
+	WorkDir         string
+	Env             []string
 	DisabledRunners []string
 }

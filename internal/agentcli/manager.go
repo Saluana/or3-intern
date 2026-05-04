@@ -76,7 +76,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	if m.Registry == nil {
 		m.Registry = NewDefaultRegistry()
 	}
-	m.Registry.RefreshAllAsync(DetectOptions{DisabledRunners: m.Cfg.DisabledRunners})
+	m.Registry.RefreshAllAsync(m.detectOptions(m.Cfg))
 	running, err := m.DB.ListRunningAgentCLIRuns(ctx)
 	if err != nil {
 		return err
@@ -179,7 +179,7 @@ func (m *Manager) Enqueue(ctx context.Context, req AgentRunRequest) (db.AgentCLI
 			return db.AgentCLIRun{}, fmt.Errorf("runner %q is disabled by config", runnerID)
 		}
 		if RunnerID(runnerID) != RunnerOR3 {
-			detectOpts := DetectOptions{DisabledRunners: cfg.DisabledRunners}
+			detectOpts := m.detectOptions(cfg)
 			if info, ok := m.Registry.DetectCached(RunnerID(runnerID), agentCLIDetectCacheTTL); ok {
 				switch info.Status {
 				case RunnerStatusDisabledByConfig:
@@ -449,10 +449,12 @@ func (m *Manager) executeRun(run db.AgentCLIRun) {
 
 	// Emit completion event
 	completionPayload, _ := json.Marshal(map[string]any{
-		"exit_code":      out.ExitCode,
-		"duration_ms":    out.DurationMS,
-		"stdout_preview": truncateString(out.StdoutPreview, 200),
-		"stderr_preview": truncateString(out.StderrPreview, 200),
+		"exit_code":          out.ExitCode,
+		"duration_ms":        out.DurationMS,
+		"final_text":         truncateString(out.FinalTextPreview, 200),
+		"final_text_preview": truncateString(out.FinalTextPreview, 200),
+		"stdout_preview":     truncateString(out.StdoutPreview, 200),
+		"stderr_preview":     truncateString(out.StderrPreview, 200),
 	})
 	completionEvent := AgentRunEvent{
 		Type:       "completion",
@@ -467,11 +469,13 @@ func (m *Manager) executeRun(run db.AgentCLIRun) {
 	m.persistEvent(run, completionEvent)
 	if m.Jobs != nil {
 		m.Jobs.Publish(run.JobID, "completion", map[string]any{
-			"exit_code":      out.ExitCode,
-			"duration_ms":    out.DurationMS,
-			"stdout_preview": out.StdoutPreview,
-			"stderr_preview": out.StderrPreview,
-			"status":         finalStatus,
+			"exit_code":          out.ExitCode,
+			"duration_ms":        out.DurationMS,
+			"final_text":         out.FinalTextPreview,
+			"final_text_preview": out.FinalTextPreview,
+			"stdout_preview":     out.StdoutPreview,
+			"stderr_preview":     out.StderrPreview,
+			"status":             finalStatus,
 		})
 	}
 
@@ -509,12 +513,14 @@ func (m *Manager) finalizeRun(ctx context.Context, run db.AgentCLIRun, status, e
 		switch status {
 		case db.AgentCLIStatusSucceeded:
 			m.Jobs.Complete(run.JobID, status, map[string]any{
-				"runner_id":      run.RunnerID,
-				"run_id":         run.ID,
-				"stdout_preview": fin.StdoutPreview,
-				"stderr_preview": fin.StderrPreview,
-				"exit_code":      fin.ExitCode,
-				"duration_ms":    out.DurationMS,
+				"runner_id":          run.RunnerID,
+				"run_id":             run.ID,
+				"final_text":         fin.FinalTextPreview,
+				"final_text_preview": fin.FinalTextPreview,
+				"stdout_preview":     fin.StdoutPreview,
+				"stderr_preview":     fin.StderrPreview,
+				"exit_code":          fin.ExitCode,
+				"duration_ms":        out.DurationMS,
 			})
 		case db.AgentCLIStatusFailed, db.AgentCLIStatusTimedOut:
 			m.Jobs.Fail(run.JobID, errMsg, map[string]any{
@@ -637,6 +643,21 @@ func (m *Manager) configSnapshot() config.AgentCLIConfig {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.Cfg
+}
+
+// DetectOptions returns the environment-aware runner detection options used by this manager.
+func (m *Manager) DetectOptions() DetectOptions {
+	if m == nil {
+		return DetectOptions{Env: SecretStrippedEnv()}
+	}
+	return m.detectOptions(m.configSnapshot())
+}
+
+func (m *Manager) detectOptions(cfg config.AgentCLIConfig) DetectOptions {
+	return DetectOptions{
+		DisabledRunners: cfg.DisabledRunners,
+		Env:             BuildAgentCLIEnv(os.Environ(), cfg.ChildEnvAllowlist, nil),
+	}
 }
 
 func isRunnerDisabled(id RunnerID, disabled []string) bool {

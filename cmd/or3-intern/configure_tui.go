@@ -1041,6 +1041,8 @@ func sectionStatus(cfg config.Config, section string) string {
 		return strings.Join(enabledChannelNames(cfg), ", ")
 	case "service":
 		return serviceSummary(cfg)
+	case "agentcli":
+		return fmt.Sprintf("enabled=%t · concurrent=%d · queued=%d · timeout=%ds · sandboxAuto=%t", cfg.AgentCLI.Enabled, cfg.AgentCLI.MaxConcurrent, cfg.AgentCLI.MaxQueued, cfg.AgentCLI.DefaultTimeoutSeconds, cfg.AgentCLI.AllowSandboxAuto)
 	default:
 		return ""
 	}
@@ -1310,11 +1312,26 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 		return []configureField{
 			{Key: "service_enabled", Label: "Enable service API", Description: "Expose the internal authenticated HTTP API.", Kind: configureFieldToggle, Value: onOff(cfg.Service.Enabled)},
 			{Key: "service_listen", Label: "Listen address", Description: "Bind address for the internal service.", Kind: configureFieldText, Value: cfg.Service.Listen, EmptyHint: "127.0.0.1:9100"},
-			{Key: "service_secret", Label: "Shared secret", Description: "Hidden secret. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Service.Secret), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"},
+			{Key: "service_secret", Label: "Shared secret", Description: "Hidden secret. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Service.Secret), SecretHint: "blank keeps current · type clear to remove", EmptyHint: "not configured"},
 			{Key: "service_max_capability", Label: "Service max capability", Description: "Highest tool capability level the app/service API may request.", Kind: configureFieldChoice, Value: cfg.Service.MaxCapability, Choices: capabilityChoices, ChoiceIndex: indexOfChoice(capabilityChoices, cfg.Service.MaxCapability)},
 			{Key: "service_allow_unauthenticated_pairing", Label: "Allow first-time local device pairing", Description: "Let a phone or browser on this same computer ask for a one-time pairing code before it has a saved key.", Kind: configureFieldToggle, Value: onOff(cfg.Service.AllowUnauthenticatedPairing)},
 			{Key: "service_trusted_browser_origins", Label: "Trusted app origins", Description: "Comma-separated browser origins allowed to call the service API from a private-network app.", Kind: configureFieldText, Value: strings.Join(cfg.Service.TrustedBrowserOrigins, ","), EmptyHint: "http://100.x.y.z:3060,http://app.local:3060"},
 			{Key: "service_trusted_browser_cidrs", Label: "Trusted app CIDRs", Description: "Comma-separated remote IPs or CIDRs allowed to use trusted app origins.", Kind: configureFieldText, Value: strings.Join(cfg.Service.TrustedBrowserCIDRs, ","), EmptyHint: "100.64.0.0/10,192.168.1.0/24"},
+		}
+	case "agentcli":
+		modeChoices := []string{"review", "safe_edit", "sandbox_auto"}
+		isolationChoices := []string{"host_readonly", "host_workspace_write", "sandbox_workspace_write", "sandbox_dangerous"}
+		disabledRunners := strings.Join(cfg.AgentCLI.DisabledRunners, ",")
+		return []configureField{
+			{Key: "agentCLI_enabled", Label: "Enable external CLI agents", Description: "Allow the service to discover and run external CLIs like OpenCode, Codex, Claude, and Gemini.", Kind: configureFieldToggle, Value: onOff(cfg.AgentCLI.Enabled)},
+			{Key: "agentCLI_max_concurrent", Label: "Max concurrent external runs", Description: "How many external CLI agents may run at once.", Kind: configureFieldText, Value: formatInt(cfg.AgentCLI.MaxConcurrent), EmptyHint: "1"},
+			{Key: "agentCLI_max_queued", Label: "Max queued external runs", Description: "How many external CLI jobs may wait in line.", Kind: configureFieldText, Value: formatInt(cfg.AgentCLI.MaxQueued), EmptyHint: "16"},
+			{Key: "agentCLI_default_timeout", Label: "Default timeout (seconds)", Description: "How long each external CLI run may take before timing out.", Kind: configureFieldText, Value: formatInt(cfg.AgentCLI.DefaultTimeoutSeconds), EmptyHint: "900"},
+			{Key: "agentCLI_max_timeout", Label: "Max timeout (seconds)", Description: "Hard upper bound for run timeouts.", Kind: configureFieldText, Value: formatInt(cfg.AgentCLI.MaxTimeoutSeconds), EmptyHint: "7200"},
+			{Key: "agentCLI_allow_sandbox_auto", Label: "Allow sandbox full autonomy", Description: "Enable dangerous full-autonomy mode for sandboxed runs. Requires sandbox infrastructure.", Kind: configureFieldToggle, Value: onOff(cfg.AgentCLI.AllowSandboxAuto)},
+			{Key: "agentCLI_default_mode", Label: "Default run mode", Description: "Default permission mode for external CLI runs.", Kind: configureFieldChoice, Value: cfg.AgentCLI.DefaultMode, Choices: modeChoices, ChoiceIndex: indexOfChoice(modeChoices, cfg.AgentCLI.DefaultMode)},
+			{Key: "agentCLI_default_isolation", Label: "Default isolation level", Description: "Default isolation boundary for external CLI runs.", Kind: configureFieldChoice, Value: cfg.AgentCLI.DefaultIsolation, Choices: isolationChoices, ChoiceIndex: indexOfChoice(isolationChoices, cfg.AgentCLI.DefaultIsolation)},
+			{Key: "agentCLI_disabled_runners", Label: "Disabled runners (comma-separated)", Description: "Runner IDs to exclude from discovery. Leave empty to allow all detected runners.", Kind: configureFieldText, Value: disabledRunners, EmptyHint: "opencode,gemini"},
 		}
 	}
 	return nil
@@ -2199,6 +2216,23 @@ func applyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 	case "service_trusted_browser_cidrs":
 		cfg.Service.TrustedBrowserCIDRs = splitAndCompact(value)
 		return true, nil
+	case "agentCLI_max_concurrent":
+		return setIntValue(&cfg.AgentCLI.MaxConcurrent, value, fieldKey)
+	case "agentCLI_max_queued":
+		return setIntValue(&cfg.AgentCLI.MaxQueued, value, fieldKey)
+	case "agentCLI_default_timeout":
+		return setIntValue(&cfg.AgentCLI.DefaultTimeoutSeconds, value, fieldKey)
+	case "agentCLI_max_timeout":
+		return setIntValue(&cfg.AgentCLI.MaxTimeoutSeconds, value, fieldKey)
+	case "agentCLI_disabled_runners":
+		cfg.AgentCLI.DisabledRunners = splitAndCompact(value)
+		return true, nil
+	case "agentCLI_enabled":
+		cfg.AgentCLI.Enabled = value == "true" || value == "on" || value == "1"
+		return true, nil
+	case "agentCLI_allow_sandbox_auto":
+		cfg.AgentCLI.AllowSandboxAuto = value == "true" || value == "on" || value == "1"
+		return true, nil
 	default:
 		return false, nil
 	}
@@ -2300,6 +2334,10 @@ func setToggleFieldValue(cfg *config.Config, section, channel, fieldKey string, 
 		cfg.Service.Enabled = value
 	case "service_allow_unauthenticated_pairing":
 		cfg.Service.AllowUnauthenticatedPairing = value
+	case "agentCLI_enabled":
+		cfg.AgentCLI.Enabled = value
+	case "agentCLI_allow_sandbox_auto":
+		cfg.AgentCLI.AllowSandboxAuto = value
 	default:
 		return false
 	}
@@ -2348,6 +2386,22 @@ func applyChoiceSelection(cfg *config.Config, section, channel, fieldKey, choice
 		}
 		cfg.Service.MaxCapability = normalized
 		return true, nil
+	case "agentCLI_default_mode":
+		switch choice {
+		case "review", "safe_edit", "sandbox_auto":
+			cfg.AgentCLI.DefaultMode = choice
+			return true, nil
+		default:
+			return false, fmt.Errorf("agentCLI.defaultMode must be review, safe_edit, or sandbox_auto")
+		}
+	case "agentCLI_default_isolation":
+		switch choice {
+		case "host_readonly", "host_workspace_write", "sandbox_workspace_write", "sandbox_dangerous":
+			cfg.AgentCLI.DefaultIsolation = choice
+			return true, nil
+		default:
+			return false, fmt.Errorf("agentCLI.defaultIsolation must be host_readonly, host_workspace_write, sandbox_workspace_write, or sandbox_dangerous")
+		}
 	case "security_approval_pairing_mode":
 		cfg.Security.Approvals.Pairing.Mode = config.ApprovalMode(choice)
 		return true, nil

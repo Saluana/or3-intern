@@ -2,6 +2,7 @@ package agentcli
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -22,7 +23,7 @@ func TestBuildAgentCLIEnv_KeepsAllowedVars(t *testing.T) {
 	base := []string{"PATH=/usr/bin", "HOME=/home/user", "USER=admin", "LANG=en_US.UTF-8"}
 	env := BuildAgentCLIEnv(base, []string{"PATH", "HOME", "USER"}, nil)
 
-	if !hasEnv(env, "PATH", "/usr/bin") {
+	if path := envValue(env, "PATH"); path == "" || !strings.HasPrefix(path, "/usr/bin") {
 		t.Errorf("expected PATH preserved, got %v", env)
 	}
 	if !hasEnv(env, "HOME", "/home/user") {
@@ -80,11 +81,24 @@ func TestBuildAgentCLIEnv_UsesAllowlist(t *testing.T) {
 	if !hasEnv(env, "KEEP", "me") {
 		t.Errorf("expected KEEP preserved, got %v", env)
 	}
-	if !hasEnv(env, "PATH", "/bin") {
+	if path := envValue(env, "PATH"); path == "" || !strings.HasPrefix(path, "/bin") {
 		t.Errorf("expected PATH preserved, got %v", env)
 	}
 	if hasEnv(env, "DROP") {
 		t.Errorf("unexpected DROP in env: %v", env)
+	}
+}
+
+func TestBuildAgentCLIEnv_DoesNotAddPathWhenDisallowed(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".opencode", "bin"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	t.Setenv("HOME", home)
+
+	env := BuildAgentCLIEnv([]string{"PATH=/bin", "HOME=" + home}, []string{"HOME"}, nil)
+	if hasEnv(env, "PATH") {
+		t.Fatalf("PATH should not be added when omitted from allowlist: %v", env)
 	}
 }
 
@@ -93,6 +107,21 @@ func TestBuildAgentCLIEnv_DefaultsWhenEmptyAllowlist(t *testing.T) {
 	env := BuildAgentCLIEnv(base, nil, nil)
 	if !hasEnv(env, "PATH") || !hasEnv(env, "HOME") {
 		t.Errorf("expected PATH and HOME with empty allowlist, got %v", env)
+	}
+}
+
+func TestBuildAgentCLIEnv_AppendsCommonUserCLIDirs(t *testing.T) {
+	home := t.TempDir()
+	bin := filepath.Join(home, ".opencode", "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	t.Setenv("HOME", home)
+
+	env := BuildAgentCLIEnv([]string{"PATH=/usr/bin", "HOME=" + home}, []string{"PATH", "HOME"}, nil)
+	path := envValue(env, "PATH")
+	if !strings.Contains(path, bin) {
+		t.Fatalf("expected PATH %q to include %q", path, bin)
 	}
 }
 

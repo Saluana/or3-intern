@@ -338,6 +338,7 @@ func (a *OpenCodeAdapter) BuildCommand(req AgentRunRequest) (CommandSpec, error)
 	}
 	args = append(args, req.Task)
 	return CommandSpec{
+		RunnerID:    a.ID(),
 		Binary:      a.spec.Binary,
 		Args:        args,
 		Cwd:         req.Cwd,
@@ -379,6 +380,7 @@ func (a *CodexAdapter) BuildCommand(req AgentRunRequest) (CommandSpec, error) {
 	}
 	args = append(args, req.Task)
 	return CommandSpec{
+		RunnerID:    a.ID(),
 		Binary:      a.spec.Binary,
 		Args:        args,
 		Cwd:         req.Cwd,
@@ -425,6 +427,7 @@ func (a *ClaudeAdapter) BuildCommand(req AgentRunRequest) (CommandSpec, error) {
 		args = append(args, "--max-turns", strconv.Itoa(req.MaxTurns))
 	}
 	return CommandSpec{
+		RunnerID:    a.ID(),
 		Binary:      a.spec.Binary,
 		Args:        args,
 		Cwd:         req.Cwd,
@@ -462,6 +465,7 @@ func (a *GeminiAdapter) BuildCommand(req AgentRunRequest) (CommandSpec, error) {
 		args = append(args, "--model", req.Model)
 	}
 	return CommandSpec{
+		RunnerID:    a.ID(),
 		Binary:      a.spec.Binary,
 		Args:        args,
 		Cwd:         req.Cwd,

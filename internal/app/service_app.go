@@ -23,12 +23,12 @@ import (
 )
 
 type ServiceApp struct {
-	runtime          *agent.Runtime
-	jobs             *agent.JobRegistry
-	subagentManager  *agent.SubagentManager
-	agentCLIManager  *agentcli.Manager
-	control          *controlplane.Service
-	auth             *auth.Service
+	runtime         *agent.Runtime
+	jobs            *agent.JobRegistry
+	subagentManager *agent.SubagentManager
+	agentCLIManager *agentcli.Manager
+	control         *controlplane.Service
+	auth            *auth.Service
 }
 
 func NewServiceApp(cfg config.Config, runtime *agent.Runtime, jobs *agent.JobRegistry, subagentManager *agent.SubagentManager, control *controlplane.Service) *ServiceApp {
@@ -656,9 +656,7 @@ func (a *ServiceApp) DetectAgentCLIRunners(ctx context.Context) ([]agentcli.Runn
 	if a.agentCLIManager.Registry == nil {
 		return nil, fmt.Errorf("runner registry is not configured")
 	}
-	return a.agentCLIManager.Registry.DetectAll(ctx, agentcli.DetectOptions{
-		DisabledRunners: a.agentCLIManager.Cfg.DisabledRunners,
-	}), nil
+	return a.agentCLIManager.Registry.DetectAll(ctx, a.agentCLIManager.DetectOptions()), nil
 }
 
 // StartAgentCLIRun enqueues a new external CLI run.

@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -26,6 +28,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/creack/pty"
+	"github.com/gorilla/websocket"
 
 	"or3-intern/internal/agent"
 	"or3-intern/internal/agentcli"
@@ -41,26 +44,28 @@ import (
 )
 
 type serviceServer struct {
-	config           config.Config
-	configPath       string
-	runtime          *agent.Runtime
-	cronSvc          *cron.Service
-	subagentManager  *agent.SubagentManager
-	agentCLIManager  *agentcli.Manager
-	jobs             *agent.JobRegistry
-	broker           *approval.Broker
-	unsafeDev        bool
-	controlOnce      sync.Once
-	controlSvc       *controlplane.Service
-	appOnce          sync.Once
-	appSvc           *app.ServiceApp
-	terminalMu       sync.Mutex
-	terminalSessions map[string]*serviceTerminalSession
-	rateMu           sync.Mutex
-	rateWindow       time.Time
-	rateCounts       map[string]int
-	authFailureMu    sync.Mutex
-	authFailures     map[string]serviceAuthFailureState
+	config             config.Config
+	configPath         string
+	runtime            *agent.Runtime
+	cronSvc            *cron.Service
+	subagentManager    *agent.SubagentManager
+	agentCLIManager    *agentcli.Manager
+	jobs               *agent.JobRegistry
+	broker             *approval.Broker
+	unsafeDev          bool
+	controlOnce        sync.Once
+	controlSvc         *controlplane.Service
+	appOnce            sync.Once
+	appSvc             *app.ServiceApp
+	terminalMu         sync.Mutex
+	terminalSessions   map[string]*serviceTerminalSession
+	terminalWSTicketMu sync.Mutex
+	terminalWSTickets  map[string]serviceTerminalWebSocketTicket
+	rateMu             sync.Mutex
+	rateWindow         time.Time
+	rateCounts         map[string]int
+	authFailureMu      sync.Mutex
+	authFailures       map[string]serviceAuthFailureState
 }
 
 type serviceAuthFailureState struct {
@@ -70,27 +75,45 @@ type serviceAuthFailureState struct {
 }
 
 const (
-	serviceTurnsBodyLimit      int64 = 1 << 20
-	serviceSubagentsBodyLimit  int64 = 1 << 20
-	servicePairingBodyLimit    int64 = 64 << 10
-	serviceApprovalBodyLimit   int64 = 64 << 10
-	serviceEmbeddingsBodyLimit int64 = 64 << 10
-	serviceScopeBodyLimit      int64 = 64 << 10
-	serviceConfigureBodyLimit  int64 = 256 << 10
-	serviceFileUploadBodyLimit int64 = 128 << 20
-	serviceFileTextReadLimit   int64 = 1 << 20
-	serviceFileTextWriteLimit  int64 = 1 << 20
-	serviceTerminalBodyLimit   int64 = 64 << 10
-	serviceAgentRunsBodyLimit  int64 = 256 << 10
-	serviceCronBodyLimit       int64 = 64 << 10
-	serviceTerminalSessionTTL        = 10 * time.Minute
-	serviceTerminalMaxSessions       = 4
+	serviceTurnsBodyLimit                    int64 = 1 << 20
+	serviceSubagentsBodyLimit                int64 = 1 << 20
+	servicePairingBodyLimit                  int64 = 64 << 10
+	serviceApprovalBodyLimit                 int64 = 64 << 10
+	serviceEmbeddingsBodyLimit               int64 = 64 << 10
+	serviceScopeBodyLimit                    int64 = 64 << 10
+	serviceConfigureBodyLimit                int64 = 256 << 10
+	serviceFileUploadBodyLimit               int64 = 128 << 20
+	serviceFileTextReadLimit                 int64 = 1 << 20
+	serviceFileTextWriteLimit                int64 = 1 << 20
+	serviceTerminalBodyLimit                 int64 = 64 << 10
+	serviceAgentRunsBodyLimit                int64 = 256 << 10
+	serviceCronBodyLimit                     int64 = 64 << 10
+	serviceTerminalSessionTTL                      = 10 * time.Minute
+	serviceTerminalMaxSessions                     = 4
+	serviceTerminalWebSocketTicketTTL              = 30 * time.Second
+	serviceTerminalWebSocketPingInterval           = 25 * time.Second
+	serviceTerminalWebSocketWriteTimeout           = 10 * time.Second
+	serviceTerminalWebSocketHandshakeTimeout       = 5 * time.Second
+	serviceTerminalWebSocketProtocol               = "or3.terminal.v1"
+	serviceTerminalWebSocketTicketPrefix           = "or3.ticket."
 )
 
 type serviceTerminalEvent struct {
-	Type string
-	Data map[string]any
+	Type string         `json:"type"`
+	Data map[string]any `json:"data"`
 }
+
+type serviceTerminalWebSocketTicket struct {
+	SessionID string
+	ExpiresAt time.Time
+}
+
+var (
+	errTerminalSessionNotFound    = errors.New("terminal session not found")
+	errTerminalInputRequired      = errors.New("input is required")
+	errTerminalSessionNotWritable = errors.New("terminal session is not writable")
+	errTerminalResizeRequired     = errors.New("terminal resize rows or cols are required")
+)
 
 type serviceTerminalSession struct {
 	ID            string
@@ -1198,6 +1221,18 @@ func (s *serviceServer) handleTerminal(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.streamTerminalSession(w, r, sessionID)
+	case "ws-ticket":
+		if r.Method != http.MethodPost {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		s.issueTerminalWebSocketTicket(w, r, sessionID)
+	case "ws":
+		if r.Method != http.MethodGet {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		s.handleTerminalWebSocket(w, r, sessionID)
 	case "input":
 		if r.Method != http.MethodPost {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
@@ -1567,6 +1602,290 @@ func (s *serviceServer) streamTerminalSession(w http.ResponseWriter, r *http.Req
 	}
 }
 
+func (s *serviceServer) issueTerminalWebSocketTicket(w http.ResponseWriter, r *http.Request, sessionID string) {
+	if _, ok := s.getTerminalSessionByID(sessionID); !ok {
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "terminal session not found"})
+		return
+	}
+	ticket, expiresAt, err := s.issueTerminalWebSocketTicketValue(sessionID, time.Now().UTC())
+	if err != nil {
+		writeServiceError(w, r, http.StatusInternalServerError, "failed to issue terminal websocket ticket", err)
+		return
+	}
+	writeServiceJSON(w, http.StatusOK, map[string]any{
+		"ticket":     ticket,
+		"expires_at": expiresAt.Format(time.RFC3339),
+	})
+}
+
+func (s *serviceServer) issueTerminalWebSocketTicketValue(sessionID string, now time.Time) (string, time.Time, error) {
+	if s == nil {
+		return "", time.Time{}, fmt.Errorf("service unavailable")
+	}
+	ticket, err := randomHex(24)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	expiresAt := now.UTC().Add(serviceTerminalWebSocketTicketTTL)
+	hash := terminalWebSocketTicketHash(ticket)
+	s.terminalWSTicketMu.Lock()
+	defer s.terminalWSTicketMu.Unlock()
+	if s.terminalWSTickets == nil {
+		s.terminalWSTickets = map[string]serviceTerminalWebSocketTicket{}
+	}
+	s.cleanupTerminalWebSocketTicketsLocked(now.UTC())
+	s.terminalWSTickets[hash] = serviceTerminalWebSocketTicket{SessionID: sessionID, ExpiresAt: expiresAt}
+	return ticket, expiresAt, nil
+}
+
+func (s *serviceServer) consumeTerminalWebSocketTicket(sessionID string, ticket string, now time.Time) bool {
+	if s == nil {
+		return false
+	}
+	ticket = strings.TrimSpace(ticket)
+	if sessionID == "" || ticket == "" {
+		return false
+	}
+	hash := terminalWebSocketTicketHash(ticket)
+	s.terminalWSTicketMu.Lock()
+	defer s.terminalWSTicketMu.Unlock()
+	s.cleanupTerminalWebSocketTicketsLocked(now.UTC())
+	record, ok := s.terminalWSTickets[hash]
+	if !ok {
+		return false
+	}
+	if record.SessionID != sessionID {
+		return false
+	}
+	if now.UTC().After(record.ExpiresAt) {
+		delete(s.terminalWSTickets, hash)
+		return false
+	}
+	delete(s.terminalWSTickets, hash)
+	return true
+}
+
+func (s *serviceServer) cleanupTerminalWebSocketTicketsLocked(now time.Time) {
+	for hash, record := range s.terminalWSTickets {
+		if now.After(record.ExpiresAt) {
+			delete(s.terminalWSTickets, hash)
+		}
+	}
+}
+
+func terminalWebSocketTicketHash(ticket string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(ticket)))
+	return hex.EncodeToString(sum[:])
+}
+
+func terminalWebSocketRequestedProtocols(r *http.Request) []string {
+	if r == nil {
+		return nil
+	}
+	raw := strings.TrimSpace(r.Header.Get("Sec-WebSocket-Protocol"))
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	protocols := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			protocols = append(protocols, part)
+		}
+	}
+	return protocols
+}
+
+func terminalWebSocketProtocolRequested(r *http.Request) bool {
+	for _, protocol := range terminalWebSocketRequestedProtocols(r) {
+		if protocol == serviceTerminalWebSocketProtocol {
+			return true
+		}
+	}
+	return false
+}
+
+func terminalWebSocketTicketFromRequest(r *http.Request) (string, bool) {
+	for _, protocol := range terminalWebSocketRequestedProtocols(r) {
+		if strings.HasPrefix(protocol, serviceTerminalWebSocketTicketPrefix) {
+			ticket := strings.TrimSpace(strings.TrimPrefix(protocol, serviceTerminalWebSocketTicketPrefix))
+			return ticket, ticket != ""
+		}
+	}
+	return "", false
+}
+
+func (s *serviceServer) handleTerminalWebSocket(w http.ResponseWriter, r *http.Request, sessionID string) {
+	if !terminalWebSocketProtocolRequested(r) {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "terminal websocket protocol is required"})
+		return
+	}
+	session, ok := s.getTerminalSessionByID(sessionID)
+	if !ok {
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "terminal session not found"})
+		return
+	}
+	upgrader := websocket.Upgrader{
+		HandshakeTimeout: serviceTerminalWebSocketHandshakeTimeout,
+		Subprotocols:     []string{serviceTerminalWebSocketProtocol},
+		CheckOrigin:      s.terminalWebSocketOriginAllowed,
+	}
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	conn.SetReadLimit(serviceTerminalBodyLimit)
+
+	history, events, unsubscribe := session.subscribe()
+	defer unsubscribe()
+
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		s.readTerminalWebSocket(conn, sessionID)
+	}()
+
+	pings := time.NewTicker(serviceTerminalWebSocketPingInterval)
+	defer pings.Stop()
+
+	writeEvent := func(event serviceTerminalEvent) error {
+		if err := conn.SetWriteDeadline(time.Now().Add(serviceTerminalWebSocketWriteTimeout)); err != nil {
+			return err
+		}
+		return conn.WriteJSON(event)
+	}
+	closeNormally := func(reason string) {
+		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, reason), time.Now().Add(serviceTerminalWebSocketWriteTimeout))
+	}
+	for _, event := range history {
+		if err := writeEvent(event); err != nil {
+			return
+		}
+		if terminalSessionEventIsTerminal(event) {
+			closeNormally("terminal session ended")
+			return
+		}
+	}
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-readDone:
+			return
+		case event, ok := <-events:
+			if !ok {
+				return
+			}
+			if err := writeEvent(event); err != nil {
+				return
+			}
+			if terminalSessionEventIsTerminal(event) {
+				closeNormally("terminal session ended")
+				return
+			}
+		case <-pings.C:
+			deadline := time.Now().Add(serviceTerminalWebSocketWriteTimeout)
+			if err := conn.WriteControl(websocket.PingMessage, nil, deadline); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func (s *serviceServer) terminalWebSocketOriginAllowed(r *http.Request) bool {
+	if strings.TrimSpace(r.Header.Get("Origin")) == "" {
+		return true
+	}
+	_, ok := serviceAllowedBrowserOrigin(s.config, r)
+	return ok
+}
+
+type serviceTerminalWebSocketClientMessage struct {
+	Type  string `json:"type"`
+	Input string `json:"input"`
+	Rows  int    `json:"rows"`
+	Cols  int    `json:"cols"`
+}
+
+func (s *serviceServer) readTerminalWebSocket(conn *websocket.Conn, sessionID string) {
+	for {
+		var msg serviceTerminalWebSocketClientMessage
+		if err := conn.ReadJSON(&msg); err != nil {
+			if !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseNoStatusReceived) {
+				terminalWebSocketClose(conn, websocket.CloseUnsupportedData, "invalid terminal websocket message")
+			}
+			return
+		}
+		switch strings.TrimSpace(msg.Type) {
+		case "input":
+			if msg.Input == "" {
+				terminalWebSocketClose(conn, websocket.CloseUnsupportedData, "input is required")
+				return
+			}
+			if err := s.terminalWriteInput(sessionID, msg.Input); err != nil {
+				terminalWebSocketClose(conn, terminalWebSocketCloseCodeForError(err), err.Error())
+				return
+			}
+		case "resize":
+			if msg.Rows <= 0 && msg.Cols <= 0 {
+				terminalWebSocketClose(conn, websocket.CloseUnsupportedData, errTerminalResizeRequired.Error())
+				return
+			}
+			if _, _, err := s.terminalResize(sessionID, msg.Rows, msg.Cols); err != nil {
+				terminalWebSocketClose(conn, terminalWebSocketCloseCodeForError(err), err.Error())
+				return
+			}
+		case "close":
+			if err := s.terminalClose(sessionID, "closed"); err != nil {
+				terminalWebSocketClose(conn, terminalWebSocketCloseCodeForError(err), err.Error())
+				return
+			}
+		default:
+			terminalWebSocketClose(conn, websocket.CloseUnsupportedData, "unknown terminal websocket message type")
+			return
+		}
+	}
+}
+
+func terminalWebSocketClose(conn *websocket.Conn, code int, reason string) {
+	if conn == nil {
+		return
+	}
+	_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason), time.Now().Add(serviceTerminalWebSocketWriteTimeout))
+}
+
+func terminalWebSocketCloseCodeForError(err error) int {
+	switch {
+	case errors.Is(err, errTerminalSessionNotFound):
+		return websocket.ClosePolicyViolation
+	case errors.Is(err, errTerminalInputRequired), errors.Is(err, errTerminalResizeRequired):
+		return websocket.CloseUnsupportedData
+	case errors.Is(err, errTerminalSessionNotWritable):
+		return websocket.ClosePolicyViolation
+	default:
+		return websocket.CloseInternalServerErr
+	}
+}
+
+func terminalSessionEventIsTerminal(event serviceTerminalEvent) bool {
+	if event.Type != "status" {
+		return false
+	}
+	status, _ := event.Data["status"].(string)
+	return isTerminalSessionStatus(status)
+}
+
+func isTerminalSessionStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "closed", "failed", "exited", "expired":
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *serviceServer) writeTerminalInput(w http.ResponseWriter, r *http.Request, sessionID string) {
 	limitServiceRequestBody(w, r, serviceTerminalBodyLimit)
 	var body struct {
@@ -1576,29 +1895,42 @@ func (s *serviceServer) writeTerminalInput(w http.ResponseWriter, r *http.Reques
 		writeServiceRequestDecodeError(w, err)
 		return
 	}
-	session, ok := s.getTerminalSessionByID(sessionID)
-	if !ok {
-		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "terminal session not found"})
+	if err := s.terminalWriteInput(sessionID, body.Input); err != nil {
+		switch {
+		case errors.Is(err, errTerminalSessionNotFound):
+			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "terminal session not found"})
+		case errors.Is(err, errTerminalInputRequired):
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "input is required"})
+		case errors.Is(err, errTerminalSessionNotWritable):
+			writeServiceJSON(w, http.StatusConflict, map[string]any{"error": "terminal session is not writable"})
+		default:
+			writeServiceError(w, r, http.StatusBadGateway, "failed to write terminal input", err)
+		}
 		return
 	}
-	if body.Input == "" {
-		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "input is required"})
-		return
+	writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true, "session_id": sessionID})
+}
+
+func (s *serviceServer) terminalWriteInput(sessionID string, input string) error {
+	session, ok := s.getTerminalSessionByID(sessionID)
+	if !ok {
+		return errTerminalSessionNotFound
+	}
+	if input == "" {
+		return errTerminalInputRequired
 	}
 	session.mu.Lock()
 	stdin := session.stdin
 	status := session.Status
 	session.mu.Unlock()
 	if stdin == nil || status != "running" {
-		writeServiceJSON(w, http.StatusConflict, map[string]any{"error": "terminal session is not writable"})
-		return
+		return errTerminalSessionNotWritable
 	}
-	if _, err := io.WriteString(stdin, body.Input); err != nil {
-		writeServiceError(w, r, http.StatusBadGateway, "failed to write terminal input", err)
-		return
+	if _, err := io.WriteString(stdin, input); err != nil {
+		return fmt.Errorf("failed to write terminal input: %w", err)
 	}
-	session.appendEvent("input", map[string]any{"size": len(body.Input)})
-	writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true, "session_id": sessionID})
+	session.appendEvent("input", map[string]any{"size": len(input)})
+	return nil
 }
 
 func (s *serviceServer) resizeTerminalSession(w http.ResponseWriter, r *http.Request, sessionID string) {
@@ -1611,44 +1943,69 @@ func (s *serviceServer) resizeTerminalSession(w http.ResponseWriter, r *http.Req
 		writeServiceRequestDecodeError(w, err)
 		return
 	}
-	session, ok := s.getTerminalSessionByID(sessionID)
-	if !ok {
-		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "terminal session not found"})
+	rows, cols, err := s.terminalResize(sessionID, body.Rows, body.Cols)
+	if err != nil {
+		if errors.Is(err, errTerminalSessionNotFound) {
+			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "terminal session not found"})
+			return
+		}
+		writeServiceError(w, r, http.StatusBadGateway, "failed to resize terminal pty", err)
 		return
 	}
-	session.mu.Lock()
-	if body.Rows > 0 {
-		session.Rows = clampTerminalRows(body.Rows)
+	writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true, "session_id": sessionID, "rows": rows, "cols": cols})
+}
+
+func (s *serviceServer) terminalResize(sessionID string, rows int, cols int) (int, int, error) {
+	session, ok := s.getTerminalSessionByID(sessionID)
+	if !ok {
+		return 0, 0, errTerminalSessionNotFound
 	}
-	if body.Cols > 0 {
-		session.Cols = clampTerminalCols(body.Cols)
+	session.mu.Lock()
+	if rows > 0 {
+		session.Rows = clampTerminalRows(rows)
+	}
+	if cols > 0 {
+		session.Cols = clampTerminalCols(cols)
 	}
 	session.LastActiveAt = time.Now().UTC()
 	session.ExpiresAt = time.Now().UTC().Add(serviceTerminalSessionTTL)
-	rows, cols := session.Rows, session.Cols
+	rows, cols = session.Rows, session.Cols
 	ptyFile := session.ptyFile
 	session.mu.Unlock()
 	if ptyFile != nil && rows > 0 && cols > 0 {
 		if err := pty.Setsize(ptyFile, &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)}); err != nil {
-			writeServiceError(w, r, http.StatusBadGateway, "failed to resize terminal pty", err)
-			return
+			return rows, cols, fmt.Errorf("failed to resize terminal pty: %w", err)
 		}
 	}
 	session.appendEvent("resize", map[string]any{"rows": rows, "cols": cols})
-	writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true, "session_id": sessionID, "rows": rows, "cols": cols})
+	return rows, cols, nil
 }
 
 func (s *serviceServer) closeTerminalSession(w http.ResponseWriter, r *http.Request, sessionID string) {
-	session, ok := s.getTerminalSessionByID(sessionID)
-	if !ok {
-		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "terminal session not found"})
+	if err := s.terminalClose(sessionID, "closed"); err != nil {
+		if errors.Is(err, errTerminalSessionNotFound) {
+			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "terminal session not found"})
+			return
+		}
+		writeServiceError(w, r, http.StatusBadGateway, "failed to close terminal session", err)
 		return
 	}
-	session.close("closed")
+	writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true, "session_id": sessionID, "status": "closed"})
+}
+
+func (s *serviceServer) terminalClose(sessionID string, status string) error {
+	session, ok := s.getTerminalSessionByID(sessionID)
+	if !ok {
+		return errTerminalSessionNotFound
+	}
+	if strings.TrimSpace(status) == "" {
+		status = "closed"
+	}
+	session.close(status)
 	s.terminalMu.Lock()
 	delete(s.terminalSessions, sessionID)
 	s.terminalMu.Unlock()
-	writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true, "session_id": sessionID, "status": "closed"})
+	return nil
 }
 
 func (s *serviceServer) handleApprovals(w http.ResponseWriter, r *http.Request) {
@@ -3004,6 +3361,17 @@ func (r *serviceStatusRecorder) Flush() {
 	if flusher, ok := r.ResponseWriter.(http.Flusher); ok {
 		flusher.Flush()
 	}
+}
+
+func (r *serviceStatusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := r.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("response writer does not implement http.Hijacker")
+	}
+	if r.statusCode == http.StatusOK {
+		r.statusCode = http.StatusSwitchingProtocols
+	}
+	return hijacker.Hijack()
 }
 
 func (s *serviceServer) isMutationRequest(r *http.Request) bool {

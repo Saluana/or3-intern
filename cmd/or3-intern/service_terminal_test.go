@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"github.com/gorilla/websocket"
 
 	"or3-intern/internal/approval"
 	"or3-intern/internal/config"
@@ -166,6 +167,167 @@ func TestServiceTerminalSessionLifecycle(t *testing.T) {
 		body, _ := io.ReadAll(closeResp.Body)
 		t.Fatalf("expected 200/404 from close, got %d: %s", closeResp.StatusCode, string(body))
 	}
+}
+
+func TestTerminalWebSocketTicketLifecycle(t *testing.T) {
+	server := &serviceServer{}
+	now := time.Now().UTC()
+
+	ticket, expiresAt, err := server.issueTerminalWebSocketTicketValue("term-1", now)
+	if err != nil {
+		t.Fatalf("issueTerminalWebSocketTicketValue: %v", err)
+	}
+	if ticket == "" {
+		t.Fatal("expected non-empty ticket")
+	}
+	if !expiresAt.After(now) {
+		t.Fatalf("expected future expiry, got %s", expiresAt)
+	}
+
+	hash := terminalWebSocketTicketHash(ticket)
+	server.terminalWSTicketMu.Lock()
+	if _, ok := server.terminalWSTickets[ticket]; ok {
+		t.Fatal("raw websocket ticket was stored as a map key")
+	}
+	record, ok := server.terminalWSTickets[hash]
+	server.terminalWSTicketMu.Unlock()
+	if !ok {
+		t.Fatal("expected hashed websocket ticket record")
+	}
+	if record.SessionID != "term-1" {
+		t.Fatalf("expected ticket to bind term-1, got %q", record.SessionID)
+	}
+
+	if server.consumeTerminalWebSocketTicket("term-2", ticket, now.Add(time.Second)) {
+		t.Fatal("ticket consumed for wrong terminal session")
+	}
+	if !server.consumeTerminalWebSocketTicket("term-1", ticket, now.Add(time.Second)) {
+		t.Fatal("expected ticket to be consumed for the matching session")
+	}
+	if server.consumeTerminalWebSocketTicket("term-1", ticket, now.Add(2*time.Second)) {
+		t.Fatal("ticket was reusable after first consume")
+	}
+
+	expiredTicket, _, err := server.issueTerminalWebSocketTicketValue("term-1", now.Add(-time.Minute))
+	if err != nil {
+		t.Fatalf("issue expired ticket: %v", err)
+	}
+	if server.consumeTerminalWebSocketTicket("term-1", expiredTicket, now) {
+		t.Fatal("expired ticket was accepted")
+	}
+}
+
+func TestServiceTerminalWebSocketLifecycle(t *testing.T) {
+	server, httpServer := newTerminalWebSocketTestServer(t)
+	defer httpServer.Close()
+
+	sessionID := createTerminalWebSocketTestSession(t, httpServer)
+	conn := dialTerminalWebSocketWithTicket(t, server, httpServer, sessionID, "")
+	defer conn.Close()
+
+	seenSnapshot := false
+	output := ""
+	if err := conn.WriteJSON(serviceTerminalWebSocketClientMessage{Type: "input", Input: "printf 'hello from websocket\\n'\n"}); err != nil {
+		t.Fatalf("write input: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		event := readTerminalWebSocketEvent(t, conn, time.Second)
+		switch event.Type {
+		case "snapshot":
+			seenSnapshot = true
+		case "output":
+			chunk, _ := event.Data["chunk"].(string)
+			output += chunk
+			if strings.Contains(output, "hello from websocket") {
+				goto gotOutput
+			}
+		}
+	}
+	t.Fatalf("expected websocket terminal output, got %q", output)
+
+gotOutput:
+	if !seenSnapshot {
+		t.Fatal("expected websocket history replay to include snapshot")
+	}
+	if err := conn.WriteJSON(serviceTerminalWebSocketClientMessage{Type: "resize", Rows: 40, Cols: 120}); err != nil {
+		t.Fatalf("write resize: %v", err)
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		event := readTerminalWebSocketEvent(t, conn, time.Second)
+		if event.Type != "resize" {
+			continue
+		}
+		if rows, _ := event.Data["rows"].(float64); rows != 40 {
+			t.Fatalf("expected resize rows 40, got %#v", event.Data["rows"])
+		}
+		if cols, _ := event.Data["cols"].(float64); cols != 120 {
+			t.Fatalf("expected resize cols 120, got %#v", event.Data["cols"])
+		}
+		goto gotResize
+	}
+	t.Fatal("expected websocket resize event")
+
+gotResize:
+	if err := conn.WriteJSON(serviceTerminalWebSocketClientMessage{Type: "close"}); err != nil {
+		t.Fatalf("write close: %v", err)
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		event := readTerminalWebSocketEvent(t, conn, time.Second)
+		if event.Type == "status" && event.Data["status"] == "closed" {
+			return
+		}
+	}
+	t.Fatal("expected websocket closed status event")
+}
+
+func TestServiceTerminalWebSocketRejectsMissingTicket(t *testing.T) {
+	_, httpServer := newTerminalWebSocketTestServer(t)
+	defer httpServer.Close()
+	sessionID := createTerminalWebSocketTestSession(t, httpServer)
+
+	wsURL := terminalWebSocketURL(httpServer, sessionID)
+	dialer := websocket.Dialer{Subprotocols: []string{serviceTerminalWebSocketProtocol}}
+	conn, resp, err := dialer.Dial(wsURL, nil)
+	if conn != nil {
+		conn.Close()
+	}
+	if err == nil {
+		t.Fatal("expected websocket dial without auth ticket to fail")
+	}
+	if resp == nil || resp.StatusCode != http.StatusUnauthorized {
+		if resp == nil {
+			t.Fatal("expected 401 response, got nil")
+		}
+		t.Fatalf("expected 401, got %d", resp.StatusCode)
+	}
+}
+
+func TestServiceTerminalWebSocketRejectsUntrustedOrigin(t *testing.T) {
+	server, httpServer := newTerminalWebSocketTestServer(t)
+	defer httpServer.Close()
+	sessionID := createTerminalWebSocketTestSession(t, httpServer)
+
+	ticket := issueTerminalWebSocketTicketForTest(t, httpServer, sessionID)
+	dialer := websocket.Dialer{Subprotocols: []string{serviceTerminalWebSocketProtocol, serviceTerminalWebSocketTicketPrefix + ticket}}
+	header := http.Header{}
+	header.Set("Origin", "https://evil.example")
+	conn, resp, err := dialer.Dial(terminalWebSocketURL(httpServer, sessionID), header)
+	if conn != nil {
+		conn.Close()
+	}
+	if err == nil {
+		t.Fatal("expected websocket dial with untrusted origin to fail")
+	}
+	if resp == nil || resp.StatusCode != http.StatusForbidden {
+		if resp == nil {
+			t.Fatal("expected 403 response, got nil")
+		}
+		t.Fatalf("expected 403, got %d", resp.StatusCode)
+	}
+	server.terminalClose(sessionID, "closed")
 }
 
 func TestAllocateTerminalSessionIDUsesRandomHexID(t *testing.T) {
@@ -429,4 +591,100 @@ func TestResizeTerminalSessionReturnsErrorWhenPTYResizeFails(t *testing.T) {
 			t.Fatalf("unexpected resize event after PTY resize failure")
 		}
 	}
+}
+
+func newTerminalWebSocketTestServer(t *testing.T) (*serviceServer, *httptest.Server) {
+	t.Helper()
+	cfg := config.Default()
+	cfg.WorkspaceDir = t.TempDir()
+	cfg.Service.SharedSecretRole = approval.RoleAdmin
+	cfg.Hardening.GuardedTools = true
+	cfg.Hardening.PrivilegedTools = true
+	cfg.Hardening.EnableExecShell = true
+	server := &serviceServer{config: cfg}
+	httpServer := newServiceTestHTTPServer(t, "terminal-secret", server)
+	return server, httpServer
+}
+
+func createTerminalWebSocketTestSession(t *testing.T, httpServer *httptest.Server) string {
+	t.Helper()
+	resp, err := http.DefaultClient.Do(mustServiceRequest(t, httpServer, "terminal-secret", http.MethodPost, "/internal/v1/terminal/sessions", `{"root_id":"workspace","path":".","shell":"sh","rows":24,"cols":80}`))
+	if err != nil {
+		t.Fatalf("create terminal session: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 201 creating terminal session, got %d: %s", resp.StatusCode, string(body))
+	}
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode create terminal response: %v", err)
+	}
+	sessionID, _ := body["session_id"].(string)
+	if sessionID == "" {
+		t.Fatalf("expected session_id in create response: %#v", body)
+	}
+	return sessionID
+}
+
+func issueTerminalWebSocketTicketForTest(t *testing.T, httpServer *httptest.Server, sessionID string) string {
+	t.Helper()
+	resp, err := http.DefaultClient.Do(mustServiceRequest(t, httpServer, "terminal-secret", http.MethodPost, "/internal/v1/terminal/sessions/"+sessionID+"/ws-ticket", `{}`))
+	if err != nil {
+		t.Fatalf("issue websocket ticket: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200 issuing websocket ticket, got %d: %s", resp.StatusCode, string(body))
+	}
+	var body struct {
+		Ticket string `json:"ticket"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode websocket ticket: %v", err)
+	}
+	if body.Ticket == "" {
+		t.Fatal("expected websocket ticket in response")
+	}
+	return body.Ticket
+}
+
+func dialTerminalWebSocketWithTicket(t *testing.T, _ *serviceServer, httpServer *httptest.Server, sessionID string, origin string) *websocket.Conn {
+	t.Helper()
+	ticket := issueTerminalWebSocketTicketForTest(t, httpServer, sessionID)
+	dialer := websocket.Dialer{Subprotocols: []string{serviceTerminalWebSocketProtocol, serviceTerminalWebSocketTicketPrefix + ticket}}
+	header := http.Header{}
+	if origin != "" {
+		header.Set("Origin", origin)
+	}
+	conn, resp, err := dialer.Dial(terminalWebSocketURL(httpServer, sessionID), header)
+	if err != nil {
+		if resp != nil {
+			t.Fatalf("websocket dial failed with status %d: %v", resp.StatusCode, err)
+		}
+		t.Fatalf("websocket dial failed: %v", err)
+	}
+	if got := conn.Subprotocol(); got != serviceTerminalWebSocketProtocol {
+		conn.Close()
+		t.Fatalf("expected websocket subprotocol %q, got %q", serviceTerminalWebSocketProtocol, got)
+	}
+	return conn
+}
+
+func terminalWebSocketURL(httpServer *httptest.Server, sessionID string) string {
+	return "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/internal/v1/terminal/sessions/" + sessionID + "/ws"
+}
+
+func readTerminalWebSocketEvent(t *testing.T, conn *websocket.Conn, timeout time.Duration) serviceTerminalEvent {
+	t.Helper()
+	if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	var event serviceTerminalEvent
+	if err := conn.ReadJSON(&event); err != nil {
+		t.Fatalf("read websocket event: %v", err)
+	}
+	return event
 }

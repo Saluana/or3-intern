@@ -111,7 +111,17 @@ func serviceAuthMiddlewareWithBrokerAndLimiter(cfg config.Config, broker *approv
 			writeServiceAuthRateLimit(w, r, retryAfter)
 			return
 		}
-		identity, err := authenticateServiceRequest(cfg, broker, authSvc, r.Header.Get("Authorization"), time.Now(), r.Context())
+		now := time.Now()
+		if identity, ok := authenticateTerminalWebSocketTicketRequest(server, r, now); ok {
+			server.clearServiceAuthFailures(r, "auth")
+			ctx := context.WithValue(r.Context(), serviceAuthContextKey{}, identity)
+			ctx = context.WithValue(ctx, serviceAuthKindContextKey{}, identity.Kind)
+			ctx = approval.ContextWithAuditAuthKind(ctx, identity.Kind)
+			ctx = approval.ContextWithAuditActor(ctx, identity.Actor)
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+		identity, err := authenticateServiceRequest(cfg, broker, authSvc, r.Header.Get("Authorization"), now, r.Context())
 		if err != nil {
 			server.recordServiceAuthFailure(r, "auth")
 			if challenge := serviceAuthChallengeError(cfg, authSvc, requirement, serviceAuthIdentity{}, err); challenge != nil {
@@ -146,6 +156,28 @@ func serviceAuthMiddlewareWithBrokerAndLimiter(cfg config.Config, broker *approv
 		ctx = approval.ContextWithAuditActor(ctx, identity.Actor)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func authenticateTerminalWebSocketTicketRequest(server *serviceServer, r *http.Request, now time.Time) (serviceAuthIdentity, bool) {
+	if server == nil || !serviceIsTerminalWebSocketRequest(r) || !terminalWebSocketProtocolRequested(r) {
+		return serviceAuthIdentity{}, false
+	}
+	sessionID, ok := serviceTerminalWebSocketSessionID(r.URL.Path)
+	if !ok {
+		return serviceAuthIdentity{}, false
+	}
+	ticket, ok := terminalWebSocketTicketFromRequest(r)
+	if !ok {
+		return serviceAuthIdentity{}, false
+	}
+	if !server.consumeTerminalWebSocketTicket(sessionID, ticket, now) {
+		return serviceAuthIdentity{}, false
+	}
+	return serviceAuthIdentity{
+		Kind:  "terminal-ws-ticket",
+		Actor: "terminal-ws:" + sessionID,
+		Role:  approval.RoleOperator,
+	}, true
 }
 
 func writeServicePairingAuthError(w http.ResponseWriter, r *http.Request, cfg config.Config) {
@@ -510,6 +542,39 @@ func serviceIsPairingRoute(r *http.Request) bool {
 	return path == "/internal/v1/pairing/requests" || path == "/internal/v1/pairing/exchange"
 }
 
+func serviceIsTerminalWebSocketRequest(r *http.Request) bool {
+	if r == nil || r.URL == nil || r.Method != http.MethodGet {
+		return false
+	}
+	if _, ok := serviceTerminalWebSocketSessionID(r.URL.Path); !ok {
+		return false
+	}
+	return headerHasToken(r.Header.Get("Connection"), "upgrade") && strings.EqualFold(strings.TrimSpace(r.Header.Get("Upgrade")), "websocket")
+}
+
+func serviceTerminalWebSocketSessionID(path string) (string, bool) {
+	path = strings.TrimSpace(path)
+	if !strings.HasPrefix(path, "/internal/v1/terminal/sessions/") {
+		return "", false
+	}
+	relative := strings.Trim(strings.TrimPrefix(path, "/internal/v1/terminal/sessions/"), "/")
+	parts := strings.Split(relative, "/")
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || parts[1] != "ws" {
+		return "", false
+	}
+	return strings.TrimSpace(parts[0]), true
+}
+
+func headerHasToken(headerValue string, token string) bool {
+	token = strings.ToLower(strings.TrimSpace(token))
+	for _, part := range strings.Split(headerValue, ",") {
+		if strings.EqualFold(strings.TrimSpace(part), token) {
+			return true
+		}
+	}
+	return false
+}
+
 func serviceRouteRequirementForRequest(cfg config.Config, r *http.Request) serviceRouteRequirement {
 	requirement := serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
 	if r == nil || r.URL == nil {
@@ -560,7 +625,16 @@ func serviceRouteRequirementForRequest(cfg config.Config, r *http.Request) servi
 		}
 		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "file changes require recent passkey verification"}
 	case path == "/internal/v1/terminal/sessions" || strings.HasPrefix(path, "/internal/v1/terminal/sessions/"):
-		if method == http.MethodGet && !strings.Contains(strings.TrimPrefix(path, "/internal/v1/terminal/sessions/"), "/input") {
+		relative := strings.Trim(strings.TrimPrefix(path, "/internal/v1/terminal/sessions"), "/")
+		parts := []string{}
+		if relative != "" {
+			parts = strings.Split(relative, "/")
+		}
+		action := ""
+		if len(parts) == 2 {
+			action = strings.TrimSpace(parts[1])
+		}
+		if method == http.MethodGet && (relative == "" || len(parts) == 1 || action == "stream") {
 			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, SessionOnly: true}
 		}
 		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "terminal access requires recent passkey verification"}

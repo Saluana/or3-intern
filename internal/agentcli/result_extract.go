@@ -85,6 +85,11 @@ func extractFinalTextCandidate(runnerID RunnerID, payload any) (int, string) {
 			}
 		}
 	case RunnerOpenCode:
+		if stringField(obj, "type") == "text" {
+			if text := extractTextPart(obj["part"]); text != "" {
+				return 100, text
+			}
+		}
 		if payloadType := stringField(obj, "type"); payloadType == "assistant_message" || payloadType == "assistant" {
 			if message := extractString(obj["message"]); message != "" {
 				return 100, message
@@ -107,6 +112,10 @@ func extractGenericFinalText(obj map[string]any) (int, string) {
 		}
 		if content := extractString(obj["content"]); content != "" {
 			return 85, content
+		}
+	case "text":
+		if text := extractTextPart(obj["part"]); text != "" {
+			return 84, text
 		}
 	case "message":
 		role := stringField(obj, "role")
@@ -181,6 +190,17 @@ func extractClaudeAssistantText(value any) string {
 		}
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+func extractTextPart(value any) string {
+	part, ok := value.(map[string]any)
+	if !ok {
+		return ""
+	}
+	if partType := stringField(part, "type"); partType != "" && partType != "text" {
+		return ""
+	}
+	return extractString(part["text"])
 }
 
 func extractString(value any) string {

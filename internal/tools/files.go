@@ -40,7 +40,7 @@ func (t *FileTool) safePathForRoot(p, rootPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	abs, err = canonicalizePath(abs)
+	abs, err = CanonicalizePath(abs)
 	if err != nil {
 		return "", err
 	}
@@ -49,7 +49,7 @@ func (t *FileTool) safePathForRoot(p, rootPath string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		root, err = canonicalizeRoot(root)
+		root, err = CanonicalizeRoot(root)
 		if err != nil {
 			return "", err
 		}
@@ -84,11 +84,11 @@ func validatePathInRoot(rootPath, abs string) error {
 	if err != nil {
 		return err
 	}
-	root, err = canonicalizeRoot(root)
+	root, err = CanonicalizeRoot(root)
 	if err != nil {
 		return err
 	}
-	resolved, err := canonicalizePath(abs)
+	resolved, err := CanonicalizePath(abs)
 	if err != nil {
 		return err
 	}
@@ -156,7 +156,7 @@ func (t *FileTool) validateOpenedWritePath(path string, openedInfo os.FileInfo) 
 }
 
 func validateOpenedPathUnchanged(path string, openedInfo os.FileInfo) error {
-	resolved, err := canonicalizePath(path)
+	resolved, err := CanonicalizePath(path)
 	if err != nil {
 		return err
 	}
@@ -170,14 +170,14 @@ func validateOpenedPathUnchanged(path string, openedInfo os.FileInfo) error {
 	return nil
 }
 
-func canonicalizeRoot(root string) (string, error) {
+func CanonicalizeRoot(root string) (string, error) {
 	if _, err := os.Stat(root); err != nil {
 		return "", err
 	}
 	return filepath.EvalSymlinks(root)
 }
 
-func canonicalizePath(abs string) (string, error) {
+func CanonicalizePath(abs string) (string, error) {
 	if _, err := os.Lstat(abs); err == nil {
 		return filepath.EvalSymlinks(abs)
 	} else if !os.IsNotExist(err) {

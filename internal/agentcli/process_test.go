@@ -95,3 +95,20 @@ func TestProcessManager_ExtractsOpenCodeFinalText(t *testing.T) {
 		t.Fatalf("expected opencode final text, got %q", out.FinalTextPreview)
 	}
 }
+
+func TestProcessManager_ExtractsOpenCodeTextEventFinalText(t *testing.T) {
+	dir := t.TempDir()
+	writeFakeBinary(t, dir, "fake-opencode", `printf '%s\n' '{"type":"step_start","timestamp":1} {"type":"tool_use","part":{"type":"tool","tool":"webfetch"}} {"type":"text","part":{"type":"text","text":"## Done\n\nShip it."}}'`)
+
+	pm := NewProcessManager(1024, 4096)
+	out := pm.Run(context.Background(), CommandSpec{
+		RunnerID:   RunnerOpenCode,
+		Binary:     "fake-opencode",
+		Env:        []string{"PATH=" + dir},
+		OutputMode: OutputJSON,
+	}, nil)
+
+	if out.FinalTextPreview != "## Done\n\nShip it." {
+		t.Fatalf("expected opencode text-event final text, got %q", out.FinalTextPreview)
+	}
+}

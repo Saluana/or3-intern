@@ -529,6 +529,7 @@ func main() {
 			MaxQueued:     cfg.AgentCLI.MaxQueued,
 			TaskTimeout:   time.Duration(cfg.AgentCLI.DefaultTimeoutSeconds) * time.Second,
 			Registry:      agentcli.NewDefaultRegistry(),
+			RestrictDir:   allowedRoot(cfg),
 		}
 		if err := agentCLIManager.Start(ctx); err != nil {
 			fmt.Fprintln(os.Stderr, "agent CLI manager error:", err)

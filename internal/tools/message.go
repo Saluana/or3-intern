@@ -151,7 +151,7 @@ func (t *SendMessage) validateMediaPaths(raw any) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		p, err = canonicalizePath(p)
+		p, err = CanonicalizePath(p)
 		if err != nil {
 			return nil, err
 		}
@@ -194,7 +194,7 @@ func pathWithinRoot(absPath, root string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	root, err = canonicalizeRoot(root)
+	root, err = CanonicalizeRoot(root)
 	if err != nil {
 		return false, err
 	}

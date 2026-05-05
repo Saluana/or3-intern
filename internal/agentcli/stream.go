@@ -3,6 +3,7 @@ package agentcli
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -109,20 +110,37 @@ func emitStructuredIfValid(onEvent func(AgentRunEvent), seq *int64, collector *o
 	if raw == "" {
 		return
 	}
-	var payload json.RawMessage
-	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+	payloads := decodeStructuredPayloads(raw)
+	if len(payloads) == 0 {
 		return
 	}
-	if collector != nil && collector.extractor != nil {
-		collector.extractor.Consider(payload)
+	for _, payload := range payloads {
+		if collector != nil && collector.extractor != nil {
+			collector.extractor.Consider(payload)
+		}
+		if onEvent != nil {
+			onEvent(AgentRunEvent{
+				Type:    "structured",
+				Seq:     atomic.AddInt64(seq, 1),
+				TS:      time.Now().UTC().Format(time.RFC3339Nano),
+				Payload: payload,
+			})
+		}
 	}
-	if onEvent != nil {
-		onEvent(AgentRunEvent{
-			Type:    "structured",
-			Seq:     atomic.AddInt64(seq, 1),
-			TS:      time.Now().UTC().Format(time.RFC3339Nano),
-			Payload: payload,
-		})
+}
+
+func decodeStructuredPayloads(raw string) []json.RawMessage {
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	payloads := make([]json.RawMessage, 0, 1)
+	for {
+		var payload json.RawMessage
+		if err := decoder.Decode(&payload); err != nil {
+			if errors.Is(err, io.EOF) {
+				return payloads
+			}
+			return nil
+		}
+		payloads = append(payloads, append(json.RawMessage(nil), payload...))
 	}
 }
 

@@ -181,11 +181,11 @@ func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, 
 		if err != nil {
 			return "", err
 		}
-		abs, err = canonicalizePath(abs)
+		abs, err = CanonicalizePath(abs)
 		if err != nil {
 			return "", err
 		}
-		root, err := canonicalizeRoot(t.RestrictDir)
+		root, err := CanonicalizeRoot(t.RestrictDir)
 		if err != nil {
 			return "", err
 		}

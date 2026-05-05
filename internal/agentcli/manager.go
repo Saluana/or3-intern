@@ -37,6 +37,10 @@ type Manager struct {
 	MaxQueued     int
 	TaskTimeout   time.Duration
 
+	// RestrictDir is the allowed root for working directories.
+	// Empty means no restriction.
+	RestrictDir string
+
 	mu       sync.Mutex
 	started  bool
 	ctx      context.Context
@@ -206,8 +210,11 @@ func (m *Manager) Enqueue(ctx context.Context, req AgentRunRequest) (db.AgentCLI
 		timeoutSeconds = cfg.MaxTimeoutSeconds
 	}
 
-	// Default cwd
-	cwd := req.Cwd
+	// Resolve and validate cwd against allowed root
+	cwd, err := resolveAgentCLICwd(req.Cwd, m.RestrictDir)
+	if err != nil {
+		return db.AgentCLIRun{}, fmt.Errorf("invalid cwd: %w", err)
+	}
 
 	jobID := newAgentCLIJobID()
 	runID := "acr_" + newAgentCLIJobID()[:16]

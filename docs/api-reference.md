@@ -155,6 +155,7 @@ Behavior:
 
 - returns Server-Sent Events when the request sends `Accept: text/event-stream`
 - otherwise waits for completion and returns JSON
+- includes `X-Or3-Job-Id` on both JSON and SSE responses so clients can persist the turn job ID immediately
 - `X-Request-Id`, `X-Workspace-Id`, and `X-Network-Session-Id` headers are propagated into request/job lifecycle metadata
 - `X-Approval-Token` and `X-Or3-Approval-Token` are accepted as approval-token header aliases
 

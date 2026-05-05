@@ -1010,6 +1010,9 @@ func TestServiceTurns_SSEStreamsLifecycleEvents(t *testing.T) {
 		t.Fatalf("Do: %v", err)
 	}
 	defer resp.Body.Close()
+	if strings.TrimSpace(resp.Header.Get("X-Or3-Job-Id")) == "" {
+		t.Fatalf("expected X-Or3-Job-Id header on SSE response")
+	}
 	payload, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatalf("ReadAll: %v", err)
@@ -1045,6 +1048,9 @@ func TestServiceTurns_JSONResponse(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	if strings.TrimSpace(resp.Header.Get("X-Or3-Job-Id")) == "" {
+		t.Fatalf("expected X-Or3-Job-Id header on JSON response")
 	}
 	var payload map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {

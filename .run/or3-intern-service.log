@@ -3287,3 +3287,31 @@ warning: service startup continuing without sandbox protection: privileged tools
 2026/05/04 17:40:55 service POST /internal/v1/terminal/sessions -> 201
 2026/05/04 17:40:55 service GET /internal/v1/terminal/sessions -> 200
 2026/05/04 17:40:55 service POST /internal/v1/terminal/sessions/term_81af5379d42471fe16c81b50/ws-ticket -> 200
+2026/05/04 18:00:25 service GET /internal/v1/files/roots -> 200
+2026/05/04 18:00:25 service GET /internal/v1/terminal/sessions -> 200
+2026/05/04 18:00:25 service GET /internal/v1/terminal/sessions/term_81af5379d42471fe16c81b50/ws -> 101
+2026/05/04 18:00:25 service GET /internal/v1/terminal/sessions/term_81af5379d42471fe16c81b50 -> 404
+2026/05/04 18:03:35 service GET /internal/v1/approvals -> 200
+2026/05/04 18:03:35 service GET /internal/v1/approvals -> 200
+2026/05/04 18:03:35 service GET /internal/v1/app/bootstrap -> 200
+2026/05/04 18:03:37 service GET /internal/v1/approvals -> 200
+2026/05/04 18:03:41 service GET /internal/v1/approvals -> 200
+2026/05/04 18:03:41 service GET /internal/v1/agent-runners: agent CLI manager is not available
+2026/05/04 18:03:41 service GET /internal/v1/agent-runners -> 503
+2026/05/04 18:03:41 service GET /internal/v1/subagents -> 200
+2026/05/04 18:03:41 service GET /internal/v1/app/bootstrap -> 200
+2026/05/04 18:03:43 service GET /internal/v1/approvals -> 200
+2026/05/04 18:03:43 service GET /internal/v1/approvals -> 200
+2026/05/04 18:03:43 service GET /internal/v1/app/bootstrap -> 200
+2026/05/04 18:03:45 service GET /internal/v1/files/roots -> 200
+2026/05/04 18:03:45 service GET /internal/v1/terminal/sessions -> 200
+2026/05/04 18:03:47 service GET /internal/v1/approvals -> 200
+2026/05/04 18:03:47 service GET /internal/v1/agent-runners: agent CLI manager is not available
+2026/05/04 18:03:47 service GET /internal/v1/agent-runners -> 503
+2026/05/04 18:03:47 service GET /internal/v1/subagents -> 200
+2026/05/04 18:03:47 service GET /internal/v1/app/bootstrap -> 200
+2026/05/04 18:03:55 service GET /internal/v1/approvals -> 200
+2026/05/04 18:03:55 service GET /internal/v1/subagents -> 200
+2026/05/04 18:03:55 service GET /internal/v1/agent-runners: agent CLI manager is not available
+2026/05/04 18:03:55 service GET /internal/v1/agent-runners -> 503
+2026/05/04 18:03:55 service GET /internal/v1/app/bootstrap -> 200

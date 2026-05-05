@@ -2340,6 +2340,7 @@ func (s *serviceServer) handleTurns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	job := s.jobs.Register("turn")
+	w.Header().Set("X-Or3-Job-Id", job.ID)
 	s.jobs.Publish(job.ID, "queued", serviceLifecyclePayload(req.SessionKey, req.Meta, map[string]any{"status": "queued"}))
 
 	ctx, cancel := context.WithCancel(withDetachedContext(r.Context()))
@@ -3273,6 +3274,7 @@ func (s *serviceServer) streamJob(w http.ResponseWriter, r *http.Request, jobID 
 		return
 	}
 	defer unsubscribe()
+	w.Header().Set("X-Or3-Job-Id", jobID)
 	if err := beginSSE(w); err != nil {
 		writeServiceError(w, r, http.StatusInternalServerError, "streaming is not supported", err)
 		return

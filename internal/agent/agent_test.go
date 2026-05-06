@@ -572,7 +572,7 @@ func TestCronRunner_PublishesEvent(t *testing.T) {
 		},
 	}
 
-	err := runner(context.Background(), job)
+	_, err := runner(context.Background(), job)
 	if err != nil {
 		t.Fatalf("CronRunner: %v", err)
 	}
@@ -609,7 +609,7 @@ func TestCronRunner_EmptyMessage_UsesName(t *testing.T) {
 		},
 	}
 
-	if err := runner(context.Background(), job); err != nil {
+	if _, err := runner(context.Background(), job); err != nil {
 		t.Fatalf("runner: %v", err)
 	}
 
@@ -628,7 +628,7 @@ func TestCronRunner_FullBus_ReturnsError(t *testing.T) {
 	b.Publish(bus.Event{}) // fill the bus
 
 	runner := CronRunner(b, "session")
-	err := runner(context.Background(), cron.CronJob{
+	_, err := runner(context.Background(), cron.CronJob{
 		ID:      "j1",
 		Payload: cron.CronPayload{Message: "msg"},
 	})

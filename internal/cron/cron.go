@@ -29,6 +29,20 @@ const (
 	KindCron ScheduleKind = "cron"
 )
 
+const (
+	// PayloadAgentTurn wakes the normal OR3 agent runtime.
+	PayloadAgentTurn = "agent_turn"
+	// PayloadSystemEvent is retained for compatibility with existing system-originated cron jobs.
+	PayloadSystemEvent = "system_event"
+	// PayloadAgentCLIRun enqueues an external agent CLI run.
+	PayloadAgentCLIRun = "agent_cli_run"
+)
+
+const (
+	DefaultAgentCLICronMode      = "review"
+	DefaultAgentCLICronIsolation = "host_readonly"
+)
+
 // CronSchedule describes when a cron job should run.
 type CronSchedule struct {
 	Kind    ScheduleKind `json:"kind"`
@@ -40,20 +54,36 @@ type CronSchedule struct {
 
 // CronPayload is the user-visible work queued when a job fires.
 type CronPayload struct {
-	Kind       string `json:"kind"` // "agent_turn"|"system_event"
-	Message    string `json:"message"`
-	Deliver    bool   `json:"deliver"`
-	Channel    string `json:"channel,omitempty"`
-	To         string `json:"to,omitempty"`
-	SessionKey string `json:"session_key,omitempty"` // optional per-job session key override
+	Kind       string               `json:"kind"` // "agent_turn"|"system_event"|"agent_cli_run"
+	Message    string               `json:"message"`
+	Deliver    bool                 `json:"deliver"`
+	Channel    string               `json:"channel,omitempty"`
+	To         string               `json:"to,omitempty"`
+	SessionKey string               `json:"session_key,omitempty"` // optional per-job session key override
+	AgentRun   *CronAgentRunPayload `json:"agent_run,omitempty"`
+}
+
+// CronAgentRunPayload describes an external agent CLI run started by cron.
+type CronAgentRunPayload struct {
+	RunnerID       string         `json:"runner_id"`
+	Task           string         `json:"task"`
+	TimeoutSeconds int            `json:"timeout_seconds,omitempty"`
+	Cwd            string         `json:"cwd,omitempty"`
+	Model          string         `json:"model,omitempty"`
+	Mode           string         `json:"mode,omitempty"`
+	Isolation      string         `json:"isolation,omitempty"`
+	MaxTurns       int            `json:"max_turns,omitempty"`
+	Meta           map[string]any `json:"meta,omitempty"`
 }
 
 // CronJobState records the latest execution result for a job.
 type CronJobState struct {
-	NextRunAtMS *int64 `json:"next_run_at_ms,omitempty"`
-	LastRunAtMS *int64 `json:"last_run_at_ms,omitempty"`
-	LastStatus  string `json:"last_status,omitempty"` // ok|error|skipped
-	LastError   string `json:"last_error,omitempty"`
+	NextRunAtMS       *int64 `json:"next_run_at_ms,omitempty"`
+	LastRunAtMS       *int64 `json:"last_run_at_ms,omitempty"`
+	LastStatus        string `json:"last_status,omitempty"` // ok|error|skipped
+	LastError         string `json:"last_error,omitempty"`
+	LastEnqueuedJobID string `json:"last_enqueued_job_id,omitempty"`
+	LastEnqueuedRunID string `json:"last_enqueued_run_id,omitempty"`
 }
 
 // CronJob is a persisted scheduled job definition.
@@ -75,8 +105,14 @@ type Store struct {
 	Jobs    []CronJob `json:"jobs"`
 }
 
+// RunResult records side effects produced by a cron run.
+type RunResult struct {
+	EnqueuedJobID string
+	EnqueuedRunID string
+}
+
 // Runner executes a single cron job when it becomes due.
-type Runner func(ctx context.Context, job CronJob) error
+type Runner func(ctx context.Context, job CronJob) (RunResult, error)
 
 // Service loads, schedules, and persists cron jobs. It is safe for concurrent use.
 type Service struct {
@@ -216,7 +252,11 @@ func (s *Service) Add(job CronJob) error {
 	if err != nil {
 		return err
 	}
+	job.Payload = NormalizePayload(job.Payload)
 	if err := ValidateSchedule(job.Schedule); err != nil {
+		return err
+	}
+	if err := ValidatePayload(job.Payload); err != nil {
 		return err
 	}
 	now := time.Now().UnixMilli()
@@ -246,6 +286,10 @@ func (s *Service) Update(id string, job CronJob) (bool, CronJob, error) {
 		return false, CronJob{}, fmt.Errorf("job id is required")
 	}
 	if err := ValidateSchedule(job.Schedule); err != nil {
+		return false, CronJob{}, err
+	}
+	job.Payload = NormalizePayload(job.Payload)
+	if err := ValidatePayload(job.Payload); err != nil {
 		return false, CronJob{}, err
 	}
 	st, err := s.load()
@@ -293,6 +337,10 @@ func (s *Service) SetEnabled(id string, enabled bool) (bool, CronJob, error) {
 		}
 		if enabled {
 			if err := ValidateSchedule(st.Jobs[i].Schedule); err != nil {
+				return true, st.Jobs[i], err
+			}
+			st.Jobs[i].Payload = NormalizePayload(st.Jobs[i].Payload)
+			if err := ValidatePayload(st.Jobs[i].Payload); err != nil {
 				return true, st.Jobs[i], err
 			}
 		}
@@ -356,7 +404,7 @@ func (s *Service) runJobByID(ctx context.Context, id string, force bool) (bool, 
 			if s.runner == nil {
 				return true, fmt.Errorf("cron runner not configured")
 			}
-			err := s.runner(ctx, j)
+			result, err := s.runner(ctx, j)
 			s.mu.Lock()
 			defer s.mu.Unlock()
 			st2, loadErr := s.load()
@@ -375,6 +423,8 @@ func (s *Service) runJobByID(ctx context.Context, id string, force bool) (bool, 
 						st2.Jobs[i].State.LastStatus = "ok"
 						st2.Jobs[i].State.LastError = ""
 					}
+					st2.Jobs[i].State.LastEnqueuedJobID = result.EnqueuedJobID
+					st2.Jobs[i].State.LastEnqueuedRunID = result.EnqueuedRunID
 					if st2.Jobs[i].DeleteAfterRun {
 						shouldDelete = true
 						break
@@ -415,6 +465,7 @@ func (s *Service) unarmJobLocked(id string) {
 }
 
 func (s *Service) prepareJobLocked(job CronJob) CronJob {
+	job.Payload = NormalizePayload(job.Payload)
 	next := nextRunMS(job.Schedule, time.Now())
 	job.State.NextRunAtMS = next
 	if !job.Enabled {
@@ -433,6 +484,10 @@ func (s *Service) armJobLocked(job CronJob) {
 	}
 	if err := ValidateSchedule(job.Schedule); err != nil {
 		log.Printf("cron schedule invalid: id=%s err=%v", job.ID, err)
+		return
+	}
+	if err := ValidatePayload(job.Payload); err != nil {
+		log.Printf("cron payload invalid: id=%s err=%v", job.ID, err)
 		return
 	}
 	switch job.Schedule.Kind {
@@ -474,6 +529,65 @@ func (s *Service) armJobLocked(job CronJob) {
 		} else {
 			log.Printf("cron schedule add failed: id=%s spec=%s err=%v", job.ID, spec, err)
 		}
+	}
+}
+
+// NormalizePayload fills compatibility defaults for persisted and incoming jobs.
+func NormalizePayload(payload CronPayload) CronPayload {
+	payload.Kind = strings.TrimSpace(payload.Kind)
+	if payload.Kind == "" {
+		payload.Kind = PayloadAgentTurn
+	}
+	payload.SessionKey = strings.TrimSpace(payload.SessionKey)
+	payload.Channel = strings.TrimSpace(payload.Channel)
+	payload.To = strings.TrimSpace(payload.To)
+	if payload.AgentRun != nil {
+		run := *payload.AgentRun
+		run.RunnerID = strings.TrimSpace(run.RunnerID)
+		run.Task = strings.TrimSpace(run.Task)
+		run.Cwd = strings.TrimSpace(run.Cwd)
+		run.Model = strings.TrimSpace(run.Model)
+		run.Mode = strings.TrimSpace(run.Mode)
+		run.Isolation = strings.TrimSpace(run.Isolation)
+		if payload.Kind == PayloadAgentCLIRun {
+			if run.Mode == "" {
+				run.Mode = DefaultAgentCLICronMode
+			}
+			if run.Isolation == "" {
+				run.Isolation = DefaultAgentCLICronIsolation
+			}
+		}
+		if run.Meta != nil {
+			meta := make(map[string]any, len(run.Meta))
+			for k, v := range run.Meta {
+				meta[k] = v
+			}
+			run.Meta = meta
+		}
+		payload.AgentRun = &run
+	}
+	return payload
+}
+
+// ValidatePayload checks whether a payload can be dispatched by the cron runner.
+func ValidatePayload(payload CronPayload) error {
+	payload = NormalizePayload(payload)
+	switch payload.Kind {
+	case PayloadAgentTurn, PayloadSystemEvent:
+		return nil
+	case PayloadAgentCLIRun:
+		if payload.AgentRun == nil {
+			return fmt.Errorf("agent_run is required for agent_cli_run payloads")
+		}
+		if strings.TrimSpace(payload.AgentRun.RunnerID) == "" {
+			return fmt.Errorf("agent_run.runner_id is required")
+		}
+		if strings.TrimSpace(payload.AgentRun.Task) == "" {
+			return fmt.Errorf("agent_run.task is required")
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported payload kind: %s", payload.Kind)
 	}
 }
 

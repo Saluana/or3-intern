@@ -4930,7 +4930,9 @@ func decodeServiceCronJobRequest(body io.Reader, defaultEnabled bool) (cron.Cron
 		jobRaw = b
 	}
 	var job cron.CronJob
-	if err := json.Unmarshal(jobRaw, &job); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(jobRaw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&job); err != nil {
 		return cron.CronJob{}, err
 	}
 	if defaultEnabled {
@@ -4944,6 +4946,7 @@ func decodeServiceCronJobRequest(body io.Reader, defaultEnabled bool) (cron.Cron
 	if job.Payload.Kind == "" {
 		job.Payload.Kind = "agent_turn"
 	}
+	job.Payload = cron.NormalizePayload(job.Payload)
 	return job, nil
 }
 

@@ -738,9 +738,9 @@ func TestServiceCron_CRUDAndRun(t *testing.T) {
 	cfg.Cron.Enabled = true
 	cfg.Cron.StorePath = filepath.Join(t.TempDir(), "cron.json")
 	runs := 0
-	cronSvc := cron.New(cfg.Cron.StorePath, func(ctx context.Context, job cron.CronJob) error {
+	cronSvc := cron.New(cfg.Cron.StorePath, func(ctx context.Context, job cron.CronJob) (cron.RunResult, error) {
 		runs++
-		return nil
+		return cron.RunResult{}, nil
 	})
 	if err := cronSvc.Start(); err != nil {
 		t.Fatalf("cron start: %v", err)
@@ -810,6 +810,115 @@ func TestServiceCron_CRUDAndRun(t *testing.T) {
 	server.handleCron(deleteRec, deleteReq)
 	if deleteRec.Code != http.StatusOK {
 		t.Fatalf("expected delete 200, got %d (%s)", deleteRec.Code, deleteRec.Body.String())
+	}
+}
+
+func TestServiceCron_AgentCLIRunPayloadCRUDAndRun(t *testing.T) {
+	cfg := config.Default()
+	cfg.Cron.Enabled = true
+	cfg.Cron.StorePath = filepath.Join(t.TempDir(), "cron.json")
+	var captured cron.CronJob
+	cronSvc := cron.New(cfg.Cron.StorePath, func(ctx context.Context, job cron.CronJob) (cron.RunResult, error) {
+		captured = job
+		return cron.RunResult{EnqueuedJobID: "job-agentcli-test", EnqueuedRunID: "acr_test"}, nil
+	})
+	if err := cronSvc.Start(); err != nil {
+		t.Fatalf("cron start: %v", err)
+	}
+	t.Cleanup(cronSvc.Stop)
+	server := &serviceServer{config: cfg, cronSvc: cronSvc}
+
+	createReq := httptest.NewRequest(http.MethodPost, "/internal/v1/cron/jobs", strings.NewReader(`{
+		"name":"Weekly external review",
+		"schedule":{"kind":"every","every_ms":3600000},
+		"payload":{
+			"kind":"agent_cli_run",
+			"session_key":"cron:agents",
+			"agent_run":{"runner_id":"codex","task":"review the repo"}
+		}
+	}`))
+	createReq = createReq.WithContext(context.WithValue(createReq.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Actor: "ops", Role: approval.RoleOperator}))
+	createRec := httptest.NewRecorder()
+	server.handleCron(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d (%s)", createRec.Code, createRec.Body.String())
+	}
+	created := mustDecodeJSONBody(t, createRec.Body)
+	jobBody := created["job"].(map[string]any)
+	jobID := jobBody["id"].(string)
+	payload := jobBody["payload"].(map[string]any)
+	agentRun := payload["agent_run"].(map[string]any)
+	if agentRun["mode"] != cron.DefaultAgentCLICronMode {
+		t.Fatalf("expected review default, got %#v", agentRun)
+	}
+	if agentRun["isolation"] != cron.DefaultAgentCLICronIsolation {
+		t.Fatalf("expected host_readonly default, got %#v", agentRun)
+	}
+
+	runReq := httptest.NewRequest(http.MethodPost, "/internal/v1/cron/jobs/"+jobID+"/run", nil)
+	runReq = runReq.WithContext(context.WithValue(runReq.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Actor: "ops", Role: approval.RoleOperator}))
+	runRec := httptest.NewRecorder()
+	server.handleCron(runRec, runReq)
+	if runRec.Code != http.StatusOK {
+		t.Fatalf("expected run 200, got %d (%s)", runRec.Code, runRec.Body.String())
+	}
+	if captured.Payload.AgentRun == nil || captured.Payload.AgentRun.RunnerID != "codex" {
+		t.Fatalf("expected captured agent run payload, got %#v", captured.Payload)
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/internal/v1/cron/jobs/"+jobID, nil)
+	getReq = getReq.WithContext(context.WithValue(getReq.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Actor: "ops", Role: approval.RoleOperator}))
+	getRec := httptest.NewRecorder()
+	server.handleCron(getRec, getReq)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("expected get 200, got %d (%s)", getRec.Code, getRec.Body.String())
+	}
+	got := mustDecodeJSONBody(t, getRec.Body)
+	gotJob := got["job"].(map[string]any)
+	state := gotJob["state"].(map[string]any)
+	if state["last_enqueued_job_id"] != "job-agentcli-test" {
+		t.Fatalf("expected enqueued job id in state, got %#v", state)
+	}
+	if state["last_enqueued_run_id"] != "acr_test" {
+		t.Fatalf("expected enqueued run id in state, got %#v", state)
+	}
+}
+
+func TestServiceCron_AgentCLIRunPayloadValidation(t *testing.T) {
+	cfg := config.Default()
+	cfg.Cron.Enabled = true
+	cfg.Cron.StorePath = filepath.Join(t.TempDir(), "cron.json")
+	cronSvc := cron.New(cfg.Cron.StorePath, func(ctx context.Context, job cron.CronJob) (cron.RunResult, error) {
+		return cron.RunResult{}, nil
+	})
+	if err := cronSvc.Start(); err != nil {
+		t.Fatalf("cron start: %v", err)
+	}
+	t.Cleanup(cronSvc.Stop)
+	server := &serviceServer{config: cfg, cronSvc: cronSvc}
+
+	createReq := httptest.NewRequest(http.MethodPost, "/internal/v1/cron/jobs", strings.NewReader(`{
+		"name":"Bad external review",
+		"schedule":{"kind":"every","every_ms":3600000},
+		"payload":{"kind":"agent_cli_run","agent_run":{"task":"review the repo"}}
+	}`))
+	createReq = createReq.WithContext(context.WithValue(createReq.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Actor: "ops", Role: approval.RoleOperator}))
+	createRec := httptest.NewRecorder()
+	server.handleCron(createRec, createReq)
+	if createRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing runner_id, got %d (%s)", createRec.Code, createRec.Body.String())
+	}
+
+	unknownReq := httptest.NewRequest(http.MethodPost, "/internal/v1/cron/jobs", strings.NewReader(`{
+		"name":"Bad external review",
+		"schedule":{"kind":"every","every_ms":3600000},
+		"payload":{"kind":"agent_turn","message":"hello","surprise":true}
+	}`))
+	unknownReq = unknownReq.WithContext(context.WithValue(unknownReq.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Actor: "ops", Role: approval.RoleOperator}))
+	unknownRec := httptest.NewRecorder()
+	server.handleCron(unknownRec, unknownReq)
+	if unknownRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unknown payload field, got %d (%s)", unknownRec.Code, unknownRec.Body.String())
 	}
 }
 

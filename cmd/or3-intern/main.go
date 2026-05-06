@@ -27,6 +27,7 @@ import (
 	"or3-intern/internal/config"
 	"or3-intern/internal/controlplane"
 	"or3-intern/internal/cron"
+	"or3-intern/internal/cronrunner"
 	"or3-intern/internal/db"
 	"or3-intern/internal/heartbeat"
 	"or3-intern/internal/mcp"
@@ -488,9 +489,26 @@ func main() {
 		rt.Streamer = nil
 	}
 
+	if cfg.AgentCLI.Enabled {
+		agentCLIManager = &agentcli.Manager{
+			DB:            d,
+			Jobs:          serviceJobs,
+			Cfg:           cfg.AgentCLI,
+			MaxConcurrent: cfg.AgentCLI.MaxConcurrent,
+			MaxQueued:     cfg.AgentCLI.MaxQueued,
+			TaskTimeout:   time.Duration(cfg.AgentCLI.DefaultTimeoutSeconds) * time.Second,
+			Registry:      agentcli.NewDefaultRegistry(),
+			RestrictDir:   allowedRoot(cfg),
+		}
+		if err := agentCLIManager.Start(ctx); err != nil {
+			fmt.Fprintln(os.Stderr, "agent CLI manager error:", err)
+			os.Exit(1)
+		}
+	}
+
 	// cron service + tool
 	if cfg.Cron.Enabled {
-		cronSvc = cron.New(cfg.Cron.StorePath, agent.CronRunner(b, cfg.DefaultSessionKey))
+		cronSvc = cron.New(cfg.Cron.StorePath, cronrunner.New(b, cfg.DefaultSessionKey, agentCLIManager))
 		if err := cronSvc.Start(); err != nil {
 			fmt.Fprintln(os.Stderr, "cron start error:", err)
 			os.Exit(1)
@@ -519,22 +537,6 @@ func main() {
 			os.Exit(1)
 		}
 		rt.Tools = buildRuntimeTools()
-	}
-	if cfg.AgentCLI.Enabled {
-		agentCLIManager = &agentcli.Manager{
-			DB:            d,
-			Jobs:          serviceJobs,
-			Cfg:           cfg.AgentCLI,
-			MaxConcurrent: cfg.AgentCLI.MaxConcurrent,
-			MaxQueued:     cfg.AgentCLI.MaxQueued,
-			TaskTimeout:   time.Duration(cfg.AgentCLI.DefaultTimeoutSeconds) * time.Second,
-			Registry:      agentcli.NewDefaultRegistry(),
-			RestrictDir:   allowedRoot(cfg),
-		}
-		if err := agentCLIManager.Start(ctx); err != nil {
-			fmt.Fprintln(os.Stderr, "agent CLI manager error:", err)
-			os.Exit(1)
-		}
 	}
 	if cfg.ConsolidationEnabled || cfg.ContextManager.Enabled {
 		rt.Consolidator = &memory.Consolidator{

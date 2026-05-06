@@ -37,8 +37,8 @@ func makeService(t *testing.T) (*Service, string) {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron.json")
-	svc := New(path, func(ctx context.Context, job CronJob) error {
-		return nil
+	svc := New(path, func(ctx context.Context, job CronJob) (RunResult, error) {
+		return RunResult{}, nil
 	})
 	return svc, path
 }
@@ -175,9 +175,9 @@ func TestRunNow_Success(t *testing.T) {
 	ran := false
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron.json")
-	svc := New(path, func(ctx context.Context, job CronJob) error {
+	svc := New(path, func(ctx context.Context, job CronJob) (RunResult, error) {
 		ran = true
-		return nil
+		return RunResult{}, nil
 	})
 	mustStartService(t, svc)
 	defer svc.Stop()
@@ -212,9 +212,9 @@ func TestRunNow_Disabled_NoForce(t *testing.T) {
 	ran := false
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron.json")
-	svc := New(path, func(ctx context.Context, job CronJob) error {
+	svc := New(path, func(ctx context.Context, job CronJob) (RunResult, error) {
 		ran = true
-		return nil
+		return RunResult{}, nil
 	})
 	mustStartService(t, svc)
 	defer svc.Stop()
@@ -238,9 +238,9 @@ func TestRunNow_Disabled_WithForce(t *testing.T) {
 	ran := false
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron.json")
-	svc := New(path, func(ctx context.Context, job CronJob) error {
+	svc := New(path, func(ctx context.Context, job CronJob) (RunResult, error) {
 		ran = true
-		return nil
+		return RunResult{}, nil
 	})
 	mustStartService(t, svc)
 	defer svc.Stop()
@@ -263,8 +263,8 @@ func TestRunNow_Disabled_WithForce(t *testing.T) {
 func TestRunNow_DeleteAfterRun(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron.json")
-	svc := New(path, func(ctx context.Context, job CronJob) error {
-		return nil
+	svc := New(path, func(ctx context.Context, job CronJob) (RunResult, error) {
+		return RunResult{}, nil
 	})
 	mustStartService(t, svc)
 	defer svc.Stop()
@@ -502,7 +502,7 @@ func TestLoad_InvalidJSON(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	svc := New(path, func(ctx context.Context, job CronJob) error { return nil })
+	svc := New(path, func(ctx context.Context, job CronJob) (RunResult, error) { return RunResult{}, nil })
 	_, err := svc.load()
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
@@ -512,7 +512,7 @@ func TestLoad_InvalidJSON(t *testing.T) {
 func TestSave_And_Load(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron.json")
-	svc := New(path, func(ctx context.Context, job CronJob) error { return nil })
+	svc := New(path, func(ctx context.Context, job CronJob) (RunResult, error) { return RunResult{}, nil })
 
 	st := Store{
 		Version: 1,
@@ -539,7 +539,7 @@ func TestSave_And_Load(t *testing.T) {
 func TestRunNow_UpdatesLastRun(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron.json")
-	svc := New(path, func(ctx context.Context, job CronJob) error { return nil })
+	svc := New(path, func(ctx context.Context, job CronJob) (RunResult, error) { return RunResult{}, nil })
 	mustStartService(t, svc)
 	defer svc.Stop()
 
@@ -567,9 +567,9 @@ func TestArmJob_KindAt_FutureTime(t *testing.T) {
 	runCh := make(chan struct{}, 1)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron.json")
-	svc := New(path, func(ctx context.Context, job CronJob) error {
+	svc := New(path, func(ctx context.Context, job CronJob) (RunResult, error) {
 		runCh <- struct{}{}
-		return nil
+		return RunResult{}, nil
 	})
 	mustStartService(t, svc)
 	defer svc.Stop()
@@ -597,7 +597,7 @@ func TestArmJob_KindAt_FutureTime(t *testing.T) {
 func TestRemove_WithSchedulerEntry(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron.json")
-	svc := New(path, func(ctx context.Context, job CronJob) error { return nil })
+	svc := New(path, func(ctx context.Context, job CronJob) (RunResult, error) { return RunResult{}, nil })
 	mustStartService(t, svc)
 	defer svc.Stop()
 
@@ -628,7 +628,7 @@ func TestStart_WithExistingJobs(t *testing.T) {
 	path := filepath.Join(dir, "cron.json")
 
 	// First, create a service and add jobs
-	svc1 := New(path, func(ctx context.Context, job CronJob) error { return nil })
+	svc1 := New(path, func(ctx context.Context, job CronJob) (RunResult, error) { return RunResult{}, nil })
 	mustStartService(t, svc1)
 	mustAddJob(t, svc1, CronJob{
 		ID:       "existing",
@@ -638,7 +638,7 @@ func TestStart_WithExistingJobs(t *testing.T) {
 	svc1.Stop()
 
 	// Create a new service with same path - Start should load existing jobs
-	svc2 := New(path, func(ctx context.Context, job CronJob) error { return nil })
+	svc2 := New(path, func(ctx context.Context, job CronJob) (RunResult, error) { return RunResult{}, nil })
 	if err := svc2.Start(); err != nil {
 		t.Fatalf("Start with existing jobs: %v", err)
 	}
@@ -653,7 +653,7 @@ func TestStart_WithExistingJobs(t *testing.T) {
 func TestRunNow_SaveError(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron.json")
-	svc := New(path, func(ctx context.Context, job CronJob) error { return nil })
+	svc := New(path, func(ctx context.Context, job CronJob) (RunResult, error) { return RunResult{}, nil })
 	mustStartService(t, svc)
 	defer svc.Stop()
 
@@ -717,6 +717,106 @@ func TestCronPayloadSessionKey_OmitEmpty(t *testing.T) {
 	}
 }
 
+func TestCronPayloadAgentCLIRun_JSONRoundTrip(t *testing.T) {
+	payload := CronPayload{
+		Kind:       PayloadAgentCLIRun,
+		SessionKey: "cron:agents",
+		AgentRun: &CronAgentRunPayload{
+			RunnerID:       "codex",
+			Task:           "review the repo",
+			TimeoutSeconds: 600,
+			Cwd:            "/workspace",
+			Model:          "gpt-5",
+			Mode:           "review",
+			Isolation:      "host_readonly",
+			MaxTurns:       4,
+			Meta:           map[string]any{"source": "cron"},
+		},
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var decoded CronPayload
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if decoded.Kind != PayloadAgentCLIRun {
+		t.Fatalf("expected kind %q, got %q", PayloadAgentCLIRun, decoded.Kind)
+	}
+	if decoded.AgentRun == nil {
+		t.Fatal("expected agent_run to round-trip")
+	}
+	if decoded.AgentRun.RunnerID != "codex" || decoded.AgentRun.Task != "review the repo" {
+		t.Fatalf("unexpected agent run payload: %#v", decoded.AgentRun)
+	}
+}
+
+func TestValidatePayload_AgentCLIRunDefaultsModeAndIsolation(t *testing.T) {
+	payload := NormalizePayload(CronPayload{
+		Kind: PayloadAgentCLIRun,
+		AgentRun: &CronAgentRunPayload{
+			RunnerID: "codex",
+			Task:     "review",
+		},
+	})
+	if err := ValidatePayload(payload); err != nil {
+		t.Fatalf("ValidatePayload: %v", err)
+	}
+	if payload.AgentRun.Mode != DefaultAgentCLICronMode {
+		t.Fatalf("expected default mode %q, got %q", DefaultAgentCLICronMode, payload.AgentRun.Mode)
+	}
+	if payload.AgentRun.Isolation != DefaultAgentCLICronIsolation {
+		t.Fatalf("expected default isolation %q, got %q", DefaultAgentCLICronIsolation, payload.AgentRun.Isolation)
+	}
+}
+
+func TestValidatePayload_AgentCLIRunRequiresRunnerAndTask(t *testing.T) {
+	cases := []CronPayload{
+		{Kind: PayloadAgentCLIRun},
+		{Kind: PayloadAgentCLIRun, AgentRun: &CronAgentRunPayload{Task: "review"}},
+		{Kind: PayloadAgentCLIRun, AgentRun: &CronAgentRunPayload{RunnerID: "codex"}},
+	}
+	for _, tc := range cases {
+		if err := ValidatePayload(tc); err == nil {
+			t.Fatalf("expected validation error for %#v", tc)
+		}
+	}
+}
+
+func TestRunNow_StoresEnqueuedRunIDs(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cron.json")
+	svc := New(path, func(ctx context.Context, job CronJob) (RunResult, error) {
+		return RunResult{EnqueuedJobID: "job-agentcli-123", EnqueuedRunID: "acr_123"}, nil
+	})
+	mustStartService(t, svc)
+	defer svc.Stop()
+
+	mustAddJob(t, svc, CronJob{
+		ID:       "agent-run",
+		Enabled:  true,
+		Schedule: CronSchedule{Kind: KindEvery, EveryMS: 60000},
+		Payload: CronPayload{
+			Kind: PayloadAgentCLIRun,
+			AgentRun: &CronAgentRunPayload{
+				RunnerID: "codex",
+				Task:     "review",
+			},
+		},
+	})
+	_ = mustRunNow(t, svc, "agent-run", false)
+
+	jobs, _ := svc.List()
+	if jobs[0].State.LastEnqueuedJobID != "job-agentcli-123" {
+		t.Fatalf("expected enqueued job id, got %#v", jobs[0].State)
+	}
+	if jobs[0].State.LastEnqueuedRunID != "acr_123" {
+		t.Fatalf("expected enqueued run id, got %#v", jobs[0].State)
+	}
+}
+
 func TestCronRunnerPerJobSession(t *testing.T) {
 	svc, _ := makeService(t)
 	if err := svc.Start(); err != nil {
@@ -729,10 +829,10 @@ func TestCronRunnerPerJobSession(t *testing.T) {
 	var runnerCalled bool
 	svc2 := &Service{
 		path: svc.path,
-		runner: func(ctx context.Context, job CronJob) error {
+		runner: func(ctx context.Context, job CronJob) (RunResult, error) {
 			capturedSessionKey = job.Payload.SessionKey
 			runnerCalled = true
-			return nil
+			return RunResult{}, nil
 		},
 	}
 
@@ -750,7 +850,7 @@ func TestCronRunnerPerJobSession(t *testing.T) {
 	}
 
 	// Directly call the runner with the job
-	if err := svc2.runner(context.Background(), job); err != nil {
+	if _, err := svc2.runner(context.Background(), job); err != nil {
 		t.Fatalf("runner: %v", err)
 	}
 

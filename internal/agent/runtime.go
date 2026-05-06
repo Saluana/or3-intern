@@ -2345,8 +2345,11 @@ func toToolDefs(reg *tools.Registry) []providers.ToolDef {
 // Cron runner helper: turns a job into a bus event message
 // CronRunner adapts the event bus into a cron.Runner.
 func CronRunner(b *bus.Bus, defaultSessionKey string) cron.Runner {
-	return func(ctx context.Context, job cron.CronJob) error {
+	return func(ctx context.Context, job cron.CronJob) (cron.RunResult, error) {
 		_ = ctx
+		if kind := strings.TrimSpace(job.Payload.Kind); kind != "" && kind != cron.PayloadAgentTurn && kind != cron.PayloadSystemEvent {
+			return cron.RunResult{}, fmt.Errorf("unsupported cron payload kind for agent runner: %s", kind)
+		}
 		msg := job.Payload.Message
 		if strings.TrimSpace(msg) == "" {
 			msg = "cron job: " + job.Name
@@ -2358,9 +2361,9 @@ func CronRunner(b *bus.Bus, defaultSessionKey string) cron.Runner {
 		}
 		ev := bus.Event{Type: bus.EventCron, SessionKey: sessionKey, Channel: job.Payload.Channel, From: job.Payload.To, Message: msg, Meta: map[string]any{"job_id": job.ID}}
 		if ok := b.Publish(ev); !ok {
-			return fmt.Errorf("event bus full")
+			return cron.RunResult{}, fmt.Errorf("event bus full")
 		}
-		return nil
+		return cron.RunResult{}, nil
 	}
 }
 

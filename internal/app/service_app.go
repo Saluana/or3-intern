@@ -23,6 +23,7 @@ import (
 )
 
 type ServiceApp struct {
+	cfg             config.Config
 	runtime         *agent.Runtime
 	jobs            *agent.JobRegistry
 	subagentManager *agent.SubagentManager
@@ -36,7 +37,7 @@ func NewServiceApp(cfg config.Config, runtime *agent.Runtime, jobs *agent.JobReg
 }
 
 func NewServiceAppWithAgentCLI(cfg config.Config, runtime *agent.Runtime, jobs *agent.JobRegistry, subagentManager *agent.SubagentManager, agentCLIManager *agentcli.Manager, control *controlplane.Service) *ServiceApp {
-	app := &ServiceApp{runtime: runtime, jobs: jobs, subagentManager: subagentManager, agentCLIManager: agentCLIManager, control: control}
+	app := &ServiceApp{cfg: cfg, runtime: runtime, jobs: jobs, subagentManager: subagentManager, agentCLIManager: agentCLIManager, control: control}
 	if control != nil {
 		if authSvc, err := auth.NewService(cfg, control.DB, control.Audit); err == nil {
 			app.auth = authSvc
@@ -650,13 +651,17 @@ func (a *ServiceApp) AbortJob(ctx context.Context, jobID string) (bool, string, 
 
 // DetectAgentCLIRunners returns runner info for all registered external CLIs.
 func (a *ServiceApp) DetectAgentCLIRunners(ctx context.Context) ([]agentcli.RunnerInfo, error) {
-	if a == nil || a.agentCLIManager == nil {
-		return nil, fmt.Errorf("agent CLI manager is not available")
+	if a == nil {
+		return nil, fmt.Errorf("service app is not available")
 	}
-	if a.agentCLIManager.Registry == nil {
-		return nil, fmt.Errorf("runner registry is not configured")
+	if a.agentCLIManager != nil {
+		if a.agentCLIManager.Registry == nil {
+			return nil, fmt.Errorf("runner registry is not configured")
+		}
+		return a.agentCLIManager.Registry.DetectAll(ctx, a.agentCLIManager.DetectOptions()), nil
 	}
-	return a.agentCLIManager.Registry.DetectAll(ctx, a.agentCLIManager.DetectOptions()), nil
+	detectManager := &agentcli.Manager{Cfg: a.cfg.AgentCLI}
+	return agentcli.NewDefaultRegistry().DetectAll(ctx, detectManager.DetectOptions()), nil
 }
 
 // StartAgentCLIRun enqueues a new external CLI run.

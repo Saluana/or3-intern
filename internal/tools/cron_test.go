@@ -29,8 +29,8 @@ func makeTestCronService(t *testing.T) *cron.Service {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron.json")
-	svc := cron.New(path, func(ctx context.Context, job cron.CronJob) error {
-		return nil
+	svc := cron.New(path, func(ctx context.Context, job cron.CronJob) (cron.RunResult, error) {
+		return cron.RunResult{}, nil
 	})
 	mustStartCronService(t, svc)
 	t.Cleanup(func() { svc.Stop() })
@@ -203,9 +203,9 @@ func TestCronTool_Run(t *testing.T) {
 	ran := false
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron.json")
-	svc := cron.New(path, func(ctx context.Context, job cron.CronJob) error {
+	svc := cron.New(path, func(ctx context.Context, job cron.CronJob) (cron.RunResult, error) {
 		ran = true
-		return nil
+		return cron.RunResult{}, nil
 	})
 	if err := svc.Start(); err != nil {
 		t.Fatalf("cron.Start: %v", err)
@@ -241,8 +241,8 @@ func TestCronTool_Run(t *testing.T) {
 func TestCronTool_Run_NotEnabled_NoForce(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron.json")
-	svc := cron.New(path, func(ctx context.Context, job cron.CronJob) error {
-		return nil
+	svc := cron.New(path, func(ctx context.Context, job cron.CronJob) (cron.RunResult, error) {
+		return cron.RunResult{}, nil
 	})
 	mustStartCronService(t, svc)
 	defer svc.Stop()
@@ -271,8 +271,8 @@ func TestCronTool_Run_NotEnabled_NoForce(t *testing.T) {
 func TestCronTool_Run_WithError(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron.json")
-	svc := cron.New(path, func(ctx context.Context, job cron.CronJob) error {
-		return errors.New("runner failed")
+	svc := cron.New(path, func(ctx context.Context, job cron.CronJob) (cron.RunResult, error) {
+		return cron.RunResult{}, errors.New("runner failed")
 	})
 	mustStartCronService(t, svc)
 	defer svc.Stop()

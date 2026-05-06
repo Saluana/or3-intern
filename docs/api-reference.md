@@ -434,6 +434,28 @@ Create/update job shape:
 }
 ```
 
+External agent CLI scheduled job shape:
+
+```json
+{
+  "name": "Weekly Codex review",
+  "enabled": true,
+  "schedule": { "kind": "cron", "expr": "0 9 * * 1" },
+  "payload": {
+    "kind": "agent_cli_run",
+    "session_key": "cron:agents",
+    "agent_run": {
+      "runner_id": "codex",
+      "task": "Review the repository for regressions and summarize risks.",
+      "mode": "review",
+      "isolation": "host_readonly"
+    }
+  }
+}
+```
+
+For `agent_cli_run`, `agent_run.runner_id` and `agent_run.task` are required. Missing `mode` defaults to `review`; missing `isolation` defaults to `host_readonly`. A cron run is marked `ok` once the external agent job is enqueued; completion status is tracked through `/internal/v1/agent-runs/{id}` and job stream APIs.
+
 Job responses include scheduler state:
 
 ```json
@@ -445,7 +467,9 @@ Job responses include scheduler state:
     "state": {
       "next_run_at_ms": 1788300000000,
       "last_run_at_ms": 1788213600000,
-      "last_status": "ok"
+      "last_status": "ok",
+      "last_enqueued_job_id": "job-agentcli-abc123def456",
+      "last_enqueued_run_id": "acr_abc123def456"
     }
   }
 }

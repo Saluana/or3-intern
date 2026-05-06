@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"or3-intern/internal/agent"
+	"or3-intern/internal/agentcli"
 	"or3-intern/internal/approval"
+	"or3-intern/internal/config"
 	"or3-intern/internal/db"
 	"or3-intern/internal/providers"
 	"or3-intern/internal/tools"
@@ -65,6 +67,34 @@ func TestReplayToolCall_UsesRestrictedRegistryContext(t *testing.T) {
 	}
 	if out != "ok" {
 		t.Fatalf("expected ok, got %q", out)
+	}
+}
+
+func TestDetectAgentCLIRunnersWithoutManager(t *testing.T) {
+	app := NewServiceAppWithAgentCLI(config.Default(), nil, nil, nil, nil, nil)
+
+	runners, err := app.DetectAgentCLIRunners(context.Background())
+	if err != nil {
+		t.Fatalf("DetectAgentCLIRunners: %v", err)
+	}
+	if len(runners) == 0 {
+		t.Fatal("expected runner detection results")
+	}
+	foundOR3 := false
+	foundExternal := false
+	for _, runner := range runners {
+		if runner.ID == string(agentcli.RunnerOR3) {
+			foundOR3 = true
+		}
+		if runner.ID == string(agentcli.RunnerCodex) {
+			foundExternal = true
+		}
+	}
+	if !foundOR3 {
+		t.Fatalf("expected built-in or3 runner in %#v", runners)
+	}
+	if !foundExternal {
+		t.Fatalf("expected external runners in %#v", runners)
 	}
 }
 

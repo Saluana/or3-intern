@@ -257,6 +257,14 @@ func TestOr3NetCompatibilityFixtures_Responses(t *testing.T) {
 		if err := json.NewDecoder(rec.Body).Decode(&actual); err != nil {
 			t.Fatalf("Decode: %v", err)
 		}
+		if processID, ok := actual["processId"].(float64); !ok || processID <= 0 {
+			t.Fatalf("expected health processId, got %#v", actual["processId"])
+		}
+		if startedAt, ok := actual["startedAt"].(string); !ok || strings.TrimSpace(startedAt) == "" {
+			t.Fatalf("expected health startedAt, got %#v", actual["startedAt"])
+		}
+		actual["processId"] = "__PROCESS_ID__"
+		actual["startedAt"] = "__STARTED_AT__"
 		var expected map[string]any
 		loadFixtureJSON(t, "service_contract/health-response.json", &expected)
 		if !reflect.DeepEqual(actual, expected) {

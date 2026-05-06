@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -33,6 +34,8 @@ const (
 	defaultListLimit = 100
 	maxListLimit     = 200
 )
+
+var processStartedAt = time.Now().UTC()
 
 type Service struct {
 	Config          config.Config
@@ -93,6 +96,8 @@ type HealthReport struct {
 	JobRegistryAvailable    bool   `json:"jobRegistryAvailable"`
 	SubagentManagerEnabled  bool   `json:"subagentManagerEnabled"`
 	ApprovalBrokerAvailable bool   `json:"approvalBrokerAvailable"`
+	ProcessID               int    `json:"processId"`
+	StartedAt               string `json:"startedAt"`
 }
 
 type ReadinessReport struct {
@@ -182,6 +187,8 @@ func (s *Service) GetHealth() HealthReport {
 		JobRegistryAvailable:    s != nil && s.Jobs != nil,
 		SubagentManagerEnabled:  s != nil && s.SubagentManager != nil,
 		ApprovalBrokerAvailable: s != nil && s.Broker != nil,
+		ProcessID:               os.Getpid(),
+		StartedAt:               processStartedAt.Format(time.RFC3339Nano),
 	}
 	if !report.RuntimeAvailable || !report.JobRegistryAvailable {
 		report.Status = "degraded"

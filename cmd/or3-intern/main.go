@@ -172,6 +172,27 @@ func roleProviderVision(cfg config.Config, provider string) bool {
 	return ok && profile.EnableVision
 }
 
+func runtimeModelConfigFromConfig(cfg config.Config) agent.RuntimeModelConfig {
+	chatRole := cfg.ModelRole(config.ModelRoleChat)
+	subagentRole := cfg.ModelRole(config.ModelRoleSubagents)
+	contextRole := cfg.ModelRole(config.ModelRoleContextManager)
+	live := agent.RuntimeModelConfig{
+		Provider:         newProviderClient(cfg),
+		Model:            chatRole.Primary.Model,
+		Temperature:      roleTemperatureOrDefault(chatRole, cfg.Provider.Temperature),
+		SubagentProvider: newRoleProviderClient(cfg, config.ModelRoleSubagents),
+		SubagentModel:    subagentRole.Primary.Model,
+		ContextManagerModel: serviceFirstNonEmpty(
+			cfg.ContextManager.Model,
+			contextRole.Primary.Model,
+		),
+	}
+	if cfg.ContextManager.Enabled {
+		live.ContextManagerProvider = newContextManagerProviderClient(cfg)
+	}
+	return live
+}
+
 func main() {
 	cfgPath, args, showHelp, unsafeDev, advancedHelp, err := parseRootCLIArgs(os.Args[1:], os.Stderr)
 	if err != nil {
@@ -556,6 +577,7 @@ func main() {
 	if cfg.ContextManager.Enabled {
 		rt.ContextManagerProvider = newContextManagerProviderClient(cfg)
 	}
+	rt.ApplyLiveModelConfig(runtimeModelConfigFromConfig(cfg))
 	var serviceJobs *agent.JobRegistry
 	if cmd == "service" {
 		serviceJobs = agent.NewJobRegistry(0, 0)

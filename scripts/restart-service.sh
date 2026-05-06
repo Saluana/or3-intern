@@ -165,16 +165,18 @@ stop_service() {
       done < <(find_service_pids)
 
       if [[ ${#current_pids[@]} -gt 0 ]]; then
-        local saw_replacement=true
+        local saw_replacement=false
         local old_pid
         for current_pid in "${current_pids[@]}"; do
+          local matched_old=false
           for old_pid in "${stopped_pids[@]}"; do
             if [[ "$current_pid" == "$old_pid" ]]; then
-              saw_replacement=false
+              matched_old=true
               break
             fi
           done
-          if [[ "$saw_replacement" == true ]]; then
+          if [[ "$matched_old" == false ]]; then
+            saw_replacement=true
             break
           fi
         done
@@ -242,7 +244,7 @@ start_service() {
   echo "$pid" > "$pid_file"
 
   local attempt
-  for attempt in {1..20}; do
+  for attempt in {1..40}; do
     if ! kill -0 "$pid" 2>/dev/null; then
       echo "Service exited before becoming ready. Recent log output:" >&2
       tail -n 20 "$log_file" >&2 || true
@@ -257,6 +259,7 @@ start_service() {
   done
 
   echo "Service process is running but no listening socket was detected yet. Check $log_file." >&2
+  return 1
 }
 
 cd "$repo_root"

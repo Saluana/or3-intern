@@ -2820,6 +2820,7 @@ type serviceActionResponse struct {
 	Message     string `json:"message,omitempty"`
 	ApprovalID  int64  `json:"approval_id,omitempty"`
 	OperationID string `json:"operation_id,omitempty"`
+	LogPath     string `json:"log_path,omitempty"`
 }
 
 func (s *serviceServer) handleApp(w http.ResponseWriter, r *http.Request) {
@@ -3038,7 +3039,9 @@ func (s *serviceServer) handleRestartServiceAction(w http.ResponseWriter, r *htt
 		writeServiceJSON(w, http.StatusForbidden, serviceErrorPayload(r, reason))
 		return
 	}
-	if err := startDetachedServiceRestart(scriptPath, workingDir, s.unsafeDev); err != nil {
+	operationID := newServiceRequestID()
+	logPath, err := startDetachedServiceRestart(scriptPath, workingDir, s.unsafeDev, operationID)
+	if err != nil {
 		writeServiceError(w, r, http.StatusBadGateway, "restart failed to start", err)
 		return
 	}
@@ -3046,24 +3049,69 @@ func (s *serviceServer) handleRestartServiceAction(w http.ResponseWriter, r *htt
 		ActionID:    "restart-service",
 		Status:      "accepted",
 		Message:     "restart requested",
-		OperationID: newServiceRequestID(),
+		OperationID: operationID,
+		LogPath:     logPath,
 	})
 }
 
-func startDetachedServiceRestart(scriptPath, workingDir string, unsafeDev bool) error {
+func startDetachedServiceRestart(scriptPath, workingDir string, unsafeDev bool, operationID string) (string, error) {
 	scriptPath = strings.TrimSpace(scriptPath)
 	workingDir = strings.TrimSpace(workingDir)
 	if scriptPath == "" || workingDir == "" {
-		return fmt.Errorf("restart script is unavailable")
+		return "", fmt.Errorf("restart script is unavailable")
 	}
+	logPath, err := serviceRestartOperationLogPath(workingDir, operationID)
+	if err != nil {
+		return "", err
+	}
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return "", fmt.Errorf("restart log unavailable: %w", err)
+	}
+	defer logFile.Close()
+	fmt.Fprintf(logFile, "%s restart requested by pid %d\n", time.Now().UTC().Format(time.RFC3339Nano), os.Getpid())
 	cmd := exec.Command(scriptPath, "restart")
 	cmd.Dir = workingDir
+	cmd.Env = append(os.Environ(), "OR3_SERVICE_RESTART_LOG="+logPath)
 	if unsafeDev {
-		cmd.Env = append(os.Environ(), "OR3_SERVICE_UNSAFE_DEV=true")
+		cmd.Env = append(cmd.Env, "OR3_SERVICE_UNSAFE_DEV=true")
 	}
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
-	return cmd.Start()
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	if err := cmd.Start(); err != nil {
+		return logPath, err
+	}
+	return logPath, nil
+}
+
+func serviceRestartOperationLogPath(workingDir, operationID string) (string, error) {
+	workingDir = strings.TrimSpace(workingDir)
+	if workingDir == "" {
+		return "", fmt.Errorf("restart working directory is unavailable")
+	}
+	operationID = serviceRestartLogID(operationID)
+	if operationID == "" {
+		operationID = serviceRestartLogID(newServiceRequestID())
+	}
+	runDir := filepath.Join(workingDir, ".run")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		return "", err
+	}
+	return filepath.Join(runDir, "service-restart-"+operationID+".log"), nil
+}
+
+func serviceRestartLogID(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 func (s *serviceServer) findServiceRestartScript() (scriptPath string, workingDir string, ok bool) {
@@ -4773,16 +4821,12 @@ func (s *serviceServer) handleConfigure(w http.ResponseWriter, r *http.Request) 
 				return
 			}
 		}
-		path := s.configPath
-		if strings.TrimSpace(path) == "" {
-			path = cfgPathOrDefault("")
-		}
-		if err := config.Save(path, next); err != nil {
+		path, err := s.saveConfigureConfig(next)
+		if err != nil {
 			writeServiceError(w, r, http.StatusBadGateway, "config save failed", err)
 			return
 		}
-		s.config = next
-		writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true, "config_path": path})
+		writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true, "config_path": path, "live_reloaded": []string{"model_routing"}})
 	default:
 		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "configure route not found"})
 	}
@@ -4796,8 +4840,28 @@ func (s *serviceServer) saveConfigureConfig(next config.Config) (string, error) 
 	if err := config.Save(path, next); err != nil {
 		return path, err
 	}
-	s.config = next
+	s.applyLiveConfig(next)
 	return path, nil
+}
+
+func (s *serviceServer) applyLiveConfig(next config.Config) {
+	if s == nil {
+		return
+	}
+	s.config = next
+	if s.runtime != nil {
+		s.runtime.ApplyLiveModelConfig(runtimeModelConfigFromConfig(next))
+	}
+	if s.controlSvc != nil {
+		s.controlSvc.Config = next
+		s.controlSvc.Provider = newProviderClient(next)
+	}
+	if s.appSvc != nil {
+		s.appSvc.SetConfig(next)
+	}
+	s.modelCatalogMu.Lock()
+	s.modelCatalogCache = nil
+	s.modelCatalogMu.Unlock()
 }
 
 func serviceNormalizeProviderKey(value string) string {

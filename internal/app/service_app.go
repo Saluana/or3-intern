@@ -46,6 +46,18 @@ func NewServiceAppWithAgentCLI(cfg config.Config, runtime *agent.Runtime, jobs *
 	return app
 }
 
+func (a *ServiceApp) SetConfig(cfg config.Config) {
+	if a == nil {
+		return
+	}
+	a.cfg = cfg
+	if a.control != nil {
+		if authSvc, err := auth.NewService(cfg, a.control.DB, a.control.Audit); err == nil {
+			a.auth = authSvc
+		}
+	}
+}
+
 type TurnRequest struct {
 	SessionKey    string
 	Message       string

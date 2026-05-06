@@ -689,7 +689,9 @@ func TestServiceConfigureApply_PersistsConfigChanges(t *testing.T) {
 	if err := config.Save(cfgPath, cfg); err != nil {
 		t.Fatalf("seed config: %v", err)
 	}
-	server := &serviceServer{config: cfg, configPath: cfgPath}
+	runtime := &agent.Runtime{}
+	server := &serviceServer{config: cfg, configPath: cfgPath, runtime: runtime}
+	_ = server.control()
 	reqBody := strings.NewReader(`{
 		"changes":[
 			{"section":"provider","field":"provider_model","op":"set","value":"gpt-4.1"},
@@ -715,6 +717,12 @@ func TestServiceConfigureApply_PersistsConfigChanges(t *testing.T) {
 	}
 	if loaded.Provider.Model != "gpt-4.1" {
 		t.Fatalf("expected provider model update, got %q", loaded.Provider.Model)
+	}
+	if live := runtime.CurrentModelConfig(); live.Model != "gpt-4.1" || live.SubagentModel != "gpt-4.1" {
+		t.Fatalf("expected live runtime model update, got %#v", live)
+	}
+	if server.controlSvc == nil || server.controlSvc.Config.Provider.Model != "gpt-4.1" {
+		t.Fatalf("expected cached controlplane config update, got %#v", server.controlSvc)
 	}
 	if !loaded.Service.Enabled {
 		t.Fatal("expected service_enabled toggle to set true")
@@ -3435,7 +3443,7 @@ func TestServiceRestartActionRoute_StartsScript(t *testing.T) {
 	workDir := t.TempDir()
 	mustUseServiceTestWorkingDir(t, workDir)
 	marker := filepath.Join(workDir, "restart-ran")
-	writeServiceTestRestartScript(t, workDir, "#!/bin/sh\nprintf 'ok' > "+strconv.Quote(marker)+"\n")
+	writeServiceTestRestartScript(t, workDir, "#!/bin/sh\necho script-output\nprintf 'ok' > "+strconv.Quote(marker)+"\n")
 
 	cfg := config.Default()
 	cfg.Service.Secret = strings.Repeat("r", 32)
@@ -3460,7 +3468,26 @@ func TestServiceRestartActionRoute_StartsScript(t *testing.T) {
 	if payload["action_id"] != "restart-service" || payload["status"] != "accepted" {
 		t.Fatalf("unexpected restart action payload: %#v", payload)
 	}
+	if operationID, ok := payload["operation_id"].(string); !ok || strings.TrimSpace(operationID) == "" {
+		t.Fatalf("expected operation_id in restart payload, got %#v", payload)
+	}
+	logPath, ok := payload["log_path"].(string)
+	if !ok {
+		t.Fatalf("expected restart log path under .run, got %#v", payload["log_path"])
+	}
+	resolvedLogDir, logDirErr := filepath.EvalSymlinks(filepath.Dir(logPath))
+	resolvedRunDir, runDirErr := filepath.EvalSymlinks(filepath.Join(workDir, ".run"))
+	if logDirErr != nil || runDirErr != nil || resolvedLogDir != resolvedRunDir {
+		t.Fatalf("expected restart log path under .run, got %q", logPath)
+	}
 	waitForFile(t, marker)
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read restart log: %v", err)
+	}
+	if !strings.Contains(string(logData), "restart requested") || !strings.Contains(string(logData), "script-output") {
+		t.Fatalf("expected restart log to include operation and script output, got %q", string(logData))
+	}
 }
 
 func TestServiceRestartActionRoute_PreservesUnsafeDevMode(t *testing.T) {

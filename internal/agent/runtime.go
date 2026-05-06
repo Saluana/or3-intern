@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"or3-intern/internal/approval"
@@ -117,6 +118,7 @@ type Runtime struct {
 	DefaultScopeKey             string
 	LinkDirectMessages          bool
 	IdentityScopeMap            map[string]string
+	modelConfig                 atomic.Value
 
 	locksMu     sync.Mutex
 	locks       map[string]*sessionLock
@@ -125,6 +127,55 @@ type Runtime struct {
 	idleMu      sync.Mutex
 	idleTimers  map[string]*time.Timer
 	idleVersion map[string]uint64
+}
+
+// RuntimeModelConfig contains the model/provider choices that can be swapped for new turns.
+type RuntimeModelConfig struct {
+	Provider               *providers.Client
+	Model                  string
+	Temperature            float64
+	SubagentProvider       *providers.Client
+	SubagentModel          string
+	ContextManagerProvider *providers.Client
+	ContextManagerModel    string
+}
+
+func (r *Runtime) ApplyLiveModelConfig(cfg RuntimeModelConfig) {
+	if r == nil {
+		return
+	}
+	r.modelConfig.Store(cfg)
+}
+
+func (r *Runtime) CurrentModelConfig() RuntimeModelConfig {
+	if r == nil {
+		return RuntimeModelConfig{}
+	}
+	if stored := r.modelConfig.Load(); stored != nil {
+		if cfg, ok := stored.(RuntimeModelConfig); ok {
+			return cfg
+		}
+	}
+	return RuntimeModelConfig{
+		Provider:               r.Provider,
+		Model:                  r.Model,
+		Temperature:            r.Temperature,
+		SubagentProvider:       r.SubagentProvider,
+		SubagentModel:          r.SubagentModel,
+		ContextManagerProvider: r.ContextManagerProvider,
+		ContextManagerModel:    r.ContextManager.Model,
+	}
+}
+
+func (r *Runtime) modelConfigForEvent(eventType bus.EventType) RuntimeModelConfig {
+	cfg := r.CurrentModelConfig()
+	if eventType == bus.EventSystem && cfg.SubagentProvider != nil {
+		cfg.Provider = cfg.SubagentProvider
+		if strings.TrimSpace(cfg.SubagentModel) != "" {
+			cfg.Model = cfg.SubagentModel
+		}
+	}
+	return cfg
 }
 
 type sessionQuotaState struct {
@@ -839,6 +890,9 @@ func (r *Runtime) contextManagerProvider() *providers.Client {
 	if r == nil {
 		return nil
 	}
+	if cfg := r.CurrentModelConfig(); cfg.ContextManagerProvider != nil {
+		return cfg.ContextManagerProvider
+	}
 	if r.ContextManagerProvider != nil {
 		return r.ContextManagerProvider
 	}
@@ -851,6 +905,9 @@ func (r *Runtime) contextManagerProvider() *providers.Client {
 func (r *Runtime) contextManagerModel() string {
 	if r == nil {
 		return ""
+	}
+	if model := strings.TrimSpace(r.CurrentModelConfig().ContextManagerModel); model != "" {
+		return model
 	}
 	if model := strings.TrimSpace(r.ContextManager.Model); model != "" {
 		return model
@@ -1193,19 +1250,15 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 			loopLimit += maxLoops
 		}
 		turnTools := r.exposedToolsForTurn(ctx, reg, messages, channel)
-		provider := r.Provider
-		model := r.Model
-		if eventType == bus.EventSystem && r.SubagentProvider != nil {
-			provider = r.SubagentProvider
-			if strings.TrimSpace(r.SubagentModel) != "" {
-				model = r.SubagentModel
-			}
+		modelCfg := r.modelConfigForEvent(eventType)
+		if modelCfg.Provider == nil {
+			return "", false, fmt.Errorf("provider not configured")
 		}
 		req := providers.ChatCompletionRequest{
-			Model:       model,
+			Model:       modelCfg.Model,
 			Messages:    messages,
 			Tools:       toToolDefs(turnTools),
-			Temperature: r.Temperature,
+			Temperature: modelCfg.Temperature,
 		}
 
 		var resp providers.ChatCompletionResponse
@@ -1214,7 +1267,7 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 		var swOnce sync.Once
 		streamer := r.streamerForContext(ctx)
 		if streamer != nil {
-			resp, err = provider.ChatStream(ctx, req, func(text string) {
+			resp, err = modelCfg.Provider.ChatStream(ctx, req, func(text string) {
 				if observer != nil {
 					observer.OnTextDelta(ctx, text)
 				}
@@ -1234,7 +1287,7 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 				}
 			})
 		} else {
-			resp, err = provider.Chat(ctx, req)
+			resp, err = modelCfg.Provider.Chat(ctx, req)
 		}
 		if err != nil {
 			if sw != nil {
@@ -1370,17 +1423,18 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 }
 
 func (r *Runtime) narrateApprovalRequired(ctx context.Context, messages []providers.ChatMessage) (string, bool) {
-	if r == nil || r.Provider == nil {
+	modelCfg := r.CurrentModelConfig()
+	if r == nil || modelCfg.Provider == nil {
 		return "", false
 	}
 	prompt := append(append([]providers.ChatMessage{}, messages...), providers.ChatMessage{
 		Role:    "system",
 		Content: "The last tool result indicates that approval is required before work can continue. Briefly explain to the user what needs approval and why. Do not call any tools. Keep the reply short and concrete.",
 	})
-	resp, err := r.Provider.Chat(ctx, providers.ChatCompletionRequest{
-		Model:       r.Model,
+	resp, err := modelCfg.Provider.Chat(ctx, providers.ChatCompletionRequest{
+		Model:       modelCfg.Model,
 		Messages:    prompt,
-		Temperature: r.Temperature,
+		Temperature: modelCfg.Temperature,
 	})
 	if err != nil || len(resp.Choices) == 0 {
 		return "", false

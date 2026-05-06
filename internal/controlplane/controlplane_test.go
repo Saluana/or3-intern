@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -128,6 +129,9 @@ func TestServiceHealthAndReadiness(t *testing.T) {
 	report := New(cfg, nil, nil, nil, nil).GetHealth()
 	if report.Status != "degraded" || report.RuntimeAvailable {
 		t.Fatalf("unexpected health report: %#v", report)
+	}
+	if report.ProcessID != os.Getpid() || strings.TrimSpace(report.StartedAt) == "" {
+		t.Fatalf("expected process identity in health report, got %#v", report)
 	}
 	readiness := New(cfg, nil, nil, nil, nil).GetReadiness()
 	if readiness.Status == "" || len(readiness.Findings) == 0 {

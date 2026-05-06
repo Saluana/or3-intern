@@ -127,9 +127,9 @@ type Config struct {
 	ConsolidationMaxMessages         int             `json:"consolidationMaxMessages"`
 	ConsolidationMaxInputChars       int             `json:"consolidationMaxInputChars"`
 	ConsolidationAsyncTimeoutSeconds int             `json:"consolidationAsyncTimeoutSeconds"`
-	Subagents                        SubagentsConfig  `json:"subagents"`
-	AgentCLI                         AgentCLIConfig   `json:"agentCLI"`
-	RuntimeProfile                   RuntimeProfile   `json:"runtimeProfile"`
+	Subagents                        SubagentsConfig `json:"subagents"`
+	AgentCLI                         AgentCLIConfig  `json:"agentCLI"`
+	RuntimeProfile                   RuntimeProfile  `json:"runtimeProfile"`
 
 	IdentityFile string         `json:"identityFile"`
 	MemoryFile   string         `json:"memoryFile"`
@@ -141,6 +141,9 @@ type Config struct {
 	Security     SecurityConfig `json:"security"`
 
 	Provider          ProviderConfig       `json:"provider"`
+	Providers         ProviderProfiles     `json:"providers,omitempty"`
+	ModelRouting      ModelRoutingConfig   `json:"modelRouting,omitempty"`
+	FavoriteModels    FavoriteModelsConfig `json:"favoriteModels,omitempty"`
 	Tools             ToolsConfig          `json:"tools"`
 	Hardening         HardeningConfig      `json:"hardening"`
 	Cron              CronConfig           `json:"cron"`
@@ -266,6 +269,82 @@ type ProviderConfig struct {
 	EmbedDimensions int     `json:"embedDimensions"`
 	EnableVision    bool    `json:"enableVision"`
 	TimeoutSeconds  int     `json:"timeoutSeconds"`
+}
+
+type ProviderProfiles map[string]ProviderProfileConfig
+
+type ProviderProfileConfig struct {
+	Label             string `json:"label,omitempty"`
+	APIBase           string `json:"apiBase"`
+	APIKey            string `json:"apiKey,omitempty"`
+	TimeoutSeconds    int    `json:"timeoutSeconds,omitempty"`
+	EnableVision      bool   `json:"enableVision,omitempty"`
+	DefaultChatModel  string `json:"defaultChatModel,omitempty"`
+	DefaultEmbedModel string `json:"defaultEmbedModel,omitempty"`
+	DefaultDimensions int    `json:"defaultDimensions,omitempty"`
+}
+
+type ModelRoutingConfig struct {
+	Chat           ModelRoleConfig `json:"chat,omitempty"`
+	Agents         ModelRoleConfig `json:"agents,omitempty"`
+	Subagents      ModelRoleConfig `json:"subagents,omitempty"`
+	Summarization  ModelRoleConfig `json:"summarization,omitempty"`
+	ContextManager ModelRoleConfig `json:"contextManager,omitempty"`
+	Embeddings     ModelRoleConfig `json:"embeddings,omitempty"`
+	Fallback       ModelRoleConfig `json:"fallback,omitempty"`
+}
+
+type ModelRoleConfig struct {
+	Primary         ModelRef   `json:"primary,omitempty"`
+	Fallbacks       []ModelRef `json:"fallbacks,omitempty"`
+	Temperature     *float64   `json:"temperature,omitempty"`
+	EmbedDimensions int        `json:"embedDimensions,omitempty"`
+}
+
+type ModelRef struct {
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model,omitempty"`
+}
+
+type FavoriteModelsConfig map[string][]FavoriteModelConfig
+
+type FavoriteModelConfig struct {
+	Model string `json:"model"`
+	Label string `json:"label,omitempty"`
+}
+
+const (
+	ModelRoleChat           = "chat"
+	ModelRoleAgents         = "agents"
+	ModelRoleSubagents      = "subagents"
+	ModelRoleSummarization  = "summarization"
+	ModelRoleContextManager = "contextManager"
+	ModelRoleEmbeddings     = "embeddings"
+	ModelRoleFallback       = "fallback"
+)
+
+func (cfg Config) ModelRole(role string) ModelRoleConfig {
+	switch strings.TrimSpace(role) {
+	case ModelRoleAgents:
+		return cfg.ModelRouting.Agents
+	case ModelRoleSubagents:
+		return cfg.ModelRouting.Subagents
+	case ModelRoleSummarization:
+		return cfg.ModelRouting.Summarization
+	case ModelRoleContextManager:
+		return cfg.ModelRouting.ContextManager
+	case ModelRoleEmbeddings:
+		return cfg.ModelRouting.Embeddings
+	case ModelRoleFallback:
+		return cfg.ModelRouting.Fallback
+	default:
+		return cfg.ModelRouting.Chat
+	}
+}
+
+func (cfg Config) ProviderProfile(provider string) (ProviderProfileConfig, bool) {
+	profile, ok := cfg.Providers[normalizeProviderKey(provider)]
+	return profile, ok
 }
 
 // ToolsConfig configures built-in tools and external MCP server integrations.
@@ -818,6 +897,46 @@ func Default() Config {
 			EmbedDimensions: 0,
 			TimeoutSeconds:  60,
 		},
+		Providers: ProviderProfiles{
+			"openai": {
+				Label:             "OpenAI",
+				APIBase:           "https://api.openai.com/v1",
+				APIKey:            os.Getenv("OPENAI_API_KEY"),
+				TimeoutSeconds:    60,
+				DefaultChatModel:  "gpt-4.1-mini",
+				DefaultEmbedModel: "text-embedding-3-small",
+			},
+			"openrouter": {
+				Label:             "OpenRouter",
+				APIBase:           "https://openrouter.ai/api/v1",
+				APIKey:            os.Getenv("OPENROUTER_API_KEY"),
+				TimeoutSeconds:    60,
+				DefaultChatModel:  "openai/gpt-4o-mini",
+				DefaultEmbedModel: "",
+			},
+			"custom": {
+				Label:          "Custom",
+				APIBase:        "",
+				TimeoutSeconds: 60,
+			},
+		},
+		ModelRouting: ModelRoutingConfig{
+			Chat:           ModelRoleConfig{Primary: ModelRef{Provider: "openai", Model: "gpt-4.1-mini"}},
+			Agents:         ModelRoleConfig{Primary: ModelRef{Provider: "openai", Model: "gpt-4.1-mini"}},
+			Subagents:      ModelRoleConfig{Primary: ModelRef{Provider: "openai", Model: "gpt-4.1-mini"}},
+			Summarization:  ModelRoleConfig{Primary: ModelRef{Provider: "openai", Model: "gpt-4.1-mini"}},
+			ContextManager: ModelRoleConfig{Primary: ModelRef{Provider: "openai", Model: "gpt-4.1-mini"}},
+			Embeddings:     ModelRoleConfig{Primary: ModelRef{Provider: "openai", Model: "text-embedding-3-small"}},
+		},
+		FavoriteModels: FavoriteModelsConfig{
+			"openai": {
+				{Model: "gpt-4.1-mini", Label: "GPT-4.1 mini"},
+				{Model: "text-embedding-3-small", Label: "Small embeddings"},
+			},
+			"openrouter": {
+				{Model: "openai/gpt-4o-mini", Label: "GPT-4o mini"},
+			},
+		},
 		Tools: ToolsConfig{
 			BraveAPIKey:         os.Getenv("BRAVE_API_KEY"),
 			WebProxy:            "",
@@ -951,24 +1070,45 @@ func ApplyEnvOverrides(cfg *Config) {
 		cfg.ArtifactsDir = v
 	}
 	if v := os.Getenv("OR3_API_BASE"); v != "" {
+		providerKey := inferProviderKey(v)
 		cfg.Provider.APIBase = v
+		cfg.ModelRouting.Chat.Primary.Provider = providerKey
+		cfg.ModelRouting.Agents.Primary.Provider = providerKey
+		cfg.ModelRouting.Subagents.Primary.Provider = providerKey
+		cfg.ModelRouting.Summarization.Primary.Provider = providerKey
+		cfg.ModelRouting.ContextManager.Primary.Provider = providerKey
+		cfg.ModelRouting.Embeddings.Primary.Provider = providerKey
+		updateProviderProfile(cfg, providerKey, func(profile *ProviderProfileConfig) { profile.APIBase = v })
 	}
 	if v := os.Getenv("OR3_API_KEY"); v != "" {
 		cfg.Provider.APIKey = v
+		updateProviderProfile(cfg, inferProviderKey(cfg.Provider.APIBase), func(profile *ProviderProfileConfig) { profile.APIKey = v })
 	}
 	if v := os.Getenv("OR3_MODEL"); v != "" {
 		cfg.Provider.Model = v
+		cfg.ModelRouting.Chat.Primary.Model = v
+		cfg.ModelRouting.Agents.Primary.Model = v
+		cfg.ModelRouting.Subagents.Primary.Model = v
 	}
 	if v := os.Getenv("OR3_CONSOLIDATION_MODEL"); v != "" {
 		cfg.ConsolidationModel = v
+		cfg.ModelRouting.Summarization.Primary.Model = v
 	}
 	if v := os.Getenv("OR3_EMBED_MODEL"); v != "" {
 		cfg.Provider.EmbedModel = v
+		cfg.ModelRouting.Embeddings.Primary.Model = v
 	}
 	if v := os.Getenv("OR3_EMBED_DIMENSIONS"); v != "" {
 		if parsed, err := strconv.Atoi(v); err == nil {
 			cfg.Provider.EmbedDimensions = parsed
+			cfg.ModelRouting.Embeddings.EmbedDimensions = parsed
 		}
+	}
+	if v := os.Getenv("OPENAI_API_KEY"); v != "" {
+		updateProviderProfile(cfg, "openai", func(profile *ProviderProfileConfig) { profile.APIKey = v })
+	}
+	if v := os.Getenv("OPENROUTER_API_KEY"); v != "" {
+		updateProviderProfile(cfg, "openrouter", func(profile *ProviderProfileConfig) { profile.APIKey = v })
 	}
 	if v := os.Getenv("OR3_TELEGRAM_TOKEN"); v != "" {
 		cfg.Channels.Telegram.Token = v
@@ -1159,11 +1299,271 @@ func ApplyEnvOverrides(cfg *Config) {
 	}
 }
 
+func updateProviderProfile(cfg *Config, key string, update func(*ProviderProfileConfig)) {
+	profile := ensureProviderProfile(cfg, key)
+	if update != nil {
+		update(&profile)
+	}
+	cfg.Providers[normalizeProviderKey(key)] = profile
+}
+
+func ensureProviderProfile(cfg *Config, key string) ProviderProfileConfig {
+	if cfg.Providers == nil {
+		cfg.Providers = ProviderProfiles{}
+	}
+	key = normalizeProviderKey(key)
+	if key == "" {
+		key = "openai"
+	}
+	profile := cfg.Providers[key]
+	if strings.TrimSpace(profile.Label) == "" {
+		switch key {
+		case "openai":
+			profile.Label = "OpenAI"
+			if strings.TrimSpace(profile.APIBase) == "" {
+				profile.APIBase = "https://api.openai.com/v1"
+			}
+			if strings.TrimSpace(profile.DefaultChatModel) == "" {
+				profile.DefaultChatModel = "gpt-4.1-mini"
+			}
+			if strings.TrimSpace(profile.DefaultEmbedModel) == "" {
+				profile.DefaultEmbedModel = "text-embedding-3-small"
+			}
+		case "openrouter":
+			profile.Label = "OpenRouter"
+			if strings.TrimSpace(profile.APIBase) == "" {
+				profile.APIBase = "https://openrouter.ai/api/v1"
+			}
+			if strings.TrimSpace(profile.DefaultChatModel) == "" {
+				profile.DefaultChatModel = "openai/gpt-4o-mini"
+			}
+		default:
+			profile.Label = strings.ReplaceAll(key, "-", " ")
+		}
+	}
+	if profile.TimeoutSeconds <= 0 {
+		profile.TimeoutSeconds = 60
+	}
+	cfg.Providers[key] = profile
+	return profile
+}
+
+func normalizeProviderKey(key string) string {
+	key = strings.ToLower(strings.TrimSpace(key))
+	key = strings.ReplaceAll(key, " ", "-")
+	key = strings.Trim(key, "_-/")
+	return key
+}
+
+func inferProviderKey(apiBase string) string {
+	base := strings.ToLower(strings.TrimSpace(apiBase))
+	switch {
+	case strings.Contains(base, "openrouter.ai"):
+		return "openrouter"
+	case strings.Contains(base, "api.openai.com"):
+		return "openai"
+	default:
+		return "custom"
+	}
+}
+
+func normalizeModelRef(ref ModelRef, fallbackProvider, fallbackModel string) ModelRef {
+	ref.Provider = normalizeProviderKey(firstNonEmpty(ref.Provider, fallbackProvider))
+	ref.Model = strings.TrimSpace(firstNonEmpty(ref.Model, fallbackModel))
+	return ref
+}
+
+func normalizeModelRole(role ModelRoleConfig, fallback ModelRef) ModelRoleConfig {
+	role.Primary = normalizeModelRef(role.Primary, fallback.Provider, fallback.Model)
+	seen := map[string]struct{}{}
+	out := make([]ModelRef, 0, len(role.Fallbacks))
+	for _, ref := range role.Fallbacks {
+		ref = normalizeModelRef(ref, "", "")
+		if ref.Provider == "" || ref.Model == "" {
+			continue
+		}
+		key := ref.Provider + "\x00" + ref.Model
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, ref)
+	}
+	role.Fallbacks = out
+	if role.EmbedDimensions < 0 {
+		role.EmbedDimensions = 0
+	}
+	return role
+}
+
+func normalizeProviderRouting(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	if cfg.Providers == nil {
+		cfg.Providers = ProviderProfiles{}
+	}
+	legacyProvider := inferProviderKey(cfg.Provider.APIBase)
+	if strings.TrimSpace(cfg.Provider.APIBase) != "" || strings.TrimSpace(cfg.Provider.APIKey) != "" {
+		updateProviderProfile(cfg, legacyProvider, func(profile *ProviderProfileConfig) {
+			if strings.TrimSpace(cfg.Provider.APIBase) != "" {
+				profile.APIBase = strings.TrimSpace(cfg.Provider.APIBase)
+			}
+			if strings.TrimSpace(cfg.Provider.APIKey) != "" {
+				profile.APIKey = cfg.Provider.APIKey
+			}
+			if cfg.Provider.TimeoutSeconds > 0 {
+				profile.TimeoutSeconds = cfg.Provider.TimeoutSeconds
+			}
+			profile.EnableVision = cfg.Provider.EnableVision
+			if strings.TrimSpace(cfg.Provider.Model) != "" {
+				profile.DefaultChatModel = strings.TrimSpace(cfg.Provider.Model)
+			}
+			if strings.TrimSpace(cfg.Provider.EmbedModel) != "" {
+				profile.DefaultEmbedModel = strings.TrimSpace(cfg.Provider.EmbedModel)
+			}
+			if cfg.Provider.EmbedDimensions > 0 {
+				profile.DefaultDimensions = cfg.Provider.EmbedDimensions
+			}
+		})
+	}
+	ensureProviderProfile(cfg, "openai")
+	ensureProviderProfile(cfg, "openrouter")
+	ensureProviderProfile(cfg, "custom")
+
+	defaultCfg := Default()
+	if strings.TrimSpace(cfg.Provider.Model) != "" && (strings.TrimSpace(cfg.ModelRouting.Chat.Primary.Model) == "" || cfg.ModelRouting.Chat.Primary.Model == defaultCfg.ModelRouting.Chat.Primary.Model) {
+		cfg.ModelRouting.Chat.Primary.Model = strings.TrimSpace(cfg.Provider.Model)
+		cfg.ModelRouting.Agents.Primary.Model = strings.TrimSpace(cfg.Provider.Model)
+		cfg.ModelRouting.Subagents.Primary.Model = strings.TrimSpace(cfg.Provider.Model)
+	}
+	if strings.TrimSpace(cfg.Provider.EmbedModel) != "" && (strings.TrimSpace(cfg.ModelRouting.Embeddings.Primary.Model) == "" || cfg.ModelRouting.Embeddings.Primary.Model == defaultCfg.ModelRouting.Embeddings.Primary.Model) {
+		cfg.ModelRouting.Embeddings.Primary.Model = strings.TrimSpace(cfg.Provider.EmbedModel)
+	}
+	if cfg.Provider.EmbedDimensions > 0 && cfg.ModelRouting.Embeddings.EmbedDimensions <= 0 {
+		cfg.ModelRouting.Embeddings.EmbedDimensions = cfg.Provider.EmbedDimensions
+	}
+	if strings.TrimSpace(cfg.ConsolidationModel) != "" {
+		cfg.ModelRouting.Summarization.Primary.Model = strings.TrimSpace(cfg.ConsolidationModel)
+	}
+	if strings.TrimSpace(cfg.ContextManager.Model) != "" {
+		cfg.ModelRouting.ContextManager.Primary.Model = strings.TrimSpace(cfg.ContextManager.Model)
+	}
+
+	chatFallback := ModelRef{Provider: legacyProvider, Model: firstNonEmpty(cfg.Provider.Model, "gpt-4.1-mini")}
+	embedFallback := ModelRef{Provider: legacyProvider, Model: firstNonEmpty(cfg.Provider.EmbedModel, "text-embedding-3-small")}
+	cfg.ModelRouting.Chat = normalizeModelRole(cfg.ModelRouting.Chat, chatFallback)
+	cfg.ModelRouting.Agents = normalizeModelRole(cfg.ModelRouting.Agents, cfg.ModelRouting.Chat.Primary)
+	cfg.ModelRouting.Subagents = normalizeModelRole(cfg.ModelRouting.Subagents, cfg.ModelRouting.Agents.Primary)
+	cfg.ModelRouting.Summarization = normalizeModelRole(cfg.ModelRouting.Summarization, ModelRef{Provider: cfg.ModelRouting.Chat.Primary.Provider, Model: firstNonEmpty(cfg.ConsolidationModel, cfg.ModelRouting.Chat.Primary.Model)})
+	cfg.ModelRouting.ContextManager = normalizeModelRole(cfg.ModelRouting.ContextManager, ModelRef{Provider: cfg.ModelRouting.Summarization.Primary.Provider, Model: firstNonEmpty(cfg.ContextManager.Model, cfg.ModelRouting.Summarization.Primary.Model)})
+	cfg.ModelRouting.Embeddings = normalizeModelRole(cfg.ModelRouting.Embeddings, embedFallback)
+	cfg.ModelRouting.Fallback = normalizeModelRole(cfg.ModelRouting.Fallback, cfg.ModelRouting.Chat.Primary)
+	if cfg.ModelRouting.Embeddings.EmbedDimensions <= 0 && cfg.Provider.EmbedDimensions > 0 {
+		cfg.ModelRouting.Embeddings.EmbedDimensions = cfg.Provider.EmbedDimensions
+	}
+
+	for key, profile := range cfg.Providers {
+		normalized := normalizeProviderKey(key)
+		if normalized == "" {
+			delete(cfg.Providers, key)
+			continue
+		}
+		profile.APIBase = strings.TrimRight(strings.TrimSpace(profile.APIBase), "/")
+		profile.Label = strings.TrimSpace(profile.Label)
+		if profile.Label == "" {
+			profile.Label = normalized
+		}
+		if profile.TimeoutSeconds <= 0 {
+			profile.TimeoutSeconds = 60
+		}
+		if profile.DefaultDimensions < 0 {
+			profile.DefaultDimensions = 0
+		}
+		if normalized != key {
+			delete(cfg.Providers, key)
+		}
+		cfg.Providers[normalized] = profile
+	}
+	if cfg.FavoriteModels == nil {
+		cfg.FavoriteModels = FavoriteModelsConfig{}
+	}
+	for provider, favorites := range cfg.FavoriteModels {
+		normalized := normalizeProviderKey(provider)
+		seen := map[string]struct{}{}
+		out := make([]FavoriteModelConfig, 0, len(favorites))
+		for _, fav := range favorites {
+			fav.Model = strings.TrimSpace(fav.Model)
+			fav.Label = strings.TrimSpace(fav.Label)
+			if fav.Model == "" {
+				continue
+			}
+			if _, ok := seen[fav.Model]; ok {
+				continue
+			}
+			seen[fav.Model] = struct{}{}
+			out = append(out, fav)
+		}
+		if normalized != provider {
+			delete(cfg.FavoriteModels, provider)
+		}
+		cfg.FavoriteModels[normalized] = out
+	}
+	syncLegacyProviderFromRouting(cfg)
+}
+
+func syncLegacyProviderFromRouting(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	chat := cfg.ModelRouting.Chat.Primary
+	if profile, ok := cfg.Providers[chat.Provider]; ok {
+		cfg.Provider.APIBase = profile.APIBase
+		cfg.Provider.APIKey = profile.APIKey
+		cfg.Provider.Model = firstNonEmpty(chat.Model, profile.DefaultChatModel, cfg.Provider.Model)
+		cfg.Provider.Temperature = roleTemperature(cfg.ModelRouting.Chat, cfg.Provider.Temperature)
+		cfg.Provider.TimeoutSeconds = profile.TimeoutSeconds
+		cfg.Provider.EnableVision = profile.EnableVision
+	}
+	embed := cfg.ModelRouting.Embeddings.Primary
+	if profile, ok := cfg.Providers[embed.Provider]; ok {
+		cfg.Provider.EmbedModel = firstNonEmpty(embed.Model, profile.DefaultEmbedModel, cfg.Provider.EmbedModel)
+		if cfg.ModelRouting.Embeddings.EmbedDimensions > 0 {
+			cfg.Provider.EmbedDimensions = cfg.ModelRouting.Embeddings.EmbedDimensions
+		} else {
+			cfg.Provider.EmbedDimensions = profile.DefaultDimensions
+		}
+	}
+	cfg.ConsolidationModel = strings.TrimSpace(cfg.ModelRouting.Summarization.Primary.Model)
+	cfg.ContextManager.Provider = ""
+	if profile, ok := cfg.Providers[cfg.ModelRouting.ContextManager.Primary.Provider]; ok {
+		cfg.ContextManager.Provider = profile.APIBase
+	}
+	cfg.ContextManager.Model = strings.TrimSpace(cfg.ModelRouting.ContextManager.Primary.Model)
+}
+
+func roleTemperature(role ModelRoleConfig, fallback float64) float64 {
+	if role.Temperature != nil {
+		return *role.Temperature
+	}
+	return fallback
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
 // Save writes cfg to path using a private file mode.
 func Save(path string, cfg Config) error {
 	if path == "" {
 		path = DefaultPath()
 	}
+	normalizeProviderRouting(&cfg)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -1208,6 +1608,7 @@ func Load(path string) (Config, error) {
 	if cfg.Provider.EmbedDimensions < 0 {
 		cfg.Provider.EmbedDimensions = 0
 	}
+	normalizeProviderRouting(&cfg)
 	if cfg.DefaultSessionKey == "" {
 		cfg.DefaultSessionKey = "cli:default"
 	}
@@ -1665,6 +2066,9 @@ func Load(path string) (Config, error) {
 	if err := validateAgentCLIConfig(cfg.AgentCLI); err != nil {
 		return cfg, err
 	}
+	if err := validateProviderRouting(cfg); err != nil {
+		return cfg, err
+	}
 	cfg.RuntimeProfile = RuntimeProfile(strings.ToLower(strings.TrimSpace(string(cfg.RuntimeProfile))))
 	if err := validateRuntimeProfile(cfg.RuntimeProfile); err != nil {
 		return cfg, err
@@ -1675,6 +2079,65 @@ func Load(path string) (Config, error) {
 func mustJSON(v any) []byte {
 	b, _ := json.MarshalIndent(v, "", "  ")
 	return b
+}
+
+func validateProviderRouting(cfg Config) error {
+	if len(cfg.Providers) == 0 {
+		return fmt.Errorf("providers must include at least one provider")
+	}
+	for key, profile := range cfg.Providers {
+		if normalizeProviderKey(key) == "" {
+			return fmt.Errorf("provider key cannot be empty")
+		}
+		if key != "custom" && strings.TrimSpace(profile.APIBase) == "" {
+			return fmt.Errorf("provider %s apiBase is required", key)
+		}
+		if profile.TimeoutSeconds <= 0 {
+			return fmt.Errorf("provider %s timeoutSeconds must be positive", key)
+		}
+	}
+	roles := map[string]ModelRoleConfig{
+		"chat":           cfg.ModelRouting.Chat,
+		"agents":         cfg.ModelRouting.Agents,
+		"subagents":      cfg.ModelRouting.Subagents,
+		"summarization":  cfg.ModelRouting.Summarization,
+		"contextManager": cfg.ModelRouting.ContextManager,
+		"embeddings":     cfg.ModelRouting.Embeddings,
+	}
+	for roleName, role := range roles {
+		if err := validateModelRef(cfg, roleName, "primary", role.Primary); err != nil {
+			return err
+		}
+		seen := map[string]struct{}{}
+		for i, ref := range role.Fallbacks {
+			if err := validateModelRef(cfg, roleName, fmt.Sprintf("fallback[%d]", i), ref); err != nil {
+				return err
+			}
+			key := ref.Provider + "\x00" + ref.Model
+			if _, ok := seen[key]; ok {
+				return fmt.Errorf("%s fallback chain contains duplicate %s/%s", roleName, ref.Provider, ref.Model)
+			}
+			seen[key] = struct{}{}
+		}
+		if role.EmbedDimensions < 0 {
+			return fmt.Errorf("%s embedDimensions cannot be negative", roleName)
+		}
+	}
+	return nil
+}
+
+func validateModelRef(cfg Config, roleName, slot string, ref ModelRef) error {
+	provider := normalizeProviderKey(ref.Provider)
+	if provider == "" {
+		return fmt.Errorf("%s %s provider is required", roleName, slot)
+	}
+	if _, ok := cfg.Providers[provider]; !ok {
+		return fmt.Errorf("%s %s provider %q is not configured", roleName, slot, ref.Provider)
+	}
+	if strings.TrimSpace(ref.Model) == "" {
+		return fmt.Errorf("%s %s model is required", roleName, slot)
+	}
+	return nil
 }
 
 func normalizeInboundPolicy(policy InboundPolicy) InboundPolicy {

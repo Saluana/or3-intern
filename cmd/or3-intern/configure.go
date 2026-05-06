@@ -21,7 +21,7 @@ var configureSections = []struct {
 	Label       string
 	Description string
 }{
-	{Key: "provider", Label: "Provider", Description: "API endpoint, chat model, embeddings, timeouts, and provider secrets"},
+	{Key: "provider", Label: "Providers", Description: "Provider profiles, model routing, favorites, fallbacks, embeddings, and secrets"},
 	{Key: "storage", Label: "Storage", Description: "Database, artifacts, and bootstrap file locations"},
 	{Key: "runtime", Label: "Runtime", Description: "Session defaults, memory retrieval, workers, consolidation, and subagents"},
 	{Key: "context", Label: "Context", Description: "Token budgets, packet mode, dynamic tools, task card, and context manager"},
@@ -280,6 +280,9 @@ func runConfigureSection(reader *bufio.Reader, out io.Writer, cfg *config.Config
 func configureGenericSection(reader *bufio.Reader, out io.Writer, cfg *config.Config, section, cwd string) error {
 	meta := configureSectionMeta(section)
 	fields := buildSectionFields(*cfg, section, cwd)
+	if section == "provider" && len(fields) > 9 {
+		fields = fields[:9]
+	}
 	if len(fields) == 0 {
 		return fmt.Errorf("section %q has no editable fields", section)
 	}

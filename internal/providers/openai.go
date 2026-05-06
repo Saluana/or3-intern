@@ -23,6 +23,48 @@ type Client struct {
 	HTTP            *http.Client
 	EmbedDimensions int
 	HostPolicy      security.HostPolicy
+	Fallbacks       []Fallback
+}
+
+type Fallback struct {
+	Client *Client
+	Model  string
+}
+
+type ProviderError struct {
+	StatusCode int
+	Status     string
+	Body       string
+	Err        error
+}
+
+func (e ProviderError) Error() string {
+	if e.Err != nil {
+		return e.Err.Error()
+	}
+	if e.Status != "" {
+		return fmt.Sprintf("provider error %s: %s", e.Status, e.Body)
+	}
+	return "provider error"
+}
+
+func (e ProviderError) Unwrap() error { return e.Err }
+
+func IsTransientError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var providerErr ProviderError
+	if errors.As(err, &providerErr) {
+		return providerErr.StatusCode == http.StatusRequestTimeout ||
+			providerErr.StatusCode == http.StatusTooManyRequests ||
+			providerErr.StatusCode >= 500
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "timeout") || strings.Contains(msg, "temporary") || strings.Contains(msg, "connection reset")
 }
 
 // EmbeddingFingerprint identifies the embedding space used for persisted
@@ -143,6 +185,32 @@ type ChatCompletionResponse struct {
 
 // Chat performs a non-streaming chat completion request.
 func (c *Client) Chat(ctx context.Context, req ChatCompletionRequest) (ChatCompletionResponse, error) {
+	resp, err := c.chatOnce(ctx, req)
+	if err == nil || c == nil || !IsTransientError(err) {
+		return resp, err
+	}
+	var lastErr error = err
+	for _, fallback := range c.Fallbacks {
+		if fallback.Client == nil {
+			continue
+		}
+		nextReq := req
+		if strings.TrimSpace(fallback.Model) != "" {
+			nextReq.Model = strings.TrimSpace(fallback.Model)
+		}
+		resp, err = fallback.Client.chatOnce(ctx, nextReq)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+		if !IsTransientError(err) {
+			break
+		}
+	}
+	return ChatCompletionResponse{}, lastErr
+}
+
+func (c *Client) chatOnce(ctx context.Context, req ChatCompletionRequest) (ChatCompletionResponse, error) {
 	var out ChatCompletionResponse
 	b, _ := json.Marshal(req)
 	const maxAttempts = 2
@@ -167,7 +235,7 @@ func (c *Client) Chat(ctx context.Context, req ChatCompletionRequest) (ChatCompl
 			return out, readErr
 		}
 		if resp.StatusCode >= 300 {
-			return out, fmt.Errorf("provider error %s: %s", resp.Status, string(body))
+			return out, ProviderError{StatusCode: resp.StatusCode, Status: resp.Status, Body: string(body), Err: fmt.Errorf("provider error %s: %s", resp.Status, string(body))}
 		}
 		if err := json.Unmarshal(body, &out); err != nil {
 			lastErr = formatProviderDecodeError(err, body)
@@ -248,6 +316,40 @@ type ChatStreamChunk struct {
 // ChatStream sends the request with stream=true, calls onDelta for each text
 // delta, and returns the fully accumulated completion response.
 func (c *Client) ChatStream(ctx context.Context, req ChatCompletionRequest, onDelta func(text string)) (ChatCompletionResponse, error) {
+	emitted := false
+	resp, err := c.chatStreamOnce(ctx, req, func(text string) {
+		if text != "" {
+			emitted = true
+		}
+		if onDelta != nil {
+			onDelta(text)
+		}
+	})
+	if err == nil || emitted || c == nil || !IsTransientError(err) {
+		return resp, err
+	}
+	var lastErr error = err
+	for _, fallback := range c.Fallbacks {
+		if fallback.Client == nil {
+			continue
+		}
+		nextReq := req
+		if strings.TrimSpace(fallback.Model) != "" {
+			nextReq.Model = strings.TrimSpace(fallback.Model)
+		}
+		resp, err = fallback.Client.chatStreamOnce(ctx, nextReq, onDelta)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+		if !IsTransientError(err) {
+			break
+		}
+	}
+	return ChatCompletionResponse{}, lastErr
+}
+
+func (c *Client) chatStreamOnce(ctx context.Context, req ChatCompletionRequest, onDelta func(text string)) (ChatCompletionResponse, error) {
 	streamReq := ChatCompletionStreamRequest{
 		Model:       req.Model,
 		Messages:    req.Messages,
@@ -275,7 +377,7 @@ func (c *Client) ChatStream(ctx context.Context, req ChatCompletionRequest, onDe
 
 	if resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-		return ChatCompletionResponse{}, fmt.Errorf("provider error %s: %s", resp.Status, string(body))
+		return ChatCompletionResponse{}, ProviderError{StatusCode: resp.StatusCode, Status: resp.Status, Body: string(body), Err: fmt.Errorf("provider error %s: %s", resp.Status, string(body))}
 	}
 	if !strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
 		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
@@ -390,6 +492,32 @@ type EmbeddingResponse struct {
 }
 
 func (c *Client) Embed(ctx context.Context, model, input string) ([]float32, error) {
+	vec, err := c.embedOnce(ctx, model, input)
+	if err == nil || c == nil || !IsTransientError(err) {
+		return vec, err
+	}
+	var lastErr error = err
+	for _, fallback := range c.Fallbacks {
+		if fallback.Client == nil {
+			continue
+		}
+		nextModel := model
+		if strings.TrimSpace(fallback.Model) != "" {
+			nextModel = strings.TrimSpace(fallback.Model)
+		}
+		vec, err = fallback.Client.embedOnce(ctx, nextModel, input)
+		if err == nil {
+			return vec, nil
+		}
+		lastErr = err
+		if !IsTransientError(err) {
+			break
+		}
+	}
+	return nil, lastErr
+}
+
+func (c *Client) embedOnce(ctx context.Context, model, input string) ([]float32, error) {
 	var out EmbeddingResponse
 	reqBody := EmbeddingRequest{Model: model, Input: input}
 	if c != nil && c.EmbedDimensions > 0 {
@@ -412,7 +540,7 @@ func (c *Client) Embed(ctx context.Context, model, input string) ([]float32, err
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("provider error %s: %s", resp.Status, string(body))
+		return nil, ProviderError{StatusCode: resp.StatusCode, Status: resp.Status, Body: string(body), Err: fmt.Errorf("provider error %s: %s", resp.Status, string(body))}
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
 		return nil, err

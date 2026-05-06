@@ -878,7 +878,12 @@ func formContextHint(section, channel string, cursor, total int) string {
 	if label == "" {
 		label = strings.Title(section)
 	}
-	position := fmt.Sprintf("Field %d/%d. Use ↑/↓ or Tab/Shift+Tab to move between fields.", cursor+1, total)
+	displayTotal := total
+	if section == "provider" && displayTotal > 9 {
+		position := fmt.Sprintf("Field %d/%d. Core provider Field %d/9. Use ↑/↓ or Tab/Shift+Tab to move between fields.", cursor+1, total, cursor+1)
+		return position + " Editing the " + label + " section. Press s to review and save when you’re happy with the current snapshot."
+	}
+	position := fmt.Sprintf("Field %d/%d. Use ↑/↓ or Tab/Shift+Tab to move between fields.", cursor+1, displayTotal)
 	if section == "channels" && channel != "" {
 		return position + " Editing the " + strings.Title(channel) + " channel. Use space for toggles, ←/→ for access presets, and Enter to edit text fields."
 	}
@@ -1070,6 +1075,7 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 	switch section {
 	case "provider":
 		preset := providerPresetLabel(cfg.Provider.APIBase)
+		providerChoices := providerChoiceKeys(cfg)
 		return []configureField{
 			{Key: "provider_preset", Label: "Provider preset", Description: "Cycle through the built-in presets.", Kind: configureFieldChoice, Value: preset, Choices: []string{"OpenAI", "OpenRouter", "Custom"}, ChoiceIndex: indexOfChoice([]string{"OpenAI", "OpenRouter", "Custom"}, preset)},
 			{Key: "provider_api_base", Label: "API base", Description: "OpenAI-compatible base URL.", Kind: configureFieldText, Value: cfg.Provider.APIBase, EmptyHint: "https://api.openai.com/v1"},
@@ -1080,6 +1086,26 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 			{Key: "provider_timeout", Label: "Timeout seconds", Description: "HTTP timeout for provider calls.", Kind: configureFieldText, Value: formatInt(cfg.Provider.TimeoutSeconds), EmptyHint: "60"},
 			{Key: "provider_vision", Label: "Enable vision", Description: "Allow image inputs when the model and runtime support it.", Kind: configureFieldToggle, Value: onOff(cfg.Provider.EnableVision)},
 			{Key: "provider_api_key", Label: "API key", Description: "Hidden secret. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Provider.APIKey), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"},
+			{Key: "provider_openai_api_key", Label: "OpenAI API key", Description: "Hidden OpenAI key. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(providerProfileValue(cfg, "openai").APIKey), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"},
+			{Key: "provider_openrouter_api_key", Label: "OpenRouter API key", Description: "Hidden OpenRouter key. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(providerProfileValue(cfg, "openrouter").APIKey), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"},
+			{Key: "provider_custom_api_base", Label: "Custom API base", Description: "OpenAI-compatible custom provider base URL for local models or another hosted service.", Kind: configureFieldText, Value: providerProfileValue(cfg, "custom").APIBase, EmptyHint: "http://127.0.0.1:8000/v1"},
+			{Key: "provider_custom_api_key", Label: "Custom API key", Description: "Hidden custom provider key. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(providerProfileValue(cfg, "custom").APIKey), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"},
+			{Key: "routing_chat_provider", Label: "Chat provider", Description: "Provider used for normal chat turns.", Kind: configureFieldChoice, Value: cfg.ModelRouting.Chat.Primary.Provider, Choices: providerChoices, ChoiceIndex: indexOfChoice(providerChoices, cfg.ModelRouting.Chat.Primary.Provider)},
+			{Key: "routing_chat_model", Label: "Chat model", Description: "Model used for normal chat turns.", Kind: configureFieldText, Value: cfg.ModelRouting.Chat.Primary.Model, EmptyHint: "gpt-4.1-mini"},
+			{Key: "routing_chat_fallbacks", Label: "Chat fallbacks", Description: "Comma-separated provider/model entries tried after transient failures.", Kind: configureFieldText, Value: formatModelRefs(cfg.ModelRouting.Chat.Fallbacks), EmptyHint: "openrouter/openai/gpt-4o-mini"},
+			{Key: "routing_agents_provider", Label: "Agents provider", Description: "Provider used for agent-style work.", Kind: configureFieldChoice, Value: cfg.ModelRouting.Agents.Primary.Provider, Choices: providerChoices, ChoiceIndex: indexOfChoice(providerChoices, cfg.ModelRouting.Agents.Primary.Provider)},
+			{Key: "routing_agents_model", Label: "Agents model", Description: "Model used for agent-style work.", Kind: configureFieldText, Value: cfg.ModelRouting.Agents.Primary.Model, EmptyHint: cfg.ModelRouting.Chat.Primary.Model},
+			{Key: "routing_subagents_provider", Label: "Subagents provider", Description: "Provider used for internal subagent jobs.", Kind: configureFieldChoice, Value: cfg.ModelRouting.Subagents.Primary.Provider, Choices: providerChoices, ChoiceIndex: indexOfChoice(providerChoices, cfg.ModelRouting.Subagents.Primary.Provider)},
+			{Key: "routing_subagents_model", Label: "Subagents model", Description: "Model used for internal subagent jobs.", Kind: configureFieldText, Value: cfg.ModelRouting.Subagents.Primary.Model, EmptyHint: cfg.ModelRouting.Agents.Primary.Model},
+			{Key: "routing_summarization_provider", Label: "Summarization provider", Description: "Provider used for memory consolidation and summaries.", Kind: configureFieldChoice, Value: cfg.ModelRouting.Summarization.Primary.Provider, Choices: providerChoices, ChoiceIndex: indexOfChoice(providerChoices, cfg.ModelRouting.Summarization.Primary.Provider)},
+			{Key: "routing_summarization_model", Label: "Summarization model", Description: "Model used for memory consolidation and summaries.", Kind: configureFieldText, Value: cfg.ModelRouting.Summarization.Primary.Model, EmptyHint: cfg.ModelRouting.Chat.Primary.Model},
+			{Key: "routing_context_provider", Label: "Context manager provider", Description: "Provider used for context-manager maintenance proposals.", Kind: configureFieldChoice, Value: cfg.ModelRouting.ContextManager.Primary.Provider, Choices: providerChoices, ChoiceIndex: indexOfChoice(providerChoices, cfg.ModelRouting.ContextManager.Primary.Provider)},
+			{Key: "routing_context_model", Label: "Context manager model", Description: "Model used for context-manager maintenance proposals.", Kind: configureFieldText, Value: cfg.ModelRouting.ContextManager.Primary.Model, EmptyHint: cfg.ModelRouting.Summarization.Primary.Model},
+			{Key: "routing_embeddings_provider", Label: "Embeddings provider", Description: "Provider used for memory and document embeddings.", Kind: configureFieldChoice, Value: cfg.ModelRouting.Embeddings.Primary.Provider, Choices: providerChoices, ChoiceIndex: indexOfChoice(providerChoices, cfg.ModelRouting.Embeddings.Primary.Provider)},
+			{Key: "routing_embeddings_model", Label: "Embeddings model", Description: "Model used for memory and document embeddings.", Kind: configureFieldText, Value: cfg.ModelRouting.Embeddings.Primary.Model, EmptyHint: "text-embedding-3-small"},
+			{Key: "routing_embeddings_dimensions", Label: "Embeddings dimensions", Description: "Optional dimensions override for the embeddings role. Use 0 for provider default.", Kind: configureFieldText, Value: formatInt(cfg.ModelRouting.Embeddings.EmbedDimensions), EmptyHint: "0"},
+			{Key: "favorites_openai", Label: "OpenAI favorites", Description: "Comma-separated favorite OpenAI model IDs.", Kind: configureFieldText, Value: formatFavoriteModels(cfg.FavoriteModels["openai"]), EmptyHint: "gpt-4.1-mini,text-embedding-3-small"},
+			{Key: "favorites_openrouter", Label: "OpenRouter favorites", Description: "Comma-separated favorite OpenRouter model IDs.", Kind: configureFieldText, Value: formatFavoriteModels(cfg.FavoriteModels["openrouter"]), EmptyHint: "openai/gpt-4o-mini"},
 		}
 	case "storage":
 		return []configureField{
@@ -1389,6 +1415,26 @@ var helpfulSectionFieldDescriptions = map[string]string{
 	"provider_timeout":                       "How long OR3 waits for the AI provider before giving up. Increase this for slow models; lower values fail faster when the provider hangs.",
 	"provider_vision":                        "Lets OR3 send images to the AI model when the model supports vision. Leave off if your provider or model cannot read images.",
 	"provider_api_key":                       "Secret key used to access your AI provider. It is hidden on screen. Warning: deleting or mistyping it will prevent OR3 from contacting the provider.",
+	"provider_openai_api_key":                "Secret OpenAI key used when any model role routes to OpenAI. Leave blank to keep the existing key or type clear to remove it.",
+	"provider_openrouter_api_key":            "Secret OpenRouter key used when any model role routes to OpenRouter. Leave blank to keep the existing key or type clear to remove it.",
+	"provider_custom_api_base":               "OpenAI-compatible custom provider base URL for local models or another hosted service. Leave blank unless you have a custom endpoint ready.",
+	"provider_custom_api_key":                "Secret custom provider key used with the custom API base. Leave blank to keep the existing key or type clear to remove it.",
+	"routing_chat_provider":                  "Provider used for normal chat turns and direct replies. Choose a provider that has a valid API key and supports your selected chat model.",
+	"routing_chat_model":                     "Model used for normal chat turns and direct replies. Favorites are only shortcuts; this exact model ID is sent to the provider.",
+	"routing_chat_fallbacks":                 "Comma-separated provider/model fallbacks tried after transient chat failures. Use entries like openrouter/openai/gpt-4o-mini.",
+	"routing_agents_provider":                "Provider used for agent-style work. Most users can match chat, while advanced setups may use a stronger or cheaper provider.",
+	"routing_agents_model":                   "Model used for agent-style work. Use a model that handles tools and longer reasoning well.",
+	"routing_subagents_provider":             "Provider used for internal subagent jobs. This can be cheaper than chat when background helpers do routine work.",
+	"routing_subagents_model":                "Model used for internal subagent jobs. Use a model that balances cost and reliability for background work.",
+	"routing_summarization_provider":         "Provider used for memory consolidation and summaries. A cheaper model is often enough if it follows structured instructions reliably.",
+	"routing_summarization_model":            "Model used for memory consolidation and summaries. Changing this affects future summaries, not existing saved memory by itself.",
+	"routing_context_provider":               "Provider used for context-manager cleanup proposals. This can be a small reliable model because outputs are guarded before use.",
+	"routing_context_model":                  "Model used for context-manager cleanup proposals. Leave near the summarization model unless context cleanup needs different behavior.",
+	"routing_embeddings_provider":            "Provider used for memory and document embeddings. Warning: changing this can require rebuilding existing memory and document vectors.",
+	"routing_embeddings_model":               "Model used for memory and document embeddings. Warning: changing this can require rebuilding existing memory and document vectors.",
+	"routing_embeddings_dimensions":          "Optional dimensions override for the embeddings role. Use 0 for provider defaults; changing it can require rebuilding vectors.",
+	"favorites_openai":                       "Comma-separated favorite OpenAI model IDs shown first in the app. Favorites do not change routing until selected in a role.",
+	"favorites_openrouter":                   "Comma-separated favorite OpenRouter model IDs shown first in the app. Favorites do not change routing until selected in a role.",
 	"storage_db":                             "Where OR3 stores conversation history, memory, approvals, devices, and other local state. Warning: changing this path can make existing history seem missing unless you move the database too.",
 	"storage_artifacts":                      "Folder for large saved outputs, attachments, and files that are too large to keep directly in chat. Warning: changing it can make older artifact links unavailable.",
 	"storage_soul":                           "Optional text file that describes OR3's core personality or operating instructions. Keep it readable and trustworthy because it is added to prompts.",
@@ -1832,15 +1878,23 @@ func applyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 	switch fieldKey {
 	case "provider_api_base":
 		cfg.Provider.APIBase = value
+		cfg.ModelRouting.Chat.Primary.Provider = configureProviderKeyFromBase(value)
+		setProviderProfileAPIBase(cfg, cfg.ModelRouting.Chat.Primary.Provider, value)
 		return true, nil
 	case "provider_model":
 		cfg.Provider.Model = value
+		cfg.ModelRouting.Chat.Primary.Model = value
+		cfg.ModelRouting.Agents.Primary.Model = value
+		cfg.ModelRouting.Subagents.Primary.Model = value
 		return true, nil
 	case "provider_embed":
 		cfg.Provider.EmbedModel = value
+		cfg.ModelRouting.Embeddings.Primary.Model = value
 		return true, nil
 	case "provider_embed_dimensions":
-		return setIntValue(&cfg.Provider.EmbedDimensions, value, fieldKey)
+		changed, err := setIntValue(&cfg.Provider.EmbedDimensions, value, fieldKey)
+		cfg.ModelRouting.Embeddings.EmbedDimensions = cfg.Provider.EmbedDimensions
+		return changed, err
 	case "provider_temperature":
 		return setFloatValue(&cfg.Provider.Temperature, value, fieldKey)
 	case "provider_timeout":
@@ -1848,11 +1902,101 @@ func applyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 	case "provider_api_key":
 		if clearRequested {
 			cfg.Provider.APIKey = ""
+			setProviderProfileAPIKey(cfg, "openai", "")
 			return true, nil
 		}
 		if value != "" {
 			cfg.Provider.APIKey = value
+			setProviderProfileAPIKey(cfg, configureProviderKeyFromBase(cfg.Provider.APIBase), value)
 		}
+		return true, nil
+	case "provider_openai_api_key":
+		if clearRequested {
+			setProviderProfileAPIKey(cfg, "openai", "")
+			return true, nil
+		}
+		if value != "" {
+			setProviderProfileAPIKey(cfg, "openai", value)
+		}
+		return true, nil
+	case "provider_openrouter_api_key":
+		if clearRequested {
+			setProviderProfileAPIKey(cfg, "openrouter", "")
+			return true, nil
+		}
+		if value != "" {
+			setProviderProfileAPIKey(cfg, "openrouter", value)
+		}
+		return true, nil
+	case "provider_custom_api_base":
+		setProviderProfileAPIBase(cfg, "custom", value)
+		return true, nil
+	case "provider_custom_api_key":
+		if clearRequested {
+			setProviderProfileAPIKey(cfg, "custom", "")
+			return true, nil
+		}
+		if value != "" {
+			setProviderProfileAPIKey(cfg, "custom", value)
+		}
+		return true, nil
+	case "routing_chat_provider":
+		cfg.ModelRouting.Chat.Primary.Provider = value
+		return true, nil
+	case "routing_chat_model":
+		cfg.ModelRouting.Chat.Primary.Model = value
+		return true, nil
+	case "routing_chat_fallbacks":
+		cfg.ModelRouting.Chat.Fallbacks = parseModelRefs(value)
+		return true, nil
+	case "routing_agents_provider":
+		cfg.ModelRouting.Agents.Primary.Provider = value
+		return true, nil
+	case "routing_agents_model":
+		cfg.ModelRouting.Agents.Primary.Model = value
+		return true, nil
+	case "routing_subagents_provider":
+		cfg.ModelRouting.Subagents.Primary.Provider = value
+		return true, nil
+	case "routing_subagents_model":
+		cfg.ModelRouting.Subagents.Primary.Model = value
+		return true, nil
+	case "routing_summarization_provider":
+		cfg.ModelRouting.Summarization.Primary.Provider = value
+		return true, nil
+	case "routing_summarization_model":
+		cfg.ModelRouting.Summarization.Primary.Model = value
+		cfg.ConsolidationModel = value
+		return true, nil
+	case "routing_context_provider":
+		cfg.ModelRouting.ContextManager.Primary.Provider = value
+		return true, nil
+	case "routing_context_model":
+		cfg.ModelRouting.ContextManager.Primary.Model = value
+		cfg.ContextManager.Model = value
+		return true, nil
+	case "routing_embeddings_provider":
+		cfg.ModelRouting.Embeddings.Primary.Provider = value
+		return true, nil
+	case "routing_embeddings_model":
+		cfg.ModelRouting.Embeddings.Primary.Model = value
+		cfg.Provider.EmbedModel = value
+		return true, nil
+	case "routing_embeddings_dimensions":
+		changed, err := setIntValue(&cfg.ModelRouting.Embeddings.EmbedDimensions, value, fieldKey)
+		cfg.Provider.EmbedDimensions = cfg.ModelRouting.Embeddings.EmbedDimensions
+		return changed, err
+	case "favorites_openai":
+		if cfg.FavoriteModels == nil {
+			cfg.FavoriteModels = config.FavoriteModelsConfig{}
+		}
+		cfg.FavoriteModels["openai"] = parseFavoriteModels(value)
+		return true, nil
+	case "favorites_openrouter":
+		if cfg.FavoriteModels == nil {
+			cfg.FavoriteModels = config.FavoriteModelsConfig{}
+		}
+		cfg.FavoriteModels["openrouter"] = parseFavoriteModels(value)
 		return true, nil
 	case "storage_db":
 		cfg.DBPath = value
@@ -2627,6 +2771,122 @@ func providerPresetLabel(apiBase string) string {
 		return "OpenRouter"
 	default:
 		return "Custom"
+	}
+}
+
+func providerChoiceKeys(cfg config.Config) []string {
+	keys := make([]string, 0, len(cfg.Providers))
+	for key, profile := range cfg.Providers {
+		if strings.TrimSpace(profile.APIBase) == "" && key != "custom" {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, preferred := range []string{"openai", "openrouter", "custom"} {
+		if !stringInSlice(preferred, keys) {
+			keys = append(keys, preferred)
+		}
+	}
+	return keys
+}
+
+func stringInSlice(value string, values []string) bool {
+	for _, item := range values {
+		if item == value {
+			return true
+		}
+	}
+	return false
+}
+
+func providerProfileValue(cfg config.Config, key string) config.ProviderProfileConfig {
+	profile, _ := cfg.ProviderProfile(key)
+	return profile
+}
+
+func formatModelRefs(refs []config.ModelRef) string {
+	parts := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		if strings.TrimSpace(ref.Provider) == "" || strings.TrimSpace(ref.Model) == "" {
+			continue
+		}
+		parts = append(parts, strings.TrimSpace(ref.Provider)+"/"+strings.TrimSpace(ref.Model))
+	}
+	return strings.Join(parts, ",")
+}
+
+func parseModelRefs(value string) []config.ModelRef {
+	raw := splitAndCompact(value)
+	refs := make([]config.ModelRef, 0, len(raw))
+	for _, item := range raw {
+		provider, model, ok := strings.Cut(item, "/")
+		if !ok || strings.TrimSpace(provider) == "" || strings.TrimSpace(model) == "" {
+			continue
+		}
+		refs = append(refs, config.ModelRef{Provider: strings.TrimSpace(provider), Model: strings.TrimSpace(model)})
+	}
+	return refs
+}
+
+func formatFavoriteModels(favorites []config.FavoriteModelConfig) string {
+	parts := make([]string, 0, len(favorites))
+	for _, favorite := range favorites {
+		if strings.TrimSpace(favorite.Model) != "" {
+			parts = append(parts, strings.TrimSpace(favorite.Model))
+		}
+	}
+	return strings.Join(parts, ",")
+}
+
+func parseFavoriteModels(value string) []config.FavoriteModelConfig {
+	models := splitAndCompact(value)
+	out := make([]config.FavoriteModelConfig, 0, len(models))
+	for _, model := range models {
+		out = append(out, config.FavoriteModelConfig{Model: model})
+	}
+	return out
+}
+
+func setProviderProfileAPIKey(cfg *config.Config, key, value string) {
+	if cfg.Providers == nil {
+		cfg.Providers = config.ProviderProfiles{}
+	}
+	profile := providerProfileValue(*cfg, key)
+	profile.APIKey = value
+	if profile.Label == "" {
+		profile.Label = strings.ReplaceAll(key, "-", " ")
+	}
+	if profile.TimeoutSeconds <= 0 {
+		profile.TimeoutSeconds = 60
+	}
+	cfg.Providers[key] = profile
+}
+
+func setProviderProfileAPIBase(cfg *config.Config, key, value string) {
+	if cfg.Providers == nil {
+		cfg.Providers = config.ProviderProfiles{}
+	}
+	profile := providerProfileValue(*cfg, key)
+	profile.APIBase = strings.TrimRight(strings.TrimSpace(value), "/")
+	if profile.Label == "" {
+		profile.Label = strings.ReplaceAll(key, "-", " ")
+	}
+	if profile.TimeoutSeconds <= 0 {
+		profile.TimeoutSeconds = 60
+	}
+	cfg.Providers[key] = profile
+}
+
+func configureProviderKeyFromBase(apiBase string) string {
+	base := strings.ToLower(strings.TrimSpace(apiBase))
+	switch {
+	case strings.Contains(base, "openrouter.ai"):
+		return "openrouter"
+	case strings.Contains(base, "api.openai.com"):
+		return "openai"
+	default:
+		return "custom"
 	}
 }
 

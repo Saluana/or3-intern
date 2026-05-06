@@ -47,11 +47,13 @@ const (
 )
 
 func effectiveConsolidationTimeout(cfg config.Config) time.Duration {
+	role := cfg.ModelRole(config.ModelRoleSummarization)
+	timeoutSeconds := providerTimeoutSeconds(cfg, role.Primary.Provider, cfg.Provider.TimeoutSeconds)
 	asyncTimeout := time.Duration(cfg.ConsolidationAsyncTimeoutSeconds) * time.Second
 	if asyncTimeout <= 0 {
 		asyncTimeout = 30 * time.Second
 	}
-	providerTimeout := time.Duration(cfg.Provider.TimeoutSeconds) * time.Second
+	providerTimeout := time.Duration(timeoutSeconds) * time.Second
 	if providerTimeout <= 0 {
 		providerTimeout = 60 * time.Second
 	}
@@ -63,30 +65,36 @@ func effectiveConsolidationTimeout(cfg config.Config) time.Duration {
 }
 
 func currentEmbedFingerprint(cfg config.Config) string {
-	return providers.EmbeddingFingerprint(cfg.Provider.APIBase, cfg.Provider.EmbedModel, cfg.Provider.EmbedDimensions)
+	role := cfg.ModelRole(config.ModelRoleEmbeddings)
+	profile, ok := cfg.ProviderProfile(role.Primary.Provider)
+	if !ok {
+		return providers.EmbeddingFingerprint(cfg.Provider.APIBase, cfg.Provider.EmbedModel, cfg.Provider.EmbedDimensions)
+	}
+	dimensions := role.EmbedDimensions
+	if dimensions <= 0 {
+		dimensions = profile.DefaultDimensions
+	}
+	return providers.EmbeddingFingerprint(profile.APIBase, role.Primary.Model, dimensions)
 }
 
 func effectiveConsolidationModel(cfg config.Config) string {
 	if model := strings.TrimSpace(cfg.ConsolidationModel); model != "" {
 		return model
 	}
+	roleModel := strings.TrimSpace(cfg.ModelRole(config.ModelRoleSummarization).Primary.Model)
+	defaultModel := config.Default().ModelRouting.Summarization.Primary.Model
+	if roleModel != "" && roleModel != defaultModel {
+		return roleModel
+	}
 	return cfg.Provider.Model
 }
 
 func newProviderClient(cfg config.Config) *providers.Client {
-	timeout := time.Duration(cfg.Provider.TimeoutSeconds) * time.Second
-	prov := providers.New(cfg.Provider.APIBase, cfg.Provider.APIKey, timeout)
-	prov.EmbedDimensions = cfg.Provider.EmbedDimensions
-	prov.HostPolicy = buildHostPolicy(cfg)
-	return prov
+	return newRoleProviderClient(cfg, config.ModelRoleChat)
 }
 
 func newConsolidationProviderClient(cfg config.Config) *providers.Client {
-	timeout := effectiveConsolidationTimeout(cfg)
-	prov := providers.New(cfg.Provider.APIBase, cfg.Provider.APIKey, timeout)
-	prov.EmbedDimensions = cfg.Provider.EmbedDimensions
-	prov.HostPolicy = buildHostPolicy(cfg)
-	return prov
+	return newRoleProviderClientWithTimeout(cfg, config.ModelRoleSummarization, effectiveConsolidationTimeout(cfg))
 }
 
 func newContextManagerProviderClient(cfg config.Config) *providers.Client {
@@ -94,14 +102,74 @@ func newContextManagerProviderClient(cfg config.Config) *providers.Client {
 	if timeout <= 0 {
 		timeout = 15 * time.Second
 	}
-	apiBase := strings.TrimSpace(cfg.ContextManager.Provider)
-	if apiBase == "" {
-		apiBase = cfg.Provider.APIBase
+	return newRoleProviderClientWithTimeout(cfg, config.ModelRoleContextManager, timeout)
+}
+
+func newEmbeddingProviderClient(cfg config.Config) *providers.Client {
+	return newRoleProviderClient(cfg, config.ModelRoleEmbeddings)
+}
+
+func newRoleProviderClient(cfg config.Config, roleName string) *providers.Client {
+	role := cfg.ModelRole(roleName)
+	return newRoleProviderClientWithTimeout(cfg, roleName, time.Duration(providerTimeoutSeconds(cfg, role.Primary.Provider, cfg.Provider.TimeoutSeconds))*time.Second)
+}
+
+func newRoleProviderClientWithTimeout(cfg config.Config, roleName string, timeout time.Duration) *providers.Client {
+	role := cfg.ModelRole(roleName)
+	prov := newModelRefClient(cfg, role.Primary, timeout)
+	if prov == nil {
+		return nil
 	}
-	prov := providers.New(apiBase, cfg.Provider.APIKey, timeout)
-	prov.EmbedDimensions = cfg.Provider.EmbedDimensions
+	if roleName == config.ModelRoleEmbeddings && role.EmbedDimensions > 0 {
+		prov.EmbedDimensions = role.EmbedDimensions
+	}
+	for _, fallback := range append(role.Fallbacks, cfg.ModelRole(config.ModelRoleFallback).Fallbacks...) {
+		fallbackClient := newModelRefClient(cfg, fallback, timeout)
+		if fallbackClient == nil {
+			continue
+		}
+		if roleName == config.ModelRoleEmbeddings && role.EmbedDimensions > 0 {
+			fallbackClient.EmbedDimensions = role.EmbedDimensions
+		}
+		prov.Fallbacks = append(prov.Fallbacks, providers.Fallback{Client: fallbackClient, Model: fallback.Model})
+	}
+	return prov
+}
+
+func newModelRefClient(cfg config.Config, ref config.ModelRef, timeout time.Duration) *providers.Client {
+	profile, ok := cfg.ProviderProfile(ref.Provider)
+	if !ok || strings.TrimSpace(profile.APIBase) == "" {
+		return nil
+	}
+	if timeout <= 0 {
+		timeout = time.Duration(profile.TimeoutSeconds) * time.Second
+	}
+	prov := providers.New(strings.TrimRight(profile.APIBase, "/"), profile.APIKey, timeout)
+	prov.EmbedDimensions = profile.DefaultDimensions
 	prov.HostPolicy = buildHostPolicy(cfg)
 	return prov
+}
+
+func providerTimeoutSeconds(cfg config.Config, provider string, fallback int) int {
+	if profile, ok := cfg.ProviderProfile(provider); ok && profile.TimeoutSeconds > 0 {
+		return profile.TimeoutSeconds
+	}
+	if fallback > 0 {
+		return fallback
+	}
+	return 60
+}
+
+func roleTemperatureOrDefault(role config.ModelRoleConfig, fallback float64) float64 {
+	if role.Temperature != nil {
+		return *role.Temperature
+	}
+	return fallback
+}
+
+func roleProviderVision(cfg config.Config, provider string) bool {
+	profile, ok := cfg.ProviderProfile(provider)
+	return ok && profile.EnableVision
 }
 
 func main() {
@@ -334,7 +402,7 @@ func main() {
 	if commandHandledBeforeRuntimeBootstrap(cmd) {
 		var prov *providers.Client
 		if cmd == "embeddings" {
-			prov = newProviderClient(cfg)
+			prov = newEmbeddingProviderClient(cfg)
 		}
 		handled, err := runPreRuntimeCommand(ctx, cmd, cfg, d, prov, auditLogger, approvalBroker, args[1:], os.Stdout, os.Stderr)
 		if handled {
@@ -350,6 +418,10 @@ func main() {
 		}
 	}
 	prov := newProviderClient(cfg)
+	embedProv := newEmbeddingProviderClient(cfg)
+	chatRole := cfg.ModelRole(config.ModelRoleChat)
+	subagentRole := cfg.ModelRole(config.ModelRoleSubagents)
+	embedRole := cfg.ModelRole(config.ModelRoleEmbeddings)
 	art := &artifacts.Store{Dir: cfg.ArtifactsDir, DB: d}
 
 	b := bus.New(256)
@@ -380,10 +452,10 @@ func main() {
 	var agentCLIManager *agentcli.Manager
 	enableSubagents := subagentsEnabledForCommand(cmd, cfg)
 	buildRuntimeTools := func() *tools.Registry {
-		return buildToolRegistry(cfg, d, prov, channelManager, &inv, cronSvc, subagentManager, mcpManager, approvalBroker)
+		return buildToolRegistry(cfg, d, embedProv, channelManager, &inv, cronSvc, subagentManager, mcpManager, approvalBroker)
 	}
 	buildBackgroundTools := func() *tools.Registry {
-		return buildBackgroundToolRegistry(cfg, d, prov, channelManager, &inv, cronSvc, mcpManager, approvalBroker)
+		return buildBackgroundToolRegistry(cfg, d, embedProv, channelManager, &inv, cronSvc, mcpManager, approvalBroker)
 	}
 
 	ret := memory.NewRetriever(d)
@@ -395,8 +467,8 @@ func main() {
 	if cfg.DocIndex.Enabled && len(cfg.DocIndex.Roots) > 0 {
 		docIndexer = &memory.DocIndexer{
 			DB:               d,
-			Provider:         prov,
-			EmbedModel:       cfg.Provider.EmbedModel,
+			Provider:         embedProv,
+			EmbedModel:       embedRole.Primary.Model,
 			EmbedFingerprint: currentEmbedFingerprint(cfg),
 			Config: memory.DocIndexConfig{
 				Roots:          cfg.DocIndex.Roots,
@@ -433,20 +505,22 @@ func main() {
 	}
 
 	rt := &agent.Runtime{
-		DB:          d,
-		Provider:    prov,
-		Model:       cfg.Provider.Model,
-		Temperature: cfg.Provider.Temperature,
-		Tools:       buildRuntimeTools(),
+		DB:               d,
+		Provider:         prov,
+		Model:            chatRole.Primary.Model,
+		Temperature:      roleTemperatureOrDefault(chatRole, cfg.Provider.Temperature),
+		SubagentProvider: newRoleProviderClient(cfg, config.ModelRoleSubagents),
+		SubagentModel:    subagentRole.Primary.Model,
+		Tools:            buildRuntimeTools(),
 		Builder: applyContextConfigToBuilder(cfg, &agent.Builder{
 			DB:                     d,
 			Artifacts:              art,
 			Skills:                 inv,
 			Mem:                    ret,
-			Provider:               prov,
-			EmbedModel:             cfg.Provider.EmbedModel,
+			Provider:               embedProv,
+			EmbedModel:             embedRole.Primary.Model,
 			EmbedFingerprint:       currentEmbedFingerprint(cfg),
-			EnableVision:           cfg.Provider.EnableVision,
+			EnableVision:           roleProviderVision(cfg, chatRole.Primary.Provider),
 			Soul:                   loadBootstrapFile(cfg.SoulFile, cfg.WorkspaceDir, "SOUL.md", agent.DefaultSoul),
 			AgentInstructions:      loadBootstrapFile(cfg.AgentsFile, cfg.WorkspaceDir, "AGENTS.md", agent.DefaultAgentInstructions),
 			ToolNotes:              loadBootstrapFile(cfg.ToolsFile, cfg.WorkspaceDir, "TOOLS.md", agent.DefaultToolNotes),
@@ -542,7 +616,7 @@ func main() {
 		rt.Consolidator = &memory.Consolidator{
 			DB:                 d,
 			Provider:           newConsolidationProviderClient(cfg),
-			EmbedModel:         cfg.Provider.EmbedModel,
+			EmbedModel:         embedRole.Primary.Model,
 			EmbedFingerprint:   currentEmbedFingerprint(cfg),
 			ChatModel:          effectiveConsolidationModel(cfg),
 			WindowSize:         cfg.ConsolidationWindowSize,
@@ -908,8 +982,9 @@ func buildToolRegistryWithOptions(cfg config.Config, d *db.DB, prov *providers.C
 	reg.Register(&tools.WebFetchMarkdown{HostPolicy: hostPolicy, Store: &artifacts.Store{Dir: cfg.ArtifactsDir, DB: d}})
 	reg.Register(&tools.WebSearch{APIKey: cfg.Tools.BraveAPIKey, HostPolicy: hostPolicy})
 	reg.Register(&tools.MemorySetPinned{DB: d})
-	reg.Register(&tools.MemoryAddNote{DB: d, Provider: prov, EmbedModel: cfg.Provider.EmbedModel, EmbedFingerprint: currentEmbedFingerprint(cfg)})
-	reg.Register(&tools.MemorySearch{DB: d, Provider: prov, EmbedModel: cfg.Provider.EmbedModel, EmbedFingerprint: currentEmbedFingerprint(cfg), VectorK: cfg.VectorK, FTSK: cfg.FTSK, TopK: cfg.MemoryRetrieve, VectorScanLimit: cfg.VectorScanLimit})
+	embedRole := cfg.ModelRole(config.ModelRoleEmbeddings)
+	reg.Register(&tools.MemoryAddNote{DB: d, Provider: prov, EmbedModel: embedRole.Primary.Model, EmbedFingerprint: currentEmbedFingerprint(cfg)})
+	reg.Register(&tools.MemorySearch{DB: d, Provider: prov, EmbedModel: embedRole.Primary.Model, EmbedFingerprint: currentEmbedFingerprint(cfg), VectorK: cfg.VectorK, FTSK: cfg.FTSK, TopK: cfg.MemoryRetrieve, VectorScanLimit: cfg.VectorScanLimit})
 	reg.Register(&tools.MemoryRecent{DB: d, DefaultLimit: 10, MaxLimit: cfg.HistoryMax, MaxChars: 240})
 	reg.Register(&tools.MemoryGetPinned{DB: d, MaxChars: 400})
 	if includeSendMessage {

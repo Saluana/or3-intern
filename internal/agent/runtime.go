@@ -91,6 +91,8 @@ type Runtime struct {
 	Provider                   *providers.Client
 	Model                      string
 	Temperature                float64
+	SubagentProvider           *providers.Client
+	SubagentModel              string
 	Tools                      *tools.Registry
 	Hardening                  config.HardeningConfig
 	AccessProfiles             config.AccessProfilesConfig
@@ -1191,8 +1193,16 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 			loopLimit += maxLoops
 		}
 		turnTools := r.exposedToolsForTurn(ctx, reg, messages, channel)
+		provider := r.Provider
+		model := r.Model
+		if eventType == bus.EventSystem && r.SubagentProvider != nil {
+			provider = r.SubagentProvider
+			if strings.TrimSpace(r.SubagentModel) != "" {
+				model = r.SubagentModel
+			}
+		}
 		req := providers.ChatCompletionRequest{
-			Model:       r.Model,
+			Model:       model,
 			Messages:    messages,
 			Tools:       toToolDefs(turnTools),
 			Temperature: r.Temperature,
@@ -1204,7 +1214,7 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 		var swOnce sync.Once
 		streamer := r.streamerForContext(ctx)
 		if streamer != nil {
-			resp, err = r.Provider.ChatStream(ctx, req, func(text string) {
+			resp, err = provider.ChatStream(ctx, req, func(text string) {
 				if observer != nil {
 					observer.OnTextDelta(ctx, text)
 				}
@@ -1224,7 +1234,7 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 				}
 			})
 		} else {
-			resp, err = r.Provider.Chat(ctx, req)
+			resp, err = provider.Chat(ctx, req)
 		}
 		if err != nil {
 			if sw != nil {
@@ -1343,6 +1353,9 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 			messages = append(messages, providers.ChatMessage{Role: "tool", ToolCallID: tc.ID, Content: sendOut})
 			var approvalErr *tools.ApprovalRequiredError
 			if errors.As(err, &approvalErr) {
+				if tools.RequestSourceFromContext(ctx) == tools.RequestSourceService {
+					return "", false, err
+				}
 				finalText, streamed := r.narrateApprovalRequired(ctx, messages)
 				return finalText, streamed, err
 			}

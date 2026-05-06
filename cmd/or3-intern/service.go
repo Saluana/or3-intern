@@ -39,6 +39,7 @@ import (
 	"or3-intern/internal/controlplane"
 	"or3-intern/internal/cron"
 	"or3-intern/internal/db"
+	"or3-intern/internal/providers"
 	"or3-intern/internal/skills"
 	"or3-intern/internal/tools"
 )
@@ -4659,6 +4660,18 @@ func (s *serviceServer) handleConfigure(w http.ResponseWriter, r *http.Request) 
 			"channel": channel,
 			"fields":  toServiceConfigureFields(fields),
 		})
+	case "providers":
+		if r.Method != http.MethodGet {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		writeServiceValue(w, http.StatusOK, serviceProviderStatus(s.config))
+	case "test":
+		if r.Method != http.MethodPost {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		s.handleConfigureProviderTest(w, r)
 	case "apply":
 		if r.Method != http.MethodPost {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
@@ -4729,6 +4742,116 @@ func (s *serviceServer) handleConfigure(w http.ResponseWriter, r *http.Request) 
 	default:
 		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "configure route not found"})
 	}
+}
+
+func serviceProviderStatus(cfg config.Config) map[string]any {
+	providerItems := make([]map[string]any, 0, len(cfg.Providers))
+	keys := make([]string, 0, len(cfg.Providers))
+	for key := range cfg.Providers {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	for _, key := range keys {
+		profile := cfg.Providers[key]
+		providerItems = append(providerItems, map[string]any{
+			"key":               key,
+			"label":             profile.Label,
+			"apiBase":           profile.APIBase,
+			"apiKeyConfigured":  strings.TrimSpace(profile.APIKey) != "",
+			"timeoutSeconds":    profile.TimeoutSeconds,
+			"enableVision":      profile.EnableVision,
+			"defaultChatModel":  profile.DefaultChatModel,
+			"defaultEmbedModel": profile.DefaultEmbedModel,
+			"defaultDimensions": profile.DefaultDimensions,
+			"favorites":         cfg.FavoriteModels[key],
+		})
+	}
+	roleItems := map[string]any{}
+	for _, roleName := range []string{config.ModelRoleChat, config.ModelRoleAgents, config.ModelRoleSubagents, config.ModelRoleSummarization, config.ModelRoleContextManager, config.ModelRoleEmbeddings} {
+		role := cfg.ModelRole(roleName)
+		roleItems[roleName] = map[string]any{
+			"primary":         role.Primary,
+			"fallbacks":       role.Fallbacks,
+			"embedDimensions": role.EmbedDimensions,
+			"warnings":        providerRoleWarnings(cfg, role),
+		}
+	}
+	return map[string]any{"providers": providerItems, "roles": roleItems}
+}
+
+func providerRoleWarnings(cfg config.Config, role config.ModelRoleConfig) []string {
+	var warnings []string
+	check := func(ref config.ModelRef) {
+		profile, ok := cfg.ProviderProfile(ref.Provider)
+		if !ok {
+			warnings = append(warnings, "provider not configured: "+ref.Provider)
+			return
+		}
+		if strings.TrimSpace(profile.APIBase) == "" {
+			warnings = append(warnings, "provider missing API base: "+ref.Provider)
+		}
+		if strings.TrimSpace(profile.APIKey) == "" {
+			warnings = append(warnings, "provider missing API key: "+ref.Provider)
+		}
+	}
+	check(role.Primary)
+	seen := map[string]struct{}{}
+	for _, fallback := range role.Fallbacks {
+		key := fallback.Provider + "/" + fallback.Model
+		if _, ok := seen[key]; ok {
+			warnings = append(warnings, "duplicate fallback: "+key)
+		}
+		seen[key] = struct{}{}
+		check(fallback)
+	}
+	return warnings
+}
+
+func (s *serviceServer) handleConfigureProviderTest(w http.ResponseWriter, r *http.Request) {
+	limitServiceRequestBody(w, r, serviceConfigureBodyLimit)
+	var body struct {
+		Role     string `json:"role"`
+		Provider string `json:"provider"`
+		Model    string `json:"model"`
+	}
+	if err := decodeServiceRequestBody(r.Body, &body); err != nil {
+		writeServiceRequestDecodeError(w, err)
+		return
+	}
+	cfg := s.config
+	roleName := strings.TrimSpace(body.Role)
+	if roleName == "" {
+		roleName = config.ModelRoleChat
+	}
+	role := cfg.ModelRole(roleName)
+	if strings.TrimSpace(body.Provider) != "" {
+		role.Primary.Provider = strings.TrimSpace(body.Provider)
+	}
+	if strings.TrimSpace(body.Model) != "" {
+		role.Primary.Model = strings.TrimSpace(body.Model)
+	}
+	client := newModelRefClient(cfg, role.Primary, 15*time.Second)
+	if client == nil {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "provider is not configured"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	switch roleName {
+	case config.ModelRoleEmbeddings:
+		_, err := client.Embed(ctx, role.Primary.Model, "or3 provider test")
+		if err != nil {
+			writeServiceJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": err.Error(), "transient": providers.IsTransientError(err)})
+			return
+		}
+	default:
+		_, err := client.Chat(ctx, providers.ChatCompletionRequest{Model: role.Primary.Model, Messages: []providers.ChatMessage{{Role: "user", Content: "Reply with ok."}}, Temperature: 0})
+		if err != nil {
+			writeServiceJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": err.Error(), "transient": providers.IsTransientError(err)})
+			return
+		}
+	}
+	writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (s *serviceServer) handleCron(w http.ResponseWriter, r *http.Request) {

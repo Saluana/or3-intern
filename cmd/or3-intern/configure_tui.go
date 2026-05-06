@@ -1095,14 +1095,19 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 			{Key: "routing_chat_fallbacks", Label: "Chat fallbacks", Description: "Comma-separated provider/model entries tried after transient failures.", Kind: configureFieldText, Value: formatModelRefs(cfg.ModelRouting.Chat.Fallbacks), EmptyHint: "openrouter/openai/gpt-4o-mini"},
 			{Key: "routing_agents_provider", Label: "Agents provider", Description: "Provider used for agent-style work.", Kind: configureFieldChoice, Value: cfg.ModelRouting.Agents.Primary.Provider, Choices: providerChoices, ChoiceIndex: indexOfChoice(providerChoices, cfg.ModelRouting.Agents.Primary.Provider)},
 			{Key: "routing_agents_model", Label: "Agents model", Description: "Model used for agent-style work.", Kind: configureFieldText, Value: cfg.ModelRouting.Agents.Primary.Model, EmptyHint: cfg.ModelRouting.Chat.Primary.Model},
+			{Key: "routing_agents_fallbacks", Label: "Agents fallbacks", Description: "Comma-separated provider/model entries tried after transient agent failures.", Kind: configureFieldText, Value: formatModelRefs(cfg.ModelRouting.Agents.Fallbacks), EmptyHint: "openrouter/openai/gpt-4o-mini"},
 			{Key: "routing_subagents_provider", Label: "Subagents provider", Description: "Provider used for internal subagent jobs.", Kind: configureFieldChoice, Value: cfg.ModelRouting.Subagents.Primary.Provider, Choices: providerChoices, ChoiceIndex: indexOfChoice(providerChoices, cfg.ModelRouting.Subagents.Primary.Provider)},
 			{Key: "routing_subagents_model", Label: "Subagents model", Description: "Model used for internal subagent jobs.", Kind: configureFieldText, Value: cfg.ModelRouting.Subagents.Primary.Model, EmptyHint: cfg.ModelRouting.Agents.Primary.Model},
+			{Key: "routing_subagents_fallbacks", Label: "Subagents fallbacks", Description: "Comma-separated provider/model entries tried after transient subagent failures.", Kind: configureFieldText, Value: formatModelRefs(cfg.ModelRouting.Subagents.Fallbacks), EmptyHint: "openrouter/openai/gpt-4o-mini"},
 			{Key: "routing_summarization_provider", Label: "Summarization provider", Description: "Provider used for memory consolidation and summaries.", Kind: configureFieldChoice, Value: cfg.ModelRouting.Summarization.Primary.Provider, Choices: providerChoices, ChoiceIndex: indexOfChoice(providerChoices, cfg.ModelRouting.Summarization.Primary.Provider)},
 			{Key: "routing_summarization_model", Label: "Summarization model", Description: "Model used for memory consolidation and summaries.", Kind: configureFieldText, Value: cfg.ModelRouting.Summarization.Primary.Model, EmptyHint: cfg.ModelRouting.Chat.Primary.Model},
+			{Key: "routing_summarization_fallbacks", Label: "Summarization fallbacks", Description: "Comma-separated provider/model entries tried after transient summarization failures.", Kind: configureFieldText, Value: formatModelRefs(cfg.ModelRouting.Summarization.Fallbacks), EmptyHint: "openrouter/openai/gpt-4o-mini"},
 			{Key: "routing_context_provider", Label: "Context manager provider", Description: "Provider used for context-manager maintenance proposals.", Kind: configureFieldChoice, Value: cfg.ModelRouting.ContextManager.Primary.Provider, Choices: providerChoices, ChoiceIndex: indexOfChoice(providerChoices, cfg.ModelRouting.ContextManager.Primary.Provider)},
 			{Key: "routing_context_model", Label: "Context manager model", Description: "Model used for context-manager maintenance proposals.", Kind: configureFieldText, Value: cfg.ModelRouting.ContextManager.Primary.Model, EmptyHint: cfg.ModelRouting.Summarization.Primary.Model},
+			{Key: "routing_context_fallbacks", Label: "Context manager fallbacks", Description: "Comma-separated provider/model entries tried after transient context-manager failures.", Kind: configureFieldText, Value: formatModelRefs(cfg.ModelRouting.ContextManager.Fallbacks), EmptyHint: "openrouter/openai/gpt-4o-mini"},
 			{Key: "routing_embeddings_provider", Label: "Embeddings provider", Description: "Provider used for memory and document embeddings.", Kind: configureFieldChoice, Value: cfg.ModelRouting.Embeddings.Primary.Provider, Choices: providerChoices, ChoiceIndex: indexOfChoice(providerChoices, cfg.ModelRouting.Embeddings.Primary.Provider)},
 			{Key: "routing_embeddings_model", Label: "Embeddings model", Description: "Model used for memory and document embeddings.", Kind: configureFieldText, Value: cfg.ModelRouting.Embeddings.Primary.Model, EmptyHint: "text-embedding-3-small"},
+			{Key: "routing_embeddings_fallbacks", Label: "Embeddings fallbacks", Description: "Comma-separated provider/model entries tried after transient embedding failures.", Kind: configureFieldText, Value: formatModelRefs(cfg.ModelRouting.Embeddings.Fallbacks), EmptyHint: "openai/text-embedding-3-small"},
 			{Key: "routing_embeddings_dimensions", Label: "Embeddings dimensions", Description: "Optional dimensions override for the embeddings role. Use 0 for provider default.", Kind: configureFieldText, Value: formatInt(cfg.ModelRouting.Embeddings.EmbedDimensions), EmptyHint: "0"},
 			{Key: "favorites_openai", Label: "OpenAI favorites", Description: "Comma-separated favorite OpenAI model IDs.", Kind: configureFieldText, Value: formatFavoriteModels(cfg.FavoriteModels["openai"]), EmptyHint: "gpt-4.1-mini,text-embedding-3-small"},
 			{Key: "favorites_openrouter", Label: "OpenRouter favorites", Description: "Comma-separated favorite OpenRouter model IDs.", Kind: configureFieldText, Value: formatFavoriteModels(cfg.FavoriteModels["openrouter"]), EmptyHint: "openai/gpt-4o-mini"},
@@ -1424,14 +1429,19 @@ var helpfulSectionFieldDescriptions = map[string]string{
 	"routing_chat_fallbacks":                 "Comma-separated provider/model fallbacks tried after transient chat failures. Use entries like openrouter/openai/gpt-4o-mini.",
 	"routing_agents_provider":                "Provider used for agent-style work. Most users can match chat, while advanced setups may use a stronger or cheaper provider.",
 	"routing_agents_model":                   "Model used for agent-style work. Use a model that handles tools and longer reasoning well.",
+	"routing_agents_fallbacks":               "Comma-separated provider/model fallbacks tried after transient agent failures. Leave blank to use only the primary.",
 	"routing_subagents_provider":             "Provider used for internal subagent jobs. This can be cheaper than chat when background helpers do routine work.",
 	"routing_subagents_model":                "Model used for internal subagent jobs. Use a model that balances cost and reliability for background work.",
+	"routing_subagents_fallbacks":            "Comma-separated provider/model fallbacks tried after transient subagent failures. Leave blank to use only the primary.",
 	"routing_summarization_provider":         "Provider used for memory consolidation and summaries. A cheaper model is often enough if it follows structured instructions reliably.",
 	"routing_summarization_model":            "Model used for memory consolidation and summaries. Changing this affects future summaries, not existing saved memory by itself.",
+	"routing_summarization_fallbacks":        "Comma-separated provider/model fallbacks tried after transient summarization failures. Leave blank to use only the primary.",
 	"routing_context_provider":               "Provider used for context-manager cleanup proposals. This can be a small reliable model because outputs are guarded before use.",
 	"routing_context_model":                  "Model used for context-manager cleanup proposals. Leave near the summarization model unless context cleanup needs different behavior.",
+	"routing_context_fallbacks":              "Comma-separated provider/model fallbacks tried after transient context-manager failures. Leave blank to use only the primary.",
 	"routing_embeddings_provider":            "Provider used for memory and document embeddings. Warning: changing this can require rebuilding existing memory and document vectors.",
 	"routing_embeddings_model":               "Model used for memory and document embeddings. Warning: changing this can require rebuilding existing memory and document vectors.",
+	"routing_embeddings_fallbacks":           "Comma-separated provider/model fallbacks tried after transient embedding failures. Warning: fallback embeddings should produce compatible vectors.",
 	"routing_embeddings_dimensions":          "Optional dimensions override for the embeddings role. Use 0 for provider defaults; changing it can require rebuilding vectors.",
 	"favorites_openai":                       "Comma-separated favorite OpenAI model IDs shown first in the app. Favorites do not change routing until selected in a role.",
 	"favorites_openrouter":                   "Comma-separated favorite OpenRouter model IDs shown first in the app. Favorites do not change routing until selected in a role.",
@@ -1955,11 +1965,17 @@ func applyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 	case "routing_agents_model":
 		cfg.ModelRouting.Agents.Primary.Model = value
 		return true, nil
+	case "routing_agents_fallbacks":
+		cfg.ModelRouting.Agents.Fallbacks = parseModelRefs(value)
+		return true, nil
 	case "routing_subagents_provider":
 		cfg.ModelRouting.Subagents.Primary.Provider = value
 		return true, nil
 	case "routing_subagents_model":
 		cfg.ModelRouting.Subagents.Primary.Model = value
+		return true, nil
+	case "routing_subagents_fallbacks":
+		cfg.ModelRouting.Subagents.Fallbacks = parseModelRefs(value)
 		return true, nil
 	case "routing_summarization_provider":
 		cfg.ModelRouting.Summarization.Primary.Provider = value
@@ -1968,6 +1984,9 @@ func applyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 		cfg.ModelRouting.Summarization.Primary.Model = value
 		cfg.ConsolidationModel = value
 		return true, nil
+	case "routing_summarization_fallbacks":
+		cfg.ModelRouting.Summarization.Fallbacks = parseModelRefs(value)
+		return true, nil
 	case "routing_context_provider":
 		cfg.ModelRouting.ContextManager.Primary.Provider = value
 		return true, nil
@@ -1975,12 +1994,18 @@ func applyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 		cfg.ModelRouting.ContextManager.Primary.Model = value
 		cfg.ContextManager.Model = value
 		return true, nil
+	case "routing_context_fallbacks":
+		cfg.ModelRouting.ContextManager.Fallbacks = parseModelRefs(value)
+		return true, nil
 	case "routing_embeddings_provider":
 		cfg.ModelRouting.Embeddings.Primary.Provider = value
 		return true, nil
 	case "routing_embeddings_model":
 		cfg.ModelRouting.Embeddings.Primary.Model = value
 		cfg.Provider.EmbedModel = value
+		return true, nil
+	case "routing_embeddings_fallbacks":
+		cfg.ModelRouting.Embeddings.Fallbacks = parseModelRefs(value)
 		return true, nil
 	case "routing_embeddings_dimensions":
 		changed, err := setIntValue(&cfg.ModelRouting.Embeddings.EmbedDimensions, value, fieldKey)

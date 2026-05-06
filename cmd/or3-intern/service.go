@@ -67,12 +67,31 @@ type serviceServer struct {
 	rateCounts         map[string]int
 	authFailureMu      sync.Mutex
 	authFailures       map[string]serviceAuthFailureState
+	modelCatalogMu     sync.Mutex
+	modelCatalogCache  map[string]serviceModelCatalogCacheEntry
 }
 
 type serviceAuthFailureState struct {
 	Count        int
 	FirstAttempt time.Time
 	BlockedUntil time.Time
+}
+
+type serviceModelCatalogCacheEntry struct {
+	FetchedAt time.Time
+	Items     []serviceModelCatalogItem
+}
+
+type serviceModelCatalogItem struct {
+	ID               string         `json:"id"`
+	Name             string         `json:"name,omitempty"`
+	Description      string         `json:"description,omitempty"`
+	Provider         string         `json:"provider,omitempty"`
+	ContextLength    int            `json:"contextLength,omitempty"`
+	InputModalities  []string       `json:"inputModalities,omitempty"`
+	OutputModalities []string       `json:"outputModalities,omitempty"`
+	Pricing          map[string]any `json:"pricing,omitempty"`
+	RawProvider      string         `json:"rawProvider,omitempty"`
 }
 
 const (
@@ -4618,8 +4637,8 @@ func (s *serviceServer) handleConfigure(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/internal/v1/configure"), "/")
-	switch path {
-	case "", "sections":
+	switch {
+	case path == "" || path == "sections":
 		if r.Method != http.MethodGet {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 			return
@@ -4634,7 +4653,7 @@ func (s *serviceServer) handleConfigure(w http.ResponseWriter, r *http.Request) 
 			})
 		}
 		writeServiceJSON(w, http.StatusOK, map[string]any{"items": items})
-	case "fields":
+	case path == "fields":
 		if r.Method != http.MethodGet {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 			return
@@ -4660,19 +4679,44 @@ func (s *serviceServer) handleConfigure(w http.ResponseWriter, r *http.Request) 
 			"channel": channel,
 			"fields":  toServiceConfigureFields(fields),
 		})
-	case "providers":
+	case path == "providers":
+		switch r.Method {
+		case http.MethodGet:
+			writeServiceValue(w, http.StatusOK, serviceProviderStatus(s.config))
+		case http.MethodPost:
+			s.handleConfigureProviderSave(w, r, "")
+		default:
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		}
+	case strings.HasPrefix(path, "providers/"):
+		key := strings.Trim(strings.TrimPrefix(path, "providers/"), "/")
+		switch r.Method {
+		case http.MethodPut, http.MethodPatch:
+			s.handleConfigureProviderSave(w, r, key)
+		case http.MethodDelete:
+			s.handleConfigureProviderDelete(w, r, key)
+		default:
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		}
+	case path == "models":
 		if r.Method != http.MethodGet {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 			return
 		}
-		writeServiceValue(w, http.StatusOK, serviceProviderStatus(s.config))
-	case "test":
+		s.handleConfigureModels(w, r)
+	case path == "favorite-models":
+		if r.Method != http.MethodPost {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		s.handleConfigureFavoriteModel(w, r)
+	case path == "test":
 		if r.Method != http.MethodPost {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 			return
 		}
 		s.handleConfigureProviderTest(w, r)
-	case "apply":
+	case path == "apply":
 		if r.Method != http.MethodPost {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 			return
@@ -4744,6 +4788,125 @@ func (s *serviceServer) handleConfigure(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
+func (s *serviceServer) saveConfigureConfig(next config.Config) (string, error) {
+	path := s.configPath
+	if strings.TrimSpace(path) == "" {
+		path = cfgPathOrDefault("")
+	}
+	if err := config.Save(path, next); err != nil {
+		return path, err
+	}
+	s.config = next
+	return path, nil
+}
+
+func serviceNormalizeProviderKey(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var b strings.Builder
+	lastDash := false
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+func (s *serviceServer) handleConfigureProviderSave(w http.ResponseWriter, r *http.Request, pathKey string) {
+	limitServiceRequestBody(w, r, serviceConfigureBodyLimit)
+	var body struct {
+		Key               string `json:"key"`
+		Label             string `json:"label"`
+		APIBase           string `json:"apiBase"`
+		APIKey            string `json:"apiKey"`
+		TimeoutSeconds    int    `json:"timeoutSeconds"`
+		EnableVision      bool   `json:"enableVision"`
+		DefaultChatModel  string `json:"defaultChatModel"`
+		DefaultEmbedModel string `json:"defaultEmbedModel"`
+		DefaultDimensions int    `json:"defaultDimensions"`
+		ClearAPIKey       bool   `json:"clearApiKey"`
+	}
+	if err := decodeServiceRequestBody(r.Body, &body); err != nil {
+		writeServiceRequestDecodeError(w, err)
+		return
+	}
+	key := serviceNormalizeProviderKey(serviceFirstNonEmpty(pathKey, body.Key))
+	if key == "" {
+		key = serviceNormalizeProviderKey(body.Label)
+	}
+	if key == "" {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "provider key or label is required"})
+		return
+	}
+	if strings.TrimSpace(body.APIBase) == "" {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "apiBase is required"})
+		return
+	}
+	if _, err := url.ParseRequestURI(strings.TrimSpace(body.APIBase)); err != nil {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "apiBase must be a valid URL"})
+		return
+	}
+	next := s.config
+	if next.Providers == nil {
+		next.Providers = config.ProviderProfiles{}
+	}
+	profile := next.Providers[key]
+	profile.Label = strings.TrimSpace(serviceFirstNonEmpty(body.Label, profile.Label, key))
+	profile.APIBase = strings.TrimRight(strings.TrimSpace(body.APIBase), "/")
+	if body.ClearAPIKey {
+		profile.APIKey = ""
+	} else if strings.TrimSpace(body.APIKey) != "" {
+		profile.APIKey = strings.TrimSpace(body.APIKey)
+	}
+	if body.TimeoutSeconds > 0 {
+		profile.TimeoutSeconds = body.TimeoutSeconds
+	}
+	profile.EnableVision = body.EnableVision
+	profile.DefaultChatModel = strings.TrimSpace(body.DefaultChatModel)
+	profile.DefaultEmbedModel = strings.TrimSpace(body.DefaultEmbedModel)
+	if body.DefaultDimensions >= 0 {
+		profile.DefaultDimensions = body.DefaultDimensions
+	}
+	next.Providers[key] = profile
+	path, err := s.saveConfigureConfig(next)
+	if err != nil {
+		writeServiceError(w, r, http.StatusBadGateway, "config save failed", err)
+		return
+	}
+	writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true, "config_path": path, "provider": key})
+}
+
+func (s *serviceServer) handleConfigureProviderDelete(w http.ResponseWriter, r *http.Request, key string) {
+	key = serviceNormalizeProviderKey(key)
+	if key == "" {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "provider key is required"})
+		return
+	}
+	if key == "openai" || key == "openrouter" {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "built-in providers cannot be deleted"})
+		return
+	}
+	next := s.config
+	if next.Providers != nil {
+		delete(next.Providers, key)
+	}
+	if next.FavoriteModels != nil {
+		delete(next.FavoriteModels, key)
+	}
+	path, err := s.saveConfigureConfig(next)
+	if err != nil {
+		writeServiceError(w, r, http.StatusBadGateway, "config save failed", err)
+		return
+	}
+	writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true, "config_path": path})
+}
+
 func serviceProviderStatus(cfg config.Config) map[string]any {
 	providerItems := make([]map[string]any, 0, len(cfg.Providers))
 	keys := make([]string, 0, len(cfg.Providers))
@@ -4805,6 +4968,244 @@ func providerRoleWarnings(cfg config.Config, role config.ModelRoleConfig) []stri
 		check(fallback)
 	}
 	return warnings
+}
+
+func (s *serviceServer) handleConfigureFavoriteModel(w http.ResponseWriter, r *http.Request) {
+	limitServiceRequestBody(w, r, serviceConfigureBodyLimit)
+	var body struct {
+		Provider string `json:"provider"`
+		Model    string `json:"model"`
+		Label    string `json:"label"`
+		Favorite *bool  `json:"favorite"`
+	}
+	if err := decodeServiceRequestBody(r.Body, &body); err != nil {
+		writeServiceRequestDecodeError(w, err)
+		return
+	}
+	provider := serviceNormalizeProviderKey(body.Provider)
+	model := strings.TrimSpace(body.Model)
+	if provider == "" || model == "" {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "provider and model are required"})
+		return
+	}
+	favorite := true
+	if body.Favorite != nil {
+		favorite = *body.Favorite
+	}
+	next := s.config
+	if next.FavoriteModels == nil {
+		next.FavoriteModels = config.FavoriteModelsConfig{}
+	}
+	current := next.FavoriteModels[provider]
+	out := make([]config.FavoriteModelConfig, 0, len(current)+1)
+	for _, item := range current {
+		if strings.TrimSpace(item.Model) == model {
+			continue
+		}
+		out = append(out, item)
+	}
+	if favorite {
+		out = append([]config.FavoriteModelConfig{{Model: model, Label: strings.TrimSpace(body.Label)}}, out...)
+	}
+	next.FavoriteModels[provider] = out
+	path, err := s.saveConfigureConfig(next)
+	if err != nil {
+		writeServiceError(w, r, http.StatusBadGateway, "config save failed", err)
+		return
+	}
+	writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true, "config_path": path, "favorites": next.FavoriteModels[provider]})
+}
+
+func (s *serviceServer) handleConfigureModels(w http.ResponseWriter, r *http.Request) {
+	provider := serviceNormalizeProviderKey(r.URL.Query().Get("provider"))
+	if provider == "" {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "provider is required"})
+		return
+	}
+	kind := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("kind")))
+	if kind == "" {
+		kind = "chat"
+	}
+	refresh := r.URL.Query().Get("refresh") == "1" || strings.EqualFold(r.URL.Query().Get("refresh"), "true")
+	category := strings.TrimSpace(r.URL.Query().Get("category"))
+	userFiltered := r.URL.Query().Get("user") == "1" || strings.EqualFold(r.URL.Query().Get("user"), "true")
+	items, fetchedAt, err := s.configureModelCatalog(r.Context(), provider, kind, category, userFiltered, refresh)
+	if err != nil {
+		writeServiceJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		return
+	}
+	writeServiceJSON(w, http.StatusOK, map[string]any{
+		"provider":  provider,
+		"kind":      kind,
+		"fetchedAt": fetchedAt.Format(time.RFC3339),
+		"items":     items,
+	})
+}
+
+func (s *serviceServer) configureModelCatalog(ctx context.Context, provider, kind, category string, userFiltered, refresh bool) ([]serviceModelCatalogItem, time.Time, error) {
+	cacheKey := strings.Join([]string{provider, kind, category, strconv.FormatBool(userFiltered)}, "|")
+	now := time.Now()
+	s.modelCatalogMu.Lock()
+	if s.modelCatalogCache == nil {
+		s.modelCatalogCache = map[string]serviceModelCatalogCacheEntry{}
+	}
+	if entry, ok := s.modelCatalogCache[cacheKey]; ok && !refresh && now.Sub(entry.FetchedAt) < 24*time.Hour {
+		items := append([]serviceModelCatalogItem(nil), entry.Items...)
+		s.modelCatalogMu.Unlock()
+		return items, entry.FetchedAt, nil
+	}
+	s.modelCatalogMu.Unlock()
+
+	items, err := s.fetchConfigureModelCatalog(ctx, provider, kind, category, userFiltered)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	s.modelCatalogMu.Lock()
+	s.modelCatalogCache[cacheKey] = serviceModelCatalogCacheEntry{FetchedAt: now, Items: items}
+	s.modelCatalogMu.Unlock()
+	return items, now, nil
+}
+
+func (s *serviceServer) fetchConfigureModelCatalog(ctx context.Context, provider, kind, category string, userFiltered bool) ([]serviceModelCatalogItem, error) {
+	profile, ok := s.config.ProviderProfile(provider)
+	if !ok {
+		return nil, fmt.Errorf("provider is not configured: %s", provider)
+	}
+	base := strings.TrimRight(strings.TrimSpace(profile.APIBase), "/")
+	if base == "" {
+		return nil, fmt.Errorf("provider missing API base: %s", provider)
+	}
+	endpoint := base + "/models"
+	query := url.Values{}
+	if provider == "openrouter" {
+		if kind == "embeddings" {
+			endpoint = base + "/embeddings/models"
+		} else if userFiltered && strings.TrimSpace(profile.APIKey) != "" {
+			endpoint = base + "/models/user"
+		}
+		if category != "" {
+			query.Set("category", category)
+		}
+	} else if kind == "embeddings" && strings.Contains(base, "openrouter.ai") {
+		endpoint = base + "/embeddings/models"
+	}
+	if len(query) > 0 {
+		endpoint += "?" + query.Encode()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(profile.APIKey) != "" {
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(profile.APIKey))
+	}
+	req.Header.Set("Accept", "application/json")
+	client := &http.Client{Timeout: 20 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("model list failed: %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+	var payload struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&payload); err != nil {
+		return nil, err
+	}
+	items := make([]serviceModelCatalogItem, 0, len(payload.Data))
+	for _, raw := range payload.Data {
+		item := serviceModelCatalogItem{
+			ID:          serviceString(raw["id"]),
+			Name:        serviceString(raw["name"]),
+			Description: serviceString(raw["description"]),
+			Provider:    provider,
+			Pricing:     serviceMap(raw["pricing"]),
+		}
+		if item.ID == "" {
+			continue
+		}
+		item.ContextLength = serviceInt(raw["context_length"])
+		if item.ContextLength == 0 {
+			item.ContextLength = serviceInt(raw["contextLength"])
+		}
+		if arch := serviceMap(raw["architecture"]); arch != nil {
+			item.InputModalities = serviceStringSlice(arch["input_modalities"])
+			item.OutputModalities = serviceStringSlice(arch["output_modalities"])
+		}
+		if topProvider := serviceMap(raw["top_provider"]); topProvider != nil {
+			item.RawProvider = serviceString(topProvider["name"])
+		}
+		if kind == "embeddings" && len(item.OutputModalities) > 0 && !slices.Contains(item.OutputModalities, "embeddings") {
+			continue
+		}
+		items = append(items, item)
+	}
+	slices.SortFunc(items, func(a, b serviceModelCatalogItem) int {
+		return strings.Compare(strings.ToLower(a.ID), strings.ToLower(b.ID))
+	})
+	return items, nil
+}
+
+func serviceString(value any) string {
+	if value == nil {
+		return ""
+	}
+	switch v := value.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	default:
+		return strings.TrimSpace(fmt.Sprint(v))
+	}
+}
+
+func serviceMap(value any) map[string]any {
+	if value == nil {
+		return nil
+	}
+	if v, ok := value.(map[string]any); ok {
+		return v
+	}
+	return nil
+}
+
+func serviceInt(value any) int {
+	switch v := value.(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	case json.Number:
+		n, _ := v.Int64()
+		return int(n)
+	case string:
+		n, _ := strconv.Atoi(strings.TrimSpace(v))
+		return n
+	default:
+		return 0
+	}
+}
+
+func serviceStringSlice(value any) []string {
+	raw, ok := value.([]any)
+	if !ok {
+		if strings.TrimSpace(serviceString(value)) == "" {
+			return nil
+		}
+		return []string{serviceString(value)}
+	}
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		if s := serviceString(item); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func (s *serviceServer) handleConfigureProviderTest(w http.ResponseWriter, r *http.Request) {

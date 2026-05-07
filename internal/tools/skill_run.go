@@ -182,10 +182,11 @@ func (t *RunSkillScript) prepareSkillRun(ctx context.Context, params map[string]
 		ScriptHash:     skillCommandHash(cmd),
 		EnvBindingHash: hashEnvBinding(childEnv),
 	}
-	_, planHash, err := approval.CanonicalSubjectHash(planHashInput)
+	sh, err := approval.CanonicalSubjectHash(planHashInput)
 	if err != nil {
 		return preparedSkillRun{}, "", err
 	}
+	planHash := sh.Hash
 	identity := RequesterIdentityFromContext(ctx)
 	plan := db.SkillRunPlanRecord{
 		SkillID:            skill.Name,

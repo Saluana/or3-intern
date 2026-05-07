@@ -814,6 +814,70 @@ func TestBroker_DenyPairingRequest_RejectsAlreadyApprovedRequest(t *testing.T) {
 	}
 }
 
+func TestBroker_ApprovePairingRequest_RejectsExpiredWithoutResolving(t *testing.T) {
+	broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Pairing.Mode = config.ApprovalModeAsk
+		cfg.PairingCodeTTLSeconds = 1
+	})
+	defer cleanup()
+
+	req, _, err := broker.CreatePairingRequest(context.Background(), PairingRequestInput{
+		Role:        RoleOperator,
+		DisplayName: "Ops Laptop",
+	})
+	if err != nil {
+		t.Fatalf("CreatePairingRequest: %v", err)
+	}
+	broker.Now = func() time.Time {
+		return time.Unix(1700000002, 0).UTC()
+	}
+
+	if _, err := broker.ApprovePairingRequest(context.Background(), req.ID, "cli:test"); err == nil {
+		t.Fatal("expected expired pairing approval to fail")
+	}
+	updated, err := broker.DB.GetPairingRequest(context.Background(), req.ID)
+	if err != nil {
+		t.Fatalf("GetPairingRequest: %v", err)
+	}
+	if updated.Status != StatusPending {
+		t.Fatalf("expected expired pairing request to remain pending, got %q", updated.Status)
+	}
+	if updated.ApprovedAt != 0 {
+		t.Fatalf("expected no approved timestamp, got %d", updated.ApprovedAt)
+	}
+}
+
+func TestBroker_DenyPairingRequest_RecordsDeniedTimestampOnly(t *testing.T) {
+	broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Pairing.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+
+	req, _, err := broker.CreatePairingRequest(context.Background(), PairingRequestInput{
+		Role:        RoleOperator,
+		DisplayName: "Ops Laptop",
+	})
+	if err != nil {
+		t.Fatalf("CreatePairingRequest: %v", err)
+	}
+	if err := broker.DenyPairingRequest(context.Background(), req.ID, "cli:test"); err != nil {
+		t.Fatalf("DenyPairingRequest: %v", err)
+	}
+	updated, err := broker.DB.GetPairingRequest(context.Background(), req.ID)
+	if err != nil {
+		t.Fatalf("GetPairingRequest: %v", err)
+	}
+	if updated.Status != StatusDenied {
+		t.Fatalf("expected denied status, got %q", updated.Status)
+	}
+	if updated.ApprovedAt != 0 {
+		t.Fatalf("expected no approved timestamp, got %d", updated.ApprovedAt)
+	}
+	if updated.DeniedAt == 0 {
+		t.Fatal("expected denied timestamp")
+	}
+}
+
 func TestBroker_RotatePairedDeviceToken_RejectsRevokedDevice(t *testing.T) {
 	broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {})
 	defer cleanup()
@@ -848,5 +912,112 @@ func TestBroker_IsPairedChannelIdentity_FindsMatchBeyond200Rows(t *testing.T) {
 	}
 	if !allowed {
 		t.Fatal("expected legacy paired identity to be found beyond first page")
+	}
+}
+
+func TestBroker_EvaluateSecretAccess_AsksAndAcceptsApprovedToken(t *testing.T) {
+	broker, cleanup := newTestBroker(t, nil)
+	defer cleanup()
+	ctx := context.Background()
+
+	input := SecretAccessEvaluation{
+		SecretName: "provider.openai",
+		Operation:  "read",
+		AgentID:    "agent-1",
+		SessionID:  "session-1",
+	}
+	first, err := broker.EvaluateSecretAccess(ctx, input)
+	if err != nil {
+		t.Fatalf("EvaluateSecretAccess first: %v", err)
+	}
+	if !first.RequiresApproval || first.RequestID == 0 {
+		t.Fatalf("expected pending approval, got %#v", first)
+	}
+
+	issued, err := broker.ApproveRequest(ctx, first.RequestID, "admin", false, "")
+	if err != nil {
+		t.Fatalf("ApproveRequest: %v", err)
+	}
+
+	retry := SecretAccessEvaluation{
+		SecretName:    "provider.openai",
+		Operation:     "read",
+		AgentID:       "agent-1",
+		SessionID:     "session-1",
+		ApprovalToken: issued.Token,
+	}
+	decision, err := broker.EvaluateSecretAccess(ctx, retry)
+	if err != nil {
+		t.Fatalf("EvaluateSecretAccess retry: %v", err)
+	}
+	if !decision.Allowed {
+		t.Fatalf("expected allow with approved token, got %#v", decision)
+	}
+	if decision.RequestID != first.RequestID {
+		t.Fatalf("expected token linked to original request %d, got %d", first.RequestID, decision.RequestID)
+	}
+}
+
+func TestBroker_EvaluateSecretAccess_DenyBlocksAccess(t *testing.T) {
+	broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.SecretAccess.Mode = config.ApprovalModeDeny
+	})
+	defer cleanup()
+
+	decision, err := broker.EvaluateSecretAccess(context.Background(), SecretAccessEvaluation{
+		SecretName: "provider.openai",
+		Operation:  "read",
+		AgentID:    "agent-1",
+		SessionID:  "session-1",
+	})
+	if err != nil {
+		t.Fatalf("EvaluateSecretAccess: %v", err)
+	}
+	if decision.Allowed {
+		t.Fatal("expected access denied by policy")
+	}
+}
+
+func TestBroker_EvaluateSecretAccess_TrustedAllowsAccess(t *testing.T) {
+	broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.SecretAccess.Mode = config.ApprovalModeTrusted
+	})
+	defer cleanup()
+
+	decision, err := broker.EvaluateSecretAccess(context.Background(), SecretAccessEvaluation{
+		SecretName: "provider.openai",
+		Operation:  "read",
+		AgentID:    "agent-1",
+		SessionID:  "session-1",
+	})
+	if err != nil {
+		t.Fatalf("EvaluateSecretAccess: %v", err)
+	}
+	if !decision.Allowed {
+		t.Fatal("expected access allowed in trusted mode")
+	}
+}
+
+func TestBroker_EvaluateSecretAccess_ReusesPendingRequest(t *testing.T) {
+	broker, cleanup := newTestBroker(t, nil)
+	defer cleanup()
+	ctx := context.Background()
+
+	input := SecretAccessEvaluation{
+		SecretName: "provider.openai",
+		Operation:  "write",
+		AgentID:    "agent-1",
+		SessionID:  "session-1",
+	}
+	first, err := broker.EvaluateSecretAccess(ctx, input)
+	if err != nil {
+		t.Fatalf("EvaluateSecretAccess first: %v", err)
+	}
+	second, err := broker.EvaluateSecretAccess(ctx, input)
+	if err != nil {
+		t.Fatalf("EvaluateSecretAccess second: %v", err)
+	}
+	if second.RequestID != first.RequestID {
+		t.Fatalf("expected reused request %d, got %d", first.RequestID, second.RequestID)
 	}
 }

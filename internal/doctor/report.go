@@ -230,3 +230,10 @@ func (r Report) MarshalJSON() ([]byte, error) {
 	type alias Report
 	return json.Marshal(alias(r))
 }
+
+func TopFindings(findings []Finding, limit int) []Finding {
+	if limit <= 0 || len(findings) <= limit {
+		return append([]Finding{}, findings...)
+	}
+	return append([]Finding{}, findings[:limit]...)
+}

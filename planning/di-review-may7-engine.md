@@ -335,23 +335,23 @@ func hostListTooBroad(hosts []string) bool {
 
 ### Phase 1: Drift Prevention (Do First)
 
-1. **Add `collectChannels()` / `enumerateChannels()` inside `doctor`** with channel name, display name, enabled, open access, inbound policy, and allowlist-present state.
-2. **Rewrite `channelExposureFindings`, `openAccessChannelNames`, `channelIngressFindings`, `anyEnabledChannels`, and public-ingress helpers** to iterate over that channel snapshot.
-3. **Add focused tests for channel exposure and invalid ingress** so adding a sixth channel requires updating one helper and one test table, not several handwritten branches.
+1. **[x]** **Add `collectChannels()` / `enumerateChannels()` inside `doctor`** with channel name, display name, enabled, open access, inbound policy, and allowlist-present state.
+2. **[x]** **Rewrite `channelExposureFindings`, `openAccessChannelNames`, `channelIngressFindings`, `anyEnabledChannels`, and public-ingress helpers** to iterate over that channel snapshot.
+3. **[x]** **Add focused tests for channel exposure and invalid ingress** so adding a sixth channel requires updating one helper and one test table, not several handwritten branches.
 
 ### Phase 2: Readability Without Behavior Change
 
-4. **Split `webhookFindings` into unresolved-profile and resolved-profile helpers** to reduce nesting and make webhook policy tests easier to write.
-5. **Trim repeated config fields once per function** where it improves clarity (`workspaceDir`, `artifactsDir`, `bubblewrapPath`, service/webhook secrets).
-6. **Merge `severityForConfigureOrStartup` only if the replacement stays obvious**. A helper like `severityForModes(mode, advisory, blockModes...)` is clearer than widening `severityFor` with hidden configure behavior.
-7. **Move `TopFindings` to `report.go`** only if a report utility cleanup is already underway.
+4. **[x]** **Split `webhookFindings` into unresolved-profile and resolved-profile helpers** to reduce nesting and make webhook policy tests easier to write.
+5. **[x]** **Trim repeated config fields once per function** where it improves clarity (`workspaceDir`, `artifactsDir`, `bubblewrapPath`, service/webhook secrets).
+6. **[x]** **Keep `severityForConfigureOrStartup` as-is** -- the replacement is not obviously clearer given the distinct configure mode. No behavior change.
+7. **[x]** **Move `TopFindings` to `report.go`** -- done alongside the structural split.
 
 ### Phase 3: Structural Split
 
-8. **Split into domain files** per the table in section 1.3, starting with `engine_channels.go`, `engine_webhook.go`, `engine_network.go`, and `engine_profiles.go`.
-9. **Consider moving profile policy helpers to `config`** only after another package needs exactly the same semantics.
-10. **Consider a `FindingDefinition` registry** for centralized severity escalation rules after the file split makes existing finding IDs easier to audit.
-11. **Move `validateConfigSnapshot` to config package** as `ValidateRoundTrip()` if config grows a buffer-based save/load validation path.
+8. **[x]** **Split into domain files** per the table in section 1.3 (17 files total, engine.go slimmed to ~55 lines).
+9. **[ ]** **Consider moving profile policy helpers to `config`** only after another package needs exactly the same semantics.
+10. **[ ]** **Consider a `FindingDefinition` registry** for centralized severity escalation rules after the file split makes existing finding IDs easier to audit.
+11. **[ ]** **Move `validateConfigSnapshot` to config package** as `ValidateRoundTrip()` if config grows a buffer-based save/load validation path.
 
 ---
 

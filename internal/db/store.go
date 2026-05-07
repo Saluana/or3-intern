@@ -109,7 +109,10 @@ const (
 	SubagentStatusInterrupted = "interrupted"
 )
 
-var ErrSubagentQueueFull = errors.New("subagent queue is full")
+var (
+	ErrSubagentQueueFull          = errors.New("subagent queue is full")
+	ErrInvalidSubagentStatusFilter = errors.New("invalid subagent status filter")
+)
 
 const (
 	AgentCLIStatusQueued    = "queued"
@@ -1253,7 +1256,7 @@ func (d *DB) ListSubagentJobs(ctx context.Context, filter SubagentJobFilter) ([]
 		clauses = append(clauses, "status=?")
 		args = append(args, strings.ToLower(strings.TrimSpace(filter.Status)))
 	default:
-		return nil, fmt.Errorf("invalid subagent status filter %q", filter.Status)
+		return nil, fmt.Errorf("%w: %q", ErrInvalidSubagentStatusFilter, filter.Status)
 	}
 
 	if parent := strings.TrimSpace(filter.ParentSessionKey); parent != "" {

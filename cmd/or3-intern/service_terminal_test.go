@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,6 +26,42 @@ type serviceTerminalTestWriteCloser struct {
 
 func (w *serviceTerminalTestWriteCloser) Close() error {
 	return nil
+}
+
+func TestServiceTerminalSlowSubscriberIsClosed(t *testing.T) {
+	session := &serviceTerminalSession{ID: "term-test"}
+	_, events, unsubscribe := session.subscribe()
+	defer unsubscribe()
+
+	for i := 0; i < 33; i++ {
+		session.appendEvent("output", map[string]any{"i": i})
+	}
+
+	for range 32 {
+		if _, ok := <-events; !ok {
+			t.Fatal("subscriber closed before buffered events were readable")
+		}
+	}
+	if _, ok := <-events; ok {
+		t.Fatal("expected slow subscriber channel to be closed")
+	}
+}
+
+func TestServiceComponentsConcurrentInit(t *testing.T) {
+	server := &serviceServer{}
+	var wg sync.WaitGroup
+	for range 100 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = server.terminals()
+			_ = server.terminalTickets()
+			_ = server.serviceRateLimiter()
+			_ = server.serviceAuthFailures()
+			_ = server.serviceModelCatalog()
+		}()
+	}
+	wg.Wait()
 }
 
 func TestServiceTerminalDisabledWhenShellModeOff(t *testing.T) {
@@ -185,12 +222,12 @@ func TestTerminalWebSocketTicketLifecycle(t *testing.T) {
 	}
 
 	hash := terminalWebSocketTicketHash(ticket)
-	server.terminalWSTicketMu.Lock()
-	if _, ok := server.terminalWSTickets[ticket]; ok {
+	server.terminalTickets().mu.Lock()
+	if _, ok := server.terminalTickets().tickets[ticket]; ok {
 		t.Fatal("raw websocket ticket was stored as a map key")
 	}
-	record, ok := server.terminalWSTickets[hash]
-	server.terminalWSTicketMu.Unlock()
+	record, ok := server.terminalTickets().tickets[hash]
+	server.terminalTickets().mu.Unlock()
 	if !ok {
 		t.Fatal("expected hashed websocket ticket record")
 	}
@@ -390,7 +427,7 @@ func TestCollectTerminalOutputStreamsPartialChunks(t *testing.T) {
 func TestWriteTerminalInputAcceptsNewlineOnlyInput(t *testing.T) {
 	writer := &serviceTerminalTestWriteCloser{}
 	session := &serviceTerminalSession{ID: "term-test", Status: "running", ExpiresAt: time.Now().Add(time.Minute), stdin: writer, subscribers: map[chan serviceTerminalEvent]struct{}{}}
-	server := &serviceServer{terminalSessions: map[string]*serviceTerminalSession{session.ID: session}}
+	server := &serviceServer{terminalManager: &serviceTerminalManager{sessions: map[string]*serviceTerminalSession{session.ID: session}}}
 	req := httptest.NewRequest(http.MethodPost, "/internal/v1/terminal/sessions/term-test/input", strings.NewReader(`{"input":"\n"}`))
 	rec := httptest.NewRecorder()
 
@@ -414,7 +451,7 @@ func TestWriteTerminalInputRefreshesSessionExpiry(t *testing.T) {
 		stdin:       writer,
 		subscribers: map[chan serviceTerminalEvent]struct{}{},
 	}
-	server := &serviceServer{terminalSessions: map[string]*serviceTerminalSession{session.ID: session}}
+	server := &serviceServer{terminalManager: &serviceTerminalManager{sessions: map[string]*serviceTerminalSession{session.ID: session}}}
 	req := httptest.NewRequest(http.MethodPost, "/internal/v1/terminal/sessions/term-refresh-input/input", strings.NewReader(`{"input":"echo hi\n"}`))
 	rec := httptest.NewRecorder()
 
@@ -455,7 +492,7 @@ func TestAppendTerminalOutputRefreshesSessionExpiry(t *testing.T) {
 
 func TestListTerminalSessionsReturnsMostRecentFirst(t *testing.T) {
 	now := time.Now().UTC()
-	server := &serviceServer{terminalSessions: map[string]*serviceTerminalSession{
+	server := &serviceServer{terminalManager: &serviceTerminalManager{sessions: map[string]*serviceTerminalSession{
 		"term-old": {
 			ID:           "term-old",
 			Shell:        "/bin/zsh",
@@ -482,7 +519,7 @@ func TestListTerminalSessionsReturnsMostRecentFirst(t *testing.T) {
 			Rows:         24,
 			Cols:         80,
 		},
-	}}
+	}}}
 	req := httptest.NewRequest(http.MethodGet, "/internal/v1/terminal/sessions", nil)
 	rec := httptest.NewRecorder()
 
@@ -539,7 +576,7 @@ func TestResizeTerminalSessionClampsRowsCols(t *testing.T) {
 		ptyFile:     ptmx,
 		subscribers: map[chan serviceTerminalEvent]struct{}{},
 	}
-	server := &serviceServer{terminalSessions: map[string]*serviceTerminalSession{session.ID: session}}
+	server := &serviceServer{terminalManager: &serviceTerminalManager{sessions: map[string]*serviceTerminalSession{session.ID: session}}}
 	req := httptest.NewRequest(http.MethodPost, "/internal/v1/terminal/sessions/term-resize/resize", strings.NewReader(`{"rows":999999,"cols":888888}`))
 	rec := httptest.NewRecorder()
 
@@ -575,7 +612,7 @@ func TestResizeTerminalSessionReturnsErrorWhenPTYResizeFails(t *testing.T) {
 		ptyFile:     ptmx,
 		subscribers: map[chan serviceTerminalEvent]struct{}{},
 	}
-	server := &serviceServer{terminalSessions: map[string]*serviceTerminalSession{session.ID: session}}
+	server := &serviceServer{terminalManager: &serviceTerminalManager{sessions: map[string]*serviceTerminalSession{session.ID: session}}}
 	req := httptest.NewRequest(http.MethodPost, "/internal/v1/terminal/sessions/term-resize-error/resize", strings.NewReader(`{"rows":40,"cols":120}`))
 	rec := httptest.NewRecorder()
 

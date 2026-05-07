@@ -1242,6 +1242,7 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 		maxLoops = 6
 	}
 	loopLimit := maxLoops
+	validationFailures := map[string]int{}
 	for loop := 0; ; loop++ {
 		if loop >= loopLimit {
 			if err := r.handleToolLoopLimitExceeded(ctx, sessionKey, loopLimit); err != nil {
@@ -1254,10 +1255,15 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 		if modelCfg.Provider == nil {
 			return "", false, fmt.Errorf("provider not configured")
 		}
+		profile := modelCfg.Provider.ProviderProfile(modelCfg.Model)
+		toolDefs, sanitizerReports := toProviderToolDefs(turnTools, profile)
+		for _, report := range sanitizerReports {
+			log.Printf("provider tool schema sanitized: profile=%s %s", profile.Name, report.String())
+		}
 		req := providers.ChatCompletionRequest{
 			Model:       modelCfg.Model,
 			Messages:    messages,
-			Tools:       toToolDefs(turnTools),
+			Tools:       toolDefs,
 			Temperature: modelCfg.Temperature,
 		}
 
@@ -1309,38 +1315,40 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 			return "", false, err
 		}
 		msg := resp.Choices[0].Message
+		toolCallSource := ToolCallSourceProvider
 		if len(msg.ToolCalls) == 0 {
 			if raw, ok := msg.Content.(string); ok {
 				if calls := parseToolMarkupCalls(raw, fmt.Sprintf("markup_%d", loop+1)); len(calls) > 0 {
 					msg.ToolCalls = calls
 					msg.Content = sanitizeToolTurnContent(raw)
+					toolCallSource = ToolCallSourceMarkup
 				}
 			}
 		}
-		if len(msg.ToolCalls) > 0 {
-			availableCalls := availableToolCalls(msg.ToolCalls, turnTools)
+		normalizedCalls := normalizeProviderToolCalls(msg.ToolCalls, toolCallSource, fmt.Sprintf("tool_%d", loop+1))
+		if len(normalizedCalls) > 0 {
+			availableCalls := availableNormalizedToolCalls(normalizedCalls, turnTools)
 			if len(availableCalls) == 0 {
 				if sw != nil {
 					_ = sw.Abort(ctx)
 				}
-				for _, tc := range msg.ToolCalls {
+				for _, tc := range normalizedCalls {
 					var parsedParams map[string]any
-					_ = json.Unmarshal([]byte(tc.Function.Arguments), &parsedParams)
-					toolOut := formatToolExecutionError(tc.Function.Name, parsedParams, "", fmt.Errorf("tool not available in this turn"))
-					if observer != nil {
-						observer.OnToolCall(ctx, tc.Function.Name, tc.Function.Arguments)
-						observer.OnToolResult(ctx, tc.Function.Name, toolOut, fmt.Errorf("tool not available in this turn"))
-					}
+					_ = json.Unmarshal([]byte(tc.ArgumentsJSON), &parsedParams)
+					toolOut := formatToolExecutionError(tc.Name, parsedParams, "", fmt.Errorf("tool not available in this turn"))
+					emitToolCallStarted(ctx, observer, tc)
+					emitToolCallFinished(ctx, observer, tc, toolOut, "", fmt.Errorf("tool not available in this turn"))
 				}
 				messages = append(messages, providers.ChatMessage{
 					Role:    "system",
-					Content: unavailableToolCallPrompt(msg.ToolCalls, turnTools),
+					Content: unavailableNormalizedToolCallPrompt(normalizedCalls, turnTools),
 				})
 				continue
 			}
-			msg.ToolCalls = availableCalls
+			normalizedCalls = availableCalls
+			msg.ToolCalls = normalizedToProviderToolCalls(normalizedCalls)
 		}
-		if len(msg.ToolCalls) == 0 {
+		if len(normalizedCalls) == 0 {
 			finalText := strings.TrimSpace(contentToString(msg.Content))
 			if sw != nil {
 				_ = sw.Close(ctx, finalText)
@@ -1370,36 +1378,58 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 			log.Printf("append assistant(tool_calls) failed: %v", err)
 		}
 
-		for _, tc := range msg.ToolCalls {
-			if observer != nil {
-				observer.OnToolCall(ctx, tc.Function.Name, tc.Function.Arguments)
-			}
+		for _, tc := range normalizedCalls {
+			emitToolCallStarted(ctx, observer, tc)
 			toolCtx := tools.ContextWithSession(ctx, scopeKey)
 			toolCtx = tools.ContextWithDelivery(toolCtx, channel, replyTo)
 			toolCtx = tools.ContextWithDeliveryMeta(toolCtx, replyMeta)
 			toolCtx = r.contextWithTrustedToolAccess(toolCtx, bus.Event{Type: eventType, SessionKey: sessionKey, Channel: channel})
 			toolCtx = context.WithValue(toolCtx, messageQuotaCountersContextKey{}, messageQuotas)
 			toolCtx = tools.ContextWithToolGuard(toolCtx, r.guardToolExecution)
-			out, err := turnTools.Execute(toolCtx, tc.Function.Name, tc.Function.Arguments)
+			tool := turnTools.Get(tc.Name)
+			validation := ToolArgumentValidator{}.ValidateAndCoerce(tool, tc.ArgumentsJSON)
+			if len(validation.Errors) > 0 {
+				out := formatToolValidationError(tc, validation)
+				err := fmt.Errorf("tool argument validation failed")
+				emitToolCallFinished(ctx, observer, tc, out, "", err)
+				payload := map[string]any{
+					"tool":         tc.Name,
+					"tool_call_id": tc.ID,
+					"args":         json.RawMessage([]byte(tc.ArgumentsJSON)),
+					"public_code":  "tool_argument_validation_failed",
+				}
+				if _, appendErr := r.DB.AppendMessage(ctx, sessionKey, "tool", out, payload); appendErr != nil {
+					log.Printf("append validation tool message failed: %v", appendErr)
+				}
+				messages = append(messages, providers.ChatMessage{Role: "tool", ToolCallID: tc.ID, Content: out})
+				for _, validationErr := range validation.Errors {
+					key := tc.Name + ":" + validationErr.Path + ":" + validationErr.Code
+					validationFailures[key]++
+					if validationFailures[key] >= 2 {
+						return "", false, fmt.Errorf("tool argument validation failed repeatedly for %s at %s", tc.Name, validationErr.Path)
+					}
+				}
+				continue
+			}
+			tc.ArgumentsJSON = validation.ArgumentsJSON
+			out, err := turnTools.ExecuteParams(toolCtx, tc.Name, validation.Params)
 			if err != nil {
 				var parsedParams map[string]any
-				_ = json.Unmarshal([]byte(tc.Function.Arguments), &parsedParams)
-				out = formatToolExecutionError(tc.Function.Name, parsedParams, out, err)
-			}
-			if observer != nil {
-				observer.OnToolResult(ctx, tc.Function.Name, out, err)
+				_ = json.Unmarshal([]byte(tc.ArgumentsJSON), &parsedParams)
+				out = formatToolExecutionError(tc.Name, parsedParams, out, err)
 			}
 
 			payload := map[string]any{
-				"tool":         tc.Function.Name,
+				"tool":         tc.Name,
 				"tool_call_id": tc.ID,
-				"args":         json.RawMessage([]byte(tc.Function.Arguments)),
+				"args":         json.RawMessage([]byte(tc.ArgumentsJSON)),
 			}
 			sendOut, preview, artifactID := r.boundTextResult(ctx, sessionKey, out)
 			if artifactID != "" {
 				payload["artifact_id"] = artifactID
 				payload["preview"] = preview
 			}
+			emitToolCallFinished(ctx, observer, tc, out, artifactID, err)
 			if _, err := r.DB.AppendMessage(ctx, sessionKey, "tool", sendOut, payload); err != nil {
 				log.Printf("append tool message failed: %v", err)
 			}
@@ -1412,7 +1442,7 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 				finalText, streamed := r.narrateApprovalRequired(ctx, messages)
 				return finalText, streamed, err
 			}
-			if finalText := terminalToolResultText(tc.Function.Name, out); finalText != "" {
+			if finalText := terminalToolResultText(tc.Name, out); finalText != "" {
 				if observer != nil {
 					observer.OnCompletion(ctx, finalText, false)
 				}
@@ -1562,6 +1592,20 @@ func (r *Runtime) exposedToolsForTurn(ctx context.Context, reg *tools.Registry, 
 func (r *Runtime) filterToolsForContext(ctx context.Context, reg *tools.Registry) *tools.Registry {
 	if reg == nil {
 		return reg
+	}
+	if r != nil {
+		allowlist := map[string]struct{}{}
+		for _, name := range r.Hardening.MetadataScanner.Allowlist {
+			name = strings.TrimSpace(name)
+			if name != "" {
+				allowlist[name] = struct{}{}
+			}
+		}
+		var diagnostics []tools.MetadataDiagnostic
+		reg, diagnostics = tools.FilterSuspiciousExternalTools(reg, r.Hardening.MetadataScanner.Mode, allowlist)
+		for _, diagnostic := range diagnostics {
+			log.Printf("tool metadata scanner: %s", diagnostic.String())
+		}
 	}
 	ceiling := tools.CapabilityCeilingFromContext(ctx)
 	profile := tools.ActiveProfileFromContext(ctx)
@@ -2389,8 +2433,13 @@ func releaseEvent(ev bus.Event) {
 }
 
 func toToolDefs(reg *tools.Registry) []providers.ToolDef {
+	defs, _ := toProviderToolDefs(reg, providers.OpenAICompatibleProfile())
+	return defs
+}
+
+func toProviderToolDefs(reg *tools.Registry, profile providers.ProviderProfile) ([]providers.ToolDef, []providers.SchemaSanitizationReport) {
 	if reg == nil {
-		return nil
+		return nil, nil
 	}
 	raw := reg.Definitions()
 	out := make([]providers.ToolDef, 0, len(raw))
@@ -2406,7 +2455,7 @@ func toToolDefs(reg *tools.Registry) []providers.ToolDef {
 		}
 		out = append(out, td)
 	}
-	return out
+	return providers.SanitizeToolDefs(out, profile)
 }
 
 // Cron runner helper: turns a job into a bus event message

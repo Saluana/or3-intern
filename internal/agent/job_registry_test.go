@@ -157,3 +157,41 @@ func TestJobObserverToolResultIncludesApprovalRequestID(t *testing.T) {
 		t.Fatalf("expected approval_id 42, got %+v", data)
 	}
 }
+
+func TestJobObserverToolLifecyclePublishesEnrichedPayloads(t *testing.T) {
+	registry := NewJobRegistry(0, 0)
+	job := registry.Register("turn")
+	observer := registry.Observer(job.ID)
+	lifecycle, ok := observer.(ToolLifecycleObserver)
+	if !ok {
+		t.Fatal("expected lifecycle observer")
+	}
+
+	lifecycle.OnToolLifecycle(context.Background(), ToolLifecycleEvent{
+		ToolCallID:       "call_1",
+		Name:             "read_file",
+		Status:           "running",
+		Arguments:        `{"path":"README.md"}`,
+		ArgumentsPreview: `{"path":"README.md"}`,
+	})
+	lifecycle.OnToolLifecycle(context.Background(), ToolLifecycleEvent{
+		ToolCallID:    "call_1",
+		Name:          "read_file",
+		Status:        "completed",
+		ResultPreview: "ok",
+		ArtifactID:    "artifact_1",
+	})
+
+	snapshot, ok := registry.Snapshot(job.ID)
+	if !ok || len(snapshot.Events) != 2 {
+		t.Fatalf("expected two events, ok=%v snapshot=%#v", ok, snapshot)
+	}
+	call := snapshot.Events[0].Data
+	if call["tool_call_id"] != "call_1" || call["status"] != "running" || call["arguments_preview"] == "" {
+		t.Fatalf("unexpected call event: %#v", call)
+	}
+	result := snapshot.Events[1].Data
+	if result["artifact_id"] != "artifact_1" || result["result_preview"] != "ok" {
+		t.Fatalf("unexpected result event: %#v", result)
+	}
+}

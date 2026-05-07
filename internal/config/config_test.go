@@ -743,7 +743,11 @@ func TestSave_ExistingFilePermissionsAreTightened(t *testing.T) {
 	clearConfigEnv(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(path, mustJSON(Default()), 0o644); err != nil {
+	b, err := marshalJSON(Default())
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	if err := os.WriteFile(path, b, 0o644); err != nil {
 		t.Fatalf("seed config: %v", err)
 	}
 
@@ -1268,10 +1272,13 @@ func TestLoad_EmptyPath_UsesDefault(t *testing.T) {
 	}
 }
 
-func TestMustJSON(t *testing.T) {
+func TestMarshalJSON(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := Default()
-	b := mustJSON(cfg)
+	b, err := marshalJSON(cfg)
+	if err != nil {
+		t.Fatalf("expected successful marshal, got error: %v", err)
+	}
 	if len(b) == 0 {
 		t.Fatal("expected non-empty JSON output")
 	}

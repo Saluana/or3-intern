@@ -60,6 +60,10 @@ func IsTransientError(err error) bool {
 			providerErr.StatusCode == http.StatusTooManyRequests ||
 			providerErr.StatusCode >= 500
 	}
+	var streamErr ProviderStreamError
+	if errors.As(err, &streamErr) {
+		return streamErr.Retryable
+	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return true
 	}
@@ -328,6 +332,20 @@ func (c *Client) ChatStream(ctx context.Context, req ChatCompletionRequest, onDe
 	if err == nil || emitted || c == nil || !IsTransientError(err) {
 		return resp, err
 	}
+	var streamErr ProviderStreamError
+	if errors.As(err, &streamErr) && c.ProviderProfile(req.Model).Retry.FallbackToNonStream {
+		originalErr := err
+		resp, err = c.Chat(ctx, req)
+		if err == nil {
+			if len(resp.Choices) > 0 && onDelta != nil {
+				if text := contentToStreamString(resp.Choices[0].Message.Content); text != "" {
+					onDelta(text)
+				}
+			}
+			return resp, nil
+		}
+		err = originalErr
+	}
 	var lastErr error = err
 	for _, fallback := range c.Fallbacks {
 		if fallback.Client == nil {
@@ -393,43 +411,34 @@ func (c *Client) chatStreamOnce(ctx context.Context, req ChatCompletionRequest, 
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	var contentBuilder strings.Builder
-	var finalToolCalls []ToolCall
-	sawData := false
+	assembler := StreamAssembler{Profile: c.ProviderProfile(req.Model)}
 
 	for scanner.Scan() {
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
-		sawData = true
 		data := strings.TrimPrefix(line, "data: ")
 		if data == "[DONE]" {
 			break
 		}
 		var chunk ChatStreamChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			assembler.RecordMalformed(data)
 			continue
 		}
-		if len(chunk.Choices) == 0 {
-			continue
-		}
-		delta := chunk.Choices[0].Delta
-		if delta.Content != "" {
-			contentBuilder.WriteString(delta.Content)
-			if onDelta != nil {
-				onDelta(delta.Content)
+		for _, event := range assembler.ApplyChunk(chunk) {
+			if event.TextDelta != "" && onDelta != nil {
+				onDelta(event.TextDelta)
 			}
-		}
-		if len(delta.ToolCalls) > 0 {
-			finalToolCalls = mergeStreamToolCalls(finalToolCalls, delta.ToolCalls)
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		return ChatCompletionResponse{}, err
 	}
-	if !sawData {
-		return ChatCompletionResponse{}, fmt.Errorf("provider stream returned no data events")
+	assistant, err := assembler.Finalize()
+	if err != nil {
+		return ChatCompletionResponse{}, err
 	}
 
 	out := ChatCompletionResponse{
@@ -446,9 +455,9 @@ func (c *Client) chatStreamOnce(ctx context.Context, req ChatCompletionRequest, 
 					Content   any        `json:"content"`
 					ToolCalls []ToolCall `json:"tool_calls"`
 				}{
-					Role:      "assistant",
-					Content:   contentBuilder.String(),
-					ToolCalls: finalToolCalls,
+					Role:      assistant.Role,
+					Content:   assistant.Content,
+					ToolCalls: assistant.ToolCalls,
 				},
 			},
 		},
@@ -460,24 +469,19 @@ func (c *Client) chatStreamOnce(ctx context.Context, req ChatCompletionRequest, 
 // OpenAI streaming sends each piece as {index, partial args}; we expand the
 // slice to the required index and concatenate name/arguments incrementally.
 func mergeStreamToolCalls(existing []ToolCall, delta []ToolCall) []ToolCall {
-	for _, d := range delta {
-		idx := d.Index
-		for len(existing) <= idx {
-			existing = append(existing, ToolCall{})
-		}
-		existing[idx].Function.Arguments += d.Function.Arguments
-		if d.Function.Name != "" {
-			existing[idx].Function.Name += d.Function.Name
-		}
-		if d.ID != "" {
-			existing[idx].ID = d.ID
-		}
-		if d.Type != "" {
-			existing[idx].Type = d.Type
-		}
-		existing[idx].Index = idx
+	acc := toolCallAccumulator{calls: existing}
+	return acc.Apply(delta)
+}
+
+func contentToStreamString(v any) string {
+	if v == nil {
+		return ""
 	}
-	return existing
+	if text, ok := v.(string); ok {
+		return text
+	}
+	b, _ := json.Marshal(v)
+	return string(b)
 }
 
 type EmbeddingRequest struct {

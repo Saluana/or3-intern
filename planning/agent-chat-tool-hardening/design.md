@@ -14,29 +14,35 @@ The most important design principle is: raw provider output should never directl
 ## Current integration points
 
 - `internal/providers/openai.go`
-  - Sends OpenAI-compatible chat requests.
-  - Parses SSE text deltas.
-  - Merges streamed `tool_calls` by index.
-  - Currently skips malformed stream JSON chunks and returns a final response even when some chunks were bad.
+    - Sends OpenAI-compatible chat requests.
+    - Parses SSE text deltas.
+    - Merges streamed `tool_calls` by index.
+    - Currently skips malformed stream JSON chunks and returns a final response even when some chunks were bad.
 - `internal/agent/runtime.go`
-  - Builds provider requests with `toToolDefs`.
-  - Calls `ChatStream` when a streamer exists.
-  - Parses fallback tool-call markup.
-  - Executes tools by passing raw argument JSON to `tools.Registry.Execute`.
-  - Emits observer events for text, tool calls, tool results, completion, and errors.
+    - Builds provider requests with `toToolDefs`.
+    - Calls `ChatStream` when a streamer exists.
+    - Parses fallback tool-call markup.
+    - Executes tools by passing raw argument JSON to `tools.Registry.Execute`.
+    - Emits observer events for text, tool calls, tool results, completion, and errors.
 - `internal/tools/registry.go`
-  - Decodes argument JSON into `map[string]any`.
-  - Runs the capability guard.
-  - Does not validate params against the tool schema before execution.
+    - Decodes argument JSON into `map[string]any`.
+    - Runs the capability guard.
+    - Does not validate params against the tool schema before execution.
 - `internal/agent/job_registry.go`
-  - Publishes `text_delta`, `tool_call`, `tool_result`, `assistant`, and `completion` events.
-  - Keeps sequence numbers and short in-memory history.
+    - Publishes `text_delta`, `tool_call`, `tool_result`, `assistant`, and `completion` events.
+    - Keeps sequence numbers and short in-memory history.
 - `or3-app/app/composables/useAssistantStream.ts`
-  - Converts SSE job events into `ChatMessage` state.
-  - Dedupes events by sequence/payload.
-  - Tracks tool calls, approval state, activity log, retry payloads, and recovery.
+    - Converts SSE job events into `ChatMessage` state.
+    - Dedupes events by sequence/payload.
+    - Tracks tool calls, approval state, activity log, retry payloads, and recovery.
 - `or3-app/app/components/assistant/ChatMessage.vue`
-  - Renders reasoning, tool calls, activity log, markdown, errors, copy, pin, retry, and approval actions.
+    - Renders reasoning, tool calls, activity log, markdown, errors, copy, pin, retry, and approval actions.
+
+## Event compatibility promise
+
+The v1 hardening rollout keeps `/internal/v1/turns`, `/internal/v1/jobs/:job_id`, and existing SSE event names backward-compatible. Existing consumers can continue to rely on `queued`, `text_delta`, `tool_call`, `tool_result`, `assistant`, `completion`, `failed`, `aborted`, and `approval_required` event types while the backend adds normalized internals and enriched payload fields.
+
+For v1, event enrichment is additive: old fields keep their names and meanings, new lifecycle/status/code/preview fields may be present, and values crossing the service boundary must be bounded. Provider quirks, malformed stream chunks, unavailable tools, and argument validation failures should be normalized before reaching the browser so the app reducer can stay provider-agnostic.
 
 ## T3 Code inspiration to adopt
 
@@ -268,11 +274,13 @@ Example content for the model:
 
 ```json
 {
-  "ok": false,
-  "error": "tool_argument_validation_failed",
-  "tool": "read_file",
-  "message": "The tool arguments were not valid. Fix the fields and call the tool again.",
-  "errors": [{"path":"path","code":"required","message":"path is required"}]
+    "ok": false,
+    "error": "tool_argument_validation_failed",
+    "tool": "read_file",
+    "message": "The tool arguments were not valid. Fix the fields and call the tool again.",
+    "errors": [
+        { "path": "path", "code": "required", "message": "path is required" }
+    ]
 }
 ```
 
@@ -286,12 +294,12 @@ Example content for the model:
 4. Normalize provider/markup tool calls.
 5. If no tool calls, complete text as today.
 6. For each normalized tool call:
-   - Emit `tool_call` with generated ID and status `running`.
-   - Check availability and policy reason.
-   - Validate/coerce arguments against canonical schema.
-   - If invalid, append a model-visible `tool` message with validation error and continue the loop.
-   - If valid, execute with `ExecuteParams` to avoid re-decoding JSON.
-   - Emit `tool_result` with status, public code, preview, artifact ID, and approval ID when applicable.
+    - Emit `tool_call` with generated ID and status `running`.
+    - Check availability and policy reason.
+    - Validate/coerce arguments against canonical schema.
+    - If invalid, append a model-visible `tool` message with validation error and continue the loop.
+    - If valid, execute with `ExecuteParams` to avoid re-decoding JSON.
+    - Emit `tool_result` with status, public code, preview, artifact ID, and approval ID when applicable.
 7. Enforce repeated validation failure and existing max tool-loop safeguards.
 
 ### Tool policy and modes
@@ -361,46 +369,46 @@ Keep current event names and add fields. This allows `or3-app` to adopt richer r
 
 ```json
 {
-  "event": "tool_call",
-  "data": {
-    "job_id": "job_...",
-    "turn_id": "turn_...",
-    "item_id": "item_...",
-    "tool_call_id": "call_...",
-    "name": "read_file",
-    "arguments": "{\"path\":\"README.md\"}",
-    "arguments_preview": "README.md",
-    "status": "running"
-  }
+    "event": "tool_call",
+    "data": {
+        "job_id": "job_...",
+        "turn_id": "turn_...",
+        "item_id": "item_...",
+        "tool_call_id": "call_...",
+        "name": "read_file",
+        "arguments": "{\"path\":\"README.md\"}",
+        "arguments_preview": "README.md",
+        "status": "running"
+    }
 }
 ```
 
 ```json
 {
-  "event": "tool_result",
-  "data": {
-    "job_id": "job_...",
-    "turn_id": "turn_...",
-    "item_id": "item_...",
-    "tool_call_id": "call_...",
-    "name": "read_file",
-    "status": "complete",
-    "result": "bounded preview",
-    "artifact_id": "artifact_...",
-    "code": "tool_argument_validation_failed"
-  }
+    "event": "tool_result",
+    "data": {
+        "job_id": "job_...",
+        "turn_id": "turn_...",
+        "item_id": "item_...",
+        "tool_call_id": "call_...",
+        "name": "read_file",
+        "status": "complete",
+        "result": "bounded preview",
+        "artifact_id": "artifact_...",
+        "code": "tool_argument_validation_failed"
+    }
 }
 ```
 
 ```json
 {
-  "event": "text_delta",
-  "data": {
-    "job_id": "job_...",
-    "turn_id": "turn_...",
-    "item_id": "assistant_...",
-    "content": "new text"
-  }
+    "event": "text_delta",
+    "data": {
+        "job_id": "job_...",
+        "turn_id": "turn_...",
+        "item_id": "assistant_...",
+        "content": "new text"
+    }
 }
 ```
 
@@ -422,39 +430,47 @@ Add part-oriented state while keeping `ChatMessage.content`, `toolCalls`, and `a
 
 ```ts
 export type ChatMessagePart =
-  | { id: string; kind: 'text'; text: string; streaming?: boolean }
-  | { id: string; kind: 'reasoning'; text: string; streaming?: boolean }
-  | {
-      id: string;
-      kind: 'tool';
-      toolCallId: string;
-      name: string;
-      status: 'pending' | 'running' | 'complete' | 'error' | 'attention';
-      argumentsPreview?: string;
-      resultPreview?: string;
-      error?: string;
-      code?: string;
-      artifactId?: string;
-      startedAt?: string;
-      completedAt?: string;
-    }
-  | { id: string; kind: 'status'; label: string; status: 'running' | 'complete' | 'error' | 'attention' };
+    | { id: string; kind: 'text'; text: string; streaming?: boolean }
+    | { id: string; kind: 'reasoning'; text: string; streaming?: boolean }
+    | {
+          id: string;
+          kind: 'tool';
+          toolCallId: string;
+          name: string;
+          status: 'pending' | 'running' | 'complete' | 'error' | 'attention';
+          argumentsPreview?: string;
+          resultPreview?: string;
+          error?: string;
+          code?: string;
+          artifactId?: string;
+          startedAt?: string;
+          completedAt?: string;
+      }
+    | {
+          id: string;
+          kind: 'status';
+          label: string;
+          status: 'running' | 'complete' | 'error' | 'attention';
+      };
 ```
 
 `useAssistantStream` should become a reducer over normalized event objects:
 
 ```ts
 type TurnEvent = {
-  type: string;
-  sequence?: number;
-  jobId?: string;
-  turnId?: string;
-  itemId?: string;
-  toolCallId?: string;
-  payload: Record<string, unknown>;
+    type: string;
+    sequence?: number;
+    jobId?: string;
+    turnId?: string;
+    itemId?: string;
+    toolCallId?: string;
+    payload: Record<string, unknown>;
 };
 
-function reduceTurnEvent(state: AssistantMessageDraft, event: TurnEvent): AssistantMessageDraft;
+function reduceTurnEvent(
+    state: AssistantMessageDraft,
+    event: TurnEvent,
+): AssistantMessageDraft;
 ```
 
 Reducer rules:
@@ -501,6 +517,22 @@ Runtime behavior:
 - Validation and unavailable-tool errors are appended as tool-visible/model-visible messages so the model can correct itself.
 - Repeated validation errors for the same tool/path stop with a user-visible explanation.
 - Approval-required errors remain interrupting for service-origin requests and attention-state for app chat.
+
+## V1 implementation notes
+
+Tool policy modes are intentionally coarse and backend-owned:
+
+- `ask`: safe read/memory/web/skill/MCP tools only; write, exec, service, channel, cron, and admin-style tools stay hidden.
+- `work`: day-to-day guarded tools; service, channel, and cron tooling stays hidden unless explicitly allowed elsewhere.
+- `admin`: all visible non-hidden tools after role/capability/profile checks.
+
+The app should send a mode-derived `tool_policy` instead of `allow_all`, and retry/replay requests must preserve the original mode/policy so approvals and validation recovery do not accidentally widen access.
+
+External/MCP metadata scanning supports `off`, `warn`, and `block`. Warn is the default for untrusted external tools. Diagnostics are bounded and classify likely instruction overrides, secret exfiltration attempts, hidden prompt requests, and unrelated behavioral commands. Block mode removes suspicious MCP tools from provider-visible schemas until allowlisted.
+
+Runtime event enrichment remains additive. Existing event names and legacy fields are preserved while new payloads may include `turn_id`, `item_id`, `tool_call_id`, `status`, bounded argument/result previews, `public_code`, `artifact_id`, and approval identifiers. Public error codes currently use stable coarse categories: `provider_error`, `stream_error`, `validation_error`, `policy_error`, `approval_required`, `tool_execution_error`, `tool_loop_limit`, `aborted`, and `unknown_error`.
+
+No SQLite migration is required for the v1 hardening pass. `JobRegistry` history and existing message persistence are sufficient for the current compatible event enrichment.
 
 ## Data model
 

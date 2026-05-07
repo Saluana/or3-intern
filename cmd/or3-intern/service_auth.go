@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"or3-intern/internal/approval"
@@ -196,17 +197,32 @@ func (s *serviceServer) serviceAuthRetryAfter(r *http.Request, scope string) int
 	if s == nil || r == nil {
 		return 0
 	}
-	now := time.Now().UTC()
-	keys := serviceAuthFailureKeys(r, scope)
-	s.authFailureMu.Lock()
-	defer s.authFailureMu.Unlock()
+	return s.serviceAuthFailures().RetryAfter(serviceAuthFailureKeys(r, scope), time.Now().UTC())
+}
+
+func (s *serviceServer) serviceAuthFailures() *serviceAuthFailureTracker {
+	s.components()
+	return s.authFailures
+}
+
+type serviceAuthFailureTracker struct {
+	mu       sync.Mutex
+	failures map[string]serviceAuthFailureState
+}
+
+func (t *serviceAuthFailureTracker) RetryAfter(keys []string, now time.Time) int {
+	if t == nil {
+		return 0
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	for _, key := range keys {
-		state, ok := s.authFailures[key]
+		state, ok := t.failures[key]
 		if !ok {
 			continue
 		}
 		if now.Sub(state.FirstAttempt) > serviceAuthFailureWindow {
-			delete(s.authFailures, key)
+			delete(t.failures, key)
 			continue
 		}
 		if state.BlockedUntil.After(now) {
@@ -220,15 +236,20 @@ func (s *serviceServer) recordServiceAuthFailure(r *http.Request, scope string) 
 	if s == nil || r == nil {
 		return
 	}
-	now := time.Now().UTC()
-	keys := serviceAuthFailureKeys(r, scope)
-	s.authFailureMu.Lock()
-	defer s.authFailureMu.Unlock()
-	if s.authFailures == nil {
-		s.authFailures = map[string]serviceAuthFailureState{}
+	s.serviceAuthFailures().Record(serviceAuthFailureKeys(r, scope), time.Now().UTC())
+}
+
+func (t *serviceAuthFailureTracker) Record(keys []string, now time.Time) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.failures == nil {
+		t.failures = map[string]serviceAuthFailureState{}
 	}
 	for _, key := range keys {
-		state := s.authFailures[key]
+		state := t.failures[key]
 		if state.FirstAttempt.IsZero() || now.Sub(state.FirstAttempt) > serviceAuthFailureWindow {
 			state = serviceAuthFailureState{FirstAttempt: now}
 		}
@@ -241,7 +262,7 @@ func (s *serviceServer) recordServiceAuthFailure(r *http.Request, scope string) 
 			}
 			state.BlockedUntil = now.Add(backoff)
 		}
-		s.authFailures[key] = state
+		t.failures[key] = state
 	}
 }
 
@@ -249,11 +270,17 @@ func (s *serviceServer) clearServiceAuthFailures(r *http.Request, scope string) 
 	if s == nil || r == nil {
 		return
 	}
-	keys := serviceAuthFailureKeys(r, scope)
-	s.authFailureMu.Lock()
-	defer s.authFailureMu.Unlock()
+	s.serviceAuthFailures().Clear(serviceAuthFailureKeys(r, scope))
+}
+
+func (t *serviceAuthFailureTracker) Clear(keys []string) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	for _, key := range keys {
-		delete(s.authFailures, key)
+		delete(t.failures, key)
 	}
 }
 

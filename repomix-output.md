@@ -3,25 +3,21 @@ This file is a merged representation of a subset of the codebase, containing fil
 # File Summary
 
 ## Purpose
-
 This file contains a packed representation of a subset of the repository's contents that is considered the most important context.
 It is designed to be easily consumable by AI systems for analysis, code review,
 or other automated processes.
 
 ## File Format
-
 The content is organized as follows:
-
 1. This summary section
 2. Repository information
 3. Directory structure
 4. Repository files (if enabled)
 5. Multiple file entries, each consisting of:
-   a. A header with the file path (## File: path/to/file)
-   b. The full contents of the file in a code block
+  a. A header with the file path (## File: path/to/file)
+  b. The full contents of the file in a code block
 
 ## Usage Guidelines
-
 - This file should be treated as read-only. Any changes should be made to the
   original repository files, not this packed version.
 - When processing this file, use the file path to distinguish
@@ -30,16 +26,14 @@ The content is organized as follows:
   the same level of security as you would the original repository.
 
 ## Notes
-
 - Some files may have been excluded based on .gitignore rules and Repomix's configuration
 - Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
-- Files matching these patterns are excluded: .github, planning, .vscode, \*_/_\_test.go, bin, nanobot-repo.md, repomix-output.md, docs, .run, go.mod, go.sum, string
+- Files matching these patterns are excluded: .github, planning, .vscode, **/*_test.go, bin, nanobot-repo.md, repomix-output.md, docs, .run, go.mod, go.sum, string
 - Files matching patterns in .gitignore are excluded
 - Files matching default ignore patterns are excluded
 - Files are sorted by Git change count (files with more changes are at the bottom)
 
 # Directory Structure
-
 ```
 builtin_skills/
   cron/
@@ -116,6 +110,11 @@ internal/
     noop_streamer.go
     prompt_budget.go
     prompt.go
+    runtime_access.go
+    runtime_execution.go
+    runtime_helpers.go
+    runtime_quota.go
+    runtime_session.go
     runtime_status.go
     runtime.go
     semantic_compression.go
@@ -124,6 +123,7 @@ internal/
     subagents.go
     task_card.go
     tool_calls.go
+    tool_markup.go
     tool_policy.go
     tool_validation.go
   agentcli/
@@ -269,41 +269,37 @@ README.md
 # Files
 
 ## File: cmd/or3-intern/testdata/service_contract/intern-stream-events.jsonl
-
-```
+````
 {"event":"queued","data":{"job_id":"__JOB_ID__","status":"queued"}}
 {"event":"started","data":{"job_id":"__JOB_ID__","status":"running"}}
 {"event":"completion","data":{"job_id":"__JOB_ID__","status":"completed","final_text":"done"}}
-```
+````
 
 ## File: cmd/or3-intern/testdata/service_contract/intern-turn-response.json
-
-```json
+````json
 {
-    "final_text": "Hello fixture",
-    "job_id": "__JOB_ID__",
-    "kind": "turn",
-    "network_session_id": "sess_fixture",
-    "request_id": "req_fixture",
-    "session_key": "svc:fixture",
-    "status": "completed",
-    "workspace_id": "ws_fixture"
+  "final_text": "Hello fixture",
+  "job_id": "__JOB_ID__",
+  "kind": "turn",
+  "network_session_id": "sess_fixture",
+  "request_id": "req_fixture",
+  "session_key": "svc:fixture",
+  "status": "completed",
+  "workspace_id": "ws_fixture"
 }
-```
+````
 
 ## File: cmd/or3-intern/testdata/service_contract/job-abort-response.json
-
-```json
+````json
 {
-    "job_id": "__JOB_ID__",
-    "ok": true,
-    "status": "completed"
+  "job_id": "__JOB_ID__",
+  "ok": true,
+  "status": "completed"
 }
-```
+````
 
 ## File: cmd/or3-intern/testdata/service_contract/job-stream.sse
-
-```
+````
 event: queued
 data: {"job_id":"__JOB_ID__","status":"queued"}
 
@@ -312,86 +308,80 @@ data: {"job_id":"__JOB_ID__","status":"running"}
 
 event: completion
 data: {"final_text":"done","job_id":"__JOB_ID__","status":"completed"}
-```
+````
 
 ## File: cmd/or3-intern/testdata/service_contract/subagent-request.decoded.json
-
-```json
+````json
 {
-    "parent_session_key": "svc:parent",
-    "task": "background contract task",
-    "allowed_tools": ["read_file"],
-    "restrict_tools": true,
-    "timeout_seconds": 15,
-    "profile_name": "ops",
-    "channel": "service",
-    "reply_to": "or3-net",
-    "meta": {
-        "trace_id": "trace-subagent"
-    }
+  "parent_session_key": "svc:parent",
+  "task": "background contract task",
+  "allowed_tools": ["read_file"],
+  "restrict_tools": true,
+  "timeout_seconds": 15,
+  "profile_name": "ops",
+  "channel": "service",
+  "reply_to": "or3-net",
+  "meta": {
+    "trace_id": "trace-subagent"
+  }
 }
-```
+````
 
 ## File: cmd/or3-intern/testdata/service_contract/subagent-response.json
-
-```json
+````json
 {
-    "child_session_key": "__CHILD_SESSION_KEY__",
-    "job_id": "__JOB_ID__",
-    "status": "queued"
+  "child_session_key": "__CHILD_SESSION_KEY__",
+  "job_id": "__JOB_ID__",
+  "status": "queued"
 }
-```
+````
 
 ## File: cmd/or3-intern/testdata/service_contract/turn-request.decoded.json
-
-```json
+````json
 {
-    "session_key": "svc:fixture",
-    "message": "hello contract",
-    "allowed_tools": ["read_file"],
-    "restrict_tools": true,
-    "profile_name": "ops",
-    "meta": {
-        "trace_id": "trace-turn"
-    }
+  "session_key": "svc:fixture",
+  "message": "hello contract",
+  "allowed_tools": ["read_file"],
+  "restrict_tools": true,
+  "profile_name": "ops",
+  "meta": {
+    "trace_id": "trace-turn"
+  }
 }
-```
+````
 
 ## File: cmd/or3-intern/testdata/service_contract/turn-request.json
-
-```json
+````json
 {
-    "internSessionKey": "svc:fixture",
-    "message": "hello contract",
-    "toolPolicy": {
-        "mode": "allow_list",
-        "allowedTools": ["read_file"]
-    },
-    "profileName": "ops",
-    "meta": {
-        "trace_id": "trace-turn"
-    }
+  "internSessionKey": "svc:fixture",
+  "message": "hello contract",
+  "toolPolicy": {
+    "mode": "allow_list",
+    "allowedTools": ["read_file"]
+  },
+  "profileName": "ops",
+  "meta": {
+    "trace_id": "trace-turn"
+  }
 }
-```
+````
 
 ## File: cmd/or3-intern/testdata/service_contract/turn-response.json
-
-```json
+````json
 {
-    "final_text": "Hello fixture",
-    "job_id": "__JOB_ID__",
-    "kind": "turn",
-    "network_session_id": "sess_fixture",
-    "request_id": "req_fixture",
-    "session_key": "svc:fixture",
-    "status": "completed",
-    "workspace_id": "ws_fixture"
+  "final_text": "Hello fixture",
+  "job_id": "__JOB_ID__",
+  "kind": "turn",
+  "network_session_id": "sess_fixture",
+  "request_id": "req_fixture",
+  "session_key": "svc:fixture",
+  "status": "completed",
+  "workspace_id": "ws_fixture"
 }
-```
+````
 
 ## File: cmd/or3-intern/command_args.go
-
-```go
+````go
 package main
 
 import (
@@ -420,11 +410,10 @@ func requireExactFlagArgs(fs *flag.FlagSet, want int, usage string) error {
 	}
 	return nil
 }
-```
+````
 
 ## File: cmd/or3-intern/doctor_compat.go
-
-```go
+````go
 package main
 
 import (
@@ -468,11 +457,10 @@ func runtimeProfileFindings(cfg config.Config) []doctorFinding {
 	}
 	return items
 }
-```
+````
 
 ## File: cmd/or3-intern/migrate.go
-
-```go
+````go
 package main
 
 import (
@@ -547,11 +535,10 @@ func toStr(v any) string {
 		return fmt.Sprint(v)
 	}
 }
-```
+````
 
 ## File: cmd/or3-intern/secrets_cmd.go
-
-```go
+````go
 package main
 
 import (
@@ -648,11 +635,10 @@ func runSecretsCommand(ctx context.Context, mgr *security.SecretManager, audit *
 		return fmt.Errorf("unknown secrets subcommand: %s", args[0])
 	}
 }
-```
+````
 
 ## File: cmd/or3-intern/security_setup.go
-
-```go
+````go
 package main
 
 import (
@@ -801,11 +787,10 @@ func setupApprovalBroker(cfg config.Config, d *db.DB, audit *security.AuditLogge
 	}
 	return &approval.Broker{DB: d, Audit: audit, Config: cfg.Security.Approvals, HostID: cfg.Security.Approvals.HostID, SignKey: key}, nil
 }
-```
+````
 
 ## File: cmd/or3-intern/tty.go
-
-```go
+````go
 package main
 
 import (
@@ -839,11 +824,10 @@ func isTerminalFile(file *os.File) bool {
 	fd := file.Fd()
 	return isatty.IsTerminal(fd) || isatty.IsCygwinTerminal(fd)
 }
-```
+````
 
 ## File: internal/agent/noop_streamer.go
-
-```go
+````go
 package agent
 
 import (
@@ -863,11 +847,10 @@ func (NullStreamer) BeginStream(context.Context, string, map[string]any) (channe
 func (nullStreamWriter) WriteDelta(context.Context, string) error { return nil }
 func (nullStreamWriter) Close(context.Context, string) error      { return nil }
 func (nullStreamWriter) Abort(context.Context) error              { return nil }
-```
+````
 
 ## File: internal/agent/subagents.go
-
-```go
+````go
 package agent
 
 import (
@@ -1424,11 +1407,10 @@ func formatDeliverySubagentSummary(job db.SubagentJob, success bool, preview str
 	}
 	return fmt.Sprintf("Background job %s failed. %s", job.ID, reasonOrDefault(errText, "unknown error"))
 }
-```
+````
 
 ## File: internal/artifacts/attachment.go
-
-```go
+````go
 package artifacts
 
 import (
@@ -1525,11 +1507,10 @@ func FailureMarker(kind, name, reason string) string {
 	}
 	return fmt.Sprintf("[%s: %s - %s]", kind, name, reason)
 }
-```
+````
 
 ## File: internal/bus/bus.go
-
-```go
+````go
 // Package bus provides a small in-memory event bus for cross-service signaling.
 package bus
 
@@ -1593,11 +1574,10 @@ func (b *Bus) Publish(ev Event) bool {
 
 // Channel returns the receive-only event stream.
 func (b *Bus) Channel() <-chan Event { return b.ch }
-```
+````
 
 ## File: internal/channels/cli/service.go
-
-```go
+````go
 package cli
 
 import (
@@ -1640,11 +1620,10 @@ func (s Service) Deliver(ctx context.Context, to, text string, meta map[string]a
 	}
 	return s.Deliverer.Deliver(ctx, "cli", to, text)
 }
-```
+````
 
 ## File: internal/channels/discord/discord.go
-
-```go
+````go
 // Package discord implements the Discord channel adapter.
 package discord
 
@@ -2148,11 +2127,10 @@ type discordAttachment struct {
 	ContentType string `json:"content_type"`
 	Size        int64  `json:"size"`
 }
-```
+````
 
 ## File: internal/channels/email/email.go
-
-```go
+````go
 // Package email implements the email channel adapter.
 package email
 
@@ -3127,11 +3105,10 @@ func watchConnContext(ctx context.Context, conn net.Conn) func() {
 		close(done)
 	}
 }
-```
+````
 
 ## File: internal/channels/slack/slack.go
-
-```go
+````go
 // Package slack implements the Slack socket-mode channel adapter.
 package slack
 
@@ -3615,11 +3592,10 @@ type slackFile struct {
 	URLPrivate         string `json:"url_private"`
 	URLPrivateDownload string `json:"url_private_download"`
 }
-```
+````
 
 ## File: internal/channels/telegram/telegram.go
-
-```go
+````go
 // Package telegram implements the Telegram channel adapter.
 package telegram
 
@@ -4252,11 +4228,10 @@ type fileInfo struct {
 	FilePath string `json:"file_path"`
 	FileSize int64  `json:"file_size"`
 }
-```
+````
 
 ## File: internal/channels/whatsapp/whatsapp.go
-
-```go
+````go
 // Package whatsapp implements the WhatsApp bridge channel adapter.
 package whatsapp
 
@@ -4615,11 +4590,10 @@ func whatsappDedupeKey(msg inboundMessage) string {
 	}
 	return strings.Join([]string{target, msg.From, msg.Text}, "|")
 }
-```
+````
 
 ## File: internal/channels/channels.go
-
-```go
+````go
 // Package channels defines the shared channel interfaces and metadata helpers.
 package channels
 
@@ -4896,11 +4870,10 @@ func hasMeaningfulMetaValue(value any) bool {
 		return text != "" && text != "<nil>"
 	}
 }
-```
+````
 
 ## File: internal/channels/media.go
-
-```go
+````go
 package channels
 
 import (
@@ -4952,11 +4925,10 @@ func MediaPaths(meta map[string]any) []string {
 		return nil
 	}
 }
-```
+````
 
 ## File: internal/channels/rate_limit.go
-
-```go
+````go
 package channels
 
 import (
@@ -4998,11 +4970,10 @@ func ParseRetryAfterSeconds(raw string) time.Duration {
 	}
 	return 0
 }
-```
+````
 
 ## File: internal/channels/stream.go
-
-```go
+````go
 package channels
 
 import "context"
@@ -5027,11 +4998,10 @@ type StreamingChannel interface {
 	// Returns a StreamWriter to write deltas, or an error.
 	BeginStream(ctx context.Context, to string, meta map[string]any) (StreamWriter, error)
 }
-```
+````
 
 ## File: internal/clawhub/client.go
-
-```go
+````go
 // Package clawhub installs and inspects managed skills from the ClawHub registry.
 package clawhub
 
@@ -5845,11 +5815,10 @@ func urlEncode(s string) string {
 	)
 	return replacer.Replace(s)
 }
-```
+````
 
 ## File: internal/heartbeat/service.go
-
-```go
+````go
 // Package heartbeat publishes recurring review events derived from a tasks file.
 package heartbeat
 
@@ -6151,11 +6120,10 @@ func normalizedSessionKey(v string) string {
 	}
 	return v
 }
-```
+````
 
 ## File: internal/mcp/manager.go
-
-```go
+````go
 // Package mcp connects configured Model Context Protocol servers and exposes their tools.
 package mcp
 
@@ -6720,10 +6688,9 @@ func (rt *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 	}
 	return base.RoundTrip(cloned)
 }
-```
+````
 
 ## File: internal/memory/docs.go
-
 ````go
 package memory
 
@@ -7121,8 +7088,7 @@ func nullBytes(b []byte) any {
 ````
 
 ## File: internal/memory/scheduler.go
-
-```go
+````go
 package memory
 
 import (
@@ -7212,11 +7178,10 @@ func (s *Scheduler) runLoop(sessionKey string) {
 		return
 	}
 }
-```
+````
 
 ## File: internal/scope/scope.go
-
-```go
+````go
 // Package scope defines shared session-scope identifiers and helpers.
 package scope
 
@@ -7234,11 +7199,10 @@ func IsGlobalScopeRequest(v string) bool {
 	v = strings.TrimSpace(v)
 	return strings.EqualFold(v, GlobalScopeAlias) || v == GlobalMemoryScope
 }
-```
+````
 
 ## File: internal/security/store.go
-
-```go
+````go
 // Package security provides secret storage, audit logging, and outbound host policy helpers.
 package security
 
@@ -7575,11 +7539,10 @@ func deriveKey(master []byte, label string) []byte {
 func filepathDir(path string) string {
 	return filepath.Dir(path)
 }
-```
+````
 
 ## File: internal/tools/env.go
-
-```go
+````go
 package tools
 
 import (
@@ -7666,10 +7629,9 @@ func BuildChildEnv(base []string, allowlist []string, overlay map[string]string,
 	}
 	return out
 }
-```
+````
 
 ## File: internal/triggers/structured_tasks.go
-
 ````go
 package triggers
 
@@ -7898,8 +7860,7 @@ func toInt(raw any) int {
 ````
 
 ## File: internal/triggers/triggers.go
-
-```go
+````go
 // Package triggers defines shared metadata for webhook and filewatch events.
 package triggers
 
@@ -7956,11 +7917,10 @@ func StructuredEventJSON(raw any) string {
 	}
 	return string(b)
 }
-```
+````
 
 ## File: internal/triggers/webhook.go
-
-```go
+````go
 package triggers
 
 import (
@@ -8109,11 +8069,10 @@ func (w *WebhookServer) authenticate(r *http.Request, body []byte) bool {
 	// Fall back to simple shared secret in X-Webhook-Secret header
 	return r.Header.Get("X-Webhook-Secret") == secret
 }
-```
+````
 
 ## File: scripts/install-cli.sh
-
-```bash
+````bash
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -8160,1908 +8119,1069 @@ echo "Installed or3-intern to $binary_path"
 echo "Add this directory to your PATH to use the bare command:"
 echo "  export PATH=\"$bin_dir:\$PATH\""
 echo "Then run: or3-intern version"
-```
+````
 
 ## File: .gitignore
-
-```
+````
 .env
 .or3/
 /or3-intern
 or3-intern.exe
-```
+````
 
 ## File: index.html
-
-```html
+````html
 <!DOCTYPE html>
 <html lang="en">
-    <head>
-        <meta charset="UTF-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <title>or3-intern — The AI Runtime That Actually Runs Your Work</title>
-        <meta
-            name="description"
-            content="or3-intern is the local-first AI runtime that remembers, automates, integrates, and operates with production-grade guardrails."
-        />
-        <meta name="theme-color" content="#0f0d17" />
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-        <link
-            href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap"
-            rel="stylesheet"
-        />
-        <style>
-            /* ===== MD3 Dark Theme — Enhanced Tokens ===== */
-            :root {
-                --surface: #0f0d17;
-                --surface-dim: #0b0a12;
-                --surface-low: #171521;
-                --surface-cont: #1e1b2a;
-                --surface-high: #27243a;
-                --surface-highest: #322f48;
-                --primary: #c9b1ff;
-                --primary-bright: #e0d0ff;
-                --on-primary: #2d1a5e;
-                --primary-cont: #4a3680;
-                --on-primary-cont: #ece0ff;
-                --secondary: #cec2dc;
-                --secondary-cont: #4a4458;
-                --tertiary: #f0b0c8;
-                --tertiary-bright: #ffd0e4;
-                --on-tertiary: #4a2538;
-                --tertiary-cont: #633b48;
-                --on-surface: #eae4f0;
-                --on-surface-var: #c8c0d4;
-                --outline: #908a9c;
-                --outline-var: #48445a;
-                --success: #7ee8a0;
-                --warning: #f8dc6c;
-                --error: #f2b8b5;
-                --glow-primary: rgba(201, 177, 255, 0.12);
-                --glow-tertiary: rgba(240, 176, 200, 0.1);
-                --elev-1:
-                    0 1px 3px 1px rgba(0, 0, 0, 0.2),
-                    0 1px 2px rgba(0, 0, 0, 0.36);
-                --elev-2:
-                    0 2px 6px 2px rgba(0, 0, 0, 0.2),
-                    0 1px 2px rgba(0, 0, 0, 0.36);
-                --elev-3:
-                    0 4px 12px 4px rgba(0, 0, 0, 0.24),
-                    0 1px 3px rgba(0, 0, 0, 0.36);
-                --radius-xs: 6px;
-                --radius-sm: 10px;
-                --radius-md: 14px;
-                --radius-lg: 20px;
-                --radius-xl: 28px;
-                --radius-full: 9999px;
-                --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
-                --ease-bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
-                --dur-fast: 180ms;
-                --dur-mid: 350ms;
-                --dur-slow: 600ms;
-                --max-w: 1180px;
-            }
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>or3-intern — The AI Runtime That Actually Runs Your Work</title>
+  <meta name="description" content="or3-intern is the local-first AI runtime that remembers, automates, integrates, and operates with production-grade guardrails." />
+  <meta name="theme-color" content="#0f0d17" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    /* ===== MD3 Dark Theme — Enhanced Tokens ===== */
+    :root {
+      --surface:         #0f0d17;
+      --surface-dim:     #0b0a12;
+      --surface-low:     #171521;
+      --surface-cont:    #1e1b2a;
+      --surface-high:    #27243a;
+      --surface-highest: #322f48;
+      --primary:         #c9b1ff;
+      --primary-bright:  #e0d0ff;
+      --on-primary:      #2d1a5e;
+      --primary-cont:    #4a3680;
+      --on-primary-cont: #ece0ff;
+      --secondary:       #cec2dc;
+      --secondary-cont:  #4a4458;
+      --tertiary:        #f0b0c8;
+      --tertiary-bright: #ffd0e4;
+      --on-tertiary:     #4a2538;
+      --tertiary-cont:   #633b48;
+      --on-surface:      #eae4f0;
+      --on-surface-var:  #c8c0d4;
+      --outline:         #908a9c;
+      --outline-var:     #48445a;
+      --success:         #7ee8a0;
+      --warning:         #f8dc6c;
+      --error:           #f2b8b5;
+      --glow-primary:    rgba(201,177,255,0.12);
+      --glow-tertiary:   rgba(240,176,200,0.10);
+      --elev-1: 0 1px 3px 1px rgba(0,0,0,.20), 0 1px 2px rgba(0,0,0,.36);
+      --elev-2: 0 2px 6px 2px rgba(0,0,0,.20), 0 1px 2px rgba(0,0,0,.36);
+      --elev-3: 0 4px 12px 4px rgba(0,0,0,.24), 0 1px 3px rgba(0,0,0,.36);
+      --radius-xs: 6px;
+      --radius-sm: 10px;
+      --radius-md: 14px;
+      --radius-lg: 20px;
+      --radius-xl: 28px;
+      --radius-full: 9999px;
+      --ease: cubic-bezier(.22,.61,.36,1);
+      --ease-bounce: cubic-bezier(.34,1.56,.64,1);
+      --dur-fast: 180ms;
+      --dur-mid: 350ms;
+      --dur-slow: 600ms;
+      --max-w: 1180px;
+    }
 
-            /* ===== Reset ===== */
-            *,
-            *::before,
-            *::after {
-                box-sizing: border-box;
-                margin: 0;
-                padding: 0;
-            }
-            html {
-                scroll-behavior: smooth;
-                -webkit-font-smoothing: antialiased;
-                text-rendering: optimizeLegibility;
-            }
-            body {
-                font-family: 'Inter', system-ui, sans-serif;
-                font-size: 16px;
-                line-height: 1.6;
-                color: var(--on-surface);
-                background: var(--surface);
-                overflow-x: hidden;
-            }
-            a {
-                color: inherit;
-                text-decoration: none;
-            }
-            img {
-                max-width: 100%;
-                display: block;
-            }
-            ul {
-                list-style: none;
-            }
+    /* ===== Reset ===== */
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    html{scroll-behavior:smooth;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+    body{
+      font-family:"Inter",system-ui,sans-serif;
+      font-size:16px;line-height:1.6;
+      color:var(--on-surface);
+      background:var(--surface);
+      overflow-x:hidden;
+    }
+    a{color:inherit;text-decoration:none}
+    img{max-width:100%;display:block}
+    ul{list-style:none}
 
-            /* ===== Ambient background ===== */
-            body::before {
-                content: '';
-                position: fixed;
-                inset: 0;
-                z-index: 0;
-                pointer-events: none;
-                background:
-                    radial-gradient(
-                        ellipse 60% 50% at 20% 10%,
-                        rgba(140, 80, 255, 0.08) 0%,
-                        transparent 70%
-                    ),
-                    radial-gradient(
-                        ellipse 50% 40% at 80% 60%,
-                        rgba(240, 176, 200, 0.06) 0%,
-                        transparent 70%
-                    ),
-                    radial-gradient(
-                        ellipse 40% 60% at 50% 90%,
-                        rgba(100, 60, 255, 0.05) 0%,
-                        transparent 70%
-                    );
-            }
+    /* ===== Ambient background ===== */
+    body::before{
+      content:"";position:fixed;inset:0;z-index:0;pointer-events:none;
+      background:
+        radial-gradient(ellipse 60% 50% at 20% 10%, rgba(140,80,255,.08) 0%, transparent 70%),
+        radial-gradient(ellipse 50% 40% at 80% 60%, rgba(240,176,200,.06) 0%, transparent 70%),
+        radial-gradient(ellipse 40% 60% at 50% 90%, rgba(100,60,255,.05) 0%, transparent 70%);
+    }
 
-            .page {
-                position: relative;
-                z-index: 1;
-            }
+    .page{position:relative;z-index:1}
 
-            .wrap {
-                width: min(100% - 48px, var(--max-w));
-                margin-inline: auto;
-            }
+    .wrap{
+      width:min(100% - 48px, var(--max-w));
+      margin-inline:auto;
+    }
 
-            /* ===== Top App Bar ===== */
-            .topbar {
-                position: sticky;
-                top: 0;
-                z-index: 100;
-                background: rgba(15, 13, 23, 0.82);
-                backdrop-filter: blur(16px) saturate(1.4);
-                -webkit-backdrop-filter: blur(16px) saturate(1.4);
-                border-bottom: 1px solid rgba(72, 68, 90, 0.5);
-                transition: box-shadow var(--dur-fast) var(--ease);
-            }
-            .topbar.scrolled {
-                box-shadow: var(--elev-2);
-            }
-            .nav {
-                display: flex;
-                align-items: center;
-                justify-content: space-between;
-                height: 64px;
-            }
-            .brand {
-                display: inline-flex;
-                align-items: center;
-                gap: 10px;
-                font-weight: 700;
-                font-size: 1.05rem;
-                letter-spacing: -0.2px;
-            }
-            .brand-mark {
-                width: 36px;
-                height: 36px;
-                border-radius: var(--radius-sm);
-                background: linear-gradient(
-                    135deg,
-                    var(--primary-cont),
-                    var(--on-primary)
-                );
-                display: grid;
-                place-items: center;
-                color: var(--primary-bright);
-                font-weight: 800;
-                font-size: 0.8rem;
-            }
-            .nav-links {
-                display: flex;
-                gap: 2px;
-            }
-            .nav-links a {
-                padding: 8px 14px;
-                border-radius: var(--radius-full);
-                color: var(--on-surface-var);
-                font-size: 0.85rem;
-                font-weight: 500;
-                transition:
-                    background var(--dur-fast) var(--ease),
-                    color var(--dur-fast) var(--ease);
-            }
-            .nav-links a:hover {
-                background: var(--glow-primary);
-                color: var(--on-surface);
-            }
-            .nav-cta {
-                display: inline-flex;
-                align-items: center;
-                gap: 8px;
-            }
+    /* ===== Top App Bar ===== */
+    .topbar{
+      position:sticky;top:0;z-index:100;
+      background:rgba(15,13,23,.82);
+      backdrop-filter:blur(16px) saturate(1.4);
+      -webkit-backdrop-filter:blur(16px) saturate(1.4);
+      border-bottom:1px solid rgba(72,68,90,.5);
+      transition:box-shadow var(--dur-fast) var(--ease);
+    }
+    .topbar.scrolled{box-shadow:var(--elev-2)}
+    .nav{display:flex;align-items:center;justify-content:space-between;height:64px}
+    .brand{display:inline-flex;align-items:center;gap:10px;font-weight:700;font-size:1.05rem;letter-spacing:-.2px}
+    .brand-mark{
+      width:36px;height:36px;border-radius:var(--radius-sm);
+      background:linear-gradient(135deg,var(--primary-cont),var(--on-primary));
+      display:grid;place-items:center;
+      color:var(--primary-bright);font-weight:800;font-size:.8rem;
+    }
+    .nav-links{display:flex;gap:2px}
+    .nav-links a{
+      padding:8px 14px;border-radius:var(--radius-full);
+      color:var(--on-surface-var);font-size:.85rem;font-weight:500;
+      transition:background var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease);
+    }
+    .nav-links a:hover{background:var(--glow-primary);color:var(--on-surface)}
+    .nav-cta{display:inline-flex;align-items:center;gap:8px}
 
-            /* ===== Buttons ===== */
-            .btn,
-            .btn-outline {
-                display: inline-flex;
-                align-items: center;
-                justify-content: center;
-                gap: 8px;
-                border: none;
-                border-radius: var(--radius-full);
-                padding: 11px 28px;
-                font-family: inherit;
-                font-weight: 600;
-                font-size: 0.875rem;
-                letter-spacing: 0.2px;
-                cursor: pointer;
-                white-space: nowrap;
-                transition: all var(--dur-fast) var(--ease);
-                text-decoration: none;
-            }
-            .btn {
-                background: linear-gradient(
-                    135deg,
-                    var(--primary) 0%,
-                    #a78bfa 100%
-                );
-                color: #1a1130;
-                box-shadow: 0 0 0 0 rgba(201, 177, 255, 0);
-            }
-            .btn:hover {
-                box-shadow: 0 0 24px rgba(201, 177, 255, 0.28);
-                transform: translateY(-1px);
-            }
-            .btn-outline {
-                background: transparent;
-                color: var(--primary);
-                border: 1.5px solid var(--outline);
-            }
-            .btn-outline:hover {
-                border-color: var(--primary);
-                background: var(--glow-primary);
-            }
-            .btn:focus-visible,
-            .btn-outline:focus-visible {
-                outline: 2px solid var(--primary);
-                outline-offset: 3px;
-            }
+    /* ===== Buttons ===== */
+    .btn,.btn-outline{
+      display:inline-flex;align-items:center;justify-content:center;gap:8px;
+      border:none;border-radius:var(--radius-full);
+      padding:11px 28px;font-family:inherit;font-weight:600;font-size:.875rem;
+      letter-spacing:.2px;cursor:pointer;white-space:nowrap;
+      transition:all var(--dur-fast) var(--ease);text-decoration:none;
+    }
+    .btn{
+      background:linear-gradient(135deg,var(--primary) 0%,#a78bfa 100%);
+      color:#1a1130;
+      box-shadow:0 0 0 0 rgba(201,177,255,0);
+    }
+    .btn:hover{
+      box-shadow:0 0 24px rgba(201,177,255,.28);
+      transform:translateY(-1px);
+    }
+    .btn-outline{
+      background:transparent;color:var(--primary);
+      border:1.5px solid var(--outline);
+    }
+    .btn-outline:hover{
+      border-color:var(--primary);
+      background:var(--glow-primary);
+    }
+    .btn:focus-visible,.btn-outline:focus-visible{
+      outline:2px solid var(--primary);outline-offset:3px;
+    }
 
-            /* ===== HERO ===== */
-            .hero {
-                padding: 72px 0 40px;
-                position: relative;
-            }
-            .hero-grid {
-                display: grid;
-                grid-template-columns: 1.05fr 0.95fr;
-                gap: 48px;
-                align-items: center;
-            }
-            .eyebrow {
-                display: inline-flex;
-                align-items: center;
-                gap: 8px;
-                padding: 6px 16px 6px 12px;
-                border-radius: var(--radius-full);
-                background: var(--surface-cont);
-                border: 1px solid var(--outline-var);
-                color: var(--on-surface-var);
-                font-size: 0.72rem;
-                font-weight: 500;
-                letter-spacing: 0.4px;
-                margin-bottom: 20px;
-            }
-            .dot-live {
-                width: 7px;
-                height: 7px;
-                border-radius: 50%;
-                background: var(--success);
-                box-shadow: 0 0 0 0 rgba(126, 232, 160, 0.5);
-                animation: blink 2.4s ease-in-out infinite;
-            }
-            @keyframes blink {
-                0%,
-                100% {
-                    box-shadow: 0 0 0 0 rgba(126, 232, 160, 0.45);
-                }
-                50% {
-                    box-shadow: 0 0 0 7px rgba(126, 232, 160, 0);
-                }
-            }
+    /* ===== HERO ===== */
+    .hero{padding:72px 0 40px;position:relative}
+    .hero-grid{
+      display:grid;grid-template-columns:1.05fr .95fr;
+      gap:48px;align-items:center;
+    }
+    .eyebrow{
+      display:inline-flex;align-items:center;gap:8px;
+      padding:6px 16px 6px 12px;border-radius:var(--radius-full);
+      background:var(--surface-cont);
+      border:1px solid var(--outline-var);
+      color:var(--on-surface-var);font-size:.72rem;font-weight:500;
+      letter-spacing:.4px;margin-bottom:20px;
+    }
+    .dot-live{
+      width:7px;height:7px;border-radius:50%;background:var(--success);
+      box-shadow:0 0 0 0 rgba(126,232,160,.5);
+      animation:blink 2.4s ease-in-out infinite;
+    }
+    @keyframes blink{
+      0%,100%{box-shadow:0 0 0 0 rgba(126,232,160,.45)}
+      50%{box-shadow:0 0 0 7px rgba(126,232,160,0)}
+    }
 
-            h1 {
-                font-size: clamp(2.6rem, 5.4vw, 3.75rem);
-                line-height: 1.1;
-                letter-spacing: -0.5px;
-                font-weight: 800;
-                margin: 0 0 20px;
-                max-width: 15ch;
-            }
-            .grad {
-                background: linear-gradient(
-                    135deg,
-                    var(--primary-bright) 0%,
-                    var(--tertiary-bright) 60%,
-                    var(--primary) 100%
-                );
-                background-size: 200% auto;
-                -webkit-background-clip: text;
-                background-clip: text;
-                color: transparent;
-                animation: shimmer 6s ease infinite;
-            }
-            @keyframes shimmer {
-                0% {
-                    background-position: 0% 50%;
-                }
-                50% {
-                    background-position: 100% 50%;
-                }
-                100% {
-                    background-position: 0% 50%;
-                }
-            }
+    h1{
+      font-size:clamp(2.6rem,5.4vw,3.75rem);
+      line-height:1.1;letter-spacing:-.5px;font-weight:800;
+      margin:0 0 20px;max-width:15ch;
+    }
+    .grad{
+      background:linear-gradient(135deg,var(--primary-bright) 0%,var(--tertiary-bright) 60%,var(--primary) 100%);
+      background-size:200% auto;
+      -webkit-background-clip:text;background-clip:text;color:transparent;
+      animation:shimmer 6s ease infinite;
+    }
+    @keyframes shimmer{
+      0%{background-position:0% 50%}
+      50%{background-position:100% 50%}
+      100%{background-position:0% 50%}
+    }
 
-            .hero-sub {
-                margin-bottom: 28px;
-                color: var(--on-surface-var);
-                max-width: 52ch;
-                font-size: 1.05rem;
-                line-height: 1.65;
-            }
-            .hero-btns {
-                display: flex;
-                flex-wrap: wrap;
-                gap: 12px;
-                margin-bottom: 28px;
-            }
-            .proof-pills {
-                display: flex;
-                flex-wrap: wrap;
-                gap: 8px 16px;
-                color: var(--on-surface-var);
-                font-size: 0.82rem;
-            }
-            .proof-pills span {
-                display: inline-flex;
-                align-items: center;
-                gap: 6px;
-            }
-            .proof-pills span::before {
-                content: '\2713';
-                color: var(--success);
-                font-weight: 700;
-            }
+    .hero-sub{
+      margin-bottom:28px;color:var(--on-surface-var);
+      max-width:52ch;font-size:1.05rem;line-height:1.65;
+    }
+    .hero-btns{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:28px}
+    .proof-pills{
+      display:flex;flex-wrap:wrap;gap:8px 16px;
+      color:var(--on-surface-var);font-size:.82rem;
+    }
+    .proof-pills span{display:inline-flex;align-items:center;gap:6px}
+    .proof-pills span::before{content:"\2713";color:var(--success);font-weight:700}
 
-            /* Terminal card */
-            .hero-card {
-                border-radius: var(--radius-xl);
-                background: var(--surface-cont);
-                border: 1px solid var(--outline-var);
-                box-shadow: var(--elev-3);
-                padding: 14px;
-                position: relative;
-                overflow: hidden;
-            }
-            .hero-card::before {
-                content: '';
-                position: absolute;
-                top: -40%;
-                right: -30%;
-                width: 300px;
-                height: 300px;
-                border-radius: 50%;
-                background: radial-gradient(
-                    circle,
-                    rgba(201, 177, 255, 0.1),
-                    transparent 70%
-                );
-                pointer-events: none;
-            }
-            .term {
-                border-radius: var(--radius-md);
-                overflow: hidden;
-                border: 1px solid var(--outline-var);
-                background: var(--surface-dim);
-                position: relative;
-            }
-            .term-bar {
-                display: flex;
-                align-items: center;
-                gap: 6px;
-                padding: 11px 14px;
-                background: var(--surface-low);
-                border-bottom: 1px solid var(--outline-var);
-            }
-            .term-dot {
-                width: 10px;
-                height: 10px;
-                border-radius: 50%;
-            }
-            .term-dot:nth-child(1) {
-                background: #f87171;
-            }
-            .term-dot:nth-child(2) {
-                background: #fbbf24;
-            }
-            .term-dot:nth-child(3) {
-                background: #34d399;
-            }
-            .term-title {
-                margin-left: auto;
-                color: var(--outline);
-                font-size: 0.7rem;
-                letter-spacing: 0.3px;
-            }
-            .term-body {
-                padding: 18px 14px;
-                font-family:
-                    'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
-                font-size: 0.78rem;
-                line-height: 1.75;
-                color: var(--on-surface-var);
-                min-height: 310px;
-            }
-            .tl {
-                opacity: 0;
-                transform: translateY(5px);
-                animation: rise 0.45s var(--ease) forwards;
-            }
-            .tl:nth-child(1) {
-                animation-delay: 0.05s;
-            }
-            .tl:nth-child(2) {
-                animation-delay: 0.12s;
-            }
-            .tl:nth-child(3) {
-                animation-delay: 0.19s;
-            }
-            .tl:nth-child(4) {
-                animation-delay: 0.26s;
-            }
-            .tl:nth-child(5) {
-                animation-delay: 0.33s;
-            }
-            .tl:nth-child(6) {
-                animation-delay: 0.4s;
-            }
-            .tl:nth-child(7) {
-                animation-delay: 0.47s;
-            }
-            .tl:nth-child(8) {
-                animation-delay: 0.54s;
-            }
-            .tl:nth-child(9) {
-                animation-delay: 0.61s;
-            }
-            .tl:nth-child(10) {
-                animation-delay: 0.68s;
-            }
-            @keyframes rise {
-                to {
-                    opacity: 1;
-                    transform: translateY(0);
-                }
-            }
-            .c-prompt {
-                color: var(--tertiary);
-            }
-            .c-cmd {
-                color: var(--primary-bright);
-            }
-            .c-warn {
-                color: var(--warning);
-            }
-            .c-ok {
-                color: var(--success);
-            }
+    /* Terminal card */
+    .hero-card{
+      border-radius:var(--radius-xl);
+      background:var(--surface-cont);
+      border:1px solid var(--outline-var);
+      box-shadow:var(--elev-3);
+      padding:14px;position:relative;overflow:hidden;
+    }
+    .hero-card::before{
+      content:"";position:absolute;top:-40%;right:-30%;
+      width:300px;height:300px;border-radius:50%;
+      background:radial-gradient(circle,rgba(201,177,255,.10),transparent 70%);
+      pointer-events:none;
+    }
+    .term{
+      border-radius:var(--radius-md);overflow:hidden;
+      border:1px solid var(--outline-var);
+      background:var(--surface-dim);position:relative;
+    }
+    .term-bar{
+      display:flex;align-items:center;gap:6px;
+      padding:11px 14px;background:var(--surface-low);
+      border-bottom:1px solid var(--outline-var);
+    }
+    .term-dot{width:10px;height:10px;border-radius:50%}
+    .term-dot:nth-child(1){background:#f87171}
+    .term-dot:nth-child(2){background:#fbbf24}
+    .term-dot:nth-child(3){background:#34d399}
+    .term-title{margin-left:auto;color:var(--outline);font-size:.7rem;letter-spacing:.3px}
+    .term-body{
+      padding:18px 14px;
+      font-family:"JetBrains Mono","Fira Code",ui-monospace,monospace;
+      font-size:.78rem;line-height:1.75;color:var(--on-surface-var);
+      min-height:310px;
+    }
+    .tl{opacity:0;transform:translateY(5px);animation:rise .45s var(--ease) forwards}
+    .tl:nth-child(1){animation-delay:.05s}
+    .tl:nth-child(2){animation-delay:.12s}
+    .tl:nth-child(3){animation-delay:.19s}
+    .tl:nth-child(4){animation-delay:.26s}
+    .tl:nth-child(5){animation-delay:.33s}
+    .tl:nth-child(6){animation-delay:.40s}
+    .tl:nth-child(7){animation-delay:.47s}
+    .tl:nth-child(8){animation-delay:.54s}
+    .tl:nth-child(9){animation-delay:.61s}
+    .tl:nth-child(10){animation-delay:.68s}
+    @keyframes rise{to{opacity:1;transform:translateY(0)}}
+    .c-prompt{color:var(--tertiary)}
+    .c-cmd{color:var(--primary-bright)}
+    .c-warn{color:var(--warning)}
+    .c-ok{color:var(--success)}
 
-            /* Floating pills below terminal */
-            .float-grid {
-                display: grid;
-                grid-template-columns: 1fr 1fr;
-                gap: 10px;
-                margin-top: 12px;
-            }
-            .float-pill {
-                padding: 14px;
-                border-radius: var(--radius-md);
-                background: var(--surface-high);
-                border: 1px solid var(--outline-var);
-                font-size: 0.78rem;
-                line-height: 1.55;
-                color: var(--on-surface-var);
-            }
-            .float-pill strong {
-                display: block;
-                color: var(--on-surface);
-                font-size: 0.84rem;
-                font-weight: 600;
-                margin-bottom: 3px;
-            }
+    /* Floating pills below terminal */
+    .float-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}
+    .float-pill{
+      padding:14px;border-radius:var(--radius-md);
+      background:var(--surface-high);
+      border:1px solid var(--outline-var);
+      font-size:.78rem;line-height:1.55;color:var(--on-surface-var);
+    }
+    .float-pill strong{
+      display:block;color:var(--on-surface);font-size:.84rem;
+      font-weight:600;margin-bottom:3px;
+    }
 
-            /* ===== Proof strip ===== */
-            .proof-strip {
-                padding: 12px 0 0;
-            }
-            .proof-row {
-                display: grid;
-                grid-template-columns: repeat(4, 1fr);
-                gap: 12px;
-                padding: 14px;
-                border-radius: var(--radius-xl);
-                background: var(--surface-cont);
-                border: 1px solid var(--outline-var);
-            }
-            .pstat {
-                padding: 18px 14px;
-                border-radius: var(--radius-md);
-                background: var(--surface-high);
-                text-align: center;
-            }
-            .pstat strong {
-                display: block;
-                font-size: 1.2rem;
-                font-weight: 700;
-                color: var(--primary);
-            }
-            .pstat span {
-                display: block;
-                margin-top: 5px;
-                font-size: 0.78rem;
-                color: var(--on-surface-var);
-                line-height: 1.45;
-            }
+    /* ===== Proof strip ===== */
+    .proof-strip{padding:12px 0 0}
+    .proof-row{
+      display:grid;grid-template-columns:repeat(4,1fr);gap:12px;
+      padding:14px;border-radius:var(--radius-xl);
+      background:var(--surface-cont);
+      border:1px solid var(--outline-var);
+    }
+    .pstat{
+      padding:18px 14px;border-radius:var(--radius-md);
+      background:var(--surface-high);text-align:center;
+    }
+    .pstat strong{
+      display:block;font-size:1.2rem;font-weight:700;
+      color:var(--primary);
+    }
+    .pstat span{
+      display:block;margin-top:5px;font-size:.78rem;
+      color:var(--on-surface-var);line-height:1.45;
+    }
 
-            /* ===== Section base ===== */
-            section {
-                padding: 88px 0;
-            }
-            .sec-head {
-                max-width: 640px;
-                margin-bottom: 44px;
-            }
-            .label {
-                display: inline-block;
-                font-size: 0.68rem;
-                font-weight: 600;
-                letter-spacing: 0.6px;
-                text-transform: uppercase;
-                color: var(--tertiary);
-                margin-bottom: 14px;
-            }
-            h2 {
-                font-size: clamp(1.9rem, 3.8vw, 2.75rem);
-                line-height: 1.14;
-                font-weight: 700;
-                letter-spacing: -0.3px;
-                margin: 0 0 8px;
-            }
-            .sec-copy {
-                margin-top: 10px;
-                color: var(--on-surface-var);
-                font-size: 0.95rem;
-                line-height: 1.6;
-            }
+    /* ===== Section base ===== */
+    section{padding:88px 0}
+    .sec-head{max-width:640px;margin-bottom:44px}
+    .label{
+      display:inline-block;font-size:.68rem;font-weight:600;
+      letter-spacing:.6px;text-transform:uppercase;
+      color:var(--tertiary);margin-bottom:14px;
+    }
+    h2{
+      font-size:clamp(1.9rem,3.8vw,2.75rem);
+      line-height:1.14;font-weight:700;letter-spacing:-.3px;
+      margin:0 0 8px;
+    }
+    .sec-copy{
+      margin-top:10px;color:var(--on-surface-var);
+      font-size:.95rem;line-height:1.6;
+    }
 
-            /* ===== Section divider glow ===== */
-            .divider {
-                height: 1px;
-                border: none;
-                background: linear-gradient(
-                    90deg,
-                    transparent,
-                    var(--outline-var) 30%,
-                    var(--primary-cont) 50%,
-                    var(--outline-var) 70%,
-                    transparent
-                );
-                margin: 0;
-            }
+    /* ===== Section divider glow ===== */
+    .divider{
+      height:1px;border:none;
+      background:linear-gradient(90deg,transparent,var(--outline-var) 30%,var(--primary-cont) 50%,var(--outline-var) 70%,transparent);
+      margin:0;
+    }
 
-            /* ===== Cards ===== */
-            .card {
-                padding: 28px;
-                border-radius: var(--radius-lg);
-                background: var(--surface-cont);
-                border: 1px solid var(--outline-var);
-                transition:
-                    box-shadow var(--dur-fast) var(--ease),
-                    border-color var(--dur-fast) var(--ease),
-                    transform var(--dur-fast) var(--ease);
-            }
-            .card:hover {
-                box-shadow: var(--elev-2);
-                border-color: rgba(201, 177, 255, 0.18);
-                transform: translateY(-2px);
-            }
-            .card h3 {
-                margin: 0 0 10px;
-                font-size: 1.3rem;
-                font-weight: 600;
-                line-height: 1.3;
-            }
-            .card p,
-            .card li {
-                color: var(--on-surface-var);
-                line-height: 1.6;
-                font-size: 0.88rem;
-            }
+    /* ===== Cards ===== */
+    .card{
+      padding:28px;border-radius:var(--radius-lg);
+      background:var(--surface-cont);
+      border:1px solid var(--outline-var);
+      transition:box-shadow var(--dur-fast) var(--ease),
+                 border-color var(--dur-fast) var(--ease),
+                 transform var(--dur-fast) var(--ease);
+    }
+    .card:hover{
+      box-shadow:var(--elev-2);
+      border-color:rgba(201,177,255,.18);
+      transform:translateY(-2px);
+    }
+    .card h3{
+      margin:0 0 10px;font-size:1.3rem;font-weight:600;line-height:1.3;
+    }
+    .card p,.card li{
+      color:var(--on-surface-var);line-height:1.6;font-size:.88rem;
+    }
 
-            /* ===== Icon (tonal container) ===== */
-            .icon {
-                width: 48px;
-                height: 48px;
-                border-radius: var(--radius-sm);
-                display: grid;
-                place-items: center;
-                margin-bottom: 16px;
-                font-size: 1.3rem;
-            }
-            .icon-purple {
-                background: var(--primary-cont);
-                color: var(--primary-bright);
-            }
-            .icon-pink {
-                background: var(--tertiary-cont);
-                color: var(--tertiary-bright);
-            }
-            .icon-green {
-                background: rgba(126, 232, 160, 0.14);
-                color: var(--success);
-            }
+    /* ===== Icon (tonal container) ===== */
+    .icon{
+      width:48px;height:48px;border-radius:var(--radius-sm);
+      display:grid;place-items:center;margin-bottom:16px;
+      font-size:1.3rem;
+    }
+    .icon-purple{background:var(--primary-cont);color:var(--primary-bright)}
+    .icon-pink{background:var(--tertiary-cont);color:var(--tertiary-bright)}
+    .icon-green{background:rgba(126,232,160,.14);color:var(--success)}
 
-            /* ===== Grids ===== */
-            .g2 {
-                display: grid;
-                gap: 16px;
-                grid-template-columns: 1fr 1fr;
-            }
-            .g3 {
-                display: grid;
-                gap: 16px;
-                grid-template-columns: repeat(3, 1fr);
-            }
-            .g4 {
-                display: grid;
-                gap: 16px;
-                grid-template-columns: repeat(4, 1fr);
-            }
+    /* ===== Grids ===== */
+    .g2{display:grid;gap:16px;grid-template-columns:1fr 1fr}
+    .g3{display:grid;gap:16px;grid-template-columns:repeat(3,1fr)}
+    .g4{display:grid;gap:16px;grid-template-columns:repeat(4,1fr)}
 
-            /* ===== Pain grid ===== */
-            .pain-grid {
-                display: grid;
-                grid-template-columns: 1fr 1fr;
-                gap: 16px;
-            }
-            .clean-list {
-                padding: 0;
-                margin: 0;
-                display: grid;
-                gap: 14px;
-            }
-            .clean-list li {
-                display: flex;
-                gap: 12px;
-                align-items: flex-start;
-                font-size: 0.88rem;
-                line-height: 1.55;
-                color: var(--on-surface-var);
-            }
-            .clean-list li::before {
-                content: '\2726';
-                color: var(--tertiary);
-                font-weight: 700;
-                flex-shrink: 0;
-                margin-top: 2px;
-            }
+    /* ===== Pain grid ===== */
+    .pain-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+    .clean-list{padding:0;margin:0;display:grid;gap:14px}
+    .clean-list li{
+      display:flex;gap:12px;align-items:flex-start;
+      font-size:.88rem;line-height:1.55;color:var(--on-surface-var);
+    }
+    .clean-list li::before{
+      content:"\2726";color:var(--tertiary);font-weight:700;
+      flex-shrink:0;margin-top:2px;
+    }
 
-            /* ===== Feature cards ===== */
-            .feat-card {
-                display: flex;
-                flex-direction: column;
-            }
-            .tag {
-                display: inline-flex;
-                width: fit-content;
-                padding: 4px 14px;
-                border-radius: var(--radius-full);
-                background: rgba(201, 177, 255, 0.12);
-                color: var(--primary-bright);
-                font-size: 0.68rem;
-                font-weight: 600;
-                letter-spacing: 0.4px;
-                margin-bottom: 16px;
-            }
+    /* ===== Feature cards ===== */
+    .feat-card{display:flex;flex-direction:column}
+    .tag{
+      display:inline-flex;width:fit-content;
+      padding:4px 14px;border-radius:var(--radius-full);
+      background:rgba(201,177,255,.12);
+      color:var(--primary-bright);
+      font-size:.68rem;font-weight:600;letter-spacing:.4px;
+      margin-bottom:16px;
+    }
 
-            /* ===== Journey ===== */
-            .journey {
-                display: grid;
-                grid-template-columns: repeat(4, 1fr);
-                gap: 16px;
-                counter-reset: journey;
-            }
-            .step {
-                padding: 24px;
-                border-radius: var(--radius-lg);
-                background: var(--surface-cont);
-                border: 1px solid var(--outline-var);
-                transition: border-color var(--dur-fast) var(--ease);
-            }
-            .step:hover {
-                border-color: rgba(201, 177, 255, 0.22);
-            }
-            .step::before {
-                counter-increment: journey;
-                content: counter(journey);
-                display: inline-grid;
-                place-items: center;
-                width: 34px;
-                height: 34px;
-                border-radius: var(--radius-full);
-                margin-bottom: 14px;
-                background: linear-gradient(
-                    135deg,
-                    var(--primary-cont),
-                    var(--on-primary)
-                );
-                color: var(--primary-bright);
-                font-weight: 700;
-                font-size: 0.85rem;
-            }
-            .step h3 {
-                font-size: 0.95rem;
-                font-weight: 600;
-                margin-bottom: 8px;
-            }
-            .step p {
-                color: var(--on-surface-var);
-                font-size: 0.84rem;
-                line-height: 1.55;
-            }
+    /* ===== Journey ===== */
+    .journey{
+      display:grid;grid-template-columns:repeat(4,1fr);
+      gap:16px;counter-reset:journey;
+    }
+    .step{
+      padding:24px;border-radius:var(--radius-lg);
+      background:var(--surface-cont);
+      border:1px solid var(--outline-var);
+      transition:border-color var(--dur-fast) var(--ease);
+    }
+    .step:hover{border-color:rgba(201,177,255,.22)}
+    .step::before{
+      counter-increment:journey;content:counter(journey);
+      display:inline-grid;place-items:center;
+      width:34px;height:34px;border-radius:var(--radius-full);
+      margin-bottom:14px;
+      background:linear-gradient(135deg,var(--primary-cont),var(--on-primary));
+      color:var(--primary-bright);font-weight:700;font-size:.85rem;
+    }
+    .step h3{font-size:.95rem;font-weight:600;margin-bottom:8px}
+    .step p{color:var(--on-surface-var);font-size:.84rem;line-height:1.55}
 
-            /* ===== Comparison ===== */
-            .comparison {
-                display: grid;
-                grid-template-columns: 1fr 1fr;
-                gap: 16px;
-            }
-            .comparison ul {
-                padding: 0;
-                margin: 16px 0 0;
-                display: grid;
-                gap: 12px;
-            }
-            .comparison li {
-                padding-left: 22px;
-                position: relative;
-                font-size: 0.88rem;
-                color: var(--on-surface-var);
-                line-height: 1.55;
-            }
-            .comparison li::before {
-                content: '\2022';
-                position: absolute;
-                left: 0;
-                color: var(--primary);
-                font-size: 1.3rem;
-                line-height: 1;
-                top: 1px;
-            }
+    /* ===== Comparison ===== */
+    .comparison{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+    .comparison ul{padding:0;margin:16px 0 0;display:grid;gap:12px}
+    .comparison li{
+      padding-left:22px;position:relative;
+      font-size:.88rem;color:var(--on-surface-var);line-height:1.55;
+    }
+    .comparison li::before{
+      content:"\2022";position:absolute;left:0;
+      color:var(--primary);font-size:1.3rem;line-height:1;top:1px;
+    }
 
-            /* ===== Testimonial ===== */
-            .testimonial {
-                display: grid;
-                grid-template-columns: 1.1fr 0.9fr;
-                gap: 16px;
-            }
-            .quote {
-                font-size: clamp(1.2rem, 2vw, 1.6rem);
-                line-height: 1.45;
-                color: var(--on-surface);
-                font-weight: 500;
-            }
-            .quote-meta {
-                margin-top: 14px;
-                color: var(--on-surface-var);
-                font-size: 0.84rem;
-            }
+    /* ===== Testimonial ===== */
+    .testimonial{display:grid;grid-template-columns:1.1fr .9fr;gap:16px}
+    .quote{
+      font-size:clamp(1.2rem,2vw,1.6rem);line-height:1.45;
+      color:var(--on-surface);font-weight:500;
+    }
+    .quote-meta{margin-top:14px;color:var(--on-surface-var);font-size:.84rem}
 
-            /* ===== Pricing ===== */
-            .pricing {
-                position: relative;
-                overflow: hidden;
-            }
-            .price-tag {
-                display: flex;
-                align-items: flex-end;
-                gap: 8px;
-                margin: 18px 0 12px;
-            }
-            .price-tag strong {
-                font-size: clamp(2.2rem, 4.5vw, 3.2rem);
-                line-height: 1;
-                font-weight: 800;
-                letter-spacing: -0.5px;
-            }
-            .check-list {
-                margin: 16px 0 0;
-                padding: 0;
-                display: grid;
-                gap: 12px;
-            }
-            .check-list li {
-                display: flex;
-                gap: 10px;
-                color: var(--on-surface-var);
-                font-size: 0.88rem;
-                line-height: 1.55;
-            }
-            .check-list li::before {
-                content: '\2713';
-                color: var(--success);
-                font-weight: 700;
-                flex-shrink: 0;
-            }
+    /* ===== Pricing ===== */
+    .pricing{position:relative;overflow:hidden}
+    .price-tag{display:flex;align-items:flex-end;gap:8px;margin:18px 0 12px}
+    .price-tag strong{
+      font-size:clamp(2.2rem,4.5vw,3.2rem);line-height:1;
+      font-weight:800;letter-spacing:-.5px;
+    }
+    .check-list{margin:16px 0 0;padding:0;display:grid;gap:12px}
+    .check-list li{
+      display:flex;gap:10px;color:var(--on-surface-var);
+      font-size:.88rem;line-height:1.55;
+    }
+    .check-list li::before{content:"\2713";color:var(--success);font-weight:700;flex-shrink:0}
 
-            /* Pricing card gradient border */
-            .pricing-card {
-                position: relative;
-                background: linear-gradient(
-                    135deg,
-                    rgba(201, 177, 255, 0.06),
-                    rgba(240, 176, 200, 0.04)
-                );
-            }
-            .pricing-card::before {
-                content: '';
-                position: absolute;
-                inset: -1px;
-                border-radius: calc(var(--radius-lg) + 1px);
-                padding: 1px;
-                background: linear-gradient(
-                    135deg,
-                    rgba(201, 177, 255, 0.25),
-                    transparent 40%,
-                    transparent 60%,
-                    rgba(240, 176, 200, 0.2)
-                );
-                -webkit-mask:
-                    linear-gradient(#fff 0 0) content-box,
-                    linear-gradient(#fff 0 0);
-                mask:
-                    linear-gradient(#fff 0 0) content-box,
-                    linear-gradient(#fff 0 0);
-                -webkit-mask-composite: xor;
-                mask-composite: exclude;
-                pointer-events: none;
-            }
+    /* Pricing card gradient border */
+    .pricing-card{
+      position:relative;
+      background:linear-gradient(135deg,rgba(201,177,255,.06),rgba(240,176,200,.04));
+    }
+    .pricing-card::before{
+      content:"";position:absolute;inset:-1px;
+      border-radius:calc(var(--radius-lg) + 1px);
+      padding:1px;
+      background:linear-gradient(135deg,rgba(201,177,255,.25),transparent 40%,transparent 60%,rgba(240,176,200,.2));
+      -webkit-mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);
+      mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);
+      -webkit-mask-composite:xor;
+      mask-composite:exclude;
+      pointer-events:none;
+    }
 
-            /* ===== CTA Band ===== */
-            .cta-band {
-                padding: 44px;
-                border-radius: var(--radius-xl);
-                background: linear-gradient(
-                    135deg,
-                    var(--surface-high) 0%,
-                    rgba(74, 54, 128, 0.18) 100%
-                );
-                border: 1px solid var(--outline-var);
-                display: grid;
-                grid-template-columns: 1.15fr 0.85fr;
-                gap: 28px;
-                align-items: center;
-            }
+    /* ===== CTA Band ===== */
+    .cta-band{
+      padding:44px;border-radius:var(--radius-xl);
+      background:linear-gradient(135deg,var(--surface-high) 0%,rgba(74,54,128,.18) 100%);
+      border:1px solid var(--outline-var);
+      display:grid;grid-template-columns:1.15fr .85fr;
+      gap:28px;align-items:center;
+    }
 
-            /* ===== FAQ ===== */
-            .faq-grid {
-                display: grid;
-                grid-template-columns: 1fr 1fr;
-                gap: 16px;
-            }
-            .faq-item summary {
-                list-style: none;
-                cursor: pointer;
-                font-weight: 600;
-                font-size: 0.95rem;
-                line-height: 1.5;
-                display: flex;
-                align-items: center;
-                justify-content: space-between;
-                gap: 16px;
-                color: var(--on-surface);
-            }
-            .faq-item summary::-webkit-details-marker {
-                display: none;
-            }
-            .faq-item summary::after {
-                content: '+';
-                font-size: 1.3rem;
-                color: var(--primary);
-                transition: transform var(--dur-fast) var(--ease);
-                flex-shrink: 0;
-            }
-            .faq-item[open] summary::after {
-                transform: rotate(45deg);
-            }
-            .faq-item p {
-                margin: 12px 0 0;
-                color: var(--on-surface-var);
-                font-size: 0.86rem;
-                line-height: 1.6;
-            }
+    /* ===== FAQ ===== */
+    .faq-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+    .faq-item summary{
+      list-style:none;cursor:pointer;
+      font-weight:600;font-size:.95rem;line-height:1.5;
+      display:flex;align-items:center;justify-content:space-between;gap:16px;
+      color:var(--on-surface);
+    }
+    .faq-item summary::-webkit-details-marker{display:none}
+    .faq-item summary::after{
+      content:"+";font-size:1.3rem;color:var(--primary);
+      transition:transform var(--dur-fast) var(--ease);flex-shrink:0;
+    }
+    .faq-item[open] summary::after{transform:rotate(45deg)}
+    .faq-item p{margin:12px 0 0;color:var(--on-surface-var);font-size:.86rem;line-height:1.6}
 
-            /* ===== Footer ===== */
-            .footer {
-                padding: 32px 0 48px;
-                color: var(--outline);
-                font-size: 0.78rem;
-                border-top: 1px solid var(--outline-var);
-            }
+    /* ===== Footer ===== */
+    .footer{
+      padding:32px 0 48px;
+      color:var(--outline);font-size:.78rem;
+      border-top:1px solid var(--outline-var);
+    }
 
-            /* ===== Scroll Reveal ===== */
-            .rv {
-                opacity: 0;
-                transform: translateY(20px);
-                transition:
-                    opacity var(--dur-slow) var(--ease),
-                    transform var(--dur-slow) var(--ease);
-            }
-            .rv.show {
-                opacity: 1;
-                transform: translateY(0);
-            }
+    /* ===== Scroll Reveal ===== */
+    .rv{
+      opacity:0;transform:translateY(20px);
+      transition:opacity var(--dur-slow) var(--ease),
+                 transform var(--dur-slow) var(--ease);
+    }
+    .rv.show{opacity:1;transform:translateY(0)}
 
-            /* ===== Reduced motion ===== */
-            @media (prefers-reduced-motion: reduce) {
-                html {
-                    scroll-behavior: auto;
-                }
-                *,
-                *::before,
-                *::after {
-                    animation: none !important;
-                    transition: none !important;
-                }
-                .rv {
-                    opacity: 1;
-                    transform: none;
-                }
-            }
+    /* ===== Reduced motion ===== */
+    @media(prefers-reduced-motion:reduce){
+      html{scroll-behavior:auto}
+      *,*::before,*::after{animation:none!important;transition:none!important}
+      .rv{opacity:1;transform:none}
+    }
 
-            /* ===== Responsive: Tablet ===== */
-            @media (max-width: 1080px) {
-                .hero-grid,
-                .pain-grid,
-                .testimonial,
-                .cta-band,
-                .comparison {
-                    grid-template-columns: 1fr;
-                }
-                .g3,
-                .g4,
-                .journey,
-                .proof-row,
-                .faq-grid {
-                    grid-template-columns: repeat(2, 1fr);
-                }
-            }
+    /* ===== Responsive: Tablet ===== */
+    @media(max-width:1080px){
+      .hero-grid,.pain-grid,.testimonial,.cta-band,.comparison{
+        grid-template-columns:1fr;
+      }
+      .g3,.g4,.journey,.proof-row,.faq-grid{
+        grid-template-columns:repeat(2,1fr);
+      }
+    }
 
-            /* ===== Responsive: Mobile ===== */
-            @media (max-width: 760px) {
-                .wrap {
-                    width: min(100% - 28px, var(--max-w));
-                }
-                .nav-links {
-                    display: none;
-                }
-                .hero {
-                    padding-top: 40px;
-                }
-                .g3,
-                .g4,
-                .journey,
-                .proof-row,
-                .faq-grid,
-                .float-grid,
-                .g2 {
-                    grid-template-columns: 1fr;
-                }
-                h1 {
-                    max-width: none;
-                }
-                .hero-btns,
-                .nav-cta {
-                    flex-wrap: wrap;
-                }
-                .btn,
-                .btn-outline {
-                    width: 100%;
-                    justify-content: center;
-                }
-                .term-body {
-                    min-height: auto;
-                }
-                .cta-band {
-                    padding: 24px;
-                    grid-template-columns: 1fr;
-                }
-            }
-        </style>
-    </head>
-    <body>
-        <div class="page">
-            <!-- ===== TOP APP BAR ===== -->
-            <header class="topbar" id="topbar">
-                <div class="wrap nav">
-                    <a class="brand" href="#top" aria-label="or3-intern home">
-                        <span class="brand-mark">or3</span>
-                        <span>or3-intern</span>
-                    </a>
-                    <nav class="nav-links" aria-label="Primary">
-                        <a href="#why">Why it wins</a>
-                        <a href="#features">Features</a>
-                        <a href="#proof">Proof</a>
-                        <a href="#pricing">Offer</a>
-                        <a href="#faq">FAQ</a>
-                    </nav>
-                    <div class="nav-cta">
-                        <a class="btn-outline" href="#proof"
-                            >See the advantage</a
-                        >
-                        <a class="btn" href="#pricing">Get started</a>
-                    </div>
-                </div>
-            </header>
+    /* ===== Responsive: Mobile ===== */
+    @media(max-width:760px){
+      .wrap{width:min(100% - 28px,var(--max-w))}
+      .nav-links{display:none}
+      .hero{padding-top:40px}
+      .g3,.g4,.journey,.proof-row,.faq-grid,.float-grid,.g2{
+        grid-template-columns:1fr;
+      }
+      h1{max-width:none}
+      .hero-btns,.nav-cta{flex-wrap:wrap}
+      .btn,.btn-outline{width:100%;justify-content:center}
+      .term-body{min-height:auto}
+      .cta-band{padding:24px;grid-template-columns:1fr}
+    }
+  </style>
+</head>
+<body>
+<div class="page">
 
-            <main id="top">
-                <!-- ===== HERO ===== -->
-                <section class="hero">
-                    <div class="wrap hero-grid">
-                        <div>
-                            <div class="eyebrow rv">
-                                <span class="dot-live"></span>
-                                Local-first AI runtime &middot; memory &middot;
-                                channels &middot; automation &middot; hardening
-                            </div>
-                            <h1 class="rv">
-                                Stop buying <span class="grad">AI demos.</span
-                                ><br />
-                                Start running an AI&nbsp;operator.
-                            </h1>
-                            <p class="hero-sub rv">
-                                or3-intern is the AI runtime for teams who want
-                                more than a chatbot. It remembers context, works
-                                across real channels, automates recurring jobs,
-                                integrates with tools, and stays governed with
-                                production-grade controls.
-                            </p>
-                            <div class="hero-btns rv">
-                                <a class="btn" href="#pricing"
-                                    >Launch your AI operator &rarr;</a
-                                >
-                                <a class="btn-outline" href="#why"
-                                    >Why this converts work into output</a
-                                >
-                            </div>
-                            <div
-                                class="proof-pills rv"
-                                aria-label="Key differentiators"
-                            >
-                                <span
-                                    >Shared runtime across CLI, service,
-                                    channels &amp; jobs</span
-                                >
-                                <span
-                                    >SQLite-backed history &amp; hybrid memory
-                                    retrieval</span
-                                >
-                                <span
-                                    >Secrets, audit, profiles &amp; network
-                                    policy built&nbsp;in</span
-                                >
-                            </div>
-                        </div>
+  <!-- ===== TOP APP BAR ===== -->
+  <header class="topbar" id="topbar">
+    <div class="wrap nav">
+      <a class="brand" href="#top" aria-label="or3-intern home">
+        <span class="brand-mark">or3</span>
+        <span>or3-intern</span>
+      </a>
+      <nav class="nav-links" aria-label="Primary">
+        <a href="#why">Why it wins</a>
+        <a href="#features">Features</a>
+        <a href="#proof">Proof</a>
+        <a href="#pricing">Offer</a>
+        <a href="#faq">FAQ</a>
+      </nav>
+      <div class="nav-cta">
+        <a class="btn-outline" href="#proof">See the advantage</a>
+        <a class="btn" href="#pricing">Get started</a>
+      </div>
+    </div>
+  </header>
 
-                        <div class="hero-card rv">
-                            <div class="term">
-                                <div class="term-bar">
-                                    <span class="term-dot"></span>
-                                    <span class="term-dot"></span>
-                                    <span class="term-dot"></span>
-                                    <span class="term-title"
-                                        >or3-intern live operator flow</span
-                                    >
-                                </div>
-                                <div class="term-body">
-                                    <div class="tl">
-                                        <span class="c-prompt">$</span>
-                                        <span class="c-cmd"
-                                            >or3-intern init</span
-                                        >
-                                    </div>
-                                    <div class="tl">
-                                        Configured provider, memory, artifacts,
-                                        channels, and runtime profile.
-                                    </div>
-                                    <div class="tl">
-                                        <span class="c-prompt">$</span>
-                                        <span class="c-cmd"
-                                            >or3-intern serve</span
-                                        >
-                                    </div>
-                                    <div class="tl">
-                                        <span class="c-ok">&#10003;</span>
-                                        Telegram enabled
-                                    </div>
-                                    <div class="tl">
-                                        <span class="c-ok">&#10003;</span> Slack
-                                        enabled
-                                    </div>
-                                    <div class="tl">
-                                        <span class="c-ok">&#10003;</span> Cron
-                                        + heartbeat running
-                                    </div>
-                                    <div class="tl">
-                                        <span class="c-ok">&#10003;</span> MCP
-                                        tools connected
-                                    </div>
-                                    <div class="tl">
-                                        <span class="c-warn">&#8594;</span> New
-                                        inbound request: &ldquo;Summarize the
-                                        incident and notify the team&rdquo;
-                                    </div>
-                                    <div class="tl">
-                                        Pulled memory, checked policies,
-                                        executed tools, posted reply, logged
-                                        audit trail.
-                                    </div>
-                                    <div class="tl">
-                                        <span class="c-ok">Result:</span> one AI
-                                        brain, everywhere your work happens.
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="float-grid">
-                                <div class="float-pill">
-                                    <strong>Remembers context</strong>
-                                    SQLite history, hybrid retrieval, document
-                                    indexing, and standing memory.
-                                </div>
-                                <div class="float-pill">
-                                    <strong>Acts across channels</strong>
-                                    CLI, service API, Telegram, Slack, Discord,
-                                    Email, and WhatsApp bridge.
-                                </div>
-                                <div class="float-pill">
-                                    <strong>Runs autonomously</strong>
-                                    Webhooks, file-watch, heartbeat, cron, and
-                                    structured tasks.
-                                </div>
-                                <div class="float-pill">
-                                    <strong>Stays controlled</strong>
-                                    Secrets, audit, host policy, access
-                                    profiles, and runtime hardening.
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </section>
+  <main id="top">
 
-                <!-- ===== PROOF STRIP ===== -->
-                <section class="proof-strip">
-                    <div class="wrap">
-                        <div class="proof-row rv" id="proof">
-                            <div class="pstat">
-                                <strong>1 runtime</strong>
-                                <span
-                                    >One shared AI system across chat, channels,
-                                    service APIs, and automation.</span
-                                >
-                            </div>
-                            <div class="pstat">
-                                <strong>5+ channels</strong>
-                                <span
-                                    >Real communication surfaces, not just
-                                    another browser tab.</span
-                                >
-                            </div>
-                            <div class="pstat">
-                                <strong>4 postures</strong>
-                                <span
-                                    >From local development to hardened service
-                                    deployment.</span
-                                >
-                            </div>
-                            <div class="pstat">
-                                <strong>Built-in guardrails</strong>
-                                <span
-                                    >Secret refs, audit chain, quotas, profiles,
-                                    and outbound network policy.</span
-                                >
-                            </div>
-                        </div>
-                    </div>
-                </section>
-
-                <hr class="divider" />
-
-                <!-- ===== WHY ===== -->
-                <section id="why">
-                    <div class="wrap">
-                        <div class="sec-head rv">
-                            <span class="label">Why buyers switch</span>
-                            <h2>
-                                The problem is not getting AI to talk.<br />The
-                                problem is getting AI to
-                                <span class="grad">operate.</span>
-                            </h2>
-                            <p class="sec-copy">
-                                Most AI products fail after the demo because
-                                they are disconnected from the real flow of
-                                work. They forget context, live in one
-                                interface, break when you add automation, and
-                                become risky the moment you expose them to the
-                                outside&nbsp;world.
-                            </p>
-                        </div>
-
-                        <div class="pain-grid">
-                            <div class="card rv">
-                                <div class="icon icon-pink">&#10005;</div>
-                                <h3>What you are stuck with now</h3>
-                                <ul class="clean-list">
-                                    <li>
-                                        A chatbot that forgets everything
-                                        important after the session ends.
-                                    </li>
-                                    <li>
-                                        Separate bots for internal chat,
-                                        external channels, and background
-                                        automation.
-                                    </li>
-                                    <li>
-                                        Fragile glue code between prompts,
-                                        tools, schedules, and APIs.
-                                    </li>
-                                    <li>
-                                        Security anxiety the second AI touches
-                                        secrets, shell tools, or public
-                                        endpoints.
-                                    </li>
-                                    <li>
-                                        No operational confidence because there
-                                        is no audit trail, profile system, or
-                                        host policy.
-                                    </li>
-                                </ul>
-                            </div>
-                            <div class="card rv">
-                                <div class="icon icon-green">&#10003;</div>
-                                <h3>What or3-intern changes</h3>
-                                <ul class="clean-list">
-                                    <li>
-                                        One AI runtime that powers local chat,
-                                        service mode, channels, triggers, and
-                                        scheduled jobs.
-                                    </li>
-                                    <li>
-                                        Persistent memory with SQLite-backed
-                                        history, hybrid retrieval, and document
-                                        indexing.
-                                    </li>
-                                    <li>
-                                        Real-world channel integrations so the
-                                        agent meets your users where they
-                                        already work.
-                                    </li>
-                                    <li>
-                                        Hardening features designed for grown-up
-                                        deployments, not retrofitted after the
-                                        fact.
-                                    </li>
-                                    <li>
-                                        Extensibility through skills and MCP
-                                        tool integrations so it grows with your
-                                        stack.
-                                    </li>
-                                </ul>
-                            </div>
-                        </div>
-                    </div>
-                </section>
-
-                <hr class="divider" />
-
-                <!-- ===== FEATURES ===== -->
-                <section id="features">
-                    <div class="wrap">
-                        <div class="sec-head rv">
-                            <span class="label"
-                                >Features that close the deal</span
-                            >
-                            <h2>
-                                Every layer is engineered to reduce friction and
-                                increase&nbsp;trust.
-                            </h2>
-                            <p class="sec-copy">
-                                This is not a vague AI promise. It is a system
-                                with concrete advantages: faster setup, deeper
-                                context, broader reach, safer execution, and
-                                cleaner&nbsp;operations.
-                            </p>
-                        </div>
-
-                        <div class="g3">
-                            <article class="card feat-card rv">
-                                <span class="tag">Memory that compounds</span>
-                                <h3>Persistent context that actually sticks</h3>
-                                <p>
-                                    SQLite-backed history, pinned memory, hybrid
-                                    vector + FTS retrieval, and document
-                                    indexing mean the system gets more useful
-                                    over time instead of resetting every
-                                    conversation.
-                                </p>
-                            </article>
-                            <article class="card feat-card rv">
-                                <span class="tag"
-                                    >Reach beyond the browser</span
-                                >
-                                <h3>One operator across real channels</h3>
-                                <p>
-                                    Run through CLI, internal service APIs,
-                                    Telegram, Slack, Discord, Email, and
-                                    WhatsApp bridge&mdash;all on the same shared
-                                    runtime and policy model.
-                                </p>
-                            </article>
-                            <article class="card feat-card rv">
-                                <span class="tag">Autonomy without chaos</span>
-                                <h3>Automation built in, not bolted on</h3>
-                                <p>
-                                    Webhooks, file-watch triggers, heartbeat
-                                    tasks, cron jobs, and structured task
-                                    execution let the system move from reactive
-                                    assistant to active operator.
-                                </p>
-                            </article>
-                            <article class="card feat-card rv">
-                                <span class="tag">Guardrails by design</span>
-                                <h3>Security that makes adoption easier</h3>
-                                <p>
-                                    Secret references, audit verification,
-                                    runtime profiles, access profiles, quotas,
-                                    sandbox options, and host-based network
-                                    policy lower the risk of real deployment.
-                                </p>
-                            </article>
-                            <article class="card feat-card rv">
-                                <span class="tag">Fits your stack</span>
-                                <h3>Skills &amp; MCP extend capability fast</h3>
-                                <p>
-                                    Add managed skills, quarantine or approve
-                                    them intelligently, and connect MCP tools
-                                    over stdio, SSE, or streamable HTTP with
-                                    policy-aware controls.
-                                </p>
-                            </article>
-                            <article class="card feat-card rv">
-                                <span class="tag">Operational confidence</span>
-                                <h3>Built to move from local to hosted</h3>
-                                <p>
-                                    Run
-                                    <code
-                                        style="background:var(--surface-high);padding:2px 8px;border-radius:6px;font-size:.8rem"
-                                        >doctor --strict</code
-                                    >, choose a runtime posture, validate
-                                    startup constraints, and scale from personal
-                                    workflows to service-grade&nbsp;deployments.
-                                </p>
-                            </article>
-                        </div>
-                    </div>
-                </section>
-
-                <hr class="divider" />
-
-                <!-- ===== VALUE JOURNEY ===== -->
-                <section>
-                    <div class="wrap">
-                        <div class="sec-head rv">
-                            <span class="label"
-                                >How buyers rationalize the purchase</span
-                            >
-                            <h2>
-                                You are not paying for responses. You are paying
-                                for <span class="grad">leverage.</span>
-                            </h2>
-                            <p class="sec-copy">
-                                The real value comes from replacing fragmented
-                                tooling, shrinking manual follow-up, and turning
-                                AI from a novelty into reliable
-                                operational&nbsp;capacity.
-                            </p>
-                        </div>
-
-                        <div class="journey">
-                            <div class="step rv">
-                                <h3>Replace tool sprawl</h3>
-                                <p>
-                                    Stop paying the operational tax of separate
-                                    bots, one-off scripts, prompt silos, and
-                                    brittle glue code.
-                                </p>
-                            </div>
-                            <div class="step rv">
-                                <h3>Compress response time</h3>
-                                <p>
-                                    One runtime can receive, reason, retrieve
-                                    context, act, and respond without handoffs
-                                    between systems.
-                                </p>
-                            </div>
-                            <div class="step rv">
-                                <h3>Increase output quality</h3>
-                                <p>
-                                    Persistent memory and shared context produce
-                                    more relevant results than stateless
-                                    assistants ever can.
-                                </p>
-                            </div>
-                            <div class="step rv">
-                                <h3>Adopt with confidence</h3>
-                                <p>
-                                    Security and hardening features reduce the
-                                    hidden cost that normally stalls AI rollout
-                                    inside serious teams.
-                                </p>
-                            </div>
-                        </div>
-                    </div>
-                </section>
-
-                <hr class="divider" />
-
-                <!-- ===== COMPARISON ===== -->
-                <section>
-                    <div class="wrap comparison">
-                        <div class="card rv">
-                            <div class="icon icon-pink">&#128556;</div>
-                            <h3>The typical AI product</h3>
-                            <ul>
-                                <li>Lives in one interface</li>
-                                <li>
-                                    Forgets everything outside the active
-                                    session
-                                </li>
-                                <li>
-                                    Needs extra tooling for channels and
-                                    automation
-                                </li>
-                                <li>
-                                    Becomes risky the moment it touches tools or
-                                    endpoints
-                                </li>
-                                <li>
-                                    Feels impressive in demos and fragile in
-                                    production
-                                </li>
-                            </ul>
-                        </div>
-                        <div class="card rv">
-                            <div class="icon icon-purple">&#9889;</div>
-                            <h3>The or3-intern advantage</h3>
-                            <ul>
-                                <li>
-                                    Shared runtime across interactive, async,
-                                    and service workflows
-                                </li>
-                                <li>
-                                    Persistent memory and retrieval grounded in
-                                    local data
-                                </li>
-                                <li>
-                                    Channels, triggers, schedules, and service
-                                    mode already in the box
-                                </li>
-                                <li>
-                                    Guardrails for secrets, audit, profiles,
-                                    quotas, and host policy
-                                </li>
-                                <li>
-                                    Built to become infrastructure, not just
-                                    interface decoration
-                                </li>
-                            </ul>
-                        </div>
-                    </div>
-                </section>
-
-                <hr class="divider" />
-
-                <!-- ===== TESTIMONIAL ===== -->
-                <section>
-                    <div class="wrap testimonial">
-                        <div class="card rv">
-                            <span class="label"
-                                >What your future buyer-self says</span
-                            >
-                            <p class="quote">
-                                &ldquo;We stopped experimenting with AI in
-                                isolated pockets and finally gave the business
-                                one operator that could remember, integrate,
-                                automate, and still stay under control.&rdquo;
-                            </p>
-                            <div class="quote-meta">
-                                That is the emotional reason this product wins:
-                                fewer moving parts, more output, less risk.
-                            </div>
-                        </div>
-                        <div class="card rv">
-                            <div class="icon icon-purple">&#129504;</div>
-                            <h3>Ideal for</h3>
-                            <ul class="check-list">
-                                <li>
-                                    Founders who want an AI operator instead of
-                                    a toy assistant
-                                </li>
-                                <li>
-                                    Internal tools teams who need one platform
-                                    for AI workflows
-                                </li>
-                                <li>
-                                    Operators who care about memory, reach, and
-                                    governance
-                                </li>
-                                <li>
-                                    Teams who want to start local-first and
-                                    scale toward service mode
-                                </li>
-                            </ul>
-                        </div>
-                    </div>
-                </section>
-
-                <hr class="divider" />
-
-                <!-- ===== PRICING ===== -->
-                <section id="pricing">
-                    <div class="wrap">
-                        <div class="sec-head rv">
-                            <span class="label">The offer</span>
-                            <h2>
-                                Buy one system that replaces a pile of
-                                partial&nbsp;solutions.
-                            </h2>
-                            <p class="sec-copy">
-                                The conversion decision is simple: if you
-                                believe your team needs AI that can do more than
-                                answer prompts, this is the
-                                category&nbsp;upgrade.
-                            </p>
-                        </div>
-
-                        <div class="card pricing-card rv">
-                            <div class="g3">
-                                <div>
-                                    <span class="label"
-                                        >Why it is worth it</span
-                                    >
-                                    <h3 style="font-size:1.65rem;margin:0">
-                                        You get infrastructure-level value.
-                                    </h3>
-                                    <div class="price-tag">
-                                        <strong>1 runtime</strong>
-                                        <span
-                                            style="color:var(--on-surface-var);padding-bottom:6px"
-                                            >for memory, channels, automation,
-                                            service APIs, skills &amp;
-                                            governance</span
-                                        >
-                                    </div>
-                                    <p class="sec-copy" style="margin-top:6px">
-                                        Instead of paying in tool sprawl, prompt
-                                        drift, and operational fragility, you
-                                        buy a platform that turns AI into a
-                                        durable business&nbsp;capability.
-                                    </p>
-                                    <div
-                                        class="hero-btns"
-                                        style="margin-top:20px"
-                                    >
-                                        <a class="btn" href="#final-cta"
-                                            >Yes &mdash; I want the operator</a
-                                        >
-                                        <a class="btn-outline" href="#faq"
-                                            >Answer my objections</a
-                                        >
-                                    </div>
-                                </div>
-                                <div>
-                                    <h3>What makes the decision easy</h3>
-                                    <ul class="check-list">
-                                        <li>
-                                            Grounded in local-first persistence,
-                                            so your context stays yours.
-                                        </li>
-                                        <li>
-                                            Works across the surfaces your
-                                            business already uses.
-                                        </li>
-                                        <li>
-                                            Supports autonomy, not just
-                                            interactive prompting.
-                                        </li>
-                                        <li>
-                                            Includes the hardening layer that
-                                            serious deployment demands.
-                                        </li>
-                                    </ul>
-                                </div>
-                                <div>
-                                    <h3>What you stop buying separately</h3>
-                                    <ul class="check-list">
-                                        <li>Disconnected channel bots</li>
-                                        <li>One-off automation glue</li>
-                                        <li>Stateless AI wrappers</li>
-                                        <li>
-                                            Afterthought governance retrofits
-                                        </li>
-                                    </ul>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </section>
-
-                <hr class="divider" />
-
-                <!-- ===== FAQ ===== -->
-                <section id="faq">
-                    <div class="wrap">
-                        <div class="sec-head rv">
-                            <span class="label">Objection handling</span>
-                            <h2>
-                                The questions buyers ask before they
-                                say&nbsp;yes.
-                            </h2>
-                        </div>
-                        <div class="faq-grid">
-                            <details class="card faq-item rv" open>
-                                <summary>
-                                    Why not just use a normal AI assistant?
-                                </summary>
-                                <p>
-                                    Because a normal assistant gives you
-                                    isolated conversations. or3-intern gives you
-                                    a runtime: memory, channels, automation,
-                                    service mode, tools, and governance in one
-                                    system.
-                                </p>
-                            </details>
-                            <details class="card faq-item rv">
-                                <summary>Is this only for developers?</summary>
-                                <p>
-                                    It is built by engineers, but the value is
-                                    operational: faster execution, fewer
-                                    handoffs, more reliable automation, and
-                                    safer adoption. Technical teams enable it;
-                                    the business benefits from it.
-                                </p>
-                            </details>
-                            <details class="card faq-item rv">
-                                <summary>
-                                    What if we need security controls?
-                                </summary>
-                                <p>
-                                    That is one of its biggest strengths.
-                                    Runtime profiles, audit verification, secret
-                                    refs, quotas, host policy, access profiles,
-                                    and hardened execution are already part of
-                                    the product.
-                                </p>
-                            </details>
-                            <details class="card faq-item rv">
-                                <summary>Can it grow with our stack?</summary>
-                                <p>
-                                    Yes. Skills and MCP integrations make the
-                                    system extensible, while service mode and
-                                    channel adapters let it operate beyond a
-                                    single UI.
-                                </p>
-                            </details>
-                        </div>
-                    </div>
-                </section>
-
-                <!-- ===== FINAL CTA ===== -->
-                <section id="final-cta">
-                    <div class="wrap">
-                        <div class="cta-band rv">
-                            <div>
-                                <span class="label">Final close</span>
-                                <h2 style="margin-bottom:12px">
-                                    If you want AI that only talks,
-                                    keep&nbsp;shopping.
-                                </h2>
-                                <p
-                                    style="margin:0;max-width:46rem;color:var(--on-surface-var);font-size:1rem;line-height:1.6"
-                                >
-                                    If you want AI that can remember, integrate,
-                                    automate, and operate like part of the
-                                    business&mdash;this is the smarter buy. The
-                                    future is not another assistant tab. The
-                                    future is one dependable AI runtime embedded
-                                    into how work actually gets&nbsp;done.
-                                </p>
-                            </div>
-                            <div>
-                                <div class="card" style="min-height:100%">
-                                    <h3 style="font-size:1.3rem">
-                                        Make the obvious move
-                                    </h3>
-                                    <ul class="check-list">
-                                        <li>Start local-first</li>
-                                        <li>
-                                            Expand to channels and automation
-                                        </li>
-                                        <li>Harden for real deployment</li>
-                                        <li>
-                                            Let one AI brain power the workflow
-                                        </li>
-                                    </ul>
-                                    <div
-                                        class="hero-btns"
-                                        style="margin-top:18px;margin-bottom:0"
-                                    >
-                                        <a class="btn" href="#top"
-                                            >Back to top &uarr;</a
-                                        >
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </section>
-            </main>
-
-            <footer class="footer">
-                <div class="wrap">
-                    <p>
-                        Built around the real capabilities of or3-intern:
-                        local-first runtime, shared memory, channel
-                        integrations, automation, service mode, hardening,
-                        skills, and MCP extensions.
-                    </p>
-                </div>
-            </footer>
+    <!-- ===== HERO ===== -->
+    <section class="hero">
+      <div class="wrap hero-grid">
+        <div>
+          <div class="eyebrow rv">
+            <span class="dot-live"></span>
+            Local-first AI runtime &middot; memory &middot; channels &middot; automation &middot; hardening
+          </div>
+          <h1 class="rv">
+            Stop buying <span class="grad">AI demos.</span><br/>
+            Start running an AI&nbsp;operator.
+          </h1>
+          <p class="hero-sub rv">
+            or3-intern is the AI runtime for teams who want more than a chatbot.
+            It remembers context, works across real channels, automates recurring
+            jobs, integrates with tools, and stays governed with production-grade controls.
+          </p>
+          <div class="hero-btns rv">
+            <a class="btn" href="#pricing">Launch your AI operator &rarr;</a>
+            <a class="btn-outline" href="#why">Why this converts work into output</a>
+          </div>
+          <div class="proof-pills rv" aria-label="Key differentiators">
+            <span>Shared runtime across CLI, service, channels &amp; jobs</span>
+            <span>SQLite-backed history &amp; hybrid memory retrieval</span>
+            <span>Secrets, audit, profiles &amp; network policy built&nbsp;in</span>
+          </div>
         </div>
 
-        <script>
-            // Scroll-reveal with IntersectionObserver
-            const io = new IntersectionObserver(
-                (entries) => {
-                    entries.forEach((e) => {
-                        if (e.isIntersecting) {
-                            e.target.classList.add('show');
-                            io.unobserve(e.target);
-                        }
-                    });
-                },
-                { threshold: 0.08, rootMargin: '0px 0px -40px 0px' },
-            );
-            document.querySelectorAll('.rv').forEach((el) => io.observe(el));
+        <div class="hero-card rv">
+          <div class="term">
+            <div class="term-bar">
+              <span class="term-dot"></span>
+              <span class="term-dot"></span>
+              <span class="term-dot"></span>
+              <span class="term-title">or3-intern live operator flow</span>
+            </div>
+            <div class="term-body">
+              <div class="tl"><span class="c-prompt">$</span> <span class="c-cmd">or3-intern init</span></div>
+              <div class="tl">Configured provider, memory, artifacts, channels, and runtime profile.</div>
+              <div class="tl"><span class="c-prompt">$</span> <span class="c-cmd">or3-intern serve</span></div>
+              <div class="tl"><span class="c-ok">&#10003;</span> Telegram enabled</div>
+              <div class="tl"><span class="c-ok">&#10003;</span> Slack enabled</div>
+              <div class="tl"><span class="c-ok">&#10003;</span> Cron + heartbeat running</div>
+              <div class="tl"><span class="c-ok">&#10003;</span> MCP tools connected</div>
+              <div class="tl"><span class="c-warn">&#8594;</span> New inbound request: &ldquo;Summarize the incident and notify the team&rdquo;</div>
+              <div class="tl">Pulled memory, checked policies, executed tools, posted reply, logged audit trail.</div>
+              <div class="tl"><span class="c-ok">Result:</span> one AI brain, everywhere your work happens.</div>
+            </div>
+          </div>
+          <div class="float-grid">
+            <div class="float-pill">
+              <strong>Remembers context</strong>
+              SQLite history, hybrid retrieval, document indexing, and standing memory.
+            </div>
+            <div class="float-pill">
+              <strong>Acts across channels</strong>
+              CLI, service API, Telegram, Slack, Discord, Email, and WhatsApp bridge.
+            </div>
+            <div class="float-pill">
+              <strong>Runs autonomously</strong>
+              Webhooks, file-watch, heartbeat, cron, and structured tasks.
+            </div>
+            <div class="float-pill">
+              <strong>Stays controlled</strong>
+              Secrets, audit, host policy, access profiles, and runtime hardening.
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
 
-            // Top bar elevation on scroll
-            const tb = document.getElementById('topbar');
-            window.addEventListener(
-                'scroll',
-                () => {
-                    tb.classList.toggle('scrolled', window.scrollY > 8);
-                },
-                { passive: true },
-            );
-        </script>
-    </body>
+    <!-- ===== PROOF STRIP ===== -->
+    <section class="proof-strip">
+      <div class="wrap">
+        <div class="proof-row rv" id="proof">
+          <div class="pstat">
+            <strong>1 runtime</strong>
+            <span>One shared AI system across chat, channels, service APIs, and automation.</span>
+          </div>
+          <div class="pstat">
+            <strong>5+ channels</strong>
+            <span>Real communication surfaces, not just another browser tab.</span>
+          </div>
+          <div class="pstat">
+            <strong>4 postures</strong>
+            <span>From local development to hardened service deployment.</span>
+          </div>
+          <div class="pstat">
+            <strong>Built-in guardrails</strong>
+            <span>Secret refs, audit chain, quotas, profiles, and outbound network policy.</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <hr class="divider" />
+
+    <!-- ===== WHY ===== -->
+    <section id="why">
+      <div class="wrap">
+        <div class="sec-head rv">
+          <span class="label">Why buyers switch</span>
+          <h2>The problem is not getting AI to talk.<br/>The problem is getting AI to <span class="grad">operate.</span></h2>
+          <p class="sec-copy">
+            Most AI products fail after the demo because they are disconnected from
+            the real flow of work. They forget context, live in one interface,
+            break when you add automation, and become risky the moment you expose
+            them to the outside&nbsp;world.
+          </p>
+        </div>
+
+        <div class="pain-grid">
+          <div class="card rv">
+            <div class="icon icon-pink">&#10005;</div>
+            <h3>What you are stuck with now</h3>
+            <ul class="clean-list">
+              <li>A chatbot that forgets everything important after the session ends.</li>
+              <li>Separate bots for internal chat, external channels, and background automation.</li>
+              <li>Fragile glue code between prompts, tools, schedules, and APIs.</li>
+              <li>Security anxiety the second AI touches secrets, shell tools, or public endpoints.</li>
+              <li>No operational confidence because there is no audit trail, profile system, or host policy.</li>
+            </ul>
+          </div>
+          <div class="card rv">
+            <div class="icon icon-green">&#10003;</div>
+            <h3>What or3-intern changes</h3>
+            <ul class="clean-list">
+              <li>One AI runtime that powers local chat, service mode, channels, triggers, and scheduled jobs.</li>
+              <li>Persistent memory with SQLite-backed history, hybrid retrieval, and document indexing.</li>
+              <li>Real-world channel integrations so the agent meets your users where they already work.</li>
+              <li>Hardening features designed for grown-up deployments, not retrofitted after the fact.</li>
+              <li>Extensibility through skills and MCP tool integrations so it grows with your stack.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <hr class="divider" />
+
+    <!-- ===== FEATURES ===== -->
+    <section id="features">
+      <div class="wrap">
+        <div class="sec-head rv">
+          <span class="label">Features that close the deal</span>
+          <h2>Every layer is engineered to reduce friction and increase&nbsp;trust.</h2>
+          <p class="sec-copy">
+            This is not a vague AI promise. It is a system with concrete advantages:
+            faster setup, deeper context, broader reach, safer execution, and
+            cleaner&nbsp;operations.
+          </p>
+        </div>
+
+        <div class="g3">
+          <article class="card feat-card rv">
+            <span class="tag">Memory that compounds</span>
+            <h3>Persistent context that actually sticks</h3>
+            <p>SQLite-backed history, pinned memory, hybrid vector + FTS retrieval, and document indexing mean the system gets more useful over time instead of resetting every conversation.</p>
+          </article>
+          <article class="card feat-card rv">
+            <span class="tag">Reach beyond the browser</span>
+            <h3>One operator across real channels</h3>
+            <p>Run through CLI, internal service APIs, Telegram, Slack, Discord, Email, and WhatsApp bridge&mdash;all on the same shared runtime and policy model.</p>
+          </article>
+          <article class="card feat-card rv">
+            <span class="tag">Autonomy without chaos</span>
+            <h3>Automation built in, not bolted on</h3>
+            <p>Webhooks, file-watch triggers, heartbeat tasks, cron jobs, and structured task execution let the system move from reactive assistant to active operator.</p>
+          </article>
+          <article class="card feat-card rv">
+            <span class="tag">Guardrails by design</span>
+            <h3>Security that makes adoption easier</h3>
+            <p>Secret references, audit verification, runtime profiles, access profiles, quotas, sandbox options, and host-based network policy lower the risk of real deployment.</p>
+          </article>
+          <article class="card feat-card rv">
+            <span class="tag">Fits your stack</span>
+            <h3>Skills &amp; MCP extend capability fast</h3>
+            <p>Add managed skills, quarantine or approve them intelligently, and connect MCP tools over stdio, SSE, or streamable HTTP with policy-aware controls.</p>
+          </article>
+          <article class="card feat-card rv">
+            <span class="tag">Operational confidence</span>
+            <h3>Built to move from local to hosted</h3>
+            <p>Run <code style="background:var(--surface-high);padding:2px 8px;border-radius:6px;font-size:.8rem">doctor --strict</code>, choose a runtime posture, validate startup constraints, and scale from personal workflows to service-grade&nbsp;deployments.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <hr class="divider" />
+
+    <!-- ===== VALUE JOURNEY ===== -->
+    <section>
+      <div class="wrap">
+        <div class="sec-head rv">
+          <span class="label">How buyers rationalize the purchase</span>
+          <h2>You are not paying for responses. You are paying for <span class="grad">leverage.</span></h2>
+          <p class="sec-copy">
+            The real value comes from replacing fragmented tooling, shrinking manual
+            follow-up, and turning AI from a novelty into reliable operational&nbsp;capacity.
+          </p>
+        </div>
+
+        <div class="journey">
+          <div class="step rv">
+            <h3>Replace tool sprawl</h3>
+            <p>Stop paying the operational tax of separate bots, one-off scripts, prompt silos, and brittle glue code.</p>
+          </div>
+          <div class="step rv">
+            <h3>Compress response time</h3>
+            <p>One runtime can receive, reason, retrieve context, act, and respond without handoffs between systems.</p>
+          </div>
+          <div class="step rv">
+            <h3>Increase output quality</h3>
+            <p>Persistent memory and shared context produce more relevant results than stateless assistants ever can.</p>
+          </div>
+          <div class="step rv">
+            <h3>Adopt with confidence</h3>
+            <p>Security and hardening features reduce the hidden cost that normally stalls AI rollout inside serious teams.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <hr class="divider" />
+
+    <!-- ===== COMPARISON ===== -->
+    <section>
+      <div class="wrap comparison">
+        <div class="card rv">
+          <div class="icon icon-pink">&#128556;</div>
+          <h3>The typical AI product</h3>
+          <ul>
+            <li>Lives in one interface</li>
+            <li>Forgets everything outside the active session</li>
+            <li>Needs extra tooling for channels and automation</li>
+            <li>Becomes risky the moment it touches tools or endpoints</li>
+            <li>Feels impressive in demos and fragile in production</li>
+          </ul>
+        </div>
+        <div class="card rv">
+          <div class="icon icon-purple">&#9889;</div>
+          <h3>The or3-intern advantage</h3>
+          <ul>
+            <li>Shared runtime across interactive, async, and service workflows</li>
+            <li>Persistent memory and retrieval grounded in local data</li>
+            <li>Channels, triggers, schedules, and service mode already in the box</li>
+            <li>Guardrails for secrets, audit, profiles, quotas, and host policy</li>
+            <li>Built to become infrastructure, not just interface decoration</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <hr class="divider" />
+
+    <!-- ===== TESTIMONIAL ===== -->
+    <section>
+      <div class="wrap testimonial">
+        <div class="card rv">
+          <span class="label">What your future buyer-self says</span>
+          <p class="quote">&ldquo;We stopped experimenting with AI in isolated pockets and finally gave the business one operator that could remember, integrate, automate, and still stay under control.&rdquo;</p>
+          <div class="quote-meta">That is the emotional reason this product wins: fewer moving parts, more output, less risk.</div>
+        </div>
+        <div class="card rv">
+          <div class="icon icon-purple">&#129504;</div>
+          <h3>Ideal for</h3>
+          <ul class="check-list">
+            <li>Founders who want an AI operator instead of a toy assistant</li>
+            <li>Internal tools teams who need one platform for AI workflows</li>
+            <li>Operators who care about memory, reach, and governance</li>
+            <li>Teams who want to start local-first and scale toward service mode</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <hr class="divider" />
+
+    <!-- ===== PRICING ===== -->
+    <section id="pricing">
+      <div class="wrap">
+        <div class="sec-head rv">
+          <span class="label">The offer</span>
+          <h2>Buy one system that replaces a pile of partial&nbsp;solutions.</h2>
+          <p class="sec-copy">
+            The conversion decision is simple: if you believe your team needs AI
+            that can do more than answer prompts, this is the category&nbsp;upgrade.
+          </p>
+        </div>
+
+        <div class="card pricing-card rv">
+          <div class="g3">
+            <div>
+              <span class="label">Why it is worth it</span>
+              <h3 style="font-size:1.65rem;margin:0">You get infrastructure-level value.</h3>
+              <div class="price-tag">
+                <strong>1 runtime</strong>
+                <span style="color:var(--on-surface-var);padding-bottom:6px">for memory, channels, automation, service APIs, skills &amp; governance</span>
+              </div>
+              <p class="sec-copy" style="margin-top:6px">
+                Instead of paying in tool sprawl, prompt drift, and operational
+                fragility, you buy a platform that turns AI into a durable business&nbsp;capability.
+              </p>
+              <div class="hero-btns" style="margin-top:20px">
+                <a class="btn" href="#final-cta">Yes &mdash; I want the operator</a>
+                <a class="btn-outline" href="#faq">Answer my objections</a>
+              </div>
+            </div>
+            <div>
+              <h3>What makes the decision easy</h3>
+              <ul class="check-list">
+                <li>Grounded in local-first persistence, so your context stays yours.</li>
+                <li>Works across the surfaces your business already uses.</li>
+                <li>Supports autonomy, not just interactive prompting.</li>
+                <li>Includes the hardening layer that serious deployment demands.</li>
+              </ul>
+            </div>
+            <div>
+              <h3>What you stop buying separately</h3>
+              <ul class="check-list">
+                <li>Disconnected channel bots</li>
+                <li>One-off automation glue</li>
+                <li>Stateless AI wrappers</li>
+                <li>Afterthought governance retrofits</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <hr class="divider" />
+
+    <!-- ===== FAQ ===== -->
+    <section id="faq">
+      <div class="wrap">
+        <div class="sec-head rv">
+          <span class="label">Objection handling</span>
+          <h2>The questions buyers ask before they say&nbsp;yes.</h2>
+        </div>
+        <div class="faq-grid">
+          <details class="card faq-item rv" open>
+            <summary>Why not just use a normal AI assistant?</summary>
+            <p>Because a normal assistant gives you isolated conversations. or3-intern gives you a runtime: memory, channels, automation, service mode, tools, and governance in one system.</p>
+          </details>
+          <details class="card faq-item rv">
+            <summary>Is this only for developers?</summary>
+            <p>It is built by engineers, but the value is operational: faster execution, fewer handoffs, more reliable automation, and safer adoption. Technical teams enable it; the business benefits from it.</p>
+          </details>
+          <details class="card faq-item rv">
+            <summary>What if we need security controls?</summary>
+            <p>That is one of its biggest strengths. Runtime profiles, audit verification, secret refs, quotas, host policy, access profiles, and hardened execution are already part of the product.</p>
+          </details>
+          <details class="card faq-item rv">
+            <summary>Can it grow with our stack?</summary>
+            <p>Yes. Skills and MCP integrations make the system extensible, while service mode and channel adapters let it operate beyond a single UI.</p>
+          </details>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== FINAL CTA ===== -->
+    <section id="final-cta">
+      <div class="wrap">
+        <div class="cta-band rv">
+          <div>
+            <span class="label">Final close</span>
+            <h2 style="margin-bottom:12px">If you want AI that only talks, keep&nbsp;shopping.</h2>
+            <p style="margin:0;max-width:46rem;color:var(--on-surface-var);font-size:1rem;line-height:1.6">
+              If you want AI that can remember, integrate, automate, and operate
+              like part of the business&mdash;this is the smarter buy. The future
+              is not another assistant tab. The future is one dependable AI runtime
+              embedded into how work actually gets&nbsp;done.
+            </p>
+          </div>
+          <div>
+            <div class="card" style="min-height:100%">
+              <h3 style="font-size:1.3rem">Make the obvious move</h3>
+              <ul class="check-list">
+                <li>Start local-first</li>
+                <li>Expand to channels and automation</li>
+                <li>Harden for real deployment</li>
+                <li>Let one AI brain power the workflow</li>
+              </ul>
+              <div class="hero-btns" style="margin-top:18px;margin-bottom:0">
+                <a class="btn" href="#top">Back to top &uarr;</a>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="wrap">
+      <p>Built around the real capabilities of or3-intern: local-first runtime, shared memory, channel integrations, automation, service mode, hardening, skills, and MCP extensions.</p>
+    </div>
+  </footer>
+</div>
+
+<script>
+  // Scroll-reveal with IntersectionObserver
+  const io = new IntersectionObserver(
+    (entries) => {
+      entries.forEach((e) => {
+        if (e.isIntersecting) { e.target.classList.add('show'); io.unobserve(e.target); }
+      });
+    },
+    { threshold: 0.08, rootMargin: '0px 0px -40px 0px' }
+  );
+  document.querySelectorAll('.rv').forEach((el) => io.observe(el));
+
+  // Top bar elevation on scroll
+  const tb = document.getElementById('topbar');
+  window.addEventListener('scroll', () => {
+    tb.classList.toggle('scrolled', window.scrollY > 8);
+  }, { passive: true });
+</script>
+</body>
 </html>
-```
+````
 
 ## File: builtin_skills/cron/SKILL.md
-
-```markdown
+````markdown
 # cron
-
 Use the `cron` tool to add/list/remove/run/status scheduled jobs.
 
 For normal OR3 turns, create jobs with `payload.kind="agent_turn"` and a `payload.message`.
 
 For external agent CLI jobs, create jobs with `payload.kind="agent_cli_run"` and `payload.agent_run` containing `runner_id` and `task`. Scheduled external agent runs default to `mode="review"` and `isolation="host_readonly"` when those fields are omitted.
-```
+````
 
 ## File: cmd/or3-intern/testdata/service_contract/audit-status-response.json
-
-```json
+````json
 {
-    "status": "ok",
-    "enabled": true,
-    "available": true,
-    "strict": true,
-    "verifyOnStart": false,
-    "eventCount": 1,
-    "lastEventId": 1,
-    "lastEventType": "tool.execute",
-    "lastActor": "cli",
-    "lastEventAt": "__LAST_EVENT_AT__"
+  "status": "ok",
+  "enabled": true,
+  "available": true,
+  "strict": true,
+  "verifyOnStart": false,
+  "eventCount": 1,
+  "lastEventId": 1,
+  "lastEventType": "tool.execute",
+  "lastActor": "cli",
+  "lastEventAt": "__LAST_EVENT_AT__"
 }
-```
+````
 
 ## File: cmd/or3-intern/testdata/service_contract/embeddings-status-response.json
-
-```json
+````json
 {
-    "status": "ok",
-    "memoryVectorDims": 0,
-    "currentEmbedFingerprint": "http://provider.example|text-embedding-3-small",
-    "docIndexEnabled": false,
-    "docRootsConfigured": false
+  "status": "ok",
+  "memoryVectorDims": 0,
+  "currentEmbedFingerprint": "http://provider.example|text-embedding-3-small",
+  "docIndexEnabled": false,
+  "docRootsConfigured": false
 }
-```
+````
 
 ## File: cmd/or3-intern/testdata/service_contract/intern-turn-request.json
-
-```json
+````json
 {
-    "session_key": "svc:fixture",
-    "platform_session_ref": {
-        "workspace_id": "ws_fixture",
-        "client_kind": "chat",
-        "client_session_id": "thread_fixture",
-        "network_session_id": "sess_fixture",
-        "session_key": "svc:fixture"
-    },
-    "message": "hello contract",
-    "tool_policy": {
-        "mode": "allow_list",
-        "allowed_tools": ["read_file"]
-    },
-    "meta": {
-        "request_id": "req_fixture",
-        "workspace_id": "ws_fixture",
-        "network_session_id": "sess_fixture"
-    },
-    "profile_name": "ops"
+  "session_key": "svc:fixture",
+  "platform_session_ref": {
+    "workspace_id": "ws_fixture",
+    "client_kind": "chat",
+    "client_session_id": "thread_fixture",
+    "network_session_id": "sess_fixture",
+    "session_key": "svc:fixture"
+  },
+  "message": "hello contract",
+  "tool_policy": {
+    "mode": "allow_list",
+    "allowed_tools": ["read_file"]
+  },
+  "meta": {
+    "request_id": "req_fixture",
+    "workspace_id": "ws_fixture",
+    "network_session_id": "sess_fixture"
+  },
+  "profile_name": "ops"
 }
-```
+````
 
 ## File: cmd/or3-intern/testdata/service_contract/subagent-request.json
-
-```json
+````json
 {
-    "parentSessionKey": "svc:parent",
-    "task": "background contract task",
-    "promptSnapshot": [
-        {
-            "role": "user",
-            "content": "remember contract"
-        }
-    ],
-    "toolPolicy": {
-        "mode": "allow_list",
-        "allowedTools": ["read_file"]
-    },
-    "timeoutSeconds": 15,
-    "profileName": "ops",
-    "channel": "service",
-    "replyTo": "or3-net",
-    "meta": {
-        "trace_id": "trace-subagent"
+  "parentSessionKey": "svc:parent",
+  "task": "background contract task",
+  "promptSnapshot": [
+    {
+      "role": "user",
+      "content": "remember contract"
     }
+  ],
+  "toolPolicy": {
+    "mode": "allow_list",
+    "allowedTools": ["read_file"]
+  },
+  "timeoutSeconds": 15,
+  "profileName": "ops",
+  "channel": "service",
+  "replyTo": "or3-net",
+  "meta": {
+    "trace_id": "trace-subagent"
+  }
 }
-```
+````
 
 ## File: cmd/or3-intern/app_cmd.go
-
-```go
+````go
 package main
 
 import (
@@ -10073,11 +9193,10 @@ import (
 func newCLIControlplane(broker *approval.Broker) *controlplane.Service {
 	return controlplane.New(config.Config{}, nil, broker, nil, nil)
 }
-```
+````
 
 ## File: cmd/or3-intern/audit_cmd.go
-
-```go
+````go
 package main
 
 import (
@@ -10102,11 +9221,10 @@ func runAuditCommand(ctx context.Context, cp *controlplane.Service, args []strin
 	}
 	return fmt.Errorf("unknown audit subcommand: %s", args[0])
 }
-```
+````
 
 ## File: cmd/or3-intern/capabilities_cmd.go
-
-```go
+````go
 package main
 
 import (
@@ -10191,11 +9309,366 @@ func printCapabilitiesReport(w io.Writer, report controlplane.CapabilitiesReport
 		_, _ = fmt.Fprintln(w)
 	}
 }
-```
+````
+
+## File: cmd/or3-intern/doctor.go
+````go
+package main
+
+import (
+	"bufio"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+
+	"or3-intern/internal/config"
+	intdoctor "or3-intern/internal/doctor"
+)
+
+type doctorFinding struct {
+	Level   string
+	Area    string
+	Message string
+}
+
+type doctorArgs struct {
+	Strict      bool
+	JSON        bool
+	Fix         bool
+	Interactive bool
+	Probe       bool
+	Severity    intdoctor.Severity
+	Areas       []string
+	FixableOnly bool
+}
+
+func parseDoctorArgs(args []string, stderr io.Writer) (doctorArgs, error) {
+	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	strict := fs.Bool("strict", false, "exit non-zero when warnings are found")
+	jsonOut := fs.Bool("json", false, "emit structured JSON output")
+	fix := fs.Bool("fix", false, "apply safe fixes")
+	interactive := fs.Bool("interactive", false, "use guided repair prompts for ambiguous fixes")
+	probe := fs.Bool("probe", false, "run bounded local runtime probes")
+	severity := fs.String("severity", "", "minimum severity filter: info, warn, error, block")
+	fixableOnly := fs.Bool("fixable-only", false, "show only findings with available fixes")
+	var areas stringSliceFlag
+	fs.Var(&areas, "area", "repeatable area filter")
+	if err := fs.Parse(args); err != nil {
+		return doctorArgs{}, err
+	}
+	if fs.NArg() > 0 {
+		return doctorArgs{}, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+	}
+	minSeverity := intdoctor.NormalizeSeverity(*severity)
+	if *severity != "" && minSeverity == "" {
+		return doctorArgs{}, fmt.Errorf("invalid --severity %q", *severity)
+	}
+	return doctorArgs{
+		Strict:      *strict,
+		JSON:        *jsonOut,
+		Fix:         *fix,
+		Interactive: *interactive,
+		Probe:       *probe,
+		Severity:    minSeverity,
+		Areas:       []string(areas),
+		FixableOnly: *fixableOnly,
+	}, nil
+}
+
+func runDoctorCommand(cfgPath string, cfg config.Config, validationError string, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	if stdin == nil {
+		stdin = os.Stdin
+	}
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+	if stderr == nil {
+		stderr = os.Stderr
+	}
+	parsed, err := parseDoctorArgs(args, stderr)
+	if err != nil {
+		return err
+	}
+
+	report := intdoctor.Evaluate(cfg, intdoctor.Options{
+		Mode:            chooseDoctorMode(parsed.Strict),
+		ConfigPath:      cfgPath,
+		ValidationError: validationError,
+		Probe:           parsed.Probe,
+	})
+	currentValidationError := validationError
+
+	if parsed.Fix {
+		applied, fixErr := intdoctor.ApplyAutomaticFixes(cfgPath, &cfg, report)
+		if fixErr != nil {
+			return fixErr
+		}
+		currentValidationError = refreshDoctorValidationError(cfgPath, currentValidationError)
+		report = intdoctor.Evaluate(cfg, intdoctor.Options{
+			Mode:            chooseDoctorMode(parsed.Strict),
+			ConfigPath:      cfgPath,
+			ValidationError: currentValidationError,
+			Probe:           parsed.Probe,
+		})
+		if parsed.Interactive {
+			appliedInteractive, interactiveErr := applyInteractiveDoctorFixes(stdin, stdout, cfgPath, &cfg, report)
+			if interactiveErr != nil {
+				return interactiveErr
+			}
+			applied = append(applied, appliedInteractive...)
+		}
+		currentValidationError = refreshDoctorValidationError(cfgPath, currentValidationError)
+		report = intdoctor.Evaluate(cfg, intdoctor.Options{
+			Mode:            chooseDoctorMode(parsed.Strict),
+			ConfigPath:      cfgPath,
+			ValidationError: currentValidationError,
+			Probe:           parsed.Probe,
+		})
+		report.FixesApplied = applied
+	}
+
+	report = report.Filter(intdoctor.FilterOptions{
+		Areas:       parsed.Areas,
+		MinSeverity: parsed.Severity,
+		FixableOnly: parsed.FixableOnly,
+	})
+
+	if parsed.JSON {
+		payload, err := intdoctor.RenderJSON(report)
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintln(stdout, string(payload))
+	} else {
+		_, _ = io.WriteString(stdout, intdoctor.RenderText(report))
+	}
+
+	if parsed.Strict && report.HasStrictFailures() {
+		return fmt.Errorf("doctor found warnings")
+	}
+	return nil
+}
+
+func chooseDoctorMode(strict bool) intdoctor.Mode {
+	if strict {
+		return intdoctor.ModeStrict
+	}
+	return intdoctor.ModeAdvisory
+}
+
+func refreshDoctorValidationError(cfgPath, previous string) string {
+	if strings.TrimSpace(cfgPath) == "" {
+		return previous
+	}
+	if _, err := config.Load(cfgPath); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
+func doctorFindings(cfg config.Config) []doctorFinding {
+	report := intdoctor.Evaluate(cfg, intdoctor.Options{Mode: intdoctor.ModeAdvisory})
+	items := make([]doctorFinding, 0, len(report.Findings))
+	for _, finding := range report.Findings {
+		items = append(items, doctorFinding{
+			Level:   string(finding.Severity),
+			Area:    finding.Area,
+			Message: finding.Summary,
+		})
+	}
+	return items
+}
+
+func applyInteractiveDoctorFixes(in io.Reader, out io.Writer, cfgPath string, cfg *config.Config, report intdoctor.Report) ([]intdoctor.AppliedFix, error) {
+	reader := bufio.NewReader(in)
+	applied := []intdoctor.AppliedFix{}
+	for _, finding := range report.Findings {
+		if finding.FixMode != intdoctor.FixModeInteractive {
+			continue
+		}
+		changed, summary, err := applySingleInteractiveDoctorFix(reader, out, cfg, finding)
+		if err != nil {
+			return applied, err
+		}
+		if changed {
+			applied = append(applied, intdoctor.AppliedFix{ID: finding.ID, Summary: summary})
+		}
+	}
+	if len(applied) > 0 {
+		if err := config.Save(cfgPath, *cfg); err != nil {
+			return applied, err
+		}
+	}
+	return applied, nil
+}
+
+func applySingleInteractiveDoctorFix(reader *bufio.Reader, out io.Writer, cfg *config.Config, finding intdoctor.Finding) (bool, string, error) {
+	switch finding.ID {
+	case "channels.invalid_ingress":
+		channel := finding.Metadata["channel"]
+		choice, err := promptMenuChoice(reader, out, fmt.Sprintf("Repair %s inbound access", channel), []string{
+			"1) Pairing (secure default for interactive channels)",
+			"2) Allowlist (specify allowed identities now)",
+			"3) Open access",
+			"4) Deny inbound (send-only)",
+			"5) Disable channel",
+			"6) Skip",
+		}, "1")
+		if err != nil {
+			return false, "", err
+		}
+		var mode string
+		var allowlist []string
+		switch choice {
+		case "1":
+			mode = "pairing"
+		case "2":
+			mode = "allowlist"
+			text, err := promptString(reader, out, fmt.Sprintf("%s allowlist (comma-separated)", channel), "")
+			if err != nil {
+				return false, "", err
+			}
+			allowlist = splitAndCompact(text)
+		case "3":
+			mode = "open"
+		case "4":
+			mode = "deny"
+		case "5":
+			mode = "disable"
+		default:
+			return false, "", nil
+		}
+		changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, mode, allowlist)
+		if err != nil {
+			return false, "", err
+		}
+		return changed, fmt.Sprintf("updated %s inbound access", channel), nil
+	case "service.secret_missing", "service.secret_weak":
+		choice, err := promptMenuChoice(reader, out, "Repair service secret", []string{
+			"1) Generate a strong random secret",
+			"2) Disable service mode",
+			"3) Skip",
+		}, "1")
+		if err != nil {
+			return false, "", err
+		}
+		switch choice {
+		case "1":
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "generate", nil)
+			return changed, "generated a service secret", err
+		case "2":
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "disable", nil)
+			return changed, "disabled service mode", err
+		default:
+			return false, "", nil
+		}
+	case "webhook.secret_missing":
+		choice, err := promptMenuChoice(reader, out, "Repair webhook secret", []string{
+			"1) Generate a strong random secret",
+			"2) Disable webhook",
+			"3) Skip",
+		}, "1")
+		if err != nil {
+			return false, "", err
+		}
+		switch choice {
+		case "1":
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "generate", nil)
+			return changed, "generated a webhook secret", err
+		case "2":
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "disable", nil)
+			return changed, "disabled webhook", err
+		default:
+			return false, "", nil
+		}
+	case "service.public_bind":
+		choice, err := promptMenuChoice(reader, out, "Repair service bind address", []string{
+			"1) Bind to loopback",
+			"2) Skip",
+		}, "1")
+		if err != nil {
+			return false, "", err
+		}
+		if choice == "1" {
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "loopback", nil)
+			return changed, "bound service to loopback", err
+		}
+	case "webhook.public_bind":
+		choice, err := promptMenuChoice(reader, out, "Repair webhook bind address", []string{
+			"1) Bind to loopback",
+			"2) Skip",
+		}, "1")
+		if err != nil {
+			return false, "", err
+		}
+		if choice == "1" {
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "loopback", nil)
+			return changed, "bound webhook to loopback", err
+		}
+	case "security.secret_store_disabled_with_integrations":
+		choice, err := promptMenuChoice(reader, out, "Repair secret store for external integrations", []string{
+			"1) Enable secret store and generate a key file",
+			"2) Skip",
+		}, "1")
+		if err != nil {
+			return false, "", err
+		}
+		if choice == "1" {
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "enable", nil)
+			return changed, "enabled secret store and generated a key file", err
+		}
+	case "privileged-exec.sandbox_disabled":
+		choice, err := promptMenuChoice(reader, out, "Repair privileged tools without sandboxing", []string{
+			"1) Disable privileged tools",
+			"2) Enable Bubblewrap sandboxing",
+			"3) Skip",
+		}, "1")
+		if err != nil {
+			return false, "", err
+		}
+		switch choice {
+		case "1":
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "disable_privileged", nil)
+			return changed, "disabled privileged tools", err
+		case "2":
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "enable_sandbox", nil)
+			return changed, "enabled Bubblewrap sandboxing", err
+		default:
+			return false, "", nil
+		}
+	case "privileged-exec.bubblewrap_missing":
+		choice, err := promptMenuChoice(reader, out, "Repair missing Bubblewrap binary", []string{
+			"1) Disable privileged tools and sandboxing",
+			"2) Set Bubblewrap path manually",
+			"3) Skip",
+		}, "1")
+		if err != nil {
+			return false, "", err
+		}
+		switch choice {
+		case "1":
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "disable_privileged", nil)
+			return changed, "disabled privileged tools and sandboxing", err
+		case "2":
+			path, err := promptString(reader, out, "Bubblewrap path", cfg.Hardening.Sandbox.BubblewrapPath)
+			if err != nil {
+				return false, "", err
+			}
+			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "set_path", []string{path})
+			return changed, "updated Bubblewrap path", err
+		default:
+			return false, "", nil
+		}
+	}
+	return false, "", nil
+}
+````
 
 ## File: cmd/or3-intern/embeddings_cmd.go
-
-```go
+````go
 package main
 
 import (
@@ -10280,11 +9753,10 @@ func containsSkipReason(skipped []string, want string) bool {
 	}
 	return false
 }
-```
+````
 
 ## File: cmd/or3-intern/pre_runtime_commands.go
-
-```go
+````go
 package main
 
 import (
@@ -10332,11 +9804,10 @@ func runPreRuntimeCommand(ctx context.Context, cmd string, cfg config.Config, da
 		return false, nil
 	}
 }
-```
+````
 
 ## File: cmd/or3-intern/scope_cmd.go
-
-```go
+````go
 package main
 
 import (
@@ -10399,11 +9870,10 @@ func runScopeCommand(ctx context.Context, cp *controlplane.Service, args []strin
 		return newUsageError("unknown scope subcommand: %s", scopeArgs[0])
 	}
 }
-```
+````
 
 ## File: cmd/or3-intern/service_agents.go
-
-```go
+````go
 package main
 
 import (
@@ -11180,11 +10650,10 @@ func (s *serviceServer) handleAgentRunEvents(w http.ResponseWriter, r *http.Requ
 	}
 	writeServiceValue(w, http.StatusOK, controlplane.BuildAgentCLIEventListResponse(events))
 }
-```
+````
 
 ## File: cmd/or3-intern/service_api_misc.go
-
-```go
+````go
 package main
 
 import (
@@ -11346,11 +10815,10 @@ func (s *serviceServer) handleScope(w http.ResponseWriter, r *http.Request) {
 		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "scope route not found"})
 	}
 }
-```
+````
 
 ## File: cmd/or3-intern/service_app.go
-
-```go
+````go
 package main
 
 import (
@@ -11743,11 +11211,10 @@ func (s *serviceServer) findServiceRestartScript() (scriptPath string, workingDi
 	}
 	return "", "", false
 }
-```
+````
 
 ## File: cmd/or3-intern/service_approvals.go
-
-```go
+````go
 package main
 
 import (
@@ -12071,11 +11538,10 @@ func serviceApprovalTokenFromRequest(r *http.Request) string {
 		r.Header.Get("X-Or3-Approval-Token"),
 	)
 }
-```
+````
 
 ## File: cmd/or3-intern/service_auth_handlers.go
-
-```go
+````go
 package main
 
 import (
@@ -12335,11 +11801,10 @@ func (s *serviceServer) handleAuth(w http.ResponseWriter, r *http.Request) {
 		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "auth route not found"})
 	}
 }
-```
+````
 
 ## File: cmd/or3-intern/service_configure.go
-
-```go
+````go
 package main
 
 import (
@@ -12844,11 +12309,10 @@ func (s *serviceServer) handleConfigureFavoriteModel(w http.ResponseWriter, r *h
 	}
 	writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true, "config_path": path, "favorites": next.FavoriteModels[provider]})
 }
-```
+````
 
 ## File: cmd/or3-intern/service_cron.go
-
-```go
+````go
 package main
 
 import (
@@ -13102,11 +12566,10 @@ func findServiceCronJob(jobs []cron.CronJob, id string) *cron.CronJob {
 	}
 	return nil
 }
-```
+````
 
 ## File: cmd/or3-intern/service_files.go
-
-```go
+````go
 package main
 
 import (
@@ -13760,11 +13223,10 @@ func (s *serviceServer) handleFileMkdir(w http.ResponseWriter, r *http.Request) 
 	}
 	writeServiceJSON(w, http.StatusCreated, map[string]any{"root_id": root.ID, "path": filepath.ToSlash(filepath.Join(rel, name)), "status": "created"})
 }
-```
+````
 
 ## File: cmd/or3-intern/service_middleware.go
-
-```go
+````go
 package main
 
 import (
@@ -14326,11 +13788,10 @@ func (s *serviceServer) handleCapabilities(w http.ResponseWriter, r *http.Reques
 	}
 	writeServiceValue(w, http.StatusOK, s.control().GetCapabilities(r.URL.Query().Get("channel"), r.URL.Query().Get("trigger")))
 }
-```
+````
 
 ## File: cmd/or3-intern/service_models.go
-
-```go
+````go
 package main
 
 import (
@@ -14645,11 +14106,10 @@ func (s *serviceServer) handleConfigureProviderTest(w http.ResponseWriter, r *ht
 	}
 	writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
-```
+````
 
 ## File: cmd/or3-intern/service_skills.go
-
-```go
+````go
 package main
 
 import (
@@ -14950,11 +14410,10 @@ func mergeServiceSkillConfig(current map[string]any, updates map[string]any) map
 	}
 	return current
 }
-```
+````
 
 ## File: cmd/or3-intern/service_terminal.go
-
-```go
+````go
 package main
 
 import (
@@ -15978,11 +15437,10 @@ func (s *serviceServer) terminalClose(sessionID string, status string) error {
 	s.terminals().mu.Unlock()
 	return nil
 }
-```
+````
 
 ## File: cmd/or3-intern/settings_safety_tui.go
-
-```go
+````go
 package main
 
 import (
@@ -16181,11 +15639,10 @@ func (m settingsSafetyModel) View() string {
 	fmt.Fprintln(&b, styles.help.Render("↑/↓ or number keys move • enter saves • esc/q cancels"))
 	return styles.app.Width(contentWidth).Render(styles.focused.Width(maxInt(40, contentWidth-8)).Render(strings.TrimRight(b.String(), "\n")))
 }
-```
+````
 
 ## File: internal/agent/context_evaluation.go
-
-```go
+````go
 package agent
 
 import (
@@ -16270,11 +15727,10 @@ func firstNonEmptyEval(values ...string) string {
 func structChatMessage(role, content string) providers.ChatMessage {
 	return providers.ChatMessage{Role: role, Content: content}
 }
-```
+````
 
 ## File: internal/agent/diagnostics.go
-
-```go
+````go
 package agent
 
 import (
@@ -16331,11 +15787,10 @@ func redactDiagnostic(text string) string {
 	}
 	return strings.Join(words, " ")
 }
-```
+````
 
 ## File: internal/agent/error_codes.go
-
-```go
+````go
 package agent
 
 import (
@@ -16390,11 +15845,1482 @@ func PublicErrorCode(err error) string {
 		return PublicErrorUnknown
 	}
 }
-```
+````
+
+## File: internal/agent/runtime_access.go
+````go
+package agent
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/url"
+	"path/filepath"
+	"strings"
+
+	"or3-intern/internal/bus"
+	"or3-intern/internal/config"
+	"or3-intern/internal/providers"
+	"or3-intern/internal/security"
+	"or3-intern/internal/skills"
+	"or3-intern/internal/tools"
+)
+
+type trustedToolAccessContextKey struct{}
+
+func (r *Runtime) effectiveTools(ctx context.Context, fallback *tools.Registry) *tools.Registry {
+	if reg := toolRegistryFromContext(ctx); reg != nil {
+		return reg
+	}
+	if fallback == nil {
+		return tools.NewRegistry()
+	}
+	return fallback
+}
+
+func (r *Runtime) exposedToolsForTurn(ctx context.Context, reg *tools.Registry, messages []providers.ChatMessage, channel string) *tools.Registry {
+	if reg == nil {
+		return reg
+	}
+	filtered := r.filterToolsForContext(ctx, reg)
+	if r == nil || !r.DynamicToolExposure {
+		return filtered
+	}
+	intent := latestUserText(messages) + " " + strings.TrimSpace(channel)
+	groups := selectedToolGroups(intent)
+	allowed := map[string]struct{}{}
+	for _, name := range filtered.Names() {
+		meta := filtered.Metadata(name)
+		if meta.Hidden || hasGroup(meta.Groups, tools.ToolGroupHidden) {
+			continue
+		}
+		if hasAnyGroup(meta.Groups, groups) {
+			allowed[name] = struct{}{}
+		}
+	}
+	return filtered.CloneSelected(allowed)
+}
+
+func (r *Runtime) filterToolsForContext(ctx context.Context, reg *tools.Registry) *tools.Registry {
+	if reg == nil {
+		return reg
+	}
+	if r != nil {
+		allowlist := map[string]struct{}{}
+		for _, name := range r.Hardening.MetadataScanner.Allowlist {
+			name = strings.TrimSpace(name)
+			if name != "" {
+				allowlist[name] = struct{}{}
+			}
+		}
+		var diagnostics []tools.MetadataDiagnostic
+		reg, diagnostics = tools.FilterSuspiciousExternalTools(reg, r.Hardening.MetadataScanner.Mode, allowlist)
+		for _, diagnostic := range diagnostics {
+			log.Printf("tool metadata scanner: %s", diagnostic.String())
+		}
+	}
+	ceiling := tools.CapabilityCeilingFromContext(ctx)
+	profile := tools.ActiveProfileFromContext(ctx)
+	if strings.TrimSpace(profile.Name) != "" {
+		if ceiling == "" || capabilityRank(profile.MaxCapability) < capabilityRank(ceiling) {
+			ceiling = profile.MaxCapability
+		}
+	}
+	allowed := map[string]struct{}{}
+	profileAllowed := profile.AllowedTools
+	for _, name := range reg.Names() {
+		if len(profileAllowed) > 0 {
+			if _, ok := profileAllowed[name]; !ok {
+				continue
+			}
+		}
+		if ceiling != "" && capabilityRank(tools.ToolCapability(reg.Get(name), nil)) > capabilityRank(ceiling) {
+			continue
+		}
+		allowed[name] = struct{}{}
+	}
+	return reg.CloneSelected(allowed)
+}
+
+func latestUserText(messages []providers.ChatMessage) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			return contentToString(messages[i].Content)
+		}
+	}
+	return ""
+}
+
+func selectedToolGroups(intent string) map[string]struct{} {
+	lower := strings.ToLower(intent)
+	groups := map[string]struct{}{
+		tools.ToolGroupRead:   {},
+		tools.ToolGroupMemory: {},
+	}
+	if strings.Contains(lower, "tool") || strings.Contains(lower, "capabilit") || strings.Contains(lower, "what can you do") {
+		groups[tools.ToolGroupWrite] = struct{}{}
+		groups[tools.ToolGroupExec] = struct{}{}
+		groups[tools.ToolGroupWeb] = struct{}{}
+		groups[tools.ToolGroupCron] = struct{}{}
+		groups[tools.ToolGroupSkills] = struct{}{}
+		groups[tools.ToolGroupChannels] = struct{}{}
+		groups[tools.ToolGroupMCP] = struct{}{}
+		groups[tools.ToolGroupService] = struct{}{}
+	}
+	if strings.Contains(lower, "write") || strings.Contains(lower, "edit") || strings.Contains(lower, "modify") || strings.Contains(lower, "create file") || strings.Contains(lower, "patch") {
+		groups[tools.ToolGroupWrite] = struct{}{}
+	}
+	if strings.Contains(lower, "run") || strings.Contains(lower, "exec") || strings.Contains(lower, "command") || strings.Contains(lower, "shell") || strings.Contains(lower, "test") || strings.Contains(lower, "build") {
+		groups[tools.ToolGroupExec] = struct{}{}
+	}
+	if strings.Contains(lower, "http") || strings.Contains(lower, "web") || strings.Contains(lower, "url") || strings.Contains(lower, "search") || strings.Contains(lower, "internet") {
+		groups[tools.ToolGroupWeb] = struct{}{}
+	}
+	if strings.Contains(lower, "cron") || strings.Contains(lower, "schedule") || strings.Contains(lower, "remind") {
+		groups[tools.ToolGroupCron] = struct{}{}
+	}
+	if strings.Contains(lower, "skill") {
+		groups[tools.ToolGroupSkills] = struct{}{}
+	}
+	if strings.TrimSpace(intent) != "" {
+		groups[tools.ToolGroupChannels] = struct{}{}
+	}
+	return groups
+}
+
+func hasAnyGroup(groups []string, allowed map[string]struct{}) bool {
+	for _, group := range groups {
+		if _, ok := allowed[group]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func hasGroup(groups []string, want string) bool {
+	for _, group := range groups {
+		if group == want {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *Runtime) guardToolExecution(ctx context.Context, tool tools.Tool, capability tools.CapabilityLevel, params map[string]any) error {
+	if tool == nil {
+		return nil
+	}
+	profile := tools.ActiveProfileFromContext(ctx)
+	if tool.Name() == "send_message" && trustedToolAccessFromContext(ctx) {
+		capability = tools.CapabilitySafe
+	}
+	if ceiling := tools.CapabilityCeilingFromContext(ctx); ceiling != "" && capabilityRank(capability) > capabilityRank(ceiling) {
+		return fmt.Errorf("tool exceeds request capability ceiling: %s", tool.Name())
+	}
+	if err := r.enforceProfile(ctx, profile, tool, capability, params); err != nil {
+		return err
+	}
+	if err := r.enforceSkillPolicy(ctx, tool, params); err != nil {
+		return err
+	}
+	if capability == tools.CapabilityGuarded && !r.Hardening.GuardedTools {
+		return fmt.Errorf("tool requires guarded access: %s", tool.Name())
+	}
+	if capability == tools.CapabilityPrivileged && !r.Hardening.PrivilegedTools {
+		return fmt.Errorf("tool requires privileged access: %s", tool.Name())
+	}
+	if r.ApprovalBroker != nil && (tool.Name() == "exec" || tool.Name() == "run_skill" || tool.Name() == "run_skill_script") {
+		if mode := r.approvalModeForTool(tool.Name()); mode == config.ApprovalModeAsk || mode == config.ApprovalModeAllowlist || mode == config.ApprovalModeDeny {
+			if len(r.ApprovalBroker.SignKey) == 0 {
+				return fmt.Errorf("approval broker unavailable for %s", tool.Name())
+			}
+		}
+	}
+	if r.Audit != nil && (capability == tools.CapabilityPrivileged || tool.Name() == "spawn_subagent") {
+		if err := r.Audit.Record(ctx, "tool.execute", tools.SessionFromContext(ctx), profileActor(profile), map[string]any{
+			"tool":       tool.Name(),
+			"capability": capability,
+			"profile":    profile.Name,
+			"summary":    summarizeToolParams(tool.Name(), params),
+		}); err != nil {
+			return err
+		}
+	}
+	if !r.Hardening.Quotas.Enabled {
+		return nil
+	}
+	return r.incrementQuota(ctx, tools.SessionFromContext(ctx), tool.Name())
+}
+
+func (r *Runtime) GuardToolExecution(ctx context.Context, tool tools.Tool, capability tools.CapabilityLevel, params map[string]any) error {
+	return r.guardToolExecution(ctx, tool, capability, params)
+}
+
+func (r *Runtime) approvalModeForTool(toolName string) config.ApprovalMode {
+	if r == nil || r.ApprovalBroker == nil {
+		return config.ApprovalModeTrusted
+	}
+	switch toolName {
+	case "exec":
+		return r.ApprovalBroker.Config.Exec.Mode
+	case "run_skill", "run_skill_script":
+		return r.ApprovalBroker.Config.SkillExecution.Mode
+	default:
+		return config.ApprovalModeTrusted
+	}
+}
+
+func (r *Runtime) enforceSkillPolicy(ctx context.Context, tool tools.Tool, params map[string]any) error {
+	policy := tools.SkillPolicyFromContext(ctx)
+	if tool == nil || strings.TrimSpace(policy.Name) == "" {
+		return nil
+	}
+	if len(policy.AllowedTools) > 0 {
+		if _, ok := policy.AllowedTools[tool.Name()]; !ok {
+			return fmt.Errorf("tool denied by skill policy: %s", tool.Name())
+		}
+	}
+	switch tool.Name() {
+	case "exec", "run_skill", "run_skill_script":
+		if !policy.AllowExecution {
+			return fmt.Errorf("execution denied by skill policy: %s", tool.Name())
+		}
+		if cwd := strings.TrimSpace(fmt.Sprint(params["cwd"])); cwd != "" && cwd != "<nil>" && len(policy.WritablePaths) > 0 {
+			if err := validateProfileWritablePath(policy.WritablePaths, cwd); err != nil {
+				return err
+			}
+		}
+	case "write_file", "edit_file":
+		if !policy.AllowWrite {
+			return fmt.Errorf("write denied by skill policy: %s", tool.Name())
+		}
+		if len(policy.WritablePaths) > 0 {
+			if err := validateProfileWritablePath(policy.WritablePaths, fmt.Sprint(params["path"])); err != nil {
+				return err
+			}
+		}
+	case "web_fetch", "web_fetch_markdown":
+		if !policy.AllowNetwork {
+			return fmt.Errorf("network denied by skill policy: %s", tool.Name())
+		}
+		if len(policy.AllowedHosts) > 0 {
+			parsed, err := url.Parse(strings.TrimSpace(fmt.Sprint(params["url"])))
+			if err != nil {
+				return err
+			}
+			if err := (security.HostPolicy{Enabled: true, DefaultDeny: true, AllowedHosts: policy.AllowedHosts}).ValidateURL(ctx, parsed); err != nil {
+				return err
+			}
+		}
+	case "web_search":
+		if !policy.AllowNetwork {
+			return fmt.Errorf("network denied by skill policy: %s", tool.Name())
+		}
+		if len(policy.AllowedHosts) > 0 {
+			if err := (security.HostPolicy{Enabled: true, DefaultDeny: true, AllowedHosts: policy.AllowedHosts}).ValidateHost(ctx, "api.search.brave.com"); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func skillPolicyForSkill(skill skills.SkillMeta) tools.SkillPolicy {
+	allowed := map[string]struct{}{}
+	for _, toolName := range skill.AllowedTools {
+		toolName = strings.TrimSpace(toolName)
+		if toolName == "" {
+			continue
+		}
+		allowed[toolName] = struct{}{}
+	}
+	if commandTool := strings.TrimSpace(skill.CommandTool); commandTool != "" {
+		allowed[commandTool] = struct{}{}
+	}
+	return tools.SkillPolicy{
+		Name:           skill.Name,
+		AllowedTools:   allowed,
+		AllowExecution: skill.Permissions.Shell || (strings.EqualFold(skill.CommandDispatch, "tool") && (strings.EqualFold(skill.CommandTool, "exec") || strings.EqualFold(skill.CommandTool, "run_skill") || strings.EqualFold(skill.CommandTool, "run_skill_script"))),
+		AllowNetwork:   skill.Permissions.Network,
+		AllowWrite:     skill.Permissions.Write,
+		AllowedHosts:   append([]string{}, skill.Permissions.AllowedHosts...),
+		WritablePaths:  append([]string{}, skill.Permissions.AllowedPaths...),
+	}
+}
+
+func (r *Runtime) contextWithEventProfile(ctx context.Context, ev bus.Event) context.Context {
+	if r == nil {
+		return ctx
+	}
+	return r.contextWithProfileName(ctx, r.profileNameForEvent(ev))
+}
+
+func (r *Runtime) contextWithProfileName(ctx context.Context, name string) context.Context {
+	profile, ok := r.resolveProfile(name)
+	if !ok {
+		return ctx
+	}
+	return tools.ContextWithActiveProfile(ctx, profile)
+}
+
+func (r *Runtime) ContextWithProfileName(ctx context.Context, name string) context.Context {
+	return r.contextWithProfileName(ctx, name)
+}
+
+func (r *Runtime) profileNameForEvent(ev bus.Event) string {
+	if len(ev.Meta) > 0 {
+		if profileName := strings.TrimSpace(fmt.Sprint(ev.Meta["profile_name"])); profileName != "" && profileName != "<nil>" {
+			return profileName
+		}
+	}
+	if !r.AccessProfiles.Enabled {
+		return ""
+	}
+	triggerKey := strings.ToLower(strings.TrimSpace(string(ev.Type)))
+	if profileName := strings.TrimSpace(r.AccessProfiles.Triggers[triggerKey]); profileName != "" {
+		return profileName
+	}
+	if profileName := strings.TrimSpace(r.AccessProfiles.Channels[strings.ToLower(strings.TrimSpace(ev.Channel))]); profileName != "" {
+		return profileName
+	}
+	return strings.TrimSpace(r.AccessProfiles.Default)
+}
+
+func (r *Runtime) resolveProfile(name string) (tools.ActiveProfile, bool) {
+	name = strings.TrimSpace(name)
+	if !r.AccessProfiles.Enabled || name == "" {
+		return tools.ActiveProfile{}, false
+	}
+	profileCfg, ok := r.AccessProfiles.Profiles[name]
+	if !ok {
+		return tools.ActiveProfile{}, false
+	}
+	allowed := map[string]struct{}{}
+	for _, toolName := range profileCfg.AllowedTools {
+		allowed[strings.TrimSpace(toolName)] = struct{}{}
+	}
+	maxCapability := tools.CapabilityPrivileged
+	switch strings.ToLower(strings.TrimSpace(profileCfg.MaxCapability)) {
+	case "safe":
+		maxCapability = tools.CapabilitySafe
+	case "guarded":
+		maxCapability = tools.CapabilityGuarded
+	case "privileged", "":
+		maxCapability = tools.CapabilityPrivileged
+	}
+	return tools.ActiveProfile{
+		Name:           name,
+		MaxCapability:  maxCapability,
+		AllowedTools:   allowed,
+		AllowedHosts:   append([]string{}, profileCfg.AllowedHosts...),
+		WritablePaths:  append([]string{}, profileCfg.WritablePaths...),
+		AllowSubagents: profileCfg.AllowSubagents,
+	}, true
+}
+
+func (r *Runtime) enforceProfile(ctx context.Context, profile tools.ActiveProfile, tool tools.Tool, capability tools.CapabilityLevel, params map[string]any) error {
+	if strings.TrimSpace(profile.Name) == "" {
+		return nil
+	}
+	if capabilityRank(capability) > capabilityRank(profile.MaxCapability) {
+		return fmt.Errorf("tool exceeds profile capability: %s", tool.Name())
+	}
+	if len(profile.AllowedTools) > 0 {
+		if _, ok := profile.AllowedTools[tool.Name()]; !ok {
+			return fmt.Errorf("tool denied by profile: %s", tool.Name())
+		}
+	}
+	if tool.Name() == "spawn_subagent" && !profile.AllowSubagents {
+		return fmt.Errorf("subagents denied by profile")
+	}
+	switch tool.Name() {
+	case "write_file", "edit_file":
+		if len(profile.WritablePaths) == 0 {
+			return fmt.Errorf("path denied by profile")
+		}
+		if err := validateProfileWritablePath(profile.WritablePaths, fmt.Sprint(params["path"])); err != nil {
+			return err
+		}
+	case "exec":
+		if cwd := strings.TrimSpace(fmt.Sprint(params["cwd"])); cwd != "" && cwd != "<nil>" {
+			if len(profile.WritablePaths) == 0 {
+				return fmt.Errorf("path denied by profile")
+			}
+			if err := validateProfileWritablePath(profile.WritablePaths, cwd); err != nil {
+				return err
+			}
+		}
+	}
+	switch tool.Name() {
+	case "web_fetch", "web_fetch_markdown":
+		parsed, err := url.Parse(strings.TrimSpace(fmt.Sprint(params["url"])))
+		if err != nil {
+			return err
+		}
+		if err := (security.HostPolicy{Enabled: true, DefaultDeny: true, AllowedHosts: profile.AllowedHosts}).ValidateURL(ctx, parsed); err != nil {
+			return err
+		}
+	case "web_search":
+		if err := (security.HostPolicy{Enabled: true, DefaultDeny: true, AllowedHosts: profile.AllowedHosts}).ValidateHost(ctx, "api.search.brave.com"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func capabilityRank(level tools.CapabilityLevel) int {
+	switch level {
+	case tools.CapabilitySafe:
+		return 0
+	case tools.CapabilityGuarded:
+		return 1
+	case tools.CapabilityPrivileged:
+		return 2
+	default:
+		return 2
+	}
+}
+
+func validateProfileWritablePath(allowed []string, path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" || path == "<nil>" {
+		return nil
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	for _, root := range allowed {
+		rootPath, rootErr := filepath.Abs(root)
+		if rootErr != nil {
+			continue
+		}
+		rel, relErr := filepath.Rel(rootPath, absPath)
+		if relErr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return nil
+		}
+	}
+	return fmt.Errorf("path denied by profile")
+}
+
+func profileActor(profile tools.ActiveProfile) string {
+	if strings.TrimSpace(profile.Name) == "" {
+		return "runtime"
+	}
+	return "profile:" + profile.Name
+}
+
+func (r *Runtime) contextWithTrustedToolAccess(ctx context.Context, ev bus.Event) context.Context {
+	if !isTrustedToolEvent(ev.Type) {
+		return ctx
+	}
+	return context.WithValue(ctx, trustedToolAccessContextKey{}, true)
+}
+
+func trustedToolAccessFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	trusted, _ := ctx.Value(trustedToolAccessContextKey{}).(bool)
+	return trusted
+}
+
+func isTrustedToolEvent(eventType bus.EventType) bool {
+	switch eventType {
+	case bus.EventHeartbeat, bus.EventCron:
+		return true
+	default:
+		return false
+	}
+}
+````
+
+## File: internal/agent/runtime_execution.go
+````go
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"strings"
+	"sync"
+
+	"or3-intern/internal/approval"
+	"or3-intern/internal/bus"
+	"or3-intern/internal/channels"
+	"or3-intern/internal/config"
+	"or3-intern/internal/providers"
+	"or3-intern/internal/tools"
+)
+
+func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventType, sessionKey string, messages []providers.ChatMessage, reg *tools.Registry, channel string, replyTo string, replyMeta map[string]any) (string, bool, error) {
+	if reg == nil {
+		reg = tools.NewRegistry()
+	}
+	observer := conversationObserverFromContext(ctx)
+	scopeKey := sessionKey
+	if r.DB != nil && strings.TrimSpace(sessionKey) != "" {
+		if resolved, err := r.DB.ResolveScopeKey(ctx, sessionKey); err == nil && strings.TrimSpace(resolved) != "" {
+			scopeKey = resolved
+		}
+	}
+	messageQuotas := &quotaCounters{}
+	maxLoops := r.MaxToolLoops
+	if maxLoops <= 0 {
+		maxLoops = 6
+	}
+	loopLimit := maxLoops
+	validationFailures := map[string]int{}
+	for loop := 0; ; loop++ {
+		if loop >= loopLimit {
+			if err := r.handleToolLoopLimitExceeded(ctx, sessionKey, loopLimit); err != nil {
+				return "", false, err
+			}
+			loopLimit += maxLoops
+		}
+		turnTools := r.exposedToolsForTurn(ctx, reg, messages, channel)
+		modelCfg := r.modelConfigForEvent(eventType)
+		if modelCfg.Provider == nil {
+			return "", false, fmt.Errorf("provider not configured")
+		}
+		profile := modelCfg.Provider.ProviderProfile(modelCfg.Model)
+		toolDefs, sanitizerReports := toProviderToolDefs(turnTools, profile)
+		for _, report := range sanitizerReports {
+			log.Printf("provider tool schema sanitized: profile=%s %s", profile.Name, report.String())
+		}
+		req := providers.ChatCompletionRequest{
+			Model:       modelCfg.Model,
+			Messages:    messages,
+			Tools:       toolDefs,
+			Temperature: modelCfg.Temperature,
+		}
+
+		var resp providers.ChatCompletionResponse
+		var err error
+		var sw channels.StreamWriter
+		var swOnce sync.Once
+		streamer := r.streamerForContext(ctx)
+		if streamer != nil {
+			resp, err = modelCfg.Provider.ChatStream(ctx, req, func(text string) {
+				if observer != nil {
+					observer.OnTextDelta(ctx, text)
+				}
+				swOnce.Do(func() {
+					streamMeta := channels.CloneMeta(replyMeta)
+					if streamMeta == nil {
+						streamMeta = map[string]any{}
+					}
+					streamMeta["channel"] = channel
+					w, beginErr := streamer.BeginStream(ctx, replyTo, streamMeta)
+					if beginErr == nil {
+						sw = w
+					}
+				})
+				if sw != nil {
+					_ = sw.WriteDelta(ctx, text)
+				}
+			})
+		} else {
+			resp, err = modelCfg.Provider.Chat(ctx, req)
+		}
+		if err != nil {
+			if sw != nil {
+				_ = sw.Abort(ctx)
+			}
+			if observer != nil {
+				observer.OnError(ctx, err)
+			}
+			return "", false, err
+		}
+		if len(resp.Choices) == 0 {
+			if sw != nil {
+				_ = sw.Abort(ctx)
+			}
+			err = fmt.Errorf("no choices")
+			if observer != nil {
+				observer.OnError(ctx, err)
+			}
+			return "", false, err
+		}
+		msg := resp.Choices[0].Message
+		toolCallSource := ToolCallSourceProvider
+		if len(msg.ToolCalls) == 0 {
+			if raw, ok := msg.Content.(string); ok {
+				if calls := parseToolMarkupCalls(raw, fmt.Sprintf("markup_%d", loop+1)); len(calls) > 0 {
+					msg.ToolCalls = calls
+					msg.Content = sanitizeToolTurnContent(raw)
+					toolCallSource = ToolCallSourceMarkup
+				}
+			}
+		}
+		normalizedCalls := normalizeProviderToolCalls(msg.ToolCalls, toolCallSource, fmt.Sprintf("tool_%d", loop+1))
+		if len(normalizedCalls) > 0 {
+			availableCalls := availableNormalizedToolCalls(normalizedCalls, turnTools)
+			if len(availableCalls) == 0 {
+				if sw != nil {
+					_ = sw.Abort(ctx)
+				}
+				for _, tc := range normalizedCalls {
+					var parsedParams map[string]any
+					_ = json.Unmarshal([]byte(tc.ArgumentsJSON), &parsedParams)
+					toolOut := formatToolExecutionError(tc.Name, parsedParams, "", fmt.Errorf("tool not available in this turn"))
+					emitToolCallStarted(ctx, observer, tc)
+					emitToolCallFinished(ctx, observer, tc, toolOut, "", fmt.Errorf("tool not available in this turn"))
+				}
+				messages = append(messages, providers.ChatMessage{
+					Role:    "system",
+					Content: unavailableNormalizedToolCallPrompt(normalizedCalls, turnTools),
+				})
+				continue
+			}
+			normalizedCalls = availableCalls
+			msg.ToolCalls = normalizedToProviderToolCalls(normalizedCalls)
+		}
+		if len(normalizedCalls) == 0 {
+			finalText := strings.TrimSpace(contentToString(msg.Content))
+			if sw != nil {
+				_ = sw.Close(ctx, finalText)
+				if observer != nil {
+					observer.OnCompletion(ctx, finalText, true)
+				}
+				return finalText, true, nil
+			}
+			if observer != nil {
+				observer.OnCompletion(ctx, finalText, false)
+			}
+			return finalText, false, nil
+		}
+
+		if sw != nil {
+			_ = sw.Abort(ctx)
+		}
+
+		toolTurnContent := msg.Content
+		if raw, ok := msg.Content.(string); ok {
+			toolTurnContent = sanitizeToolTurnContent(raw)
+		}
+
+		messages = append(messages, providers.ChatMessage{Role: "assistant", Content: toolTurnContent, ToolCalls: msg.ToolCalls})
+		if _, err := r.DB.AppendMessage(ctx, sessionKey, "assistant", sanitizeToolTurnContent(contentToString(msg.Content)), map[string]any{"tool_calls": msg.ToolCalls}); err != nil {
+			log.Printf("append assistant(tool_calls) failed: %v", err)
+		}
+
+		for _, tc := range normalizedCalls {
+			emitToolCallStarted(ctx, observer, tc)
+			toolCtx := tools.ContextWithSession(ctx, scopeKey)
+			toolCtx = tools.ContextWithDelivery(toolCtx, channel, replyTo)
+			toolCtx = tools.ContextWithDeliveryMeta(toolCtx, replyMeta)
+			toolCtx = r.contextWithTrustedToolAccess(toolCtx, bus.Event{Type: eventType, SessionKey: sessionKey, Channel: channel})
+			toolCtx = context.WithValue(toolCtx, messageQuotaCountersContextKey{}, messageQuotas)
+			toolCtx = tools.ContextWithToolGuard(toolCtx, r.guardToolExecution)
+			tool := turnTools.Get(tc.Name)
+			validation := ToolArgumentValidator{}.ValidateAndCoerce(tool, tc.ArgumentsJSON)
+			if len(validation.Errors) > 0 {
+				out := formatToolValidationError(tc, validation)
+				err := fmt.Errorf("tool argument validation failed")
+				emitToolCallFinished(ctx, observer, tc, out, "", err)
+				payload := map[string]any{
+					"tool":         tc.Name,
+					"tool_call_id": tc.ID,
+					"args":         json.RawMessage([]byte(tc.ArgumentsJSON)),
+					"public_code":  "tool_argument_validation_failed",
+				}
+				if _, appendErr := r.DB.AppendMessage(ctx, sessionKey, "tool", out, payload); appendErr != nil {
+					log.Printf("append validation tool message failed: %v", appendErr)
+				}
+				messages = append(messages, providers.ChatMessage{Role: "tool", ToolCallID: tc.ID, Content: out})
+				for _, validationErr := range validation.Errors {
+					key := tc.Name + ":" + validationErr.Path + ":" + validationErr.Code
+					validationFailures[key]++
+					if validationFailures[key] >= 2 {
+						return "", false, fmt.Errorf("tool argument validation failed repeatedly for %s at %s", tc.Name, validationErr.Path)
+					}
+				}
+				continue
+			}
+			tc.ArgumentsJSON = validation.ArgumentsJSON
+			out, err := turnTools.ExecuteParams(toolCtx, tc.Name, validation.Params)
+			if err != nil {
+				var parsedParams map[string]any
+				_ = json.Unmarshal([]byte(tc.ArgumentsJSON), &parsedParams)
+				out = formatToolExecutionError(tc.Name, parsedParams, out, err)
+			}
+
+			payload := map[string]any{
+				"tool":         tc.Name,
+				"tool_call_id": tc.ID,
+				"args":         json.RawMessage([]byte(tc.ArgumentsJSON)),
+			}
+			sendOut, preview, artifactID := r.boundTextResult(ctx, sessionKey, out)
+			if artifactID != "" {
+				payload["artifact_id"] = artifactID
+				payload["preview"] = preview
+			}
+			emitToolCallFinished(ctx, observer, tc, out, artifactID, err)
+			if _, err := r.DB.AppendMessage(ctx, sessionKey, "tool", sendOut, payload); err != nil {
+				log.Printf("append tool message failed: %v", err)
+			}
+			messages = append(messages, providers.ChatMessage{Role: "tool", ToolCallID: tc.ID, Content: sendOut})
+			var approvalErr *tools.ApprovalRequiredError
+			if errors.As(err, &approvalErr) {
+				if tools.RequestSourceFromContext(ctx) == tools.RequestSourceService {
+					return "", false, err
+				}
+				finalText, streamed := r.narrateApprovalRequired(ctx, messages)
+				return finalText, streamed, err
+			}
+			if finalText := terminalToolResultText(tc.Name, out); finalText != "" {
+				if observer != nil {
+					observer.OnCompletion(ctx, finalText, false)
+				}
+				return finalText, false, nil
+			}
+		}
+	}
+}
+
+func (r *Runtime) streamerForContext(ctx context.Context) channels.StreamingChannel {
+	if streamer := streamingChannelFromContext(ctx); streamer != nil {
+		return streamer
+	}
+	return r.Streamer
+}
+
+func (r *Runtime) narrateApprovalRequired(ctx context.Context, messages []providers.ChatMessage) (string, bool) {
+	modelCfg := r.CurrentModelConfig()
+	if r == nil || modelCfg.Provider == nil {
+		return "", false
+	}
+	prompt := append(append([]providers.ChatMessage{}, messages...), providers.ChatMessage{
+		Role:    "system",
+		Content: "The last tool result indicates that approval is required before work can continue. Briefly explain to the user what needs approval and why. Do not call any tools. Keep the reply short and concrete.",
+	})
+	resp, err := modelCfg.Provider.Chat(ctx, providers.ChatCompletionRequest{
+		Model:       modelCfg.Model,
+		Messages:    prompt,
+		Temperature: modelCfg.Temperature,
+	})
+	if err != nil || len(resp.Choices) == 0 {
+		return "", false
+	}
+	finalText := strings.TrimSpace(contentToString(resp.Choices[0].Message.Content))
+	if finalText == "" {
+		return "", false
+	}
+	if observer := conversationObserverFromContext(ctx); observer != nil {
+		observer.OnCompletion(ctx, finalText, false)
+	}
+	return finalText, false
+}
+
+func (r *Runtime) handleToolLoopLimitExceeded(ctx context.Context, sessionKey string, currentLimit int) error {
+	if r.effectiveToolLoopLimitAction() == config.QuotaExceededActionFail {
+		return toolLoopLimitExceededError(sessionKey, currentLimit, "hard limit reached")
+	}
+	if r.ApprovalBroker == nil {
+		return toolLoopLimitExceededError(sessionKey, currentLimit, "approval is configured, but the approval broker is unavailable")
+	}
+	identity := tools.RequesterIdentityFromContext(ctx)
+	decision, err := r.ApprovalBroker.EvaluateToolQuota(ctx, approval.ToolQuotaEvaluation{
+		Scope:         "message",
+		LimitName:     "tool_loops",
+		ToolName:      "tool loop continuation",
+		Current:       currentLimit,
+		Limit:         currentLimit,
+		AgentID:       firstNonEmptyString(identity.Actor, "runtime"),
+		SessionID:     sessionKey,
+		ApprovalToken: tools.ApprovalTokenFromContext(ctx),
+	}, config.ApprovalModeAsk)
+	if err != nil {
+		return err
+	}
+	if decision.Allowed {
+		if r.Audit != nil {
+			_ = r.Audit.Record(ctx, "tool_loop.override", sessionKey, "approval", map[string]any{
+				"limit":        currentLimit,
+				"subject_hash": decision.SubjectHash,
+			})
+		}
+		return nil
+	}
+	if decision.RequiresApproval {
+		return &tools.ApprovalRequiredError{ToolName: "tool loop continuation", RequestID: decision.RequestID}
+	}
+	return toolLoopLimitExceededError(sessionKey, currentLimit, decision.Reason)
+}
+
+func toolLoopLimitExceededError(sessionKey string, currentLimit int, reason string) error {
+	resolvedSession := strings.TrimSpace(sessionKey)
+	if resolvedSession == "" {
+		resolvedSession = "unknown"
+	}
+	message := fmt.Sprintf("max tool loops exceeded for session %s after %d rounds", resolvedSession, currentLimit)
+	if trimmed := strings.TrimSpace(reason); trimmed != "" {
+		message += fmt.Sprintf(" (%s)", trimmed)
+	}
+	return errors.New(message)
+}
+
+func (r *Runtime) effectiveToolLoopLimitAction() config.QuotaExceededAction {
+	if strings.EqualFold(string(r.MaxToolLoopsExceededAction), string(config.QuotaExceededActionFail)) {
+		return config.QuotaExceededActionFail
+	}
+	return config.QuotaExceededActionAsk
+}
+
+func terminalToolResultText(toolName string, out string) string {
+	if strings.TrimSpace(toolName) != "read_skill" || strings.TrimSpace(out) == "" {
+		return ""
+	}
+	var result struct {
+		OK      *bool  `json:"ok"`
+		Kind    string `json:"kind"`
+		Summary string `json:"summary"`
+	}
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		return ""
+	}
+	if result.OK == nil || *result.OK || result.Kind != "skill_read" {
+		return ""
+	}
+	summary := strings.TrimSpace(result.Summary)
+	if summary == "" || !strings.Contains(strings.ToLower(summary), "unavailable") {
+		return ""
+	}
+	return summary + ". I can't complete that with the tools currently available in this turn."
+}
+
+func toProviderToolDefs(reg *tools.Registry, profile providers.ProviderProfile) ([]providers.ToolDef, []providers.SchemaSanitizationReport) {
+	if reg == nil {
+		return nil, nil
+	}
+	raw := reg.Definitions()
+	out := make([]providers.ToolDef, 0, len(raw))
+	for _, d := range raw {
+		fn, _ := d["function"].(map[string]any)
+		td := providers.ToolDef{
+			Type: "function",
+			Function: providers.ToolFunc{
+				Name:        fmt.Sprint(fn["name"]),
+				Description: fmt.Sprint(fn["description"]),
+				Parameters:  fn["parameters"],
+			},
+		}
+		out = append(out, td)
+	}
+	return providers.SanitizeToolDefs(out, profile)
+}
+````
+
+## File: internal/agent/runtime_helpers.go
+````go
+package agent
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"strings"
+
+	"or3-intern/internal/channels"
+	"or3-intern/internal/db"
+	"or3-intern/internal/tools"
+)
+
+func summarizeToolParams(toolName string, params map[string]any) map[string]any {
+	summary := map[string]any{"tool": toolName}
+	switch toolName {
+	case "exec":
+		summary["program"] = strings.TrimSpace(fmt.Sprint(params["program"]))
+		summary["cwd"] = strings.TrimSpace(fmt.Sprint(params["cwd"]))
+	case "run_skill", "run_skill_script":
+		summary["skill"] = strings.TrimSpace(fmt.Sprint(params["skill"]))
+		summary["entrypoint"] = strings.TrimSpace(fmt.Sprint(params["entrypoint"]))
+		summary["plan_id"] = strings.TrimSpace(fmt.Sprint(params["plan_id"]))
+	case "spawn_subagent":
+		summary["task"] = previewText(strings.TrimSpace(fmt.Sprint(params["task"])), 120)
+	case "web_fetch", "web_fetch_markdown":
+		summary["url"] = strings.TrimSpace(fmt.Sprint(params["url"]))
+	}
+	return summary
+}
+
+func formatToolExecutionError(toolName string, params map[string]any, out string, err error) string {
+	if err == nil {
+		return out
+	}
+	return tools.EncodeToolFailure(toolName, params, out, err)
+}
+
+func (r *Runtime) skillRunEnvFor(name string) map[string]string {
+	if r.Builder == nil {
+		return nil
+	}
+	return r.Builder.Skills.RunEnvForSkill(name)
+}
+
+func (r *Runtime) persistAssistantReply(ctx context.Context, sessionKey string, msgID int64, channel, replyTarget, finalText string, replyMeta map[string]any, streamed bool, autoDeliver bool) {
+	if strings.TrimSpace(finalText) == "" {
+		finalText = "(no response)"
+	}
+	assistantID, err := r.DB.AppendMessage(ctx, sessionKey, "assistant", finalText, map[string]any{"in_reply_to": msgID})
+	if err != nil {
+		log.Printf("append assistant(final) failed: %v", err)
+	} else if r.DB != nil {
+		scopeKey := sessionKey
+		if resolved, rerr := r.DB.ResolveScopeKey(ctx, sessionKey); rerr == nil && strings.TrimSpace(resolved) != "" {
+			scopeKey = resolved
+		}
+		card, _, _ := loadTaskCard(ctx, r.DB, sessionKey)
+		card.Status = "active"
+		card.MessageRefs = appendBoundedInt64(card.MessageRefs, assistantID, 12)
+		if err := saveTaskCard(ctx, r.DB, sessionKey, scopeKey, card); err != nil {
+			log.Printf("save task card failed: %v", err)
+		}
+	}
+	if autoDeliver && !streamed && r.Deliver != nil {
+		if err := r.deliver(ctx, channel, replyTarget, finalText, replyMeta); err != nil {
+			log.Printf("deliver failed: %v", err)
+		}
+	}
+}
+
+func (r *Runtime) deliver(ctx context.Context, channel, to, text string, meta map[string]any) error {
+	if r.Deliver == nil {
+		return nil
+	}
+	if withMeta, ok := r.Deliver.(MetaDeliverer); ok {
+		return withMeta.DeliverWithMeta(ctx, channel, to, text, channels.ReplyMeta(meta))
+	}
+	return r.Deliver.Deliver(ctx, channel, to, text)
+}
+
+func (r *Runtime) boundTextResult(ctx context.Context, sessionKey string, text string) (stored string, preview string, artifactID string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return "(no response)", "(no response)", ""
+	}
+	preview = previewText(text, r.toolPreviewBytes())
+	shouldStoreArtifact := r.Artifacts != nil && (preview != text || (r.MaxToolBytes > 0 && len(text) > r.MaxToolBytes))
+	if shouldStoreArtifact {
+		id, err := r.Artifacts.Save(ctx, sessionKey, "text/plain", []byte(text))
+		if err != nil {
+			log.Printf("artifact save failed: %v", err)
+			return text, preview, ""
+		}
+		if r.DB != nil {
+			summary := buildArtifactSummary(id, "text/plain", preview, int64(len(text)))
+			if _, err := r.DB.InsertMemoryNoteTyped(ctx, sessionKey, db.TypedNoteInput{
+				Text:             summary,
+				Summary:          compactSemanticJSON(db.MemoryKindArtifact, preview, []string{"artifact:" + id}),
+				SourceArtifactID: id,
+				Kind:             db.MemoryKindArtifact,
+				Status:           db.MemoryStatusActive,
+				Importance:       0.2,
+				Confidence:       0.9,
+			}); err != nil {
+				log.Printf("artifact summary note save failed: %v", err)
+			}
+			scopeKey := sessionKey
+			if resolved, rerr := r.DB.ResolveScopeKey(ctx, sessionKey); rerr == nil && strings.TrimSpace(resolved) != "" {
+				scopeKey = resolved
+			}
+			card, _, _ := loadTaskCard(ctx, r.DB, sessionKey)
+			card.Status = "active"
+			card.ArtifactRefs = appendBoundedString(card.ArtifactRefs, id, 12)
+			if err := saveTaskCard(ctx, r.DB, sessionKey, scopeKey, card); err != nil {
+				log.Printf("save task card artifact ref failed: %v", err)
+			}
+		}
+		return tools.EncodeToolResult(tools.ToolResult{
+			Kind:       "large_tool_output",
+			OK:         true,
+			Summary:    fmt.Sprintf("Large tool output saved as artifact %s", id),
+			Preview:    preview,
+			ArtifactID: id,
+			Stats: map[string]any{
+				"bytes": len(text),
+			},
+		}), preview, id
+	}
+	return text, preview, ""
+}
+````
+
+## File: internal/agent/runtime_quota.go
+````go
+package agent
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"or3-intern/internal/approval"
+	"or3-intern/internal/config"
+	"or3-intern/internal/scope"
+	"or3-intern/internal/tools"
+)
+
+type messageQuotaCountersContextKey struct{}
+
+type sessionQuotaState struct {
+	Session  quotaCounters
+	LastSeen time.Time
+}
+
+type quotaCounters struct {
+	ToolCalls     int
+	ExecCalls     int
+	WebCalls      int
+	SubagentCalls int
+}
+
+type quotaCheck struct {
+	Scope     string
+	Name      string
+	Label     string
+	ConfigKey string
+	Current   int
+	Limit     int
+}
+
+func (r *Runtime) incrementQuota(ctx context.Context, sessionKey string, toolName string) error {
+	r.quotaMu.Lock()
+	state := r.sessionQuotaStateLocked(sessionKey)
+	message := messageQuotaCountersFromContext(ctx)
+	checks := r.quotaChecks(message, &state.Session, toolName)
+	for _, check := range checks {
+		if check.Limit > 0 && check.Current >= check.Limit {
+			r.quotaMu.Unlock()
+			if err := r.handleQuotaExceeded(ctx, sessionKey, toolName, check); err != nil {
+				return err
+			}
+			r.quotaMu.Lock()
+			state = r.sessionQuotaStateLocked(sessionKey)
+			message = messageQuotaCountersFromContext(ctx)
+			incrementQuotaCounters(message, toolName)
+			incrementQuotaCounters(&state.Session, toolName)
+			r.quotaMu.Unlock()
+			return nil
+		}
+	}
+	incrementQuotaCounters(message, toolName)
+	incrementQuotaCounters(&state.Session, toolName)
+	r.quotaMu.Unlock()
+	return nil
+}
+
+func (r *Runtime) quotaChecks(message *quotaCounters, session *quotaCounters, toolName string) []quotaCheck {
+	cfg := r.Hardening.Quotas
+	checks := []quotaCheck{
+		{Scope: "message", Name: "tool_calls", Label: "per-message total tool-call", ConfigKey: "hardening.quotas.maxToolCalls", Current: message.ToolCalls, Limit: cfg.MaxToolCalls},
+		{Scope: "session", Name: "tool_calls", Label: "per-session total tool-call", ConfigKey: "hardening.quotas.maxSessionToolCalls", Current: session.ToolCalls, Limit: cfg.MaxSessionToolCalls},
+	}
+	switch toolName {
+	case "exec", "run_skill", "run_skill_script":
+		checks = append(checks,
+			quotaCheck{Scope: "message", Name: "exec_calls", Label: "per-message exec-call", ConfigKey: "hardening.quotas.maxExecCalls", Current: message.ExecCalls, Limit: cfg.MaxExecCalls},
+			quotaCheck{Scope: "session", Name: "exec_calls", Label: "per-session exec-call", ConfigKey: "hardening.quotas.maxSessionExecCalls", Current: session.ExecCalls, Limit: cfg.MaxSessionExecCalls},
+		)
+	case "web_fetch", "web_fetch_markdown", "web_search":
+		checks = append(checks,
+			quotaCheck{Scope: "message", Name: "web_calls", Label: "per-message web-call", ConfigKey: "hardening.quotas.maxWebCalls", Current: message.WebCalls, Limit: cfg.MaxWebCalls},
+			quotaCheck{Scope: "session", Name: "web_calls", Label: "per-session web-call", ConfigKey: "hardening.quotas.maxSessionWebCalls", Current: session.WebCalls, Limit: cfg.MaxSessionWebCalls},
+		)
+	case "spawn_subagent":
+		checks = append(checks,
+			quotaCheck{Scope: "message", Name: "subagent_calls", Label: "per-message subagent-call", ConfigKey: "hardening.quotas.maxSubagentCalls", Current: message.SubagentCalls, Limit: cfg.MaxSubagentCalls},
+			quotaCheck{Scope: "session", Name: "subagent_calls", Label: "per-session subagent-call", ConfigKey: "hardening.quotas.maxSessionSubagentCalls", Current: session.SubagentCalls, Limit: cfg.MaxSessionSubagentCalls},
+		)
+	}
+	return checks
+}
+
+func (r *Runtime) handleQuotaExceeded(ctx context.Context, sessionKey string, toolName string, check quotaCheck) error {
+	if r.Hardening.Quotas.ExceededAction == config.QuotaExceededActionFail {
+		return quotaExceededError(toolName, check, "hard limit reached")
+	}
+	if r.ApprovalBroker == nil {
+		return quotaExceededError(toolName, check, "approval is configured, but the approval broker is unavailable")
+	}
+	identity := tools.RequesterIdentityFromContext(ctx)
+	decision, err := r.ApprovalBroker.EvaluateToolQuota(ctx, approval.ToolQuotaEvaluation{
+		Scope:         check.Scope,
+		LimitName:     check.Name,
+		ToolName:      toolName,
+		Current:       check.Current,
+		Limit:         check.Limit,
+		AgentID:       firstNonEmptyString(identity.Actor, "runtime"),
+		SessionID:     sessionKey,
+		ApprovalToken: tools.ApprovalTokenFromContext(ctx),
+	}, config.ApprovalModeAsk)
+	if err != nil {
+		return err
+	}
+	if decision.Allowed {
+		if r.Audit != nil {
+			_ = r.Audit.Record(ctx, "quota.override", sessionKey, "approval", map[string]any{
+				"tool":         toolName,
+				"scope":        check.Scope,
+				"limit":        check.Name,
+				"current":      check.Current,
+				"max":          check.Limit,
+				"subject_hash": decision.SubjectHash,
+			})
+		}
+		return nil
+	}
+	if decision.RequiresApproval {
+		return &tools.ApprovalRequiredError{ToolName: toolName, RequestID: decision.RequestID}
+	}
+	return quotaExceededError(toolName, check, decision.Reason)
+}
+
+func messageQuotaCountersFromContext(ctx context.Context) *quotaCounters {
+	if ctx != nil {
+		if counters, ok := ctx.Value(messageQuotaCountersContextKey{}).(*quotaCounters); ok && counters != nil {
+			return counters
+		}
+	}
+	return &quotaCounters{}
+}
+
+func incrementQuotaCounters(counters *quotaCounters, toolName string) {
+	if counters == nil {
+		return
+	}
+	counters.ToolCalls++
+	switch toolName {
+	case "exec", "run_skill", "run_skill_script":
+		counters.ExecCalls++
+	case "web_fetch", "web_fetch_markdown", "web_search":
+		counters.WebCalls++
+	case "spawn_subagent":
+		counters.SubagentCalls++
+	}
+}
+
+func quotaExceededError(toolName string, check quotaCheck, reason string) error {
+	return errors.New(quotaExceededMessage(toolName, check, reason))
+}
+
+func quotaExceededMessage(toolName string, check quotaCheck, reason string) string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "limit reached"
+	}
+	return fmt.Sprintf("tool quota reached for %s: %s limit %d/%d while executing %s (%s). Increase %s or set hardening.quotas.exceededAction to ask/fail as appropriate.",
+		check.Scope,
+		check.Label,
+		check.Current,
+		check.Limit,
+		toolName,
+		reason,
+		check.ConfigKey,
+	)
+}
+
+func (r *Runtime) sessionQuotaState(sessionKey string) *sessionQuotaState {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		sessionKey = scope.GlobalMemoryScope
+	}
+	r.quotaMu.Lock()
+	defer r.quotaMu.Unlock()
+	return r.sessionQuotaStateLocked(sessionKey)
+}
+
+func (r *Runtime) sessionQuotaStateLocked(sessionKey string) *sessionQuotaState {
+	if r.quotas == nil {
+		r.quotas = map[string]*sessionQuotaState{}
+	}
+	r.evictQuotaStateLocked()
+	state := r.quotas[sessionKey]
+	if state == nil {
+		state = &sessionQuotaState{}
+		r.quotas[sessionKey] = state
+	}
+	state.LastSeen = time.Now()
+	return state
+}
+
+func (r *Runtime) evictQuotaStateLocked() {
+	if len(r.quotas) < maxTrackedQuotaSessions {
+		return
+	}
+	oldestKey := ""
+	var oldestTime time.Time
+	for key, state := range r.quotas {
+		if state == nil {
+			delete(r.quotas, key)
+			continue
+		}
+		if oldestKey == "" || state.LastSeen.Before(oldestTime) {
+			oldestKey = key
+			oldestTime = state.LastSeen
+		}
+	}
+	if oldestKey != "" {
+		delete(r.quotas, oldestKey)
+	}
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+````
+
+## File: internal/agent/runtime_session.go
+````go
+package agent
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"strings"
+	"sync"
+	"time"
+
+	"or3-intern/internal/bus"
+)
+
+type sessionLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+func (r *Runtime) acquireSessionLock(key string) *sessionLock {
+	r.locksMu.Lock()
+	if r.locks == nil {
+		r.locks = map[string]*sessionLock{}
+	}
+	entry := r.locks[key]
+	if entry == nil {
+		entry = &sessionLock{}
+		r.locks[key] = entry
+	}
+	entry.refs++
+	r.locksMu.Unlock()
+	return entry
+}
+
+func (r *Runtime) releaseSessionLock(key string, entry *sessionLock) {
+	if r == nil || entry == nil {
+		return
+	}
+	r.locksMu.Lock()
+	if entry.refs > 0 {
+		entry.refs--
+	}
+	if entry.refs == 0 {
+		if current := r.locks[key]; current == entry {
+			delete(r.locks, key)
+		}
+	}
+	r.locksMu.Unlock()
+}
+
+func (r *Runtime) markSessionActivity(sessionKey string) {
+	if r == nil || strings.TrimSpace(sessionKey) == "" {
+		return
+	}
+	r.idleMu.Lock()
+	defer r.idleMu.Unlock()
+	if r.idleVersion == nil {
+		r.idleVersion = map[string]uint64{}
+	}
+	r.idleVersion[sessionKey]++
+	if r.idleTimers != nil {
+		if timer := r.idleTimers[sessionKey]; timer != nil {
+			timer.Stop()
+			delete(r.idleTimers, sessionKey)
+		}
+	}
+}
+
+func (r *Runtime) scheduleIdlePrune(ctx context.Context, ev bus.Event) {
+	if r == nil || !r.ContextManager.Enabled || r.DB == nil || strings.TrimSpace(ev.SessionKey) == "" {
+		return
+	}
+	if r.contextManagerProvider() == nil && (r.Consolidator == nil || r.Consolidator.Provider == nil) {
+		return
+	}
+	delay := time.Duration(r.ContextManager.IdlePruneSeconds) * time.Second
+	if delay <= 0 {
+		delay = 5 * time.Minute
+	}
+	sessionKey := ev.SessionKey
+	channel := ev.Channel
+	replyTarget := deliveryTarget(ev)
+	meta := cloneMap(ev.Meta)
+	r.idleMu.Lock()
+	if r.idleTimers == nil {
+		r.idleTimers = map[string]*time.Timer{}
+	}
+	version := r.idleVersion[sessionKey]
+	if timer := r.idleTimers[sessionKey]; timer != nil {
+		timer.Stop()
+	}
+	r.idleTimers[sessionKey] = time.AfterFunc(delay, func() {
+		r.runIdlePrune(context.Background(), sessionKey, channel, replyTarget, meta, version)
+	})
+	r.idleMu.Unlock()
+}
+
+func (r *Runtime) runIdlePrune(ctx context.Context, sessionKey, channel, replyTarget string, meta map[string]any, expectedVersion uint64) {
+	entry := r.acquireSessionLock(sessionKey)
+	entry.mu.Lock()
+	defer func() {
+		entry.mu.Unlock()
+		r.releaseSessionLock(sessionKey, entry)
+	}()
+	if !r.sessionIdleVersionMatches(sessionKey, expectedVersion) {
+		return
+	}
+	msg, err := r.pruneSessionContext(ctx, sessionKey, "idle")
+	if err != nil {
+		msg = "Context prune skipped. Cause: " + oneLine(err.Error(), 180)
+	}
+	if r.Deliver != nil && strings.TrimSpace(channel) != "" && strings.TrimSpace(replyTarget) != "" {
+		if err := r.deliver(ctx, channel, replyTarget, msg, meta); err != nil {
+			log.Printf("deliver idle prune notice failed: %v", err)
+		}
+	}
+}
+
+func (r *Runtime) sessionIdleVersionMatches(sessionKey string, expected uint64) bool {
+	r.idleMu.Lock()
+	defer r.idleMu.Unlock()
+	if r.idleTimers != nil {
+		delete(r.idleTimers, sessionKey)
+	}
+	return r.idleVersion != nil && r.idleVersion[sessionKey] == expected
+}
+
+func (r *Runtime) ensureSessionScope(ctx context.Context, ev bus.Event) {
+	if r == nil || r.DB == nil || strings.TrimSpace(ev.SessionKey) == "" {
+		return
+	}
+	scopeKey, ok := r.scopeKeyForEvent(ev)
+	if !ok {
+		return
+	}
+	scopeKey = strings.TrimSpace(scopeKey)
+	if scopeKey == "" || scopeKey == ev.SessionKey {
+		return
+	}
+	meta := map[string]any{"auto": true, "channel": ev.Channel}
+	_ = r.DB.LinkSession(ctx, ev.SessionKey, scopeKey, meta)
+}
+
+func (r *Runtime) scopeKeyForEvent(ev bus.Event) (string, bool) {
+	if r == nil {
+		return "", false
+	}
+	if scopeKey := strings.TrimSpace(r.IdentityScopeMap[ev.SessionKey]); scopeKey != "" {
+		return scopeKey, true
+	}
+	if r.LinkDirectMessages && isDirectMessageEvent(ev) {
+		scopeKey := strings.TrimSpace(r.DefaultScopeKey)
+		if scopeKey == "" {
+			scopeKey = ev.SessionKey
+		}
+		return scopeKey, true
+	}
+	return "", false
+}
+
+func isDirectMessageEvent(ev bus.Event) bool {
+	if len(ev.Meta) == 0 {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(ev.Channel)) {
+	case "telegram":
+		return strings.EqualFold(strings.TrimSpace(fmt.Sprint(ev.Meta["chat_type"])), "private")
+	case "slack":
+		return strings.EqualFold(strings.TrimSpace(fmt.Sprint(ev.Meta["channel_type"])), "im")
+	case "discord":
+		if v, ok := ev.Meta["is_private"].(bool); ok {
+			return v
+		}
+		return strings.TrimSpace(fmt.Sprint(ev.Meta["guild_id"])) == ""
+	case "whatsapp":
+		if v, ok := ev.Meta["is_group"].(bool); ok {
+			return !v
+		}
+	case "email":
+		return true
+	}
+	return false
+}
+
+func (r *Runtime) handleNewSession(ctx context.Context, ev bus.Event) error {
+	replyTarget := deliveryTarget(ev)
+	if r.Consolidator != nil && r.Builder != nil {
+		historyMax := r.Builder.HistoryMax
+		if historyMax <= 0 {
+			historyMax = 40
+		}
+		if err := r.Consolidator.ArchiveResetWindow(ctx, ev.SessionKey, historyMax); err != nil {
+			log.Printf("new session archive failed: session=%s err=%v", ev.SessionKey, err)
+			msg := "Memory archival failed, session not cleared. Cause: " + oneLine(err.Error(), 180)
+			if r.Deliver != nil {
+				if derr := r.deliver(ctx, ev.Channel, replyTarget, msg, ev.Meta); derr != nil {
+					log.Printf("deliver failed: %v", derr)
+				}
+			}
+			return nil
+		}
+	}
+	if err := r.DB.ResetSessionHistory(ctx, ev.SessionKey); err != nil {
+		log.Printf("new session reset failed: session=%s err=%v", ev.SessionKey, err)
+		msg := "New session failed. Cause: " + oneLine(err.Error(), 180)
+		if r.Deliver != nil {
+			if derr := r.deliver(ctx, ev.Channel, replyTarget, msg, ev.Meta); derr != nil {
+				log.Printf("deliver failed: %v", derr)
+			}
+		}
+		return nil
+	}
+	if r.Deliver != nil {
+		deliverCtx := ContextWithConversationAction(ctx, ConversationActionSessionReset)
+		if err := r.deliver(deliverCtx, ev.Channel, replyTarget, "New session started.", ev.Meta); err != nil {
+			log.Printf("deliver failed: %v", err)
+		}
+	}
+	return nil
+}
+
+func (r *Runtime) handlePruneSession(ctx context.Context, ev bus.Event, reason string) error {
+	msg, err := r.pruneSessionContext(ctx, ev.SessionKey, reason)
+	if err != nil {
+		log.Printf("context prune failed: session=%s err=%v", ev.SessionKey, err)
+		msg = "Context prune failed. Cause: " + oneLine(err.Error(), 180)
+	}
+	if r.Deliver != nil {
+		if derr := r.deliver(ctx, ev.Channel, deliveryTarget(ev), msg, ev.Meta); derr != nil {
+			log.Printf("deliver failed: %v", derr)
+		}
+	}
+	return nil
+}
+````
 
 ## File: internal/agent/semantic_compression.go
-
-```go
+````go
 package agent
 
 import (
@@ -16530,11 +17456,10 @@ func cleanRefs(refs []string) []string {
 	}
 	return out
 }
-```
+````
 
 ## File: internal/agent/structured_autonomy.go
-
-```go
+````go
 package agent
 
 import (
@@ -16758,11 +17683,10 @@ func isIntegerValue(value any) bool {
 		return false
 	}
 }
-```
+````
 
 ## File: internal/agent/tool_calls.go
-
-```go
+````go
 package agent
 
 import (
@@ -16972,11 +17896,254 @@ func eventPreview(text string, limit int) string {
 	}
 	return string(runes[:limit]) + "..."
 }
-```
+````
+
+## File: internal/agent/tool_markup.go
+````go
+package agent
+
+import (
+	"encoding/json"
+	"fmt"
+	"html"
+	"regexp"
+	"strings"
+
+	"or3-intern/internal/providers"
+)
+
+var toolMarkupPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?is)<tool_call>[\s\S]*?</tool_call>`),
+	regexp.MustCompile(`(?is)<tool_call[\s\S]*$`),
+	regexp.MustCompile(`(?i)</?tool_call>`),
+	regexp.MustCompile(`(?i)<function=[^>]*>`),
+	regexp.MustCompile(`(?is)<function=[\s\S]*$`),
+	regexp.MustCompile(`(?i)<parameter=[^>]*>`),
+	regexp.MustCompile(`(?is)<parameter[\s\S]*$`),
+	regexp.MustCompile(`(?is)<\s*[|｜]\s*DSML\s*[|｜]\s*tool_calls\s*>[\s\S]*?<\s*/\s*[|｜]\s*DSML\s*[|｜]\s*tool_calls\s*>`),
+	regexp.MustCompile(`(?is)<\s*[|｜]\s*DSML\s*[|｜]\s*tool_calls[\s\S]*$`),
+	regexp.MustCompile(`(?is)<\s*/?\s*[|｜]\s*DSML\s*[|｜]\s*(?:invoke|parameter)[^>]*>`),
+}
+
+var (
+	toolMarkupBlockPattern            = regexp.MustCompile(`(?is)<tool_call\b[^>]*>(.*?)</tool_call>`)
+	toolMarkupFunctionPattern         = regexp.MustCompile(`(?is)<function=([^>\s]+)>\s*`)
+	toolMarkupParameterPattern        = regexp.MustCompile(`(?is)<parameter=([^>\s]+)>\s*`)
+	toolMarkupClosingPattern          = regexp.MustCompile(`(?is)</(?:parameter|function)>\s*$`)
+	toolMarkupNameElementPattern      = regexp.MustCompile(`(?is)<name>\s*(.*?)\s*</name>`)
+	toolMarkupArgumentsElementPattern = regexp.MustCompile(`(?is)<arguments>\s*(.*?)\s*</arguments>`)
+	dsmlToolCallsBlockPattern         = regexp.MustCompile(`(?is)<\s*[|｜]\s*DSML\s*[|｜]\s*tool_calls\s*>(.*?)<\s*/\s*[|｜]\s*DSML\s*[|｜]\s*tool_calls\s*>`)
+	dsmlInvokePattern                 = regexp.MustCompile(`(?is)<\s*[|｜]\s*DSML\s*[|｜]\s*invoke\b([^>]*)>(.*?)<\s*/\s*[|｜]\s*DSML\s*[|｜]\s*invoke\s*>`)
+	dsmlParameterPattern              = regexp.MustCompile(`(?is)<\s*[|｜]\s*DSML\s*[|｜]\s*parameter\b([^>]*)>(.*?)<\s*/\s*[|｜]\s*DSML\s*[|｜]\s*parameter\s*>`)
+	markupNameAttrPattern             = regexp.MustCompile(`(?is)\bname\s*=\s*(?:"([^"]*)"|'([^']*)')`)
+)
+
+func sanitizeToolTurnContent(text string) string {
+	cleaned := text
+	for _, pattern := range toolMarkupPatterns {
+		cleaned = pattern.ReplaceAllString(cleaned, "")
+	}
+	return strings.TrimSpace(cleaned)
+}
+
+func parseToolMarkupCalls(text string, idPrefix string) []providers.ToolCall {
+	matches := toolMarkupBlockPattern.FindAllStringSubmatch(text, -1)
+	out := make([]providers.ToolCall, 0, len(matches))
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		block := match[1]
+		name, args, ok := parseToolMarkupBlock(block)
+		if !ok {
+			continue
+		}
+		index := len(out)
+		tc := providers.ToolCall{
+			ID:    fmt.Sprintf("%s_%d", idPrefix, index+1),
+			Index: index,
+			Type:  "function",
+		}
+		tc.Function.Name = name
+		tc.Function.Arguments = args
+		out = append(out, tc)
+	}
+	for _, match := range dsmlToolCallsBlockPattern.FindAllStringSubmatch(text, -1) {
+		if len(match) < 2 {
+			continue
+		}
+		out = append(out, parseDSMLToolMarkupCalls(match[1], idPrefix, len(out))...)
+	}
+	return out
+}
+
+func parseToolMarkupBlock(block string) (string, string, bool) {
+	block = strings.TrimSpace(html.UnescapeString(block))
+	if block == "" {
+		return "", "", false
+	}
+	var object map[string]any
+	if err := json.Unmarshal([]byte(block), &object); err == nil {
+		name := strings.TrimSpace(fmt.Sprint(object["name"]))
+		if name == "" {
+			return "", "", false
+		}
+		args := object["arguments"]
+		if args == nil {
+			args = map[string]any{}
+		}
+		encoded, err := json.Marshal(args)
+		if err != nil {
+			return "", "", false
+		}
+		return name, string(encoded), true
+	}
+	if nameMatch := toolMarkupNameElementPattern.FindStringSubmatch(block); len(nameMatch) >= 2 {
+		name := strings.TrimSpace(html.UnescapeString(nameMatch[1]))
+		if name == "" {
+			return "", "", false
+		}
+		args := "{}"
+		if argMatch := toolMarkupArgumentsElementPattern.FindStringSubmatch(block); len(argMatch) >= 2 {
+			rawArgs := strings.TrimSpace(html.UnescapeString(argMatch[1]))
+			if rawArgs != "" {
+				var decoded any
+				if err := json.Unmarshal([]byte(rawArgs), &decoded); err == nil {
+					if encoded, err := json.Marshal(decoded); err == nil {
+						args = string(encoded)
+					}
+				} else {
+					params := parseToolMarkupParams(rawArgs)
+					if len(params) > 0 {
+						if encoded, err := json.Marshal(params); err == nil {
+							args = string(encoded)
+						}
+					} else if encoded, err := json.Marshal(map[string]any{"value": rawArgs}); err == nil {
+						args = string(encoded)
+					}
+				}
+			}
+		}
+		return name, args, true
+	}
+	functionMatch := toolMarkupFunctionPattern.FindStringSubmatch(block)
+	if len(functionMatch) < 2 {
+		return "", "", false
+	}
+	name := strings.TrimSpace(html.UnescapeString(functionMatch[1]))
+	if name == "" {
+		return "", "", false
+	}
+	params := parseToolMarkupParams(block)
+	args, err := json.Marshal(params)
+	if err != nil {
+		return "", "", false
+	}
+	return name, string(args), true
+}
+
+func parseDSMLToolMarkupCalls(block string, idPrefix string, offset int) []providers.ToolCall {
+	matches := dsmlInvokePattern.FindAllStringSubmatch(block, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	out := make([]providers.ToolCall, 0, len(matches))
+	for _, match := range matches {
+		if len(match) < 3 {
+			continue
+		}
+		name := markupNameAttr(match[1])
+		if name == "" {
+			continue
+		}
+		params := parseDSMLToolMarkupParams(match[2])
+		args, err := json.Marshal(params)
+		if err != nil {
+			continue
+		}
+		index := offset + len(out)
+		tc := providers.ToolCall{
+			ID:    fmt.Sprintf("%s_%d", idPrefix, index+1),
+			Index: index,
+			Type:  "function",
+		}
+		tc.Function.Name = name
+		tc.Function.Arguments = string(args)
+		out = append(out, tc)
+	}
+	return out
+}
+
+func parseDSMLToolMarkupParams(block string) map[string]any {
+	params := map[string]any{}
+	matches := dsmlParameterPattern.FindAllStringSubmatch(block, -1)
+	for _, match := range matches {
+		if len(match) < 3 {
+			continue
+		}
+		name := markupNameAttr(match[1])
+		if name == "" {
+			continue
+		}
+		params[name] = parseToolMarkupParamValue(html.UnescapeString(match[2]))
+	}
+	return params
+}
+
+func markupNameAttr(attrs string) string {
+	match := markupNameAttrPattern.FindStringSubmatch(attrs)
+	if len(match) < 3 {
+		return ""
+	}
+	name := match[1]
+	if name == "" {
+		name = match[2]
+	}
+	return strings.TrimSpace(html.UnescapeString(name))
+}
+
+func parseToolMarkupParams(block string) map[string]any {
+	params := map[string]any{}
+	matches := toolMarkupParameterPattern.FindAllStringSubmatchIndex(block, -1)
+	for i, match := range matches {
+		if len(match) < 4 {
+			continue
+		}
+		name := strings.TrimSpace(html.UnescapeString(block[match[2]:match[3]]))
+		if name == "" {
+			continue
+		}
+		start := match[1]
+		end := len(block)
+		if i+1 < len(matches) {
+			end = matches[i+1][0]
+		}
+		value := strings.TrimSpace(block[start:end])
+		value = strings.TrimSpace(toolMarkupClosingPattern.ReplaceAllString(value, ""))
+		params[name] = parseToolMarkupParamValue(html.UnescapeString(value))
+	}
+	return params
+}
+
+func parseToolMarkupParamValue(value string) any {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	first := value[0]
+	if !strings.ContainsRune(`{["-0123456789tfn`, rune(first)) {
+		return value
+	}
+	var parsed any
+	if err := json.Unmarshal([]byte(value), &parsed); err == nil {
+		return parsed
+	}
+	return value
+}
+````
 
 ## File: internal/agent/tool_validation.go
-
-```go
+````go
 package agent
 
 import (
@@ -17302,11 +18469,10 @@ func stringSet(raw any) map[string]struct{} {
 	}
 	return out
 }
-```
+````
 
 ## File: internal/agentcli/cwd.go
-
-```go
+````go
 package agentcli
 
 import (
@@ -17376,11 +18542,10 @@ func validateCwdWithinRoot(cwd, root string) (string, error) {
 	}
 	return abs, nil
 }
-```
+````
 
 ## File: internal/agentcli/executable.go
-
-```go
+````go
 package agentcli
 
 import (
@@ -17468,11 +18633,10 @@ func isExecutableFile(path string) bool {
 	}
 	return info.Mode()&0o111 != 0
 }
-```
+````
 
 ## File: internal/agentcli/process_windows.go
-
-```go
+````go
 //go:build windows
 
 package agentcli
@@ -17494,11 +18658,10 @@ func KillProcessGroup(cmd *exec.Cmd) error {
 	}
 	return cmd.Process.Kill()
 }
-```
+````
 
 ## File: internal/channels/cli/cli.go
-
-```go
+````go
 // Package cli implements the local interactive terminal channel.
 package cli
 
@@ -17579,11 +18742,10 @@ func (c *Channel) runPlaintext(ctx context.Context) error {
 		}
 	}
 }
-```
+````
 
 ## File: internal/channels/cli/deliver.go
-
-```go
+````go
 package cli
 
 import (
@@ -17804,11 +18966,10 @@ func (w *CLIStreamWriter) Abort(ctx context.Context) error {
 func (d Deliverer) BeginStream(ctx context.Context, to string, meta map[string]any) (channels.StreamWriter, error) {
 	return &CLIStreamWriter{spinner: d.Spinner, bridge: d.bridge, sessionKey: agent.ConversationSessionFromContext(ctx)}, nil
 }
-```
+````
 
 ## File: internal/channels/cli/terminal.go
-
-```go
+````go
 package cli
 
 import (
@@ -18025,11 +19186,10 @@ func (s *Spinner) Stop() {
 	s.mu.Unlock()
 	<-stopped
 }
-```
+````
 
 ## File: internal/config/defaults.go
-
-```go
+````go
 // Package config defines the persisted runtime configuration and validation
 // rules for or3-intern.
 package config
@@ -18394,11 +19554,10 @@ func DefaultPath() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, defaultConfigDirName, "config.json")
 }
-```
+````
 
 ## File: internal/config/env.go
-
-```go
+````go
 // Package config defines the persisted runtime configuration and validation
 // rules for or3-intern.
 package config
@@ -18620,11 +19779,10 @@ func inferProviderKey(apiBase string) string {
 		return "custom"
 	}
 }
-```
+````
 
 ## File: internal/config/load.go
-
-```go
+````go
 // Package config defines the persisted runtime configuration and validation
 // rules for or3-intern.
 package config
@@ -19161,11 +20319,10 @@ func normalizeAndValidateConfig(cfg Config) (Config, error) {
 	}
 	return cfg, nil
 }
-```
+````
 
 ## File: internal/config/routing.go
-
-```go
+````go
 // Package config defines the persisted runtime configuration and validation
 // rules for or3-intern.
 package config
@@ -19363,11 +20520,10 @@ func firstNonEmpty(values ...string) string {
 	}
 	return ""
 }
-```
+````
 
 ## File: internal/config/save.go
-
-```go
+````go
 // Package config defines the persisted runtime configuration and validation
 // rules for or3-intern.
 package config
@@ -19400,11 +20556,10 @@ func Save(path string, cfg Config) error {
 func marshalJSON(v any) ([]byte, error) {
 	return json.MarshalIndent(v, "", "  ")
 }
-```
+````
 
 ## File: internal/config/types.go
-
-```go
+````go
 // Package config defines the persisted runtime configuration and validation
 // rules for or3-intern.
 package config
@@ -20135,11 +21290,10 @@ type NetworkPolicyConfig struct {
 	AllowLoopback bool     `json:"allowLoopback"`
 	AllowPrivate  bool     `json:"allowPrivate"`
 }
-```
+````
 
 ## File: internal/config/validate.go
-
-```go
+````go
 // Package config defines the persisted runtime configuration and validation
 // rules for or3-intern.
 package config
@@ -20755,11 +21909,10 @@ func hasNonEmpty(values []string) bool {
 	}
 	return false
 }
-```
+````
 
 ## File: internal/cronrunner/dispatcher.go
-
-```go
+````go
 package cronrunner
 
 import (
@@ -20856,11 +22009,10 @@ func (d Dispatcher) enqueueAgentRun(ctx context.Context, job cron.CronJob, paylo
 	}
 	return cron.RunResult{EnqueuedJobID: created.JobID, EnqueuedRunID: created.ID}, nil
 }
-```
+````
 
 ## File: internal/db/auth_store.go
-
-```go
+````go
 package db
 
 import (
@@ -21439,11 +22591,10 @@ func EncodeCredentialIDHex(raw []byte) string {
 func DecodeCredentialJSON(raw string, out any) error {
 	return json.Unmarshal([]byte(raw), out)
 }
-```
+````
 
 ## File: internal/db/security.go
-
-```go
+````go
 package db
 
 import (
@@ -21655,11 +22806,10 @@ func truncateAuditPayload(payload string) string {
 	}
 	return payload[:2048] + "...[truncated]"
 }
-```
+````
 
 ## File: internal/db/skill_run_plan_store.go
-
-```go
+````go
 package db
 
 import (
@@ -22045,11 +23195,10 @@ func skillRunPlanNonceValue(nonce []byte) []byte {
 	}
 	return append([]byte{}, nonce...)
 }
-```
+````
 
 ## File: internal/doctor/fix.go
-
-```go
+````go
 package doctor
 
 import (
@@ -22305,11 +23454,10 @@ func compactStrings(items []string) []string {
 	}
 	return out
 }
-```
+````
 
 ## File: internal/doctor/render.go
-
-```go
+````go
 package doctor
 
 import (
@@ -22398,11 +23546,10 @@ func findingsWithSeverity(findings []Finding, severity Severity) []Finding {
 	}
 	return items
 }
-```
+````
 
 ## File: internal/doctor/report.go
-
-```go
+````go
 package doctor
 
 import (
@@ -22635,11 +23782,10 @@ func (r Report) MarshalJSON() ([]byte, error) {
 	type alias Report
 	return json.Marshal(alias(r))
 }
-```
+````
 
 ## File: internal/memory/vector.go
-
-```go
+````go
 package memory
 
 import (
@@ -22741,11 +23887,10 @@ func VectorSearch(ctx context.Context, d *db.DB, sessionKey string, queryVec []f
 	}
 	return out, nil
 }
-```
+````
 
 ## File: internal/memory/workspace_context.go
-
-```go
+````go
 package memory
 
 import (
@@ -23188,11 +24333,10 @@ func workspaceTruncate(s string, max int) string {
 	}
 	return s
 }
-```
+````
 
 ## File: internal/providers/profile.go
-
-```go
+````go
 package providers
 
 import "strings"
@@ -23302,11 +24446,10 @@ func (c *Client) ProviderProfile(model string) ProviderProfile {
 	}
 	return SelectProviderProfile("", c.APIBase, model)
 }
-```
+````
 
 ## File: internal/providers/schema_sanitizer.go
-
-```go
+````go
 package providers
 
 import (
@@ -23458,11 +24601,10 @@ func (r SchemaSanitizationReport) String() string {
 	}
 	return strings.Join(parts, " ")
 }
-```
+````
 
 ## File: internal/providers/stream_assembler.go
-
-```go
+````go
 package providers
 
 import (
@@ -23696,11 +24838,10 @@ func (a *toolCallAccumulator) Finalize() []ToolCall {
 	}
 	return out
 }
-```
+````
 
 ## File: internal/security/network.go
-
-```go
+````go
 package security
 
 import (
@@ -23997,11 +25138,10 @@ type roundTripperFunc func(*http.Request) (*http.Response, error)
 func (fn roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return fn(req)
 }
-```
+````
 
 ## File: internal/tools/splitter/main.go
-
-```go
+````go
 package main
 
 import (
@@ -24207,11 +25347,10 @@ func splitServiceFile(filePath string, decls []Decl) error {
 	}
 	return nil
 }
-```
+````
 
 ## File: internal/tools/context.go
-
-```go
+````go
 package tools
 
 import (
@@ -24518,11 +25657,10 @@ func RequesterIdentityFromContext(ctx context.Context) RequesterIdentity {
 	identity, _ := ctx.Value(requesterIdentityContextKey{}).(RequesterIdentity)
 	return identity
 }
-```
+````
 
 ## File: internal/tools/html_converter.go
-
-```go
+````go
 package tools
 
 import (
@@ -24838,11 +25976,10 @@ func normalizeHTMLMarkdown(markdown string) string {
 	markdown = strings.ReplaceAll(markdown, `\[ \]`, `[ ]`)
 	return markdown
 }
-```
+````
 
 ## File: internal/tools/metadata_scanner.go
-
-```go
+````go
 package tools
 
 import (
@@ -24976,11 +26113,10 @@ func trimMetadataPreview(text string, limit int) string {
 func (d MetadataDiagnostic) String() string {
 	return fmt.Sprintf("tool=%s class=%s action=%s preview=%q", d.ToolName, d.Class, d.Action, d.Preview)
 }
-```
+````
 
 ## File: internal/tools/sandbox.go
-
-```go
+````go
 package tools
 
 import (
@@ -25119,11 +26255,10 @@ func sandboxPathCovered(path string, cwd string, writable []string) bool {
 	}
 	return false
 }
-```
+````
 
 ## File: internal/tools/skill_run.go
-
-```go
+````go
 package tools
 
 import (
@@ -25788,11 +26923,10 @@ func (t *RunSkillScript) canPersistSkillRunApprovalLink() bool {
 	}
 	return t.DB.SQL == t.ApprovalBroker.DB.SQL
 }
-```
+````
 
 ## File: internal/tools/tools.go
-
-```go
+````go
 // Package tools defines the shared interfaces and capability model for runtime tools.
 package tools
 
@@ -25879,11 +27013,10 @@ func (Base) SchemaFor(name, desc string, params map[string]any) map[string]any {
 		},
 	}
 }
-```
+````
 
 ## File: internal/triggers/filewatch.go
-
-```go
+````go
 package triggers
 
 import (
@@ -26036,11 +27169,10 @@ func (fw *FileWatcher) poll(ctx context.Context) {
 		}
 	}
 }
-```
+````
 
 ## File: .env.example
-
-```
+````
 # Example environment for or3-intern
 #
 # This repo does NOT auto-load .env files.
@@ -26097,11 +27229,10 @@ OR3_SLACK_BOT_TOKEN=
 OR3_DISCORD_TOKEN=
 OR3_WHATSAPP_BRIDGE_URL=ws://127.0.0.1:3001/ws
 OR3_WHATSAPP_BRIDGE_TOKEN=
-```
+````
 
 ## File: cmd/or3-intern/testdata/service_contract/health-response.json
-
-```json
+````json
 {
     "approvalBrokerAvailable": false,
     "jobRegistryAvailable": true,
@@ -26111,368 +27242,10 @@ OR3_WHATSAPP_BRIDGE_TOKEN=
     "status": "ok",
     "subagentManagerEnabled": false
 }
-```
-
-## File: cmd/or3-intern/doctor.go
-
-```go
-package main
-
-import (
-	"bufio"
-	"flag"
-	"fmt"
-	"io"
-	"os"
-	"strings"
-
-	"or3-intern/internal/config"
-	intdoctor "or3-intern/internal/doctor"
-)
-
-type doctorFinding struct {
-	Level   string
-	Area    string
-	Message string
-}
-
-type doctorArgs struct {
-	Strict      bool
-	JSON        bool
-	Fix         bool
-	Interactive bool
-	Probe       bool
-	Severity    intdoctor.Severity
-	Areas       []string
-	FixableOnly bool
-}
-
-func parseDoctorArgs(args []string, stderr io.Writer) (doctorArgs, error) {
-	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	strict := fs.Bool("strict", false, "exit non-zero when warnings are found")
-	jsonOut := fs.Bool("json", false, "emit structured JSON output")
-	fix := fs.Bool("fix", false, "apply safe fixes")
-	interactive := fs.Bool("interactive", false, "use guided repair prompts for ambiguous fixes")
-	probe := fs.Bool("probe", false, "run bounded local runtime probes")
-	severity := fs.String("severity", "", "minimum severity filter: info, warn, error, block")
-	fixableOnly := fs.Bool("fixable-only", false, "show only findings with available fixes")
-	var areas stringSliceFlag
-	fs.Var(&areas, "area", "repeatable area filter")
-	if err := fs.Parse(args); err != nil {
-		return doctorArgs{}, err
-	}
-	if fs.NArg() > 0 {
-		return doctorArgs{}, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
-	}
-	minSeverity := intdoctor.NormalizeSeverity(*severity)
-	if *severity != "" && minSeverity == "" {
-		return doctorArgs{}, fmt.Errorf("invalid --severity %q", *severity)
-	}
-	return doctorArgs{
-		Strict:      *strict,
-		JSON:        *jsonOut,
-		Fix:         *fix,
-		Interactive: *interactive,
-		Probe:       *probe,
-		Severity:    minSeverity,
-		Areas:       []string(areas),
-		FixableOnly: *fixableOnly,
-	}, nil
-}
-
-func runDoctorCommand(cfgPath string, cfg config.Config, validationError string, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
-	if stdin == nil {
-		stdin = os.Stdin
-	}
-	if stdout == nil {
-		stdout = os.Stdout
-	}
-	if stderr == nil {
-		stderr = os.Stderr
-	}
-	parsed, err := parseDoctorArgs(args, stderr)
-	if err != nil {
-		return err
-	}
-
-	report := intdoctor.Evaluate(cfg, intdoctor.Options{
-		Mode:            chooseDoctorMode(parsed.Strict),
-		ConfigPath:      cfgPath,
-		ValidationError: validationError,
-		Probe:           parsed.Probe,
-	})
-	currentValidationError := validationError
-
-	if parsed.Fix {
-		applied, fixErr := intdoctor.ApplyAutomaticFixes(cfgPath, &cfg, report)
-		if fixErr != nil {
-			return fixErr
-		}
-		currentValidationError = refreshDoctorValidationError(cfgPath, currentValidationError)
-		report = intdoctor.Evaluate(cfg, intdoctor.Options{
-			Mode:            chooseDoctorMode(parsed.Strict),
-			ConfigPath:      cfgPath,
-			ValidationError: currentValidationError,
-			Probe:           parsed.Probe,
-		})
-		if parsed.Interactive {
-			appliedInteractive, interactiveErr := applyInteractiveDoctorFixes(stdin, stdout, cfgPath, &cfg, report)
-			if interactiveErr != nil {
-				return interactiveErr
-			}
-			applied = append(applied, appliedInteractive...)
-		}
-		currentValidationError = refreshDoctorValidationError(cfgPath, currentValidationError)
-		report = intdoctor.Evaluate(cfg, intdoctor.Options{
-			Mode:            chooseDoctorMode(parsed.Strict),
-			ConfigPath:      cfgPath,
-			ValidationError: currentValidationError,
-			Probe:           parsed.Probe,
-		})
-		report.FixesApplied = applied
-	}
-
-	report = report.Filter(intdoctor.FilterOptions{
-		Areas:       parsed.Areas,
-		MinSeverity: parsed.Severity,
-		FixableOnly: parsed.FixableOnly,
-	})
-
-	if parsed.JSON {
-		payload, err := intdoctor.RenderJSON(report)
-		if err != nil {
-			return err
-		}
-		_, _ = fmt.Fprintln(stdout, string(payload))
-	} else {
-		_, _ = io.WriteString(stdout, intdoctor.RenderText(report))
-	}
-
-	if parsed.Strict && report.HasStrictFailures() {
-		return fmt.Errorf("doctor found warnings")
-	}
-	return nil
-}
-
-func chooseDoctorMode(strict bool) intdoctor.Mode {
-	if strict {
-		return intdoctor.ModeStrict
-	}
-	return intdoctor.ModeAdvisory
-}
-
-func refreshDoctorValidationError(cfgPath, previous string) string {
-	if strings.TrimSpace(cfgPath) == "" {
-		return previous
-	}
-	if _, err := config.Load(cfgPath); err != nil {
-		return err.Error()
-	}
-	return ""
-}
-
-func doctorFindings(cfg config.Config) []doctorFinding {
-	report := intdoctor.Evaluate(cfg, intdoctor.Options{Mode: intdoctor.ModeAdvisory})
-	items := make([]doctorFinding, 0, len(report.Findings))
-	for _, finding := range report.Findings {
-		items = append(items, doctorFinding{
-			Level:   string(finding.Severity),
-			Area:    finding.Area,
-			Message: finding.Summary,
-		})
-	}
-	return items
-}
-
-func applyInteractiveDoctorFixes(in io.Reader, out io.Writer, cfgPath string, cfg *config.Config, report intdoctor.Report) ([]intdoctor.AppliedFix, error) {
-	reader := bufio.NewReader(in)
-	applied := []intdoctor.AppliedFix{}
-	for _, finding := range report.Findings {
-		if finding.FixMode != intdoctor.FixModeInteractive {
-			continue
-		}
-		changed, summary, err := applySingleInteractiveDoctorFix(reader, out, cfg, finding)
-		if err != nil {
-			return applied, err
-		}
-		if changed {
-			applied = append(applied, intdoctor.AppliedFix{ID: finding.ID, Summary: summary})
-		}
-	}
-	if len(applied) > 0 {
-		if err := config.Save(cfgPath, *cfg); err != nil {
-			return applied, err
-		}
-	}
-	return applied, nil
-}
-
-func applySingleInteractiveDoctorFix(reader *bufio.Reader, out io.Writer, cfg *config.Config, finding intdoctor.Finding) (bool, string, error) {
-	switch finding.ID {
-	case "channels.invalid_ingress":
-		channel := finding.Metadata["channel"]
-		choice, err := promptMenuChoice(reader, out, fmt.Sprintf("Repair %s inbound access", channel), []string{
-			"1) Pairing (secure default for interactive channels)",
-			"2) Allowlist (specify allowed identities now)",
-			"3) Open access",
-			"4) Deny inbound (send-only)",
-			"5) Disable channel",
-			"6) Skip",
-		}, "1")
-		if err != nil {
-			return false, "", err
-		}
-		var mode string
-		var allowlist []string
-		switch choice {
-		case "1":
-			mode = "pairing"
-		case "2":
-			mode = "allowlist"
-			text, err := promptString(reader, out, fmt.Sprintf("%s allowlist (comma-separated)", channel), "")
-			if err != nil {
-				return false, "", err
-			}
-			allowlist = splitAndCompact(text)
-		case "3":
-			mode = "open"
-		case "4":
-			mode = "deny"
-		case "5":
-			mode = "disable"
-		default:
-			return false, "", nil
-		}
-		changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, mode, allowlist)
-		if err != nil {
-			return false, "", err
-		}
-		return changed, fmt.Sprintf("updated %s inbound access", channel), nil
-	case "service.secret_missing", "service.secret_weak":
-		choice, err := promptMenuChoice(reader, out, "Repair service secret", []string{
-			"1) Generate a strong random secret",
-			"2) Disable service mode",
-			"3) Skip",
-		}, "1")
-		if err != nil {
-			return false, "", err
-		}
-		switch choice {
-		case "1":
-			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "generate", nil)
-			return changed, "generated a service secret", err
-		case "2":
-			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "disable", nil)
-			return changed, "disabled service mode", err
-		default:
-			return false, "", nil
-		}
-	case "webhook.secret_missing":
-		choice, err := promptMenuChoice(reader, out, "Repair webhook secret", []string{
-			"1) Generate a strong random secret",
-			"2) Disable webhook",
-			"3) Skip",
-		}, "1")
-		if err != nil {
-			return false, "", err
-		}
-		switch choice {
-		case "1":
-			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "generate", nil)
-			return changed, "generated a webhook secret", err
-		case "2":
-			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "disable", nil)
-			return changed, "disabled webhook", err
-		default:
-			return false, "", nil
-		}
-	case "service.public_bind":
-		choice, err := promptMenuChoice(reader, out, "Repair service bind address", []string{
-			"1) Bind to loopback",
-			"2) Skip",
-		}, "1")
-		if err != nil {
-			return false, "", err
-		}
-		if choice == "1" {
-			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "loopback", nil)
-			return changed, "bound service to loopback", err
-		}
-	case "webhook.public_bind":
-		choice, err := promptMenuChoice(reader, out, "Repair webhook bind address", []string{
-			"1) Bind to loopback",
-			"2) Skip",
-		}, "1")
-		if err != nil {
-			return false, "", err
-		}
-		if choice == "1" {
-			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "loopback", nil)
-			return changed, "bound webhook to loopback", err
-		}
-	case "security.secret_store_disabled_with_integrations":
-		choice, err := promptMenuChoice(reader, out, "Repair secret store for external integrations", []string{
-			"1) Enable secret store and generate a key file",
-			"2) Skip",
-		}, "1")
-		if err != nil {
-			return false, "", err
-		}
-		if choice == "1" {
-			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "enable", nil)
-			return changed, "enabled secret store and generated a key file", err
-		}
-	case "privileged-exec.sandbox_disabled":
-		choice, err := promptMenuChoice(reader, out, "Repair privileged tools without sandboxing", []string{
-			"1) Disable privileged tools",
-			"2) Enable Bubblewrap sandboxing",
-			"3) Skip",
-		}, "1")
-		if err != nil {
-			return false, "", err
-		}
-		switch choice {
-		case "1":
-			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "disable_privileged", nil)
-			return changed, "disabled privileged tools", err
-		case "2":
-			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "enable_sandbox", nil)
-			return changed, "enabled Bubblewrap sandboxing", err
-		default:
-			return false, "", nil
-		}
-	case "privileged-exec.bubblewrap_missing":
-		choice, err := promptMenuChoice(reader, out, "Repair missing Bubblewrap binary", []string{
-			"1) Disable privileged tools and sandboxing",
-			"2) Set Bubblewrap path manually",
-			"3) Skip",
-		}, "1")
-		if err != nil {
-			return false, "", err
-		}
-		switch choice {
-		case "1":
-			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "disable_privileged", nil)
-			return changed, "disabled privileged tools and sandboxing", err
-		case "2":
-			path, err := promptString(reader, out, "Bubblewrap path", cfg.Hardening.Sandbox.BubblewrapPath)
-			if err != nil {
-				return false, "", err
-			}
-			changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, "set_path", []string{path})
-			return changed, "updated Bubblewrap path", err
-		default:
-			return false, "", nil
-		}
-	}
-	return false, "", nil
-}
-```
+````
 
 ## File: internal/agent/context_manager.go
-
-```go
+````go
 package agent
 
 import (
@@ -26921,11 +27694,10 @@ func appendBoundedStringSlice(base []string, additions []string, max int) []stri
 	}
 	return out
 }
-```
+````
 
 ## File: internal/agent/job_registry.go
-
-```go
+````go
 package agent
 
 import (
@@ -27374,11 +28146,10 @@ func newServiceJobID() string {
 	}
 	return "svc-" + hex.EncodeToString(raw[:])
 }
-```
+````
 
 ## File: internal/agentcli/detect.go
-
-```go
+````go
 package agentcli
 
 import (
@@ -27491,11 +28262,10 @@ func firstLine(out []byte) string {
 	}
 	return s
 }
-```
+````
 
 ## File: internal/agentcli/env.go
-
-```go
+````go
 package agentcli
 
 import (
@@ -27609,11 +28379,10 @@ func defaultAgentCLIPathAppend() string {
 	}
 	return strings.Join(out, string(os.PathListSeparator))
 }
-```
+````
 
 ## File: internal/agentcli/process_unix.go
-
-```go
+````go
 //go:build !windows
 
 package agentcli
@@ -27644,11 +28413,10 @@ func KillProcessGroup(cmd *exec.Cmd) error {
 	_ = syscall.Kill(-pgid, syscall.SIGKILL)
 	return nil
 }
-```
+````
 
 ## File: internal/agentcli/result_extract.go
-
-```go
+````go
 package agentcli
 
 import (
@@ -27888,11 +28656,10 @@ func looksMachineOriented(text string) bool {
 	}
 	return strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[")
 }
-```
+````
 
 ## File: internal/agentcli/runners.go
-
-```go
+````go
 // Package agentcli defines the typed runner registry, detection, and adapter
 // contracts for external agent CLI delegation.
 package agentcli
@@ -28063,11 +28830,10 @@ type DetectOptions struct {
 	Env             []string
 	DisabledRunners []string
 }
-```
+````
 
 ## File: internal/auth/service.go
-
-```go
+````go
 package auth
 
 import (
@@ -28838,11 +29604,10 @@ func transportsToStrings(values []protocol.AuthenticatorTransport) []string {
 	}
 	return out
 }
-```
+````
 
 ## File: internal/db/task_state.go
-
-```go
+````go
 package db
 
 import (
@@ -28935,11 +29700,10 @@ func (d *DB) CompleteActiveTaskState(ctx context.Context, sessionKey string) err
 		NowMS(), sessionKey)
 	return err
 }
-```
+````
 
 ## File: internal/safetymode/safetymode.go
-
-```go
+````go
 package safetymode
 
 import (
@@ -29223,11 +29987,10 @@ func InferScenario(cfg config.Config) Scenario {
 		return ScenarioSoloComputer
 	}
 }
-```
+````
 
 ## File: internal/tools/memory.go
-
-```go
+````go
 package tools
 
 import (
@@ -29508,11 +30271,10 @@ func compactMemoryText(text string, maxChars int) string {
 	}
 	return text[:maxChars-3] + "..."
 }
-```
+````
 
 ## File: internal/tools/spawn.go
-
-```go
+````go
 package tools
 
 import (
@@ -29618,11 +30380,10 @@ func readOptionalString(params map[string]any, key string) string {
 	}
 	return strings.TrimSpace(fmt.Sprint(v))
 }
-```
+````
 
 ## File: cmd/or3-intern/connect_device_cmd.go
-
-```go
+````go
 package main
 
 import (
@@ -29843,11 +30604,10 @@ func formatPairingCode(code string) string {
 	}
 	return code[:3] + "-" + code[3:]
 }
-```
+````
 
 ## File: cmd/or3-intern/init.go
-
-```go
+````go
 package main
 
 import (
@@ -30048,11 +30808,10 @@ func promptSecretString(reader *bufio.Reader, out io.Writer, label, currentValue
 		return line, nil
 	}
 }
-```
+````
 
 ## File: cmd/or3-intern/service_request.go
-
-```go
+````go
 package main
 
 import (
@@ -30442,11 +31201,10 @@ func backgroundToolsRegistry(manager *agent.SubagentManager) *tools.Registry {
 	}
 	return tools.NewRegistry()
 }
-```
+````
 
 ## File: cmd/or3-intern/setup_cmd.go
-
-```go
+````go
 package main
 
 import (
@@ -30785,11 +31543,10 @@ func printSetupReview(out io.Writer, status uxstate.StatusView) {
 		fmt.Fprintf(out, "- %s\n", uxcopy.SafetyModeSummary(inferenceMode))
 	}
 }
-```
+````
 
 ## File: cmd/or3-intern/skills_cmd.go
-
-```go
+````go
 package main
 
 import (
@@ -31340,11 +32097,10 @@ func printReasons(w io.Writer, label string, values []string) {
 	}
 	_, _ = fmt.Fprintf(w, "%s: %s\n", label, strings.Join(values, "; "))
 }
-```
+````
 
 ## File: cmd/or3-intern/startup_validation.go
-
-```go
+````go
 package main
 
 import (
@@ -31521,11 +32277,10 @@ func minInt(a, b int) int {
 	}
 	return b
 }
-```
+````
 
 ## File: internal/agent/prompt_budget.go
-
-```go
+````go
 package agent
 
 import (
@@ -31922,11 +32677,10 @@ func messageContentString(content any) string {
 		return fmt.Sprintf("%v", v)
 	}
 }
-```
+````
 
 ## File: internal/agent/runtime_status.go
-
-```go
+````go
 package agent
 
 import (
@@ -32296,11 +33050,10 @@ func countMemoryRows(ctx context.Context, d *db.DB, table, column string, values
 	}
 	return count, err
 }
-```
+````
 
 ## File: internal/agent/service_runtime_context.go
-
-```go
+````go
 package agent
 
 import (
@@ -32445,11 +33198,10 @@ func toolRegistryWithAllowlist(base *tools.Registry, allowed []string, restrict 
 	}
 	return base.CloneFiltered(trimmed)
 }
-```
+````
 
 ## File: internal/agent/task_card.go
-
-```go
+````go
 package agent
 
 import (
@@ -32620,11 +33372,10 @@ func appendBoundedString(values []string, value string, max int) []string {
 	}
 	return out
 }
-```
+````
 
 ## File: internal/agent/tool_policy.go
-
-```go
+````go
 package agent
 
 import (
@@ -32814,11 +33565,10 @@ func normalizeToolNames(names []string) []string {
 	}
 	return out
 }
-```
+````
 
 ## File: internal/artifacts/store.go
-
-```go
+````go
 // Package artifacts persists binary attachments referenced from conversations.
 package artifacts
 
@@ -33022,11 +33772,1043 @@ func randID() string {
 	}
 	return hex.EncodeToString(b[:])
 }
-```
+````
+
+## File: internal/channels/cli/chat_tui.go
+````go
+package cli
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"log"
+	"strings"
+	"sync"
+	"sync/atomic"
+
+	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+
+	"or3-intern/internal/agent"
+	"or3-intern/internal/bus"
+	"or3-intern/internal/db"
+)
+
+const (
+	chatHistoryLimit   = 80
+	chatActivityLimit  = 10
+	chatViewportMinW   = 40
+	chatSidebarMinW    = 28
+	chatInputMinW      = 24
+	chatInputPanelH    = 3
+	chatHeaderPanelH   = 4
+	chatMessagePadding = 2
+)
+
+type historyStore interface {
+	GetLastMessagesScoped(ctx context.Context, sessionKey string, limit int) ([]db.Message, error)
+	ResolveScopeKey(ctx context.Context, sessionKey string) (string, error)
+	ListScopeSessions(ctx context.Context, scopeKey string) ([]string, error)
+}
+
+type bubbleChatBridge struct {
+	events       chan tea.Msg
+	done         chan struct{}
+	closeOnce    sync.Once
+	nextStreamID atomic.Int64
+}
+
+func newBubbleChatBridge() *bubbleChatBridge {
+	return &bubbleChatBridge{events: make(chan tea.Msg, 256), done: make(chan struct{})}
+}
+
+type chatBridgeClosedMsg struct{}
+
+func (b *bubbleChatBridge) waitCmd() tea.Cmd {
+	return func() tea.Msg {
+		if b == nil {
+			return chatBridgeClosedMsg{}
+		}
+		select {
+		case msg := <-b.events:
+			return msg
+		case <-b.done:
+			return chatBridgeClosedMsg{}
+		}
+	}
+}
+
+func (b *bubbleChatBridge) emit(msg tea.Msg) bool {
+	if b == nil || msg == nil {
+		return false
+	}
+	select {
+	case <-b.done:
+		return false
+	case b.events <- msg:
+		return true
+	default:
+		return false
+	}
+}
+
+func (b *bubbleChatBridge) close() {
+	if b == nil {
+		return
+	}
+	b.closeOnce.Do(func() {
+		close(b.done)
+	})
+}
+
+func (b *bubbleChatBridge) newStreamID() int {
+	if b == nil {
+		return 0
+	}
+	return int(b.nextStreamID.Add(1))
+}
+
+type chatHistoryLoadedMsg struct {
+	sessionKey    string
+	scopeKey      string
+	scopeSessions []string
+	items         []chatMessage
+	err           error
+}
+
+type chatAssistantDeltaMsg struct {
+	sessionKey string
+	streamID   int
+	text       string
+}
+
+type chatAssistantCloseMsg struct {
+	sessionKey string
+	streamID   int
+	finalText  string
+	complete   bool
+}
+
+type chatAssistantAbortMsg struct {
+	sessionKey string
+	streamID   int
+}
+
+type chatErrorMsg struct {
+	sessionKey string
+	err        string
+}
+
+type chatNoticeMsg struct {
+	sessionKey string
+	text       string
+}
+
+type chatRuntimeLogMsg struct {
+	sessionKey string
+	text       string
+	kind       string
+}
+
+type chatSessionResetMsg struct {
+	sessionKey string
+	notice     string
+}
+
+type chatToolCallMsg struct {
+	sessionKey string
+	name       string
+	arguments  string
+}
+
+type chatToolResultMsg struct {
+	sessionKey string
+	name       string
+	result     string
+	err        string
+}
+
+type chatMessage struct {
+	role    string
+	content string
+	pending bool
+}
+
+type chatActivity struct {
+	title  string
+	detail string
+	kind   string
+}
+
+type chatKeyMap struct {
+	Send       key.Binding
+	Quit       key.Binding
+	ClearInput key.Binding
+	ScrollUp   key.Binding
+	ScrollDown key.Binding
+	ScrollTop  key.Binding
+	ScrollEnd  key.Binding
+	Commands   key.Binding
+	Session    key.Binding
+	ClearView  key.Binding
+}
+
+func newChatKeyMap() chatKeyMap {
+	return chatKeyMap{
+		Send:       key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "send")),
+		Quit:       key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "quit")),
+		ClearInput: key.NewBinding(key.WithKeys("ctrl+u"), key.WithHelp("ctrl+u", "clear input")),
+		ScrollUp:   key.NewBinding(key.WithKeys("pgup", "shift+up", "up"), key.WithHelp("↑/pgup", "scroll up")),
+		ScrollDown: key.NewBinding(key.WithKeys("pgdown", "shift+down", "down"), key.WithHelp("↓/pgdn", "scroll down")),
+		ScrollTop:  key.NewBinding(key.WithKeys("home"), key.WithHelp("home", "scroll to top")),
+		ScrollEnd:  key.NewBinding(key.WithKeys("end"), key.WithHelp("end", "scroll to end")),
+		Commands:   key.NewBinding(key.WithKeys("ctrl+/"), key.WithHelp("ctrl+/", "commands")),
+		Session:    key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("ctrl+s", "session info")),
+		ClearView:  key.NewBinding(key.WithKeys("ctrl+l"), key.WithHelp("ctrl+l", "clear view")),
+	}
+}
+
+func (k chatKeyMap) ShortHelp() []key.Binding {
+	return []key.Binding{k.Send, k.ScrollUp, k.ScrollDown, k.Commands, k.Session, k.ClearView, k.Quit}
+}
+
+func (k chatKeyMap) FullHelp() [][]key.Binding {
+	return [][]key.Binding{{k.Send, k.ClearInput, k.Commands, k.Session}, {k.ScrollUp, k.ScrollDown, k.ScrollTop, k.ScrollEnd}, {k.ClearView, k.Quit}}
+}
+
+type chatStyles struct {
+	app         lipgloss.Style
+	header      lipgloss.Style
+	title       lipgloss.Style
+	subtitle    lipgloss.Style
+	panel       lipgloss.Style
+	panelTitle  lipgloss.Style
+	muted       lipgloss.Style
+	status      lipgloss.Style
+	inputBox    lipgloss.Style
+	userLabel   lipgloss.Style
+	assistant   lipgloss.Style
+	system      lipgloss.Style
+	error       lipgloss.Style
+	activity    lipgloss.Style
+	badge       lipgloss.Style
+	badgeWarm   lipgloss.Style
+	badgeCool   lipgloss.Style
+	help        lipgloss.Style
+	placeholder lipgloss.Style
+}
+
+type chatLayout struct {
+	panelWidth     int
+	transcriptW    int
+	sidebarW       int
+	viewportH      int
+	stacked        bool
+	compact        bool
+	compactSidebar bool
+}
+
+func newChatStyles() chatStyles {
+	border := lipgloss.RoundedBorder()
+	return chatStyles{
+		app:         lipgloss.NewStyle().Padding(0, 1),
+		header:      lipgloss.NewStyle().BorderStyle(border).BorderForeground(lipgloss.Color("63")).Padding(0, 1),
+		title:       lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("86")),
+		subtitle:    lipgloss.NewStyle().Foreground(lipgloss.Color("245")),
+		panel:       lipgloss.NewStyle().BorderStyle(border).BorderForeground(lipgloss.Color("240")).Padding(0, 1),
+		panelTitle:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("111")),
+		muted:       lipgloss.NewStyle().Foreground(lipgloss.Color("244")),
+		status:      lipgloss.NewStyle().Foreground(lipgloss.Color("229")),
+		inputBox:    lipgloss.NewStyle().BorderStyle(border).BorderForeground(lipgloss.Color("69")).Padding(0, 1),
+		userLabel:   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("81")),
+		assistant:   lipgloss.NewStyle().Foreground(lipgloss.Color("252")),
+		system:      lipgloss.NewStyle().Foreground(lipgloss.Color("221")),
+		error:       lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true),
+		activity:    lipgloss.NewStyle().Foreground(lipgloss.Color("250")),
+		badge:       lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("62")).Padding(0, 1),
+		badgeWarm:   lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("166")).Padding(0, 1),
+		badgeCool:   lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("32")).Padding(0, 1),
+		help:        lipgloss.NewStyle().Foreground(lipgloss.Color("241")),
+		placeholder: lipgloss.NewStyle().Foreground(lipgloss.Color("240")),
+	}
+}
+
+type chatModel struct {
+	ctx           context.Context
+	bridge        *bubbleChatBridge
+	store         historyStore
+	publish       func(sessionKey, text string) bool
+	width         int
+	height        int
+	sessionKey    string
+	scopeKey      string
+	scopeSessions []string
+	viewport      viewport.Model
+	input         textinput.Model
+	keys          chatKeyMap
+	styles        chatStyles
+	messages      []chatMessage
+	activity      []chatActivity
+	streamIndex   map[int]int
+	pendingCount  int
+	statusText    string
+	historyLimit  int
+}
+
+func newChatModel(ctx context.Context, sessionKey string, bridge *bubbleChatBridge, store historyStore, publish func(sessionKey, text string) bool) chatModel {
+	input := textinput.New()
+	input.Placeholder = "Ask anything, or type /commands"
+	input.Prompt = ""
+	input.CharLimit = 0
+	input.Focus()
+	input.Width = 80
+	vp := viewport.New(80, 20)
+	vp.YPosition = 0
+	vp.MouseWheelEnabled = true
+	return chatModel{
+		ctx:          ctx,
+		bridge:       bridge,
+		store:        store,
+		publish:      publish,
+		sessionKey:   strings.TrimSpace(sessionKey),
+		viewport:     vp,
+		input:        input,
+		keys:         newChatKeyMap(),
+		styles:       newChatStyles(),
+		streamIndex:  map[int]int{},
+		statusText:   "Ready",
+		historyLimit: chatHistoryLimit,
+	}
+}
+
+func (m chatModel) Init() tea.Cmd {
+	return tea.Batch(textinput.Blink, m.bridge.waitCmd(), loadChatHistoryCmd(m.ctx, m.store, m.sessionKey, m.historyLimit))
+}
+
+func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		m.resize()
+		m.refreshViewport(true)
+	case tea.MouseMsg:
+		var vpCmd tea.Cmd
+		m.viewport, vpCmd = m.viewport.Update(msg)
+		cmds = append(cmds, vpCmd)
+		return m, tea.Batch(cmds...)
+	case chatBridgeClosedMsg:
+		return m, nil
+	case tea.KeyMsg:
+		handledKey := false
+		switch {
+		case key.Matches(msg, m.keys.Quit):
+			return m, tea.Quit
+		case key.Matches(msg, m.keys.ClearInput):
+			handledKey = true
+			m.input.SetValue("")
+		case key.Matches(msg, m.keys.ScrollUp):
+			handledKey = true
+			m.viewport.LineUp(3)
+		case key.Matches(msg, m.keys.ScrollDown):
+			handledKey = true
+			m.viewport.LineDown(3)
+		case key.Matches(msg, m.keys.ScrollTop):
+			handledKey = true
+			m.viewport.GotoTop()
+		case key.Matches(msg, m.keys.ScrollEnd):
+			handledKey = true
+			m.viewport.GotoBottom()
+		case key.Matches(msg, m.keys.Commands):
+			handledKey = true
+			m.appendSystem(localCommandsHelp())
+			m.refreshViewport(true)
+		case key.Matches(msg, m.keys.Session):
+			handledKey = true
+			m.appendSystem(m.sessionSummary())
+			m.refreshViewport(true)
+		case key.Matches(msg, m.keys.ClearView):
+			handledKey = true
+			m.messages = nil
+			m.activity = nil
+			m.streamIndex = map[int]int{}
+			m.statusText = "Transcript cleared"
+			m.refreshViewport(true)
+		case key.Matches(msg, m.keys.Send):
+			handledKey = true
+			line := strings.TrimSpace(m.input.Value())
+			if line == "" {
+				break
+			}
+			m.input.SetValue("")
+			if handled, cmd := m.handleLocalCommand(line); handled {
+				m.refreshViewport(true)
+				if cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+				break
+			}
+			if line == "/new" {
+				m.statusText = "Starting new session…"
+			} else if line == "/prune" {
+				m.statusText = "Pruning context…"
+			} else if line == "/status" {
+				m.statusText = "Loading status…"
+			}
+			m.messages = append(m.messages, chatMessage{role: "user", content: line})
+			if m.publish == nil || !m.publish(m.sessionKey, line) {
+				m.appendError("queue full — message dropped")
+			} else {
+				m.pendingCount++
+				if line != "/new" && line != "/status" && line != "/prune" {
+					m.statusText = "Thinking…"
+				}
+			}
+			m.refreshViewport(true)
+		}
+		if handledKey {
+			return m, tea.Batch(cmds...)
+		}
+	case chatHistoryLoadedMsg:
+		if msg.err != nil {
+			m.appendError("load history: " + msg.err.Error())
+		} else if msg.sessionKey == m.sessionKey {
+			m.scopeKey = msg.scopeKey
+			m.scopeSessions = msg.scopeSessions
+			m.messages = msg.items
+			m.streamIndex = map[int]int{}
+			m.statusText = fmt.Sprintf("Loaded %d messages", len(msg.items))
+		}
+		m.refreshViewport(true)
+	case chatAssistantDeltaMsg:
+		if !m.acceptsSessionEvent(msg.sessionKey) {
+			cmds = append(cmds, m.bridge.waitCmd())
+			break
+		}
+		idx, ok := m.streamIndex[msg.streamID]
+		if !ok {
+			m.messages = append(m.messages, chatMessage{role: "assistant", pending: true})
+			idx = len(m.messages) - 1
+			m.streamIndex[msg.streamID] = idx
+		}
+		m.messages[idx].content += msg.text
+		m.messages[idx].pending = true
+		m.statusText = "Streaming response…"
+		m.refreshViewport(true)
+		cmds = append(cmds, m.bridge.waitCmd())
+	case chatAssistantCloseMsg:
+		if !m.acceptsSessionEvent(msg.sessionKey) {
+			cmds = append(cmds, m.bridge.waitCmd())
+			break
+		}
+		if idx, ok := m.streamIndex[msg.streamID]; ok {
+			if strings.TrimSpace(msg.finalText) != "" && strings.TrimSpace(m.messages[idx].content) == "" {
+				m.messages[idx].content = msg.finalText
+			}
+			m.messages[idx].pending = false
+			delete(m.streamIndex, msg.streamID)
+		} else if strings.TrimSpace(msg.finalText) != "" {
+			m.messages = append(m.messages, chatMessage{role: "assistant", content: msg.finalText})
+		}
+		if msg.complete && m.pendingCount > 0 {
+			m.pendingCount--
+		}
+		if m.pendingCount == 0 {
+			m.statusText = "Ready"
+		} else {
+			m.statusText = "Working…"
+		}
+		m.refreshViewport(true)
+		cmds = append(cmds, m.bridge.waitCmd())
+	case chatAssistantAbortMsg:
+		if !m.acceptsSessionEvent(msg.sessionKey) {
+			cmds = append(cmds, m.bridge.waitCmd())
+			break
+		}
+		m.addActivity("Tool loop", "assistant stream paused while tools run", "tool")
+		m.statusText = "Using tools…"
+		cmds = append(cmds, m.bridge.waitCmd())
+	case chatErrorMsg:
+		if !m.acceptsSessionEvent(msg.sessionKey) {
+			cmds = append(cmds, m.bridge.waitCmd())
+			break
+		}
+		m.appendError(msg.err)
+		if m.pendingCount > 0 {
+			m.pendingCount--
+		}
+		if m.pendingCount == 0 {
+			m.statusText = "Error"
+		} else {
+			m.statusText = "Working…"
+		}
+		m.refreshViewport(true)
+		cmds = append(cmds, m.bridge.waitCmd())
+	case chatNoticeMsg:
+		if !m.acceptsSessionEvent(msg.sessionKey) {
+			cmds = append(cmds, m.bridge.waitCmd())
+			break
+		}
+		m.appendSystem("Runtime\n" + strings.TrimSpace(msg.text))
+		m.addActivity("Background", summarizeText(msg.text, 100), "notice")
+		if m.pendingCount == 0 {
+			m.statusText = "Background notice"
+		}
+		m.refreshViewport(true)
+		cmds = append(cmds, m.bridge.waitCmd())
+	case chatRuntimeLogMsg:
+		if !m.acceptsSessionEvent(msg.sessionKey) {
+			cmds = append(cmds, m.bridge.waitCmd())
+			break
+		}
+		text := strings.TrimSpace(msg.text)
+		if text == "" {
+			cmds = append(cmds, m.bridge.waitCmd())
+			break
+		}
+		title := "Runtime"
+		if msg.kind == "error" {
+			title = "Runtime error"
+			m.messages = append(m.messages, chatMessage{role: "error", content: title + "\n" + text})
+			if m.pendingCount == 0 {
+				m.statusText = "Runtime error"
+			}
+		} else {
+			m.appendSystem(title + "\n" + text)
+			if m.pendingCount == 0 {
+				m.statusText = "Runtime notice"
+			}
+		}
+		m.addActivity(title, summarizeText(text, 100), msg.kind)
+		m.refreshViewport(true)
+		cmds = append(cmds, m.bridge.waitCmd())
+	case chatSessionResetMsg:
+		if !m.acceptsSessionEvent(msg.sessionKey) {
+			cmds = append(cmds, m.bridge.waitCmd())
+			break
+		}
+		m.messages = nil
+		m.activity = nil
+		m.streamIndex = map[int]int{}
+		m.pendingCount = 0
+		m.statusText = fallback(strings.TrimSpace(msg.notice), "New session started.")
+		m.refreshViewport(true)
+		cmds = append(cmds, m.bridge.waitCmd())
+	case chatToolCallMsg:
+		if !m.acceptsSessionEvent(msg.sessionKey) {
+			cmds = append(cmds, m.bridge.waitCmd())
+			break
+		}
+		m.addActivity("Tool", fmt.Sprintf("%s %s", msg.name, strings.TrimSpace(msg.arguments)), "tool")
+		m.statusText = "Using tools…"
+		cmds = append(cmds, m.bridge.waitCmd())
+	case chatToolResultMsg:
+		if !m.acceptsSessionEvent(msg.sessionKey) {
+			cmds = append(cmds, m.bridge.waitCmd())
+			break
+		}
+		detail := msg.result
+		if strings.TrimSpace(msg.err) != "" {
+			detail = msg.err
+		}
+		m.addActivity("Result", fmt.Sprintf("%s · %s", msg.name, summarizeText(detail, 80)), "result")
+		if m.pendingCount == 0 {
+			m.statusText = "Ready"
+		}
+		cmds = append(cmds, m.bridge.waitCmd())
+	}
+
+	var inputCmd tea.Cmd
+	m.input, inputCmd = m.input.Update(msg)
+	cmds = append(cmds, inputCmd)
+	return m, tea.Batch(cmds...)
+}
+
+func (m chatModel) View() string {
+	if m.width == 0 || m.height == 0 {
+		return "Loading chat UI..."
+	}
+	layout := deriveChatLayout(m.width, m.height)
+	header := m.renderHeader(layout)
+	transcriptPanel := m.styles.panel.Width(layout.transcriptW).Height(maxInt(7, m.viewport.Height+2)).Render(m.styles.panelTitle.Render("Conversation") + "\n" + m.viewport.View())
+	var content string
+	if layout.stacked {
+		sidebarContent := m.renderSidebar(layout.panelWidth)
+		if layout.compactSidebar {
+			sidebarContent = m.renderSidebarCompact(layout.panelWidth)
+		}
+		sidebar := m.styles.panel.Width(layout.panelWidth).Render(sidebarContent)
+		content = lipgloss.JoinVertical(lipgloss.Left, transcriptPanel, sidebar)
+	} else {
+		sidebar := m.styles.panel.Width(layout.sidebarW).Height(maxInt(7, m.viewport.Height+2)).Render(m.renderSidebar(layout.sidebarW))
+		content = lipgloss.JoinHorizontal(lipgloss.Top, transcriptPanel, "  ", sidebar)
+	}
+	inputTitle := m.styles.panelTitle.Render("Message") + "  " + m.styles.status.Render(m.statusLabel())
+	inputPanel := m.styles.inputBox.Width(layout.panelWidth).Render(inputTitle + "\n" + m.input.View())
+	footer := m.renderFooter(layout)
+	return m.styles.app.Render(lipgloss.JoinVertical(lipgloss.Left, header, content, inputPanel, footer))
+}
+
+func (m *chatModel) resize() {
+	layout := deriveChatLayout(m.width, m.height)
+	m.viewport.Width = maxInt(20, layout.transcriptW-4)
+	m.viewport.Height = layout.viewportH
+	m.input.Width = maxInt(chatInputMinW, layout.panelWidth-6)
+}
+
+func (m *chatModel) renderHeader(layout chatLayout) string {
+	title := m.styles.title.Render("or3-intern chat")
+	session := m.styles.badge.Render("session " + safeLabel(m.sessionKey, "default"))
+	scope := m.styles.badgeCool.Render("scope " + safeLabel(m.scopeKey, m.sessionKey))
+	subtitleText := "Slash commands, live tool activity, scoped history, and a proper full-screen terminal UI."
+	if layout.compact {
+		subtitleText = "Slash commands, activity, and scoped history."
+	}
+	subtitle := m.styles.subtitle.Render(subtitleText)
+	if layout.compact {
+		return m.styles.header.Width(layout.panelWidth).Render(lipgloss.JoinVertical(lipgloss.Left, title, lipgloss.JoinHorizontal(lipgloss.Left, session, " ", scope), subtitle))
+	}
+	return m.styles.header.Width(layout.panelWidth).Render(lipgloss.JoinVertical(lipgloss.Left, lipgloss.JoinHorizontal(lipgloss.Center, title, "  ", session, " ", scope), subtitle))
+}
+
+func (m *chatModel) renderSidebar(width int) string {
+	sections := []string{
+		m.styles.panelTitle.Render("Status"),
+		m.styles.muted.Render("Pending turns: ") + fmt.Sprintf("%d", m.pendingCount),
+		m.styles.muted.Render("Scope sessions: ") + fmt.Sprintf("%d", len(m.scopeSessions)),
+		"",
+		m.styles.panelTitle.Render("Slash commands"),
+		m.styles.activity.Render("/commands  /status  /session  /session <key>\n/scope  /clear  /new  /prune  /exit"),
+		"",
+		m.styles.panelTitle.Render("Recent activity"),
+	}
+	if len(m.activity) == 0 {
+		sections = append(sections, m.styles.placeholder.Render("No tool activity yet."))
+	} else {
+		detailLimit := maxInt(20, width-8)
+		for _, item := range m.activity {
+			sections = append(sections, m.styles.activity.Render("• "+item.title), m.styles.muted.Render("  "+summarizeText(item.detail, detailLimit)))
+		}
+	}
+	return lipgloss.NewStyle().Width(width - 4).Render(strings.Join(sections, "\n"))
+}
+
+func (m *chatModel) renderSidebarCompact(width int) string {
+	sections := []string{
+		m.styles.panelTitle.Render("Status"),
+		m.styles.muted.Render("Pending: ") + fmt.Sprintf("%d", m.pendingCount),
+		m.styles.muted.Render("Scope sessions: ") + fmt.Sprintf("%d", len(m.scopeSessions)),
+		"",
+		m.styles.panelTitle.Render("Recent activity"),
+	}
+	if len(m.activity) == 0 {
+		sections = append(sections, m.styles.placeholder.Render("No recent tool activity."))
+	} else {
+		limit := minInt(3, len(m.activity))
+		detailLimit := maxInt(24, width-12)
+		for _, item := range m.activity[:limit] {
+			sections = append(sections, m.styles.activity.Render("• "+item.title+" · "+summarizeText(item.detail, detailLimit)))
+		}
+	}
+	sections = append(sections, "", m.styles.panelTitle.Render("Commands"), m.styles.activity.Render("/commands  /session  /scope  /clear"))
+	return lipgloss.NewStyle().Width(width - 4).Render(strings.Join(sections, "\n"))
+}
+
+func (m *chatModel) renderFooter(layout chatLayout) string {
+	line := strings.Join([]string{
+		"ctrl+/ commands",
+		"ctrl+s session",
+		"ctrl+l clear",
+		"ctrl+c quit",
+	}, " • ")
+	if layout.compact {
+		line = strings.Join([]string{"/commands", "/session", "/clear", "ctrl+c quit"}, " • ")
+	}
+	return m.styles.help.Width(layout.panelWidth).Render(truncateChatLine(line, maxInt(12, layout.panelWidth-2)))
+}
+
+func deriveChatLayout(width, height int) chatLayout {
+	panelWidth := maxInt(chatInputMinW, width-4)
+	stacked := width > 0 && width < 104
+	compact := (width > 0 && width < 82) || (height > 0 && height < 24)
+	transcriptW := panelWidth
+	sidebarW := panelWidth
+	if !stacked {
+		transcriptW = maxInt(chatViewportMinW, panelWidth-chatSidebarMinW-2)
+		sidebarW = maxInt(chatSidebarMinW, panelWidth-transcriptW-2)
+	}
+	// header(4) + transcript chrome(panel border 2 + title 1 + viewport pad 1)
+	// + input(4) + footer(1) ≈ 13. Stacked adds the sidebar block beneath
+	// the transcript so we have to reserve more vertical room for it.
+	reserved := 13
+	if stacked {
+		if compact {
+			reserved += 6
+		} else {
+			reserved += 8
+		}
+	}
+	viewportH := 6
+	if height > 0 {
+		viewportH = maxInt(6, height-reserved)
+	}
+	return chatLayout{
+		panelWidth:     panelWidth,
+		transcriptW:    transcriptW,
+		sidebarW:       sidebarW,
+		viewportH:      viewportH,
+		stacked:        stacked,
+		compact:        compact,
+		compactSidebar: stacked && compact,
+	}
+}
+
+func truncateChatLine(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	if limit <= 0 {
+		return ""
+	}
+	if lipgloss.Width(value) <= limit {
+		return value
+	}
+	if limit == 1 {
+		return "…"
+	}
+	runes := []rune(value)
+	for len(runes) > 0 && lipgloss.Width(string(runes)+"…") > limit {
+		runes = runes[:len(runes)-1]
+	}
+	if len(runes) == 0 {
+		return "…"
+	}
+	return strings.TrimRight(string(runes), " ") + "…"
+}
+
+func (m *chatModel) refreshViewport(stickBottom bool) {
+	atBottom := stickBottom || m.viewport.AtBottom()
+	contentWidth := maxInt(20, m.viewport.Width-chatMessagePadding)
+	if len(m.messages) == 0 {
+		m.viewport.SetContent(m.styles.placeholder.Render("No messages yet. Try /commands, ask a question, or switch sessions with /session <key>."))
+		return
+	}
+	blocks := make([]string, 0, len(m.messages))
+	for _, item := range m.messages {
+		blocks = append(blocks, renderChatMessage(m.styles, item, contentWidth))
+	}
+	m.viewport.SetContent(strings.Join(blocks, "\n\n"))
+	if atBottom {
+		m.viewport.GotoBottom()
+	}
+}
+
+func (m *chatModel) acceptsSessionEvent(sessionKey string) bool {
+	sessionKey = strings.TrimSpace(sessionKey)
+	return sessionKey == "" || sessionKey == m.sessionKey
+}
+
+func (m *chatModel) appendSystem(text string) {
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	m.messages = append(m.messages, chatMessage{role: "system", content: text})
+}
+
+func (m *chatModel) appendError(text string) {
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	m.messages = append(m.messages, chatMessage{role: "error", content: text})
+	if m.pendingCount > 0 {
+		m.pendingCount--
+	}
+	if strings.TrimSpace(m.statusText) == "" {
+		m.statusText = "Error"
+	}
+}
+
+func (m *chatModel) addActivity(title, detail, kind string) {
+	m.activity = append([]chatActivity{{title: title, detail: strings.TrimSpace(detail), kind: kind}}, m.activity...)
+	if len(m.activity) > chatActivityLimit {
+		m.activity = m.activity[:chatActivityLimit]
+	}
+}
+
+func (m *chatModel) handleLocalCommand(line string) (bool, tea.Cmd) {
+	trimmed := strings.TrimSpace(line)
+	parts := strings.Fields(trimmed)
+	if len(parts) == 0 {
+		return true, nil
+	}
+	switch parts[0] {
+	case "/exit", "/quit":
+		return true, tea.Quit
+	case "/commands", "/help":
+		m.appendSystem(localCommandsHelp())
+		return true, nil
+	case "/clear":
+		m.messages = nil
+		m.activity = nil
+		m.streamIndex = map[int]int{}
+		m.statusText = "Transcript cleared"
+		return true, nil
+	case "/session":
+		if len(parts) == 1 {
+			m.appendSystem(m.sessionSummary())
+			return true, nil
+		}
+		m.sessionKey = strings.TrimSpace(parts[1])
+		m.scopeKey = ""
+		m.scopeSessions = nil
+		m.pendingCount = 0
+		m.messages = nil
+		m.activity = nil
+		m.streamIndex = map[int]int{}
+		m.statusText = "Switched session to " + m.sessionKey
+		return true, loadChatHistoryCmd(m.ctx, m.store, m.sessionKey, m.historyLimit)
+	case "/scope":
+		m.appendSystem(scopeSummary(m.scopeKey, m.scopeSessions, m.sessionKey))
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+func (m *chatModel) sessionSummary() string {
+	return fmt.Sprintf("Current session: %s\nCurrent scope: %s\nScoped sessions: %s", safeLabel(m.sessionKey, "default"), safeLabel(m.scopeKey, m.sessionKey), strings.Join(nonEmptyOrDefault(m.scopeSessions, []string{m.sessionKey}), ", "))
+}
+
+func (m *chatModel) statusLabel() string {
+	if m.pendingCount > 0 {
+		return fmt.Sprintf("%s · %d request(s) in flight", fallback(m.statusText, "Working…"), m.pendingCount)
+	}
+	return fallback(m.statusText, "Ready")
+}
+
+func renderChatMessage(styles chatStyles, item chatMessage, width int) string {
+	content := lipgloss.NewStyle().Width(width).Render(strings.TrimSpace(item.content))
+	switch item.role {
+	case "user":
+		return styles.userLabel.Render("You") + "\n" + content
+	case "assistant":
+		label := "or3-intern"
+		if item.pending {
+			label += " · typing…"
+		}
+		return styles.panelTitle.Render(label) + "\n" + styles.assistant.Render(content)
+	case "system":
+		return styles.system.Render("System\n" + content)
+	case "error":
+		return styles.error.Render("Error\n" + content)
+	default:
+		return content
+	}
+}
+
+func localCommandsHelp() string {
+	return strings.Join([]string{
+		"Available local commands:",
+		"/commands or /help  Show this command list",
+		"/session             Show current session and scope",
+		"/session <key>       Switch to another session and load its history",
+		"/scope               Show all sessions linked to the current scope",
+		"/status              Show runtime context, memory, and token budget status",
+		"/clear               Clear only the current on-screen transcript",
+		"/new                 Clear backend history for the current session",
+		"/prune               Archive recent chat into memory and clear live context",
+		"/exit or /quit       Leave chat",
+		"Any other slash command is forwarded to the runtime, including skill commands.",
+	}, "\n")
+}
+
+func scopeSummary(scopeKey string, sessions []string, sessionKey string) string {
+	return fmt.Sprintf("Scope: %s\nSessions: %s", safeLabel(scopeKey, sessionKey), strings.Join(nonEmptyOrDefault(sessions, []string{sessionKey}), ", "))
+}
+
+func loadChatHistoryCmd(ctx context.Context, store historyStore, sessionKey string, limit int) tea.Cmd {
+	return func() tea.Msg {
+		if store == nil {
+			return chatHistoryLoadedMsg{sessionKey: sessionKey, scopeKey: sessionKey}
+		}
+		messages, err := store.GetLastMessagesScoped(ctx, sessionKey, limit)
+		if err != nil {
+			return chatHistoryLoadedMsg{sessionKey: sessionKey, err: err}
+		}
+		scopeKey, err := store.ResolveScopeKey(ctx, sessionKey)
+		if err != nil {
+			scopeKey = sessionKey
+		}
+		scopeSessions, err := store.ListScopeSessions(ctx, scopeKey)
+		if err != nil || len(scopeSessions) == 0 {
+			scopeSessions = []string{sessionKey}
+		}
+		items := make([]chatMessage, 0, len(messages))
+		for _, msg := range messages {
+			role := msg.Role
+			if role == "" {
+				role = "system"
+			}
+			items = append(items, chatMessage{role: role, content: msg.Content})
+		}
+		return chatHistoryLoadedMsg{sessionKey: sessionKey, scopeKey: scopeKey, scopeSessions: scopeSessions, items: items}
+	}
+}
+
+func (c *Channel) runBubbleTea(ctx context.Context) error {
+	bridge := newBubbleChatBridge()
+	defer bridge.close()
+	if c.Deliverer != nil {
+		c.Deliverer.SetBridge(bridge)
+		defer c.Deliverer.SetBridge(nil)
+	}
+	restoreLogs := captureBubbleTeaLogs(bridge)
+	defer restoreLogs()
+	publish := func(sessionKey, text string) bool {
+		return c.Bus.Publish(bus.Event{Type: bus.EventUserMessage, SessionKey: sessionKey, Channel: "cli", From: "local", Message: text})
+	}
+	model := newChatModel(ctx, c.SessionKey, bridge, c.History, publish)
+	program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithContext(ctx))
+	_, err := program.Run()
+	return err
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func summarizeText(text string, limit int) string {
+	text = strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
+	if len(text) <= limit || limit <= 3 {
+		return text
+	}
+	return text[:limit-1] + "…"
+}
+
+func safeLabel(value, fallbackValue string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallbackValue
+	}
+	return value
+}
+
+func fallback(value, fallbackValue string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallbackValue
+	}
+	return value
+}
+
+func nonEmptyOrDefault(values, fallbackValues []string) []string {
+	trimmed := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			trimmed = append(trimmed, value)
+		}
+	}
+	if len(trimmed) == 0 {
+		return fallbackValues
+	}
+	return trimmed
+}
+
+type bridgeObserver struct{ bridge *bubbleChatBridge }
+
+type bridgeLogWriter struct{ bridge *bubbleChatBridge }
+
+func (w bridgeLogWriter) Write(p []byte) (int, error) {
+	text := strings.TrimSpace(string(p))
+	if text == "" || w.bridge == nil {
+		return len(p), nil
+	}
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		w.bridge.emit(chatRuntimeLogMsg{sessionKey: "", text: line, kind: classifyRuntimeLogLine(line)})
+	}
+	return len(p), nil
+}
+
+func captureBubbleTeaLogs(bridge *bubbleChatBridge) func() {
+	if bridge == nil {
+		return func() {}
+	}
+	prevWriter := log.Writer()
+	log.SetOutput(io.MultiWriter(bridgeLogWriter{bridge: bridge}))
+	return func() {
+		log.SetOutput(prevWriter)
+	}
+}
+
+func classifyRuntimeLogLine(text string) string {
+	text = strings.ToLower(strings.TrimSpace(text))
+	switch {
+	case text == "":
+		return "notice"
+	case strings.Contains(text, " panic") || strings.Contains(text, "panic:"):
+		return "error"
+	case strings.Contains(text, " fatal") || strings.Contains(text, "fatal:"):
+		return "error"
+	case strings.Contains(text, " error") || strings.Contains(text, "error:"):
+		return "error"
+	case strings.Contains(text, " failed") || strings.Contains(text, "failed:"):
+		return "error"
+	case strings.Contains(text, " warning") || strings.Contains(text, "warning:"):
+		return "error"
+	default:
+		return "notice"
+	}
+}
+
+func (o bridgeObserver) OnTextDelta(context.Context, string) {}
+
+func (o bridgeObserver) OnToolCall(ctx context.Context, name string, arguments string) {
+	o.bridge.emit(chatToolCallMsg{sessionKey: agent.ConversationSessionFromContext(ctx), name: name, arguments: arguments})
+}
+
+func (o bridgeObserver) OnToolResult(ctx context.Context, name string, result string, err error) {
+	errText := ""
+	if err != nil {
+		errText = err.Error()
+	}
+	o.bridge.emit(chatToolResultMsg{sessionKey: agent.ConversationSessionFromContext(ctx), name: name, result: result, err: errText})
+}
+
+func (o bridgeObserver) OnCompletion(context.Context, string, bool) {}
+
+func (o bridgeObserver) OnError(ctx context.Context, err error) {
+	if err != nil {
+		o.bridge.emit(chatErrorMsg{sessionKey: agent.ConversationSessionFromContext(ctx), err: err.Error()})
+	}
+}
+
+func (d *Deliverer) Observer() agent.ConversationObserver {
+	if d == nil || d.bridge == nil {
+		return nil
+	}
+	return bridgeObserver{bridge: d.bridge}
+}
+````
 
 ## File: internal/cron/cron.go
-
-```go
+````go
 // Package cron stores and runs scheduled jobs backed by a JSON file.
 package cron
 
@@ -33705,11 +35487,10 @@ func randID() string {
 	}
 	return string(b)
 }
-```
+````
 
 ## File: internal/doctor/engine.go
-
-```go
+````go
 package doctor
 
 import (
@@ -35079,11 +36860,10 @@ func TopFindings(findings []Finding, limit int) []Finding {
 	}
 	return append([]Finding{}, findings[:limit]...)
 }
-```
+````
 
 ## File: internal/memory/retrieve.go
-
-```go
+````go
 // Package memory retrieves and consolidates long-lived memory entries.
 package memory
 
@@ -35642,11 +37422,10 @@ func normalizeFTSQuery(q string) string {
 	}
 	return strings.Join(parts, " ")
 }
-```
+````
 
 ## File: internal/skills/skills.go
-
-```go
+````go
 // Package skills discovers, evaluates, and loads skill metadata from multiple roots.
 package skills
 
@@ -37093,11 +38872,10 @@ func min(a, b int) int {
 	}
 	return b
 }
-```
+````
 
 ## File: internal/tools/cron.go
-
-```go
+````go
 package tools
 
 import (
@@ -37196,11 +38974,10 @@ func (t *CronTool) Execute(ctx context.Context, params map[string]any) (string, 
 		return "", fmt.Errorf("unknown action")
 	}
 }
-```
+````
 
 ## File: internal/tools/message.go
-
-```go
+````go
 package tools
 
 import (
@@ -37435,11 +39212,10 @@ func stringSlice(raw any) ([]string, error) {
 		return nil, fmt.Errorf("media must be an array of strings")
 	}
 }
-```
+````
 
 ## File: internal/tools/web_markdown.go
-
-```go
+````go
 package tools
 
 import (
@@ -37689,11 +39465,10 @@ func buildMarkdownFetchResult(ctx context.Context, store *artifacts.Store, conve
 		},
 	}, nil
 }
-```
+````
 
 ## File: cmd/or3-intern/devices_cmd.go
-
-```go
+````go
 package main
 
 import (
@@ -37811,11 +39586,10 @@ func runDevicesCommand(ctx context.Context, broker *approval.Broker, args []stri
 		return fmt.Errorf("unknown devices subcommand: %s", args[0])
 	}
 }
-```
+````
 
 ## File: cmd/or3-intern/pairing_cmd.go
-
-```go
+````go
 package main
 
 import (
@@ -37975,11 +39749,10 @@ func explainPairingLookupError(err error, requestID int64) error {
 	}
 	return err
 }
-```
+````
 
 ## File: cmd/or3-intern/settings_cmd.go
-
-```go
+````go
 package main
 
 import (
@@ -38347,11 +40120,10 @@ func exportSettingsConfig(out io.Writer, target string, cfg config.Config) error
 	fmt.Fprintf(out, "Exported advanced config to %s\n", target)
 	return nil
 }
-```
+````
 
 ## File: internal/agentcli/process.go
-
-```go
+````go
 package agentcli
 
 import (
@@ -38490,11 +40262,10 @@ func emitError(onEvent func(AgentRunEvent), seq int64, msg string) {
 		Message: msg,
 	})
 }
-```
+````
 
 ## File: internal/agentcli/registry.go
-
-```go
+````go
 package agentcli
 
 import (
@@ -38970,1045 +40741,10 @@ func (a *GeminiAdapter) BuildCommand(req AgentRunRequest) (CommandSpec, error) {
 		ArgvPreview: append([]string{}, args...),
 	}, nil
 }
-```
-
-## File: internal/channels/cli/chat_tui.go
-
-```go
-package cli
-
-import (
-	"context"
-	"fmt"
-	"io"
-	"log"
-	"strings"
-	"sync"
-	"sync/atomic"
-
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/textinput"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
-
-	"or3-intern/internal/agent"
-	"or3-intern/internal/bus"
-	"or3-intern/internal/db"
-)
-
-const (
-	chatHistoryLimit   = 80
-	chatActivityLimit  = 10
-	chatViewportMinW   = 40
-	chatSidebarMinW    = 28
-	chatInputMinW      = 24
-	chatInputPanelH    = 3
-	chatHeaderPanelH   = 4
-	chatMessagePadding = 2
-)
-
-type historyStore interface {
-	GetLastMessagesScoped(ctx context.Context, sessionKey string, limit int) ([]db.Message, error)
-	ResolveScopeKey(ctx context.Context, sessionKey string) (string, error)
-	ListScopeSessions(ctx context.Context, scopeKey string) ([]string, error)
-}
-
-type bubbleChatBridge struct {
-	events       chan tea.Msg
-	done         chan struct{}
-	closeOnce    sync.Once
-	nextStreamID atomic.Int64
-}
-
-func newBubbleChatBridge() *bubbleChatBridge {
-	return &bubbleChatBridge{events: make(chan tea.Msg, 256), done: make(chan struct{})}
-}
-
-type chatBridgeClosedMsg struct{}
-
-func (b *bubbleChatBridge) waitCmd() tea.Cmd {
-	return func() tea.Msg {
-		if b == nil {
-			return chatBridgeClosedMsg{}
-		}
-		select {
-		case msg := <-b.events:
-			return msg
-		case <-b.done:
-			return chatBridgeClosedMsg{}
-		}
-	}
-}
-
-func (b *bubbleChatBridge) emit(msg tea.Msg) bool {
-	if b == nil || msg == nil {
-		return false
-	}
-	select {
-	case <-b.done:
-		return false
-	case b.events <- msg:
-		return true
-	default:
-		return false
-	}
-}
-
-func (b *bubbleChatBridge) close() {
-	if b == nil {
-		return
-	}
-	b.closeOnce.Do(func() {
-		close(b.done)
-	})
-}
-
-func (b *bubbleChatBridge) newStreamID() int {
-	if b == nil {
-		return 0
-	}
-	return int(b.nextStreamID.Add(1))
-}
-
-type chatHistoryLoadedMsg struct {
-	sessionKey    string
-	scopeKey      string
-	scopeSessions []string
-	items         []chatMessage
-	err           error
-}
-
-type chatAssistantDeltaMsg struct {
-	sessionKey string
-	streamID   int
-	text       string
-}
-
-type chatAssistantCloseMsg struct {
-	sessionKey string
-	streamID   int
-	finalText  string
-	complete   bool
-}
-
-type chatAssistantAbortMsg struct {
-	sessionKey string
-	streamID   int
-}
-
-type chatErrorMsg struct {
-	sessionKey string
-	err        string
-}
-
-type chatNoticeMsg struct {
-	sessionKey string
-	text       string
-}
-
-type chatRuntimeLogMsg struct {
-	sessionKey string
-	text       string
-	kind       string
-}
-
-type chatSessionResetMsg struct {
-	sessionKey string
-	notice     string
-}
-
-type chatToolCallMsg struct {
-	sessionKey string
-	name       string
-	arguments  string
-}
-
-type chatToolResultMsg struct {
-	sessionKey string
-	name       string
-	result     string
-	err        string
-}
-
-type chatMessage struct {
-	role    string
-	content string
-	pending bool
-}
-
-type chatActivity struct {
-	title  string
-	detail string
-	kind   string
-}
-
-type chatKeyMap struct {
-	Send       key.Binding
-	Quit       key.Binding
-	ClearInput key.Binding
-	ScrollUp   key.Binding
-	ScrollDown key.Binding
-	ScrollTop  key.Binding
-	ScrollEnd  key.Binding
-	Commands   key.Binding
-	Session    key.Binding
-	ClearView  key.Binding
-}
-
-func newChatKeyMap() chatKeyMap {
-	return chatKeyMap{
-		Send:       key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "send")),
-		Quit:       key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "quit")),
-		ClearInput: key.NewBinding(key.WithKeys("ctrl+u"), key.WithHelp("ctrl+u", "clear input")),
-		ScrollUp:   key.NewBinding(key.WithKeys("pgup", "shift+up", "up"), key.WithHelp("↑/pgup", "scroll up")),
-		ScrollDown: key.NewBinding(key.WithKeys("pgdown", "shift+down", "down"), key.WithHelp("↓/pgdn", "scroll down")),
-		ScrollTop:  key.NewBinding(key.WithKeys("home"), key.WithHelp("home", "scroll to top")),
-		ScrollEnd:  key.NewBinding(key.WithKeys("end"), key.WithHelp("end", "scroll to end")),
-		Commands:   key.NewBinding(key.WithKeys("ctrl+/"), key.WithHelp("ctrl+/", "commands")),
-		Session:    key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("ctrl+s", "session info")),
-		ClearView:  key.NewBinding(key.WithKeys("ctrl+l"), key.WithHelp("ctrl+l", "clear view")),
-	}
-}
-
-func (k chatKeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Send, k.ScrollUp, k.ScrollDown, k.Commands, k.Session, k.ClearView, k.Quit}
-}
-
-func (k chatKeyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{{k.Send, k.ClearInput, k.Commands, k.Session}, {k.ScrollUp, k.ScrollDown, k.ScrollTop, k.ScrollEnd}, {k.ClearView, k.Quit}}
-}
-
-type chatStyles struct {
-	app         lipgloss.Style
-	header      lipgloss.Style
-	title       lipgloss.Style
-	subtitle    lipgloss.Style
-	panel       lipgloss.Style
-	panelTitle  lipgloss.Style
-	muted       lipgloss.Style
-	status      lipgloss.Style
-	inputBox    lipgloss.Style
-	userLabel   lipgloss.Style
-	assistant   lipgloss.Style
-	system      lipgloss.Style
-	error       lipgloss.Style
-	activity    lipgloss.Style
-	badge       lipgloss.Style
-	badgeWarm   lipgloss.Style
-	badgeCool   lipgloss.Style
-	help        lipgloss.Style
-	placeholder lipgloss.Style
-}
-
-type chatLayout struct {
-	panelWidth     int
-	transcriptW    int
-	sidebarW       int
-	viewportH      int
-	stacked        bool
-	compact        bool
-	compactSidebar bool
-}
-
-func newChatStyles() chatStyles {
-	border := lipgloss.RoundedBorder()
-	return chatStyles{
-		app:         lipgloss.NewStyle().Padding(0, 1),
-		header:      lipgloss.NewStyle().BorderStyle(border).BorderForeground(lipgloss.Color("63")).Padding(0, 1),
-		title:       lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("86")),
-		subtitle:    lipgloss.NewStyle().Foreground(lipgloss.Color("245")),
-		panel:       lipgloss.NewStyle().BorderStyle(border).BorderForeground(lipgloss.Color("240")).Padding(0, 1),
-		panelTitle:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("111")),
-		muted:       lipgloss.NewStyle().Foreground(lipgloss.Color("244")),
-		status:      lipgloss.NewStyle().Foreground(lipgloss.Color("229")),
-		inputBox:    lipgloss.NewStyle().BorderStyle(border).BorderForeground(lipgloss.Color("69")).Padding(0, 1),
-		userLabel:   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("81")),
-		assistant:   lipgloss.NewStyle().Foreground(lipgloss.Color("252")),
-		system:      lipgloss.NewStyle().Foreground(lipgloss.Color("221")),
-		error:       lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true),
-		activity:    lipgloss.NewStyle().Foreground(lipgloss.Color("250")),
-		badge:       lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("62")).Padding(0, 1),
-		badgeWarm:   lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("166")).Padding(0, 1),
-		badgeCool:   lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("32")).Padding(0, 1),
-		help:        lipgloss.NewStyle().Foreground(lipgloss.Color("241")),
-		placeholder: lipgloss.NewStyle().Foreground(lipgloss.Color("240")),
-	}
-}
-
-type chatModel struct {
-	ctx           context.Context
-	bridge        *bubbleChatBridge
-	store         historyStore
-	publish       func(sessionKey, text string) bool
-	width         int
-	height        int
-	sessionKey    string
-	scopeKey      string
-	scopeSessions []string
-	viewport      viewport.Model
-	input         textinput.Model
-	keys          chatKeyMap
-	styles        chatStyles
-	messages      []chatMessage
-	activity      []chatActivity
-	streamIndex   map[int]int
-	pendingCount  int
-	statusText    string
-	historyLimit  int
-}
-
-func newChatModel(ctx context.Context, sessionKey string, bridge *bubbleChatBridge, store historyStore, publish func(sessionKey, text string) bool) chatModel {
-	input := textinput.New()
-	input.Placeholder = "Ask anything, or type /commands"
-	input.Prompt = ""
-	input.CharLimit = 0
-	input.Focus()
-	input.Width = 80
-	vp := viewport.New(80, 20)
-	vp.YPosition = 0
-	vp.MouseWheelEnabled = true
-	return chatModel{
-		ctx:          ctx,
-		bridge:       bridge,
-		store:        store,
-		publish:      publish,
-		sessionKey:   strings.TrimSpace(sessionKey),
-		viewport:     vp,
-		input:        input,
-		keys:         newChatKeyMap(),
-		styles:       newChatStyles(),
-		streamIndex:  map[int]int{},
-		statusText:   "Ready",
-		historyLimit: chatHistoryLimit,
-	}
-}
-
-func (m chatModel) Init() tea.Cmd {
-	return tea.Batch(textinput.Blink, m.bridge.waitCmd(), loadChatHistoryCmd(m.ctx, m.store, m.sessionKey, m.historyLimit))
-}
-
-func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var cmds []tea.Cmd
-	switch msg := msg.(type) {
-	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-		m.resize()
-		m.refreshViewport(true)
-	case tea.MouseMsg:
-		var vpCmd tea.Cmd
-		m.viewport, vpCmd = m.viewport.Update(msg)
-		cmds = append(cmds, vpCmd)
-		return m, tea.Batch(cmds...)
-	case chatBridgeClosedMsg:
-		return m, nil
-	case tea.KeyMsg:
-		handledKey := false
-		switch {
-		case key.Matches(msg, m.keys.Quit):
-			return m, tea.Quit
-		case key.Matches(msg, m.keys.ClearInput):
-			handledKey = true
-			m.input.SetValue("")
-		case key.Matches(msg, m.keys.ScrollUp):
-			handledKey = true
-			m.viewport.LineUp(3)
-		case key.Matches(msg, m.keys.ScrollDown):
-			handledKey = true
-			m.viewport.LineDown(3)
-		case key.Matches(msg, m.keys.ScrollTop):
-			handledKey = true
-			m.viewport.GotoTop()
-		case key.Matches(msg, m.keys.ScrollEnd):
-			handledKey = true
-			m.viewport.GotoBottom()
-		case key.Matches(msg, m.keys.Commands):
-			handledKey = true
-			m.appendSystem(localCommandsHelp())
-			m.refreshViewport(true)
-		case key.Matches(msg, m.keys.Session):
-			handledKey = true
-			m.appendSystem(m.sessionSummary())
-			m.refreshViewport(true)
-		case key.Matches(msg, m.keys.ClearView):
-			handledKey = true
-			m.messages = nil
-			m.activity = nil
-			m.streamIndex = map[int]int{}
-			m.statusText = "Transcript cleared"
-			m.refreshViewport(true)
-		case key.Matches(msg, m.keys.Send):
-			handledKey = true
-			line := strings.TrimSpace(m.input.Value())
-			if line == "" {
-				break
-			}
-			m.input.SetValue("")
-			if handled, cmd := m.handleLocalCommand(line); handled {
-				m.refreshViewport(true)
-				if cmd != nil {
-					cmds = append(cmds, cmd)
-				}
-				break
-			}
-			if line == "/new" {
-				m.statusText = "Starting new session…"
-			} else if line == "/prune" {
-				m.statusText = "Pruning context…"
-			} else if line == "/status" {
-				m.statusText = "Loading status…"
-			}
-			m.messages = append(m.messages, chatMessage{role: "user", content: line})
-			if m.publish == nil || !m.publish(m.sessionKey, line) {
-				m.appendError("queue full — message dropped")
-			} else {
-				m.pendingCount++
-				if line != "/new" && line != "/status" && line != "/prune" {
-					m.statusText = "Thinking…"
-				}
-			}
-			m.refreshViewport(true)
-		}
-		if handledKey {
-			return m, tea.Batch(cmds...)
-		}
-	case chatHistoryLoadedMsg:
-		if msg.err != nil {
-			m.appendError("load history: " + msg.err.Error())
-		} else if msg.sessionKey == m.sessionKey {
-			m.scopeKey = msg.scopeKey
-			m.scopeSessions = msg.scopeSessions
-			m.messages = msg.items
-			m.streamIndex = map[int]int{}
-			m.statusText = fmt.Sprintf("Loaded %d messages", len(msg.items))
-		}
-		m.refreshViewport(true)
-	case chatAssistantDeltaMsg:
-		if !m.acceptsSessionEvent(msg.sessionKey) {
-			cmds = append(cmds, m.bridge.waitCmd())
-			break
-		}
-		idx, ok := m.streamIndex[msg.streamID]
-		if !ok {
-			m.messages = append(m.messages, chatMessage{role: "assistant", pending: true})
-			idx = len(m.messages) - 1
-			m.streamIndex[msg.streamID] = idx
-		}
-		m.messages[idx].content += msg.text
-		m.messages[idx].pending = true
-		m.statusText = "Streaming response…"
-		m.refreshViewport(true)
-		cmds = append(cmds, m.bridge.waitCmd())
-	case chatAssistantCloseMsg:
-		if !m.acceptsSessionEvent(msg.sessionKey) {
-			cmds = append(cmds, m.bridge.waitCmd())
-			break
-		}
-		if idx, ok := m.streamIndex[msg.streamID]; ok {
-			if strings.TrimSpace(msg.finalText) != "" && strings.TrimSpace(m.messages[idx].content) == "" {
-				m.messages[idx].content = msg.finalText
-			}
-			m.messages[idx].pending = false
-			delete(m.streamIndex, msg.streamID)
-		} else if strings.TrimSpace(msg.finalText) != "" {
-			m.messages = append(m.messages, chatMessage{role: "assistant", content: msg.finalText})
-		}
-		if msg.complete && m.pendingCount > 0 {
-			m.pendingCount--
-		}
-		if m.pendingCount == 0 {
-			m.statusText = "Ready"
-		} else {
-			m.statusText = "Working…"
-		}
-		m.refreshViewport(true)
-		cmds = append(cmds, m.bridge.waitCmd())
-	case chatAssistantAbortMsg:
-		if !m.acceptsSessionEvent(msg.sessionKey) {
-			cmds = append(cmds, m.bridge.waitCmd())
-			break
-		}
-		m.addActivity("Tool loop", "assistant stream paused while tools run", "tool")
-		m.statusText = "Using tools…"
-		cmds = append(cmds, m.bridge.waitCmd())
-	case chatErrorMsg:
-		if !m.acceptsSessionEvent(msg.sessionKey) {
-			cmds = append(cmds, m.bridge.waitCmd())
-			break
-		}
-		m.appendError(msg.err)
-		if m.pendingCount > 0 {
-			m.pendingCount--
-		}
-		if m.pendingCount == 0 {
-			m.statusText = "Error"
-		} else {
-			m.statusText = "Working…"
-		}
-		m.refreshViewport(true)
-		cmds = append(cmds, m.bridge.waitCmd())
-	case chatNoticeMsg:
-		if !m.acceptsSessionEvent(msg.sessionKey) {
-			cmds = append(cmds, m.bridge.waitCmd())
-			break
-		}
-		m.appendSystem("Runtime\n" + strings.TrimSpace(msg.text))
-		m.addActivity("Background", summarizeText(msg.text, 100), "notice")
-		if m.pendingCount == 0 {
-			m.statusText = "Background notice"
-		}
-		m.refreshViewport(true)
-		cmds = append(cmds, m.bridge.waitCmd())
-	case chatRuntimeLogMsg:
-		if !m.acceptsSessionEvent(msg.sessionKey) {
-			cmds = append(cmds, m.bridge.waitCmd())
-			break
-		}
-		text := strings.TrimSpace(msg.text)
-		if text == "" {
-			cmds = append(cmds, m.bridge.waitCmd())
-			break
-		}
-		title := "Runtime"
-		if msg.kind == "error" {
-			title = "Runtime error"
-			m.messages = append(m.messages, chatMessage{role: "error", content: title + "\n" + text})
-			if m.pendingCount == 0 {
-				m.statusText = "Runtime error"
-			}
-		} else {
-			m.appendSystem(title + "\n" + text)
-			if m.pendingCount == 0 {
-				m.statusText = "Runtime notice"
-			}
-		}
-		m.addActivity(title, summarizeText(text, 100), msg.kind)
-		m.refreshViewport(true)
-		cmds = append(cmds, m.bridge.waitCmd())
-	case chatSessionResetMsg:
-		if !m.acceptsSessionEvent(msg.sessionKey) {
-			cmds = append(cmds, m.bridge.waitCmd())
-			break
-		}
-		m.messages = nil
-		m.activity = nil
-		m.streamIndex = map[int]int{}
-		m.pendingCount = 0
-		m.statusText = fallback(strings.TrimSpace(msg.notice), "New session started.")
-		m.refreshViewport(true)
-		cmds = append(cmds, m.bridge.waitCmd())
-	case chatToolCallMsg:
-		if !m.acceptsSessionEvent(msg.sessionKey) {
-			cmds = append(cmds, m.bridge.waitCmd())
-			break
-		}
-		m.addActivity("Tool", fmt.Sprintf("%s %s", msg.name, strings.TrimSpace(msg.arguments)), "tool")
-		m.statusText = "Using tools…"
-		cmds = append(cmds, m.bridge.waitCmd())
-	case chatToolResultMsg:
-		if !m.acceptsSessionEvent(msg.sessionKey) {
-			cmds = append(cmds, m.bridge.waitCmd())
-			break
-		}
-		detail := msg.result
-		if strings.TrimSpace(msg.err) != "" {
-			detail = msg.err
-		}
-		m.addActivity("Result", fmt.Sprintf("%s · %s", msg.name, summarizeText(detail, 80)), "result")
-		if m.pendingCount == 0 {
-			m.statusText = "Ready"
-		}
-		cmds = append(cmds, m.bridge.waitCmd())
-	}
-
-	var inputCmd tea.Cmd
-	m.input, inputCmd = m.input.Update(msg)
-	cmds = append(cmds, inputCmd)
-	return m, tea.Batch(cmds...)
-}
-
-func (m chatModel) View() string {
-	if m.width == 0 || m.height == 0 {
-		return "Loading chat UI..."
-	}
-	layout := deriveChatLayout(m.width, m.height)
-	header := m.renderHeader(layout)
-	transcriptPanel := m.styles.panel.Width(layout.transcriptW).Height(maxInt(7, m.viewport.Height+2)).Render(m.styles.panelTitle.Render("Conversation") + "\n" + m.viewport.View())
-	var content string
-	if layout.stacked {
-		sidebarContent := m.renderSidebar(layout.panelWidth)
-		if layout.compactSidebar {
-			sidebarContent = m.renderSidebarCompact(layout.panelWidth)
-		}
-		sidebar := m.styles.panel.Width(layout.panelWidth).Render(sidebarContent)
-		content = lipgloss.JoinVertical(lipgloss.Left, transcriptPanel, sidebar)
-	} else {
-		sidebar := m.styles.panel.Width(layout.sidebarW).Height(maxInt(7, m.viewport.Height+2)).Render(m.renderSidebar(layout.sidebarW))
-		content = lipgloss.JoinHorizontal(lipgloss.Top, transcriptPanel, "  ", sidebar)
-	}
-	inputTitle := m.styles.panelTitle.Render("Message") + "  " + m.styles.status.Render(m.statusLabel())
-	inputPanel := m.styles.inputBox.Width(layout.panelWidth).Render(inputTitle + "\n" + m.input.View())
-	footer := m.renderFooter(layout)
-	return m.styles.app.Render(lipgloss.JoinVertical(lipgloss.Left, header, content, inputPanel, footer))
-}
-
-func (m *chatModel) resize() {
-	layout := deriveChatLayout(m.width, m.height)
-	m.viewport.Width = maxInt(20, layout.transcriptW-4)
-	m.viewport.Height = layout.viewportH
-	m.input.Width = maxInt(chatInputMinW, layout.panelWidth-6)
-}
-
-func (m *chatModel) renderHeader(layout chatLayout) string {
-	title := m.styles.title.Render("or3-intern chat")
-	session := m.styles.badge.Render("session " + safeLabel(m.sessionKey, "default"))
-	scope := m.styles.badgeCool.Render("scope " + safeLabel(m.scopeKey, m.sessionKey))
-	subtitleText := "Slash commands, live tool activity, scoped history, and a proper full-screen terminal UI."
-	if layout.compact {
-		subtitleText = "Slash commands, activity, and scoped history."
-	}
-	subtitle := m.styles.subtitle.Render(subtitleText)
-	if layout.compact {
-		return m.styles.header.Width(layout.panelWidth).Render(lipgloss.JoinVertical(lipgloss.Left, title, lipgloss.JoinHorizontal(lipgloss.Left, session, " ", scope), subtitle))
-	}
-	return m.styles.header.Width(layout.panelWidth).Render(lipgloss.JoinVertical(lipgloss.Left, lipgloss.JoinHorizontal(lipgloss.Center, title, "  ", session, " ", scope), subtitle))
-}
-
-func (m *chatModel) renderSidebar(width int) string {
-	sections := []string{
-		m.styles.panelTitle.Render("Status"),
-		m.styles.muted.Render("Pending turns: ") + fmt.Sprintf("%d", m.pendingCount),
-		m.styles.muted.Render("Scope sessions: ") + fmt.Sprintf("%d", len(m.scopeSessions)),
-		"",
-		m.styles.panelTitle.Render("Slash commands"),
-		m.styles.activity.Render("/commands  /status  /session  /session <key>\n/scope  /clear  /new  /prune  /exit"),
-		"",
-		m.styles.panelTitle.Render("Recent activity"),
-	}
-	if len(m.activity) == 0 {
-		sections = append(sections, m.styles.placeholder.Render("No tool activity yet."))
-	} else {
-		detailLimit := maxInt(20, width-8)
-		for _, item := range m.activity {
-			sections = append(sections, m.styles.activity.Render("• "+item.title), m.styles.muted.Render("  "+summarizeText(item.detail, detailLimit)))
-		}
-	}
-	return lipgloss.NewStyle().Width(width - 4).Render(strings.Join(sections, "\n"))
-}
-
-func (m *chatModel) renderSidebarCompact(width int) string {
-	sections := []string{
-		m.styles.panelTitle.Render("Status"),
-		m.styles.muted.Render("Pending: ") + fmt.Sprintf("%d", m.pendingCount),
-		m.styles.muted.Render("Scope sessions: ") + fmt.Sprintf("%d", len(m.scopeSessions)),
-		"",
-		m.styles.panelTitle.Render("Recent activity"),
-	}
-	if len(m.activity) == 0 {
-		sections = append(sections, m.styles.placeholder.Render("No recent tool activity."))
-	} else {
-		limit := minInt(3, len(m.activity))
-		detailLimit := maxInt(24, width-12)
-		for _, item := range m.activity[:limit] {
-			sections = append(sections, m.styles.activity.Render("• "+item.title+" · "+summarizeText(item.detail, detailLimit)))
-		}
-	}
-	sections = append(sections, "", m.styles.panelTitle.Render("Commands"), m.styles.activity.Render("/commands  /session  /scope  /clear"))
-	return lipgloss.NewStyle().Width(width - 4).Render(strings.Join(sections, "\n"))
-}
-
-func (m *chatModel) renderFooter(layout chatLayout) string {
-	line := strings.Join([]string{
-		"ctrl+/ commands",
-		"ctrl+s session",
-		"ctrl+l clear",
-		"ctrl+c quit",
-	}, " • ")
-	if layout.compact {
-		line = strings.Join([]string{"/commands", "/session", "/clear", "ctrl+c quit"}, " • ")
-	}
-	return m.styles.help.Width(layout.panelWidth).Render(truncateChatLine(line, maxInt(12, layout.panelWidth-2)))
-}
-
-func deriveChatLayout(width, height int) chatLayout {
-	panelWidth := maxInt(chatInputMinW, width-4)
-	stacked := width > 0 && width < 104
-	compact := (width > 0 && width < 82) || (height > 0 && height < 24)
-	transcriptW := panelWidth
-	sidebarW := panelWidth
-	if !stacked {
-		transcriptW = maxInt(chatViewportMinW, panelWidth-chatSidebarMinW-2)
-		sidebarW = maxInt(chatSidebarMinW, panelWidth-transcriptW-2)
-	}
-	// header(4) + transcript chrome(panel border 2 + title 1 + viewport pad 1)
-	// + input(4) + footer(1) ≈ 13. Stacked adds the sidebar block beneath
-	// the transcript so we have to reserve more vertical room for it.
-	reserved := 13
-	if stacked {
-		if compact {
-			reserved += 6
-		} else {
-			reserved += 8
-		}
-	}
-	viewportH := 6
-	if height > 0 {
-		viewportH = maxInt(6, height-reserved)
-	}
-	return chatLayout{
-		panelWidth:     panelWidth,
-		transcriptW:    transcriptW,
-		sidebarW:       sidebarW,
-		viewportH:      viewportH,
-		stacked:        stacked,
-		compact:        compact,
-		compactSidebar: stacked && compact,
-	}
-}
-
-func truncateChatLine(value string, limit int) string {
-	value = strings.TrimSpace(value)
-	if limit <= 0 {
-		return ""
-	}
-	if lipgloss.Width(value) <= limit {
-		return value
-	}
-	if limit == 1 {
-		return "…"
-	}
-	runes := []rune(value)
-	for len(runes) > 0 && lipgloss.Width(string(runes)+"…") > limit {
-		runes = runes[:len(runes)-1]
-	}
-	if len(runes) == 0 {
-		return "…"
-	}
-	return strings.TrimRight(string(runes), " ") + "…"
-}
-
-func (m *chatModel) refreshViewport(stickBottom bool) {
-	atBottom := stickBottom || m.viewport.AtBottom()
-	contentWidth := maxInt(20, m.viewport.Width-chatMessagePadding)
-	if len(m.messages) == 0 {
-		m.viewport.SetContent(m.styles.placeholder.Render("No messages yet. Try /commands, ask a question, or switch sessions with /session <key>."))
-		return
-	}
-	blocks := make([]string, 0, len(m.messages))
-	for _, item := range m.messages {
-		blocks = append(blocks, renderChatMessage(m.styles, item, contentWidth))
-	}
-	m.viewport.SetContent(strings.Join(blocks, "\n\n"))
-	if atBottom {
-		m.viewport.GotoBottom()
-	}
-}
-
-func (m *chatModel) acceptsSessionEvent(sessionKey string) bool {
-	sessionKey = strings.TrimSpace(sessionKey)
-	return sessionKey == "" || sessionKey == m.sessionKey
-}
-
-func (m *chatModel) appendSystem(text string) {
-	if strings.TrimSpace(text) == "" {
-		return
-	}
-	m.messages = append(m.messages, chatMessage{role: "system", content: text})
-}
-
-func (m *chatModel) appendError(text string) {
-	if strings.TrimSpace(text) == "" {
-		return
-	}
-	m.messages = append(m.messages, chatMessage{role: "error", content: text})
-	if m.pendingCount > 0 {
-		m.pendingCount--
-	}
-	if strings.TrimSpace(m.statusText) == "" {
-		m.statusText = "Error"
-	}
-}
-
-func (m *chatModel) addActivity(title, detail, kind string) {
-	m.activity = append([]chatActivity{{title: title, detail: strings.TrimSpace(detail), kind: kind}}, m.activity...)
-	if len(m.activity) > chatActivityLimit {
-		m.activity = m.activity[:chatActivityLimit]
-	}
-}
-
-func (m *chatModel) handleLocalCommand(line string) (bool, tea.Cmd) {
-	trimmed := strings.TrimSpace(line)
-	parts := strings.Fields(trimmed)
-	if len(parts) == 0 {
-		return true, nil
-	}
-	switch parts[0] {
-	case "/exit", "/quit":
-		return true, tea.Quit
-	case "/commands", "/help":
-		m.appendSystem(localCommandsHelp())
-		return true, nil
-	case "/clear":
-		m.messages = nil
-		m.activity = nil
-		m.streamIndex = map[int]int{}
-		m.statusText = "Transcript cleared"
-		return true, nil
-	case "/session":
-		if len(parts) == 1 {
-			m.appendSystem(m.sessionSummary())
-			return true, nil
-		}
-		m.sessionKey = strings.TrimSpace(parts[1])
-		m.scopeKey = ""
-		m.scopeSessions = nil
-		m.pendingCount = 0
-		m.messages = nil
-		m.activity = nil
-		m.streamIndex = map[int]int{}
-		m.statusText = "Switched session to " + m.sessionKey
-		return true, loadChatHistoryCmd(m.ctx, m.store, m.sessionKey, m.historyLimit)
-	case "/scope":
-		m.appendSystem(scopeSummary(m.scopeKey, m.scopeSessions, m.sessionKey))
-		return true, nil
-	default:
-		return false, nil
-	}
-}
-
-func (m *chatModel) sessionSummary() string {
-	return fmt.Sprintf("Current session: %s\nCurrent scope: %s\nScoped sessions: %s", safeLabel(m.sessionKey, "default"), safeLabel(m.scopeKey, m.sessionKey), strings.Join(nonEmptyOrDefault(m.scopeSessions, []string{m.sessionKey}), ", "))
-}
-
-func (m *chatModel) statusLabel() string {
-	if m.pendingCount > 0 {
-		return fmt.Sprintf("%s · %d request(s) in flight", fallback(m.statusText, "Working…"), m.pendingCount)
-	}
-	return fallback(m.statusText, "Ready")
-}
-
-func renderChatMessage(styles chatStyles, item chatMessage, width int) string {
-	content := lipgloss.NewStyle().Width(width).Render(strings.TrimSpace(item.content))
-	switch item.role {
-	case "user":
-		return styles.userLabel.Render("You") + "\n" + content
-	case "assistant":
-		label := "or3-intern"
-		if item.pending {
-			label += " · typing…"
-		}
-		return styles.panelTitle.Render(label) + "\n" + styles.assistant.Render(content)
-	case "system":
-		return styles.system.Render("System\n" + content)
-	case "error":
-		return styles.error.Render("Error\n" + content)
-	default:
-		return content
-	}
-}
-
-func localCommandsHelp() string {
-	return strings.Join([]string{
-		"Available local commands:",
-		"/commands or /help  Show this command list",
-		"/session             Show current session and scope",
-		"/session <key>       Switch to another session and load its history",
-		"/scope               Show all sessions linked to the current scope",
-		"/status              Show runtime context, memory, and token budget status",
-		"/clear               Clear only the current on-screen transcript",
-		"/new                 Clear backend history for the current session",
-		"/prune               Archive recent chat into memory and clear live context",
-		"/exit or /quit       Leave chat",
-		"Any other slash command is forwarded to the runtime, including skill commands.",
-	}, "\n")
-}
-
-func scopeSummary(scopeKey string, sessions []string, sessionKey string) string {
-	return fmt.Sprintf("Scope: %s\nSessions: %s", safeLabel(scopeKey, sessionKey), strings.Join(nonEmptyOrDefault(sessions, []string{sessionKey}), ", "))
-}
-
-func loadChatHistoryCmd(ctx context.Context, store historyStore, sessionKey string, limit int) tea.Cmd {
-	return func() tea.Msg {
-		if store == nil {
-			return chatHistoryLoadedMsg{sessionKey: sessionKey, scopeKey: sessionKey}
-		}
-		messages, err := store.GetLastMessagesScoped(ctx, sessionKey, limit)
-		if err != nil {
-			return chatHistoryLoadedMsg{sessionKey: sessionKey, err: err}
-		}
-		scopeKey, err := store.ResolveScopeKey(ctx, sessionKey)
-		if err != nil {
-			scopeKey = sessionKey
-		}
-		scopeSessions, err := store.ListScopeSessions(ctx, scopeKey)
-		if err != nil || len(scopeSessions) == 0 {
-			scopeSessions = []string{sessionKey}
-		}
-		items := make([]chatMessage, 0, len(messages))
-		for _, msg := range messages {
-			role := msg.Role
-			if role == "" {
-				role = "system"
-			}
-			items = append(items, chatMessage{role: role, content: msg.Content})
-		}
-		return chatHistoryLoadedMsg{sessionKey: sessionKey, scopeKey: scopeKey, scopeSessions: scopeSessions, items: items}
-	}
-}
-
-func (c *Channel) runBubbleTea(ctx context.Context) error {
-	bridge := newBubbleChatBridge()
-	defer bridge.close()
-	if c.Deliverer != nil {
-		c.Deliverer.SetBridge(bridge)
-		defer c.Deliverer.SetBridge(nil)
-	}
-	restoreLogs := captureBubbleTeaLogs(bridge)
-	defer restoreLogs()
-	publish := func(sessionKey, text string) bool {
-		return c.Bus.Publish(bus.Event{Type: bus.EventUserMessage, SessionKey: sessionKey, Channel: "cli", From: "local", Message: text})
-	}
-	model := newChatModel(ctx, c.SessionKey, bridge, c.History, publish)
-	program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithContext(ctx))
-	_, err := program.Run()
-	return err
-}
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func summarizeText(text string, limit int) string {
-	text = strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
-	if len(text) <= limit || limit <= 3 {
-		return text
-	}
-	return text[:limit-1] + "…"
-}
-
-func safeLabel(value, fallbackValue string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return fallbackValue
-	}
-	return value
-}
-
-func fallback(value, fallbackValue string) string {
-	if strings.TrimSpace(value) == "" {
-		return fallbackValue
-	}
-	return value
-}
-
-func nonEmptyOrDefault(values, fallbackValues []string) []string {
-	trimmed := make([]string, 0, len(values))
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value != "" {
-			trimmed = append(trimmed, value)
-		}
-	}
-	if len(trimmed) == 0 {
-		return fallbackValues
-	}
-	return trimmed
-}
-
-type bridgeObserver struct{ bridge *bubbleChatBridge }
-
-type bridgeLogWriter struct{ bridge *bubbleChatBridge }
-
-func (w bridgeLogWriter) Write(p []byte) (int, error) {
-	text := strings.TrimSpace(string(p))
-	if text == "" || w.bridge == nil {
-		return len(p), nil
-	}
-	for _, line := range strings.Split(text, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		w.bridge.emit(chatRuntimeLogMsg{sessionKey: "", text: line, kind: classifyRuntimeLogLine(line)})
-	}
-	return len(p), nil
-}
-
-func captureBubbleTeaLogs(bridge *bubbleChatBridge) func() {
-	if bridge == nil {
-		return func() {}
-	}
-	prevWriter := log.Writer()
-	log.SetOutput(io.MultiWriter(bridgeLogWriter{bridge: bridge}))
-	return func() {
-		log.SetOutput(prevWriter)
-	}
-}
-
-func classifyRuntimeLogLine(text string) string {
-	text = strings.ToLower(strings.TrimSpace(text))
-	switch {
-	case text == "":
-		return "notice"
-	case strings.Contains(text, " panic") || strings.Contains(text, "panic:"):
-		return "error"
-	case strings.Contains(text, " fatal") || strings.Contains(text, "fatal:"):
-		return "error"
-	case strings.Contains(text, " error") || strings.Contains(text, "error:"):
-		return "error"
-	case strings.Contains(text, " failed") || strings.Contains(text, "failed:"):
-		return "error"
-	case strings.Contains(text, " warning") || strings.Contains(text, "warning:"):
-		return "error"
-	default:
-		return "notice"
-	}
-}
-
-func (o bridgeObserver) OnTextDelta(context.Context, string) {}
-
-func (o bridgeObserver) OnToolCall(ctx context.Context, name string, arguments string) {
-	o.bridge.emit(chatToolCallMsg{sessionKey: agent.ConversationSessionFromContext(ctx), name: name, arguments: arguments})
-}
-
-func (o bridgeObserver) OnToolResult(ctx context.Context, name string, result string, err error) {
-	errText := ""
-	if err != nil {
-		errText = err.Error()
-	}
-	o.bridge.emit(chatToolResultMsg{sessionKey: agent.ConversationSessionFromContext(ctx), name: name, result: result, err: errText})
-}
-
-func (o bridgeObserver) OnCompletion(context.Context, string, bool) {}
-
-func (o bridgeObserver) OnError(ctx context.Context, err error) {
-	if err != nil {
-		o.bridge.emit(chatErrorMsg{sessionKey: agent.ConversationSessionFromContext(ctx), err: err.Error()})
-	}
-}
-
-func (d *Deliverer) Observer() agent.ConversationObserver {
-	if d == nil || d.bridge == nil {
-		return nil
-	}
-	return bridgeObserver{bridge: d.bridge}
-}
-```
+````
 
 ## File: internal/memory/consolidate.go
-
-```go
+````go
 package memory
 
 import (
@@ -40762,11 +41498,10 @@ func buildExtraNotes(parsed consolidationOutput, sourceMsgID sql.NullInt64, embe
 	}
 	return out
 }
-```
+````
 
 ## File: internal/providers/openai.go
-
-```go
+````go
 // Package providers wraps the OpenAI-compatible chat and embedding APIs used by or3-intern.
 package providers
 
@@ -41334,11 +42069,10 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 	}
 	return client.Do(req)
 }
-```
+````
 
 ## File: internal/tools/artifact.go
-
-```go
+````go
 package tools
 
 import (
@@ -41396,11 +42130,10 @@ func (t *ReadArtifact) Execute(ctx context.Context, params map[string]any) (stri
 	return fmt.Sprintf("artifact_id: %s\nsession_key: %s\nmime: %s\nsize_bytes: %d\noffset: %d\nread_bytes: %d\n\n%s%s",
 		result.Artifact.ID, result.Artifact.SessionKey, result.Artifact.Mime, result.Artifact.SizeBytes, offset, result.ReadBytes, result.Content, marker), nil
 }
-```
+````
 
 ## File: internal/uxcopy/uxcopy.go
-
-```go
+````go
 package uxcopy
 
 import (
@@ -41565,11 +42298,10 @@ func fallbackTitle(text string) string {
 	}
 	return strings.ToUpper(text[:1]) + text[1:]
 }
-```
+````
 
 ## File: cmd/or3-intern/migrate_openclaw.go
-
-```go
+````go
 package main
 
 import (
@@ -42385,11 +43117,10 @@ func pathWithinRoot(root, path string) bool {
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
-```
+````
 
 ## File: cmd/or3-intern/status_cmd.go
-
-```go
+````go
 package main
 
 import (
@@ -42559,11 +43290,10 @@ func translateAndPrintError(err error, out io.Writer) error {
 	}
 	return nil
 }
-```
+````
 
 ## File: internal/agentcli/manager.go
-
-```go
+````go
 package agentcli
 
 import (
@@ -43241,11 +43971,10 @@ func isRunnerDisabled(id RunnerID, disabled []string) bool {
 	}
 	return false
 }
-```
+````
 
 ## File: internal/agentcli/stream.go
-
-```go
+````go
 package agentcli
 
 import (
@@ -43409,11 +44138,10 @@ func splitChunks(data string, maxBytes int) []string {
 	}
 	return chunks
 }
-```
+````
 
 ## File: internal/db/db.go
-
-```go
+````go
 // Package db opens and migrates the SQLite stores used by or3-intern.
 package db
 
@@ -44270,10 +44998,10 @@ func (d *DB) ensureMemoryNotesMetaColumns(ctx context.Context) error {
 	if _, err := d.SQL.ExecContext(ctx,
 		`UPDATE memory_notes SET kind='summary'
 		 WHERE kind='note' AND (
-			tags='consolidation' OR
-			tags LIKE 'consolidation,%' OR
-			tags LIKE '%,consolidation' OR
-			tags LIKE '%,consolidation,%'
+		 	tags='consolidation' OR
+		 	tags LIKE 'consolidation,%' OR
+		 	tags LIKE '%,consolidation' OR
+		 	tags LIKE '%,consolidation,%'
 		 )`); err != nil {
 		return err
 	}
@@ -44301,11 +45029,10 @@ func (d *DB) tableHasColumn(ctx context.Context, tableName, columnName string) (
 	}
 	return false, rows.Err()
 }
-```
+````
 
 ## File: internal/tools/registry.go
-
-```go
+````go
 package tools
 
 import (
@@ -44503,11 +45230,10 @@ func (r *Registry) ExecuteParams(ctx context.Context, name string, params map[st
 	}
 	return t.Execute(ctx, params)
 }
-```
+````
 
 ## File: internal/tools/result.go
-
-```go
+````go
 package tools
 
 import (
@@ -44941,11 +45667,10 @@ func TruncationAdvice(kind string, target string) []string {
 		return nil
 	}
 }
-```
+````
 
 ## File: internal/tools/skill_exec.go
-
-```go
+````go
 package tools
 
 import (
@@ -45128,11 +45853,10 @@ func skillCommandHashSource(cmd []string) string {
 	}
 	return ""
 }
-```
+````
 
 ## File: internal/tools/skill.go
-
-```go
+````go
 package tools
 
 import (
@@ -45304,11 +46028,10 @@ func skillOutline(s skills.SkillMeta, body string) string {
 	}
 	return strings.TrimSpace(b.String())
 }
-```
+````
 
 ## File: internal/tools/web.go
-
-```go
+````go
 package tools
 
 import (
@@ -45820,11 +46543,10 @@ func prepareWebFetchRequestContext(ctx context.Context, target *url.URL, policy 
 	}
 	return security.PrepareURLRequestContext(ctx, target, policies...)
 }
-```
+````
 
 ## File: internal/uxstate/uxstate.go
-
-```go
+````go
 package uxstate
 
 import (
@@ -46286,11 +47008,10 @@ func firstNonEmpty(values ...string) string {
 	}
 	return "Unnamed item"
 }
-```
+````
 
 ## File: scripts/restart-service.sh
-
-```bash
+````bash
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -46578,10 +47299,9 @@ case "$action" in
     start_service
     ;;
 esac
-```
+````
 
 ## File: README.md
-
 ````markdown
 # or3-intern (v1)
 
@@ -46605,29 +47325,29 @@ or3-intern version
 
 1. Run guided setup:
 
-    ```bash
-    or3-intern setup
-    ```
+   ```bash
+   or3-intern setup
+   ```
 
 2. Start an interactive local session:
 
-    ```bash
-    or3-intern chat
-    ```
+   ```bash
+   or3-intern chat
+   ```
 
-    Inside chat, use `/new` when you want to archive the current conversation into memory and start with a clean live session.
+   Inside chat, use `/new` when you want to archive the current conversation into memory and start with a clean live session.
 
 3. Or run enabled external channels and automation:
 
-    ```bash
-    or3-intern serve
-    ```
+   ```bash
+   or3-intern serve
+   ```
 
 4. Check safety and access posture any time:
 
-    ```bash
-    or3-intern status
-    ```
+   ```bash
+   or3-intern status
+   ```
 
 The `setup` command is the recommended first-run flow. It asks for a provider, workspace folder, scenario, and safety mode, then translates those choices into the existing runtime profile, approvals, audit, service, and hardening settings.
 
@@ -46725,8 +47445,7 @@ This repo uses external Go modules (including SQLite drivers, `sqlite-vec`, and 
 ````
 
 ## File: cmd/or3-intern/configure.go
-
-```go
+````go
 package main
 
 import (
@@ -47541,11 +48260,10 @@ func channelAccessSummary(policy config.InboundPolicy, openAccess, hasAllowlist 
 		return "deny"
 	}
 }
-```
+````
 
 ## File: internal/approval/broker.go
-
-```go
+````go
 package approval
 
 import (
@@ -48829,11 +49547,10 @@ func firstNonEmpty(values ...string) string {
 	}
 	return ""
 }
-```
+````
 
 ## File: internal/controlplane/controlplane.go
-
-```go
+````go
 package controlplane
 
 import (
@@ -49884,11 +50601,10 @@ func formatAgentCLITime(ms int64) string {
 	}
 	return time.UnixMilli(ms).UTC().Format(time.RFC3339)
 }
-```
+````
 
 ## File: internal/db/approval_store.go
-
-```go
+````go
 package db
 
 import (
@@ -50449,11 +51165,10 @@ func decodeJSONMap(raw string) map[string]any {
 	}
 	return out
 }
-```
+````
 
 ## File: internal/tools/files.go
-
-```go
+````go
 package tools
 
 import (
@@ -51152,11 +51867,10 @@ func existingFileMode(path string, defaultMode os.FileMode) os.FileMode {
 	}
 	return defaultMode
 }
-```
+````
 
 ## File: cmd/or3-intern/approvals_cmd.go
-
-```go
+````go
 package main
 
 import (
@@ -51492,11 +52206,10 @@ func joinSkillRunPlanIDs(plans []db.SkillRunPlanRecord) string {
 func approvalPlanLookupWarning(err error) string {
 	return fmt.Sprintf("approval succeeded, but linked skill plan lookup failed: %v", err)
 }
-```
+````
 
 ## File: internal/db/store.go
-
-```go
+````go
 package db
 
 import (
@@ -53482,11 +54195,10 @@ func (d *DB) GetLastMessagesScoped(ctx context.Context, sessionKey string, limit
 	}
 	return out, nil
 }
-```
+````
 
 ## File: cmd/or3-intern/help.go
-
-```go
+````go
 package main
 
 import (
@@ -54059,11 +54771,10 @@ func printHelpItems(w io.Writer, items []helpItem) {
 	}
 	_ = tw.Flush()
 }
-```
+````
 
 ## File: internal/tools/exec.go
-
-```go
+````go
 package tools
 
 import (
@@ -54695,990 +55406,10 @@ func firstRequester(actor string) string {
 	}
 	return "local"
 }
-```
-
-## File: internal/app/service_app.go
-
-```go
-package app
-
-import (
-	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
-	"strings"
-	"time"
-
-	"or3-intern/internal/agent"
-	"or3-intern/internal/agentcli"
-	"or3-intern/internal/approval"
-	"or3-intern/internal/auth"
-	"or3-intern/internal/bus"
-	"or3-intern/internal/channels"
-	"or3-intern/internal/config"
-	"or3-intern/internal/controlplane"
-	"or3-intern/internal/db"
-	"or3-intern/internal/providers"
-	"or3-intern/internal/tools"
-)
-
-type ServiceApp struct {
-	cfg             config.Config
-	runtime         *agent.Runtime
-	jobs            *agent.JobRegistry
-	subagentManager *agent.SubagentManager
-	agentCLIManager *agentcli.Manager
-	control         *controlplane.Service
-	auth            *auth.Service
-}
-
-func NewServiceApp(cfg config.Config, runtime *agent.Runtime, jobs *agent.JobRegistry, subagentManager *agent.SubagentManager, control *controlplane.Service) *ServiceApp {
-	return NewServiceAppWithAgentCLI(cfg, runtime, jobs, subagentManager, nil, control)
-}
-
-func NewServiceAppWithAgentCLI(cfg config.Config, runtime *agent.Runtime, jobs *agent.JobRegistry, subagentManager *agent.SubagentManager, agentCLIManager *agentcli.Manager, control *controlplane.Service) *ServiceApp {
-	app := &ServiceApp{cfg: cfg, runtime: runtime, jobs: jobs, subagentManager: subagentManager, agentCLIManager: agentCLIManager, control: control}
-	if control != nil {
-		if authSvc, err := auth.NewService(cfg, control.DB, control.Audit); err == nil {
-			app.auth = authSvc
-		}
-	}
-	return app
-}
-
-func (a *ServiceApp) SetConfig(cfg config.Config) {
-	if a == nil {
-		return
-	}
-	a.cfg = cfg
-	if a.control != nil {
-		if authSvc, err := auth.NewService(cfg, a.control.DB, a.control.Audit); err == nil {
-			a.auth = authSvc
-		}
-	}
-}
-
-type TurnRequest struct {
-	SessionKey    string
-	Message       string
-	Meta          map[string]any
-	AllowedTools  []string
-	RestrictTools bool
-	ProfileName   string
-	Capability    tools.CapabilityLevel
-	ApprovalToken string
-	Actor         string
-	Role          string
-	Observer      agent.ConversationObserver
-	Streamer      channels.StreamingChannel
-}
-
-func (a *ServiceApp) serviceRunContext(ctx context.Context, sessionKey, profileName, approvalToken, actor, role string, capability tools.CapabilityLevel, observer agent.ConversationObserver, streamer channels.StreamingChannel) context.Context {
-	runCtx := tools.ContextWithRequestSource(ctx, tools.RequestSourceService)
-	runCtx = tools.ContextWithSession(runCtx, strings.TrimSpace(sessionKey))
-	runCtx = tools.ContextWithApprovalToken(runCtx, approvalToken)
-	runCtx = tools.ContextWithRequesterIdentity(runCtx, actor, role)
-	runCtx = tools.ContextWithCapabilityCeiling(runCtx, capability)
-	if a != nil && a.runtime != nil {
-		runCtx = a.runtime.ContextWithProfileName(runCtx, profileName)
-		runCtx = tools.ContextWithToolGuard(runCtx, a.runtime.GuardToolExecution)
-	}
-	if observer != nil {
-		runCtx = agent.ContextWithConversationObserver(runCtx, observer)
-	}
-	if streamer != nil {
-		runCtx = agent.ContextWithStreamingChannel(runCtx, streamer)
-	}
-	return runCtx
-}
-
-func (a *ServiceApp) serviceToolRegistry(allowedTools []string, restrictTools bool) *tools.Registry {
-	if a == nil || a.runtime == nil {
-		return nil
-	}
-	if !restrictTools {
-		return a.runtime.Tools
-	}
-	filtered := tools.NewRegistry()
-	if len(allowedTools) > 0 {
-		filtered = a.runtime.Tools.CloneFiltered(allowedTools)
-	}
-	return filtered
-}
-
-func (a *ServiceApp) RunTurn(ctx context.Context, req TurnRequest) error {
-	if a == nil || a.runtime == nil {
-		return errors.New("runtime unavailable")
-	}
-	runCtx := a.serviceRunContext(ctx, req.SessionKey, req.ProfileName, req.ApprovalToken, req.Actor, req.Role, req.Capability, req.Observer, req.Streamer)
-	if req.RestrictTools {
-		filtered := a.serviceToolRegistry(req.AllowedTools, req.RestrictTools)
-		runCtx = agent.ContextWithToolRegistry(runCtx, filtered)
-	}
-	meta := cloneMap(req.Meta)
-	if strings.TrimSpace(req.ProfileName) != "" {
-		meta["profile_name"] = strings.TrimSpace(req.ProfileName)
-	}
-	return a.runtime.Handle(runCtx, bus.Event{
-		Type:       bus.EventUserMessage,
-		SessionKey: strings.TrimSpace(req.SessionKey),
-		Channel:    "service",
-		From:       "or3-net",
-		Message:    strings.TrimSpace(req.Message),
-		Meta:       meta,
-	})
-}
-
-type ReplayToolCallRequest struct {
-	SessionKey        string
-	ToolName          string
-	ArgumentsJSON     string
-	ApprovalRequestID int64
-	AllowedTools      []string
-	RestrictTools     bool
-	ProfileName       string
-	Capability        tools.CapabilityLevel
-	ApprovalToken     string
-	Actor             string
-	Role              string
-	Observer          agent.ConversationObserver
-}
-
-type ResumeApprovedRequest struct {
-	IssuedApproval approval.IssuedApproval
-	ProfileName    string
-	Capability     tools.CapabilityLevel
-	Actor          string
-	Role           string
-	Observer       agent.ConversationObserver
-}
-
-type replayToolCallTarget struct {
-	ToolName       string
-	ArgumentsJSON  string
-	ToolCallID     string
-	AlreadyResumed bool
-}
-
-type replayHistoryMessage struct {
-	Role       string
-	Content    string
-	ToolCallID string
-	ToolCalls  []providers.ToolCall
-}
-
-func (a *ServiceApp) ReplayToolCall(ctx context.Context, req ReplayToolCallRequest) (string, error) {
-	if a == nil || a.runtime == nil {
-		return "", errors.New("runtime unavailable")
-	}
-	registry := a.serviceToolRegistry(req.AllowedTools, req.RestrictTools)
-	if registry == nil {
-		return "", errors.New("tool registry unavailable")
-	}
-	toolName := strings.TrimSpace(req.ToolName)
-	if toolName == "" {
-		return "", errors.New("tool name is required")
-	}
-	argsJSON := strings.TrimSpace(req.ArgumentsJSON)
-	if argsJSON == "" {
-		argsJSON = "{}"
-	}
-	runCtx := a.serviceRunContext(ctx, req.SessionKey, req.ProfileName, req.ApprovalToken, req.Actor, req.Role, req.Capability, req.Observer, nil)
-	if req.RestrictTools {
-		runCtx = agent.ContextWithToolRegistry(runCtx, registry)
-	}
-	toolCallID := ""
-	fullReplayHistory := a.runtime.DB != nil && a.runtime.Builder != nil && a.runtime.Provider != nil
-	if fullReplayHistory {
-		if req.ApprovalRequestID > 0 {
-			target, findErr := a.findApprovalReplayTarget(runCtx, req.SessionKey, req.ApprovalRequestID)
-			if findErr != nil {
-				return "", findErr
-			}
-			if target.AlreadyResumed {
-				finalText := "Approval was already applied. The latest tool result is already in the conversation."
-				if req.Observer != nil {
-					req.Observer.OnCompletion(runCtx, finalText, false)
-				}
-				return finalText, nil
-			}
-			toolName = strings.TrimSpace(target.ToolName)
-			argsJSON = strings.TrimSpace(target.ArgumentsJSON)
-			toolCallID = strings.TrimSpace(target.ToolCallID)
-			if toolName == "" || toolCallID == "" {
-				return "", fmt.Errorf("approved replay rejected: no matching blocked tool call for request %d", req.ApprovalRequestID)
-			}
-		} else {
-			var findErr error
-			toolCallID, findErr = a.findReplayToolCallID(runCtx, req.SessionKey, toolName, argsJSON)
-			if findErr != nil {
-				return "", findErr
-			}
-			if strings.TrimSpace(toolCallID) == "" {
-				return "", fmt.Errorf("approved replay rejected: no matching prior assistant tool call")
-			}
-		}
-	}
-	if req.Observer != nil {
-		req.Observer.OnToolCall(runCtx, toolName, argsJSON)
-	}
-	out, err := registry.Execute(runCtx, toolName, argsJSON)
-	if err != nil {
-		var params map[string]any
-		_ = json.Unmarshal([]byte(argsJSON), &params)
-		out = tools.EncodeToolFailure(toolName, params, out, err)
-	}
-	if req.Observer != nil {
-		req.Observer.OnToolResult(runCtx, toolName, out, err)
-	}
-	if err != nil {
-		var approvalErr *tools.ApprovalRequiredError
-		if errors.As(err, &approvalErr) {
-			return "", err
-		}
-		if !fullReplayHistory {
-			return "", err
-		}
-	}
-	if !fullReplayHistory {
-		finalText := summarizeReplayToolResult(toolName, out)
-		if req.Observer != nil {
-			req.Observer.OnCompletion(runCtx, finalText, false)
-		}
-		return finalText, nil
-	}
-	if a.runtime.DB != nil && strings.TrimSpace(req.SessionKey) != "" {
-		payload := map[string]any{
-			"name":      toolName,
-			"replayed":  true,
-			"args_json": argsJSON,
-		}
-		if strings.TrimSpace(toolCallID) != "" {
-			payload["tool_call_id"] = toolCallID
-		}
-		if _, err := a.runtime.DB.AppendMessage(runCtx, req.SessionKey, "tool", out, payload); err != nil {
-			return "", err
-		}
-	}
-	if err := a.runtime.Handle(runCtx, bus.Event{
-		Type:       bus.EventSystem,
-		SessionKey: strings.TrimSpace(req.SessionKey),
-		Channel:    "service",
-		From:       "or3-net",
-		Message:    replayContinuationPrompt(toolName),
-		Meta: map[string]any{
-			"approved_tool_replay": true,
-			"tool_name":            toolName,
-		},
-	}); err != nil {
-		return "", err
-	}
-	return "", nil
-}
-
-func (a *ServiceApp) ResumeApprovedRequest(ctx context.Context, req ResumeApprovedRequest) (string, error) {
-	if a == nil || a.runtime == nil {
-		return "", errors.New("runtime unavailable")
-	}
-	issued := req.IssuedApproval
-	sessionKey := strings.TrimSpace(issued.Request.RequesterSessionID)
-	if sessionKey == "" {
-		return "", nil
-	}
-	switch strings.TrimSpace(issued.Request.Type) {
-	case string(approval.SubjectExec), string(approval.SubjectSkillExec):
-		target, err := a.findApprovalReplayTarget(ctx, sessionKey, issued.Request.ID)
-		if err != nil {
-			return "", err
-		}
-		if target.AlreadyResumed {
-			finalText := "Approval was already applied. The latest tool result is already in the conversation."
-			if req.Observer != nil {
-				req.Observer.OnCompletion(ctx, finalText, false)
-			}
-			return finalText, nil
-		}
-		if strings.TrimSpace(target.ToolCallID) == "" {
-			finalText := "Approval was granted, but the original blocked tool call could not be found to resume. Please retry the request if it is still needed."
-			if req.Observer != nil {
-				req.Observer.OnCompletion(ctx, finalText, false)
-			}
-			return finalText, nil
-		}
-		return a.ReplayToolCall(ctx, ReplayToolCallRequest{
-			SessionKey:        sessionKey,
-			ToolName:          target.ToolName,
-			ArgumentsJSON:     target.ArgumentsJSON,
-			ApprovalRequestID: issued.Request.ID,
-			ProfileName:       req.ProfileName,
-			Capability:        req.Capability,
-			ApprovalToken:     issued.Token,
-			Actor:             req.Actor,
-			Role:              req.Role,
-			Observer:          req.Observer,
-		})
-	case string(approval.SubjectToolQuota):
-		runCtx := a.serviceRunContext(ctx, sessionKey, req.ProfileName, issued.Token, req.Actor, req.Role, req.Capability, req.Observer, nil)
-		return "", a.runtime.Handle(runCtx, bus.Event{
-			Type:       bus.EventSystem,
-			SessionKey: sessionKey,
-			Channel:    "service",
-			From:       "or3-net",
-			Message:    toolQuotaApprovalContinuationPrompt(),
-			Meta: map[string]any{
-				"approved_tool_quota": true,
-				"approval_request_id": issued.Request.ID,
-			},
-		})
-	default:
-		return "", nil
-	}
-}
-
-func summarizeReplayToolResult(toolName string, out string) string {
-	out = strings.TrimSpace(out)
-	if out == "" {
-		return fmt.Sprintf("%s completed.", strings.TrimSpace(toolName))
-	}
-	var result tools.ToolResult
-	if err := json.Unmarshal([]byte(out), &result); err == nil {
-		parts := make([]string, 0, 3)
-		if preview := strings.TrimSpace(result.Preview); preview != "" {
-			parts = append(parts, preview)
-		}
-		if len(parts) == 0 {
-			if summary := strings.TrimSpace(result.Summary); summary != "" {
-				parts = append(parts, summary)
-			}
-		}
-		if artifactID := strings.TrimSpace(result.ArtifactID); artifactID != "" {
-			parts = append(parts, fmt.Sprintf("artifact: %s", artifactID))
-		}
-		if len(parts) > 0 {
-			return strings.Join(parts, "\n\n")
-		}
-	}
-	return out
-}
-
-func (a *ServiceApp) findReplayToolCallID(ctx context.Context, sessionKey, toolName, argsJSON string) (string, error) {
-	if a == nil || a.runtime == nil || a.runtime.Builder == nil {
-		return "", nil
-	}
-	pp, _, err := a.runtime.Builder.BuildWithOptions(ctx, agent.BuildOptions{
-		SessionKey: strings.TrimSpace(sessionKey),
-	})
-	if err != nil {
-		return "", err
-	}
-	wantArgs := canonicalReplayArgs(argsJSON)
-	for i := len(pp.History) - 1; i >= 0; i-- {
-		msg := pp.History[i]
-		if msg.Role != "assistant" || len(msg.ToolCalls) == 0 {
-			continue
-		}
-		for j := len(msg.ToolCalls) - 1; j >= 0; j-- {
-			tc := msg.ToolCalls[j]
-			if strings.TrimSpace(tc.Function.Name) != strings.TrimSpace(toolName) {
-				continue
-			}
-			if wantArgs != "" && canonicalReplayArgs(tc.Function.Arguments) != wantArgs {
-				continue
-			}
-			if id := strings.TrimSpace(tc.ID); id != "" {
-				return id, nil
-			}
-		}
-	}
-	return "", nil
-}
-
-func (a *ServiceApp) findApprovalReplayTarget(ctx context.Context, sessionKey string, requestID int64) (replayToolCallTarget, error) {
-	if a == nil || a.runtime == nil || requestID <= 0 {
-		return replayToolCallTarget{}, nil
-	}
-	history, err := a.approvalReplayHistory(ctx, sessionKey)
-	if err != nil {
-		return replayToolCallTarget{}, err
-	}
-	for i := len(history) - 1; i >= 0; i-- {
-		msg := history[i]
-		if msg.Role != "tool" || strings.TrimSpace(msg.ToolCallID) == "" {
-			continue
-		}
-		result, ok := tools.DecodeToolResult(msg.Content)
-		if !ok || result.RequestID != requestID {
-			continue
-		}
-		toolCallID := strings.TrimSpace(msg.ToolCallID)
-		for j := i + 1; j < len(history); j++ {
-			later := history[j]
-			if later.Role == "tool" && strings.TrimSpace(later.ToolCallID) == toolCallID {
-				return replayToolCallTarget{ToolCallID: toolCallID, AlreadyResumed: true}, nil
-			}
-		}
-		for j := i - 1; j >= 0; j-- {
-			prior := history[j]
-			if prior.Role != "assistant" || len(prior.ToolCalls) == 0 {
-				continue
-			}
-			for k := len(prior.ToolCalls) - 1; k >= 0; k-- {
-				tc := prior.ToolCalls[k]
-				if strings.TrimSpace(tc.ID) != toolCallID {
-					continue
-				}
-				return replayToolCallTarget{
-					ToolName:      strings.TrimSpace(tc.Function.Name),
-					ArgumentsJSON: strings.TrimSpace(tc.Function.Arguments),
-					ToolCallID:    toolCallID,
-				}, nil
-			}
-		}
-		return replayToolCallTarget{}, fmt.Errorf("approved replay rejected: no matching prior assistant tool call for request %d", requestID)
-	}
-	return replayToolCallTarget{}, nil
-}
-
-func (a *ServiceApp) approvalReplayHistory(ctx context.Context, sessionKey string) ([]replayHistoryMessage, error) {
-	history, err := a.rawSessionReplayHistory(ctx, sessionKey, 250)
-	if err != nil {
-		return nil, err
-	}
-	if len(history) > 0 || a == nil || a.runtime == nil || a.runtime.Builder == nil {
-		return history, nil
-	}
-	pp, _, err := a.runtime.Builder.BuildWithOptions(ctx, agent.BuildOptions{
-		SessionKey: strings.TrimSpace(sessionKey),
-	})
-	if err != nil {
-		return nil, err
-	}
-	out := make([]replayHistoryMessage, 0, len(pp.History))
-	for _, msg := range pp.History {
-		content, _ := msg.Content.(string)
-		out = append(out, replayHistoryMessage{
-			Role:       msg.Role,
-			Content:    content,
-			ToolCallID: msg.ToolCallID,
-			ToolCalls:  msg.ToolCalls,
-		})
-	}
-	return out, nil
-}
-
-func (a *ServiceApp) rawSessionReplayHistory(ctx context.Context, sessionKey string, limit int) ([]replayHistoryMessage, error) {
-	if a == nil || a.runtime == nil || a.runtime.DB == nil || a.runtime.DB.SQL == nil {
-		return nil, nil
-	}
-	sessionKey = strings.TrimSpace(sessionKey)
-	if sessionKey == "" {
-		return nil, nil
-	}
-	if limit <= 0 {
-		limit = 250
-	}
-	rows, err := a.runtime.DB.SQL.QueryContext(ctx,
-		`SELECT role, content, payload_json FROM messages WHERE session_key=? ORDER BY id DESC LIMIT ?`, sessionKey, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	history := make([]replayHistoryMessage, 0, limit)
-	for rows.Next() {
-		var role, content, payloadJSON string
-		if err := rows.Scan(&role, &content, &payloadJSON); err != nil {
-			return nil, err
-		}
-		msg := replayHistoryMessage{Role: role, Content: content}
-		var payload map[string]any
-		if err := json.Unmarshal([]byte(payloadJSON), &payload); err == nil {
-			switch role {
-			case "assistant":
-				if raw, ok := payload["tool_calls"]; ok {
-					b, _ := json.Marshal(raw)
-					_ = json.Unmarshal(b, &msg.ToolCalls)
-				}
-			case "tool":
-				if rawID, ok := payload["tool_call_id"]; ok {
-					msg.ToolCallID = strings.TrimSpace(fmt.Sprint(rawID))
-				}
-			}
-		}
-		history = append(history, msg)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	for i, j := 0, len(history)-1; i < j; i, j = i+1, j-1 {
-		history[i], history[j] = history[j], history[i]
-	}
-	backfillReplayToolCallIDs(history)
-	return history, nil
-}
-
-func backfillReplayToolCallIDs(history []replayHistoryMessage) {
-	pendingToolCallIDs := make([]string, 0)
-	for i := range history {
-		msg := &history[i]
-		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
-			pendingToolCallIDs = pendingToolCallIDs[:0]
-			for _, tc := range msg.ToolCalls {
-				if id := strings.TrimSpace(tc.ID); id != "" {
-					pendingToolCallIDs = append(pendingToolCallIDs, id)
-				}
-			}
-			continue
-		}
-		if msg.Role != "tool" {
-			continue
-		}
-		if msg.ToolCallID == "" && len(pendingToolCallIDs) > 0 {
-			msg.ToolCallID = pendingToolCallIDs[0]
-		}
-		if msg.ToolCallID == "" || len(pendingToolCallIDs) == 0 {
-			continue
-		}
-		if pendingToolCallIDs[0] == msg.ToolCallID {
-			pendingToolCallIDs = pendingToolCallIDs[1:]
-			continue
-		}
-		for j, id := range pendingToolCallIDs {
-			if id == msg.ToolCallID {
-				pendingToolCallIDs = append(pendingToolCallIDs[:j], pendingToolCallIDs[j+1:]...)
-				break
-			}
-		}
-	}
-}
-
-func canonicalReplayArgs(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return ""
-	}
-	var decoded any
-	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
-		return raw
-	}
-	encoded, err := json.Marshal(decoded)
-	if err != nil {
-		return raw
-	}
-	return string(encoded)
-}
-
-func replayContinuationPrompt(toolName string) string {
-	name := strings.TrimSpace(toolName)
-	if name == "" {
-		name = "tool"
-	}
-	return fmt.Sprintf("Approval was granted for the previously requested %s call. The exact approved tool call has now been executed and its latest result is already in the conversation. Continue the same task from that result. Do not stop just because the approved tool call succeeded, and do not repeat the same %s call unless it is still necessary.", name, name)
-}
-
-func toolQuotaApprovalContinuationPrompt() string {
-	return "Approval was granted for the previously requested continuation. Continue the same task from the existing conversation state. Use the latest tool results already in the conversation, and do not repeat the same failing or blocked path unless it is still necessary."
-}
-
-type SubagentRequest struct {
-	ParentSessionKey string
-	Task             string
-	PromptSnapshot   []providers.ChatMessage
-	AllowedTools     []string
-	RestrictTools    bool
-	ProfileName      string
-	Capability       tools.CapabilityLevel
-	Channel          string
-	ReplyTo          string
-	Meta             map[string]any
-	Timeout          time.Duration
-	ApprovalToken    string
-	Actor            string
-	Role             string
-}
-
-func (a *ServiceApp) StartSubagent(ctx context.Context, req SubagentRequest) (tools.SpawnJob, error) {
-	if a == nil || a.subagentManager == nil {
-		return tools.SpawnJob{}, errors.New("subagent manager unavailable")
-	}
-	jobCtx := tools.ContextWithRequestSource(ctx, tools.RequestSourceService)
-	jobCtx = tools.ContextWithCapabilityCeiling(jobCtx, req.Capability)
-	return a.subagentManager.EnqueueService(jobCtx, agent.ServiceSubagentRequest{
-		ParentSessionKey: strings.TrimSpace(req.ParentSessionKey),
-		Task:             strings.TrimSpace(req.Task),
-		PromptSnapshot:   append([]providers.ChatMessage{}, req.PromptSnapshot...),
-		AllowedTools:     append([]string{}, req.AllowedTools...),
-		RestrictTools:    req.RestrictTools,
-		ProfileName:      strings.TrimSpace(req.ProfileName),
-		Channel:          strings.TrimSpace(req.Channel),
-		ReplyTo:          strings.TrimSpace(req.ReplyTo),
-		Meta:             cloneMap(req.Meta),
-		Timeout:          req.Timeout,
-		ApprovalToken:    strings.TrimSpace(req.ApprovalToken),
-		RequesterActor:   strings.TrimSpace(req.Actor),
-		RequesterRole:    strings.TrimSpace(req.Role),
-	})
-}
-
-func (a *ServiceApp) GetJob(jobID string) (agent.JobSnapshot, error) {
-	if a == nil || a.control == nil {
-		return agent.JobSnapshot{}, controlplane.ErrJobRegistryUnavailable
-	}
-	return a.control.GetJob(jobID)
-}
-
-func (a *ServiceApp) AbortJob(ctx context.Context, jobID string) (bool, string, error) {
-	if a == nil || a.jobs == nil {
-		return false, "", controlplane.ErrJobRegistryUnavailable
-	}
-	if a.jobs.Cancel(jobID) {
-		return true, "", nil
-	}
-	if a.subagentManager != nil {
-		if err := a.subagentManager.Abort(ctx, jobID); err == nil {
-			return true, "", nil
-		} else if strings.Contains(strings.ToLower(err.Error()), "not abortable") {
-			return false, "not_abortable", nil
-		} else {
-			if !strings.Contains(strings.ToLower(err.Error()), "not found") {
-				return false, "", err
-			}
-		}
-	}
-	if a.agentCLIManager != nil {
-		if err := a.agentCLIManager.Abort(ctx, jobID); err == nil {
-			return true, "", nil
-		} else if strings.Contains(strings.ToLower(err.Error()), "not abortable") {
-			return false, "not_abortable", nil
-		}
-	}
-	snapshot, ok := a.jobs.Snapshot(jobID)
-	if !ok {
-		return false, "not_found", nil
-	}
-	if isTerminalStatus(snapshot.Status) {
-		return true, snapshot.Status, nil
-	}
-	return false, "not_abortable", nil
-}
-
-// DetectAgentCLIRunners returns runner info for all registered external CLIs.
-func (a *ServiceApp) DetectAgentCLIRunners(ctx context.Context) ([]agentcli.RunnerInfo, error) {
-	if a == nil {
-		return nil, fmt.Errorf("service app is not available")
-	}
-	if a.agentCLIManager != nil {
-		if a.agentCLIManager.Registry == nil {
-			return nil, fmt.Errorf("runner registry is not configured")
-		}
-		return a.agentCLIManager.Registry.DetectAll(ctx, a.agentCLIManager.DetectOptions()), nil
-	}
-	detectManager := &agentcli.Manager{Cfg: a.cfg.AgentCLI}
-	return agentcli.NewDefaultRegistry().DetectAll(ctx, detectManager.DetectOptions()), nil
-}
-
-// StartAgentCLIRun enqueues a new external CLI run.
-func (a *ServiceApp) StartAgentCLIRun(ctx context.Context, req agentcli.AgentRunRequest) (db.AgentCLIRun, error) {
-	if a == nil || a.agentCLIManager == nil {
-		return db.AgentCLIRun{}, fmt.Errorf("agent CLI manager is not available")
-	}
-	return a.agentCLIManager.Enqueue(ctx, req)
-}
-
-// GetAgentCLIRun reads a persisted CLI run by run ID or job ID.
-func (a *ServiceApp) GetAgentCLIRun(ctx context.Context, id string) (db.AgentCLIRun, bool, error) {
-	if a == nil || a.agentCLIManager == nil || a.agentCLIManager.DB == nil {
-		return db.AgentCLIRun{}, false, fmt.Errorf("agent CLI manager is not available")
-	}
-	return a.agentCLIManager.DB.GetAgentCLIRun(ctx, id)
-}
-
-// ListAgentCLIEvents lists persisted events for a job.
-func (a *ServiceApp) ListAgentCLIEvents(ctx context.Context, jobID string, afterSeq int64, limit int) ([]db.AgentCLIEvent, error) {
-	if a == nil || a.agentCLIManager == nil || a.agentCLIManager.DB == nil {
-		return nil, fmt.Errorf("agent CLI manager is not available")
-	}
-	return a.agentCLIManager.DB.ListAgentCLIEvents(ctx, jobID, afterSeq, limit)
-}
-
-// AbortAgentCLIRun cancels an external CLI job.
-func (a *ServiceApp) AbortAgentCLIRun(ctx context.Context, jobID string) error {
-	if a == nil || a.agentCLIManager == nil {
-		return fmt.Errorf("agent CLI manager is not available")
-	}
-	return a.agentCLIManager.Abort(ctx, jobID)
-}
-
-func (a *ServiceApp) WaitForJob(ctx context.Context, jobID string) (agent.JobSnapshot, bool) {
-	if a == nil || a.jobs == nil {
-		return agent.JobSnapshot{}, false
-	}
-	return a.jobs.Wait(ctx, jobID)
-}
-
-func (a *ServiceApp) SubscribeJob(jobID string) (agent.JobSnapshot, <-chan agent.JobEvent, func(), bool) {
-	if a == nil || a.jobs == nil {
-		return agent.JobSnapshot{}, nil, nil, false
-	}
-	return a.jobs.Subscribe(jobID)
-}
-
-func (a *ServiceApp) CreatePairingRequest(ctx context.Context, input approval.PairingRequestInput) (db.PairingRequestRecord, string, error) {
-	if a == nil || a.control == nil {
-		return db.PairingRequestRecord{}, "", controlplane.ErrApprovalBrokerUnavailable
-	}
-	return a.control.CreatePairingRequest(ctx, input)
-}
-
-func (a *ServiceApp) ListPairingRequests(ctx context.Context, status string, limit int) ([]db.PairingRequestRecord, error) {
-	if a == nil || a.control == nil {
-		return nil, controlplane.ErrApprovalBrokerUnavailable
-	}
-	return a.control.ListPairingRequests(ctx, status, limit)
-}
-
-func (a *ServiceApp) ApprovePairingRequest(ctx context.Context, requestID int64, actor string) (db.PairingRequestRecord, error) {
-	if a == nil || a.control == nil {
-		return db.PairingRequestRecord{}, controlplane.ErrApprovalBrokerUnavailable
-	}
-	return a.control.ApprovePairingRequest(ctx, requestID, actor)
-}
-
-func (a *ServiceApp) ApprovePairingRequestByCode(ctx context.Context, code string, actor string) (db.PairingRequestRecord, error) {
-	if a == nil || a.control == nil {
-		return db.PairingRequestRecord{}, controlplane.ErrApprovalBrokerUnavailable
-	}
-	return a.control.ApprovePairingRequestByCode(ctx, code, actor)
-}
-
-func (a *ServiceApp) DenyPairingRequest(ctx context.Context, requestID int64, actor string) error {
-	if a == nil || a.control == nil {
-		return controlplane.ErrApprovalBrokerUnavailable
-	}
-	return a.control.DenyPairingRequest(ctx, requestID, actor)
-}
-
-func (a *ServiceApp) ExchangePairingCode(ctx context.Context, input approval.PairingExchangeInput) (db.PairedDeviceRecord, string, error) {
-	if a == nil || a.control == nil {
-		return db.PairedDeviceRecord{}, "", controlplane.ErrApprovalBrokerUnavailable
-	}
-	return a.control.ExchangePairingCode(ctx, input)
-}
-
-func (a *ServiceApp) ListDevices(ctx context.Context, limit int) ([]db.PairedDeviceRecord, error) {
-	if a == nil || a.control == nil {
-		return nil, controlplane.ErrApprovalBrokerUnavailable
-	}
-	return a.control.ListDevices(ctx, limit)
-}
-
-func (a *ServiceApp) RevokeDevice(ctx context.Context, deviceID, actor string) error {
-	if a == nil || a.control == nil {
-		return controlplane.ErrApprovalBrokerUnavailable
-	}
-	return a.control.RevokeDevice(ctx, deviceID, actor)
-}
-
-func (a *ServiceApp) RotateDevice(ctx context.Context, deviceID string) (db.PairedDeviceRecord, string, error) {
-	if a == nil || a.control == nil {
-		return db.PairedDeviceRecord{}, "", controlplane.ErrApprovalBrokerUnavailable
-	}
-	return a.control.RotateDevice(ctx, deviceID)
-}
-
-func (a *ServiceApp) ListApprovalRequests(ctx context.Context, filter controlplane.ApprovalFilter) ([]db.ApprovalRequestRecord, error) {
-	if a == nil || a.control == nil {
-		return nil, controlplane.ErrApprovalBrokerUnavailable
-	}
-	return a.control.ListApprovalRequests(ctx, filter)
-}
-
-func (a *ServiceApp) GetApproval(ctx context.Context, requestID int64) (db.ApprovalRequestRecord, error) {
-	if a == nil || a.control == nil {
-		return db.ApprovalRequestRecord{}, controlplane.ErrApprovalBrokerUnavailable
-	}
-	return a.control.GetApproval(ctx, requestID)
-}
-
-func (a *ServiceApp) ApproveApproval(ctx context.Context, requestID int64, actor string, allowlist bool, note string) (approval.IssuedApproval, error) {
-	if a == nil || a.control == nil {
-		return approval.IssuedApproval{}, controlplane.ErrApprovalBrokerUnavailable
-	}
-	return a.control.ApproveApproval(ctx, requestID, actor, allowlist, note)
-}
-
-func (a *ServiceApp) DenyApproval(ctx context.Context, requestID int64, actor, note string) error {
-	if a == nil || a.control == nil {
-		return controlplane.ErrApprovalBrokerUnavailable
-	}
-	return a.control.DenyApproval(ctx, requestID, actor, note)
-}
-
-func (a *ServiceApp) CancelApproval(ctx context.Context, requestID int64, actor, note string) error {
-	if a == nil || a.control == nil {
-		return controlplane.ErrApprovalBrokerUnavailable
-	}
-	return a.control.CancelApproval(ctx, requestID, actor, note)
-}
-
-func (a *ServiceApp) ExpireApprovals(ctx context.Context, actor string) (int64, error) {
-	if a == nil || a.control == nil {
-		return 0, controlplane.ErrApprovalBrokerUnavailable
-	}
-	return a.control.ExpireApprovals(ctx, actor)
-}
-
-func (a *ServiceApp) ListAllowlists(ctx context.Context, domain string, limit int) ([]db.ApprovalAllowlistRecord, error) {
-	if a == nil || a.control == nil {
-		return nil, controlplane.ErrApprovalBrokerUnavailable
-	}
-	return a.control.ListAllowlists(ctx, domain, limit)
-}
-
-func (a *ServiceApp) Auth() *auth.Service {
-	if a == nil {
-		return nil
-	}
-	return a.auth
-}
-
-func (a *ServiceApp) BeginPasskeyRegistration(ctx context.Context, req auth.BeginRegistrationRequest) (*auth.BeginCeremonyResponse, error) {
-	if a == nil || a.auth == nil {
-		return nil, auth.ErrAuthDisabled
-	}
-	return a.auth.BeginRegistration(ctx, req)
-}
-
-func (a *ServiceApp) FinishPasskeyRegistration(ctx context.Context, req auth.FinishRegistrationRequest) (db.PasskeyCredentialRecord, error) {
-	if a == nil || a.auth == nil {
-		return db.PasskeyCredentialRecord{}, auth.ErrAuthDisabled
-	}
-	return a.auth.FinishRegistration(ctx, req)
-}
-
-func (a *ServiceApp) BeginPasskeyLogin(ctx context.Context, req auth.BeginLoginRequest) (*auth.BeginCeremonyResponse, error) {
-	if a == nil || a.auth == nil {
-		return nil, auth.ErrAuthDisabled
-	}
-	return a.auth.BeginLogin(ctx, req)
-}
-
-func (a *ServiceApp) FinishPasskeyLogin(ctx context.Context, req auth.FinishLoginRequest) (auth.LoginResult, error) {
-	if a == nil || a.auth == nil {
-		return auth.LoginResult{}, auth.ErrAuthDisabled
-	}
-	return a.auth.FinishLogin(ctx, req)
-}
-
-func (a *ServiceApp) BeginStepUp(ctx context.Context, req auth.BeginStepUpRequest) (*auth.BeginCeremonyResponse, error) {
-	if a == nil || a.auth == nil {
-		return nil, auth.ErrAuthDisabled
-	}
-	return a.auth.BeginStepUp(ctx, req)
-}
-
-func (a *ServiceApp) FinishStepUp(ctx context.Context, req auth.FinishStepUpRequest) (db.AuthSessionRecord, error) {
-	if a == nil || a.auth == nil {
-		return db.AuthSessionRecord{}, auth.ErrAuthDisabled
-	}
-	return a.auth.FinishStepUp(ctx, req)
-}
-
-func (a *ServiceApp) ValidateAuthSession(ctx context.Context, token string) (auth.SessionClaims, error) {
-	if a == nil || a.auth == nil {
-		return auth.SessionClaims{}, auth.ErrAuthDisabled
-	}
-	return a.auth.ValidateSessionToken(ctx, token)
-}
-
-func (a *ServiceApp) RevokeAuthSession(ctx context.Context, token, reason string) error {
-	if a == nil || a.auth == nil {
-		return auth.ErrAuthDisabled
-	}
-	return a.auth.RevokeSessionToken(ctx, token, reason)
-}
-
-func (a *ServiceApp) ListPasskeys(ctx context.Context, userID string) ([]db.PasskeyCredentialRecord, error) {
-	if a == nil || a.auth == nil {
-		return nil, auth.ErrAuthDisabled
-	}
-	return a.auth.ListPasskeys(ctx, userID)
-}
-
-func (a *ServiceApp) RenamePasskey(ctx context.Context, passkeyID, nickname string) error {
-	if a == nil || a.auth == nil {
-		return auth.ErrAuthDisabled
-	}
-	return a.auth.RenamePasskey(ctx, passkeyID, nickname)
-}
-
-func (a *ServiceApp) RevokePasskey(ctx context.Context, sessionToken, passkeyID, reason string) error {
-	if a == nil || a.auth == nil {
-		return auth.ErrAuthDisabled
-	}
-	return a.auth.RevokePasskey(ctx, sessionToken, passkeyID, reason)
-}
-
-func (a *ServiceApp) AddAllowlist(ctx context.Context, domain string, scope approval.AllowlistScope, matcher any, actor string, expiresAt int64) (db.ApprovalAllowlistRecord, error) {
-	if a == nil || a.control == nil {
-		return db.ApprovalAllowlistRecord{}, controlplane.ErrApprovalBrokerUnavailable
-	}
-	return a.control.AddAllowlist(ctx, domain, scope, matcher, actor, expiresAt)
-}
-
-func (a *ServiceApp) RemoveAllowlist(ctx context.Context, id int64, actor string) error {
-	if a == nil || a.control == nil {
-		return controlplane.ErrApprovalBrokerUnavailable
-	}
-	return a.control.RemoveAllowlist(ctx, id, actor)
-}
-
-func ResolveToolPolicy(base *tools.Registry, policy *agent.ServiceToolPolicy, legacyAllowed []string) ([]string, bool, error) {
-	return agent.ResolveServiceToolAllowlist(base, policy, legacyAllowed)
-}
-
-func DecodeServiceFilePayload(reader io.Reader, maxBytes int64) ([]byte, error) {
-	if reader == nil {
-		return nil, errors.New("reader is required")
-	}
-	if maxBytes <= 0 {
-		maxBytes = 1 << 20
-	}
-	data, err := io.ReadAll(io.LimitReader(reader, maxBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) > maxBytes {
-		return nil, io.ErrUnexpectedEOF
-	}
-	return data, nil
-}
-
-func cloneMap(src map[string]any) map[string]any {
-	if len(src) == 0 {
-		return map[string]any{}
-	}
-	dst := make(map[string]any, len(src))
-	for key, value := range src {
-		dst[key] = value
-	}
-	return dst
-}
-
-func isTerminalStatus(status string) bool {
-	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "completed", "failed", "aborted", db.SubagentStatusSucceeded, db.SubagentStatusInterrupted:
-		return true
-	default:
-		return false
-	}
-}
-```
+````
 
 ## File: cmd/or3-intern/configure_tui.go
-
-```go
+````go
 package main
 
 import (
@@ -58651,11 +58382,988 @@ func configSnapshotsEqual(left, right config.Config) bool {
 	rightJSON, _ := json.Marshal(right)
 	return string(leftJSON) == string(rightJSON)
 }
-```
+````
+
+## File: internal/app/service_app.go
+````go
+package app
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"strings"
+	"time"
+
+	"or3-intern/internal/agent"
+	"or3-intern/internal/agentcli"
+	"or3-intern/internal/approval"
+	"or3-intern/internal/auth"
+	"or3-intern/internal/bus"
+	"or3-intern/internal/channels"
+	"or3-intern/internal/config"
+	"or3-intern/internal/controlplane"
+	"or3-intern/internal/db"
+	"or3-intern/internal/providers"
+	"or3-intern/internal/tools"
+)
+
+type ServiceApp struct {
+	cfg             config.Config
+	runtime         *agent.Runtime
+	jobs            *agent.JobRegistry
+	subagentManager *agent.SubagentManager
+	agentCLIManager *agentcli.Manager
+	control         *controlplane.Service
+	auth            *auth.Service
+}
+
+func NewServiceApp(cfg config.Config, runtime *agent.Runtime, jobs *agent.JobRegistry, subagentManager *agent.SubagentManager, control *controlplane.Service) *ServiceApp {
+	return NewServiceAppWithAgentCLI(cfg, runtime, jobs, subagentManager, nil, control)
+}
+
+func NewServiceAppWithAgentCLI(cfg config.Config, runtime *agent.Runtime, jobs *agent.JobRegistry, subagentManager *agent.SubagentManager, agentCLIManager *agentcli.Manager, control *controlplane.Service) *ServiceApp {
+	app := &ServiceApp{cfg: cfg, runtime: runtime, jobs: jobs, subagentManager: subagentManager, agentCLIManager: agentCLIManager, control: control}
+	if control != nil {
+		if authSvc, err := auth.NewService(cfg, control.DB, control.Audit); err == nil {
+			app.auth = authSvc
+		}
+	}
+	return app
+}
+
+func (a *ServiceApp) SetConfig(cfg config.Config) {
+	if a == nil {
+		return
+	}
+	a.cfg = cfg
+	if a.control != nil {
+		if authSvc, err := auth.NewService(cfg, a.control.DB, a.control.Audit); err == nil {
+			a.auth = authSvc
+		}
+	}
+}
+
+type TurnRequest struct {
+	SessionKey    string
+	Message       string
+	Meta          map[string]any
+	AllowedTools  []string
+	RestrictTools bool
+	ProfileName   string
+	Capability    tools.CapabilityLevel
+	ApprovalToken string
+	Actor         string
+	Role          string
+	Observer      agent.ConversationObserver
+	Streamer      channels.StreamingChannel
+}
+
+func (a *ServiceApp) serviceRunContext(ctx context.Context, sessionKey, profileName, approvalToken, actor, role string, capability tools.CapabilityLevel, observer agent.ConversationObserver, streamer channels.StreamingChannel) context.Context {
+	runCtx := tools.ContextWithRequestSource(ctx, tools.RequestSourceService)
+	runCtx = tools.ContextWithSession(runCtx, strings.TrimSpace(sessionKey))
+	runCtx = tools.ContextWithApprovalToken(runCtx, approvalToken)
+	runCtx = tools.ContextWithRequesterIdentity(runCtx, actor, role)
+	runCtx = tools.ContextWithCapabilityCeiling(runCtx, capability)
+	if a != nil && a.runtime != nil {
+		runCtx = a.runtime.ContextWithProfileName(runCtx, profileName)
+		runCtx = tools.ContextWithToolGuard(runCtx, a.runtime.GuardToolExecution)
+	}
+	if observer != nil {
+		runCtx = agent.ContextWithConversationObserver(runCtx, observer)
+	}
+	if streamer != nil {
+		runCtx = agent.ContextWithStreamingChannel(runCtx, streamer)
+	}
+	return runCtx
+}
+
+func (a *ServiceApp) serviceToolRegistry(allowedTools []string, restrictTools bool) *tools.Registry {
+	if a == nil || a.runtime == nil {
+		return nil
+	}
+	if !restrictTools {
+		return a.runtime.Tools
+	}
+	filtered := tools.NewRegistry()
+	if len(allowedTools) > 0 {
+		filtered = a.runtime.Tools.CloneFiltered(allowedTools)
+	}
+	return filtered
+}
+
+func (a *ServiceApp) RunTurn(ctx context.Context, req TurnRequest) error {
+	if a == nil || a.runtime == nil {
+		return errors.New("runtime unavailable")
+	}
+	runCtx := a.serviceRunContext(ctx, req.SessionKey, req.ProfileName, req.ApprovalToken, req.Actor, req.Role, req.Capability, req.Observer, req.Streamer)
+	if req.RestrictTools {
+		filtered := a.serviceToolRegistry(req.AllowedTools, req.RestrictTools)
+		runCtx = agent.ContextWithToolRegistry(runCtx, filtered)
+	}
+	meta := cloneMap(req.Meta)
+	if strings.TrimSpace(req.ProfileName) != "" {
+		meta["profile_name"] = strings.TrimSpace(req.ProfileName)
+	}
+	return a.runtime.Handle(runCtx, bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: strings.TrimSpace(req.SessionKey),
+		Channel:    "service",
+		From:       "or3-net",
+		Message:    strings.TrimSpace(req.Message),
+		Meta:       meta,
+	})
+}
+
+type ReplayToolCallRequest struct {
+	SessionKey        string
+	ToolName          string
+	ArgumentsJSON     string
+	ApprovalRequestID int64
+	AllowedTools      []string
+	RestrictTools     bool
+	ProfileName       string
+	Capability        tools.CapabilityLevel
+	ApprovalToken     string
+	Actor             string
+	Role              string
+	Observer          agent.ConversationObserver
+}
+
+type ResumeApprovedRequest struct {
+	IssuedApproval approval.IssuedApproval
+	ProfileName    string
+	Capability     tools.CapabilityLevel
+	Actor          string
+	Role           string
+	Observer       agent.ConversationObserver
+}
+
+type replayToolCallTarget struct {
+	ToolName       string
+	ArgumentsJSON  string
+	ToolCallID     string
+	AlreadyResumed bool
+}
+
+type replayHistoryMessage struct {
+	Role       string
+	Content    string
+	ToolCallID string
+	ToolCalls  []providers.ToolCall
+}
+
+func (a *ServiceApp) ReplayToolCall(ctx context.Context, req ReplayToolCallRequest) (string, error) {
+	if a == nil || a.runtime == nil {
+		return "", errors.New("runtime unavailable")
+	}
+	registry := a.serviceToolRegistry(req.AllowedTools, req.RestrictTools)
+	if registry == nil {
+		return "", errors.New("tool registry unavailable")
+	}
+	toolName := strings.TrimSpace(req.ToolName)
+	if toolName == "" {
+		return "", errors.New("tool name is required")
+	}
+	argsJSON := strings.TrimSpace(req.ArgumentsJSON)
+	if argsJSON == "" {
+		argsJSON = "{}"
+	}
+	runCtx := a.serviceRunContext(ctx, req.SessionKey, req.ProfileName, req.ApprovalToken, req.Actor, req.Role, req.Capability, req.Observer, nil)
+	if req.RestrictTools {
+		runCtx = agent.ContextWithToolRegistry(runCtx, registry)
+	}
+	toolCallID := ""
+	fullReplayHistory := a.runtime.DB != nil && a.runtime.Builder != nil && a.runtime.Provider != nil
+	if fullReplayHistory {
+		if req.ApprovalRequestID > 0 {
+			target, findErr := a.findApprovalReplayTarget(runCtx, req.SessionKey, req.ApprovalRequestID)
+			if findErr != nil {
+				return "", findErr
+			}
+			if target.AlreadyResumed {
+				finalText := "Approval was already applied. The latest tool result is already in the conversation."
+				if req.Observer != nil {
+					req.Observer.OnCompletion(runCtx, finalText, false)
+				}
+				return finalText, nil
+			}
+			toolName = strings.TrimSpace(target.ToolName)
+			argsJSON = strings.TrimSpace(target.ArgumentsJSON)
+			toolCallID = strings.TrimSpace(target.ToolCallID)
+			if toolName == "" || toolCallID == "" {
+				return "", fmt.Errorf("approved replay rejected: no matching blocked tool call for request %d", req.ApprovalRequestID)
+			}
+		} else {
+			var findErr error
+			toolCallID, findErr = a.findReplayToolCallID(runCtx, req.SessionKey, toolName, argsJSON)
+			if findErr != nil {
+				return "", findErr
+			}
+			if strings.TrimSpace(toolCallID) == "" {
+				return "", fmt.Errorf("approved replay rejected: no matching prior assistant tool call")
+			}
+		}
+	}
+	if req.Observer != nil {
+		req.Observer.OnToolCall(runCtx, toolName, argsJSON)
+	}
+	out, err := registry.Execute(runCtx, toolName, argsJSON)
+	if err != nil {
+		var params map[string]any
+		_ = json.Unmarshal([]byte(argsJSON), &params)
+		out = tools.EncodeToolFailure(toolName, params, out, err)
+	}
+	if req.Observer != nil {
+		req.Observer.OnToolResult(runCtx, toolName, out, err)
+	}
+	if err != nil {
+		var approvalErr *tools.ApprovalRequiredError
+		if errors.As(err, &approvalErr) {
+			return "", err
+		}
+		if !fullReplayHistory {
+			return "", err
+		}
+	}
+	if !fullReplayHistory {
+		finalText := summarizeReplayToolResult(toolName, out)
+		if req.Observer != nil {
+			req.Observer.OnCompletion(runCtx, finalText, false)
+		}
+		return finalText, nil
+	}
+	if a.runtime.DB != nil && strings.TrimSpace(req.SessionKey) != "" {
+		payload := map[string]any{
+			"name":      toolName,
+			"replayed":  true,
+			"args_json": argsJSON,
+		}
+		if strings.TrimSpace(toolCallID) != "" {
+			payload["tool_call_id"] = toolCallID
+		}
+		if _, err := a.runtime.DB.AppendMessage(runCtx, req.SessionKey, "tool", out, payload); err != nil {
+			return "", err
+		}
+	}
+	if err := a.runtime.Handle(runCtx, bus.Event{
+		Type:       bus.EventSystem,
+		SessionKey: strings.TrimSpace(req.SessionKey),
+		Channel:    "service",
+		From:       "or3-net",
+		Message:    replayContinuationPrompt(toolName),
+		Meta: map[string]any{
+			"approved_tool_replay": true,
+			"tool_name":            toolName,
+		},
+	}); err != nil {
+		return "", err
+	}
+	return "", nil
+}
+
+func (a *ServiceApp) ResumeApprovedRequest(ctx context.Context, req ResumeApprovedRequest) (string, error) {
+	if a == nil || a.runtime == nil {
+		return "", errors.New("runtime unavailable")
+	}
+	issued := req.IssuedApproval
+	sessionKey := strings.TrimSpace(issued.Request.RequesterSessionID)
+	if sessionKey == "" {
+		return "", nil
+	}
+	switch strings.TrimSpace(issued.Request.Type) {
+	case string(approval.SubjectExec), string(approval.SubjectSkillExec):
+		target, err := a.findApprovalReplayTarget(ctx, sessionKey, issued.Request.ID)
+		if err != nil {
+			return "", err
+		}
+		if target.AlreadyResumed {
+			finalText := "Approval was already applied. The latest tool result is already in the conversation."
+			if req.Observer != nil {
+				req.Observer.OnCompletion(ctx, finalText, false)
+			}
+			return finalText, nil
+		}
+		if strings.TrimSpace(target.ToolCallID) == "" {
+			finalText := "Approval was granted, but the original blocked tool call could not be found to resume. Please retry the request if it is still needed."
+			if req.Observer != nil {
+				req.Observer.OnCompletion(ctx, finalText, false)
+			}
+			return finalText, nil
+		}
+		return a.ReplayToolCall(ctx, ReplayToolCallRequest{
+			SessionKey:        sessionKey,
+			ToolName:          target.ToolName,
+			ArgumentsJSON:     target.ArgumentsJSON,
+			ApprovalRequestID: issued.Request.ID,
+			ProfileName:       req.ProfileName,
+			Capability:        req.Capability,
+			ApprovalToken:     issued.Token,
+			Actor:             req.Actor,
+			Role:              req.Role,
+			Observer:          req.Observer,
+		})
+	case string(approval.SubjectToolQuota):
+		runCtx := a.serviceRunContext(ctx, sessionKey, req.ProfileName, issued.Token, req.Actor, req.Role, req.Capability, req.Observer, nil)
+		return "", a.runtime.Handle(runCtx, bus.Event{
+			Type:       bus.EventSystem,
+			SessionKey: sessionKey,
+			Channel:    "service",
+			From:       "or3-net",
+			Message:    toolQuotaApprovalContinuationPrompt(),
+			Meta: map[string]any{
+				"approved_tool_quota": true,
+				"approval_request_id": issued.Request.ID,
+			},
+		})
+	default:
+		return "", nil
+	}
+}
+
+func summarizeReplayToolResult(toolName string, out string) string {
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return fmt.Sprintf("%s completed.", strings.TrimSpace(toolName))
+	}
+	var result tools.ToolResult
+	if err := json.Unmarshal([]byte(out), &result); err == nil {
+		parts := make([]string, 0, 3)
+		if preview := strings.TrimSpace(result.Preview); preview != "" {
+			parts = append(parts, preview)
+		}
+		if len(parts) == 0 {
+			if summary := strings.TrimSpace(result.Summary); summary != "" {
+				parts = append(parts, summary)
+			}
+		}
+		if artifactID := strings.TrimSpace(result.ArtifactID); artifactID != "" {
+			parts = append(parts, fmt.Sprintf("artifact: %s", artifactID))
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, "\n\n")
+		}
+	}
+	return out
+}
+
+func (a *ServiceApp) findReplayToolCallID(ctx context.Context, sessionKey, toolName, argsJSON string) (string, error) {
+	if a == nil || a.runtime == nil || a.runtime.Builder == nil {
+		return "", nil
+	}
+	pp, _, err := a.runtime.Builder.BuildWithOptions(ctx, agent.BuildOptions{
+		SessionKey: strings.TrimSpace(sessionKey),
+	})
+	if err != nil {
+		return "", err
+	}
+	wantArgs := canonicalReplayArgs(argsJSON)
+	for i := len(pp.History) - 1; i >= 0; i-- {
+		msg := pp.History[i]
+		if msg.Role != "assistant" || len(msg.ToolCalls) == 0 {
+			continue
+		}
+		for j := len(msg.ToolCalls) - 1; j >= 0; j-- {
+			tc := msg.ToolCalls[j]
+			if strings.TrimSpace(tc.Function.Name) != strings.TrimSpace(toolName) {
+				continue
+			}
+			if wantArgs != "" && canonicalReplayArgs(tc.Function.Arguments) != wantArgs {
+				continue
+			}
+			if id := strings.TrimSpace(tc.ID); id != "" {
+				return id, nil
+			}
+		}
+	}
+	return "", nil
+}
+
+func (a *ServiceApp) findApprovalReplayTarget(ctx context.Context, sessionKey string, requestID int64) (replayToolCallTarget, error) {
+	if a == nil || a.runtime == nil || requestID <= 0 {
+		return replayToolCallTarget{}, nil
+	}
+	history, err := a.approvalReplayHistory(ctx, sessionKey)
+	if err != nil {
+		return replayToolCallTarget{}, err
+	}
+	for i := len(history) - 1; i >= 0; i-- {
+		msg := history[i]
+		if msg.Role != "tool" || strings.TrimSpace(msg.ToolCallID) == "" {
+			continue
+		}
+		result, ok := tools.DecodeToolResult(msg.Content)
+		if !ok || result.RequestID != requestID {
+			continue
+		}
+		toolCallID := strings.TrimSpace(msg.ToolCallID)
+		for j := i + 1; j < len(history); j++ {
+			later := history[j]
+			if later.Role == "tool" && strings.TrimSpace(later.ToolCallID) == toolCallID {
+				return replayToolCallTarget{ToolCallID: toolCallID, AlreadyResumed: true}, nil
+			}
+		}
+		for j := i - 1; j >= 0; j-- {
+			prior := history[j]
+			if prior.Role != "assistant" || len(prior.ToolCalls) == 0 {
+				continue
+			}
+			for k := len(prior.ToolCalls) - 1; k >= 0; k-- {
+				tc := prior.ToolCalls[k]
+				if strings.TrimSpace(tc.ID) != toolCallID {
+					continue
+				}
+				return replayToolCallTarget{
+					ToolName:      strings.TrimSpace(tc.Function.Name),
+					ArgumentsJSON: strings.TrimSpace(tc.Function.Arguments),
+					ToolCallID:    toolCallID,
+				}, nil
+			}
+		}
+		return replayToolCallTarget{}, fmt.Errorf("approved replay rejected: no matching prior assistant tool call for request %d", requestID)
+	}
+	return replayToolCallTarget{}, nil
+}
+
+func (a *ServiceApp) approvalReplayHistory(ctx context.Context, sessionKey string) ([]replayHistoryMessage, error) {
+	history, err := a.rawSessionReplayHistory(ctx, sessionKey, 250)
+	if err != nil {
+		return nil, err
+	}
+	if len(history) > 0 || a == nil || a.runtime == nil || a.runtime.Builder == nil {
+		return history, nil
+	}
+	pp, _, err := a.runtime.Builder.BuildWithOptions(ctx, agent.BuildOptions{
+		SessionKey: strings.TrimSpace(sessionKey),
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]replayHistoryMessage, 0, len(pp.History))
+	for _, msg := range pp.History {
+		content, _ := msg.Content.(string)
+		out = append(out, replayHistoryMessage{
+			Role:       msg.Role,
+			Content:    content,
+			ToolCallID: msg.ToolCallID,
+			ToolCalls:  msg.ToolCalls,
+		})
+	}
+	return out, nil
+}
+
+func (a *ServiceApp) rawSessionReplayHistory(ctx context.Context, sessionKey string, limit int) ([]replayHistoryMessage, error) {
+	if a == nil || a.runtime == nil || a.runtime.DB == nil || a.runtime.DB.SQL == nil {
+		return nil, nil
+	}
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 250
+	}
+	rows, err := a.runtime.DB.SQL.QueryContext(ctx,
+		`SELECT role, content, payload_json FROM messages WHERE session_key=? ORDER BY id DESC LIMIT ?`, sessionKey, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	history := make([]replayHistoryMessage, 0, limit)
+	for rows.Next() {
+		var role, content, payloadJSON string
+		if err := rows.Scan(&role, &content, &payloadJSON); err != nil {
+			return nil, err
+		}
+		msg := replayHistoryMessage{Role: role, Content: content}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(payloadJSON), &payload); err == nil {
+			switch role {
+			case "assistant":
+				if raw, ok := payload["tool_calls"]; ok {
+					b, _ := json.Marshal(raw)
+					_ = json.Unmarshal(b, &msg.ToolCalls)
+				}
+			case "tool":
+				if rawID, ok := payload["tool_call_id"]; ok {
+					msg.ToolCallID = strings.TrimSpace(fmt.Sprint(rawID))
+				}
+			}
+		}
+		history = append(history, msg)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i, j := 0, len(history)-1; i < j; i, j = i+1, j-1 {
+		history[i], history[j] = history[j], history[i]
+	}
+	backfillReplayToolCallIDs(history)
+	return history, nil
+}
+
+func backfillReplayToolCallIDs(history []replayHistoryMessage) {
+	pendingToolCallIDs := make([]string, 0)
+	for i := range history {
+		msg := &history[i]
+		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
+			pendingToolCallIDs = pendingToolCallIDs[:0]
+			for _, tc := range msg.ToolCalls {
+				if id := strings.TrimSpace(tc.ID); id != "" {
+					pendingToolCallIDs = append(pendingToolCallIDs, id)
+				}
+			}
+			continue
+		}
+		if msg.Role != "tool" {
+			continue
+		}
+		if msg.ToolCallID == "" && len(pendingToolCallIDs) > 0 {
+			msg.ToolCallID = pendingToolCallIDs[0]
+		}
+		if msg.ToolCallID == "" || len(pendingToolCallIDs) == 0 {
+			continue
+		}
+		if pendingToolCallIDs[0] == msg.ToolCallID {
+			pendingToolCallIDs = pendingToolCallIDs[1:]
+			continue
+		}
+		for j, id := range pendingToolCallIDs {
+			if id == msg.ToolCallID {
+				pendingToolCallIDs = append(pendingToolCallIDs[:j], pendingToolCallIDs[j+1:]...)
+				break
+			}
+		}
+	}
+}
+
+func canonicalReplayArgs(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	var decoded any
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		return raw
+	}
+	encoded, err := json.Marshal(decoded)
+	if err != nil {
+		return raw
+	}
+	return string(encoded)
+}
+
+func replayContinuationPrompt(toolName string) string {
+	name := strings.TrimSpace(toolName)
+	if name == "" {
+		name = "tool"
+	}
+	return fmt.Sprintf("Approval was granted for the previously requested %s call. The exact approved tool call has now been executed and its latest result is already in the conversation. Continue the same task from that result. Do not stop just because the approved tool call succeeded, and do not repeat the same %s call unless it is still necessary.", name, name)
+}
+
+func toolQuotaApprovalContinuationPrompt() string {
+	return "Approval was granted for the previously requested continuation. Continue the same task from the existing conversation state. Use the latest tool results already in the conversation, and do not repeat the same failing or blocked path unless it is still necessary."
+}
+
+type SubagentRequest struct {
+	ParentSessionKey string
+	Task             string
+	PromptSnapshot   []providers.ChatMessage
+	AllowedTools     []string
+	RestrictTools    bool
+	ProfileName      string
+	Capability       tools.CapabilityLevel
+	Channel          string
+	ReplyTo          string
+	Meta             map[string]any
+	Timeout          time.Duration
+	ApprovalToken    string
+	Actor            string
+	Role             string
+}
+
+func (a *ServiceApp) StartSubagent(ctx context.Context, req SubagentRequest) (tools.SpawnJob, error) {
+	if a == nil || a.subagentManager == nil {
+		return tools.SpawnJob{}, errors.New("subagent manager unavailable")
+	}
+	jobCtx := tools.ContextWithRequestSource(ctx, tools.RequestSourceService)
+	jobCtx = tools.ContextWithCapabilityCeiling(jobCtx, req.Capability)
+	return a.subagentManager.EnqueueService(jobCtx, agent.ServiceSubagentRequest{
+		ParentSessionKey: strings.TrimSpace(req.ParentSessionKey),
+		Task:             strings.TrimSpace(req.Task),
+		PromptSnapshot:   append([]providers.ChatMessage{}, req.PromptSnapshot...),
+		AllowedTools:     append([]string{}, req.AllowedTools...),
+		RestrictTools:    req.RestrictTools,
+		ProfileName:      strings.TrimSpace(req.ProfileName),
+		Channel:          strings.TrimSpace(req.Channel),
+		ReplyTo:          strings.TrimSpace(req.ReplyTo),
+		Meta:             cloneMap(req.Meta),
+		Timeout:          req.Timeout,
+		ApprovalToken:    strings.TrimSpace(req.ApprovalToken),
+		RequesterActor:   strings.TrimSpace(req.Actor),
+		RequesterRole:    strings.TrimSpace(req.Role),
+	})
+}
+
+func (a *ServiceApp) GetJob(jobID string) (agent.JobSnapshot, error) {
+	if a == nil || a.control == nil {
+		return agent.JobSnapshot{}, controlplane.ErrJobRegistryUnavailable
+	}
+	return a.control.GetJob(jobID)
+}
+
+func (a *ServiceApp) AbortJob(ctx context.Context, jobID string) (bool, string, error) {
+	if a == nil || a.jobs == nil {
+		return false, "", controlplane.ErrJobRegistryUnavailable
+	}
+	if a.jobs.Cancel(jobID) {
+		return true, "", nil
+	}
+	if a.subagentManager != nil {
+		if err := a.subagentManager.Abort(ctx, jobID); err == nil {
+			return true, "", nil
+		} else if strings.Contains(strings.ToLower(err.Error()), "not abortable") {
+			return false, "not_abortable", nil
+		} else {
+			if !strings.Contains(strings.ToLower(err.Error()), "not found") {
+				return false, "", err
+			}
+		}
+	}
+	if a.agentCLIManager != nil {
+		if err := a.agentCLIManager.Abort(ctx, jobID); err == nil {
+			return true, "", nil
+		} else if strings.Contains(strings.ToLower(err.Error()), "not abortable") {
+			return false, "not_abortable", nil
+		}
+	}
+	snapshot, ok := a.jobs.Snapshot(jobID)
+	if !ok {
+		return false, "not_found", nil
+	}
+	if isTerminalStatus(snapshot.Status) {
+		return true, snapshot.Status, nil
+	}
+	return false, "not_abortable", nil
+}
+
+// DetectAgentCLIRunners returns runner info for all registered external CLIs.
+func (a *ServiceApp) DetectAgentCLIRunners(ctx context.Context) ([]agentcli.RunnerInfo, error) {
+	if a == nil {
+		return nil, fmt.Errorf("service app is not available")
+	}
+	if a.agentCLIManager != nil {
+		if a.agentCLIManager.Registry == nil {
+			return nil, fmt.Errorf("runner registry is not configured")
+		}
+		return a.agentCLIManager.Registry.DetectAll(ctx, a.agentCLIManager.DetectOptions()), nil
+	}
+	detectManager := &agentcli.Manager{Cfg: a.cfg.AgentCLI}
+	return agentcli.NewDefaultRegistry().DetectAll(ctx, detectManager.DetectOptions()), nil
+}
+
+// StartAgentCLIRun enqueues a new external CLI run.
+func (a *ServiceApp) StartAgentCLIRun(ctx context.Context, req agentcli.AgentRunRequest) (db.AgentCLIRun, error) {
+	if a == nil || a.agentCLIManager == nil {
+		return db.AgentCLIRun{}, fmt.Errorf("agent CLI manager is not available")
+	}
+	return a.agentCLIManager.Enqueue(ctx, req)
+}
+
+// GetAgentCLIRun reads a persisted CLI run by run ID or job ID.
+func (a *ServiceApp) GetAgentCLIRun(ctx context.Context, id string) (db.AgentCLIRun, bool, error) {
+	if a == nil || a.agentCLIManager == nil || a.agentCLIManager.DB == nil {
+		return db.AgentCLIRun{}, false, fmt.Errorf("agent CLI manager is not available")
+	}
+	return a.agentCLIManager.DB.GetAgentCLIRun(ctx, id)
+}
+
+// ListAgentCLIEvents lists persisted events for a job.
+func (a *ServiceApp) ListAgentCLIEvents(ctx context.Context, jobID string, afterSeq int64, limit int) ([]db.AgentCLIEvent, error) {
+	if a == nil || a.agentCLIManager == nil || a.agentCLIManager.DB == nil {
+		return nil, fmt.Errorf("agent CLI manager is not available")
+	}
+	return a.agentCLIManager.DB.ListAgentCLIEvents(ctx, jobID, afterSeq, limit)
+}
+
+// AbortAgentCLIRun cancels an external CLI job.
+func (a *ServiceApp) AbortAgentCLIRun(ctx context.Context, jobID string) error {
+	if a == nil || a.agentCLIManager == nil {
+		return fmt.Errorf("agent CLI manager is not available")
+	}
+	return a.agentCLIManager.Abort(ctx, jobID)
+}
+
+func (a *ServiceApp) WaitForJob(ctx context.Context, jobID string) (agent.JobSnapshot, bool) {
+	if a == nil || a.jobs == nil {
+		return agent.JobSnapshot{}, false
+	}
+	return a.jobs.Wait(ctx, jobID)
+}
+
+func (a *ServiceApp) SubscribeJob(jobID string) (agent.JobSnapshot, <-chan agent.JobEvent, func(), bool) {
+	if a == nil || a.jobs == nil {
+		return agent.JobSnapshot{}, nil, nil, false
+	}
+	return a.jobs.Subscribe(jobID)
+}
+
+func (a *ServiceApp) CreatePairingRequest(ctx context.Context, input approval.PairingRequestInput) (db.PairingRequestRecord, string, error) {
+	if a == nil || a.control == nil {
+		return db.PairingRequestRecord{}, "", controlplane.ErrApprovalBrokerUnavailable
+	}
+	return a.control.CreatePairingRequest(ctx, input)
+}
+
+func (a *ServiceApp) ListPairingRequests(ctx context.Context, status string, limit int) ([]db.PairingRequestRecord, error) {
+	if a == nil || a.control == nil {
+		return nil, controlplane.ErrApprovalBrokerUnavailable
+	}
+	return a.control.ListPairingRequests(ctx, status, limit)
+}
+
+func (a *ServiceApp) ApprovePairingRequest(ctx context.Context, requestID int64, actor string) (db.PairingRequestRecord, error) {
+	if a == nil || a.control == nil {
+		return db.PairingRequestRecord{}, controlplane.ErrApprovalBrokerUnavailable
+	}
+	return a.control.ApprovePairingRequest(ctx, requestID, actor)
+}
+
+func (a *ServiceApp) ApprovePairingRequestByCode(ctx context.Context, code string, actor string) (db.PairingRequestRecord, error) {
+	if a == nil || a.control == nil {
+		return db.PairingRequestRecord{}, controlplane.ErrApprovalBrokerUnavailable
+	}
+	return a.control.ApprovePairingRequestByCode(ctx, code, actor)
+}
+
+func (a *ServiceApp) DenyPairingRequest(ctx context.Context, requestID int64, actor string) error {
+	if a == nil || a.control == nil {
+		return controlplane.ErrApprovalBrokerUnavailable
+	}
+	return a.control.DenyPairingRequest(ctx, requestID, actor)
+}
+
+func (a *ServiceApp) ExchangePairingCode(ctx context.Context, input approval.PairingExchangeInput) (db.PairedDeviceRecord, string, error) {
+	if a == nil || a.control == nil {
+		return db.PairedDeviceRecord{}, "", controlplane.ErrApprovalBrokerUnavailable
+	}
+	return a.control.ExchangePairingCode(ctx, input)
+}
+
+func (a *ServiceApp) ListDevices(ctx context.Context, limit int) ([]db.PairedDeviceRecord, error) {
+	if a == nil || a.control == nil {
+		return nil, controlplane.ErrApprovalBrokerUnavailable
+	}
+	return a.control.ListDevices(ctx, limit)
+}
+
+func (a *ServiceApp) RevokeDevice(ctx context.Context, deviceID, actor string) error {
+	if a == nil || a.control == nil {
+		return controlplane.ErrApprovalBrokerUnavailable
+	}
+	return a.control.RevokeDevice(ctx, deviceID, actor)
+}
+
+func (a *ServiceApp) RotateDevice(ctx context.Context, deviceID string) (db.PairedDeviceRecord, string, error) {
+	if a == nil || a.control == nil {
+		return db.PairedDeviceRecord{}, "", controlplane.ErrApprovalBrokerUnavailable
+	}
+	return a.control.RotateDevice(ctx, deviceID)
+}
+
+func (a *ServiceApp) ListApprovalRequests(ctx context.Context, filter controlplane.ApprovalFilter) ([]db.ApprovalRequestRecord, error) {
+	if a == nil || a.control == nil {
+		return nil, controlplane.ErrApprovalBrokerUnavailable
+	}
+	return a.control.ListApprovalRequests(ctx, filter)
+}
+
+func (a *ServiceApp) GetApproval(ctx context.Context, requestID int64) (db.ApprovalRequestRecord, error) {
+	if a == nil || a.control == nil {
+		return db.ApprovalRequestRecord{}, controlplane.ErrApprovalBrokerUnavailable
+	}
+	return a.control.GetApproval(ctx, requestID)
+}
+
+func (a *ServiceApp) ApproveApproval(ctx context.Context, requestID int64, actor string, allowlist bool, note string) (approval.IssuedApproval, error) {
+	if a == nil || a.control == nil {
+		return approval.IssuedApproval{}, controlplane.ErrApprovalBrokerUnavailable
+	}
+	return a.control.ApproveApproval(ctx, requestID, actor, allowlist, note)
+}
+
+func (a *ServiceApp) DenyApproval(ctx context.Context, requestID int64, actor, note string) error {
+	if a == nil || a.control == nil {
+		return controlplane.ErrApprovalBrokerUnavailable
+	}
+	return a.control.DenyApproval(ctx, requestID, actor, note)
+}
+
+func (a *ServiceApp) CancelApproval(ctx context.Context, requestID int64, actor, note string) error {
+	if a == nil || a.control == nil {
+		return controlplane.ErrApprovalBrokerUnavailable
+	}
+	return a.control.CancelApproval(ctx, requestID, actor, note)
+}
+
+func (a *ServiceApp) ExpireApprovals(ctx context.Context, actor string) (int64, error) {
+	if a == nil || a.control == nil {
+		return 0, controlplane.ErrApprovalBrokerUnavailable
+	}
+	return a.control.ExpireApprovals(ctx, actor)
+}
+
+func (a *ServiceApp) ListAllowlists(ctx context.Context, domain string, limit int) ([]db.ApprovalAllowlistRecord, error) {
+	if a == nil || a.control == nil {
+		return nil, controlplane.ErrApprovalBrokerUnavailable
+	}
+	return a.control.ListAllowlists(ctx, domain, limit)
+}
+
+func (a *ServiceApp) Auth() *auth.Service {
+	if a == nil {
+		return nil
+	}
+	return a.auth
+}
+
+func (a *ServiceApp) BeginPasskeyRegistration(ctx context.Context, req auth.BeginRegistrationRequest) (*auth.BeginCeremonyResponse, error) {
+	if a == nil || a.auth == nil {
+		return nil, auth.ErrAuthDisabled
+	}
+	return a.auth.BeginRegistration(ctx, req)
+}
+
+func (a *ServiceApp) FinishPasskeyRegistration(ctx context.Context, req auth.FinishRegistrationRequest) (db.PasskeyCredentialRecord, error) {
+	if a == nil || a.auth == nil {
+		return db.PasskeyCredentialRecord{}, auth.ErrAuthDisabled
+	}
+	return a.auth.FinishRegistration(ctx, req)
+}
+
+func (a *ServiceApp) BeginPasskeyLogin(ctx context.Context, req auth.BeginLoginRequest) (*auth.BeginCeremonyResponse, error) {
+	if a == nil || a.auth == nil {
+		return nil, auth.ErrAuthDisabled
+	}
+	return a.auth.BeginLogin(ctx, req)
+}
+
+func (a *ServiceApp) FinishPasskeyLogin(ctx context.Context, req auth.FinishLoginRequest) (auth.LoginResult, error) {
+	if a == nil || a.auth == nil {
+		return auth.LoginResult{}, auth.ErrAuthDisabled
+	}
+	return a.auth.FinishLogin(ctx, req)
+}
+
+func (a *ServiceApp) BeginStepUp(ctx context.Context, req auth.BeginStepUpRequest) (*auth.BeginCeremonyResponse, error) {
+	if a == nil || a.auth == nil {
+		return nil, auth.ErrAuthDisabled
+	}
+	return a.auth.BeginStepUp(ctx, req)
+}
+
+func (a *ServiceApp) FinishStepUp(ctx context.Context, req auth.FinishStepUpRequest) (db.AuthSessionRecord, error) {
+	if a == nil || a.auth == nil {
+		return db.AuthSessionRecord{}, auth.ErrAuthDisabled
+	}
+	return a.auth.FinishStepUp(ctx, req)
+}
+
+func (a *ServiceApp) ValidateAuthSession(ctx context.Context, token string) (auth.SessionClaims, error) {
+	if a == nil || a.auth == nil {
+		return auth.SessionClaims{}, auth.ErrAuthDisabled
+	}
+	return a.auth.ValidateSessionToken(ctx, token)
+}
+
+func (a *ServiceApp) RevokeAuthSession(ctx context.Context, token, reason string) error {
+	if a == nil || a.auth == nil {
+		return auth.ErrAuthDisabled
+	}
+	return a.auth.RevokeSessionToken(ctx, token, reason)
+}
+
+func (a *ServiceApp) ListPasskeys(ctx context.Context, userID string) ([]db.PasskeyCredentialRecord, error) {
+	if a == nil || a.auth == nil {
+		return nil, auth.ErrAuthDisabled
+	}
+	return a.auth.ListPasskeys(ctx, userID)
+}
+
+func (a *ServiceApp) RenamePasskey(ctx context.Context, passkeyID, nickname string) error {
+	if a == nil || a.auth == nil {
+		return auth.ErrAuthDisabled
+	}
+	return a.auth.RenamePasskey(ctx, passkeyID, nickname)
+}
+
+func (a *ServiceApp) RevokePasskey(ctx context.Context, sessionToken, passkeyID, reason string) error {
+	if a == nil || a.auth == nil {
+		return auth.ErrAuthDisabled
+	}
+	return a.auth.RevokePasskey(ctx, sessionToken, passkeyID, reason)
+}
+
+func (a *ServiceApp) AddAllowlist(ctx context.Context, domain string, scope approval.AllowlistScope, matcher any, actor string, expiresAt int64) (db.ApprovalAllowlistRecord, error) {
+	if a == nil || a.control == nil {
+		return db.ApprovalAllowlistRecord{}, controlplane.ErrApprovalBrokerUnavailable
+	}
+	return a.control.AddAllowlist(ctx, domain, scope, matcher, actor, expiresAt)
+}
+
+func (a *ServiceApp) RemoveAllowlist(ctx context.Context, id int64, actor string) error {
+	if a == nil || a.control == nil {
+		return controlplane.ErrApprovalBrokerUnavailable
+	}
+	return a.control.RemoveAllowlist(ctx, id, actor)
+}
+
+func ResolveToolPolicy(base *tools.Registry, policy *agent.ServiceToolPolicy, legacyAllowed []string) ([]string, bool, error) {
+	return agent.ResolveServiceToolAllowlist(base, policy, legacyAllowed)
+}
+
+func DecodeServiceFilePayload(reader io.Reader, maxBytes int64) ([]byte, error) {
+	if reader == nil {
+		return nil, errors.New("reader is required")
+	}
+	if maxBytes <= 0 {
+		maxBytes = 1 << 20
+	}
+	data, err := io.ReadAll(io.LimitReader(reader, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, io.ErrUnexpectedEOF
+	}
+	return data, nil
+}
+
+func cloneMap(src map[string]any) map[string]any {
+	if len(src) == 0 {
+		return map[string]any{}
+	}
+	dst := make(map[string]any, len(src))
+	for key, value := range src {
+		dst[key] = value
+	}
+	return dst
+}
+
+func isTerminalStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "completed", "failed", "aborted", db.SubagentStatusSucceeded, db.SubagentStatusInterrupted:
+		return true
+	default:
+		return false
+	}
+}
+````
 
 ## File: cmd/or3-intern/service_auth.go
-
-```go
+````go
 package main
 
 import (
@@ -59541,11 +60249,10 @@ func withDetachedContext(ctx context.Context) context.Context {
 	}
 	return context.WithoutCancel(ctx)
 }
-```
+````
 
 ## File: internal/agent/prompt.go
-
-```go
+````go
 package agent
 
 import (
@@ -60466,11 +61173,10 @@ func cachedEmbed(ctx context.Context, provider *providers.Client, fingerprint, m
 	promptEmbedCache.mu.Unlock()
 	return vec, nil
 }
-```
+````
 
 ## File: cmd/or3-intern/main.go
-
-```go
+````go
 package main
 
 import (
@@ -61663,11 +62369,10 @@ func ensureFileIfMissing(path, content string) error {
 	}
 	return os.WriteFile(path, []byte(strings.TrimSpace(content)+"\n"), 0o644)
 }
-```
+````
 
 ## File: internal/agent/runtime.go
-
-```go
+````go
 // Package agent coordinates prompt building, tool execution, and turn delivery.
 package agent
 
@@ -61676,11 +62381,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
 	"log"
-	"net/url"
-	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -61691,12 +62392,10 @@ import (
 	"or3-intern/internal/bus"
 	"or3-intern/internal/channels"
 	"or3-intern/internal/config"
-	"or3-intern/internal/cron"
 	"or3-intern/internal/db"
 	"or3-intern/internal/heartbeat"
 	"or3-intern/internal/memory"
 	"or3-intern/internal/providers"
-	"or3-intern/internal/scope"
 	"or3-intern/internal/security"
 	"or3-intern/internal/skills"
 	"or3-intern/internal/tools"
@@ -61711,34 +62410,6 @@ const (
 
 const maxTrackedQuotaSessions = 1024
 
-var toolMarkupPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?is)<tool_call>[\s\S]*?</tool_call>`),
-	regexp.MustCompile(`(?is)<tool_call[\s\S]*$`),
-	regexp.MustCompile(`(?i)</?tool_call>`),
-	regexp.MustCompile(`(?i)<function=[^>]*>`),
-	regexp.MustCompile(`(?is)<function=[\s\S]*$`),
-	regexp.MustCompile(`(?i)<parameter=[^>]*>`),
-	regexp.MustCompile(`(?is)<parameter[\s\S]*$`),
-	regexp.MustCompile(`(?is)<\s*[|｜]\s*DSML\s*[|｜]\s*tool_calls\s*>[\s\S]*?<\s*/\s*[|｜]\s*DSML\s*[|｜]\s*tool_calls\s*>`),
-	regexp.MustCompile(`(?is)<\s*[|｜]\s*DSML\s*[|｜]\s*tool_calls[\s\S]*$`),
-	regexp.MustCompile(`(?is)<\s*/?\s*[|｜]\s*DSML\s*[|｜]\s*(?:invoke|parameter)[^>]*>`),
-}
-
-var (
-	toolMarkupBlockPattern            = regexp.MustCompile(`(?is)<tool_call\b[^>]*>(.*?)</tool_call>`)
-	toolMarkupFunctionPattern         = regexp.MustCompile(`(?is)<function=([^>\s]+)>\s*`)
-	toolMarkupParameterPattern        = regexp.MustCompile(`(?is)<parameter=([^>\s]+)>\s*`)
-	toolMarkupClosingPattern          = regexp.MustCompile(`(?is)</(?:parameter|function)>\s*$`)
-	toolMarkupNameElementPattern      = regexp.MustCompile(`(?is)<name>\s*(.*?)\s*</name>`)
-	toolMarkupArgumentsElementPattern = regexp.MustCompile(`(?is)<arguments>\s*(.*?)\s*</arguments>`)
-	dsmlToolCallsBlockPattern         = regexp.MustCompile(`(?is)<\s*[|｜]\s*DSML\s*[|｜]\s*tool_calls\s*>(.*?)<\s*/\s*[|｜]\s*DSML\s*[|｜]\s*tool_calls\s*>`)
-	dsmlInvokePattern                 = regexp.MustCompile(`(?is)<\s*[|｜]\s*DSML\s*[|｜]\s*invoke\b([^>]*)>(.*?)<\s*/\s*[|｜]\s*DSML\s*[|｜]\s*invoke\s*>`)
-	dsmlParameterPattern              = regexp.MustCompile(`(?is)<\s*[|｜]\s*DSML\s*[|｜]\s*parameter\b([^>]*)>(.*?)<\s*/\s*[|｜]\s*DSML\s*[|｜]\s*parameter\s*>`)
-	markupNameAttrPattern             = regexp.MustCompile(`(?is)\bname\s*=\s*(?:"([^"]*)"|'([^']*)')`)
-)
-
-type trustedToolAccessContextKey struct{}
-
 // Deliverer sends a completed response to a channel target.
 type Deliverer interface {
 	Deliver(ctx context.Context, channel, to, text string) error
@@ -61748,13 +62419,6 @@ type Deliverer interface {
 type MetaDeliverer interface {
 	DeliverWithMeta(ctx context.Context, channel, to, text string, meta map[string]any) error
 }
-
-type sessionLock struct {
-	mu   sync.Mutex
-	refs int
-}
-
-type messageQuotaCountersContextKey struct{}
 
 // Runtime executes conversational turns against the configured model and tools.
 type Runtime struct {
@@ -61848,18 +62512,6 @@ func (r *Runtime) modelConfigForEvent(eventType bus.EventType) RuntimeModelConfi
 	return cfg
 }
 
-type sessionQuotaState struct {
-	Session  quotaCounters
-	LastSeen time.Time
-}
-
-type quotaCounters struct {
-	ToolCalls     int
-	ExecCalls     int
-	WebCalls      int
-	SubagentCalls int
-}
-
 // BackgroundRunInput describes an isolated subagent-style background run.
 type BackgroundRunInput struct {
 	SessionKey       string
@@ -61877,51 +62529,6 @@ type BackgroundRunResult struct {
 	FinalText  string
 	Preview    string
 	ArtifactID string
-}
-
-func (r *Runtime) acquireSessionLock(key string) *sessionLock {
-	r.locksMu.Lock()
-	if r.locks == nil {
-		r.locks = map[string]*sessionLock{}
-	}
-	entry := r.locks[key]
-	if entry == nil {
-		entry = &sessionLock{}
-		r.locks[key] = entry
-	}
-	entry.refs++
-	r.locksMu.Unlock()
-	return entry
-}
-
-func (r *Runtime) releaseSessionLock(key string, entry *sessionLock) {
-	if r == nil || entry == nil {
-		return
-	}
-	r.locksMu.Lock()
-	if entry.refs > 0 {
-		entry.refs--
-	}
-	if entry.refs == 0 {
-		if current := r.locks[key]; current == entry {
-			delete(r.locks, key)
-		}
-	}
-	r.locksMu.Unlock()
-}
-
-func (r *Runtime) getSessionLock(key string) *sessionLock {
-	r.locksMu.Lock()
-	defer r.locksMu.Unlock()
-	if r.locks == nil {
-		r.locks = map[string]*sessionLock{}
-	}
-	entry := r.locks[key]
-	if entry == nil {
-		entry = &sessionLock{}
-		r.locks[key] = entry
-	}
-	return entry
 }
 
 // Handle routes a published event into the runtime turn pipeline.
@@ -62024,137 +62631,6 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 func isNewSessionCommand(message string) bool {
 	message = strings.TrimSpace(message)
 	return strings.EqualFold(message, commandNewSession) || strings.EqualFold(message, commandClear)
-}
-
-func (r *Runtime) markSessionActivity(sessionKey string) {
-	if r == nil || strings.TrimSpace(sessionKey) == "" {
-		return
-	}
-	r.idleMu.Lock()
-	defer r.idleMu.Unlock()
-	if r.idleVersion == nil {
-		r.idleVersion = map[string]uint64{}
-	}
-	r.idleVersion[sessionKey]++
-	if r.idleTimers != nil {
-		if timer := r.idleTimers[sessionKey]; timer != nil {
-			timer.Stop()
-			delete(r.idleTimers, sessionKey)
-		}
-	}
-}
-
-func (r *Runtime) scheduleIdlePrune(ctx context.Context, ev bus.Event) {
-	if r == nil || !r.ContextManager.Enabled || r.Consolidator == nil || r.DB == nil || strings.TrimSpace(ev.SessionKey) == "" {
-		return
-	}
-	delay := time.Duration(r.ContextManager.IdlePruneSeconds) * time.Second
-	if delay <= 0 {
-		delay = 5 * time.Minute
-	}
-	sessionKey := ev.SessionKey
-	channel := ev.Channel
-	replyTarget := deliveryTarget(ev)
-	meta := cloneMap(ev.Meta)
-	r.idleMu.Lock()
-	if r.idleTimers == nil {
-		r.idleTimers = map[string]*time.Timer{}
-	}
-	version := r.idleVersion[sessionKey]
-	if timer := r.idleTimers[sessionKey]; timer != nil {
-		timer.Stop()
-	}
-	r.idleTimers[sessionKey] = time.AfterFunc(delay, func() {
-		r.runIdlePrune(context.Background(), sessionKey, channel, replyTarget, meta, version)
-	})
-	r.idleMu.Unlock()
-}
-
-func (r *Runtime) runIdlePrune(ctx context.Context, sessionKey, channel, replyTarget string, meta map[string]any, expectedVersion uint64) {
-	entry := r.acquireSessionLock(sessionKey)
-	entry.mu.Lock()
-	defer func() {
-		entry.mu.Unlock()
-		r.releaseSessionLock(sessionKey, entry)
-	}()
-	if !r.sessionIdleVersionMatches(sessionKey, expectedVersion) {
-		return
-	}
-	msg, err := r.pruneSessionContext(ctx, sessionKey, "idle")
-	if err != nil {
-		msg = "Context prune skipped. Cause: " + oneLine(err.Error(), 180)
-	}
-	if r.Deliver != nil && strings.TrimSpace(channel) != "" && strings.TrimSpace(replyTarget) != "" {
-		if err := r.deliver(ctx, channel, replyTarget, msg, meta); err != nil {
-			log.Printf("deliver idle prune notice failed: %v", err)
-		}
-	}
-}
-
-func (r *Runtime) sessionIdleVersionMatches(sessionKey string, expected uint64) bool {
-	r.idleMu.Lock()
-	defer r.idleMu.Unlock()
-	if r.idleTimers != nil {
-		delete(r.idleTimers, sessionKey)
-	}
-	return r.idleVersion != nil && r.idleVersion[sessionKey] == expected
-}
-
-func (r *Runtime) ensureSessionScope(ctx context.Context, ev bus.Event) {
-	if r == nil || r.DB == nil || strings.TrimSpace(ev.SessionKey) == "" {
-		return
-	}
-	scopeKey, ok := r.scopeKeyForEvent(ev)
-	if !ok {
-		return
-	}
-	scopeKey = strings.TrimSpace(scopeKey)
-	if scopeKey == "" || scopeKey == ev.SessionKey {
-		return
-	}
-	meta := map[string]any{"auto": true, "channel": ev.Channel}
-	_ = r.DB.LinkSession(ctx, ev.SessionKey, scopeKey, meta)
-}
-
-func (r *Runtime) scopeKeyForEvent(ev bus.Event) (string, bool) {
-	if r == nil {
-		return "", false
-	}
-	if scopeKey := strings.TrimSpace(r.IdentityScopeMap[ev.SessionKey]); scopeKey != "" {
-		return scopeKey, true
-	}
-	if r.LinkDirectMessages && isDirectMessageEvent(ev) {
-		scopeKey := strings.TrimSpace(r.DefaultScopeKey)
-		if scopeKey == "" {
-			scopeKey = ev.SessionKey
-		}
-		return scopeKey, true
-	}
-	return "", false
-}
-
-func isDirectMessageEvent(ev bus.Event) bool {
-	if len(ev.Meta) == 0 {
-		return false
-	}
-	switch strings.ToLower(strings.TrimSpace(ev.Channel)) {
-	case "telegram":
-		return strings.EqualFold(strings.TrimSpace(fmt.Sprint(ev.Meta["chat_type"])), "private")
-	case "slack":
-		return strings.EqualFold(strings.TrimSpace(fmt.Sprint(ev.Meta["channel_type"])), "im")
-	case "discord":
-		if v, ok := ev.Meta["is_private"].(bool); ok {
-			return v
-		}
-		return strings.TrimSpace(fmt.Sprint(ev.Meta["guild_id"])) == ""
-	case "whatsapp":
-		if v, ok := ev.Meta["is_group"].(bool); ok {
-			return !v
-		}
-	case "email":
-		return true
-	}
-	return false
 }
 
 func (r *Runtime) handleExplicitSkillInvocation(ctx context.Context, ev bus.Event, msgID int64) (bool, error) {
@@ -62362,57 +62838,6 @@ func (r *Runtime) RunBackground(ctx context.Context, input BackgroundRunInput) (
 		log.Printf("append background assistant(final) failed: %v", err)
 	}
 	return BackgroundRunResult{FinalText: finalText, Preview: preview, ArtifactID: artifactID}, nil
-}
-
-func (r *Runtime) handleNewSession(ctx context.Context, ev bus.Event) error {
-	replyTarget := deliveryTarget(ev)
-	if r.Consolidator != nil && r.Builder != nil {
-		historyMax := r.Builder.HistoryMax
-		if historyMax <= 0 {
-			historyMax = 40
-		}
-		if err := r.Consolidator.ArchiveResetWindow(ctx, ev.SessionKey, historyMax); err != nil {
-			log.Printf("new session archive failed: session=%s err=%v", ev.SessionKey, err)
-			msg := "Memory archival failed, session not cleared. Cause: " + oneLine(err.Error(), 180)
-			if r.Deliver != nil {
-				if derr := r.deliver(ctx, ev.Channel, replyTarget, msg, ev.Meta); derr != nil {
-					log.Printf("deliver failed: %v", derr)
-				}
-			}
-			return nil
-		}
-	}
-	if err := r.DB.ResetSessionHistory(ctx, ev.SessionKey); err != nil {
-		log.Printf("new session reset failed: session=%s err=%v", ev.SessionKey, err)
-		msg := "New session failed. Cause: " + oneLine(err.Error(), 180)
-		if r.Deliver != nil {
-			if derr := r.deliver(ctx, ev.Channel, replyTarget, msg, ev.Meta); derr != nil {
-				log.Printf("deliver failed: %v", derr)
-			}
-		}
-		return nil
-	}
-	if r.Deliver != nil {
-		deliverCtx := ContextWithConversationAction(ctx, ConversationActionSessionReset)
-		if err := r.deliver(deliverCtx, ev.Channel, replyTarget, "New session started.", ev.Meta); err != nil {
-			log.Printf("deliver failed: %v", err)
-		}
-	}
-	return nil
-}
-
-func (r *Runtime) handlePruneSession(ctx context.Context, ev bus.Event, reason string) error {
-	msg, err := r.pruneSessionContext(ctx, ev.SessionKey, reason)
-	if err != nil {
-		log.Printf("context prune failed: session=%s err=%v", ev.SessionKey, err)
-		msg = "Context prune failed. Cause: " + oneLine(err.Error(), 180)
-	}
-	if r.Deliver != nil {
-		if derr := r.deliver(ctx, ev.Channel, deliveryTarget(ev), msg, ev.Meta); derr != nil {
-			log.Printf("deliver failed: %v", derr)
-		}
-	}
-	return nil
 }
 
 func (r *Runtime) pruneSessionContext(ctx context.Context, sessionKey, reason string) (string, error) {
@@ -62648,1375 +63073,6 @@ func contentToString(v any) string {
 	return string(b)
 }
 
-func sanitizeToolTurnContent(text string) string {
-	cleaned := text
-	for _, pattern := range toolMarkupPatterns {
-		cleaned = pattern.ReplaceAllString(cleaned, "")
-	}
-	return strings.TrimSpace(cleaned)
-}
-
-func parseToolMarkupCalls(text string, idPrefix string) []providers.ToolCall {
-	matches := toolMarkupBlockPattern.FindAllStringSubmatch(text, -1)
-	out := make([]providers.ToolCall, 0, len(matches))
-	for _, match := range matches {
-		if len(match) < 2 {
-			continue
-		}
-		block := match[1]
-		name, args, ok := parseToolMarkupBlock(block)
-		if !ok {
-			continue
-		}
-		index := len(out)
-		tc := providers.ToolCall{
-			ID:    fmt.Sprintf("%s_%d", idPrefix, index+1),
-			Index: index,
-			Type:  "function",
-		}
-		tc.Function.Name = name
-		tc.Function.Arguments = args
-		out = append(out, tc)
-	}
-	for _, match := range dsmlToolCallsBlockPattern.FindAllStringSubmatch(text, -1) {
-		if len(match) < 2 {
-			continue
-		}
-		out = append(out, parseDSMLToolMarkupCalls(match[1], idPrefix, len(out))...)
-	}
-	return out
-}
-
-func parseToolMarkupBlock(block string) (string, string, bool) {
-	block = strings.TrimSpace(html.UnescapeString(block))
-	if block == "" {
-		return "", "", false
-	}
-	var object map[string]any
-	if err := json.Unmarshal([]byte(block), &object); err == nil {
-		name := strings.TrimSpace(fmt.Sprint(object["name"]))
-		if name == "" {
-			return "", "", false
-		}
-		args := object["arguments"]
-		if args == nil {
-			args = map[string]any{}
-		}
-		encoded, err := json.Marshal(args)
-		if err != nil {
-			return "", "", false
-		}
-		return name, string(encoded), true
-	}
-	if nameMatch := toolMarkupNameElementPattern.FindStringSubmatch(block); len(nameMatch) >= 2 {
-		name := strings.TrimSpace(html.UnescapeString(nameMatch[1]))
-		if name == "" {
-			return "", "", false
-		}
-		args := "{}"
-		if argsMatch := toolMarkupArgumentsElementPattern.FindStringSubmatch(block); len(argsMatch) >= 2 {
-			argText := strings.TrimSpace(html.UnescapeString(argsMatch[1]))
-			if argText != "" {
-				var parsed any
-				if err := json.Unmarshal([]byte(argText), &parsed); err == nil {
-					encoded, err := json.Marshal(parsed)
-					if err != nil {
-						return "", "", false
-					}
-					args = string(encoded)
-				} else {
-					encoded, err := json.Marshal(map[string]any{"value": argText})
-					if err != nil {
-						return "", "", false
-					}
-					args = string(encoded)
-				}
-			}
-		}
-		return name, args, true
-	}
-	functionMatch := toolMarkupFunctionPattern.FindStringSubmatch(block)
-	if len(functionMatch) < 2 {
-		return "", "", false
-	}
-	name := strings.TrimSpace(html.UnescapeString(functionMatch[1]))
-	if name == "" {
-		return "", "", false
-	}
-	params := parseToolMarkupParams(block)
-	args, err := json.Marshal(params)
-	if err != nil {
-		return "", "", false
-	}
-	return name, string(args), true
-}
-
-func parseDSMLToolMarkupCalls(block string, idPrefix string, offset int) []providers.ToolCall {
-	matches := dsmlInvokePattern.FindAllStringSubmatch(block, -1)
-	if len(matches) == 0 {
-		return nil
-	}
-	out := make([]providers.ToolCall, 0, len(matches))
-	for _, match := range matches {
-		if len(match) < 3 {
-			continue
-		}
-		name := markupNameAttr(match[1])
-		if name == "" {
-			continue
-		}
-		params := parseDSMLToolMarkupParams(match[2])
-		args, err := json.Marshal(params)
-		if err != nil {
-			continue
-		}
-		index := offset + len(out)
-		tc := providers.ToolCall{
-			ID:    fmt.Sprintf("%s_%d", idPrefix, index+1),
-			Index: index,
-			Type:  "function",
-		}
-		tc.Function.Name = name
-		tc.Function.Arguments = string(args)
-		out = append(out, tc)
-	}
-	return out
-}
-
-func parseDSMLToolMarkupParams(block string) map[string]any {
-	params := map[string]any{}
-	matches := dsmlParameterPattern.FindAllStringSubmatch(block, -1)
-	for _, match := range matches {
-		if len(match) < 3 {
-			continue
-		}
-		name := markupNameAttr(match[1])
-		if name == "" {
-			continue
-		}
-		params[name] = parseToolMarkupParamValue(html.UnescapeString(match[2]))
-	}
-	return params
-}
-
-func markupNameAttr(attrs string) string {
-	match := markupNameAttrPattern.FindStringSubmatch(attrs)
-	if len(match) < 3 {
-		return ""
-	}
-	name := match[1]
-	if name == "" {
-		name = match[2]
-	}
-	return strings.TrimSpace(html.UnescapeString(name))
-}
-
-func availableToolCalls(calls []providers.ToolCall, reg *tools.Registry) []providers.ToolCall {
-	if len(calls) == 0 || reg == nil {
-		return nil
-	}
-	out := make([]providers.ToolCall, 0, len(calls))
-	for _, call := range calls {
-		name := strings.TrimSpace(call.Function.Name)
-		if name == "search" && reg.Get("web_search") != nil {
-			name = "web_search"
-		}
-		if name == "" || reg.Get(name) == nil {
-			continue
-		}
-		call.Function.Name = name
-		call.Index = len(out)
-		out = append(out, call)
-	}
-	return out
-}
-
-func unavailableToolCallPrompt(calls []providers.ToolCall, reg *tools.Registry) string {
-	names := make([]string, 0, len(calls))
-	seen := map[string]struct{}{}
-	for _, call := range calls {
-		name := strings.TrimSpace(call.Function.Name)
-		if name == "" {
-			continue
-		}
-		if _, ok := seen[name]; ok {
-			continue
-		}
-		seen[name] = struct{}{}
-		names = append(names, name)
-	}
-	available := []string{}
-	if reg != nil {
-		available = reg.Names()
-	}
-	return fmt.Sprintf(
-		"The previous assistant response attempted unavailable tool call(s): %s. Continue by answering directly or by using only currently advertised tool names: %s.",
-		strings.Join(names, ", "),
-		strings.Join(available, ", "),
-	)
-}
-
-func parseToolMarkupParams(block string) map[string]any {
-	params := map[string]any{}
-	matches := toolMarkupParameterPattern.FindAllStringSubmatchIndex(block, -1)
-	for i, match := range matches {
-		if len(match) < 4 {
-			continue
-		}
-		name := strings.TrimSpace(html.UnescapeString(block[match[2]:match[3]]))
-		if name == "" {
-			continue
-		}
-		start := match[1]
-		end := len(block)
-		if i+1 < len(matches) {
-			end = matches[i+1][0]
-		}
-		value := strings.TrimSpace(block[start:end])
-		value = strings.TrimSpace(toolMarkupClosingPattern.ReplaceAllString(value, ""))
-		params[name] = parseToolMarkupParamValue(html.UnescapeString(value))
-	}
-	return params
-}
-
-func parseToolMarkupParamValue(value string) any {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return ""
-	}
-	first := value[0]
-	if !strings.ContainsRune(`{["-0123456789tfn`, rune(first)) {
-		return value
-	}
-	var parsed any
-	if err := json.Unmarshal([]byte(value), &parsed); err == nil {
-		return parsed
-	}
-	return value
-}
-
-func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventType, sessionKey string, messages []providers.ChatMessage, reg *tools.Registry, channel string, replyTo string, replyMeta map[string]any) (string, bool, error) {
-	if reg == nil {
-		reg = tools.NewRegistry()
-	}
-	observer := conversationObserverFromContext(ctx)
-	scopeKey := sessionKey
-	if r.DB != nil && strings.TrimSpace(sessionKey) != "" {
-		if resolved, err := r.DB.ResolveScopeKey(ctx, sessionKey); err == nil && strings.TrimSpace(resolved) != "" {
-			scopeKey = resolved
-		}
-	}
-	messageQuotas := &quotaCounters{}
-	maxLoops := r.MaxToolLoops
-	if maxLoops <= 0 {
-		maxLoops = 6
-	}
-	loopLimit := maxLoops
-	validationFailures := map[string]int{}
-	for loop := 0; ; loop++ {
-		if loop >= loopLimit {
-			if err := r.handleToolLoopLimitExceeded(ctx, sessionKey, loopLimit); err != nil {
-				return "", false, err
-			}
-			loopLimit += maxLoops
-		}
-		turnTools := r.exposedToolsForTurn(ctx, reg, messages, channel)
-		modelCfg := r.modelConfigForEvent(eventType)
-		if modelCfg.Provider == nil {
-			return "", false, fmt.Errorf("provider not configured")
-		}
-		profile := modelCfg.Provider.ProviderProfile(modelCfg.Model)
-		toolDefs, sanitizerReports := toProviderToolDefs(turnTools, profile)
-		for _, report := range sanitizerReports {
-			log.Printf("provider tool schema sanitized: profile=%s %s", profile.Name, report.String())
-		}
-		req := providers.ChatCompletionRequest{
-			Model:       modelCfg.Model,
-			Messages:    messages,
-			Tools:       toolDefs,
-			Temperature: modelCfg.Temperature,
-		}
-
-		var resp providers.ChatCompletionResponse
-		var err error
-		var sw channels.StreamWriter // lazily created on first text delta
-		var swOnce sync.Once
-		streamer := r.streamerForContext(ctx)
-		if streamer != nil {
-			resp, err = modelCfg.Provider.ChatStream(ctx, req, func(text string) {
-				if observer != nil {
-					observer.OnTextDelta(ctx, text)
-				}
-				swOnce.Do(func() {
-					streamMeta := channels.CloneMeta(replyMeta)
-					if streamMeta == nil {
-						streamMeta = map[string]any{}
-					}
-					streamMeta["channel"] = channel
-					w, beginErr := streamer.BeginStream(ctx, replyTo, streamMeta)
-					if beginErr == nil {
-						sw = w
-					}
-				})
-				if sw != nil {
-					_ = sw.WriteDelta(ctx, text)
-				}
-			})
-		} else {
-			resp, err = modelCfg.Provider.Chat(ctx, req)
-		}
-		if err != nil {
-			if sw != nil {
-				_ = sw.Abort(ctx)
-			}
-			if observer != nil {
-				observer.OnError(ctx, err)
-			}
-			return "", false, err
-		}
-		if len(resp.Choices) == 0 {
-			if sw != nil {
-				_ = sw.Abort(ctx)
-			}
-			err = fmt.Errorf("no choices")
-			if observer != nil {
-				observer.OnError(ctx, err)
-			}
-			return "", false, err
-		}
-		msg := resp.Choices[0].Message
-		toolCallSource := ToolCallSourceProvider
-		if len(msg.ToolCalls) == 0 {
-			if raw, ok := msg.Content.(string); ok {
-				if calls := parseToolMarkupCalls(raw, fmt.Sprintf("markup_%d", loop+1)); len(calls) > 0 {
-					msg.ToolCalls = calls
-					msg.Content = sanitizeToolTurnContent(raw)
-					toolCallSource = ToolCallSourceMarkup
-				}
-			}
-		}
-		normalizedCalls := normalizeProviderToolCalls(msg.ToolCalls, toolCallSource, fmt.Sprintf("tool_%d", loop+1))
-		if len(normalizedCalls) > 0 {
-			availableCalls := availableNormalizedToolCalls(normalizedCalls, turnTools)
-			if len(availableCalls) == 0 {
-				if sw != nil {
-					_ = sw.Abort(ctx)
-				}
-				for _, tc := range normalizedCalls {
-					var parsedParams map[string]any
-					_ = json.Unmarshal([]byte(tc.ArgumentsJSON), &parsedParams)
-					toolOut := formatToolExecutionError(tc.Name, parsedParams, "", fmt.Errorf("tool not available in this turn"))
-					emitToolCallStarted(ctx, observer, tc)
-					emitToolCallFinished(ctx, observer, tc, toolOut, "", fmt.Errorf("tool not available in this turn"))
-				}
-				messages = append(messages, providers.ChatMessage{
-					Role:    "system",
-					Content: unavailableNormalizedToolCallPrompt(normalizedCalls, turnTools),
-				})
-				continue
-			}
-			normalizedCalls = availableCalls
-			msg.ToolCalls = normalizedToProviderToolCalls(normalizedCalls)
-		}
-		if len(normalizedCalls) == 0 {
-			finalText := strings.TrimSpace(contentToString(msg.Content))
-			if sw != nil {
-				_ = sw.Close(ctx, finalText)
-				if observer != nil {
-					observer.OnCompletion(ctx, finalText, true)
-				}
-				return finalText, true, nil
-			}
-			if observer != nil {
-				observer.OnCompletion(ctx, finalText, false)
-			}
-			return finalText, false, nil
-		}
-
-		// Tool-call turn: close any partial stream that showed text.
-		if sw != nil {
-			_ = sw.Abort(ctx)
-		}
-
-		toolTurnContent := msg.Content
-		if raw, ok := msg.Content.(string); ok {
-			toolTurnContent = sanitizeToolTurnContent(raw)
-		}
-
-		messages = append(messages, providers.ChatMessage{Role: "assistant", Content: toolTurnContent, ToolCalls: msg.ToolCalls})
-		if _, err := r.DB.AppendMessage(ctx, sessionKey, "assistant", sanitizeToolTurnContent(contentToString(msg.Content)), map[string]any{"tool_calls": msg.ToolCalls}); err != nil {
-			log.Printf("append assistant(tool_calls) failed: %v", err)
-		}
-
-		for _, tc := range normalizedCalls {
-			emitToolCallStarted(ctx, observer, tc)
-			toolCtx := tools.ContextWithSession(ctx, scopeKey)
-			toolCtx = tools.ContextWithDelivery(toolCtx, channel, replyTo)
-			toolCtx = tools.ContextWithDeliveryMeta(toolCtx, replyMeta)
-			toolCtx = r.contextWithTrustedToolAccess(toolCtx, bus.Event{Type: eventType, SessionKey: sessionKey, Channel: channel})
-			toolCtx = context.WithValue(toolCtx, messageQuotaCountersContextKey{}, messageQuotas)
-			toolCtx = tools.ContextWithToolGuard(toolCtx, r.guardToolExecution)
-			tool := turnTools.Get(tc.Name)
-			validation := ToolArgumentValidator{}.ValidateAndCoerce(tool, tc.ArgumentsJSON)
-			if len(validation.Errors) > 0 {
-				out := formatToolValidationError(tc, validation)
-				err := fmt.Errorf("tool argument validation failed")
-				emitToolCallFinished(ctx, observer, tc, out, "", err)
-				payload := map[string]any{
-					"tool":         tc.Name,
-					"tool_call_id": tc.ID,
-					"args":         json.RawMessage([]byte(tc.ArgumentsJSON)),
-					"public_code":  "tool_argument_validation_failed",
-				}
-				if _, appendErr := r.DB.AppendMessage(ctx, sessionKey, "tool", out, payload); appendErr != nil {
-					log.Printf("append validation tool message failed: %v", appendErr)
-				}
-				messages = append(messages, providers.ChatMessage{Role: "tool", ToolCallID: tc.ID, Content: out})
-				for _, validationErr := range validation.Errors {
-					key := tc.Name + ":" + validationErr.Path + ":" + validationErr.Code
-					validationFailures[key]++
-					if validationFailures[key] >= 2 {
-						return "", false, fmt.Errorf("tool argument validation failed repeatedly for %s at %s", tc.Name, validationErr.Path)
-					}
-				}
-				continue
-			}
-			tc.ArgumentsJSON = validation.ArgumentsJSON
-			out, err := turnTools.ExecuteParams(toolCtx, tc.Name, validation.Params)
-			if err != nil {
-				var parsedParams map[string]any
-				_ = json.Unmarshal([]byte(tc.ArgumentsJSON), &parsedParams)
-				out = formatToolExecutionError(tc.Name, parsedParams, out, err)
-			}
-
-			payload := map[string]any{
-				"tool":         tc.Name,
-				"tool_call_id": tc.ID,
-				"args":         json.RawMessage([]byte(tc.ArgumentsJSON)),
-			}
-			sendOut, preview, artifactID := r.boundTextResult(ctx, sessionKey, out)
-			if artifactID != "" {
-				payload["artifact_id"] = artifactID
-				payload["preview"] = preview
-			}
-			emitToolCallFinished(ctx, observer, tc, out, artifactID, err)
-			if _, err := r.DB.AppendMessage(ctx, sessionKey, "tool", sendOut, payload); err != nil {
-				log.Printf("append tool message failed: %v", err)
-			}
-			messages = append(messages, providers.ChatMessage{Role: "tool", ToolCallID: tc.ID, Content: sendOut})
-			var approvalErr *tools.ApprovalRequiredError
-			if errors.As(err, &approvalErr) {
-				if tools.RequestSourceFromContext(ctx) == tools.RequestSourceService {
-					return "", false, err
-				}
-				finalText, streamed := r.narrateApprovalRequired(ctx, messages)
-				return finalText, streamed, err
-			}
-			if finalText := terminalToolResultText(tc.Name, out); finalText != "" {
-				if observer != nil {
-					observer.OnCompletion(ctx, finalText, false)
-				}
-				return finalText, false, nil
-			}
-		}
-	}
-}
-
-func (r *Runtime) narrateApprovalRequired(ctx context.Context, messages []providers.ChatMessage) (string, bool) {
-	modelCfg := r.CurrentModelConfig()
-	if r == nil || modelCfg.Provider == nil {
-		return "", false
-	}
-	prompt := append(append([]providers.ChatMessage{}, messages...), providers.ChatMessage{
-		Role:    "system",
-		Content: "The last tool result indicates that approval is required before work can continue. Briefly explain to the user what needs approval and why. Do not call any tools. Keep the reply short and concrete.",
-	})
-	resp, err := modelCfg.Provider.Chat(ctx, providers.ChatCompletionRequest{
-		Model:       modelCfg.Model,
-		Messages:    prompt,
-		Temperature: modelCfg.Temperature,
-	})
-	if err != nil || len(resp.Choices) == 0 {
-		return "", false
-	}
-	finalText := strings.TrimSpace(contentToString(resp.Choices[0].Message.Content))
-	if finalText == "" {
-		return "", false
-	}
-	if observer := conversationObserverFromContext(ctx); observer != nil {
-		observer.OnCompletion(ctx, finalText, false)
-	}
-	return finalText, false
-}
-
-func (r *Runtime) handleToolLoopLimitExceeded(ctx context.Context, sessionKey string, currentLimit int) error {
-	if r.effectiveToolLoopLimitAction() == config.QuotaExceededActionFail {
-		return toolLoopLimitExceededError(sessionKey, currentLimit, "hard limit reached")
-	}
-	if r.ApprovalBroker == nil {
-		return toolLoopLimitExceededError(sessionKey, currentLimit, "approval is configured, but the approval broker is unavailable")
-	}
-	identity := tools.RequesterIdentityFromContext(ctx)
-	decision, err := r.ApprovalBroker.EvaluateToolQuota(ctx, approval.ToolQuotaEvaluation{
-		Scope:         "message",
-		LimitName:     "tool_loops",
-		ToolName:      "tool loop continuation",
-		Current:       currentLimit,
-		Limit:         currentLimit,
-		AgentID:       firstNonEmptyString(identity.Actor, "runtime"),
-		SessionID:     sessionKey,
-		ApprovalToken: tools.ApprovalTokenFromContext(ctx),
-	}, config.ApprovalModeAsk)
-	if err != nil {
-		return err
-	}
-	if decision.Allowed {
-		if r.Audit != nil {
-			_ = r.Audit.Record(ctx, "tool_loop.override", sessionKey, "approval", map[string]any{
-				"limit":        currentLimit,
-				"subject_hash": decision.SubjectHash,
-			})
-		}
-		return nil
-	}
-	if decision.RequiresApproval {
-		return &tools.ApprovalRequiredError{ToolName: "tool loop continuation", RequestID: decision.RequestID}
-	}
-	return toolLoopLimitExceededError(sessionKey, currentLimit, decision.Reason)
-}
-
-func toolLoopLimitExceededError(sessionKey string, currentLimit int, reason string) error {
-	resolvedSession := strings.TrimSpace(sessionKey)
-	if resolvedSession == "" {
-		resolvedSession = "unknown"
-	}
-	message := fmt.Sprintf("max tool loops exceeded for session %s after %d rounds", resolvedSession, currentLimit)
-	if trimmed := strings.TrimSpace(reason); trimmed != "" {
-		message += fmt.Sprintf(" (%s)", trimmed)
-	}
-	return errors.New(message)
-}
-
-func (r *Runtime) effectiveToolLoopLimitAction() config.QuotaExceededAction {
-	if strings.EqualFold(string(r.MaxToolLoopsExceededAction), string(config.QuotaExceededActionFail)) {
-		return config.QuotaExceededActionFail
-	}
-	return config.QuotaExceededActionAsk
-}
-
-func terminalToolResultText(toolName string, out string) string {
-	if strings.TrimSpace(toolName) != "read_skill" || strings.TrimSpace(out) == "" {
-		return ""
-	}
-	var result struct {
-		OK      *bool  `json:"ok"`
-		Kind    string `json:"kind"`
-		Summary string `json:"summary"`
-	}
-	if err := json.Unmarshal([]byte(out), &result); err != nil {
-		return ""
-	}
-	if result.OK == nil || *result.OK || result.Kind != "skill_read" {
-		return ""
-	}
-	summary := strings.TrimSpace(result.Summary)
-	if summary == "" || !strings.Contains(strings.ToLower(summary), "unavailable") {
-		return ""
-	}
-	return summary + ". I can't complete that with the tools currently available in this turn."
-}
-
-func (r *Runtime) effectiveTools(ctx context.Context, fallback *tools.Registry) *tools.Registry {
-	if reg := toolRegistryFromContext(ctx); reg != nil {
-		return reg
-	}
-	if fallback == nil {
-		return tools.NewRegistry()
-	}
-	return fallback
-}
-
-func (r *Runtime) exposedToolsForTurn(ctx context.Context, reg *tools.Registry, messages []providers.ChatMessage, channel string) *tools.Registry {
-	if reg == nil {
-		return reg
-	}
-	filtered := r.filterToolsForContext(ctx, reg)
-	if r == nil || !r.DynamicToolExposure {
-		return filtered
-	}
-	intent := latestUserText(messages) + " " + strings.TrimSpace(channel)
-	groups := selectedToolGroups(intent)
-	allowed := map[string]struct{}{}
-	for _, name := range filtered.Names() {
-		meta := filtered.Metadata(name)
-		if meta.Hidden || hasGroup(meta.Groups, tools.ToolGroupHidden) {
-			continue
-		}
-		if hasAnyGroup(meta.Groups, groups) {
-			allowed[name] = struct{}{}
-		}
-	}
-	return filtered.CloneSelected(allowed)
-}
-
-func (r *Runtime) filterToolsForContext(ctx context.Context, reg *tools.Registry) *tools.Registry {
-	if reg == nil {
-		return reg
-	}
-	if r != nil {
-		allowlist := map[string]struct{}{}
-		for _, name := range r.Hardening.MetadataScanner.Allowlist {
-			name = strings.TrimSpace(name)
-			if name != "" {
-				allowlist[name] = struct{}{}
-			}
-		}
-		var diagnostics []tools.MetadataDiagnostic
-		reg, diagnostics = tools.FilterSuspiciousExternalTools(reg, r.Hardening.MetadataScanner.Mode, allowlist)
-		for _, diagnostic := range diagnostics {
-			log.Printf("tool metadata scanner: %s", diagnostic.String())
-		}
-	}
-	ceiling := tools.CapabilityCeilingFromContext(ctx)
-	profile := tools.ActiveProfileFromContext(ctx)
-	if strings.TrimSpace(profile.Name) != "" {
-		if ceiling == "" || capabilityRank(profile.MaxCapability) < capabilityRank(ceiling) {
-			ceiling = profile.MaxCapability
-		}
-	}
-	allowed := map[string]struct{}{}
-	profileAllowed := profile.AllowedTools
-	for _, name := range reg.Names() {
-		if len(profileAllowed) > 0 {
-			if _, ok := profileAllowed[name]; !ok {
-				continue
-			}
-		}
-		if ceiling != "" && capabilityRank(tools.ToolCapability(reg.Get(name), nil)) > capabilityRank(ceiling) {
-			continue
-		}
-		allowed[name] = struct{}{}
-	}
-	return reg.CloneSelected(allowed)
-}
-
-func latestUserText(messages []providers.ChatMessage) string {
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == "user" {
-			return contentToString(messages[i].Content)
-		}
-	}
-	return ""
-}
-
-func selectedToolGroups(intent string) map[string]struct{} {
-	lower := strings.ToLower(intent)
-	groups := map[string]struct{}{
-		tools.ToolGroupRead:   {},
-		tools.ToolGroupMemory: {},
-	}
-	if strings.Contains(lower, "tool") || strings.Contains(lower, "capabilit") || strings.Contains(lower, "what can you do") {
-		groups[tools.ToolGroupWrite] = struct{}{}
-		groups[tools.ToolGroupExec] = struct{}{}
-		groups[tools.ToolGroupWeb] = struct{}{}
-		groups[tools.ToolGroupCron] = struct{}{}
-		groups[tools.ToolGroupSkills] = struct{}{}
-		groups[tools.ToolGroupChannels] = struct{}{}
-		groups[tools.ToolGroupMCP] = struct{}{}
-		groups[tools.ToolGroupService] = struct{}{}
-	}
-	if strings.Contains(lower, "write") || strings.Contains(lower, "edit") || strings.Contains(lower, "modify") || strings.Contains(lower, "create file") || strings.Contains(lower, "patch") {
-		groups[tools.ToolGroupWrite] = struct{}{}
-	}
-	if strings.Contains(lower, "run") || strings.Contains(lower, "exec") || strings.Contains(lower, "command") || strings.Contains(lower, "shell") || strings.Contains(lower, "test") || strings.Contains(lower, "build") {
-		groups[tools.ToolGroupExec] = struct{}{}
-	}
-	if strings.Contains(lower, "http") || strings.Contains(lower, "web") || strings.Contains(lower, "url") || strings.Contains(lower, "search") || strings.Contains(lower, "internet") {
-		groups[tools.ToolGroupWeb] = struct{}{}
-	}
-	if strings.Contains(lower, "cron") || strings.Contains(lower, "schedule") || strings.Contains(lower, "remind") {
-		groups[tools.ToolGroupCron] = struct{}{}
-	}
-	if strings.Contains(lower, "skill") {
-		groups[tools.ToolGroupSkills] = struct{}{}
-	}
-	if strings.TrimSpace(intent) != "" {
-		groups[tools.ToolGroupChannels] = struct{}{}
-	}
-	return groups
-}
-
-func hasAnyGroup(groups []string, allowed map[string]struct{}) bool {
-	for _, group := range groups {
-		if _, ok := allowed[group]; ok {
-			return true
-		}
-	}
-	return false
-}
-
-func hasGroup(groups []string, want string) bool {
-	for _, group := range groups {
-		if group == want {
-			return true
-		}
-	}
-	return false
-}
-
-func (r *Runtime) streamerForContext(ctx context.Context) channels.StreamingChannel {
-	if streamer := streamingChannelFromContext(ctx); streamer != nil {
-		return streamer
-	}
-	return r.Streamer
-}
-
-func (r *Runtime) guardToolExecution(ctx context.Context, tool tools.Tool, capability tools.CapabilityLevel, params map[string]any) error {
-	if tool == nil {
-		return nil
-	}
-	profile := tools.ActiveProfileFromContext(ctx)
-	if tool.Name() == "send_message" && trustedToolAccessFromContext(ctx) {
-		capability = tools.CapabilitySafe
-	}
-	if ceiling := tools.CapabilityCeilingFromContext(ctx); ceiling != "" && capabilityRank(capability) > capabilityRank(ceiling) {
-		return fmt.Errorf("tool exceeds request capability ceiling: %s", tool.Name())
-	}
-	if err := r.enforceProfile(ctx, profile, tool, capability, params); err != nil {
-		return err
-	}
-	if err := r.enforceSkillPolicy(ctx, tool, params); err != nil {
-		return err
-	}
-	if capability == tools.CapabilityGuarded && !r.Hardening.GuardedTools {
-		return fmt.Errorf("tool requires guarded access: %s", tool.Name())
-	}
-	if capability == tools.CapabilityPrivileged && !r.Hardening.PrivilegedTools {
-		return fmt.Errorf("tool requires privileged access: %s", tool.Name())
-	}
-	if r.ApprovalBroker != nil && (tool.Name() == "exec" || tool.Name() == "run_skill" || tool.Name() == "run_skill_script") {
-		if mode := r.approvalModeForTool(tool.Name()); mode == config.ApprovalModeAsk || mode == config.ApprovalModeAllowlist || mode == config.ApprovalModeDeny {
-			if len(r.ApprovalBroker.SignKey) == 0 {
-				return fmt.Errorf("approval broker unavailable for %s", tool.Name())
-			}
-		}
-	}
-	if r.Audit != nil && (capability == tools.CapabilityPrivileged || tool.Name() == "spawn_subagent") {
-		if err := r.Audit.Record(ctx, "tool.execute", tools.SessionFromContext(ctx), profileActor(profile), map[string]any{
-			"tool":       tool.Name(),
-			"capability": capability,
-			"profile":    profile.Name,
-			"summary":    summarizeToolParams(tool.Name(), params),
-		}); err != nil {
-			return err
-		}
-	}
-	if !r.Hardening.Quotas.Enabled {
-		return nil
-	}
-	return r.incrementQuota(ctx, tools.SessionFromContext(ctx), tool.Name())
-}
-
-func (r *Runtime) GuardToolExecution(ctx context.Context, tool tools.Tool, capability tools.CapabilityLevel, params map[string]any) error {
-	return r.guardToolExecution(ctx, tool, capability, params)
-}
-
-func (r *Runtime) approvalModeForTool(toolName string) config.ApprovalMode {
-	if r == nil || r.ApprovalBroker == nil {
-		return config.ApprovalModeTrusted
-	}
-	switch toolName {
-	case "exec":
-		return r.ApprovalBroker.Config.Exec.Mode
-	case "run_skill", "run_skill_script":
-		return r.ApprovalBroker.Config.SkillExecution.Mode
-	default:
-		return config.ApprovalModeTrusted
-	}
-}
-
-func (r *Runtime) enforceSkillPolicy(ctx context.Context, tool tools.Tool, params map[string]any) error {
-	policy := tools.SkillPolicyFromContext(ctx)
-	if tool == nil || strings.TrimSpace(policy.Name) == "" {
-		return nil
-	}
-	if len(policy.AllowedTools) > 0 {
-		if _, ok := policy.AllowedTools[tool.Name()]; !ok {
-			return fmt.Errorf("tool denied by skill policy: %s", tool.Name())
-		}
-	}
-	switch tool.Name() {
-	case "exec", "run_skill", "run_skill_script":
-		if !policy.AllowExecution {
-			return fmt.Errorf("execution denied by skill policy: %s", tool.Name())
-		}
-		if cwd := strings.TrimSpace(fmt.Sprint(params["cwd"])); cwd != "" && cwd != "<nil>" && len(policy.WritablePaths) > 0 {
-			if err := validateProfileWritablePath(policy.WritablePaths, cwd); err != nil {
-				return err
-			}
-		}
-	case "write_file", "edit_file":
-		if !policy.AllowWrite {
-			return fmt.Errorf("write denied by skill policy: %s", tool.Name())
-		}
-		if len(policy.WritablePaths) > 0 {
-			if err := validateProfileWritablePath(policy.WritablePaths, fmt.Sprint(params["path"])); err != nil {
-				return err
-			}
-		}
-	case "web_fetch", "web_fetch_markdown":
-		if !policy.AllowNetwork {
-			return fmt.Errorf("network denied by skill policy: %s", tool.Name())
-		}
-		if len(policy.AllowedHosts) > 0 {
-			parsed, err := url.Parse(strings.TrimSpace(fmt.Sprint(params["url"])))
-			if err != nil {
-				return err
-			}
-			if err := (security.HostPolicy{Enabled: true, DefaultDeny: true, AllowedHosts: policy.AllowedHosts}).ValidateURL(ctx, parsed); err != nil {
-				return err
-			}
-		}
-	case "web_search":
-		if !policy.AllowNetwork {
-			return fmt.Errorf("network denied by skill policy: %s", tool.Name())
-		}
-		if len(policy.AllowedHosts) > 0 {
-			if err := (security.HostPolicy{Enabled: true, DefaultDeny: true, AllowedHosts: policy.AllowedHosts}).ValidateHost(ctx, "api.search.brave.com"); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-func skillPolicyForSkill(skill skills.SkillMeta) tools.SkillPolicy {
-	allowed := map[string]struct{}{}
-	for _, toolName := range skill.AllowedTools {
-		toolName = strings.TrimSpace(toolName)
-		if toolName == "" {
-			continue
-		}
-		allowed[toolName] = struct{}{}
-	}
-	if commandTool := strings.TrimSpace(skill.CommandTool); commandTool != "" {
-		allowed[commandTool] = struct{}{}
-	}
-	return tools.SkillPolicy{
-		Name:           skill.Name,
-		AllowedTools:   allowed,
-		AllowExecution: skill.Permissions.Shell || (strings.EqualFold(skill.CommandDispatch, "tool") && (strings.EqualFold(skill.CommandTool, "exec") || strings.EqualFold(skill.CommandTool, "run_skill") || strings.EqualFold(skill.CommandTool, "run_skill_script"))),
-		AllowNetwork:   skill.Permissions.Network,
-		AllowWrite:     skill.Permissions.Write,
-		AllowedHosts:   append([]string{}, skill.Permissions.AllowedHosts...),
-		WritablePaths:  append([]string{}, skill.Permissions.AllowedPaths...),
-	}
-}
-
-func (r *Runtime) contextWithEventProfile(ctx context.Context, ev bus.Event) context.Context {
-	if r == nil {
-		return ctx
-	}
-	return r.contextWithProfileName(ctx, r.profileNameForEvent(ev))
-}
-
-func (r *Runtime) contextWithProfileName(ctx context.Context, name string) context.Context {
-	profile, ok := r.resolveProfile(name)
-	if !ok {
-		return ctx
-	}
-	return tools.ContextWithActiveProfile(ctx, profile)
-}
-
-func (r *Runtime) ContextWithProfileName(ctx context.Context, name string) context.Context {
-	return r.contextWithProfileName(ctx, name)
-}
-
-func (r *Runtime) profileNameForEvent(ev bus.Event) string {
-	if len(ev.Meta) > 0 {
-		if profileName := strings.TrimSpace(fmt.Sprint(ev.Meta["profile_name"])); profileName != "" && profileName != "<nil>" {
-			return profileName
-		}
-	}
-	if !r.AccessProfiles.Enabled {
-		return ""
-	}
-	triggerKey := strings.ToLower(strings.TrimSpace(string(ev.Type)))
-	if profileName := strings.TrimSpace(r.AccessProfiles.Triggers[triggerKey]); profileName != "" {
-		return profileName
-	}
-	if profileName := strings.TrimSpace(r.AccessProfiles.Channels[strings.ToLower(strings.TrimSpace(ev.Channel))]); profileName != "" {
-		return profileName
-	}
-	return strings.TrimSpace(r.AccessProfiles.Default)
-}
-
-func (r *Runtime) resolveProfile(name string) (tools.ActiveProfile, bool) {
-	name = strings.TrimSpace(name)
-	if !r.AccessProfiles.Enabled || name == "" {
-		return tools.ActiveProfile{}, false
-	}
-	profileCfg, ok := r.AccessProfiles.Profiles[name]
-	if !ok {
-		return tools.ActiveProfile{}, false
-	}
-	allowed := map[string]struct{}{}
-	for _, toolName := range profileCfg.AllowedTools {
-		allowed[strings.TrimSpace(toolName)] = struct{}{}
-	}
-	maxCapability := tools.CapabilityPrivileged
-	switch strings.ToLower(strings.TrimSpace(profileCfg.MaxCapability)) {
-	case "safe":
-		maxCapability = tools.CapabilitySafe
-	case "guarded":
-		maxCapability = tools.CapabilityGuarded
-	case "privileged", "":
-		maxCapability = tools.CapabilityPrivileged
-	}
-	return tools.ActiveProfile{
-		Name:           name,
-		MaxCapability:  maxCapability,
-		AllowedTools:   allowed,
-		AllowedHosts:   append([]string{}, profileCfg.AllowedHosts...),
-		WritablePaths:  append([]string{}, profileCfg.WritablePaths...),
-		AllowSubagents: profileCfg.AllowSubagents,
-	}, true
-}
-
-func (r *Runtime) enforceProfile(ctx context.Context, profile tools.ActiveProfile, tool tools.Tool, capability tools.CapabilityLevel, params map[string]any) error {
-	if strings.TrimSpace(profile.Name) == "" {
-		return nil
-	}
-	if capabilityRank(capability) > capabilityRank(profile.MaxCapability) {
-		return fmt.Errorf("tool exceeds profile capability: %s", tool.Name())
-	}
-	if len(profile.AllowedTools) > 0 {
-		if _, ok := profile.AllowedTools[tool.Name()]; !ok {
-			return fmt.Errorf("tool denied by profile: %s", tool.Name())
-		}
-	}
-	if tool.Name() == "spawn_subagent" && !profile.AllowSubagents {
-		return fmt.Errorf("subagents denied by profile")
-	}
-	switch tool.Name() {
-	case "write_file", "edit_file":
-		if len(profile.WritablePaths) == 0 {
-			return fmt.Errorf("path denied by profile")
-		}
-		if err := validateProfileWritablePath(profile.WritablePaths, fmt.Sprint(params["path"])); err != nil {
-			return err
-		}
-	case "exec":
-		if cwd := strings.TrimSpace(fmt.Sprint(params["cwd"])); cwd != "" && cwd != "<nil>" {
-			if len(profile.WritablePaths) == 0 {
-				return fmt.Errorf("path denied by profile")
-			}
-			if err := validateProfileWritablePath(profile.WritablePaths, cwd); err != nil {
-				return err
-			}
-		}
-	}
-	switch tool.Name() {
-	case "web_fetch", "web_fetch_markdown":
-		parsed, err := url.Parse(strings.TrimSpace(fmt.Sprint(params["url"])))
-		if err != nil {
-			return err
-		}
-		if err := (security.HostPolicy{Enabled: true, DefaultDeny: true, AllowedHosts: profile.AllowedHosts}).ValidateURL(ctx, parsed); err != nil {
-			return err
-		}
-	case "web_search":
-		if err := (security.HostPolicy{Enabled: true, DefaultDeny: true, AllowedHosts: profile.AllowedHosts}).ValidateHost(ctx, "api.search.brave.com"); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func capabilityRank(level tools.CapabilityLevel) int {
-	switch level {
-	case tools.CapabilitySafe:
-		return 0
-	case tools.CapabilityGuarded:
-		return 1
-	case tools.CapabilityPrivileged:
-		return 2
-	default:
-		return 2
-	}
-}
-
-func validateProfileWritablePath(allowed []string, path string) error {
-	path = strings.TrimSpace(path)
-	if path == "" || path == "<nil>" {
-		return nil
-	}
-	absPath, err := filepath.Abs(path)
-	if err != nil {
-		return err
-	}
-	for _, root := range allowed {
-		rootPath, rootErr := filepath.Abs(root)
-		if rootErr != nil {
-			continue
-		}
-		rel, relErr := filepath.Rel(rootPath, absPath)
-		if relErr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return nil
-		}
-	}
-	return fmt.Errorf("path denied by profile")
-}
-
-func profileActor(profile tools.ActiveProfile) string {
-	if strings.TrimSpace(profile.Name) == "" {
-		return "runtime"
-	}
-	return "profile:" + profile.Name
-}
-
-func summarizeToolParams(toolName string, params map[string]any) map[string]any {
-	summary := map[string]any{"tool": toolName}
-	switch toolName {
-	case "exec":
-		summary["program"] = strings.TrimSpace(fmt.Sprint(params["program"]))
-		summary["cwd"] = strings.TrimSpace(fmt.Sprint(params["cwd"]))
-	case "run_skill", "run_skill_script":
-		summary["skill"] = strings.TrimSpace(fmt.Sprint(params["skill"]))
-		summary["entrypoint"] = strings.TrimSpace(fmt.Sprint(params["entrypoint"]))
-		summary["plan_id"] = strings.TrimSpace(fmt.Sprint(params["plan_id"]))
-	case "spawn_subagent":
-		summary["task"] = previewText(strings.TrimSpace(fmt.Sprint(params["task"])), 120)
-	case "web_fetch", "web_fetch_markdown":
-		summary["url"] = strings.TrimSpace(fmt.Sprint(params["url"]))
-	}
-	return summary
-}
-
-func formatToolExecutionError(toolName string, params map[string]any, out string, err error) string {
-	if err == nil {
-		return out
-	}
-	return tools.EncodeToolFailure(toolName, params, out, err)
-}
-
-type quotaCheck struct {
-	Scope     string
-	Name      string
-	Label     string
-	ConfigKey string
-	Current   int
-	Limit     int
-}
-
-func (r *Runtime) incrementQuota(ctx context.Context, sessionKey string, toolName string) error {
-	r.quotaMu.Lock()
-	state := r.sessionQuotaStateLocked(sessionKey)
-	message := messageQuotaCountersFromContext(ctx)
-	checks := r.quotaChecks(message, &state.Session, toolName)
-	for _, check := range checks {
-		if check.Limit > 0 && check.Current >= check.Limit {
-			r.quotaMu.Unlock()
-			if err := r.handleQuotaExceeded(ctx, sessionKey, toolName, check); err != nil {
-				return err
-			}
-			r.quotaMu.Lock()
-			state = r.sessionQuotaStateLocked(sessionKey)
-			message = messageQuotaCountersFromContext(ctx)
-			incrementQuotaCounters(message, toolName)
-			incrementQuotaCounters(&state.Session, toolName)
-			r.quotaMu.Unlock()
-			return nil
-		}
-	}
-	incrementQuotaCounters(message, toolName)
-	incrementQuotaCounters(&state.Session, toolName)
-	r.quotaMu.Unlock()
-	return nil
-}
-
-func (r *Runtime) quotaChecks(message *quotaCounters, session *quotaCounters, toolName string) []quotaCheck {
-	cfg := r.Hardening.Quotas
-	checks := []quotaCheck{
-		{Scope: "message", Name: "tool_calls", Label: "per-message total tool-call", ConfigKey: "hardening.quotas.maxToolCalls", Current: message.ToolCalls, Limit: cfg.MaxToolCalls},
-		{Scope: "session", Name: "tool_calls", Label: "per-session total tool-call", ConfigKey: "hardening.quotas.maxSessionToolCalls", Current: session.ToolCalls, Limit: cfg.MaxSessionToolCalls},
-	}
-	switch toolName {
-	case "exec", "run_skill", "run_skill_script":
-		checks = append(checks,
-			quotaCheck{Scope: "message", Name: "exec_calls", Label: "per-message exec-call", ConfigKey: "hardening.quotas.maxExecCalls", Current: message.ExecCalls, Limit: cfg.MaxExecCalls},
-			quotaCheck{Scope: "session", Name: "exec_calls", Label: "per-session exec-call", ConfigKey: "hardening.quotas.maxSessionExecCalls", Current: session.ExecCalls, Limit: cfg.MaxSessionExecCalls},
-		)
-	case "web_fetch", "web_fetch_markdown", "web_search":
-		checks = append(checks,
-			quotaCheck{Scope: "message", Name: "web_calls", Label: "per-message web-call", ConfigKey: "hardening.quotas.maxWebCalls", Current: message.WebCalls, Limit: cfg.MaxWebCalls},
-			quotaCheck{Scope: "session", Name: "web_calls", Label: "per-session web-call", ConfigKey: "hardening.quotas.maxSessionWebCalls", Current: session.WebCalls, Limit: cfg.MaxSessionWebCalls},
-		)
-	case "spawn_subagent":
-		checks = append(checks,
-			quotaCheck{Scope: "message", Name: "subagent_calls", Label: "per-message subagent-call", ConfigKey: "hardening.quotas.maxSubagentCalls", Current: message.SubagentCalls, Limit: cfg.MaxSubagentCalls},
-			quotaCheck{Scope: "session", Name: "subagent_calls", Label: "per-session subagent-call", ConfigKey: "hardening.quotas.maxSessionSubagentCalls", Current: session.SubagentCalls, Limit: cfg.MaxSessionSubagentCalls},
-		)
-	}
-	return checks
-}
-
-func (r *Runtime) handleQuotaExceeded(ctx context.Context, sessionKey string, toolName string, check quotaCheck) error {
-	if r.Hardening.Quotas.ExceededAction == config.QuotaExceededActionFail {
-		return quotaExceededError(toolName, check, "hard limit reached")
-	}
-	if r.ApprovalBroker == nil {
-		return quotaExceededError(toolName, check, "approval is configured, but the approval broker is unavailable")
-	}
-	identity := tools.RequesterIdentityFromContext(ctx)
-	decision, err := r.ApprovalBroker.EvaluateToolQuota(ctx, approval.ToolQuotaEvaluation{
-		Scope:         check.Scope,
-		LimitName:     check.Name,
-		ToolName:      toolName,
-		Current:       check.Current,
-		Limit:         check.Limit,
-		AgentID:       firstNonEmptyString(identity.Actor, "runtime"),
-		SessionID:     sessionKey,
-		ApprovalToken: tools.ApprovalTokenFromContext(ctx),
-	}, config.ApprovalModeAsk)
-	if err != nil {
-		return err
-	}
-	if decision.Allowed {
-		if r.Audit != nil {
-			_ = r.Audit.Record(ctx, "quota.override", sessionKey, "approval", map[string]any{
-				"tool":         toolName,
-				"scope":        check.Scope,
-				"limit":        check.Name,
-				"current":      check.Current,
-				"max":          check.Limit,
-				"subject_hash": decision.SubjectHash,
-			})
-		}
-		return nil
-	}
-	if decision.RequiresApproval {
-		return fmt.Errorf("%s Approve request %d, then retry with the issued approval token.", quotaExceededMessage(toolName, check, "approval required"), decision.RequestID)
-	}
-	return quotaExceededError(toolName, check, decision.Reason)
-}
-
-func messageQuotaCountersFromContext(ctx context.Context) *quotaCounters {
-	if ctx != nil {
-		if counters, ok := ctx.Value(messageQuotaCountersContextKey{}).(*quotaCounters); ok && counters != nil {
-			return counters
-		}
-	}
-	return &quotaCounters{}
-}
-
-func incrementQuotaCounters(counters *quotaCounters, toolName string) {
-	if counters == nil {
-		return
-	}
-	counters.ToolCalls++
-	switch toolName {
-	case "exec", "run_skill", "run_skill_script":
-		counters.ExecCalls++
-	case "web_fetch", "web_fetch_markdown", "web_search":
-		counters.WebCalls++
-	case "spawn_subagent":
-		counters.SubagentCalls++
-	}
-}
-
-func quotaExceededError(toolName string, check quotaCheck, reason string) error {
-	return errors.New(quotaExceededMessage(toolName, check, reason))
-}
-
-func quotaExceededMessage(toolName string, check quotaCheck, reason string) string {
-	reason = strings.TrimSpace(reason)
-	if reason == "" {
-		reason = "limit reached"
-	}
-	return fmt.Sprintf("tool quota reached for %s: %s limit %d/%d while executing %s (%s). Increase %s or set hardening.quotas.exceededAction to ask/fail as appropriate.",
-		check.Scope,
-		check.Label,
-		check.Current,
-		check.Limit,
-		toolName,
-		reason,
-		check.ConfigKey,
-	)
-}
-
-func (r *Runtime) sessionQuotaState(sessionKey string) *sessionQuotaState {
-	sessionKey = strings.TrimSpace(sessionKey)
-	if sessionKey == "" {
-		sessionKey = scope.GlobalMemoryScope
-	}
-	r.quotaMu.Lock()
-	defer r.quotaMu.Unlock()
-	return r.sessionQuotaStateLocked(sessionKey)
-}
-
-func (r *Runtime) sessionQuotaStateLocked(sessionKey string) *sessionQuotaState {
-	if r.quotas == nil {
-		r.quotas = map[string]*sessionQuotaState{}
-	}
-	r.evictQuotaStateLocked()
-	state := r.quotas[sessionKey]
-	if state == nil {
-		state = &sessionQuotaState{}
-		r.quotas[sessionKey] = state
-	}
-	state.LastSeen = time.Now()
-	return state
-}
-
-func (r *Runtime) contextWithTrustedToolAccess(ctx context.Context, ev bus.Event) context.Context {
-	if !isTrustedToolEvent(ev.Type) {
-		return ctx
-	}
-	return context.WithValue(ctx, trustedToolAccessContextKey{}, true)
-}
-
-func trustedToolAccessFromContext(ctx context.Context) bool {
-	if ctx == nil {
-		return false
-	}
-	trusted, _ := ctx.Value(trustedToolAccessContextKey{}).(bool)
-	return trusted
-}
-
-func isTrustedToolEvent(eventType bus.EventType) bool {
-	switch eventType {
-	case bus.EventHeartbeat, bus.EventCron:
-		return true
-	default:
-		return false
-	}
-}
-
-func (r *Runtime) evictQuotaStateLocked() {
-	if len(r.quotas) < maxTrackedQuotaSessions {
-		return
-	}
-	oldestKey := ""
-	var oldestTime time.Time
-	for key, state := range r.quotas {
-		if state == nil {
-			delete(r.quotas, key)
-			continue
-		}
-		if oldestKey == "" || state.LastSeen.Before(oldestTime) {
-			oldestKey = key
-			oldestTime = state.LastSeen
-		}
-	}
-	if oldestKey != "" {
-		delete(r.quotas, oldestKey)
-	}
-}
-
-func firstNonEmptyString(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
-}
-
-func (r *Runtime) skillRunEnvFor(name string) map[string]string {
-	if r.Builder == nil {
-		return nil
-	}
-	return r.Builder.Skills.RunEnvForSkill(name)
-}
-
-func (r *Runtime) persistAssistantReply(ctx context.Context, sessionKey string, msgID int64, channel, replyTarget, finalText string, replyMeta map[string]any, streamed bool, autoDeliver bool) {
-	if strings.TrimSpace(finalText) == "" {
-		finalText = "(no response)"
-	}
-	assistantID, err := r.DB.AppendMessage(ctx, sessionKey, "assistant", finalText, map[string]any{"in_reply_to": msgID})
-	if err != nil {
-		log.Printf("append assistant(final) failed: %v", err)
-	} else if r.DB != nil {
-		scopeKey := sessionKey
-		if resolved, rerr := r.DB.ResolveScopeKey(ctx, sessionKey); rerr == nil && strings.TrimSpace(resolved) != "" {
-			scopeKey = resolved
-		}
-		card, _, _ := loadTaskCard(ctx, r.DB, sessionKey)
-		card.Status = "active"
-		card.MessageRefs = appendBoundedInt64(card.MessageRefs, assistantID, 12)
-		if err := saveTaskCard(ctx, r.DB, sessionKey, scopeKey, card); err != nil {
-			log.Printf("save task card failed: %v", err)
-		}
-	}
-	if autoDeliver && !streamed && r.Deliver != nil {
-		if err := r.deliver(ctx, channel, replyTarget, finalText, replyMeta); err != nil {
-			log.Printf("deliver failed: %v", err)
-		}
-	}
-}
-
-func (r *Runtime) deliver(ctx context.Context, channel, to, text string, meta map[string]any) error {
-	if r.Deliver == nil {
-		return nil
-	}
-	if withMeta, ok := r.Deliver.(MetaDeliverer); ok {
-		return withMeta.DeliverWithMeta(ctx, channel, to, text, channels.ReplyMeta(meta))
-	}
-	return r.Deliver.Deliver(ctx, channel, to, text)
-}
-
-func (r *Runtime) boundTextResult(ctx context.Context, sessionKey string, text string) (stored string, preview string, artifactID string) {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return "(no response)", "(no response)", ""
-	}
-	preview = previewText(text, r.toolPreviewBytes())
-	shouldStoreArtifact := r.Artifacts != nil && (preview != text || (r.MaxToolBytes > 0 && len(text) > r.MaxToolBytes))
-	if shouldStoreArtifact {
-		id, err := r.Artifacts.Save(ctx, sessionKey, "text/plain", []byte(text))
-		if err != nil {
-			log.Printf("artifact save failed: %v", err)
-			return text, preview, ""
-		}
-		if r.DB != nil {
-			summary := buildArtifactSummary(id, "text/plain", preview, int64(len(text)))
-			if _, err := r.DB.InsertMemoryNoteTyped(ctx, sessionKey, db.TypedNoteInput{
-				Text:             summary,
-				Summary:          compactSemanticJSON(db.MemoryKindArtifact, preview, []string{"artifact:" + id}),
-				SourceArtifactID: id,
-				Kind:             db.MemoryKindArtifact,
-				Status:           db.MemoryStatusActive,
-				Importance:       0.2,
-				Confidence:       0.9,
-			}); err != nil {
-				log.Printf("artifact summary note save failed: %v", err)
-			}
-			scopeKey := sessionKey
-			if resolved, rerr := r.DB.ResolveScopeKey(ctx, sessionKey); rerr == nil && strings.TrimSpace(resolved) != "" {
-				scopeKey = resolved
-			}
-			card, _, _ := loadTaskCard(ctx, r.DB, sessionKey)
-			card.Status = "active"
-			card.ArtifactRefs = appendBoundedString(card.ArtifactRefs, id, 12)
-			if err := saveTaskCard(ctx, r.DB, sessionKey, scopeKey, card); err != nil {
-				log.Printf("save task card artifact ref failed: %v", err)
-			}
-		}
-		return tools.EncodeToolResult(tools.ToolResult{
-			Kind:       "large_tool_output",
-			OK:         true,
-			Summary:    fmt.Sprintf("Large tool output saved as artifact %s", id),
-			Preview:    preview,
-			ArtifactID: id,
-			Stats: map[string]any{
-				"bytes": len(text),
-			},
-		}), preview, id
-	}
-	return text, preview, ""
-}
-
 func (r *Runtime) toolPreviewBytes() int {
 	if r.ToolPreviewBytes <= 0 {
 		if r.MaxToolBytes > 0 {
@@ -64102,57 +63158,6 @@ func releaseEvent(ev bus.Event) {
 	done()
 }
 
-func toToolDefs(reg *tools.Registry) []providers.ToolDef {
-	defs, _ := toProviderToolDefs(reg, providers.OpenAICompatibleProfile())
-	return defs
-}
-
-func toProviderToolDefs(reg *tools.Registry, profile providers.ProviderProfile) ([]providers.ToolDef, []providers.SchemaSanitizationReport) {
-	if reg == nil {
-		return nil, nil
-	}
-	raw := reg.Definitions()
-	out := make([]providers.ToolDef, 0, len(raw))
-	for _, d := range raw {
-		fn, _ := d["function"].(map[string]any)
-		td := providers.ToolDef{
-			Type: "function",
-			Function: providers.ToolFunc{
-				Name:        fmt.Sprint(fn["name"]),
-				Description: fmt.Sprint(fn["description"]),
-				Parameters:  fn["parameters"],
-			},
-		}
-		out = append(out, td)
-	}
-	return providers.SanitizeToolDefs(out, profile)
-}
-
-// Cron runner helper: turns a job into a bus event message
-// CronRunner adapts the event bus into a cron.Runner.
-func CronRunner(b *bus.Bus, defaultSessionKey string) cron.Runner {
-	return func(ctx context.Context, job cron.CronJob) (cron.RunResult, error) {
-		_ = ctx
-		if kind := strings.TrimSpace(job.Payload.Kind); kind != "" && kind != cron.PayloadAgentTurn && kind != cron.PayloadSystemEvent {
-			return cron.RunResult{}, fmt.Errorf("unsupported cron payload kind for agent runner: %s", kind)
-		}
-		msg := job.Payload.Message
-		if strings.TrimSpace(msg) == "" {
-			msg = "cron job: " + job.Name
-		}
-		// prefer per-job session key over the default
-		sessionKey := job.Payload.SessionKey
-		if strings.TrimSpace(sessionKey) == "" {
-			sessionKey = defaultSessionKey
-		}
-		ev := bus.Event{Type: bus.EventCron, SessionKey: sessionKey, Channel: job.Payload.Channel, From: job.Payload.To, Message: msg, Meta: map[string]any{"job_id": job.ID}}
-		if ok := b.Publish(ev); !ok {
-			return cron.RunResult{}, fmt.Errorf("event bus full")
-		}
-		return cron.RunResult{}, nil
-	}
-}
-
 // WithTimeout derives a timeout context when sec is positive.
 func WithTimeout(ctx context.Context, sec int) (context.Context, context.CancelFunc) {
 	if sec <= 0 {
@@ -64160,11 +63165,10 @@ func WithTimeout(ctx context.Context, sec int) (context.Context, context.CancelF
 	}
 	return context.WithTimeout(ctx, time.Duration(sec)*time.Second)
 }
-```
+````
 
 ## File: cmd/or3-intern/service.go
-
-```go
+````go
 package main
 
 import (
@@ -64673,4 +63677,4 @@ func (s *serviceServer) abortJob(w http.ResponseWriter, r *http.Request, jobID s
 	}
 	writeServiceJSON(w, http.StatusConflict, map[string]any{"error": "job is not abortable", "job_id": jobID})
 }
-```
+````

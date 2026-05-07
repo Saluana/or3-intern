@@ -16,6 +16,16 @@ It currently mixes:
 
 The package already split other concerns into dedicated files like `approval_store.go`, `auth_store.go`, `skill_run_plan_store.go`, and `task_state.go`. `store.go` is the outlier.
 
+## Review validation update
+
+I re-checked the code and the six high-confidence findings all hold up. This review is less about taste than the other two: several items are real contract bugs where callers can observe a successful-looking side effect after persistence failed, or a failure after the primary row already committed.
+
+The biggest priority adjustment is to fix the agent CLI finalization path before structural extraction. `FinalizeAgentCLIRun` currently accepts zero-row transitions, `Manager.finalizeRun` logs DB errors but still publishes job completion, and `Manager.reconcileInterruptedRun` ignores the DB error entirely before publishing completion. That is the clearest state-divergence bug.
+
+For memory vectors, pick one explicit contract and test it. The code already treats consolidation vector maintenance as best-effort, so the simplest consistent contract is: SQL note writes succeed even if vector indexing fails, vector failure is recorded/logged or left for a reindex path, and callers do not retry the primary note write just because the index update failed.
+
+For pinned memory, the better fix is probably not a blind behavior change. Add or rename APIs so the difference is explicit: an overlay read (`global` plus scope override) and an exact-scope read. Then point prompt construction and consolidation at the intended read model.
+
 ## High-confidence findings
 
 ### 1. Memory note writes can report failure after the note row already committed
@@ -36,6 +46,8 @@ It is also inconsistent with `WriteConsolidation`, which already treats vector m
 
 Practical effect: callers cannot tell the difference between `nothing was written` and `the note exists but the vec index is stale`. That is exactly the kind of ambiguity that creates duplicate retries and weird retrieval drift later.
 
+Recommended implementation: keep the primary `memory_notes` write authoritative, make vector upsert best-effort for insert/update, and add an explicit reindex/repair path for stale vector rows. If the team wants vector failure surfaced, return it through a separate diagnostic mechanism, not as the main write error after the row already committed.
+
 ### 2. `FinalizeAgentCLIRun` can silently no-op and still look successful to callers
 
 Relevant code:
@@ -51,6 +63,8 @@ That is already inconsistent with the neighboring subagent path, which treats th
 
 The downstream effect is worse than a harmless no-op. The manager logs on error in one path and ignores the return entirely in another path, but still publishes completion state to the in-memory job registry. That means the UI or event consumers can believe a run is finished while the DB row still says `running` or some earlier state.
 
+Recommended implementation: match `FinalizeSubagentJob` by checking `RowsAffected` and returning `sql.ErrNoRows` for invalid transitions. In the manager, publish job completion only after finalization succeeds. For reconciliation, log and skip publish on failure, or reload the run and publish based on the persisted terminal state if one already exists.
+
 ### 3. `GetLastMessagesScoped` swallows scope-resolution failures and silently narrows history
 
 Relevant code:
@@ -65,6 +79,8 @@ That means real DB problems get converted into a smaller prompt/history window w
 
 This is the kind of bug that hides in production because the function still returns a valid-looking slice. You do not get a crash, you just get worse context assembly and lower-quality model behavior.
 
+Recommended implementation: preserve fallback only for legitimate "no link exists" behavior. Return errors for `ResolveScopeKey` query failures and `ListScopeSessions` query failures. If a scope exists but has no rows, include the current physical session explicitly rather than treating database errors and empty scopes the same way.
+
 ### 4. `LinkSession` writes JSON `null` for nil metadata instead of `{}`
 
 Relevant code:
@@ -77,6 +93,8 @@ Relevant code:
 This is inconsistent with the rest of the package, which already has a helper that normalizes empty maps to `{}`.
 
 It is not catastrophic, but it is sloppy data-shape handling. Any consumer that expects an object now has to defensively accept both `null` and `{}` for the same column, which is needless schema fuzziness.
+
+Recommended implementation: use the same normalization pattern as `mustJSONMap`, either by reusing that helper or adding a local `jsonMapObject` helper for session metadata.
 
 ### 5. Cross-scope vector search is not a real top-k search
 
@@ -94,6 +112,8 @@ So with both global and session-scoped hits present, the function can return mor
 
 That means this is not really implementing the API shape its name suggests. Callers asking for top-k nearest matches can receive a merged bag of per-scope candidates instead of the best k candidates overall.
 
+Recommended implementation: after dedupe, sort by ascending `Distance` with a stable tie-breaker such as note id, then clamp to `k`. The per-scope search functions already order their local results; the missing piece is the global merge.
+
 ### 6. Pinned-memory read semantics are inconsistent inside the same package
 
 Relevant code:
@@ -110,6 +130,8 @@ That means prompt construction can see global pinned memory while consolidation 
 This is an avoidable semantic split in two APIs that look like they should agree.
 
 Practical effect: two adjacent memory pipelines can build on different canonical baselines even when they are supposed to operate on the same logical scope. That invites churn, overwrites, and confusing consolidation behavior.
+
+Recommended implementation: introduce explicit names. For example, keep an exact read as `GetPinnedValueExact`, add overlay behavior as `GetPinnedValue` or `GetPinnedValueOverlay`, and update consolidation/prompt code intentionally. Consolidation likely wants overlay-as-baseline but scoped writes, so it can inherit global canonical memory without mutating the global row.
 
 ## Duplication and design drift
 
@@ -155,21 +177,23 @@ The problem is that active responsibilities were piled into one file and similar
 
 ## Recommended next steps
 
-1. Fix the concrete contract bugs first.
-2. Add tests for the failure paths that are currently missing.
-3. Extract `subagent_store.go` and `agent_cli_store.go` next, preserving behavior before attempting shared helpers.
-4. After the extraction, unify queue transition behavior where the two stores should match.
+1. Fix `FinalizeAgentCLIRun` and manager publish-after-finalize behavior first.
+2. Fix the memory note/vector write contract and add failure-path tests.
+3. Fix scoped-history error propagation, link metadata normalization, vector top-k merge, and pinned-memory API naming/semantics.
+4. Extract `subagent_store.go` and `agent_cli_store.go` after the queue lifecycle tests are in place.
+5. After extraction, unify queue transition behavior where the two stores should match.
 
 ## Task list
 
-- [ ] Fix the memory note write contract so callers do not get a hard failure after `memory_notes` already committed.
-- [ ] Add a regression test that simulates vec-index failure after a successful note insert or update.
 - [ ] Make `FinalizeAgentCLIRun` check `RowsAffected` and return `sql.ErrNoRows` on no-op finalization.
 - [ ] Stop the agent CLI manager from publishing completion if DB finalization failed.
+- [ ] Add a regression test where agent CLI finalization affects zero rows and verify no job completion is published from the manager.
+- [ ] Fix the memory note write contract so callers do not get a hard failure after `memory_notes` already committed.
+- [ ] Add a regression test that simulates vec-index failure after a successful note insert or update.
 - [ ] Make `GetLastMessagesScoped` surface scope-resolution errors instead of silently narrowing to a single session.
 - [ ] Normalize `LinkSession` metadata JSON to `{}` for nil or empty maps.
 - [ ] Rework `SearchMemoryVectors` to merge, global-sort, and clamp results to true top-k semantics.
-- [ ] Decide whether pinned-memory reads should always overlay global scope; then align `GetPinnedValue` with that decision or rename it to make the narrower contract explicit.
+- [ ] Split pinned-memory reads into explicit exact-scope and overlay APIs, then point prompt construction and consolidation at the intended one.
 - [ ] Extract the subagent queue code into `subagent_store.go`.
 - [ ] Extract the agent CLI queue code into `agent_cli_store.go`.
 - [ ] Add shared transition tests so subagent and agent CLI lifecycle behavior cannot drift again.

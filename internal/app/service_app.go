@@ -285,6 +285,7 @@ func (a *ServiceApp) ResumeApprovedRequest(ctx context.Context, req ResumeApprov
 	if sessionKey == "" {
 		return "", nil
 	}
+	profileName, actor := approvedReplayContext(issued, req.ProfileName, req.Actor)
 	switch strings.TrimSpace(issued.Request.Type) {
 	case string(approval.SubjectExec), string(approval.SubjectSkillExec):
 		target, err := a.findApprovalReplayTarget(ctx, sessionKey, issued.Request.ID)
@@ -310,15 +311,15 @@ func (a *ServiceApp) ResumeApprovedRequest(ctx context.Context, req ResumeApprov
 			ToolName:          target.ToolName,
 			ArgumentsJSON:     target.ArgumentsJSON,
 			ApprovalRequestID: issued.Request.ID,
-			ProfileName:       req.ProfileName,
+			ProfileName:       profileName,
 			Capability:        req.Capability,
 			ApprovalToken:     issued.Token,
-			Actor:             req.Actor,
+			Actor:             actor,
 			Role:              req.Role,
 			Observer:          req.Observer,
 		})
 	case string(approval.SubjectToolQuota):
-		runCtx := a.serviceRunContext(ctx, sessionKey, req.ProfileName, issued.Token, req.Actor, req.Role, req.Capability, req.Observer, nil)
+		runCtx := a.serviceRunContext(ctx, sessionKey, profileName, issued.Token, actor, req.Role, req.Capability, req.Observer, nil)
 		return "", a.runtime.Handle(runCtx, bus.Event{
 			Type:       bus.EventSystem,
 			SessionKey: sessionKey,
@@ -333,6 +334,34 @@ func (a *ServiceApp) ResumeApprovedRequest(ctx context.Context, req ResumeApprov
 	default:
 		return "", nil
 	}
+}
+
+func approvedReplayContext(issued approval.IssuedApproval, fallbackProfile string, fallbackActor string) (string, string) {
+	profileName := strings.TrimSpace(fallbackProfile)
+	actor := strings.TrimSpace(fallbackActor)
+	switch strings.TrimSpace(issued.Request.Type) {
+	case string(approval.SubjectExec):
+		var subject approval.ExecSubject
+		if err := json.Unmarshal([]byte(issued.Request.SubjectJSON), &subject); err == nil {
+			if profileName == "" {
+				profileName = strings.TrimSpace(subject.AccessProfile)
+			}
+			if strings.TrimSpace(subject.RequestingAgent) != "" {
+				actor = strings.TrimSpace(subject.RequestingAgent)
+			}
+		}
+	case string(approval.SubjectSkillExec):
+		var subject approval.SkillExecutionSubject
+		if err := json.Unmarshal([]byte(issued.Request.SubjectJSON), &subject); err == nil && strings.TrimSpace(subject.RequestingAgent) != "" {
+			actor = strings.TrimSpace(subject.RequestingAgent)
+		}
+	case string(approval.SubjectToolQuota):
+		var subject approval.ToolQuotaSubject
+		if err := json.Unmarshal([]byte(issued.Request.SubjectJSON), &subject); err == nil && strings.TrimSpace(subject.RequestingAgent) != "" {
+			actor = strings.TrimSpace(subject.RequestingAgent)
+		}
+	}
+	return profileName, actor
 }
 
 func summarizeReplayToolResult(toolName string, out string) string {

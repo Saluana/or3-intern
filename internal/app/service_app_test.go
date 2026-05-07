@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -173,6 +174,107 @@ func TestResumeApprovedRequest_ReplaysBlockedToolCall(t *testing.T) {
 	content, ok := last.Content.(string)
 	if last.Role != "assistant" || !ok || content != "continued after approval" {
 		t.Fatalf("expected continued assistant reply, got %#v", last)
+	}
+}
+
+func TestResumeApprovedRequest_ReplaysWithOriginalApprovalSubjectContext(t *testing.T) {
+	database, err := db.Open(filepath.Join(t.TempDir(), "service-app-profile.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { database.Close() })
+
+	approvalCfg := config.Default().Security.Approvals
+	approvalCfg.Enabled = true
+	approvalCfg.HostID = "test-host"
+	approvalCfg.Exec.Mode = config.ApprovalModeAsk
+	broker := &approval.Broker{
+		DB:      database,
+		Config:  approvalCfg,
+		HostID:  approvalCfg.HostID,
+		SignKey: []byte("0123456789abcdef0123456789abcdef"),
+		Now:     func() time.Time { return time.Unix(1_700_000_000, 0).UTC() },
+	}
+
+	registry := tools.NewRegistry()
+	registry.Register(&tools.ExecTool{
+		Timeout:         time.Second,
+		AllowedPrograms: []string{"/bin/echo", "echo"},
+		ApprovalBroker:  broker,
+	})
+
+	const sessionKey = "sess-resume-profile"
+	const argsJSON = `{"program":"/bin/echo","args":["hello"]}`
+	params := map[string]any{"program": "/bin/echo", "args": []any{"hello"}}
+	originalCtx := tools.ContextWithRequestSource(context.Background(), tools.RequestSourceService)
+	originalCtx = tools.ContextWithSession(originalCtx, sessionKey)
+	originalCtx = tools.ContextWithRequesterIdentity(originalCtx, "device:original", approval.RoleOperator)
+	originalCtx = tools.ContextWithActiveProfile(originalCtx, tools.ActiveProfile{Name: "service-profile"})
+
+	_, err = registry.Get("exec").Execute(originalCtx, params)
+	var approvalErr *tools.ApprovalRequiredError
+	if !errors.As(err, &approvalErr) || approvalErr.RequestID == 0 {
+		t.Fatalf("expected approval-required exec, got %T: %v", err, err)
+	}
+
+	toolCall := providers.ToolCall{
+		ID:   "tc-resume-profile",
+		Type: "function",
+		Function: struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		}{Name: "exec", Arguments: argsJSON},
+	}
+	if _, err := database.AppendMessage(context.Background(), sessionKey, "user", "run it", nil); err != nil {
+		t.Fatalf("AppendMessage user: %v", err)
+	}
+	if _, err := database.AppendMessage(context.Background(), sessionKey, "assistant", "", map[string]any{"tool_calls": []providers.ToolCall{toolCall}}); err != nil {
+		t.Fatalf("AppendMessage assistant: %v", err)
+	}
+	blocked := tools.EncodeToolFailure("exec", params, "", approvalErr)
+	if _, err := database.AppendMessage(context.Background(), sessionKey, "tool", blocked, map[string]any{"tool_call_id": "tc-resume-profile"}); err != nil {
+		t.Fatalf("AppendMessage tool: %v", err)
+	}
+
+	providerCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","content":"continued after profiled approval"}}]}`)
+	}))
+	defer srv.Close()
+
+	provider := providers.New(srv.URL, "test-key", 10*time.Second)
+	provider.HTTP = srv.Client()
+	runtime := &agent.Runtime{
+		DB:       database,
+		Provider: provider,
+		Model:    "gpt-4",
+		Tools:    registry,
+		Builder:  &agent.Builder{DB: database, HistoryMax: 20},
+		AccessProfiles: config.AccessProfilesConfig{
+			Enabled: true,
+			Profiles: map[string]config.AccessProfileConfig{
+				"service-profile": {MaxCapability: "guarded"},
+			},
+		},
+	}
+	app := &ServiceApp{runtime: runtime}
+
+	issued, err := broker.ApproveRequest(context.Background(), approvalErr.RequestID, "device:approver", false, "ok")
+	if err != nil {
+		t.Fatalf("ApproveRequest: %v", err)
+	}
+	if _, err := app.ResumeApprovedRequest(context.Background(), ResumeApprovedRequest{
+		IssuedApproval: issued,
+		Capability:     tools.CapabilityGuarded,
+		Actor:          "device:approver",
+		Role:           approval.RoleOperator,
+	}); err != nil {
+		t.Fatalf("ResumeApprovedRequest: %v", err)
+	}
+	if providerCalls != 1 {
+		t.Fatalf("expected continuation provider call after approved replay, got %d", providerCalls)
 	}
 }
 

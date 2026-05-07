@@ -3,6 +3,7 @@ package agentcli
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -515,6 +516,7 @@ func (m *Manager) finalizeRun(ctx context.Context, run db.AgentCLIRun, status, e
 	}
 	if err := m.DB.FinalizeAgentCLIRun(finalizeCtx, run.ID, fin); err != nil {
 		log.Printf("finalize agent CLI run failed: run=%s err=%v", run.ID, err)
+		return
 	}
 	if m.Jobs != nil {
 		switch status {
@@ -570,7 +572,12 @@ func (m *Manager) reconcileInterruptedRun(run db.AgentCLIRun, reason string) {
 		ErrorMessage: reason,
 		CompletedAt:  db.NowMS(),
 	}
-	_ = m.DB.FinalizeAgentCLIRun(ctx, run.ID, fin)
+	if err := m.DB.FinalizeAgentCLIRun(ctx, run.ID, fin); err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("reconcile interrupted run failed: run=%s err=%v", run.ID, err)
+		}
+		return
+	}
 	if m.Jobs != nil {
 		m.Jobs.Publish(run.JobID, "completion", map[string]any{
 			"status":  db.AgentCLIStatusAborted,

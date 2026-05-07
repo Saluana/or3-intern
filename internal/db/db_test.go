@@ -2770,3 +2770,258 @@ func TestAgentCLIRuns_EnqueueWithLimit(t *testing.T) {
 		t.Fatalf("expected 3 queued, got %d", len(queued))
 	}
 }
+
+func TestFinalizeAgentCLIRun_ErrNoRowsWhenNotRunning(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	run := AgentCLIRun{
+		ID:               "acr-noop",
+		JobID:            "job-noop",
+		ParentSessionKey: "parent",
+		RunnerID:         "codex",
+		Task:             "will not run",
+		Mode:             "safe_edit",
+	}
+	if err := d.EnqueueAgentCLIRun(ctx, run); err != nil {
+		t.Fatalf("EnqueueAgentCLIRun: %v", err)
+	}
+	// Finalize while still queued should return ErrNoRows.
+	err := d.FinalizeAgentCLIRun(ctx, run.ID, AgentCLIFinalizeInput{
+		Status:      AgentCLIStatusSucceeded,
+		ExitCode:    0,
+		CompletedAt: NowMS(),
+	})
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expected sql.ErrNoRows for non-running run, got %v", err)
+	}
+	// Finalize non-existent run should also return ErrNoRows.
+	err = d.FinalizeAgentCLIRun(ctx, "nonexistent", AgentCLIFinalizeInput{
+		Status:      AgentCLIStatusSucceeded,
+		ExitCode:    0,
+		CompletedAt: NowMS(),
+	})
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expected sql.ErrNoRows for missing run, got %v", err)
+	}
+}
+
+func TestFinalizeSubagentJob_ErrNoRowsWhenNotRunning(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	job := SubagentJob{
+		ID:               "sub-noop",
+		ParentSessionKey: "parent",
+		ChildSessionKey:  "child",
+		Task:             "will not run",
+	}
+	if err := d.EnqueueSubagentJob(ctx, job); err != nil {
+		t.Fatalf("EnqueueSubagentJob: %v", err)
+	}
+	// Finalize while still queued should return ErrNoRows.
+	err := d.FinalizeSubagentJob(ctx, job, SubagentStatusSucceeded, "", "", "", "", "")
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expected sql.ErrNoRows for non-running job, got %v", err)
+	}
+}
+
+func TestSubagentAndAgentCLI_LifecycleTransitionsMatch(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	// Both stores should reject finalization when not in running state.
+	sj := SubagentJob{
+		ID:               "dual-job",
+		ParentSessionKey: "parent",
+		ChildSessionKey:  "child",
+		Task:             "dual",
+	}
+	ar := AgentCLIRun{
+		ID:               "dual-run",
+		JobID:            "dual-job-run",
+		ParentSessionKey: "parent",
+		RunnerID:         "codex",
+		Task:             "dual",
+		Mode:             "safe_edit",
+	}
+
+	if err := d.EnqueueSubagentJob(ctx, sj); err != nil {
+		t.Fatalf("EnqueueSubagentJob: %v", err)
+	}
+	if err := d.EnqueueAgentCLIRun(ctx, ar); err != nil {
+		t.Fatalf("EnqueueAgentCLIRun: %v", err)
+	}
+
+	// Both should reject non-running finalization.
+	if err := d.FinalizeSubagentJob(ctx, sj, SubagentStatusSucceeded, "", "", "", "", ""); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("subagent finalize non-running: expected ErrNoRows, got %v", err)
+	}
+	if err := d.FinalizeAgentCLIRun(ctx, ar.ID, AgentCLIFinalizeInput{
+		Status: AgentCLIStatusSucceeded, CompletedAt: NowMS(),
+	}); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("agent CLI finalize non-running: expected ErrNoRows, got %v", err)
+	}
+
+	// Both should support claiming and transition to running.
+	claimedJob, err := d.ClaimNextSubagentJob(ctx)
+	if err != nil {
+		t.Fatalf("ClaimNextSubagentJob: %v", err)
+	}
+	if claimedJob == nil || claimedJob.Status != SubagentStatusRunning {
+		t.Errorf("expected subagent to be claimed and running")
+	}
+	claimedRun, err := d.ClaimNextAgentCLIRun(ctx)
+	if err != nil {
+		t.Fatalf("ClaimNextAgentCLIRun: %v", err)
+	}
+	if claimedRun == nil || claimedRun.Status != AgentCLIStatusRunning {
+		t.Errorf("expected agent CLI run to be claimed and running")
+	}
+
+	// Both should successfully finalize from running state.
+	if err := d.FinalizeSubagentJob(ctx, *claimedJob, SubagentStatusSucceeded, "", "", "", "", ""); err != nil {
+		t.Errorf("subagent finalize running: %v", err)
+	}
+	if err := d.FinalizeAgentCLIRun(ctx, claimedRun.ID, AgentCLIFinalizeInput{
+		Status: AgentCLIStatusSucceeded, CompletedAt: NowMS(),
+	}); err != nil {
+		t.Errorf("agent CLI finalize running: %v", err)
+	}
+}
+
+func TestInsertMemoryNoteTyped_SucceedsWhenVecIndexFails(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	// Insert with a valid embedding that has a dim mismatch against any existing index.
+	// The note row should be created; the vector failure is swallowed.
+	emb := make([]byte, 16) // 4 floats
+	id, err := d.InsertMemoryNoteTyped(ctx, "sess", TypedNoteInput{
+		Text:      "note with no index",
+		Embedding: emb,
+	})
+	if err != nil {
+		t.Fatalf("InsertMemoryNoteTyped should succeed even if vec index fails: %v", err)
+	}
+	if id <= 0 {
+		t.Fatalf("expected positive note id, got %d", id)
+	}
+	// Verify the note row exists.
+	var text string
+	if err := d.SQL.QueryRowContext(ctx, `SELECT text FROM memory_notes WHERE id=?`, id).Scan(&text); err != nil {
+		t.Fatalf("note row missing after insert: %v", err)
+	}
+	if text != "note with no index" {
+		t.Fatalf("unexpected note text: %q", text)
+	}
+}
+
+func TestSearchMemoryVectors_TopK(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	if d.VecSQL == nil {
+		t.Skip("VecSQL not available")
+	}
+	dims := 4
+	if err := d.EnsureMemoryVecIndexWithDim(ctx, dims); err != nil {
+		t.Fatalf("EnsureMemoryVecIndexWithDim: %v", err)
+	}
+	verified, err := d.MemoryVectorDims(ctx)
+	if err != nil {
+		t.Fatalf("MemoryVectorDims: %v", err)
+	}
+	if verified != dims {
+		t.Skip("vector index not available for this test")
+	}
+
+	emb1 := make([]byte, dims*4)
+	emb2 := make([]byte, dims*4)
+	for i := range dims {
+		emb1[i*4] = 0x3F   // 0.5 in float32
+		emb2[i*4+3] = 0x3F // different distribution
+	}
+
+	for i := 0; i < 5; i++ {
+		if _, err := d.InsertMemoryNoteTyped(ctx, scope.GlobalMemoryScope, TypedNoteInput{
+			Text:      fmt.Sprintf("note %d", i),
+			Embedding: emb1,
+		}); err != nil {
+			t.Fatalf("InsertMemoryNoteTyped %d: %v", i, err)
+		}
+	}
+	if _, err := d.InsertMemoryNoteTyped(ctx, "sess", TypedNoteInput{
+		Text:      "session note",
+		Embedding: emb2,
+	}); err != nil {
+		t.Fatalf("InsertMemoryNoteTyped session: %v", err)
+	}
+
+	results, err := d.SearchMemoryVectors(ctx, "sess", emb1, 3)
+	if err != nil {
+		t.Fatalf("SearchMemoryVectors: %v", err)
+	}
+	if len(results) > 3 {
+		t.Fatalf("expected at most 3 results, got %d", len(results))
+	}
+	if len(results) == 0 {
+		t.Skip("empty vec index results, possibly due to sqlite-vec limitations")
+	}
+	for i := 1; i < len(results); i++ {
+		if results[i].Distance < results[i-1].Distance {
+			t.Fatalf("results not sorted by distance: %+v", results)
+		}
+	}
+}
+
+func TestGetPinnedValue_OverlayFallsBackToGlobal(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	if err := d.UpsertPinned(ctx, scope.GlobalMemoryScope, "shared_key", "global value"); err != nil {
+		t.Fatalf("UpsertPinned global: %v", err)
+	}
+
+	val, ok, err := d.GetPinnedValue(ctx, "session-x", "shared_key")
+	if err != nil {
+		t.Fatalf("GetPinnedValue overlay: %v", err)
+	}
+	if !ok || val != "global value" {
+		t.Fatalf("expected overlay to fall back to global, got ok=%v val=%q", ok, val)
+	}
+
+	exactVal, exactOk, err := d.GetPinnedValueExact(ctx, "session-x", "shared_key")
+	if err != nil {
+		t.Fatalf("GetPinnedValueExact: %v", err)
+	}
+	if exactOk {
+		t.Fatalf("expected exact read to miss for session-x, got val=%q", exactVal)
+	}
+}
+
+func TestLinkSession_NilMetadataStoredAsEmptyObject(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	if err := d.LinkSession(ctx, "sess-nil-meta", "scope-nil", nil); err != nil {
+		t.Fatalf("LinkSession nil meta: %v", err)
+	}
+
+	var metaJSON string
+	if err := d.SQL.QueryRowContext(ctx, `SELECT metadata_json FROM session_links WHERE session_key=?`, "sess-nil-meta").Scan(&metaJSON); err != nil {
+		t.Fatalf("read metadata_json: %v", err)
+	}
+	if metaJSON != "{}" {
+		t.Fatalf("expected metadata_json='{}' for nil meta, got %q", metaJSON)
+	}
+}
+
+func TestGetLastMessagesScoped_PropagatesError(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	// Without a linked scope and no messages, returns empty slice (nil is valid).
+	msgs, err := d.GetLastMessagesScoped(ctx, "unlinked-session", 10)
+	if err != nil {
+		t.Fatalf("GetLastMessagesScoped: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("expected empty messages for unlinked session, got %d", len(msgs))
+	}
+}

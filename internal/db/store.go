@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 
 	"or3-intern/internal/scope"
@@ -99,105 +100,6 @@ type ConsolidationWrite struct {
 	CanonicalKey  string
 	CanonicalText string
 	CursorMsgID   int64
-}
-
-const (
-	SubagentStatusQueued      = "queued"
-	SubagentStatusRunning     = "running"
-	SubagentStatusSucceeded   = "succeeded"
-	SubagentStatusFailed      = "failed"
-	SubagentStatusInterrupted = "interrupted"
-)
-
-var (
-	ErrSubagentQueueFull          = errors.New("subagent queue is full")
-	ErrInvalidSubagentStatusFilter = errors.New("invalid subagent status filter")
-)
-
-const (
-	AgentCLIStatusQueued    = "queued"
-	AgentCLIStatusStarting  = "starting"
-	AgentCLIStatusRunning   = "running"
-	AgentCLIStatusSucceeded = "succeeded"
-	AgentCLIStatusFailed    = "failed"
-	AgentCLIStatusAborted   = "aborted"
-	AgentCLIStatusTimedOut  = "timed_out"
-)
-
-var ErrAgentCLIQueueFull = errors.New("agent CLI queue is full")
-
-type AgentCLIRun struct {
-	ID               string
-	JobID            string
-	ParentSessionKey string
-	RunnerID         string
-	Task             string
-	Cwd              string
-	Model            string
-	Mode             string
-	Isolation        string
-	Status           string
-	PID              int
-	RequestedAt      int64
-	StartedAt        int64
-	CompletedAt      int64
-	TimeoutSeconds   int
-	ExitCode         sql.NullInt64
-	StdoutPreview    string
-	StderrPreview    string
-	FinalTextPreview string
-	ErrorMessage     string
-	Attempts         int
-	MetaJSON         string
-}
-
-type AgentCLIEvent struct {
-	ID          int64
-	RunID       string
-	JobID       string
-	Seq         int64
-	TS          string
-	Type        string
-	Stream      string
-	Chunk       string
-	PayloadJSON string
-}
-
-type AgentCLIFinalizeInput struct {
-	Status           string
-	ExitCode         int
-	StdoutPreview    string
-	StderrPreview    string
-	FinalTextPreview string
-	ErrorMessage     string
-	CompletedAt      int64
-}
-
-type AgentCLIRunFilter struct {
-	Status           string
-	ParentSessionKey string
-	Limit            int
-}
-
-const AgentCLIRunListDefaultLimit = 50
-const AgentCLIRunListMaxLimit = 100
-
-type SubagentJob struct {
-	ID               string
-	ParentSessionKey string
-	ChildSessionKey  string
-	Channel          string
-	ReplyTo          string
-	Task             string
-	Status           string
-	ResultPreview    string
-	ArtifactID       string
-	ErrorText        string
-	RequestedAt      int64
-	StartedAt        int64
-	FinishedAt       int64
-	Attempts         int
-	MetadataJSON     string
 }
 
 func (d *DB) EnsureSession(ctx context.Context, key string) error {
@@ -321,7 +223,7 @@ func (d *DB) GetPinned(ctx context.Context, sessionKey string) (map[string]strin
 	return out, rows.Err()
 }
 
-func (d *DB) GetPinnedValue(ctx context.Context, sessionKey, key string) (string, bool, error) {
+func (d *DB) GetPinnedValueExact(ctx context.Context, sessionKey, key string) (string, bool, error) {
 	sessionKey = normalizeMemorySession(sessionKey)
 	row := d.SQL.QueryRowContext(ctx,
 		`SELECT content FROM memory_pinned WHERE session_key=? AND key=?`,
@@ -334,6 +236,21 @@ func (d *DB) GetPinnedValue(ctx context.Context, sessionKey, key string) (string
 		return "", false, err
 	}
 	return out, true, nil
+}
+
+func (d *DB) GetPinnedValue(ctx context.Context, sessionKey, key string) (string, bool, error) {
+	sessionKey = normalizeMemorySession(sessionKey)
+	if sessionKey == scope.GlobalMemoryScope {
+		return d.GetPinnedValueExact(ctx, scope.GlobalMemoryScope, key)
+	}
+	out, ok, err := d.GetPinnedValueExact(ctx, sessionKey, key)
+	if err != nil {
+		return "", false, err
+	}
+	if ok {
+		return out, true, nil
+	}
+	return d.GetPinnedValueExact(ctx, scope.GlobalMemoryScope, key)
 }
 
 func (d *DB) UpsertPinned(ctx context.Context, sessionKey, key, content string) error {
@@ -437,9 +354,7 @@ func (d *DB) InsertMemoryNoteTyped(ctx context.Context, sessionKey string, input
 	if err != nil {
 		return 0, err
 	}
-	if err := d.upsertMemoryVec(ctx, id, sessionKey, input.Text, input.Embedding); err != nil {
-		return id, err
-	}
+	_ = d.upsertMemoryVec(ctx, id, sessionKey, input.Text, input.Embedding)
 	return id, nil
 }
 
@@ -466,7 +381,8 @@ func (d *DB) UpdateMemoryNoteTyped(ctx context.Context, noteID int64, input Type
 	if rows, _ := res.RowsAffected(); rows == 0 {
 		return sql.ErrNoRows
 	}
-	return d.upsertMemoryVec(ctx, noteID, sessionKey, input.Text, input.Embedding)
+	_ = d.upsertMemoryVec(ctx, noteID, sessionKey, input.Text, input.Embedding)
+	return nil
 }
 
 func normalizeStoredEmbeddingFingerprint(embedding []byte, fingerprint string) string {
@@ -649,6 +565,15 @@ func (d *DB) SearchMemoryVectors(ctx context.Context, sessionKey string, queryVe
 			seen[row.ID] = struct{}{}
 			out = append(out, row)
 		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Distance != out[j].Distance {
+			return out[i].Distance < out[j].Distance
+		}
+		return out[i].ID < out[j].ID
+	})
+	if len(out) > k {
+		out = out[:k]
 	}
 	return out, nil
 }
@@ -1098,737 +1023,6 @@ func (d *DB) CleanupStaleMemoryNotes(ctx context.Context, scopeKey string, nowMS
 	return int(n), nil
 }
 
-func (d *DB) EnqueueSubagentJob(ctx context.Context, job SubagentJob) error {
-	return d.EnqueueSubagentJobLimited(ctx, job, 0)
-}
-
-func (d *DB) EnqueueSubagentJobLimited(ctx context.Context, job SubagentJob, maxQueued int) error {
-	if job.RequestedAt == 0 {
-		job.RequestedAt = NowMS()
-	}
-	if strings.TrimSpace(job.Status) == "" {
-		job.Status = SubagentStatusQueued
-	}
-	if strings.TrimSpace(job.MetadataJSON) == "" {
-		job.MetadataJSON = "{}"
-	}
-	tx, err := d.SQL.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
-	if err := ensureSessionTx(ctx, tx, job.ParentSessionKey); err != nil {
-		return err
-	}
-	if err := ensureSessionTx(ctx, tx, job.ChildSessionKey); err != nil {
-		return err
-	}
-	res, err := tx.ExecContext(ctx,
-		`INSERT INTO subagent_jobs(
-			id, parent_session_key, child_session_key, channel, reply_to, task, status,
-			result_preview, artifact_id, error_text, requested_at, started_at, finished_at, attempts, metadata_json
-		)
-		SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
-		WHERE ? <= 0 OR (SELECT COUNT(*) FROM subagent_jobs WHERE status=?) < ?`,
-		job.ID,
-		job.ParentSessionKey,
-		job.ChildSessionKey,
-		job.Channel,
-		job.ReplyTo,
-		job.Task,
-		job.Status,
-		job.ResultPreview,
-		job.ArtifactID,
-		job.ErrorText,
-		job.RequestedAt,
-		job.StartedAt,
-		job.FinishedAt,
-		job.Attempts,
-		job.MetadataJSON,
-		maxQueued,
-		SubagentStatusQueued,
-		maxQueued,
-	)
-	if err != nil {
-		return err
-	}
-	affected, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if affected == 0 {
-		return ErrSubagentQueueFull
-	}
-	return tx.Commit()
-}
-
-func (d *DB) GetSubagentJob(ctx context.Context, id string) (SubagentJob, bool, error) {
-	row := d.SQL.QueryRowContext(ctx,
-		`SELECT id, parent_session_key, child_session_key, channel, reply_to, task, status,
-			result_preview, artifact_id, error_text, requested_at, started_at, finished_at, attempts, metadata_json
-		 FROM subagent_jobs WHERE id=?`, id)
-	job, err := scanSubagentJob(row)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return SubagentJob{}, false, nil
-		}
-		return SubagentJob{}, false, err
-	}
-	return job, true, nil
-}
-
-func (d *DB) ListQueuedSubagentJobs(ctx context.Context) ([]SubagentJob, error) {
-	return d.listSubagentJobsByStatus(ctx, SubagentStatusQueued)
-}
-
-func (d *DB) ListRunningSubagentJobs(ctx context.Context) ([]SubagentJob, error) {
-	return d.listSubagentJobsByStatus(ctx, SubagentStatusRunning)
-}
-
-func (d *DB) listSubagentJobsByStatus(ctx context.Context, status string) ([]SubagentJob, error) {
-	rows, err := d.SQL.QueryContext(ctx,
-		`SELECT id, parent_session_key, child_session_key, channel, reply_to, task, status,
-			result_preview, artifact_id, error_text, requested_at, started_at, finished_at, attempts, metadata_json
-		 FROM subagent_jobs WHERE status=? ORDER BY requested_at ASC, id ASC`,
-		status)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []SubagentJob
-	for rows.Next() {
-		job, err := scanSubagentJob(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, job)
-	}
-	return out, rows.Err()
-}
-
-// SubagentJobFilter narrows ListSubagentJobs results.
-//
-// Status accepts the database-native subagent statuses
-// (queued, running, succeeded, failed, interrupted) plus the convenience
-// values "active" (queued or running) and "terminal" (succeeded, failed,
-// interrupted). An empty Status returns all rows.
-type SubagentJobFilter struct {
-	Status           string
-	ParentSessionKey string
-	Limit            int
-}
-
-// SubagentJobListDefaultLimit is the default row count returned when no
-// limit is specified.
-const SubagentJobListDefaultLimit = 50
-
-// SubagentJobListMaxLimit caps the maximum row count to keep the response
-// bounded for mobile clients.
-const SubagentJobListMaxLimit = 100
-
-// ListSubagentJobs returns persisted subagent jobs ordered newest first.
-// It uses a stable sort key (max of requested_at/started_at/finished_at)
-// so completed jobs appear above older queued ones.
-func (d *DB) ListSubagentJobs(ctx context.Context, filter SubagentJobFilter) ([]SubagentJob, error) {
-	limit := filter.Limit
-	if limit <= 0 {
-		limit = SubagentJobListDefaultLimit
-	}
-	if limit > SubagentJobListMaxLimit {
-		limit = SubagentJobListMaxLimit
-	}
-
-	clauses := []string{}
-	args := []any{}
-
-	switch strings.ToLower(strings.TrimSpace(filter.Status)) {
-	case "":
-		// no filter
-	case "active":
-		clauses = append(clauses, "status IN (?, ?)")
-		args = append(args, SubagentStatusQueued, SubagentStatusRunning)
-	case "terminal":
-		clauses = append(clauses, "status IN (?, ?, ?)")
-		args = append(args, SubagentStatusSucceeded, SubagentStatusFailed, SubagentStatusInterrupted)
-	case SubagentStatusQueued, SubagentStatusRunning, SubagentStatusSucceeded, SubagentStatusFailed, SubagentStatusInterrupted:
-		clauses = append(clauses, "status=?")
-		args = append(args, strings.ToLower(strings.TrimSpace(filter.Status)))
-	default:
-		return nil, fmt.Errorf("%w: %q", ErrInvalidSubagentStatusFilter, filter.Status)
-	}
-
-	if parent := strings.TrimSpace(filter.ParentSessionKey); parent != "" {
-		clauses = append(clauses, "parent_session_key=?")
-		args = append(args, parent)
-	}
-
-	where := ""
-	if len(clauses) > 0 {
-		where = "WHERE " + strings.Join(clauses, " AND ")
-	}
-	args = append(args, limit)
-
-	// Order by the most recent activity timestamp so finished jobs sort
-	// alongside their queued/started counterparts in a single timeline.
-	query := `SELECT id, parent_session_key, child_session_key, channel, reply_to, task, status,
-			result_preview, artifact_id, error_text, requested_at, started_at, finished_at, attempts, metadata_json
-		 FROM subagent_jobs ` + where + `
-		 ORDER BY MAX(requested_at, started_at, finished_at) DESC, id DESC
-		 LIMIT ?`
-
-	rows, err := d.SQL.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := make([]SubagentJob, 0, limit)
-	for rows.Next() {
-		job, err := scanSubagentJob(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, job)
-	}
-	return out, rows.Err()
-}
-
-func (d *DB) MarkSubagentRunning(ctx context.Context, id string) error {
-	now := NowMS()
-	_, err := d.SQL.ExecContext(ctx,
-		`UPDATE subagent_jobs
-		 SET status=?, started_at=CASE WHEN started_at=0 THEN ? ELSE started_at END, attempts=attempts+1
-		 WHERE id=? AND status=?`,
-		SubagentStatusRunning, now, id, SubagentStatusQueued)
-	return err
-}
-
-func (d *DB) ClaimNextSubagentJob(ctx context.Context) (*SubagentJob, error) {
-	tx, err := d.SQL.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
-
-	row := tx.QueryRowContext(ctx,
-		`SELECT id, parent_session_key, child_session_key, channel, reply_to, task, status,
-			result_preview, artifact_id, error_text, requested_at, started_at, finished_at, attempts, metadata_json
-		 FROM subagent_jobs WHERE status=? ORDER BY requested_at ASC, id ASC LIMIT 1`,
-		SubagentStatusQueued)
-	job, err := scanSubagentJob(row)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil
-		}
-		return nil, err
-	}
-	now := NowMS()
-	res, err := tx.ExecContext(ctx,
-		`UPDATE subagent_jobs SET status=?, started_at=?, attempts=attempts+1 WHERE id=? AND status=?`,
-		SubagentStatusRunning, now, job.ID, SubagentStatusQueued)
-	if err != nil {
-		return nil, err
-	}
-	affected, err := res.RowsAffected()
-	if err != nil {
-		return nil, err
-	}
-	if affected == 0 {
-		return nil, tx.Commit()
-	}
-	job.Status = SubagentStatusRunning
-	job.StartedAt = now
-	job.Attempts++
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-	return &job, nil
-}
-
-func (d *DB) AbortQueuedSubagentJob(ctx context.Context, id, errText string) (SubagentJob, bool, error) {
-	tx, err := d.SQL.BeginTx(ctx, nil)
-	if err != nil {
-		return SubagentJob{}, false, err
-	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
-
-	row := tx.QueryRowContext(ctx,
-		`SELECT id, parent_session_key, child_session_key, channel, reply_to, task, status,
-			result_preview, artifact_id, error_text, requested_at, started_at, finished_at, attempts, metadata_json
-		 FROM subagent_jobs WHERE id=?`,
-		id)
-	job, err := scanSubagentJob(row)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return SubagentJob{}, false, nil
-		}
-		return SubagentJob{}, false, err
-	}
-
-	now := NowMS()
-	res, err := tx.ExecContext(ctx,
-		`UPDATE subagent_jobs
-		 SET status=?, error_text=?, finished_at=?
-		 WHERE id=? AND status=?`,
-		SubagentStatusInterrupted, errText, now, id, SubagentStatusQueued)
-	if err != nil {
-		return SubagentJob{}, false, err
-	}
-	affected, err := res.RowsAffected()
-	if err != nil {
-		return SubagentJob{}, false, err
-	}
-	if err := tx.Commit(); err != nil {
-		return SubagentJob{}, false, err
-	}
-	if affected == 0 {
-		return job, false, nil
-	}
-	job.Status = SubagentStatusInterrupted
-	job.ErrorText = errText
-	job.FinishedAt = now
-	return job, true, nil
-}
-
-func (d *DB) MarkSubagentSucceeded(ctx context.Context, id, preview, artifactID string) error {
-	_, err := d.SQL.ExecContext(ctx,
-		`UPDATE subagent_jobs
-		 SET status=?, result_preview=?, artifact_id=?, error_text='', finished_at=?
-		 WHERE id=?`,
-		SubagentStatusSucceeded, preview, artifactID, NowMS(), id)
-	return err
-}
-
-func (d *DB) MarkSubagentFailed(ctx context.Context, id, errText string) error {
-	_, err := d.SQL.ExecContext(ctx,
-		`UPDATE subagent_jobs
-		 SET status=?, error_text=?, finished_at=?
-		 WHERE id=?`,
-		SubagentStatusFailed, errText, NowMS(), id)
-	return err
-}
-
-func (d *DB) MarkSubagentInterrupted(ctx context.Context, id, errText string) error {
-	_, err := d.SQL.ExecContext(ctx,
-		`UPDATE subagent_jobs
-		 SET status=?, error_text=?, finished_at=?
-		 WHERE id=?`,
-		SubagentStatusInterrupted, errText, NowMS(), id)
-	return err
-}
-
-func (d *DB) MarkRunningSubagentsInterrupted(ctx context.Context, reason string) error {
-	if strings.TrimSpace(reason) == "" {
-		reason = "interrupted during restart"
-	}
-	_, err := d.SQL.ExecContext(ctx,
-		`UPDATE subagent_jobs
-		 SET status=?, error_text=?, finished_at=?
-		 WHERE status=?`,
-		SubagentStatusInterrupted, reason, NowMS(), SubagentStatusRunning)
-	return err
-}
-
-func (d *DB) FinalizeSubagentJob(ctx context.Context, job SubagentJob, status, preview, artifactID, errText, parentSummary string, parentPayload any) error {
-	tx, err := d.SQL.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
-	res, err := tx.ExecContext(ctx,
-		`UPDATE subagent_jobs
-		 SET status=?, result_preview=?, artifact_id=?, error_text=?, finished_at=?
-		 WHERE id=? AND status=?`,
-		status, preview, artifactID, errText, NowMS(), job.ID, SubagentStatusRunning)
-	if err != nil {
-		return err
-	}
-	affected, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if affected == 0 {
-		return sql.ErrNoRows
-	}
-	if strings.TrimSpace(parentSummary) != "" {
-		if _, err := appendMessageTx(ctx, tx, job.ParentSessionKey, "assistant", parentSummary, parentPayload); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
-}
-
-func (d *DB) EnqueueAgentCLIRun(ctx context.Context, run AgentCLIRun) error {
-	return d.EnqueueAgentCLIRunLimited(ctx, run, 0)
-}
-
-func (d *DB) EnqueueAgentCLIRunLimited(ctx context.Context, run AgentCLIRun, maxQueued int) error {
-	if run.RequestedAt == 0 {
-		run.RequestedAt = NowMS()
-	}
-	if strings.TrimSpace(run.Status) == "" {
-		run.Status = AgentCLIStatusQueued
-	}
-	if strings.TrimSpace(run.MetaJSON) == "" {
-		run.MetaJSON = "{}"
-	}
-	tx, err := d.SQL.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
-	if err := ensureSessionTx(ctx, tx, run.ParentSessionKey); err != nil {
-		return err
-	}
-	res, err := tx.ExecContext(ctx,
-		`INSERT INTO agent_cli_runs(
-			id, job_id, parent_session_key, runner_id, task, cwd, model, mode, isolation, status,
-			pid, requested_at, started_at, completed_at, timeout_seconds,
-			exit_code, stdout_preview, stderr_preview, final_text_preview, error_message,
-			attempts, meta_json
-		)
-		SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
-		WHERE ? <= 0 OR (SELECT COUNT(*) FROM agent_cli_runs WHERE status=?) < ?`,
-		run.ID,
-		run.JobID,
-		run.ParentSessionKey,
-		run.RunnerID,
-		run.Task,
-		run.Cwd,
-		run.Model,
-		run.Mode,
-		run.Isolation,
-		run.Status,
-		run.PID,
-		run.RequestedAt,
-		run.StartedAt,
-		run.CompletedAt,
-		run.TimeoutSeconds,
-		run.ExitCode,
-		run.StdoutPreview,
-		run.StderrPreview,
-		run.FinalTextPreview,
-		run.ErrorMessage,
-		run.Attempts,
-		run.MetaJSON,
-		maxQueued,
-		AgentCLIStatusQueued,
-		maxQueued,
-	)
-	if err != nil {
-		return err
-	}
-	affected, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if affected == 0 {
-		return ErrAgentCLIQueueFull
-	}
-	return tx.Commit()
-}
-
-func (d *DB) GetAgentCLIRun(ctx context.Context, idOrJobID string) (AgentCLIRun, bool, error) {
-	row := d.SQL.QueryRowContext(ctx,
-		`SELECT id, job_id, parent_session_key, runner_id, task, cwd, model, mode, isolation, status,
-			pid, requested_at, started_at, completed_at, timeout_seconds,
-			exit_code, stdout_preview, stderr_preview, final_text_preview, error_message, attempts, meta_json
-		 FROM agent_cli_runs WHERE id=? OR job_id=?`,
-		idOrJobID, idOrJobID)
-	run, err := scanAgentCLIRun(row)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return AgentCLIRun{}, false, nil
-		}
-		return AgentCLIRun{}, false, err
-	}
-	return run, true, nil
-}
-
-func (d *DB) ListQueuedAgentCLIRuns(ctx context.Context) ([]AgentCLIRun, error) {
-	return d.listAgentCLIRunsByStatus(ctx, AgentCLIStatusQueued)
-}
-
-func (d *DB) ListRunningAgentCLIRuns(ctx context.Context) ([]AgentCLIRun, error) {
-	return d.listAgentCLIRunsByStatus(ctx, AgentCLIStatusRunning)
-}
-
-func (d *DB) ListAgentCLIRuns(ctx context.Context, filter AgentCLIRunFilter) ([]AgentCLIRun, error) {
-	limit := filter.Limit
-	if limit <= 0 {
-		limit = AgentCLIRunListDefaultLimit
-	}
-	if limit > AgentCLIRunListMaxLimit {
-		limit = AgentCLIRunListMaxLimit
-	}
-
-	query := `SELECT id, job_id, parent_session_key, runner_id, task, cwd, model, mode, isolation, status,
-			pid, requested_at, started_at, completed_at, timeout_seconds,
-			exit_code, stdout_preview, stderr_preview, final_text_preview, error_message, attempts, meta_json
-		 FROM agent_cli_runs`
-	var conditions []string
-	var args []any
-	if status := strings.TrimSpace(filter.Status); status != "" {
-		conditions = append(conditions, "status=?")
-		args = append(args, status)
-	}
-	if session := strings.TrimSpace(filter.ParentSessionKey); session != "" {
-		conditions = append(conditions, "parent_session_key=?")
-		args = append(args, session)
-	}
-	if len(conditions) > 0 {
-		query += " WHERE " + strings.Join(conditions, " AND ")
-	}
-	query += " ORDER BY requested_at DESC, id DESC LIMIT ?"
-	args = append(args, limit)
-
-	rows, err := d.SQL.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []AgentCLIRun
-	for rows.Next() {
-		run, err := scanAgentCLIRun(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, run)
-	}
-	return out, rows.Err()
-}
-
-func (d *DB) listAgentCLIRunsByStatus(ctx context.Context, status string) ([]AgentCLIRun, error) {
-	rows, err := d.SQL.QueryContext(ctx,
-		`SELECT id, job_id, parent_session_key, runner_id, task, cwd, model, mode, isolation, status,
-			pid, requested_at, started_at, completed_at, timeout_seconds,
-			exit_code, stdout_preview, stderr_preview, final_text_preview, error_message, attempts, meta_json
-		 FROM agent_cli_runs WHERE status=? ORDER BY requested_at ASC, id ASC`,
-		status)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []AgentCLIRun
-	for rows.Next() {
-		run, err := scanAgentCLIRun(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, run)
-	}
-	return out, rows.Err()
-}
-
-func (d *DB) ClaimNextAgentCLIRun(ctx context.Context) (*AgentCLIRun, error) {
-	tx, err := d.SQL.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
-
-	row := tx.QueryRowContext(ctx,
-		`SELECT id, job_id, parent_session_key, runner_id, task, cwd, model, mode, isolation, status,
-			pid, requested_at, started_at, completed_at, timeout_seconds,
-			exit_code, stdout_preview, stderr_preview, final_text_preview, error_message, attempts, meta_json
-		 FROM agent_cli_runs WHERE status=? ORDER BY requested_at ASC, id ASC LIMIT 1`,
-		AgentCLIStatusQueued)
-	run, err := scanAgentCLIRun(row)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil
-		}
-		return nil, err
-	}
-	now := NowMS()
-	res, err := tx.ExecContext(ctx,
-		`UPDATE agent_cli_runs SET status=?, started_at=?, attempts=attempts+1 WHERE id=? AND status=?`,
-		AgentCLIStatusRunning, now, run.ID, AgentCLIStatusQueued)
-	if err != nil {
-		return nil, err
-	}
-	affected, err := res.RowsAffected()
-	if err != nil {
-		return nil, err
-	}
-	if affected == 0 {
-		return nil, tx.Commit()
-	}
-	run.Status = AgentCLIStatusRunning
-	run.StartedAt = now
-	run.Attempts++
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-	return &run, nil
-}
-
-func (d *DB) AbortQueuedAgentCLIRun(ctx context.Context, idOrJobID, reason string) (AgentCLIRun, bool, error) {
-	tx, err := d.SQL.BeginTx(ctx, nil)
-	if err != nil {
-		return AgentCLIRun{}, false, err
-	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
-
-	row := tx.QueryRowContext(ctx,
-		`SELECT id, job_id, parent_session_key, runner_id, task, cwd, model, mode, isolation, status,
-			pid, requested_at, started_at, completed_at, timeout_seconds,
-			exit_code, stdout_preview, stderr_preview, final_text_preview, error_message, attempts, meta_json
-		 FROM agent_cli_runs WHERE id=? OR job_id=?`,
-		idOrJobID, idOrJobID)
-	run, err := scanAgentCLIRun(row)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return AgentCLIRun{}, false, nil
-		}
-		return AgentCLIRun{}, false, err
-	}
-
-	now := NowMS()
-	res, err := tx.ExecContext(ctx,
-		`UPDATE agent_cli_runs
-		 SET status=?, error_message=?, completed_at=?
-		 WHERE id=? AND status=?`,
-		AgentCLIStatusAborted, reason, now, run.ID, AgentCLIStatusQueued)
-	if err != nil {
-		return AgentCLIRun{}, false, err
-	}
-	affected, err := res.RowsAffected()
-	if err != nil {
-		return AgentCLIRun{}, false, err
-	}
-	if err := tx.Commit(); err != nil {
-		return AgentCLIRun{}, false, err
-	}
-	if affected == 0 {
-		return run, false, nil
-	}
-	run.Status = AgentCLIStatusAborted
-	run.ErrorMessage = reason
-	run.CompletedAt = now
-	return run, true, nil
-}
-
-func (d *DB) MarkRunningAgentCLIRunsAborted(ctx context.Context, reason string) error {
-	if strings.TrimSpace(reason) == "" {
-		reason = "interrupted during restart"
-	}
-	_, err := d.SQL.ExecContext(ctx,
-		`UPDATE agent_cli_runs
-		 SET status=?, error_message=?, completed_at=?
-		 WHERE status=?`,
-		AgentCLIStatusAborted, reason, NowMS(), AgentCLIStatusRunning)
-	return err
-}
-
-func (d *DB) AppendAgentCLIEvent(ctx context.Context, event AgentCLIEvent) error {
-	_, err := d.SQL.ExecContext(ctx,
-		`INSERT OR IGNORE INTO agent_cli_events(run_id, job_id, seq, ts, type, stream, chunk, payload_json)
-		 VALUES(?,?,?,?,?,?,?,?)`,
-		event.RunID, event.JobID, event.Seq, event.TS, event.Type, event.Stream, event.Chunk, event.PayloadJSON)
-	return err
-}
-
-func (d *DB) ListAgentCLIEvents(ctx context.Context, jobID string, afterSeq int64, limit int) ([]AgentCLIEvent, error) {
-	if limit <= 0 {
-		limit = 100
-	}
-	rows, err := d.SQL.QueryContext(ctx,
-		`SELECT id, run_id, job_id, seq, ts, type, stream, chunk, payload_json
-		 FROM agent_cli_events WHERE job_id=? AND seq > ?
-		 ORDER BY seq ASC LIMIT ?`,
-		jobID, afterSeq, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []AgentCLIEvent
-	for rows.Next() {
-		var e AgentCLIEvent
-		if err := rows.Scan(&e.ID, &e.RunID, &e.JobID, &e.Seq, &e.TS, &e.Type, &e.Stream, &e.Chunk, &e.PayloadJSON); err != nil {
-			return nil, err
-		}
-		out = append(out, e)
-	}
-	return out, rows.Err()
-}
-
-func (d *DB) FinalizeAgentCLIRun(ctx context.Context, runID string, final AgentCLIFinalizeInput) error {
-	_, err := d.SQL.ExecContext(ctx,
-		`UPDATE agent_cli_runs
-		 SET status=?, exit_code=?, stdout_preview=?, stderr_preview=?, final_text_preview=?,
-		     error_message=?, completed_at=?
-		 WHERE id=? AND status=?`,
-		final.Status, final.ExitCode, final.StdoutPreview, final.StderrPreview, final.FinalTextPreview,
-		final.ErrorMessage, final.CompletedAt,
-		runID, AgentCLIStatusRunning)
-	return err
-}
-
-func scanAgentCLIRun(scanner interface{ Scan(dest ...any) error }) (AgentCLIRun, error) {
-	var run AgentCLIRun
-	err := scanner.Scan(
-		&run.ID,
-		&run.JobID,
-		&run.ParentSessionKey,
-		&run.RunnerID,
-		&run.Task,
-		&run.Cwd,
-		&run.Model,
-		&run.Mode,
-		&run.Isolation,
-		&run.Status,
-		&run.PID,
-		&run.RequestedAt,
-		&run.StartedAt,
-		&run.CompletedAt,
-		&run.TimeoutSeconds,
-		&run.ExitCode,
-		&run.StdoutPreview,
-		&run.StderrPreview,
-		&run.FinalTextPreview,
-		&run.ErrorMessage,
-		&run.Attempts,
-		&run.MetaJSON,
-	)
-	return run, err
-}
-
-func scanSubagentJob(scanner interface{ Scan(dest ...any) error }) (SubagentJob, error) {
-	var job SubagentJob
-	err := scanner.Scan(
-		&job.ID,
-		&job.ParentSessionKey,
-		&job.ChildSessionKey,
-		&job.Channel,
-		&job.ReplyTo,
-		&job.Task,
-		&job.Status,
-		&job.ResultPreview,
-		&job.ArtifactID,
-		&job.ErrorText,
-		&job.RequestedAt,
-		&job.StartedAt,
-		&job.FinishedAt,
-		&job.Attempts,
-		&job.MetadataJSON,
-	)
-	return job, err
-}
-
 func ensureSessionTx(ctx context.Context, tx *sql.Tx, key string) error {
 	now := NowMS()
 	_, err := tx.ExecContext(ctx,
@@ -1874,17 +1068,10 @@ func (d *DB) LinkSession(ctx context.Context, sessionKey, scopeKey string, meta 
 	if strings.TrimSpace(scopeKey) == "" {
 		scopeKey = sessionKey
 	}
-	mb, err := json.Marshal(meta)
-	if err != nil {
-		return fmt.Errorf("marshal metadata: %w", err)
-	}
-	if mb == nil {
-		mb = []byte("{}")
-	}
-	_, err = d.SQL.ExecContext(ctx,
+	_, err := d.SQL.ExecContext(ctx,
 		`INSERT INTO session_links(session_key, scope_key, linked_at, metadata_json) VALUES(?,?,?,?)
          ON CONFLICT(session_key) DO UPDATE SET scope_key=excluded.scope_key, linked_at=excluded.linked_at, metadata_json=excluded.metadata_json`,
-		sessionKey, scopeKey, NowMS(), string(mb))
+		sessionKey, scopeKey, NowMS(), mustJSONMap(meta))
 	return err
 }
 
@@ -1927,11 +1114,13 @@ func (d *DB) ListScopeSessions(ctx context.Context, scopeKey string) ([]string, 
 func (d *DB) GetLastMessagesScoped(ctx context.Context, sessionKey string, limit int) ([]Message, error) {
 	scopeKey, err := d.ResolveScopeKey(ctx, sessionKey)
 	if err != nil {
-		return d.GetLastMessages(ctx, sessionKey, limit)
+		return nil, err
 	}
-	// get all sessions in scope (including the session itself)
 	linked, err := d.ListScopeSessions(ctx, scopeKey)
-	if err != nil || len(linked) == 0 {
+	if err != nil {
+		return nil, err
+	}
+	if len(linked) == 0 {
 		return d.GetLastMessages(ctx, sessionKey, limit)
 	}
 	// build IN clause; always include the physical session key itself

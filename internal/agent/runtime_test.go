@@ -385,6 +385,19 @@ func TestRuntime_Handle_NameArgumentsToolCallMarkupExecutesTool(t *testing.T) {
 	}
 }
 
+func TestParseToolMarkupCalls_NameArgumentsPlainTextPreservesValue(t *testing.T) {
+	calls := parseToolMarkupCalls(`<tool_call><name>search</name><arguments>weather in Austin</arguments></tool_call>`, "test")
+	if len(calls) != 1 {
+		t.Fatalf("expected one call, got %d", len(calls))
+	}
+	if calls[0].Function.Name != "search" {
+		t.Fatalf("expected search call, got %q", calls[0].Function.Name)
+	}
+	if got := calls[0].Function.Arguments; got != `{"value":"weather in Austin"}` {
+		t.Fatalf("expected plain text value fallback, got %s", got)
+	}
+}
+
 func TestRuntime_Handle_UnavailableLegacyToolMarkupRetriesWithoutToolError(t *testing.T) {
 	d := openRuntimeTestDB(t)
 	callCount := 0
@@ -2561,8 +2574,9 @@ func TestRuntime_IncrementQuota_AsksApprovalAndAcceptsApprovedToken(t *testing.T
 		t.Fatalf("first increment: %v", err)
 	}
 	err := rt.incrementQuota(ctx, "quota-approval-scope", "echo_tool")
-	if err == nil || !strings.Contains(err.Error(), "Approve request") {
-		t.Fatalf("expected approval request, got %v", err)
+	var approvalErr *tools.ApprovalRequiredError
+	if !errors.As(err, &approvalErr) {
+		t.Fatalf("expected approval required error, got %v", err)
 	}
 	pending, err := d.ListApprovalRequestsFiltered(context.Background(), approval.StatusPending, string(approval.SubjectToolQuota), 1)
 	if err != nil {
@@ -2570,6 +2584,9 @@ func TestRuntime_IncrementQuota_AsksApprovalAndAcceptsApprovedToken(t *testing.T
 	}
 	if len(pending) != 1 {
 		t.Fatalf("expected one pending quota approval, got %#v", pending)
+	}
+	if approvalErr.RequestID != pending[0].ID {
+		t.Fatalf("expected approval request id %d, got %d", pending[0].ID, approvalErr.RequestID)
 	}
 	issued, err := broker.ApproveRequest(context.Background(), pending[0].ID, "cli:test", false, "continue")
 	if err != nil {

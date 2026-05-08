@@ -5,7 +5,7 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/hmac"
+	"crypto/hkdf"
 	crand "crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -351,6 +351,24 @@ func (t *RunSkillScript) runPreparedSkillRun(ctx context.Context, prepared prepa
 	runCtx, cancel := context.WithTimeout(ctx, prepared.timeout)
 	defer cancel()
 
+	var heartbeatStop chan struct{}
+	if t.DB != nil && strings.TrimSpace(prepared.plan.ID) != "" {
+		heartbeatStop = make(chan struct{})
+		defer close(heartbeatStop)
+		go func() {
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					_ = t.DB.TouchSkillRunPlan(context.Background(), prepared.plan.ID)
+				case <-heartbeatStop:
+					return
+				}
+			}
+		}()
+	}
+
 	command, err := commandWithSandbox(runCtx, t.Sandbox, prepared.skill.Dir, prepared.command)
 	if err != nil {
 		result := encodeSkillRunResult(db.SkillRunStatusPreflightFailed, false, prepared.plan, err.Error(), "", prepared.plan.ApprovalRequestID, nil)
@@ -598,7 +616,11 @@ func (t *RunSkillScript) skillRunSensitiveDataKey() []byte {
 		return append([]byte{}, t.SensitiveDataKey...)
 	}
 	if t.ApprovalBroker != nil && len(t.ApprovalBroker.SignKey) > 0 {
-		return append([]byte{}, t.ApprovalBroker.SignKey...)
+		encKey, err := hkdf.Key(sha256.New, t.ApprovalBroker.SignKey, nil, "skill-run-encryption", 32)
+		if err != nil {
+			return nil
+		}
+		return encKey
 	}
 	return nil
 }
@@ -633,9 +655,11 @@ func decryptSkillRunBlob(master, ciphertext, nonce []byte) ([]byte, error) {
 }
 
 func deriveSkillRunKey(master []byte) []byte {
-	h := hmac.New(sha256.New, master)
-	_, _ = h.Write([]byte("skill-run-stdin"))
-	return h.Sum(nil)[:32]
+	key, err := hkdf.Key(sha256.New, master, nil, "skill-run-stdin", 32)
+	if err != nil {
+		return nil
+	}
+	return key
 }
 
 func hashSkillRunStdin(stdinText string) string {

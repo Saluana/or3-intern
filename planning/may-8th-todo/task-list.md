@@ -4,34 +4,34 @@ Tasks ordered by priority. Check off as completed.
 
 ## P0 — Data Loss / Crashes / Deadlocks
 
-- [ ] **cron: Fix Stop() deadlock** — release mutex before waiting on callbacks (`cron.go:198-211`, issue 4.3)
-- [ ] **cron: Fix JSON corruption on save** — check `json.MarshalIndent` error, use atomic write via temp file + rename (`cron.go:153-159`, issues 4.1, 4.2)
-- [ ] **tools: Add mutex to Registry** — prevent concurrent map access panics (`registry.go:11-52`, issue 3.2)
-- [ ] **tools: Fix nil tool returns "Safe" capability** — fail closed instead of silently bypassing guards (`tools.go:45-71`, issue 3.1)
+- [x] **cron: Fix Stop() deadlock** — release mutex before waiting on callbacks (`cron.go:198-211`, issue 4.3)
+- [x] **cron: Fix JSON corruption on save** — check `json.MarshalIndent` error, use atomic write via temp file + rename (`cron.go:153-159`, issues 4.1, 4.2)
+- [x] **tools: Add mutex to Registry** — prevent concurrent map access panics (`registry.go:11-52`, issue 3.2)
+- [x] **tools: Fix nil tool returns "Safe" capability** — fail closed instead of silently bypassing guards (`tools.go:45-71`, issue 3.1)
 
 ## P1 — Silent Failure / Security
 
-- [ ] **bus: Log dropped events** — add counter/metric + warn log on publish overflow (`bus.go:52-60`, issue 1.4)
-- [ ] **tools: Fix sandbox symlink TOCTOU** — compare `os.SameFile` after open before returning fd (`files.go:102-117, 158-171`, issues 3.14, 3.15)
-- [ ] **tools: Fix skill encryption key reuse** — separate signing/encryption keys, use HKDF with distinct contexts (`skill_run.go:596-639`, issue 3.21)
-- [ ] **agent + tools: Fix all `io.ReadAll` / `json.Marshal` / `_` error discards** — check every `_` error return (`web.go:176,447`, `cron.go:153`, `html_converter.go:156`, `prompt.go:438`, issues 3.8, 3.12, 4.1, 2.16)
-- [ ] **agent: Fix SQL injection surface in `countMemoryRows`** — validate `extraWhere` against whitelist (`runtime_status.go:330-368`, issue 2.6)
-- [ ] **agent + tools: Fix silent event drops in Publish/JobRegistry** — log, retry, or buffer (`job_registry.go:154-159`, `bus.go:52-60`, issues 2.13, 1.4)
-- [ ] **agent: Fix boundedContext escaping parent cancellation** — remove `context.WithoutCancel`, use proper lifecycle (`subagents.go:497-507`, issue 2.23)
-- [ ] **agent: Fix validateStructuredValue no recursion limit** — add `maxDepth`, prevent stack overflow DoS (`structured_autonomy.go:96-165`, issue 2.22)
+- [x] **bus: Log dropped events** — add counter/metric + warn log on publish overflow (`bus.go:52-60`, issue 1.4)
+- [x] **tools: Fix sandbox symlink TOCTOU** — compare `os.SameFile` after open before returning fd (`files.go:102-117, 158-171`, issues 3.14, 3.15)
+- [x] **tools: Fix skill encryption key reuse** — separate signing/encryption keys, use HKDF with distinct contexts (`skill_run.go:596-639`, issue 3.21)
+- [x] **agent + tools: Fix all `io.ReadAll` / `json.Marshal` / `_` error discards** — check every `_` error return (`web.go:176,447`, `cron.go:153`, `html_converter.go:156`, `prompt.go:438`, issues 3.8, 3.12, 4.1, 2.16)
+- [x] **agent: Fix SQL injection surface in `countMemoryRows`** — validate `extraWhere` against whitelist (`runtime_status.go:330-368`, issue 2.6)
+- [x] **agent + tools: Fix silent event drops in Publish/JobRegistry** — log, retry, or buffer (`job_registry.go:154-159`, `bus.go:52-60`, issues 2.13, 1.4)
+- [x] **agent: Fix boundedContext escaping parent cancellation** — remove `context.WithoutCancel`, use proper lifecycle (`subagents.go:497-507`, issue 2.23)
+- [x] **agent: Fix validateStructuredValue no recursion limit** — add `maxDepth`, prevent stack overflow DoS (`structured_autonomy.go:96-165`, issue 2.22)
 
 ## P2 — Data Integrity / State Bugs
 
-- [ ] **cron: Fix runJobByID TOCTOU race** — keep job in memory, don't reload file mid-execution (`cron.go:392-454`, issue 4.4)
-- [ ] **cron: Fix timezone ignored on cron registration** — pass `cron.WithLocation` (`cron.go:520-532`, issue 4.6)
-- [ ] **cron: Fix sub-second intervals silently changed to 60s** — reject `EveryMS < 1000` in validation (`cron.go:504-509`, issue 4.7)
-- [ ] **cron: Fix KindAt check-then-act race** — compute `time.Until` once (`cron.go:493-503`, issue 4.8)
-- [ ] **cron: Fix DeleteAfterRun inline rebuild instead of delegating to Remove** — reuse `Remove()`, prevent one-shot resurrection (`cron.go:436-445`, issue 4.38)
-- [ ] **agent: Fix `executeConversation` mutating caller's slice** — copy at function top (`runtime_execution.go:167,227`, issue 2.9)
-- [ ] **agent: Fix `cloneEventData` shallow copy** — deep clone maps/slices (`job_registry.go:431-440`, issue 2.12)
-- [ ] **agent: Fix test data races** — use `atomic.Int32` for handler call counters (`runtime_test.go`, issue 2.24)
-- [ ] **cron: Fix Add() blindly appending duplicate IDs** — check before append (`cron.go:248-278`, issue 4.19)
-- [ ] **tools: Fix skill-run plan permanently stuck "Running"** — add heartbeat or lease expiry (`skill_run.go:339-406`, issue 3.23)
+- [x] **cron: Fix runJobByID TOCTOU race** — keep job in memory, don't reload file mid-execution (`cron.go:392-454`, issue 4.4)
+- [x] **cron: Fix timezone ignored on cron registration** — pass `cron.WithLocation` (`cron.go:520-532`, issue 4.6)
+- [x] **cron: Fix sub-second intervals silently changed to 60s** — reject `EveryMS < 1000` in validation (`cron.go:504-509`, issue 4.7)
+- [x] **cron: Fix KindAt check-then-act race** — compute `time.Until` once (`cron.go:493-503`, issue 4.8)
+- [x] **cron: Fix DeleteAfterRun inline rebuild instead of delegating to Remove** — reuse `Remove()`, prevent one-shot resurrection (`cron.go:436-445`, issue 4.38)
+- [x] **agent: Fix `executeConversation` mutating caller's slice** — copy at function top (`runtime_execution.go:167,227`, issue 2.9)
+- [x] **agent: Fix `cloneEventData` shallow copy** — deep clone maps/slices (`job_registry.go:431-440`, issue 2.12)
+- [x] **agent: Fix test data races** — use `atomic.Int32` for handler call counters (`runtime_test.go`, issue 2.24)
+- [x] **cron: Fix Add() blindly appending duplicate IDs** — check before append (`cron.go:248-278`, issue 4.19)
+- [x] **tools: Fix skill-run plan permanently stuck "Running"** — add heartbeat or lease expiry (`skill_run.go:339-406`, issue 3.23)
 
 ## P3 — Bugged Behavior
 

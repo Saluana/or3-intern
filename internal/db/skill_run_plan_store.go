@@ -295,6 +295,11 @@ func (d *DB) ClearSkillRunPlanStdin(ctx context.Context, id string, updatedAt in
 	return err
 }
 
+func (d *DB) TouchSkillRunPlan(ctx context.Context, id string) error {
+	_, err := d.SQL.ExecContext(ctx, `UPDATE skill_run_plans SET updated_at=? WHERE id=? AND status=?`, NowMS(), strings.TrimSpace(id), SkillRunStatusRunning)
+	return err
+}
+
 func scanSkillRunPlan(scanner interface{ Scan(dest ...any) error }) (SkillRunPlanRecord, error) {
 	var rec SkillRunPlanRecord
 	var approvalRequestID sql.NullInt64

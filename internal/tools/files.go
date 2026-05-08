@@ -109,7 +109,11 @@ func (t *FileTool) openSafeRead(path string) (*os.File, os.FileInfo, error) {
 		f.Close()
 		return nil, nil, err
 	}
-	if err := t.validateOpenedPath(path, info); err != nil {
+	if err := validateOpenedPathUnchanged(path, info); err != nil {
+		f.Close()
+		return nil, nil, err
+	}
+	if err := t.validatePathInRoot(path); err != nil {
 		f.Close()
 		return nil, nil, err
 	}
@@ -126,7 +130,11 @@ func (t *FileTool) openSafeWrite(path string, perm os.FileMode) (*os.File, error
 		f.Close()
 		return nil, err
 	}
-	if err := t.validateOpenedWritePath(path, info); err != nil {
+	if err := validateOpenedPathUnchanged(path, info); err != nil {
+		f.Close()
+		return nil, err
+	}
+	if err := t.validatePathInWriteRoot(path); err != nil {
 		f.Close()
 		return nil, err
 	}

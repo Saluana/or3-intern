@@ -286,15 +286,15 @@ func (m *SubagentManager) executeJob(job db.SubagentJob) {
 		reason := strings.TrimSpace(err.Error())
 		switch {
 		case errors.Is(err, context.Canceled), errors.Is(runCtx.Err(), context.Canceled):
-			m.finalizeJob(runCtx, job, db.SubagentStatusInterrupted, "", "", reasonOrDefault(reason, "subagent interrupted"), true)
+			m.finalizeJob(m.ctx, job, db.SubagentStatusInterrupted, "", "", reasonOrDefault(reason, "subagent interrupted"), true)
 		case errors.Is(err, context.DeadlineExceeded), errors.Is(runCtx.Err(), context.DeadlineExceeded):
-			m.finalizeJob(runCtx, job, db.SubagentStatusFailed, "", "", reasonOrDefault(reason, "subagent timed out"), true)
+			m.finalizeJob(m.ctx, job, db.SubagentStatusFailed, "", "", reasonOrDefault(reason, "subagent timed out"), true)
 		default:
-			m.finalizeJob(runCtx, job, db.SubagentStatusFailed, "", "", reasonOrDefault(reason, "subagent failed"), true)
+			m.finalizeJob(m.ctx, job, db.SubagentStatusFailed, "", "", reasonOrDefault(reason, "subagent failed"), true)
 		}
 		return
 	}
-	m.finalizeJob(runCtx, job, db.SubagentStatusSucceeded, result.Preview, result.ArtifactID, "", true)
+	m.finalizeJob(m.ctx, job, db.SubagentStatusSucceeded, result.Preview, result.ArtifactID, "", true)
 }
 
 func (m *SubagentManager) runJob(ctx context.Context, job db.SubagentJob) (BackgroundRunResult, error) {
@@ -337,7 +337,8 @@ func (m *SubagentManager) backgroundTools() *tools.Registry {
 }
 
 func (m *SubagentManager) finalizeJob(baseCtx context.Context, job db.SubagentJob, status string, preview string, artifactID string, errText string, deliver bool) {
-	finalizeCtx, cancel := boundedContext(baseCtx, subagentFinalizeTimeout)
+	_ = baseCtx
+	finalizeCtx, cancel := context.WithTimeout(context.Background(), subagentFinalizeTimeout)
 	defer cancel()
 	success := status == db.SubagentStatusSucceeded
 	text := formatParentSubagentSummary(job, success, preview, artifactID, errText)
@@ -497,8 +498,6 @@ func (m *SubagentManager) signalN(n int) {
 func boundedContext(base context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
 	if base == nil {
 		base = context.Background()
-	} else {
-		base = context.WithoutCancel(base)
 	}
 	if timeout <= 0 {
 		return context.WithCancel(base)

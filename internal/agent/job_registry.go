@@ -1,10 +1,13 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -155,6 +158,7 @@ func (r *JobRegistry) Publish(id string, eventType string, data map[string]any) 
 		select {
 		case ch <- event:
 		default:
+			log.Printf("job_registry: event dropped for job %s (type=%s, subscriber full)", id, eventType)
 		}
 	}
 	return true
@@ -432,9 +436,22 @@ func cloneEventData(in map[string]any) map[string]any {
 	if len(in) == 0 {
 		return map[string]any{}
 	}
-	out := make(map[string]any, len(in))
-	for key, value := range in {
-		out[key] = value
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(in); err != nil {
+		return map[string]any{}
+	}
+	var out map[string]any
+	dec := json.NewDecoder(&buf)
+	dec.UseNumber()
+	if err := dec.Decode(&out); err != nil {
+		return map[string]any{}
+	}
+	for k, v := range out {
+		if num, ok := v.(json.Number); ok {
+			if i, err := num.Int64(); err == nil {
+				out[k] = i
+			}
+		}
 	}
 	return out
 }

@@ -18,6 +18,7 @@ import (
 )
 
 func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventType, sessionKey string, messages []providers.ChatMessage, reg *tools.Registry, channel string, replyTo string, replyMeta map[string]any) (string, bool, error) {
+	messages = append([]providers.ChatMessage(nil), messages...)
 	if reg == nil {
 		reg = tools.NewRegistry()
 	}

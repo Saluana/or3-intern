@@ -94,6 +94,13 @@ func validateStructuredToolParams(tool tools.Tool, params map[string]any) error 
 }
 
 func validateStructuredValue(schema map[string]any, value any, path string) error {
+	return validateStructuredValueDepth(schema, value, path, 0, 32)
+}
+
+func validateStructuredValueDepth(schema map[string]any, value any, path string, depth, maxDepth int) error {
+	if depth > maxDepth {
+		return fmt.Errorf("%s exceeds maximum nesting depth (%d)", path, maxDepth)
+	}
 	typeName := strings.TrimSpace(fmt.Sprint(schema["type"]))
 	switch typeName {
 	case "", "object":
@@ -119,7 +126,7 @@ func validateStructuredValue(schema map[string]any, value any, path string) erro
 			if !ok {
 				continue
 			}
-			if err := validateStructuredValue(childSchema, raw, path+"."+key); err != nil {
+			if err := validateStructuredValueDepth(childSchema, raw, path+"."+key, depth+1, maxDepth); err != nil {
 				return err
 			}
 		}
@@ -134,7 +141,7 @@ func validateStructuredValue(schema map[string]any, value any, path string) erro
 			if len(itemSchema) == 0 {
 				continue
 			}
-			if err := validateStructuredValue(itemSchema, item, fmt.Sprintf("%s[%d]", path, index)); err != nil {
+			if err := validateStructuredValueDepth(itemSchema, item, fmt.Sprintf("%s[%d]", path, index), depth+1, maxDepth); err != nil {
 				return err
 			}
 		}

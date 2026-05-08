@@ -50,7 +50,7 @@ func ToolCapability(t Tool, params map[string]any) CapabilityLevel {
 // using request context when a tool has source-specific capability behavior.
 func ToolCapabilityForContext(ctx context.Context, t Tool, params map[string]any) CapabilityLevel {
 	if t == nil {
-		return CapabilitySafe
+		return CapabilityPrivileged
 	}
 	if dynamic, ok := t.(CapabilityForContextParamsReporter); ok {
 		if level := dynamic.CapabilityForContextParams(ctx, params); level != "" {

@@ -367,8 +367,8 @@ func TestArmJob_KindEvery_ZeroInterval(t *testing.T) {
 	mustStartService(t, svc)
 	defer svc.Stop()
 
-	// Zero EveryMS should default to 60s
-	mustAddJob(t, svc, CronJob{
+	// Zero EveryMS must be rejected (must be at least 1000)
+	err := svc.Add(CronJob{
 		ID:      "every-zero",
 		Enabled: true,
 		Schedule: CronSchedule{
@@ -376,13 +376,8 @@ func TestArmJob_KindEvery_ZeroInterval(t *testing.T) {
 			EveryMS: 0,
 		},
 	})
-
-	jobs, _ := svc.List()
-	if len(jobs) != 1 {
-		t.Errorf("expected 1 job, got %d", len(jobs))
-	}
-	if _, ok := svc.entries["every-zero"]; !ok {
-		t.Fatal("expected KindEvery job to be armed in scheduler")
+	if err == nil {
+		t.Fatal("expected error for zero EveryMS")
 	}
 }
 
@@ -444,24 +439,6 @@ func TestArmJob_DisabledJob(t *testing.T) {
 	jobs, _ := svc.List()
 	if len(jobs) != 1 {
 		t.Errorf("expected 1 job, got %d", len(jobs))
-	}
-}
-
-func TestFilepathDir(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"/home/user/config.json", "/home/user"},
-		{"config.json", "."},
-		{"/config.json", "."},
-		{"a/b/c/d.json", "a/b/c"},
-	}
-	for _, tc := range tests {
-		got := filepathDir(tc.input)
-		if got != tc.want {
-			t.Errorf("filepathDir(%q) = %q, want %q", tc.input, got, tc.want)
-		}
 	}
 }
 

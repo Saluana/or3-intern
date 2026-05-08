@@ -173,7 +173,10 @@ func (t *WebFetch) Execute(ctx context.Context, params map[string]any) (string, 
 	if !raw && t.shouldAutoConvertHTML(info) {
 		readLimit = int64(t.htmlSourceLimit()) + 1
 	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, readLimit))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, readLimit))
+	if err != nil {
+		return "", fmt.Errorf("read web fetch body: %w", err)
+	}
 	sourceTruncated := int64(len(body)) >= readLimit
 	if sourceTruncated {
 		body = body[:readLimit-1]
@@ -444,7 +447,10 @@ func (t *WebSearch) Execute(ctx context.Context, params map[string]any) (string,
 	if maxRead <= 0 {
 		maxRead = defaultWebSearchReadMaxBytes
 	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, int64(maxRead)))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxRead)))
+	if err != nil {
+		return "", fmt.Errorf("read search body: %w", err)
+	}
 	if resp.StatusCode >= 300 {
 		return "", fmt.Errorf("search error %s: %s", resp.Status, string(body))
 	}

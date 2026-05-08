@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -151,22 +152,18 @@ func (s *Service) load() (Store, error) {
 }
 
 func (s *Service) save(st Store) error {
-	if err := os.MkdirAll(filepathDir(s.path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
 		return err
 	}
-	b, _ := json.MarshalIndent(st, "", "  ")
-	return os.WriteFile(s.path, b, 0o644)
-}
-
-func filepathDir(p string) string {
-	i := len(p) - 1
-	for i >= 0 && p[i] != '/' && p[i] != '\\' {
-		i--
+	b, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		return err
 	}
-	if i <= 0 {
-		return "."
+	tmpPath := s.path + ".tmp"
+	if err := os.WriteFile(tmpPath, b, 0o644); err != nil {
+		return err
 	}
-	return p[:i]
+	return os.Rename(tmpPath, s.path)
 }
 
 // Start loads persisted jobs and arms the scheduler.
@@ -197,16 +194,19 @@ func (s *Service) Start() error {
 // Stop halts the scheduler and waits for the cron runner to stop.
 func (s *Service) Stop() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.c != nil {
-		ctx := s.c.Stop()
+	c := s.c
+	timers := s.timers
+	s.c = nil
+	s.entries = map[string]cron.EntryID{}
+	s.timers = map[string]*time.Timer{}
+	s.mu.Unlock()
+
+	if c != nil {
+		ctx := c.Stop()
 		<-ctx.Done()
-		s.c = nil
-		s.entries = map[string]cron.EntryID{}
 	}
-	for id, timer := range s.timers {
+	for _, timer := range timers {
 		timer.Stop()
-		delete(s.timers, id)
 	}
 }
 
@@ -267,6 +267,11 @@ func (s *Service) Add(job CronJob) error {
 	}
 	if job.Name == "" {
 		job.Name = job.ID
+	}
+	for _, j := range st.Jobs {
+		if j.ID == job.ID {
+			return fmt.Errorf("job with id %s already exists", job.ID)
+		}
 	}
 	job = s.prepareJobLocked(job)
 	st.Jobs = append(st.Jobs, job)
@@ -361,6 +366,10 @@ func (s *Service) SetEnabled(id string, enabled bool) (bool, CronJob, error) {
 func (s *Service) Remove(id string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.removeLocked(id)
+}
+
+func (s *Service) removeLocked(id string) (bool, error) {
 	st, err := s.load()
 	if err != nil {
 		return false, err
@@ -375,11 +384,14 @@ func (s *Service) Remove(id string) (bool, error) {
 		}
 		n = append(n, j)
 	}
+	if !found {
+		return false, nil
+	}
 	st.Jobs = n
 	if err := s.save(st); err != nil {
 		return false, err
 	}
-	return found, nil
+	return true, nil
 }
 
 // RunNow runs the job with id immediately.
@@ -392,65 +404,64 @@ func (s *Service) RunNow(ctx context.Context, id string, force bool) (bool, erro
 func (s *Service) runJobByID(ctx context.Context, id string, force bool) (bool, error) {
 	s.mu.Lock()
 	st, err := s.load()
-	s.mu.Unlock()
 	if err != nil {
+		s.mu.Unlock()
 		return false, err
 	}
-	for _, j := range st.Jobs {
-		if j.ID == id {
-			if !force && !j.Enabled {
-				return false, nil
-			}
-			if s.runner == nil {
-				return true, fmt.Errorf("cron runner not configured")
-			}
-			result, err := s.runner(ctx, j)
-			s.mu.Lock()
-			defer s.mu.Unlock()
-			st2, loadErr := s.load()
-			if loadErr != nil {
-				return true, err
-			}
-			shouldDelete := false
-			for i := range st2.Jobs {
-				if st2.Jobs[i].ID == id {
-					now := time.Now().UnixMilli()
-					st2.Jobs[i].State.LastRunAtMS = &now
-					if err != nil {
-						st2.Jobs[i].State.LastStatus = "error"
-						st2.Jobs[i].State.LastError = err.Error()
-					} else {
-						st2.Jobs[i].State.LastStatus = "ok"
-						st2.Jobs[i].State.LastError = ""
-					}
-					st2.Jobs[i].State.LastEnqueuedJobID = result.EnqueuedJobID
-					st2.Jobs[i].State.LastEnqueuedRunID = result.EnqueuedRunID
-					if st2.Jobs[i].DeleteAfterRun {
-						shouldDelete = true
-						break
-					}
-					st2.Jobs[i] = s.prepareJobLocked(st2.Jobs[i])
-					break
-				}
-			}
-			if shouldDelete {
-				next := make([]CronJob, 0, len(st2.Jobs))
-				for _, jj := range st2.Jobs {
-					if jj.ID == id {
-						continue
-					}
-					next = append(next, jj)
-				}
-				st2.Jobs = next
-				s.unarmJobLocked(id)
-			}
-			if saveErr := s.save(st2); saveErr != nil {
-				log.Printf("cron save failed: %v", saveErr)
-			}
-			return true, err
+	var jobToRun *CronJob
+	for i := range st.Jobs {
+		if st.Jobs[i].ID == id {
+			jobToRun = &st.Jobs[i]
+			break
 		}
 	}
-	return false, nil
+	if jobToRun == nil {
+		s.mu.Unlock()
+		return false, nil
+	}
+	if !force && !jobToRun.Enabled {
+		s.mu.Unlock()
+		return false, nil
+	}
+	if s.runner == nil {
+		s.mu.Unlock()
+		return true, fmt.Errorf("cron runner not configured")
+	}
+	job := *jobToRun
+	s.mu.Unlock()
+
+	result, err := s.runner(ctx, job)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UnixMilli()
+	jobToRun.State.LastRunAtMS = &now
+	if err != nil {
+		jobToRun.State.LastStatus = "error"
+		jobToRun.State.LastError = err.Error()
+	} else {
+		jobToRun.State.LastStatus = "ok"
+		jobToRun.State.LastError = ""
+	}
+	jobToRun.State.LastEnqueuedJobID = result.EnqueuedJobID
+	jobToRun.State.LastEnqueuedRunID = result.EnqueuedRunID
+	if jobToRun.DeleteAfterRun {
+		s.unarmJobLocked(id)
+		n := make([]CronJob, 0, len(st.Jobs))
+		for _, jj := range st.Jobs {
+			if jj.ID == id {
+				continue
+			}
+			n = append(n, jj)
+		}
+		st.Jobs = n
+	} else {
+		*jobToRun = s.prepareJobLocked(*jobToRun)
+	}
+	if saveErr := s.save(st); saveErr != nil {
+		log.Printf("cron save failed: %v", saveErr)
+	}
+	return true, err
 }
 
 func (s *Service) unarmJobLocked(id string) {
@@ -493,41 +504,51 @@ func (s *Service) armJobLocked(job CronJob) {
 	switch job.Schedule.Kind {
 	case KindAt:
 		at := time.UnixMilli(job.Schedule.AtMS)
-		if time.Now().After(at) {
+		dur := time.Until(at)
+		if dur <= 0 {
 			return
 		}
-		s.timers[job.ID] = time.AfterFunc(time.Until(at), func() {
-			if _, err := s.runJobByID(context.Background(), job.ID, false); err != nil {
-				log.Printf("cron runner error: id=%s err=%v", job.ID, err)
+		id := job.ID
+		s.timers[id] = time.AfterFunc(dur, func() {
+			if _, err := s.runJobByID(context.Background(), id, false); err != nil {
+				log.Printf("cron runner error: id=%s err=%v", id, err)
 			}
 		})
 	case KindEvery:
 		sec := int64(job.Schedule.EveryMS / 1000)
 		if sec <= 0 {
-			sec = 60
+			log.Printf("cron schedule invalid: id=%s every_ms=%d must be >= 1000", job.ID, job.Schedule.EveryMS)
+			return
 		}
 		spec := "@every " + (time.Duration(sec) * time.Second).String()
+		id := job.ID
 		eid, err := s.c.AddFunc(spec, func() {
-			if _, e := s.runJobByID(context.Background(), job.ID, false); e != nil {
-				log.Printf("cron runner error: id=%s err=%v", job.ID, e)
+			if _, e := s.runJobByID(context.Background(), id, false); e != nil {
+				log.Printf("cron runner error: id=%s err=%v", id, e)
 			}
 		})
 		if err == nil {
-			s.entries[job.ID] = eid
+			s.entries[id] = eid
 		} else {
-			log.Printf("cron schedule add failed: id=%s spec=%s err=%v", job.ID, spec, err)
+			log.Printf("cron schedule add failed: id=%s spec=%s err=%v", id, spec, err)
 		}
 	case KindCron:
 		spec := job.Schedule.Expr
+		id := job.ID
+		if tz := strings.TrimSpace(job.Schedule.TZ); tz != "" {
+			if _, err := time.LoadLocation(tz); err == nil {
+				spec = "CRON_TZ=" + tz + " " + spec
+			}
+		}
 		eid, err := s.c.AddFunc(spec, func() {
-			if _, e := s.runJobByID(context.Background(), job.ID, false); e != nil {
-				log.Printf("cron runner error: id=%s err=%v", job.ID, e)
+			if _, e := s.runJobByID(context.Background(), id, false); e != nil {
+				log.Printf("cron runner error: id=%s err=%v", id, e)
 			}
 		})
 		if err == nil {
-			s.entries[job.ID] = eid
+			s.entries[id] = eid
 		} else {
-			log.Printf("cron schedule add failed: id=%s spec=%s err=%v", job.ID, spec, err)
+			log.Printf("cron schedule add failed: id=%s spec=%s err=%v", id, spec, err)
 		}
 	}
 }
@@ -599,8 +620,8 @@ func ValidateSchedule(schedule CronSchedule) error {
 			return fmt.Errorf("at_ms is required for at schedules")
 		}
 	case KindEvery:
-		if schedule.EveryMS < 0 {
-			return fmt.Errorf("every_ms must not be negative")
+		if schedule.EveryMS < 1000 {
+			return fmt.Errorf("every_ms must be at least 1000 (1 second)")
 		}
 	case KindCron:
 		if strings.TrimSpace(schedule.Expr) == "" {

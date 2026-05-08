@@ -358,6 +358,17 @@ func countMemoryRows(ctx context.Context, d *db.DB, table, column string, values
 	}
 	query := `SELECT COUNT(*) FROM ` + table + ` WHERE ` + column + ` IN (` + strings.Join(placeholders, ",") + `)`
 	if strings.TrimSpace(extraWhere) != "" {
+		allowedExtra := map[string]struct{}{
+			"deleted = 0":                 {},
+			"expires_at > ?":              {},
+			"scope = 'global'":            {},
+			"status='active'":             {},
+			"status = 'active'":           {},
+			"status IN ('active','idle')": {},
+		}
+		if _, ok := allowedExtra[strings.TrimSpace(extraWhere)]; !ok {
+			return 0, fmt.Errorf("unsupported extra where clause")
+		}
 		query += ` AND ` + extraWhere
 	}
 	var count int

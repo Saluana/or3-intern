@@ -157,8 +157,13 @@ func decodeHTML(raw []byte, requestedCharset string) (string, error) {
 	if strings.TrimSpace(requestedCharset) == "" {
 		requestedCharset = "utf-8"
 	}
-	encoding, _, _ := charset.DetermineEncoding(raw, requestedCharset)
-	reader := encoding.NewDecoder().Reader(bytes.NewReader(raw))
+	enc, _, certain := charset.DetermineEncoding(raw, requestedCharset)
+	var reader io.Reader
+	if !certain {
+		reader = bytes.NewReader(raw)
+	} else {
+		reader = enc.NewDecoder().Reader(bytes.NewReader(raw))
+	}
 	decoded, err := io.ReadAll(reader)
 	if err != nil {
 		return "", err

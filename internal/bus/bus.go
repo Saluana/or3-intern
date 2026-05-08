@@ -1,8 +1,8 @@
-// Package bus provides a small in-memory event bus for cross-service signaling.
+// Package bus provides a single-process, single-channel event queue.
 package bus
 
 import (
-	"context"
+	"log"
 )
 
 // EventType classifies messages sent through a Bus.
@@ -33,9 +33,6 @@ type Event struct {
 	Meta       map[string]any
 }
 
-// Handler consumes a published event.
-type Handler func(ctx context.Context, ev Event) error
-
 // Bus is a buffered single-channel event queue.
 type Bus struct {
 	ch chan Event
@@ -55,6 +52,7 @@ func (b *Bus) Publish(ev Event) bool {
 	case b.ch <- ev:
 		return true
 	default:
+		log.Printf("bus: event dropped, buffer full (type=%s)", ev.Type)
 		return false
 	}
 }

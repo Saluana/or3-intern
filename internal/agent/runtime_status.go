@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"log"
 	"sort"
@@ -373,8 +372,5 @@ func countMemoryRows(ctx context.Context, d *db.DB, table, column string, values
 	}
 	var count int
 	err := d.SQL.QueryRowContext(ctx, query, args...).Scan(&count)
-	if err == sql.ErrNoRows {
-		return 0, nil
-	}
 	return count, err
 }

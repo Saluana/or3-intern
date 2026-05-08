@@ -718,8 +718,8 @@ func formatStructuredEventContext(meta map[string]any, max int) string {
 
 func truncateText(s string, max int) string {
 	s = strings.TrimSpace(s)
-	if max > 0 && len(s) > max {
-		return strings.TrimSpace(s[:max]) + "\n…[truncated]"
+	if max > 0 && len([]rune(s)) > max {
+		return strings.TrimSpace(string([]rune(s)[:max])) + "\n…[truncated]"
 	}
 	return s
 }
@@ -866,8 +866,8 @@ func uniqueInt64(ids []int64) []int64 {
 func oneLine(s string, max int) string {
 	s = strings.ReplaceAll(s, "\n", " ")
 	s = strings.Join(strings.Fields(s), " ")
-	if max > 0 && len(s) > max {
-		s = s[:max] + "…"
+	if max > 0 && len([]rune(s)) > max {
+		s = string([]rune(s)[:max]) + "…"
 	}
 	return s
 }

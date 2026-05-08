@@ -100,16 +100,10 @@ type RuntimeModelConfig struct {
 }
 
 func (r *Runtime) ApplyLiveModelConfig(cfg RuntimeModelConfig) {
-	if r == nil {
-		return
-	}
 	r.modelConfig.Store(cfg)
 }
 
 func (r *Runtime) CurrentModelConfig() RuntimeModelConfig {
-	if r == nil {
-		return RuntimeModelConfig{}
-	}
 	if stored := r.modelConfig.Load(); stored != nil {
 		if cfg, ok := stored.(RuntimeModelConfig); ok {
 			return cfg
@@ -466,7 +460,7 @@ func (r *Runtime) RunBackground(ctx context.Context, input BackgroundRunInput) (
 }
 
 func (r *Runtime) pruneSessionContext(ctx context.Context, sessionKey, reason string) (string, error) {
-	if r == nil || r.DB == nil {
+	if r.DB == nil {
 		return "", fmt.Errorf("runtime database not configured")
 	}
 	if strings.TrimSpace(sessionKey) == "" {
@@ -607,9 +601,6 @@ func (r *Runtime) buildContextManagerPruneInput(ctx context.Context, sessionKey,
 }
 
 func (r *Runtime) contextManagerProvider() *providers.Client {
-	if r == nil {
-		return nil
-	}
 	if cfg := r.CurrentModelConfig(); cfg.ContextManagerProvider != nil {
 		return cfg.ContextManagerProvider
 	}
@@ -623,9 +614,6 @@ func (r *Runtime) contextManagerProvider() *providers.Client {
 }
 
 func (r *Runtime) contextManagerModel() string {
-	if r == nil {
-		return ""
-	}
 	if model := strings.TrimSpace(r.CurrentModelConfig().ContextManagerModel); model != "" {
 		return model
 	}
@@ -666,7 +654,7 @@ func nonEmptyLabel(value, fallbackValue string) string {
 }
 
 func (r *Runtime) ensureTaskCardForTurn(ctx context.Context, ev bus.Event) {
-	if r == nil || r.DB == nil || r.Builder == nil || r.Builder.DisableTaskCard || strings.TrimSpace(ev.SessionKey) == "" {
+	if r.DB == nil || r.Builder == nil || r.Builder.DisableTaskCard || strings.TrimSpace(ev.SessionKey) == "" {
 		return
 	}
 	message := strings.TrimSpace(ev.Message)

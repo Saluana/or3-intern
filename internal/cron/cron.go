@@ -117,12 +117,14 @@ type Runner func(ctx context.Context, job CronJob) (RunResult, error)
 
 // Service loads, schedules, and persists cron jobs. It is safe for concurrent use.
 type Service struct {
-	mu      sync.Mutex
+	mu      sync.RWMutex
 	path    string
 	runner  Runner
 	c       *cron.Cron
 	entries map[string]cron.EntryID
 	timers  map[string]*time.Timer
+	ctx     context.Context
+	cancel  context.CancelFunc
 }
 
 // New constructs a Service backed by path and runner.
@@ -175,6 +177,8 @@ func (s *Service) Start() error {
 		return nil
 	}
 
+	s.ctx, s.cancel = context.WithCancel(context.Background())
+
 	s.c = cron.New(cron.WithSeconds(), cron.WithParser(cron.NewParser(cron.SecondOptional|cron.Minute|cron.Hour|cron.Dom|cron.Month|cron.Dow|cron.Descriptor)))
 	st, err := s.load()
 	if err != nil {
@@ -199,7 +203,12 @@ func (s *Service) Stop() {
 	s.c = nil
 	s.entries = map[string]cron.EntryID{}
 	s.timers = map[string]*time.Timer{}
+	cancel := s.cancel
+	s.cancel = nil
 	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 
 	if c != nil {
 		ctx := c.Stop()
@@ -212,8 +221,8 @@ func (s *Service) Stop() {
 
 // Status reports the number of jobs and the earliest known next wake time.
 func (s *Service) Status() (map[string]any, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	st, err := s.load()
 	if err != nil {
 		return nil, err
@@ -235,8 +244,8 @@ func (s *Service) Status() (map[string]any, error) {
 
 // List returns the persisted jobs in storage order.
 func (s *Service) List() ([]CronJob, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	st, err := s.load()
 	if err != nil {
 		return nil, err
@@ -251,6 +260,10 @@ func (s *Service) Add(job CronJob) error {
 	st, err := s.load()
 	if err != nil {
 		return err
+	}
+	const maxJobs = 10000
+	if len(st.Jobs) >= maxJobs {
+		return fmt.Errorf("max job count reached (%d)", maxJobs)
 	}
 	job.Payload = NormalizePayload(job.Payload)
 	if err := ValidateSchedule(job.Schedule); err != nil {
@@ -375,17 +388,22 @@ func (s *Service) removeLocked(id string) (bool, error) {
 		return false, err
 	}
 	found := false
-	n := make([]CronJob, 0, len(st.Jobs))
 	for _, j := range st.Jobs {
 		if j.ID == id {
 			found = true
+			break
+		}
+	}
+	if !found {
+		return false, nil
+	}
+	n := make([]CronJob, 0, len(st.Jobs))
+	for _, j := range st.Jobs {
+		if j.ID == id {
 			s.unarmJobLocked(id)
 			continue
 		}
 		n = append(n, j)
-	}
-	if !found {
-		return false, nil
 	}
 	st.Jobs = n
 	if err := s.save(st); err != nil {
@@ -510,7 +528,7 @@ func (s *Service) armJobLocked(job CronJob) {
 		}
 		id := job.ID
 		s.timers[id] = time.AfterFunc(dur, func() {
-			if _, err := s.runJobByID(context.Background(), id, false); err != nil {
+			if _, err := s.runJobByID(s.ctx, id, false); err != nil {
 				log.Printf("cron runner error: id=%s err=%v", id, err)
 			}
 		})
@@ -523,7 +541,7 @@ func (s *Service) armJobLocked(job CronJob) {
 		spec := "@every " + (time.Duration(sec) * time.Second).String()
 		id := job.ID
 		eid, err := s.c.AddFunc(spec, func() {
-			if _, e := s.runJobByID(context.Background(), id, false); e != nil {
+			if _, e := s.runJobByID(s.ctx, id, false); e != nil {
 				log.Printf("cron runner error: id=%s err=%v", id, e)
 			}
 		})
@@ -541,7 +559,7 @@ func (s *Service) armJobLocked(job CronJob) {
 			}
 		}
 		eid, err := s.c.AddFunc(spec, func() {
-			if _, e := s.runJobByID(context.Background(), id, false); e != nil {
+			if _, e := s.runJobByID(s.ctx, id, false); e != nil {
 				log.Printf("cron runner error: id=%s err=%v", id, e)
 			}
 		})
@@ -578,13 +596,7 @@ func NormalizePayload(payload CronPayload) CronPayload {
 				run.Isolation = DefaultAgentCLICronIsolation
 			}
 		}
-		if run.Meta != nil {
-			meta := make(map[string]any, len(run.Meta))
-			for k, v := range run.Meta {
-				meta[k] = v
-			}
-			run.Meta = meta
-		}
+	
 		payload.AgentRun = &run
 	}
 	return payload
@@ -677,23 +689,33 @@ func nextRunMS(schedule CronSchedule, now time.Time) *int64 {
 	}
 }
 
+var cronParserInstance = cron.NewParser(cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
+
 func cronParser() cron.Parser {
-	return cron.NewParser(cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
+	return cronParserInstance
 }
 
-func randUint() uint64 {
+func randUint() (uint64, error) {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		return uint64(time.Now().UnixNano())
+		return 0, err
 	}
-	return binary.LittleEndian.Uint64(b[:])
+	return binary.BigEndian.Uint64(b[:]), nil
+}
+
+func mustRandUint() uint64 {
+	v, err := randUint()
+	if err != nil {
+		panic("crypto/rand failed: " + err.Error())
+	}
+	return v
 }
 
 func randID() string {
 	const chars = "abcdefghijklmnopqrstuvwxyz0123456789"
 	b := make([]byte, 10)
 	for i := range b {
-		b[i] = chars[int(randUint()%uint64(len(chars)))]
+		b[i] = chars[int(mustRandUint()%uint64(len(chars)))]
 	}
 	return string(b)
 }

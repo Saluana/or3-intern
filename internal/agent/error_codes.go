@@ -44,7 +44,7 @@ func PublicErrorCode(err error) string {
 	switch {
 	case strings.Contains(msg, "validation"):
 		return PublicErrorValidation
-	case strings.Contains(msg, "denied") || strings.Contains(msg, "policy") || strings.Contains(msg, "capability") || strings.Contains(msg, "not available"):
+	case strings.Contains(msg, "denied") || strings.Contains(msg, "policy"):
 		return PublicErrorPolicy
 	case strings.Contains(msg, "loop"):
 		return PublicErrorLoopLimit

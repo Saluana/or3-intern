@@ -30,7 +30,9 @@ func (t *ReadSkill) Schema() map[string]any {
 }
 
 func (t *ReadSkill) Execute(ctx context.Context, params map[string]any) (string, error) {
-	_ = ctx
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if t.Inventory == nil {
 		return "", fmt.Errorf("skills inventory not configured")
 	}

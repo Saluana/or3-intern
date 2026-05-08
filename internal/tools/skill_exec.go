@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -154,9 +155,11 @@ func skillCommandHash(cmd []string) string {
 		return ""
 	}
 	if scriptPath := skillCommandHashSource(cmd); scriptPath != "" {
-		if blob, readErr := os.ReadFile(scriptPath); readErr == nil {
-			sum := sha256.Sum256(blob)
-			return fmt.Sprintf("%x", sum[:])
+		if f, openErr := os.Open(scriptPath); openErr == nil {
+			h := sha256.New()
+			_, _ = io.Copy(h, f)
+			f.Close()
+			return fmt.Sprintf("%x", h.Sum(nil))
 		}
 	}
 	sum := sha256.Sum256([]byte(strings.Join(cmd, "\x00")))

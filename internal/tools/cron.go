@@ -67,11 +67,14 @@ func (t *CronTool) Execute(ctx context.Context, params map[string]any) (string, 
 		}
 		return fmt.Sprintf("ran: %v", ok), nil
 	case "add":
-		raw, _ := params["job"].(map[string]any)
-		if raw == nil {
+		raw, ok := params["job"].(map[string]any)
+		if !ok || raw == nil {
 			return "", fmt.Errorf("missing job")
 		}
-		b, _ := json.Marshal(raw)
+		b, err := json.Marshal(raw)
+		if err != nil {
+			return "", err
+		}
 		var j cron.CronJob
 		if err := json.Unmarshal(b, &j); err != nil {
 			return "", err

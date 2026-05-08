@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"strings"
 
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
+
 	"or3-intern/internal/db"
 )
 
@@ -78,7 +81,7 @@ func buildHistorySummary(rows []db.Message, maxItems int) string {
 		if role == "" {
 			role = "message"
 		}
-		out.WriteString(fmt.Sprintf("- %s Msg:%d %s\n", strings.Title(role), row.ID, oneLine(row.Content, 180)))
+		out.WriteString(fmt.Sprintf("- %s Msg:%d %s\n", cases.Title(language.English).String(role), row.ID, oneLine(row.Content, 180)))
 	}
 	return strings.TrimSpace(out.String())
 }

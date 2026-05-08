@@ -67,7 +67,7 @@ func TestDispatcherEnqueuesAgentCLIRun(t *testing.T) {
 
 	result, err := runner(context.Background(), cron.CronJob{
 		ID: "agent-cron",
-		Payload: cron.CronPayload{
+		Payload: cron.NormalizePayload(cron.CronPayload{
 			Kind:       cron.PayloadAgentCLIRun,
 			SessionKey: "cron:custom",
 			AgentRun: &cron.CronAgentRunPayload{
@@ -76,7 +76,7 @@ func TestDispatcherEnqueuesAgentCLIRun(t *testing.T) {
 				Cwd:      "/workspace",
 				Meta:     map[string]any{"source": "test"},
 			},
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatalf("runner: %v", err)

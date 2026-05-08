@@ -27,14 +27,13 @@ func New(b *bus.Bus, defaultSessionKey string, agentCLI AgentCLIEnqueuer) cron.R
 }
 
 func (d Dispatcher) Run(ctx context.Context, job cron.CronJob) (cron.RunResult, error) {
-	payload := cron.NormalizePayload(job.Payload)
-	switch payload.Kind {
+	switch job.Payload.Kind {
 	case cron.PayloadAgentTurn, cron.PayloadSystemEvent:
-		return d.publishAgentTurn(job, payload)
+		return d.publishAgentTurn(job, job.Payload)
 	case cron.PayloadAgentCLIRun:
-		return d.enqueueAgentRun(ctx, job, payload)
+		return d.enqueueAgentRun(ctx, job, job.Payload)
 	default:
-		return cron.RunResult{}, fmt.Errorf("unsupported cron payload kind: %s", payload.Kind)
+		return cron.RunResult{}, fmt.Errorf("unsupported cron payload kind: %s", job.Payload.Kind)
 	}
 }
 
@@ -67,9 +66,6 @@ func (d Dispatcher) publishAgentTurn(job cron.CronJob, payload cron.CronPayload)
 func (d Dispatcher) enqueueAgentRun(ctx context.Context, job cron.CronJob, payload cron.CronPayload) (cron.RunResult, error) {
 	if d.AgentCLI == nil {
 		return cron.RunResult{}, fmt.Errorf("agent CLI manager is not available for cron job")
-	}
-	if err := cron.ValidatePayload(payload); err != nil {
-		return cron.RunResult{}, err
 	}
 	run := payload.AgentRun
 	sessionKey := payload.SessionKey

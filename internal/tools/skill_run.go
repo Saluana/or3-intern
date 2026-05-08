@@ -371,11 +371,14 @@ func (t *RunSkillScript) runPreparedSkillRun(ctx context.Context, prepared prepa
 
 	command, err := commandWithSandbox(runCtx, t.Sandbox, prepared.skill.Dir, prepared.command)
 	if err != nil {
-		result := encodeSkillRunResult(db.SkillRunStatusPreflightFailed, false, prepared.plan, err.Error(), "", prepared.plan.ApprovalRequestID, nil)
-		if persistErr := t.persistSkillRunResult(ctx, prepared.plan, db.SkillRunStatusPreflightFailed, result, err.Error()); persistErr != nil {
-			return result, persistErr
+		if !errors.Is(err, errSandboxNotEnabled) {
+			result := encodeSkillRunResult(db.SkillRunStatusPreflightFailed, false, prepared.plan, err.Error(), "", prepared.plan.ApprovalRequestID, nil)
+			if persistErr := t.persistSkillRunResult(ctx, prepared.plan, db.SkillRunStatusPreflightFailed, result, err.Error()); persistErr != nil {
+				return result, persistErr
+			}
+			return result, err
 		}
-		return result, err
+		command = nil
 	}
 	if command == nil {
 		command = exec.CommandContext(runCtx, prepared.command[0], prepared.command[1:]...)

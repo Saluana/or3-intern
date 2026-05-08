@@ -374,7 +374,7 @@ func isBlockedFetchAddr(addr netip.Addr) bool {
 	if addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() || addr.IsMulticast() || addr.IsUnspecified() {
 		return true
 	}
-	return addr.String() == "169.254.169.254"
+	return false
 }
 
 type WebSearch struct {

@@ -1,6 +1,9 @@
 package agent
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestContextEvaluationFixturesCoverRequiredScenarios(t *testing.T) {
 	fixtures := ContextEvaluationFixtures()
@@ -40,7 +43,7 @@ func TestContextModesReducePacketSizeAndPreserveProtectedSections(t *testing.T) 
 	for _, packet := range []ContextPacket{poor, balanced, quality} {
 		stable := renderStablePrefix(packet)
 		for _, want := range []string{"Soul protected", "Agent protected", "Tools protected", "Pinned protected"} {
-			if !containsEval(stable, want) {
+			if !strings.Contains(stable, want) {
 				t.Fatalf("expected protected section %q in stable prefix", want)
 			}
 		}
@@ -73,22 +76,7 @@ func BenchmarkContextPacketConstructionLargeFixture(b *testing.B) {
 }
 
 func repeatedEvalText(word string, count int) string {
-	out := ""
-	for i := 0; i < count; i++ {
-		out += word + " "
-	}
-	return out
+	return strings.Repeat(word+" ", count)
 }
 
-func containsEval(text, want string) bool {
-	return len(text) >= len(want) && (text == want || len(want) == 0 || indexEval(text, want) >= 0)
-}
 
-func indexEval(text, want string) int {
-	for i := 0; i+len(want) <= len(text); i++ {
-		if text[i:i+len(want)] == want {
-			return i
-		}
-	}
-	return -1
-}

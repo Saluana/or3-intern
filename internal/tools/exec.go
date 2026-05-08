@@ -250,7 +250,10 @@ func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, 
 	if legacyCommand != "" {
 		c, err = commandWithSandbox(cctx, t.Sandbox, cwd, []string{"bash", "-lc", legacyCommand})
 		if err != nil {
-			return "", err
+			if !errors.Is(err, errSandboxNotEnabled) {
+				return "", err
+			}
+			c = nil
 		}
 		if c == nil {
 			c = exec.CommandContext(cctx, "bash", "-lc", legacyCommand)

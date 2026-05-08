@@ -252,8 +252,11 @@ func (r *Runtime) streamerForContext(ctx context.Context) channels.StreamingChan
 }
 
 func (r *Runtime) narrateApprovalRequired(ctx context.Context, messages []providers.ChatMessage) (string, bool) {
+	if r == nil {
+		return "", false
+	}
 	modelCfg := r.CurrentModelConfig()
-	if r == nil || modelCfg.Provider == nil {
+	if modelCfg.Provider == nil {
 		return "", false
 	}
 	prompt := append(append([]providers.ChatMessage{}, messages...), providers.ChatMessage{

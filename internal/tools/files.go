@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -371,7 +372,7 @@ func (t *WriteFile) Execute(ctx context.Context, params map[string]any) (string,
 			return "", err
 		}
 	}
-	out, err := t.openSafeWrite(p, existingFileMode(p, 0o600))
+	out, err := t.openSafeWrite(p, 0o600)
 	if err != nil {
 		return "", err
 	}
@@ -415,8 +416,12 @@ func (t *EditFile) Execute(ctx context.Context, params map[string]any) (string, 
 	if err != nil {
 		return "", err
 	}
-	b, err := io.ReadAll(in)
+	const maxEditSize = 10 * 1024 * 1024
+	b, err := io.ReadAll(io.LimitReader(in, maxEditSize+1))
 	closeErr := in.Close()
+	if err == nil && len(b) > maxEditSize {
+		return "", fmt.Errorf("file too large to edit (max %d bytes)", maxEditSize)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -439,7 +444,7 @@ func (t *EditFile) Execute(ctx context.Context, params map[string]any) (string, 
 			s = strings.Replace(s, find, replace, count)
 		}
 	}
-	out, err := t.openSafeWrite(p, existingFileMode(p, 0))
+	out, err := t.openSafeWrite(p, 0)
 	if err != nil {
 		return "", err
 	}
@@ -585,6 +590,12 @@ func readLineRange(f *os.File, path string, size int64, start, end, max int) (st
 }
 
 func grepFile(f *os.File, path string, size int64, pattern string, max int) (string, error) {
+	var match func(string) bool
+	if re, err := regexp.Compile(pattern); err == nil {
+		match = re.MatchString
+	} else {
+		match = func(s string) bool { return strings.Contains(s, pattern) }
+	}
 	var b strings.Builder
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -593,7 +604,7 @@ func grepFile(f *os.File, path string, size int64, pattern string, max int) (str
 	for sc.Scan() {
 		line++
 		text := sc.Text()
-		if !strings.Contains(text, pattern) {
+		if !match(text) {
 			continue
 		}
 		matches++

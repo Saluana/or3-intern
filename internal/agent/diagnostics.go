@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -34,17 +35,18 @@ func FormatBudgetDiagnostics(report BudgetReport, maxRejected int) string {
 	return strings.TrimSpace(out.String())
 }
 
+var redactSecretPattern = regexp.MustCompile(`(?i)\b(secret|token|api[_-]?key|password|bearer)\b`)
+
 func redactDiagnostic(text string) string {
 	words := strings.Fields(text)
 	redactNext := false
 	for i, word := range words {
-		lower := strings.ToLower(word)
 		if redactNext {
 			words[i] = "[redacted]"
 			redactNext = false
 			continue
 		}
-		if strings.Contains(lower, "secret") || strings.Contains(lower, "token") || strings.Contains(lower, "api_key") || strings.Contains(lower, "apikey") || strings.Contains(lower, "password") || strings.Contains(lower, "bearer") {
+		if redactSecretPattern.MatchString(word) {
 			words[i] = "[redacted]"
 			redactNext = true
 		}

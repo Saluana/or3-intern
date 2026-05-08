@@ -81,10 +81,11 @@ func EncodeToolFailure(toolName string, params map[string]any, out string, err e
 
 func PreviewString(s string, maxBytes int) (string, bool) {
 	s = strings.TrimSpace(s)
-	if maxBytes <= 0 || len(s) <= maxBytes {
+	runes := []rune(s)
+	if maxBytes <= 0 || len(runes) <= maxBytes {
 		return s, false
 	}
-	return s[:maxBytes] + "\n...[preview truncated]", true
+	return string(runes[:maxBytes]) + "\n...[preview truncated]", true
 }
 
 func normalizedToolResultKind(toolName string) string {

@@ -11,6 +11,7 @@ import (
 	"or3-intern/internal/agentcli"
 	"or3-intern/internal/controlplane"
 	"or3-intern/internal/db"
+	"or3-intern/internal/tools"
 )
 
 const serviceRunnerChatBodyLimit = 64 * 1024
@@ -42,6 +43,13 @@ type runnerChatStartTurnRequest struct {
 	MaxTurns         int            `json:"max_turns"`
 	TimeoutSeconds   int            `json:"timeout_seconds"`
 	Meta             map[string]any `json:"meta"`
+	ApprovalToken    string         `json:"approval_token"`
+	RunnerPermission struct {
+		RunnerID   string `json:"runner_id"`
+		Kind       string `json:"kind"`
+		Access     string `json:"access"`
+		TargetPath string `json:"target_path"`
+	} `json:"runner_permission"`
 }
 
 // handleRunnerChatSessions dispatches the runner-chat session/turn API:
@@ -235,10 +243,22 @@ func (s *serviceServer) handleRunnerChatTurnStart(w http.ResponseWriter, r *http
 		MaxTurns:         req.MaxTurns,
 		TimeoutSeconds:   req.TimeoutSeconds,
 		Meta:             req.Meta,
+		ApprovalToken:    serviceFirstNonEmpty(req.ApprovalToken, serviceApprovalTokenFromRequest(r)),
+	}
+	if permission, ok := agentcli.NormalizeRunnerPermissionRequest(agentcli.RunnerPermissionRequest{
+		RunnerID:   strings.TrimSpace(req.RunnerPermission.RunnerID),
+		Kind:       strings.TrimSpace(req.RunnerPermission.Kind),
+		Access:     strings.TrimSpace(req.RunnerPermission.Access),
+		TargetPath: strings.TrimSpace(req.RunnerPermission.TargetPath),
+	}); ok {
+		startReq.RunnerPermission = &permission
 	}
 	result, err := s.chatManager.StartTurn(r.Context(), sessionID, startReq)
 	if err != nil {
+		var approvalErr *tools.ApprovalRequiredError
 		switch {
+		case errors.As(err, &approvalErr):
+			writeServiceJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "code": "approval_required", "status": "approval_required", "approval_id": approvalErr.RequestID, "request_id": approvalErr.RequestID})
 		case errors.Is(err, agentcli.ErrUnsupportedNativeSession):
 			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "native continuation not supported by this runner", "code": "unsupported_native_session"})
 		case errors.Is(err, db.ErrRunnerChatSessionNotFound):
@@ -423,6 +443,7 @@ func (s *serviceServer) handleRunnerChatTurnAbort(w http.ResponseWriter, r *http
 func isTerminalRunnerChatStatus(status string) bool {
 	switch status {
 	case db.RunnerChatTurnStatusSucceeded,
+		db.RunnerChatTurnStatusApprovalRequired,
 		db.RunnerChatTurnStatusFailed,
 		db.RunnerChatTurnStatusAborted,
 		db.RunnerChatTurnStatusTimedOut:

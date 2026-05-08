@@ -67,6 +67,23 @@ func (b *Broker) EvaluateSecretAccess(ctx context.Context, req SecretAccessEvalu
 	)
 }
 
+func (b *Broker) EvaluateRunnerPermission(ctx context.Context, req RunnerPermissionEvaluation) (Decision, error) {
+	subject := RunnerPermissionSubject{
+		Type:            string(SubjectRunnerPermission),
+		ExecutionHostID: b.hostID(),
+		RunnerID:        strings.TrimSpace(req.RunnerID),
+		PermissionKind:  firstNonEmpty(req.PermissionKind, "filesystem"),
+		Access:          firstNonEmpty(req.Access, "read"),
+		TargetPath:      strings.TrimSpace(req.TargetPath),
+		RequestingAgent: strings.TrimSpace(req.AgentID),
+		SessionID:       strings.TrimSpace(req.SessionID),
+	}
+	return b.evaluateWithMode(ctx, SubjectRunnerPermission, subject, req.ApprovalToken, b.Config.Exec.Mode,
+		AllowlistScope{HostID: subject.ExecutionHostID, Tool: subject.RunnerID, Agent: subject.RequestingAgent},
+		RunnerPermissionAllowlistMatcher{RunnerID: subject.RunnerID, PermissionKind: subject.PermissionKind, Access: subject.Access, TargetPath: subject.TargetPath},
+	)
+}
+
 func (b *Broker) EvaluateToolQuota(ctx context.Context, req ToolQuotaEvaluation, mode config.ApprovalMode) (Decision, error) {
 	subject := ToolQuotaSubject{
 		Type:            string(SubjectToolQuota),
@@ -190,6 +207,8 @@ func (b *Broker) modeFor(subjectType SubjectType) config.ApprovalMode {
 		return b.Config.Exec.Mode
 	case SubjectSkillExec:
 		return b.Config.SkillExecution.Mode
+	case SubjectRunnerPermission:
+		return b.Config.Exec.Mode
 	case SubjectSecretAccess:
 		return b.Config.SecretAccess.Mode
 	case SubjectMessageSend:

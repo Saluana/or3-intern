@@ -11,12 +11,13 @@ import (
 type SubjectType string
 
 const (
-	SubjectExec         SubjectType = "exec"
-	SubjectSkillExec    SubjectType = "skill_execution"
-	SubjectSecretAccess SubjectType = "secret_access"
-	SubjectMessageSend  SubjectType = "message_send"
-	SubjectFileTransfer SubjectType = "file_transfer"
-	SubjectToolQuota    SubjectType = "tool_quota"
+	SubjectExec             SubjectType = "exec"
+	SubjectSkillExec        SubjectType = "skill_execution"
+	SubjectRunnerPermission SubjectType = "runner_permission"
+	SubjectSecretAccess     SubjectType = "secret_access"
+	SubjectMessageSend      SubjectType = "message_send"
+	SubjectFileTransfer     SubjectType = "file_transfer"
+	SubjectToolQuota        SubjectType = "tool_quota"
 
 	RoleViewer        = "viewer"
 	RoleOperator      = "operator"
@@ -34,7 +35,7 @@ const (
 	StatusActive    = "active"
 	StatusRevoked   = "revoked"
 
-	ResolutionKindApproveOnce       = "approve_once"
+	ResolutionKindApproveOnce         = "approve_once"
 	ResolutionKindApproveAndAllowlist = "approve_and_allowlist"
 )
 
@@ -95,6 +96,16 @@ type SecretAccessEvaluation struct {
 	ApprovalToken string
 }
 
+type RunnerPermissionEvaluation struct {
+	RunnerID       string
+	PermissionKind string
+	Access         string
+	TargetPath     string
+	AgentID        string
+	SessionID      string
+	ApprovalToken  string
+}
+
 type ToolQuotaEvaluation struct {
 	Scope         string
 	LimitName     string
@@ -153,6 +164,19 @@ type SecretAccessSubject struct {
 
 func (s SecretAccessSubject) GetSessionID() string { return s.SessionID }
 
+type RunnerPermissionSubject struct {
+	Type            string `json:"type"`
+	ExecutionHostID string `json:"execution_host_id"`
+	RunnerID        string `json:"runner_id"`
+	PermissionKind  string `json:"permission_kind"`
+	Access          string `json:"access"`
+	TargetPath      string `json:"target_path"`
+	RequestingAgent string `json:"requesting_agent_id,omitempty"`
+	SessionID       string `json:"session_id,omitempty"`
+}
+
+func (s RunnerPermissionSubject) GetSessionID() string { return s.SessionID }
+
 type ToolQuotaSubject struct {
 	Type            string `json:"type"`
 	ExecutionHostID string `json:"execution_host_id"`
@@ -192,6 +216,14 @@ type SkillAllowlistMatcher struct {
 	ScriptHash     string `json:"script_hash,omitempty"`
 	EnvBindingHash string `json:"env_binding_hash,omitempty"`
 	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
+}
+
+type RunnerPermissionAllowlistMatcher struct {
+	RunnerID       string `json:"runner_id,omitempty"`
+	PermissionKind string `json:"permission_kind,omitempty"`
+	Access         string `json:"access,omitempty"`
+	TargetPath     string `json:"target_path,omitempty"`
+	PathPrefix     string `json:"path_prefix,omitempty"`
 }
 
 type ApprovalTokenClaims struct {

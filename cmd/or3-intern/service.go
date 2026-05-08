@@ -140,7 +140,7 @@ func runServiceCommandWithBrokerOptionsAndCron(ctx context.Context, cfg config.C
 	}
 	server := &serviceServer{config: cfg, configPath: cfgPathOrDefault(""), runtime: rt, cronSvc: cronSvc, subagentManager: subagentManager, agentCLIManager: agentCLIManager, jobs: jobs, broker: broker, unsafeDev: unsafeDev}
 	if rt.DB != nil {
-		server.chatManager = &agentcli.ChatManager{DB: rt.DB, Manager: agentCLIManager, Jobs: jobs}
+		server.chatManager = &agentcli.ChatManager{DB: rt.DB, Manager: agentCLIManager, Jobs: jobs, Broker: broker}
 		if err := server.chatManager.ReconcileOnStartup(ctx); err != nil {
 			log.Printf("chat manager: startup reconciliation failed: %v", err)
 		}

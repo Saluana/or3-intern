@@ -160,6 +160,33 @@ func allowlistMatcherMatches(subjectType SubjectType, current any, raw string) (
 			return false, nil
 		}
 		return true, nil
+	case SubjectRunnerPermission:
+		var expected RunnerPermissionAllowlistMatcher
+		if err := json.Unmarshal([]byte(raw), &expected); err != nil {
+			return false, err
+		}
+		if isEmptyRunnerPermissionAllowlistMatcher(expected) {
+			return false, nil
+		}
+		actual, _ := current.(RunnerPermissionAllowlistMatcher)
+		if expected.RunnerID != "" && expected.RunnerID != actual.RunnerID {
+			return false, nil
+		}
+		if expected.PermissionKind != "" && expected.PermissionKind != actual.PermissionKind {
+			return false, nil
+		}
+		if expected.Access != "" && expected.Access != actual.Access {
+			return false, nil
+		}
+		if expected.TargetPath != "" && expected.TargetPath != actual.TargetPath {
+			return false, nil
+		}
+		if expected.PathPrefix != "" {
+			if actual.TargetPath != expected.PathPrefix && !strings.HasPrefix(actual.TargetPath, expected.PathPrefix+string(filepath.Separator)) {
+				return false, nil
+			}
+		}
+		return true, nil
 	default:
 		return false, nil
 	}
@@ -185,6 +212,15 @@ func ValidateAllowlistMatcher(domain string, matcher any) error {
 			return fmt.Errorf("skill allowlist matcher must include at least one skill, version, origin, trust, plan, script, environment, or timeout constraint")
 		}
 		return nil
+	case SubjectRunnerPermission:
+		candidate, ok := matcher.(RunnerPermissionAllowlistMatcher)
+		if !ok {
+			return fmt.Errorf("runner permission allowlist matcher is invalid")
+		}
+		if isEmptyRunnerPermissionAllowlistMatcher(candidate) {
+			return fmt.Errorf("runner permission allowlist matcher must include at least one runner, permission kind, access, or path constraint")
+		}
+		return nil
 	default:
 		return fmt.Errorf("unsupported allowlist domain")
 	}
@@ -208,4 +244,12 @@ func isEmptySkillAllowlistMatcher(matcher SkillAllowlistMatcher) bool {
 		strings.TrimSpace(matcher.ScriptHash) == "" &&
 		strings.TrimSpace(matcher.EnvBindingHash) == "" &&
 		matcher.TimeoutSeconds == 0
+}
+
+func isEmptyRunnerPermissionAllowlistMatcher(matcher RunnerPermissionAllowlistMatcher) bool {
+	return strings.TrimSpace(matcher.RunnerID) == "" &&
+		strings.TrimSpace(matcher.PermissionKind) == "" &&
+		strings.TrimSpace(matcher.Access) == "" &&
+		strings.TrimSpace(matcher.TargetPath) == "" &&
+		strings.TrimSpace(matcher.PathPrefix) == ""
 }

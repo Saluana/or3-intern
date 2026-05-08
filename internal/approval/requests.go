@@ -155,6 +155,20 @@ func (b *Broker) createAllowlistFromRequest(ctx context.Context, req db.Approval
 			return 0, err
 		}
 		return rec.ID, nil
+	case SubjectRunnerPermission:
+		var subject RunnerPermissionSubject
+		if err := json.Unmarshal([]byte(req.SubjectJSON), &subject); err != nil {
+			return 0, err
+		}
+		rec, err := b.AddAllowlist(ctx, req.Type,
+			AllowlistScope{HostID: subject.ExecutionHostID, Tool: subject.RunnerID, Agent: subject.RequestingAgent},
+			RunnerPermissionAllowlistMatcher{RunnerID: subject.RunnerID, PermissionKind: subject.PermissionKind, Access: subject.Access, PathPrefix: subject.TargetPath},
+			actor, 0,
+		)
+		if err != nil {
+			return 0, err
+		}
+		return rec.ID, nil
 	default:
 		return 0, nil
 	}

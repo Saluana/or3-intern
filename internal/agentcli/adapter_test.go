@@ -80,6 +80,11 @@ func TestCodexAdapter_SafeEdit(t *testing.T) {
 		t.Fatalf("BuildCommand: %v", err)
 	}
 	args := cmd.Args
+	wantPrefix := []string{"--ask-for-approval", "never", "exec", "--json", "--color", "never", "--skip-git-repo-check"}
+	if len(args) < len(wantPrefix) {
+		t.Fatalf("expected codex args prefix %v, got %v", wantPrefix, args)
+	}
+	assertArgsEqual(t, wantPrefix, args[:len(wantPrefix)])
 	if !containsArg(args, "--sandbox", "workspace-write") {
 		t.Errorf("expected --sandbox workspace-write, got %v", args)
 	}
@@ -91,6 +96,9 @@ func TestCodexAdapter_SafeEdit(t *testing.T) {
 	}
 	if !containsArg(args, "--json") {
 		t.Errorf("expected --json flag, got %v", args)
+	}
+	if !contains(args, "--skip-git-repo-check") {
+		t.Errorf("expected --skip-git-repo-check flag, got %v", args)
 	}
 	if !containsArg(args, "--cd", "/workspace") {
 		t.Errorf("expected --cd /workspace, got %v", args)
@@ -158,6 +166,9 @@ func TestCodexAdapter_DangerousBypassFlag(t *testing.T) {
 	}
 	if !contains(cmd.Args, "--dangerously-bypass-approvals-and-sandbox") {
 		t.Errorf("expected --dangerously-bypass-approvals-and-sandbox in sandbox_auto, got %v", cmd.Args)
+	}
+	if contains(cmd.Args, "--ask-for-approval") {
+		t.Errorf("sandbox_auto should rely on Codex dangerous bypass only, got %v", cmd.Args)
 	}
 }
 

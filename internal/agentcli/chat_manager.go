@@ -13,7 +13,9 @@ import (
 	"time"
 
 	"or3-intern/internal/agent"
+	"or3-intern/internal/approval"
 	"or3-intern/internal/db"
+	"or3-intern/internal/tools"
 )
 
 // ChatManager owns runner-backed chat turn lifecycle on top of the existing
@@ -24,6 +26,7 @@ type ChatManager struct {
 	DB      *db.DB
 	Manager *Manager
 	Jobs    *agent.JobRegistry
+	Broker  *approval.Broker
 
 	mu          sync.Mutex
 	activeTurns map[string]turnContext // turnID -> cancel/job binding
@@ -47,6 +50,18 @@ type StartTurnRequest struct {
 	MaxTurns         int
 	TimeoutSeconds   int
 	Meta             map[string]any
+	ApprovalToken    string
+	RunnerPermission *RunnerPermissionRequest
+}
+
+type turnMirrorState struct {
+	permission *runnerApprovalState
+}
+
+type runnerApprovalState struct {
+	Request  RunnerPermissionRequest
+	Decision approval.Decision
+	Message  string
 }
 
 // StartTurnResult contains the durable identifiers for a started turn.
@@ -118,6 +133,10 @@ func (cm *ChatManager) StartTurn(ctx context.Context, sessionID string, req Star
 	if userMessage == "" {
 		return StartTurnResult{}, errors.New("user_message required")
 	}
+	approvedPermission, err := cm.approvedRunnerPermission(ctx, sess, req)
+	if err != nil {
+		return StartTurnResult{}, err
+	}
 
 	prompt := ""
 	if req.ContinuationMode != ContinuationNative {
@@ -179,6 +198,19 @@ func (cm *ChatManager) StartTurn(ctx context.Context, sessionID string, req Star
 	}
 
 	// Enqueue the underlying agent CLI run.
+	agentMeta := make(map[string]any, len(req.Meta)+6)
+	for key, value := range req.Meta {
+		agentMeta[key] = value
+	}
+	agentMeta["runner_chat_session_id"] = sess.ID
+	agentMeta["runner_chat_turn_id"] = turn.ID
+	agentMeta["runner_chat_continuation_mode"] = string(req.ContinuationMode)
+	agentMeta["runner_chat_user_message"] = userMessage
+	agentMeta["runner_chat_replay_prompt"] = prompt
+	agentMeta["runner_chat_native_session_ref"] = sess.NativeSessionRef
+	if approvedPermission != nil {
+		agentMeta["runner_permission"] = runnerPermissionToMap(*approvedPermission)
+	}
 	agentReq := AgentRunRequest{
 		ParentSessionKey: sess.AppSessionKey,
 		RunnerID:         sess.RunnerID,
@@ -189,14 +221,7 @@ func (cm *ChatManager) StartTurn(ctx context.Context, sessionID string, req Star
 		Isolation:        turn.Isolation,
 		MaxTurns:         maxTurns,
 		TimeoutSeconds:   req.TimeoutSeconds,
-		Meta: map[string]any{
-			"runner_chat_session_id":         sess.ID,
-			"runner_chat_turn_id":            turn.ID,
-			"runner_chat_continuation_mode":  string(req.ContinuationMode),
-			"runner_chat_user_message":       userMessage,
-			"runner_chat_replay_prompt":      prompt,
-			"runner_chat_native_session_ref": sess.NativeSessionRef,
-		},
+		Meta:             agentMeta,
 	}
 	run, err := cm.Manager.Enqueue(ctx, agentReq)
 	if err != nil {
@@ -281,17 +306,18 @@ func (cm *ChatManager) mirrorJobEvents(sess db.RunnerChatSession, turn db.Runner
 	defer cancel()
 
 	// Replay any events that already arrived before subscription.
+	state := &turnMirrorState{}
 	for _, ev := range snapshot.Events {
-		cm.persistJobEvent(turn, sess, jobID, ev)
+		cm.persistJobEvent(turn, sess, jobID, state, ev)
 	}
 	if isTerminalJobStatus(snapshot.Status) {
-		cm.finalizeFromSnapshot(sess, turn, snapshot)
+		cm.finalizeFromSnapshot(sess, turn, snapshot, state)
 		return
 	}
 
 	finalSnapshot := snapshot
 	for ev := range ch {
-		cm.persistJobEvent(turn, sess, jobID, ev)
+		cm.persistJobEvent(turn, sess, jobID, state, ev)
 		if isTerminalEventType(ev.Type) {
 			// Pull a fresh snapshot to capture final status/data.
 			if s, ok := cm.Jobs.Snapshot(jobID); ok {
@@ -304,11 +330,16 @@ func (cm *ChatManager) mirrorJobEvents(sess db.RunnerChatSession, turn db.Runner
 			finalSnapshot = s
 		}
 	}
-	cm.finalizeFromSnapshot(sess, turn, finalSnapshot)
+	cm.finalizeFromSnapshot(sess, turn, finalSnapshot, state)
 }
 
-func (cm *ChatManager) persistJobEvent(turn db.RunnerChatTurn, sess db.RunnerChatSession, jobID string, ev agent.JobEvent) {
+func (cm *ChatManager) persistJobEvent(turn db.RunnerChatTurn, sess db.RunnerChatSession, jobID string, state *turnMirrorState, ev agent.JobEvent) {
 	rawEvent := jobEventToAgentRunEvent(ev, jobID, sess.RunnerID)
+	cm.maybeCaptureRunnerPermission(turn, sess, jobID, state, rawEvent)
+	if state != nil && state.permission != nil && shouldSuppressRunnerFailureEvent(rawEvent) {
+		cm.maybePersistNativeSessionRef(sess, jobID, ev)
+		return
+	}
 	_, runnerAdapter, err := cm.chatRunner(sess.RunnerID)
 	var normalized []RunnerChatEvent
 	if err == nil {
@@ -345,15 +376,20 @@ func (cm *ChatManager) persistJobEvent(turn db.RunnerChatTurn, sess db.RunnerCha
 	cm.maybePersistNativeSessionRef(sess, jobID, ev)
 }
 
-func (cm *ChatManager) finalizeFromSnapshot(sess db.RunnerChatSession, turn db.RunnerChatTurn, snap agent.JobSnapshot) {
+func (cm *ChatManager) finalizeFromSnapshot(sess db.RunnerChatSession, turn db.RunnerChatTurn, snap agent.JobSnapshot, state *turnMirrorState) {
 	if latest, err := cm.DB.GetRunnerChatSession(context.Background(), sess.ID); err == nil {
 		sess = latest
 	}
 	finalText := extractFinalTextFromSnapshot(snap)
+	cm.maybeCaptureCodexRunnerPermission(turn, sess, state, finalText)
 	errMessage := extractErrorFromSnapshot(snap)
 	status := mapJobStatusToTurnStatus(snap.Status)
 	if status == "" {
 		status = db.RunnerChatTurnStatusFailed
+	}
+	if state != nil && state.permission != nil {
+		status = db.RunnerChatTurnStatusApprovalRequired
+		errMessage = ""
 	}
 
 	// Append assistant message into the shared timeline, even on failure
@@ -373,9 +409,28 @@ func (cm *ChatManager) finalizeFromSnapshot(sess db.RunnerChatSession, turn db.R
 		"runner_chat_turn_id":    turn.ID,
 		"continuation_mode":      turn.ContinuationMode,
 		"status":                 status,
+		"user_message":           turn.UserMessage,
+	}
+	if strings.TrimSpace(turn.Model) != "" {
+		assistantPayload["model"] = turn.Model
+	}
+	if strings.TrimSpace(turn.Mode) != "" {
+		assistantPayload["mode"] = turn.Mode
+	}
+	if strings.TrimSpace(turn.Isolation) != "" {
+		assistantPayload["isolation"] = turn.Isolation
+	}
+	if strings.TrimSpace(turn.Cwd) != "" {
+		assistantPayload["cwd"] = turn.Cwd
 	}
 	if strings.TrimSpace(sess.NativeSessionRef) != "" {
 		assistantPayload["native_session_ref"] = sess.NativeSessionRef
+	}
+	if state != nil && state.permission != nil {
+		assistantPayload["approval_id"] = state.permission.Decision.RequestID
+		assistantPayload["approval_request_id"] = state.permission.Decision.RequestID
+		assistantPayload["approval_state"] = "pending"
+		assistantPayload["runner_permission"] = runnerPermissionToMap(state.permission.Request)
 	}
 	if errMessage != "" {
 		assistantPayload["error"] = errMessage
@@ -402,6 +457,130 @@ func (cm *ChatManager) finalizeFromSnapshot(sess db.RunnerChatSession, turn db.R
 
 	// Update chat_session_meta with the latest preview / counts.
 	cm.bumpChatSessionMeta(sess.AppSessionKey, sess.RunnerID, sess.ID, finalText)
+}
+
+func (cm *ChatManager) approvedRunnerPermission(ctx context.Context, sess db.RunnerChatSession, req StartTurnRequest) (*RunnerPermissionRequest, error) {
+	if req.RunnerPermission == nil {
+		return nil, nil
+	}
+	permission, ok := NormalizeRunnerPermissionRequest(*req.RunnerPermission)
+	if !ok {
+		return nil, nil
+	}
+	if cm == nil || cm.Broker == nil {
+		return nil, fmt.Errorf("runner permission approvals unavailable")
+	}
+	decision, err := cm.Broker.EvaluateRunnerPermission(ctx, approval.RunnerPermissionEvaluation{
+		RunnerID:       sess.RunnerID,
+		PermissionKind: permission.Kind,
+		Access:         permission.Access,
+		TargetPath:     permission.TargetPath,
+		SessionID:      sess.AppSessionKey,
+		ApprovalToken:  strings.TrimSpace(req.ApprovalToken),
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !decision.Allowed {
+		if decision.RequiresApproval {
+			return nil, &tools.ApprovalRequiredError{ToolName: "runner_chat", RequestID: decision.RequestID}
+		}
+		return nil, fmt.Errorf("runner permission blocked: %s", decision.Reason)
+	}
+	return &permission, nil
+}
+
+func (cm *ChatManager) maybeCaptureRunnerPermission(turn db.RunnerChatTurn, sess db.RunnerChatSession, jobID string, state *turnMirrorState, raw AgentRunEvent) {
+	if state == nil || state.permission != nil {
+		return
+	}
+	var permission RunnerPermissionRequest
+	var ok bool
+	switch RunnerID(sess.RunnerID) {
+	case RunnerOpenCode:
+		permission, ok = detectOpenCodePermissionRequest(raw)
+	default:
+		return
+	}
+	if !ok {
+		return
+	}
+	cm.appendRunnerApprovalRequired(turn, sess, jobID, state, permission)
+}
+
+func (cm *ChatManager) maybeCaptureCodexRunnerPermission(turn db.RunnerChatTurn, sess db.RunnerChatSession, state *turnMirrorState, finalText string) {
+	if state == nil || state.permission != nil || RunnerID(sess.RunnerID) != RunnerCodex {
+		return
+	}
+	permission, ok := detectCodexPermissionRequest(finalText)
+	if !ok {
+		return
+	}
+	cm.appendRunnerApprovalRequired(turn, sess, turn.AgentCLIJobID, state, permission)
+}
+
+func (cm *ChatManager) appendRunnerApprovalRequired(turn db.RunnerChatTurn, sess db.RunnerChatSession, jobID string, state *turnMirrorState, permission RunnerPermissionRequest) {
+	if cm == nil || cm.Broker == nil || state == nil {
+		return
+	}
+	decision, err := cm.Broker.EvaluateRunnerPermission(context.Background(), approval.RunnerPermissionEvaluation{
+		RunnerID:       sess.RunnerID,
+		PermissionKind: permission.Kind,
+		Access:         permission.Access,
+		TargetPath:     permission.TargetPath,
+		SessionID:      sess.AppSessionKey,
+	})
+	if err != nil || !decision.RequiresApproval || decision.RequestID == 0 {
+		return
+	}
+	state.permission = &runnerApprovalState{
+		Request:  permission,
+		Decision: decision,
+		Message:  runnerPermissionApprovalMessage(permission),
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"status":              "approval_required",
+		"code":                "approval_required",
+		"approval_id":         decision.RequestID,
+		"approval_request_id": decision.RequestID,
+		"approval_state":      "pending",
+		"message":             state.permission.Message,
+		"runner_permission":   runnerPermissionToMap(permission),
+	})
+	if err := cm.DB.AppendRunnerChatEvent(context.Background(), db.RunnerChatEvent{
+		TurnID:      turn.ID,
+		SessionID:   sess.ID,
+		JobID:       jobID,
+		Seq:         db.NowMS(),
+		TS:          db.NowMS(),
+		Type:        "approval_required",
+		PayloadJSON: string(payload),
+	}); err != nil {
+		log.Printf("chat manager: append approval event failed: turn=%s err=%v", turn.ID, err)
+	}
+}
+
+func runnerPermissionApprovalMessage(permission RunnerPermissionRequest) string {
+	action := permission.Access
+	if action == "" {
+		action = runnerPermissionAccessRead
+	}
+	runner := strings.TrimSpace(permission.RunnerID)
+	if runner == "" {
+		runner = "runner"
+	}
+	target := strings.TrimSpace(permission.TargetPath)
+	if target == "" {
+		return "Approval is needed before the runner can continue."
+	}
+	return fmt.Sprintf("Approval is needed to let %s %s %s.", runner, action, target)
+}
+
+func shouldSuppressRunnerFailureEvent(raw AgentRunEvent) bool {
+	if raw.Type == "completion" && raw.Status == db.AgentCLIStatusFailed {
+		return true
+	}
+	return raw.Type == "error"
 }
 
 func (cm *ChatManager) bumpChatSessionMeta(appSessionKey, runnerID, runnerChatSessionID, lastFinalText string) {
@@ -587,6 +766,8 @@ func mapJobStatusToTurnStatus(status string) string {
 	switch status {
 	case "completed", "succeeded":
 		return db.RunnerChatTurnStatusSucceeded
+	case "approval_required":
+		return db.RunnerChatTurnStatusApprovalRequired
 	case "failed":
 		return db.RunnerChatTurnStatusFailed
 	case "aborted":
@@ -600,6 +781,8 @@ func mapJobStatusToTurnStatus(status string) string {
 func isTerminalJobStatus(status string) bool {
 	switch status {
 	case "completed", "succeeded", "failed", "aborted", "timed_out":
+		return true
+	case "approval_required":
 		return true
 	}
 	return false

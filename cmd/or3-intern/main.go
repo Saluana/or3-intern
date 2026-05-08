@@ -587,14 +587,15 @@ func main() {
 
 	if cfg.AgentCLI.Enabled {
 		agentCLIManager = &agentcli.Manager{
-			DB:            d,
-			Jobs:          serviceJobs,
-			Cfg:           cfg.AgentCLI,
-			MaxConcurrent: cfg.AgentCLI.MaxConcurrent,
-			MaxQueued:     cfg.AgentCLI.MaxQueued,
-			TaskTimeout:   time.Duration(cfg.AgentCLI.DefaultTimeoutSeconds) * time.Second,
-			Registry:      agentcli.NewDefaultRegistry(),
-			RestrictDir:   allowedRoot(cfg),
+			DB:                          d,
+			Jobs:                        serviceJobs,
+			Cfg:                         cfg.AgentCLI,
+			OpenCodeExternalDirectories: agentcli.OpenCodeExternalDirectoriesFromConfig(cfg),
+			MaxConcurrent:               cfg.AgentCLI.MaxConcurrent,
+			MaxQueued:                   cfg.AgentCLI.MaxQueued,
+			TaskTimeout:                 time.Duration(cfg.AgentCLI.DefaultTimeoutSeconds) * time.Second,
+			Registry:                    agentcli.NewDefaultRegistry(),
+			RestrictDir:                 allowedRoot(cfg),
 		}
 		if err := agentCLIManager.Start(ctx); err != nil {
 			fmt.Fprintln(os.Stderr, "agent CLI manager error:", err)

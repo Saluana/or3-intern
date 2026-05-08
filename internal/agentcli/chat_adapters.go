@@ -48,10 +48,38 @@ func (a *GeminiAdapter) BuildChatCommand(req RunnerChatCommandRequest) (CommandS
 }
 
 func (a *OpenCodeAdapter) NormalizeChatEvent(raw AgentRunEvent) []RunnerChatEvent {
+	if raw.Type == "structured" {
+		return normalizeOpenCodeStructuredChatEvent(raw)
+	}
+	if raw.Type == "output" && raw.Stream == "stdout" {
+		trimmed := strings.TrimSpace(raw.Chunk)
+		if trimmed == "" || strings.HasPrefix(trimmed, "{") || len(decodeStructuredPayloads(trimmed)) > 0 {
+			return []RunnerChatEvent{{
+				Type:    "runner_output",
+				Seq:     raw.Seq,
+				Stream:  raw.Stream,
+				Payload: rawEventPayload(raw),
+			}}
+		}
+	}
 	return normalizeGenericChatEvent(raw)
 }
 
 func (a *CodexAdapter) NormalizeChatEvent(raw AgentRunEvent) []RunnerChatEvent {
+	if raw.Type == "structured" {
+		return normalizeCodexStructuredChatEvent(raw)
+	}
+	if raw.Type == "output" && raw.Stream == "stdout" {
+		trimmed := strings.TrimSpace(raw.Chunk)
+		if trimmed == "" || strings.HasPrefix(trimmed, "{") || len(decodeStructuredPayloads(trimmed)) > 0 {
+			return []RunnerChatEvent{{
+				Type:    "runner_output",
+				Seq:     raw.Seq,
+				Stream:  raw.Stream,
+				Payload: rawEventPayload(raw),
+			}}
+		}
+	}
 	return normalizeGenericChatEvent(raw)
 }
 
@@ -94,17 +122,7 @@ func normalizeGenericChatEvent(raw AgentRunEvent) []RunnerChatEvent {
 	if raw.Type == "" {
 		return nil
 	}
-	payload := raw.Payload
-	if len(payload) == 0 {
-		payload, _ = json.Marshal(map[string]any{
-			"type":        raw.Type,
-			"stream":      raw.Stream,
-			"chunk":       raw.Chunk,
-			"status":      raw.Status,
-			"message":     raw.Message,
-			"duration_ms": raw.DurationMS,
-		})
-	}
+	payload := rawEventPayload(raw)
 	eventType := raw.Type
 	text := raw.Chunk
 	if raw.Type == "output" {
@@ -123,6 +141,114 @@ func normalizeGenericChatEvent(raw AgentRunEvent) []RunnerChatEvent {
 		Text:    text,
 		Payload: payload,
 	}}
+}
+
+func normalizeOpenCodeStructuredChatEvent(raw AgentRunEvent) []RunnerChatEvent {
+	if len(raw.Payload) == 0 {
+		return nil
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(raw.Payload, &obj); err != nil {
+		return nil
+	}
+	switch stringField(obj, "type") {
+	case "text":
+		text, ok := openCodeTextPart(obj["part"])
+		if !ok || text == "" {
+			return nil
+		}
+		return []RunnerChatEvent{{
+			Type:    "text_delta",
+			Seq:     raw.Seq,
+			Text:    text,
+			Payload: raw.Payload,
+		}}
+	case "assistant", "assistant_message":
+		text := extractOpenCodeAssistantText(obj)
+		if text == "" {
+			return nil
+		}
+		return []RunnerChatEvent{{
+			Type:    "text_delta",
+			Seq:     raw.Seq,
+			Text:    text,
+			Payload: raw.Payload,
+		}}
+	default:
+		return nil
+	}
+}
+
+func normalizeCodexStructuredChatEvent(raw AgentRunEvent) []RunnerChatEvent {
+	if len(raw.Payload) == 0 {
+		return nil
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(raw.Payload, &obj); err != nil {
+		return nil
+	}
+	switch stringField(obj, "type") {
+	case "item.completed":
+		text := extractCodexAgentMessageText(obj)
+		if text == "" {
+			return nil
+		}
+		return []RunnerChatEvent{{
+			Type:    "text_delta",
+			Seq:     raw.Seq,
+			Text:    text,
+			Payload: raw.Payload,
+		}}
+	default:
+		return nil
+	}
+}
+
+func openCodeTextPart(value any) (string, bool) {
+	part, ok := value.(map[string]any)
+	if !ok {
+		return "", false
+	}
+	if partType := stringField(part, "type"); partType != "" && partType != "text" {
+		return "", false
+	}
+	text, ok := part["text"].(string)
+	return text, ok
+}
+
+func extractOpenCodeAssistantText(obj map[string]any) string {
+	for _, key := range []string{"message", "content", "text"} {
+		if text, ok := obj[key].(string); ok && text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func extractCodexAgentMessageText(obj map[string]any) string {
+	item, ok := obj["item"].(map[string]any)
+	if !ok || stringField(item, "type") != "agent_message" {
+		return ""
+	}
+	if text := extractString(item["text"]); text != "" {
+		return text
+	}
+	return extractString(item["content"])
+}
+
+func rawEventPayload(raw AgentRunEvent) json.RawMessage {
+	payload := raw.Payload
+	if len(payload) == 0 {
+		payload, _ = json.Marshal(map[string]any{
+			"type":        raw.Type,
+			"stream":      raw.Stream,
+			"chunk":       raw.Chunk,
+			"status":      raw.Status,
+			"message":     raw.Message,
+			"duration_ms": raw.DurationMS,
+		})
+	}
+	return payload
 }
 
 func extractOpenCodeSessionRefPayload(event AgentRunEvent) string {

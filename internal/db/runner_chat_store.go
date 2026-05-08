@@ -10,12 +10,13 @@ import (
 
 // Runner chat session/turn statuses.
 const (
-	RunnerChatTurnStatusQueued    = "queued"
-	RunnerChatTurnStatusRunning   = "running"
-	RunnerChatTurnStatusSucceeded = "succeeded"
-	RunnerChatTurnStatusFailed    = "failed"
-	RunnerChatTurnStatusAborted   = "aborted"
-	RunnerChatTurnStatusTimedOut  = "timed_out"
+	RunnerChatTurnStatusQueued           = "queued"
+	RunnerChatTurnStatusRunning          = "running"
+	RunnerChatTurnStatusSucceeded        = "succeeded"
+	RunnerChatTurnStatusApprovalRequired = "approval_required"
+	RunnerChatTurnStatusFailed           = "failed"
+	RunnerChatTurnStatusAborted          = "aborted"
+	RunnerChatTurnStatusTimedOut         = "timed_out"
 )
 
 // ErrRunnerChatTurnActive is returned when a session already has a queued or

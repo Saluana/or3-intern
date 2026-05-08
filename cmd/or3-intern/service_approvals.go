@@ -283,6 +283,14 @@ func decodeServiceAllowlistRequest(body io.Reader) (serviceAllowlistRequest, err
 			}
 		}
 		matcher = item
+	case string(approval.SubjectRunnerPermission):
+		var item approval.RunnerPermissionAllowlistMatcher
+		if len(payload.Matcher) > 0 {
+			if err := json.Unmarshal(payload.Matcher, &item); err != nil {
+				return serviceAllowlistRequest{}, fmt.Errorf("invalid request body")
+			}
+		}
+		matcher = item
 	default:
 		return serviceAllowlistRequest{}, fmt.Errorf("unsupported allowlist domain")
 	}

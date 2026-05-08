@@ -119,7 +119,7 @@ func TestChatManagerPersistsNormalizedRunnerEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateRunnerChatTurn: %v", err)
 	}
-	cm.persistJobEvent(turn, sess, "job-events", agent.JobEvent{
+	cm.persistJobEvent(turn, sess, "job-events", &turnMirrorState{}, agent.JobEvent{
 		Sequence: 3,
 		Type:     "output",
 		Data: map[string]any{

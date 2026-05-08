@@ -395,17 +395,24 @@ func (a *CodexAdapter) Detect(ctx context.Context, opts DetectOptions) RunnerInf
 }
 
 func (a *CodexAdapter) BuildCommand(req AgentRunRequest) (CommandSpec, error) {
-	args := []string{"exec", "--json", "--color", "never"}
+	mode := RunnerMode(req.Mode)
+	args := make([]string, 0, 16)
+	if mode != RunnerModeSandboxAuto {
+		args = append(args, "--ask-for-approval", "never")
+	}
+	args = append(args, "exec", "--json", "--color", "never", "--skip-git-repo-check")
 	if req.Cwd != "" {
 		args = append(args, "--cd", req.Cwd)
 	}
+	if permission, ok := runnerPermissionFromMeta(req.Meta); ok && permission.Access == runnerPermissionAccessWrite {
+		args = append(args, "--add-dir", permission.TargetPath)
+	}
 
-	mode := RunnerMode(req.Mode)
 	switch mode {
 	case RunnerModeReview:
-		args = append(args, "--sandbox", "read-only", "--ask-for-approval", "never")
+		args = append(args, "--sandbox", "read-only")
 	case RunnerModeSafeEdit, "":
-		args = append(args, "--sandbox", "workspace-write", "--ask-for-approval", "never")
+		args = append(args, "--sandbox", "workspace-write")
 	case RunnerModeSandboxAuto:
 		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
 	default:

@@ -34,6 +34,11 @@ type Manager struct {
 	Registry *RunnerRegistry
 	Process  *ProcessManager
 
+	// OpenCodeExternalDirectories are OR3-owned directories that OpenCode may
+	// access outside the current cwd without falling back to a global permissions
+	// bypass.
+	OpenCodeExternalDirectories []string
+
 	MaxConcurrent int
 	MaxQueued     int
 	TaskTimeout   time.Duration
@@ -363,11 +368,18 @@ func (m *Manager) executeRun(run db.AgentCLIRun) {
 		m.finalizeRun(runCtx, run, db.AgentCLIStatusFailed, buildErr.Error(), ProcessOutput{ExitCode: -1, DurationMS: 0})
 		return
 	}
+	runnerID := cmdSpec.RunnerID
+	if runnerID == "" {
+		runnerID = RunnerID(run.RunnerID)
+	}
+	additionalEnv := m.runnerAdditionalEnv(runnerID, parseAgentRunMeta(run.MetaJSON))
 
 	// Build child environment — use os.Environ() as the base so PATH, HOME,
 	// and TMPDIR are preserved through the allowlist filter.
 	if len(cmdSpec.Env) == 0 {
-		cmdSpec.Env = BuildAgentCLIEnv(os.Environ(), m.configSnapshot().ChildEnvAllowlist, nil)
+		cmdSpec.Env = BuildAgentCLIEnv(os.Environ(), m.configSnapshot().ChildEnvAllowlist, additionalEnv)
+	} else if len(additionalEnv) > 0 {
+		cmdSpec.Env = mergeEnvOverlay(cmdSpec.Env, additionalEnv)
 	}
 
 	// Emit started event with argv preview
@@ -723,6 +735,29 @@ func (m *Manager) detectOptions(cfg config.AgentCLIConfig) DetectOptions {
 		DisabledRunners: cfg.DisabledRunners,
 		Env:             BuildAgentCLIEnv(os.Environ(), cfg.ChildEnvAllowlist, nil),
 	}
+}
+
+func (m *Manager) runnerAdditionalEnv(runnerID RunnerID, meta map[string]any) map[string]string {
+	if m == nil || runnerID != RunnerOpenCode {
+		return nil
+	}
+	directories := m.openCodeExternalDirectoriesSnapshot()
+	if permission, ok := runnerPermissionFromMeta(meta); ok {
+		directories = append(directories, permission.TargetPath)
+	}
+	return buildOpenCodeConfigEnv(directories)
+}
+
+func (m *Manager) openCodeExternalDirectoriesSnapshot() []string {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.OpenCodeExternalDirectories) == 0 {
+		return nil
+	}
+	return append([]string{}, m.OpenCodeExternalDirectories...)
 }
 
 func isRunnerDisabled(id RunnerID, disabled []string) bool {

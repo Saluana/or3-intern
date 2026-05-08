@@ -30,6 +30,13 @@ func AllRunners() []RunnerSpec {
 				SafeSandboxFlag:     false,
 				DangerousBypassFlag: true,
 				StdinPrompt:         false,
+				Chat: RunnerChatCapabilities{
+					ChatSelectable:            true,
+					ChatReplay:                true,
+					ChatNativeSession:         true,
+					ChatResume:                true,
+					ChatSessionRefExtractable: true,
+				},
 			},
 		},
 		{
@@ -46,6 +53,10 @@ func AllRunners() []RunnerSpec {
 				SafeSandboxFlag:     true,
 				DangerousBypassFlag: true,
 				StdinPrompt:         false,
+				Chat: RunnerChatCapabilities{
+					ChatSelectable: true,
+					ChatReplay:     true,
+				},
 			},
 		},
 		{
@@ -62,6 +73,10 @@ func AllRunners() []RunnerSpec {
 				SafeSandboxFlag:     false,
 				DangerousBypassFlag: true,
 				StdinPrompt:         false,
+				Chat: RunnerChatCapabilities{
+					ChatSelectable: true,
+					ChatReplay:     true,
+				},
 			},
 		},
 		{
@@ -78,6 +93,10 @@ func AllRunners() []RunnerSpec {
 				SafeSandboxFlag:     false,
 				DangerousBypassFlag: true,
 				StdinPrompt:         false,
+				Chat: RunnerChatCapabilities{
+					ChatSelectable: true,
+					ChatReplay:     true,
+				},
 			},
 		},
 		{
@@ -94,6 +113,10 @@ func AllRunners() []RunnerSpec {
 				SafeSandboxFlag:     false,
 				DangerousBypassFlag: false,
 				StdinPrompt:         false,
+				Chat: RunnerChatCapabilities{
+					ChatSelectable: true,
+					ChatReplay:     true,
+				},
 			},
 		},
 	}
@@ -230,6 +253,20 @@ func (r *RunnerRegistry) BuildCommand(req AgentRunRequest) (CommandSpec, error) 
 		return CommandSpec{}, fmt.Errorf("no adapter for runner %q", req.RunnerID)
 	}
 	return adapter.BuildCommand(req)
+}
+
+// BuildChatCommand builds a chat-turn command for a runner that supports the
+// RunnerChatAdapter extension.
+func (r *RunnerRegistry) BuildChatCommand(id RunnerID, req RunnerChatCommandRequest) (CommandSpec, error) {
+	adapter, ok := r.Adapter(id)
+	if !ok {
+		return CommandSpec{}, fmt.Errorf("no adapter for runner %q", id)
+	}
+	chatAdapter, ok := adapter.(RunnerChatAdapter)
+	if !ok {
+		return CommandSpec{}, fmt.Errorf("runner %q does not support chat commands", id)
+	}
+	return chatAdapter.BuildChatCommand(req)
 }
 
 // ValidateRunPolicy checks that the requested mode and isolation are compatible.

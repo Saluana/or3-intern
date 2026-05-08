@@ -28,6 +28,7 @@ type serviceServer struct {
 	cronSvc             *cron.Service
 	subagentManager     *agent.SubagentManager
 	agentCLIManager     *agentcli.Manager
+	chatManager         *agentcli.ChatManager
 	jobs                *agent.JobRegistry
 	broker              *approval.Broker
 	unsafeDev           bool
@@ -138,6 +139,12 @@ func runServiceCommandWithBrokerOptionsAndCron(ctx context.Context, cfg config.C
 		jobs = agent.NewJobRegistry(0, 0)
 	}
 	server := &serviceServer{config: cfg, configPath: cfgPathOrDefault(""), runtime: rt, cronSvc: cronSvc, subagentManager: subagentManager, agentCLIManager: agentCLIManager, jobs: jobs, broker: broker, unsafeDev: unsafeDev}
+	if rt.DB != nil {
+		server.chatManager = &agentcli.ChatManager{DB: rt.DB, Manager: agentCLIManager, Jobs: jobs}
+		if err := server.chatManager.ReconcileOnStartup(ctx); err != nil {
+			log.Printf("chat manager: startup reconciliation failed: %v", err)
+		}
+	}
 	authSvc := server.app().Auth()
 	mux := newServiceMux(server)
 
@@ -198,6 +205,9 @@ func newServiceMux(server *serviceServer) *http.ServeMux {
 	handleServiceRoute(mux, "/internal/v1/terminal/sessions", server.handleTerminal, true)
 	handleServiceRoute(mux, "/internal/v1/agent-runners", server.handleAgentRunners, false)
 	handleServiceRoute(mux, "/internal/v1/agent-runs", server.handleAgentRuns, true)
+	handleServiceRoute(mux, "/internal/v1/chat-runners", server.handleChatRunners, false)
+	handleServiceRoute(mux, "/internal/v1/chat-sessions", server.handleChatSessions, true)
+	handleServiceRoute(mux, "/internal/v1/runner-chat/sessions", server.handleRunnerChatSessions, true)
 	return mux
 }
 

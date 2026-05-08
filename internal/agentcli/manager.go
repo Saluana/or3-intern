@@ -357,35 +357,8 @@ func (m *Manager) executeRun(run db.AgentCLIRun) {
 		})
 	}
 
-	// Build command through registry adapter
-	req := AgentRunRequest{
-		RunnerID:  run.RunnerID,
-		Task:      run.Task,
-		Cwd:       run.Cwd,
-		Model:     run.Model,
-		Mode:      run.Mode,
-		Isolation: run.Isolation,
-	}
-	// Restore max_turns from persisted meta_json
-	if run.MetaJSON != "" && run.MetaJSON != "{}" {
-		var meta map[string]any
-		if err := json.Unmarshal([]byte(run.MetaJSON), &meta); err == nil {
-			if mt, ok := meta["_max_turns"]; ok {
-				switch v := mt.(type) {
-				case float64:
-					req.MaxTurns = int(v)
-				}
-			}
-		}
-	}
-
 	var cmdSpec CommandSpec
-	var buildErr error
-	if m.Registry != nil {
-		cmdSpec, buildErr = m.Registry.BuildCommand(req)
-	} else {
-		buildErr = fmt.Errorf("no runner registry configured")
-	}
+	cmdSpec, buildErr := m.buildCommandSpecForRun(run)
 	if buildErr != nil {
 		m.finalizeRun(runCtx, run, db.AgentCLIStatusFailed, buildErr.Error(), ProcessOutput{ExitCode: -1, DurationMS: 0})
 		return
@@ -614,7 +587,7 @@ func (m *Manager) signalN(n int) {
 }
 
 func eventToMap(e AgentRunEvent) map[string]any {
-	return map[string]any{
+	out := map[string]any{
 		"type":        e.Type,
 		"seq":         e.Seq,
 		"stream":      e.Stream,
@@ -625,6 +598,84 @@ func eventToMap(e AgentRunEvent) map[string]any {
 		"message":     e.Message,
 		"duration_ms": e.DurationMS,
 	}
+	if len(e.Payload) > 0 {
+		var payload any
+		if err := json.Unmarshal(e.Payload, &payload); err == nil {
+			out["payload"] = payload
+		} else {
+			out["payload_json"] = string(e.Payload)
+		}
+	}
+	return out
+}
+
+func (m *Manager) buildCommandSpecForRun(run db.AgentCLIRun) (CommandSpec, error) {
+	if m.Registry == nil {
+		return CommandSpec{}, fmt.Errorf("no runner registry configured")
+	}
+	meta := parseAgentRunMeta(run.MetaJSON)
+	req := AgentRunRequest{
+		RunnerID:  run.RunnerID,
+		Task:      run.Task,
+		Cwd:       run.Cwd,
+		Model:     run.Model,
+		Mode:      run.Mode,
+		Isolation: run.Isolation,
+		Meta:      meta,
+	}
+	if mt, ok := meta["_max_turns"]; ok {
+		switch v := mt.(type) {
+		case float64:
+			req.MaxTurns = int(v)
+		case int:
+			req.MaxTurns = v
+		}
+	}
+	if sessionID := strings.TrimSpace(stringMeta(meta, "runner_chat_session_id")); sessionID != "" {
+		chatReq := RunnerChatCommandRequest{
+			SessionID:        sessionID,
+			TurnID:           stringMeta(meta, "runner_chat_turn_id"),
+			NativeSessionRef: stringMeta(meta, "runner_chat_native_session_ref"),
+			ContinuationMode: ContinuationMode(firstNonEmptyStringMeta(meta, "runner_chat_continuation_mode", string(ContinuationReplay))),
+			ReplayPrompt:     firstNonEmptyStringMeta(meta, "runner_chat_replay_prompt", run.Task),
+			UserMessage:      firstNonEmptyStringMeta(meta, "runner_chat_user_message", run.Task),
+			Model:            run.Model,
+			Mode:             run.Mode,
+			Isolation:        run.Isolation,
+			MaxTurns:         req.MaxTurns,
+			Cwd:              run.Cwd,
+			TimeoutSeconds:   run.TimeoutSeconds,
+			Meta:             meta,
+		}
+		return m.Registry.BuildChatCommand(RunnerID(run.RunnerID), chatReq)
+	}
+	return m.Registry.BuildCommand(req)
+}
+
+func parseAgentRunMeta(metaJSON string) map[string]any {
+	if strings.TrimSpace(metaJSON) == "" || metaJSON == "{}" {
+		return map[string]any{}
+	}
+	var meta map[string]any
+	if err := json.Unmarshal([]byte(metaJSON), &meta); err != nil || meta == nil {
+		return map[string]any{}
+	}
+	return meta
+}
+
+func stringMeta(meta map[string]any, key string) string {
+	if meta == nil {
+		return ""
+	}
+	value, _ := meta[key].(string)
+	return strings.TrimSpace(value)
+}
+
+func firstNonEmptyStringMeta(meta map[string]any, key string, fallback string) string {
+	if value := stringMeta(meta, key); value != "" {
+		return value
+	}
+	return strings.TrimSpace(fallback)
 }
 
 func newAgentCLIJobID() string {

@@ -22,6 +22,9 @@ type Dispatcher struct {
 }
 
 func New(b *bus.Bus, defaultSessionKey string, agentCLI AgentCLIEnqueuer) cron.Runner {
+	if b == nil {
+		panic("cronrunner dispatcher event bus not configured")
+	}
 	d := Dispatcher{Bus: b, DefaultSessionKey: defaultSessionKey, AgentCLI: agentCLI}
 	return d.Run
 }
@@ -38,9 +41,6 @@ func (d Dispatcher) Run(ctx context.Context, job cron.CronJob) (cron.RunResult, 
 }
 
 func (d Dispatcher) publishAgentTurn(job cron.CronJob, payload cron.CronPayload) (cron.RunResult, error) {
-	if d.Bus == nil {
-		return cron.RunResult{}, fmt.Errorf("event bus unavailable")
-	}
 	msg := payload.Message
 	if strings.TrimSpace(msg) == "" {
 		msg = "cron job: " + job.Name

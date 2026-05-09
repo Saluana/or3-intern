@@ -118,7 +118,7 @@ func Default() Config {
 		FavoriteModels:                   defaultFavoriteModelsConfig(),
 		Tools:                            defaultToolsConfig(),
 		Hardening:                        defaultHardeningConfig(),
-		Cron:                             CronConfig{Enabled: true, StorePath: filepath.Join(root, "cron.json")},
+		Cron:                             CronConfig{Enabled: true, StorePath: filepath.Join(root, "cron.db")},
 		Service:                          defaultServiceConfig(),
 		Heartbeat: HeartbeatConfig{
 			Enabled:         false,

@@ -2,11 +2,10 @@ package agent
 
 import (
 	"context"
-	"crypto/sha1"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"sort"
 	"strings"
 
@@ -136,8 +135,9 @@ func stableToolCallID(prefix string, index int, name, args string) string {
 	if strings.TrimSpace(prefix) == "" {
 		prefix = "call"
 	}
-	sum := sha1.Sum([]byte(fmt.Sprintf("%d:%s:%s", index, name, canonicalJSON(args))))
-	return fmt.Sprintf("%s_%d_%s", prefix, index+1, hex.EncodeToString(sum[:])[:8])
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(fmt.Sprintf("%d:%s:%s", index, name, canonicalJSON(args))))
+	return fmt.Sprintf("%s_%d_%08x", prefix, index+1, h.Sum32())
 }
 
 func canonicalJSON(raw string) string {

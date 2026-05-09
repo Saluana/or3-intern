@@ -3,9 +3,13 @@ package cron
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -26,11 +30,17 @@ func mustAddJob(t *testing.T, svc *Service, job CronJob) {
 
 func mustRunNow(t *testing.T, svc *Service, id string, force bool) bool {
 	t.Helper()
-	found, err := svc.RunNow(context.Background(), id, force)
+	job, err := svc.RunNow(context.Background(), id, force)
 	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return false
+		}
 		t.Fatalf("RunNow: %v", err)
 	}
-	return found
+	if !force && !job.Enabled {
+		return false
+	}
+	return true
 }
 
 func makeService(t *testing.T) (*Service, string) {
@@ -42,6 +52,10 @@ func makeService(t *testing.T) (*Service, string) {
 	})
 	return svc, path
 }
+
+type stubScheduledTimer struct{}
+
+func (stubScheduledTimer) Stop() bool { return true }
 
 func TestNew(t *testing.T) {
 	svc, _ := makeService(t)
@@ -542,17 +556,24 @@ func TestRunNow_UpdatesLastRun(t *testing.T) {
 
 func TestArmJob_KindAt_FutureTime(t *testing.T) {
 	runCh := make(chan struct{}, 1)
+	scheduledCh := make(chan time.Duration, 1)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron.json")
+	fixedNow := time.Unix(1_700_000_000, 0).UTC()
 	svc := New(path, func(ctx context.Context, job CronJob) (RunResult, error) {
 		runCh <- struct{}{}
 		return RunResult{}, nil
 	})
+	svc.now = func() time.Time { return fixedNow }
+	svc.after = func(delay time.Duration, fn func()) scheduledTimer {
+		scheduledCh <- delay
+		go fn()
+		return stubScheduledTimer{}
+	}
 	mustStartService(t, svc)
 	defer svc.Stop()
 
-	// Schedule to run very soon
-	atMS := time.Now().Add(100 * time.Millisecond).UnixMilli()
+	atMS := fixedNow.Add(time.Second).UnixMilli()
 	mustAddJob(t, svc, CronJob{
 		ID:      "at-future",
 		Enabled: true,
@@ -562,11 +583,18 @@ func TestArmJob_KindAt_FutureTime(t *testing.T) {
 		},
 	})
 
-	// Wait for it to run
+	select {
+	case delay := <-scheduledCh:
+		if delay <= 0 {
+			t.Fatalf("expected positive schedule delay, got %s", delay)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("timeout waiting for KindAt timer scheduling")
+	}
+
 	select {
 	case <-runCh:
-	// success
-	case <-time.After(2 * time.Second):
+	case <-time.After(100 * time.Millisecond):
 		t.Error("timeout waiting for KindAt job to run")
 	}
 }
@@ -624,26 +652,6 @@ func TestStart_WithExistingJobs(t *testing.T) {
 	jobs, _ := svc2.List()
 	if len(jobs) != 1 {
 		t.Errorf("expected 1 job loaded from file, got %d", len(jobs))
-	}
-}
-
-func TestRunNow_SaveError(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "cron.json")
-	svc := New(path, func(ctx context.Context, job CronJob) (RunResult, error) { return RunResult{}, nil })
-	mustStartService(t, svc)
-	defer svc.Stop()
-
-	mustAddJob(t, svc, CronJob{
-		ID:       "save-err",
-		Enabled:  true,
-		Schedule: CronSchedule{Kind: KindEvery, EveryMS: 60000},
-	})
-
-	// Run successfully
-	found := mustRunNow(t, svc, "save-err", false)
-	if !found {
-		t.Error("expected found=true")
 	}
 }
 
@@ -794,47 +802,128 @@ func TestRunNow_StoresEnqueuedRunIDs(t *testing.T) {
 	}
 }
 
-func TestCronRunnerPerJobSession(t *testing.T) {
-	svc, _ := makeService(t)
-	if err := svc.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+func TestService_ConcurrentMutationAndLifecycle(t *testing.T) {
+	var ran atomic.Int32
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cron.json")
+	svc := New(path, func(ctx context.Context, job CronJob) (RunResult, error) {
+		ran.Add(1)
+		return RunResult{}, nil
+	})
+	mustStartService(t, svc)
 	defer svc.Stop()
 
-	// Track which session key the runner sees
-	var capturedSessionKey string
-	var runnerCalled bool
-	svc2 := &Service{
-		path: svc.path,
-		runner: func(ctx context.Context, job CronJob) (RunResult, error) {
-			capturedSessionKey = job.Payload.SessionKey
-			runnerCalled = true
-			return RunResult{}, nil
-		},
+	const runJobs = 8
+	const removeJobs = 8
+	const addJobs = 8
+	const lifecycleCycles = 4
+
+	for i := 0; i < runJobs; i++ {
+		mustAddJob(t, svc, CronJob{
+			ID:       fmt.Sprintf("run-%d", i),
+			Enabled:  true,
+			Schedule: CronSchedule{Kind: KindEvery, EveryMS: 60000},
+		})
+	}
+	for i := 0; i < removeJobs; i++ {
+		mustAddJob(t, svc, CronJob{
+			ID:       fmt.Sprintf("remove-%d", i),
+			Enabled:  true,
+			Schedule: CronSchedule{Kind: KindEvery, EveryMS: 60000},
+		})
 	}
 
-	// Simulate a job with per-job SessionKey
-	job := CronJob{
-		ID:       "per-job-session",
-		Name:     "Per Job Session Test",
-		Enabled:  true,
-		Schedule: CronSchedule{Kind: KindEvery, EveryMS: 60000},
-		Payload: CronPayload{
-			Kind:       "agent_turn",
-			Message:    "per-job message",
-			SessionKey: "per-job-session-key",
-		},
+	errCh := make(chan error, runJobs+removeJobs+addJobs)
+	var wg sync.WaitGroup
+	for i := 0; i < runJobs; i++ {
+		id := fmt.Sprintf("run-%d", i)
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			job, err := svc.RunNow(context.Background(), id, false)
+			if err != nil {
+				errCh <- fmt.Errorf("RunNow %s: %w", id, err)
+				return
+			}
+			if job.ID != id {
+				errCh <- fmt.Errorf("RunNow returned job %q, want %q", job.ID, id)
+			}
+		}(id)
+	}
+	for i := 0; i < removeJobs; i++ {
+		id := fmt.Sprintf("remove-%d", i)
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			removed, err := svc.Remove(id)
+			if err != nil {
+				errCh <- fmt.Errorf("Remove %s: %w", id, err)
+				return
+			}
+			if !removed {
+				errCh <- fmt.Errorf("Remove %s returned false", id)
+			}
+		}(id)
+	}
+	for i := 0; i < addJobs; i++ {
+		id := fmt.Sprintf("add-%d", i)
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			if err := svc.Add(CronJob{ID: id, Enabled: true, Schedule: CronSchedule{Kind: KindEvery, EveryMS: 60000}}); err != nil {
+				errCh <- fmt.Errorf("Add %s: %w", id, err)
+			}
+		}(id)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for cycle := 0; cycle < lifecycleCycles; cycle++ {
+			svc.Stop()
+			if err := svc.Start(); err != nil {
+				errCh <- fmt.Errorf("Start cycle %d: %w", cycle, err)
+				return
+			}
+		}
+	}()
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Error(err)
+		}
 	}
 
-	// Directly call the runner with the job
-	if _, err := svc2.runner(context.Background(), job); err != nil {
-		t.Fatalf("runner: %v", err)
+	if got := ran.Load(); got != runJobs {
+		t.Fatalf("expected %d successful run invocations, got %d", runJobs, got)
 	}
 
-	if !runnerCalled {
-		t.Fatal("expected runner to be called")
+	jobs, err := svc.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
 	}
-	if capturedSessionKey != "per-job-session-key" {
-		t.Errorf("expected SessionKey %q, got %q", "per-job-session-key", capturedSessionKey)
+	seen := make(map[string]struct{}, len(jobs))
+	for _, job := range jobs {
+		if _, ok := seen[job.ID]; ok {
+			t.Fatalf("duplicate job id %q after concurrent operations", job.ID)
+		}
+		seen[job.ID] = struct{}{}
+	}
+	for i := 0; i < runJobs; i++ {
+		id := fmt.Sprintf("run-%d", i)
+		if _, ok := seen[id]; !ok {
+			t.Fatalf("expected retained job %q after concurrent operations", id)
+		}
+	}
+	for i := 0; i < addJobs; i++ {
+		id := fmt.Sprintf("add-%d", i)
+		if _, ok := seen[id]; !ok {
+			t.Fatalf("expected added job %q after concurrent operations", id)
+		}
+	}
+	for i := 0; i < removeJobs; i++ {
+		if _, ok := seen[fmt.Sprintf("remove-%d", i)]; ok {
+			t.Fatalf("removed job remove-%d still present", i)
+		}
 	}
 }

@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	rootchannels "or3-intern/internal/channels"
 )
 
 func TestSendMessage_NoDeliver(t *testing.T) {
@@ -172,7 +174,7 @@ func TestSendMessage_MediaOnlySuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CanonicalizePath: %v", err)
 	}
-	paths, ok := gotMeta["media_paths"].([]string)
+	paths, ok := gotMeta[rootchannels.MetaMediaPaths].([]string)
 	if !ok || len(paths) != 1 || paths[0] != wantPath {
 		t.Fatalf("expected media_paths to be passed through, got %#v", gotMeta)
 	}

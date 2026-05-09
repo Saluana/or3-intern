@@ -51,6 +51,8 @@ type serviceFileReadResponse struct {
 	Content    string `json:"content"`
 }
 
+const maxServiceFileSearchVisited = 5000
+
 func (s *serviceServer) handleFiles(w http.ResponseWriter, r *http.Request) {
 	if !requireServiceRole(w, r, approval.RoleOperator) {
 		return
@@ -285,48 +287,88 @@ func (s *serviceServer) handleFileSearch(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	items := make([]serviceFileSearchItem, 0, limit)
-	visited := 0
-	const maxVisited = 5000
-	_ = filepath.WalkDir(absRoot, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil || path == absRoot {
-			return nil
-		}
-		name := entry.Name()
-		if entry.IsDir() && isIgnoredSearchDir(name) {
-			return filepath.SkipDir
-		}
-		visited++
-		if visited > maxVisited {
-			return filepath.SkipAll
-		}
-		if entry.IsDir() {
-			return nil
-		}
-		rel, err := filepath.Rel(absRoot, path)
-		if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return nil
-		}
-		slashRel := filepath.ToSlash(rel)
-		if query != "" && !fileSearchMatches(query, name, slashRel) {
-			return nil
-		}
-		info, err := entry.Info()
-		if err != nil {
-			return nil
-		}
-		items = append(items, serviceFileSearchItem{
-			serviceFileEntry: serviceFileEntry{Name: name, Path: slashRel, Type: "file", Size: info.Size(), ModifiedAt: info.ModTime().Format(time.RFC3339), MimeType: mime.TypeByExtension(filepath.Ext(name))},
-			RootID:           root.ID,
-			RootLabel:        root.Label,
-		})
-		if len(items) >= limit {
-			return filepath.SkipAll
-		}
-		return nil
-	})
+	items := serviceFileSearchItems(absRoot, root, query, limit)
 
 	writeServiceJSON(w, http.StatusOK, map[string]any{"root_id": root.ID, "query": query, "items": items})
+}
+
+func serviceFileSearchItems(absRoot string, root serviceFileRoot, query string, limit int) []serviceFileSearchItem {
+	if limit <= 0 {
+		return nil
+	}
+
+	items := make([]serviceFileSearchItem, 0, limit)
+	queue := []string{absRoot}
+	visited := 0
+
+	for len(queue) > 0 && len(items) < limit && visited < maxServiceFileSearchVisited {
+		dir := queue[0]
+		queue = queue[1:]
+
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+
+		for _, entry := range entries {
+			if len(items) >= limit || visited >= maxServiceFileSearchVisited {
+				break
+			}
+
+			visited++
+			name := entry.Name()
+			childPath := filepath.Join(dir, name)
+			rel, err := filepath.Rel(absRoot, childPath)
+			if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				continue
+			}
+			slashRel := filepath.ToSlash(rel)
+
+			if query == "" || fileSearchMatches(query, name, slashRel) {
+				item, ok := newServiceFileSearchItem(entry, slashRel, root)
+				if ok {
+					items = append(items, item)
+					if len(items) >= limit {
+						break
+					}
+				}
+			}
+
+			if entry.IsDir() && !isIgnoredSearchDir(name) {
+				queue = append(queue, childPath)
+			}
+		}
+	}
+
+	return items
+}
+
+func newServiceFileSearchItem(entry os.DirEntry, relPath string, root serviceFileRoot) (serviceFileSearchItem, bool) {
+	info, err := entry.Info()
+	if err != nil {
+		return serviceFileSearchItem{}, false
+	}
+
+	entryType := "file"
+	item := serviceFileSearchItem{
+		serviceFileEntry: serviceFileEntry{
+			Name:       entry.Name(),
+			Path:       relPath,
+			Type:       entryType,
+			Size:       info.Size(),
+			ModifiedAt: info.ModTime().Format(time.RFC3339),
+			MimeType:   mime.TypeByExtension(filepath.Ext(entry.Name())),
+		},
+		RootID:    root.ID,
+		RootLabel: root.Label,
+	}
+	if entry.IsDir() {
+		item.Type = "directory"
+		item.Size = 0
+		item.MimeType = ""
+	}
+
+	return item, true
 }
 
 func parsePositiveInt(raw string, fallback int) int {

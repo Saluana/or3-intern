@@ -69,17 +69,17 @@ func (r *Runtime) quotaChecks(message *quotaCounters, session *quotaCounters, to
 		{Scope: "session", Name: "tool_calls", Label: "per-session total tool-call", ConfigKey: "hardening.quotas.maxSessionToolCalls", Current: session.ToolCalls, Limit: cfg.MaxSessionToolCalls},
 	}
 	switch toolName {
-	case "exec", "run_skill", "run_skill_script":
+	case tools.ToolNameExec, tools.ToolNameRunSkill, tools.ToolNameRunSkillScript:
 		checks = append(checks,
 			quotaCheck{Scope: "message", Name: "exec_calls", Label: "per-message exec-call", ConfigKey: "hardening.quotas.maxExecCalls", Current: message.ExecCalls, Limit: cfg.MaxExecCalls},
 			quotaCheck{Scope: "session", Name: "exec_calls", Label: "per-session exec-call", ConfigKey: "hardening.quotas.maxSessionExecCalls", Current: session.ExecCalls, Limit: cfg.MaxSessionExecCalls},
 		)
-	case "web_fetch", "web_fetch_markdown", "web_search":
+	case tools.ToolNameWebFetch, tools.ToolNameWebFetchMarkdown, tools.ToolNameWebSearch:
 		checks = append(checks,
 			quotaCheck{Scope: "message", Name: "web_calls", Label: "per-message web-call", ConfigKey: "hardening.quotas.maxWebCalls", Current: message.WebCalls, Limit: cfg.MaxWebCalls},
 			quotaCheck{Scope: "session", Name: "web_calls", Label: "per-session web-call", ConfigKey: "hardening.quotas.maxSessionWebCalls", Current: session.WebCalls, Limit: cfg.MaxSessionWebCalls},
 		)
-	case "spawn_subagent":
+	case tools.ToolNameSpawnSubagent:
 		checks = append(checks,
 			quotaCheck{Scope: "message", Name: "subagent_calls", Label: "per-message subagent-call", ConfigKey: "hardening.quotas.maxSubagentCalls", Current: message.SubagentCalls, Limit: cfg.MaxSubagentCalls},
 			quotaCheck{Scope: "session", Name: "subagent_calls", Label: "per-session subagent-call", ConfigKey: "hardening.quotas.maxSessionSubagentCalls", Current: session.SubagentCalls, Limit: cfg.MaxSessionSubagentCalls},
@@ -143,11 +143,11 @@ func incrementQuotaCounters(counters *quotaCounters, toolName string) {
 	}
 	counters.ToolCalls++
 	switch toolName {
-	case "exec", "run_skill", "run_skill_script":
+	case tools.ToolNameExec, tools.ToolNameRunSkill, tools.ToolNameRunSkillScript:
 		counters.ExecCalls++
-	case "web_fetch", "web_fetch_markdown", "web_search":
+	case tools.ToolNameWebFetch, tools.ToolNameWebFetchMarkdown, tools.ToolNameWebSearch:
 		counters.WebCalls++
-	case "spawn_subagent":
+	case tools.ToolNameSpawnSubagent:
 		counters.SubagentCalls++
 	}
 }

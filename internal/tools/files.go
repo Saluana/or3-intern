@@ -318,7 +318,7 @@ func (t *SearchFile) Description() string {
 func (t *SearchFile) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
 		"path":     map[string]any{"type": "string", "description": "File path to search. Use an absolute path or workspace-relative path inside the allowed read root."},
-		"pattern":  map[string]any{"type": "string", "description": "Substring or regex pattern to find. Choose a specific term rather than a broad word when possible."},
+		"pattern":  map[string]any{"type": "string", "description": "Pattern to find. Valid regular expressions use regex matching; invalid regex falls back to literal substring matching."},
 		"maxBytes": map[string]any{"type": "integer", "description": "Maximum bytes of matching-line output returned directly. Omit for default 65536."},
 	}, "required": []string{"path", "pattern"}}
 }

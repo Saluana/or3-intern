@@ -11,7 +11,6 @@ import (
 	htmltomarkdown "github.com/JohannesKaufmann/html-to-markdown"
 	"github.com/JohannesKaufmann/html-to-markdown/plugin"
 	"github.com/PuerkitoBio/goquery"
-	"golang.org/x/net/html"
 	"golang.org/x/net/html/charset"
 )
 
@@ -245,7 +244,8 @@ func CleanHTMLForLLM(raw string) string {
 		doc.Find("body").First(),
 		doc.Selection,
 	)
-	return CollapseWhitespace(visibleSelectionText(main))
+	separateVisibleTextBlocks(main)
+	return CollapseWhitespace(main.Text())
 }
 
 func firstNonEmptySelection(selections ...*goquery.Selection) *goquery.Selection {
@@ -269,47 +269,16 @@ func CollapseWhitespace(s string) string {
 	return strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
 }
 
-var htmlTextSeparatorTags = map[string]struct{}{
-	"address": {}, "article": {}, "aside": {}, "blockquote": {}, "br": {}, "dd": {}, "div": {},
-	"dl": {}, "dt": {}, "fieldset": {}, "figcaption": {}, "figure": {}, "footer": {}, "form": {},
-	"h1": {}, "h2": {}, "h3": {}, "h4": {}, "h5": {}, "h6": {}, "header": {}, "hr": {},
-	"li": {}, "main": {}, "nav": {}, "ol": {}, "p": {}, "pre": {}, "section": {}, "table": {},
-	"td": {}, "th": {}, "tr": {}, "ul": {},
-}
-
-func visibleSelectionText(selection *goquery.Selection) string {
-	if selection == nil || len(selection.Nodes) == 0 {
-		return ""
-	}
-	var builder strings.Builder
-	for _, node := range selection.Nodes {
-		appendVisibleNodeText(&builder, node)
-	}
-	return builder.String()
-}
-
-func appendVisibleNodeText(builder *strings.Builder, node *html.Node) {
-	if node == nil {
+func separateVisibleTextBlocks(selection *goquery.Selection) {
+	if selection == nil || selection.Length() == 0 {
 		return
 	}
-	switch node.Type {
-	case html.TextNode:
-		builder.WriteString(node.Data)
-	case html.ElementNode:
-		if _, ok := htmlTextSeparatorTags[strings.ToLower(node.Data)]; ok {
-			builder.WriteByte(' ')
-		}
-		for child := node.FirstChild; child != nil; child = child.NextSibling {
-			appendVisibleNodeText(builder, child)
-		}
-		if _, ok := htmlTextSeparatorTags[strings.ToLower(node.Data)]; ok {
-			builder.WriteByte(' ')
-		}
-	default:
-		for child := node.FirstChild; child != nil; child = child.NextSibling {
-			appendVisibleNodeText(builder, child)
-		}
-	}
+	selection.Find("br").Each(func(_ int, item *goquery.Selection) {
+		item.ReplaceWithHtml(" ")
+	})
+	selection.Find("address,article,aside,blockquote,dd,div,dl,dt,fieldset,figcaption,figure,footer,form,h1,h2,h3,h4,h5,h6,header,hr,li,main,nav,ol,p,pre,section,table,td,th,tr,ul").Each(func(_ int, item *goquery.Selection) {
+		item.AppendHtml(" ")
+	})
 }
 
 func normalizeHTMLMarkdown(markdown string) string {

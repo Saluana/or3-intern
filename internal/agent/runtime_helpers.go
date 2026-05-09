@@ -14,16 +14,16 @@ import (
 func summarizeToolParams(toolName string, params map[string]any) map[string]any {
 	summary := map[string]any{"tool": toolName}
 	switch toolName {
-	case "exec":
+	case tools.ToolNameExec:
 		summary["program"] = strings.TrimSpace(fmt.Sprint(params["program"]))
 		summary["cwd"] = strings.TrimSpace(fmt.Sprint(params["cwd"]))
-	case "run_skill", "run_skill_script":
+	case tools.ToolNameRunSkill, tools.ToolNameRunSkillScript:
 		summary["skill"] = strings.TrimSpace(fmt.Sprint(params["skill"]))
 		summary["entrypoint"] = strings.TrimSpace(fmt.Sprint(params["entrypoint"]))
 		summary["plan_id"] = strings.TrimSpace(fmt.Sprint(params["plan_id"]))
-	case "spawn_subagent":
+	case tools.ToolNameSpawnSubagent:
 		summary["task"] = previewText(strings.TrimSpace(fmt.Sprint(params["task"])), 120)
-	case "web_fetch", "web_fetch_markdown":
+	case tools.ToolNameWebFetch, tools.ToolNameWebFetchMarkdown:
 		summary["url"] = strings.TrimSpace(fmt.Sprint(params["url"]))
 	}
 	return summary

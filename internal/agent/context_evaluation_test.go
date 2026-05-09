@@ -76,7 +76,10 @@ func BenchmarkContextPacketConstructionLargeFixture(b *testing.B) {
 }
 
 func repeatedEvalText(word string, count int) string {
-	return strings.Repeat(word+" ", count)
+	if count <= 0 {
+		return ""
+	}
+	return strings.TrimSpace(strings.Repeat(word+" ", count))
 }
 
 

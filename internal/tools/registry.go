@@ -46,6 +46,7 @@ func (r *Registry) Register(t Tool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.tools[t.Name()] = t
+	registerToolAdviceProvider(t)
 }
 
 func (r *Registry) Get(name string) Tool {
@@ -95,10 +96,13 @@ func (r *Registry) Metadata(name string) ToolMetadata {
 	}
 	if reporter, ok := t.(MetadataReporter); ok {
 		meta := reporter.Metadata()
+		if len(meta.Capabilities) == 0 {
+			meta.Capabilities = []string{string(ToolCapability(t, nil))}
+		}
 		meta.Groups = normalizeGroups(meta.Groups)
 		return meta
 	}
-	return inferToolMetadata(name)
+	return inferToolMetadata(t)
 }
 
 func (r *Registry) CloneSelected(allowedNames map[string]struct{}) *Registry {
@@ -134,32 +138,11 @@ func normalizeGroups(groups []string) []string {
 	return out
 }
 
-func inferToolMetadata(name string) ToolMetadata {
-	name = strings.ToLower(strings.TrimSpace(name))
-	var groups []string
-	switch {
-	case name == "read_file" || name == "search_file" || name == "read_artifact" || name == "list_dir" || name == "list_files" || name == "grep_files" || name == "search_memory" || name == "show_diff":
-		groups = []string{ToolGroupRead}
-	case strings.HasPrefix(name, "memory_"):
-		groups = []string{ToolGroupMemory, ToolGroupRead}
-	case name == "write_file" || name == "edit_file":
-		groups = []string{ToolGroupWrite}
-	case name == "exec" || name == "run_skill" || name == "run_skill_script":
-		groups = []string{ToolGroupExec}
-	case strings.HasPrefix(name, "web_"):
-		groups = []string{ToolGroupWeb}
-	case strings.HasPrefix(name, "cron"):
-		groups = []string{ToolGroupCron}
-	case strings.Contains(name, "skill"):
-		groups = []string{ToolGroupSkills, ToolGroupRead}
-	case name == "send_message":
-		groups = []string{ToolGroupChannels}
-	case strings.HasPrefix(name, "mcp_"):
-		groups = []string{ToolGroupMCP}
-	case strings.Contains(name, "service"):
-		groups = []string{ToolGroupService}
+func inferToolMetadata(tool Tool) ToolMetadata {
+	if tool == nil {
+		return ToolMetadata{}
 	}
-	return ToolMetadata{Groups: normalizeGroups(groups), Capabilities: []string{string(ToolCapability(nil, nil))}}
+	return ToolMetadata{Capabilities: []string{string(ToolCapability(tool, nil))}}
 }
 
 func (r *Registry) CloneFiltered(allowed []string) *Registry {

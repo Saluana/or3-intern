@@ -81,6 +81,14 @@ type ContextSectionBudgets struct {
 	ToolSchemas      int
 }
 
+type systemPromptSection struct {
+	Title     string
+	Text      string
+	Protected bool
+	TokenCap  int
+	MinTokens int
+}
+
 const (
 	defaultContextMaxInputTokens      = 16000
 	defaultContextOutputReserveTokens = 1200
@@ -129,71 +137,20 @@ func pressureStateForBudget(used, max int) string {
 }
 
 func (b *Builder) buildContextPacket(pinnedText, digestText, memText, identityText, staticMemoryText, heartbeatText, structuredContextText, docContextText, workspaceContextText string) ContextPacket {
-	budgets := b.contextSectionBudgets()
 	maxEach := b.BootstrapMaxChars
 	if maxEach <= 0 {
 		maxEach = defaultBootstrapMaxChars
 	}
-	skillsMax := b.SkillsSummaryMax
-	if skillsMax <= 0 {
-		skillsMax = defaultSkillsSummaryMax
-	}
-
-	soul := strings.TrimSpace(b.Soul)
-	if soul == "" {
-		soul = DefaultSoul
-	}
-	inst := strings.TrimSpace(b.AgentInstructions)
-	if inst == "" {
-		inst = DefaultAgentInstructions
-	}
-	notes := strings.TrimSpace(b.ToolNotes)
-	if notes == "" {
-		notes = DefaultToolNotes
-	}
-
 	packet := ContextPacket{
 		MaxInputTokens: b.contextMaxInputTokens(),
 		OutputReserve:  b.contextOutputReserveTokens(),
 		SafetyMargin:   b.contextSafetyMarginTokens(),
 	}
-	packet.StableSections = append(packet.StableSections,
-		budgetSection("SOUL.md", soul, true, budgets.SoulIdentity, minProtectedTokens(budgets.SoulIdentity), maxEach),
-	)
-	if t := strings.TrimSpace(identityText); t != "" {
-		packet.StableSections = append(packet.StableSections, budgetSection("Identity", t, true, budgets.SoulIdentity, minProtectedTokens(budgets.SoulIdentity), maxEach))
+	for _, section := range b.stablePromptSections(pinnedText, digestText, memText, identityText, staticMemoryText, docContextText, workspaceContextText) {
+		packet.StableSections = append(packet.StableSections, budgetSection(section.Title, section.Text, section.Protected, section.TokenCap, section.MinTokens, maxEach))
 	}
-	packet.StableSections = append(packet.StableSections,
-		budgetSection("AGENTS.md", inst, true, budgets.SoulIdentity, minProtectedTokens(budgets.SoulIdentity), maxEach),
-	)
-	if t := strings.TrimSpace(staticMemoryText); t != "" {
-		packet.StableSections = append(packet.StableSections, budgetSection("Static Memory", t, false, 0, 0, maxEach))
-	}
-	packet.StableSections = append(packet.StableSections,
-		budgetSection("TOOLS.md", notes, true, budgets.ToolPolicy, minProtectedTokens(budgets.ToolPolicy), maxEach),
-		budgetSection("Pinned Memory", pinnedText, true, budgets.PinnedMemory, minProtectedTokens(budgets.PinnedMemory), maxEach),
-	)
-	if t := strings.TrimSpace(digestText); t != "" {
-		packet.StableSections = append(packet.StableSections, budgetSection("Memory Digest", t, false, budgets.MemoryDigest, 0, maxEach))
-	}
-	packet.StableSections = append(packet.StableSections, budgetSection("Retrieved Memory", memText, false, budgets.RetrievedMemory, 0, maxEach))
-	if t := strings.TrimSpace(workspaceContextText); t != "" {
-		packet.StableSections = append(packet.StableSections, budgetSection("Workspace Context", t, false, budgets.WorkspaceContext, 0, maxEach))
-	}
-	if t := strings.TrimSpace(docContextText); t != "" {
-		packet.StableSections = append(packet.StableSections, budgetSection("Indexed File Context", t, false, budgets.WorkspaceContext, 0, maxEach))
-	}
-	packet.StableSections = append(packet.StableSections, budgetSection("Skills Inventory", b.Skills.ModelSummary(skillsMax), false, budgets.ToolSchemas, 0, maxEach))
-
-	if t := strings.TrimSpace(b.renderRuntimeContext()); t != "" {
-		packet.VolatileSections = append(packet.VolatileSections, budgetSection("Runtime Context", t, false, 0, 0, maxEach))
-	}
-	if t := strings.TrimSpace(heartbeatText); t != "" {
-		packet.VolatileSections = append(packet.VolatileSections, budgetSection("Heartbeat", t, false, 0, 0, maxEach))
-	}
-	if t := strings.TrimSpace(structuredContextText); t != "" {
-		protected := strings.Contains(t, "active_task_card:")
-		packet.VolatileSections = append(packet.VolatileSections, budgetSection("Structured Trigger Context", t, protected, budgets.ActiveTaskCard, minProtectedTokens(budgets.ActiveTaskCard), maxEach))
+	for _, section := range b.volatilePromptSections(heartbeatText, structuredContextText) {
+		packet.VolatileSections = append(packet.VolatileSections, budgetSection(section.Title, section.Text, section.Protected, section.TokenCap, section.MinTokens, maxEach))
 	}
 	return packet
 }

@@ -892,6 +892,46 @@ func TestServiceCron_AgentCLIRunPayloadCRUDAndRun(t *testing.T) {
 	}
 }
 
+func TestServiceCron_RunDisabledWithoutForceReportsSkipped(t *testing.T) {
+	cfg := config.Default()
+	cfg.Cron.Enabled = true
+	cfg.Cron.StorePath = filepath.Join(t.TempDir(), "cron.json")
+	runs := 0
+	cronSvc := cron.New(cfg.Cron.StorePath, func(ctx context.Context, job cron.CronJob) (cron.RunResult, error) {
+		runs++
+		return cron.RunResult{}, nil
+	})
+	if err := cronSvc.Start(); err != nil {
+		t.Fatalf("cron start: %v", err)
+	}
+	t.Cleanup(cronSvc.Stop)
+	if err := cronSvc.Add(cron.CronJob{
+		ID:       "disabled",
+		Enabled:  false,
+		Schedule: cron.CronSchedule{Kind: cron.KindEvery, EveryMS: 3600000},
+		Payload:  cron.CronPayload{Kind: cron.PayloadAgentTurn, Message: "skip me"},
+	}); err != nil {
+		t.Fatalf("cron add: %v", err)
+	}
+	server := &serviceServer{config: cfg, cronSvc: cronSvc}
+
+	runReq := httptest.NewRequest(http.MethodPost, "/internal/v1/cron/jobs/disabled/run", strings.NewReader(`{"force":false}`))
+	runReq = runReq.WithContext(context.WithValue(runReq.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Actor: "ops", Role: approval.RoleOperator}))
+	runRec := httptest.NewRecorder()
+	server.handleCron(runRec, runReq)
+
+	if runRec.Code != http.StatusOK {
+		t.Fatalf("expected run 200, got %d (%s)", runRec.Code, runRec.Body.String())
+	}
+	body := mustDecodeJSONBody(t, runRec.Body)
+	if body["status"] != "skipped" || body["ran"] != false {
+		t.Fatalf("expected skipped run response, got %#v", body)
+	}
+	if runs != 0 {
+		t.Fatalf("expected disabled job not to run, got %d runs", runs)
+	}
+}
+
 func TestServiceCron_AgentCLIRunPayloadValidation(t *testing.T) {
 	cfg := config.Default()
 	cfg.Cron.Enabled = true

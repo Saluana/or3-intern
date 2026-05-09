@@ -29,6 +29,8 @@ func (f *fakeAgentCLIEnqueuer) Enqueue(ctx context.Context, req agentcli.AgentRu
 
 func TestDispatcherPublishesLegacyCronEvent(t *testing.T) {
 	b := bus.New(1)
+	events, unsubscribe := b.Subscribe()
+	defer unsubscribe()
 	runner := New(b, "default-session", nil)
 
 	_, err := runner(context.Background(), cron.CronJob{
@@ -44,7 +46,7 @@ func TestDispatcherPublishesLegacyCronEvent(t *testing.T) {
 	}
 
 	select {
-	case ev := <-b.Channel():
+	case ev := <-events:
 		if ev.Type != bus.EventCron {
 			t.Fatalf("expected cron event, got %s", ev.Type)
 		}

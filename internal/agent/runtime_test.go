@@ -3104,10 +3104,10 @@ func TestToToolDefs_SortsByToolNameDeterministically(t *testing.T) {
 func TestDynamicToolExposureSelectsIntentGroups(t *testing.T) {
 	reg := tools.NewRegistry()
 	reg.Register(&alphaTool{})
-	reg.Register(&namedRuntimeTool{name: "list_dir"})
-	reg.Register(&namedRuntimeTool{name: "write_file"})
-	reg.Register(&namedRuntimeTool{name: "exec"})
-	reg.Register(&namedRuntimeTool{name: "web_fetch"})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameListDir, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupRead}}})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameWriteFile, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupWrite}}})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameExec, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupExec}}})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameWebFetch, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupWeb}}})
 	rt := &Runtime{DynamicToolExposure: true}
 	exposed := rt.exposedToolsForTurn(context.Background(), reg, []providers.ChatMessage{{Role: "user", Content: "please edit the config file"}}, "")
 	defs := toToolDefs(exposed)
@@ -3122,9 +3122,9 @@ func TestDynamicToolExposureSelectsIntentGroups(t *testing.T) {
 
 func TestDynamicToolExposureReadIntentIncludesListDir(t *testing.T) {
 	reg := tools.NewRegistry()
-	reg.Register(&namedRuntimeTool{name: "read_file"})
-	reg.Register(&namedRuntimeTool{name: "list_dir"})
-	reg.Register(&namedRuntimeTool{name: "write_file"})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameReadFile, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupRead}}})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameListDir, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupRead}}})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameWriteFile, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupWrite}}})
 	rt := &Runtime{DynamicToolExposure: true}
 	defs := toToolDefs(rt.exposedToolsForTurn(context.Background(), reg, []providers.ChatMessage{{Role: "user", Content: "inspect the project files"}}, ""))
 	if !toolDefsContain(defs, "read_file") || !toolDefsContain(defs, "list_dir") {
@@ -3137,8 +3137,8 @@ func TestDynamicToolExposureReadIntentIncludesListDir(t *testing.T) {
 
 func TestUnchangedExposedToolsLeavesPrefixIdentical(t *testing.T) {
 	reg := tools.NewRegistry()
-	reg.Register(&namedRuntimeTool{name: "read_file"})
-	reg.Register(&namedRuntimeTool{name: "write_file"})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameReadFile, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupRead}}})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameWriteFile, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupWrite}}})
 	rt := &Runtime{DynamicToolExposure: true}
 	first := toToolDefs(rt.exposedToolsForTurn(context.Background(), reg, []providers.ChatMessage{{Role: "user", Content: "edit the config"}}, ""))
 	second := toToolDefs(rt.exposedToolsForTurn(context.Background(), reg, []providers.ChatMessage{{Role: "user", Content: "modify the config"}}, ""))
@@ -3149,9 +3149,9 @@ func TestUnchangedExposedToolsLeavesPrefixIdentical(t *testing.T) {
 
 func TestExposedToolSetChangeRebuildsPrefix(t *testing.T) {
 	reg := tools.NewRegistry()
-	reg.Register(&namedRuntimeTool{name: "read_file"})
-	reg.Register(&namedRuntimeTool{name: "write_file"})
-	reg.Register(&namedRuntimeTool{name: "web_fetch"})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameReadFile, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupRead}}})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameWriteFile, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupWrite}}})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameWebFetch, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupWeb}}})
 	rt := &Runtime{DynamicToolExposure: true}
 	readDefs := toToolDefs(rt.exposedToolsForTurn(context.Background(), reg, []providers.ChatMessage{{Role: "user", Content: "inspect the file"}}, ""))
 	webDefs := toToolDefs(rt.exposedToolsForTurn(context.Background(), reg, []providers.ChatMessage{{Role: "user", Content: "fetch this url"}}, ""))
@@ -3162,8 +3162,8 @@ func TestExposedToolSetChangeRebuildsPrefix(t *testing.T) {
 
 func TestDynamicToolExposureDoesNotExposeUnknownToolsByDefault(t *testing.T) {
 	reg := tools.NewRegistry()
-	reg.Register(&namedRuntimeTool{name: "read_file"})
-	reg.Register(&namedRuntimeTool{name: "spawn_subagent"})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameReadFile, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupRead}}})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameSpawnSubagent})
 	rt := &Runtime{DynamicToolExposure: true}
 	defs := toToolDefs(rt.exposedToolsForTurn(context.Background(), reg, []providers.ChatMessage{{Role: "user", Content: "inspect the file"}}, ""))
 	if toolDefsContain(defs, "spawn_subagent") {
@@ -3173,11 +3173,11 @@ func TestDynamicToolExposureDoesNotExposeUnknownToolsByDefault(t *testing.T) {
 
 func TestDynamicToolExposureToolInventoryIntentExposesRegisteredToolGroups(t *testing.T) {
 	reg := tools.NewRegistry()
-	reg.Register(&namedRuntimeTool{name: "read_file"})
-	reg.Register(&namedRuntimeTool{name: "write_file"})
-	reg.Register(&namedRuntimeTool{name: "exec"})
-	reg.Register(&namedRuntimeTool{name: "web_fetch"})
-	reg.Register(&namedRuntimeTool{name: "cron"})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameReadFile, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupRead}}})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameWriteFile, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupWrite}}})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameExec, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupExec}}})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameWebFetch, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupWeb}}})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameCron, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupCron}}})
 	rt := &Runtime{DynamicToolExposure: true}
 	defs := toToolDefs(rt.exposedToolsForTurn(context.Background(), reg, []providers.ChatMessage{{Role: "user", Content: "what tools are available?"}}, "service"))
 	for _, name := range []string{"read_file", "write_file", "exec", "web_fetch", "cron"} {
@@ -3189,10 +3189,10 @@ func TestDynamicToolExposureToolInventoryIntentExposesRegisteredToolGroups(t *te
 
 func TestDynamicToolExposureRespectsCapabilityCeiling(t *testing.T) {
 	reg := tools.NewRegistry()
-	reg.Register(&namedRuntimeTool{name: "read_file"})
-	reg.Register(&guardedNamedRuntimeTool{namedRuntimeTool{name: "write_file"}})
-	reg.Register(&guardedNamedRuntimeTool{namedRuntimeTool{name: "run_skill"}})
-	reg.Register(&guardedNamedRuntimeTool{namedRuntimeTool{name: "run_skill_script"}})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameReadFile, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupRead}}})
+	reg.Register(&guardedNamedRuntimeTool{namedRuntimeTool{name: tools.ToolNameWriteFile, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupWrite}}}})
+	reg.Register(&guardedNamedRuntimeTool{namedRuntimeTool{name: tools.ToolNameRunSkill, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupExec, tools.ToolGroupSkills}}}})
+	reg.Register(&guardedNamedRuntimeTool{namedRuntimeTool{name: tools.ToolNameRunSkillScript, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupExec, tools.ToolGroupSkills}}}})
 	rt := &Runtime{DynamicToolExposure: true}
 	ctx := tools.ContextWithCapabilityCeiling(context.Background(), tools.CapabilitySafe)
 	defs := toToolDefs(rt.exposedToolsForTurn(ctx, reg, []providers.ChatMessage{{Role: "user", Content: "what tools are available?"}}, "service"))
@@ -3206,8 +3206,8 @@ func TestDynamicToolExposureRespectsCapabilityCeiling(t *testing.T) {
 
 func TestDynamicToolExposureRespectsProfileAllowlist(t *testing.T) {
 	reg := tools.NewRegistry()
-	reg.Register(&namedRuntimeTool{name: "read_file"})
-	reg.Register(&namedRuntimeTool{name: "list_dir"})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameReadFile, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupRead}}})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameListDir, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupRead}}})
 	rt := &Runtime{DynamicToolExposure: true}
 	ctx := tools.ContextWithActiveProfile(context.Background(), tools.ActiveProfile{
 		Name:          "read-file-only",
@@ -3226,6 +3226,7 @@ func TestDynamicToolExposureRespectsProfileAllowlist(t *testing.T) {
 type namedRuntimeTool struct {
 	tools.Base
 	name string
+	meta tools.ToolMetadata
 }
 
 func (t *namedRuntimeTool) Name() string               { return t.name }
@@ -3236,6 +3237,9 @@ func (t *namedRuntimeTool) Schema() map[string]any {
 }
 func (t *namedRuntimeTool) Execute(ctx context.Context, params map[string]any) (string, error) {
 	return "ok", nil
+}
+func (t *namedRuntimeTool) Metadata() tools.ToolMetadata {
+	return t.meta
 }
 
 type guardedNamedRuntimeTool struct{ namedRuntimeTool }

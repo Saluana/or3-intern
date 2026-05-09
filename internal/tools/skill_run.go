@@ -519,11 +519,7 @@ func skillRunExecutionHostID(broker *approval.Broker) string {
 }
 
 func optionalSkillRunString(params map[string]any, key string) string {
-	text := strings.TrimSpace(fmt.Sprint(params[key]))
-	if text == "<nil>" {
-		return ""
-	}
-	return text
+	return stringParam(params, key)
 }
 
 func isTerminalSkillRunStatus(status string) bool {

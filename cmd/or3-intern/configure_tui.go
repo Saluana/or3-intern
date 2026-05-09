@@ -1324,7 +1324,7 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 	case "automation":
 		return []configureField{
 			{Key: "automation_cron_enabled", Label: "Enable cron store", Description: "Persist cron jobs and make the cron service available.", Kind: configureFieldToggle, Value: onOff(cfg.Cron.Enabled)},
-			{Key: "automation_cron_store_path", Label: "Cron store path", Description: "JSON persistence path for scheduled jobs.", Kind: configureFieldText, Value: cfg.Cron.StorePath, EmptyHint: "~/.or3-intern/cron.json"},
+			{Key: "automation_cron_store_path", Label: "Cron store path", Description: "SQLite persistence path for scheduled jobs.", Kind: configureFieldText, Value: cfg.Cron.StorePath, EmptyHint: "~/.or3-intern/cron.db"},
 			{Key: "automation_heartbeat_enabled", Label: "Enable heartbeat", Description: "Run periodic autonomous heartbeat turns.", Kind: configureFieldToggle, Value: onOff(cfg.Heartbeat.Enabled)},
 			{Key: "automation_heartbeat_interval", Label: "Heartbeat interval minutes", Description: "How often heartbeat turns run.", Kind: configureFieldText, Value: formatInt(cfg.Heartbeat.IntervalMinutes), EmptyHint: "30"},
 			{Key: "automation_heartbeat_tasks_file", Label: "Heartbeat tasks file", Description: "Markdown file containing recurring heartbeat tasks.", Kind: configureFieldText, Value: cfg.Heartbeat.TasksFile, EmptyHint: "~/.or3-intern/HEARTBEAT.md"},

@@ -340,9 +340,7 @@ func (b *Builder) buildPacket(ctx context.Context, opts BuildOptions) (ContextPa
 		if err := json.Unmarshal([]byte(m.PayloadJSON), &payload); err == nil {
 			if m.Role == "assistant" {
 				if raw, ok := payload["tool_calls"]; ok {
-					b, _ := json.Marshal(raw)
-					var tcs []providers.ToolCall
-					if err := json.Unmarshal(b, &tcs); err == nil {
+					if tcs := toolCallsFromPayload(raw); len(tcs) > 0 {
 						msg.ToolCalls = tcs
 						pendingToolCallIDs = pendingToolCallIDs[:0]
 						for _, tc := range tcs {
@@ -435,11 +433,7 @@ func attachmentsFromPayload(payload map[string]any) []artifacts.Attachment {
 	if raw == nil {
 		return nil
 	}
-	b, _ := json.Marshal(raw)
-	var atts []artifacts.Attachment
-	if err := json.Unmarshal(b, &atts); err != nil {
-		return nil
-	}
+	atts := attachmentsFromRaw(raw)
 	out := make([]artifacts.Attachment, 0, len(atts))
 	for _, att := range atts {
 		if strings.TrimSpace(att.ArtifactID) == "" {
@@ -454,6 +448,158 @@ func attachmentsFromPayload(payload map[string]any) []artifacts.Attachment {
 		out = append(out, att)
 	}
 	return out
+}
+
+func toolCallsFromPayload(raw any) []providers.ToolCall {
+	switch typed := raw.(type) {
+	case []providers.ToolCall:
+		return append([]providers.ToolCall(nil), typed...)
+	case []any:
+		out := make([]providers.ToolCall, 0, len(typed))
+		for _, item := range typed {
+			call, ok := decodeToolCall(item)
+			if !ok {
+				continue
+			}
+			out = append(out, call)
+		}
+		return out
+	case []map[string]any:
+		out := make([]providers.ToolCall, 0, len(typed))
+		for _, item := range typed {
+			call, ok := decodeToolCall(item)
+			if !ok {
+				continue
+			}
+			out = append(out, call)
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func decodeToolCall(raw any) (providers.ToolCall, bool) {
+	switch typed := raw.(type) {
+	case providers.ToolCall:
+		if strings.TrimSpace(typed.Function.Name) == "" {
+			return providers.ToolCall{}, false
+		}
+		if strings.TrimSpace(typed.Type) == "" {
+			typed.Type = "function"
+		}
+		return typed, true
+	case map[string]any:
+		var call providers.ToolCall
+		call.ID = payloadStringValue(typed["id"])
+		call.Index = payloadIntValue(typed["index"])
+		call.Type = payloadStringValue(typed["type"])
+		function, _ := typed["function"].(map[string]any)
+		call.Function.Name = payloadStringValue(function["name"])
+		call.Function.Arguments = payloadStringValue(function["arguments"])
+		if strings.TrimSpace(call.Function.Name) == "" {
+			return providers.ToolCall{}, false
+		}
+		if strings.TrimSpace(call.Type) == "" {
+			call.Type = "function"
+		}
+		return call, true
+	default:
+		return providers.ToolCall{}, false
+	}
+}
+
+func attachmentsFromRaw(raw any) []artifacts.Attachment {
+	switch typed := raw.(type) {
+	case []artifacts.Attachment:
+		return append([]artifacts.Attachment(nil), typed...)
+	case []any:
+		out := make([]artifacts.Attachment, 0, len(typed))
+		for _, item := range typed {
+			att, ok := decodeAttachment(item)
+			if !ok {
+				continue
+			}
+			out = append(out, att)
+		}
+		return out
+	case []map[string]any:
+		out := make([]artifacts.Attachment, 0, len(typed))
+		for _, item := range typed {
+			att, ok := decodeAttachment(item)
+			if !ok {
+				continue
+			}
+			out = append(out, att)
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func decodeAttachment(raw any) (artifacts.Attachment, bool) {
+	switch typed := raw.(type) {
+	case artifacts.Attachment:
+		return typed, true
+	case map[string]any:
+		att := artifacts.Attachment{
+			ArtifactID: payloadStringValue(typed["artifact_id"]),
+			Filename:   payloadStringValue(typed["filename"]),
+			Mime:       payloadStringValue(typed["mime"]),
+			Kind:       payloadStringValue(typed["kind"]),
+			SizeBytes:  payloadInt64Value(typed["size_bytes"]),
+		}
+		return att, true
+	default:
+		return artifacts.Attachment{}, false
+	}
+}
+
+func payloadStringValue(raw any) string {
+	switch typed := raw.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case json.Number:
+		return strings.TrimSpace(typed.String())
+	default:
+		if raw == nil {
+			return ""
+		}
+		return strings.TrimSpace(fmt.Sprint(raw))
+	}
+}
+
+func payloadIntValue(raw any) int {
+	switch typed := raw.(type) {
+	case int:
+		return typed
+	case int64:
+		return int(typed)
+	case float64:
+		return int(typed)
+	case json.Number:
+		if value, err := typed.Int64(); err == nil {
+			return int(value)
+		}
+	}
+	return 0
+}
+
+func payloadInt64Value(raw any) int64 {
+	switch typed := raw.(type) {
+	case int:
+		return int64(typed)
+	case int64:
+		return typed
+	case float64:
+		return int64(typed)
+	case json.Number:
+		if value, err := typed.Int64(); err == nil {
+			return value
+		}
+	}
+	return 0
 }
 
 type visionBudget struct {
@@ -615,42 +761,13 @@ func (b *Builder) renderStablePrefix(pinnedText, digestText, memText, identityTe
 		notes = DefaultToolNotes
 	}
 
-	type section struct {
-		title string
-		text  string
-	}
-	// Build sections in order, omitting optional ones when empty.
-	sections := []section{
-		{title: "SOUL.md", text: truncateText(soul, maxEach)},
-	}
-	if t := strings.TrimSpace(identityText); t != "" {
-		sections = append(sections, section{title: "Identity", text: truncateText(t, maxEach)})
-	}
-	sections = append(sections, section{title: "AGENTS.md", text: truncateText(inst, maxEach)})
-	if t := strings.TrimSpace(staticMemoryText); t != "" {
-		sections = append(sections, section{title: "Static Memory", text: truncateText(t, maxEach)})
-	}
-	sections = append(sections, section{title: "TOOLS.md", text: truncateText(notes, maxEach)})
-	sections = append(sections, section{title: "Pinned Memory", text: pinnedText})
-	if t := strings.TrimSpace(digestText); t != "" {
-		sections = append(sections, section{title: "Memory Digest", text: truncateText(t, maxEach)})
-	}
-	sections = append(sections, section{title: "Retrieved Memory", text: memText})
-	if t := strings.TrimSpace(workspaceContextText); t != "" {
-		sections = append(sections, section{title: "Workspace Context", text: truncateText(t, maxEach)})
-	}
-	if t := strings.TrimSpace(docContextText); t != "" {
-		sections = append(sections, section{title: "Indexed File Context", text: truncateText(t, maxEach)})
-	}
-	sections = append(sections, section{title: "Skills Inventory", text: b.Skills.ModelSummary(skillsMax)})
-
 	var out strings.Builder
 	out.WriteString("# System Prompt\n")
-	for _, s := range sections {
+	for _, s := range b.stablePromptSections(pinnedText, digestText, memText, identityText, staticMemoryText, docContextText, workspaceContextText) {
 		out.WriteString("\n## ")
-		out.WriteString(s.title)
+		out.WriteString(s.Title)
 		out.WriteString("\n")
-		out.WriteString(strings.TrimSpace(s.text))
+		out.WriteString(strings.TrimSpace(truncateText(s.Text, maxEach)))
 		out.WriteString("\n")
 	}
 	return truncateText(strings.TrimSpace(out.String()), maxTotal)
@@ -661,32 +778,81 @@ func (b *Builder) renderVolatileSuffix(heartbeatText, structuredContextText stri
 	if maxEach <= 0 {
 		maxEach = defaultBootstrapMaxChars
 	}
-	type section struct {
-		title string
-		text  string
-	}
-	var sections []section
-	if t := strings.TrimSpace(b.renderRuntimeContext()); t != "" {
-		sections = append(sections, section{title: "Runtime Context", text: truncateText(t, maxEach)})
-	}
-	if t := strings.TrimSpace(heartbeatText); t != "" {
-		sections = append(sections, section{title: "Heartbeat", text: truncateText(t, maxEach)})
-	}
-	if t := strings.TrimSpace(structuredContextText); t != "" {
-		sections = append(sections, section{title: "Structured Trigger Context", text: truncateText(t, maxEach)})
-	}
+	sections := b.volatilePromptSections(heartbeatText, structuredContextText)
 	if len(sections) == 0 {
 		return ""
 	}
 	var out strings.Builder
 	for _, s := range sections {
 		out.WriteString("## ")
-		out.WriteString(s.title)
+		out.WriteString(s.Title)
 		out.WriteString("\n")
-		out.WriteString(strings.TrimSpace(s.text))
+		out.WriteString(strings.TrimSpace(truncateText(s.Text, maxEach)))
 		out.WriteString("\n\n")
 	}
 	return strings.TrimSpace(out.String())
+}
+
+func (b *Builder) stablePromptSections(pinnedText, digestText, memText, identityText, staticMemoryText, docContextText, workspaceContextText string) []systemPromptSection {
+	budgets := b.contextSectionBudgets()
+	skillsMax := b.SkillsSummaryMax
+	if skillsMax <= 0 {
+		skillsMax = defaultSkillsSummaryMax
+	}
+	soul := strings.TrimSpace(b.Soul)
+	if soul == "" {
+		soul = DefaultSoul
+	}
+	inst := strings.TrimSpace(b.AgentInstructions)
+	if inst == "" {
+		inst = DefaultAgentInstructions
+	}
+	notes := strings.TrimSpace(b.ToolNotes)
+	if notes == "" {
+		notes = DefaultToolNotes
+	}
+	sections := []systemPromptSection{
+		{Title: "SOUL.md", Text: soul, Protected: true, TokenCap: budgets.SoulIdentity, MinTokens: minProtectedTokens(budgets.SoulIdentity)},
+	}
+	if t := strings.TrimSpace(identityText); t != "" {
+		sections = append(sections, systemPromptSection{Title: "Identity", Text: t, Protected: true, TokenCap: budgets.SoulIdentity, MinTokens: minProtectedTokens(budgets.SoulIdentity)})
+	}
+	sections = append(sections, systemPromptSection{Title: "AGENTS.md", Text: inst, Protected: true, TokenCap: budgets.SoulIdentity, MinTokens: minProtectedTokens(budgets.SoulIdentity)})
+	if t := strings.TrimSpace(staticMemoryText); t != "" {
+		sections = append(sections, systemPromptSection{Title: "Static Memory", Text: t})
+	}
+	sections = append(sections,
+		systemPromptSection{Title: "TOOLS.md", Text: notes, Protected: true, TokenCap: budgets.ToolPolicy, MinTokens: minProtectedTokens(budgets.ToolPolicy)},
+		systemPromptSection{Title: "Pinned Memory", Text: pinnedText, Protected: true, TokenCap: budgets.PinnedMemory, MinTokens: minProtectedTokens(budgets.PinnedMemory)},
+	)
+	if t := strings.TrimSpace(digestText); t != "" {
+		sections = append(sections, systemPromptSection{Title: "Memory Digest", Text: t, TokenCap: budgets.MemoryDigest})
+	}
+	sections = append(sections, systemPromptSection{Title: "Retrieved Memory", Text: memText, TokenCap: budgets.RetrievedMemory})
+	if t := strings.TrimSpace(workspaceContextText); t != "" {
+		sections = append(sections, systemPromptSection{Title: "Workspace Context", Text: t, TokenCap: budgets.WorkspaceContext})
+	}
+	if t := strings.TrimSpace(docContextText); t != "" {
+		sections = append(sections, systemPromptSection{Title: "Indexed File Context", Text: t, TokenCap: budgets.WorkspaceContext})
+	}
+	sections = append(sections, systemPromptSection{Title: "Skills Inventory", Text: b.Skills.ModelSummary(skillsMax), TokenCap: budgets.ToolSchemas})
+	return sections
+}
+
+func (b *Builder) volatilePromptSections(heartbeatText, structuredContextText string) []systemPromptSection {
+	budgets := b.contextSectionBudgets()
+	var sections []systemPromptSection
+	if t := strings.TrimSpace(b.renderRuntimeContext()); t != "" {
+		sections = append(sections, systemPromptSection{Title: "Runtime Context", Text: t})
+	}
+	if t := strings.TrimSpace(heartbeatText); t != "" {
+		sections = append(sections, systemPromptSection{Title: "Heartbeat", Text: t})
+	}
+	if t := strings.TrimSpace(structuredContextText); t != "" {
+		protected := strings.Contains(t, "active_task_card:")
+		sections = append(sections, systemPromptSection{Title: "Structured Trigger Context", Text: t, Protected: protected, TokenCap: budgets.ActiveTaskCard, MinTokens: minProtectedTokens(budgets.ActiveTaskCard)})
+	}
+	return sections
 }
 
 func (b *Builder) renderRuntimeContext() string {

@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"or3-intern/internal/bus"
@@ -17,6 +18,15 @@ import (
 )
 
 type trustedToolAccessContextKey struct{}
+
+var toolIntentPatterns = map[string]*regexp.Regexp{
+	"capabilities": regexp.MustCompile(`\b(tool|tools|capability|capabilities|what can you do)\b`),
+	"write":        regexp.MustCompile(`\b(write|edit|modify|patch)\b|\bcreate\s+file\b`),
+	"exec":         regexp.MustCompile(`\b(run|exec|execute|command|shell|test|build)\b`),
+	"web":          regexp.MustCompile(`\b(http|https|web|url|search|internet)\b`),
+	"cron":         regexp.MustCompile(`\b(cron|schedule|remind)\b`),
+	"skills":       regexp.MustCompile(`\b(skill|skills)\b`),
+}
 
 func (r *Runtime) effectiveTools(ctx context.Context, fallback *tools.Registry) *tools.Registry {
 	if reg := toolRegistryFromContext(ctx); reg != nil {
@@ -107,7 +117,7 @@ func selectedToolGroups(intent string) map[string]struct{} {
 		tools.ToolGroupRead:   {},
 		tools.ToolGroupMemory: {},
 	}
-	if strings.Contains(lower, "tool") || strings.Contains(lower, "capabilit") || strings.Contains(lower, "what can you do") {
+	if toolIntentPatterns["capabilities"].MatchString(lower) {
 		groups[tools.ToolGroupWrite] = struct{}{}
 		groups[tools.ToolGroupExec] = struct{}{}
 		groups[tools.ToolGroupWeb] = struct{}{}
@@ -117,19 +127,19 @@ func selectedToolGroups(intent string) map[string]struct{} {
 		groups[tools.ToolGroupMCP] = struct{}{}
 		groups[tools.ToolGroupService] = struct{}{}
 	}
-	if strings.Contains(lower, "write") || strings.Contains(lower, "edit") || strings.Contains(lower, "modify") || strings.Contains(lower, "create file") || strings.Contains(lower, "patch") {
+	if toolIntentPatterns["write"].MatchString(lower) {
 		groups[tools.ToolGroupWrite] = struct{}{}
 	}
-	if strings.Contains(lower, "run") || strings.Contains(lower, "exec") || strings.Contains(lower, "command") || strings.Contains(lower, "shell") || strings.Contains(lower, "test") || strings.Contains(lower, "build") {
+	if toolIntentPatterns["exec"].MatchString(lower) {
 		groups[tools.ToolGroupExec] = struct{}{}
 	}
-	if strings.Contains(lower, "http") || strings.Contains(lower, "web") || strings.Contains(lower, "url") || strings.Contains(lower, "search") || strings.Contains(lower, "internet") {
+	if toolIntentPatterns["web"].MatchString(lower) {
 		groups[tools.ToolGroupWeb] = struct{}{}
 	}
-	if strings.Contains(lower, "cron") || strings.Contains(lower, "schedule") || strings.Contains(lower, "remind") {
+	if toolIntentPatterns["cron"].MatchString(lower) {
 		groups[tools.ToolGroupCron] = struct{}{}
 	}
-	if strings.Contains(lower, "skill") {
+	if toolIntentPatterns["skills"].MatchString(lower) {
 		groups[tools.ToolGroupSkills] = struct{}{}
 	}
 	if strings.TrimSpace(intent) != "" {
@@ -161,7 +171,7 @@ func (r *Runtime) guardToolExecution(ctx context.Context, tool tools.Tool, capab
 		return nil
 	}
 	profile := tools.ActiveProfileFromContext(ctx)
-	if tool.Name() == "send_message" && trustedToolAccessFromContext(ctx) {
+	if tool.Name() == tools.ToolNameSendMessage && trustedToolAccessFromContext(ctx) {
 		capability = tools.CapabilitySafe
 	}
 	if ceiling := tools.CapabilityCeilingFromContext(ctx); ceiling != "" && capabilityRank(capability) > capabilityRank(ceiling) {
@@ -179,14 +189,14 @@ func (r *Runtime) guardToolExecution(ctx context.Context, tool tools.Tool, capab
 	if capability == tools.CapabilityPrivileged && !r.Hardening.PrivilegedTools {
 		return fmt.Errorf("tool requires privileged access: %s", tool.Name())
 	}
-	if r.ApprovalBroker != nil && (tool.Name() == "exec" || tool.Name() == "run_skill" || tool.Name() == "run_skill_script") {
+	if r.ApprovalBroker != nil && tools.IsExecutionToolName(tool.Name()) {
 		if mode := r.approvalModeForTool(tool.Name()); mode == config.ApprovalModeAsk || mode == config.ApprovalModeAllowlist || mode == config.ApprovalModeDeny {
 			if len(r.ApprovalBroker.SignKey) == 0 {
 				return fmt.Errorf("approval broker unavailable for %s", tool.Name())
 			}
 		}
 	}
-	if r.Audit != nil && (capability == tools.CapabilityPrivileged || tool.Name() == "spawn_subagent") {
+	if r.Audit != nil && (capability == tools.CapabilityPrivileged || tool.Name() == tools.ToolNameSpawnSubagent) {
 		if err := r.Audit.Record(ctx, "tool.execute", tools.SessionFromContext(ctx), profileActor(profile), map[string]any{
 			"tool":       tool.Name(),
 			"capability": capability,
@@ -211,9 +221,9 @@ func (r *Runtime) approvalModeForTool(toolName string) config.ApprovalMode {
 		return config.ApprovalModeTrusted
 	}
 	switch toolName {
-	case "exec":
+	case tools.ToolNameExec:
 		return r.ApprovalBroker.Config.Exec.Mode
-	case "run_skill", "run_skill_script":
+	case tools.ToolNameRunSkill, tools.ToolNameRunSkillScript:
 		return r.ApprovalBroker.Config.SkillExecution.Mode
 	default:
 		return config.ApprovalModeTrusted
@@ -231,7 +241,7 @@ func (r *Runtime) enforceSkillPolicy(ctx context.Context, tool tools.Tool, param
 		}
 	}
 	switch tool.Name() {
-	case "exec", "run_skill", "run_skill_script":
+	case tools.ToolNameExec, tools.ToolNameRunSkill, tools.ToolNameRunSkillScript:
 		if !policy.AllowExecution {
 			return fmt.Errorf("execution denied by skill policy: %s", tool.Name())
 		}
@@ -240,7 +250,7 @@ func (r *Runtime) enforceSkillPolicy(ctx context.Context, tool tools.Tool, param
 				return err
 			}
 		}
-	case "write_file", "edit_file":
+	case tools.ToolNameWriteFile, tools.ToolNameEditFile:
 		if !policy.AllowWrite {
 			return fmt.Errorf("write denied by skill policy: %s", tool.Name())
 		}
@@ -249,7 +259,7 @@ func (r *Runtime) enforceSkillPolicy(ctx context.Context, tool tools.Tool, param
 				return err
 			}
 		}
-	case "web_fetch", "web_fetch_markdown":
+	case tools.ToolNameWebFetch, tools.ToolNameWebFetchMarkdown:
 		if !policy.AllowNetwork {
 			return fmt.Errorf("network denied by skill policy: %s", tool.Name())
 		}
@@ -262,7 +272,7 @@ func (r *Runtime) enforceSkillPolicy(ctx context.Context, tool tools.Tool, param
 				return err
 			}
 		}
-	case "web_search":
+	case tools.ToolNameWebSearch:
 		if !policy.AllowNetwork {
 			return fmt.Errorf("network denied by skill policy: %s", tool.Name())
 		}
@@ -290,7 +300,7 @@ func skillPolicyForSkill(skill skills.SkillMeta) tools.SkillPolicy {
 	return tools.SkillPolicy{
 		Name:           skill.Name,
 		AllowedTools:   allowed,
-		AllowExecution: skill.Permissions.Shell || (strings.EqualFold(skill.CommandDispatch, "tool") && (strings.EqualFold(skill.CommandTool, "exec") || strings.EqualFold(skill.CommandTool, "run_skill") || strings.EqualFold(skill.CommandTool, "run_skill_script"))),
+		AllowExecution: skill.Permissions.Shell || (strings.EqualFold(skill.CommandDispatch, "tool") && tools.IsExecutionToolName(strings.TrimSpace(skill.CommandTool))),
 		AllowNetwork:   skill.Permissions.Network,
 		AllowWrite:     skill.Permissions.Write,
 		AllowedHosts:   append([]string{}, skill.Permissions.AllowedHosts...),
@@ -380,18 +390,18 @@ func (r *Runtime) enforceProfile(ctx context.Context, profile tools.ActiveProfil
 			return fmt.Errorf("tool denied by profile: %s", tool.Name())
 		}
 	}
-	if tool.Name() == "spawn_subagent" && !profile.AllowSubagents {
+	if tool.Name() == tools.ToolNameSpawnSubagent && !profile.AllowSubagents {
 		return fmt.Errorf("subagents denied by profile")
 	}
 	switch tool.Name() {
-	case "write_file", "edit_file":
+	case tools.ToolNameWriteFile, tools.ToolNameEditFile:
 		if len(profile.WritablePaths) == 0 {
 			return fmt.Errorf("path denied by profile")
 		}
 		if err := validateProfileWritablePath(profile.WritablePaths, fmt.Sprint(params["path"])); err != nil {
 			return err
 		}
-	case "exec":
+	case tools.ToolNameExec:
 		if cwd := strings.TrimSpace(fmt.Sprint(params["cwd"])); cwd != "" && cwd != "<nil>" {
 			if len(profile.WritablePaths) == 0 {
 				return fmt.Errorf("path denied by profile")
@@ -402,7 +412,7 @@ func (r *Runtime) enforceProfile(ctx context.Context, profile tools.ActiveProfil
 		}
 	}
 	switch tool.Name() {
-	case "web_fetch", "web_fetch_markdown":
+	case tools.ToolNameWebFetch, tools.ToolNameWebFetchMarkdown:
 		parsed, err := url.Parse(strings.TrimSpace(fmt.Sprint(params["url"])))
 		if err != nil {
 			return err
@@ -410,7 +420,7 @@ func (r *Runtime) enforceProfile(ctx context.Context, profile tools.ActiveProfil
 		if err := (security.HostPolicy{Enabled: true, DefaultDeny: true, AllowedHosts: profile.AllowedHosts}).ValidateURL(ctx, parsed); err != nil {
 			return err
 		}
-	case "web_search":
+	case tools.ToolNameWebSearch:
 		if err := (security.HostPolicy{Enabled: true, DefaultDeny: true, AllowedHosts: profile.AllowedHosts}).ValidateHost(ctx, "api.search.brave.com"); err != nil {
 			return err
 		}

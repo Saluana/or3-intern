@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	"or3-intern/internal/cron"
@@ -35,7 +34,7 @@ func (t *CronTool) Execute(ctx context.Context, params map[string]any) (string, 
 	if t.Svc == nil {
 		return "", fmt.Errorf("cron service not configured")
 	}
-	act := strings.TrimSpace(fmt.Sprint(params["action"]))
+	act := stringParam(params, "action")
 	switch act {
 	case "status":
 		s, err := t.Svc.Status()
@@ -52,20 +51,23 @@ func (t *CronTool) Execute(ctx context.Context, params map[string]any) (string, 
 		b, _ := json.MarshalIndent(j, "", "  ")
 		return string(b), nil
 	case "remove":
-		id := strings.TrimSpace(fmt.Sprint(params["id"]))
+		id := stringParam(params, "id")
 		ok, err := t.Svc.Remove(id)
 		if err != nil {
 			return "", err
 		}
 		return fmt.Sprintf("removed: %v", ok), nil
 	case "run":
-		id := strings.TrimSpace(fmt.Sprint(params["id"]))
+		id := stringParam(params, "id")
 		force, _ := params["force"].(bool)
-		ok, err := t.Svc.RunNow(ctx, id, force)
+		job, err := t.Svc.RunNow(ctx, id, force)
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("ran: %v", ok), nil
+		if !force && !job.Enabled {
+			return "ran: false", nil
+		}
+		return "ran: true", nil
 	case "add":
 		raw, ok := params["job"].(map[string]any)
 		if !ok || raw == nil {

@@ -34,7 +34,7 @@ func (t *RunSkillScript) Capability() CapabilityLevel { return CapabilityPrivile
 func (t *RunSkillScript) Name() string { return "run_skill_script" }
 
 func (t *RunSkillScript) Description() string {
-	return "Legacy low-level skill execution tool. Runs an approved skill-local script or declared entrypoint without shell interpolation. Prefer run_skill for plan-based approval and resumable execution."
+	return "Legacy low-level skill execution tool. Runs an approved skill-local script or declared entrypoint without shell interpolation. Raw path execution only supports .sh and .py scripts, or already-executable files. Prefer run_skill for plan-based approval and resumable execution."
 }
 
 func (t *RunSkillScript) Parameters() map[string]any {
@@ -50,10 +50,7 @@ func (t *RunSkillScript) Execute(ctx context.Context, params map[string]any) (st
 }
 
 func (t *RunSkillScript) commandForSkill(skill skills.SkillMeta, params map[string]any) ([]string, error) {
-	entrypoint := strings.TrimSpace(fmt.Sprint(params["entrypoint"]))
-	if entrypoint == "<nil>" {
-		entrypoint = ""
-	}
+	entrypoint := stringParam(params, "entrypoint")
 	if entrypoint != "" {
 		for _, candidate := range skill.Entrypoints {
 			if candidate.Name != entrypoint {
@@ -68,10 +65,7 @@ func (t *RunSkillScript) commandForSkill(skill skills.SkillMeta, params map[stri
 		return nil, fmt.Errorf("entrypoint not found: %s", entrypoint)
 	}
 
-	relPath := strings.TrimSpace(fmt.Sprint(params["path"]))
-	if relPath == "<nil>" {
-		relPath = ""
-	}
+	relPath := stringParam(params, "path")
 	if relPath == "" {
 		return nil, fmt.Errorf("missing path or entrypoint")
 	}

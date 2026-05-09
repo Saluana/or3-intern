@@ -3,6 +3,10 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"strconv"
+	"strings"
 )
 
 // CapabilityLevel classifies the trust required to invoke a tool.
@@ -83,4 +87,47 @@ func (Base) SchemaFor(name, desc string, params map[string]any) map[string]any {
 			"parameters":  params,
 		},
 	}
+}
+
+func stringParam(params map[string]any, key string) string {
+	if params == nil {
+		return ""
+	}
+	value, ok := params[key]
+	if !ok || value == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(value))
+}
+
+func floatParam(params map[string]any, key string) (float64, bool) {
+	if params == nil {
+		return 0, false
+	}
+	switch value := params[key].(type) {
+	case float64:
+		return value, true
+	case float32:
+		return float64(value), true
+	case int:
+		return float64(value), true
+	case int64:
+		return float64(value), true
+	case json.Number:
+		parsed, err := value.Float64()
+		return parsed, err == nil
+	case string:
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+		return parsed, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func boolParam(params map[string]any, key string) (bool, bool) {
+	if params == nil {
+		return false, false
+	}
+	value, ok := params[key].(bool)
+	return value, ok
 }

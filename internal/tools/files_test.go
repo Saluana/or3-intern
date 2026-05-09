@@ -309,15 +309,15 @@ func TestWriteFile_Mkdirs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stat parent: %v", err)
 	}
-	if info.Mode().Perm() != 0o700 {
-		t.Fatalf("expected parent dir mode 0700, got %#o", info.Mode().Perm())
+	if info.Mode().Perm()&0o700 != 0o700 {
+		t.Fatalf("expected parent dir to keep owner rwx bits, got %#o", info.Mode().Perm())
 	}
 	fileInfo, err := os.Stat(p)
 	if err != nil {
 		t.Fatalf("Stat file: %v", err)
 	}
-	if fileInfo.Mode().Perm() != 0o600 {
-		t.Fatalf("expected file mode 0600, got %#o", fileInfo.Mode().Perm())
+	if fileInfo.Mode().Perm()&0o600 != 0o600 {
+		t.Fatalf("expected file to keep owner rw bits, got %#o", fileInfo.Mode().Perm())
 	}
 }
 

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -127,13 +128,13 @@ func (s *serviceServer) handleCronJob(w http.ResponseWriter, r *http.Request, sv
 			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
-		found, updated, err := svc.Update(id, job)
+		updated, err := svc.Update(id, job)
 		if err != nil {
+			if errors.Is(err, cron.ErrNotFound) {
+				writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "cron job not found"})
+				return
+			}
 			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-			return
-		}
-		if !found {
-			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "cron job not found"})
 			return
 		}
 		writeServiceJSON(w, http.StatusOK, map[string]any{"job": updated})
@@ -162,13 +163,17 @@ func (s *serviceServer) handleCronJobAction(w http.ResponseWriter, r *http.Reque
 	case "run":
 		limitServiceRequestBody(w, r, serviceCronBodyLimit)
 		force := serviceCronRunForce(r.Body)
-		found, err := svc.RunNow(r.Context(), id, force)
+		job, err := svc.RunNow(r.Context(), id, force)
 		if err != nil {
+			if errors.Is(err, cron.ErrNotFound) {
+				writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "cron job not found"})
+				return
+			}
 			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
-		if !found {
-			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "cron job not found or disabled"})
+		if !force && !job.Enabled {
+			writeServiceJSON(w, http.StatusOK, map[string]any{"id": id, "status": "skipped", "ran": false})
 			return
 		}
 		writeServiceJSON(w, http.StatusOK, map[string]any{"id": id, "status": "ran"})
@@ -182,13 +187,13 @@ func (s *serviceServer) handleCronJobAction(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *serviceServer) writeCronEnabledState(w http.ResponseWriter, svc *cron.Service, id string, enabled bool) {
-	found, job, err := svc.SetEnabled(id, enabled)
+	job, err := svc.SetEnabled(id, enabled)
 	if err != nil {
+		if errors.Is(err, cron.ErrNotFound) {
+			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "cron job not found"})
+			return
+		}
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-		return
-	}
-	if !found {
-		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "cron job not found"})
 		return
 	}
 	writeServiceJSON(w, http.StatusOK, map[string]any{"job": job})

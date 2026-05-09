@@ -1132,9 +1132,10 @@ func runWorkers(ctx context.Context, b *bus.Bus, rt *agent.Runtime, n int, cliDe
 	if n <= 0 {
 		n = 4
 	}
+	events := b.Channel()
 	for i := 0; i < n; i++ {
 		go func() {
-			for ev := range b.Channel() {
+			for ev := range events {
 				cctx, cancel := agent.WithTimeout(ctx, 120)
 				cctx = agent.ContextWithConversationSession(cctx, ev.SessionKey)
 				if ev.Channel == "cli" && cliDeliverer != nil {

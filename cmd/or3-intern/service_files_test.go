@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -149,6 +150,73 @@ func TestFileSearchMatchesAllQueryTokens(t *testing.T) {
 	}
 	if fileSearchMatches("runtime missing", "runtime.go", "internal/agent/runtime.go") {
 		t.Fatal("expected unmatched token to fail")
+	}
+}
+
+func TestHandleFileSearchReturnsMatchingDirectories(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmp, ".openclaw", "state"), 0o755); err != nil {
+		t.Fatalf("mkdir hidden dir: %v", err)
+	}
+	server := &serviceServer{config: config.Config{AllowedDir: tmp}}
+	req := httptest.NewRequest(http.MethodGet, "/internal/v1/files/search?root_id=allowed&q=.openclaw", nil)
+	rec := httptest.NewRecorder()
+
+	server.handleFileSearch(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Items []serviceFileSearchItem `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(payload.Items) == 0 {
+		t.Fatal("expected search to return the matching directory")
+	}
+	if payload.Items[0].Path != ".openclaw" || payload.Items[0].Type != "directory" {
+		t.Fatalf("expected hidden directory match first, got %+v", payload.Items[0])
+	}
+}
+
+func TestHandleFileSearchChecksSiblingDirectoriesBeforeDeepTree(t *testing.T) {
+	tmp := t.TempDir()
+	largeDir := filepath.Join(tmp, ".android")
+	if err := os.MkdirAll(largeDir, 0o755); err != nil {
+		t.Fatalf("mkdir large dir: %v", err)
+	}
+	for index := 0; index < maxServiceFileSearchVisited+100; index++ {
+		path := filepath.Join(largeDir, fmt.Sprintf("entry-%04d.txt", index))
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatalf("write large tree entry %d: %v", index, err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(tmp, ".openclaw"), 0o755); err != nil {
+		t.Fatalf("mkdir target dir: %v", err)
+	}
+
+	server := &serviceServer{config: config.Config{AllowedDir: tmp}}
+	req := httptest.NewRequest(http.MethodGet, "/internal/v1/files/search?root_id=allowed&q=.openclaw&limit=5", nil)
+	rec := httptest.NewRecorder()
+
+	server.handleFileSearch(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Items []serviceFileSearchItem `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(payload.Items) == 0 {
+		t.Fatal("expected search to find the sibling hidden directory")
+	}
+	if payload.Items[0].Path != ".openclaw" || payload.Items[0].Type != "directory" {
+		t.Fatalf("expected .openclaw directory despite earlier deep tree, got %+v", payload.Items[0])
 	}
 }
 

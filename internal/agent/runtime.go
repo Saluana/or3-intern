@@ -172,53 +172,75 @@ func (r *Runtime) Handle(ctx context.Context, ev bus.Event) error {
 func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 	defer releaseEvent(ev)
 
-	if ev.Type == bus.EventUserMessage && isNewSessionCommand(ev.Message) {
-		return r.handleNewSession(ctx, ev)
-	}
-	if ev.Type == bus.EventUserMessage && strings.EqualFold(strings.TrimSpace(ev.Message), commandStatus) {
-		r.ensureSessionScope(ctx, ev)
-		return r.handleStatus(ctx, ev)
-	}
-	if ev.Type == bus.EventUserMessage && strings.EqualFold(strings.TrimSpace(ev.Message), commandPrune) {
-		r.ensureSessionScope(ctx, ev)
-		return r.handlePruneSession(ctx, ev, "manual")
+	if handled, err := r.handleTurnCommand(ctx, ev); handled || err != nil {
+		return err
 	}
 	r.ensureSessionScope(ctx, ev)
 
-	// persist user message
 	msgID, err := r.DB.AppendMessage(ctx, ev.SessionKey, "user", ev.Message, map[string]any{
 		"channel": ev.Channel, "from": ev.From, "meta": ev.Meta,
 	})
 	if err != nil {
 		return err
 	}
-	if handled, err := r.handleExplicitSkillInvocation(ctx, ev, msgID); handled || err != nil {
-		return err
-	}
-	if handled, err := r.handleStructuredAutonomy(ctx, ev, msgID); handled || err != nil {
-		return err
-	}
-	if ev.Type == bus.EventUserMessage {
-		r.ensureTaskCardForTurn(ctx, ev)
-	}
-
-	// build prompt
-	if r.Builder == nil {
-		return fmt.Errorf("runtime builder not configured")
-	}
-	isAutonomous := isAutonomousEvent(ev.Type)
-	messages, err := r.BuildPromptSnapshotWithOptions(ctx, BuildOptions{
-		SessionKey:  ev.SessionKey,
-		UserMessage: ev.Message,
-		Autonomous:  isAutonomous,
-		EventMeta:   cloneMap(ev.Meta),
-	})
-	if err != nil {
+	if handled, err := r.handleTurnPreExecution(ctx, ev, msgID); handled || err != nil {
 		return err
 	}
 
 	replyTarget := deliveryTarget(ev)
 	replyMeta := channels.ReplyMeta(ev.Meta)
+	if err := r.handleTurnExecution(ctx, ev, msgID, replyTarget, replyMeta); err != nil {
+		return err
+	}
+	r.handleTurnPostCleanup(ctx, ev)
+	return nil
+}
+
+func (r *Runtime) handleTurnCommand(ctx context.Context, ev bus.Event) (bool, error) {
+	if ev.Type != bus.EventUserMessage {
+		return false, nil
+	}
+	message := strings.TrimSpace(ev.Message)
+	switch {
+	case isNewSessionCommand(message):
+		return true, r.handleNewSession(ctx, ev)
+	case strings.EqualFold(message, commandStatus):
+		r.ensureSessionScope(ctx, ev)
+		return true, r.handleStatus(ctx, ev)
+	case strings.EqualFold(message, commandPrune):
+		r.ensureSessionScope(ctx, ev)
+		return true, r.handlePruneSession(ctx, ev, "manual")
+	default:
+		return false, nil
+	}
+}
+
+func (r *Runtime) handleTurnPreExecution(ctx context.Context, ev bus.Event, msgID int64) (bool, error) {
+	if handled, err := r.handleExplicitSkillInvocation(ctx, ev, msgID); handled || err != nil {
+		return handled, err
+	}
+	if handled, err := r.handleStructuredAutonomy(ctx, ev, msgID); handled || err != nil {
+		return handled, err
+	}
+	if ev.Type == bus.EventUserMessage {
+		r.ensureTaskCardForTurn(ctx, ev)
+	}
+	return false, nil
+}
+
+func (r *Runtime) handleTurnExecution(ctx context.Context, ev bus.Event, msgID int64, replyTarget string, replyMeta map[string]any) error {
+	if r.Builder == nil {
+		return fmt.Errorf("runtime builder not configured")
+	}
+	messages, err := r.BuildPromptSnapshotWithOptions(ctx, BuildOptions{
+		SessionKey:  ev.SessionKey,
+		UserMessage: ev.Message,
+		Autonomous:  isAutonomousEvent(ev.Type),
+		EventMeta:   cloneMap(ev.Meta),
+	})
+	if err != nil {
+		return err
+	}
 	finalText, streamed, err := r.executeConversation(ctx, ev.Type, ev.SessionKey, messages, r.effectiveTools(ctx, r.Tools), ev.Channel, replyTarget, replyMeta)
 	if err != nil {
 		var approvalErr *tools.ApprovalRequiredError
@@ -227,10 +249,11 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 		}
 		return err
 	}
-
 	r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, finalText, replyMeta, streamed, shouldAutoDeliver(ev))
+	return nil
+}
 
-	// best-effort rolling consolidation of old messages into memory notes
+func (r *Runtime) handleTurnPostCleanup(ctx context.Context, ev bus.Event) {
 	if !r.DisableRollingConsolidation && r.Consolidator != nil && r.Builder != nil && r.ConsolidationScheduler != nil {
 		r.ConsolidationScheduler.Trigger(ev.SessionKey)
 	} else if !r.DisableRollingConsolidation && r.Consolidator != nil && r.Builder != nil {
@@ -243,8 +266,6 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 		}
 	}
 	r.scheduleIdlePrune(ctx, ev)
-
-	return nil
 }
 
 func isNewSessionCommand(message string) bool {

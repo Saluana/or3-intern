@@ -45,3 +45,15 @@ func TestBuildReplayPromptByteLimitKeepsUserMessage(t *testing.T) {
 		t.Fatalf("prompt did not respect byte bound enough: len=%d", len(prompt))
 	}
 }
+
+func TestBuildReplayPromptSanitizesAssistantJSONEnvelope(t *testing.T) {
+	prompt := BuildReplayPromptBounded([]RunnerChatTurn{
+		{Sequence: 1, UserText: "you working?", FinalText: `{"session_id":"old","response":"I'm ready.","stats":{"models":{}}}`, Status: "succeeded"},
+	}, "next", 10, 4096)
+	if !strings.Contains(prompt, "Assistant: I'm ready.") {
+		t.Fatalf("expected sanitized assistant response in prompt: %s", prompt)
+	}
+	if strings.Contains(prompt, "session_id") || strings.Contains(prompt, "stats") {
+		t.Fatalf("expected metadata to be removed from replay prompt: %s", prompt)
+	}
+}

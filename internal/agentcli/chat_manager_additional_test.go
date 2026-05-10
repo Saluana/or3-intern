@@ -5,10 +5,11 @@ import (
 	"strings"
 	"testing"
 
+	"or3-intern/internal/agent"
 	"or3-intern/internal/db"
 )
 
-func TestChatManagerStartTurnRejectsUnsupportedNativeAndEmptyUserMessage(t *testing.T) {
+func TestChatManagerStartTurnValidatesEmptyUserMessage(t *testing.T) {
 	d := openAgentCLITestDB(t)
 	cm := testChatManager(d)
 	ctx := context.Background()
@@ -16,11 +17,48 @@ func TestChatManagerStartTurnRejectsUnsupportedNativeAndEmptyUserMessage(t *test
 	if err != nil {
 		t.Fatalf("EnsureSession: %v", err)
 	}
-	if _, err := cm.StartTurn(ctx, sess.ID, StartTurnRequest{ContinuationMode: ContinuationNative, UserMessage: "continue"}); err != ErrUnsupportedNativeSession {
-		t.Fatalf("expected ErrUnsupportedNativeSession, got %v", err)
-	}
 	if _, err := cm.StartTurn(ctx, sess.ID, StartTurnRequest{UserMessage: "   "}); err == nil || !strings.Contains(err.Error(), "user_message required") {
 		t.Fatalf("expected user message error, got %v", err)
+	}
+}
+
+func TestChatManagerEnsureSessionDefaultsNativeForCapableRunners(t *testing.T) {
+	d := openAgentCLITestDB(t)
+	cm := testChatManager(d)
+	sess, err := cm.EnsureSession(context.Background(), StartTurnRequest{AppSessionKey: "app-session", RunnerID: string(RunnerCodex)})
+	if err != nil {
+		t.Fatalf("EnsureSession: %v", err)
+	}
+	if sess.ContinuationMode != string(ContinuationNative) {
+		t.Fatalf("expected native default continuation, got %q", sess.ContinuationMode)
+	}
+}
+
+func TestChatManagerPersistsDistinctNativeRefsPerSession(t *testing.T) {
+	d := openAgentCLITestDB(t)
+	cm := testChatManager(d)
+	ctx := context.Background()
+	first, err := d.CreateOrGetRunnerChatSession(ctx, db.RunnerChatSession{ID: "session-a", AppSessionKey: "app-a", RunnerID: string(RunnerCodex), ContinuationMode: string(ContinuationNative)})
+	if err != nil {
+		t.Fatalf("CreateOrGetRunnerChatSession first: %v", err)
+	}
+	second, err := d.CreateOrGetRunnerChatSession(ctx, db.RunnerChatSession{ID: "session-b", AppSessionKey: "app-b", RunnerID: string(RunnerCodex), ContinuationMode: string(ContinuationNative)})
+	if err != nil {
+		t.Fatalf("CreateOrGetRunnerChatSession second: %v", err)
+	}
+	cm.maybePersistNativeSessionRef(first, "job-a", agent.JobEvent{Type: "structured", Sequence: 1, Data: map[string]any{"payload": map[string]any{"type": "thread.started", "thread_id": "thread-a"}}})
+	cm.maybePersistNativeSessionRef(second, "job-b", agent.JobEvent{Type: "structured", Sequence: 1, Data: map[string]any{"payload": map[string]any{"type": "thread.started", "thread_id": "thread-b"}}})
+
+	gotFirst, err := d.GetRunnerChatSession(ctx, first.ID)
+	if err != nil {
+		t.Fatalf("GetRunnerChatSession first: %v", err)
+	}
+	gotSecond, err := d.GetRunnerChatSession(ctx, second.ID)
+	if err != nil {
+		t.Fatalf("GetRunnerChatSession second: %v", err)
+	}
+	if gotFirst.NativeSessionRef != "thread-a" || gotSecond.NativeSessionRef != "thread-b" {
+		t.Fatalf("expected distinct native refs, got first=%q second=%q", gotFirst.NativeSessionRef, gotSecond.NativeSessionRef)
 	}
 }
 

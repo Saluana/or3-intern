@@ -57,7 +57,7 @@ func TestProcessManagerDefaultsNilCallbackAndCancelledProcess(t *testing.T) {
 	}
 }
 
-func TestRingBufferOverflowAndScannerOverflow(t *testing.T) {
+func TestRingBufferOverflowAndLongLineChunking(t *testing.T) {
 	rb := newRingBuffer(4)
 	if _, err := rb.Write([]byte("abcdef")); err != nil {
 		t.Fatalf("Write: %v", err)
@@ -72,11 +72,12 @@ func TestRingBufferOverflowAndScannerOverflow(t *testing.T) {
 	readStream(strings.NewReader(strings.Repeat("x", 32)+"\n"), "stdout", 8, &seq, collector, func(e AgentRunEvent) {
 		events = append(events, e)
 	}, OutputPlain)
-	if len(events) == 0 {
-		t.Fatal("expected scanner overflow event")
+	if len(events) != 4 {
+		t.Fatalf("expected long line to be split into 4 output chunks, got %#v", events)
 	}
-	last := events[len(events)-1]
-	if last.Type != "error" || !strings.Contains(last.Message, "token too long") {
-		t.Fatalf("unexpected scanner error event: %#v", last)
+	for _, event := range events {
+		if event.Type != "output" || strings.Contains(event.Message, "token too long") {
+			t.Fatalf("unexpected long-line event: %#v", event)
+		}
 	}
 }

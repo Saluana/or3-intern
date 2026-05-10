@@ -84,3 +84,13 @@ func TestResultExtractHelpers(t *testing.T) {
 		t.Fatal("expected plain text to be human-oriented")
 	}
 }
+
+func TestExtractGeminiAssistantValueNestedJSONResponse(t *testing.T) {
+	value := map[string]any{
+		"session_id": "session_outer",
+		"response":   "{\n \"session_id\": \"session_inner\",\n \"response\": \"I'm fully operational and ready to assist.\",\n \"stats\": {\"models\": {}}\n}",
+	}
+	if got := extractGeminiAssistantText(value); got != "I'm fully operational and ready to assist." {
+		t.Fatalf("unexpected nested Gemini response extraction: %q", got)
+	}
+}

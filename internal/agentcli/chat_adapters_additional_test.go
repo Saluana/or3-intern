@@ -23,12 +23,12 @@ func TestChatAdapterSessionRefHelpersAndUnknownTypes(t *testing.T) {
 	}
 
 	codex := &CodexAdapter{spec: RunnerSpec{Binary: "codex"}}
-	if events := codex.NormalizeChatEvent(AgentRunEvent{Type: "structured", Payload: json.RawMessage(`{"type":"unknown"}`)}); len(events) != 0 {
-		t.Fatalf("expected unknown codex payload to be suppressed, got %#v", events)
+	if events := codex.NormalizeChatEvent(AgentRunEvent{Type: "structured", Payload: json.RawMessage(`{"type":"unknown"}`)}); len(events) != 1 || events[0].Type != "runner_output" {
+		t.Fatalf("expected unknown codex payload to become diagnostics, got %#v", events)
 	}
 	opencode := &OpenCodeAdapter{spec: RunnerSpec{Binary: "opencode"}}
-	if events := opencode.NormalizeChatEvent(AgentRunEvent{Type: "structured", Payload: json.RawMessage(`{"type":"unknown"}`)}); len(events) != 0 {
-		t.Fatalf("expected unknown opencode payload to be suppressed, got %#v", events)
+	if events := opencode.NormalizeChatEvent(AgentRunEvent{Type: "structured", Payload: json.RawMessage(`{"type":"unknown"}`)}); len(events) != 1 || events[0].Type != "runner_output" {
+		t.Fatalf("expected unknown opencode payload to become diagnostics, got %#v", events)
 	}
 }
 

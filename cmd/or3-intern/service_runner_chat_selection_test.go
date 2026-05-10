@@ -230,8 +230,8 @@ func TestServiceChatRunners_DiscoveryStatusesAndAgentRunnerContract(t *testing.T
 		t.Fatalf("expected Gemini error, got %#v", got)
 	}
 	codexCaps, ok := findRunnerByID(t, chatPayload, string(agentcli.RunnerCodex))["chat_capabilities"].(map[string]any)
-	if !ok || codexCaps["chatNativeSession"] != false {
-		t.Fatalf("expected Codex native session capability to remain disabled, got %#v", codexCaps)
+	if !ok || codexCaps["chatNativeSession"] != true || codexCaps["streamToolEvents"] != true {
+		t.Fatalf("expected Codex native/tool chat capabilities to be enabled, got %#v", codexCaps)
 	}
 	openCodeCaps, ok := findRunnerByID(t, chatPayload, string(agentcli.RunnerOpenCode))["chat_capabilities"].(map[string]any)
 	if !ok || openCodeCaps["chatNativeSession"] != true {
@@ -310,7 +310,15 @@ func TestServiceRunnerChat_DisabledWriteAndUnsupportedNative(t *testing.T) {
 		defer closeDB()
 		cfg := config.Default()
 		cfg.AgentCLI.Enabled = true
-		registry := newDiscoveryRegistry()
+		specs := agentcli.AllRunners()
+		for i := range specs {
+			if specs[i].ID == agentcli.RunnerCodex {
+				specs[i].Supports.Chat.ChatNativeSession = false
+				specs[i].Supports.Chat.ChatResume = false
+				specs[i].Supports.Chat.ChatSessionRefExtractable = false
+			}
+		}
+		registry := agentcli.NewRunnerRegistry(specs, []agentcli.RunnerAdapter{agentcli.NewCodexAdapter()})
 		jobs := agent.NewJobRegistry(time.Minute, 32)
 		manager := &agentcli.Manager{DB: database, Jobs: jobs, Cfg: cfg.AgentCLI, Registry: registry}
 		chatManager := &agentcli.ChatManager{DB: database, Manager: manager, Jobs: jobs}
@@ -413,6 +421,49 @@ func TestServiceRunnerChat_StreamReplaysAfterSeqAndEmitsDoneSnapshot(t *testing.
 	}
 	if !strings.Contains(joined, `done|{"status":"succeeded"}`) {
 		t.Fatalf("expected done snapshot, got %s", joined)
+	}
+}
+
+func TestServiceRunnerChat_StreamAndListExposeCanonicalPayload(t *testing.T) {
+	database, closeDB := openServiceTestDB(t)
+	defer closeDB()
+	fixture := newRunnerChatServiceFixture(t, config.Default(), database, nil, &agentcli.ChatManager{DB: database})
+	defer fixture.httpServer.Close()
+
+	sess, turn := seedRunnerChatTerminalTurn(t, database)
+	canonical := `{"type":"content.delta","stream_kind":"command_output","delta":"ok"}`
+	if err := database.AppendRunnerChatEvent(context.Background(), db.RunnerChatEvent{TurnID: turn.ID, SessionID: sess.ID, JobID: "job-stream", Seq: 4, Type: "content.delta", Text: "ok", PayloadJSON: canonical}); err != nil {
+		t.Fatalf("AppendRunnerChatEvent canonical: %v", err)
+	}
+
+	list := mustServiceDoJSON(t, fixture, http.MethodGet, fmt.Sprintf("/internal/v1/runner-chat/sessions/%s/turns/%s/events?after_seq=3", sess.ID, turn.ID), "")
+	items := list["events"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("expected one canonical event, got %#v", list)
+	}
+	item := items[0].(map[string]any)
+	if item["type"] != "content.delta" || item["text"] != "ok" {
+		t.Fatalf("expected legacy fields with canonical event, got %#v", item)
+	}
+	payload := item["payload"].(map[string]any)
+	if payload["type"] != "content.delta" || payload["stream_kind"] != "command_output" || payload["delta"] != "ok" {
+		t.Fatalf("expected canonical payload in list response, got %#v", payload)
+	}
+
+	path := fmt.Sprintf("/internal/v1/runner-chat/sessions/%s/turns/%s/stream?after_seq=3", sess.ID, turn.ID)
+	req := mustServiceRequest(t, fixture.httpServer, fixture.secret, http.MethodGet, path, "")
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := fixture.httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do stream: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		defer resp.Body.Close()
+		t.Fatalf("expected 200, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	joined := strings.Join(readSSEEvents(t, resp), "\n")
+	if !strings.Contains(joined, `content.delta|{"id":4,"job_id":"job-stream","payload":{"type":"content.delta","stream_kind":"command_output","delta":"ok"}`) {
+		t.Fatalf("expected canonical payload in SSE stream, got %s", joined)
 	}
 }
 

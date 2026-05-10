@@ -139,6 +139,29 @@ func TestServiceHealthAndReadiness(t *testing.T) {
 	}
 }
 
+func TestBuildRunnerChatEventResponsePassesCanonicalPayload(t *testing.T) {
+	payload := `{"type":"item.started","item_type":"command_execution","status":"inProgress","title":"Command run"}`
+	response := BuildRunnerChatEventResponse(db.RunnerChatEvent{
+		ID:          7,
+		TurnID:      "turn-1",
+		Seq:         4,
+		Type:        "item.started",
+		Text:        "go test ./...",
+		JobID:       "job-1",
+		PayloadJSON: payload,
+	})
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		t.Fatalf("Marshal response: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"payload":{"type":"item.started","item_type":"command_execution","status":"inProgress","title":"Command run"}`) {
+		t.Fatalf("expected canonical payload passthrough, got %s", string(encoded))
+	}
+	if response["type"] != "item.started" || response["text"] != "go test ./..." || response["job_id"] != "job-1" {
+		t.Fatalf("expected legacy fields preserved, got %#v", response)
+	}
+}
+
 func TestServiceScopeOperations(t *testing.T) {
 	database, err := db.Open(filepath.Join(t.TempDir(), "scope-test.db"))
 	if err != nil {

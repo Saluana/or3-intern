@@ -116,7 +116,7 @@ func renderTurnsBounded(turns []RunnerChatTurn, maxBytes int) (string, bool) {
 
 func renderSingleTurn(t RunnerChatTurn) string {
 	user := strings.TrimSpace(t.UserText)
-	final := strings.TrimSpace(t.FinalText)
+	final := sanitizeReplayAssistantText(t.FinalText)
 	switch {
 	case user != "" && final != "":
 		return fmt.Sprintf("User: %s\nAssistant: %s\n", user, final)
@@ -127,6 +127,17 @@ func renderSingleTurn(t RunnerChatTurn) string {
 	default:
 		return ""
 	}
+}
+
+func sanitizeReplayAssistantText(text string) string {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return ""
+	}
+	if nested := extractGeminiAssistantFromSerialized(trimmed, 0); nested != "" {
+		return nested
+	}
+	return trimmed
 }
 
 // truncateFront keeps the latter portion of `s` so the most recent text wins

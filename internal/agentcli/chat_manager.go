@@ -79,7 +79,7 @@ func (cm *ChatManager) EnsureSession(ctx context.Context, req StartTurnRequest) 
 	}
 	mode := string(req.ContinuationMode)
 	if mode == "" {
-		mode = string(ContinuationReplay)
+		mode = string(cm.defaultContinuationMode(req.RunnerID))
 	}
 	sess, err := cm.DB.CreateOrGetRunnerChatSession(ctx, db.RunnerChatSession{
 		ID:               newRunnerChatID("rcs"),
@@ -95,13 +95,28 @@ func (cm *ChatManager) EnsureSession(ctx context.Context, req StartTurnRequest) 
 	return sess, err
 }
 
+func (cm *ChatManager) defaultContinuationMode(runnerID string) ContinuationMode {
+	spec, adapter, err := cm.chatRunner(runnerID)
+	if err != nil {
+		return ContinuationReplay
+	}
+	caps := spec.Supports.Chat
+	if !caps.ChatNativeSession || !caps.ChatResume || !caps.ChatSessionRefExtractable {
+		return ContinuationReplay
+	}
+	if _, ok := adapter.(NativeRunnerChatAdapter); !ok {
+		return ContinuationReplay
+	}
+	return ContinuationNative
+}
+
 // StartTurn creates a new runner_chat_turn for `sessionID`, builds the replay
 // prompt, persists the user message into `messages`, enqueues the underlying
 // agent CLI run, and wires event mirroring + finalization into the
 // runner_chat_events / runner_chat_turns / messages tables.
 //
-// Native continuation mode is not supported in this pass: callers requesting
-// it receive ErrUnsupportedNativeSession.
+// Native continuation mode is used for runners that advertise resumable native
+// sessions; callers requesting it for other runners receive ErrUnsupportedNativeSession.
 func (cm *ChatManager) StartTurn(ctx context.Context, sessionID string, req StartTurnRequest) (StartTurnResult, error) {
 	if cm == nil || cm.DB == nil || cm.Manager == nil {
 		return StartTurnResult{}, errors.New("chat manager not configured")
@@ -345,8 +360,12 @@ func (cm *ChatManager) persistJobEvent(turn db.RunnerChatTurn, sess db.RunnerCha
 	if err == nil {
 		normalized = runnerAdapter.NormalizeChatEvent(rawEvent)
 	}
-	if len(normalized) == 0 {
+	if len(normalized) == 0 && err != nil {
 		normalized = normalizeGenericChatEvent(rawEvent)
+	}
+	if len(normalized) == 0 {
+		cm.maybePersistNativeSessionRef(sess, jobID, ev)
+		return
 	}
 	for _, normalizedEvent := range normalized {
 		payload := string(normalizedEvent.Payload)

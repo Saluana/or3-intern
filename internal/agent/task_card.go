@@ -106,6 +106,14 @@ func renderTaskCard(card TaskCard, maxChars int) string {
 		b.WriteString(strings.TrimSpace(card.Goal))
 		b.WriteString("\n")
 	}
+	for _, v := range card.Plan {
+		if strings.TrimSpace(v) == "" {
+			continue
+		}
+		b.WriteString("Plan: ")
+		b.WriteString(strings.TrimSpace(v))
+		b.WriteString("\n")
+	}
 	for _, v := range card.Constraints {
 		if strings.TrimSpace(v) == "" {
 			continue

@@ -3,6 +3,8 @@ package agent
 import (
 	"strings"
 	"testing"
+
+	"or3-intern/internal/providers"
 )
 
 func TestBudgetEnforcesSectionCaps(t *testing.T) {
@@ -116,6 +118,63 @@ func TestLegacyPacketRenderingMatchesExistingPromptRenderer(t *testing.T) {
 	want := b.composeSystemPrompt("- p: v", "- [fact] digest", "1) [memory] retrieved", b.IdentityText, b.StaticMemory, "heartbeat", "trigger", "docs", "workspace")
 	if got != want {
 		t.Fatalf("packet renderer changed legacy prompt:\ngot:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestEstimateMessagesTokensAndMessageContentString(t *testing.T) {
+	content := []providers.ToolCall{toolCall("lookup", `{"id":1}`)}
+	msgs := []providers.ChatMessage{
+		{Role: "assistant", Content: content, Name: "planner", ToolCallID: "call-1"},
+		{Role: "tool", Content: nil},
+	}
+	want := 0
+	for _, msg := range msgs {
+		want += 4
+		want += estimateTextTokens(msg.Role)
+		want += estimateTextTokens(messageContentString(msg.Content))
+		want += estimateTextTokens(msg.Name)
+		want += estimateTextTokens(msg.ToolCallID)
+	}
+	if got := estimateMessagesTokens(msgs); got != want {
+		t.Fatalf("estimateMessagesTokens=%d, want %d", got, want)
+	}
+	if got := messageContentString(nil); got != "" {
+		t.Fatalf("messageContentString(nil)=%q, want empty", got)
+	}
+	if got := messageContentString(content); !strings.Contains(got, "lookup") {
+		t.Fatalf("expected array content to stringify tool calls, got %q", got)
+	}
+}
+
+func TestMinProtectedTokensBoundaries(t *testing.T) {
+	tests := map[int]int{
+		0:   1,
+		63:  63,
+		64:  16,
+		100: 25,
+	}
+	for cap, want := range tests {
+		if got := minProtectedTokens(cap); got != want {
+			t.Fatalf("minProtectedTokens(%d)=%d, want %d", cap, got, want)
+		}
+	}
+}
+
+func TestEstimatePacketBudgetFallsBackWhenUsableIsNonPositive(t *testing.T) {
+	packet := (&Builder{
+		ContextMaxInputTokens:      10000,
+		ContextOutputReserveTokens: 6000,
+		ContextSafetyMarginTokens:  5000,
+	}).buildContextPacket("(none)", "", "tiny", "", "", "", "", "", "")
+
+	report := estimatePacketBudget(packet, nil)
+	if report.MaxInputTokens != 10000 || report.OutputReserveTokens != 6000 {
+		t.Fatalf("unexpected report: %+v", report)
+	}
+	for _, ev := range report.Pruned {
+		if ev.Section == "Prompt" {
+			t.Fatalf("expected usable<=0 fallback to avoid prompt prune for this packet, got %+v", report.Pruned)
+		}
 	}
 }
 

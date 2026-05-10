@@ -137,6 +137,9 @@ func (r *JobRegistry) Publish(id string, eventType string, data map[string]any) 
 	if entry == nil {
 		return false
 	}
+	if entry.terminal {
+		return false
+	}
 	if data == nil {
 		data = map[string]any{}
 	}

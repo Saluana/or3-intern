@@ -82,4 +82,21 @@ func repeatedEvalText(word string, count int) string {
 	return strings.TrimSpace(strings.Repeat(word+" ", count))
 }
 
-
+func TestFirstNonEmptyEval(t *testing.T) {
+	tests := []struct {
+		name   string
+		values []string
+		want   string
+	}{
+		{name: "all empty", values: []string{"", "   "}, want: ""},
+		{name: "first non empty", values: []string{"value", "later"}, want: "value"},
+		{name: "skips leading empty", values: []string{"", "  ", "picked", "later"}, want: "picked"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := firstNonEmptyEval(tc.values...); got != tc.want {
+				t.Fatalf("firstNonEmptyEval(%q)=%q, want %q", tc.values, got, tc.want)
+			}
+		})
+	}
+}

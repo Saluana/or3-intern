@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"or3-intern/internal/artifacts"
 	"or3-intern/internal/db"
 	"or3-intern/internal/memory"
 	"or3-intern/internal/providers"
@@ -569,6 +570,281 @@ func TestCachedEmbed_FingerprintSeparatesCacheEntries(t *testing.T) {
 	if embedCalls != 2 {
 		t.Fatalf("expected 2 embed calls across distinct fingerprints, got %d", embedCalls)
 	}
+}
+
+func TestBuildUserContentAndImagePartBranches(t *testing.T) {
+	ctx := context.Background()
+	store, image := newPromptTestArtifact(t, []byte("image-bytes"))
+	builder := &Builder{Artifacts: store, EnableVision: true}
+
+	if got := (&Builder{}).buildUserContent(ctx, "hello", []artifacts.Attachment{image}, newVisionBudget()); got != "hello" {
+		t.Fatalf("expected disabled vision to keep plain text, got %#v", got)
+	}
+	if got := (&Builder{EnableVision: true}).buildUserContent(ctx, "hello", []artifacts.Attachment{image}, newVisionBudget()); got != "hello" {
+		t.Fatalf("expected nil artifact store to keep plain text, got %#v", got)
+	}
+	if got := builder.buildUserContent(ctx, "hello", nil, newVisionBudget()); got != "hello" {
+		t.Fatalf("expected empty attachments to keep plain text, got %#v", got)
+	}
+	if got := builder.buildUserContent(ctx, "hello", []artifacts.Attachment{{ArtifactID: "file-1", Filename: "notes.txt", Mime: "text/plain", Kind: artifacts.KindFile}}, newVisionBudget()); got != "hello" {
+		t.Fatalf("expected non-image attachments to keep plain text, got %#v", got)
+	}
+	if got := builder.buildUserContent(ctx, "hello", []artifacts.Attachment{{ArtifactID: "missing", Filename: "photo.png", Mime: "image/png", Kind: artifacts.KindImage}}, newVisionBudget()); got != "hello" {
+		t.Fatalf("expected failed image lookup to fall back to text, got %#v", got)
+	}
+
+	content := builder.buildUserContent(ctx, "hello", []artifacts.Attachment{
+		{ArtifactID: "file-1", Filename: "notes.txt", Mime: "text/plain", Kind: artifacts.KindFile},
+		image,
+	}, newVisionBudget())
+	parts, ok := content.([]map[string]any)
+	if !ok || len(parts) != 2 {
+		t.Fatalf("expected text plus one image part, got %#v", content)
+	}
+	if parts[0]["type"] != "text" || parts[1]["type"] != "image_url" {
+		t.Fatalf("unexpected content parts: %#v", parts)
+	}
+}
+
+func TestImagePartAndReadCappedFileBranches(t *testing.T) {
+	ctx := context.Background()
+	store, image := newPromptTestArtifact(t, []byte("1234"))
+	builder := &Builder{Artifacts: store, EnableVision: true}
+
+	for name, budget := range map[string]*visionBudget{
+		"nil budget":     nil,
+		"no images left": {remainingImages: 0, remainingBytes: 10},
+		"no bytes left":  {remainingImages: 1, remainingBytes: 0},
+		"lookup error":   {remainingImages: 1, remainingBytes: 10},
+	} {
+		t.Run(name, func(t *testing.T) {
+			att := image
+			if name == "lookup error" {
+				att.ArtifactID = "missing"
+			}
+			if part, ok := builder.imagePart(ctx, att, budget); ok || part != nil {
+				t.Fatalf("expected imagePart to skip for %s, got %#v ok=%v", name, part, ok)
+			}
+		})
+	}
+
+	budget := &visionBudget{remainingImages: 1, remainingBytes: 10}
+	part, ok := builder.imagePart(ctx, image, budget)
+	if !ok || part["type"] != "image_url" {
+		t.Fatalf("expected valid image part, got %#v ok=%v", part, ok)
+	}
+	if budget.remainingImages != 0 || budget.remainingBytes != 6 {
+		t.Fatalf("expected budget to decrement after success, got %+v", budget)
+	}
+
+	stored, err := store.Lookup(ctx, image.ArtifactID)
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if data, err := readCappedFile(stored.Path, 4); err != nil || string(data) != "1234" {
+		t.Fatalf("readCappedFile success: data=%q err=%v", data, err)
+	}
+	if _, err := readCappedFile(stored.Path, 3); err == nil || !strings.Contains(err.Error(), "vision limit") {
+		t.Fatalf("expected vision limit error, got %v", err)
+	}
+
+	if err := os.Remove(stored.Path); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if part, ok := builder.imagePart(ctx, image, &visionBudget{remainingImages: 1, remainingBytes: 10}); ok || part != nil {
+		t.Fatalf("expected deleted artifact path to fail, got %#v ok=%v", part, ok)
+	}
+
+	store, image = newPromptTestArtifact(t, []byte("1234"))
+	if _, err := store.DB.SQL.ExecContext(ctx, `UPDATE artifacts SET size_bytes=1 WHERE id=?`, image.ArtifactID); err != nil {
+		t.Fatalf("shrink artifact size metadata: %v", err)
+	}
+	if part, ok := (&Builder{Artifacts: store, EnableVision: true}).imagePart(ctx, image, &visionBudget{remainingImages: 1, remainingBytes: 2}); ok || part != nil {
+		t.Fatalf("expected post-read remainingBytes guard to fail, got %#v ok=%v", part, ok)
+	}
+}
+
+func TestPayloadHelpersAndAttachmentDecoding(t *testing.T) {
+	toolShapes := []struct {
+		name string
+		raw  any
+	}{
+		{
+			name: "tool call slice",
+			raw: []providers.ToolCall{{Type: "function", Function: struct {
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			}{Name: "lookup", Arguments: `{"id":1}`}}},
+		},
+		{
+			name: "any slice",
+			raw: []any{
+				map[string]any{"id": "a", "index": json.Number("2"), "function": map[string]any{"name": "lookup", "arguments": `{"id":2}`}},
+				map[string]any{"function": map[string]any{"name": "", "arguments": `{}`}},
+			},
+		},
+		{
+			name: "map slice",
+			raw: []map[string]any{
+				{"id": "b", "index": float64(3), "type": "", "function": map[string]any{"name": "search", "arguments": `{}`}},
+			},
+		},
+	}
+	for _, tc := range toolShapes {
+		t.Run(tc.name, func(t *testing.T) {
+			got := toolCallsFromPayload(tc.raw)
+			if len(got) != 1 || got[0].Function.Name == "" || got[0].Type != "function" {
+				t.Fatalf("toolCallsFromPayload(%s)=%#v", tc.name, got)
+			}
+		})
+	}
+	if got := toolCallsFromPayload("not-a-slice"); got != nil {
+		t.Fatalf("expected unsupported tool payload shape to return nil, got %#v", got)
+	}
+
+	atts := attachmentsFromPayload(map[string]any{
+		"meta": map[string]any{
+			"attachments": []any{
+				map[string]any{"artifact_id": "img-1", "filename": "photo.png", "mime": "image/png", "size_bytes": json.Number("12")},
+				map[string]any{"artifact_id": "file-1", "filename": "", "mime": "text/plain"},
+				map[string]any{"artifact_id": "", "filename": "skip.txt"},
+			},
+		},
+	})
+	if len(atts) != 2 {
+		t.Fatalf("expected two valid attachments, got %#v", atts)
+	}
+	if atts[0].Kind != artifacts.KindImage || atts[1].Filename != "attachment" || atts[1].Kind != artifacts.KindFile {
+		t.Fatalf("expected attachment defaults and kind detection, got %#v", atts)
+	}
+	if got := attachmentsFromRaw([]artifacts.Attachment{{ArtifactID: "id-1", Filename: "doc.txt"}}); len(got) != 1 {
+		t.Fatalf("expected attachment slice passthrough, got %#v", got)
+	}
+	if got := attachmentsFromRaw("bad-shape"); got != nil {
+		t.Fatalf("expected unsupported attachment payload shape to return nil, got %#v", got)
+	}
+}
+
+func TestPayloadScalarHelpers(t *testing.T) {
+	if got := payloadStringValue("  hi "); got != "hi" {
+		t.Fatalf("payloadStringValue(string)=%q", got)
+	}
+	if got := payloadStringValue(json.Number("42")); got != "42" {
+		t.Fatalf("payloadStringValue(json.Number)=%q", got)
+	}
+	if got := payloadStringValue(nil); got != "" {
+		t.Fatalf("payloadStringValue(nil)=%q", got)
+	}
+	if got := payloadIntValue(json.Number("7")); got != 7 {
+		t.Fatalf("payloadIntValue(json.Number)=%d", got)
+	}
+	if got := payloadIntValue(float64(8.9)); got != 8 {
+		t.Fatalf("payloadIntValue(float64)=%d", got)
+	}
+	if got := payloadInt64Value(9); got != 9 {
+		t.Fatalf("payloadInt64Value(int)=%d", got)
+	}
+	if got := payloadInt64Value(float64(10.9)); got != 10 {
+		t.Fatalf("payloadInt64Value(float64)=%d", got)
+	}
+	if got := payloadInt64Value(nil); got != 0 {
+		t.Fatalf("payloadInt64Value(nil)=%d", got)
+	}
+}
+
+func TestCachedEmbed_ErrorPathsAndLRUEviction(t *testing.T) {
+	resetPromptEmbedCache(t)
+	if _, err := cachedEmbed(context.Background(), nil, "fp", "embed", "hello"); err == nil || !strings.Contains(err.Error(), "provider not configured") {
+		t.Fatalf("expected provider nil error, got %v", err)
+	}
+
+	errServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer errServer.Close()
+	errProvider := providers.New(errServer.URL, "test-key", 5*time.Second)
+	errProvider.HTTP = errServer.Client()
+	if _, err := cachedEmbed(context.Background(), errProvider, "fp", "embed", "hello"); err == nil {
+		t.Fatalf("expected embed error")
+	}
+
+	now := time.Now()
+	promptEmbedCache.mu.Lock()
+	for i := 0; i < embedCacheMaxEntries; i++ {
+		key := embedCacheKey{fingerprint: "fp", model: "embed", input: fmt.Sprintf("input-%03d", i)}
+		promptEmbedCache.entries[key] = embedCacheEntry{
+			vec:       []float32{float32(i)},
+			expiresAt: now.Add(time.Minute),
+			usedAt:    now.Add(time.Duration(i) * time.Second),
+		}
+	}
+	promptEmbedCache.mu.Unlock()
+
+	p := testPromptProvider(t)
+	if _, err := cachedEmbed(context.Background(), p, "fp", "embed", "new-input"); err != nil {
+		t.Fatalf("cachedEmbed eviction path: %v", err)
+	}
+	promptEmbedCache.mu.Lock()
+	defer promptEmbedCache.mu.Unlock()
+	if len(promptEmbedCache.entries) != embedCacheMaxEntries {
+		t.Fatalf("expected cache to stay capped at %d, got %d", embedCacheMaxEntries, len(promptEmbedCache.entries))
+	}
+	if _, ok := promptEmbedCache.entries[embedCacheKey{fingerprint: "fp", model: "embed", input: "input-000"}]; ok {
+		t.Fatalf("expected least-recently-used entry to be evicted")
+	}
+	if _, ok := promptEmbedCache.entries[embedCacheKey{fingerprint: "fp", model: "embed", input: "new-input"}]; !ok {
+		t.Fatalf("expected new entry to be cached")
+	}
+}
+
+func TestCurrentHeartbeatTextFallbacks(t *testing.T) {
+	if got := (*Builder)(nil).currentHeartbeatText(); got != "" {
+		t.Fatalf("expected nil builder to return empty string, got %q", got)
+	}
+
+	workspace := t.TempDir()
+	heartbeatPath := filepath.Join(workspace, "HEARTBEAT.md")
+	if err := os.Mkdir(heartbeatPath, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	if got := (&Builder{WorkspaceDir: workspace, HeartbeatText: " fallback "}).currentHeartbeatText(); got != "fallback" {
+		t.Fatalf("expected read error to fall back to HeartbeatText, got %q", got)
+	}
+
+	if err := os.Remove(heartbeatPath); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if err := os.WriteFile(heartbeatPath, []byte("# Heartbeat\n<!-- comments only -->"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if got := (&Builder{WorkspaceDir: workspace, HeartbeatText: "fallback"}).currentHeartbeatText(); got != "" {
+		t.Fatalf("expected comment-only file to suppress heartbeat text, got %q", got)
+	}
+}
+
+func newPromptTestArtifact(t *testing.T, data []byte) (*artifacts.Store, artifacts.Attachment) {
+	t.Helper()
+	store := &artifacts.Store{
+		Dir: filepath.Join(t.TempDir(), "artifacts"),
+		DB:  openTestDB(t),
+	}
+	att, err := store.SaveNamed(context.Background(), "sess", "photo.png", "image/png", data)
+	if err != nil {
+		t.Fatalf("SaveNamed: %v", err)
+	}
+	return store, att
+}
+
+func resetPromptEmbedCache(t *testing.T) {
+	t.Helper()
+	promptEmbedCache.mu.Lock()
+	promptEmbedCache.entries = map[embedCacheKey]embedCacheEntry{}
+	promptEmbedCache.mu.Unlock()
+	t.Cleanup(func() {
+		promptEmbedCache.mu.Lock()
+		promptEmbedCache.entries = map[embedCacheKey]embedCacheEntry{}
+		promptEmbedCache.mu.Unlock()
+	})
 }
 
 func TestBuildWithOptions_UsageLoggingOnlyForIncludedPromptNotes(t *testing.T) {

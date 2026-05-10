@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -245,7 +246,15 @@ func (m *SubagentManager) EnqueueService(ctx context.Context, req ServiceSubagen
 func (m *SubagentManager) workerLoop() {
 	defer m.wg.Done()
 	for {
-		ran, err := m.runOnce()
+		ran, err := func() (ran bool, err error) {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					log.Printf("subagent worker panic recovered: %v\n%s", recovered, debug.Stack())
+					err = fmt.Errorf("subagent worker panic: %v", recovered)
+				}
+			}()
+			return m.runOnce()
+		}()
 		if err != nil {
 			if !errors.Is(err, context.Canceled) {
 				log.Printf("subagent worker error: %v", err)

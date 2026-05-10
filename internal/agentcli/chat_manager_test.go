@@ -11,12 +11,7 @@ import (
 
 func openChatManagerTestDB(t *testing.T) *db.DB {
 	t.Helper()
-	d, err := db.Open(t.TempDir() + "/test.db")
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	t.Cleanup(func() { _ = d.Close() })
-	return d
+	return openAgentCLITestDB(t)
 }
 
 func testChatManager(database *db.DB) *ChatManager {
@@ -52,9 +47,11 @@ func TestChatManagerStartTurnDoesNotAppendUserMessageOnActiveConflict(t *testing
 	if err != nil {
 		t.Fatalf("EnsureSession: %v", err)
 	}
-	if _, err := cm.StartTurn(ctx, sess.ID, StartTurnRequest{UserMessage: "first"}); err != nil {
+	result, err := cm.StartTurn(ctx, sess.ID, StartTurnRequest{UserMessage: "first"})
+	if err != nil {
 		t.Fatalf("StartTurn first: %v", err)
 	}
+	defer func() { _ = cm.Manager.Abort(ctx, result.JobID) }()
 	if _, err := cm.StartTurn(ctx, sess.ID, StartTurnRequest{UserMessage: "second"}); err != db.ErrRunnerChatTurnActive {
 		t.Fatalf("expected ErrRunnerChatTurnActive, got %v", err)
 	}
@@ -84,6 +81,7 @@ func TestChatManagerUsesSessionMaxTurnsDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartTurn: %v", err)
 	}
+	defer func() { _ = cm.Manager.Abort(ctx, result.JobID) }()
 	run, ok, err := d.GetAgentCLIRun(ctx, result.JobID)
 	if err != nil || !ok {
 		t.Fatalf("GetAgentCLIRun: ok=%v err=%v", ok, err)

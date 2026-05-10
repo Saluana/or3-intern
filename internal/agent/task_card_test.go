@@ -152,3 +152,40 @@ func TestTaskCardLoadModifySavePreservesExistingFields(t *testing.T) {
 		t.Fatalf("expected caller-style load/modify/save merge behavior, got %+v", reloaded)
 	}
 }
+
+func TestRenderTaskCardIncludesPlanAndRespectsExactLimit(t *testing.T) {
+	card := TaskCard{
+		Status:        "active",
+		Goal:          "ship prompt coverage",
+		Plan:          []string{"add focused unit tests"},
+		Constraints:   []string{""},
+		Decisions:     []string{"keep changes surgical"},
+		OpenQuestions: nil,
+	}
+	rendered := renderTaskCard(card, 0)
+	if !strings.Contains(rendered, "Plan: add focused unit tests") {
+		t.Fatalf("expected plan section in rendered card, got %q", rendered)
+	}
+	if strings.Contains(rendered, "Constraint:") || strings.Contains(rendered, "Open Question:") {
+		t.Fatalf("expected empty sections to stay omitted, got %q", rendered)
+	}
+	if got := renderTaskCard(card, len(rendered)); got != rendered {
+		t.Fatalf("expected exact limit to avoid truncation, got %q want %q", got, rendered)
+	}
+	if got := renderTaskCard(card, len(rendered)-1); !strings.Contains(got, "[truncated]") {
+		t.Fatalf("expected shorter limit to truncate, got %q", got)
+	}
+}
+
+func TestStatusOrDefault(t *testing.T) {
+	tests := map[string]string{
+		"":         "active",
+		"   ":      "active",
+		"blocked ": "blocked",
+	}
+	for input, want := range tests {
+		if got := statusOrDefault(input); got != want {
+			t.Fatalf("statusOrDefault(%q)=%q, want %q", input, got, want)
+		}
+	}
+}

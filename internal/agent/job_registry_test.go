@@ -2,6 +2,10 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -129,6 +133,31 @@ func TestJobRegistry_BoundsPerJobEventHistory(t *testing.T) {
 	}
 }
 
+func TestJobRegistry_PublishIgnoresTerminalJobs(t *testing.T) {
+	registry := NewJobRegistry(time.Minute, 16)
+	job := registry.RegisterWithID("job-terminal-guard", "turn")
+	if !registry.Complete(job.ID, "completed", map[string]any{"final_text": "done"}) {
+		t.Fatal("expected completion to succeed")
+	}
+
+	snapshot, ok := registry.Snapshot(job.ID)
+	if !ok {
+		t.Fatal("expected snapshot to succeed")
+	}
+	eventCount := len(snapshot.Events)
+	if registry.Publish(job.ID, "late_event", map[string]any{"content": "ignored"}) {
+		t.Fatal("expected publish to reject terminal job")
+	}
+
+	snapshot, ok = registry.Snapshot(job.ID)
+	if !ok {
+		t.Fatal("expected snapshot after terminal publish")
+	}
+	if len(snapshot.Events) != eventCount {
+		t.Fatalf("expected late publish to leave history unchanged, got %#v", snapshot.Events)
+	}
+}
+
 func TestJobObserverToolResultIncludesApprovalRequestID(t *testing.T) {
 	registry := NewJobRegistry(0, 0)
 	job := registry.Register("turn")
@@ -193,5 +222,186 @@ func TestJobObserverToolLifecyclePublishesEnrichedPayloads(t *testing.T) {
 	result := snapshot.Events[1].Data
 	if result["artifact_id"] != "artifact_1" || result["result_preview"] != "ok" {
 		t.Fatalf("unexpected result event: %#v", result)
+	}
+}
+
+func TestJobObserverPublishesConversationEvents(t *testing.T) {
+	registry := NewJobRegistry(time.Minute, 16)
+	job := registry.RegisterWithID("job-observer-events", "turn")
+	observer := JobObserver{registry: registry, jobID: job.ID}
+
+	observer.OnTextDelta(context.Background(), "")
+	observer.OnTextDelta(context.Background(), "hello")
+	observer.OnToolCall(context.Background(), "exec", strings.Repeat("x", 520))
+	observer.OnCompletion(context.Background(), "done", true)
+	observer.OnError(context.Background(), errors.New("boom"))
+
+	snapshot, ok := registry.Snapshot(job.ID)
+	if !ok {
+		t.Fatal("expected snapshot")
+	}
+	if len(snapshot.Events) != 4 {
+		t.Fatalf("expected four events, got %#v", snapshot.Events)
+	}
+	if snapshot.Events[0].Type != "text_delta" || snapshot.Events[0].Data["content"] != "hello" {
+		t.Fatalf("unexpected text delta event: %#v", snapshot.Events[0])
+	}
+	if snapshot.Events[1].Type != "tool_call" || snapshot.Events[1].Data["name"] != "exec" {
+		t.Fatalf("unexpected tool call event: %#v", snapshot.Events[1])
+	}
+	if preview := fmt.Sprint(snapshot.Events[1].Data["arguments_preview"]); !strings.HasSuffix(preview, "...") {
+		t.Fatalf("expected bounded tool call preview, got %q", preview)
+	}
+	if snapshot.Events[2].Type != "assistant" || snapshot.Events[2].Data["streamed"] != true {
+		t.Fatalf("unexpected completion event: %#v", snapshot.Events[2])
+	}
+	if snapshot.Events[3].Type != "runtime_error" || snapshot.Events[3].Data["public_code"] != PublicErrorUnknown {
+		t.Fatalf("unexpected error event: %#v", snapshot.Events[3])
+	}
+}
+
+func TestJobObserverNilRegistryIsSafe(t *testing.T) {
+	observer := JobObserver{jobID: "job-nil"}
+	observer.OnTextDelta(context.Background(), "hello")
+	observer.OnToolCall(context.Background(), "exec", "{}")
+	observer.OnToolResult(context.Background(), "exec", "ok", nil)
+	observer.OnCompletion(context.Background(), "done", false)
+	observer.OnError(context.Background(), errors.New("boom"))
+}
+
+func TestJobRegistry_FailMarksTerminalError(t *testing.T) {
+	registry := NewJobRegistry(time.Minute, 16)
+	job := registry.RegisterWithID("job-fail", "turn")
+
+	if !registry.Fail(job.ID, "boom", map[string]any{"detail": "x"}) {
+		t.Fatal("expected Fail to succeed")
+	}
+
+	snapshot, ok := registry.Wait(context.Background(), job.ID)
+	if !ok {
+		t.Fatal("expected failed job snapshot")
+	}
+	if snapshot.Status != "failed" {
+		t.Fatalf("expected failed status, got %#v", snapshot)
+	}
+	if len(snapshot.Events) != 1 || snapshot.Events[0].Type != "error" {
+		t.Fatalf("expected single error event, got %#v", snapshot.Events)
+	}
+	if snapshot.Events[0].Data["message"] != "boom" || snapshot.Events[0].Data["detail"] != "x" {
+		t.Fatalf("unexpected fail payload: %#v", snapshot.Events[0].Data)
+	}
+}
+
+func TestJobRegistry_AttachCancelHandlesMissingEntry(t *testing.T) {
+	registry := NewJobRegistry(time.Minute, 16)
+	if registry.AttachCancel("missing", func() {}) {
+		t.Fatal("expected AttachCancel to reject missing job")
+	}
+
+	job := registry.RegisterWithID("job-cancel", "turn")
+	cancelled := false
+	if !registry.AttachCancel(job.ID, func() { cancelled = true }) {
+		t.Fatal("expected AttachCancel to succeed for existing job")
+	}
+	if !registry.Cancel(job.ID) {
+		t.Fatal("expected Cancel to invoke attached cancel func")
+	}
+	if !cancelled {
+		t.Fatal("expected cancel func to run")
+	}
+}
+
+func TestJobRegistry_WaitReturnsFalseOnCanceledContext(t *testing.T) {
+	registry := NewJobRegistry(time.Minute, 16)
+	job := registry.RegisterWithID("job-wait-cancel", "turn")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if snapshot, ok := registry.Wait(ctx, job.ID); ok {
+		t.Fatalf("expected canceled wait to fail, got %#v", snapshot)
+	}
+}
+
+func TestJobRegistry_ConcurrentRegisterPublishSubscribe(t *testing.T) {
+	registry := NewJobRegistry(time.Minute, 256)
+
+	const workers = 10
+	const eventsPerWorker = 4
+	var wg sync.WaitGroup
+	errCh := make(chan error, workers)
+	start := make(chan struct{})
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+
+			jobID := fmt.Sprintf("job-concurrent-%d", i)
+			job := registry.RegisterWithID(jobID, "turn")
+			if job.ID != jobID {
+				errCh <- fmt.Errorf("unexpected job id %q", job.ID)
+				return
+			}
+			_, ch, unsubscribe, ok := registry.Subscribe(jobID)
+			if !ok {
+				errCh <- fmt.Errorf("subscribe failed for %s", jobID)
+				return
+			}
+
+			for j := 0; j < eventsPerWorker; j++ {
+				registry.Publish(jobID, "text_delta", map[string]any{"content": fmt.Sprintf("%d-%d", i, j)})
+			}
+			registry.Complete(jobID, "completed", map[string]any{"worker": i})
+
+			seen := 0
+			for range ch {
+				seen++
+			}
+			unsubscribe()
+			if seen == 0 {
+				errCh <- fmt.Errorf("expected streamed events for %s", jobID)
+				return
+			}
+			snapshot, ok := registry.Wait(context.Background(), jobID)
+			if !ok || snapshot.Status != "completed" {
+				errCh <- fmt.Errorf("wait failed for %s: ok=%v snapshot=%#v", jobID, ok, snapshot)
+				return
+			}
+			if len(snapshot.Events) != eventsPerWorker+1 {
+				errCh <- fmt.Errorf("unexpected event count for %s: %d", jobID, len(snapshot.Events))
+			}
+		}(i)
+	}
+
+	close(start)
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestJobRegistry_DoesNotEvictWhenOnlyLiveJobsRemain(t *testing.T) {
+	registry := NewJobRegistry(time.Hour, 2)
+
+	jobA := registry.RegisterWithID("job-live-a", "turn")
+	jobB := registry.RegisterWithID("job-live-b", "turn")
+	jobC := registry.RegisterWithID("job-live-c", "turn")
+
+	registry.mu.Lock()
+	registry.cleanupLocked(time.Now())
+	size := len(registry.jobs)
+	registry.mu.Unlock()
+
+	if size != 3 {
+		t.Fatalf("expected all live jobs to remain tracked, got %d", size)
+	}
+	for _, id := range []string{jobA.ID, jobB.ID, jobC.ID} {
+		if _, ok := registry.Snapshot(id); !ok {
+			t.Fatalf("expected live job %q to remain accessible", id)
+		}
 	}
 }

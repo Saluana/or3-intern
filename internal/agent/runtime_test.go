@@ -2374,9 +2374,9 @@ func TestRuntime_ExecuteConversation_AsksApprovalWhenToolLoopLimitHit(t *testing
 		},
 	}
 
-	loopCalls := 0
+	var loopCalls atomic.Int32
 	loopServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		loopCalls++
+		callNumber := loopCalls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		resp := providers.ChatCompletionResponse{Choices: []struct {
 			Message struct {
@@ -2390,7 +2390,7 @@ func TestRuntime_ExecuteConversation_AsksApprovalWhenToolLoopLimitHit(t *testing
 			ToolCalls []providers.ToolCall `json:"tool_calls"`
 		}{
 			Role: "assistant",
-			ToolCalls: []providers.ToolCall{{ID: fmt.Sprintf("loop-%d", loopCalls), Type: "function", Function: struct {
+			ToolCalls: []providers.ToolCall{{ID: fmt.Sprintf("loop-%d", callNumber), Type: "function", Function: struct {
 				Name      string `json:"name"`
 				Arguments string `json:"arguments"`
 			}{Name: "echo_tool", Arguments: `{}`}}},
@@ -2423,8 +2423,8 @@ func TestRuntime_ExecuteConversation_AsksApprovalWhenToolLoopLimitHit(t *testing
 	if !errors.As(err, &approvalErr) || approvalErr.RequestID == 0 {
 		t.Fatalf("expected approval-required error, got %T: %v", err, err)
 	}
-	if loopCalls != 2 {
-		t.Fatalf("expected loop budget to stop before a third provider call, got %d", loopCalls)
+	if got := loopCalls.Load(); got != 2 {
+		t.Fatalf("expected loop budget to stop before a third provider call, got %d", got)
 	}
 
 	pending, err := d.ListApprovalRequestsFiltered(context.Background(), approval.StatusPending, string(approval.SubjectToolQuota), 1)
@@ -2439,11 +2439,11 @@ func TestRuntime_ExecuteConversation_AsksApprovalWhenToolLoopLimitHit(t *testing
 		t.Fatalf("ApproveRequest: %v", err)
 	}
 
-	successCalls := 0
+	var successCalls atomic.Int32
 	successServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		successCalls++
+		callNumber := successCalls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		if successCalls <= 3 {
+		if callNumber <= 3 {
 			resp := providers.ChatCompletionResponse{Choices: []struct {
 				Message struct {
 					Role      string               `json:"role"`
@@ -2456,7 +2456,7 @@ func TestRuntime_ExecuteConversation_AsksApprovalWhenToolLoopLimitHit(t *testing
 				ToolCalls []providers.ToolCall `json:"tool_calls"`
 			}{
 				Role: "assistant",
-				ToolCalls: []providers.ToolCall{{ID: fmt.Sprintf("retry-%d", successCalls), Type: "function", Function: struct {
+				ToolCalls: []providers.ToolCall{{ID: fmt.Sprintf("retry-%d", callNumber), Type: "function", Function: struct {
 					Name      string `json:"name"`
 					Arguments string `json:"arguments"`
 				}{Name: "echo_tool", Arguments: `{}`}}},
@@ -2490,8 +2490,8 @@ func TestRuntime_ExecuteConversation_AsksApprovalWhenToolLoopLimitHit(t *testing
 	if finalText != "done" {
 		t.Fatalf("expected final text after approved continuation, got %q", finalText)
 	}
-	if successCalls != 4 {
-		t.Fatalf("expected approved retry to use one extra tool-loop block, got %d provider calls", successCalls)
+	if got := successCalls.Load(); got != 4 {
+		t.Fatalf("expected approved retry to use one extra tool-loop block, got %d provider calls", got)
 	}
 }
 

@@ -6,8 +6,8 @@
 - [x] Update `internal/agentcli/registry.go` runner specs with conservative chat capabilities: replay selectable for available external runners, native disabled until verified per adapter. Requirements: 1, 6.
 - [x] Add optional `RunnerChatAdapter` and `NativeRunnerChatAdapter` interfaces without changing the existing `RunnerAdapter` contract. Requirements: 5, 6.
 - [x] Add `GET /internal/v1/chat-runners` handler, response builder, and route registration. Requirements: 1, 9.
-- [ ] Add tests for runner discovery responses, disabled runner handling, conservative capability gating, and `or3-intern` default inclusion. Requirements: 1, 6, 13.
-- [ ] Add discovery edge-case tests for missing/auth-missing/disabled/errored runners, default hint passthrough, and regression coverage that `GET /internal/v1/agent-runners` keeps its existing contract. Requirements: 1, 9, 12, 13.
+- [x] Add tests for runner discovery responses, disabled runner handling, conservative capability gating, and `or3-intern` default inclusion. Requirements: 1, 6, 13.
+- [x] Add discovery edge-case tests for missing/auth-missing/disabled/errored runners, default hint passthrough, and regression coverage that `GET /internal/v1/agent-runners` keeps its existing contract. Requirements: 1, 9, 12, 13.
 
 ## 2. Backend Persistence
 
@@ -85,7 +85,7 @@
 - [x] Register routes in `cmd/or3-intern/service.go` with the same auth sensitivity as chat/job routes. Requirements: 8, 10, 12.
 - [x] Ensure session-history route responses use bounded previews and paginated message reads. Requirements: 14, 21.
 - [x] Add response builders in `internal/controlplane/controlplane.go`. Requirements: 4, 7, 12.
-- [ ] Add service tests for JSON responses, SSE streaming, event replay after `after_seq`, active turn conflict, abort, and not-found cases. Requirements: 4, 7, 8, 12, 13.
+- [x] Add service tests for JSON responses, SSE streaming, event replay after `after_seq`, active turn conflict, abort, and not-found cases. Requirements: 4, 7, 8, 12, 13.
 - [ ] Add service tests for session listing, message pagination, rename/archive, fork, invalid anchors, incomplete anchors, and replay fallback metadata. Requirements: 14, 16, 17, 18, 20, 21.
 - [ ] Add service tests for auth parity with existing chat routes, bounded preview payloads, and stable error codes for `runner_missing`, `runner_auth_missing`, `unsupported_native_session`, `invalid_fork_anchor`, `fork_anchor_incomplete`, and `unsupported_native_fork`. Requirements: 1, 6, 12, 18, 21.
 - [ ] Add SSE edge-case tests for duplicate/late subscribers, ordered replay with sequence gaps, and snapshot fallback after a turn completes before the client reconnects. Requirements: 4, 7, 8, 12, 13.
@@ -106,9 +106,9 @@
 - [x] Create `../or3-app/app/composables/useChatRunners.ts` to call `GET /internal/v1/chat-runners`, cache by host, and expose selectable runners. Requirements: 1, 9.
 - [x] Create `../or3-app/app/composables/useSessionHistory.ts` to list sessions, hydrate messages, rename/archive, fork, and reconcile backend metadata into local cache. Requirements: 14, 16, 19, 20.
 - [x] Update `../or3-app/app/composables/useChatSessions.ts` with helpers to set runner metadata, bind a backend runner chat session ID, activate old sessions, and handle switch/fork rules. Requirements: 2, 9, 11, 14, 16.
-- [ ] Add `useChatRunners` tests for host-scoped caching, refresh behavior, default runner selection, and unavailable-runner fallback. Requirements: 1, 9, 13.
+- [x] Add `useChatRunners` tests for host-scoped caching, refresh behavior, default runner selection, and unavailable-runner fallback. Requirements: 1, 9, 13.
 - [ ] Add `useChatSessions` tests for empty-session switch, non-empty-session switch confirmation/new-session behavior, backend metadata reconciliation, session activation, and fork activation. Requirements: 2, 9, 11, 14, 16, 19.
-- [ ] Add `useSessionHistory` tests for backend hydration, draft preservation, runner/archive/search filtering, and activation of forked sessions returned by the backend. Requirements: 14, 16, 19, 20.
+- [x] Add `useSessionHistory` tests for backend hydration, draft preservation, runner/archive/search filtering, and activation of forked sessions returned by the backend. Requirements: 14, 16, 19, 20.
 
 ## 10. Frontend Transport Refactor
 

@@ -11,6 +11,22 @@ import (
 	"or3-intern/internal/config"
 )
 
+func clearConfigEnvForTest(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"OR3_DB_PATH",
+		"OR3_ARTIFACTS_DIR",
+		"OR3_API_BASE",
+		"OR3_API_KEY",
+		"OR3_MODEL",
+		"OR3_EMBED_MODEL",
+		"OPENAI_API_KEY",
+		"OPENROUTER_API_KEY",
+	} {
+		t.Setenv(key, "")
+	}
+}
+
 func TestParseConfigureArgs(t *testing.T) {
 	parsed, err := parseConfigureArgs([]string{"--section", "provider", "--section", "web", "--section", "provider"})
 	if err != nil {
@@ -223,6 +239,7 @@ func TestRunConfigureWithIO_WarnsWhenSavedConfigIsStillInvalid(t *testing.T) {
 }
 
 func TestRunConfigureWithIO_SecretPromptKeepsExistingValueWithoutLeakingIt(t *testing.T) {
+	clearConfigEnvForTest(t)
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 
@@ -253,6 +270,7 @@ func TestRunConfigureWithIO_SecretPromptKeepsExistingValueWithoutLeakingIt(t *te
 }
 
 func TestRunConfigureWithIO_SecretPromptCanClearExistingValue(t *testing.T) {
+	clearConfigEnvForTest(t)
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 

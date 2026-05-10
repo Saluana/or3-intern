@@ -37,6 +37,7 @@ func seedConsumerConfig(t *testing.T, cfgPath, root string) config.Config {
 }
 
 func TestRunSetupWithIO_PreservesExistingProviderModels(t *testing.T) {
+	clearConfigEnvForTest(t)
 	tmp := t.TempDir()
 	cfgPath := filepath.Join(tmp, "config.json")
 	cfg := seedConsumerConfig(t, cfgPath, tmp)

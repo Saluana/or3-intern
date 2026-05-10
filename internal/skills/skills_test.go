@@ -213,6 +213,11 @@ func TestScan_BacktickPrerequisiteSkillDependency(t *testing.T) {
 
 func TestScan_LocalBinaryRequirementNeedsExecTool(t *testing.T) {
 	dir := t.TempDir()
+	binDir := t.TempDir()
+	binaryPath := filepath.Join(binDir, "gws")
+	if err := os.WriteFile(binaryPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile fake gws: %v", err)
+	}
 	makeSkillBundle(t, dir, "cli-skill", `---
 metadata:
   openclaw:
@@ -223,6 +228,7 @@ metadata:
 
 	inv := ScanWithOptions(LoadOptions{
 		Roots:          []Root{{Path: dir, Source: SourceWorkspace}},
+		Env:            map[string]string{"PATH": binDir},
 		AvailableTools: map[string]struct{}{"read_skill": {}},
 	})
 	skill := inv.Skills[0]
@@ -235,6 +241,7 @@ metadata:
 
 	inv = ScanWithOptions(LoadOptions{
 		Roots:          []Root{{Path: dir, Source: SourceWorkspace}},
+		Env:            map[string]string{"PATH": binDir},
 		AvailableTools: map[string]struct{}{"read_skill": {}, "exec": {}},
 	})
 	if !inv.Skills[0].Eligible {

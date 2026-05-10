@@ -684,6 +684,7 @@ func TestServiceConfigureFields_UsesFrontendFriendlyShape(t *testing.T) {
 }
 
 func TestServiceConfigureApply_PersistsConfigChanges(t *testing.T) {
+	clearConfigEnvForTest(t)
 	cfg := config.Default()
 	cfgPath := filepath.Join(t.TempDir(), "or3-intern.json")
 	if err := config.Save(cfgPath, cfg); err != nil {

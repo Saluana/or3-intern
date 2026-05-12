@@ -19,29 +19,32 @@ import (
 	"or3-intern/internal/config"
 	"or3-intern/internal/controlplane"
 	"or3-intern/internal/cron"
+	"or3-intern/internal/mcp"
 )
 
 type serviceServer struct {
-	config              config.Config
-	configPath          string
-	runtime             *agent.Runtime
-	cronSvc             *cron.Service
-	subagentManager     *agent.SubagentManager
-	agentCLIManager     *agentcli.Manager
-	chatManager         *agentcli.ChatManager
-	jobs                *agent.JobRegistry
-	broker              *approval.Broker
-	unsafeDev           bool
-	controlOnce         sync.Once
-	controlSvc          *controlplane.Service
-	appOnce             sync.Once
-	appSvc              *app.ServiceApp
-	componentsOnce      sync.Once
-	terminalManager     *serviceTerminalManager
-	terminalTicketStore *serviceTerminalWebSocketTicketStore
-	rateLimiter         *serviceRateLimiter
-	authFailures        *serviceAuthFailureTracker
-	modelCatalog        *serviceModelCatalogCache
+	config                config.Config
+	configPath            string
+	runtime               *agent.Runtime
+	cronSvc               *cron.Service
+	subagentManager       *agent.SubagentManager
+	agentCLIManager       *agentcli.Manager
+	chatManager           *agentcli.ChatManager
+	mcpManager            *mcp.Manager
+	mcpTestManagerFactory serviceMCPTestManagerFactory
+	jobs                  *agent.JobRegistry
+	broker                *approval.Broker
+	unsafeDev             bool
+	controlOnce           sync.Once
+	controlSvc            *controlplane.Service
+	appOnce               sync.Once
+	appSvc                *app.ServiceApp
+	componentsOnce        sync.Once
+	terminalManager       *serviceTerminalManager
+	terminalTicketStore   *serviceTerminalWebSocketTicketStore
+	rateLimiter           *serviceRateLimiter
+	authFailures          *serviceAuthFailureTracker
+	modelCatalog          *serviceModelCatalogCache
 }
 
 func (s *serviceServer) initComponents() {
@@ -126,6 +129,10 @@ func runServiceCommandWithBrokerOptions(ctx context.Context, cfg config.Config, 
 }
 
 func runServiceCommandWithBrokerOptionsAndCron(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, agentCLIManager *agentcli.Manager, jobs *agent.JobRegistry, broker *approval.Broker, unsafeDev bool, cronSvc *cron.Service) error {
+	return runServiceCommandWithBrokerOptionsCronMCP(ctx, cfg, rt, subagentManager, agentCLIManager, jobs, broker, unsafeDev, cronSvc, nil)
+}
+
+func runServiceCommandWithBrokerOptionsCronMCP(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, agentCLIManager *agentcli.Manager, jobs *agent.JobRegistry, broker *approval.Broker, unsafeDev bool, cronSvc *cron.Service, mcpManager *mcp.Manager) error {
 	if strings.TrimSpace(cfg.Service.Secret) == "" {
 		return fmt.Errorf("service secret is required")
 	}
@@ -138,7 +145,7 @@ func runServiceCommandWithBrokerOptionsAndCron(ctx context.Context, cfg config.C
 	if jobs == nil {
 		jobs = agent.NewJobRegistry(0, 0)
 	}
-	server := &serviceServer{config: cfg, configPath: cfgPathOrDefault(""), runtime: rt, cronSvc: cronSvc, subagentManager: subagentManager, agentCLIManager: agentCLIManager, jobs: jobs, broker: broker, unsafeDev: unsafeDev}
+	server := &serviceServer{config: cfg, configPath: cfgPathOrDefault(""), runtime: rt, cronSvc: cronSvc, subagentManager: subagentManager, agentCLIManager: agentCLIManager, chatManager: nil, mcpManager: mcpManager, jobs: jobs, broker: broker, unsafeDev: unsafeDev}
 	if rt.DB != nil {
 		server.chatManager = &agentcli.ChatManager{DB: rt.DB, Manager: agentCLIManager, Jobs: jobs, Broker: broker}
 		if err := server.chatManager.ReconcileOnStartup(ctx); err != nil {
@@ -200,6 +207,7 @@ func newServiceMux(server *serviceServer) *http.ServeMux {
 	handleServiceRoute(mux, "/internal/v1/audit", server.handleAudit, true)
 	handleServiceRoute(mux, "/internal/v1/scope", server.handleScope, true)
 	handleServiceRoute(mux, "/internal/v1/configure", server.handleConfigure, true)
+	handleServiceRoute(mux, "/internal/v1/mcp/servers", server.handleMCPServers, true)
 	handleServiceRoute(mux, "/internal/v1/skills", server.handleSkills, true)
 	handleServiceRoute(mux, "/internal/v1/files", server.handleFiles, true)
 	handleServiceRoute(mux, "/internal/v1/terminal/sessions", server.handleTerminal, true)
@@ -221,6 +229,7 @@ func handleServiceRoute(mux *http.ServeMux, path string, handler func(http.Respo
 func (s *serviceServer) control() *controlplane.Service {
 	s.controlOnce.Do(func() {
 		s.controlSvc = controlplane.New(s.config, s.runtime, s.broker, s.jobs, s.subagentManager)
+		s.controlSvc.MCPStatus = s.mcpManager
 	})
 	return s.controlSvc
 }

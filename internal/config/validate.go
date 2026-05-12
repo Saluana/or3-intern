@@ -182,6 +182,11 @@ func validateMCPServers(servers map[string]MCPServerConfig) error {
 	return nil
 }
 
+// ValidateMCPServers validates an MCP server map before persisting user edits.
+func ValidateMCPServers(servers map[string]MCPServerConfig) error {
+	return validateMCPServers(servers)
+}
+
 func validateMCPHTTPURL(name string, server MCPServerConfig) error {
 	if server.URL == "" {
 		return errors.New("tools.mcpServers." + name + ": transport " + strconv.Quote(server.Transport) + " requires url")

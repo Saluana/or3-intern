@@ -47,7 +47,7 @@ func printCapabilitiesReport(w io.Writer, report controlplane.CapabilitiesReport
 	if len(report.EnabledMCPServers) == 0 {
 		_, _ = fmt.Fprintln(w, "mcp_servers: none")
 	} else {
-		_, _ = fmt.Fprintf(w, "mcp_servers: %s\n", strings.Join(report.EnabledMCPServers, ", "))
+		_, _ = fmt.Fprintf(w, "mcp_servers: %s\n", strings.Join(capabilityMCPServerNames(report.EnabledMCPServers), ", "))
 	}
 	_, _ = fmt.Fprintln(w, "approvals:")
 	for _, key := range []string{"pairing", "exec", "skillExecution", "secretAccess", "messageSend"} {
@@ -81,4 +81,12 @@ func printCapabilitiesReport(w io.Writer, report controlplane.CapabilitiesReport
 		}
 		_, _ = fmt.Fprintln(w)
 	}
+}
+
+func capabilityMCPServerNames(servers []controlplane.CapabilitiesMCPServerInfo) []string {
+	names := make([]string, 0, len(servers))
+	for _, server := range servers {
+		names = append(names, server.Name)
+	}
+	return names
 }

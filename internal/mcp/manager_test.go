@@ -293,6 +293,62 @@ func TestManagerConnect_PartialFailureAndRegistration(t *testing.T) {
 	}
 }
 
+func TestManagerServerStatus(t *testing.T) {
+	manager := NewManager(map[string]config.MCPServerConfig{
+		"alpha":    {Enabled: true, Transport: "stdio", Command: "alpha", ToolTimeoutSeconds: 5},
+		"beta":     {Enabled: true, Transport: "stdio", Command: "beta", ToolTimeoutSeconds: 5},
+		"disabled": {Enabled: false, Transport: "stdio", Command: "disabled"},
+	})
+	manager.connect = func(ctx context.Context, name string, cfg config.MCPServerConfig) (session, error) {
+		switch name {
+		case "alpha":
+			return &fakeSession{
+				listFn: func(ctx context.Context, params *sdkmcp.ListToolsParams) (*sdkmcp.ListToolsResult, error) {
+					return &sdkmcp.ListToolsResult{
+						Tools: []*sdkmcp.Tool{
+							{Name: "write", InputSchema: map[string]any{"type": "object"}},
+							{Name: "read", InputSchema: map[string]any{"type": "object"}},
+						},
+					}, nil
+				},
+			}, nil
+		case "beta":
+			return nil, errors.New("dial exploded")
+		default:
+			return nil, errors.New("unexpected server")
+		}
+	}
+
+	if err := manager.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	status := manager.ServerStatus()
+	if !status["alpha"].Connected {
+		t.Fatalf("expected alpha connected, got %#v", status["alpha"])
+	}
+	if status["alpha"].ToolCount != 2 || strings.Join(status["alpha"].Tools, ",") != "mcp_alpha_read,mcp_alpha_write" {
+		t.Fatalf("unexpected alpha tools: %#v", status["alpha"])
+	}
+	if status["beta"].Connected || !strings.Contains(status["beta"].LastError, "dial exploded") {
+		t.Fatalf("expected beta failure, got %#v", status["beta"])
+	}
+	if status["disabled"].Connected || status["disabled"].LastError != "disabled" {
+		t.Fatalf("expected disabled status, got %#v", status["disabled"])
+	}
+}
+
+func TestManagerServerStatus_EmptyManager(t *testing.T) {
+	status := NewManager(nil).ServerStatus()
+	if len(status) != 0 {
+		t.Fatalf("expected empty status, got %#v", status)
+	}
+	var manager *Manager
+	if status := manager.ServerStatus(); len(status) != 0 {
+		t.Fatalf("expected nil manager to return empty status, got %#v", status)
+	}
+}
+
 func TestManagerConnect_SkipsMalformedRemoteTools(t *testing.T) {
 	manager := NewManager(map[string]config.MCPServerConfig{
 		"alpha": {Enabled: true, Transport: "stdio", Command: "alpha", ToolTimeoutSeconds: 5},

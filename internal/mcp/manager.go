@@ -38,7 +38,16 @@ type Manager struct {
 	connect    connector
 	sessions   map[string]session
 	tools      []remoteToolSpec
+	failures   map[string]string
 	hostPolicy security.HostPolicy
+}
+
+// ServerStatus describes the most recent known connection state for one MCP server.
+type ServerStatus struct {
+	Connected bool     `json:"connected"`
+	ToolCount int      `json:"toolCount"`
+	Tools     []string `json:"tools"`
+	LastError string   `json:"lastError,omitempty"`
 }
 
 type remoteToolSpec struct {
@@ -76,6 +85,7 @@ func NewManager(servers map[string]config.MCPServerConfig) *Manager {
 	mgr := &Manager{
 		servers:  cloned,
 		sessions: map[string]session{},
+		failures: map[string]string{},
 	}
 	mgr.connect = func(ctx context.Context, name string, cfg config.MCPServerConfig) (session, error) {
 		return connectSessionWithPolicy(ctx, name, cfg, mgr.hostPolicy)
@@ -112,6 +122,40 @@ func (m *Manager) ToolNames() []string {
 	return out
 }
 
+// ServerStatus returns a stable per-server snapshot derived from configured
+// servers, active sessions, discovered tools, and startup/test failures.
+func (m *Manager) ServerStatus() map[string]ServerStatus {
+	if m == nil {
+		return map[string]ServerStatus{}
+	}
+	out := make(map[string]ServerStatus, len(m.servers))
+	for name, server := range m.servers {
+		status := ServerStatus{}
+		if !server.Enabled {
+			status.LastError = "disabled"
+		}
+		if failure := strings.TrimSpace(m.failures[name]); failure != "" {
+			status.LastError = failure
+		}
+		if _, ok := m.sessions[name]; ok {
+			status.Connected = true
+			status.LastError = ""
+		}
+		out[name] = status
+	}
+	for _, spec := range m.tools {
+		status := out[spec.serverName]
+		status.Tools = append(status.Tools, spec.localName)
+		out[spec.serverName] = status
+	}
+	for name, status := range out {
+		sort.Strings(status.Tools)
+		status.ToolCount = len(status.Tools)
+		out[name] = status
+	}
+	return out
+}
+
 // Connect establishes sessions to enabled servers and discovers their tools.
 func (m *Manager) Connect(ctx context.Context) error {
 	if m == nil {
@@ -122,6 +166,7 @@ func (m *Manager) Connect(ctx context.Context) error {
 	}
 
 	usedLocalNames := map[string]string{}
+	m.failures = map[string]string{}
 	for _, name := range enabledServerNames(m.servers) {
 		cfg := m.servers[name]
 		if m.hostPolicy.EnabledPolicy() && (cfg.Transport == "sse" || cfg.Transport == "streamablehttp") {
@@ -160,6 +205,7 @@ func (m *Manager) Connect(ctx context.Context) error {
 		}
 
 		m.sessions[name] = sess
+		delete(m.failures, name)
 		m.logfSafe("mcp server connected: name=%s transport=%s tools=%d", name, cfg.Transport, added)
 	}
 	return nil
@@ -193,12 +239,19 @@ func (m *Manager) Close() error {
 }
 
 func (m *Manager) logFailure(name, prefix string, err error) {
-	if m == nil || m.logf == nil || err == nil {
+	if m == nil || err == nil {
 		return
 	}
 	msg := strings.TrimSpace(err.Error())
 	if len(msg) > 240 {
 		msg = msg[:240] + "...[truncated]"
+	}
+	if m.failures == nil {
+		m.failures = map[string]string{}
+	}
+	m.failures[name] = strings.TrimSpace(prefix + ": " + msg)
+	if m.logf == nil {
+		return
 	}
 	m.logf("mcp server unavailable: name=%s %s err=%s", name, prefix, msg)
 }

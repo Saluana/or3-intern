@@ -22,6 +22,7 @@ import (
 	"or3-intern/internal/config"
 	"or3-intern/internal/cron"
 	"or3-intern/internal/db"
+	"or3-intern/internal/mcp"
 	"or3-intern/internal/providers"
 	"or3-intern/internal/security"
 	"or3-intern/internal/skills"
@@ -30,6 +31,24 @@ import (
 
 type serviceTestTool struct {
 	name string
+}
+
+type fakeServiceMCPTestManager struct {
+	connectErr error
+	closeErr   error
+	status     map[string]mcp.ServerStatus
+}
+
+func (m *fakeServiceMCPTestManager) Connect(context.Context) error {
+	return m.connectErr
+}
+
+func (m *fakeServiceMCPTestManager) Close() error {
+	return m.closeErr
+}
+
+func (m *fakeServiceMCPTestManager) ServerStatus() map[string]mcp.ServerStatus {
+	return m.status
 }
 
 func (t serviceTestTool) Name() string               { return t.name }
@@ -739,6 +758,137 @@ func TestServiceConfigureApply_PersistsConfigChanges(t *testing.T) {
 	}
 	if loaded.Channels.Slack.InboundPolicy != config.InboundPolicyAllowlist {
 		t.Fatalf("expected slack allowlist policy, got %q", loaded.Channels.Slack.InboundPolicy)
+	}
+}
+
+func TestServiceMCPServers_CRUDAndAuth(t *testing.T) {
+	clearConfigEnvForTest(t)
+	cfg := config.Default()
+	cfg.Service.SharedSecretRole = approval.RoleOperator
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	secret := strings.Repeat("m", 32)
+	server := &serviceServer{config: cfg, configPath: cfgPath}
+	httpServer := newServiceTestHTTPServer(t, secret, server)
+	defer httpServer.Close()
+
+	unauthResp, err := httpServer.Client().Get(httpServer.URL + "/internal/v1/mcp/servers")
+	if err != nil {
+		t.Fatalf("unauth GET: %v", err)
+	}
+	unauthResp.Body.Close()
+	if unauthResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected unauthenticated MCP list to be rejected, got %d", unauthResp.StatusCode)
+	}
+
+	create := mustServiceRequest(t, httpServer, secret, http.MethodPost, "/internal/v1/mcp/servers", `{
+		"name":"local",
+		"config":{"enabled":true,"transport":"stdio","command":"mcp-local","args":["--demo"],"connectTimeoutSeconds":5,"toolTimeoutSeconds":7}
+	}`)
+	createResp, err := httpServer.Client().Do(create)
+	if err != nil {
+		t.Fatalf("create MCP server: %v", err)
+	}
+	defer createResp.Body.Close()
+	if createResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected create 200, got %d (%s)", createResp.StatusCode, mustReadBody(t, createResp.Body))
+	}
+	created := mustDecodeJSONBody(t, createResp.Body)
+	if created["restartRequired"] != true {
+		t.Fatalf("expected restartRequired response, got %#v", created)
+	}
+
+	list := mustServiceRequest(t, httpServer, secret, http.MethodGet, "/internal/v1/mcp/servers", "")
+	listResp, err := httpServer.Client().Do(list)
+	if err != nil {
+		t.Fatalf("list MCP servers: %v", err)
+	}
+	defer listResp.Body.Close()
+	if listResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected list 200, got %d (%s)", listResp.StatusCode, mustReadBody(t, listResp.Body))
+	}
+	listed := mustDecodeJSONBody(t, listResp.Body)
+	items, _ := listed["servers"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("expected one server, got %#v", listed)
+	}
+
+	loaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load config after create: %v", err)
+	}
+	if loaded.Tools.MCPServers["local"].Command != "mcp-local" {
+		t.Fatalf("expected persisted MCP config, got %#v", loaded.Tools.MCPServers)
+	}
+
+	del := mustServiceRequest(t, httpServer, secret, http.MethodDelete, "/internal/v1/mcp/servers/local", "")
+	delResp, err := httpServer.Client().Do(del)
+	if err != nil {
+		t.Fatalf("delete MCP server: %v", err)
+	}
+	defer delResp.Body.Close()
+	if delResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected delete 200, got %d (%s)", delResp.StatusCode, mustReadBody(t, delResp.Body))
+	}
+	loaded, err = config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load config after delete: %v", err)
+	}
+	if _, ok := loaded.Tools.MCPServers["local"]; ok {
+		t.Fatalf("expected MCP server to be deleted, got %#v", loaded.Tools.MCPServers)
+	}
+}
+
+func TestServiceMCPServers_ValidationAndTestEndpoint(t *testing.T) {
+	cfg := config.Default()
+	cfg.Service.SharedSecretRole = approval.RoleOperator
+	cfg.Tools.MCPServers = map[string]config.MCPServerConfig{
+		"local": {Enabled: true, Transport: "stdio", Command: "mcp-local"},
+	}
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	secret := strings.Repeat("n", 32)
+	server := &serviceServer{
+		config:     cfg,
+		configPath: cfgPath,
+		mcpTestManagerFactory: func(map[string]config.MCPServerConfig) serviceMCPTestManager {
+			return &fakeServiceMCPTestManager{status: map[string]mcp.ServerStatus{
+				"local": {Connected: true, ToolCount: 1, Tools: []string{"mcp_local_echo"}},
+			}}
+		},
+	}
+	httpServer := newServiceTestHTTPServer(t, secret, server)
+	defer httpServer.Close()
+
+	invalid := mustServiceRequest(t, httpServer, secret, http.MethodPost, "/internal/v1/mcp/servers", `{
+		"name":"bad",
+		"config":{"enabled":true,"transport":"streamableHttp","url":"http://example.com/mcp"}
+	}`)
+	invalidResp, err := httpServer.Client().Do(invalid)
+	if err != nil {
+		t.Fatalf("invalid create: %v", err)
+	}
+	defer invalidResp.Body.Close()
+	if invalidResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected invalid create 400, got %d (%s)", invalidResp.StatusCode, mustReadBody(t, invalidResp.Body))
+	}
+
+	testReq := mustServiceRequest(t, httpServer, secret, http.MethodPost, "/internal/v1/mcp/servers/local/test", `{}`)
+	testResp, err := httpServer.Client().Do(testReq)
+	if err != nil {
+		t.Fatalf("test MCP server: %v", err)
+	}
+	defer testResp.Body.Close()
+	if testResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected test 200, got %d (%s)", testResp.StatusCode, mustReadBody(t, testResp.Body))
+	}
+	result := mustDecodeJSONBody(t, testResp.Body)
+	if result["ok"] != true || result["toolCount"].(float64) != 1 {
+		t.Fatalf("unexpected test result: %#v", result)
 	}
 }
 

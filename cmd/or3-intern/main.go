@@ -711,7 +711,7 @@ func main() {
 		<-ctx.Done()
 	case "service":
 		runWorkers(ctx, b, rt, cfg.WorkerCount, nil)
-		if err := runServiceCommandWithBrokerOptionsAndCron(ctx, cfg, rt, subagentManager, agentCLIManager, serviceJobs, approvalBroker, unsafeDev, cronSvc); err != nil {
+		if err := runServiceCommandWithBrokerOptionsCronMCP(ctx, cfg, rt, subagentManager, agentCLIManager, serviceJobs, approvalBroker, unsafeDev, cronSvc, mcpManager); err != nil {
 			fmt.Fprintln(os.Stderr, "service error:", err)
 			os.Exit(1)
 		}

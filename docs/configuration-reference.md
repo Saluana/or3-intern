@@ -77,7 +77,9 @@ Controls local tool execution and optional MCP registration:
 
 `allowFullFileRead` keeps write/edit operations restricted to the workspace while allowing read/list/search file tools to inspect paths outside the workspace. It is off by default and only takes effect when `restrictToWorkspace` remains enabled.
 
-See [mcp-tool-integrations.md](mcp-tool-integrations.md) for the MCP-specific settings.
+Manage `tools.mcpServers` with `or3-intern configure --section mcp` or the OR3 app at **Settings → Add-ons**. MCP server changes are saved to config and take effect after restarting `or3-intern`.
+
+See [mcp-tool-integrations.md](mcp-tool-integrations.md) for the MCP-specific settings and API workflow.
 
 ### `hardening`
 

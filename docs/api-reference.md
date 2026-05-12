@@ -112,6 +112,10 @@ Bearer token notes:
 | `GET` | `/internal/v1/capabilities` | Admin or Operator | Effective machine-readable runtime posture. |
 | `GET` | `/internal/v1/app/bootstrap` | Admin or Operator | Return an app-shaped host overview with pairing/auth/status/count/action summaries. |
 | `POST` | `/internal/v1/actions/restart-service` | Operator | Request a structured service restart without opening a terminal session. |
+| `GET` | `/internal/v1/mcp/servers` | Operator | List configured MCP servers with current runtime status. |
+| `POST` | `/internal/v1/mcp/servers` | Operator | Add or update one MCP server in config. |
+| `DELETE` | `/internal/v1/mcp/servers/{name}` | Operator | Remove one MCP server from config. |
+| `POST` | `/internal/v1/mcp/servers/{name}/test` | Operator | Test one saved MCP server config with a temporary manager. |
 | `GET` | `/internal/v1/cron/status` | Operator | Return scheduler availability, job count, and next wake time. |
 | `GET` | `/internal/v1/cron/jobs` | Operator | List scheduled jobs. |
 | `POST` | `/internal/v1/cron/jobs` | Operator | Create a scheduled job. |
@@ -193,6 +197,53 @@ Synchronous JSON response shape:
 ```
 
 If the turn fails, the same response includes `error` and typically returns `502`.
+
+### MCP server management
+
+MCP management routes require operator access and write the primary config file. Runtime MCP tools are loaded at startup, so successful writes return `restartRequired: true`.
+
+`GET /internal/v1/mcp/servers` response:
+
+```json
+{
+  "servers": [
+    {
+      "name": "filesystem",
+      "config": {
+        "enabled": true,
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]
+      },
+      "status": {
+        "connected": true,
+        "toolCount": 3,
+        "tools": ["mcp_filesystem_read_file"]
+      }
+    }
+  ]
+}
+```
+
+`POST /internal/v1/mcp/servers` adds or updates one server:
+
+```json
+{
+  "name": "filesystem",
+  "config": {
+    "enabled": true,
+    "transport": "stdio",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
+    "connectTimeoutSeconds": 10,
+    "toolTimeoutSeconds": 30
+  }
+}
+```
+
+`DELETE /internal/v1/mcp/servers/{name}` removes one configured server.
+
+`POST /internal/v1/mcp/servers/{name}/test` creates a temporary MCP manager for the saved server config, connects once, reports discovered tools, and closes the manager. It does not hot-reload the runtime manager.
 
 ### `POST /internal/v1/subagents`
 

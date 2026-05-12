@@ -15,6 +15,7 @@ import (
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
 	intdoctor "or3-intern/internal/doctor"
+	"or3-intern/internal/mcp"
 	"or3-intern/internal/memory"
 	"or3-intern/internal/providers"
 	"or3-intern/internal/scope"
@@ -46,6 +47,12 @@ type Service struct {
 	DB              *db.DB
 	Provider        *providers.Client
 	Audit           *security.AuditLogger
+	MCPStatus       MCPStatusProvider
+}
+
+// MCPStatusProvider exposes runtime MCP connection state to control-plane reports.
+type MCPStatusProvider interface {
+	ServerStatus() map[string]mcp.ServerStatus
 }
 
 type ApprovalFilter struct {
@@ -70,6 +77,13 @@ type CapabilitiesIngressSummary struct {
 	Profile       *CapabilitiesProfileSummary `json:"effectiveProfile,omitempty"`
 }
 
+type CapabilitiesMCPServerInfo struct {
+	Name      string `json:"name"`
+	Transport string `json:"transport"`
+	ToolCount int    `json:"toolCount"`
+	Connected bool   `json:"connected"`
+}
+
 type CapabilitiesReport struct {
 	RuntimeProfile     string                       `json:"runtimeProfile"`
 	Hosted             bool                         `json:"hosted"`
@@ -82,7 +96,8 @@ type CapabilitiesReport struct {
 	ShellModeAvailable bool                         `json:"shellModeAvailable"`
 	SandboxEnabled     bool                         `json:"sandboxEnabled"`
 	SandboxRequired    bool                         `json:"sandboxRequired"`
-	EnabledMCPServers  []string                     `json:"enabledMcpServers,omitempty"`
+	EnabledMCPServers  []CapabilitiesMCPServerInfo  `json:"enabledMcpServers,omitempty"`
+	MCPServers         []CapabilitiesMCPServerInfo  `json:"mcpServers,omitempty"`
 	NetworkPolicy      config.NetworkPolicyConfig   `json:"networkPolicy"`
 	Channels           []CapabilitiesIngressSummary `json:"channels,omitempty"`
 	Triggers           []CapabilitiesIngressSummary `json:"triggers,omitempty"`
@@ -217,7 +232,11 @@ func (s *Service) GetCapabilities(channelFilter, triggerFilter string) Capabilit
 		cfg = s.Config
 		broker = s.Broker
 	}
-	return CollectCapabilitiesReport(cfg, broker, channelFilter, triggerFilter)
+	var mcpStatus MCPStatusProvider
+	if s != nil {
+		mcpStatus = s.MCPStatus
+	}
+	return CollectCapabilitiesReportWithMCPStatus(cfg, broker, mcpStatus, channelFilter, triggerFilter)
 }
 
 func (s *Service) ListApprovalRequests(ctx context.Context, filter ApprovalFilter) ([]db.ApprovalRequestRecord, error) {
@@ -648,6 +667,10 @@ func rebuildDocEmbeddings(ctx context.Context, cfg config.Config, database *db.D
 }
 
 func CollectCapabilitiesReport(cfg config.Config, broker *approval.Broker, channelFilter, triggerFilter string) CapabilitiesReport {
+	return CollectCapabilitiesReportWithMCPStatus(cfg, broker, nil, channelFilter, triggerFilter)
+}
+
+func CollectCapabilitiesReportWithMCPStatus(cfg config.Config, broker *approval.Broker, mcpStatus MCPStatusProvider, channelFilter, triggerFilter string) CapabilitiesReport {
 	spec := config.ProfileSpec(cfg.RuntimeProfile)
 	report := CapabilitiesReport{
 		RuntimeProfile:     string(cfg.RuntimeProfile),
@@ -670,7 +693,8 @@ func CollectCapabilitiesReport(cfg config.Config, broker *approval.Broker, chann
 			"canIssueToken": broker != nil && len(broker.SignKey) > 0,
 		},
 	}
-	report.EnabledMCPServers = enabledMCPServers(cfg)
+	report.MCPServers = mcpServerCapabilities(cfg, mcpStatus)
+	report.EnabledMCPServers = enabledMCPServers(report.MCPServers, cfg)
 	report.Channels = collectChannelCapabilities(cfg, channelFilter)
 	report.Triggers = collectTriggerCapabilities(cfg, triggerFilter)
 	return report
@@ -787,14 +811,34 @@ func effectiveProfileSummary(cfg config.Config, name string) *CapabilitiesProfil
 	}
 }
 
-func enabledMCPServers(cfg config.Config) []string {
-	out := make([]string, 0, len(cfg.Tools.MCPServers))
+func mcpServerCapabilities(cfg config.Config, provider MCPStatusProvider) []CapabilitiesMCPServerInfo {
+	statuses := map[string]mcp.ServerStatus{}
+	if provider != nil {
+		statuses = provider.ServerStatus()
+	}
+	out := make([]CapabilitiesMCPServerInfo, 0, len(cfg.Tools.MCPServers))
 	for name, server := range cfg.Tools.MCPServers {
-		if server.Enabled {
-			out = append(out, name)
+		status := statuses[name]
+		out = append(out, CapabilitiesMCPServerInfo{
+			Name:      name,
+			Transport: strings.TrimSpace(server.Transport),
+			ToolCount: status.ToolCount,
+			Connected: status.Connected,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
+	})
+	return out
+}
+
+func enabledMCPServers(items []CapabilitiesMCPServerInfo, cfg config.Config) []CapabilitiesMCPServerInfo {
+	out := make([]CapabilitiesMCPServerInfo, 0, len(items))
+	for _, item := range items {
+		if cfg.Tools.MCPServers[item.Name].Enabled {
+			out = append(out, item)
 		}
 	}
-	sort.Strings(out)
 	return out
 }
 

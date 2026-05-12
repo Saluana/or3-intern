@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
@@ -16,6 +18,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"or3-intern/internal/config"
+	"or3-intern/internal/mcp"
 )
 
 type configureTUIOptions struct {
@@ -35,6 +38,10 @@ const (
 	configureScreenReview
 	configureScreenSuccess
 	configureScreenQuitConfirm
+	configureScreenMCPServerList
+	configureScreenMCPNameInput
+	configureScreenMCPForm
+	configureScreenMCPDeleteConfirm
 )
 
 type configureFieldKind int
@@ -70,6 +77,8 @@ func (i configureListItem) FilterValue() string { return i.title + " " + i.descr
 func (i configureListItem) Title() string       { return i.title }
 func (i configureListItem) Description() string { return i.description }
 
+var configureMCPTestManagerFactory serviceMCPTestManagerFactory
+
 type configureKeyMap struct {
 	Up     key.Binding
 	Down   key.Binding
@@ -82,6 +91,9 @@ type configureKeyMap struct {
 	Toggle key.Binding
 	Next   key.Binding
 	Prev   key.Binding
+	Add    key.Binding
+	Delete key.Binding
+	Test   key.Binding
 }
 
 func newConfigureKeyMap() configureKeyMap {
@@ -97,6 +109,9 @@ func newConfigureKeyMap() configureKeyMap {
 		Toggle: key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "toggle")),
 		Next:   key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next")),
 		Prev:   key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("shift+tab", "previous")),
+		Add:    key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add")),
+		Delete: key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "delete")),
+		Test:   key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "test")),
 	}
 }
 
@@ -105,7 +120,7 @@ func (k configureKeyMap) ShortHelp() []key.Binding {
 }
 
 func (k configureKeyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{{k.Up, k.Down, k.Left, k.Right}, {k.Select, k.Toggle, k.Next, k.Prev}, {k.Save, k.Back, k.Quit}}
+	return [][]key.Binding{{k.Up, k.Down, k.Left, k.Right}, {k.Select, k.Toggle, k.Next, k.Prev}, {k.Add, k.Delete, k.Test}, {k.Save, k.Back, k.Quit}}
 }
 
 type configureStyles struct {
@@ -168,33 +183,37 @@ func newConfigureStyles() configureStyles {
 }
 
 type configureTUIModel struct {
-	options         configureTUIOptions
-	styles          configureStyles
-	keys            configureKeyMap
-	help            help.Model
-	sectionList     list.Model
-	channelList     list.Model
-	textInput       textinput.Model
-	width           int
-	height          int
-	screen          configureScreen
-	cfgPath         string
-	cwd             string
-	cfg             config.Config
-	original        config.Config
-	existed         bool
-	loadWarning     string
-	currentSection  string
-	currentChannel  string
-	fieldCursor     int
-	formScroll      int
-	editingFieldKey string
-	editing         bool
-	dirty           bool
-	errorMessage    string
-	successMessage  string
-	quitting        bool
-	lastSection     string
+	options              configureTUIOptions
+	styles               configureStyles
+	keys                 configureKeyMap
+	help                 help.Model
+	sectionList          list.Model
+	channelList          list.Model
+	mcpList              list.Model
+	textInput            textinput.Model
+	width                int
+	height               int
+	screen               configureScreen
+	cfgPath              string
+	cwd                  string
+	cfg                  config.Config
+	original             config.Config
+	existed              bool
+	loadWarning          string
+	currentSection       string
+	currentChannel       string
+	currentMCPServerName string
+	fieldCursor          int
+	formScroll           int
+	editingFieldKey      string
+	editing              bool
+	dirty                bool
+	errorMessage         string
+	successMessage       string
+	mcpTestMessage       string
+	mcpRestartReminder   bool
+	quitting             bool
+	lastSection          string
 }
 
 func runConfigureWithTUI(cfgPath, cwd string, args []string, options configureTUIOptions) error {
@@ -245,6 +264,13 @@ func newConfigureTUIModel(cfgPath, cwd string, cfg config.Config, existed bool, 
 	channelList.SetShowHelp(false)
 	channelList.SetShowPagination(false)
 
+	mcpList := list.New(buildMCPServerItems(cfg, ""), delegate, 36, 16)
+	mcpList.Title = "MCP Servers"
+	mcpList.SetShowStatusBar(false)
+	mcpList.SetFilteringEnabled(false)
+	mcpList.SetShowHelp(false)
+	mcpList.SetShowPagination(false)
+
 	input := textinput.New()
 	input.Prompt = "» "
 	input.CharLimit = 512
@@ -257,6 +283,7 @@ func newConfigureTUIModel(cfgPath, cwd string, cfg config.Config, existed bool, 
 		help:        help.New(),
 		sectionList: sectionList,
 		channelList: channelList,
+		mcpList:     mcpList,
 		textInput:   input,
 		screen:      configureScreenSections,
 		cfgPath:     cfgPath,
@@ -271,7 +298,11 @@ func newConfigureTUIModel(cfgPath, cwd string, cfg config.Config, existed bool, 
 	}
 	if len(model.options.Restricted) == 1 {
 		model.currentSection = model.options.Restricted[0]
-		model.screen = configureScreenForm
+		if model.currentSection == "mcp" {
+			model.screen = configureScreenMCPServerList
+		} else {
+			model.screen = configureScreenForm
+		}
 	}
 	return model
 }
@@ -286,6 +317,7 @@ func (m configureTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		layout := deriveConfigureLayout(msg.Width, msg.Height)
 		m.sectionList.SetSize(layout.navWidth, layout.listHeight)
 		m.channelList.SetSize(layout.navWidth, layout.listHeight)
+		m.mcpList.SetSize(layout.navWidth, layout.listHeight)
 		m.textInput.Width = maxInt(20, layout.contentWidth-8)
 		m.ensureFieldCursorVisible(len(m.activeFields()))
 		return m, nil
@@ -312,6 +344,14 @@ func (m configureTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateSectionForm(msg)
 		case configureScreenChannels:
 			return m.updateChannelPicker(msg)
+		case configureScreenMCPServerList:
+			return m.updateMCPServerList(msg)
+		case configureScreenMCPNameInput:
+			return m.updateMCPNameInput(msg)
+		case configureScreenMCPForm:
+			return m.updateSectionForm(msg)
+		case configureScreenMCPDeleteConfirm:
+			return m.updateMCPDeleteConfirm(msg)
 		case configureScreenReview:
 			return m.updateReview(msg)
 		case configureScreenSuccess:
@@ -330,6 +370,10 @@ func (m configureTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if m.screen == configureScreenChannels {
 		m.channelList, cmd = m.channelList.Update(msg)
+		return m, cmd
+	}
+	if m.screen == configureScreenMCPServerList {
+		m.mcpList, cmd = m.mcpList.Update(msg)
 		return m, cmd
 	}
 	return m, nil
@@ -362,6 +406,9 @@ func (m configureTUIModel) updateSectionPicker(msg tea.KeyMsg) (tea.Model, tea.C
 			if item.key == "channels" {
 				m.screen = configureScreenChannels
 				m.channelList.Select(0)
+			} else if item.key == "mcp" {
+				m.screen = configureScreenMCPServerList
+				m.mcpTestMessage = ""
 			} else {
 				m.fieldCursor = 0
 				m.formScroll = 0
@@ -395,6 +442,168 @@ func (m configureTUIModel) updateChannelPicker(msg tea.KeyMsg) (tea.Model, tea.C
 	return m, cmd
 }
 
+func (m configureTUIModel) updateMCPServerList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if key.Matches(msg, m.keys.Back) {
+		if len(m.options.Restricted) == 1 && m.options.Restricted[0] == "mcp" {
+			m.quitting = true
+			return m, tea.Quit
+		}
+		m.screen = configureScreenSections
+		return m, nil
+	}
+	if key.Matches(msg, m.keys.Add) {
+		return m.startMCPNameInput()
+	}
+	if key.Matches(msg, m.keys.Delete) {
+		if item, ok := m.mcpList.SelectedItem().(configureListItem); ok && item.key != "__add__" {
+			m.currentMCPServerName = item.key
+			m.screen = configureScreenMCPDeleteConfirm
+		}
+		return m, nil
+	}
+	if key.Matches(msg, m.keys.Test) {
+		if item, ok := m.mcpList.SelectedItem().(configureListItem); ok && item.key != "__add__" {
+			m.currentMCPServerName = item.key
+			m.testMCPServer(item.key)
+		}
+		return m, nil
+	}
+	if key.Matches(msg, m.keys.Select) {
+		if item, ok := m.mcpList.SelectedItem().(configureListItem); ok {
+			if item.key == "__add__" {
+				return m.startMCPNameInput()
+			}
+			m.currentMCPServerName = item.key
+			m.currentSection = "mcp"
+			m.fieldCursor = 0
+			m.formScroll = 0
+			m.mcpTestMessage = ""
+			m.screen = configureScreenMCPForm
+		}
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.mcpList, cmd = m.mcpList.Update(msg)
+	return m, cmd
+}
+
+func (m configureTUIModel) startMCPNameInput() (tea.Model, tea.Cmd) {
+	m.currentSection = "mcp"
+	m.currentMCPServerName = ""
+	m.errorMessage = ""
+	m.textInput.Reset()
+	m.textInput.Focus()
+	m.textInput.EchoMode = textinput.EchoNormal
+	m.textInput.Prompt = "Name » "
+	m.textInput.Placeholder = "filesystem"
+	m.screen = configureScreenMCPNameInput
+	return m, textinput.Blink
+}
+
+func (m configureTUIModel) updateMCPNameInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if key.Matches(msg, m.keys.Back) {
+		m.textInput.Blur()
+		m.screen = configureScreenMCPServerList
+		return m, nil
+	}
+	if key.Matches(msg, m.keys.Select) {
+		name := strings.TrimSpace(m.textInput.Value())
+		if name == "" {
+			m.errorMessage = "MCP server name is required."
+			return m, nil
+		}
+		if m.cfg.Tools.MCPServers == nil {
+			m.cfg.Tools.MCPServers = map[string]config.MCPServerConfig{}
+		}
+		if _, exists := m.cfg.Tools.MCPServers[name]; exists {
+			m.errorMessage = "MCP server name already exists."
+			return m, nil
+		}
+		m.cfg.Tools.MCPServers[name] = config.MCPServerConfig{Enabled: true, Transport: "stdio"}
+		m.currentMCPServerName = name
+		m.currentSection = "mcp"
+		m.fieldCursor = 0
+		m.formScroll = 0
+		m.dirty = true
+		m.lastSection = "mcp"
+		m.mcpRestartReminder = true
+		m.errorMessage = ""
+		m.textInput.Blur()
+		m.refreshLists()
+		m.screen = configureScreenMCPForm
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.textInput, cmd = m.textInput.Update(msg)
+	return m, cmd
+}
+
+func (m configureTUIModel) updateMCPDeleteConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "y", "Y":
+		if m.cfg.Tools.MCPServers != nil {
+			delete(m.cfg.Tools.MCPServers, m.currentMCPServerName)
+		}
+		m.dirty = true
+		m.lastSection = "mcp"
+		m.mcpRestartReminder = true
+		m.currentMCPServerName = ""
+		m.refreshLists()
+		m.screen = configureScreenMCPServerList
+	case "n", "N", "esc":
+		m.screen = configureScreenMCPServerList
+	}
+	return m, nil
+}
+
+func (m *configureTUIModel) testMCPServer(name string) {
+	server, ok := m.cfg.Tools.MCPServers[name]
+	if !ok {
+		m.errorMessage = "MCP server not found."
+		return
+	}
+	factory := configureMCPTestManagerFactory
+	if factory == nil {
+		factory = func(servers map[string]config.MCPServerConfig) serviceMCPTestManager {
+			return mcp.NewManager(servers)
+		}
+	}
+	manager := factory(map[string]config.MCPServerConfig{name: server})
+	if manager == nil {
+		m.errorMessage = "MCP test manager is unavailable."
+		return
+	}
+	defer manager.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := manager.Connect(ctx); err != nil {
+		m.mcpTestMessage = "test failed: " + boundServiceMCPError(err)
+		m.errorMessage = m.mcpTestMessage
+		m.refreshLists()
+		return
+	}
+	statuses := manager.ServerStatus()
+	for statusName, status := range statuses {
+		if statusName == name {
+			if status.Connected {
+				m.mcpTestMessage = fmt.Sprintf("test ok: %d tools", status.ToolCount)
+				m.errorMessage = ""
+			} else if strings.TrimSpace(status.LastError) != "" {
+				m.mcpTestMessage = "test failed: " + status.LastError
+				m.errorMessage = m.mcpTestMessage
+			} else {
+				m.mcpTestMessage = "test failed: not connected"
+				m.errorMessage = m.mcpTestMessage
+			}
+			m.refreshLists()
+			return
+		}
+	}
+	m.mcpTestMessage = "test failed: status unavailable"
+	m.errorMessage = m.mcpTestMessage
+	m.refreshLists()
+}
+
 func (m configureTUIModel) updateSectionForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	fields := m.activeFields()
 	if len(fields) == 0 {
@@ -404,6 +613,11 @@ func (m configureTUIModel) updateSectionForm(msg tea.KeyMsg) (tea.Model, tea.Cmd
 	if key.Matches(msg, m.keys.Back) {
 		if m.currentSection == "channels" {
 			m.screen = configureScreenChannels
+			return m, nil
+		}
+		if m.currentSection == "mcp" {
+			m.screen = configureScreenMCPServerList
+			m.mcpTestMessage = ""
 			return m, nil
 		}
 		m.screen = configureScreenSections
@@ -450,6 +664,10 @@ func (m configureTUIModel) updateReview(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.screen = configureScreenChannels
 			return m, nil
 		}
+		if m.lastSection == "mcp" || m.currentSection == "mcp" {
+			m.screen = configureScreenMCPServerList
+			return m, nil
+		}
 		if m.currentSection != "" {
 			m.screen = configureScreenForm
 			return m, nil
@@ -458,6 +676,10 @@ func (m configureTUIModel) updateReview(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if key.Matches(msg, m.keys.Select, m.keys.Save) {
+		if err := config.ValidateMCPServers(m.cfg.Tools.MCPServers); err != nil {
+			m.errorMessage = err.Error()
+			return m, nil
+		}
 		if err := config.Save(m.cfgPath, m.cfg); err != nil {
 			m.errorMessage = err.Error()
 			return m, nil
@@ -465,6 +687,9 @@ func (m configureTUIModel) updateReview(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.original = m.cfg
 		m.dirty = false
 		m.successMessage = "Configuration saved successfully."
+		if m.mcpRestartReminder {
+			m.successMessage += " Restart the service to apply MCP server changes."
+		}
 		m.screen = configureScreenSuccess
 		return m, nil
 	}
@@ -485,12 +710,16 @@ func (m configureTUIModel) updateQuitConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd
 func (m *configureTUIModel) refreshLists() {
 	m.sectionList.SetItems(buildConfigureSectionItems(m.cfg, m.options.Restricted))
 	m.channelList.SetItems(buildChannelItems(m.cfg))
+	m.mcpList.SetItems(buildMCPServerItems(m.cfg, m.mcpTestMessage))
 	m.ensureFieldCursorVisible(len(m.activeFields()))
 	if m.sectionList.Index() >= len(m.sectionList.Items()) && len(m.sectionList.Items()) > 0 {
 		m.sectionList.Select(len(m.sectionList.Items()) - 1)
 	}
 	if m.channelList.Index() >= len(m.channelList.Items()) && len(m.channelList.Items()) > 0 {
 		m.channelList.Select(len(m.channelList.Items()) - 1)
+	}
+	if m.mcpList.Index() >= len(m.mcpList.Items()) && len(m.mcpList.Items()) > 0 {
+		m.mcpList.Select(len(m.mcpList.Items()) - 1)
 	}
 }
 
@@ -545,7 +774,11 @@ func (m *configureTUIModel) startEditingField(field configureField) {
 }
 
 func (m *configureTUIModel) applyEditedValue(value string) {
-	changed, err := applyFieldValue(&m.cfg, m.currentSection, m.currentChannel, m.editingFieldKey, value)
+	contextKey := m.currentChannel
+	if m.currentSection == "mcp" {
+		contextKey = m.currentMCPServerName
+	}
+	changed, err := applyFieldValue(&m.cfg, m.currentSection, contextKey, m.editingFieldKey, value)
 	if err != nil {
 		m.errorMessage = err.Error()
 		return
@@ -554,6 +787,9 @@ func (m *configureTUIModel) applyEditedValue(value string) {
 	if changed {
 		m.dirty = true
 		m.lastSection = m.currentSection
+		if m.currentSection == "mcp" {
+			m.mcpRestartReminder = true
+		}
 	}
 	if m.currentSection == "channels" {
 		m.lastSection = "channels"
@@ -570,16 +806,30 @@ func (m *configureTUIModel) applyEditedValue(value string) {
 }
 
 func (m *configureTUIModel) toggleField(fieldKey string) {
-	if toggleFieldValue(&m.cfg, m.currentSection, m.currentChannel, fieldKey) {
+	contextKey := m.currentChannel
+	if m.currentSection == "mcp" {
+		contextKey = m.currentMCPServerName
+	}
+	if toggleFieldValue(&m.cfg, m.currentSection, contextKey, fieldKey) {
 		m.dirty = true
 		m.lastSection = m.currentSection
+		if m.currentSection == "mcp" {
+			m.mcpRestartReminder = true
+		}
 	}
 }
 
 func (m *configureTUIModel) cycleChoice(fieldKey string, delta int) {
-	if cycleChoiceValue(&m.cfg, m.currentSection, m.currentChannel, fieldKey, delta) {
+	contextKey := m.currentChannel
+	if m.currentSection == "mcp" {
+		contextKey = m.currentMCPServerName
+	}
+	if cycleChoiceValue(&m.cfg, m.currentSection, contextKey, fieldKey, delta) {
 		m.dirty = true
 		m.lastSection = m.currentSection
+		if m.currentSection == "mcp" {
+			m.mcpRestartReminder = true
+		}
 	}
 }
 
@@ -617,8 +867,19 @@ func (m configureTUIModel) View() string {
 			m.styles.focused.Width(layout.navWidth).Render(m.channelList.View()),
 			m.styles.panel.Width(layout.detailWidth).Render(renderSummaryPanelMode(m.styles, m.cfg, "Select a channel to edit its toggles, access policy, and defaults.", layout.compact)),
 		)
+	case configureScreenMCPServerList:
+		body = renderConfigureSplitPanels(layout,
+			m.styles.focused.Width(layout.navWidth).Render(m.mcpList.View()),
+			m.styles.panel.Width(layout.detailWidth).Render(renderMCPPanel(m)),
+		)
+	case configureScreenMCPNameInput:
+		body = m.styles.focused.Width(layout.fullWidth).Render(renderMCPNameInput(m))
 	case configureScreenForm:
 		body = renderFormScreen(m)
+	case configureScreenMCPForm:
+		body = renderFormScreen(m)
+	case configureScreenMCPDeleteConfirm:
+		body = m.styles.focused.Width(layout.fullWidth).Render(fmt.Sprintf("Remove MCP server %q?\n\nPress y to delete it, n or esc to keep it.", m.currentMCPServerName))
 	case configureScreenReview:
 		body = m.styles.focused.Width(layout.fullWidth).Render(renderSummaryPanelMode(m.styles, m.cfg, "Review the snapshot below. Press Enter or s to save, esc to go back.", layout.compact))
 	case configureScreenSuccess:
@@ -657,6 +918,9 @@ func renderFormScreen(m configureTUIModel) string {
 	if m.currentSection == "channels" && strings.TrimSpace(m.currentChannel) != "" {
 		sectionLabel = sectionLabel + " · " + strings.Title(m.currentChannel)
 	}
+	if m.currentSection == "mcp" && strings.TrimSpace(m.currentMCPServerName) != "" {
+		sectionLabel = "MCP Servers · " + m.currentMCPServerName
+	}
 
 	rows := make([]string, 0, len(visibleFields)+4)
 	rows = append(rows, m.styles.section.Render(fmt.Sprintf("%s Field %d/%d", sectionLabel, m.fieldCursor+1, len(fields))))
@@ -674,7 +938,11 @@ func renderFormScreen(m configureTUIModel) string {
 
 	left := m.styles.panel.Width(layout.navWidth).Render(strings.Join(rows, "\n"))
 
-	rightSections := []string{renderSummaryPanelMode(m.styles, m.cfg, formContextHint(m.currentSection, m.currentChannel, m.fieldCursor, len(fields)), layout.compact)}
+	hint := formContextHint(m.currentSection, m.currentChannel, m.fieldCursor, len(fields))
+	if m.currentSection == "mcp" {
+		hint = fmt.Sprintf("Editing %s. Save and restart the service to apply MCP server changes.", m.currentMCPServerName)
+	}
+	rightSections := []string{renderSummaryPanelMode(m.styles, m.cfg, hint, layout.compact)}
 	if m.editing {
 		rightSections = append(rightSections, m.styles.section.Render("Editing")+"\n"+m.textInput.View()+"\n"+m.styles.muted.Render("Enter to apply • esc to cancel"))
 	} else {
@@ -683,6 +951,52 @@ func renderFormScreen(m configureTUIModel) string {
 	}
 	right := m.styles.panel.Width(layout.detailWidth).Render(strings.Join(rightSections, "\n\n"))
 	return renderConfigureSplitPanels(layout, left, right)
+}
+
+func renderMCPPanel(m configureTUIModel) string {
+	lines := []string{
+		m.styles.section.Render("MCP add-ons"),
+		fmt.Sprintf("%s %s", m.styles.label.Render("Configured:"), m.styles.value.Render(fmt.Sprintf("%d servers", len(m.cfg.Tools.MCPServers)))),
+		fmt.Sprintf("%s %s", m.styles.label.Render("Enabled:"), m.styles.value.Render(fmt.Sprintf("%d servers", enabledMCPServerCount(m.cfg)))),
+		"",
+		m.styles.muted.Render("Enter edits the selected server. Press a to add, d to delete, t to test, s to review and save."),
+	}
+	if m.mcpRestartReminder {
+		lines = append(lines, "", m.styles.badgeWarn.Render("restart required")+" "+m.styles.muted.Render("MCP changes apply after restarting the service."))
+	}
+	if strings.TrimSpace(m.mcpTestMessage) != "" {
+		style := m.styles.success
+		if strings.Contains(m.mcpTestMessage, "failed") {
+			style = m.styles.error
+		}
+		lines = append(lines, "", style.Render(m.mcpTestMessage))
+	}
+	if item, ok := m.mcpList.SelectedItem().(configureListItem); ok && item.key != "__add__" {
+		server := m.cfg.Tools.MCPServers[item.key]
+		lines = append(lines, "",
+			m.styles.section.Render("Selected"),
+			fmt.Sprintf("%s %s", m.styles.label.Render("Name:"), m.styles.value.Render(item.key)),
+			fmt.Sprintf("%s %s", m.styles.label.Render("Transport:"), m.styles.value.Render(server.Transport)),
+			fmt.Sprintf("%s %s", m.styles.label.Render("Enabled:"), m.styles.value.Render(fmt.Sprintf("%t", server.Enabled))),
+		)
+		if server.Transport == "stdio" {
+			lines = append(lines, fmt.Sprintf("%s %s", m.styles.label.Render("Command:"), m.styles.value.Render(emptyAsNone(server.Command))))
+		} else {
+			lines = append(lines, fmt.Sprintf("%s %s", m.styles.label.Render("URL:"), m.styles.value.Render(emptyAsNone(server.URL))))
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func renderMCPNameInput(m configureTUIModel) string {
+	return strings.Join([]string{
+		m.styles.section.Render("Add MCP server"),
+		m.styles.muted.Render("Choose a unique config name. You can edit transport details on the next screen."),
+		"",
+		m.textInput.View(),
+		"",
+		m.styles.muted.Render("Enter to create • esc to cancel"),
+	}, "\n")
 }
 
 func renderSelectedFieldPanel(styles configureStyles, field configureField, width int) string {
@@ -1000,6 +1314,69 @@ func buildChannelItems(cfg config.Config) []list.Item {
 	return items
 }
 
+func buildMCPServerItems(cfg config.Config, testMessage string) []list.Item {
+	names := sortedMCPServerNames(cfg.Tools.MCPServers)
+	items := make([]list.Item, 0, len(names)+1)
+	items = append(items, configureListItem{key: "__add__", title: "+ Add MCP server", description: "Create a stdio, SSE, or streamable-http server"})
+	for _, name := range names {
+		server := cfg.Tools.MCPServers[name]
+		status := "disabled"
+		if server.Enabled {
+			status = "enabled"
+		}
+		description := fmt.Sprintf("%s · %s", status, server.Transport)
+		if strings.TrimSpace(testMessage) != "" {
+			description += " · " + testMessage
+		}
+		items = append(items, configureListItem{key: name, title: name, description: description})
+	}
+	return items
+}
+
+func enabledMCPServerCount(cfg config.Config) int {
+	count := 0
+	for _, server := range cfg.Tools.MCPServers {
+		if server.Enabled {
+			count++
+		}
+	}
+	return count
+}
+
+func buildMCPFields(cfg config.Config, name string) []configureField {
+	server := cfg.Tools.MCPServers[name]
+	transportChoices := []string{"stdio", "sse", "streamable-http"}
+	fields := []configureField{
+		{Key: "mcp_enabled", Label: "Enabled", Description: "Expose this MCP server's tools after the service restarts.", Kind: configureFieldToggle, Value: onOff(server.Enabled)},
+		{Key: "mcp_transport", Label: "Transport", Description: "How or3-intern connects to the MCP server.", Kind: configureFieldChoice, Value: server.Transport, Choices: transportChoices, ChoiceIndex: indexOfChoice(transportChoices, server.Transport)},
+	}
+	switch server.Transport {
+	case "stdio":
+		fields = append(fields,
+			configureField{Key: "mcp_command", Label: "Command", Description: "Executable used to start the MCP server.", Kind: configureFieldText, Value: server.Command, EmptyHint: "npx"},
+			configureField{Key: "mcp_args", Label: "Arguments", Description: "Command arguments passed to the MCP server command.", Kind: configureFieldText, Value: strings.Join(server.Args, " "), EmptyHint: "-y @modelcontextprotocol/server-filesystem ."},
+			configureField{Key: "mcp_child_env_allowlist", Label: "Child env allowlist", Description: "Comma-separated inherited environment variable names for the child process.", Kind: configureFieldText, Value: strings.Join(server.ChildEnvAllowlist, ","), EmptyHint: "PATH,HOME"},
+		)
+	case "sse", "streamable-http":
+		fields = append(fields,
+			configureField{Key: "mcp_url", Label: "URL", Description: "Remote MCP endpoint URL.", Kind: configureFieldText, Value: server.URL, EmptyHint: "http://127.0.0.1:3000/mcp"},
+			configureField{Key: "mcp_allow_insecure_http", Label: "Allow insecure HTTP", Description: "Allow plain HTTP only for loopback or localhost endpoints.", Kind: configureFieldToggle, Value: onOff(server.AllowInsecureHTTP)},
+		)
+	default:
+		fields = append(fields,
+			configureField{Key: "mcp_command", Label: "Command", Description: "Executable used to start stdio MCP servers.", Kind: configureFieldText, Value: server.Command, EmptyHint: "npx"},
+			configureField{Key: "mcp_url", Label: "URL", Description: "Remote MCP endpoint URL.", Kind: configureFieldText, Value: server.URL, EmptyHint: "http://127.0.0.1:3000/mcp"},
+		)
+	}
+	fields = append(fields,
+		configureField{Key: "mcp_headers", Label: "Headers", Description: "Comma-separated HTTP headers as Name=Value. Used only for remote transports.", Kind: configureFieldText, Value: formatStringMap(server.Headers), EmptyHint: "Authorization=Bearer ..."},
+		configureField{Key: "mcp_env", Label: "Environment", Description: "Comma-separated environment variables as NAME=VALUE for stdio servers.", Kind: configureFieldText, Value: formatStringMap(server.Env), EmptyHint: "TOKEN=..."},
+		configureField{Key: "mcp_connect_timeout", Label: "Connect timeout seconds", Description: "How long to wait while connecting to this MCP server.", Kind: configureFieldText, Value: formatInt(server.ConnectTimeoutSeconds), EmptyHint: "10"},
+		configureField{Key: "mcp_tool_timeout", Label: "Tool timeout seconds", Description: "Maximum runtime for each tool call from this MCP server.", Kind: configureFieldText, Value: formatInt(server.ToolTimeoutSeconds), EmptyHint: "30"},
+	)
+	return withHelpfulFieldDescriptions("mcp", name, fields)
+}
+
 func channelStatus(enabled bool, policy config.InboundPolicy, openAccess, hasAllowlist bool) string {
 	if !enabled {
 		return "disabled"
@@ -1025,6 +1402,8 @@ func sectionStatus(cfg config.Config, section string) string {
 		return fmt.Sprintf("restrict=%t · fullRead=%t · %s", cfg.Tools.RestrictToWorkspace, cfg.Tools.AllowFullFileRead, emptyAsNone(cfg.WorkspaceDir))
 	case "tools":
 		return fmt.Sprintf("Brave=%t · exec=%ds", strings.TrimSpace(cfg.Tools.BraveAPIKey) != "", cfg.Tools.ExecTimeoutSeconds)
+	case "mcp":
+		return fmt.Sprintf("%d configured · %d enabled", len(cfg.Tools.MCPServers), enabledMCPServerCount(cfg))
 	case "docindex":
 		return fmt.Sprintf("enabled=%t · roots=%d · retrieve=%d", cfg.DocIndex.Enabled, len(cfg.DocIndex.Roots), cfg.DocIndex.RetrieveLimit)
 	case "skills":
@@ -1063,6 +1442,9 @@ func serviceSummary(cfg config.Config) string {
 func (m configureTUIModel) activeFields() []configureField {
 	if m.currentSection == "channels" {
 		return buildChannelFields(m.cfg, m.currentChannel)
+	}
+	if m.currentSection == "mcp" {
+		return buildMCPFields(m.cfg, m.currentMCPServerName)
 	}
 	return buildSectionFields(m.cfg, m.currentSection, m.cwd)
 }
@@ -1704,8 +2086,36 @@ func toggleFieldValue(cfg *config.Config, section, channel, fieldKey string) boo
 		}
 		return false
 	}
+	if section == "mcp" && fieldKey == "mcp_enabled" {
+		if cfg.Tools.MCPServers == nil {
+			return false
+		}
+		server, ok := cfg.Tools.MCPServers[channel]
+		if !ok {
+			return false
+		}
+		server.Enabled = !server.Enabled
+		cfg.Tools.MCPServers[channel] = server
+		return true
+	}
+	if section == "mcp" && fieldKey == "mcp_allow_insecure_http" {
+		if cfg.Tools.MCPServers == nil {
+			return false
+		}
+		server, ok := cfg.Tools.MCPServers[channel]
+		if !ok {
+			return false
+		}
+		server.AllowInsecureHTTP = !server.AllowInsecureHTTP
+		cfg.Tools.MCPServers[channel] = server
+		return true
+	}
 	current := false
-	for _, field := range buildSectionFields(*cfg, section, "") {
+	fields := buildSectionFields(*cfg, section, "")
+	if section == "mcp" {
+		fields = buildMCPFields(*cfg, channel)
+	}
+	for _, field := range fields {
 		if field.Key == fieldKey {
 			current = field.Value == "on"
 			break
@@ -1719,7 +2129,11 @@ func cycleChoiceValue(cfg *config.Config, section, channel, fieldKey string, del
 		return false
 	}
 	if section != "channels" {
-		for _, field := range buildSectionFields(*cfg, section, "") {
+		fields := buildSectionFields(*cfg, section, "")
+		if section == "mcp" {
+			fields = buildMCPFields(*cfg, channel)
+		}
+		for _, field := range fields {
 			if field.Key == fieldKey && len(field.Choices) > 0 {
 				next := field.Choices[wrapIndex(indexOfChoice(field.Choices, field.Value)+delta, len(field.Choices))]
 				changed, err := applyChoiceSelection(cfg, section, channel, fieldKey, next)
@@ -1884,6 +2298,49 @@ func applyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 			}
 		}
 		return false, nil
+	}
+	if section == "mcp" {
+		if cfg.Tools.MCPServers == nil {
+			cfg.Tools.MCPServers = map[string]config.MCPServerConfig{}
+		}
+		server, ok := cfg.Tools.MCPServers[channel]
+		if !ok {
+			return false, nil
+		}
+		switch fieldKey {
+		case "mcp_command":
+			server.Command = value
+		case "mcp_args":
+			server.Args = splitAndCompact(value)
+		case "mcp_child_env_allowlist":
+			server.ChildEnvAllowlist = splitAndCompact(value)
+		case "mcp_url":
+			server.URL = value
+		case "mcp_headers":
+			headers, err := parseStringMap(value)
+			if err != nil {
+				return false, err
+			}
+			server.Headers = headers
+		case "mcp_env":
+			env, err := parseStringMap(value)
+			if err != nil {
+				return false, err
+			}
+			server.Env = env
+		case "mcp_connect_timeout":
+			changed, err := setIntValue(&server.ConnectTimeoutSeconds, value, fieldKey)
+			cfg.Tools.MCPServers[channel] = server
+			return changed, err
+		case "mcp_tool_timeout":
+			changed, err := setIntValue(&server.ToolTimeoutSeconds, value, fieldKey)
+			cfg.Tools.MCPServers[channel] = server
+			return changed, err
+		default:
+			return false, nil
+		}
+		cfg.Tools.MCPServers[channel] = server
+		return true, nil
 	}
 	switch fieldKey {
 	case "provider_api_base":
@@ -2414,6 +2871,24 @@ func setToggleFieldValue(cfg *config.Config, section, channel, fieldKey string, 
 	if section == "channels" {
 		return false
 	}
+	if section == "mcp" && fieldKey == "mcp_enabled" {
+		server, ok := cfg.Tools.MCPServers[channel]
+		if !ok {
+			return false
+		}
+		server.Enabled = value
+		cfg.Tools.MCPServers[channel] = server
+		return true
+	}
+	if section == "mcp" && fieldKey == "mcp_allow_insecure_http" {
+		server, ok := cfg.Tools.MCPServers[channel]
+		if !ok {
+			return false
+		}
+		server.AllowInsecureHTTP = value
+		cfg.Tools.MCPServers[channel] = server
+		return true
+	}
 	switch fieldKey {
 	case "provider_vision":
 		cfg.Provider.EnableVision = value
@@ -2519,6 +2994,15 @@ func applyChoiceSelection(cfg *config.Config, section, channel, fieldKey, choice
 	}
 	if section == "channels" && fieldKey == "access" {
 		applyAccessChoice(cfg, channel, choice)
+		return true, nil
+	}
+	if section == "mcp" && fieldKey == "mcp_transport" {
+		server, ok := cfg.Tools.MCPServers[channel]
+		if !ok {
+			return false, nil
+		}
+		server.Transport = choice
+		cfg.Tools.MCPServers[channel] = server
 		return true, nil
 	}
 	switch fieldKey {

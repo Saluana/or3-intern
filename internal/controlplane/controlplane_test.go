@@ -16,9 +16,18 @@ import (
 	"or3-intern/internal/approval"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
+	"or3-intern/internal/mcp"
 	"or3-intern/internal/providers"
 	"or3-intern/internal/security"
 )
+
+type fakeMCPStatusProvider struct {
+	status map[string]mcp.ServerStatus
+}
+
+func (p fakeMCPStatusProvider) ServerStatus() map[string]mcp.ServerStatus {
+	return p.status
+}
 
 func testBroker(t *testing.T, mutate func(*config.ApprovalConfig), now time.Time) *approval.Broker {
 	t.Helper()
@@ -39,6 +48,31 @@ func testBroker(t *testing.T, mutate func(*config.ApprovalConfig), now time.Time
 		HostID:  approvalCfg.HostID,
 		SignKey: []byte("0123456789abcdef0123456789abcdef"),
 		Now:     func() time.Time { return now.UTC() },
+	}
+}
+
+func TestCollectCapabilitiesReportWithMCPDetails(t *testing.T) {
+	cfg := config.Default()
+	cfg.Tools.MCPServers = map[string]config.MCPServerConfig{
+		"files": {Enabled: true, Transport: "stdio"},
+		"docs":  {Enabled: false, Transport: "streamablehttp"},
+	}
+
+	report := CollectCapabilitiesReportWithMCPStatus(cfg, nil, fakeMCPStatusProvider{status: map[string]mcp.ServerStatus{
+		"files": {Connected: true, ToolCount: 2},
+	}}, "", "")
+
+	if len(report.MCPServers) != 2 {
+		t.Fatalf("expected all configured MCP servers, got %#v", report.MCPServers)
+	}
+	if report.MCPServers[0].Name != "docs" || report.MCPServers[0].Transport != "streamablehttp" || report.MCPServers[0].Connected {
+		t.Fatalf("unexpected first MCP server info: %#v", report.MCPServers[0])
+	}
+	if report.MCPServers[1].Name != "files" || report.MCPServers[1].ToolCount != 2 || !report.MCPServers[1].Connected {
+		t.Fatalf("unexpected files MCP server info: %#v", report.MCPServers[1])
+	}
+	if len(report.EnabledMCPServers) != 1 || report.EnabledMCPServers[0].Name != "files" {
+		t.Fatalf("expected only enabled MCP server in enabledMcpServers, got %#v", report.EnabledMCPServers)
 	}
 }
 

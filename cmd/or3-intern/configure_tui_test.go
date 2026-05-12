@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"or3-intern/internal/config"
+	"or3-intern/internal/mcp"
 )
 
 func TestConfigureTUIFormNavigationHighlightsSelectedField(t *testing.T) {
@@ -119,6 +120,80 @@ func TestConfigureTUIFieldDescriptionsAreHelpful(t *testing.T) {
 				t.Fatalf("expected helpful description for %s/%s, got %q", channel, field.Key, field.Description)
 			}
 		}
+	}
+	cfg.Tools.MCPServers = map[string]config.MCPServerConfig{"files": {Enabled: true, Transport: "stdio"}}
+	for _, field := range buildMCPFields(cfg, "files") {
+		if len(strings.Fields(field.Description)) < 6 {
+			t.Fatalf("expected helpful description for mcp/%s, got %q", field.Key, field.Description)
+		}
+	}
+}
+
+func TestConfigureTUIMCPFieldsApply(t *testing.T) {
+	cfg := config.Default()
+	cfg.Tools.MCPServers = map[string]config.MCPServerConfig{"files": {Enabled: true, Transport: "stdio"}}
+	if changed, err := applyChoiceSelection(&cfg, "mcp", "files", "mcp_transport", "streamable-http"); err != nil || !changed {
+		t.Fatalf("apply mcp transport: changed=%v err=%v", changed, err)
+	}
+	if changed, err := applyFieldValue(&cfg, "mcp", "files", "mcp_url", "http://127.0.0.1:3000/mcp"); err != nil || !changed {
+		t.Fatalf("apply mcp url: changed=%v err=%v", changed, err)
+	}
+	if changed, err := applyFieldValue(&cfg, "mcp", "files", "mcp_headers", "Authorization=Bearer token"); err != nil || !changed {
+		t.Fatalf("apply mcp headers: changed=%v err=%v", changed, err)
+	}
+	if changed := setToggleFieldValue(&cfg, "mcp", "files", "mcp_enabled", false); !changed {
+		t.Fatal("expected mcp enabled toggle to apply")
+	}
+	server := cfg.Tools.MCPServers["files"]
+	if server.Transport != "streamable-http" || server.URL != "http://127.0.0.1:3000/mcp" || server.Enabled || server.Headers["Authorization"] != "Bearer token" {
+		t.Fatalf("unexpected mcp server config: %+v", server)
+	}
+}
+
+func TestConfigureTUIMCPTestConnectionFlow(t *testing.T) {
+	cfg := config.Default()
+	cfg.Tools.MCPServers = map[string]config.MCPServerConfig{"files": {Enabled: true, Transport: "stdio", Command: "mcp-files"}}
+	previousFactory := configureMCPTestManagerFactory
+	configureMCPTestManagerFactory = func(map[string]config.MCPServerConfig) serviceMCPTestManager {
+		return &fakeServiceMCPTestManager{status: map[string]mcp.ServerStatus{
+			"files": {Connected: true, ToolCount: 2, Tools: []string{"mcp_files_read", "mcp_files_write"}},
+		}}
+	}
+	t.Cleanup(func() { configureMCPTestManagerFactory = previousFactory })
+
+	model := newConfigureTUIModel("/tmp/config.json", "/workspace/project", cfg, false, "", configureTUIOptions{
+		Restricted: []string{"mcp"},
+	})
+	model.mcpList.Select(1)
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
+	model = updated.(configureTUIModel)
+
+	if !strings.Contains(model.mcpTestMessage, "test ok: 2 tools") {
+		t.Fatalf("expected test success message, got %q", model.mcpTestMessage)
+	}
+	if !strings.Contains(model.View(), "test ok: 2 tools") {
+		t.Fatalf("expected test result in view, got %q", model.View())
+	}
+}
+
+func TestConfigureTUIMCPAddFlow(t *testing.T) {
+	model := newConfigureTUIModel("/tmp/config.json", "/workspace/project", config.Default(), false, "", configureTUIOptions{
+		Restricted: []string{"mcp"},
+	})
+	if model.screen != configureScreenMCPServerList {
+		t.Fatalf("expected restricted mcp flow to start on server list, got %v", model.screen)
+	}
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	model = updated.(configureTUIModel)
+	model.textInput.SetValue("files")
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(configureTUIModel)
+	if model.screen != configureScreenMCPForm {
+		t.Fatalf("expected add flow to open mcp form, got %v", model.screen)
+	}
+	server, ok := model.cfg.Tools.MCPServers["files"]
+	if !ok || !server.Enabled || server.Transport != "stdio" {
+		t.Fatalf("expected default stdio server after add, got ok=%v server=%+v", ok, server)
 	}
 }
 

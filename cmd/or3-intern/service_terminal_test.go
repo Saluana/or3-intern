@@ -490,6 +490,36 @@ func TestAppendTerminalOutputRefreshesSessionExpiry(t *testing.T) {
 	}
 }
 
+func TestAppendTerminalEventDropsFullSubscriberWithoutBlocking(t *testing.T) {
+	full := make(chan serviceTerminalEvent)
+	session := &serviceTerminalSession{
+		ID:          "term-safe-publish",
+		ExpiresAt:   time.Now().Add(time.Minute),
+		subscribers: map[chan serviceTerminalEvent]struct{}{full: {}},
+	}
+
+	session.appendEvent("output", map[string]any{"chunk": "hello"})
+
+	session.mu.Lock()
+	_, stillSubscribed := session.subscribers[full]
+	eventCount := len(session.events)
+	session.mu.Unlock()
+	if stillSubscribed {
+		t.Fatalf("expected blocked subscriber to be dropped")
+	}
+	if eventCount != 1 {
+		t.Fatalf("expected event to be retained, got %d", eventCount)
+	}
+	select {
+	case _, ok := <-full:
+		if ok {
+			t.Fatalf("expected dropped subscriber channel to be closed")
+		}
+	default:
+		t.Fatalf("expected dropped subscriber channel to be closed")
+	}
+}
+
 func TestListTerminalSessionsReturnsMostRecentFirst(t *testing.T) {
 	now := time.Now().UTC()
 	server := &serviceServer{terminalManager: &serviceTerminalManager{sessions: map[string]*serviceTerminalSession{

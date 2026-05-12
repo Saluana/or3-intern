@@ -46,6 +46,7 @@ func (s *serviceServer) handleTurns(w http.ResponseWriter, r *http.Request) {
 	job := s.jobs.Register("turn")
 	w.Header().Set("X-Or3-Job-Id", job.ID)
 	s.jobs.Publish(job.ID, "queued", serviceLifecyclePayload(req.SessionKey, req.Meta, map[string]any{"status": "queued"}))
+	s.persistServiceJobSummary(context.Background(), job.ID)
 
 	ctx, cancel := context.WithCancel(withDetachedContext(r.Context()))
 	s.jobs.AttachCancel(job.ID, cancel)
@@ -68,6 +69,7 @@ func (s *serviceServer) handleTurns(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *serviceServer) runTurnJob(ctx context.Context, jobID string, req serviceTurnRequest, identity serviceAuthIdentity) {
+	defer s.persistServiceJobSummary(context.Background(), jobID)
 	s.jobs.Publish(jobID, "started", serviceLifecyclePayload(req.SessionKey, req.Meta, map[string]any{"status": "running"}))
 	observer := &serviceObserver{ConversationObserver: s.jobs.Observer(jobID)}
 	var err error
@@ -127,6 +129,7 @@ func (s *serviceServer) startApprovedResumeJob(ctx context.Context, issued appro
 		"approved_resume":     true,
 	}
 	s.jobs.Publish(job.ID, "queued", serviceLifecyclePayload(sessionKey, meta, map[string]any{"status": "queued"}))
+	s.persistServiceJobSummary(context.Background(), job.ID)
 	runCtx, cancel := context.WithCancel(withDetachedContext(ctx))
 	s.jobs.AttachCancel(job.ID, cancel)
 	go s.runApprovedResumeJob(runCtx, job.ID, issued, identity)
@@ -134,6 +137,7 @@ func (s *serviceServer) startApprovedResumeJob(ctx context.Context, issued appro
 }
 
 func (s *serviceServer) runApprovedResumeJob(ctx context.Context, jobID string, issued approval.IssuedApproval, identity serviceAuthIdentity) {
+	defer s.persistServiceJobSummary(context.Background(), jobID)
 	sessionKey := strings.TrimSpace(issued.Request.RequesterSessionID)
 	meta := map[string]any{
 		"approval_request_id": issued.Request.ID,

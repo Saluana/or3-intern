@@ -3,6 +3,7 @@ package doctor
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"or3-intern/internal/config"
@@ -23,6 +24,187 @@ func TestProbeFindings_DoesNotCreateDatabase(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("expected probe to avoid creating %q, stat err=%v", path, err)
+	}
+}
+
+func TestDoctorFindingsHaveConsumerRepairFields(t *testing.T) {
+	fixtures := []config.Config{
+		config.Default(),
+		func() config.Config {
+			cfg := config.Default()
+			cfg.RuntimeProfile = config.ProfileHostedService
+			cfg.Service.Enabled = true
+			cfg.Service.Listen = "0.0.0.0:9100"
+			cfg.Service.AllowUnauthenticatedPairing = true
+			cfg.Service.SharedSecretRole = "operator"
+			cfg.Service.MaxCapability = "guarded"
+			cfg.Triggers.Webhook.Enabled = true
+			cfg.Triggers.Webhook.Addr = "0.0.0.0:8765"
+			cfg.Channels.Slack.Enabled = true
+			return cfg
+		}(),
+		func() config.Config {
+			cfg := config.Default()
+			cfg.RuntimeProfile = config.ProfileHostedRemoteSandbox
+			cfg.Hardening.PrivilegedTools = true
+			return cfg
+		}(),
+	}
+	for _, cfg := range fixtures {
+		report := Evaluate(cfg, Options{Mode: ModeStartupService, ValidationError: "invalid config value"})
+		for _, finding := range report.Findings {
+			if strings.TrimSpace(finding.Summary) == "" {
+				t.Fatalf("%s missing summary", finding.ID)
+			}
+			if finding.Severity == SeverityInfo {
+				continue
+			}
+			if strings.TrimSpace(finding.Detail) == "" {
+				t.Fatalf("%s missing detail", finding.ID)
+			}
+			if strings.TrimSpace(finding.FixHint) == "" {
+				t.Fatalf("%s missing fix hint", finding.ID)
+			}
+			if finding.FixMode == "" {
+				t.Fatalf("%s missing fix mode", finding.ID)
+			}
+		}
+	}
+}
+
+func TestApplyAutomaticFixes_ServiceUnsafeSharedSecretPosture(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	cfg := config.Default()
+	cfg.Service.Enabled = true
+	cfg.Service.Listen = "0.0.0.0:9100"
+	cfg.Service.Secret = strings.Repeat("s", 32)
+	cfg.Service.AllowUnauthenticatedPairing = true
+	cfg.Service.SharedSecretRole = "operator"
+	cfg.Service.MaxCapability = "guarded"
+	cfg.RuntimeProfile = config.ProfileHostedService
+	report := Evaluate(cfg, Options{Mode: ModeStartupService})
+
+	applied, err := ApplyAutomaticFixes(cfgPath, &cfg, report)
+	if err != nil {
+		t.Fatalf("ApplyAutomaticFixes: %v", err)
+	}
+	for _, want := range []string{"service.unauthenticated_pairing_remote", "service.shared_secret_role_unsafe", "service.max_capability_unsafe"} {
+		found := false
+		for _, fix := range applied {
+			if fix.ID == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("expected applied fix %s in %#v", want, applied)
+		}
+	}
+	if cfg.Service.AllowUnauthenticatedPairing || cfg.Service.SharedSecretRole != "service-client" || cfg.Service.MaxCapability != "safe" {
+		t.Fatalf("unsafe service posture not repaired: %#v", cfg.Service)
+	}
+}
+
+func TestServiceFindingsRequireEffectiveProfileForExposedIngress(t *testing.T) {
+	cfg := config.Default()
+	cfg.RuntimeProfile = config.ProfileHostedService
+	cfg.Service.Enabled = true
+	cfg.Service.Listen = "0.0.0.0:9100"
+	cfg.Service.Secret = strings.Repeat("s", 32)
+
+	report := Evaluate(cfg, Options{Mode: ModeStartupService})
+	if !doctorReportHasFinding(report, "service.effective_profile_missing") {
+		t.Fatalf("expected exposed service ingress to require an effective profile, findings=%#v", report.Findings)
+	}
+
+	cfg.Security.Profiles.Enabled = true
+	cfg.Security.Profiles.Default = "service-safe"
+	cfg.Security.Profiles.Profiles = map[string]config.AccessProfileConfig{
+		"service-safe": {MaxCapability: "safe", AllowedTools: []string{"search"}},
+	}
+	report = Evaluate(cfg, Options{Mode: ModeStartupService})
+	if doctorReportHasFinding(report, "service.effective_profile_missing") {
+		t.Fatalf("expected default access profile to satisfy service ingress, findings=%#v", report.Findings)
+	}
+}
+
+func doctorReportHasFinding(report Report, id string) bool {
+	for _, finding := range report.Findings {
+		if finding.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func TestDoctorStartupFixtureCoverageForStabilityProfiles(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  config.Config
+		want string
+	}{
+		{
+			name: "local",
+			cfg: func() config.Config {
+				cfg := config.Default()
+				cfg.Provider.APIKey = strings.Repeat("k", 24)
+				return cfg
+			}(),
+			want: "service.secret_missing",
+		},
+		{
+			name: "private-service",
+			cfg: func() config.Config {
+				cfg := config.Default()
+				cfg.Service.Enabled = true
+				cfg.Service.Listen = "127.0.0.1:9100"
+				cfg.Service.Secret = strings.Repeat("s", 32)
+				return cfg
+			}(),
+			want: "provider.api_key_missing",
+		},
+		{
+			name: "exposed-ingress",
+			cfg: func() config.Config {
+				cfg := config.Default()
+				cfg.RuntimeProfile = config.ProfileHostedService
+				cfg.Service.Enabled = true
+				cfg.Service.Listen = "0.0.0.0:9100"
+				cfg.Service.Secret = strings.Repeat("s", 32)
+				return cfg
+			}(),
+			want: "service.effective_profile_missing",
+		},
+		{
+			name: "remote-mcp",
+			cfg: func() config.Config {
+				cfg := config.Default()
+				cfg.RuntimeProfile = config.ProfileHostedService
+				cfg.Tools.MCPServers = map[string]config.MCPServerConfig{
+					"remote": {Enabled: true, Transport: "streamablehttp", URL: "https://mcp.example"},
+				}
+				return cfg
+			}(),
+			want: "mcp.http_no_default_deny",
+		},
+		{
+			name: "privileged-exec",
+			cfg: func() config.Config {
+				cfg := config.Default()
+				cfg.RuntimeProfile = config.ProfileHostedRemoteSandbox
+				cfg.Hardening.PrivilegedTools = true
+				return cfg
+			}(),
+			want: "privileged-exec.sandbox_disabled",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			report := Evaluate(tc.cfg, Options{Mode: ModeStartupService})
+			if !doctorReportHasFinding(report, tc.want) {
+				t.Fatalf("expected finding %q, got %#v", tc.want, report.Findings)
+			}
+		})
 	}
 }
 

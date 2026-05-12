@@ -1,0 +1,20 @@
+{
+  "workspaceDir": "/tmp/or3-unsafe",
+  "dbPath": "/tmp/or3-unsafe/or3.sqlite",
+  "artifactsDir": "/tmp/or3-unsafe/artifacts",
+  "provider": {
+    "apiBase": "https://api.openai.com/v1",
+    "apiKey": "test-key",
+    "model": "gpt-4.1-mini",
+    "embedModel": "text-embedding-3-small",
+    "timeoutSeconds": 60
+  },
+  "service": {
+    "enabled": true,
+    "listen": "0.0.0.0:9100",
+    "secret": "",
+    "sharedSecretRole": "operator",
+    "maxCapability": "guarded",
+    "allowUnauthenticatedPairing": true
+  }
+}

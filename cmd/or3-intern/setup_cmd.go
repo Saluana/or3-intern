@@ -2,15 +2,18 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"or3-intern/internal/config"
 	intdoctor "or3-intern/internal/doctor"
+	"or3-intern/internal/providers"
 	"or3-intern/internal/safetymode"
 	"or3-intern/internal/security"
 	"or3-intern/internal/uxcopy"
@@ -27,6 +30,21 @@ type setupOptions struct {
 	StartChatDefault bool
 	CompletionNext   string
 	AutoInvoked      bool
+	ProviderProbe    setupProviderProbeFunc
+	ProbeTimeout     time.Duration
+}
+
+type setupProviderProbeFunc func(context.Context, config.Config) setupProviderProbeReport
+
+type setupProviderProbeReport struct {
+	Checks []setupProviderProbeCheck
+	Ready  bool
+}
+
+type setupProviderProbeCheck struct {
+	Name    string
+	OK      bool
+	Message string
 }
 
 func runSetup(cfgPath string) (setupResult, error) {
@@ -93,15 +111,34 @@ func runSetupWithIOOptions(in io.Reader, out io.Writer, cfgPath, cwd string, opt
 		}
 	}
 	fmt.Fprintln(out, providerAPIKeyHelp(providerChoice))
-	fmt.Fprintln(out, "This key is like a password for billing and access to that AI service. OR3 stores it in your local config file, not in the project folder.")
-	cfg.Provider.APIKey, err = promptSecretString(reader, out, "API key", cfg.Provider.APIKey)
+	envKeyName := providerAPIKeyEnv(providerChoice)
+	envKey := strings.TrimSpace(os.Getenv(envKeyName))
+	promptDefaultKey := cfg.Provider.APIKey
+	if !existed && envKey != "" && promptDefaultKey == envKey {
+		promptDefaultKey = ""
+		fmt.Fprintf(out, "Found %s in your environment. Leave the API key blank to use that without saving it in config.\n", envKeyName)
+	}
+	fmt.Fprintln(out, "This key is like a password for billing and access to that AI service. Prefer an environment variable or secret store; paste it here only for local-only config storage on this computer.")
+	cfg.Provider.APIKey, err = promptSecretString(reader, out, "API key", promptDefaultKey)
 	if err != nil {
 		return setupResult{}, err
 	}
-	if strings.TrimSpace(cfg.Provider.APIKey) == "" && strings.TrimSpace(os.Getenv(providerAPIKeyEnv(providerChoice))) == "" {
+	if !existed && envKey != "" && strings.TrimSpace(cfg.Provider.APIKey) == "" {
+		clearSetupProviderProfileKey(&cfg)
+	}
+	effectiveCfg := cfg
+	if strings.TrimSpace(effectiveCfg.Provider.APIKey) == "" && envKey != "" {
+		effectiveCfg.Provider.APIKey = envKey
+	}
+	probeReport := setupProviderProbeReport{Ready: true}
+	if strings.TrimSpace(effectiveCfg.Provider.APIKey) == "" {
 		fmt.Fprintln(out, "No API key found. Setup can still be saved, but chat will not be able to contact the AI provider until you add one.")
+		probeReport = setupProviderProbeReport{Ready: false, Checks: []setupProviderProbeCheck{
+			{Name: "API key", OK: false, Message: "Missing provider key."},
+		}}
 	} else {
-		fmt.Fprintln(out, "Provider step complete.")
+		probeReport = runSetupProviderProbe(in, out, effectiveCfg, options)
+		printSetupProviderProbe(out, probeReport)
 	}
 
 	fmt.Fprintln(out, "\nStep 2 of 4: Workspace folder")
@@ -155,22 +192,139 @@ func runSetupWithIOOptions(in io.Reader, out io.Writer, cfgPath, cwd string, opt
 	}
 
 	report := intdoctor.Evaluate(cfg, intdoctor.Options{Mode: intdoctor.ModeConfigurePostSave, ConfigPath: cfgPath})
+	if applied, err := intdoctor.ApplyAutomaticFixes(cfgPath, &cfg, report); err != nil {
+		return setupResult{}, err
+	} else if len(applied) > 0 {
+		fmt.Fprintln(out, "\nApplied safe repairs")
+		for _, fix := range applied {
+			fmt.Fprintf(out, "- %s: %s\n", fix.ID, fix.Summary)
+		}
+		report = intdoctor.Evaluate(cfg, intdoctor.Options{Mode: intdoctor.ModeConfigurePostSave, ConfigPath: cfgPath})
+	}
 	status := uxstate.BuildStatusView(cfg, report, 0, 0)
 	printSetupReview(out, status)
+	effectiveReadyCfg := cfg
+	if strings.TrimSpace(effectiveReadyCfg.Provider.APIKey) == "" && envKey != "" {
+		effectiveReadyCfg.Provider.APIKey = envKey
+	}
+	readiness := config.EvaluateReadiness(effectiveReadyCfg, config.ReadinessOptions{Command: "chat"})
+	readyToChat := probeReport.Ready && (readiness.State == config.ReadinessReady || readiness.State == config.ReadinessAdvancedCustom)
 	startChat := false
-	if options.AskStartChat {
+	if options.AskStartChat && readyToChat {
 		startChat, err = promptBool(reader, out, "Start chat next", options.StartChatDefault)
 		if err != nil {
 			return setupResult{}, err
 		}
 	}
-	fmt.Fprintln(out, "\nSaved setup.")
+	if readyToChat {
+		fmt.Fprintln(out, "\nSaved setup. OR3 is ready to chat.")
+	} else {
+		fmt.Fprintln(out, "\nSaved draft setup.")
+		fmt.Fprintln(out, "Chat will be available after the provider settings pass setup checks.")
+	}
 	if startChat {
 		fmt.Fprintln(out, "Starting chat now.")
-	} else if strings.TrimSpace(options.CompletionNext) != "" {
+	} else if readyToChat && strings.TrimSpace(options.CompletionNext) != "" {
 		fmt.Fprintf(out, "Next: %s.\n", options.CompletionNext)
+	} else if !readyToChat {
+		fmt.Fprintln(out, "Next: run `or3-intern setup` after adding provider credentials, or run `or3-intern status` for repair guidance.")
 	}
 	return setupResult{StartChat: startChat, Config: cfg}, nil
+}
+
+func runSetupProviderProbe(in io.Reader, out io.Writer, cfg config.Config, options setupOptions) setupProviderProbeReport {
+	timeout := options.ProbeTimeout
+	if timeout <= 0 {
+		timeout = 8 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if options.ProviderProbe != nil {
+		return options.ProviderProbe(ctx, cfg)
+	}
+	if isNonInteractiveIO(in, out) {
+		return staticSetupProviderProbe(cfg)
+	}
+	return defaultSetupProviderProbe(ctx, cfg)
+}
+
+func staticSetupProviderProbe(cfg config.Config) setupProviderProbeReport {
+	checks := []setupProviderProbeCheck{
+		{Name: "Provider endpoint", OK: strings.TrimSpace(cfg.Provider.APIBase) != "", Message: "Endpoint is configured."},
+		{Name: "API key", OK: strings.TrimSpace(cfg.Provider.APIKey) != "", Message: "Provider key is available."},
+		{Name: "Chat model", OK: strings.TrimSpace(cfg.Provider.Model) != "", Message: "Chat model is configured."},
+	}
+	if strings.TrimSpace(cfg.Provider.EmbedModel) != "" {
+		checks = append(checks, setupProviderProbeCheck{Name: "Embedding model", OK: true, Message: "Embedding model is configured."})
+	}
+	return setupProviderProbeReport{Checks: checks, Ready: setupProbeChecksReady(checks)}
+}
+
+func defaultSetupProviderProbe(ctx context.Context, cfg config.Config) setupProviderProbeReport {
+	report := staticSetupProviderProbe(cfg)
+	if !report.Ready {
+		return report
+	}
+	client := providers.New(strings.TrimRight(cfg.Provider.APIBase, "/"), cfg.Provider.APIKey, 8*time.Second)
+	client.EmbedDimensions = cfg.Provider.EmbedDimensions
+	if _, err := client.Chat(ctx, providers.ChatCompletionRequest{
+		Model: cfg.Provider.Model,
+		Messages: []providers.ChatMessage{
+			{Role: "user", Content: "Reply with OK."},
+		},
+		Temperature: 0,
+	}); err != nil {
+		report.Checks = append(report.Checks, setupProviderProbeCheck{Name: "Chat model probe", OK: false, Message: err.Error()})
+		report.Ready = false
+		return report
+	}
+	report.Checks = append(report.Checks, setupProviderProbeCheck{Name: "Chat model probe", OK: true, Message: "Provider accepted a short chat request."})
+	if strings.TrimSpace(cfg.Provider.EmbedModel) != "" {
+		if _, err := client.Embed(ctx, cfg.Provider.EmbedModel, "OR3 setup probe"); err != nil {
+			report.Checks = append(report.Checks, setupProviderProbeCheck{Name: "Embedding model probe", OK: false, Message: err.Error()})
+			report.Ready = false
+			return report
+		}
+		report.Checks = append(report.Checks, setupProviderProbeCheck{Name: "Embedding model probe", OK: true, Message: "Provider accepted a short embedding request."})
+	}
+	return report
+}
+
+func printSetupProviderProbe(out io.Writer, report setupProviderProbeReport) {
+	fmt.Fprintln(out, "\nProvider checks")
+	for _, check := range report.Checks {
+		mark := "OK"
+		if !check.OK {
+			mark = "Needs attention"
+		}
+		fmt.Fprintf(out, "- %s: %s", check.Name, mark)
+		if strings.TrimSpace(check.Message) != "" {
+			fmt.Fprintf(out, " — %s", check.Message)
+		}
+		fmt.Fprintln(out)
+	}
+}
+
+func setupProbeChecksReady(checks []setupProviderProbeCheck) bool {
+	for _, check := range checks {
+		if !check.OK {
+			return false
+		}
+	}
+	return true
+}
+
+func clearSetupProviderProfileKey(cfg *config.Config) {
+	if cfg == nil || cfg.Providers == nil {
+		return
+	}
+	key := configureProviderKeyFromBase(cfg.Provider.APIBase)
+	profile, ok := cfg.Providers[key]
+	if !ok {
+		return
+	}
+	profile.APIKey = ""
+	cfg.Providers[key] = profile
 }
 
 func promptSetupScenario(reader *bufio.Reader, out io.Writer) (safetymode.Scenario, error) {

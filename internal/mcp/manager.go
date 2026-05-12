@@ -17,6 +17,7 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"or3-intern/internal/config"
+	"or3-intern/internal/integrations"
 	"or3-intern/internal/security"
 	"or3-intern/internal/tools"
 )
@@ -45,9 +46,18 @@ type Manager struct {
 // ServerStatus describes the most recent known connection state for one MCP server.
 type ServerStatus struct {
 	Connected bool     `json:"connected"`
+	State     string   `json:"state"`
 	ToolCount int      `json:"toolCount"`
 	Tools     []string `json:"tools"`
 	LastError string   `json:"lastError,omitempty"`
+}
+
+type ToolCatalogEntry struct {
+	ServerName string
+	RemoteName string
+	LocalName  string
+	Status     string
+	LastError  string
 }
 
 type remoteToolSpec struct {
@@ -151,6 +161,7 @@ func (m *Manager) ServerStatus() map[string]ServerStatus {
 	for name, status := range out {
 		sort.Strings(status.Tools)
 		status.ToolCount = len(status.Tools)
+		status.State = integrations.Label(integrations.FromStatus(m.servers[name].Enabled, status.Connected, status.LastError))
 		out[name] = status
 	}
 	return out
@@ -209,6 +220,86 @@ func (m *Manager) Connect(ctx context.Context) error {
 		m.logfSafe("mcp server connected: name=%s transport=%s tools=%d", name, cfg.Transport, added)
 	}
 	return nil
+}
+
+// Refresh replaces the configured server set and reconnects without requiring
+// the parent process to restart.
+func (m *Manager) Refresh(ctx context.Context, servers map[string]config.MCPServerConfig) error {
+	if m == nil {
+		return nil
+	}
+	if err := m.Close(); err != nil {
+		return err
+	}
+	cloned := make(map[string]config.MCPServerConfig, len(servers))
+	for name, server := range servers {
+		cloned[name] = server
+	}
+	m.servers = cloned
+	m.failures = map[string]string{}
+	return m.Connect(ctx)
+}
+
+// ReconnectWithBackoff retries unavailable servers using a bounded backoff.
+func (m *Manager) ReconnectWithBackoff(ctx context.Context, attempts int, initialDelay time.Duration) error {
+	if m == nil || len(m.failures) == 0 {
+		return nil
+	}
+	if attempts <= 0 {
+		attempts = 1
+	}
+	if initialDelay < 0 {
+		initialDelay = 0
+	}
+	var err error
+	for attempt := 0; attempt < attempts; attempt++ {
+		if attempt > 0 && initialDelay > 0 {
+			timer := time.NewTimer(initialDelay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+			initialDelay *= 2
+			if initialDelay > 5*time.Second {
+				initialDelay = 5 * time.Second
+			}
+		}
+		err = m.Refresh(ctx, m.servers)
+		if err != nil {
+			return err
+		}
+		if len(m.failures) == 0 {
+			return nil
+		}
+	}
+	return nil
+}
+
+func (m *Manager) ToolCatalog() []ToolCatalogEntry {
+	if m == nil {
+		return nil
+	}
+	status := m.ServerStatus()
+	out := make([]ToolCatalogEntry, 0, len(m.tools))
+	for _, spec := range m.tools {
+		state := status[spec.serverName]
+		out = append(out, ToolCatalogEntry{
+			ServerName: spec.serverName,
+			RemoteName: spec.remoteName,
+			LocalName:  spec.localName,
+			Status:     state.State,
+			LastError:  state.LastError,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ServerName != out[j].ServerName {
+			return out[i].ServerName < out[j].ServerName
+		}
+		return out[i].LocalName < out[j].LocalName
+	})
+	return out
 }
 
 // RegisterTools registers all discovered remote tools into reg.

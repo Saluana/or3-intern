@@ -336,7 +336,7 @@ func (s *serviceServer) cleanupTerminalSessions() {
 	s.terminals().mu.Lock()
 	sessions := make([]*serviceTerminalSession, 0)
 	for id, session := range s.terminals().sessions {
-		if session == nil || now.After(session.ExpiresAt) {
+		if session == nil || terminalSessionExpired(session, now) {
 			delete(s.terminals().sessions, id)
 			if session != nil {
 				sessions = append(sessions, session)
@@ -359,12 +359,22 @@ func (s *serviceServer) getTerminalSessionByID(sessionID string) (*serviceTermin
 	if !ok || session == nil {
 		return nil, false
 	}
-	if time.Now().UTC().After(session.ExpiresAt) {
+	if terminalSessionExpired(session, time.Now().UTC()) {
 		delete(s.terminals().sessions, sessionID)
 		go session.close("expired")
 		return nil, false
 	}
 	return session, true
+}
+
+func terminalSessionExpired(session *serviceTerminalSession, now time.Time) bool {
+	if session == nil {
+		return true
+	}
+	session.mu.Lock()
+	expiresAt := session.ExpiresAt
+	session.mu.Unlock()
+	return now.After(expiresAt)
 }
 
 func (s *serviceServer) allocateTerminalSessionID() (string, error) {

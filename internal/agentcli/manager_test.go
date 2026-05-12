@@ -162,6 +162,33 @@ func TestManagerStartStopAndReconcile(t *testing.T) {
 	}
 }
 
+func TestManagerRecoverRunPanicFinalizesRun(t *testing.T) {
+	manager, database, jobs := newTestManager(t)
+	run := mustInsertAgentRun(t, database, db.AgentCLIRun{
+		ID:     "acr-panic",
+		JobID:  "job-panic",
+		Status: db.AgentCLIStatusRunning,
+	})
+	jobs.RegisterWithID(run.JobID, "agent-run")
+
+	func() {
+		defer manager.recoverRunPanic(run)
+		panic("boom")
+	}()
+
+	stored := mustGetAgentRun(t, database, run.ID)
+	if stored.Status != db.AgentCLIStatusFailed {
+		t.Fatalf("expected recovered panic to finalize failed, got %q", stored.Status)
+	}
+	if !strings.Contains(stored.ErrorMessage, "internal failure") {
+		t.Fatalf("expected redacted recovery message, got %q", stored.ErrorMessage)
+	}
+	snapshot, ok := jobs.Snapshot(run.JobID)
+	if !ok || snapshot.Status != db.AgentCLIStatusFailed {
+		t.Fatalf("expected job registry to be failed, ok=%v snapshot=%#v", ok, snapshot)
+	}
+}
+
 func TestManagerStopTimeout(t *testing.T) {
 	manager := &Manager{DB: openAgentCLITestDB(t), started: true, cancel: func() {}}
 	unblock := make(chan struct{})
@@ -180,20 +207,25 @@ func TestManagerStopTimeout(t *testing.T) {
 }
 
 func TestManagerEnqueueRejectsInvalidRequests(t *testing.T) {
-	manager, _, _ := newTestManager(t)
-	manager.RestrictDir = t.TempDir()
-	manager.Cfg.MaxTimeoutSeconds = 30
-	manager.Registry.detectCache[RunnerCodex] = runnerDetectCacheEntry{
-		info:      RunnerInfo{Status: RunnerStatusMissing},
-		fetchedAt: time.Now(),
-	}
-	manager.Registry.detectCache[RunnerClaude] = runnerDetectCacheEntry{
-		info:      RunnerInfo{Status: RunnerStatusAuthMissing},
-		fetchedAt: time.Now(),
-	}
-	manager.Registry.detectCache[RunnerGemini] = runnerDetectCacheEntry{
-		info:      RunnerInfo{Status: RunnerStatusError},
-		fetchedAt: time.Now(),
+	restrictDir := t.TempDir()
+	newCaseManager := func(t *testing.T) *Manager {
+		t.Helper()
+		manager, _, _ := newTestManager(t)
+		manager.RestrictDir = restrictDir
+		manager.Cfg.MaxTimeoutSeconds = 30
+		manager.Registry.detectCache[RunnerCodex] = runnerDetectCacheEntry{
+			info:      RunnerInfo{Status: RunnerStatusMissing},
+			fetchedAt: time.Now(),
+		}
+		manager.Registry.detectCache[RunnerClaude] = runnerDetectCacheEntry{
+			info:      RunnerInfo{Status: RunnerStatusAuthMissing},
+			fetchedAt: time.Now(),
+		}
+		manager.Registry.detectCache[RunnerGemini] = runnerDetectCacheEntry{
+			info:      RunnerInfo{Status: RunnerStatusError},
+			fetchedAt: time.Now(),
+		}
+		return manager
 	}
 
 	cases := []struct {
@@ -258,12 +290,11 @@ func TestManagerEnqueueRejectsInvalidRequests(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			copyManager := *manager
-			copyManager.Cfg = manager.Cfg
+			manager := newCaseManager(t)
 			if tc.mutate != nil {
-				tc.mutate(&copyManager)
+				tc.mutate(manager)
 			}
-			_, err := copyManager.Enqueue(context.Background(), tc.req)
+			_, err := manager.Enqueue(context.Background(), tc.req)
 			if err == nil || !strings.Contains(err.Error(), tc.wantErrText) {
 				t.Fatalf("expected error containing %q, got %v", tc.wantErrText, err)
 			}

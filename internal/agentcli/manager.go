@@ -344,6 +344,7 @@ func (m *Manager) runOnce() (bool, error) {
 }
 
 func (m *Manager) executeRun(run db.AgentCLIRun) {
+	defer m.recoverRunPanic(run)
 	timeout := time.Duration(run.TimeoutSeconds) * time.Second
 	if timeout <= 0 {
 		timeout = m.TaskTimeout
@@ -483,6 +484,13 @@ func (m *Manager) executeRun(run db.AgentCLIRun) {
 		errMsg = "aborted"
 	}
 	m.finalizeRun(runCtx, run, finalStatus, errMsg, out)
+}
+
+func (m *Manager) recoverRunPanic(run db.AgentCLIRun) {
+	if recovered := recover(); recovered != nil {
+		log.Printf("agent CLI worker recovered panic: run=%s err=%v", run.ID, recovered)
+		m.finalizeRun(context.Background(), run, db.AgentCLIStatusFailed, "agent CLI worker recovered after an internal failure", ProcessOutput{ExitCode: -1})
+	}
 }
 
 func (m *Manager) finalizeRun(ctx context.Context, run db.AgentCLIRun, status, errMsg string, out ProcessOutput) {

@@ -401,6 +401,7 @@ type HeartbeatConfig struct {
 type ServiceConfig struct {
 	Enabled                           bool     `json:"enabled"`
 	Listen                            string   `json:"listen"`
+	UnixSocket                        string   `json:"unixSocket,omitempty"`
 	Secret                            string   `json:"secret"`
 	SharedSecretRole                  string   `json:"sharedSecretRole"`
 	MaxCapability                     string   `json:"maxCapability"`

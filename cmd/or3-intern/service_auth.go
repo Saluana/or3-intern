@@ -31,8 +31,17 @@ const (
 )
 
 type serviceTokenClaims struct {
-	IssuedAt int64  `json:"iat"`
-	Nonce    string `json:"nonce"`
+	IssuedAt   int64  `json:"iat"`
+	Nonce      string `json:"nonce"`
+	Method     string `json:"method,omitempty"`
+	Path       string `json:"path,omitempty"`
+	BodySHA256 string `json:"bodySha256,omitempty"`
+}
+
+type serviceTokenBinding struct {
+	Method     string
+	Path       string
+	BodySHA256 string
 }
 
 type serviceAuthContextKey struct{}
@@ -122,7 +131,12 @@ func serviceAuthMiddlewareWithBrokerAndLimiter(cfg config.Config, broker *approv
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
-		identity, err := authenticateServiceRequest(cfg, broker, authSvc, r.Header.Get("Authorization"), now, r.Context())
+		var nonceGuard *serviceNonceReplayGuard
+		if server != nil {
+			server.components()
+			nonceGuard = server.nonceGuard
+		}
+		identity, err := authenticateServiceRequest(cfg, broker, authSvc, r.Header.Get("Authorization"), now, r.Context(), r, nonceGuard)
 		if err != nil {
 			server.recordServiceAuthFailure(r, "auth")
 			if challenge := serviceAuthChallengeError(cfg, authSvc, requirement, serviceAuthIdentity{}, err); challenge != nil {
@@ -477,8 +491,15 @@ func serviceAppendVary(header http.Header, value string) {
 	header.Add("Vary", value)
 }
 
-func authenticateServiceRequest(cfg config.Config, broker *approval.Broker, authSvc *auth.Service, header string, now time.Time, ctx context.Context) (serviceAuthIdentity, error) {
-	if err := validateServiceAuthorization(cfg.Service.Secret, header, now); err == nil {
+func authenticateServiceRequest(cfg config.Config, broker *approval.Broker, authSvc *auth.Service, header string, now time.Time, ctx context.Context, r *http.Request, nonceGuard *serviceNonceReplayGuard) (serviceAuthIdentity, error) {
+	binding := serviceTokenBinding{}
+	if r != nil {
+		binding.Method = r.Method
+		if r.URL != nil {
+			binding.Path = r.URL.Path
+		}
+	}
+	if err := validateServiceAuthorizationBound(cfg.Service.Secret, header, now, binding, nonceGuard); err == nil {
 		role := strings.TrimSpace(cfg.Service.SharedSecretRole)
 		if role == "" {
 			role = approval.RoleServiceClient
@@ -797,6 +818,10 @@ func requestRemoteIsLoopback(addr string) bool {
 }
 
 func validateServiceAuthorization(secret string, header string, now time.Time) error {
+	return validateServiceAuthorizationBound(secret, header, now, serviceTokenBinding{}, nil)
+}
+
+func validateServiceAuthorizationBound(secret string, header string, now time.Time, binding serviceTokenBinding, nonceGuard *serviceNonceReplayGuard) error {
 	secret = strings.TrimSpace(secret)
 	if secret == "" {
 		return fmt.Errorf("service secret is not configured")
@@ -805,10 +830,14 @@ func validateServiceAuthorization(secret string, header string, now time.Time) e
 	if !ok || !strings.EqualFold(scheme, "Bearer") || strings.TrimSpace(token) == "" {
 		return fmt.Errorf("missing bearer token")
 	}
-	return validateServiceBearerToken(secret, token, now)
+	return validateServiceBearerTokenBound(secret, token, now, binding, nonceGuard)
 }
 
 func validateServiceBearerToken(secret string, token string, now time.Time) error {
+	return validateServiceBearerTokenBound(secret, token, now, serviceTokenBinding{}, nil)
+}
+
+func validateServiceBearerTokenBound(secret string, token string, now time.Time, binding serviceTokenBinding, nonceGuard *serviceNonceReplayGuard) error {
 	payloadPart, signaturePart, ok := strings.Cut(strings.TrimSpace(token), ".")
 	if !ok || payloadPart == "" || signaturePart == "" {
 		return fmt.Errorf("invalid bearer token format")
@@ -842,15 +871,39 @@ func validateServiceBearerToken(secret string, token string, now time.Time) erro
 	if strings.TrimSpace(claims.Nonce) == "" {
 		return fmt.Errorf("invalid bearer token nonce")
 	}
+	if strings.TrimSpace(claims.Method) != "" && !strings.EqualFold(strings.TrimSpace(claims.Method), strings.TrimSpace(binding.Method)) {
+		return fmt.Errorf("bearer token method binding mismatch")
+	}
+	if strings.TrimSpace(claims.Path) != "" && strings.TrimSpace(claims.Path) != strings.TrimSpace(binding.Path) {
+		return fmt.Errorf("bearer token path binding mismatch")
+	}
+	if strings.TrimSpace(claims.BodySHA256) != "" && strings.TrimSpace(claims.BodySHA256) != strings.TrimSpace(binding.BodySHA256) {
+		return fmt.Errorf("bearer token body binding mismatch")
+	}
+	if nonceGuard != nil {
+		if !nonceGuard.Accept(claims.Nonce, issuedAt.Add(serviceTokenMaxAge), now) {
+			return fmt.Errorf("bearer token replay detected")
+		}
+	}
 	return nil
 }
 
 func issueServiceBearerToken(secret string, now time.Time) (string, error) {
+	return issueServiceBearerTokenBound(secret, now, serviceTokenBinding{})
+}
+
+func issueServiceBearerTokenBound(secret string, now time.Time, binding serviceTokenBinding) (string, error) {
 	nonce, err := randomHex(12)
 	if err != nil {
 		return "", err
 	}
-	claims := serviceTokenClaims{IssuedAt: now.Unix(), Nonce: nonce}
+	claims := serviceTokenClaims{
+		IssuedAt:   now.Unix(),
+		Nonce:      nonce,
+		Method:     strings.ToUpper(strings.TrimSpace(binding.Method)),
+		Path:       strings.TrimSpace(binding.Path),
+		BodySHA256: strings.TrimSpace(binding.BodySHA256),
+	}
 	payload, err := json.Marshal(claims)
 	if err != nil {
 		return "", err

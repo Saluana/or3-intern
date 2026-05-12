@@ -11,6 +11,8 @@ import (
 
 func hostedStartupConfig() config.Config {
 	cfg := config.Default()
+	cfg.WorkspaceDir = "/tmp/or3-startup-workspace"
+	cfg.Provider.APIKey = "test-provider-key"
 	cfg.RuntimeProfile = config.ProfileHostedService
 	cfg.Security.SecretStore.Enabled = true
 	cfg.Security.SecretStore.Required = true
@@ -32,6 +34,35 @@ func TestValidateStartupCommand_ChatRejectsInvalidHostedProfile(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "chat startup refused") {
 		t.Fatalf("expected chat startup refusal, got %v", err)
+	}
+}
+
+func TestValidateStartupCommand_ChatRejectsDraftConfig(t *testing.T) {
+	cfg := hostedStartupConfig()
+	cfg.Provider.APIKey = ""
+
+	err := validateStartupCommand("chat", cfg, false)
+	if err == nil {
+		t.Fatal("expected draft config to fail chat startup validation")
+	}
+	if !strings.Contains(err.Error(), "setup state is draft") {
+		t.Fatalf("expected draft readiness refusal, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "AI provider key is missing") {
+		t.Fatalf("expected provider key guidance, got %v", err)
+	}
+}
+
+func TestValidateStartupCommand_ServiceDeclaresReadinessChecks(t *testing.T) {
+	got := config.RequiredReadinessChecks("service")
+	want := []string{"database", "artifacts", "service-auth", "service-bind"}
+	if len(got) != len(want) {
+		t.Fatalf("expected %#v, got %#v", want, got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("expected %#v, got %#v", want, got)
+		}
 	}
 }
 

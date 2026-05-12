@@ -15,6 +15,7 @@ func Evaluate(cfg config.Config, opts Options) Report {
 	}
 	findings := make([]Finding, 0, 48)
 	findings = append(findings, configValidationFindings(cfg, opts)...)
+	findings = append(findings, providerFindings(cfg, opts)...)
 	findings = append(findings, filesystemFindings(cfg, opts)...)
 	findings = append(findings, hardeningFindings(cfg, opts)...)
 	findings = append(findings, securityFindings(cfg, opts)...)

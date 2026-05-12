@@ -104,6 +104,9 @@ func HasFix(mode FixMode) bool {
 
 func NewReport(mode Mode, findings []Finding) Report {
 	items := append([]Finding{}, findings...)
+	for i := range items {
+		items[i] = normalizeFindingRepairFields(items[i])
+	}
 	sort.SliceStable(items, func(i, j int) bool {
 		li := severityRank(items[i].Severity)
 		lj := severityRank(items[j].Severity)
@@ -121,6 +124,22 @@ func NewReport(mode Mode, findings []Finding) Report {
 	report := Report{Mode: mode, Findings: items}
 	report.recomputeSummary()
 	return report
+}
+
+func normalizeFindingRepairFields(finding Finding) Finding {
+	if severityRank(finding.Severity) < severityRank(SeverityWarn) {
+		return finding
+	}
+	if strings.TrimSpace(finding.Detail) == "" {
+		finding.Detail = finding.Summary
+	}
+	if strings.TrimSpace(finding.FixHint) == "" {
+		finding.FixHint = "Review this setting in `or3-intern status --advanced`, then run `or3-intern doctor --fix` when a safe repair is available."
+	}
+	if finding.FixMode == "" {
+		finding.FixMode = FixModeManual
+	}
+	return finding
 }
 
 func (r Report) Filter(opts FilterOptions) Report {

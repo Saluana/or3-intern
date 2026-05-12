@@ -932,6 +932,80 @@ func TestLoad_EnvOverrides(t *testing.T) {
 	}
 }
 
+func TestEvaluateReadinessFixtures(t *testing.T) {
+	clearConfigEnv(t)
+	tests := []struct {
+		name    string
+		command string
+		want    ReadinessState
+	}{
+		{name: "ready", command: "chat", want: ReadinessReady},
+		{name: "draft", command: "chat", want: ReadinessDraft},
+		{name: "repairable", command: "chat", want: ReadinessNeedsRepair},
+		{name: "unsafe", command: "service", want: ReadinessNeedsRepair},
+		{name: "advanced-custom", command: "chat", want: ReadinessAdvancedCustom},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := Load(filepath.Join("testdata", "readiness", tc.name+".json"))
+			if err != nil {
+				t.Fatalf("Load fixture: %v", err)
+			}
+			report := EvaluateReadiness(cfg, ReadinessOptions{Command: tc.command})
+			if report.State != tc.want {
+				t.Fatalf("expected readiness %s, got %s with issues %#v", tc.want, report.State, report.Issues)
+			}
+			if tc.want != ReadinessReady && tc.want != ReadinessAdvancedCustom && len(report.Issues) == 0 {
+				t.Fatal("expected non-ready fixture to include at least one issue")
+			}
+		})
+	}
+}
+
+func TestRequiredReadinessChecks(t *testing.T) {
+	tests := map[string][]string{
+		"chat":    {"provider", "workspace", "database", "artifacts"},
+		"serve":   {"provider", "workspace", "database", "artifacts", "enabled-ingress"},
+		"service": {"database", "artifacts", "service-auth", "service-bind"},
+	}
+	for command, want := range tests {
+		got := RequiredReadinessChecks(command)
+		if !slices.Equal(got, want) {
+			t.Fatalf("%s checks: expected %#v, got %#v", command, want, got)
+		}
+	}
+}
+
+func TestLoadRepairableReturnsNeedsRepairForValidationError(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	raw := []byte(`{
+		"workspaceDir": "/tmp/or3-repair-mode",
+		"dbPath": "/tmp/or3-repair-mode/or3.sqlite",
+		"artifactsDir": "/tmp/or3-repair-mode/artifacts",
+		"runtimeProfile": "not-a-profile",
+		"provider": {
+			"apiBase": "https://api.openai.com/v1",
+			"apiKey": "test-key",
+			"model": "gpt-4.1-mini",
+			"timeoutSeconds": 60
+		}
+	}`)
+	mustWriteTestFile(t, path, raw)
+
+	cfg, report, err := LoadRepairable(path, "chat")
+	if err != nil {
+		t.Fatalf("LoadRepairable: %v", err)
+	}
+	if cfg.RuntimeProfile != "not-a-profile" {
+		t.Fatalf("expected raw runtime profile to be preserved for repair, got %q", cfg.RuntimeProfile)
+	}
+	if report.State != ReadinessNeedsRepair {
+		t.Fatalf("expected needs-repair, got %s with issues %#v", report.State, report.Issues)
+	}
+}
+
 func TestLoad_SubagentNormalization(t *testing.T) {
 	clearConfigEnv(t)
 	dir := t.TempDir()

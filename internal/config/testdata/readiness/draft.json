@@ -1,0 +1,12 @@
+{
+  "workspaceDir": "/tmp/or3-draft",
+  "dbPath": "/tmp/or3-draft/or3.sqlite",
+  "artifactsDir": "/tmp/or3-draft/artifacts",
+  "provider": {
+    "apiBase": "https://api.openai.com/v1",
+    "apiKey": "",
+    "model": "gpt-4.1-mini",
+    "embedModel": "text-embedding-3-small",
+    "timeoutSeconds": 60
+  }
+}

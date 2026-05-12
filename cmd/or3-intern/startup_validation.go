@@ -6,7 +6,6 @@ import (
 	"os"
 	"strings"
 
-	"or3-intern/internal/approval"
 	"or3-intern/internal/config"
 	intdoctor "or3-intern/internal/doctor"
 )
@@ -22,7 +21,7 @@ func validateStartupCommandWithOptions(cmd string, cfg config.Config, unsafeDev 
 	if unsafeDev {
 		return nil
 	}
-	if err := validateStrictServicePosture(cmd, cfg); err != nil {
+	if err := validateReadinessForStartup(cmd, cfg); err != nil {
 		return err
 	}
 	mode := startupDoctorMode(cmd)
@@ -49,6 +48,16 @@ func validateStartupCommandWithOptions(cmd string, cfg config.Config, unsafeDev 
 		message += fmt.Sprintf(" (%d more blocking finding(s))", len(blockers)-len(top))
 	}
 	return startupRefusal(cmd, message, blockers)
+}
+
+func validateReadinessForStartup(cmd string, cfg config.Config) error {
+	report := config.EvaluateReadiness(cfg, config.ReadinessOptions{Command: cmd})
+	switch report.State {
+	case config.ReadinessReady, config.ReadinessAdvancedCustom:
+		return nil
+	default:
+		return readinessStartupRefusal(cmd, report)
+	}
 }
 
 func startupBlockingFindings(findings []intdoctor.Finding) []intdoctor.Finding {
@@ -102,27 +111,6 @@ func emitStartupWarnings(cmd string, warnings []intdoctor.Finding) {
 	}
 }
 
-func validateStrictServicePosture(cmd string, cfg config.Config) error {
-	if cmd != "service" {
-		return nil
-	}
-	if cfg.Service.AllowUnauthenticatedPairing && !serviceListenIsLoopback(cfg.Service.Listen) && !cfg.Service.AllowRemoteUnauthenticatedPairing {
-		return fmt.Errorf("service startup refused: unauthenticated pairing requires a loopback listen address unless service.allowRemoteUnauthenticatedPairing is enabled with trusted origins and CIDRs; rerun with --unsafe-dev only for local development")
-	}
-	role := strings.ToLower(strings.TrimSpace(cfg.Service.SharedSecretRole))
-	switch role {
-	case "", approval.RoleViewer, approval.RoleServiceClient:
-	default:
-		return fmt.Errorf("service startup refused: service.sharedSecretRole must be viewer or service-client; rerun with --unsafe-dev only for local development")
-	}
-	switch strings.ToLower(strings.TrimSpace(cfg.Service.MaxCapability)) {
-	case "", "safe":
-	default:
-		return fmt.Errorf("service startup refused: service.maxCapability must remain safe; rerun with --unsafe-dev only for local development")
-	}
-	return nil
-}
-
 func startupDoctorMode(cmd string) intdoctor.Mode {
 	switch cmd {
 	case "chat":
@@ -143,6 +131,32 @@ func startupRefusal(cmd, message string, blockers []intdoctor.Finding) error {
 	}
 	guidance := startupFixGuidance(blockers)
 	return fmt.Errorf("%s startup refused: %s; %s", cmd, message, guidance)
+}
+
+func readinessStartupRefusal(cmd string, report config.ReadinessReport) error {
+	cmd = strings.TrimSpace(cmd)
+	if cmd == "" {
+		cmd = "startup"
+	}
+	top := report.Issues
+	if len(top) > 3 {
+		top = top[:3]
+	}
+	parts := make([]string, 0, len(top))
+	for _, issue := range top {
+		message := strings.TrimSpace(issue.Title)
+		if fix := strings.TrimSpace(issue.Fix); fix != "" {
+			message += " — " + fix
+		}
+		parts = append(parts, message)
+	}
+	if len(parts) == 0 {
+		parts = append(parts, "setup is not complete")
+	}
+	if extra := len(report.Issues) - len(top); extra > 0 {
+		parts = append(parts, fmt.Sprintf("%d more issue(s)", extra))
+	}
+	return fmt.Errorf("%s startup refused: setup state is %s: %s", cmd, report.State, strings.Join(parts, "; "))
 }
 
 func startupFixGuidance(blockers []intdoctor.Finding) string {

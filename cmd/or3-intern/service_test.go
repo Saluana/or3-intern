@@ -312,6 +312,99 @@ func TestValidateServiceAuthorization(t *testing.T) {
 	}
 }
 
+func TestValidateServiceAuthorizationBoundRejectsReplayAndBindingMismatch(t *testing.T) {
+	secret := strings.Repeat("s", 32)
+	now := time.Unix(1_700_000_000, 0)
+	binding := serviceTokenBinding{Method: http.MethodPost, Path: "/internal/v1/turns"}
+	token, err := issueServiceBearerTokenBound(secret, now.Add(-time.Minute), binding)
+	if err != nil {
+		t.Fatalf("issue bound token: %v", err)
+	}
+	guard := newServiceNonceReplayGuard(16)
+	header := "Bearer " + token
+	if err := validateServiceAuthorizationBound(secret, header, now, binding, guard); err != nil {
+		t.Fatalf("expected first use to succeed, got %v", err)
+	}
+	if err := validateServiceAuthorizationBound(secret, header, now, binding, guard); err == nil || err.Error() != "bearer token replay detected" {
+		t.Fatalf("expected replay rejection, got %v", err)
+	}
+	if err := validateServiceAuthorizationBound(secret, header, now, serviceTokenBinding{Method: http.MethodGet, Path: binding.Path}, newServiceNonceReplayGuard(16)); err == nil || err.Error() != "bearer token method binding mismatch" {
+		t.Fatalf("expected method binding rejection, got %v", err)
+	}
+	if err := validateServiceAuthorizationBound(secret, header, now, serviceTokenBinding{Method: binding.Method, Path: "/internal/v1/jobs"}, newServiceNonceReplayGuard(16)); err == nil || err.Error() != "bearer token path binding mismatch" {
+		t.Fatalf("expected path binding rejection, got %v", err)
+	}
+}
+
+func TestValidateServiceAuthorizationBoundAcceptsLegacyTokenWithoutOptionalClaims(t *testing.T) {
+	secret := strings.Repeat("s", 32)
+	now := time.Unix(1_700_000_000, 0)
+	token := signedServiceToken(t, secret, encodeServiceClaims(t, serviceTokenClaims{IssuedAt: now.Add(-time.Minute).Unix(), Nonce: "legacy-nonce"}))
+	if err := validateServiceAuthorizationBound(secret, "Bearer "+token, now, serviceTokenBinding{Method: http.MethodPost, Path: "/different"}, nil); err != nil {
+		t.Fatalf("expected legacy token without bindings to remain valid, got %v", err)
+	}
+}
+
+func TestServiceNonceReplayGuardAllowsNonceAfterExpiry(t *testing.T) {
+	guard := newServiceNonceReplayGuard(16)
+	now := time.Unix(1_700_000_000, 0)
+	if !guard.Accept("nonce", now.Add(time.Minute), now) {
+		t.Fatalf("expected first nonce use to be accepted")
+	}
+	if guard.Accept("nonce", now.Add(time.Minute), now.Add(time.Second)) {
+		t.Fatalf("expected duplicate nonce to be rejected before expiry")
+	}
+	if !guard.Accept("nonce", now.Add(2*time.Minute), now.Add(time.Minute+time.Second)) {
+		t.Fatalf("expected nonce to be accepted after expiry cleanup")
+	}
+}
+
+func TestServiceJobSummaryPersistsAcrossServerRestart(t *testing.T) {
+	database, err := db.Open(filepath.Join(t.TempDir(), "service-jobs.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer database.Close()
+	jobs := agent.NewJobRegistry(0, 0)
+	server := &serviceServer{runtime: &agent.Runtime{DB: database}, jobs: jobs}
+	jobs.RegisterWithID("job-persist", "turn")
+	jobs.Complete("job-persist", "completed", map[string]any{"final_text": "done"})
+	server.persistServiceJobSummary(context.Background(), "job-persist")
+
+	restarted := &serviceServer{runtime: &agent.Runtime{DB: database}, jobs: agent.NewJobRegistry(0, 0)}
+	req := httptest.NewRequest(http.MethodGet, "/internal/v1/jobs/job-persist", nil)
+	rec := httptest.NewRecorder()
+	if !restarted.writePersistedServiceJobSnapshot(rec, req, "job-persist") {
+		t.Fatalf("expected persisted job snapshot")
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	payload := mustDecodeJSONBody(t, rec.Body)
+	if payload["job_id"] != "job-persist" || payload["status"] != "completed" || payload["final_text"] != "done" {
+		t.Fatalf("unexpected persisted job payload: %#v", payload)
+	}
+}
+
+func TestServiceErrorsRedactInternalsAndAddRecoveryGuidance(t *testing.T) {
+	if got := servicePublicJobError(fmt.Errorf("provider API key sk-secret failed at /tmp/private")); got != "job failed" {
+		t.Fatalf("expected generic job error, got %q", got)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/internal/v1/test", nil)
+	payload := serviceErrorPayload(req, "provider endpoint is unavailable")
+	if payload["recovery"] == "" {
+		t.Fatalf("expected provider recovery guidance, got %#v", payload)
+	}
+	payload = serviceErrorPayload(req, "runner is not authenticated")
+	if payload["recovery"] == "" {
+		t.Fatalf("expected runner auth recovery guidance, got %#v", payload)
+	}
+	payload = serviceErrorPayload(req, "sqlite database is read only")
+	if payload["recovery"] == "" {
+		t.Fatalf("expected storage recovery guidance, got %#v", payload)
+	}
+}
+
 func TestServiceBoundary_RateLimitIsPerActorAndPathAndEchoesRequestID(t *testing.T) {
 	server := &serviceServer{config: config.Config{Service: config.ServiceConfig{MutationRateLimitPerMinute: 1}}}
 	var handled int

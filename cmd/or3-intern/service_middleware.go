@@ -283,10 +283,29 @@ func serviceErrorPayload(r *http.Request, public string) map[string]any {
 	if payload["error"] == "" {
 		payload["error"] = "request failed"
 	}
+	if guidance := serviceRecoveryGuidance(fmt.Sprint(payload["error"])); guidance != "" {
+		payload["recovery"] = guidance
+	}
 	if requestID := serviceRequestIDFromContext(r.Context()); requestID != "" {
 		payload["request_id"] = requestID
 	}
 	return payload
+}
+
+func serviceRecoveryGuidance(message string) string {
+	text := strings.ToLower(strings.TrimSpace(message))
+	switch {
+	case strings.Contains(text, "provider"), strings.Contains(text, "model"), strings.Contains(text, "api key"), strings.Contains(text, "endpoint"):
+		return "Check provider settings with doctor, then retry when the model endpoint is reachable."
+	case strings.Contains(text, "tool"):
+		return "Check tool configuration and approvals with doctor, then retry the request."
+	case strings.Contains(text, "runner") && (strings.Contains(text, "auth") || strings.Contains(text, "authenticated")):
+		return "Authenticate the configured runner CLI or choose a different runner."
+	case strings.Contains(text, "database"), strings.Contains(text, "sqlite"), strings.Contains(text, "artifact"):
+		return "Check local storage paths and permissions, then run doctor repair if needed."
+	default:
+		return ""
+	}
 }
 
 func writeServiceAuthError(w http.ResponseWriter, r *http.Request, err error) {

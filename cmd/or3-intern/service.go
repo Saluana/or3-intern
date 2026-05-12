@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -44,6 +45,7 @@ type serviceServer struct {
 	terminalTicketStore   *serviceTerminalWebSocketTicketStore
 	rateLimiter           *serviceRateLimiter
 	authFailures          *serviceAuthFailureTracker
+	nonceGuard            *serviceNonceReplayGuard
 	modelCatalog          *serviceModelCatalogCache
 }
 
@@ -59,6 +61,9 @@ func (s *serviceServer) initComponents() {
 	}
 	if s.authFailures == nil {
 		s.authFailures = &serviceAuthFailureTracker{}
+	}
+	if s.nonceGuard == nil {
+		s.nonceGuard = newServiceNonceReplayGuard(4096)
 	}
 	if s.modelCatalog == nil {
 		s.modelCatalog = newServiceModelCatalogCache(64, 24*time.Hour)
@@ -163,21 +168,80 @@ func runServiceCommandWithBrokerOptionsCronMCP(ctx context.Context, cfg config.C
 		IdleTimeout:       60 * time.Second,
 	}
 
-	errCh := make(chan error, 1)
-	go func() {
-		log.Printf("or3-intern service listening on %s", cfg.Service.Listen)
-		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			errCh <- err
-		}
-	}()
+	return serveHTTPWithConfiguredTransport(ctx, httpServer, cfg)
+}
 
+func serveHTTPWithConfiguredTransport(ctx context.Context, httpServer *http.Server, cfg config.Config) error {
+	errCh := make(chan error, 1)
+	socketPath := strings.TrimSpace(cfg.Service.UnixSocket)
+	if socketPath != "" {
+		if err := prepareUnixSocketPath(socketPath); err != nil {
+			return err
+		}
+		listener, err := net.Listen("unix", socketPath)
+		if err != nil {
+			return err
+		}
+		go func() {
+			log.Printf("or3-intern service listening on unix socket %s", socketPath)
+			if err := httpServer.Serve(listener); err != nil && err != http.ErrServerClosed {
+				errCh <- err
+			}
+		}()
+	} else {
+		go func() {
+			log.Printf("or3-intern service listening on %s", cfg.Service.Listen)
+			if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				errCh <- err
+			}
+		}()
+	}
 	select {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), gracefulShutdownTimeout)
 		defer cancel()
-		return httpServer.Shutdown(shutdownCtx)
-	case err := <-errCh:
+		err := httpServer.Shutdown(shutdownCtx)
+		if socketPath != "" {
+			cleanupUnixSocketPath(socketPath)
+		}
 		return err
+	case err := <-errCh:
+		if socketPath != "" {
+			cleanupUnixSocketPath(socketPath)
+		}
+		return err
+	}
+}
+
+func prepareUnixSocketPath(socketPath string) error {
+	socketPath = strings.TrimSpace(socketPath)
+	if socketPath == "" {
+		return nil
+	}
+	info, err := os.Lstat(socketPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		return fmt.Errorf("unix socket path %s already exists and is not a socket", socketPath)
+	}
+	return os.Remove(socketPath)
+}
+
+func cleanupUnixSocketPath(socketPath string) {
+	socketPath = strings.TrimSpace(socketPath)
+	if socketPath == "" {
+		return
+	}
+	info, err := os.Lstat(socketPath)
+	if err != nil || info.Mode()&os.ModeSocket == 0 {
+		return
+	}
+	if err := os.Remove(socketPath); err != nil {
+		log.Printf("unix socket cleanup failed for %s: %v", socketPath, err)
 	}
 }
 
@@ -439,6 +503,9 @@ func (s *serviceServer) handleJobs(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if s.writePersistedAgentCLIRunSnapshot(w, r, jobID) {
+				return
+			}
+			if s.writePersistedServiceJobSnapshot(w, r, jobID) {
 				return
 			}
 			if !errors.Is(err, controlplane.ErrJobNotFound) {

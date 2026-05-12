@@ -1,0 +1,28 @@
+name: Consumer Grade Stability
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  stability:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Unit and integration tests
+        run: go test ./...
+      - name: Targeted race tests
+        run: go test -race ./internal/agent ./internal/agentcli ./cmd/or3-intern -run 'Test.*(Job|Terminal|Service|Manager|Registry)'
+      - name: Staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          staticcheck ./...
+      - name: Gosec
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          gosec ./...
+      - name: Fuzz smoke
+        run: go test ./internal/config -run '^$' -fuzz=FuzzEvaluateReadinessDoesNotPanic -fuzztime=5s

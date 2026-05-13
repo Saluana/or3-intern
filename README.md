@@ -56,6 +56,8 @@ The advanced `configure` command still exists and supports re-running specific s
 
 On an interactive terminal, `configure` and `init` launch the Bubble Tea setup UI with arrow-key navigation, `enter` to open/select, `space` to toggle booleans, `s` to save, and `q` to back out or quit. If stdin or stdout is not a terminal, both commands automatically stay in the plain-text prompt flow so scripts and redirected input remain stable. In plain-text mode, existing secrets stay hidden: leave the field blank to keep the current value, enter a new value to replace it, or type `clear` to remove it. The provider section now also exposes an optional embedding-dimensions override for models/providers that support configurable vector sizes.
 
+Environment overrides are loaded from `.env` in the current directory or parent directory before config is read. Already-exported shell variables win. Set `OR3_LOAD_DOTENV=false` to disable this behavior.
+
 Use `go run ./cmd/or3-intern ...` for ad hoc local runs, or install the binary first if you want every command in the reference to work exactly as `or3-intern ...`.
 
 ## Core features
@@ -125,7 +127,10 @@ The setup docs stay text-first in-repo. Screenshots or terminal recordings can b
 - Hybrid retrieval combines pinned context, vector similarity, and FTS keyword search.
 - After changing `provider.apiBase` or `provider.embedModel`, run `or3-intern embeddings status` and then `or3-intern embeddings rebuild memory` (or `all`) so stored vectors are regenerated in the new embedding space.
 - External channels are disabled by default until configured.
+- Incomplete optional integrations are quarantined at startup and surfaced by `status` and `/internal/v1/app/bootstrap` instead of silently breaking core chat.
 - `or3-intern doctor` is the main readiness command before exposing channels, triggers, or the service API.
+- `OR3_SERVICE_UNSAFE_DEV=true` is only for local development restarts; it preserves `--unsafe-dev` and bypasses startup safety gates.
+- `Dockerfile` and `compose.yaml` provide a hosted-service starting point, not a complete production hardening profile.
 
 ## Config alignment
 

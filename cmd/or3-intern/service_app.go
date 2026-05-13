@@ -154,7 +154,7 @@ func (s *serviceServer) buildAppBootstrap(r *http.Request) serviceAppBootstrapRe
 	response.Status.Capabilities = &capabilities
 	response.Status.Summary = serviceBootstrapSummary(health, readiness)
 
-	warnings := make([]serviceAppBootstrapWarning, 0, 6)
+	warnings := make([]serviceAppBootstrapWarning, 0, 8)
 	if !health.RuntimeAvailable {
 		warnings = append(warnings, serviceAppBootstrapWarning{Code: "runtime_unavailable", Message: "The OR3 runtime is not available right now.", Severity: "error"})
 	}
@@ -174,6 +174,31 @@ func (s *serviceServer) buildAppBootstrap(r *http.Request) serviceAppBootstrapRe
 		warnings = append(warnings, serviceAppBootstrapWarning{
 			Code:     "shared_secret_limited",
 			Message:  "This connection is using the shared service secret as service-client. Read-only API calls work, but exec and approvals need a paired operator or admin device.",
+			Severity: "warning",
+		})
+	}
+	for _, quarantined := range s.config.IntegrationWarnings {
+		name := strings.TrimSpace(quarantined.Name)
+		if name == "" {
+			name = "integration"
+		}
+		warnings = append(warnings, serviceAppBootstrapWarning{
+			Code:     "integration_quarantined",
+			Message:  fmt.Sprintf("%s was disabled because its settings are incomplete: %s", name, serviceFirstNonEmpty(quarantined.Reason, "invalid configuration")),
+			Severity: "warning",
+		})
+	}
+	if !s.config.ContextConfigured {
+		warnings = append(warnings, serviceAppBootstrapWarning{
+			Code:     "legacy_context_mode",
+			Message:  "This host is using legacy context settings because the saved config has no context section.",
+			Severity: "info",
+		})
+	}
+	if embeddingStatus, err := s.control().GetEmbeddingStatus(r.Context()); err == nil && strings.EqualFold(embeddingStatus.Status, "mismatch") {
+		warnings = append(warnings, serviceAppBootstrapWarning{
+			Code:     "embedding_fingerprint_mismatch",
+			Message:  "Memory embeddings were built with a different provider or model. Rebuild embeddings so recall stays accurate.",
 			Severity: "warning",
 		})
 	}

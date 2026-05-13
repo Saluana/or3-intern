@@ -104,7 +104,7 @@ func TranslateError(err error) UserError {
 	case strings.Contains(lower, "config error") || strings.Contains(lower, "validation"):
 		return UserError{Title: "Saved settings need repair", WhatHappened: "OR3 could not use the current settings as-is.", Fix: "Run setup or settings to repair them.", Command: "or3-intern setup", Advanced: raw}
 	default:
-		return UserError{Title: fallbackTitle(raw), WhatHappened: raw, Fix: "Review the details and retry.", Command: "or3-intern status", Advanced: raw}
+		return UserError{Title: "OR3 could not finish that request", WhatHappened: "An internal operation failed. The technical details are available for troubleshooting.", Fix: "Run status to check for common setup problems, then retry.", Command: "or3-intern status", Advanced: raw}
 	}
 }
 

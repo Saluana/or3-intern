@@ -219,7 +219,7 @@ func (s *Service) GetReadiness() ReadinessReport {
 	report := intdoctor.Evaluate(cfg, intdoctor.Options{Mode: intdoctor.ModeStartupService})
 	return ReadinessReport{
 		Status:   report.Summary.Status,
-		Ready:    !report.HasBlockingFindings(),
+		Ready:    report.Summary.ErrorCount == 0 && report.Summary.BlockCount == 0,
 		Summary:  report.Summary,
 		Findings: append([]intdoctor.Finding{}, report.Findings...),
 	}

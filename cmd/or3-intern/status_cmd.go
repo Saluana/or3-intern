@@ -91,6 +91,15 @@ func runStatusCommand(cfg config.Config, validationError string, database *db.DB
 	fmt.Fprintf(stdout, "Activity log: %s\n", view.ActivityLog)
 	if detailed {
 		fmt.Fprintf(stdout, "Context: mode=%s maxInputTokens=%d outputReserve=%d dynamicTools=%v\n", cfg.Context.Mode, cfg.Context.MaxInputTokens, cfg.Context.OutputReserveTokens, cfg.Context.Tools.DynamicExpose)
+		if !cfg.ContextConfigured {
+			fmt.Fprintln(stdout, "Context note: using legacy context behavior because config.json has no top-level context section.")
+		}
+	}
+	if len(cfg.IntegrationWarnings) > 0 {
+		fmt.Fprintln(stdout, "\nIntegration warnings")
+		for _, warning := range cfg.IntegrationWarnings {
+			fmt.Fprintf(stdout, "- %s: disabled because %s\n", warning.Name, warning.Reason)
+		}
 	}
 	fmt.Fprintln(stdout, "\nWhat OR3 can access")
 	for _, section := range view.Access.Sections {

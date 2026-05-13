@@ -148,7 +148,7 @@ func serviceAuthMiddlewareWithBrokerAndLimiter(cfg config.Config, broker *approv
 				writeServicePairingAuthError(w, r, cfg)
 				return
 			}
-			writeServiceJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+			writeServiceJSON(w, http.StatusUnauthorized, addServiceRequestID(map[string]any{"error": "unauthorized", "code": serviceCodeUnauthorized}, r))
 			return
 		}
 		server.clearServiceAuthFailures(r, "auth")
@@ -333,7 +333,7 @@ func writeServiceAuthRateLimit(w http.ResponseWriter, r *http.Request, retryAfte
 		retryAfter = 1
 	}
 	w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
-	writeServiceJSON(w, http.StatusTooManyRequests, map[string]any{"error": "too many authentication attempts", "retry_after_seconds": retryAfter})
+	writeServiceJSON(w, http.StatusTooManyRequests, addServiceRequestID(map[string]any{"error": "too many authentication attempts", "code": serviceCodeRateLimited, "retry_after_seconds": retryAfter}, r))
 }
 
 func serviceAllowedBrowserOrigin(cfg config.Config, r *http.Request) (string, bool) {
@@ -493,30 +493,48 @@ func serviceAppendVary(header http.Header, value string) {
 
 func authenticateServiceRequest(cfg config.Config, broker *approval.Broker, authSvc *auth.Service, header string, now time.Time, ctx context.Context, r *http.Request, nonceGuard *serviceNonceReplayGuard) (serviceAuthIdentity, error) {
 	binding := serviceTokenBinding{}
+	requestedMethod := ""
 	if r != nil {
+		requestedMethod = strings.ToLower(strings.TrimSpace(r.Header.Get("X-Or3-Auth-Method")))
 		binding.Method = r.Method
 		if r.URL != nil {
 			binding.Path = r.URL.Path
 		}
 	}
-	if err := validateServiceAuthorizationBound(cfg.Service.Secret, header, now, binding, nonceGuard); err == nil {
-		role := strings.TrimSpace(cfg.Service.SharedSecretRole)
-		if role == "" {
-			role = approval.RoleServiceClient
+	switch requestedMethod {
+	case "", "shared-secret", "paired-device", "session", "auth-session":
+	default:
+		return serviceAuthIdentity{}, fmt.Errorf("unsupported auth method")
+	}
+	if requestedMethod == "" || requestedMethod == "shared-secret" {
+		if err := validateServiceAuthorizationBound(cfg.Service.Secret, header, now, binding, nonceGuard); err == nil {
+			role := strings.TrimSpace(cfg.Service.SharedSecretRole)
+			if role == "" {
+				role = approval.RoleServiceClient
+			}
+			return serviceAuthIdentity{Kind: "shared-secret", Actor: "service:shared-secret", Role: role}, nil
 		}
-		return serviceAuthIdentity{Kind: "shared-secret", Actor: "service:shared-secret", Role: role}, nil
+		if requestedMethod == "shared-secret" {
+			return serviceAuthIdentity{}, fmt.Errorf("invalid shared-secret token")
+		}
 	}
 	scheme, token, ok := strings.Cut(strings.TrimSpace(header), " ")
 	if !ok || !strings.EqualFold(scheme, "Bearer") || strings.TrimSpace(token) == "" {
 		return serviceAuthIdentity{}, fmt.Errorf("missing bearer token")
 	}
-	if broker != nil {
+	if (requestedMethod == "" || requestedMethod == "paired-device") && broker != nil {
 		device, err := broker.AuthenticateDeviceToken(ctx, token)
 		if err == nil {
 			return serviceAuthIdentity{Kind: "paired-device", Actor: "device:" + device.DeviceID, Role: device.Role, Device: device.DeviceID}, nil
 		}
+		if requestedMethod == "paired-device" {
+			return serviceAuthIdentity{}, fmt.Errorf("invalid paired-device token")
+		}
 	}
-	if authSvc != nil && authSvc.Enabled() {
+	if requestedMethod == "paired-device" {
+		return serviceAuthIdentity{}, fmt.Errorf("paired-device auth is unavailable")
+	}
+	if (requestedMethod == "" || requestedMethod == "session" || requestedMethod == "auth-session") && authSvc != nil && authSvc.Enabled() {
 		claims, err := authSvc.ValidateSessionToken(ctx, token)
 		if err == nil {
 			actor := "user:" + claims.User.ID
@@ -536,6 +554,9 @@ func authenticateServiceRequest(cfg config.Config, broker *approval.Broker, auth
 			}, nil
 		}
 		return serviceAuthIdentity{}, err
+	}
+	if requestedMethod == "session" || requestedMethod == "auth-session" {
+		return serviceAuthIdentity{}, fmt.Errorf("session auth is unavailable")
 	}
 	return serviceAuthIdentity{}, fmt.Errorf("invalid bearer token")
 }
@@ -771,7 +792,7 @@ func requireServiceRole(w http.ResponseWriter, r *http.Request, roles ...string)
 			return true
 		}
 	}
-	writeServiceJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
+	writeServiceJSON(w, http.StatusForbidden, addServiceRequestID(map[string]any{"error": "forbidden", "code": serviceCodeForbidden}, r))
 	return false
 }
 

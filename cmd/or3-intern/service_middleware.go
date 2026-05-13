@@ -41,7 +41,7 @@ func serviceBoundaryMiddleware(server *serviceServer, next http.Handler) http.Ha
 			writeServiceJSON(w, http.StatusTooManyRequests, serviceErrorPayload(r, "rate limit exceeded"))
 			return
 		}
-		captured := &serviceStatusRecorder{ResponseWriter: w, statusCode: http.StatusOK}
+		captured := &serviceStatusRecorder{ResponseWriter: w, statusCode: http.StatusOK, requestID: requestID}
 		next.ServeHTTP(captured, r)
 		log.Printf("service %s %s -> %d", r.Method, r.URL.Path, captured.statusCode)
 		server.recordServiceAudit(r, captured.statusCode)
@@ -51,6 +51,14 @@ func serviceBoundaryMiddleware(server *serviceServer, next http.Handler) http.Ha
 type serviceStatusRecorder struct {
 	http.ResponseWriter
 	statusCode int
+	requestID  string
+}
+
+func (r *serviceStatusRecorder) ServiceRequestID() string {
+	if r == nil {
+		return ""
+	}
+	return strings.TrimSpace(r.requestID)
 }
 
 func (r *serviceStatusRecorder) WriteHeader(statusCode int) {
@@ -179,6 +187,20 @@ func writeServiceError(w http.ResponseWriter, r *http.Request, statusCode int, p
 	writeServiceJSON(w, statusCode, payload)
 }
 
+const (
+	serviceCodeValidationFailed      = "validation_failed"
+	serviceCodeMethodNotAllowed      = "method_not_allowed"
+	serviceCodeNotFound              = "not_found"
+	serviceCodeForbidden             = "forbidden"
+	serviceCodeUnauthorized          = "unauthorized"
+	serviceCodeRateLimited           = "rate_limited"
+	serviceCodeCapabilityUnavailable = "capability_unavailable"
+	serviceCodeRequestTooLarge       = "request_too_large"
+	serviceCodeConflict              = "conflict"
+	serviceCodeTimeout               = "timeout"
+	serviceCodeRequestFailed         = "request_failed"
+)
+
 func servicePublicPairingExchangeError(err error) (string, bool) {
 	if err == nil {
 		return "", false
@@ -283,8 +305,96 @@ func serviceErrorPayload(r *http.Request, public string) map[string]any {
 	if payload["error"] == "" {
 		payload["error"] = "request failed"
 	}
+	payload["code"] = serviceErrorCodeForMessage(fmt.Sprint(payload["error"]), http.StatusInternalServerError)
 	if guidance := serviceRecoveryGuidance(fmt.Sprint(payload["error"])); guidance != "" {
 		payload["recovery"] = guidance
+	}
+	if r != nil {
+		if requestID := serviceRequestIDFromContext(r.Context()); requestID != "" {
+			payload["request_id"] = requestID
+		}
+	}
+	return payload
+}
+
+func serviceErrorCodeForMessage(message string, statusCode int) string {
+	text := strings.ToLower(strings.TrimSpace(message))
+	switch {
+	case strings.Contains(text, "method not allowed"):
+		return serviceCodeMethodNotAllowed
+	case strings.Contains(text, "not found") || strings.Contains(text, "route not found"):
+		return serviceCodeNotFound
+	case strings.Contains(text, "unauthorized"):
+		return serviceCodeUnauthorized
+	case strings.Contains(text, "forbidden"):
+		return serviceCodeForbidden
+	case strings.Contains(text, "rate limit") || strings.Contains(text, "too many"):
+		return serviceCodeRateLimited
+	case strings.Contains(text, "too large"):
+		return serviceCodeRequestTooLarge
+	case strings.Contains(text, "required") || strings.Contains(text, "invalid") || strings.Contains(text, "unsupported") || strings.Contains(text, "must "):
+		return serviceCodeValidationFailed
+	case strings.Contains(text, "unavailable") || strings.Contains(text, "disabled"):
+		return serviceCodeCapabilityUnavailable
+	case strings.Contains(text, "timed out") || strings.Contains(text, "timeout"):
+		return serviceCodeTimeout
+	case strings.Contains(text, "conflict") || strings.Contains(text, "already"):
+		return serviceCodeConflict
+	}
+	switch statusCode {
+	case http.StatusBadRequest:
+		return serviceCodeValidationFailed
+	case http.StatusUnauthorized:
+		return serviceCodeUnauthorized
+	case http.StatusForbidden:
+		return serviceCodeForbidden
+	case http.StatusNotFound:
+		return serviceCodeNotFound
+	case http.StatusMethodNotAllowed:
+		return serviceCodeMethodNotAllowed
+	case http.StatusConflict:
+		return serviceCodeConflict
+	case http.StatusRequestEntityTooLarge:
+		return serviceCodeRequestTooLarge
+	case http.StatusTooManyRequests:
+		return serviceCodeRateLimited
+	case http.StatusGatewayTimeout:
+		return serviceCodeTimeout
+	case http.StatusServiceUnavailable:
+		return serviceCodeCapabilityUnavailable
+	default:
+		return serviceCodeRequestFailed
+	}
+}
+
+type serviceRequestIDProvider interface {
+	ServiceRequestID() string
+}
+
+func normalizeServiceErrorPayload(statusCode int, payload map[string]any, requestID string) map[string]any {
+	if payload == nil {
+		return payload
+	}
+	errorValue, hasError := payload["error"]
+	if !hasError {
+		return payload
+	}
+	code, hasCode := payload["code"]
+	if !hasCode || strings.TrimSpace(fmt.Sprint(code)) == "" {
+		payload["code"] = serviceErrorCodeForMessage(fmt.Sprint(errorValue), statusCode)
+	}
+	if _, hasRequestID := payload["request_id"]; !hasRequestID && strings.TrimSpace(requestID) != "" {
+		payload["request_id"] = strings.TrimSpace(requestID)
+	}
+	return payload
+}
+
+func addServiceRequestID(payload map[string]any, r *http.Request) map[string]any {
+	if payload == nil || r == nil {
+		return payload
+	}
+	if _, ok := payload["request_id"]; ok {
+		return payload
 	}
 	if requestID := serviceRequestIDFromContext(r.Context()); requestID != "" {
 		payload["request_id"] = requestID
@@ -332,7 +442,9 @@ func writeServiceAuthError(w http.ResponseWriter, r *http.Request, err error) {
 		status = http.StatusConflict
 		message = err.Error()
 	}
-	writeServiceJSON(w, status, serviceErrorPayload(r, message))
+	payload := serviceErrorPayload(r, message)
+	payload["code"] = serviceErrorCodeForMessage(message, status)
+	writeServiceJSON(w, status, payload)
 }
 
 func serviceAuthSessionToken(r *http.Request) string {
@@ -476,6 +588,26 @@ func writeSSEEvent(w http.ResponseWriter, eventType string, payload map[string]a
 }
 
 func writeServiceJSON(w http.ResponseWriter, statusCode int, payload map[string]any) {
+	if statusCode >= 400 {
+		requestID := ""
+		if provider, ok := w.(serviceRequestIDProvider); ok {
+			requestID = provider.ServiceRequestID()
+		}
+		if requestID == "" && payload != nil {
+			if existing, ok := payload["request_id"]; ok {
+				requestID = strings.TrimSpace(fmt.Sprint(existing))
+			}
+		}
+		if requestID == "" && payload != nil {
+			if _, hasError := payload["error"]; hasError {
+				requestID = newServiceRequestID()
+				w.Header().Set("X-Request-Id", requestID)
+			}
+		} else if requestID != "" && strings.TrimSpace(w.Header().Get("X-Request-Id")) == "" {
+			w.Header().Set("X-Request-Id", requestID)
+		}
+		payload = normalizeServiceErrorPayload(statusCode, payload, requestID)
+	}
 	writeServiceValue(w, statusCode, payload)
 }
 

@@ -562,9 +562,15 @@ func TestLoad_EnabledExternalChannelRequiresAllowlistOrOpenAccess(t *testing.T) 
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	_, err := Load(path)
-	if err == nil {
-		t.Fatal("expected validation error when telegram is enabled without allowlist or openAccess")
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.Channels.Telegram.Enabled {
+		t.Fatal("expected invalid telegram integration to be quarantined")
+	}
+	if len(loaded.IntegrationWarnings) == 0 || loaded.IntegrationWarnings[0].Name != "telegram" {
+		t.Fatalf("expected telegram quarantine warning, got %#v", loaded.IntegrationWarnings)
 	}
 }
 

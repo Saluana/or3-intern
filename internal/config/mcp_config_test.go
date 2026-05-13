@@ -82,8 +82,15 @@ func TestLoad_MCPHTTPValidationRejectsUnsafeURLs(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	if _, err := Load(path); err == nil {
-		t.Fatal("expected unsafe insecure HTTP MCP URL to be rejected")
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.Tools.MCPServers["remote"].Enabled {
+		t.Fatal("expected unsafe insecure HTTP MCP URL to be quarantined")
+	}
+	if len(loaded.IntegrationWarnings) == 0 || loaded.IntegrationWarnings[0].Name != "mcp:remote" {
+		t.Fatalf("expected mcp quarantine warning, got %#v", loaded.IntegrationWarnings)
 	}
 }
 

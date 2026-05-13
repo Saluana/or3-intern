@@ -47,6 +47,7 @@ func QuarantineInvalidOptionalIntegrations(cfg *Config) []IntegrationQuarantine 
 		cfg.Channels.Email.Enabled = false
 		quarantined = append(quarantined, IntegrationQuarantine{Name: "email", Reason: "missing mail server settings"})
 	}
+	cfg.IntegrationWarnings = append([]IntegrationQuarantine{}, quarantined...)
 	return quarantined
 }
 

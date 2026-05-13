@@ -1,0 +1,17 @@
+.git
+.run
+.env
+.env.*
+!.env.example
+config
+data
+artifacts
+*.db
+*.sqlite
+*.sqlite3
+*.log
+node_modules
+dist
+coverage
+repomix-output.md
+session-*.md

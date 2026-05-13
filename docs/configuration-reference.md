@@ -2,6 +2,8 @@
 
 `or3-intern` loads its primary configuration from `config.json`, usually under `~/.or3-intern/config.json` after `or3-intern init`.
 
+Environment overrides are applied after loading `.env` from the current directory or parent directory. Existing shell variables are not overwritten by `.env`; set `OR3_LOAD_DOTENV=false` to disable `.env` loading.
+
 ## Top-level sections
 
 | Key                                                    | Purpose                                                                                              |
@@ -309,6 +311,7 @@ Prompt assembly and token-budget controls:
 Backward-compatibility note:
 
 - When an older `config.json` has no top-level `context` block at all, the runtime preserves the legacy prompt knobs as authoritative defaults: `historyMaxMessages`, `memoryRetrieveLimit`, `vectorSearchK`, `ftsSearchK`, `bootstrapMaxChars`, `bootstrapTotalMaxChars`, and `maxToolBytes`.
+- `or3-intern status --advanced` and the app bootstrap endpoint report this as legacy context mode so it is visible during debugging.
 - When a `context` block is present, those explicit context budgets are applied to prompt packing while the legacy fields continue to drive adjacent runtime behavior that still uses them directly.
 
 ### `contextManager`

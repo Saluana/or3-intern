@@ -131,19 +131,20 @@ type Config struct {
 	Auth         AuthConfig     `json:"auth"`
 	Security     SecurityConfig `json:"security"`
 
-	Provider          ProviderConfig       `json:"provider"`
-	Providers         ProviderProfiles     `json:"providers,omitempty"`
-	ModelRouting      ModelRoutingConfig   `json:"modelRouting,omitempty"`
-	FavoriteModels    FavoriteModelsConfig `json:"favoriteModels,omitempty"`
-	Tools             ToolsConfig          `json:"tools"`
-	Hardening         HardeningConfig      `json:"hardening"`
-	Cron              CronConfig           `json:"cron"`
-	Service           ServiceConfig        `json:"service"`
-	Heartbeat         HeartbeatConfig      `json:"heartbeat"`
-	Channels          ChannelsConfig       `json:"channels"`
-	Context           ContextConfig        `json:"context"`
-	ContextManager    ContextManagerConfig `json:"contextManager"`
-	ContextConfigured bool                 `json:"-"`
+	Provider            ProviderConfig          `json:"provider"`
+	Providers           ProviderProfiles        `json:"providers,omitempty"`
+	ModelRouting        ModelRoutingConfig      `json:"modelRouting,omitempty"`
+	FavoriteModels      FavoriteModelsConfig    `json:"favoriteModels,omitempty"`
+	Tools               ToolsConfig             `json:"tools"`
+	Hardening           HardeningConfig         `json:"hardening"`
+	Cron                CronConfig              `json:"cron"`
+	Service             ServiceConfig           `json:"service"`
+	Heartbeat           HeartbeatConfig         `json:"heartbeat"`
+	Channels            ChannelsConfig          `json:"channels"`
+	Context             ContextConfig           `json:"context"`
+	ContextManager      ContextManagerConfig    `json:"contextManager"`
+	ContextConfigured   bool                    `json:"-"`
+	IntegrationWarnings []IntegrationQuarantine `json:"-"`
 }
 
 type ContextConfig struct {

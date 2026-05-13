@@ -12,6 +12,7 @@ import (
 )
 
 func Load(path string) (Config, error) {
+	LoadDotEnv()
 	path = resolveConfigPath(path)
 	cfg, err := readConfigFile(path)
 	if err != nil {
@@ -507,6 +508,7 @@ func normalizeAndValidateConfig(cfg Config) (Config, error) {
 		profile.WritablePaths = compactStrings(profile.WritablePaths)
 		cfg.Security.Profiles.Profiles[name] = profile
 	}
+	QuarantineInvalidOptionalIntegrations(&cfg)
 	if err := validateMCPServers(cfg.Tools.MCPServers); err != nil {
 		return cfg, err
 	}

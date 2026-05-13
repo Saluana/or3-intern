@@ -20,6 +20,7 @@ import (
 	"or3-intern/internal/artifacts"
 	"or3-intern/internal/bus"
 	rootchannels "or3-intern/internal/channels"
+	"or3-intern/internal/channels/shared"
 	"or3-intern/internal/config"
 )
 
@@ -185,29 +186,7 @@ func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
 }
 
 func (c *Channel) allowedFrom(ctx context.Context, from string) bool {
-	switch strings.ToLower(strings.TrimSpace(string(c.Config.InboundPolicy))) {
-	case string(config.InboundPolicyDeny):
-		return false
-	case string(config.InboundPolicyPairing):
-		allowed, err := c.ApprovalBroker.IsPairedChannelIdentity(ctx, "whatsapp", strings.TrimSpace(from))
-		return err == nil && allowed
-	case string(config.InboundPolicyAllowlist):
-		for _, allowed := range c.Config.AllowedFrom {
-			if strings.TrimSpace(allowed) == strings.TrimSpace(from) {
-				return true
-			}
-		}
-		return false
-	}
-	if len(c.Config.AllowedFrom) == 0 {
-		return c.Config.OpenAccess
-	}
-	for _, allowed := range c.Config.AllowedFrom {
-		if strings.TrimSpace(allowed) == strings.TrimSpace(from) {
-			return true
-		}
-	}
-	return false
+	return shared.AllowInboundIdentity(ctx, shared.InboundAccessInput{Policy: c.Config.InboundPolicy, OpenAccess: c.Config.OpenAccess, Allowlist: c.Config.AllowedFrom, Channel: "whatsapp", Identity: from, Broker: c.ApprovalBroker})
 }
 
 type inboundMessage struct {

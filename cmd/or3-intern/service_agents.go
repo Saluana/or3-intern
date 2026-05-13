@@ -32,6 +32,7 @@ func (s *serviceServer) handleTurns(w http.ResponseWriter, r *http.Request) {
 		writeServiceRequestDecodeError(w, err)
 		return
 	}
+	writeServiceRequestWarnings(w, req.Warnings)
 	if err := validateServiceToolCapabilities(s.runtime.Tools, req.AllowedTools, s.config.Service.MaxCapability); err != nil {
 		writeServiceError(w, r, http.StatusBadRequest, "requested tools exceed service capability ceiling", err)
 		return
@@ -227,6 +228,7 @@ func (s *serviceServer) handleSubagents(w http.ResponseWriter, r *http.Request) 
 		writeServiceRequestDecodeError(w, err)
 		return
 	}
+	writeServiceRequestWarnings(w, req.Warnings)
 	if err := validateServiceToolCapabilities(backgroundToolsRegistry(s.subagentManager), req.AllowedTools, s.config.Service.MaxCapability); err != nil {
 		writeServiceError(w, r, http.StatusBadRequest, "requested tools exceed service capability ceiling", err)
 		return
@@ -708,6 +710,7 @@ func (s *serviceServer) handleAgentRunsStart(w http.ResponseWriter, r *http.Requ
 		writeServiceRequestDecodeError(w, err)
 		return
 	}
+	writeServiceRequestWarnings(w, req.Warnings)
 	agentReq := agentcli.AgentRunRequest{
 		ParentSessionKey: req.ParentSessionKey,
 		RunnerID:         req.RunnerID,

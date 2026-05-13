@@ -21,6 +21,7 @@ import (
 	"or3-intern/internal/artifacts"
 	"or3-intern/internal/bus"
 	rootchannels "or3-intern/internal/channels"
+	"or3-intern/internal/channels/shared"
 	"or3-intern/internal/config"
 )
 
@@ -220,7 +221,7 @@ func (c *Channel) client() *http.Client {
 	if c.HTTP != nil {
 		return c.HTTP
 	}
-	return &http.Client{Timeout: 20 * time.Second}
+	return shared.DefaultHTTPClient()
 }
 
 func (c *Channel) getJSON(ctx context.Context, endpoint string, out any) error {
@@ -429,29 +430,7 @@ func (c *Channel) attachFilePart(writer *multipart.Writer, index int, mediaPath 
 }
 
 func (c *Channel) allowedUser(ctx context.Context, user string) bool {
-	switch strings.ToLower(strings.TrimSpace(string(c.Config.InboundPolicy))) {
-	case string(config.InboundPolicyDeny):
-		return false
-	case string(config.InboundPolicyPairing):
-		allowed, err := c.ApprovalBroker.IsPairedChannelIdentity(ctx, "discord", user)
-		return err == nil && allowed
-	case string(config.InboundPolicyAllowlist):
-		for _, allowed := range c.Config.AllowedUserIDs {
-			if strings.TrimSpace(allowed) == user {
-				return true
-			}
-		}
-		return false
-	}
-	if len(c.Config.AllowedUserIDs) == 0 {
-		return c.Config.OpenAccess
-	}
-	for _, allowed := range c.Config.AllowedUserIDs {
-		if strings.TrimSpace(allowed) == user {
-			return true
-		}
-	}
-	return false
+	return shared.AllowInboundIdentity(ctx, shared.InboundAccessInput{Policy: c.Config.InboundPolicy, OpenAccess: c.Config.OpenAccess, Allowlist: c.Config.AllowedUserIDs, Channel: "discord", Identity: user, Broker: c.ApprovalBroker})
 }
 
 func mentioned(mentions []mention, botID string) bool {

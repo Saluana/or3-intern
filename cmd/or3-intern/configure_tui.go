@@ -337,43 +337,9 @@ func (m configureTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.screen = configureScreenReview
 			return m, nil
 		}
-		switch m.screen {
-		case configureScreenSections:
-			return m.updateSectionPicker(msg)
-		case configureScreenForm:
-			return m.updateSectionForm(msg)
-		case configureScreenChannels:
-			return m.updateChannelPicker(msg)
-		case configureScreenMCPServerList:
-			return m.updateMCPServerList(msg)
-		case configureScreenMCPNameInput:
-			return m.updateMCPNameInput(msg)
-		case configureScreenMCPForm:
-			return m.updateSectionForm(msg)
-		case configureScreenMCPDeleteConfirm:
-			return m.updateMCPDeleteConfirm(msg)
-		case configureScreenReview:
-			return m.updateReview(msg)
-		case configureScreenSuccess:
-			if key.Matches(msg, m.keys.Select, m.keys.Quit, m.keys.Back) {
-				return m, tea.Quit
-			}
-		case configureScreenQuitConfirm:
-			return m.updateQuitConfirm(msg)
-		}
 	}
 
-	var cmd tea.Cmd
-	if m.screen == configureScreenSections {
-		m.sectionList, cmd = m.sectionList.Update(msg)
-		return m, cmd
-	}
-	if m.screen == configureScreenChannels {
-		m.channelList, cmd = m.channelList.Update(msg)
-		return m, cmd
-	}
-	if m.screen == configureScreenMCPServerList {
-		m.mcpList, cmd = m.mcpList.Update(msg)
+	if handled, cmd := m.screenAdapter().Update(msg, &m); handled {
 		return m, cmd
 	}
 	return m, nil
@@ -837,7 +803,6 @@ func (m configureTUIModel) View() string {
 	if m.quitting {
 		return ""
 	}
-	layout := deriveConfigureLayout(m.width, m.height)
 	header := m.styles.title.Render(m.options.Title)
 	if len(m.options.Intro) == 0 {
 		if m.existed {
@@ -855,38 +820,7 @@ func (m configureTUIModel) View() string {
 		header += "\n" + m.styles.error.Render(m.errorMessage)
 	}
 
-	var body string
-	switch m.screen {
-	case configureScreenSections:
-		body = renderConfigureSplitPanels(layout,
-			m.styles.focused.Width(layout.navWidth).Render(m.sectionList.View()),
-			m.styles.panel.Width(layout.detailWidth).Render(renderSummaryPanelMode(m.styles, m.cfg, "Pick a section on the left. Press s to review and save.", layout.compact)),
-		)
-	case configureScreenChannels:
-		body = renderConfigureSplitPanels(layout,
-			m.styles.focused.Width(layout.navWidth).Render(m.channelList.View()),
-			m.styles.panel.Width(layout.detailWidth).Render(renderSummaryPanelMode(m.styles, m.cfg, "Select a channel to edit its toggles, access policy, and defaults.", layout.compact)),
-		)
-	case configureScreenMCPServerList:
-		body = renderConfigureSplitPanels(layout,
-			m.styles.focused.Width(layout.navWidth).Render(m.mcpList.View()),
-			m.styles.panel.Width(layout.detailWidth).Render(renderMCPPanel(m)),
-		)
-	case configureScreenMCPNameInput:
-		body = m.styles.focused.Width(layout.fullWidth).Render(renderMCPNameInput(m))
-	case configureScreenForm:
-		body = renderFormScreen(m)
-	case configureScreenMCPForm:
-		body = renderFormScreen(m)
-	case configureScreenMCPDeleteConfirm:
-		body = m.styles.focused.Width(layout.fullWidth).Render(fmt.Sprintf("Remove MCP server %q?\n\nPress y to delete it, n or esc to keep it.", m.currentMCPServerName))
-	case configureScreenReview:
-		body = m.styles.focused.Width(layout.fullWidth).Render(renderSummaryPanelMode(m.styles, m.cfg, "Review the snapshot below. Press Enter or s to save, esc to go back.", layout.compact))
-	case configureScreenSuccess:
-		body = m.styles.focused.Width(layout.fullWidth).Render(m.styles.success.Render(m.successMessage) + "\n\n" + renderSummaryPanelMode(m.styles, m.cfg, renderNextStepsText(m.cfg), layout.compact))
-	case configureScreenQuitConfirm:
-		body = m.styles.focused.Width(layout.fullWidth).Render("You have unsaved changes. Quit anyway?\n\nPress y to discard changes, n or esc to continue editing.")
-	}
+	body := m.screenAdapter().View(m)
 
 	footer := m.styles.help.Render(m.help.View(m.keys))
 	return m.styles.app.Render(header + "\n\n" + body + "\n\n" + footer)

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -40,6 +41,12 @@ type serviceSubagentRequestFixture struct {
 	Channel          string         `json:"channel"`
 	ReplyTo          string         `json:"reply_to"`
 	ApprovalToken    string         `json:"approval_token"`
+}
+
+type serviceAppUsageRouteFixture struct {
+	Area   string `json:"area"`
+	Method string `json:"method"`
+	Path   string `json:"path"`
 }
 
 func TestOr3NetCompatibilityFixtures_RequestDecoding(t *testing.T) {
@@ -319,6 +326,141 @@ func TestOr3NetCompatibilityFixtures_Responses(t *testing.T) {
 			t.Fatalf("audit status response mismatch\nexpected: %#v\ngot: %#v", expected, actual)
 		}
 	})
+}
+
+func TestServiceRouteContracts_CurrentAppUsageRoutesStayRegistered(t *testing.T) {
+	var fixtures []serviceAppUsageRouteFixture
+	loadFixtureJSON(t, "service_contract/app-usage-routes.json", &fixtures)
+	if len(fixtures) == 0 {
+		t.Fatal("expected app usage route fixtures")
+	}
+	routes := serviceRouteSpecs(&serviceServer{})
+	for _, fixture := range fixtures {
+		t.Run(fixture.Area+" "+fixture.Method+" "+fixture.Path, func(t *testing.T) {
+			if strings.TrimSpace(fixture.Method) == "" || strings.TrimSpace(fixture.Path) == "" {
+				t.Fatalf("fixture must include method and path: %#v", fixture)
+			}
+			if !serviceRouteFixtureIsRegistered(routes, fixture.Path) {
+				t.Fatalf("expected app route %s %s to be registered", fixture.Method, fixture.Path)
+			}
+		})
+	}
+}
+
+func TestServiceRouteContracts_UnknownInternalRouteReturnsStructuredJSON(t *testing.T) {
+	secret := strings.Repeat("r", 32)
+	server := &serviceServer{config: config.Default(), runtime: &agent.Runtime{Tools: tools.NewRegistry()}, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	server.config.Service.SharedSecretRole = "operator"
+	httpServer := newServiceTestHTTPServer(t, secret, server)
+	defer httpServer.Close()
+
+	req := mustServiceRequest(t, httpServer, secret, http.MethodGet, "/internal/v1/not-a-real-route", "")
+	req.Header.Set("X-Request-Id", "req-unknown-route")
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	payload := mustDecodeJSONBody(t, resp.Body)
+	for _, key := range []string{"error", "code", "request_id"} {
+		if strings.TrimSpace(stringValue(payload[key])) == "" {
+			t.Fatalf("expected %s in unknown route error payload, got %#v", key, payload)
+		}
+	}
+	if payload["request_id"] != "req-unknown-route" {
+		t.Fatalf("expected request id propagation, got %#v", payload)
+	}
+}
+
+func TestServiceRouteContracts_Non2xxJSONResponsesIncludeErrorCodeAndRequestID(t *testing.T) {
+	secret := strings.Repeat("c", 32)
+	server := &serviceServer{
+		config:  config.Default(),
+		runtime: &agent.Runtime{Tools: tools.NewRegistry()},
+		jobs:    agent.NewJobRegistry(time.Minute, 32),
+	}
+	server.config.Service.SharedSecretRole = "operator"
+	httpServer := newServiceTestHTTPServer(t, secret, server)
+	defer httpServer.Close()
+
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		body       string
+		wantStatus int
+	}{
+		{name: "turns validation", method: http.MethodPost, path: "/internal/v1/turns", body: `{}`, wantStatus: http.StatusBadRequest},
+		{name: "subagents unavailable", method: http.MethodPost, path: "/internal/v1/subagents", body: `{}`, wantStatus: http.StatusServiceUnavailable},
+		{name: "jobs route missing", method: http.MethodGet, path: "/internal/v1/jobs", wantStatus: http.StatusNotFound},
+		{name: "cron method", method: http.MethodPost, path: "/internal/v1/cron", wantStatus: http.StatusMethodNotAllowed},
+		{name: "approvals unavailable", method: http.MethodGet, path: "/internal/v1/approvals", wantStatus: http.StatusServiceUnavailable},
+		{name: "configure validation", method: http.MethodGet, path: "/internal/v1/configure/fields", wantStatus: http.StatusBadRequest},
+		{name: "files route missing", method: http.MethodGet, path: "/internal/v1/files/unknown", wantStatus: http.StatusNotFound},
+		{name: "terminal unavailable", method: http.MethodPost, path: "/internal/v1/terminal/sessions", body: `{"root_id":"workspace","path":"."}`, wantStatus: http.StatusServiceUnavailable},
+		{name: "bootstrap method", method: http.MethodPost, path: "/internal/v1/app/bootstrap", wantStatus: http.StatusMethodNotAllowed},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			requestID := "req-contract-" + strings.ReplaceAll(strings.ReplaceAll(tt.name, " ", "-"), "_", "-")
+			req := mustServiceRequest(t, httpServer, secret, tt.method, tt.path, tt.body)
+			req.Header.Set("X-Request-Id", requestID)
+
+			resp, err := httpServer.Client().Do(req)
+			if err != nil {
+				t.Fatalf("Do: %v", err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != tt.wantStatus {
+				t.Fatalf("expected %d, got %d (%s)", tt.wantStatus, resp.StatusCode, mustReadBody(t, resp.Body))
+			}
+			if resp.StatusCode < 400 {
+				t.Fatalf("expected non-2xx response, got %d", resp.StatusCode)
+			}
+
+			var payload map[string]any
+			if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+				t.Fatalf("Decode: %v", err)
+			}
+			if strings.TrimSpace(stringValue(payload["error"])) == "" {
+				t.Fatalf("expected error field, got %#v", payload)
+			}
+			if strings.TrimSpace(stringValue(payload["code"])) == "" {
+				t.Fatalf("expected code field, got %#v", payload)
+			}
+			if got := strings.TrimSpace(stringValue(payload["request_id"])); got != requestID {
+				t.Fatalf("expected request_id %q, got %#v", requestID, payload)
+			}
+			if got := strings.TrimSpace(resp.Header.Get("X-Request-Id")); got != requestID {
+				t.Fatalf("expected X-Request-Id %q, got %q", requestID, got)
+			}
+		})
+	}
+}
+
+func stringValue(value any) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(value))
+}
+
+func serviceRouteFixtureIsRegistered(routes []serviceRouteSpec, fixturePath string) bool {
+	path := strings.TrimSpace(fixturePath)
+	for _, route := range routes {
+		if path == route.Path {
+			return true
+		}
+		if route.Subtree && strings.HasPrefix(path, strings.TrimRight(route.Path, "/")+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func loadFixtureString(t *testing.T, rel string) string {

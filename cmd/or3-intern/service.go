@@ -247,47 +247,11 @@ func cleanupUnixSocketPath(socketPath string) {
 
 func newServiceMux(server *serviceServer) *http.ServeMux {
 	mux := http.NewServeMux()
-	handleServiceRoute(mux, "/internal/v1/turns", server.handleTurns, false)
-	handleServiceRoute(mux, "/internal/v1/subagents", server.handleSubagents, true)
-	handleServiceRoute(mux, "/internal/v1/jobs", server.handleJobs, true)
-	handleServiceRoute(mux, "/internal/v1/artifacts", server.handleArtifacts, true)
-	handleServiceRoute(mux, "/internal/v1/pairing/requests", server.handlePairing, true)
-	handleServiceRoute(mux, "/internal/v1/pairing/exchange", server.handlePairing, false)
-	handleServiceRoute(mux, "/internal/v1/devices", server.handleDevices, true)
-	handleServiceRoute(mux, "/internal/v1/approvals", server.handleApprovals, true)
-	handleServiceRoute(mux, "/internal/v1/auth/capabilities", server.handleAuth, false)
-	handleServiceRoute(mux, "/internal/v1/auth/session", server.handleAuth, true)
-	handleServiceRoute(mux, "/internal/v1/auth/passkeys", server.handleAuth, true)
-	handleServiceRoute(mux, "/internal/v1/auth/passkeys/registration", server.handleAuth, true)
-	handleServiceRoute(mux, "/internal/v1/auth/passkeys/login", server.handleAuth, true)
-	handleServiceRoute(mux, "/internal/v1/auth/step-up", server.handleAuth, true)
-	handleServiceRoute(mux, "/internal/v1/health", server.handleHealth, false)
-	handleServiceRoute(mux, "/internal/v1/readiness", server.handleReadiness, false)
-	handleServiceRoute(mux, "/internal/v1/capabilities", server.handleCapabilities, false)
-	handleServiceRoute(mux, "/internal/v1/app/bootstrap", server.handleApp, false)
-	handleServiceRoute(mux, "/internal/v1/actions", server.handleActions, true)
-	handleServiceRoute(mux, "/internal/v1/cron", server.handleCron, true)
-	handleServiceRoute(mux, "/internal/v1/embeddings", server.handleEmbeddings, true)
-	handleServiceRoute(mux, "/internal/v1/audit", server.handleAudit, true)
-	handleServiceRoute(mux, "/internal/v1/scope", server.handleScope, true)
-	handleServiceRoute(mux, "/internal/v1/configure", server.handleConfigure, true)
-	handleServiceRoute(mux, "/internal/v1/mcp/servers", server.handleMCPServers, true)
-	handleServiceRoute(mux, "/internal/v1/skills", server.handleSkills, true)
-	handleServiceRoute(mux, "/internal/v1/files", server.handleFiles, true)
-	handleServiceRoute(mux, "/internal/v1/terminal/sessions", server.handleTerminal, true)
-	handleServiceRoute(mux, "/internal/v1/agent-runners", server.handleAgentRunners, false)
-	handleServiceRoute(mux, "/internal/v1/agent-runs", server.handleAgentRuns, true)
-	handleServiceRoute(mux, "/internal/v1/chat-runners", server.handleChatRunners, false)
-	handleServiceRoute(mux, "/internal/v1/chat-sessions", server.handleChatSessions, true)
-	handleServiceRoute(mux, "/internal/v1/runner-chat/sessions", server.handleRunnerChatSessions, true)
-	return mux
-}
-
-func handleServiceRoute(mux *http.ServeMux, path string, handler func(http.ResponseWriter, *http.Request), subtree bool) {
-	mux.Handle(path, http.HandlerFunc(handler))
-	if subtree {
-		mux.Handle(strings.TrimRight(path, "/")+"/", http.HandlerFunc(handler))
+	for _, route := range serviceRouteSpecs(server) {
+		registerServiceRoute(mux, route)
 	}
+	mux.Handle("/internal/v1/", http.HandlerFunc(handleUnknownServiceRoute))
+	return mux
 }
 
 func (s *serviceServer) control() *controlplane.Service {

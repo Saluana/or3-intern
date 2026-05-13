@@ -54,8 +54,8 @@ func TestRunDevicesCommand_List_Empty(t *testing.T) {
 	if err := runDevicesCommand(context.Background(), broker, []string{"list"}, &out, &out); err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if strings.TrimSpace(out.String()) != "" {
-		t.Errorf("expected empty device list, got %q", out.String())
+	if !strings.Contains(out.String(), "No paired devices yet") || !strings.Contains(out.String(), "or3-intern pairing approve-code <code>") {
+		t.Errorf("expected pairing-focused empty state, got %q", out.String())
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"or3-intern/internal/approval"
 	"or3-intern/internal/config"
 	"or3-intern/internal/uxcopy"
+	"or3-intern/internal/uxformat"
 	"or3-intern/internal/uxstate"
 )
 
@@ -32,6 +33,10 @@ func runDevicesCommand(ctx context.Context, broker *approval.Broker, args []stri
 		if err != nil {
 			return err
 		}
+		if len(items) == 0 {
+			uxformat.WriteEmptyState(stdout, "No paired devices yet.", "Use the pairing flow to connect a phone, tablet, browser, or app.", []string{"or3-intern connect-device", "or3-intern pairing approve-code <code>"})
+			return nil
+		}
 		views := uxstate.BuildDeviceViews(items)
 		for _, item := range items {
 			fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", item.DeviceID, item.Status, item.Role, item.DisplayName)
@@ -51,6 +56,10 @@ func runDevicesCommand(ctx context.Context, broker *approval.Broker, args []stri
 		items, err := appSvc.ListPairingRequests(ctx, status, 100)
 		if err != nil {
 			return err
+		}
+		if len(items) == 0 {
+			uxformat.WriteEmptyState(stdout, "No pairing requests are waiting.", "When another device shows a code, approve it from the pairing command.", []string{"or3-intern pairing approve-code <code>"})
+			return nil
 		}
 		for _, item := range items {
 			fmt.Fprintf(stdout, "%d\t%s\t%s\t%s\t%s\n", item.ID, item.Status, item.Role, item.DeviceID, item.DisplayName)

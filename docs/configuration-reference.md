@@ -4,6 +4,14 @@
 
 Environment overrides are applied after loading `.env` from the current directory or parent directory. Existing shell variables are not overwritten by `.env`; set `OR3_LOAD_DOTENV=false` to disable `.env` loading.
 
+## Compatibility notes
+
+- `settings` is the canonical user-facing configuration entrypoint. `setup`, `init`, `configure`, and `doctor --fix` remain supported workflow wrappers for first-run setup, advanced section edits, and safe repairs.
+- Service request payloads under `/internal/v1` keep snake_case field names canonical. camelCase aliases remain accepted for compatibility, but when both are supplied with different values, the snake_case field wins and the service returns `X-Or3-Request-Warning`.
+- `.env` remains additive: checked-in config should not rely on environment-only keys unless deploy scripts also set them. Shell variables win over `.env` values, so local overrides can safely shadow compose defaults.
+- Quarantined integrations are surfaced as warnings instead of preventing the service from starting. Fix the integration config, then restart or rerun readiness checks to clear the warning.
+- Legacy context mode means the loaded config did not include the modern `context` section. The runtime still works, but saving through `settings` or `configure` writes the current context defaults explicitly.
+
 ## Top-level sections
 
 | Key                                                    | Purpose                                                                                              |

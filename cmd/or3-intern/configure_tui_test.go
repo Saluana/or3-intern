@@ -129,6 +129,91 @@ func TestConfigureTUIFieldDescriptionsAreHelpful(t *testing.T) {
 	}
 }
 
+func TestConfigureTUIScreenAdaptersImplementInterface(t *testing.T) {
+	screens := []configureScreenAdapter{
+		configureProviderScreen{},
+		configureWorkspaceScreen{},
+		configureChannelsScreen{},
+		configureMCPScreen{},
+		configureContextScreen{},
+		configureSafetyScreen{},
+		configureServiceScreen{},
+		configureDocIndexScreen{},
+		configureReviewScreen{},
+		configureSuccessScreen{},
+	}
+	model := newConfigureTUIModel("/tmp/config.json", "/workspace/project", config.Default(), false, "", configureTUIOptions{})
+	for _, screen := range screens {
+		_ = screen.Init(model)
+		if view := screen.View(model); strings.TrimSpace(view) == "" {
+			t.Fatalf("expected screen view to render")
+		}
+		var saved config.Config
+		if err := screen.Save(&model, &saved); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+	}
+}
+
+func TestConfigureTUIScreenAdaptersHandleScreenUpdates(t *testing.T) {
+	t.Run("section picker", func(t *testing.T) {
+		model := newConfigureTUIModel("/tmp/config.json", "/workspace/project", config.Default(), false, "", configureTUIOptions{})
+		model.screen = configureScreenSections
+		handled, _ := model.screenAdapter().Update(tea.KeyMsg{Type: tea.KeyEnter}, &model)
+		if !handled || model.screen != configureScreenForm || model.currentSection == "" {
+			t.Fatalf("expected section adapter to enter a form, handled=%v screen=%v section=%q", handled, model.screen, model.currentSection)
+		}
+	})
+
+	t.Run("mcp add flow", func(t *testing.T) {
+		model := newConfigureTUIModel("/tmp/config.json", "/workspace/project", config.Default(), false, "", configureTUIOptions{Restricted: []string{"mcp"}})
+		model.screen = configureScreenMCPServerList
+		handled, _ := model.screenAdapter().Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}}, &model)
+		if !handled || model.screen != configureScreenMCPNameInput {
+			t.Fatalf("expected mcp adapter to start name input, handled=%v screen=%v", handled, model.screen)
+		}
+	})
+
+	t.Run("review back", func(t *testing.T) {
+		model := newConfigureTUIModel("/tmp/config.json", "/workspace/project", config.Default(), false, "", configureTUIOptions{Restricted: []string{"provider"}})
+		model.currentSection = "provider"
+		model.screen = configureScreenReview
+		handled, _ := model.screenAdapter().Update(tea.KeyMsg{Type: tea.KeyEsc}, &model)
+		if !handled || model.screen != configureScreenForm {
+			t.Fatalf("expected review adapter to return to form, handled=%v screen=%v", handled, model.screen)
+		}
+	})
+}
+
+func TestConfigureTUISectionSmokeRendersWithoutPanic(t *testing.T) {
+	cfg := config.Default()
+	sections := []string{"provider", "storage", "runtime", "context", "workspace", "tools", "docindex", "skills", "security", "hardening", "session", "automation", "service"}
+	for _, section := range sections {
+		t.Run(section, func(t *testing.T) {
+			model := newConfigureTUIModel("/tmp/config.json", "/workspace/project", cfg, false, "", configureTUIOptions{Restricted: []string{section}})
+			model.height = 28
+			model.currentSection = section
+			model.screen = configureScreenForm
+			view := model.View()
+			if strings.TrimSpace(view) == "" {
+				t.Fatalf("expected non-empty view for %s", section)
+			}
+		})
+	}
+	for _, channel := range []string{"telegram", "slack", "discord", "whatsapp", "email"} {
+		t.Run("channel_"+channel, func(t *testing.T) {
+			model := newConfigureTUIModel("/tmp/config.json", "/workspace/project", cfg, false, "", configureTUIOptions{Restricted: []string{"channels"}})
+			model.height = 28
+			model.currentSection = "channels"
+			model.currentChannel = channel
+			model.screen = configureScreenForm
+			if strings.TrimSpace(model.View()) == "" {
+				t.Fatalf("expected non-empty channel view for %s", channel)
+			}
+		})
+	}
+}
+
 func TestConfigureTUIMCPFieldsApply(t *testing.T) {
 	cfg := config.Default()
 	cfg.Tools.MCPServers = map[string]config.MCPServerConfig{"files": {Enabled: true, Transport: "stdio"}}

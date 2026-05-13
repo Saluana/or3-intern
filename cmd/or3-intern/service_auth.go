@@ -102,33 +102,21 @@ func serviceAuthMiddlewareWithBroker(cfg config.Config, broker *approval.Broker,
 func serviceAuthMiddlewareWithBrokerAndLimiter(cfg config.Config, broker *approval.Broker, authSvc *auth.Service, server *serviceServer, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if allowsUnauthenticatedPairingRoute(cfg, r) {
-			ctx := approval.ContextWithAuditAuthKind(r.Context(), "unauthenticated")
-			ctx = approval.ContextWithAuditActor(ctx, "anonymous")
-			next.ServeHTTP(w, r.WithContext(ctx))
+			next.ServeHTTP(w, serviceUnauthenticatedPairingRequest(r))
 			return
 		}
-		requirement := serviceRouteRequirementForRequest(cfg, r)
+		requirement := serviceRequestRouteRequirement(cfg, r)
 		if requirement.Sensitivity == serviceRoutePublic {
-			identity := serviceAuthIdentity{Kind: "public", Actor: "anonymous"}
-			ctx := context.WithValue(r.Context(), serviceAuthContextKey{}, identity)
-			ctx = context.WithValue(ctx, serviceAuthKindContextKey{}, identity.Kind)
-			ctx = approval.ContextWithAuditAuthKind(ctx, identity.Kind)
-			ctx = approval.ContextWithAuditActor(ctx, identity.Actor)
-			next.ServeHTTP(w, r.WithContext(ctx))
+			next.ServeHTTP(w, serviceRequestWithAuthIdentity(r, servicePublicAuthIdentity()))
 			return
 		}
-		if retryAfter := server.serviceAuthRetryAfter(r, "auth"); retryAfter > 0 {
-			writeServiceAuthRateLimit(w, r, retryAfter)
+		if server.rejectServiceAuthRateLimit(w, r, "auth") {
 			return
 		}
 		now := time.Now()
 		if identity, ok := authenticateTerminalWebSocketTicketRequest(server, r, now); ok {
 			server.clearServiceAuthFailures(r, "auth")
-			ctx := context.WithValue(r.Context(), serviceAuthContextKey{}, identity)
-			ctx = context.WithValue(ctx, serviceAuthKindContextKey{}, identity.Kind)
-			ctx = approval.ContextWithAuditAuthKind(ctx, identity.Kind)
-			ctx = approval.ContextWithAuditActor(ctx, identity.Actor)
-			next.ServeHTTP(w, r.WithContext(ctx))
+			next.ServeHTTP(w, serviceRequestWithAuthIdentity(r, identity))
 			return
 		}
 		var nonceGuard *serviceNonceReplayGuard
@@ -136,40 +124,24 @@ func serviceAuthMiddlewareWithBrokerAndLimiter(cfg config.Config, broker *approv
 			server.components()
 			nonceGuard = server.nonceGuard
 		}
-		identity, err := authenticateServiceRequest(cfg, broker, authSvc, r.Header.Get("Authorization"), now, r.Context(), r, nonceGuard)
+		identity, err := serviceAuthenticateRequest(cfg, broker, authSvc, r, now, nonceGuard)
 		if err != nil {
 			server.recordServiceAuthFailure(r, "auth")
-			if challenge := serviceAuthChallengeError(cfg, authSvc, requirement, serviceAuthIdentity{}, err); challenge != nil {
-				serviceAuditAuthEvent(authSvc, r.Context(), "auth.policy.denied", serviceAuthIdentity{Actor: "anonymous"}, map[string]any{"path": r.URL.Path, "method": r.Method, "code": challenge.Code})
-				writeServiceAuthError(w, r, challenge)
+			if serviceWriteAuthChallengeIfNeeded(cfg, authSvc, w, r, requirement, serviceAuthIdentity{}, err) {
 				return
 			}
 			if serviceIsPairingRoute(r) && cfg.Service.AllowUnauthenticatedPairing {
 				writeServicePairingAuthError(w, r, cfg)
 				return
 			}
-			writeServiceJSON(w, http.StatusUnauthorized, addServiceRequestID(map[string]any{"error": "unauthorized", "code": serviceCodeUnauthorized}, r))
+			writeServiceJSON(w, http.StatusUnauthorized, addServiceRequestID(map[string]any{"error": "unauthorized", "code": serviceAuthErrorCode(err)}, r))
 			return
 		}
 		server.clearServiceAuthFailures(r, "auth")
-		if challenge := serviceAuthChallengeError(cfg, authSvc, requirement, identity, nil); challenge != nil {
-			if strings.EqualFold(string(cfg.Auth.EnforcementMode), string(config.AuthEnforcementWarn)) {
-				serviceAuditAuthEvent(authSvc, r.Context(), "auth.policy.warn", identity, map[string]any{"path": r.URL.Path, "method": r.Method, "code": challenge.Code})
-				w.Header().Set("X-Or3-Auth-Warning", challenge.Code)
-				if strings.TrimSpace(challenge.Message) != "" {
-					w.Header().Set("X-Or3-Auth-Reason", challenge.Message)
-				}
-			} else {
-				serviceAuditAuthEvent(authSvc, r.Context(), "auth.policy.denied", identity, map[string]any{"path": r.URL.Path, "method": r.Method, "code": challenge.Code})
-				writeServiceAuthError(w, r, challenge)
-				return
-			}
+		if serviceWriteAuthChallengeIfNeeded(cfg, authSvc, w, r, requirement, identity, nil) {
+			return
 		}
-		ctx := context.WithValue(r.Context(), serviceAuthContextKey{}, identity)
-		ctx = context.WithValue(ctx, serviceAuthKindContextKey{}, identity.Kind)
-		ctx = approval.ContextWithAuditAuthKind(ctx, identity.Kind)
-		ctx = approval.ContextWithAuditActor(ctx, identity.Actor)
-		next.ServeHTTP(w, r.WithContext(ctx))
+		next.ServeHTTP(w, serviceRequestWithAuthIdentity(r, identity))
 	})
 }
 
@@ -333,7 +305,7 @@ func writeServiceAuthRateLimit(w http.ResponseWriter, r *http.Request, retryAfte
 		retryAfter = 1
 	}
 	w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
-	writeServiceJSON(w, http.StatusTooManyRequests, addServiceRequestID(map[string]any{"error": "too many authentication attempts", "code": serviceCodeRateLimited, "retry_after_seconds": retryAfter}, r))
+	writeServiceJSON(w, http.StatusTooManyRequests, addServiceRequestID(map[string]any{"error": "too many authentication attempts", "code": serviceCodeAuthRateLimited, "retry_after_seconds": retryAfter}, r))
 }
 
 func serviceAllowedBrowserOrigin(cfg config.Config, r *http.Request) (string, bool) {
@@ -537,21 +509,7 @@ func authenticateServiceRequest(cfg config.Config, broker *approval.Broker, auth
 	if (requestedMethod == "" || requestedMethod == "session" || requestedMethod == "auth-session") && authSvc != nil && authSvc.Enabled() {
 		claims, err := authSvc.ValidateSessionToken(ctx, token)
 		if err == nil {
-			actor := "user:" + claims.User.ID
-			if strings.TrimSpace(claims.Session.DeviceID) != "" {
-				actor = actor + ":device:" + claims.Session.DeviceID
-			}
-			return serviceAuthIdentity{
-				Kind:      "auth-session",
-				Actor:     actor,
-				Role:      claims.Role,
-				Device:    claims.Session.DeviceID,
-				User:      claims.User.ID,
-				Session:   claims.Session.ID,
-				StepUpAt:  claims.Session.LastStepUpAt,
-				StepUpOK:  authSvc.HasRecentStepUp(claims.Session),
-				Challenge: token,
-			}, nil
+			return serviceAuthIdentityFromValidatedSession(authSvc, token, claims), nil
 		}
 		return serviceAuthIdentity{}, err
 	}

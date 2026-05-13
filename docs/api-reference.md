@@ -76,6 +76,36 @@ Bearer token notes:
 - unknown routes return `404`
 - routes backed by unavailable subsystems return `503` when the failure is infrastructural rather than user input
 
+`/internal/v1` request bodies use snake_case as the canonical field convention. Existing camelCase aliases remain accepted for compatibility. When both canonical and alias fields are present with different values, the snake_case value wins and the response includes `X-Or3-Request-Warning` with a non-fatal conflict message. A future `/internal/v2` can reject conflicting duplicate fields once app clients have migrated.
+
+All non-2xx JSON service errors include these stable fields:
+
+```json
+{
+  "error": "human-readable message",
+  "code": "validation_failed",
+  "request_id": "req_..."
+}
+```
+
+Lowercase `code` values are app-facing service error codes. Current generic codes are:
+
+| Code | Meaning |
+| --- | --- |
+| `validation_failed` | Request body, query, route parameter, or requested option is invalid. |
+| `method_not_allowed` | The route exists but does not support the HTTP method. |
+| `not_found` | The route or requested resource was not found. |
+| `forbidden` | The authenticated actor lacks the required role or capability. |
+| `unauthorized` | Authentication failed or no acceptable bearer credential was supplied. |
+| `rate_limited` | The request was deferred by service or auth rate limiting. |
+| `capability_unavailable` | A backing subsystem or configured capability is unavailable. |
+| `request_too_large` | The request body exceeded the endpoint limit. |
+| `conflict` | The request conflicts with current resource state. |
+| `timeout` | The operation timed out. |
+| `request_failed` | Generic fallback for failures that do not fit a narrower code. |
+
+Auth policy challenges keep their uppercase challenge codes (`SESSION_REQUIRED`, `SESSION_EXPIRED`, `PASSKEY_REQUIRED`, `STEP_UP_REQUIRED`, `AUTH_UNSUPPORTED`) so existing app challenge handling remains compatible.
+
 ## Route inventory
 
 | Method | Path | Auth | Purpose |

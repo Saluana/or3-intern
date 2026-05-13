@@ -13,12 +13,14 @@ This directory holds the detailed guides and references that were previously pac
 - [Triggers and automation](triggers-and-automation.md) — webhook, file-watch, heartbeat, cron, and structured task execution
 - [Security and hardening](security-and-hardening.md) — phase 1/2/3 controls, doctor, secrets, audit, profiles, and network policy
 - [MCP tool integrations](mcp-tool-integrations.md) — optional MCP server registration and transport safety
+- [Migration notes](migration-notes.md) — compatibility notes for `/internal/v1`, `.env`, compose, integration warnings, and context defaults
 
 ## References
 
 - [Configuration reference](configuration-reference.md) — top-level config map and the major nested sections in `config.json`
 - [CLI reference](cli-reference.md) — command-by-command summary for the `or3-intern` binary
 - [Internal service REST / HTTP API reference](api-reference.md) — authenticated machine-facing endpoints for `or3-intern service`
+- [Release checklist](release-checklist.md) — validation and manual smoke checks for service/app contract releases
 
 ## Suggested reading order
 

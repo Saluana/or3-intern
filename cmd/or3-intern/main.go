@@ -27,10 +27,8 @@ import (
 	"or3-intern/internal/config"
 	"or3-intern/internal/controlplane"
 	"or3-intern/internal/cron"
-	"or3-intern/internal/cronrunner"
 	"or3-intern/internal/db"
 	"or3-intern/internal/heartbeat"
-	"or3-intern/internal/mcp"
 	"or3-intern/internal/memory"
 	"or3-intern/internal/providers"
 	"or3-intern/internal/scope"
@@ -325,7 +323,7 @@ func main() {
 		return
 	}
 
-	cfg, err := config.Load(cfgPath)
+	loadedRuntimeConfig, err := loadRuntimeConfig(cfgPath)
 	if err != nil {
 		if translated := translateAndPrintError(err, os.Stderr); translated != nil {
 			fmt.Fprintln(os.Stderr, "config error:", err)
@@ -335,56 +333,32 @@ func main() {
 		}
 		os.Exit(1)
 	}
-	if cfg.Tools.RestrictToWorkspace && strings.TrimSpace(cfg.WorkspaceDir) == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			cfg.WorkspaceDir = cwd
-		}
-	}
-	if err := os.MkdirAll(filepath.Dir(cfg.DBPath), 0o755); err != nil {
-		fmt.Fprintln(os.Stderr, "mkdir db dir error:", err)
+	cfg := loadedRuntimeConfig.Config
+	if err := prepareRuntimeStorage(cfg); err != nil {
+		fmt.Fprintln(os.Stderr, "runtime storage error:", err)
 		os.Exit(1)
-	}
-	if err := os.MkdirAll(cfg.ArtifactsDir, 0o755); err != nil {
-		fmt.Fprintln(os.Stderr, "mkdir artifacts dir error:", err)
-		os.Exit(1)
-	}
-	if err := ensureFileIfMissing(cfg.SoulFile, agent.DefaultSoul); err != nil {
-		fmt.Fprintln(os.Stderr, "bootstrap soul file error:", err)
-		os.Exit(1)
-	}
-	if err := ensureFileIfMissing(cfg.AgentsFile, agent.DefaultAgentInstructions); err != nil {
-		fmt.Fprintln(os.Stderr, "bootstrap agents file error:", err)
-		os.Exit(1)
-	}
-	if err := ensureFileIfMissing(cfg.ToolsFile, agent.DefaultToolNotes); err != nil {
-		fmt.Fprintln(os.Stderr, "bootstrap tools file error:", err)
-		os.Exit(1)
-	}
-	// Bootstrap IDENTITY.md and MEMORY.md (silent fallback if missing)
-	if cfg.IdentityFile != "" {
-		_ = ensureFileIfMissing(cfg.IdentityFile, "# Identity\n")
-	}
-	if cfg.MemoryFile != "" {
-		_ = ensureFileIfMissing(cfg.MemoryFile, "# Static Memory\n")
 	}
 
-	d, err := db.Open(cfg.DBPath)
+	d, err := openRuntimeDatabase(cfg)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "db error:", err)
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 	defer d.Close()
 
 	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
-	cfg, secretManager, auditLogger, err := setupSecurity(ctx, cfg, d)
+	securedRuntime, err := buildRuntimeSecurity(ctx, cfg, d)
 	if err != nil {
 		if translated := translateAndPrintError(err, os.Stderr); translated != nil {
 			fmt.Fprintln(os.Stderr, "security error:", err)
 		}
 		os.Exit(1)
 	}
-	if err := validateStartupCommand(cmd, cfg, unsafeDev); err != nil {
+	cfg = securedRuntime.Config
+	secretManager := securedRuntime.Secrets
+	auditLogger := securedRuntime.Audit
+	if err := validateRuntimeStartupCommand(cmd, cfg, unsafeDev); err != nil {
 		if translated := translateAndPrintError(err, os.Stderr); translated != nil {
 			fmt.Fprintln(os.Stderr, err)
 		}
@@ -413,13 +387,14 @@ func main() {
 		}
 		return
 	}
-	approvalBroker, err := setupApprovalBroker(cfg, d, auditLogger)
+	approvalRuntime, err := buildRuntimeApprovalSecurity(cfg, d, auditLogger)
 	if err != nil {
 		if translated := translateAndPrintError(err, os.Stderr); translated != nil {
 			fmt.Fprintln(os.Stderr, "approval error:", err)
 		}
 		os.Exit(1)
 	}
+	approvalBroker := approvalRuntime.ApprovalBroker
 	if commandHandledBeforeRuntimeBootstrap(cmd) {
 		var prov *providers.Client
 		if cmd == "embeddings" {
@@ -454,20 +429,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	var mcpManager *mcp.Manager
-	if len(cfg.Tools.MCPServers) > 0 {
-		mcpManager = mcp.NewManager(cfg.Tools.MCPServers)
-		mcpManager.SetLogger(log.Printf)
-		mcpManager.SetHostPolicy(buildHostPolicy(cfg))
-		if err := mcpManager.Connect(ctx); err != nil {
-			log.Printf("mcp setup failed: %v", err)
-		}
-	}
+	mcpManager := buildRuntimeMCPManager(ctx, cfg)
 
 	// skills
-	builtin := filepath.Join(filepath.Dir(cfgPathOrDefault(cfgPath)), "builtin_skills")
-	toolNames := loadAvailableToolNamesWithManager(ctx, cfg, mcpManager)
-	inv := buildSkillsInventory(cfg, builtin, toolNames)
+	inv := buildRuntimeSkillsInventory(ctx, cfg, cfgPath, mcpManager)
 	var cronSvc *cron.Service
 	var subagentManager *agent.SubagentManager
 	var agentCLIManager *agentcli.Manager
@@ -578,34 +543,23 @@ func main() {
 		rt.ContextManagerProvider = newContextManagerProviderClient(cfg)
 	}
 	rt.ApplyLiveModelConfig(runtimeModelConfigFromConfig(cfg))
-	var serviceJobs *agent.JobRegistry
-	if cmd == "service" {
-		serviceJobs = agent.NewJobRegistry(0, 0)
+	serviceJobs := buildServiceJobRegistry(cmd)
+	if serviceJobs != nil {
 		rt.Deliver = nil
 		rt.Streamer = nil
 	}
 
-	if cfg.AgentCLI.Enabled {
-		agentCLIManager = &agentcli.Manager{
-			DB:                          d,
-			Jobs:                        serviceJobs,
-			Cfg:                         cfg.AgentCLI,
-			OpenCodeExternalDirectories: agentcli.OpenCodeExternalDirectoriesFromConfig(cfg),
-			MaxConcurrent:               cfg.AgentCLI.MaxConcurrent,
-			MaxQueued:                   cfg.AgentCLI.MaxQueued,
-			TaskTimeout:                 time.Duration(cfg.AgentCLI.DefaultTimeoutSeconds) * time.Second,
-			Registry:                    agentcli.NewDefaultRegistry(),
-			RestrictDir:                 allowedRoot(cfg),
-		}
-		if err := agentCLIManager.Start(ctx); err != nil {
+	agentCLIManager = buildRuntimeAgentCLIManager(cfg, d, serviceJobs)
+	if agentCLIManager != nil {
+		if err := startRuntimeAgentCLIManager(ctx, agentCLIManager); err != nil {
 			fmt.Fprintln(os.Stderr, "agent CLI manager error:", err)
 			os.Exit(1)
 		}
 	}
 
 	// cron service + tool
-	if cfg.Cron.Enabled {
-		cronSvc = cron.New(cfg.Cron.StorePath, cronrunner.New(b, cfg.DefaultSessionKey, agentCLIManager))
+	cronSvc = buildRuntimeCronService(cfg, b, agentCLIManager)
+	if cronSvc != nil {
 		if err := cronSvc.Start(); err != nil {
 			fmt.Fprintln(os.Stderr, "cron start error:", err)
 			os.Exit(1)
@@ -761,6 +715,7 @@ func main() {
 				return loadAvailableToolNamesWithManager(ctx, cfg, nil)
 			},
 			LoadInventory: func(toolNames map[string]struct{}) skills.Inventory {
+				builtin := filepath.Join(filepath.Dir(cfgPathOrDefault(cfgPath)), "builtin_skills")
 				return buildSkillsInventory(cfg, builtin, toolNames)
 			},
 			Audit: func(ctx context.Context, eventType string, payload any) error {

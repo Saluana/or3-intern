@@ -68,6 +68,47 @@ func TestDecodeServiceAgentRunRequest_Minimal(t *testing.T) {
 	}
 }
 
+func TestDecodeServiceAgentRunRequest_AcceptsCamelAliasesWithWarnings(t *testing.T) {
+	body := `{
+		"parent_session_key": "session-snake",
+		"parentSessionKey": "session-camel",
+		"runnerId": "codex",
+		"task": "fix the tests",
+		"timeoutSeconds": 30,
+		"maxTurns": 4
+	}`
+	req, err := decodeServiceAgentRunRequest(strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.ParentSessionKey != "session-snake" {
+		t.Fatalf("expected canonical parent_session_key to win, got %q", req.ParentSessionKey)
+	}
+	if req.RunnerID != "codex" || req.TimeoutSeconds != 30 || req.MaxTurns != 4 {
+		t.Fatalf("expected camel aliases to decode, got %#v", req)
+	}
+	if len(req.Warnings) != 1 || !strings.Contains(req.Warnings[0], "parent_session_key") {
+		t.Fatalf("expected parent_session_key conflict warning, got %#v", req.Warnings)
+	}
+}
+
+func TestDecodeServiceTurnRequest_ConflictWarningsKeepSnakeCaseCanonical(t *testing.T) {
+	req, err := decodeServiceTurnRequest(strings.NewReader(`{
+		"session_key": "snake-session",
+		"sessionKey": "camel-session",
+		"message": "hello"
+	}`), nil)
+	if err != nil {
+		t.Fatalf("decodeServiceTurnRequest: %v", err)
+	}
+	if req.SessionKey != "snake-session" {
+		t.Fatalf("expected snake_case session_key to win, got %q", req.SessionKey)
+	}
+	if len(req.Warnings) != 1 || !strings.Contains(req.Warnings[0], "session_key") {
+		t.Fatalf("expected session_key conflict warning, got %#v", req.Warnings)
+	}
+}
+
 func TestDecodeServiceAgentRunRequest_RejectsUnknownFields(t *testing.T) {
 	body := `{
 		"parent_session_key": "session-1",

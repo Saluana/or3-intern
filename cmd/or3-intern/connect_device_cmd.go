@@ -73,22 +73,16 @@ func runConnectDeviceCommand(ctx context.Context, cfgPath string, cfg *config.Co
 	if choice == "3" {
 		role = approval.RoleAdmin
 	}
-	req, code, err := updatedBroker.CreatePairingRequest(ctx, approval.PairingRequestInput{Role: role, DisplayName: name, Origin: "connect-device"})
+	pairing, err := runLocalPairingFlow(ctx, updatedBroker, localPairingFlowInput{Role: role, DisplayName: name, Origin: "connect-device"})
 	if err != nil {
 		return err
-	}
-	if req.Status == approval.StatusPending {
-		req, err = updatedBroker.ApprovePairingRequest(ctx, req.ID, "cli")
-		if err != nil {
-			return err
-		}
 	}
 	fmt.Fprintln(stdout, "Connect a device")
 	fmt.Fprintln(stdout, "\nStep 1: Open OR3 on your phone or other device.")
 	fmt.Fprintln(stdout, "Step 2: Enter this code:")
-	fmt.Fprintf(stdout, "\n  %s\n\n", formatPairingCode(code))
+	fmt.Fprintf(stdout, "\n  %s\n\n", formatPairingCode(pairing.Code))
 	fmt.Fprintf(stdout, "Step 3: This device will be connected as: %s\n", uxcopy.DeviceRoleLabel(role))
-	fmt.Fprintf(stdout, "Request ID: %d\n", req.ID)
+	fmt.Fprintf(stdout, "Request ID: %d\n", pairing.Request.ID)
 	fmt.Fprintln(stdout, "After the remote device enters the code, use `or3-intern connect-device list` to review connected devices.")
 	return nil
 }

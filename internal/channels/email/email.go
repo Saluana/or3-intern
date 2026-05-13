@@ -29,6 +29,7 @@ import (
 
 	"or3-intern/internal/approval"
 	"or3-intern/internal/bus"
+	"or3-intern/internal/channels/shared"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
 )
@@ -686,29 +687,7 @@ func formatInboundMessage(sender, subject string, sentAt time.Time, body string)
 }
 
 func (c *Channel) allowedSender(ctx context.Context, sender string) bool {
-	switch strings.ToLower(strings.TrimSpace(string(c.Config.InboundPolicy))) {
-	case string(config.InboundPolicyDeny):
-		return false
-	case string(config.InboundPolicyPairing):
-		allowed, err := c.ApprovalBroker.IsPairedChannelIdentity(ctx, "email", sender)
-		return err == nil && allowed
-	case string(config.InboundPolicyAllowlist):
-		for _, allowed := range c.Config.AllowedSenders {
-			if normalizeAddress(allowed) == sender {
-				return true
-			}
-		}
-		return false
-	}
-	if c.Config.OpenAccess {
-		return true
-	}
-	for _, allowed := range c.Config.AllowedSenders {
-		if normalizeAddress(allowed) == sender {
-			return true
-		}
-	}
-	return false
+	return shared.AllowInboundIdentity(ctx, shared.InboundAccessInput{Policy: c.Config.InboundPolicy, OpenAccess: c.Config.OpenAccess, Allowlist: c.Config.AllowedSenders, Channel: "email", Identity: sender, Broker: c.ApprovalBroker, Normalize: normalizeAddress, OpenAccessOverridesAllowlist: true})
 }
 
 func normalizeAddress(value string) string {

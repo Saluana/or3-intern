@@ -151,6 +151,10 @@ func TestServiceAuthMiddleware_RejectsMissingBearer(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d (%s)", rec.Code, rec.Body.String())
 	}
+	payload := mustDecodeJSONBody(t, rec.Body)
+	if payload["code"] != serviceCodeMissingToken {
+		t.Fatalf("expected missing_token code, got %#v", payload)
+	}
 }
 
 func TestServiceAuthMiddleware_RateLimitsFailedBearerAttempts(t *testing.T) {
@@ -180,6 +184,10 @@ func TestServiceAuthMiddleware_RateLimitsFailedBearerAttempts(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("expected 429 after repeated auth failures, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	payload := mustDecodeJSONBody(t, rec.Body)
+	if payload["code"] != serviceCodeAuthRateLimited {
+		t.Fatalf("expected auth_rate_limited code, got %#v", payload)
 	}
 	if rec.Header().Get("Retry-After") == "" {
 		t.Fatalf("expected Retry-After header")

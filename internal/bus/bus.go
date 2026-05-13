@@ -93,7 +93,9 @@ func (b *Bus) Subscribe() (<-chan Event, func()) {
 	return ch, unsubscribe
 }
 
-// Publish fans ev out without blocking and reports whether every subscriber accepted it.
+// Publish fans ev out without blocking and reports whether at least one active
+// subscriber accepted it. Slow optional subscribers may miss events without
+// making the publish fail for critical producers.
 func (b *Bus) Publish(ev Event) bool {
 	if b == nil {
 		return false
@@ -104,19 +106,19 @@ func (b *Bus) Publish(ev Event) bool {
 		log.Printf("bus: event dropped, bus closed (type=%s)", ev.Type)
 		return false
 	}
-	ok := true
+	delivered := false
 	for ch := range b.subscribers {
 		select {
 		case ch <- ev:
+			delivered = true
 		default:
 			if ch == b.legacy && !b.legacyUsed {
 				continue
 			}
 			log.Printf("bus: event dropped, subscriber buffer full (type=%s)", ev.Type)
-			ok = false
 		}
 	}
-	return ok
+	return delivered
 }
 
 // Close closes every subscriber stream once.

@@ -42,10 +42,15 @@ Useful discovery routes:
 | Pairing and devices | `/internal/v1/pairing/*`, `/internal/v1/devices/*` |
 | Approvals | `/internal/v1/approvals/*` |
 | Config editing | `/internal/v1/configure/*` |
+| MCP servers | `/internal/v1/mcp/servers/*` |
+| Skills | `/internal/v1/skills/*` |
 | Files | `/internal/v1/files/*` |
 | Terminal sessions | `/internal/v1/terminal/sessions/*` |
 | Chat session metadata | `/internal/v1/chat-sessions/*` |
+| Agent runners | `/internal/v1/agent-runners`, `/internal/v1/agent-runs/*` |
 | Runner chat | `/internal/v1/runner-chat/sessions/*` |
 | Cron | `/internal/v1/cron/*` |
+| Embeddings, audit, scope | `/internal/v1/embeddings/*`, `/internal/v1/audit/*`, `/internal/v1/scope/*` |
+| Bootstrap and host actions | `/internal/v1/app/bootstrap`, `/internal/v1/actions/*` |
 
 Use the pages in this folder for route-family details.

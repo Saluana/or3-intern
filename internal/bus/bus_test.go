@@ -168,6 +168,42 @@ func TestPublish_Overflow(t *testing.T) {
 	}
 }
 
+func TestPublish_SlowSubscriberDoesNotFailWhenAnotherSubscriberAccepts(t *testing.T) {
+	b := New(1)
+	slow, unsubscribeSlow := b.Subscribe()
+	defer unsubscribeSlow()
+	fast, unsubscribeFast := b.Subscribe()
+	defer unsubscribeFast()
+
+	if !b.Publish(Event{Type: EventUserMessage, Message: "first"}) {
+		t.Fatal("expected first publish to succeed")
+	}
+	select {
+	case <-fast:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("timeout waiting for fast subscriber")
+	}
+	if !b.Publish(Event{Type: EventUserMessage, Message: "second"}) {
+		t.Fatal("expected publish to succeed because fast subscriber accepted it")
+	}
+	select {
+	case ev := <-fast:
+		if ev.Message != "second" {
+			t.Fatalf("expected second event, got %#v", ev)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("timeout waiting for second fast subscriber event")
+	}
+	select {
+	case ev := <-slow:
+		if ev.Message != "first" {
+			t.Fatalf("expected slow subscriber to retain first event, got %#v", ev)
+		}
+	default:
+		t.Fatal("expected slow subscriber to keep buffered first event")
+	}
+}
+
 func TestPublish_SubscribeOnlyDoesNotFillLegacyChannel(t *testing.T) {
 	b := New(1)
 	ch, unsubscribe := b.Subscribe()

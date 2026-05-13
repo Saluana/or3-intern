@@ -1,45 +1,41 @@
 # Jobs Endpoints
 
-Endpoints for background job management. Jobs run independently of the request that created them.
+Jobs are the common observation surface for turns, subagents, approved-resume work, and agent-runner jobs. There is no generic `POST /internal/v1/jobs` route in v1; jobs are created by other route families.
 
-## Create Job
+## Job Creators
 
-`POST /api/v1/jobs`
+- `POST /internal/v1/turns`
+- `POST /internal/v1/subagents`
+- `POST /internal/v1/agent-runs`
+- approval actions that return `resume_job_id`
+- runner chat turns, which expose both runner-chat turn IDs and job IDs
 
-```json
-{
-  "type": "research",
-  "input": {
-    "query": "latest developments in AI",
-    "depth": "thorough"
-  }
-}
-```
-
-Returns the job ID and initial status.
+Capture job IDs from response payloads or the `X-Or3-Job-Id` header.
 
 ## Get Job Status
 
-`GET /api/v1/jobs/:id`
+`GET /internal/v1/jobs/{jobId}`
 
-Returns the job's current status, any output so far, and error details if failed.
+Reads the live job snapshot first. If the live registry no longer has it, the service attempts to return persisted subagent, agent-runner, or service-job history.
 
-## List Jobs
+## Stream Job Events
 
-`GET /api/v1/jobs`
+`GET /internal/v1/jobs/{jobId}/stream`
 
-Lists recent jobs. Supports filtering by status and type. Uses cursor-based pagination.
+Attaches to the job's SSE stream. The server flushes known events first, then sends new events until the job reaches a terminal status.
 
-## Cancel Job
+## Abort Job
 
-`DELETE /api/v1/jobs/:id`
+`POST /internal/v1/jobs/{jobId}/abort`
 
-Cancels a running job. Jobs that are pending or running can be cancelled. Completed or failed jobs return an error.
+Requests cancellation for abortable work. Completed or non-abortable jobs return a conflict-style response.
 
 ## Job Statuses
 
-- pending — waiting to start
+- queued — accepted and waiting to start
 - running — being processed
 - completed — finished successfully
 - failed — stopped with an error
-- cancelled — aborted by user
+- aborted — canceled by user or caller
+- approval_required — paused until an approval request is resolved
+- subagent-specific terminal statuses such as succeeded/interrupted can appear in persisted snapshots

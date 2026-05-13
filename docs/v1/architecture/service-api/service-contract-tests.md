@@ -66,7 +66,7 @@ These API endpoints are part of the stable v1 contract:
 - `POST /internal/v1/jobs/:id/abort` - abort a job
 - `GET /internal/v1/health` - health status
 - `GET /internal/v1/embeddings/status` - embedding system status
-- `GET /internal/v1/audit/status` - audit system status
+- `GET /internal/v1/audit` - audit system status
 
 Aliases such as `session_id` for `session_key` are also part of the frozen contract and covered by compatibility tests.
 

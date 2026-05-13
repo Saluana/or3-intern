@@ -284,6 +284,10 @@ func TestServiceRouteRequirementForRequest_SensitivityMatrix(t *testing.T) {
 		{method: http.MethodPost, path: "/internal/v1/devices/device-1/revoke", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
 		{method: http.MethodPost, path: "/internal/v1/configure/security", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
 		{method: http.MethodPost, path: "/internal/v1/actions/restart-service", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
+		{method: http.MethodGet, path: "/internal/v1/mcp/servers", want: serviceRouteLowRisk, sessionOnly: true},
+		{method: http.MethodPost, path: "/internal/v1/mcp/servers", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
+		{method: http.MethodPost, path: "/internal/v1/mcp/servers/local/test", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
+		{method: http.MethodDelete, path: "/internal/v1/mcp/servers/local", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {

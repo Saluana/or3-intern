@@ -180,7 +180,7 @@ func (s *serviceServer) resolveServiceFilePath(rootID, relPath string) (serviceF
 	if cleanRel == "." || cleanRel == string(filepath.Separator) {
 		cleanRel = "."
 	}
-	if filepath.IsAbs(cleanRel) || strings.HasPrefix(cleanRel, "..") || strings.Contains(cleanRel, string(filepath.Separator)+".."+string(filepath.Separator)) {
+	if filepath.IsAbs(cleanRel) || cleanRel == ".." || strings.HasPrefix(cleanRel, ".."+string(filepath.Separator)) || strings.Contains(cleanRel, string(filepath.Separator)+".."+string(filepath.Separator)) {
 		return serviceFileRoot{}, "", "", fmt.Errorf("path escapes root")
 	}
 	absRoot, err := filepath.Abs(root.Path)

@@ -16,6 +16,7 @@ import (
 )
 
 const serviceMCPBodyLimit int64 = 256 << 10
+const serviceMCPRedactedValue = "configured"
 
 type serviceMCPServerDetail struct {
 	Name   string                 `json:"name"`
@@ -84,7 +85,7 @@ func (s *serviceServer) handleMCPServersList(w http.ResponseWriter, r *http.Requ
 	for _, name := range sortedMCPServerNames(servers) {
 		items = append(items, serviceMCPServerDetail{
 			Name:   name,
-			Config: servers[name],
+			Config: redactServiceMCPConfig(servers[name]),
 			Status: statuses[name],
 		})
 	}
@@ -110,7 +111,8 @@ func (s *serviceServer) handleMCPServersAdd(w http.ResponseWriter, r *http.Reque
 	if next.Tools.MCPServers == nil {
 		next.Tools.MCPServers = map[string]config.MCPServerConfig{}
 	}
-	next.Tools.MCPServers[name] = normalizeServiceMCPConfig(body.Config, next.Hardening.ChildEnvAllowlist)
+	previous := next.Tools.MCPServers[name]
+	next.Tools.MCPServers[name] = preserveServiceMCPRedactedSecrets(normalizeServiceMCPConfig(body.Config, next.Hardening.ChildEnvAllowlist), previous)
 	if err := config.ValidateMCPServers(next.Tools.MCPServers); err != nil {
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
@@ -227,6 +229,50 @@ func normalizeServiceMCPConfig(server config.MCPServerConfig, childEnvAllowlist 
 		server.ToolTimeoutSeconds = config.DefaultMCPToolTimeoutSeconds
 	}
 	return server
+}
+
+func redactServiceMCPConfig(server config.MCPServerConfig) config.MCPServerConfig {
+	server.Env = redactServiceMCPSecretMap(server.Env)
+	server.Headers = redactServiceMCPSecretMap(server.Headers)
+	return server
+}
+
+func redactServiceMCPSecretMap(values map[string]string) map[string]string {
+	if values == nil {
+		return nil
+	}
+	redacted := make(map[string]string, len(values))
+	for key, value := range values {
+		if strings.TrimSpace(value) == "" {
+			redacted[key] = ""
+			continue
+		}
+		redacted[key] = serviceMCPRedactedValue
+	}
+	return redacted
+}
+
+func preserveServiceMCPRedactedSecrets(next, previous config.MCPServerConfig) config.MCPServerConfig {
+	next.Env = preserveServiceMCPRedactedSecretMap(next.Env, previous.Env)
+	next.Headers = preserveServiceMCPRedactedSecretMap(next.Headers, previous.Headers)
+	return next
+}
+
+func preserveServiceMCPRedactedSecretMap(next, previous map[string]string) map[string]string {
+	if next == nil {
+		return nil
+	}
+	out := make(map[string]string, len(next))
+	for key, value := range next {
+		if value == serviceMCPRedactedValue {
+			if previousValue, ok := previous[key]; ok {
+				out[key] = previousValue
+				continue
+			}
+		}
+		out[key] = value
+	}
+	return out
 }
 
 func sortedMCPServerNames(servers map[string]config.MCPServerConfig) []string {

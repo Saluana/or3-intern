@@ -1,43 +1,65 @@
 # Auth Requirements
 
-Different endpoints need different auth. Here is the breakdown.
+The service API is intended for trusted app and host-control clients. Most `/internal/v1/*` routes require an authenticated identity and a sufficient role.
 
-## No Auth
+## Public Discovery
 
-- `GET /health` — health check
-- `GET /ready` — readiness check
+`GET /internal/v1/auth/capabilities` is the public route that lets clients discover the current auth posture before prompting for pairing, passkeys, or session login.
 
-These endpoints are open because monitoring tools need to check them without credentials.
+Other routes should be treated as protected unless the route policy explicitly allows otherwise.
 
-## Service Secret
+## Bearer Credentials
 
-Most endpoints need the service secret. The client sends it in a header:
+Service credentials are sent as:
 
 ```
-Authorization: Bearer <service_secret>
+Authorization: Bearer <token>
 ```
 
-The service secret is set in the config file. It acts like a master password for the API.
+Accepted bearer identities include:
 
-## Session Token
+- **Shared-secret tokens** — signed service tokens derived from the configured service secret.
+- **Paired-device tokens** — device tokens created by the pairing flow.
+- **Legacy direct shared secret** — supported for compatible local clients when enabled by policy.
 
-Some endpoints use session tokens. These are tied to a specific device or session. Tokens expire after a set time. They are created when a device authenticates.
+The auth layer detects missing, invalid, expired, unsupported, or replayed tokens and returns stable error codes such as `missing_token`, `invalid_token`, and `token_replay`.
+
+## Auth Session Header
+
+Passkey-backed app sessions use:
+
+```
+X-Or3-Session: <session_token>
+```
+
+`X-Auth-Session` and the `session_token` query parameter are also accepted aliases.
 
 ## Passkey (WebAuthn)
 
-Passkey auth uses WebAuthn. The device registers a passkey. Future requests use the passkey to authenticate. This is more secure than a shared secret.
+Passkey flows live under `/internal/v1/auth/passkeys/*`:
+
+- registration begin/finish
+- login begin/finish
+- passkey list
+- passkey rename
+- passkey revoke
+
+Step-up auth lives under `/internal/v1/auth/step-up/*` and is used when sensitive operations require a fresh passkey assertion.
 
 ## Pairing
 
-Device pairing creates a trust relationship. One device approves another. Paired devices share access. Pairing requests expire if not approved in time.
+Device pairing creates a trust relationship for a device, app, or channel identity. Pairing routes are under `/internal/v1/pairing/*`; paired device management is under `/internal/v1/devices/*`.
 
-## Auth Summary
+Pairing requests expire if not approved in time. Paired devices can be revoked or rotated.
+
+## Role Gates
 
 | Endpoint Group | Auth Type |
 |---|---|
-| Health/Ready | None |
-| Turns | Service secret or session token |
-| Jobs | Service secret or session token |
-| Approvals | Session token or passkey |
-| Configure | Service secret |
-| Files | Service secret or session token |
+| `auth/capabilities` | Public |
+| Turns, jobs, runner chat, chat sessions | Authenticated app/operator identity |
+| MCP list, file reads, terminal reads | Authenticated operator session |
+| Files, terminal, configure, MCP add/delete/test, skills, approvals, device management, service restart | Operator session with recent passkey step-up |
+| Cron, audit, embeddings, scope | Operator role |
+
+Route requirements are evaluated by `serviceRequestRouteRequirement` and enforced by `requireServiceRole` plus the auth policy layer.

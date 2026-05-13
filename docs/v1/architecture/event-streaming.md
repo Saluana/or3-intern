@@ -1,36 +1,66 @@
 # Event Streaming
 
-Events are streamed using Server-Sent Events (SSE). Each event has a type and a JSON payload.
+The service API uses Server-Sent Events (SSE) for progressive output and reconnectable job/runner streams. Each event is emitted as:
+
+```text
+event: <type>
+data: <json>
+```
 
 ## Event Types
 
 | Event | When It Happens |
 |---|---|
-| `turn_start` | A new turn begins |
-| `turn_finish` | A turn completes |
+| `queued` | A job was accepted |
+| `started` | A job began executing |
+| `completion` | The runtime produced final assistant text |
 | `tool_call` | The agent calls a tool |
 | `tool_result` | A tool returns its result |
-| `job_update` | A background job reports progress |
-| `approval_request` | A tool needs user approval |
+| `approval_required` | A tool needs user approval before continuing |
+| `completed` | A job completed |
+| `failed` | A job failed |
+| `aborted` | A job was canceled |
 | `error` | Something went wrong |
-| `stream_chunk` | Partial text output from the agent |
+| `done` | Runner-chat stream reached a terminal turn state |
 
 ## How Streaming Works
 
-The client opens an SSE connection. Events are sent as they happen. The client can show progress in real time.
+Foreground turns stream when the request includes `Accept: text/event-stream`:
 
-For chat turns, `stream_chunk` events contain partial text. The client appends each chunk to build the full response. `tool_call` and `tool_result` events let the client show what the agent is doing.
+```http
+POST /internal/v1/turns
+Accept: text/event-stream
+```
 
-For jobs, `job_update` events show progress. The client can show a progress bar or status text.
+Long-running jobs expose a reconnect-friendly stream:
+
+```http
+GET /internal/v1/jobs/{jobId}/stream
+```
+
+Runner chat turns expose both durable event history and a stream:
+
+```http
+GET /internal/v1/runner-chat/sessions/{sessionId}/turns/{turnId}/events?after_seq=42
+GET /internal/v1/runner-chat/sessions/{sessionId}/turns/{turnId}/stream?after_seq=42
+```
 
 ## Client Code Example
 
 ```javascript
-const events = new EventSource("/api/v1/turns?stream=true");
-events.addEventListener("stream_chunk", (e) => {
-  appendText(JSON.parse(e.data).content);
-});
+const events = new EventSource("/internal/v1/jobs/job_123/stream");
+
 events.addEventListener("tool_call", (e) => {
   showToolCall(JSON.parse(e.data));
 });
+
+events.addEventListener("completion", (e) => {
+  renderFinalText(JSON.parse(e.data).final_text);
+});
 ```
+
+## Reconnect Rules
+
+- Capture IDs immediately: `X-Or3-Job-Id`, runner chat `session_id`, and `turn_id`.
+- Job streams replay the in-memory snapshot before live events.
+- Runner chat streams use durable event sequence numbers, so reconnect with `after_seq`.

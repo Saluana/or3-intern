@@ -645,6 +645,11 @@ func serviceRouteRequirementForRequest(cfg config.Config, r *http.Request) servi
 			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
 		}
 		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "skill settings require recent passkey verification"}
+	case path == "/internal/v1/mcp/servers" || strings.HasPrefix(path, "/internal/v1/mcp/servers/"):
+		if method == http.MethodGet {
+			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, SessionOnly: true}
+		}
+		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "MCP server changes require recent passkey verification"}
 	case path == "/internal/v1/files" || strings.HasPrefix(path, "/internal/v1/files/"):
 		relative := strings.Trim(strings.TrimPrefix(path, "/internal/v1/files"), "/")
 		if method == http.MethodGet || relative == "roots" || relative == "list" || relative == "search" || relative == "stat" || relative == "read" || relative == "download" {

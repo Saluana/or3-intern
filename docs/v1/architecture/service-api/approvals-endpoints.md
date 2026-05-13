@@ -2,50 +2,73 @@
 
 Endpoints for the approval workflow. Apps use these to let users review and respond to approval requests.
 
-## Get Pending Approvals
+## List Approvals
 
-`GET /api/v1/approvals/pending`
+`GET /internal/v1/approvals`
 
-Returns all approval requests waiting for user action.
+Query parameters can filter by `status`, `type`, and `limit`.
 
 ```json
 {
-  "approvals": [
+  "items": [
     {
-      "id": "apr_123",
-      "tool": "exec",
-      "args": {"command": "rm -rf /tmp/test"},
-      "reason": "Agent wants to run a shell command",
-      "created_at": "2026-05-12T10:00:00Z"
+      "id": 123,
+      "status": "pending",
+      "type": "exec",
+      "subject_json": "{}"
     }
   ]
 }
 ```
 
-## Approve or Deny
+## Read One Approval
 
-`POST /api/v1/approvals/:id`
+`GET /internal/v1/approvals/{id}`
 
-```json
-{
-  "action": "approve"
-}
-```
+Returns one approval request as `item`.
 
-Or:
+## Approve
+
+`POST /internal/v1/approvals/{id}/approve`
 
 ```json
 {
-  "action": "deny",
-  "reason": "That command looks dangerous"
+  "allowlist": true,
+  "note": "Allow this exact command for this workspace"
 }
 ```
 
-## Approval History
+Approval responses can include:
 
-`GET /api/v1/approvals/history`
+- `token`
+- `allowlist_id`
+- `session_key`
+- `plan_id` / `plan_ids`
+- `resume_job_id`
+- `warnings`
 
-Returns past approvals and denials. Useful for audit and review.
+## Deny or Cancel
+
+```http
+POST /internal/v1/approvals/{id}/deny
+POST /internal/v1/approvals/{id}/cancel
+```
+
+Both accept an optional JSON body with `note`.
+
+## Expire Stale Requests
+
+`POST /internal/v1/approvals/expire`
+
+Returns the number of expired pending requests.
+
+## Allowlists
+
+| Route | Purpose |
+| --- | --- |
+| `GET /internal/v1/approvals/allowlists` | List active allowlist rules |
+| `POST /internal/v1/approvals/allowlists` | Add a rule |
+| `POST /internal/v1/approvals/allowlists/{id}/remove` | Remove a rule |
 
 ## How Approvals Work
 

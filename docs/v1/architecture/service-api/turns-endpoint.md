@@ -1,6 +1,6 @@
 # Turns Endpoint
 
-`POST /api/v1/turns` — send a message and get a response.
+`POST /internal/v1/turns` submits a foreground agent turn. Internally every turn is registered as a job, so clients can wait for JSON, stream immediately, or reconnect through the job endpoints.
 
 ## Request
 
@@ -8,37 +8,63 @@
 {
   "session_key": "sess_abc123",
   "message": "What files are in my project?",
-  "stream": false
+  "meta": {
+    "request_id": "req_abc123"
+  },
+  "profile_name": "default",
+  "allowed_tools": ["list_dir", "read_file"],
+  "restrict_tools": true
 }
 ```
 
-## Response (Sync Mode)
+Required fields:
 
-The response waits for the agent to finish. It includes the full message and any tool calls made during the turn.
+- `session_key`
+- `message`
+
+Optional fields include `meta`, `profile_name`, `allowed_tools`, `restrict_tools`, `tool_policy`, `approval_token`, and replay-tool-call fields.
+
+## JSON Mode
+
+Without SSE, the route waits for completion and returns a job-shaped JSON response.
 
 ```json
 {
-  "session_key": "sess_abc123",
-  "message": "Your project has src/, docs/, and tests/ directories.",
-  "tool_calls": [
-    {"tool": "list_dir", "args": {"path": "."}, "result": "..."}
-  ],
-  "status": "completed"
+  "job_id": "job_abc123",
+  "type": "turn",
+  "status": "completed",
+  "final_text": "Your project has src/, docs/, and tests/ directories.",
+  "events": []
 }
 ```
 
 ## Streaming Mode
 
-Set `stream: true` to get SSE events. Each event has a type and data. The client reads events as they arrive.
+To stream the same turn, send `Accept: text/event-stream`:
 
-Event types:
-- `turn_start` — turn started
-- `stream_chunk` — partial text output
-- `tool_call` — agent called a tool
-- `tool_result` — tool returned a result
-- `turn_finish` — turn completed
-- `error` — something went wrong
+```http
+POST /internal/v1/turns
+Accept: text/event-stream
+```
 
-## Session Creation
+The response includes `X-Or3-Job-Id`. The stream first flushes existing job events, then sends new events until the job reaches a terminal status.
 
-If `session_key` is not provided, a new session is created. The new key is in the response.
+## Lifecycle Events
+
+Common event types include:
+
+- `queued`
+- `started`
+- `tool_call`
+- `tool_result`
+- `completion`
+- `approval_required`
+- `completed`
+- `failed`
+- `aborted`
+
+`X-Request-Id`, `X-Workspace-Id`, and `X-Network-Session-Id` headers are copied into lifecycle metadata when present.
+
+## Approval Resume
+
+If a tool returns approval-required, the turn job completes with `approval_required`. Approving the request may return a `resume_job_id` that continues the original session with the issued approval token.

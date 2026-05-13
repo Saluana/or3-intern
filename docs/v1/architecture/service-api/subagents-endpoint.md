@@ -1,41 +1,64 @@
 # Subagents Endpoint
 
-Endpoints for managing subagents. They let apps create and monitor parallel agent tasks.
+Subagent endpoints create and inspect background tasks run by OR3's internal subagent manager.
 
 ## Create Subagent
 
-`POST /api/v1/subagents`
+`POST /internal/v1/subagents`
 
 ```json
 {
-  "session_key": "sess_abc123",
-  "instructions": "Search the web for latest AI news",
-  "tools": ["web_search"]
+  "parent_session_key": "sess_abc123",
+  "task": "Review the service API docs for stale route names",
+  "allowed_tools": ["read_file", "search_file"],
+  "restrict_tools": true,
+  "timeout_seconds": 120,
+  "meta": {
+    "request_id": "req_abc123"
+  }
 }
 ```
 
-Returns the subagent ID and status.
+Returns `202 Accepted` with:
+
+```json
+{
+  "job_id": "subagent_job_123",
+  "child_session_key": "sess_child_123",
+  "status": "queued"
+}
+```
 
 ## Get Subagent Status
 
-`GET /api/v1/subagents/:id`
+`GET /internal/v1/subagents/{jobId}`
 
-Returns the subagent's current status and any results.
+Returns the persisted subagent job snapshot, final text when available, and reconstructed events.
 
 ## List Subagents
 
-`GET /api/v1/subagents?session_key=sess_abc123`
+`GET /internal/v1/subagents`
 
-Lists all subagents for a session.
+Query parameters:
 
-## Cancel Subagent
+- `status`
+- `parent_session_key`
+- `limit`
 
-`DELETE /api/v1/subagents/:id`
+The special status filter `terminal` is accepted by the database layer for completed/failed/interrupted jobs.
 
-Cancels a running subagent.
+## Abort
+
+Subagents are aborted through the shared job route:
+
+```http
+POST /internal/v1/jobs/{jobId}/abort
+```
+
+There is no `DELETE /internal/v1/subagents/{id}` route in v1.
 
 ## Use Cases
 
-- Research tasks (multiple searches at once)
-- File processing (process multiple files in parallel)
-- Code review (review multiple files simultaneously)
+- bounded background research
+- codebase exploration that should not block the foreground turn
+- file-processing or review tasks with a separate child session

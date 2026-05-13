@@ -60,7 +60,7 @@ Connects over HTTP with the streamable transport variant. Supports automatic rec
 
 ## Connection Lifecycle
 
-### Connect (`internal/agentcli/manager.go:171-223`)
+### Connect (`internal/mcp/manager.go`)
 
 1. Only connects once (skips if tools or sessions already exist)
 2. Iterates enabled servers sorted by name
@@ -71,21 +71,21 @@ Connects over HTTP with the streamable transport variant. Supports automatic rec
 7. Assigns local tool names in the format `mcp_<server>_<tool>`
 8. Duplicate local names are skipped (logged as warnings)
 
-### Refresh (`internal/agentcli/manager.go:227-241`)
+### Refresh (`internal/mcp/manager.go`)
 
 Replaces the server configuration and reconnects without restarting the process. Closes existing sessions first.
 
-### ReconnectWithBackoff (`internal/agentcli/manager.go:244-278`)
+### ReconnectWithBackoff (`internal/mcp/manager.go`)
 
 Retries failed servers with exponential backoff (up to 5 seconds max delay). Useful for servers that are slow to start.
 
-### Close (`internal/agentcli/manager.go:317-330`)
+### Close (`internal/mcp/manager.go`)
 
 Closes all active sessions and clears discovered tools.
 
 ## Tool Registration
 
-Discovered tools are registered into the `tools.Registry` via `RegisterTools` (`internal/agentcli/manager.go:306-314`). Each remote tool becomes a `RemoteTool` implementing the `tools.Tool` interface.
+Discovered tools are registered into the `tools.Registry` via `RegisterTools` (`internal/mcp/manager.go`). Each remote tool becomes a `RemoteTool` implementing the `tools.Tool` interface.
 
 ## RemoteTool
 
@@ -110,7 +110,7 @@ type RemoteTool struct {
 
 ## Result Conversion
 
-`resultToText` (`internal/agentcli/manager.go:604-620`) converts MCP tool results to plain text:
+`resultToText` (`internal/mcp/manager.go`) converts MCP tool results to plain text:
 
 - `TextContent` → the text value
 - `ImageContent` → `[image content omitted mime=... bytes=N]`

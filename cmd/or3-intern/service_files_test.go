@@ -65,6 +65,22 @@ func TestResolveServiceFilePathRejectsTraversal(t *testing.T) {
 	}
 }
 
+func TestResolveServiceFilePathAllowsDotPrefixedFilename(t *testing.T) {
+	tmp := t.TempDir()
+	server := &serviceServer{config: config.Config{AllowedDir: tmp}}
+
+	_, absPath, relPath, err := server.resolveServiceFilePath("allowed", "..notes.md")
+	if err != nil {
+		t.Fatalf("resolve dot-prefixed filename: %v", err)
+	}
+	if absPath != filepath.Join(tmp, "..notes.md") {
+		t.Fatalf("unexpected absolute path: %q", absPath)
+	}
+	if relPath != "..notes.md" {
+		t.Fatalf("unexpected relative path: %q", relPath)
+	}
+}
+
 func TestResolveServiceFilePathKeepsPathInsideRoot(t *testing.T) {
 	tmp := t.TempDir()
 	server := &serviceServer{config: config.Config{AllowedDir: tmp}}

@@ -886,7 +886,7 @@ func TestServiceMCPServers_CRUDAndAuth(t *testing.T) {
 
 	create := mustServiceRequest(t, httpServer, secret, http.MethodPost, "/internal/v1/mcp/servers", `{
 		"name":"local",
-		"config":{"enabled":true,"transport":"stdio","command":"mcp-local","args":["--demo"],"connectTimeoutSeconds":5,"toolTimeoutSeconds":7}
+		"config":{"enabled":true,"transport":"stdio","command":"mcp-local","args":["--demo"],"env":{"API_KEY":"secret-env"},"headers":{"Authorization":"Bearer secret-header"},"connectTimeoutSeconds":5,"toolTimeoutSeconds":7}
 	}`)
 	createResp, err := httpServer.Client().Do(create)
 	if err != nil {
@@ -915,6 +915,13 @@ func TestServiceMCPServers_CRUDAndAuth(t *testing.T) {
 	if len(items) != 1 {
 		t.Fatalf("expected one server, got %#v", listed)
 	}
+	listedServer, _ := items[0].(map[string]any)
+	listedConfig, _ := listedServer["config"].(map[string]any)
+	listedEnv, _ := listedConfig["env"].(map[string]any)
+	listedHeaders, _ := listedConfig["headers"].(map[string]any)
+	if listedEnv["API_KEY"] != serviceMCPRedactedValue || listedHeaders["Authorization"] != serviceMCPRedactedValue {
+		t.Fatalf("expected MCP secrets to be redacted, got env=%#v headers=%#v", listedEnv, listedHeaders)
+	}
 
 	loaded, err := config.Load(cfgPath)
 	if err != nil {
@@ -922,6 +929,29 @@ func TestServiceMCPServers_CRUDAndAuth(t *testing.T) {
 	}
 	if loaded.Tools.MCPServers["local"].Command != "mcp-local" {
 		t.Fatalf("expected persisted MCP config, got %#v", loaded.Tools.MCPServers)
+	}
+	if loaded.Tools.MCPServers["local"].Env["API_KEY"] != "secret-env" || loaded.Tools.MCPServers["local"].Headers["Authorization"] != "Bearer secret-header" {
+		t.Fatalf("expected persisted MCP secrets to remain unredacted, got %#v", loaded.Tools.MCPServers["local"])
+	}
+
+	update := mustServiceRequest(t, httpServer, secret, http.MethodPost, "/internal/v1/mcp/servers", `{
+		"name":"local",
+		"config":{"enabled":true,"transport":"stdio","command":"mcp-local","args":["--demo","--updated"],"env":{"API_KEY":"configured"},"headers":{"Authorization":"configured"},"connectTimeoutSeconds":5,"toolTimeoutSeconds":7}
+	}`)
+	updateResp, err := httpServer.Client().Do(update)
+	if err != nil {
+		t.Fatalf("update MCP server: %v", err)
+	}
+	defer updateResp.Body.Close()
+	if updateResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected update 200, got %d (%s)", updateResp.StatusCode, mustReadBody(t, updateResp.Body))
+	}
+	loaded, err = config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load config after update: %v", err)
+	}
+	if loaded.Tools.MCPServers["local"].Env["API_KEY"] != "secret-env" || loaded.Tools.MCPServers["local"].Headers["Authorization"] != "Bearer secret-header" {
+		t.Fatalf("expected redacted MCP secrets to preserve previous values, got %#v", loaded.Tools.MCPServers["local"])
 	}
 
 	del := mustServiceRequest(t, httpServer, secret, http.MethodDelete, "/internal/v1/mcp/servers/local", "")

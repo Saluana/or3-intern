@@ -1,44 +1,50 @@
 # Files Endpoints
 
-Endpoints for file operations. The agent can upload, download, and manage files.
+The v1 file API is root-and-path based. It does not expose arbitrary host paths or opaque file IDs for browsing.
 
-## Upload File
+## Routes
 
-`POST /api/v1/files`
+| Route | Method | Purpose |
+| --- | --- | --- |
+| `/internal/v1/files/roots` | GET | List available roots |
+| `/internal/v1/files/list` | GET | List a directory under a root |
+| `/internal/v1/files/search` | GET | Search under a root |
+| `/internal/v1/files/stat` | GET | Fetch metadata for one path |
+| `/internal/v1/files/read` | GET | Read text content |
+| `/internal/v1/files/download` | GET | Download raw file content |
+| `/internal/v1/files/write` | PUT | Write or replace text content |
+| `/internal/v1/files/upload` | POST | Upload one file into a writable root |
+| `/internal/v1/files/mkdir` | POST | Create a directory |
+| `/internal/v1/files/delete` | POST | Disabled in v1; returns `403` |
 
-Multipart form upload. Returns file metadata including a file ID.
+## Common Query Fields
+
+- `root_id` — one of the roots returned by `files/roots`
+- `path` — relative path inside that root
+- route-specific fields such as `q`, `limit`, `offset`, or `max_bytes`
+
+Common root IDs include `workspace`, `allowed`, `artifacts`, `computer`, and `cwd`, depending on config.
+
+## Read Example
+
+```http
+GET /internal/v1/files/read?root_id=workspace&path=notes/todo.md
+```
 
 ```json
 {
-  "file_id": "file_abc123",
-  "name": "report.pdf",
-  "size": 1024000,
-  "content_type": "application/pdf"
+  "root_id": "workspace",
+  "path": "notes/todo.md",
+  "name": "todo.md",
+  "mime_type": "text/markdown",
+  "size": 1204,
+  "writable": true,
+  "content": "# Todo\n"
 }
 ```
 
-## Download File
+## Write Model
 
-`GET /api/v1/files/:file_id`
+Write, upload, and mkdir are allowed only inside writable roots. Path resolution rejects absolute paths, `..` escapes, and symlink escapes from the selected root.
 
-Returns the file content with the correct content type. Supports range requests for partial downloads.
-
-## List Files
-
-`GET /api/v1/files`
-
-Lists files in the artifacts directory. Supports filtering by type and date. Cursor-based pagination.
-
-## Delete File
-
-`DELETE /api/v1/files/:file_id`
-
-Removes a file from storage. This is permanent.
-
-## Storage
-
-Files are stored in the artifacts directory. The directory is inside the storage path (`~/.or3-intern/artifacts/`). File metadata is in SQLite.
-
-## File Size Limits
-
-Maximum file size is configurable. Default is 100MB per file.
+Deletion is intentionally disabled in v1.

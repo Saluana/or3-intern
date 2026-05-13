@@ -7,8 +7,11 @@ Welcome to the OR3 Intern v1 documentation. These docs cover everything you need
 | Section | What it covers |
 |---|---|
 | [Getting Started](getting-started/overview.md) | Install, configure, and run OR3 Intern |
+| [User Guide](user-guide/cli/overview.md) | CLI, app integration, and workflow guides |
+| [Architecture](architecture/overview.md) | Runtime, service API, security, storage, tools, channels, and integrations |
 | [Operations](operations/overview.md) | Running in production, Docker, security |
 | [Reference](reference/config-reference.md) | Config, CLI commands, tools, and more |
+| [Documentation Audit](documentation-audit.md) | Current coverage map and known follow-up areas |
 
 ## Need help?
 

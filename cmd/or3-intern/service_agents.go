@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -45,6 +46,7 @@ func (s *serviceServer) handleTurns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	job := s.jobs.Register("turn")
+	log.Printf("service_turn: registered job=%s session=%s trace=%s", job.ID, req.SessionKey, serviceMetaText(req.Meta, "trace_id"))
 	w.Header().Set("X-Or3-Job-Id", job.ID)
 	s.jobs.Publish(job.ID, "queued", serviceLifecyclePayload(req.SessionKey, req.Meta, map[string]any{"status": "queued"}))
 	s.persistServiceJobSummary(context.Background(), job.ID)
@@ -71,6 +73,7 @@ func (s *serviceServer) handleTurns(w http.ResponseWriter, r *http.Request) {
 
 func (s *serviceServer) runTurnJob(ctx context.Context, jobID string, req serviceTurnRequest, identity serviceAuthIdentity) {
 	defer s.persistServiceJobSummary(context.Background(), jobID)
+	log.Printf("service_turn: started job=%s session=%s trace=%s replay=%t", jobID, req.SessionKey, serviceMetaText(req.Meta, "trace_id"), req.ReplayToolCall != nil)
 	s.jobs.Publish(jobID, "started", serviceLifecyclePayload(req.SessionKey, req.Meta, map[string]any{"status": "running"}))
 	observer := &serviceObserver{ConversationObserver: s.jobs.Observer(jobID)}
 	var err error
@@ -105,10 +108,21 @@ func (s *serviceServer) runTurnJob(ctx context.Context, jobID string, req servic
 		})
 	}
 	if err != nil {
+		log.Printf("service_turn: error job=%s session=%s trace=%s public_code=%s", jobID, req.SessionKey, serviceMetaText(req.Meta, "trace_id"), agent.PublicErrorCode(err))
 		s.completeTurnJobWithError(ctx, jobID, err, observer, req.SessionKey, req.Meta)
 		return
 	}
-	s.jobs.Complete(jobID, "completed", serviceLifecyclePayload(req.SessionKey, req.Meta, map[string]any{"final_text": observer.finalText}))
+	finalText, recoveredEmpty := observer.finalTextForCompletion("or3-intern completed without a final response.")
+	if recoveredEmpty {
+		log.Printf("service_turn: completed_empty_final job=%s session=%s trace=%s saw_tool=%t last_tool=%s last_tool_status=%s", jobID, req.SessionKey, serviceMetaText(req.Meta, "trace_id"), observer.sawToolActivity(), observer.lastToolName, observer.lastToolStatus)
+	}
+	log.Printf("service_turn: completed job=%s session=%s trace=%s recovered_empty=%t final_preview=%q", jobID, req.SessionKey, serviceMetaText(req.Meta, "trace_id"), recoveredEmpty, boundedServiceLogPreview(finalText, 160))
+	payload := map[string]any{"final_text": finalText}
+	if recoveredEmpty {
+		payload["degraded"] = true
+		payload["empty_final_text_recovered"] = true
+	}
+	s.jobs.Complete(jobID, "completed", serviceLifecyclePayload(req.SessionKey, req.Meta, payload))
 }
 
 func (s *serviceServer) startApprovedResumeJob(ctx context.Context, issued approval.IssuedApproval, identity serviceAuthIdentity) (string, error) {
@@ -129,6 +143,7 @@ func (s *serviceServer) startApprovedResumeJob(ctx context.Context, issued appro
 		"approval_request_id": issued.Request.ID,
 		"approved_resume":     true,
 	}
+	log.Printf("service_approval: resume_registered approval=%d job=%s session=%s", issued.Request.ID, job.ID, sessionKey)
 	s.jobs.Publish(job.ID, "queued", serviceLifecyclePayload(sessionKey, meta, map[string]any{"status": "queued"}))
 	s.persistServiceJobSummary(context.Background(), job.ID)
 	runCtx, cancel := context.WithCancel(withDetachedContext(ctx))
@@ -144,6 +159,7 @@ func (s *serviceServer) runApprovedResumeJob(ctx context.Context, jobID string, 
 		"approval_request_id": issued.Request.ID,
 		"approved_resume":     true,
 	}
+	log.Printf("service_approval: resume_started approval=%d job=%s session=%s", issued.Request.ID, jobID, sessionKey)
 	s.jobs.Publish(jobID, "started", serviceLifecyclePayload(sessionKey, meta, map[string]any{"status": "running"}))
 	observer := &serviceObserver{ConversationObserver: s.jobs.Observer(jobID)}
 	finalText, err := s.app().ResumeApprovedRequest(ctx, app.ResumeApprovedRequest{
@@ -154,13 +170,24 @@ func (s *serviceServer) runApprovedResumeJob(ctx context.Context, jobID string, 
 		Observer:       observer,
 	})
 	if err != nil {
+		log.Printf("service_approval: resume_error approval=%d job=%s session=%s public_code=%s", issued.Request.ID, jobID, sessionKey, agent.PublicErrorCode(err))
 		s.completeTurnJobWithError(ctx, jobID, err, observer, sessionKey, meta)
 		return
 	}
 	if strings.TrimSpace(observer.finalText) == "" {
 		observer.finalText = strings.TrimSpace(finalText)
 	}
-	s.jobs.Complete(jobID, "completed", serviceLifecyclePayload(sessionKey, meta, map[string]any{"final_text": observer.finalText}))
+	completionText, recoveredEmpty := observer.finalTextForCompletion("The approval was accepted, but or3-intern did not return a final response after the resume job. Please retry the command if it still matters.")
+	if recoveredEmpty {
+		log.Printf("service_approval: resume_completed_empty_final approval=%d job=%s session=%s saw_tool=%t last_tool=%s last_tool_status=%s", issued.Request.ID, jobID, sessionKey, observer.sawToolActivity(), observer.lastToolName, observer.lastToolStatus)
+	}
+	payload := map[string]any{"final_text": completionText}
+	if recoveredEmpty {
+		payload["degraded"] = true
+		payload["empty_final_text_recovered"] = true
+	}
+	s.jobs.Complete(jobID, "completed", serviceLifecyclePayload(sessionKey, meta, payload))
+	log.Printf("service_approval: resume_completed approval=%d job=%s session=%s recovered_empty=%t final_preview=%q", issued.Request.ID, jobID, sessionKey, recoveredEmpty, boundedServiceLogPreview(completionText, 160))
 }
 
 func (s *serviceServer) completeTurnJobWithError(ctx context.Context, jobID string, err error, observer *serviceObserver, sessionKey string, meta map[string]any) {
@@ -170,6 +197,7 @@ func (s *serviceServer) completeTurnJobWithError(ctx context.Context, jobID stri
 	}
 	var approvalErr *tools.ApprovalRequiredError
 	if errors.As(err, &approvalErr) {
+		log.Printf("service_turn: approval_required job=%s session=%s approval=%d trace=%s", jobID, sessionKey, approvalErr.RequestID, serviceMetaText(meta, "trace_id"))
 		s.jobs.Complete(jobID, "approval_required", serviceApprovalRequiredPayload(sessionKey, meta, approvalErr))
 		return
 	}
@@ -555,6 +583,50 @@ func serviceJSONText(values map[string]any, key string) string {
 	return strings.TrimSpace(value)
 }
 
+func serviceMetaText(values map[string]any, key string) string {
+	if values == nil {
+		return ""
+	}
+	value, ok := values[key]
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(value))
+}
+
+func boundedServiceLogPreview(text string, limit int) string {
+	text = redactServiceLogPreview(strings.TrimSpace(text))
+	if text == "" || limit <= 0 {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	return string(runes[:limit]) + "..."
+}
+
+var serviceLogSecretPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)ya29\.[A-Za-z0-9._~+/=-]+`),
+	regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+`),
+	regexp.MustCompile(`(?i)("?(?:access_token|refresh_token|id_token|approval_token|token)"?\s*[:=]\s*")([^"\s]+)("?)`),
+}
+
+func redactServiceLogPreview(text string) string {
+	for _, pattern := range serviceLogSecretPatterns {
+		text = pattern.ReplaceAllStringFunc(text, func(match string) string {
+			if strings.HasPrefix(strings.ToLower(match), "bearer ") {
+				return "Bearer [redacted]"
+			}
+			if strings.Contains(match, ":") || strings.Contains(match, "=") {
+				return pattern.ReplaceAllString(match, `${1}[redacted]${3}`)
+			}
+			return "[redacted]"
+		})
+	}
+	return text
+}
+
 func decodeServiceJSONMap(raw string) map[string]any {
 	out := map[string]any{}
 	if strings.TrimSpace(raw) == "" {
@@ -579,7 +651,7 @@ func (s *serviceServer) streamJob(w http.ResponseWriter, r *http.Request, jobID 
 		return
 	}
 	for _, event := range snapshot.Events {
-		if err := writeSSEEvent(w, event.Type, event.Data); err != nil {
+		if err := writeSSEEvent(w, event.Type, serviceStreamEventPayload(event)); err != nil {
 			return
 		}
 	}
@@ -594,17 +666,34 @@ func (s *serviceServer) streamJob(w http.ResponseWriter, r *http.Request, jobID 
 			if !ok {
 				return
 			}
-			if err := writeSSEEvent(w, event.Type, event.Data); err != nil {
+			if err := writeSSEEvent(w, event.Type, serviceStreamEventPayload(event)); err != nil {
 				return
 			}
 		}
 	}
 }
 
+func serviceStreamEventPayload(event agent.JobEvent) map[string]any {
+	payload := map[string]any{}
+	for key, value := range event.Data {
+		payload[key] = value
+	}
+	payload["sequence"] = event.Sequence
+	payload["type"] = event.Type
+	return payload
+}
+
 type serviceObserver struct {
 	agent.ConversationObserver
-	finalText     string
-	lastToolError string
+	finalText             string
+	sawToolCall           bool
+	sawToolResult         bool
+	lastToolName          string
+	lastToolStatus        string
+	lastToolError         string
+	lastToolResultPreview string
+	lastToolCallID        string
+	lastApprovalID        int64
 }
 
 func (o *serviceObserver) OnCompletion(ctx context.Context, finalText string, streamed bool) {
@@ -614,9 +703,28 @@ func (o *serviceObserver) OnCompletion(ctx context.Context, finalText string, st
 	}
 }
 
+func (o *serviceObserver) OnToolCall(ctx context.Context, name string, arguments string) {
+	o.sawToolCall = true
+	o.lastToolName = strings.TrimSpace(name)
+	o.lastToolStatus = "running"
+	if o.ConversationObserver != nil {
+		o.ConversationObserver.OnToolCall(ctx, name, arguments)
+	}
+}
+
 func (o *serviceObserver) OnToolResult(ctx context.Context, name string, out string, err error) {
+	o.sawToolResult = true
+	o.lastToolName = strings.TrimSpace(name)
+	o.lastToolStatus = "completed"
+	o.lastToolResultPreview = boundedServiceLogPreview(out, 180)
 	if err != nil {
 		o.lastToolError = err.Error()
+		o.lastToolStatus = "failed"
+		var approvalErr *tools.ApprovalRequiredError
+		if errors.As(err, &approvalErr) {
+			o.lastToolStatus = "approval_required"
+			o.lastApprovalID = approvalErr.RequestID
+		}
 	}
 	if o.ConversationObserver != nil {
 		o.ConversationObserver.OnToolResult(ctx, name, out, err)
@@ -624,11 +732,78 @@ func (o *serviceObserver) OnToolResult(ctx context.Context, name string, out str
 }
 
 func (o *serviceObserver) OnToolLifecycle(ctx context.Context, event agent.ToolLifecycleEvent) {
+	o.sawToolCall = true
+	o.lastToolName = strings.TrimSpace(event.Name)
+	o.lastToolStatus = strings.TrimSpace(event.Status)
+	o.lastToolCallID = strings.TrimSpace(event.ToolCallID)
+	if event.Result != "" || event.ResultPreview != "" || event.Status == "completed" || event.Status == "failed" {
+		o.sawToolResult = true
+	}
+	if event.ResultPreview != "" {
+		o.lastToolResultPreview = boundedServiceLogPreview(event.ResultPreview, 180)
+	} else if event.Result != "" {
+		o.lastToolResultPreview = boundedServiceLogPreview(event.Result, 180)
+	}
+	if event.ApprovalID > 0 {
+		o.lastApprovalID = event.ApprovalID
+		o.lastToolStatus = "approval_required"
+	}
 	if event.PublicCode == "" && event.Status == "failed" {
 		event.PublicCode = agent.PublicErrorToolExecution
 	}
+	if event.Status == "failed" && o.lastToolError == "" {
+		o.lastToolError = firstNonEmptyString(event.ResultPreview, event.Result, event.PublicCode)
+	}
 	if lifecycle, ok := o.ConversationObserver.(agent.ToolLifecycleObserver); ok {
 		lifecycle.OnToolLifecycle(ctx, event)
+	}
+}
+
+func (o *serviceObserver) sawToolActivity() bool {
+	return o != nil && (o.sawToolCall || o.sawToolResult)
+}
+
+func (o *serviceObserver) finalTextForCompletion(defaultMessage string) (string, bool) {
+	if o == nil {
+		return strings.TrimSpace(defaultMessage), strings.TrimSpace(defaultMessage) != ""
+	}
+	if finalText := strings.TrimSpace(o.finalText); finalText != "" {
+		return finalText, false
+	}
+	if fallback, ok := o.emptyFinalTextFallback(); ok {
+		o.finalText = fallback
+		return fallback, true
+	}
+	defaultMessage = strings.TrimSpace(defaultMessage)
+	if defaultMessage == "" {
+		return "", false
+	}
+	o.finalText = defaultMessage
+	return defaultMessage, true
+}
+
+func (o *serviceObserver) emptyFinalTextFallback() (string, bool) {
+	if o == nil || !o.sawToolActivity() {
+		return "", false
+	}
+	toolName := strings.TrimSpace(o.lastToolName)
+	if toolName == "" {
+		toolName = "tool"
+	}
+	switch strings.TrimSpace(o.lastToolStatus) {
+	case "failed", "error":
+		message := fmt.Sprintf("The tool failed, and the model did not return a final message. Last tool: %s.", toolName)
+		if detail := strings.TrimSpace(firstNonEmptyString(o.lastToolError, o.lastToolResultPreview)); detail != "" {
+			message += " " + boundedServiceLogPreview(detail, 220)
+		}
+		return message, true
+	case "approval_required":
+		if o.lastApprovalID > 0 {
+			return fmt.Sprintf("The tool still needs approval before it can continue. Last tool: %s. Approval request: %d.", toolName, o.lastApprovalID), true
+		}
+		return fmt.Sprintf("The tool still needs approval before it can continue. Last tool: %s.", toolName), true
+	default:
+		return fmt.Sprintf("The tool finished, but the model did not return a final message. Last tool: %s.", toolName), true
 	}
 }
 

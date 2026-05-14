@@ -46,6 +46,24 @@ type errString string
 
 func (e errString) Error() string { return string(e) }
 
+type replayLifecycleObserver struct {
+	events []agent.ToolLifecycleEvent
+}
+
+func (o *replayLifecycleObserver) OnTextDelta(context.Context, string) {}
+
+func (o *replayLifecycleObserver) OnToolCall(context.Context, string, string) {}
+
+func (o *replayLifecycleObserver) OnToolResult(context.Context, string, string, error) {}
+
+func (o *replayLifecycleObserver) OnCompletion(context.Context, string, bool) {}
+
+func (o *replayLifecycleObserver) OnError(context.Context, error) {}
+
+func (o *replayLifecycleObserver) OnToolLifecycle(_ context.Context, event agent.ToolLifecycleEvent) {
+	o.events = append(o.events, event)
+}
+
 func TestReplayToolCall_UsesRestrictedRegistryContext(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(registryProbeTool{name: "replay_probe"})
@@ -68,6 +86,71 @@ func TestReplayToolCall_UsesRestrictedRegistryContext(t *testing.T) {
 	}
 	if out != "ok" {
 		t.Fatalf("expected ok, got %q", out)
+	}
+}
+
+func TestReplayToolCall_EmitsOriginalToolCallID(t *testing.T) {
+	database, err := db.Open(filepath.Join(t.TempDir(), "service-app-replay-id.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { database.Close() })
+
+	providerCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","content":"continued"}}]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	provider := providers.New(srv.URL, "test-key", 10*time.Second)
+	provider.HTTP = srv.Client()
+	registry := tools.NewRegistry()
+	registry.Register(registryProbeTool{name: "replay_probe"})
+	runtime := &agent.Runtime{
+		DB:       database,
+		Provider: provider,
+		Model:    "gpt-4",
+		Tools:    registry,
+		Builder:  &agent.Builder{DB: database, HistoryMax: 20},
+	}
+	app := &ServiceApp{runtime: runtime}
+
+	toolCall := providers.ToolCall{
+		ID:   "tc-replay-id",
+		Type: "function",
+		Function: struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		}{Name: "replay_probe", Arguments: `{}`},
+	}
+	if _, err := database.AppendMessage(context.Background(), "sess-replay-id", "user", "run it", nil); err != nil {
+		t.Fatalf("Append user: %v", err)
+	}
+	if _, err := database.AppendMessage(context.Background(), "sess-replay-id", "assistant", "", map[string]any{"tool_calls": []providers.ToolCall{toolCall}}); err != nil {
+		t.Fatalf("Append assistant: %v", err)
+	}
+
+	observer := &replayLifecycleObserver{}
+	if _, err := app.ReplayToolCall(context.Background(), ReplayToolCallRequest{
+		SessionKey:    "sess-replay-id",
+		ToolName:      "replay_probe",
+		ArgumentsJSON: `{}`,
+		Observer:      observer,
+	}); err != nil {
+		t.Fatalf("ReplayToolCall: %v", err)
+	}
+	if providerCalls != 1 {
+		t.Fatalf("expected one provider continuation call, got %d", providerCalls)
+	}
+	if len(observer.events) != 2 {
+		t.Fatalf("expected start and finish lifecycle events, got %#v", observer.events)
+	}
+	for _, event := range observer.events {
+		if event.ToolCallID != "tc-replay-id" {
+			t.Fatalf("expected original tool_call_id on lifecycle event, got %#v", event)
+		}
 	}
 }
 

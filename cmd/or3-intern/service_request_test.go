@@ -109,6 +109,21 @@ func TestDecodeServiceTurnRequest_ConflictWarningsKeepSnakeCaseCanonical(t *test
 	}
 }
 
+func TestServiceLifecyclePayloadIncludesTraceID(t *testing.T) {
+	payload := serviceLifecyclePayload("session-1", map[string]any{
+		"trace_id":           "turn_trace",
+		"request_id":         "req_trace",
+		"network_session_id": "net_trace",
+	}, map[string]any{"status": "running"})
+
+	if payload["trace_id"] != "turn_trace" {
+		t.Fatalf("expected trace_id to be carried in lifecycle payload, got %#v", payload)
+	}
+	if payload["request_id"] != "req_trace" || payload["network_session_id"] != "net_trace" {
+		t.Fatalf("expected audit identifiers to remain present, got %#v", payload)
+	}
+}
+
 func TestDecodeServiceAgentRunRequest_RejectsUnknownFields(t *testing.T) {
 	body := `{
 		"parent_session_key": "session-1",

@@ -662,7 +662,7 @@ func mergeServiceAuditMeta(meta map[string]any, audit serviceAuditHeaders) map[s
 
 func serviceLifecyclePayload(sessionKey string, meta map[string]any, extra map[string]any) map[string]any {
 	payload := map[string]any{"session_key": sessionKey}
-	for _, key := range []string{"request_id", "workspace_id", "network_session_id"} {
+	for _, key := range []string{"request_id", "workspace_id", "network_session_id", "trace_id"} {
 		if value, ok := meta[key]; ok {
 			payload[key] = value
 		}

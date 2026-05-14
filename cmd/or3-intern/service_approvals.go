@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -151,6 +152,7 @@ func (s *serviceServer) handleApprovals(w http.ResponseWriter, r *http.Request) 
 			s.writeServiceApprovalActionError(w, r, http.StatusBadRequest, id, "approve", "approval failed", err)
 			return
 		}
+		log.Printf("service_approval: approved approval=%d session=%s allowlist=%t", id, strings.TrimSpace(issued.Request.RequesterSessionID), body.Allowlist)
 		response := map[string]any{"request_id": id, "token": issued.Token, "allowlist_id": issued.AllowlistID}
 		if sessionKey := strings.TrimSpace(issued.Request.RequesterSessionID); sessionKey != "" {
 			response["session_key"] = sessionKey
@@ -209,6 +211,7 @@ func (s *serviceServer) handleApprovals(w http.ResponseWriter, r *http.Request) 
 			s.writeServiceApprovalActionError(w, r, http.StatusBadRequest, id, "deny", "approval denial failed", err)
 			return
 		}
+		log.Printf("service_approval: denied approval=%d", id)
 		writeServiceJSON(w, http.StatusOK, map[string]any{"request_id": id, "status": "denied"})
 	case "cancel":
 		if r.Method != http.MethodPost {

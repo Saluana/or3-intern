@@ -219,18 +219,14 @@ func (a *ServiceApp) ReplayToolCall(ctx context.Context, req ReplayToolCallReque
 			}
 		}
 	}
-	if req.Observer != nil {
-		req.Observer.OnToolCall(runCtx, toolName, argsJSON)
-	}
+	emitReplayToolCallStarted(runCtx, req.Observer, toolName, argsJSON, toolCallID)
 	out, err := registry.Execute(runCtx, toolName, argsJSON)
 	if err != nil {
 		var params map[string]any
 		_ = json.Unmarshal([]byte(argsJSON), &params)
 		out = tools.EncodeToolFailure(toolName, params, out, err)
 	}
-	if req.Observer != nil {
-		req.Observer.OnToolResult(runCtx, toolName, out, err)
-	}
+	emitReplayToolCallFinished(runCtx, req.Observer, toolName, argsJSON, toolCallID, out, err)
 	if err != nil {
 		var approvalErr *tools.ApprovalRequiredError
 		if errors.As(err, &approvalErr) {
@@ -388,6 +384,64 @@ func summarizeReplayToolResult(toolName string, out string) string {
 		}
 	}
 	return out
+}
+
+func emitReplayToolCallStarted(ctx context.Context, observer agent.ConversationObserver, toolName string, argsJSON string, toolCallID string) {
+	if observer == nil {
+		return
+	}
+	if lifecycle, ok := observer.(agent.ToolLifecycleObserver); ok {
+		lifecycle.OnToolLifecycle(ctx, agent.ToolLifecycleEvent{
+			ToolCallID:       strings.TrimSpace(toolCallID),
+			Name:             strings.TrimSpace(toolName),
+			Status:           "running",
+			Arguments:        argsJSON,
+			ArgumentsPreview: serviceAppEventPreview(argsJSON, 500),
+		})
+		return
+	}
+	observer.OnToolCall(ctx, toolName, argsJSON)
+}
+
+func emitReplayToolCallFinished(ctx context.Context, observer agent.ConversationObserver, toolName string, argsJSON string, toolCallID string, out string, err error) {
+	if observer == nil {
+		return
+	}
+	if lifecycle, ok := observer.(agent.ToolLifecycleObserver); ok {
+		status := "completed"
+		if err != nil {
+			status = "failed"
+		}
+		event := agent.ToolLifecycleEvent{
+			ToolCallID:       strings.TrimSpace(toolCallID),
+			Name:             strings.TrimSpace(toolName),
+			Status:           status,
+			Arguments:        argsJSON,
+			ArgumentsPreview: serviceAppEventPreview(argsJSON, 500),
+			Result:           out,
+			ResultPreview:    serviceAppEventPreview(out, 700),
+			PublicCode:       agent.PublicErrorCode(err),
+		}
+		var approvalErr *tools.ApprovalRequiredError
+		if errors.As(err, &approvalErr) {
+			event.ApprovalID = approvalErr.RequestID
+		}
+		lifecycle.OnToolLifecycle(ctx, event)
+		return
+	}
+	observer.OnToolResult(ctx, toolName, out, err)
+}
+
+func serviceAppEventPreview(text string, limit int) string {
+	text = strings.TrimSpace(text)
+	if text == "" || limit <= 0 {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	return string(runes[:limit]) + "..."
 }
 
 func (a *ServiceApp) findReplayToolCallID(ctx context.Context, sessionKey, toolName, argsJSON string) (string, error) {

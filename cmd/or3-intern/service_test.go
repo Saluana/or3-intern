@@ -126,6 +126,52 @@ func (serviceApprovalTool) Execute(context.Context, map[string]any) (string, err
 	return "", &tools.ApprovalRequiredError{ToolName: "exec", RequestID: 77}
 }
 
+func TestServiceObserver_RecoversEmptyFinalTextAfterToolWork(t *testing.T) {
+	observer := &serviceObserver{}
+	observer.OnToolLifecycle(context.Background(), agent.ToolLifecycleEvent{
+		ToolCallID:    "call_exec",
+		Name:          "exec",
+		Status:        "completed",
+		ResultPreview: "stdout:\nv22.21.1",
+	})
+
+	finalText, recovered := observer.finalTextForCompletion("")
+	if !recovered {
+		t.Fatal("expected empty final text to be recovered after tool work")
+	}
+	if !strings.Contains(finalText, "tool finished") || !strings.Contains(finalText, "exec") {
+		t.Fatalf("expected visible fallback final text, got %q", finalText)
+	}
+}
+
+func TestServiceObserver_RecoversEmptyApprovalResumeWithoutToolWork(t *testing.T) {
+	observer := &serviceObserver{}
+
+	finalText, recovered := observer.finalTextForCompletion("resume did not produce text")
+	if !recovered {
+		t.Fatal("expected default resume fallback to be used")
+	}
+	if finalText != "resume did not produce text" {
+		t.Fatalf("unexpected fallback final text: %q", finalText)
+	}
+}
+
+func TestBoundedServiceLogPreview_RedactsTokenShapedValues(t *testing.T) {
+	preview := boundedServiceLogPreview(`stdout:
+token: ya29.a0AQvPyExampleSecret
+Authorization: Bearer abc.def.ghi
+{"access_token":"plain-secret"}`, 500)
+
+	for _, leaked := range []string{"ya29.a0AQvPyExampleSecret", "abc.def.ghi", "plain-secret"} {
+		if strings.Contains(preview, leaked) {
+			t.Fatalf("expected preview to redact %q, got %q", leaked, preview)
+		}
+	}
+	if !strings.Contains(preview, "[redacted]") {
+		t.Fatalf("expected redaction marker in preview, got %q", preview)
+	}
+}
+
 func TestServiceServerControl_CachesWrapper(t *testing.T) {
 	server := &serviceServer{jobs: agent.NewJobRegistry(time.Minute, 32)}
 
@@ -2492,6 +2538,53 @@ func TestServiceTurns_MaxToolLoopsReturnsFallbackResponse(t *testing.T) {
 	finalText := fmt.Sprint(payload["final_text"])
 	if !strings.Contains(finalText, "tool calls kept failing or looping") {
 		t.Fatalf("expected fallback final_text, got %#v", payload)
+	}
+}
+
+func TestServiceTurns_EmptyAssistantResponseReturnsFallbackText(t *testing.T) {
+	rt, cleanup := buildServiceTestRuntime(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		resp := providers.ChatCompletionResponse{
+			Choices: []struct {
+				Message struct {
+					Role      string               `json:"role"`
+					Content   any                  `json:"content"`
+					ToolCalls []providers.ToolCall `json:"tool_calls"`
+				} `json:"message"`
+			}{{
+				Message: struct {
+					Role      string               `json:"role"`
+					Content   any                  `json:"content"`
+					ToolCalls []providers.ToolCall `json:"tool_calls"`
+				}{Role: "assistant", Content: ""},
+			}},
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("Encode: %v", err)
+		}
+	})
+	defer cleanup()
+
+	server := &serviceServer{runtime: rt, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	httpServer := newServiceTestHTTPServer(t, strings.Repeat("e", 32), server)
+	defer httpServer.Close()
+
+	body := `{"session_key":"svc:empty-final","message":"say something"}`
+	req := mustServiceRequest(t, httpServer, strings.Repeat("e", 32), http.MethodPost, "/internal/v1/turns", body)
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	payload := mustDecodeJSONBody(t, resp.Body)
+	if got := fmt.Sprint(payload["final_text"]); !strings.Contains(got, "completed without a final response") {
+		t.Fatalf("expected fallback final_text, got %#v", payload)
+	}
+	if payload["empty_final_text_recovered"] != true {
+		t.Fatalf("expected empty_final_text_recovered marker, got %#v", payload)
 	}
 }
 

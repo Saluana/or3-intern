@@ -135,6 +135,7 @@ func normalizeEntry(entry Entry) Entry {
 	}
 	entry.Component = strings.TrimSpace(entry.Component)
 	entry.Message = redact(strings.TrimSpace(entry.Message))
+	entry.Fields = redactFields(entry.Fields)
 	entry.TraceID = strings.TrimSpace(entry.TraceID)
 	entry.Session = strings.TrimSpace(entry.Session)
 	if entry.Component == "" {
@@ -191,6 +192,7 @@ var keyValuePattern = regexp.MustCompile(`\b([A-Za-z0-9_]+)=([^\s]+)`)
 var redactionPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+`),
 	regexp.MustCompile(`(?i)(token|secret|password|authorization)=([^\s]+)`),
+	regexp.MustCompile(`(?i)"(token|secret|password|authorization)"\s*:\s*"[^"]+"`),
 }
 
 func normalizeStdlibLine(line string) string {
@@ -220,8 +222,46 @@ func redact(message string) string {
 			if len(parts) == 2 {
 				return parts[0] + "=[redacted]"
 			}
+			if index := strings.Index(match, ":"); index > 0 {
+				return match[:index+1] + ` "[redacted]"`
+			}
 			return "[redacted]"
 		})
 	}
 	return message
+}
+
+func redactFields(fields map[string]string) map[string]string {
+	if len(fields) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(fields))
+	for key, value := range fields {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		if isSensitiveFieldKey(key) {
+			out[key] = "[redacted]"
+			continue
+		}
+		out[key] = redact(strings.TrimSpace(value))
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func isSensitiveFieldKey(key string) bool {
+	key = strings.ToLower(strings.TrimSpace(key))
+	if key == "" {
+		return false
+	}
+	for _, token := range []string{"token", "secret", "password", "authorization", "api_key", "apikey", "api-key"} {
+		if key == token || strings.Contains(key, token) {
+			return true
+		}
+	}
+	return false
 }

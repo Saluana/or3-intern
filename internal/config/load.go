@@ -5,6 +5,7 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +21,10 @@ func Load(path string) (Config, error) {
 	}
 	ApplyEnvOverrides(&cfg)
 	return normalizeAndValidateConfig(cfg)
+}
+
+type normalizeOptions struct {
+	QuarantineOptionalIntegrations bool
 }
 
 func resolveConfigPath(path string) string {
@@ -59,6 +64,10 @@ func parseConfigFile(data []byte, cfg Config) (Config, error) {
 }
 
 func normalizeAndValidateConfig(cfg Config) (Config, error) {
+	return normalizeAndValidateConfigWithOptions(cfg, normalizeOptions{QuarantineOptionalIntegrations: true})
+}
+
+func normalizeAndValidateConfigWithOptions(cfg Config, opts normalizeOptions) (Config, error) {
 	if cfg.Provider.TimeoutSeconds <= 0 {
 		cfg.Provider.TimeoutSeconds = int((60 * time.Second).Seconds())
 	}
@@ -508,7 +517,11 @@ func normalizeAndValidateConfig(cfg Config) (Config, error) {
 		profile.WritablePaths = compactStrings(profile.WritablePaths)
 		cfg.Security.Profiles.Profiles[name] = profile
 	}
-	QuarantineInvalidOptionalIntegrations(&cfg)
+	if opts.QuarantineOptionalIntegrations {
+		QuarantineInvalidOptionalIntegrations(&cfg)
+	} else {
+		cfg.IntegrationWarnings = nil
+	}
 	if err := validateMCPServers(cfg.Tools.MCPServers); err != nil {
 		return cfg, err
 	}
@@ -535,4 +548,19 @@ func normalizeAndValidateConfig(cfg Config) (Config, error) {
 		return cfg, err
 	}
 	return cfg, nil
+}
+
+// ValidateSnapshot normalizes and validates an in-memory config without
+// applying dotenv or process environment overrides.
+func ValidateSnapshot(cfg Config) error {
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("marshal config snapshot: %w", err)
+	}
+	var snapshot Config
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		return fmt.Errorf("unmarshal config snapshot: %w", err)
+	}
+	_, err = normalizeAndValidateConfigWithOptions(snapshot, normalizeOptions{QuarantineOptionalIntegrations: false})
+	return err
 }

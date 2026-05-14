@@ -25,3 +25,18 @@ func TestQuarantineInvalidOptionalIntegrations(t *testing.T) {
 		t.Fatal("expected telegram without token to be disabled")
 	}
 }
+
+func TestValidateSnapshotDoesNotQuarantineOptionalIntegrations(t *testing.T) {
+	cfg := Default()
+	cfg.Tools.MCPServers = map[string]MCPServerConfig{
+		"broken": {Enabled: true, Transport: "stdio"},
+	}
+
+	err := ValidateSnapshot(cfg)
+	if err == nil {
+		t.Fatal("expected invalid MCP server to fail snapshot validation")
+	}
+	if !cfg.Tools.MCPServers["broken"].Enabled {
+		t.Fatal("expected snapshot validation not to disable caller MCP server")
+	}
+}

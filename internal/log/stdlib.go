@@ -10,17 +10,22 @@ import (
 )
 
 var (
-	defaultBuffer = NewBuffer(DefaultBufferSize)
-	installOnce   sync.Once
-	outputMu      sync.Mutex
-	outputWriter  io.Writer = os.Stderr
+	defaultBuffer   = NewBuffer(DefaultBufferSize)
+	defaultBufferMu sync.RWMutex
+	installOnce     sync.Once
+	outputMu        sync.Mutex
+	outputWriter    io.Writer = os.Stderr
 )
 
 func DefaultBuffer() *Buffer {
+	defaultBufferMu.RLock()
+	defer defaultBufferMu.RUnlock()
 	return defaultBuffer
 }
 
 func ResetDefaultBufferForTest(max int) {
+	defaultBufferMu.Lock()
+	defer defaultBufferMu.Unlock()
 	defaultBuffer = NewBuffer(max)
 }
 
@@ -33,7 +38,7 @@ func InstallStdlibSink() {
 		outputMu.Lock()
 		outputWriter = writer
 		outputMu.Unlock()
-		stdlog.SetOutput(io.MultiWriter(writer, stdlibSink{buffer: defaultBuffer}))
+		stdlog.SetOutput(io.MultiWriter(writer, stdlibSink{}))
 	})
 }
 
@@ -64,9 +69,7 @@ func emit(level Level, component, format string, args ...any) {
 	_, _ = fmt.Fprintf(outputWriter, "%s: %s\n", strings.TrimSpace(component), message)
 }
 
-type stdlibSink struct {
-	buffer *Buffer
-}
+type stdlibSink struct{}
 
 func (w stdlibSink) Write(p []byte) (int, error) {
 	lines := strings.Split(string(p), "\n")
@@ -79,7 +82,7 @@ func (w stdlibSink) Write(p []byte) (int, error) {
 		if !Enabled(level) {
 			continue
 		}
-		w.buffer.Append(Entry{Level: level, Message: message})
+		DefaultBuffer().Append(Entry{Level: level, Message: message})
 	}
 	return len(p), nil
 }

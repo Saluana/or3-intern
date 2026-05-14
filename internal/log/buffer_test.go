@@ -1,6 +1,7 @@
 package log
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -54,5 +55,45 @@ func TestFilterMatchesLevelComponentTraceAndSession(t *testing.T) {
 	filter = Filter{MinLevel: LevelError}
 	if filter.Matches(entry) {
 		t.Fatal("expected warn entry to be below error filter")
+	}
+}
+
+func TestRedactRemovesJSONSecrets(t *testing.T) {
+	buffer := NewBuffer(1)
+	entry := buffer.Append(Entry{
+		Level:     LevelInfo,
+		Component: "service",
+		Message:   `received {"token":"abc123","password": "secret-value","ok":"visible"}`,
+	})
+
+	if strings.Contains(entry.Message, "abc123") || strings.Contains(entry.Message, "secret-value") {
+		t.Fatalf("expected JSON secrets to be redacted, got %q", entry.Message)
+	}
+	if !strings.Contains(entry.Message, `"ok":"visible"`) {
+		t.Fatalf("expected non-secret JSON fields to remain, got %q", entry.Message)
+	}
+}
+
+func TestNormalizeEntryRedactsStructuredFields(t *testing.T) {
+	buffer := NewBuffer(1)
+	entry := buffer.Append(Entry{
+		Level:     LevelInfo,
+		Component: "service",
+		Message:   "structured fields",
+		Fields: map[string]string{
+			"api_key": "sk-test",
+			"note":    "Bearer visible-token",
+			"safe":    "visible",
+		},
+	})
+
+	if entry.Fields["api_key"] != "[redacted]" {
+		t.Fatalf("expected api_key field to be redacted, got %#v", entry.Fields)
+	}
+	if strings.Contains(entry.Fields["note"], "visible-token") {
+		t.Fatalf("expected bearer token in non-sensitive field value to be redacted, got %#v", entry.Fields)
+	}
+	if entry.Fields["safe"] != "visible" {
+		t.Fatalf("expected safe field to remain, got %#v", entry.Fields)
 	}
 }

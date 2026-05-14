@@ -39,6 +39,9 @@ func approvalFindings(cfg config.Config, opts Options) []Finding {
 }
 
 func approvalBrokerRequired(cfg config.Config) bool {
+	if !cfg.Security.Approvals.Enabled {
+		return false
+	}
 	for _, mode := range []config.ApprovalMode{
 		cfg.Security.Approvals.Pairing.Mode,
 		cfg.Security.Approvals.Exec.Mode,

@@ -1,7 +1,6 @@
 package doctor
 
 import (
-	"os"
 	"strings"
 
 	"or3-intern/internal/config"
@@ -48,19 +47,5 @@ func configValidationFindings(cfg config.Config, opts Options) []Finding {
 }
 
 func validateConfigSnapshot(cfg config.Config) error {
-	file, err := os.CreateTemp("", "or3-intern-doctor-*.json")
-	if err != nil {
-		return err
-	}
-	path := file.Name()
-	if closeErr := file.Close(); closeErr != nil {
-		_ = os.Remove(path)
-		return closeErr
-	}
-	defer os.Remove(path)
-	if err := config.Save(path, cfg); err != nil {
-		return err
-	}
-	_, err = config.Load(path)
-	return err
+	return config.ValidateSnapshot(cfg)
 }

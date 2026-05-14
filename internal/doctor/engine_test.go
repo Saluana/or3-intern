@@ -105,6 +105,37 @@ func TestApplyAutomaticFixes_ServiceUnsafeSharedSecretPosture(t *testing.T) {
 	}
 }
 
+func TestValidateConfigSnapshotDoesNotApplyEnvOverrides(t *testing.T) {
+	t.Setenv("OR3_RUNTIME_PROFILE", string(config.ProfileLocalDev))
+
+	cfg := config.Default()
+	cfg.RuntimeProfile = config.RuntimeProfile("invalid-profile")
+
+	err := validateConfigSnapshot(cfg)
+	if err == nil {
+		t.Fatal("expected snapshot validation to reject in-memory config")
+	}
+	if !strings.Contains(err.Error(), "unrecognized runtimeProfile") {
+		t.Fatalf("expected runtime profile validation error, got %v", err)
+	}
+}
+
+func TestValidateConfigSnapshotDoesNotMutateInputMaps(t *testing.T) {
+	cfg := config.Default()
+	cfg.Tools.MCPServers = map[string]config.MCPServerConfig{
+		"broken": {
+			Enabled:   true,
+			Transport: "stdio",
+		},
+	}
+
+	_ = validateConfigSnapshot(cfg)
+
+	if !cfg.Tools.MCPServers["broken"].Enabled {
+		t.Fatal("expected snapshot validation not to quarantine caller MCP map")
+	}
+}
+
 func TestServiceFindingsRequireEffectiveProfileForExposedIngress(t *testing.T) {
 	cfg := config.Default()
 	cfg.RuntimeProfile = config.ProfileHostedService

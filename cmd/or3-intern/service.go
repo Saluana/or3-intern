@@ -20,6 +20,7 @@ import (
 	"or3-intern/internal/config"
 	"or3-intern/internal/controlplane"
 	"or3-intern/internal/cron"
+	or3log "or3-intern/internal/log"
 	"or3-intern/internal/mcp"
 )
 
@@ -138,6 +139,7 @@ func runServiceCommandWithBrokerOptionsAndCron(ctx context.Context, cfg config.C
 }
 
 func runServiceCommandWithBrokerOptionsCronMCP(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, agentCLIManager *agentcli.Manager, jobs *agent.JobRegistry, broker *approval.Broker, unsafeDev bool, cronSvc *cron.Service, mcpManager *mcp.Manager) error {
+	or3log.InstallStdlibSink()
 	if strings.TrimSpace(cfg.Service.Secret) == "" {
 		return fmt.Errorf("service secret is required")
 	}

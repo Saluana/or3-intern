@@ -19,6 +19,7 @@ import (
 	"or3-intern/internal/approval"
 	"or3-intern/internal/auth"
 	"or3-intern/internal/db"
+	or3log "or3-intern/internal/log"
 	"or3-intern/internal/tools"
 )
 
@@ -26,6 +27,7 @@ type serviceRequestContextKey struct{}
 
 type serviceRequestContext struct {
 	RequestID string
+	TraceID   string
 }
 
 func serviceBoundaryMiddleware(server *serviceServer, next http.Handler) http.Handler {
@@ -35,7 +37,17 @@ func serviceBoundaryMiddleware(server *serviceServer, next http.Handler) http.Ha
 			requestID = newServiceRequestID()
 		}
 		w.Header().Set("X-Request-Id", requestID)
-		ctx := context.WithValue(r.Context(), serviceRequestContextKey{}, serviceRequestContext{RequestID: requestID})
+		traceID := normalizeServiceTraceID(r.Header.Get("X-Trace-Id"))
+		if traceID == "" {
+			traceID = normalizeServiceTraceID(r.Header.Get("X-Or3-Trace-Id"))
+		}
+		if traceID != "" {
+			w.Header().Set("X-Trace-Id", traceID)
+		}
+		ctx := context.WithValue(r.Context(), serviceRequestContextKey{}, serviceRequestContext{RequestID: requestID, TraceID: traceID})
+		if traceID != "" {
+			ctx = or3log.WithTraceID(ctx, traceID)
+		}
 		r = r.WithContext(ctx)
 		if server != nil && server.isMutationRequest(r) && !server.allowMutationRequest(r) {
 			writeServiceJSON(w, http.StatusTooManyRequests, serviceErrorPayload(r, "rate limit exceeded"))
@@ -43,7 +55,11 @@ func serviceBoundaryMiddleware(server *serviceServer, next http.Handler) http.Ha
 		}
 		captured := &serviceStatusRecorder{ResponseWriter: w, statusCode: http.StatusOK, requestID: requestID}
 		next.ServeHTTP(captured, r)
-		log.Printf("service %s %s -> %d", r.Method, r.URL.Path, captured.statusCode)
+		if traceID != "" {
+			log.Printf("service %s %s -> %d trace=%s", r.Method, r.URL.Path, captured.statusCode, traceID)
+		} else {
+			log.Printf("service %s %s -> %d", r.Method, r.URL.Path, captured.statusCode)
+		}
 		server.recordServiceAudit(r, captured.statusCode)
 	})
 }
@@ -162,6 +178,9 @@ func (s *serviceServer) recordServiceAudit(r *http.Request, statusCode int) {
 		"status_code": statusCode,
 		"request_id":  serviceRequestIDFromContext(r.Context()),
 	}
+	if traceID := serviceTraceIDFromContext(r.Context()); traceID != "" {
+		payload["trace_id"] = traceID
+	}
 	if remote := remoteIPKey(r.RemoteAddr); remote != "" {
 		payload["remote_addr"] = remote
 	}
@@ -174,6 +193,17 @@ func serviceRequestIDFromContext(ctx context.Context) string {
 	}
 	requestCtx, _ := ctx.Value(serviceRequestContextKey{}).(serviceRequestContext)
 	return strings.TrimSpace(requestCtx.RequestID)
+}
+
+func serviceTraceIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	requestCtx, _ := ctx.Value(serviceRequestContextKey{}).(serviceRequestContext)
+	if requestCtx.TraceID != "" {
+		return strings.TrimSpace(requestCtx.TraceID)
+	}
+	return or3log.TraceIDFromContext(ctx)
 }
 
 func writeServiceError(w http.ResponseWriter, r *http.Request, statusCode int, public string, err error) {
@@ -312,6 +342,9 @@ func serviceErrorPayload(r *http.Request, public string) map[string]any {
 	if r != nil {
 		if requestID := serviceRequestIDFromContext(r.Context()); requestID != "" {
 			payload["request_id"] = requestID
+		}
+		if traceID := serviceTraceIDFromContext(r.Context()); traceID != "" {
+			payload["trace_id"] = traceID
 		}
 	}
 	return payload
@@ -636,6 +669,7 @@ type serviceAuditHeaders struct {
 	RequestID        string
 	WorkspaceID      string
 	NetworkSessionID string
+	TraceID          string
 }
 
 func serviceAuditHeadersFromRequest(r *http.Request) serviceAuditHeaders {
@@ -643,6 +677,7 @@ func serviceAuditHeadersFromRequest(r *http.Request) serviceAuditHeaders {
 		RequestID:        strings.TrimSpace(r.Header.Get("X-Request-Id")),
 		WorkspaceID:      strings.TrimSpace(r.Header.Get("X-Workspace-Id")),
 		NetworkSessionID: strings.TrimSpace(r.Header.Get("X-Network-Session-Id")),
+		TraceID:          normalizeServiceTraceID(r.Header.Get("X-Trace-Id")),
 	}
 }
 
@@ -657,7 +692,24 @@ func mergeServiceAuditMeta(meta map[string]any, audit serviceAuditHeaders) map[s
 	if audit.NetworkSessionID != "" {
 		out["network_session_id"] = audit.NetworkSessionID
 	}
+	if audit.TraceID != "" {
+		out["trace_id"] = audit.TraceID
+	}
 	return out
+}
+
+func normalizeServiceTraceID(traceID string) string {
+	traceID = strings.TrimSpace(traceID)
+	if traceID == "" || len(traceID) > 128 {
+		return ""
+	}
+	for _, r := range traceID {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' || r == '.' || r == ':' {
+			continue
+		}
+		return ""
+	}
+	return traceID
 }
 
 func serviceLifecyclePayload(sessionKey string, meta map[string]any, extra map[string]any) map[string]any {

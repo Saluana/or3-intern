@@ -37,6 +37,7 @@ func serviceRouteSpecs(server *serviceServer) []serviceRouteSpec {
 		{Path: "/internal/v1/cron", Subtree: true, Handler: server.handleCron},
 		{Path: "/internal/v1/embeddings", Subtree: true, Handler: server.handleEmbeddings},
 		{Path: "/internal/v1/audit", Subtree: true, Handler: server.handleAudit},
+		{Path: "/internal/v1/logs/stream", Handler: server.handleLogs},
 		{Path: "/internal/v1/scope", Subtree: true, Handler: server.handleScope},
 		{Path: "/internal/v1/configure", Subtree: true, Handler: server.handleConfigure},
 		{Path: "/internal/v1/mcp/servers", Subtree: true, Handler: server.handleMCPServers},

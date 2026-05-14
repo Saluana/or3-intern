@@ -40,6 +40,14 @@ func (s *serviceServer) handleTurns(w http.ResponseWriter, r *http.Request) {
 	}
 	audit := serviceAuditHeadersFromRequest(r)
 	req.Meta = mergeServiceAuditMeta(req.Meta, audit)
+	if traceID := serviceTraceIDFromContext(r.Context()); traceID != "" {
+		if req.Meta == nil {
+			req.Meta = map[string]any{}
+		}
+		if serviceMetaText(req.Meta, "trace_id") == "" {
+			req.Meta["trace_id"] = traceID
+		}
+	}
 	req.ApprovalToken = serviceFirstNonEmpty(req.ApprovalToken, serviceApprovalTokenFromRequest(r))
 	if req.SessionKey == "" || req.Message == "" {
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "session_key and message are required"})

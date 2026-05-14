@@ -968,6 +968,42 @@ func TestEvaluateReadinessFixtures(t *testing.T) {
 	}
 }
 
+func TestEvaluateReadiness_DisabledMCPServerIsNotAdvancedCustom(t *testing.T) {
+	cfg := Default()
+	cfg.Provider.APIKey = "key"
+	cfg.WorkspaceDir = t.TempDir()
+	cfg.Tools.MCPServers = map[string]MCPServerConfig{
+		"disabled": {
+			Enabled:   false,
+			Transport: "stdio",
+			Command:   "example",
+		},
+	}
+
+	report := EvaluateReadiness(cfg, ReadinessOptions{Command: "chat"})
+	if report.State != ReadinessReady {
+		t.Fatalf("expected disabled MCP server not to change readiness, got %s with issues %#v", report.State, report.Issues)
+	}
+}
+
+func TestEvaluateReadiness_EnabledMCPServerIsAdvancedCustom(t *testing.T) {
+	cfg := Default()
+	cfg.Provider.APIKey = "key"
+	cfg.WorkspaceDir = t.TempDir()
+	cfg.Tools.MCPServers = map[string]MCPServerConfig{
+		"enabled": {
+			Enabled:   true,
+			Transport: "stdio",
+			Command:   "example",
+		},
+	}
+
+	report := EvaluateReadiness(cfg, ReadinessOptions{Command: "chat"})
+	if report.State != ReadinessAdvancedCustom {
+		t.Fatalf("expected enabled MCP server to mark advanced custom, got %s with issues %#v", report.State, report.Issues)
+	}
+}
+
 func TestRequiredReadinessChecks(t *testing.T) {
 	tests := map[string][]string{
 		"chat":    {"provider", "workspace", "database", "artifacts"},

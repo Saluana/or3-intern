@@ -84,6 +84,40 @@ func TestChatStream_FallsBackToJSONResponse(t *testing.T) {
 	}
 }
 
+func TestChatStream_ScannerErrorFallsBackToNonStream(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprintf(w, "data: %s\n", strings.Repeat("x", 1024*1024+1))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"fallback"}}]}`)
+	}))
+	t.Cleanup(srv.Close)
+	c := New(srv.URL, "key", 0)
+	c.HTTP = srv.Client()
+
+	var got []string
+	resp, err := c.ChatStream(context.Background(), ChatCompletionRequest{Model: "m"}, func(text string) {
+		got = append(got, text)
+	})
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("expected stream plus non-stream fallback, got %d calls", calls)
+	}
+	if resp.Choices[0].Message.Content != "fallback" {
+		t.Fatalf("expected fallback response, got %#v", resp.Choices[0].Message.Content)
+	}
+	if strings.Join(got, "") != "fallback" {
+		t.Fatalf("expected fallback delta, got %#v", got)
+	}
+}
+
 func TestChatStream_EmptySSEReturnsError(t *testing.T) {
 	_, c := sseServer(t, []string{`: keep-alive`})
 

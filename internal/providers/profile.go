@@ -105,5 +105,5 @@ func (c *Client) ProviderProfile(model string) ProviderProfile {
 	if c == nil {
 		return OpenAICompatibleProfile()
 	}
-	return SelectProviderProfile("", c.APIBase, model)
+	return SelectProviderProfile(c.ProviderName, c.APIBase, model)
 }

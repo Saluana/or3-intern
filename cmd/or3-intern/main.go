@@ -143,6 +143,7 @@ func newModelRefClient(cfg config.Config, ref config.ModelRef, timeout time.Dura
 		timeout = time.Duration(profile.TimeoutSeconds) * time.Second
 	}
 	prov := providers.New(strings.TrimRight(profile.APIBase, "/"), profile.APIKey, timeout)
+	prov.ProviderName = strings.TrimSpace(ref.Provider)
 	prov.EmbedDimensions = profile.DefaultDimensions
 	prov.HostPolicy = buildHostPolicy(cfg)
 	return prov

@@ -18,6 +18,7 @@ import (
 
 // Client talks to an OpenAI-compatible HTTP API.
 type Client struct {
+	ProviderName    string
 	APIBase         string
 	APIKey          string
 	HTTP            *http.Client
@@ -434,7 +435,11 @@ func (c *Client) chatStreamOnce(ctx context.Context, req ChatCompletionRequest, 
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return ChatCompletionResponse{}, err
+		return ChatCompletionResponse{}, ProviderStreamError{
+			Code:      "stream_read_error",
+			Message:   fmt.Sprintf("provider stream read error: %v", err),
+			Retryable: true,
+		}
 	}
 	assistant, err := assembler.Finalize()
 	if err != nil {

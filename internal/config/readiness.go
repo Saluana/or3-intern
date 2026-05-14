@@ -183,8 +183,10 @@ func isAdvancedCustomReadiness(cfg Config) bool {
 	if cfg.Security.Profiles.Enabled {
 		return true
 	}
-	if len(cfg.Tools.MCPServers) > 0 {
-		return true
+	for _, server := range cfg.Tools.MCPServers {
+		if server.Enabled {
+			return true
+		}
 	}
 	if len(cfg.ModelRouting.Chat.Fallbacks) > 0 || len(cfg.ModelRouting.Embeddings.Fallbacks) > 0 {
 		return true

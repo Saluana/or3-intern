@@ -241,11 +241,11 @@ func TestRuntime_Handle_UserMessage(t *testing.T) {
 func TestRuntime_Handle_XMLToolCallMarkupExecutesTool(t *testing.T) {
 	d := openRuntimeTestDB(t)
 	tool := &requiredTextTool{}
-	callCount := 0
+	var callCount atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
+		callCount.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		if callCount == 1 {
+		if callCount.Load() == 1 {
 			_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","content":"<tool_call><function=required_text_tool><parameter=text>hello from markup</tool_call>"}}]}`)
 			return
 		}
@@ -296,11 +296,11 @@ func TestRuntime_Handle_XMLToolCallMarkupExecutesTool(t *testing.T) {
 func TestRuntime_Handle_JSONToolCallMarkupExecutesTool(t *testing.T) {
 	d := openRuntimeTestDB(t)
 	tool := &requiredTextTool{}
-	callCount := 0
+	var callCount atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
+		callCount.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		if callCount == 1 {
+		if callCount.Load() == 1 {
 			_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","content":"<tool_call>{\"name\":\"required_text_tool\",\"arguments\":{\"text\":\"hello from json markup\"}}</tool_call>"}}]}`)
 			return
 		}
@@ -342,11 +342,11 @@ func TestRuntime_Handle_JSONToolCallMarkupExecutesTool(t *testing.T) {
 func TestRuntime_Handle_NameArgumentsToolCallMarkupExecutesTool(t *testing.T) {
 	d := openRuntimeTestDB(t)
 	tool := &requiredTextTool{}
-	callCount := 0
+	var callCount atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
+		callCount.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		if callCount == 1 {
+		if callCount.Load() == 1 {
 			_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","content":"<tool_call><name>required_text_tool</name><arguments>{\"text\":\"hello from name args markup\"}</arguments></tool_call>"}}]}`)
 			return
 		}
@@ -385,13 +385,26 @@ func TestRuntime_Handle_NameArgumentsToolCallMarkupExecutesTool(t *testing.T) {
 	}
 }
 
+func TestParseToolMarkupCalls_NameArgumentsPlainTextPreservesValue(t *testing.T) {
+	calls := parseToolMarkupCalls(`<tool_call><name>search</name><arguments>weather in Austin</arguments></tool_call>`, "test")
+	if len(calls) != 1 {
+		t.Fatalf("expected one call, got %d", len(calls))
+	}
+	if calls[0].Function.Name != "search" {
+		t.Fatalf("expected search call, got %q", calls[0].Function.Name)
+	}
+	if got := calls[0].Function.Arguments; got != `{"value":"weather in Austin"}` {
+		t.Fatalf("expected plain text value fallback, got %s", got)
+	}
+}
+
 func TestRuntime_Handle_UnavailableLegacyToolMarkupRetriesWithoutToolError(t *testing.T) {
 	d := openRuntimeTestDB(t)
-	callCount := 0
+	var callCount atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
+		callCount.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		if callCount == 1 {
+		if callCount.Load() == 1 {
 			_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","content":"<tool_call><function=memory><parameter=action>list</tool_call>"}}]}`)
 			return
 		}
@@ -426,8 +439,8 @@ func TestRuntime_Handle_UnavailableLegacyToolMarkupRetriesWithoutToolError(t *te
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	if callCount != 2 {
-		t.Fatalf("expected retry after unavailable markup tool, got %d provider calls", callCount)
+	if callCount.Load() != 2 {
+		t.Fatalf("expected retry after unavailable markup tool, got %d provider calls", callCount.Load())
 	}
 	if len(deliver.messages) != 1 || deliver.messages[0] != "final without tool" {
 		t.Fatalf("expected final response after retry, got %#v", deliver.messages)
@@ -451,11 +464,11 @@ func TestRuntime_Handle_UnavailableLegacyToolMarkupRetriesWithoutToolError(t *te
 
 func TestRuntime_Handle_DSMLToolMarkupRetriesWithoutLeakingMarkup(t *testing.T) {
 	d := openRuntimeTestDB(t)
-	callCount := 0
+	var callCount atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
+		callCount.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		if callCount == 1 {
+		if callCount.Load() == 1 {
 			_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","content":"<｜DSML｜tool_calls><｜DSML｜invoke name=\"exec\"><｜DSML｜parameter name=\"command\" string=\"true\">echo \"tools test\"</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>"}}]}`)
 			return
 		}
@@ -487,8 +500,8 @@ func TestRuntime_Handle_DSMLToolMarkupRetriesWithoutLeakingMarkup(t *testing.T) 
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	if callCount != 2 {
-		t.Fatalf("expected retry after unavailable DSML tool, got %d provider calls", callCount)
+	if callCount.Load() != 2 {
+		t.Fatalf("expected retry after unavailable DSML tool, got %d provider calls", callCount.Load())
 	}
 	if len(observer.toolCalls) != 1 || observer.toolCalls[0] != "exec" {
 		t.Fatalf("expected DSML exec call to be observable, got %#v", observer.toolCalls)
@@ -514,11 +527,11 @@ func TestRuntime_Handle_DSMLSearchAliasUsesWebSearch(t *testing.T) {
 	if calls := parseToolMarkupCalls(dsml, "test"); len(calls) != 1 || calls[0].Function.Name != "search" {
 		t.Fatalf("expected DSML search markup to parse, got %#v", calls)
 	}
-	callCount := 0
+	var callCount atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
+		callCount.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		if callCount == 1 {
+		if callCount.Load() == 1 {
 			_ = json.NewEncoder(w).Encode(chatTextResponse(dsml))
 			return
 		}
@@ -1158,12 +1171,12 @@ func TestRuntime_Handle_NoChoices(t *testing.T) {
 func TestRuntime_Handle_WithToolCall(t *testing.T) {
 	d := openRuntimeTestDB(t)
 
-	callCount := 0
+	var callCount atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
+		callCount.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		var resp providers.ChatCompletionResponse
-		if callCount == 1 {
+		if callCount.Load() == 1 {
 			// First call returns tool call
 			resp = providers.ChatCompletionResponse{
 				Choices: []struct {
@@ -1251,7 +1264,7 @@ func TestRuntime_Handle_WithMCPNamedTool_UsesNormalToolPath(t *testing.T) {
 
 	var firstTools []providers.ToolDef
 	var secondMessages []providers.ChatMessage
-	callCount := 0
+	var callCount atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 
@@ -1260,16 +1273,16 @@ func TestRuntime_Handle_WithMCPNamedTool_UsesNormalToolPath(t *testing.T) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if callCount == 0 {
+		if callCount.Load() == 0 {
 			firstTools = append([]providers.ToolDef(nil), req.Tools...)
 		} else {
 			secondMessages = append([]providers.ChatMessage(nil), req.Messages...)
 		}
-		callCount++
+		callCount.Add(1)
 
 		w.Header().Set("Content-Type", "application/json")
 		var resp providers.ChatCompletionResponse
-		if callCount == 1 {
+		if callCount.Load() == 1 {
 			resp = providers.ChatCompletionResponse{
 				Choices: []struct {
 					Message struct {
@@ -1344,8 +1357,8 @@ func TestRuntime_Handle_WithMCPNamedTool_UsesNormalToolPath(t *testing.T) {
 		t.Fatalf("Handle with MCP tool: %v", err)
 	}
 
-	if callCount != 2 {
-		t.Fatalf("expected two provider requests, got %d", callCount)
+	if callCount.Load() != 2 {
+		t.Fatalf("expected two provider requests, got %d", callCount.Load())
 	}
 	if !tool.called || tool.gotText != "hi" {
 		t.Fatalf("expected MCP tool to execute with text=hi, got called=%v text=%q", tool.called, tool.gotText)
@@ -1390,7 +1403,7 @@ func TestRuntime_Handle_NextTurnPreservesToolCallIDInHistory(t *testing.T) {
 	d := openRuntimeTestDB(t)
 
 	var thirdRequestMessages []providers.ChatMessage
-	callCount := 0
+	var callCount atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 
@@ -1399,14 +1412,14 @@ func TestRuntime_Handle_NextTurnPreservesToolCallIDInHistory(t *testing.T) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		callCount++
-		if callCount == 3 {
+		callCount.Add(1)
+		if callCount.Load() == 3 {
 			thirdRequestMessages = append([]providers.ChatMessage(nil), req.Messages...)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		var resp providers.ChatCompletionResponse
-		switch callCount {
+		switch callCount.Load() {
 		case 1:
 			resp = providers.ChatCompletionResponse{
 				Choices: []struct {
@@ -1498,8 +1511,8 @@ func TestRuntime_Handle_NextTurnPreservesToolCallIDInHistory(t *testing.T) {
 	if err := rt.Handle(context.Background(), bus.Event{Type: bus.EventUserMessage, SessionKey: "sess-history", Channel: "cli", From: "user", Message: "second"}); err != nil {
 		t.Fatalf("second Handle: %v", err)
 	}
-	if callCount != 3 {
-		t.Fatalf("expected three provider requests, got %d", callCount)
+	if callCount.Load() != 3 {
+		t.Fatalf("expected three provider requests, got %d", callCount.Load())
 	}
 	if len(thirdRequestMessages) == 0 {
 		t.Fatal("expected third provider request messages")
@@ -1706,11 +1719,11 @@ func TestFormatToolExecutionError_PreservesOutput(t *testing.T) {
 func TestRuntime_ToolFailureBecomesStructuredToolMessage(t *testing.T) {
 	d := openRuntimeTestDB(t)
 	tool := &failingReadFileTool{}
-	callCount := 0
+	var callCount atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
+		callCount.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		if callCount == 1 {
+		if callCount.Load() == 1 {
 			_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"tc-read","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"big.txt\",\"mode\":\"full\"}"}}]}}]}`)
 			return
 		}
@@ -1759,22 +1772,23 @@ func TestRuntime_ToolFailureBecomesStructuredToolMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	if callCount != 2 {
-		t.Fatalf("expected tool retry loop to make two provider calls, got %d", callCount)
+	if callCount.Load() != 2 {
+		t.Fatalf("expected tool retry loop to make two provider calls, got %d", callCount.Load())
 	}
 }
 
-func TestRuntime_ApprovalRequiredHaltsToolLoop(t *testing.T) {
+func TestRuntime_ApprovalRequiredNarratesBeforePausing(t *testing.T) {
 	d := openRuntimeTestDB(t)
 	tool := &approvalExecTool{}
-	callCount := 0
+	var callCount atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
+		callCount.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		if callCount > 1 {
-			t.Fatalf("provider should not be called again after approval is required")
+		if callCount.Load() == 1 {
+			_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"tc-exec","type":"function","function":{"name":"exec","arguments":"{\"program\":\"pwd\"}"}}]}}]}`)
+			return
 		}
-		_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"tc-exec","type":"function","function":{"name":"exec","arguments":"{\"program\":\"pwd\"}"}}]}}]}`)
+		_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","content":"I need approval to run pwd before I can continue."}}]}`)
 	}))
 	t.Cleanup(srv.Close)
 
@@ -1798,8 +1812,68 @@ func TestRuntime_ApprovalRequiredHaltsToolLoop(t *testing.T) {
 	if approvalErr.RequestID != 42 {
 		t.Fatalf("expected request id 42, got %#v", approvalErr)
 	}
-	if callCount != 1 {
-		t.Fatalf("expected one provider call before pausing, got %d", callCount)
+	if callCount.Load() != 2 {
+		t.Fatalf("expected narration round before pausing, got %d provider calls", callCount.Load())
+	}
+	pp, _, err := rt.Builder.BuildWithOptions(context.Background(), BuildOptions{SessionKey: "sess-approval-required"})
+	if err != nil {
+		t.Fatalf("BuildWithOptions: %v", err)
+	}
+	if len(pp.History) == 0 {
+		t.Fatal("expected persisted history")
+	}
+	last := pp.History[len(pp.History)-1]
+	content, ok := last.Content.(string)
+	if last.Role != "assistant" || !ok || !strings.Contains(content, "I need approval to run pwd") {
+		t.Fatalf("expected persisted approval narration, got %#v", last)
+	}
+}
+
+func TestRuntime_ApprovalRequiredStillPausesWhenNarrationFails(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	tool := &approvalExecTool{}
+	var callCount atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount.Add(1)
+		if callCount.Load() == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"tc-exec","type":"function","function":{"name":"exec","arguments":"{\"program\":\"pwd\"}"}}]}}]}`)
+			return
+		}
+		http.Error(w, "boom", http.StatusBadGateway)
+	}))
+	t.Cleanup(srv.Close)
+
+	provider := providers.New(srv.URL, "test-key", 10*time.Second)
+	provider.HTTP = srv.Client()
+	deliver := &mockDeliverer{}
+	rt := buildSimpleRuntime(t, provider, d, deliver)
+	rt.Tools.Register(tool)
+
+	err := rt.Handle(context.Background(), bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "sess-approval-narration-fails",
+		Channel:    "cli",
+		From:       "user",
+		Message:    "run pwd",
+	})
+	var approvalErr *tools.ApprovalRequiredError
+	if !errors.As(err, &approvalErr) {
+		t.Fatalf("expected approval-required error, got %v", err)
+	}
+	if callCount.Load() != 2 {
+		t.Fatalf("expected narration attempt before pausing, got %d provider calls", callCount.Load())
+	}
+	pp, _, err := rt.Builder.BuildWithOptions(context.Background(), BuildOptions{SessionKey: "sess-approval-narration-fails"})
+	if err != nil {
+		t.Fatalf("BuildWithOptions: %v", err)
+	}
+	if len(pp.History) == 0 {
+		t.Fatal("expected persisted history")
+	}
+	last := pp.History[len(pp.History)-1]
+	if last.Role != "tool" {
+		t.Fatalf("expected last persisted message to remain the blocked tool result, got %#v", last)
 	}
 }
 
@@ -1917,12 +1991,12 @@ func TestRuntime_Handle_ArtifactSave(t *testing.T) {
 	artifactsDir := t.TempDir()
 
 	// First call: return tool call that generates large output
-	callCount := 0
+	var callCount atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
+		callCount.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		var resp providers.ChatCompletionResponse
-		if callCount == 1 {
+		if callCount.Load() == 1 {
 			resp = providers.ChatCompletionResponse{
 				Choices: []struct {
 					Message struct {
@@ -2110,12 +2184,12 @@ func TestRuntime_GuardToolExecution_ProfileWithEmptyWritablePathsDeniesExecCWD(t
 
 func TestRuntime_Handle_GuardedToolDeniedByDefault(t *testing.T) {
 	d := openRuntimeTestDB(t)
-	callCount := 0
+	var callCount atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
+		callCount.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		var resp providers.ChatCompletionResponse
-		if callCount == 1 {
+		if callCount.Load() == 1 {
 			resp = providers.ChatCompletionResponse{Choices: []struct {
 				Message struct {
 					Role      string               `json:"role"`
@@ -2171,12 +2245,12 @@ func TestRuntime_Handle_GuardedToolDeniedByDefault(t *testing.T) {
 
 func TestRuntime_Handle_ToolQuotaExceeded(t *testing.T) {
 	d := openRuntimeTestDB(t)
-	callCount := 0
+	var callCount atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
+		callCount.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		var resp providers.ChatCompletionResponse
-		switch callCount {
+		switch callCount.Load() {
 		case 1, 2:
 			resp = providers.ChatCompletionResponse{Choices: []struct {
 				Message struct {
@@ -2188,7 +2262,7 @@ func TestRuntime_Handle_ToolQuotaExceeded(t *testing.T) {
 				Role      string               `json:"role"`
 				Content   any                  `json:"content"`
 				ToolCalls []providers.ToolCall `json:"tool_calls"`
-			}{Role: "assistant", ToolCalls: []providers.ToolCall{{ID: fmt.Sprintf("tc%d", callCount), Type: "function", Function: struct {
+			}{Role: "assistant", ToolCalls: []providers.ToolCall{{ID: fmt.Sprintf("tc%d", callCount.Load()), Type: "function", Function: struct {
 				Name      string `json:"name"`
 				Arguments string `json:"arguments"`
 			}{Name: "echo_tool", Arguments: `{}`}}}}}}}
@@ -2236,9 +2310,9 @@ func TestRuntime_Handle_ToolQuotaExceeded(t *testing.T) {
 
 func TestRuntime_ExecuteConversation_ReturnsErrorWhenToolLoopBudgetExhausted(t *testing.T) {
 	d := openRuntimeTestDB(t)
-	callCount := 0
+	var callCount atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
+		callCount.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		resp := providers.ChatCompletionResponse{Choices: []struct {
 			Message struct {
@@ -2252,7 +2326,7 @@ func TestRuntime_ExecuteConversation_ReturnsErrorWhenToolLoopBudgetExhausted(t *
 			ToolCalls []providers.ToolCall `json:"tool_calls"`
 		}{
 			Role: "assistant",
-			ToolCalls: []providers.ToolCall{{ID: fmt.Sprintf("loop-%d", callCount), Type: "function", Function: struct {
+			ToolCalls: []providers.ToolCall{{ID: fmt.Sprintf("loop-%d", callCount.Load()), Type: "function", Function: struct {
 				Name      string `json:"name"`
 				Arguments string `json:"arguments"`
 			}{Name: "echo_tool", Arguments: `{}`}}},
@@ -2300,9 +2374,9 @@ func TestRuntime_ExecuteConversation_AsksApprovalWhenToolLoopLimitHit(t *testing
 		},
 	}
 
-	loopCalls := 0
+	var loopCalls atomic.Int32
 	loopServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		loopCalls++
+		callNumber := loopCalls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		resp := providers.ChatCompletionResponse{Choices: []struct {
 			Message struct {
@@ -2316,7 +2390,7 @@ func TestRuntime_ExecuteConversation_AsksApprovalWhenToolLoopLimitHit(t *testing
 			ToolCalls []providers.ToolCall `json:"tool_calls"`
 		}{
 			Role: "assistant",
-			ToolCalls: []providers.ToolCall{{ID: fmt.Sprintf("loop-%d", loopCalls), Type: "function", Function: struct {
+			ToolCalls: []providers.ToolCall{{ID: fmt.Sprintf("loop-%d", callNumber), Type: "function", Function: struct {
 				Name      string `json:"name"`
 				Arguments string `json:"arguments"`
 			}{Name: "echo_tool", Arguments: `{}`}}},
@@ -2349,8 +2423,8 @@ func TestRuntime_ExecuteConversation_AsksApprovalWhenToolLoopLimitHit(t *testing
 	if !errors.As(err, &approvalErr) || approvalErr.RequestID == 0 {
 		t.Fatalf("expected approval-required error, got %T: %v", err, err)
 	}
-	if loopCalls != 2 {
-		t.Fatalf("expected loop budget to stop before a third provider call, got %d", loopCalls)
+	if got := loopCalls.Load(); got != 2 {
+		t.Fatalf("expected loop budget to stop before a third provider call, got %d", got)
 	}
 
 	pending, err := d.ListApprovalRequestsFiltered(context.Background(), approval.StatusPending, string(approval.SubjectToolQuota), 1)
@@ -2365,11 +2439,11 @@ func TestRuntime_ExecuteConversation_AsksApprovalWhenToolLoopLimitHit(t *testing
 		t.Fatalf("ApproveRequest: %v", err)
 	}
 
-	successCalls := 0
+	var successCalls atomic.Int32
 	successServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		successCalls++
+		callNumber := successCalls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		if successCalls <= 3 {
+		if callNumber <= 3 {
 			resp := providers.ChatCompletionResponse{Choices: []struct {
 				Message struct {
 					Role      string               `json:"role"`
@@ -2382,7 +2456,7 @@ func TestRuntime_ExecuteConversation_AsksApprovalWhenToolLoopLimitHit(t *testing
 				ToolCalls []providers.ToolCall `json:"tool_calls"`
 			}{
 				Role: "assistant",
-				ToolCalls: []providers.ToolCall{{ID: fmt.Sprintf("retry-%d", successCalls), Type: "function", Function: struct {
+				ToolCalls: []providers.ToolCall{{ID: fmt.Sprintf("retry-%d", callNumber), Type: "function", Function: struct {
 					Name      string `json:"name"`
 					Arguments string `json:"arguments"`
 				}{Name: "echo_tool", Arguments: `{}`}}},
@@ -2416,8 +2490,8 @@ func TestRuntime_ExecuteConversation_AsksApprovalWhenToolLoopLimitHit(t *testing
 	if finalText != "done" {
 		t.Fatalf("expected final text after approved continuation, got %q", finalText)
 	}
-	if successCalls != 4 {
-		t.Fatalf("expected approved retry to use one extra tool-loop block, got %d provider calls", successCalls)
+	if got := successCalls.Load(); got != 4 {
+		t.Fatalf("expected approved retry to use one extra tool-loop block, got %d provider calls", got)
 	}
 }
 
@@ -2500,8 +2574,9 @@ func TestRuntime_IncrementQuota_AsksApprovalAndAcceptsApprovedToken(t *testing.T
 		t.Fatalf("first increment: %v", err)
 	}
 	err := rt.incrementQuota(ctx, "quota-approval-scope", "echo_tool")
-	if err == nil || !strings.Contains(err.Error(), "Approve request") {
-		t.Fatalf("expected approval request, got %v", err)
+	var approvalErr *tools.ApprovalRequiredError
+	if !errors.As(err, &approvalErr) {
+		t.Fatalf("expected approval required error, got %v", err)
 	}
 	pending, err := d.ListApprovalRequestsFiltered(context.Background(), approval.StatusPending, string(approval.SubjectToolQuota), 1)
 	if err != nil {
@@ -2509,6 +2584,9 @@ func TestRuntime_IncrementQuota_AsksApprovalAndAcceptsApprovedToken(t *testing.T
 	}
 	if len(pending) != 1 {
 		t.Fatalf("expected one pending quota approval, got %#v", pending)
+	}
+	if approvalErr.RequestID != pending[0].ID {
+		t.Fatalf("expected approval request id %d, got %d", pending[0].ID, approvalErr.RequestID)
 	}
 	issued, err := broker.ApproveRequest(context.Background(), pending[0].ID, "cli:test", false, "continue")
 	if err != nil {
@@ -2525,12 +2603,12 @@ func TestRuntime_IncrementQuota_AsksApprovalAndAcceptsApprovedToken(t *testing.T
 
 func TestRuntime_Handle_ToolContextIncludesDelivery(t *testing.T) {
 	d := openRuntimeTestDB(t)
-	callCount := 0
+	var callCount atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
+		callCount.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		var resp providers.ChatCompletionResponse
-		if callCount == 1 {
+		if callCount.Load() == 1 {
 			resp = providers.ChatCompletionResponse{
 				Choices: []struct {
 					Message struct {
@@ -2598,12 +2676,12 @@ func TestRuntime_Handle_ToolContextIncludesDelivery(t *testing.T) {
 
 func TestRuntime_Handle_HeartbeatSendMessageToolStillWorks(t *testing.T) {
 	d := openRuntimeTestDB(t)
-	callCount := 0
+	var callCount atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
+		callCount.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		var resp providers.ChatCompletionResponse
-		if callCount == 1 {
+		if callCount.Load() == 1 {
 			resp = providers.ChatCompletionResponse{
 				Choices: []struct {
 					Message struct {
@@ -2695,12 +2773,12 @@ func TestRuntime_Handle_HeartbeatSendMessageToolStillWorks(t *testing.T) {
 
 func TestRuntime_Handle_HeartbeatSendMessageDoesNotImplicitlyThread(t *testing.T) {
 	d := openRuntimeTestDB(t)
-	callCount := 0
+	var callCount atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
+		callCount.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		var resp providers.ChatCompletionResponse
-		if callCount == 1 {
+		if callCount.Load() == 1 {
 			resp = providers.ChatCompletionResponse{
 				Choices: []struct {
 					Message struct {
@@ -2784,12 +2862,12 @@ func TestRuntime_Handle_HeartbeatSendMessageDoesNotImplicitlyThread(t *testing.T
 
 func TestRuntime_Handle_UserMessageSendMessageDeniedByDefault(t *testing.T) {
 	d := openRuntimeTestDB(t)
-	callCount := 0
+	var callCount atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
+		callCount.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		var resp providers.ChatCompletionResponse
-		if callCount == 1 {
+		if callCount.Load() == 1 {
 			resp = providers.ChatCompletionResponse{
 				Choices: []struct {
 					Message struct {
@@ -3026,10 +3104,10 @@ func TestToToolDefs_SortsByToolNameDeterministically(t *testing.T) {
 func TestDynamicToolExposureSelectsIntentGroups(t *testing.T) {
 	reg := tools.NewRegistry()
 	reg.Register(&alphaTool{})
-	reg.Register(&namedRuntimeTool{name: "list_dir"})
-	reg.Register(&namedRuntimeTool{name: "write_file"})
-	reg.Register(&namedRuntimeTool{name: "exec"})
-	reg.Register(&namedRuntimeTool{name: "web_fetch"})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameListDir, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupRead}}})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameWriteFile, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupWrite}}})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameExec, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupExec}}})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameWebFetch, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupWeb}}})
 	rt := &Runtime{DynamicToolExposure: true}
 	exposed := rt.exposedToolsForTurn(context.Background(), reg, []providers.ChatMessage{{Role: "user", Content: "please edit the config file"}}, "")
 	defs := toToolDefs(exposed)
@@ -3044,9 +3122,9 @@ func TestDynamicToolExposureSelectsIntentGroups(t *testing.T) {
 
 func TestDynamicToolExposureReadIntentIncludesListDir(t *testing.T) {
 	reg := tools.NewRegistry()
-	reg.Register(&namedRuntimeTool{name: "read_file"})
-	reg.Register(&namedRuntimeTool{name: "list_dir"})
-	reg.Register(&namedRuntimeTool{name: "write_file"})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameReadFile, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupRead}}})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameListDir, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupRead}}})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameWriteFile, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupWrite}}})
 	rt := &Runtime{DynamicToolExposure: true}
 	defs := toToolDefs(rt.exposedToolsForTurn(context.Background(), reg, []providers.ChatMessage{{Role: "user", Content: "inspect the project files"}}, ""))
 	if !toolDefsContain(defs, "read_file") || !toolDefsContain(defs, "list_dir") {
@@ -3059,8 +3137,8 @@ func TestDynamicToolExposureReadIntentIncludesListDir(t *testing.T) {
 
 func TestUnchangedExposedToolsLeavesPrefixIdentical(t *testing.T) {
 	reg := tools.NewRegistry()
-	reg.Register(&namedRuntimeTool{name: "read_file"})
-	reg.Register(&namedRuntimeTool{name: "write_file"})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameReadFile, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupRead}}})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameWriteFile, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupWrite}}})
 	rt := &Runtime{DynamicToolExposure: true}
 	first := toToolDefs(rt.exposedToolsForTurn(context.Background(), reg, []providers.ChatMessage{{Role: "user", Content: "edit the config"}}, ""))
 	second := toToolDefs(rt.exposedToolsForTurn(context.Background(), reg, []providers.ChatMessage{{Role: "user", Content: "modify the config"}}, ""))
@@ -3071,9 +3149,9 @@ func TestUnchangedExposedToolsLeavesPrefixIdentical(t *testing.T) {
 
 func TestExposedToolSetChangeRebuildsPrefix(t *testing.T) {
 	reg := tools.NewRegistry()
-	reg.Register(&namedRuntimeTool{name: "read_file"})
-	reg.Register(&namedRuntimeTool{name: "write_file"})
-	reg.Register(&namedRuntimeTool{name: "web_fetch"})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameReadFile, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupRead}}})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameWriteFile, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupWrite}}})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameWebFetch, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupWeb}}})
 	rt := &Runtime{DynamicToolExposure: true}
 	readDefs := toToolDefs(rt.exposedToolsForTurn(context.Background(), reg, []providers.ChatMessage{{Role: "user", Content: "inspect the file"}}, ""))
 	webDefs := toToolDefs(rt.exposedToolsForTurn(context.Background(), reg, []providers.ChatMessage{{Role: "user", Content: "fetch this url"}}, ""))
@@ -3084,8 +3162,8 @@ func TestExposedToolSetChangeRebuildsPrefix(t *testing.T) {
 
 func TestDynamicToolExposureDoesNotExposeUnknownToolsByDefault(t *testing.T) {
 	reg := tools.NewRegistry()
-	reg.Register(&namedRuntimeTool{name: "read_file"})
-	reg.Register(&namedRuntimeTool{name: "spawn_subagent"})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameReadFile, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupRead}}})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameSpawnSubagent})
 	rt := &Runtime{DynamicToolExposure: true}
 	defs := toToolDefs(rt.exposedToolsForTurn(context.Background(), reg, []providers.ChatMessage{{Role: "user", Content: "inspect the file"}}, ""))
 	if toolDefsContain(defs, "spawn_subagent") {
@@ -3095,11 +3173,11 @@ func TestDynamicToolExposureDoesNotExposeUnknownToolsByDefault(t *testing.T) {
 
 func TestDynamicToolExposureToolInventoryIntentExposesRegisteredToolGroups(t *testing.T) {
 	reg := tools.NewRegistry()
-	reg.Register(&namedRuntimeTool{name: "read_file"})
-	reg.Register(&namedRuntimeTool{name: "write_file"})
-	reg.Register(&namedRuntimeTool{name: "exec"})
-	reg.Register(&namedRuntimeTool{name: "web_fetch"})
-	reg.Register(&namedRuntimeTool{name: "cron"})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameReadFile, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupRead}}})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameWriteFile, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupWrite}}})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameExec, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupExec}}})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameWebFetch, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupWeb}}})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameCron, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupCron}}})
 	rt := &Runtime{DynamicToolExposure: true}
 	defs := toToolDefs(rt.exposedToolsForTurn(context.Background(), reg, []providers.ChatMessage{{Role: "user", Content: "what tools are available?"}}, "service"))
 	for _, name := range []string{"read_file", "write_file", "exec", "web_fetch", "cron"} {
@@ -3111,10 +3189,10 @@ func TestDynamicToolExposureToolInventoryIntentExposesRegisteredToolGroups(t *te
 
 func TestDynamicToolExposureRespectsCapabilityCeiling(t *testing.T) {
 	reg := tools.NewRegistry()
-	reg.Register(&namedRuntimeTool{name: "read_file"})
-	reg.Register(&guardedNamedRuntimeTool{namedRuntimeTool{name: "write_file"}})
-	reg.Register(&guardedNamedRuntimeTool{namedRuntimeTool{name: "run_skill"}})
-	reg.Register(&guardedNamedRuntimeTool{namedRuntimeTool{name: "run_skill_script"}})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameReadFile, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupRead}}})
+	reg.Register(&guardedNamedRuntimeTool{namedRuntimeTool{name: tools.ToolNameWriteFile, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupWrite}}}})
+	reg.Register(&guardedNamedRuntimeTool{namedRuntimeTool{name: tools.ToolNameRunSkill, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupExec, tools.ToolGroupSkills}}}})
+	reg.Register(&guardedNamedRuntimeTool{namedRuntimeTool{name: tools.ToolNameRunSkillScript, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupExec, tools.ToolGroupSkills}}}})
 	rt := &Runtime{DynamicToolExposure: true}
 	ctx := tools.ContextWithCapabilityCeiling(context.Background(), tools.CapabilitySafe)
 	defs := toToolDefs(rt.exposedToolsForTurn(ctx, reg, []providers.ChatMessage{{Role: "user", Content: "what tools are available?"}}, "service"))
@@ -3128,8 +3206,8 @@ func TestDynamicToolExposureRespectsCapabilityCeiling(t *testing.T) {
 
 func TestDynamicToolExposureRespectsProfileAllowlist(t *testing.T) {
 	reg := tools.NewRegistry()
-	reg.Register(&namedRuntimeTool{name: "read_file"})
-	reg.Register(&namedRuntimeTool{name: "list_dir"})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameReadFile, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupRead}}})
+	reg.Register(&namedRuntimeTool{name: tools.ToolNameListDir, meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupRead}}})
 	rt := &Runtime{DynamicToolExposure: true}
 	ctx := tools.ContextWithActiveProfile(context.Background(), tools.ActiveProfile{
 		Name:          "read-file-only",
@@ -3148,6 +3226,7 @@ func TestDynamicToolExposureRespectsProfileAllowlist(t *testing.T) {
 type namedRuntimeTool struct {
 	tools.Base
 	name string
+	meta tools.ToolMetadata
 }
 
 func (t *namedRuntimeTool) Name() string               { return t.name }
@@ -3158,6 +3237,9 @@ func (t *namedRuntimeTool) Schema() map[string]any {
 }
 func (t *namedRuntimeTool) Execute(ctx context.Context, params map[string]any) (string, error) {
 	return "ok", nil
+}
+func (t *namedRuntimeTool) Metadata() tools.ToolMetadata {
+	return t.meta
 }
 
 type guardedNamedRuntimeTool struct{ namedRuntimeTool }
@@ -3559,6 +3641,24 @@ func TestRuntime_HandleStatusReportsRuntimeSnapshotWithoutPersisting(t *testing.
 	}
 	if count != 3 {
 		t.Fatalf("expected /status not to persist, message count=%d", count)
+	}
+}
+
+func TestCountMemoryRowsAllowsActiveStatusFilter(t *testing.T) {
+	d := openRuntimeTestDB(t)
+	ctx := context.Background()
+	if _, err := d.InsertMemoryNoteTyped(ctx, "sess-count-active", db.TypedNoteInput{Text: "active note", Status: db.MemoryStatusActive}); err != nil {
+		t.Fatalf("InsertMemoryNoteTyped active: %v", err)
+	}
+	if _, err := d.InsertMemoryNoteTyped(ctx, "sess-count-active", db.TypedNoteInput{Text: "stale note", Status: db.MemoryStatusStale}); err != nil {
+		t.Fatalf("InsertMemoryNoteTyped stale: %v", err)
+	}
+	count, err := countMemoryRows(ctx, d, "memory_notes", "session_key", []string{"sess-count-active"}, "status='active'")
+	if err != nil {
+		t.Fatalf("countMemoryRows: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 active memory note, got %d", count)
 	}
 }
 

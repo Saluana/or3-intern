@@ -293,6 +293,138 @@ func TestManagerConnect_PartialFailureAndRegistration(t *testing.T) {
 	}
 }
 
+func TestManagerServerStatus(t *testing.T) {
+	manager := NewManager(map[string]config.MCPServerConfig{
+		"alpha":    {Enabled: true, Transport: "stdio", Command: "alpha", ToolTimeoutSeconds: 5},
+		"beta":     {Enabled: true, Transport: "stdio", Command: "beta", ToolTimeoutSeconds: 5},
+		"disabled": {Enabled: false, Transport: "stdio", Command: "disabled"},
+	})
+	manager.connect = func(ctx context.Context, name string, cfg config.MCPServerConfig) (session, error) {
+		switch name {
+		case "alpha":
+			return &fakeSession{
+				listFn: func(ctx context.Context, params *sdkmcp.ListToolsParams) (*sdkmcp.ListToolsResult, error) {
+					return &sdkmcp.ListToolsResult{
+						Tools: []*sdkmcp.Tool{
+							{Name: "write", InputSchema: map[string]any{"type": "object"}},
+							{Name: "read", InputSchema: map[string]any{"type": "object"}},
+						},
+					}, nil
+				},
+			}, nil
+		case "beta":
+			return nil, errors.New("dial exploded")
+		default:
+			return nil, errors.New("unexpected server")
+		}
+	}
+
+	if err := manager.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	status := manager.ServerStatus()
+	if !status["alpha"].Connected {
+		t.Fatalf("expected alpha connected, got %#v", status["alpha"])
+	}
+	if status["alpha"].State != "connected" {
+		t.Fatalf("expected alpha connected state, got %#v", status["alpha"])
+	}
+	if status["alpha"].ToolCount != 2 || strings.Join(status["alpha"].Tools, ",") != "mcp_alpha_read,mcp_alpha_write" {
+		t.Fatalf("unexpected alpha tools: %#v", status["alpha"])
+	}
+	if status["beta"].Connected || !strings.Contains(status["beta"].LastError, "dial exploded") {
+		t.Fatalf("expected beta failure, got %#v", status["beta"])
+	}
+	if status["beta"].State != "degraded" {
+		t.Fatalf("expected beta degraded state, got %#v", status["beta"])
+	}
+	if status["disabled"].Connected || status["disabled"].LastError != "disabled" {
+		t.Fatalf("expected disabled status, got %#v", status["disabled"])
+	}
+	if status["disabled"].State != "off" {
+		t.Fatalf("expected disabled off state, got %#v", status["disabled"])
+	}
+}
+
+func TestManagerRefreshAndReconnectWithBackoff(t *testing.T) {
+	manager := NewManager(map[string]config.MCPServerConfig{
+		"alpha": {Enabled: true, Transport: "stdio", Command: "alpha", ToolTimeoutSeconds: 5},
+	})
+	attempts := 0
+	manager.connect = func(ctx context.Context, name string, cfg config.MCPServerConfig) (session, error) {
+		attempts++
+		if attempts == 1 {
+			return nil, errors.New("temporary dial failure")
+		}
+		return &fakeSession{
+			listFn: func(ctx context.Context, params *sdkmcp.ListToolsParams) (*sdkmcp.ListToolsResult, error) {
+				return &sdkmcp.ListToolsResult{Tools: []*sdkmcp.Tool{{Name: "echo", InputSchema: map[string]any{"type": "object"}}}}, nil
+			},
+		}, nil
+	}
+
+	if err := manager.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if status := manager.ServerStatus()["alpha"]; status.State != "degraded" {
+		t.Fatalf("expected initial degraded state, got %#v", status)
+	}
+	if err := manager.ReconnectWithBackoff(context.Background(), 2, 0); err != nil {
+		t.Fatalf("ReconnectWithBackoff: %v", err)
+	}
+	if got := manager.ToolNames(); len(got) != 1 || got[0] != "mcp_alpha_echo" {
+		t.Fatalf("expected tool after reconnect, got %#v", got)
+	}
+
+	if err := manager.Refresh(context.Background(), map[string]config.MCPServerConfig{
+		"beta": {Enabled: false, Transport: "stdio", Command: "beta"},
+	}); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	status := manager.ServerStatus()
+	if _, ok := status["alpha"]; ok {
+		t.Fatalf("expected alpha removed after hot reload, got %#v", status)
+	}
+	if status["beta"].State != "off" {
+		t.Fatalf("expected beta off after hot reload, got %#v", status["beta"])
+	}
+}
+
+func TestManagerToolCatalog(t *testing.T) {
+	manager := NewManager(map[string]config.MCPServerConfig{
+		"alpha": {Enabled: true, Transport: "stdio", Command: "alpha", ToolTimeoutSeconds: 5},
+	})
+	manager.connect = func(ctx context.Context, name string, cfg config.MCPServerConfig) (session, error) {
+		return &fakeSession{
+			listFn: func(ctx context.Context, params *sdkmcp.ListToolsParams) (*sdkmcp.ListToolsResult, error) {
+				return &sdkmcp.ListToolsResult{Tools: []*sdkmcp.Tool{{Name: "echo", InputSchema: map[string]any{"type": "object"}}}}, nil
+			},
+		}, nil
+	}
+	if err := manager.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	catalog := manager.ToolCatalog()
+	if len(catalog) != 1 {
+		t.Fatalf("expected one catalog entry, got %#v", catalog)
+	}
+	if catalog[0].ServerName != "alpha" || catalog[0].RemoteName != "echo" || catalog[0].LocalName != "mcp_alpha_echo" || catalog[0].Status != "connected" {
+		t.Fatalf("unexpected catalog entry: %#v", catalog[0])
+	}
+}
+
+func TestManagerServerStatus_EmptyManager(t *testing.T) {
+	status := NewManager(nil).ServerStatus()
+	if len(status) != 0 {
+		t.Fatalf("expected empty status, got %#v", status)
+	}
+	var manager *Manager
+	if status := manager.ServerStatus(); len(status) != 0 {
+		t.Fatalf("expected nil manager to return empty status, got %#v", status)
+	}
+}
+
 func TestManagerConnect_SkipsMalformedRemoteTools(t *testing.T) {
 	manager := NewManager(map[string]config.MCPServerConfig{
 		"alpha": {Enabled: true, Transport: "stdio", Command: "alpha", ToolTimeoutSeconds: 5},

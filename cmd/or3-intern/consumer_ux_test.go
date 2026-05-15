@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,6 +38,7 @@ func seedConsumerConfig(t *testing.T, cfgPath, root string) config.Config {
 }
 
 func TestRunSetupWithIO_PreservesExistingProviderModels(t *testing.T) {
+	clearConfigEnvForTest(t)
 	tmp := t.TempDir()
 	cfgPath := filepath.Join(tmp, "config.json")
 	cfg := seedConsumerConfig(t, cfgPath, tmp)
@@ -131,6 +133,124 @@ func TestRunSetupWithIO_NewSetupDefaultsStateOutsideWorkspace(t *testing.T) {
 	}
 	if strings.Contains(result.Config.ArtifactsDir, workspace) {
 		t.Fatalf("artifacts path should default outside workspace, got %q", result.Config.ArtifactsDir)
+	}
+}
+
+func TestRunSetupWithIO_MissingProviderKeySavesDraft(t *testing.T) {
+	clearConfigEnvForTest(t)
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "config.json")
+	workspace := filepath.Join(tmp, "workspace")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	input := strings.Join([]string{
+		"",        // provider default
+		"",        // no API key
+		workspace, // workspace
+		"",        // recommended app folder
+		"1",       // solo computer
+		"2",       // balanced safety
+		"",
+	}, "\n")
+	var out bytes.Buffer
+	result, err := runSetupWithIO(strings.NewReader(input), &out, cfgPath, tmp)
+	if err != nil {
+		t.Fatalf("runSetupWithIO: %v", err)
+	}
+	if result.StartChat {
+		t.Fatal("draft setup must not start chat")
+	}
+	text := out.String()
+	if !strings.Contains(text, "Saved draft setup.") || !strings.Contains(text, "Chat will be available after the provider settings pass setup checks.") {
+		t.Fatalf("expected draft guidance, got %s", text)
+	}
+}
+
+func TestRunSetupWithIO_ProviderProbeFailureSavesDraft(t *testing.T) {
+	clearConfigEnvForTest(t)
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "config.json")
+	workspace := filepath.Join(tmp, "workspace")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	input := strings.Join([]string{
+		"",        // provider default
+		"testkey", // API key
+		workspace, // workspace
+		"",        // recommended app folder
+		"1",       // solo computer
+		"2",       // balanced safety
+		"",
+	}, "\n")
+	var out bytes.Buffer
+	result, err := runSetupWithIOOptions(strings.NewReader(input), &out, cfgPath, tmp, setupOptions{
+		AskStartChat: true,
+		ProviderProbe: func(context.Context, config.Config) setupProviderProbeReport {
+			return setupProviderProbeReport{Ready: false, Checks: []setupProviderProbeCheck{
+				{Name: "Chat model probe", OK: false, Message: "model not found"},
+			}}
+		},
+	})
+	if err != nil {
+		t.Fatalf("runSetupWithIOOptions: %v", err)
+	}
+	if result.StartChat {
+		t.Fatal("probe failure must not start chat")
+	}
+	if !strings.Contains(out.String(), "Chat model probe: Needs attention") || !strings.Contains(out.String(), "Saved draft setup.") {
+		t.Fatalf("expected probe failure draft output, got %s", out.String())
+	}
+}
+
+func TestStaticSetupProviderProbeDoesNotRequireEmbeddingsForChat(t *testing.T) {
+	cfg := config.Default()
+	cfg.Provider.APIKey = "test-key"
+	cfg.Provider.EmbedModel = ""
+
+	report := staticSetupProviderProbe(cfg)
+	if !report.Ready {
+		t.Fatalf("expected chat-ready provider probe without embeddings, got %#v", report)
+	}
+}
+
+func TestRunSetupWithIO_EnvProviderKeyIsNotSavedLocally(t *testing.T) {
+	clearConfigEnvForTest(t)
+	t.Setenv("OPENAI_API_KEY", "env-provider-key")
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "config.json")
+	workspace := filepath.Join(tmp, "workspace")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	input := strings.Join([]string{
+		"",        // provider default
+		"",        // use env key
+		workspace, // workspace
+		"",        // recommended app folder
+		"1",       // solo computer
+		"2",       // balanced safety
+		"n",       // do not start chat
+		"",
+	}, "\n")
+	var out bytes.Buffer
+	if _, err := runSetupWithIO(strings.NewReader(input), &out, cfgPath, tmp); err != nil {
+		t.Fatalf("runSetupWithIO: %v", err)
+	}
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	var saved config.Config
+	if err := json.Unmarshal(raw, &saved); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if saved.Provider.APIKey != "" {
+		t.Fatalf("expected env key not to be saved locally, got %q", saved.Provider.APIKey)
+	}
+	if !strings.Contains(out.String(), "Found OPENAI_API_KEY in your environment") {
+		t.Fatalf("expected env key guidance, got %s", out.String())
 	}
 }
 

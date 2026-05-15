@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -40,7 +41,7 @@ func (t *FileTool) safePathForRoot(p, rootPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	abs, err = canonicalizePath(abs)
+	abs, err = CanonicalizePath(abs)
 	if err != nil {
 		return "", err
 	}
@@ -49,7 +50,7 @@ func (t *FileTool) safePathForRoot(p, rootPath string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		root, err = canonicalizeRoot(root)
+		root, err = CanonicalizeRoot(root)
 		if err != nil {
 			return "", err
 		}
@@ -84,11 +85,11 @@ func validatePathInRoot(rootPath, abs string) error {
 	if err != nil {
 		return err
 	}
-	root, err = canonicalizeRoot(root)
+	root, err = CanonicalizeRoot(root)
 	if err != nil {
 		return err
 	}
-	resolved, err := canonicalizePath(abs)
+	resolved, err := CanonicalizePath(abs)
 	if err != nil {
 		return err
 	}
@@ -109,7 +110,11 @@ func (t *FileTool) openSafeRead(path string) (*os.File, os.FileInfo, error) {
 		f.Close()
 		return nil, nil, err
 	}
-	if err := t.validateOpenedPath(path, info); err != nil {
+	if err := validateOpenedPathUnchanged(path, info); err != nil {
+		f.Close()
+		return nil, nil, err
+	}
+	if err := t.validatePathInRoot(path); err != nil {
 		f.Close()
 		return nil, nil, err
 	}
@@ -126,7 +131,11 @@ func (t *FileTool) openSafeWrite(path string, perm os.FileMode) (*os.File, error
 		f.Close()
 		return nil, err
 	}
-	if err := t.validateOpenedWritePath(path, info); err != nil {
+	if err := validateOpenedPathUnchanged(path, info); err != nil {
+		f.Close()
+		return nil, err
+	}
+	if err := t.validatePathInWriteRoot(path); err != nil {
 		f.Close()
 		return nil, err
 	}
@@ -156,7 +165,7 @@ func (t *FileTool) validateOpenedWritePath(path string, openedInfo os.FileInfo) 
 }
 
 func validateOpenedPathUnchanged(path string, openedInfo os.FileInfo) error {
-	resolved, err := canonicalizePath(path)
+	resolved, err := CanonicalizePath(path)
 	if err != nil {
 		return err
 	}
@@ -170,14 +179,14 @@ func validateOpenedPathUnchanged(path string, openedInfo os.FileInfo) error {
 	return nil
 }
 
-func canonicalizeRoot(root string) (string, error) {
+func CanonicalizeRoot(root string) (string, error) {
 	if _, err := os.Stat(root); err != nil {
 		return "", err
 	}
 	return filepath.EvalSymlinks(root)
 }
 
-func canonicalizePath(abs string) (string, error) {
+func CanonicalizePath(abs string) (string, error) {
 	if _, err := os.Lstat(abs); err == nil {
 		return filepath.EvalSymlinks(abs)
 	} else if !os.IsNotExist(err) {
@@ -309,7 +318,7 @@ func (t *SearchFile) Description() string {
 func (t *SearchFile) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
 		"path":     map[string]any{"type": "string", "description": "File path to search. Use an absolute path or workspace-relative path inside the allowed read root."},
-		"pattern":  map[string]any{"type": "string", "description": "Substring or regex pattern to find. Choose a specific term rather than a broad word when possible."},
+		"pattern":  map[string]any{"type": "string", "description": "Pattern to find. Valid regular expressions use regex matching; invalid regex falls back to literal substring matching."},
 		"maxBytes": map[string]any{"type": "integer", "description": "Maximum bytes of matching-line output returned directly. Omit for default 65536."},
 	}, "required": []string{"path", "pattern"}}
 }
@@ -363,7 +372,7 @@ func (t *WriteFile) Execute(ctx context.Context, params map[string]any) (string,
 			return "", err
 		}
 	}
-	out, err := t.openSafeWrite(p, existingFileMode(p, 0o600))
+	out, err := t.openSafeWrite(p, 0o600)
 	if err != nil {
 		return "", err
 	}
@@ -407,8 +416,12 @@ func (t *EditFile) Execute(ctx context.Context, params map[string]any) (string, 
 	if err != nil {
 		return "", err
 	}
-	b, err := io.ReadAll(in)
+	const maxEditSize = 10 * 1024 * 1024
+	b, err := io.ReadAll(io.LimitReader(in, maxEditSize+1))
 	closeErr := in.Close()
+	if err == nil && len(b) > maxEditSize {
+		return "", fmt.Errorf("file too large to edit (max %d bytes)", maxEditSize)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -431,7 +444,7 @@ func (t *EditFile) Execute(ctx context.Context, params map[string]any) (string, 
 			s = strings.Replace(s, find, replace, count)
 		}
 	}
-	out, err := t.openSafeWrite(p, existingFileMode(p, 0))
+	out, err := t.openSafeWrite(p, 0)
 	if err != nil {
 		return "", err
 	}
@@ -577,6 +590,12 @@ func readLineRange(f *os.File, path string, size int64, start, end, max int) (st
 }
 
 func grepFile(f *os.File, path string, size int64, pattern string, max int) (string, error) {
+	var match func(string) bool
+	if re, err := regexp.Compile(pattern); err == nil {
+		match = re.MatchString
+	} else {
+		match = func(s string) bool { return strings.Contains(s, pattern) }
+	}
 	var b strings.Builder
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -585,7 +604,7 @@ func grepFile(f *os.File, path string, size int64, pattern string, max int) (str
 	for sc.Scan() {
 		line++
 		text := sc.Text()
-		if !strings.Contains(text, pattern) {
+		if !match(text) {
 			continue
 		}
 		matches++

@@ -61,6 +61,8 @@ Cron is for schedule-specific work or per-job delivery targets.
 
 The README highlights that job payloads can set `session_key` explicitly to override the global default session.
 
+Cron payloads can also use `kind: "agent_cli_run"` to enqueue an external agent runner such as Codex, Claude, Gemini, or OpenCode. These jobs require `payload.agent_run.runner_id` and `payload.agent_run.task`; when `mode` and `isolation` are omitted they default to read-only review (`review` + `host_readonly`).
+
 Use heartbeat for a standing background task list. Use cron when you need a specific schedule or delivery target.
 
 ## Structured trigger inputs

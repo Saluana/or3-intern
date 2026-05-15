@@ -30,6 +30,8 @@ or3-intern version
 
 If you prefer not to install anything yet, every example below also works with `go run ./cmd/or3-intern ...`.
 
+If a `.env` file exists in the current directory or its parent, OR3 loads it automatically before applying environment overrides. Existing shell variables are not replaced. Set `OR3_LOAD_DOTENV=false` when you want to disable `.env` loading for a run.
+
 ### 1. Run guided setup
 
 ```bash
@@ -123,6 +125,10 @@ or3-intern service
 This exposes the authenticated loopback HTTP API documented in [api-reference.md](api-reference.md).
 If you are running the repo checkout directly, [scripts/restart-service.sh](../scripts/restart-service.sh) gives you a reusable `start|stop|restart|status` helper for service mode and will auto-load `.env` when present.
 If you want to reach service mode over your tailnet instead of keeping it loopback-only, see [tailscale-service-guide.md](tailscale-service-guide.md).
+
+`OR3_SERVICE_UNSAFE_DEV=true` makes the restart helper preserve `--unsafe-dev`. Use it only on a local development machine because it bypasses startup safety checks.
+
+For a containerized starting point, use `compose.yaml`. It binds the service to `127.0.0.1:9100`, reads `.env`, and mounts local `config/`, `data/`, and the repo workspace. Treat it as a baseline, not a production security profile.
 
 ## Important local paths
 

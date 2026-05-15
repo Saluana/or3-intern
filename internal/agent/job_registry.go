@@ -1,10 +1,14 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -133,6 +137,9 @@ func (r *JobRegistry) Publish(id string, eventType string, data map[string]any) 
 	if entry == nil {
 		return false
 	}
+	if entry.terminal {
+		return false
+	}
 	if data == nil {
 		data = map[string]any{}
 	}
@@ -154,6 +161,7 @@ func (r *JobRegistry) Publish(id string, eventType string, data map[string]any) 
 		select {
 		case ch <- event:
 		default:
+			log.Printf("job_registry: event dropped for job %s (type=%s, subscriber full)", id, eventType)
 		}
 	}
 	return true
@@ -285,7 +293,7 @@ func (o JobObserver) OnToolCall(_ context.Context, name string, arguments string
 	if o.registry == nil {
 		return
 	}
-	o.registry.Publish(o.jobID, "tool_call", map[string]any{"name": name, "arguments": arguments})
+	o.registry.Publish(o.jobID, "tool_call", map[string]any{"name": name, "arguments": arguments, "status": "running", "arguments_preview": boundedEventPreview(arguments, 500)})
 }
 
 func (o JobObserver) OnToolResult(_ context.Context, name string, result string, err error) {
@@ -295,6 +303,7 @@ func (o JobObserver) OnToolResult(_ context.Context, name string, result string,
 	data := map[string]any{"name": name, "result": result}
 	if err != nil {
 		data["error"] = err.Error()
+		data["public_code"] = PublicErrorCode(err)
 		var approvalErr *tools.ApprovalRequiredError
 		if errors.As(err, &approvalErr) {
 			data["code"] = "approval_required"
@@ -302,7 +311,45 @@ func (o JobObserver) OnToolResult(_ context.Context, name string, result string,
 			data["approval_id"] = approvalErr.RequestID
 		}
 	}
+	data["status"] = "completed"
+	if err != nil {
+		data["status"] = "failed"
+	}
+	data["result_preview"] = boundedEventPreview(result, 700)
 	o.registry.Publish(o.jobID, "tool_result", data)
+}
+
+func (o JobObserver) OnToolLifecycle(_ context.Context, event ToolLifecycleEvent) {
+	if o.registry == nil {
+		return
+	}
+	eventType := "tool_call"
+	if event.Status == "completed" || event.Status == "failed" || event.Result != "" || event.ResultPreview != "" {
+		eventType = "tool_result"
+	}
+	data := map[string]any{
+		"name":              event.Name,
+		"status":            event.Status,
+		"tool_call_id":      event.ToolCallID,
+		"arguments":         event.Arguments,
+		"arguments_preview": firstNonEmpty(event.ArgumentsPreview, boundedEventPreview(event.Arguments, 500)),
+	}
+	if event.Result != "" || event.ResultPreview != "" {
+		data["result"] = event.Result
+		data["result_preview"] = firstNonEmpty(event.ResultPreview, boundedEventPreview(event.Result, 700))
+	}
+	if event.ArtifactID != "" {
+		data["artifact_id"] = event.ArtifactID
+	}
+	if event.ApprovalID > 0 {
+		data["approval_id"] = event.ApprovalID
+		data["request_id"] = event.ApprovalID
+		data["code"] = PublicErrorApproval
+	}
+	if event.PublicCode != "" {
+		data["public_code"] = event.PublicCode
+	}
+	o.registry.Publish(o.jobID, eventType, data)
 }
 
 func (o JobObserver) OnCompletion(_ context.Context, finalText string, streamed bool) {
@@ -316,7 +363,28 @@ func (o JobObserver) OnError(_ context.Context, err error) {
 	if o.registry == nil || err == nil {
 		return
 	}
-	o.registry.Publish(o.jobID, "runtime_error", map[string]any{"message": err.Error()})
+	o.registry.Publish(o.jobID, "runtime_error", map[string]any{"message": err.Error(), "public_code": PublicErrorCode(err)})
+}
+
+func boundedEventPreview(text string, limit int) string {
+	text = strings.TrimSpace(text)
+	if limit <= 0 || text == "" {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	return string(runes[:limit]) + "..."
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (r *JobRegistry) cleanupLocked(now time.Time) {
@@ -371,9 +439,22 @@ func cloneEventData(in map[string]any) map[string]any {
 	if len(in) == 0 {
 		return map[string]any{}
 	}
-	out := make(map[string]any, len(in))
-	for key, value := range in {
-		out[key] = value
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(in); err != nil {
+		return map[string]any{}
+	}
+	var out map[string]any
+	dec := json.NewDecoder(&buf)
+	dec.UseNumber()
+	if err := dec.Decode(&out); err != nil {
+		return map[string]any{}
+	}
+	for k, v := range out {
+		if num, ok := v.(json.Number); ok {
+			if i, err := num.Int64(); err == nil {
+				out[k] = i
+			}
+		}
 	}
 	return out
 }

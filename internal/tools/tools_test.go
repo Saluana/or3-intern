@@ -92,27 +92,31 @@ func TestRegistry_Definitions(t *testing.T) {
 	}
 }
 
-func TestRegistry_MetadataInfersGroups(t *testing.T) {
+func TestRegistry_MetadataUsesReportersAndConservativeFallback(t *testing.T) {
 	r := NewRegistry()
-	r.Register(&mockTool{name: "read_file", desc: ""})
-	r.Register(&mockTool{name: "list_dir", desc: ""})
-	r.Register(&mockTool{name: "write_file", desc: ""})
-	r.Register(&mockTool{name: "web_fetch", desc: ""})
-	r.Register(&mockTool{name: "spawn_subagent", desc: ""})
-	if !containsGroup(r.Metadata("read_file").Groups, ToolGroupRead) {
+	r.Register(&ReadFile{})
+	r.Register(&ListDir{})
+	r.Register(&WriteFile{})
+	r.Register(&WebFetch{})
+	r.Register(&SpawnSubagent{})
+	r.Register(&mockTool{name: "plain_tool", desc: ""})
+	if !containsGroup(r.Metadata(ToolNameReadFile).Groups, ToolGroupRead) {
 		t.Fatalf("expected read_file read group")
 	}
-	if !containsGroup(r.Metadata("list_dir").Groups, ToolGroupRead) {
+	if !containsGroup(r.Metadata(ToolNameListDir).Groups, ToolGroupRead) {
 		t.Fatalf("expected list_dir read group")
 	}
-	if !containsGroup(r.Metadata("write_file").Groups, ToolGroupWrite) {
+	if !containsGroup(r.Metadata(ToolNameWriteFile).Groups, ToolGroupWrite) {
 		t.Fatalf("expected write_file write group")
 	}
-	if !containsGroup(r.Metadata("web_fetch").Groups, ToolGroupWeb) {
+	if !containsGroup(r.Metadata(ToolNameWebFetch).Groups, ToolGroupWeb) {
 		t.Fatalf("expected web_fetch web group")
 	}
-	if containsGroup(r.Metadata("spawn_subagent").Groups, ToolGroupRead) {
-		t.Fatalf("expected unknown tool to avoid implicit read group")
+	if containsGroup(r.Metadata(ToolNameSpawnSubagent).Groups, ToolGroupRead) {
+		t.Fatalf("expected spawn_subagent to avoid implicit read group")
+	}
+	if len(r.Metadata("plain_tool").Groups) != 0 {
+		t.Fatalf("expected fallback metadata to avoid guessed groups")
 	}
 }
 

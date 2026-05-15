@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 )
 
 type Registry struct {
+	mu    sync.RWMutex
 	tools map[string]Tool
 }
 
@@ -40,9 +42,22 @@ func NewRegistry() *Registry {
 	return &Registry{tools: map[string]Tool{}}
 }
 
-func (r *Registry) Register(t Tool)      { r.tools[t.Name()] = t }
-func (r *Registry) Get(name string) Tool { return r.tools[name] }
+func (r *Registry) Register(t Tool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.tools[t.Name()] = t
+	registerToolAdviceProvider(t)
+}
+
+func (r *Registry) Get(name string) Tool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.tools[name]
+}
+
 func (r *Registry) Names() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	out := make([]string, 0, len(r.tools))
 	for k := range r.tools {
 		out = append(out, k)
@@ -52,7 +67,13 @@ func (r *Registry) Names() []string {
 }
 
 func (r *Registry) Definitions() []map[string]any {
-	names := r.Names()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	names := make([]string, 0, len(r.tools))
+	for k := range r.tools {
+		names = append(names, k)
+	}
+	sort.Strings(names)
 	out := make([]map[string]any, 0, len(names))
 	for _, name := range names {
 		out = append(out, r.tools[name].Schema())
@@ -61,7 +82,12 @@ func (r *Registry) Definitions() []map[string]any {
 }
 
 func (r *Registry) Metadata(name string) ToolMetadata {
-	if r == nil || r.tools == nil {
+	if r == nil {
+		return ToolMetadata{}
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.tools == nil {
 		return ToolMetadata{}
 	}
 	t := r.tools[name]
@@ -70,10 +96,13 @@ func (r *Registry) Metadata(name string) ToolMetadata {
 	}
 	if reporter, ok := t.(MetadataReporter); ok {
 		meta := reporter.Metadata()
+		if len(meta.Capabilities) == 0 {
+			meta.Capabilities = []string{string(ToolCapability(t, nil))}
+		}
 		meta.Groups = normalizeGroups(meta.Groups)
 		return meta
 	}
-	return inferToolMetadata(name)
+	return inferToolMetadata(t)
 }
 
 func (r *Registry) CloneSelected(allowedNames map[string]struct{}) *Registry {
@@ -81,9 +110,11 @@ func (r *Registry) CloneSelected(allowedNames map[string]struct{}) *Registry {
 	if r == nil {
 		return clone
 	}
-	for _, name := range r.Names() {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for name := range r.tools {
 		if _, ok := allowedNames[name]; ok {
-			clone.Register(r.tools[name])
+			clone.tools[name] = r.tools[name]
 		}
 	}
 	return clone
@@ -107,42 +138,23 @@ func normalizeGroups(groups []string) []string {
 	return out
 }
 
-func inferToolMetadata(name string) ToolMetadata {
-	name = strings.ToLower(strings.TrimSpace(name))
-	var groups []string
-	switch {
-	case name == "read_file" || name == "search_file" || name == "read_artifact" || name == "list_dir" || name == "list_files" || name == "grep_files" || name == "search_memory" || name == "show_diff":
-		groups = []string{ToolGroupRead}
-	case strings.HasPrefix(name, "memory_"):
-		groups = []string{ToolGroupMemory, ToolGroupRead}
-	case name == "write_file" || name == "edit_file":
-		groups = []string{ToolGroupWrite}
-	case name == "exec" || name == "run_skill" || name == "run_skill_script":
-		groups = []string{ToolGroupExec}
-	case strings.HasPrefix(name, "web_"):
-		groups = []string{ToolGroupWeb}
-	case strings.HasPrefix(name, "cron"):
-		groups = []string{ToolGroupCron}
-	case strings.Contains(name, "skill"):
-		groups = []string{ToolGroupSkills, ToolGroupRead}
-	case name == "send_message":
-		groups = []string{ToolGroupChannels}
-	case strings.HasPrefix(name, "mcp_"):
-		groups = []string{ToolGroupMCP}
-	case strings.Contains(name, "service"):
-		groups = []string{ToolGroupService}
+func inferToolMetadata(tool Tool) ToolMetadata {
+	if tool == nil {
+		return ToolMetadata{}
 	}
-	return ToolMetadata{Groups: normalizeGroups(groups), Capabilities: []string{string(ToolCapability(nil, nil))}}
+	return ToolMetadata{Capabilities: []string{string(ToolCapability(tool, nil))}}
 }
 
 func (r *Registry) CloneFiltered(allowed []string) *Registry {
 	if r == nil {
 		return NewRegistry()
 	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	if len(allowed) == 0 {
 		clone := NewRegistry()
-		for _, name := range r.Names() {
-			clone.Register(r.tools[name])
+		for name := range r.tools {
+			clone.tools[name] = r.tools[name]
 		}
 		return clone
 	}
@@ -155,20 +167,16 @@ func (r *Registry) CloneFiltered(allowed []string) *Registry {
 		allowedSet[trimmed] = struct{}{}
 	}
 	clone := NewRegistry()
-	for _, name := range r.Names() {
+	for name := range r.tools {
 		if _, ok := allowedSet[name]; !ok {
 			continue
 		}
-		clone.Register(r.tools[name])
+		clone.tools[name] = r.tools[name]
 	}
 	return clone
 }
 
 func (r *Registry) Execute(ctx context.Context, name string, argsJSON string) (string, error) {
-	t := r.tools[name]
-	if t == nil {
-		return "", fmt.Errorf("tool '%s' not found", name)
-	}
 	var params map[string]any
 	if argsJSON == "" {
 		params = map[string]any{}
@@ -181,7 +189,9 @@ func (r *Registry) Execute(ctx context.Context, name string, argsJSON string) (s
 }
 
 func (r *Registry) ExecuteParams(ctx context.Context, name string, params map[string]any) (string, error) {
+	r.mu.RLock()
 	t := r.tools[name]
+	r.mu.RUnlock()
 	if t == nil {
 		return "", fmt.Errorf("tool '%s' not found", name)
 	}

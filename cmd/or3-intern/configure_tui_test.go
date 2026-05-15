@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"or3-intern/internal/config"
+	"or3-intern/internal/mcp"
 )
 
 func TestConfigureTUIFormNavigationHighlightsSelectedField(t *testing.T) {
@@ -119,6 +120,165 @@ func TestConfigureTUIFieldDescriptionsAreHelpful(t *testing.T) {
 				t.Fatalf("expected helpful description for %s/%s, got %q", channel, field.Key, field.Description)
 			}
 		}
+	}
+	cfg.Tools.MCPServers = map[string]config.MCPServerConfig{"files": {Enabled: true, Transport: "stdio"}}
+	for _, field := range buildMCPFields(cfg, "files") {
+		if len(strings.Fields(field.Description)) < 6 {
+			t.Fatalf("expected helpful description for mcp/%s, got %q", field.Key, field.Description)
+		}
+	}
+}
+
+func TestConfigureTUIScreenAdaptersImplementInterface(t *testing.T) {
+	screens := []configureScreenAdapter{
+		configureProviderScreen{},
+		configureWorkspaceScreen{},
+		configureChannelsScreen{},
+		configureMCPScreen{},
+		configureContextScreen{},
+		configureSafetyScreen{},
+		configureServiceScreen{},
+		configureDocIndexScreen{},
+		configureReviewScreen{},
+		configureSuccessScreen{},
+	}
+	model := newConfigureTUIModel("/tmp/config.json", "/workspace/project", config.Default(), false, "", configureTUIOptions{})
+	for _, screen := range screens {
+		_ = screen.Init(model)
+		if view := screen.View(model); strings.TrimSpace(view) == "" {
+			t.Fatalf("expected screen view to render")
+		}
+		var saved config.Config
+		if err := screen.Save(&model, &saved); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+	}
+}
+
+func TestConfigureTUIScreenAdaptersHandleScreenUpdates(t *testing.T) {
+	t.Run("section picker", func(t *testing.T) {
+		model := newConfigureTUIModel("/tmp/config.json", "/workspace/project", config.Default(), false, "", configureTUIOptions{})
+		model.screen = configureScreenSections
+		handled, _ := model.screenAdapter().Update(tea.KeyMsg{Type: tea.KeyEnter}, &model)
+		if !handled || model.screen != configureScreenForm || model.currentSection == "" {
+			t.Fatalf("expected section adapter to enter a form, handled=%v screen=%v section=%q", handled, model.screen, model.currentSection)
+		}
+	})
+
+	t.Run("mcp add flow", func(t *testing.T) {
+		model := newConfigureTUIModel("/tmp/config.json", "/workspace/project", config.Default(), false, "", configureTUIOptions{Restricted: []string{"mcp"}})
+		model.screen = configureScreenMCPServerList
+		handled, _ := model.screenAdapter().Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}}, &model)
+		if !handled || model.screen != configureScreenMCPNameInput {
+			t.Fatalf("expected mcp adapter to start name input, handled=%v screen=%v", handled, model.screen)
+		}
+	})
+
+	t.Run("review back", func(t *testing.T) {
+		model := newConfigureTUIModel("/tmp/config.json", "/workspace/project", config.Default(), false, "", configureTUIOptions{Restricted: []string{"provider"}})
+		model.currentSection = "provider"
+		model.screen = configureScreenReview
+		handled, _ := model.screenAdapter().Update(tea.KeyMsg{Type: tea.KeyEsc}, &model)
+		if !handled || model.screen != configureScreenForm {
+			t.Fatalf("expected review adapter to return to form, handled=%v screen=%v", handled, model.screen)
+		}
+	})
+}
+
+func TestConfigureTUISectionSmokeRendersWithoutPanic(t *testing.T) {
+	cfg := config.Default()
+	sections := []string{"provider", "storage", "runtime", "context", "workspace", "tools", "docindex", "skills", "security", "hardening", "session", "automation", "service"}
+	for _, section := range sections {
+		t.Run(section, func(t *testing.T) {
+			model := newConfigureTUIModel("/tmp/config.json", "/workspace/project", cfg, false, "", configureTUIOptions{Restricted: []string{section}})
+			model.height = 28
+			model.currentSection = section
+			model.screen = configureScreenForm
+			view := model.View()
+			if strings.TrimSpace(view) == "" {
+				t.Fatalf("expected non-empty view for %s", section)
+			}
+		})
+	}
+	for _, channel := range []string{"telegram", "slack", "discord", "whatsapp", "email"} {
+		t.Run("channel_"+channel, func(t *testing.T) {
+			model := newConfigureTUIModel("/tmp/config.json", "/workspace/project", cfg, false, "", configureTUIOptions{Restricted: []string{"channels"}})
+			model.height = 28
+			model.currentSection = "channels"
+			model.currentChannel = channel
+			model.screen = configureScreenForm
+			if strings.TrimSpace(model.View()) == "" {
+				t.Fatalf("expected non-empty channel view for %s", channel)
+			}
+		})
+	}
+}
+
+func TestConfigureTUIMCPFieldsApply(t *testing.T) {
+	cfg := config.Default()
+	cfg.Tools.MCPServers = map[string]config.MCPServerConfig{"files": {Enabled: true, Transport: "stdio"}}
+	if changed, err := applyChoiceSelection(&cfg, "mcp", "files", "mcp_transport", "streamable-http"); err != nil || !changed {
+		t.Fatalf("apply mcp transport: changed=%v err=%v", changed, err)
+	}
+	if changed, err := applyFieldValue(&cfg, "mcp", "files", "mcp_url", "http://127.0.0.1:3000/mcp"); err != nil || !changed {
+		t.Fatalf("apply mcp url: changed=%v err=%v", changed, err)
+	}
+	if changed, err := applyFieldValue(&cfg, "mcp", "files", "mcp_headers", "Authorization=Bearer token"); err != nil || !changed {
+		t.Fatalf("apply mcp headers: changed=%v err=%v", changed, err)
+	}
+	if changed := setToggleFieldValue(&cfg, "mcp", "files", "mcp_enabled", false); !changed {
+		t.Fatal("expected mcp enabled toggle to apply")
+	}
+	server := cfg.Tools.MCPServers["files"]
+	if server.Transport != "streamable-http" || server.URL != "http://127.0.0.1:3000/mcp" || server.Enabled || server.Headers["Authorization"] != "Bearer token" {
+		t.Fatalf("unexpected mcp server config: %+v", server)
+	}
+}
+
+func TestConfigureTUIMCPTestConnectionFlow(t *testing.T) {
+	cfg := config.Default()
+	cfg.Tools.MCPServers = map[string]config.MCPServerConfig{"files": {Enabled: true, Transport: "stdio", Command: "mcp-files"}}
+	previousFactory := configureMCPTestManagerFactory
+	configureMCPTestManagerFactory = func(map[string]config.MCPServerConfig) serviceMCPTestManager {
+		return &fakeServiceMCPTestManager{status: map[string]mcp.ServerStatus{
+			"files": {Connected: true, ToolCount: 2, Tools: []string{"mcp_files_read", "mcp_files_write"}},
+		}}
+	}
+	t.Cleanup(func() { configureMCPTestManagerFactory = previousFactory })
+
+	model := newConfigureTUIModel("/tmp/config.json", "/workspace/project", cfg, false, "", configureTUIOptions{
+		Restricted: []string{"mcp"},
+	})
+	model.mcpList.Select(1)
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
+	model = updated.(configureTUIModel)
+
+	if !strings.Contains(model.mcpTestMessage, "test ok: 2 tools") {
+		t.Fatalf("expected test success message, got %q", model.mcpTestMessage)
+	}
+	if !strings.Contains(model.View(), "test ok: 2 tools") {
+		t.Fatalf("expected test result in view, got %q", model.View())
+	}
+}
+
+func TestConfigureTUIMCPAddFlow(t *testing.T) {
+	model := newConfigureTUIModel("/tmp/config.json", "/workspace/project", config.Default(), false, "", configureTUIOptions{
+		Restricted: []string{"mcp"},
+	})
+	if model.screen != configureScreenMCPServerList {
+		t.Fatalf("expected restricted mcp flow to start on server list, got %v", model.screen)
+	}
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	model = updated.(configureTUIModel)
+	model.textInput.SetValue("files")
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(configureTUIModel)
+	if model.screen != configureScreenMCPForm {
+		t.Fatalf("expected add flow to open mcp form, got %v", model.screen)
+	}
+	server, ok := model.cfg.Tools.MCPServers["files"]
+	if !ok || !server.Enabled || server.Transport != "stdio" {
+		t.Fatalf("expected default stdio server after add, got ok=%v server=%+v", ok, server)
 	}
 }
 

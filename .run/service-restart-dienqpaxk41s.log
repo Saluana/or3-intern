@@ -1,0 +1,4 @@
+2026-05-10T02:56:59.340806Z restart requested by pid 3874
+Port 9100 is still busy after stopping the service.
+COMMAND    PID    USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+or3-inter 3874 brendon   13u  IPv4 0xd0fead3b82b65502      0t0  TCP 127.0.0.1:9100 (LISTEN)

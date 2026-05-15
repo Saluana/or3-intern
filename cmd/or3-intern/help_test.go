@@ -128,6 +128,39 @@ func TestPrintHelpTopic_Configure(t *testing.T) {
 	}
 }
 
+func TestPrintHelpTopic_SettingsIsCanonicalConfigEntrypoint(t *testing.T) {
+	var out bytes.Buffer
+	if err := printHelpTopic(&out, []string{"settings"}); err != nil {
+		t.Fatalf("printHelpTopic settings: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "canonical settings flow") {
+		t.Fatalf("expected settings help to be canonical, got %q", got)
+	}
+	if !strings.Contains(got, "Setup, init, configure, and doctor --fix stay available") {
+		t.Fatalf("expected alias guidance in settings help, got %q", got)
+	}
+}
+
+func TestPrintHelpTopic_DeviceCommandsUsePairingLanguage(t *testing.T) {
+	var connectOut bytes.Buffer
+	if err := printHelpTopic(&connectOut, []string{"connect-device"}); err != nil {
+		t.Fatalf("printHelpTopic connect-device: %v", err)
+	}
+	if !strings.Contains(connectOut.String(), "Start the device pairing flow") {
+		t.Fatalf("expected connect-device to describe pairing flow, got %q", connectOut.String())
+	}
+
+	var devicesOut bytes.Buffer
+	if err := printHelpTopic(&devicesOut, []string{"devices"}); err != nil {
+		t.Fatalf("printHelpTopic devices: %v", err)
+	}
+	got := devicesOut.String()
+	if !strings.Contains(got, "List and manage already paired devices") || !strings.Contains(got, "or3-intern pairing approve-code <code>") {
+		t.Fatalf("expected devices help to separate management from pairing, got %q", got)
+	}
+}
+
 func TestPrintHelpTopic_PairingExplainsBrowserApprovalFlow(t *testing.T) {
 	var out bytes.Buffer
 	if err := printHelpTopic(&out, []string{"pairing"}); err != nil {

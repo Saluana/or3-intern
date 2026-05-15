@@ -1,0 +1,13 @@
+{
+  "workspaceDir": "/tmp/or3-advanced",
+  "dbPath": "/tmp/or3-advanced/or3.sqlite",
+  "artifactsDir": "/tmp/or3-advanced/artifacts",
+  "runtimeProfile": "hosted-remote-sandbox-only",
+  "provider": {
+    "apiBase": "https://api.openai.com/v1",
+    "apiKey": "test-key",
+    "model": "gpt-4.1-mini",
+    "embedModel": "text-embedding-3-small",
+    "timeoutSeconds": 60
+  }
+}

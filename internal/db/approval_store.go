@@ -296,6 +296,20 @@ func (d *DB) TouchPairedDevice(ctx context.Context, deviceID string, lastSeenAt 
 	return err
 }
 
+func (d *DB) FindActivePairedDeviceByChannelIdentity(ctx context.Context, channel, identity string) (bool, error) {
+	channel = strings.ToLower(strings.TrimSpace(channel))
+	identity = strings.ToLower(strings.TrimSpace(identity))
+	row := d.SQL.QueryRowContext(ctx, `SELECT 1 FROM paired_devices WHERE status='active' AND revoked_at=0 AND LOWER(json_extract(metadata_json, '$.channel'))=? AND (LOWER(json_extract(metadata_json, '$.identity'))=? OR LOWER(json_extract(metadata_json, '$.sender'))=? OR LOWER(json_extract(metadata_json, '$.user_id'))=? OR LOWER(json_extract(metadata_json, '$.chat_id'))=? OR LOWER(json_extract(metadata_json, '$.from'))=?) LIMIT 1`, channel, identity, identity, identity, identity, identity)
+	var found int
+	if err := row.Scan(&found); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
 func (d *DB) CreateApprovalRequest(ctx context.Context, input ApprovalRequestRecord) (ApprovalRequestRecord, error) {
 	res, err := d.SQL.ExecContext(ctx, `INSERT INTO approval_requests(type, subject_hash, subject_json, requester_agent_id, requester_session_id, execution_host_id, status, policy_mode, requested_at, expires_at, resolved_at, resolver_actor_id, resolution_kind, resolution_note)
 		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, input.Type, input.SubjectHash, input.SubjectJSON, input.RequesterAgentID, input.RequesterSessionID, input.ExecutionHostID, input.Status, input.PolicyMode, input.RequestedAt, input.ExpiresAt, input.ResolvedAt, input.ResolverActorID, input.ResolutionKind, input.ResolutionNote)

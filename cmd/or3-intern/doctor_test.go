@@ -546,6 +546,7 @@ func safeDoctorConfig() config.Config {
 	cfg.Security.Network.Enabled = true
 	cfg.Security.Network.DefaultDeny = true
 	cfg.Tools.MCPServers = map[string]config.MCPServerConfig{}
+	cfg.Provider.APIKey = "test-provider-key"
 	cfg.RuntimeProfile = config.ProfileLocalDev
 	return cfg
 }

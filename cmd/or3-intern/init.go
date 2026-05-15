@@ -97,6 +97,16 @@ func applyProviderPreset(cfg *config.Config, choice string) {
 	cfg.Provider.APIBase = preset.apiBase
 	cfg.Provider.Model = preset.model
 	cfg.Provider.EmbedModel = preset.embedModel
+	providerKey := configureProviderKeyFromBase(preset.apiBase)
+	if cfg.ModelRouting.Chat.Primary.Provider == "" || choice != "3" {
+		cfg.ModelRouting.Chat.Primary = config.ModelRef{Provider: providerKey, Model: preset.model}
+		cfg.ModelRouting.Agents.Primary = cfg.ModelRouting.Chat.Primary
+		cfg.ModelRouting.Subagents.Primary = cfg.ModelRouting.Chat.Primary
+		cfg.ModelRouting.Summarization.Primary = cfg.ModelRouting.Chat.Primary
+		cfg.ModelRouting.ContextManager.Primary = cfg.ModelRouting.Chat.Primary
+		cfg.ModelRouting.Embeddings.Primary = config.ModelRef{Provider: providerKey, Model: preset.embedModel}
+	}
+	setProviderProfileAPIBase(cfg, providerKey, preset.apiBase)
 }
 
 func promptChoice(reader *bufio.Reader, out io.Writer, label string, options []string, defaultChoice string) (string, error) {

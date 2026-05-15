@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	"or3-intern/internal/cron"
@@ -17,12 +16,12 @@ type CronTool struct {
 
 func (t *CronTool) Name() string { return "cron" }
 func (t *CronTool) Description() string {
-	return "Manage scheduled jobs: add, list, remove, run now, or inspect scheduler status. Use this for future or recurring work, not immediate one-turn actions."
+	return "Manage scheduled jobs: add, list, remove, run now, or inspect scheduler status. Jobs can run OR3 agent turns or enqueue external agent CLI runs with payload.kind=agent_cli_run. Use this for future or recurring work, not immediate one-turn actions."
 }
 func (t *CronTool) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
 		"action": map[string]any{"type": "string", "enum": []any{"add", "list", "remove", "run", "status"}, "description": "Operation to perform: list/status need no other fields; add needs job; remove/run need id."},
-		"job":    map[string]any{"type": "object", "description": "Job object for action=add, including schedule and payload. Omit for other actions."},
+		"job":    map[string]any{"type": "object", "description": "Job object for action=add, including schedule and payload. Use payload.kind=agent_turn with payload.message for OR3 turns, or payload.kind=agent_cli_run with payload.agent_run.runner_id and payload.agent_run.task for external agent CLI runs. Omit for other actions."},
 		"id":     map[string]any{"type": "string", "description": "Existing job id for action=remove or action=run."},
 		"force":  map[string]any{"type": "boolean", "description": "For action=run only: run even if normal scheduler checks would skip it."},
 	}, "required": []string{"action"}}
@@ -35,7 +34,7 @@ func (t *CronTool) Execute(ctx context.Context, params map[string]any) (string, 
 	if t.Svc == nil {
 		return "", fmt.Errorf("cron service not configured")
 	}
-	act := strings.TrimSpace(fmt.Sprint(params["action"]))
+	act := stringParam(params, "action")
 	switch act {
 	case "status":
 		s, err := t.Svc.Status()
@@ -52,26 +51,32 @@ func (t *CronTool) Execute(ctx context.Context, params map[string]any) (string, 
 		b, _ := json.MarshalIndent(j, "", "  ")
 		return string(b), nil
 	case "remove":
-		id := strings.TrimSpace(fmt.Sprint(params["id"]))
+		id := stringParam(params, "id")
 		ok, err := t.Svc.Remove(id)
 		if err != nil {
 			return "", err
 		}
 		return fmt.Sprintf("removed: %v", ok), nil
 	case "run":
-		id := strings.TrimSpace(fmt.Sprint(params["id"]))
+		id := stringParam(params, "id")
 		force, _ := params["force"].(bool)
-		ok, err := t.Svc.RunNow(ctx, id, force)
+		job, err := t.Svc.RunNow(ctx, id, force)
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("ran: %v", ok), nil
+		if !force && !job.Enabled {
+			return "ran: false", nil
+		}
+		return "ran: true", nil
 	case "add":
-		raw, _ := params["job"].(map[string]any)
-		if raw == nil {
+		raw, ok := params["job"].(map[string]any)
+		if !ok || raw == nil {
 			return "", fmt.Errorf("missing job")
 		}
-		b, _ := json.Marshal(raw)
+		b, err := json.Marshal(raw)
+		if err != nil {
+			return "", err
+		}
 		var j cron.CronJob
 		if err := json.Unmarshal(b, &j); err != nil {
 			return "", err
@@ -83,6 +88,7 @@ func (t *CronTool) Execute(ctx context.Context, params map[string]any) (string, 
 		if j.Payload.Kind == "" {
 			j.Payload.Kind = "agent_turn"
 		}
+		j.Payload = cron.NormalizePayload(j.Payload)
 		if j.Schedule.Kind == "" {
 			j.Schedule.Kind = cron.KindEvery
 			j.Schedule.EveryMS = int64((24 * time.Hour).Milliseconds())

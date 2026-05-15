@@ -21,6 +21,7 @@ import (
 	"or3-intern/internal/artifacts"
 	"or3-intern/internal/bus"
 	rootchannels "or3-intern/internal/channels"
+	"or3-intern/internal/channels/shared"
 	"or3-intern/internal/config"
 )
 
@@ -184,36 +185,14 @@ func (c *Channel) fetchUpdates(ctx context.Context, eventBus *bus.Bus) error {
 }
 
 func (c *Channel) allowedChat(ctx context.Context, chatID string) bool {
-	switch strings.ToLower(strings.TrimSpace(string(c.Config.InboundPolicy))) {
-	case string(config.InboundPolicyDeny):
-		return false
-	case string(config.InboundPolicyPairing):
-		allowed, err := c.ApprovalBroker.IsPairedChannelIdentity(ctx, "telegram", chatID)
-		return err == nil && allowed
-	case string(config.InboundPolicyAllowlist):
-		for _, allowed := range c.Config.AllowedChatIDs {
-			if strings.TrimSpace(allowed) == chatID {
-				return true
-			}
-		}
-		return false
-	}
-	if len(c.Config.AllowedChatIDs) == 0 {
-		return c.Config.OpenAccess
-	}
-	for _, allowed := range c.Config.AllowedChatIDs {
-		if strings.TrimSpace(allowed) == chatID {
-			return true
-		}
-	}
-	return false
+	return shared.AllowInboundIdentity(ctx, shared.InboundAccessInput{Policy: c.Config.InboundPolicy, OpenAccess: c.Config.OpenAccess, Allowlist: c.Config.AllowedChatIDs, Channel: "telegram", Identity: chatID, Broker: c.ApprovalBroker})
 }
 
 func (c *Channel) client() *http.Client {
 	if c.HTTP != nil {
 		return c.HTTP
 	}
-	return &http.Client{Timeout: 20 * time.Second}
+	return shared.DefaultHTTPClient()
 }
 
 func (c *Channel) apiBase() string {

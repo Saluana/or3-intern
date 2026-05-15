@@ -243,17 +243,6 @@ func memoryScopeFromParams(ctx context.Context, params map[string]any) string {
 	return SessionFromContext(ctx)
 }
 
-func stringParam(params map[string]any, key string) string {
-	if params == nil {
-		return ""
-	}
-	value, ok := params[key]
-	if !ok || value == nil {
-		return ""
-	}
-	return strings.TrimSpace(fmt.Sprint(value))
-}
-
 func boundedPositiveInt(raw any, fallback, max int) int {
 	value := fallback
 	if v, ok := raw.(float64); ok && int(v) > 0 {

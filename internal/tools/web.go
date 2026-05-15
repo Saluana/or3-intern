@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -73,7 +74,7 @@ func (t *WebFetch) Schema() map[string]any {
 }
 func (t *WebFetch) Execute(ctx context.Context, params map[string]any) (string, error) {
 	profile := ActiveProfileFromContext(ctx)
-	u := fmt.Sprint(params["url"])
+	u := stringParam(params, "url")
 	if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
 		return "", fmt.Errorf("invalid url")
 	}
@@ -105,7 +106,7 @@ func (t *WebFetch) Execute(ctx context.Context, params map[string]any) (string, 
 			MaxBytes:  max,
 			WaitUntil: webFetchWaitUntil(params),
 			WaitMS:    webFetchWaitMS(params),
-			Selector:  strings.TrimSpace(fmt.Sprint(params["selector"])),
+			Selector:  stringParam(params, "selector"),
 		})
 		if err != nil {
 			return "", err
@@ -126,60 +127,24 @@ func (t *WebFetch) Execute(ctx context.Context, params map[string]any) (string, 
 			},
 		}), nil
 	}
-	reqCtx, err := prepareWebFetchRequestContext(ctx, parsed, t.HostPolicy, profile)
-	if err != nil {
-		return "", err
-	}
-	var client *http.Client
-	if t.HTTP == nil {
-		client = &http.Client{Timeout: t.effectiveTimeout()}
-	} else {
-		copyClient := *t.HTTP
-		client = &copyClient
-	}
-	originalCheckRedirect := client.CheckRedirect
-	client = security.WrapHTTPClient(client, t.HostPolicy)
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if len(via) >= defaultWebFetchMaxRedirects {
-			return fmt.Errorf("stopped after %d redirects", defaultWebFetchMaxRedirects)
-		}
-		if originalCheckRedirect != nil {
-			if err := originalCheckRedirect(req, via); err != nil {
-				return err
-			}
-		}
-		if err := validateFetchURL(req.URL); err != nil {
-			return err
-		}
-		redirectCtx, err := prepareWebFetchRequestContext(req.Context(), req.URL, t.HostPolicy, profile)
-		if err != nil {
-			return err
-		}
-		*req = *req.WithContext(redirectCtx)
-		return nil
-	}
-	r, err := http.NewRequestWithContext(reqCtx, "GET", parsed.String(), nil)
-	if err != nil {
-		return "", err
-	}
-	resp, err := client.Do(r)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	contentType := resp.Header.Get("Content-Type")
 	readLimit := int64(max) + 1
-	info := StreamInfo{MIMEType: contentType, Extension: strings.ToLower(filepath.Ext(parsed.Path)), Filename: filepath.Base(parsed.Path), Charset: htmlCharsetFromContentType(contentType), URL: parsed.String()}
-	if !raw && t.shouldAutoConvertHTML(info) {
-		readLimit = int64(t.htmlSourceLimit()) + 1
+	info := StreamInfo{Extension: strings.ToLower(filepath.Ext(parsed.Path)), Filename: filepath.Base(parsed.Path), URL: parsed.String()}
+	if !raw && t.Store != nil {
+		htmlReadLimit := int64(t.htmlSourceLimit()) + 1
+		if htmlReadLimit > readLimit {
+			readLimit = htmlReadLimit
+		}
 	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, readLimit))
-	sourceTruncated := int64(len(body)) >= readLimit
-	if sourceTruncated {
-		body = body[:readLimit-1]
+	response, err := executeWebFetchRequest(ctx, t.HTTP, t.effectiveTimeout(), parsed, t.HostPolicy, profile, "", readLimit)
+	if err != nil {
+		return "", err
 	}
+	contentType := response.ContentType
+	info = StreamInfo{MIMEType: contentType, Extension: strings.ToLower(filepath.Ext(parsed.Path)), Filename: filepath.Base(parsed.Path), Charset: htmlCharsetFromContentType(contentType), URL: parsed.String()}
+	body := response.Body
+	sourceTruncated := response.SourceTruncated
 	if !raw && t.shouldAutoConvertHTML(info) {
-		result, err := buildMarkdownFetchResult(ctx, t.Store, t.Converter, parsed, resp.Status, resp.StatusCode, contentType, body, sourceTruncated, max, "web_fetch")
+		result, err := buildMarkdownFetchResult(ctx, t.Store, t.Converter, parsed, response.Status, response.StatusCode, contentType, body, sourceTruncated, max, "web_fetch")
 		if err == nil {
 			return EncodeToolResult(result), nil
 		}
@@ -195,14 +160,14 @@ func (t *WebFetch) Execute(ctx context.Context, params map[string]any) (string, 
 	preview, previewTruncated := PreviewString(previewSource, max)
 	return EncodeToolResult(ToolResult{
 		Kind:    "web_fetch",
-		OK:      resp.StatusCode < 400,
-		Summary: fmt.Sprintf("Fetched %s with HTTP status %s", parsed.String(), resp.Status),
+		OK:      response.StatusCode < 400,
+		Summary: fmt.Sprintf("Fetched %s with HTTP status %s", parsed.String(), response.Status),
 		Preview: preview,
 		Stats: map[string]any{
 			"url":          parsed.String(),
 			"mode":         mode,
-			"status":       resp.Status,
-			"status_code":  resp.StatusCode,
+			"status":       response.Status,
+			"status_code":  response.StatusCode,
 			"content_type": contentType,
 			"max_bytes":    max,
 			"truncated":    previewTruncated || sourceTruncated,
@@ -240,7 +205,7 @@ func (t *WebFetch) effectiveTimeout() time.Duration {
 }
 
 func webFetchWaitUntil(params map[string]any) string {
-	waitUntil := strings.ToLower(strings.TrimSpace(fmt.Sprint(params["waitUntil"])))
+	waitUntil := strings.ToLower(stringParam(params, "waitUntil"))
 	switch waitUntil {
 	case "domcontentloaded", "load", "networkidle":
 		return waitUntil
@@ -265,6 +230,12 @@ type PlaywrightRenderer struct {
 	Timeout  time.Duration
 }
 
+var playwrightRenderScriptFile = struct {
+	once sync.Once
+	path string
+	err  error
+}{}
+
 func (r PlaywrightRenderer) Render(ctx context.Context, target string, opts WebRenderOptions) (string, error) {
 	nodePath := strings.TrimSpace(r.NodePath)
 	if nodePath == "" {
@@ -280,13 +251,8 @@ func (r PlaywrightRenderer) Render(ctx context.Context, target string, opts WebR
 	}
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	dir, err := os.MkdirTemp("", "or3-web-render-*")
+	scriptPath, err := ensurePlaywrightRenderScriptPath()
 	if err != nil {
-		return "", err
-	}
-	defer os.RemoveAll(dir)
-	scriptPath := filepath.Join(dir, "render.js")
-	if err := os.WriteFile(scriptPath, []byte(playwrightRenderScript), 0o600); err != nil {
 		return "", err
 	}
 	args := []string{scriptPath, target, opts.WaitUntil, fmt.Sprint(opts.WaitMS), strings.TrimSpace(opts.Selector)}
@@ -305,6 +271,23 @@ func (r PlaywrightRenderer) Render(ctx context.Context, target string, opts WebR
 		return "", fmt.Errorf("render failed: %s", errText)
 	}
 	return stdout.String(), nil
+}
+
+func ensurePlaywrightRenderScriptPath() (string, error) {
+	playwrightRenderScriptFile.once.Do(func() {
+		dir, err := os.MkdirTemp("", "or3-web-render-*")
+		if err != nil {
+			playwrightRenderScriptFile.err = err
+			return
+		}
+		path := filepath.Join(dir, "render.js")
+		if err := os.WriteFile(path, []byte(playwrightRenderScript), 0o600); err != nil {
+			playwrightRenderScriptFile.err = err
+			return
+		}
+		playwrightRenderScriptFile.path = path
+	})
+	return playwrightRenderScriptFile.path, playwrightRenderScriptFile.err
 }
 
 const playwrightRenderScript = `
@@ -371,7 +354,7 @@ func isBlockedFetchAddr(addr netip.Addr) bool {
 	if addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() || addr.IsMulticast() || addr.IsUnspecified() {
 		return true
 	}
-	return addr.String() == "169.254.169.254"
+	return false
 }
 
 type WebSearch struct {
@@ -404,7 +387,7 @@ func (t *WebSearch) Execute(ctx context.Context, params map[string]any) (string,
 	if strings.TrimSpace(t.APIKey) == "" {
 		return "", fmt.Errorf("Brave API key not configured (set BRAVE_API_KEY)")
 	}
-	q := fmt.Sprint(params["query"])
+	q := stringParam(params, "query")
 	count := 5
 	if v, ok := params["count"].(float64); ok && int(v) > 0 {
 		count = int(v)
@@ -444,7 +427,10 @@ func (t *WebSearch) Execute(ctx context.Context, params map[string]any) (string,
 	if maxRead <= 0 {
 		maxRead = defaultWebSearchReadMaxBytes
 	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, int64(maxRead)))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxRead)))
+	if err != nil {
+		return "", fmt.Errorf("read search body: %w", err)
+	}
 	if resp.StatusCode >= 300 {
 		return "", fmt.Errorf("search error %s: %s", resp.Status, string(body))
 	}
@@ -508,4 +494,85 @@ func prepareWebFetchRequestContext(ctx context.Context, target *url.URL, policy 
 		policies = append(policies, security.HostPolicy{Enabled: true, DefaultDeny: true, AllowedHosts: profile.AllowedHosts})
 	}
 	return security.PrepareURLRequestContext(ctx, target, policies...)
+}
+
+type webFetchResponse struct {
+	Status          string
+	StatusCode      int
+	ContentType     string
+	Body            []byte
+	SourceTruncated bool
+}
+
+func executeWebFetchRequest(ctx context.Context, baseClient *http.Client, timeout time.Duration, target *url.URL, hostPolicy security.HostPolicy, profile ActiveProfile, accept string, readLimit int64) (webFetchResponse, error) {
+	reqCtx, err := prepareWebFetchRequestContext(ctx, target, hostPolicy, profile)
+	if err != nil {
+		return webFetchResponse{}, err
+	}
+	client := newWebHTTPClient(baseClient, timeout, hostPolicy, profile)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, target.String(), nil)
+	if err != nil {
+		return webFetchResponse{}, err
+	}
+	if strings.TrimSpace(accept) != "" {
+		req.Header.Set("Accept", accept)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return webFetchResponse{}, err
+	}
+	defer resp.Body.Close()
+	if readLimit <= 0 {
+		readLimit = 1
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, readLimit))
+	if err != nil {
+		return webFetchResponse{}, fmt.Errorf("read web fetch body: %w", err)
+	}
+	sourceTruncated := int64(len(body)) >= readLimit
+	if sourceTruncated {
+		body = body[:readLimit-1]
+	}
+	return webFetchResponse{
+		Status:          resp.Status,
+		StatusCode:      resp.StatusCode,
+		ContentType:     resp.Header.Get("Content-Type"),
+		Body:            body,
+		SourceTruncated: sourceTruncated,
+	}, nil
+}
+
+func newWebHTTPClient(base *http.Client, timeout time.Duration, hostPolicy security.HostPolicy, profile ActiveProfile) *http.Client {
+	var client *http.Client
+	if base == nil {
+		client = &http.Client{Timeout: timeout}
+	} else {
+		copyClient := *base
+		client = &copyClient
+		if client.Timeout <= 0 {
+			client.Timeout = timeout
+		}
+	}
+	originalCheckRedirect := client.CheckRedirect
+	client = security.WrapHTTPClient(client, hostPolicy)
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= defaultWebFetchMaxRedirects {
+			return fmt.Errorf("stopped after %d redirects", defaultWebFetchMaxRedirects)
+		}
+		if originalCheckRedirect != nil {
+			if err := originalCheckRedirect(req, via); err != nil {
+				return err
+			}
+		}
+		if err := validateFetchURL(req.URL); err != nil {
+			return err
+		}
+		redirectCtx, err := prepareWebFetchRequestContext(req.Context(), req.URL, hostPolicy, profile)
+		if err != nil {
+			return err
+		}
+		*req = *req.WithContext(redirectCtx)
+		return nil
+	}
+	return client
 }

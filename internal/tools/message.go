@@ -52,9 +52,9 @@ func (t *SendMessage) Execute(ctx context.Context, params map[string]any) (strin
 		return "", fmt.Errorf("deliver not configured")
 	}
 	ctxChannel, ctxTo := DeliveryFromContext(ctx)
-	ch := readOptionalString(params, "channel")
-	to := readOptionalString(params, "to")
-	text := readOptionalString(params, "text")
+	ch := stringParam(params, "channel")
+	to := stringParam(params, "to")
+	text := stringParam(params, "text")
 	if ch == "" {
 		ch = strings.TrimSpace(t.DefaultChannel)
 	}
@@ -76,7 +76,7 @@ func (t *SendMessage) Execute(ctx context.Context, params map[string]any) (strin
 	}
 	inheritedReplyMeta := DeliveryMetaFromContext(ctx)
 	meta := map[string]any{}
-	explicitTo := strings.TrimSpace(readOptionalString(params, "to")) != ""
+	explicitTo := strings.TrimSpace(stringParam(params, "to")) != ""
 	replyInThread, err := optionalBool(params["reply_in_thread"])
 	if err != nil {
 		return "", err
@@ -115,16 +115,6 @@ func optionalBool(raw any) (bool, error) {
 		return false, nil
 	case bool:
 		return v, nil
-	case string:
-		text := strings.TrimSpace(strings.ToLower(v))
-		switch text {
-		case "", "false", "0", "no":
-			return false, nil
-		case "true", "1", "yes":
-			return true, nil
-		default:
-			return false, fmt.Errorf("reply_in_thread must be a boolean")
-		}
 	default:
 		return false, fmt.Errorf("reply_in_thread must be a boolean")
 	}
@@ -151,7 +141,7 @@ func (t *SendMessage) validateMediaPaths(raw any) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		p, err = canonicalizePath(p)
+		p, err = CanonicalizePath(p)
 		if err != nil {
 			return nil, err
 		}
@@ -194,7 +184,7 @@ func pathWithinRoot(absPath, root string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	root, err = canonicalizeRoot(root)
+	root, err = CanonicalizeRoot(root)
 	if err != nil {
 		return false, err
 	}

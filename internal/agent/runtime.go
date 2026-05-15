@@ -6,13 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
 	"log"
-	"net/url"
-	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"or3-intern/internal/approval"
@@ -20,12 +17,10 @@ import (
 	"or3-intern/internal/bus"
 	"or3-intern/internal/channels"
 	"or3-intern/internal/config"
-	"or3-intern/internal/cron"
 	"or3-intern/internal/db"
 	"or3-intern/internal/heartbeat"
 	"or3-intern/internal/memory"
 	"or3-intern/internal/providers"
-	"or3-intern/internal/scope"
 	"or3-intern/internal/security"
 	"or3-intern/internal/skills"
 	"or3-intern/internal/tools"
@@ -40,34 +35,6 @@ const (
 
 const maxTrackedQuotaSessions = 1024
 
-var toolMarkupPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?is)<tool_call>[\s\S]*?</tool_call>`),
-	regexp.MustCompile(`(?is)<tool_call[\s\S]*$`),
-	regexp.MustCompile(`(?i)</?tool_call>`),
-	regexp.MustCompile(`(?i)<function=[^>]*>`),
-	regexp.MustCompile(`(?is)<function=[\s\S]*$`),
-	regexp.MustCompile(`(?i)<parameter=[^>]*>`),
-	regexp.MustCompile(`(?is)<parameter[\s\S]*$`),
-	regexp.MustCompile(`(?is)<\s*[|｜]\s*DSML\s*[|｜]\s*tool_calls\s*>[\s\S]*?<\s*/\s*[|｜]\s*DSML\s*[|｜]\s*tool_calls\s*>`),
-	regexp.MustCompile(`(?is)<\s*[|｜]\s*DSML\s*[|｜]\s*tool_calls[\s\S]*$`),
-	regexp.MustCompile(`(?is)<\s*/?\s*[|｜]\s*DSML\s*[|｜]\s*(?:invoke|parameter)[^>]*>`),
-}
-
-var (
-	toolMarkupBlockPattern            = regexp.MustCompile(`(?is)<tool_call\b[^>]*>(.*?)</tool_call>`)
-	toolMarkupFunctionPattern         = regexp.MustCompile(`(?is)<function=([^>\s]+)>\s*`)
-	toolMarkupParameterPattern        = regexp.MustCompile(`(?is)<parameter=([^>\s]+)>\s*`)
-	toolMarkupClosingPattern          = regexp.MustCompile(`(?is)</(?:parameter|function)>\s*$`)
-	toolMarkupNameElementPattern      = regexp.MustCompile(`(?is)<name>\s*(.*?)\s*</name>`)
-	toolMarkupArgumentsElementPattern = regexp.MustCompile(`(?is)<arguments>\s*(.*?)\s*</arguments>`)
-	dsmlToolCallsBlockPattern         = regexp.MustCompile(`(?is)<\s*[|｜]\s*DSML\s*[|｜]\s*tool_calls\s*>(.*?)<\s*/\s*[|｜]\s*DSML\s*[|｜]\s*tool_calls\s*>`)
-	dsmlInvokePattern                 = regexp.MustCompile(`(?is)<\s*[|｜]\s*DSML\s*[|｜]\s*invoke\b([^>]*)>(.*?)<\s*/\s*[|｜]\s*DSML\s*[|｜]\s*invoke\s*>`)
-	dsmlParameterPattern              = regexp.MustCompile(`(?is)<\s*[|｜]\s*DSML\s*[|｜]\s*parameter\b([^>]*)>(.*?)<\s*/\s*[|｜]\s*DSML\s*[|｜]\s*parameter\s*>`)
-	markupNameAttrPattern             = regexp.MustCompile(`(?is)\bname\s*=\s*(?:"([^"]*)"|'([^']*)')`)
-)
-
-type trustedToolAccessContextKey struct{}
-
 // Deliverer sends a completed response to a channel target.
 type Deliverer interface {
 	Deliver(ctx context.Context, channel, to, text string) error
@@ -78,19 +45,14 @@ type MetaDeliverer interface {
 	DeliverWithMeta(ctx context.Context, channel, to, text string, meta map[string]any) error
 }
 
-type sessionLock struct {
-	mu   sync.Mutex
-	refs int
-}
-
-type messageQuotaCountersContextKey struct{}
-
 // Runtime executes conversational turns against the configured model and tools.
 type Runtime struct {
 	DB                         *db.DB
 	Provider                   *providers.Client
 	Model                      string
 	Temperature                float64
+	SubagentProvider           *providers.Client
+	SubagentModel              string
 	Tools                      *tools.Registry
 	Hardening                  config.HardeningConfig
 	AccessProfiles             config.AccessProfilesConfig
@@ -115,6 +77,7 @@ type Runtime struct {
 	DefaultScopeKey             string
 	LinkDirectMessages          bool
 	IdentityScopeMap            map[string]string
+	modelConfig                 atomic.Value
 
 	locksMu     sync.Mutex
 	locks       map[string]*sessionLock
@@ -125,16 +88,47 @@ type Runtime struct {
 	idleVersion map[string]uint64
 }
 
-type sessionQuotaState struct {
-	Session  quotaCounters
-	LastSeen time.Time
+// RuntimeModelConfig contains the model/provider choices that can be swapped for new turns.
+type RuntimeModelConfig struct {
+	Provider               *providers.Client
+	Model                  string
+	Temperature            float64
+	SubagentProvider       *providers.Client
+	SubagentModel          string
+	ContextManagerProvider *providers.Client
+	ContextManagerModel    string
 }
 
-type quotaCounters struct {
-	ToolCalls     int
-	ExecCalls     int
-	WebCalls      int
-	SubagentCalls int
+func (r *Runtime) ApplyLiveModelConfig(cfg RuntimeModelConfig) {
+	r.modelConfig.Store(cfg)
+}
+
+func (r *Runtime) CurrentModelConfig() RuntimeModelConfig {
+	if stored := r.modelConfig.Load(); stored != nil {
+		if cfg, ok := stored.(RuntimeModelConfig); ok {
+			return cfg
+		}
+	}
+	return RuntimeModelConfig{
+		Provider:               r.Provider,
+		Model:                  r.Model,
+		Temperature:            r.Temperature,
+		SubagentProvider:       r.SubagentProvider,
+		SubagentModel:          r.SubagentModel,
+		ContextManagerProvider: r.ContextManagerProvider,
+		ContextManagerModel:    r.ContextManager.Model,
+	}
+}
+
+func (r *Runtime) modelConfigForEvent(eventType bus.EventType) RuntimeModelConfig {
+	cfg := r.CurrentModelConfig()
+	if eventType == bus.EventSystem && cfg.SubagentProvider != nil {
+		cfg.Provider = cfg.SubagentProvider
+		if strings.TrimSpace(cfg.SubagentModel) != "" {
+			cfg.Model = cfg.SubagentModel
+		}
+	}
+	return cfg
 }
 
 // BackgroundRunInput describes an isolated subagent-style background run.
@@ -154,51 +148,6 @@ type BackgroundRunResult struct {
 	FinalText  string
 	Preview    string
 	ArtifactID string
-}
-
-func (r *Runtime) acquireSessionLock(key string) *sessionLock {
-	r.locksMu.Lock()
-	if r.locks == nil {
-		r.locks = map[string]*sessionLock{}
-	}
-	entry := r.locks[key]
-	if entry == nil {
-		entry = &sessionLock{}
-		r.locks[key] = entry
-	}
-	entry.refs++
-	r.locksMu.Unlock()
-	return entry
-}
-
-func (r *Runtime) releaseSessionLock(key string, entry *sessionLock) {
-	if r == nil || entry == nil {
-		return
-	}
-	r.locksMu.Lock()
-	if entry.refs > 0 {
-		entry.refs--
-	}
-	if entry.refs == 0 {
-		if current := r.locks[key]; current == entry {
-			delete(r.locks, key)
-		}
-	}
-	r.locksMu.Unlock()
-}
-
-func (r *Runtime) getSessionLock(key string) *sessionLock {
-	r.locksMu.Lock()
-	defer r.locksMu.Unlock()
-	if r.locks == nil {
-		r.locks = map[string]*sessionLock{}
-	}
-	entry := r.locks[key]
-	if entry == nil {
-		entry = &sessionLock{}
-		r.locks[key] = entry
-	}
-	return entry
 }
 
 // Handle routes a published event into the runtime turn pipeline.
@@ -223,61 +172,88 @@ func (r *Runtime) Handle(ctx context.Context, ev bus.Event) error {
 func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 	defer releaseEvent(ev)
 
-	if ev.Type == bus.EventUserMessage && isNewSessionCommand(ev.Message) {
-		return r.handleNewSession(ctx, ev)
-	}
-	if ev.Type == bus.EventUserMessage && strings.EqualFold(strings.TrimSpace(ev.Message), commandStatus) {
-		r.ensureSessionScope(ctx, ev)
-		return r.handleStatus(ctx, ev)
-	}
-	if ev.Type == bus.EventUserMessage && strings.EqualFold(strings.TrimSpace(ev.Message), commandPrune) {
-		r.ensureSessionScope(ctx, ev)
-		return r.handlePruneSession(ctx, ev, "manual")
+	if handled, err := r.handleTurnCommand(ctx, ev); handled || err != nil {
+		return err
 	}
 	r.ensureSessionScope(ctx, ev)
 
-	// persist user message
 	msgID, err := r.DB.AppendMessage(ctx, ev.SessionKey, "user", ev.Message, map[string]any{
 		"channel": ev.Channel, "from": ev.From, "meta": ev.Meta,
 	})
 	if err != nil {
 		return err
 	}
-	if handled, err := r.handleExplicitSkillInvocation(ctx, ev, msgID); handled || err != nil {
-		return err
-	}
-	if handled, err := r.handleStructuredAutonomy(ctx, ev, msgID); handled || err != nil {
-		return err
-	}
-	if ev.Type == bus.EventUserMessage {
-		r.ensureTaskCardForTurn(ctx, ev)
-	}
-
-	// build prompt
-	if r.Builder == nil {
-		return fmt.Errorf("runtime builder not configured")
-	}
-	isAutonomous := isAutonomousEvent(ev.Type)
-	messages, err := r.BuildPromptSnapshotWithOptions(ctx, BuildOptions{
-		SessionKey:  ev.SessionKey,
-		UserMessage: ev.Message,
-		Autonomous:  isAutonomous,
-		EventMeta:   cloneMap(ev.Meta),
-	})
-	if err != nil {
+	if handled, err := r.handleTurnPreExecution(ctx, ev, msgID); handled || err != nil {
 		return err
 	}
 
 	replyTarget := deliveryTarget(ev)
 	replyMeta := channels.ReplyMeta(ev.Meta)
-	finalText, streamed, err := r.executeConversation(ctx, ev.Type, ev.SessionKey, messages, r.effectiveTools(ctx, r.Tools), ev.Channel, replyTarget, replyMeta)
+	if err := r.handleTurnExecution(ctx, ev, msgID, replyTarget, replyMeta); err != nil {
+		return err
+	}
+	r.handleTurnPostCleanup(ctx, ev)
+	return nil
+}
+
+func (r *Runtime) handleTurnCommand(ctx context.Context, ev bus.Event) (bool, error) {
+	if ev.Type != bus.EventUserMessage {
+		return false, nil
+	}
+	message := strings.TrimSpace(ev.Message)
+	switch {
+	case isNewSessionCommand(message):
+		return true, r.handleNewSession(ctx, ev)
+	case strings.EqualFold(message, commandStatus):
+		r.ensureSessionScope(ctx, ev)
+		return true, r.handleStatus(ctx, ev)
+	case strings.EqualFold(message, commandPrune):
+		r.ensureSessionScope(ctx, ev)
+		return true, r.handlePruneSession(ctx, ev, "manual")
+	default:
+		return false, nil
+	}
+}
+
+func (r *Runtime) handleTurnPreExecution(ctx context.Context, ev bus.Event, msgID int64) (bool, error) {
+	if handled, err := r.handleExplicitSkillInvocation(ctx, ev, msgID); handled || err != nil {
+		return handled, err
+	}
+	if handled, err := r.handleStructuredAutonomy(ctx, ev, msgID); handled || err != nil {
+		return handled, err
+	}
+	if ev.Type == bus.EventUserMessage {
+		r.ensureTaskCardForTurn(ctx, ev)
+	}
+	return false, nil
+}
+
+func (r *Runtime) handleTurnExecution(ctx context.Context, ev bus.Event, msgID int64, replyTarget string, replyMeta map[string]any) error {
+	if r.Builder == nil {
+		return fmt.Errorf("runtime builder not configured")
+	}
+	messages, err := r.BuildPromptSnapshotWithOptions(ctx, BuildOptions{
+		SessionKey:  ev.SessionKey,
+		UserMessage: ev.Message,
+		Autonomous:  isAutonomousEvent(ev.Type),
+		EventMeta:   cloneMap(ev.Meta),
+	})
 	if err != nil {
 		return err
 	}
-
+	finalText, streamed, err := r.executeConversation(ctx, ev.Type, ev.SessionKey, messages, r.effectiveTools(ctx, r.Tools), ev.Channel, replyTarget, replyMeta)
+	if err != nil {
+		var approvalErr *tools.ApprovalRequiredError
+		if errors.As(err, &approvalErr) && strings.TrimSpace(finalText) != "" {
+			r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, finalText, replyMeta, streamed, shouldAutoDeliver(ev))
+		}
+		return err
+	}
 	r.persistAssistantReply(ctx, ev.SessionKey, msgID, ev.Channel, replyTarget, finalText, replyMeta, streamed, shouldAutoDeliver(ev))
+	return nil
+}
 
-	// best-effort rolling consolidation of old messages into memory notes
+func (r *Runtime) handleTurnPostCleanup(ctx context.Context, ev bus.Event) {
 	if !r.DisableRollingConsolidation && r.Consolidator != nil && r.Builder != nil && r.ConsolidationScheduler != nil {
 		r.ConsolidationScheduler.Trigger(ev.SessionKey)
 	} else if !r.DisableRollingConsolidation && r.Consolidator != nil && r.Builder != nil {
@@ -290,144 +266,11 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 		}
 	}
 	r.scheduleIdlePrune(ctx, ev)
-
-	return nil
 }
 
 func isNewSessionCommand(message string) bool {
 	message = strings.TrimSpace(message)
 	return strings.EqualFold(message, commandNewSession) || strings.EqualFold(message, commandClear)
-}
-
-func (r *Runtime) markSessionActivity(sessionKey string) {
-	if r == nil || strings.TrimSpace(sessionKey) == "" {
-		return
-	}
-	r.idleMu.Lock()
-	defer r.idleMu.Unlock()
-	if r.idleVersion == nil {
-		r.idleVersion = map[string]uint64{}
-	}
-	r.idleVersion[sessionKey]++
-	if r.idleTimers != nil {
-		if timer := r.idleTimers[sessionKey]; timer != nil {
-			timer.Stop()
-			delete(r.idleTimers, sessionKey)
-		}
-	}
-}
-
-func (r *Runtime) scheduleIdlePrune(ctx context.Context, ev bus.Event) {
-	if r == nil || !r.ContextManager.Enabled || r.Consolidator == nil || r.DB == nil || strings.TrimSpace(ev.SessionKey) == "" {
-		return
-	}
-	delay := time.Duration(r.ContextManager.IdlePruneSeconds) * time.Second
-	if delay <= 0 {
-		delay = 5 * time.Minute
-	}
-	sessionKey := ev.SessionKey
-	channel := ev.Channel
-	replyTarget := deliveryTarget(ev)
-	meta := cloneMap(ev.Meta)
-	r.idleMu.Lock()
-	if r.idleTimers == nil {
-		r.idleTimers = map[string]*time.Timer{}
-	}
-	version := r.idleVersion[sessionKey]
-	if timer := r.idleTimers[sessionKey]; timer != nil {
-		timer.Stop()
-	}
-	r.idleTimers[sessionKey] = time.AfterFunc(delay, func() {
-		r.runIdlePrune(context.Background(), sessionKey, channel, replyTarget, meta, version)
-	})
-	r.idleMu.Unlock()
-}
-
-func (r *Runtime) runIdlePrune(ctx context.Context, sessionKey, channel, replyTarget string, meta map[string]any, expectedVersion uint64) {
-	entry := r.acquireSessionLock(sessionKey)
-	entry.mu.Lock()
-	defer func() {
-		entry.mu.Unlock()
-		r.releaseSessionLock(sessionKey, entry)
-	}()
-	if !r.sessionIdleVersionMatches(sessionKey, expectedVersion) {
-		return
-	}
-	msg, err := r.pruneSessionContext(ctx, sessionKey, "idle")
-	if err != nil {
-		msg = "Context prune skipped. Cause: " + oneLine(err.Error(), 180)
-	}
-	if r.Deliver != nil && strings.TrimSpace(channel) != "" && strings.TrimSpace(replyTarget) != "" {
-		if err := r.deliver(ctx, channel, replyTarget, msg, meta); err != nil {
-			log.Printf("deliver idle prune notice failed: %v", err)
-		}
-	}
-}
-
-func (r *Runtime) sessionIdleVersionMatches(sessionKey string, expected uint64) bool {
-	r.idleMu.Lock()
-	defer r.idleMu.Unlock()
-	if r.idleTimers != nil {
-		delete(r.idleTimers, sessionKey)
-	}
-	return r.idleVersion != nil && r.idleVersion[sessionKey] == expected
-}
-
-func (r *Runtime) ensureSessionScope(ctx context.Context, ev bus.Event) {
-	if r == nil || r.DB == nil || strings.TrimSpace(ev.SessionKey) == "" {
-		return
-	}
-	scopeKey, ok := r.scopeKeyForEvent(ev)
-	if !ok {
-		return
-	}
-	scopeKey = strings.TrimSpace(scopeKey)
-	if scopeKey == "" || scopeKey == ev.SessionKey {
-		return
-	}
-	meta := map[string]any{"auto": true, "channel": ev.Channel}
-	_ = r.DB.LinkSession(ctx, ev.SessionKey, scopeKey, meta)
-}
-
-func (r *Runtime) scopeKeyForEvent(ev bus.Event) (string, bool) {
-	if r == nil {
-		return "", false
-	}
-	if scopeKey := strings.TrimSpace(r.IdentityScopeMap[ev.SessionKey]); scopeKey != "" {
-		return scopeKey, true
-	}
-	if r.LinkDirectMessages && isDirectMessageEvent(ev) {
-		scopeKey := strings.TrimSpace(r.DefaultScopeKey)
-		if scopeKey == "" {
-			scopeKey = ev.SessionKey
-		}
-		return scopeKey, true
-	}
-	return "", false
-}
-
-func isDirectMessageEvent(ev bus.Event) bool {
-	if len(ev.Meta) == 0 {
-		return false
-	}
-	switch strings.ToLower(strings.TrimSpace(ev.Channel)) {
-	case "telegram":
-		return strings.EqualFold(strings.TrimSpace(fmt.Sprint(ev.Meta["chat_type"])), "private")
-	case "slack":
-		return strings.EqualFold(strings.TrimSpace(fmt.Sprint(ev.Meta["channel_type"])), "im")
-	case "discord":
-		if v, ok := ev.Meta["is_private"].(bool); ok {
-			return v
-		}
-		return strings.TrimSpace(fmt.Sprint(ev.Meta["guild_id"])) == ""
-	case "whatsapp":
-		if v, ok := ev.Meta["is_group"].(bool); ok {
-			return !v
-		}
-	case "email":
-		return true
-	}
-	return false
 }
 
 func (r *Runtime) handleExplicitSkillInvocation(ctx context.Context, ev bus.Event, msgID int64) (bool, error) {
@@ -637,59 +480,8 @@ func (r *Runtime) RunBackground(ctx context.Context, input BackgroundRunInput) (
 	return BackgroundRunResult{FinalText: finalText, Preview: preview, ArtifactID: artifactID}, nil
 }
 
-func (r *Runtime) handleNewSession(ctx context.Context, ev bus.Event) error {
-	replyTarget := deliveryTarget(ev)
-	if r.Consolidator != nil && r.Builder != nil {
-		historyMax := r.Builder.HistoryMax
-		if historyMax <= 0 {
-			historyMax = 40
-		}
-		if err := r.Consolidator.ArchiveResetWindow(ctx, ev.SessionKey, historyMax); err != nil {
-			log.Printf("new session archive failed: session=%s err=%v", ev.SessionKey, err)
-			msg := "Memory archival failed, session not cleared. Cause: " + oneLine(err.Error(), 180)
-			if r.Deliver != nil {
-				if derr := r.deliver(ctx, ev.Channel, replyTarget, msg, ev.Meta); derr != nil {
-					log.Printf("deliver failed: %v", derr)
-				}
-			}
-			return nil
-		}
-	}
-	if err := r.DB.ResetSessionHistory(ctx, ev.SessionKey); err != nil {
-		log.Printf("new session reset failed: session=%s err=%v", ev.SessionKey, err)
-		msg := "New session failed. Cause: " + oneLine(err.Error(), 180)
-		if r.Deliver != nil {
-			if derr := r.deliver(ctx, ev.Channel, replyTarget, msg, ev.Meta); derr != nil {
-				log.Printf("deliver failed: %v", derr)
-			}
-		}
-		return nil
-	}
-	if r.Deliver != nil {
-		deliverCtx := ContextWithConversationAction(ctx, ConversationActionSessionReset)
-		if err := r.deliver(deliverCtx, ev.Channel, replyTarget, "New session started.", ev.Meta); err != nil {
-			log.Printf("deliver failed: %v", err)
-		}
-	}
-	return nil
-}
-
-func (r *Runtime) handlePruneSession(ctx context.Context, ev bus.Event, reason string) error {
-	msg, err := r.pruneSessionContext(ctx, ev.SessionKey, reason)
-	if err != nil {
-		log.Printf("context prune failed: session=%s err=%v", ev.SessionKey, err)
-		msg = "Context prune failed. Cause: " + oneLine(err.Error(), 180)
-	}
-	if r.Deliver != nil {
-		if derr := r.deliver(ctx, ev.Channel, deliveryTarget(ev), msg, ev.Meta); derr != nil {
-			log.Printf("deliver failed: %v", derr)
-		}
-	}
-	return nil
-}
-
 func (r *Runtime) pruneSessionContext(ctx context.Context, sessionKey, reason string) (string, error) {
-	if r == nil || r.DB == nil {
+	if r.DB == nil {
 		return "", fmt.Errorf("runtime database not configured")
 	}
 	if strings.TrimSpace(sessionKey) == "" {
@@ -830,8 +622,8 @@ func (r *Runtime) buildContextManagerPruneInput(ctx context.Context, sessionKey,
 }
 
 func (r *Runtime) contextManagerProvider() *providers.Client {
-	if r == nil {
-		return nil
+	if cfg := r.CurrentModelConfig(); cfg.ContextManagerProvider != nil {
+		return cfg.ContextManagerProvider
 	}
 	if r.ContextManagerProvider != nil {
 		return r.ContextManagerProvider
@@ -843,8 +635,8 @@ func (r *Runtime) contextManagerProvider() *providers.Client {
 }
 
 func (r *Runtime) contextManagerModel() string {
-	if r == nil {
-		return ""
+	if model := strings.TrimSpace(r.CurrentModelConfig().ContextManagerModel); model != "" {
+		return model
 	}
 	if model := strings.TrimSpace(r.ContextManager.Model); model != "" {
 		return model
@@ -883,7 +675,7 @@ func nonEmptyLabel(value, fallbackValue string) string {
 }
 
 func (r *Runtime) ensureTaskCardForTurn(ctx context.Context, ev bus.Event) {
-	if r == nil || r.DB == nil || r.Builder == nil || r.Builder.DisableTaskCard || strings.TrimSpace(ev.SessionKey) == "" {
+	if r.DB == nil || r.Builder == nil || r.Builder.DisableTaskCard || strings.TrimSpace(ev.SessionKey) == "" {
 		return
 	}
 	message := strings.TrimSpace(ev.Message)
@@ -913,1296 +705,6 @@ func contentToString(v any) string {
 	}
 	b, _ := json.Marshal(v)
 	return string(b)
-}
-
-func sanitizeToolTurnContent(text string) string {
-	cleaned := text
-	for _, pattern := range toolMarkupPatterns {
-		cleaned = pattern.ReplaceAllString(cleaned, "")
-	}
-	return strings.TrimSpace(cleaned)
-}
-
-func parseToolMarkupCalls(text string, idPrefix string) []providers.ToolCall {
-	matches := toolMarkupBlockPattern.FindAllStringSubmatch(text, -1)
-	out := make([]providers.ToolCall, 0, len(matches))
-	for _, match := range matches {
-		if len(match) < 2 {
-			continue
-		}
-		block := match[1]
-		name, args, ok := parseToolMarkupBlock(block)
-		if !ok {
-			continue
-		}
-		index := len(out)
-		tc := providers.ToolCall{
-			ID:    fmt.Sprintf("%s_%d", idPrefix, index+1),
-			Index: index,
-			Type:  "function",
-		}
-		tc.Function.Name = name
-		tc.Function.Arguments = args
-		out = append(out, tc)
-	}
-	for _, match := range dsmlToolCallsBlockPattern.FindAllStringSubmatch(text, -1) {
-		if len(match) < 2 {
-			continue
-		}
-		out = append(out, parseDSMLToolMarkupCalls(match[1], idPrefix, len(out))...)
-	}
-	return out
-}
-
-func parseToolMarkupBlock(block string) (string, string, bool) {
-	block = strings.TrimSpace(html.UnescapeString(block))
-	if block == "" {
-		return "", "", false
-	}
-	var object map[string]any
-	if err := json.Unmarshal([]byte(block), &object); err == nil {
-		name := strings.TrimSpace(fmt.Sprint(object["name"]))
-		if name == "" {
-			return "", "", false
-		}
-		args := object["arguments"]
-		if args == nil {
-			args = map[string]any{}
-		}
-		encoded, err := json.Marshal(args)
-		if err != nil {
-			return "", "", false
-		}
-		return name, string(encoded), true
-	}
-	if nameMatch := toolMarkupNameElementPattern.FindStringSubmatch(block); len(nameMatch) >= 2 {
-		name := strings.TrimSpace(html.UnescapeString(nameMatch[1]))
-		if name == "" {
-			return "", "", false
-		}
-		args := "{}"
-		if argsMatch := toolMarkupArgumentsElementPattern.FindStringSubmatch(block); len(argsMatch) >= 2 {
-			argText := strings.TrimSpace(html.UnescapeString(argsMatch[1]))
-			if argText != "" {
-				var parsed any
-				if err := json.Unmarshal([]byte(argText), &parsed); err == nil {
-					encoded, err := json.Marshal(parsed)
-					if err != nil {
-						return "", "", false
-					}
-					args = string(encoded)
-				} else {
-					encoded, err := json.Marshal(map[string]any{"value": argText})
-					if err != nil {
-						return "", "", false
-					}
-					args = string(encoded)
-				}
-			}
-		}
-		return name, args, true
-	}
-	functionMatch := toolMarkupFunctionPattern.FindStringSubmatch(block)
-	if len(functionMatch) < 2 {
-		return "", "", false
-	}
-	name := strings.TrimSpace(html.UnescapeString(functionMatch[1]))
-	if name == "" {
-		return "", "", false
-	}
-	params := parseToolMarkupParams(block)
-	args, err := json.Marshal(params)
-	if err != nil {
-		return "", "", false
-	}
-	return name, string(args), true
-}
-
-func parseDSMLToolMarkupCalls(block string, idPrefix string, offset int) []providers.ToolCall {
-	matches := dsmlInvokePattern.FindAllStringSubmatch(block, -1)
-	if len(matches) == 0 {
-		return nil
-	}
-	out := make([]providers.ToolCall, 0, len(matches))
-	for _, match := range matches {
-		if len(match) < 3 {
-			continue
-		}
-		name := markupNameAttr(match[1])
-		if name == "" {
-			continue
-		}
-		params := parseDSMLToolMarkupParams(match[2])
-		args, err := json.Marshal(params)
-		if err != nil {
-			continue
-		}
-		index := offset + len(out)
-		tc := providers.ToolCall{
-			ID:    fmt.Sprintf("%s_%d", idPrefix, index+1),
-			Index: index,
-			Type:  "function",
-		}
-		tc.Function.Name = name
-		tc.Function.Arguments = string(args)
-		out = append(out, tc)
-	}
-	return out
-}
-
-func parseDSMLToolMarkupParams(block string) map[string]any {
-	params := map[string]any{}
-	matches := dsmlParameterPattern.FindAllStringSubmatch(block, -1)
-	for _, match := range matches {
-		if len(match) < 3 {
-			continue
-		}
-		name := markupNameAttr(match[1])
-		if name == "" {
-			continue
-		}
-		params[name] = parseToolMarkupParamValue(html.UnescapeString(match[2]))
-	}
-	return params
-}
-
-func markupNameAttr(attrs string) string {
-	match := markupNameAttrPattern.FindStringSubmatch(attrs)
-	if len(match) < 3 {
-		return ""
-	}
-	name := match[1]
-	if name == "" {
-		name = match[2]
-	}
-	return strings.TrimSpace(html.UnescapeString(name))
-}
-
-func availableToolCalls(calls []providers.ToolCall, reg *tools.Registry) []providers.ToolCall {
-	if len(calls) == 0 || reg == nil {
-		return nil
-	}
-	out := make([]providers.ToolCall, 0, len(calls))
-	for _, call := range calls {
-		name := strings.TrimSpace(call.Function.Name)
-		if name == "search" && reg.Get("web_search") != nil {
-			name = "web_search"
-		}
-		if name == "" || reg.Get(name) == nil {
-			continue
-		}
-		call.Function.Name = name
-		call.Index = len(out)
-		out = append(out, call)
-	}
-	return out
-}
-
-func unavailableToolCallPrompt(calls []providers.ToolCall, reg *tools.Registry) string {
-	names := make([]string, 0, len(calls))
-	seen := map[string]struct{}{}
-	for _, call := range calls {
-		name := strings.TrimSpace(call.Function.Name)
-		if name == "" {
-			continue
-		}
-		if _, ok := seen[name]; ok {
-			continue
-		}
-		seen[name] = struct{}{}
-		names = append(names, name)
-	}
-	available := []string{}
-	if reg != nil {
-		available = reg.Names()
-	}
-	return fmt.Sprintf(
-		"The previous assistant response attempted unavailable tool call(s): %s. Continue by answering directly or by using only currently advertised tool names: %s.",
-		strings.Join(names, ", "),
-		strings.Join(available, ", "),
-	)
-}
-
-func parseToolMarkupParams(block string) map[string]any {
-	params := map[string]any{}
-	matches := toolMarkupParameterPattern.FindAllStringSubmatchIndex(block, -1)
-	for i, match := range matches {
-		if len(match) < 4 {
-			continue
-		}
-		name := strings.TrimSpace(html.UnescapeString(block[match[2]:match[3]]))
-		if name == "" {
-			continue
-		}
-		start := match[1]
-		end := len(block)
-		if i+1 < len(matches) {
-			end = matches[i+1][0]
-		}
-		value := strings.TrimSpace(block[start:end])
-		value = strings.TrimSpace(toolMarkupClosingPattern.ReplaceAllString(value, ""))
-		params[name] = parseToolMarkupParamValue(html.UnescapeString(value))
-	}
-	return params
-}
-
-func parseToolMarkupParamValue(value string) any {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return ""
-	}
-	first := value[0]
-	if !strings.ContainsRune(`{["-0123456789tfn`, rune(first)) {
-		return value
-	}
-	var parsed any
-	if err := json.Unmarshal([]byte(value), &parsed); err == nil {
-		return parsed
-	}
-	return value
-}
-
-func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventType, sessionKey string, messages []providers.ChatMessage, reg *tools.Registry, channel string, replyTo string, replyMeta map[string]any) (string, bool, error) {
-	if reg == nil {
-		reg = tools.NewRegistry()
-	}
-	observer := conversationObserverFromContext(ctx)
-	scopeKey := sessionKey
-	if r.DB != nil && strings.TrimSpace(sessionKey) != "" {
-		if resolved, err := r.DB.ResolveScopeKey(ctx, sessionKey); err == nil && strings.TrimSpace(resolved) != "" {
-			scopeKey = resolved
-		}
-	}
-	messageQuotas := &quotaCounters{}
-	maxLoops := r.MaxToolLoops
-	if maxLoops <= 0 {
-		maxLoops = 6
-	}
-	loopLimit := maxLoops
-	for loop := 0; ; loop++ {
-		if loop >= loopLimit {
-			if err := r.handleToolLoopLimitExceeded(ctx, sessionKey, loopLimit); err != nil {
-				return "", false, err
-			}
-			loopLimit += maxLoops
-		}
-		turnTools := r.exposedToolsForTurn(ctx, reg, messages, channel)
-		req := providers.ChatCompletionRequest{
-			Model:       r.Model,
-			Messages:    messages,
-			Tools:       toToolDefs(turnTools),
-			Temperature: r.Temperature,
-		}
-
-		var resp providers.ChatCompletionResponse
-		var err error
-		var sw channels.StreamWriter // lazily created on first text delta
-		var swOnce sync.Once
-		streamer := r.streamerForContext(ctx)
-		if streamer != nil {
-			resp, err = r.Provider.ChatStream(ctx, req, func(text string) {
-				if observer != nil {
-					observer.OnTextDelta(ctx, text)
-				}
-				swOnce.Do(func() {
-					streamMeta := channels.CloneMeta(replyMeta)
-					if streamMeta == nil {
-						streamMeta = map[string]any{}
-					}
-					streamMeta["channel"] = channel
-					w, beginErr := streamer.BeginStream(ctx, replyTo, streamMeta)
-					if beginErr == nil {
-						sw = w
-					}
-				})
-				if sw != nil {
-					_ = sw.WriteDelta(ctx, text)
-				}
-			})
-		} else {
-			resp, err = r.Provider.Chat(ctx, req)
-		}
-		if err != nil {
-			if sw != nil {
-				_ = sw.Abort(ctx)
-			}
-			if observer != nil {
-				observer.OnError(ctx, err)
-			}
-			return "", false, err
-		}
-		if len(resp.Choices) == 0 {
-			if sw != nil {
-				_ = sw.Abort(ctx)
-			}
-			err = fmt.Errorf("no choices")
-			if observer != nil {
-				observer.OnError(ctx, err)
-			}
-			return "", false, err
-		}
-		msg := resp.Choices[0].Message
-		if len(msg.ToolCalls) == 0 {
-			if raw, ok := msg.Content.(string); ok {
-				if calls := parseToolMarkupCalls(raw, fmt.Sprintf("markup_%d", loop+1)); len(calls) > 0 {
-					msg.ToolCalls = calls
-					msg.Content = sanitizeToolTurnContent(raw)
-				}
-			}
-		}
-		if len(msg.ToolCalls) > 0 {
-			availableCalls := availableToolCalls(msg.ToolCalls, turnTools)
-			if len(availableCalls) == 0 {
-				if sw != nil {
-					_ = sw.Abort(ctx)
-				}
-				for _, tc := range msg.ToolCalls {
-					var parsedParams map[string]any
-					_ = json.Unmarshal([]byte(tc.Function.Arguments), &parsedParams)
-					toolOut := formatToolExecutionError(tc.Function.Name, parsedParams, "", fmt.Errorf("tool not available in this turn"))
-					if observer != nil {
-						observer.OnToolCall(ctx, tc.Function.Name, tc.Function.Arguments)
-						observer.OnToolResult(ctx, tc.Function.Name, toolOut, fmt.Errorf("tool not available in this turn"))
-					}
-				}
-				messages = append(messages, providers.ChatMessage{
-					Role:    "system",
-					Content: unavailableToolCallPrompt(msg.ToolCalls, turnTools),
-				})
-				continue
-			}
-			msg.ToolCalls = availableCalls
-		}
-		if len(msg.ToolCalls) == 0 {
-			finalText := strings.TrimSpace(contentToString(msg.Content))
-			if sw != nil {
-				_ = sw.Close(ctx, finalText)
-				if observer != nil {
-					observer.OnCompletion(ctx, finalText, true)
-				}
-				return finalText, true, nil
-			}
-			if observer != nil {
-				observer.OnCompletion(ctx, finalText, false)
-			}
-			return finalText, false, nil
-		}
-
-		// Tool-call turn: close any partial stream that showed text.
-		if sw != nil {
-			_ = sw.Abort(ctx)
-		}
-
-		toolTurnContent := msg.Content
-		if raw, ok := msg.Content.(string); ok {
-			toolTurnContent = sanitizeToolTurnContent(raw)
-		}
-
-		messages = append(messages, providers.ChatMessage{Role: "assistant", Content: toolTurnContent, ToolCalls: msg.ToolCalls})
-		if _, err := r.DB.AppendMessage(ctx, sessionKey, "assistant", sanitizeToolTurnContent(contentToString(msg.Content)), map[string]any{"tool_calls": msg.ToolCalls}); err != nil {
-			log.Printf("append assistant(tool_calls) failed: %v", err)
-		}
-
-		for _, tc := range msg.ToolCalls {
-			if observer != nil {
-				observer.OnToolCall(ctx, tc.Function.Name, tc.Function.Arguments)
-			}
-			toolCtx := tools.ContextWithSession(ctx, scopeKey)
-			toolCtx = tools.ContextWithDelivery(toolCtx, channel, replyTo)
-			toolCtx = tools.ContextWithDeliveryMeta(toolCtx, replyMeta)
-			toolCtx = r.contextWithTrustedToolAccess(toolCtx, bus.Event{Type: eventType, SessionKey: sessionKey, Channel: channel})
-			toolCtx = context.WithValue(toolCtx, messageQuotaCountersContextKey{}, messageQuotas)
-			toolCtx = tools.ContextWithToolGuard(toolCtx, r.guardToolExecution)
-			out, err := turnTools.Execute(toolCtx, tc.Function.Name, tc.Function.Arguments)
-			if err != nil {
-				var parsedParams map[string]any
-				_ = json.Unmarshal([]byte(tc.Function.Arguments), &parsedParams)
-				out = formatToolExecutionError(tc.Function.Name, parsedParams, out, err)
-			}
-			if observer != nil {
-				observer.OnToolResult(ctx, tc.Function.Name, out, err)
-			}
-
-			payload := map[string]any{
-				"tool":         tc.Function.Name,
-				"tool_call_id": tc.ID,
-				"args":         json.RawMessage([]byte(tc.Function.Arguments)),
-			}
-			sendOut, preview, artifactID := r.boundTextResult(ctx, sessionKey, out)
-			if artifactID != "" {
-				payload["artifact_id"] = artifactID
-				payload["preview"] = preview
-			}
-			if _, err := r.DB.AppendMessage(ctx, sessionKey, "tool", sendOut, payload); err != nil {
-				log.Printf("append tool message failed: %v", err)
-			}
-			messages = append(messages, providers.ChatMessage{Role: "tool", ToolCallID: tc.ID, Content: sendOut})
-			var approvalErr *tools.ApprovalRequiredError
-			if errors.As(err, &approvalErr) {
-				return "", false, err
-			}
-			if finalText := terminalToolResultText(tc.Function.Name, out); finalText != "" {
-				if observer != nil {
-					observer.OnCompletion(ctx, finalText, false)
-				}
-				return finalText, false, nil
-			}
-		}
-	}
-}
-
-func (r *Runtime) handleToolLoopLimitExceeded(ctx context.Context, sessionKey string, currentLimit int) error {
-	if r.effectiveToolLoopLimitAction() == config.QuotaExceededActionFail {
-		return toolLoopLimitExceededError(sessionKey, currentLimit, "hard limit reached")
-	}
-	if r.ApprovalBroker == nil {
-		return toolLoopLimitExceededError(sessionKey, currentLimit, "approval is configured, but the approval broker is unavailable")
-	}
-	identity := tools.RequesterIdentityFromContext(ctx)
-	decision, err := r.ApprovalBroker.EvaluateToolQuota(ctx, approval.ToolQuotaEvaluation{
-		Scope:         "message",
-		LimitName:     "tool_loops",
-		ToolName:      "tool loop continuation",
-		Current:       currentLimit,
-		Limit:         currentLimit,
-		AgentID:       firstNonEmptyString(identity.Actor, "runtime"),
-		SessionID:     sessionKey,
-		ApprovalToken: tools.ApprovalTokenFromContext(ctx),
-	}, config.ApprovalModeAsk)
-	if err != nil {
-		return err
-	}
-	if decision.Allowed {
-		if r.Audit != nil {
-			_ = r.Audit.Record(ctx, "tool_loop.override", sessionKey, "approval", map[string]any{
-				"limit":        currentLimit,
-				"subject_hash": decision.SubjectHash,
-			})
-		}
-		return nil
-	}
-	if decision.RequiresApproval {
-		return &tools.ApprovalRequiredError{ToolName: "tool loop continuation", RequestID: decision.RequestID}
-	}
-	return toolLoopLimitExceededError(sessionKey, currentLimit, decision.Reason)
-}
-
-func toolLoopLimitExceededError(sessionKey string, currentLimit int, reason string) error {
-	resolvedSession := strings.TrimSpace(sessionKey)
-	if resolvedSession == "" {
-		resolvedSession = "unknown"
-	}
-	message := fmt.Sprintf("max tool loops exceeded for session %s after %d rounds", resolvedSession, currentLimit)
-	if trimmed := strings.TrimSpace(reason); trimmed != "" {
-		message += fmt.Sprintf(" (%s)", trimmed)
-	}
-	return errors.New(message)
-}
-
-func (r *Runtime) effectiveToolLoopLimitAction() config.QuotaExceededAction {
-	if strings.EqualFold(string(r.MaxToolLoopsExceededAction), string(config.QuotaExceededActionFail)) {
-		return config.QuotaExceededActionFail
-	}
-	return config.QuotaExceededActionAsk
-}
-
-func terminalToolResultText(toolName string, out string) string {
-	if strings.TrimSpace(toolName) != "read_skill" || strings.TrimSpace(out) == "" {
-		return ""
-	}
-	var result struct {
-		OK      *bool  `json:"ok"`
-		Kind    string `json:"kind"`
-		Summary string `json:"summary"`
-	}
-	if err := json.Unmarshal([]byte(out), &result); err != nil {
-		return ""
-	}
-	if result.OK == nil || *result.OK || result.Kind != "skill_read" {
-		return ""
-	}
-	summary := strings.TrimSpace(result.Summary)
-	if summary == "" || !strings.Contains(strings.ToLower(summary), "unavailable") {
-		return ""
-	}
-	return summary + ". I can't complete that with the tools currently available in this turn."
-}
-
-func (r *Runtime) effectiveTools(ctx context.Context, fallback *tools.Registry) *tools.Registry {
-	if reg := toolRegistryFromContext(ctx); reg != nil {
-		return reg
-	}
-	if fallback == nil {
-		return tools.NewRegistry()
-	}
-	return fallback
-}
-
-func (r *Runtime) exposedToolsForTurn(ctx context.Context, reg *tools.Registry, messages []providers.ChatMessage, channel string) *tools.Registry {
-	if reg == nil {
-		return reg
-	}
-	filtered := r.filterToolsForContext(ctx, reg)
-	if r == nil || !r.DynamicToolExposure {
-		return filtered
-	}
-	intent := latestUserText(messages) + " " + strings.TrimSpace(channel)
-	groups := selectedToolGroups(intent)
-	allowed := map[string]struct{}{}
-	for _, name := range filtered.Names() {
-		meta := filtered.Metadata(name)
-		if meta.Hidden || hasGroup(meta.Groups, tools.ToolGroupHidden) {
-			continue
-		}
-		if hasAnyGroup(meta.Groups, groups) {
-			allowed[name] = struct{}{}
-		}
-	}
-	return filtered.CloneSelected(allowed)
-}
-
-func (r *Runtime) filterToolsForContext(ctx context.Context, reg *tools.Registry) *tools.Registry {
-	if reg == nil {
-		return reg
-	}
-	ceiling := tools.CapabilityCeilingFromContext(ctx)
-	profile := tools.ActiveProfileFromContext(ctx)
-	if strings.TrimSpace(profile.Name) != "" {
-		if ceiling == "" || capabilityRank(profile.MaxCapability) < capabilityRank(ceiling) {
-			ceiling = profile.MaxCapability
-		}
-	}
-	allowed := map[string]struct{}{}
-	profileAllowed := profile.AllowedTools
-	for _, name := range reg.Names() {
-		if len(profileAllowed) > 0 {
-			if _, ok := profileAllowed[name]; !ok {
-				continue
-			}
-		}
-		if ceiling != "" && capabilityRank(tools.ToolCapability(reg.Get(name), nil)) > capabilityRank(ceiling) {
-			continue
-		}
-		allowed[name] = struct{}{}
-	}
-	return reg.CloneSelected(allowed)
-}
-
-func latestUserText(messages []providers.ChatMessage) string {
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == "user" {
-			return contentToString(messages[i].Content)
-		}
-	}
-	return ""
-}
-
-func selectedToolGroups(intent string) map[string]struct{} {
-	lower := strings.ToLower(intent)
-	groups := map[string]struct{}{
-		tools.ToolGroupRead:   {},
-		tools.ToolGroupMemory: {},
-	}
-	if strings.Contains(lower, "tool") || strings.Contains(lower, "capabilit") || strings.Contains(lower, "what can you do") {
-		groups[tools.ToolGroupWrite] = struct{}{}
-		groups[tools.ToolGroupExec] = struct{}{}
-		groups[tools.ToolGroupWeb] = struct{}{}
-		groups[tools.ToolGroupCron] = struct{}{}
-		groups[tools.ToolGroupSkills] = struct{}{}
-		groups[tools.ToolGroupChannels] = struct{}{}
-		groups[tools.ToolGroupMCP] = struct{}{}
-		groups[tools.ToolGroupService] = struct{}{}
-	}
-	if strings.Contains(lower, "write") || strings.Contains(lower, "edit") || strings.Contains(lower, "modify") || strings.Contains(lower, "create file") || strings.Contains(lower, "patch") {
-		groups[tools.ToolGroupWrite] = struct{}{}
-	}
-	if strings.Contains(lower, "run") || strings.Contains(lower, "exec") || strings.Contains(lower, "command") || strings.Contains(lower, "shell") || strings.Contains(lower, "test") || strings.Contains(lower, "build") {
-		groups[tools.ToolGroupExec] = struct{}{}
-	}
-	if strings.Contains(lower, "http") || strings.Contains(lower, "web") || strings.Contains(lower, "url") || strings.Contains(lower, "search") || strings.Contains(lower, "internet") {
-		groups[tools.ToolGroupWeb] = struct{}{}
-	}
-	if strings.Contains(lower, "cron") || strings.Contains(lower, "schedule") || strings.Contains(lower, "remind") {
-		groups[tools.ToolGroupCron] = struct{}{}
-	}
-	if strings.Contains(lower, "skill") {
-		groups[tools.ToolGroupSkills] = struct{}{}
-	}
-	if strings.TrimSpace(intent) != "" {
-		groups[tools.ToolGroupChannels] = struct{}{}
-	}
-	return groups
-}
-
-func hasAnyGroup(groups []string, allowed map[string]struct{}) bool {
-	for _, group := range groups {
-		if _, ok := allowed[group]; ok {
-			return true
-		}
-	}
-	return false
-}
-
-func hasGroup(groups []string, want string) bool {
-	for _, group := range groups {
-		if group == want {
-			return true
-		}
-	}
-	return false
-}
-
-func (r *Runtime) streamerForContext(ctx context.Context) channels.StreamingChannel {
-	if streamer := streamingChannelFromContext(ctx); streamer != nil {
-		return streamer
-	}
-	return r.Streamer
-}
-
-func (r *Runtime) guardToolExecution(ctx context.Context, tool tools.Tool, capability tools.CapabilityLevel, params map[string]any) error {
-	if tool == nil {
-		return nil
-	}
-	profile := tools.ActiveProfileFromContext(ctx)
-	if tool.Name() == "send_message" && trustedToolAccessFromContext(ctx) {
-		capability = tools.CapabilitySafe
-	}
-	if ceiling := tools.CapabilityCeilingFromContext(ctx); ceiling != "" && capabilityRank(capability) > capabilityRank(ceiling) {
-		return fmt.Errorf("tool exceeds request capability ceiling: %s", tool.Name())
-	}
-	if err := r.enforceProfile(ctx, profile, tool, capability, params); err != nil {
-		return err
-	}
-	if err := r.enforceSkillPolicy(ctx, tool, params); err != nil {
-		return err
-	}
-	if capability == tools.CapabilityGuarded && !r.Hardening.GuardedTools {
-		return fmt.Errorf("tool requires guarded access: %s", tool.Name())
-	}
-	if capability == tools.CapabilityPrivileged && !r.Hardening.PrivilegedTools {
-		return fmt.Errorf("tool requires privileged access: %s", tool.Name())
-	}
-	if r.ApprovalBroker != nil && (tool.Name() == "exec" || tool.Name() == "run_skill" || tool.Name() == "run_skill_script") {
-		if mode := r.approvalModeForTool(tool.Name()); mode == config.ApprovalModeAsk || mode == config.ApprovalModeAllowlist || mode == config.ApprovalModeDeny {
-			if len(r.ApprovalBroker.SignKey) == 0 {
-				return fmt.Errorf("approval broker unavailable for %s", tool.Name())
-			}
-		}
-	}
-	if r.Audit != nil && (capability == tools.CapabilityPrivileged || tool.Name() == "spawn_subagent") {
-		if err := r.Audit.Record(ctx, "tool.execute", tools.SessionFromContext(ctx), profileActor(profile), map[string]any{
-			"tool":       tool.Name(),
-			"capability": capability,
-			"profile":    profile.Name,
-			"summary":    summarizeToolParams(tool.Name(), params),
-		}); err != nil {
-			return err
-		}
-	}
-	if !r.Hardening.Quotas.Enabled {
-		return nil
-	}
-	return r.incrementQuota(ctx, tools.SessionFromContext(ctx), tool.Name())
-}
-
-func (r *Runtime) GuardToolExecution(ctx context.Context, tool tools.Tool, capability tools.CapabilityLevel, params map[string]any) error {
-	return r.guardToolExecution(ctx, tool, capability, params)
-}
-
-func (r *Runtime) approvalModeForTool(toolName string) config.ApprovalMode {
-	if r == nil || r.ApprovalBroker == nil {
-		return config.ApprovalModeTrusted
-	}
-	switch toolName {
-	case "exec":
-		return r.ApprovalBroker.Config.Exec.Mode
-	case "run_skill", "run_skill_script":
-		return r.ApprovalBroker.Config.SkillExecution.Mode
-	default:
-		return config.ApprovalModeTrusted
-	}
-}
-
-func (r *Runtime) enforceSkillPolicy(ctx context.Context, tool tools.Tool, params map[string]any) error {
-	policy := tools.SkillPolicyFromContext(ctx)
-	if tool == nil || strings.TrimSpace(policy.Name) == "" {
-		return nil
-	}
-	if len(policy.AllowedTools) > 0 {
-		if _, ok := policy.AllowedTools[tool.Name()]; !ok {
-			return fmt.Errorf("tool denied by skill policy: %s", tool.Name())
-		}
-	}
-	switch tool.Name() {
-	case "exec", "run_skill", "run_skill_script":
-		if !policy.AllowExecution {
-			return fmt.Errorf("execution denied by skill policy: %s", tool.Name())
-		}
-		if cwd := strings.TrimSpace(fmt.Sprint(params["cwd"])); cwd != "" && cwd != "<nil>" && len(policy.WritablePaths) > 0 {
-			if err := validateProfileWritablePath(policy.WritablePaths, cwd); err != nil {
-				return err
-			}
-		}
-	case "write_file", "edit_file":
-		if !policy.AllowWrite {
-			return fmt.Errorf("write denied by skill policy: %s", tool.Name())
-		}
-		if len(policy.WritablePaths) > 0 {
-			if err := validateProfileWritablePath(policy.WritablePaths, fmt.Sprint(params["path"])); err != nil {
-				return err
-			}
-		}
-	case "web_fetch", "web_fetch_markdown":
-		if !policy.AllowNetwork {
-			return fmt.Errorf("network denied by skill policy: %s", tool.Name())
-		}
-		if len(policy.AllowedHosts) > 0 {
-			parsed, err := url.Parse(strings.TrimSpace(fmt.Sprint(params["url"])))
-			if err != nil {
-				return err
-			}
-			if err := (security.HostPolicy{Enabled: true, DefaultDeny: true, AllowedHosts: policy.AllowedHosts}).ValidateURL(ctx, parsed); err != nil {
-				return err
-			}
-		}
-	case "web_search":
-		if !policy.AllowNetwork {
-			return fmt.Errorf("network denied by skill policy: %s", tool.Name())
-		}
-		if len(policy.AllowedHosts) > 0 {
-			if err := (security.HostPolicy{Enabled: true, DefaultDeny: true, AllowedHosts: policy.AllowedHosts}).ValidateHost(ctx, "api.search.brave.com"); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-func skillPolicyForSkill(skill skills.SkillMeta) tools.SkillPolicy {
-	allowed := map[string]struct{}{}
-	for _, toolName := range skill.AllowedTools {
-		toolName = strings.TrimSpace(toolName)
-		if toolName == "" {
-			continue
-		}
-		allowed[toolName] = struct{}{}
-	}
-	if commandTool := strings.TrimSpace(skill.CommandTool); commandTool != "" {
-		allowed[commandTool] = struct{}{}
-	}
-	return tools.SkillPolicy{
-		Name:           skill.Name,
-		AllowedTools:   allowed,
-		AllowExecution: skill.Permissions.Shell || (strings.EqualFold(skill.CommandDispatch, "tool") && (strings.EqualFold(skill.CommandTool, "exec") || strings.EqualFold(skill.CommandTool, "run_skill") || strings.EqualFold(skill.CommandTool, "run_skill_script"))),
-		AllowNetwork:   skill.Permissions.Network,
-		AllowWrite:     skill.Permissions.Write,
-		AllowedHosts:   append([]string{}, skill.Permissions.AllowedHosts...),
-		WritablePaths:  append([]string{}, skill.Permissions.AllowedPaths...),
-	}
-}
-
-func (r *Runtime) contextWithEventProfile(ctx context.Context, ev bus.Event) context.Context {
-	if r == nil {
-		return ctx
-	}
-	return r.contextWithProfileName(ctx, r.profileNameForEvent(ev))
-}
-
-func (r *Runtime) contextWithProfileName(ctx context.Context, name string) context.Context {
-	profile, ok := r.resolveProfile(name)
-	if !ok {
-		return ctx
-	}
-	return tools.ContextWithActiveProfile(ctx, profile)
-}
-
-func (r *Runtime) ContextWithProfileName(ctx context.Context, name string) context.Context {
-	return r.contextWithProfileName(ctx, name)
-}
-
-func (r *Runtime) profileNameForEvent(ev bus.Event) string {
-	if len(ev.Meta) > 0 {
-		if profileName := strings.TrimSpace(fmt.Sprint(ev.Meta["profile_name"])); profileName != "" && profileName != "<nil>" {
-			return profileName
-		}
-	}
-	if !r.AccessProfiles.Enabled {
-		return ""
-	}
-	triggerKey := strings.ToLower(strings.TrimSpace(string(ev.Type)))
-	if profileName := strings.TrimSpace(r.AccessProfiles.Triggers[triggerKey]); profileName != "" {
-		return profileName
-	}
-	if profileName := strings.TrimSpace(r.AccessProfiles.Channels[strings.ToLower(strings.TrimSpace(ev.Channel))]); profileName != "" {
-		return profileName
-	}
-	return strings.TrimSpace(r.AccessProfiles.Default)
-}
-
-func (r *Runtime) resolveProfile(name string) (tools.ActiveProfile, bool) {
-	name = strings.TrimSpace(name)
-	if !r.AccessProfiles.Enabled || name == "" {
-		return tools.ActiveProfile{}, false
-	}
-	profileCfg, ok := r.AccessProfiles.Profiles[name]
-	if !ok {
-		return tools.ActiveProfile{}, false
-	}
-	allowed := map[string]struct{}{}
-	for _, toolName := range profileCfg.AllowedTools {
-		allowed[strings.TrimSpace(toolName)] = struct{}{}
-	}
-	maxCapability := tools.CapabilityPrivileged
-	switch strings.ToLower(strings.TrimSpace(profileCfg.MaxCapability)) {
-	case "safe":
-		maxCapability = tools.CapabilitySafe
-	case "guarded":
-		maxCapability = tools.CapabilityGuarded
-	case "privileged", "":
-		maxCapability = tools.CapabilityPrivileged
-	}
-	return tools.ActiveProfile{
-		Name:           name,
-		MaxCapability:  maxCapability,
-		AllowedTools:   allowed,
-		AllowedHosts:   append([]string{}, profileCfg.AllowedHosts...),
-		WritablePaths:  append([]string{}, profileCfg.WritablePaths...),
-		AllowSubagents: profileCfg.AllowSubagents,
-	}, true
-}
-
-func (r *Runtime) enforceProfile(ctx context.Context, profile tools.ActiveProfile, tool tools.Tool, capability tools.CapabilityLevel, params map[string]any) error {
-	if strings.TrimSpace(profile.Name) == "" {
-		return nil
-	}
-	if capabilityRank(capability) > capabilityRank(profile.MaxCapability) {
-		return fmt.Errorf("tool exceeds profile capability: %s", tool.Name())
-	}
-	if len(profile.AllowedTools) > 0 {
-		if _, ok := profile.AllowedTools[tool.Name()]; !ok {
-			return fmt.Errorf("tool denied by profile: %s", tool.Name())
-		}
-	}
-	if tool.Name() == "spawn_subagent" && !profile.AllowSubagents {
-		return fmt.Errorf("subagents denied by profile")
-	}
-	switch tool.Name() {
-	case "write_file", "edit_file":
-		if len(profile.WritablePaths) == 0 {
-			return fmt.Errorf("path denied by profile")
-		}
-		if err := validateProfileWritablePath(profile.WritablePaths, fmt.Sprint(params["path"])); err != nil {
-			return err
-		}
-	case "exec":
-		if cwd := strings.TrimSpace(fmt.Sprint(params["cwd"])); cwd != "" && cwd != "<nil>" {
-			if len(profile.WritablePaths) == 0 {
-				return fmt.Errorf("path denied by profile")
-			}
-			if err := validateProfileWritablePath(profile.WritablePaths, cwd); err != nil {
-				return err
-			}
-		}
-	}
-	switch tool.Name() {
-	case "web_fetch", "web_fetch_markdown":
-		parsed, err := url.Parse(strings.TrimSpace(fmt.Sprint(params["url"])))
-		if err != nil {
-			return err
-		}
-		if err := (security.HostPolicy{Enabled: true, DefaultDeny: true, AllowedHosts: profile.AllowedHosts}).ValidateURL(ctx, parsed); err != nil {
-			return err
-		}
-	case "web_search":
-		if err := (security.HostPolicy{Enabled: true, DefaultDeny: true, AllowedHosts: profile.AllowedHosts}).ValidateHost(ctx, "api.search.brave.com"); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func capabilityRank(level tools.CapabilityLevel) int {
-	switch level {
-	case tools.CapabilitySafe:
-		return 0
-	case tools.CapabilityGuarded:
-		return 1
-	case tools.CapabilityPrivileged:
-		return 2
-	default:
-		return 2
-	}
-}
-
-func validateProfileWritablePath(allowed []string, path string) error {
-	path = strings.TrimSpace(path)
-	if path == "" || path == "<nil>" {
-		return nil
-	}
-	absPath, err := filepath.Abs(path)
-	if err != nil {
-		return err
-	}
-	for _, root := range allowed {
-		rootPath, rootErr := filepath.Abs(root)
-		if rootErr != nil {
-			continue
-		}
-		rel, relErr := filepath.Rel(rootPath, absPath)
-		if relErr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return nil
-		}
-	}
-	return fmt.Errorf("path denied by profile")
-}
-
-func profileActor(profile tools.ActiveProfile) string {
-	if strings.TrimSpace(profile.Name) == "" {
-		return "runtime"
-	}
-	return "profile:" + profile.Name
-}
-
-func summarizeToolParams(toolName string, params map[string]any) map[string]any {
-	summary := map[string]any{"tool": toolName}
-	switch toolName {
-	case "exec":
-		summary["program"] = strings.TrimSpace(fmt.Sprint(params["program"]))
-		summary["cwd"] = strings.TrimSpace(fmt.Sprint(params["cwd"]))
-	case "run_skill", "run_skill_script":
-		summary["skill"] = strings.TrimSpace(fmt.Sprint(params["skill"]))
-		summary["entrypoint"] = strings.TrimSpace(fmt.Sprint(params["entrypoint"]))
-		summary["plan_id"] = strings.TrimSpace(fmt.Sprint(params["plan_id"]))
-	case "spawn_subagent":
-		summary["task"] = previewText(strings.TrimSpace(fmt.Sprint(params["task"])), 120)
-	case "web_fetch", "web_fetch_markdown":
-		summary["url"] = strings.TrimSpace(fmt.Sprint(params["url"]))
-	}
-	return summary
-}
-
-func formatToolExecutionError(toolName string, params map[string]any, out string, err error) string {
-	if err == nil {
-		return out
-	}
-	return tools.EncodeToolFailure(toolName, params, out, err)
-}
-
-type quotaCheck struct {
-	Scope     string
-	Name      string
-	Label     string
-	ConfigKey string
-	Current   int
-	Limit     int
-}
-
-func (r *Runtime) incrementQuota(ctx context.Context, sessionKey string, toolName string) error {
-	r.quotaMu.Lock()
-	state := r.sessionQuotaStateLocked(sessionKey)
-	message := messageQuotaCountersFromContext(ctx)
-	checks := r.quotaChecks(message, &state.Session, toolName)
-	for _, check := range checks {
-		if check.Limit > 0 && check.Current >= check.Limit {
-			r.quotaMu.Unlock()
-			if err := r.handleQuotaExceeded(ctx, sessionKey, toolName, check); err != nil {
-				return err
-			}
-			r.quotaMu.Lock()
-			state = r.sessionQuotaStateLocked(sessionKey)
-			message = messageQuotaCountersFromContext(ctx)
-			incrementQuotaCounters(message, toolName)
-			incrementQuotaCounters(&state.Session, toolName)
-			r.quotaMu.Unlock()
-			return nil
-		}
-	}
-	incrementQuotaCounters(message, toolName)
-	incrementQuotaCounters(&state.Session, toolName)
-	r.quotaMu.Unlock()
-	return nil
-}
-
-func (r *Runtime) quotaChecks(message *quotaCounters, session *quotaCounters, toolName string) []quotaCheck {
-	cfg := r.Hardening.Quotas
-	checks := []quotaCheck{
-		{Scope: "message", Name: "tool_calls", Label: "per-message total tool-call", ConfigKey: "hardening.quotas.maxToolCalls", Current: message.ToolCalls, Limit: cfg.MaxToolCalls},
-		{Scope: "session", Name: "tool_calls", Label: "per-session total tool-call", ConfigKey: "hardening.quotas.maxSessionToolCalls", Current: session.ToolCalls, Limit: cfg.MaxSessionToolCalls},
-	}
-	switch toolName {
-	case "exec", "run_skill", "run_skill_script":
-		checks = append(checks,
-			quotaCheck{Scope: "message", Name: "exec_calls", Label: "per-message exec-call", ConfigKey: "hardening.quotas.maxExecCalls", Current: message.ExecCalls, Limit: cfg.MaxExecCalls},
-			quotaCheck{Scope: "session", Name: "exec_calls", Label: "per-session exec-call", ConfigKey: "hardening.quotas.maxSessionExecCalls", Current: session.ExecCalls, Limit: cfg.MaxSessionExecCalls},
-		)
-	case "web_fetch", "web_fetch_markdown", "web_search":
-		checks = append(checks,
-			quotaCheck{Scope: "message", Name: "web_calls", Label: "per-message web-call", ConfigKey: "hardening.quotas.maxWebCalls", Current: message.WebCalls, Limit: cfg.MaxWebCalls},
-			quotaCheck{Scope: "session", Name: "web_calls", Label: "per-session web-call", ConfigKey: "hardening.quotas.maxSessionWebCalls", Current: session.WebCalls, Limit: cfg.MaxSessionWebCalls},
-		)
-	case "spawn_subagent":
-		checks = append(checks,
-			quotaCheck{Scope: "message", Name: "subagent_calls", Label: "per-message subagent-call", ConfigKey: "hardening.quotas.maxSubagentCalls", Current: message.SubagentCalls, Limit: cfg.MaxSubagentCalls},
-			quotaCheck{Scope: "session", Name: "subagent_calls", Label: "per-session subagent-call", ConfigKey: "hardening.quotas.maxSessionSubagentCalls", Current: session.SubagentCalls, Limit: cfg.MaxSessionSubagentCalls},
-		)
-	}
-	return checks
-}
-
-func (r *Runtime) handleQuotaExceeded(ctx context.Context, sessionKey string, toolName string, check quotaCheck) error {
-	if r.Hardening.Quotas.ExceededAction == config.QuotaExceededActionFail {
-		return quotaExceededError(toolName, check, "hard limit reached")
-	}
-	if r.ApprovalBroker == nil {
-		return quotaExceededError(toolName, check, "approval is configured, but the approval broker is unavailable")
-	}
-	identity := tools.RequesterIdentityFromContext(ctx)
-	decision, err := r.ApprovalBroker.EvaluateToolQuota(ctx, approval.ToolQuotaEvaluation{
-		Scope:         check.Scope,
-		LimitName:     check.Name,
-		ToolName:      toolName,
-		Current:       check.Current,
-		Limit:         check.Limit,
-		AgentID:       firstNonEmptyString(identity.Actor, "runtime"),
-		SessionID:     sessionKey,
-		ApprovalToken: tools.ApprovalTokenFromContext(ctx),
-	}, config.ApprovalModeAsk)
-	if err != nil {
-		return err
-	}
-	if decision.Allowed {
-		if r.Audit != nil {
-			_ = r.Audit.Record(ctx, "quota.override", sessionKey, "approval", map[string]any{
-				"tool":         toolName,
-				"scope":        check.Scope,
-				"limit":        check.Name,
-				"current":      check.Current,
-				"max":          check.Limit,
-				"subject_hash": decision.SubjectHash,
-			})
-		}
-		return nil
-	}
-	if decision.RequiresApproval {
-		return fmt.Errorf("%s Approve request %d, then retry with the issued approval token.", quotaExceededMessage(toolName, check, "approval required"), decision.RequestID)
-	}
-	return quotaExceededError(toolName, check, decision.Reason)
-}
-
-func messageQuotaCountersFromContext(ctx context.Context) *quotaCounters {
-	if ctx != nil {
-		if counters, ok := ctx.Value(messageQuotaCountersContextKey{}).(*quotaCounters); ok && counters != nil {
-			return counters
-		}
-	}
-	return &quotaCounters{}
-}
-
-func incrementQuotaCounters(counters *quotaCounters, toolName string) {
-	if counters == nil {
-		return
-	}
-	counters.ToolCalls++
-	switch toolName {
-	case "exec", "run_skill", "run_skill_script":
-		counters.ExecCalls++
-	case "web_fetch", "web_fetch_markdown", "web_search":
-		counters.WebCalls++
-	case "spawn_subagent":
-		counters.SubagentCalls++
-	}
-}
-
-func quotaExceededError(toolName string, check quotaCheck, reason string) error {
-	return errors.New(quotaExceededMessage(toolName, check, reason))
-}
-
-func quotaExceededMessage(toolName string, check quotaCheck, reason string) string {
-	reason = strings.TrimSpace(reason)
-	if reason == "" {
-		reason = "limit reached"
-	}
-	return fmt.Sprintf("tool quota reached for %s: %s limit %d/%d while executing %s (%s). Increase %s or set hardening.quotas.exceededAction to ask/fail as appropriate.",
-		check.Scope,
-		check.Label,
-		check.Current,
-		check.Limit,
-		toolName,
-		reason,
-		check.ConfigKey,
-	)
-}
-
-func (r *Runtime) sessionQuotaState(sessionKey string) *sessionQuotaState {
-	sessionKey = strings.TrimSpace(sessionKey)
-	if sessionKey == "" {
-		sessionKey = scope.GlobalMemoryScope
-	}
-	r.quotaMu.Lock()
-	defer r.quotaMu.Unlock()
-	return r.sessionQuotaStateLocked(sessionKey)
-}
-
-func (r *Runtime) sessionQuotaStateLocked(sessionKey string) *sessionQuotaState {
-	if r.quotas == nil {
-		r.quotas = map[string]*sessionQuotaState{}
-	}
-	r.evictQuotaStateLocked()
-	state := r.quotas[sessionKey]
-	if state == nil {
-		state = &sessionQuotaState{}
-		r.quotas[sessionKey] = state
-	}
-	state.LastSeen = time.Now()
-	return state
-}
-
-func (r *Runtime) contextWithTrustedToolAccess(ctx context.Context, ev bus.Event) context.Context {
-	if !isTrustedToolEvent(ev.Type) {
-		return ctx
-	}
-	return context.WithValue(ctx, trustedToolAccessContextKey{}, true)
-}
-
-func trustedToolAccessFromContext(ctx context.Context) bool {
-	if ctx == nil {
-		return false
-	}
-	trusted, _ := ctx.Value(trustedToolAccessContextKey{}).(bool)
-	return trusted
-}
-
-func isTrustedToolEvent(eventType bus.EventType) bool {
-	switch eventType {
-	case bus.EventHeartbeat, bus.EventCron:
-		return true
-	default:
-		return false
-	}
-}
-
-func (r *Runtime) evictQuotaStateLocked() {
-	if len(r.quotas) < maxTrackedQuotaSessions {
-		return
-	}
-	oldestKey := ""
-	var oldestTime time.Time
-	for key, state := range r.quotas {
-		if state == nil {
-			delete(r.quotas, key)
-			continue
-		}
-		if oldestKey == "" || state.LastSeen.Before(oldestTime) {
-			oldestKey = key
-			oldestTime = state.LastSeen
-		}
-	}
-	if oldestKey != "" {
-		delete(r.quotas, oldestKey)
-	}
-}
-
-func firstNonEmptyString(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
-}
-
-func (r *Runtime) skillRunEnvFor(name string) map[string]string {
-	if r.Builder == nil {
-		return nil
-	}
-	return r.Builder.Skills.RunEnvForSkill(name)
-}
-
-func (r *Runtime) persistAssistantReply(ctx context.Context, sessionKey string, msgID int64, channel, replyTarget, finalText string, replyMeta map[string]any, streamed bool, autoDeliver bool) {
-	if strings.TrimSpace(finalText) == "" {
-		finalText = "(no response)"
-	}
-	assistantID, err := r.DB.AppendMessage(ctx, sessionKey, "assistant", finalText, map[string]any{"in_reply_to": msgID})
-	if err != nil {
-		log.Printf("append assistant(final) failed: %v", err)
-	} else if r.DB != nil {
-		scopeKey := sessionKey
-		if resolved, rerr := r.DB.ResolveScopeKey(ctx, sessionKey); rerr == nil && strings.TrimSpace(resolved) != "" {
-			scopeKey = resolved
-		}
-		card, _, _ := loadTaskCard(ctx, r.DB, sessionKey)
-		card.Status = "active"
-		card.MessageRefs = appendBoundedInt64(card.MessageRefs, assistantID, 12)
-		if err := saveTaskCard(ctx, r.DB, sessionKey, scopeKey, card); err != nil {
-			log.Printf("save task card failed: %v", err)
-		}
-	}
-	if autoDeliver && !streamed && r.Deliver != nil {
-		if err := r.deliver(ctx, channel, replyTarget, finalText, replyMeta); err != nil {
-			log.Printf("deliver failed: %v", err)
-		}
-	}
-}
-
-func (r *Runtime) deliver(ctx context.Context, channel, to, text string, meta map[string]any) error {
-	if r.Deliver == nil {
-		return nil
-	}
-	if withMeta, ok := r.Deliver.(MetaDeliverer); ok {
-		return withMeta.DeliverWithMeta(ctx, channel, to, text, channels.ReplyMeta(meta))
-	}
-	return r.Deliver.Deliver(ctx, channel, to, text)
-}
-
-func (r *Runtime) boundTextResult(ctx context.Context, sessionKey string, text string) (stored string, preview string, artifactID string) {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return "(no response)", "(no response)", ""
-	}
-	preview = previewText(text, r.toolPreviewBytes())
-	shouldStoreArtifact := r.Artifacts != nil && (preview != text || (r.MaxToolBytes > 0 && len(text) > r.MaxToolBytes))
-	if shouldStoreArtifact {
-		id, err := r.Artifacts.Save(ctx, sessionKey, "text/plain", []byte(text))
-		if err != nil {
-			log.Printf("artifact save failed: %v", err)
-			return text, preview, ""
-		}
-		if r.DB != nil {
-			summary := buildArtifactSummary(id, "text/plain", preview, int64(len(text)))
-			if _, err := r.DB.InsertMemoryNoteTyped(ctx, sessionKey, db.TypedNoteInput{
-				Text:             summary,
-				Summary:          compactSemanticJSON(db.MemoryKindArtifact, preview, []string{"artifact:" + id}),
-				SourceArtifactID: id,
-				Kind:             db.MemoryKindArtifact,
-				Status:           db.MemoryStatusActive,
-				Importance:       0.2,
-				Confidence:       0.9,
-			}); err != nil {
-				log.Printf("artifact summary note save failed: %v", err)
-			}
-			scopeKey := sessionKey
-			if resolved, rerr := r.DB.ResolveScopeKey(ctx, sessionKey); rerr == nil && strings.TrimSpace(resolved) != "" {
-				scopeKey = resolved
-			}
-			card, _, _ := loadTaskCard(ctx, r.DB, sessionKey)
-			card.Status = "active"
-			card.ArtifactRefs = appendBoundedString(card.ArtifactRefs, id, 12)
-			if err := saveTaskCard(ctx, r.DB, sessionKey, scopeKey, card); err != nil {
-				log.Printf("save task card artifact ref failed: %v", err)
-			}
-		}
-		return tools.EncodeToolResult(tools.ToolResult{
-			Kind:       "large_tool_output",
-			OK:         true,
-			Summary:    fmt.Sprintf("Large tool output saved as artifact %s", id),
-			Preview:    preview,
-			ArtifactID: id,
-			Stats: map[string]any{
-				"bytes": len(text),
-			},
-		}), preview, id
-	}
-	return text, preview, ""
 }
 
 func (r *Runtime) toolPreviewBytes() int {
@@ -2288,49 +790,6 @@ func releaseEvent(ev bus.Event) {
 		return
 	}
 	done()
-}
-
-func toToolDefs(reg *tools.Registry) []providers.ToolDef {
-	if reg == nil {
-		return nil
-	}
-	raw := reg.Definitions()
-	out := make([]providers.ToolDef, 0, len(raw))
-	for _, d := range raw {
-		fn, _ := d["function"].(map[string]any)
-		td := providers.ToolDef{
-			Type: "function",
-			Function: providers.ToolFunc{
-				Name:        fmt.Sprint(fn["name"]),
-				Description: fmt.Sprint(fn["description"]),
-				Parameters:  fn["parameters"],
-			},
-		}
-		out = append(out, td)
-	}
-	return out
-}
-
-// Cron runner helper: turns a job into a bus event message
-// CronRunner adapts the event bus into a cron.Runner.
-func CronRunner(b *bus.Bus, defaultSessionKey string) cron.Runner {
-	return func(ctx context.Context, job cron.CronJob) error {
-		_ = ctx
-		msg := job.Payload.Message
-		if strings.TrimSpace(msg) == "" {
-			msg = "cron job: " + job.Name
-		}
-		// prefer per-job session key over the default
-		sessionKey := job.Payload.SessionKey
-		if strings.TrimSpace(sessionKey) == "" {
-			sessionKey = defaultSessionKey
-		}
-		ev := bus.Event{Type: bus.EventCron, SessionKey: sessionKey, Channel: job.Payload.Channel, From: job.Payload.To, Message: msg, Meta: map[string]any{"job_id": job.ID}}
-		if ok := b.Publish(ev); !ok {
-			return fmt.Errorf("event bus full")
-		}
-		return nil
-	}
 }
 
 // WithTimeout derives a timeout context when sec is positive.

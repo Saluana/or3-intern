@@ -26,7 +26,34 @@ Per-server settings include:
 
 - `stdio`
 - `sse`
-- `streamableHttp`
+- `streamable-http`
+
+## Managing MCP servers
+
+Use the interactive configurator for local setup:
+
+```bash
+or3-intern configure --section mcp
+```
+
+The MCP Servers screen lists configured servers and supports:
+
+- `a` add a server
+- `enter` edit the selected server
+- `d` delete the selected server
+- `t` test the saved server config
+- `s` review and save
+
+The OR3 app exposes the same workflow at **Settings → Add-ons**. Changes are persisted to `config.json` and require restarting `or3-intern` before the runtime tool registry changes.
+
+Service API clients can manage MCP servers with:
+
+- `GET /internal/v1/mcp/servers`
+- `POST /internal/v1/mcp/servers`
+- `DELETE /internal/v1/mcp/servers/{name}`
+- `POST /internal/v1/mcp/servers/{name}/test`
+
+All MCP management API routes require operator access. Add/update validates the full `tools.mcpServers` map before saving and returns `restartRequired: true`.
 
 ## Safety notes
 

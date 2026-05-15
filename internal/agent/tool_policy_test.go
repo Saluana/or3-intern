@@ -10,7 +10,9 @@ import (
 
 type toolPolicyStubTool struct {
 	tools.Base
-	name string
+	name       string
+	groups     []string
+	capability tools.CapabilityLevel
 }
 
 func (t *toolPolicyStubTool) Name() string        { return t.name }
@@ -23,6 +25,15 @@ func (t *toolPolicyStubTool) Schema() map[string]any {
 }
 func (t *toolPolicyStubTool) Execute(_ context.Context, _ map[string]any) (string, error) {
 	return "", nil
+}
+func (t *toolPolicyStubTool) Metadata() tools.ToolMetadata {
+	return tools.ToolMetadata{Groups: t.groups}
+}
+func (t *toolPolicyStubTool) Capability() tools.CapabilityLevel {
+	if t.capability != "" {
+		return t.capability
+	}
+	return tools.CapabilitySafe
 }
 
 func TestResolveServiceToolAllowlist_RejectsMissingMode(t *testing.T) {
@@ -102,5 +113,38 @@ func TestResolveServiceToolAllowlist_DefaultAllowAllAndLegacyFailure(t *testing.
 	}
 	if _, _, err := ResolveServiceToolAllowlist(nil, nil, []string{"read_file"}); err == nil || !strings.Contains(err.Error(), "tool_policy.mode is required") {
 		t.Fatalf("expected legacy allowed_tools without tool_policy to fail, got %v", err)
+	}
+}
+
+func TestResolveServiceToolAllowlist_ModeDefaults(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(&toolPolicyStubTool{name: "read_file", groups: []string{tools.ToolGroupRead}})
+	registry.Register(&toolPolicyStubTool{name: "web_search", groups: []string{tools.ToolGroupWeb}})
+	registry.Register(&toolPolicyStubTool{name: "write_file", groups: []string{tools.ToolGroupWrite}})
+	registry.Register(&toolPolicyStubTool{name: "exec", groups: []string{tools.ToolGroupExec}, capability: tools.CapabilityGuarded})
+	registry.Register(&toolPolicyStubTool{name: "restart_service", groups: []string{tools.ToolGroupService}, capability: tools.CapabilityPrivileged})
+
+	ask, explicit, err := ResolveServiceToolAllowlist(registry, &ServiceToolPolicy{Mode: "ask"}, nil)
+	if err != nil || !explicit {
+		t.Fatalf("ask policy: explicit=%v err=%v", explicit, err)
+	}
+	if strings.Join(ask, ",") != "read_file,web_search" {
+		t.Fatalf("unexpected ask tools: %#v", ask)
+	}
+
+	work, explicit, err := ResolveServiceToolAllowlist(registry, &ServiceToolPolicy{Mode: "work"}, nil)
+	if err != nil || !explicit {
+		t.Fatalf("work policy: explicit=%v err=%v", explicit, err)
+	}
+	if strings.Contains(strings.Join(work, ","), "restart_service") {
+		t.Fatalf("work mode should hide service tools, got %#v", work)
+	}
+
+	admin, explicit, err := ResolveServiceToolAllowlist(registry, &ServiceToolPolicy{Mode: "admin"}, nil)
+	if err != nil || !explicit {
+		t.Fatalf("admin policy: explicit=%v err=%v", explicit, err)
+	}
+	if len(admin) != 5 {
+		t.Fatalf("admin should expose all non-hidden tools, got %#v", admin)
 	}
 }

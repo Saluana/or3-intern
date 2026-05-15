@@ -3,9 +3,13 @@ package cron
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -26,22 +30,32 @@ func mustAddJob(t *testing.T, svc *Service, job CronJob) {
 
 func mustRunNow(t *testing.T, svc *Service, id string, force bool) bool {
 	t.Helper()
-	found, err := svc.RunNow(context.Background(), id, force)
+	job, err := svc.RunNow(context.Background(), id, force)
 	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return false
+		}
 		t.Fatalf("RunNow: %v", err)
 	}
-	return found
+	if !force && !job.Enabled {
+		return false
+	}
+	return true
 }
 
 func makeService(t *testing.T) (*Service, string) {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron.json")
-	svc := New(path, func(ctx context.Context, job CronJob) error {
-		return nil
+	svc := New(path, func(ctx context.Context, job CronJob) (RunResult, error) {
+		return RunResult{}, nil
 	})
 	return svc, path
 }
+
+type stubScheduledTimer struct{}
+
+func (stubScheduledTimer) Stop() bool { return true }
 
 func TestNew(t *testing.T) {
 	svc, _ := makeService(t)
@@ -175,9 +189,9 @@ func TestRunNow_Success(t *testing.T) {
 	ran := false
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron.json")
-	svc := New(path, func(ctx context.Context, job CronJob) error {
+	svc := New(path, func(ctx context.Context, job CronJob) (RunResult, error) {
 		ran = true
-		return nil
+		return RunResult{}, nil
 	})
 	mustStartService(t, svc)
 	defer svc.Stop()
@@ -212,9 +226,9 @@ func TestRunNow_Disabled_NoForce(t *testing.T) {
 	ran := false
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron.json")
-	svc := New(path, func(ctx context.Context, job CronJob) error {
+	svc := New(path, func(ctx context.Context, job CronJob) (RunResult, error) {
 		ran = true
-		return nil
+		return RunResult{}, nil
 	})
 	mustStartService(t, svc)
 	defer svc.Stop()
@@ -238,9 +252,9 @@ func TestRunNow_Disabled_WithForce(t *testing.T) {
 	ran := false
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron.json")
-	svc := New(path, func(ctx context.Context, job CronJob) error {
+	svc := New(path, func(ctx context.Context, job CronJob) (RunResult, error) {
 		ran = true
-		return nil
+		return RunResult{}, nil
 	})
 	mustStartService(t, svc)
 	defer svc.Stop()
@@ -263,8 +277,8 @@ func TestRunNow_Disabled_WithForce(t *testing.T) {
 func TestRunNow_DeleteAfterRun(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron.json")
-	svc := New(path, func(ctx context.Context, job CronJob) error {
-		return nil
+	svc := New(path, func(ctx context.Context, job CronJob) (RunResult, error) {
+		return RunResult{}, nil
 	})
 	mustStartService(t, svc)
 	defer svc.Stop()
@@ -367,8 +381,8 @@ func TestArmJob_KindEvery_ZeroInterval(t *testing.T) {
 	mustStartService(t, svc)
 	defer svc.Stop()
 
-	// Zero EveryMS should default to 60s
-	mustAddJob(t, svc, CronJob{
+	// Zero EveryMS must be rejected (must be at least 1000)
+	err := svc.Add(CronJob{
 		ID:      "every-zero",
 		Enabled: true,
 		Schedule: CronSchedule{
@@ -376,13 +390,8 @@ func TestArmJob_KindEvery_ZeroInterval(t *testing.T) {
 			EveryMS: 0,
 		},
 	})
-
-	jobs, _ := svc.List()
-	if len(jobs) != 1 {
-		t.Errorf("expected 1 job, got %d", len(jobs))
-	}
-	if _, ok := svc.entries["every-zero"]; !ok {
-		t.Fatal("expected KindEvery job to be armed in scheduler")
+	if err == nil {
+		t.Fatal("expected error for zero EveryMS")
 	}
 }
 
@@ -411,8 +420,8 @@ func TestArmJob_KindCron_InvalidExpr(t *testing.T) {
 	mustStartService(t, svc)
 	defer svc.Stop()
 
-	// Invalid cron expr - should log but not panic
-	mustAddJob(t, svc, CronJob{
+	// Invalid cron expr should be rejected before persistence.
+	err := svc.Add(CronJob{
 		ID:      "bad-expr",
 		Enabled: true,
 		Schedule: CronSchedule{
@@ -420,10 +429,13 @@ func TestArmJob_KindCron_InvalidExpr(t *testing.T) {
 			Expr: "not a valid cron expression at all",
 		},
 	})
+	if err == nil {
+		t.Fatal("expected invalid cron expression error")
+	}
 
 	jobs, _ := svc.List()
-	if len(jobs) != 1 {
-		t.Errorf("expected 1 job (still added, just not scheduled), got %d", len(jobs))
+	if len(jobs) != 0 {
+		t.Errorf("expected invalid job to be rejected, got %d jobs", len(jobs))
 	}
 }
 
@@ -441,24 +453,6 @@ func TestArmJob_DisabledJob(t *testing.T) {
 	jobs, _ := svc.List()
 	if len(jobs) != 1 {
 		t.Errorf("expected 1 job, got %d", len(jobs))
-	}
-}
-
-func TestFilepathDir(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"/home/user/config.json", "/home/user"},
-		{"config.json", "."},
-		{"/config.json", "."},
-		{"a/b/c/d.json", "a/b/c"},
-	}
-	for _, tc := range tests {
-		got := filepathDir(tc.input)
-		if got != tc.want {
-			t.Errorf("filepathDir(%q) = %q, want %q", tc.input, got, tc.want)
-		}
 	}
 }
 
@@ -499,7 +493,7 @@ func TestLoad_InvalidJSON(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	svc := New(path, func(ctx context.Context, job CronJob) error { return nil })
+	svc := New(path, func(ctx context.Context, job CronJob) (RunResult, error) { return RunResult{}, nil })
 	_, err := svc.load()
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
@@ -509,7 +503,7 @@ func TestLoad_InvalidJSON(t *testing.T) {
 func TestSave_And_Load(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron.json")
-	svc := New(path, func(ctx context.Context, job CronJob) error { return nil })
+	svc := New(path, func(ctx context.Context, job CronJob) (RunResult, error) { return RunResult{}, nil })
 
 	st := Store{
 		Version: 1,
@@ -536,7 +530,7 @@ func TestSave_And_Load(t *testing.T) {
 func TestRunNow_UpdatesLastRun(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron.json")
-	svc := New(path, func(ctx context.Context, job CronJob) error { return nil })
+	svc := New(path, func(ctx context.Context, job CronJob) (RunResult, error) { return RunResult{}, nil })
 	mustStartService(t, svc)
 	defer svc.Stop()
 
@@ -562,17 +556,24 @@ func TestRunNow_UpdatesLastRun(t *testing.T) {
 
 func TestArmJob_KindAt_FutureTime(t *testing.T) {
 	runCh := make(chan struct{}, 1)
+	scheduledCh := make(chan time.Duration, 1)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron.json")
-	svc := New(path, func(ctx context.Context, job CronJob) error {
+	fixedNow := time.Unix(1_700_000_000, 0).UTC()
+	svc := New(path, func(ctx context.Context, job CronJob) (RunResult, error) {
 		runCh <- struct{}{}
-		return nil
+		return RunResult{}, nil
 	})
+	svc.now = func() time.Time { return fixedNow }
+	svc.after = func(delay time.Duration, fn func()) scheduledTimer {
+		scheduledCh <- delay
+		go fn()
+		return stubScheduledTimer{}
+	}
 	mustStartService(t, svc)
 	defer svc.Stop()
 
-	// Schedule to run very soon
-	atMS := time.Now().Add(100 * time.Millisecond).UnixMilli()
+	atMS := fixedNow.Add(time.Second).UnixMilli()
 	mustAddJob(t, svc, CronJob{
 		ID:      "at-future",
 		Enabled: true,
@@ -582,11 +583,18 @@ func TestArmJob_KindAt_FutureTime(t *testing.T) {
 		},
 	})
 
-	// Wait for it to run
+	select {
+	case delay := <-scheduledCh:
+		if delay <= 0 {
+			t.Fatalf("expected positive schedule delay, got %s", delay)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("timeout waiting for KindAt timer scheduling")
+	}
+
 	select {
 	case <-runCh:
-	// success
-	case <-time.After(2 * time.Second):
+	case <-time.After(100 * time.Millisecond):
 		t.Error("timeout waiting for KindAt job to run")
 	}
 }
@@ -594,7 +602,7 @@ func TestArmJob_KindAt_FutureTime(t *testing.T) {
 func TestRemove_WithSchedulerEntry(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron.json")
-	svc := New(path, func(ctx context.Context, job CronJob) error { return nil })
+	svc := New(path, func(ctx context.Context, job CronJob) (RunResult, error) { return RunResult{}, nil })
 	mustStartService(t, svc)
 	defer svc.Stop()
 
@@ -625,7 +633,7 @@ func TestStart_WithExistingJobs(t *testing.T) {
 	path := filepath.Join(dir, "cron.json")
 
 	// First, create a service and add jobs
-	svc1 := New(path, func(ctx context.Context, job CronJob) error { return nil })
+	svc1 := New(path, func(ctx context.Context, job CronJob) (RunResult, error) { return RunResult{}, nil })
 	mustStartService(t, svc1)
 	mustAddJob(t, svc1, CronJob{
 		ID:       "existing",
@@ -635,7 +643,7 @@ func TestStart_WithExistingJobs(t *testing.T) {
 	svc1.Stop()
 
 	// Create a new service with same path - Start should load existing jobs
-	svc2 := New(path, func(ctx context.Context, job CronJob) error { return nil })
+	svc2 := New(path, func(ctx context.Context, job CronJob) (RunResult, error) { return RunResult{}, nil })
 	if err := svc2.Start(); err != nil {
 		t.Fatalf("Start with existing jobs: %v", err)
 	}
@@ -644,26 +652,6 @@ func TestStart_WithExistingJobs(t *testing.T) {
 	jobs, _ := svc2.List()
 	if len(jobs) != 1 {
 		t.Errorf("expected 1 job loaded from file, got %d", len(jobs))
-	}
-}
-
-func TestRunNow_SaveError(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "cron.json")
-	svc := New(path, func(ctx context.Context, job CronJob) error { return nil })
-	mustStartService(t, svc)
-	defer svc.Stop()
-
-	mustAddJob(t, svc, CronJob{
-		ID:       "save-err",
-		Enabled:  true,
-		Schedule: CronSchedule{Kind: KindEvery, EveryMS: 60000},
-	})
-
-	// Run successfully
-	found := mustRunNow(t, svc, "save-err", false)
-	if !found {
-		t.Error("expected found=true")
 	}
 }
 
@@ -714,47 +702,228 @@ func TestCronPayloadSessionKey_OmitEmpty(t *testing.T) {
 	}
 }
 
-func TestCronRunnerPerJobSession(t *testing.T) {
-	svc, _ := makeService(t)
-	if err := svc.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer svc.Stop()
-
-	// Track which session key the runner sees
-	var capturedSessionKey string
-	var runnerCalled bool
-	svc2 := &Service{
-		path: svc.path,
-		runner: func(ctx context.Context, job CronJob) error {
-			capturedSessionKey = job.Payload.SessionKey
-			runnerCalled = true
-			return nil
+func TestCronPayloadAgentCLIRun_JSONRoundTrip(t *testing.T) {
+	payload := CronPayload{
+		Kind:       PayloadAgentCLIRun,
+		SessionKey: "cron:agents",
+		AgentRun: &CronAgentRunPayload{
+			RunnerID:       "codex",
+			Task:           "review the repo",
+			TimeoutSeconds: 600,
+			Cwd:            "/workspace",
+			Model:          "gpt-5",
+			Mode:           "review",
+			Isolation:      "host_readonly",
+			MaxTurns:       4,
+			Meta:           map[string]any{"source": "cron"},
 		},
 	}
 
-	// Simulate a job with per-job SessionKey
-	job := CronJob{
-		ID:       "per-job-session",
-		Name:     "Per Job Session Test",
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var decoded CronPayload
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if decoded.Kind != PayloadAgentCLIRun {
+		t.Fatalf("expected kind %q, got %q", PayloadAgentCLIRun, decoded.Kind)
+	}
+	if decoded.AgentRun == nil {
+		t.Fatal("expected agent_run to round-trip")
+	}
+	if decoded.AgentRun.RunnerID != "codex" || decoded.AgentRun.Task != "review the repo" {
+		t.Fatalf("unexpected agent run payload: %#v", decoded.AgentRun)
+	}
+}
+
+func TestValidatePayload_AgentCLIRunDefaultsModeAndIsolation(t *testing.T) {
+	payload := NormalizePayload(CronPayload{
+		Kind: PayloadAgentCLIRun,
+		AgentRun: &CronAgentRunPayload{
+			RunnerID: "codex",
+			Task:     "review",
+		},
+	})
+	if err := ValidatePayload(payload); err != nil {
+		t.Fatalf("ValidatePayload: %v", err)
+	}
+	if payload.AgentRun.Mode != DefaultAgentCLICronMode {
+		t.Fatalf("expected default mode %q, got %q", DefaultAgentCLICronMode, payload.AgentRun.Mode)
+	}
+	if payload.AgentRun.Isolation != DefaultAgentCLICronIsolation {
+		t.Fatalf("expected default isolation %q, got %q", DefaultAgentCLICronIsolation, payload.AgentRun.Isolation)
+	}
+}
+
+func TestValidatePayload_AgentCLIRunRequiresRunnerAndTask(t *testing.T) {
+	cases := []CronPayload{
+		{Kind: PayloadAgentCLIRun},
+		{Kind: PayloadAgentCLIRun, AgentRun: &CronAgentRunPayload{Task: "review"}},
+		{Kind: PayloadAgentCLIRun, AgentRun: &CronAgentRunPayload{RunnerID: "codex"}},
+	}
+	for _, tc := range cases {
+		if err := ValidatePayload(tc); err == nil {
+			t.Fatalf("expected validation error for %#v", tc)
+		}
+	}
+}
+
+func TestRunNow_StoresEnqueuedRunIDs(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cron.json")
+	svc := New(path, func(ctx context.Context, job CronJob) (RunResult, error) {
+		return RunResult{EnqueuedJobID: "job-agentcli-123", EnqueuedRunID: "acr_123"}, nil
+	})
+	mustStartService(t, svc)
+	defer svc.Stop()
+
+	mustAddJob(t, svc, CronJob{
+		ID:       "agent-run",
 		Enabled:  true,
 		Schedule: CronSchedule{Kind: KindEvery, EveryMS: 60000},
 		Payload: CronPayload{
-			Kind:       "agent_turn",
-			Message:    "per-job message",
-			SessionKey: "per-job-session-key",
+			Kind: PayloadAgentCLIRun,
+			AgentRun: &CronAgentRunPayload{
+				RunnerID: "codex",
+				Task:     "review",
+			},
 		},
+	})
+	_ = mustRunNow(t, svc, "agent-run", false)
+
+	jobs, _ := svc.List()
+	if jobs[0].State.LastEnqueuedJobID != "job-agentcli-123" {
+		t.Fatalf("expected enqueued job id, got %#v", jobs[0].State)
+	}
+	if jobs[0].State.LastEnqueuedRunID != "acr_123" {
+		t.Fatalf("expected enqueued run id, got %#v", jobs[0].State)
+	}
+}
+
+func TestService_ConcurrentMutationAndLifecycle(t *testing.T) {
+	var ran atomic.Int32
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cron.json")
+	svc := New(path, func(ctx context.Context, job CronJob) (RunResult, error) {
+		ran.Add(1)
+		return RunResult{}, nil
+	})
+	mustStartService(t, svc)
+	defer svc.Stop()
+
+	const runJobs = 8
+	const removeJobs = 8
+	const addJobs = 8
+	const lifecycleCycles = 4
+
+	for i := 0; i < runJobs; i++ {
+		mustAddJob(t, svc, CronJob{
+			ID:       fmt.Sprintf("run-%d", i),
+			Enabled:  true,
+			Schedule: CronSchedule{Kind: KindEvery, EveryMS: 60000},
+		})
+	}
+	for i := 0; i < removeJobs; i++ {
+		mustAddJob(t, svc, CronJob{
+			ID:       fmt.Sprintf("remove-%d", i),
+			Enabled:  true,
+			Schedule: CronSchedule{Kind: KindEvery, EveryMS: 60000},
+		})
 	}
 
-	// Directly call the runner with the job
-	if err := svc2.runner(context.Background(), job); err != nil {
-		t.Fatalf("runner: %v", err)
+	errCh := make(chan error, runJobs+removeJobs+addJobs)
+	var wg sync.WaitGroup
+	for i := 0; i < runJobs; i++ {
+		id := fmt.Sprintf("run-%d", i)
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			job, err := svc.RunNow(context.Background(), id, false)
+			if err != nil {
+				errCh <- fmt.Errorf("RunNow %s: %w", id, err)
+				return
+			}
+			if job.ID != id {
+				errCh <- fmt.Errorf("RunNow returned job %q, want %q", job.ID, id)
+			}
+		}(id)
+	}
+	for i := 0; i < removeJobs; i++ {
+		id := fmt.Sprintf("remove-%d", i)
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			removed, err := svc.Remove(id)
+			if err != nil {
+				errCh <- fmt.Errorf("Remove %s: %w", id, err)
+				return
+			}
+			if !removed {
+				errCh <- fmt.Errorf("Remove %s returned false", id)
+			}
+		}(id)
+	}
+	for i := 0; i < addJobs; i++ {
+		id := fmt.Sprintf("add-%d", i)
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			if err := svc.Add(CronJob{ID: id, Enabled: true, Schedule: CronSchedule{Kind: KindEvery, EveryMS: 60000}}); err != nil {
+				errCh <- fmt.Errorf("Add %s: %w", id, err)
+			}
+		}(id)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for cycle := 0; cycle < lifecycleCycles; cycle++ {
+			svc.Stop()
+			if err := svc.Start(); err != nil {
+				errCh <- fmt.Errorf("Start cycle %d: %w", cycle, err)
+				return
+			}
+		}
+	}()
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Error(err)
+		}
 	}
 
-	if !runnerCalled {
-		t.Fatal("expected runner to be called")
+	if got := ran.Load(); got != runJobs {
+		t.Fatalf("expected %d successful run invocations, got %d", runJobs, got)
 	}
-	if capturedSessionKey != "per-job-session-key" {
-		t.Errorf("expected SessionKey %q, got %q", "per-job-session-key", capturedSessionKey)
+
+	jobs, err := svc.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	seen := make(map[string]struct{}, len(jobs))
+	for _, job := range jobs {
+		if _, ok := seen[job.ID]; ok {
+			t.Fatalf("duplicate job id %q after concurrent operations", job.ID)
+		}
+		seen[job.ID] = struct{}{}
+	}
+	for i := 0; i < runJobs; i++ {
+		id := fmt.Sprintf("run-%d", i)
+		if _, ok := seen[id]; !ok {
+			t.Fatalf("expected retained job %q after concurrent operations", id)
+		}
+	}
+	for i := 0; i < addJobs; i++ {
+		id := fmt.Sprintf("add-%d", i)
+		if _, ok := seen[id]; !ok {
+			t.Fatalf("expected added job %q after concurrent operations", id)
+		}
+	}
+	for i := 0; i < removeJobs; i++ {
+		if _, ok := seen[fmt.Sprintf("remove-%d", i)]; ok {
+			t.Fatalf("removed job remove-%d still present", i)
+		}
 	}
 }

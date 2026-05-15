@@ -13,10 +13,18 @@ import (
 // isTTY is true when stdout is an interactive terminal.
 var stdoutIsTTY = isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
 var stdinIsTTY = isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd())
-var isTTY = stdoutIsTTY
+var isTTY = stdoutIsTTY && colorEnabled()
 
 func isInteractiveTTY() bool {
 	return stdinIsTTY && stdoutIsTTY
+}
+
+func colorEnabled() bool {
+	if strings.TrimSpace(os.Getenv("NO_COLOR")) != "" {
+		return false
+	}
+	term := strings.ToLower(strings.TrimSpace(os.Getenv("TERM")))
+	return term != "dumb"
 }
 
 // ---------- ANSI helpers ----------

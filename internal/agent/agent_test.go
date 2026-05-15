@@ -559,6 +559,8 @@ func TestBuilder_Build_UserImageAttachmentsRespectVisionBudget(t *testing.T) {
 
 func TestCronRunner_PublishesEvent(t *testing.T) {
 	b := bus.New(10)
+	events, unsubscribe := b.Subscribe()
+	defer unsubscribe()
 	runner := CronRunner(b, "test-session")
 
 	job := cron.CronJob{
@@ -572,13 +574,13 @@ func TestCronRunner_PublishesEvent(t *testing.T) {
 		},
 	}
 
-	err := runner(context.Background(), job)
+	_, err := runner(context.Background(), job)
 	if err != nil {
 		t.Fatalf("CronRunner: %v", err)
 	}
 
 	select {
-	case ev := <-b.Channel():
+	case ev := <-events:
 		if ev.Type != bus.EventCron {
 			t.Errorf("expected EventCron, got %s", ev.Type)
 		}
@@ -598,6 +600,8 @@ func TestCronRunner_PublishesEvent(t *testing.T) {
 
 func TestCronRunner_EmptyMessage_UsesName(t *testing.T) {
 	b := bus.New(10)
+	events, unsubscribe := b.Subscribe()
+	defer unsubscribe()
 	runner := CronRunner(b, "test-session")
 
 	job := cron.CronJob{
@@ -609,12 +613,12 @@ func TestCronRunner_EmptyMessage_UsesName(t *testing.T) {
 		},
 	}
 
-	if err := runner(context.Background(), job); err != nil {
+	if _, err := runner(context.Background(), job); err != nil {
 		t.Fatalf("runner: %v", err)
 	}
 
 	select {
-	case ev := <-b.Channel():
+	case ev := <-events:
 		if !strings.Contains(ev.Message, "my job") {
 			t.Errorf("expected message to contain job name, got %q", ev.Message)
 		}
@@ -625,10 +629,13 @@ func TestCronRunner_EmptyMessage_UsesName(t *testing.T) {
 
 func TestCronRunner_FullBus_ReturnsError(t *testing.T) {
 	b := bus.New(1)
+	events, unsubscribe := b.Subscribe()
+	defer unsubscribe()
 	b.Publish(bus.Event{}) // fill the bus
+	_ = events
 
 	runner := CronRunner(b, "session")
-	err := runner(context.Background(), cron.CronJob{
+	_, err := runner(context.Background(), cron.CronJob{
 		ID:      "j1",
 		Payload: cron.CronPayload{Message: "msg"},
 	})

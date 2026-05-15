@@ -5,7 +5,7 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/hmac"
+	"crypto/hkdf"
 	crand "crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -182,10 +182,11 @@ func (t *RunSkillScript) prepareSkillRun(ctx context.Context, params map[string]
 		ScriptHash:     skillCommandHash(cmd),
 		EnvBindingHash: hashEnvBinding(childEnv),
 	}
-	_, planHash, err := approval.CanonicalSubjectHash(planHashInput)
+	sh, err := approval.CanonicalSubjectHash(planHashInput)
 	if err != nil {
 		return preparedSkillRun{}, "", err
 	}
+	planHash := sh.Hash
 	identity := RequesterIdentityFromContext(ctx)
 	plan := db.SkillRunPlanRecord{
 		SkillID:            skill.Name,
@@ -350,13 +351,34 @@ func (t *RunSkillScript) runPreparedSkillRun(ctx context.Context, prepared prepa
 	runCtx, cancel := context.WithTimeout(ctx, prepared.timeout)
 	defer cancel()
 
+	var heartbeatStop chan struct{}
+	if t.DB != nil && strings.TrimSpace(prepared.plan.ID) != "" {
+		heartbeatStop = make(chan struct{})
+		defer close(heartbeatStop)
+		go func() {
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					_ = t.DB.TouchSkillRunPlan(context.Background(), prepared.plan.ID)
+				case <-heartbeatStop:
+					return
+				}
+			}
+		}()
+	}
+
 	command, err := commandWithSandbox(runCtx, t.Sandbox, prepared.skill.Dir, prepared.command)
 	if err != nil {
-		result := encodeSkillRunResult(db.SkillRunStatusPreflightFailed, false, prepared.plan, err.Error(), "", prepared.plan.ApprovalRequestID, nil)
-		if persistErr := t.persistSkillRunResult(ctx, prepared.plan, db.SkillRunStatusPreflightFailed, result, err.Error()); persistErr != nil {
-			return result, persistErr
+		if !errors.Is(err, errSandboxNotEnabled) {
+			result := encodeSkillRunResult(db.SkillRunStatusPreflightFailed, false, prepared.plan, err.Error(), "", prepared.plan.ApprovalRequestID, nil)
+			if persistErr := t.persistSkillRunResult(ctx, prepared.plan, db.SkillRunStatusPreflightFailed, result, err.Error()); persistErr != nil {
+				return result, persistErr
+			}
+			return result, err
 		}
-		return result, err
+		command = nil
 	}
 	if command == nil {
 		command = exec.CommandContext(runCtx, prepared.command[0], prepared.command[1:]...)
@@ -497,11 +519,7 @@ func skillRunExecutionHostID(broker *approval.Broker) string {
 }
 
 func optionalSkillRunString(params map[string]any, key string) string {
-	text := strings.TrimSpace(fmt.Sprint(params[key]))
-	if text == "<nil>" {
-		return ""
-	}
-	return text
+	return stringParam(params, key)
 }
 
 func isTerminalSkillRunStatus(status string) bool {
@@ -597,7 +615,11 @@ func (t *RunSkillScript) skillRunSensitiveDataKey() []byte {
 		return append([]byte{}, t.SensitiveDataKey...)
 	}
 	if t.ApprovalBroker != nil && len(t.ApprovalBroker.SignKey) > 0 {
-		return append([]byte{}, t.ApprovalBroker.SignKey...)
+		encKey, err := hkdf.Key(sha256.New, t.ApprovalBroker.SignKey, nil, "skill-run-encryption", 32)
+		if err != nil {
+			return nil
+		}
+		return encKey
 	}
 	return nil
 }
@@ -632,9 +654,11 @@ func decryptSkillRunBlob(master, ciphertext, nonce []byte) ([]byte, error) {
 }
 
 func deriveSkillRunKey(master []byte) []byte {
-	h := hmac.New(sha256.New, master)
-	_, _ = h.Write([]byte("skill-run-stdin"))
-	return h.Sum(nil)[:32]
+	key, err := hkdf.Key(sha256.New, master, nil, "skill-run-stdin", 32)
+	if err != nil {
+		return nil
+	}
+	return key
 }
 
 func hashSkillRunStdin(stdinText string) string {

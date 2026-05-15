@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"or3-intern/internal/approval"
@@ -30,8 +31,17 @@ const (
 )
 
 type serviceTokenClaims struct {
-	IssuedAt int64  `json:"iat"`
-	Nonce    string `json:"nonce"`
+	IssuedAt   int64  `json:"iat"`
+	Nonce      string `json:"nonce"`
+	Method     string `json:"method,omitempty"`
+	Path       string `json:"path,omitempty"`
+	BodySHA256 string `json:"bodySha256,omitempty"`
+}
+
+type serviceTokenBinding struct {
+	Method     string
+	Path       string
+	BodySHA256 string
 }
 
 type serviceAuthContextKey struct{}
@@ -92,60 +102,69 @@ func serviceAuthMiddlewareWithBroker(cfg config.Config, broker *approval.Broker,
 func serviceAuthMiddlewareWithBrokerAndLimiter(cfg config.Config, broker *approval.Broker, authSvc *auth.Service, server *serviceServer, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if allowsUnauthenticatedPairingRoute(cfg, r) {
-			ctx := approval.ContextWithAuditAuthKind(r.Context(), "unauthenticated")
-			ctx = approval.ContextWithAuditActor(ctx, "anonymous")
-			next.ServeHTTP(w, r.WithContext(ctx))
+			next.ServeHTTP(w, serviceUnauthenticatedPairingRequest(r))
 			return
 		}
-		requirement := serviceRouteRequirementForRequest(cfg, r)
+		requirement := serviceRequestRouteRequirement(cfg, r)
 		if requirement.Sensitivity == serviceRoutePublic {
-			identity := serviceAuthIdentity{Kind: "public", Actor: "anonymous"}
-			ctx := context.WithValue(r.Context(), serviceAuthContextKey{}, identity)
-			ctx = context.WithValue(ctx, serviceAuthKindContextKey{}, identity.Kind)
-			ctx = approval.ContextWithAuditAuthKind(ctx, identity.Kind)
-			ctx = approval.ContextWithAuditActor(ctx, identity.Actor)
-			next.ServeHTTP(w, r.WithContext(ctx))
+			next.ServeHTTP(w, serviceRequestWithAuthIdentity(r, servicePublicAuthIdentity()))
 			return
 		}
-		if retryAfter := server.serviceAuthRetryAfter(r, "auth"); retryAfter > 0 {
-			writeServiceAuthRateLimit(w, r, retryAfter)
+		if server.rejectServiceAuthRateLimit(w, r, "auth") {
 			return
 		}
-		identity, err := authenticateServiceRequest(cfg, broker, authSvc, r.Header.Get("Authorization"), time.Now(), r.Context())
+		now := time.Now()
+		if identity, ok := authenticateTerminalWebSocketTicketRequest(server, r, now); ok {
+			server.clearServiceAuthFailures(r, "auth")
+			next.ServeHTTP(w, serviceRequestWithAuthIdentity(r, identity))
+			return
+		}
+		var nonceGuard *serviceNonceReplayGuard
+		if server != nil {
+			server.components()
+			nonceGuard = server.nonceGuard
+		}
+		identity, err := serviceAuthenticateRequest(cfg, broker, authSvc, r, now, nonceGuard)
 		if err != nil {
 			server.recordServiceAuthFailure(r, "auth")
-			if challenge := serviceAuthChallengeError(cfg, authSvc, requirement, serviceAuthIdentity{}, err); challenge != nil {
-				serviceAuditAuthEvent(authSvc, r.Context(), "auth.policy.denied", serviceAuthIdentity{Actor: "anonymous"}, map[string]any{"path": r.URL.Path, "method": r.Method, "code": challenge.Code})
-				writeServiceAuthError(w, r, challenge)
+			if serviceWriteAuthChallengeIfNeeded(cfg, authSvc, w, r, requirement, serviceAuthIdentity{}, err) {
 				return
 			}
 			if serviceIsPairingRoute(r) && cfg.Service.AllowUnauthenticatedPairing {
 				writeServicePairingAuthError(w, r, cfg)
 				return
 			}
-			writeServiceJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+			writeServiceJSON(w, http.StatusUnauthorized, addServiceRequestID(map[string]any{"error": "unauthorized", "code": serviceAuthErrorCode(err)}, r))
 			return
 		}
 		server.clearServiceAuthFailures(r, "auth")
-		if challenge := serviceAuthChallengeError(cfg, authSvc, requirement, identity, nil); challenge != nil {
-			if strings.EqualFold(string(cfg.Auth.EnforcementMode), string(config.AuthEnforcementWarn)) {
-				serviceAuditAuthEvent(authSvc, r.Context(), "auth.policy.warn", identity, map[string]any{"path": r.URL.Path, "method": r.Method, "code": challenge.Code})
-				w.Header().Set("X-Or3-Auth-Warning", challenge.Code)
-				if strings.TrimSpace(challenge.Message) != "" {
-					w.Header().Set("X-Or3-Auth-Reason", challenge.Message)
-				}
-			} else {
-				serviceAuditAuthEvent(authSvc, r.Context(), "auth.policy.denied", identity, map[string]any{"path": r.URL.Path, "method": r.Method, "code": challenge.Code})
-				writeServiceAuthError(w, r, challenge)
-				return
-			}
+		if serviceWriteAuthChallengeIfNeeded(cfg, authSvc, w, r, requirement, identity, nil) {
+			return
 		}
-		ctx := context.WithValue(r.Context(), serviceAuthContextKey{}, identity)
-		ctx = context.WithValue(ctx, serviceAuthKindContextKey{}, identity.Kind)
-		ctx = approval.ContextWithAuditAuthKind(ctx, identity.Kind)
-		ctx = approval.ContextWithAuditActor(ctx, identity.Actor)
-		next.ServeHTTP(w, r.WithContext(ctx))
+		next.ServeHTTP(w, serviceRequestWithAuthIdentity(r, identity))
 	})
+}
+
+func authenticateTerminalWebSocketTicketRequest(server *serviceServer, r *http.Request, now time.Time) (serviceAuthIdentity, bool) {
+	if server == nil || !serviceIsTerminalWebSocketRequest(r) || !terminalWebSocketProtocolRequested(r) {
+		return serviceAuthIdentity{}, false
+	}
+	sessionID, ok := serviceTerminalWebSocketSessionID(r.URL.Path)
+	if !ok {
+		return serviceAuthIdentity{}, false
+	}
+	ticket, ok := terminalWebSocketTicketFromRequest(r)
+	if !ok {
+		return serviceAuthIdentity{}, false
+	}
+	if !server.consumeTerminalWebSocketTicket(sessionID, ticket, now) {
+		return serviceAuthIdentity{}, false
+	}
+	return serviceAuthIdentity{
+		Kind:  "terminal-ws-ticket",
+		Actor: "terminal-ws:" + sessionID,
+		Role:  approval.RoleOperator,
+	}, true
 }
 
 func writeServicePairingAuthError(w http.ResponseWriter, r *http.Request, cfg config.Config) {
@@ -164,17 +183,32 @@ func (s *serviceServer) serviceAuthRetryAfter(r *http.Request, scope string) int
 	if s == nil || r == nil {
 		return 0
 	}
-	now := time.Now().UTC()
-	keys := serviceAuthFailureKeys(r, scope)
-	s.authFailureMu.Lock()
-	defer s.authFailureMu.Unlock()
+	return s.serviceAuthFailures().RetryAfter(serviceAuthFailureKeys(r, scope), time.Now().UTC())
+}
+
+func (s *serviceServer) serviceAuthFailures() *serviceAuthFailureTracker {
+	s.components()
+	return s.authFailures
+}
+
+type serviceAuthFailureTracker struct {
+	mu       sync.Mutex
+	failures map[string]serviceAuthFailureState
+}
+
+func (t *serviceAuthFailureTracker) RetryAfter(keys []string, now time.Time) int {
+	if t == nil {
+		return 0
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	for _, key := range keys {
-		state, ok := s.authFailures[key]
+		state, ok := t.failures[key]
 		if !ok {
 			continue
 		}
 		if now.Sub(state.FirstAttempt) > serviceAuthFailureWindow {
-			delete(s.authFailures, key)
+			delete(t.failures, key)
 			continue
 		}
 		if state.BlockedUntil.After(now) {
@@ -188,15 +222,20 @@ func (s *serviceServer) recordServiceAuthFailure(r *http.Request, scope string) 
 	if s == nil || r == nil {
 		return
 	}
-	now := time.Now().UTC()
-	keys := serviceAuthFailureKeys(r, scope)
-	s.authFailureMu.Lock()
-	defer s.authFailureMu.Unlock()
-	if s.authFailures == nil {
-		s.authFailures = map[string]serviceAuthFailureState{}
+	s.serviceAuthFailures().Record(serviceAuthFailureKeys(r, scope), time.Now().UTC())
+}
+
+func (t *serviceAuthFailureTracker) Record(keys []string, now time.Time) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.failures == nil {
+		t.failures = map[string]serviceAuthFailureState{}
 	}
 	for _, key := range keys {
-		state := s.authFailures[key]
+		state := t.failures[key]
 		if state.FirstAttempt.IsZero() || now.Sub(state.FirstAttempt) > serviceAuthFailureWindow {
 			state = serviceAuthFailureState{FirstAttempt: now}
 		}
@@ -209,7 +248,7 @@ func (s *serviceServer) recordServiceAuthFailure(r *http.Request, scope string) 
 			}
 			state.BlockedUntil = now.Add(backoff)
 		}
-		s.authFailures[key] = state
+		t.failures[key] = state
 	}
 }
 
@@ -217,11 +256,17 @@ func (s *serviceServer) clearServiceAuthFailures(r *http.Request, scope string) 
 	if s == nil || r == nil {
 		return
 	}
-	keys := serviceAuthFailureKeys(r, scope)
-	s.authFailureMu.Lock()
-	defer s.authFailureMu.Unlock()
+	s.serviceAuthFailures().Clear(serviceAuthFailureKeys(r, scope))
+}
+
+func (t *serviceAuthFailureTracker) Clear(keys []string) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	for _, key := range keys {
-		delete(s.authFailures, key)
+		delete(t.failures, key)
 	}
 }
 
@@ -260,7 +305,7 @@ func writeServiceAuthRateLimit(w http.ResponseWriter, r *http.Request, retryAfte
 		retryAfter = 1
 	}
 	w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
-	writeServiceJSON(w, http.StatusTooManyRequests, map[string]any{"error": "too many authentication attempts", "retry_after_seconds": retryAfter})
+	writeServiceJSON(w, http.StatusTooManyRequests, addServiceRequestID(map[string]any{"error": "too many authentication attempts", "code": serviceCodeAuthRateLimited, "retry_after_seconds": retryAfter}, r))
 }
 
 func serviceAllowedBrowserOrigin(cfg config.Config, r *http.Request) (string, bool) {
@@ -418,44 +463,58 @@ func serviceAppendVary(header http.Header, value string) {
 	header.Add("Vary", value)
 }
 
-func authenticateServiceRequest(cfg config.Config, broker *approval.Broker, authSvc *auth.Service, header string, now time.Time, ctx context.Context) (serviceAuthIdentity, error) {
-	if err := validateServiceAuthorization(cfg.Service.Secret, header, now); err == nil {
-		role := strings.TrimSpace(cfg.Service.SharedSecretRole)
-		if role == "" {
-			role = approval.RoleServiceClient
+func authenticateServiceRequest(cfg config.Config, broker *approval.Broker, authSvc *auth.Service, header string, now time.Time, ctx context.Context, r *http.Request, nonceGuard *serviceNonceReplayGuard) (serviceAuthIdentity, error) {
+	binding := serviceTokenBinding{}
+	requestedMethod := ""
+	if r != nil {
+		requestedMethod = strings.ToLower(strings.TrimSpace(r.Header.Get("X-Or3-Auth-Method")))
+		binding.Method = r.Method
+		if r.URL != nil {
+			binding.Path = r.URL.Path
 		}
-		return serviceAuthIdentity{Kind: "shared-secret", Actor: "service:shared-secret", Role: role}, nil
+	}
+	switch requestedMethod {
+	case "", "shared-secret", "paired-device", "session", "auth-session":
+	default:
+		return serviceAuthIdentity{}, fmt.Errorf("unsupported auth method")
+	}
+	if requestedMethod == "" || requestedMethod == "shared-secret" {
+		if err := validateServiceAuthorizationBound(cfg.Service.Secret, header, now, binding, nonceGuard); err == nil {
+			role := strings.TrimSpace(cfg.Service.SharedSecretRole)
+			if role == "" {
+				role = approval.RoleServiceClient
+			}
+			return serviceAuthIdentity{Kind: "shared-secret", Actor: "service:shared-secret", Role: role}, nil
+		}
+		if requestedMethod == "shared-secret" {
+			return serviceAuthIdentity{}, fmt.Errorf("invalid shared-secret token")
+		}
 	}
 	scheme, token, ok := strings.Cut(strings.TrimSpace(header), " ")
 	if !ok || !strings.EqualFold(scheme, "Bearer") || strings.TrimSpace(token) == "" {
 		return serviceAuthIdentity{}, fmt.Errorf("missing bearer token")
 	}
-	if broker != nil {
+	if (requestedMethod == "" || requestedMethod == "paired-device") && broker != nil {
 		device, err := broker.AuthenticateDeviceToken(ctx, token)
 		if err == nil {
 			return serviceAuthIdentity{Kind: "paired-device", Actor: "device:" + device.DeviceID, Role: device.Role, Device: device.DeviceID}, nil
 		}
+		if requestedMethod == "paired-device" {
+			return serviceAuthIdentity{}, fmt.Errorf("invalid paired-device token")
+		}
 	}
-	if authSvc != nil && authSvc.Enabled() {
+	if requestedMethod == "paired-device" {
+		return serviceAuthIdentity{}, fmt.Errorf("paired-device auth is unavailable")
+	}
+	if (requestedMethod == "" || requestedMethod == "session" || requestedMethod == "auth-session") && authSvc != nil && authSvc.Enabled() {
 		claims, err := authSvc.ValidateSessionToken(ctx, token)
 		if err == nil {
-			actor := "user:" + claims.User.ID
-			if strings.TrimSpace(claims.Session.DeviceID) != "" {
-				actor = actor + ":device:" + claims.Session.DeviceID
-			}
-			return serviceAuthIdentity{
-				Kind:      "auth-session",
-				Actor:     actor,
-				Role:      claims.Role,
-				Device:    claims.Session.DeviceID,
-				User:      claims.User.ID,
-				Session:   claims.Session.ID,
-				StepUpAt:  claims.Session.LastStepUpAt,
-				StepUpOK:  authSvc.HasRecentStepUp(claims.Session),
-				Challenge: token,
-			}, nil
+			return serviceAuthIdentityFromValidatedSession(authSvc, token, claims), nil
 		}
 		return serviceAuthIdentity{}, err
+	}
+	if requestedMethod == "session" || requestedMethod == "auth-session" {
+		return serviceAuthIdentity{}, fmt.Errorf("session auth is unavailable")
 	}
 	return serviceAuthIdentity{}, fmt.Errorf("invalid bearer token")
 }
@@ -510,6 +569,39 @@ func serviceIsPairingRoute(r *http.Request) bool {
 	return path == "/internal/v1/pairing/requests" || path == "/internal/v1/pairing/exchange"
 }
 
+func serviceIsTerminalWebSocketRequest(r *http.Request) bool {
+	if r == nil || r.URL == nil || r.Method != http.MethodGet {
+		return false
+	}
+	if _, ok := serviceTerminalWebSocketSessionID(r.URL.Path); !ok {
+		return false
+	}
+	return headerHasToken(r.Header.Get("Connection"), "upgrade") && strings.EqualFold(strings.TrimSpace(r.Header.Get("Upgrade")), "websocket")
+}
+
+func serviceTerminalWebSocketSessionID(path string) (string, bool) {
+	path = strings.TrimSpace(path)
+	if !strings.HasPrefix(path, "/internal/v1/terminal/sessions/") {
+		return "", false
+	}
+	relative := strings.Trim(strings.TrimPrefix(path, "/internal/v1/terminal/sessions/"), "/")
+	parts := strings.Split(relative, "/")
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || parts[1] != "ws" {
+		return "", false
+	}
+	return strings.TrimSpace(parts[0]), true
+}
+
+func headerHasToken(headerValue string, token string) bool {
+	token = strings.ToLower(strings.TrimSpace(token))
+	for _, part := range strings.Split(headerValue, ",") {
+		if strings.EqualFold(strings.TrimSpace(part), token) {
+			return true
+		}
+	}
+	return false
+}
+
 func serviceRouteRequirementForRequest(cfg config.Config, r *http.Request) serviceRouteRequirement {
 	requirement := serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
 	if r == nil || r.URL == nil {
@@ -553,6 +645,11 @@ func serviceRouteRequirementForRequest(cfg config.Config, r *http.Request) servi
 			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
 		}
 		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "skill settings require recent passkey verification"}
+	case path == "/internal/v1/mcp/servers" || strings.HasPrefix(path, "/internal/v1/mcp/servers/"):
+		if method == http.MethodGet {
+			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, SessionOnly: true}
+		}
+		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "MCP server changes require recent passkey verification"}
 	case path == "/internal/v1/files" || strings.HasPrefix(path, "/internal/v1/files/"):
 		relative := strings.Trim(strings.TrimPrefix(path, "/internal/v1/files"), "/")
 		if method == http.MethodGet || relative == "roots" || relative == "list" || relative == "search" || relative == "stat" || relative == "read" || relative == "download" {
@@ -560,7 +657,16 @@ func serviceRouteRequirementForRequest(cfg config.Config, r *http.Request) servi
 		}
 		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "file changes require recent passkey verification"}
 	case path == "/internal/v1/terminal/sessions" || strings.HasPrefix(path, "/internal/v1/terminal/sessions/"):
-		if method == http.MethodGet && !strings.Contains(strings.TrimPrefix(path, "/internal/v1/terminal/sessions/"), "/input") {
+		relative := strings.Trim(strings.TrimPrefix(path, "/internal/v1/terminal/sessions"), "/")
+		parts := []string{}
+		if relative != "" {
+			parts = strings.Split(relative, "/")
+		}
+		action := ""
+		if len(parts) == 2 {
+			action = strings.TrimSpace(parts[1])
+		}
+		if method == http.MethodGet && (relative == "" || len(parts) == 1 || action == "stream") {
 			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, SessionOnly: true}
 		}
 		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "terminal access requires recent passkey verification"}
@@ -649,7 +755,7 @@ func requireServiceRole(w http.ResponseWriter, r *http.Request, roles ...string)
 			return true
 		}
 	}
-	writeServiceJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
+	writeServiceJSON(w, http.StatusForbidden, addServiceRequestID(map[string]any{"error": "forbidden", "code": serviceCodeForbidden}, r))
 	return false
 }
 
@@ -696,6 +802,10 @@ func requestRemoteIsLoopback(addr string) bool {
 }
 
 func validateServiceAuthorization(secret string, header string, now time.Time) error {
+	return validateServiceAuthorizationBound(secret, header, now, serviceTokenBinding{}, nil)
+}
+
+func validateServiceAuthorizationBound(secret string, header string, now time.Time, binding serviceTokenBinding, nonceGuard *serviceNonceReplayGuard) error {
 	secret = strings.TrimSpace(secret)
 	if secret == "" {
 		return fmt.Errorf("service secret is not configured")
@@ -704,10 +814,14 @@ func validateServiceAuthorization(secret string, header string, now time.Time) e
 	if !ok || !strings.EqualFold(scheme, "Bearer") || strings.TrimSpace(token) == "" {
 		return fmt.Errorf("missing bearer token")
 	}
-	return validateServiceBearerToken(secret, token, now)
+	return validateServiceBearerTokenBound(secret, token, now, binding, nonceGuard)
 }
 
 func validateServiceBearerToken(secret string, token string, now time.Time) error {
+	return validateServiceBearerTokenBound(secret, token, now, serviceTokenBinding{}, nil)
+}
+
+func validateServiceBearerTokenBound(secret string, token string, now time.Time, binding serviceTokenBinding, nonceGuard *serviceNonceReplayGuard) error {
 	payloadPart, signaturePart, ok := strings.Cut(strings.TrimSpace(token), ".")
 	if !ok || payloadPart == "" || signaturePart == "" {
 		return fmt.Errorf("invalid bearer token format")
@@ -741,15 +855,39 @@ func validateServiceBearerToken(secret string, token string, now time.Time) erro
 	if strings.TrimSpace(claims.Nonce) == "" {
 		return fmt.Errorf("invalid bearer token nonce")
 	}
+	if strings.TrimSpace(claims.Method) != "" && !strings.EqualFold(strings.TrimSpace(claims.Method), strings.TrimSpace(binding.Method)) {
+		return fmt.Errorf("bearer token method binding mismatch")
+	}
+	if strings.TrimSpace(claims.Path) != "" && strings.TrimSpace(claims.Path) != strings.TrimSpace(binding.Path) {
+		return fmt.Errorf("bearer token path binding mismatch")
+	}
+	if strings.TrimSpace(claims.BodySHA256) != "" && strings.TrimSpace(claims.BodySHA256) != strings.TrimSpace(binding.BodySHA256) {
+		return fmt.Errorf("bearer token body binding mismatch")
+	}
+	if nonceGuard != nil {
+		if !nonceGuard.Accept(claims.Nonce, issuedAt.Add(serviceTokenMaxAge), now) {
+			return fmt.Errorf("bearer token replay detected")
+		}
+	}
 	return nil
 }
 
 func issueServiceBearerToken(secret string, now time.Time) (string, error) {
+	return issueServiceBearerTokenBound(secret, now, serviceTokenBinding{})
+}
+
+func issueServiceBearerTokenBound(secret string, now time.Time, binding serviceTokenBinding) (string, error) {
 	nonce, err := randomHex(12)
 	if err != nil {
 		return "", err
 	}
-	claims := serviceTokenClaims{IssuedAt: now.Unix(), Nonce: nonce}
+	claims := serviceTokenClaims{
+		IssuedAt:   now.Unix(),
+		Nonce:      nonce,
+		Method:     strings.ToUpper(strings.TrimSpace(binding.Method)),
+		Path:       strings.TrimSpace(binding.Path),
+		BodySHA256: strings.TrimSpace(binding.BodySHA256),
+	}
 	payload, err := json.Marshal(claims)
 	if err != nil {
 		return "", err

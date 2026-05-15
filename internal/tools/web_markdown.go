@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -57,7 +56,7 @@ func (t *WebFetchMarkdown) Execute(ctx context.Context, params map[string]any) (
 		return "", fmt.Errorf("artifact store not set")
 	}
 	profile := ActiveProfileFromContext(ctx)
-	rawURL := strings.TrimSpace(fmt.Sprint(params["url"]))
+	rawURL := stringParam(params, "url")
 	if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") {
 		return "", fmt.Errorf("invalid url")
 	}
@@ -68,52 +67,14 @@ func (t *WebFetchMarkdown) Execute(ctx context.Context, params map[string]any) (
 	if err := validateFetchURL(parsed); err != nil {
 		return "", err
 	}
-	reqCtx, err := prepareWebFetchRequestContext(ctx, parsed, t.HostPolicy, profile)
-	if err != nil {
-		return "", err
-	}
-	client := t.httpClient()
-	originalCheckRedirect := client.CheckRedirect
-	client = security.WrapHTTPClient(client, t.HostPolicy)
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if len(via) >= defaultWebFetchMaxRedirects {
-			return fmt.Errorf("stopped after %d redirects", defaultWebFetchMaxRedirects)
-		}
-		if originalCheckRedirect != nil {
-			if err := originalCheckRedirect(req, via); err != nil {
-				return err
-			}
-		}
-		if err := validateFetchURL(req.URL); err != nil {
-			return err
-		}
-		redirectCtx, err := prepareWebFetchRequestContext(req.Context(), req.URL, t.HostPolicy, profile)
-		if err != nil {
-			return err
-		}
-		*req = *req.WithContext(redirectCtx)
-		return nil
-	}
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, parsed.String(), nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Accept", "text/html,application/xhtml+xml;q=0.9,*/*;q=0.1")
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
 	maxSourceBytes := t.sourceLimit(params)
-	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxSourceBytes)+1))
+	response, err := executeWebFetchRequest(ctx, t.HTTP, t.effectiveTimeout(), parsed, t.HostPolicy, profile, "text/html,application/xhtml+xml;q=0.9,*/*;q=0.1", int64(maxSourceBytes)+1)
 	if err != nil {
 		return "", err
 	}
-	sourceTruncated := len(body) > maxSourceBytes
-	if sourceTruncated {
-		body = body[:maxSourceBytes]
-	}
-	contentType := resp.Header.Get("Content-Type")
+	body := response.Body
+	sourceTruncated := response.SourceTruncated
+	contentType := response.ContentType
 	info := StreamInfo{MIMEType: contentType, Extension: strings.ToLower(filepath.Ext(parsed.Path)), Filename: filepath.Base(parsed.Path), Charset: htmlCharsetFromContentType(contentType), URL: parsed.String()}
 	converter := t.Converter
 	if converter == nil {
@@ -123,7 +84,7 @@ func (t *WebFetchMarkdown) Execute(ctx context.Context, params map[string]any) (
 		return "", fmt.Errorf("web_fetch_markdown: unsupported content type %q for %s", contentType, parsed.String())
 	}
 	previewBytes := t.previewLimit(params)
-	result, err := buildMarkdownFetchResult(ctx, t.Store, converter, parsed, resp.Status, resp.StatusCode, contentType, body, sourceTruncated, previewBytes, "web_fetch_markdown")
+	result, err := buildMarkdownFetchResult(ctx, t.Store, converter, parsed, response.Status, response.StatusCode, contentType, body, sourceTruncated, previewBytes, "web_fetch_markdown")
 	if err != nil {
 		return "", err
 	}

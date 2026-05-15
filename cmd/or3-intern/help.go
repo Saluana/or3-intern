@@ -33,15 +33,15 @@ var rootHelpSections = []struct {
 			{Name: "chat", Description: "Start chatting with OR3"},
 			{Name: "status", Description: "Check what OR3 can access and what needs attention"},
 			{Name: "settings", Description: "Review and update your settings"},
-			{Name: "connect-device", Description: "Pair a phone or other device"},
+			{Name: "connect-device", Description: "Start the device pairing flow"},
 			{Name: "help", Description: "Show help for simple or advanced commands"},
 		},
 	},
 	{
 		Title: "Advanced commands",
 		Items: []helpItem{
-			{Name: "configure", Description: "Interactive configuration wizard for setup and later edits"},
-			{Name: "init", Description: "Guided first-run setup for config and provider settings"},
+			{Name: "configure", Description: "Advanced settings wizard used by setup/settings"},
+			{Name: "init", Description: "First-run setup alias kept for scripts and old docs"},
 			{Name: "config-path", Description: "Print the resolved config.json path"},
 			{Name: "chat", Description: "Interactive CLI session"},
 			{Name: "serve", Description: "Run enabled channels, triggers, heartbeat, cron, and workers"},
@@ -60,7 +60,7 @@ var rootHelpSections = []struct {
 			{Name: "audit", Description: "Inspect or verify the append-only audit chain"},
 			{Name: "skills", Description: "List, inspect, search, install, update, check, and remove skills"},
 			{Name: "approvals", Description: "Inspect and resolve approval requests and allowlists"},
-			{Name: "devices", Description: "Inspect paired devices and legacy pairing request helpers"},
+			{Name: "devices", Description: "List and manage already paired devices"},
 			{Name: "pairing", Description: "Manage first-class pairing workflows"},
 			{Name: "scope", Description: "Link session keys to a shared history scope"},
 			{Name: "migrate-jsonl", Description: "Import legacy session history from JSONL"},
@@ -72,8 +72,9 @@ var rootHelpSections = []struct {
 var helpTopics = map[string]helpCommand{
 	"configure": {
 		Usage:   "or3-intern configure [--section provider|storage|workspace|web|channels|service] ...",
-		Summary: "Interactive configuration wizard for first-run setup and later edits.",
+		Summary: "Advanced configuration wizard behind the friendlier settings flow.",
 		Description: []string{
+			"Use `or3-intern settings` for day-to-day configuration. Configure remains available for targeted scripted or advanced edits.",
 			"Loads the active config when present, shows a short summary, and prompts only for the sections you want to change.",
 			"When stdin and stdout are terminals, configure opens the Bubble Tea setup UI with arrow-key navigation, enter to select, space to toggle, s to save, and q to quit.",
 			"When either side is non-interactive, configure stays in the plain text prompt flow so pipes, redirected input, and scripts keep working.",
@@ -96,8 +97,9 @@ var helpTopics = map[string]helpCommand{
 	},
 	"settings": {
 		Usage:   "or3-intern settings [--section provider|workspace|devices|safety|channels|tools|memory|advanced] [--export path|-] [--advanced]",
-		Summary: "Open the settings flow for reviewing and updating your setup.",
+		Summary: "Open the canonical settings flow for reviewing and updating your setup.",
 		Description: []string{
+			"Settings is the recommended entrypoint for configuration. Setup, init, configure, and doctor --fix stay available for first-run, compatibility, and repair workflows.",
 			"Shows a task-based settings home for AI Provider, Workspace Folder, Connected Devices, Safety Level, Channels, Tools, Memory, and Advanced.",
 			"Use --section to jump to a task, or --export to write the current advanced JSON config without making JSON editing the default path.",
 		},
@@ -118,14 +120,19 @@ var helpTopics = map[string]helpCommand{
 		Examples: []string{"or3-intern status", "or3-intern status --fix 1", "or3-intern status --fix all"},
 	},
 	"connect-device": {
-		Usage:    "or3-intern connect-device [list|disconnect <device-id>|role <device-id>]",
-		Summary:  "Pair a phone or other device using a short code and simple access levels.",
+		Usage:   "or3-intern connect-device [list|disconnect <device-id>|role <device-id>]",
+		Summary: "Start the device pairing flow with a short code and simple access levels.",
+		Description: []string{
+			"Use connect-device when you are sitting at this computer and want to add a phone, browser, or app.",
+			"For app-generated codes, use `or3-intern pairing approve-code <code>`. For already connected devices, use `or3-intern devices list`.",
+		},
 		Examples: []string{"or3-intern connect-device", "or3-intern connect-device list"},
 	},
 	"init": {
 		Usage:   "or3-intern init",
 		Summary: "Guided first-run setup alias.",
 		Description: []string{
+			"Compatibility alias for first-run setup. Use `or3-intern settings` for everyday configuration changes.",
 			"Runs the same configure wizard with the original first-run sections: provider, storage, workspace, and web.",
 			"Like configure, it opens the Bubble Tea UI only on an interactive terminal and falls back to plain text prompts when used non-interactively.",
 			"Use `or3-intern configure` directly when you want channels, service, or custom section selection.",
@@ -292,10 +299,10 @@ var helpTopics = map[string]helpCommand{
 	},
 	"devices": {
 		Usage:   "or3-intern devices <list|requests|approve|deny|rotate|revoke> ...",
-		Summary: "Inspect paired devices and legacy pairing request helpers.",
+		Summary: "List and manage already paired devices.",
 		Description: []string{
-			"Use `devices list` after pairing is complete to review or manage connected phones, tablets, or apps.",
-			"For the actual pairing approval step, `or3-intern pairing` is the clearest command group.",
+			"Use `devices list` after pairing is complete to review, rotate, or revoke connected phones, tablets, browsers, or apps.",
+			"Use `or3-intern connect-device` to start a pairing flow from this computer, or `or3-intern pairing approve-code <code>` when the app already shows a code.",
 		},
 		Subcommands: []helpItem{
 			{Name: "list", Description: "List paired devices"},

@@ -43,6 +43,20 @@ func TestClient_SupportsExplicitPromptCache(t *testing.T) {
 	}
 }
 
+func TestClientProviderProfile_UsesProviderName(t *testing.T) {
+	c := &Client{ProviderName: "openrouter", APIBase: "https://api.openai.com/v1"}
+	if got := c.ProviderProfile("gpt-4").Name; got != "openrouter_compatible" {
+		t.Fatalf("expected provider name to select openrouter profile, got %q", got)
+	}
+}
+
+func TestClientProviderProfile_UsesAPIBaseFallback(t *testing.T) {
+	c := &Client{APIBase: "https://openrouter.ai/api/v1"}
+	if got := c.ProviderProfile("gpt-4").Name; got != "openrouter_compatible" {
+		t.Fatalf("expected api base to select openrouter profile, got %q", got)
+	}
+}
+
 func TestBuildCacheAwareSystemContent(t *testing.T) {
 	content := BuildCacheAwareSystemContent("stable", "volatile")
 	parts, ok := content.([]map[string]any)

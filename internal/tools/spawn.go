@@ -58,12 +58,12 @@ func (t *SpawnSubagent) Execute(ctx context.Context, params map[string]any) (str
 	if t.Manager == nil {
 		return "", fmt.Errorf("background subagents disabled")
 	}
-	task := readOptionalString(params, "task")
+	task := stringParam(params, "task")
 	if task == "" {
 		return "", fmt.Errorf("empty task")
 	}
-	channel := readOptionalString(params, "channel")
-	to := readOptionalString(params, "to")
+	channel := stringParam(params, "channel")
+	to := stringParam(params, "to")
 	ctxChannel, ctxTo := DeliveryFromContext(ctx)
 	if channel == "" {
 		channel = firstNonEmpty(ctxChannel, t.DefaultChannel)
@@ -91,15 +91,4 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
-}
-
-func readOptionalString(params map[string]any, key string) string {
-	if params == nil {
-		return ""
-	}
-	v, ok := params[key]
-	if !ok || v == nil {
-		return ""
-	}
-	return strings.TrimSpace(fmt.Sprint(v))
 }

@@ -2,15 +2,18 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"or3-intern/internal/approval"
 	"or3-intern/internal/auth"
 	"or3-intern/internal/config"
+	"or3-intern/internal/db"
 )
 
 func TestServiceAuthMiddleware_PublicAuthCapabilitiesDoesNotRequireBearer(t *testing.T) {
@@ -132,6 +135,97 @@ func TestServiceAuthMiddleware_RolloutModesForLegacyPairedTokens(t *testing.T) {
 	}
 }
 
+func TestServiceAuthMiddleware_AuthMethodSelection(t *testing.T) {
+	ctx := context.Background()
+	database, cleanup := openServiceTestDB(t)
+	defer cleanup()
+	cfg := rolloutAuthTestConfig(config.AuthEnforcementOff)
+	cfg.Service.Secret = strings.Repeat("m", 32)
+	cfg.Service.SharedSecretRole = approval.RoleAdmin
+	broker := &approval.Broker{DB: database, Config: cfg.Security.Approvals}
+	_, pairedToken, err := broker.RotateDeviceToken(ctx, "device-method", approval.RoleOperator, "Method Device", nil)
+	if err != nil {
+		t.Fatalf("RotateDeviceToken: %v", err)
+	}
+	authSvc, sessionToken := seedServiceAuthSession(t, ctx, cfg, database)
+	sharedToken := mustIssueServiceTokenAt(t, cfg.Service.Secret, time.Now())
+
+	tests := []struct {
+		name       string
+		token      string
+		method     string
+		wantStatus int
+		wantKind   string
+		wantCode   string
+	}{
+		{name: "default prefers shared secret", token: sharedToken, wantStatus: http.StatusOK, wantKind: "shared-secret"},
+		{name: "default accepts paired device", token: pairedToken, wantStatus: http.StatusOK, wantKind: "paired-device"},
+		{name: "explicit shared secret", token: sharedToken, method: "shared-secret", wantStatus: http.StatusOK, wantKind: "shared-secret"},
+		{name: "explicit paired device", token: pairedToken, method: "paired-device", wantStatus: http.StatusOK, wantKind: "paired-device"},
+		{name: "explicit session", token: sessionToken, method: "session", wantStatus: http.StatusOK, wantKind: "auth-session"},
+		{name: "paired token rejected as shared secret", token: pairedToken, method: "shared-secret", wantStatus: http.StatusUnauthorized, wantCode: serviceCodeInvalidToken},
+		{name: "unsupported method", token: sharedToken, method: "bogus", wantStatus: http.StatusUnauthorized, wantCode: serviceCodeValidationFailed},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := serviceAuthMiddlewareWithBroker(cfg, broker, authSvc, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				identity := serviceAuthIdentityFromContext(r.Context())
+				writeServiceJSON(w, http.StatusOK, map[string]any{"kind": identity.Kind})
+			}))
+			req := httptest.NewRequest(http.MethodGet, "/internal/v1/turns", nil)
+			req.Header.Set("Authorization", "Bearer "+tc.token)
+			if tc.method != "" {
+				req.Header.Set("X-Or3-Auth-Method", tc.method)
+			}
+			rec := httptest.NewRecorder()
+
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("expected status %d, got %d (%s)", tc.wantStatus, rec.Code, rec.Body.String())
+			}
+			payload := mustDecodeJSONBody(t, rec.Body)
+			if tc.wantKind != "" && payload["kind"] != tc.wantKind {
+				t.Fatalf("expected kind %q, got %#v", tc.wantKind, payload)
+			}
+			if tc.wantCode != "" && payload["code"] != tc.wantCode {
+				t.Fatalf("expected code %q, got %#v", tc.wantCode, payload)
+			}
+		})
+	}
+}
+
+func seedServiceAuthSession(t *testing.T, ctx context.Context, cfg config.Config, database *db.DB) (*auth.Service, string) {
+	t.Helper()
+	authSvc, err := auth.NewService(cfg, database, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	user, err := database.UpsertAuthUser(ctx, db.AuthUserRecord{ID: auth.DefaultUserID, DisplayName: auth.DefaultUserDisplayName})
+	if err != nil {
+		t.Fatalf("UpsertAuthUser: %v", err)
+	}
+	rawToken := "session-token-method-selection"
+	hash := sha256.Sum256([]byte(rawToken))
+	now := time.Now().UTC()
+	if _, err := database.CreateAuthSession(ctx, db.AuthSessionRecord{
+		ID:                "session-method-selection",
+		UserID:            user.ID,
+		DeviceID:          "device-method",
+		CredentialID:      "credential-method",
+		TokenHash:         hash[:],
+		Role:              approval.RoleAdmin,
+		CreatedAt:         now.UnixMilli(),
+		LastSeenAt:        now.UnixMilli(),
+		IdleExpiresAt:     now.Add(time.Hour).UnixMilli(),
+		AbsoluteExpiresAt: now.Add(2 * time.Hour).UnixMilli(),
+	}); err != nil {
+		t.Fatalf("CreateAuthSession: %v", err)
+	}
+	return authSvc, rawToken
+}
+
 func TestServiceAuthMiddleware_EnforcementReturnsUpgradeGuidanceErrors(t *testing.T) {
 	cfg := rolloutAuthTestConfig(config.AuthEnforcementSession)
 	database, cleanup := openServiceTestDB(t)
@@ -182,12 +276,18 @@ func TestServiceRouteRequirementForRequest_SensitivityMatrix(t *testing.T) {
 		{method: http.MethodPost, path: "/internal/v1/files/upload", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
 		{method: http.MethodPut, path: "/internal/v1/files/write", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
 		{method: http.MethodGet, path: "/internal/v1/terminal/sessions/term-1/stream", want: serviceRouteLowRisk, sessionOnly: true},
+		{method: http.MethodGet, path: "/internal/v1/terminal/sessions/term-1/ws", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
 		{method: http.MethodPost, path: "/internal/v1/terminal/sessions", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
+		{method: http.MethodPost, path: "/internal/v1/terminal/sessions/term-1/ws-ticket", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
 		{method: http.MethodPost, path: "/internal/v1/terminal/sessions/term-1/input", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
 		{method: http.MethodPost, path: "/internal/v1/approvals/12/approve", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
 		{method: http.MethodPost, path: "/internal/v1/devices/device-1/revoke", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
 		{method: http.MethodPost, path: "/internal/v1/configure/security", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
 		{method: http.MethodPost, path: "/internal/v1/actions/restart-service", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
+		{method: http.MethodGet, path: "/internal/v1/mcp/servers", want: serviceRouteLowRisk, sessionOnly: true},
+		{method: http.MethodPost, path: "/internal/v1/mcp/servers", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
+		{method: http.MethodPost, path: "/internal/v1/mcp/servers/local/test", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
+		{method: http.MethodDelete, path: "/internal/v1/mcp/servers/local", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {

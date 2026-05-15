@@ -1,6 +1,9 @@
 package agent
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestContextEvaluationFixturesCoverRequiredScenarios(t *testing.T) {
 	fixtures := ContextEvaluationFixtures()
@@ -40,7 +43,7 @@ func TestContextModesReducePacketSizeAndPreserveProtectedSections(t *testing.T) 
 	for _, packet := range []ContextPacket{poor, balanced, quality} {
 		stable := renderStablePrefix(packet)
 		for _, want := range []string{"Soul protected", "Agent protected", "Tools protected", "Pinned protected"} {
-			if !containsEval(stable, want) {
+			if !strings.Contains(stable, want) {
 				t.Fatalf("expected protected section %q in stable prefix", want)
 			}
 		}
@@ -73,22 +76,27 @@ func BenchmarkContextPacketConstructionLargeFixture(b *testing.B) {
 }
 
 func repeatedEvalText(word string, count int) string {
-	out := ""
-	for i := 0; i < count; i++ {
-		out += word + " "
+	if count <= 0 {
+		return ""
 	}
-	return out
+	return strings.TrimSpace(strings.Repeat(word+" ", count))
 }
 
-func containsEval(text, want string) bool {
-	return len(text) >= len(want) && (text == want || len(want) == 0 || indexEval(text, want) >= 0)
-}
-
-func indexEval(text, want string) int {
-	for i := 0; i+len(want) <= len(text); i++ {
-		if text[i:i+len(want)] == want {
-			return i
-		}
+func TestFirstNonEmptyEval(t *testing.T) {
+	tests := []struct {
+		name   string
+		values []string
+		want   string
+	}{
+		{name: "all empty", values: []string{"", "   "}, want: ""},
+		{name: "first non empty", values: []string{"value", "later"}, want: "value"},
+		{name: "skips leading empty", values: []string{"", "  ", "picked", "later"}, want: "picked"},
 	}
-	return -1
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := firstNonEmptyEval(tc.values...); got != tc.want {
+				t.Fatalf("firstNonEmptyEval(%q)=%q, want %q", tc.values, got, tc.want)
+			}
+		})
+	}
 }

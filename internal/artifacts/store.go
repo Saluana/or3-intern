@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -14,6 +15,11 @@ import (
 	"time"
 
 	"or3-intern/internal/db"
+)
+
+var (
+	ErrNotFound     = errors.New("artifact not found")
+	ErrNotAvailable = errors.New("artifact not available for session")
 )
 
 // Store saves artifact bytes on disk and tracks them in the database.
@@ -85,7 +91,7 @@ func (s *Store) Lookup(ctx context.Context, artifactID string) (StoredArtifact, 
 	var stored StoredArtifact
 	if err := row.Scan(&stored.ID, &stored.SessionKey, &stored.Mime, &stored.Path, &stored.SizeBytes); err != nil {
 		if err == sql.ErrNoRows {
-			return StoredArtifact{}, fmt.Errorf("artifact not found: %s", artifactID)
+			return StoredArtifact{}, fmt.Errorf("%w: %s", ErrNotFound, artifactID)
 		}
 		return StoredArtifact{}, err
 	}
@@ -112,7 +118,7 @@ func (s *Store) ReadCappedFrom(ctx context.Context, sessionKey, artifactID strin
 		return ReadResult{}, err
 	}
 	if !s.sessionCanRead(ctx, sessionKey, stored.SessionKey) {
-		return ReadResult{}, fmt.Errorf("artifact not available for session")
+		return ReadResult{}, fmt.Errorf("%w", ErrNotAvailable)
 	}
 	path, err := s.safeStoredPath(stored.Path)
 	if err != nil {

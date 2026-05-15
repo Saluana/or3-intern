@@ -16,9 +16,11 @@ type BubblewrapConfig struct {
 	WritablePaths  []string
 }
 
+var errSandboxNotEnabled = fmt.Errorf("sandbox not enabled")
+
 func commandWithSandbox(ctx context.Context, cfg BubblewrapConfig, cwd string, command []string) (*exec.Cmd, error) {
 	if !cfg.Enabled {
-		return nil, nil
+		return nil, errSandboxNotEnabled
 	}
 	if len(command) == 0 || strings.TrimSpace(command[0]) == "" {
 		return nil, fmt.Errorf("sandbox command missing executable")

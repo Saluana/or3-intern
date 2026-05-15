@@ -1,0 +1,21 @@
+services:
+  or3-intern:
+    build: .
+    command: ["or3-intern", "--config", "/config/config.json", "service"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      OR3_ARTIFACTS_DIR: /data/artifacts
+      OR3_DB_PATH: /data/or3-intern.sqlite
+      OR3_SERVICE_ENABLED: "true"
+      OR3_SERVICE_LISTEN: 0.0.0.0:9100
+      # Override in .env before exposing this beyond the local host.
+      OR3_SERVICE_SECRET: ${OR3_SERVICE_SECRET:-change-me-local-compose-secret}
+    ports:
+      - "127.0.0.1:9100:9100"
+    volumes:
+      - ./config:/config
+      - ./data:/data
+      - .:/workspace
+    restart: unless-stopped

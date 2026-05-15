@@ -15,11 +15,11 @@
 		{
 			"label": "Replace broker test file",
 			"type": "shell",
-			"command": "mv",
-			"args": [
-				"/Users/brendon/Documents/or3-intern/internal/approval/broker_test_clean.tmp",
-				"/Users/brendon/Documents/or3-intern/internal/approval/broker_test.go"
-			],
+				"command": "mv",
+				"args": [
+					"${workspaceFolder}/internal/approval/broker_test_clean.tmp",
+					"${workspaceFolder}/internal/approval/broker_test.go"
+				],
 			"isBackground": false
 		},
 		{

@@ -24,6 +24,23 @@ type ConversationObserver interface {
 	OnError(ctx context.Context, err error)
 }
 
+type ToolLifecycleEvent struct {
+	ToolCallID       string
+	Name             string
+	Status           string
+	Arguments        string
+	ArgumentsPreview string
+	Result           string
+	ResultPreview    string
+	ArtifactID       string
+	ApprovalID       int64
+	PublicCode       string
+}
+
+type ToolLifecycleObserver interface {
+	OnToolLifecycle(ctx context.Context, event ToolLifecycleEvent)
+}
+
 func ContextWithConversationObserver(ctx context.Context, observer ConversationObserver) context.Context {
 	if observer == nil {
 		return ctx

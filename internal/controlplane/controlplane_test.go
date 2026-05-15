@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -15,9 +16,18 @@ import (
 	"or3-intern/internal/approval"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
+	"or3-intern/internal/mcp"
 	"or3-intern/internal/providers"
 	"or3-intern/internal/security"
 )
+
+type fakeMCPStatusProvider struct {
+	status map[string]mcp.ServerStatus
+}
+
+func (p fakeMCPStatusProvider) ServerStatus() map[string]mcp.ServerStatus {
+	return p.status
+}
 
 func testBroker(t *testing.T, mutate func(*config.ApprovalConfig), now time.Time) *approval.Broker {
 	t.Helper()
@@ -38,6 +48,31 @@ func testBroker(t *testing.T, mutate func(*config.ApprovalConfig), now time.Time
 		HostID:  approvalCfg.HostID,
 		SignKey: []byte("0123456789abcdef0123456789abcdef"),
 		Now:     func() time.Time { return now.UTC() },
+	}
+}
+
+func TestCollectCapabilitiesReportWithMCPDetails(t *testing.T) {
+	cfg := config.Default()
+	cfg.Tools.MCPServers = map[string]config.MCPServerConfig{
+		"files": {Enabled: true, Transport: "stdio"},
+		"docs":  {Enabled: false, Transport: "streamablehttp"},
+	}
+
+	report := CollectCapabilitiesReportWithMCPStatus(cfg, nil, fakeMCPStatusProvider{status: map[string]mcp.ServerStatus{
+		"files": {Connected: true, ToolCount: 2},
+	}}, "", "")
+
+	if len(report.MCPServers) != 2 {
+		t.Fatalf("expected all configured MCP servers, got %#v", report.MCPServers)
+	}
+	if report.MCPServers[0].Name != "docs" || report.MCPServers[0].Transport != "streamablehttp" || report.MCPServers[0].Connected {
+		t.Fatalf("unexpected first MCP server info: %#v", report.MCPServers[0])
+	}
+	if report.MCPServers[1].Name != "files" || report.MCPServers[1].ToolCount != 2 || !report.MCPServers[1].Connected {
+		t.Fatalf("unexpected files MCP server info: %#v", report.MCPServers[1])
+	}
+	if len(report.EnabledMCPServers) != 1 || report.EnabledMCPServers[0].Name != "files" {
+		t.Fatalf("expected only enabled MCP server in enabledMcpServers, got %#v", report.EnabledMCPServers)
 	}
 }
 
@@ -129,9 +164,35 @@ func TestServiceHealthAndReadiness(t *testing.T) {
 	if report.Status != "degraded" || report.RuntimeAvailable {
 		t.Fatalf("unexpected health report: %#v", report)
 	}
+	if report.ProcessID != os.Getpid() || strings.TrimSpace(report.StartedAt) == "" {
+		t.Fatalf("expected process identity in health report, got %#v", report)
+	}
 	readiness := New(cfg, nil, nil, nil, nil).GetReadiness()
 	if readiness.Status == "" || len(readiness.Findings) == 0 {
 		t.Fatalf("expected readiness findings, got %#v", readiness)
+	}
+}
+
+func TestBuildRunnerChatEventResponsePassesCanonicalPayload(t *testing.T) {
+	payload := `{"type":"item.started","item_type":"command_execution","status":"inProgress","title":"Command run"}`
+	response := BuildRunnerChatEventResponse(db.RunnerChatEvent{
+		ID:          7,
+		TurnID:      "turn-1",
+		Seq:         4,
+		Type:        "item.started",
+		Text:        "go test ./...",
+		JobID:       "job-1",
+		PayloadJSON: payload,
+	})
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		t.Fatalf("Marshal response: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"payload":{"type":"item.started","item_type":"command_execution","status":"inProgress","title":"Command run"}`) {
+		t.Fatalf("expected canonical payload passthrough, got %s", string(encoded))
+	}
+	if response["type"] != "item.started" || response["text"] != "go test ./..." || response["job_id"] != "job-1" {
+		t.Fatalf("expected legacy fields preserved, got %#v", response)
 	}
 }
 

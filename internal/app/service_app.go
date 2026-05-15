@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"or3-intern/internal/agent"
+	"or3-intern/internal/agentcli"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/auth"
 	"or3-intern/internal/bus"
@@ -22,21 +23,39 @@ import (
 )
 
 type ServiceApp struct {
+	cfg             config.Config
 	runtime         *agent.Runtime
 	jobs            *agent.JobRegistry
 	subagentManager *agent.SubagentManager
+	agentCLIManager *agentcli.Manager
 	control         *controlplane.Service
 	auth            *auth.Service
 }
 
 func NewServiceApp(cfg config.Config, runtime *agent.Runtime, jobs *agent.JobRegistry, subagentManager *agent.SubagentManager, control *controlplane.Service) *ServiceApp {
-	app := &ServiceApp{runtime: runtime, jobs: jobs, subagentManager: subagentManager, control: control}
+	return NewServiceAppWithAgentCLI(cfg, runtime, jobs, subagentManager, nil, control)
+}
+
+func NewServiceAppWithAgentCLI(cfg config.Config, runtime *agent.Runtime, jobs *agent.JobRegistry, subagentManager *agent.SubagentManager, agentCLIManager *agentcli.Manager, control *controlplane.Service) *ServiceApp {
+	app := &ServiceApp{cfg: cfg, runtime: runtime, jobs: jobs, subagentManager: subagentManager, agentCLIManager: agentCLIManager, control: control}
 	if control != nil {
 		if authSvc, err := auth.NewService(cfg, control.DB, control.Audit); err == nil {
 			app.auth = authSvc
 		}
 	}
 	return app
+}
+
+func (a *ServiceApp) SetConfig(cfg config.Config) {
+	if a == nil {
+		return
+	}
+	a.cfg = cfg
+	if a.control != nil {
+		if authSvc, err := auth.NewService(cfg, a.control.DB, a.control.Audit); err == nil {
+			a.auth = authSvc
+		}
+	}
 }
 
 type TurnRequest struct {
@@ -111,17 +130,41 @@ func (a *ServiceApp) RunTurn(ctx context.Context, req TurnRequest) error {
 }
 
 type ReplayToolCallRequest struct {
-	SessionKey    string
-	ToolName      string
-	ArgumentsJSON string
-	AllowedTools  []string
-	RestrictTools bool
-	ProfileName   string
-	Capability    tools.CapabilityLevel
-	ApprovalToken string
-	Actor         string
-	Role          string
-	Observer      agent.ConversationObserver
+	SessionKey        string
+	ToolName          string
+	ArgumentsJSON     string
+	ApprovalRequestID int64
+	AllowedTools      []string
+	RestrictTools     bool
+	ProfileName       string
+	Capability        tools.CapabilityLevel
+	ApprovalToken     string
+	Actor             string
+	Role              string
+	Observer          agent.ConversationObserver
+}
+
+type ResumeApprovedRequest struct {
+	IssuedApproval approval.IssuedApproval
+	ProfileName    string
+	Capability     tools.CapabilityLevel
+	Actor          string
+	Role           string
+	Observer       agent.ConversationObserver
+}
+
+type replayToolCallTarget struct {
+	ToolName       string
+	ArgumentsJSON  string
+	ToolCallID     string
+	AlreadyResumed bool
+}
+
+type replayHistoryMessage struct {
+	Role       string
+	Content    string
+	ToolCallID string
+	ToolCalls  []providers.ToolCall
 }
 
 func (a *ServiceApp) ReplayToolCall(ctx context.Context, req ReplayToolCallRequest) (string, error) {
@@ -147,27 +190,43 @@ func (a *ServiceApp) ReplayToolCall(ctx context.Context, req ReplayToolCallReque
 	toolCallID := ""
 	fullReplayHistory := a.runtime.DB != nil && a.runtime.Builder != nil && a.runtime.Provider != nil
 	if fullReplayHistory {
-		var findErr error
-		toolCallID, findErr = a.findReplayToolCallID(runCtx, req.SessionKey, toolName, argsJSON)
-		if findErr != nil {
-			return "", findErr
-		}
-		if strings.TrimSpace(toolCallID) == "" {
-			return "", fmt.Errorf("approved replay rejected: no matching prior assistant tool call")
+		if req.ApprovalRequestID > 0 {
+			target, findErr := a.findApprovalReplayTarget(runCtx, req.SessionKey, req.ApprovalRequestID)
+			if findErr != nil {
+				return "", findErr
+			}
+			if target.AlreadyResumed {
+				finalText := "Approval was already applied. The latest tool result is already in the conversation."
+				if req.Observer != nil {
+					req.Observer.OnCompletion(runCtx, finalText, false)
+				}
+				return finalText, nil
+			}
+			toolName = strings.TrimSpace(target.ToolName)
+			argsJSON = strings.TrimSpace(target.ArgumentsJSON)
+			toolCallID = strings.TrimSpace(target.ToolCallID)
+			if toolName == "" || toolCallID == "" {
+				return "", fmt.Errorf("approved replay rejected: no matching blocked tool call for request %d", req.ApprovalRequestID)
+			}
+		} else {
+			var findErr error
+			toolCallID, findErr = a.findReplayToolCallID(runCtx, req.SessionKey, toolName, argsJSON)
+			if findErr != nil {
+				return "", findErr
+			}
+			if strings.TrimSpace(toolCallID) == "" {
+				return "", fmt.Errorf("approved replay rejected: no matching prior assistant tool call")
+			}
 		}
 	}
-	if req.Observer != nil {
-		req.Observer.OnToolCall(runCtx, toolName, argsJSON)
-	}
+	emitReplayToolCallStarted(runCtx, req.Observer, toolName, argsJSON, toolCallID)
 	out, err := registry.Execute(runCtx, toolName, argsJSON)
 	if err != nil {
 		var params map[string]any
 		_ = json.Unmarshal([]byte(argsJSON), &params)
 		out = tools.EncodeToolFailure(toolName, params, out, err)
 	}
-	if req.Observer != nil {
-		req.Observer.OnToolResult(runCtx, toolName, out, err)
-	}
+	emitReplayToolCallFinished(runCtx, req.Observer, toolName, argsJSON, toolCallID, out, err)
 	if err != nil {
 		var approvalErr *tools.ApprovalRequiredError
 		if errors.As(err, &approvalErr) {
@@ -213,6 +272,94 @@ func (a *ServiceApp) ReplayToolCall(ctx context.Context, req ReplayToolCallReque
 	return "", nil
 }
 
+func (a *ServiceApp) ResumeApprovedRequest(ctx context.Context, req ResumeApprovedRequest) (string, error) {
+	if a == nil || a.runtime == nil {
+		return "", errors.New("runtime unavailable")
+	}
+	issued := req.IssuedApproval
+	sessionKey := strings.TrimSpace(issued.Request.RequesterSessionID)
+	if sessionKey == "" {
+		return "", nil
+	}
+	profileName, actor := approvedReplayContext(issued, req.ProfileName, req.Actor)
+	switch strings.TrimSpace(issued.Request.Type) {
+	case string(approval.SubjectExec), string(approval.SubjectSkillExec):
+		target, err := a.findApprovalReplayTarget(ctx, sessionKey, issued.Request.ID)
+		if err != nil {
+			return "", err
+		}
+		if target.AlreadyResumed {
+			finalText := "Approval was already applied. The latest tool result is already in the conversation."
+			if req.Observer != nil {
+				req.Observer.OnCompletion(ctx, finalText, false)
+			}
+			return finalText, nil
+		}
+		if strings.TrimSpace(target.ToolCallID) == "" {
+			finalText := "Approval was granted, but the original blocked tool call could not be found to resume. Please retry the request if it is still needed."
+			if req.Observer != nil {
+				req.Observer.OnCompletion(ctx, finalText, false)
+			}
+			return finalText, nil
+		}
+		return a.ReplayToolCall(ctx, ReplayToolCallRequest{
+			SessionKey:        sessionKey,
+			ToolName:          target.ToolName,
+			ArgumentsJSON:     target.ArgumentsJSON,
+			ApprovalRequestID: issued.Request.ID,
+			ProfileName:       profileName,
+			Capability:        req.Capability,
+			ApprovalToken:     issued.Token,
+			Actor:             actor,
+			Role:              req.Role,
+			Observer:          req.Observer,
+		})
+	case string(approval.SubjectToolQuota):
+		runCtx := a.serviceRunContext(ctx, sessionKey, profileName, issued.Token, actor, req.Role, req.Capability, req.Observer, nil)
+		return "", a.runtime.Handle(runCtx, bus.Event{
+			Type:       bus.EventSystem,
+			SessionKey: sessionKey,
+			Channel:    "service",
+			From:       "or3-net",
+			Message:    toolQuotaApprovalContinuationPrompt(),
+			Meta: map[string]any{
+				"approved_tool_quota": true,
+				"approval_request_id": issued.Request.ID,
+			},
+		})
+	default:
+		return "", nil
+	}
+}
+
+func approvedReplayContext(issued approval.IssuedApproval, fallbackProfile string, fallbackActor string) (string, string) {
+	profileName := strings.TrimSpace(fallbackProfile)
+	actor := strings.TrimSpace(fallbackActor)
+	switch strings.TrimSpace(issued.Request.Type) {
+	case string(approval.SubjectExec):
+		var subject approval.ExecSubject
+		if err := json.Unmarshal([]byte(issued.Request.SubjectJSON), &subject); err == nil {
+			if profileName == "" {
+				profileName = strings.TrimSpace(subject.AccessProfile)
+			}
+			if strings.TrimSpace(subject.RequestingAgent) != "" {
+				actor = strings.TrimSpace(subject.RequestingAgent)
+			}
+		}
+	case string(approval.SubjectSkillExec):
+		var subject approval.SkillExecutionSubject
+		if err := json.Unmarshal([]byte(issued.Request.SubjectJSON), &subject); err == nil && strings.TrimSpace(subject.RequestingAgent) != "" {
+			actor = strings.TrimSpace(subject.RequestingAgent)
+		}
+	case string(approval.SubjectToolQuota):
+		var subject approval.ToolQuotaSubject
+		if err := json.Unmarshal([]byte(issued.Request.SubjectJSON), &subject); err == nil && strings.TrimSpace(subject.RequestingAgent) != "" {
+			actor = strings.TrimSpace(subject.RequestingAgent)
+		}
+	}
+	return profileName, actor
+}
+
 func summarizeReplayToolResult(toolName string, out string) string {
 	out = strings.TrimSpace(out)
 	if out == "" {
@@ -237,6 +384,64 @@ func summarizeReplayToolResult(toolName string, out string) string {
 		}
 	}
 	return out
+}
+
+func emitReplayToolCallStarted(ctx context.Context, observer agent.ConversationObserver, toolName string, argsJSON string, toolCallID string) {
+	if observer == nil {
+		return
+	}
+	if lifecycle, ok := observer.(agent.ToolLifecycleObserver); ok {
+		lifecycle.OnToolLifecycle(ctx, agent.ToolLifecycleEvent{
+			ToolCallID:       strings.TrimSpace(toolCallID),
+			Name:             strings.TrimSpace(toolName),
+			Status:           "running",
+			Arguments:        argsJSON,
+			ArgumentsPreview: serviceAppEventPreview(argsJSON, 500),
+		})
+		return
+	}
+	observer.OnToolCall(ctx, toolName, argsJSON)
+}
+
+func emitReplayToolCallFinished(ctx context.Context, observer agent.ConversationObserver, toolName string, argsJSON string, toolCallID string, out string, err error) {
+	if observer == nil {
+		return
+	}
+	if lifecycle, ok := observer.(agent.ToolLifecycleObserver); ok {
+		status := "completed"
+		if err != nil {
+			status = "failed"
+		}
+		event := agent.ToolLifecycleEvent{
+			ToolCallID:       strings.TrimSpace(toolCallID),
+			Name:             strings.TrimSpace(toolName),
+			Status:           status,
+			Arguments:        argsJSON,
+			ArgumentsPreview: serviceAppEventPreview(argsJSON, 500),
+			Result:           out,
+			ResultPreview:    serviceAppEventPreview(out, 700),
+			PublicCode:       agent.PublicErrorCode(err),
+		}
+		var approvalErr *tools.ApprovalRequiredError
+		if errors.As(err, &approvalErr) {
+			event.ApprovalID = approvalErr.RequestID
+		}
+		lifecycle.OnToolLifecycle(ctx, event)
+		return
+	}
+	observer.OnToolResult(ctx, toolName, out, err)
+}
+
+func serviceAppEventPreview(text string, limit int) string {
+	text = strings.TrimSpace(text)
+	if text == "" || limit <= 0 {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	return string(runes[:limit]) + "..."
 }
 
 func (a *ServiceApp) findReplayToolCallID(ctx context.Context, sessionKey, toolName, argsJSON string) (string, error) {
@@ -271,6 +476,164 @@ func (a *ServiceApp) findReplayToolCallID(ctx context.Context, sessionKey, toolN
 	return "", nil
 }
 
+func (a *ServiceApp) findApprovalReplayTarget(ctx context.Context, sessionKey string, requestID int64) (replayToolCallTarget, error) {
+	if a == nil || a.runtime == nil || requestID <= 0 {
+		return replayToolCallTarget{}, nil
+	}
+	history, err := a.approvalReplayHistory(ctx, sessionKey)
+	if err != nil {
+		return replayToolCallTarget{}, err
+	}
+	for i := len(history) - 1; i >= 0; i-- {
+		msg := history[i]
+		if msg.Role != "tool" || strings.TrimSpace(msg.ToolCallID) == "" {
+			continue
+		}
+		result, ok := tools.DecodeToolResult(msg.Content)
+		if !ok || result.RequestID != requestID {
+			continue
+		}
+		toolCallID := strings.TrimSpace(msg.ToolCallID)
+		for j := i + 1; j < len(history); j++ {
+			later := history[j]
+			if later.Role == "tool" && strings.TrimSpace(later.ToolCallID) == toolCallID {
+				return replayToolCallTarget{ToolCallID: toolCallID, AlreadyResumed: true}, nil
+			}
+		}
+		for j := i - 1; j >= 0; j-- {
+			prior := history[j]
+			if prior.Role != "assistant" || len(prior.ToolCalls) == 0 {
+				continue
+			}
+			for k := len(prior.ToolCalls) - 1; k >= 0; k-- {
+				tc := prior.ToolCalls[k]
+				if strings.TrimSpace(tc.ID) != toolCallID {
+					continue
+				}
+				return replayToolCallTarget{
+					ToolName:      strings.TrimSpace(tc.Function.Name),
+					ArgumentsJSON: strings.TrimSpace(tc.Function.Arguments),
+					ToolCallID:    toolCallID,
+				}, nil
+			}
+		}
+		return replayToolCallTarget{}, fmt.Errorf("approved replay rejected: no matching prior assistant tool call for request %d", requestID)
+	}
+	return replayToolCallTarget{}, nil
+}
+
+func (a *ServiceApp) approvalReplayHistory(ctx context.Context, sessionKey string) ([]replayHistoryMessage, error) {
+	history, err := a.rawSessionReplayHistory(ctx, sessionKey, 250)
+	if err != nil {
+		return nil, err
+	}
+	if len(history) > 0 || a == nil || a.runtime == nil || a.runtime.Builder == nil {
+		return history, nil
+	}
+	pp, _, err := a.runtime.Builder.BuildWithOptions(ctx, agent.BuildOptions{
+		SessionKey: strings.TrimSpace(sessionKey),
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]replayHistoryMessage, 0, len(pp.History))
+	for _, msg := range pp.History {
+		content, _ := msg.Content.(string)
+		out = append(out, replayHistoryMessage{
+			Role:       msg.Role,
+			Content:    content,
+			ToolCallID: msg.ToolCallID,
+			ToolCalls:  msg.ToolCalls,
+		})
+	}
+	return out, nil
+}
+
+func (a *ServiceApp) rawSessionReplayHistory(ctx context.Context, sessionKey string, limit int) ([]replayHistoryMessage, error) {
+	if a == nil || a.runtime == nil || a.runtime.DB == nil || a.runtime.DB.SQL == nil {
+		return nil, nil
+	}
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 250
+	}
+	rows, err := a.runtime.DB.SQL.QueryContext(ctx,
+		`SELECT role, content, payload_json FROM messages WHERE session_key=? ORDER BY id DESC LIMIT ?`, sessionKey, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	history := make([]replayHistoryMessage, 0, limit)
+	for rows.Next() {
+		var role, content, payloadJSON string
+		if err := rows.Scan(&role, &content, &payloadJSON); err != nil {
+			return nil, err
+		}
+		msg := replayHistoryMessage{Role: role, Content: content}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(payloadJSON), &payload); err == nil {
+			switch role {
+			case "assistant":
+				if raw, ok := payload["tool_calls"]; ok {
+					b, _ := json.Marshal(raw)
+					_ = json.Unmarshal(b, &msg.ToolCalls)
+				}
+			case "tool":
+				if rawID, ok := payload["tool_call_id"]; ok {
+					msg.ToolCallID = strings.TrimSpace(fmt.Sprint(rawID))
+				}
+			}
+		}
+		history = append(history, msg)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i, j := 0, len(history)-1; i < j; i, j = i+1, j-1 {
+		history[i], history[j] = history[j], history[i]
+	}
+	backfillReplayToolCallIDs(history)
+	return history, nil
+}
+
+func backfillReplayToolCallIDs(history []replayHistoryMessage) {
+	pendingToolCallIDs := make([]string, 0)
+	for i := range history {
+		msg := &history[i]
+		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
+			pendingToolCallIDs = pendingToolCallIDs[:0]
+			for _, tc := range msg.ToolCalls {
+				if id := strings.TrimSpace(tc.ID); id != "" {
+					pendingToolCallIDs = append(pendingToolCallIDs, id)
+				}
+			}
+			continue
+		}
+		if msg.Role != "tool" {
+			continue
+		}
+		if msg.ToolCallID == "" && len(pendingToolCallIDs) > 0 {
+			msg.ToolCallID = pendingToolCallIDs[0]
+		}
+		if msg.ToolCallID == "" || len(pendingToolCallIDs) == 0 {
+			continue
+		}
+		if pendingToolCallIDs[0] == msg.ToolCallID {
+			pendingToolCallIDs = pendingToolCallIDs[1:]
+			continue
+		}
+		for j, id := range pendingToolCallIDs {
+			if id == msg.ToolCallID {
+				pendingToolCallIDs = append(pendingToolCallIDs[:j], pendingToolCallIDs[j+1:]...)
+				break
+			}
+		}
+	}
+}
+
 func canonicalReplayArgs(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -293,6 +656,10 @@ func replayContinuationPrompt(toolName string) string {
 		name = "tool"
 	}
 	return fmt.Sprintf("Approval was granted for the previously requested %s call. The exact approved tool call has now been executed and its latest result is already in the conversation. Continue the same task from that result. Do not stop just because the approved tool call succeeded, and do not repeat the same %s call unless it is still necessary.", name, name)
+}
+
+func toolQuotaApprovalContinuationPrompt() string {
+	return "Approval was granted for the previously requested continuation. Continue the same task from the existing conversation state. Use the latest tool results already in the conversation, and do not repeat the same failing or blocked path unless it is still necessary."
 }
 
 type SubagentRequest struct {
@@ -360,6 +727,13 @@ func (a *ServiceApp) AbortJob(ctx context.Context, jobID string) (bool, string, 
 			}
 		}
 	}
+	if a.agentCLIManager != nil {
+		if err := a.agentCLIManager.Abort(ctx, jobID); err == nil {
+			return true, "", nil
+		} else if strings.Contains(strings.ToLower(err.Error()), "not abortable") {
+			return false, "not_abortable", nil
+		}
+	}
 	snapshot, ok := a.jobs.Snapshot(jobID)
 	if !ok {
 		return false, "not_found", nil
@@ -368,6 +742,53 @@ func (a *ServiceApp) AbortJob(ctx context.Context, jobID string) (bool, string, 
 		return true, snapshot.Status, nil
 	}
 	return false, "not_abortable", nil
+}
+
+// DetectAgentCLIRunners returns runner info for all registered external CLIs.
+func (a *ServiceApp) DetectAgentCLIRunners(ctx context.Context) ([]agentcli.RunnerInfo, error) {
+	if a == nil {
+		return nil, fmt.Errorf("service app is not available")
+	}
+	if a.agentCLIManager != nil {
+		if a.agentCLIManager.Registry == nil {
+			return nil, fmt.Errorf("runner registry is not configured")
+		}
+		return a.agentCLIManager.Registry.DetectAll(ctx, a.agentCLIManager.DetectOptions()), nil
+	}
+	detectManager := &agentcli.Manager{Cfg: a.cfg.AgentCLI}
+	return agentcli.NewDefaultRegistry().DetectAll(ctx, detectManager.DetectOptions()), nil
+}
+
+// StartAgentCLIRun enqueues a new external CLI run.
+func (a *ServiceApp) StartAgentCLIRun(ctx context.Context, req agentcli.AgentRunRequest) (db.AgentCLIRun, error) {
+	if a == nil || a.agentCLIManager == nil {
+		return db.AgentCLIRun{}, fmt.Errorf("agent CLI manager is not available")
+	}
+	return a.agentCLIManager.Enqueue(ctx, req)
+}
+
+// GetAgentCLIRun reads a persisted CLI run by run ID or job ID.
+func (a *ServiceApp) GetAgentCLIRun(ctx context.Context, id string) (db.AgentCLIRun, bool, error) {
+	if a == nil || a.agentCLIManager == nil || a.agentCLIManager.DB == nil {
+		return db.AgentCLIRun{}, false, fmt.Errorf("agent CLI manager is not available")
+	}
+	return a.agentCLIManager.DB.GetAgentCLIRun(ctx, id)
+}
+
+// ListAgentCLIEvents lists persisted events for a job.
+func (a *ServiceApp) ListAgentCLIEvents(ctx context.Context, jobID string, afterSeq int64, limit int) ([]db.AgentCLIEvent, error) {
+	if a == nil || a.agentCLIManager == nil || a.agentCLIManager.DB == nil {
+		return nil, fmt.Errorf("agent CLI manager is not available")
+	}
+	return a.agentCLIManager.DB.ListAgentCLIEvents(ctx, jobID, afterSeq, limit)
+}
+
+// AbortAgentCLIRun cancels an external CLI job.
+func (a *ServiceApp) AbortAgentCLIRun(ctx context.Context, jobID string) error {
+	if a == nil || a.agentCLIManager == nil {
+		return fmt.Errorf("agent CLI manager is not available")
+	}
+	return a.agentCLIManager.Abort(ctx, jobID)
 }
 
 func (a *ServiceApp) WaitForJob(ctx context.Context, jobID string) (agent.JobSnapshot, bool) {

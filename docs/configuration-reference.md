@@ -2,6 +2,16 @@
 
 `or3-intern` loads its primary configuration from `config.json`, usually under `~/.or3-intern/config.json` after `or3-intern init`.
 
+Environment overrides are applied after loading `.env` from the current directory or parent directory. Existing shell variables are not overwritten by `.env`; set `OR3_LOAD_DOTENV=false` to disable `.env` loading.
+
+## Compatibility notes
+
+- `settings` is the canonical user-facing configuration entrypoint. `setup`, `init`, `configure`, and `doctor --fix` remain supported workflow wrappers for first-run setup, advanced section edits, and safe repairs.
+- Service request payloads under `/internal/v1` keep snake_case field names canonical. camelCase aliases remain accepted for compatibility, but when both are supplied with different values, the snake_case field wins and the service returns `X-Or3-Request-Warning`.
+- `.env` remains additive: checked-in config should not rely on environment-only keys unless deploy scripts also set them. Shell variables win over `.env` values, so local overrides can safely shadow compose defaults.
+- Quarantined integrations are surfaced as warnings instead of preventing the service from starting. Fix the integration config, then restart or rerun readiness checks to clear the warning.
+- Legacy context mode means the loaded config did not include the modern `context` section. The runtime still works, but saving through `settings` or `configure` writes the current context defaults explicitly.
+
 ## Top-level sections
 
 | Key                                                    | Purpose                                                                                              |
@@ -22,6 +32,7 @@
 | `runtimeProfile`                                       | Named execution posture (`local-dev`, `hosted-service`, `hosted-no-exec`, etc.)                      |
 | `docIndex`                                             | Opt-in document indexing for prompt-time retrieval                                                   |
 | `subagents`                                            | Background job queueing and concurrency controls                                                     |
+| `agentCLI`                                             | External agent CLI delegation: runner discovery, worker pool, timeouts, and sandboxing               |
 | `context`, `contextManager`                            | Token budgeting, prompt assembly budgets, and optional cheap maintenance-model settings              |
 
 ## Minimal shape
@@ -42,6 +53,7 @@
     "contextManager": {},
     "docIndex": {},
     "subagents": {},
+    "agentCLI": {},
     "session": {}
 }
 ```
@@ -75,7 +87,9 @@ Controls local tool execution and optional MCP registration:
 
 `allowFullFileRead` keeps write/edit operations restricted to the workspace while allowing read/list/search file tools to inspect paths outside the workspace. It is off by default and only takes effect when `restrictToWorkspace` remains enabled.
 
-See [mcp-tool-integrations.md](mcp-tool-integrations.md) for the MCP-specific settings.
+Manage `tools.mcpServers` with `or3-intern configure --section mcp` or the OR3 app at **Settings → Add-ons**. MCP server changes are saved to config and take effect after restarting `or3-intern`.
+
+See [mcp-tool-integrations.md](mcp-tool-integrations.md) for the MCP-specific settings and API workflow.
 
 ### `hardening`
 
@@ -305,6 +319,7 @@ Prompt assembly and token-budget controls:
 Backward-compatibility note:
 
 - When an older `config.json` has no top-level `context` block at all, the runtime preserves the legacy prompt knobs as authoritative defaults: `historyMaxMessages`, `memoryRetrieveLimit`, `vectorSearchK`, `ftsSearchK`, `bootstrapMaxChars`, `bootstrapTotalMaxChars`, and `maxToolBytes`.
+- `or3-intern status --advanced` and the app bootstrap endpoint report this as legacy context mode so it is visible during debugging.
 - When a `context` block is present, those explicit context budgets are applied to prompt packing while the legacy fields continue to drive adjacent runtime behavior that still uses them directly.
 
 ### `contextManager`
@@ -319,6 +334,51 @@ Optional low-cost maintenance-model controls:
 - `maxOutputTokens`
 - `allowTaskUpdates`
 - `allowStalePropose`
+
+### `agentCLI`
+
+Controls the external agent CLI delegation subsystem. All fields are under the `agentCLI` key in `config.json`.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Feature gate. Must be `true` for any agent CLI functionality. |
+| `disabledRunners` | string[] | `[]` | Runner IDs to block from discovery and execution (e.g. `["opencode", "gemini"]`). |
+| `maxConcurrent` | int | `1` | Maximum worker goroutines running external CLIs simultaneously. |
+| `maxQueued` | int | `16` | Maximum queued runs before the endpoint returns `429`. |
+| `defaultTimeoutSeconds` | int | `900` | Per-run timeout when the request omits `timeout_seconds`. Minimum 30, default 900. |
+| `maxTimeoutSeconds` | int | `7200` | Hard server-side cap on any requested timeout. Minimum 30, default 7200. |
+| `allowSandboxAuto` | bool | `false` | If `true`, permits `sandbox_auto` mode when isolation is `sandbox_dangerous`. |
+| `defaultMode` | string | `"safe_edit"` | Mode used when the request omits `mode`. Must be `review`, `safe_edit`, or `sandbox_auto`. |
+| `defaultIsolation` | string | `"host_workspace_write"` | Isolation used when the request omits `isolation`. Must be `host_readonly`, `host_workspace_write`, `sandbox_workspace_write`, or `sandbox_dangerous`. |
+| `eventChunkMaxBytes` | int | `16384` | Maximum size of a single output event chunk (16 KiB). |
+| `previewMaxBytes` | int | `65536` | Retained stdout/stderr ring-buffer preview size (64 KiB). |
+| `maxPersistedOutputBytes` | int64 | `10485760` | Total persisted output cap before truncation (10 MiB). |
+| `childEnvAllowlist` | string[] | `["PATH","HOME","TMPDIR","TMP","TEMP"]` | Environment variables passed through to child CLI processes. |
+
+Environment variable overrides follow the existing `OR3_*` pattern:
+
+| Env var | Maps to |
+|---------|---------|
+| `OR3_AGENT_CLI_ENABLED` | `agentCLI.enabled` (bool) |
+| `OR3_AGENT_CLI_DISABLED_RUNNERS` | `agentCLI.disabledRunners` (comma-separated string) |
+| `OR3_AGENT_CLI_MAX_CONCURRENT` | `agentCLI.maxConcurrent` (int) |
+| `OR3_AGENT_CLI_MAX_QUEUED` | `agentCLI.maxQueued` (int) |
+| `OR3_AGENT_CLI_DEFAULT_TIMEOUT_SECONDS` | `agentCLI.defaultTimeoutSeconds` (int) |
+| `OR3_AGENT_CLI_MAX_TIMEOUT_SECONDS` | `agentCLI.maxTimeoutSeconds` (int) |
+| `OR3_AGENT_CLI_ALLOW_SANDBOX_AUTO` | `agentCLI.allowSandboxAuto` (bool) |
+| `OR3_AGENT_CLI_DEFAULT_MODE` | `agentCLI.defaultMode` (string) |
+| `OR3_AGENT_CLI_DEFAULT_ISOLATION` | `agentCLI.defaultIsolation` (string) |
+
+Example minimal enablement:
+
+```json
+{
+  "agentCLI": {
+    "enabled": true,
+    "maxConcurrent": 2
+  }
+}
+```
 
 ## Environment overrides called out in the README
 

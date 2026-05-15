@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
@@ -16,6 +18,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"or3-intern/internal/config"
+	"or3-intern/internal/mcp"
 )
 
 type configureTUIOptions struct {
@@ -35,6 +38,10 @@ const (
 	configureScreenReview
 	configureScreenSuccess
 	configureScreenQuitConfirm
+	configureScreenMCPServerList
+	configureScreenMCPNameInput
+	configureScreenMCPForm
+	configureScreenMCPDeleteConfirm
 )
 
 type configureFieldKind int
@@ -70,6 +77,8 @@ func (i configureListItem) FilterValue() string { return i.title + " " + i.descr
 func (i configureListItem) Title() string       { return i.title }
 func (i configureListItem) Description() string { return i.description }
 
+var configureMCPTestManagerFactory serviceMCPTestManagerFactory
+
 type configureKeyMap struct {
 	Up     key.Binding
 	Down   key.Binding
@@ -82,6 +91,9 @@ type configureKeyMap struct {
 	Toggle key.Binding
 	Next   key.Binding
 	Prev   key.Binding
+	Add    key.Binding
+	Delete key.Binding
+	Test   key.Binding
 }
 
 func newConfigureKeyMap() configureKeyMap {
@@ -97,6 +109,9 @@ func newConfigureKeyMap() configureKeyMap {
 		Toggle: key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "toggle")),
 		Next:   key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next")),
 		Prev:   key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("shift+tab", "previous")),
+		Add:    key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add")),
+		Delete: key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "delete")),
+		Test:   key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "test")),
 	}
 }
 
@@ -105,7 +120,7 @@ func (k configureKeyMap) ShortHelp() []key.Binding {
 }
 
 func (k configureKeyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{{k.Up, k.Down, k.Left, k.Right}, {k.Select, k.Toggle, k.Next, k.Prev}, {k.Save, k.Back, k.Quit}}
+	return [][]key.Binding{{k.Up, k.Down, k.Left, k.Right}, {k.Select, k.Toggle, k.Next, k.Prev}, {k.Add, k.Delete, k.Test}, {k.Save, k.Back, k.Quit}}
 }
 
 type configureStyles struct {
@@ -168,33 +183,37 @@ func newConfigureStyles() configureStyles {
 }
 
 type configureTUIModel struct {
-	options         configureTUIOptions
-	styles          configureStyles
-	keys            configureKeyMap
-	help            help.Model
-	sectionList     list.Model
-	channelList     list.Model
-	textInput       textinput.Model
-	width           int
-	height          int
-	screen          configureScreen
-	cfgPath         string
-	cwd             string
-	cfg             config.Config
-	original        config.Config
-	existed         bool
-	loadWarning     string
-	currentSection  string
-	currentChannel  string
-	fieldCursor     int
-	formScroll      int
-	editingFieldKey string
-	editing         bool
-	dirty           bool
-	errorMessage    string
-	successMessage  string
-	quitting        bool
-	lastSection     string
+	options              configureTUIOptions
+	styles               configureStyles
+	keys                 configureKeyMap
+	help                 help.Model
+	sectionList          list.Model
+	channelList          list.Model
+	mcpList              list.Model
+	textInput            textinput.Model
+	width                int
+	height               int
+	screen               configureScreen
+	cfgPath              string
+	cwd                  string
+	cfg                  config.Config
+	original             config.Config
+	existed              bool
+	loadWarning          string
+	currentSection       string
+	currentChannel       string
+	currentMCPServerName string
+	fieldCursor          int
+	formScroll           int
+	editingFieldKey      string
+	editing              bool
+	dirty                bool
+	errorMessage         string
+	successMessage       string
+	mcpTestMessage       string
+	mcpRestartReminder   bool
+	quitting             bool
+	lastSection          string
 }
 
 func runConfigureWithTUI(cfgPath, cwd string, args []string, options configureTUIOptions) error {
@@ -245,6 +264,13 @@ func newConfigureTUIModel(cfgPath, cwd string, cfg config.Config, existed bool, 
 	channelList.SetShowHelp(false)
 	channelList.SetShowPagination(false)
 
+	mcpList := list.New(buildMCPServerItems(cfg, ""), delegate, 36, 16)
+	mcpList.Title = "MCP Servers"
+	mcpList.SetShowStatusBar(false)
+	mcpList.SetFilteringEnabled(false)
+	mcpList.SetShowHelp(false)
+	mcpList.SetShowPagination(false)
+
 	input := textinput.New()
 	input.Prompt = "» "
 	input.CharLimit = 512
@@ -257,6 +283,7 @@ func newConfigureTUIModel(cfgPath, cwd string, cfg config.Config, existed bool, 
 		help:        help.New(),
 		sectionList: sectionList,
 		channelList: channelList,
+		mcpList:     mcpList,
 		textInput:   input,
 		screen:      configureScreenSections,
 		cfgPath:     cfgPath,
@@ -271,7 +298,11 @@ func newConfigureTUIModel(cfgPath, cwd string, cfg config.Config, existed bool, 
 	}
 	if len(model.options.Restricted) == 1 {
 		model.currentSection = model.options.Restricted[0]
-		model.screen = configureScreenForm
+		if model.currentSection == "mcp" {
+			model.screen = configureScreenMCPServerList
+		} else {
+			model.screen = configureScreenForm
+		}
 	}
 	return model
 }
@@ -286,6 +317,7 @@ func (m configureTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		layout := deriveConfigureLayout(msg.Width, msg.Height)
 		m.sectionList.SetSize(layout.navWidth, layout.listHeight)
 		m.channelList.SetSize(layout.navWidth, layout.listHeight)
+		m.mcpList.SetSize(layout.navWidth, layout.listHeight)
 		m.textInput.Width = maxInt(20, layout.contentWidth-8)
 		m.ensureFieldCursorVisible(len(m.activeFields()))
 		return m, nil
@@ -305,31 +337,9 @@ func (m configureTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.screen = configureScreenReview
 			return m, nil
 		}
-		switch m.screen {
-		case configureScreenSections:
-			return m.updateSectionPicker(msg)
-		case configureScreenForm:
-			return m.updateSectionForm(msg)
-		case configureScreenChannels:
-			return m.updateChannelPicker(msg)
-		case configureScreenReview:
-			return m.updateReview(msg)
-		case configureScreenSuccess:
-			if key.Matches(msg, m.keys.Select, m.keys.Quit, m.keys.Back) {
-				return m, tea.Quit
-			}
-		case configureScreenQuitConfirm:
-			return m.updateQuitConfirm(msg)
-		}
 	}
 
-	var cmd tea.Cmd
-	if m.screen == configureScreenSections {
-		m.sectionList, cmd = m.sectionList.Update(msg)
-		return m, cmd
-	}
-	if m.screen == configureScreenChannels {
-		m.channelList, cmd = m.channelList.Update(msg)
+	if handled, cmd := m.screenAdapter().Update(msg, &m); handled {
 		return m, cmd
 	}
 	return m, nil
@@ -362,6 +372,9 @@ func (m configureTUIModel) updateSectionPicker(msg tea.KeyMsg) (tea.Model, tea.C
 			if item.key == "channels" {
 				m.screen = configureScreenChannels
 				m.channelList.Select(0)
+			} else if item.key == "mcp" {
+				m.screen = configureScreenMCPServerList
+				m.mcpTestMessage = ""
 			} else {
 				m.fieldCursor = 0
 				m.formScroll = 0
@@ -395,6 +408,168 @@ func (m configureTUIModel) updateChannelPicker(msg tea.KeyMsg) (tea.Model, tea.C
 	return m, cmd
 }
 
+func (m configureTUIModel) updateMCPServerList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if key.Matches(msg, m.keys.Back) {
+		if len(m.options.Restricted) == 1 && m.options.Restricted[0] == "mcp" {
+			m.quitting = true
+			return m, tea.Quit
+		}
+		m.screen = configureScreenSections
+		return m, nil
+	}
+	if key.Matches(msg, m.keys.Add) {
+		return m.startMCPNameInput()
+	}
+	if key.Matches(msg, m.keys.Delete) {
+		if item, ok := m.mcpList.SelectedItem().(configureListItem); ok && item.key != "__add__" {
+			m.currentMCPServerName = item.key
+			m.screen = configureScreenMCPDeleteConfirm
+		}
+		return m, nil
+	}
+	if key.Matches(msg, m.keys.Test) {
+		if item, ok := m.mcpList.SelectedItem().(configureListItem); ok && item.key != "__add__" {
+			m.currentMCPServerName = item.key
+			m.testMCPServer(item.key)
+		}
+		return m, nil
+	}
+	if key.Matches(msg, m.keys.Select) {
+		if item, ok := m.mcpList.SelectedItem().(configureListItem); ok {
+			if item.key == "__add__" {
+				return m.startMCPNameInput()
+			}
+			m.currentMCPServerName = item.key
+			m.currentSection = "mcp"
+			m.fieldCursor = 0
+			m.formScroll = 0
+			m.mcpTestMessage = ""
+			m.screen = configureScreenMCPForm
+		}
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.mcpList, cmd = m.mcpList.Update(msg)
+	return m, cmd
+}
+
+func (m configureTUIModel) startMCPNameInput() (tea.Model, tea.Cmd) {
+	m.currentSection = "mcp"
+	m.currentMCPServerName = ""
+	m.errorMessage = ""
+	m.textInput.Reset()
+	m.textInput.Focus()
+	m.textInput.EchoMode = textinput.EchoNormal
+	m.textInput.Prompt = "Name » "
+	m.textInput.Placeholder = "filesystem"
+	m.screen = configureScreenMCPNameInput
+	return m, textinput.Blink
+}
+
+func (m configureTUIModel) updateMCPNameInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if key.Matches(msg, m.keys.Back) {
+		m.textInput.Blur()
+		m.screen = configureScreenMCPServerList
+		return m, nil
+	}
+	if key.Matches(msg, m.keys.Select) {
+		name := strings.TrimSpace(m.textInput.Value())
+		if name == "" {
+			m.errorMessage = "MCP server name is required."
+			return m, nil
+		}
+		if m.cfg.Tools.MCPServers == nil {
+			m.cfg.Tools.MCPServers = map[string]config.MCPServerConfig{}
+		}
+		if _, exists := m.cfg.Tools.MCPServers[name]; exists {
+			m.errorMessage = "MCP server name already exists."
+			return m, nil
+		}
+		m.cfg.Tools.MCPServers[name] = config.MCPServerConfig{Enabled: true, Transport: "stdio"}
+		m.currentMCPServerName = name
+		m.currentSection = "mcp"
+		m.fieldCursor = 0
+		m.formScroll = 0
+		m.dirty = true
+		m.lastSection = "mcp"
+		m.mcpRestartReminder = true
+		m.errorMessage = ""
+		m.textInput.Blur()
+		m.refreshLists()
+		m.screen = configureScreenMCPForm
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.textInput, cmd = m.textInput.Update(msg)
+	return m, cmd
+}
+
+func (m configureTUIModel) updateMCPDeleteConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "y", "Y":
+		if m.cfg.Tools.MCPServers != nil {
+			delete(m.cfg.Tools.MCPServers, m.currentMCPServerName)
+		}
+		m.dirty = true
+		m.lastSection = "mcp"
+		m.mcpRestartReminder = true
+		m.currentMCPServerName = ""
+		m.refreshLists()
+		m.screen = configureScreenMCPServerList
+	case "n", "N", "esc":
+		m.screen = configureScreenMCPServerList
+	}
+	return m, nil
+}
+
+func (m *configureTUIModel) testMCPServer(name string) {
+	server, ok := m.cfg.Tools.MCPServers[name]
+	if !ok {
+		m.errorMessage = "MCP server not found."
+		return
+	}
+	factory := configureMCPTestManagerFactory
+	if factory == nil {
+		factory = func(servers map[string]config.MCPServerConfig) serviceMCPTestManager {
+			return mcp.NewManager(servers)
+		}
+	}
+	manager := factory(map[string]config.MCPServerConfig{name: server})
+	if manager == nil {
+		m.errorMessage = "MCP test manager is unavailable."
+		return
+	}
+	defer manager.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := manager.Connect(ctx); err != nil {
+		m.mcpTestMessage = "test failed: " + boundServiceMCPError(err)
+		m.errorMessage = m.mcpTestMessage
+		m.refreshLists()
+		return
+	}
+	statuses := manager.ServerStatus()
+	for statusName, status := range statuses {
+		if statusName == name {
+			if status.Connected {
+				m.mcpTestMessage = fmt.Sprintf("test ok: %d tools", status.ToolCount)
+				m.errorMessage = ""
+			} else if strings.TrimSpace(status.LastError) != "" {
+				m.mcpTestMessage = "test failed: " + status.LastError
+				m.errorMessage = m.mcpTestMessage
+			} else {
+				m.mcpTestMessage = "test failed: not connected"
+				m.errorMessage = m.mcpTestMessage
+			}
+			m.refreshLists()
+			return
+		}
+	}
+	m.mcpTestMessage = "test failed: status unavailable"
+	m.errorMessage = m.mcpTestMessage
+	m.refreshLists()
+}
+
 func (m configureTUIModel) updateSectionForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	fields := m.activeFields()
 	if len(fields) == 0 {
@@ -404,6 +579,11 @@ func (m configureTUIModel) updateSectionForm(msg tea.KeyMsg) (tea.Model, tea.Cmd
 	if key.Matches(msg, m.keys.Back) {
 		if m.currentSection == "channels" {
 			m.screen = configureScreenChannels
+			return m, nil
+		}
+		if m.currentSection == "mcp" {
+			m.screen = configureScreenMCPServerList
+			m.mcpTestMessage = ""
 			return m, nil
 		}
 		m.screen = configureScreenSections
@@ -450,6 +630,10 @@ func (m configureTUIModel) updateReview(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.screen = configureScreenChannels
 			return m, nil
 		}
+		if m.lastSection == "mcp" || m.currentSection == "mcp" {
+			m.screen = configureScreenMCPServerList
+			return m, nil
+		}
 		if m.currentSection != "" {
 			m.screen = configureScreenForm
 			return m, nil
@@ -458,6 +642,10 @@ func (m configureTUIModel) updateReview(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if key.Matches(msg, m.keys.Select, m.keys.Save) {
+		if err := config.ValidateMCPServers(m.cfg.Tools.MCPServers); err != nil {
+			m.errorMessage = err.Error()
+			return m, nil
+		}
 		if err := config.Save(m.cfgPath, m.cfg); err != nil {
 			m.errorMessage = err.Error()
 			return m, nil
@@ -465,6 +653,9 @@ func (m configureTUIModel) updateReview(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.original = m.cfg
 		m.dirty = false
 		m.successMessage = "Configuration saved successfully."
+		if m.mcpRestartReminder {
+			m.successMessage += " Restart the service to apply MCP server changes."
+		}
 		m.screen = configureScreenSuccess
 		return m, nil
 	}
@@ -485,12 +676,16 @@ func (m configureTUIModel) updateQuitConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd
 func (m *configureTUIModel) refreshLists() {
 	m.sectionList.SetItems(buildConfigureSectionItems(m.cfg, m.options.Restricted))
 	m.channelList.SetItems(buildChannelItems(m.cfg))
+	m.mcpList.SetItems(buildMCPServerItems(m.cfg, m.mcpTestMessage))
 	m.ensureFieldCursorVisible(len(m.activeFields()))
 	if m.sectionList.Index() >= len(m.sectionList.Items()) && len(m.sectionList.Items()) > 0 {
 		m.sectionList.Select(len(m.sectionList.Items()) - 1)
 	}
 	if m.channelList.Index() >= len(m.channelList.Items()) && len(m.channelList.Items()) > 0 {
 		m.channelList.Select(len(m.channelList.Items()) - 1)
+	}
+	if m.mcpList.Index() >= len(m.mcpList.Items()) && len(m.mcpList.Items()) > 0 {
+		m.mcpList.Select(len(m.mcpList.Items()) - 1)
 	}
 }
 
@@ -545,7 +740,11 @@ func (m *configureTUIModel) startEditingField(field configureField) {
 }
 
 func (m *configureTUIModel) applyEditedValue(value string) {
-	changed, err := applyFieldValue(&m.cfg, m.currentSection, m.currentChannel, m.editingFieldKey, value)
+	contextKey := m.currentChannel
+	if m.currentSection == "mcp" {
+		contextKey = m.currentMCPServerName
+	}
+	changed, err := applyFieldValue(&m.cfg, m.currentSection, contextKey, m.editingFieldKey, value)
 	if err != nil {
 		m.errorMessage = err.Error()
 		return
@@ -554,6 +753,9 @@ func (m *configureTUIModel) applyEditedValue(value string) {
 	if changed {
 		m.dirty = true
 		m.lastSection = m.currentSection
+		if m.currentSection == "mcp" {
+			m.mcpRestartReminder = true
+		}
 	}
 	if m.currentSection == "channels" {
 		m.lastSection = "channels"
@@ -570,16 +772,30 @@ func (m *configureTUIModel) applyEditedValue(value string) {
 }
 
 func (m *configureTUIModel) toggleField(fieldKey string) {
-	if toggleFieldValue(&m.cfg, m.currentSection, m.currentChannel, fieldKey) {
+	contextKey := m.currentChannel
+	if m.currentSection == "mcp" {
+		contextKey = m.currentMCPServerName
+	}
+	if toggleFieldValue(&m.cfg, m.currentSection, contextKey, fieldKey) {
 		m.dirty = true
 		m.lastSection = m.currentSection
+		if m.currentSection == "mcp" {
+			m.mcpRestartReminder = true
+		}
 	}
 }
 
 func (m *configureTUIModel) cycleChoice(fieldKey string, delta int) {
-	if cycleChoiceValue(&m.cfg, m.currentSection, m.currentChannel, fieldKey, delta) {
+	contextKey := m.currentChannel
+	if m.currentSection == "mcp" {
+		contextKey = m.currentMCPServerName
+	}
+	if cycleChoiceValue(&m.cfg, m.currentSection, contextKey, fieldKey, delta) {
 		m.dirty = true
 		m.lastSection = m.currentSection
+		if m.currentSection == "mcp" {
+			m.mcpRestartReminder = true
+		}
 	}
 }
 
@@ -587,7 +803,6 @@ func (m configureTUIModel) View() string {
 	if m.quitting {
 		return ""
 	}
-	layout := deriveConfigureLayout(m.width, m.height)
 	header := m.styles.title.Render(m.options.Title)
 	if len(m.options.Intro) == 0 {
 		if m.existed {
@@ -605,27 +820,7 @@ func (m configureTUIModel) View() string {
 		header += "\n" + m.styles.error.Render(m.errorMessage)
 	}
 
-	var body string
-	switch m.screen {
-	case configureScreenSections:
-		body = renderConfigureSplitPanels(layout,
-			m.styles.focused.Width(layout.navWidth).Render(m.sectionList.View()),
-			m.styles.panel.Width(layout.detailWidth).Render(renderSummaryPanelMode(m.styles, m.cfg, "Pick a section on the left. Press s to review and save.", layout.compact)),
-		)
-	case configureScreenChannels:
-		body = renderConfigureSplitPanels(layout,
-			m.styles.focused.Width(layout.navWidth).Render(m.channelList.View()),
-			m.styles.panel.Width(layout.detailWidth).Render(renderSummaryPanelMode(m.styles, m.cfg, "Select a channel to edit its toggles, access policy, and defaults.", layout.compact)),
-		)
-	case configureScreenForm:
-		body = renderFormScreen(m)
-	case configureScreenReview:
-		body = m.styles.focused.Width(layout.fullWidth).Render(renderSummaryPanelMode(m.styles, m.cfg, "Review the snapshot below. Press Enter or s to save, esc to go back.", layout.compact))
-	case configureScreenSuccess:
-		body = m.styles.focused.Width(layout.fullWidth).Render(m.styles.success.Render(m.successMessage) + "\n\n" + renderSummaryPanelMode(m.styles, m.cfg, renderNextStepsText(m.cfg), layout.compact))
-	case configureScreenQuitConfirm:
-		body = m.styles.focused.Width(layout.fullWidth).Render("You have unsaved changes. Quit anyway?\n\nPress y to discard changes, n or esc to continue editing.")
-	}
+	body := m.screenAdapter().View(m)
 
 	footer := m.styles.help.Render(m.help.View(m.keys))
 	return m.styles.app.Render(header + "\n\n" + body + "\n\n" + footer)
@@ -657,6 +852,9 @@ func renderFormScreen(m configureTUIModel) string {
 	if m.currentSection == "channels" && strings.TrimSpace(m.currentChannel) != "" {
 		sectionLabel = sectionLabel + " · " + strings.Title(m.currentChannel)
 	}
+	if m.currentSection == "mcp" && strings.TrimSpace(m.currentMCPServerName) != "" {
+		sectionLabel = "MCP Servers · " + m.currentMCPServerName
+	}
 
 	rows := make([]string, 0, len(visibleFields)+4)
 	rows = append(rows, m.styles.section.Render(fmt.Sprintf("%s Field %d/%d", sectionLabel, m.fieldCursor+1, len(fields))))
@@ -674,7 +872,11 @@ func renderFormScreen(m configureTUIModel) string {
 
 	left := m.styles.panel.Width(layout.navWidth).Render(strings.Join(rows, "\n"))
 
-	rightSections := []string{renderSummaryPanelMode(m.styles, m.cfg, formContextHint(m.currentSection, m.currentChannel, m.fieldCursor, len(fields)), layout.compact)}
+	hint := formContextHint(m.currentSection, m.currentChannel, m.fieldCursor, len(fields))
+	if m.currentSection == "mcp" {
+		hint = fmt.Sprintf("Editing %s. Save and restart the service to apply MCP server changes.", m.currentMCPServerName)
+	}
+	rightSections := []string{renderSummaryPanelMode(m.styles, m.cfg, hint, layout.compact)}
 	if m.editing {
 		rightSections = append(rightSections, m.styles.section.Render("Editing")+"\n"+m.textInput.View()+"\n"+m.styles.muted.Render("Enter to apply • esc to cancel"))
 	} else {
@@ -683,6 +885,52 @@ func renderFormScreen(m configureTUIModel) string {
 	}
 	right := m.styles.panel.Width(layout.detailWidth).Render(strings.Join(rightSections, "\n\n"))
 	return renderConfigureSplitPanels(layout, left, right)
+}
+
+func renderMCPPanel(m configureTUIModel) string {
+	lines := []string{
+		m.styles.section.Render("MCP add-ons"),
+		fmt.Sprintf("%s %s", m.styles.label.Render("Configured:"), m.styles.value.Render(fmt.Sprintf("%d servers", len(m.cfg.Tools.MCPServers)))),
+		fmt.Sprintf("%s %s", m.styles.label.Render("Enabled:"), m.styles.value.Render(fmt.Sprintf("%d servers", enabledMCPServerCount(m.cfg)))),
+		"",
+		m.styles.muted.Render("Enter edits the selected server. Press a to add, d to delete, t to test, s to review and save."),
+	}
+	if m.mcpRestartReminder {
+		lines = append(lines, "", m.styles.badgeWarn.Render("restart required")+" "+m.styles.muted.Render("MCP changes apply after restarting the service."))
+	}
+	if strings.TrimSpace(m.mcpTestMessage) != "" {
+		style := m.styles.success
+		if strings.Contains(m.mcpTestMessage, "failed") {
+			style = m.styles.error
+		}
+		lines = append(lines, "", style.Render(m.mcpTestMessage))
+	}
+	if item, ok := m.mcpList.SelectedItem().(configureListItem); ok && item.key != "__add__" {
+		server := m.cfg.Tools.MCPServers[item.key]
+		lines = append(lines, "",
+			m.styles.section.Render("Selected"),
+			fmt.Sprintf("%s %s", m.styles.label.Render("Name:"), m.styles.value.Render(item.key)),
+			fmt.Sprintf("%s %s", m.styles.label.Render("Transport:"), m.styles.value.Render(server.Transport)),
+			fmt.Sprintf("%s %s", m.styles.label.Render("Enabled:"), m.styles.value.Render(fmt.Sprintf("%t", server.Enabled))),
+		)
+		if server.Transport == "stdio" {
+			lines = append(lines, fmt.Sprintf("%s %s", m.styles.label.Render("Command:"), m.styles.value.Render(emptyAsNone(server.Command))))
+		} else {
+			lines = append(lines, fmt.Sprintf("%s %s", m.styles.label.Render("URL:"), m.styles.value.Render(emptyAsNone(server.URL))))
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func renderMCPNameInput(m configureTUIModel) string {
+	return strings.Join([]string{
+		m.styles.section.Render("Add MCP server"),
+		m.styles.muted.Render("Choose a unique config name. You can edit transport details on the next screen."),
+		"",
+		m.textInput.View(),
+		"",
+		m.styles.muted.Render("Enter to create • esc to cancel"),
+	}, "\n")
 }
 
 func renderSelectedFieldPanel(styles configureStyles, field configureField, width int) string {
@@ -878,7 +1126,12 @@ func formContextHint(section, channel string, cursor, total int) string {
 	if label == "" {
 		label = strings.Title(section)
 	}
-	position := fmt.Sprintf("Field %d/%d. Use ↑/↓ or Tab/Shift+Tab to move between fields.", cursor+1, total)
+	displayTotal := total
+	if section == "provider" && displayTotal > 9 {
+		position := fmt.Sprintf("Field %d/%d. Core provider Field %d/9. Use ↑/↓ or Tab/Shift+Tab to move between fields.", cursor+1, total, cursor+1)
+		return position + " Editing the " + label + " section. Press s to review and save when you’re happy with the current snapshot."
+	}
+	position := fmt.Sprintf("Field %d/%d. Use ↑/↓ or Tab/Shift+Tab to move between fields.", cursor+1, displayTotal)
 	if section == "channels" && channel != "" {
 		return position + " Editing the " + strings.Title(channel) + " channel. Use space for toggles, ←/→ for access presets, and Enter to edit text fields."
 	}
@@ -995,6 +1248,69 @@ func buildChannelItems(cfg config.Config) []list.Item {
 	return items
 }
 
+func buildMCPServerItems(cfg config.Config, testMessage string) []list.Item {
+	names := sortedMCPServerNames(cfg.Tools.MCPServers)
+	items := make([]list.Item, 0, len(names)+1)
+	items = append(items, configureListItem{key: "__add__", title: "+ Add MCP server", description: "Create a stdio, SSE, or streamable-http server"})
+	for _, name := range names {
+		server := cfg.Tools.MCPServers[name]
+		status := "disabled"
+		if server.Enabled {
+			status = "enabled"
+		}
+		description := fmt.Sprintf("%s · %s", status, server.Transport)
+		if strings.TrimSpace(testMessage) != "" {
+			description += " · " + testMessage
+		}
+		items = append(items, configureListItem{key: name, title: name, description: description})
+	}
+	return items
+}
+
+func enabledMCPServerCount(cfg config.Config) int {
+	count := 0
+	for _, server := range cfg.Tools.MCPServers {
+		if server.Enabled {
+			count++
+		}
+	}
+	return count
+}
+
+func buildMCPFields(cfg config.Config, name string) []configureField {
+	server := cfg.Tools.MCPServers[name]
+	transportChoices := []string{"stdio", "sse", "streamable-http"}
+	fields := []configureField{
+		{Key: "mcp_enabled", Label: "Enabled", Description: "Expose this MCP server's tools after the service restarts.", Kind: configureFieldToggle, Value: onOff(server.Enabled)},
+		{Key: "mcp_transport", Label: "Transport", Description: "How or3-intern connects to the MCP server.", Kind: configureFieldChoice, Value: server.Transport, Choices: transportChoices, ChoiceIndex: indexOfChoice(transportChoices, server.Transport)},
+	}
+	switch server.Transport {
+	case "stdio":
+		fields = append(fields,
+			configureField{Key: "mcp_command", Label: "Command", Description: "Executable used to start the MCP server.", Kind: configureFieldText, Value: server.Command, EmptyHint: "npx"},
+			configureField{Key: "mcp_args", Label: "Arguments", Description: "Command arguments passed to the MCP server command.", Kind: configureFieldText, Value: strings.Join(server.Args, " "), EmptyHint: "-y @modelcontextprotocol/server-filesystem ."},
+			configureField{Key: "mcp_child_env_allowlist", Label: "Child env allowlist", Description: "Comma-separated inherited environment variable names for the child process.", Kind: configureFieldText, Value: strings.Join(server.ChildEnvAllowlist, ","), EmptyHint: "PATH,HOME"},
+		)
+	case "sse", "streamable-http":
+		fields = append(fields,
+			configureField{Key: "mcp_url", Label: "URL", Description: "Remote MCP endpoint URL.", Kind: configureFieldText, Value: server.URL, EmptyHint: "http://127.0.0.1:3000/mcp"},
+			configureField{Key: "mcp_allow_insecure_http", Label: "Allow insecure HTTP", Description: "Allow plain HTTP only for loopback or localhost endpoints.", Kind: configureFieldToggle, Value: onOff(server.AllowInsecureHTTP)},
+		)
+	default:
+		fields = append(fields,
+			configureField{Key: "mcp_command", Label: "Command", Description: "Executable used to start stdio MCP servers.", Kind: configureFieldText, Value: server.Command, EmptyHint: "npx"},
+			configureField{Key: "mcp_url", Label: "URL", Description: "Remote MCP endpoint URL.", Kind: configureFieldText, Value: server.URL, EmptyHint: "http://127.0.0.1:3000/mcp"},
+		)
+	}
+	fields = append(fields,
+		configureField{Key: "mcp_headers", Label: "Headers", Description: "Comma-separated HTTP headers as Name=Value. Used only for remote transports.", Kind: configureFieldText, Value: formatStringMap(server.Headers), EmptyHint: "Authorization=Bearer ..."},
+		configureField{Key: "mcp_env", Label: "Environment", Description: "Comma-separated environment variables as NAME=VALUE for stdio servers.", Kind: configureFieldText, Value: formatStringMap(server.Env), EmptyHint: "TOKEN=..."},
+		configureField{Key: "mcp_connect_timeout", Label: "Connect timeout seconds", Description: "How long to wait while connecting to this MCP server.", Kind: configureFieldText, Value: formatInt(server.ConnectTimeoutSeconds), EmptyHint: "10"},
+		configureField{Key: "mcp_tool_timeout", Label: "Tool timeout seconds", Description: "Maximum runtime for each tool call from this MCP server.", Kind: configureFieldText, Value: formatInt(server.ToolTimeoutSeconds), EmptyHint: "30"},
+	)
+	return withHelpfulFieldDescriptions("mcp", name, fields)
+}
+
 func channelStatus(enabled bool, policy config.InboundPolicy, openAccess, hasAllowlist bool) string {
 	if !enabled {
 		return "disabled"
@@ -1020,6 +1336,8 @@ func sectionStatus(cfg config.Config, section string) string {
 		return fmt.Sprintf("restrict=%t · fullRead=%t · %s", cfg.Tools.RestrictToWorkspace, cfg.Tools.AllowFullFileRead, emptyAsNone(cfg.WorkspaceDir))
 	case "tools":
 		return fmt.Sprintf("Brave=%t · exec=%ds", strings.TrimSpace(cfg.Tools.BraveAPIKey) != "", cfg.Tools.ExecTimeoutSeconds)
+	case "mcp":
+		return fmt.Sprintf("%d configured · %d enabled", len(cfg.Tools.MCPServers), enabledMCPServerCount(cfg))
 	case "docindex":
 		return fmt.Sprintf("enabled=%t · roots=%d · retrieve=%d", cfg.DocIndex.Enabled, len(cfg.DocIndex.Roots), cfg.DocIndex.RetrieveLimit)
 	case "skills":
@@ -1041,6 +1359,8 @@ func sectionStatus(cfg config.Config, section string) string {
 		return strings.Join(enabledChannelNames(cfg), ", ")
 	case "service":
 		return serviceSummary(cfg)
+	case "agentcli":
+		return fmt.Sprintf("enabled=%t · concurrent=%d · queued=%d · timeout=%ds · sandboxAuto=%t", cfg.AgentCLI.Enabled, cfg.AgentCLI.MaxConcurrent, cfg.AgentCLI.MaxQueued, cfg.AgentCLI.DefaultTimeoutSeconds, cfg.AgentCLI.AllowSandboxAuto)
 	default:
 		return ""
 	}
@@ -1057,6 +1377,9 @@ func (m configureTUIModel) activeFields() []configureField {
 	if m.currentSection == "channels" {
 		return buildChannelFields(m.cfg, m.currentChannel)
 	}
+	if m.currentSection == "mcp" {
+		return buildMCPFields(m.cfg, m.currentMCPServerName)
+	}
 	return buildSectionFields(m.cfg, m.currentSection, m.cwd)
 }
 
@@ -1068,6 +1391,7 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 	switch section {
 	case "provider":
 		preset := providerPresetLabel(cfg.Provider.APIBase)
+		providerChoices := providerChoiceKeys(cfg)
 		return []configureField{
 			{Key: "provider_preset", Label: "Provider preset", Description: "Cycle through the built-in presets.", Kind: configureFieldChoice, Value: preset, Choices: []string{"OpenAI", "OpenRouter", "Custom"}, ChoiceIndex: indexOfChoice([]string{"OpenAI", "OpenRouter", "Custom"}, preset)},
 			{Key: "provider_api_base", Label: "API base", Description: "OpenAI-compatible base URL.", Kind: configureFieldText, Value: cfg.Provider.APIBase, EmptyHint: "https://api.openai.com/v1"},
@@ -1078,6 +1402,31 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 			{Key: "provider_timeout", Label: "Timeout seconds", Description: "HTTP timeout for provider calls.", Kind: configureFieldText, Value: formatInt(cfg.Provider.TimeoutSeconds), EmptyHint: "60"},
 			{Key: "provider_vision", Label: "Enable vision", Description: "Allow image inputs when the model and runtime support it.", Kind: configureFieldToggle, Value: onOff(cfg.Provider.EnableVision)},
 			{Key: "provider_api_key", Label: "API key", Description: "Hidden secret. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Provider.APIKey), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"},
+			{Key: "provider_openai_api_key", Label: "OpenAI API key", Description: "Hidden OpenAI key. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(providerProfileValue(cfg, "openai").APIKey), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"},
+			{Key: "provider_openrouter_api_key", Label: "OpenRouter API key", Description: "Hidden OpenRouter key. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(providerProfileValue(cfg, "openrouter").APIKey), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"},
+			{Key: "provider_custom_api_base", Label: "Custom API base", Description: "OpenAI-compatible custom provider base URL for local models or another hosted service.", Kind: configureFieldText, Value: providerProfileValue(cfg, "custom").APIBase, EmptyHint: "http://127.0.0.1:8000/v1"},
+			{Key: "provider_custom_api_key", Label: "Custom API key", Description: "Hidden custom provider key. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(providerProfileValue(cfg, "custom").APIKey), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"},
+			{Key: "routing_chat_provider", Label: "Chat provider", Description: "Provider used for normal chat turns.", Kind: configureFieldChoice, Value: cfg.ModelRouting.Chat.Primary.Provider, Choices: providerChoices, ChoiceIndex: indexOfChoice(providerChoices, cfg.ModelRouting.Chat.Primary.Provider)},
+			{Key: "routing_chat_model", Label: "Chat model", Description: "Model used for normal chat turns.", Kind: configureFieldText, Value: cfg.ModelRouting.Chat.Primary.Model, EmptyHint: "gpt-4.1-mini"},
+			{Key: "routing_chat_fallbacks", Label: "Chat fallbacks", Description: "Comma-separated provider/model entries tried after transient failures.", Kind: configureFieldText, Value: formatModelRefs(cfg.ModelRouting.Chat.Fallbacks), EmptyHint: "openrouter/openai/gpt-4o-mini"},
+			{Key: "routing_agents_provider", Label: "Agents provider", Description: "Provider used for agent-style work.", Kind: configureFieldChoice, Value: cfg.ModelRouting.Agents.Primary.Provider, Choices: providerChoices, ChoiceIndex: indexOfChoice(providerChoices, cfg.ModelRouting.Agents.Primary.Provider)},
+			{Key: "routing_agents_model", Label: "Agents model", Description: "Model used for agent-style work.", Kind: configureFieldText, Value: cfg.ModelRouting.Agents.Primary.Model, EmptyHint: cfg.ModelRouting.Chat.Primary.Model},
+			{Key: "routing_agents_fallbacks", Label: "Agents fallbacks", Description: "Comma-separated provider/model entries tried after transient agent failures.", Kind: configureFieldText, Value: formatModelRefs(cfg.ModelRouting.Agents.Fallbacks), EmptyHint: "openrouter/openai/gpt-4o-mini"},
+			{Key: "routing_subagents_provider", Label: "Subagents provider", Description: "Provider used for internal subagent jobs.", Kind: configureFieldChoice, Value: cfg.ModelRouting.Subagents.Primary.Provider, Choices: providerChoices, ChoiceIndex: indexOfChoice(providerChoices, cfg.ModelRouting.Subagents.Primary.Provider)},
+			{Key: "routing_subagents_model", Label: "Subagents model", Description: "Model used for internal subagent jobs.", Kind: configureFieldText, Value: cfg.ModelRouting.Subagents.Primary.Model, EmptyHint: cfg.ModelRouting.Agents.Primary.Model},
+			{Key: "routing_subagents_fallbacks", Label: "Subagents fallbacks", Description: "Comma-separated provider/model entries tried after transient subagent failures.", Kind: configureFieldText, Value: formatModelRefs(cfg.ModelRouting.Subagents.Fallbacks), EmptyHint: "openrouter/openai/gpt-4o-mini"},
+			{Key: "routing_summarization_provider", Label: "Summarization provider", Description: "Provider used for memory consolidation and summaries.", Kind: configureFieldChoice, Value: cfg.ModelRouting.Summarization.Primary.Provider, Choices: providerChoices, ChoiceIndex: indexOfChoice(providerChoices, cfg.ModelRouting.Summarization.Primary.Provider)},
+			{Key: "routing_summarization_model", Label: "Summarization model", Description: "Model used for memory consolidation and summaries.", Kind: configureFieldText, Value: cfg.ModelRouting.Summarization.Primary.Model, EmptyHint: cfg.ModelRouting.Chat.Primary.Model},
+			{Key: "routing_summarization_fallbacks", Label: "Summarization fallbacks", Description: "Comma-separated provider/model entries tried after transient summarization failures.", Kind: configureFieldText, Value: formatModelRefs(cfg.ModelRouting.Summarization.Fallbacks), EmptyHint: "openrouter/openai/gpt-4o-mini"},
+			{Key: "routing_context_provider", Label: "Context manager provider", Description: "Provider used for context-manager maintenance proposals.", Kind: configureFieldChoice, Value: cfg.ModelRouting.ContextManager.Primary.Provider, Choices: providerChoices, ChoiceIndex: indexOfChoice(providerChoices, cfg.ModelRouting.ContextManager.Primary.Provider)},
+			{Key: "routing_context_model", Label: "Context manager model", Description: "Model used for context-manager maintenance proposals.", Kind: configureFieldText, Value: cfg.ModelRouting.ContextManager.Primary.Model, EmptyHint: cfg.ModelRouting.Summarization.Primary.Model},
+			{Key: "routing_context_fallbacks", Label: "Context manager fallbacks", Description: "Comma-separated provider/model entries tried after transient context-manager failures.", Kind: configureFieldText, Value: formatModelRefs(cfg.ModelRouting.ContextManager.Fallbacks), EmptyHint: "openrouter/openai/gpt-4o-mini"},
+			{Key: "routing_embeddings_provider", Label: "Embeddings provider", Description: "Provider used for memory and document embeddings.", Kind: configureFieldChoice, Value: cfg.ModelRouting.Embeddings.Primary.Provider, Choices: providerChoices, ChoiceIndex: indexOfChoice(providerChoices, cfg.ModelRouting.Embeddings.Primary.Provider)},
+			{Key: "routing_embeddings_model", Label: "Embeddings model", Description: "Model used for memory and document embeddings.", Kind: configureFieldText, Value: cfg.ModelRouting.Embeddings.Primary.Model, EmptyHint: "text-embedding-3-small"},
+			{Key: "routing_embeddings_fallbacks", Label: "Embeddings fallbacks", Description: "Comma-separated provider/model entries tried after transient embedding failures.", Kind: configureFieldText, Value: formatModelRefs(cfg.ModelRouting.Embeddings.Fallbacks), EmptyHint: "openai/text-embedding-3-small"},
+			{Key: "routing_embeddings_dimensions", Label: "Embeddings dimensions", Description: "Optional dimensions override for the embeddings role. Use 0 for provider default.", Kind: configureFieldText, Value: formatInt(cfg.ModelRouting.Embeddings.EmbedDimensions), EmptyHint: "0"},
+			{Key: "favorites_openai", Label: "OpenAI favorites", Description: "Comma-separated favorite OpenAI model IDs.", Kind: configureFieldText, Value: formatFavoriteModels(cfg.FavoriteModels["openai"]), EmptyHint: "gpt-4.1-mini,text-embedding-3-small"},
+			{Key: "favorites_openrouter", Label: "OpenRouter favorites", Description: "Comma-separated favorite OpenRouter model IDs.", Kind: configureFieldText, Value: formatFavoriteModels(cfg.FavoriteModels["openrouter"]), EmptyHint: "openai/gpt-4o-mini"},
 		}
 	case "storage":
 		return []configureField{
@@ -1291,7 +1640,7 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 	case "automation":
 		return []configureField{
 			{Key: "automation_cron_enabled", Label: "Enable cron store", Description: "Persist cron jobs and make the cron service available.", Kind: configureFieldToggle, Value: onOff(cfg.Cron.Enabled)},
-			{Key: "automation_cron_store_path", Label: "Cron store path", Description: "JSON persistence path for scheduled jobs.", Kind: configureFieldText, Value: cfg.Cron.StorePath, EmptyHint: "~/.or3-intern/cron.json"},
+			{Key: "automation_cron_store_path", Label: "Cron store path", Description: "SQLite persistence path for scheduled jobs.", Kind: configureFieldText, Value: cfg.Cron.StorePath, EmptyHint: "~/.or3-intern/cron.db"},
 			{Key: "automation_heartbeat_enabled", Label: "Enable heartbeat", Description: "Run periodic autonomous heartbeat turns.", Kind: configureFieldToggle, Value: onOff(cfg.Heartbeat.Enabled)},
 			{Key: "automation_heartbeat_interval", Label: "Heartbeat interval minutes", Description: "How often heartbeat turns run.", Kind: configureFieldText, Value: formatInt(cfg.Heartbeat.IntervalMinutes), EmptyHint: "30"},
 			{Key: "automation_heartbeat_tasks_file", Label: "Heartbeat tasks file", Description: "Markdown file containing recurring heartbeat tasks.", Kind: configureFieldText, Value: cfg.Heartbeat.TasksFile, EmptyHint: "~/.or3-intern/HEARTBEAT.md"},
@@ -1310,11 +1659,26 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 		return []configureField{
 			{Key: "service_enabled", Label: "Enable service API", Description: "Expose the internal authenticated HTTP API.", Kind: configureFieldToggle, Value: onOff(cfg.Service.Enabled)},
 			{Key: "service_listen", Label: "Listen address", Description: "Bind address for the internal service.", Kind: configureFieldText, Value: cfg.Service.Listen, EmptyHint: "127.0.0.1:9100"},
-			{Key: "service_secret", Label: "Shared secret", Description: "Hidden secret. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Service.Secret), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"},
+			{Key: "service_secret", Label: "Shared secret", Description: "Hidden secret. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Service.Secret), SecretHint: "blank keeps current · type clear to remove", EmptyHint: "not configured"},
 			{Key: "service_max_capability", Label: "Service max capability", Description: "Highest tool capability level the app/service API may request.", Kind: configureFieldChoice, Value: cfg.Service.MaxCapability, Choices: capabilityChoices, ChoiceIndex: indexOfChoice(capabilityChoices, cfg.Service.MaxCapability)},
 			{Key: "service_allow_unauthenticated_pairing", Label: "Allow first-time local device pairing", Description: "Let a phone or browser on this same computer ask for a one-time pairing code before it has a saved key.", Kind: configureFieldToggle, Value: onOff(cfg.Service.AllowUnauthenticatedPairing)},
 			{Key: "service_trusted_browser_origins", Label: "Trusted app origins", Description: "Comma-separated browser origins allowed to call the service API from a private-network app.", Kind: configureFieldText, Value: strings.Join(cfg.Service.TrustedBrowserOrigins, ","), EmptyHint: "http://100.x.y.z:3060,http://app.local:3060"},
 			{Key: "service_trusted_browser_cidrs", Label: "Trusted app CIDRs", Description: "Comma-separated remote IPs or CIDRs allowed to use trusted app origins.", Kind: configureFieldText, Value: strings.Join(cfg.Service.TrustedBrowserCIDRs, ","), EmptyHint: "100.64.0.0/10,192.168.1.0/24"},
+		}
+	case "agentcli":
+		modeChoices := []string{"review", "safe_edit", "sandbox_auto"}
+		isolationChoices := []string{"host_readonly", "host_workspace_write", "sandbox_workspace_write", "sandbox_dangerous"}
+		disabledRunners := strings.Join(cfg.AgentCLI.DisabledRunners, ",")
+		return []configureField{
+			{Key: "agentCLI_enabled", Label: "Enable external CLI agents", Description: "Allow the service to discover and run external CLIs like OpenCode, Codex, Claude, and Gemini.", Kind: configureFieldToggle, Value: onOff(cfg.AgentCLI.Enabled)},
+			{Key: "agentCLI_max_concurrent", Label: "Max concurrent external runs", Description: "How many external CLI agents may run at once.", Kind: configureFieldText, Value: formatInt(cfg.AgentCLI.MaxConcurrent), EmptyHint: "1"},
+			{Key: "agentCLI_max_queued", Label: "Max queued external runs", Description: "How many external CLI jobs may wait in line.", Kind: configureFieldText, Value: formatInt(cfg.AgentCLI.MaxQueued), EmptyHint: "16"},
+			{Key: "agentCLI_default_timeout", Label: "Default timeout (seconds)", Description: "How long each external CLI run may take before timing out.", Kind: configureFieldText, Value: formatInt(cfg.AgentCLI.DefaultTimeoutSeconds), EmptyHint: "900"},
+			{Key: "agentCLI_max_timeout", Label: "Max timeout (seconds)", Description: "Hard upper bound for run timeouts.", Kind: configureFieldText, Value: formatInt(cfg.AgentCLI.MaxTimeoutSeconds), EmptyHint: "7200"},
+			{Key: "agentCLI_allow_sandbox_auto", Label: "Allow sandbox full autonomy", Description: "Enable dangerous full-autonomy mode for sandboxed runs. Requires sandbox infrastructure.", Kind: configureFieldToggle, Value: onOff(cfg.AgentCLI.AllowSandboxAuto)},
+			{Key: "agentCLI_default_mode", Label: "Default run mode", Description: "Default permission mode for external CLI runs.", Kind: configureFieldChoice, Value: cfg.AgentCLI.DefaultMode, Choices: modeChoices, ChoiceIndex: indexOfChoice(modeChoices, cfg.AgentCLI.DefaultMode)},
+			{Key: "agentCLI_default_isolation", Label: "Default isolation level", Description: "Default isolation boundary for external CLI runs.", Kind: configureFieldChoice, Value: cfg.AgentCLI.DefaultIsolation, Choices: isolationChoices, ChoiceIndex: indexOfChoice(isolationChoices, cfg.AgentCLI.DefaultIsolation)},
+			{Key: "agentCLI_disabled_runners", Label: "Disabled runners (comma-separated)", Description: "Runner IDs to exclude from discovery. Leave empty to allow all detected runners.", Kind: configureFieldText, Value: disabledRunners, EmptyHint: "opencode,gemini"},
 		}
 	}
 	return nil
@@ -1372,6 +1736,31 @@ var helpfulSectionFieldDescriptions = map[string]string{
 	"provider_timeout":                       "How long OR3 waits for the AI provider before giving up. Increase this for slow models; lower values fail faster when the provider hangs.",
 	"provider_vision":                        "Lets OR3 send images to the AI model when the model supports vision. Leave off if your provider or model cannot read images.",
 	"provider_api_key":                       "Secret key used to access your AI provider. It is hidden on screen. Warning: deleting or mistyping it will prevent OR3 from contacting the provider.",
+	"provider_openai_api_key":                "Secret OpenAI key used when any model role routes to OpenAI. Leave blank to keep the existing key or type clear to remove it.",
+	"provider_openrouter_api_key":            "Secret OpenRouter key used when any model role routes to OpenRouter. Leave blank to keep the existing key or type clear to remove it.",
+	"provider_custom_api_base":               "OpenAI-compatible custom provider base URL for local models or another hosted service. Leave blank unless you have a custom endpoint ready.",
+	"provider_custom_api_key":                "Secret custom provider key used with the custom API base. Leave blank to keep the existing key or type clear to remove it.",
+	"routing_chat_provider":                  "Provider used for normal chat turns and direct replies. Choose a provider that has a valid API key and supports your selected chat model.",
+	"routing_chat_model":                     "Model used for normal chat turns and direct replies. Favorites are only shortcuts; this exact model ID is sent to the provider.",
+	"routing_chat_fallbacks":                 "Comma-separated provider/model fallbacks tried after transient chat failures. Use entries like openrouter/openai/gpt-4o-mini.",
+	"routing_agents_provider":                "Provider used for agent-style work. Most users can match chat, while advanced setups may use a stronger or cheaper provider.",
+	"routing_agents_model":                   "Model used for agent-style work. Use a model that handles tools and longer reasoning well.",
+	"routing_agents_fallbacks":               "Comma-separated provider/model fallbacks tried after transient agent failures. Leave blank to use only the primary.",
+	"routing_subagents_provider":             "Provider used for internal subagent jobs. This can be cheaper than chat when background helpers do routine work.",
+	"routing_subagents_model":                "Model used for internal subagent jobs. Use a model that balances cost and reliability for background work.",
+	"routing_subagents_fallbacks":            "Comma-separated provider/model fallbacks tried after transient subagent failures. Leave blank to use only the primary.",
+	"routing_summarization_provider":         "Provider used for memory consolidation and summaries. A cheaper model is often enough if it follows structured instructions reliably.",
+	"routing_summarization_model":            "Model used for memory consolidation and summaries. Changing this affects future summaries, not existing saved memory by itself.",
+	"routing_summarization_fallbacks":        "Comma-separated provider/model fallbacks tried after transient summarization failures. Leave blank to use only the primary.",
+	"routing_context_provider":               "Provider used for context-manager cleanup proposals. This can be a small reliable model because outputs are guarded before use.",
+	"routing_context_model":                  "Model used for context-manager cleanup proposals. Leave near the summarization model unless context cleanup needs different behavior.",
+	"routing_context_fallbacks":              "Comma-separated provider/model fallbacks tried after transient context-manager failures. Leave blank to use only the primary.",
+	"routing_embeddings_provider":            "Provider used for memory and document embeddings. Warning: changing this can require rebuilding existing memory and document vectors.",
+	"routing_embeddings_model":               "Model used for memory and document embeddings. Warning: changing this can require rebuilding existing memory and document vectors.",
+	"routing_embeddings_fallbacks":           "Comma-separated provider/model fallbacks tried after transient embedding failures. Warning: fallback embeddings should produce compatible vectors.",
+	"routing_embeddings_dimensions":          "Optional dimensions override for the embeddings role. Use 0 for provider defaults; changing it can require rebuilding vectors.",
+	"favorites_openai":                       "Comma-separated favorite OpenAI model IDs shown first in the app. Favorites do not change routing until selected in a role.",
+	"favorites_openrouter":                   "Comma-separated favorite OpenRouter model IDs shown first in the app. Favorites do not change routing until selected in a role.",
 	"storage_db":                             "Where OR3 stores conversation history, memory, approvals, devices, and other local state. Warning: changing this path can make existing history seem missing unless you move the database too.",
 	"storage_artifacts":                      "Folder for large saved outputs, attachments, and files that are too large to keep directly in chat. Warning: changing it can make older artifact links unavailable.",
 	"storage_soul":                           "Optional text file that describes OR3's core personality or operating instructions. Keep it readable and trustworthy because it is added to prompts.",
@@ -1631,8 +2020,36 @@ func toggleFieldValue(cfg *config.Config, section, channel, fieldKey string) boo
 		}
 		return false
 	}
+	if section == "mcp" && fieldKey == "mcp_enabled" {
+		if cfg.Tools.MCPServers == nil {
+			return false
+		}
+		server, ok := cfg.Tools.MCPServers[channel]
+		if !ok {
+			return false
+		}
+		server.Enabled = !server.Enabled
+		cfg.Tools.MCPServers[channel] = server
+		return true
+	}
+	if section == "mcp" && fieldKey == "mcp_allow_insecure_http" {
+		if cfg.Tools.MCPServers == nil {
+			return false
+		}
+		server, ok := cfg.Tools.MCPServers[channel]
+		if !ok {
+			return false
+		}
+		server.AllowInsecureHTTP = !server.AllowInsecureHTTP
+		cfg.Tools.MCPServers[channel] = server
+		return true
+	}
 	current := false
-	for _, field := range buildSectionFields(*cfg, section, "") {
+	fields := buildSectionFields(*cfg, section, "")
+	if section == "mcp" {
+		fields = buildMCPFields(*cfg, channel)
+	}
+	for _, field := range fields {
 		if field.Key == fieldKey {
 			current = field.Value == "on"
 			break
@@ -1646,7 +2063,11 @@ func cycleChoiceValue(cfg *config.Config, section, channel, fieldKey string, del
 		return false
 	}
 	if section != "channels" {
-		for _, field := range buildSectionFields(*cfg, section, "") {
+		fields := buildSectionFields(*cfg, section, "")
+		if section == "mcp" {
+			fields = buildMCPFields(*cfg, channel)
+		}
+		for _, field := range fields {
 			if field.Key == fieldKey && len(field.Choices) > 0 {
 				next := field.Choices[wrapIndex(indexOfChoice(field.Choices, field.Value)+delta, len(field.Choices))]
 				changed, err := applyChoiceSelection(cfg, section, channel, fieldKey, next)
@@ -1812,18 +2233,69 @@ func applyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 		}
 		return false, nil
 	}
+	if section == "mcp" {
+		if cfg.Tools.MCPServers == nil {
+			cfg.Tools.MCPServers = map[string]config.MCPServerConfig{}
+		}
+		server, ok := cfg.Tools.MCPServers[channel]
+		if !ok {
+			return false, nil
+		}
+		switch fieldKey {
+		case "mcp_command":
+			server.Command = value
+		case "mcp_args":
+			server.Args = splitAndCompact(value)
+		case "mcp_child_env_allowlist":
+			server.ChildEnvAllowlist = splitAndCompact(value)
+		case "mcp_url":
+			server.URL = value
+		case "mcp_headers":
+			headers, err := parseStringMap(value)
+			if err != nil {
+				return false, err
+			}
+			server.Headers = headers
+		case "mcp_env":
+			env, err := parseStringMap(value)
+			if err != nil {
+				return false, err
+			}
+			server.Env = env
+		case "mcp_connect_timeout":
+			changed, err := setIntValue(&server.ConnectTimeoutSeconds, value, fieldKey)
+			cfg.Tools.MCPServers[channel] = server
+			return changed, err
+		case "mcp_tool_timeout":
+			changed, err := setIntValue(&server.ToolTimeoutSeconds, value, fieldKey)
+			cfg.Tools.MCPServers[channel] = server
+			return changed, err
+		default:
+			return false, nil
+		}
+		cfg.Tools.MCPServers[channel] = server
+		return true, nil
+	}
 	switch fieldKey {
 	case "provider_api_base":
 		cfg.Provider.APIBase = value
+		cfg.ModelRouting.Chat.Primary.Provider = configureProviderKeyFromBase(value)
+		setProviderProfileAPIBase(cfg, cfg.ModelRouting.Chat.Primary.Provider, value)
 		return true, nil
 	case "provider_model":
 		cfg.Provider.Model = value
+		cfg.ModelRouting.Chat.Primary.Model = value
+		cfg.ModelRouting.Agents.Primary.Model = value
+		cfg.ModelRouting.Subagents.Primary.Model = value
 		return true, nil
 	case "provider_embed":
 		cfg.Provider.EmbedModel = value
+		cfg.ModelRouting.Embeddings.Primary.Model = value
 		return true, nil
 	case "provider_embed_dimensions":
-		return setIntValue(&cfg.Provider.EmbedDimensions, value, fieldKey)
+		changed, err := setIntValue(&cfg.Provider.EmbedDimensions, value, fieldKey)
+		cfg.ModelRouting.Embeddings.EmbedDimensions = cfg.Provider.EmbedDimensions
+		return changed, err
 	case "provider_temperature":
 		return setFloatValue(&cfg.Provider.Temperature, value, fieldKey)
 	case "provider_timeout":
@@ -1831,11 +2303,116 @@ func applyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 	case "provider_api_key":
 		if clearRequested {
 			cfg.Provider.APIKey = ""
+			setProviderProfileAPIKey(cfg, "openai", "")
 			return true, nil
 		}
 		if value != "" {
 			cfg.Provider.APIKey = value
+			setProviderProfileAPIKey(cfg, configureProviderKeyFromBase(cfg.Provider.APIBase), value)
 		}
+		return true, nil
+	case "provider_openai_api_key":
+		if clearRequested {
+			setProviderProfileAPIKey(cfg, "openai", "")
+			return true, nil
+		}
+		if value != "" {
+			setProviderProfileAPIKey(cfg, "openai", value)
+		}
+		return true, nil
+	case "provider_openrouter_api_key":
+		if clearRequested {
+			setProviderProfileAPIKey(cfg, "openrouter", "")
+			return true, nil
+		}
+		if value != "" {
+			setProviderProfileAPIKey(cfg, "openrouter", value)
+		}
+		return true, nil
+	case "provider_custom_api_base":
+		setProviderProfileAPIBase(cfg, "custom", value)
+		return true, nil
+	case "provider_custom_api_key":
+		if clearRequested {
+			setProviderProfileAPIKey(cfg, "custom", "")
+			return true, nil
+		}
+		if value != "" {
+			setProviderProfileAPIKey(cfg, "custom", value)
+		}
+		return true, nil
+	case "routing_chat_provider":
+		cfg.ModelRouting.Chat.Primary.Provider = value
+		return true, nil
+	case "routing_chat_model":
+		cfg.ModelRouting.Chat.Primary.Model = value
+		return true, nil
+	case "routing_chat_fallbacks":
+		cfg.ModelRouting.Chat.Fallbacks = parseModelRefs(value)
+		return true, nil
+	case "routing_agents_provider":
+		cfg.ModelRouting.Agents.Primary.Provider = value
+		return true, nil
+	case "routing_agents_model":
+		cfg.ModelRouting.Agents.Primary.Model = value
+		return true, nil
+	case "routing_agents_fallbacks":
+		cfg.ModelRouting.Agents.Fallbacks = parseModelRefs(value)
+		return true, nil
+	case "routing_subagents_provider":
+		cfg.ModelRouting.Subagents.Primary.Provider = value
+		return true, nil
+	case "routing_subagents_model":
+		cfg.ModelRouting.Subagents.Primary.Model = value
+		return true, nil
+	case "routing_subagents_fallbacks":
+		cfg.ModelRouting.Subagents.Fallbacks = parseModelRefs(value)
+		return true, nil
+	case "routing_summarization_provider":
+		cfg.ModelRouting.Summarization.Primary.Provider = value
+		return true, nil
+	case "routing_summarization_model":
+		cfg.ModelRouting.Summarization.Primary.Model = value
+		cfg.ConsolidationModel = value
+		return true, nil
+	case "routing_summarization_fallbacks":
+		cfg.ModelRouting.Summarization.Fallbacks = parseModelRefs(value)
+		return true, nil
+	case "routing_context_provider":
+		cfg.ModelRouting.ContextManager.Primary.Provider = value
+		return true, nil
+	case "routing_context_model":
+		cfg.ModelRouting.ContextManager.Primary.Model = value
+		cfg.ContextManager.Model = value
+		return true, nil
+	case "routing_context_fallbacks":
+		cfg.ModelRouting.ContextManager.Fallbacks = parseModelRefs(value)
+		return true, nil
+	case "routing_embeddings_provider":
+		cfg.ModelRouting.Embeddings.Primary.Provider = value
+		return true, nil
+	case "routing_embeddings_model":
+		cfg.ModelRouting.Embeddings.Primary.Model = value
+		cfg.Provider.EmbedModel = value
+		return true, nil
+	case "routing_embeddings_fallbacks":
+		cfg.ModelRouting.Embeddings.Fallbacks = parseModelRefs(value)
+		return true, nil
+	case "routing_embeddings_dimensions":
+		changed, err := setIntValue(&cfg.ModelRouting.Embeddings.EmbedDimensions, value, fieldKey)
+		cfg.Provider.EmbedDimensions = cfg.ModelRouting.Embeddings.EmbedDimensions
+		return changed, err
+	case "favorites_openai":
+		if cfg.FavoriteModels == nil {
+			cfg.FavoriteModels = config.FavoriteModelsConfig{}
+		}
+		cfg.FavoriteModels["openai"] = parseFavoriteModels(value)
+		return true, nil
+	case "favorites_openrouter":
+		if cfg.FavoriteModels == nil {
+			cfg.FavoriteModels = config.FavoriteModelsConfig{}
+		}
+		cfg.FavoriteModels["openrouter"] = parseFavoriteModels(value)
 		return true, nil
 	case "storage_db":
 		cfg.DBPath = value
@@ -2199,6 +2776,23 @@ func applyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 	case "service_trusted_browser_cidrs":
 		cfg.Service.TrustedBrowserCIDRs = splitAndCompact(value)
 		return true, nil
+	case "agentCLI_max_concurrent":
+		return setIntValue(&cfg.AgentCLI.MaxConcurrent, value, fieldKey)
+	case "agentCLI_max_queued":
+		return setIntValue(&cfg.AgentCLI.MaxQueued, value, fieldKey)
+	case "agentCLI_default_timeout":
+		return setIntValue(&cfg.AgentCLI.DefaultTimeoutSeconds, value, fieldKey)
+	case "agentCLI_max_timeout":
+		return setIntValue(&cfg.AgentCLI.MaxTimeoutSeconds, value, fieldKey)
+	case "agentCLI_disabled_runners":
+		cfg.AgentCLI.DisabledRunners = splitAndCompact(value)
+		return true, nil
+	case "agentCLI_enabled":
+		cfg.AgentCLI.Enabled = value == "true" || value == "on" || value == "1"
+		return true, nil
+	case "agentCLI_allow_sandbox_auto":
+		cfg.AgentCLI.AllowSandboxAuto = value == "true" || value == "on" || value == "1"
+		return true, nil
 	default:
 		return false, nil
 	}
@@ -2210,6 +2804,24 @@ func setToggleFieldValue(cfg *config.Config, section, channel, fieldKey string, 
 	}
 	if section == "channels" {
 		return false
+	}
+	if section == "mcp" && fieldKey == "mcp_enabled" {
+		server, ok := cfg.Tools.MCPServers[channel]
+		if !ok {
+			return false
+		}
+		server.Enabled = value
+		cfg.Tools.MCPServers[channel] = server
+		return true
+	}
+	if section == "mcp" && fieldKey == "mcp_allow_insecure_http" {
+		server, ok := cfg.Tools.MCPServers[channel]
+		if !ok {
+			return false
+		}
+		server.AllowInsecureHTTP = value
+		cfg.Tools.MCPServers[channel] = server
+		return true
 	}
 	switch fieldKey {
 	case "provider_vision":
@@ -2300,6 +2912,10 @@ func setToggleFieldValue(cfg *config.Config, section, channel, fieldKey string, 
 		cfg.Service.Enabled = value
 	case "service_allow_unauthenticated_pairing":
 		cfg.Service.AllowUnauthenticatedPairing = value
+	case "agentCLI_enabled":
+		cfg.AgentCLI.Enabled = value
+	case "agentCLI_allow_sandbox_auto":
+		cfg.AgentCLI.AllowSandboxAuto = value
 	default:
 		return false
 	}
@@ -2312,6 +2928,15 @@ func applyChoiceSelection(cfg *config.Config, section, channel, fieldKey, choice
 	}
 	if section == "channels" && fieldKey == "access" {
 		applyAccessChoice(cfg, channel, choice)
+		return true, nil
+	}
+	if section == "mcp" && fieldKey == "mcp_transport" {
+		server, ok := cfg.Tools.MCPServers[channel]
+		if !ok {
+			return false, nil
+		}
+		server.Transport = choice
+		cfg.Tools.MCPServers[channel] = server
 		return true, nil
 	}
 	switch fieldKey {
@@ -2348,6 +2973,22 @@ func applyChoiceSelection(cfg *config.Config, section, channel, fieldKey, choice
 		}
 		cfg.Service.MaxCapability = normalized
 		return true, nil
+	case "agentCLI_default_mode":
+		switch choice {
+		case "review", "safe_edit", "sandbox_auto":
+			cfg.AgentCLI.DefaultMode = choice
+			return true, nil
+		default:
+			return false, fmt.Errorf("agentCLI.defaultMode must be review, safe_edit, or sandbox_auto")
+		}
+	case "agentCLI_default_isolation":
+		switch choice {
+		case "host_readonly", "host_workspace_write", "sandbox_workspace_write", "sandbox_dangerous":
+			cfg.AgentCLI.DefaultIsolation = choice
+			return true, nil
+		default:
+			return false, fmt.Errorf("agentCLI.defaultIsolation must be host_readonly, host_workspace_write, sandbox_workspace_write, or sandbox_dangerous")
+		}
 	case "security_approval_pairing_mode":
 		cfg.Security.Approvals.Pairing.Mode = config.ApprovalMode(choice)
 		return true, nil
@@ -2573,6 +3214,122 @@ func providerPresetLabel(apiBase string) string {
 		return "OpenRouter"
 	default:
 		return "Custom"
+	}
+}
+
+func providerChoiceKeys(cfg config.Config) []string {
+	keys := make([]string, 0, len(cfg.Providers))
+	for key, profile := range cfg.Providers {
+		if strings.TrimSpace(profile.APIBase) == "" && key != "custom" {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, preferred := range []string{"openai", "openrouter", "custom"} {
+		if !stringInSlice(preferred, keys) {
+			keys = append(keys, preferred)
+		}
+	}
+	return keys
+}
+
+func stringInSlice(value string, values []string) bool {
+	for _, item := range values {
+		if item == value {
+			return true
+		}
+	}
+	return false
+}
+
+func providerProfileValue(cfg config.Config, key string) config.ProviderProfileConfig {
+	profile, _ := cfg.ProviderProfile(key)
+	return profile
+}
+
+func formatModelRefs(refs []config.ModelRef) string {
+	parts := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		if strings.TrimSpace(ref.Provider) == "" || strings.TrimSpace(ref.Model) == "" {
+			continue
+		}
+		parts = append(parts, strings.TrimSpace(ref.Provider)+"/"+strings.TrimSpace(ref.Model))
+	}
+	return strings.Join(parts, ",")
+}
+
+func parseModelRefs(value string) []config.ModelRef {
+	raw := splitAndCompact(value)
+	refs := make([]config.ModelRef, 0, len(raw))
+	for _, item := range raw {
+		provider, model, ok := strings.Cut(item, "/")
+		if !ok || strings.TrimSpace(provider) == "" || strings.TrimSpace(model) == "" {
+			continue
+		}
+		refs = append(refs, config.ModelRef{Provider: strings.TrimSpace(provider), Model: strings.TrimSpace(model)})
+	}
+	return refs
+}
+
+func formatFavoriteModels(favorites []config.FavoriteModelConfig) string {
+	parts := make([]string, 0, len(favorites))
+	for _, favorite := range favorites {
+		if strings.TrimSpace(favorite.Model) != "" {
+			parts = append(parts, strings.TrimSpace(favorite.Model))
+		}
+	}
+	return strings.Join(parts, ",")
+}
+
+func parseFavoriteModels(value string) []config.FavoriteModelConfig {
+	models := splitAndCompact(value)
+	out := make([]config.FavoriteModelConfig, 0, len(models))
+	for _, model := range models {
+		out = append(out, config.FavoriteModelConfig{Model: model})
+	}
+	return out
+}
+
+func setProviderProfileAPIKey(cfg *config.Config, key, value string) {
+	if cfg.Providers == nil {
+		cfg.Providers = config.ProviderProfiles{}
+	}
+	profile := providerProfileValue(*cfg, key)
+	profile.APIKey = value
+	if profile.Label == "" {
+		profile.Label = strings.ReplaceAll(key, "-", " ")
+	}
+	if profile.TimeoutSeconds <= 0 {
+		profile.TimeoutSeconds = 60
+	}
+	cfg.Providers[key] = profile
+}
+
+func setProviderProfileAPIBase(cfg *config.Config, key, value string) {
+	if cfg.Providers == nil {
+		cfg.Providers = config.ProviderProfiles{}
+	}
+	profile := providerProfileValue(*cfg, key)
+	profile.APIBase = strings.TrimRight(strings.TrimSpace(value), "/")
+	if profile.Label == "" {
+		profile.Label = strings.ReplaceAll(key, "-", " ")
+	}
+	if profile.TimeoutSeconds <= 0 {
+		profile.TimeoutSeconds = 60
+	}
+	cfg.Providers[key] = profile
+}
+
+func configureProviderKeyFromBase(apiBase string) string {
+	base := strings.ToLower(strings.TrimSpace(apiBase))
+	switch {
+	case strings.Contains(base, "openrouter.ai"):
+		return "openrouter"
+	case strings.Contains(base, "api.openai.com"):
+		return "openai"
+	default:
+		return "custom"
 	}
 }
 

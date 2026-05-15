@@ -21,12 +21,13 @@ var configureSections = []struct {
 	Label       string
 	Description string
 }{
-	{Key: "provider", Label: "Provider", Description: "API endpoint, chat model, embeddings, timeouts, and provider secrets"},
+	{Key: "provider", Label: "Providers", Description: "Provider profiles, model routing, favorites, fallbacks, embeddings, and secrets"},
 	{Key: "storage", Label: "Storage", Description: "Database, artifacts, and bootstrap file locations"},
 	{Key: "runtime", Label: "Runtime", Description: "Session defaults, memory retrieval, workers, consolidation, and subagents"},
 	{Key: "context", Label: "Context", Description: "Token budgets, packet mode, dynamic tools, task card, and context manager"},
 	{Key: "workspace", Label: "Workspace", Description: "Workspace directory and file-tool boundaries"},
 	{Key: "tools", Label: "Tools", Description: "Search, proxy, exec timeout, and PATH settings"},
+	{Key: "mcp", Label: "MCP Servers", Description: "Model Context Protocol server connections and tool registration"},
 	{Key: "docindex", Label: "Doc Index", Description: "Workspace indexing and retrieval controls"},
 	{Key: "skills", Label: "Skills", Description: "Managed skills, trust policy, watch settings, and ClawHub"},
 	{Key: "auth", Label: "Auth", Description: "Passkeys, WebAuthn origins, sessions, step-up, and fallback policy"},
@@ -36,6 +37,7 @@ var configureSections = []struct {
 	{Key: "automation", Label: "Automation", Description: "Cron, heartbeat, webhook, and file-watch triggers"},
 	{Key: "channels", Label: "Channels", Description: "Telegram, Slack, Discord, WhatsApp, and Email delivery"},
 	{Key: "service", Label: "Service", Description: "Internal authenticated HTTP API listener"},
+	{Key: "agentCLI", Label: "External CLI Agents", Description: "External agent CLI delegation, runner discovery, and sandbox controls"},
 }
 
 type configureArgs struct {
@@ -269,16 +271,35 @@ func runConfigureSection(reader *bufio.Reader, out io.Writer, cfg *config.Config
 	switch section {
 	case "channels":
 		return configureChannelsSection(reader, out, cfg)
-	case "provider", "storage", "runtime", "context", "workspace", "tools", "docindex", "skills", "auth", "security", "hardening", "session", "automation", "service":
+	case "mcp":
+		return configureMCPSection(out, cfg)
+	case "provider", "storage", "runtime", "context", "workspace", "tools", "docindex", "skills", "auth", "security", "hardening", "session", "automation", "service", "agentcli":
 		return configureGenericSection(reader, out, cfg, section, cwd)
 	default:
 		return fmt.Errorf("unknown configure section %q", section)
 	}
 }
 
+func configureMCPSection(out io.Writer, cfg *config.Config) error {
+	fmt.Fprintln(out, "MCP Servers configuration")
+	if cfg == nil || len(cfg.Tools.MCPServers) == 0 {
+		fmt.Fprintln(out, "No MCP servers configured. Run this command in an interactive terminal to add one.")
+		return nil
+	}
+	for _, name := range sortedMCPServerNames(cfg.Tools.MCPServers) {
+		server := cfg.Tools.MCPServers[name]
+		fmt.Fprintf(out, "- %s: %s, enabled=%t\n", name, server.Transport, server.Enabled)
+	}
+	fmt.Fprintln(out, "Run this command in an interactive terminal to add, edit, remove, or test MCP servers.")
+	return nil
+}
+
 func configureGenericSection(reader *bufio.Reader, out io.Writer, cfg *config.Config, section, cwd string) error {
 	meta := configureSectionMeta(section)
 	fields := buildSectionFields(*cfg, section, cwd)
+	if section == "provider" && len(fields) > 9 {
+		fields = fields[:9]
+	}
 	if len(fields) == 0 {
 		return fmt.Errorf("section %q has no editable fields", section)
 	}

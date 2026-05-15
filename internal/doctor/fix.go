@@ -63,6 +63,18 @@ func ApplyAutomaticFixes(cfgPath string, cfg *config.Config, report Report) ([]A
 				changedConfig = true
 				applied = append(applied, AppliedFix{ID: finding.ID, Summary: "bound service to loopback"})
 			}
+		case "service.unauthenticated_pairing_remote":
+			cfg.Service.AllowUnauthenticatedPairing = false
+			changedConfig = true
+			applied = append(applied, AppliedFix{ID: finding.ID, Summary: "disabled unauthenticated remote pairing"})
+		case "service.shared_secret_role_unsafe":
+			cfg.Service.SharedSecretRole = "service-client"
+			changedConfig = true
+			applied = append(applied, AppliedFix{ID: finding.ID, Summary: "limited shared-secret role to service-client"})
+		case "service.max_capability_unsafe":
+			cfg.Service.MaxCapability = "safe"
+			changedConfig = true
+			applied = append(applied, AppliedFix{ID: finding.ID, Summary: "limited service capability to safe"})
 		case "webhook.public_bind":
 			if fixModeForBind(cfg.RuntimeProfile) == FixModeAutomatic {
 				cfg.Triggers.Webhook.Addr = "127.0.0.1:8765"

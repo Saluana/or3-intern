@@ -75,14 +75,14 @@ func (t *ExecTool) Schema() map[string]any {
 }
 
 func (t *ExecTool) CapabilityForParams(params map[string]any) CapabilityLevel {
-	if strings.TrimSpace(fmt.Sprint(params["command"])) != "" && fmt.Sprint(params["command"]) != "<nil>" {
+	if stringParam(params, "command") != "" {
 		return CapabilityPrivileged
 	}
 	return CapabilityGuarded
 }
 
 func (t *ExecTool) CapabilityForContextParams(ctx context.Context, params map[string]any) CapabilityLevel {
-	if strings.TrimSpace(fmt.Sprint(params["command"])) != "" && fmt.Sprint(params["command"]) != "<nil>" {
+	if stringParam(params, "command") != "" {
 		if toolsRequestIsService(ctx) {
 			return CapabilityGuarded
 		}
@@ -101,7 +101,7 @@ var defaultBlockedPatterns = []string{
 
 func resolveExecWorkingDir(requested string, restrictDir string) (string, error) {
 	requested = strings.TrimSpace(requested)
-	if requested == "" || requested == "<nil>" {
+	if requested == "" {
 		if strings.TrimSpace(restrictDir) != "" {
 			return restrictDir, nil
 		}
@@ -122,10 +122,7 @@ func resolveExecWorkingDir(requested string, restrictDir string) (string, error)
 }
 
 func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, error) {
-	program := strings.TrimSpace(fmt.Sprint(params["program"]))
-	if program == "<nil>" {
-		program = ""
-	}
+	program := stringParam(params, "program")
 	legacyCommand, _ := params["command"].(string)
 	legacyCommand = strings.TrimSpace(legacyCommand)
 	if toolsRequestIsService(ctx) && legacyCommand != "" {
@@ -171,7 +168,7 @@ func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, 
 			}
 		}
 	}
-	cwd, err := resolveExecWorkingDir(fmt.Sprint(params["cwd"]), t.RestrictDir)
+	cwd, err := resolveExecWorkingDir(stringParam(params, "cwd"), t.RestrictDir)
 	if err != nil {
 		return "", err
 	}
@@ -181,11 +178,11 @@ func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, 
 		if err != nil {
 			return "", err
 		}
-		abs, err = canonicalizePath(abs)
+		abs, err = CanonicalizePath(abs)
 		if err != nil {
 			return "", err
 		}
-		root, err := canonicalizeRoot(t.RestrictDir)
+		root, err := CanonicalizeRoot(t.RestrictDir)
 		if err != nil {
 			return "", err
 		}
@@ -250,7 +247,10 @@ func (t *ExecTool) Execute(ctx context.Context, params map[string]any) (string, 
 	if legacyCommand != "" {
 		c, err = commandWithSandbox(cctx, t.Sandbox, cwd, []string{"bash", "-lc", legacyCommand})
 		if err != nil {
-			return "", err
+			if !errors.Is(err, errSandboxNotEnabled) {
+				return "", err
+			}
+			c = nil
 		}
 		if c == nil {
 			c = exec.CommandContext(cctx, "bash", "-lc", legacyCommand)

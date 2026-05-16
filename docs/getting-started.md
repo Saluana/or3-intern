@@ -6,7 +6,7 @@
 
 - a Go CLI
 - SQLite-backed history and memory
-- external channel adapters
+- connected app adapters
 - optional autonomous triggers
 - optional internal HTTP service mode
 - a hardened tool execution model
@@ -75,7 +75,7 @@ Use `status` after setup any time you want a quick answer to:
 
 Use `or3-intern status --advanced` when you also want the internal finding IDs. When a safe automatic repair is available, advanced output shows a focused `or3-intern status --fix <finding-id>` command.
 
-### 3. Start an interactive local session
+### 3. Start an interactive local conversation
 
 ```bash
 or3-intern chat
@@ -90,7 +90,7 @@ Inside chat, `/new` archives the current conversation into long-term memory befo
 or3-intern settings
 ```
 
-`settings` opens a task-based home with AI Provider, Workspace Folder, Connected Devices, Safety Level, Channels, Tools, Memory, and Advanced. Use `or3-intern settings --section safety` to change safety mode, `or3-intern settings --section workspace` to change the folder boundary, or `or3-intern settings --export config.json` to export the raw config for advanced review.
+`settings` opens a task-based home with AI Provider, Workspace Folder, Connected Devices, Safety Level, Connected Apps, Tools, Memory, and Advanced. Use `or3-intern settings --section safety` to change safety mode, `or3-intern settings --section workspace` to change the folder boundary, or `or3-intern settings --export config.json` to export the raw config for advanced review.
 
 ### 5. Connect another device
 
@@ -108,13 +108,13 @@ or3-intern connect-device list
 
 to review already connected devices.
 
-### 6. Run external channels and automation
+### 6. Run connected apps and automation
 
 ```bash
 or3-intern serve
 ```
 
-`serve` starts the shared runtime plus any enabled channels, triggers, heartbeat jobs, and other background workers.
+`serve` starts the shared runtime plus any enabled connected apps, triggers, heartbeat jobs, and other background workers.
 
 ### 7. Run internal service mode when integrating with OR3 Net
 
@@ -151,8 +151,8 @@ Common files and directories include:
 3. Confirm `chat` works with a simple question
 4. Review or adjust anything important with `settings`
 5. Review [configuration-reference.md](configuration-reference.md) when you need raw config keys
-6. Run `or3-intern doctor --strict` before exposing channels or service mode; use `or3-intern doctor --fix` for safe automatic repairs and `or3-intern doctor --fix --interactive` for guided fixes
-7. Enable one advanced feature at a time: channels, skills, triggers, MCP, or service mode
+6. Run `or3-intern doctor --strict` before exposing connected apps or service mode; use `or3-intern doctor --fix` for safe automatic repairs and `or3-intern doctor --fix --interactive` for guided fixes
+7. Enable one advanced feature at a time: connected apps, skills, triggers, MCP, or service mode
 
 ## After changing embedding providers or models
 
@@ -178,5 +178,5 @@ If you only need long-term memory rebuilt, use `or3-intern embeddings rebuild me
 
 - Runtime behavior: [agent-runtime.md](agent-runtime.md)
 - Context loading and retrieval: [memory-and-context.md](memory-and-context.md)
-- External integrations: [channels.md](channels.md)
+- Connected app integrations: [channels.md](channels.md)
 - Hardening controls: [security-and-hardening.md](security-and-hardening.md)

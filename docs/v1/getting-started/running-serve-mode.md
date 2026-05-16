@@ -1,6 +1,6 @@
 # Running serve mode
 
-Serve mode is the "always-on" mode. It runs all enabled external channels and automation.
+Serve mode is the "always-on" mode. It runs all enabled connected apps and automation.
 
 ## Start the server
 
@@ -21,11 +21,11 @@ This starts everything you've configured:
 
 ## When to use serve mode
 
-Use serve mode when you want your agent to be available all the time. It listens on all channels and runs scheduled tasks in the background.
+Use serve mode when you want your agent to be available all the time. It listens through connected apps and runs scheduled tasks in the background.
 
-## Channel configuration
+## Connected app setup
 
-Each channel needs its own setup. For example, a Telegram bot needs a bot token from BotFather. Set these in your config file or environment variables.
+Each connected app needs its own setup. For example, a Telegram bot needs a bot token from BotFather. Set these in your config file or environment variables.
 
 ## Automation
 

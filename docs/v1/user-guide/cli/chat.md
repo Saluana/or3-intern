@@ -17,14 +17,14 @@ The current chat flow includes useful slash commands such as:
 
 - `/commands` — show available local chat commands
 - `/status` — show message counts, context pressure, and related runtime details
-- `/new` — archive the current session into memory and start a fresh live conversation
+- `/new` — archive the current conversation into memory and start fresh
 - `/exit` or `/quit` — leave chat
 
 You can also leave with `Ctrl+C`.
 
-## Sessions
+## Conversations
 
-Chat runs under a stable session identity so conversation history can build over time. Use `/new` when you want to preserve memory but clear the live thread for a fresh conversation.
+Chat keeps a stable conversation history so memory can build over time. Use `/new` when you want to preserve memory but start a fresh conversation.
 
 ## Before you start
 

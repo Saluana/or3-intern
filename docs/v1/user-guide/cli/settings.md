@@ -16,7 +16,7 @@ Instead of exposing raw config JSON first, `settings` presents task-oriented are
 - Workspace Folder
 - Connected Devices
 - Safety Level
-- Channels
+- Connected Apps
 - Tools
 - Memory
 - Advanced
@@ -41,6 +41,6 @@ Use it when you want to review or update your setup without dropping directly in
 
 ## Good uses
 
-- review the current setup before enabling tools or channels
+- review the current setup before enabling tools or connected apps
 - jump to one task area with `--section`
 - export the config without editing JSON by hand

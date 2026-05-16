@@ -2,7 +2,7 @@
 
 ## Interactive mode
 
-Start a chat session in your terminal:
+Start a conversation in your terminal:
 
 ```bash
 or3-intern chat
@@ -10,7 +10,7 @@ or3-intern chat
 
 Type your messages and press Enter. The agent will respond. It can use tools, remember context, and run skills.
 
-Type `/help` to see available commands during a session. Type `/exit` or press Ctrl+C to quit.
+Type `/help` to see available commands during a conversation. Type `/exit` or press Ctrl+C to quit.
 
 ## One-shot mode
 
@@ -22,9 +22,9 @@ or3-intern agent -m "What files are in the current directory?"
 
 The agent runs your request and prints the result. This is useful for automation and piping.
 
-## Multi-turn sessions
+## Multi-turn conversations
 
-The interactive mode keeps the conversation going. The agent remembers what you talked about earlier in the session. It can also search its memory from older sessions.
+The interactive mode keeps the conversation going. The agent remembers what you talked about earlier in the conversation. It can also search its memory from older conversations.
 
 ## Tips
 

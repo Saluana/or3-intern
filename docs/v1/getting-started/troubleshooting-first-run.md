@@ -36,7 +36,7 @@ If port 9100 is taken, change it in your config:
 }
 ```
 
-## Channel not connecting
+## Connected app not working
 
 Check your bot tokens and API keys in the config. Make sure they are correct. For Telegram, check the bot was created with BotFather. For Slack, verify the bot token has the right scopes.
 
@@ -46,4 +46,4 @@ Check your bot tokens and API keys in the config. Make sure they are correct. Fo
 or3-intern doctor
 ```
 
-This checks your setup and reports any problems. It looks at config, provider connectivity, and channel status.
+This checks your setup and reports any problems. It looks at config, provider connectivity, and connected app status.

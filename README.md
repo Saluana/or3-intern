@@ -1,6 +1,6 @@
 # or3-intern (v1)
 
-`or3-intern` is a Go rewrite of nanobot with SQLite persistence, hybrid long-term memory retrieval, external channel integrations, autonomous triggers, and a hardened tool runtime.
+`or3-intern` is a Go rewrite of nanobot with SQLite persistence, hybrid long-term memory retrieval, connected app integrations, autonomous triggers, and a hardened tool runtime.
 
 The README now stays focused on orientation and quick start. Detailed guides and references live under `docs/`.
 
@@ -24,15 +24,15 @@ or3-intern version
    or3-intern setup
    ```
 
-2. Start an interactive local session:
+2. Start an interactive local conversation:
 
    ```bash
    or3-intern chat
    ```
 
-   Inside chat, use `/new` when you want to archive the current conversation into memory and start with a clean live session.
+   Inside chat, use `/new` when you want to archive the current conversation into memory and start fresh.
 
-3. Or run enabled external channels and automation:
+3. Or run enabled connected apps and automation:
 
    ```bash
    or3-intern serve
@@ -46,7 +46,7 @@ or3-intern version
 
 The `setup` command is the recommended first-run flow. It asks for a provider, workspace folder, scenario, and safety mode, then translates those choices into the existing runtime profile, approvals, audit, service, and hardening settings.
 
-Use `settings` when you want to revisit your setup later. It opens a task-based home for AI Provider, Workspace Folder, Connected Devices, Safety Level, Channels, Tools, Memory, and Advanced:
+Use `settings` when you want to revisit your setup later. It opens a task-based home for AI Provider, Workspace Folder, Connected Devices, Safety Level, Connected Apps, Tools, Memory, and Advanced:
 
 ```bash
 or3-intern settings
@@ -62,9 +62,9 @@ Use `go run ./cmd/or3-intern ...` for ad hoc local runs, or install the binary f
 
 ## Core features
 
-- Shared agent runtime for CLI, service mode, channels, and autonomous jobs
+- Shared agent runtime for CLI, service mode, connected apps, and autonomous jobs
 - SQLite-backed history with hybrid memory retrieval and document indexing
-- External channels for Telegram, Slack, Discord, Email, and a local WhatsApp bridge
+- Connected apps for Telegram, Slack, Discord, Email, and a local WhatsApp bridge
 - ClawHub/OpenClaw-compatible skills with trust and quarantine controls
 - Webhook, file-watch, heartbeat, and cron-based automation
 - Phase-based hardening, audit, secret store, profile, and network controls
@@ -83,7 +83,7 @@ Root help shows the full command catalog by default:
 - `or3-intern configure [--section ...]` interactive setup and reconfiguration wizard
 - `or3-intern init` guided first-run setup
 - `or3-intern config-path` print the resolved config.json path
-- `or3-intern serve` run enabled external channels and automation
+- `or3-intern serve` run enabled connected apps and automation
 - `or3-intern service` run the internal authenticated HTTP API for OR3 Net
 - `scripts/restart-service.sh [restart|start|stop|status]` manage a repo-run `or3-intern service` process without retyping the full command
 - `or3-intern agent -m "hello"` run a one-shot turn
@@ -113,7 +113,7 @@ The setup docs stay text-first in-repo. Screenshots or terminal recordings can b
 - CLI reference
 - Agent runtime
 - Memory and context
-- Channel integrations
+- Connected app integrations
 - Skills
 - Triggers and automation
 - Security and hardening
@@ -126,9 +126,9 @@ The setup docs stay text-first in-repo. Screenshots or terminal recordings can b
 - History is fetched with bounded queries instead of full scans.
 - Hybrid retrieval combines pinned context, vector similarity, and FTS keyword search.
 - After changing `provider.apiBase` or `provider.embedModel`, run `or3-intern embeddings status` and then `or3-intern embeddings rebuild memory` (or `all`) so stored vectors are regenerated in the new embedding space.
-- External channels are disabled by default until configured.
+- Connected apps are disabled by default until configured.
 - Incomplete optional integrations are quarantined at startup and surfaced by `status` and `/internal/v1/app/bootstrap` instead of silently breaking core chat.
-- `or3-intern doctor` is the main readiness command before exposing channels, triggers, or the service API.
+- `or3-intern doctor` is the main readiness command before exposing connected apps, triggers, or the service API.
 - `OR3_SERVICE_UNSAFE_DEV=true` is only for local development restarts; it preserves `--unsafe-dev` and bypasses startup safety gates.
 - `Dockerfile` and `compose.yaml` provide a hosted-service starting point, not a complete production hardening profile.
 

@@ -8,7 +8,7 @@ OR3 Intern uses a JSON config file. By default it lives at `~/.or3-intern/config
 |---|---|
 | `provider` | AI provider, API key, model, base URL |
 | `service` | HTTP port, host, auth secret, TLS settings |
-| `channels` | Bot tokens and settings for Telegram, Slack, Discord, WhatsApp, Email |
+| `channels` | Connected app settings for Telegram, Slack, Discord, WhatsApp, Email |
 | `storage` | File paths for data and config |
 | `safety` | Approval mode, safety profiles |
 | `tools` | Allow and block lists for tool access |
@@ -38,4 +38,4 @@ See the [environment variables reference](../reference/environment-variables.md)
 
 ## Next step
 
-Start a [chat session](running-chat.md) with your agent.
+Start a [conversation](running-chat.md) with your agent.

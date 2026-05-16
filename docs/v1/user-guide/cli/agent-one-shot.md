@@ -12,17 +12,17 @@ or3-intern agent -m "Summarize this file" -s review
 | Flag | Description |
 | --- | --- |
 | `-m <message>` | Message to send to the agent. Required. |
-| `-s <session>` | Session key to continue or group work under one session identity |
+| `-s <conversation>` | Conversation identity to continue or group related work |
 | `--approval-token <token>` | Attach a one-shot approval token |
 
-## Session behavior
+## Conversation behavior
 
-If you omit `-s`, the command uses the configured default session key. It does not automatically create a guaranteed one-off random session every time.
+If you omit `-s`, the command uses the configured default conversation identity. It does not automatically create a guaranteed one-off random conversation every time.
 
-Use an explicit session key when you want:
+Use an explicit conversation identity when you want:
 
 - repeated scripted calls to share context
-- a dedicated review or automation session
+- a dedicated review or automation conversation
 - predictable memory/history grouping
 
 ## Good uses

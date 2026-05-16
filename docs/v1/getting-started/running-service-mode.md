@@ -34,4 +34,4 @@ For the best experience, pair your phone or tablet with the service. The setup w
 
 ## Next step
 
-Run [serve mode](running-serve-mode.md) for channels and automation.
+Run [serve mode](running-serve-mode.md) for connected apps and automation.

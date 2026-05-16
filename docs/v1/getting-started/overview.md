@@ -22,7 +22,7 @@ This starts an HTTP API on port 9100. Connect the OR3 App on your phone or table
 
 **Connect messaging apps**
 
-Turn on Telegram, Slack, Discord, WhatsApp, or Email channels. Talk to your agent from wherever you are.
+Connect Telegram, Slack, Discord, WhatsApp, or Email. Talk to your agent from wherever you are.
 
 **Set up automation**
 
@@ -32,9 +32,9 @@ Configure cron jobs, webhooks, and file watchers. Your agent can run tasks on a 
 
 | Concept | What it is |
 |---|---|
-| CLI | The command line interface. Run commands and chat sessions in your terminal. |
+| CLI | The command line interface. Run commands and conversations in your terminal. |
 | Service API | An HTTP server that lets apps talk to your agent. |
-| Channels | Ways to reach your agent (Telegram, Slack, etc.). |
+| Connected Apps | Messaging apps that can reach your agent, such as Telegram or Slack. |
 | Agents | The AI that processes your messages and uses tools. |
 | Skills | Reusable instructions that teach the agent how to do things. |
 | Memory | The agent can remember past conversations and context. |

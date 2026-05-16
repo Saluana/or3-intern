@@ -2803,6 +2803,45 @@ func setToggleFieldValue(cfg *config.Config, section, channel, fieldKey string, 
 		return false
 	}
 	if section == "channels" {
+		switch channel {
+		case "telegram":
+			if fieldKey == "enabled" {
+				cfg.Channels.Telegram.Enabled = value
+				return true
+			}
+		case "slack":
+			if fieldKey == "enabled" {
+				cfg.Channels.Slack.Enabled = value
+				return true
+			}
+			if fieldKey == "require_mention" {
+				cfg.Channels.Slack.RequireMention = value
+				return true
+			}
+		case "discord":
+			if fieldKey == "enabled" {
+				cfg.Channels.Discord.Enabled = value
+				return true
+			}
+			if fieldKey == "require_mention" {
+				cfg.Channels.Discord.RequireMention = value
+				return true
+			}
+		case "whatsapp":
+			if fieldKey == "enabled" {
+				cfg.Channels.WhatsApp.Enabled = value
+				return true
+			}
+		case "email":
+			if fieldKey == "enabled" {
+				cfg.Channels.Email.Enabled = value
+				return true
+			}
+			if fieldKey == "consent" {
+				cfg.Channels.Email.ConsentGranted = value
+				return true
+			}
+		}
 		return false
 	}
 	if section == "mcp" && fieldKey == "mcp_enabled" {

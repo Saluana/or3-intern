@@ -86,6 +86,49 @@ func serviceConfigureFieldValue(field configureField) any {
 	return field.Value
 }
 
+func serviceConfigureFieldDefinition(cfg config.Config, section, channel, fieldKey string) (configureField, bool) {
+	var fields []configureField
+	switch section {
+	case "channels":
+		fields = buildChannelFields(cfg, channel)
+	case "mcp":
+		fields = buildMCPFields(cfg, channel)
+	default:
+		fields = buildSectionFields(cfg, section, "")
+	}
+	for _, field := range fields {
+		if field.Key == fieldKey {
+			return field, true
+		}
+	}
+	return configureField{}, false
+}
+
+func serviceConfigureBoolValue(value string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "on", "yes":
+		return true, true
+	case "0", "false", "off", "no":
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+func applyServiceConfigureSetValue(cfg *config.Config, section, channel, fieldKey, value string) (bool, error) {
+	if cfg == nil {
+		return false, nil
+	}
+	if field, ok := serviceConfigureFieldDefinition(*cfg, section, channel, fieldKey); ok && field.Kind == configureFieldToggle {
+		if toggleValue, ok := serviceConfigureBoolValue(value); ok {
+			if setToggleFieldValue(cfg, section, channel, fieldKey, toggleValue) {
+				return true, nil
+			}
+		}
+	}
+	return applyFieldValue(cfg, section, channel, fieldKey, value)
+}
+
 func toServiceConfigureFields(fields []configureField) []serviceConfigureField {
 	result := make([]serviceConfigureField, 0, len(fields))
 	for _, field := range fields {
@@ -215,7 +258,7 @@ func (s *serviceServer) handleConfigure(w http.ResponseWriter, r *http.Request) 
 			}
 			switch strings.ToLower(strings.TrimSpace(change.Op)) {
 			case "", "set":
-				changed, err := applyFieldValue(&next, section, channel, field, change.Value.String())
+				changed, err := applyServiceConfigureSetValue(&next, section, channel, field, change.Value.String())
 				if err != nil {
 					writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 					return

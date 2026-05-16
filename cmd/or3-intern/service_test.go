@@ -908,6 +908,47 @@ func TestServiceConfigureApply_PersistsConfigChanges(t *testing.T) {
 	}
 }
 
+func TestServiceConfigureApply_SetsToggleFieldsFromBooleanValues(t *testing.T) {
+	clearConfigEnvForTest(t)
+	cfg := config.Default()
+	cfg.Channels.Telegram.Token = "telegram-token"
+	cfg.Channels.Telegram.InboundPolicy = config.InboundPolicyPairing
+	cfgPath := filepath.Join(t.TempDir(), "or3-intern.json")
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	server := &serviceServer{config: cfg, configPath: cfgPath}
+	reqBody := strings.NewReader(`{
+		"changes":[
+			{"section":"provider","field":"provider_vision","op":"set","value":true},
+			{"section":"channels","channel":"telegram","field":"enabled","op":"set","value":true},
+			{"section":"channels","channel":"slack","field":"require_mention","op":"set","value":true}
+		]
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/configure/apply", reqBody)
+	req = req.WithContext(context.WithValue(req.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Actor: "ops", Role: approval.RoleOperator}))
+	rec := httptest.NewRecorder()
+
+	server.handleConfigure(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	loaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if !loaded.Provider.EnableVision {
+		t.Fatal("expected provider vision toggle to persist true")
+	}
+	if !loaded.Channels.Telegram.Enabled {
+		t.Fatal("expected telegram enabled toggle to persist true")
+	}
+	if !loaded.Channels.Slack.RequireMention {
+		t.Fatal("expected slack require_mention toggle to persist true")
+	}
+}
+
 func TestServiceMCPServers_CRUDAndAuth(t *testing.T) {
 	clearConfigEnvForTest(t)
 	cfg := config.Default()

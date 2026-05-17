@@ -125,6 +125,23 @@ find_service_pids() {
   fi
 }
 
+find_replacement_service_pid() {
+  local ignored_pid="$1"
+  local pid
+  local attempt
+  for attempt in {1..20}; do
+    while IFS= read -r pid; do
+      [[ -n "$pid" ]] || continue
+      if [[ "$pid" != "$ignored_pid" ]]; then
+        printf '%s\n' "$pid"
+        return 0
+      fi
+    done < <(find_service_pids)
+    sleep 0.25
+  done
+  return 1
+}
+
 wait_for_exit() {
   local pid="$1"
   local attempt
@@ -259,6 +276,15 @@ start_service() {
   local attempt
   for attempt in {1..40}; do
     if ! kill -0 "$pid" 2>/dev/null; then
+      local replacement_pid
+      replacement_pid="$(find_replacement_service_pid "$pid" || true)"
+      if [[ -n "$replacement_pid" ]]; then
+        echo "A replacement or3-intern service is already running as PID $replacement_pid."
+        echo "$replacement_pid" > "$pid_file"
+        echo "Log file: $log_file"
+        return 0
+      fi
+      rm -f "$pid_file"
       echo "Service exited before becoming ready. Recent log output:" >&2
       tail -n 20 "$log_file" >&2 || true
       return 1

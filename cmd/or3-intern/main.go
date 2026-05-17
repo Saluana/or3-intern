@@ -634,13 +634,13 @@ func main() {
 	case "chat":
 		rt.Streamer = del
 		_ = channelManager.Start(ctx, "cli", b)
-		runWorkers(ctx, b, rt, cfg.WorkerCount, del)
+		runWorkers(ctx, b, rt, cfg.WorkerCount, del, channelManager)
 		ch := &cli.Channel{Bus: b, SessionKey: cfg.DefaultSessionKey, Spinner: spinner, Deliverer: del, History: d}
 		if err := ch.Run(ctx); err != nil {
 			fmt.Fprintln(os.Stderr, "cli error:", err)
 		}
 	case "serve":
-		runWorkers(ctx, b, rt, cfg.WorkerCount, nil)
+		runWorkers(ctx, b, rt, cfg.WorkerCount, nil, channelManager)
 		if err := channelManager.StartAll(ctx, b); err != nil {
 			fmt.Fprintln(os.Stderr, "channel start error:", err)
 			os.Exit(1)
@@ -665,7 +665,12 @@ func main() {
 		fmt.Println("or3-intern serve: channels running. Ctrl+C to stop.")
 		<-ctx.Done()
 	case "service":
-		runWorkers(ctx, b, rt, cfg.WorkerCount, nil)
+		channelRuntime := channelWorkerRuntime(rt, delivererFunc(channelManager.Deliver))
+		runWorkers(ctx, b, channelRuntime, cfg.WorkerCount, nil, channelManager)
+		if err := channelManager.StartAll(ctx, b); err != nil {
+			fmt.Fprintln(os.Stderr, "channel start error:", err)
+			os.Exit(1)
+		}
 		if err := runServiceCommandWithBrokerOptionsCronMCP(ctx, cfg, rt, subagentManager, agentCLIManager, serviceJobs, approvalBroker, unsafeDev, cronSvc, mcpManager); err != nil {
 			fmt.Fprintln(os.Stderr, "service error:", err)
 			os.Exit(1)
@@ -1084,7 +1089,7 @@ func heartbeatServiceForCommand(cmd string, cfg config.Config, eventBus *bus.Bus
 	return heartbeat.New(cfg.Heartbeat, cfg.WorkspaceDir, eventBus)
 }
 
-func runWorkers(ctx context.Context, b *bus.Bus, rt *agent.Runtime, n int, cliDeliverer *cli.Deliverer) {
+func runWorkers(ctx context.Context, b *bus.Bus, rt *agent.Runtime, n int, cliDeliverer *cli.Deliverer, channelManager *rootchannels.Manager) {
 	if n <= 0 {
 		n = 4
 	}
@@ -1094,6 +1099,10 @@ func runWorkers(ctx context.Context, b *bus.Bus, rt *agent.Runtime, n int, cliDe
 			for ev := range events {
 				cctx, cancel := agent.WithTimeout(ctx, 120)
 				cctx = agent.ContextWithConversationSession(cctx, ev.SessionKey)
+				stopTyping := func() {}
+				if ev.Channel != "cli" && channelManager != nil {
+					stopTyping = channelManager.StartTyping(cctx, ev.Channel, "", ev.Meta)
+				}
 				if ev.Channel == "cli" && cliDeliverer != nil {
 					if observer := cliDeliverer.Observer(); observer != nil {
 						cctx = agent.ContextWithConversationObserver(cctx, observer)
@@ -1108,10 +1117,48 @@ func runWorkers(ctx context.Context, b *bus.Bus, rt *agent.Runtime, n int, cliDe
 						log.Printf("handle event failed: type=%s session=%s err=%v", ev.Type, ev.SessionKey, err)
 					}
 				}
+				stopTyping()
 				cancel()
 			}
 		}()
 	}
+}
+
+func channelWorkerRuntime(rt *agent.Runtime, deliverer agent.Deliverer) *agent.Runtime {
+	if rt == nil {
+		return &agent.Runtime{Deliver: deliverer}
+	}
+	channelRuntime := &agent.Runtime{
+		DB:                          rt.DB,
+		Provider:                    rt.Provider,
+		Model:                       rt.Model,
+		Temperature:                 rt.Temperature,
+		SubagentProvider:            rt.SubagentProvider,
+		SubagentModel:               rt.SubagentModel,
+		Tools:                       rt.Tools,
+		Hardening:                   rt.Hardening,
+		AccessProfiles:              rt.AccessProfiles,
+		Builder:                     rt.Builder,
+		Artifacts:                   rt.Artifacts,
+		MaxToolBytes:                rt.MaxToolBytes,
+		MaxToolLoops:                rt.MaxToolLoops,
+		MaxToolLoopsExceededAction:  rt.MaxToolLoopsExceededAction,
+		ToolPreviewBytes:            rt.ToolPreviewBytes,
+		DynamicToolExposure:         rt.DynamicToolExposure,
+		Audit:                       rt.Audit,
+		ApprovalBroker:              rt.ApprovalBroker,
+		ContextManager:              rt.ContextManager,
+		ContextManagerProvider:      rt.ContextManagerProvider,
+		Deliver:                     deliverer,
+		Consolidator:                rt.Consolidator,
+		ConsolidationScheduler:      rt.ConsolidationScheduler,
+		DisableRollingConsolidation: rt.DisableRollingConsolidation,
+		DefaultScopeKey:             rt.DefaultScopeKey,
+		LinkDirectMessages:          rt.LinkDirectMessages,
+		IdentityScopeMap:            rt.IdentityScopeMap,
+	}
+	channelRuntime.ApplyLiveModelConfig(rt.CurrentModelConfig())
+	return channelRuntime
 }
 
 func loadBootstrapFile(configPath, workspaceDir, baseName, fallback string) string {

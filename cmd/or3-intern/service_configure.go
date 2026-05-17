@@ -193,6 +193,8 @@ func (s *serviceServer) handleConfigure(w http.ResponseWriter, r *http.Request) 
 			"channel": channel,
 			"fields":  toServiceConfigureFields(fields),
 		})
+	case path == "channels/telegram/chats":
+		s.handleConfigureTelegramChats(w, r)
 	case path == "providers":
 		switch r.Method {
 		case http.MethodGet:

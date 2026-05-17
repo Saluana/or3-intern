@@ -78,6 +78,12 @@ type Channel interface {
 	Deliver(ctx context.Context, to, text string, meta map[string]any) error
 }
 
+// TypingIndicator is optionally implemented by channels that can show a
+// transient "assistant is working" state while a turn is being processed.
+type TypingIndicator interface {
+	StartTyping(ctx context.Context, to string, meta map[string]any) func()
+}
+
 // Manager owns a named set of channels and their start state.
 type Manager struct {
 	mu       sync.RWMutex
@@ -201,6 +207,20 @@ func (m *Manager) DeliverWithMeta(ctx context.Context, channel, to, text string,
 		return err
 	}
 	return ch.Deliver(ctx, to, text, meta)
+}
+
+// StartTyping starts a channel-specific typing indicator when supported.
+// The returned function is always safe to call and stops the indicator loop.
+func (m *Manager) StartTyping(ctx context.Context, channel, to string, meta map[string]any) func() {
+	ch, err := m.get(channel)
+	if err != nil {
+		return func() {}
+	}
+	typing, ok := ch.(TypingIndicator)
+	if !ok {
+		return func() {}
+	}
+	return typing.StartTyping(ctx, to, meta)
 }
 
 func (m *Manager) get(name string) (Channel, error) {

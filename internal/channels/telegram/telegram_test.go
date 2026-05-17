@@ -168,6 +168,36 @@ func TestChannel_DeliverSurfacesRateLimit(t *testing.T) {
 	}
 }
 
+func TestChannel_StartTypingSendsChatAction(t *testing.T) {
+	got := make(chan map[string]any, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/bottoken/sendChatAction" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		got <- body
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": true})
+	}))
+	defer server.Close()
+
+	ch := &Channel{Config: config.TelegramChannelConfig{Token: "token", APIBase: server.URL, DefaultChatID: "fallback", OpenAccess: true}}
+	stop := ch.StartTyping(context.Background(), "", map[string]any{"chat_id": "123"})
+	defer stop()
+
+	select {
+	case body := <-got:
+		if body["chat_id"] != "123" || body["action"] != "typing" {
+			t.Fatalf("unexpected payload: %#v", body)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for typing chat action")
+	}
+}
+
 func TestChannel_FetchUpdatesPublishesIsolatedGroupMessageWhenEnabled(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

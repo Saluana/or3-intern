@@ -849,6 +849,105 @@ func TestServiceConfigureFields_UsesFrontendFriendlyShape(t *testing.T) {
 	}
 }
 
+func TestServiceConfigureTelegramChatsDiscoversRecentChats(t *testing.T) {
+	telegramAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/bottelegram-token/getUpdates" {
+			t.Fatalf("unexpected Telegram path %s", r.URL.Path)
+		}
+		if r.URL.Query().Get("timeout") != "0" {
+			t.Fatalf("expected timeout=0, got %q", r.URL.Query().Get("timeout"))
+		}
+		writeServiceJSON(w, http.StatusOK, map[string]any{
+			"ok": true,
+			"result": []map[string]any{
+				{"update_id": 1, "message": map[string]any{"message_id": 10, "date": 100, "text": "older", "chat": map[string]any{"id": 123, "type": "private", "first_name": "Brendon"}}},
+				{"update_id": 2, "message": map[string]any{"message_id": 11, "date": 200, "text": "hello bot", "chat": map[string]any{"id": 123, "type": "private", "first_name": "Brendon"}}},
+				{"update_id": 3, "message": map[string]any{"message_id": 12, "date": 150, "text": "group ping", "chat": map[string]any{"id": -100456, "type": "group", "title": "Ops Group"}}},
+			},
+		})
+	}))
+	defer telegramAPI.Close()
+
+	cfg := config.Default()
+	cfg.Channels.Telegram.Token = "telegram-token"
+	cfg.Channels.Telegram.APIBase = telegramAPI.URL
+	server := &serviceServer{config: cfg}
+	req := httptest.NewRequest(http.MethodGet, "/internal/v1/configure/channels/telegram/chats", nil)
+	req = req.WithContext(context.WithValue(req.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Actor: "ops", Role: approval.RoleOperator}))
+	rec := httptest.NewRecorder()
+
+	server.handleConfigure(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Items []serviceTelegramChatCandidate `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(body.Items) != 2 {
+		t.Fatalf("expected 2 deduped chats, got %#v", body.Items)
+	}
+	if body.Items[0].ID != "123" || body.Items[0].DisplayName != "Brendon" || body.Items[0].LastMessageText != "hello bot" {
+		t.Fatalf("unexpected first chat: %#v", body.Items[0])
+	}
+	if body.Items[1].ID != "-100456" || body.Items[1].DisplayName != "Ops Group" {
+		t.Fatalf("unexpected second chat: %#v", body.Items[1])
+	}
+}
+
+func TestServiceConfigureTelegramChatsRequiresSavedToken(t *testing.T) {
+	server := &serviceServer{config: config.Default()}
+	req := httptest.NewRequest(http.MethodGet, "/internal/v1/configure/channels/telegram/chats", nil)
+	req = req.WithContext(context.WithValue(req.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Actor: "ops", Role: approval.RoleOperator}))
+	rec := httptest.NewRecorder()
+
+	server.handleConfigure(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestServiceConfigureTelegramChatsAcceptsUnsavedToken(t *testing.T) {
+	telegramAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/bottelegram-token/getUpdates" {
+			t.Fatalf("unexpected Telegram path %s", r.URL.Path)
+		}
+		writeServiceJSON(w, http.StatusOK, map[string]any{
+			"ok": true,
+			"result": []map[string]any{
+				{"update_id": 1, "message": map[string]any{"message_id": 10, "date": 100, "text": "setup", "chat": map[string]any{"id": 123, "type": "private", "first_name": "Brendon"}}},
+			},
+		})
+	}))
+	defer telegramAPI.Close()
+
+	cfg := config.Default()
+	cfg.Channels.Telegram.APIBase = telegramAPI.URL
+	server := &serviceServer{config: cfg}
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/configure/channels/telegram/chats", strings.NewReader(`{"token":"telegram-token","limit":5}`))
+	req = req.WithContext(context.WithValue(req.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Actor: "ops", Role: approval.RoleOperator}))
+	rec := httptest.NewRecorder()
+
+	server.handleConfigure(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Items []serviceTelegramChatCandidate `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(body.Items) != 1 || body.Items[0].ID != "123" {
+		t.Fatalf("unexpected chats: %#v", body.Items)
+	}
+}
+
 func TestServiceConfigureApply_PersistsConfigChanges(t *testing.T) {
 	clearConfigEnvForTest(t)
 	cfg := config.Default()

@@ -79,10 +79,7 @@ func (c *Channel) Stop(ctx context.Context) error {
 
 // Deliver sends a Telegram text or media message.
 func (c *Channel) Deliver(ctx context.Context, to, text string, meta map[string]any) error {
-	chatID := strings.TrimSpace(to)
-	if chatID == "" {
-		chatID = strings.TrimSpace(c.Config.DefaultChatID)
-	}
+	chatID := c.resolveChatID(to, meta)
 	if chatID == "" {
 		return fmt.Errorf("telegram target chat id required")
 	}
@@ -95,6 +92,57 @@ func (c *Channel) Deliver(ctx context.Context, to, text string, meta map[string]
 		payload["reply_to_message_id"] = replyID
 	}
 	return c.postJSON(ctx, "/sendMessage", payload, nil)
+}
+
+// StartTyping keeps Telegram's typing indicator alive while a turn is running.
+func (c *Channel) StartTyping(ctx context.Context, to string, meta map[string]any) func() {
+	chatID := c.resolveChatID(to, meta)
+	if chatID == "" {
+		return func() {}
+	}
+	typingCtx, cancel := context.WithCancel(ctx)
+	send := func() {
+		if err := c.postJSON(typingCtx, "/sendChatAction", map[string]any{"chat_id": chatID, "action": "typing"}, nil); err != nil && typingCtx.Err() == nil {
+			// Typing indicators are best-effort and should never fail the turn.
+			return
+		}
+	}
+	go func() {
+		send()
+		ticker := time.NewTicker(4 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-typingCtx.Done():
+				return
+			case <-ticker.C:
+				send()
+			}
+		}
+	}()
+	return cancel
+}
+
+func (c *Channel) resolveChatID(to string, meta map[string]any) string {
+	chatID := strings.TrimSpace(to)
+	if chatID == "" && meta != nil {
+		switch value := meta["chat_id"].(type) {
+		case string:
+			chatID = strings.TrimSpace(value)
+		case int64:
+			chatID = strconv.FormatInt(value, 10)
+		case int:
+			chatID = strconv.Itoa(value)
+		case float64:
+			if value == float64(int64(value)) {
+				chatID = strconv.FormatInt(int64(value), 10)
+			}
+		}
+	}
+	if chatID == "" {
+		chatID = strings.TrimSpace(c.Config.DefaultChatID)
+	}
+	return chatID
 }
 
 func (c *Channel) poll(ctx context.Context, eventBus *bus.Bus) {

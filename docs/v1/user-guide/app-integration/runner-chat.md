@@ -24,6 +24,17 @@ Creating a runner chat session currently requires:
 
 Optional fields include continuation mode, model, mode, isolation, cwd, and max turns.
 
+## Native runner behavior
+
+OpenCode and Codex are native-first when their runtime mode is `auto`, with CLI fallback preserved:
+
+- OpenCode can reuse a configured local server from `agentCLI.nativeServerUrls.opencode` or lazily start `opencode serve` on loopback.
+- Codex starts `codex app-server --listen stdio://` only when a turn needs it.
+- Service start/restart commands only start OR3 Intern itself; they do not eagerly start OpenCode or Codex helper runtimes.
+- Runner discovery includes runtime status, ownership, fallback reason, available models, and the configured/default model so the app can show model choices per runner.
+
+Native permission requests are converted into OR3 runner-permission approvals. Approving a request and retrying the turn passes the approved permission back through the runner chat metadata; denied requests remain blocked and are shown in the approval UI with the raw technical payload available for inspection.
+
 ## Use runner chat when
 
 - the app needs an interactive session with an external agent CLI

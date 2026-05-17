@@ -165,6 +165,58 @@ func normalizeAndValidateConfigWithOptions(cfg Config, opts normalizeOptions) (C
 		cfg.AgentCLI.DisabledRunners = []string{}
 	}
 	cfg.AgentCLI.DisabledRunners = compactStrings(cfg.AgentCLI.DisabledRunners)
+	if cfg.AgentCLI.RuntimeMode == nil {
+		cfg.AgentCLI.RuntimeMode = map[string]string{"opencode": "auto", "codex": "auto"}
+	} else {
+		for runner, mode := range cfg.AgentCLI.RuntimeMode {
+			trimmedRunner := strings.ToLower(strings.TrimSpace(runner))
+			trimmedMode := strings.ToLower(strings.TrimSpace(mode))
+			if trimmedRunner == "" {
+				delete(cfg.AgentCLI.RuntimeMode, runner)
+				continue
+			}
+			if trimmedRunner != runner {
+				delete(cfg.AgentCLI.RuntimeMode, runner)
+			}
+			cfg.AgentCLI.RuntimeMode[trimmedRunner] = trimmedMode
+		}
+	}
+	if _, ok := cfg.AgentCLI.RuntimeMode["opencode"]; !ok {
+		cfg.AgentCLI.RuntimeMode["opencode"] = "auto"
+	}
+	if _, ok := cfg.AgentCLI.RuntimeMode["codex"]; !ok {
+		cfg.AgentCLI.RuntimeMode["codex"] = "auto"
+	}
+	if cfg.AgentCLI.DefaultModels == nil {
+		cfg.AgentCLI.DefaultModels = map[string]string{}
+	} else {
+		for runner, model := range cfg.AgentCLI.DefaultModels {
+			trimmedRunner := strings.ToLower(strings.TrimSpace(runner))
+			trimmedModel := strings.TrimSpace(model)
+			delete(cfg.AgentCLI.DefaultModels, runner)
+			if trimmedRunner != "" && trimmedModel != "" {
+				cfg.AgentCLI.DefaultModels[trimmedRunner] = trimmedModel
+			}
+		}
+	}
+	if cfg.AgentCLI.NativeServerURLs == nil {
+		cfg.AgentCLI.NativeServerURLs = map[string]string{}
+	} else {
+		for runner, endpoint := range cfg.AgentCLI.NativeServerURLs {
+			trimmedRunner := strings.ToLower(strings.TrimSpace(runner))
+			trimmedEndpoint := strings.TrimRight(strings.TrimSpace(endpoint), "/")
+			delete(cfg.AgentCLI.NativeServerURLs, runner)
+			if trimmedRunner != "" && trimmedEndpoint != "" {
+				cfg.AgentCLI.NativeServerURLs[trimmedRunner] = trimmedEndpoint
+			}
+		}
+	}
+	if cfg.AgentCLI.NativeServerStartupSeconds <= 0 {
+		cfg.AgentCLI.NativeServerStartupSeconds = 10
+	}
+	if cfg.AgentCLI.NativeServerIdleSeconds <= 0 {
+		cfg.AgentCLI.NativeServerIdleSeconds = 900
+	}
 	if len(cfg.AgentCLI.ChildEnvAllowlist) == 0 {
 		cfg.AgentCLI.ChildEnvAllowlist = []string{"PATH", "HOME", "TMPDIR", "TMP", "TEMP"}
 	}

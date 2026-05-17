@@ -2,6 +2,7 @@ package agentcli
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -84,6 +85,11 @@ func runnerPermissionFromMeta(meta map[string]any) (RunnerPermissionRequest, boo
 }
 
 func detectOpenCodePermissionRequest(raw AgentRunEvent) (RunnerPermissionRequest, bool) {
+	if raw.Type == "structured" && len(raw.Payload) > 0 {
+		if req, ok := detectStructuredRunnerPermission(raw.Payload, string(RunnerOpenCode)); ok {
+			return req, true
+		}
+	}
 	if raw.Type != "output" || raw.Stream != "stderr" {
 		return RunnerPermissionRequest{}, false
 	}
@@ -102,6 +108,13 @@ func detectOpenCodePermissionRequest(raw AgentRunEvent) (RunnerPermissionRequest
 	})
 }
 
+func detectCodexStructuredPermissionRequest(raw AgentRunEvent) (RunnerPermissionRequest, bool) {
+	if raw.Type != "structured" || len(raw.Payload) == 0 {
+		return RunnerPermissionRequest{}, false
+	}
+	return detectStructuredRunnerPermission(raw.Payload, string(RunnerCodex))
+}
+
 func detectCodexPermissionRequest(text string) (RunnerPermissionRequest, bool) {
 	trimmed := strings.TrimSpace(text)
 	if trimmed == "" || !strings.Contains(strings.ToLower(trimmed), "approvals are disabled") {
@@ -118,6 +131,68 @@ func detectCodexPermissionRequest(text string) (RunnerPermissionRequest, bool) {
 		Access:     runnerPermissionAccessWrite,
 		TargetPath: target,
 	})
+}
+
+func detectStructuredRunnerPermission(payload json.RawMessage, runnerID string) (RunnerPermissionRequest, bool) {
+	var obj map[string]any
+	if err := json.Unmarshal(payload, &obj); err != nil {
+		return RunnerPermissionRequest{}, false
+	}
+	typeValue := strings.ToLower(firstNonEmptyRunnerPermission(stringMapValue(obj, "type"), stringMapValue(obj, "method")))
+	if !strings.Contains(typeValue, "permission") && !strings.Contains(typeValue, "approval") && !strings.Contains(typeValue, "requestapproval") {
+		return RunnerPermissionRequest{}, false
+	}
+	params := mapAnyValue(obj, "params")
+	raw := firstNonNilRunnerPermission(params["target_path"], params["targetPath"], params["path"], params["file"], params["cwd"], obj["target_path"], obj["targetPath"], obj["path"], obj["file"], obj["cwd"])
+	if raw == nil {
+		raw = firstNonNilRunnerPermission(params["command"], params["reason"], obj["command"], obj["message"], obj["raw"])
+	}
+	target := pathFromPermissionValue(raw)
+	access := runnerPermissionAccessRead
+	if strings.Contains(typeValue, "change") || strings.Contains(typeValue, "command") || strings.Contains(typeValue, "write") || strings.Contains(strings.ToLower(fmt.Sprint(raw)), "write") {
+		access = runnerPermissionAccessWrite
+	}
+	return NormalizeRunnerPermissionRequest(RunnerPermissionRequest{RunnerID: runnerID, Kind: runnerPermissionKindFilesystem, Access: access, TargetPath: target})
+}
+
+func mapAnyValue(record map[string]any, key string) map[string]any {
+	if record == nil {
+		return nil
+	}
+	value, _ := record[key].(map[string]any)
+	return value
+}
+
+func firstNonNilRunnerPermission(values ...any) any {
+	for _, value := range values {
+		if value != nil && strings.TrimSpace(fmt.Sprint(value)) != "" {
+			return value
+		}
+	}
+	return nil
+}
+
+func pathFromPermissionValue(value any) string {
+	switch v := value.(type) {
+	case string:
+		fields := strings.Fields(v)
+		for _, field := range fields {
+			trimmed := strings.Trim(field, "`'\".,:;()[]{}")
+			if strings.HasPrefix(trimmed, string(filepath.Separator)) || strings.HasPrefix(trimmed, "~/") {
+				return filepath.Clean(trimmed)
+			}
+		}
+		return filepath.Clean(strings.Trim(v, "`'\""))
+	case map[string]any:
+		return stringMapValue(v, "target_path", "targetPath", "path", "file", "cwd")
+	case []any:
+		for _, item := range v {
+			if path := pathFromPermissionValue(item); path != "" {
+				return path
+			}
+		}
+	}
+	return ""
 }
 
 func normalizeWriteTarget(raw string) string {

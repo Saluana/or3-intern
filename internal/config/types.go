@@ -425,19 +425,24 @@ type SubagentsConfig struct {
 
 // AgentCLIConfig controls the external agent CLI delegation subsystem.
 type AgentCLIConfig struct {
-	Enabled                 bool     `json:"enabled"`
-	DisabledRunners         []string `json:"disabledRunners"`
-	MaxConcurrent           int      `json:"maxConcurrent"`
-	MaxQueued               int      `json:"maxQueued"`
-	DefaultTimeoutSeconds   int      `json:"defaultTimeoutSeconds"`
-	MaxTimeoutSeconds       int      `json:"maxTimeoutSeconds"`
-	AllowSandboxAuto        bool     `json:"allowSandboxAuto"`
-	DefaultMode             string   `json:"defaultMode"`
-	DefaultIsolation        string   `json:"defaultIsolation"`
-	EventChunkMaxBytes      int      `json:"eventChunkMaxBytes"`
-	PreviewMaxBytes         int      `json:"previewMaxBytes"`
-	MaxPersistedOutputBytes int64    `json:"maxPersistedOutputBytes"`
-	ChildEnvAllowlist       []string `json:"childEnvAllowlist"`
+	Enabled                    bool              `json:"enabled"`
+	DisabledRunners            []string          `json:"disabledRunners"`
+	RuntimeMode                map[string]string `json:"runtimeMode,omitempty"`
+	DefaultModels              map[string]string `json:"defaultModels,omitempty"`
+	NativeServerURLs           map[string]string `json:"nativeServerUrls,omitempty"`
+	NativeServerStartupSeconds int               `json:"nativeServerStartupSeconds"`
+	NativeServerIdleSeconds    int               `json:"nativeServerIdleSeconds"`
+	MaxConcurrent              int               `json:"maxConcurrent"`
+	MaxQueued                  int               `json:"maxQueued"`
+	DefaultTimeoutSeconds      int               `json:"defaultTimeoutSeconds"`
+	MaxTimeoutSeconds          int               `json:"maxTimeoutSeconds"`
+	AllowSandboxAuto           bool              `json:"allowSandboxAuto"`
+	DefaultMode                string            `json:"defaultMode"`
+	DefaultIsolation           string            `json:"defaultIsolation"`
+	EventChunkMaxBytes         int               `json:"eventChunkMaxBytes"`
+	PreviewMaxBytes            int               `json:"previewMaxBytes"`
+	MaxPersistedOutputBytes    int64             `json:"maxPersistedOutputBytes"`
+	ChildEnvAllowlist          []string          `json:"childEnvAllowlist"`
 }
 
 type InboundPolicy string

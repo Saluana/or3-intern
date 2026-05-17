@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -753,10 +754,38 @@ func (a *ServiceApp) DetectAgentCLIRunners(ctx context.Context) ([]agentcli.Runn
 		if a.agentCLIManager.Registry == nil {
 			return nil, fmt.Errorf("runner registry is not configured")
 		}
-		return a.agentCLIManager.Registry.DetectAll(ctx, a.agentCLIManager.DetectOptions()), nil
+		runners := a.agentCLIManager.Registry.DetectAll(ctx, a.agentCLIManager.DetectOptions())
+		return a.decorateAgentCLIRuntimeInfo(ctx, runners), nil
 	}
 	detectManager := &agentcli.Manager{Cfg: a.cfg.AgentCLI}
-	return agentcli.NewDefaultRegistry().DetectAll(ctx, detectManager.DetectOptions()), nil
+	runners := agentcli.NewDefaultRegistry().DetectAll(ctx, detectManager.DetectOptions())
+	return a.decorateAgentCLIRuntimeInfo(ctx, runners), nil
+}
+
+func (a *ServiceApp) decorateAgentCLIRuntimeInfo(ctx context.Context, runners []agentcli.RunnerInfo) []agentcli.RunnerInfo {
+	if len(runners) == 0 {
+		return runners
+	}
+	cfg := a.cfg.AgentCLI
+	var runtimes *agentcli.RunnerRuntimeRegistry
+	if a.agentCLIManager != nil && a.agentCLIManager.Runtimes != nil {
+		runtimes = a.agentCLIManager.Runtimes
+	} else {
+		runtimes = agentcli.NewDefaultRuntimeRegistry()
+	}
+	env := agentcli.BuildAgentCLIEnv(os.Environ(), cfg.ChildEnvAllowlist, nil)
+	for i := range runners {
+		id := agentcli.RunnerID(runners[i].ID)
+		if runtime, ok := runtimes.Get(id); ok {
+			runners[i].Runtime = runtime.Info(ctx, cfg, env)
+		} else {
+			runners[i].Runtime = agentcli.RunnerRuntimeInfo{Kind: agentcli.RuntimeCLI, Mode: agentcli.RuntimeModeCLI, State: agentcli.RuntimeStateUnavailable, Ownership: agentcli.RuntimeOwnershipNone, Fallback: true, FallbackReason: "using CLI adapter"}
+		}
+		if model := strings.TrimSpace(cfg.DefaultModels[runners[i].ID]); model != "" && runners[i].Runtime.DefaultModel == "" {
+			runners[i].Runtime.DefaultModel = model
+		}
+	}
+	return runners
 }
 
 // StartAgentCLIRun enqueues a new external CLI run.

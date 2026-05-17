@@ -62,6 +62,20 @@ Each adapter implements the `RunnerAdapter` interface (`internal/agentcli/runner
 
 When `Manager.executeRun()` needs to run a task, it calls `m.Registry.BuildCommand(req)` (`internal/agentcli/registry.go:261-268`), which finds the right adapter and calls its `BuildCommand` method. Each adapter builds a `CommandSpec` with the binary path, arguments, working directory, and output mode for its specific CLI.
 
+## Runtime Backends
+
+OpenCode and Codex can now run through native runtime backends before falling back to the CLI adapters:
+
+- `auto` mode tries native first and emits a bounded `runtime.warning` event before CLI fallback.
+- `native` mode treats native runtime errors as terminal instead of falling back.
+- `cli` mode preserves the original adapter/process behavior.
+
+OpenCode supports explicit loopback attach/reuse with `agentCLI.nativeServerUrls.opencode`. Config validation rejects non-loopback URLs; a healthy configured endpoint is classified as `external` ownership and is reused even if the `opencode` binary is not installed locally. If no configured endpoint is healthy, the runtime can lazily start `opencode serve` on loopback and classify it as `managed`.
+
+Codex uses `codex app-server --listen stdio://` per turn. It is not started by `or3-intern service`, service start scripts, or restart scripts.
+
+The compatibility `CLIRuntimeBackend` wraps existing chat adapters so fallback behavior remains explicit and testable without changing command construction.
+
 ## Detection Cache
 
 Detection results are cached with a TTL of 30 seconds (constant `agentCLIDetectCacheTTL` in `internal/agentcli/manager.go:28`). When a run is enqueued, the manager checks the cache first. If the cache is stale or missing, it triggers an async refresh via `RefreshDetectAsync` (`internal/agentcli/registry.go:219-246`).

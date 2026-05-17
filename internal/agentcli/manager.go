@@ -32,6 +32,7 @@ type Manager struct {
 	Jobs     *agent.JobRegistry
 	Cfg      config.AgentCLIConfig
 	Registry *RunnerRegistry
+	Runtimes *RunnerRuntimeRegistry
 	Process  *ProcessManager
 
 	// OpenCodeExternalDirectories are OR3-owned directories that OpenCode may
@@ -85,6 +86,9 @@ func (m *Manager) Start(ctx context.Context) error {
 	}
 	if m.Registry == nil {
 		m.Registry = NewDefaultRegistry()
+	}
+	if m.Runtimes == nil {
+		m.Runtimes = NewDefaultRuntimeRegistry()
 	}
 	m.Registry.RefreshAllAsync(m.detectOptions(m.Cfg))
 	running, err := m.DB.ListRunningAgentCLIRuns(ctx)
@@ -281,6 +285,11 @@ func (m *Manager) Abort(ctx context.Context, id string) error {
 	if m == nil || m.DB == nil {
 		return fmt.Errorf("agent CLI manager is not available")
 	}
+	if m.Runtimes != nil {
+		m.Runtimes.ForEach(func(runtime NativeRunnerRuntime) {
+			_ = runtime.Abort(ctx, id)
+		})
+	}
 	// First try to cancel a running job via JobRegistry
 	if m.Jobs != nil && m.Jobs.Cancel(id) {
 		return nil
@@ -363,6 +372,30 @@ func (m *Manager) executeRun(run db.AgentCLIRun) {
 		})
 	}
 
+	if out, handled := m.tryExecuteNativeRun(runCtx, run); handled {
+		finalStatus := db.AgentCLIStatusSucceeded
+		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+			finalStatus = db.AgentCLIStatusTimedOut
+		} else if errors.Is(runCtx.Err(), context.Canceled) {
+			finalStatus = db.AgentCLIStatusAborted
+		} else if out.ExitCode != 0 {
+			finalStatus = db.AgentCLIStatusFailed
+		}
+		m.emitCompletion(run, finalStatus, out)
+		errMsg := ""
+		if finalStatus == db.AgentCLIStatusFailed {
+			errMsg = out.StderrPreview
+		}
+		if finalStatus == db.AgentCLIStatusTimedOut {
+			errMsg = "timed out"
+		}
+		if finalStatus == db.AgentCLIStatusAborted {
+			errMsg = "aborted"
+		}
+		m.finalizeRun(runCtx, run, finalStatus, errMsg, out)
+		return
+	}
+
 	var cmdSpec CommandSpec
 	cmdSpec, buildErr := m.buildCommandSpecForRun(run)
 	if buildErr != nil {
@@ -418,10 +451,11 @@ func (m *Manager) executeRun(run db.AgentCLIRun) {
 		pm = NewProcessManager(cfg.EventChunkMaxBytes, cfg.PreviewMaxBytes)
 	}
 
-	var eventSeq int64
+	var maxSeq int64
 	out := pm.Run(runCtx, cmdSpec, func(e AgentRunEvent) {
 		e.JobID = run.JobID
 		e.RunnerID = run.RunnerID
+		updateMaxSeq(&maxSeq, e.Seq)
 		m.persistEvent(run, e)
 		if m.Jobs != nil {
 			m.Jobs.Publish(run.JobID, e.Type, eventToMap(e))
@@ -441,7 +475,101 @@ func (m *Manager) executeRun(run db.AgentCLIRun) {
 		finalStatus = db.AgentCLIStatusFailed
 	}
 
-	// Emit completion event
+	m.emitCompletionWithSeq(run, finalStatus, out, maxSeq+1)
+
+	var errMsg string
+	if finalStatus == db.AgentCLIStatusFailed {
+		errMsg = out.StderrPreview
+	}
+	if finalStatus == db.AgentCLIStatusTimedOut {
+		errMsg = "timed out"
+	}
+	if finalStatus == db.AgentCLIStatusAborted {
+		errMsg = "aborted"
+	}
+	m.finalizeRun(runCtx, run, finalStatus, errMsg, out)
+}
+
+func (m *Manager) tryExecuteNativeRun(ctx context.Context, run db.AgentCLIRun) (ProcessOutput, bool) {
+	cfg := m.configSnapshot()
+	mode := runnerRuntimeMode(cfg, RunnerID(run.RunnerID))
+	if mode == RuntimeModeCLI {
+		return ProcessOutput{}, false
+	}
+	chatReq, ok := buildRuntimeChatRequest(run)
+	if !ok {
+		return ProcessOutput{}, false
+	}
+	if m.Runtimes == nil {
+		m.Runtimes = NewDefaultRuntimeRegistry()
+	}
+	runtime, ok := m.Runtimes.Get(RunnerID(run.RunnerID))
+	if !ok {
+		return ProcessOutput{}, false
+	}
+	env := nativeEnv(cfg)
+	runnerID := RunnerID(run.RunnerID)
+	if additionalEnv := m.runnerAdditionalEnv(runnerID, parseAgentRunMeta(run.MetaJSON)); len(additionalEnv) > 0 {
+		env = mergeEnvOverlay(env, additionalEnv)
+	}
+	startedPayload, _ := json.Marshal(map[string]any{
+		"job_id":    run.JobID,
+		"runner_id": run.RunnerID,
+		"run_id":    run.ID,
+		"runtime":   "native",
+		"cwd":       run.Cwd,
+	})
+	m.persistEvent(run, AgentRunEvent{Type: "started", TS: time.Now().UTC().Format(time.RFC3339Nano), Seq: 0, JobID: run.JobID, RunnerID: run.RunnerID, Payload: startedPayload})
+	if m.Jobs != nil {
+		m.Jobs.Publish(run.JobID, "started", map[string]any{"status": db.AgentCLIStatusRunning, "runner_id": run.RunnerID, "run_id": run.ID, "runtime": "native", "cwd": run.Cwd})
+	}
+	var maxSeq int64
+	out, err := runtime.Execute(ctx, NativeRuntimeExecuteRequest{
+		Run:    run,
+		Chat:   chatReq,
+		Config: cfg,
+		Env:    env,
+		OnEvent: func(e AgentRunEvent) {
+			e.JobID = run.JobID
+			e.RunnerID = run.RunnerID
+			updateMaxSeq(&maxSeq, e.Seq)
+			m.persistEvent(run, e)
+			if m.Jobs != nil {
+				m.Jobs.Publish(run.JobID, e.Type, eventToMap(e))
+			}
+		},
+	})
+	out.EventSeq = maxSeq
+	if err == nil {
+		return out, true
+	}
+	if errors.Is(err, errNativeApprovalRequired) {
+		out.ExitCode = -1
+		if out.StderrPreview == "" {
+			out.StderrPreview = err.Error()
+		}
+		return out, true
+	}
+	if mode == RuntimeModeAuto {
+		payload, _ := json.Marshal(map[string]any{"runtime": "native", "fallback": "cli", "reason": err.Error()})
+		m.persistEvent(run, AgentRunEvent{Type: "warning", TS: time.Now().UTC().Format(time.RFC3339Nano), JobID: run.JobID, RunnerID: run.RunnerID, Payload: payload, Message: err.Error()})
+		if m.Jobs != nil {
+			m.Jobs.Publish(run.JobID, "warning", map[string]any{"runtime": "native", "fallback": "cli", "reason": err.Error()})
+		}
+		return ProcessOutput{}, false
+	}
+	out.ExitCode = -1
+	if out.StderrPreview == "" {
+		out.StderrPreview = err.Error()
+	}
+	return out, true
+}
+
+func (m *Manager) emitCompletion(run db.AgentCLIRun, finalStatus string, out ProcessOutput) {
+	m.emitCompletionWithSeq(run, finalStatus, out, out.EventSeq+1)
+}
+
+func (m *Manager) emitCompletionWithSeq(run db.AgentCLIRun, finalStatus string, out ProcessOutput, seq int64) {
 	completionPayload, _ := json.Marshal(map[string]any{
 		"exit_code":          out.ExitCode,
 		"duration_ms":        out.DurationMS,
@@ -453,7 +581,7 @@ func (m *Manager) executeRun(run db.AgentCLIRun) {
 	completionEvent := AgentRunEvent{
 		Type:       "completion",
 		TS:         time.Now().UTC().Format(time.RFC3339Nano),
-		Seq:        atomicIncrement(&eventSeq),
+		Seq:        seq,
 		JobID:      run.JobID,
 		RunnerID:   run.RunnerID,
 		Payload:    completionPayload,
@@ -472,18 +600,6 @@ func (m *Manager) executeRun(run db.AgentCLIRun) {
 			"status":             finalStatus,
 		})
 	}
-
-	var errMsg string
-	if finalStatus == db.AgentCLIStatusFailed {
-		errMsg = out.StderrPreview
-	}
-	if finalStatus == db.AgentCLIStatusTimedOut {
-		errMsg = "timed out"
-	}
-	if finalStatus == db.AgentCLIStatusAborted {
-		errMsg = "aborted"
-	}
-	m.finalizeRun(runCtx, run, finalStatus, errMsg, out)
 }
 
 func (m *Manager) recoverRunPanic(run db.AgentCLIRun) {
@@ -720,8 +836,16 @@ func minInt(a, b int) int {
 	return b
 }
 
-func atomicIncrement(i *int64) int64 {
-	return atomic.AddInt64(i, 1)
+func updateMaxSeq(maxSeq *int64, seq int64) {
+	for {
+		current := atomic.LoadInt64(maxSeq)
+		if seq <= current {
+			return
+		}
+		if atomic.CompareAndSwapInt64(maxSeq, current, seq) {
+			return
+		}
+	}
 }
 
 func (m *Manager) configSnapshot() config.AgentCLIConfig {

@@ -607,6 +607,25 @@ func validateAgentCLIConfig(cfg AgentCLIConfig) error {
 	if mode == "sandbox_auto" && iso != "sandbox_dangerous" {
 		return errors.New("agentCLI.defaultMode=sandbox_auto requires agentCLI.defaultIsolation=sandbox_dangerous")
 	}
+	for runner, runtimeMode := range cfg.RuntimeMode {
+		switch strings.TrimSpace(runtimeMode) {
+		case "", "auto", "native", "cli":
+		default:
+			return fmt.Errorf("agentCLI.runtimeMode[%s] must be auto, native, or cli", runner)
+		}
+	}
+	for runner, endpoint := range cfg.NativeServerURLs {
+		u, err := url.Parse(strings.TrimSpace(endpoint))
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			return fmt.Errorf("agentCLI.nativeServerUrls[%s] must be an absolute loopback http URL", runner)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return fmt.Errorf("agentCLI.nativeServerUrls[%s] must use http or https", runner)
+		}
+		if !isLoopbackHost(u.Hostname()) {
+			return fmt.Errorf("agentCLI.nativeServerUrls[%s] must point at loopback", runner)
+		}
+	}
 	return nil
 }
 

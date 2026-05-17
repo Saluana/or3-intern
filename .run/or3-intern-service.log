@@ -7542,3 +7542,139 @@ warning: service startup continuing without sandbox protection: privileged tools
 2026/05/16 22:12:38 service GET /internal/v1/chat-sessions -> 200
 2026/05/16 22:12:39 service GET /internal/v1/chat-runners -> 200
 2026/05/16 22:12:40 service GET /internal/v1/chat-runners -> 200
+warning: service startup continuing without sandbox protection: privileged tools are enabled without Bubblewrap sandboxing: Privileged exec-capable tools should run under Bubblewrap in hardened setups.; Run `or3-intern doctor --fix --interactive` to disable privileged tools or enable sandboxing.
+2026/05/16 23:26:33 or3-intern service listening on 127.0.0.1:9100
+2026/05/16 23:26:38 service GET /internal/v1/approvals -> 200
+2026/05/16 23:26:38 service GET /internal/v1/chat-sessions -> 200
+2026/05/16 23:26:38 service GET /internal/v1/chat-sessions -> 200
+2026/05/16 23:26:38 service GET /internal/v1/chat-runners -> 200
+2026/05/16 23:26:39 service GET /internal/v1/chat-runners -> 200
+2026/05/16 23:28:24 service GET /internal/v1/approvals -> 200
+2026/05/16 23:28:24 service GET /internal/v1/approvals -> 200
+2026/05/16 23:28:24 service GET /internal/v1/app/bootstrap -> 200
+2026/05/16 23:28:24 service GET /internal/v1/approvals -> 200
+2026/05/16 23:28:39 service GET /internal/v1/approvals -> 200
+2026/05/16 23:28:41 service POST /internal/v1/runner-chat/sessions -> 201 trace=turn_mp9e9hde_h2dfw81h
+2026/05/16 23:28:41 chat manager: started runner chat turn runner=codex session=rcs_656444ca141f21087ea5 turn=rct_11b1f1ce8357c17aed37 job=job-agentcli-4b9bdccc1298ba19d7b4b0f7 mode= isolation=
+2026/05/16 23:28:41 service POST /internal/v1/runner-chat/sessions/rcs_656444ca141f21087ea5/turns -> 202 trace=turn_mp9e9hde_h2dfw81h
+2026/05/16 23:28:42 chat manager: persisted native session ref runner=codex session=rcs_656444ca141f21087ea5 native_ref=019e349f-6582-73b1-a0e4-dc900b5be6f7
+2026/05/16 23:28:46 chat manager: finalized runner chat turn runner=codex session=rcs_656444ca141f21087ea5 turn=rct_11b1f1ce8357c17aed37 status=succeeded duration_ms=5048
+2026/05/16 23:28:46 service GET /internal/v1/runner-chat/sessions/rcs_656444ca141f21087ea5/turns/rct_11b1f1ce8357c17aed37/stream -> 200 trace=turn_mp9e9hde_h2dfw81h
+2026/05/16 23:28:46 service GET /internal/v1/runner-chat/sessions/rcs_656444ca141f21087ea5/turns/rct_11b1f1ce8357c17aed37 -> 200 trace=turn_mp9e9hde_h2dfw81h
+2026/05/16 23:28:46 service GET /internal/v1/approvals -> 200
+2026/05/16 23:28:54 service GET /internal/v1/approvals -> 200
+2026/05/16 23:29:09 service GET /internal/v1/approvals -> 200
+2026/05/16 23:29:24 service GET /internal/v1/approvals -> 200
+2026/05/16 23:29:39 service GET /internal/v1/approvals -> 200
+2026/05/16 23:29:54 service GET /internal/v1/approvals -> 200
+2026/05/16 23:30:07 service POST /internal/v1/runner-chat/sessions -> 201 trace=turn_mp9ebc45_8qtb17pq
+2026/05/16 23:30:07 chat manager: started runner chat turn runner=codex session=rcs_656444ca141f21087ea5 turn=rct_a9134cfbcc3dd415b32f job=job-agentcli-bbad0a788435ec8d582488cb mode= isolation=
+2026/05/16 23:30:07 service POST /internal/v1/runner-chat/sessions/rcs_656444ca141f21087ea5/turns -> 202 trace=turn_mp9ebc45_8qtb17pq
+2026/05/16 23:30:09 service GET /internal/v1/approvals -> 200 trace=turn_mp9ebc45_8qtb17pq
+2026/05/16 23:30:19 chat manager: finalized runner chat turn runner=codex session=rcs_656444ca141f21087ea5 turn=rct_a9134cfbcc3dd415b32f status=succeeded duration_ms=11822
+2026/05/16 23:30:19 service GET /internal/v1/runner-chat/sessions/rcs_656444ca141f21087ea5/turns/rct_a9134cfbcc3dd415b32f/stream -> 200 trace=turn_mp9ebc45_8qtb17pq
+2026/05/16 23:30:19 service GET /internal/v1/runner-chat/sessions/rcs_656444ca141f21087ea5/turns/rct_a9134cfbcc3dd415b32f -> 200 trace=turn_mp9ebc45_8qtb17pq
+2026/05/16 23:30:19 service GET /internal/v1/approvals -> 200
+2026/05/16 23:30:24 service GET /internal/v1/approvals -> 200
+2026/05/16 23:30:39 service GET /internal/v1/approvals -> 200
+2026/05/16 23:30:42 service POST /internal/v1/runner-chat/sessions -> 201 trace=turn_mp9ec3cb_r5ilytoi
+2026/05/16 23:30:43 chat manager: started runner chat turn runner=codex session=rcs_656444ca141f21087ea5 turn=rct_dbaf08a826915b097859 job=job-agentcli-c72df2ac822b80ae863b4b98 mode= isolation=
+2026/05/16 23:30:43 agent CLI worker error: database is locked (517)
+2026/05/16 23:30:43 service POST /internal/v1/runner-chat/sessions/rcs_656444ca141f21087ea5/turns -> 202 trace=turn_mp9ec3cb_r5ilytoi
+2026/05/16 23:30:54 service GET /internal/v1/approvals -> 200 trace=turn_mp9ec3cb_r5ilytoi
+2026/05/16 23:31:09 service GET /internal/v1/approvals -> 200 trace=turn_mp9ec3cb_r5ilytoi
+2026/05/16 23:31:16 chat manager: finalized runner chat turn runner=codex session=rcs_656444ca141f21087ea5 turn=rct_dbaf08a826915b097859 status=succeeded duration_ms=33512
+2026/05/16 23:31:16 service GET /internal/v1/runner-chat/sessions/rcs_656444ca141f21087ea5/turns/rct_dbaf08a826915b097859/stream -> 200 trace=turn_mp9ec3cb_r5ilytoi
+2026/05/16 23:31:16 service GET /internal/v1/runner-chat/sessions/rcs_656444ca141f21087ea5/turns/rct_dbaf08a826915b097859 -> 200 trace=turn_mp9ec3cb_r5ilytoi
+2026/05/16 23:31:16 service GET /internal/v1/approvals -> 200
+2026/05/16 23:31:24 service GET /internal/v1/approvals -> 200
+2026/05/16 23:31:39 service GET /internal/v1/approvals -> 200
+2026/05/16 23:31:54 service GET /internal/v1/approvals -> 200
+2026/05/16 23:32:09 service GET /internal/v1/approvals -> 200
+2026/05/16 23:32:24 service GET /internal/v1/approvals -> 200
+2026/05/16 23:32:39 service GET /internal/v1/approvals -> 200
+2026/05/16 23:32:54 service GET /internal/v1/approvals -> 200
+2026/05/16 23:33:09 service GET /internal/v1/approvals -> 200
+2026/05/16 23:33:24 service GET /internal/v1/approvals -> 200
+2026/05/16 23:33:39 service GET /internal/v1/approvals -> 200
+2026/05/16 23:33:54 service GET /internal/v1/approvals -> 200
+2026/05/16 23:34:09 service GET /internal/v1/approvals -> 200
+2026/05/16 23:34:09 service POST /internal/v1/runner-chat/sessions -> 201 trace=turn_mp9egj0n_5lzju429
+2026/05/16 23:34:09 chat manager: started runner chat turn runner=codex session=rcs_656444ca141f21087ea5 turn=rct_d6421ba74dd27f7cdc5e job=job-agentcli-ee5aa8545005818153130686 mode= isolation=
+2026/05/16 23:34:09 agent CLI worker error: database is locked (517)
+2026/05/16 23:34:09 service POST /internal/v1/runner-chat/sessions/rcs_656444ca141f21087ea5/turns -> 202 trace=turn_mp9egj0n_5lzju429
+2026/05/16 23:34:24 service GET /internal/v1/approvals -> 200 trace=turn_mp9egj0n_5lzju429
+2026/05/16 23:34:39 service GET /internal/v1/approvals -> 200 trace=turn_mp9egj0n_5lzju429
+2026/05/16 23:34:54 service GET /internal/v1/approvals -> 200 trace=turn_mp9egj0n_5lzju429
+2026/05/16 23:35:07 chat manager: finalized runner chat turn runner=codex session=rcs_656444ca141f21087ea5 turn=rct_d6421ba74dd27f7cdc5e status=succeeded duration_ms=57137
+2026/05/16 23:35:07 service GET /internal/v1/runner-chat/sessions/rcs_656444ca141f21087ea5/turns/rct_d6421ba74dd27f7cdc5e/stream -> 200 trace=turn_mp9egj0n_5lzju429
+2026/05/16 23:35:07 service GET /internal/v1/runner-chat/sessions/rcs_656444ca141f21087ea5/turns/rct_d6421ba74dd27f7cdc5e -> 200 trace=turn_mp9egj0n_5lzju429
+2026/05/16 23:35:07 service GET /internal/v1/approvals -> 200
+2026/05/16 23:35:09 service GET /internal/v1/approvals -> 200
+2026/05/16 23:35:24 service GET /internal/v1/approvals -> 200
+2026/05/16 23:35:38 service GET /internal/v1/approvals -> 200
+2026/05/16 23:35:39 service GET /internal/v1/approvals -> 200
+2026/05/16 23:35:49 service POST /internal/v1/runner-chat/sessions -> 201 trace=turn_mp9einxd_erwsof4o
+2026/05/16 23:35:49 chat manager: started runner chat turn runner=opencode session=rcs_a05fd55ef327d6ef18ff turn=rct_0d30fc25e8dbd7dcdce4 job=job-agentcli-32a545f4d7067d6c48c00e30 mode= isolation=
+2026/05/16 23:35:49 agent CLI worker error: database is locked (517)
+2026/05/16 23:35:49 service POST /internal/v1/runner-chat/sessions/rcs_a05fd55ef327d6ef18ff/turns -> 202 trace=turn_mp9einxd_erwsof4o
+2026/05/16 23:35:50 chat manager: persisted native session ref runner=opencode session=rcs_a05fd55ef327d6ef18ff native_ref=ses_1cb5a1057ffeQ2elZ8kkzFRwOq
+2026/05/16 23:35:54 service GET /internal/v1/approvals -> 200 trace=turn_mp9einxd_erwsof4o
+2026/05/16 23:35:55 chat manager: persisted native session ref runner=opencode session=rcs_a05fd55ef327d6ef18ff native_ref=ses_1cb5a1057ffeQ2elZ8kkzFRwOq
+2026/05/16 23:35:55 chat manager: persisted native session ref runner=opencode session=rcs_a05fd55ef327d6ef18ff native_ref=ses_1cb5a1057ffeQ2elZ8kkzFRwOq
+2026/05/16 23:35:55 chat manager: persisted native session ref runner=opencode session=rcs_a05fd55ef327d6ef18ff native_ref=ses_1cb5a1057ffeQ2elZ8kkzFRwOq
+2026/05/16 23:35:55 chat manager: persisted native session ref runner=opencode session=rcs_a05fd55ef327d6ef18ff native_ref=ses_1cb5a1057ffeQ2elZ8kkzFRwOq
+2026/05/16 23:35:55 chat manager: persisted native session ref runner=opencode session=rcs_a05fd55ef327d6ef18ff native_ref=ses_1cb5a1057ffeQ2elZ8kkzFRwOq
+2026/05/16 23:35:55 chat manager: persisted native session ref runner=opencode session=rcs_a05fd55ef327d6ef18ff native_ref=ses_1cb5a1057ffeQ2elZ8kkzFRwOq
+2026/05/16 23:35:55 chat manager: finalized runner chat turn runner=opencode session=rcs_a05fd55ef327d6ef18ff turn=rct_0d30fc25e8dbd7dcdce4 status=succeeded duration_ms=6175
+2026/05/16 23:35:56 service GET /internal/v1/runner-chat/sessions/rcs_a05fd55ef327d6ef18ff/turns/rct_0d30fc25e8dbd7dcdce4/stream -> 200 trace=turn_mp9einxd_erwsof4o
+2026/05/16 23:35:56 service GET /internal/v1/runner-chat/sessions/rcs_a05fd55ef327d6ef18ff/turns/rct_0d30fc25e8dbd7dcdce4 -> 200 trace=turn_mp9einxd_erwsof4o
+2026/05/16 23:35:56 service GET /internal/v1/approvals -> 200
+2026/05/16 23:36:09 service GET /internal/v1/approvals -> 200
+2026/05/16 23:36:24 service GET /internal/v1/approvals -> 200
+2026/05/16 23:36:39 service POST /internal/v1/runner-chat/sessions -> 201 trace=turn_mp9ejqnq_aub3g3zv
+2026/05/16 23:36:39 chat manager: started runner chat turn runner=opencode session=rcs_a05fd55ef327d6ef18ff turn=rct_4b5ec9c3787261b30930 job=job-agentcli-5ccff5866cb75846ea202b18 mode= isolation=
+2026/05/16 23:36:39 agent CLI worker error: database is locked (517)
+2026/05/16 23:36:39 service POST /internal/v1/runner-chat/sessions/rcs_a05fd55ef327d6ef18ff/turns -> 202 trace=turn_mp9ejqnq_aub3g3zv
+2026/05/16 23:36:39 service GET /internal/v1/approvals -> 200 trace=turn_mp9ejqnq_aub3g3zv
+2026/05/16 23:36:54 service GET /internal/v1/chat-sessions -> 200 trace=turn_mp9ejqnq_aub3g3zv
+2026/05/16 23:36:54 service GET /internal/v1/chat-sessions -> 200 trace=turn_mp9ejqnq_aub3g3zv
+2026/05/16 23:36:54 service GET /internal/v1/approvals -> 200 trace=turn_mp9ejqnq_aub3g3zv
+2026/05/16 23:36:55 service GET /internal/v1/chat-runners -> 200 trace=turn_mp9ejqnq_aub3g3zv
+2026/05/16 23:36:56 service GET /internal/v1/chat-runners -> 200 trace=turn_mp9ejqnq_aub3g3zv
+2026/05/16 23:37:06 chat manager: finalized runner chat turn runner=opencode session=rcs_a05fd55ef327d6ef18ff turn=rct_4b5ec9c3787261b30930 status=succeeded duration_ms=27115
+2026/05/16 23:37:07 service GET /internal/v1/runner-chat/sessions/rcs_a05fd55ef327d6ef18ff/turns/rct_4b5ec9c3787261b30930/stream -> 200 trace=turn_mp9ejqnq_aub3g3zv
+2026/05/16 23:37:07 service GET /internal/v1/runner-chat/sessions/rcs_a05fd55ef327d6ef18ff/turns/rct_4b5ec9c3787261b30930 -> 200 trace=turn_mp9ejqnq_aub3g3zv
+2026/05/16 23:37:09 service GET /internal/v1/approvals -> 200
+2026/05/16 23:37:24 service GET /internal/v1/approvals -> 200
+2026/05/16 23:37:29 service GET /internal/v1/chat-sessions -> 200
+2026/05/16 23:37:29 service GET /internal/v1/chat-sessions -> 200
+2026/05/16 23:37:29 service GET /internal/v1/chat-runners -> 200
+2026/05/16 23:37:30 service GET /internal/v1/chat-runners -> 200
+2026/05/16 23:37:32 service POST /internal/v1/runner-chat/sessions -> 201 trace=turn_mp9ekvfu_aaev9dph
+2026/05/16 23:37:32 chat manager: started runner chat turn runner=opencode session=rcs_a05fd55ef327d6ef18ff turn=rct_27d8e7dd92a77e0f610a job=job-agentcli-09a41ff8c87430d4d2a174cb mode= isolation=
+2026/05/16 23:37:32 service POST /internal/v1/runner-chat/sessions/rcs_a05fd55ef327d6ef18ff/turns -> 202 trace=turn_mp9ekvfu_aaev9dph
+2026/05/16 23:37:38 chat manager: finalized runner chat turn runner=opencode session=rcs_a05fd55ef327d6ef18ff turn=rct_27d8e7dd92a77e0f610a status=succeeded duration_ms=5855
+2026/05/16 23:37:38 service GET /internal/v1/runner-chat/sessions/rcs_a05fd55ef327d6ef18ff/turns/rct_27d8e7dd92a77e0f610a/stream -> 200 trace=turn_mp9ekvfu_aaev9dph
+2026/05/16 23:37:38 service GET /internal/v1/runner-chat/sessions/rcs_a05fd55ef327d6ef18ff/turns/rct_27d8e7dd92a77e0f610a -> 200 trace=turn_mp9ekvfu_aaev9dph
+2026/05/16 23:37:39 service GET /internal/v1/approvals -> 200
+2026/05/16 23:37:54 service GET /internal/v1/approvals -> 200
+2026/05/16 23:38:09 service GET /internal/v1/approvals -> 200
+2026/05/16 23:38:24 service GET /internal/v1/approvals -> 200
+2026/05/16 23:38:39 service GET /internal/v1/approvals -> 200
+2026/05/16 23:38:54 service GET /internal/v1/approvals -> 200
+2026/05/16 23:39:09 service GET /internal/v1/approvals -> 200
+2026/05/16 23:39:24 service GET /internal/v1/approvals -> 200
+2026/05/16 23:39:39 service GET /internal/v1/approvals -> 200
+2026/05/16 23:39:54 service GET /internal/v1/approvals -> 200
+2026/05/16 23:40:09 service GET /internal/v1/approvals -> 200
+2026/05/16 23:40:24 service GET /internal/v1/approvals -> 200
+2026/05/16 23:40:37 service GET /internal/v1/chat-sessions -> 200
+2026/05/16 23:40:37 service GET /internal/v1/chat-sessions -> 200
+2026/05/16 23:40:37 service GET /internal/v1/chat-sessions -> 200
+2026/05/16 23:40:37 service GET /internal/v1/chat-sessions -> 200
+2026/05/16 23:40:38 service GET /internal/v1/chat-runners -> 200
+2026/05/16 23:40:39 service GET /internal/v1/chat-runners -> 200
+2026/05/16 23:40:39 service GET /internal/v1/approvals -> 200
+2026/05/16 23:40:39 service GET /internal/v1/chat-runners -> 200
+2026/05/16 23:40:40 service GET /internal/v1/chat-runners -> 200

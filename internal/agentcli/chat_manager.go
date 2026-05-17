@@ -518,6 +518,8 @@ func (cm *ChatManager) maybeCaptureRunnerPermission(turn db.RunnerChatTurn, sess
 	switch RunnerID(sess.RunnerID) {
 	case RunnerOpenCode:
 		permission, ok = detectOpenCodePermissionRequest(raw)
+	case RunnerCodex:
+		permission, ok = detectCodexStructuredPermissionRequest(raw)
 	default:
 		return
 	}

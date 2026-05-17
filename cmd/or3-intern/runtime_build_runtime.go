@@ -33,6 +33,7 @@ func buildRuntimeAgentCLIManager(cfg config.Config, database *db.DB, jobs *agent
 		MaxQueued:                   cfg.AgentCLI.MaxQueued,
 		TaskTimeout:                 time.Duration(cfg.AgentCLI.DefaultTimeoutSeconds) * time.Second,
 		Registry:                    agentcli.NewDefaultRegistry(),
+		Runtimes:                    agentcli.NewDefaultRuntimeRegistry(),
 		RestrictDir:                 allowedRoot(cfg),
 	}
 }

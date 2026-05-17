@@ -41,6 +41,7 @@ type ProcessOutput struct {
 	StderrPreview    string
 	FinalTextPreview string
 	DurationMS       int64
+	EventSeq         int64
 }
 
 // Run launches a command and streams events through the provided callback.

@@ -138,19 +138,24 @@ func defaultSubagentsConfig() SubagentsConfig {
 
 func defaultAgentCLIConfig() AgentCLIConfig {
 	return AgentCLIConfig{
-		Enabled:                 false,
-		DisabledRunners:         []string{},
-		MaxConcurrent:           1,
-		MaxQueued:               16,
-		DefaultTimeoutSeconds:   900,
-		MaxTimeoutSeconds:       7200,
-		AllowSandboxAuto:        false,
-		DefaultMode:             "safe_edit",
-		DefaultIsolation:        "host_workspace_write",
-		EventChunkMaxBytes:      16384,
-		PreviewMaxBytes:         65536,
-		MaxPersistedOutputBytes: 10485760,
-		ChildEnvAllowlist:       append([]string{}, defaultChildEnvAllowlist...),
+		Enabled:                    false,
+		DisabledRunners:            []string{},
+		RuntimeMode:                map[string]string{"opencode": "auto", "codex": "auto"},
+		DefaultModels:              map[string]string{},
+		NativeServerURLs:           map[string]string{},
+		NativeServerStartupSeconds: 10,
+		NativeServerIdleSeconds:    900,
+		MaxConcurrent:              1,
+		MaxQueued:                  16,
+		DefaultTimeoutSeconds:      900,
+		MaxTimeoutSeconds:          7200,
+		AllowSandboxAuto:           false,
+		DefaultMode:                "safe_edit",
+		DefaultIsolation:           "host_workspace_write",
+		EventChunkMaxBytes:         16384,
+		PreviewMaxBytes:            65536,
+		MaxPersistedOutputBytes:    10485760,
+		ChildEnvAllowlist:          append([]string{}, defaultChildEnvAllowlist...),
 	}
 }
 

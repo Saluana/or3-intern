@@ -38,6 +38,15 @@ func BuildChatRunner(spec agentcli.RunnerSpec, info agentcli.RunnerInfo, default
 		"supports":          spec.Supports,
 		"chat_capabilities": spec.Supports.Chat,
 	}
+	if info.Runtime.Kind != "" || len(info.Runtime.Models) > 0 || info.Runtime.DefaultModel != "" {
+		out["runtime"] = info.Runtime
+		if len(info.Runtime.Models) > 0 {
+			out["models"] = info.Runtime.Models
+		}
+		if strings.TrimSpace(info.Runtime.DefaultModel) != "" {
+			defaultModel = info.Runtime.DefaultModel
+		}
+	}
 	if v := strings.TrimSpace(info.Version); v != "" {
 		out["version"] = v
 	}

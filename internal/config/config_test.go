@@ -183,6 +183,12 @@ func TestDefault_Values(t *testing.T) {
 	if cfg.AgentCLI.MaxPersistedOutputBytes != 10485760 {
 		t.Errorf("expected AgentCLI.MaxPersistedOutputBytes=10485760, got %d", cfg.AgentCLI.MaxPersistedOutputBytes)
 	}
+	if cfg.AgentCLI.RuntimeMode["opencode"] != "auto" || cfg.AgentCLI.RuntimeMode["codex"] != "auto" {
+		t.Fatalf("expected native runner runtime modes to default to auto, got %#v", cfg.AgentCLI.RuntimeMode)
+	}
+	if len(cfg.AgentCLI.NativeServerURLs) != 0 {
+		t.Fatalf("expected native server URLs to default empty, got %#v", cfg.AgentCLI.NativeServerURLs)
+	}
 	if cfg.Service.Enabled {
 		t.Error("expected Service.Enabled=false by default")
 	}
@@ -1175,6 +1181,30 @@ func TestLoad_AgentCLIDefaultTimeoutClamped(t *testing.T) {
 	}
 	if cfg.AgentCLI.DefaultTimeoutSeconds != 30 {
 		t.Errorf("expected timeout clamped to 30, got %d", cfg.AgentCLI.DefaultTimeoutSeconds)
+	}
+}
+
+func TestLoad_AgentCLINativeServerURLsAreLoopbackOnly(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	input := Default()
+	input.AgentCLI.NativeServerURLs = map[string]string{"OpenCode": "http://127.0.0.1:4096/"}
+	b, _ := json.MarshalIndent(input, "", "  ")
+	mustWriteTestFile(t, path, b)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.AgentCLI.NativeServerURLs["opencode"]; got != "http://127.0.0.1:4096" {
+		t.Fatalf("native server URL = %q, want normalized loopback URL", got)
+	}
+
+	input.AgentCLI.NativeServerURLs = map[string]string{"opencode": "https://example.com:4096"}
+	b, _ = json.MarshalIndent(input, "", "  ")
+	mustWriteTestFile(t, path, b)
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "must point at loopback") {
+		t.Fatalf("expected non-loopback native server URL to be rejected, got %v", err)
 	}
 }
 

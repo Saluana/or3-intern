@@ -60,6 +60,67 @@ const (
 	AuthUnknown AuthStatus = "unknown"
 )
 
+// RunnerRuntimeKind describes how a runner turn will be executed.
+type RunnerRuntimeKind string
+
+const (
+	RuntimeCLI    RunnerRuntimeKind = "cli"
+	RuntimeNative RunnerRuntimeKind = "native"
+)
+
+// RunnerRuntimeMode controls whether native runtime backends are attempted.
+type RunnerRuntimeMode string
+
+const (
+	RuntimeModeAuto   RunnerRuntimeMode = "auto"
+	RuntimeModeNative RunnerRuntimeMode = "native"
+	RuntimeModeCLI    RunnerRuntimeMode = "cli"
+)
+
+// RunnerRuntimeOwnership records whether OR3 owns a helper process.
+type RunnerRuntimeOwnership string
+
+const (
+	RuntimeOwnershipNone     RunnerRuntimeOwnership = "none"
+	RuntimeOwnershipManaged  RunnerRuntimeOwnership = "managed"
+	RuntimeOwnershipExternal RunnerRuntimeOwnership = "external"
+	RuntimeOwnershipUnknown  RunnerRuntimeOwnership = "unknown"
+)
+
+// RunnerRuntimeState is safe, user-facing readiness for a native runtime.
+type RunnerRuntimeState string
+
+const (
+	RuntimeStateUnavailable RunnerRuntimeState = "unavailable"
+	RuntimeStateReady       RunnerRuntimeState = "ready"
+	RuntimeStateStarting    RunnerRuntimeState = "starting"
+	RuntimeStateError       RunnerRuntimeState = "error"
+	RuntimeStateFallback    RunnerRuntimeState = "fallback"
+)
+
+// RunnerModelInfo is model metadata exposed to the app selector.
+type RunnerModelInfo struct {
+	ID          string   `json:"id"`
+	DisplayName string   `json:"display_name,omitempty"`
+	Provider    string   `json:"provider,omitempty"`
+	Default     bool     `json:"default,omitempty"`
+	Reasoning   []string `json:"reasoning,omitempty"`
+}
+
+// RunnerRuntimeInfo is discovery/status metadata for native-first backends.
+type RunnerRuntimeInfo struct {
+	Kind           RunnerRuntimeKind      `json:"kind"`
+	Mode           RunnerRuntimeMode      `json:"mode"`
+	State          RunnerRuntimeState     `json:"state"`
+	Ownership      RunnerRuntimeOwnership `json:"ownership"`
+	Endpoint       string                 `json:"endpoint,omitempty"`
+	Message        string                 `json:"message,omitempty"`
+	Fallback       bool                   `json:"fallback"`
+	FallbackReason string                 `json:"fallback_reason,omitempty"`
+	Models         []RunnerModelInfo      `json:"models,omitempty"`
+	DefaultModel   string                 `json:"default_model,omitempty"`
+}
+
 // OutputMode describes how the CLI output is formatted.
 type OutputMode string
 
@@ -127,16 +188,17 @@ type RunnerSpec struct {
 
 // RunnerInfo is the detection result returned by the API.
 type RunnerInfo struct {
-	ID                 string         `json:"id"`
-	DisplayName        string         `json:"display_name"`
-	BinaryName         string         `json:"binary_name"`
-	BinaryPath         string         `json:"binary_path,omitempty"`
-	Version            string         `json:"version,omitempty"`
-	Status             RunnerStatus   `json:"status"`
-	DisabledReason     string         `json:"disabled_reason,omitempty"`
-	AuthStatus         AuthStatus     `json:"auth_status"`
-	Supports           RunnerSupports `json:"supports"`
-	DefaultArgsPreview []string       `json:"default_args_preview"`
+	ID                 string            `json:"id"`
+	DisplayName        string            `json:"display_name"`
+	BinaryName         string            `json:"binary_name"`
+	BinaryPath         string            `json:"binary_path,omitempty"`
+	Version            string            `json:"version,omitempty"`
+	Status             RunnerStatus      `json:"status"`
+	DisabledReason     string            `json:"disabled_reason,omitempty"`
+	AuthStatus         AuthStatus        `json:"auth_status"`
+	Supports           RunnerSupports    `json:"supports"`
+	DefaultArgsPreview []string          `json:"default_args_preview"`
+	Runtime            RunnerRuntimeInfo `json:"runtime,omitempty"`
 }
 
 // AgentRunRequest is the validated input for starting a CLI run.

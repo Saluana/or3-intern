@@ -631,6 +631,18 @@ func serviceRouteRequirementForRequest(cfg config.Config, r *http.Request) servi
 		return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
 	case strings.HasPrefix(path, "/internal/v1/devices/"):
 		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "device management requires recent passkey verification"}
+	case strings.HasPrefix(path, "/internal/v1/secure-connections"):
+		relative := strings.Trim(strings.TrimPrefix(path, "/internal/v1/secure-connections"), "/")
+		if method == http.MethodGet && relative == "capabilities" {
+			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
+		}
+		if method == http.MethodGet && relative == "host-identity" {
+			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, SessionOnly: true}
+		}
+		if method == http.MethodGet && (relative == "devices" || relative == "relay/rendezvous") {
+			return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "secure connection state requires recent passkey verification"}
+		}
+		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "secure connection changes require recent passkey verification"}
 	case path == "/internal/v1/app/bootstrap":
 		return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, BypassGlobalSession: true}
 	case path == "/internal/v1/actions/restart-service":
@@ -708,9 +720,6 @@ func serviceAuthChallengeError(cfg config.Config, authSvc *auth.Service, require
 		if requirement.Sensitivity == serviceRouteSensitive {
 			return auth.ErrPasskeyRequired
 		}
-		return nil
-	}
-	if strings.EqualFold(identity.Kind, "shared-secret") {
 		return nil
 	}
 	enforceSession := requirement.SessionOnly || (strings.EqualFold(mode, string(config.AuthEnforcementSession)) && !requirement.BypassGlobalSession)

@@ -20,29 +20,37 @@ or3-intern version
 
 1. Run guided setup:
 
-   ```bash
-   or3-intern setup
-   ```
+    ```bash
+    or3-intern setup
+    ```
 
 2. Start an interactive local conversation:
 
-   ```bash
-   or3-intern chat
-   ```
+    ```bash
+    or3-intern chat
+    ```
 
-   Inside chat, use `/new` when you want to archive the current conversation into memory and start fresh.
+    Inside chat, use `/new` when you want to archive the current conversation into memory and start fresh.
 
 3. Or run enabled connected apps and automation:
 
-   ```bash
-   or3-intern serve
-   ```
+    ```bash
+    or3-intern serve
+    ```
+
+    To connect OR3 App over the internal service API, run:
+
+    ```bash
+    or3-intern service
+    ```
+
+    Then pair from OR3 App at `/settings/pair`, or start from the computer with `or3-intern connect-device` and enter the printed request ID and code in the app. See docs/v1/user-guide/app-integration/or3-app-connection-guide.md for the full web, Electron, iOS, Android, pairing, disconnect, and troubleshooting flow.
 
 4. Check safety and access posture any time:
 
-   ```bash
-   or3-intern status
-   ```
+    ```bash
+    or3-intern status
+    ```
 
 The `setup` command is the recommended first-run flow. It asks for a provider, workspace folder, scenario, and safety mode, then translates those choices into the existing runtime profile, approvals, audit, service, and hardening settings.
 

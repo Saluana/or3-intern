@@ -15,6 +15,14 @@ type TrustStore struct {
 	Now      func() time.Time
 }
 
+type EnrollmentApprovalInput struct {
+	RendezvousID  string
+	PairingSecret string
+	Proposal      DeviceEnrollmentProposalV1
+	TrustLevel    string
+	ExpiresAt     time.Time
+}
+
 func (s *TrustStore) now() time.Time {
 	if s != nil && s.Now != nil {
 		return s.Now().UTC()
@@ -148,6 +156,9 @@ func (s *TrustStore) ApproveEnrollment(ctx context.Context, proposal DeviceEnrol
 		return HostEnrollmentCertificateV1{}, db.SecureConnectionDeviceRecord{}, fmt.Errorf("secure connection trust store unavailable")
 	}
 	now := s.now()
+	if err := VerifyEnrollmentProposalSignature(proposal, now); err != nil {
+		return HostEnrollmentCertificateV1{}, db.SecureConnectionDeviceRecord{}, err
+	}
 	if err := validateAccountBinding(proposal, accountID); err != nil {
 		return HostEnrollmentCertificateV1{}, db.SecureConnectionDeviceRecord{}, err
 	}
@@ -186,6 +197,53 @@ func (s *TrustStore) ApproveEnrollment(ctx context.Context, proposal DeviceEnrol
 		return HostEnrollmentCertificateV1{}, db.SecureConnectionDeviceRecord{}, err
 	}
 	return cert, record, nil
+}
+
+func (s *TrustStore) ApproveEnrollmentFromPairing(ctx context.Context, input EnrollmentApprovalInput) (HostEnrollmentCertificateV1, db.SecureConnectionDeviceRecord, error) {
+	if s == nil || s.DB == nil {
+		return HostEnrollmentCertificateV1{}, db.SecureConnectionDeviceRecord{}, fmt.Errorf("secure connection trust store unavailable")
+	}
+	rendezvousID := strings.TrimSpace(input.RendezvousID)
+	if rendezvousID == "" {
+		return HostEnrollmentCertificateV1{}, db.SecureConnectionDeviceRecord{}, fmt.Errorf("rendezvous ID required")
+	}
+	pairingSecret := strings.TrimSpace(input.PairingSecret)
+	if pairingSecret == "" {
+		return HostEnrollmentCertificateV1{}, db.SecureConnectionDeviceRecord{}, fmt.Errorf("pairing secret proof required")
+	}
+	session, err := s.DB.GetSecureConnectionPairingSession(ctx, rendezvousID)
+	if err != nil {
+		return HostEnrollmentCertificateV1{}, db.SecureConnectionDeviceRecord{}, fmt.Errorf("pairing session not found: %w", err)
+	}
+	now := s.now()
+	if session.HostID != s.Identity.HostID {
+		return HostEnrollmentCertificateV1{}, db.SecureConnectionDeviceRecord{}, fmt.Errorf("pairing session belongs to a different host")
+	}
+	if session.ExpiresAt <= now.UnixMilli() {
+		return HostEnrollmentCertificateV1{}, db.SecureConnectionDeviceRecord{}, SecureConnectionError{Code: ErrorPairingExpired, SafeMessage: "This pairing code expired. Show a new one.", Retryable: true}
+	}
+	if session.Status != StatusJoined && session.Status != StatusPendingApproval {
+		return HostEnrollmentCertificateV1{}, db.SecureConnectionDeviceRecord{}, fmt.Errorf("pairing session is not awaiting approval")
+	}
+	commitment, err := RendezvousCommitment(pairingSecret)
+	if err != nil {
+		return HostEnrollmentCertificateV1{}, db.SecureConnectionDeviceRecord{}, err
+	}
+	if !constantStringEqual(commitment, session.SecretCommitment) {
+		return HostEnrollmentCertificateV1{}, db.SecureConnectionDeviceRecord{}, fmt.Errorf("pairing secret proof mismatch")
+	}
+	cert, rec, err := s.ApproveEnrollment(ctx, input.Proposal, session.RequestedRole, session.Capabilities, input.TrustLevel, session.AccountID, input.ExpiresAt)
+	if err != nil {
+		return HostEnrollmentCertificateV1{}, db.SecureConnectionDeviceRecord{}, err
+	}
+	ok, err := s.DB.CompareAndSwapSecureConnectionPairingStatus(ctx, rendezvousID, session.Status, StatusConsumed, now.UnixMilli())
+	if err != nil {
+		return HostEnrollmentCertificateV1{}, db.SecureConnectionDeviceRecord{}, err
+	}
+	if !ok {
+		return HostEnrollmentCertificateV1{}, db.SecureConnectionDeviceRecord{}, fmt.Errorf("pairing session was already consumed")
+	}
+	return cert, rec, nil
 }
 
 func (s *TrustStore) RevokeDevice(ctx context.Context, deviceID, reason string) error {

@@ -95,6 +95,33 @@ func TestRelayRendezvousExpireAndReject(t *testing.T) {
 	if !rejected {
 		t.Fatal("expected live rendezvous to reject")
 	}
+	consumed, err := database.ConsumeRelayRendezvous(context.Background(), "rv-expired", 22)
+	if err != nil {
+		t.Fatalf("ConsumeRelayRendezvous: %v", err)
+	}
+	if consumed {
+		t.Fatal("expected expired rendezvous not to consume")
+	}
+}
+
+func TestRelayMetadataRejectsUnsupportedFields(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "relay-metadata.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer database.Close()
+
+	err = database.CreateRelayRoute(context.Background(), RelayRouteRecord{
+		RouteID:    "route-unsupported",
+		HostIDHash: "host-hash",
+		Status:     "created",
+		CreatedAt:  1,
+		ExpiresAt:  2,
+		Metadata:   map[string]any{"notes": "should not be accepted"},
+	})
+	if err == nil {
+		t.Fatal("expected unsupported relay metadata field to be rejected")
+	}
 }
 
 func TestSecureConnectionDeviceLookupByNoiseKey(t *testing.T) {

@@ -37,9 +37,11 @@ type SessionStartInput struct {
 	DeviceID                  string
 	DeviceNoisePublicKey      string
 	RelayRouteID              string
+	RelayOrigin               string
 	EnrollmentCertificateHash string
 	AccountID                 string
-	StepUpAt                  time.Time
+	NoiseHandshake            NoiseHandshakeInitV1
+	AuthenticatedStepUpAt     time.Time
 	TTL                       time.Duration
 }
 
@@ -103,8 +105,44 @@ func (m *SessionManager) StartVerifiedSession(ctx context.Context, input Session
 			return SessionClaims{}, db.SecureConnectionSessionRecord{}, fmt.Errorf("enrollment certificate hash mismatch")
 		}
 	}
+	certificateHash, err := EnrollmentCertificateHash(cert)
+	if err != nil {
+		return SessionClaims{}, db.SecureConnectionSessionRecord{}, err
+	}
 	if strings.TrimSpace(input.AccountID) != "" && strings.TrimSpace(device.AccountID) != "" && strings.TrimSpace(input.AccountID) != strings.TrimSpace(device.AccountID) {
 		return SessionClaims{}, db.SecureConnectionSessionRecord{}, fmt.Errorf("secure session account mismatch")
+	}
+	handshake := input.NoiseHandshake
+	if handshake.Version == 0 {
+		return SessionClaims{}, db.SecureConnectionSessionRecord{}, SecureConnectionError{Code: ErrorHandshakeFailed, SafeMessage: "Connection setup did not include a runtime handshake.", Retryable: true}
+	}
+	if strings.TrimSpace(handshake.DeviceID) != device.DeviceID {
+		return SessionClaims{}, db.SecureConnectionSessionRecord{}, SecureConnectionError{Code: ErrorHandshakeFailed, SafeMessage: "Connection setup was not bound to this device.", Retryable: true}
+	}
+	if strings.TrimSpace(handshake.DeviceNoisePublicKey) != device.DeviceNoisePublicKey {
+		return SessionClaims{}, db.SecureConnectionSessionRecord{}, SecureConnectionError{Code: ErrorHandshakeFailed, SafeMessage: "Connection setup used the wrong device key.", Retryable: true}
+	}
+	if strings.TrimSpace(handshake.EnrollmentCertHash) != certificateHash {
+		return SessionClaims{}, db.SecureConnectionSessionRecord{}, SecureConnectionError{Code: ErrorHandshakeFailed, SafeMessage: "Connection setup was not bound to this enrollment.", Retryable: true}
+	}
+	prologue := SessionPrologueV1{
+		Protocol:                  "or3-secure-runtime",
+		Version:                   ProtocolVersion,
+		RelayOrigin:               strings.TrimSpace(input.RelayOrigin),
+		RouteID:                   strings.TrimSpace(input.RelayRouteID),
+		HostID:                    m.Identity.HostID,
+		DeviceIDHash:              HashBase64URL([]byte(device.DeviceID)),
+		EnrollmentCertificateHash: certificateHash,
+		AccountID:                 strings.TrimSpace(device.AccountID),
+		MinProtocolVersion:        ProtocolVersion,
+		MaxProtocolVersion:        ProtocolVersion,
+	}
+	if strings.TrimSpace(input.AccountID) != "" {
+		prologue.AccountID = strings.TrimSpace(input.AccountID)
+	}
+	handshakeResult, err := HostAcceptNoiseIK(m.Identity, handshake, prologue)
+	if err != nil {
+		return SessionClaims{}, db.SecureConnectionSessionRecord{}, err
 	}
 	sessionID, err := RandomBase64URL(24)
 	if err != nil {
@@ -118,8 +156,8 @@ func (m *SessionManager) StartVerifiedSession(ctx context.Context, input Session
 	if ttl > time.Hour {
 		ttl = time.Hour
 	}
-	stepUpAt := input.StepUpAt.UTC().UnixMilli()
-	if input.StepUpAt.IsZero() {
+	stepUpAt := input.AuthenticatedStepUpAt.UTC().UnixMilli()
+	if input.AuthenticatedStepUpAt.IsZero() {
 		stepUpAt = 0
 	}
 	rec, err := m.DB.CreateSecureConnectionSession(ctx, db.SecureConnectionSessionRecord{
@@ -134,7 +172,8 @@ func (m *SessionManager) StartVerifiedSession(ctx context.Context, input Session
 		ExpiresAt:       now.Add(ttl).UnixMilli(),
 		StepUpAt:        stepUpAt,
 		Metadata: map[string]any{
-			"protocol": "secure-connections-v2",
+			"protocol":   "secure-connections-v2",
+			"transcript": handshakeResult.Transcript,
 		},
 	})
 	if err != nil {
@@ -157,6 +196,47 @@ func (m *SessionManager) StartVerifiedSession(ctx context.Context, input Session
 	return claims, rec, nil
 }
 
+func (m *SessionManager) LoadActiveSessionClaims(ctx context.Context, sessionID string) (SessionClaims, error) {
+	if m == nil || m.DB == nil {
+		return SessionClaims{}, fmt.Errorf("secure session manager unavailable")
+	}
+	rec, err := m.DB.GetSecureConnectionSession(ctx, sessionID)
+	if err != nil {
+		return SessionClaims{}, err
+	}
+	now := m.now()
+	if rec.Status != StatusActive || (rec.ExpiresAt > 0 && rec.ExpiresAt <= now.UnixMilli()) {
+		return SessionClaims{}, SecureConnectionError{Code: ErrorSessionExpired, SafeMessage: "This secure connection expired. Reconnect from the app.", Retryable: true}
+	}
+	device, err := m.DB.GetSecureConnectionDevice(ctx, rec.DeviceID)
+	if err != nil {
+		return SessionClaims{}, err
+	}
+	if device.Status != StatusActive {
+		return SessionClaims{}, SecureConnectionError{Code: ErrorDeviceRevoked, SafeMessage: "This device is no longer trusted by the desktop.", Retryable: false}
+	}
+	if device.HostID != rec.HostID || rec.HostID != m.Identity.HostID {
+		return SessionClaims{}, fmt.Errorf("secure session host mismatch")
+	}
+	if device.EnrollmentEpoch != rec.EnrollmentEpoch {
+		return SessionClaims{}, fmt.Errorf("secure session enrollment epoch is stale")
+	}
+	return SessionClaims{
+		HostID:          rec.HostID,
+		DeviceID:        rec.DeviceID,
+		EnrollmentEpoch: rec.EnrollmentEpoch,
+		Role:            device.Role,
+		Capabilities:    NormalizeCapabilities(device.Capabilities),
+		TrustLevel:      device.TrustLevel,
+		SessionID:       rec.SessionID,
+		RelayRouteID:    rec.RelayRouteID,
+		AccountID:       device.AccountID,
+		StepUpAtUnixMs:  rec.StepUpAt,
+		IssuedAtUnixMs:  rec.CreatedAt,
+		ExpiresAtUnixMs: rec.ExpiresAt,
+	}, nil
+}
+
 func (m *SessionManager) ValidateFrame(ctx context.Context, sessionID string, raw []byte, window *ReplayWindow) (SecureFrameV1, error) {
 	rec, err := m.DB.GetSecureConnectionSession(ctx, sessionID)
 	if err != nil {
@@ -166,12 +246,17 @@ func (m *SessionManager) ValidateFrame(ctx context.Context, sessionID string, ra
 	if rec.Status != StatusActive || (rec.ExpiresAt > 0 && rec.ExpiresAt <= now.UnixMilli()) {
 		return SecureFrameV1{}, SecureConnectionError{Code: ErrorSessionExpired, SafeMessage: "This secure connection expired. Reconnect from the app.", Retryable: true}
 	}
-	if window == nil {
-		window = NewReplayWindow(DefaultReplayWindowCap)
-	}
-	frame, err := DecodeSecureFrame(raw, rec.SessionID, window, now)
+	frame, err := DecodeSecureFrame(raw, rec.SessionID, nil, now)
 	if err != nil {
 		return SecureFrameV1{}, err
+	}
+	if rec.LastSequenceIn > 0 && frame.Sequence <= uint64(rec.LastSequenceIn) {
+		return SecureFrameV1{}, SecureConnectionError{Code: ErrorReplayDetected, SafeMessage: "A repeated connection message was blocked.", Retryable: true}
+	}
+	if window != nil {
+		if err := window.Accept(frame.Sequence); err != nil {
+			return SecureFrameV1{}, err
+		}
 	}
 	if err := m.DB.TouchSecureConnectionSession(ctx, rec.SessionID, now.UnixMilli(), int64(frame.Sequence), rec.LastSequenceOut); err != nil {
 		return SecureFrameV1{}, err

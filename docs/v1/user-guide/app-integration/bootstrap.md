@@ -33,6 +33,16 @@ or3-intern pairing approve-code 123456
 
 That corresponds to the 6-digit code shown in the app.
 
+The app can also consume a request that was created by the CLI. Run:
+
+```bash
+or3-intern connect-device
+```
+
+Then enter the printed request ID and code in the app's **Connect with a CLI code** section on `/settings/pair`.
+
+See [OR3 App Connection Guide](or3-app-connection-guide.md) for the complete web, Electron, iOS, Android, pairing, and disconnect flow.
+
 ## 4. Establish session auth if required
 
 After pairing, the app may still need an authenticated session flow such as:

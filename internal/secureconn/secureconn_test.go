@@ -2,12 +2,15 @@ package secureconn
 
 import (
 	"context"
+	"crypto/ed25519"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"or3-intern/internal/db"
+
+	"golang.org/x/crypto/curve25519"
 )
 
 func TestPairingQREnforcesEntropyExpiryAndCommitment(t *testing.T) {
@@ -68,14 +71,8 @@ func TestEnrollmentCertificateRejectsTampering(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewHostIdentity: %v", err)
 	}
-	deviceNoise, err := RandomBase64URL(32)
-	if err != nil {
-		t.Fatalf("RandomBase64URL: %v", err)
-	}
-	deviceSign, err := RandomBase64URL(32)
-	if err != nil {
-		t.Fatalf("RandomBase64URL: %v", err)
-	}
+	deviceNoise, _ := mustX25519KeyPair(t)
+	deviceSign, _ := mustEd25519KeyPair(t)
 	proposal := DeviceEnrollmentProposalV1{
 		Version:                ProtocolVersion,
 		DeviceID:               "device-1",
@@ -97,6 +94,34 @@ func TestEnrollmentCertificateRejectsTampering(t *testing.T) {
 	cert.Role = RoleAdmin
 	if err := VerifyEnrollmentCertificate(cert, now); err == nil {
 		t.Fatal("expected tampered certificate role to fail signature verification")
+	}
+}
+
+func TestVerifyEnrollmentProposalSignatureRejectsUnsignedAndTamperedRequests(t *testing.T) {
+	now := time.Now().UTC()
+	deviceNoise, _ := mustX25519KeyPair(t)
+	deviceSign, deviceSignPriv := mustEd25519KeyPair(t)
+	proposal := DeviceEnrollmentProposalV1{
+		Version:                ProtocolVersion,
+		DeviceID:               "device-signed",
+		DeviceDisplayName:      "Phone",
+		Platform:               PlatformIOS,
+		DeviceSigningPublicKey: deviceSign,
+		DeviceNoisePublicKey:   deviceNoise,
+		RequestedRole:          RoleOperator,
+		RequestedCapabilities:  []string{CapabilityChat},
+		CreatedAtUnixMs:        now.UnixMilli(),
+	}
+	if err := VerifyEnrollmentProposalSignature(proposal, now); err == nil {
+		t.Fatal("expected unsigned proposal to be rejected")
+	}
+	proposal = mustSignEnrollmentProposal(t, proposal, deviceSignPriv)
+	if err := VerifyEnrollmentProposalSignature(proposal, now); err != nil {
+		t.Fatalf("expected signed proposal to verify: %v", err)
+	}
+	proposal.RequestedRole = RoleAdmin
+	if err := VerifyEnrollmentProposalSignature(proposal, now); err == nil {
+		t.Fatal("expected tampered signed proposal to be rejected")
 	}
 }
 
@@ -134,20 +159,74 @@ func TestSecureFrameRejectsOversizedBody(t *testing.T) {
 	}
 }
 
+func TestHostAcceptNoiseIKAndTransport(t *testing.T) {
+	now := time.Now().UTC()
+	identity, err := NewHostIdentity("Test Host", now)
+	if err != nil {
+		t.Fatalf("NewHostIdentity: %v", err)
+	}
+	devicePriv, err := RandomBytes(32)
+	if err != nil {
+		t.Fatalf("RandomBytes device: %v", err)
+	}
+	clampX25519Scalar(devicePriv)
+	devicePub, err := curve25519.X25519(devicePriv, curve25519.Basepoint)
+	if err != nil {
+		t.Fatalf("device public: %v", err)
+	}
+	ephemeralPriv, err := RandomBytes(32)
+	if err != nil {
+		t.Fatalf("RandomBytes ephemeral: %v", err)
+	}
+	clampX25519Scalar(ephemeralPriv)
+	ephemeralPub, err := curve25519.X25519(ephemeralPriv, curve25519.Basepoint)
+	if err != nil {
+		t.Fatalf("ephemeral public: %v", err)
+	}
+	prologue := SessionPrologueV1{
+		Protocol:                  "or3-secure-runtime",
+		Version:                   ProtocolVersion,
+		RouteID:                   "route",
+		HostID:                    identity.HostID,
+		DeviceIDHash:              HashBase64URL([]byte("device")),
+		EnrollmentCertificateHash: "cert-hash",
+		MinProtocolVersion:        ProtocolVersion,
+		MaxProtocolVersion:        ProtocolVersion,
+	}
+	prologueBytes, _ := CanonicalBytes(prologue)
+	result, err := HostAcceptNoiseIK(identity, NoiseHandshakeInitV1{
+		Version:                 ProtocolVersion,
+		PrologueHash:            HashBase64URL([]byte("OR3-NOISE-PROLOGUE-V1"), prologueBytes),
+		DeviceID:                "device",
+		DeviceNoisePublicKey:    Base64URL(devicePub),
+		DeviceEphemeralKey:      Base64URL(ephemeralPub),
+		EnrollmentCertHash:      "cert-hash",
+		EncryptedInitialPayload: "",
+	}, prologue)
+	if err != nil {
+		t.Fatalf("HostAcceptNoiseIK: %v", err)
+	}
+	ciphertext, err := SealNoiseTransport(result.SessionKey, []byte("aad"), []byte("hello"))
+	if err != nil {
+		t.Fatalf("SealNoiseTransport: %v", err)
+	}
+	plaintext, err := OpenNoiseTransport(result.SessionKey, []byte("aad"), ciphertext)
+	if err != nil {
+		t.Fatalf("OpenNoiseTransport: %v", err)
+	}
+	if string(plaintext) != "hello" {
+		t.Fatalf("unexpected plaintext %q", plaintext)
+	}
+}
+
 func TestSecureSessionLifecycleAuthorizationAndRekey(t *testing.T) {
 	now := time.Now().UTC()
 	identity, err := NewHostIdentity("Test Host", now)
 	if err != nil {
 		t.Fatalf("NewHostIdentity: %v", err)
 	}
-	deviceNoise, err := RandomBase64URL(32)
-	if err != nil {
-		t.Fatalf("RandomBase64URL: %v", err)
-	}
-	deviceSign, err := RandomBase64URL(32)
-	if err != nil {
-		t.Fatalf("RandomBase64URL: %v", err)
-	}
+	deviceNoise, _ := mustX25519KeyPair(t)
+	deviceSign, _ := mustEd25519KeyPair(t)
 	proposal := DeviceEnrollmentProposalV1{
 		Version:                ProtocolVersion,
 		DeviceID:               "device-session",
@@ -195,12 +274,17 @@ func TestSecureSessionLifecycleAuthorizationAndRekey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnrollmentCertificateHash: %v", err)
 	}
+	routeID := "route-session"
+	handshake := mustNoiseHandshakeInit(t, identity, proposal.DeviceID, deviceNoise, hash, routeID, "https://relay.or3.chat", "acct-1")
 	manager := &SessionManager{DB: database, Identity: identity, Now: func() time.Time { return now }}
 	claims, _, err := manager.StartVerifiedSession(context.Background(), SessionStartInput{
 		DeviceID:                  "device-session",
+		RelayRouteID:              routeID,
+		RelayOrigin:               "https://relay.or3.chat",
 		EnrollmentCertificateHash: hash,
 		AccountID:                 "acct-1",
-		StepUpAt:                  now,
+		NoiseHandshake:            handshake,
+		AuthenticatedStepUpAt:     now,
 		TTL:                       time.Minute,
 	})
 	if err != nil {
@@ -216,8 +300,11 @@ func TestSecureSessionLifecycleAuthorizationAndRekey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EncodeSecureFrame: %v", err)
 	}
-	if _, err := manager.ValidateFrame(context.Background(), claims.SessionID, frameBytes, NewReplayWindow(4)); err != nil {
+	if _, err := manager.ValidateFrame(context.Background(), claims.SessionID, frameBytes, nil); err != nil {
 		t.Fatalf("ValidateFrame: %v", err)
+	}
+	if _, err := manager.ValidateFrame(context.Background(), claims.SessionID, frameBytes, nil); err == nil {
+		t.Fatal("expected duplicate frame without replay window state to be rejected by persisted sequence tracking")
 	}
 	decision := AuthorizeAction(claims, ClassifyAction(httpMethodPost, "/internal/v1/terminal/input", ""), now)
 	if !decision.Allowed {
@@ -246,6 +333,163 @@ func TestSecureSessionLifecycleAuthorizationAndRekey(t *testing.T) {
 	}
 	if expired != 1 {
 		t.Fatalf("expected one expired session, got %d", expired)
+	}
+}
+
+func TestApproveEnrollmentFromPairingRequiresSecretAndConsumesSession(t *testing.T) {
+	now := time.Now().UTC()
+	identity, err := NewHostIdentity("Test Host", now)
+	if err != nil {
+		t.Fatalf("NewHostIdentity: %v", err)
+	}
+	database, err := db.Open(filepath.Join(t.TempDir(), "pairing-approve.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer database.Close()
+	secret, err := RandomBase64URL(32)
+	if err != nil {
+		t.Fatalf("RandomBase64URL: %v", err)
+	}
+	commitment, err := RendezvousCommitment(secret)
+	if err != nil {
+		t.Fatalf("RendezvousCommitment: %v", err)
+	}
+	if err := database.CreateSecureConnectionPairingSession(context.Background(), db.SecureConnectionPairingSessionRecord{
+		RendezvousID:     "rv-approve",
+		HostID:           identity.HostID,
+		SecretCommitment: commitment,
+		Status:           StatusJoined,
+		RequestedRole:    RoleOperator,
+		Capabilities:     []string{CapabilityChat},
+		RelayOrigin:      "https://relay.or3.chat",
+		AccountID:        "acct-approve",
+		CreatedAt:        now.UnixMilli(),
+		ExpiresAt:        now.Add(time.Minute).UnixMilli(),
+	}); err != nil {
+		t.Fatalf("CreateSecureConnectionPairingSession: %v", err)
+	}
+	deviceNoise, _ := mustX25519KeyPair(t)
+	deviceSign, deviceSignPriv := mustEd25519KeyPair(t)
+	proposal := mustSignEnrollmentProposal(t, DeviceEnrollmentProposalV1{
+		Version:                ProtocolVersion,
+		DeviceID:               "device-approve",
+		DeviceDisplayName:      "Phone",
+		Platform:               PlatformIOS,
+		DeviceSigningPublicKey: deviceSign,
+		DeviceNoisePublicKey:   deviceNoise,
+		RequestedRole:          RoleOperator,
+		RequestedCapabilities:  []string{CapabilityChat},
+		AccountBinding:         map[string]any{"accountId": "acct-approve"},
+		CreatedAtUnixMs:        now.UnixMilli(),
+	}, deviceSignPriv)
+	store := &TrustStore{DB: database, Identity: identity, Now: func() time.Time { return now }}
+	if _, _, err := store.ApproveEnrollmentFromPairing(context.Background(), EnrollmentApprovalInput{
+		RendezvousID:  "rv-approve",
+		PairingSecret: mustRandomBase64URL(t, 32),
+		Proposal:      proposal,
+		TrustLevel:    TrustNativeSoftware,
+	}); err == nil {
+		t.Fatal("expected wrong pairing secret to be rejected")
+	}
+	cert, rec, err := store.ApproveEnrollmentFromPairing(context.Background(), EnrollmentApprovalInput{
+		RendezvousID:  "rv-approve",
+		PairingSecret: secret,
+		Proposal:      proposal,
+		TrustLevel:    TrustNativeSoftware,
+	})
+	if err != nil {
+		t.Fatalf("expected pairing approval to succeed: %v", err)
+	}
+	if cert.DeviceID != proposal.DeviceID || rec.DeviceID != proposal.DeviceID {
+		t.Fatalf("expected approved device to match proposal, got cert=%q rec=%q", cert.DeviceID, rec.DeviceID)
+	}
+	pairingSession, err := database.GetSecureConnectionPairingSession(context.Background(), "rv-approve")
+	if err != nil {
+		t.Fatalf("GetSecureConnectionPairingSession: %v", err)
+	}
+	if pairingSession.Status != StatusConsumed {
+		t.Fatalf("expected pairing session to be consumed, got %q", pairingSession.Status)
+	}
+	if _, _, err := store.ApproveEnrollmentFromPairing(context.Background(), EnrollmentApprovalInput{
+		RendezvousID:  "rv-approve",
+		PairingSecret: secret,
+		Proposal:      proposal,
+		TrustLevel:    TrustNativeSoftware,
+	}); err == nil {
+		t.Fatal("expected consumed pairing session to reject replayed approval")
+	}
+}
+
+func TestLoadActiveSessionClaimsRejectsRevokedDevice(t *testing.T) {
+	now := time.Now().UTC()
+	identity, err := NewHostIdentity("Test Host", now)
+	if err != nil {
+		t.Fatalf("NewHostIdentity: %v", err)
+	}
+	database, err := db.Open(filepath.Join(t.TempDir(), "active-session.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer database.Close()
+	deviceNoise, _ := mustX25519KeyPair(t)
+	deviceSign, _ := mustEd25519KeyPair(t)
+	proposal := DeviceEnrollmentProposalV1{
+		Version:                ProtocolVersion,
+		DeviceID:               "device-active",
+		DeviceDisplayName:      "Phone",
+		Platform:               PlatformIOS,
+		DeviceSigningPublicKey: deviceSign,
+		DeviceNoisePublicKey:   deviceNoise,
+		RequestedRole:          RoleOperator,
+		RequestedCapabilities:  []string{CapabilityChat},
+		CreatedAtUnixMs:        now.UnixMilli(),
+	}
+	cert, err := NewEnrollmentCertificate(identity, proposal, RoleOperator, []string{CapabilityChat}, TrustNativeSoftware, "acct-active", now.UnixMilli(), time.Time{}, now)
+	if err != nil {
+		t.Fatalf("NewEnrollmentCertificate: %v", err)
+	}
+	certBytes, err := CanonicalBytes(cert)
+	if err != nil {
+		t.Fatalf("CanonicalBytes: %v", err)
+	}
+	if _, err := database.UpsertSecureConnectionDevice(context.Background(), db.SecureConnectionDeviceRecord{
+		DeviceID:               cert.DeviceID,
+		HostID:                 cert.HostID,
+		DisplayName:            "Phone",
+		Platform:               PlatformIOS,
+		Role:                   RoleOperator,
+		Capabilities:           []string{CapabilityChat},
+		TrustLevel:             TrustNativeSoftware,
+		DeviceSigningPublicKey: cert.DeviceSigningPublicKey,
+		DeviceNoisePublicKey:   cert.DeviceNoisePublicKey,
+		EnrollmentCertificate:  certBytes,
+		EnrollmentEpoch:        cert.EnrollmentEpoch,
+		Status:                 StatusActive,
+		CreatedAt:              now.UnixMilli(),
+		AccountID:              "acct-active",
+	}); err != nil {
+		t.Fatalf("UpsertSecureConnectionDevice: %v", err)
+	}
+	if _, err := database.CreateSecureConnectionSession(context.Background(), db.SecureConnectionSessionRecord{
+		SessionID:       "session-active",
+		DeviceID:        cert.DeviceID,
+		HostID:          identity.HostID,
+		RelayRouteID:    "route-active",
+		EnrollmentEpoch: cert.EnrollmentEpoch,
+		Status:          StatusActive,
+		CreatedAt:       now.UnixMilli(),
+		LastSeenAt:      now.UnixMilli(),
+		ExpiresAt:       now.Add(time.Minute).UnixMilli(),
+	}); err != nil {
+		t.Fatalf("CreateSecureConnectionSession: %v", err)
+	}
+	if err := database.RevokeSecureConnectionDevice(context.Background(), cert.DeviceID, "test revoke", now.UnixMilli()); err != nil {
+		t.Fatalf("RevokeSecureConnectionDevice: %v", err)
+	}
+	manager := &SessionManager{DB: database, Identity: identity, Now: func() time.Time { return now }}
+	if _, err := manager.LoadActiveSessionClaims(context.Background(), "session-active"); err == nil {
+		t.Fatal("expected revoked device to block active session claims")
 	}
 }
 
@@ -292,18 +536,20 @@ func TestEnrollmentApprovalRequiresMatchingAccountBinding(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer database.Close()
-	proposal := DeviceEnrollmentProposalV1{
+	deviceNoise, _ := mustX25519KeyPair(t)
+	deviceSign, deviceSignPriv := mustEd25519KeyPair(t)
+	proposal := mustSignEnrollmentProposal(t, DeviceEnrollmentProposalV1{
 		Version:                ProtocolVersion,
 		DeviceID:               "device-binding",
 		DeviceDisplayName:      "Phone",
 		Platform:               PlatformIOS,
-		DeviceSigningPublicKey: mustRandomBase64URL(t, 32),
-		DeviceNoisePublicKey:   mustRandomBase64URL(t, 32),
+		DeviceSigningPublicKey: deviceSign,
+		DeviceNoisePublicKey:   deviceNoise,
 		RequestedRole:          RoleOperator,
 		RequestedCapabilities:  []string{CapabilityChat},
 		AccountBinding:         map[string]any{"accountId": "acct-a"},
 		CreatedAtUnixMs:        now.UnixMilli(),
-	}
+	}, deviceSignPriv)
 	store := &TrustStore{DB: database, Identity: identity, Now: func() time.Time { return now }}
 	if _, _, err := store.ApproveEnrollment(context.Background(), proposal, RoleOperator, []string{CapabilityChat}, TrustNativeSoftware, "acct-b", time.Time{}); err == nil {
 		t.Fatal("expected mismatched account binding to be rejected")
@@ -365,6 +611,76 @@ func mustRandomBase64URL(t *testing.T, n int) string {
 		t.Fatalf("RandomBase64URL: %v", err)
 	}
 	return value
+}
+
+func mustEd25519KeyPair(t *testing.T) (string, ed25519.PrivateKey) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("ed25519.GenerateKey: %v", err)
+	}
+	return Base64URL(pub), priv
+}
+
+func mustX25519KeyPair(t *testing.T) (string, []byte) {
+	t.Helper()
+	priv, err := RandomBytes(32)
+	if err != nil {
+		t.Fatalf("RandomBytes: %v", err)
+	}
+	clampX25519Scalar(priv)
+	pub, err := curve25519.X25519(priv, curve25519.Basepoint)
+	if err != nil {
+		t.Fatalf("curve25519.X25519: %v", err)
+	}
+	return Base64URL(pub), priv
+}
+
+func mustSignEnrollmentProposal(t *testing.T, proposal DeviceEnrollmentProposalV1, priv ed25519.PrivateKey) DeviceEnrollmentProposalV1 {
+	t.Helper()
+	encoded, err := EnrollmentProposalSigningBytes(proposal)
+	if err != nil {
+		t.Fatalf("EnrollmentProposalSigningBytes: %v", err)
+	}
+	proposal.Signature = Base64URL(ed25519.Sign(priv, encoded))
+	return proposal
+}
+
+func mustNoiseHandshakeInit(t *testing.T, identity HostIdentity, deviceID, deviceNoisePublicKey, certHash, routeID, relayOrigin, accountID string) NoiseHandshakeInitV1 {
+	t.Helper()
+	ephemeralPriv, err := RandomBytes(32)
+	if err != nil {
+		t.Fatalf("RandomBytes: %v", err)
+	}
+	clampX25519Scalar(ephemeralPriv)
+	ephemeralPub, err := curve25519.X25519(ephemeralPriv, curve25519.Basepoint)
+	if err != nil {
+		t.Fatalf("curve25519.X25519: %v", err)
+	}
+	prologue := SessionPrologueV1{
+		Protocol:                  "or3-secure-runtime",
+		Version:                   ProtocolVersion,
+		RelayOrigin:               relayOrigin,
+		RouteID:                   routeID,
+		HostID:                    identity.HostID,
+		DeviceIDHash:              HashBase64URL([]byte(deviceID)),
+		EnrollmentCertificateHash: certHash,
+		AccountID:                 accountID,
+		MinProtocolVersion:        ProtocolVersion,
+		MaxProtocolVersion:        ProtocolVersion,
+	}
+	prologueBytes, err := CanonicalBytes(prologue)
+	if err != nil {
+		t.Fatalf("CanonicalBytes: %v", err)
+	}
+	return NoiseHandshakeInitV1{
+		Version:              ProtocolVersion,
+		PrologueHash:         HashBase64URL([]byte("OR3-NOISE-PROLOGUE-V1"), prologueBytes),
+		DeviceID:             deviceID,
+		DeviceNoisePublicKey: deviceNoisePublicKey,
+		DeviceEphemeralKey:   Base64URL(ephemeralPub),
+		EnrollmentCertHash:   certHash,
+	}
 }
 
 const httpMethodPost = "POST"

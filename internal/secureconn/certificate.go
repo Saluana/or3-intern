@@ -8,6 +8,7 @@ import (
 )
 
 var enrollmentDomain = []byte("OR3-ENROLLMENT-CERTIFICATE-V1")
+var enrollmentProposalDomain = []byte("OR3-ENROLLMENT-PROPOSAL-V1")
 
 func NewEnrollmentCertificate(identity HostIdentity, proposal DeviceEnrollmentProposalV1, role string, capabilities []string, trustLevel, accountID string, epoch int64, expiresAt time.Time, now time.Time) (HostEnrollmentCertificateV1, error) {
 	if err := identity.Validate(); err != nil {
@@ -141,6 +142,49 @@ func ValidateEnrollmentProposal(proposal DeviceEnrollmentProposalV1, now time.Ti
 		return fmt.Errorf("invalid enrollment proposal timestamp")
 	}
 	return nil
+}
+
+func VerifyEnrollmentProposalSignature(proposal DeviceEnrollmentProposalV1, now time.Time) error {
+	if err := ValidateEnrollmentProposal(proposal, now); err != nil {
+		return err
+	}
+	if strings.TrimSpace(proposal.Signature) == "" {
+		return fmt.Errorf("enrollment proposal signature required")
+	}
+	pubRaw, err := DecodeBase64URL(proposal.DeviceSigningPublicKey)
+	if err != nil {
+		return fmt.Errorf("invalid device signing public key: %w", err)
+	}
+	if len(pubRaw) != ed25519.PublicKeySize {
+		return fmt.Errorf("invalid device signing public key length")
+	}
+	sig, err := DecodeBase64URL(proposal.Signature)
+	if err != nil {
+		return fmt.Errorf("invalid enrollment proposal signature: %w", err)
+	}
+	if len(sig) != ed25519.SignatureSize {
+		return fmt.Errorf("invalid enrollment proposal signature length")
+	}
+	signed, err := EnrollmentProposalSigningBytes(proposal)
+	if err != nil {
+		return err
+	}
+	if !ed25519.Verify(ed25519.PublicKey(pubRaw), signed, sig) {
+		return fmt.Errorf("invalid enrollment proposal signature")
+	}
+	return nil
+}
+
+func EnrollmentProposalSigningBytes(proposal DeviceEnrollmentProposalV1) ([]byte, error) {
+	proposal.Signature = ""
+	encoded, err := CanonicalBytes(proposal)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, 0, len(enrollmentProposalDomain)+len(encoded))
+	out = append(out, enrollmentProposalDomain...)
+	out = append(out, encoded...)
+	return out, nil
 }
 
 func validateEnrollmentCertificateShape(cert HostEnrollmentCertificateV1) error {

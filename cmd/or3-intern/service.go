@@ -49,6 +49,7 @@ type serviceServer struct {
 	authFailures          *serviceAuthFailureTracker
 	nonceGuard            *serviceNonceReplayGuard
 	modelCatalog          *serviceModelCatalogCache
+	secureRelayHub        *secureConnectionRelayHub
 }
 
 type serviceDeviceResponse struct {
@@ -79,6 +80,9 @@ func (s *serviceServer) initComponents() {
 	}
 	if s.modelCatalog == nil {
 		s.modelCatalog = newServiceModelCatalogCache(64, 24*time.Hour)
+	}
+	if s.secureRelayHub == nil {
+		s.secureRelayHub = newSecureConnectionRelayHub()
 	}
 }
 

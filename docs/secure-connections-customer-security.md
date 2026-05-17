@@ -6,4 +6,4 @@ The relay carries routing metadata and encrypted frames only. It does not receiv
 
 Trusted devices can be revoked from the desktop. Revocation blocks new secure sessions and invalidates active sessions for that device. If the desktop host identity changes unexpectedly, remote sessions are blocked until local recovery or re-pairing.
 
-Browser enrollments are intentionally lower trust than native app enrollments. They get shorter certificate lifetimes, fewer default capabilities, and more frequent step-up prompts.
+Browser enrollments and any mobile enrollment backed only by exportable or software-backed key storage are intentionally lower trust than hardware-backed native enrollments. They get fewer default capabilities, shorter certificate lifetimes, and more frequent step-up prompts until a non-extractable device key store is available.

@@ -77,6 +77,12 @@ func (s *serviceServer) handleSecureConnections(w http.ResponseWriter, r *http.R
 		s.handleRelayRendezvousExpire(w, r, store)
 	case strings.HasPrefix(path, "relay/rendezvous/"):
 		s.handleRelayRendezvousAction(w, r, store, strings.TrimPrefix(path, "relay/rendezvous/"))
+	case path == "relay/host/ws":
+		s.handleSecureRelayHostWebSocket(w, r, store)
+	case path == "relay/device/ws":
+		s.handleSecureRelayDeviceWebSocket(w, r, store)
+	case path == "relay/routes":
+		s.handleSecureRelayRouteRequest(w, r, store)
 	default:
 		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "secure connection route not found"})
 	}
@@ -107,6 +113,17 @@ func (s *serviceServer) handleSecureConnectionDeviceAction(w http.ResponseWriter
 	}
 	deviceID, action := parts[0], parts[1]
 	switch action {
+	case "remote-revoke":
+		if r.Method != http.MethodPost {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		if err := store.RevokeDevice(r.Context(), deviceID, "remote account request"); err != nil {
+			writeServiceError(w, r, http.StatusBadRequest, "secure remote revocation failed", err)
+			return
+		}
+		s.auditSecureConnection(r.Context(), "secure_connection.remote_revoke_requested", "", deviceID, map[string]any{"device_id": deviceID, "authority": "account"})
+		writeServiceJSON(w, http.StatusOK, map[string]any{"device_id": deviceID, "relay_routing": "blocked", "host_trust": secureconn.StatusRevoked})
 	case "trust":
 		if r.Method != http.MethodPatch && r.Method != http.MethodPost {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
@@ -226,7 +243,6 @@ func (s *serviceServer) handleSecureConnectionPairingIntent(w http.ResponseWrite
 	}
 	writeServiceJSON(w, http.StatusCreated, map[string]any{
 		"qr":                result.Encoded,
-		"payload":           result.Payload,
 		"secret_commitment": result.SecretCommitment,
 		"rendezvous_id":     result.Payload.RendezvousID,
 		"expires_at":        result.Payload.ExpiresAtUnixMs,
@@ -240,12 +256,11 @@ func (s *serviceServer) handleSecureConnectionPairingApprove(w http.ResponseWrit
 	}
 	limitServiceRequestBody(w, r, servicePairingBodyLimit)
 	var body struct {
-		Proposal     secureconn.DeviceEnrollmentProposalV1 `json:"proposal"`
-		Role         string                                `json:"role"`
-		Capabilities []string                              `json:"capabilities"`
-		TrustLevel   string                                `json:"trust_level"`
-		AccountID    string                                `json:"account_id"`
-		ExpiresAt    int64                                 `json:"expires_at"`
+		RendezvousID  string                                `json:"rendezvous_id"`
+		PairingSecret string                                `json:"pairing_secret"`
+		Proposal      secureconn.DeviceEnrollmentProposalV1 `json:"proposal"`
+		TrustLevel    string                                `json:"trust_level"`
+		ExpiresAt     int64                                 `json:"expires_at"`
 	}
 	if err := decodeServiceRequestBody(r.Body, &body); err != nil {
 		writeServiceRequestDecodeError(w, err)
@@ -255,7 +270,13 @@ func (s *serviceServer) handleSecureConnectionPairingApprove(w http.ResponseWrit
 	if body.ExpiresAt > 0 {
 		expiresAt = time.UnixMilli(body.ExpiresAt).UTC()
 	}
-	cert, rec, err := store.ApproveEnrollment(r.Context(), body.Proposal, body.Role, body.Capabilities, body.TrustLevel, body.AccountID, expiresAt)
+	cert, rec, err := store.ApproveEnrollmentFromPairing(r.Context(), secureconn.EnrollmentApprovalInput{
+		RendezvousID:  body.RendezvousID,
+		PairingSecret: body.PairingSecret,
+		Proposal:      body.Proposal,
+		TrustLevel:    body.TrustLevel,
+		ExpiresAt:     expiresAt,
+	})
 	if err != nil {
 		writeServiceError(w, r, http.StatusBadRequest, "secure enrollment approval failed", err)
 		return
@@ -271,30 +292,34 @@ func (s *serviceServer) handleSecureConnectionSessions(w http.ResponseWriter, r 
 	}
 	limitServiceRequestBody(w, r, servicePairingBodyLimit)
 	var body struct {
-		DeviceID                  string `json:"device_id"`
-		DeviceNoisePublicKey      string `json:"device_noise_public_key"`
-		RelayRouteID              string `json:"relay_route_id"`
-		EnrollmentCertificateHash string `json:"enrollment_certificate_hash"`
-		AccountID                 string `json:"account_id"`
-		StepUpAt                  int64  `json:"step_up_at"`
-		TTLSeconds                int    `json:"ttl_seconds"`
+		DeviceID                  string                          `json:"device_id"`
+		DeviceNoisePublicKey      string                          `json:"device_noise_public_key"`
+		RelayRouteID              string                          `json:"relay_route_id"`
+		RelayOrigin               string                          `json:"relay_origin"`
+		EnrollmentCertificateHash string                          `json:"enrollment_certificate_hash"`
+		AccountID                 string                          `json:"account_id"`
+		NoiseHandshake            secureconn.NoiseHandshakeInitV1 `json:"noise_handshake"`
+		TTLSeconds                int                             `json:"ttl_seconds"`
 	}
 	if err := decodeServiceRequestBody(r.Body, &body); err != nil {
 		writeServiceRequestDecodeError(w, err)
 		return
 	}
 	var stepUpAt time.Time
-	if body.StepUpAt > 0 {
-		stepUpAt = time.UnixMilli(body.StepUpAt).UTC()
+	identity := serviceAuthIdentityFromContext(r.Context())
+	if identity.Kind == "auth-session" && identity.StepUpOK && identity.StepUpAt > 0 {
+		stepUpAt = time.UnixMilli(identity.StepUpAt).UTC()
 	}
 	manager := &secureconn.SessionManager{DB: store.DB, Identity: store.Identity}
 	claims, rec, err := manager.StartVerifiedSession(r.Context(), secureconn.SessionStartInput{
 		DeviceID:                  body.DeviceID,
 		DeviceNoisePublicKey:      body.DeviceNoisePublicKey,
 		RelayRouteID:              body.RelayRouteID,
+		RelayOrigin:               body.RelayOrigin,
 		EnrollmentCertificateHash: body.EnrollmentCertificateHash,
 		AccountID:                 body.AccountID,
-		StepUpAt:                  stepUpAt,
+		NoiseHandshake:            body.NoiseHandshake,
+		AuthenticatedStepUpAt:     stepUpAt,
 		TTL:                       time.Duration(body.TTLSeconds) * time.Second,
 	})
 	if err != nil {
@@ -349,29 +374,11 @@ func (s *serviceServer) handleSecureConnectionSessionAction(w http.ResponseWrite
 			writeServiceRequestDecodeError(w, err)
 			return
 		}
-		rec, err := store.DB.GetSecureConnectionSession(r.Context(), sessionID)
+		manager := &secureconn.SessionManager{DB: store.DB, Identity: store.Identity}
+		claims, err := manager.LoadActiveSessionClaims(r.Context(), sessionID)
 		if err != nil {
-			writeServiceError(w, r, http.StatusNotFound, "secure session not found", err)
+			writeServiceError(w, r, http.StatusForbidden, "secure session is not active", err)
 			return
-		}
-		device, err := store.DB.GetSecureConnectionDevice(r.Context(), rec.DeviceID)
-		if err != nil {
-			writeServiceError(w, r, http.StatusNotFound, "secure session device not found", err)
-			return
-		}
-		claims := secureconn.SessionClaims{
-			HostID:          rec.HostID,
-			DeviceID:        rec.DeviceID,
-			EnrollmentEpoch: rec.EnrollmentEpoch,
-			Role:            device.Role,
-			Capabilities:    device.Capabilities,
-			TrustLevel:      device.TrustLevel,
-			SessionID:       rec.SessionID,
-			RelayRouteID:    rec.RelayRouteID,
-			AccountID:       device.AccountID,
-			StepUpAtUnixMs:  rec.StepUpAt,
-			IssuedAtUnixMs:  rec.CreatedAt,
-			ExpiresAtUnixMs: rec.ExpiresAt,
 		}
 		actionReq := secureconn.ClassifyAction(body.Method, body.Path, body.Tool)
 		decision := secureconn.AuthorizeAction(claims, actionReq, time.Now().UTC())
@@ -386,28 +393,23 @@ func (s *serviceServer) handleSecureConnectionSessionAction(w http.ResponseWrite
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 			return
 		}
-		limitServiceRequestBody(w, r, servicePairingBodyLimit)
-		var body struct {
-			VerifiedAt int64 `json:"verified_at"`
-		}
-		if err := decodeServiceRequestBody(r.Body, &body); err != nil {
-			writeServiceRequestDecodeError(w, err)
+		identity := serviceAuthIdentityFromContext(r.Context())
+		if identity.Kind != "auth-session" || !identity.StepUpOK || identity.StepUpAt <= 0 {
+			writeServiceJSON(w, http.StatusUnauthorized, map[string]any{"error": "recent passkey step-up required", "code": "recent_step_up_required"})
 			return
 		}
-		if body.VerifiedAt <= 0 {
-			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "verified_at required"})
+		manager := &secureconn.SessionManager{DB: store.DB, Identity: store.Identity}
+		claims, err := manager.LoadActiveSessionClaims(r.Context(), sessionID)
+		if err != nil {
+			writeServiceError(w, r, http.StatusForbidden, "secure session is not active", err)
 			return
 		}
-		verifiedAt := time.UnixMilli(body.VerifiedAt).UTC()
-		if _, err := secureconn.ValidateStepUpUpdate(secureconn.SessionClaims{SessionID: sessionID}, verifiedAt, time.Now().UTC()); err != nil {
-			writeServiceError(w, r, http.StatusBadRequest, "secure session step-up failed", err)
-			return
-		}
+		verifiedAt := time.UnixMilli(identity.StepUpAt).UTC()
 		if err := store.DB.UpdateSecureConnectionSessionStepUp(r.Context(), sessionID, verifiedAt.UnixMilli()); err != nil {
 			writeServiceError(w, r, http.StatusBadRequest, "secure session step-up update failed", err)
 			return
 		}
-		s.auditSecureConnection(r.Context(), "secure_connection.step_up", sessionID, "", map[string]any{"verified_at": verifiedAt.UnixMilli()})
+		s.auditSecureConnection(r.Context(), "secure_connection.step_up", sessionID, claims.DeviceID, map[string]any{"verified_at": verifiedAt.UnixMilli(), "auth_session_id": identity.Session})
 		writeServiceJSON(w, http.StatusOK, map[string]any{"session_id": sessionID, "step_up_at": verifiedAt.UnixMilli()})
 	default:
 		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "secure session action not found"})

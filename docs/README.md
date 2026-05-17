@@ -6,6 +6,7 @@ This directory holds the detailed guides and references that were previously pac
 
 - [Getting started](getting-started.md) — first-run flow, simple commands, local paths, and the quickest way to get a working install
 - [Using or3-intern service with Tailscale](tailscale-service-guide.md) — practical setup for reaching service mode over a Tailscale tailnet without tripping over origins, CIDRs, or pairing
+- [OR3 App connection guide](v1/user-guide/app-integration/or3-app-connection-guide.md) — run the web, Electron, iOS, or Android app and pair it to `or3-intern service`
 - [Agent runtime](agent-runtime.md) — how turns move through the shared runtime across CLI, service mode, connected apps, and automation
 - [Memory and context](memory-and-context.md) — history, hybrid retrieval, bootstrap files, document indexing, and conversation memory
 - [Connected app integrations](channels.md) — Telegram, Slack, Discord, Email, and WhatsApp bridge setup and behavior

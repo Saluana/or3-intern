@@ -108,6 +108,7 @@ type DeviceEnrollmentProposalV1 struct {
 	AccountBinding         map[string]any `json:"accountBinding,omitempty" cbor:"accountBinding,omitempty"`
 	SecureStorageEvidence  map[string]any `json:"secureStorageEvidence,omitempty" cbor:"secureStorageEvidence,omitempty"`
 	CreatedAtUnixMs        int64          `json:"createdAtUnixMs" cbor:"createdAtUnixMs"`
+	Signature              string         `json:"signature,omitempty" cbor:"signature,omitempty"`
 }
 
 type HostEnrollmentCertificateV1 struct {

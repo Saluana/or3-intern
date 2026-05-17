@@ -56,11 +56,11 @@ All tasks start incomplete. The plan is split into phases so OR3 can ship safely
     - Add host presence, route, rendezvous, endpoint hash, expiry, and abuse-control records without private keys, pairing secrets, or plaintext payloads.
     - Requirements: 1, 9, 15
 
-- [ ] 3.2 Implement relay host connection endpoint.
+- [x] 3.2 Implement relay host connection endpoint.
     - Allow desktop hosts to maintain outbound WSS connections, advertise presence, receive route requests, and reconnect with backoff.
     - Requirements: 9, 18
 
-- [ ] 3.3 Implement relay device connection endpoint.
+- [x] 3.3 Implement relay device connection endpoint.
     - Allow enrolled devices to request host routes, send opaque Noise frames, and receive opaque response frames.
     - Requirements: 1, 6, 9, 18
 
@@ -86,15 +86,15 @@ All tasks start incomplete. The plan is split into phases so OR3 can ship safely
     - Include relay origin, rendezvous ID, host identity, host display name, host Noise key, pairing secret, expiry, capabilities, and nonce.
     - Requirements: 3, 4, 6, 9
 
-- [ ] 4.3 Render the consumer pairing UI.
+- [x] 4.3 Render the consumer pairing UI.
     - Show QR, short status text, refresh action, cancel action, and no setup commands in the main path.
     - Requirements: 3, 17
 
-- [ ] 4.4 Implement host-side Noise pairing session handling.
+- [x] 4.4 Implement host-side Noise pairing session handling.
     - Join the relay rendezvous, validate prologue binding, decrypt enrollment proposal, enforce expiry, and close rendezvous after use.
     - Requirements: 1, 4, 6, 9, 16
 
-- [ ] 4.5 Build local approval prompt for new devices.
+- [x] 4.5 Build local approval prompt for new devices.
     - Display device name, platform, account, requested role, capability summary, and clear allow/deny actions.
     - Requirements: 2, 3, 4, 7, 17
 
@@ -116,11 +116,11 @@ All tasks start incomplete. The plan is split into phases so OR3 can ship safely
     - Detect hardware-backed, software-backed, unavailable, restored, and wiped states; map each state to trust level and policy.
     - Requirements: 5, 11, 13
 
-- [ ] 5.3 Build QR scanner flow in the Capacitor app.
+- [x] 5.3 Build QR scanner flow in the Capacitor app.
     - Parse `or3pair:v1` payloads, validate expiry and relay origin, then start the encrypted pairing session.
     - Requirements: 3, 4, 11, 17
 
-- [ ] 5.4 Implement mobile-side Noise pairing.
+- [x] 5.4 Implement mobile-side Noise pairing.
     - Join relay rendezvous without revealing pairing secret, validate host identity from QR, send encrypted enrollment proposal, and store returned certificate.
     - Requirements: 1, 4, 5, 6, 9
 
@@ -134,11 +134,11 @@ All tasks start incomplete. The plan is split into phases so OR3 can ship safely
 
 ## 6. Implement Runtime E2EE Sessions
 
-- [ ] 6.1 Add runtime session connection manager on the host.
+- [x] 6.1 Add runtime session connection manager on the host.
     - Accept relay route requests, perform Noise IK handshakes, validate enrolled device keys, and create short-lived session claims.
     - Requirements: 1, 2, 6, 7, 9
 
-- [ ] 6.2 Add runtime session connection manager in the app.
+- [x] 6.2 Add runtime session connection manager in the app.
     - Discover host routes, run Noise IK with stored host identity, verify enrollment hash, and handle reconnects.
     - Requirements: 5, 6, 9, 18
 
@@ -186,7 +186,7 @@ All tasks start incomplete. The plan is split into phases so OR3 can ship safely
     - Ensure no cloud passkey session can create host trust without QR pairing and desktop approval.
     - Requirements: 2, 4, 8
 
-- [ ] 8.3 Add passkey step-up APIs for secure sessions.
+- [x] 8.3 Add passkey step-up APIs for secure sessions.
     - Support request, challenge, verify, and session-claim update paths with user verification required.
     - Requirements: 7, 8, 12
 
@@ -196,23 +196,23 @@ All tasks start incomplete. The plan is split into phases so OR3 can ship safely
 
 ## 9. Harden Electron Desktop Host
 
-- [ ] 9.1 Create Electron security baseline configuration.
+- [x] 9.1 Create Electron security baseline configuration.
     - Disable Node integration for renderer content, enable context isolation, enable sandboxing, block untrusted navigation, deny unexpected windows, and use a restrictive CSP.
     - Requirements: 10, 16
 
-- [ ] 9.2 Build a narrow typed IPC bridge.
+- [x] 9.2 Build a narrow typed IPC bridge.
     - Expose only pairing, secure session status, approval, and host management calls needed by the UI; validate sender frame and origin on every call.
     - Requirements: 10, 16
 
-- [ ] 9.3 Replace broad local HTTP assumptions for privileged host actions.
+- [x] 9.3 Replace broad local HTTP assumptions for privileged host actions.
     - Prefer Unix domain socket or named pipe between Electron and `or3-intern`, with loopback TCP limited to development or explicit compatibility mode.
     - Requirements: 2, 10, 15
 
-- [ ] 9.4 Configure release fuses and packaged-content loading.
+- [x] 9.4 Configure release fuses and packaged-content loading.
     - Prefer a custom app protocol for packaged UI, remove unnecessary Electron runtime features, and document release verification.
     - Requirements: 10, 16, 20
 
-- [ ] 9.5 Add desktop security regression checks.
+- [x] 9.5 Add desktop security regression checks.
     - Automate checks for CSP, IPC allowlist, navigation allowlist, new-window denial, no unsafe external URL opening, and production config drift.
     - Requirements: 10, 16
 
@@ -252,7 +252,7 @@ All tasks start incomplete. The plan is split into phases so OR3 can ship safely
     - Require recent WebAuthn verification more frequently for browser devices than native devices.
     - Requirements: 8, 12
 
-- [ ] 11.4 Harden web origins and CSP.
+- [x] 11.4 Harden web origins and CSP.
     - Block cross-origin iframe enrollment, restrict scripts, validate origins, and add XSS regression coverage for pairing and secure-session pages.
     - Requirements: 10, 12, 16
 
@@ -262,7 +262,7 @@ All tasks start incomplete. The plan is split into phases so OR3 can ship safely
     - Let app and host identify whether QR pairing v2, relay sessions, and enrollment certificates are supported.
     - Requirements: 14, 18
 
-- [ ] 12.2 Build upgrade flow for existing paired devices.
+- [x] 12.2 Build upgrade flow for existing paired devices.
     - Prompt the user to upgrade from bearer-token pairing to device identity and host-signed enrollment with local confirmation.
     - Requirements: 3, 13, 14, 17
 
@@ -280,11 +280,11 @@ All tasks start incomplete. The plan is split into phases so OR3 can ship safely
 
 ## 13. Implement Revocation, Recovery, and Key Rotation
 
-- [ ] 13.1 Add device revocation from desktop host UI.
+- [x] 13.1 Add device revocation from desktop host UI.
     - Show trusted devices, last seen, role, platform, trust level, and clear revoke action.
     - Requirements: 13, 17
 
-- [ ] 13.2 Add remote revocation request path through OR3 account.
+- [x] 13.2 Add remote revocation request path through OR3 account.
     - Allow cloud account UI to stop relay routing immediately while making clear that host-local trust is final for control.
     - Requirements: 8, 9, 13, 19
 
@@ -292,7 +292,7 @@ All tasks start incomplete. The plan is split into phases so OR3 can ship safely
     - Reject revoked devices during session handshake, command authorization, and reconnect; invalidate existing sessions.
     - Requirements: 2, 6, 7, 13
 
-- [ ] 13.4 Add host key rotation procedure.
+- [x] 13.4 Add host key rotation procedure.
     - Support planned rotation, emergency rotation, device re-trust, audit events, and identity-change prompts.
     - Requirements: 2, 13, 19, 20
 
@@ -324,7 +324,7 @@ All tasks start incomplete. The plan is split into phases so OR3 can ship safely
     - Cover test vectors, invalid public keys, malformed QR payloads, invalid signatures, wrong PSK, wrong prologue, downgrade attempts, rekey, and corrupted frames.
     - Requirements: 4, 6, 16
 
-- [ ] 15.2 Build malicious relay integration tests.
+- [x] 15.2 Build malicious relay integration tests.
     - Simulate dropped frames, duplicated frames, reordered frames, host swap, route swap, injected bytes, replayed command frames, delayed revocation, and leaked relay database.
     - Requirements: 1, 6, 9, 15, 16
 
@@ -336,7 +336,7 @@ All tasks start incomplete. The plan is split into phases so OR3 can ship safely
     - Cover roles, capabilities, sensitive step-up, approval broker, runtime profiles, revoked devices, stale enrollment epoch, stale sessions, and audit output.
     - Requirements: 2, 7, 8, 13, 16
 
-- [ ] 15.5 Build Electron hardening tests.
+- [x] 15.5 Build Electron hardening tests.
     - Verify renderer isolation, sandbox, CSP, IPC validation, navigation blocking, window blocking, custom protocol behavior, and release fuse settings.
     - Requirements: 10, 16
 
@@ -344,15 +344,15 @@ All tasks start incomplete. The plan is split into phases so OR3 can ship safely
     - Verify secure storage, key lifecycle, app links, passkey domain integration, biometric/device credential prompts, background/resume behavior, and reinstall behavior.
     - Requirements: 5, 8, 11, 16, 18
 
-- [ ] 15.7 Build web security tests.
+- [x] 15.7 Build web security tests.
     - Verify WebCrypto paths, storage fallback limits, CSP, origin validation, XSS protections, cross-origin iframe blocking, and passkey step-up.
     - Requirements: 12, 16
 
-- [ ] 15.8 Build performance and reliability tests.
+- [x] 15.8 Build performance and reliability tests.
     - Measure pairing time, handshake latency, reconnect latency, encryption throughput, host sleep/wake, mobile background/resume, relay restart, and degraded network behavior.
     - Requirements: 18
 
-- [ ] 15.9 Build incident and chaos tests.
+- [x] 15.9 Build incident and chaos tests.
     - Simulate relay compromise, relay outage, key rotation, leaked metadata, compromised cloud admin action, and emergency revocation.
     - Requirements: 1, 9, 13, 19
 
@@ -362,11 +362,11 @@ All tasks start incomplete. The plan is split into phases so OR3 can ship safely
     - Validate the desktop QR, mobile scan, desktop approve, and success states before production implementation is locked.
     - Requirements: 3, 17
 
-- [ ] 16.2 Run first-glance comprehension testing.
+- [x] 16.2 Run first-glance comprehension testing.
     - Test whether users understand the current state and next action within the 500 ms confusion budget.
     - Requirements: 3, 17
 
-- [ ] 16.3 Run recovery comprehension testing.
+- [x] 16.3 Run recovery comprehension testing.
     - Test expired QR, rejected pairing, lost phone, revoked phone, host identity changed, and relay unavailable states.
     - Requirements: 13, 17, 19
 

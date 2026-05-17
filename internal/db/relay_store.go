@@ -56,8 +56,8 @@ func (d *DB) CreateRelayRoute(ctx context.Context, rec RelayRouteRecord) error {
 	if strings.TrimSpace(rec.RouteID) == "" || strings.TrimSpace(rec.HostIDHash) == "" {
 		return fmt.Errorf("route ID and host hash required")
 	}
-	if containsLikelySecret(rec.Metadata) {
-		return fmt.Errorf("relay metadata rejected possible plaintext secret")
+	if err := validateRelayMetadata(rec.Metadata); err != nil {
+		return err
 	}
 	_, err := d.SQL.ExecContext(ctx, `INSERT INTO relay_routes(route_id, account_id, host_id_hash, device_id_hash, status, created_at, expires_at, metadata_json)
 		VALUES(?,?,?,?,?,?,?,?)`, rec.RouteID, rec.AccountID, rec.HostIDHash, rec.DeviceIDHash, rec.Status, rec.CreatedAt, rec.ExpiresAt, mustJSONMap(rec.Metadata))
@@ -77,8 +77,8 @@ func (d *DB) CreateRelayRendezvous(ctx context.Context, rec RelayRendezvousRecor
 	if strings.TrimSpace(rec.RendezvousID) == "" || strings.TrimSpace(rec.SecretCommitment) == "" {
 		return fmt.Errorf("rendezvous ID and secret commitment required")
 	}
-	if containsLikelySecret(rec.Metadata) {
-		return fmt.Errorf("relay metadata rejected possible plaintext secret")
+	if err := validateRelayMetadata(rec.Metadata); err != nil {
+		return err
 	}
 	_, err := d.SQL.ExecContext(ctx, `INSERT INTO relay_rendezvous(rendezvous_id, account_id, host_id_hash, secret_commitment, status, created_at, expires_at, joined_at, consumed_at, join_count, metadata_json)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?)`, rec.RendezvousID, rec.AccountID, rec.HostIDHash, rec.SecretCommitment, rec.Status, rec.CreatedAt, rec.ExpiresAt, rec.JoinedAt, rec.ConsumedAt, rec.JoinCount, mustJSONMap(rec.Metadata))
@@ -120,7 +120,7 @@ func (d *DB) JoinRelayRendezvous(ctx context.Context, rendezvousID string, nowMS
 }
 
 func (d *DB) ConsumeRelayRendezvous(ctx context.Context, rendezvousID string, nowMS int64) (bool, error) {
-	res, err := d.SQL.ExecContext(ctx, `UPDATE relay_rendezvous SET status='consumed', consumed_at=? WHERE rendezvous_id=? AND status IN ('created','joined')`, nowMS, strings.TrimSpace(rendezvousID))
+	res, err := d.SQL.ExecContext(ctx, `UPDATE relay_rendezvous SET status='consumed', consumed_at=? WHERE rendezvous_id=? AND status IN ('created','joined') AND expires_at>?`, nowMS, strings.TrimSpace(rendezvousID), nowMS)
 	if err != nil {
 		return false, err
 	}
@@ -140,7 +140,7 @@ func (d *DB) ExpireRelayRendezvous(ctx context.Context, nowMS int64) (int64, err
 }
 
 func (d *DB) RejectRelayRendezvous(ctx context.Context, rendezvousID string, nowMS int64) (bool, error) {
-	res, err := d.SQL.ExecContext(ctx, `UPDATE relay_rendezvous SET status='rejected', consumed_at=? WHERE rendezvous_id=? AND status IN ('created','joined')`, nowMS, strings.TrimSpace(rendezvousID))
+	res, err := d.SQL.ExecContext(ctx, `UPDATE relay_rendezvous SET status='rejected', consumed_at=? WHERE rendezvous_id=? AND status IN ('created','joined') AND expires_at>?`, nowMS, strings.TrimSpace(rendezvousID), nowMS)
 	if err != nil {
 		return false, err
 	}
@@ -193,4 +193,24 @@ func containsLikelySecret(metadata map[string]any) bool {
 		}
 	}
 	return false
+}
+
+func validateRelayMetadata(metadata map[string]any) error {
+	if containsLikelySecret(metadata) {
+		return fmt.Errorf("relay metadata rejected possible plaintext secret")
+	}
+	for key, value := range metadata {
+		key = strings.ToLower(strings.TrimSpace(key))
+		switch key {
+		case "kind", "protocol", "relay_origin":
+		default:
+			return fmt.Errorf("relay metadata rejected unsupported field %q", key)
+		}
+		switch value.(type) {
+		case nil, string, bool, float64, int, int64:
+		default:
+			return fmt.Errorf("relay metadata rejected non-scalar field %q", key)
+		}
+	}
+	return nil
 }

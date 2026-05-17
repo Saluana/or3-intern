@@ -102,13 +102,26 @@ service_launch_args() {
 
 find_service_pids() {
   local pids=()
+  local port
+  port="$(service_port)"
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
     pids+=("$line")
-  done < <(pgrep -f 'or3-intern.* service|go run ./cmd/or3-intern service' || true)
+  done < <(lsof -nP -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
+
+  if [[ ${#pids[@]} -eq 0 ]]; then
+    local pid command
+    pid="$(sed -n '1p' "$pid_file" 2>/dev/null | tr -cd '0-9')"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+      if [[ "$command" == *"or3-intern"* && "$command" == *" service"* ]]; then
+        pids+=("$pid")
+      fi
+    fi
+  fi
 
   if [[ ${#pids[@]} -gt 0 ]]; then
-    printf '%s\n' "${pids[@]}"
+    printf '%s\n' "${pids[@]}" | awk '!seen[$0]++'
   fi
 }
 

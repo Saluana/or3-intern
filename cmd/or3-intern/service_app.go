@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"or3-intern/internal/approval"
@@ -363,8 +364,10 @@ func startDetachedServiceRestart(scriptPath, workingDir string, unsafeDev bool, 
 	if unsafeDev {
 		cmd.Env = append(cmd.Env, "OR3_SERVICE_UNSAFE_DEV=true")
 	}
+	cmd.Stdin = nil
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		return logPath, err
 	}

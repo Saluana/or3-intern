@@ -21,6 +21,7 @@ func serviceRouteSpecs(server *serviceServer) []serviceRouteSpec {
 		{Path: "/internal/v1/artifacts", Subtree: true, Handler: server.handleArtifacts},
 		{Path: "/internal/v1/pairing/requests", Subtree: true, Handler: server.handlePairing},
 		{Path: "/internal/v1/pairing/exchange", Handler: server.handlePairing},
+		{Path: "/internal/v1/secure-connections", Subtree: true, Handler: server.handleSecureConnections},
 		{Path: "/internal/v1/devices", Subtree: true, Handler: server.handleDevices},
 		{Path: "/internal/v1/approvals", Subtree: true, Handler: server.handleApprovals},
 		{Path: "/internal/v1/auth/capabilities", Handler: server.handleAuth},

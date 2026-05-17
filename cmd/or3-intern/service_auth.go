@@ -316,8 +316,20 @@ func serviceAllowedBrowserOrigin(cfg config.Config, r *http.Request) (string, bo
 	if origin == "" {
 		return "", false
 	}
+	if strings.EqualFold(origin, "null") {
+		if !serviceIsPairingRoute(r) && (strings.TrimSpace(r.RemoteAddr) == "" || requestRemoteIsLoopback(r.RemoteAddr)) {
+			return origin, true
+		}
+		return "", false
+	}
 	parsed, err := url.Parse(origin)
 	if err != nil {
+		return "", false
+	}
+	if strings.EqualFold(parsed.Scheme, "app") {
+		if serviceElectronAppOriginAllowed(origin, cfg) && (strings.TrimSpace(r.RemoteAddr) == "" || requestRemoteIsLoopback(r.RemoteAddr)) {
+			return origin, true
+		}
 		return "", false
 	}
 	if !strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https") {
@@ -330,6 +342,13 @@ func serviceAllowedBrowserOrigin(cfg config.Config, r *http.Request) (string, bo
 		return origin, true
 	}
 	return "", false
+}
+
+func serviceElectronAppOriginAllowed(origin string, cfg config.Config) bool {
+	if strings.EqualFold(strings.TrimRight(strings.TrimSpace(origin), "/"), "app://or3") {
+		return true
+	}
+	return serviceOriginInAllowlist(origin, serviceTrustedBrowserOrigins(cfg))
 }
 
 func serviceOriginIsLoopback(parsed *url.URL) bool {

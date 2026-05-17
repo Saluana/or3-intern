@@ -611,6 +611,81 @@ func TestServiceBrowserMiddleware_AddsLoopbackCORSHeadersToRequests(t *testing.T
 	}
 }
 
+func TestServiceBrowserMiddleware_AllowsTrustedElectronAppOriginFromLoopback(t *testing.T) {
+	cfg := config.Config{Service: config.ServiceConfig{
+		Listen: "0.0.0.0:9100",
+	}}
+	handler := serviceBrowserMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeServiceJSON(w, http.StatusAccepted, map[string]any{"ok": true})
+	}))
+
+	req := httptest.NewRequest(http.MethodOptions, "/internal/v1/app/bootstrap", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("Origin", "app://or3")
+	req.Header.Set("Access-Control-Request-Method", http.MethodGet)
+	req.Header.Set("Access-Control-Request-Headers", "authorization,x-or3-auth-method,content-type")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 preflight response, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "app://or3" {
+		t.Fatalf("expected trusted Electron app allow-origin header, got %q", got)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Headers"); !strings.Contains(strings.ToLower(got), "x-or3-auth-method") {
+		t.Fatalf("expected desktop auth method header to be allowed, got %q", got)
+	}
+}
+
+func TestServiceBrowserMiddleware_AllowsOpaqueElectronOriginFromLoopback(t *testing.T) {
+	cfg := config.Config{Service: config.ServiceConfig{
+		Listen: "127.0.0.1:9100",
+	}}
+	handler := serviceBrowserMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeServiceJSON(w, http.StatusAccepted, map[string]any{"ok": true})
+	}))
+
+	req := httptest.NewRequest(http.MethodOptions, "/internal/v1/chat-sessions", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("Origin", "null")
+	req.Header.Set("Access-Control-Request-Method", http.MethodGet)
+	req.Header.Set("Access-Control-Request-Headers", "authorization,x-or3-auth-method")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 preflight response, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "null" {
+		t.Fatalf("expected opaque local allow-origin header, got %q", got)
+	}
+}
+
+func TestServiceBrowserMiddleware_DoesNotAllowOpaquePairingPreflight(t *testing.T) {
+	cfg := config.Config{Service: config.ServiceConfig{
+		Listen:                       "127.0.0.1:9100",
+		AllowUnauthenticatedPairing: true,
+	}}
+	handler := serviceBrowserMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeServiceJSON(w, http.StatusAccepted, map[string]any{"ok": true})
+	}))
+
+	req := httptest.NewRequest(http.MethodOptions, "/internal/v1/pairing/requests", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("Origin", "null")
+	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Header().Get("Access-Control-Allow-Origin") == "null" {
+		t.Fatal("opaque origins should not receive CORS access to unauthenticated pairing")
+	}
+}
+
 func TestServiceBrowserMiddleware_AddsTrustedTailscaleCORSHeadersToRemoteAppRequests(t *testing.T) {
 	cfg := config.Config{Service: config.ServiceConfig{
 		Listen:                "100.64.0.42:9100",

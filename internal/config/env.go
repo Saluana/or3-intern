@@ -88,6 +88,8 @@ func ApplyEnvOverrides(cfg *Config) {
 	applyEnvBool("OR3_SERVICE_ENABLED", &cfg.Service.Enabled)
 	applyEnvString("OR3_SERVICE_LISTEN", &cfg.Service.Listen)
 	applyEnvString("OR3_SERVICE_SECRET", &cfg.Service.Secret)
+	applyEnvString("OR3_SERVICE_SHARED_SECRET_ROLE", &cfg.Service.SharedSecretRole)
+	applyEnvBool("OR3_SERVICE_ALLOW_UNAUTHENTICATED_PAIRING", &cfg.Service.AllowUnauthenticatedPairing)
 	applyEnvBool("OR3_SERVICE_ALLOW_REMOTE_UNAUTHENTICATED_PAIRING", &cfg.Service.AllowRemoteUnauthenticatedPairing)
 	applyEnvList("OR3_SERVICE_TRUSTED_BROWSER_ORIGINS", &cfg.Service.TrustedBrowserOrigins)
 	applyEnvList("OR3_SERVICE_TRUSTED_BROWSER_CIDRS", &cfg.Service.TrustedBrowserCIDRs)

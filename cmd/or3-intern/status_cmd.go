@@ -174,5 +174,8 @@ func translateAndPrintError(err error, out io.Writer) error {
 	if strings.TrimSpace(translated.Command) != "" {
 		fmt.Fprintf(out, "\nTry:\n%s\n", translated.Command)
 	}
+	if strings.TrimSpace(translated.Advanced) != "" {
+		fmt.Fprintf(out, "\nTechnical detail:\n%s\n", translated.Advanced)
+	}
 	return nil
 }

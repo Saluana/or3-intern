@@ -51,6 +51,7 @@ func clearConfigEnv(t *testing.T) {
 		"OR3_SERVICE_ENABLED",
 		"OR3_SERVICE_LISTEN",
 		"OR3_SERVICE_SECRET",
+		"OR3_SERVICE_ALLOW_UNAUTHENTICATED_PAIRING",
 		"OR3_SERVICE_ALLOW_REMOTE_UNAUTHENTICATED_PAIRING",
 		"OR3_SERVICE_TRUSTED_BROWSER_ORIGINS",
 		"OR3_SERVICE_TRUSTED_BROWSER_CIDRS",
@@ -354,6 +355,8 @@ func TestApplyEnvOverrides_ServiceConfig(t *testing.T) {
 	t.Setenv("OR3_SERVICE_ENABLED", "true")
 	t.Setenv("OR3_SERVICE_LISTEN", "127.0.0.1:9200")
 	t.Setenv("OR3_SERVICE_SECRET", "top-secret-value")
+	t.Setenv("OR3_SERVICE_SHARED_SECRET_ROLE", "operator")
+	t.Setenv("OR3_SERVICE_ALLOW_UNAUTHENTICATED_PAIRING", "true")
 	t.Setenv("OR3_SERVICE_TRUSTED_BROWSER_ORIGINS", "http://100.64.0.42:3060, https://app.example.test ")
 	t.Setenv("OR3_SERVICE_TRUSTED_BROWSER_CIDRS", "100.64.0.0/10,192.168.1.10")
 
@@ -367,6 +370,12 @@ func TestApplyEnvOverrides_ServiceConfig(t *testing.T) {
 	}
 	if cfg.Service.Secret != "top-secret-value" {
 		t.Fatalf("unexpected service secret override: %q", cfg.Service.Secret)
+	}
+	if cfg.Service.SharedSecretRole != "operator" {
+		t.Fatalf("unexpected service shared secret role override: %q", cfg.Service.SharedSecretRole)
+	}
+	if !cfg.Service.AllowUnauthenticatedPairing {
+		t.Fatal("expected unauthenticated pairing override")
 	}
 	if got, want := cfg.Service.TrustedBrowserOrigins, []string{"http://100.64.0.42:3060", "https://app.example.test"}; !slices.Equal(got, want) {
 		t.Fatalf("unexpected trusted browser origins override: got %v want %v", got, want)

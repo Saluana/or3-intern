@@ -3132,6 +3132,18 @@ func TestServicePairingWorkflow_AllowsUnauthenticatedBootstrapAndPairedOperatorR
 	if deviceResp.StatusCode != http.StatusOK {
 		t.Fatalf("expected paired operator device access 200, got %d (%s)", deviceResp.StatusCode, mustReadBody(t, deviceResp.Body))
 	}
+	listed := mustDecodeJSONBody(t, deviceResp.Body)
+	items, ok := listed["items"].([]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("expected one listed device, got %#v", listed["items"])
+	}
+	item, ok := items[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected listed device object, got %#v", items[0])
+	}
+	if item["device_id"] == "" || item["DeviceID"] != nil {
+		t.Fatalf("expected snake_case device payload, got %#v", item)
+	}
 }
 
 func TestServicePairingWorkflow_RejectsNonOperatorDeviceOnOperatorRoutes(t *testing.T) {

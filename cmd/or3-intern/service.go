@@ -20,6 +20,7 @@ import (
 	"or3-intern/internal/config"
 	"or3-intern/internal/controlplane"
 	"or3-intern/internal/cron"
+	"or3-intern/internal/db"
 	or3log "or3-intern/internal/log"
 	"or3-intern/internal/mcp"
 )
@@ -48,6 +49,16 @@ type serviceServer struct {
 	authFailures          *serviceAuthFailureTracker
 	nonceGuard            *serviceNonceReplayGuard
 	modelCatalog          *serviceModelCatalogCache
+}
+
+type serviceDeviceResponse struct {
+	DeviceID    string `json:"device_id"`
+	DisplayName string `json:"display_name,omitempty"`
+	Role        string `json:"role,omitempty"`
+	Status      string `json:"status,omitempty"`
+	CreatedAt   int64  `json:"created_at,omitempty"`
+	LastSeenAt  int64  `json:"last_seen_at,omitempty"`
+	RevokedAt   int64  `json:"revoked_at,omitempty"`
 }
 
 func (s *serviceServer) initComponents() {
@@ -418,7 +429,7 @@ func (s *serviceServer) handleDevices(w http.ResponseWriter, r *http.Request) {
 			writeServiceError(w, r, http.StatusBadGateway, "device list unavailable", err)
 			return
 		}
-		writeServiceJSON(w, http.StatusOK, map[string]any{"items": items})
+		writeServiceJSON(w, http.StatusOK, map[string]any{"items": serviceDeviceResponses(items)})
 		return
 	}
 	parts := strings.Split(strings.Trim(path, "/"), "/")
@@ -452,6 +463,22 @@ func (s *serviceServer) handleDevices(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "device action not found"})
 	}
+}
+
+func serviceDeviceResponses(items []db.PairedDeviceRecord) []serviceDeviceResponse {
+	out := make([]serviceDeviceResponse, 0, len(items))
+	for _, item := range items {
+		out = append(out, serviceDeviceResponse{
+			DeviceID:    item.DeviceID,
+			DisplayName: item.DisplayName,
+			Role:        item.Role,
+			Status:      item.Status,
+			CreatedAt:   item.CreatedAt,
+			LastSeenAt:  item.LastSeenAt,
+			RevokedAt:   item.RevokedAt,
+		})
+	}
+	return out
 }
 
 func (s *serviceServer) handleJobs(w http.ResponseWriter, r *http.Request) {

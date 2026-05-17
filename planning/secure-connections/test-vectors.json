@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "vectors": [
+    {
+      "name": "rendezvous commitment shape",
+      "pairingSecretBytes": 32,
+      "commitmentEncoding": "base64url-sha256-hmac",
+      "domain": "or3 relay rendezvous"
+    },
+    {
+      "name": "enrollment certificate signature domain",
+      "domain": "OR3-ENROLLMENT-CERTIFICATE-V1",
+      "signature": "ed25519",
+      "encoding": "canonical-cbor"
+    },
+    {
+      "name": "secure frame replay rejection",
+      "version": 1,
+      "firstSequence": 1,
+      "duplicateSequenceRejected": true,
+      "staleSequenceRejected": true
+    },
+    {
+      "name": "protocol downgrade rejection",
+      "minVersion": 2,
+      "maxVersion": 2,
+      "currentVersionRejected": true
+    }
+  ]
+}

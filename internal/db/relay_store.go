@@ -56,6 +56,9 @@ func (d *DB) CreateRelayRoute(ctx context.Context, rec RelayRouteRecord) error {
 	if strings.TrimSpace(rec.RouteID) == "" || strings.TrimSpace(rec.HostIDHash) == "" {
 		return fmt.Errorf("route ID and host hash required")
 	}
+	if containsLikelySecret(rec.Metadata) {
+		return fmt.Errorf("relay metadata rejected possible plaintext secret")
+	}
 	_, err := d.SQL.ExecContext(ctx, `INSERT INTO relay_routes(route_id, account_id, host_id_hash, device_id_hash, status, created_at, expires_at, metadata_json)
 		VALUES(?,?,?,?,?,?,?,?)`, rec.RouteID, rec.AccountID, rec.HostIDHash, rec.DeviceIDHash, rec.Status, rec.CreatedAt, rec.ExpiresAt, mustJSONMap(rec.Metadata))
 	return err
@@ -128,6 +131,26 @@ func (d *DB) ConsumeRelayRendezvous(ctx context.Context, rendezvousID string, no
 	return rows == 1, nil
 }
 
+func (d *DB) ExpireRelayRendezvous(ctx context.Context, nowMS int64) (int64, error) {
+	res, err := d.SQL.ExecContext(ctx, `UPDATE relay_rendezvous SET status='expired', consumed_at=? WHERE status IN ('created','joined') AND expires_at<=?`, nowMS, nowMS)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+func (d *DB) RejectRelayRendezvous(ctx context.Context, rendezvousID string, nowMS int64) (bool, error) {
+	res, err := d.SQL.ExecContext(ctx, `UPDATE relay_rendezvous SET status='rejected', consumed_at=? WHERE rendezvous_id=? AND status IN ('created','joined')`, nowMS, strings.TrimSpace(rendezvousID))
+	if err != nil {
+		return false, err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return rows == 1, nil
+}
+
 func scanRelayRoute(row scanner) (RelayRouteRecord, error) {
 	var rec RelayRouteRecord
 	var metadataJSON string
@@ -154,6 +177,18 @@ func containsLikelySecret(metadata map[string]any) bool {
 		if strings.Contains(lowerKey, "secret") || strings.Contains(lowerKey, "plaintext") || strings.Contains(lowerKey, "token") || strings.Contains(lowerKey, "command") || strings.Contains(lowerKey, "terminal") {
 			if strings.TrimSpace(fmt.Sprint(value)) != "" {
 				return true
+			}
+		}
+		switch typed := value.(type) {
+		case map[string]any:
+			if containsLikelySecret(typed) {
+				return true
+			}
+		case []any:
+			for _, item := range typed {
+				if nested, ok := item.(map[string]any); ok && containsLikelySecret(nested) {
+					return true
+				}
 			}
 		}
 	}

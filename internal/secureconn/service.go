@@ -148,6 +148,13 @@ func (s *TrustStore) ApproveEnrollment(ctx context.Context, proposal DeviceEnrol
 		return HostEnrollmentCertificateV1{}, db.SecureConnectionDeviceRecord{}, fmt.Errorf("secure connection trust store unavailable")
 	}
 	now := s.now()
+	if err := validateAccountBinding(proposal, accountID); err != nil {
+		return HostEnrollmentCertificateV1{}, db.SecureConnectionDeviceRecord{}, err
+	}
+	capabilities, expiresAt, restrictedTrust := ApplyWebEnrollmentRestrictions(proposal.Platform, capabilities, expiresAt, now)
+	if restrictedTrust != "" {
+		trustLevel = restrictedTrust
+	}
 	epoch := now.UnixMilli()
 	cert, err := NewEnrollmentCertificate(s.Identity, proposal, role, capabilities, trustLevel, accountID, epoch, expiresAt, now)
 	if err != nil {
@@ -185,5 +192,77 @@ func (s *TrustStore) RevokeDevice(ctx context.Context, deviceID, reason string) 
 	if s == nil || s.DB == nil {
 		return fmt.Errorf("secure connection trust store unavailable")
 	}
-	return s.DB.RevokeSecureConnectionDevice(ctx, deviceID, reason, s.now().UnixMilli())
+	now := s.now().UnixMilli()
+	if err := s.DB.RevokeSecureConnectionDevice(ctx, deviceID, reason, now); err != nil {
+		return err
+	}
+	_, err := s.DB.RevokeSecureConnectionSessionsByDevice(ctx, deviceID, now)
+	return err
+}
+
+func (s *TrustStore) ListDevices(ctx context.Context, status string, limit int) ([]db.SecureConnectionDeviceRecord, error) {
+	if s == nil || s.DB == nil {
+		return nil, fmt.Errorf("secure connection trust store unavailable")
+	}
+	return s.DB.ListSecureConnectionDevices(ctx, s.Identity.HostID, status, limit)
+}
+
+func (s *TrustStore) GetDevice(ctx context.Context, deviceID string) (db.SecureConnectionDeviceRecord, error) {
+	if s == nil || s.DB == nil {
+		return db.SecureConnectionDeviceRecord{}, fmt.Errorf("secure connection trust store unavailable")
+	}
+	rec, err := s.DB.GetSecureConnectionDevice(ctx, deviceID)
+	if err != nil {
+		return db.SecureConnectionDeviceRecord{}, err
+	}
+	if rec.HostID != s.Identity.HostID {
+		return db.SecureConnectionDeviceRecord{}, fmt.Errorf("device is not enrolled to this host")
+	}
+	return rec, nil
+}
+
+func (s *TrustStore) UpdateDeviceTrust(ctx context.Context, deviceID, role string, capabilities []string, trustLevel string) (db.SecureConnectionDeviceRecord, error) {
+	rec, err := s.GetDevice(ctx, deviceID)
+	if err != nil {
+		return db.SecureConnectionDeviceRecord{}, err
+	}
+	if role = NormalizeRole(role); role == "" {
+		role = rec.Role
+	}
+	if trustLevel = NormalizeTrustLevel(trustLevel, rec.Platform); trustLevel == "" {
+		trustLevel = rec.TrustLevel
+	}
+	if capabilities == nil {
+		capabilities = rec.Capabilities
+	}
+	rec.Role = role
+	rec.Capabilities = NormalizeCapabilities(capabilities)
+	rec.TrustLevel = trustLevel
+	rec.LastSeenAt = s.now().UnixMilli()
+	rec.Metadata = RedactSecureConnectionLogValue(rec.Metadata).(map[string]any)
+	return s.DB.UpsertSecureConnectionDevice(ctx, rec)
+}
+
+func validateAccountBinding(proposal DeviceEnrollmentProposalV1, expectedAccountID string) error {
+	expectedAccountID = strings.TrimSpace(expectedAccountID)
+	if expectedAccountID == "" {
+		return nil
+	}
+	if proposal.AccountBinding == nil {
+		return fmt.Errorf("account binding proof required")
+	}
+	actual := ""
+	for _, key := range []string{"accountId", "account_id", "sub"} {
+		if value, ok := proposal.AccountBinding[key]; ok {
+			actual = strings.TrimSpace(fmt.Sprint(value))
+			break
+		}
+	}
+	if actual == "" {
+		return fmt.Errorf("account binding proof missing account ID")
+	}
+	if actual != expectedAccountID {
+		return fmt.Errorf("account binding mismatch")
+	}
+	return nil
 }

@@ -167,6 +167,49 @@ func (d *DB) RevokeSecureConnectionDevice(ctx context.Context, deviceID, reason 
 	return err
 }
 
+func (d *DB) CreateSecureConnectionSession(ctx context.Context, rec SecureConnectionSessionRecord) (SecureConnectionSessionRecord, error) {
+	if strings.TrimSpace(rec.SessionID) == "" || strings.TrimSpace(rec.DeviceID) == "" || strings.TrimSpace(rec.HostID) == "" {
+		return SecureConnectionSessionRecord{}, fmt.Errorf("session ID, device ID, and host ID required")
+	}
+	_, err := d.SQL.ExecContext(ctx, `INSERT INTO secure_connection_sessions(session_id, device_id, host_id, relay_route_id, enrollment_epoch, status, created_at, last_seen_at, expires_at, step_up_at, last_sequence_in, last_sequence_out, metadata_json)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, rec.SessionID, rec.DeviceID, rec.HostID, rec.RelayRouteID, rec.EnrollmentEpoch, rec.Status, rec.CreatedAt, rec.LastSeenAt, rec.ExpiresAt, rec.StepUpAt, rec.LastSequenceIn, rec.LastSequenceOut, mustJSONMap(rec.Metadata))
+	if err != nil {
+		return SecureConnectionSessionRecord{}, err
+	}
+	return d.GetSecureConnectionSession(ctx, rec.SessionID)
+}
+
+func (d *DB) GetSecureConnectionSession(ctx context.Context, sessionID string) (SecureConnectionSessionRecord, error) {
+	row := d.SQL.QueryRowContext(ctx, `SELECT session_id, device_id, host_id, relay_route_id, enrollment_epoch, status, created_at, last_seen_at, expires_at, step_up_at, last_sequence_in, last_sequence_out, metadata_json FROM secure_connection_sessions WHERE session_id=?`, strings.TrimSpace(sessionID))
+	return scanSecureConnectionSession(row)
+}
+
+func (d *DB) TouchSecureConnectionSession(ctx context.Context, sessionID string, lastSeenAt int64, lastSequenceIn, lastSequenceOut int64) error {
+	_, err := d.SQL.ExecContext(ctx, `UPDATE secure_connection_sessions SET last_seen_at=?, last_sequence_in=MAX(last_sequence_in, ?), last_sequence_out=MAX(last_sequence_out, ?) WHERE session_id=?`, lastSeenAt, lastSequenceIn, lastSequenceOut, strings.TrimSpace(sessionID))
+	return err
+}
+
+func (d *DB) UpdateSecureConnectionSessionStepUp(ctx context.Context, sessionID string, stepUpAt int64) error {
+	_, err := d.SQL.ExecContext(ctx, `UPDATE secure_connection_sessions SET step_up_at=? WHERE session_id=?`, stepUpAt, strings.TrimSpace(sessionID))
+	return err
+}
+
+func (d *DB) ExpireSecureConnectionSessions(ctx context.Context, nowMS int64) (int64, error) {
+	res, err := d.SQL.ExecContext(ctx, `UPDATE secure_connection_sessions SET status='expired', last_seen_at=? WHERE status='active' AND expires_at>0 AND expires_at<=?`, nowMS, nowMS)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+func (d *DB) RevokeSecureConnectionSessionsByDevice(ctx context.Context, deviceID string, nowMS int64) (int64, error) {
+	res, err := d.SQL.ExecContext(ctx, `UPDATE secure_connection_sessions SET status='revoked', last_seen_at=? WHERE device_id=? AND status='active'`, nowMS, strings.TrimSpace(deviceID))
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 func (d *DB) CreateSecureConnectionPairingSession(ctx context.Context, rec SecureConnectionPairingSessionRecord) error {
 	if strings.TrimSpace(rec.RendezvousID) == "" || strings.TrimSpace(rec.SecretCommitment) == "" {
 		return fmt.Errorf("rendezvous ID and secret commitment required")
@@ -221,6 +264,16 @@ func scanSecureConnectionDevice(row scanner) (SecureConnectionDeviceRecord, erro
 		return SecureConnectionDeviceRecord{}, err
 	}
 	rec.Capabilities = parseJSONStringSlice(capabilitiesJSON)
+	rec.Metadata = decodeJSONMap(metadataJSON)
+	return rec, nil
+}
+
+func scanSecureConnectionSession(row scanner) (SecureConnectionSessionRecord, error) {
+	var rec SecureConnectionSessionRecord
+	var metadataJSON string
+	if err := row.Scan(&rec.SessionID, &rec.DeviceID, &rec.HostID, &rec.RelayRouteID, &rec.EnrollmentEpoch, &rec.Status, &rec.CreatedAt, &rec.LastSeenAt, &rec.ExpiresAt, &rec.StepUpAt, &rec.LastSequenceIn, &rec.LastSequenceOut, &metadataJSON); err != nil {
+		return SecureConnectionSessionRecord{}, err
+	}
 	rec.Metadata = decodeJSONMap(metadataJSON)
 	return rec, nil
 }

@@ -36,6 +36,8 @@ const (
 	FrameNoiseTransport = "noiseTransport"
 	FrameControl        = "control"
 
+	MaxSecureFrameBodyBytes = 64 * 1024
+
 	ErrorPairingExpired            = "PAIRING_EXPIRED"
 	ErrorPairingConsumed           = "PAIRING_CONSUMED"
 	ErrorPairingRejected           = "PAIRING_REJECTED"

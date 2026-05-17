@@ -56,6 +56,9 @@ func ValidateSecureFrame(frame SecureFrameV1, expectedSessionID string, window *
 	if strings.TrimSpace(frame.Kind) == "" || strings.TrimSpace(frame.SessionID) == "" || strings.TrimSpace(frame.CorrelationID) == "" {
 		return SecureConnectionError{Code: ErrorMalformedPayload, SafeMessage: "A malformed connection message was blocked.", Retryable: false}
 	}
+	if len(frame.Body) > MaxSecureFrameBodyBytes {
+		return SecureConnectionError{Code: ErrorMalformedPayload, SafeMessage: "A connection message was too large.", Retryable: false}
+	}
 	if expectedSessionID != "" && frame.SessionID != expectedSessionID {
 		return SecureConnectionError{Code: ErrorMalformedPayload, SafeMessage: "A connection message was addressed to the wrong session.", Retryable: false}
 	}
@@ -70,4 +73,31 @@ func ValidateSecureFrame(frame SecureFrameV1, expectedSessionID string, window *
 		return window.Accept(frame.Sequence)
 	}
 	return nil
+}
+
+func EncodeSecureFrame(frame SecureFrameV1, now time.Time) ([]byte, error) {
+	if frame.Version == 0 {
+		frame.Version = ProtocolVersion
+	}
+	if frame.SentAtUnixMs == 0 {
+		if now.IsZero() {
+			now = time.Now().UTC()
+		}
+		frame.SentAtUnixMs = now.UTC().UnixMilli()
+	}
+	if err := ValidateSecureFrame(frame, frame.SessionID, nil, now); err != nil {
+		return nil, err
+	}
+	return CanonicalBytes(frame)
+}
+
+func DecodeSecureFrame(raw []byte, expectedSessionID string, window *ReplayWindow, now time.Time) (SecureFrameV1, error) {
+	var frame SecureFrameV1
+	if err := DecodeCanonical(raw, &frame); err != nil {
+		return SecureFrameV1{}, SecureConnectionError{Code: ErrorMalformedPayload, SafeMessage: "A malformed connection message was blocked.", Retryable: false}
+	}
+	if err := ValidateSecureFrame(frame, expectedSessionID, window, now); err != nil {
+		return SecureFrameV1{}, err
+	}
+	return frame, nil
 }

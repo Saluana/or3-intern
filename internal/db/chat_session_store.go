@@ -207,6 +207,86 @@ func (d *DB) ListChatSessions(ctx context.Context, filter ChatSessionListFilter)
 	return out, rows.Err()
 }
 
+// BackfillExternalChannelChatSessionMeta creates chat metadata for persisted
+// external-channel sessions that predate chat_session_meta syncing.
+func (d *DB) BackfillExternalChannelChatSessionMeta(ctx context.Context) error {
+	now := NowMS()
+	_, err := d.SQL.ExecContext(ctx, `
+		INSERT INTO chat_session_meta(
+			session_key, title, runner_id, runner_label,
+			message_count, last_message_preview, last_message_at, created_at, updated_at
+		)
+		SELECT grouped.session_key,
+			CASE
+				WHEN grouped.session_key LIKE 'telegram:%' THEN 'Telegram ' || substr(grouped.session_key, 10)
+				WHEN grouped.session_key LIKE 'discord:%' THEN 'Discord ' || substr(grouped.session_key, 9)
+				WHEN grouped.session_key LIKE 'slack:%' THEN 'Slack ' || substr(grouped.session_key, 7)
+				WHEN grouped.session_key LIKE 'whatsapp:%' THEN 'WhatsApp ' || substr(grouped.session_key, 10)
+				WHEN grouped.session_key LIKE 'email:%' THEN 'Email ' || substr(grouped.session_key, 7)
+				ELSE grouped.session_key
+			END,
+			'or3-intern', 'OR3 Intern', grouped.message_count,
+			COALESCE((SELECT m2.content FROM messages m2 WHERE m2.session_key=grouped.session_key ORDER BY m2.id DESC LIMIT 1), ''),
+			COALESCE((SELECT m3.created_at FROM messages m3 WHERE m3.session_key=grouped.session_key ORDER BY m3.id DESC LIMIT 1), ?),
+			COALESCE((SELECT m4.created_at FROM messages m4 WHERE m4.session_key=grouped.session_key ORDER BY m4.id ASC LIMIT 1), ?),
+			COALESCE((SELECT m5.created_at FROM messages m5 WHERE m5.session_key=grouped.session_key ORDER BY m5.id DESC LIMIT 1), ?)
+		FROM (
+			SELECT m.session_key, COUNT(*) AS message_count
+			FROM messages m
+			LEFT JOIN chat_session_meta csm ON csm.session_key=m.session_key
+			WHERE csm.session_key IS NULL
+			  AND (m.session_key LIKE 'telegram:%'
+				OR m.session_key LIKE 'discord:%'
+				OR m.session_key LIKE 'slack:%'
+				OR m.session_key LIKE 'whatsapp:%'
+				OR m.session_key LIKE 'email:%')
+			GROUP BY m.session_key
+		) grouped`, now, now, now)
+	return err
+}
+
+// SyncChatSessionMessageSummary ensures metadata exists for sessionKey and
+// refreshes its message count and latest-message fields from persisted messages.
+func (d *DB) SyncChatSessionMessageSummary(ctx context.Context, sessionKey, title, runnerID, runnerLabel string) error {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return errors.New("session_key required")
+	}
+	now := NowMS()
+	tx, err := d.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := ensureSessionTx(ctx, tx, sessionKey); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO chat_session_meta(
+			session_key, title, runner_id, runner_label,
+			message_count, last_message_preview, last_message_at, created_at, updated_at
+		)
+		SELECT ?, ?, ?, ?, COUNT(*),
+			COALESCE((SELECT content FROM messages WHERE session_key=? ORDER BY id DESC LIMIT 1), ''),
+			COALESCE((SELECT created_at FROM messages WHERE session_key=? ORDER BY id DESC LIMIT 1), ?),
+			?, ?
+		FROM messages WHERE session_key=?
+		ON CONFLICT(session_key) DO UPDATE SET
+			title=COALESCE(NULLIF(excluded.title,''), chat_session_meta.title),
+			runner_id=COALESCE(NULLIF(excluded.runner_id,''), chat_session_meta.runner_id),
+			runner_label=COALESCE(NULLIF(excluded.runner_label,''), chat_session_meta.runner_label),
+			message_count=excluded.message_count,
+			last_message_preview=excluded.last_message_preview,
+			last_message_at=excluded.last_message_at,
+			updated_at=excluded.updated_at`,
+		sessionKey, strings.TrimSpace(title), strings.TrimSpace(runnerID), strings.TrimSpace(runnerLabel),
+		sessionKey, sessionKey, now, now, now, sessionKey)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // RenameChatSession sets the title.
 func (d *DB) RenameChatSession(ctx context.Context, sessionKey, title string) error {
 	now := NowMS()

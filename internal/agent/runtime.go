@@ -183,6 +183,7 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 	if err != nil {
 		return err
 	}
+	defer r.syncExternalChannelChatSessionMeta(ctx, ev)
 	if handled, err := r.handleTurnPreExecution(ctx, ev, msgID); handled || err != nil {
 		return err
 	}
@@ -737,6 +738,49 @@ func cloneMap(in map[string]any) map[string]any {
 		out[k] = v
 	}
 	return out
+}
+
+func (r *Runtime) syncExternalChannelChatSessionMeta(ctx context.Context, ev bus.Event) {
+	if r.DB == nil || strings.TrimSpace(ev.SessionKey) == "" || !isExternalUserChannel(ev.Channel) {
+		return
+	}
+	if err := r.DB.SyncChatSessionMessageSummary(ctx, ev.SessionKey, externalChannelSessionTitle(ev), "or3-intern", "OR3 Intern"); err != nil {
+		log.Printf("sync external chat session metadata failed: session=%s channel=%s err=%v", ev.SessionKey, ev.Channel, err)
+	}
+}
+
+func isExternalUserChannel(channel string) bool {
+	switch strings.ToLower(strings.TrimSpace(channel)) {
+	case "telegram", "discord", "slack", "whatsapp", "email":
+		return true
+	default:
+		return false
+	}
+}
+
+func externalChannelSessionTitle(ev bus.Event) string {
+	channel := strings.ToLower(strings.TrimSpace(ev.Channel))
+	target := deliveryTarget(ev)
+	if target == "" {
+		target = strings.TrimSpace(ev.From)
+	}
+	if target == "" {
+		target = strings.TrimSpace(ev.SessionKey)
+	}
+	switch channel {
+	case "telegram":
+		return "Telegram " + target
+	case "discord":
+		return "Discord " + target
+	case "slack":
+		return "Slack " + target
+	case "whatsapp":
+		return "WhatsApp " + target
+	case "email":
+		return "Email " + target
+	default:
+		return strings.TrimSpace(ev.SessionKey)
+	}
 }
 
 func deliveryTarget(ev bus.Event) string {

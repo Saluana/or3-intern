@@ -177,6 +177,63 @@ func readSSEEvents(t *testing.T, resp *http.Response) []string {
 	return events
 }
 
+func readSingleSSEEvent(t *testing.T, resp *http.Response) string {
+	t.Helper()
+	reader := bufio.NewReader(resp.Body)
+	var lines []string
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read SSE event: %v", err)
+		}
+		if strings.TrimSpace(line) == "" {
+			break
+		}
+		lines = append(lines, strings.TrimRight(line, "\r\n"))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func TestServiceChatSessionMessagesStream(t *testing.T) {
+	database, err := db.Open(filepath.Join(t.TempDir(), "chat-session-stream.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	cfg := config.Default()
+	fixture := newRunnerChatServiceFixture(t, cfg, database, nil, nil)
+	defer fixture.cleanup()
+
+	ctx := context.Background()
+	_, err = database.UpsertChatSessionMeta(ctx, db.ChatSessionMeta{SessionKey: "telegram:123", Title: "Telegram"})
+	if err != nil {
+		t.Fatalf("UpsertChatSessionMeta: %v", err)
+	}
+	firstID, err := database.AppendMessage(ctx, "telegram:123", "user", "one", map[string]any{"channel": "telegram"})
+	if err != nil {
+		t.Fatalf("AppendMessage first: %v", err)
+	}
+	secondID, err := database.AppendMessage(ctx, "telegram:123", "assistant", "two", map[string]any{"channel": "telegram"})
+	if err != nil {
+		t.Fatalf("AppendMessage second: %v", err)
+	}
+
+	path := fmt.Sprintf("/internal/v1/chat-sessions/%s/messages/stream?after_id=%d&poll_ms=1000", "telegram:123", firstID)
+	req := mustServiceRequest(t, fixture.httpServer, fixture.secret, http.MethodGet, path, "")
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := fixture.httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do stream: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	event := readSingleSSEEvent(t, resp)
+	if !strings.Contains(event, "event: message") || !strings.Contains(event, fmt.Sprintf(`"id":%d`, secondID)) || !strings.Contains(event, `"content":"two"`) {
+		t.Fatalf("unexpected SSE event: %s", event)
+	}
+}
+
 func TestServiceChatRunners_DiscoveryStatusesAndAgentRunnerContract(t *testing.T) {
 	database, closeDB := openServiceTestDB(t)
 	defer closeDB()
@@ -541,6 +598,31 @@ func TestServiceChatSessions_LifecyclePaginationAndForkErrors(t *testing.T) {
 	invalid := mustDecodeJSONBody(t, badAnchorResp.Body)
 	if invalid["code"] != "invalid_fork_anchor" {
 		t.Fatalf("expected invalid_fork_anchor, got %#v", invalid)
+	}
+}
+
+func TestServiceChatSessionsListBackfillsExternalChannelMessages(t *testing.T) {
+	database, closeDB := openServiceTestDB(t)
+	defer closeDB()
+	fixture := newRunnerChatServiceFixture(t, config.Default(), database, nil, &agentcli.ChatManager{DB: database})
+	defer fixture.httpServer.Close()
+	ctx := context.Background()
+
+	if _, err := database.AppendMessage(ctx, "telegram:123", "user", "hello from telegram", map[string]any{"channel": "telegram"}); err != nil {
+		t.Fatalf("AppendMessage telegram: %v", err)
+	}
+	if _, err := database.AppendMessage(ctx, "svc:not-channel", "user", "local only", nil); err != nil {
+		t.Fatalf("AppendMessage local: %v", err)
+	}
+
+	list := mustServiceDoJSON(t, fixture, http.MethodGet, "/internal/v1/chat-sessions?include_archived=true&limit=10", "")
+	items := list["sessions"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("expected one external session, got %#v", list)
+	}
+	item := items[0].(map[string]any)
+	if item["session_key"] != "telegram:123" || item["title"] != "Telegram 123" || item["last_message_preview"] != "hello from telegram" {
+		t.Fatalf("unexpected backfilled session payload %#v", item)
 	}
 }
 

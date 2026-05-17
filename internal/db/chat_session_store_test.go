@@ -33,6 +33,41 @@ func TestChatSessionStoreListRenameArchiveAndMessages(t *testing.T) {
 	}
 }
 
+func TestBackfillExternalChannelChatSessionMeta(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	if _, err := d.AppendMessage(ctx, "telegram:123", "user", "hello", map[string]any{"channel": "telegram"}); err != nil {
+		t.Fatalf("AppendMessage telegram: %v", err)
+	}
+	if _, err := d.AppendMessage(ctx, "discord:C1", "assistant", "reply", map[string]any{"channel": "discord"}); err != nil {
+		t.Fatalf("AppendMessage discord: %v", err)
+	}
+	if _, err := d.AppendMessage(ctx, "svc:local", "user", "local", nil); err != nil {
+		t.Fatalf("AppendMessage local: %v", err)
+	}
+
+	if err := d.BackfillExternalChannelChatSessionMeta(ctx); err != nil {
+		t.Fatalf("BackfillExternalChannelChatSessionMeta: %v", err)
+	}
+	items, err := d.ListChatSessions(ctx, ChatSessionListFilter{IncludeArchive: true, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListChatSessions: %v", err)
+	}
+	byKey := map[string]ChatSessionMeta{}
+	for _, item := range items {
+		byKey[item.SessionKey] = item
+	}
+	if got := byKey["telegram:123"]; got.Title != "Telegram 123" || got.MessageCount != 1 || got.LastMessagePreview != "hello" {
+		t.Fatalf("unexpected telegram metadata: %#v", got)
+	}
+	if got := byKey["discord:C1"]; got.Title != "Discord C1" || got.MessageCount != 1 || got.LastMessagePreview != "reply" {
+		t.Fatalf("unexpected discord metadata: %#v", got)
+	}
+	if _, ok := byKey["svc:local"]; ok {
+		t.Fatalf("local message-only session should not be backfilled as external: %#v", byKey["svc:local"])
+	}
+}
+
 func TestChatSessionForkSanitizesPayload(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()

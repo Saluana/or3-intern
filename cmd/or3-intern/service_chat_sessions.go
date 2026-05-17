@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"or3-intern/internal/agentcli"
 	"or3-intern/internal/controlplane"
@@ -80,6 +81,7 @@ type chatSessionsForkRequest struct {
 //	GET    /internal/v1/chat-sessions/:key
 //	PATCH  /internal/v1/chat-sessions/:key
 //	GET    /internal/v1/chat-sessions/:key/messages
+//	GET    /internal/v1/chat-sessions/:key/messages/stream
 //	POST   /internal/v1/chat-sessions/:key/fork
 func (s *serviceServer) handleChatSessions(w http.ResponseWriter, r *http.Request) {
 	store := s.control().DB
@@ -126,6 +128,12 @@ func (s *serviceServer) handleChatSessions(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		s.handleChatSessionMessages(w, r, store, sessionKey)
+	case "messages/stream":
+		if r.Method != http.MethodGet {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		s.streamChatSessionMessages(w, r, store, sessionKey)
 	case "fork":
 		if r.Method != http.MethodPost {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
@@ -153,6 +161,10 @@ func (s *serviceServer) handleChatSessionsList(w http.ResponseWriter, r *http.Re
 			return
 		}
 		filter.Limit = n
+	}
+	if err := store.BackfillExternalChannelChatSessionMeta(r.Context()); err != nil {
+		writeServiceError(w, r, http.StatusServiceUnavailable, "chat session metadata backfill failed", err)
+		return
 	}
 	rows, err := store.ListChatSessions(r.Context(), filter)
 	if err != nil {
@@ -264,6 +276,71 @@ func (s *serviceServer) handleChatSessionMessages(w http.ResponseWriter, r *http
 		return
 	}
 	writeServiceValue(w, http.StatusOK, controlplane.BuildChatMessagePageResponse(page))
+}
+
+func (s *serviceServer) streamChatSessionMessages(w http.ResponseWriter, r *http.Request, store *db.DB, sessionKey string) {
+	q := r.URL.Query()
+	afterID := int64(0)
+	if raw := strings.TrimSpace(q.Get("after_id")); raw != "" {
+		n, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || n < 0 {
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid after_id"})
+			return
+		}
+		afterID = n
+	}
+	pollEvery := time.Second
+	if raw := strings.TrimSpace(q.Get("poll_ms")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 250 || n > 10000 {
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid poll_ms"})
+			return
+		}
+		pollEvery = time.Duration(n) * time.Millisecond
+	}
+	if err := beginSSE(w); err != nil {
+		writeServiceError(w, r, http.StatusInternalServerError, "streaming is not supported", err)
+		return
+	}
+	ticker := time.NewTicker(pollEvery)
+	defer ticker.Stop()
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+
+	flush := func() error {
+		page, err := store.ListChatMessages(r.Context(), sessionKey, afterID, 100)
+		if err != nil {
+			return err
+		}
+		for _, message := range page.Messages {
+			if message.ID > afterID {
+				afterID = message.ID
+			}
+			if err := writeSSEEvent(w, "message", controlplane.BuildChatMessageResponse(message)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := flush(); err != nil {
+		_ = writeSSEEvent(w, "error", map[string]any{"error": "chat messages unavailable"})
+		return
+	}
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			if err := flush(); err != nil {
+				_ = writeSSEEvent(w, "error", map[string]any{"error": "chat messages unavailable"})
+				return
+			}
+		case <-heartbeat.C:
+			if err := writeSSEEvent(w, "heartbeat", map[string]any{"session_key": sessionKey, "after_id": afterID}); err != nil {
+				return
+			}
+		}
+	}
 }
 
 func (s *serviceServer) handleChatSessionFork(w http.ResponseWriter, r *http.Request, store *db.DB, sessionKey string) {

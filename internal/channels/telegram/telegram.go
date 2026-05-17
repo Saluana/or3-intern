@@ -187,6 +187,7 @@ func (c *Channel) fetchUpdates(ctx context.Context, eventBus *bus.Bus) error {
 		}
 		c.mu.Unlock()
 		msg := update.Message
+		recordRecentChat(c.Config.APIBase, c.Config.Token, msg)
 		chatID := strconv.FormatInt(msg.Chat.ID, 10)
 		if !c.allowedChat(ctx, chatID) {
 			continue
@@ -619,12 +620,17 @@ type update struct {
 
 type inboundMessage struct {
 	MessageID    int    `json:"message_id"`
+	Date         int64  `json:"date"`
 	Text         string `json:"text"`
 	Caption      string `json:"caption"`
 	MediaGroupID string `json:"media_group_id"`
 	Chat         struct {
-		ID   int64  `json:"id"`
-		Type string `json:"type"`
+		ID        int64  `json:"id"`
+		Type      string `json:"type"`
+		Title     string `json:"title"`
+		Username  string `json:"username"`
+		FirstName string `json:"first_name"`
+		LastName  string `json:"last_name"`
 	} `json:"chat"`
 	From struct {
 		ID       int64  `json:"id"`

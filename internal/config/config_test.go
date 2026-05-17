@@ -620,6 +620,47 @@ func TestLoad_EnabledExternalChannelAllowsPairingPolicy(t *testing.T) {
 	}
 }
 
+func TestLoad_EnabledDiscordDefaultsClosedInboundAccess(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	cfg := Default()
+	cfg.Channels.Discord.Enabled = true
+	cfg.Channels.Discord.Token = "discord-token"
+
+	b, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.Channels.Discord.InboundPolicy != InboundPolicyDeny {
+		t.Fatalf("expected discord inbound policy to default to deny, got %q", loaded.Channels.Discord.InboundPolicy)
+	}
+
+	cfg = Default()
+	cfg.Channels.Discord.Enabled = true
+	cfg.Channels.Discord.Token = "discord-token"
+	cfg.Channels.Discord.AllowedUserIDs = []string{"user-123"}
+
+	b, _ = json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	loaded, err = Load(path)
+	if err != nil {
+		t.Fatalf("Load with allowlist: %v", err)
+	}
+	if loaded.Channels.Discord.InboundPolicy != InboundPolicyAllowlist {
+		t.Fatalf("expected discord inbound policy to default to allowlist, got %q", loaded.Channels.Discord.InboundPolicy)
+	}
+}
+
 func TestLoad_EmailChannelRequiresConsentAndCredentials(t *testing.T) {
 	clearConfigEnv(t)
 	dir := t.TempDir()

@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	telegramchannel "or3-intern/internal/channels/telegram"
 )
 
 type serviceTelegramChatCandidate struct {
@@ -73,17 +75,88 @@ func (s *serviceServer) handleConfigureTelegramChats(w http.ResponseWriter, r *h
 			r.URL.RawQuery = "limit=" + strconv.Itoa(body.Limit)
 		}
 	}
+	limit := serviceParsePositiveInt(r.URL.Query().Get("limit"), 20, 100)
+	items := s.knownTelegramChatCandidates(token, limit)
 	if token == "" {
+		if len(items) > 0 {
+			writeServiceJSON(w, http.StatusOK, map[string]any{"items": items, "warning": "Add a Telegram bot token to refresh recent chats."})
+			return
+		}
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "Paste a Telegram bot token first, then message the bot and try discovery again."})
 		return
 	}
-	limit := serviceParsePositiveInt(r.URL.Query().Get("limit"), 20, 100)
-	items, err := s.discoverTelegramChats(r.Context(), token, s.config.Channels.Telegram.APIBase, limit)
+	apiItems, err := s.discoverTelegramChats(r.Context(), token, s.config.Channels.Telegram.APIBase, limit)
 	if err != nil {
+		if len(items) > 0 {
+			writeServiceJSON(w, http.StatusOK, map[string]any{"items": items, "warning": "Could not refresh from Telegram, showing chats OR3 already knows."})
+			return
+		}
 		writeServiceError(w, r, http.StatusBadGateway, "telegram chat discovery failed", err)
 		return
 	}
+	items = mergeTelegramChatCandidates(items, apiItems, limit)
 	writeServiceJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *serviceServer) knownTelegramChatCandidates(token string, limit int) []serviceTelegramChatCandidate {
+	items := make([]serviceTelegramChatCandidate, 0)
+	defaultID := strings.TrimSpace(s.config.Channels.Telegram.DefaultChatID)
+	if defaultID != "" {
+		items = append(items, serviceTelegramChatCandidate{ID: defaultID, Type: "saved", DisplayName: "Primary Telegram chat", LastMessageText: "Saved in OR3 settings."})
+	}
+	for _, id := range s.config.Channels.Telegram.AllowedChatIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		items = append(items, serviceTelegramChatCandidate{ID: id, Type: "saved", DisplayName: "Trusted Telegram chat", LastMessageText: "Saved in OR3 settings."})
+	}
+	for _, item := range telegramchannel.RecentChats(s.config.Channels.Telegram.APIBase, token, limit) {
+		items = append(items, serviceTelegramChatCandidate{ID: item.ID, Type: item.Type, Title: item.Title, Username: item.Username, DisplayName: item.DisplayName, LastMessageAt: item.LastMessageAt, LastMessageText: item.LastMessageText})
+	}
+	return mergeTelegramChatCandidates(nil, items, limit)
+}
+
+func mergeTelegramChatCandidates(base []serviceTelegramChatCandidate, next []serviceTelegramChatCandidate, limit int) []serviceTelegramChatCandidate {
+	byID := map[string]serviceTelegramChatCandidate{}
+	for _, item := range append(base, next...) {
+		item.ID = strings.TrimSpace(item.ID)
+		if item.ID == "" {
+			continue
+		}
+		if strings.TrimSpace(item.DisplayName) == "" {
+			item.DisplayName = item.ID
+		}
+		if existing, ok := byID[item.ID]; ok {
+			if existing.LastMessageAt > item.LastMessageAt {
+				continue
+			}
+			if item.LastMessageAt == 0 && existing.LastMessageAt == 0 && existing.DisplayName != existing.ID {
+				continue
+			}
+		}
+		byID[item.ID] = item
+	}
+	items := make([]serviceTelegramChatCandidate, 0, len(byID))
+	for _, item := range byID {
+		items = append(items, item)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].LastMessageAt != items[j].LastMessageAt {
+			return items[i].LastMessageAt > items[j].LastMessageAt
+		}
+		if items[i].DisplayName != items[j].DisplayName {
+			return items[i].DisplayName == "Primary Telegram chat"
+		}
+		if items[i].Type != items[j].Type {
+			return items[i].Type == "saved"
+		}
+		return items[i].ID < items[j].ID
+	})
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+	return items
 }
 
 func (s *serviceServer) discoverTelegramChats(ctx context.Context, token, apiBase string, limit int) ([]serviceTelegramChatCandidate, error) {

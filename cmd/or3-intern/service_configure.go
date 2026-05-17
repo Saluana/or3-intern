@@ -195,6 +195,8 @@ func (s *serviceServer) handleConfigure(w http.ResponseWriter, r *http.Request) 
 		})
 	case path == "channels/telegram/chats":
 		s.handleConfigureTelegramChats(w, r)
+	case path == "channels/discord/targets":
+		s.handleConfigureDiscordTargets(w, r)
 	case path == "providers":
 		switch r.Method {
 		case http.MethodGet:
@@ -289,6 +291,7 @@ func (s *serviceServer) handleConfigure(w http.ResponseWriter, r *http.Request) 
 				return
 			}
 		}
+		normalizeDiscordInboundDefaults(&next)
 		path, err := s.saveConfigureConfig(next)
 		if err != nil {
 			writeServiceError(w, r, http.StatusBadGateway, "config save failed", err)

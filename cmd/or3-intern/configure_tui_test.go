@@ -104,6 +104,28 @@ func TestConfigureTUIAppliesContextFields(t *testing.T) {
 	}
 }
 
+func TestConfigureTUIDiscordEnableDefaultsClosedInboundAccess(t *testing.T) {
+	cfg := config.Default()
+	if changed, err := applyFieldValue(&cfg, "channels", "discord", "token", "discord-token"); err != nil || !changed {
+		t.Fatalf("apply discord token: changed=%v err=%v", changed, err)
+	}
+	if changed := setToggleFieldValue(&cfg, "channels", "discord", "enabled", true); !changed {
+		t.Fatal("expected discord enabled toggle to apply")
+	}
+	if cfg.Channels.Discord.InboundPolicy != config.InboundPolicyDeny {
+		t.Fatalf("expected discord inbound policy to default to deny, got %q", cfg.Channels.Discord.InboundPolicy)
+	}
+
+	allowlistCfg := config.Default()
+	allowlistCfg.Channels.Discord.Enabled = true
+	if changed, err := applyFieldValue(&allowlistCfg, "channels", "discord", "allowlist", "user-123"); err != nil || !changed {
+		t.Fatalf("apply discord allowlist: changed=%v err=%v", changed, err)
+	}
+	if allowlistCfg.Channels.Discord.InboundPolicy != config.InboundPolicyAllowlist {
+		t.Fatalf("expected blank discord inbound policy to switch to allowlist, got %q", allowlistCfg.Channels.Discord.InboundPolicy)
+	}
+}
+
 func TestConfigureTUIFieldDescriptionsAreHelpful(t *testing.T) {
 	cfg := config.Default()
 	sections := []string{"provider", "storage", "runtime", "context", "workspace", "tools", "docindex", "skills", "security", "hardening", "session", "automation", "service"}

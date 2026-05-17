@@ -2154,17 +2154,21 @@ func applyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 			case "token":
 				if clearRequested {
 					cfg.Channels.Discord.Token = ""
+					normalizeDiscordInboundDefaults(cfg)
 					return true, nil
 				}
 				if value != "" {
 					cfg.Channels.Discord.Token = value
 				}
+				normalizeDiscordInboundDefaults(cfg)
 				return true, nil
 			case "default_id":
 				cfg.Channels.Discord.DefaultChannelID = value
+				normalizeDiscordInboundDefaults(cfg)
 				return true, nil
 			case "allowlist":
 				cfg.Channels.Discord.AllowedUserIDs = splitAndCompact(value)
+				normalizeDiscordInboundDefaults(cfg)
 				return true, nil
 			}
 		case "whatsapp":
@@ -2821,6 +2825,7 @@ func setToggleFieldValue(cfg *config.Config, section, channel, fieldKey string, 
 		case "discord":
 			if fieldKey == "enabled" {
 				cfg.Channels.Discord.Enabled = value
+				normalizeDiscordInboundDefaults(cfg)
 				return true
 			}
 			if fieldKey == "require_mention" {
@@ -2959,6 +2964,24 @@ func setToggleFieldValue(cfg *config.Config, section, channel, fieldKey string, 
 		return false
 	}
 	return true
+}
+
+func normalizeDiscordInboundDefaults(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	channel := &cfg.Channels.Discord
+	if !channel.Enabled {
+		return
+	}
+	if strings.TrimSpace(string(channel.InboundPolicy)) != "" || channel.OpenAccess {
+		return
+	}
+	if len(channel.AllowedUserIDs) > 0 {
+		channel.InboundPolicy = config.InboundPolicyAllowlist
+		return
+	}
+	channel.InboundPolicy = config.InboundPolicyDeny
 }
 
 func applyChoiceSelection(cfg *config.Config, section, channel, fieldKey, choice string) (bool, error) {

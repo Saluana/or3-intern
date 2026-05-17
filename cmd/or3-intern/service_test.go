@@ -911,6 +911,34 @@ func TestServiceConfigureTelegramChatsRequiresSavedToken(t *testing.T) {
 	}
 }
 
+func TestServiceConfigureTelegramChatsShowsConfiguredChatsWithoutToken(t *testing.T) {
+	cfg := config.Default()
+	cfg.Channels.Telegram.DefaultChatID = "123"
+	cfg.Channels.Telegram.AllowedChatIDs = []string{"123", "-100456"}
+	server := &serviceServer{config: cfg}
+	req := httptest.NewRequest(http.MethodGet, "/internal/v1/configure/channels/telegram/chats", nil)
+	req = req.WithContext(context.WithValue(req.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Actor: "ops", Role: approval.RoleOperator}))
+	rec := httptest.NewRecorder()
+
+	server.handleConfigure(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Items []serviceTelegramChatCandidate `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(body.Items) != 2 {
+		t.Fatalf("expected configured chats, got %#v", body.Items)
+	}
+	if body.Items[0].ID != "123" || body.Items[1].ID != "-100456" {
+		t.Fatalf("unexpected configured chats: %#v", body.Items)
+	}
+}
+
 func TestServiceConfigureTelegramChatsAcceptsUnsavedToken(t *testing.T) {
 	telegramAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/bottelegram-token/getUpdates" {
@@ -945,6 +973,30 @@ func TestServiceConfigureTelegramChatsAcceptsUnsavedToken(t *testing.T) {
 	}
 	if len(body.Items) != 1 || body.Items[0].ID != "123" {
 		t.Fatalf("unexpected chats: %#v", body.Items)
+	}
+}
+
+func TestServiceConfigureDiscordTargetsShowsConfiguredDestinationWithoutToken(t *testing.T) {
+	cfg := config.Default()
+	cfg.Channels.Discord.DefaultChannelID = "C123"
+	server := &serviceServer{config: cfg}
+	req := httptest.NewRequest(http.MethodGet, "/internal/v1/configure/channels/discord/targets", nil)
+	req = req.WithContext(context.WithValue(req.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Actor: "ops", Role: approval.RoleOperator}))
+	rec := httptest.NewRecorder()
+
+	server.handleConfigure(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Items []serviceDiscordTargetCandidate `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(body.Items) != 1 || body.Items[0].ChannelID != "C123" {
+		t.Fatalf("unexpected configured Discord targets: %#v", body.Items)
 	}
 }
 
@@ -1004,6 +1056,41 @@ func TestServiceConfigureApply_PersistsConfigChanges(t *testing.T) {
 	}
 	if loaded.Channels.Slack.InboundPolicy != config.InboundPolicyAllowlist {
 		t.Fatalf("expected slack allowlist policy, got %q", loaded.Channels.Slack.InboundPolicy)
+	}
+}
+
+func TestServiceConfigureApply_DefaultsDiscordInboundPolicyWhenEnabled(t *testing.T) {
+	clearConfigEnvForTest(t)
+	cfg := config.Default()
+	cfgPath := filepath.Join(t.TempDir(), "or3-intern.json")
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	server := &serviceServer{config: cfg, configPath: cfgPath}
+	reqBody := strings.NewReader(`{
+		"changes":[
+			{"section":"channels","channel":"discord","field":"token","op":"set","value":"discord-token"},
+			{"section":"channels","channel":"discord","field":"enabled","op":"set","value":true}
+		]
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/configure/apply", reqBody)
+	req = req.WithContext(context.WithValue(req.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Actor: "ops", Role: approval.RoleOperator}))
+	rec := httptest.NewRecorder()
+
+	server.handleConfigure(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	loaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if !loaded.Channels.Discord.Enabled {
+		t.Fatal("expected discord enabled to persist")
+	}
+	if loaded.Channels.Discord.InboundPolicy != config.InboundPolicyDeny {
+		t.Fatalf("expected discord inbound policy to default to deny, got %q", loaded.Channels.Discord.InboundPolicy)
 	}
 }
 

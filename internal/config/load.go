@@ -510,6 +510,7 @@ func normalizeAndValidateConfigWithOptions(cfg Config, opts normalizeOptions) (C
 	cfg.Channels.Discord.InboundPolicy = normalizeInboundPolicy(cfg.Channels.Discord.InboundPolicy)
 	cfg.Channels.WhatsApp.InboundPolicy = normalizeInboundPolicy(cfg.Channels.WhatsApp.InboundPolicy)
 	cfg.Channels.Email.InboundPolicy = normalizeInboundPolicy(cfg.Channels.Email.InboundPolicy)
+	normalizeManagedChannelInboundDefaults(&cfg)
 	for name, profile := range cfg.Security.Profiles.Profiles {
 		profile.MaxCapability = strings.ToLower(strings.TrimSpace(profile.MaxCapability))
 		profile.AllowedTools = compactStrings(profile.AllowedTools)
@@ -548,6 +549,27 @@ func normalizeAndValidateConfigWithOptions(cfg Config, opts normalizeOptions) (C
 		return cfg, err
 	}
 	return cfg, nil
+}
+
+func normalizeManagedChannelInboundDefaults(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	normalizeDiscordChannelInboundDefaults(&cfg.Channels.Discord)
+}
+
+func normalizeDiscordChannelInboundDefaults(channel *DiscordChannelConfig) {
+	if channel == nil || !channel.Enabled {
+		return
+	}
+	if normalizeInboundPolicy(channel.InboundPolicy) != "" || channel.OpenAccess {
+		return
+	}
+	if hasNonEmpty(channel.AllowedUserIDs) {
+		channel.InboundPolicy = InboundPolicyAllowlist
+		return
+	}
+	channel.InboundPolicy = InboundPolicyDeny
 }
 
 // ValidateSnapshot normalizes and validates an in-memory config without

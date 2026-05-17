@@ -25,6 +25,14 @@ import (
 	"or3-intern/internal/config"
 )
 
+const (
+	discordGatewayIntentGuilds         = 1 << 0
+	discordGatewayIntentGuildMessages  = 1 << 9
+	discordGatewayIntentDirectMessages = 1 << 12
+	discordGatewayIntentMessageContent = 1 << 15
+	discordGatewayIntents              = discordGatewayIntentGuilds | discordGatewayIntentGuildMessages | discordGatewayIntentDirectMessages | discordGatewayIntentMessageContent
+)
+
 // Channel receives Discord gateway events and sends outbound messages.
 type Channel struct {
 	Config         config.DiscordChannelConfig
@@ -35,11 +43,13 @@ type Channel struct {
 	IsolatePeers   bool
 	ApprovalBroker *approval.Broker
 
-	mu     sync.Mutex
-	conn   *websocket.Conn
-	cancel context.CancelFunc
-	botID  string
-	dedupe *rootchannels.IngressDeduplicator
+	mu       sync.Mutex
+	conn     *websocket.Conn
+	cancel   context.CancelFunc
+	botID    string
+	dedupe   *rootchannels.IngressDeduplicator
+	guilds   map[string]string
+	channels map[string]string
 }
 
 // Name returns the registered channel name.
@@ -144,7 +154,7 @@ func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
 				HeartbeatInterval float64 `json:"heartbeat_interval"`
 			}
 			_ = json.Unmarshal(frame.D, &hello)
-			_ = conn.WriteJSON(map[string]any{"op": 2, "d": map[string]any{"token": c.Config.Token, "intents": 513, "properties": map[string]string{"$os": "linux", "$browser": "or3-intern", "$device": "or3-intern"}}})
+			_ = conn.WriteJSON(map[string]any{"op": 2, "d": map[string]any{"token": c.Config.Token, "intents": discordGatewayIntents, "properties": map[string]string{"$os": "linux", "$browser": "or3-intern", "$device": "or3-intern"}}})
 			interval := time.Duration(int64(hello.HeartbeatInterval)) * time.Millisecond
 			if interval > 0 {
 				heartbeatTicker = time.NewTicker(interval)
@@ -166,22 +176,51 @@ func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
 					User struct {
 						ID string `json:"id"`
 					} `json:"user"`
+					Guilds []struct {
+						ID   string `json:"id"`
+						Name string `json:"name"`
+					} `json:"guilds"`
 				}
 				_ = json.Unmarshal(frame.D, &ready)
 				c.botID = ready.User.ID
+				for _, guild := range ready.Guilds {
+					c.setGuildName(guild.ID, guild.Name)
+				}
+			case "GUILD_CREATE":
+				var guild struct {
+					ID       string `json:"id"`
+					Name     string `json:"name"`
+					Channels []struct {
+						ID   string `json:"id"`
+						Name string `json:"name"`
+					} `json:"channels"`
+				}
+				_ = json.Unmarshal(frame.D, &guild)
+				c.setGuildName(guild.ID, guild.Name)
+				for _, channel := range guild.Channels {
+					c.setChannelName(channel.ID, channel.Name)
+				}
+			case "CHANNEL_CREATE":
+				var channel struct {
+					ID   string `json:"id"`
+					Name string `json:"name"`
+				}
+				_ = json.Unmarshal(frame.D, &channel)
+				c.setChannelName(channel.ID, channel.Name)
 			case "MESSAGE_CREATE":
 				var msg inboundMessage
 				_ = json.Unmarshal(frame.D, &msg)
 				if msg.Author.Bot {
 					continue
 				}
+				c.recordRecentConversation(msg)
 				if key := discordDedupeKey(msg); key != "" && c.ingressDeduper().IsDuplicate(key) {
 					continue
 				}
 				if !c.allowedUser(ctx, msg.Author.ID) {
 					continue
 				}
-				if c.Config.RequireMention && c.botID != "" && !mentioned(msg.Mentions, c.botID) {
+				if c.requiresMention(msg) && !mentioned(msg.Mentions, c.botID) {
 					continue
 				}
 				clean := strings.TrimSpace(stripMention(msg.Content, c.botID))
@@ -207,6 +246,16 @@ func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
 		default:
 		}
 	}
+}
+
+func (c *Channel) requiresMention(msg inboundMessage) bool {
+	if !c.Config.RequireMention {
+		return false
+	}
+	if c.botID == "" {
+		return false
+	}
+	return strings.TrimSpace(msg.GuildID) != ""
 }
 
 func (c *Channel) apiBase() string {
@@ -277,6 +326,92 @@ func (c *Channel) ingressDeduper() *rootchannels.IngressDeduplicator {
 		c.dedupe = rootchannels.NewIngressDeduplicator(0)
 	}
 	return c.dedupe
+}
+
+func (c *Channel) setGuildName(id, name string) {
+	id = strings.TrimSpace(id)
+	name = strings.TrimSpace(name)
+	if id == "" || name == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.guilds == nil {
+		c.guilds = map[string]string{}
+	}
+	c.guilds[id] = name
+}
+
+func (c *Channel) setChannelName(id, name string) {
+	id = strings.TrimSpace(id)
+	name = strings.TrimSpace(name)
+	if id == "" || name == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.channels == nil {
+		c.channels = map[string]string{}
+	}
+	c.channels[id] = name
+}
+
+func (c *Channel) lookupGuildName(id string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return strings.TrimSpace(c.guilds[id])
+}
+
+func (c *Channel) lookupChannelName(id string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return strings.TrimSpace(c.channels[id])
+}
+
+func (c *Channel) recordRecentConversation(msg inboundMessage) {
+	userDisplay := strings.TrimSpace(msg.Member.Nick)
+	if userDisplay == "" {
+		userDisplay = strings.TrimSpace(msg.Author.GlobalName)
+	}
+	if userDisplay == "" {
+		userDisplay = strings.TrimSpace(msg.Author.Username)
+	}
+	if userDisplay == "" {
+		userDisplay = strings.TrimSpace(msg.Author.ID)
+	}
+	channelName := c.lookupChannelName(msg.ChannelID)
+	guildName := c.lookupGuildName(msg.GuildID)
+	kind := "channel"
+	displayName := "Discord channel"
+	isPrivate := strings.TrimSpace(msg.GuildID) == ""
+	if isPrivate {
+		kind = "dm"
+		displayName = "DM with " + userDisplay
+	} else {
+		switch {
+		case channelName != "" && guildName != "":
+			displayName = "#" + channelName + " in " + guildName
+		case channelName != "":
+			displayName = "#" + channelName
+		case guildName != "":
+			displayName = "Conversation in " + guildName
+		default:
+			displayName = "Discord channel " + strings.TrimSpace(msg.ChannelID)
+		}
+	}
+	recordRecentConversation(c.Config.APIBase, c.Config.Token, RecentConversation{
+		ChannelID:       strings.TrimSpace(msg.ChannelID),
+		UserID:          strings.TrimSpace(msg.Author.ID),
+		GuildID:         strings.TrimSpace(msg.GuildID),
+		Kind:            kind,
+		DisplayName:     displayName,
+		UserDisplayName: userDisplay,
+		ChannelName:     channelName,
+		GuildName:       guildName,
+		LastMessageAt:   parseDiscordUnixTime(msg.Timestamp),
+		LastMessageText: strings.TrimSpace(stripMention(msg.Content, c.botID)),
+		IsPrivate:       isPrivate,
+	})
 }
 
 func discordDedupeKey(msg inboundMessage) string {
@@ -465,12 +600,18 @@ type inboundMessage struct {
 	ID          string              `json:"id"`
 	ChannelID   string              `json:"channel_id"`
 	GuildID     string              `json:"guild_id"`
+	Timestamp   string              `json:"timestamp"`
 	Content     string              `json:"content"`
 	Mentions    []mention           `json:"mentions"`
 	Attachments []discordAttachment `json:"attachments"`
-	Author      struct {
-		ID  string `json:"id"`
-		Bot bool   `json:"bot"`
+	Member      struct {
+		Nick string `json:"nick"`
+	} `json:"member"`
+	Author struct {
+		ID         string `json:"id"`
+		Username   string `json:"username"`
+		GlobalName string `json:"global_name"`
+		Bot        bool   `json:"bot"`
 	} `json:"author"`
 }
 

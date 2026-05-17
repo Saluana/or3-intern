@@ -110,6 +110,43 @@ func TestChannel_FetchUpdatesDeduplicatesRepeatedMessageID(t *testing.T) {
 	}
 }
 
+func TestChannel_FetchUpdatesCachesRecentChatsBeforeAllowlist(t *testing.T) {
+	clearRecentChatsForTest()
+	t.Cleanup(clearRecentChatsForTest)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok": true,
+			"result": []map[string]any{{
+				"update_id": 1,
+				"message": map[string]any{
+					"message_id": 99,
+					"date":       200,
+					"text":       "please add me",
+					"chat":       map[string]any{"id": 123, "type": "private", "first_name": "Brendon"},
+					"from":       map[string]any{"id": 456, "username": "alice"},
+				},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	ch := &Channel{Config: config.TelegramChannelConfig{Token: "token", APIBase: server.URL, PollSeconds: 1}}
+	b := bus.New(1)
+	if err := ch.fetchUpdates(context.Background(), b); err != nil {
+		t.Fatalf("fetchUpdates: %v", err)
+	}
+	select {
+	case ev := <-b.Channel():
+		t.Fatalf("expected untrusted chat not to publish event, got %#v", ev)
+	default:
+	}
+	recent := RecentChats(server.URL, "token", 20)
+	if len(recent) != 1 || recent[0].ID != "123" || recent[0].DisplayName != "Brendon" || recent[0].LastMessageText != "please add me" {
+		t.Fatalf("unexpected recent chats: %#v", recent)
+	}
+}
+
 func TestChannel_AllowedChatSupportsPairingPolicy(t *testing.T) {
 	broker := &approval.Broker{DB: openTelegramTestDB(t)}
 	if _, _, err := broker.RotateDeviceToken(context.Background(), "telegram:123", approval.RoleOperator, "Telegram Chat", map[string]any{"channel": "telegram", "identity": "123"}); err != nil {

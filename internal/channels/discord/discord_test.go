@@ -32,7 +32,7 @@ func openDiscordTestDB(t *testing.T) *db.DB {
 
 func TestChannel_StartReceivesMessage(t *testing.T) {
 	upgrader := websocket.Upgrader{}
-	identified := make(chan bool, 1)
+	identified := make(chan string, 1)
 	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
@@ -44,9 +44,7 @@ func TestChannel_StartReceivesMessage(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Read identify: %v", err)
 		}
-		if strings.Contains(string(raw), `"op":2`) {
-			identified <- true
-		}
+		identified <- string(raw)
 		_ = conn.WriteJSON(map[string]any{"op": 0, "t": "READY", "d": map[string]any{"user": map[string]any{"id": "B1"}}})
 		_ = conn.WriteJSON(map[string]any{"op": 0, "t": "MESSAGE_CREATE", "d": map[string]any{"id": "m1", "channel_id": "C1", "content": "<@B1> hello", "author": map[string]any{"id": "U1", "bot": false}, "mentions": []map[string]any{{"id": "B1"}}}})
 		<-time.After(100 * time.Millisecond)
@@ -61,7 +59,10 @@ func TestChannel_StartReceivesMessage(t *testing.T) {
 	}
 	defer func() { _ = ch.Stop(context.Background()) }()
 	select {
-	case <-identified:
+	case raw := <-identified:
+		if !strings.Contains(raw, `"op":2`) || !strings.Contains(raw, `"intents":37377`) {
+			t.Fatalf("expected identify with guild, DM, and message-content intents, got %s", raw)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for identify")
 	}
@@ -75,6 +76,92 @@ func TestChannel_StartReceivesMessage(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for discord event")
+	}
+}
+
+func TestChannel_StartCachesRecentConversationBeforeAllowlist(t *testing.T) {
+	clearRecentConversationsForTest()
+	t.Cleanup(clearRecentConversationsForTest)
+	upgrader := websocket.Upgrader{}
+	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		_ = conn.WriteJSON(map[string]any{"op": 10, "d": map[string]any{"heartbeat_interval": 10000}})
+		_, _, _ = conn.ReadMessage()
+		_ = conn.WriteJSON(map[string]any{"op": 0, "t": "READY", "d": map[string]any{"user": map[string]any{"id": "B1"}}})
+		_ = conn.WriteJSON(map[string]any{"op": 0, "t": "MESSAGE_CREATE", "d": map[string]any{
+			"id":         "m1",
+			"channel_id": "D1",
+			"content":    "hello from dm",
+			"timestamp":  "2026-05-16T12:00:00.000000+00:00",
+			"author":     map[string]any{"id": "U1", "username": "brendon", "global_name": "Brendon", "bot": false},
+			"mentions":   []map[string]any{},
+		}})
+		<-time.After(100 * time.Millisecond)
+	}))
+	defer wsServer.Close()
+
+	b := bus.New(1)
+	ch := &Channel{Config: config.DiscordChannelConfig{Token: "token", GatewayURL: "ws" + strings.TrimPrefix(wsServer.URL, "http"), RequireMention: false}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := ch.Start(ctx, b); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ch.Stop(context.Background()) }()
+
+	select {
+	case ev := <-b.Channel():
+		t.Fatalf("expected untrusted Discord user not to publish event, got %#v", ev)
+	case <-time.After(200 * time.Millisecond):
+	}
+	recent := RecentConversations("", "token", 20)
+	if len(recent) != 1 || recent[0].ChannelID != "D1" || recent[0].DisplayName != "DM with Brendon" || recent[0].UserID != "U1" {
+		t.Fatalf("unexpected recent conversations: %#v", recent)
+	}
+}
+
+func TestChannel_StartAllowsDMWithoutMentionWhenRequireMentionEnabled(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		_ = conn.WriteJSON(map[string]any{"op": 10, "d": map[string]any{"heartbeat_interval": 10000}})
+		_, _, _ = conn.ReadMessage()
+		_ = conn.WriteJSON(map[string]any{"op": 0, "t": "READY", "d": map[string]any{"user": map[string]any{"id": "B1"}}})
+		_ = conn.WriteJSON(map[string]any{"op": 0, "t": "MESSAGE_CREATE", "d": map[string]any{
+			"id":         "m1",
+			"channel_id": "D1",
+			"content":    "hello from dm",
+			"author":     map[string]any{"id": "U1", "bot": false},
+			"mentions":   []map[string]any{},
+		}})
+		<-time.After(100 * time.Millisecond)
+	}))
+	defer wsServer.Close()
+
+	b := bus.New(1)
+	ch := &Channel{Config: config.DiscordChannelConfig{Token: "token", GatewayURL: "ws" + strings.TrimPrefix(wsServer.URL, "http"), RequireMention: true, OpenAccess: true}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := ch.Start(ctx, b); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ch.Stop(context.Background()) }()
+
+	select {
+	case ev := <-b.Channel():
+		if ev.Channel != "discord" || ev.Message != "hello from dm" {
+			t.Fatalf("unexpected dm event: %#v", ev)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for discord dm event")
 	}
 }
 

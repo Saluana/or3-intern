@@ -100,11 +100,13 @@ const (
 
 // RunnerModelInfo is model metadata exposed to the app selector.
 type RunnerModelInfo struct {
-	ID          string   `json:"id"`
-	DisplayName string   `json:"display_name,omitempty"`
-	Provider    string   `json:"provider,omitempty"`
-	Default     bool     `json:"default,omitempty"`
-	Reasoning   []string `json:"reasoning,omitempty"`
+	ID               string   `json:"id"`
+	DisplayName      string   `json:"display_name,omitempty"`
+	Provider         string   `json:"provider,omitempty"`
+	ProviderName     string   `json:"provider_name,omitempty"`
+	Default          bool     `json:"default,omitempty"`
+	Reasoning        []string `json:"reasoning,omitempty"`
+	ReasoningDefault string   `json:"reasoning_default,omitempty"`
 }
 
 // RunnerRuntimeInfo is discovery/status metadata for native-first backends.

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -153,6 +154,126 @@ func TestOpenCodeInfoUsesConfiguredLoopbackWithoutBinary(t *testing.T) {
 	}
 	if !foundModel {
 		t.Fatalf("models = %+v, want gpt-5", info.Models)
+	}
+}
+
+func TestFlattenOpenCodeModelsPreservesVariantsAndDefaults(t *testing.T) {
+	var raw any
+	if err := json.Unmarshal([]byte(`{
+		"default":{"openai":"gpt-5"},
+		"providers":[{"id":"openai","name":"OpenAI","models":{"gpt-5":{"name":"GPT-5","variants":{"low":{},"medium":{},"high":{}}}}}]
+	}`), &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	models := flattenModelInfo(raw)
+	if len(models) != 1 {
+		t.Fatalf("models = %+v, want one", models)
+	}
+	model := models[0]
+	if model.ID != "gpt-5" || model.Provider != "openai" || model.ProviderName != "OpenAI" || !model.Default {
+		t.Fatalf("unexpected model metadata: %+v", model)
+	}
+	if !reflect.DeepEqual(model.Reasoning, []string{"low", "medium", "high"}) {
+		t.Fatalf("reasoning = %+v", model.Reasoning)
+	}
+}
+
+func TestCodexModelListToRunnerModelsMapsReasoning(t *testing.T) {
+	var resp map[string]any
+	if err := json.Unmarshal([]byte(`{"data":[{"model":"gpt-5","displayName":"GPT-5","modelProvider":"openai","isDefault":true,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"low"},{"reasoningEffort":"high"}]}]}`), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	models := codexModelListToRunnerModels(resp)
+	if len(models) != 1 {
+		t.Fatalf("models = %+v, want one", models)
+	}
+	model := models[0]
+	if model.ID != "gpt-5" || model.Provider != "openai" || model.ProviderName != "OpenAI Codex" || !model.Default || model.ReasoningDefault != "medium" {
+		t.Fatalf("unexpected model metadata: %+v", model)
+	}
+	if !reflect.DeepEqual(model.Reasoning, []string{"low", "high"}) {
+		t.Fatalf("reasoning = %+v", model.Reasoning)
+	}
+}
+
+func TestReasoningOptionsUseSemanticOrder(t *testing.T) {
+	got := sortedUniqueStrings([]string{"xhigh", "medium", "low", "high", "none", "max"})
+	want := []string{"none", "low", "medium", "high", "xhigh", "max"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("reasoning order = %+v, want %+v", got, want)
+	}
+}
+
+func TestOpenCodeExecuteSendsVariantOnlyWhenSupported(t *testing.T) {
+	var messageBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/global/health":
+			w.WriteHeader(http.StatusOK)
+		case "/config/providers":
+			_, _ = w.Write([]byte(`{"default":{"openai":"gpt-5"},"providers":[{"id":"openai","models":{"gpt-5":{"name":"GPT-5","variants":{"low":{},"high":{}}}}}]}`))
+		case "/session":
+			_, _ = w.Write([]byte(`{"id":"sess_1"}`))
+		case "/session/sess_1/message":
+			if err := json.NewDecoder(r.Body).Decode(&messageBody); err != nil {
+				t.Fatalf("decode body: %v", err)
+			}
+			_, _ = w.Write([]byte(`{"type":"message","text":"done"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	runtime := NewOpenCodeNativeRuntime()
+	_, err := runtime.Execute(context.Background(), NativeRuntimeExecuteRequest{
+		Run:    db.AgentCLIRun{ID: "run_1", JobID: "job_1", Task: "hello", Model: "gpt-5"},
+		Chat:   RunnerChatCommandRequest{UserMessage: "hello", Meta: map[string]any{"runner_thinking_level": "high"}},
+		Config: config.AgentCLIConfig{NativeServerURLs: map[string]string{"opencode": server.URL}},
+		Env:    []string{"PATH="},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	model, ok := messageBody["model"].(map[string]any)
+	if !ok {
+		t.Fatalf("model body = %#v, want object", messageBody["model"])
+	}
+	if model["providerID"] != "openai" || model["modelID"] != "gpt-5" || model["variant"] != "high" {
+		t.Fatalf("unexpected model request: %#v", model)
+	}
+}
+
+func TestParseOpenCodeModelsCLIOutputPreservesProviderAndVariants(t *testing.T) {
+	models := parseOpenCodeModelsCLIOutput([]byte(`opencode-go/deepseek-v4-pro
+{
+  "id": "deepseek-v4-pro",
+  "providerID": "opencode-go",
+  "name": "DeepSeek V4 Pro",
+  "variants": {"low": {}, "medium": {}, "high": {}}
+}
+opencode/gpt-5.2
+{
+  "id": "gpt-5.2",
+  "providerID": "opencode",
+  "name": "GPT-5.2",
+  "variants": {"none": {}, "low": {}, "medium": {}, "high": {}}
+}
+`))
+	if len(models) != 2 {
+		t.Fatalf("models = %+v, want two", models)
+	}
+	if models[0].Provider != "opencode-go" || models[0].ProviderName != "OpenCode Go" || models[0].ID != "deepseek-v4-pro" {
+		t.Fatalf("unexpected first model: %+v", models[0])
+	}
+	if !reflect.DeepEqual(models[0].Reasoning, []string{"low", "medium", "high"}) {
+		t.Fatalf("first reasoning = %+v", models[0].Reasoning)
+	}
+	if models[1].Provider != "opencode" || models[1].ProviderName != "OpenCode Zen" || models[1].ID != "gpt-5.2" {
+		t.Fatalf("unexpected second model: %+v", models[1])
+	}
+	if !reflect.DeepEqual(models[1].Reasoning, []string{"none", "low", "medium", "high"}) {
+		t.Fatalf("second reasoning = %+v", models[1].Reasoning)
 	}
 }
 

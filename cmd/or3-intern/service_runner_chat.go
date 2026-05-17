@@ -43,6 +43,7 @@ type runnerChatStartTurnRequest struct {
 	MaxTurns         int            `json:"max_turns"`
 	TimeoutSeconds   int            `json:"timeout_seconds"`
 	Meta             map[string]any `json:"meta"`
+	ThinkingLevel    string         `json:"thinking_level"`
 	ApprovalToken    string         `json:"approval_token"`
 	RunnerPermission struct {
 		RunnerID   string `json:"runner_id"`
@@ -244,6 +245,12 @@ func (s *serviceServer) handleRunnerChatTurnStart(w http.ResponseWriter, r *http
 		TimeoutSeconds:   req.TimeoutSeconds,
 		Meta:             req.Meta,
 		ApprovalToken:    serviceFirstNonEmpty(req.ApprovalToken, serviceApprovalTokenFromRequest(r)),
+	}
+	if thinking := strings.ToLower(strings.TrimSpace(req.ThinkingLevel)); thinking != "" {
+		if startReq.Meta == nil {
+			startReq.Meta = map[string]any{}
+		}
+		startReq.Meta["runner_thinking_level"] = thinking
 	}
 	if permission, ok := agentcli.NormalizeRunnerPermissionRequest(agentcli.RunnerPermissionRequest{
 		RunnerID:   strings.TrimSpace(req.RunnerPermission.RunnerID),

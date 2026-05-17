@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -303,6 +304,7 @@ func (r *OpenCodeNativeRuntime) Info(ctx context.Context, cfg config.AgentCLICon
 		info.State = RuntimeStateFallback
 		info.Fallback = true
 		info.FallbackReason = "native runtime will start when first used"
+		info.Models = r.modelsFromCLI(ctx, env)
 		return info
 	}
 	info.Endpoint = endpoint
@@ -321,6 +323,9 @@ func (r *OpenCodeNativeRuntime) Info(ctx context.Context, cfg config.AgentCLICon
 	info.Fallback = false
 	info.FallbackReason = ""
 	info.Models = r.models(ctx, endpoint)
+	if len(info.Models) == 0 {
+		info.Models = r.modelsFromCLI(ctx, env)
+	}
 	return info
 }
 
@@ -368,7 +373,7 @@ func (r *OpenCodeNativeRuntime) Execute(ctx context.Context, req NativeRuntimeEx
 		"parts": []map[string]any{{"type": "text", "text": prompt}},
 	}
 	if model := firstNonEmpty(req.Run.Model, req.Config.DefaultModels[string(RunnerOpenCode)]); model != "" {
-		messageBody["model"] = model
+		messageBody["model"] = r.openCodeModelRequest(ctx, endpoint, model, requestedThinkingLevel(req.Chat.Meta))
 	}
 	var response map[string]any
 	if err := httpJSON(ctx, r.client, http.MethodPost, endpoint+"/session/"+sessionID+"/message", messageBody, &response); err != nil {
@@ -545,6 +550,43 @@ func (r *OpenCodeNativeRuntime) models(ctx context.Context, endpoint string) []R
 	return flattenModelInfo(providers)
 }
 
+func (r *OpenCodeNativeRuntime) modelsFromCLI(ctx context.Context, env []string) []RunnerModelInfo {
+	binary, err := ResolveExecutable("opencode", env)
+	if err != nil {
+		return nil
+	}
+	discoveryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(discoveryCtx, binary, "models", "--verbose")
+	cmd.Env = env
+	output, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	return parseOpenCodeModelsCLIOutput(output)
+}
+
+func (r *OpenCodeNativeRuntime) openCodeModelRequest(ctx context.Context, endpoint, model, thinking string) any {
+	providerID, modelID := splitProviderModel(model)
+	if thinking == "" {
+		return model
+	}
+	for _, info := range r.models(ctx, endpoint) {
+		if info.ID != modelID && info.ID != model {
+			continue
+		}
+		if !stringInSlice(thinking, info.Reasoning) {
+			continue
+		}
+		provider := firstNonEmpty(providerID, info.Provider)
+		if provider == "" {
+			return model
+		}
+		return map[string]any{"providerID": provider, "modelID": info.ID, "variant": thinking}
+	}
+	return model
+}
+
 // CodexNativeRuntime talks to codex app-server over stdio JSON-RPC.
 type CodexNativeRuntime struct{}
 
@@ -567,10 +609,68 @@ func (r *CodexNativeRuntime) Info(ctx context.Context, cfg config.AgentCLIConfig
 	info.Fallback = true
 	info.FallbackReason = "codex app-server is started per turn"
 	info.Ownership = RuntimeOwnershipManaged
+	info.Models = r.models(ctx, cfg, env)
 	if model := strings.TrimSpace(cfg.DefaultModels[string(RunnerCodex)]); model != "" {
-		info.Models = []RunnerModelInfo{{ID: model, DisplayName: model, Default: true}}
+		info.DefaultModel = model
+		if len(info.Models) == 0 {
+			info.Models = []RunnerModelInfo{{ID: model, DisplayName: model, Default: true}}
+		} else {
+			for i := range info.Models {
+				if info.Models[i].ID == model {
+					info.Models[i].Default = true
+				}
+			}
+		}
 	}
 	return info
+}
+
+func (r *CodexNativeRuntime) models(ctx context.Context, cfg config.AgentCLIConfig, env []string) []RunnerModelInfo {
+	binary, err := ResolveExecutable("codex", env)
+	if err != nil {
+		return nil
+	}
+	discoveryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(discoveryCtx, binary, "app-server", "--listen", "stdio://")
+	cmd.Env = env
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil
+	}
+	stderr, _ := cmd.StderrPipe()
+	if err := cmd.Start(); err != nil {
+		return nil
+	}
+	if stderr != nil {
+		go func() { _, _ = io.Copy(io.Discard, io.LimitReader(stderr, 65536)) }()
+	}
+	client := newCodexRPC(stdin, stdout)
+	client.start(nil, nil)
+	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait(); client.close() }()
+	if _, err := client.call(discoveryCtx, "initialize", map[string]any{"clientInfo": map[string]any{"name": "or3-intern", "version": "native-runner"}}); err != nil {
+		return nil
+	}
+	_ = client.notify("initialized", map[string]any{})
+	models := []RunnerModelInfo{}
+	params := map[string]any{"limit": 200, "includeHidden": false}
+	for pages := 0; pages < 5; pages++ {
+		resp, err := client.call(discoveryCtx, "model/list", params)
+		if err != nil {
+			return models
+		}
+		models = append(models, codexModelListToRunnerModels(resp)...)
+		next, _ := resp["nextCursor"].(string)
+		if strings.TrimSpace(next) == "" {
+			break
+		}
+		params["cursor"] = next
+	}
+	return dedupeRunnerModels(models)
 }
 
 func (r *CodexNativeRuntime) Execute(ctx context.Context, req NativeRuntimeExecuteRequest) (ProcessOutput, error) {
@@ -655,8 +755,14 @@ func (r *CodexNativeRuntime) Execute(ctx context.Context, req NativeRuntimeExecu
 	}
 	emitNativeStructured(&seq, req.OnEvent, map[string]any{"type": "thread.started", "thread_id": threadID, "raw": threadResp})
 	turnParams := map[string]any{"threadId": threadID, "input": req.Chat.UserMessage, "cwd": req.Run.Cwd}
-	if model := firstNonEmpty(req.Run.Model, req.Config.DefaultModels[string(RunnerCodex)]); model != "" {
+	selectedModel := firstNonEmpty(req.Run.Model, req.Config.DefaultModels[string(RunnerCodex)])
+	if model := selectedModel; model != "" {
 		turnParams["model"] = model
+	}
+	if thinking := requestedThinkingLevel(req.Chat.Meta); thinking != "" {
+		if r.codexSupportsEffort(ctx, client, selectedModel, thinking) {
+			turnParams["effort"] = thinking
+		}
 	}
 	if err := addCodexPolicies(turnParams, req.Run); err != nil {
 		return ProcessOutput{ExitCode: -1, StderrPreview: err.Error(), DurationMS: time.Since(started).Milliseconds()}, err
@@ -692,6 +798,24 @@ func (r *CodexNativeRuntime) Execute(ctx context.Context, req NativeRuntimeExecu
 
 func (r *CodexNativeRuntime) Abort(ctx context.Context, jobID string) error { return nil }
 func (r *CodexNativeRuntime) Stop(ctx context.Context) error                { return nil }
+
+func (r *CodexNativeRuntime) codexSupportsEffort(ctx context.Context, client *codexRPC, modelID, effort string) bool {
+	modelID = strings.TrimSpace(modelID)
+	effort = strings.ToLower(strings.TrimSpace(effort))
+	if modelID == "" || effort == "" {
+		return false
+	}
+	resp, err := client.call(ctx, "model/list", map[string]any{"limit": 200, "includeHidden": false})
+	if err != nil {
+		return false
+	}
+	for _, model := range codexModelListToRunnerModels(resp) {
+		if model.ID == modelID && stringInSlice(effort, model.Reasoning) {
+			return true
+		}
+	}
+	return false
+}
 
 func addCodexPolicies(params map[string]any, run db.AgentCLIRun) error {
 	switch RunnerMode(run.Mode) {
@@ -919,30 +1043,288 @@ func extractText(value any) string {
 
 func flattenModelInfo(value any) []RunnerModelInfo {
 	models := []RunnerModelInfo{}
-	var walk func(any, string)
-	walk = func(v any, provider string) {
-		switch x := v.(type) {
-		case map[string]any:
-			id := firstNonEmpty(asString(x["id"]), asString(x["model"]), asString(x["name"]))
-			if id != "" {
-				models = append(models, RunnerModelInfo{ID: id, DisplayName: firstNonEmpty(asString(x["displayName"]), asString(x["display_name"]), id), Provider: provider})
-			}
-			nextProvider := firstNonEmpty(provider, asString(x["id"]), asString(x["name"]))
-			for key, child := range x {
-				childProvider := provider
-				if key == "models" {
-					childProvider = nextProvider
+	defaults := map[string]string{}
+	if root, ok := value.(map[string]any); ok {
+		if rawDefaults, ok := root["default"].(map[string]any); ok {
+			for provider, model := range rawDefaults {
+				if text := asString(model); text != "" {
+					defaults[provider] = text
 				}
-				walk(child, childProvider)
-			}
-		case []any:
-			for _, item := range x {
-				walk(item, provider)
 			}
 		}
 	}
-	walk(value, "")
-	return models
+	var walk func(any, string, string)
+	walk = func(v any, provider string, providerName string) {
+		switch x := v.(type) {
+		case map[string]any:
+			providerID := firstNonEmpty(asString(x["providerID"]), asString(x["provider_id"]), provider)
+			if rawModels, ok := x["models"].(map[string]any); ok {
+				nextProvider := firstNonEmpty(asString(x["id"]), asString(x["name"]), providerID)
+				nextProviderName := firstNonEmpty(asString(x["name"]), providerName, nextProvider)
+				for modelID, modelValue := range rawModels {
+					if modelMap, ok := modelValue.(map[string]any); ok {
+						models = append(models, openCodeModelMapToRunnerModel(modelID, nextProvider, nextProviderName, defaults[nextProvider], modelMap))
+					} else if modelID != "" {
+						models = append(models, RunnerModelInfo{ID: modelID, DisplayName: modelID, Provider: nextProvider, ProviderName: nextProviderName, Default: defaults[nextProvider] == modelID})
+					}
+				}
+				return
+			}
+			id := firstNonEmpty(asString(x["id"]), asString(x["model"]), asString(x["name"]))
+			if id != "" && provider != "" {
+				models = append(models, openCodeModelMapToRunnerModel(id, providerID, providerName, defaults[providerID], x))
+			}
+			nextProvider := firstNonEmpty(provider, asString(x["id"]), asString(x["name"]))
+			nextProviderName := firstNonEmpty(providerName, asString(x["name"]), nextProvider)
+			for key, child := range x {
+				childProvider := provider
+				childProviderName := providerName
+				if key == "models" {
+					childProvider = nextProvider
+					childProviderName = nextProviderName
+				}
+				walk(child, childProvider, childProviderName)
+			}
+		case []any:
+			for _, item := range x {
+				walk(item, provider, providerName)
+			}
+		}
+	}
+	walk(value, "", "")
+	return dedupeRunnerModels(models)
+}
+
+func openCodeModelMapToRunnerModel(id, provider, providerName, defaultID string, x map[string]any) RunnerModelInfo {
+	reasoning := variantKeys(x["variants"])
+	return RunnerModelInfo{
+		ID:           firstNonEmpty(asString(x["id"]), asString(x["model"]), id),
+		DisplayName:  firstNonEmpty(asString(x["name"]), asString(x["displayName"]), asString(x["display_name"]), id),
+		Provider:     firstNonEmpty(asString(x["providerID"]), asString(x["provider_id"]), provider),
+		ProviderName: firstNonEmpty(providerName, openCodeProviderDisplayName(firstNonEmpty(asString(x["providerID"]), asString(x["provider_id"]), provider))),
+		Default:      defaultID != "" && defaultID == firstNonEmpty(asString(x["id"]), asString(x["model"]), id),
+		Reasoning:    reasoning,
+	}
+}
+
+func parseOpenCodeModelsCLIOutput(output []byte) []RunnerModelInfo {
+	scanner := bufio.NewScanner(bytes.NewReader(output))
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	models := []RunnerModelInfo{}
+	provider := ""
+	modelID := ""
+	var object strings.Builder
+	braceDepth := 0
+	for scanner.Scan() {
+		line := scanner.Text()
+		trimmed := strings.TrimSpace(line)
+		if braceDepth == 0 {
+			if before, after, ok := strings.Cut(trimmed, "/"); ok && before != "" && after != "" && !strings.HasPrefix(trimmed, "{") {
+				provider = before
+				modelID = after
+				continue
+			}
+			if trimmed != "{" || provider == "" || modelID == "" {
+				continue
+			}
+			object.Reset()
+		}
+		if braceDepth > 0 || trimmed == "{" {
+			object.WriteString(line)
+			object.WriteByte('\n')
+			braceDepth += strings.Count(line, "{")
+			braceDepth -= strings.Count(line, "}")
+			if braceDepth == 0 {
+				var raw map[string]any
+				if err := json.Unmarshal([]byte(object.String()), &raw); err == nil {
+					models = append(models, openCodeModelMapToRunnerModel(modelID, provider, openCodeProviderDisplayName(provider), "", raw))
+				}
+				provider = ""
+				modelID = ""
+			}
+		}
+	}
+	return dedupeRunnerModels(models)
+}
+
+func openCodeProviderDisplayName(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "opencode":
+		return "OpenCode Zen"
+	case "opencode-go":
+		return "OpenCode Go"
+	case "kimi-for-coding":
+		return "Kimi For Coding"
+	case "openai":
+		return "OpenAI"
+	}
+	return provider
+}
+
+func codexModelListToRunnerModels(resp map[string]any) []RunnerModelInfo {
+	items, _ := resp["data"].([]any)
+	out := make([]RunnerModelInfo, 0, len(items))
+	for _, item := range items {
+		model, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		id := firstNonEmpty(asString(model["model"]), asString(model["id"]))
+		if id == "" {
+			continue
+		}
+		out = append(out, RunnerModelInfo{
+			ID:               id,
+			DisplayName:      firstNonEmpty(asString(model["displayName"]), asString(model["display_name"]), id),
+			Provider:         firstNonEmpty(asString(model["modelProvider"]), asString(model["model_provider"]), "openai"),
+			ProviderName:     "OpenAI Codex",
+			Default:          boolField(model, "isDefault") || boolField(model, "default"),
+			Reasoning:        codexReasoningOptions(model["supportedReasoningEfforts"]),
+			ReasoningDefault: asString(model["defaultReasoningEffort"]),
+		})
+	}
+	return out
+}
+
+func codexReasoningOptions(value any) []string {
+	items, _ := value.([]any)
+	out := []string{}
+	for _, item := range items {
+		if text := asString(item); text != "" {
+			out = append(out, text)
+			continue
+		}
+		if obj, ok := item.(map[string]any); ok {
+			if text := asString(obj["reasoningEffort"]); text != "" {
+				out = append(out, text)
+			}
+		}
+	}
+	return sortedUniqueStrings(out)
+}
+
+func variantKeys(value any) []string {
+	variants, ok := value.(map[string]any)
+	if !ok || len(variants) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(variants))
+	for key := range variants {
+		if strings.TrimSpace(key) != "" {
+			keys = append(keys, strings.TrimSpace(key))
+		}
+	}
+	return sortedUniqueStrings(keys)
+}
+
+func dedupeRunnerModels(models []RunnerModelInfo) []RunnerModelInfo {
+	seen := map[string]int{}
+	out := []RunnerModelInfo{}
+	for _, model := range models {
+		if model.ID == "" {
+			continue
+		}
+		key := model.Provider + "/" + model.ID
+		if idx, ok := seen[key]; ok {
+			if out[idx].DisplayName == "" {
+				out[idx].DisplayName = model.DisplayName
+			}
+			if len(out[idx].Reasoning) == 0 {
+				out[idx].Reasoning = model.Reasoning
+			}
+			if out[idx].ReasoningDefault == "" {
+				out[idx].ReasoningDefault = model.ReasoningDefault
+			}
+			out[idx].Default = out[idx].Default || model.Default
+			continue
+		}
+		seen[key] = len(out)
+		out = append(out, model)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Default != out[j].Default {
+			return out[i].Default
+		}
+		return strings.ToLower(out[i].DisplayName) < strings.ToLower(out[j].DisplayName)
+	})
+	return out
+}
+
+func requestedThinkingLevel(meta map[string]any) string {
+	for _, key := range []string{"runner_thinking_level", "runner_reasoning_effort", "thinking_level", "reasoning_effort"} {
+		if value := strings.ToLower(strings.TrimSpace(stringMeta(meta, key))); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func splitProviderModel(model string) (string, string) {
+	provider, id, ok := strings.Cut(strings.TrimSpace(model), "/")
+	if ok && provider != "" && id != "" {
+		return provider, id
+	}
+	return "", strings.TrimSpace(model)
+}
+
+func sortedUniqueStrings(values []string) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, value := range values {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		leftRank, leftKnown := reasoningRank(out[i])
+		rightRank, rightKnown := reasoningRank(out[j])
+		if leftKnown != rightKnown {
+			return leftKnown
+		}
+		if leftRank != rightRank {
+			return leftRank < rightRank
+		}
+		return out[i] < out[j]
+	})
+	return out
+}
+
+func reasoningRank(value string) (int, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "none", "off", "disabled":
+		return 0, true
+	case "minimal":
+		return 1, true
+	case "low":
+		return 2, true
+	case "medium", "med", "normal":
+		return 3, true
+	case "high":
+		return 4, true
+	case "xhigh", "extra-high", "extra_high":
+		return 5, true
+	case "max", "maximum":
+		return 6, true
+	}
+	return 100, false
+}
+
+func stringInSlice(value string, values []string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	for _, candidate := range values {
+		if strings.ToLower(strings.TrimSpace(candidate)) == value {
+			return true
+		}
+	}
+	return false
+}
+
+func boolField(record map[string]any, key string) bool {
+	value, _ := record[key].(bool)
+	return value
 }
 
 func asString(value any) string {

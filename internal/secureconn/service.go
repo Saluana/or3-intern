@@ -222,7 +222,7 @@ func (s *TrustStore) ApproveEnrollmentFromPairing(ctx context.Context, input Enr
 	if session.ExpiresAt <= now.UnixMilli() {
 		return HostEnrollmentCertificateV1{}, db.SecureConnectionDeviceRecord{}, SecureConnectionError{Code: ErrorPairingExpired, SafeMessage: "This pairing code expired. Show a new one.", Retryable: true}
 	}
-	if session.Status != StatusJoined && session.Status != StatusPendingApproval {
+	if session.Status != StatusCreated && session.Status != StatusJoined && session.Status != StatusPendingApproval {
 		return HostEnrollmentCertificateV1{}, db.SecureConnectionDeviceRecord{}, fmt.Errorf("pairing session is not awaiting approval")
 	}
 	commitment, err := RendezvousCommitment(pairingSecret)

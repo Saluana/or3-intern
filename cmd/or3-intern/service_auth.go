@@ -335,6 +335,9 @@ func serviceAllowedBrowserOrigin(cfg config.Config, r *http.Request) (string, bo
 	if !strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https") {
 		return "", false
 	}
+	if serviceIsSecurePairingRoute(r) && requestRemoteInCIDRAllowlist(r.RemoteAddr, serviceDefaultPairingBrowserCIDRs()) {
+		return origin, true
+	}
 	if serviceOriginIsLoopback(parsed) && serviceListenIsLoopback(cfg.Service.Listen) && (strings.TrimSpace(r.RemoteAddr) == "" || requestRemoteIsLoopback(r.RemoteAddr)) {
 		return origin, true
 	}
@@ -585,7 +588,31 @@ func serviceIsPairingRoute(r *http.Request) bool {
 		return false
 	}
 	path := strings.TrimSpace(r.URL.Path)
-	return path == "/internal/v1/pairing/requests" || path == "/internal/v1/pairing/exchange"
+	return path == "/internal/v1/pairing/requests" ||
+		path == "/internal/v1/pairing/exchange" ||
+		serviceIsSecurePairingRoute(r)
+}
+
+func serviceIsSecurePairingRoute(r *http.Request) bool {
+	if r == nil || r.URL == nil {
+		return false
+	}
+	path := strings.TrimSpace(r.URL.Path)
+	return path == "/internal/v1/secure-connections/pairing/approve" ||
+		path == "/internal/v1/secure-connections/pairing/exchange"
+}
+
+func serviceDefaultPairingBrowserCIDRs() []string {
+	return []string{
+		"127.0.0.0/8",
+		"::1/128",
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"100.64.0.0/10",
+		"fc00::/7",
+		"fe80::/10",
+	}
 }
 
 func serviceIsTerminalWebSocketRequest(r *http.Request) bool {
@@ -654,6 +681,9 @@ func serviceRouteRequirementForRequest(cfg config.Config, r *http.Request) servi
 		relative := strings.Trim(strings.TrimPrefix(path, "/internal/v1/secure-connections"), "/")
 		if method == http.MethodGet && relative == "capabilities" {
 			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
+		}
+		if method == http.MethodPost && (relative == "pairing/approve" || relative == "pairing/exchange") {
+			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, BypassGlobalSession: true}
 		}
 		if method == http.MethodGet && relative == "host-identity" {
 			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, SessionOnly: true}

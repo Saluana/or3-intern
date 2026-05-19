@@ -139,6 +139,22 @@ func (d *DB) ExpireRelayRendezvous(ctx context.Context, nowMS int64) (int64, err
 	return res.RowsAffected()
 }
 
+func (d *DB) PurgeTerminalRelayRendezvous(ctx context.Context, olderThanMS int64) (int64, error) {
+	res, err := d.SQL.ExecContext(ctx, `DELETE FROM relay_rendezvous WHERE status IN ('consumed','expired','rejected') AND consumed_at>0 AND consumed_at<=?`, olderThanMS)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+func (d *DB) PurgeExpiredRelayRoutes(ctx context.Context, olderThanMS int64) (int64, error) {
+	res, err := d.SQL.ExecContext(ctx, `DELETE FROM relay_routes WHERE expires_at>0 AND expires_at<=?`, olderThanMS)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 func (d *DB) RejectRelayRendezvous(ctx context.Context, rendezvousID string, nowMS int64) (bool, error) {
 	res, err := d.SQL.ExecContext(ctx, `UPDATE relay_rendezvous SET status='rejected', consumed_at=? WHERE rendezvous_id=? AND status IN ('created','joined') AND expires_at>?`, nowMS, strings.TrimSpace(rendezvousID), nowMS)
 	if err != nil {

@@ -2,6 +2,8 @@ package secureconn
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"fmt"
 	"strings"
 	"time"
@@ -55,9 +57,17 @@ type RekeyPolicy struct {
 }
 
 type SessionManager struct {
-	DB       *db.DB
-	Identity HostIdentity
-	Now      func() time.Time
+	DB        *db.DB
+	Identity  HostIdentity
+	Now       func() time.Time
+	Handshake NoiseHandshake
+}
+
+func (m *SessionManager) handshake() NoiseHandshake {
+	if m != nil && m.Handshake != nil {
+		return m.Handshake
+	}
+	return NoiseHandshakeIKV1{}
 }
 
 func (m *SessionManager) now() time.Time {
@@ -140,7 +150,7 @@ func (m *SessionManager) StartVerifiedSession(ctx context.Context, input Session
 	if strings.TrimSpace(input.AccountID) != "" {
 		prologue.AccountID = strings.TrimSpace(input.AccountID)
 	}
-	handshakeResult, err := HostAcceptNoiseIK(m.Identity, handshake, prologue)
+	handshakeResult, err := m.handshake().Accept(m.Identity, handshake, prologue)
 	if err != nil {
 		return SessionClaims{}, db.SecureConnectionSessionRecord{}, err
 	}
@@ -193,6 +203,15 @@ func (m *SessionManager) StartVerifiedSession(ctx context.Context, input Session
 		IssuedAtUnixMs:  rec.CreatedAt,
 		ExpiresAtUnixMs: rec.ExpiresAt,
 	}
+	claimMAC, err := m.signClaims(claims)
+	if err != nil {
+		return SessionClaims{}, db.SecureConnectionSessionRecord{}, err
+	}
+	if ok, err := m.DB.UpsertSecureConnectionSessionClaimMAC(ctx, rec.SessionID, claimMAC); err != nil {
+		return SessionClaims{}, db.SecureConnectionSessionRecord{}, err
+	} else if !ok {
+		return SessionClaims{}, db.SecureConnectionSessionRecord{}, fmt.Errorf("secure session claim MAC was not stored")
+	}
 	return claims, rec, nil
 }
 
@@ -221,7 +240,7 @@ func (m *SessionManager) LoadActiveSessionClaims(ctx context.Context, sessionID 
 	if device.EnrollmentEpoch != rec.EnrollmentEpoch {
 		return SessionClaims{}, fmt.Errorf("secure session enrollment epoch is stale")
 	}
-	return SessionClaims{
+	claims := SessionClaims{
 		HostID:          rec.HostID,
 		DeviceID:        rec.DeviceID,
 		EnrollmentEpoch: rec.EnrollmentEpoch,
@@ -234,7 +253,37 @@ func (m *SessionManager) LoadActiveSessionClaims(ctx context.Context, sessionID 
 		StepUpAtUnixMs:  rec.StepUpAt,
 		IssuedAtUnixMs:  rec.CreatedAt,
 		ExpiresAtUnixMs: rec.ExpiresAt,
-	}, nil
+	}
+	storedMAC, ok, err := m.DB.GetSecureConnectionSessionClaimMAC(ctx, sessionID)
+	if err != nil {
+		return SessionClaims{}, err
+	}
+	if !ok {
+		return SessionClaims{}, SecureConnectionError{Code: ErrorSessionExpired, SafeMessage: "This secure connection needs to be re-established.", Retryable: true}
+	}
+	if err := m.verifyClaims(claims, storedMAC); err != nil {
+		return SessionClaims{}, SecureConnectionError{Code: ErrorSessionExpired, SafeMessage: "This secure connection needs to be re-established.", Retryable: true}
+	}
+	return claims, nil
+}
+
+func (m *SessionManager) UpdateStepUp(ctx context.Context, sessionID string, stepUpAt time.Time) (SessionClaims, error) {
+	claims, err := m.LoadActiveSessionClaims(ctx, sessionID)
+	if err != nil {
+		return SessionClaims{}, err
+	}
+	updated, err := ValidateStepUpUpdate(claims, stepUpAt, m.now())
+	if err != nil {
+		return SessionClaims{}, err
+	}
+	claimMAC, err := m.signClaims(updated)
+	if err != nil {
+		return SessionClaims{}, err
+	}
+	if err := m.DB.UpdateSecureConnectionSessionStepUpAndClaimMAC(ctx, sessionID, updated.StepUpAtUnixMs, claimMAC); err != nil {
+		return SessionClaims{}, err
+	}
+	return updated, nil
 }
 
 func (m *SessionManager) ValidateFrame(ctx context.Context, sessionID string, raw []byte, window *ReplayWindow) (SecureFrameV1, error) {
@@ -269,6 +318,65 @@ func (m *SessionManager) ExpireStaleSessions(ctx context.Context) (int64, error)
 		return 0, fmt.Errorf("secure session manager unavailable")
 	}
 	return m.DB.ExpireSecureConnectionSessions(ctx, m.now().UnixMilli())
+}
+
+const (
+	DefaultPairingRetention    = 24 * time.Hour
+	DefaultSessionRetention    = 7 * 24 * time.Hour
+	DefaultRendezvousRetention = 24 * time.Hour
+)
+
+type PurgeResult struct {
+	TerminalPairingSessions int64
+	ExpiredSessions         int64
+	RevokedDevices          int64
+	TerminalRendezvous      int64
+	ExpiredRelayRoutes      int64
+}
+
+func (m *SessionManager) PurgeStaleRecords(ctx context.Context) (PurgeResult, error) {
+	if m == nil || m.DB == nil {
+		return PurgeResult{}, fmt.Errorf("secure session manager unavailable")
+	}
+	now := m.now()
+	var result PurgeResult
+
+	pairingCut := now.Add(-DefaultPairingRetention).UnixMilli()
+	n, err := m.DB.PurgeTerminalPairingSessions(ctx, pairingCut)
+	if err != nil {
+		return result, err
+	}
+	result.TerminalPairingSessions = n
+
+	sessionCut := now.Add(-DefaultSessionRetention).UnixMilli()
+	n, err = m.DB.PurgeExpiredSecureConnectionSessions(ctx, sessionCut)
+	if err != nil {
+		return result, err
+	}
+	result.ExpiredSessions = n
+
+	deviceCut := now.Add(-DefaultSessionRetention).UnixMilli()
+	n, err = m.DB.PurgeRevokedDevices(ctx, deviceCut)
+	if err != nil {
+		return result, err
+	}
+	result.RevokedDevices = n
+
+	rendezvousCut := now.Add(-DefaultRendezvousRetention).UnixMilli()
+	n, err = m.DB.PurgeTerminalRelayRendezvous(ctx, rendezvousCut)
+	if err != nil {
+		return result, err
+	}
+	result.TerminalRendezvous = n
+
+	routeCut := now.UnixMilli()
+	n, err = m.DB.PurgeExpiredRelayRoutes(ctx, routeCut)
+	if err != nil {
+		return result, err
+	}
+	result.ExpiredRelayRoutes = n
+
+	return result, nil
 }
 
 func ShouldRekey(policy RekeyPolicy, now time.Time) bool {
@@ -319,4 +427,61 @@ func constantStringEqual(a, b string) bool {
 		diff |= a[i] ^ b[i]
 	}
 	return diff == 0
+}
+
+// signClaims produces an HMAC-SHA-256 over the canonical claim fields using
+// the host noise private key as the MAC key. This binds the session claims to
+// host-held key material so that a database compromise alone cannot forge
+// accepted active claims.
+func (m *SessionManager) signClaims(claims SessionClaims) (string, error) {
+	if m == nil || m.Identity.HostNoisePrivateKey == "" {
+		return "", fmt.Errorf("claim signing unavailable")
+	}
+	key, err := DecodeBase64URL(m.Identity.HostNoisePrivateKey)
+	if err != nil {
+		return "", fmt.Errorf("invalid host noise key for claim signing: %w", err)
+	}
+	payload := claimSigningPayload(claims)
+	h := hmac.New(sha256.New, key)
+	_, _ = h.Write([]byte(payload))
+	return Base64URL(h.Sum(nil)), nil
+}
+
+func (m *SessionManager) verifyClaims(claims SessionClaims, storedMAC string) error {
+	if m == nil || m.Identity.HostNoisePrivateKey == "" {
+		return fmt.Errorf("claim verification unavailable")
+	}
+	key, err := DecodeBase64URL(m.Identity.HostNoisePrivateKey)
+	if err != nil {
+		return fmt.Errorf("invalid host noise key for claim verification: %w", err)
+	}
+	payload := claimSigningPayload(claims)
+	h := hmac.New(sha256.New, key)
+	_, _ = h.Write([]byte(payload))
+	expected := Base64URL(h.Sum(nil))
+	if !constantStringEqual(expected, storedMAC) {
+		return fmt.Errorf("session claim integrity check failed")
+	}
+	return nil
+}
+
+// claimSigningPayload builds a canonical string from the protected claim
+// fields. Changes to role, capabilities, trust level, account ID, route ID,
+// enrollment epoch, or expiry will invalidate the MAC.
+func claimSigningPayload(claims SessionClaims) string {
+	return fmt.Sprintf(
+		"host=%s|device=%s|epoch=%d|role=%s|caps=%s|trust=%s|sid=%s|route=%s|acct=%s|stepup=%d|issued=%d|expires=%d",
+		claims.HostID,
+		claims.DeviceID,
+		claims.EnrollmentEpoch,
+		claims.Role,
+		strings.Join(claims.Capabilities, ","),
+		claims.TrustLevel,
+		claims.SessionID,
+		claims.RelayRouteID,
+		claims.AccountID,
+		claims.StepUpAtUnixMs,
+		claims.IssuedAtUnixMs,
+		claims.ExpiresAtUnixMs,
+	)
 }

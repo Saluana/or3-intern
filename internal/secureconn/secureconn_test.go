@@ -484,10 +484,13 @@ func TestLoadActiveSessionClaimsRejectsRevokedDevice(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateSecureConnectionSession: %v", err)
 	}
+	manager := &SessionManager{DB: database, Identity: identity, Now: func() time.Time { return now }}
+	if _, err := manager.LoadActiveSessionClaims(context.Background(), "session-active"); err == nil {
+		t.Fatal("expected active session without claim MAC to be rejected")
+	}
 	if err := database.RevokeSecureConnectionDevice(context.Background(), cert.DeviceID, "test revoke", now.UnixMilli()); err != nil {
 		t.Fatalf("RevokeSecureConnectionDevice: %v", err)
 	}
-	manager := &SessionManager{DB: database, Identity: identity, Now: func() time.Time { return now }}
 	if _, err := manager.LoadActiveSessionClaims(context.Background(), "session-active"); err == nil {
 		t.Fatal("expected revoked device to block active session claims")
 	}
@@ -684,3 +687,432 @@ func mustNoiseHandshakeInit(t *testing.T, identity HostIdentity, deviceID, devic
 }
 
 const httpMethodPost = "POST"
+
+func TestNoiseSessionKeyDerivationIsDeterministic(t *testing.T) {
+	prologueHash := "test-prologue-hash"
+	transcript := "test-transcript"
+	es := make([]byte, 32)
+	ss := make([]byte, 32)
+	for i := range es {
+		es[i] = byte(i)
+		ss[i] = byte(i + 32)
+	}
+	key1, err := deriveNoiseSessionKey(prologueHash, transcript, es, ss)
+	if err != nil {
+		t.Fatalf("deriveNoiseSessionKey 1: %v", err)
+	}
+	key2, err := deriveNoiseSessionKey(prologueHash, transcript, es, ss)
+	if err != nil {
+		t.Fatalf("deriveNoiseSessionKey 2: %v", err)
+	}
+	if !bytesEqual(key1, key2) {
+		t.Fatal("expected deterministic session key derivation")
+	}
+	if len(key1) != 32 {
+		t.Fatalf("expected 32-byte key, got %d", len(key1))
+	}
+}
+
+func TestNoiseSessionKeyVerifyMatchesDerivation(t *testing.T) {
+	prologueHash := "test-prologue"
+	transcript := "test-transcript"
+	es := make([]byte, 32)
+	ss := make([]byte, 32)
+	key, err := deriveNoiseSessionKey(prologueHash, transcript, es, ss)
+	if err != nil {
+		t.Fatalf("deriveNoiseSessionKey: %v", err)
+	}
+	if !VerifySessionKeyDerivation(prologueHash, transcript, es, ss, key) {
+		t.Fatal("expected VerifySessionKeyDerivation to accept correct key")
+	}
+	if VerifySessionKeyDerivation(prologueHash, transcript, es, ss, make([]byte, 32)) {
+		t.Fatal("expected VerifySessionKeyDerivation to reject wrong key")
+	}
+}
+
+func TestNoiseSessionKeyDiffersForDifferentInputs(t *testing.T) {
+	es := make([]byte, 32)
+	ss := make([]byte, 32)
+	keyA, _ := deriveNoiseSessionKey("hash-a", "transcript-a", es, ss)
+	keyB, _ := deriveNoiseSessionKey("hash-b", "transcript-a", es, ss)
+	keyC, _ := deriveNoiseSessionKey("hash-a", "transcript-c", es, ss)
+	if bytesEqual(keyA, keyB) {
+		t.Fatal("expected different keys for different prologue hashes")
+	}
+	if bytesEqual(keyA, keyC) {
+		t.Fatal("expected different keys for different transcripts")
+	}
+}
+
+func TestHandshakeInterfaceAcceptsValidInput(t *testing.T) {
+	now := time.Now().UTC()
+	identity, err := NewHostIdentity("Test Host", now)
+	if err != nil {
+		t.Fatalf("NewHostIdentity: %v", err)
+	}
+	devicePubStr, devicePriv := mustX25519KeyPair(t)
+	devicePub := Base64URL(func() []byte {
+		pub, _ := curve25519.X25519(devicePriv, curve25519.Basepoint)
+		return pub
+	}())
+	if devicePub != devicePubStr {
+		t.Fatal("test setup: public key mismatch")
+	}
+	ephemeralPriv, _ := RandomBytes(32)
+	clampX25519Scalar(ephemeralPriv)
+	ephemeralPub, _ := curve25519.X25519(ephemeralPriv, curve25519.Basepoint)
+	prologue := SessionPrologueV1{
+		Protocol:                  "or3-secure-runtime",
+		Version:                   ProtocolVersion,
+		RouteID:                   "route",
+		HostID:                    identity.HostID,
+		DeviceIDHash:              HashBase64URL([]byte("device")),
+		EnrollmentCertificateHash: "cert-hash",
+		MinProtocolVersion:        ProtocolVersion,
+		MaxProtocolVersion:        ProtocolVersion,
+	}
+	prologueBytes, _ := CanonicalBytes(prologue)
+	init := NoiseHandshakeInitV1{
+		Version:              ProtocolVersion,
+		PrologueHash:         HashBase64URL([]byte("OR3-NOISE-PROLOGUE-V1"), prologueBytes),
+		DeviceID:             "device",
+		DeviceNoisePublicKey: devicePub,
+		DeviceEphemeralKey:   Base64URL(ephemeralPub),
+		EnrollmentCertHash:   "cert-hash",
+	}
+	var handshake NoiseHandshake = NoiseHandshakeIKV1{}
+	result, err := handshake.Accept(identity, init, prologue)
+	if err != nil {
+		t.Fatalf("NoiseHandshakeIKV1.Accept: %v", err)
+	}
+	if len(result.SessionKey) != 32 {
+		t.Fatalf("expected 32-byte session key, got %d", len(result.SessionKey))
+	}
+	if result.Transcript == "" {
+		t.Fatal("expected non-empty transcript")
+	}
+}
+
+func TestFrameTimestampRejectsFutureSkewBeyond60Seconds(t *testing.T) {
+	now := time.Now().UTC()
+	// Frame sent 61 seconds in the FUTURE should be rejected
+	frame := SecureFrameV1{
+		Version:       ProtocolVersion,
+		Kind:          FrameControl,
+		SessionID:     "session",
+		Sequence:      1,
+		CorrelationID: "corr",
+		SentAtUnixMs:  now.Add(61 * time.Second).UnixMilli(),
+		Body:          []byte("test"),
+	}
+	if err := ValidateSecureFrame(frame, "session", nil, now); err == nil {
+		t.Fatal("expected frame with >60s future skew to be rejected")
+	}
+	// Frame sent 61 seconds in the PAST should be accepted (within 24h window)
+	frame.SentAtUnixMs = now.Add(-61 * time.Second).UnixMilli()
+	if err := ValidateSecureFrame(frame, "session", nil, now); err != nil {
+		t.Fatalf("expected frame with 61s past skew to be accepted: %v", err)
+	}
+	// Frame sent 30 seconds in the future should be accepted
+	frame.SentAtUnixMs = now.Add(30 * time.Second).UnixMilli()
+	if err := ValidateSecureFrame(frame, "session", nil, now); err != nil {
+		t.Fatalf("expected frame with 30s future skew to be accepted: %v", err)
+	}
+	// Frame sent 25 hours in the past should be rejected
+	frame.SentAtUnixMs = now.Add(-25 * time.Hour).UnixMilli()
+	if err := ValidateSecureFrame(frame, "session", nil, now); err == nil {
+		t.Fatal("expected frame with >24h past skew to be rejected")
+	}
+}
+
+func TestReplayWindowUsesDefaultCapacity(t *testing.T) {
+	w := NewReplayWindow(0)
+	if w.capacity != DefaultReplayWindowCap {
+		t.Fatalf("expected default capacity %d, got %d", DefaultReplayWindowCap, w.capacity)
+	}
+	w2 := NewReplayWindow(-1)
+	if w2.capacity != DefaultReplayWindowCap {
+		t.Fatalf("expected default capacity %d for negative input, got %d", DefaultReplayWindowCap, w2.capacity)
+	}
+}
+
+func TestClaimIntegrityMACTamperDetection(t *testing.T) {
+	now := time.Now().UTC()
+	identity, err := NewHostIdentity("Test Host", now)
+	if err != nil {
+		t.Fatalf("NewHostIdentity: %v", err)
+	}
+	database, err := db.Open(filepath.Join(t.TempDir(), "claim-mac.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer database.Close()
+	deviceNoise, _ := mustX25519KeyPair(t)
+	deviceSign, _ := mustEd25519KeyPair(t)
+	proposal := DeviceEnrollmentProposalV1{
+		Version:                ProtocolVersion,
+		DeviceID:               "device-mac",
+		DeviceDisplayName:      "Phone",
+		Platform:               PlatformIOS,
+		DeviceSigningPublicKey: deviceSign,
+		DeviceNoisePublicKey:   deviceNoise,
+		RequestedRole:          RoleOperator,
+		RequestedCapabilities:  []string{CapabilityChat},
+		CreatedAtUnixMs:        now.UnixMilli(),
+	}
+	cert, err := NewEnrollmentCertificate(identity, proposal, RoleOperator, []string{CapabilityChat}, TrustNativeSoftware, "acct-mac", now.UnixMilli(), time.Time{}, now)
+	if err != nil {
+		t.Fatalf("NewEnrollmentCertificate: %v", err)
+	}
+	certBytes, _ := CanonicalBytes(cert)
+	if _, err := database.UpsertSecureConnectionDevice(context.Background(), db.SecureConnectionDeviceRecord{
+		DeviceID:               cert.DeviceID,
+		HostID:                 cert.HostID,
+		DisplayName:            "Phone",
+		Platform:               PlatformIOS,
+		Role:                   RoleOperator,
+		Capabilities:           []string{CapabilityChat},
+		TrustLevel:             TrustNativeSoftware,
+		DeviceSigningPublicKey: cert.DeviceSigningPublicKey,
+		DeviceNoisePublicKey:   cert.DeviceNoisePublicKey,
+		EnrollmentCertificate:  certBytes,
+		EnrollmentEpoch:        cert.EnrollmentEpoch,
+		Status:                 StatusActive,
+		CreatedAt:              now.UnixMilli(),
+		AccountID:              "acct-mac",
+	}); err != nil {
+		t.Fatalf("UpsertSecureConnectionDevice: %v", err)
+	}
+	if _, err := database.CreateSecureConnectionSession(context.Background(), db.SecureConnectionSessionRecord{
+		SessionID:       "session-mac",
+		DeviceID:        cert.DeviceID,
+		HostID:          identity.HostID,
+		RelayRouteID:    "route-mac",
+		EnrollmentEpoch: cert.EnrollmentEpoch,
+		Status:          StatusActive,
+		CreatedAt:       now.UnixMilli(),
+		LastSeenAt:      now.UnixMilli(),
+		ExpiresAt:       now.Add(time.Minute).UnixMilli(),
+	}); err != nil {
+		t.Fatalf("CreateSecureConnectionSession: %v", err)
+	}
+	manager := &SessionManager{DB: database, Identity: identity, Now: func() time.Time { return now }}
+	claims, _, err := manager.StartVerifiedSession(context.Background(), SessionStartInput{
+		DeviceID:     "device-mac",
+		RelayRouteID: "route-mac",
+		RelayOrigin:  "https://relay.or3.chat",
+		AccountID:    "acct-mac",
+		NoiseHandshake: mustNoiseHandshakeInit(t, identity, "device-mac", deviceNoise, func() string {
+			h, _ := EnrollmentCertificateHash(cert)
+			return h
+		}(), "route-mac", "https://relay.or3.chat", "acct-mac"),
+		TTL: time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("StartVerifiedSession: %v", err)
+	}
+	loaded, err := manager.LoadActiveSessionClaims(context.Background(), claims.SessionID)
+	if err != nil {
+		t.Fatalf("LoadActiveSessionClaims: %v", err)
+	}
+	if loaded.Role != claims.Role {
+		t.Fatalf("expected role %q, got %q", claims.Role, loaded.Role)
+	}
+	stepUpAt := now.Add(30 * time.Second)
+	manager.Now = func() time.Time { return stepUpAt }
+	updated, err := manager.UpdateStepUp(context.Background(), claims.SessionID, stepUpAt)
+	if err != nil {
+		t.Fatalf("UpdateStepUp: %v", err)
+	}
+	if updated.StepUpAtUnixMs != stepUpAt.UnixMilli() {
+		t.Fatalf("expected step-up %d, got %d", stepUpAt.UnixMilli(), updated.StepUpAtUnixMs)
+	}
+	if _, err := manager.LoadActiveSessionClaims(context.Background(), claims.SessionID); err != nil {
+		t.Fatalf("LoadActiveSessionClaims after step-up: %v", err)
+	}
+	// Tamper with the stored MAC to simulate DB compromise.
+	_, err = database.SQL.ExecContext(context.Background(),
+		`UPDATE secure_connection_sessions SET metadata_json=json_set(COALESCE(metadata_json,'{}'), '$.claim_mac', 'tampered-mac') WHERE session_id=?`,
+		claims.SessionID)
+	if err != nil {
+		t.Fatalf("tamper metadata: %v", err)
+	}
+	_, err = manager.LoadActiveSessionClaims(context.Background(), claims.SessionID)
+	if err == nil {
+		t.Fatal("expected tampered claim MAC to be rejected")
+	}
+}
+
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestNormalizeRoleEmptyReturnsEmpty(t *testing.T) {
+	if NormalizeRole("") != "" {
+		t.Fatal("expected empty role to return empty string")
+	}
+	if NormalizeRole("  ") != "" {
+		t.Fatal("expected whitespace role to return empty string")
+	}
+	if NormalizeRole("unknown") != "" {
+		t.Fatal("expected unknown role to return empty string")
+	}
+	if NormalizeRole("operator") != RoleOperator {
+		t.Fatalf("expected operator, got %q", NormalizeRole("operator"))
+	}
+	if NormalizeRole("viewer") != RoleViewer {
+		t.Fatalf("expected viewer, got %q", NormalizeRole("viewer"))
+	}
+	if NormalizeRole("admin") != RoleAdmin {
+		t.Fatalf("expected admin, got %q", NormalizeRole("admin"))
+	}
+}
+
+func TestClassifyActionUnknownPathFailsClosed(t *testing.T) {
+	action := ClassifyAction("", "", "")
+	if action.Class != ActionMutate {
+		t.Fatalf("expected empty inputs to classify as mutate (restrictive), got %q", action.Class)
+	}
+	if action.Capability != CapabilityFiles {
+		t.Fatalf("expected files capability for empty inputs, got %q", action.Capability)
+	}
+
+	action = ClassifyAction("GET", "/api/v1/something/unknown", "")
+	if action.Class != ActionView {
+		t.Fatalf("expected GET to classify as view, got %q", action.Class)
+	}
+
+	action = ClassifyAction("POST", "/api/v1/something/unknown", "")
+	if action.Class != ActionMutate {
+		t.Fatalf("expected POST to classify as mutate, got %q", action.Class)
+	}
+}
+
+func TestValidateStepUpUpdateRejectsFutureTimestamps(t *testing.T) {
+	now := time.Now().UTC()
+	claims := SessionClaims{}
+
+	_, err := ValidateStepUpUpdate(claims, now.Add(10*time.Second), now)
+	if err == nil {
+		t.Fatal("expected future step-up timestamp to be rejected")
+	}
+
+	_, err = ValidateStepUpUpdate(claims, now.Add(6*time.Second), now)
+	if err == nil {
+		t.Fatal("expected 6s future step-up to be rejected (beyond 5s tolerance)")
+	}
+
+	updated, err := ValidateStepUpUpdate(claims, now, now)
+	if err != nil {
+		t.Fatalf("expected current step-up to succeed: %v", err)
+	}
+	if updated.StepUpAtUnixMs != now.UnixMilli() {
+		t.Fatal("expected step-up timestamp to be set")
+	}
+}
+
+func TestSessionLifecyclePurge(t *testing.T) {
+	now := time.Now().UTC()
+	identity, err := NewHostIdentity("Test Host", now)
+	if err != nil {
+		t.Fatalf("NewHostIdentity: %v", err)
+	}
+	database, err := db.Open(filepath.Join(t.TempDir(), "purge-lifecycle.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer database.Close()
+
+	deviceNoise, _ := mustX25519KeyPair(t)
+	deviceSign, _ := mustEd25519KeyPair(t)
+	proposal := DeviceEnrollmentProposalV1{
+		Version:                ProtocolVersion,
+		DeviceID:               "device-purge",
+		DeviceDisplayName:      "Phone",
+		Platform:               PlatformIOS,
+		DeviceSigningPublicKey: deviceSign,
+		DeviceNoisePublicKey:   deviceNoise,
+		RequestedRole:          RoleOperator,
+		RequestedCapabilities:  []string{CapabilityChat},
+		CreatedAtUnixMs:        now.UnixMilli(),
+	}
+	cert, err := NewEnrollmentCertificate(identity, proposal, RoleOperator, []string{CapabilityChat}, TrustNativeSoftware, "acct-purge", now.UnixMilli(), time.Time{}, now)
+	if err != nil {
+		t.Fatalf("NewEnrollmentCertificate: %v", err)
+	}
+	certBytes, _ := CanonicalBytes(cert)
+	if _, err := database.UpsertSecureConnectionDevice(context.Background(), db.SecureConnectionDeviceRecord{
+		DeviceID:               cert.DeviceID,
+		HostID:                 cert.HostID,
+		DisplayName:            "Phone",
+		Platform:               PlatformIOS,
+		Role:                   RoleOperator,
+		Capabilities:           []string{CapabilityChat},
+		TrustLevel:             TrustNativeSoftware,
+		DeviceSigningPublicKey: cert.DeviceSigningPublicKey,
+		DeviceNoisePublicKey:   cert.DeviceNoisePublicKey,
+		EnrollmentCertificate:  certBytes,
+		EnrollmentEpoch:        cert.EnrollmentEpoch,
+		Status:                 StatusActive,
+		CreatedAt:              now.UnixMilli(),
+		AccountID:              "acct-purge",
+	}); err != nil {
+		t.Fatalf("UpsertSecureConnectionDevice: %v", err)
+	}
+
+	hash, _ := EnrollmentCertificateHash(cert)
+	manager := &SessionManager{DB: database, Identity: identity, Now: func() time.Time { return now }}
+	claims, _, err := manager.StartVerifiedSession(context.Background(), SessionStartInput{
+		DeviceID:                  "device-purge",
+		RelayRouteID:              "route-purge",
+		RelayOrigin:               "https://relay.or3.chat",
+		EnrollmentCertificateHash: hash,
+		AccountID:                 "acct-purge",
+		NoiseHandshake:            mustNoiseHandshakeInit(t, identity, "device-purge", deviceNoise, hash, "route-purge", "https://relay.or3.chat", "acct-purge"),
+		TTL:                       time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("StartVerifiedSession: %v", err)
+	}
+	if claims.Role != RoleOperator {
+		t.Fatalf("expected operator role, got %q", claims.Role)
+	}
+
+	// Expire the session
+	manager.Now = func() time.Time { return now.Add(2 * time.Minute) }
+	expired, err := manager.ExpireStaleSessions(context.Background())
+	if err != nil {
+		t.Fatalf("ExpireStaleSessions: %v", err)
+	}
+	if expired != 1 {
+		t.Fatalf("expected 1 expired, got %d", expired)
+	}
+
+	// Purge should find nothing (session just expired, retention is 7 days)
+	manager.Now = func() time.Time { return now.Add(3 * time.Minute) }
+	result, err := manager.PurgeStaleRecords(context.Background())
+	if err != nil {
+		t.Fatalf("PurgeStaleRecords: %v", err)
+	}
+	if result.ExpiredSessions != 0 {
+		t.Fatalf("expected 0 purged sessions (within retention), got %d", result.ExpiredSessions)
+	}
+
+	// After retention period, purge should clean up
+	manager.Now = func() time.Time { return now.Add(8 * 24 * time.Hour) }
+	result, err = manager.PurgeStaleRecords(context.Background())
+	if err != nil {
+		t.Fatalf("PurgeStaleRecords: %v", err)
+	}
+	if result.ExpiredSessions != 1 {
+		t.Fatalf("expected 1 purged session after retention, got %d", result.ExpiredSessions)
+	}
+}

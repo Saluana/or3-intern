@@ -13,6 +13,7 @@ import (
 
 	"or3-intern/internal/approval"
 	"or3-intern/internal/config"
+	"or3-intern/internal/db"
 	"or3-intern/internal/secureconn"
 )
 
@@ -93,5 +94,60 @@ func TestSecureConnectionCompatibilityExchangeIsSingleUse(t *testing.T) {
 	}
 	if len(devices) != 1 {
 		t.Fatalf("expected exactly one compatibility device, got %d", len(devices))
+	}
+}
+
+func TestSecureConnectionPairingExchangeVerifiesRelayRendezvous(t *testing.T) {
+	database, cleanup := openServiceTestDB(t)
+	defer cleanup()
+	cfg := config.Default()
+	cfg.Security.SecretStore.KeyFile = filepath.Join(t.TempDir(), "secure-connections.key")
+	server := &serviceServer{
+		config: cfg,
+		broker: &approval.Broker{DB: database, Config: cfg.Security.Approvals},
+	}
+	store, err := server.secureConnectionTrustStore(context.Background())
+	if err != nil {
+		t.Fatalf("secureConnectionTrustStore: %v", err)
+	}
+	intent, err := store.CreatePairingIntent(context.Background(), secureconn.PairingIntent{
+		HostDisplayName: "Desk",
+		RequestedRole:   approval.RoleOperator,
+		Capabilities:    []string{"chat"},
+		TTL:             time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("CreatePairingIntent: %v", err)
+	}
+	// Create the relay rendezvous record (as the pairing intent handler would)
+	if err := database.CreateRelayRendezvous(context.Background(), db.RelayRendezvousRecord{
+		RendezvousID:     intent.Payload.RendezvousID,
+		HostIDHash:       secureconn.HashBase64URL([]byte(store.Identity.HostID)),
+		SecretCommitment: intent.SecretCommitment,
+		Status:           secureconn.StatusCreated,
+		CreatedAt:        time.Now().UTC().UnixMilli(),
+		ExpiresAt:        intent.Payload.ExpiresAtUnixMs,
+		Metadata:         map[string]any{"relay_origin": "https://relay.or3.chat", "protocol": "or3-secure-pairing"},
+	}); err != nil {
+		t.Fatalf("CreateRelayRendezvous: %v", err)
+	}
+	body := fmt.Sprintf(`{"rendezvous_id":%q,"pairing_secret":%q,"device_name":"Phone"}`, intent.Payload.RendezvousID, intent.Payload.PairingSecret)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/secure-connections/pairing/exchange", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	server.handleSecureConnectionPairingExchange(rec, req, store)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	// Verify relay rendezvous was consumed
+	rv, ok, err := database.GetRelayRendezvous(context.Background(), intent.Payload.RendezvousID)
+	if err != nil {
+		t.Fatalf("GetRelayRendezvous: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected relay rendezvous to still exist")
+	}
+	if rv.Status != secureconn.StatusConsumed {
+		t.Fatalf("expected relay rendezvous to be consumed, got %q", rv.Status)
 	}
 }

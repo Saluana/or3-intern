@@ -15,6 +15,7 @@ import (
 )
 
 const hostIdentitySecretName = "secure-connections/host-identity-v1"
+const hostIdentityPrivateSecretName = "secure-connections/host-identity-private-v1"
 
 type HostIdentity struct {
 	Version               int    `json:"version"`
@@ -25,6 +26,14 @@ type HostIdentity struct {
 	HostNoisePrivateKey   string `json:"host_noise_private_key"`
 	Fingerprint           string `json:"fingerprint"`
 	CreatedAtUnixMs       int64  `json:"created_at_unix_ms"`
+}
+
+// HostIdentityPrivateKeys holds only the secret key material. This is stored
+// separately from the public identity so that reading public metadata never
+// requires deserializing private keys.
+type HostIdentityPrivateKeys struct {
+	HostSigningPrivateKey string `json:"host_signing_private_key"`
+	HostNoisePrivateKey   string `json:"host_noise_private_key"`
 }
 
 type IdentityStore struct {
@@ -45,8 +54,27 @@ func (s *IdentityStore) LoadOrCreate(ctx context.Context, displayName string) (H
 		if err := json.Unmarshal([]byte(existing), &identity); err != nil {
 			return HostIdentity{}, false, fmt.Errorf("decode host identity: %w", err)
 		}
+		// Try to load private keys from the separate secret. If they exist
+		// there, use them; otherwise fall back to the inline fields (legacy).
+		privRaw, privOk, err := s.Secrets.Get(ctx, hostIdentityPrivateSecretName)
+		if err != nil {
+			return HostIdentity{}, false, err
+		}
+		if privOk {
+			var priv HostIdentityPrivateKeys
+			if err := json.Unmarshal([]byte(privRaw), &priv); err == nil {
+				identity.HostSigningPrivateKey = priv.HostSigningPrivateKey
+				identity.HostNoisePrivateKey = priv.HostNoisePrivateKey
+			}
+		}
 		if err := identity.Validate(); err != nil {
 			return HostIdentity{}, false, err
+		}
+		// Migrate: if private keys are still inline, split them out.
+		if !privOk && identity.HostSigningPrivateKey != "" {
+			if err := s.storePrivateKeys(ctx, identity); err == nil {
+				_ = s.stripAndStorePublic(ctx, identity)
+			}
 		}
 		return identity, false, nil
 	}
@@ -54,14 +82,38 @@ func (s *IdentityStore) LoadOrCreate(ctx context.Context, displayName string) (H
 	if err != nil {
 		return HostIdentity{}, false, err
 	}
-	encoded, err := json.Marshal(identity)
-	if err != nil {
+	// Store private keys separately first.
+	if err := s.storePrivateKeys(ctx, identity); err != nil {
 		return HostIdentity{}, false, err
 	}
-	if err := s.Secrets.Put(ctx, hostIdentitySecretName, string(encoded)); err != nil {
+	// Store public metadata without private key fields.
+	if err := s.stripAndStorePublic(ctx, identity); err != nil {
 		return HostIdentity{}, false, err
 	}
 	return identity, true, nil
+}
+
+func (s *IdentityStore) storePrivateKeys(ctx context.Context, identity HostIdentity) error {
+	priv := HostIdentityPrivateKeys{
+		HostSigningPrivateKey: identity.HostSigningPrivateKey,
+		HostNoisePrivateKey:   identity.HostNoisePrivateKey,
+	}
+	encoded, err := json.Marshal(priv)
+	if err != nil {
+		return err
+	}
+	return s.Secrets.Put(ctx, hostIdentityPrivateSecretName, string(encoded))
+}
+
+func (s *IdentityStore) stripAndStorePublic(ctx context.Context, identity HostIdentity) error {
+	public := identity
+	public.HostSigningPrivateKey = ""
+	public.HostNoisePrivateKey = ""
+	encoded, err := json.Marshal(public)
+	if err != nil {
+		return err
+	}
+	return s.Secrets.Put(ctx, hostIdentitySecretName, string(encoded))
 }
 
 func (s *IdentityStore) now() time.Time {

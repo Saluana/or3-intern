@@ -1,7 +1,6 @@
 package secureconn
 
 import (
-	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -16,7 +15,7 @@ type ReplayWindow struct {
 
 func NewReplayWindow(capacity int) *ReplayWindow {
 	if capacity <= 0 {
-		capacity = 128
+		capacity = DefaultReplayWindowCap
 	}
 	return &ReplayWindow{seen: map[uint64]struct{}{}, capacity: capacity}
 }
@@ -66,8 +65,8 @@ func ValidateSecureFrame(frame SecureFrameV1, expectedSessionID string, window *
 		now = time.Now().UTC()
 	}
 	skew := now.UTC().UnixMilli() - frame.SentAtUnixMs
-	if skew < -5*60*1000 || skew > 24*60*60*1000 {
-		return fmt.Errorf("secure frame timestamp outside allowed window")
+	if skew < -60*1000 || skew > 24*60*60*1000 {
+		return SecureConnectionError{Code: ErrorMalformedPayload, SafeMessage: "A connection message had an invalid timestamp.", Retryable: false}
 	}
 	if window != nil {
 		return window.Accept(frame.Sequence)

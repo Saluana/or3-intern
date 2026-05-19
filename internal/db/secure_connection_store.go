@@ -162,6 +162,38 @@ func (d *DB) ListSecureConnectionDevices(ctx context.Context, hostID, status str
 	return out, rows.Err()
 }
 
+func (d *DB) ListSecureConnectionDeviceIDs(ctx context.Context, hostID, status string) ([]string, error) {
+	query := `SELECT device_id FROM secure_connection_devices`
+	args := []any{}
+	clauses := []string{}
+	if strings.TrimSpace(hostID) != "" {
+		clauses = append(clauses, "host_id=?")
+		args = append(args, strings.TrimSpace(hostID))
+	}
+	if strings.TrimSpace(status) != "" {
+		clauses = append(clauses, "status=?")
+		args = append(args, strings.TrimSpace(status))
+	}
+	if len(clauses) > 0 {
+		query += " WHERE " + strings.Join(clauses, " AND ")
+	}
+	query += " ORDER BY created_at DESC"
+	rows, err := d.SQL.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var deviceID string
+		if err := rows.Scan(&deviceID); err != nil {
+			return nil, err
+		}
+		out = append(out, deviceID)
+	}
+	return out, rows.Err()
+}
+
 func (d *DB) RevokeSecureConnectionDevice(ctx context.Context, deviceID, reason string, revokedAt int64) error {
 	_, err := d.SQL.ExecContext(ctx, `UPDATE secure_connection_devices SET status='revoked', revoked_at=?, revoked_reason=? WHERE device_id=?`, revokedAt, strings.TrimSpace(reason), strings.TrimSpace(deviceID))
 	return err
@@ -190,12 +222,61 @@ func (d *DB) TouchSecureConnectionSession(ctx context.Context, sessionID string,
 }
 
 func (d *DB) UpdateSecureConnectionSessionStepUp(ctx context.Context, sessionID string, stepUpAt int64) error {
-	_, err := d.SQL.ExecContext(ctx, `UPDATE secure_connection_sessions SET step_up_at=? WHERE session_id=?`, stepUpAt, strings.TrimSpace(sessionID))
-	return err
+	res, err := d.SQL.ExecContext(ctx, `UPDATE secure_connection_sessions SET step_up_at=? WHERE session_id=? AND status='active' AND (expires_at=0 OR expires_at>?)`, stepUpAt, strings.TrimSpace(sessionID), stepUpAt)
+	if err != nil {
+		return err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return fmt.Errorf("session not found or not active")
+	}
+	return nil
+}
+
+func (d *DB) UpdateSecureConnectionSessionStepUpAndClaimMAC(ctx context.Context, sessionID string, stepUpAt int64, claimMAC string) error {
+	res, err := d.SQL.ExecContext(ctx, `UPDATE secure_connection_sessions SET step_up_at=?, metadata_json=json_set(COALESCE(metadata_json,'{}'), '$.claim_mac', ?) WHERE session_id=? AND status='active' AND (expires_at=0 OR expires_at>?)`, stepUpAt, strings.TrimSpace(claimMAC), strings.TrimSpace(sessionID), stepUpAt)
+	if err != nil {
+		return err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return fmt.Errorf("session not found or not active")
+	}
+	return nil
 }
 
 func (d *DB) ExpireSecureConnectionSessions(ctx context.Context, nowMS int64) (int64, error) {
 	res, err := d.SQL.ExecContext(ctx, `UPDATE secure_connection_sessions SET status='expired', last_seen_at=? WHERE status='active' AND expires_at>0 AND expires_at<=?`, nowMS, nowMS)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+func (d *DB) PurgeTerminalPairingSessions(ctx context.Context, olderThanMS int64) (int64, error) {
+	res, err := d.SQL.ExecContext(ctx, `DELETE FROM secure_connection_pairing_sessions WHERE status IN ('consumed','expired','rejected','failed') AND consumed_at>0 AND consumed_at<=?`, olderThanMS)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+func (d *DB) PurgeExpiredSecureConnectionSessions(ctx context.Context, olderThanMS int64) (int64, error) {
+	res, err := d.SQL.ExecContext(ctx, `DELETE FROM secure_connection_sessions WHERE status IN ('expired','revoked') AND last_seen_at>0 AND last_seen_at<=?`, olderThanMS)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+func (d *DB) PurgeRevokedDevices(ctx context.Context, olderThanMS int64) (int64, error) {
+	res, err := d.SQL.ExecContext(ctx, `DELETE FROM secure_connection_devices WHERE status='revoked' AND revoked_at>0 AND revoked_at<=?`, olderThanMS)
 	if err != nil {
 		return 0, err
 	}
@@ -208,6 +289,32 @@ func (d *DB) RevokeSecureConnectionSessionsByDevice(ctx context.Context, deviceI
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+func (d *DB) UpsertSecureConnectionSessionClaimMAC(ctx context.Context, sessionID, claimMAC string) (bool, error) {
+	res, err := d.SQL.ExecContext(ctx, `UPDATE secure_connection_sessions SET metadata_json=json_set(COALESCE(metadata_json,'{}'), '$.claim_mac', ?) WHERE session_id=?`, strings.TrimSpace(claimMAC), strings.TrimSpace(sessionID))
+	if err != nil {
+		return false, err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return rows == 1, nil
+}
+
+func (d *DB) GetSecureConnectionSessionClaimMAC(ctx context.Context, sessionID string) (string, bool, error) {
+	row := d.SQL.QueryRowContext(ctx, `SELECT metadata_json FROM secure_connection_sessions WHERE session_id=?`, strings.TrimSpace(sessionID))
+	var metadataJSON string
+	if err := row.Scan(&metadataJSON); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	meta := decodeJSONMap(metadataJSON)
+	mac, _ := meta["claim_mac"].(string)
+	return mac, mac != "", nil
 }
 
 func (d *DB) CreateSecureConnectionPairingSession(ctx context.Context, rec SecureConnectionPairingSessionRecord) error {
@@ -225,11 +332,13 @@ func (d *DB) GetSecureConnectionPairingSession(ctx context.Context, rendezvousID
 }
 
 func (d *DB) CompareAndSwapSecureConnectionPairingStatus(ctx context.Context, rendezvousID, fromStatus, toStatus string, timestamp int64) (bool, error) {
-	field := "joined_at"
-	if toStatus == "consumed" || toStatus == "approved" || toStatus == "rejected" || toStatus == "expired" {
-		field = "consumed_at"
+	var query string
+	switch toStatus {
+	case "consumed", "approved", "rejected", "expired", "failed":
+		query = `UPDATE secure_connection_pairing_sessions SET status=?, consumed_at=? WHERE rendezvous_id=? AND status=?`
+	default:
+		query = `UPDATE secure_connection_pairing_sessions SET status=?, joined_at=? WHERE rendezvous_id=? AND status=?`
 	}
-	query := fmt.Sprintf(`UPDATE secure_connection_pairing_sessions SET status=?, %s=? WHERE rendezvous_id=? AND status=?`, field)
 	res, err := d.SQL.ExecContext(ctx, query, strings.TrimSpace(toStatus), timestamp, strings.TrimSpace(rendezvousID), strings.TrimSpace(fromStatus))
 	if err != nil {
 		return false, err

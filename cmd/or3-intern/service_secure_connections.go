@@ -75,6 +75,8 @@ func (s *serviceServer) handleSecureConnections(w http.ResponseWriter, r *http.R
 		s.handleSecureConnectionSessions(w, r, store)
 	case path == "sessions/expire":
 		s.handleSecureConnectionSessionExpiry(w, r, store)
+	case path == "sessions/purge":
+		s.handleSecureConnectionPurge(w, r, store)
 	case strings.HasPrefix(path, "sessions/"):
 		s.handleSecureConnectionSessionAction(w, r, store, strings.TrimPrefix(path, "sessions/"))
 	case path == "relay/rendezvous":
@@ -225,7 +227,7 @@ func (s *serviceServer) handleSecureConnectionPairingIntent(w http.ResponseWrite
 		RequestedRole:      body.RequestedRole,
 		Capabilities:       body.Capabilities,
 		RequestedAccountID: body.RequestedAccountID,
-		TTL:                time.Duration(body.TTLSeconds) * time.Second,
+		TTL:                validatePairingIntentTTL(body.TTLSeconds),
 	})
 	if err != nil {
 		writeServiceError(w, r, http.StatusBadRequest, "secure pairing intent failed", err)
@@ -392,10 +394,7 @@ func (s *serviceServer) handleSecureConnectionPairingExchange(w http.ResponseWri
 		writeSecurePairingFriendlyError(w, http.StatusBadRequest, "PAIRING_INVALID", "This code expired. Refresh the QR on your computer.")
 		return
 	}
-	deviceName := strings.TrimSpace(body.DeviceName)
-	if deviceName == "" {
-		deviceName = "OR3 App"
-	}
+	deviceName := normalizeDeviceName(body.DeviceName)
 	ok, err := store.DB.CompareAndSwapSecureConnectionPairingStatus(r.Context(), rendezvousID, session.Status, secureconn.StatusConsumed, nowMS)
 	if err != nil {
 		writeServiceError(w, r, http.StatusBadRequest, "pairing session update failed", err)
@@ -404,6 +403,17 @@ func (s *serviceServer) handleSecureConnectionPairingExchange(w http.ResponseWri
 	if !ok {
 		writeSecurePairingFriendlyError(w, http.StatusConflict, secureconn.ErrorPairingConsumed, "This code was already used. Refresh the QR.")
 		return
+	}
+	// Also consume the relay rendezvous record to prevent relay-level replay.
+	// If the relay rendezvous is already consumed or missing, the pairing
+	// session CAS already succeeded — the exchange is still valid, but we
+	// log the mismatch for audit.
+	if _, relayErr := store.DB.ConsumeRelayRendezvous(r.Context(), rendezvousID, nowMS); relayErr != nil {
+		auditCtx := r.Context()
+		s.auditSecureConnection(auditCtx, "secure_connection.pairing_exchange_relay_consume_failed", "", "", map[string]any{
+			"rendezvous_id": rendezvousID,
+			"error":         relayErr.Error(),
+		})
 	}
 	deviceID := "secure-qr:" + secureconn.HashBase64URL([]byte(rendezvousID), []byte(deviceName))
 	device, token, err := s.broker.RotateDeviceToken(r.Context(), deviceID, session.RequestedRole, deviceName, map[string]any{
@@ -484,6 +494,23 @@ func (s *serviceServer) handleSecureConnectionSessionExpiry(w http.ResponseWrite
 	writeServiceJSON(w, http.StatusOK, map[string]any{"expired": count})
 }
 
+func (s *serviceServer) handleSecureConnectionPurge(w http.ResponseWriter, r *http.Request, store *secureconn.TrustStore) {
+	if r.Method != http.MethodPost {
+		writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	manager := &secureconn.SessionManager{DB: store.DB, Identity: store.Identity}
+	result, err := manager.PurgeStaleRecords(r.Context())
+	if err != nil {
+		writeServiceError(w, r, http.StatusBadRequest, "secure connection purge failed", err)
+		return
+	}
+	if s.secureRelayHub != nil {
+		result.ExpiredRelayRoutes += int64(s.secureRelayHub.purgeExpiredRoutes())
+	}
+	writeServiceJSON(w, http.StatusOK, map[string]any{"purge": result})
+}
+
 func (s *serviceServer) handleSecureConnectionSessionAction(w http.ResponseWriter, r *http.Request, store *secureconn.TrustStore, tail string) {
 	parts := strings.Split(strings.Trim(tail, "/"), "/")
 	if len(parts) < 2 {
@@ -532,13 +559,9 @@ func (s *serviceServer) handleSecureConnectionSessionAction(w http.ResponseWrite
 			return
 		}
 		manager := &secureconn.SessionManager{DB: store.DB, Identity: store.Identity}
-		claims, err := manager.LoadActiveSessionClaims(r.Context(), sessionID)
-		if err != nil {
-			writeServiceError(w, r, http.StatusForbidden, "secure session is not active", err)
-			return
-		}
 		verifiedAt := time.UnixMilli(identity.StepUpAt).UTC()
-		if err := store.DB.UpdateSecureConnectionSessionStepUp(r.Context(), sessionID, verifiedAt.UnixMilli()); err != nil {
+		claims, err := manager.UpdateStepUp(r.Context(), sessionID, verifiedAt)
+		if err != nil {
 			writeServiceError(w, r, http.StatusBadRequest, "secure session step-up update failed", err)
 			return
 		}
@@ -556,12 +579,43 @@ func (s *serviceServer) auditSecureConnection(ctx context.Context, eventType, se
 	_ = s.runtime.Audit.Record(ctx, eventType, sessionID, actor, payload)
 }
 
+func validatePairingIntentTTL(ttlSeconds int) time.Duration {
+	if ttlSeconds <= 0 {
+		return 0
+	}
+	ttl := time.Duration(ttlSeconds) * time.Second
+	if ttl < 30*time.Second {
+		ttl = 30 * time.Second
+	}
+	if ttl > 10*time.Minute {
+		ttl = 10 * time.Minute
+	}
+	return ttl
+}
+
+const maxDeviceNameBytes = 128
+
+func normalizeDeviceName(raw string) string {
+	name := strings.TrimSpace(raw)
+	if name == "" {
+		return "OR3 App"
+	}
+	if len(name) > maxDeviceNameBytes {
+		name = name[:maxDeviceNameBytes]
+	}
+	return name
+}
+
 func (s *serviceServer) handleRelayRendezvous(w http.ResponseWriter, r *http.Request, store *secureconn.TrustStore) {
 	if r.Method != http.MethodGet {
 		writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 		return
 	}
 	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "rendezvous id required"})
+		return
+	}
 	rec, ok, err := store.DB.GetRelayRendezvous(r.Context(), id)
 	if err != nil {
 		writeServiceError(w, r, http.StatusBadRequest, "relay rendezvous lookup failed", err)
@@ -571,7 +625,18 @@ func (s *serviceServer) handleRelayRendezvous(w http.ResponseWriter, r *http.Req
 		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "rendezvous not found"})
 		return
 	}
-	writeServiceJSON(w, http.StatusOK, map[string]any{"item": rec})
+	// Return only the fields needed by clients/operators. Do not expose
+	// SecretCommitment — it is only needed for pairing secret verification.
+	writeServiceJSON(w, http.StatusOK, map[string]any{"item": map[string]any{
+		"rendezvous_id": rec.RendezvousID,
+		"host_id_hash":  rec.HostIDHash,
+		"account_id":    rec.AccountID,
+		"status":        rec.Status,
+		"created_at":    rec.CreatedAt,
+		"expires_at":    rec.ExpiresAt,
+		"joined_at":     rec.JoinedAt,
+		"consumed_at":   rec.ConsumedAt,
+	}})
 }
 
 func (s *serviceServer) handleRelayRendezvousExpire(w http.ResponseWriter, r *http.Request, store *secureconn.TrustStore) {

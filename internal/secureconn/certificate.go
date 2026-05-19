@@ -223,7 +223,7 @@ func NormalizeRole(role string) string {
 	switch strings.ToLower(strings.TrimSpace(role)) {
 	case RoleViewer:
 		return RoleViewer
-	case "", RoleOperator:
+	case RoleOperator:
 		return RoleOperator
 	case RoleAdmin:
 		return RoleAdmin

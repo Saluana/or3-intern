@@ -88,6 +88,20 @@ func (h *secureConnectionRelayHub) registerRoute(route secureRelayRoute) {
 	h.routes[route.routeID] = route
 }
 
+func (h *secureConnectionRelayHub) purgeExpiredRoutes() int {
+	now := time.Now().UTC().UnixMilli()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	purged := 0
+	for id, route := range h.routes {
+		if route.expiresAt > 0 && route.expiresAt <= now {
+			delete(h.routes, id)
+			purged++
+		}
+	}
+	return purged
+}
+
 func (h *secureConnectionRelayHub) host(hostIDHash string) *secureRelayPeer {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -121,6 +135,13 @@ func (h *secureConnectionRelayHub) forward(fromHost bool, peerID string, env sec
 		return false
 	}
 	select {
+	case <-target.closed:
+		return false
+	default:
+	}
+	select {
+	case <-target.closed:
+		return false
 	case target.send <- env:
 		return true
 	default:
@@ -147,6 +168,12 @@ func (s *serviceServer) handleSecureRelayRouteRequest(w http.ResponseWriter, r *
 	}
 	if strings.TrimSpace(body.HostIDHash) == "" {
 		body.HostIDHash = secureconn.HashBase64URL([]byte(store.Identity.HostID))
+	} else {
+		expectedHash := secureconn.HashBase64URL([]byte(store.Identity.HostID))
+		if strings.TrimSpace(body.HostIDHash) != expectedHash {
+			writeServiceJSON(w, http.StatusForbidden, map[string]any{"error": "host_id_hash does not match authenticated host"})
+			return
+		}
 	}
 	if strings.TrimSpace(body.DeviceIDHash) == "" {
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "device_id_hash required"})
@@ -189,17 +216,39 @@ func (s *serviceServer) handleSecureRelayRouteRequest(w http.ResponseWriter, r *
 }
 
 func (s *serviceServer) handleSecureRelayHostWebSocket(w http.ResponseWriter, r *http.Request, store *secureconn.TrustStore) {
-	hostIDHash := strings.TrimSpace(r.URL.Query().Get("host_id_hash"))
-	if hostIDHash == "" {
-		hostIDHash = secureconn.HashBase64URL([]byte(store.Identity.HostID))
+	expectedHash := secureconn.HashBase64URL([]byte(store.Identity.HostID))
+	requestedHash := strings.TrimSpace(r.URL.Query().Get("host_id_hash"))
+	// If a host_id_hash is provided, it must match the authenticated host.
+	// Reject arbitrary hash registration.
+	if requestedHash != "" && requestedHash != expectedHash {
+		writeServiceJSON(w, http.StatusForbidden, map[string]any{"error": "host_id_hash does not match authenticated host"})
+		return
 	}
-	s.handleSecureRelayWebSocket(w, r, hostIDHash, true)
+	s.handleSecureRelayWebSocket(w, r, expectedHash, true)
 }
 
-func (s *serviceServer) handleSecureRelayDeviceWebSocket(w http.ResponseWriter, r *http.Request, _ *secureconn.TrustStore) {
+func (s *serviceServer) handleSecureRelayDeviceWebSocket(w http.ResponseWriter, r *http.Request, store *secureconn.TrustStore) {
 	deviceIDHash := strings.TrimSpace(r.URL.Query().Get("device_id_hash"))
 	if deviceIDHash == "" {
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "device_id_hash required"})
+		return
+	}
+	// Validate the device_id_hash corresponds to an enrolled device for this host.
+	// Compute the hash of each active enrolled device ID and compare.
+	deviceIDs, err := store.ListDeviceIDs(r.Context(), secureconn.StatusActive)
+	if err != nil {
+		writeServiceError(w, r, http.StatusInternalServerError, "device validation failed", err)
+		return
+	}
+	matched := false
+	for _, deviceID := range deviceIDs {
+		if secureconn.HashBase64URL([]byte(deviceID)) == deviceIDHash {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		writeServiceJSON(w, http.StatusForbidden, map[string]any{"error": "device_id_hash does not match any enrolled device"})
 		return
 	}
 	s.handleSecureRelayWebSocket(w, r, deviceIDHash, false)

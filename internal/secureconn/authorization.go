@@ -78,6 +78,11 @@ func ClassifyAction(method, path, tool string) ActionRequest {
 	case method != "" && method != http.MethodGet && method != http.MethodHead && method != http.MethodOptions:
 		class = ActionMutate
 		capability = CapabilityFiles
+	case path == "" && tool == "":
+		// No path and no tool: treat as unknown/restrictive rather than
+		// defaulting to permissive chat/view.
+		class = ActionMutate
+		capability = CapabilityFiles
 	}
 	return ActionRequest{Class: class, Capability: capability, Method: method, Path: path, Tool: tool}
 }
@@ -165,7 +170,7 @@ func ValidateStepUpUpdate(claims SessionClaims, stepUpAt time.Time, now time.Tim
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	if stepUpAt.IsZero() || stepUpAt.After(now.Add(30*time.Second)) {
+	if stepUpAt.IsZero() || stepUpAt.After(now.Add(5*time.Second)) {
 		return claims, fmt.Errorf("invalid step-up verification timestamp")
 	}
 	claims.StepUpAtUnixMs = stepUpAt.UTC().UnixMilli()

@@ -410,7 +410,7 @@ func (d *DB) migrate(ctx context.Context) error {
 			metadata_json TEXT NOT NULL DEFAULT '{}'
 		);`,
 		`CREATE INDEX IF NOT EXISTS secure_connection_devices_host_status ON secure_connection_devices(host_id, status);`,
-		`CREATE INDEX IF NOT EXISTS secure_connection_devices_noise_key ON secure_connection_devices(device_noise_public_key);`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS secure_connection_devices_host_noise_key ON secure_connection_devices(host_id, device_noise_public_key);`,
 		`CREATE TABLE IF NOT EXISTS secure_connection_sessions(
 			session_id TEXT PRIMARY KEY,
 			device_id TEXT NOT NULL,

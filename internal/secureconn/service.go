@@ -232,16 +232,22 @@ func (s *TrustStore) ApproveEnrollmentFromPairing(ctx context.Context, input Enr
 	if !constantStringEqual(commitment, session.SecretCommitment) {
 		return HostEnrollmentCertificateV1{}, db.SecureConnectionDeviceRecord{}, fmt.Errorf("pairing secret proof mismatch")
 	}
-	cert, rec, err := s.ApproveEnrollment(ctx, input.Proposal, session.RequestedRole, session.Capabilities, input.TrustLevel, session.AccountID, input.ExpiresAt)
-	if err != nil {
-		return HostEnrollmentCertificateV1{}, db.SecureConnectionDeviceRecord{}, err
-	}
+	// CAS to consumed BEFORE creating the enrolled device. This ensures
+	// single-use: if the CAS succeeds, no other caller can consume this
+	// pairing session. If it fails (race), we return early without creating
+	// an orphaned device.
 	ok, err := s.DB.CompareAndSwapSecureConnectionPairingStatus(ctx, rendezvousID, session.Status, StatusConsumed, now.UnixMilli())
 	if err != nil {
 		return HostEnrollmentCertificateV1{}, db.SecureConnectionDeviceRecord{}, err
 	}
 	if !ok {
-		return HostEnrollmentCertificateV1{}, db.SecureConnectionDeviceRecord{}, fmt.Errorf("pairing session was already consumed")
+		return HostEnrollmentCertificateV1{}, db.SecureConnectionDeviceRecord{}, SecureConnectionError{Code: ErrorPairingConsumed, SafeMessage: "This code was already used. Refresh the QR.", Retryable: true}
+	}
+	// Pairing is now consumed. Create the enrollment. If this fails, the
+	// pairing stays in consumed state (terminal) — no rollback needed.
+	cert, rec, err := s.ApproveEnrollment(ctx, input.Proposal, session.RequestedRole, session.Capabilities, input.TrustLevel, session.AccountID, input.ExpiresAt)
+	if err != nil {
+		return HostEnrollmentCertificateV1{}, db.SecureConnectionDeviceRecord{}, err
 	}
 	return cert, rec, nil
 }
@@ -263,6 +269,13 @@ func (s *TrustStore) ListDevices(ctx context.Context, status string, limit int) 
 		return nil, fmt.Errorf("secure connection trust store unavailable")
 	}
 	return s.DB.ListSecureConnectionDevices(ctx, s.Identity.HostID, status, limit)
+}
+
+func (s *TrustStore) ListDeviceIDs(ctx context.Context, status string) ([]string, error) {
+	if s == nil || s.DB == nil {
+		return nil, fmt.Errorf("secure connection trust store unavailable")
+	}
+	return s.DB.ListSecureConnectionDeviceIDs(ctx, s.Identity.HostID, status)
 }
 
 func (s *TrustStore) GetDevice(ctx context.Context, deviceID string) (db.SecureConnectionDeviceRecord, error) {

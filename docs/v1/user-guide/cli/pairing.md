@@ -26,10 +26,17 @@ This is the main approval flow for app-generated pairing requests.
 When you start at the computer instead, run:
 
 ```bash
-or3-intern connect-device
+or3-intern pair --auto
 ```
 
-The command prints a request ID and a formatted code such as `123-456`. Open OR3 App, go to `/settings/pair`, and enter both values in **Connect with a CLI code**. The app accepts the code with or without the hyphen.
+The command checks readiness, applies safe fixes when possible, then prints a formatted code such as `123-456`. Open OR3 App, go to `/settings/pair`, and enter the code. The app accepts the code with or without the hyphen.
+
+Useful options:
+
+- `--name <name>` sets the device display name.
+- `--role viewer|operator|admin` chooses the access level.
+- `--json` emits structured output for scripts.
+- `--manual` falls back to the older `connect-device` flow.
 
 ## Advanced subcommands
 
@@ -56,6 +63,7 @@ That advanced path is useful for channel-bound identities such as Slack or other
 
 ## Related commands
 
-- `connect-device` starts a pairing flow from this computer.
+- `pair --auto` starts the normal pairing flow from this computer.
+- `connect-device` remains available for the older manual computer-started flow.
 - [OR3 App Connection Guide](../app-integration/or3-app-connection-guide.md) covers the full web, Electron, iOS, Android, pairing, and disconnect flow.
 - `devices` manages already paired devices and stored requests.

@@ -96,26 +96,25 @@ Use this path when you are at the computer first and want the CLI to create the 
 On the computer:
 
 ```bash
-or3-intern connect-device
+or3-intern pair --auto
 ```
 
-Choose the access level and device name. The CLI prints a formatted six-digit code and a request ID, for example:
+Choose the access level and device name. The CLI checks readiness, applies safe fixes when possible, and prints a formatted six-digit code, for example:
 
 ```text
 123-456
-Request ID: 42
 ```
 
 In OR3 App:
 
 1. Go to `/settings/pair`.
 2. Enter the computer address and device names at the top of the card.
-3. In **Connect with a CLI code**, enter the request ID and code printed by `or3-intern connect-device`.
+3. In the CLI-code pairing area, enter the code printed by `or3-intern pair --auto`.
 4. Press **Connect**.
 
 The app accepts either `123456` or `123-456` and exchanges the approved request for a device token.
 
-Do not run `or3-intern pairing approve-code` for this path. `connect-device` already created the waiting request; the app connects by exchanging the request ID and code directly.
+Do not run `or3-intern pairing approve-code` for this path. `pair --auto` already created the waiting request; the app connects by exchanging the code directly. If you need the older request-ID flow, use `or3-intern pair --manual`.
 
 ## Secure QR upgrade
 
@@ -135,7 +134,7 @@ To make the app forget its local pairing, open OR3 App and use **Disconnect this
 To revoke the device on the computer, list devices and disconnect the device ID:
 
 ```bash
-or3-intern connect-device list
+or3-intern pair list
 or3-intern connect-device disconnect <device-id>
 ```
 

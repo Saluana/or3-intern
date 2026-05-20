@@ -11,22 +11,24 @@ If you are running directly from a checkout without installing, replace `or3-int
 
 ## Commands
 
-| Command                                             | Purpose                                                                                                   |
-| --------------------------------------------------- | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------- |
-| `or3-intern setup`                                  | Guided first-run setup with scenario and safety choices                                                   |
-| `or3-intern chat`                                   | Interactive CLI session                                                                                   |
-| `or3-intern status [--advanced]`                    | Shows a plain-language safety, access, and problems summary                                               |
-| `or3-intern settings [--section ...] [--export path | -]`                                                                                                       | Opens the task-based settings home and supports focused edits or config export |
-| `or3-intern connect-device [list                    | disconnect <device-id>                                                                                    | role <device-id>]`                                                             | Pairs a phone or other device using a short code and simple access levels |
-| `or3-intern help`                                   | Shows the full root command catalog                                                                       |
-| `or3-intern configure [--section ...]`              | Interactive setup and reconfiguration wizard for provider, storage, workspace, web, channels, and service |
-| `or3-intern init`                                   | Guided first-run setup for config and provider settings                                                   |
-| `or3-intern config-path`                            | Prints the resolved config.json path                                                                      |
-| `or3-intern serve`                                  | Starts enabled channels, triggers, heartbeat, cron, and the shared worker runtime                         |
-| `or3-intern service`                                | Starts the authenticated internal HTTP API                                                                |
-| `or3-intern agent -m "..."`                         | Runs a one-shot foreground turn                                                                           |
-| `or3-intern version`                                | Prints the binary version                                                                                 |
-| `or3-intern help [command]`                         | Shows root help or command-specific help                                                                  |
+| Command | Purpose |
+| --- | --- |
+| `or3-intern setup` | Guided first-run setup with scenario and safety choices |
+| `or3-intern chat` | Interactive CLI session |
+| `or3-intern health [--check|--fix|--json]` | Checks readiness and applies safe repairs |
+| `or3-intern pair --auto [--name ...] [--role viewer|operator|admin]` | Pairs a phone or other device with readiness checks |
+| `or3-intern status [--advanced]` | Shows a plain-language safety, access, and problems summary |
+| `or3-intern settings [--section ...] [--export path|-]` | Opens the task-based settings home and supports focused edits or config export |
+| `or3-intern connect-device [list|disconnect <device-id>|role <device-id>]` | Legacy/manual computer-started pairing flow and device shortcuts |
+| `or3-intern help` | Shows the full root command catalog |
+| `or3-intern configure [--section ...]` | Interactive setup and reconfiguration wizard for provider, storage, workspace, web, channels, and service |
+| `or3-intern init` | Guided first-run setup for config and provider settings |
+| `or3-intern config-path` | Prints the resolved config.json path |
+| `or3-intern serve` | Starts enabled channels, triggers, heartbeat, cron, and the shared worker runtime |
+| `or3-intern service` | Starts the authenticated internal HTTP API |
+| `or3-intern agent -m "..."` | Runs a one-shot foreground turn |
+| `or3-intern version` | Prints the binary version |
+| `or3-intern help [command]` | Shows root help or command-specific help |
 
 Root help behavior:
 
@@ -52,6 +54,18 @@ The flow asks for:
 It then applies the corresponding runtime profile, approvals, audit, service, and hardening settings before saving the config.
 
 If setup succeeds, it prints a short review covering files, commands, internet, devices, and activity log state, then asks whether to start chat next.
+
+### `or3-intern health`
+
+Checks whether OR3 is ready to work.
+
+```
+or3-intern health
+or3-intern health --fix
+or3-intern health --json
+```
+
+Default output focuses on readiness issues and next actions. Use `--fix` for safe automatic repairs and `--json` for structured output. Advanced filters such as `--area`, `--severity`, and `--fixable-only` are available when needed, but `doctor` remains the deeper diagnostics command.
 
 ### `or3-intern status`
 
@@ -86,11 +100,27 @@ or3-intern settings --section context
 or3-intern settings --export config.json
 ```
 
-This is the user-facing entry point for revisiting setup. The default view is task-based: AI Provider, Workspace Folder, Connected Devices, Safety Level, Channels, Tools, Memory, Context, and Advanced.
+This is the user-facing entry point for revisiting setup. The default view is task-based: AI Controls, Workspace Folder, Connected Devices, Safety Level, Channels, Tools, Memory, Context, and Advanced.
 
 Use `--section` to jump to one task area. Common sections are `provider`, `workspace`, `devices`, `safety`, `channels`, `tools`, `memory`, `context`, and `advanced`.
 
 Use `--export` when you need the raw JSON config without making JSON editing the normal path.
+
+### `or3-intern pair`
+
+Starts the normal computer-initiated device pairing flow.
+
+```
+or3-intern pair --auto
+or3-intern pair --auto --name "Brendon's iPhone"
+or3-intern pair --auto --role operator
+or3-intern pair --auto --json
+or3-intern pair --manual
+```
+
+`pair --auto` checks readiness, applies safe repairs unless `--no-fix` is set, prompts for device name and access level when needed, and prints a six-digit code for OR3 App. Use `--json` for scripts and `--manual` for the older `connect-device` flow.
+
+Supported roles are `viewer`, `operator`, and `admin`.
 
 ### `or3-intern connect-device`
 
@@ -101,7 +131,7 @@ or3-intern connect-device disconnect <device-id>
 or3-intern connect-device role <device-id>
 ```
 
-This flow:
+This older manual flow:
 
 - checks pairing/service prerequisites
 - repairs missing safe defaults such as service secret or approval key when needed

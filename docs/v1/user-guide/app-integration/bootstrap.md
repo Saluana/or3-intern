@@ -36,10 +36,10 @@ That corresponds to the 6-digit code shown in the app.
 The app can also consume a request that was created by the CLI. Run:
 
 ```bash
-or3-intern connect-device
+or3-intern pair --auto
 ```
 
-Then enter the printed request ID and code in the app's **Connect with a CLI code** section on `/settings/pair`.
+Then enter the printed code in the app's CLI-code pairing section on `/settings/pair`. Use `or3-intern pair --manual` if you need the older request-ID flow.
 
 See [OR3 App Connection Guide](or3-app-connection-guide.md) for the complete web, Electron, iOS, Android, pairing, and disconnect flow.
 
@@ -67,5 +67,6 @@ This returns the host overview used by OR3 App: pairing/auth status, counts, war
 ## Useful checks
 
 - `or3-intern devices list` — confirm paired devices exist
-- `or3-intern status` — quick host posture summary
+- `or3-intern health` — quick readiness check
+- `or3-intern status` — safety and access posture summary
 - `or3-intern doctor` — deeper readiness troubleshooting

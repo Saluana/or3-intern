@@ -10,7 +10,7 @@ The CLI starts in `cmd/or3-intern/main.go:main()`. The flow is:
 2. Handle help requests (any topic or advanced help)
 3. Handle pre-config commands (config-path, version, configure, init, setup, settings)
 4. Run first-run setup if no config file exists
-5. Handle doctor and status commands (load config without full runtime)
+5. Handle health, doctor, and status commands (load config without full runtime)
 6. Load full runtime config
 7. Initialize database and storage
 8. Build runtime security (secrets, audit)
@@ -37,6 +37,8 @@ Handled by `commandHandledBeforeConfigLoad`:
 
 Source: `cmd/or3-intern/main.go:823-830`
 
+After first-run setup handling, `health`, `doctor`, and `status` load config in repair mode and return before full runtime bootstrap.
+
 ### Tier 2: After config + security, before full runtime
 Handled by `commandHandledBeforeRuntimeBootstrap`:
 - `capabilities` - show capability report
@@ -60,6 +62,7 @@ Commands that need the complete runtime (tools, agents, channels):
 - `devices` - manage paired devices
 - `pairing` - manage pairing requests
 - `connect-device` - initiate device pairing
+- `pair` - initiate normal device pairing with readiness checks
 - `migrate-jsonl` - import JSONL conversation history
 - `migrate-openclaw` - migrate from OpenClaw
 

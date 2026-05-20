@@ -42,9 +42,9 @@ If no config file exists and the command is `chat`, the setup wizard runs automa
 
 Source: `cmd/or3-intern/main.go:832-867`
 
-## Doctor and status
+## Health, doctor, and status
 
-Both `doctor` and `status` commands load config in repair mode (lenient loading) and run without building the full runtime. The `status` command optionally opens the database for additional checks.
+The `health`, `doctor`, and `status` commands load config in repair mode (lenient loading) and run without building the full runtime. `health` is the normal readiness wrapper around the doctor engine. `doctor` exposes stricter advanced diagnostics and filters. `status` optionally opens the database for additional checks.
 
 Source: `cmd/or3-intern/main.go:278-324`
 
@@ -77,6 +77,7 @@ These commands build the complete runtime (providers, tools, channels, MCP, cron
 | `devices` | `runDevicesCommand` | Approval broker |
 | `pairing` | `runPairingCommand` | Approval broker |
 | `connect-device` | `runConnectDeviceCommand` | Approval broker, database |
+| `pair` | `runPairCommand` | Approval broker, database |
 | `migrate-jsonl` | `migrateJSONL` | Database |
 | `migrate-openclaw` | `runMigrateOpenClawCommand` | Database, provider |
 

@@ -60,20 +60,20 @@ When input or output is redirected, piped, or otherwise non-interactive, `config
 
 `or3-intern init` follows the same activation rules, but starts with the original first-run sections: provider, storage, workspace, and web.
 
-### 2. Check safety and access
+### 2. Check readiness
 
 ```bash
-or3-intern status
+or3-intern health
 ```
 
-Use `status` after setup any time you want a quick answer to:
+Use `health` after setup any time you want a quick answer to:
 
-- what OR3 can access
-- what safety mode you are effectively using
-- whether any problems still need attention
-- whether devices and approvals are ready
+- whether OR3 is ready to work
+- whether local files, keys, service settings, and runtime prerequisites are valid
+- what safe repairs are available
+- whether device pairing can proceed
 
-Use `or3-intern status --advanced` when you also want the internal finding IDs. When a safe automatic repair is available, advanced output shows a focused `or3-intern status --fix <finding-id>` command.
+Use `or3-intern health --fix` to apply safe automatic repairs. Use `or3-intern health --json` when scripts need the structured readiness report. `or3-intern status` still exists when you want a plain-language safety and access summary.
 
 ### 3. Start an interactive local conversation
 
@@ -90,20 +90,20 @@ Inside chat, `/new` archives the current conversation into long-term memory befo
 or3-intern settings
 ```
 
-`settings` opens a task-based home with AI Provider, Workspace Folder, Connected Devices, Safety Level, Connected Apps, Tools, Memory, and Advanced. Use `or3-intern settings --section safety` to change safety mode, `or3-intern settings --section workspace` to change the folder boundary, or `or3-intern settings --export config.json` to export the raw config for advanced review.
+`settings` opens a task-based home with AI Controls, Workspace Folder, Connected Devices, Safety Level, Connected Apps, Tools, Memory, and Advanced. Use `or3-intern settings --section safety` to change safety mode, `or3-intern settings --section workspace` to change the folder boundary, or `or3-intern settings --export config.json` to export the raw config for advanced review.
 
 ### 5. Connect another device
 
 ```bash
-or3-intern connect-device
+or3-intern pair --auto
 ```
 
-This flow helps you pair a phone or other device using a short code and simple access levels.
+This flow checks readiness, applies safe repairs when possible, and helps you pair a phone or other device using a short code and simple access levels. Add `--name "Brendon's iPhone"` or `--role operator` when you already know the device label or access level.
 
 Use:
 
 ```bash
-or3-intern connect-device list
+or3-intern pair list
 ```
 
 to review already connected devices.
@@ -147,12 +147,13 @@ Common files and directories include:
 ## Recommended first-run sequence
 
 1. Run `setup`
-2. Run `status`
+2. Run `health`
 3. Confirm `chat` works with a simple question
-4. Review or adjust anything important with `settings`
-5. Review [configuration-reference.md](configuration-reference.md) when you need raw config keys
-6. Run `or3-intern doctor --strict` before exposing connected apps or service mode; use `or3-intern doctor --fix` for safe automatic repairs and `or3-intern doctor --fix --interactive` for guided fixes
-7. Enable one advanced feature at a time: connected apps, skills, triggers, MCP, or service mode
+4. Pair your app or phone with `pair --auto`
+5. Review or adjust anything important with `settings`
+6. Review [configuration-reference.md](configuration-reference.md) when you need raw config keys
+7. Run `or3-intern doctor --strict` before exposing connected apps or service mode; use `or3-intern doctor --fix` for safe automatic repairs and `or3-intern doctor --fix --interactive` for guided fixes
+8. Enable one advanced feature at a time: connected apps, skills, triggers, MCP, or service mode
 
 ## After changing embedding providers or models
 

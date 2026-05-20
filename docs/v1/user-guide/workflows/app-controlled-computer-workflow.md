@@ -17,10 +17,10 @@ Useful routes and commands:
 - `POST /internal/v1/pairing/requests`
 - `POST /internal/v1/pairing/exchange`
 - `or3-intern pairing approve-code <code>`
-- `or3-intern connect-device`
+- `or3-intern pair --auto`
 - `GET /internal/v1/auth/capabilities`
 
-The app supports both pairing directions: app-created code approval with `pairing approve-code`, and CLI-created requests from `connect-device` entered into the app's **Connect with a CLI code** section. See [OR3 App Connection Guide](../app-integration/or3-app-connection-guide.md) for the complete operator guide.
+The app supports both pairing directions: app-created code approval with `pairing approve-code`, and CLI-created codes from `pair --auto` entered into the app's CLI-code pairing section. See [OR3 App Connection Guide](../app-integration/or3-app-connection-guide.md) for the complete operator guide.
 
 ## 3. Load host overview
 

@@ -16,4 +16,4 @@ Welcome to the OR3 Intern v1 documentation. These docs cover everything you need
 
 ## Need help?
 
-Run `or3-intern doctor` for a quick diagnostic. Or open an issue on the project repo.
+Run `or3-intern health` for a quick readiness check, or `or3-intern doctor` for deeper diagnostics. Or open an issue on the project repo.

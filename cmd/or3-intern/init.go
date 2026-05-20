@@ -41,30 +41,16 @@ var initProviderPresets = map[string]initProviderPreset{
 }
 
 func runInit(cfgPath string) error {
-	cwd, err := os.Getwd()
-	if err != nil {
-		cwd = ""
-	}
-	if supportsInteractiveTUI(os.Stdin, os.Stdout) {
-		return runConfigureWithTUI(cfgPathOrDefault(cfgPath), cwd, []string{}, configureTUIOptions{
-			Title:      "or3-intern init",
-			Intro:      []string{"First-run setup with the essential provider, storage, workspace, and tools sections."},
-			Restricted: []string{"provider", "storage", "workspace", "tools"},
-		})
-	}
-	return runInitWithIO(os.Stdin, os.Stdout, cfgPathOrDefault(cfgPath), cwd)
+	fmt.Fprintln(os.Stderr, "Note: `init` is a compatibility alias. Use `or3-intern setup` for the recommended first-run experience.")
+	_, err := runSetup(cfgPath)
+	return err
 }
 
 func runInitWithIO(in io.Reader, out io.Writer, cfgPath, cwd string) error {
-	fmt.Fprintln(out, "or3-intern init")
-	fmt.Fprintln(out, "`init` now uses the same configure wizard under the hood with the original first-run sections.")
+	fmt.Fprintln(out, "Note: `init` is a compatibility alias. Use `or3-intern setup` for the recommended first-run experience.")
 	fmt.Fprintln(out)
-	return runConfigureWithIO(in, out, cfgPath, cwd, []string{
-		"--section", "provider",
-		"--section", "storage",
-		"--section", "workspace",
-		"--section", "tools",
-	})
+	_, err := runSetupWithIO(in, out, cfgPath, cwd)
+	return err
 }
 
 func initDefaults(cwd string) config.Config {

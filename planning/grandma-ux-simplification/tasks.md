@@ -2,63 +2,63 @@
 
 ## 1. Consolidate setup into one normal path
 
-- [ ] 1.1 Audit current `setup`, `init`, `configure`, app host setup, and README quick-start paths; mark which code path is canonical and which are compatibility/advanced. Requirements: 1
-- [ ] 1.2 Update `or3-intern setup` to be the only recommended first-run command in normal CLI help and docs. Requirements: 1
-- [ ] 1.3 Make `init` delegate to the setup engine or print compatibility copy that points users to `setup`, while preserving existing non-interactive/script behavior. Requirements: 1, 8
-- [ ] 1.4 Move `configure` language to advanced/manual configuration in root help, CLI reference, and setup docs without removing `configure --section`. Requirements: 1, 8
-- [ ] 1.5 Add regression tests for `setup`, `init`, and `configure --section` compatibility. Requirements: 1, 8, 10
+- [x] 1.1 Audit current `setup`, `init`, `configure`, app host setup, and README quick-start paths; mark which code path is canonical and which are compatibility/advanced. Requirements: 1
+- [x] 1.2 Update `or3-intern setup` to be the only recommended first-run command in normal CLI help and docs. Requirements: 1
+- [x] 1.3 Make `init` delegate to the setup engine or print compatibility copy that points users to `setup`, while preserving existing non-interactive/script behavior. Requirements: 1, 8
+- [x] 1.4 Move `configure` language to advanced/manual configuration in root help, CLI reference, and setup docs without removing `configure --section`. Requirements: 1, 8
+- [x] 1.5 Add regression tests for `setup`, `init`, and `configure --section` compatibility. Requirements: 1, 8, 10
 
 ## 2. Add success moments and milestone state
 
-- [ ] 2.1 Define milestone names for setup complete, pairing complete, and first successful chat complete. Requirements: 2
-- [ ] 2.2 Add setup completion output with “You did it”, a plain-language summary, and no more than four next-step choices. Requirements: 2
-- [ ] 2.3 Add pairing completion output in CLI/app flows that names the connected device and access level. Requirements: 2, 4, 5
+- [x] 2.1 Define milestone names for setup complete, pairing complete, and first successful chat complete. Requirements: 2
+- [x] 2.2 Add setup completion output with "You did it", a plain-language summary, and no more than four next-step choices. Requirements: 2
+- [x] 2.3 Add pairing completion output in CLI/app flows that names the connected device and access level. Requirements: 2, 4, 5
 - [ ] 2.4 Add first-chat-complete one-time success prompt for CLI chat and app chat where practical. Requirements: 2, 3
-- [ ] 2.5 Persist milestone dismissal/completion using existing config, SQLite, or app local storage patterns; do not store secrets or pairing internals. Requirements: 2, 10
+- [x] 2.5 Persist milestone dismissal/completion using existing config, SQLite, or app local storage patterns; do not store secrets or pairing internals. Requirements: 2, 10
 - [ ] 2.6 Add tests that milestone messages do not repeat unnecessarily and do not include raw IDs, tokens, CIDRs, MCP, embeddings, runtime profile, or other advanced terms. Requirements: 2, 10
 
 ## 3. Add app welcome/onboarding card
 
-- [ ] 3.1 Identify the existing app connection/session state used by chat and settings pairing screens. Requirements: 3
-- [ ] 3.2 Add a “Welcome! Let’s get you set up.” card to the unconnected app landing state. Requirements: 3
-- [ ] 3.3 Route Electron-capable users from the welcome card into the existing `ElectronHostSetupWizard`. Requirements: 3
-- [ ] 3.4 Route web/mobile users from the welcome card into the simplified pairing flow. Requirements: 3, 4
-- [ ] 3.5 Add a secondary “What can OR3 do?” explainer action that does not require setup to read. Requirements: 3
+- [x] 3.1 Identify the existing app connection/session state used by chat and settings pairing screens. Requirements: 3
+- [x] 3.2 Add a "Welcome! Let's get you set up." card to the unconnected app landing state. Requirements: 3
+- [x] 3.3 Route Electron-capable users from the welcome card into the existing `ElectronHostSetupWizard`. Requirements: 3
+- [x] 3.4 Route web/mobile users from the welcome card into the simplified pairing flow. Requirements: 3, 4
+- [x] 3.5 Add a secondary "What can OR3 do?" explainer action that does not require setup to read. Requirements: 3
 - [ ] 3.6 Add app tests for unconnected, Electron host-capable, web/mobile, and connected states. Requirements: 3, 10
 
 ## 4. Simplify app pairing to discovery-or-code
 
-- [ ] 4.1 Inventory existing app pairing modes and label manual/legacy methods that should move behind Advanced. Requirements: 4, 8
+- [x] 4.1 Inventory existing app pairing modes and label manual/legacy methods that should move behind Advanced. Requirements: 4, 8
 - [ ] 4.2 Add safe local host discovery where the platform supports it, bounded by a short timeout. Requirements: 4, 10
-- [ ] 4.3 If exactly one host is discovered, show a “Connect to this computer” card with visible host name and access label. Requirements: 4
+- [ ] 4.3 If exactly one host is discovered, show a "Connect to this computer" card with visible host name and access label. Requirements: 4
 - [ ] 4.4 If discovery finds zero or multiple hosts, fall back to one simple code entry flow. Requirements: 4
-- [ ] 4.5 Move request-ID/token/manual-origin/CIDR-oriented pairing details behind Advanced. Requirements: 4, 8, 10
+- [x] 4.5 Move request-ID/token/manual-origin/CIDR-oriented pairing details behind Advanced. Requirements: 4, 8, 10
 - [ ] 4.6 Add app tests for single-host discovery, no-host fallback, multi-host fallback, unsupported-platform fallback, and redaction of raw pairing internals. Requirements: 4, 10
 
 ## 5. Implement `pair --auto` in `or3-intern`
 
-- [ ] 5.1 Add `pair` command routing with `--auto` as the normal documented path, preserving existing `connect-device` and lower-level pairing commands. Requirements: 5, 8
-- [ ] 5.2 Reuse the structured health/doctor engine to check service readiness, auth posture, pairing config, listen address, local reachability, and required directories/keys. Requirements: 5, 7, 10
-- [ ] 5.3 Add conservative auto-fix/offer-fix behavior for deterministic safe issues such as missing local directories, missing generated secrets/keys, disabled local service prerequisites, or inconsistent loopback/private defaults. Requirements: 5, 10
-- [ ] 5.4 Add blocker output for issues that require manual networking, Tailscale/firewall/DNS decisions, public exposure, or unsafe trust broadening. Requirements: 5, 10
-- [ ] 5.5 Generate or reuse the existing local pairing flow after prerequisites pass; default output should show only simple code/QR instruction, role, expiration, and app step. Requirements: 5
-- [ ] 5.6 Add `--json`, `--name`, `--role`, `--no-fix`, and advanced/manual options only where needed for scripts/operators. Requirements: 5, 8
+- [x] 5.1 Add `pair` command routing with `--auto` as the normal documented path, preserving existing `connect-device` and lower-level pairing commands. Requirements: 5, 8
+- [x] 5.2 Reuse the structured health/doctor engine to check service readiness, auth posture, pairing config, listen address, local reachability, and required directories/keys. Requirements: 5, 7, 10
+- [x] 5.3 Add conservative auto-fix/offer-fix behavior for deterministic safe issues such as missing local directories, missing generated secrets/keys, disabled local service prerequisites, or inconsistent loopback/private defaults. Requirements: 5, 10
+- [x] 5.4 Add blocker output for issues that require manual networking, Tailscale/firewall/DNS decisions, public exposure, or unsafe trust broadening. Requirements: 5, 10
+- [x] 5.5 Generate or reuse the existing local pairing flow after prerequisites pass; default output should show only simple code/QR instruction, role, expiration, and app step. Requirements: 5
+- [x] 5.6 Add `--json`, `--name`, `--role`, `--no-fix`, and advanced/manual options only where needed for scripts/operators. Requirements: 5, 8
 - [ ] 5.7 Add tests covering ready config, safe-fix config, blocked config, output redaction, compatibility with `connect-device`, and non-interactive behavior. Requirements: 5, 8, 10
 
 ## 6. Rename normal health workflow from `doctor` to `health`
 
-- [ ] 6.1 Add `or3-intern health` as a wrapper over the existing doctor/health engine. Requirements: 7
-- [ ] 6.2 Make `or3-intern health` default to the check/readiness report; support `health --check` as explicit equivalent. Requirements: 7
-- [ ] 6.3 Keep `or3-intern doctor` as a compatibility alias and add gentle copy pointing normal users to `health`. Requirements: 7, 8
-- [ ] 6.4 Reduce short help to the core forms: `health`, `health --fix`, and `health --json`; move area/severity/fixable/probe filters to advanced help. Requirements: 7, 8
-- [ ] 6.5 Ensure health output groups overall status, blockers, available fixes, and next steps. Requirements: 7
-- [ ] 6.6 Add tests proving `health` and `doctor` use the same report engine and that `--check` is equivalent to default. Requirements: 7, 10
+- [x] 6.1 Add `or3-intern health` as a wrapper over the existing doctor/health engine. Requirements: 7
+- [x] 6.2 Make `or3-intern health` default to the check/readiness report; support `health --check` as explicit equivalent. Requirements: 7
+- [x] 6.3 Keep `or3-intern doctor` as a compatibility alias and add gentle copy pointing normal users to `health`. Requirements: 7, 8
+- [x] 6.4 Reduce short help to the core forms: `health`, `health --fix`, and `health --json`; move area/severity/fixable/probe filters to advanced help. Requirements: 7, 8
+- [x] 6.5 Ensure health output groups overall status, blockers, available fixes, and next steps. Requirements: 7
+- [x] 6.6 Add tests proving `health` and `doctor` use the same report engine and that `--check` is equivalent to default. Requirements: 7, 10
 
 ## 7. Collapse default settings to max five sections plus Advanced
 
-- [ ] 7.1 Define the final default section list: AI Service, Workspace, Safety, Connected Apps/Devices, and Appearance/App Preferences where supported. Requirements: 6
+- [x] 7.1 Define the final default section list: AI Service, Workspace, Safety, Connected Apps/Devices, and Appearance/App Preferences where supported. Requirements: 6
 - [ ] 7.2 Update CLI settings builders so normal mode renders no more than five sections plus Advanced. Requirements: 6
-- [ ] 7.3 Update app settings home/simple settings to render no more than five visible sections plus Advanced. Requirements: 6
+- [x] 7.3 Update app settings home/simple settings to render no more than five visible sections plus Advanced. Requirements: 6
 - [ ] 7.4 Move raw model routing, MCP/custom tool config, embeddings/doc index details, runtime profile, logs/observability, env-style config, and developer diagnostics behind Advanced. Requirements: 6, 8
 - [ ] 7.5 Preserve `settings --section` and `configure --section` for existing section keys. Requirements: 6, 8
 - [ ] 7.6 Add CLI/app tests that normal settings renders at most five sections and advanced paths still expose existing controls. Requirements: 6, 8, 10

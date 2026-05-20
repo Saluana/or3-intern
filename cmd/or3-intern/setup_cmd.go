@@ -217,17 +217,18 @@ func runSetupWithIOOptions(in io.Reader, out io.Writer, cfgPath, cwd string, opt
 		}
 	}
 	if readyToChat {
-		fmt.Fprintln(out, "\nSaved setup. OR3 is ready to chat.")
+		MarkMilestone(&cfg, MilestoneSetupComplete)
+		if err := config.Save(cfgPath, cfg); err != nil {
+			return setupResult{}, err
+		}
+		PrintSetupSuccess(out, cfg, readyToChat)
 	} else {
 		fmt.Fprintln(out, "\nSaved draft setup.")
 		fmt.Fprintln(out, "Chat will be available after the provider settings pass setup checks.")
+		fmt.Fprintln(out, "Next: run `or3-intern setup` after adding provider credentials, or run `or3-intern health` for repair guidance.")
 	}
 	if startChat {
 		fmt.Fprintln(out, "Starting chat now.")
-	} else if readyToChat && strings.TrimSpace(options.CompletionNext) != "" {
-		fmt.Fprintf(out, "Next: %s.\n", options.CompletionNext)
-	} else if !readyToChat {
-		fmt.Fprintln(out, "Next: run `or3-intern setup` after adding provider credentials, or run `or3-intern status` for repair guidance.")
 	}
 	return setupResult{StartChat: startChat, Config: cfg}, nil
 }

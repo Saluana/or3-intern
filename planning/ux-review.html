@@ -1,0 +1,762 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OR3 UX Review — Grandma-Friendly Audit</title>
+<style>
+  :root {
+    --bg: #faf8f5;
+    --card: #fff;
+    --border: #e2ded8;
+    --text: #2c2c2c;
+    --muted: #6b6560;
+    --red: #d94a3a;
+    --amber: #e08a20;
+    --green: #4a8c4a;
+    --blue: #4a7ab5;
+    --purple: #7a5fb5;
+    --pill-bg: #f0ebe3;
+    --radius: 12px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    padding: 24px;
+    max-width: 1000px;
+    margin: 0 auto;
+  }
+  header {
+    text-align: center;
+    padding: 40px 0 32px;
+    border-bottom: 2px solid var(--border);
+    margin-bottom: 40px;
+  }
+  header h1 { font-size: 2.2rem; font-weight: 700; }
+  header .subtitle { color: var(--muted); font-size: 1.1rem; margin-top: 8px; }
+  .scorecard {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 16px;
+    margin: 32px 0;
+  }
+  .score {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+    text-align: center;
+  }
+  .score .number { font-size: 2.4rem; font-weight: 800; }
+  .score .label { color: var(--muted); font-size: 0.85rem; margin-top: 4px; }
+  .score.red .number { color: var(--red); }
+  .score.amber .number { color: var(--amber); }
+  .score.green .number { color: var(--green); }
+  h2 {
+    font-size: 1.5rem;
+    margin: 40px 0 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 10px;
+  }
+  h2 .emoji { font-size: 1.4rem; }
+  h3 { font-size: 1.15rem; margin: 24px 0 10px; color: #444; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+    margin: 16px 0;
+  }
+  .problem { border-left: 4px solid var(--red); }
+  .warning { border-left: 4px solid var(--amber); }
+  .good    { border-left: 4px solid var(--green); }
+  .idea    { border-left: 4px solid var(--blue); }
+  .problem h3 { color: var(--red); }
+  .warning h3 { color: var(--amber); }
+  .good h3    { color: var(--green); }
+  .idea h3    { color: var(--blue); }
+  .severity {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 100px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    margin-right: 8px;
+  }
+  .sev-high   { background: #fde8e8; color: var(--red); }
+  .sev-medium { background: #fef3e4; color: var(--amber); }
+  .sev-low    { background: #e8f0e8; color: var(--green); }
+  .pill {
+    display: inline-block;
+    padding: 4px 12px;
+    border-radius: 100px;
+    font-size: 0.8rem;
+    font-weight: 500;
+    background: var(--pill-bg);
+    margin: 2px 4px;
+  }
+  .pill.app { background: #e8eaf6; color: #3f51b5; }
+  .pill.intern { background: #fce4ec; color: #c62828; }
+  .pill.both { background: #fff3e0; color: #e65100; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 12px 0;
+    font-size: 0.9rem;
+  }
+  th, td {
+    text-align: left;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  th { font-weight: 600; color: var(--muted); font-size: 0.8rem; text-transform: uppercase; }
+  .jargon-term { font-family: monospace; color: var(--red); }
+  .suggestion { color: var(--green); font-weight: 500; }
+  /* Interactive Tabs */
+  .tabs {
+    display: flex; gap: 0; margin: 20px 0 0;
+    border-bottom: 2px solid var(--border);
+  }
+  .tab-btn {
+    padding: 10px 20px;
+    background: none; border: none;
+    cursor: pointer;
+    font-size: 0.9rem; font-weight: 500;
+    color: var(--muted);
+    border-bottom: 2px solid transparent;
+    margin-bottom: -2px;
+    transition: all 0.15s;
+  }
+  .tab-btn.active { color: var(--text); border-bottom-color: var(--text); }
+  .tab-content { display: none; padding-top: 16px; }
+  .tab-content.active { display: block; }
+  .toggle-section { cursor: pointer; user-select: none; }
+  .toggle-section:hover { opacity: 0.8; }
+  .toggle-body { display: none; }
+  .toggle-body.open { display: block; }
+  .checklist { list-style: none; padding: 0; }
+  .checklist li { padding: 6px 0; }
+  .checklist li::before { content: "☐ "; color: var(--muted); }
+  .checklist li.done::before { content: "☑ "; color: var(--green); }
+  .grandma-test {
+    background: linear-gradient(135deg, #fef9f0, #fdf2e8);
+    border: 2px dashed #d4b896;
+    border-radius: var(--radius);
+    padding: 24px;
+    margin: 24px 0;
+    text-align: center;
+  }
+  .grandma-test .quote {
+    font-style: italic;
+    font-size: 1.1rem;
+    color: #7a5a3a;
+    margin-bottom: 12px;
+  }
+  .grandma-test .speaker { font-weight: 600; color: #5a3a1a; }
+  @media (max-width: 640px) {
+    body { padding: 12px; }
+    header h1 { font-size: 1.6rem; }
+    .scorecard { grid-template-columns: 1fr 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🧓 OR3 UX Review</h1>
+  <p class="subtitle">Can a 90-year-old use this? Let's find out.</p>
+  <p style="margin-top:12px; color:var(--muted); font-size:0.85rem">
+    Audit of <strong>or3-app</strong> (Vue/Nuxt frontend) + <strong>or3-intern</strong> (Go CLI/backend)<br>
+    May 2026
+  </p>
+</header>
+
+<!-- SCORECARD -->
+<div class="scorecard">
+  <div class="score red">
+    <div class="number">18/100</div>
+    <div class="label">Grandma-Friendliness</div>
+  </div>
+  <div class="score amber">
+    <div class="number">43</div>
+    <div class="label">Jargon Terms Found</div>
+  </div>
+  <div class="score red">
+    <div class="number">~30</div>
+    <div class="label">App Page Routes</div>
+  </div>
+  <div class="score red">
+    <div class="number">19</div>
+    <div class="label">CLI Commands (11 have sub-commands)</div>
+  </div>
+  <div class="score amber">
+    <div class="number">22</div>
+    <div class="label">Config Sections</div>
+  </div>
+  <div class="score red">
+    <div class="number">48+</div>
+    <div class="label">Environment Variables</div>
+  </div>
+</div>
+
+<!-- GRANDMA TESTIMONIAL -->
+<div class="grandma-test">
+  <p class="quote">"I just wanted to ask it a question, dear. Now it's asking me about 'embedding dimensions' and 'MCP transport protocols.' I think I'll just call my grandson instead."</p>
+  <p class="speaker">— Your Hypothetical Grandma, age 90</p>
+</div>
+
+<!-- OVERVIEW TABS -->
+<h2><span class="emoji">🔍</span> Quick Overview</h2>
+
+<div class="tabs">
+  <button class="tab-btn active" onclick="switchTab('summary')">Executive Summary</button>
+  <button class="tab-btn" onclick="switchTab('app')">or3-app Pain Points</button>
+  <button class="tab-btn" onclick="switchTab('intern')">or3-intern Pain Points</button>
+  <button class="tab-btn" onclick="switchTab('suggestions')">Top Simplifications</button>
+</div>
+
+<div id="tab-summary" class="tab-content active">
+  <p style="font-size:1.05rem; margin-bottom:16px;">
+    <strong>Both products suffer from the same disease:</strong> they were built by brilliant engineers
+    who exposed <em>everything</em> to the user. Every knob, every slider, every internal concept has
+    found its way into the UI and CLI. The result is a system that requires a computer science degree
+    to configure — and even then, you'll need to read 16+ markdown documents to understand it all.
+  </p>
+
+  <div class="card problem">
+    <h3><span class="severity sev-high">HIGH</span> The Core Problem</h3>
+    <p>
+      OR3 has <strong>two products</strong> (a terminal CLI and a mobile/web app) that expose
+      <strong>the same 22+ configuration sections, 48+ env vars, and 30+ pages</strong>.
+      A user needs to understand MCP, embeddings, subagents, runtime profiles, safety modes,
+      channel policies, trusted origins, CIDRs, passkeys, and token budgets — just to get started.
+    </p>
+  </div>
+
+  <div class="card good">
+    <h3><span class="severity sev-low">NOTE</span> What's Actually Good</h3>
+    <ul style="padding-left:20px;">
+      <li>The <strong>retro pixel-art aesthetic</strong> is warm and distinctive — it feels human</li>
+      <li>The <strong>plain-language layer</strong> (<code>lang</code> package) already maps technical errors to friendly messages — it just needs to be used more</li>
+      <li>The app's <strong>Simple Settings</strong> concept (8 themed sections) is the right direction — it just sprawled too far</li>
+      <li>The <strong>Electron First-Run Wizard</strong> is excellent — step-by-step, plain language, progress bar. The CLI needs this too.</li>
+      <li>Documentation is <strong>thorough</strong> (16+ docs) — just organized for engineers, not humans</li>
+    </ul>
+  </div>
+</div>
+
+<div id="tab-app" class="tab-content">
+  <h3>😵 App-Specific Confusion</h3>
+
+  <div class="card problem">
+    <h3><span class="severity sev-high">HIGH</span> "Agent" is the Wrong Word</h3>
+    <p>The bottom nav has an <strong>Agents</strong> tab. Non-technical users think of travel agents or insurance agents. The "Agent Command Center" uses "runner", "thinking level", "tool policy", "isolation" — pure developer jargon. A 90-year-old has no reference point for any of this.</p>
+    <p><span class="suggestion">→ Call it "Tasks" or "Delegation." Hide runners/models behind an "advanced" toggle.</span></p>
+  </div>
+
+  <div class="card problem">
+    <h3><span class="severity sev-high">HIGH</span> No Onboarding for Web/Mobile Users</h3>
+    <p>iOS/Android/web users land on an empty chat page. There's no guided setup. They must discover <code>/settings/pair</code> on their own. The "Hi, I'm or3-intern" greeting is friendly, but sending a message to an unpaired device just fails silently.</p>
+    <p><span class="suggestion">→ Show a 3-step onboarding card on first launch: (1) Connect to your computer (2) Pick a name (3) Try a chat.</span></p>
+  </div>
+
+  <div class="card problem">
+    <h3><span class="severity sev-high">HIGH</span> Chat Composer Has Too Many Controls</h3>
+    <p>The chat input has: <strong>mode switcher</strong> (Chat/Ask/Work/Admin), <strong>runner picker</strong>, <strong>model picker</strong>, <strong>thinking level slider</strong>, attachments, slash commands, file mentions, AND a send button. That's 7+ decisions before typing a single message.</p>
+    <p><span class="suggestion">→ Default to "Chat" mode with smart auto-selection. Put everything else under one "Options" button.</span></p>
+  </div>
+
+  <div class="card warning">
+    <h3><span class="severity sev-medium">MEDIUM</span> Terminal Exposed Without Warning</h3>
+    <p>The Terminal page exposes a full Linux terminal via xterm.js. No safety warning. No confirmation. A curious tap opens a blinking cursor in a shell — terrifying for non-technical users, dangerous for everyone.</p>
+    <p><span class="suggestion">→ Gate behind a "I know what I'm doing" confirmation. Consider hiding entirely unless in "developer mode."</span></p>
+  </div>
+
+  <div class="card warning">
+    <h3><span class="severity sev-medium">MEDIUM</span> 30+ Page Routes is Absurd</h3>
+    <p>Between Chat, Agents, Add, Computer (with sub-pages), Settings (with 8+ sub-pages), Activity, Approvals, Memory, Scheduled, Notes, Prompts, Pair, Passkeys, Heartbeat, Observability, Permissions, Skills, Addons — the navigation is a labyrinth.</p>
+    <p><span class="suggestion">→ Collapse to 4 tabs: Chat, Tasks, Files, Settings. Everything else is accessible from within those.</span></p>
+  </div>
+
+  <div class="card warning">
+    <h3><span class="severity sev-medium">MEDIUM</span> Settings Save Review Shows Raw Config Keys</h3>
+    <p>When saving "Simple Settings" changes, the review screen shows internal config keys like <code>routing.chatProvider</code>, <code>exec.allowedPrograms</code>. This breaks the "simple" abstraction.</p>
+    <p><span class="suggestion">→ Show only the friendly label that changed, not the raw key.</span></p>
+  </div>
+
+  <div class="card warning">
+    <h3><span class="severity sev-medium">MEDIUM</span> Observability is a Developer Tool in User Settings</h3>
+    <p>Live logs, traces, and service events are exposed at <code>/settings/observability</code>. This is pure debugging infrastructure that serves zero purpose for end users.</p>
+    <p><span class="suggestion">→ Move to a hidden Developer Mode or remove from navigation entirely.</span></p>
+  </div>
+</div>
+
+<div id="tab-intern" class="tab-content">
+  <h3>😵 CLI-Specific Confusion</h3>
+
+  <div class="card problem">
+    <h3><span class="severity sev-high">HIGH</span> Four Competing Setup Wizards</h3>
+    <p>New users face <code>or3-intern setup</code>, <code>init</code>, <code>configure</code>, AND <code>settings</code> — all doing similar things differently. The README literally says "Use <code>setup</code> for the plain-language path. Use <code>settings</code> when you want to revisit. Use <code>configure</code> from a normal terminal." That's cognitive overload.</p>
+    <p><span class="suggestion">→ ONE setup experience. <code>or3-intern setup</code> for first run, <code>or3-intern settings</code> to revisit. Deprecate <code>init</code> and <code>configure</code> from user-facing paths.</span></p>
+  </div>
+
+  <div class="card problem">
+    <h3><span class="severity sev-high">HIGH</span> 19 Commands, 11 With Sub-Commands</h3>
+    <p>The CLI has <code>embeddings status|rebuild</code>, <code>skills list|info|check|search|install|update|remove</code>, <code>devices list|requests|approve|deny|rotate|revoke</code>, <code>pairing list|request|approve|deny|exchange</code>, and more. The root help is a flat table — no grouping by user role.</p>
+    <p><span class="suggestion">→ Group commands: "Everyday" (chat, settings, version), "Setup" (setup, pair, doctor), "Advanced" (everything else). Hide advanced by default.</span></p>
+  </div>
+
+  <div class="card problem">
+    <h3><span class="severity sev-high">HIGH</span> "Safety Mode" vs "Runtime Profile" — Two Systems, Same Job</h3>
+    <p>The consumer layer uses "Relaxed / Balanced / Locked Down" safety modes. Underneath are 5 runtime profiles with different enforcement. The <code>settings</code> TUI exposes raw <code>runtimeProfile</code> values. Users don't know which abstraction to use.</p>
+    <p><span class="suggestion">→ Expose ONLY safety modes to users. Runtime profiles are an implementation detail.</span></p>
+  </div>
+
+  <div class="card warning">
+    <h3><span class="severity sev-medium">MEDIUM</span> Pairing Requires a Networking Degree</h3>
+    <p>To pair a phone, you need: <code>service</code> running, correct listen address, <code>trustedBrowserOrigins</code> matching exactly, <code>trustedBrowserCIDRs</code> covering the client IP, shared secret, and optionally Tailscale. The Tailscale guide alone is 312 lines troubleshooting 5+ failure modes.</p>
+    <p><span class="suggestion">→ Add <code>or3-intern connect-device --auto</code> that detects network config and guides with copy-paste commands.</span></p>
+  </div>
+
+  <div class="card warning">
+    <h3><span class="severity sev-medium">MEDIUM</span> No "It's Working!" Moment</h3>
+    <p>After setup, <code>or3-intern chat</code> works, but there's no celebration or next steps. The setup review says "Saved setup. OR3 is ready to chat." For a product that can do Telegram bots, Slack integrations, cron jobs, webhooks — users walk away with no idea what's possible.</p>
+    <p><span class="suggestion">→ Post-setup "What now?" with simple checkboxes: Try a chat, Connect Telegram, Pair your phone, Set up automation.</span></p>
+  </div>
+</div>
+
+<div id="tab-suggestions" class="tab-content">
+  <h3>💡 The Top 10 Simplifications (ordered by impact)</h3>
+
+  <div class="card idea">
+    <h3>#1 — Reduce to ONE Setup Experience</h3>
+    <p>Merge <code>setup</code>, <code>init</code>, and <code>configure</code> into a single guided flow. The Electron First-Run Wizard already does this beautifully — bring that same step-by-step clarity to the CLI and web/mobile onboarding. Ask 4 questions max: "What AI service do you use?", "Where should I work?", "How careful should I be?", "What's your name for me?"</p>
+    <span class="pill both">Both Apps</span> <span class="pill" style="background:#e8f5e9;color:#2e7d32;">Highest Impact</span>
+  </div>
+
+  <div class="card idea">
+    <h3>#2 — Kill the Jargon: Rename Everything for Humans</h3>
+    <table>
+      <tr><th>Current (Engineer-Speak)</th><th>→</th><th>Grandma-Friendly</th></tr>
+      <tr><td class="jargon-term">Agent / Subagent</td><td>→</td><td class="suggestion">Task / Background Task</td></tr>
+      <tr><td class="jargon-term">Embeddings / Vector Search</td><td>→</td><td class="suggestion">Memory Search</td></tr>
+      <tr><td class="jargon-term">MCP Add-ons</td><td>→</td><td class="suggestion">Connected Tools</td></tr>
+      <tr><td class="jargon-term">Runner (or3-intern, opencode...)</td><td>→</td><td class="suggestion">AI Brain (hide in advanced)</td></tr>
+      <tr><td class="jargon-term">Thinking Level</td><td>→</td><td class="suggestion">Thoroughness (Quick → Deep Think)</td></tr>
+      <tr><td class="jargon-term">Tool Calls</td><td>→</td><td class="suggestion">Actions</td></tr>
+      <tr><td class="jargon-term">Tool Policy</td><td>→</td><td class="suggestion">What can I do?</td></tr>
+      <tr><td class="jargon-term">Fallback Model</td><td>→</td><td class="suggestion">Backup AI</td></tr>
+      <tr><td class="jargon-term">Runtime Profile</td><td>→</td><td class="suggestion">(hide entirely — use Safety Mode)</td></tr>
+      <tr><td class="jargon-term">Heartbeat</td><td>→</td><td class="suggestion">Auto Check-ins</td></tr>
+      <tr><td class="jargon-term">Cron / Cron Job</td><td>→</td><td class="suggestion">Scheduled Task</td></tr>
+      <tr><td class="jargon-term">Observability</td><td>→</td><td class="suggestion">(remove from user UI)</td></tr>
+      <tr><td class="jargon-term">Consolidation</td><td>→</td><td class="suggestion">Memory Cleanup</td></tr>
+      <tr><td class="jargon-term">Quota</td><td>→</td><td class="suggestion">Usage Limit</td></tr>
+    </table>
+    <span class="pill both">Both Apps</span>
+  </div>
+
+  <div class="card idea">
+    <h3>#3 — Collapse Navigation to 4 Tabs</h3>
+    <p>The app currently has ~30 routes. Simplify to:</p>
+    <table>
+      <tr><th>Tab</th><th>Contains</th></tr>
+      <tr><td><strong>💬 Chat</strong></td><td>Main conversation + quick actions (notes, prompts, upload)</td></tr>
+      <tr><td><strong>📋 Tasks</strong></td><td>Agent delegation + activity history + approvals (merged)</td></tr>
+      <tr><td><strong>📁 Files</strong></td><td>Computer overview + file browser + editor (terminal hidden behind advanced)</td></tr>
+      <tr><td><strong>⚙️ Settings</strong></td><td>3 sections: AI Provider, Safety, Connected Apps. Everything else behind "Advanced..."</td></tr>
+    </table>
+    <span class="pill app">or3-app</span>
+  </div>
+
+  <div class="card idea">
+    <h3>#4 — "Just Chat" Mode as Default</h3>
+    <p>When a user opens the app, they see a clean chat interface. No mode switcher, no runner picker, no thinking slider. Just a text box and a send button. The system intelligently picks the right AI based on the question. Advanced users can tap a small "..." button to reveal options.</p>
+    <span class="pill app">or3-app</span>
+  </div>
+
+  <div class="card idea">
+    <h3>#5 — Three Settings, Not Twenty-Two</h3>
+    <p>Reduce the 22 config sections + 8 Simple Settings groups to just 3 visible surfaces:</p>
+    <ul style="padding-left:20px; margin:8px 0;">
+      <li><strong>AI Provider</strong> — Pick your AI service, enter your key, done</li>
+      <li><strong>Safety</strong> — Relaxed / Balanced / Locked Down (one slider)</li>
+      <li><strong>Connected Apps</strong> — Telegram, Discord, etc. (one card each)</li>
+    </ul>
+    <p>Everything else (model routing, memory config, tool policies, channel security, token budgets, document indexing, runtime profiles, hardening, quotas, sandboxes, audit chains) goes behind a single "Advanced Settings" gate with a warning.</p>
+    <span class="pill both">Both Apps</span>
+  </div>
+
+  <div class="card idea">
+    <h3>#6 — Guided "What Now?" After Setup</h3>
+    <p>After first setup, show a card with a simple checklist:</p>
+    <ul class="checklist">
+      <li><strong>Try a chat</strong> — "Ask me to check your computer or summarize a file"</li>
+      <li><strong>Pair your phone</strong> — "Chat with me from anywhere"</li>
+      <li><strong>Connect Telegram</strong> — "Text me like you text your friends"</li>
+      <li><strong>Set a schedule</strong> — "I can check in on you daily"</li>
+    </ul>
+    <p>Each item opens the exact setup flow. Users see <em>what's possible</em> instead of a blank screen.</p>
+    <span class="pill both">Both Apps</span>
+  </div>
+
+  <div class="card idea">
+    <h3>#7 — Group CLI Commands by User Role</h3>
+    <p>Instead of a flat 19-command table, organize <code>or3-intern --help</code> into:</p>
+    <table>
+      <tr><th>Everyday</th><td><code>chat</code>, <code>settings</code>, <code>permissions</code>, <code>version</code></td></tr>
+      <tr><th>Setup</th><td><code>setup</code>, <code>pair</code>, <code>doctor</code></td></tr>
+      <tr><th>Advanced</th><td>Everything else (hidden by default, shown with <code>--help-all</code>)</td></tr>
+    </table>
+    <span class="pill intern">or3-intern</span>
+  </div>
+
+  <div class="card idea">
+    <h3>#8 — Add Confirmation for Destructive Actions</h3>
+    <p>"Disconnect this app," "Remove device," "Revoke passkey," "Delete scheduled task" — none have confirmation dialogs. Settings has a "last change undo" but it's not obvious. Add simple "Are you sure?" prompts with a 3-second grace period before the button activates.</p>
+    <span class="pill app">or3-app</span>
+  </div>
+
+  <div class="card idea">
+    <h3>#9 — Show Only What's Configured</h3>
+    <p>If a user hasn't set up Telegram, don't show the Telegram settings card. If they haven't enabled the service, don't show pairing options. If they haven't added passkeys, don't show passkey management. Progressive disclosure: show features <em>as they become relevant</em>.</p>
+    <span class="pill both">Both Apps</span>
+  </div>
+
+  <div class="card idea">
+    <h3>#10 — Add a Dark Mode</h3>
+    <p>It's 2026. The warm light theme is lovely, but dark mode is table stakes. The CSS custom property system is already in place — it's ready for it.</p>
+    <span class="pill app">or3-app</span> <span class="pill" style="background:#e8f5e9;color:#2e7d32;">Quick Win</span>
+  </div>
+</div>
+
+<!-- JARGON GLOSSARY -->
+<h2><span class="emoji">📖</span> Jargon Translation Guide</h2>
+<p style="color:var(--muted); margin-bottom:16px;">
+  Click any term to see what it should be called instead. <strong>43 jargon terms</strong> found across both apps.
+</p>
+
+<div class="card" style="max-height:500px; overflow-y:auto;">
+  <table>
+    <tr><th>Engineer Says...</th><th>→</th><th>Grandma Hears...</th><th style="text-align:center">App</th></tr>
+    <tr onclick="this.classList.toggle('highlight')" style="cursor:pointer">
+      <td class="jargon-term">Agent</td><td>→</td><td class="suggestion">Task / Helper</td>
+      <td style="text-align:center"><span class="pill both">both</span></td>
+    </tr>
+    <tr onclick="this.classList.toggle('highlight')" style="cursor:pointer">
+      <td class="jargon-term">Subagent</td><td>→</td><td class="suggestion">Background Task</td>
+      <td style="text-align:center"><span class="pill both">both</span></td>
+    </tr>
+    <tr onclick="this.classList.toggle('highlight')" style="cursor:pointer">
+      <td class="jargon-term">Embedding / Vector Search</td><td>→</td><td class="suggestion">Memory Search</td>
+      <td style="text-align:center"><span class="pill both">both</span></td>
+    </tr>
+    <tr onclick="this.classList.toggle('highlight')" style="cursor:pointer">
+      <td class="jargon-term">MCP / Model Context Protocol</td><td>→</td><td class="suggestion">Connected Tools</td>
+      <td style="text-align:center"><span class="pill both">both</span></td>
+    </tr>
+    <tr onclick="this.classList.toggle('highlight')" style="cursor:pointer">
+      <td class="jargon-term">Runner</td><td>→</td><td class="suggestion">AI Brain (advanced)</td>
+      <td style="text-align:center"><span class="pill app">app</span></td>
+    </tr>
+    <tr onclick="this.classList.toggle('highlight')" style="cursor:pointer">
+      <td class="jargon-term">Thinking Level</td><td>→</td><td class="suggestion">Thoroughness</td>
+      <td style="text-align:center"><span class="pill app">app</span></td>
+    </tr>
+    <tr onclick="this.classList.toggle('highlight')" style="cursor:pointer">
+      <td class="jargon-term">Tool Call</td><td>→</td><td class="suggestion">Action</td>
+      <td style="text-align:center"><span class="pill app">app</span></td>
+    </tr>
+    <tr onclick="this.classList.toggle('highlight')" style="cursor:pointer">
+      <td class="jargon-term">Tool Policy</td><td>→</td><td class="suggestion">What I Can Do</td>
+      <td style="text-align:center"><span class="pill app">app</span></td>
+    </tr>
+    <tr onclick="this.classList.toggle('highlight')" style="cursor:pointer">
+      <td class="jargon-term">Fallback Model</td><td>→</td><td class="suggestion">Backup AI</td>
+      <td style="text-align:center"><span class="pill both">both</span></td>
+    </tr>
+    <tr onclick="this.classList.toggle('highlight')" style="cursor:pointer">
+      <td class="jargon-term">API Key</td><td>→</td><td class="suggestion">Service Key / Connection Key</td>
+      <td style="text-align:center"><span class="pill both">both</span></td>
+    </tr>
+    <tr onclick="this.classList.toggle('highlight')" style="cursor:pointer">
+      <td class="jargon-term">API Base</td><td>→</td><td class="suggestion">Service Address</td>
+      <td style="text-align:center"><span class="pill both">both</span></td>
+    </tr>
+    <tr onclick="this.classList.toggle('highlight')" style="cursor:pointer">
+      <td class="jargon-term">Runtime Profile</td><td>→</td><td class="suggestion">(hidden — use Safety Mode)</td>
+      <td style="text-align:center"><span class="pill intern">intern</span></td>
+    </tr>
+    <tr onclick="this.classList.toggle('highlight')" style="cursor:pointer">
+      <td class="jargon-term">Heartbeat</td><td>→</td><td class="suggestion">Auto Check-ins</td>
+      <td style="text-align:center"><span class="pill both">both</span></td>
+    </tr>
+    <tr onclick="this.classList.toggle('highlight')" style="cursor:pointer">
+      <td class="jargon-term">Cron / Cron Job</td><td>→</td><td class="suggestion">Scheduled Task</td>
+      <td style="text-align:center"><span class="pill app">app</span></td>
+    </tr>
+    <tr onclick="this.classList.toggle('highlight')" style="cursor:pointer">
+      <td class="jargon-term">Observability</td><td>→</td><td class="suggestion">(remove from user UI)</td>
+      <td style="text-align:center"><span class="pill app">app</span></td>
+    </tr>
+    <tr onclick="this.classList.toggle('highlight')" style="cursor:pointer">
+      <td class="jargon-term">Consolidation</td><td>→</td><td class="suggestion">Memory Cleanup</td>
+      <td style="text-align:center"><span class="pill intern">intern</span></td>
+    </tr>
+    <tr onclick="this.classList.toggle('highlight')" style="cursor:pointer">
+      <td class="jargon-term">Token Budget</td><td>→</td><td class="suggestion">Memory Limit (advanced)</td>
+      <td style="text-align:center"><span class="pill intern">intern</span></td>
+    </tr>
+    <tr onclick="this.classList.toggle('highlight')" style="cursor:pointer">
+      <td class="jargon-term">Quota</td><td>→</td><td class="suggestion">Usage Limit</td>
+      <td style="text-align:center"><span class="pill intern">intern</span></td>
+    </tr>
+    <tr onclick="this.classList.toggle('highlight')" style="cursor:pointer">
+      <td class="jargon-term">Passkey / WebAuthn</td><td>→</td><td class="suggestion">Face ID / Fingerprint</td>
+      <td style="text-align:center"><span class="pill app">app</span></td>
+    </tr>
+    <tr onclick="this.classList.toggle('highlight')" style="cursor:pointer">
+      <td class="jargon-term">Step-Up Verification</td><td>→</td><td class="suggestion">Verify Your Identity</td>
+      <td style="text-align:center"><span class="pill app">app</span></td>
+    </tr>
+    <tr onclick="this.classList.toggle('highlight')" style="cursor:pointer">
+      <td class="jargon-term">Transport (stdio/HTTP)</td><td>→</td><td class="suggestion">Connection Type (advanced)</td>
+      <td style="text-align:center"><span class="pill app">app</span></td>
+    </tr>
+    <tr onclick="this.classList.toggle('highlight')" style="cursor:pointer">
+      <td class="jargon-term">Trusted Browser Origins / CIDRs</td><td>→</td><td class="suggestion">Allowed Devices (advanced)</td>
+      <td style="text-align:center"><span class="pill intern">intern</span></td>
+    </tr>
+    <tr onclick="this.classList.toggle('highlight')" style="cursor:pointer">
+      <td class="jargon-term">Inbound Policy</td><td>→</td><td class="suggestion">Who Can Message Me</td>
+      <td style="text-align:center"><span class="pill intern">intern</span></td>
+    </tr>
+    <tr onclick="this.classList.toggle('highlight')" style="cursor:pointer">
+      <td class="jargon-term">Allowlist / Denylist</td><td>→</td><td class="suggestion">Allowed / Blocked</td>
+      <td style="text-align:center"><span class="pill both">both</span></td>
+    </tr>
+    <tr onclick="this.classList.toggle('highlight')" style="cursor:pointer">
+      <td class="jargon-term">Session Key / Scope</td><td>→</td><td class="suggestion">Conversation Thread</td>
+      <td style="text-align:center"><span class="pill intern">intern</span></td>
+    </tr>
+    <tr onclick="this.classList.toggle('highlight')" style="cursor:pointer">
+      <td class="jargon-term">Bootstrap</td><td>→</td><td class="suggestion">Startup Instructions (advanced)</td>
+      <td style="text-align:center"><span class="pill intern">intern</span></td>
+    </tr>
+    <tr onclick="this.classList.toggle('highlight')" style="cursor:pointer">
+      <td class="jargon-term">Audit Chain</td><td>→</td><td class="suggestion">Activity Log</td>
+      <td style="text-align:center"><span class="pill intern">intern</span></td>
+    </tr>
+    <tr onclick="this.classList.toggle('highlight')" style="cursor:pointer">
+      <td class="jargon-term">Bubblewrap Sandbox</td><td>→</td><td class="suggestion">Safety Container (advanced)</td>
+      <td style="text-align:center"><span class="pill intern">intern</span></td>
+    </tr>
+  </table>
+</div>
+
+<!-- THE GRANDMA JOURNEY -->
+<h2><span class="emoji">👵</span> The "Grandma Journey" — Then vs. Now</h2>
+
+<div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin:16px 0;">
+  <div class="card problem">
+    <h3>Current Journey (😱)</h3>
+    <ol style="padding-left:20px; line-height:2;">
+      <li>Download the app</li>
+      <li>Stare at empty chat screen — nothing works</li>
+      <li>Tap around, find Settings</li>
+      <li>Find "Pair new computer" buried in Settings</li>
+      <li>Need to install and run <code>or3-intern service</code> on a computer</li>
+      <li>Configure trusted origins, CIDRs, secrets</li>
+      <li>Scan QR or type a pairing code</li>
+      <li>Go back to Chat — it works!</li>
+      <li>See "runner picker", "thinking level", "tool policy"</li>
+      <li>Accidentally open Terminal — panic</li>
+      <li>Settings has 8+ sections with "Embedding Dimensions"</li>
+      <li>Give up, call grandson</li>
+    </ol>
+  </div>
+  <div class="card good">
+    <h3>Simplified Journey (😊)</h3>
+    <ol style="padding-left:20px; line-height:2;">
+      <li>Download the app</li>
+      <li>See "Welcome! Let's get you set up." card</li>
+      <li>Tap "Connect to my computer"</li>
+      <li>App auto-discovers or shows simple code</li>
+      <li>Run one command on computer: <code>or3-intern pair --auto</code></li>
+      <li>Connection established! 🎉</li>
+      <li>"What would you like to try?" — Chat / Schedule / Connect Apps</li>
+      <li>Type a message, get a response. That's it.</li>
+      <li>Settings: AI Service, Safety Level, Connected Apps. Three things.</li>
+      <li>Everything else behind "Advanced..." with a warning</li>
+    </ol>
+  </div>
+</div>
+
+<!-- DETAILED FINDINGS -->
+<h2><span class="emoji">📋</span> Detailed Findings</h2>
+
+<!-- Expandable sections -->
+<div class="card toggle-section" onclick="this.querySelector('.toggle-body').classList.toggle('open')">
+  <h3 style="margin:0; cursor:pointer;">📱 or3-app — Page-by-Page Audit <span style="font-size:0.8rem;color:var(--muted)">(click to expand)</span></h3>
+  <div class="toggle-body" style="margin-top:16px;">
+    <table>
+      <tr><th>Page</th><th>Verdict</th><th>Issue</th></tr>
+      <tr><td><strong>Chat (/)</strong></td><td><span class="severity sev-medium">MEDIUM</span></td><td>Too many controls in composer. Mode switcher + runner + model + thinking level before you even type.</td></tr>
+      <tr><td><strong>Agents</strong></td><td><span class="severity sev-high">HIGH</span></td><td>"Agent Command Center" uses runner, thinking level, tool policy, isolation — pure dev jargon. Rename to "Tasks."</td></tr>
+      <tr><td><strong>Add (+) </strong></td><td><span class="severity sev-medium">MEDIUM</span></td><td>6 actions in a grid causes decision paralysis. "New Agent Task" is scary. "MCP add-ons" means nothing.</td></tr>
+      <tr><td><strong>Computer</strong></td><td><span class="severity sev-medium">MEDIUM</span></td><td>Health/readiness/capabilities dashboard is fine. But Terminal exposure with no warning is dangerous.</td></tr>
+      <tr><td><strong>Settings</strong></td><td><span class="severity sev-high">HIGH</span></td><td>8 Simple Settings sections + 8 specialized pages. Collapse to 3 visible sections + Advanced gate.</td></tr>
+      <tr><td><strong>Activity</strong></td><td><span class="severity sev-low">LOW</span></td><td>Nested expansion (day → job) is information-dense on mobile. Merge into Tasks tab.</td></tr>
+      <tr><td><strong>Approvals</strong></td><td><span class="severity sev-low">LOW</span></td><td>Clear purpose. Badge creates anxiety — add snooze/batch. Merge into Tasks tab.</td></tr>
+      <tr><td><strong>Memory</strong></td><td><span class="severity sev-high">HIGH</span></td><td>"Check embeddings," "re-scan notes" — completely opaque. Should be automatic, not user-managed.</td></tr>
+      <tr><td><strong>Scheduled</strong></td><td><span class="severity sev-low">LOW</span></td><td>Actually uses "scheduled task" language! Good. Should be accessible from Settings → Automation.</td></tr>
+      <tr><td><strong>Notes / Prompts</strong></td><td><span class="severity sev-low">LOW</span></td><td>Markdown editors are fine. Favorites on notes vs pinned on chat feel like two features.</td></tr>
+      <tr><td><strong>Pair</strong></td><td><span class="severity sev-high">HIGH</span></td><td>Secure pairing + compatibility code + legacy modes. Too many options. Should auto-detect best method.</td></tr>
+      <tr><td><strong>Terminal</strong></td><td><span class="severity sev-high">HIGH</span></td><td>Full Linux terminal with no warning. Hide behind developer mode or add scary confirmation.</td></tr>
+      <tr><td><strong>Observability</strong></td><td><span class="severity sev-high">HIGH</span></td><td>Live logs/traces in user settings. Pure dev tool. Remove from navigation.</td></tr>
+      <tr><td><strong>Settings → Advanced</strong></td><td><span class="severity sev-medium">MEDIUM</span></td><td>Raw config field editor. Fine if gated behind Advanced, but shows internal keys to users.</td></tr>
+      <tr><td><strong>Settings → Heartbeat</strong></td><td><span class="severity sev-low">LOW</span></td><td>"Automatic check-ins" is good language. Markdown checklist for tasks is nice.</td></tr>
+      <tr><td><strong>Settings → Permissions</strong></td><td><span class="severity sev-low">LOW</span></td><td>Plain-language permissions receipt is great. More of this, please.</td></tr>
+    </table>
+  </div>
+</div>
+
+<div class="card toggle-section" onclick="this.querySelector('.toggle-body').classList.toggle('open')">
+  <h3 style="margin:0; cursor:pointer;">💻 or3-intern — CLI Surface Audit <span style="font-size:0.8rem;color:var(--muted)">(click to expand)</span></h3>
+  <div class="toggle-body" style="margin-top:16px;">
+    <table>
+      <tr><th>Command</th><th>Verdict</th><th>Issue</th></tr>
+      <tr><td><code>chat</code></td><td><span class="severity sev-low">LOW</span></td><td>Core feature, works. Slash commands are discoverable. Good.</td></tr>
+      <tr><td><code>setup</code></td><td><span class="severity sev-medium">MEDIUM</span></td><td>Good plain-language flow, but competes with <code>init</code> and <code>configure</code>. Needs to be THE ONE.</td></tr>
+      <tr><td><code>init</code></td><td><span class="severity sev-high">HIGH</span></td><td>Legacy wizard. Duplicates setup. Should be deprecated or merged.</td></tr>
+      <tr><td><code>configure</code></td><td><span class="severity sev-high">HIGH</span></td><td>Full TUI with ALL config sections. Operator tool, not user tool. Hide from normal help.</td></tr>
+      <tr><td><code>settings</code></td><td><span class="severity sev-medium">MEDIUM</span></td><td>Task-based settings is good. But 9 sections is too many. Reduce to 3-4.</td></tr>
+      <tr><td><code>permissions</code></td><td><span class="severity sev-low">LOW</span></td><td>Plain-language safety summary. Excellent. Keep.</td></tr>
+      <tr><td><code>pair</code></td><td><span class="severity sev-high">HIGH</span></td><td>Too many manual steps. Needs <code>--auto</code> mode that detects and fixes config.</td></tr>
+      <tr><td><code>doctor</code></td><td><span class="severity sev-medium">MEDIUM</span></td><td>Incredible diagnostic tool, but "doctor" is a weird metaphor. Rename to <code>health</code> or <code>check</code>. 12 flags is too many.</td></tr>
+      <tr><td><code>serve</code></td><td><span class="severity sev-medium">MEDIUM</span></td><td>Runs all connected apps. Good purpose. Needs progress output so users know it's working.</td></tr>
+      <tr><td><code>service</code></td><td><span class="severity sev-high">HIGH</span></td><td>HTTP API server. Requires networking knowledge. Should auto-detect config issues.</td></tr>
+      <tr><td><code>embeddings</code></td><td><span class="severity sev-high">HIGH</span></td><td>"Embeddings status|rebuild" — should be automatic, not a user command.</td></tr>
+      <tr><td><code>skills</code></td><td><span class="severity sev-high">HIGH</span></td><td>8 sub-commands for skill bundles. Operator tool. Hide from normal help.</td></tr>
+      <tr><td><code>devices</code></td><td><span class="severity sev-medium">MEDIUM</span></td><td>Legacy device management. 7 sub-commands. Merge into <code>pair</code>.</td></tr>
+      <tr><td><code>secrets</code></td><td><span class="severity sev-high">HIGH</span></td><td>Encrypted secret management. Purely operator. Hide.</td></tr>
+      <tr><td><code>audit</code></td><td><span class="severity sev-high">HIGH</span></td><td>Tamper-evident audit chain inspection. Purely operator. Hide.</td></tr>
+    </table>
+  </div>
+</div>
+
+<div class="card toggle-section" onclick="this.querySelector('.toggle-body').classList.toggle('open')">
+  <h3 style="margin:0; cursor:pointer;">⚙️ Configuration Complexity <span style="font-size:0.8rem;color:var(--muted)">(click to expand)</span></h3>
+  <div class="toggle-body" style="margin-top:16px;">
+    <p>The config system has <strong>22 top-level sections</strong> and <strong>48+ environment variables</strong>. Here's what should be visible vs hidden:</p>
+    <table>
+      <tr><th>Section</th><th>Visibility</th><th>Rationale</th></tr>
+      <tr><td>Provider / AI config</td><td><span class="severity sev-low">VISIBLE</span></td><td>User must set this up. Simplify to provider + key + model.</td></tr>
+      <tr><td>Workspace dirs</td><td><span class="severity sev-low">VISIBLE</span></td><td>Users understand folders. Show with sensible defaults.</td></tr>
+      <tr><td>Safety mode</td><td><span class="severity sev-low">VISIBLE</span></td><td>One slider: Relaxed → Balanced → Locked Down. That's it.</td></tr>
+      <tr><td>Channels (Telegram etc)</td><td><span class="severity sev-low">VISIBLE</span></td><td>Per-channel setup cards. Only show configured ones.</td></tr>
+      <tr><td>Model routing (per-role)</td><td><span class="severity sev-high">HIDDEN</span></td><td>Advanced. Let the system pick sensible defaults.</td></tr>
+      <tr><td>Tool execution / hardening</td><td><span class="severity sev-high">HIDDEN</span></td><td>Tied to safety mode. No manual config needed.</td></tr>
+      <tr><td>Embedding / doc index</td><td><span class="severity sev-high">HIDDEN</span></td><td>Auto-managed. Only expose if broken.</td></tr>
+      <tr><td>Triggers / heartbeat / cron</td><td><span class="severity sev-medium">SEMI</span></td><td>Simple on/off + frequency. Hide advanced scheduling.</td></tr>
+      <tr><td>Service / pairing / auth</td><td><span class="severity sev-high">HIDDEN</span></td><td>Auto-configured by <code>pair --auto</code>. No manual CIDR editing.</td></tr>
+      <tr><td>Runtime profile</td><td><span class="severity sev-high">HIDDEN</span></td><td>Derived from safety mode. Never exposed to users.</td></tr>
+      <tr><td>Subagents / token budgets</td><td><span class="severity sev-high">HIDDEN</span></td><td>Advanced performance tuning. Not user-facing.</td></tr>
+      <tr><td>Agent CLI delegation</td><td><span class="severity sev-high">HIDDEN</span></td><td>Power user feature. Behind advanced gate.</td></tr>
+      <tr><td>Skills / MCP servers</td><td><span class="severity sev-high">HIDDEN</span></td><td>Power user feature. Behind advanced gate.</td></tr>
+      <tr><td>Secrets / audit</td><td><span class="severity sev-high">HIDDEN</span></td><td>Operator tools. Never in user surfaces.</td></tr>
+    </table>
+  </div>
+</div>
+
+<!-- RECOMMENDED ACTION PLAN -->
+<h2><span class="emoji">🗺️</span> Recommended Simplification Roadmap</h2>
+
+<div class="card idea">
+  <h3>Phase 1: Immediate Wins (1-2 weeks)</h3>
+  <table>
+    <tr><th>Action</th><th>Impact</th><th>Effort</th></tr>
+    <tr><td>Rename "Agents" tab to "Tasks"</td><td><span class="severity sev-low">HIGH</span></td><td>Minutes</td></tr>
+    <tr><td>Hide mode switcher + runner + model + thinking behind "Options" button in chat</td><td><span class="severity sev-low">HIGH</span></td><td>Hours</td></tr>
+    <tr><td>Add confirmation dialog to Terminal page</td><td><span class="severity sev-low">HIGH</span></td><td>Minutes</td></tr>
+    <tr><td>Remove Observability from settings navigation</td><td><span class="severity sev-low">MEDIUM</span></td><td>Minutes</td></tr>
+    <tr><td>Add confirmation to Disconnect, Revoke, Delete actions</td><td><span class="severity sev-low">MEDIUM</span></td><td>Hours</td></tr>
+    <tr><td>Group CLI help into Everyday / Setup / Advanced</td><td><span class="severity sev-low">HIGH</span></td><td>Hours</td></tr>
+  </table>
+</div>
+
+<div class="card idea">
+  <h3>Phase 2: Structural Cleanup (2-4 weeks)</h3>
+  <table>
+    <tr><th>Action</th><th>Impact</th><th>Effort</th></tr>
+    <tr><td>Merge <code>init</code> into <code>setup</code>; hide <code>configure</code> from normal help</td><td><span class="severity sev-low">HIGH</span></td><td>Days</td></tr>
+    <tr><td>Reduce app navigation to Chat / Tasks / Files / Settings (4 tabs)</td><td><span class="severity sev-low">HIGH</span></td><td>Days</td></tr>
+    <tr><td>Collapse settings to 3 visible sections + Advanced gate</td><td><span class="severity sev-low">HIGH</span></td><td>Days</td></tr>
+    <tr><td>Add "What Now?" post-setup checklist (both app and CLI)</td><td><span class="severity sev-low">HIGH</span></td><td>Days</td></tr>
+    <tr><td>Rename doctor → health; reduce flags; make --check default</td><td><span class="severity sev-low">MEDIUM</span></td><td>Days</td></tr>
+    <tr><td>Add <code>pair --auto</code> that detects network and fixes config</td><td><span class="severity sev-low">HIGH</span></td><td>Days</td></tr>
+  </table>
+</div>
+
+<div class="card idea">
+  <h3>Phase 3: Deep Simplification (4-8 weeks)</h3>
+  <table>
+    <tr><th>Action</th><th>Impact</th><th>Effort</th></tr>
+    <tr><td>Full plain-language rename pass (43 jargon terms → friendly labels)</td><td><span class="severity sev-low">HIGH</span></td><td>Weeks</td></tr>
+    <tr><td>Progressive disclosure: only show features that are configured</td><td><span class="severity sev-low">HIGH</span></td><td>Weeks</td></tr>
+    <tr><td>Route ALL errors through <code>lang</code> package (no raw Go errors to users)</td><td><span class="severity sev-low">MEDIUM</span></td><td>Days</td></tr>
+    <tr><td>Onboarding flow for web/mobile (currently only Electron has it)</td><td><span class="severity sev-low">HIGH</span></td><td>Weeks</td></tr>
+    <tr><td>Dark mode</td><td><span class="severity sev-low">MEDIUM</span></td><td>Days</td></tr>
+    <tr><td>Remove Memory page from nav (auto-manage embeddings)</td><td><span class="severity sev-low">MEDIUM</span></td><td>Days</td></tr>
+  </table>
+</div>
+
+<!-- PRINCIPLES -->
+<h2><span class="emoji">🧭</span> Simplification Principles to Live By</h2>
+
+<div class="card good">
+  <ol style="padding-left:20px; line-height:2.2; font-size:1.05rem;">
+    <li><strong>If Grandma wouldn't understand the word, find a new word.</strong> "Embedding dimensions" → "Memory search." "MCP transport" → "Connection."</li>
+    <li><strong>The default path must work with zero configuration.</strong> Smart defaults for model, safety, workspace. User only provides API key.</li>
+    <li><strong>One way to do each thing.</strong> Not four setup wizards. Not three pairing methods. Pick the best one and kill the rest.</li>
+    <li><strong>Progressive disclosure.</strong> Start with Chat + Settings (3 sections). Everything else appears when needed.</li>
+    <li><strong>Celebrate success.</strong> After setup, after pairing, after first chat — show a "You did it!" moment. Humans need closure.</li>
+    <li><strong>Hide power, not remove it.</strong> Advanced users still get all 22 config sections, 48 env vars, raw terminal. They just go through a gate.</li>
+    <li><strong>Every destructive action needs a confirmation.</strong> Disconnect, delete, revoke, remove — all need "Are you sure?" with a brief delay.</li>
+    <li><strong>Test with actual grandmas.</strong> Not hypothetical ones. Sit a real non-technical person down and watch them struggle. Fix what they trip on.</li>
+  </ol>
+</div>
+
+<footer style="text-align:center; padding:40px 0; color:var(--muted); font-size:0.85rem; border-top:1px solid var(--border); margin-top:40px;">
+  OR3 UX Review — May 2026<br>
+  Generated by exploring every page, component, CLI command, and config surface across or3-app and or3-intern.<br>
+  No code was harmed in the making of this report.
+</footer>
+
+<script>
+function switchTab(name) {
+  document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  event.target.classList.add('active');
+}
+
+// Keyboard navigation for expandable sections
+document.querySelectorAll('.toggle-section').forEach(section => {
+  section.setAttribute('tabindex', '0');
+  section.setAttribute('role', 'button');
+  section.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      section.querySelector('.toggle-body').classList.toggle('open');
+    }
+  });
+});
+</script>
+
+</body>
+</html>

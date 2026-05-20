@@ -22,7 +22,7 @@ func TestSecureRelayHubForwardsOpaqueFrames(t *testing.T) {
 		deviceIDHash: "device-hash",
 		expiresAt:    time.Now().Add(time.Minute).UnixMilli(),
 	})
-	if !hub.forward(false, "device-hash", secureRelayEnvelope{Type: "opaque_frame", RouteID: "route"}) {
+	if result := hub.forward(false, "device-hash", secureRelayEnvelope{Type: "opaque_frame", RouteID: "route"}); !result.Delivered {
 		t.Fatal("expected device-to-host frame to forward")
 	}
 	select {
@@ -30,7 +30,7 @@ func TestSecureRelayHubForwardsOpaqueFrames(t *testing.T) {
 	default:
 		t.Fatal("expected host to receive forwarded frame")
 	}
-	if !hub.forward(true, "host-hash", secureRelayEnvelope{Type: "opaque_frame", RouteID: "route"}) {
+	if result := hub.forward(true, "host-hash", secureRelayEnvelope{Type: "opaque_frame", RouteID: "route"}); !result.Delivered {
 		t.Fatal("expected host-to-device frame to forward")
 	}
 	select {
@@ -49,7 +49,7 @@ func TestSecureRelayHubRejectsExpiredRoutes(t *testing.T) {
 		deviceIDHash: "device-hash",
 		expiresAt:    time.Now().Add(-time.Second).UnixMilli(),
 	})
-	if hub.forward(false, "device-hash", secureRelayEnvelope{Type: "opaque_frame", RouteID: "route"}) {
+	if result := hub.forward(false, "device-hash", secureRelayEnvelope{Type: "opaque_frame", RouteID: "route"}); result.Delivered || result.Code != "ROUTE_EXPIRED" {
 		t.Fatal("expected expired route not to forward")
 	}
 }
@@ -64,10 +64,10 @@ func TestSecureRelayHubRejectsMismatchedSender(t *testing.T) {
 		deviceIDHash: "device-hash",
 		expiresAt:    time.Now().Add(time.Minute).UnixMilli(),
 	})
-	if hub.forward(false, "device-imposter", secureRelayEnvelope{Type: "opaque_frame", RouteID: "route"}) {
+	if result := hub.forward(false, "device-imposter", secureRelayEnvelope{Type: "opaque_frame", RouteID: "route"}); result.Delivered || result.Code != "SENDER_MISMATCH" {
 		t.Fatal("expected device sender mismatch to be rejected")
 	}
-	if hub.forward(true, "host-imposter", secureRelayEnvelope{Type: "opaque_frame", RouteID: "route"}) {
+	if result := hub.forward(true, "host-imposter", secureRelayEnvelope{Type: "opaque_frame", RouteID: "route"}); result.Delivered || result.Code != "SENDER_MISMATCH" {
 		t.Fatal("expected host sender mismatch to be rejected")
 	}
 }
@@ -118,7 +118,28 @@ func TestSecureRelayHubClosedTargetReturnsFailure(t *testing.T) {
 		deviceIDHash: "device-hash",
 		expiresAt:    time.Now().Add(time.Minute).UnixMilli(),
 	})
-	if hub.forward(false, "device-hash", secureRelayEnvelope{Type: "opaque_frame", RouteID: "route"}) {
+	if result := hub.forward(false, "device-hash", secureRelayEnvelope{Type: "opaque_frame", RouteID: "route"}); result.Delivered || result.Code != "TARGET_CLOSED" {
 		t.Fatal("expected forward to closed host peer to fail")
+	}
+}
+
+func TestSecureRelayHubBackpressureReturnsFailureReason(t *testing.T) {
+	hub := newSecureConnectionRelayHub()
+	host := &secureRelayPeer{id: "host", send: make(chan secureRelayEnvelope, 1), closed: make(chan struct{})}
+	host.send <- secureRelayEnvelope{Type: "opaque_frame", RouteID: "existing"}
+	hub.registerHost("host-hash", host)
+	hub.registerDevice("device-hash", &secureRelayPeer{id: "device", send: make(chan secureRelayEnvelope, 1), closed: make(chan struct{})})
+	hub.registerRoute(secureRelayRoute{
+		routeID:      "route",
+		hostIDHash:   "host-hash",
+		deviceIDHash: "device-hash",
+		expiresAt:    time.Now().Add(time.Minute).UnixMilli(),
+	})
+	result := hub.forward(false, "device-hash", secureRelayEnvelope{Type: "opaque_frame", RouteID: "route", CorrelationID: "corr-1"})
+	if result.Delivered {
+		t.Fatal("expected backpressure to prevent delivery")
+	}
+	if result.Code != "TARGET_BACKPRESSURE" {
+		t.Fatalf("expected TARGET_BACKPRESSURE, got %q", result.Code)
 	}
 }

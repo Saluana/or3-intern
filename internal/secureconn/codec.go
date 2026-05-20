@@ -24,7 +24,10 @@ var cborDecMode = func() cbor.DecMode {
 	mode, err := cbor.DecOptions{
 		DupMapKey:        cbor.DupMapKeyEnforcedAPF,
 		TimeTag:          cbor.DecTagRequired,
+		// Bound decoder fan-out so hostile payloads cannot force unbounded
+		// allocation or pathologically deep pairing/session parsing work.
 		MaxArrayElements: 4096,
+		// Pair with MaxArrayElements as an anti-DoS ceiling for untrusted CBOR.
 		MaxMapPairs:      4096,
 	}.DecMode()
 	if err != nil {

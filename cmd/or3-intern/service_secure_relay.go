@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -44,6 +45,12 @@ type secureRelayRoute struct {
 	hostIDHash   string
 	deviceIDHash string
 	expiresAt    int64
+}
+
+type secureRelayForwardResult struct {
+	Delivered bool
+	Code      string
+	Message   string
 }
 
 func newSecureConnectionRelayHub() *secureConnectionRelayHub {
@@ -108,21 +115,24 @@ func (h *secureConnectionRelayHub) host(hostIDHash string) *secureRelayPeer {
 	return h.hosts[hostIDHash]
 }
 
-func (h *secureConnectionRelayHub) forward(fromHost bool, peerID string, env secureRelayEnvelope) bool {
+func (h *secureConnectionRelayHub) forward(fromHost bool, peerID string, env secureRelayEnvelope) secureRelayForwardResult {
 	h.mu.RLock()
 	route, ok := h.routes[strings.TrimSpace(env.RouteID)]
 	if !ok || (route.expiresAt > 0 && route.expiresAt <= time.Now().UTC().UnixMilli()) {
 		h.mu.RUnlock()
-		return false
+		if ok {
+			return secureRelayForwardResult{Code: "ROUTE_EXPIRED", Message: "relay route expired"}
+		}
+		return secureRelayForwardResult{Code: "ROUTE_NOT_FOUND", Message: "relay route unavailable"}
 	}
 	peerID = strings.TrimSpace(peerID)
 	if fromHost && peerID != route.hostIDHash {
 		h.mu.RUnlock()
-		return false
+		return secureRelayForwardResult{Code: "SENDER_MISMATCH", Message: "sender did not match the relay route host"}
 	}
 	if !fromHost && peerID != route.deviceIDHash {
 		h.mu.RUnlock()
-		return false
+		return secureRelayForwardResult{Code: "SENDER_MISMATCH", Message: "sender did not match the relay route device"}
 	}
 	var target *secureRelayPeer
 	if fromHost {
@@ -132,20 +142,44 @@ func (h *secureConnectionRelayHub) forward(fromHost bool, peerID string, env sec
 	}
 	h.mu.RUnlock()
 	if target == nil {
-		return false
+		return secureRelayForwardResult{Code: "TARGET_UNAVAILABLE", Message: "target peer is not connected"}
 	}
 	select {
 	case <-target.closed:
-		return false
+		return secureRelayForwardResult{Code: "TARGET_CLOSED", Message: "target peer already closed"}
 	default:
 	}
 	select {
 	case <-target.closed:
-		return false
+		return secureRelayForwardResult{Code: "TARGET_CLOSED", Message: "target peer already closed"}
 	case target.send <- env:
-		return true
+		return secureRelayForwardResult{Delivered: true}
 	default:
-		return false
+		return secureRelayForwardResult{Code: "TARGET_BACKPRESSURE", Message: "target peer send queue is full"}
+	}
+}
+
+func secureRelaySendForwardFailure(peer *secureRelayPeer, correlationID, code, message string) {
+	if peer == nil {
+		return
+	}
+	payload, err := json.Marshal(map[string]string{
+		"code":    strings.TrimSpace(code),
+		"message": strings.TrimSpace(message),
+	})
+	if err != nil {
+		return
+	}
+	select {
+	case <-peer.closed:
+		return
+	default:
+	}
+	select {
+	case <-peer.closed:
+		return
+	case peer.send <- secureRelayEnvelope{Type: "error", CorrelationID: correlationID, Payload: payload}:
+	default:
 	}
 }
 
@@ -264,6 +298,7 @@ func (s *serviceServer) handleSecureRelayWebSocket(w http.ResponseWriter, r *htt
 	}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
+		log.Printf("secure_relay: debug websocket upgrade failed host=%t id=%s remote=%s err=%v", host, strings.TrimSpace(id), strings.TrimSpace(r.RemoteAddr), err)
 		return
 	}
 	conn.SetReadLimit(secureRelayMaxFrameBytes)
@@ -303,7 +338,10 @@ func secureRelayReadPump(hub *secureConnectionRelayHub, peer *secureRelayPeer, h
 				}
 				continue
 			}
-			hub.forward(host, peer.id, env)
+			result := hub.forward(host, peer.id, env)
+			if !result.Delivered {
+				secureRelaySendForwardFailure(peer, env.CorrelationID, result.Code, result.Message)
+			}
 		}
 	}
 }

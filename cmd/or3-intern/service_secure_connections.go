@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -272,24 +273,38 @@ func writeSecurePairingError(w http.ResponseWriter, err error) {
 	}
 	var secureErr secureconn.SecureConnectionError
 	if errors.As(err, &secureErr) {
+		status := http.StatusBadRequest
+		code := secureErr.Code
+		message := secureErr.SafeMessage
 		switch secureErr.Code {
 		case secureconn.ErrorPairingExpired:
-			writeSecurePairingFriendlyError(w, http.StatusBadRequest, secureconn.ErrorPairingExpired, "This code expired. Refresh the QR on your computer.")
-			return
+			message = "This code expired. Refresh the QR on your computer."
 		case secureconn.ErrorPairingConsumed:
-			writeSecurePairingFriendlyError(w, http.StatusConflict, secureconn.ErrorPairingConsumed, "This code was already used. Refresh the QR.")
-			return
+			status = http.StatusConflict
+			message = "This code was already used. Refresh the QR."
+		case secureconn.ErrorPairingRejected:
+			status = http.StatusForbidden
+			if strings.TrimSpace(message) == "" {
+				message = "This pairing request was rejected on the computer."
+			}
+		case secureconn.ErrorRelayUnavailable:
+			status = http.StatusServiceUnavailable
+			if strings.TrimSpace(message) == "" {
+				message = "This computer is not reachable from this device."
+			}
+		default:
+			if strings.TrimSpace(message) == "" {
+				message = "This computer is not reachable from this device."
+			}
 		}
+		if strings.TrimSpace(code) == "" {
+			code = "PAIRING_FAILED"
+		}
+		writeSecurePairingFriendlyError(w, status, code, message)
+		return
 	}
-	text := strings.ToLower(err.Error())
-	switch {
-	case strings.Contains(text, "expired"):
-		writeSecurePairingFriendlyError(w, http.StatusBadRequest, secureconn.ErrorPairingExpired, "This code expired. Refresh the QR on your computer.")
-	case strings.Contains(text, "consumed") || strings.Contains(text, "already") || strings.Contains(text, "not awaiting"):
-		writeSecurePairingFriendlyError(w, http.StatusConflict, secureconn.ErrorPairingConsumed, "This code was already used. Refresh the QR.")
-	default:
-		writeSecurePairingFriendlyError(w, http.StatusBadRequest, "PAIRING_FAILED", "This computer is not reachable from this device.")
-	}
+	log.Printf("secure_connections: pairing error: %v", err)
+	writeSecurePairingFriendlyError(w, http.StatusBadRequest, "PAIRING_FAILED", "This computer is not reachable from this device.")
 }
 
 func (s *serviceServer) handleSecureConnectionPairingApprove(w http.ResponseWriter, r *http.Request, store *secureconn.TrustStore) {

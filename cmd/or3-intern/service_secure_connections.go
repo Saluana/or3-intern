@@ -326,7 +326,7 @@ func (s *serviceServer) handleSecureConnectionPairingApprove(w http.ResponseWrit
 	}
 	hash, _ := secureconn.EnrollmentCertificateHash(cert)
 	response := map[string]any{"certificate": cert, "certificate_hash": hash, "device": rec}
-	if s.broker != nil {
+	if s.broker != nil && s.config.Auth.AllowPairedTokenFallback {
 		legacyDevice, token, err := s.broker.RotateDeviceToken(r.Context(), rec.DeviceID, rec.Role, rec.DisplayName, map[string]any{
 			"secure_connection": true,
 			"host_id":           rec.HostID,

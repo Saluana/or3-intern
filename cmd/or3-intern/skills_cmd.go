@@ -277,7 +277,11 @@ func runSkillsCommandWithDeps(ctx context.Context, cfg config.Config, args []str
 		}
 		return nil
 	case "remove":
-		if err := requireExactArgs(args[1:], 1, "or3-intern skills remove <name>"); err != nil {
+		rest, force, err := splitForceFlag(args[1:])
+		if err != nil {
+			return err
+		}
+		if err := requireExactArgs(rest, 1, "or3-intern skills remove <name> [--force]"); err != nil {
 			return err
 		}
 		root := resolveInstallRoot(cfg)
@@ -285,9 +289,28 @@ func runSkillsCommandWithDeps(ctx context.Context, cfg config.Config, args []str
 		if err != nil {
 			return err
 		}
-		match, err := findInstalledSkill(installed, args[1])
+		match, err := findInstalledSkill(installed, rest[0])
 		if err != nil {
 			return err
+		}
+		stdinTTY, stdoutTTY := stdioIsTerminal(os.Stdin, deps.Stdout)
+		ok, err := confirmDestructiveAction(destructiveConfirmation{
+			Action:      "Remove installed skill",
+			ItemName:    match.Name,
+			Consequence: "This removes the local skill install and its available commands.",
+			Undo:        "There is no undo. Install the skill again if you need it later.",
+			Force:       force,
+			Stdin:       os.Stdin,
+			Stdout:      deps.Stdout,
+			StdinTTY:    stdinTTY,
+			StdoutTTY:   stdoutTTY,
+		})
+		if err != nil {
+			return err
+		}
+		if !ok {
+			_, _ = fmt.Fprintln(deps.Stdout, "Canceled.")
+			return nil
 		}
 		if err := clawhub.RemoveSkill(root, match.Name); err != nil {
 			return err

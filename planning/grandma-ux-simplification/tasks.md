@@ -65,12 +65,12 @@
 
 ## 8. Add confirmation gates for destructive actions
 
-- [ ] 8.1 Inventory destructive app actions: disconnect/unpair, revoke device/passkey, delete scheduled task, remove integration/add-on, reset PIN/session, and similar actions. Requirements: 9
-- [ ] 8.2 Add reusable app confirmation component or pattern that displays item name, consequence, and undo availability. Requirements: 9
-- [ ] 8.3 Apply confirmation gates to destructive app actions without changing backend authorization checks. Requirements: 9, 10
-- [ ] 8.4 Inventory destructive CLI actions and add interactive confirmations where stdin/stdout are terminals. Requirements: 9
-- [ ] 8.5 Preserve scriptability with explicit `--force`, existing non-interactive behavior, or compatibility paths where needed. Requirements: 8, 9
-- [ ] 8.6 Add tests for app confirmation rendering and CLI confirmation/force behavior. Requirements: 9, 10
+- [x] 8.1 Inventory destructive app actions: disconnect/unpair, revoke device/passkey, delete scheduled task, remove integration/add-on, reset PIN/session, and similar actions. Requirements: 9
+- [x] 8.2 Add reusable app confirmation component or pattern that displays item name, consequence, and undo availability. Requirements: 9
+- [x] 8.3 Apply confirmation gates to destructive app actions without changing backend authorization checks. Requirements: 9, 10
+- [x] 8.4 Inventory destructive CLI actions and add interactive confirmations where stdin/stdout are terminals. Requirements: 9
+- [x] 8.5 Preserve scriptability with explicit `--force`, existing non-interactive behavior, or compatibility paths where needed. Requirements: 8, 9
+- [x] 8.6 Add tests for app confirmation rendering and CLI confirmation/force behavior. Requirements: 9, 10
 
 ## 9. Update copy, docs, and command discovery
 

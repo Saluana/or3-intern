@@ -122,7 +122,7 @@ var helpTopics = map[string]helpCommand{
 		Examples: []string{"or3-intern status", "or3-intern status --fix 1", "or3-intern status --fix all"},
 	},
 	"connect-device": {
-		Usage:   "or3-intern connect-device [list|disconnect <device-id>|role <device-id>]",
+		Usage:   "or3-intern connect-device [list|disconnect <device-id> [--force]|role <device-id>]",
 		Summary: "Start the device pairing flow with a short code and simple access levels.",
 		Description: []string{
 			"Use connect-device when you are sitting at this computer and want to add a phone, browser, or app.",
@@ -245,7 +245,7 @@ var helpTopics = map[string]helpCommand{
 		Summary: "Manage encrypted secret references stored in SQLite.",
 		Subcommands: []helpItem{
 			{Name: "set <name> <value>", Description: "Store or replace a secret"},
-			{Name: "delete <name>", Description: "Delete a stored secret"},
+			{Name: "delete <name> [--force]", Description: "Delete a stored secret"},
 			{Name: "list", Description: "List stored secret names"},
 		},
 		Examples: []string{"or3-intern secrets set provider.openai sk-...", "or3-intern secrets list"},
@@ -294,7 +294,7 @@ var helpTopics = map[string]helpCommand{
 		Subcommands: []helpItem{
 			{Name: "list [domain]", Description: "List active allowlist rules"},
 			{Name: "add [flags]", Description: "Create a new allowlist rule"},
-			{Name: "remove <id>", Description: "Disable an allowlist rule by ID"},
+			{Name: "remove <id> [--force]", Description: "Disable an allowlist rule by ID"},
 		},
 		Examples: []string{"or3-intern approvals allowlist list exec", "or3-intern approvals allowlist add --domain exec --program /bin/echo"},
 	},
@@ -329,7 +329,7 @@ var helpTopics = map[string]helpCommand{
 			{Name: "approve <pairing-request-id>", Description: "Approve a pairing request"},
 			{Name: "deny <pairing-request-id>", Description: "Deny a pairing request"},
 			{Name: "rotate <device-id>", Description: "Rotate a device token and print the new token"},
-			{Name: "revoke <device-id>", Description: "Revoke a paired device immediately"},
+			{Name: "revoke <device-id> [--force]", Description: "Revoke a paired device immediately"},
 		},
 		Examples: []string{"or3-intern devices list", "or3-intern devices rotate dev_123"},
 	},
@@ -397,7 +397,7 @@ var helpTopics = map[string]helpCommand{
 			{Name: "search <query>", Description: "Search configured skill registries"},
 			{Name: "install <slug> [--version v] [--force]", Description: "Install a skill into the managed directory"},
 			{Name: "update <name>|--all [--version v] [--force]", Description: "Update one or more managed skill installs"},
-			{Name: "remove <name>", Description: "Remove a managed install"},
+			{Name: "remove <name> [--force]", Description: "Remove a managed install"},
 		},
 		Examples: []string{"or3-intern skills list --eligible", "or3-intern skills install demo --version 1.0.0"},
 	},

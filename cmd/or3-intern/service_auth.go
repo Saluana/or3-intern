@@ -21,6 +21,8 @@ import (
 	"or3-intern/internal/approval"
 	"or3-intern/internal/auth"
 	"or3-intern/internal/config"
+	"or3-intern/internal/secureconn"
+	"or3-intern/internal/security"
 )
 
 const serviceTokenMaxAge = 5 * time.Minute
@@ -103,6 +105,10 @@ func serviceAuthMiddlewareWithBrokerAndLimiter(cfg config.Config, broker *approv
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if allowsUnauthenticatedPairingRoute(cfg, r) {
 			next.ServeHTTP(w, serviceUnauthenticatedPairingRequest(r))
+			return
+		}
+		if serviceIsSecureSessionBootstrapRoute(r) {
+			next.ServeHTTP(w, serviceRequestWithAuthIdentity(r, servicePublicAuthIdentity()))
 			return
 		}
 		requirement := serviceRequestRouteRequirement(cfg, r)
@@ -496,7 +502,7 @@ func authenticateServiceRequest(cfg config.Config, broker *approval.Broker, auth
 		}
 	}
 	switch requestedMethod {
-	case "", "shared-secret", "paired-device", "session", "auth-session":
+	case "", "shared-secret", "paired-device", "session", "auth-session", "secure-session":
 	default:
 		return serviceAuthIdentity{}, fmt.Errorf("unsupported auth method")
 	}
@@ -538,7 +544,46 @@ func authenticateServiceRequest(cfg config.Config, broker *approval.Broker, auth
 	if requestedMethod == "session" || requestedMethod == "auth-session" {
 		return serviceAuthIdentity{}, fmt.Errorf("session auth is unavailable")
 	}
+	if requestedMethod == "secure-session" {
+		identity, err := authenticateSecureConnectionSession(cfg, broker, ctx, token)
+		if err != nil {
+			return serviceAuthIdentity{}, err
+		}
+		return identity, nil
+	}
 	return serviceAuthIdentity{}, fmt.Errorf("invalid bearer token")
+}
+
+func authenticateSecureConnectionSession(cfg config.Config, broker *approval.Broker, ctx context.Context, sessionID string) (serviceAuthIdentity, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return serviceAuthIdentity{}, fmt.Errorf("missing secure session token")
+	}
+	if broker == nil || broker.DB == nil {
+		return serviceAuthIdentity{}, fmt.Errorf("secure session auth is unavailable")
+	}
+	key, err := security.LoadOrCreateKey(cfg.Security.SecretStore.KeyFile)
+	if err != nil {
+		return serviceAuthIdentity{}, err
+	}
+	secrets := &security.SecretManager{DB: broker.DB, Key: key}
+	identity, _, err := (&secureconn.IdentityStore{Secrets: secrets}).LoadOrCreate(ctx, "OR3 Desktop")
+	if err != nil {
+		return serviceAuthIdentity{}, err
+	}
+	claims, err := (&secureconn.SessionManager{DB: broker.DB, Identity: identity}).LoadActiveSessionClaims(ctx, sessionID)
+	if err != nil {
+		return serviceAuthIdentity{}, err
+	}
+	return serviceAuthIdentity{
+		Kind:     "secure-session",
+		Actor:    "secure-device:" + claims.DeviceID,
+		Role:     claims.Role,
+		Device:   claims.DeviceID,
+		Session:  claims.SessionID,
+		StepUpAt: claims.StepUpAtUnixMs,
+		StepUpOK: claims.StepUpAtUnixMs > 0,
+	}, nil
 }
 
 func serviceAuthIdentityFromContext(ctx context.Context) serviceAuthIdentity {
@@ -600,6 +645,14 @@ func serviceIsSecurePairingRoute(r *http.Request) bool {
 	path := strings.TrimSpace(r.URL.Path)
 	return path == "/internal/v1/secure-connections/pairing/approve" ||
 		path == "/internal/v1/secure-connections/pairing/exchange"
+}
+
+func serviceIsSecureSessionBootstrapRoute(r *http.Request) bool {
+	if r == nil || r.URL == nil {
+		return false
+	}
+	return r.Method == http.MethodPost &&
+		strings.TrimSpace(r.URL.Path) == "/internal/v1/secure-connections/sessions"
 }
 
 func serviceDefaultPairingBrowserCIDRs() []string {
@@ -682,7 +735,7 @@ func serviceRouteRequirementForRequest(cfg config.Config, r *http.Request) servi
 		if method == http.MethodGet && relative == "capabilities" {
 			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
 		}
-		if method == http.MethodPost && (relative == "pairing/approve" || relative == "pairing/exchange") {
+		if method == http.MethodPost && (relative == "pairing/approve" || relative == "pairing/exchange" || relative == "sessions") {
 			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, BypassGlobalSession: true}
 		}
 		if method == http.MethodGet && relative == "host-identity" {
@@ -772,13 +825,13 @@ func serviceAuthChallengeError(cfg config.Config, authSvc *auth.Service, require
 		return nil
 	}
 	enforceSession := requirement.SessionOnly || (strings.EqualFold(mode, string(config.AuthEnforcementSession)) && !requirement.BypassGlobalSession)
-	if enforceSession && identity.Kind != "auth-session" {
+	if enforceSession && !serviceIdentitySatisfiesSession(identity) {
 		return auth.ErrSessionRequired
 	}
 	if requirement.Sensitivity != serviceRouteSensitive {
 		return nil
 	}
-	if identity.Kind != "auth-session" {
+	if !serviceIdentitySatisfiesSession(identity) {
 		return auth.ErrPasskeyRequired
 	}
 	if requirement.StepUpOnly || strings.TrimSpace(requirement.Reason) != "" {
@@ -787,6 +840,10 @@ func serviceAuthChallengeError(cfg config.Config, authSvc *auth.Service, require
 		}
 	}
 	return nil
+}
+
+func serviceIdentitySatisfiesSession(identity serviceAuthIdentity) bool {
+	return identity.Kind == "auth-session" || identity.Kind == "secure-session"
 }
 
 func serviceAuditAuthEvent(authSvc *auth.Service, ctx context.Context, eventType string, identity serviceAuthIdentity, payload map[string]any) {

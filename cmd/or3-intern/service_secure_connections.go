@@ -39,7 +39,7 @@ func (s *serviceServer) secureConnectionTrustStore(ctx context.Context) (*secure
 func (s *serviceServer) handleSecureConnections(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/internal/v1/secure-connections")
 	path = strings.Trim(path, "/")
-	if path != "pairing/approve" && path != "pairing/exchange" {
+	if path != "pairing/approve" && path != "pairing/exchange" && path != "sessions" {
 		if !requireServiceRole(w, r, approval.RoleOperator) {
 			return
 		}

@@ -316,7 +316,7 @@ func TestServiceRouteRequirementForRequest_SensitivityMatrix(t *testing.T) {
 		{method: http.MethodPost, path: "/internal/v1/secure-connections/pairing/intents", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
 		{method: http.MethodPost, path: "/internal/v1/secure-connections/pairing/approve", want: serviceRouteLowRisk},
 		{method: http.MethodPost, path: "/internal/v1/secure-connections/pairing/exchange", want: serviceRouteLowRisk},
-		{method: http.MethodPost, path: "/internal/v1/secure-connections/sessions", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
+		{method: http.MethodPost, path: "/internal/v1/secure-connections/sessions", want: serviceRouteLowRisk},
 	}
 	for _, tc := range tests {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {

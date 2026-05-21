@@ -514,7 +514,10 @@ func mustJSONMap(value map[string]any) string {
 	if len(value) == 0 {
 		return "{}"
 	}
-	blob, _ := json.Marshal(value)
+	blob, err := json.Marshal(value)
+	if err != nil {
+		return "{}"
+	}
 	return string(blob)
 }
 

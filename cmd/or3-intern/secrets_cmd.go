@@ -58,21 +58,45 @@ func runSecretsCommand(ctx context.Context, mgr *security.SecretManager, audit *
 		_, _ = fmt.Fprintf(stdout, "stored\t%s\n", name)
 		return nil
 	case "delete":
-		if err := requireExactArgs(args[1:], 1, "or3-intern secrets delete <name>"); err != nil {
+		rest, force, err := splitForceFlag(args[1:])
+		if err != nil {
 			return err
 		}
+		if err := requireExactArgs(rest, 1, "or3-intern secrets delete <name> [--force]"); err != nil {
+			return err
+		}
+		name := rest[0]
 		if err := validateStrictAuditBeforeMutation(audit); err != nil {
 			return err
 		}
-		if err := mgr.Delete(ctx, args[1]); err != nil {
+		stdinTTY, stdoutTTY := stdioIsTerminal(os.Stdin, stdout)
+		ok, err := confirmDestructiveAction(destructiveConfirmation{
+			Action:      "Delete stored secret",
+			ItemName:    name,
+			Consequence: "Any provider or integration using this secret may stop working.",
+			Undo:        "There is no undo. Store the secret again if you still have the value.",
+			Force:       force,
+			Stdin:       os.Stdin,
+			Stdout:      stdout,
+			StdinTTY:    stdinTTY,
+			StdoutTTY:   stdoutTTY,
+		})
+		if err != nil {
+			return err
+		}
+		if !ok {
+			_, _ = fmt.Fprintln(stdout, "Canceled.")
+			return nil
+		}
+		if err := mgr.Delete(ctx, name); err != nil {
 			return err
 		}
 		if audit != nil {
-			if err := audit.Record(ctx, "secret.delete", "", "cli", map[string]any{"name": args[1]}); err != nil {
+			if err := audit.Record(ctx, "secret.delete", "", "cli", map[string]any{"name": name}); err != nil {
 				return err
 			}
 		}
-		_, _ = fmt.Fprintf(stdout, "deleted\t%s\n", args[1])
+		_, _ = fmt.Fprintf(stdout, "deleted\t%s\n", name)
 		return nil
 	case "list":
 		if err := requireExactArgs(args[1:], 0, "or3-intern secrets list"); err != nil {

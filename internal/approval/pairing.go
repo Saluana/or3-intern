@@ -140,7 +140,8 @@ func (b *Broker) DenyPairingRequest(ctx context.Context, id int64, actor string)
 }
 
 func (b *Broker) ExchangePairingCode(ctx context.Context, input PairingExchangeInput) (db.PairedDeviceRecord, string, error) {
-	req, ok, err := b.DB.FindPairingRequestByCodeHash(ctx, input.RequestID, hashBytes(strings.TrimSpace(input.Code)))
+	code := strings.TrimSpace(strings.ReplaceAll(input.Code, "-", ""))
+	req, ok, err := b.DB.FindPairingRequestByCodeHash(ctx, input.RequestID, hashBytes(code))
 	if err != nil {
 		return db.PairedDeviceRecord{}, "", err
 	}

@@ -276,19 +276,26 @@ func main() {
 			return
 		}
 	}
-	if cmd == "doctor" {
+	if cmd == "doctor" || cmd == "health" {
 		cwd, err := os.Getwd()
 		if err != nil {
 			cwd = ""
 		}
 		cfg, validationError, loadErr := loadDoctorConfig(cfgPathOrDefault(cfgPath), cwd)
 		if loadErr != nil {
-			fmt.Fprintln(os.Stderr, "doctor error:", loadErr)
+			fmt.Fprintln(os.Stderr, cmd+" error:", loadErr)
 			os.Exit(1)
 		}
-		if err := runDoctorCommand(cfgPathOrDefault(cfgPath), cfg, validationError, args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
-			fmt.Fprintln(os.Stderr, "doctor error:", err)
-			os.Exit(1)
+		if cmd == "health" {
+			if err := runHealthCommand(cfgPathOrDefault(cfgPath), cfg, validationError, args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
+				fmt.Fprintln(os.Stderr, "health error:", err)
+				os.Exit(1)
+			}
+		} else {
+			if err := runDoctorCommand(cfgPathOrDefault(cfgPath), cfg, validationError, args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
+				fmt.Fprintln(os.Stderr, "doctor error:", err)
+				os.Exit(1)
+			}
 		}
 		return
 	}
@@ -760,6 +767,11 @@ func main() {
 				os.Exit(1)
 			}
 			fmt.Fprintln(os.Stderr, "connect-device error:", err)
+			os.Exit(1)
+		}
+	case "pair":
+		if err := runPairCommand(ctx, cfgPathOrDefault(cfgPath), &cfg, d, approvalBroker, args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
+			fmt.Fprintln(os.Stderr, "pair error:", err)
 			os.Exit(1)
 		}
 	default:

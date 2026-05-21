@@ -212,7 +212,7 @@ func defaultAuthConfig() AuthConfig {
 		StepUpTTLSeconds:           defaultAuthStepUpTTLSeconds,
 		FallbackPolicy:             AuthFallbackPairedTokenPlusWarn,
 		EnforcementMode:            AuthEnforcementOff,
-		AllowPairedTokenFallback:   true,
+		AllowPairedTokenFallback:   false,
 		RequirePasskeyForSensitive: true,
 	}
 }

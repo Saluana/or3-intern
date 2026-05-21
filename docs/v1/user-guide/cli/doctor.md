@@ -1,6 +1,6 @@
 # Doctor
 
-`doctor` is the readiness and repair command for OR3 Intern.
+`doctor` is the advanced readiness and repair command for OR3 Intern. For normal checks, start with `or3-intern health`.
 
 ```bash
 or3-intern doctor
@@ -33,9 +33,10 @@ Typical findings include:
 | `--severity <level>` | Minimum severity filter: `info`, `warn`, `error`, or `block` |
 | `--fixable-only` | Show only findings that have available fixes |
 
-## `doctor` vs `status`
+## `doctor` vs `health` and `status`
 
+- `health` is the normal readiness command and supports safe repairs with `--fix`.
 - `status` is the friendly summary for day-to-day use.
-- `doctor` is the deeper readiness and repair tool.
+- `doctor` is the deeper readiness and repair tool with strict mode and advanced filters.
 
 Use `doctor` when the service will not start, a safety gate blocks startup, a channel or integration looks unhealthy, or you want a structured diagnostic report for debugging.

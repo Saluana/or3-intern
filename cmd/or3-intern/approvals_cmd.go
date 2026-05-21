@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 
@@ -203,12 +204,35 @@ func runApprovalAllowlistCommand(ctx context.Context, appSvc *app.ServiceApp, de
 		}
 		return nil
 	case "remove":
-		if err := requireExactArgs(args[1:], 1, "approvals allowlist remove <id>"); err != nil {
+		rest, force, err := splitForceFlag(args[1:])
+		if err != nil {
 			return err
 		}
-		id, err := strconv.ParseInt(strings.TrimSpace(args[1]), 10, 64)
+		if err := requireExactArgs(rest, 1, "approvals allowlist remove <id> [--force]"); err != nil {
+			return err
+		}
+		id, err := strconv.ParseInt(strings.TrimSpace(rest[0]), 10, 64)
 		if err != nil {
 			return fmt.Errorf("invalid allowlist ID")
+		}
+		stdinTTY, stdoutTTY := stdioIsTerminal(os.Stdin, stdout)
+		ok, err := confirmDestructiveAction(destructiveConfirmation{
+			Action:      "Remove approval allowlist rule",
+			ItemName:    fmt.Sprintf("allowlist %d", id),
+			Consequence: "Future matching actions will ask for approval again.",
+			Undo:        "There is no undo. Add a new allowlist rule if you want this behavior again.",
+			Force:       force,
+			Stdin:       os.Stdin,
+			Stdout:      stdout,
+			StdinTTY:    stdinTTY,
+			StdoutTTY:   stdoutTTY,
+		})
+		if err != nil {
+			return err
+		}
+		if !ok {
+			_, _ = fmt.Fprintln(stdout, "Canceled.")
+			return nil
 		}
 		if err := appSvc.RemoveAllowlist(ctx, id, "cli"); err != nil {
 			return err

@@ -15,9 +15,11 @@ If you are running directly from a checkout without installing, replace `or3-int
 | --- | --- |
 | `or3-intern setup` | Guided first-run setup with scenario and safety choices |
 | `or3-intern chat` | Interactive CLI session |
+| `or3-intern health [--check|--fix|--json]` | Checks readiness and applies safe repairs |
+| `or3-intern pair --auto [--name ...] [--role viewer|operator|admin]` | Pairs a phone or other device with readiness checks |
 | `or3-intern status [--advanced]` | Shows a plain-language safety, access, and problems summary |
 | `or3-intern settings [--section ...] [--export path|-]` | Opens the task-based settings home and supports focused edits or config export |
-| `or3-intern connect-device [list|disconnect <device-id>|role <device-id>]` | Pairs a phone or other device using a short code and simple access levels |
+| `or3-intern connect-device [list|disconnect <device-id>|role <device-id>]` | Legacy/manual computer-started pairing flow and device shortcuts |
 | `or3-intern help` | Shows the full root command catalog |
 | `or3-intern configure [--section ...]` | Interactive setup and reconfiguration wizard for provider, storage, workspace, web, channels, and service |
 | `or3-intern init` | Guided first-run setup for config and provider settings |
@@ -53,6 +55,18 @@ It then applies the corresponding runtime profile, approvals, audit, service, an
 
 If setup succeeds, it prints a short review covering files, commands, internet, devices, and activity log state, then asks whether to start chat next.
 
+### `or3-intern health`
+
+Checks whether OR3 is ready to work.
+
+```
+or3-intern health
+or3-intern health --fix
+or3-intern health --json
+```
+
+Default output focuses on readiness issues and next actions. Use `--fix` for safe automatic repairs and `--json` for structured output. Advanced filters such as `--area`, `--severity`, and `--fixable-only` are available when needed, but `doctor` remains the deeper diagnostics command.
+
 ### `or3-intern status`
 
 Shows a friendly status summary sourced from config plus doctor findings.
@@ -86,11 +100,27 @@ or3-intern settings --section context
 or3-intern settings --export config.json
 ```
 
-This is the user-facing entry point for revisiting setup. The default view is task-based: AI Provider, Workspace Folder, Connected Devices, Safety Level, Channels, Tools, Memory, Context, and Advanced.
+This is the user-facing entry point for revisiting setup. The default view is task-based: AI Controls, Workspace Folder, Connected Devices, Safety Level, Channels, Tools, Memory, Context, and Advanced.
 
 Use `--section` to jump to one task area. Common sections are `provider`, `workspace`, `devices`, `safety`, `channels`, `tools`, `memory`, `context`, and `advanced`.
 
 Use `--export` when you need the raw JSON config without making JSON editing the normal path.
+
+### `or3-intern pair`
+
+Starts the normal computer-initiated device pairing flow.
+
+```
+or3-intern pair --auto
+or3-intern pair --auto --name "Brendon's iPhone"
+or3-intern pair --auto --role operator
+or3-intern pair --auto --json
+or3-intern pair --manual
+```
+
+`pair --auto` checks readiness, applies safe repairs unless `--no-fix` is set, prompts for device name and access level when needed, and prints a six-digit code for OR3 App. Use `--json` for scripts and `--manual` for the older `connect-device` flow.
+
+Supported roles are `viewer`, `operator`, and `admin`.
 
 ### `or3-intern connect-device`
 
@@ -101,11 +131,12 @@ or3-intern connect-device disconnect <device-id>
 or3-intern connect-device role <device-id>
 ```
 
-This flow:
+This older manual flow:
 
 - checks pairing/service prerequisites
 - repairs missing safe defaults such as service secret or approval key when needed
 - creates a pairing code
+- prints a request ID and six-digit code that OR3 App can enter in **Connect with a CLI code**
 - lets the user choose an access level such as chat-only, workspace access, or admin
 
 The `list` view shows connected devices with friendly role labels, last-used status, change-access guidance, and disconnect commands. `role` currently points users to disconnect/reconnect with a new access level so the role change remains explicit and safe.
@@ -173,17 +204,17 @@ Use `or3-intern init` if you only want the original lightweight first-run provid
 
 ## Operator tools
 
-| Command | Purpose |
-| --- | --- |
-| `or3-intern doctor [--strict|--json|--fix]` | Diagnoses readiness issues, emits machine-readable reports, and repairs safe local problems |
-| `or3-intern capabilities [--channel name|--trigger name|--json]` | Shows the effective runtime posture, ingress policy, approvals, and access-profile limits |
-| `or3-intern embeddings <status|rebuild> [memory|docs|all]` | Shows embedding compatibility status and rebuilds stored memory/doc embeddings after provider or model changes |
-| `or3-intern secrets <set|delete|list>` | Manages encrypted secret references stored in SQLite |
-| `or3-intern audit [verify]` | Inspects or verifies the append-only audit chain |
-| `or3-intern approvals <list|show|approve|deny|cancel|expire|allowlist>` | Lists and resolves pending approval requests or approval allowlists |
-| `or3-intern devices <list|requests|approve|deny|rotate|revoke>` | Lists paired devices and supports device rotation/revocation plus legacy pairing request actions |
-| `or3-intern pairing <list|request|approve|deny|exchange>` | Runs the pairing workflow and can bind approvals to channel identities such as `slack:U123` |
-| `or3-intern migrate-jsonl /path/to/session.jsonl [session_key]` | Imports legacy session history |
+| Command                                                                  | Purpose                                                                                                      |
+| ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ | -------- | ------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------- |
+| `or3-intern doctor [--strict                                             | --json                                                                                                       | --fix]`  | Diagnoses readiness issues, emits machine-readable reports, and repairs safe local problems |
+| `or3-intern capabilities [--channel name                                 | --trigger name                                                                                               | --json]` | Shows the effective runtime posture, ingress policy, approvals, and access-profile limits   |
+| `or3-intern embeddings <status                                           | rebuild> [memory                                                                                             | docs     | all]`                                                                                       | Shows embedding compatibility status and rebuilds stored memory/doc embeddings after provider or model changes |
+| `or3-intern secrets <set                                                 | delete                                                                                                       | list>`   | Manages encrypted secret references stored in SQLite                                        |
+| `or3-intern audit [verify]`                                              | Inspects or verifies the append-only audit chain                                                             |
+| `or3-intern approvals <list                                              | show                                                                                                         | approve  | deny                                                                                        | cancel                                                                                                         | expire                                                                                      | allowlist>`                                                                                      | Lists and resolves pending approval requests or approval allowlists |
+| `or3-intern devices <list                                                | requests                                                                                                     | approve  | deny                                                                                        | rotate                                                                                                         | revoke>`                                                                                    | Lists paired devices and supports device rotation/revocation plus legacy pairing request actions |
+| `or3-intern pairing <list                                                | request                                                                                                      | approve  | deny                                                                                        | exchange>`                                                                                                     | Runs the pairing workflow and can bind approvals to channel identities such as `slack:U123` |
+| `or3-intern migrate-jsonl /path/to/session.jsonl [session_key]`          | Imports legacy session history                                                                               |
 | `or3-intern migrate-openclaw [--scope <scope-key>] <openclaw-agent-dir>` | Imports a local OpenClaw agent's soul, identity, static memory, user context, daily memory notes, and dreams |
 
 ### `or3-intern embeddings`
@@ -247,62 +278,72 @@ Manage pending approval requests and allowlist rules. All sub-commands work dire
 ```
 or3-intern approvals list [status]
 ```
+
 Lists approval requests. Optionally filter by status: `pending`, `approved`, `denied`, `canceled`, `expired`. Up to 100 results are returned. The default output includes a short human summary of what OR3 wants to do.
 
 ```
 or3-intern approvals show <id>
 ```
+
 Shows one approval request with a friendly action summary and risk label, plus the raw subject details for advanced review.
 
 ```
 or3-intern approvals approve <id> [--allowlist] [--note <text>]
 ```
+
 Approves a pending request and issues a short-lived approval token. The token is printed once and can be passed to the next execution attempt via context.
+
 - `--allowlist` also creates a persistent allowlist rule matching the same subject, so future identical executions are pre-approved without another prompt.
 - `--note` attaches a free-text resolution note to the audit record.
 
 ```
 or3-intern approvals deny <id> [--note <text>]
 ```
+
 Denies a pending request and records the resolution in the audit chain. The blocked tool invocation returns an error to the agent.
 
 ```
 or3-intern approvals cancel <id> [--note <text>]
 ```
+
 Cancels a pending request without approving or denying the underlying action.
 
 ```
 or3-intern approvals expire
 ```
+
 Marks every currently expired pending request as `expired` and prints how many were updated.
 
 ```
 or3-intern approvals allowlist list [domain]
 ```
+
 Lists allowlist rules. Optionally filter by domain (`exec`, `skill_execution`).
 
 ```
 or3-intern approvals allowlist add --domain <exec|skill_execution> [options]
 ```
+
 Creates a new allowlist rule. Options:
 
-| Flag | Description |
-| --- | --- |
-| `--domain` | Approval domain (`exec` or `skill_execution`). Default: `exec`. |
-| `--host` | Host scope (default: current host ID). |
-| `--tool` | Tool name scope. |
-| `--profile` | Access profile scope. |
-| `--agent` | Agent ID scope. |
-| `--program` | (exec) Exact executable path to match. |
-| `--cwd` | (exec) Working directory constraint. |
-| `--skill` | (skill_execution) Skill ID to match. |
-| `--version` | (skill_execution) Skill version constraint. |
-| `--origin` | (skill_execution) Skill origin/registry constraint. |
-| `--trust` | (skill_execution) Skill trust state constraint. |
+| Flag        | Description                                                     |
+| ----------- | --------------------------------------------------------------- |
+| `--domain`  | Approval domain (`exec` or `skill_execution`). Default: `exec`. |
+| `--host`    | Host scope (default: current host ID).                          |
+| `--tool`    | Tool name scope.                                                |
+| `--profile` | Access profile scope.                                           |
+| `--agent`   | Agent ID scope.                                                 |
+| `--program` | (exec) Exact executable path to match.                          |
+| `--cwd`     | (exec) Working directory constraint.                            |
+| `--skill`   | (skill_execution) Skill ID to match.                            |
+| `--version` | (skill_execution) Skill version constraint.                     |
+| `--origin`  | (skill_execution) Skill origin/registry constraint.             |
+| `--trust`   | (skill_execution) Skill trust state constraint.                 |
 
 ```
 or3-intern approvals allowlist remove <id>
 ```
+
 Disables an allowlist rule by ID.
 
 ### `or3-intern devices`
@@ -312,31 +353,37 @@ Manage paired devices and pairing requests. All sub-commands work directly again
 ```
 or3-intern devices list
 ```
+
 Lists all paired devices with their status, role, and display name, followed by friendly role and status labels.
 
 ```
 or3-intern devices requests [status]
 ```
+
 Lists pairing requests. Optionally filter by status: `pending`, `approved`, `denied`, `exchanged`. The default output includes a human summary of the requested device access.
 
 ```
 or3-intern devices approve <pairing-request-id>
 ```
+
 Approves a pending pairing request. The remote client can then exchange the pairing code for a device token using the HTTP API.
 
 ```
 or3-intern devices deny <pairing-request-id>
 ```
+
 Denies a pending pairing request. The remote client receives an error on the next exchange attempt.
 
 ```
 or3-intern devices revoke <device-id>
 ```
+
 Revokes a paired device immediately. Any active bearer token for this device is invalidated on the next API request.
 
 ```
 or3-intern devices rotate <device-id>
 ```
+
 Rotates the device token and prints the new token once. The old token is invalidated. Use this to recover a potentially leaked token without re-pairing.
 
 ### `or3-intern pairing`
@@ -346,21 +393,25 @@ The pairing command group handles channel-identity pairing, which binds a channe
 ```
 or3-intern pairing list
 ```
+
 Lists all pairing requests.
 
 ```
 or3-intern pairing request --channel <channel> --identity <id> --name <name>
 ```
+
 Creates a pairing request for a specific channel identity. Returns a request ID and one-time code.
 
 ```
 or3-intern pairing approve <request-id>
 ```
+
 Approves a pairing request from CLI so the remote client can exchange the code.
 
 ```
 or3-intern pairing deny <request-id>
 ```
+
 Denies a pairing request.
 
 ```
@@ -380,26 +431,26 @@ Exchanges an approved pairing code for a device token (normally done by the remo
 
 ## Skills commands
 
-| Command | Purpose |
-| --- | --- |
-| `or3-intern skills list` | Lists discovered skills |
-| `or3-intern skills list --eligible` | Lists only eligible skills |
-| `or3-intern skills info <name>` | Shows metadata, permission state, and policy notes |
-| `or3-intern skills check` | Validates available skills and reports policy state |
-| `or3-intern skills search "query"` | Searches configured registries |
-| `or3-intern skills install <slug>` | Installs a skill into the managed directory |
-| `or3-intern skills update <name>` / `--all` | Updates managed installs |
-| `or3-intern skills remove <name>` | Removes a managed install |
+| Command                                     | Purpose                                             |
+| ------------------------------------------- | --------------------------------------------------- |
+| `or3-intern skills list`                    | Lists discovered skills                             |
+| `or3-intern skills list --eligible`         | Lists only eligible skills                          |
+| `or3-intern skills info <name>`             | Shows metadata, permission state, and policy notes  |
+| `or3-intern skills check`                   | Validates available skills and reports policy state |
+| `or3-intern skills search "query"`          | Searches configured registries                      |
+| `or3-intern skills install <slug>`          | Installs a skill into the managed directory         |
+| `or3-intern skills update <name>` / `--all` | Updates managed installs                            |
+| `or3-intern skills remove <name>`           | Removes a managed install                           |
 
 See [skills.md](skills.md) for how the loader, trust model, and quarantine policy work.
 
 ## Session scope commands
 
-| Command | Purpose |
-| --- | --- |
-| `or3-intern scope link <session-key> <scope>` | Links a session to a named scope |
-| `or3-intern scope list <scope>` | Lists session keys attached to a scope |
-| `or3-intern scope resolve <session-key>` | Resolves the scope for a session |
+| Command                                       | Purpose                                |
+| --------------------------------------------- | -------------------------------------- |
+| `or3-intern scope link <session-key> <scope>` | Links a session to a named scope       |
+| `or3-intern scope list <scope>`               | Lists session keys attached to a scope |
+| `or3-intern scope resolve <session-key>`      | Resolves the scope for a session       |
 
 Scopes let multiple session keys share one conversation history. See [memory-and-context.md](memory-and-context.md).
 

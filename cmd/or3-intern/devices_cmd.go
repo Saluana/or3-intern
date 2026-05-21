@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 
@@ -94,12 +95,35 @@ func runDevicesCommand(ctx context.Context, broker *approval.Broker, args []stri
 		_, _ = fmt.Fprintf(stdout, "denied pairing request %d\n", id)
 		return nil
 	case "revoke":
-		if err := requireExactArgs(args[1:], 1, "devices revoke <device-id>"); err != nil {
+		rest, force, err := splitForceFlag(args[1:])
+		if err != nil {
 			return err
 		}
-		deviceID := strings.TrimSpace(args[1])
+		if err := requireExactArgs(rest, 1, "devices revoke <device-id> [--force]"); err != nil {
+			return err
+		}
+		deviceID := strings.TrimSpace(rest[0])
 		if deviceID == "" {
 			return fmt.Errorf("device ID required")
+		}
+		stdinTTY, stdoutTTY := stdioIsTerminal(os.Stdin, stdout)
+		ok, err := confirmDestructiveAction(destructiveConfirmation{
+			Action:      "Revoke paired device",
+			ItemName:    deviceID,
+			Consequence: "This device will stop being able to use this computer.",
+			Undo:        "There is no undo. Pair the device again if you trust it later.",
+			Force:       force,
+			Stdin:       os.Stdin,
+			Stdout:      stdout,
+			StdinTTY:    stdinTTY,
+			StdoutTTY:   stdoutTTY,
+		})
+		if err != nil {
+			return err
+		}
+		if !ok {
+			_, _ = fmt.Fprintln(stdout, "Canceled.")
+			return nil
 		}
 		if err := appSvc.RevokeDevice(ctx, deviceID, "cli"); err != nil {
 			return err

@@ -18,7 +18,7 @@ Set your approval mode. Relaxed mode auto-approves tool calls. Normal mode asks 
 
 **Device pairing**
 
-If you plan to use the OR3 App, the wizard will help you pair your device. This uses passkey authentication for secure approval requests.
+If you plan to use the OR3 App, run `or3-intern pair --auto` after setup. It checks readiness, applies safe repairs when possible, and prints the short code the app needs.
 
 **Storage location**
 
@@ -39,8 +39,10 @@ This creates a default config file you can edit manually.
 Run this anytime to update your configuration:
 
 ```bash
-or3-intern configure
+or3-intern settings
 ```
+
+Use `or3-intern configure` when you need the lower-level section editor.
 
 ## Next step
 

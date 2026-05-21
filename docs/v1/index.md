@@ -28,6 +28,7 @@ Start with the [overview](getting-started/overview.md) to learn more. Then follo
 
 - [CLI guide](user-guide/cli/overview.md) - local commands, setup, diagnostics, approvals, pairing, and skill management
 - [App integration guide](user-guide/app-integration/overview.md) - authenticated `/internal/v1/*` service API usage
+- [OR3 App connection guide](user-guide/app-integration/or3-app-connection-guide.md) - run the web, Electron, iOS, or Android app against `or3-intern service`
 - [Architecture overview](architecture/overview.md) - how the core runtime, service API, storage, tools, channels, automation, and safety systems fit together
 - [Operations guide](operations/overview.md) - Docker, production service mode, monitoring, backups, upgrades, and security checks
 - [Reference](reference/command-reference.md) - commands, config, environment variables, tools, events, paths, permissions, errors, and tables

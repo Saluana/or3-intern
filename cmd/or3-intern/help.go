@@ -31,6 +31,8 @@ var rootHelpSections = []struct {
 		Items: []helpItem{
 			{Name: "setup", Description: "Guided first-run setup with scenario and safety choices"},
 			{Name: "chat", Description: "Start chatting with OR3"},
+			{Name: "health", Description: "Check if OR3 is ready to work"},
+			{Name: "pair --auto", Description: "Pair a device with automatic readiness checks"},
 			{Name: "status", Description: "Check what OR3 can access and what needs attention"},
 			{Name: "settings", Description: "Review and update your settings"},
 			{Name: "connect-device", Description: "Start the device pairing flow"},
@@ -40,8 +42,8 @@ var rootHelpSections = []struct {
 	{
 		Title: "Advanced commands",
 		Items: []helpItem{
-			{Name: "configure", Description: "Advanced settings wizard used by setup/settings"},
-			{Name: "init", Description: "First-run setup alias kept for scripts and old docs"},
+			{Name: "configure", Description: "Advanced settings wizard for manual or scripted edits"},
+			{Name: "init", Description: "Compatibility alias for setup; use `setup` instead"},
 			{Name: "config-path", Description: "Print the resolved config.json path"},
 			{Name: "chat", Description: "Interactive CLI session"},
 			{Name: "serve", Description: "Run enabled channels, triggers, heartbeat, cron, and workers"},
@@ -53,7 +55,7 @@ var rootHelpSections = []struct {
 	{
 		Title: "Operator tools",
 		Items: []helpItem{
-			{Name: "doctor", Description: "Diagnose readiness issues, explain risk, and repair safe local problems"},
+			{Name: "doctor", Description: "Advanced diagnostics; use `health` for normal checks"},
 			{Name: "capabilities", Description: "Inspect runtime posture, ingress policy, approvals, and profiles"},
 			{Name: "embeddings", Description: "Inspect or rebuild stored memory and doc embeddings after provider/model changes"},
 			{Name: "secrets", Description: "Manage encrypted secret references stored in SQLite"},
@@ -72,10 +74,10 @@ var rootHelpSections = []struct {
 var helpTopics = map[string]helpCommand{
 	"configure": {
 		Usage:   "or3-intern configure [--section provider|storage|workspace|web|channels|service] ...",
-		Summary: "Advanced configuration wizard behind the friendlier settings flow.",
+		Summary: "Advanced configuration wizard for manual or scripted edits.",
 		Description: []string{
-			"Use `or3-intern settings` for day-to-day configuration. Configure remains available for targeted scripted or advanced edits.",
-			"Loads the active config when present, shows a short summary, and prompts only for the sections you want to change.",
+			"Configure is the advanced configuration wizard. Most users should use `or3-intern setup` for first-run and `or3-intern settings` for day-to-day changes.",
+			"Use configure when you need to edit specific sections via --section flags, run in scripts, or access the full 17-section advanced wizard.",
 			"When stdin and stdout are terminals, configure opens the Bubble Tea setup UI with arrow-key navigation, enter to select, space to toggle, s to save, and q to quit.",
 			"When either side is non-interactive, configure stays in the plain text prompt flow so pipes, redirected input, and scripts keep working.",
 			"The provider section can also set an optional embedding dimensions override for providers/models that support truncated embedding vectors.",
@@ -120,7 +122,7 @@ var helpTopics = map[string]helpCommand{
 		Examples: []string{"or3-intern status", "or3-intern status --fix 1", "or3-intern status --fix all"},
 	},
 	"connect-device": {
-		Usage:   "or3-intern connect-device [list|disconnect <device-id>|role <device-id>]",
+		Usage:   "or3-intern connect-device [list|disconnect <device-id> [--force]|role <device-id>]",
 		Summary: "Start the device pairing flow with a short code and simple access levels.",
 		Description: []string{
 			"Use connect-device when you are sitting at this computer and want to add a phone, browser, or app.",
@@ -130,14 +132,13 @@ var helpTopics = map[string]helpCommand{
 	},
 	"init": {
 		Usage:   "or3-intern init",
-		Summary: "Guided first-run setup alias.",
+		Summary: "Compatibility alias for `setup`. Use `or3-intern setup` instead.",
 		Description: []string{
-			"Compatibility alias for first-run setup. Use `or3-intern settings` for everyday configuration changes.",
-			"Runs the same configure wizard with the original first-run sections: provider, storage, workspace, and web.",
-			"Like configure, it opens the Bubble Tea UI only on an interactive terminal and falls back to plain text prompts when used non-interactively.",
-			"Use `or3-intern configure` directly when you want channels, service, or custom section selection.",
+			"`init` is a compatibility alias that delegates to `or3-intern setup`.",
+			"Use `or3-intern setup` for the recommended first-run experience with plain-language scenario and safety choices.",
+			"Use `or3-intern settings` for everyday configuration changes after initial setup.",
 		},
-		Examples: []string{"or3-intern init"},
+		Examples: []string{"or3-intern init", "or3-intern setup"},
 	},
 	"config-path": {
 		Usage:   "or3-intern config-path",
@@ -179,9 +180,9 @@ var helpTopics = map[string]helpCommand{
 	},
 	"doctor": {
 		Usage:   "or3-intern doctor [--strict] [--json] [--fix] [--interactive] [--probe] [--area name] [--severity level] [--fixable-only]",
-		Summary: "Diagnose readiness and safety issues, then repair the safe ones.",
+		Summary: "Diagnose readiness and safety issues, then repair the safe ones. Use `health` instead for normal checks.",
 		Description: []string{
-			"Doctor is the main readiness command for config, local runtime prerequisites, ingress posture, and hardened startup checks.",
+			"Doctor is the advanced diagnostic command. Most users should use `or3-intern health` for readiness checks.",
 			"Use --fix for deterministic automatic repairs such as missing directories, key files, or conservative channel ingress defaults.",
 			"Use --fix --interactive when multiple valid repairs exist, such as choosing pairing vs allowlist for an enabled channel.",
 		},
@@ -196,6 +197,24 @@ var helpTopics = map[string]helpCommand{
 			{Name: "--fixable-only", Description: "Show only findings with available fixes"},
 		},
 		Examples: []string{"or3-intern doctor", "or3-intern doctor --strict", "or3-intern doctor --fix", "or3-intern doctor --fix --interactive", "or3-intern doctor --json --severity error"},
+	},
+	"health": {
+		Usage:   "or3-intern health [--check] [--fix] [--json]",
+		Summary: "Check if OR3 is ready to work.",
+		Description: []string{
+			"Health is the normal readiness command. It checks your config, provider, workspace, and local runtime prerequisites.",
+			"Use --fix for safe automatic repairs such as missing directories or key files.",
+			"Use --json for machine-readable output.",
+			"For advanced filters and interactive repairs, use `or3-intern doctor`.",
+		},
+		Flags: []helpItem{
+			{Name: "--check", Description: "Run the default readiness check (explicit)"},
+			{Name: "--fix", Description: "Apply safe automatic fixes where available"},
+			{Name: "--json", Description: "Emit a structured JSON report"},
+			{Name: "--interactive", Description: "Prompt for guided fixes on ambiguous findings"},
+			{Name: "--advanced", Description: "Show advanced filters and options"},
+		},
+		Examples: []string{"or3-intern health", "or3-intern health --check", "or3-intern health --fix", "or3-intern health --json"},
 	},
 	"capabilities": {
 		Usage:   "or3-intern capabilities [--channel name] [--trigger name] [--json]",
@@ -226,7 +245,7 @@ var helpTopics = map[string]helpCommand{
 		Summary: "Manage encrypted secret references stored in SQLite.",
 		Subcommands: []helpItem{
 			{Name: "set <name> <value>", Description: "Store or replace a secret"},
-			{Name: "delete <name>", Description: "Delete a stored secret"},
+			{Name: "delete <name> [--force]", Description: "Delete a stored secret"},
 			{Name: "list", Description: "List stored secret names"},
 		},
 		Examples: []string{"or3-intern secrets set provider.openai sk-...", "or3-intern secrets list"},
@@ -275,7 +294,7 @@ var helpTopics = map[string]helpCommand{
 		Subcommands: []helpItem{
 			{Name: "list [domain]", Description: "List active allowlist rules"},
 			{Name: "add [flags]", Description: "Create a new allowlist rule"},
-			{Name: "remove <id>", Description: "Disable an allowlist rule by ID"},
+			{Name: "remove <id> [--force]", Description: "Disable an allowlist rule by ID"},
 		},
 		Examples: []string{"or3-intern approvals allowlist list exec", "or3-intern approvals allowlist add --domain exec --program /bin/echo"},
 	},
@@ -310,7 +329,7 @@ var helpTopics = map[string]helpCommand{
 			{Name: "approve <pairing-request-id>", Description: "Approve a pairing request"},
 			{Name: "deny <pairing-request-id>", Description: "Deny a pairing request"},
 			{Name: "rotate <device-id>", Description: "Rotate a device token and print the new token"},
-			{Name: "revoke <device-id>", Description: "Revoke a paired device immediately"},
+			{Name: "revoke <device-id> [--force]", Description: "Revoke a paired device immediately"},
 		},
 		Examples: []string{"or3-intern devices list", "or3-intern devices rotate dev_123"},
 	},
@@ -348,6 +367,26 @@ var helpTopics = map[string]helpCommand{
 		},
 		Examples: []string{"or3-intern pairing request --name \"Laptop\"", "or3-intern pairing request --channel slack --identity U42 --name \"Slack User\""},
 	},
+	"pair": {
+		Usage:   "or3-intern pair --auto [--name device-name] [--role viewer|operator|admin]",
+		Summary: "Pair a device with automatic readiness checks.",
+		Description: []string{
+			"Pair is the normal device pairing command. It checks readiness, applies safe fixes, and creates a pairing code.",
+			"Use --auto to run the automatic pairing flow with health checks.",
+			"Use --manual to fall back to the legacy connect-device flow.",
+			"Use --name to set the device display name.",
+			"Use --role to set the device access level: viewer, operator, or admin.",
+		},
+		Flags: []helpItem{
+			{Name: "--auto", Description: "Run automatic pairing with readiness checks"},
+			{Name: "--name <name>", Description: "Device display name"},
+			{Name: "--role <role>", Description: "Device role: viewer, operator, admin"},
+			{Name: "--manual", Description: "Use manual pairing flow"},
+			{Name: "--json", Description: "Emit JSON output"},
+			{Name: "--no-fix", Description: "Skip automatic fixes"},
+		},
+		Examples: []string{"or3-intern pair --auto", "or3-intern pair --auto --name \"Brendon's iPhone\"", "or3-intern pair --auto --role operator"},
+	},
 	"skills": {
 		Usage:   "or3-intern skills <list|info|check|search|install|update|remove> ...",
 		Summary: "List, inspect, search, install, update, check, and remove skills.",
@@ -358,7 +397,7 @@ var helpTopics = map[string]helpCommand{
 			{Name: "search <query>", Description: "Search configured skill registries"},
 			{Name: "install <slug> [--version v] [--force]", Description: "Install a skill into the managed directory"},
 			{Name: "update <name>|--all [--version v] [--force]", Description: "Update one or more managed skill installs"},
-			{Name: "remove <name>", Description: "Remove a managed install"},
+			{Name: "remove <name> [--force]", Description: "Remove a managed install"},
 		},
 		Examples: []string{"or3-intern skills list --eligible", "or3-intern skills install demo --version 1.0.0"},
 	},
@@ -538,7 +577,7 @@ func printRootHelpMode(w io.Writer) {
 	printHelpItems(w, []helpItem{{Name: "--config <path>", Description: "Path to config.json"}, {Name: "--unsafe-dev", Description: "Bypass startup safety gates for local development"}, {Name: "--advanced", Description: "Accepted for compatibility; root help is always complete"}, {Name: "-h, --help", Description: "Show help for the root command or a subcommand"}})
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, "Examples:")
-	for _, example := range []string{"or3-intern setup", "or3-intern chat", "or3-intern status", "or3-intern connect-device", "or3-intern approvals list pending"} {
+	for _, example := range []string{"or3-intern setup", "or3-intern chat", "or3-intern health", "or3-intern status", "or3-intern connect-device"} {
 		_, _ = fmt.Fprintf(w, "  %s\n", example)
 	}
 }

@@ -382,3 +382,25 @@ func TestCodexRPCWaitForTurnAllowsEOFAfterCompletion(t *testing.T) {
 	}
 	client.close()
 }
+
+func TestEmitCodexNotificationStructuredDoesNotDuplicateTextAsStdout(t *testing.T) {
+	var seq int64
+	var events []AgentRunEvent
+	emitCodexNotificationStructured(
+		&seq,
+		func(event AgentRunEvent) { events = append(events, event) },
+		"item/agentMessage/delta",
+		map[string]any{"delta": "hello"},
+	)
+
+	if len(events) != 1 {
+		t.Fatalf("events = %#v, want one structured event", events)
+	}
+	if events[0].Type != "structured" || events[0].Stream != "" || events[0].Chunk != "" {
+		t.Fatalf("unexpected event: %#v", events[0])
+	}
+	normalized := (&CodexAdapter{}).NormalizeChatEvent(events[0])
+	if len(normalized) != 1 || normalized[0].Type != "text_delta" || normalized[0].Text != "hello" {
+		t.Fatalf("unexpected normalized event: %#v", normalized)
+	}
+}

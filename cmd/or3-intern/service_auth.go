@@ -21,6 +21,8 @@ import (
 	"or3-intern/internal/approval"
 	"or3-intern/internal/auth"
 	"or3-intern/internal/config"
+	"or3-intern/internal/secureconn"
+	"or3-intern/internal/security"
 )
 
 const serviceTokenMaxAge = 5 * time.Minute
@@ -103,6 +105,10 @@ func serviceAuthMiddlewareWithBrokerAndLimiter(cfg config.Config, broker *approv
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if allowsUnauthenticatedPairingRoute(cfg, r) {
 			next.ServeHTTP(w, serviceUnauthenticatedPairingRequest(r))
+			return
+		}
+		if serviceIsSecureSessionBootstrapRoute(r) {
+			next.ServeHTTP(w, serviceRequestWithAuthIdentity(r, servicePublicAuthIdentity()))
 			return
 		}
 		requirement := serviceRequestRouteRequirement(cfg, r)
@@ -316,12 +322,27 @@ func serviceAllowedBrowserOrigin(cfg config.Config, r *http.Request) (string, bo
 	if origin == "" {
 		return "", false
 	}
+	if strings.EqualFold(origin, "null") {
+		if !serviceIsPairingRoute(r) && (strings.TrimSpace(r.RemoteAddr) == "" || requestRemoteIsLoopback(r.RemoteAddr)) {
+			return origin, true
+		}
+		return "", false
+	}
 	parsed, err := url.Parse(origin)
 	if err != nil {
 		return "", false
 	}
+	if strings.EqualFold(parsed.Scheme, "app") {
+		if serviceElectronAppOriginAllowed(origin, cfg) && (strings.TrimSpace(r.RemoteAddr) == "" || requestRemoteIsLoopback(r.RemoteAddr) || requestRemoteInCIDRAllowlist(r.RemoteAddr, serviceTrustedBrowserCIDRs(cfg))) {
+			return origin, true
+		}
+		return "", false
+	}
 	if !strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https") {
 		return "", false
+	}
+	if serviceIsSecurePairingRoute(r) && requestRemoteInCIDRAllowlist(r.RemoteAddr, serviceDefaultPairingBrowserCIDRs()) {
+		return origin, true
 	}
 	if serviceOriginIsLoopback(parsed) && serviceListenIsLoopback(cfg.Service.Listen) && (strings.TrimSpace(r.RemoteAddr) == "" || requestRemoteIsLoopback(r.RemoteAddr)) {
 		return origin, true
@@ -330,6 +351,13 @@ func serviceAllowedBrowserOrigin(cfg config.Config, r *http.Request) (string, bo
 		return origin, true
 	}
 	return "", false
+}
+
+func serviceElectronAppOriginAllowed(origin string, cfg config.Config) bool {
+	if strings.EqualFold(strings.TrimRight(strings.TrimSpace(origin), "/"), "app://or3") {
+		return true
+	}
+	return serviceOriginInAllowlist(origin, serviceTrustedBrowserOrigins(cfg))
 }
 
 func serviceOriginIsLoopback(parsed *url.URL) bool {
@@ -474,7 +502,7 @@ func authenticateServiceRequest(cfg config.Config, broker *approval.Broker, auth
 		}
 	}
 	switch requestedMethod {
-	case "", "shared-secret", "paired-device", "session", "auth-session":
+	case "", "shared-secret", "paired-device", "session", "auth-session", "secure-session":
 	default:
 		return serviceAuthIdentity{}, fmt.Errorf("unsupported auth method")
 	}
@@ -516,7 +544,46 @@ func authenticateServiceRequest(cfg config.Config, broker *approval.Broker, auth
 	if requestedMethod == "session" || requestedMethod == "auth-session" {
 		return serviceAuthIdentity{}, fmt.Errorf("session auth is unavailable")
 	}
+	if requestedMethod == "secure-session" {
+		identity, err := authenticateSecureConnectionSession(cfg, broker, ctx, token)
+		if err != nil {
+			return serviceAuthIdentity{}, err
+		}
+		return identity, nil
+	}
 	return serviceAuthIdentity{}, fmt.Errorf("invalid bearer token")
+}
+
+func authenticateSecureConnectionSession(cfg config.Config, broker *approval.Broker, ctx context.Context, sessionID string) (serviceAuthIdentity, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return serviceAuthIdentity{}, fmt.Errorf("missing secure session token")
+	}
+	if broker == nil || broker.DB == nil {
+		return serviceAuthIdentity{}, fmt.Errorf("secure session auth is unavailable")
+	}
+	key, err := security.LoadOrCreateKey(cfg.Security.SecretStore.KeyFile)
+	if err != nil {
+		return serviceAuthIdentity{}, err
+	}
+	secrets := &security.SecretManager{DB: broker.DB, Key: key}
+	identity, _, err := (&secureconn.IdentityStore{Secrets: secrets}).LoadOrCreate(ctx, "OR3 Desktop")
+	if err != nil {
+		return serviceAuthIdentity{}, err
+	}
+	claims, err := (&secureconn.SessionManager{DB: broker.DB, Identity: identity}).LoadActiveSessionClaims(ctx, sessionID)
+	if err != nil {
+		return serviceAuthIdentity{}, err
+	}
+	return serviceAuthIdentity{
+		Kind:     "secure-session",
+		Actor:    "secure-device:" + claims.DeviceID,
+		Role:     claims.Role,
+		Device:   claims.DeviceID,
+		Session:  claims.SessionID,
+		StepUpAt: claims.StepUpAtUnixMs,
+		StepUpOK: claims.StepUpAtUnixMs > 0,
+	}, nil
 }
 
 func serviceAuthIdentityFromContext(ctx context.Context) serviceAuthIdentity {
@@ -566,7 +633,39 @@ func serviceIsPairingRoute(r *http.Request) bool {
 		return false
 	}
 	path := strings.TrimSpace(r.URL.Path)
-	return path == "/internal/v1/pairing/requests" || path == "/internal/v1/pairing/exchange"
+	return path == "/internal/v1/pairing/requests" ||
+		path == "/internal/v1/pairing/exchange" ||
+		serviceIsSecurePairingRoute(r)
+}
+
+func serviceIsSecurePairingRoute(r *http.Request) bool {
+	if r == nil || r.URL == nil {
+		return false
+	}
+	path := strings.TrimSpace(r.URL.Path)
+	return path == "/internal/v1/secure-connections/pairing/approve" ||
+		path == "/internal/v1/secure-connections/pairing/exchange"
+}
+
+func serviceIsSecureSessionBootstrapRoute(r *http.Request) bool {
+	if r == nil || r.URL == nil {
+		return false
+	}
+	return r.Method == http.MethodPost &&
+		strings.TrimSpace(r.URL.Path) == "/internal/v1/secure-connections/sessions"
+}
+
+func serviceDefaultPairingBrowserCIDRs() []string {
+	return []string{
+		"127.0.0.0/8",
+		"::1/128",
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"100.64.0.0/10",
+		"fc00::/7",
+		"fe80::/10",
+	}
 }
 
 func serviceIsTerminalWebSocketRequest(r *http.Request) bool {
@@ -631,6 +730,21 @@ func serviceRouteRequirementForRequest(cfg config.Config, r *http.Request) servi
 		return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
 	case strings.HasPrefix(path, "/internal/v1/devices/"):
 		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "device management requires recent passkey verification"}
+	case strings.HasPrefix(path, "/internal/v1/secure-connections"):
+		relative := strings.Trim(strings.TrimPrefix(path, "/internal/v1/secure-connections"), "/")
+		if method == http.MethodGet && relative == "capabilities" {
+			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
+		}
+		if method == http.MethodPost && (relative == "pairing/intents" || relative == "pairing/approve" || relative == "pairing/exchange" || relative == "sessions") {
+			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, BypassGlobalSession: true}
+		}
+		if method == http.MethodGet && relative == "host-identity" {
+			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, SessionOnly: true}
+		}
+		if method == http.MethodGet && (relative == "devices" || relative == "relay/rendezvous") {
+			return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "secure connection state requires recent passkey verification"}
+		}
+		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "secure connection changes require recent passkey verification"}
 	case path == "/internal/v1/app/bootstrap":
 		return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, BypassGlobalSession: true}
 	case path == "/internal/v1/actions/restart-service":
@@ -671,6 +785,9 @@ func serviceRouteRequirementForRequest(cfg config.Config, r *http.Request) servi
 		}
 		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "terminal access requires recent passkey verification"}
 	case path == "/internal/v1/approvals" || strings.HasPrefix(path, "/internal/v1/approvals/"):
+		if method == http.MethodGet && path == "/internal/v1/approvals" {
+			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
+		}
 		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "approval changes require recent passkey verification"}
 	case method == http.MethodDelete || method == http.MethodPatch || method == http.MethodPut:
 		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, Reason: "recent passkey verification required"}
@@ -710,17 +827,14 @@ func serviceAuthChallengeError(cfg config.Config, authSvc *auth.Service, require
 		}
 		return nil
 	}
-	if strings.EqualFold(identity.Kind, "shared-secret") {
-		return nil
-	}
 	enforceSession := requirement.SessionOnly || (strings.EqualFold(mode, string(config.AuthEnforcementSession)) && !requirement.BypassGlobalSession)
-	if enforceSession && identity.Kind != "auth-session" {
+	if enforceSession && !serviceIdentitySatisfiesSession(identity) {
 		return auth.ErrSessionRequired
 	}
 	if requirement.Sensitivity != serviceRouteSensitive {
 		return nil
 	}
-	if identity.Kind != "auth-session" {
+	if !serviceIdentitySatisfiesSession(identity) {
 		return auth.ErrPasskeyRequired
 	}
 	if requirement.StepUpOnly || strings.TrimSpace(requirement.Reason) != "" {
@@ -729,6 +843,10 @@ func serviceAuthChallengeError(cfg config.Config, authSvc *auth.Service, require
 		}
 	}
 	return nil
+}
+
+func serviceIdentitySatisfiesSession(identity serviceAuthIdentity) bool {
+	return identity.Kind == "auth-session" || identity.Kind == "secure-session"
 }
 
 func serviceAuditAuthEvent(authSvc *auth.Service, ctx context.Context, eventType string, identity serviceAuthIdentity, payload map[string]any) {

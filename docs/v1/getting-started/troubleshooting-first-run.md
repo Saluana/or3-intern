@@ -43,7 +43,7 @@ Check your bot tokens and API keys in the config. Make sure they are correct. Fo
 ## Run a diagnostic
 
 ```bash
-or3-intern doctor
+or3-intern health
 ```
 
-This checks your setup and reports any problems. It looks at config, provider connectivity, and connected app status.
+This checks your setup and reports any problems. It looks at config, provider connectivity, and connected app status. Use `or3-intern health --fix` for safe automatic repairs, or `or3-intern doctor` when you need deeper diagnostics.

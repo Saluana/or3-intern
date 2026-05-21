@@ -615,6 +615,29 @@ func TestBroker_ExchangePairingCodeRejectsWrongCodeAndExpiredRequest(t *testing.
 	}
 }
 
+func TestBroker_ExchangePairingCodeAcceptsFormattedCode(t *testing.T) {
+	broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Pairing.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+
+	pairingReq, code, err := broker.CreatePairingRequest(context.Background(), PairingRequestInput{
+		Role:        RoleOperator,
+		DisplayName: "Phone",
+		Origin:      "connect-device",
+	})
+	if err != nil {
+		t.Fatalf("CreatePairingRequest: %v", err)
+	}
+	if _, err := broker.ApprovePairingRequest(context.Background(), pairingReq.ID, "cli:test"); err != nil {
+		t.Fatalf("ApprovePairingRequest: %v", err)
+	}
+	formattedCode := code[:3] + "-" + code[3:]
+	if _, _, err := broker.ExchangePairingCode(context.Background(), PairingExchangeInput{RequestID: pairingReq.ID, Code: formattedCode}); err != nil {
+		t.Fatalf("ExchangePairingCode formatted: %v", err)
+	}
+}
+
 func TestBroker_ExchangePairingCode_IsSingleUse(t *testing.T) {
 	broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
 		cfg.Pairing.Mode = config.ApprovalModeAsk

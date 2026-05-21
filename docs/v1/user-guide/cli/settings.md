@@ -12,7 +12,7 @@ or3-intern settings --export -
 
 Instead of exposing raw config JSON first, `settings` presents task-oriented areas such as:
 
-- AI Provider
+- AI Controls
 - Workspace Folder
 - Connected Devices
 - Safety Level
@@ -37,7 +37,8 @@ Use it when you want to review or update your setup without dropping directly in
 - `setup` — plain-language first-run flow
 - `init` — compatibility alias for the original first-run wizard
 - `configure` — advanced targeted editor
-- `doctor --fix` — repair path for safe readiness fixes
+- `health --fix` — normal repair path for safe readiness fixes
+- `doctor --fix` — advanced repair path with stricter diagnostics and filters
 
 ## Good uses
 

@@ -274,8 +274,8 @@ func TestRunSetupWithIO_StartChatCopy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runSetupWithIO: %v", err)
 	}
-	if result.StartChat || !strings.Contains(out.String(), "Next: run `or3-intern chat`.") {
-		t.Fatalf("expected next chat copy, got start=%t output=%s", result.StartChat, out.String())
+	if result.StartChat || !strings.Contains(out.String(), "You did it") {
+		t.Fatalf("expected success copy, got start=%t output=%s", result.StartChat, out.String())
 	}
 }
 
@@ -311,7 +311,7 @@ func TestRunSetupWithIOOptions_AutoSetupContinuesOriginalCommand(t *testing.T) {
 		"No saved setup was found",
 		"Step 1 of 4: AI provider",
 		"Step 4 of 4: Safety level",
-		"Next: continuing with `or3-intern status`.",
+		"You did it",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("expected %q in output: %s", want, text)

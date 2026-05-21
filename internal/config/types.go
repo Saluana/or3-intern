@@ -145,6 +145,11 @@ type Config struct {
 	ContextManager      ContextManagerConfig    `json:"contextManager"`
 	ContextConfigured   bool                    `json:"-"`
 	IntegrationWarnings []IntegrationQuarantine `json:"-"`
+
+	// Milestones tracks completed onboarding milestones.
+	// Keys are milestone names (e.g., "setup_complete", "pairing_complete", "first_chat_complete").
+	// Values are RFC3339 timestamps when the milestone was completed.
+	Milestones map[string]string `json:"milestones,omitempty"`
 }
 
 type ContextConfig struct {

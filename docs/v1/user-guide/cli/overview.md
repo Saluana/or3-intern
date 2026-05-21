@@ -7,12 +7,14 @@ The OR3 Intern CLI is the main interface for local chat, setup, diagnostics, app
 ```bash
 or3-intern help
 or3-intern setup
-or3-intern status
+or3-intern health
+or3-intern pair --auto
 or3-intern settings
 ```
 
 - `setup` is the friendliest first-run flow.
-- `status` gives a plain-language summary of what OR3 can access and what needs attention.
+- `health` checks whether OR3 is ready and can apply safe repairs with `--fix`.
+- `pair --auto` starts the normal device pairing flow with readiness checks.
 - `settings` is the canonical day-to-day configuration entrypoint.
 
 ## Command groups
@@ -21,7 +23,7 @@ The root help groups commands into three buckets:
 
 | Group | Commands |
 | --- | --- |
-| Simple commands | `setup`, `chat`, `status`, `settings`, `connect-device`, `help` |
+| Simple commands | `setup`, `chat`, `health`, `pair --auto`, `status`, `settings`, `connect-device`, `help` |
 | Advanced commands | `configure`, `init`, `config-path`, `chat`, `serve`, `service`, `agent`, `version` |
 | Operator tools | `doctor`, `capabilities`, `embeddings`, `secrets`, `audit`, `skills`, `approvals`, `devices`, `pairing`, `scope`, `migrate-jsonl`, `migrate-openclaw` |
 
@@ -45,3 +47,4 @@ By default OR3 Intern reads `~/.or3-intern/config.json`. Use `or3-intern config-
 - See [settings](settings.md) for routine configuration changes.
 - See [configure](configure.md) for targeted advanced edits.
 - See [setup-init](setup-init.md) for first-run flows.
+- See [health](health.md) for normal readiness checks and safe repairs.

@@ -20,33 +20,41 @@ or3-intern version
 
 1. Run guided setup:
 
-   ```bash
-   or3-intern setup
-   ```
+    ```bash
+    or3-intern setup
+    ```
 
 2. Start an interactive local conversation:
 
-   ```bash
-   or3-intern chat
-   ```
+    ```bash
+    or3-intern chat
+    ```
 
-   Inside chat, use `/new` when you want to archive the current conversation into memory and start fresh.
+    Inside chat, use `/new` when you want to archive the current conversation into memory and start fresh.
 
 3. Or run enabled connected apps and automation:
 
-   ```bash
-   or3-intern serve
-   ```
+    ```bash
+    or3-intern serve
+    ```
 
-4. Check safety and access posture any time:
+    To connect OR3 App over the internal service API, run:
 
-   ```bash
-   or3-intern status
-   ```
+    ```bash
+    or3-intern service
+    ```
+
+    Then pair from OR3 App at `/settings/pair`, or start from the computer with `or3-intern pair --auto` and enter the printed code in the app. See docs/v1/user-guide/app-integration/or3-app-connection-guide.md for the full web, Electron, iOS, Android, pairing, disconnect, and troubleshooting flow.
+
+4. Check readiness any time:
+
+    ```bash
+    or3-intern health
+    ```
 
 The `setup` command is the recommended first-run flow. It asks for a provider, workspace folder, scenario, and safety mode, then translates those choices into the existing runtime profile, approvals, audit, service, and hardening settings.
 
-Use `settings` when you want to revisit your setup later. It opens a task-based home for AI Provider, Workspace Folder, Connected Devices, Safety Level, Connected Apps, Tools, Memory, and Advanced:
+Use `settings` when you want to revisit your setup later. It opens a task-based home for AI Controls, Workspace Folder, Connected Devices, Safety Level, Connected Apps, Tools, Memory, and Advanced:
 
 ```bash
 or3-intern settings
@@ -77,9 +85,11 @@ Root help shows the full command catalog by default:
 
 - `or3-intern setup` guided first-run setup using scenario and safety choices
 - `or3-intern chat` interactive CLI
+- `or3-intern health [--check|--fix|--json]` normal readiness checks and safe repairs
+- `or3-intern pair --auto [--name ...] [--role viewer|operator|admin]` pair a phone or other device with readiness checks
 - `or3-intern status [--advanced]` plain-language safety and access summary
 - `or3-intern settings [--section ...] [--export path|-]` review setup, jump to focused task sections, or export config
-- `or3-intern connect-device [list|disconnect <device-id>|role <device-id>]` pair a phone or other device
+- `or3-intern connect-device [list|disconnect <device-id>|role <device-id>]` legacy/manual computer-started pairing flow and device shortcuts
 - `or3-intern configure [--section ...]` interactive setup and reconfiguration wizard
 - `or3-intern init` guided first-run setup
 - `or3-intern config-path` print the resolved config.json path
@@ -87,7 +97,7 @@ Root help shows the full command catalog by default:
 - `or3-intern service` run the internal authenticated HTTP API for OR3 Net
 - `scripts/restart-service.sh [restart|start|stop|status]` manage a repo-run `or3-intern service` process without retyping the full command
 - `or3-intern agent -m "hello"` run a one-shot turn
-- `or3-intern doctor [--strict|--json|--fix]` diagnose readiness issues, explain risk, and repair safe local problems
+- `or3-intern doctor [--strict|--json|--fix]` advanced diagnostics, filters, and guided repair
 - `or3-intern embeddings <status|rebuild>` inspect or rebuild stored memory/doc embeddings after provider or embedding-model changes
 - `or3-intern capabilities [--channel name|--trigger name|--json]` inspect the effective runtime posture, ingress policy, approvals, and access profiles
 - `or3-intern secrets <set|delete|list>` manage encrypted secret refs stored in SQLite
@@ -95,7 +105,7 @@ Root help shows the full command catalog by default:
 - `or3-intern skills ...` list, inspect, search, install, update, check, and remove skills
 - `or3-intern approvals <list|show|approve|deny|allowlist>` inspect and resolve approval requests
 - `or3-intern devices <list|requests|approve|deny|rotate|revoke>` inspect paired devices and legacy pairing request helpers
-- `or3-intern pairing <list|request|approve|deny|exchange>` manage first-class pairing workflows, including channel-bound identities
+- `or3-intern pairing <list|request|approve-code|approve|deny|exchange>` manage first-class pairing workflows, including channel-bound identities
 - `or3-intern scope <link|list|resolve>` link multiple session keys to a shared history scope
 - `or3-intern migrate-jsonl /path/to/session.jsonl [session_key]`
 - `or3-intern version`

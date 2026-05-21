@@ -23,16 +23,40 @@ func runConnectDeviceCommand(ctx context.Context, cfgPath string, cfg *config.Co
 		case "list":
 			return runConnectDeviceList(ctx, database, stdout)
 		case "disconnect":
-			if len(args) != 2 {
-				return fmt.Errorf("usage: connect-device disconnect <device-id>")
+			rest, force, err := splitForceFlag(args[1:])
+			if err != nil {
+				return err
+			}
+			if len(rest) != 1 {
+				return fmt.Errorf("usage: connect-device disconnect <device-id> [--force]")
 			}
 			if broker == nil {
 				return fmt.Errorf("approval broker unavailable")
 			}
-			if err := broker.RevokeDevice(ctx, strings.TrimSpace(args[1]), "cli"); err != nil {
+			deviceID := strings.TrimSpace(rest[0])
+			stdinTTY, stdoutTTY := stdioIsTerminal(os.Stdin, stdout)
+			ok, err := confirmDestructiveAction(destructiveConfirmation{
+				Action:      "Disconnect paired device",
+				ItemName:    deviceID,
+				Consequence: "This device will stop being able to use this computer.",
+				Undo:        "There is no undo. Pair the device again if you trust it later.",
+				Force:       force,
+				Stdin:       os.Stdin,
+				Stdout:      stdout,
+				StdinTTY:    stdinTTY,
+				StdoutTTY:   stdoutTTY,
+			})
+			if err != nil {
 				return err
 			}
-			fmt.Fprintf(stdout, "Disconnected %s\n", strings.TrimSpace(args[1]))
+			if !ok {
+				fmt.Fprintln(stdout, "Canceled.")
+				return nil
+			}
+			if err := broker.RevokeDevice(ctx, deviceID, "cli"); err != nil {
+				return err
+			}
+			fmt.Fprintf(stdout, "Disconnected %s\n", deviceID)
 			return nil
 		case "role":
 			if len(args) != 2 {

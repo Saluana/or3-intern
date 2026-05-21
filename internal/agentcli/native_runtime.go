@@ -201,6 +201,21 @@ func emitNativeStructured(seq *int64, onEvent func(AgentRunEvent), payload map[s
 	onEvent(runtimeEvent(seq, "structured", payload))
 }
 
+func emitCodexNotificationStructured(seq *int64, onEvent func(AgentRunEvent), method string, params map[string]any) {
+	payload := map[string]any{
+		"type":   method,
+		"method": method,
+		"params": params,
+		"raw":    params,
+	}
+	for key, value := range params {
+		if _, exists := payload[key]; !exists {
+			payload[key] = value
+		}
+	}
+	emitNativeStructured(seq, onEvent, payload)
+}
+
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
 		if trimmed := strings.TrimSpace(value); trimmed != "" {
@@ -706,10 +721,7 @@ func (r *CodexNativeRuntime) Execute(ctx context.Context, req NativeRuntimeExecu
 		stderrDone <- string(data)
 	}()
 	client.start(func(method string, params map[string]any) {
-		emitNativeStructured(&seq, req.OnEvent, map[string]any{"type": method, "raw": params})
-		if delta := extractText(params); delta != "" && req.OnEvent != nil {
-			req.OnEvent(textChunkEvent(&seq, delta))
-		}
+		emitCodexNotificationStructured(&seq, req.OnEvent, method, params)
 	}, func(id int64, method string, params map[string]any) map[string]any {
 		approvalRequired.Store(true)
 		emitNativeStructured(&seq, req.OnEvent, map[string]any{"type": method, "method": method, "params": params, "request_id": id})

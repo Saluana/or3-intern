@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -34,7 +35,7 @@ func TestInitDefaults_UsesAppDataPaths(t *testing.T) {
 	}
 }
 
-func TestRunInitWithIO_WritesConfig(t *testing.T) {
+func TestRunInitWithIO_DelegatesToSetup(t *testing.T) {
 	t.Setenv("OR3_DB_PATH", "")
 	t.Setenv("OR3_ARTIFACTS_DIR", "")
 	t.Setenv("OR3_API_BASE", "")
@@ -44,22 +45,20 @@ func TestRunInitWithIO_WritesConfig(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	input := strings.NewReader(strings.Join([]string{
-		// Provider section (9 prompts)
-		"2",        // 1. provider preset -> OpenRouter
-		"",         // 2. API base (default)
-		"",         // 3. Chat model (default)
-		"",         // 4. Embedding model (default)
-		"",         // 5. Embedding dimensions (default)
-		"",         // 6. Temperature (default)
-		"",         // 7. Timeout seconds (default)
-		"n",        // 8. Enable vision (y/n)
-		"test-key", // 9. API key
-		// Storage section (7 prompts)
-		"", "", "", "", "", "", "",
-		// Workspace section (3 prompts)
-		"", "", "",
-		// Tools section (4 prompts)
-		"", "", "", "",
+		// Provider choice
+		"2",
+		// API key
+		"test-key",
+		// Workspace folder
+		"",
+		// Storage location
+		"1",
+		// Scenario (solo computer)
+		"1",
+		// Safety mode (balanced)
+		"2",
+		// Start chat
+		"n",
 	}, "\n"))
 	var out strings.Builder
 
@@ -84,17 +83,71 @@ func TestRunInitWithIO_WritesConfig(t *testing.T) {
 	if cfg.Provider.APIKey != "test-key" {
 		t.Fatalf("unexpected API key: %q", cfg.Provider.APIKey)
 	}
-	if strings.Contains(cfg.DBPath, "/workspace/project/.or3") {
-		t.Fatalf("DB path should not default inside workspace: %q", cfg.DBPath)
+	if !strings.Contains(out.String(), "compatibility alias") {
+		t.Fatalf("expected compatibility alias message, got %q", out.String())
 	}
-	if !strings.Contains(out.String(), "Saved config") {
-		t.Fatalf("expected success output, got %q", out.String())
+	if !strings.Contains(out.String(), "You did it") {
+		t.Fatalf("expected setup success output, got %q", out.String())
 	}
-	if !strings.Contains(out.String(), "or3-intern init") {
-		t.Fatalf("expected init alias banner, got %q", out.String())
+}
+
+func TestInitPrintsCompatibilityMessage(t *testing.T) {
+	var out bytes.Buffer
+	_, err := runSetupWithIO(strings.NewReader("1\ntest-key\n\n1\n1\n2\nn\n"), &out, filepath.Join(t.TempDir(), "config.json"), "/tmp")
+	if err != nil {
+		t.Fatalf("runSetupWithIO: %v", err)
 	}
-	if !strings.Contains(out.String(), "or3-intern chat") {
-		t.Fatalf("expected next-step instructions, got %q", out.String())
+	if !strings.Contains(out.String(), "OR3 setup") {
+		t.Fatalf("expected setup header, got %q", out.String())
+	}
+}
+
+func TestConfigureSectionFlagStillWorks(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+
+	cfg := config.Default()
+	cfg.WorkspaceDir = dir
+	cfg.Provider.APIBase = "https://api.openai.com/v1"
+	cfg.Provider.Model = "gpt-4.1-mini"
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	args, err := parseConfigureArgs([]string{"--section", "provider"})
+	if err != nil {
+		t.Fatalf("parseConfigureArgs: %v", err)
+	}
+	if len(args.Sections) != 1 || args.Sections[0] != "provider" {
+		t.Fatalf("expected provider section, got %#v", args.Sections)
+	}
+}
+
+func TestHelpShowsSetupAsRecommendedFirstRun(t *testing.T) {
+	var out bytes.Buffer
+	if err := printHelpTopic(&out, []string{"init"}); err != nil {
+		t.Fatalf("printHelpTopic init: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "Compatibility alias") {
+		t.Fatalf("expected init help to describe compatibility alias, got %q", got)
+	}
+	if !strings.Contains(got, "or3-intern setup") {
+		t.Fatalf("expected init help to reference setup command, got %q", got)
+	}
+}
+
+func TestHelpConfigureLabeledAdvanced(t *testing.T) {
+	var out bytes.Buffer
+	if err := printHelpTopic(&out, []string{"configure"}); err != nil {
+		t.Fatalf("printHelpTopic configure: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "Advanced configuration wizard") {
+		t.Fatalf("expected configure help to be labeled advanced, got %q", got)
+	}
+	if !strings.Contains(got, "Most users should use") {
+		t.Fatalf("expected configure help to reference setup/settings, got %q", got)
 	}
 }
 

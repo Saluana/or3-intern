@@ -333,7 +333,7 @@ func serviceAllowedBrowserOrigin(cfg config.Config, r *http.Request) (string, bo
 		return "", false
 	}
 	if strings.EqualFold(parsed.Scheme, "app") {
-		if serviceElectronAppOriginAllowed(origin, cfg) && (strings.TrimSpace(r.RemoteAddr) == "" || requestRemoteIsLoopback(r.RemoteAddr)) {
+		if serviceElectronAppOriginAllowed(origin, cfg) && (strings.TrimSpace(r.RemoteAddr) == "" || requestRemoteIsLoopback(r.RemoteAddr) || requestRemoteInCIDRAllowlist(r.RemoteAddr, serviceTrustedBrowserCIDRs(cfg))) {
 			return origin, true
 		}
 		return "", false
@@ -735,7 +735,7 @@ func serviceRouteRequirementForRequest(cfg config.Config, r *http.Request) servi
 		if method == http.MethodGet && relative == "capabilities" {
 			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
 		}
-		if method == http.MethodPost && (relative == "pairing/approve" || relative == "pairing/exchange" || relative == "sessions") {
+		if method == http.MethodPost && (relative == "pairing/intents" || relative == "pairing/approve" || relative == "pairing/exchange" || relative == "sessions") {
 			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, BypassGlobalSession: true}
 		}
 		if method == http.MethodGet && relative == "host-identity" {
@@ -785,6 +785,9 @@ func serviceRouteRequirementForRequest(cfg config.Config, r *http.Request) servi
 		}
 		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "terminal access requires recent passkey verification"}
 	case path == "/internal/v1/approvals" || strings.HasPrefix(path, "/internal/v1/approvals/"):
+		if method == http.MethodGet && path == "/internal/v1/approvals" {
+			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
+		}
 		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "approval changes require recent passkey verification"}
 	case method == http.MethodDelete || method == http.MethodPatch || method == http.MethodPut:
 		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, Reason: "recent passkey verification required"}

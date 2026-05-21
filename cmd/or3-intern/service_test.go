@@ -639,6 +639,33 @@ func TestServiceBrowserMiddleware_AllowsTrustedElectronAppOriginFromLoopback(t *
 	}
 }
 
+func TestServiceBrowserMiddleware_AllowsTrustedElectronAppOriginFromPrivateNetwork(t *testing.T) {
+	cfg := config.Config{Service: config.ServiceConfig{
+		Listen:                "100.64.0.42:9100",
+		TrustedBrowserOrigins: []string{"app://or3"},
+		TrustedBrowserCIDRs:   []string{"100.64.0.0/10"},
+	}}
+	handler := serviceBrowserMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeServiceJSON(w, http.StatusAccepted, map[string]any{"ok": true})
+	}))
+
+	req := httptest.NewRequest(http.MethodOptions, "/internal/v1/chat-runners", nil)
+	req.RemoteAddr = "100.82.202.111:54321"
+	req.Header.Set("Origin", "app://or3")
+	req.Header.Set("Access-Control-Request-Method", http.MethodGet)
+	req.Header.Set("Access-Control-Request-Headers", "authorization,x-or3-auth-method,content-type")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 preflight response, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "app://or3" {
+		t.Fatalf("expected trusted Electron app allow-origin header, got %q", got)
+	}
+}
+
 func TestServiceBrowserMiddleware_AllowsOpaqueElectronOriginFromLoopback(t *testing.T) {
 	cfg := config.Config{Service: config.ServiceConfig{
 		Listen: "127.0.0.1:9100",

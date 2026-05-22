@@ -69,6 +69,10 @@ type DiagnosticLogQuery struct {
 	Source        string
 	Level         string
 	CorrelationID string
+	EventType     string
+	Pattern       string
+	SinceUnixMS   int64
+	UntilUnixMS   int64
 	Limit         int
 }
 
@@ -103,6 +107,30 @@ func (d *DB) GetSettingsChangePlan(ctx context.Context, id string) (SettingsChan
 		return SettingsChangePlanRecord{}, false, err
 	}
 	return record, true, nil
+}
+
+func (d *DB) ListPendingSettingsChangePlans(ctx context.Context, limit int) ([]SettingsChangePlanRecord, error) {
+	if limit <= 0 || limit > 50 {
+		limit = 25
+	}
+	rows, err := d.SQL.QueryContext(ctx,
+		`SELECT id, status, conversation_id, accepted_card_id, created_by, plan_json, approval_json, live_reload_json, rollback_id, post_check_pending, error_text, created_at, updated_at, applied_at
+		 FROM settings_change_plans
+		 WHERE post_check_pending=1 OR status IN ('applied','restart_pending','restart_start_failed','restart_approval_required','post_check_failed')
+		 ORDER BY updated_at DESC, created_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []SettingsChangePlanRecord{}
+	for rows.Next() {
+		item, err := scanSettingsChangePlanRecord(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
 }
 
 func (d *DB) UpdateSettingsChangePlanStatus(ctx context.Context, id, status, rollbackID, errorText string, postCheckPending bool, approvalJSON, liveReloadJSON string, appliedAt int64) error {
@@ -252,6 +280,26 @@ func (d *DB) QueryDiagnosticLogEvents(ctx context.Context, query DiagnosticLogQu
 	if correlationID := strings.TrimSpace(query.CorrelationID); correlationID != "" {
 		clauses = append(clauses, "correlation_id=?")
 		args = append(args, correlationID)
+	}
+	if eventType := strings.TrimSpace(query.EventType); eventType != "" {
+		clauses = append(clauses, "event_type=?")
+		args = append(args, eventType)
+	}
+	if query.SinceUnixMS > 0 {
+		clauses = append(clauses, "created_at>=?")
+		args = append(args, query.SinceUnixMS)
+	}
+	if query.UntilUnixMS > 0 {
+		clauses = append(clauses, "created_at<=?")
+		args = append(args, query.UntilUnixMS)
+	}
+	if pattern := strings.TrimSpace(query.Pattern); pattern != "" {
+		if len(pattern) > 120 {
+			pattern = pattern[:120]
+		}
+		clauses = append(clauses, "(event_type LIKE ? OR payload_json LIKE ?)")
+		like := "%" + strings.ReplaceAll(pattern, "%", `\%`) + "%"
+		args = append(args, like, like)
 	}
 	args = append(args, limit)
 	rows, err := d.SQL.QueryContext(ctx,

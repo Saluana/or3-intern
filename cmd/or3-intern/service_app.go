@@ -290,56 +290,62 @@ func (s *serviceServer) restartActionDescriptor() serviceAppActionDescriptor {
 }
 
 func (s *serviceServer) handleRestartServiceAction(w http.ResponseWriter, r *http.Request) {
+	response, status, err := s.startRestartServiceAction(r.Context(), r)
+	if err != nil {
+		writeServiceError(w, r, status, err.Error(), nil)
+		return
+	}
+	if status >= 400 && response.Status != "approval_required" && response.Message != "" {
+		writeServiceJSON(w, status, serviceErrorPayload(r, response.Message))
+		return
+	}
+	writeServiceValue(w, status, response)
+}
+
+func (s *serviceServer) startRestartServiceAction(ctx context.Context, r *http.Request) (serviceActionResponse, int, error) {
 	descriptor := s.restartActionDescriptor()
 	if !descriptor.Available {
-		writeServiceJSON(w, http.StatusServiceUnavailable, serviceErrorPayload(r, serviceFirstNonEmpty(descriptor.DisabledReason, "restart is not available on this computer")))
-		return
+		return serviceActionResponse{ActionID: "restart-service", Status: "unavailable", Message: serviceFirstNonEmpty(descriptor.DisabledReason, "restart is not available on this computer")}, http.StatusServiceUnavailable, nil
 	}
 	scriptPath, workingDir, ok := s.findServiceRestartScript()
 	if !ok {
-		writeServiceJSON(w, http.StatusServiceUnavailable, serviceErrorPayload(r, "restart is not available on this computer"))
-		return
+		return serviceActionResponse{ActionID: "restart-service", Status: "unavailable", Message: "restart is not available on this computer"}, http.StatusServiceUnavailable, nil
 	}
 	shellPath, err := resolveTerminalShell("sh")
 	if err != nil {
-		writeServiceError(w, r, http.StatusServiceUnavailable, "restart shell is not available", err)
-		return
+		return serviceActionResponse{ActionID: "restart-service", Status: "unavailable"}, http.StatusServiceUnavailable, fmt.Errorf("restart shell is not available: %w", err)
 	}
-	decision, err := s.evaluateTerminalApproval(r.Context(), shellPath, workingDir, "")
+	decision, err := s.evaluateTerminalApproval(ctx, shellPath, workingDir, "")
 	if err != nil {
-		writeServiceError(w, r, http.StatusBadGateway, "restart approval failed", err)
-		return
+		return serviceActionResponse{ActionID: "restart-service", Status: "failed"}, http.StatusBadGateway, fmt.Errorf("restart approval failed: %w", err)
 	}
 	if decision.RequiresApproval {
-		writeServiceValue(w, http.StatusConflict, serviceActionResponse{
+		return serviceActionResponse{
 			ActionID:   "restart-service",
 			Status:     "approval_required",
 			Message:    "restart service requires approval",
 			ApprovalID: decision.RequestID,
-		})
-		return
+		}, http.StatusConflict, nil
 	}
 	if !decision.Allowed {
 		reason := strings.TrimSpace(decision.Reason)
 		if reason == "" {
 			reason = "restart service denied"
 		}
-		writeServiceJSON(w, http.StatusForbidden, serviceErrorPayload(r, reason))
-		return
+		return serviceActionResponse{ActionID: "restart-service", Status: "denied", Message: reason}, http.StatusForbidden, nil
 	}
 	operationID := newServiceRequestID()
 	logPath, err := startDetachedServiceRestart(scriptPath, workingDir, s.unsafeDev, operationID)
 	if err != nil {
-		writeServiceError(w, r, http.StatusBadGateway, "restart failed to start", err)
-		return
+		return serviceActionResponse{ActionID: "restart-service", Status: "failed", OperationID: operationID, LogPath: logPath}, http.StatusBadGateway, fmt.Errorf("restart failed to start: %w", err)
 	}
-	writeServiceValue(w, http.StatusAccepted, serviceActionResponse{
+	return serviceActionResponse{
 		ActionID:    "restart-service",
 		Status:      "accepted",
 		Message:     "restart requested",
 		OperationID: operationID,
 		LogPath:     logPath,
-	})
+	}, http.StatusAccepted, nil
 }
 
 func startDetachedServiceRestart(scriptPath, workingDir string, unsafeDev bool, operationID string) (string, error) {

@@ -64,21 +64,21 @@
 
 ## 7. Diagnostic logs and service-down checks
 
-- [ ] (Req 1, 2, 16) Create `internal/diagnosticlog` for structured, bounded, redaction-aware Doctor/Admin log events with correlation IDs.
-- [ ] (Req 16, 17) Add SQLite-backed `diagnostic_log_events` retention with age/count/size pruning and query bounds.
-- [ ] (Req 1, 16) Extend `service_logs.go` or adjacent helpers so Doctor/Admin can query redacted logs by source, level, time range, correlation ID, and known failure pattern.
-- [ ] (Req 2, 13) Add app-side client diagnostics for service unreachable states: host profile, pairing/session state, base URL, bootstrap reachability, timeout/refused/auth error category, and cached restart guidance.
-- [ ] (Req 2, 13) Merge client-side service-down findings with service-side Doctor findings when the service returns.
-- [ ] (Req 16) Add tests for log redaction, prompt-injection log lines, retention pruning, query bounds, and service-down classification.
+- [x] (Req 1, 2, 16) Create `internal/diagnosticlog` for structured, bounded, redaction-aware Doctor/Admin log events with correlation IDs.
+- [x] (Req 16, 17) Add SQLite-backed `diagnostic_log_events` retention with age/count/size pruning and query bounds.
+- [x] (Req 1, 16) Extend `service_logs.go` or adjacent helpers so Doctor/Admin can query redacted logs by source, level, time range, correlation ID, and known failure pattern.
+- [x] (Req 2, 13) Add app-side client diagnostics for service unreachable states: host profile, pairing/session state, base URL, bootstrap reachability, timeout/refused/auth error category, and cached restart guidance.
+- [x] (Req 2, 13) Merge client-side service-down findings with service-side Doctor findings when the service returns.
+- [x] (Req 16) Add tests for log redaction, prompt-injection log lines, retention pruning, query bounds, and service-down classification.
 
 ## 8. Restart and recovery integration
 
-- [ ] (Req 7, 9) Reuse `/internal/v1/actions/restart-service` for restart-required plans rather than adding a second restart path.
-- [ ] (Req 9, 13) Include restart preview, approval state, operation ID, and log path in plan apply responses.
-- [ ] (Req 9) Add backend post-restart readiness polling hooks or app instructions so post-checks can resume after reconnect.
-- [ ] (Req 9) Reload persisted Doctor/Admin session, pending plan, accepted checkpoint, and rollback IDs after service restart.
-- [ ] (Req 9) Handle restart-start failure, restart timeout, app disconnect, service returning with failed readiness, and manual recovery path.
-- [ ] (Req 9, 17) Add tests around restart-required plans and existing restart action availability/approval behavior.
+- [x] (Req 7, 9) Reuse `/internal/v1/actions/restart-service` for restart-required plans rather than adding a second restart path.
+- [x] (Req 9, 13) Include restart preview, approval state, operation ID, and log path in plan apply responses.
+- [x] (Req 9) Add backend post-restart readiness polling hooks or app instructions so post-checks can resume after reconnect.
+- [x] (Req 9) Reload persisted Doctor/Admin session, pending plan, accepted checkpoint, and rollback IDs after service restart.
+- [x] (Req 9) Handle restart-start failure, restart timeout, app disconnect, service returning with failed readiness, and manual recovery path.
+- [x] (Req 9, 17) Add tests around restart-required plans and existing restart action availability/approval behavior.
 
 ## 9. App Doctor/Admin chat and fix cards
 

@@ -18,6 +18,7 @@ import (
 	"or3-intern/internal/config"
 	"or3-intern/internal/configmeta"
 	"or3-intern/internal/db"
+	"or3-intern/internal/diagnosticlog"
 	"or3-intern/internal/doctor"
 	"or3-intern/internal/skilldiag"
 )
@@ -25,7 +26,8 @@ import (
 const serviceDoctorBodyLimit = 256 * 1024
 
 type serviceDoctorStatusRequest struct {
-	ClientFindings []doctor.Finding `json:"client_findings"`
+	ClientFindings    []doctor.Finding                 `json:"client_findings"`
+	ClientDiagnostics *diagnosticlog.ClientDiagnostics `json:"client_diagnostics,omitempty"`
 }
 
 type serviceDoctorSessionCreateRequest struct {
@@ -73,7 +75,11 @@ func (s *serviceServer) handleDoctor(w http.ResponseWriter, r *http.Request) {
 			writeServiceRequestDecodeError(w, err)
 			return
 		}
-		s.handleDoctorStatus(w, r, req.ClientFindings)
+		clientFindings := append([]doctor.Finding{}, req.ClientFindings...)
+		if req.ClientDiagnostics != nil {
+			clientFindings = append(clientFindings, diagnosticlog.FindingsFromClientDiagnostics(*req.ClientDiagnostics)...)
+		}
+		s.handleDoctorStatus(w, r, clientFindings)
 	case path == "admin-brain":
 		if r.Method != http.MethodGet {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
@@ -178,10 +184,26 @@ func (s *serviceServer) handleDoctorLogs(w http.ResponseWriter, r *http.Request)
 		}
 		limit = n
 	}
+	sinceMS, ok := parseOptionalInt64Query(w, r, "since_ms")
+	if !ok {
+		return
+	}
+	untilMS, ok := parseOptionalInt64Query(w, r, "until_ms")
+	if !ok {
+		return
+	}
+	if sinceMS > 0 && untilMS > 0 && sinceMS > untilMS {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "since_ms must be before until_ms"})
+		return
+	}
 	items, err := store.QueryDiagnosticLogEvents(r.Context(), db.DiagnosticLogQuery{
 		Source:        strings.TrimSpace(r.URL.Query().Get("source")),
 		Level:         strings.TrimSpace(r.URL.Query().Get("level")),
 		CorrelationID: strings.TrimSpace(r.URL.Query().Get("correlation_id")),
+		EventType:     strings.TrimSpace(r.URL.Query().Get("event_type")),
+		Pattern:       serviceFirstNonEmpty(strings.TrimSpace(r.URL.Query().Get("pattern")), strings.TrimSpace(r.URL.Query().Get("known_failure_pattern"))),
+		SinceUnixMS:   sinceMS,
+		UntilUnixMS:   untilMS,
 		Limit:         limit,
 	})
 	if err != nil {
@@ -192,6 +214,10 @@ func (s *serviceServer) handleDoctorLogs(w http.ResponseWriter, r *http.Request)
 		"source":         strings.TrimSpace(r.URL.Query().Get("source")),
 		"level":          strings.TrimSpace(r.URL.Query().Get("level")),
 		"correlation_id": strings.TrimSpace(r.URL.Query().Get("correlation_id")),
+		"event_type":     strings.TrimSpace(r.URL.Query().Get("event_type")),
+		"pattern":        serviceFirstNonEmpty(strings.TrimSpace(r.URL.Query().Get("pattern")), strings.TrimSpace(r.URL.Query().Get("known_failure_pattern"))),
+		"since_ms":       sinceMS,
+		"until_ms":       untilMS,
 		"limit":          limit,
 		"returned":       len(items),
 		"queried_at":     db.NowMS(),
@@ -472,7 +498,7 @@ func (s *serviceServer) handleDoctorPlanApply(w http.ResponseWriter, r *http.Req
 		"config_path":        configPath,
 		"applied_at":         appliedAt,
 	}))
-	writeServiceValue(w, http.StatusOK, map[string]any{
+	response := map[string]any{
 		"ok":                 true,
 		"plan_id":            plan.ID,
 		"rollback_id":        rollbackID,
@@ -481,7 +507,45 @@ func (s *serviceServer) handleDoctorPlanApply(w http.ResponseWriter, r *http.Req
 		"post_check_ids":     []string{checkpointID},
 		"live_reloaded":      state.LiveReloadKeys,
 		"config_path":        configPath,
-	})
+		"post_restart_recovery": map[string]any{
+			"resume_endpoint": "/internal/v1/doctor/plans/" + plan.ID + "/post-checks",
+			"readiness_hint":  "After reconnect, poll /internal/v1/readiness and then resume this plan's post-checks.",
+		},
+	}
+	if plan.RestartRequired {
+		restartResponse, restartStatus, restartErr := s.startRestartServiceAction(r.Context(), r)
+		response["restart_preview"] = s.restartActionDescriptor()
+		response["restart_status"] = restartResponse.Status
+		response["restart_action"] = restartResponse
+		if restartResponse.OperationID != "" {
+			response["operation_id"] = restartResponse.OperationID
+		}
+		if restartResponse.LogPath != "" {
+			response["log_path"] = restartResponse.LogPath
+		}
+		switch {
+		case restartErr != nil:
+			message := restartErr.Error()
+			response["restart_error"] = message
+			response["manual_recovery"] = "The config was saved, but the service restart did not start. Restart OR3 manually, then run post-checks from the Doctor plan card."
+			_ = store.UpdateSettingsChangePlanStatus(r.Context(), plan.ID, "restart_start_failed", rollbackID, message, true, serviceDoctorMustJSON(approval), serviceDoctorMustJSON(state.LiveReloadKeys), appliedAt)
+			_ = s.recordDoctorAudit(r.Context(), identity, "doctor.restart.failed", map[string]any{"plan_id": plan.ID, "status": restartResponse.Status, "error": message, "failed_at": db.NowMS()})
+		case restartStatus == http.StatusConflict && restartResponse.Status == "approval_required":
+			response["approval_state"] = "restart_approval_required"
+			response["manual_recovery"] = "Approve the restart request or restart OR3 manually, then run post-checks from the Doctor plan card."
+			_ = store.UpdateSettingsChangePlanStatus(r.Context(), plan.ID, "restart_approval_required", rollbackID, "", true, serviceDoctorMustJSON(approval), serviceDoctorMustJSON(state.LiveReloadKeys), appliedAt)
+			_ = s.recordDoctorAudit(r.Context(), identity, "doctor.restart.approval_required", map[string]any{"plan_id": plan.ID, "approval_id": restartResponse.ApprovalID, "created_at": db.NowMS()})
+		case restartStatus == http.StatusAccepted:
+			response["restart_requested"] = true
+			response["approval_state"] = "restart_requested"
+			_ = store.UpdateSettingsChangePlanStatus(r.Context(), plan.ID, "restart_pending", rollbackID, "", true, serviceDoctorMustJSON(approval), serviceDoctorMustJSON(state.LiveReloadKeys), appliedAt)
+			_ = s.recordDoctorAudit(r.Context(), identity, "doctor.restart.requested", map[string]any{"plan_id": plan.ID, "operation_id": restartResponse.OperationID, "log_path": restartResponse.LogPath, "requested_at": db.NowMS()})
+		default:
+			response["manual_recovery"] = "The config was saved, but automatic restart is unavailable. Restart OR3 manually, then run post-checks from the Doctor plan card."
+			_ = store.UpdateSettingsChangePlanStatus(r.Context(), plan.ID, "restart_start_failed", rollbackID, restartResponse.Message, true, serviceDoctorMustJSON(approval), serviceDoctorMustJSON(state.LiveReloadKeys), appliedAt)
+		}
+	}
+	writeServiceValue(w, http.StatusOK, response)
 }
 
 func (s *serviceServer) handleDoctorPlanRollback(w http.ResponseWriter, r *http.Request, planID string) {
@@ -867,7 +931,8 @@ func (s *serviceServer) buildDoctorStatusResponse(r *http.Request, report doctor
 			"count": len(inventory.Skills),
 			"items": serviceSkillItems(inventory, s.config.Skills),
 		},
-		"recent_logs": recentLogs,
+		"recent_logs":      recentLogs,
+		"pending_recovery": s.buildDoctorPendingRecovery(ctx),
 	}
 }
 
@@ -983,6 +1048,7 @@ func (s *serviceServer) appendDoctorLog(ctx context.Context, event db.Diagnostic
 	if store == nil {
 		return nil
 	}
+	event = diagnosticlog.NewEvent(event.Source, event.Level, event.CorrelationID, event.EventType, event.Payload)
 	if err := store.AppendDiagnosticLogEvent(ctx, event); err != nil {
 		return err
 	}
@@ -995,6 +1061,48 @@ func (s *serviceServer) appendDoctorLog(ctx context.Context, event db.Diagnostic
 		"created_at":     db.NowMS(),
 	})
 	return nil
+}
+
+func parseOptionalInt64Query(w http.ResponseWriter, r *http.Request, key string) (int64, bool) {
+	raw := strings.TrimSpace(r.URL.Query().Get(key))
+	if raw == "" {
+		return 0, true
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || n < 0 {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid " + key})
+		return 0, false
+	}
+	return n, true
+}
+
+func (s *serviceServer) buildDoctorPendingRecovery(ctx context.Context) map[string]any {
+	store := s.doctorDB()
+	if store == nil {
+		return map[string]any{"plans": []any{}}
+	}
+	records, err := store.ListPendingSettingsChangePlans(ctx, 25)
+	if err != nil {
+		return map[string]any{"plans": []any{}, "error": "pending recovery unavailable"}
+	}
+	plans := make([]map[string]any, 0, len(records))
+	for _, record := range records {
+		item := map[string]any{
+			"plan_id":            record.ID,
+			"status":             record.Status,
+			"rollback_id":        record.RollbackID,
+			"post_check_pending": record.PostCheckPending,
+			"error":              record.ErrorText,
+			"updated_at":         record.UpdatedAt,
+			"applied_at":         record.AppliedAt,
+		}
+		if checkpoint, ok, err := store.GetLatestDoctorCheckpointForPlan(ctx, record.ID); err == nil && ok {
+			item["checkpoint_id"] = checkpoint.ID
+			item["checkpoint_status"] = checkpoint.Status
+		}
+		plans = append(plans, item)
+	}
+	return map[string]any{"plans": plans}
 }
 
 func (s *serviceServer) recordDoctorAudit(ctx context.Context, identity serviceAuthIdentity, eventType string, payload any) error {

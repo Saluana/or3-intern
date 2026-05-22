@@ -2588,6 +2588,38 @@ func TestDiagnosticLogEventPrunesBounded(t *testing.T) {
 	}
 }
 
+func TestDiagnosticLogEventQueryBoundsAndPattern(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	now := NowMS()
+	events := []DiagnosticLogEvent{
+		{Source: "doctor", Level: "info", CorrelationID: "a", EventType: "doctor.start", Payload: []byte(`{"message":"ready"}`), CreatedAt: now - 3000},
+		{Source: "doctor", Level: "warn", CorrelationID: "b", EventType: "doctor.known_failure", Payload: []byte(`{"message":"connection refused"}`), CreatedAt: now - 2000},
+		{Source: "service", Level: "warn", CorrelationID: "c", EventType: "service.other", Payload: []byte(`{"message":"connection refused"}`), CreatedAt: now - 1000},
+	}
+	for _, event := range events {
+		if err := d.AppendDiagnosticLogEvent(ctx, event); err != nil {
+			t.Fatalf("AppendDiagnosticLogEvent: %v", err)
+		}
+	}
+
+	items, err := d.QueryDiagnosticLogEvents(ctx, DiagnosticLogQuery{
+		Source:      "doctor",
+		Level:       "warn",
+		EventType:   "doctor.known_failure",
+		Pattern:     "connection refused",
+		SinceUnixMS: now - 2500,
+		UntilUnixMS: now - 1500,
+		Limit:       10,
+	})
+	if err != nil {
+		t.Fatalf("QueryDiagnosticLogEvents: %v", err)
+	}
+	if len(items) != 1 || items[0].CorrelationID != "b" {
+		t.Fatalf("unexpected filtered diagnostic events: %#v", items)
+	}
+}
+
 func TestOpen_CreatesAgentCLIRunsTable(t *testing.T) {
 	d := openTestDB(t)
 	row := d.SQL.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='agent_cli_runs'`)

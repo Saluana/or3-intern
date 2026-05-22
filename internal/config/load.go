@@ -610,6 +610,12 @@ func normalizeManagedChannelInboundDefaults(cfg *Config) {
 	normalizeDiscordChannelInboundDefaults(&cfg.Channels.Discord)
 }
 
+// NormalizeManagedChannelInboundDefaults normalizes managed channel defaults for
+// an in-memory config snapshot.
+func NormalizeManagedChannelInboundDefaults(cfg *Config) {
+	normalizeManagedChannelInboundDefaults(cfg)
+}
+
 func normalizeDiscordChannelInboundDefaults(channel *DiscordChannelConfig) {
 	if channel == nil || !channel.Enabled {
 		return
@@ -622,6 +628,12 @@ func normalizeDiscordChannelInboundDefaults(channel *DiscordChannelConfig) {
 		return
 	}
 	channel.InboundPolicy = InboundPolicyDeny
+}
+
+// NormalizeDiscordChannelInboundDefaults normalizes Discord inbound defaults for
+// an in-memory channel snapshot.
+func NormalizeDiscordChannelInboundDefaults(channel *DiscordChannelConfig) {
+	normalizeDiscordChannelInboundDefaults(channel)
 }
 
 // ValidateSnapshot normalizes and validates an in-memory config without

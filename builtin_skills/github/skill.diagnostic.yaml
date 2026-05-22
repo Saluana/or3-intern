@@ -1,0 +1,10 @@
+version: 1
+checks:
+  - id: github_token
+    kind: env
+    label: GitHub token
+    summary: GitHub token is configured
+    severity: warning
+    env_key: GITHUB_TOKEN
+redactions:
+  env_keys: [GITHUB_TOKEN]

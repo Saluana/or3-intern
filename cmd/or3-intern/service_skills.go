@@ -14,27 +14,30 @@ import (
 )
 
 type serviceSkillItem struct {
-	Name             string   `json:"name"`
-	Key              string   `json:"key"`
-	Description      string   `json:"description,omitempty"`
-	Summary          string   `json:"summary,omitempty"`
-	Homepage         string   `json:"homepage,omitempty"`
-	Source           string   `json:"source"`
-	Location         string   `json:"location"`
-	Eligible         bool     `json:"eligible"`
-	Disabled         bool     `json:"disabled"`
-	Hidden           bool     `json:"hidden"`
-	Status           string   `json:"status"`
-	PermissionState  string   `json:"permission_state"`
-	PermissionNotes  []string `json:"permission_notes,omitempty"`
-	Missing          []string `json:"missing,omitempty"`
-	Unsupported      []string `json:"unsupported,omitempty"`
-	ParseError       string   `json:"parse_error,omitempty"`
-	UserInvocable    bool     `json:"user_invocable"`
-	PrimaryEnv       string   `json:"primary_env,omitempty"`
-	RequiredEnv      []string `json:"required_env,omitempty"`
-	ConfigFields     []string `json:"config_fields,omitempty"`
-	APIKeyConfigured bool     `json:"api_key_configured"`
+	Name                string   `json:"name"`
+	Key                 string   `json:"key"`
+	Description         string   `json:"description,omitempty"`
+	Summary             string   `json:"summary,omitempty"`
+	Homepage            string   `json:"homepage,omitempty"`
+	Source              string   `json:"source"`
+	Location            string   `json:"location"`
+	Eligible            bool     `json:"eligible"`
+	Disabled            bool     `json:"disabled"`
+	Hidden              bool     `json:"hidden"`
+	Status              string   `json:"status"`
+	PermissionState     string   `json:"permission_state"`
+	PermissionNotes     []string `json:"permission_notes,omitempty"`
+	Missing             []string `json:"missing,omitempty"`
+	Unsupported         []string `json:"unsupported,omitempty"`
+	ParseError          string   `json:"parse_error,omitempty"`
+	UserInvocable       bool     `json:"user_invocable"`
+	PrimaryEnv          string   `json:"primary_env,omitempty"`
+	RequiredEnv         []string `json:"required_env,omitempty"`
+	ConfigFields        []string `json:"config_fields,omitempty"`
+	APIKeyConfigured    bool     `json:"api_key_configured"`
+	DiagnosticAvailable bool     `json:"diagnostic_available"`
+	DiagnosticStatus    string   `json:"diagnostic_status,omitempty"`
+	DiagnosticManifest  string   `json:"diagnostic_manifest,omitempty"`
 }
 
 type serviceSkillRoot struct {
@@ -208,27 +211,41 @@ func serviceSkillItemFromMeta(skill skills.SkillMeta, cfg config.SkillsConfig) s
 		permissionState = "approved"
 	}
 	return serviceSkillItem{
-		Name:             skill.Name,
-		Key:              serviceSkillEntryKey(skill),
-		Description:      skill.Description,
-		Summary:          skill.Summary,
-		Homepage:         skill.Homepage,
-		Source:           string(skill.Source),
-		Location:         skill.Dir,
-		Eligible:         skill.Eligible,
-		Disabled:         skill.Disabled,
-		Hidden:           skill.Hidden,
-		Status:           serviceSkillStatus(skill),
-		PermissionState:  permissionState,
-		PermissionNotes:  append([]string{}, skill.PermissionNotes...),
-		Missing:          append([]string{}, skill.Missing...),
-		Unsupported:      append([]string{}, skill.Unsupported...),
-		ParseError:       skill.ParseError,
-		UserInvocable:    skill.UserInvocable,
-		PrimaryEnv:       skill.Metadata.PrimaryEnv,
-		RequiredEnv:      append([]string{}, skill.Metadata.Requires.Env...),
-		ConfigFields:     append([]string{}, skill.Metadata.Requires.Config...),
-		APIKeyConfigured: strings.TrimSpace(entry.APIKey) != "",
+		Name:                skill.Name,
+		Key:                 serviceSkillEntryKey(skill),
+		Description:         skill.Description,
+		Summary:             skill.Summary,
+		Homepage:            skill.Homepage,
+		Source:              string(skill.Source),
+		Location:            skill.Dir,
+		Eligible:            skill.Eligible,
+		Disabled:            skill.Disabled,
+		Hidden:              skill.Hidden,
+		Status:              serviceSkillStatus(skill),
+		PermissionState:     permissionState,
+		PermissionNotes:     append([]string{}, skill.PermissionNotes...),
+		Missing:             append([]string{}, skill.Missing...),
+		Unsupported:         append([]string{}, skill.Unsupported...),
+		ParseError:          skill.ParseError,
+		UserInvocable:       skill.UserInvocable,
+		PrimaryEnv:          skill.Metadata.PrimaryEnv,
+		RequiredEnv:         append([]string{}, skill.Metadata.Requires.Env...),
+		ConfigFields:        append([]string{}, skill.Metadata.Requires.Config...),
+		APIKeyConfigured:    strings.TrimSpace(entry.APIKey) != "",
+		DiagnosticAvailable: skill.DiagnosticAvailable,
+		DiagnosticStatus:    serviceSkillDiagnosticStatus(skill),
+		DiagnosticManifest:  skill.DiagnosticManifestPath,
+	}
+}
+
+func serviceSkillDiagnosticStatus(skill skills.SkillMeta) string {
+	switch {
+	case strings.TrimSpace(skill.DiagnosticError) != "":
+		return "invalid"
+	case skill.DiagnosticAvailable:
+		return "available"
+	default:
+		return "unavailable"
 	}
 }
 

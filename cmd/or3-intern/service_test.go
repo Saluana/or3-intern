@@ -693,7 +693,7 @@ func TestServiceBrowserMiddleware_AllowsOpaqueElectronOriginFromLoopback(t *test
 
 func TestServiceBrowserMiddleware_DoesNotAllowOpaquePairingPreflight(t *testing.T) {
 	cfg := config.Config{Service: config.ServiceConfig{
-		Listen:                       "127.0.0.1:9100",
+		Listen:                      "127.0.0.1:9100",
 		AllowUnauthenticatedPairing: true,
 	}}
 	handler := serviceBrowserMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1648,6 +1648,16 @@ metadata:
 `), 0o644); err != nil {
 		t.Fatalf("write skill: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(skillDir, "skill.diagnostic.yaml"), []byte(`version: 1
+checks:
+  - id: env-key
+    kind: env
+    label: API key
+    summary: API key env is configured
+    env_key: DEMO_API_KEY
+`), 0o644); err != nil {
+		t.Fatalf("write skill diagnostic manifest: %v", err)
+	}
 	cfg.Skills.Load.GlobalDir = globalRoot
 	if err := config.Save(cfgPath, cfg); err != nil {
 		t.Fatalf("seed config: %v", err)
@@ -1672,6 +1682,9 @@ metadata:
 	}
 	if len(listBody.Items) != 1 || listBody.Items[0].Name != "demo" || listBody.Items[0].Source != string(skills.SourceGlobal) {
 		t.Fatalf("expected demo global skill, got %#v", listBody.Items)
+	}
+	if !listBody.Items[0].DiagnosticAvailable || listBody.Items[0].DiagnosticStatus != "available" {
+		t.Fatalf("expected diagnostic metadata in list response, got %#v", listBody.Items[0])
 	}
 
 	reqBody := strings.NewReader(`{"enabled":false,"apiKey":"secret-value","config":{"demo.enabled":true}}`)

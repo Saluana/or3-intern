@@ -1,0 +1,8 @@
+version: 1
+checks:
+  - id: shell_binary
+    kind: binary
+    label: Shell binary
+    summary: A POSIX shell is available
+    severity: notice
+    binary: sh

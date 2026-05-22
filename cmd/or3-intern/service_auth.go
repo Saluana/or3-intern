@@ -735,7 +735,10 @@ func serviceRouteRequirementForRequest(cfg config.Config, r *http.Request) servi
 		if method == http.MethodGet && relative == "capabilities" {
 			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
 		}
-		if method == http.MethodPost && (relative == "pairing/intents" || relative == "pairing/approve" || relative == "pairing/exchange" || relative == "sessions") {
+		if method == http.MethodPost && relative == "pairing/intents" {
+			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, SessionOnly: true}
+		}
+		if method == http.MethodPost && (relative == "pairing/approve" || relative == "pairing/exchange" || relative == "sessions") {
 			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, BypassGlobalSession: true}
 		}
 		if method == http.MethodGet && relative == "host-identity" {
@@ -754,6 +757,24 @@ func serviceRouteRequirementForRequest(cfg config.Config, r *http.Request) servi
 			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
 		}
 		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "configuration changes require recent passkey verification"}
+	case path == "/internal/v1/doctor" || strings.HasPrefix(path, "/internal/v1/doctor/"):
+		relative := strings.Trim(strings.TrimPrefix(path, "/internal/v1/doctor"), "/")
+		if strings.HasPrefix(relative, "skills/") && strings.HasSuffix(relative, "/diagnostics") {
+			return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "skill diagnostics can execute local checks and require recent passkey verification"}
+		}
+		if relative == "" || relative == "status" || relative == "run" || relative == "admin-brain" || relative == "config-metadata" || relative == "logs" || relative == "plans" {
+			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
+		}
+		if strings.HasPrefix(relative, "plans/") {
+			if strings.HasSuffix(relative, "/apply") || strings.HasSuffix(relative, "/rollback") {
+				return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "applying or rolling back doctor plans requires recent passkey verification"}
+			}
+			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
+		}
+		if strings.HasPrefix(relative, "sessions/") || relative == "sessions" {
+			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, SessionOnly: true}
+		}
+		return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
 	case path == "/internal/v1/skills" || strings.HasPrefix(path, "/internal/v1/skills/"):
 		if method == http.MethodGet {
 			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}

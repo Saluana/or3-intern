@@ -41,6 +41,7 @@ func serviceRouteSpecs(server *serviceServer) []serviceRouteSpec {
 		{Path: "/internal/v1/logs/stream", Handler: server.handleLogs},
 		{Path: "/internal/v1/scope", Subtree: true, Handler: server.handleScope},
 		{Path: "/internal/v1/configure", Subtree: true, Handler: server.handleConfigure},
+		{Path: "/internal/v1/doctor", Subtree: true, Handler: server.handleDoctor},
 		{Path: "/internal/v1/mcp/servers", Subtree: true, Handler: server.handleMCPServers},
 		{Path: "/internal/v1/skills", Subtree: true, Handler: server.handleSkills},
 		{Path: "/internal/v1/files", Subtree: true, Handler: server.handleFiles},

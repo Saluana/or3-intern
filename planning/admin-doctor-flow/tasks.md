@@ -2,65 +2,65 @@
 
 ## 1. Backend metadata and policy foundation
 
-- [ ] (Req 4, 5, 6) Create `internal/configmeta` with `RiskLevel`, `ConfigFieldMetadata`, relation/validation/rollback types, and a registry interface.
-- [ ] (Req 5, 14) Build a typed Go metadata registry as the authoritative source for first-slice fields; use current `configureField` definitions only to reuse labels/descriptions/choices where they already exist.
-- [ ] (Req 5, 12) Add first-slice metadata for generic installable skill env/config fields, provider keys, runner/admin-brain availability, tool exec policy, allowed programs, service restart, and credential/config paths.
-- [ ] (Req 6, 7) Create `internal/adminflow` with `SettingsChangePlan`, `SettingsPlanChange`, `RiskDecision`, `ApprovalContext`, `ApplyResult`, and `RollbackResult` types.
-- [ ] (Req 6, 7, 10) Implement Go-only risk classification for safe/notice/warning/danger, including escalation rules for restart, skill auth, tool permissions, file scope, shell/network/service exposure, approval posture, automation changes, and remembered warning approvals.
-- [ ] (Req 16) Implement redacted value helpers for config/env/log fields, with secret presence indicators instead of raw secret values.
-- [ ] (Req 6, 16) Add table-driven tests for risk classification and redaction in `internal/adminflow` and `internal/configmeta`.
+- [x] (Req 4, 5, 6) Create `internal/configmeta` with `RiskLevel`, `ConfigFieldMetadata`, relation/validation/rollback types, and a registry interface.
+- [x] (Req 5, 14) Build a typed Go metadata registry as the authoritative source for first-slice fields; use current `configureField` definitions only to reuse labels/descriptions/choices where they already exist.
+- [x] (Req 5, 12) Add first-slice metadata for generic installable skill env/config fields, provider keys, runner/admin-brain availability, tool exec policy, allowed programs, service restart, and credential/config paths.
+- [x] (Req 6, 7) Create `internal/adminflow` with `SettingsChangePlan`, `SettingsPlanChange`, `RiskDecision`, `ApprovalContext`, `ApplyResult`, and `RollbackResult` types.
+- [x] (Req 6, 7, 10) Implement Go-only risk classification for safe/notice/warning/danger, including escalation rules for restart, skill auth, tool permissions, file scope, shell/network/service exposure, approval posture, automation changes, and remembered warning approvals.
+- [x] (Req 16) Implement redacted value helpers for config/env/log fields, with secret presence indicators instead of raw secret values.
+- [x] (Req 6, 16) Add table-driven tests for risk classification and redaction in `internal/adminflow` and `internal/configmeta`.
 
 ## 2. Plan validation and apply pipeline
 
-- [ ] (Req 4, 9) Implement `PlanValidator` that stages plan changes against an in-memory `config.Config` copy.
-- [ ] (Req 4, 9, 17) Reuse existing configure field setters from `cmd/or3-intern/service_configure.go` / `configure_tui.go` through an adapter or shared helper; avoid a second config mutation implementation.
-- [ ] (Req 4, 9) Run config validation and a Doctor post-save mode against staged config before apply.
-- [ ] (Req 6, 9) Recompute final risk after staging and reject any plan whose computed risk exceeds the caller’s approved authority.
-- [ ] (Req 9) Implement stale-plan detection by comparing expected old values with current config values before write.
-- [ ] (Req 9, 17) Save config through existing `config.Save` path and call existing live reload behavior for model-routing-compatible fields.
-- [ ] (Req 9) Add post-apply check orchestration with bounded timeouts and per-check status.
-- [ ] (Req 9) Persist post-check-pending state so checks can resume after app refresh or service restart.
-- [ ] (Req 4, 9) Add tests for validation failures, stale plans, partial apply prevention, live-reload-only changes, restart-required changes, and post-check failure reporting.
+- [x] (Req 4, 9) Implement `PlanValidator` that stages plan changes against an in-memory `config.Config` copy.
+- [x] (Req 4, 9, 17) Reuse existing configure field setters from `cmd/or3-intern/service_configure.go` / `configure_tui.go` through an adapter or shared helper; avoid a second config mutation implementation.
+- [x] (Req 4, 9) Run config validation and a Doctor post-save mode against staged config before apply.
+- [x] (Req 6, 9) Recompute final risk after staging and reject any plan whose computed risk exceeds the caller’s approved authority.
+- [x] (Req 9) Implement stale-plan detection by comparing expected old values with current config values before write.
+- [x] (Req 9, 17) Save config through existing `config.Save` path and call existing live reload behavior for model-routing-compatible fields.
+- [x] (Req 9) Add post-apply check orchestration with bounded timeouts and per-check status.
+- [x] (Req 9) Persist post-check-pending state so checks can resume after app refresh or service restart.
+- [x] (Req 4, 9) Add tests for validation failures, stale plans, partial apply prevention, live-reload-only changes, restart-required changes, and post-check failure reporting.
 
 ## 3. Audit and rollback persistence
 
-- [ ] (Req 9, 11, 17) Add additive SQLite migration(s) for `settings_change_plans`, `doctor_checkpoints`, `settings_change_rollbacks`, and bounded `diagnostic_log_events`.
-- [ ] (Req 9, 11) Add DB methods for creating, reading, marking applied, and listing recent rollback records.
-- [ ] (Req 9, 11) Reuse `DB.AppendAuditEvent` for `doctor.plan.*`, `doctor.checkpoint.*`, `doctor.log.*`, and `doctor.post_check.*` event types.
-- [ ] (Req 9, 11, 16) Ensure audit payloads include redacted old/new values, requester, approver, auth method, risk, restart status, post-check result, rollback availability, and timestamps.
-- [ ] (Req 9, 11) Implement rollback apply for rollback-safe config changes using the same validation/risk/approval path as forward apply, and render accepted conversation cards as undo cards when rollback is available.
-- [ ] (Req 9, 11) Add DB migration and audit-chain regression tests in `internal/db` and service-level tests.
+- [x] (Req 9, 11, 17) Add additive SQLite migration(s) for `settings_change_plans`, `doctor_checkpoints`, `settings_change_rollbacks`, and bounded `diagnostic_log_events`.
+- [x] (Req 9, 11) Add DB methods for creating, reading, marking applied, and listing recent rollback records.
+- [x] (Req 9, 11) Reuse `DB.AppendAuditEvent` for `doctor.plan.*`, `doctor.checkpoint.*`, `doctor.log.*`, and `doctor.post_check.*` event types.
+- [x] (Req 9, 11, 16) Ensure audit payloads include redacted old/new values, requester, approver, auth method, risk, restart status, post-check result, rollback availability, and timestamps.
+- [x] (Req 9, 11) Implement rollback apply for rollback-safe config changes using the same validation/risk/approval path as forward apply, and render accepted conversation cards as undo cards when rollback is available.
+- [x] (Req 9, 11) Add DB migration and audit-chain regression tests in `internal/db` and service-level tests.
 
 ## 4. Doctor service API
 
-- [ ] (Req 1, 2, 10) Add `cmd/or3-intern/service_doctor.go` with handlers for Doctor status/run, Doctor/Admin chat sessions/messages/events, Admin Brain availability, metadata, plan create/read/validate/apply/rollback/post-check, logs, and skill diagnostics.
-- [ ] (Req 1, 17) Register `/internal/v1/doctor` routes in `service_routes.go`.
-- [ ] (Req 7, 10, 15) Update `serviceRouteRequirementForRequest` and `service_auth_rollout_test.go` so read-only Doctor routes are low-risk and apply/rollback/approved diagnostics are sensitive session+step-up routes.
-- [ ] (Req 1, 2) Build Doctor aggregation over existing health, readiness, app bootstrap, approvals, config validation, runner/provider status, skills, redacted logs, and client-side service-down findings supplied by the app.
-- [ ] (Req 1, 13) Add display-ready finding/card response types while preserving current `internal/doctor.Report` JSON compatibility for CLI use.
-- [ ] (Req 4, 9) Implement plan creation from deterministic Doctor findings and settings UI changes.
-- [ ] (Req 7, 9) Wire plan apply to existing passkey/session auth context and approval broker behavior.
-- [ ] (Req 1, 17) Add service contract tests for route methods, auth behavior, response shapes, validation errors, and mutation/audit results.
+- [x] (Req 1, 2, 10) Add `cmd/or3-intern/service_doctor.go` with handlers for Doctor status/run, Doctor/Admin chat sessions/messages/events, Admin Brain availability, metadata, plan create/read/validate/apply/rollback/post-check, logs, and skill diagnostics.
+- [x] (Req 1, 17) Register `/internal/v1/doctor` routes in `service_routes.go`.
+- [x] (Req 7, 10, 15) Update `serviceRouteRequirementForRequest` and `service_auth_rollout_test.go` so read-only Doctor routes are low-risk and apply/rollback/approved diagnostics are sensitive session+step-up routes.
+- [x] (Req 1, 2) Build Doctor aggregation over existing health, readiness, app bootstrap, approvals, config validation, runner/provider status, skills, redacted logs, and client-side service-down findings supplied by the app.
+- [x] (Req 1, 13) Add display-ready finding/card response types while preserving current `internal/doctor.Report` JSON compatibility for CLI use.
+- [x] (Req 4, 9) Implement plan creation from deterministic Doctor findings and settings UI changes.
+- [x] (Req 7, 9) Wire plan apply to existing passkey/session auth context and approval broker behavior.
+- [x] (Req 1, 17) Add service contract tests for route methods, auth behavior, response shapes, validation errors, and mutation/audit results.
 
 ## 5. AdminBrainProvider integration
 
-- [ ] (Req 3, 8) Implement `AdminBrainProvider` detection from existing `/internal/v1/chat-runners`, `/internal/v1/agent-runners`, and provider key/config status.
-- [ ] (Req 3) Normalize provider states to `runner`, `apiKeyProvider`, or `unavailable` with generic user-facing copy and advanced-only runner/provider IDs.
-- [ ] (Req 8, 10, 16) Reuse existing runner-chat/session infrastructure for multi-turn Doctor/Admin conversations with a debugging/fixing system prompt and restricted Doctor/Admin tools.
-- [ ] (Req 8, 10, 16) Define the allowed Admin Brain prompt/evidence envelope and ensure logs/config/skill output are redacted and marked untrusted.
-- [ ] (Req 8, 10) Ensure Admin Brain can only propose `SettingsChangePlan` data, create safe diagnostic tool calls, or request approved tool cards; it must not receive direct write/restart/shell tools.
-- [ ] (Req 2, 3) Add tests for no-runner/no-provider fallback, runner installed but auth broken, API key configured, and generic copy with no runner positioning.
+- [x] (Req 3, 8) Implement `AdminBrainProvider` detection from existing `/internal/v1/chat-runners`, `/internal/v1/agent-runners`, and provider key/config status.
+- [x] (Req 3) Normalize provider states to `runner`, `apiKeyProvider`, or `unavailable` with generic user-facing copy and advanced-only runner/provider IDs.
+- [x] (Req 8, 10, 16) Reuse existing runner-chat/session infrastructure for multi-turn Doctor/Admin conversations with a debugging/fixing system prompt and restricted Doctor/Admin tools.
+- [x] (Req 8, 10, 16) Define the allowed Admin Brain prompt/evidence envelope and ensure logs/config/skill output are redacted and marked untrusted.
+- [x] (Req 8, 10) Ensure Admin Brain can only propose `SettingsChangePlan` data, create safe diagnostic tool calls, or request approved tool cards; it must not receive direct write/restart/shell tools.
+- [x] (Req 2, 3) Add tests for no-runner/no-provider fallback, runner installed but auth broken, API key configured, and generic copy with no runner positioning.
 
 ## 6. SkillDiagnosticManifest and installable skill diagnostics
 
-- [ ] (Req 11) Create `internal/skilldiag` with manifest schema, parser/validator, safe command runner interface, redaction, known failure matcher, and result types.
-- [ ] (Req 11, 17) Integrate diagnostic manifest discovery with `internal/skills` inventory without breaking existing `SKILL.md` parsing.
-- [ ] (Req 11) Extend `cmd/or3-intern/service_skills.go` to include diagnostic availability/status in skill responses.
-- [ ] (Req 11, 12) Add a first generic installable skill diagnostic fixture/implementation for binary presence, auth source, credential/config path, identity/account field, JSON/config validity, permission hints, split capability checks, env override source, stale external references, and restart need.
-- [ ] (Req 11, 12, 16) Add generic installable skill redaction rules for credential JSON, OAuth/client secrets, access/refresh tokens, API keys, email/account identifiers where appropriate, and local paths when sent to remote AI.
-- [ ] (Req 12) Implement deterministic installable-skill known-pattern fixes that create warning-level `SettingsChangePlan` proposals for OR3-managed credential/config source correction, identity preservation, stale managed-reference clearing, and restart/post-check.
-- [ ] (Req 11, 12) Add placeholder/basic manifests or metadata for GitHub, filesystem, terminal, model provider, and runner integration without overbuilding their repairs.
-- [ ] (Req 11, 12, 16) Add fixture-based tests for first-pass installable skill failure modes and redaction behavior.
+- [x] (Req 11) Create `internal/skilldiag` with manifest schema, parser/validator, safe command runner interface, redaction, known failure matcher, and result types.
+- [x] (Req 11, 17) Integrate diagnostic manifest discovery with `internal/skills` inventory without breaking existing `SKILL.md` parsing.
+- [x] (Req 11) Extend `cmd/or3-intern/service_skills.go` to include diagnostic availability/status in skill responses.
+- [x] (Req 11, 12) Add a first generic installable skill diagnostic fixture/implementation for binary presence, auth source, credential/config path, identity/account field, JSON/config validity, permission hints, split capability checks, env override source, stale external references, and restart need.
+- [x] (Req 11, 12, 16) Add generic installable skill redaction rules for credential JSON, OAuth/client secrets, access/refresh tokens, API keys, email/account identifiers where appropriate, and local paths when sent to remote AI.
+- [x] (Req 12) Implement deterministic installable-skill known-pattern fixes that create warning-level `SettingsChangePlan` proposals for OR3-managed credential/config source correction, identity preservation, stale managed-reference clearing, and restart/post-check.
+- [x] (Req 11, 12) Add placeholder/basic manifests or metadata for GitHub, filesystem, terminal, model provider, and runner integration without overbuilding their repairs.
+- [x] (Req 11, 12, 16) Add fixture-based tests for first-pass installable skill failure modes and redaction behavior.
 
 ## 7. Diagnostic logs and service-down checks
 

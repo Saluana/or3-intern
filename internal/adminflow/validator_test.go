@@ -1,0 +1,235 @@
+package adminflow
+
+import (
+	"errors"
+	"testing"
+
+	"or3-intern/internal/config"
+	"or3-intern/internal/configmeta"
+)
+
+func TestPlanValidatorStage_Success(t *testing.T) {
+	configmeta.Clear()
+	configmeta.RegisterFirstSliceFields()
+
+	cfg := config.Default()
+	plan := &SettingsChangePlan{
+		ID: "scp_test",
+		Changes: []SettingsPlanChange{
+			{
+				ConfigPath: "provider.model",
+				Section:    "provider",
+				Field:      "provider_model",
+				Operation:  "set",
+				OldValue:   RedactedValue{Value: cfg.Provider.Model, Present: cfg.Provider.Model != ""},
+				NewValue:   RedactedValue{Value: "gpt-4.1-mini"},
+			},
+		},
+	}
+
+	state, err := (PlanValidator{}).Stage(cfg, plan, ValidationOptions{ApprovedAuthority: configmeta.RiskWarning})
+	if err != nil {
+		t.Fatalf("Stage() error = %v", err)
+	}
+	if state.StagedConfig.Provider.Model != "gpt-4.1-mini" {
+		t.Fatalf("staged model = %q", state.StagedConfig.Provider.Model)
+	}
+	if state.RiskDecision.Level != configmeta.RiskSafe {
+		t.Fatalf("risk level = %s", state.RiskDecision.Level)
+	}
+	if len(state.Validation) == 0 {
+		t.Fatal("expected validation results")
+	}
+}
+
+func TestPlanValidatorStage_StalePlan(t *testing.T) {
+	configmeta.Clear()
+	configmeta.RegisterFirstSliceFields()
+
+	cfg := config.Default()
+	plan := &SettingsChangePlan{
+		Changes: []SettingsPlanChange{
+			{
+				ConfigPath: "provider.model",
+				Section:    "provider",
+				Field:      "provider_model",
+				Operation:  "set",
+				OldValue:   RedactedValue{Value: "different-model", Present: true},
+				NewValue:   RedactedValue{Value: "gpt-4.1-mini"},
+			},
+		},
+	}
+
+	_, err := (PlanValidator{}).Stage(cfg, plan, ValidationOptions{})
+	if !errors.Is(err, ErrStalePlan) {
+		t.Fatalf("Stage() error = %v, want stale plan", err)
+	}
+}
+
+func TestPlanValidatorStage_MutationFailure(t *testing.T) {
+	configmeta.Clear()
+	configmeta.RegisterFirstSliceFields()
+
+	cfg := config.Default()
+	plan := &SettingsChangePlan{
+		Changes: []SettingsPlanChange{
+			{
+				ConfigPath: "runtime.historyMaxMessages",
+				Section:    "runtime",
+				Field:      "runtime_history_max",
+				Operation:  "set",
+				OldValue:   RedactedValue{Value: cfg.HistoryMax},
+				NewValue:   RedactedValue{Value: "not-an-int"},
+			},
+		},
+	}
+
+	_, err := (PlanValidator{}).Stage(cfg, plan, ValidationOptions{})
+	if !errors.Is(err, ErrPlanValidation) {
+		t.Fatalf("Stage() error = %v, want plan validation error", err)
+	}
+}
+
+func TestPlanValidatorStage_ConfigValidationFailure(t *testing.T) {
+	configmeta.Clear()
+	configmeta.RegisterFirstSliceFields()
+
+	cfg := config.Default()
+	plan := &SettingsChangePlan{
+		Changes: []SettingsPlanChange{
+			{
+				ConfigPath: "agentCLI.defaultMode",
+				Section:    "agentCLI",
+				Field:      "agentCLI_default_mode",
+				Operation:  "choose",
+				OldValue:   RedactedValue{Value: cfg.AgentCLI.DefaultMode, Present: cfg.AgentCLI.DefaultMode != ""},
+				NewValue:   RedactedValue{Value: "sandbox_auto"},
+			},
+		},
+	}
+
+	_, err := (PlanValidator{}).Stage(cfg, plan, ValidationOptions{})
+	if !errors.Is(err, ErrPlanValidation) {
+		t.Fatalf("Stage() error = %v, want plan validation error", err)
+	}
+}
+
+func TestPlanValidatorStage_RiskAuthorityFailure(t *testing.T) {
+	configmeta.Clear()
+	configmeta.RegisterFirstSliceFields()
+
+	cfg := config.Default()
+	plan := &SettingsChangePlan{
+		Changes: []SettingsPlanChange{
+			{
+				ConfigPath: "tools.enableExec",
+				Section:    "tools",
+				Field:      "tools_enable_exec",
+				Operation:  "toggle",
+				OldValue:   RedactedValue{Value: cfg.Tools.EnableExec},
+				NewValue:   RedactedValue{Value: true},
+			},
+		},
+	}
+
+	_, err := (PlanValidator{}).Stage(cfg, plan, ValidationOptions{ApprovedAuthority: configmeta.RiskNotice})
+	if !errors.Is(err, ErrPlanRiskExceeded) {
+		t.Fatalf("Stage() error = %v, want risk exceeded", err)
+	}
+}
+
+func TestPlanValidatorStage_RedactedOldValuePresenceMismatch(t *testing.T) {
+	configmeta.Clear()
+	configmeta.RegisterFirstSliceFields()
+
+	cfg := config.Default()
+	cfg.Skills.Entries = map[string]config.SkillEntryConfig{
+		"demo": {},
+	}
+	plan := &SettingsChangePlan{
+		Changes: []SettingsPlanChange{{
+			ConfigPath: "skills.entries.demo.apiKey",
+			Section:    "skills_entry",
+			Channel:    "demo",
+			Field:      "api_key",
+			Operation:  "set",
+			OldValue:   RedactedValue{Redacted: true, Present: true, Summary: "configured"},
+			NewValue:   RedactedValue{Value: "clear"},
+		}},
+	}
+
+	_, err := (PlanValidator{}).Stage(cfg, plan, ValidationOptions{ApprovedAuthority: configmeta.RiskWarning})
+	if !errors.Is(err, ErrStalePlan) {
+		t.Fatalf("Stage() error = %v, want stale plan", err)
+	}
+}
+
+func TestPlanValidatorStage_RestartRequiredChange(t *testing.T) {
+	configmeta.Clear()
+	configmeta.RegisterFirstSliceFields()
+
+	cfg := config.Default()
+	plan := &SettingsChangePlan{
+		Changes: []SettingsPlanChange{{
+			ConfigPath: "skills.load.disableGlobalDir",
+			Section:    "skills",
+			Field:      "skills_global_disabled",
+			Operation:  "toggle",
+			OldValue:   RedactedValue{Value: cfg.Skills.Load.DisableGlobalDir},
+			NewValue:   RedactedValue{Value: !cfg.Skills.Load.DisableGlobalDir},
+		}},
+	}
+
+	state, err := (PlanValidator{}).Stage(cfg, plan, ValidationOptions{ApprovedAuthority: configmeta.RiskNotice})
+	if err != nil {
+		t.Fatalf("Stage() error = %v", err)
+	}
+	if !plan.RestartRequired || !state.RiskDecision.RequiresRestart {
+		t.Fatalf("expected restart-required plan, got plan=%#v decision=%#v", plan, state.RiskDecision)
+	}
+}
+
+func TestPlanValidatorStage_SkillEntryConfigChange(t *testing.T) {
+	configmeta.Clear()
+	configmeta.RegisterFirstSliceFields()
+
+	cfg := config.Default()
+	cfg.Skills.Entries = map[string]config.SkillEntryConfig{
+		"demo": {
+			Config: map[string]any{"managed_reference": "managed://cred-1"},
+		},
+	}
+	plan := &SettingsChangePlan{
+		Changes: []SettingsPlanChange{
+			{
+				ConfigPath: "skills.entries.demo.config.managed_reference",
+				Section:    "skills_entry",
+				Channel:    "demo",
+				Field:      "config.managed_reference",
+				Operation:  "set",
+				OldValue:   RedactedValue{Value: "managed://cred-1"},
+				NewValue:   RedactedValue{Value: "clear"},
+			},
+		},
+	}
+
+	state, err := (PlanValidator{}).Stage(cfg, plan, ValidationOptions{ApprovedAuthority: configmeta.RiskWarning})
+	if err != nil {
+		t.Fatalf("Stage() error = %v", err)
+	}
+	if _, ok := state.StagedConfig.Skills.Entries["demo"].Config["managed_reference"]; ok {
+		t.Fatalf("expected managed_reference to be cleared, got %#v", state.StagedConfig.Skills.Entries["demo"].Config)
+	}
+}
+
+func TestPlanLiveReloadKeys(t *testing.T) {
+	plan := SettingsChangePlan{
+		Changes: []SettingsPlanChange{
+			{ConfigPath: "modelRouting.chat.primary.model", Field: "routing_chat_model"},
+		},
+	}
+	keys := planLiveReloadKeys(plan)
+	if len(keys) != 1 || keys[0] != "model_routing" {
+		t.Fatalf("live reload keys = %#v", keys)
+	}
+}

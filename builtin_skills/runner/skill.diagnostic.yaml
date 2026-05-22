@@ -1,0 +1,8 @@
+version: 1
+checks:
+  - id: runner_config
+    kind: config
+    label: Runner config
+    summary: Runner integration config is present
+    severity: notice
+    config_key: runner_id

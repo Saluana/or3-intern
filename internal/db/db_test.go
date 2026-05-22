@@ -2479,6 +2479,115 @@ func TestRebuildMemoryVecIndexWithProfile_FiltersRowsByFingerprint(t *testing.T)
 	}
 }
 
+func TestSettingsChangePlanStoreRoundTrip(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	planJSON := `{"id":"scp_test_1","title":"Update provider model","summary":"Switch the default model","created_by":"tester","risk_level":"safe","user_facing_explanation":"Use a smaller chat model","changes":[{"config_path":"provider.model","section":"provider","field":"provider_model","operation":"set","old_value":{"value":"gpt-4.1"},"new_value":{"value":"gpt-4.1-mini"}}]}`
+	approvalJSON := `{"plan_id":"scp_test_1","approved":true,"approver":"tester","auth_method":"passkey"}`
+	record := SettingsChangePlanRecord{
+		ID:             "scp_test_1",
+		Status:         "validated",
+		ConversationID: "conv_1",
+		AcceptedCardID: "card_1",
+		CreatedBy:      "tester",
+		PlanJSON:       planJSON,
+		ApprovalJSON:   approvalJSON,
+		LiveReloadJSON: `["model_routing"]`,
+	}
+	if err := d.CreateSettingsChangePlan(ctx, record); err != nil {
+		t.Fatalf("CreateSettingsChangePlan: %v", err)
+	}
+
+	loaded, ok, err := d.GetSettingsChangePlan(ctx, record.ID)
+	if err != nil {
+		t.Fatalf("GetSettingsChangePlan: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected stored settings change plan")
+	}
+	if loaded.PlanJSON != planJSON {
+		t.Fatalf("loaded plan json = %q", loaded.PlanJSON)
+	}
+	if loaded.LiveReloadJSON != `["model_routing"]` {
+		t.Fatalf("loaded live reload json = %q", loaded.LiveReloadJSON)
+	}
+
+	rollback := SettingsChangeRollbackRecord{
+		ID:           "scr_1",
+		PlanID:       record.ID,
+		Status:       "available",
+		RollbackJSON: `{"available":true,"safe":true,"instructions":"Restore the prior provider model"}`,
+		ChangesJSON:  `[{"config_path":"provider.model","section":"provider","field":"provider_model","operation":"set"}]`,
+	}
+	if err := d.CreateSettingsChangeRollback(ctx, rollback); err != nil {
+		t.Fatalf("CreateSettingsChangeRollback: %v", err)
+	}
+	if err := d.UpdateSettingsChangePlanStatus(ctx, record.ID, "applied", rollback.ID, "", false, approvalJSON, `["model_routing"]`, NowMS()); err != nil {
+		t.Fatalf("UpdateSettingsChangePlanStatus: %v", err)
+	}
+
+	rollbacks, err := d.ListRecentSettingsChangeRollbacks(ctx, 5)
+	if err != nil {
+		t.Fatalf("ListRecentSettingsChangeRollbacks: %v", err)
+	}
+	if len(rollbacks) != 1 {
+		t.Fatalf("rollback count = %d", len(rollbacks))
+	}
+	if rollbacks[0].RollbackJSON != rollback.RollbackJSON {
+		t.Fatalf("rollback json = %q", rollbacks[0].RollbackJSON)
+	}
+
+	if err := d.CreateDoctorCheckpoint(ctx, DoctorCheckpointRecord{
+		ID:             "dcp_1",
+		PlanID:         record.ID,
+		ConversationID: "conv_1",
+		AcceptedCardID: "card_1",
+		Status:         "pending",
+		ChecksJSON:     `[{"id":"doctor","description":"Re-run doctor"}]`,
+		ResultsJSON:    `[{"check":"config.validate","status":"pass"}]`,
+	}); err != nil {
+		t.Fatalf("CreateDoctorCheckpoint: %v", err)
+	}
+	if err := d.UpdateDoctorCheckpoint(ctx, "dcp_1", "complete", `[{"check":"doctor.configure_post_save","status":"pass"}]`); err != nil {
+		t.Fatalf("UpdateDoctorCheckpoint: %v", err)
+	}
+}
+
+func TestDiagnosticLogEventPrunesBounded(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	for i := 0; i < 6; i++ {
+		payload := fmt.Sprintf(`{"index":%d,"message":"abcdefghijklmnopqrstuvwxyz"}`, i)
+		if err := d.AppendDiagnosticLogEvent(ctx, DiagnosticLogEvent{
+			Source:        "doctor",
+			Level:         "info",
+			CorrelationID: "corr-1",
+			EventType:     "doctor.log",
+			Payload:       []byte(payload),
+		}); err != nil {
+			t.Fatalf("AppendDiagnosticLogEvent(%d): %v", i, err)
+		}
+	}
+	if err := d.pruneDiagnosticLogEvents(ctx, 3, 0, 140); err != nil {
+		t.Fatalf("pruneDiagnosticLogEvents: %v", err)
+	}
+
+	items, err := d.QueryDiagnosticLogEvents(ctx, DiagnosticLogQuery{Source: "doctor", Limit: 10})
+	if err != nil {
+		t.Fatalf("QueryDiagnosticLogEvents: %v", err)
+	}
+	if len(items) == 0 || len(items) > 3 {
+		t.Fatalf("diagnostic log count = %d", len(items))
+	}
+	for _, item := range items {
+		if item.Source != "doctor" {
+			t.Fatalf("unexpected source = %q", item.Source)
+		}
+	}
+}
+
 func TestOpen_CreatesAgentCLIRunsTable(t *testing.T) {
 	d := openTestDB(t)
 	row := d.SQL.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='agent_cli_runs'`)

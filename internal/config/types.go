@@ -199,6 +199,7 @@ type ContextArtifactConfig struct {
 
 type ContextTaskCardConfig struct {
 	Enabled      bool `json:"enabled"`
+	EnforcePlan  bool `json:"enforcePlan"`
 	MaxRefs      int  `json:"maxRefs"`
 	MaxPlanItems int  `json:"maxPlanItems"`
 }

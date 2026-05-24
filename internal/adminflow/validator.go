@@ -116,7 +116,17 @@ func applyPlanChange(cfg *config.Config, change SettingsPlanChange) (bool, error
 	op := strings.ToLower(strings.TrimSpace(change.Operation))
 	switch op {
 	case "", "set":
-		return configedit.ApplyFieldValue(cfg, change.Section, change.Channel, change.Field, stringifyPlanValue(change.NewValue.Value))
+		changed, err := configedit.ApplyFieldValue(cfg, change.Section, change.Channel, change.Field, stringifyPlanValue(change.NewValue.Value))
+		if err != nil {
+			return false, err
+		}
+		if changed {
+			return true, nil
+		}
+		if value, ok := boolPlanValue(change.NewValue.Value); ok {
+			return configedit.SetToggleFieldValue(cfg, change.Section, change.Channel, change.Field, value), nil
+		}
+		return false, nil
 	case "toggle":
 		value, ok := boolPlanValue(change.NewValue.Value)
 		if !ok {

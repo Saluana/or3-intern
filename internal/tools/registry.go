@@ -17,6 +17,7 @@ type Registry struct {
 const (
 	ToolGroupRead     = "read"
 	ToolGroupMemory   = "memory"
+	ToolGroupPlan     = "plan"
 	ToolGroupWrite    = "write"
 	ToolGroupExec     = "exec"
 	ToolGroupWeb      = "web"

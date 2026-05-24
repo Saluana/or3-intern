@@ -236,6 +236,9 @@ func appendUniqueAdvice(existing []string, additional ...string) []string {
 }
 
 func toolFailureAdvice(toolName string, params map[string]any, errText string) []string {
+	if IsToolNotAvailableThisTurn(errText) {
+		return ToolNotAvailableThisTurnAdvice(toolName)
+	}
 	common := []string{"Check the tool arguments and use the smallest, most specific request that satisfies the task."}
 	if provider := adviceProviderForToolName(toolName); provider != nil {
 		return appendUniqueAdvice(common, provider.FailureAdvice(params, errText)...)

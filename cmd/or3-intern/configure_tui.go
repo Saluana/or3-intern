@@ -1500,6 +1500,7 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 			{Key: "context_section_workspace", Label: "Workspace context budget", Description: "Section budget for workspace context and indexed docs.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.WorkspaceContext), EmptyHint: "1200"},
 			{Key: "context_section_tool_schemas", Label: "Tool schema budget", Description: "Section budget for exposed tool schemas.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.ToolSchemas), EmptyHint: "1400"},
 			{Key: "context_task_card_enabled", Label: "Task card", Description: "Track current goal, plan, decisions, refs, and active files across turns.", Kind: configureFieldToggle, Value: onOff(cfg.Context.TaskCard.Enabled)},
+			{Key: "context_task_card_enforce_plan", Label: "Require plan before writes", Description: "Block write, exec, and web tools until create_plan establishes an active task plan. Best for untrusted or multi-step workflows; leave off for simple local use.", Kind: configureFieldToggle, Value: onOff(cfg.Context.TaskCard.EnforcePlan)},
 			{Key: "context_task_card_max_refs", Label: "Task card max refs", Description: "Maximum source refs retained on the active task card.", Kind: configureFieldText, Value: formatInt(cfg.Context.TaskCard.MaxRefs), EmptyHint: "12"},
 			{Key: "context_task_card_max_plan", Label: "Task card max plan items", Description: "Maximum active plan items retained on the task card.", Kind: configureFieldText, Value: formatInt(cfg.Context.TaskCard.MaxPlanItems), EmptyHint: "8"},
 			{Key: "context_artifact_summary_chars", Label: "Artifact summary chars", Description: "Bounded artifact/tool-output summary size stored for retrieval.", Kind: configureFieldText, Value: formatInt(cfg.Context.Artifacts.SummaryMaxChars), EmptyHint: "500"},
@@ -1686,7 +1687,22 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 }
 
 func buildChannelFields(cfg config.Config, channel string) []configureField {
-	return withHelpfulFieldDescriptions("channels", channel, buildChannelFieldsRaw(cfg, channel))
+	fields := buildChannelFieldsRaw(cfg, channel)
+	agentChoices := []string{"reader", "operator", "admin"}
+	agentChoice := channelAgentAccessSummary(cfg, channel)
+	if agentChoice == "" {
+		agentChoice = "reader"
+	}
+	fields = append(fields, configureField{
+		Key:         "agent_access",
+		Label:       "Agent access",
+		Description: "Choose which tools this channel can give the agent.",
+		Kind:        configureFieldChoice,
+		Value:       agentChoice,
+		Choices:     agentChoices,
+		ChoiceIndex: indexOfChoice(agentChoices, agentChoice),
+	})
+	return withHelpfulFieldDescriptions("channels", channel, fields)
 }
 
 func buildChannelFieldsRaw(cfg config.Config, channel string) []configureField {
@@ -1718,6 +1734,14 @@ func withHelpfulFieldDescriptions(section, channel string, fields []configureFie
 		}
 	}
 	return fields
+}
+
+func channelAgentAccessSummary(cfg config.Config, channel string) string {
+	channel = strings.ToLower(strings.TrimSpace(channel))
+	if profile := strings.TrimSpace(cfg.Security.Profiles.Channels[channel]); profile != "" {
+		return config.NormalizeAccessLevel(profile)
+	}
+	return config.NormalizeAccessLevel(cfg.Security.Profiles.Default)
 }
 
 func helpfulFieldDescription(section, channel, key string) string {
@@ -1814,6 +1838,7 @@ var helpfulSectionFieldDescriptions = map[string]string{
 	"context_section_workspace":              "Space reserved for workspace/document snippets. Increase if OR3 needs more project files in context; decrease if prompts feel crowded.",
 	"context_section_tool_schemas":           "Space reserved for tool descriptions shown to the AI. Warning: too low can hide tools; too high crowds out chat and memory.",
 	"context_task_card_enabled":              "Keeps a small running note of the current task, plan, decisions, references, and active files so long jobs stay coherent.",
+	"context_task_card_enforce_plan":         "When on, write, exec, web, MCP, skill, and subagent tools stay blocked until create_plan establishes an active plan. Turn off for simple local edits without a planning step.",
 	"context_task_card_max_refs":             "Maximum references kept on the task card. Higher values remember more links/files but use more prompt space.",
 	"context_task_card_max_plan":             "Maximum plan items kept on the task card. Higher values help detailed projects; lower values keep the prompt cleaner.",
 	"context_artifact_summary_chars":         "Maximum characters saved when OR3 summarizes a large artifact or tool output for later recall. Higher values keep more detail but use more storage/context.",
@@ -1955,6 +1980,8 @@ func helpfulChannelFieldDescription(channel, key string) string {
 		return "Only respond when the bot is directly mentioned. Recommended in busy shared rooms so OR3 does not answer every message."
 	case "access":
 		return "Controls who may send inbound messages to OR3. Pairing and allowlist are safer; open access is convenient but risky on shared channels."
+	case "agent_access":
+		return "Controls what the agent can do after this channel is admitted. Reader is read-only, Operator can write workspace files with guarded tools, and Admin has full local control."
 	case "allowlist":
 		return "Comma-separated list of sender or chat IDs allowed when inbound access is set to allowlist. Warning: leave no spaces or typos if you rely on this for safety."
 	case "bridge_url":

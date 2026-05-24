@@ -32,9 +32,9 @@ func TestPromptIncludesIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	sys := pp.System[0].Content.(string)
-	if !strings.Contains(sys, "Identity") {
-		t.Errorf("expected 'Identity' section header in system prompt, got %q", sys)
+	sys := systemPromptText(pp.System[0].Content)
+	if !strings.Contains(sys, "<assistant_identity") {
+		t.Errorf("expected assistant identity envelope in system prompt, got %q", sys)
 	}
 	if !strings.Contains(sys, "unique identity") {
 		t.Errorf("expected identity text in system prompt, got %q", sys)
@@ -53,9 +53,9 @@ func TestPromptIncludesStaticMemory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	sys := pp.System[0].Content.(string)
-	if !strings.Contains(sys, "Static Memory") {
-		t.Errorf("expected 'Static Memory' section header in system prompt, got %q", sys)
+	sys := systemPromptText(pp.System[0].Content)
+	if !strings.Contains(sys, "answer is always 42") {
+		t.Errorf("expected static memory content in system prompt, got %q", sys)
 	}
 	if !strings.Contains(sys, "answer is always 42") {
 		t.Errorf("expected static memory text in system prompt, got %q", sys)
@@ -73,14 +73,14 @@ func TestBuildWithOptions_IncludesPinnedMemoryAndSkillsInventory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	sys := pp.System[0].Content.(string)
-	if !strings.Contains(sys, "## Pinned Memory") || !strings.Contains(sys, "always keep prompts deterministic") {
+	sys := systemPromptText(pp.System[0].Content)
+	if !strings.Contains(sys, "<pinned_memory") || !strings.Contains(sys, "always keep prompts deterministic") {
 		t.Fatalf("expected pinned memory section and content, got %q", sys)
 	}
-	if !strings.Contains(sys, "## Skills Inventory") {
+	if !strings.Contains(sys, "<skills_inventory") {
 		t.Fatalf("expected skills inventory section, got %q", sys)
 	}
-	for _, section := range []string{"## SOUL.md", "## AGENTS.md", "## TOOLS.md", "## Retrieved Memory"} {
+	for _, section := range []string{"<assistant_identity", "<coding_agent_rules", "<tool_policy", "<retrieved_memory"} {
 		if !strings.Contains(sys, section) {
 			t.Fatalf("expected section %q in system prompt, got %q", section, sys)
 		}
@@ -127,9 +127,9 @@ func TestHeartbeatOnlyForAutonomous(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildWithOptions (non-autonomous): %v", err)
 	}
-	sysNormal := ppNormal.System[0].Content.(string)
-	if strings.Contains(sysNormal, "Heartbeat") {
-		t.Errorf("expected NO 'Heartbeat' section for non-autonomous turn, got %q", sysNormal)
+	sysNormal := systemPromptText(ppNormal.System[0].Content)
+	if strings.Contains(sysNormal, "<event_context") || strings.Contains(sysNormal, "check your tasks now") {
+		t.Errorf("expected NO heartbeat/event context for non-autonomous turn, got %q", sysNormal)
 	}
 
 	// Autonomous: heartbeat SHOULD appear.
@@ -141,9 +141,9 @@ func TestHeartbeatOnlyForAutonomous(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildWithOptions (autonomous): %v", err)
 	}
-	sysAuto := ppAuto.System[0].Content.(string)
-	if !strings.Contains(sysAuto, "Heartbeat") {
-		t.Errorf("expected 'Heartbeat' section for autonomous turn, got %q", sysAuto)
+	sysAuto := systemPromptText(ppAuto.System[0].Content)
+	if !strings.Contains(sysAuto, "<event_context") {
+		t.Errorf("expected event context section for autonomous turn, got %q", sysAuto)
 	}
 	if !strings.Contains(sysAuto, "check your tasks now") {
 		t.Errorf("expected heartbeat text in autonomous system prompt, got %q", sysAuto)
@@ -173,8 +173,8 @@ func TestHeartbeatTextRefreshesFromFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildWithOptions: %v", err)
 	}
-	if !strings.Contains(first.System[0].Content.(string), "first task") {
-		t.Fatalf("expected first heartbeat text, got %q", first.System[0].Content.(string))
+	if !strings.Contains(systemPromptText(first.System[0].Content), "first task") {
+		t.Fatalf("expected first heartbeat text, got %q", systemPromptText(first.System[0].Content))
 	}
 
 	if err := os.WriteFile(heartbeatPath, []byte("# Heartbeat\n- second task"), 0o644); err != nil {
@@ -188,11 +188,12 @@ func TestHeartbeatTextRefreshesFromFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildWithOptions: %v", err)
 	}
-	if !strings.Contains(second.System[0].Content.(string), "second task") {
-		t.Fatalf("expected refreshed heartbeat text, got %q", second.System[0].Content.(string))
+	secondSys := systemPromptText(second.System[0].Content)
+	if !strings.Contains(secondSys, "second task") {
+		t.Fatalf("expected refreshed heartbeat text, got %q", secondSys)
 	}
-	if strings.Contains(second.System[0].Content.(string), "first task") {
-		t.Fatalf("expected stale heartbeat text to be replaced, got %q", second.System[0].Content.(string))
+	if strings.Contains(secondSys, "first task") {
+		t.Fatalf("expected stale heartbeat text to be replaced, got %q", secondSys)
 	}
 }
 
@@ -222,9 +223,9 @@ func TestDocContextIncluded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildWithOptions: %v", err)
 	}
-	sys := pp.System[0].Content.(string)
-	if !strings.Contains(sys, "Indexed File Context") {
-		t.Errorf("expected 'Indexed File Context' section in system prompt, got %q", sys)
+	sys := systemPromptText(pp.System[0].Content)
+	if !strings.Contains(sys, "<workspace_context") {
+		t.Errorf("expected workspace context envelope in system prompt, got %q", sys)
 	}
 	if !strings.Contains(sys, "guide.md") {
 		t.Errorf("expected doc path in system prompt, got %q", sys)
@@ -245,8 +246,8 @@ func TestBuildWithOptions_WrapperParity(t *testing.T) {
 	if len(ret1) != len(ret2) {
 		t.Errorf("retrieved count mismatch: %d vs %d", len(ret1), len(ret2))
 	}
-	sys1 := pp1.System[0].Content.(string)
-	sys2 := pp2.System[0].Content.(string)
+	sys1 := systemPromptText(pp1.System[0].Content)
+	sys2 := systemPromptText(pp2.System[0].Content)
 	if sys1 != sys2 {
 		t.Errorf("system prompts differ:\n%q\nvs\n%q", sys1, sys2)
 	}
@@ -264,15 +265,14 @@ func TestIdentityAfterSoul(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	sys := pp.System[0].Content.(string)
-	soulIdx := strings.Index(sys, "SOUL.md")
-	identIdx := strings.Index(sys, "Identity")
-	agentsIdx := strings.Index(sys, "AGENTS.md")
-	if soulIdx < 0 || identIdx < 0 || agentsIdx < 0 {
-		t.Fatalf("missing sections in: %q", sys)
+	sys := systemPromptText(pp.System[0].Content)
+	soulIdx := strings.Index(sys, "<assistant_identity")
+	agentsIdx := strings.Index(sys, "<coding_agent_rules")
+	if soulIdx < 0 || agentsIdx < 0 || !strings.Contains(sys, "MyIdentity") {
+		t.Fatalf("missing identity sections in: %q", sys)
 	}
-	if !(soulIdx < identIdx && identIdx < agentsIdx) {
-		t.Errorf("expected order SOUL.md < Identity < AGENTS.md, indices: %d %d %d", soulIdx, identIdx, agentsIdx)
+	if !(soulIdx < agentsIdx) {
+		t.Errorf("expected assistant identity before coding rules, indices: %d %d", soulIdx, agentsIdx)
 	}
 }
 
@@ -288,15 +288,14 @@ func TestStaticMemoryAfterAgents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	sys := pp.System[0].Content.(string)
-	agentsIdx := strings.Index(sys, "AGENTS.md")
-	staticIdx := strings.Index(sys, "Static Memory")
-	toolsIdx := strings.Index(sys, "TOOLS.md")
-	if agentsIdx < 0 || staticIdx < 0 || toolsIdx < 0 {
+	sys := systemPromptText(pp.System[0].Content)
+	toolsIdx := strings.Index(sys, "<tool_policy")
+	staticIdx := strings.Index(sys, "MyStaticMem")
+	if toolsIdx < 0 || staticIdx < 0 {
 		t.Fatalf("missing sections in: %q", sys)
 	}
-	if !(agentsIdx < staticIdx && staticIdx < toolsIdx) {
-		t.Errorf("expected order AGENTS.md < Static Memory < TOOLS.md, indices: %d %d %d", agentsIdx, staticIdx, toolsIdx)
+	if !(toolsIdx < staticIdx) {
+		t.Errorf("expected static tier before session static memory text, indices: %d %d", toolsIdx, staticIdx)
 	}
 }
 
@@ -342,9 +341,9 @@ func TestPromptIncludesStructuredTriggerContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildWithOptions: %v", err)
 	}
-	sys := pp.System[0].Content.(string)
-	if !strings.Contains(sys, "Structured Trigger Context") || !strings.Contains(sys, "request_id") {
-		t.Fatalf("expected structured trigger context in prompt, got %q", sys)
+	sys := systemPromptText(pp.System[0].Content)
+	if !strings.Contains(sys, "<event_context") || !strings.Contains(sys, "request_id") {
+		t.Fatalf("expected structured event context in prompt, got %q", sys)
 	}
 }
 
@@ -366,9 +365,9 @@ func TestWorkspaceContextIncluded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	sys := pp.System[0].Content.(string)
-	if !strings.Contains(sys, "Workspace Context") {
-		t.Fatalf("expected workspace context section, got %q", sys)
+	sys := systemPromptText(pp.System[0].Content)
+	if !strings.Contains(sys, "<workspace_context") {
+		t.Fatalf("expected workspace context envelope, got %q", sys)
 	}
 	if !strings.Contains(strings.ToLower(sys), "penguin") {
 		t.Fatalf("expected workspace context to include workspace content, got %q", sys)
@@ -481,11 +480,11 @@ func TestPromptIncludesMemoryDigest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildWithOptions: %v", err)
 	}
-	sys := pp.System[0].Content.(string)
+	sys := systemPromptText(pp.System[0].Content)
 	// Only check digest section if FTS actually returned results.
 	if strings.Contains(sys, "verbose logging") && strings.Contains(sys, "preference") {
-		if !strings.Contains(sys, "## Memory Digest") {
-			t.Errorf("expected 'Memory Digest' section when durable notes retrieved, got %q", sys)
+		if !strings.Contains(sys, "<retrieved_memory") {
+			t.Errorf("expected memory digest envelope when durable notes retrieved, got %q", sys)
 		}
 	}
 }
@@ -493,9 +492,9 @@ func TestPromptIncludesMemoryDigest(t *testing.T) {
 func TestComposeSystemPrompt_MemoryDigestBetweenPinnedAndRetrieved(t *testing.T) {
 	b := &Builder{}
 	got := b.composeSystemPrompt("pinned content", "digest content", "retrieved content", "", "", "", "", "", "")
-	pinnedIdx := strings.Index(got, "## Pinned Memory")
-	digestIdx := strings.Index(got, "## Memory Digest")
-	retrievedIdx := strings.Index(got, "## Retrieved Memory")
+	pinnedIdx := strings.Index(got, "pinned content")
+	digestIdx := strings.Index(got, "digest content")
+	retrievedIdx := strings.Index(got, "retrieved content")
 	if pinnedIdx < 0 || digestIdx < 0 || retrievedIdx < 0 {
 		t.Fatalf("missing sections: pinned=%d digest=%d retrieved=%d", pinnedIdx, digestIdx, retrievedIdx)
 	}
@@ -916,20 +915,24 @@ func TestStablePrefixIsByteStableAcrossTurns(t *testing.T) {
 
 func TestStablePrefixExcludesHeartbeatAndTriggerMetadata(t *testing.T) {
 	b := &Builder{HeartbeatText: "tick"}
-	stable := b.renderStablePrefix("(none)", "", "(none)", "", "", "", "")
-	if strings.Contains(stable, "Heartbeat") || strings.Contains(stable, "Structured Trigger Context") || strings.Contains(stable, "Runtime Context") {
+	packet := b.buildContextPacket(turnPromptInput{
+		heartbeatText:    "tick",
+		eventContextText: `{"event":"cron"}`,
+	})
+	stable := renderStablePrefix(packet)
+	if strings.Contains(stable, "tick") || strings.Contains(stable, `{"event":"cron"}`) || strings.Contains(stable, "<runtime_context") {
 		t.Fatalf("stable prefix must not include volatile heartbeat or trigger metadata: %q", stable)
 	}
-	volatile := b.renderVolatileSuffix("tick", "{\"event\":\"cron\"}")
-	if !strings.Contains(volatile, "Heartbeat") || !strings.Contains(volatile, "Structured Trigger Context") || !strings.Contains(volatile, "Runtime Context") {
+	volatile := renderVolatileSuffix(packet)
+	if !strings.Contains(volatile, "tick") || !strings.Contains(volatile, `{"event":"cron"}`) || !strings.Contains(volatile, "<runtime_context") {
 		t.Fatalf("volatile suffix should include runtime, heartbeat, and structured context: %q", volatile)
 	}
 }
 
 func TestVolatileSuffixIncludesDateAndWorkingDirectory(t *testing.T) {
 	b := &Builder{WorkspaceDir: "/tmp/or3-workspace"}
-	volatile := b.renderVolatileSuffix("", "")
-	if !strings.Contains(volatile, "Runtime Context") {
+	volatile := renderVolatileSuffix(b.buildContextPacket(turnPromptInput{}))
+	if !strings.Contains(volatile, "<runtime_context") {
 		t.Fatalf("expected runtime context section, got %q", volatile)
 	}
 	if !strings.Contains(volatile, time.Now().Format("2006-01-02")) {
@@ -950,18 +953,20 @@ func TestComposeSystemContent_UsesExplicitCacheBoundaryWhenSupported(t *testing.
 	if !ok {
 		t.Fatalf("expected structured content parts for explicit cache provider, got %T", content)
 	}
-	if len(parts) != 2 {
-		t.Fatalf("expected stable+volatile parts, got %#v", parts)
+	if len(parts) != 3 {
+		t.Fatalf("expected static+session+turn parts, got %#v", parts)
 	}
-	cacheControl, ok := parts[0]["cache_control"].(map[string]any)
-	if !ok || cacheControl["type"] != "ephemeral" {
-		t.Fatalf("expected cache_control breakpoint on stable prefix, got %#v", parts[0])
+	for i := 0; i < 2; i++ {
+		cacheControl, ok := parts[i]["cache_control"].(map[string]any)
+		if !ok || cacheControl["type"] != "ephemeral" {
+			t.Fatalf("expected cache_control breakpoint on tier %d, got %#v", i, parts[i])
+		}
 	}
-	if strings.Contains(fmt.Sprint(parts[0]["text"]), "Heartbeat") || strings.Contains(fmt.Sprint(parts[0]["text"]), "Structured Trigger Context") {
-		t.Fatalf("stable part should not contain volatile sections: %#v", parts[0])
+	if strings.Contains(fmt.Sprint(parts[0]["text"]), "heartbeat") || strings.Contains(fmt.Sprint(parts[0]["text"]), "trigger") {
+		t.Fatalf("static part should not contain volatile sections: %#v", parts[0])
 	}
-	if !strings.Contains(fmt.Sprint(parts[1]["text"]), "Heartbeat") || !strings.Contains(fmt.Sprint(parts[1]["text"]), "Structured Trigger Context") {
-		t.Fatalf("volatile part missing heartbeat/trigger content: %#v", parts[1])
+	if !strings.Contains(fmt.Sprint(parts[2]["text"]), "heartbeat") || !strings.Contains(fmt.Sprint(parts[2]["text"]), "trigger") {
+		t.Fatalf("turn part missing heartbeat/trigger content: %#v", parts[2])
 	}
 }
 

@@ -180,13 +180,15 @@ func SetToggleFieldValue(cfg *config.Config, section, channel, fieldKey string, 
 		cfg.Context.Tools.DynamicExpose = value
 	case "context_task_card_enabled":
 		cfg.Context.TaskCard.Enabled = value
+	case "context_task_card_enforce_plan":
+		cfg.Context.TaskCard.EnforcePlan = value
 	case "context_manager_enabled":
 		cfg.ContextManager.Enabled = value
 	case "context_manager_allow_task_updates":
 		cfg.ContextManager.AllowTaskUpdates = value
 	case "context_manager_allow_stale_propose":
 		cfg.ContextManager.AllowStalePropose = value
-	case "workspace_restrict":
+	case "workspace_restrict", "tools_restrict_to_workspace":
 		cfg.Tools.RestrictToWorkspace = value
 	case "workspace_allow_full_read":
 		cfg.Tools.AllowFullFileRead = value
@@ -196,6 +198,9 @@ func SetToggleFieldValue(cfg *config.Config, section, channel, fieldKey string, 
 		cfg.DocIndex.Enabled = value
 	case "skills_enable_exec":
 		cfg.Skills.EnableExec = value
+		if value {
+			config.EnsureSkillsExecTrustPolicy(cfg)
+		}
 	case "skills_quarantine":
 		cfg.Skills.Policy.QuarantineByDefault = value
 	case "skills_global_disabled":
@@ -274,6 +279,13 @@ func ApplyChoiceSelection(cfg *config.Config, section, channel, fieldKey, choice
 	}
 	if section == "channels" && fieldKey == "access" {
 		applyAccessChoice(cfg, channel, choice)
+		return true, nil
+	}
+	if section == "channels" && fieldKey == "agent_access" {
+		if !config.SetChannelAccessLevel(&cfg.Security.Profiles, channel, choice) {
+			return false, fmt.Errorf("invalid agent access level %q", choice)
+		}
+		applyAgentAccessRuntimeRequirements(cfg, choice)
 		return true, nil
 	}
 	if section == "mcp" && fieldKey == "mcp_transport" {
@@ -876,6 +888,20 @@ func ApplyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 		}
 		cfg.Tools.EnableExec = enabled
 		return true, nil
+	case "workspace_restrict", "tools_restrict_to_workspace":
+		enabled, err := parseBoolValue(value, fieldKey)
+		if err != nil {
+			return false, err
+		}
+		cfg.Tools.RestrictToWorkspace = enabled
+		return true, nil
+	case "hardening_guarded_tools":
+		enabled, err := parseBoolValue(value, fieldKey)
+		if err != nil {
+			return false, err
+		}
+		cfg.Hardening.GuardedTools = enabled
+		return true, nil
 	case "tools_exec_timeout":
 		return setIntValue(&cfg.Tools.ExecTimeoutSeconds, value, fieldKey)
 	case "tools_path_append":
@@ -1235,6 +1261,20 @@ func applyAccessChoice(cfg *config.Config, channel, choice string) {
 		setInboundChoice(choice, &cfg.Channels.WhatsApp.InboundPolicy, &cfg.Channels.WhatsApp.OpenAccess)
 	case "email":
 		setInboundChoice(choice, &cfg.Channels.Email.InboundPolicy, &cfg.Channels.Email.OpenAccess)
+	}
+}
+
+func applyAgentAccessRuntimeRequirements(cfg *config.Config, level string) {
+	switch config.NormalizeAccessLevel(level) {
+	case config.AccessLevelAdmin:
+		cfg.Service.MaxCapability = "privileged"
+		cfg.Hardening.GuardedTools = true
+		cfg.Hardening.PrivilegedTools = true
+		cfg.Tools.EnableExec = true
+	case config.AccessLevelOperator:
+		cfg.Service.MaxCapability = "guarded"
+		cfg.Hardening.GuardedTools = true
+		cfg.Tools.EnableExec = true
 	}
 }
 

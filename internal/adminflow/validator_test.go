@@ -93,6 +93,64 @@ func TestPlanValidatorStage_RejectsProviderModelDisplayName(t *testing.T) {
 	}
 }
 
+func TestPlanValidatorStage_AppliesGuardedToolsToggle(t *testing.T) {
+	configmeta.Clear()
+	configmeta.RegisterFirstSliceFields()
+
+	cfg := config.Default()
+	cfg.Hardening.GuardedTools = false
+	plan := &SettingsChangePlan{
+		ID: "scp_guarded",
+		Changes: []SettingsPlanChange{
+			{
+				ConfigPath: "hardening.guardedTools",
+				Operation:  "set",
+				NewValue:   RedactedValue{Value: true},
+			},
+		},
+	}
+
+	state, err := (PlanValidator{}).Stage(cfg, plan, ValidationOptions{ApprovedAuthority: configmeta.RiskWarning})
+	if err != nil {
+		t.Fatalf("Stage() error = %v", err)
+	}
+	if !state.StagedConfig.Hardening.GuardedTools {
+		t.Fatalf("expected guarded tools enabled, got false")
+	}
+	if plan.Changes[0].Field != "hardening_guarded_tools" {
+		t.Fatalf("normalized field = %q, want hardening_guarded_tools", plan.Changes[0].Field)
+	}
+}
+
+func TestPlanValidatorStage_AppliesRestrictToWorkspaceToggle(t *testing.T) {
+	configmeta.Clear()
+	configmeta.RegisterFirstSliceFields()
+
+	cfg := config.Default()
+	cfg.Tools.RestrictToWorkspace = false
+	plan := &SettingsChangePlan{
+		ID: "scp_workspace",
+		Changes: []SettingsPlanChange{
+			{
+				ConfigPath: "tools.restrictToWorkspace",
+				Operation:  "toggle",
+				NewValue:   RedactedValue{Value: true},
+			},
+		},
+	}
+
+	state, err := (PlanValidator{}).Stage(cfg, plan, ValidationOptions{ApprovedAuthority: configmeta.RiskWarning})
+	if err != nil {
+		t.Fatalf("Stage() error = %v", err)
+	}
+	if !state.StagedConfig.Tools.RestrictToWorkspace {
+		t.Fatalf("expected workspace restriction enabled, got false")
+	}
+	if plan.Changes[0].Field != "workspace_restrict" {
+		t.Fatalf("normalized field = %q, want workspace_restrict", plan.Changes[0].Field)
+	}
+}
+
 func TestPlanValidatorStage_NormalizesProviderModelFieldAlias(t *testing.T) {
 	configmeta.Clear()
 	configmeta.RegisterFirstSliceFields()

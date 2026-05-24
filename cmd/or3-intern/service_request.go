@@ -19,6 +19,7 @@ import (
 type serviceTurnRequest struct {
 	SessionKey     string
 	Message        string
+	Attachments    []agent.ChatAttachment
 	AllowedTools   []string
 	RestrictTools  bool
 	Meta           map[string]any
@@ -102,6 +103,7 @@ type serviceTurnRequestPayload struct {
 	InternSessionKeyCamel string                        `json:"internSessionKey"`
 	PlatformSessionRef    map[string]any                `json:"platform_session_ref"`
 	Message               string                        `json:"message"`
+	Attachments           []map[string]any              `json:"attachments"`
 	AllowedTools          []string                      `json:"allowed_tools"`
 	AllowedToolsCamel     []string                      `json:"allowedTools"`
 	ToolPolicy            *serviceToolPolicyPayload     `json:"tool_policy"`
@@ -169,9 +171,14 @@ func decodeServiceTurnRequest(body io.Reader, registry *tools.Registry) (service
 	if err != nil {
 		return serviceTurnRequest{}, err
 	}
+	attachments := decodeServiceAttachments(payload.Attachments)
+	if err := agent.ValidateChatAttachments(attachments); err != nil {
+		return serviceTurnRequest{}, err
+	}
 	return serviceTurnRequest{
 		SessionKey:     compat.FirstString(payload.SessionKey, payload.InternSessionKey, payload.SessionKeyCamel, payload.InternSessionKeyCamel),
 		Message:        strings.TrimSpace(payload.Message),
+		Attachments:    attachments,
 		AllowedTools:   allowedTools,
 		RestrictTools:  restrictTools,
 		Meta:           cloneMapOrEmpty(payload.Meta),
@@ -444,6 +451,17 @@ func firstPositiveInt(values ...json.Number) (int, error) {
 		return int(n), nil
 	}
 	return 0, nil
+}
+
+func decodeServiceAttachments(raw []map[string]any) []agent.ChatAttachment {
+	if len(raw) == 0 {
+		return nil
+	}
+	items := make([]any, 0, len(raw))
+	for _, item := range raw {
+		items = append(items, item)
+	}
+	return agent.DecodeChatAttachments(items)
 }
 
 func cloneMapOrEmpty(in map[string]any) map[string]any {

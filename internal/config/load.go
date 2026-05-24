@@ -570,6 +570,7 @@ func normalizeAndValidateConfigWithOptions(cfg Config, opts normalizeOptions) (C
 		profile.WritablePaths = compactStrings(profile.WritablePaths)
 		cfg.Security.Profiles.Profiles[name] = profile
 	}
+	MigrateLegacyServiceAccessChannel(&cfg)
 	if opts.QuarantineOptionalIntegrations {
 		QuarantineInvalidOptionalIntegrations(&cfg)
 	} else {

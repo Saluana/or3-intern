@@ -42,6 +42,7 @@ type StartTurnRequest struct {
 	AppSessionKey    string
 	RunnerID         string
 	UserMessage      string
+	Attachments      []agent.ChatAttachment
 	PromptMessage    string
 	ContinuationMode ContinuationMode
 	Model            string
@@ -194,6 +195,9 @@ func (cm *ChatManager) StartTurn(ctx context.Context, sessionID string, req Star
 		"runner_chat_session_id": sess.ID,
 		"runner_chat_turn_id":    turn.ID,
 		"continuation_mode":      string(req.ContinuationMode),
+	}
+	if len(req.Attachments) > 0 {
+		userPayload["attachments"] = agent.ChatAttachmentsForMeta(req.Attachments)
 	}
 	userMsgID, err := cm.appendMessage(ctx, sess.AppSessionKey, "user", userMessage, userPayload)
 	if err != nil {

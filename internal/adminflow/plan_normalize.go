@@ -57,6 +57,19 @@ func NormalizePlanChange(change *SettingsPlanChange) {
 	if strings.TrimSpace(change.Operation) == "" {
 		change.Operation = "set"
 	}
+	if planChangeHasBoolNewValue(change) &&
+		(strings.TrimSpace(change.Operation) == "" ||
+			strings.EqualFold(strings.TrimSpace(change.Operation), "set")) {
+		change.Operation = "toggle"
+	}
+}
+
+func planChangeHasBoolNewValue(change *SettingsPlanChange) bool {
+	if change == nil {
+		return false
+	}
+	_, ok := boolPlanValue(change.NewValue.Value)
+	return ok
 }
 
 func channelFromConcreteConfigPath(path, section string) string {

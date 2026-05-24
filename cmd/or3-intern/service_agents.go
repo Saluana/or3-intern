@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"regexp"
@@ -84,6 +85,7 @@ func (s *serviceServer) runTurnJob(ctx context.Context, jobID string, req servic
 	log.Printf("service_turn: started job=%s session=%s trace=%s replay=%t", jobID, req.SessionKey, serviceMetaText(req.Meta, "trace_id"), req.ReplayToolCall != nil)
 	s.jobs.Publish(jobID, "started", serviceLifecyclePayload(req.SessionKey, req.Meta, map[string]any{"status": "running"}))
 	observer := &serviceObserver{ConversationObserver: s.jobs.Observer(jobID)}
+	profileName := s.effectiveServiceProfileName(req.ProfileName)
 	var err error
 	if req.ReplayToolCall != nil {
 		_, err = s.app().ReplayToolCall(ctx, app.ReplayToolCallRequest{
@@ -92,7 +94,7 @@ func (s *serviceServer) runTurnJob(ctx context.Context, jobID string, req servic
 			ArgumentsJSON: req.ReplayToolCall.ArgumentsJSON,
 			AllowedTools:  req.AllowedTools,
 			RestrictTools: req.RestrictTools,
-			ProfileName:   req.ProfileName,
+			ProfileName:   profileName,
 			Capability:    tools.CapabilityLevel(s.config.Service.MaxCapability),
 			ApprovalToken: req.ApprovalToken,
 			Actor:         identity.Actor,
@@ -103,10 +105,11 @@ func (s *serviceServer) runTurnJob(ctx context.Context, jobID string, req servic
 		err = s.app().RunTurn(ctx, app.TurnRequest{
 			SessionKey:    req.SessionKey,
 			Message:       req.Message,
+			Attachments:   req.Attachments,
 			Meta:          req.Meta,
 			AllowedTools:  req.AllowedTools,
 			RestrictTools: req.RestrictTools,
-			ProfileName:   req.ProfileName,
+			ProfileName:   profileName,
 			Capability:    tools.CapabilityLevel(s.config.Service.MaxCapability),
 			ApprovalToken: req.ApprovalToken,
 			Actor:         identity.Actor,
@@ -131,6 +134,19 @@ func (s *serviceServer) runTurnJob(ctx context.Context, jobID string, req servic
 		payload["empty_final_text_recovered"] = true
 	}
 	s.jobs.Complete(jobID, "completed", serviceLifecyclePayload(req.SessionKey, req.Meta, payload))
+}
+
+func (s *serviceServer) effectiveServiceProfileName(requested string) string {
+	if requested = strings.TrimSpace(requested); requested != "" {
+		return requested
+	}
+	if s == nil || !s.config.Security.Profiles.Enabled {
+		return ""
+	}
+	if profileName := strings.TrimSpace(s.config.Security.Profiles.Channels["service"]); profileName != "" {
+		return profileName
+	}
+	return strings.TrimSpace(s.config.Security.Profiles.Default)
 }
 
 func (s *serviceServer) startApprovedResumeJob(ctx context.Context, issued approval.IssuedApproval, identity serviceAuthIdentity) (string, error) {
@@ -362,7 +378,12 @@ func (s *serviceServer) handleArtifacts(w http.ResponseWriter, r *http.Request) 
 	if !requireServiceRole(w, r, approval.RoleOperator) {
 		return
 	}
-	if r.Method != http.MethodGet {
+	switch r.Method {
+	case http.MethodPost:
+		s.handleArtifactUpload(w, r)
+		return
+	case http.MethodGet:
+	default:
 		writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 		return
 	}
@@ -419,6 +440,63 @@ func (s *serviceServer) handleArtifacts(w http.ResponseWriter, r *http.Request) 
 		"read_bytes": result.ReadBytes,
 		"truncated":  result.Truncated,
 		"content":    result.Content,
+	})
+}
+
+func (s *serviceServer) handleArtifactUpload(w http.ResponseWriter, r *http.Request) {
+	if s.runtime == nil || s.runtime.Artifacts == nil {
+		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "artifacts unavailable"})
+		return
+	}
+	const maxUploadBytes = 8 << 20
+	if err := r.ParseMultipartForm(maxUploadBytes); err != nil {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid multipart form"})
+		return
+	}
+	sessionKey := serviceFirstNonEmpty(r.FormValue("session_key"), r.FormValue("sessionKey"))
+	if sessionKey == "" {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "session_key is required"})
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "file is required"})
+		return
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxUploadBytes+1))
+	if err != nil {
+		writeServiceError(w, r, http.StatusInternalServerError, "artifact upload read failed", err)
+		return
+	}
+	if len(data) > maxUploadBytes {
+		writeServiceJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"error": "file too large"})
+		return
+	}
+	filename := "attachment"
+	mimeType := "application/octet-stream"
+	if header != nil {
+		if name := strings.TrimSpace(header.Filename); name != "" {
+			filename = name
+		}
+		if header.Header != nil {
+			if mt := strings.TrimSpace(header.Header.Get("Content-Type")); mt != "" {
+				mimeType = mt
+			}
+		}
+	}
+	att, err := s.runtime.Artifacts.SaveNamed(r.Context(), sessionKey, filename, mimeType, data)
+	if err != nil {
+		writeServiceError(w, r, http.StatusInternalServerError, "artifact upload failed", err)
+		return
+	}
+	writeServiceJSON(w, http.StatusCreated, map[string]any{
+		"id":          att.ArtifactID,
+		"artifact_id": att.ArtifactID,
+		"name":        att.Filename,
+		"mime_type":   att.Mime,
+		"size_bytes":  att.SizeBytes,
+		"kind":        att.Kind,
 	})
 }
 
@@ -808,8 +886,14 @@ func (o *serviceObserver) emptyFinalTextFallback() (string, bool) {
 	}
 	switch strings.TrimSpace(o.lastToolStatus) {
 	case "failed", "error":
-		if strings.EqualFold(toolName, tools.ToolNameExec) && strings.Contains(strings.ToLower(firstNonEmptyString(o.lastToolError, o.lastToolResultPreview)), "tool not available in this turn") {
-			return "I tried to run a shell command, but the Admin Assistant is intentionally limited to dedicated Doctor tools for safety. No command was run. Ask again and I will use Doctor status/config tools instead of exec.", true
+		unavailableDetail := strings.ToLower(firstNonEmptyString(o.lastToolError, o.lastToolResultPreview))
+		if tools.IsToolNotAvailableThisTurn(unavailableDetail) {
+			if strings.EqualFold(toolName, tools.ToolNameExec) {
+				return "I tried to run a shell command, but the Admin Assistant is intentionally limited to dedicated Doctor tools for safety. No command was run. Ask again and I will use Doctor status/config tools instead of exec.", true
+			}
+			if tools.IsWriteToolName(toolName) {
+				return "I can't create or modify files in Ask mode (read-only). Switch to Work mode if you'd like me to write that file for you, or I can paste the content here for you to save manually.", true
+			}
 		}
 		message := fmt.Sprintf("The tool failed, and the model did not return a final message. Last tool: %s.", toolName)
 		if detail := strings.TrimSpace(firstNonEmptyString(o.lastToolError, o.lastToolResultPreview)); detail != "" {

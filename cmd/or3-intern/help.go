@@ -56,6 +56,7 @@ var rootHelpSections = []struct {
 		Title: "Operator tools",
 		Items: []helpItem{
 			{Name: "doctor", Description: "Advanced diagnostics; use `health` for normal checks"},
+			{Name: "access", Description: "Set simple Reader, Operator, or Admin access for channels"},
 			{Name: "capabilities", Description: "Inspect runtime posture, ingress policy, approvals, and profiles"},
 			{Name: "embeddings", Description: "Inspect or rebuild stored memory and doc embeddings after provider/model changes"},
 			{Name: "secrets", Description: "Manage encrypted secret references stored in SQLite"},

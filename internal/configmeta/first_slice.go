@@ -517,6 +517,20 @@ func RegisterFirstSliceFields() {
 	})
 
 	Register(ConfigFieldMetadata{
+		Section:          "context",
+		Key:              "task_card_enforce_plan",
+		Path:             "context.taskCard.enforcePlan",
+		Label:            "Require plan before writes",
+		Description:      "Block write, exec, web, MCP, skill, and subagent tools until create_plan establishes an active task plan",
+		Risk:             RiskNotice,
+		RestartRequired:  false,
+		RequiresApproval: false,
+		RequiresStepUp:   false,
+		Rollback:         RollbackBehavior{Safe: true},
+		UserIntents:      []string{"require plan", "plan gate", "create plan before write"},
+	})
+
+	Register(ConfigFieldMetadata{
 		Section:          "service_action",
 		Key:              "restart",
 		Path:             "actions.restartService",

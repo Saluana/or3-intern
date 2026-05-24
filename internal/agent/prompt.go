@@ -167,10 +167,22 @@ type PromptParts struct {
 
 // BuildOptions holds options for building a prompt.
 type BuildOptions struct {
-	SessionKey  string
-	UserMessage string
-	Autonomous  bool // true for cron/webhook/file-change events
-	EventMeta   map[string]any
+	SessionKey      string
+	UserMessage     string
+	UserMessageID   int64
+	TurnAttachments []ChatAttachment
+	Autonomous      bool // true for cron/webhook/file-change events
+	EventMeta       map[string]any
+}
+
+type turnPromptInput struct {
+	pinnedText, digestText, memText, identityText, staticMemoryText string
+	docContextText, workspaceContextText                            string
+	heartbeatText, compactionText, activePlanText, eventContextText string
+	currentUserMessage                                              string
+	currentUserMessageID                                            int64
+	turnAttachments                                                 []ChatAttachment
+	recentExecutionText                                             string
 }
 
 type Builder struct {
@@ -222,7 +234,7 @@ func (b *Builder) BuildWithOptions(ctx context.Context, opts BuildOptions) (Prom
 	if err != nil {
 		return PromptParts{}, nil, err
 	}
-	sys := renderProviderMessages(packet, b)
+	sys := renderProviderMessages(&packet, b)
 	return PromptParts{
 		System:  sys,
 		History: packet.RecentHistory,
@@ -247,12 +259,24 @@ func (b *Builder) buildPacket(ctx context.Context, opts BuildOptions) (ContextPa
 	if structuredMax <= 0 {
 		structuredMax = defaultBootstrapMaxChars
 	}
+	var activePlanMeta ActivePlanMetadata
+	var taskCard TaskCard
+	var hasTaskCard bool
 	taskCardText := ""
 	if b.DB != nil && !b.DisableTaskCard {
 		if card, ok, err := loadTaskCard(ctx, b.DB, opts.SessionKey); err == nil && ok {
-			taskCardText = renderTaskCard(card, structuredMax)
+			hasTaskCard = true
+			taskCard = card
+			activePlanMeta = card.Metadata
+			if activePlanIsEstablished(activePlanMeta) {
+				taskCardText = renderActivePlanCompact(card, activePlanMeta, structuredMax)
+			} else {
+				taskCardText = renderTaskCard(card, structuredMax)
+			}
 		}
 	}
+	turnAttachments := mergeTurnAttachments(opts.TurnAttachments, opts.EventMeta)
+	recentExecutionText := b.buildRecentExecutionState(ctx, opts.SessionKey, activePlanMeta)
 	compactionText := ""
 	var compactionCutoff int64
 	if b.DB != nil {
@@ -341,6 +365,15 @@ func (b *Builder) buildPacket(ctx context.Context, opts BuildOptions) (ContextPa
 		}
 		histRows = filtered
 	}
+	if opts.UserMessageID > 0 {
+		filtered := histRows[:0]
+		for _, row := range histRows {
+			if row.ID != opts.UserMessageID {
+				filtered = append(filtered, row)
+			}
+		}
+		histRows = filtered
+	}
 	visionBudget := newVisionBudget()
 	hist := make([]providers.ChatMessage, 0, len(histRows))
 	pendingToolCallIDs := make([]string, 0)
@@ -389,28 +422,34 @@ func (b *Builder) buildPacket(ctx context.Context, opts BuildOptions) (ContextPa
 	}
 
 	heartbeat := ""
-	structuredContext := ""
+	eventContext := ""
 	if opts.Autonomous {
 		heartbeat = b.currentHeartbeatText()
-		structuredContext = formatStructuredEventContext(opts.EventMeta, structuredMax)
+		eventContext = formatStructuredEventContext(opts.EventMeta, structuredMax)
 	}
-	if strings.TrimSpace(taskCardText) != "" {
-		if strings.TrimSpace(structuredContext) == "" {
-			structuredContext = "active_task_card:\n" + taskCardText
-		} else {
-			structuredContext = structuredContext + "\n\nactive_task_card:\n" + taskCardText
-		}
+	activePlanText := ""
+	if hasTaskCard && activePlanIsEstablished(activePlanMeta) {
+		activePlanText = renderActivePlanCompact(taskCard, activePlanMeta, structuredMax)
 	}
-	if strings.TrimSpace(compactionText) != "" {
-		if strings.TrimSpace(structuredContext) == "" {
-			structuredContext = "compacted_chat_context:\n" + compactionText
-		} else {
-			structuredContext = structuredContext + "\n\ncompacted_chat_context:\n" + compactionText
-		}
-	}
-	packet := b.buildContextPacket(pinnedText, digestText, memText, b.IdentityText, b.StaticMemory, heartbeat, structuredContext, docContextText, workspaceContextText)
+	packet := b.buildContextPacket(turnPromptInput{
+		pinnedText:           pinnedText,
+		digestText:           digestText,
+		memText:              memText,
+		identityText:         b.IdentityText,
+		staticMemoryText:     b.StaticMemory,
+		docContextText:       docContextText,
+		workspaceContextText: workspaceContextText,
+		heartbeatText:        heartbeat,
+		compactionText:       compactionText,
+		activePlanText:       activePlanText,
+		eventContextText:     eventContext,
+		currentUserMessage:   opts.UserMessage,
+		currentUserMessageID: opts.UserMessageID,
+		turnAttachments:      turnAttachments,
+		recentExecutionText:  recentExecutionText,
+	})
 	packet.RecentHistory = hist
-	packet.Budget = estimatePacketBudget(packet, b)
+	packet.Budget = estimatePacketBudget(&packet, b)
 	if len(rejected) > 0 {
 		packet.Budget.Rejected = append(packet.Budget.Rejected, rejected...)
 	}
@@ -431,6 +470,17 @@ func (b *Builder) currentHeartbeatText() string {
 }
 
 func attachmentsFromPayload(payload map[string]any) []artifacts.Attachment {
+	chatAtts := chatAttachmentsFromPayload(payload)
+	out := make([]artifacts.Attachment, 0, len(chatAtts))
+	for _, att := range chatAtts {
+		if art, ok := att.ToArtifactAttachment(); ok {
+			out = append(out, art)
+			continue
+		}
+	}
+	if len(out) > 0 {
+		return out
+	}
 	if len(payload) == 0 {
 		return nil
 	}
@@ -444,7 +494,6 @@ func attachmentsFromPayload(payload map[string]any) []artifacts.Attachment {
 		return nil
 	}
 	atts := attachmentsFromRaw(raw)
-	out := make([]artifacts.Attachment, 0, len(atts))
 	for _, att := range atts {
 		if strings.TrimSpace(att.ArtifactID) == "" {
 			continue
@@ -458,6 +507,19 @@ func attachmentsFromPayload(payload map[string]any) []artifacts.Attachment {
 		out = append(out, att)
 	}
 	return out
+}
+
+func chatAttachmentsFromPayload(payload map[string]any) []ChatAttachment {
+	if len(payload) == 0 {
+		return nil
+	}
+	raw := payload["attachments"]
+	if raw == nil {
+		if meta, ok := payload["meta"].(map[string]any); ok {
+			raw = meta["attachments"]
+		}
+	}
+	return DecodeChatAttachments(raw)
 }
 
 func toolCallsFromPayload(raw any) []providers.ToolCall {
@@ -716,32 +778,63 @@ func readCappedFile(path string, maxBytes int64) ([]byte, error) {
 }
 
 func (b *Builder) composeSystemPrompt(pinnedText, digestText, memText, identityText, staticMemoryText, heartbeatText, structuredContextText, docContextText, workspaceContextText string) string {
-	stable := b.renderStablePrefix(pinnedText, digestText, memText, identityText, staticMemoryText, docContextText, workspaceContextText)
-	volatile := b.renderVolatileSuffix(heartbeatText, structuredContextText)
-	if strings.TrimSpace(volatile) == "" {
-		return stable
+	packet := b.buildContextPacket(turnPromptInput{
+		pinnedText:           pinnedText,
+		digestText:           digestText,
+		memText:              memText,
+		identityText:         identityText,
+		staticMemoryText:     staticMemoryText,
+		heartbeatText:        heartbeatText,
+		eventContextText:     structuredContextText,
+		docContextText:       docContextText,
+		workspaceContextText: workspaceContextText,
+	})
+	combined := renderStablePrefix(packet)
+	if turn := renderTurnTier(packet); strings.TrimSpace(turn) != "" {
+		if combined == "" {
+			combined = turn
+		} else {
+			combined = strings.TrimSpace(combined + "\n\n" + turn)
+		}
 	}
 	maxTotal := b.BootstrapTotalMaxChars
 	if maxTotal <= 0 {
 		maxTotal = defaultBootstrapTotalMaxChars
 	}
-	return truncateText(strings.TrimSpace(stable+"\n\n"+volatile), maxTotal)
+	return truncateText(combined, maxTotal)
 }
 
 func (b *Builder) composeSystemContent(pinnedText, digestText, memText, identityText, staticMemoryText, heartbeatText, structuredContextText, docContextText, workspaceContextText string) any {
-	stable := b.renderStablePrefix(pinnedText, digestText, memText, identityText, staticMemoryText, docContextText, workspaceContextText)
-	volatile := b.renderVolatileSuffix(heartbeatText, structuredContextText)
+	packet := b.buildContextPacket(turnPromptInput{
+		pinnedText:           pinnedText,
+		digestText:           digestText,
+		memText:              memText,
+		identityText:         identityText,
+		staticMemoryText:     staticMemoryText,
+		heartbeatText:        heartbeatText,
+		eventContextText:     structuredContextText,
+		docContextText:       docContextText,
+		workspaceContextText: workspaceContextText,
+	})
+	static := renderStaticTier(packet)
+	session := renderSessionTier(packet)
+	turn := renderTurnTier(packet)
 	if b != nil && b.Provider != nil && b.Provider.SupportsExplicitPromptCache() {
-		return providers.BuildCacheAwareSystemContent(stable, volatile)
+		return providers.BuildCacheAwareTieredContent(static, session, turn)
 	}
-	if strings.TrimSpace(volatile) == "" {
-		return stable
+	combined := renderStablePrefix(packet)
+	if strings.TrimSpace(turn) != "" {
+		if combined == "" {
+			combined = turn
+		} else {
+			combined = strings.TrimSpace(combined + "\n\n" + turn)
+		}
 	}
 	maxTotal := b.BootstrapTotalMaxChars
 	if maxTotal <= 0 {
 		maxTotal = defaultBootstrapTotalMaxChars
 	}
-	return truncateText(strings.TrimSpace(stable+"\n\n"+volatile), maxTotal)
+	return truncateText(combined, maxTotal)
 }
 
 func (b *Builder) renderStablePrefix(pinnedText, digestText, memText, identityText, staticMemoryText, docContextText, workspaceContextText string) string {
@@ -773,7 +866,7 @@ func (b *Builder) renderStablePrefix(pinnedText, digestText, memText, identityTe
 
 	var out strings.Builder
 	out.WriteString("# System Prompt\n")
-	for _, s := range b.stablePromptSections(pinnedText, digestText, memText, identityText, staticMemoryText, docContextText, workspaceContextText) {
+	for _, s := range append(b.staticPromptSections(identityText), b.sessionPromptSections(pinnedText, digestText, staticMemoryText)...) {
 		out.WriteString("\n## ")
 		out.WriteString(s.Title)
 		out.WriteString("\n")
@@ -783,27 +876,17 @@ func (b *Builder) renderStablePrefix(pinnedText, digestText, memText, identityTe
 	return truncateText(strings.TrimSpace(out.String()), maxTotal)
 }
 
-func (b *Builder) renderVolatileSuffix(heartbeatText, structuredContextText string) string {
-	maxEach := b.BootstrapMaxChars
-	if maxEach <= 0 {
-		maxEach = defaultBootstrapMaxChars
-	}
-	sections := b.volatilePromptSections(heartbeatText, structuredContextText)
-	if len(sections) == 0 {
-		return ""
-	}
-	var out strings.Builder
-	for _, s := range sections {
-		out.WriteString("## ")
-		out.WriteString(s.Title)
-		out.WriteString("\n")
-		out.WriteString(strings.TrimSpace(truncateText(s.Text, maxEach)))
-		out.WriteString("\n\n")
-	}
-	return strings.TrimSpace(out.String())
+func (b *Builder) renderVolatileSuffix(heartbeatText, structuredContextText, currentTurnText string) string {
+	packet := b.buildContextPacket(turnPromptInput{
+		heartbeatText:        heartbeatText,
+		eventContextText:     structuredContextText,
+		currentUserMessage:   currentTurnText,
+		currentUserMessageID: 0,
+	})
+	return renderTurnTier(packet)
 }
 
-func (b *Builder) stablePromptSections(pinnedText, digestText, memText, identityText, staticMemoryText, docContextText, workspaceContextText string) []systemPromptSection {
+func (b *Builder) staticPromptSections(identityText string) []systemPromptSection {
 	budgets := b.contextSectionBudgets()
 	skillsMax := b.SkillsSummaryMax
 	if skillsMax <= 0 {
@@ -822,45 +905,100 @@ func (b *Builder) stablePromptSections(pinnedText, digestText, memText, identity
 		notes = DefaultToolNotes
 	}
 	sections := []systemPromptSection{
-		{Title: "SOUL.md", Text: soul, Protected: true, TokenCap: budgets.SoulIdentity, MinTokens: minProtectedTokens(budgets.SoulIdentity)},
+		{Title: "SOUL.md", XMLTag: xmlTagAssistantIdentity, Text: soul, Protected: true, CacheClass: CacheClassStatic, TokenCap: budgets.SoulIdentity, MinTokens: minProtectedTokens(budgets.SoulIdentity)},
 	}
 	if t := strings.TrimSpace(identityText); t != "" {
-		sections = append(sections, systemPromptSection{Title: "Identity", Text: t, Protected: true, TokenCap: budgets.SoulIdentity, MinTokens: minProtectedTokens(budgets.SoulIdentity)})
-	}
-	sections = append(sections, systemPromptSection{Title: "AGENTS.md", Text: inst, Protected: true, TokenCap: budgets.SoulIdentity, MinTokens: minProtectedTokens(budgets.SoulIdentity)})
-	if t := strings.TrimSpace(staticMemoryText); t != "" {
-		sections = append(sections, systemPromptSection{Title: "Static Memory", Text: t})
+		sections = append(sections, systemPromptSection{
+			Title: "Identity", XMLTag: xmlTagAssistantIdentity, Text: t, Protected: true, CacheClass: CacheClassStatic,
+			TokenCap: budgets.SoulIdentity, MinTokens: minProtectedTokens(budgets.SoulIdentity),
+		})
 	}
 	sections = append(sections,
-		systemPromptSection{Title: "TOOLS.md", Text: notes, Protected: true, TokenCap: budgets.ToolPolicy, MinTokens: minProtectedTokens(budgets.ToolPolicy)},
-		systemPromptSection{Title: "Pinned Memory", Text: pinnedText, Protected: true, TokenCap: budgets.PinnedMemory, MinTokens: minProtectedTokens(budgets.PinnedMemory)},
+		systemPromptSection{Title: "AGENTS.md", XMLTag: xmlTagCodingAgentRules, Text: inst, Protected: true, CacheClass: CacheClassStatic, TokenCap: budgets.SoulIdentity, MinTokens: minProtectedTokens(budgets.SoulIdentity)},
+		systemPromptSection{Title: "TOOLS.md", XMLTag: xmlTagToolPolicy, Text: notes, Protected: true, CacheClass: CacheClassStatic, TokenCap: budgets.ToolPolicy, MinTokens: minProtectedTokens(budgets.ToolPolicy)},
+		systemPromptSection{Title: "Skills Inventory", XMLTag: xmlTagSkillsInventory, Text: b.Skills.ModelSummary(skillsMax), CacheClass: CacheClassStatic, TokenCap: budgets.ToolSchemas},
 	)
-	if t := strings.TrimSpace(digestText); t != "" {
-		sections = append(sections, systemPromptSection{Title: "Memory Digest", Text: t, TokenCap: budgets.MemoryDigest})
-	}
-	sections = append(sections, systemPromptSection{Title: "Retrieved Memory", Text: memText, TokenCap: budgets.RetrievedMemory})
-	if t := strings.TrimSpace(workspaceContextText); t != "" {
-		sections = append(sections, systemPromptSection{Title: "Workspace Context", Text: t, TokenCap: budgets.WorkspaceContext})
-	}
-	if t := strings.TrimSpace(docContextText); t != "" {
-		sections = append(sections, systemPromptSection{Title: "Indexed File Context", Text: t, TokenCap: budgets.WorkspaceContext})
-	}
-	sections = append(sections, systemPromptSection{Title: "Skills Inventory", Text: b.Skills.ModelSummary(skillsMax), TokenCap: budgets.ToolSchemas})
 	return sections
 }
 
-func (b *Builder) volatilePromptSections(heartbeatText, structuredContextText string) []systemPromptSection {
+func (b *Builder) sessionPromptSections(pinnedText, digestText, staticMemoryText string) []systemPromptSection {
 	budgets := b.contextSectionBudgets()
 	var sections []systemPromptSection
+	if t := strings.TrimSpace(pinnedText); t != "" {
+		sections = append(sections, systemPromptSection{
+			Title: "Pinned Memory", XMLTag: xmlTagPinnedMemory, Text: t, Protected: true, CacheClass: CacheClassSession,
+			Attrs: envelopeAttrs{"authority": "durable"}, TokenCap: budgets.PinnedMemory, MinTokens: minProtectedTokens(budgets.PinnedMemory),
+		})
+	}
+	if t := strings.TrimSpace(staticMemoryText); t != "" {
+		sections = append(sections, systemPromptSection{Title: "Static Memory", XMLTag: xmlTagPinnedMemory, Text: t, CacheClass: CacheClassSession, Attrs: envelopeAttrs{"authority": "durable"}})
+	}
+	if t := strings.TrimSpace(digestText); t != "" {
+		sections = append(sections, systemPromptSection{Title: "Memory Digest", XMLTag: xmlTagRetrievedMemory, Text: t, CacheClass: CacheClassSession, TokenCap: budgets.MemoryDigest})
+	}
+	return sections
+}
+
+func (b *Builder) turnPromptSections(input turnPromptInput) []systemPromptSection {
+	budgets := b.contextSectionBudgets()
+	var sections []systemPromptSection
+	if t := strings.TrimSpace(input.memText); t != "" {
+		sections = append(sections, systemPromptSection{
+			Title: "Retrieved Memory", XMLTag: xmlTagRetrievedMemory, Text: t, CacheClass: CacheClassTurn,
+			Attrs: envelopeAttrs{"authority": "suggestive", "freshness": "possibly_stale"}, TokenCap: budgets.RetrievedMemory,
+		})
+	}
+	if t := strings.TrimSpace(input.workspaceContextText); t != "" {
+		sections = append(sections, systemPromptSection{
+			Title: "Workspace Context", XMLTag: xmlTagWorkspaceContext, Text: t, CacheClass: CacheClassTurn,
+			Attrs: envelopeAttrs{"authority": "partial_index", "freshness": "possibly_stale"}, TokenCap: budgets.WorkspaceContext,
+		})
+	}
+	if t := strings.TrimSpace(input.docContextText); t != "" {
+		sections = append(sections, systemPromptSection{
+			Title: "Indexed File Context", XMLTag: xmlTagWorkspaceContext, Text: t, CacheClass: CacheClassTurn,
+			Attrs: envelopeAttrs{"authority": "partial_index", "freshness": "possibly_stale"}, TokenCap: budgets.WorkspaceContext,
+		})
+	}
+	if t := strings.TrimSpace(input.compactionText); t != "" {
+		sections = append(sections, systemPromptSection{Title: "Context Compaction", XMLTag: xmlTagContextCompaction, Text: t, CacheClass: CacheClassTurn})
+	}
 	if t := strings.TrimSpace(b.renderRuntimeContext()); t != "" {
-		sections = append(sections, systemPromptSection{Title: "Runtime Context", Text: t})
+		sections = append(sections, systemPromptSection{Title: "Runtime Context", XMLTag: xmlTagRuntimeContext, Text: t, CacheClass: CacheClassTurn})
 	}
-	if t := strings.TrimSpace(heartbeatText); t != "" {
-		sections = append(sections, systemPromptSection{Title: "Heartbeat", Text: t})
+	if t := strings.TrimSpace(renderCurrentUserRequestBody(input.currentUserMessage, input.currentUserMessageID)); t != "" {
+		cap := budgets.CurrentTurn
+		if cap <= 0 {
+			cap = budgets.ActiveTaskCard
+		}
+		if cap <= 0 {
+			cap = 160
+		}
+		sections = append(sections, systemPromptSection{
+			Title: "Current Turn", XMLTag: xmlTagCurrentUserRequest, Text: t, Protected: true, CacheClass: CacheClassTurn,
+			TokenCap: cap, MinTokens: minProtectedTokens(cap),
+		})
 	}
-	if t := strings.TrimSpace(structuredContextText); t != "" {
-		protected := strings.Contains(t, "active_task_card:")
-		sections = append(sections, systemPromptSection{Title: "Structured Trigger Context", Text: t, Protected: protected, TokenCap: budgets.ActiveTaskCard, MinTokens: minProtectedTokens(budgets.ActiveTaskCard)})
+	if t := strings.TrimSpace(input.activePlanText); t != "" {
+		sections = append(sections, systemPromptSection{
+			Title: "Active Plan", XMLTag: xmlTagActiveTurnPlan, Text: t, Protected: true, CacheClass: CacheClassTurn,
+			TokenCap: budgets.ActiveTaskCard, MinTokens: minProtectedTokens(budgets.ActiveTaskCard),
+		})
+	}
+	if t := strings.TrimSpace(renderUserAttachmentsBody(input.turnAttachments)); t != "" {
+		sections = append(sections, systemPromptSection{
+			Title: "User Attachments", XMLTag: xmlTagUserAttachments, Text: t, Protected: true, CacheClass: CacheClassTurn,
+			TokenCap: budgets.ActiveTaskCard, MinTokens: minProtectedTokens(budgets.ActiveTaskCard),
+		})
+	}
+	if t := strings.TrimSpace(input.recentExecutionText); t != "" {
+		sections = append(sections, systemPromptSection{Title: "Recent Execution", XMLTag: xmlTagRecentExecution, Text: t, CacheClass: CacheClassTurn})
+	}
+	if t := strings.TrimSpace(input.heartbeatText); t != "" {
+		sections = append(sections, systemPromptSection{Title: "Heartbeat", XMLTag: xmlTagEventContext, Text: t, CacheClass: CacheClassTurn})
+	}
+	if t := strings.TrimSpace(input.eventContextText); t != "" {
+		sections = append(sections, systemPromptSection{Title: "Event Context", XMLTag: xmlTagEventContext, Text: t, CacheClass: CacheClassTurn})
 	}
 	return sections
 }

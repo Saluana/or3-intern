@@ -193,11 +193,11 @@ func TestFormatRetrieved_WithResults(t *testing.T) {
 func TestBuilder_ComposeSystemPrompt_Defaults(t *testing.T) {
 	b := &Builder{}
 	got := b.composeSystemPrompt("(none)", "", "(none)", "", "", "", "", "", "")
-	if !strings.Contains(got, "System Prompt") {
-		t.Errorf("expected '# System Prompt' in output, got %q", got)
+	if !strings.Contains(got, "<assistant_identity") {
+		t.Errorf("expected assistant identity envelope in output, got %q", got)
 	}
-	if !strings.Contains(got, "SOUL.md") {
-		t.Errorf("expected 'SOUL.md' section, got %q", got)
+	if !strings.Contains(got, "<coding_agent_rules") {
+		t.Errorf("expected coding agent rules envelope, got %q", got)
 	}
 }
 
@@ -232,8 +232,8 @@ func TestBuilder_ComposeSystemPrompt_WithSkills(t *testing.T) {
 	_ = skills.Scan([]string{dir}) // use empty skills
 	b := &Builder{}
 	got := b.composeSystemPrompt("(none)", "", "(none)", "", "", "", "", "", "")
-	if !strings.Contains(got, "Skills Inventory") {
-		t.Errorf("expected 'Skills Inventory' section, got %q", got)
+	if !strings.Contains(got, "<skills_inventory") {
+		t.Errorf("expected skills inventory envelope, got %q", got)
 	}
 }
 

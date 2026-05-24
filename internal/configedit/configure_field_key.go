@@ -19,12 +19,15 @@ var configureFieldKeysByPath = map[string]string{
 	"skills.load.disableGlobalDir":   "skills_global_disabled",
 	"tools.enableExec":               "tools_enable_exec",
 	"tools.execAllowedPrograms":      "hardening_exec_allowed_programs",
-	"tools.restrictToWorkspace":      "tools_restrict_to_workspace",
+	"tools.restrictToWorkspace":      "workspace_restrict",
+	"hardening.guardedTools":         "hardening_guarded_tools",
 	"service.enabled":                "service_enabled",
 	"service.listen":                 "service_listen",
 	"service.secret":                 "service_secret",
 	"agentCLI.enabled":               "agentCLI_enabled",
 	"agentCLI.disabledRunners":       "agentCLI_disabled_runners",
+	"context.taskCard.enforcePlan":   "context_task_card_enforce_plan",
+	"context.taskCard.enabled":       "context_task_card_enabled",
 }
 
 // ConfigureFieldKeyForMetadata returns the configure API field key used by

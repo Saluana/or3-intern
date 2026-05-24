@@ -28,6 +28,22 @@ func TestAvailableNormalizedToolCallsMapsDoctorStatusExecAlias(t *testing.T) {
 	}
 }
 
+func TestUnavailableNormalizedToolCallPromptMentionsAskModeForWriteTools(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(&toolPolicyStubTool{name: "read_file", groups: []string{tools.ToolGroupRead}})
+
+	got := unavailableNormalizedToolCallPrompt([]NormalizedToolCall{{
+		Name: "write_file",
+	}}, registry)
+
+	if !strings.Contains(got, "Ask") || !strings.Contains(got, "will not succeed") {
+		t.Fatalf("expected Ask-mode write guidance, got %q", got)
+	}
+	if strings.Contains(got, "edit_file") && strings.Contains(got, "instead") {
+		t.Fatalf("expected no misleading alternate-tool advice, got %q", got)
+	}
+}
+
 func TestUnavailableNormalizedToolCallPromptMentionsDoctorStatusInsteadOfExec(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(&toolPolicyStubTool{name: "doctor_status"})

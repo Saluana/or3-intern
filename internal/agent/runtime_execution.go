@@ -143,6 +143,14 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 			msg.ToolCalls = normalizedToProviderToolCalls(normalizedCalls)
 		}
 		if len(normalizedCalls) == 0 {
+			if reminder := r.unfinishedPlanReminder(ctx, sessionKey); reminder != "" {
+				messages = append(messages, providers.ChatMessage{Role: "system", Content: reminder})
+				ctx = ContextWithPlanGateReminderSent(ctx)
+				if _, err := r.DB.AppendMessage(ctx, sessionKey, "system", reminder, map[string]any{"source": "plan_gate"}); err != nil {
+					log.Printf("append plan gate reminder failed: %v", err)
+				}
+				continue
+			}
 			finalText := strings.TrimSpace(contentToString(msg.Content))
 			if sw != nil {
 				_ = sw.Close(ctx, finalText)
@@ -173,7 +181,12 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 
 		for _, tc := range normalizedCalls {
 			emitToolCallStarted(ctx, observer, tc)
+			if isExplorationToolName(tc.Name) {
+				ctx = ContextWithExplorationToolCall(ctx)
+			}
 			toolCtx := tools.ContextWithSession(ctx, scopeKey)
+			toolCtx = ContextWithConversationSession(toolCtx, sessionKey)
+			toolCtx = ContextWithTurnState(toolCtx, TurnStateFromContextOrDefault(ctx, sessionKey))
 			toolCtx = tools.ContextWithDelivery(toolCtx, channel, replyTo)
 			toolCtx = tools.ContextWithDeliveryMeta(toolCtx, replyMeta)
 			toolCtx = r.contextWithTrustedToolAccess(toolCtx, bus.Event{Type: eventType, SessionKey: sessionKey, Channel: channel})

@@ -1,11 +1,29 @@
 package agent
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
 	"or3-intern/internal/providers"
 )
+
+func systemPromptText(content any) string {
+	switch typed := content.(type) {
+	case string:
+		return typed
+	case []map[string]any:
+		var parts []string
+		for _, block := range typed {
+			if text, ok := block["text"].(string); ok {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, "\n\n")
+	default:
+		return strings.TrimSpace(strings.Join(strings.Fields(fmt.Sprint(content)), " "))
+	}
+}
 
 func TestBudgetEnforcesSectionCaps(t *testing.T) {
 	b := &Builder{
@@ -14,9 +32,12 @@ func TestBudgetEnforcesSectionCaps(t *testing.T) {
 			RetrievedMemory: 10,
 		},
 	}
-	packet := b.buildContextPacket("(none)", strings.Repeat("digest ", 80), strings.Repeat("retrieved ", 80), "", "", "", "", "", "")
+	packet := b.buildContextPacket(turnPromptInput{
+		digestText: strings.Repeat("digest ", 80),
+		memText:    strings.Repeat("retrieved ", 80),
+	})
 
-	report := estimatePacketBudget(packet, nil)
+	report := estimatePacketBudget(&packet, nil)
 	assertSectionTruncated(t, report, "Memory Digest")
 	assertSectionTruncated(t, report, "Retrieved Memory")
 }
@@ -32,7 +53,10 @@ func TestProtectedSectionsRetainedUnderEmergencyPressure(t *testing.T) {
 			PinnedMemory: 6,
 		},
 	}
-	packet := b.buildContextPacket("PINNED PROTECTED "+strings.Repeat("pinned ", 100), "", "(none)", "IDENTITY PROTECTED "+strings.Repeat("identity ", 100), "", "", "", "", "")
+	packet := b.buildContextPacket(turnPromptInput{
+		pinnedText:   "PINNED PROTECTED " + strings.Repeat("pinned ", 100),
+		identityText: "IDENTITY PROTECTED " + strings.Repeat("identity ", 100),
+	})
 
 	stable := renderStablePrefix(packet)
 	for _, want := range []string{"SOUL PROTECTED", "IDENTITY", "AGENTS PROTECTED", "TOOLS PROTECTED", "PINNED"} {
@@ -40,7 +64,7 @@ func TestProtectedSectionsRetainedUnderEmergencyPressure(t *testing.T) {
 			t.Fatalf("protected section content %q was dropped from %q", want, stable)
 		}
 	}
-	for _, usage := range estimatePacketBudget(packet, nil).Sections {
+	for _, usage := range estimatePacketBudget(&packet, nil).Sections {
 		switch usage.Name {
 		case "SOUL.md", "Identity", "AGENTS.md", "TOOLS.md", "Pinned Memory":
 			if !usage.Protected {
@@ -55,9 +79,9 @@ func TestOutputReserveReducesInputBudget(t *testing.T) {
 		ContextMaxInputTokens:      1000,
 		ContextOutputReserveTokens: 900,
 		ContextSafetyMarginTokens:  50,
-	}).buildContextPacket("(none)", "", "(none)", "", "", "", "", "", "")
+	}).buildContextPacket(turnPromptInput{})
 
-	report := estimatePacketBudget(packet, nil)
+	report := estimatePacketBudget(&packet, nil)
 	if report.OutputReserveTokens != 900 {
 		t.Fatalf("expected output reserve in report, got %+v", report)
 	}
@@ -94,9 +118,9 @@ func TestPressureStatesNormalWarningHighEmergency(t *testing.T) {
 
 func TestPruneEventsIncludeReasons(t *testing.T) {
 	packet := (&Builder{ContextSectionBudgets: ContextSectionBudgets{WorkspaceContext: 6}}).
-		buildContextPacket("(none)", "", "(none)", "", "", "", "", "", strings.Repeat("workspace ", 100))
+		buildContextPacket(turnPromptInput{workspaceContextText: strings.Repeat("workspace ", 100)})
 
-	report := estimatePacketBudget(packet, nil)
+	report := estimatePacketBudget(&packet, nil)
 	for _, ev := range report.Pruned {
 		if ev.Section == "Workspace Context" && ev.Reason != "" {
 			return
@@ -105,7 +129,7 @@ func TestPruneEventsIncludeReasons(t *testing.T) {
 	t.Fatalf("expected workspace prune event with reason, got %+v", report.Pruned)
 }
 
-func TestLegacyPacketRenderingMatchesExistingPromptRenderer(t *testing.T) {
+func TestRenderProviderMessagesUsesXMLTiers(t *testing.T) {
 	b := &Builder{
 		Soul:              "Soul",
 		AgentInstructions: "Agent",
@@ -113,11 +137,31 @@ func TestLegacyPacketRenderingMatchesExistingPromptRenderer(t *testing.T) {
 		IdentityText:      "Identity",
 		StaticMemory:      "Static",
 	}
-	packet := b.buildContextPacket("- p: v", "- [fact] digest", "1) [memory] retrieved", b.IdentityText, b.StaticMemory, "heartbeat", "trigger", "docs", "workspace")
-	got := renderProviderMessages(packet, b)[0].Content.(string)
-	want := b.composeSystemPrompt("- p: v", "- [fact] digest", "1) [memory] retrieved", b.IdentityText, b.StaticMemory, "heartbeat", "trigger", "docs", "workspace")
-	if got != want {
-		t.Fatalf("packet renderer changed legacy prompt:\ngot:\n%s\nwant:\n%s", got, want)
+	packet := b.buildContextPacket(turnPromptInput{
+		pinnedText:           "- p: v",
+		digestText:           "- [fact] digest",
+		memText:              "1) [memory] retrieved",
+		identityText:         b.IdentityText,
+		staticMemoryText:     b.StaticMemory,
+		heartbeatText:        "heartbeat",
+		eventContextText:     "trigger",
+		docContextText:       "docs",
+		workspaceContextText: "workspace",
+		currentUserMessage:   "current ask",
+		currentUserMessageID: 12,
+	})
+	got := systemPromptText(renderProviderMessages(&packet, b)[0].Content)
+	for _, want := range []string{
+		"<assistant_identity",
+		"<coding_agent_rules",
+		"<tool_policy",
+		"<pinned_memory",
+		"<current_user_request",
+		"current ask",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected XML prompt to include %q, got:\n%s", want, got)
+		}
 	}
 }
 
@@ -165,9 +209,9 @@ func TestEstimatePacketBudgetFallsBackWhenUsableIsNonPositive(t *testing.T) {
 		ContextMaxInputTokens:      10000,
 		ContextOutputReserveTokens: 6000,
 		ContextSafetyMarginTokens:  5000,
-	}).buildContextPacket("(none)", "", "tiny", "", "", "", "", "", "")
+	}).buildContextPacket(turnPromptInput{memText: "tiny"})
 
-	report := estimatePacketBudget(packet, nil)
+	report := estimatePacketBudget(&packet, nil)
 	if report.MaxInputTokens != 10000 || report.OutputReserveTokens != 6000 {
 		t.Fatalf("unexpected report: %+v", report)
 	}

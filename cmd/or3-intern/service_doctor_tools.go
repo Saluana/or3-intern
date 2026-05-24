@@ -1347,7 +1347,7 @@ func normalizeDoctorToolPlanInput(raw any, plan *adminflow.SettingsChangePlan) {
 			change.Operation = serviceFirstNonEmpty(doctorToolString(rawChange, "operation"), doctorToolString(rawChange, "op"), "set")
 		}
 		if change.NewValue.Value == nil {
-			for _, key := range []string{"value", "new_value", "newValue", "new"} {
+			for _, key := range []string{"value", "new_value", "newValue", "new", "enabled", "to"} {
 				if value, ok := rawChange[key]; ok {
 					change.NewValue.Value = value
 					break

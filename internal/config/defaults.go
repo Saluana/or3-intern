@@ -354,7 +354,7 @@ func defaultContextConfig() ContextConfig {
 		Pressure:  ContextPressureConfig{WarningPercent: 70, HighPercent: 85, EmergencyPercent: 95},
 		Tools:     ContextToolConfig{DynamicExpose: true},
 		Artifacts: ContextArtifactConfig{SummaryMaxChars: 500},
-		TaskCard:  ContextTaskCardConfig{Enabled: true, MaxRefs: 12, MaxPlanItems: 8},
+		TaskCard:  ContextTaskCardConfig{Enabled: true, EnforcePlan: false, MaxRefs: 12, MaxPlanItems: 8},
 	}
 }
 

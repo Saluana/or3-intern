@@ -3223,6 +3223,26 @@ func TestDynamicToolExposureRespectsProfileAllowlist(t *testing.T) {
 	}
 }
 
+func TestResolveBuiltinAccessProfileExpandsWorkspace(t *testing.T) {
+	workspace := t.TempDir()
+	profiles := config.AccessProfilesConfig{}
+	config.SetChannelAccessLevel(&profiles, "telegram", "operator")
+	rt := &Runtime{AccessProfiles: profiles, WorkspaceDir: workspace}
+	profile, ok := rt.resolveProfile("operator")
+	if !ok {
+		t.Fatal("expected operator profile to resolve")
+	}
+	if profile.MaxCapability != tools.CapabilityGuarded {
+		t.Fatalf("expected guarded capability, got %s", profile.MaxCapability)
+	}
+	if _, ok := profile.AllowedTools[tools.ToolNameDeleteFile]; !ok {
+		t.Fatalf("expected delete_file to be allowed, got %#v", profile.AllowedTools)
+	}
+	if len(profile.WritablePaths) != 1 || profile.WritablePaths[0] != workspace {
+		t.Fatalf("expected workspace writable path, got %#v", profile.WritablePaths)
+	}
+}
+
 type namedRuntimeTool struct {
 	tools.Base
 	name string

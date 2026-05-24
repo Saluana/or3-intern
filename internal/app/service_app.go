@@ -62,6 +62,7 @@ func (a *ServiceApp) SetConfig(cfg config.Config) {
 type TurnRequest struct {
 	SessionKey          string
 	Message             string
+	Attachments         []agent.ChatAttachment
 	SystemPrompt        string
 	Meta                map[string]any
 	AllowedTools        []string
@@ -125,6 +126,9 @@ func (a *ServiceApp) RunTurn(ctx context.Context, req TurnRequest) error {
 		runCtx = agent.ContextWithToolBudgetOverrides(runCtx, *req.ToolBudgetOverrides)
 	}
 	meta := cloneMap(req.Meta)
+	if len(req.Attachments) > 0 {
+		meta["attachments"] = agent.ChatAttachmentsForMeta(req.Attachments)
+	}
 	if strings.TrimSpace(req.ProfileName) != "" {
 		meta["profile_name"] = strings.TrimSpace(req.ProfileName)
 	}

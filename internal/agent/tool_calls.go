@@ -194,8 +194,15 @@ func unavailableNormalizedToolCallPrompt(calls []NormalizedToolCall, reg *tools.
 			strings.Join(available, ", "),
 		)
 	}
+	if tools.AttemptedIncludesWriteTool(names) && !tools.AvailableIncludesWriteTool(available) {
+		return fmt.Sprintf(
+			"The previous assistant response attempted unavailable tool call(s): %s. This turn is in read-only (Ask) mode, so write/edit/delete tools are not advertised and retrying them will not succeed. Tell the user that file changes require Work mode (or paste content for them to save manually). Use only currently advertised tool names: %s.",
+			strings.Join(names, ", "),
+			strings.Join(available, ", "),
+		)
+	}
 	return fmt.Sprintf(
-		"The previous assistant response attempted unavailable tool call(s): %s. Continue by answering directly or by using only currently advertised tool names: %s.",
+		"The previous assistant response attempted unavailable tool call(s): %s. Do not retry the same unavailable tool(s). Continue by answering directly or by using only currently advertised tool names: %s.",
 		strings.Join(names, ", "),
 		strings.Join(available, ", "),
 	)

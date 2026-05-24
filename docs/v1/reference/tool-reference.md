@@ -24,5 +24,11 @@ These are the built-in tools the agent can use.
 | `RunSkillScript` | Run a skill's script |
 | `CronTool` | Manage scheduled tasks |
 | `SpawnSubagent` | Start a subagent for parallel work |
+| `create_plan` | Create or replace the active work plan on the task card |
+| `update_plan` | Update plan title, tasks, statuses, or next step |
+| `complete_plan_task` | Mark a plan task complete with summary and next step |
+| `remove_plan` | Clear the active plan when work is finished |
+
+Plan tools are always **safe** capability. When `context.taskCard.enforcePlan` is enabled, write, exec, web, MCP, skill, and subagent tools require an active plan from `create_plan` first (see [plan tools](../architecture/tools/plan-tools.md)).
 
 Each tool can be allowed or blocked in the config's safety settings.

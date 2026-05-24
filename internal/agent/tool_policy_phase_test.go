@@ -86,6 +86,13 @@ func TestSelectedToolGroups_EmptyIntentOmitsChannels(t *testing.T) {
 	}
 }
 
+func TestSelectedToolGroups_DeleteIntentIncludesWrite(t *testing.T) {
+	groups := selectedToolGroups("delete a file")
+	if _, ok := groups[tools.ToolGroupWrite]; !ok {
+		t.Fatalf("expected delete intent to include write group, got %#v", groups)
+	}
+}
+
 func TestRuntime_GuardToolExecution_EdgeBranches(t *testing.T) {
 	rt := &Runtime{}
 	if err := rt.guardToolExecution(context.Background(), nil, tools.CapabilitySafe, nil); err != nil {

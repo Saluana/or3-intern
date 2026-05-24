@@ -330,6 +330,26 @@ func main() {
 		}
 		return
 	}
+	if cmd == "access" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			cwd = ""
+		}
+		cfg, _, loadErr := loadDoctorConfig(cfgPathOrDefault(cfgPath), cwd)
+		if loadErr != nil {
+			fmt.Fprintln(os.Stderr, "access error:", loadErr)
+			os.Exit(1)
+		}
+		if err := runAccessCommand(context.Background(), cfgPathOrDefault(cfgPath), cfg, args[1:], os.Stdout, os.Stderr); err != nil {
+			if isUsageError(err) {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(2)
+			}
+			fmt.Fprintln(os.Stderr, "access error:", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	loadedRuntimeConfig, err := loadRuntimeConfig(cfgPath)
 	if err != nil {
@@ -364,6 +384,9 @@ func main() {
 		os.Exit(1)
 	}
 	cfg = securedRuntime.Config
+	if cfg.Security.Profiles.Enabled {
+		config.EnsureBuiltinAccessProfiles(&cfg.Security.Profiles)
+	}
 	secretManager := securedRuntime.Secrets
 	auditLogger := securedRuntime.Audit
 	if err := validateRuntimeStartupCommand(cmd, cfg, unsafeDev); err != nil {
@@ -533,12 +556,14 @@ func main() {
 		MaxToolLoops:                cfg.MaxToolLoops,
 		MaxToolLoopsExceededAction:  cfg.MaxToolLoopsExceededAction,
 		DynamicToolExposure:         cfg.ContextConfigured && cfg.Context.Tools.DynamicExpose,
+		EnforceActivePlan:           cfg.ContextConfigured && cfg.Context.TaskCard.Enabled && cfg.Context.TaskCard.EnforcePlan,
 		Deliver:                     delivererFunc(channelManager.Deliver),
 		DefaultScopeKey:             cfg.DefaultSessionKey,
 		LinkDirectMessages:          cfg.Session.DirectMessagesShareDefault,
 		IdentityScopeMap:            buildIdentityScopeMap(cfg),
 		Hardening:                   cfg.Hardening,
 		AccessProfiles:              cfg.Security.Profiles,
+		WorkspaceDir:                cfg.WorkspaceDir,
 		Audit:                       auditLogger,
 		ApprovalBroker:              approvalBroker,
 		ContextManager:              cfg.ContextManager,
@@ -970,6 +995,7 @@ func buildToolRegistryWithOptions(cfg config.Config, d *db.DB, prov *providers.C
 	reg.Register(&tools.ReadArtifact{Store: &artifacts.Store{Dir: cfg.ArtifactsDir, DB: d}, MaxReadBytes: int64(cfg.MaxToolBytes)})
 	reg.Register(&tools.WriteFile{FileTool: tools.FileTool{Root: fileReadRoot, WriteRoot: fileWriteRoot}})
 	reg.Register(&tools.EditFile{FileTool: tools.FileTool{Root: fileReadRoot, WriteRoot: fileWriteRoot}})
+	reg.Register(&tools.DeleteFile{FileTool: tools.FileTool{Root: fileReadRoot, WriteRoot: fileWriteRoot}})
 	reg.Register(&tools.ListDir{FileTool: tools.FileTool{Root: fileReadRoot, WriteRoot: fileWriteRoot}})
 	reg.Register(&tools.WebFetch{HostPolicy: hostPolicy, Store: &artifacts.Store{Dir: cfg.ArtifactsDir, DB: d}})
 	reg.Register(&tools.WebFetchMarkdown{HostPolicy: hostPolicy, Store: &artifacts.Store{Dir: cfg.ArtifactsDir, DB: d}})
@@ -980,6 +1006,11 @@ func buildToolRegistryWithOptions(cfg config.Config, d *db.DB, prov *providers.C
 	reg.Register(&tools.MemorySearch{DB: d, Provider: prov, EmbedModel: embedRole.Primary.Model, EmbedFingerprint: currentEmbedFingerprint(cfg), VectorK: cfg.VectorK, FTSK: cfg.FTSK, TopK: cfg.MemoryRetrieve, VectorScanLimit: cfg.VectorScanLimit})
 	reg.Register(&tools.MemoryRecent{DB: d, DefaultLimit: 10, MaxLimit: cfg.HistoryMax, MaxChars: 240})
 	reg.Register(&tools.MemoryGetPinned{DB: d, MaxChars: 400})
+	planBase := agent.NewPlanToolBase(d)
+	reg.Register(&agent.CreatePlanTool{PlanToolBase: planBase})
+	reg.Register(&agent.UpdatePlanTool{PlanToolBase: planBase})
+	reg.Register(&agent.CompletePlanTaskTool{PlanToolBase: planBase})
+	reg.Register(&agent.RemovePlanTool{PlanToolBase: planBase})
 	if includeSendMessage {
 		reg.Register(&tools.SendMessage{
 			Deliver: func(ctx context.Context, channel, to, text string, meta map[string]any) error {
@@ -1147,6 +1178,7 @@ func channelWorkerRuntime(rt *agent.Runtime, deliverer agent.Deliverer) *agent.R
 		Tools:                       rt.Tools,
 		Hardening:                   rt.Hardening,
 		AccessProfiles:              rt.AccessProfiles,
+		WorkspaceDir:                rt.WorkspaceDir,
 		Builder:                     rt.Builder,
 		Artifacts:                   rt.Artifacts,
 		MaxToolBytes:                rt.MaxToolBytes,

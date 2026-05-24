@@ -43,6 +43,20 @@ func (m *fakeServiceMCPTestManager) Connect(context.Context) error {
 	return m.connectErr
 }
 
+func TestServiceServerEffectiveServiceProfileNameUsesServiceChannel(t *testing.T) {
+	cfg := config.Default()
+	cfg.Security.Profiles.Enabled = true
+	cfg.Security.Profiles.Default = "reader"
+	cfg.Security.Profiles.Channels = map[string]string{"service": "admin"}
+	server := &serviceServer{config: cfg}
+	if got := server.effectiveServiceProfileName(""); got != "admin" {
+		t.Fatalf("expected service channel profile, got %q", got)
+	}
+	if got := server.effectiveServiceProfileName("operator"); got != "operator" {
+		t.Fatalf("expected explicit profile to win, got %q", got)
+	}
+}
+
 func (m *fakeServiceMCPTestManager) Close() error {
 	return m.closeErr
 }
@@ -169,6 +183,24 @@ func TestServiceObserver_RecoversDoctorConfigSearchWithoutModelFinalText(t *test
 	}
 	if !strings.Contains(finalText, "Default Model") || !strings.Contains(finalText, "nvidia/nemotron-3-super-120b-a12b:free") {
 		t.Fatalf("expected synthesized model answer, got %q", finalText)
+	}
+}
+
+func TestServiceObserver_RecoversUnavailableWriteFileWithAskModeGuidance(t *testing.T) {
+	observer := &serviceObserver{}
+	observer.OnToolLifecycle(context.Background(), agent.ToolLifecycleEvent{
+		ToolCallID:    "call_write",
+		Name:          "write_file",
+		Status:        "failed",
+		ResultPreview: "tool not available in this turn",
+	})
+
+	finalText, recovered := observer.finalTextForCompletion("")
+	if !recovered {
+		t.Fatal("expected empty final text to be recovered after unavailable write_file")
+	}
+	if !strings.Contains(finalText, "Ask mode") || !strings.Contains(finalText, "Work mode") {
+		t.Fatalf("expected Ask-mode write guidance, got %q", finalText)
 	}
 }
 

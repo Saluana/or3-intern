@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 
 	"or3-intern/internal/adminflow"
 	"or3-intern/internal/agent"
 	"or3-intern/internal/agentcli"
 	"or3-intern/internal/app"
+	"or3-intern/internal/approval"
 	"or3-intern/internal/db"
 	"or3-intern/internal/tools"
 )
@@ -18,7 +20,9 @@ const doctorAdminBrainToolPolicyName = "settings_plan_proposals_and_safe_diagnos
 var doctorAdminBrainAllowedToolNames = []string{
 	doctorToolNameStatus,
 	doctorToolNameLogs,
+	doctorToolNameDocsIndex,
 	doctorToolNameDocsSearch,
+	doctorToolNameDocsSection,
 	doctorToolNameConfigSearch,
 	doctorToolNameConfigCatalog,
 	doctorToolNameConfigMetadata,
@@ -134,6 +138,41 @@ func (s *serviceServer) runDoctorInternalAdminBrainTurn(ctx context.Context, ses
 		identity:      identity,
 	}
 	return s.runDoctorInternalAdminBrainTurnWithObserver(ctx, req, &serviceObserver{})
+}
+
+func doctorApprovedQuotaContinuationPrompt() string {
+	return "Approval was granted to continue this Admin Assistant turn. Continue the same task from the existing conversation state and tool results already present. Do not repeat the same documentation searches unless a new gap remains."
+}
+
+func (s *serviceServer) runDoctorApprovedQuotaResumeJob(ctx context.Context, jobID string, issued approval.IssuedApproval, identity serviceAuthIdentity) {
+	sessionKey := strings.TrimSpace(issued.Request.RequesterSessionID)
+	meta := map[string]any{
+		"approval_request_id": issued.Request.ID,
+		"approved_resume":     true,
+		"doctor_quota_resume": true,
+	}
+	log.Printf("service_approval: doctor_quota_resume_started approval=%d job=%s session=%s", issued.Request.ID, jobID, sessionKey)
+	s.jobs.Publish(jobID, "started", serviceLifecyclePayload(sessionKey, meta, map[string]any{"status": "running"}))
+	observer := &serviceObserver{ConversationObserver: s.jobs.Observer(jobID)}
+	err := s.runDoctorInternalAdminBrainTurnWithObserver(ctx, doctorInternalAdminBrainTurnRequest{
+		sessionKey:    sessionKey,
+		content:       doctorApprovedQuotaContinuationPrompt(),
+		approvalToken: strings.TrimSpace(issued.Token),
+		identity:      identity,
+	}, observer)
+	if err != nil {
+		log.Printf("service_approval: doctor_quota_resume_error approval=%d job=%s session=%s public_code=%s", issued.Request.ID, jobID, sessionKey, agent.PublicErrorCode(err))
+		s.completeTurnJobWithError(ctx, jobID, err, observer, sessionKey, meta)
+		return
+	}
+	finalText, recoveredEmpty := observer.finalTextForCompletion("Admin Brain resumed after approval but did not return a final response.")
+	payload := map[string]any{"final_text": finalText}
+	if recoveredEmpty {
+		payload["degraded"] = true
+		payload["empty_final_text_recovered"] = true
+	}
+	s.jobs.Complete(jobID, "completed", serviceLifecyclePayload(sessionKey, meta, payload))
+	log.Printf("service_approval: doctor_quota_resume_completed approval=%d job=%s session=%s recovered_empty=%t", issued.Request.ID, jobID, sessionKey, recoveredEmpty)
 }
 
 func (s *serviceServer) runDoctorInternalAdminBrainTurnWithObserver(ctx context.Context, req doctorInternalAdminBrainTurnRequest, observer *serviceObserver) error {

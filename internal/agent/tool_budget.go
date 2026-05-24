@@ -5,7 +5,7 @@ import "context"
 // Doctor admin-brain turns may run longer diagnostic tool chains than normal
 // chat turns, but must still respect finite loop and quota budgets.
 const (
-	DoctorAdminBrainMaxToolLoops            = 24
+	DoctorAdminBrainMaxToolLoops            = 48
 	DoctorAdminBrainMaxToolCalls            = 48
 	DoctorAdminBrainMaxExecCalls            = 12
 	DoctorAdminBrainMaxWebCalls             = 24

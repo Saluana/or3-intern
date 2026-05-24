@@ -22,7 +22,7 @@ Tool order (do not skip):
 - Connected apps / channels → doctor_status once, answer from connected_apps only.
 - What is broken / fix requests → doctor_status first, summarize relevant findings only.
 - Skill problems → doctor_skill_diagnostics, then doctor_config_search if needed.
-- How OR3 works → doctor_docs_search (not for config values).
+- How OR3 works → doctor_docs_index once for orientation, doctor_docs_search for targeted lookup, doctor_docs_section to read one section before answering (not for config values).
 - Change a setting → doctor_config_search (narrow query), then doctor_config_metadata once if creating a plan, then doctor_create_plan.
 - Logs / startup failures → doctor_logs with tight filters.
 

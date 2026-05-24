@@ -163,6 +163,10 @@ func (s *serviceServer) startApprovedResumeJob(ctx context.Context, issued appro
 func (s *serviceServer) runApprovedResumeJob(ctx context.Context, jobID string, issued approval.IssuedApproval, identity serviceAuthIdentity) {
 	defer s.persistServiceJobSummary(context.Background(), jobID)
 	sessionKey := strings.TrimSpace(issued.Request.RequesterSessionID)
+	if strings.HasPrefix(sessionKey, "doctor-app-") && strings.TrimSpace(issued.Request.Type) == string(approval.SubjectToolQuota) {
+		s.runDoctorApprovedQuotaResumeJob(ctx, jobID, issued, identity)
+		return
+	}
 	meta := map[string]any{
 		"approval_request_id": issued.Request.ID,
 		"approved_resume":     true,

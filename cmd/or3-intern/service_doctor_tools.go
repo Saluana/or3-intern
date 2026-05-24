@@ -103,13 +103,31 @@ func (s *serviceServer) doctorAdminBrainTools() []tools.Tool {
 		},
 		doctorServiceTool{
 			server: s,
+			name:   doctorToolNameDocsIndex,
+			desc:   "Return a compact map of bundled OR3 v1 documentation categories and sample page titles. Use this once for broad 'how does OR3 work' questions before searching.",
+			params: map[string]any{"type": "object", "properties": map[string]any{}},
+			run:    s.executeDoctorDocsIndexTool,
+		},
+		doctorServiceTool{
+			server: s,
 			name:   doctorToolNameDocsSearch,
-			desc:   "Search the bundled OR3 v1 documentation and return short redacted snippets with doc paths. Use this when explaining how OR3 works or before giving setup guidance.",
+			desc:   "Search the bundled OR3 v1 documentation index and return short redacted snippets with doc paths and section headings. Use after doctor_docs_index when you need targeted matches.",
 			params: map[string]any{"type": "object", "properties": map[string]any{
 				"query": map[string]any{"type": "string", "description": "Plain-language search query, for example agent runtime tools, config, service auth, or v1 docs."},
 				"limit": map[string]any{"type": "integer", "description": "Maximum documentation matches to return. Defaults to 5 and is capped at 8."},
 			}, "required": []string{"query"}},
 			run: s.executeDoctorDocsSearchTool,
+		},
+		doctorServiceTool{
+			server: s,
+			name:   doctorToolNameDocsSection,
+			desc:   "Read one redacted section from a bundled OR3 v1 doc path returned by doctor_docs_search. Use this to cite accurate details without repeated searches.",
+			params: map[string]any{"type": "object", "properties": map[string]any{
+				"path":      map[string]any{"type": "string", "description": "Documentation path from search results, for example docs/v1/user-guide/cli/health.md."},
+				"heading":   map[string]any{"type": "string", "description": "Optional section heading to read. Omit to read the whole page (truncated)."},
+				"max_chars": map[string]any{"type": "integer", "description": "Maximum characters to return. Defaults to 4000 and is capped at 12000."},
+			}, "required": []string{"path"}},
+			run: s.executeDoctorDocsSectionTool,
 		},
 		doctorServiceTool{
 			server: s,
@@ -431,7 +449,7 @@ func (s *serviceServer) executeDoctorDocsSearchTool(ctx context.Context, params 
 	if limit > 8 {
 		limit = 8
 	}
-	docsDir, err := doctorDocsV1Dir(s.configPath)
+	corpus, err := s.loadDoctorDocsCorpus(ctx)
 	if err != nil {
 		return encodeDoctorToolResult("doctor_docs_search", false, "OR3 v1 documentation is not available on this host.", map[string]any{"query": query, "error": err.Error()}), nil
 	}
@@ -439,66 +457,7 @@ func (s *serviceServer) executeDoctorDocsSearchTool(ctx context.Context, params 
 	if len(terms) == 0 {
 		return encodeDoctorToolResult("doctor_docs_search", true, "Found 0 OR3 v1 documentation matches.", map[string]any{"query": query, "count": 0, "results": []map[string]any{}}), nil
 	}
-	type docMatch struct {
-		Score  int
-		Result map[string]any
-	}
-	matches := []docMatch{}
-	walkErr := filepath.WalkDir(docsDir, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-		if entry.IsDir() {
-			return nil
-		}
-		if !strings.EqualFold(filepath.Ext(path), ".md") {
-			return nil
-		}
-		info, err := entry.Info()
-		if err != nil || info.Size() > 256*1024 {
-			return nil
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil
-		}
-		content := string(data)
-		rel, _ := filepath.Rel(docsDir, path)
-		rel = filepath.ToSlash(filepath.Join("docs", "v1", rel))
-		title := doctorDocsTitle(content, rel)
-		score := doctorDocsScore(rel, title, content, terms, query)
-		if score == 0 {
-			return nil
-		}
-		matches = append(matches, docMatch{Score: score, Result: map[string]any{
-			"path":    rel,
-			"title":   adminflow.SanitizeForAI(title),
-			"snippet": doctorDocsSnippet(content, terms),
-			"score":   score,
-		}})
-		return nil
-	})
-	if walkErr != nil {
-		return "", walkErr
-	}
-	sort.Slice(matches, func(i, j int) bool {
-		if matches[i].Score == matches[j].Score {
-			return fmt.Sprint(matches[i].Result["path"]) < fmt.Sprint(matches[j].Result["path"])
-		}
-		return matches[i].Score > matches[j].Score
-	})
-	results := make([]map[string]any, 0, minInt(limit, len(matches)))
-	for i, item := range matches {
-		if i == limit {
-			break
-		}
-		results = append(results, item.Result)
-	}
+	results := corpus.search(query, limit)
 	summary := fmt.Sprintf("Found %d OR3 v1 documentation matches.", len(results))
 	return encodeDoctorToolResult("doctor_docs_search", true, summary, map[string]any{"query": query, "count": len(results), "results": results}), nil
 }

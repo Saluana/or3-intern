@@ -62,6 +62,32 @@ func TestRetrieve_Empty(t *testing.T) {
 	}
 }
 
+func TestRetrieve_NilVectorUsesFTS(t *testing.T) {
+	d := openRetrieveTestDB(t)
+	ctx := context.Background()
+	if _, err := d.InsertMemoryNote(ctx, "session1", "keyword alpha bravo", make([]byte, 4), sql.NullInt64{}, ""); err != nil {
+		t.Fatalf("InsertMemoryNote: %v", err)
+	}
+	r := NewRetriever(d)
+	results, err := r.Retrieve(ctx, "session1", "alpha bravo", nil, 5, 5, 10)
+	if err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected FTS results with nil query vector")
+	}
+	found := false
+	for _, res := range results {
+		if strings.Contains(res.Text, "alpha bravo") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected FTS match, got %#v", results)
+	}
+}
+
 func TestRetrieve_WithVectorResults(t *testing.T) {
 	d := openRetrieveTestDB(t)
 	ctx := context.Background()

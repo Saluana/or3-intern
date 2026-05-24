@@ -265,19 +265,26 @@ func (b *Builder) buildPacket(ctx context.Context, opts BuildOptions) (ContextPa
 	// embed and retrieve
 	var retrieved []memory.Retrieved
 	var rejected []string
-	if b.Mem != nil && b.Provider != nil && strings.TrimSpace(opts.UserMessage) != "" {
-		vec, err := cachedEmbed(ctx, b.Provider, b.EmbedFingerprint, b.EmbedModel, opts.UserMessage)
-		if err == nil {
-			mem := *b.Mem
-			mem.EmbedFingerprint = b.EmbedFingerprint
-			mem.TaskContext = taskCardText
-			retrieved, err = mem.Retrieve(ctx, scopeKey, opts.UserMessage, vec, b.VectorK, b.FTSK, b.TopK)
-			if err != nil {
-				log.Printf("memory retrieve failed for scope %q: %v", scopeKey, err)
-				retrieved = nil
+	if b.Mem != nil && strings.TrimSpace(opts.UserMessage) != "" {
+		var queryVec []float32
+		if b.Provider != nil {
+			vec, embedErr := cachedEmbed(ctx, b.Provider, b.EmbedFingerprint, b.EmbedModel, opts.UserMessage)
+			if embedErr != nil {
+				log.Printf("memory embed failed for scope %q, using FTS fallback: %v", scopeKey, embedErr)
+			} else {
+				queryVec = vec
 			}
-			rejected = append(rejected, mem.LastRejected...)
 		}
+		mem := *b.Mem
+		mem.EmbedFingerprint = b.EmbedFingerprint
+		mem.TaskContext = taskCardText
+		var err error
+		retrieved, err = mem.Retrieve(ctx, scopeKey, opts.UserMessage, queryVec, b.VectorK, b.FTSK, b.TopK)
+		if err != nil {
+			log.Printf("memory retrieve failed for scope %q: %v", scopeKey, err)
+			retrieved = nil
+		}
+		rejected = append(rejected, mem.LastRejected...)
 	}
 	maxEach := b.BootstrapMaxChars
 	if maxEach <= 0 {
@@ -305,7 +312,10 @@ func (b *Builder) buildPacket(ctx context.Context, opts BuildOptions) (ContextPa
 		if limit <= 0 {
 			limit = 5
 		}
-		docs, _ := b.DocRetriever.RetrieveDocs(ctx, scope.GlobalMemoryScope, opts.UserMessage, limit)
+		docs, docErr := b.DocRetriever.RetrieveDocs(ctx, scope.GlobalMemoryScope, opts.UserMessage, limit)
+		if docErr != nil {
+			log.Printf("indexed doc retrieval failed: %v", docErr)
+		}
 		if len(docs) > 0 {
 			var sb strings.Builder
 			for i, d := range docs {

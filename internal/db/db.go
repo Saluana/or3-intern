@@ -762,6 +762,9 @@ func (d *DB) migrate(ctx context.Context) error {
 	if err := d.ensureSkillRunPlanColumns(ctx); err != nil {
 		return err
 	}
+	if err := d.ensureApprovalAllowlistMatchColumns(ctx); err != nil {
+		return err
+	}
 	if err := d.ensureMemoryVecIndexForExisting(ctx); err != nil {
 		return err
 	}
@@ -948,12 +951,62 @@ func (d *DB) RebuildMemoryVecIndexWithProfile(ctx context.Context, dims int, fin
 	return d.initMemoryVecIndex(ctx, dims, fingerprint, true)
 }
 
+func (d *DB) memoryVecTableExists(ctx context.Context) (bool, error) {
+	if d == nil || d.VecSQL == nil {
+		return false, nil
+	}
+	var count int
+	if err := d.VecSQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='memory_vec'`).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (d *DB) memoryVecIndexMatches(ctx context.Context, dims int, fingerprint string) (bool, error) {
+	if dims <= 0 {
+		return false, nil
+	}
+	exists, err := d.memoryVecTableExists(ctx)
+	if err != nil || !exists {
+		return false, err
+	}
+	existing, err := d.MemoryVectorDims(ctx)
+	if err != nil {
+		return false, err
+	}
+	if existing != dims {
+		return false, nil
+	}
+	haveFingerprint, err := d.MemoryVectorFingerprint(ctx)
+	if err != nil {
+		return false, err
+	}
+	wantFingerprint := strings.TrimSpace(fingerprint)
+	haveFingerprint = strings.TrimSpace(haveFingerprint)
+	if wantFingerprint == "" {
+		return true, nil
+	}
+	if haveFingerprint == "" {
+		return false, nil
+	}
+	return haveFingerprint == wantFingerprint, nil
+}
+
 func (d *DB) initMemoryVecIndex(ctx context.Context, dims int, fingerprint string, force bool) error {
 	if dims <= 0 {
 		return nil
 	}
 	if d == nil || d.VecSQL == nil {
 		return nil
+	}
+	if !force {
+		matches, err := d.memoryVecIndexMatches(ctx, dims, fingerprint)
+		if err != nil {
+			return err
+		}
+		if matches {
+			return nil
+		}
 	}
 	tx, err := d.VecSQL.BeginTx(ctx, nil)
 	if err != nil {
@@ -1082,6 +1135,7 @@ func (d *DB) ensureMemoryNotesMetaColumns(ctx context.Context) error {
 		{name: "supersedes_id", ddl: `ALTER TABLE memory_notes ADD COLUMN supersedes_id INTEGER`},
 		{name: "use_count", ddl: `ALTER TABLE memory_notes ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0`},
 		{name: "last_used_at", ddl: `ALTER TABLE memory_notes ADD COLUMN last_used_at INTEGER NOT NULL DEFAULT 0`},
+		{name: "vector_index_dirty", ddl: `ALTER TABLE memory_notes ADD COLUMN vector_index_dirty INTEGER NOT NULL DEFAULT 0`},
 	}
 
 	for i := range cols {
@@ -1127,6 +1181,52 @@ func (d *DB) ensureMemoryNotesMetaColumns(ctx context.Context) error {
 	}
 	_, err := d.SQL.ExecContext(ctx, `UPDATE memory_notes SET updated_at=created_at WHERE updated_at<=0`)
 	return err
+}
+
+func (d *DB) ensureApprovalAllowlistMatchColumns(ctx context.Context) error {
+	cols := []string{
+		`ALTER TABLE approval_allowlists ADD COLUMN scope_host_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE approval_allowlists ADD COLUMN scope_tool TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE approval_allowlists ADD COLUMN scope_profile TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE approval_allowlists ADD COLUMN scope_agent TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE approval_allowlists ADD COLUMN match_executable_path TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE approval_allowlists ADD COLUMN match_working_dir TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE approval_allowlists ADD COLUMN match_script_hash TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE approval_allowlists ADD COLUMN match_skill_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE approval_allowlists ADD COLUMN match_plan_hash TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE approval_allowlists ADD COLUMN match_runner_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE approval_allowlists ADD COLUMN match_target_path TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE approval_allowlists ADD COLUMN match_path_prefix TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE approval_allowlists ADD COLUMN match_fingerprint TEXT NOT NULL DEFAULT ''`,
+	}
+	colNames := []string{
+		"scope_host_id", "scope_tool", "scope_profile", "scope_agent",
+		"match_executable_path", "match_working_dir", "match_script_hash",
+		"match_skill_id", "match_plan_hash", "match_runner_id", "match_target_path", "match_path_prefix", "match_fingerprint",
+	}
+	for i, ddl := range cols {
+		has, err := d.tableHasColumn(ctx, "approval_allowlists", colNames[i])
+		if err != nil {
+			return err
+		}
+		if has {
+			continue
+		}
+		if _, err := d.SQL.ExecContext(ctx, ddl); err != nil {
+			return err
+		}
+	}
+	indexes := []string{
+		`CREATE UNIQUE INDEX IF NOT EXISTS approval_requests_active_pending_subject ON approval_requests(type, subject_hash, execution_host_id) WHERE status='pending'`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS approval_allowlists_active_fingerprint ON approval_allowlists(domain, match_fingerprint) WHERE disabled_at=0 AND match_fingerprint!=''`,
+		`CREATE INDEX IF NOT EXISTS approval_allowlists_match_lookup ON approval_allowlists(domain, disabled_at, expires_at, scope_host_id, scope_tool, match_executable_path, match_skill_id)`,
+	}
+	for _, stmt := range indexes {
+		if _, err := d.SQL.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (d *DB) tableHasColumn(ctx context.Context, tableName, columnName string) (bool, error) {

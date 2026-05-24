@@ -192,8 +192,8 @@ func TestConsolidator_RunOnce_PersistsNoteCursorAndCanonical(t *testing.T) {
 	if atomic.LoadInt32(calls.Chat) != 1 {
 		t.Fatalf("expected 1 chat call, got %d", atomic.LoadInt32(calls.Chat))
 	}
-	if atomic.LoadInt32(calls.Embed) != 1 {
-		t.Fatalf("expected 1 embed call, got %d", atomic.LoadInt32(calls.Embed))
+	if embedCalls := atomic.LoadInt32(calls.Embed); embedCalls < 1 {
+		t.Fatalf("expected at least 1 embed call, got %d", embedCalls)
 	}
 
 	lastID, _, err := d.GetConsolidationRange(ctx, "sess", 5)
@@ -433,8 +433,8 @@ func TestConsolidator_MaxInputCharsBoundsPromptAndSkipsEmbedOnFailure(t *testing
 	if !didWork {
 		t.Fatal("expected work to be done")
 	}
-	if atomic.LoadInt32(calls.Embed) != 1 {
-		t.Fatalf("expected embed attempt, got %d", atomic.LoadInt32(calls.Embed))
+	if embedCalls := atomic.LoadInt32(calls.Embed); embedCalls < 1 {
+		t.Fatalf("expected embed attempt, got %d", embedCalls)
 	}
 }
 

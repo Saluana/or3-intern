@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"sort"
 	"strings"
@@ -354,7 +355,10 @@ func (d *DB) InsertMemoryNoteTyped(ctx context.Context, sessionKey string, input
 	if err != nil {
 		return 0, err
 	}
-	_ = d.upsertMemoryVec(ctx, id, sessionKey, input.Text, input.Embedding)
+	if err := d.indexMemoryNoteVector(ctx, id, sessionKey, input.Text, input.Embedding); err != nil {
+		_, _ = d.SQL.ExecContext(ctx, `DELETE FROM memory_notes WHERE id=?`, id)
+		return 0, err
+	}
 	return id, nil
 }
 
@@ -381,8 +385,7 @@ func (d *DB) UpdateMemoryNoteTyped(ctx context.Context, noteID int64, input Type
 	if rows, _ := res.RowsAffected(); rows == 0 {
 		return sql.ErrNoRows
 	}
-	_ = d.upsertMemoryVec(ctx, noteID, sessionKey, input.Text, input.Embedding)
-	return nil
+	return d.indexMemoryNoteVector(ctx, noteID, sessionKey, input.Text, input.Embedding)
 }
 
 func normalizeStoredEmbeddingFingerprint(embedding []byte, fingerprint string) string {
@@ -426,9 +429,45 @@ func (d *DB) validateMemoryEmbeddingProfile(ctx context.Context, embedding []byt
 	return nil
 }
 
+func (d *DB) setMemoryNoteVectorDirty(ctx context.Context, noteID int64, dirty bool) error {
+	if d == nil || noteID <= 0 {
+		return nil
+	}
+	flag := 0
+	if dirty {
+		flag = 1
+	}
+	_, err := d.SQL.ExecContext(ctx, `UPDATE memory_notes SET vector_index_dirty=? WHERE id=?`, flag, noteID)
+	return err
+}
+
+func (d *DB) indexMemoryNoteVector(ctx context.Context, noteID int64, sessionKey, text string, embedding []byte) error {
+	if len(embedding) < 4 || len(embedding)%4 != 0 {
+		return nil
+	}
+	if err := d.upsertMemoryVec(ctx, noteID, sessionKey, text, embedding); err != nil {
+		dims, _ := d.MemoryVectorDims(ctx)
+		fingerprint, _ := d.MemoryVectorFingerprint(ctx)
+		log.Printf("memory vector upsert failed: note_id=%d scope_key=%q dims=%d fingerprint=%q err=%v", noteID, sessionKey, dims, fingerprint, err)
+		_ = d.setMemoryNoteVectorDirty(ctx, noteID, true)
+		return fmt.Errorf("memory vector index: %w", err)
+	}
+	return d.setMemoryNoteVectorDirty(ctx, noteID, false)
+}
+
+func (d *DB) markMemoryNoteVectorDirtyBestEffort(ctx context.Context, noteID int64, sessionKey, text string, embedding []byte, err error) {
+	if len(embedding) < 4 || len(embedding)%4 != 0 {
+		return
+	}
+	dims, _ := d.MemoryVectorDims(ctx)
+	fingerprint, _ := d.MemoryVectorFingerprint(ctx)
+	log.Printf("memory vector upsert failed: note_id=%d scope_key=%q dims=%d fingerprint=%q err=%v", noteID, sessionKey, dims, fingerprint, err)
+	_ = d.setMemoryNoteVectorDirty(ctx, noteID, true)
+}
+
 func (d *DB) upsertMemoryVec(ctx context.Context, noteID int64, sessionKey, text string, embedding []byte) error {
 	if d == nil || d.VecSQL == nil {
-		return nil
+		return fmt.Errorf("memory vector index unavailable")
 	}
 	if len(embedding) < 4 || len(embedding)%4 != 0 {
 		return nil
@@ -861,12 +900,21 @@ func (d *DB) WriteConsolidation(ctx context.Context, w ConsolidationWrite) (int6
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
-	// Update vector index outside the transaction (best-effort).
+	// Update vector index outside the transaction; mark rows dirty on failure.
 	if noteID > 0 {
-		_ = d.upsertMemoryVec(ctx, noteID, scopeKey, w.NoteText, normalizeTypedNoteInput(TypedNoteInput{Embedding: w.Embedding}).Embedding)
+		emb := normalizeTypedNoteInput(TypedNoteInput{Embedding: w.Embedding}).Embedding
+		if err := d.upsertMemoryVec(ctx, noteID, scopeKey, w.NoteText, emb); err != nil {
+			d.markMemoryNoteVectorDirtyBestEffort(ctx, noteID, scopeKey, w.NoteText, emb, err)
+		} else {
+			_ = d.setMemoryNoteVectorDirty(ctx, noteID, false)
+		}
 	}
 	for _, en := range extraIDs {
-		_ = d.upsertMemoryVec(ctx, en.id, scopeKey, en.text, en.emb)
+		if err := d.upsertMemoryVec(ctx, en.id, scopeKey, en.text, en.emb); err != nil {
+			d.markMemoryNoteVectorDirtyBestEffort(ctx, en.id, scopeKey, en.text, en.emb, err)
+		} else {
+			_ = d.setMemoryNoteVectorDirty(ctx, en.id, false)
+		}
 	}
 	return noteID, nil
 }
@@ -904,8 +952,97 @@ func (d *DB) ReplaceMemoryNoteEmbedding(ctx context.Context, noteID int64, embed
 	if embedding == nil {
 		embedding = make([]byte, 0)
 	}
-	_, err := d.SQL.ExecContext(ctx, `UPDATE memory_notes SET embedding=?, embed_fingerprint=? WHERE id=?`, embedding, normalizeStoredEmbeddingFingerprint(embedding, fingerprint), noteID)
+	_, err := d.SQL.ExecContext(ctx, `UPDATE memory_notes SET embedding=?, embed_fingerprint=?, vector_index_dirty=1 WHERE id=?`, embedding, normalizeStoredEmbeddingFingerprint(embedding, fingerprint), noteID)
 	return err
+}
+
+// StagedMemoryEmbedding is a pending embedding update applied atomically.
+type StagedMemoryEmbedding struct {
+	ID        int64
+	Embedding []byte
+}
+
+// ApplyStagedMemoryEmbeddings writes staged embeddings in one transaction.
+func (d *DB) ApplyStagedMemoryEmbeddings(ctx context.Context, fingerprint string, staged []StagedMemoryEmbedding) error {
+	if len(staged) == 0 {
+		return nil
+	}
+	tx, err := d.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+	for _, item := range staged {
+		emb := item.Embedding
+		if emb == nil {
+			emb = make([]byte, 0)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE memory_notes SET embedding=?, embed_fingerprint=?, vector_index_dirty=1 WHERE id=?`,
+			emb, normalizeStoredEmbeddingFingerprint(emb, fingerprint), item.ID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// ListDirtyMemoryNotes returns note ids/text needing vector index repair.
+func (d *DB) ListDirtyMemoryNotes(ctx context.Context, limit int) ([]MemoryNoteReembedRow, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	rows, err := d.SQL.QueryContext(ctx,
+		`SELECT id, session_key, text FROM memory_notes
+		 WHERE vector_index_dirty=1 AND typeof(embedding)='blob' AND length(embedding) >= 4
+		 ORDER BY id ASC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []MemoryNoteReembedRow
+	for rows.Next() {
+		var item MemoryNoteReembedRow
+		if err := rows.Scan(&item.ID, &item.SessionKey, &item.Text); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+// CountDirtyMemoryNotes reports rows flagged for vector index repair.
+func (d *DB) CountDirtyMemoryNotes(ctx context.Context) (int, error) {
+	row := d.SQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_notes WHERE vector_index_dirty=1`)
+	var count int
+	if err := row.Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+// RepairDirtyMemoryVectors indexes notes flagged dirty without a full rebuild.
+func (d *DB) RepairDirtyMemoryVectors(ctx context.Context, limit int) (int, error) {
+	rows, err := d.ListDirtyMemoryNotes(ctx, limit)
+	if err != nil {
+		return 0, err
+	}
+	repaired := 0
+	for _, row := range rows {
+		var embedding []byte
+		if err := d.SQL.QueryRowContext(ctx, `SELECT embedding FROM memory_notes WHERE id=?`, row.ID).Scan(&embedding); err != nil {
+			return repaired, err
+		}
+		if err := d.upsertMemoryVec(ctx, row.ID, row.SessionKey, row.Text, embedding); err != nil {
+			return repaired, err
+		}
+		if err := d.setMemoryNoteVectorDirty(ctx, row.ID, false); err != nil {
+			return repaired, err
+		}
+		repaired++
+	}
+	return repaired, nil
 }
 
 func (d *DB) ResetSessionHistory(ctx context.Context, sessionKey string) error {

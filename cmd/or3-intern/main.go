@@ -460,10 +460,7 @@ func main() {
 	var docRetriever *memory.DocRetriever
 	if cfg.DocIndex.Enabled && len(cfg.DocIndex.Roots) > 0 {
 		docIndexer = &memory.DocIndexer{
-			DB:               d,
-			Provider:         embedProv,
-			EmbedModel:       embedRole.Primary.Model,
-			EmbedFingerprint: currentEmbedFingerprint(cfg),
+			DB: d,
 			Config: memory.DocIndexConfig{
 				Roots:          cfg.DocIndex.Roots,
 				MaxFiles:       cfg.DocIndex.MaxFiles,

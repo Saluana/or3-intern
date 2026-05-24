@@ -3029,29 +3029,74 @@ func TestSubagentAndAgentCLI_LifecycleTransitionsMatch(t *testing.T) {
 	}
 }
 
-func TestInsertMemoryNoteTyped_SucceedsWhenVecIndexFails(t *testing.T) {
+func TestOpen_SecondOpenDoesNotRebuildMemoryVec(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "vec_reopen.db")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	ctx := context.Background()
+	emb := make([]byte, 8)
+	if _, err := d.InsertMemoryNoteTyped(ctx, "sess", TypedNoteInput{
+		Text:      "vector note",
+		Embedding: emb,
+	}); err != nil {
+		t.Fatalf("InsertMemoryNoteTyped: %v", err)
+	}
+	if err := d.RebuildMemoryVecIndexWithDim(ctx, 2); err != nil {
+		t.Fatalf("RebuildMemoryVecIndexWithDim: %v", err)
+	}
+	var countAfterBuild int
+	if err := d.VecSQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_vec`).Scan(&countAfterBuild); err != nil {
+		t.Fatalf("count memory_vec after build: %v", err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	d, err = Open(path)
+	if err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	defer d.Close()
+	var countAfterReopen int
+	if err := d.VecSQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_vec`).Scan(&countAfterReopen); err != nil {
+		t.Fatalf("count memory_vec after reopen: %v", err)
+	}
+	if countAfterReopen != countAfterBuild {
+		t.Fatalf("expected memory_vec row count to stay %d after reopen, got %d", countAfterBuild, countAfterReopen)
+	}
+}
+
+func TestInsertMemoryNoteTyped_MarksDirtyWhenVectorUpsertFails(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
-	// Insert with a valid embedding that has a dim mismatch against any existing index.
-	// The note row should be created; the vector failure is swallowed.
-	emb := make([]byte, 16) // 4 floats
+	if _, err := d.InsertMemoryNoteTyped(ctx, "sess", TypedNoteInput{
+		Text:      "first",
+		Embedding: make([]byte, 8),
+	}); err != nil {
+		t.Fatalf("InsertMemoryNoteTyped first: %v", err)
+	}
+	if _, err := d.VecSQL.ExecContext(ctx, `DROP TABLE memory_vec`); err != nil {
+		t.Fatalf("drop memory_vec: %v", err)
+	}
 	id, err := d.InsertMemoryNoteTyped(ctx, "sess", TypedNoteInput{
-		Text:      "note with no index",
-		Embedding: emb,
+		Text:      "second",
+		Embedding: make([]byte, 8),
 	})
-	if err != nil {
-		t.Fatalf("InsertMemoryNoteTyped should succeed even if vec index fails: %v", err)
+	if err == nil {
+		t.Fatal("expected vector upsert failure")
 	}
-	if id <= 0 {
-		t.Fatalf("expected positive note id, got %d", id)
+	if id != 0 {
+		t.Fatalf("expected zero id on failure, got %d", id)
 	}
-	// Verify the note row exists.
-	var text string
-	if err := d.SQL.QueryRowContext(ctx, `SELECT text FROM memory_notes WHERE id=?`, id).Scan(&text); err != nil {
-		t.Fatalf("note row missing after insert: %v", err)
+	var count int
+	if err := d.SQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_notes WHERE text='second'`).Scan(&count); err != nil {
+		t.Fatalf("count notes: %v", err)
 	}
-	if text != "note with no index" {
-		t.Fatalf("unexpected note text: %q", text)
+	if count != 0 {
+		t.Fatal("expected failed insert to roll back note row")
 	}
 }
 

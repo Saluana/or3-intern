@@ -304,10 +304,13 @@ func TestMemorySearch_EmbedFails(t *testing.T) {
 	c := providers.New(srv.URL, "key", 10*time.Second)
 	c.HTTP = srv.Client()
 
-	tool := &MemorySearch{DB: d, Provider: c, EmbedModel: "model", TopK: 5}
-	_, err := tool.Execute(context.Background(), map[string]any{"query": "test"})
-	if err == nil {
-		t.Fatal("expected error when embed fails")
+	tool := &MemorySearch{DB: d, Provider: c, EmbedModel: "model", TopK: 5, FTSK: 5}
+	out, err := tool.Execute(context.Background(), map[string]any{"query": "test"})
+	if err != nil {
+		t.Fatalf("expected FTS fallback when embed fails: %v", err)
+	}
+	if !strings.Contains(out, "semantic search unavailable") {
+		t.Fatalf("expected embed fallback warning, got %q", out)
 	}
 }
 

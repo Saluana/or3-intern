@@ -616,6 +616,7 @@ func rebuildMemoryEmbeddings(ctx context.Context, database *db.DB, provider *pro
 		return 0, []string{"no_memory_notes"}, nil
 	}
 	wantDims := 0
+	staged := make([]db.StagedMemoryEmbedding, 0, len(rows))
 	for _, row := range rows {
 		vec, err := provider.Embed(ctx, model, strings.TrimSpace(row.Text))
 		if err != nil {
@@ -626,12 +627,16 @@ func rebuildMemoryEmbeddings(ctx context.Context, database *db.DB, provider *pro
 		} else if len(vec) != wantDims {
 			return 0, nil, fmt.Errorf("embedding dimension changed during rebuild: have %d want %d", len(vec), wantDims)
 		}
-		if err := database.ReplaceMemoryNoteEmbedding(ctx, row.ID, memory.PackFloat32(vec), fingerprint); err != nil {
-			return 0, nil, fmt.Errorf("persist memory note %d: %w", row.ID, err)
-		}
+		staged = append(staged, db.StagedMemoryEmbedding{ID: row.ID, Embedding: memory.PackFloat32(vec)})
+	}
+	if err := database.ApplyStagedMemoryEmbeddings(ctx, fingerprint, staged); err != nil {
+		return 0, nil, err
 	}
 	if wantDims > 0 {
 		if err := database.RebuildMemoryVecIndexWithProfile(ctx, wantDims, fingerprint); err != nil {
+			return 0, nil, err
+		}
+		if _, err := database.SQL.ExecContext(ctx, `UPDATE memory_notes SET vector_index_dirty=0 WHERE typeof(embedding)='blob' AND length(embedding) >= 4`); err != nil {
 			return 0, nil, err
 		}
 	}
@@ -646,10 +651,7 @@ func rebuildDocEmbeddings(ctx context.Context, cfg config.Config, database *db.D
 		return false, []string{"doc_index_no_roots"}, nil
 	}
 	indexer := &memory.DocIndexer{
-		DB:               database,
-		Provider:         provider,
-		EmbedModel:       cfg.Provider.EmbedModel,
-		EmbedFingerprint: fingerprint,
+		DB: database,
 		Config: memory.DocIndexConfig{
 			Roots:          cfg.DocIndex.Roots,
 			MaxFiles:       cfg.DocIndex.MaxFiles,

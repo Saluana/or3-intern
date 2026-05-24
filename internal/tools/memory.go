@@ -135,18 +135,26 @@ func (t *MemorySearch) Execute(ctx context.Context, params map[string]any) (stri
 	if v, ok := params["topK"].(float64); ok && int(v) > 0 {
 		topK = int(v)
 	}
+	var embedWarning string
+	var queryVec []float32
 	vec, err := t.Provider.Embed(ctx, t.EmbedModel, q)
 	if err != nil {
-		return "", err
+		embedWarning = "semantic search unavailable; keyword search used"
+	} else {
+		queryVec = vec
 	}
 	r := memory.NewRetriever(t.DB)
 	r.EmbedFingerprint = t.EmbedFingerprint
 	r.VectorScanLimit = t.VectorScanLimit
-	got, err := r.Retrieve(ctx, memoryScopeFromParams(ctx, params), q, vec, t.VectorK, t.FTSK, topK)
+	got, err := r.Retrieve(ctx, memoryScopeFromParams(ctx, params), q, queryVec, t.VectorK, t.FTSK, topK)
 	if err != nil {
 		return "", err
 	}
 	var b strings.Builder
+	if embedWarning != "" {
+		b.WriteString(embedWarning)
+		b.WriteString("\n")
+	}
 	for i, m := range got {
 		b.WriteString(fmt.Sprintf("%d. [%s] %.4f %s\n", i+1, m.Source, m.Score, m.Text))
 	}

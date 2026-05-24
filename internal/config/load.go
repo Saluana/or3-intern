@@ -600,6 +600,7 @@ func normalizeAndValidateConfigWithOptions(cfg Config, opts normalizeOptions) (C
 	if err := validateRuntimeProfile(cfg.RuntimeProfile); err != nil {
 		return cfg, err
 	}
+	clampMemoryAndDocConfig(&cfg)
 	return cfg, nil
 }
 

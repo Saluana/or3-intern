@@ -67,6 +67,37 @@ type ApprovalAllowlistRecord struct {
 	CreatedAt   int64
 	ExpiresAt   int64
 	DisabledAt  int64
+	ScopeHostID         string
+	ScopeTool           string
+	ScopeProfile        string
+	ScopeAgent          string
+	MatchExecutablePath string
+	MatchWorkingDir     string
+	MatchScriptHash     string
+	MatchSkillID        string
+	MatchPlanHash       string
+	MatchRunnerID       string
+	MatchTargetPath     string
+	MatchPathPrefix     string
+	MatchFingerprint    string
+}
+
+// ApprovalAllowlistMatchQuery scopes candidate allowlist rows for indexed matching.
+type ApprovalAllowlistMatchQuery struct {
+	Domain              string
+	NowMS               int64
+	ScopeHostID         string
+	ScopeTool           string
+	ScopeProfile        string
+	ScopeAgent          string
+	MatchExecutablePath string
+	MatchWorkingDir     string
+	MatchScriptHash     string
+	MatchSkillID        string
+	MatchPlanHash       string
+	MatchRunnerID       string
+	MatchTargetPath     string
+	MatchPathPrefix     string
 }
 
 type ApprovalTokenRecord struct {
@@ -379,17 +410,117 @@ func (d *DB) ListApprovalRequestsFiltered(ctx context.Context, status, approvalT
 }
 
 func (d *DB) ExpireApprovalRequests(ctx context.Context, nowMS int64, actor, note string) (int64, error) {
-	res, err := d.SQL.ExecContext(ctx, `UPDATE approval_requests
+	_, count, err := d.ExpireApprovalRequestsReturning(ctx, nowMS, actor, note)
+	return count, err
+}
+
+func (d *DB) ExpireApprovalRequestsReturning(ctx context.Context, nowMS int64, actor, note string) ([]int64, int64, error) {
+	rows, err := d.SQL.QueryContext(ctx, `UPDATE approval_requests
 		SET status=?, resolved_at=?, resolver_actor_id=?, resolution_kind=?, resolution_note=?
-		WHERE status=? AND expires_at>0 AND expires_at<=?`, "expired", nowMS, actor, "expired", note, "pending", nowMS)
+		WHERE status=? AND expires_at>0 AND expires_at<=?
+		RETURNING id`, "expired", nowMS, actor, "expired", note, "pending", nowMS)
 	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	ids := make([]int64, 0)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, 0, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	return ids, int64(len(ids)), nil
+}
+
+func (d *DB) CountApprovalRequests(ctx context.Context, status, approvalType string) (int64, error) {
+	query := `SELECT COUNT(*) FROM approval_requests`
+	args := []any{}
+	clauses := make([]string, 0, 2)
+	if strings.TrimSpace(status) != "" {
+		clauses = append(clauses, "status=?")
+		args = append(args, status)
+	}
+	if strings.TrimSpace(approvalType) != "" {
+		clauses = append(clauses, "type=?")
+		args = append(args, approvalType)
+	}
+	if len(clauses) > 0 {
+		query += ` WHERE ` + strings.Join(clauses, ` AND `)
+	}
+	var count int64
+	if err := d.SQL.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
 		return 0, err
 	}
-	rows, err := res.RowsAffected()
+	return count, nil
+}
+
+func (d *DB) CreateOrGetPendingApprovalRequest(ctx context.Context, input ApprovalRequestRecord, nowMS int64) (ApprovalRequestRecord, bool, error) {
+	tx, err := d.SQL.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, err
+		return ApprovalRequestRecord{}, false, err
 	}
-	return rows, nil
+	defer func() {
+		_ = tx.Rollback()
+	}()
+	existing, ok, err := findPendingApprovalRequestTx(ctx, tx, input.Type, input.SubjectHash, input.ExecutionHostID, nowMS)
+	if err != nil {
+		return ApprovalRequestRecord{}, false, err
+	}
+	if ok {
+		if err := tx.Commit(); err != nil {
+			return ApprovalRequestRecord{}, false, err
+		}
+		return existing, true, nil
+	}
+	res, err := tx.ExecContext(ctx, `INSERT INTO approval_requests(type, subject_hash, subject_json, requester_agent_id, requester_session_id, execution_host_id, status, policy_mode, requested_at, expires_at, resolved_at, resolver_actor_id, resolution_kind, resolution_note)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, input.Type, input.SubjectHash, input.SubjectJSON, input.RequesterAgentID, input.RequesterSessionID, input.ExecutionHostID, input.Status, input.PolicyMode, input.RequestedAt, input.ExpiresAt, input.ResolvedAt, input.ResolverActorID, input.ResolutionKind, input.ResolutionNote)
+	if err != nil {
+		if isUniqueConstraintErr(err) {
+			existing, ok, findErr := findPendingApprovalRequestTx(ctx, tx, input.Type, input.SubjectHash, input.ExecutionHostID, nowMS)
+			if findErr != nil {
+				return ApprovalRequestRecord{}, false, findErr
+			}
+			if ok {
+				if commitErr := tx.Commit(); commitErr != nil {
+					return ApprovalRequestRecord{}, false, commitErr
+				}
+				return existing, true, nil
+			}
+		}
+		return ApprovalRequestRecord{}, false, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return ApprovalRequestRecord{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return ApprovalRequestRecord{}, false, err
+	}
+	rec, err := d.GetApprovalRequest(ctx, id)
+	return rec, false, err
+}
+
+func findPendingApprovalRequestTx(ctx context.Context, tx *sql.Tx, approvalType, subjectHash, hostID string, nowMS int64) (ApprovalRequestRecord, bool, error) {
+	row := tx.QueryRowContext(ctx, `SELECT id, type, subject_hash, subject_json, requester_agent_id, requester_session_id, execution_host_id, status, policy_mode, requested_at, expires_at, resolved_at, resolver_actor_id, resolution_kind, resolution_note
+		FROM approval_requests WHERE type=? AND subject_hash=? AND execution_host_id=? AND status='pending' AND expires_at>? ORDER BY id DESC LIMIT 1`, approvalType, subjectHash, hostID, nowMS)
+	rec, err := scanApprovalRequest(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ApprovalRequestRecord{}, false, nil
+	}
+	return rec, err == nil, err
+}
+
+func isUniqueConstraintErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unique constraint") || strings.Contains(msg, "constraint failed")
 }
 
 func (d *DB) ListExpiredPendingApprovalRequestIDs(ctx context.Context, nowMS int64) ([]int64, error) {
@@ -427,19 +558,116 @@ func (d *DB) ResolveApprovalRequest(ctx context.Context, id int64, fromStatus, t
 }
 
 func (d *DB) CreateApprovalAllowlist(ctx context.Context, input ApprovalAllowlistRecord) (ApprovalAllowlistRecord, error) {
-	res, err := d.SQL.ExecContext(ctx, `INSERT INTO approval_allowlists(domain, scope_json, matcher_json, created_by, created_at, expires_at, disabled_at) VALUES(?, ?, ?, ?, ?, ?, ?)`, input.Domain, input.ScopeJSON, input.MatcherJSON, input.CreatedBy, input.CreatedAt, input.ExpiresAt, input.DisabledAt)
+	rec, _, err := d.CreateOrGetApprovalAllowlist(ctx, input)
+	return rec, err
+}
+
+func (d *DB) CreateOrGetApprovalAllowlist(ctx context.Context, input ApprovalAllowlistRecord) (ApprovalAllowlistRecord, bool, error) {
+	if strings.TrimSpace(input.MatchFingerprint) != "" {
+		row := d.SQL.QueryRowContext(ctx, `SELECT id, domain, scope_json, matcher_json, created_by, created_at, expires_at, disabled_at,
+			scope_host_id, scope_tool, scope_profile, scope_agent,
+			match_executable_path, match_working_dir, match_script_hash,
+			match_skill_id, match_plan_hash, match_runner_id, match_target_path, match_path_prefix, match_fingerprint
+			FROM approval_allowlists WHERE domain=? AND match_fingerprint=? AND disabled_at=0 LIMIT 1`,
+			input.Domain, input.MatchFingerprint)
+		rec, err := scanApprovalAllowlist(row)
+		if err == nil {
+			return rec, true, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return ApprovalAllowlistRecord{}, false, err
+		}
+	}
+	res, err := d.SQL.ExecContext(ctx, `INSERT INTO approval_allowlists(
+			domain, scope_json, matcher_json, created_by, created_at, expires_at, disabled_at,
+			scope_host_id, scope_tool, scope_profile, scope_agent,
+			match_executable_path, match_working_dir, match_script_hash,
+			match_skill_id, match_plan_hash, match_runner_id, match_target_path, match_path_prefix, match_fingerprint)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		input.Domain, input.ScopeJSON, input.MatcherJSON, input.CreatedBy, input.CreatedAt, input.ExpiresAt, input.DisabledAt,
+		input.ScopeHostID, input.ScopeTool, input.ScopeProfile, input.ScopeAgent,
+		input.MatchExecutablePath, input.MatchWorkingDir, input.MatchScriptHash,
+		input.MatchSkillID, input.MatchPlanHash, input.MatchRunnerID, input.MatchTargetPath, input.MatchPathPrefix, input.MatchFingerprint)
 	if err != nil {
-		return ApprovalAllowlistRecord{}, err
+		if isUniqueConstraintErr(err) && strings.TrimSpace(input.MatchFingerprint) != "" {
+			row := d.SQL.QueryRowContext(ctx, `SELECT id, domain, scope_json, matcher_json, created_by, created_at, expires_at, disabled_at,
+				scope_host_id, scope_tool, scope_profile, scope_agent,
+				match_executable_path, match_working_dir, match_script_hash,
+				match_skill_id, match_plan_hash, match_runner_id, match_target_path, match_path_prefix, match_fingerprint
+				FROM approval_allowlists WHERE domain=? AND match_fingerprint=? AND disabled_at=0 LIMIT 1`,
+				input.Domain, input.MatchFingerprint)
+			rec, findErr := scanApprovalAllowlist(row)
+			if findErr == nil {
+				return rec, true, nil
+			}
+		}
+		return ApprovalAllowlistRecord{}, false, err
 	}
 	id, err := res.LastInsertId()
 	if err != nil {
-		return ApprovalAllowlistRecord{}, err
+		return ApprovalAllowlistRecord{}, false, err
 	}
-	return d.GetApprovalAllowlist(ctx, id)
+	rec, err := d.GetApprovalAllowlist(ctx, id)
+	return rec, false, err
+}
+
+func (d *DB) ListApprovalAllowlistCandidates(ctx context.Context, query ApprovalAllowlistMatchQuery, limit, offset int) ([]ApprovalAllowlistRecord, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 200
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	sqlQuery := `SELECT id, domain, scope_json, matcher_json, created_by, created_at, expires_at, disabled_at,
+		scope_host_id, scope_tool, scope_profile, scope_agent,
+		match_executable_path, match_working_dir, match_script_hash,
+		match_skill_id, match_plan_hash, match_runner_id, match_target_path, match_path_prefix, match_fingerprint
+		FROM approval_allowlists
+		WHERE domain=? AND disabled_at=0 AND (expires_at=0 OR expires_at>?)`
+	args := []any{query.Domain, query.NowMS}
+	appendScopeFilter := func(column, value string) {
+		if strings.TrimSpace(value) == "" {
+			return
+		}
+		sqlQuery += ` AND (` + column + `='' OR ` + column + `=?)`
+		args = append(args, value)
+	}
+	appendScopeFilter("scope_host_id", query.ScopeHostID)
+	appendScopeFilter("scope_tool", query.ScopeTool)
+	appendScopeFilter("scope_profile", query.ScopeProfile)
+	appendScopeFilter("scope_agent", query.ScopeAgent)
+	appendScopeFilter("match_executable_path", query.MatchExecutablePath)
+	appendScopeFilter("match_working_dir", query.MatchWorkingDir)
+	appendScopeFilter("match_script_hash", query.MatchScriptHash)
+	appendScopeFilter("match_skill_id", query.MatchSkillID)
+	appendScopeFilter("match_plan_hash", query.MatchPlanHash)
+	appendScopeFilter("match_runner_id", query.MatchRunnerID)
+	appendScopeFilter("match_target_path", query.MatchTargetPath)
+	appendScopeFilter("match_path_prefix", query.MatchPathPrefix)
+	sqlQuery += ` ORDER BY id DESC LIMIT ? OFFSET ?`
+	args = append(args, limit, offset)
+	rows, err := d.SQL.QueryContext(ctx, sqlQuery, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]ApprovalAllowlistRecord, 0)
+	for rows.Next() {
+		rec, err := scanApprovalAllowlist(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rec)
+	}
+	return out, rows.Err()
 }
 
 func (d *DB) GetApprovalAllowlist(ctx context.Context, id int64) (ApprovalAllowlistRecord, error) {
-	row := d.SQL.QueryRowContext(ctx, `SELECT id, domain, scope_json, matcher_json, created_by, created_at, expires_at, disabled_at FROM approval_allowlists WHERE id=?`, id)
+	row := d.SQL.QueryRowContext(ctx, `SELECT id, domain, scope_json, matcher_json, created_by, created_at, expires_at, disabled_at,
+		scope_host_id, scope_tool, scope_profile, scope_agent,
+		match_executable_path, match_working_dir, match_script_hash,
+		match_skill_id, match_plan_hash, match_runner_id, match_target_path, match_path_prefix, match_fingerprint
+		FROM approval_allowlists WHERE id=?`, id)
 	return scanApprovalAllowlist(row)
 }
 
@@ -447,7 +675,11 @@ func (d *DB) ListApprovalAllowlists(ctx context.Context, domain string, limit in
 	if limit <= 0 || limit > 200 {
 		limit = 200
 	}
-	query := `SELECT id, domain, scope_json, matcher_json, created_by, created_at, expires_at, disabled_at FROM approval_allowlists`
+	query := `SELECT id, domain, scope_json, matcher_json, created_by, created_at, expires_at, disabled_at,
+		scope_host_id, scope_tool, scope_profile, scope_agent,
+		match_executable_path, match_working_dir, match_script_hash,
+		match_skill_id, match_plan_hash, match_runner_id, match_target_path, match_path_prefix, match_fingerprint
+		FROM approval_allowlists`
 	args := []any{}
 	if strings.TrimSpace(domain) != "" {
 		query += ` WHERE domain=?`
@@ -471,9 +703,161 @@ func (d *DB) ListApprovalAllowlists(ctx context.Context, domain string, limit in
 	return out, rows.Err()
 }
 
-func (d *DB) DisableApprovalAllowlist(ctx context.Context, id int64, disabledAt int64) error {
-	_, err := d.SQL.ExecContext(ctx, `UPDATE approval_allowlists SET disabled_at=? WHERE id=?`, disabledAt, id)
-	return err
+func (d *DB) DisableApprovalAllowlist(ctx context.Context, id int64, disabledAt int64) (bool, error) {
+	res, err := d.SQL.ExecContext(ctx, `UPDATE approval_allowlists SET disabled_at=? WHERE id=? AND disabled_at=0`, disabledAt, id)
+	if err != nil {
+		return false, err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return rows > 0, nil
+}
+
+// ApproveRequestArtifacts bundles the side effects of approving a request.
+type ApproveRequestArtifacts struct {
+	Request     ApprovalRequestRecord
+	AllowlistID int64
+	TokenRecord ApprovalTokenRecord
+}
+
+func (d *DB) ApproveRequestWithArtifacts(ctx context.Context, requestID int64, actor string, alwaysAllow bool, resolutionKind, note string, nowMS int64, tokenExpiresAt int64, buildAllowlist func(ApprovalRequestRecord) (ApprovalAllowlistRecord, error)) (ApproveRequestArtifacts, error) {
+	tx, err := d.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return ApproveRequestArtifacts{}, err
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+	req, err := getApprovalRequestTx(ctx, tx, requestID)
+	if err != nil {
+		return ApproveRequestArtifacts{}, err
+	}
+	if req.Status != "pending" {
+		return ApproveRequestArtifacts{}, fmt.Errorf("approval request is not pending")
+	}
+	if req.ExpiresAt > 0 && req.ExpiresAt < nowMS {
+		return ApproveRequestArtifacts{}, fmt.Errorf("approval request expired")
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE approval_requests SET status=?, resolved_at=?, resolver_actor_id=?, resolution_kind=?, resolution_note=? WHERE id=? AND status=?`,
+		"approved", nowMS, strings.TrimSpace(actor), resolutionKind, strings.TrimSpace(note), requestID, "pending")
+	if err != nil {
+		return ApproveRequestArtifacts{}, err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return ApproveRequestArtifacts{}, err
+	}
+	if rows != 1 {
+		return ApproveRequestArtifacts{}, fmt.Errorf("approval request is not pending")
+	}
+	if _, err := updateSkillRunPlansByApprovalRequestTx(ctx, tx, requestID, []string{"pending_approval"}, "approved", "", nowMS); err != nil {
+		return ApproveRequestArtifacts{}, err
+	}
+	out := ApproveRequestArtifacts{Request: req}
+	if alwaysAllow && buildAllowlist != nil {
+		allowlistInput, err := buildAllowlist(req)
+		if err != nil {
+			return ApproveRequestArtifacts{}, err
+		}
+		if strings.TrimSpace(allowlistInput.Domain) == "" {
+			goto issueToken
+		}
+		allowlistRec, _, err := createOrGetApprovalAllowlistTx(ctx, tx, allowlistInput)
+		if err != nil {
+			return ApproveRequestArtifacts{}, err
+		}
+		out.AllowlistID = allowlistRec.ID
+	}
+issueToken:
+	tokenRes, err := tx.ExecContext(ctx, `INSERT INTO approval_tokens(approval_request_id, subject_hash, issued_at, expires_at, issuer, revoked_at) VALUES(?, ?, ?, ?, ?, 0)`,
+		requestID, req.SubjectHash, nowMS, tokenExpiresAt, strings.TrimSpace(actor))
+	if err != nil {
+		return ApproveRequestArtifacts{}, err
+	}
+	tokenID, err := tokenRes.LastInsertId()
+	if err != nil {
+		return ApproveRequestArtifacts{}, err
+	}
+	out.TokenRecord = ApprovalTokenRecord{
+		ID:                tokenID,
+		ApprovalRequestID: requestID,
+		SubjectHash:       req.SubjectHash,
+		IssuedAt:          nowMS,
+		ExpiresAt:         tokenExpiresAt,
+		Issuer:            strings.TrimSpace(actor),
+	}
+	if err := tx.Commit(); err != nil {
+		return ApproveRequestArtifacts{}, err
+	}
+	return out, nil
+}
+
+func getApprovalRequestTx(ctx context.Context, tx *sql.Tx, id int64) (ApprovalRequestRecord, error) {
+	row := tx.QueryRowContext(ctx, `SELECT id, type, subject_hash, subject_json, requester_agent_id, requester_session_id, execution_host_id, status, policy_mode, requested_at, expires_at, resolved_at, resolver_actor_id, resolution_kind, resolution_note FROM approval_requests WHERE id=?`, id)
+	return scanApprovalRequest(row)
+}
+
+func createOrGetApprovalAllowlistTx(ctx context.Context, tx *sql.Tx, input ApprovalAllowlistRecord) (ApprovalAllowlistRecord, bool, error) {
+	if strings.TrimSpace(input.MatchFingerprint) != "" {
+		row := tx.QueryRowContext(ctx, `SELECT id, domain, scope_json, matcher_json, created_by, created_at, expires_at, disabled_at,
+			scope_host_id, scope_tool, scope_profile, scope_agent,
+			match_executable_path, match_working_dir, match_script_hash,
+			match_skill_id, match_plan_hash, match_runner_id, match_target_path, match_path_prefix, match_fingerprint
+			FROM approval_allowlists WHERE domain=? AND match_fingerprint=? AND disabled_at=0 LIMIT 1`,
+			input.Domain, input.MatchFingerprint)
+		rec, err := scanApprovalAllowlist(row)
+		if err == nil {
+			return rec, true, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return ApprovalAllowlistRecord{}, false, err
+		}
+	}
+	res, err := tx.ExecContext(ctx, `INSERT INTO approval_allowlists(
+			domain, scope_json, matcher_json, created_by, created_at, expires_at, disabled_at,
+			scope_host_id, scope_tool, scope_profile, scope_agent,
+			match_executable_path, match_working_dir, match_script_hash,
+			match_skill_id, match_plan_hash, match_runner_id, match_target_path, match_path_prefix, match_fingerprint)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		input.Domain, input.ScopeJSON, input.MatcherJSON, input.CreatedBy, input.CreatedAt, input.ExpiresAt, input.DisabledAt,
+		input.ScopeHostID, input.ScopeTool, input.ScopeProfile, input.ScopeAgent,
+		input.MatchExecutablePath, input.MatchWorkingDir, input.MatchScriptHash,
+		input.MatchSkillID, input.MatchPlanHash, input.MatchRunnerID, input.MatchTargetPath, input.MatchPathPrefix, input.MatchFingerprint)
+	if err != nil {
+		return ApprovalAllowlistRecord{}, false, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return ApprovalAllowlistRecord{}, false, err
+	}
+	row := tx.QueryRowContext(ctx, `SELECT id, domain, scope_json, matcher_json, created_by, created_at, expires_at, disabled_at,
+		scope_host_id, scope_tool, scope_profile, scope_agent,
+		match_executable_path, match_working_dir, match_script_hash,
+		match_skill_id, match_plan_hash, match_runner_id, match_target_path, match_path_prefix, match_fingerprint
+		FROM approval_allowlists WHERE id=?`, id)
+	rec, err := scanApprovalAllowlist(row)
+	return rec, false, err
+}
+
+func updateSkillRunPlansByApprovalRequestTx(ctx context.Context, tx *sql.Tx, approvalRequestID int64, fromStatuses []string, toStatus, lastError string, updatedAt int64) (int64, error) {
+	if len(fromStatuses) == 0 {
+		return 0, nil
+	}
+	placeholders := make([]string, len(fromStatuses))
+	args := []any{strings.TrimSpace(toStatus), strings.TrimSpace(lastError), updatedAt, approvalRequestID}
+	for i, status := range fromStatuses {
+		placeholders[i] = "?"
+		args = append(args, status)
+	}
+	query := `UPDATE skill_run_plans SET status=?, last_error=?, updated_at=? WHERE approval_request_id=? AND status IN (` + strings.Join(placeholders, ",") + `)`
+	res, err := tx.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	rows, err := res.RowsAffected()
+	return rows, err
 }
 
 func (d *DB) CreateApprovalToken(ctx context.Context, input ApprovalTokenRecord) (ApprovalTokenRecord, error) {
@@ -551,7 +935,12 @@ func scanApprovalRequest(scanner interface{ Scan(dest ...any) error }) (Approval
 
 func scanApprovalAllowlist(scanner interface{ Scan(dest ...any) error }) (ApprovalAllowlistRecord, error) {
 	var rec ApprovalAllowlistRecord
-	if err := scanner.Scan(&rec.ID, &rec.Domain, &rec.ScopeJSON, &rec.MatcherJSON, &rec.CreatedBy, &rec.CreatedAt, &rec.ExpiresAt, &rec.DisabledAt); err != nil {
+	if err := scanner.Scan(
+		&rec.ID, &rec.Domain, &rec.ScopeJSON, &rec.MatcherJSON, &rec.CreatedBy, &rec.CreatedAt, &rec.ExpiresAt, &rec.DisabledAt,
+		&rec.ScopeHostID, &rec.ScopeTool, &rec.ScopeProfile, &rec.ScopeAgent,
+		&rec.MatchExecutablePath, &rec.MatchWorkingDir, &rec.MatchScriptHash,
+		&rec.MatchSkillID, &rec.MatchPlanHash, &rec.MatchRunnerID, &rec.MatchTargetPath, &rec.MatchPathPrefix, &rec.MatchFingerprint,
+	); err != nil {
 		return ApprovalAllowlistRecord{}, err
 	}
 	return rec, nil

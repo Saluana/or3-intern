@@ -14,6 +14,10 @@ func (b *Broker) ListApprovalRequestsFiltered(ctx context.Context, status, appro
 	return b.DB.ListApprovalRequestsFiltered(ctx, status, approvalType, limit)
 }
 
+func (b *Broker) CountApprovalRequests(ctx context.Context, status, approvalType string) (int64, error) {
+	return b.DB.CountApprovalRequests(ctx, status, approvalType)
+}
+
 func (b *Broker) ListPairingRequests(ctx context.Context, status string, limit int) ([]db.PairingRequestRecord, error) {
 	return b.DB.ListPairingRequests(ctx, status, limit)
 }

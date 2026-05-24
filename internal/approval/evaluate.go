@@ -178,22 +178,16 @@ func (b *Broker) checkAllowlist(ctx context.Context, subjectType SubjectType, sc
 
 func (b *Broker) requireApproval(ctx context.Context, subjectType SubjectType, subject any, sh SubjectHash, scope AllowlistScope, mode config.ApprovalMode) (Decision, error) {
 	nowMS := b.now().UnixMilli()
-	existing, ok, err := b.DB.FindPendingApprovalRequest(ctx, string(subjectType), sh.Hash, b.hostID(), nowMS)
-	if err != nil {
-		return Decision{}, err
-	}
-	if ok {
-		return Decision{Allowed: false, RequiresApproval: true, RequestID: existing.ID, SubjectHash: sh.Hash, Reason: "approval required"}, nil
-	}
-	req, err := b.DB.CreateApprovalRequest(ctx, db.ApprovalRequestRecord{
+	req, reused, err := b.DB.CreateOrGetPendingApprovalRequest(ctx, db.ApprovalRequestRecord{
 		Type: string(subjectType), SubjectHash: sh.Hash, SubjectJSON: sh.JSON,
 		RequesterAgentID: scope.Agent, RequesterSessionID: extractSessionID(subject),
 		ExecutionHostID: b.hostID(), Status: StatusPending, PolicyMode: string(mode),
 		RequestedAt: nowMS, ExpiresAt: nowMS + int64(b.Config.PendingTTLSeconds*1000),
-	})
+	}, nowMS)
 	if err != nil {
 		return Decision{}, err
 	}
+	_ = reused
 	_ = b.audit(ctx, "approval.requested", map[string]any{
 		"request_id": req.ID, "subject_hash": sh.Hash, "host_id": b.hostID(),
 		"type": string(subjectType), "policy_mode": string(mode), "outcome": "pending",

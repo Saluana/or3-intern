@@ -2,17 +2,12 @@ package memory
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"or3-intern/internal/db"
-	"or3-intern/internal/providers"
 )
 
 func openDocsTestDB(t *testing.T) *db.DB {
@@ -82,7 +77,7 @@ func TestSyncRoots(t *testing.T) {
 	// verify kinds
 	kinds := map[string]string{}
 	for _, r := range got {
-		kinds[filepath.Base(r.path)] = r.kind
+		kinds[DocDisplayPath(r.path)] = r.kind
 	}
 	if kinds["readme.md"] != "markdown" {
 		t.Errorf("expected markdown, got %q", kinds["readme.md"])
@@ -151,10 +146,7 @@ func TestSyncRootsDeactivation(t *testing.T) {
 	if err := os.WriteFile(filePath, []byte("important note content"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	canonicalPath, err := filepath.EvalSymlinks(filePath)
-	if err != nil {
-		t.Fatalf("EvalSymlinks: %v", err)
-	}
+	storedPath := docStoredPath(0, "note.txt")
 
 	indexer := &DocIndexer{
 		DB:     d,
@@ -167,7 +159,7 @@ func TestSyncRootsDeactivation(t *testing.T) {
 	}
 	var active int
 	if err := d.SQL.QueryRowContext(ctx,
-		`SELECT active FROM memory_docs WHERE scope_key='scope1' AND path=?`, canonicalPath,
+		`SELECT active FROM memory_docs WHERE scope_key='scope1' AND path=?`, storedPath,
 	).Scan(&active); err != nil {
 		t.Fatalf("query after first sync: %v", err)
 	}
@@ -184,7 +176,7 @@ func TestSyncRootsDeactivation(t *testing.T) {
 	}
 
 	if err := d.SQL.QueryRowContext(ctx,
-		`SELECT active FROM memory_docs WHERE scope_key='scope1' AND path=?`, canonicalPath,
+		`SELECT active FROM memory_docs WHERE scope_key='scope1' AND path=?`, storedPath,
 	).Scan(&active); err != nil {
 		t.Fatalf("query after second sync: %v", err)
 	}
@@ -224,8 +216,8 @@ func TestSyncRoots_SkipsSymlinkedFiles(t *testing.T) {
 	if err := d.SQL.QueryRowContext(ctx, `SELECT path FROM memory_docs WHERE scope_key='scope1' AND active=1`).Scan(&path); err != nil {
 		t.Fatalf("select doc path: %v", err)
 	}
-	if filepath.Base(path) != "real.md" {
-		t.Fatalf("expected real.md to be indexed, got %q", path)
+	if path != "r0:real.md" {
+		t.Fatalf("expected r0:real.md to be indexed, got %q", path)
 	}
 }
 
@@ -310,65 +302,62 @@ func TestSyncRoots_Idempotent(t *testing.T) {
 	}
 }
 
-func TestSyncRoots_ReembedsWhenFingerprintChanges(t *testing.T) {
+func TestSyncRoots_PartialCapDoesNotDeactivateExistingDocs(t *testing.T) {
 	d := openDocsTestDB(t)
 	ctx := context.Background()
 	root := t.TempDir()
-	filePath := filepath.Join(root, "readme.md")
-	if err := os.WriteFile(filePath, []byte("# Hello\nThis is a fingerprint test document."), 0o644); err != nil {
+	for i := 0; i < 5; i++ {
+		name := filepath.Join(root, fmt.Sprintf("keep%d.txt", i))
+		if err := os.WriteFile(name, []byte("keep me"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	otherRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(otherRoot, "overflow.txt"), []byte("overflow"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	embedCalls := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/embeddings" {
-			http.NotFound(w, r)
-			return
-		}
-		embedCalls++
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"data": []map[string]any{{"embedding": []float32{1, 0}}},
-		})
-	}))
-	defer srv.Close()
-
-	p := providers.New(srv.URL, "test-key", 5*time.Second)
-	p.HTTP = srv.Client()
-
 	indexer := &DocIndexer{
-		DB:               d,
-		Provider:         p,
-		EmbedModel:       "embed",
-		EmbedFingerprint: "provider-a:embed",
-		Config:           DocIndexConfig{Roots: []string{root}},
+		DB: d,
+		Config: DocIndexConfig{
+			Roots:    []string{root, otherRoot},
+			MaxFiles: 3,
+		},
 	}
+	result, err := indexer.SyncRootsWithResult(ctx, "scope1")
+	if err != nil {
+		t.Fatalf("SyncRootsWithResult: %v", err)
+	}
+	if !result.PartialScan {
+		t.Fatal("expected partial scan when cap hit")
+	}
+	var active int
+	if err := d.SQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_docs WHERE scope_key='scope1' AND active=1`).Scan(&active); err != nil {
+		t.Fatalf("count active docs: %v", err)
+	}
+	if active < 3 {
+		t.Fatalf("expected at least capped active docs, got %d", active)
+	}
+}
+
+func TestSyncRoots_DoesNotStoreDocEmbeddings(t *testing.T) {
+	d := openDocsTestDB(t)
+	ctx := context.Background()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "readme.md"), []byte("# Hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	indexer := &DocIndexer{DB: d, Config: DocIndexConfig{Roots: []string{root}}}
 	if err := indexer.SyncRoots(ctx, "scope1"); err != nil {
-		t.Fatalf("first SyncRoots: %v", err)
+		t.Fatalf("SyncRoots: %v", err)
 	}
-	if embedCalls != 1 {
-		t.Fatalf("expected 1 embed call after first sync, got %d", embedCalls)
-	}
-	if err := indexer.SyncRoots(ctx, "scope1"); err != nil {
-		t.Fatalf("second SyncRoots: %v", err)
-	}
-	if embedCalls != 1 {
-		t.Fatalf("expected no re-embed when fingerprint unchanged, got %d calls", embedCalls)
-	}
-	indexer.EmbedFingerprint = "provider-b:embed"
-	if err := indexer.SyncRoots(ctx, "scope1"); err != nil {
-		t.Fatalf("third SyncRoots: %v", err)
-	}
-	if embedCalls != 2 {
-		t.Fatalf("expected fingerprint change to trigger re-embed, got %d calls", embedCalls)
-	}
-	var fingerprint string
+	var embedding any
 	if err := d.SQL.QueryRowContext(ctx,
-		`SELECT embed_fingerprint FROM memory_docs WHERE scope_key='scope1' AND active=1 LIMIT 1`,
-	).Scan(&fingerprint); err != nil {
-		t.Fatalf("fingerprint query: %v", err)
+		`SELECT embedding FROM memory_docs WHERE scope_key='scope1' AND active=1 LIMIT 1`,
+	).Scan(&embedding); err != nil {
+		t.Fatalf("embedding query: %v", err)
 	}
-	if fingerprint != "provider-b:embed" {
-		t.Fatalf("expected updated fingerprint, got %q", fingerprint)
+	if embedding != nil {
+		t.Fatalf("expected no doc embedding, got %#v", embedding)
 	}
 }

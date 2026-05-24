@@ -1044,3 +1044,129 @@ func TestBroker_EvaluateSecretAccess_ReusesPendingRequest(t *testing.T) {
 		t.Fatalf("expected reused request %d, got %d", first.RequestID, second.RequestID)
 	}
 }
+
+func TestBroker_ApproveRequest_IsAtomic(t *testing.T) {
+	broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Exec.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+
+	decision, err := broker.EvaluateExec(context.Background(), ExecEvaluation{
+		ExecutablePath: "/bin/echo",
+		Argv:           []string{"hello"},
+		WorkingDir:     "/tmp",
+		ToolName:       "exec",
+	})
+	if err != nil {
+		t.Fatalf("EvaluateExec: %v", err)
+	}
+	issued, err := broker.ApproveRequest(context.Background(), decision.RequestID, "cli:test", false, "ok")
+	if err != nil {
+		t.Fatalf("ApproveRequest: %v", err)
+	}
+	if strings.TrimSpace(issued.Token) == "" {
+		t.Fatal("expected issued approval token")
+	}
+	req, err := broker.DB.GetApprovalRequest(context.Background(), decision.RequestID)
+	if err != nil {
+		t.Fatalf("GetApprovalRequest: %v", err)
+	}
+	if req.Status != StatusApproved {
+		t.Fatalf("expected approved status, got %q", req.Status)
+	}
+}
+
+func TestBroker_ExpirePendingRequests_OnlySyncsActuallyExpired(t *testing.T) {
+	broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.SkillExecution.Mode = config.ApprovalModeAsk
+		cfg.PendingTTLSeconds = 1
+	})
+	defer cleanup()
+	ctx := context.Background()
+
+	plan, decision := createLinkedPendingSkillRunPlan(t, broker, "srp_expire_race")
+	issued, err := broker.ApproveRequest(ctx, decision.RequestID, "cli:test", false, "approved before expire sweep")
+	if err != nil {
+		t.Fatalf("ApproveRequest: %v", err)
+	}
+	if strings.TrimSpace(issued.Token) == "" {
+		t.Fatal("expected approval token")
+	}
+
+	broker.Now = func() time.Time { return time.Unix(1700003600, 0).UTC() }
+	if _, err := broker.ExpirePendingRequests(ctx, "cli:test"); err != nil {
+		t.Fatalf("ExpirePendingRequests: %v", err)
+	}
+	updatedPlan, err := broker.DB.GetSkillRunPlan(ctx, plan.ID)
+	if err != nil {
+		t.Fatalf("GetSkillRunPlan: %v", err)
+	}
+	if updatedPlan.Status != string(db.SkillRunStatusApproved) {
+		t.Fatalf("expected approved plan after race, got %q", updatedPlan.Status)
+	}
+}
+
+func TestBroker_AddAllowlist_IsIdempotent(t *testing.T) {
+	broker, cleanup := newTestBroker(t, nil)
+	defer cleanup()
+	ctx := context.Background()
+
+	first, err := broker.AddAllowlist(ctx, string(SubjectExec),
+		AllowlistScope{HostID: "test-host", Tool: "exec"},
+		ExecAllowlistMatcher{ExecutablePath: "/bin/echo", Argv: []string{"ok"}, WorkingDir: "/tmp"},
+		"cli:test", 0)
+	if err != nil {
+		t.Fatalf("AddAllowlist first: %v", err)
+	}
+	second, err := broker.AddAllowlist(ctx, string(SubjectExec),
+		AllowlistScope{HostID: "test-host", Tool: "exec"},
+		ExecAllowlistMatcher{ExecutablePath: "/bin/echo", Argv: []string{"ok"}, WorkingDir: "/tmp"},
+		"cli:test", 0)
+	if err != nil {
+		t.Fatalf("AddAllowlist second: %v", err)
+	}
+	if first.ID != second.ID {
+		t.Fatalf("expected duplicate allowlist reuse, got %d and %d", first.ID, second.ID)
+	}
+}
+
+func TestBroker_AllowlistMatchesBeyondFirstPage(t *testing.T) {
+	broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Exec.Mode = config.ApprovalModeAllowlist
+	})
+	defer cleanup()
+	ctx := context.Background()
+
+	target, err := broker.AddAllowlist(ctx, string(SubjectExec),
+		AllowlistScope{HostID: "test-host", Tool: "exec"},
+		ExecAllowlistMatcher{ExecutablePath: "/bin/echo", Argv: []string{"target"}, WorkingDir: "/tmp"},
+		"cli:test", 0)
+	if err != nil {
+		t.Fatalf("AddAllowlist target: %v", err)
+	}
+	for i := 0; i < 205; i++ {
+		_, err := broker.AddAllowlist(ctx, string(SubjectExec),
+			AllowlistScope{HostID: "test-host", Tool: "exec"},
+			ExecAllowlistMatcher{ExecutablePath: "/bin/echo", Argv: []string{strconv.Itoa(i)}},
+			"cli:test", 0)
+		if err != nil {
+			t.Fatalf("AddAllowlist noise %d: %v", i, err)
+		}
+	}
+
+	decision, err := broker.EvaluateExec(ctx, ExecEvaluation{
+		ExecutablePath: "/bin/echo",
+		Argv:           []string{"target"},
+		WorkingDir:     "/tmp",
+		ToolName:       "exec",
+	})
+	if err != nil {
+		t.Fatalf("EvaluateExec: %v", err)
+	}
+	if !decision.Allowed || decision.Reason != "allowlist" {
+		t.Fatalf("expected allowlist match beyond first page, got %#v", decision)
+	}
+	if target.ID <= 0 {
+		t.Fatal("expected target allowlist id")
+	}
+}

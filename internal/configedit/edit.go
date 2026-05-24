@@ -1138,6 +1138,9 @@ func setIntValue(target *int, value string, field string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("invalid integer for %s: %q", field, value)
 	}
+	if err := config.ValidateMemoryIntField(field, parsed); err != nil {
+		return false, err
+	}
 	*target = parsed
 	return true, nil
 }

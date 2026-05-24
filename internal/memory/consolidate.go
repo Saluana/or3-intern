@@ -399,7 +399,7 @@ func (c *Consolidator) writeConsolidatedTranscript(ctx context.Context, sessionK
 		embedding = make([]byte, 0)
 	}
 
-	extraNotes := buildExtraNotes(parsed, sql.NullInt64{Int64: lastIncludedID, Valid: lastIncludedID > 0}, c.EmbedFingerprint)
+	extraNotes := c.embedExtraNotes(ctx, buildExtraNotes(parsed, sql.NullInt64{Int64: lastIncludedID, Valid: lastIncludedID > 0}, c.EmbedFingerprint))
 	w := db.ConsolidationWrite{
 		SessionKey:       sessionKey,
 		ScopeKey:         memScope,
@@ -717,6 +717,32 @@ func trimTo(s string, max int) string {
 
 // buildExtraNotes converts parsed structured consolidation output into a slice
 // of TypedNoteInput ready to be written alongside the summary note.
+const maxConsolidationTypedEmbeds = 12
+
+func (c *Consolidator) embedExtraNotes(ctx context.Context, notes []db.TypedNoteInput) []db.TypedNoteInput {
+	if c == nil || c.Provider == nil || strings.TrimSpace(c.EmbedModel) == "" {
+		return notes
+	}
+	embedded := 0
+	for i := range notes {
+		if embedded >= maxConsolidationTypedEmbeds {
+			break
+		}
+		text := strings.TrimSpace(notes[i].Text)
+		if text == "" {
+			continue
+		}
+		vec, err := c.Provider.Embed(ctx, c.EmbedModel, text)
+		if err != nil {
+			log.Printf("consolidation typed note embed failed: %v", err)
+			continue
+		}
+		notes[i].Embedding = PackFloat32(vec)
+		embedded++
+	}
+	return notes
+}
+
 func buildExtraNotes(parsed consolidationOutput, sourceMsgID sql.NullInt64, embedFingerprint string) []db.TypedNoteInput {
 	type kindItems struct {
 		kind  string

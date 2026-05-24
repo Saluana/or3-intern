@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -238,11 +240,11 @@ func (s *serviceServer) bootstrapPendingApprovalCount(ctx context.Context) int {
 	if s == nil || s.broker == nil {
 		return 0
 	}
-	items, err := s.broker.ListApprovalRequestsFiltered(ctx, approval.StatusPending, "", 200)
+	count, err := s.broker.CountApprovalRequests(ctx, approval.StatusPending, "")
 	if err != nil {
 		return 0
 	}
-	return len(items)
+	return int(count)
 }
 
 func (s *serviceServer) bootstrapActiveJobCount(ctx context.Context) int {
@@ -311,11 +313,32 @@ func (s *serviceServer) startRestartServiceAction(ctx context.Context, r *http.R
 	if !ok {
 		return serviceActionResponse{ActionID: "restart-service", Status: "unavailable", Message: "restart is not available on this computer"}, http.StatusServiceUnavailable, nil
 	}
-	shellPath, err := resolveTerminalShell("sh")
-	if err != nil {
-		return serviceActionResponse{ActionID: "restart-service", Status: "unavailable"}, http.StatusServiceUnavailable, fmt.Errorf("restart shell is not available: %w", err)
+	approvalToken := ""
+	if r != nil {
+		approvalToken = serviceApprovalTokenFromRequest(r)
 	}
-	decision, err := s.evaluateTerminalApproval(ctx, shellPath, workingDir, "")
+	if s.broker == nil {
+		operationID := newServiceRequestID()
+		logPath, err := startDetachedServiceRestart(scriptPath, workingDir, s.unsafeDev, operationID)
+		if err != nil {
+			return serviceActionResponse{ActionID: "restart-service", Status: "failed", OperationID: operationID, LogPath: logPath}, http.StatusBadGateway, fmt.Errorf("restart failed to start: %w", err)
+		}
+		return serviceActionResponse{
+			ActionID:    "restart-service",
+			Status:      "accepted",
+			Message:     "restart requested",
+			OperationID: operationID,
+			LogPath:     logPath,
+		}, http.StatusAccepted, nil
+	}
+	decision, err := s.broker.EvaluateExec(ctx, approval.ExecEvaluation{
+		ExecutablePath: scriptPath,
+		Argv:           []string{scriptPath, "restart"},
+		WorkingDir:     workingDir,
+		ToolName:       "restart-service",
+		ScriptHash:     serviceScriptFileHash(scriptPath),
+		ApprovalToken:  approvalToken,
+	})
 	if err != nil {
 		return serviceActionResponse{ActionID: "restart-service", Status: "failed"}, http.StatusBadGateway, fmt.Errorf("restart approval failed: %w", err)
 	}
@@ -423,4 +446,21 @@ func (s *serviceServer) findServiceRestartScript() (scriptPath string, workingDi
 		return script, dir, true
 	}
 	return "", "", false
+}
+
+func serviceScriptFileHash(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%x", hash.Sum(nil))
 }

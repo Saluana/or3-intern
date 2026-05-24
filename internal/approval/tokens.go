@@ -61,6 +61,26 @@ func (b *Broker) VerifyApprovalTokenClaims(ctx context.Context, token string, su
 	return claims, nil
 }
 
+func (b *Broker) signTokenFromRecord(req db.ApprovalRequestRecord, record db.ApprovalTokenRecord) (string, error) {
+	issuedAt := time.UnixMilli(record.IssuedAt).UTC()
+	expiresAt := time.UnixMilli(record.ExpiresAt).UTC()
+	claims := ApprovalTokenClaims{
+		TokenID:       record.ID,
+		RequestID:     req.ID,
+		SubjectHash:   req.SubjectHash,
+		ExecutionHost: req.ExecutionHostID,
+		IssuedAt:      issuedAt.Unix(),
+		ExpiresAt:     expiresAt.Unix(),
+	}
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		return "", err
+	}
+	payloadPart := base64.RawURLEncoding.EncodeToString(payload)
+	signature := hex.EncodeToString(signToken(b.SignKey, payloadPart))
+	return payloadPart + "." + signature, nil
+}
+
 func (b *Broker) issueTokenForRequest(ctx context.Context, req db.ApprovalRequestRecord, actor string) (string, error) {
 	now := b.now()
 	record, err := b.DB.CreateApprovalToken(ctx, db.ApprovalTokenRecord{ApprovalRequestID: req.ID, SubjectHash: req.SubjectHash, IssuedAt: now.UnixMilli(), ExpiresAt: now.Add(time.Duration(b.Config.ApprovalTokenTTLSeconds) * time.Second).UnixMilli(), Issuer: actor})

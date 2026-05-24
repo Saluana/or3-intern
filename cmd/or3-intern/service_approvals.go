@@ -42,6 +42,23 @@ func (s *serviceServer) handleApprovals(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	trimmedPath := strings.Trim(path, "/")
+	if trimmedPath == "count" {
+		if r.Method != http.MethodGet {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		if s.broker == nil {
+			writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "approval broker unavailable"})
+			return
+		}
+		count, err := s.broker.CountApprovalRequests(r.Context(), r.URL.Query().Get("status"), r.URL.Query().Get("type"))
+		if err != nil {
+			writeServiceError(w, r, http.StatusBadGateway, "approval count unavailable", err)
+			return
+		}
+		writeServiceJSON(w, http.StatusOK, map[string]any{"count": count})
+		return
+	}
 	if trimmedPath == "expire" {
 		if r.Method != http.MethodPost {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
@@ -98,7 +115,11 @@ func (s *serviceServer) handleApprovals(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		if err := appSvc.RemoveAllowlist(r.Context(), id, serviceAuthIdentityFromContext(r.Context()).Actor); err != nil {
-			writeServiceError(w, r, http.StatusBadRequest, "allowlist remove failed", err)
+			status := http.StatusBadRequest
+			if strings.Contains(strings.ToLower(err.Error()), "not found") {
+				status = http.StatusNotFound
+			}
+			writeServiceError(w, r, status, "allowlist remove failed", err)
 			return
 		}
 		writeServiceJSON(w, http.StatusOK, map[string]any{"allowlist_id": id, "status": "removed"})

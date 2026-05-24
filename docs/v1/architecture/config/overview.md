@@ -20,7 +20,7 @@ When config is loaded, these steps happen in order:
 
 2. **Read config file** - `readConfigFile()` in `internal/config/load.go:32` reads the JSON from disk. If the file does not exist, it creates one with default values.
 
-3. **Apply env overrides** - `ApplyEnvOverrides()` in `internal/config/env.go:11` applies environment variables on top of the file config. Env vars always win over file settings.
+3. **Apply env overrides** - `ApplyEnvOverrides()` in `internal/config/env.go:11` applies environment variables on top of the file config. Most env vars win over file settings. `OR3_MODEL` is an exception: it only applies when provider and chat/agents/subagents routing still match factory defaults, so settings saved from or3-app persist across restarts.
 
 4. **Normalize and validate** - `normalizeAndValidateConfig()` in `internal/config/load.go:61` fills in missing values with defaults, normalizes strings (lowercase, trim spaces), and runs all validators.
 

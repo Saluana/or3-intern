@@ -77,6 +77,10 @@ func availableNormalizedToolCalls(calls []NormalizedToolCall, reg *tools.Registr
 		if name == "search" && reg.Get("web_search") != nil {
 			name = "web_search"
 		}
+		if name == "exec" && reg.Get("exec") == nil && reg.Get("doctor_status") != nil && isDoctorStatusExecCall(call.ArgumentsJSON) {
+			name = "doctor_status"
+			call.ArgumentsJSON = "{}"
+		}
 		if name == "" || reg.Get(name) == nil {
 			continue
 		}
@@ -85,6 +89,72 @@ func availableNormalizedToolCalls(calls []NormalizedToolCall, reg *tools.Registr
 		out = append(out, call)
 	}
 	return out
+}
+
+func isDoctorStatusExecCall(argsJSON string) bool {
+	var args map[string]any
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return false
+	}
+	command := strings.TrimSpace(stringFromAny(args["command"]))
+	if command != "" {
+		return strings.HasPrefix(command, "or3-intern status") || strings.Contains(command, " or3-intern status")
+	}
+	program := strings.TrimSpace(stringFromAny(args["program"]))
+	if program == "" {
+		program = strings.TrimSpace(stringFromAny(args["cmd"]))
+	}
+	argv := stringSliceFromAny(args["args"])
+	if len(argv) == 0 {
+		argv = stringSliceFromAny(args["argv"])
+		if len(argv) > 0 && strings.TrimSpace(program) == "" {
+			program = argv[0]
+			argv = argv[1:]
+		}
+	}
+	if filepathBase(program) != "or3-intern" {
+		return false
+	}
+	return len(argv) > 0 && argv[0] == "status"
+}
+
+func stringFromAny(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return typed
+	case fmt.Stringer:
+		return typed.String()
+	default:
+		return ""
+	}
+}
+
+func stringSliceFromAny(value any) []string {
+	items, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		if text := strings.TrimSpace(stringFromAny(item)); text != "" {
+			out = append(out, text)
+		}
+	}
+	return out
+}
+
+func filepathBase(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	path = strings.TrimRight(path, `/\`)
+	for i := len(path) - 1; i >= 0; i-- {
+		if path[i] == '/' || path[i] == '\\' {
+			return path[i+1:]
+		}
+	}
+	return path
 }
 
 func normalizedToProviderToolCalls(calls []NormalizedToolCall) []providers.ToolCall {
@@ -117,11 +187,27 @@ func unavailableNormalizedToolCallPrompt(calls []NormalizedToolCall, reg *tools.
 	if reg != nil {
 		available = reg.Names()
 	}
+	if containsToolName(names, "exec") && containsToolName(available, "doctor_status") {
+		return fmt.Sprintf(
+			"The previous assistant response attempted unavailable tool call(s): %s. This Doctor/Admin turn cannot use exec. Use doctor_status instead of `or3-intern status --advanced`, and use only currently advertised tool names: %s.",
+			strings.Join(names, ", "),
+			strings.Join(available, ", "),
+		)
+	}
 	return fmt.Sprintf(
 		"The previous assistant response attempted unavailable tool call(s): %s. Continue by answering directly or by using only currently advertised tool names: %s.",
 		strings.Join(names, ", "),
 		strings.Join(available, ", "),
 	)
+}
+
+func containsToolName(items []string, name string) bool {
+	for _, item := range items {
+		if strings.EqualFold(strings.TrimSpace(item), name) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c NormalizedToolCall) dedupeKey() string {

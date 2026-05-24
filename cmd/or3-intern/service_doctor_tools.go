@@ -14,6 +14,8 @@ import (
 	"unicode"
 
 	"or3-intern/internal/adminflow"
+	"or3-intern/internal/config"
+	"or3-intern/internal/configedit"
 	"or3-intern/internal/configmeta"
 	"or3-intern/internal/db"
 	"or3-intern/internal/doctor"
@@ -26,6 +28,7 @@ const (
 	doctorToolNameLogs             = "doctor_logs"
 	doctorToolNameDocsSearch       = "doctor_docs_search"
 	doctorToolNameConfigSearch     = "doctor_config_search"
+	doctorToolNameConfigCatalog    = "doctor_config_catalog"
 	doctorToolNameConfigMetadata   = "doctor_config_metadata"
 	doctorToolNameSkillDiagnostics = "doctor_skill_diagnostics"
 	doctorToolNameCreatePlan       = "doctor_create_plan"
@@ -94,7 +97,7 @@ func (s *serviceServer) doctorAdminBrainTools() []tools.Tool {
 				"known_failure_pattern": map[string]any{"type": "string", "description": "Alias for pattern when looking for a known failure signature."},
 				"since_ms":              map[string]any{"type": "integer", "description": "Optional lower bound in Unix milliseconds."},
 				"until_ms":              map[string]any{"type": "integer", "description": "Optional upper bound in Unix milliseconds."},
-				"limit":                 map[string]any{"type": "integer", "description": "Maximum rows to return. Defaults to 100 and is capped at 250."},
+				"limit":                 map[string]any{"type": "integer", "description": "Maximum rows to return. Defaults to 100 and is capped at 200."},
 			}},
 			run: s.executeDoctorLogsTool,
 		},
@@ -123,6 +126,17 @@ func (s *serviceServer) doctorAdminBrainTools() []tools.Tool {
 		},
 		doctorServiceTool{
 			server: s,
+			name:   doctorToolNameConfigCatalog,
+			desc:   "List Doctor-safe config field paths in a compact, paginated catalog. Use this to discover which section and field keys exist before calling doctor_config_search or doctor_config_metadata.",
+			params: map[string]any{"type": "object", "properties": map[string]any{
+				"section":   map[string]any{"type": "string", "description": "Optional section filter, such as provider, tools, skills, modelRouting, or service."},
+				"page":      map[string]any{"type": "integer", "description": "Page number (1-based). Defaults to 1."},
+				"page_size": map[string]any{"type": "integer", "description": "Fields per page. Defaults to 40 and is capped at 80."},
+			}},
+			run: s.executeDoctorConfigCatalogTool,
+		},
+		doctorServiceTool{
+			server: s,
 			name:   doctorToolNameConfigMetadata,
 			desc:   "Return backend-owned configuration metadata, including safe field paths, risk levels, restart requirements, validation rules, and rollback behavior. Use this before creating a settings plan.",
 			params: map[string]any{"type": "object", "properties": map[string]any{
@@ -147,7 +161,7 @@ func (s *serviceServer) doctorAdminBrainTools() []tools.Tool {
 				"conversation_id":    map[string]any{"type": "string", "description": "Current Doctor conversation/session ID."},
 				"accepted_card_id":   map[string]any{"type": "string", "description": "Optional finding or recommendation card ID that led to this plan."},
 				"approved_authority": map[string]any{"type": "string", "enum": []string{"safe", "notice", "warning", "danger"}, "description": "Maximum risk authority for validation. Omit unless the user explicitly scoped authority."},
-				"plan":               map[string]any{"type": "object", "description": "SettingsChangePlan JSON with title, summary, changes, and optional post_apply_checks."},
+				"plan":               map[string]any{"type": "object", "description": "SettingsChangePlan JSON with title, summary, changes, and optional post_apply_checks. Each change should include config_path (preferred, e.g. provider.model), operation (set/toggle/choose), and new_value. Use configure field keys from doctor_config_metadata for field when provided (e.g. provider_model, not model)."},
 			}, "required": []string{"plan"}},
 			run: s.executeDoctorCreatePlanTool,
 		},
@@ -184,9 +198,71 @@ func (s *serviceServer) executeDoctorStatusTool(ctx context.Context, params map[
 		"readiness":        response["readiness"],
 		"report":           response["report"],
 		"finding_cards":    response["finding_cards"],
+		"connected_apps":   doctorConnectedAppsSummary(s.config),
 		"recent_logs":      response["recent_logs"],
 		"pending_recovery": response["pending_recovery"],
 	}), nil
+}
+
+func doctorConnectedAppsSummary(cfg config.Config) []map[string]any {
+	type channelApp struct {
+		id      string
+		name    string
+		enabled bool
+		detail  string
+	}
+	apps := []channelApp{
+		{
+			id:      "telegram",
+			name:    "Telegram",
+			enabled: cfg.Channels.Telegram.Enabled,
+			detail:  doctorChannelConnectionDetail(cfg.Channels.Telegram.Enabled, cfg.Channels.Telegram.Token != ""),
+		},
+		{
+			id:      "slack",
+			name:    "Slack",
+			enabled: cfg.Channels.Slack.Enabled,
+			detail:  doctorChannelConnectionDetail(cfg.Channels.Slack.Enabled, cfg.Channels.Slack.BotToken != "" && cfg.Channels.Slack.AppToken != ""),
+		},
+		{
+			id:      "discord",
+			name:    "Discord",
+			enabled: cfg.Channels.Discord.Enabled,
+			detail:  doctorChannelConnectionDetail(cfg.Channels.Discord.Enabled, cfg.Channels.Discord.Token != ""),
+		},
+		{
+			id:      "whatsapp",
+			name:    "WhatsApp",
+			enabled: cfg.Channels.WhatsApp.Enabled,
+			detail:  doctorChannelConnectionDetail(cfg.Channels.WhatsApp.Enabled, cfg.Channels.WhatsApp.BridgeURL != ""),
+		},
+		{
+			id:      "email",
+			name:    "Email",
+			enabled: cfg.Channels.Email.Enabled,
+			detail:  doctorChannelConnectionDetail(cfg.Channels.Email.Enabled, cfg.Channels.Email.IMAPHost != "" && cfg.Channels.Email.SMTPHost != ""),
+		},
+	}
+	items := make([]map[string]any, 0, len(apps))
+	for _, app := range apps {
+		items = append(items, map[string]any{
+			"id":      app.id,
+			"name":    app.name,
+			"enabled": app.enabled,
+			"detail":  app.detail,
+		})
+	}
+	return items
+}
+
+func doctorChannelConnectionDetail(enabled, configured bool) string {
+	if !enabled {
+		return "off"
+	}
+	if configured {
+		return "on and configured"
+	}
+	return "on but still needs setup"
 }
 
 func (s *serviceServer) executeDoctorLogsTool(ctx context.Context, params map[string]any) (string, error) {
@@ -194,13 +270,8 @@ func (s *serviceServer) executeDoctorLogsTool(ctx context.Context, params map[st
 	if store == nil {
 		return "", fmt.Errorf("doctor database unavailable")
 	}
-	limit := doctorToolInt(params, "limit", 100)
-	if limit <= 0 {
-		limit = 100
-	}
-	if limit > 250 {
-		limit = 250
-	}
+	requestedLimit := doctorToolInt(params, "limit", 100)
+	limit := clampDoctorDiagnosticLogLimit(requestedLimit)
 	sinceMS := doctorToolInt64(params, "since_ms", 0)
 	untilMS := doctorToolInt64(params, "until_ms", 0)
 	if sinceMS > 0 && untilMS > 0 && sinceMS > untilMS {
@@ -220,7 +291,106 @@ func (s *serviceServer) executeDoctorLogsTool(ctx context.Context, params map[st
 		return "", err
 	}
 	summary := fmt.Sprintf("Returned %d redacted Doctor diagnostic log events.", len(items))
-	return encodeDoctorToolResult("doctor_logs", true, summary, map[string]any{"items": items, "count": len(items)}), nil
+	return encodeDoctorToolResult("doctor_logs", true, summary, map[string]any{"items": items, "count": len(items), "limit": limit, "requested_limit": requestedLimit}), nil
+}
+
+func (s *serviceServer) executeDoctorConfigCatalogTool(ctx context.Context, params map[string]any) (string, error) {
+	_ = ctx
+	configmeta.EnsureFirstSliceFieldsRegistered()
+	section := strings.TrimSpace(doctorToolString(params, "section"))
+	page := doctorToolInt(params, "page", 1)
+	if page < 1 {
+		page = 1
+	}
+	pageSize := doctorToolInt(params, "page_size", 40)
+	if pageSize <= 0 {
+		pageSize = 40
+	}
+	if pageSize > 80 {
+		pageSize = 80
+	}
+
+	type catalogEntry struct {
+		Path    string
+		Key     string
+		Section string
+	}
+	entries := make([]catalogEntry, 0, 64)
+	sections := make([]string, 0, 16)
+	seenSection := map[string]struct{}{}
+	for _, field := range configmeta.List() {
+		if section != "" && !strings.EqualFold(strings.TrimSpace(field.Section), section) {
+			continue
+		}
+		if _, ok := seenSection[field.Section]; !ok && strings.TrimSpace(field.Section) != "" {
+			seenSection[field.Section] = struct{}{}
+			sections = append(sections, field.Section)
+		}
+		path := strings.TrimSpace(field.Path)
+		if path == "" {
+			continue
+		}
+		entries = append(entries, catalogEntry{
+			Path:    path,
+			Key:     configedit.ConfigureFieldKeyForMetadata(field),
+			Section: field.Section,
+		})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		left := entries[i].Path
+		right := entries[j].Path
+		if left == right {
+			return entries[i].Key < entries[j].Key
+		}
+		return left < right
+	})
+	sort.Strings(sections)
+
+	total := len(entries)
+	totalPages := 1
+	if total > 0 {
+		totalPages = (total + pageSize - 1) / pageSize
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+	if page < 1 {
+		page = 1
+	}
+	start := (page - 1) * pageSize
+	end := start + pageSize
+	if start > total {
+		start = total
+	}
+	if end > total {
+		end = total
+	}
+	pageEntries := entries[start:end]
+	fields := make([]map[string]any, 0, len(pageEntries))
+	for _, entry := range pageEntries {
+		fields = append(fields, map[string]any{
+			"path":    entry.Path,
+			"key":     entry.Key,
+			"section": entry.Section,
+		})
+	}
+	nextPage := 0
+	if page < totalPages {
+		nextPage = page + 1
+	}
+	summary := fmt.Sprintf("Returned %d of %d Doctor-safe config fields (page %d/%d).", len(fields), total, page, totalPages)
+	return encodeDoctorToolResult(doctorToolNameConfigCatalog, true, summary, map[string]any{
+		"section":      section,
+		"page":         page,
+		"page_size":    pageSize,
+		"total":        total,
+		"total_pages":  totalPages,
+		"sections":     sections,
+		"fields":       fields,
+		"has_more":     nextPage > 0,
+		"next_page":    nextPage,
+		"compact_hint": "Use doctor_config_search for current values or doctor_config_metadata for one field's rules.",
+	}), nil
 }
 
 func (s *serviceServer) executeDoctorConfigMetadataTool(ctx context.Context, params map[string]any) (string, error) {
@@ -403,7 +573,7 @@ func (s *serviceServer) executeDoctorSkillDiagnosticsTool(ctx context.Context, p
 			Env:      cloneSkillEnv(entry.Env),
 			Config:   cloneSkillConfig(entry.Config),
 		},
-		Runner: skilldiag.ExecRunner{},
+		SkipCommandChecks: true,
 	})
 	plans := serviceDoctorPlansFromSkillDiag(result.SuggestedPlans)
 	summary := fmt.Sprintf("Skill %s diagnostics status: %s; suggested plans: %d.", skill.Name, result.Status, len(plans))
@@ -424,13 +594,14 @@ func (s *serviceServer) executeDoctorCreatePlanTool(ctx context.Context, params 
 	if err := doctorToolDecode(params["plan"], &plan); err != nil {
 		return "", fmt.Errorf("invalid plan: %w", err)
 	}
+	normalizeDoctorToolPlanInput(params["plan"], &plan)
 	if strings.TrimSpace(plan.ID) == "" {
 		plan.ID = newDoctorID("scp")
 	}
 	if strings.TrimSpace(plan.CreatedBy) == "" {
 		plan.CreatedBy = "doctor-admin-brain"
 	}
-	state, err := (adminflow.PlanValidator{}).Stage(s.config, &plan, adminflow.ValidationOptions{ApprovedAuthority: configmeta.RiskLevel(doctorToolString(params, "approved_authority"))})
+	state, err := (adminflow.PlanValidator{}).Stage(s.config, &plan, adminflow.ValidationOptions{ApprovedAuthority: serviceDoctorApprovedAuthority(ctx)})
 	if err != nil {
 		return encodeDoctorToolResult("doctor_plan", false, err.Error(), map[string]any{"plan": plan, "validation": state.Validation, "error": err.Error()}), nil
 	}
@@ -762,9 +933,43 @@ func doctorConfigSearchItem(s *serviceServer, field configmeta.ConfigFieldMetada
 	if includeCurrent && s != nil {
 		if value, ok := doctorConfigValueForField(s.config, field); ok {
 			item["current_value"] = value
+			if !doctorFieldExposeFullCurrentValue(field) {
+				item["current_value"] = doctorPublicConfigValueSummaryOnly(value)
+			}
 		}
 	}
 	return item
+}
+
+func doctorFieldExposeFullCurrentValue(field configmeta.ConfigFieldMetadata) bool {
+	if field.Secret || field.AdvancedOnly {
+		return false
+	}
+	switch field.Risk {
+	case configmeta.RiskSafe:
+		return true
+	case configmeta.RiskNotice:
+		return len(field.AllowedValues) > 0
+	default:
+		return false
+	}
+}
+
+func doctorPublicConfigValueSummaryOnly(value adminflow.RedactedValue) adminflow.RedactedValue {
+	if value.Redacted {
+		return value
+	}
+	if value.Summary != "" {
+		return adminflow.RedactedValue{Present: true, Summary: value.Summary, Redacted: true}
+	}
+	if text, ok := value.Value.(string); ok && strings.TrimSpace(text) != "" {
+		summary := strings.TrimSpace(text)
+		if len(summary) > 120 {
+			summary = strings.TrimSpace(summary[:120]) + "..."
+		}
+		return adminflow.RedactedValue{Present: true, Summary: summary, Redacted: true}
+	}
+	return adminflow.RedactValue(value.Value, true)
 }
 
 func doctorConfigValueForField(cfg any, field configmeta.ConfigFieldMetadata) (adminflow.RedactedValue, bool) {
@@ -847,9 +1052,33 @@ func doctorResolveConfigPathValue(source any, path string) (any, bool) {
 	return value.Interface(), true
 }
 
+func doctorOperationalConfigString(text string) bool {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return false
+	}
+	if strings.Contains(text, "/") || strings.Contains(text, "\\") {
+		return true
+	}
+	lower := strings.ToLower(text)
+	for _, hint := range []string{".local", ".internal", "localhost", "127.0.0.1", "0.0.0.0", ":\\", "://"} {
+		if strings.Contains(lower, hint) {
+			return true
+		}
+	}
+	return false
+}
+
 func doctorPublicConfigValue(value any) adminflow.RedactedValue {
 	if text, ok := value.(string); ok {
 		text = adminflow.SanitizeForAI(text)
+		if doctorOperationalConfigString(text) {
+			summary := text
+			if len(summary) > 120 {
+				summary = strings.TrimSpace(summary[:120]) + "..."
+			}
+			return adminflow.RedactedValue{Present: true, Summary: summary, Redacted: true}
+		}
 		if len(text) > 300 {
 			return adminflow.RedactedValue{Present: true, Summary: strings.TrimSpace(text[:300]) + "..."}
 		}
@@ -891,6 +1120,112 @@ func doctorConfigValuePresent(value any) bool {
 	default:
 		return !reflectValue.IsZero()
 	}
+}
+
+func doctorEmptyFinalSummaryFromToolResult(toolName, raw string) (string, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", false
+	}
+	result, ok := tools.DecodeToolResult(raw)
+	if !ok || !result.OK {
+		return "", false
+	}
+	kind := strings.TrimSpace(result.Kind)
+	if kind == "" {
+		kind = strings.TrimSpace(toolName)
+	}
+	switch kind {
+	case doctorToolNameConfigSearch:
+		fields, _ := result.Stats["fields"].([]any)
+		if len(fields) == 0 {
+			summary := strings.TrimSpace(result.Summary)
+			if summary != "" {
+				return summary, true
+			}
+			return "I couldn't find any matching settings for that question.", true
+		}
+		if len(fields) == 1 {
+			field, _ := fields[0].(map[string]any)
+			label := doctorConfigFieldLabel(field)
+			value := doctorConfigFieldValueLabel(field)
+			description := strings.TrimSpace(doctorToolString(field, "description"))
+			text := fmt.Sprintf("Your **%s** is set to **%s**.", label, value)
+			if description != "" {
+				text += " " + description
+			}
+			return text, true
+		}
+		lines := make([]string, 0, minInt(6, len(fields)))
+		for i, item := range fields {
+			if i == 6 {
+				break
+			}
+			field, _ := item.(map[string]any)
+			label := doctorConfigFieldLabel(field)
+			value := doctorConfigFieldValueLabel(field)
+			lines = append(lines, fmt.Sprintf("- **%s**: %s", label, value))
+		}
+		suffix := ""
+		if len(fields) > 6 {
+			suffix = fmt.Sprintf("\n\n…and %d more.", len(fields)-6)
+		}
+		return fmt.Sprintf("Here are the matching settings:\n\n%s%s", strings.Join(lines, "\n"), suffix), true
+	case doctorToolNameStatus:
+		summary := strings.TrimSpace(result.Summary)
+		if summary != "" {
+			return summary, true
+		}
+	}
+	summary := strings.TrimSpace(result.Summary)
+	if summary != "" {
+		return summary, true
+	}
+	return "", false
+}
+
+func doctorConfigFieldLabel(field map[string]any) string {
+	for _, key := range []string{"label", "key", "path"} {
+		if value := strings.TrimSpace(doctorToolString(field, key)); value != "" {
+			return value
+		}
+	}
+	return "Setting"
+}
+
+func doctorConfigFieldValueLabel(field map[string]any) string {
+	current, ok := field["current_value"].(map[string]any)
+	if !ok || current == nil {
+		return "not set"
+	}
+	if summary := strings.TrimSpace(doctorToolString(current, "summary")); summary != "" {
+		return summary
+	}
+	if present, ok := current["present"].(bool); ok && !present {
+		return "not set"
+	}
+	if redacted, ok := current["redacted"].(bool); ok && redacted {
+		if present, ok := current["present"].(bool); ok && present {
+			return "configured (hidden)"
+		}
+		return "not set"
+	}
+	switch value := current["value"].(type) {
+	case bool:
+		if value {
+			return "On"
+		}
+		return "Off"
+	case string:
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	default:
+		if value != nil {
+			return fmt.Sprint(value)
+		}
+	}
+	return "not set"
 }
 
 func encodeDoctorToolResult(kind string, ok bool, summary string, stats map[string]any) string {
@@ -1008,3 +1343,58 @@ func doctorToolDecode(value any, target any) error {
 	}
 	return json.Unmarshal(data, target)
 }
+
+func normalizeDoctorToolPlanInput(raw any, plan *adminflow.SettingsChangePlan) {
+	if plan == nil {
+		return
+	}
+	rawPlan, ok := raw.(map[string]any)
+	if !ok {
+		return
+	}
+	rawChanges, ok := rawPlan["changes"].([]any)
+	if !ok {
+		return
+	}
+	configmeta.EnsureFirstSliceFieldsRegistered()
+	for i := range plan.Changes {
+		if i >= len(rawChanges) {
+			break
+		}
+		rawChange, ok := rawChanges[i].(map[string]any)
+		if !ok {
+			continue
+		}
+		change := &plan.Changes[i]
+		if strings.TrimSpace(change.ConfigPath) == "" {
+			change.ConfigPath = serviceFirstNonEmpty(
+				doctorToolString(rawChange, "config_path"),
+				doctorToolString(rawChange, "configPath"),
+				doctorToolString(rawChange, "path"),
+			)
+		}
+	}
+	adminflow.NormalizePlanChanges(plan.Changes)
+	for i := range plan.Changes {
+		if i >= len(rawChanges) {
+			break
+		}
+		rawChange, ok := rawChanges[i].(map[string]any)
+		if !ok {
+			continue
+		}
+		change := &plan.Changes[i]
+		if strings.TrimSpace(change.Operation) == "" {
+			change.Operation = serviceFirstNonEmpty(doctorToolString(rawChange, "operation"), doctorToolString(rawChange, "op"), "set")
+		}
+		if change.NewValue.Value == nil {
+			for _, key := range []string{"value", "new_value", "newValue", "new"} {
+				if value, ok := rawChange[key]; ok {
+					change.NewValue.Value = value
+					break
+				}
+			}
+		}
+	}
+}
+

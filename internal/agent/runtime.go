@@ -414,10 +414,7 @@ func (r *Runtime) BuildPromptSnapshot(ctx context.Context, sessionKey string, us
 	if err != nil {
 		return nil, err
 	}
-	messages := append([]providers.ChatMessage{}, pp.System...)
-	if prompt := trustedSystemPromptFromContext(ctx); prompt != "" {
-		messages = append(messages, providers.ChatMessage{Role: "system", Content: prompt})
-	}
+	messages := promptSnapshotSystemMessages(ctx, pp.System)
 	messages = append(messages, pp.History...)
 	if len(pp.History) == 0 || pp.History[len(pp.History)-1].Role != "user" {
 		messages = append(messages, providers.ChatMessage{Role: "user", Content: userMessage})
@@ -434,15 +431,19 @@ func (r *Runtime) BuildPromptSnapshotWithOptions(ctx context.Context, opts Build
 	if err != nil {
 		return nil, err
 	}
-	messages := append([]providers.ChatMessage{}, pp.System...)
-	if prompt := trustedSystemPromptFromContext(ctx); prompt != "" {
-		messages = append(messages, providers.ChatMessage{Role: "system", Content: prompt})
-	}
+	messages := promptSnapshotSystemMessages(ctx, pp.System)
 	messages = append(messages, pp.History...)
 	if len(pp.History) == 0 || pp.History[len(pp.History)-1].Role != "user" {
 		messages = append(messages, providers.ChatMessage{Role: "user", Content: opts.UserMessage})
 	}
 	return messages, nil
+}
+
+func promptSnapshotSystemMessages(ctx context.Context, bootstrap []providers.ChatMessage) []providers.ChatMessage {
+	if prompt := trustedSystemPromptFromContext(ctx); prompt != "" {
+		return []providers.ChatMessage{{Role: "system", Content: prompt}}
+	}
+	return append([]providers.ChatMessage{}, bootstrap...)
 }
 
 // RunBackground executes a background task without auto-persisting a user event.

@@ -144,6 +144,52 @@ func TestServiceObserver_RecoversEmptyFinalTextAfterToolWork(t *testing.T) {
 	}
 }
 
+func TestServiceObserver_RecoversDoctorConfigSearchWithoutModelFinalText(t *testing.T) {
+	raw := encodeDoctorToolResult("doctor_config_search", true, "Found 1 Doctor-safe config fields.", map[string]any{
+		"count": 1,
+		"fields": []map[string]any{
+			{
+				"label":       "Default Model",
+				"key":         "model",
+				"path":        "provider.model",
+				"description": "The default model to use for chat and agents",
+				"current_value": map[string]any{
+					"value":   "nvidia/nemotron-3-super-120b-a12b:free",
+					"present": true,
+				},
+			},
+		},
+	})
+	observer := &serviceObserver{}
+	observer.OnToolResult(context.Background(), "doctor_config_search", raw, nil)
+
+	finalText, recovered := observer.finalTextForCompletion("")
+	if !recovered {
+		t.Fatal("expected empty final text to be recovered after doctor_config_search")
+	}
+	if !strings.Contains(finalText, "Default Model") || !strings.Contains(finalText, "nvidia/nemotron-3-super-120b-a12b:free") {
+		t.Fatalf("expected synthesized model answer, got %q", finalText)
+	}
+}
+
+func TestServiceObserver_RecoversUnavailableExecWithDoctorGuidance(t *testing.T) {
+	observer := &serviceObserver{}
+	observer.OnToolLifecycle(context.Background(), agent.ToolLifecycleEvent{
+		ToolCallID:    "call_exec",
+		Name:          "exec",
+		Status:        "failed",
+		ResultPreview: "tool not available in this turn",
+	})
+
+	finalText, recovered := observer.finalTextForCompletion("")
+	if !recovered {
+		t.Fatal("expected empty final text to be recovered after unavailable exec")
+	}
+	if !strings.Contains(finalText, "No command was run") || !strings.Contains(finalText, "Doctor status/config tools") {
+		t.Fatalf("expected Doctor-safe exec guidance, got %q", finalText)
+	}
+}
+
 func TestServiceObserver_RecoversEmptyApprovalResumeWithoutToolWork(t *testing.T) {
 	observer := &serviceObserver{}
 

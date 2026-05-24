@@ -39,6 +39,8 @@ func (PlanValidator) Stage(current config.Config, plan *SettingsChangePlan, opts
 		return ValidationState{}, fmt.Errorf("%w: plan is required", ErrPlanValidation)
 	}
 
+	NormalizePlanChanges(plan.Changes)
+
 	next := cloneConfig(current)
 	results := make([]PlanValidationResult, 0, len(plan.Changes)+4)
 
@@ -58,10 +60,15 @@ func (PlanValidator) Stage(current config.Config, plan *SettingsChangePlan, opts
 			return ValidationState{Validation: results}, fmt.Errorf("%w: %s", ErrPlanValidation, err)
 		}
 		if !changed {
-			message := fmt.Sprintf("unsupported field update: %s.%s", change.Section, change.Field)
+			message := fmt.Sprintf("unsupported field update: %s", changeDisplayPath(change))
 			results = append(results, PlanValidationResult{Check: applyCheckName(change), Status: "fail", Message: message})
 			plan.ValidationResults = results
 			return ValidationState{Validation: results}, fmt.Errorf("%w: %s", ErrPlanValidation, message)
+		}
+		if err := validatePlanChangeValue(change); err != nil {
+			results = append(results, PlanValidationResult{Check: applyCheckName(change), Status: "fail", Message: err.Error()})
+			plan.ValidationResults = results
+			return ValidationState{Validation: results}, fmt.Errorf("%w: %s", ErrPlanValidation, err)
 		}
 		results = append(results, PlanValidationResult{Check: applyCheckName(change), Status: "pass"})
 	}
@@ -123,8 +130,58 @@ func applyPlanChange(cfg *config.Config, change SettingsPlanChange) (bool, error
 	}
 }
 
+func validatePlanChangeValue(change SettingsPlanChange) error {
+	if !isProviderModelChange(change) {
+		return nil
+	}
+	model := strings.TrimSpace(stringifyPlanValue(change.NewValue.Value))
+	if model == "" {
+		return fmt.Errorf("provider model must not be empty")
+	}
+	if strings.ContainsAny(model, " \t\n\r") {
+		return fmt.Errorf("provider model %q looks like a display name; use the exact provider model ID, for example openrouter/deepseek/deepseek-chat-v3-0324", model)
+	}
+	return nil
+}
+
+func isProviderModelChange(change SettingsPlanChange) bool {
+	if change.ConfigPath == "provider.model" {
+		return true
+	}
+	if change.Section != "provider" {
+		return false
+	}
+	switch change.Field {
+	case "provider_model", "model":
+		return true
+	default:
+		return false
+	}
+}
+
+func changeDisplayPath(change SettingsPlanChange) string {
+	if strings.TrimSpace(change.ConfigPath) != "" {
+		return strings.TrimSpace(change.ConfigPath)
+	}
+	section := strings.TrimSpace(change.Section)
+	field := strings.TrimSpace(change.Field)
+	if section != "" && field != "" {
+		return section + "." + field
+	}
+	if field != "" {
+		return field
+	}
+	if section != "" {
+		return section
+	}
+	return "unknown setting"
+}
+
 func validateExpectedOldValue(current config.Config, change SettingsPlanChange) error {
 	if strings.TrimSpace(change.ConfigPath) == "" {
+		return nil
+	}
+	if change.OldValue.Value == nil && !change.OldValue.Redacted && !change.OldValue.Present && strings.TrimSpace(change.OldValue.Summary) == "" {
 		return nil
 	}
 	currentValue, ok := resolveConfigPathValue(current, change.ConfigPath)

@@ -60,19 +60,20 @@ func (a *ServiceApp) SetConfig(cfg config.Config) {
 }
 
 type TurnRequest struct {
-	SessionKey    string
-	Message       string
-	SystemPrompt  string
-	Meta          map[string]any
-	AllowedTools  []string
-	RestrictTools bool
-	ProfileName   string
-	Capability    tools.CapabilityLevel
-	ApprovalToken string
-	Actor         string
-	Role          string
-	Observer      agent.ConversationObserver
-	Streamer      channels.StreamingChannel
+	SessionKey          string
+	Message             string
+	SystemPrompt        string
+	Meta                map[string]any
+	AllowedTools        []string
+	RestrictTools       bool
+	ProfileName         string
+	Capability          tools.CapabilityLevel
+	ApprovalToken       string
+	Actor               string
+	Role                string
+	Observer            agent.ConversationObserver
+	Streamer            channels.StreamingChannel
+	ToolBudgetOverrides *agent.ToolBudgetOverrides
 }
 
 func (a *ServiceApp) serviceRunContext(ctx context.Context, sessionKey, profileName, approvalToken, actor, role string, capability tools.CapabilityLevel, observer agent.ConversationObserver, streamer channels.StreamingChannel) context.Context {
@@ -119,6 +120,9 @@ func (a *ServiceApp) RunTurn(ctx context.Context, req TurnRequest) error {
 	if req.RestrictTools {
 		filtered := a.serviceToolRegistry(req.AllowedTools, req.RestrictTools)
 		runCtx = agent.ContextWithToolRegistry(runCtx, filtered)
+	}
+	if req.ToolBudgetOverrides != nil {
+		runCtx = agent.ContextWithToolBudgetOverrides(runCtx, *req.ToolBudgetOverrides)
 	}
 	meta := cloneMap(req.Meta)
 	if strings.TrimSpace(req.ProfileName) != "" {

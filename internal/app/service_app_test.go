@@ -114,7 +114,7 @@ func TestRunTurn_UsesSystemPromptWithoutPersistingIt(t *testing.T) {
 		Provider: provider,
 		Model:    "gpt-4",
 		Tools:    tools.NewRegistry(),
-		Builder:  &agent.Builder{DB: database, HistoryMax: 10},
+		Builder:  &agent.Builder{DB: database, HistoryMax: 10, Soul: "SOUL.bootstrap.marker"},
 	}
 	app := &ServiceApp{runtime: runtime}
 
@@ -129,10 +129,17 @@ func TestRunTurn_UsesSystemPromptWithoutPersistingIt(t *testing.T) {
 
 	foundPrompt := false
 	foundUser := false
+	systemCount := 0
 	for _, message := range captured.Messages {
 		content := fmt.Sprint(message.Content)
-		if message.Role == "system" && content == "trusted doctor context secret-marker" {
-			foundPrompt = true
+		if message.Role == "system" {
+			systemCount++
+			if content == "trusted doctor context secret-marker" {
+				foundPrompt = true
+			}
+			if strings.Contains(content, "SOUL.bootstrap.marker") {
+				t.Fatalf("expected trusted system prompt to replace chat bootstrap, got %#v", captured.Messages)
+			}
 		}
 		if message.Role == "user" && content == "visible user words" {
 			foundUser = true
@@ -140,6 +147,9 @@ func TestRunTurn_UsesSystemPromptWithoutPersistingIt(t *testing.T) {
 	}
 	if !foundPrompt || !foundUser {
 		t.Fatalf("expected provider request to include trusted system prompt and visible user text, got %#v", captured.Messages)
+	}
+	if systemCount != 1 {
+		t.Fatalf("expected exactly one system message for trusted doctor prompt, got %d in %#v", systemCount, captured.Messages)
 	}
 
 	page, err := database.ListChatMessages(context.Background(), "doctor:test", 0, 10)

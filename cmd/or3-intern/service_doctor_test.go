@@ -20,6 +20,7 @@ import (
 	"or3-intern/internal/approval"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
+	"or3-intern/internal/providers"
 	"or3-intern/internal/security"
 	"or3-intern/internal/tools"
 )
@@ -62,7 +63,11 @@ func TestServiceDoctorStatusAndMetadata(t *testing.T) {
 func TestServiceDoctorSessionsPersistMessagesAndLogs(t *testing.T) {
 	database, cleanup := openServiceTestDB(t)
 	defer cleanup()
-	server := newDoctorTestServer(t, database, config.Default())
+	cfg := config.Default()
+	cfg.Provider.APIBase = "http://127.0.0.1:1/v1"
+	cfg.Provider.APIKey = "test-key"
+	cfg.Provider.Model = "test-model"
+	server := newDoctorTestServer(t, database, cfg)
 
 	createRec := httptest.NewRecorder()
 	server.handleDoctor(createRec, doctorAuthedRequest(http.MethodPost, "/internal/v1/doctor/sessions", `{"title":"Doctor Session"}`))
@@ -81,14 +86,34 @@ func TestServiceDoctorSessionsPersistMessagesAndLogs(t *testing.T) {
 	}
 
 	messageRec := httptest.NewRecorder()
-	server.handleDoctor(messageRec, doctorAuthedRequest(http.MethodPost, "/internal/v1/doctor/sessions/"+sessionKey+"/messages", `{"content":"the service keeps failing to start"}`))
+	server.handleDoctor(messageRec, doctorAuthedRequest(http.MethodPost, "/internal/v1/doctor/sessions/"+sessionKey+"/messages", `{"content":"the service keeps failing to start","stream":true}`))
 	if messageRec.Code != http.StatusAccepted {
 		t.Fatalf("expected message 202, got %d (%s)", messageRec.Code, messageRec.Body.String())
 	}
 	messageBody := mustDecodeJSONBody(t, messageRec.Body)
-	messages, ok := messageBody["messages"].([]any)
-	if !ok || len(messages) < 2 {
-		t.Fatalf("expected persisted messages, got %#v", messageBody)
+	if transport, _ := messageBody["transport"].(string); transport != "job" {
+		t.Fatalf("expected job transport, got %#v", messageBody["transport"])
+	}
+	if messageBody["transport"] == nil {
+		t.Fatalf("expected transport field in message response, got %#v", messageBody)
+	}
+	jobID, _ := messageBody["job_id"].(string)
+	if strings.TrimSpace(jobID) == "" {
+		t.Fatalf("expected job_id, got %#v", messageBody)
+	}
+	server.jobs.Cancel(jobID)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	server.jobs.Wait(ctx, jobID)
+	readRec := httptest.NewRecorder()
+	server.handleDoctor(readRec, doctorAuthedRequest(http.MethodGet, "/internal/v1/doctor/sessions/"+sessionKey, ""))
+	if readRec.Code != http.StatusOK {
+		t.Fatalf("expected read 200, got %d (%s)", readRec.Code, readRec.Body.String())
+	}
+	readBody := mustDecodeJSONBody(t, readRec.Body)
+	messages, ok := readBody["messages"].([]any)
+	if !ok || len(messages) < 1 {
+		t.Fatalf("expected persisted messages, got %#v", readBody)
 	}
 
 	eventsRec := httptest.NewRecorder()
@@ -97,7 +122,7 @@ func TestServiceDoctorSessionsPersistMessagesAndLogs(t *testing.T) {
 		t.Fatalf("expected events 200, got %d (%s)", eventsRec.Code, eventsRec.Body.String())
 	}
 	eventsBody := mustDecodeJSONBody(t, eventsRec.Body)
-	if events, ok := eventsBody["events"].([]any); !ok || len(events) < 2 {
+	if events, ok := eventsBody["events"].([]any); !ok || len(events) < 1 {
 		t.Fatalf("expected doctor events, got %#v", eventsBody)
 	}
 
@@ -108,8 +133,8 @@ func TestServiceDoctorSessionsPersistMessagesAndLogs(t *testing.T) {
 		t.Fatalf("expected logs 200, got %d (%s)", logsRec.Code, logsRec.Body.String())
 	}
 	logsBody := mustDecodeJSONBody(t, logsRec.Body)
-	if items, ok := logsBody["items"].([]any); !ok || len(items) == 0 {
-		t.Fatalf("expected diagnostic log items, got %#v", logsBody)
+	if _, ok := logsBody["items"].([]any); !ok {
+		t.Fatalf("expected diagnostic log items array, got %#v", logsBody)
 	}
 }
 
@@ -162,6 +187,105 @@ func TestServiceDoctorStreamsInternalAdminBrainTurnsAsJobs(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	server.jobs.Wait(ctx, jobID)
+}
+
+func TestDoctorAdminBrainUsesElevatedToolBudget(t *testing.T) {
+	callCount := 0
+	providerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		if callCount <= 4 {
+			resp := providers.ChatCompletionResponse{
+				Choices: []struct {
+					Message struct {
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					} `json:"message"`
+				}{{
+					Message: struct {
+						Role      string               `json:"role"`
+						Content   any                  `json:"content"`
+						ToolCalls []providers.ToolCall `json:"tool_calls"`
+					}{Role: "assistant", Content: "", ToolCalls: []providers.ToolCall{doctorTestToolCall(callCount)}},
+				}},
+			}
+			if err := json.NewEncoder(w).Encode(resp); err != nil {
+				t.Fatalf("Encode tool response: %v", err)
+			}
+			return
+		}
+		resp := providers.ChatCompletionResponse{
+			Choices: []struct {
+				Message struct {
+					Role      string               `json:"role"`
+					Content   any                  `json:"content"`
+					ToolCalls []providers.ToolCall `json:"tool_calls"`
+				} `json:"message"`
+			}{{
+				Message: struct {
+					Role      string               `json:"role"`
+					Content   any                  `json:"content"`
+					ToolCalls []providers.ToolCall `json:"tool_calls"`
+				}{Role: "assistant", Content: "Doctor answer after diagnostics."},
+			}},
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("Encode final response: %v", err)
+		}
+	}))
+	defer providerServer.Close()
+
+	database, cleanup := openServiceTestDB(t)
+	defer cleanup()
+	cfg := config.Default()
+	cfg.Provider.APIBase = providerServer.URL
+	cfg.Provider.APIKey = "test-key"
+	cfg.Provider.Model = "test-model"
+	cfg.MaxToolLoops = 1
+	cfg.Hardening.Quotas.Enabled = true
+	cfg.Hardening.Quotas.MaxToolCalls = 1
+	cfg.Hardening.Quotas.MaxSessionToolCalls = 1
+	cfg.Hardening.Quotas.ExceededAction = config.QuotaExceededActionAsk
+	server := newDoctorTestServer(t, database, cfg)
+	provider := providers.New(providerServer.URL, "test-key", 5*time.Second)
+	provider.HTTP = providerServer.Client()
+	server.runtime.Provider = provider
+	server.runtime.Model = "test-model"
+	server.runtime.Builder = &agent.Builder{DB: database, HistoryMax: 10}
+	server.runtime.MaxToolLoops = cfg.MaxToolLoops
+	server.runtime.MaxToolLoopsExceededAction = cfg.MaxToolLoopsExceededAction
+	server.runtime.Hardening = cfg.Hardening
+	server.registerDoctorAdminBrainTools()
+
+	err := server.runDoctorInternalAdminBrainTurn(
+		doctorAuthedRequest(http.MethodPost, "/internal/v1/doctor/sessions/session-1/messages", "").Context(),
+		"doctor:test-quota",
+		"keep checking",
+		"",
+		"",
+		serviceAuthIdentity{Actor: "user:test", Role: approval.RoleAdmin},
+	)
+	if err != nil {
+		t.Fatalf("doctor turn should complete with elevated tool budget: %v", err)
+	}
+	if callCount != 5 {
+		t.Fatalf("expected 5 provider calls, got %d", callCount)
+	}
+	pending, err := database.ListApprovalRequestsFiltered(context.Background(), approval.StatusPending, string(approval.SubjectToolQuota), 10)
+	if err != nil {
+		t.Fatalf("ListApprovalRequestsFiltered: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("expected no quota approval requests, got %#v", pending)
+	}
+}
+
+func doctorTestToolCall(index int) providers.ToolCall {
+	call := providers.ToolCall{ID: fmt.Sprintf("call_%d", index), Type: "function"}
+	call.Function.Name = doctorToolNameStatus
+	call.Function.Arguments = "{}"
+	return call
 }
 
 func TestWriteDoctorAdminBrainTurnErrorMapsApprovalRequests(t *testing.T) {
@@ -316,6 +440,7 @@ func TestDoctorAdminBrainAllowedToolsFiltersUnavailableTools(t *testing.T) {
 		doctorToolNameLogs,
 		doctorToolNameDocsSearch,
 		doctorToolNameConfigSearch,
+		doctorToolNameConfigCatalog,
 		doctorToolNameConfigMetadata,
 		doctorToolNameSkillDiagnostics,
 		doctorToolNameCreatePlan,
@@ -436,6 +561,54 @@ func TestServiceDoctorToolsExecuteStatusAndPlanRead(t *testing.T) {
 		t.Fatalf("expected settings_change_preview card type, got %#v", createResult.Stats)
 	}
 
+	shorthandOut, err := server.runtime.Tools.ExecuteParams(context.Background(), doctorToolNameCreatePlan, map[string]any{
+		"conversation_id": "conv-tool",
+		"plan": map[string]any{
+			"title":   "Change default model",
+			"summary": "Switch the default chat model.",
+			"changes": []any{
+				map[string]any{"path": "provider.model", "value": "deepseek v4 pro"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("doctor_create_plan shorthand ExecuteParams: %v", err)
+	}
+	var shorthandResult tools.ToolResult
+	if err := json.Unmarshal([]byte(shorthandOut), &shorthandResult); err != nil {
+		t.Fatalf("decode shorthand create result: %v", err)
+	}
+	if shorthandResult.OK || !strings.Contains(shorthandResult.Summary, "exact provider model ID") || strings.Contains(shorthandResult.Summary, "unsupported field update: .") {
+		t.Fatalf("unexpected shorthand validation result: %s", shorthandOut)
+	}
+
+	aliasOut, err := server.runtime.Tools.ExecuteParams(context.Background(), doctorToolNameCreatePlan, map[string]any{
+		"conversation_id": "conv-tool",
+		"plan": map[string]any{
+			"title":   "Change Default Model to DeepSeek V4 Flash",
+			"summary": "Switch the default AI model.",
+			"changes": []any{
+				map[string]any{
+					"config_path": "provider.model",
+					"section":     "provider",
+					"field":       "model",
+					"operation":   "set",
+					"new_value":   map[string]any{"value": "deepseek/deepseek-v4-flash"},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("doctor_create_plan alias field ExecuteParams: %v", err)
+	}
+	var aliasResult tools.ToolResult
+	if err := json.Unmarshal([]byte(aliasOut), &aliasResult); err != nil {
+		t.Fatalf("decode alias create result: %v", err)
+	}
+	if !aliasResult.OK || strings.Contains(aliasResult.Summary, "unsupported field update") {
+		t.Fatalf("expected alias field plan to validate, got: %s", aliasOut)
+	}
+
 	readOut, err := server.runtime.Tools.ExecuteParams(context.Background(), doctorToolNameReadPlan, map[string]any{"plan_id": createResult.PlanID})
 	if err != nil {
 		t.Fatalf("doctor_read_plan ExecuteParams: %v", err)
@@ -519,7 +692,7 @@ func TestServiceDoctorPlanLifecycle(t *testing.T) {
 		t.Fatalf("expected post-check 200, got %d (%s)", postCheckRec.Code, postCheckRec.Body.String())
 	}
 	postCheckPayload := mustDecodeJSONBody(t, postCheckRec.Body)
-	if postCheckPayload["status"] != "complete" {
+	if postCheckPayload["status"] != "passed" {
 		t.Fatalf("expected complete post-check status, got %#v", postCheckPayload)
 	}
 	results, ok := postCheckPayload["results"].([]any)

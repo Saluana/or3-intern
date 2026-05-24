@@ -818,16 +818,31 @@ func serviceRouteRequirementForRequest(cfg config.Config, r *http.Request) servi
 	case path == "/internal/v1/doctor" || strings.HasPrefix(path, "/internal/v1/doctor/"):
 		relative := strings.Trim(strings.TrimPrefix(path, "/internal/v1/doctor"), "/")
 		if strings.HasPrefix(relative, "skills/") && strings.HasSuffix(relative, "/diagnostics") {
+			if method == http.MethodGet {
+				return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, SessionOnly: true}
+			}
 			return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "skill diagnostics can execute local checks and require recent passkey verification"}
 		}
-		if relative == "" || relative == "status" || relative == "run" || relative == "admin-brain" || relative == "config-metadata" || relative == "logs" || relative == "plans" {
+		if relative == "" || relative == "status" || relative == "run" || relative == "admin-brain" || relative == "config-metadata" || relative == "logs" {
+			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
+		}
+		if relative == "plans/preview" {
+			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, SessionOnly: true}
+		}
+		if relative == "plans" {
+			if method == http.MethodPost {
+				return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, SessionOnly: true}
+			}
 			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
 		}
 		if strings.HasPrefix(relative, "plans/") {
 			if strings.HasSuffix(relative, "/apply") || strings.HasSuffix(relative, "/rollback") {
 				return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "applying or rolling back doctor plans requires recent passkey verification"}
 			}
-			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
+			if strings.HasSuffix(relative, "/validate") && method == http.MethodPost {
+				return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, SessionOnly: true}
+			}
+			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, SessionOnly: true}
 		}
 		if strings.HasPrefix(relative, "sessions/") || relative == "sessions" {
 			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, SessionOnly: true}

@@ -71,6 +71,22 @@ type ChatMessagePage struct {
 	NextCursor int64 // 0 when no more
 }
 
+func escapeSQLLikeContains(search string) string {
+	var b strings.Builder
+	b.WriteString("%")
+	for _, r := range search {
+		switch r {
+		case '%', '_', '\\':
+			b.WriteByte('\\')
+			b.WriteByte(byte(r))
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteString("%")
+	return b.String()
+}
+
 const chatSessionMetaSelectSQL = `SELECT session_key, host_id, title, runner_id, runner_label,
 		runner_chat_session_id, runner_continuation_mode, runner_model, runner_mode,
 		runner_isolation, runner_cwd, message_count, last_message_preview, last_message_at,
@@ -185,8 +201,8 @@ func (d *DB) ListChatSessions(ctx context.Context, filter ChatSessionListFilter)
 		args = append(args, filter.RunnerID)
 	}
 	if s := strings.TrimSpace(filter.Search); s != "" {
-		q += ` AND (title LIKE ? OR last_message_preview LIKE ?)`
-		like := "%" + s + "%"
+		q += ` AND (title LIKE ? ESCAPE '\' OR last_message_preview LIKE ? ESCAPE '\')`
+		like := escapeSQLLikeContains(s)
 		args = append(args, like, like)
 	}
 	q += ` ORDER BY updated_at DESC LIMIT ?`

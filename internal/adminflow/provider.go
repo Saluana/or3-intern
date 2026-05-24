@@ -24,6 +24,10 @@ type AdminBrainProvider struct {
 	Reason      string         `json:"reason,omitempty"`
 }
 
+// DetectAdminBrainProvider chooses how settings health chat runs AI turns.
+// When a service API key is configured, the in-process admin brain is preferred.
+// Otherwise an external CLI runner is used when available; or3-intern native runner
+// is skipped here because doctor admin turns use the service runtime directly when keyed.
 func DetectAdminBrainProvider(cfg config.Config, runners []agentcli.RunnerInfo) AdminBrainProvider {
 	if providerKey := configuredAdminBrainProviderKey(cfg); providerKey != "" {
 		return AdminBrainProvider{

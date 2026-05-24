@@ -46,6 +46,7 @@ type serviceDoctorSessionMessageRequest struct {
 	Model         string `json:"model"`
 	ThinkingLevel string `json:"thinking_level"`
 	Stream        bool   `json:"stream"`
+	RunnerID      string `json:"runner_id"`
 }
 
 type serviceDoctorPlanCreateRequest struct {
@@ -109,6 +110,12 @@ func (s *serviceServer) handleDoctor(w http.ResponseWriter, r *http.Request) {
 		s.handleDoctorLogs(w, r)
 	case strings.HasPrefix(path, "skills/"):
 		s.handleDoctorSkillRoutes(w, r, strings.TrimPrefix(path, "skills/"))
+	case path == "plans/preview":
+		if r.Method != http.MethodPost {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		s.handleDoctorPlanPreview(w, r)
 	case path == "plans":
 		if r.Method != http.MethodPost {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
@@ -163,7 +170,7 @@ func (s *serviceServer) handleDoctorSkillRoutes(w http.ResponseWriter, r *http.R
 		Runner: skilldiag.ExecRunner{},
 	})
 	if err != nil {
-		writeServiceValue(w, http.StatusOK, map[string]any{"skill": serviceSkillItemFromMeta(skill, s.config.Skills), "diagnostics": result, "error": err.Error(), "plans": serviceDoctorPlansFromSkillDiag(result.SuggestedPlans)})
+		writeServiceValue(w, http.StatusBadGateway, map[string]any{"skill": serviceSkillItemFromMeta(skill, s.config.Skills), "diagnostics": result, "error": err.Error(), "plans": serviceDoctorPlansFromSkillDiag(result.SuggestedPlans)})
 		return
 	}
 	writeServiceValue(w, http.StatusOK, map[string]any{"skill": serviceSkillItemFromMeta(skill, s.config.Skills), "diagnostics": result, "plans": serviceDoctorPlansFromSkillDiag(result.SuggestedPlans)})
@@ -184,15 +191,16 @@ func (s *serviceServer) handleDoctorLogs(w http.ResponseWriter, r *http.Request)
 		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "database unavailable"})
 		return
 	}
-	limit := 100
+	requestedLimit := 100
 	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
 		n, err := strconv.Atoi(raw)
 		if err != nil || n <= 0 {
 			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid limit"})
 			return
 		}
-		limit = n
+		requestedLimit = n
 	}
+	limit := clampDoctorDiagnosticLogLimit(requestedLimit)
 	sinceMS, ok := parseOptionalInt64Query(w, r, "since_ms")
 	if !ok {
 		return
@@ -227,11 +235,46 @@ func (s *serviceServer) handleDoctorLogs(w http.ResponseWriter, r *http.Request)
 		"pattern":        serviceFirstNonEmpty(strings.TrimSpace(r.URL.Query().Get("pattern")), strings.TrimSpace(r.URL.Query().Get("known_failure_pattern"))),
 		"since_ms":       sinceMS,
 		"until_ms":       untilMS,
-		"limit":          limit,
-		"returned":       len(items),
-		"queried_at":     db.NowMS(),
+		"limit":           limit,
+		"requested_limit": requestedLimit,
+		"returned":        len(items),
+		"queried_at":      db.NowMS(),
 	})
-	writeServiceValue(w, http.StatusOK, map[string]any{"items": items})
+	writeServiceValue(w, http.StatusOK, map[string]any{
+		"items":           items,
+		"limit":           limit,
+		"requested_limit": requestedLimit,
+		"returned":        len(items),
+	})
+}
+
+func (s *serviceServer) handleDoctorPlanPreview(w http.ResponseWriter, r *http.Request) {
+	limitServiceRequestBody(w, r, serviceDoctorBodyLimit)
+	var req serviceDoctorPlanCreateRequest
+	if err := decodeServiceRequestBody(r.Body, &req); err != nil {
+		writeServiceRequestDecodeError(w, err)
+		return
+	}
+	plan := req.Plan
+	if strings.TrimSpace(plan.ID) == "" {
+		plan.ID = newDoctorID("scp-preview")
+	}
+	state, err := (adminflow.PlanValidator{}).Stage(s.config, &plan, adminflow.ValidationOptions{ApprovedAuthority: serviceDoctorApprovedAuthority(r.Context())})
+	if err != nil {
+		status := http.StatusBadRequest
+		if err == adminflow.ErrStalePlan {
+			status = http.StatusConflict
+		}
+		writeServiceValue(w, status, map[string]any{"error": err.Error(), "plan": plan, "validation": state.Validation, "persisted": false})
+		return
+	}
+	writeServiceValue(w, http.StatusOK, map[string]any{
+		"plan":          plan,
+		"doctor_report": state.DoctorReport,
+		"live_reloaded": state.LiveReloadKeys,
+		"validation":    state.Validation,
+		"persisted":     false,
+	})
 }
 
 func (s *serviceServer) handleDoctorPlanCreate(w http.ResponseWriter, r *http.Request) {
@@ -253,13 +296,17 @@ func (s *serviceServer) handleDoctorPlanCreate(w http.ResponseWriter, r *http.Re
 	if strings.TrimSpace(plan.CreatedBy) == "" {
 		plan.CreatedBy = s.serviceDoctorActor(r)
 	}
-	state, err := (adminflow.PlanValidator{}).Stage(s.config, &plan, adminflow.ValidationOptions{ApprovedAuthority: req.ApprovedAuthority})
+	state, err := (adminflow.PlanValidator{}).Stage(s.config, &plan, adminflow.ValidationOptions{ApprovedAuthority: serviceDoctorApprovedAuthority(r.Context())})
 	if err != nil {
 		status := http.StatusBadRequest
 		if err == adminflow.ErrStalePlan {
 			status = http.StatusConflict
 		}
 		writeServiceValue(w, status, map[string]any{"error": err.Error(), "plan": plan, "validation": state.Validation})
+		return
+	}
+	if err := serviceDoctorPlanPersistAllowed(r.Context(), plan); err != nil {
+		writeServiceJSON(w, http.StatusForbidden, map[string]any{"error": err.Error(), "code": "step_up_required"})
 		return
 	}
 	planJSON, err := json.Marshal(plan)
@@ -371,13 +418,17 @@ func (s *serviceServer) handleDoctorPlanValidate(w http.ResponseWriter, r *http.
 		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "plan not found"})
 		return
 	}
-	state, err := (adminflow.PlanValidator{}).Stage(s.config, &plan, adminflow.ValidationOptions{ApprovedAuthority: configmeta.RiskDanger})
+	state, err := (adminflow.PlanValidator{}).Stage(s.config, &plan, adminflow.ValidationOptions{ApprovedAuthority: serviceDoctorApprovedAuthority(r.Context())})
 	if err != nil {
 		status := http.StatusBadRequest
 		if err == adminflow.ErrStalePlan {
 			status = http.StatusConflict
 		}
 		writeServiceValue(w, status, map[string]any{"error": err.Error(), "plan": plan, "validation": state.Validation})
+		return
+	}
+	if err := serviceDoctorPlanPersistAllowed(r.Context(), plan); err != nil {
+		writeServiceJSON(w, http.StatusForbidden, map[string]any{"error": err.Error(), "code": "step_up_required"})
 		return
 	}
 	planJSON, _ := json.Marshal(plan)
@@ -407,13 +458,17 @@ func (s *serviceServer) handleDoctorPlanApply(w http.ResponseWriter, r *http.Req
 		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "plan not found"})
 		return
 	}
+	if !serviceDoctorPlanStatusAllowsApply(record.Status) {
+		writeServiceJSON(w, http.StatusConflict, map[string]any{"error": fmt.Sprintf("plan cannot be applied from status %q", record.Status), "status": record.Status})
+		return
+	}
 	limitServiceRequestBody(w, r, serviceDoctorBodyLimit)
 	var req serviceDoctorPlanApplyRequest
 	if err := decodeServiceRequestBody(r.Body, &req); err != nil {
 		writeServiceRequestDecodeError(w, err)
 		return
 	}
-	state, err := (adminflow.PlanValidator{}).Stage(s.config, &plan, adminflow.ValidationOptions{ApprovedAuthority: coalesceRisk(req.ApprovedAuthority, configmeta.RiskDanger)})
+	state, err := (adminflow.PlanValidator{}).Stage(s.config, &plan, adminflow.ValidationOptions{ApprovedAuthority: serviceDoctorApprovedAuthority(r.Context())})
 	if err != nil {
 		status := http.StatusBadRequest
 		if err == adminflow.ErrStalePlan {
@@ -422,7 +477,7 @@ func (s *serviceServer) handleDoctorPlanApply(w http.ResponseWriter, r *http.Req
 		writeServiceValue(w, status, map[string]any{"error": err.Error(), "plan": plan, "validation": state.Validation})
 		return
 	}
-	if err := validateDoctorApprovalForPlan(plan, req.Approval); err != nil {
+	if err := validateDoctorApprovalForPlan(r.Context(), plan, req.Approval); err != nil {
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
@@ -435,7 +490,7 @@ func (s *serviceServer) handleDoctorPlanApply(w http.ResponseWriter, r *http.Req
 			PlanID:       plan.ID,
 			Status:       "available",
 			RollbackJSON: serviceDoctorMustJSON(rollbackPlan),
-			ChangesJSON:  serviceDoctorMustJSON(plan.Changes),
+			ChangesJSON:  serviceDoctorMustJSON(serviceDoctorRedactedRollbackChanges(plan)),
 		}); err != nil {
 			writeServiceError(w, r, http.StatusServiceUnavailable, "rollback persistence failed", err)
 			return
@@ -445,7 +500,12 @@ func (s *serviceServer) handleDoctorPlanApply(w http.ResponseWriter, r *http.Req
 	if strings.TrimSpace(configPath) == "" {
 		configPath = cfgPathOrDefault("")
 	}
+	if err := store.UpdateSettingsChangePlanStatus(r.Context(), plan.ID, "applying", rollbackID, "", true, serviceDoctorMustJSON(req.Approval), serviceDoctorMustJSON(state.LiveReloadKeys), 0); err != nil {
+		writeServiceError(w, r, http.StatusServiceUnavailable, "plan status update failed", err)
+		return
+	}
 	if err := config.Save(configPath, state.StagedConfig); err != nil {
+		_ = store.UpdateSettingsChangePlanStatus(r.Context(), plan.ID, "validated", rollbackID, err.Error(), true, serviceDoctorMustJSON(req.Approval), serviceDoctorMustJSON(state.LiveReloadKeys), 0)
 		writeServiceError(w, r, http.StatusBadGateway, "config save failed", err)
 		return
 	}
@@ -465,6 +525,7 @@ func (s *serviceServer) handleDoctorPlanApply(w http.ResponseWriter, r *http.Req
 		ChecksJSON:     serviceDoctorMustJSON(postChecks),
 		ResultsJSON:    serviceDoctorMustJSON(plan.ValidationResults),
 	}); err != nil {
+		_ = store.UpdateSettingsChangePlanStatus(r.Context(), plan.ID, "apply_state_unknown", rollbackID, err.Error(), true, serviceDoctorMustJSON(req.Approval), serviceDoctorMustJSON(state.LiveReloadKeys), appliedAt)
 		writeServiceError(w, r, http.StatusServiceUnavailable, "doctor checkpoint persistence failed", err)
 		return
 	}
@@ -482,11 +543,13 @@ func (s *serviceServer) handleDoctorPlanApply(w http.ResponseWriter, r *http.Req
 		approval.ApprovedAtUnixMs = db.NowMS()
 	}
 	if err := store.UpdateSettingsChangePlanStatus(r.Context(), plan.ID, "applied", rollbackID, "", true, serviceDoctorMustJSON(approval), serviceDoctorMustJSON(state.LiveReloadKeys), appliedAt); err != nil {
+		_ = store.UpdateSettingsChangePlanStatus(r.Context(), plan.ID, "apply_state_unknown", rollbackID, err.Error(), true, serviceDoctorMustJSON(approval), serviceDoctorMustJSON(state.LiveReloadKeys), appliedAt)
 		writeServiceError(w, r, http.StatusServiceUnavailable, "plan status update failed", err)
 		return
 	}
 	planJSON := serviceDoctorMustJSON(plan)
 	if _, err := store.SQL.ExecContext(r.Context(), `UPDATE settings_change_plans SET plan_json=? WHERE id=?`, planJSON, plan.ID); err != nil {
+		_ = store.UpdateSettingsChangePlanStatus(r.Context(), plan.ID, "apply_state_unknown", rollbackID, err.Error(), true, serviceDoctorMustJSON(approval), serviceDoctorMustJSON(state.LiveReloadKeys), appliedAt)
 		writeServiceError(w, r, http.StatusServiceUnavailable, "plan update failed", err)
 		return
 	}
@@ -568,6 +631,14 @@ func (s *serviceServer) handleDoctorPlanRollback(w http.ResponseWriter, r *http.
 		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "plan not found"})
 		return
 	}
+	if strings.TrimSpace(planRecord.Status) == "rolled_back" {
+		writeServiceValue(w, http.StatusOK, map[string]any{"ok": true, "rolled_back": true, "rollback_id": planRecord.RollbackID, "plan_id": plan.ID, "already_rolled_back": true})
+		return
+	}
+	if !serviceDoctorPlanStatusAllowsRollback(planRecord.Status) {
+		writeServiceJSON(w, http.StatusConflict, map[string]any{"error": fmt.Sprintf("plan cannot be rolled back from status %q", planRecord.Status), "status": planRecord.Status})
+		return
+	}
 	rollbackID := strings.TrimSpace(planRecord.RollbackID)
 	if rollbackID == "" {
 		writeServiceJSON(w, http.StatusConflict, map[string]any{"error": "rollback is not available for this plan"})
@@ -582,6 +653,10 @@ func (s *serviceServer) handleDoctorPlanRollback(w http.ResponseWriter, r *http.
 		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "rollback not found"})
 		return
 	}
+	if strings.TrimSpace(rollbackRecord.Status) == "applied" {
+		writeServiceValue(w, http.StatusOK, map[string]any{"ok": true, "rolled_back": true, "rollback_id": rollbackID, "plan_id": plan.ID, "already_rolled_back": true})
+		return
+	}
 	if !serviceDoctorRollbackIsAutomatic(plan) {
 		writeServiceJSON(w, http.StatusConflict, map[string]any{"error": "rollback requires manual recovery", "rollback": json.RawMessage(rollbackRecord.RollbackJSON)})
 		return
@@ -593,7 +668,7 @@ func (s *serviceServer) handleDoctorPlanRollback(w http.ResponseWriter, r *http.
 		return
 	}
 	reverse := reverseDoctorPlan(plan)
-	state, err := (adminflow.PlanValidator{}).Stage(s.config, &reverse, adminflow.ValidationOptions{ApprovedAuthority: configmeta.RiskDanger})
+	state, err := (adminflow.PlanValidator{}).Stage(s.config, &reverse, adminflow.ValidationOptions{ApprovedAuthority: serviceDoctorApprovedAuthority(r.Context())})
 	if err != nil {
 		status := http.StatusBadRequest
 		if err == adminflow.ErrStalePlan {
@@ -602,7 +677,7 @@ func (s *serviceServer) handleDoctorPlanRollback(w http.ResponseWriter, r *http.
 		writeServiceValue(w, status, map[string]any{"error": err.Error(), "plan": reverse, "validation": state.Validation})
 		return
 	}
-	if err := validateDoctorApprovalForPlan(reverse, req.Approval); err != nil {
+	if err := validateDoctorApprovalForPlan(r.Context(), reverse, req.Approval); err != nil {
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
@@ -625,7 +700,7 @@ func (s *serviceServer) handleDoctorPlanRollback(w http.ResponseWriter, r *http.
 		return
 	}
 	_ = s.recordDoctorAudit(r.Context(), serviceAuthIdentityFromContext(r.Context()), "doctor.plan.rollback", serviceDoctorAuditPlanPayload(plan, serviceAuthIdentityFromContext(r.Context()), adminflow.ApprovalContext{}, map[string]any{"rollback_id": rollbackID, "rolled_back_at": appliedAt}))
-	writeServiceValue(w, http.StatusOK, map[string]any{"ok": true, "rollback_id": rollbackID, "plan_id": plan.ID, "restart_required": reverse.RestartRequired})
+	writeServiceValue(w, http.StatusOK, map[string]any{"ok": true, "rolled_back": true, "rollback_id": rollbackID, "plan_id": plan.ID, "restart_required": reverse.RestartRequired})
 }
 
 func (s *serviceServer) handleDoctorPlanPostChecks(w http.ResponseWriter, r *http.Request, planID string) {
@@ -690,6 +765,11 @@ func (s *serviceServer) handleDoctorSessionCreate(w http.ResponseWriter, r *http
 	sessionKey := strings.TrimSpace(req.SessionKey)
 	if sessionKey == "" {
 		sessionKey = newDoctorID("doctor-session")
+	} else if !isStrongDoctorSessionKey(sessionKey) {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "session_key is too weak; omit it to create a new session or use a server-issued key"})
+		return
+	} else {
+		doctorLogWeakSessionKeyWarning(sessionKey)
 	}
 	adminBrain := s.detectAdminBrainProvider(r.Context())
 	runnerID := strings.TrimSpace(req.RunnerID)
@@ -712,29 +792,20 @@ func (s *serviceServer) handleDoctorSessionCreate(w http.ResponseWriter, r *http
 	if strings.TrimSpace(meta.RunnerLabel) == "" {
 		meta.RunnerLabel = "Admin Brain"
 	}
-	if s.chatManager != nil && s.chatManager.DB != nil && s.chatManager.Manager != nil && doctorUsesRunnerChat(meta.RunnerID) {
-		if runnerSession, err := s.chatManager.EnsureSession(r.Context(), agentcli.StartTurnRequest{
-			AppSessionKey:    sessionKey,
-			RunnerID:         meta.RunnerID,
-			ContinuationMode: agentcli.ContinuationReplay,
-			Model:            meta.RunnerModel,
-			Mode:             string(agentcli.RunnerModeReview),
-			Isolation:        string(agentcli.IsolationHostReadOnly),
-			MaxTurns:         4,
-			TimeoutSeconds:   120,
-		}); err == nil {
-			meta.RunnerChatSessionID = runnerSession.ID
-			meta.RunnerContinuationMode = runnerSession.ContinuationMode
-			meta.RunnerModel = runnerSession.Model
-			meta.RunnerMode = runnerSession.Mode
-			meta.RunnerIsolation = runnerSession.Isolation
-			meta.RunnerCwd = runnerSession.Cwd
+	if doctorUsesRunnerChat(meta.RunnerID) && adminBrain.Kind == adminflow.AdminBrainRunner {
+		var syncErr error
+		meta, syncErr = s.syncDoctorSessionRunnerMeta(r.Context(), meta, meta.RunnerID, meta.RunnerModel, adminBrain)
+		if syncErr != nil {
+			writeServiceError(w, r, http.StatusBadGateway, "admin brain runner session setup failed", syncErr)
+			return
 		}
-	}
-	meta, err := store.UpsertChatSessionMeta(r.Context(), meta)
-	if err != nil {
-		writeServiceError(w, r, http.StatusServiceUnavailable, "doctor session create failed", err)
-		return
+	} else {
+		var err error
+		meta, err = store.UpsertChatSessionMeta(r.Context(), meta)
+		if err != nil {
+			writeServiceError(w, r, http.StatusServiceUnavailable, "doctor session create failed", err)
+			return
+		}
 	}
 	writeServiceValue(w, http.StatusCreated, map[string]any{"session": meta, "admin_brain": adminBrain})
 }
@@ -789,12 +860,12 @@ func (s *serviceServer) handleDoctorSessionRead(w http.ResponseWriter, r *http.R
 		writeServiceError(w, r, http.StatusServiceUnavailable, "doctor session lookup failed", err)
 		return
 	}
-	page, err := store.ListChatMessages(r.Context(), sessionKey, 0, 100)
+	messages, err := s.listDoctorSessionMessages(r.Context(), sessionKey)
 	if err != nil {
 		writeServiceError(w, r, http.StatusServiceUnavailable, "doctor session messages unavailable", err)
 		return
 	}
-	writeServiceValue(w, http.StatusOK, map[string]any{"session": meta, "messages": page.Messages, "admin_brain": s.detectAdminBrainProvider(r.Context())})
+	writeDoctorSessionPayload(w, http.StatusOK, doctorSessionMessageResponse(messages, s.detectAdminBrainProvider(r.Context()), "sync", map[string]any{"session": meta}))
 }
 
 func (s *serviceServer) handleDoctorSessionEvents(w http.ResponseWriter, r *http.Request, sessionKey string) {
@@ -837,6 +908,14 @@ func (s *serviceServer) handleDoctorSessionMessage(w http.ResponseWriter, r *htt
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "content required"})
 		return
 	}
+	if containsDoctorAdminBrainEnvelope(content) {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{
+			"error":   "message must not include admin brain prompt context",
+			"code":    "doctor_prompt_leak",
+			"message": "Send only your question, not the internal admin prompt envelope.",
+		})
+		return
+	}
 	meta, err := store.GetChatSessionMeta(r.Context(), sessionKey)
 	if err != nil {
 		if err == db.ErrChatSessionNotFound {
@@ -846,16 +925,32 @@ func (s *serviceServer) handleDoctorSessionMessage(w http.ResponseWriter, r *htt
 		writeServiceError(w, r, http.StatusServiceUnavailable, "doctor session lookup failed", err)
 		return
 	}
+	adminBrain := s.detectAdminBrainProvider(r.Context())
+	if runnerID := strings.TrimSpace(req.RunnerID); runnerID != "" || strings.TrimSpace(req.Model) != "" {
+		meta, err = s.syncDoctorSessionRunnerMeta(r.Context(), meta, runnerID, strings.TrimSpace(req.Model), adminBrain)
+		if err != nil {
+			writeServiceError(w, r, http.StatusBadGateway, "doctor session runner update failed", err)
+			return
+		}
+	}
 	if strings.TrimSpace(meta.RunnerChatSessionID) != "" && s.chatManager != nil && s.chatManager.DB != nil && s.chatManager.Manager != nil {
+		releaseTurn, turnErr := s.claimDoctorSessionTurn(sessionKey, "runner_chat", meta.RunnerChatSessionID)
+		if turnErr != nil {
+			writeServiceJSON(w, http.StatusConflict, map[string]any{"error": turnErr.Error(), "code": "doctor_turn_active"})
+			return
+		}
+		defer releaseTurn()
 		turnMeta := map[string]any{
-			"doctor_session":      true,
-			"doctor_user_message": content,
-			"doctor_untrusted":    true,
-			"doctor_tool_policy":  doctorAdminBrainToolPolicyName,
+			"doctor_session":       true,
+			"doctor_user_message":  content,
+			"doctor_untrusted":     true,
+			"doctor_tool_policy":   doctorAdminBrainToolPolicyName,
+			"doctor_allowed_tools": doctorAdminBrainAllowedTools(s.runtime.Tools),
 		}
 		if thinking := strings.ToLower(strings.TrimSpace(req.ThinkingLevel)); thinking != "" {
 			turnMeta["runner_thinking_level"] = thinking
 		}
+		allowedTools := doctorAdminBrainAllowedTools(s.runtime.Tools)
 		result, err := s.chatManager.StartTurn(r.Context(), meta.RunnerChatSessionID, agentcli.StartTurnRequest{
 			UserMessage:    content,
 			PromptMessage:  s.buildDoctorAdminBrainEnvelope(r.Context(), content),
@@ -864,6 +959,8 @@ func (s *serviceServer) handleDoctorSessionMessage(w http.ResponseWriter, r *htt
 			Model:          strings.TrimSpace(req.Model),
 			MaxTurns:       4,
 			TimeoutSeconds: 120,
+			AllowedTools:   allowedTools,
+			RestrictTools:  true,
 			ApprovalToken:  serviceApprovalTokenFromRequest(r),
 			Meta:           turnMeta,
 		})
@@ -871,63 +968,73 @@ func (s *serviceServer) handleDoctorSessionMessage(w http.ResponseWriter, r *htt
 			writeDoctorAdminBrainTurnError(w, r, err)
 			return
 		}
-		page, err := store.ListChatMessages(r.Context(), sessionKey, 0, 100)
+		messages, err := s.listDoctorSessionMessages(r.Context(), sessionKey)
 		if err != nil {
 			writeServiceError(w, r, http.StatusServiceUnavailable, "doctor session messages unavailable", err)
 			return
 		}
-		writeServiceValue(w, http.StatusAccepted, map[string]any{
-			"messages":    page.Messages,
-			"admin_brain": s.detectAdminBrainProvider(r.Context()),
+		writeDoctorSessionPayload(w, http.StatusAccepted, doctorSessionMessageResponse(messages, adminBrain, "runner_chat", map[string]any{
 			"runner_chat": map[string]any{"session_id": result.Session.ID, "turn_id": result.Turn.ID, "job_id": result.JobID},
-		})
+		}))
 		return
 	}
-	adminBrain := s.detectAdminBrainProvider(r.Context())
 	if doctorShouldUseInternalAdminBrain(meta, adminBrain) {
+		userSeq := s.nextDoctorMessageSequence(r.Context(), sessionKey)
+		if _, err := store.AppendMessage(r.Context(), sessionKey, "user", content, doctorMessagePayload("doctor", userSeq, nil)); err != nil {
+			writeServiceError(w, r, http.StatusServiceUnavailable, "doctor user message persistence failed", err)
+			return
+		}
 		if req.Stream {
 			jobID, err := s.startDoctorInternalAdminBrainTurn(r.Context(), sessionKey, content, strings.TrimSpace(req.Model), serviceApprovalTokenFromRequest(r), serviceAuthIdentityFromContext(r.Context()))
 			if err != nil {
 				writeDoctorAdminBrainTurnError(w, r, err)
 				return
 			}
-			page, err := store.ListChatMessages(r.Context(), sessionKey, 0, 100)
+			messages, err := s.listDoctorSessionMessages(r.Context(), sessionKey)
 			if err != nil {
 				writeServiceError(w, r, http.StatusServiceUnavailable, "doctor session messages unavailable", err)
 				return
 			}
-			writeServiceValue(w, http.StatusAccepted, map[string]any{"messages": page.Messages, "admin_brain": adminBrain, "job_id": jobID})
+			writeDoctorSessionPayload(w, http.StatusAccepted, doctorSessionMessageResponse(messages, adminBrain, "job", map[string]any{"job_id": jobID}))
 			return
 		}
+		releaseTurn, turnErr := s.claimDoctorSessionTurn(sessionKey, "sync", "internal")
+		if turnErr != nil {
+			writeServiceJSON(w, http.StatusConflict, map[string]any{"error": turnErr.Error(), "code": "doctor_turn_active"})
+			return
+		}
+		defer releaseTurn()
 		if err := s.runDoctorInternalAdminBrainTurn(r.Context(), sessionKey, content, strings.TrimSpace(req.Model), serviceApprovalTokenFromRequest(r), serviceAuthIdentityFromContext(r.Context())); err != nil {
 			writeDoctorAdminBrainTurnError(w, r, err)
 			return
 		}
-		page, err := store.ListChatMessages(r.Context(), sessionKey, 0, 100)
+		messages, err := s.listDoctorSessionMessages(r.Context(), sessionKey)
 		if err != nil {
 			writeServiceError(w, r, http.StatusServiceUnavailable, "doctor session messages unavailable", err)
 			return
 		}
-		writeServiceValue(w, http.StatusAccepted, map[string]any{"messages": page.Messages, "admin_brain": adminBrain})
+		writeDoctorSessionPayload(w, http.StatusAccepted, doctorSessionMessageResponse(messages, adminBrain, "sync", nil))
 		return
 	}
-	if _, err := store.AppendMessage(r.Context(), sessionKey, "user", content, map[string]any{"source": "doctor"}); err != nil {
+	userSeq := s.nextDoctorMessageSequence(r.Context(), sessionKey)
+	if _, err := store.AppendMessage(r.Context(), sessionKey, "user", content, doctorMessagePayload("doctor", userSeq, nil)); err != nil {
 		writeServiceError(w, r, http.StatusServiceUnavailable, "doctor user message persistence failed", err)
 		return
 	}
-	responseText := s.buildDoctorAssistantReply(r.Context(), content)
-	assistantID, err := store.AppendMessage(r.Context(), sessionKey, "assistant", responseText, map[string]any{"source": "doctor", "admin_brain": s.detectAdminBrainProvider(r.Context())})
-	if err != nil {
-		writeServiceError(w, r, http.StatusServiceUnavailable, "doctor assistant message persistence failed", err)
-		return
-	}
-	_ = s.appendDoctorLog(r.Context(), db.DiagnosticLogEvent{Source: "doctor", Level: "info", CorrelationID: sessionKey, EventType: "doctor.session.message", Payload: json.RawMessage(fmt.Sprintf(`{"assistant_message_id":%d}`, assistantID))})
-	page, err := store.ListChatMessages(r.Context(), sessionKey, 0, 100)
+	messages, err := s.listDoctorSessionMessages(r.Context(), sessionKey)
 	if err != nil {
 		writeServiceError(w, r, http.StatusServiceUnavailable, "doctor session messages unavailable", err)
 		return
 	}
-	writeServiceValue(w, http.StatusAccepted, map[string]any{"messages": page.Messages, "admin_brain": s.detectAdminBrainProvider(r.Context())})
+	reason := strings.TrimSpace(adminBrain.Reason)
+	if reason == "" {
+		reason = "Admin Brain is not available. Basic Doctor checks still work from the health snapshot."
+	}
+	writeDoctorSessionPayload(w, http.StatusServiceUnavailable, doctorSessionMessageResponse(messages, adminBrain, "unavailable", map[string]any{
+		"error":   reason,
+		"message": reason,
+		"code":    "admin_brain_unavailable",
+	}))
 }
 
 func writeDoctorAdminBrainTurnError(w http.ResponseWriter, r *http.Request, err error) {
@@ -1202,7 +1309,7 @@ func (s *serviceServer) recordDoctorAudit(ctx context.Context, identity serviceA
 
 func (s *serviceServer) executeDoctorPostChecks(ctx context.Context, checks []adminflow.PostApplyCheck) ([]adminflow.PlanValidationResult, string, *doctor.Report) {
 	results := make([]adminflow.PlanValidationResult, 0, len(checks))
-	status := "complete"
+	status := "passed"
 	var report *doctor.Report
 	for _, check := range checks {
 		result, checkReport := s.executeDoctorPostCheck(ctx, check)
@@ -1215,7 +1322,7 @@ func (s *serviceServer) executeDoctorPostChecks(ctx context.Context, checks []ad
 		case "fail":
 			status = "failed"
 		case "warning":
-			if status == "complete" {
+			if status == "passed" {
 				status = "warning"
 			}
 		}
@@ -1235,25 +1342,16 @@ func (s *serviceServer) executeDoctorPostCheck(ctx context.Context, check adminf
 	if timeoutSeconds <= 0 {
 		timeoutSeconds = 10
 	}
-	type checkOutcome struct {
-		result adminflow.PlanValidationResult
-		report *doctor.Report
-	}
-	resultCh := make(chan checkOutcome, 1)
-	go func() {
-		result, report := s.executeDoctorPostCheckNow(ctx, checkID)
-		resultCh <- checkOutcome{result: result, report: report}
-	}()
-	timer := time.NewTimer(time.Duration(timeoutSeconds) * time.Second)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return adminflow.PlanValidationResult{Check: checkID, Status: "fail", Message: ctx.Err().Error()}, nil
-	case <-timer.C:
+	checkCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
+	defer cancel()
+	result, report := s.executeDoctorPostCheckNow(checkCtx, checkID)
+	if checkCtx.Err() == context.DeadlineExceeded {
 		return adminflow.PlanValidationResult{Check: checkID, Status: "fail", Message: fmt.Sprintf("timed out after %d seconds", timeoutSeconds)}, nil
-	case outcome := <-resultCh:
-		return outcome.result, outcome.report
 	}
+	if err := checkCtx.Err(); err != nil {
+		return adminflow.PlanValidationResult{Check: checkID, Status: "fail", Message: err.Error()}, nil
+	}
+	return result, report
 }
 
 func (s *serviceServer) executeDoctorPostCheckNow(ctx context.Context, checkID string) (adminflow.PlanValidationResult, *doctor.Report) {
@@ -1388,20 +1486,10 @@ func reverseDoctorPlan(plan adminflow.SettingsChangePlan) adminflow.SettingsChan
 	return reversed
 }
 
-func validateDoctorApprovalForPlan(plan adminflow.SettingsChangePlan, approval adminflow.ApprovalContext) error {
-	if strings.TrimSpace(approval.PlanID) != "" && strings.TrimSpace(approval.PlanID) != strings.TrimSpace(plan.ID) {
-		return fmt.Errorf("approval plan_id does not match plan")
-	}
-	if plan.RequiresApproval && !approval.Approved {
-		return fmt.Errorf("approval is required before apply")
-	}
-	return nil
-}
-
 func newDoctorID(prefix string) string {
 	buf := make([]byte, 6)
 	if _, err := rand.Read(buf); err != nil {
-		return prefix + "_fallback"
+		panic(fmt.Sprintf("doctor: secure id generation failed: %v", err))
 	}
 	return prefix + "_" + hex.EncodeToString(buf)
 }

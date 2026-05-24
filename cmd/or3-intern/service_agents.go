@@ -700,6 +700,7 @@ type serviceObserver struct {
 	lastToolStatus        string
 	lastToolError         string
 	lastToolResultPreview string
+	lastToolResult        string
 	lastToolCallID        string
 	lastApprovalID        int64
 }
@@ -724,6 +725,7 @@ func (o *serviceObserver) OnToolResult(ctx context.Context, name string, out str
 	o.sawToolResult = true
 	o.lastToolName = strings.TrimSpace(name)
 	o.lastToolStatus = "completed"
+	o.lastToolResult = boundedServiceLogPreview(out, 16384)
 	o.lastToolResultPreview = boundedServiceLogPreview(out, 180)
 	if err != nil {
 		o.lastToolError = err.Error()
@@ -748,8 +750,10 @@ func (o *serviceObserver) OnToolLifecycle(ctx context.Context, event agent.ToolL
 		o.sawToolResult = true
 	}
 	if event.ResultPreview != "" {
+		o.lastToolResult = boundedServiceLogPreview(event.ResultPreview, 16384)
 		o.lastToolResultPreview = boundedServiceLogPreview(event.ResultPreview, 180)
 	} else if event.Result != "" {
+		o.lastToolResult = boundedServiceLogPreview(event.Result, 16384)
 		o.lastToolResultPreview = boundedServiceLogPreview(event.Result, 180)
 	}
 	if event.ApprovalID > 0 {
@@ -800,6 +804,9 @@ func (o *serviceObserver) emptyFinalTextFallback() (string, bool) {
 	}
 	switch strings.TrimSpace(o.lastToolStatus) {
 	case "failed", "error":
+		if strings.EqualFold(toolName, tools.ToolNameExec) && strings.Contains(strings.ToLower(firstNonEmptyString(o.lastToolError, o.lastToolResultPreview)), "tool not available in this turn") {
+			return "I tried to run a shell command, but the Admin Assistant is intentionally limited to dedicated Doctor tools for safety. No command was run. Ask again and I will use Doctor status/config tools instead of exec.", true
+		}
 		message := fmt.Sprintf("The tool failed, and the model did not return a final message. Last tool: %s.", toolName)
 		if detail := strings.TrimSpace(firstNonEmptyString(o.lastToolError, o.lastToolResultPreview)); detail != "" {
 			message += " " + boundedServiceLogPreview(detail, 220)
@@ -811,6 +818,9 @@ func (o *serviceObserver) emptyFinalTextFallback() (string, bool) {
 		}
 		return fmt.Sprintf("The tool still needs approval before it can continue. Last tool: %s.", toolName), true
 	default:
+		if text, ok := doctorEmptyFinalSummaryFromToolResult(toolName, o.lastToolResult); ok {
+			return text, true
+		}
 		return fmt.Sprintf("The tool finished, but the model did not return a final message. Last tool: %s.", toolName), true
 	}
 }

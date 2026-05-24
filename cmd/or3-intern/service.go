@@ -50,6 +50,9 @@ type serviceServer struct {
 	nonceGuard            *serviceNonceReplayGuard
 	modelCatalog          *serviceModelCatalogCache
 	secureRelayHub        *secureConnectionRelayHub
+	doctorTurnMu          sync.Mutex
+	doctorTurnOnce        sync.Once
+	doctorActiveTurns     map[string]doctorSessionTurnLease
 }
 
 type serviceDeviceResponse struct {

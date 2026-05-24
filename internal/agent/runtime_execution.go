@@ -34,6 +34,7 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 	if maxLoops <= 0 {
 		maxLoops = 6
 	}
+	maxLoops = ToolBudgetOverridesFromContext(ctx).EffectiveMaxToolLoops(maxLoops)
 	loopLimit := maxLoops
 	validationFailures := map[string]int{}
 	for loop := 0; ; loop++ {
@@ -215,6 +216,12 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 				"tool":         tc.Name,
 				"tool_call_id": tc.ID,
 				"args":         json.RawMessage([]byte(tc.ArgumentsJSON)),
+			}
+			if strings.HasPrefix(strings.TrimSpace(sessionKey), "doctor-app-") {
+				if toolResult, ok := tools.DecodeToolResult(out); ok {
+					payload["doctor_tool_result"] = toolResult
+					payload["source"] = "doctor_tool"
+				}
 			}
 			sendOut, preview, artifactID := r.boundTextResult(ctx, sessionKey, out)
 			if artifactID != "" {

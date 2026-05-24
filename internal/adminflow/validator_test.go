@@ -2,6 +2,7 @@ package adminflow
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"or3-intern/internal/config"
@@ -63,6 +64,101 @@ func TestPlanValidatorStage_StalePlan(t *testing.T) {
 	_, err := (PlanValidator{}).Stage(cfg, plan, ValidationOptions{})
 	if !errors.Is(err, ErrStalePlan) {
 		t.Fatalf("Stage() error = %v, want stale plan", err)
+	}
+}
+
+func TestPlanValidatorStage_RejectsProviderModelDisplayName(t *testing.T) {
+	configmeta.Clear()
+	configmeta.RegisterFirstSliceFields()
+
+	cfg := config.Default()
+	plan := &SettingsChangePlan{
+		Changes: []SettingsPlanChange{
+			{
+				ConfigPath: "provider.model",
+				Section:    "provider",
+				Field:      "provider_model",
+				Operation:  "set",
+				NewValue:   RedactedValue{Value: "deepseek v4 pro"},
+			},
+		},
+	}
+
+	_, err := (PlanValidator{}).Stage(cfg, plan, ValidationOptions{})
+	if !errors.Is(err, ErrPlanValidation) {
+		t.Fatalf("Stage() error = %v, want plan validation error", err)
+	}
+	if len(plan.ValidationResults) == 0 || !strings.Contains(plan.ValidationResults[len(plan.ValidationResults)-1].Message, "exact provider model ID") {
+		t.Fatalf("expected exact model ID validation message, got %#v", plan.ValidationResults)
+	}
+}
+
+func TestPlanValidatorStage_NormalizesProviderModelFieldAlias(t *testing.T) {
+	configmeta.Clear()
+	configmeta.RegisterFirstSliceFields()
+
+	cfg := config.Default()
+	plan := &SettingsChangePlan{
+		ID: "scp_alias",
+		Changes: []SettingsPlanChange{
+			{
+				ConfigPath: "provider.model",
+				Section:    "provider",
+				Field:      "model",
+				Operation:  "set",
+				NewValue:   RedactedValue{Value: "deepseek/deepseek-v4-flash"},
+			},
+		},
+	}
+
+	state, err := (PlanValidator{}).Stage(cfg, plan, ValidationOptions{ApprovedAuthority: configmeta.RiskWarning})
+	if err != nil {
+		t.Fatalf("Stage() error = %v", err)
+	}
+	if plan.Changes[0].Field != "provider_model" {
+		t.Fatalf("normalized field = %q, want provider_model", plan.Changes[0].Field)
+	}
+	if state.StagedConfig.Provider.Model != "deepseek/deepseek-v4-flash" {
+		t.Fatalf("staged model = %q", state.StagedConfig.Provider.Model)
+	}
+}
+
+func TestNormalizePlanChange_ConfigPathOnly(t *testing.T) {
+	configmeta.Clear()
+	configmeta.RegisterFirstSliceFields()
+
+	change := SettingsPlanChange{
+		ConfigPath: "provider.model",
+		Operation:  "set",
+		NewValue:   RedactedValue{Value: "gpt-4.1-mini"},
+	}
+	NormalizePlanChange(&change)
+	if change.Section != "provider" || change.Field != "provider_model" {
+		t.Fatalf("normalized change = %#v", change)
+	}
+}
+
+func TestNormalizePlanChange_SkillEntryAPIKey(t *testing.T) {
+	configmeta.Clear()
+	configmeta.RegisterFirstSliceFields()
+
+	change := SettingsPlanChange{
+		ConfigPath: "skills.entries.demo.apiKey",
+		Section:    "skills_entry",
+		Channel:    "demo",
+		Field:      "api_key",
+		Operation:  "set",
+		NewValue:   RedactedValue{Value: "new-secret"},
+	}
+	NormalizePlanChange(&change)
+	if change.ConfigPath != "skills.entries.demo.apiKey" {
+		t.Fatalf("config path = %q, want concrete demo path", change.ConfigPath)
+	}
+	if change.Field != "api_key" {
+		t.Fatalf("field = %q, want api_key", change.Field)
+	}
+	if change.Channel != "demo" {
+		t.Fatalf("channel = %q, want demo", change.Channel)
 	}
 }
 

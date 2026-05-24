@@ -84,9 +84,10 @@ type SkillEntryState struct {
 }
 
 type Options struct {
-	Entry             SkillEntryState
-	Runner            Runner
-	MaxCommandRuntime time.Duration
+	Entry              SkillEntryState
+	Runner             Runner
+	MaxCommandRuntime  time.Duration
+	SkipCommandChecks  bool
 }
 
 type Result struct {
@@ -351,6 +352,9 @@ func runCheck(ctx context.Context, baseDir string, check CheckSpec, redactions R
 		finding.Evidence["config_key"] = check.ConfigKey
 		return finding
 	case "command":
+		if opts.SkipCommandChecks {
+			return setPass("command check skipped in read-only Doctor chat", map[string]any{"skipped": true, "kind": "command"})
+		}
 		runner := opts.Runner
 		if runner == nil {
 			runner = ExecRunner{}

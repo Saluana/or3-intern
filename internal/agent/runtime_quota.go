@@ -40,7 +40,7 @@ func (r *Runtime) incrementQuota(ctx context.Context, sessionKey string, toolNam
 	r.quotaMu.Lock()
 	state := r.sessionQuotaStateLocked(sessionKey)
 	message := messageQuotaCountersFromContext(ctx)
-	checks := r.quotaChecks(message, &state.Session, toolName)
+	checks := r.quotaChecks(ctx, message, &state.Session, toolName)
 	for _, check := range checks {
 		if check.Limit > 0 && check.Current >= check.Limit {
 			r.quotaMu.Unlock()
@@ -62,27 +62,28 @@ func (r *Runtime) incrementQuota(ctx context.Context, sessionKey string, toolNam
 	return nil
 }
 
-func (r *Runtime) quotaChecks(message *quotaCounters, session *quotaCounters, toolName string) []quotaCheck {
+func (r *Runtime) quotaChecks(ctx context.Context, message *quotaCounters, session *quotaCounters, toolName string) []quotaCheck {
 	cfg := r.Hardening.Quotas
+	overrides := ToolBudgetOverridesFromContext(ctx)
 	checks := []quotaCheck{
-		{Scope: "message", Name: "tool_calls", Label: "per-message total tool-call", ConfigKey: "hardening.quotas.maxToolCalls", Current: message.ToolCalls, Limit: cfg.MaxToolCalls},
-		{Scope: "session", Name: "tool_calls", Label: "per-session total tool-call", ConfigKey: "hardening.quotas.maxSessionToolCalls", Current: session.ToolCalls, Limit: cfg.MaxSessionToolCalls},
+		{Scope: "message", Name: "tool_calls", Label: "per-message total tool-call", ConfigKey: "hardening.quotas.maxToolCalls", Current: message.ToolCalls, Limit: overrides.effectiveLimit(cfg.MaxToolCalls, overrides.MaxToolCalls)},
+		{Scope: "session", Name: "tool_calls", Label: "per-session total tool-call", ConfigKey: "hardening.quotas.maxSessionToolCalls", Current: session.ToolCalls, Limit: overrides.effectiveLimit(cfg.MaxSessionToolCalls, overrides.MaxSessionToolCalls)},
 	}
 	switch toolName {
 	case tools.ToolNameExec, tools.ToolNameRunSkill, tools.ToolNameRunSkillScript:
 		checks = append(checks,
-			quotaCheck{Scope: "message", Name: "exec_calls", Label: "per-message exec-call", ConfigKey: "hardening.quotas.maxExecCalls", Current: message.ExecCalls, Limit: cfg.MaxExecCalls},
-			quotaCheck{Scope: "session", Name: "exec_calls", Label: "per-session exec-call", ConfigKey: "hardening.quotas.maxSessionExecCalls", Current: session.ExecCalls, Limit: cfg.MaxSessionExecCalls},
+			quotaCheck{Scope: "message", Name: "exec_calls", Label: "per-message exec-call", ConfigKey: "hardening.quotas.maxExecCalls", Current: message.ExecCalls, Limit: overrides.effectiveLimit(cfg.MaxExecCalls, overrides.MaxExecCalls)},
+			quotaCheck{Scope: "session", Name: "exec_calls", Label: "per-session exec-call", ConfigKey: "hardening.quotas.maxSessionExecCalls", Current: session.ExecCalls, Limit: overrides.effectiveLimit(cfg.MaxSessionExecCalls, overrides.MaxSessionExecCalls)},
 		)
 	case tools.ToolNameWebFetch, tools.ToolNameWebFetchMarkdown, tools.ToolNameWebSearch:
 		checks = append(checks,
-			quotaCheck{Scope: "message", Name: "web_calls", Label: "per-message web-call", ConfigKey: "hardening.quotas.maxWebCalls", Current: message.WebCalls, Limit: cfg.MaxWebCalls},
-			quotaCheck{Scope: "session", Name: "web_calls", Label: "per-session web-call", ConfigKey: "hardening.quotas.maxSessionWebCalls", Current: session.WebCalls, Limit: cfg.MaxSessionWebCalls},
+			quotaCheck{Scope: "message", Name: "web_calls", Label: "per-message web-call", ConfigKey: "hardening.quotas.maxWebCalls", Current: message.WebCalls, Limit: overrides.effectiveLimit(cfg.MaxWebCalls, overrides.MaxWebCalls)},
+			quotaCheck{Scope: "session", Name: "web_calls", Label: "per-session web-call", ConfigKey: "hardening.quotas.maxSessionWebCalls", Current: session.WebCalls, Limit: overrides.effectiveLimit(cfg.MaxSessionWebCalls, overrides.MaxSessionWebCalls)},
 		)
 	case tools.ToolNameSpawnSubagent:
 		checks = append(checks,
-			quotaCheck{Scope: "message", Name: "subagent_calls", Label: "per-message subagent-call", ConfigKey: "hardening.quotas.maxSubagentCalls", Current: message.SubagentCalls, Limit: cfg.MaxSubagentCalls},
-			quotaCheck{Scope: "session", Name: "subagent_calls", Label: "per-session subagent-call", ConfigKey: "hardening.quotas.maxSessionSubagentCalls", Current: session.SubagentCalls, Limit: cfg.MaxSessionSubagentCalls},
+			quotaCheck{Scope: "message", Name: "subagent_calls", Label: "per-message subagent-call", ConfigKey: "hardening.quotas.maxSubagentCalls", Current: message.SubagentCalls, Limit: overrides.effectiveLimit(cfg.MaxSubagentCalls, overrides.MaxSubagentCalls)},
+			quotaCheck{Scope: "session", Name: "subagent_calls", Label: "per-session subagent-call", ConfigKey: "hardening.quotas.maxSessionSubagentCalls", Current: session.SubagentCalls, Limit: overrides.effectiveLimit(cfg.MaxSessionSubagentCalls, overrides.MaxSessionSubagentCalls)},
 		)
 	}
 	return checks

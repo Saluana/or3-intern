@@ -20,6 +20,7 @@ var doctorAdminBrainAllowedToolNames = []string{
 	doctorToolNameLogs,
 	doctorToolNameDocsSearch,
 	doctorToolNameConfigSearch,
+	doctorToolNameConfigCatalog,
 	doctorToolNameConfigMetadata,
 	doctorToolNameSkillDiagnostics,
 	doctorToolNameCreatePlan,
@@ -89,12 +90,20 @@ func (s *serviceServer) startDoctorInternalAdminBrainTurn(ctx context.Context, s
 		return "", fmt.Errorf("session_key and message are required")
 	}
 	job := s.jobs.Register("doctor_admin_brain")
+	releaseTurn, err := s.claimDoctorSessionTurn(req.sessionKey, "job", job.ID)
+	if err != nil {
+		s.jobs.Complete(job.ID, "failed", map[string]any{"error": err.Error()})
+		return "", err
+	}
 	meta := doctorInternalAdminBrainTurnMeta(req.content)
 	s.jobs.Publish(job.ID, "queued", serviceLifecyclePayload(req.sessionKey, meta, map[string]any{"status": "queued"}))
 	s.persistServiceJobSummary(context.Background(), job.ID)
 	runCtx, cancel := context.WithCancel(withDetachedContext(ctx))
 	s.jobs.AttachCancel(job.ID, cancel)
-	go s.runDoctorInternalAdminBrainJob(runCtx, job.ID, req)
+	go func() {
+		defer releaseTurn()
+		s.runDoctorInternalAdminBrainJob(runCtx, job.ID, req)
+	}()
 	return job.ID, nil
 }
 
@@ -132,19 +141,21 @@ func (s *serviceServer) runDoctorInternalAdminBrainTurnWithObserver(ctx context.
 		return fmt.Errorf("runtime unavailable")
 	}
 	allowedTools := doctorAdminBrainAllowedTools(s.runtime.Tools)
+	toolBudget := agent.DoctorAdminBrainToolBudget()
 	return s.app().RunTurn(ctx, app.TurnRequest{
-		SessionKey:    req.sessionKey,
-		Message:       req.content,
-		SystemPrompt:  s.buildDoctorAdminBrainContext(ctx),
-		Meta:          doctorInternalAdminBrainTurnMeta(req.content),
-		AllowedTools:  allowedTools,
-		RestrictTools: true,
-		Capability:    tools.CapabilityLevel(s.config.Service.MaxCapability),
-		ApprovalToken: req.approvalToken,
-		Actor:         strings.TrimSpace(req.identity.Actor),
-		Role:          strings.TrimSpace(req.identity.Role),
-		Observer:      observer,
-		Streamer:      agent.NullStreamer{},
-		ProfileName:   "",
+		SessionKey:          req.sessionKey,
+		Message:             req.content,
+		SystemPrompt:        s.buildDoctorAdminBrainContext(ctx),
+		Meta:                doctorInternalAdminBrainTurnMeta(req.content),
+		AllowedTools:        allowedTools,
+		RestrictTools:       true,
+		Capability:          tools.CapabilityLevel(s.config.Service.MaxCapability),
+		ApprovalToken:       req.approvalToken,
+		Actor:               strings.TrimSpace(req.identity.Actor),
+		Role:                strings.TrimSpace(req.identity.Role),
+		Observer:            observer,
+		Streamer:            agent.NullStreamer{},
+		ProfileName:         "",
+		ToolBudgetOverrides: &toolBudget,
 	})
 }

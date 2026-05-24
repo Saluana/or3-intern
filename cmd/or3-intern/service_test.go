@@ -653,6 +653,102 @@ func TestServiceBrowserMiddleware_AddsLoopbackCORSHeadersToRequests(t *testing.T
 	}
 }
 
+func TestServiceBrowserMiddleware_AllowsLoopbackBrowserOriginEvenWhenServiceIsPrivateNetwork(t *testing.T) {
+	cfg := config.Config{Service: config.ServiceConfig{Listen: "0.0.0.0:9100"}}
+	handler := serviceBrowserMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeServiceJSON(w, http.StatusAccepted, map[string]any{"ok": true})
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/internal/v1/health", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("Origin", "http://localhost:3060")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected downstream handler response, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:3060" {
+		t.Fatalf("expected allow-origin header, got %q", got)
+	}
+}
+
+func TestServiceBrowserMiddleware_AllowsPrivateNetworkPublicHealthOriginWithoutManualAllowlist(t *testing.T) {
+	cfg := config.Config{Service: config.ServiceConfig{Listen: "0.0.0.0:9100"}}
+	handler := serviceBrowserMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeServiceJSON(w, http.StatusAccepted, map[string]any{"ok": true})
+	}))
+
+	req := httptest.NewRequest(http.MethodOptions, "/internal/v1/health", nil)
+	req.RemoteAddr = "192.168.1.42:54321"
+	req.Header.Set("Origin", "https://app.example.test")
+	req.Header.Set("Access-Control-Request-Method", http.MethodGet)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 preflight response, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://app.example.test" {
+		t.Fatalf("expected allow-origin header, got %q", got)
+	}
+}
+
+func TestServiceBrowserMiddleware_AllowsPrivateNetworkAuthenticatedOriginWithoutManualAllowlist(t *testing.T) {
+	cfg := config.Config{Service: config.ServiceConfig{Listen: "0.0.0.0:9100"}}
+	handler := serviceBrowserMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeServiceJSON(w, http.StatusAccepted, map[string]any{"ok": true})
+	}))
+
+	req := httptest.NewRequest(http.MethodOptions, "/internal/v1/devices", nil)
+	req.RemoteAddr = "192.168.1.42:54321"
+	req.Header.Set("Origin", "https://app.example.test")
+	req.Header.Set("Access-Control-Request-Method", http.MethodGet)
+	req.Header.Set("Access-Control-Request-Headers", "authorization,x-or3-session")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 preflight response, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://app.example.test" {
+		t.Fatalf("expected allow-origin header, got %q", got)
+	}
+	if got := strings.ToLower(rec.Header().Get("Access-Control-Allow-Headers")); !strings.Contains(got, "authorization") {
+		t.Fatalf("expected allow-headers to include authorization, got %q", got)
+	}
+}
+
+func TestAllowsUnauthenticatedPairingRoute_AllowsLoopbackProxyWhenServiceIsPrivateNetwork(t *testing.T) {
+	cfg := config.Config{Service: config.ServiceConfig{
+		Listen:                      "0.0.0.0:9100",
+		AllowUnauthenticatedPairing: true,
+	}}
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/secure-connections/pairing/approve", strings.NewReader(`{}`))
+	req.RemoteAddr = "127.0.0.1:54321"
+
+	if !allowsUnauthenticatedPairingRoute(cfg, req) {
+		t.Fatal("expected loopback proxy request to be allowed for unauthenticated secure pairing")
+	}
+}
+
+func TestAllowsUnauthenticatedPairingRoute_AllowsPrivateNetworkSecurePairing(t *testing.T) {
+	cfg := config.Config{Service: config.ServiceConfig{
+		Listen:                      "0.0.0.0:9100",
+		AllowUnauthenticatedPairing: true,
+	}}
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/secure-connections/pairing/approve", strings.NewReader(`{}`))
+	req.RemoteAddr = "192.168.1.42:54321"
+	req.Header.Set("Origin", "https://app.example.test")
+
+	if !allowsUnauthenticatedPairingRoute(cfg, req) {
+		t.Fatal("expected private-network secure pairing request to be allowed without manual trusted-origin setup")
+	}
+}
+
 func TestServiceBrowserMiddleware_AllowsTrustedElectronAppOriginFromLoopback(t *testing.T) {
 	cfg := config.Config{Service: config.ServiceConfig{
 		Listen: "0.0.0.0:9100",

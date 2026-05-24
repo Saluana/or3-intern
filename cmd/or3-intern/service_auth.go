@@ -344,8 +344,13 @@ func serviceAllowedBrowserOrigin(cfg config.Config, r *http.Request) (string, bo
 	if serviceIsSecurePairingRoute(r) && requestRemoteInCIDRAllowlist(r.RemoteAddr, serviceDefaultPairingBrowserCIDRs()) {
 		return origin, true
 	}
-	if serviceOriginIsLoopback(parsed) && serviceListenIsLoopback(cfg.Service.Listen) && (strings.TrimSpace(r.RemoteAddr) == "" || requestRemoteIsLoopback(r.RemoteAddr)) {
+	if serviceOriginIsLoopback(parsed) && (strings.TrimSpace(r.RemoteAddr) == "" || requestRemoteIsLoopback(r.RemoteAddr)) {
 		return origin, true
+	}
+	if servicePrivateNetworkBrowserRequest(r, parsed) {
+		if serviceBrowserPublicRoute(r) || serviceBrowserAuthenticatedRequest(r) {
+			return origin, true
+		}
 	}
 	if serviceTrustedBrowserRequest(cfg, r, parsed) {
 		return origin, true
@@ -383,6 +388,52 @@ func serviceTrustedBrowserRequest(cfg config.Config, r *http.Request, parsedOrig
 		return false
 	}
 	return requestRemoteInCIDRAllowlist(r.RemoteAddr, serviceTrustedBrowserCIDRs(cfg))
+}
+
+func servicePrivateNetworkBrowserRequest(r *http.Request, parsedOrigin *url.URL) bool {
+	if r == nil || parsedOrigin == nil {
+		return false
+	}
+	if !strings.EqualFold(parsedOrigin.Scheme, "http") && !strings.EqualFold(parsedOrigin.Scheme, "https") {
+		return false
+	}
+	return requestRemoteInCIDRAllowlist(r.RemoteAddr, serviceDefaultPairingBrowserCIDRs())
+}
+
+func serviceBrowserPublicRoute(r *http.Request) bool {
+	if r == nil || r.URL == nil {
+		return false
+	}
+	path := strings.TrimSpace(r.URL.Path)
+	switch path {
+	case "/internal/v1/health", "/internal/v1/ready", "/internal/v1/readiness", "/internal/v1/capabilities", "/internal/v1/auth/capabilities":
+		return true
+	default:
+		return false
+	}
+}
+
+func serviceBrowserAuthenticatedRequest(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if serviceIsCORSPreflight(r) {
+		requestedHeaders := strings.ToLower(strings.TrimSpace(r.Header.Get("Access-Control-Request-Headers")))
+		if requestedHeaders == "" {
+			return false
+		}
+		for _, token := range []string{"authorization", "x-or3-session", "x-or3-auth-method"} {
+			for _, part := range strings.Split(requestedHeaders, ",") {
+				if strings.EqualFold(strings.TrimSpace(part), token) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return strings.TrimSpace(r.Header.Get("Authorization")) != "" ||
+		strings.TrimSpace(r.Header.Get("X-Or3-Session")) != "" ||
+		strings.TrimSpace(r.Header.Get("X-Or3-Auth-Method")) != ""
 }
 
 func serviceTrustedRemotePairingRequest(cfg config.Config, r *http.Request, parsedOrigin *url.URL) bool {
@@ -622,7 +673,10 @@ func allowsUnauthenticatedPairingRoute(cfg config.Config, r *http.Request) bool 
 	if !serviceIsPairingRoute(r) {
 		return false
 	}
-	if serviceListenIsLoopback(cfg.Service.Listen) && requestRemoteIsLoopback(r.RemoteAddr) {
+	if requestRemoteIsLoopback(r.RemoteAddr) {
+		return true
+	}
+	if serviceIsSecurePairingRoute(r) && requestRemoteInCIDRAllowlist(r.RemoteAddr, serviceDefaultPairingBrowserCIDRs()) {
 		return true
 	}
 	origin, err := url.Parse(strings.TrimSpace(r.Header.Get("Origin")))

@@ -466,15 +466,19 @@ func serviceWriteCORSHeaders(header http.Header, r *http.Request, origin string)
 	serviceAppendVary(header, "Origin")
 	serviceAppendVary(header, "Access-Control-Request-Method")
 	serviceAppendVary(header, "Access-Control-Request-Headers")
+	serviceAppendVary(header, "Access-Control-Request-Private-Network")
 	header.Set("Access-Control-Allow-Origin", origin)
 	header.Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-	header.Set("Access-Control-Expose-Headers", "X-Request-Id")
+	header.Set("Access-Control-Expose-Headers", "X-Request-Id, X-Trace-Id")
 	header.Set("Access-Control-Max-Age", "600")
 	requestedHeaders := strings.TrimSpace(r.Header.Get("Access-Control-Request-Headers"))
 	if requestedHeaders == "" {
-		requestedHeaders = "Authorization, Content-Type, Accept, X-Request-Id"
+		requestedHeaders = "Authorization, Content-Type, Accept, X-Request-Id, X-Trace-Id"
 	}
 	header.Set("Access-Control-Allow-Headers", requestedHeaders)
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("Access-Control-Request-Private-Network")), "true") {
+		header.Set("Access-Control-Allow-Private-Network", "true")
+	}
 }
 
 func serviceAppendVary(header http.Header, value string) {

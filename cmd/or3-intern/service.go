@@ -168,6 +168,7 @@ func runServiceCommandWithBrokerOptionsCronMCP(ctx context.Context, cfg config.C
 		jobs = agent.NewJobRegistry(0, 0)
 	}
 	server := &serviceServer{config: cfg, configPath: cfgPathOrDefault(""), runtime: rt, cronSvc: cronSvc, subagentManager: subagentManager, agentCLIManager: agentCLIManager, chatManager: nil, mcpManager: mcpManager, jobs: jobs, broker: broker, unsafeDev: unsafeDev}
+	server.registerDoctorAdminBrainTools()
 	if rt.DB != nil {
 		server.chatManager = &agentcli.ChatManager{DB: rt.DB, Manager: agentCLIManager, Jobs: jobs, Broker: broker}
 		if err := server.chatManager.ReconcileOnStartup(ctx); err != nil {

@@ -62,6 +62,7 @@ func (a *ServiceApp) SetConfig(cfg config.Config) {
 type TurnRequest struct {
 	SessionKey    string
 	Message       string
+	SystemPrompt  string
 	Meta          map[string]any
 	AllowedTools  []string
 	RestrictTools bool
@@ -112,6 +113,9 @@ func (a *ServiceApp) RunTurn(ctx context.Context, req TurnRequest) error {
 		return errors.New("runtime unavailable")
 	}
 	runCtx := a.serviceRunContext(ctx, req.SessionKey, req.ProfileName, req.ApprovalToken, req.Actor, req.Role, req.Capability, req.Observer, req.Streamer)
+	if strings.TrimSpace(req.SystemPrompt) != "" {
+		runCtx = agent.ContextWithTrustedSystemPrompt(runCtx, req.SystemPrompt)
+	}
 	if req.RestrictTools {
 		filtered := a.serviceToolRegistry(req.AllowedTools, req.RestrictTools)
 		runCtx = agent.ContextWithToolRegistry(runCtx, filtered)

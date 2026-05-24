@@ -46,10 +46,12 @@
 
 - [x] (Req 3, 8) Implement `AdminBrainProvider` detection from existing `/internal/v1/chat-runners`, `/internal/v1/agent-runners`, and provider key/config status.
 - [x] (Req 3) Normalize provider states to `runner`, `apiKeyProvider`, or `unavailable` with generic user-facing copy and advanced-only runner/provider IDs.
-- [x] (Req 8, 10, 16) Reuse existing runner-chat/session infrastructure for multi-turn Doctor/Admin conversations with a debugging/fixing system prompt and restricted Doctor/Admin tools.
+- [ ] (Req 8, 10, 16) Reuse existing runner-chat/session infrastructure for multi-turn Doctor/Admin conversations with a debugging/fixing system prompt and restricted Doctor/Admin tools.
 - [x] (Req 8, 10, 16) Define the allowed Admin Brain prompt/evidence envelope and ensure logs/config/skill output are redacted and marked untrusted.
-- [x] (Req 8, 10) Ensure Admin Brain can only propose `SettingsChangePlan` data, create safe diagnostic tool calls, or request approved tool cards; it must not receive direct write/restart/shell tools.
+- [ ] (Req 8, 10) Ensure Admin Brain can only propose `SettingsChangePlan` data, create safe diagnostic tool calls, or request approved tool cards; it must not receive direct write/restart/shell tools.
 - [x] (Req 2, 3) Add tests for no-runner/no-provider fallback, runner installed but auth broken, API key configured, and generic copy with no runner positioning.
+
+Progress note: provider-backed/internal Doctor turns now use a restricted internal service path, and auto-detection skips the unusable `or3-intern` runner-chat path. External runner-chat still does not enforce a true Doctor/Admin-only tool policy, and dedicated Doctor/Admin model-callable tool wrappers are not wired yet.
 
 ## 6. SkillDiagnosticManifest and installable skill diagnostics
 
@@ -82,47 +84,47 @@
 
 ## 9. App Doctor/Admin chat and fix cards
 
-- [ ] (Req 1, 2, 13) Update `or3-app` `useSettingsHealth.ts` to call backend Doctor status/run and fall back to current client-side checks when the endpoint is unavailable.
-- [ ] (Req 1, 3, 8, 13) Add `useDoctorAdminChat.ts` or equivalent composable for problem-description input, multi-turn Doctor/Admin messages, Admin Brain status, streamed tool cards, plan lifecycle, apply, checkpoints, rollback, and post-check state.
-- [ ] (Req 13) Add card components for diagnostic result, recommended fix, settings change preview, risk warning, approval required, exact diff, restart required, post-fix check, undo, and manual fallback.
-- [ ] (Req 13) Integrate cards into `/settings/health` first; link `/computer/attention` to the same Doctor findings instead of maintaining separate guidance logic long-term.
-- [ ] (Req 7, 13, 15) Reuse `useAuthSession.retryWithAuth` so warning/danger applies trigger passkey/PIN verification as supported by backend policy.
-- [ ] (Req 7, 13, 15) Remove typed-confirmation fallback from the default warning/danger flow; show “set up passkey or PIN” when neither is available.
-- [ ] (Req 7, 13, 15) Add warning approval option “Yes, and don’t ask again for 5 minutes” scoped to actor/device/action family/risk/scope.
-- [ ] (Req 9, 13) Reuse `useServiceRestart` reconnect behavior and network-error suppression for restart-required fix cards.
-- [ ] (Req 2, 3, 13) Add Basic Doctor unavailable-AI backend copy and actions.
-- [ ] (Req 13) Add Vitest coverage for card rendering, buttons, risk states, exact diff expansion, approval rejected, restart reconnect, failed fix, and undo available.
+- [x] (Req 1, 2, 13) Update `or3-app` `useSettingsHealth.ts` to call backend Doctor status/run and fall back to current client-side checks when the endpoint is unavailable.
+- [x] (Req 1, 3, 8, 13) Add `useDoctorAdminChat.ts` or equivalent composable for problem-description input, multi-turn Doctor/Admin messages, Admin Brain status, streamed tool cards, plan lifecycle, apply, checkpoints, rollback, and post-check state.
+- [x] (Req 13) Add card components for diagnostic result, recommended fix, settings change preview, risk warning, approval required, exact diff, restart required, post-fix check, undo, and manual fallback.
+- [x] (Req 13) Integrate cards into `/settings/health` first; link `/computer/attention` to the same Doctor findings instead of maintaining separate guidance logic long-term.
+- [x] (Req 7, 13, 15) Reuse `useAuthSession.retryWithAuth` so warning/danger applies trigger passkey/PIN verification as supported by backend policy.
+- [x] (Req 7, 13, 15) Remove typed-confirmation fallback from the default warning/danger flow; show “set up passkey or PIN” when neither is available.
+- [x] (Req 7, 13, 15) Add warning approval option “Yes, and don’t ask again for 5 minutes” scoped to actor/device/action family/risk/scope.
+- [x] (Req 9, 13) Reuse `useServiceRestart` reconnect behavior and network-error suppression for restart-required fix cards.
+- [x] (Req 2, 3, 13) Add Basic Doctor unavailable-AI backend copy and actions.
+- [x] (Req 13) Add Vitest coverage for card rendering, buttons, risk states, exact diff expansion, approval rejected, restart reconnect, failed fix, and undo available.
 
 ## 10. Settings UI integration
 
-- [ ] (Req 5, 14) Extend `useConfigure.ts` with metadata load, plan preview, plan apply, and rollback calls while preserving `applyChanges`.
-- [ ] (Req 5, 14) Update `useSimpleSettings.ts` to consume metadata for covered labels/descriptions/risk/restart status and retain current mappings as fallback.
-- [ ] (Req 5, 6, 14) Replace covered `app/settings/riskRules.ts` cases with backend plan/risk decisions; keep uncovered local warnings temporarily.
-- [ ] (Req 13, 14) Refactor `SettingSaveReview.vue` into or alongside a `SettingsChangePreviewCard` that renders backend plan responses.
-- [ ] (Req 14) Add “Ask Admin Assistant to change this” affordance in advanced settings sections where metadata supports intent mapping.
-- [ ] (Req 14) Ensure Advanced Settings can show exact config keys/diffs only after user expands advanced details.
-- [ ] (Req 14) Add focused app tests for simple setting apply through plan preview and advanced metadata display.
+- [x] (Req 5, 14) Extend `useConfigure.ts` with metadata load, plan preview, plan apply, and rollback calls while preserving `applyChanges`.
+- [x] (Req 5, 14) Update `useSimpleSettings.ts` to consume metadata for covered labels/descriptions/risk/restart status and retain current mappings as fallback.
+- [x] (Req 5, 6, 14) Replace covered `app/settings/riskRules.ts` cases with backend plan/risk decisions; keep uncovered local warnings temporarily.
+- [x] (Req 13, 14) Refactor `SettingSaveReview.vue` into or alongside a `SettingsChangePreviewCard` that renders backend plan responses.
+- [x] (Req 14) Add “Ask Admin Assistant to change this” affordance in advanced settings sections where metadata supports intent mapping.
+- [x] (Req 14) Ensure Advanced Settings can show exact config keys/diffs only after user expands advanced details.
+- [x] (Req 14) Add focused app tests for simple setting apply through plan preview and advanced metadata display.
 
 ## 11. CLI compatibility and docs
 
-- [ ] (Req 1, 17) Keep `or3-intern doctor` CLI behavior compatible; optionally add `--app-json` or richer JSON only if needed by the service/app.
-- [ ] (Req 1, 9) Consider adding a CLI command for plan preview/apply later, but do not block the app vertical slice on it.
-- [ ] (Req 5, 17) Update generated or handwritten config docs from metadata after first-slice fields are covered.
-- [ ] (Req 1, 13, 17) Update `docs/getting-started.md`, `docs/configuration-reference.md`, `docs/security-and-hardening.md`, and app integration docs with Doctor/Admin repair flow once implemented.
-- [ ] (Req 17) Document manual fallback instructions for no-AI, failed restart, failed rollback, and blocked danger changes.
+- [x] (Req 1, 17) Keep `or3-intern doctor` CLI behavior compatible; optionally add `--app-json` or richer JSON only if needed by the service/app.
+- [x] (Req 1, 9) Consider adding a CLI command for plan preview/apply later, but do not block the app vertical slice on it.
+- [x] (Req 5, 17) Update generated or handwritten config docs from metadata after first-slice fields are covered.
+- [x] (Req 1, 13, 17) Update `docs/getting-started.md`, `docs/configuration-reference.md`, `docs/security-and-hardening.md`, and app integration docs with Doctor/Admin repair flow once implemented.
+- [x] (Req 17) Document manual fallback instructions for no-AI, failed restart, failed rollback, and blocked danger changes.
 
 ## 12. First vertical slice acceptance test
 
-- [ ] (Req 1, 2) With no AI backend configured, `/settings/health` shows Basic Doctor availability and runs deterministic checks.
-- [ ] (Req 1, 2) User can describe a problem in Doctor/Admin chat, receive diagnostic tool cards, follow up, and reload the conversation.
-- [ ] (Req 3) With a working runner or configured provider, Doctor shows generic “Admin Brain available” without runner comparison copy.
-- [ ] (Req 12) A generic installable skill stale credential/config fixture produces a warning-level recommended fix plan.
-- [ ] (Req 4, 6, 7) The skill fix plan cannot be applied without required explicit consent and passkey/PIN verification.
-- [ ] (Req 9, 11) Applying the approved plan writes audit and rollback records.
-- [ ] (Req 9) Restart-required plan shows restart preview, calls existing restart action, handles reconnect, and runs post-checks.
-- [ ] (Req 11, 12, 16) Skill diagnostics and logs redact secrets and known prompt-injection log text before Admin Brain use.
-- [ ] (Req 13) The UI shows success/failure and turns accepted rollback-capable cards into undo buttons.
-- [ ] (Req 2, 16) If the service is down, the app still shows client-side Doctor findings and recovery actions.
+- [x] (Req 1, 2) With no AI backend configured, `/settings/health` shows Basic Doctor availability and runs deterministic checks.
+- [x] (Req 1, 2) User can describe a problem in Doctor/Admin chat, receive diagnostic tool cards, follow up, and reload the conversation.
+- [x] (Req 3) With a working runner or configured provider, Doctor shows generic “Admin Brain available” without runner comparison copy.
+- [x] (Req 12) A generic installable skill stale credential/config fixture produces a warning-level recommended fix plan.
+- [x] (Req 4, 6, 7) The skill fix plan cannot be applied without required explicit consent and passkey/PIN verification.
+- [x] (Req 9, 11) Applying the approved plan writes audit and rollback records.
+- [x] (Req 9) Restart-required plan shows restart preview, calls existing restart action, handles reconnect, and runs post-checks.
+- [x] (Req 11, 12, 16) Skill diagnostics and logs redact secrets and known prompt-injection log text before Admin Brain use.
+- [x] (Req 13) The UI shows success/failure and turns accepted rollback-capable cards into undo buttons.
+- [x] (Req 2, 16) If the service is down, the app still shows client-side Doctor findings and recovery actions.
 
 ## 13. Out of scope for the first implementation pass
 

@@ -587,6 +587,45 @@ func TestServiceBrowserMiddleware_AllowsLoopbackPreflight(t *testing.T) {
 	}
 }
 
+func TestServiceBrowserMiddleware_AllowsPrivateNetworkPreflight(t *testing.T) {
+	cfg := config.Config{Service: config.ServiceConfig{
+		Listen:                "100.64.0.42:9100",
+		TrustedBrowserOrigins: []string{"http://100.64.0.42:3060"},
+		TrustedBrowserCIDRs:   []string{"100.64.0.0/10"},
+	}}
+	called := false
+	handler := serviceBrowserMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true})
+	}))
+
+	req := httptest.NewRequest(http.MethodOptions, "/internal/v1/doctor/run", nil)
+	req.RemoteAddr = "100.64.0.42:54321"
+	req.Header.Set("Origin", "http://100.64.0.42:3060")
+	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	req.Header.Set("Access-Control-Request-Headers", "authorization,content-type,x-trace-id")
+	req.Header.Set("Access-Control-Request-Private-Network", "true")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if called {
+		t.Fatal("expected private-network preflight to short-circuit before downstream handler")
+	}
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 preflight response, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "http://100.64.0.42:3060" {
+		t.Fatalf("expected allow-origin header, got %q", got)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Private-Network"); got != "true" {
+		t.Fatalf("expected private network allow header, got %q", got)
+	}
+	if got := strings.ToLower(rec.Header().Get("Access-Control-Allow-Headers")); !strings.Contains(got, "x-trace-id") {
+		t.Fatalf("expected allow-headers to include x-trace-id, got %q", got)
+	}
+}
+
 func TestServiceBrowserMiddleware_AddsLoopbackCORSHeadersToRequests(t *testing.T) {
 	cfg := config.Config{Service: config.ServiceConfig{Listen: "127.0.0.1:9100"}}
 	handler := serviceBrowserMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -608,6 +647,9 @@ func TestServiceBrowserMiddleware_AddsLoopbackCORSHeadersToRequests(t *testing.T
 	}
 	if got := rec.Header().Get("Access-Control-Expose-Headers"); !strings.Contains(got, "X-Request-Id") {
 		t.Fatalf("expected expose headers to include X-Request-Id, got %q", got)
+	}
+	if got := rec.Header().Get("Access-Control-Expose-Headers"); !strings.Contains(got, "X-Trace-Id") {
+		t.Fatalf("expected expose headers to include X-Trace-Id, got %q", got)
 	}
 }
 

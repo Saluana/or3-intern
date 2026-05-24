@@ -406,7 +406,32 @@ The codebase documents these direct environment overrides for service and channe
 - `OR3_EMAIL_SMTP_PASSWORD`
 - `OR3_EMAIL_FROM_ADDRESS`
 
+## Doctor config metadata
+
+`or3-intern service` exposes backend-owned config metadata at:
+
+```http
+GET /internal/v1/doctor/config-metadata
+```
+
+This metadata is the authoritative app-facing source for first-slice setting labels, descriptions, risk level, restart requirement, approval requirement, rollback behavior, validation hints, and user-intent examples. The app uses it to preview settings plans before writes instead of relying only on local risk rules.
+
+Covered first-slice areas include provider keys and routing, runner/Admin Brain availability, generic installable skill credential/config fields, tool exec policy, allowed programs, service restart behavior, and credential/config paths. Uncovered fields continue to use the existing configure field labels and app-local warning fallback until they are migrated.
+
+Plan-based settings writes use:
+
+```http
+POST /internal/v1/doctor/plans
+POST /internal/v1/doctor/plans/{id}/apply
+POST /internal/v1/doctor/plans/{id}/rollback
+POST /internal/v1/doctor/plans/{id}/post-checks
+```
+
+The older `/internal/v1/configure/apply` route remains compatible for callers that do not yet use Doctor plans.
+
 ## Related code
 
 - `internal/config/config.go`
+- `internal/configmeta/`
+- `internal/adminflow/`
 - `cmd/or3-intern/init.go`

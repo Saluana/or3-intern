@@ -178,6 +178,14 @@ func TestRegistryWildcardLookup(t *testing.T) {
 	if !ok || meta.Key != "config.managed_reference" {
 		t.Fatalf("expected more specific metadata to win, got %#v ok=%t", meta, ok)
 	}
+	fields := List()
+	if len(fields) != 2 {
+		t.Fatalf("expected List to include wildcard metadata, got %#v", fields)
+	}
+	sectionFields := ListBySection("skills_entry")
+	if len(sectionFields) != 2 {
+		t.Fatalf("expected ListBySection to include wildcard metadata, got %#v", sectionFields)
+	}
 }
 
 func TestRegisterFirstSliceFields(t *testing.T) {

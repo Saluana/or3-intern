@@ -155,6 +155,14 @@ Common files and directories include:
 7. Run `or3-intern doctor --strict` before exposing connected apps or service mode; use `or3-intern doctor --fix` for safe automatic repairs and `or3-intern doctor --fix --interactive` for guided fixes
 8. Enable one advanced feature at a time: connected apps, skills, triggers, MCP, or service mode
 
+## Doctor in the app
+
+When `or3-intern service` is running and paired to `or3-app`, open **Settings -> Health** to run Basic Doctor from the app. Basic Doctor is deterministic and works even when no AI provider or runner is configured. It combines service-side Doctor findings with app-side connection diagnostics so service-down states still show recovery actions.
+
+The Health page also has an Admin Assistant input. If a supported runner or configured provider is available, Admin Brain can help reason about repairs. If it is not available, Basic Doctor still records the problem statement and shows deterministic findings, recommended fixes, manual fallback copy, and post-fix checks.
+
+Warning and danger repairs are applied through Doctor plans. The app previews the exact setting changes, requires passkey/PIN-backed verification when backend policy requires it, records audit/checkpoint/rollback data, and resumes post-checks after a restart.
+
 ## After changing embedding providers or models
 
 If you switch `provider.apiBase` or `provider.embedModel`, check and rebuild stored embeddings so older memory and indexed docs stay semantically compatible with the new provider/model pair.

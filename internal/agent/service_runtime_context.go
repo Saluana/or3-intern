@@ -13,6 +13,7 @@ type conversationSessionContextKey struct{}
 type conversationActionContextKey struct{}
 type streamingChannelContextKey struct{}
 type toolRegistryContextKey struct{}
+type trustedSystemPromptContextKey struct{}
 
 const ConversationActionSessionReset = "session_reset"
 
@@ -120,6 +121,22 @@ func toolRegistryFromContext(ctx context.Context) *tools.Registry {
 
 func ToolRegistryFromContext(ctx context.Context) *tools.Registry {
 	return toolRegistryFromContext(ctx)
+}
+
+func ContextWithTrustedSystemPrompt(ctx context.Context, prompt string) context.Context {
+	prompt = strings.TrimSpace(prompt)
+	if ctx == nil || prompt == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, trustedSystemPromptContextKey{}, prompt)
+}
+
+func trustedSystemPromptFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	prompt, _ := ctx.Value(trustedSystemPromptContextKey{}).(string)
+	return strings.TrimSpace(prompt)
 }
 
 func toolRegistryWithAllowlist(base *tools.Registry, allowed []string, restrict bool) *tools.Registry {

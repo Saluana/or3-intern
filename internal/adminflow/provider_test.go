@@ -35,7 +35,7 @@ func TestDetectAdminBrainProvider_RunnerInstalledButAuthBrokenFallsBackToProvide
 	}
 }
 
-func TestDetectAdminBrainProvider_PrefersReadyRunner(t *testing.T) {
+func TestDetectAdminBrainProvider_PrefersProviderOverReadyRunner(t *testing.T) {
 	cfg := config.Default()
 	cfg.Provider.APIKey = "sk-test"
 	cfg.Provider.APIBase = "https://openrouter.ai/api/v1"
@@ -48,7 +48,41 @@ func TestDetectAdminBrainProvider_PrefersReadyRunner(t *testing.T) {
 		},
 	}}
 	got := DetectAdminBrainProvider(cfg, runners)
+	if got.Kind != AdminBrainAPIKeyProvider || !got.Available || got.RunnerID != "" {
+		t.Fatalf("DetectAdminBrainProvider() = %#v", got)
+	}
+}
+
+func TestDetectAdminBrainProvider_UsesReadyRunnerWhenNoProvider(t *testing.T) {
+	cfg := config.Default()
+	runners := []agentcli.RunnerInfo{{
+		ID:         string(agentcli.RunnerOpenCode),
+		Status:     agentcli.RunnerStatusAvailable,
+		AuthStatus: agentcli.AuthReady,
+		Supports: agentcli.RunnerSupports{
+			Chat: agentcli.RunnerChatCapabilities{ChatSelectable: true},
+		},
+	}}
+	got := DetectAdminBrainProvider(cfg, runners)
 	if got.Kind != AdminBrainRunner || got.RunnerID != string(agentcli.RunnerOpenCode) {
+		t.Fatalf("DetectAdminBrainProvider() = %#v", got)
+	}
+}
+
+func TestDetectAdminBrainProvider_SkipsInternalOR3Runner(t *testing.T) {
+	cfg := config.Default()
+	cfg.Provider.APIKey = "sk-test"
+	cfg.Provider.APIBase = "https://api.openai.com/v1"
+	runners := []agentcli.RunnerInfo{{
+		ID:         string(agentcli.RunnerOR3),
+		Status:     agentcli.RunnerStatusAvailable,
+		AuthStatus: agentcli.AuthReady,
+		Supports: agentcli.RunnerSupports{
+			Chat: agentcli.RunnerChatCapabilities{ChatSelectable: true},
+		},
+	}}
+	got := DetectAdminBrainProvider(cfg, runners)
+	if got.Kind != AdminBrainAPIKeyProvider || got.ProviderKey != "openai" {
 		t.Fatalf("DetectAdminBrainProvider() = %#v", got)
 	}
 }

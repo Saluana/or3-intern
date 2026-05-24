@@ -25,7 +25,18 @@ type AdminBrainProvider struct {
 }
 
 func DetectAdminBrainProvider(cfg config.Config, runners []agentcli.RunnerInfo) AdminBrainProvider {
+	if providerKey := configuredAdminBrainProviderKey(cfg); providerKey != "" {
+		return AdminBrainProvider{
+			Kind:        AdminBrainAPIKeyProvider,
+			Available:   true,
+			DisplayName: "Admin Brain",
+			ProviderKey: providerKey,
+		}
+	}
 	for _, runner := range runners {
+		if strings.EqualFold(strings.TrimSpace(runner.ID), string(agentcli.RunnerOR3)) {
+			continue
+		}
 		if runner.Status != agentcli.RunnerStatusAvailable {
 			continue
 		}
@@ -40,14 +51,6 @@ func DetectAdminBrainProvider(cfg config.Config, runners []agentcli.RunnerInfo) 
 			Available:   true,
 			DisplayName: "Admin Brain",
 			RunnerID:    strings.TrimSpace(runner.ID),
-		}
-	}
-	if providerKey := configuredAdminBrainProviderKey(cfg); providerKey != "" {
-		return AdminBrainProvider{
-			Kind:        AdminBrainAPIKeyProvider,
-			Available:   true,
-			DisplayName: "Admin Brain",
-			ProviderKey: providerKey,
 		}
 	}
 	return AdminBrainProvider{

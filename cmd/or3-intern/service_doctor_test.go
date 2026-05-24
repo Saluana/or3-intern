@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -15,10 +16,12 @@ import (
 
 	"or3-intern/internal/adminflow"
 	"or3-intern/internal/agent"
+	"or3-intern/internal/agentcli"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
 	"or3-intern/internal/security"
+	"or3-intern/internal/tools"
 )
 
 func TestServiceDoctorStatusAndMetadata(t *testing.T) {
@@ -110,6 +113,102 @@ func TestServiceDoctorSessionsPersistMessagesAndLogs(t *testing.T) {
 	}
 }
 
+func TestServiceDoctorStreamsInternalAdminBrainTurnsAsJobs(t *testing.T) {
+	database, cleanup := openServiceTestDB(t)
+	defer cleanup()
+	cfg := config.Default()
+	cfg.Provider.APIBase = "http://127.0.0.1:1/v1"
+	cfg.Provider.APIKey = "test-key"
+	cfg.Provider.Model = "test-model"
+	server := newDoctorTestServer(t, database, cfg)
+
+	createRec := httptest.NewRecorder()
+	server.handleDoctor(createRec, doctorAuthedRequest(http.MethodPost, "/internal/v1/doctor/sessions", `{"title":"Doctor Session"}`))
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("expected create 201, got %d (%s)", createRec.Code, createRec.Body.String())
+	}
+	createBody := mustDecodeJSONBody(t, createRec.Body)
+	session, ok := createBody["session"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected session payload, got %#v", createBody)
+	}
+	sessionKey, _ := session["SessionKey"].(string)
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		t.Fatalf("expected session key, got %#v", session)
+	}
+
+	messageRec := httptest.NewRecorder()
+	server.handleDoctor(messageRec, doctorAuthedRequest(http.MethodPost, "/internal/v1/doctor/sessions/"+sessionKey+"/messages", `{"content":"check provider settings","stream":true}`))
+	if messageRec.Code != http.StatusAccepted {
+		t.Fatalf("expected message 202, got %d (%s)", messageRec.Code, messageRec.Body.String())
+	}
+	messageBody := mustDecodeJSONBody(t, messageRec.Body)
+	jobID, _ := messageBody["job_id"].(string)
+	if strings.TrimSpace(jobID) == "" {
+		t.Fatalf("expected job_id in streamed response, got %#v", messageBody)
+	}
+	if adminBrain, ok := messageBody["admin_brain"].(map[string]any); !ok || adminBrain["available"] != true {
+		t.Fatalf("expected available admin_brain payload, got %#v", messageBody["admin_brain"])
+	}
+	snapshot, ok := server.jobs.Snapshot(jobID)
+	if !ok {
+		t.Fatalf("expected registered job %q", jobID)
+	}
+	if snapshot.Kind != "doctor_admin_brain" {
+		t.Fatalf("expected doctor_admin_brain job, got %#v", snapshot)
+	}
+	server.jobs.Cancel(jobID)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	server.jobs.Wait(ctx, jobID)
+}
+
+func TestWriteDoctorAdminBrainTurnErrorMapsApprovalRequests(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := doctorAuthedRequest(http.MethodPost, "/internal/v1/doctor/sessions/session-1/messages", "")
+
+	writeDoctorAdminBrainTurnError(rec, req, &tools.ApprovalRequiredError{ToolName: "exec", RequestID: 42})
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	payload := mustDecodeJSONBody(t, rec.Body)
+	if payload["code"] != "approval_required" {
+		t.Fatalf("expected approval_required code, got %#v", payload)
+	}
+	if payload["approval_id"] != float64(42) {
+		t.Fatalf("expected approval id 42, got %#v", payload)
+	}
+	if payload["message"] != "approval required for exec (request 42)" {
+		t.Fatalf("expected approval message, got %#v", payload)
+	}
+}
+
+func TestWriteDoctorAdminBrainTurnErrorTranslatesRuntimeFailures(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := doctorAuthedRequest(http.MethodPost, "/internal/v1/doctor/sessions/session-1/messages", "")
+
+	writeDoctorAdminBrainTurnError(rec, req, errors.New("runtime unavailable"))
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	payload := mustDecodeJSONBody(t, rec.Body)
+	if payload["message"] != "OR3 could not start its runtime safely." {
+		t.Fatalf("expected translated runtime message, got %#v", payload)
+	}
+	if payload["title"] != "The assistant engine did not start" {
+		t.Fatalf("expected translated runtime title, got %#v", payload)
+	}
+	if payload["command"] != "or3-intern status" {
+		t.Fatalf("expected recovery command, got %#v", payload)
+	}
+	if payload["error"] != "doctor admin brain turn failed" {
+		t.Fatalf("expected stable public error string, got %#v", payload)
+	}
+}
+
 func TestServiceDoctorRunWithoutClientDiagnosticsDoesNotAddServiceDownFinding(t *testing.T) {
 	database, cleanup := openServiceTestDB(t)
 	defer cleanup()
@@ -177,6 +276,176 @@ func TestServiceDoctorRunMergesClientServiceDownDiagnosticsAndRedactsLogs(t *tes
 	}
 	if !strings.Contains(logBody, "UNTRUSTED CONTENT DETECTED") {
 		t.Fatalf("expected prompt-injection marker in log payload, got %s", logBody)
+	}
+}
+
+func TestDoctorUsesRunnerChatForExternalRunners(t *testing.T) {
+	if doctorUsesRunnerChat(string(agentcli.RunnerOR3)) {
+		t.Fatal("expected internal or3 runner to avoid runner-chat path")
+	}
+	if !doctorUsesRunnerChat(string(agentcli.RunnerCodex)) {
+		t.Fatal("expected external runner to use runner-chat path")
+	}
+}
+
+func TestDoctorShouldUseInternalAdminBrain(t *testing.T) {
+	if !doctorShouldUseInternalAdminBrain(db.ChatSessionMeta{RunnerID: string(agentcli.RunnerOR3)}, adminflow.AdminBrainProvider{}) {
+		t.Fatal("expected explicit or3-intern runner to use internal admin brain path")
+	}
+	if !doctorShouldUseInternalAdminBrain(db.ChatSessionMeta{}, adminflow.AdminBrainProvider{Kind: adminflow.AdminBrainAPIKeyProvider, Available: true}) {
+		t.Fatal("expected provider-backed admin brain to use internal path when no runner chat session exists")
+	}
+	if !doctorShouldUseInternalAdminBrain(db.ChatSessionMeta{RunnerID: string(agentcli.RunnerCodex)}, adminflow.AdminBrainProvider{Kind: adminflow.AdminBrainAPIKeyProvider, Available: true}) {
+		t.Fatal("expected provider-backed admin brain to ignore selected external runner without runner-chat session")
+	}
+	if doctorShouldUseInternalAdminBrain(db.ChatSessionMeta{RunnerID: string(agentcli.RunnerCodex), RunnerChatSessionID: "rcs_1"}, adminflow.AdminBrainProvider{Kind: adminflow.AdminBrainAPIKeyProvider, Available: true}) {
+		t.Fatal("expected existing external runner-chat session to keep runner-chat path")
+	}
+}
+
+func TestDoctorAdminBrainAllowedToolsFiltersUnavailableTools(t *testing.T) {
+	registry := tools.NewRegistry()
+	server := &serviceServer{}
+	for _, tool := range server.doctorAdminBrainTools() {
+		registry.Register(tool)
+	}
+	registry.Register(&tools.CronTool{})
+	got := doctorAdminBrainAllowedTools(registry)
+	want := []string{
+		doctorToolNameStatus,
+		doctorToolNameLogs,
+		doctorToolNameDocsSearch,
+		doctorToolNameConfigSearch,
+		doctorToolNameConfigMetadata,
+		doctorToolNameSkillDiagnostics,
+		doctorToolNameCreatePlan,
+		doctorToolNameReadPlan,
+		doctorToolNameRunPostChecks,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("doctorAdminBrainAllowedTools() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("doctorAdminBrainAllowedTools()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+	for _, forbidden := range []string{tools.ToolNameReadFile, tools.ToolNameSearchFile, tools.ToolNameWriteFile, tools.ToolNameEditFile, tools.ToolNameListDir, tools.ToolNameWebFetch, tools.ToolNameExec} {
+		if containsString(got, forbidden) {
+			t.Fatalf("doctor allowlist included forbidden generic tool %q: %v", forbidden, got)
+		}
+	}
+}
+
+func TestServiceDoctorRegistersAdminBrainTools(t *testing.T) {
+	database, cleanup := openServiceTestDB(t)
+	defer cleanup()
+	server := newDoctorTestServer(t, database, config.Default())
+	server.registerDoctorAdminBrainTools()
+	got := doctorAdminBrainAllowedTools(server.runtime.Tools)
+	if len(got) != len(doctorAdminBrainAllowedToolNames) {
+		t.Fatalf("doctorAdminBrainAllowedTools() = %v", got)
+	}
+	for _, forbidden := range []string{tools.ToolNameReadFile, tools.ToolNameSearchFile, tools.ToolNameWriteFile, tools.ToolNameEditFile, tools.ToolNameListDir, tools.ToolNameWebFetch, tools.ToolNameExec} {
+		if containsString(got, forbidden) {
+			t.Fatalf("registered Doctor allowlist included forbidden generic tool %q: %v", forbidden, got)
+		}
+	}
+}
+
+func TestServiceDoctorToolsExecuteStatusAndPlanRead(t *testing.T) {
+	database, cleanup := openServiceTestDB(t)
+	defer cleanup()
+	cfg := config.Default()
+	cfg.Provider.APIKey = "sk-test-secret-value"
+	server := newDoctorTestServer(t, database, cfg)
+	server.registerDoctorAdminBrainTools()
+
+	statusOut, err := server.runtime.Tools.ExecuteParams(context.Background(), doctorToolNameStatus, nil)
+	if err != nil {
+		t.Fatalf("doctor_status ExecuteParams: %v", err)
+	}
+	var statusResult tools.ToolResult
+	if err := json.Unmarshal([]byte(statusOut), &statusResult); err != nil {
+		t.Fatalf("decode status result: %v", err)
+	}
+	if statusResult.Kind != "doctor_status" || !statusResult.OK {
+		t.Fatalf("unexpected status result: %s", statusOut)
+	}
+	if _, ok := statusResult.Stats["finding_cards"]; !ok {
+		t.Fatalf("expected finding_cards in status stats: %#v", statusResult.Stats)
+	}
+
+	docsOut, err := server.runtime.Tools.ExecuteParams(context.Background(), doctorToolNameDocsSearch, map[string]any{"query": "agent runtime tools"})
+	if err != nil {
+		t.Fatalf("doctor_docs_search ExecuteParams: %v", err)
+	}
+	var docsResult tools.ToolResult
+	if err := json.Unmarshal([]byte(docsOut), &docsResult); err != nil {
+		t.Fatalf("decode docs result: %v", err)
+	}
+	if docsResult.Kind != "doctor_docs_search" || !docsResult.OK {
+		t.Fatalf("unexpected docs result: %s", docsOut)
+	}
+	if count, _ := docsResult.Stats["count"].(float64); count < 1 {
+		t.Fatalf("expected docs matches, got %s", docsOut)
+	}
+
+	configOut, err := server.runtime.Tools.ExecuteParams(context.Background(), doctorToolNameConfigSearch, map[string]any{"query": "api key"})
+	if err != nil {
+		t.Fatalf("doctor_config_search ExecuteParams: %v", err)
+	}
+	var configResult tools.ToolResult
+	if err := json.Unmarshal([]byte(configOut), &configResult); err != nil {
+		t.Fatalf("decode config search result: %v", err)
+	}
+	if configResult.Kind != "doctor_config_search" || !configResult.OK {
+		t.Fatalf("unexpected config search result: %s", configOut)
+	}
+	if !strings.Contains(configOut, "current_value") || strings.Contains(configOut, cfg.Provider.APIKey) {
+		t.Fatalf("expected redacted current config values, got %s", configOut)
+	}
+
+	change := adminflow.SettingsPlanChange{
+		ConfigPath: "skills.load.disableGlobalDir",
+		Section:    "skills",
+		Field:      "skills_global_disabled",
+		Operation:  "toggle",
+		OldValue:   adminflow.RedactedValue{Value: false},
+		NewValue:   adminflow.RedactedValue{Value: true},
+	}
+	createOut, err := server.runtime.Tools.ExecuteParams(context.Background(), doctorToolNameCreatePlan, map[string]any{
+		"conversation_id": "conv-tool",
+		"plan": adminflow.SettingsChangePlan{
+			Title:   "Disable global skills",
+			Summary: "Turn off the global skills directory.",
+			Changes: []adminflow.SettingsPlanChange{change},
+		},
+	})
+	if err != nil {
+		t.Fatalf("doctor_create_plan ExecuteParams: %v", err)
+	}
+	var createResult tools.ToolResult
+	if err := json.Unmarshal([]byte(createOut), &createResult); err != nil {
+		t.Fatalf("decode create result: %v", err)
+	}
+	if createResult.Kind != "doctor_plan" || !createResult.OK || strings.TrimSpace(createResult.PlanID) == "" {
+		t.Fatalf("unexpected create result: %s", createOut)
+	}
+	if createResult.Stats["card_type"] != "settings_change_preview" {
+		t.Fatalf("expected settings_change_preview card type, got %#v", createResult.Stats)
+	}
+
+	readOut, err := server.runtime.Tools.ExecuteParams(context.Background(), doctorToolNameReadPlan, map[string]any{"plan_id": createResult.PlanID})
+	if err != nil {
+		t.Fatalf("doctor_read_plan ExecuteParams: %v", err)
+	}
+	var readResult tools.ToolResult
+	if err := json.Unmarshal([]byte(readOut), &readResult); err != nil {
+		t.Fatalf("decode read result: %v", err)
+	}
+	if readResult.Kind != "doctor_plan" || readResult.PlanID != createResult.PlanID || readResult.Stats["status"] != "validated" {
+		t.Fatalf("unexpected read result: %s", readOut)
 	}
 }
 
@@ -716,7 +985,7 @@ func newDoctorTestServer(t *testing.T, database *db.DB, cfg config.Config) *serv
 		config:     cfg,
 		configPath: cfgPath,
 		jobs:       agent.NewJobRegistry(time.Minute, 32),
-		runtime:    &agent.Runtime{DB: database, Audit: &security.AuditLogger{DB: database, Key: []byte(strings.Repeat("a", 32))}},
+		runtime:    &agent.Runtime{DB: database, Tools: tools.NewRegistry(), Audit: &security.AuditLogger{DB: database, Key: []byte(strings.Repeat("a", 32))}},
 	}
 }
 

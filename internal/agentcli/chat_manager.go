@@ -42,6 +42,7 @@ type StartTurnRequest struct {
 	AppSessionKey    string
 	RunnerID         string
 	UserMessage      string
+	PromptMessage    string
 	ContinuationMode ContinuationMode
 	Model            string
 	Mode             string
@@ -148,6 +149,10 @@ func (cm *ChatManager) StartTurn(ctx context.Context, sessionID string, req Star
 	if userMessage == "" {
 		return StartTurnResult{}, errors.New("user_message required")
 	}
+	promptMessage := strings.TrimSpace(req.PromptMessage)
+	if promptMessage == "" {
+		promptMessage = userMessage
+	}
 	approvedPermission, err := cm.approvedRunnerPermission(ctx, sess, req)
 	if err != nil {
 		return StartTurnResult{}, err
@@ -160,7 +165,7 @@ func (cm *ChatManager) StartTurn(ctx context.Context, sessionID string, req Star
 		if err != nil {
 			return StartTurnResult{}, fmt.Errorf("list turns: %w", err)
 		}
-		prompt = BuildReplayPrompt(toAgentcliHistory(history), userMessage)
+		prompt = BuildReplayPrompt(toAgentcliHistory(history), promptMessage)
 	}
 
 	// Insert the new turn row (status=queued). UNIQUE partial index enforces
@@ -229,7 +234,7 @@ func (cm *ChatManager) StartTurn(ctx context.Context, sessionID string, req Star
 	agentReq := AgentRunRequest{
 		ParentSessionKey: sess.AppSessionKey,
 		RunnerID:         sess.RunnerID,
-		Task:             firstNonEmptyStr(prompt, userMessage),
+		Task:             firstNonEmptyStr(prompt, promptMessage),
 		Cwd:              turn.Cwd,
 		Model:            turn.Model,
 		Mode:             turn.Mode,

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -86,6 +87,72 @@ func TestReplayToolCall_UsesRestrictedRegistryContext(t *testing.T) {
 	}
 	if out != "ok" {
 		t.Fatalf("expected ok, got %q", out)
+	}
+}
+
+func TestRunTurn_UsesSystemPromptWithoutPersistingIt(t *testing.T) {
+	database, err := db.Open(filepath.Join(t.TempDir(), "service-app-prompt.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { database.Close() })
+
+	var captured providers.ChatCompletionRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("Decode provider request: %v", err)
+		}
+		_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)
+	}))
+	t.Cleanup(server.Close)
+
+	provider := providers.New(server.URL, "test-key", 10*time.Second)
+	provider.HTTP = server.Client()
+	runtime := &agent.Runtime{
+		DB:       database,
+		Provider: provider,
+		Model:    "gpt-4",
+		Tools:    tools.NewRegistry(),
+		Builder:  &agent.Builder{DB: database, HistoryMax: 10},
+	}
+	app := &ServiceApp{runtime: runtime}
+
+	err = app.RunTurn(context.Background(), TurnRequest{
+		SessionKey:   "doctor:test",
+		Message:      "visible user words",
+		SystemPrompt: "trusted doctor context secret-marker",
+	})
+	if err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+
+	foundPrompt := false
+	foundUser := false
+	for _, message := range captured.Messages {
+		content := fmt.Sprint(message.Content)
+		if message.Role == "system" && content == "trusted doctor context secret-marker" {
+			foundPrompt = true
+		}
+		if message.Role == "user" && content == "visible user words" {
+			foundUser = true
+		}
+	}
+	if !foundPrompt || !foundUser {
+		t.Fatalf("expected provider request to include trusted system prompt and visible user text, got %#v", captured.Messages)
+	}
+
+	page, err := database.ListChatMessages(context.Background(), "doctor:test", 0, 10)
+	if err != nil {
+		t.Fatalf("ListChatMessages: %v", err)
+	}
+	if len(page.Messages) == 0 || page.Messages[0].Role != "user" || page.Messages[0].Content != "visible user words" {
+		t.Fatalf("expected visible user message persisted, got %#v", page.Messages)
+	}
+	for _, message := range page.Messages {
+		if strings.Contains(message.Content, "secret-marker") {
+			t.Fatalf("trusted system prompt leaked into persisted messages: %#v", page.Messages)
+		}
 	}
 }
 

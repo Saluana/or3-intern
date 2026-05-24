@@ -415,6 +415,9 @@ func (r *Runtime) BuildPromptSnapshot(ctx context.Context, sessionKey string, us
 		return nil, err
 	}
 	messages := append([]providers.ChatMessage{}, pp.System...)
+	if prompt := trustedSystemPromptFromContext(ctx); prompt != "" {
+		messages = append(messages, providers.ChatMessage{Role: "system", Content: prompt})
+	}
 	messages = append(messages, pp.History...)
 	if len(pp.History) == 0 || pp.History[len(pp.History)-1].Role != "user" {
 		messages = append(messages, providers.ChatMessage{Role: "user", Content: userMessage})
@@ -432,6 +435,9 @@ func (r *Runtime) BuildPromptSnapshotWithOptions(ctx context.Context, opts Build
 		return nil, err
 	}
 	messages := append([]providers.ChatMessage{}, pp.System...)
+	if prompt := trustedSystemPromptFromContext(ctx); prompt != "" {
+		messages = append(messages, providers.ChatMessage{Role: "system", Content: prompt})
+	}
 	messages = append(messages, pp.History...)
 	if len(pp.History) == 0 || pp.History[len(pp.History)-1].Role != "user" {
 		messages = append(messages, providers.ChatMessage{Role: "user", Content: opts.UserMessage})

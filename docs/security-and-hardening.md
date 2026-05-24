@@ -247,6 +247,26 @@ or3-intern doctor --fix --interactive
 
 Run this before enabling external channels, webhook listeners, privileged tools, or service mode.
 
+## App Doctor/Admin repair safety
+
+The app repair flow uses the same service auth policy as the rest of OR3:
+
+- read-only Doctor status, run, logs, Admin Brain availability, and metadata routes are operator-readable
+- plan apply and rollback are sensitive routes and require a session plus recent step-up verification when policy requires it
+- warning/danger plans show exact config diffs before apply
+- the app no longer uses typed confirmation as the default approval path for warning/danger plans
+- if neither passkey nor PIN-backed verification is available, the app directs the operator to set up passkeys/PIN before applying blocked changes
+- remembered warning approval is bounded to 5 minutes and scoped by actor/device/action family/risk/scope through the approval context
+
+Applied plans write audit entries, checkpoints, and rollback records. Restart-required plans reuse `/internal/v1/actions/restart-service`; the app suppresses expected reconnect noise while the service restarts and then resumes Doctor post-checks.
+
+Manual fallbacks:
+
+- **No AI/Admin Brain**: Basic Doctor still runs deterministic checks and displays recommended fixes.
+- **Failed restart**: restart OR3 manually, then run the plan post-checks from the app.
+- **Failed rollback**: use the rollback instructions stored with the plan and avoid repeated automatic rollback attempts.
+- **Blocked danger change**: set up passkey/PIN verification or use the CLI/host console with an admin recovery path.
+
 ## External agent CLI delegation
 
 The external agent CLI subsystem spawns child processes (OpenCode, Codex, Claude, Gemini) from the service. The following controls apply:

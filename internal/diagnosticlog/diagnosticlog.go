@@ -16,16 +16,36 @@ const (
 )
 
 type ClientDiagnostics struct {
-	HostProfile           string `json:"host_profile,omitempty"`
-	PairingState          string `json:"pairing_state,omitempty"`
-	SessionState          string `json:"session_state,omitempty"`
-	BaseURL               string `json:"base_url,omitempty"`
-	BootstrapReachable    *bool  `json:"bootstrap_reachable,omitempty"`
-	ErrorCategory         string `json:"error_category,omitempty"`
-	Timeout               bool   `json:"timeout,omitempty"`
-	Refused               bool   `json:"refused,omitempty"`
-	AuthError             bool   `json:"auth_error,omitempty"`
-	CachedRestartGuidance string `json:"cached_restart_guidance,omitempty"`
+	HostProfile           string                  `json:"host_profile,omitempty"`
+	PairingState          string                  `json:"pairing_state,omitempty"`
+	SessionState          string                  `json:"session_state,omitempty"`
+	BaseURL               string                  `json:"base_url,omitempty"`
+	BootstrapReachable    *bool                   `json:"bootstrap_reachable,omitempty"`
+	ErrorCategory         string                  `json:"error_category,omitempty"`
+	Timeout               bool                    `json:"timeout,omitempty"`
+	Refused               bool                    `json:"refused,omitempty"`
+	AuthError             bool                    `json:"auth_error,omitempty"`
+	CachedRestartGuidance string                  `json:"cached_restart_guidance,omitempty"`
+	CapturedAt            string                  `json:"captured_at,omitempty"`
+	Source                string                  `json:"source,omitempty"`
+	ServiceDown           bool                    `json:"service_down,omitempty"`
+	Findings              []ClientReportedFinding `json:"findings,omitempty"`
+}
+
+// ClientReportedFinding mirrors the lightweight finding shape the or3-app
+// composes locally before the service Doctor evaluates them. We accept the
+// most common field aliases so the app can keep using its current ergonomics
+// without the request decoder rejecting unknown JSON fields.
+type ClientReportedFinding struct {
+	ID       string `json:"id,omitempty"`
+	Area     string `json:"area,omitempty"`
+	Severity string `json:"severity,omitempty"`
+	Status   string `json:"status,omitempty"`
+	Label    string `json:"label,omitempty"`
+	Summary  string `json:"summary,omitempty"`
+	Detail   string `json:"detail,omitempty"`
+	FixHref  string `json:"fix_href,omitempty"`
+	FixLabel string `json:"fix_label,omitempty"`
 }
 
 func NewEvent(source, level, correlationID, eventType string, payload any) db.DiagnosticLogEvent {
@@ -64,6 +84,16 @@ func RedactPayload(payload any) json.RawMessage {
 }
 
 func FindingsFromClientDiagnostics(diag ClientDiagnostics) []doctor.Finding {
+	out := []doctor.Finding{}
+	out = append(out, clientReportedToDoctorFindings(diag)...)
+	connection := connectionFindingFromDiagnostics(diag)
+	if connection != nil {
+		out = append(out, *connection)
+	}
+	return out
+}
+
+func connectionFindingFromDiagnostics(diag ClientDiagnostics) *doctor.Finding {
 	category := strings.ToLower(strings.TrimSpace(diag.ErrorCategory))
 	if category == "" {
 		switch {
@@ -73,9 +103,14 @@ func FindingsFromClientDiagnostics(diag ClientDiagnostics) []doctor.Finding {
 			category = "refused"
 		case diag.AuthError:
 			category = "auth"
+		case diag.ServiceDown:
+			category = "service_down"
 		}
 	}
 	if category == "" && diag.BootstrapReachable != nil && *diag.BootstrapReachable {
+		return nil
+	}
+	if category == "" && !diag.ServiceDown {
 		return nil
 	}
 	severity := doctor.SeverityWarn
@@ -111,7 +146,7 @@ func FindingsFromClientDiagnostics(diag ClientDiagnostics) []doctor.Finding {
 	if fixHint == "" {
 		fixHint = "Check the app connection settings, verify pairing/session state, then restart the OR3 service if it is not responding."
 	}
-	return []doctor.Finding{{
+	return &doctor.Finding{
 		ID:       "app.service_down." + clean(category, "unknown"),
 		Area:     "app",
 		Severity: severity,
@@ -121,7 +156,70 @@ func FindingsFromClientDiagnostics(diag ClientDiagnostics) []doctor.Finding {
 		FixMode:  doctor.FixModeManual,
 		FixHint:  fixHint,
 		Metadata: map[string]string{"source": "client_diagnostics", "category": category},
-	}}
+	}
+}
+
+func clientReportedToDoctorFindings(diag ClientDiagnostics) []doctor.Finding {
+	if len(diag.Findings) == 0 {
+		return nil
+	}
+	out := make([]doctor.Finding, 0, len(diag.Findings))
+	for _, raw := range diag.Findings {
+		severity := normalizeClientSeverity(raw.Severity, raw.Status)
+		id := strings.TrimSpace(raw.ID)
+		if id == "" {
+			continue
+		}
+		summary := firstNonEmpty(raw.Summary, raw.Label, id)
+		detail := strings.TrimSpace(raw.Detail)
+		area := strings.TrimSpace(raw.Area)
+		if area == "" {
+			area = "app"
+		}
+		metadata := map[string]string{"source": "client_diagnostics"}
+		if raw.FixHref != "" {
+			metadata["fix_href"] = raw.FixHref
+		}
+		if raw.FixLabel != "" {
+			metadata["fix_label"] = raw.FixLabel
+		}
+		out = append(out, doctor.Finding{
+			ID:       "app." + clean(id, "finding"),
+			Area:     area,
+			Severity: severity,
+			Summary:  adminflow.SanitizeForAI(summary),
+			Detail:   adminflow.SanitizeForAI(detail),
+			FixMode:  doctor.FixModeManual,
+			Metadata: metadata,
+		})
+	}
+	return out
+}
+
+func normalizeClientSeverity(severity, status string) doctor.Severity {
+	value := strings.ToLower(strings.TrimSpace(severity))
+	if value == "" {
+		value = strings.ToLower(strings.TrimSpace(status))
+	}
+	switch value {
+	case "error", "danger", "fatal", "block":
+		return doctor.SeverityError
+	case "warning", "warn", "amber":
+		return doctor.SeverityWarn
+	case "info", "ok", "notice", "unknown", "":
+		return doctor.SeverityInfo
+	default:
+		return doctor.SeverityInfo
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if v := strings.TrimSpace(value); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func decodeJSON(raw []byte) any {

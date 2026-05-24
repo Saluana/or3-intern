@@ -64,10 +64,11 @@ func GetByPath(path string) (ConfigFieldMetadata, bool) {
 func List() []ConfigFieldMetadata {
 	registryMu.RLock()
 	defer registryMu.RUnlock()
-	result := make([]ConfigFieldMetadata, 0, len(registry))
+	result := make([]ConfigFieldMetadata, 0, len(registry)+len(registryPatterns))
 	for _, meta := range registry {
 		result = append(result, meta)
 	}
+	result = append(result, registryPatterns...)
 	return result
 }
 
@@ -77,6 +78,11 @@ func ListBySection(section string) []ConfigFieldMetadata {
 	defer registryMu.RUnlock()
 	result := []ConfigFieldMetadata{}
 	for _, meta := range registry {
+		if meta.Section == section {
+			result = append(result, meta)
+		}
+	}
+	for _, meta := range registryPatterns {
 		if meta.Section == section {
 			result = append(result, meta)
 		}

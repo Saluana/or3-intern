@@ -179,6 +179,7 @@ type turnPromptInput struct {
 	pinnedText, digestText, memText, identityText, staticMemoryText string
 	docContextText, workspaceContextText                            string
 	heartbeatText, compactionText, activePlanText, eventContextText string
+	toolPolicyMode                                                  string
 	currentUserMessage                                              string
 	currentUserMessageID                                            int64
 	turnAttachments                                                 []ChatAttachment
@@ -443,6 +444,7 @@ func (b *Builder) buildPacket(ctx context.Context, opts BuildOptions) (ContextPa
 		compactionText:       compactionText,
 		activePlanText:       activePlanText,
 		eventContextText:     eventContext,
+		toolPolicyMode:       metaStringValue(opts.EventMeta, "tool_policy_mode"),
 		currentUserMessage:   opts.UserMessage,
 		currentUserMessageID: opts.UserMessageID,
 		turnAttachments:      turnAttachments,
@@ -963,7 +965,7 @@ func (b *Builder) turnPromptSections(input turnPromptInput) []systemPromptSectio
 	if t := strings.TrimSpace(input.compactionText); t != "" {
 		sections = append(sections, systemPromptSection{Title: "Context Compaction", XMLTag: xmlTagContextCompaction, Text: t, CacheClass: CacheClassTurn})
 	}
-	if t := strings.TrimSpace(b.renderRuntimeContext()); t != "" {
+	if t := strings.TrimSpace(b.renderRuntimeContext(input.toolPolicyMode)); t != "" {
 		sections = append(sections, systemPromptSection{Title: "Runtime Context", XMLTag: xmlTagRuntimeContext, Text: t, CacheClass: CacheClassTurn})
 	}
 	if t := strings.TrimSpace(renderCurrentUserRequestBody(input.currentUserMessage, input.currentUserMessageID)); t != "" {
@@ -1001,22 +1003,6 @@ func (b *Builder) turnPromptSections(input turnPromptInput) []systemPromptSectio
 		sections = append(sections, systemPromptSection{Title: "Event Context", XMLTag: xmlTagEventContext, Text: t, CacheClass: CacheClassTurn})
 	}
 	return sections
-}
-
-func (b *Builder) renderRuntimeContext() string {
-	workingDir := strings.TrimSpace(b.WorkspaceDir)
-	if workingDir == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			workingDir = strings.TrimSpace(cwd)
-		}
-	}
-	if workingDir == "" {
-		workingDir = "(unknown)"
-	}
-	return strings.TrimSpace(strings.Join([]string{
-		"Current date: " + time.Now().Format("2006-01-02"),
-		"Working directory: " + workingDir,
-	}, "\n"))
 }
 
 func formatStructuredEventContext(meta map[string]any, max int) string {

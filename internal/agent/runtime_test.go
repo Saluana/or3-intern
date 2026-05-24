@@ -456,8 +456,12 @@ func TestRuntime_Handle_UnavailableLegacyToolMarkupRetriesWithoutToolError(t *te
 		t.Fatalf("GetLastMessages: %v", err)
 	}
 	for _, msg := range msgs {
-		if msg.Role == "tool" || strings.Contains(msg.Content, "tool 'memory' not found") {
-			t.Fatalf("expected unavailable markup not to produce a tool error, got %#v", msgs)
+		if msg.Role != "tool" {
+			continue
+		}
+		result, ok := tools.DecodeToolResult(msg.Content)
+		if !ok || result.OK || !strings.Contains(strings.Join(result.Advice, " "), "not available") {
+			t.Fatalf("expected structured unavailable tool result, got %#v", msgs)
 		}
 	}
 }

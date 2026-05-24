@@ -126,12 +126,31 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 				if sw != nil {
 					_ = sw.Abort(ctx)
 				}
+				toolTurnContent := msg.Content
+				if raw, ok := msg.Content.(string); ok {
+					toolTurnContent = sanitizeToolTurnContent(raw)
+				}
+				messages = append(messages, providers.ChatMessage{Role: "assistant", Content: toolTurnContent, ToolCalls: msg.ToolCalls})
+				if _, err := r.DB.AppendMessage(ctx, sessionKey, "assistant", sanitizeToolTurnContent(contentToString(msg.Content)), map[string]any{"tool_calls": msg.ToolCalls}); err != nil {
+					log.Printf("append assistant(unavailable tool_calls) failed: %v", err)
+				}
+				unavailableErr := fmt.Errorf("tool not available in this turn")
 				for _, tc := range normalizedCalls {
 					var parsedParams map[string]any
 					_ = json.Unmarshal([]byte(tc.ArgumentsJSON), &parsedParams)
-					toolOut := formatToolExecutionError(tc.Name, parsedParams, "", fmt.Errorf("tool not available in this turn"))
+					toolOut := formatToolExecutionError(tc.Name, parsedParams, "", unavailableErr)
 					emitToolCallStarted(ctx, observer, tc)
-					emitToolCallFinished(ctx, observer, tc, toolOut, "", fmt.Errorf("tool not available in this turn"))
+					emitToolCallFinished(ctx, observer, tc, toolOut, "", unavailableErr)
+					payload := map[string]any{
+						"tool":         tc.Name,
+						"tool_call_id": tc.ID,
+						"args":         json.RawMessage([]byte(tc.ArgumentsJSON)),
+						"public_code":  PublicErrorToolExecution,
+					}
+					if _, appendErr := r.DB.AppendMessage(ctx, sessionKey, "tool", toolOut, payload); appendErr != nil {
+						log.Printf("append unavailable tool message failed: %v", appendErr)
+					}
+					messages = append(messages, providers.ChatMessage{Role: "tool", ToolCallID: tc.ID, Content: toolOut})
 				}
 				messages = append(messages, providers.ChatMessage{
 					Role:    "system",

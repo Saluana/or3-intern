@@ -17,12 +17,13 @@ import (
 )
 
 type serviceTurnRequest struct {
-	SessionKey     string
-	Message        string
-	Attachments    []agent.ChatAttachment
-	AllowedTools   []string
-	RestrictTools  bool
-	Meta           map[string]any
+	SessionKey      string
+	Message         string
+	Attachments     []agent.ChatAttachment
+	ToolPolicyMode  string
+	AllowedTools    []string
+	RestrictTools   bool
+	Meta            map[string]any
 	ProfileName    string
 	ApprovalToken  string
 	ReplayToolCall *serviceReplayToolCall
@@ -159,13 +160,18 @@ func decodeServiceTurnRequest(body io.Reader, registry *tools.Registry) (service
 		serviceRequestFieldPair{"approval_token", "approvalToken"},
 		serviceRequestFieldPair{"replay_tool_call", "replayToolCall"},
 	)
+	toolPolicy := firstToolPolicy(payload.ToolPolicy, payload.ToolPolicyCamel)
 	allowedTools, restrictTools, err := app.ResolveToolPolicy(
 		registry,
-		firstToolPolicy(payload.ToolPolicy, payload.ToolPolicyCamel),
+		toolPolicy,
 		compat.FirstStringSlice(payload.AllowedTools, payload.AllowedToolsCamel),
 	)
 	if err != nil {
 		return serviceTurnRequest{}, err
+	}
+	toolPolicyMode := ""
+	if toolPolicy != nil {
+		toolPolicyMode = strings.TrimSpace(toolPolicy.Mode)
 	}
 	replayToolCall, err := firstReplayToolCall(payload.ReplayToolCall, payload.ReplayToolCallCamel)
 	if err != nil {
@@ -175,13 +181,23 @@ func decodeServiceTurnRequest(body io.Reader, registry *tools.Registry) (service
 	if err := agent.ValidateChatAttachments(attachments); err != nil {
 		return serviceTurnRequest{}, err
 	}
+	meta := cloneMapOrEmpty(payload.Meta)
+	if toolPolicyMode != "" {
+		if meta == nil {
+			meta = map[string]any{}
+		}
+		if serviceMetaText(meta, "tool_policy_mode") == "" {
+			meta["tool_policy_mode"] = toolPolicyMode
+		}
+	}
 	return serviceTurnRequest{
 		SessionKey:     compat.FirstString(payload.SessionKey, payload.InternSessionKey, payload.SessionKeyCamel, payload.InternSessionKeyCamel),
 		Message:        strings.TrimSpace(payload.Message),
 		Attachments:    attachments,
+		ToolPolicyMode: toolPolicyMode,
 		AllowedTools:   allowedTools,
 		RestrictTools:  restrictTools,
-		Meta:           cloneMapOrEmpty(payload.Meta),
+		Meta:           meta,
 		ProfileName:    compat.FirstString(payload.ProfileName, payload.ProfileNameCamel),
 		ApprovalToken:  compat.FirstString(payload.ApprovalToken, payload.ApprovalTokenCamel),
 		ReplayToolCall: replayToolCall,

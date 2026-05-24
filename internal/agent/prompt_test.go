@@ -935,8 +935,11 @@ func TestVolatileSuffixIncludesDateAndWorkingDirectory(t *testing.T) {
 	if !strings.Contains(volatile, "<runtime_context") {
 		t.Fatalf("expected runtime context section, got %q", volatile)
 	}
-	if !strings.Contains(volatile, time.Now().Format("2006-01-02")) {
-		t.Fatalf("expected current date in runtime context, got %q", volatile)
+	if !strings.Contains(volatile, "Local time:") {
+		t.Fatalf("expected local time in runtime context, got %q", volatile)
+	}
+	if !strings.Contains(volatile, "Host OS:") {
+		t.Fatalf("expected host OS in runtime context, got %q", volatile)
 	}
 	if !strings.Contains(volatile, "/tmp/or3-workspace") {
 		t.Fatalf("expected working directory in runtime context, got %q", volatile)

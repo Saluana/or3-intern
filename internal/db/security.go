@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 type SecretRecord struct {
@@ -92,11 +93,14 @@ func (d *DB) AppendAuditEvent(ctx context.Context, input AuditEventInput, key []
 	d.auditMu.Lock()
 	defer d.auditMu.Unlock()
 
-	payloadBytes, err := json.Marshal(input.Payload)
+	payloadMap, err := auditPayloadMap(input.Payload)
 	if err != nil {
 		return err
 	}
-	payload := truncateAuditPayload(string(payloadBytes))
+	payload, err := marshalBoundedAuditPayload(payloadMap, maxAuditPayloadBytes)
+	if err != nil {
+		return err
+	}
 	conn, err := d.SQL.Conn(ctx)
 	if err != nil {
 		return err
@@ -202,10 +206,120 @@ func computeAuditHash(key []byte, eventType, sessionKey, actor, payload string, 
 	return mac.Sum(nil)
 }
 
-func truncateAuditPayload(payload string) string {
-	payload = strings.TrimSpace(payload)
-	if len(payload) <= 2048 {
-		return payload
+const maxAuditPayloadBytes = 2048
+
+func auditPayloadMap(payload any) (map[string]any, error) {
+	if payload == nil {
+		return map[string]any{}, nil
 	}
-	return payload[:2048] + "...[truncated]"
+	switch typed := payload.(type) {
+	case map[string]any:
+		return typed, nil
+	default:
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			return nil, err
+		}
+		var out map[string]any
+		if err := json.Unmarshal(raw, &out); err != nil {
+			return nil, err
+		}
+		if out == nil {
+			out = map[string]any{}
+		}
+		return out, nil
+	}
+}
+
+func marshalBoundedAuditPayload(payload map[string]any, maxBytes int) (string, error) {
+	if maxBytes <= 0 {
+		maxBytes = maxAuditPayloadBytes
+	}
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	bounded := boundAuditPayloadMap(payload, maxBytes/2)
+	raw, err := json.Marshal(bounded)
+	if err != nil {
+		return "", err
+	}
+	if len(raw) <= maxBytes {
+		return string(raw), nil
+	}
+	wrapper := map[string]any{
+		"truncated":     true,
+		"original_size": len(raw),
+		"preview":       truncateUTF8Bytes(string(raw), maxBytes-256),
+	}
+	out, err := json.Marshal(wrapper)
+	if err != nil {
+		return "", err
+	}
+	if len(out) > maxBytes {
+		wrapper["preview"] = truncateUTF8Bytes(wrapper["preview"].(string), maxBytes/2)
+		out, err = json.Marshal(wrapper)
+		if err != nil {
+			return "", err
+		}
+	}
+	return string(out), nil
+}
+
+func boundAuditPayloadMap(payload map[string]any, maxValueRunes int) map[string]any {
+	if maxValueRunes <= 0 {
+		maxValueRunes = 256
+	}
+	out := make(map[string]any, len(payload))
+	for key, value := range payload {
+		switch typed := value.(type) {
+		case string:
+			out[key] = truncateUTF8Runes(typed, maxValueRunes)
+		case map[string]any:
+			out[key] = boundAuditPayloadMap(typed, maxValueRunes/2)
+		case []any:
+			out[key] = boundAuditSlice(typed, 16, maxValueRunes)
+		default:
+			out[key] = value
+		}
+	}
+	return out
+}
+
+func boundAuditSlice(items []any, maxItems, maxValueRunes int) []any {
+	if len(items) > maxItems {
+		items = items[:maxItems]
+	}
+	out := make([]any, 0, len(items))
+	for _, item := range items {
+		switch typed := item.(type) {
+		case string:
+			out = append(out, truncateUTF8Runes(typed, maxValueRunes))
+		case map[string]any:
+			out = append(out, boundAuditPayloadMap(typed, maxValueRunes/2))
+		default:
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func truncateUTF8Bytes(s string, maxBytes int) string {
+	if maxBytes <= 0 || len(s) <= maxBytes {
+		return s
+	}
+	for maxBytes > 0 && maxBytes < len(s) && !utf8.RuneStart(s[maxBytes]) {
+		maxBytes--
+	}
+	return s[:maxBytes]
+}
+
+func truncateUTF8Runes(s string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	if utf8.RuneCountInString(s) <= maxRunes {
+		return s
+	}
+	runes := []rune(s)
+	return string(runes[:maxRunes])
 }

@@ -169,6 +169,7 @@ func (r *Retriever) retrieveCandidates(ctx context.Context, sessionKey, query st
 		docs, docErr := retrieveDocCandidates(ctx, r.DB, sessionKey, query, ftsK)
 		if docErr != nil {
 			r.LastDocRetrievalErr = docErr
+			SetLastDocRetrievalError(docErr)
 			logDocRetrievalWarning(docErr)
 		}
 		for i, doc := range docs {

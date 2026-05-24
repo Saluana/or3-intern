@@ -59,8 +59,12 @@ func (d *DB) CreateRelayRoute(ctx context.Context, rec RelayRouteRecord) error {
 	if err := validateRelayMetadata(rec.Metadata); err != nil {
 		return err
 	}
-	_, err := d.SQL.ExecContext(ctx, `INSERT INTO relay_routes(route_id, account_id, host_id_hash, device_id_hash, status, created_at, expires_at, metadata_json)
-		VALUES(?,?,?,?,?,?,?,?)`, rec.RouteID, rec.AccountID, rec.HostIDHash, rec.DeviceIDHash, rec.Status, rec.CreatedAt, rec.ExpiresAt, mustJSONMap(rec.Metadata))
+	metadataJSON, err := marshalJSONMap(rec.Metadata)
+	if err != nil {
+		return err
+	}
+	_, err = d.SQL.ExecContext(ctx, `INSERT INTO relay_routes(route_id, account_id, host_id_hash, device_id_hash, status, created_at, expires_at, metadata_json)
+		VALUES(?,?,?,?,?,?,?,?)`, rec.RouteID, rec.AccountID, rec.HostIDHash, rec.DeviceIDHash, rec.Status, rec.CreatedAt, rec.ExpiresAt, metadataJSON)
 	return err
 }
 
@@ -80,8 +84,12 @@ func (d *DB) CreateRelayRendezvous(ctx context.Context, rec RelayRendezvousRecor
 	if err := validateRelayMetadata(rec.Metadata); err != nil {
 		return err
 	}
-	_, err := d.SQL.ExecContext(ctx, `INSERT INTO relay_rendezvous(rendezvous_id, account_id, host_id_hash, secret_commitment, status, created_at, expires_at, joined_at, consumed_at, join_count, metadata_json)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?)`, rec.RendezvousID, rec.AccountID, rec.HostIDHash, rec.SecretCommitment, rec.Status, rec.CreatedAt, rec.ExpiresAt, rec.JoinedAt, rec.ConsumedAt, rec.JoinCount, mustJSONMap(rec.Metadata))
+	metadataJSON, err := marshalJSONMap(rec.Metadata)
+	if err != nil {
+		return err
+	}
+	_, err = d.SQL.ExecContext(ctx, `INSERT INTO relay_rendezvous(rendezvous_id, account_id, host_id_hash, secret_commitment, status, created_at, expires_at, joined_at, consumed_at, join_count, metadata_json)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?)`, rec.RendezvousID, rec.AccountID, rec.HostIDHash, rec.SecretCommitment, rec.Status, rec.CreatedAt, rec.ExpiresAt, rec.JoinedAt, rec.ConsumedAt, rec.JoinCount, metadataJSON)
 	return err
 }
 

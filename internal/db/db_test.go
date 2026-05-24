@@ -391,6 +391,16 @@ func TestAppendMessage_WithPayload(t *testing.T) {
 	}
 }
 
+func TestAppendMessage_RejectsNonSerializablePayload(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	ch := make(chan int)
+	_, err := d.AppendMessage(ctx, "session1", "user", "hello", map[string]any{"bad": ch})
+	if err == nil {
+		t.Fatal("expected marshal error for non-serializable payload")
+	}
+}
+
 func TestAppendMessage_RollsBackWhenSessionUpdateFails(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()

@@ -82,10 +82,14 @@ func (d *DB) UpsertSecureConnectionHostIdentity(ctx context.Context, rec SecureC
 	if rec.RecoveryRequired {
 		recoveryRequired = 1
 	}
-	_, err := d.SQL.ExecContext(ctx, `INSERT INTO secure_connection_host_identity(host_id, host_signing_public_key, host_noise_public_key, fingerprint, status, created_at, rotated_at, recovery_required, metadata_json)
+	metadataJSON, err := marshalJSONMap(rec.Metadata)
+	if err != nil {
+		return err
+	}
+	_, err = d.SQL.ExecContext(ctx, `INSERT INTO secure_connection_host_identity(host_id, host_signing_public_key, host_noise_public_key, fingerprint, status, created_at, rotated_at, recovery_required, metadata_json)
 		VALUES(?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(host_id) DO UPDATE SET host_signing_public_key=excluded.host_signing_public_key, host_noise_public_key=excluded.host_noise_public_key, fingerprint=excluded.fingerprint, status=excluded.status, rotated_at=excluded.rotated_at, recovery_required=excluded.recovery_required, metadata_json=excluded.metadata_json`,
-		strings.TrimSpace(rec.HostID), rec.HostSigningPublicKey, rec.HostNoisePublicKey, rec.Fingerprint, rec.Status, rec.CreatedAt, rec.RotatedAt, recoveryRequired, mustJSONMap(rec.Metadata))
+		strings.TrimSpace(rec.HostID), rec.HostSigningPublicKey, rec.HostNoisePublicKey, rec.Fingerprint, rec.Status, rec.CreatedAt, rec.RotatedAt, recoveryRequired, metadataJSON)
 	return err
 }
 
@@ -102,10 +106,14 @@ func (d *DB) UpsertSecureConnectionDevice(ctx context.Context, rec SecureConnect
 	if strings.TrimSpace(rec.DeviceID) == "" || strings.TrimSpace(rec.HostID) == "" {
 		return SecureConnectionDeviceRecord{}, fmt.Errorf("device ID and host ID required")
 	}
-	_, err := d.SQL.ExecContext(ctx, `INSERT INTO secure_connection_devices(device_id, host_id, display_name, platform, role, capabilities_json, trust_level, device_signing_public_key, device_noise_public_key, enrollment_certificate, enrollment_epoch, status, created_at, last_seen_at, revoked_at, revoked_reason, account_id, metadata_json)
+	metadataJSON, err := marshalJSONMap(rec.Metadata)
+	if err != nil {
+		return SecureConnectionDeviceRecord{}, err
+	}
+	_, err = d.SQL.ExecContext(ctx, `INSERT INTO secure_connection_devices(device_id, host_id, display_name, platform, role, capabilities_json, trust_level, device_signing_public_key, device_noise_public_key, enrollment_certificate, enrollment_epoch, status, created_at, last_seen_at, revoked_at, revoked_reason, account_id, metadata_json)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(device_id) DO UPDATE SET display_name=excluded.display_name, platform=excluded.platform, role=excluded.role, capabilities_json=excluded.capabilities_json, trust_level=excluded.trust_level, device_signing_public_key=excluded.device_signing_public_key, device_noise_public_key=excluded.device_noise_public_key, enrollment_certificate=excluded.enrollment_certificate, enrollment_epoch=excluded.enrollment_epoch, status=excluded.status, last_seen_at=excluded.last_seen_at, revoked_at=excluded.revoked_at, revoked_reason=excluded.revoked_reason, account_id=excluded.account_id, metadata_json=excluded.metadata_json`,
-		rec.DeviceID, rec.HostID, rec.DisplayName, rec.Platform, rec.Role, mustJSONStringSlice(rec.Capabilities), rec.TrustLevel, rec.DeviceSigningPublicKey, rec.DeviceNoisePublicKey, rec.EnrollmentCertificate, rec.EnrollmentEpoch, rec.Status, rec.CreatedAt, rec.LastSeenAt, rec.RevokedAt, rec.RevokedReason, rec.AccountID, mustJSONMap(rec.Metadata))
+		rec.DeviceID, rec.HostID, rec.DisplayName, rec.Platform, rec.Role, mustJSONStringSlice(rec.Capabilities), rec.TrustLevel, rec.DeviceSigningPublicKey, rec.DeviceNoisePublicKey, rec.EnrollmentCertificate, rec.EnrollmentEpoch, rec.Status, rec.CreatedAt, rec.LastSeenAt, rec.RevokedAt, rec.RevokedReason, rec.AccountID, metadataJSON)
 	if err != nil {
 		return SecureConnectionDeviceRecord{}, err
 	}
@@ -203,8 +211,12 @@ func (d *DB) CreateSecureConnectionSession(ctx context.Context, rec SecureConnec
 	if strings.TrimSpace(rec.SessionID) == "" || strings.TrimSpace(rec.DeviceID) == "" || strings.TrimSpace(rec.HostID) == "" {
 		return SecureConnectionSessionRecord{}, fmt.Errorf("session ID, device ID, and host ID required")
 	}
-	_, err := d.SQL.ExecContext(ctx, `INSERT INTO secure_connection_sessions(session_id, device_id, host_id, relay_route_id, enrollment_epoch, status, created_at, last_seen_at, expires_at, step_up_at, last_sequence_in, last_sequence_out, metadata_json)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, rec.SessionID, rec.DeviceID, rec.HostID, rec.RelayRouteID, rec.EnrollmentEpoch, rec.Status, rec.CreatedAt, rec.LastSeenAt, rec.ExpiresAt, rec.StepUpAt, rec.LastSequenceIn, rec.LastSequenceOut, mustJSONMap(rec.Metadata))
+	metadataJSON, err := marshalJSONMap(rec.Metadata)
+	if err != nil {
+		return SecureConnectionSessionRecord{}, err
+	}
+	_, err = d.SQL.ExecContext(ctx, `INSERT INTO secure_connection_sessions(session_id, device_id, host_id, relay_route_id, enrollment_epoch, status, created_at, last_seen_at, expires_at, step_up_at, last_sequence_in, last_sequence_out, metadata_json)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, rec.SessionID, rec.DeviceID, rec.HostID, rec.RelayRouteID, rec.EnrollmentEpoch, rec.Status, rec.CreatedAt, rec.LastSeenAt, rec.ExpiresAt, rec.StepUpAt, rec.LastSequenceIn, rec.LastSequenceOut, metadataJSON)
 	if err != nil {
 		return SecureConnectionSessionRecord{}, err
 	}
@@ -321,8 +333,12 @@ func (d *DB) CreateSecureConnectionPairingSession(ctx context.Context, rec Secur
 	if strings.TrimSpace(rec.RendezvousID) == "" || strings.TrimSpace(rec.SecretCommitment) == "" {
 		return fmt.Errorf("rendezvous ID and secret commitment required")
 	}
-	_, err := d.SQL.ExecContext(ctx, `INSERT INTO secure_connection_pairing_sessions(rendezvous_id, host_id, secret_commitment, status, requested_role, capabilities_json, relay_origin, account_id, created_at, expires_at, joined_at, consumed_at, metadata_json)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, rec.RendezvousID, rec.HostID, rec.SecretCommitment, rec.Status, rec.RequestedRole, mustJSONStringSlice(rec.Capabilities), rec.RelayOrigin, rec.AccountID, rec.CreatedAt, rec.ExpiresAt, rec.JoinedAt, rec.ConsumedAt, mustJSONMap(rec.Metadata))
+	metadataJSON, err := marshalJSONMap(rec.Metadata)
+	if err != nil {
+		return err
+	}
+	_, err = d.SQL.ExecContext(ctx, `INSERT INTO secure_connection_pairing_sessions(rendezvous_id, host_id, secret_commitment, status, requested_role, capabilities_json, relay_origin, account_id, created_at, expires_at, joined_at, consumed_at, metadata_json)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, rec.RendezvousID, rec.HostID, rec.SecretCommitment, rec.Status, rec.RequestedRole, mustJSONStringSlice(rec.Capabilities), rec.RelayOrigin, rec.AccountID, rec.CreatedAt, rec.ExpiresAt, rec.JoinedAt, rec.ConsumedAt, metadataJSON)
 	return err
 }
 

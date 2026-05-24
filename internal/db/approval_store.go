@@ -111,7 +111,10 @@ type ApprovalTokenRecord struct {
 }
 
 func (d *DB) CreatePairingRequest(ctx context.Context, input PairingRequestRecord) (PairingRequestRecord, error) {
-	metadataJSON := mustJSONMap(input.Metadata)
+	metadataJSON, err := marshalJSONMap(input.Metadata)
+	if err != nil {
+		return PairingRequestRecord{}, err
+	}
 	res, err := d.SQL.ExecContext(ctx, `INSERT INTO pairing_requests(device_id, role, display_name, origin, pairing_code_hash, requested_at, expires_at, status, approver_id, approved_at, denied_at, metadata_json)
 		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, input.DeviceID, input.Role, input.DisplayName, input.Origin, input.PairingCodeHash, input.RequestedAt, input.ExpiresAt, input.Status, input.ApproverID, input.ApprovedAt, input.DeniedAt, metadataJSON)
 	if err != nil {
@@ -158,12 +161,20 @@ func (d *DB) ListPairingRequests(ctx context.Context, status string, limit int) 
 }
 
 func (d *DB) UpdatePairingRequestStatus(ctx context.Context, id int64, status, approverID string, approvedAt, deniedAt int64, metadata map[string]any) error {
-	_, err := d.SQL.ExecContext(ctx, `UPDATE pairing_requests SET status=?, approver_id=?, approved_at=?, denied_at=?, metadata_json=? WHERE id=?`, status, approverID, approvedAt, deniedAt, mustJSONMap(metadata), id)
+	metadataJSON, err := marshalJSONMap(metadata)
+	if err != nil {
+		return err
+	}
+	_, err = d.SQL.ExecContext(ctx, `UPDATE pairing_requests SET status=?, approver_id=?, approved_at=?, denied_at=?, metadata_json=? WHERE id=?`, status, approverID, approvedAt, deniedAt, metadataJSON, id)
 	return err
 }
 
 func (d *DB) ResolvePairingRequestStatus(ctx context.Context, id int64, fromStatus, toStatus, approverID string, approvedAt, deniedAt int64, metadata map[string]any) (bool, error) {
-	res, err := d.SQL.ExecContext(ctx, `UPDATE pairing_requests SET status=?, approver_id=?, approved_at=?, denied_at=?, metadata_json=? WHERE id=? AND status=?`, toStatus, approverID, approvedAt, deniedAt, mustJSONMap(metadata), id, fromStatus)
+	metadataJSON, err := marshalJSONMap(metadata)
+	if err != nil {
+		return false, err
+	}
+	res, err := d.SQL.ExecContext(ctx, `UPDATE pairing_requests SET status=?, approver_id=?, approved_at=?, denied_at=?, metadata_json=? WHERE id=? AND status=?`, toStatus, approverID, approvedAt, deniedAt, metadataJSON, id, fromStatus)
 	if err != nil {
 		return false, err
 	}
@@ -231,7 +242,10 @@ func (d *DB) UpsertPairedDevice(ctx context.Context, input PairedDeviceRecord) (
 	if strings.TrimSpace(input.DeviceID) == "" {
 		return PairedDeviceRecord{}, fmt.Errorf("device ID required")
 	}
-	metadataJSON := mustJSONMap(input.Metadata)
+	metadataJSON, err := marshalJSONMap(input.Metadata)
+	if err != nil {
+		return PairedDeviceRecord{}, err
+	}
 	tx, err := d.SQL.BeginTx(ctx, nil)
 	if err != nil {
 		return PairedDeviceRecord{}, err
@@ -894,15 +908,15 @@ func (d *DB) ConsumeApprovalToken(ctx context.Context, id int64, revokedAt int64
 	return affected > 0, nil
 }
 
-func mustJSONMap(value map[string]any) string {
+func marshalJSONMap(value map[string]any) (string, error) {
 	if len(value) == 0 {
-		return "{}"
+		return "{}", nil
 	}
 	blob, err := json.Marshal(value)
 	if err != nil {
-		return "{}"
+		return "", fmt.Errorf("marshal metadata: %w", err)
 	}
-	return string(blob)
+	return string(blob), nil
 }
 
 func scanPairingRequest(scanner interface{ Scan(dest ...any) error }) (PairingRequestRecord, error) {

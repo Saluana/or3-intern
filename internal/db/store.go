@@ -449,6 +449,7 @@ func (d *DB) indexMemoryNoteVector(ctx context.Context, noteID int64, sessionKey
 		dims, _ := d.MemoryVectorDims(ctx)
 		fingerprint, _ := d.MemoryVectorFingerprint(ctx)
 		log.Printf("memory vector upsert failed: note_id=%d scope_key=%q dims=%d fingerprint=%q err=%v", noteID, sessionKey, dims, fingerprint, err)
+		SetLastVectorIndexError(err)
 		_ = d.setMemoryNoteVectorDirty(ctx, noteID, true)
 		return fmt.Errorf("memory vector index: %w", err)
 	}
@@ -462,6 +463,7 @@ func (d *DB) markMemoryNoteVectorDirtyBestEffort(ctx context.Context, noteID int
 	dims, _ := d.MemoryVectorDims(ctx)
 	fingerprint, _ := d.MemoryVectorFingerprint(ctx)
 	log.Printf("memory vector upsert failed: note_id=%d scope_key=%q dims=%d fingerprint=%q err=%v", noteID, sessionKey, dims, fingerprint, err)
+	SetLastVectorIndexError(err)
 	_ = d.setMemoryNoteVectorDirty(ctx, noteID, true)
 }
 
@@ -1051,9 +1053,7 @@ func (d *DB) ResetSessionHistory(ctx context.Context, sessionKey string) error {
 		return err
 	}
 	defer func() {
-		if rollbackErr := tx.Rollback(); rollbackErr != nil && rollbackErr != sql.ErrTxDone {
-			panic(rollbackErr)
-		}
+		_ = tx.Rollback()
 	}()
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM messages WHERE session_key=?`, sessionKey); err != nil {
@@ -1173,7 +1173,16 @@ func appendMessageTx(ctx context.Context, tx *sql.Tx, sessionKey, role, content 
 	if err := ensureSessionTx(ctx, tx, sessionKey); err != nil {
 		return 0, err
 	}
-	pb, _ := json.Marshal(payload)
+	var pb []byte
+	var err error
+	if payload == nil {
+		pb = []byte("{}")
+	} else {
+		pb, err = json.Marshal(payload)
+		if err != nil {
+			return 0, fmt.Errorf("marshal message payload: %w", err)
+		}
+	}
 	now := NowMS()
 	res, err := tx.ExecContext(ctx,
 		`INSERT INTO messages(session_key, role, content, payload_json, created_at) VALUES(?,?,?,?,?)`,
@@ -1205,10 +1214,14 @@ func (d *DB) LinkSession(ctx context.Context, sessionKey, scopeKey string, meta 
 	if strings.TrimSpace(scopeKey) == "" {
 		scopeKey = sessionKey
 	}
-	_, err := d.SQL.ExecContext(ctx,
+	metaJSON, err := marshalJSONMap(meta)
+	if err != nil {
+		return err
+	}
+	_, err = d.SQL.ExecContext(ctx,
 		`INSERT INTO session_links(session_key, scope_key, linked_at, metadata_json) VALUES(?,?,?,?)
          ON CONFLICT(session_key) DO UPDATE SET scope_key=excluded.scope_key, linked_at=excluded.linked_at, metadata_json=excluded.metadata_json`,
-		sessionKey, scopeKey, NowMS(), mustJSONMap(meta))
+		sessionKey, scopeKey, NowMS(), metaJSON)
 	return err
 }
 

@@ -270,6 +270,7 @@ func (x *DocIndexer) SyncRootsWithResult(ctx context.Context, scopeKey string) (
 				db.NowMS(), scopeKey, p)
 		}
 	}
+	RecordDocSyncState(result)
 	return result, nil
 }
 

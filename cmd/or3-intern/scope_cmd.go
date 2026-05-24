@@ -24,7 +24,11 @@ func runScopeCommand(ctx context.Context, cp *controlplane.Service, args []strin
 		if len(scopeArgs) < 3 {
 			return newUsageError("usage: or3-intern scope link <session-key> <scope-key>")
 		}
-		linked, err := cp.LinkSessionScope(ctx, controlplane.ScopeLinkInput{SessionKey: scopeArgs[1], ScopeKey: scopeArgs[2]})
+		linked, err := cp.LinkSessionScope(controlplane.WithScopeActor(ctx, "cli"), controlplane.ScopeLinkInput{
+			SessionKey: scopeArgs[1],
+			ScopeKey:   scopeArgs[2],
+			Actor:      "cli",
+		})
 		if err != nil {
 			return err
 		}
@@ -34,7 +38,7 @@ func runScopeCommand(ctx context.Context, cp *controlplane.Service, args []strin
 		if len(scopeArgs) < 2 {
 			return newUsageError("usage: or3-intern scope list <scope-key>")
 		}
-		sessions, err := cp.ListScopeSessions(ctx, scopeArgs[1])
+		sessions, err := cp.ListScopeSessions(controlplane.WithScopeActor(ctx, "cli"), scopeArgs[1])
 		if err != nil {
 			return err
 		}
@@ -50,7 +54,7 @@ func runScopeCommand(ctx context.Context, cp *controlplane.Service, args []strin
 		if len(scopeArgs) < 2 {
 			return newUsageError("usage: or3-intern scope resolve <session-key>")
 		}
-		scopeKey, err := cp.ResolveScopeKey(ctx, scopeArgs[1])
+		scopeKey, err := cp.ResolveScopeKey(controlplane.WithScopeActor(ctx, "cli"), scopeArgs[1])
 		if err != nil {
 			return err
 		}

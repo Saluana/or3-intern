@@ -123,12 +123,26 @@ type ReadinessReport struct {
 }
 
 type EmbeddingStatusReport struct {
-	Status                  string `json:"status"`
-	MemoryVectorDims        int    `json:"memoryVectorDims"`
-	StoredEmbedFingerprint  string `json:"storedEmbedFingerprint,omitempty"`
-	CurrentEmbedFingerprint string `json:"currentEmbedFingerprint,omitempty"`
-	DocIndexEnabled         bool   `json:"docIndexEnabled"`
-	DocRootsConfigured      bool   `json:"docRootsConfigured"`
+	Status                   string `json:"status"`
+	MemoryVectorDims         int    `json:"memoryVectorDims"`
+	StoredEmbedFingerprint   string `json:"storedEmbedFingerprint,omitempty"`
+	CurrentEmbedFingerprint  string `json:"currentEmbedFingerprint,omitempty"`
+	DocIndexEnabled          bool   `json:"docIndexEnabled"`
+	DocRootsConfigured       bool   `json:"docRootsConfigured"`
+	NoteCount                int    `json:"noteCount"`
+	EmbeddedNoteCount        int    `json:"embeddedNoteCount"`
+	VectorRowCount           int    `json:"vectorRowCount"`
+	MissingVectorCount       int    `json:"missingVectorCount"`
+	FingerprintMismatchCount int    `json:"fingerprintMismatchCount"`
+	DirtyVectorCount         int    `json:"dirtyVectorCount"`
+	ActiveDocCount           int    `json:"activeDocCount"`
+	InactiveDocCount         int    `json:"inactiveDocCount"`
+	LastDocSyncAt            int64  `json:"lastDocSyncAt,omitempty"`
+	DocSyncPartial           bool   `json:"docSyncPartial"`
+	DocSyncWarning           string `json:"docSyncWarning,omitempty"`
+	LastVectorIndexError     string `json:"lastVectorIndexError,omitempty"`
+	LastDocRetrievalError    string `json:"lastDocRetrievalError,omitempty"`
+	SearchMode               string `json:"searchMode,omitempty"`
 }
 
 type EmbeddingRebuildResult struct {
@@ -162,6 +176,7 @@ type ScopeLinkInput struct {
 	SessionKey string
 	ScopeKey   string
 	Meta       map[string]any
+	Actor      string
 }
 
 type ScopeLinkResult struct {
@@ -408,20 +423,76 @@ func (s *Service) GetEmbeddingStatus(ctx context.Context) (EmbeddingStatusReport
 		return EmbeddingStatusReport{}, err
 	}
 	currentFingerprint := providers.EmbeddingFingerprint(s.Config.Provider.APIBase, s.Config.Provider.EmbedModel, s.Config.Provider.EmbedDimensions)
-	status := "ok"
-	if strings.TrimSpace(storedFingerprint) == "" && dims > 0 {
-		status = "legacy-unknown"
-	} else if strings.TrimSpace(storedFingerprint) != "" && strings.TrimSpace(storedFingerprint) != strings.TrimSpace(currentFingerprint) {
-		status = "mismatch"
+	health, err := database.CollectMemoryEmbeddingHealth(ctx, currentFingerprint)
+	if err != nil {
+		return EmbeddingStatusReport{}, err
+	}
+	docSync := memory.LatestDocSyncState()
+	status := deriveEmbeddingStatus(dims, storedFingerprint, currentFingerprint, health, strings.TrimSpace(s.Config.Provider.EmbedModel))
+	searchMode := "fts"
+	if strings.TrimSpace(s.Config.Provider.EmbedModel) != "" {
+		searchMode = "hybrid"
+	}
+	lastDocSync := health.LastDocSyncAt
+	if docSync.LastSyncAtMS > lastDocSync {
+		lastDocSync = docSync.LastSyncAtMS
 	}
 	return EmbeddingStatusReport{
-		Status:                  status,
-		MemoryVectorDims:        dims,
-		StoredEmbedFingerprint:  storedFingerprint,
-		CurrentEmbedFingerprint: currentFingerprint,
-		DocIndexEnabled:         s.Config.DocIndex.Enabled,
-		DocRootsConfigured:      len(s.Config.DocIndex.Roots) > 0,
+		Status:                   status,
+		MemoryVectorDims:         dims,
+		StoredEmbedFingerprint:   storedFingerprint,
+		CurrentEmbedFingerprint:  currentFingerprint,
+		DocIndexEnabled:          s.Config.DocIndex.Enabled,
+		DocRootsConfigured:       len(s.Config.DocIndex.Roots) > 0,
+		NoteCount:                health.NoteCount,
+		EmbeddedNoteCount:        health.EmbeddedNoteCount,
+		VectorRowCount:           health.VectorRowCount,
+		MissingVectorCount:       health.MissingVectorCount,
+		FingerprintMismatchCount: health.FingerprintMismatchCount,
+		DirtyVectorCount:         health.DirtyVectorCount,
+		ActiveDocCount:           health.ActiveDocCount,
+		InactiveDocCount:         health.InactiveDocCount,
+		LastDocSyncAt:            lastDocSync,
+		DocSyncPartial:           docSync.PartialScan,
+		DocSyncWarning:           docSync.Warning,
+		LastVectorIndexError:     firstNonEmpty(db.LastVectorIndexError(), memory.LastVectorIndexError()),
+		LastDocRetrievalError:    memory.LastDocRetrievalError(),
+		SearchMode:               searchMode,
 	}, nil
+}
+
+func deriveEmbeddingStatus(dims int, storedFingerprint, currentFingerprint string, health db.MemoryEmbeddingHealth, embedModel string) string {
+	if strings.TrimSpace(embedModel) == "" {
+		return "unavailable"
+	}
+	if strings.TrimSpace(storedFingerprint) == "" && dims > 0 {
+		return "legacy-unknown"
+	}
+	if strings.TrimSpace(storedFingerprint) != "" && strings.TrimSpace(storedFingerprint) != strings.TrimSpace(currentFingerprint) {
+		return "mismatch"
+	}
+	if health.MissingVectorCount > 0 || health.DirtyVectorCount > 0 || health.FingerprintMismatchCount > 0 {
+		return "degraded"
+	}
+	if dims <= 0 && health.EmbeddedNoteCount > 0 {
+		return "degraded"
+	}
+	if strings.TrimSpace(db.LastVectorIndexError()) != "" || strings.TrimSpace(memory.LastVectorIndexError()) != "" {
+		return "degraded"
+	}
+	if strings.TrimSpace(memory.LastDocRetrievalError()) != "" {
+		return "degraded"
+	}
+	return "ok"
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func (s *Service) RebuildEmbeddings(ctx context.Context, target string) (EmbeddingRebuildResult, error) {
@@ -531,34 +602,71 @@ func (s *Service) VerifyAudit(ctx context.Context) (AuditVerifyResult, error) {
 }
 
 func (s *Service) LinkSessionScope(ctx context.Context, input ScopeLinkInput) (ScopeLinkResult, error) {
+	if err := ValidateScopeLinkInput(input.SessionKey, input.ScopeKey, input.Meta); err != nil {
+		return ScopeLinkResult{}, err
+	}
 	database, err := s.requireDB()
 	if err != nil {
 		return ScopeLinkResult{}, err
 	}
-	if err := database.LinkSession(ctx, strings.TrimSpace(input.SessionKey), strings.TrimSpace(input.ScopeKey), input.Meta); err != nil {
+	sessionKey := strings.TrimSpace(input.SessionKey)
+	scopeKey := strings.TrimSpace(input.ScopeKey)
+	if err := database.LinkSession(ctx, sessionKey, scopeKey, input.Meta); err != nil {
 		return ScopeLinkResult{}, err
 	}
-	resolved, err := database.ResolveScopeKey(ctx, strings.TrimSpace(input.SessionKey))
+	resolved, err := database.ResolveScopeKey(ctx, sessionKey)
 	if err != nil {
 		return ScopeLinkResult{}, err
 	}
-	return ScopeLinkResult{SessionKey: strings.TrimSpace(input.SessionKey), ScopeKey: resolved}, nil
+	s.recordScopeAudit(ctx, "scope.link", scopeActor(input.Actor, ctx), sessionKey, map[string]any{
+		"scope_key": resolved,
+		"meta":      input.Meta,
+	})
+	return ScopeLinkResult{SessionKey: sessionKey, ScopeKey: resolved}, nil
 }
 
 func (s *Service) ResolveScopeKey(ctx context.Context, sessionKey string) (string, error) {
+	if err := ValidateScopeSessionKey(sessionKey); err != nil {
+		return "", err
+	}
 	database, err := s.requireDB()
 	if err != nil {
 		return "", err
 	}
-	return database.ResolveScopeKey(ctx, strings.TrimSpace(sessionKey))
+	sessionKey = strings.TrimSpace(sessionKey)
+	resolved, err := database.ResolveScopeKey(ctx, sessionKey)
+	if err != nil {
+		return "", err
+	}
+	s.recordScopeAudit(ctx, "scope.resolve", scopeActor("", ctx), sessionKey, map[string]any{"scope_key": resolved})
+	return resolved, nil
 }
 
 func (s *Service) ListScopeSessions(ctx context.Context, scopeKey string) ([]string, error) {
+	if err := ValidateScopeKey(scopeKey); err != nil {
+		return nil, err
+	}
 	database, err := s.requireDB()
 	if err != nil {
 		return nil, err
 	}
-	return database.ListScopeSessions(ctx, strings.TrimSpace(scopeKey))
+	scopeKey = strings.TrimSpace(scopeKey)
+	sessions, err := database.ListScopeSessions(ctx, scopeKey)
+	if err != nil {
+		return nil, err
+	}
+	s.recordScopeAudit(ctx, "scope.list", scopeActor("", ctx), scopeKey, map[string]any{
+		"session_count": len(sessions),
+	})
+	return sessions, nil
+}
+
+func (s *Service) recordScopeAudit(ctx context.Context, eventType, actor, sessionKey string, payload map[string]any) {
+	audit, ok := s.auditLogger()
+	if !ok {
+		return
+	}
+	_ = audit.Record(ctx, eventType, sessionKey, actor, payload)
 }
 
 func (s *Service) requireBroker() (*approval.Broker, error) {

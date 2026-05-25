@@ -585,24 +585,53 @@ func sanitizeForkPayload(payload, sourceSessionKey string) string {
 		out, _ := json.Marshal(map[string]any{"forked_from_session_key": sourceSessionKey})
 		return string(out)
 	}
-	for _, k := range forkSensitiveKeys {
-		delete(p, k)
-	}
+	sanitizeForkPayloadMap(p)
 	p["forked_from_session_key"] = sourceSessionKey
 	out, _ := json.Marshal(p)
 	return string(out)
 }
 
-var forkSensitiveKeys = []string{
-	"approval_token",
-	"approval_tokens",
-	"runner_output",
-	"raw_output",
-	"child_env",
-	"env",
-	"secrets",
-	"bearer",
-	"authorization",
+func sanitizeForkPayloadMap(value map[string]any) {
+	for key, item := range value {
+		lower := strings.ToLower(strings.TrimSpace(key))
+		if isForkSensitiveKey(lower) {
+			delete(value, key)
+			continue
+		}
+		switch typed := item.(type) {
+		case map[string]any:
+			sanitizeForkPayloadMap(typed)
+		case []any:
+			value[key] = sanitizeForkPayloadSlice(typed)
+		}
+	}
+}
+
+func sanitizeForkPayloadSlice(items []any) []any {
+	out := make([]any, 0, len(items))
+	for _, item := range items {
+		switch typed := item.(type) {
+		case map[string]any:
+			sanitizeForkPayloadMap(typed)
+			out = append(out, typed)
+		case []any:
+			out = append(out, sanitizeForkPayloadSlice(typed))
+		default:
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func isForkSensitiveKey(key string) bool {
+	switch key {
+	case "approval_token", "approval_tokens", "runner_output", "raw_output", "child_env", "env", "secrets",
+		"bearer", "authorization", "api_key", "apikey", "token", "password", "passwd", "pwd", "secret",
+		"private_key", "cookie", "set-cookie", "session_id", "sessionid", "access_token", "refresh_token":
+		return true
+	default:
+		return strings.Contains(key, "password") || strings.Contains(key, "secret") || strings.Contains(key, "token")
+	}
 }
 
 func previewSnippet(content string) string {

@@ -438,7 +438,9 @@ func TestDoctorAdminBrainAllowedToolsFiltersUnavailableTools(t *testing.T) {
 	want := []string{
 		doctorToolNameStatus,
 		doctorToolNameLogs,
+		doctorToolNameDocsIndex,
 		doctorToolNameDocsSearch,
+		doctorToolNameDocsSection,
 		doctorToolNameConfigSearch,
 		doctorToolNameConfigCatalog,
 		doctorToolNameConfigMetadata,

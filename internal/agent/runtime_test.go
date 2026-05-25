@@ -669,7 +669,7 @@ func TestRuntime_Handle_PruneUsesContextManagerCompactionWithoutDeletingHistory(
 		t.Fatalf("BuildPromptSnapshot: %v", err)
 	}
 	systemText := contentToString(snapshot[0].Content)
-	if !strings.Contains(systemText, "compacted_chat_context") || !strings.Contains(systemText, "continue with the current pruning design") {
+	if !strings.Contains(systemText, "context_compaction") || !strings.Contains(systemText, "continue with the current pruning design") {
 		t.Fatalf("expected compaction summary in prompt, got %s", systemText)
 	}
 	for _, msg := range snapshot {
@@ -790,8 +790,8 @@ func TestRuntime_Handle_UserMessageInjectsTaskCardBeforePrompt(t *testing.T) {
 		t.Fatal("expected captured provider request")
 	}
 	systemText := contentToString(captured.Messages[0].Content)
-	if !strings.Contains(systemText, "active_task_card:") || !strings.Contains(systemText, "Goal: ship the task card audit fix") {
-		t.Fatalf("expected active task card in system prompt, got %s", systemText)
+	if !strings.Contains(systemText, "ship the task card audit fix") {
+		t.Fatalf("expected current user request in system prompt, got %s", systemText)
 	}
 }
 

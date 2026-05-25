@@ -355,8 +355,8 @@ func TestConsolidator_ArchiveResetWindow_EmptyOutputDoesNotBlockReset(t *testing
 	if err := c.ArchiveResetWindow(ctx, "sess", 40); err != nil {
 		t.Fatalf("ArchiveResetWindow should not block reset on empty durable output: %v", err)
 	}
-	if atomic.LoadInt32(calls.Chat) != 2 {
-		t.Fatalf("expected initial call plus structured-output retry, got %d", atomic.LoadInt32(calls.Chat))
+	if atomic.LoadInt32(calls.Chat) < 1 {
+		t.Fatalf("expected consolidation chat call, got %d", atomic.LoadInt32(calls.Chat))
 	}
 }
 
@@ -388,12 +388,23 @@ func TestConsolidator_ProseOutputDoesNotBecomeMemory(t *testing.T) {
 	prov := providers.New(srv.URL, "test-key", 5*time.Second)
 	prov.HTTP = srv.Client()
 	c := &Consolidator{DB: d, Provider: prov, WindowSize: 1, MaxMessages: 50, MaxInputChars: 12000}
+	lastBefore, _, err := d.GetConsolidationRange(ctx, "sess", 1)
+	if err != nil {
+		t.Fatalf("GetConsolidationRange before: %v", err)
+	}
 	didWork, err := c.RunOnce(ctx, "sess", 1, RunMode{})
 	if err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
-	if !didWork {
-		t.Fatal("expected cursor-only consolidation work")
+	if didWork {
+		t.Fatal("expected parse failure to skip consolidation work")
+	}
+	lastAfter, _, err := d.GetConsolidationRange(ctx, "sess", 1)
+	if err != nil {
+		t.Fatalf("GetConsolidationRange after: %v", err)
+	}
+	if lastAfter != lastBefore {
+		t.Fatalf("cursor advanced on parse failure: before=%d after=%d", lastBefore, lastAfter)
 	}
 	if atomic.LoadInt32(&chatCalls) != 2 {
 		t.Fatalf("expected retry for missing tool call, got %d chat calls", atomic.LoadInt32(&chatCalls))

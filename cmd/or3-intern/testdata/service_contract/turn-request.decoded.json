@@ -5,6 +5,7 @@
   "restrict_tools": true,
   "profile_name": "ops",
   "meta": {
-    "trace_id": "trace-turn"
+    "trace_id": "trace-turn",
+    "tool_policy_mode": "allow_list"
   }
 }

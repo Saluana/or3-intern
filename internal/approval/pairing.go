@@ -60,7 +60,7 @@ func (b *Broker) CreatePairingRequest(ctx context.Context, input PairingRequestI
 			approvedAt = nowMS
 		}
 	}
-	req, err := b.DB.CreatePairingRequest(ctx, db.PairingRequestRecord{DeviceID: deviceID, Role: role, DisplayName: strings.TrimSpace(input.DisplayName), Origin: strings.TrimSpace(input.Origin), PairingCodeHash: hashBytes(code), RequestedAt: nowMS, ExpiresAt: nowMS + int64(b.Config.PairingCodeTTLSeconds*1000), Status: status, ApproverID: approverID, ApprovedAt: approvedAt, Metadata: cloneMap(input.Metadata)})
+	req, err := b.DB.CreatePairingRequest(ctx, db.PairingRequestRecord{DeviceID: deviceID, Role: role, DisplayName: strings.TrimSpace(input.DisplayName), Origin: strings.TrimSpace(input.Origin), PairingCodeHash: b.hashPairingCode(code), RequestedAt: nowMS, ExpiresAt: nowMS + int64(b.Config.PairingCodeTTLSeconds*1000), Status: status, ApproverID: approverID, ApprovedAt: approvedAt, Metadata: cloneMap(input.Metadata)})
 	if err != nil {
 		return db.PairingRequestRecord{}, "", err
 	}
@@ -81,6 +81,7 @@ func (b *Broker) resolvePairingRequest(ctx context.Context, id int64, actor stri
 	deniedAt := int64(0)
 	if targetStatus == StatusApproved {
 		if req.ExpiresAt > 0 && req.ExpiresAt < nowMS {
+			_, _ = b.DB.ResolvePairingRequestStatus(ctx, id, StatusPending, StatusExpired, "system", 0, 0, req.Metadata)
 			return db.PairingRequestRecord{}, 0, fmt.Errorf("pairing request expired")
 		}
 		approvedAt = nowMS
@@ -117,7 +118,7 @@ func (b *Broker) ApprovePairingRequestByCode(ctx context.Context, code string, a
 		return db.PairingRequestRecord{}, fmt.Errorf("pairing code required")
 	}
 	nowMS := b.now().UnixMilli()
-	active, err := b.DB.FindPairingRequestsByCodeHash(ctx, hashBytes(code), StatusPending, nowMS, 2)
+	active, err := b.DB.FindPairingRequestsByCodeHash(ctx, b.hashPairingCode(code), StatusPending, nowMS, 2)
 	if err != nil {
 		return db.PairingRequestRecord{}, err
 	}
@@ -141,7 +142,7 @@ func (b *Broker) DenyPairingRequest(ctx context.Context, id int64, actor string)
 
 func (b *Broker) ExchangePairingCode(ctx context.Context, input PairingExchangeInput) (db.PairedDeviceRecord, string, error) {
 	code := strings.TrimSpace(strings.ReplaceAll(input.Code, "-", ""))
-	req, ok, err := b.DB.FindPairingRequestByCodeHash(ctx, input.RequestID, hashBytes(code))
+	req, ok, err := b.DB.FindPairingRequestByCodeHash(ctx, input.RequestID, b.hashPairingCode(code))
 	if err != nil {
 		return db.PairedDeviceRecord{}, "", err
 	}
@@ -150,6 +151,7 @@ func (b *Broker) ExchangePairingCode(ctx context.Context, input PairingExchangeI
 	}
 	nowMS := b.now().UnixMilli()
 	if req.ExpiresAt > 0 && req.ExpiresAt < nowMS {
+		_, _ = b.DB.ResolvePairingRequestStatus(ctx, req.ID, StatusPending, StatusExpired, "system", 0, 0, req.Metadata)
 		return db.PairedDeviceRecord{}, "", fmt.Errorf("pairing request expired")
 	}
 	if req.Status != StatusApproved {

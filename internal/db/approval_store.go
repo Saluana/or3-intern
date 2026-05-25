@@ -132,15 +132,23 @@ func (d *DB) GetPairingRequest(ctx context.Context, id int64) (PairingRequestRec
 	return scanPairingRequest(row)
 }
 
-func (d *DB) ListPairingRequests(ctx context.Context, status string, limit int) ([]PairingRequestRecord, error) {
+func (d *DB) ListPairingRequests(ctx context.Context, status string, limit int, nowMS int64) ([]PairingRequestRecord, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 200
 	}
 	query := `SELECT id, device_id, role, display_name, origin, pairing_code_hash, requested_at, expires_at, status, approver_id, approved_at, denied_at, metadata_json FROM pairing_requests`
 	args := []any{}
+	clauses := make([]string, 0, 2)
 	if strings.TrimSpace(status) != "" {
-		query += ` WHERE status=?`
+		clauses = append(clauses, "status=?")
 		args = append(args, status)
+	}
+	if strings.TrimSpace(status) == "pending" && nowMS > 0 {
+		clauses = append(clauses, "(expires_at<=0 OR expires_at>=?)")
+		args = append(args, nowMS)
+	}
+	if len(clauses) > 0 {
+		query += ` WHERE ` + strings.Join(clauses, ` AND `)
 	}
 	query += ` ORDER BY id DESC LIMIT ?`
 	args = append(args, limit)
@@ -426,6 +434,29 @@ func (d *DB) ListApprovalRequestsFiltered(ctx context.Context, status, approvalT
 func (d *DB) ExpireApprovalRequests(ctx context.Context, nowMS int64, actor, note string) (int64, error) {
 	_, count, err := d.ExpireApprovalRequestsReturning(ctx, nowMS, actor, note)
 	return count, err
+}
+
+func (d *DB) ExpirePairingRequestsReturning(ctx context.Context, nowMS int64, actor string) ([]int64, int64, error) {
+	rows, err := d.SQL.QueryContext(ctx, `UPDATE pairing_requests
+		SET status=?, denied_at=?
+		WHERE status=? AND expires_at>0 AND expires_at<=?
+		RETURNING id`, "expired", nowMS, "pending", nowMS)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	ids := make([]int64, 0)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, 0, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	return ids, int64(len(ids)), nil
 }
 
 func (d *DB) ExpireApprovalRequestsReturning(ctx context.Context, nowMS int64, actor, note string) ([]int64, int64, error) {

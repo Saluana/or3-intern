@@ -566,7 +566,7 @@ func TestExistingRetrieveAPIStillWorks(t *testing.T) {
 	}
 }
 
-func TestRetrieve_IncludesIndexedDocCandidates(t *testing.T) {
+func TestRetrieve_SkipsIndexedDocCandidates(t *testing.T) {
 	d := openRetrieveTestDB(t)
 	ctx := context.Background()
 	if err := UpsertDoc(ctx, d, "sess", "/repo/docs/runbook.md", "markdown", "Runbook", "", "deploy packet cache safely", nil, "hash", 1, 32); err != nil {
@@ -577,17 +577,10 @@ func TestRetrieve_IncludesIndexedDocCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
-	found := false
 	for _, result := range results {
-		if result.Source == "doc" && strings.Contains(result.Ref, "runbook.md") {
-			found = true
-			if result.Kind != db.MemoryKindFile || result.Reason == "" {
-				t.Fatalf("expected file kind and reason, got %+v", result)
-			}
+		if result.Source == "doc" || strings.Contains(result.Ref, "runbook.md") {
+			t.Fatalf("expected docs to be excluded from hybrid retrieval, got %+v", result)
 		}
-	}
-	if !found {
-		t.Fatalf("expected doc candidate, got %+v", results)
 	}
 }
 

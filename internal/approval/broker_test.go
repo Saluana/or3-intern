@@ -862,8 +862,8 @@ func TestBroker_ApprovePairingRequest_RejectsExpiredWithoutResolving(t *testing.
 	if err != nil {
 		t.Fatalf("GetPairingRequest: %v", err)
 	}
-	if updated.Status != StatusPending {
-		t.Fatalf("expected expired pairing request to remain pending, got %q", updated.Status)
+	if updated.Status != StatusExpired {
+		t.Fatalf("expected expired pairing request to be marked expired, got %q", updated.Status)
 	}
 	if updated.ApprovedAt != 0 {
 		t.Fatalf("expected no approved timestamp, got %d", updated.ApprovedAt)
@@ -1127,6 +1127,35 @@ func TestBroker_AddAllowlist_IsIdempotent(t *testing.T) {
 	}
 	if first.ID != second.ID {
 		t.Fatalf("expected duplicate allowlist reuse, got %d and %d", first.ID, second.ID)
+	}
+}
+
+func TestBroker_AskModeIgnoresAllowlist(t *testing.T) {
+	broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Exec.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+	ctx := context.Background()
+
+	_, err := broker.AddAllowlist(ctx, string(SubjectExec),
+		AllowlistScope{HostID: "test-host", Tool: "exec"},
+		ExecAllowlistMatcher{ExecutablePath: "/bin/echo", Argv: []string{"allowed"}, WorkingDir: "/tmp"},
+		"cli:test", 0)
+	if err != nil {
+		t.Fatalf("AddAllowlist: %v", err)
+	}
+
+	decision, err := broker.EvaluateExec(ctx, ExecEvaluation{
+		ExecutablePath: "/bin/echo",
+		Argv:           []string{"allowed"},
+		WorkingDir:     "/tmp",
+		ToolName:       "exec",
+	})
+	if err != nil {
+		t.Fatalf("EvaluateExec: %v", err)
+	}
+	if decision.Allowed || !decision.RequiresApproval {
+		t.Fatalf("expected ask mode to ignore allowlist and require approval, got %#v", decision)
 	}
 }
 

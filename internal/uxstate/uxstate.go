@@ -202,10 +202,7 @@ func BuildApprovalPrompt(item db.ApprovalRequestRecord) ApprovalPromptView {
 	case string(approval.SubjectExec):
 		var subject approval.ExecSubject
 		_ = json.Unmarshal([]byte(item.SubjectJSON), &subject)
-		command := strings.TrimSpace(strings.Join(subject.Argv, " "))
-		if command == "" {
-			command = strings.TrimSpace(subject.ExecutablePath)
-		}
+		command := approval.FormatExecCommandDisplay(subject.ExecutablePath, subject.Argv)
 		view.Title = "OR3 wants to run a command"
 		view.ActionSummary = command
 		view.RiskLabel, view.RiskExplanation = classifyExecRisk(command)

@@ -29,12 +29,12 @@ func TestBuildDoctorAdminBrainEnvelopeUsesDedicatedPromptTemplate(t *testing.T) 
 	}
 	for _, want := range []string{
 		"Current doctor summary:",
-		"- Blocking findings: 1",
-		"- Error findings: 2",
-		"- Warning findings: 3",
-		"- Block finding: Block detail",
-		"- Error finding: Error detail",
-		"- Warning finding: Warning detail",
+		"- Blocking: 1",
+		"- Errors: 2",
+		"- Warnings: 3",
+		"- Block finding",
+		"- Error finding",
+		"- Warning finding",
 		"User message:\nplease help",
 	} {
 		if !strings.Contains(prompt, want) {
@@ -62,7 +62,7 @@ func TestBuildDoctorAdminBrainContextExcludesUserMessage(t *testing.T) {
 	if strings.Contains(prompt, "User message:") {
 		t.Fatalf("expected context to exclude user message section, got %q", prompt)
 	}
-	if !strings.Contains(prompt, "- Warning findings: 1") {
+	if !strings.Contains(prompt, "- Warnings: 1") {
 		t.Fatalf("expected summary in context, got %q", prompt)
 	}
 }

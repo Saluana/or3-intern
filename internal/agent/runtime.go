@@ -179,9 +179,7 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 	}
 	r.ensureSessionScope(ctx, ev)
 
-	msgID, err := r.DB.AppendMessage(ctx, ev.SessionKey, "user", ev.Message, map[string]any{
-		"channel": ev.Channel, "from": ev.From, "meta": ev.Meta,
-	})
+	msgID, err := r.DB.AppendMessage(ctx, ev.SessionKey, "user", ev.Message, storableTurnPayload(ev.Channel, ev.From, ev.Meta))
 	if err != nil {
 		return err
 	}

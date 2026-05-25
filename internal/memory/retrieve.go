@@ -165,26 +165,7 @@ func (r *Retriever) retrieveCandidates(ctx context.Context, sessionKey, query st
 			a.createdAt = f.CreatedAt
 		}
 	}
-	if ftsK > 0 {
-		docs, docErr := retrieveDocCandidates(ctx, r.DB, sessionKey, query, ftsK)
-		if docErr != nil {
-			r.LastDocRetrievalErr = docErr
-			SetLastDocRetrievalError(docErr)
-			logDocRetrievalWarning(docErr)
-		}
-		for i, doc := range docs {
-			id := -int64(i + 1)
-			m[id] = &agg{
-				id:        id,
-				text:      doc.Excerpt,
-				doc:       doc.Score,
-				createdAt: db.NowMS(),
-				kind:      db.MemoryKindFile,
-				status:    db.MemoryStatusActive,
-				ref:       "file:" + doc.Path,
-			}
-		}
-	}
+	// Indexed documents are injected once via prompt DocRetriever, not here.
 
 	raw := make([]Retrieved, 0, len(m))
 	tokens := retrievalTokens(query)

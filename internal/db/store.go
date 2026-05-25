@@ -130,7 +130,23 @@ func (d *DB) AppendMessage(ctx context.Context, sessionKey, role, content string
 	return id, nil
 }
 
+const (
+	defaultMessageHistoryLimit = 40
+	maxMessageHistoryLimit     = 500
+)
+
+func clampMessageHistoryLimit(limit int) int {
+	if limit <= 0 {
+		return defaultMessageHistoryLimit
+	}
+	if limit > maxMessageHistoryLimit {
+		return maxMessageHistoryLimit
+	}
+	return limit
+}
+
 func (d *DB) GetLastMessages(ctx context.Context, sessionKey string, limit int) ([]Message, error) {
+	limit = clampMessageHistoryLimit(limit)
 	rows, err := d.SQL.QueryContext(ctx,
 		`SELECT id, session_key, role, content, payload_json, created_at
 		 FROM messages WHERE session_key=? ORDER BY id DESC LIMIT ?`, sessionKey, limit)
@@ -954,7 +970,8 @@ func (d *DB) ReplaceMemoryNoteEmbedding(ctx context.Context, noteID int64, embed
 	if embedding == nil {
 		embedding = make([]byte, 0)
 	}
-	_, err := d.SQL.ExecContext(ctx, `UPDATE memory_notes SET embedding=?, embed_fingerprint=?, vector_index_dirty=1 WHERE id=?`, embedding, normalizeStoredEmbeddingFingerprint(embedding, fingerprint), noteID)
+	now := NowMS()
+	_, err := d.SQL.ExecContext(ctx, `UPDATE memory_notes SET embedding=?, embed_fingerprint=?, vector_index_dirty=1, embedding_updated_at=? WHERE id=?`, embedding, normalizeStoredEmbeddingFingerprint(embedding, fingerprint), now, noteID)
 	return err
 }
 
@@ -981,9 +998,10 @@ func (d *DB) ApplyStagedMemoryEmbeddings(ctx context.Context, fingerprint string
 		if emb == nil {
 			emb = make([]byte, 0)
 		}
+		now := NowMS()
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE memory_notes SET embedding=?, embed_fingerprint=?, vector_index_dirty=1 WHERE id=?`,
-			emb, normalizeStoredEmbeddingFingerprint(emb, fingerprint), item.ID); err != nil {
+			`UPDATE memory_notes SET embedding=?, embed_fingerprint=?, vector_index_dirty=1, embedding_updated_at=? WHERE id=?`,
+			emb, normalizeStoredEmbeddingFingerprint(emb, fingerprint), now, item.ID); err != nil {
 			return err
 		}
 	}
@@ -1262,6 +1280,7 @@ func (d *DB) ListScopeSessions(ctx context.Context, scopeKey string) ([]string, 
 // GetLastMessagesScoped reads history for all sessions linked under the same scope
 // as sessionKey, ordered by message id ascending, up to limit messages.
 func (d *DB) GetLastMessagesScoped(ctx context.Context, sessionKey string, limit int) ([]Message, error) {
+	limit = clampMessageHistoryLimit(limit)
 	scopeKey, err := d.ResolveScopeKey(ctx, sessionKey)
 	if err != nil {
 		return nil, err

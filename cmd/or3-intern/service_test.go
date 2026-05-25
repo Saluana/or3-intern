@@ -4214,7 +4214,14 @@ func TestServiceApprovals_AllowlistsCRUD(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected allowlist item payload, got %#v", added)
 	}
-	id := int64(item["ID"].(float64))
+	idValue, ok := item["id"].(float64)
+	if !ok {
+		idValue, ok = item["ID"].(float64)
+	}
+	if !ok {
+		t.Fatalf("expected allowlist id in payload, got %#v", item)
+	}
+	id := int64(idValue)
 
 	listReq := mustServiceRequest(t, httpServer, secret, http.MethodGet, "/internal/v1/approvals/allowlists?domain=exec", "")
 	listResp, err := httpServer.Client().Do(listReq)

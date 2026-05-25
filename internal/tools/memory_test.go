@@ -70,6 +70,29 @@ func TestMemorySetPinned_EmptyKey(t *testing.T) {
 	}
 }
 
+func TestMemorySetPinned_RejectsSecretLikeContent(t *testing.T) {
+	d := makeMemoryTestDB(t)
+	tool := &MemorySetPinned{DB: d}
+	_, err := tool.Execute(context.Background(), map[string]any{
+		"key":     "api_rule",
+		"content": "api_key=sk-live-abcdef0123456789",
+	})
+	if err == nil {
+		t.Fatal("expected secret rejection")
+	}
+}
+
+func TestMemoryAddNote_RejectsOversizedText(t *testing.T) {
+	d := makeMemoryTestDB(t)
+	tool := &MemoryAddNote{DB: d, Provider: nil}
+	_, err := tool.Execute(context.Background(), map[string]any{
+		"text": strings.Repeat("x", 9000),
+	})
+	if err == nil {
+		t.Fatal("expected size rejection before provider call")
+	}
+}
+
 func TestMemorySetPinned_EmptyContent(t *testing.T) {
 	d := makeMemoryTestDB(t)
 	tool := &MemorySetPinned{DB: d}

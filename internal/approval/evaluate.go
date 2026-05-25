@@ -118,8 +118,10 @@ func (b *Broker) evaluateWithMode(ctx context.Context, subjectType SubjectType, 
 	if dec, ok := b.checkPolicyMode(ctx, subjectType, sh, mode); ok {
 		return dec, nil
 	}
-	if dec, ok := b.checkAllowlist(ctx, subjectType, scope, matcher, sh, mode); ok {
-		return dec, nil
+	if mode == config.ApprovalModeAllowlist {
+		if dec, ok := b.checkAllowlist(ctx, subjectType, scope, matcher, sh, mode); ok {
+			return dec, nil
+		}
 	}
 	return b.requireApproval(ctx, subjectType, subject, sh, scope, mode)
 }
@@ -162,7 +164,7 @@ func (b *Broker) checkPolicyMode(ctx context.Context, subjectType SubjectType, s
 }
 
 func (b *Broker) checkAllowlist(ctx context.Context, subjectType SubjectType, scope AllowlistScope, matcher any, sh SubjectHash, mode config.ApprovalMode) (Decision, bool) {
-	if mode != config.ApprovalModeAsk && mode != config.ApprovalModeAllowlist {
+	if mode != config.ApprovalModeAllowlist {
 		return Decision{}, false
 	}
 	matched, err := b.allowlistMatches(ctx, subjectType, scope, matcher)

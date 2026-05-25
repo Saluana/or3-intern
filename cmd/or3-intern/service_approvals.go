@@ -29,7 +29,7 @@ func (s *serviceServer) handleApprovals(w http.ResponseWriter, r *http.Request) 
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 			return
 		}
-		items, err := appSvc.ListApprovalRequests(r.Context(), controlplane.ApprovalFilter{
+		records, err := appSvc.ListApprovalRequests(r.Context(), controlplane.ApprovalFilter{
 			Status: r.URL.Query().Get("status"),
 			Type:   r.URL.Query().Get("type"),
 			Limit:  100,
@@ -37,6 +37,10 @@ func (s *serviceServer) handleApprovals(w http.ResponseWriter, r *http.Request) 
 		if err != nil {
 			writeServiceError(w, r, http.StatusBadGateway, "approval list unavailable", err)
 			return
+		}
+		items := make([]approval.ApprovalRequestListItem, 0, len(records))
+		for _, record := range records {
+			items = append(items, approval.ToApprovalRequestListItem(record))
 		}
 		writeServiceJSON(w, http.StatusOK, map[string]any{"items": items})
 		return
@@ -75,10 +79,14 @@ func (s *serviceServer) handleApprovals(w http.ResponseWriter, r *http.Request) 
 	if trimmedPath == "allowlists" {
 		switch r.Method {
 		case http.MethodGet:
-			items, err := appSvc.ListAllowlists(r.Context(), r.URL.Query().Get("domain"), 100)
+			records, err := appSvc.ListAllowlists(r.Context(), r.URL.Query().Get("domain"), 100)
 			if err != nil {
 				writeServiceError(w, r, http.StatusBadGateway, "allowlist list unavailable", err)
 				return
+			}
+			items := make([]approval.ApprovalAllowlistItem, 0, len(records))
+			for _, record := range records {
+				items = append(items, approval.ToApprovalAllowlistItem(record))
 			}
 			writeServiceJSON(w, http.StatusOK, map[string]any{"items": items})
 		case http.MethodPost:
@@ -93,7 +101,7 @@ func (s *serviceServer) handleApprovals(w http.ResponseWriter, r *http.Request) 
 				writeServiceError(w, r, http.StatusBadRequest, "allowlist add failed", err)
 				return
 			}
-			writeServiceJSON(w, http.StatusAccepted, map[string]any{"item": rec})
+			writeServiceJSON(w, http.StatusAccepted, map[string]any{"item": approval.ToApprovalAllowlistItem(rec)})
 		default:
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 		}
@@ -141,7 +149,7 @@ func (s *serviceServer) handleApprovals(w http.ResponseWriter, r *http.Request) 
 			writeServiceError(w, r, http.StatusBadRequest, "approval lookup failed", err)
 			return
 		}
-		writeServiceJSON(w, http.StatusOK, map[string]any{"item": item})
+		writeServiceJSON(w, http.StatusOK, map[string]any{"item": approval.ToApprovalRequestDetail(item)})
 		return
 	}
 	if len(parts) != 2 {

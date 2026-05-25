@@ -28,7 +28,7 @@ type DB struct {
 
 // Open opens path, configures both SQLite drivers, and runs migrations.
 func Open(path string) (*DB, error) {
-	primaryDSN := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)", path)
+	primaryDSN := sqliteFileURI(path, "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)")
 	s, err := sql.Open("sqlite", primaryDSN)
 	if err != nil {
 		return nil, err
@@ -37,7 +37,7 @@ func Open(path string) (*DB, error) {
 	s.SetMaxIdleConns(4)
 
 	sqliteVecAutoOnce.Do(sqlite_vec.Auto)
-	vecDSN := fmt.Sprintf("file:%s?_busy_timeout=5000&_journal=WAL&_sync=NORMAL&_fk=1", path)
+	vecDSN := sqliteFileURI(path, "_busy_timeout=5000&_journal=WAL&_sync=NORMAL&_fk=1")
 	vec, err := sql.Open("sqlite3", vecDSN)
 	if err != nil {
 		_ = s.Close()
@@ -1136,6 +1136,7 @@ func (d *DB) ensureMemoryNotesMetaColumns(ctx context.Context) error {
 		{name: "use_count", ddl: `ALTER TABLE memory_notes ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0`},
 		{name: "last_used_at", ddl: `ALTER TABLE memory_notes ADD COLUMN last_used_at INTEGER NOT NULL DEFAULT 0`},
 		{name: "vector_index_dirty", ddl: `ALTER TABLE memory_notes ADD COLUMN vector_index_dirty INTEGER NOT NULL DEFAULT 0`},
+		{name: "embedding_updated_at", ddl: `ALTER TABLE memory_notes ADD COLUMN embedding_updated_at INTEGER NOT NULL DEFAULT 0`},
 	}
 
 	for i := range cols {

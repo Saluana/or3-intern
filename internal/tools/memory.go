@@ -41,6 +41,12 @@ func (t *MemorySetPinned) Execute(ctx context.Context, params map[string]any) (s
 	if key == "" || content == "" {
 		return "", fmt.Errorf("missing key/content")
 	}
+	if err := memory.ValidatePinKey(key); err != nil {
+		return "", err
+	}
+	if err := memory.ValidatePinContent(content); err != nil {
+		return "", err
+	}
 	if err := t.DB.UpsertPinned(ctx, memoryScopeFromParams(ctx, params), key, content); err != nil {
 		return "", err
 	}
@@ -77,6 +83,9 @@ func (t *MemoryAddNote) Execute(ctx context.Context, params map[string]any) (str
 	text := stringParam(params, "text")
 	if text == "" {
 		return "", fmt.Errorf("empty text")
+	}
+	if err := memory.ValidateNoteText(text); err != nil {
+		return "", err
 	}
 	tags := stringParam(params, "tags")
 	var src sql.NullInt64

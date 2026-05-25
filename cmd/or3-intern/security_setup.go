@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"or3-intern/internal/approval"
@@ -25,6 +26,14 @@ func setupSecurity(ctx context.Context, cfg config.Config, d *db.DB) (config.Con
 	hostedProfile := config.IsHostedProfile(cfg.RuntimeProfile)
 	var secretManager *security.SecretManager
 	if cfg.Security.SecretStore.Enabled {
+		// Check key file permissions before loading
+		if err := checkKeyFilePermissions(cfg.Security.SecretStore.KeyFile, "secret store"); err != nil {
+			if hostedProfile || cfg.Security.SecretStore.Required {
+				return cfg, nil, nil, err
+			}
+			// For non-hosted profiles, warn but continue
+			fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
+		}
 		key, err := security.LoadExistingKey(cfg.Security.SecretStore.KeyFile)
 		if err != nil {
 			if hostedProfile || cfg.Security.SecretStore.Required {
@@ -145,4 +154,27 @@ func setupApprovalBroker(cfg config.Config, d *db.DB, audit *security.AuditLogge
 		return nil, nil
 	}
 	return &approval.Broker{DB: d, Audit: audit, Config: cfg.Security.Approvals, HostID: cfg.Security.Approvals.HostID, SignKey: key}, nil
+}
+
+func checkKeyFilePermissions(path, purpose string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // File doesn't exist yet, will be created
+		}
+		return fmt.Errorf("cannot access %s key file: %w", purpose, err)
+	}
+
+	// Check if it's a regular file
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s key file is not a regular file (may be symlink or special file): %s", purpose, path)
+	}
+
+	// Check permissions (on Unix systems)
+	perm := info.Mode().Perm()
+	if perm&0077 != 0 {
+		return fmt.Errorf("%s key file has insecure permissions %04o (should be 0600): %s", purpose, perm, path)
+	}
+
+	return nil
 }

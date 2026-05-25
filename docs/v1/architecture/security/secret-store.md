@@ -1,6 +1,19 @@
 # Encrypted Secret Storage
 
-The secret store encrypts API keys, tokens, and other secrets at rest using AES-256-GCM.
+The secret store provides **at-rest encryption** for config secrets using AES-256-GCM.
+
+## Security Model
+
+The secret store protects secrets when they are:
+- Stored in the SQLite database
+- Backed up or copied
+- At rest on disk
+
+The secret store does **not** protect secrets when they are:
+- Resolved at startup into config (become plaintext in memory)
+- Passed to providers, channels, or tools
+- Logged in diagnostics or error messages
+- Visible in process memory
 
 ## SecretManager
 
@@ -26,46 +39,148 @@ Source: `internal/security/store.go:31-58`
 
 Source: `internal/security/store.go:61-77`
 
+### Key file permissions
+
+Key files are checked for secure permissions:
+- Must be regular files (not symlinks or special files)
+- Must have permissions 0600 (owner read/write only)
+- Insecure permissions trigger warnings or errors in hosted profiles
+
+Source: `cmd/or3-intern/security_setup.go` (checkKeyFilePermissions)
+
 ## Encryption
 
 Secrets are encrypted with AES-256-GCM:
 1. The master key is derived with HMAC-SHA256 using the label "secrets" to produce a 32-byte AES key
 2. A random nonce (12 bytes for GCM) is generated
-3. The plaintext is encrypted with AES-GCM Seal
-4. Both ciphertext and nonce are stored
+3. Associated data (AAD) binds the ciphertext to the secret name and key version
+4. The plaintext is encrypted with AES-GCM Seal
+5. Both ciphertext and nonce are stored
 
-Source: `internal/security/store.go:298-325` (encryptBlob, decryptBlob, deriveKey)
+### AAD Binding
+
+Each secret is cryptographically bound to its name and key version using Associated Additional Data (AAD):
+
+```
+AAD = "or3-secret-store:v1:<name>:<keyVersion>"
+```
+
+This prevents:
+- Swapping ciphertext between secret names
+- Cross-version replay attacks
+- Integrity violations where modification goes undetected
+
+Legacy secrets without AAD are transparently migrated on first read.
+
+Source: `internal/security/store.go` (encryptBlob, decryptBlob, deriveKey)
 
 ## Storing secrets
 
 `Put` encrypts the value and stores it in the database with:
-- Name (the secret identifier)
+- Name (the secret identifier) - validated for length and character set
 - Ciphertext (encrypted bytes)
 - Nonce (for decryption)
 - Version marker ("v1")
 
-Source: `internal/security/store.go:102-116`
+### Name validation
+- Length: 1-256 characters
+- Allowed characters: `a-zA-Z0-9._/@:-`
+- Reserved prefixes: `secure-connections/` (internal use)
+
+### Value validation
+- Maximum size: 64 KiB (65,536 bytes)
+
+Source: `internal/security/store.go` (Put, validateSecretName, validateSecretValue)
 
 ## Retrieving secrets
 
-`Get` fetches the record by name and decrypts the ciphertext using the stored nonce.
+`Get` fetches the record by name and decrypts the ciphertext:
+1. Try decryption with AAD-bound encryption (new format)
+2. If that fails, try legacy nil AAD decryption (backward compatibility)
+3. On successful legacy decryption, re-encrypt with AAD for future reads
 
-Source: `internal/security/store.go:118-132`
+Source: `internal/security/store.go` (Get)
 
 ## Secret references in config
 
-Config values can reference secrets using the `secret:` prefix. For example, `secret:brave-api-key` tells the system to resolve the value from the secret store. `ResolveConfigSecrets` walks the entire config struct using reflection and resolves all secret references. `ValidateNoSecretRefs` checks that no unresolved references remain.
+Config values can reference secrets using the `secret:` prefix. For example, `secret:brave-api-key` tells the system to resolve the value from the secret store.
 
-Source: `internal/security/store.go:182-296` (ResolveConfigSecrets, ValidateNoSecretRefs, resolveValue, findSecretRef)
+### Config metadata
+
+Only fields tagged with `secret:"true"` in the config struct are resolved. This prevents accidental resolution in non-secret fields like paths, labels, or URLs.
+
+Source: `internal/config/types.go` (config structs with secret tags)
+
+### Resolution
+
+`ResolveConfigSecrets` walks the config struct and resolves `secret:` references in tagged fields. `ValidateNoSecretRefs` checks that no unresolved references remain.
+
+**Important**: Secrets are resolved at startup and become plaintext in memory. The secret store is at-rest protection only.
+
+Source: `internal/security/store.go` (ResolveConfigSecrets, ValidateNoSecretRefs)
+
+## Namespace isolation
+
+Internal secrets (like secure-connection keys) are prefixed with `secure-connections/` and:
+- Hidden from normal `secrets list` output
+- Require `--advanced` flag to view
+- Require `--internal` flag to delete
+- Cannot be overwritten by normal CLI operations
+
+Source: `internal/security/store.go` (IsInternalSecret, ListUserSecrets)
 
 ## Deleting secrets
 
-`Delete` removes a secret by name from the database.
+`Delete` removes a secret by name from the database. Internal secrets require the `--internal` flag.
 
-Source: `internal/security/store.go:134-140`
+Source: `internal/security/store.go` (Delete)
 
 ## Listing secrets
 
-`List` returns only the secret names, never the values.
+`List` returns only the secret names, never the values. `ListUserSecrets` filters out internal secrets for normal CLI output.
 
-Source: `internal/security/store.go:142-148`
+Source: `internal/security/store.go` (List, ListUserSecrets)
+
+## Audit logging
+
+The `AuditLogger` provides tamper-evident audit records for secret operations:
+- Secret creation/update (`secret.set`)
+- Secret deletion (`secret.delete`)
+- Config migration (`secret.migrate`)
+
+Source: `internal/security/store.go` (AuditLogger)
+
+## CLI commands
+
+The `secrets` command provides:
+- `set`: Store secrets safely with `--prompt` or `--stdin` options
+- `delete`: Remove secrets with confirmation
+- `list`: View user secrets (or all with `--advanced`)
+- `check`: Verify all secrets decrypt successfully
+- `export`: Back up encrypted secret records by default; decrypted plaintext export requires `--plaintext`
+- `migrate-config`: Move plaintext config secrets to encrypted store
+
+Source: `cmd/or3-intern/secrets_cmd.go`
+
+## Known limitations
+
+1. **At-rest only**: Secrets become plaintext in memory after startup resolution
+2. **No runtime access control**: No approval gate for secret reads (setting hidden)
+3. **No key rotation**: `secrets rekey` not yet implemented
+4. **Single key file**: Losing the key makes all secrets unreadable
+5. **Backup requirement**: Both SQLite database and key file must travel together
+
+## Threat model
+
+**Defends against:**
+- Disk theft or unauthorized file access
+- Database backup exposure
+- Accidental secret leakage in config files
+- Swap attacks between secret names (via AAD binding)
+
+**Does not defend against:**
+- Runtime memory inspection
+- Process listing while secrets are in memory
+- Logging of resolved config values
+- Compromised runtime environment
+- Key file theft (with database)

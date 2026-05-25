@@ -49,9 +49,6 @@ func TestResolveConfigSecrets_ResolvesMCPServerSecrets(t *testing.T) {
 	d := openSecurityTestDB(t)
 	ctx := context.Background()
 	mgr := &SecretManager{DB: d, Key: []byte("01234567890123456789012345678901")}
-	if err := mgr.Put(ctx, "mcp.url", "https://mcp.example.com/sse"); err != nil {
-		t.Fatalf("Put url: %v", err)
-	}
 	if err := mgr.Put(ctx, "mcp.auth", "Bearer top-secret"); err != nil {
 		t.Fatalf("Put auth: %v", err)
 	}
@@ -73,8 +70,8 @@ func TestResolveConfigSecrets_ResolvesMCPServerSecrets(t *testing.T) {
 		t.Fatalf("ResolveConfigSecrets: %v", err)
 	}
 	server := resolved.Tools.MCPServers["demo"]
-	if server.URL != "https://mcp.example.com/sse" {
-		t.Fatalf("expected resolved MCP url, got %q", server.URL)
+	if server.URL != "secret:mcp.url" {
+		t.Fatalf("expected non-secret MCP url to remain unresolved, got %q", server.URL)
 	}
 	if server.Headers["Authorization"] != "Bearer top-secret" {
 		t.Fatalf("expected resolved MCP header, got %#v", server.Headers)

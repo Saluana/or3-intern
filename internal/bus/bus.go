@@ -93,9 +93,10 @@ func (b *Bus) Subscribe() (<-chan Event, func()) {
 	return ch, unsubscribe
 }
 
-// Publish fans ev out without blocking and reports whether at least one active
-// subscriber accepted it. Slow optional subscribers may miss events without
-// making the publish fail for critical producers.
+// Publish fans ev out and reports whether at least one active subscriber
+// accepted it. The primary worker queue applies backpressure once it is in use;
+// slow optional subscribers may still miss events without making critical
+// producers fail.
 func (b *Bus) Publish(ev Event) bool {
 	if b == nil {
 		return false
@@ -112,6 +113,11 @@ func (b *Bus) Publish(ev Event) bool {
 		case ch <- ev:
 			delivered = true
 		default:
+			if ch == b.legacy && b.legacyUsed {
+				ch <- ev
+				delivered = true
+				continue
+			}
 			if ch == b.legacy && !b.legacyUsed {
 				continue
 			}

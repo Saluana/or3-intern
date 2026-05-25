@@ -199,6 +199,12 @@ func (s *serviceServer) runApprovedResumeJob(ctx context.Context, jobID string, 
 	})
 	if err != nil {
 		log.Printf("service_approval: resume_error approval=%d job=%s session=%s public_code=%s", issued.Request.ID, jobID, sessionKey, agent.PublicErrorCode(err))
+		var approvalErr *tools.ApprovalRequiredError
+		if errors.As(err, &approvalErr) && s.deliverApprovedResumeApprovalRequired(ctx, issued.Request, approvalErr) {
+			s.completeTurnJobWithError(ctx, jobID, err, observer, sessionKey, meta)
+			return
+		}
+		s.deliverApprovedResumeCompletion(ctx, issued.Request, approvalResumeFailureMessage(err))
 		s.completeTurnJobWithError(ctx, jobID, err, observer, sessionKey, meta)
 		return
 	}
@@ -215,7 +221,89 @@ func (s *serviceServer) runApprovedResumeJob(ctx context.Context, jobID string, 
 		payload["empty_final_text_recovered"] = true
 	}
 	s.jobs.Complete(jobID, "completed", serviceLifecyclePayload(sessionKey, meta, payload))
+	s.deliverApprovedResumeCompletion(ctx, issued.Request, completionText)
 	log.Printf("service_approval: resume_completed approval=%d job=%s session=%s recovered_empty=%t final_preview=%q", issued.Request.ID, jobID, sessionKey, recoveredEmpty, boundedServiceLogPreview(completionText, 160))
+}
+
+func (s *serviceServer) deliverApprovedResumeApprovalRequired(ctx context.Context, fallbackReq db.ApprovalRequestRecord, approvalErr *tools.ApprovalRequiredError) bool {
+	if s == nil || s.channelDeliverer == nil || approvalErr == nil {
+		return false
+	}
+	req, text := approvalRequiredContinuationPrompt(ctx, s.broker, fallbackReq, approvalErr)
+	requester := approval.RequesterContextFromJSON(req.RequesterContextJSON)
+	if !isApprovalExternalChannel(requester.Channel) {
+		return false
+	}
+	to := strings.TrimSpace(requester.ReplyTarget)
+	if to == "" {
+		to = strings.TrimSpace(requester.From)
+	}
+	if to == "" || strings.TrimSpace(text) == "" {
+		return false
+	}
+	if err := s.channelDeliverer.DeliverWithMeta(ctx, requester.Channel, to, text, approvalDeliveryMeta(requester)); err != nil {
+		log.Printf("service_approval: channel_delivery_failed approval=%d channel=%s err=%v", approvalErr.RequestID, requester.Channel, err)
+		return false
+	}
+	return true
+}
+
+func (s *serviceServer) deliverApprovedResumeCompletion(ctx context.Context, req db.ApprovalRequestRecord, text string) {
+	if s == nil || s.channelDeliverer == nil || strings.TrimSpace(text) == "" {
+		return
+	}
+	requester := approval.RequesterContextFromJSON(req.RequesterContextJSON)
+	if !isApprovalExternalChannel(requester.Channel) {
+		return
+	}
+	to := strings.TrimSpace(requester.ReplyTarget)
+	if to == "" {
+		to = strings.TrimSpace(requester.From)
+	}
+	if to == "" {
+		return
+	}
+	if err := s.channelDeliverer.DeliverWithMeta(ctx, requester.Channel, to, text, approvalDeliveryMeta(requester)); err != nil {
+		log.Printf("service_approval: channel_delivery_failed approval=%d channel=%s err=%v", req.ID, requester.Channel, err)
+	}
+}
+
+func approvalResumeFailureMessage(err error) string {
+	code := agent.PublicErrorCode(err)
+	if code == "" {
+		code = agent.PublicErrorUnknown
+	}
+	return "Approval was accepted, but continuing the request failed (" + code + "). Please retry or review it in the OR3 app."
+}
+
+func isApprovalExternalChannel(channel string) bool {
+	switch strings.ToLower(strings.TrimSpace(channel)) {
+	case "telegram", "discord", "slack", "whatsapp", "email":
+		return true
+	default:
+		return false
+	}
+}
+
+func approvalDeliveryMeta(requester approval.RequesterContext) map[string]any {
+	meta := map[string]any{}
+	for key, value := range requester.ReplyMeta {
+		meta[key] = value
+	}
+	if strings.TrimSpace(requester.ReplyTarget) != "" {
+		switch strings.ToLower(strings.TrimSpace(requester.Channel)) {
+		case "telegram", "whatsapp":
+			meta["chat_id"] = requester.ReplyTarget
+		case "slack", "discord":
+			meta["channel_id"] = requester.ReplyTarget
+		case "email":
+			meta["sender_email"] = requester.ReplyTarget
+		}
+	}
+	if len(meta) == 0 {
+		return nil
+	}
+	return meta
 }
 
 func (s *serviceServer) completeTurnJobWithError(ctx context.Context, jobID string, err error, observer *serviceObserver, sessionKey string, meta map[string]any) {

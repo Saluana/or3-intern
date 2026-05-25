@@ -182,7 +182,7 @@ func (b *Broker) requireApproval(ctx context.Context, subjectType SubjectType, s
 	nowMS := b.now().UnixMilli()
 	req, reused, err := b.DB.CreateOrGetPendingApprovalRequest(ctx, db.ApprovalRequestRecord{
 		Type: string(subjectType), SubjectHash: sh.Hash, SubjectJSON: sh.JSON,
-		RequesterAgentID: scope.Agent, RequesterSessionID: extractSessionID(subject),
+		RequesterAgentID: scope.Agent, RequesterSessionID: extractSessionID(subject), RequesterContextJSON: MarshalRequesterContext(RequesterContextFromContext(ctx)),
 		ExecutionHostID: b.hostID(), Status: StatusPending, PolicyMode: string(mode),
 		RequestedAt: nowMS, ExpiresAt: nowMS + int64(b.Config.PendingTTLSeconds*1000),
 	}, nowMS)

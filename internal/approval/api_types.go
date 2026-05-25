@@ -9,17 +9,18 @@ import (
 
 // ApprovalRequestListItem is the public list shape (no raw subject_json).
 type ApprovalRequestListItem struct {
-	ID                 int64  `json:"id"`
-	Type               string `json:"type"`
-	Status             string `json:"status"`
-	PolicyMode         string `json:"policy_mode,omitempty"`
-	Preview            string `json:"preview,omitempty"`
-	RequesterAgentID   string `json:"requester_agent_id,omitempty"`
-	RequesterSessionID string `json:"requester_session_id,omitempty"`
-	ExecutionHostID    string `json:"execution_host_id,omitempty"`
-	RequestedAt        int64  `json:"requested_at"`
-	ExpiresAt          int64  `json:"expires_at,omitempty"`
-	ResolvedAt         int64  `json:"resolved_at,omitempty"`
+	ID                 int64            `json:"id"`
+	Type               string           `json:"type"`
+	Status             string           `json:"status"`
+	PolicyMode         string           `json:"policy_mode,omitempty"`
+	Preview            string           `json:"preview,omitempty"`
+	RequesterAgentID   string           `json:"requester_agent_id,omitempty"`
+	RequesterSessionID string           `json:"requester_session_id,omitempty"`
+	RequesterContext   RequesterContext `json:"requester_context,omitempty"`
+	ExecutionHostID    string           `json:"execution_host_id,omitempty"`
+	RequestedAt        int64            `json:"requested_at"`
+	ExpiresAt          int64            `json:"expires_at,omitempty"`
+	ResolvedAt         int64            `json:"resolved_at,omitempty"`
 }
 
 // ApprovalRequestDetail includes the full subject for step-up detail fetches.
@@ -49,6 +50,7 @@ func ToApprovalRequestListItem(rec db.ApprovalRequestRecord) ApprovalRequestList
 		Preview:            SafeSubjectPreview(rec.Type, rec.SubjectJSON),
 		RequesterAgentID:   rec.RequesterAgentID,
 		RequesterSessionID: rec.RequesterSessionID,
+		RequesterContext:   RequesterContextFromJSON(rec.RequesterContextJSON),
 		ExecutionHostID:    rec.ExecutionHostID,
 		RequestedAt:        rec.RequestedAt,
 		ExpiresAt:          rec.ExpiresAt,

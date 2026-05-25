@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -141,7 +142,7 @@ func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
 		if !c.allowedUser(ctx, ev.User) {
 			continue
 		}
-		if envelope.Payload.Authorizations[0].UserID != "" && c.botID == "" {
+		if len(envelope.Payload.Authorizations) > 0 && envelope.Payload.Authorizations[0].UserID != "" && c.botID == "" {
 			c.botID = envelope.Payload.Authorizations[0].UserID
 		}
 		if c.Config.RequireMention && c.botID != "" && !strings.Contains(ev.Text, "<@"+c.botID+">") && len(ev.Files) == 0 {
@@ -161,7 +162,9 @@ func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
 		if len(attachments) > 0 {
 			meta["attachments"] = attachments
 		}
-		eventBus.Publish(bus.Event{Type: bus.EventUserMessage, SessionKey: sessionKey, Channel: "slack", From: ev.User, Message: content, Meta: meta})
+		if ok := eventBus.Publish(bus.Event{Type: bus.EventUserMessage, SessionKey: sessionKey, Channel: "slack", From: ev.User, Message: content, Meta: meta}); !ok {
+			log.Printf("slack event dropped: queue unavailable for channel=%s user=%s", ev.Channel, ev.User)
+		}
 		select {
 		case <-ctx.Done():
 			return

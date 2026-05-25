@@ -187,6 +187,47 @@ func TestChannel_DeliverSendsMessage(t *testing.T) {
 	}
 }
 
+func TestChannel_DeliverAddsInlineApprovalButtons(t *testing.T) {
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/bottoken/sendMessage" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": map[string]any{"message_id": 1}})
+	}))
+	defer server.Close()
+
+	ch := &Channel{Config: config.TelegramChannelConfig{Token: "token", APIBase: server.URL, DefaultChatID: "123", OpenAccess: true}}
+	text := "Approval is needed.\n\nReply `/approve 42` to continue or `/deny 42` to stop."
+	if err := ch.Deliver(context.Background(), "", text, nil); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+	markup, ok := got["reply_markup"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected reply markup, got %#v", got)
+	}
+	keyboard, ok := markup["inline_keyboard"].([]any)
+	if !ok || len(keyboard) != 1 {
+		t.Fatalf("expected inline keyboard, got %#v", markup)
+	}
+	row, ok := keyboard[0].([]any)
+	if !ok || len(row) != 2 {
+		t.Fatalf("expected two approval buttons, got %#v", keyboard)
+	}
+	approve, ok := row[0].(map[string]any)
+	if !ok || approve["callback_data"] != "or3:approval:approve:42" {
+		t.Fatalf("unexpected approve button: %#v", row[0])
+	}
+	deny, ok := row[1].(map[string]any)
+	if !ok || deny["callback_data"] != "or3:approval:deny:42" {
+		t.Fatalf("unexpected deny button: %#v", row[1])
+	}
+}
+
 func TestChannel_DeliverSurfacesRateLimit(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
@@ -267,6 +308,65 @@ func TestChannel_FetchUpdatesPublishesIsolatedGroupMessageWhenEnabled(t *testing
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for telegram event")
+	}
+}
+
+func TestChannel_FetchUpdatesPublishesApprovalCallback(t *testing.T) {
+	requests := make(chan string, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/bottoken/getUpdates":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok": true,
+				"result": []map[string]any{{
+					"update_id": 5,
+					"callback_query": map[string]any{
+						"id":   "cb-1",
+						"data": "or3:approval:approve:42",
+						"from": map[string]any{"id": 456, "username": "alice"},
+						"message": map[string]any{
+							"message_id": 99,
+							"chat":       map[string]any{"id": 123, "type": "private"},
+						},
+					},
+				}},
+			})
+		case "/bottoken/answerCallbackQuery":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": true})
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	ch := &Channel{Config: config.TelegramChannelConfig{Token: "token", APIBase: server.URL, PollSeconds: 1, OpenAccess: true}}
+	b := bus.New(1)
+	if err := ch.fetchUpdates(context.Background(), b); err != nil {
+		t.Fatalf("fetchUpdates: %v", err)
+	}
+	select {
+	case ev := <-b.Channel():
+		if ev.Channel != "telegram" || ev.SessionKey != "telegram:123" || ev.From != "456" || ev.Message != "/approve 42" {
+			t.Fatalf("unexpected callback event: %#v", ev)
+		}
+		if ev.Meta["callback_query_id"] != "cb-1" {
+			t.Fatalf("expected callback metadata, got %#v", ev.Meta)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for callback event")
+	}
+
+	var sawAnswer bool
+	requestCount := len(requests)
+	for i := 0; i < requestCount; i++ {
+		if <-requests == "/bottoken/answerCallbackQuery" {
+			sawAnswer = true
+		}
+	}
+	if !sawAnswer {
+		t.Fatal("expected callback query answer")
 	}
 }
 

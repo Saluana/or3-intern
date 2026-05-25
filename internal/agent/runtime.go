@@ -252,6 +252,7 @@ func (r *Runtime) handleTurnExecution(ctx context.Context, ev bus.Event, msgID i
 		UserMessageID: msgID,
 		UserMessage:   ev.Message,
 	})
+	turnCtx = tools.ContextWithDeliveryFrom(turnCtx, ev.From)
 	finalText, streamed, err := r.executeConversation(turnCtx, ev.Type, ev.SessionKey, messages, r.effectiveTools(turnCtx, r.Tools), ev.Channel, replyTarget, replyMeta)
 	if err != nil {
 		var approvalErr *tools.ApprovalRequiredError
@@ -348,7 +349,8 @@ func (r *Runtime) handleExplicitSkillInvocation(ctx context.Context, ev bus.Even
 		seeded = append(seeded, providers.ChatMessage{Role: "system", Content: seed})
 		seeded = append(seeded, providers.ChatMessage{Role: "user", Content: promptInput})
 	}
-	runCtx := tools.ContextWithEnv(ctx, r.skillRunEnvFor(skill.Name))
+	runCtx := tools.ContextWithDeliveryFrom(ctx, ev.From)
+	runCtx = tools.ContextWithEnv(runCtx, r.skillRunEnvFor(skill.Name))
 	runCtx = tools.ContextWithSkillPolicy(runCtx, skillPolicyForSkill(skill))
 	finalText, streamed, err := r.executeConversation(runCtx, ev.Type, ev.SessionKey, seeded, r.effectiveTools(runCtx, r.Tools), ev.Channel, replyTarget, replyMeta)
 	if err != nil {
@@ -370,7 +372,9 @@ func (r *Runtime) dispatchExplicitSkillTool(ctx context.Context, ev bus.Event, s
 	}
 	toolCtx := tools.ContextWithSession(ctx, scopeKey)
 	toolCtx = tools.ContextWithDelivery(toolCtx, ev.Channel, deliveryTarget(ev))
+	toolCtx = tools.ContextWithDeliveryFrom(toolCtx, ev.From)
 	toolCtx = tools.ContextWithDeliveryMeta(toolCtx, channels.ReplyMeta(ev.Meta))
+	toolCtx = tools.ContextWithApprovalRequesterContextForSession(toolCtx, ev.SessionKey)
 	toolCtx = tools.ContextWithEnv(toolCtx, r.skillRunEnvFor(skill.Name))
 	toolCtx = tools.ContextWithSkillPolicy(toolCtx, skillPolicyForSkill(skill))
 	toolCtx = r.contextWithTrustedToolAccess(toolCtx, ev)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -663,13 +664,13 @@ func main() {
 	case "chat":
 		rt.Streamer = del
 		_ = channelManager.Start(ctx, "cli", b)
-		runWorkers(ctx, b, rt, cfg.WorkerCount, del, channelManager)
+		runWorkers(ctx, b, rt, cfg.WorkerCount, del, channelManager, nil)
 		ch := &cli.Channel{Bus: b, SessionKey: cfg.DefaultSessionKey, Spinner: spinner, Deliverer: del, History: d}
 		if err := ch.Run(ctx); err != nil {
 			fmt.Fprintln(os.Stderr, "cli error:", err)
 		}
 	case "serve":
-		runWorkers(ctx, b, rt, cfg.WorkerCount, nil, channelManager)
+		runWorkers(ctx, b, rt, cfg.WorkerCount, nil, channelManager, &channelApprovalHandler{Config: cfg, Runtime: rt, Broker: approvalBroker, Channels: channelManager})
 		if err := channelManager.StartAll(ctx, b); err != nil {
 			fmt.Fprintln(os.Stderr, "channel start error:", err)
 			os.Exit(1)
@@ -695,12 +696,12 @@ func main() {
 		<-ctx.Done()
 	case "service":
 		channelRuntime := channelWorkerRuntime(rt, delivererFunc(channelManager.Deliver))
-		runWorkers(ctx, b, channelRuntime, cfg.WorkerCount, nil, channelManager)
+		runWorkers(ctx, b, channelRuntime, cfg.WorkerCount, nil, channelManager, &channelApprovalHandler{Config: cfg, Runtime: channelRuntime, Jobs: serviceJobs, Broker: approvalBroker, Channels: channelManager})
 		if err := channelManager.StartAll(ctx, b); err != nil {
 			fmt.Fprintln(os.Stderr, "channel start error:", err)
 			os.Exit(1)
 		}
-		if err := runServiceCommandWithBrokerOptionsCronMCP(ctx, cfg, rt, subagentManager, agentCLIManager, serviceJobs, approvalBroker, unsafeDev, cronSvc, mcpManager); err != nil {
+		if err := runServiceCommandWithBrokerOptionsCronMCPAndChannels(ctx, cfg, rt, subagentManager, agentCLIManager, serviceJobs, approvalBroker, unsafeDev, cronSvc, mcpManager, channelManager); err != nil {
 			fmt.Fprintln(os.Stderr, "service error:", err)
 			os.Exit(1)
 		}
@@ -1129,7 +1130,7 @@ func heartbeatServiceForCommand(cmd string, cfg config.Config, eventBus *bus.Bus
 	return heartbeat.New(cfg.Heartbeat, cfg.WorkspaceDir, eventBus)
 }
 
-func runWorkers(ctx context.Context, b *bus.Bus, rt *agent.Runtime, n int, cliDeliverer *cli.Deliverer, channelManager *rootchannels.Manager) {
+func runWorkers(ctx context.Context, b *bus.Bus, rt *agent.Runtime, n int, cliDeliverer *cli.Deliverer, channelManager *rootchannels.Manager, approvalHandler *channelApprovalHandler) {
 	if n <= 0 {
 		n = 4
 	}
@@ -1137,8 +1138,15 @@ func runWorkers(ctx context.Context, b *bus.Bus, rt *agent.Runtime, n int, cliDe
 	for i := 0; i < n; i++ {
 		go func() {
 			for ev := range events {
-				cctx, cancel := agent.WithTimeout(ctx, 120)
+				cctx, cancel := agent.WithTimeout(ctx, channelWorkerTimeoutSeconds(ev))
 				cctx = agent.ContextWithConversationSession(cctx, ev.SessionKey)
+				if handled, err := approvalHandler.Handle(cctx, ev); handled {
+					if err != nil {
+						log.Printf("channel approval command failed: channel=%s session=%s err=%v", ev.Channel, ev.SessionKey, err)
+					}
+					cancel()
+					continue
+				}
 				stopTyping := func() {}
 				if ev.Channel != "cli" && channelManager != nil {
 					stopTyping = channelManager.StartTyping(cctx, ev.Channel, "", ev.Meta)
@@ -1154,6 +1162,7 @@ func runWorkers(ctx context.Context, b *bus.Bus, rt *agent.Runtime, n int, cliDe
 							cliDeliverer.ShowErrorForSession(ev.SessionKey, err)
 						}
 					} else {
+						deliverChannelRuntimeError(cctx, channelManager, ev, err)
 						log.Printf("handle event failed: type=%s session=%s err=%v", ev.Type, ev.SessionKey, err)
 					}
 				}
@@ -1161,6 +1170,31 @@ func runWorkers(ctx context.Context, b *bus.Bus, rt *agent.Runtime, n int, cliDe
 				cancel()
 			}
 		}()
+	}
+}
+
+func channelWorkerTimeoutSeconds(ev bus.Event) int {
+	if isApprovalExternalChannel(ev.Channel) {
+		return 900
+	}
+	return 120
+}
+
+func deliverChannelRuntimeError(ctx context.Context, channelManager *rootchannels.Manager, ev bus.Event, err error) {
+	if channelManager == nil || err == nil {
+		return
+	}
+	var approvalErr *tools.ApprovalRequiredError
+	if errors.As(err, &approvalErr) {
+		return
+	}
+	code := agent.PublicErrorCode(err)
+	if code == "" {
+		code = agent.PublicErrorUnknown
+	}
+	text := "I hit a problem while handling that request (" + code + "). Please retry, or review the details in the OR3 app."
+	if derr := channelManager.DeliverWithMeta(ctx, ev.Channel, channelEventTarget(ev), text, rootchannels.ReplyMeta(ev.Meta)); derr != nil {
+		log.Printf("channel error delivery failed: channel=%s session=%s err=%v", ev.Channel, ev.SessionKey, derr)
 	}
 }
 

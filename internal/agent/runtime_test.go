@@ -1876,8 +1876,9 @@ func TestRuntime_ApprovalRequiredStillPausesWhenNarrationFails(t *testing.T) {
 		t.Fatal("expected persisted history")
 	}
 	last := pp.History[len(pp.History)-1]
-	if last.Role != "tool" {
-		t.Fatalf("expected last persisted message to remain the blocked tool result, got %#v", last)
+	content, ok := last.Content.(string)
+	if last.Role != "assistant" || !ok || !strings.Contains(content, "Reply `/approve 42`") {
+		t.Fatalf("expected persisted deterministic approval prompt, got %#v", last)
 	}
 }
 

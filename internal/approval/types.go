@@ -58,6 +58,15 @@ type Decision struct {
 	Reason           string
 }
 
+type RequesterContext struct {
+	Channel         string         `json:"channel,omitempty"`
+	SessionKey      string         `json:"session_key,omitempty"`
+	From            string         `json:"from,omitempty"`
+	ReplyTarget     string         `json:"reply_target,omitempty"`
+	ReplyMeta       map[string]any `json:"reply_meta,omitempty"`
+	SourceMessageID string         `json:"source_message_id,omitempty"`
+}
+
 type ExecEvaluation struct {
 	ExecutablePath string
 	Argv           []string

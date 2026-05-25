@@ -47,6 +47,18 @@ type errString string
 
 func (e errString) Error() string { return string(e) }
 
+type sessionEchoTool struct {
+	name string
+}
+
+func (t sessionEchoTool) Name() string               { return t.name }
+func (t sessionEchoTool) Description() string        { return t.name }
+func (t sessionEchoTool) Parameters() map[string]any { return map[string]any{} }
+func (t sessionEchoTool) Schema() map[string]any     { return map[string]any{} }
+func (t sessionEchoTool) Execute(ctx context.Context, _ map[string]any) (string, error) {
+	return "session:" + tools.SessionFromContext(ctx), nil
+}
+
 type replayLifecycleObserver struct {
 	events []agent.ToolLifecycleEvent
 }
@@ -435,6 +447,99 @@ func TestResumeApprovedRequest_ReplaysWithOriginalApprovalSubjectContext(t *test
 	}
 	if providerCalls != 1 {
 		t.Fatalf("expected continuation provider call after approved replay, got %d", providerCalls)
+	}
+}
+
+func TestResumeApprovedRequest_ReplaysVisibleConversationWithLinkedApprovalScope(t *testing.T) {
+	database, err := db.Open(filepath.Join(t.TempDir(), "service-app-linked-scope.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { database.Close() })
+
+	const scopeSession = "cli:default"
+	const conversationSession = "telegram:123"
+	const argsJSON = `{}`
+	toolCall := providers.ToolCall{
+		ID:   "tc-linked-scope",
+		Type: "function",
+		Function: struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		}{Name: "resume_probe", Arguments: argsJSON},
+	}
+	if _, err := database.AppendMessage(context.Background(), conversationSession, "user", "run it", nil); err != nil {
+		t.Fatalf("AppendMessage user: %v", err)
+	}
+	if _, err := database.AppendMessage(context.Background(), conversationSession, "assistant", "", map[string]any{"tool_calls": []providers.ToolCall{toolCall}}); err != nil {
+		t.Fatalf("AppendMessage assistant: %v", err)
+	}
+	blocked := tools.EncodeToolFailure("resume_probe", nil, "", &tools.ApprovalRequiredError{ToolName: "resume_probe", RequestID: 187})
+	if _, err := database.AppendMessage(context.Background(), conversationSession, "tool", blocked, map[string]any{"tool_call_id": "tc-linked-scope"}); err != nil {
+		t.Fatalf("AppendMessage tool: %v", err)
+	}
+
+	var sawReplayToolResult bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		var req providers.ChatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("Decode: %v", err)
+		}
+		for _, msg := range req.Messages {
+			if msg.Role == "tool" && strings.Contains(fmt.Sprint(msg.Content), "session:"+scopeSession) {
+				sawReplayToolResult = true
+			}
+		}
+		_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","content":"telegram continued"}}]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	provider := providers.New(srv.URL, "test-key", 10*time.Second)
+	provider.HTTP = srv.Client()
+	registry := tools.NewRegistry()
+	registry.Register(sessionEchoTool{name: "resume_probe"})
+	runtime := &agent.Runtime{
+		DB:       database,
+		Provider: provider,
+		Model:    "gpt-4",
+		Tools:    registry,
+		Builder:  &agent.Builder{DB: database, HistoryMax: 20},
+	}
+	app := &ServiceApp{runtime: runtime}
+
+	_, err = app.ResumeApprovedRequest(context.Background(), ResumeApprovedRequest{
+		IssuedApproval: approval.IssuedApproval{
+			Request: db.ApprovalRequestRecord{
+				ID:                   187,
+				Type:                 string(approval.SubjectExec),
+				RequesterSessionID:   scopeSession,
+				RequesterContextJSON: approval.MarshalRequesterContext(approval.RequesterContext{Channel: "telegram", SessionKey: conversationSession, From: "123", ReplyTarget: "123"}),
+			},
+			Token: "approved-token",
+		},
+		Capability: tools.CapabilitySafe,
+	})
+	if err != nil {
+		t.Fatalf("ResumeApprovedRequest: %v", err)
+	}
+	if !sawReplayToolResult {
+		t.Fatal("expected continuation prompt to include replayed tool result from approval scope")
+	}
+	pp, _, err := runtime.Builder.BuildWithOptions(context.Background(), agent.BuildOptions{SessionKey: conversationSession})
+	if err != nil {
+		t.Fatalf("BuildWithOptions: %v", err)
+	}
+	last := pp.History[len(pp.History)-1]
+	if last.Role != "assistant" || fmt.Sprint(last.Content) != "telegram continued" {
+		t.Fatalf("expected Telegram conversation to receive continuation, got %#v", last)
+	}
+	scopeMessages, err := database.GetLastMessages(context.Background(), scopeSession, 10)
+	if err != nil {
+		t.Fatalf("GetLastMessages scope: %v", err)
+	}
+	if len(scopeMessages) != 0 {
+		t.Fatalf("expected hidden scope session not to receive replay messages, got %#v", scopeMessages)
 	}
 }
 

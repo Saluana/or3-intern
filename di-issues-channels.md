@@ -1,6 +1,8 @@
 # Channel And Approval Review
 
-## Chat approval routing does not exist
+## ~~Chat approval routing does not exist~~
+
+Status: Fixed. Non-CLI channel messages are intercepted before normal runtime handling for shared `/approve` and `/deny` commands. Request IDs are resolved only while pending, and approval commands are accepted only from the stored originating channel/session/sender before the approved resume path starts. The current low-friction UX is text command based; the stored requester context keeps native callbacks as a small adapter layer instead of a separate approval model.
 
 `or3-intern/docs/api-reference.md:704-709`
 
@@ -10,7 +12,9 @@ Consequence: A user in Telegram, Slack, Discord, or WhatsApp cannot resolve the 
 
 Fix: Add a channel approval router that runs before normal message publication. It should recognize approval IDs, reply-to approval prompts, and platform-native interactions, validate the channel identity against the approval owner/operator policy, call `ApproveRequest` or `DenyApproval`, and then start or attach to the approved resume job. Keep the parser shared, with small per-platform adapters for buttons, callbacks, and slash commands.
 
-## Approval-required prompts can silently vanish
+## ~~Approval-required prompts can silently vanish~~
+
+Status: Fixed. Approval-required turns now build a deterministic fallback prompt from the approval request and request ID. Model narration can still improve the wording, but an empty or failed narration no longer prevents the approval prompt from being persisted and delivered.
 
 `or3-intern/internal/agent/runtime_execution.go:268-320`
 
@@ -20,7 +24,9 @@ Consequence: The original turn can hit an approval gate, return an error, and se
 
 Fix: Approval prompts must be deterministic, not model-dependent. Build a fallback message directly from `ApprovalRequiredError` and the stored approval request, including the request ID and channel-specific action instructions. The model can improve wording, but failure to narrate must still deliver the fallback.
 
-## Non-CLI channel errors are log-only
+## ~~Non-CLI channel errors are log-only~~
+
+Status: Fixed. Non-CLI runtime failures now deliver a short channel-safe failure message with a public error code. Approval-required errors are handled by the deterministic approval prompt path so users do not receive duplicate or internal error text.
 
 `or3-intern/cmd/or3-intern/main.go:1151-1158`
 
@@ -30,7 +36,9 @@ Consequence: Any error path outside the happy path becomes a dead-air failure in
 
 Fix: Add a channel-safe error delivery path. For `ApprovalRequiredError`, send the deterministic approval prompt. For public runtime errors, send a short failure message with a retry or web-app pointer. Use public error codes and avoid leaking tool internals.
 
-## Web approval resume cannot deliver back to channels
+## ~~Web approval resume cannot deliver back to channels~~
+
+Status: Fixed. Approval resume delivery is now backend-owned. The resume job reads the original requester context from the approval record and delivers final completion or safe failure text back through the channel manager when the approval originated from an external channel.
 
 `or3-intern/cmd/or3-intern/main.go:576-579`
 
@@ -40,7 +48,9 @@ Consequence: Approving in the web app can continue the blocked work and update t
 
 Fix: Make approval resume delivery a backend responsibility. Persist the origin channel and delivery metadata with the approval request, inject a channel deliverer into the resume path, and deliver the final completion to the original channel after the job completes. The web app should observe the same job, not become the delivery mechanism.
 
-## Resume jobs run as `service`, not the original channel
+## ~~Resume jobs run as `service`, not the original channel~~
+
+Status: Fixed. Approved tool replays reconstruct the original channel envelope from stored requester context, including channel, session key, sender, reply target, and safe thread/reply metadata.
 
 `or3-intern/internal/app/service_app.go:272-282`
 
@@ -50,7 +60,9 @@ Consequence: Even if `rt.Deliver` were enabled, this resume turn would try to de
 
 Fix: Resume approved requests with the original channel envelope. Store and replay `channel`, `replyTarget`, and `replyMeta` from the blocked turn. If a resume is triggered by the web app, it should still run with the channel context captured when the approval was created.
 
-## Approval records do not store delivery metadata
+## ~~Approval records do not store delivery metadata~~
+
+Status: Fixed. Approval records now store `requester_context_json` with normalized channel, session, sender, reply target, safe reply metadata, and source message information. Existing databases receive an additive migration, and the API exposes the context for app routing.
 
 `or3-intern/internal/db/db.go:536-552`
 
@@ -60,7 +72,9 @@ Consequence: The system cannot reliably resume into the original Telegram messag
 
 Fix: Add an approval context column, for example `requester_context_json`, with `channel`, `session_key`, `from`, `reply_target`, `reply_meta`, and `source_message_id`. Populate it from runtime turn context when `requireApproval` creates the request, expose it through the API, and use it for both channel approval prompts and resume delivery.
 
-## The approval slide-over creates fake web conversations for external channels
+## ~~The approval slide-over creates fake web conversations for external channels~~
+
+Status: Fixed. The app now treats Telegram, Slack, Discord, WhatsApp, and email approvals as external-channel surfaces. Approving from the slide-over observes the backend resume job and shows a confirmation instead of activating or creating a local web chat session.
 
 `or3-app/app/components/approvals/ApprovalsPanel.vue:402-429`
 
@@ -70,7 +84,9 @@ Consequence: Approving an external channel request in the slide-over starts or f
 
 Fix: Treat external channel session keys as external surfaces, not web chat sessions. `resolveApprovalResumeTarget` should classify `telegram:`, `slack:`, `discord:`, `whatsapp:`, and `email:` separately. The panel should approve and observe the backend resume job, while the backend sends the final result to the source channel.
 
-## `resolveApprovalResumeTarget` collapses every non-doctor session into web chat
+## ~~`resolveApprovalResumeTarget` collapses every non-doctor session into web chat~~
+
+Status: Fixed. The resolver now has an explicit `external_channel` surface and can infer it from either requester context or external channel session keys.
 
 `or3-app/app/utils/or3/approval-resume-target.ts:31-43`
 
@@ -80,7 +96,9 @@ Consequence: Every new channel integration will inherit the same broken behavior
 
 Fix: Add explicit surfaces for external channels, or a generic `external_channel` surface with a parsed `channel` field. UI code should render an approval status and avoid creating a chat session for external surfaces.
 
-## Pending approval hydration only works for the active web session
+## ~~Pending approval hydration only works for the active web session~~
+
+Status: Fixed. Chat hydration now stays scoped to real local chat sessions and skips external channel session keys. External approvals remain visible through the approvals surface without polluting local chat state.
 
 `or3-app/app/composables/assistant-stream/useApprovalHydration.ts:43-68`
 
@@ -90,7 +108,9 @@ Consequence: The app cannot cleanly represent "Telegram needs approval" without 
 
 Fix: Keep approval discovery separate from chat hydration. The approvals panel should list pending approvals by host and source surface. Chat hydration should only attach approvals to real local chat sessions.
 
-## Slack Socket Mode can panic on malformed envelopes
+## ~~Slack Socket Mode can panic on malformed envelopes~~
+
+Status: Fixed. Slack authorization metadata is guarded before indexing, and malformed envelopes are covered by a regression test.
 
 `or3-intern/internal/channels/slack/slack.go:144-145`
 
@@ -106,7 +126,9 @@ if len(envelope.Payload.Authorizations) > 0 && envelope.Payload.Authorizations[0
 }
 ```
 
-## Channel event publication ignores drops
+## ~~Channel event publication ignores drops~~
+
+Status: Fixed. The primary worker queue now applies backpressure once active, and channel adapters log when publication cannot reach an active worker. Optional fan-out subscribers may still drop independently without losing the primary turn queue.
 
 `or3-intern/internal/bus/bus.go:96-119`
 
@@ -116,7 +138,9 @@ Consequence: Under load, inbound Telegram/Slack/Discord messages can be silently
 
 Fix: Critical inbound channel events need a reliable path. Either use a blocking worker queue for runtime turns, retry or return an explicit channel error when publish fails, or make channel ingress persist events before dispatch.
 
-## Telegram polling is needlessly chatty and adds latency
+## ~~Telegram polling is needlessly chatty and adds latency~~
+
+Status: Fixed. Telegram polling now uses non-zero long polling with bounded timeout, keeping the retry delay only for error recovery.
 
 `or3-intern/internal/channels/telegram/telegram.go:148-180`
 
@@ -126,7 +150,9 @@ Consequence: Approval prompts and approval replies feel slower than necessary, a
 
 Fix: Use Telegram long polling with a non-zero `timeout`, for example 25 to 50 seconds, and keep the local retry delay only for errors. If webhooks are supported later, prefer webhook delivery for lower latency and fewer requests.
 
-## Channel turns have a hard 120-second synchronous timeout
+## ~~Channel turns have a hard 120-second synchronous timeout~~
+
+Status: Fixed for external channel UX. Telegram, Slack, Discord, WhatsApp, and email turns no longer use the 120-second cap; they get a longer channel budget, deterministic approval pauses, visible terminal failures, and approved resumes run through backend jobs that deliver back to the source channel. This avoids adding a new user-facing workflow while removing the dead-air failure mode.
 
 `or3-intern/cmd/or3-intern/main.go:1139-1161`
 
@@ -136,7 +162,9 @@ Consequence: Real tasks like email triage can run into timeouts or approval wait
 
 Fix: Treat channel turns like service jobs: create durable jobs, stream progress where possible, persist enough state to resume after approval, and always deliver terminal state back to the source channel.
 
-## The tests prove the web job, not the channel behavior
+## ~~The tests prove the web job, not the channel behavior~~
+
+Status: Fixed. Added regression coverage for stored requester context, deterministic approval prompts, in-channel approve/mismatch handling, web-approved resume delivery preserving Slack thread metadata, Slack malformed envelopes, and app external-channel routing away from web chat.
 
 `or3-intern/cmd/or3-intern/service_test.go:3779-3886`
 

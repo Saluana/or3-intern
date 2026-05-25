@@ -41,32 +41,33 @@ type PairedDeviceRecord struct {
 }
 
 type ApprovalRequestRecord struct {
-	ID                 int64
-	Type               string
-	SubjectHash        string
-	SubjectJSON        string
-	RequesterAgentID   string
-	RequesterSessionID string
-	ExecutionHostID    string
-	Status             string
-	PolicyMode         string
-	RequestedAt        int64
-	ExpiresAt          int64
-	ResolvedAt         int64
-	ResolverActorID    string
-	ResolutionKind     string
-	ResolutionNote     string
+	ID                   int64
+	Type                 string
+	SubjectHash          string
+	SubjectJSON          string
+	RequesterAgentID     string
+	RequesterSessionID   string
+	RequesterContextJSON string
+	ExecutionHostID      string
+	Status               string
+	PolicyMode           string
+	RequestedAt          int64
+	ExpiresAt            int64
+	ResolvedAt           int64
+	ResolverActorID      string
+	ResolutionKind       string
+	ResolutionNote       string
 }
 
 type ApprovalAllowlistRecord struct {
-	ID          int64
-	Domain      string
-	ScopeJSON   string
-	MatcherJSON string
-	CreatedBy   string
-	CreatedAt   int64
-	ExpiresAt   int64
-	DisabledAt  int64
+	ID                  int64
+	Domain              string
+	ScopeJSON           string
+	MatcherJSON         string
+	CreatedBy           string
+	CreatedAt           int64
+	ExpiresAt           int64
+	DisabledAt          int64
 	ScopeHostID         string
 	ScopeTool           string
 	ScopeProfile        string
@@ -364,8 +365,8 @@ func (d *DB) FindActivePairedDeviceByChannelIdentity(ctx context.Context, channe
 }
 
 func (d *DB) CreateApprovalRequest(ctx context.Context, input ApprovalRequestRecord) (ApprovalRequestRecord, error) {
-	res, err := d.SQL.ExecContext(ctx, `INSERT INTO approval_requests(type, subject_hash, subject_json, requester_agent_id, requester_session_id, execution_host_id, status, policy_mode, requested_at, expires_at, resolved_at, resolver_actor_id, resolution_kind, resolution_note)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, input.Type, input.SubjectHash, input.SubjectJSON, input.RequesterAgentID, input.RequesterSessionID, input.ExecutionHostID, input.Status, input.PolicyMode, input.RequestedAt, input.ExpiresAt, input.ResolvedAt, input.ResolverActorID, input.ResolutionKind, input.ResolutionNote)
+	res, err := d.SQL.ExecContext(ctx, `INSERT INTO approval_requests(type, subject_hash, subject_json, requester_agent_id, requester_session_id, requester_context_json, execution_host_id, status, policy_mode, requested_at, expires_at, resolved_at, resolver_actor_id, resolution_kind, resolution_note)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, input.Type, input.SubjectHash, input.SubjectJSON, input.RequesterAgentID, input.RequesterSessionID, input.RequesterContextJSON, input.ExecutionHostID, input.Status, input.PolicyMode, input.RequestedAt, input.ExpiresAt, input.ResolvedAt, input.ResolverActorID, input.ResolutionKind, input.ResolutionNote)
 	if err != nil {
 		return ApprovalRequestRecord{}, err
 	}
@@ -377,12 +378,12 @@ func (d *DB) CreateApprovalRequest(ctx context.Context, input ApprovalRequestRec
 }
 
 func (d *DB) GetApprovalRequest(ctx context.Context, id int64) (ApprovalRequestRecord, error) {
-	row := d.SQL.QueryRowContext(ctx, `SELECT id, type, subject_hash, subject_json, requester_agent_id, requester_session_id, execution_host_id, status, policy_mode, requested_at, expires_at, resolved_at, resolver_actor_id, resolution_kind, resolution_note FROM approval_requests WHERE id=?`, id)
+	row := d.SQL.QueryRowContext(ctx, `SELECT id, type, subject_hash, subject_json, requester_agent_id, requester_session_id, requester_context_json, execution_host_id, status, policy_mode, requested_at, expires_at, resolved_at, resolver_actor_id, resolution_kind, resolution_note FROM approval_requests WHERE id=?`, id)
 	return scanApprovalRequest(row)
 }
 
 func (d *DB) FindPendingApprovalRequest(ctx context.Context, approvalType, subjectHash, hostID string, nowMS int64) (ApprovalRequestRecord, bool, error) {
-	row := d.SQL.QueryRowContext(ctx, `SELECT id, type, subject_hash, subject_json, requester_agent_id, requester_session_id, execution_host_id, status, policy_mode, requested_at, expires_at, resolved_at, resolver_actor_id, resolution_kind, resolution_note
+	row := d.SQL.QueryRowContext(ctx, `SELECT id, type, subject_hash, subject_json, requester_agent_id, requester_session_id, requester_context_json, execution_host_id, status, policy_mode, requested_at, expires_at, resolved_at, resolver_actor_id, resolution_kind, resolution_note
 		FROM approval_requests WHERE type=? AND subject_hash=? AND execution_host_id=? AND status='pending' AND expires_at>? ORDER BY id DESC LIMIT 1`, approvalType, subjectHash, hostID, nowMS)
 	rec, err := scanApprovalRequest(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -399,7 +400,7 @@ func (d *DB) ListApprovalRequestsFiltered(ctx context.Context, status, approvalT
 	if limit <= 0 || limit > 200 {
 		limit = 200
 	}
-	query := `SELECT id, type, subject_hash, subject_json, requester_agent_id, requester_session_id, execution_host_id, status, policy_mode, requested_at, expires_at, resolved_at, resolver_actor_id, resolution_kind, resolution_note FROM approval_requests`
+	query := `SELECT id, type, subject_hash, subject_json, requester_agent_id, requester_session_id, requester_context_json, execution_host_id, status, policy_mode, requested_at, expires_at, resolved_at, resolver_actor_id, resolution_kind, resolution_note FROM approval_requests`
 	args := []any{}
 	clauses := make([]string, 0, 2)
 	if strings.TrimSpace(status) != "" {
@@ -522,8 +523,8 @@ func (d *DB) CreateOrGetPendingApprovalRequest(ctx context.Context, input Approv
 		}
 		return existing, true, nil
 	}
-	res, err := tx.ExecContext(ctx, `INSERT INTO approval_requests(type, subject_hash, subject_json, requester_agent_id, requester_session_id, execution_host_id, status, policy_mode, requested_at, expires_at, resolved_at, resolver_actor_id, resolution_kind, resolution_note)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, input.Type, input.SubjectHash, input.SubjectJSON, input.RequesterAgentID, input.RequesterSessionID, input.ExecutionHostID, input.Status, input.PolicyMode, input.RequestedAt, input.ExpiresAt, input.ResolvedAt, input.ResolverActorID, input.ResolutionKind, input.ResolutionNote)
+	res, err := tx.ExecContext(ctx, `INSERT INTO approval_requests(type, subject_hash, subject_json, requester_agent_id, requester_session_id, requester_context_json, execution_host_id, status, policy_mode, requested_at, expires_at, resolved_at, resolver_actor_id, resolution_kind, resolution_note)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, input.Type, input.SubjectHash, input.SubjectJSON, input.RequesterAgentID, input.RequesterSessionID, input.RequesterContextJSON, input.ExecutionHostID, input.Status, input.PolicyMode, input.RequestedAt, input.ExpiresAt, input.ResolvedAt, input.ResolverActorID, input.ResolutionKind, input.ResolutionNote)
 	if err != nil {
 		if isUniqueConstraintErr(err) {
 			existing, ok, findErr := findPendingApprovalRequestTx(ctx, tx, input.Type, input.SubjectHash, input.ExecutionHostID, nowMS)
@@ -551,7 +552,7 @@ func (d *DB) CreateOrGetPendingApprovalRequest(ctx context.Context, input Approv
 }
 
 func findPendingApprovalRequestTx(ctx context.Context, tx *sql.Tx, approvalType, subjectHash, hostID string, nowMS int64) (ApprovalRequestRecord, bool, error) {
-	row := tx.QueryRowContext(ctx, `SELECT id, type, subject_hash, subject_json, requester_agent_id, requester_session_id, execution_host_id, status, policy_mode, requested_at, expires_at, resolved_at, resolver_actor_id, resolution_kind, resolution_note
+	row := tx.QueryRowContext(ctx, `SELECT id, type, subject_hash, subject_json, requester_agent_id, requester_session_id, requester_context_json, execution_host_id, status, policy_mode, requested_at, expires_at, resolved_at, resolver_actor_id, resolution_kind, resolution_note
 		FROM approval_requests WHERE type=? AND subject_hash=? AND execution_host_id=? AND status='pending' AND expires_at>? ORDER BY id DESC LIMIT 1`, approvalType, subjectHash, hostID, nowMS)
 	rec, err := scanApprovalRequest(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -840,7 +841,7 @@ issueToken:
 }
 
 func getApprovalRequestTx(ctx context.Context, tx *sql.Tx, id int64) (ApprovalRequestRecord, error) {
-	row := tx.QueryRowContext(ctx, `SELECT id, type, subject_hash, subject_json, requester_agent_id, requester_session_id, execution_host_id, status, policy_mode, requested_at, expires_at, resolved_at, resolver_actor_id, resolution_kind, resolution_note FROM approval_requests WHERE id=?`, id)
+	row := tx.QueryRowContext(ctx, `SELECT id, type, subject_hash, subject_json, requester_agent_id, requester_session_id, requester_context_json, execution_host_id, status, policy_mode, requested_at, expires_at, resolved_at, resolver_actor_id, resolution_kind, resolution_note FROM approval_requests WHERE id=?`, id)
 	return scanApprovalRequest(row)
 }
 
@@ -972,7 +973,7 @@ func scanPairedDevice(scanner interface{ Scan(dest ...any) error }) (PairedDevic
 
 func scanApprovalRequest(scanner interface{ Scan(dest ...any) error }) (ApprovalRequestRecord, error) {
 	var rec ApprovalRequestRecord
-	if err := scanner.Scan(&rec.ID, &rec.Type, &rec.SubjectHash, &rec.SubjectJSON, &rec.RequesterAgentID, &rec.RequesterSessionID, &rec.ExecutionHostID, &rec.Status, &rec.PolicyMode, &rec.RequestedAt, &rec.ExpiresAt, &rec.ResolvedAt, &rec.ResolverActorID, &rec.ResolutionKind, &rec.ResolutionNote); err != nil {
+	if err := scanner.Scan(&rec.ID, &rec.Type, &rec.SubjectHash, &rec.SubjectJSON, &rec.RequesterAgentID, &rec.RequesterSessionID, &rec.RequesterContextJSON, &rec.ExecutionHostID, &rec.Status, &rec.PolicyMode, &rec.RequestedAt, &rec.ExpiresAt, &rec.ResolvedAt, &rec.ResolverActorID, &rec.ResolutionKind, &rec.ResolutionNote); err != nil {
 		return ApprovalRequestRecord{}, err
 	}
 	return rec, nil

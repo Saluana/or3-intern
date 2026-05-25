@@ -30,7 +30,9 @@ func (r *Runtime) handleStructuredAutonomy(ctx context.Context, ev bus.Event, ms
 	}
 	toolCtx := tools.ContextWithSession(ctx, scopeKey)
 	toolCtx = tools.ContextWithDelivery(toolCtx, ev.Channel, replyTarget)
+	toolCtx = tools.ContextWithDeliveryFrom(toolCtx, ev.From)
 	toolCtx = tools.ContextWithDeliveryMeta(toolCtx, replyMeta)
+	toolCtx = tools.ContextWithApprovalRequesterContextForSession(toolCtx, ev.SessionKey)
 	toolCtx = r.contextWithTrustedToolAccess(toolCtx, ev)
 	toolCtx = tools.ContextWithToolGuard(toolCtx, r.guardToolExecution)
 

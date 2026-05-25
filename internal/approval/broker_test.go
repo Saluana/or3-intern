@@ -88,6 +88,45 @@ func createLinkedPendingSkillRunPlan(t *testing.T, broker *Broker, planID string
 	return plan, decision
 }
 
+func TestBroker_EvaluateExecStoresRequesterContext(t *testing.T) {
+	broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Exec.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+
+	ctx := ContextWithRequesterContext(context.Background(), RequesterContext{
+		Channel:     "slack",
+		SessionKey:  "slack:C1:U1",
+		From:        "U1",
+		ReplyTarget: "C1",
+		ReplyMeta:   map[string]any{"thread_ts": "123.45"},
+	})
+	decision, err := broker.EvaluateExec(ctx, ExecEvaluation{
+		ExecutablePath: "/bin/echo",
+		Argv:           []string{"hello"},
+		WorkingDir:     "/tmp",
+		ToolName:       "exec",
+		SessionID:      "slack:C1:U1",
+	})
+	if err != nil {
+		t.Fatalf("EvaluateExec: %v", err)
+	}
+	if !decision.RequiresApproval || decision.RequestID == 0 {
+		t.Fatalf("expected approval request, got %#v", decision)
+	}
+	rec, err := broker.DB.GetApprovalRequest(context.Background(), decision.RequestID)
+	if err != nil {
+		t.Fatalf("GetApprovalRequest: %v", err)
+	}
+	requester := RequesterContextFromJSON(rec.RequesterContextJSON)
+	if requester.Channel != "slack" || requester.SessionKey != "slack:C1:U1" || requester.From != "U1" || requester.ReplyTarget != "C1" {
+		t.Fatalf("unexpected requester context: %#v", requester)
+	}
+	if requester.ReplyMeta["thread_ts"] != "123.45" {
+		t.Fatalf("expected thread metadata, got %#v", requester.ReplyMeta)
+	}
+}
+
 func TestBroker_EvaluateExecReusesPendingApprovalRequest(t *testing.T) {
 	broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
 		cfg.Exec.Mode = config.ApprovalModeAsk

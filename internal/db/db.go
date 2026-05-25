@@ -540,6 +540,7 @@ func (d *DB) migrate(ctx context.Context) error {
 			subject_json TEXT NOT NULL,
 			requester_agent_id TEXT NOT NULL DEFAULT '',
 			requester_session_id TEXT NOT NULL DEFAULT '',
+			requester_context_json TEXT NOT NULL DEFAULT '{}',
 			execution_host_id TEXT NOT NULL,
 			status TEXT NOT NULL,
 			policy_mode TEXT NOT NULL,
@@ -763,6 +764,9 @@ func (d *DB) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := d.ensureApprovalAllowlistMatchColumns(ctx); err != nil {
+		return err
+	}
+	if err := d.ensureApprovalRequestContextColumn(ctx); err != nil {
 		return err
 	}
 	if err := d.ensureMemoryVecIndexForExisting(ctx); err != nil {
@@ -1228,6 +1232,18 @@ func (d *DB) ensureApprovalAllowlistMatchColumns(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (d *DB) ensureApprovalRequestContextColumn(ctx context.Context) error {
+	exists, err := d.tableHasColumn(ctx, "approval_requests", "requester_context_json")
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	_, err = d.SQL.ExecContext(ctx, `ALTER TABLE approval_requests ADD COLUMN requester_context_json TEXT NOT NULL DEFAULT '{}'`)
+	return err
 }
 
 func (d *DB) tableHasColumn(ctx context.Context, tableName, columnName string) (bool, error) {

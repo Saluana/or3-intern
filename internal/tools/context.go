@@ -2,14 +2,17 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
+	"or3-intern/internal/approval"
 	"or3-intern/internal/scope"
 )
 
 type sessionContextKey struct{}
 type deliveryChannelContextKey struct{}
 type deliveryToContextKey struct{}
+type deliveryFromContextKey struct{}
 type deliveryMetaContextKey struct{}
 type envContextKey struct{}
 type toolGuardContextKey struct{}
@@ -69,6 +72,17 @@ func ContextWithDelivery(ctx context.Context, channel, to string) context.Contex
 	return context.WithValue(ctx, deliveryToContextKey{}, to)
 }
 
+func ContextWithDeliveryFrom(ctx context.Context, from string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	from = strings.TrimSpace(from)
+	if from == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, deliveryFromContextKey{}, from)
+}
+
 func ContextWithDeliveryMeta(ctx context.Context, meta map[string]any) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
@@ -81,6 +95,27 @@ func ContextWithDeliveryMeta(ctx context.Context, meta map[string]any) context.C
 		cloned[k] = v
 	}
 	return context.WithValue(ctx, deliveryMetaContextKey{}, cloned)
+}
+
+func ContextWithApprovalRequesterContext(ctx context.Context) context.Context {
+	return ContextWithApprovalRequesterContextForSession(ctx, SessionFromContext(ctx))
+}
+
+func ContextWithApprovalRequesterContextForSession(ctx context.Context, sessionKey string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	channel, to := DeliveryFromContext(ctx)
+	meta := DeliveryMetaFromContext(ctx)
+	requester := approval.RequesterContext{
+		Channel:         channel,
+		SessionKey:      strings.TrimSpace(sessionKey),
+		From:            DeliveryOriginFromContext(ctx),
+		ReplyTarget:     to,
+		ReplyMeta:       meta,
+		SourceMessageID: sourceMessageIDFromReplyMeta(meta),
+	}
+	return approval.ContextWithRequesterContext(ctx, requester)
 }
 
 func ContextWithEnv(ctx context.Context, env map[string]string) context.Context {
@@ -220,6 +255,14 @@ func DeliveryFromContext(ctx context.Context) (channel string, to string) {
 	return channel, to
 }
 
+func DeliveryOriginFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	from, _ := ctx.Value(deliveryFromContextKey{}).(string)
+	return strings.TrimSpace(from)
+}
+
 func DeliveryMetaFromContext(ctx context.Context) map[string]any {
 	if ctx == nil {
 		return nil
@@ -233,6 +276,30 @@ func DeliveryMetaFromContext(ctx context.Context) map[string]any {
 		cloned[k] = v
 	}
 	return cloned
+}
+
+func sourceMessageIDFromReplyMeta(meta map[string]any) string {
+	for _, key := range []string{"message_reference", "reply_to_message_id", "thread_ts"} {
+		if value, ok := meta[key]; ok {
+			text := strings.TrimSpace(strings.Trim(strings.TrimSpace(anyToString(value)), `"`))
+			if text != "" && text != "<nil>" {
+				return text
+			}
+		}
+	}
+	return ""
+}
+
+func anyToString(value any) string {
+	if value == nil {
+		return ""
+	}
+	switch v := value.(type) {
+	case string:
+		return v
+	default:
+		return fmt.Sprint(v)
+	}
 }
 
 func EnvFromContext(ctx context.Context) map[string]string {

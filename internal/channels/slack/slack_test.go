@@ -92,6 +92,54 @@ func TestChannel_StartReceivesEventAndAcks(t *testing.T) {
 	}
 }
 
+func TestChannel_StartHandlesMissingAuthorizations(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		_ = conn.WriteJSON(map[string]any{
+			"envelope_id": "env-no-auth",
+			"type":        "events_api",
+			"payload": map[string]any{
+				"event": map[string]any{"type": "message", "text": "hello", "user": "U1", "channel": "C1"},
+			},
+		})
+		var ack map[string]any
+		if err := conn.ReadJSON(&ack); err != nil {
+			t.Fatalf("ReadJSON ack: %v", err)
+		}
+	}))
+	defer wsServer.Close()
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/apps.connections.open" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "url": "ws" + strings.TrimPrefix(wsServer.URL, "http")})
+			return
+		}
+		t.Fatalf("unexpected api path: %s", r.URL.Path)
+	}))
+	defer apiServer.Close()
+
+	b := bus.New(1)
+	ch := &Channel{Config: config.SlackChannelConfig{AppToken: "app", BotToken: "bot", APIBase: apiServer.URL, OpenAccess: true}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := ch.Start(ctx, b); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ch.Stop(context.Background()) }()
+	select {
+	case ev := <-b.Channel():
+		if ev.Channel != "slack" || ev.Message != "hello" {
+			t.Fatalf("unexpected event: %#v", ev)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for slack event")
+	}
+}
+
 func TestChannel_StartDeduplicatesRepeatedEnvelope(t *testing.T) {
 	upgrader := websocket.Upgrader{}
 	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

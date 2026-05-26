@@ -827,6 +827,47 @@ func TestAllowsUnauthenticatedPairingRoute_AllowsPrivateNetworkSecurePairing(t *
 	}
 }
 
+func TestServiceAuthMiddleware_AllowsHostCreatedSecurePairingCompletionWithoutLegacyPairingFlag(t *testing.T) {
+	cfg := config.Config{Service: config.ServiceConfig{
+		Listen: "127.0.0.1:9100",
+	}}
+	handler := serviceAuthMiddlewareWithBroker(cfg, nil, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := serviceAuthKindFromContext(r.Context()); got != "unauthenticated" {
+			t.Fatalf("expected unauthenticated pairing context, got %q", got)
+		}
+		writeServiceJSON(w, http.StatusAccepted, map[string]any{"ok": true})
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/secure-connections/pairing/approve", strings.NewReader(`{}`))
+	req.RemoteAddr = "127.0.0.1:54321"
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected secure pairing completion to bypass app-token auth, got %d (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestServiceAuthMiddleware_StillRejectsLegacyPairingWithoutPairingFlag(t *testing.T) {
+	cfg := config.Config{Service: config.ServiceConfig{
+		Listen: "127.0.0.1:9100",
+	}}
+	handler := serviceAuthMiddlewareWithBroker(cfg, nil, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("legacy pairing exchange should not reach handler without auth or allowUnauthenticatedPairing")
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/pairing/exchange", strings.NewReader(`{}`))
+	req.RemoteAddr = "127.0.0.1:54321"
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected legacy pairing exchange to remain unauthorized, got %d (%s)", rec.Code, rec.Body.String())
+	}
+}
+
 func TestServiceBrowserMiddleware_AllowsTrustedElectronAppOriginFromLoopback(t *testing.T) {
 	cfg := config.Config{Service: config.ServiceConfig{
 		Listen: "0.0.0.0:9100",

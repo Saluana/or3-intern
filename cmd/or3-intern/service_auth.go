@@ -344,8 +344,13 @@ func serviceAllowedBrowserOrigin(cfg config.Config, r *http.Request) (string, bo
 	if serviceIsSecurePairingRoute(r) && requestRemoteInCIDRAllowlist(r.RemoteAddr, serviceDefaultPairingBrowserCIDRs()) {
 		return origin, true
 	}
-	if serviceOriginIsLoopback(parsed) && serviceListenIsLoopback(cfg.Service.Listen) && (strings.TrimSpace(r.RemoteAddr) == "" || requestRemoteIsLoopback(r.RemoteAddr)) {
+	if serviceOriginIsLoopback(parsed) && (strings.TrimSpace(r.RemoteAddr) == "" || requestRemoteIsLoopback(r.RemoteAddr)) {
 		return origin, true
+	}
+	if servicePrivateNetworkBrowserRequest(r, parsed) {
+		if serviceBrowserPublicRoute(r) || serviceBrowserAuthenticatedRequest(r) {
+			return origin, true
+		}
 	}
 	if serviceTrustedBrowserRequest(cfg, r, parsed) {
 		return origin, true
@@ -383,6 +388,52 @@ func serviceTrustedBrowserRequest(cfg config.Config, r *http.Request, parsedOrig
 		return false
 	}
 	return requestRemoteInCIDRAllowlist(r.RemoteAddr, serviceTrustedBrowserCIDRs(cfg))
+}
+
+func servicePrivateNetworkBrowserRequest(r *http.Request, parsedOrigin *url.URL) bool {
+	if r == nil || parsedOrigin == nil {
+		return false
+	}
+	if !strings.EqualFold(parsedOrigin.Scheme, "http") && !strings.EqualFold(parsedOrigin.Scheme, "https") {
+		return false
+	}
+	return requestRemoteInCIDRAllowlist(r.RemoteAddr, serviceDefaultPairingBrowserCIDRs())
+}
+
+func serviceBrowserPublicRoute(r *http.Request) bool {
+	if r == nil || r.URL == nil {
+		return false
+	}
+	path := strings.TrimSpace(r.URL.Path)
+	switch path {
+	case "/internal/v1/health", "/internal/v1/ready", "/internal/v1/readiness", "/internal/v1/capabilities", "/internal/v1/auth/capabilities":
+		return true
+	default:
+		return false
+	}
+}
+
+func serviceBrowserAuthenticatedRequest(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if serviceIsCORSPreflight(r) {
+		requestedHeaders := strings.ToLower(strings.TrimSpace(r.Header.Get("Access-Control-Request-Headers")))
+		if requestedHeaders == "" {
+			return false
+		}
+		for _, token := range []string{"authorization", "x-or3-session", "x-or3-auth-method"} {
+			for _, part := range strings.Split(requestedHeaders, ",") {
+				if strings.EqualFold(strings.TrimSpace(part), token) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return strings.TrimSpace(r.Header.Get("Authorization")) != "" ||
+		strings.TrimSpace(r.Header.Get("X-Or3-Session")) != "" ||
+		strings.TrimSpace(r.Header.Get("X-Or3-Auth-Method")) != ""
 }
 
 func serviceTrustedRemotePairingRequest(cfg config.Config, r *http.Request, parsedOrigin *url.URL) bool {
@@ -466,15 +517,19 @@ func serviceWriteCORSHeaders(header http.Header, r *http.Request, origin string)
 	serviceAppendVary(header, "Origin")
 	serviceAppendVary(header, "Access-Control-Request-Method")
 	serviceAppendVary(header, "Access-Control-Request-Headers")
+	serviceAppendVary(header, "Access-Control-Request-Private-Network")
 	header.Set("Access-Control-Allow-Origin", origin)
 	header.Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-	header.Set("Access-Control-Expose-Headers", "X-Request-Id")
+	header.Set("Access-Control-Expose-Headers", "X-Request-Id, X-Trace-Id")
 	header.Set("Access-Control-Max-Age", "600")
 	requestedHeaders := strings.TrimSpace(r.Header.Get("Access-Control-Request-Headers"))
 	if requestedHeaders == "" {
-		requestedHeaders = "Authorization, Content-Type, Accept, X-Request-Id"
+		requestedHeaders = "Authorization, Content-Type, Accept, X-Request-Id, X-Trace-Id"
 	}
 	header.Set("Access-Control-Allow-Headers", requestedHeaders)
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("Access-Control-Request-Private-Network")), "true") {
+		header.Set("Access-Control-Allow-Private-Network", "true")
+	}
 }
 
 func serviceAppendVary(header http.Header, value string) {
@@ -618,7 +673,10 @@ func allowsUnauthenticatedPairingRoute(cfg config.Config, r *http.Request) bool 
 	if !serviceIsPairingRoute(r) {
 		return false
 	}
-	if serviceListenIsLoopback(cfg.Service.Listen) && requestRemoteIsLoopback(r.RemoteAddr) {
+	if requestRemoteIsLoopback(r.RemoteAddr) {
+		return true
+	}
+	if serviceIsSecurePairingRoute(r) && requestRemoteInCIDRAllowlist(r.RemoteAddr, serviceDefaultPairingBrowserCIDRs()) {
 		return true
 	}
 	origin, err := url.Parse(strings.TrimSpace(r.Header.Get("Origin")))
@@ -735,7 +793,10 @@ func serviceRouteRequirementForRequest(cfg config.Config, r *http.Request) servi
 		if method == http.MethodGet && relative == "capabilities" {
 			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
 		}
-		if method == http.MethodPost && (relative == "pairing/intents" || relative == "pairing/approve" || relative == "pairing/exchange" || relative == "sessions") {
+		if method == http.MethodPost && relative == "pairing/intents" {
+			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, SessionOnly: true}
+		}
+		if method == http.MethodPost && (relative == "pairing/approve" || relative == "pairing/exchange" || relative == "sessions") {
 			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, BypassGlobalSession: true}
 		}
 		if method == http.MethodGet && relative == "host-identity" {
@@ -754,6 +815,39 @@ func serviceRouteRequirementForRequest(cfg config.Config, r *http.Request) servi
 			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
 		}
 		return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "configuration changes require recent passkey verification"}
+	case path == "/internal/v1/doctor" || strings.HasPrefix(path, "/internal/v1/doctor/"):
+		relative := strings.Trim(strings.TrimPrefix(path, "/internal/v1/doctor"), "/")
+		if strings.HasPrefix(relative, "skills/") && strings.HasSuffix(relative, "/diagnostics") {
+			if method == http.MethodGet {
+				return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, SessionOnly: true}
+			}
+			return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "skill diagnostics can execute local checks and require recent passkey verification"}
+		}
+		if relative == "" || relative == "status" || relative == "run" || relative == "admin-brain" || relative == "config-metadata" || relative == "logs" {
+			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
+		}
+		if relative == "plans/preview" {
+			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, SessionOnly: true}
+		}
+		if relative == "plans" {
+			if method == http.MethodPost {
+				return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, SessionOnly: true}
+			}
+			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
+		}
+		if strings.HasPrefix(relative, "plans/") {
+			if strings.HasSuffix(relative, "/apply") || strings.HasSuffix(relative, "/rollback") {
+				return serviceRouteRequirement{Sensitivity: serviceRouteSensitive, SessionOnly: true, StepUpOnly: true, Reason: "applying or rolling back doctor plans requires recent passkey verification"}
+			}
+			if strings.HasSuffix(relative, "/validate") && method == http.MethodPost {
+				return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, SessionOnly: true}
+			}
+			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, SessionOnly: true}
+		}
+		if strings.HasPrefix(relative, "sessions/") || relative == "sessions" {
+			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk, SessionOnly: true}
+		}
+		return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}
 	case path == "/internal/v1/skills" || strings.HasPrefix(path, "/internal/v1/skills/"):
 		if method == http.MethodGet {
 			return serviceRouteRequirement{Sensitivity: serviceRouteLowRisk}

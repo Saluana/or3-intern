@@ -2,6 +2,13 @@ package doctor
 
 import "or3-intern/internal/config"
 
+func fixModeForSkillsTrust(cfg config.Config) FixMode {
+	if config.IsHostedProfile(cfg.RuntimeProfile) {
+		return FixModeManual
+	}
+	return FixModeAutomatic
+}
+
 func skillFindings(cfg config.Config, opts Options) []Finding {
 	findings := []Finding{}
 	if !cfg.Skills.EnableExec {
@@ -21,6 +28,8 @@ func skillFindings(cfg config.Config, opts Options) []Finding {
 			Area:     "skills",
 			Severity: severityFor(opts.Mode, SeverityWarn, isHostedOrStartupMode(cfg, opts.Mode)),
 			Summary:  "skill execution is enabled without a trustedOwners policy for managed skills",
+			FixMode:  fixModeForSkillsTrust(cfg),
+			FixHint:  "Add at least one trusted owner (for example local) or disable skill execution",
 		})
 	}
 	if len(cfg.Skills.Policy.TrustedRegistries) == 0 {
@@ -29,6 +38,8 @@ func skillFindings(cfg config.Config, opts Options) []Finding {
 			Area:     "skills",
 			Severity: severityFor(opts.Mode, SeverityWarn, isHostedOrStartupMode(cfg, opts.Mode)),
 			Summary:  "skill execution is enabled without a trustedRegistries policy for managed skills",
+			FixMode:  fixModeForSkillsTrust(cfg),
+			FixHint:  "Add your ClawHub registry URL or disable skill execution",
 		})
 	}
 	if len(cfg.Hardening.ChildEnvAllowlist) == 0 {

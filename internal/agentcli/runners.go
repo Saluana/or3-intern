@@ -215,6 +215,8 @@ type AgentRunRequest struct {
 	Isolation        string
 	MaxTurns         int
 	Meta             map[string]any
+	AllowedTools     []string
+	RestrictTools    bool
 }
 
 // CommandSpec is the executable command built by an adapter.

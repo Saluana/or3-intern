@@ -55,3 +55,12 @@ Successful apply responses currently include:
 - `live_reloaded`
 
 Use the field-list routes to drive the UI first, then send only supported changes back to `apply`.
+
+Notable **context** section fields for agent behavior:
+
+| Field key | Config path | Meaning |
+| --- | --- | --- |
+| `context_task_card_enabled` | `context.taskCard.enabled` | Task card tracking |
+| `context_task_card_enforce_plan` | `context.taskCard.enforcePlan` | Require `create_plan` before write/exec/web tools |
+
+In or3-app, open **Settings → Advanced**, filter **Agent behavior** or **Advanced**, choose **Context**, and toggle **Require plan before writes**.

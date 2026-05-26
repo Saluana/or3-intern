@@ -183,6 +183,9 @@ func (m *Manager) Enqueue(ctx context.Context, req AgentRunRequest) (db.AgentCLI
 	if err := ValidateRunPolicy(RunnerMode(mode), RunIsolation(isolation), cfg.AllowSandboxAuto); err != nil {
 		return db.AgentCLIRun{}, fmt.Errorf("policy validation: %w", err)
 	}
+	if err := ValidateDoctorAgentRunRequest(req); err != nil {
+		return db.AgentCLIRun{}, err
+	}
 
 	// Check runner readiness
 	if m.Registry != nil {

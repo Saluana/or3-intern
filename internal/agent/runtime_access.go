@@ -21,7 +21,7 @@ type trustedToolAccessContextKey struct{}
 
 var toolIntentPatterns = map[string]*regexp.Regexp{
 	"capabilities": regexp.MustCompile(`\b(tool|tools|capability|capabilities|what can you do)\b`),
-	"write":        regexp.MustCompile(`\b(write|edit|modify|patch)\b|\bcreate\s+file\b`),
+	"write":        regexp.MustCompile(`\b(write|edit|modify|patch|delete|remove|trash|unlink)\b|\bcreate\s+file\b`),
 	"exec":         regexp.MustCompile(`\b(run|exec|execute|command|shell|test|build)\b`),
 	"web":          regexp.MustCompile(`\b(http|https|web|url|search|internet)\b`),
 	"cron":         regexp.MustCompile(`\b(cron|schedule|remind)\b`),
@@ -116,6 +116,7 @@ func selectedToolGroups(intent string) map[string]struct{} {
 	groups := map[string]struct{}{
 		tools.ToolGroupRead:   {},
 		tools.ToolGroupMemory: {},
+		tools.ToolGroupPlan:   {},
 	}
 	if toolIntentPatterns["capabilities"].MatchString(lower) {
 		groups[tools.ToolGroupWrite] = struct{}{}
@@ -169,6 +170,10 @@ func hasGroup(groups []string, want string) bool {
 func (r *Runtime) guardToolExecution(ctx context.Context, tool tools.Tool, capability tools.CapabilityLevel, params map[string]any) error {
 	if tool == nil {
 		return nil
+	}
+	sessionKey := tools.SessionFromContext(ctx)
+	if err := r.enforcePlanBeforeTool(ctx, tool, sessionKey); err != nil {
+		return err
 	}
 	profile := tools.ActiveProfileFromContext(ctx)
 	if tool.Name() == tools.ToolNameSendMessage && trustedToolAccessFromContext(ctx) {
@@ -250,7 +255,7 @@ func (r *Runtime) enforceSkillPolicy(ctx context.Context, tool tools.Tool, param
 				return err
 			}
 		}
-	case tools.ToolNameWriteFile, tools.ToolNameEditFile:
+	case tools.ToolNameWriteFile, tools.ToolNameEditFile, tools.ToolNameDeleteFile:
 		if !policy.AllowWrite {
 			return fmt.Errorf("write denied by skill policy: %s", tool.Name())
 		}
@@ -355,6 +360,7 @@ func (r *Runtime) resolveProfile(name string) (tools.ActiveProfile, bool) {
 	if !ok {
 		return tools.ActiveProfile{}, false
 	}
+	profileCfg = config.ExpandAccessProfile(profileCfg, r.WorkspaceDir)
 	allowed := map[string]struct{}{}
 	for _, toolName := range profileCfg.AllowedTools {
 		allowed[strings.TrimSpace(toolName)] = struct{}{}
@@ -394,7 +400,7 @@ func (r *Runtime) enforceProfile(ctx context.Context, profile tools.ActiveProfil
 		return fmt.Errorf("subagents denied by profile")
 	}
 	switch tool.Name() {
-	case tools.ToolNameWriteFile, tools.ToolNameEditFile:
+	case tools.ToolNameWriteFile, tools.ToolNameEditFile, tools.ToolNameDeleteFile:
 		if len(profile.WritablePaths) == 0 {
 			return fmt.Errorf("path denied by profile")
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -64,7 +65,11 @@ Tool argument rules:
 - Every list item must be standalone, specific, and under 300 characters.
 - procedures should be actionable steps or commands, not vague descriptions.
 - warnings should name the risk and condition that triggers it.
-- Use [] when a category has no durable information. Do not invent details.`
+- Use [] when a category has no durable information. Do not invent details.
+
+Never store secrets or credentials:
+- Do not store API keys, bearer tokens, passwords, private keys, auth headers, session IDs, cookies, or other credential material.
+- If the excerpt only contains secrets with no other durable context, return empty lists and an empty summary.`
 
 const consolidationUserPrompt = `Existing pinned memory (ultra-stable only):
 %s
@@ -198,7 +203,10 @@ func (c *Consolidator) ArchiveResetWindow(ctx context.Context, sessionKey string
 	}
 	memScope := c.resolveMemoryScope(ctx, sessionKey)
 	if err := c.writeConsolidatedTranscript(ctx, sessionKey, memScope, canonicalKey, transcript, lastIncludedID, maxInputChars, "reset_archive"); err != nil {
-		if err == errEmptyConsolidationOutput {
+		if errors.Is(err, errConsolidationParseFailed) {
+			return fmt.Errorf("reset archive consolidation failed: %w", err)
+		}
+		if errors.Is(err, errConsolidationNoUsefulMemory) {
 			log.Printf("reset archive produced no durable memory for session %q; continuing reset", sessionKey)
 			return nil
 		}
@@ -280,26 +288,17 @@ func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMa
 		return false, nil
 	}
 	if err := c.writeConsolidatedTranscript(ctx, sessionKey, memScope, canonicalKey, transcript, lastIncludedID, maxInputChars, "consolidation"); err != nil {
-		if err == errEmptyConsolidationOutput {
-			currentCanonical, _, getErr := c.DB.GetPinnedValue(ctx, memScope, canonicalKey)
-			if getErr != nil {
-				return false, fmt.Errorf("consolidation get canonical memory: %w", getErr)
+		if errors.Is(err, errConsolidationParseFailed) {
+			log.Printf("consolidation parse failed for session %q; cursor not advanced (%d messages pending)", sessionKey, len(msgs))
+			return false, nil
+		}
+		if errors.Is(err, errConsolidationNoUsefulMemory) {
+			if _, writeErr := c.DB.WriteConsolidation(ctx, db.ConsolidationWrite{
+				SessionKey: sessionKey, ScopeKey: memScope, CursorMsgID: lastIncludedID,
+			}); writeErr != nil {
+				return false, fmt.Errorf("consolidation advance cursor: %w", writeErr)
 			}
-			canonicalText := trimTo(currentCanonical, maxInputChars)
-			w := db.ConsolidationWrite{
-				SessionKey:  sessionKey,
-				ScopeKey:    memScope,
-				CursorMsgID: lastIncludedID,
-			}
-			if canonicalText != "" {
-				w.CanonicalKey = canonicalKey
-				w.CanonicalText = canonicalText
-			}
-			_, err := c.DB.WriteConsolidation(ctx, w)
-			if err != nil {
-				return false, fmt.Errorf("consolidation update cursor: %w", err)
-			}
-			log.Printf("consolidated %d messages for session %q (cursor-only)", len(msgs), sessionKey)
+			log.Printf("consolidated %d messages for session %q (no durable memory)", len(msgs), sessionKey)
 			return true, nil
 		}
 		return false, err
@@ -309,7 +308,10 @@ func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMa
 	return true, nil
 }
 
-var errEmptyConsolidationOutput = fmt.Errorf("empty consolidation output")
+var (
+	errConsolidationParseFailed   = errors.New("consolidation parse failed")
+	errConsolidationNoUsefulMemory = errors.New("consolidation no useful memory")
+)
 
 func buildConsolidationTranscript(msgs []db.ConsolidationMessage, maxInputChars int) (string, int64) {
 	var sb strings.Builder
@@ -369,10 +371,14 @@ func (c *Consolidator) writeConsolidatedTranscript(ctx context.Context, sessionK
 	}
 	parsed, err := c.requestConsolidationOutput(ctx, model, currentCanonical, transcript)
 	if err != nil {
-		if err == errEmptyConsolidationOutput {
+		if errors.Is(err, errConsolidationParseFailed) {
 			return err
 		}
 		return fmt.Errorf("consolidation structured output: %w", err)
+	}
+	if err := validateConsolidationOutput(parsed); err != nil {
+		log.Printf("consolidation rejected stored content: %v", err)
+		return errConsolidationNoUsefulMemory
 	}
 	summary := trimTo(parsed.Summary, maxInputChars/canonicalMemoryInputDivisor)
 
@@ -382,7 +388,7 @@ func (c *Consolidator) writeConsolidatedTranscript(ctx context.Context, sessionK
 	canonicalText = trimTo(canonicalText, maxInputChars)
 
 	if summary == "" && len(parsed.Facts)+len(parsed.Preferences)+len(parsed.Goals)+len(parsed.Procedures)+len(parsed.Decisions)+len(parsed.Warnings) == 0 {
-		return errEmptyConsolidationOutput
+		return errConsolidationNoUsefulMemory
 	}
 
 	embedModel := c.EmbedModel
@@ -399,7 +405,7 @@ func (c *Consolidator) writeConsolidatedTranscript(ctx context.Context, sessionK
 		embedding = make([]byte, 0)
 	}
 
-	extraNotes := buildExtraNotes(parsed, sql.NullInt64{Int64: lastIncludedID, Valid: lastIncludedID > 0}, c.EmbedFingerprint)
+	extraNotes := c.embedExtraNotes(ctx, buildExtraNotes(parsed, sql.NullInt64{Int64: lastIncludedID, Valid: lastIncludedID > 0}, c.EmbedFingerprint))
 	w := db.ConsolidationWrite{
 		SessionKey:       sessionKey,
 		ScopeKey:         memScope,
@@ -469,7 +475,28 @@ func (c *Consolidator) requestConsolidationOutput(ctx context.Context, model, cu
 		messages = append(messages, providers.ChatMessage{Role: "user", Content: consolidationRetryPrompt})
 	}
 	log.Printf("consolidation structured output rejected: %v", lastErr)
-	return consolidationOutput{}, errEmptyConsolidationOutput
+	return consolidationOutput{}, errConsolidationParseFailed
+}
+
+func validateConsolidationOutput(parsed consolidationOutput) error {
+	fields := []struct {
+		name  string
+		items []string
+	}{
+		{"summary", []string{parsed.Summary}},
+		{"facts", parsed.Facts},
+		{"preferences", parsed.Preferences},
+		{"goals", parsed.Goals},
+		{"procedures", parsed.Procedures},
+		{"decisions", parsed.Decisions},
+		{"warnings", parsed.Warnings},
+	}
+	for _, field := range fields {
+		if err := RejectSecretLikeStrings(field.items, field.name); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func providerRejectedToolChoice(err error) bool {
@@ -542,14 +569,9 @@ func parseConsolidationOutput(raw string) (consolidationOutput, error) {
 
 	// Attempt to extract a JSON object even if the model added surrounding text.
 	jsonStr := extractJSON(raw)
-
-	var out consolidationOutput
 	if jsonStr != "" {
 		if parsed, err := decodeConsolidationJSON(jsonStr); err == nil {
-			out = parsed
-			if out.Summary != "" || len(out.Facts)+len(out.Preferences)+len(out.Goals)+len(out.Procedures)+len(out.Decisions)+len(out.Warnings) > 0 {
-				return out, nil
-			}
+			return parsed, nil
 		} else {
 			return consolidationOutput{}, fmt.Errorf("invalid consolidation JSON: %w", err)
 		}
@@ -717,6 +739,32 @@ func trimTo(s string, max int) string {
 
 // buildExtraNotes converts parsed structured consolidation output into a slice
 // of TypedNoteInput ready to be written alongside the summary note.
+const maxConsolidationTypedEmbeds = 12
+
+func (c *Consolidator) embedExtraNotes(ctx context.Context, notes []db.TypedNoteInput) []db.TypedNoteInput {
+	if c == nil || c.Provider == nil || strings.TrimSpace(c.EmbedModel) == "" {
+		return notes
+	}
+	embedded := 0
+	for i := range notes {
+		if embedded >= maxConsolidationTypedEmbeds {
+			break
+		}
+		text := strings.TrimSpace(notes[i].Text)
+		if text == "" {
+			continue
+		}
+		vec, err := c.Provider.Embed(ctx, c.EmbedModel, text)
+		if err != nil {
+			log.Printf("consolidation typed note embed failed: %v", err)
+			continue
+		}
+		notes[i].Embedding = PackFloat32(vec)
+		embedded++
+	}
+	return notes
+}
+
 func buildExtraNotes(parsed consolidationOutput, sourceMsgID sql.NullInt64, embedFingerprint string) []db.TypedNoteInput {
 	type kindItems struct {
 		kind  string

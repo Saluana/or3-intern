@@ -258,6 +258,47 @@ func TestFileToolsAllowBroadReadButRestrictWrites(t *testing.T) {
 	}
 }
 
+func TestDeleteFileMovesFileToWorkspaceTrash(t *testing.T) {
+	workspace := t.TempDir()
+	path := filepath.Join(workspace, "notes", "old.txt")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tool := &DeleteFile{FileTool: FileTool{Root: workspace, WriteRoot: workspace}}
+	result, err := tool.Execute(context.Background(), map[string]any{"path": path})
+	if err != nil {
+		t.Fatalf("delete_file failed: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("expected original file to be moved, stat err=%v result=%s", err, result)
+	}
+	matches, err := filepath.Glob(filepath.Join(workspace, ".or3-trash", "notes", "old.txt.*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("expected one trashed file, got %#v result=%s", matches, result)
+	}
+	content, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "old" {
+		t.Fatalf("expected trashed content, got %q", content)
+	}
+}
+
+func TestDeleteFileRejectsDirectories(t *testing.T) {
+	workspace := t.TempDir()
+	tool := &DeleteFile{FileTool: FileTool{Root: workspace, WriteRoot: workspace}}
+	if _, err := tool.Execute(context.Background(), map[string]any{"path": workspace}); err == nil {
+		t.Fatal("expected directory delete to be rejected")
+	}
+}
+
 func TestReadFile_Schema(t *testing.T) {
 	tool := &ReadFile{}
 	schema := tool.Schema()

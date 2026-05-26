@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -237,7 +238,9 @@ func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
 				if len(attachments) > 0 {
 					meta["attachments"] = attachments
 				}
-				eventBus.Publish(bus.Event{Type: bus.EventUserMessage, SessionKey: sessionKey, Channel: "discord", From: msg.Author.ID, Message: content, Meta: meta})
+				if ok := eventBus.Publish(bus.Event{Type: bus.EventUserMessage, SessionKey: sessionKey, Channel: "discord", From: msg.Author.ID, Message: content, Meta: meta}); !ok {
+					log.Printf("discord event dropped: queue unavailable for channel=%s user=%s", msg.ChannelID, msg.Author.ID)
+				}
 			}
 		}
 		select {

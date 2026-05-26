@@ -46,6 +46,7 @@ Tools are organized into groups for filtering and metadata:
 - **channels** - send_message
 - **mcp** - MCP-provided tools
 - **service** - spawn_subagent
+- **plan** - create_plan, update_plan, complete_plan_task, remove_plan (agent runtime; see [plan tools](plan-tools.md))
 
 Source: `internal/tools/registry.go:17-29` (ToolGroup constants)
 

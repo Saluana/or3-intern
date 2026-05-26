@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"mime"
 	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -91,6 +93,9 @@ func (c *Channel) Deliver(ctx context.Context, to, text string, meta map[string]
 	if replyID, ok := meta["reply_to_message_id"].(int64); ok && replyID > 0 {
 		payload["reply_to_message_id"] = replyID
 	}
+	if approvalID := approvalRequestIDFromText(text); approvalID > 0 {
+		payload["reply_markup"] = telegramApprovalReplyMarkup(approvalID)
+	}
 	return c.postJSON(ctx, "/sendMessage", payload, nil)
 }
 
@@ -146,31 +151,29 @@ func (c *Channel) resolveChatID(to string, meta map[string]any) string {
 }
 
 func (c *Channel) poll(ctx context.Context, eventBus *bus.Bus) {
-	interval := time.Duration(c.Config.PollSeconds) * time.Second
-	if interval <= 0 {
-		interval = 2 * time.Second
+	retryDelay := time.Duration(c.Config.PollSeconds) * time.Second
+	if retryDelay <= 0 {
+		retryDelay = 2 * time.Second
 	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
 	for {
 		if err := c.fetchUpdates(ctx, eventBus); err != nil {
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(interval):
+			case <-time.After(retryDelay):
 			}
 		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		default:
 		}
 	}
 
 }
 
 func (c *Channel) fetchUpdates(ctx context.Context, eventBus *bus.Bus) error {
-	query := map[string]string{"timeout": "0"}
+	query := map[string]string{"timeout": strconv.Itoa(c.longPollTimeoutSeconds())}
 	c.mu.Lock()
 	if c.offset > 0 {
 		query["offset"] = strconv.FormatInt(c.offset, 10)
@@ -186,7 +189,14 @@ func (c *Channel) fetchUpdates(ctx context.Context, eventBus *bus.Bus) error {
 			c.offset = next
 		}
 		c.mu.Unlock()
+		if update.CallbackQuery.ID != "" {
+			c.handleCallbackQuery(ctx, eventBus, update.CallbackQuery)
+			continue
+		}
 		msg := update.Message
+		if msg.Chat.ID == 0 || msg.MessageID == 0 {
+			continue
+		}
 		recordRecentChat(c.Config.APIBase, c.Config.Token, msg)
 		chatID := strconv.FormatInt(msg.Chat.ID, 10)
 		if !c.allowedChat(ctx, chatID) {
@@ -221,16 +231,99 @@ func (c *Channel) fetchUpdates(ctx context.Context, eventBus *bus.Bus) error {
 		if len(attachments) > 0 {
 			meta["attachments"] = attachments
 		}
-		eventBus.Publish(bus.Event{
+		if ok := eventBus.Publish(bus.Event{
 			Type:       bus.EventUserMessage,
 			SessionKey: sessionKey,
 			Channel:    "telegram",
 			From:       strconv.FormatInt(msg.From.ID, 10),
 			Message:    content,
 			Meta:       meta,
-		})
+		}); !ok {
+			log.Printf("telegram event dropped: queue unavailable for chat=%s", chatID)
+		}
 	}
 	return nil
+}
+
+func (c *Channel) handleCallbackQuery(ctx context.Context, eventBus *bus.Bus, query callbackQuery) {
+	cmd, ok := telegramApprovalCommandFromCallbackData(query.Data)
+	if !ok || query.Message.Chat.ID == 0 {
+		_ = c.answerCallbackQuery(ctx, query.ID, "That approval button is no longer valid.")
+		return
+	}
+	chatID := strconv.FormatInt(query.Message.Chat.ID, 10)
+	if !c.allowedChat(ctx, chatID) {
+		_ = c.answerCallbackQuery(ctx, query.ID, "This chat is not allowed to approve requests.")
+		return
+	}
+	fromID := strconv.FormatInt(query.From.ID, 10)
+	sessionKey := "telegram:" + chatID
+	if c.IsolatePeers && !strings.EqualFold(strings.TrimSpace(query.Message.Chat.Type), "private") {
+		sessionKey = sessionKey + ":" + fromID
+	}
+	meta := map[string]any{
+		"chat_id":             chatID,
+		"chat_type":           query.Message.Chat.Type,
+		"message_id":          query.Message.MessageID,
+		"reply_to_message_id": int64(query.Message.MessageID),
+		"username":            query.From.Username,
+		"callback_query_id":   query.ID,
+	}
+	if ok := eventBus.Publish(bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: sessionKey,
+		Channel:    "telegram",
+		From:       fromID,
+		Message:    cmd,
+		Meta:       meta,
+	}); !ok {
+		log.Printf("telegram callback event dropped: queue unavailable for chat=%s", chatID)
+		_ = c.answerCallbackQuery(ctx, query.ID, "OR3 is busy. Please try again.")
+		return
+	}
+	_ = c.answerCallbackQuery(ctx, query.ID, "Approval received.")
+}
+
+func telegramApprovalCommandFromCallbackData(data string) (string, bool) {
+	parts := strings.Split(strings.TrimSpace(data), ":")
+	if len(parts) != 4 || parts[0] != "or3" || parts[1] != "approval" {
+		return "", false
+	}
+	action := strings.ToLower(strings.TrimSpace(parts[2]))
+	if action != "approve" && action != "deny" {
+		return "", false
+	}
+	id, err := strconv.ParseInt(strings.TrimSpace(parts[3]), 10, 64)
+	if err != nil || id <= 0 {
+		return "", false
+	}
+	return "/" + action + " " + strconv.FormatInt(id, 10), true
+}
+
+func (c *Channel) answerCallbackQuery(ctx context.Context, callbackID string, text string) error {
+	callbackID = strings.TrimSpace(callbackID)
+	if callbackID == "" {
+		return nil
+	}
+	payload := map[string]any{"callback_query_id": callbackID}
+	if strings.TrimSpace(text) != "" {
+		payload["text"] = strings.TrimSpace(text)
+	}
+	return c.postJSON(ctx, "/answerCallbackQuery", payload, nil)
+}
+
+func (c *Channel) longPollTimeoutSeconds() int {
+	seconds := c.Config.PollSeconds
+	if seconds <= 0 {
+		return 30
+	}
+	if seconds < 1 {
+		return 1
+	}
+	if seconds > 50 {
+		return 50
+	}
+	return seconds
 }
 
 func (c *Channel) allowedChat(ctx context.Context, chatID string) bool {
@@ -614,8 +707,9 @@ type apiEnvelope struct {
 }
 
 type update struct {
-	UpdateID int64          `json:"update_id"`
-	Message  inboundMessage `json:"message"`
+	UpdateID      int64          `json:"update_id"`
+	Message       inboundMessage `json:"message"`
+	CallbackQuery callbackQuery  `json:"callback_query"`
 }
 
 type inboundMessage struct {
@@ -659,7 +753,43 @@ type inboundMessage struct {
 	} `json:"document"`
 }
 
+type callbackQuery struct {
+	ID   string `json:"id"`
+	Data string `json:"data"`
+	From struct {
+		ID       int64  `json:"id"`
+		Username string `json:"username"`
+	} `json:"from"`
+	Message inboundMessage `json:"message"`
+}
+
 type fileInfo struct {
 	FilePath string `json:"file_path"`
 	FileSize int64  `json:"file_size"`
+}
+
+var telegramApprovalCommandRE = regexp.MustCompile(`(?i)/(?:approve|deny)\s+([0-9]+)`)
+
+func approvalRequestIDFromText(text string) int64 {
+	matches := telegramApprovalCommandRE.FindStringSubmatch(text)
+	if len(matches) < 2 {
+		return 0
+	}
+	id, err := strconv.ParseInt(matches[1], 10, 64)
+	if err != nil || id <= 0 {
+		return 0
+	}
+	return id
+}
+
+func telegramApprovalReplyMarkup(requestID int64) map[string]any {
+	id := strconv.FormatInt(requestID, 10)
+	return map[string]any{
+		"inline_keyboard": [][]map[string]string{
+			{
+				{"text": "Approve", "callback_data": "or3:approval:approve:" + id},
+				{"text": "Deny", "callback_data": "or3:approval:deny:" + id},
+			},
+		},
+	}
 }

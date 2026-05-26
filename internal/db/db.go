@@ -28,7 +28,7 @@ type DB struct {
 
 // Open opens path, configures both SQLite drivers, and runs migrations.
 func Open(path string) (*DB, error) {
-	primaryDSN := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)", path)
+	primaryDSN := sqliteFileURI(path, "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)")
 	s, err := sql.Open("sqlite", primaryDSN)
 	if err != nil {
 		return nil, err
@@ -37,7 +37,7 @@ func Open(path string) (*DB, error) {
 	s.SetMaxIdleConns(4)
 
 	sqliteVecAutoOnce.Do(sqlite_vec.Auto)
-	vecDSN := fmt.Sprintf("file:%s?_busy_timeout=5000&_journal=WAL&_sync=NORMAL&_fk=1", path)
+	vecDSN := sqliteFileURI(path, "_busy_timeout=5000&_journal=WAL&_sync=NORMAL&_fk=1")
 	vec, err := sql.Open("sqlite3", vecDSN)
 	if err != nil {
 		_ = s.Close()
@@ -262,6 +262,61 @@ func (d *DB) migrate(ctx context.Context) error {
 			created_at INTEGER NOT NULL
 		);`,
 		`CREATE INDEX IF NOT EXISTS audit_events_created_at ON audit_events(created_at);`,
+		`CREATE TABLE IF NOT EXISTS settings_change_plans(
+			id TEXT PRIMARY KEY,
+			status TEXT NOT NULL,
+			conversation_id TEXT NOT NULL DEFAULT '',
+			accepted_card_id TEXT NOT NULL DEFAULT '',
+			created_by TEXT NOT NULL DEFAULT '',
+			plan_json TEXT NOT NULL,
+			approval_json TEXT NOT NULL DEFAULT '{}',
+			live_reload_json TEXT NOT NULL DEFAULT '[]',
+			rollback_id TEXT NOT NULL DEFAULT '',
+			post_check_pending INTEGER NOT NULL DEFAULT 0,
+			error_text TEXT NOT NULL DEFAULT '',
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			applied_at INTEGER NOT NULL DEFAULT 0
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_settings_change_plans_status_updated_at ON settings_change_plans(status, updated_at DESC);`,
+		`CREATE TABLE IF NOT EXISTS doctor_checkpoints(
+			id TEXT PRIMARY KEY,
+			plan_id TEXT NOT NULL DEFAULT '',
+			conversation_id TEXT NOT NULL DEFAULT '',
+			accepted_card_id TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL,
+			checks_json TEXT NOT NULL DEFAULT '[]',
+			results_json TEXT NOT NULL DEFAULT '[]',
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			FOREIGN KEY(plan_id) REFERENCES settings_change_plans(id) ON DELETE CASCADE
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_doctor_checkpoints_plan_status ON doctor_checkpoints(plan_id, status, updated_at DESC);`,
+		`CREATE TABLE IF NOT EXISTS settings_change_rollbacks(
+			id TEXT PRIMARY KEY,
+			plan_id TEXT NOT NULL,
+			status TEXT NOT NULL,
+			rollback_json TEXT NOT NULL,
+			changes_json TEXT NOT NULL DEFAULT '[]',
+			error_text TEXT NOT NULL DEFAULT '',
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			applied_at INTEGER NOT NULL DEFAULT 0,
+			FOREIGN KEY(plan_id) REFERENCES settings_change_plans(id) ON DELETE CASCADE
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_settings_change_rollbacks_plan_created_at ON settings_change_rollbacks(plan_id, created_at DESC);`,
+		`CREATE TABLE IF NOT EXISTS diagnostic_log_events(
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			source TEXT NOT NULL,
+			level TEXT NOT NULL,
+			correlation_id TEXT NOT NULL DEFAULT '',
+			event_type TEXT NOT NULL DEFAULT '',
+			payload_json TEXT NOT NULL DEFAULT '{}',
+			size_bytes INTEGER NOT NULL DEFAULT 0,
+			created_at INTEGER NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_diagnostic_log_events_source_created_at ON diagnostic_log_events(source, created_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_diagnostic_log_events_correlation_id ON diagnostic_log_events(correlation_id, created_at DESC);`,
 		`CREATE TABLE IF NOT EXISTS paired_devices(
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			device_id TEXT NOT NULL UNIQUE,
@@ -485,6 +540,7 @@ func (d *DB) migrate(ctx context.Context) error {
 			subject_json TEXT NOT NULL,
 			requester_agent_id TEXT NOT NULL DEFAULT '',
 			requester_session_id TEXT NOT NULL DEFAULT '',
+			requester_context_json TEXT NOT NULL DEFAULT '{}',
 			execution_host_id TEXT NOT NULL,
 			status TEXT NOT NULL,
 			policy_mode TEXT NOT NULL,
@@ -707,6 +763,12 @@ func (d *DB) migrate(ctx context.Context) error {
 	if err := d.ensureSkillRunPlanColumns(ctx); err != nil {
 		return err
 	}
+	if err := d.ensureApprovalAllowlistMatchColumns(ctx); err != nil {
+		return err
+	}
+	if err := d.ensureApprovalRequestContextColumn(ctx); err != nil {
+		return err
+	}
 	if err := d.ensureMemoryVecIndexForExisting(ctx); err != nil {
 		return err
 	}
@@ -893,12 +955,62 @@ func (d *DB) RebuildMemoryVecIndexWithProfile(ctx context.Context, dims int, fin
 	return d.initMemoryVecIndex(ctx, dims, fingerprint, true)
 }
 
+func (d *DB) memoryVecTableExists(ctx context.Context) (bool, error) {
+	if d == nil || d.VecSQL == nil {
+		return false, nil
+	}
+	var count int
+	if err := d.VecSQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='memory_vec'`).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (d *DB) memoryVecIndexMatches(ctx context.Context, dims int, fingerprint string) (bool, error) {
+	if dims <= 0 {
+		return false, nil
+	}
+	exists, err := d.memoryVecTableExists(ctx)
+	if err != nil || !exists {
+		return false, err
+	}
+	existing, err := d.MemoryVectorDims(ctx)
+	if err != nil {
+		return false, err
+	}
+	if existing != dims {
+		return false, nil
+	}
+	haveFingerprint, err := d.MemoryVectorFingerprint(ctx)
+	if err != nil {
+		return false, err
+	}
+	wantFingerprint := strings.TrimSpace(fingerprint)
+	haveFingerprint = strings.TrimSpace(haveFingerprint)
+	if wantFingerprint == "" {
+		return true, nil
+	}
+	if haveFingerprint == "" {
+		return false, nil
+	}
+	return haveFingerprint == wantFingerprint, nil
+}
+
 func (d *DB) initMemoryVecIndex(ctx context.Context, dims int, fingerprint string, force bool) error {
 	if dims <= 0 {
 		return nil
 	}
 	if d == nil || d.VecSQL == nil {
 		return nil
+	}
+	if !force {
+		matches, err := d.memoryVecIndexMatches(ctx, dims, fingerprint)
+		if err != nil {
+			return err
+		}
+		if matches {
+			return nil
+		}
 	}
 	tx, err := d.VecSQL.BeginTx(ctx, nil)
 	if err != nil {
@@ -1027,6 +1139,8 @@ func (d *DB) ensureMemoryNotesMetaColumns(ctx context.Context) error {
 		{name: "supersedes_id", ddl: `ALTER TABLE memory_notes ADD COLUMN supersedes_id INTEGER`},
 		{name: "use_count", ddl: `ALTER TABLE memory_notes ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0`},
 		{name: "last_used_at", ddl: `ALTER TABLE memory_notes ADD COLUMN last_used_at INTEGER NOT NULL DEFAULT 0`},
+		{name: "vector_index_dirty", ddl: `ALTER TABLE memory_notes ADD COLUMN vector_index_dirty INTEGER NOT NULL DEFAULT 0`},
+		{name: "embedding_updated_at", ddl: `ALTER TABLE memory_notes ADD COLUMN embedding_updated_at INTEGER NOT NULL DEFAULT 0`},
 	}
 
 	for i := range cols {
@@ -1071,6 +1185,64 @@ func (d *DB) ensureMemoryNotesMetaColumns(ctx context.Context) error {
 		return err
 	}
 	_, err := d.SQL.ExecContext(ctx, `UPDATE memory_notes SET updated_at=created_at WHERE updated_at<=0`)
+	return err
+}
+
+func (d *DB) ensureApprovalAllowlistMatchColumns(ctx context.Context) error {
+	cols := []string{
+		`ALTER TABLE approval_allowlists ADD COLUMN scope_host_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE approval_allowlists ADD COLUMN scope_tool TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE approval_allowlists ADD COLUMN scope_profile TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE approval_allowlists ADD COLUMN scope_agent TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE approval_allowlists ADD COLUMN match_executable_path TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE approval_allowlists ADD COLUMN match_working_dir TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE approval_allowlists ADD COLUMN match_script_hash TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE approval_allowlists ADD COLUMN match_skill_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE approval_allowlists ADD COLUMN match_plan_hash TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE approval_allowlists ADD COLUMN match_runner_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE approval_allowlists ADD COLUMN match_target_path TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE approval_allowlists ADD COLUMN match_path_prefix TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE approval_allowlists ADD COLUMN match_fingerprint TEXT NOT NULL DEFAULT ''`,
+	}
+	colNames := []string{
+		"scope_host_id", "scope_tool", "scope_profile", "scope_agent",
+		"match_executable_path", "match_working_dir", "match_script_hash",
+		"match_skill_id", "match_plan_hash", "match_runner_id", "match_target_path", "match_path_prefix", "match_fingerprint",
+	}
+	for i, ddl := range cols {
+		has, err := d.tableHasColumn(ctx, "approval_allowlists", colNames[i])
+		if err != nil {
+			return err
+		}
+		if has {
+			continue
+		}
+		if _, err := d.SQL.ExecContext(ctx, ddl); err != nil {
+			return err
+		}
+	}
+	indexes := []string{
+		`CREATE UNIQUE INDEX IF NOT EXISTS approval_requests_active_pending_subject ON approval_requests(type, subject_hash, execution_host_id) WHERE status='pending'`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS approval_allowlists_active_fingerprint ON approval_allowlists(domain, match_fingerprint) WHERE disabled_at=0 AND match_fingerprint!=''`,
+		`CREATE INDEX IF NOT EXISTS approval_allowlists_match_lookup ON approval_allowlists(domain, disabled_at, expires_at, scope_host_id, scope_tool, match_executable_path, match_skill_id)`,
+	}
+	for _, stmt := range indexes {
+		if _, err := d.SQL.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *DB) ensureApprovalRequestContextColumn(ctx context.Context) error {
+	exists, err := d.tableHasColumn(ctx, "approval_requests", "requester_context_json")
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	_, err = d.SQL.ExecContext(ctx, `ALTER TABLE approval_requests ADD COLUMN requester_context_json TEXT NOT NULL DEFAULT '{}'`)
 	return err
 }
 

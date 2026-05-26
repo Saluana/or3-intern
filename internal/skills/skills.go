@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"or3-intern/internal/clawhub"
+	"or3-intern/internal/skilldiag"
 
 	"gopkg.in/yaml.v3"
 )
@@ -153,25 +154,28 @@ type SkillMeta struct {
 	CommandTool            string
 	CommandArgMode         string
 
-	Metadata         SkillRuntimeMeta
-	Permissions      SkillPermissions
-	AllowedTools     []string
-	PermissionState  string
-	PermissionNotes  []string
-	Publisher        string
-	Registry         string
-	InstalledVersion string
-	Modified         bool
-	ScanStatus       string
-	ScanFindings     []string
-	Key              string
-	Eligible         bool
-	Disabled         bool
-	Hidden           bool
-	Missing          []string
-	Unsupported      []string
-	ParseError       string
-	RuntimeEnv       map[string]string
+	Metadata               SkillRuntimeMeta
+	Permissions            SkillPermissions
+	AllowedTools           []string
+	PermissionState        string
+	PermissionNotes        []string
+	Publisher              string
+	Registry               string
+	InstalledVersion       string
+	Modified               bool
+	ScanStatus             string
+	ScanFindings           []string
+	Key                    string
+	Eligible               bool
+	Disabled               bool
+	Hidden                 bool
+	Missing                []string
+	Unsupported            []string
+	ParseError             string
+	RuntimeEnv             map[string]string
+	DiagnosticAvailable    bool
+	DiagnosticManifestPath string
+	DiagnosticError        string
 
 	sourcePriority int
 	rootOrder      int
@@ -443,6 +447,14 @@ func loadSkill(dir, path string, root Root, order int, opts LoadOptions) SkillMe
 	applyOriginMetadata(&meta)
 	applyEligibility(&meta, rawTop, body, entry, opts)
 	applyApprovalPolicy(&meta, opts.ApprovalPolicy)
+	if _, path, ok, err := skilldiag.LoadManifest(dir); err != nil {
+		meta.DiagnosticManifestPath = path
+		meta.DiagnosticError = err.Error()
+		meta.PermissionNotes = append(meta.PermissionNotes, "diagnostic manifest invalid: "+err.Error())
+	} else if ok {
+		meta.DiagnosticAvailable = true
+		meta.DiagnosticManifestPath = path
+	}
 	return meta
 }
 

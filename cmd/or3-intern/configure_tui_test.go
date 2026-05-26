@@ -62,7 +62,7 @@ func TestConfigureTUIFormNavigationScrollsLongSections(t *testing.T) {
 	if !strings.Contains(view, "↑ more above") {
 		t.Fatalf("expected upward scroll affordance, got %q", view)
 	}
-	if !strings.Contains(view, "Field 9/12") {
+	if !strings.Contains(view, "Field 9/13") {
 		t.Fatalf("expected updated field position hint, got %q", view)
 	}
 }

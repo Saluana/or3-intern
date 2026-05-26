@@ -259,8 +259,11 @@ func TestServiceEmbeddingStatusAndRebuild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetEmbeddingStatus: %v", err)
 	}
-	if status.Status != "ok" {
-		t.Fatalf("expected ok before rebuild, got %#v", status)
+	if status.Status != "ok" && status.Status != "degraded" {
+		t.Fatalf("expected ok or degraded before rebuild, got %#v", status)
+	}
+	if status.NoteCount != 1 {
+		t.Fatalf("expected noteCount=1, got %#v", status)
 	}
 	result, err := cp.RebuildEmbeddings(ctx, "memory")
 	if err != nil {

@@ -56,6 +56,7 @@ var rootHelpSections = []struct {
 		Title: "Operator tools",
 		Items: []helpItem{
 			{Name: "doctor", Description: "Advanced diagnostics; use `health` for normal checks"},
+			{Name: "access", Description: "Set simple Reader, Operator, or Admin access for channels"},
 			{Name: "capabilities", Description: "Inspect runtime posture, ingress policy, approvals, and profiles"},
 			{Name: "embeddings", Description: "Inspect or rebuild stored memory and doc embeddings after provider/model changes"},
 			{Name: "secrets", Description: "Manage encrypted secret references stored in SQLite"},
@@ -241,14 +242,23 @@ var helpTopics = map[string]helpCommand{
 		Examples: []string{"or3-intern embeddings status", "or3-intern embeddings rebuild memory", "or3-intern embeddings rebuild all"},
 	},
 	"secrets": {
-		Usage:   "or3-intern secrets <set|delete|list> ...",
+		Usage:   "or3-intern secrets <set|delete|list|check|export|migrate-config> ...",
 		Summary: "Manage encrypted secret references stored in SQLite.",
 		Subcommands: []helpItem{
-			{Name: "set <name> <value>", Description: "Store or replace a secret"},
-			{Name: "delete <name> [--force]", Description: "Delete a stored secret"},
-			{Name: "list", Description: "List stored secret names"},
+			{Name: "set <name> [--prompt | --stdin | <value>]", Description: "Store or replace a secret"},
+			{Name: "delete <name> [--force] [--internal]", Description: "Delete a stored secret"},
+			{Name: "list [--advanced]", Description: "List stored secret names"},
+			{Name: "check", Description: "Verify all secrets decrypt successfully"},
+			{Name: "export [--encrypted | --plaintext] [--force]", Description: "Export encrypted secrets by default; plaintext requires an explicit flag"},
+			{Name: "migrate-config [--dry-run] [--force]", Description: "Migrate plaintext config secrets to encrypted store"},
 		},
-		Examples: []string{"or3-intern secrets set provider.openai sk-...", "or3-intern secrets list"},
+		Examples: []string{
+			"or3-intern secrets set provider.openai --prompt",
+			"printf '%s' \"$TOKEN\" | or3-intern secrets set provider.openai --stdin",
+			"or3-intern secrets list",
+			"or3-intern secrets check",
+			"or3-intern secrets migrate-config --dry-run",
+		},
 	},
 	"audit": {
 		Usage:       "or3-intern audit [verify]",

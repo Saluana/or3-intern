@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -45,6 +46,18 @@ func (t registryProbeTool) Execute(ctx context.Context, _ map[string]any) (strin
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+type sessionEchoTool struct {
+	name string
+}
+
+func (t sessionEchoTool) Name() string               { return t.name }
+func (t sessionEchoTool) Description() string        { return t.name }
+func (t sessionEchoTool) Parameters() map[string]any { return map[string]any{} }
+func (t sessionEchoTool) Schema() map[string]any     { return map[string]any{} }
+func (t sessionEchoTool) Execute(ctx context.Context, _ map[string]any) (string, error) {
+	return "session:" + tools.SessionFromContext(ctx), nil
+}
 
 type replayLifecycleObserver struct {
 	events []agent.ToolLifecycleEvent
@@ -86,6 +99,82 @@ func TestReplayToolCall_UsesRestrictedRegistryContext(t *testing.T) {
 	}
 	if out != "ok" {
 		t.Fatalf("expected ok, got %q", out)
+	}
+}
+
+func TestRunTurn_UsesSystemPromptWithoutPersistingIt(t *testing.T) {
+	database, err := db.Open(filepath.Join(t.TempDir(), "service-app-prompt.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { database.Close() })
+
+	var captured providers.ChatCompletionRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("Decode provider request: %v", err)
+		}
+		_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)
+	}))
+	t.Cleanup(server.Close)
+
+	provider := providers.New(server.URL, "test-key", 10*time.Second)
+	provider.HTTP = server.Client()
+	runtime := &agent.Runtime{
+		DB:       database,
+		Provider: provider,
+		Model:    "gpt-4",
+		Tools:    tools.NewRegistry(),
+		Builder:  &agent.Builder{DB: database, HistoryMax: 10, Soul: "SOUL.bootstrap.marker"},
+	}
+	app := &ServiceApp{runtime: runtime}
+
+	err = app.RunTurn(context.Background(), TurnRequest{
+		SessionKey:   "doctor:test",
+		Message:      "visible user words",
+		SystemPrompt: "trusted doctor context secret-marker",
+	})
+	if err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+
+	foundPrompt := false
+	foundUser := false
+	systemCount := 0
+	for _, message := range captured.Messages {
+		content := fmt.Sprint(message.Content)
+		if message.Role == "system" {
+			systemCount++
+			if content == "trusted doctor context secret-marker" {
+				foundPrompt = true
+			}
+			if strings.Contains(content, "SOUL.bootstrap.marker") {
+				t.Fatalf("expected trusted system prompt to replace chat bootstrap, got %#v", captured.Messages)
+			}
+		}
+		if message.Role == "user" && content == "visible user words" {
+			foundUser = true
+		}
+	}
+	if !foundPrompt || !foundUser {
+		t.Fatalf("expected provider request to include trusted system prompt and visible user text, got %#v", captured.Messages)
+	}
+	if systemCount != 1 {
+		t.Fatalf("expected exactly one system message for trusted doctor prompt, got %d in %#v", systemCount, captured.Messages)
+	}
+
+	page, err := database.ListChatMessages(context.Background(), "doctor:test", 0, 10)
+	if err != nil {
+		t.Fatalf("ListChatMessages: %v", err)
+	}
+	if len(page.Messages) == 0 || page.Messages[0].Role != "user" || page.Messages[0].Content != "visible user words" {
+		t.Fatalf("expected visible user message persisted, got %#v", page.Messages)
+	}
+	for _, message := range page.Messages {
+		if strings.Contains(message.Content, "secret-marker") {
+			t.Fatalf("trusted system prompt leaked into persisted messages: %#v", page.Messages)
+		}
 	}
 }
 
@@ -358,6 +447,99 @@ func TestResumeApprovedRequest_ReplaysWithOriginalApprovalSubjectContext(t *test
 	}
 	if providerCalls != 1 {
 		t.Fatalf("expected continuation provider call after approved replay, got %d", providerCalls)
+	}
+}
+
+func TestResumeApprovedRequest_ReplaysVisibleConversationWithLinkedApprovalScope(t *testing.T) {
+	database, err := db.Open(filepath.Join(t.TempDir(), "service-app-linked-scope.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { database.Close() })
+
+	const scopeSession = "cli:default"
+	const conversationSession = "telegram:123"
+	const argsJSON = `{}`
+	toolCall := providers.ToolCall{
+		ID:   "tc-linked-scope",
+		Type: "function",
+		Function: struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		}{Name: "resume_probe", Arguments: argsJSON},
+	}
+	if _, err := database.AppendMessage(context.Background(), conversationSession, "user", "run it", nil); err != nil {
+		t.Fatalf("AppendMessage user: %v", err)
+	}
+	if _, err := database.AppendMessage(context.Background(), conversationSession, "assistant", "", map[string]any{"tool_calls": []providers.ToolCall{toolCall}}); err != nil {
+		t.Fatalf("AppendMessage assistant: %v", err)
+	}
+	blocked := tools.EncodeToolFailure("resume_probe", nil, "", &tools.ApprovalRequiredError{ToolName: "resume_probe", RequestID: 187})
+	if _, err := database.AppendMessage(context.Background(), conversationSession, "tool", blocked, map[string]any{"tool_call_id": "tc-linked-scope"}); err != nil {
+		t.Fatalf("AppendMessage tool: %v", err)
+	}
+
+	var sawReplayToolResult bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		var req providers.ChatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("Decode: %v", err)
+		}
+		for _, msg := range req.Messages {
+			if msg.Role == "tool" && strings.Contains(fmt.Sprint(msg.Content), "session:"+scopeSession) {
+				sawReplayToolResult = true
+			}
+		}
+		_, _ = fmt.Fprintln(w, `{"choices":[{"message":{"role":"assistant","content":"telegram continued"}}]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	provider := providers.New(srv.URL, "test-key", 10*time.Second)
+	provider.HTTP = srv.Client()
+	registry := tools.NewRegistry()
+	registry.Register(sessionEchoTool{name: "resume_probe"})
+	runtime := &agent.Runtime{
+		DB:       database,
+		Provider: provider,
+		Model:    "gpt-4",
+		Tools:    registry,
+		Builder:  &agent.Builder{DB: database, HistoryMax: 20},
+	}
+	app := &ServiceApp{runtime: runtime}
+
+	_, err = app.ResumeApprovedRequest(context.Background(), ResumeApprovedRequest{
+		IssuedApproval: approval.IssuedApproval{
+			Request: db.ApprovalRequestRecord{
+				ID:                   187,
+				Type:                 string(approval.SubjectExec),
+				RequesterSessionID:   scopeSession,
+				RequesterContextJSON: approval.MarshalRequesterContext(approval.RequesterContext{Channel: "telegram", SessionKey: conversationSession, From: "123", ReplyTarget: "123"}),
+			},
+			Token: "approved-token",
+		},
+		Capability: tools.CapabilitySafe,
+	})
+	if err != nil {
+		t.Fatalf("ResumeApprovedRequest: %v", err)
+	}
+	if !sawReplayToolResult {
+		t.Fatal("expected continuation prompt to include replayed tool result from approval scope")
+	}
+	pp, _, err := runtime.Builder.BuildWithOptions(context.Background(), agent.BuildOptions{SessionKey: conversationSession})
+	if err != nil {
+		t.Fatalf("BuildWithOptions: %v", err)
+	}
+	last := pp.History[len(pp.History)-1]
+	if last.Role != "assistant" || fmt.Sprint(last.Content) != "telegram continued" {
+		t.Fatalf("expected Telegram conversation to receive continuation, got %#v", last)
+	}
+	scopeMessages, err := database.GetLastMessages(context.Background(), scopeSession, 10)
+	if err != nil {
+		t.Fatalf("GetLastMessages scope: %v", err)
+	}
+	if len(scopeMessages) != 0 {
+		t.Fatalf("expected hidden scope session not to receive replay messages, got %#v", scopeMessages)
 	}
 }
 

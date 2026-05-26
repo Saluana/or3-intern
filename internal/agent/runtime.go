@@ -56,6 +56,7 @@ type Runtime struct {
 	Tools                      *tools.Registry
 	Hardening                  config.HardeningConfig
 	AccessProfiles             config.AccessProfilesConfig
+	WorkspaceDir               string
 	Builder                    *Builder
 	Artifacts                  *artifacts.Store
 	MaxToolBytes               int
@@ -63,6 +64,7 @@ type Runtime struct {
 	MaxToolLoopsExceededAction config.QuotaExceededAction
 	ToolPreviewBytes           int
 	DynamicToolExposure        bool
+	EnforceActivePlan          bool
 	Audit                      *security.AuditLogger
 	ApprovalBroker             *approval.Broker
 	ContextManager             config.ContextManagerConfig
@@ -177,14 +179,15 @@ func (r *Runtime) turn(ctx context.Context, ev bus.Event) error {
 	}
 	r.ensureSessionScope(ctx, ev)
 
-	msgID, err := r.DB.AppendMessage(ctx, ev.SessionKey, "user", ev.Message, map[string]any{
-		"channel": ev.Channel, "from": ev.From, "meta": ev.Meta,
-	})
+	msgID, err := r.DB.AppendMessage(ctx, ev.SessionKey, "user", ev.Message, storableTurnPayload(ev.Channel, ev.From, ev.Meta))
 	if err != nil {
 		return err
 	}
 	defer r.syncExternalChannelChatSessionMeta(ctx, ev)
 	if handled, err := r.handleTurnPreExecution(ctx, ev, msgID); handled || err != nil {
+		if handled && err == nil {
+			r.cleanupActiveTurnTask(ctx, ev.SessionKey)
+		}
 		return err
 	}
 
@@ -224,7 +227,7 @@ func (r *Runtime) handleTurnPreExecution(ctx context.Context, ev bus.Event, msgI
 		return handled, err
 	}
 	if ev.Type == bus.EventUserMessage {
-		r.ensureTaskCardForTurn(ctx, ev)
+		r.ensureTaskCardForTurn(ctx, ev, msgID)
 	}
 	return false, nil
 }
@@ -234,15 +237,23 @@ func (r *Runtime) handleTurnExecution(ctx context.Context, ev bus.Event, msgID i
 		return fmt.Errorf("runtime builder not configured")
 	}
 	messages, err := r.BuildPromptSnapshotWithOptions(ctx, BuildOptions{
-		SessionKey:  ev.SessionKey,
-		UserMessage: ev.Message,
-		Autonomous:  isAutonomousEvent(ev.Type),
-		EventMeta:   cloneMap(ev.Meta),
+		SessionKey:      ev.SessionKey,
+		UserMessage:     ev.Message,
+		UserMessageID:   msgID,
+		TurnAttachments: chatAttachmentsFromMeta(ev.Meta),
+		Autonomous:      isAutonomousEvent(ev.Type),
+		EventMeta:       cloneMap(ev.Meta),
 	})
 	if err != nil {
 		return err
 	}
-	finalText, streamed, err := r.executeConversation(ctx, ev.Type, ev.SessionKey, messages, r.effectiveTools(ctx, r.Tools), ev.Channel, replyTarget, replyMeta)
+	turnCtx := ContextWithTurnState(ctx, TurnState{
+		SessionKey:    ev.SessionKey,
+		UserMessageID: msgID,
+		UserMessage:   ev.Message,
+	})
+	turnCtx = tools.ContextWithDeliveryFrom(turnCtx, ev.From)
+	finalText, streamed, err := r.executeConversation(turnCtx, ev.Type, ev.SessionKey, messages, r.effectiveTools(turnCtx, r.Tools), ev.Channel, replyTarget, replyMeta)
 	if err != nil {
 		var approvalErr *tools.ApprovalRequiredError
 		if errors.As(err, &approvalErr) && strings.TrimSpace(finalText) != "" {
@@ -255,6 +266,7 @@ func (r *Runtime) handleTurnExecution(ctx context.Context, ev bus.Event, msgID i
 }
 
 func (r *Runtime) handleTurnPostCleanup(ctx context.Context, ev bus.Event) {
+	r.cleanupActiveTurnTask(ctx, ev.SessionKey)
 	if !r.DisableRollingConsolidation && r.Consolidator != nil && r.Builder != nil && r.ConsolidationScheduler != nil {
 		r.ConsolidationScheduler.Trigger(ev.SessionKey)
 	} else if !r.DisableRollingConsolidation && r.Consolidator != nil && r.Builder != nil {
@@ -337,7 +349,8 @@ func (r *Runtime) handleExplicitSkillInvocation(ctx context.Context, ev bus.Even
 		seeded = append(seeded, providers.ChatMessage{Role: "system", Content: seed})
 		seeded = append(seeded, providers.ChatMessage{Role: "user", Content: promptInput})
 	}
-	runCtx := tools.ContextWithEnv(ctx, r.skillRunEnvFor(skill.Name))
+	runCtx := tools.ContextWithDeliveryFrom(ctx, ev.From)
+	runCtx = tools.ContextWithEnv(runCtx, r.skillRunEnvFor(skill.Name))
 	runCtx = tools.ContextWithSkillPolicy(runCtx, skillPolicyForSkill(skill))
 	finalText, streamed, err := r.executeConversation(runCtx, ev.Type, ev.SessionKey, seeded, r.effectiveTools(runCtx, r.Tools), ev.Channel, replyTarget, replyMeta)
 	if err != nil {
@@ -359,7 +372,9 @@ func (r *Runtime) dispatchExplicitSkillTool(ctx context.Context, ev bus.Event, s
 	}
 	toolCtx := tools.ContextWithSession(ctx, scopeKey)
 	toolCtx = tools.ContextWithDelivery(toolCtx, ev.Channel, deliveryTarget(ev))
+	toolCtx = tools.ContextWithDeliveryFrom(toolCtx, ev.From)
 	toolCtx = tools.ContextWithDeliveryMeta(toolCtx, channels.ReplyMeta(ev.Meta))
+	toolCtx = tools.ContextWithApprovalRequesterContextForSession(toolCtx, ev.SessionKey)
 	toolCtx = tools.ContextWithEnv(toolCtx, r.skillRunEnvFor(skill.Name))
 	toolCtx = tools.ContextWithSkillPolicy(toolCtx, skillPolicyForSkill(skill))
 	toolCtx = r.contextWithTrustedToolAccess(toolCtx, ev)
@@ -414,7 +429,7 @@ func (r *Runtime) BuildPromptSnapshot(ctx context.Context, sessionKey string, us
 	if err != nil {
 		return nil, err
 	}
-	messages := append([]providers.ChatMessage{}, pp.System...)
+	messages := promptSnapshotSystemMessages(ctx, pp.System)
 	messages = append(messages, pp.History...)
 	if len(pp.History) == 0 || pp.History[len(pp.History)-1].Role != "user" {
 		messages = append(messages, providers.ChatMessage{Role: "user", Content: userMessage})
@@ -431,12 +446,25 @@ func (r *Runtime) BuildPromptSnapshotWithOptions(ctx context.Context, opts Build
 	if err != nil {
 		return nil, err
 	}
-	messages := append([]providers.ChatMessage{}, pp.System...)
+	messages := promptSnapshotSystemMessages(ctx, pp.System)
 	messages = append(messages, pp.History...)
 	if len(pp.History) == 0 || pp.History[len(pp.History)-1].Role != "user" {
-		messages = append(messages, providers.ChatMessage{Role: "user", Content: opts.UserMessage})
+		visionBudget := newVisionBudget()
+		var content any = opts.UserMessage
+		if r.Builder != nil {
+			atts := mergeTurnAttachments(opts.TurnAttachments, opts.EventMeta)
+			content = r.Builder.buildUserContent(ctx, opts.UserMessage, chatAttachmentsToArtifactAttachments(atts), visionBudget)
+		}
+		messages = append(messages, providers.ChatMessage{Role: "user", Content: content})
 	}
 	return messages, nil
+}
+
+func promptSnapshotSystemMessages(ctx context.Context, bootstrap []providers.ChatMessage) []providers.ChatMessage {
+	if prompt := trustedSystemPromptFromContext(ctx); prompt != "" {
+		return []providers.ChatMessage{{Role: "system", Content: prompt}}
+	}
+	return append([]providers.ChatMessage{}, bootstrap...)
 }
 
 // RunBackground executes a background task without auto-persisting a user event.
@@ -538,7 +566,11 @@ func (r *Runtime) compactSessionContextWithModel(ctx context.Context, sessionKey
 	if proposal.Compaction == nil || proposal.Compaction.CompactThroughMessageID <= existingCutoff {
 		return "Context prune skipped. The model found no additional context that was safe to compact.", nil
 	}
-	resolvedCutoff, cutoffAdjusted, err := normalizeCompactionCutoff(proposal.Compaction.CompactThroughMessageID, input.Messages)
+	protectedMin := int64(0)
+	if card, ok, err := loadTaskCard(ctx, r.DB, sessionKey); err == nil && ok {
+		protectedMin = protectedCompactionMinMessageID(card.Metadata, 0)
+	}
+	resolvedCutoff, cutoffAdjusted, err := enforceProtectedCompactionCutoff(proposal.Compaction.CompactThroughMessageID, input.Messages, protectedMin)
 	if err != nil {
 		return "", err
 	}
@@ -667,6 +699,28 @@ func normalizeCompactionCutoff(cutoff int64, messages []contextManagerMessage) (
 	return 0, false, fmt.Errorf("compaction cutoff %d was not in the provided context window", cutoff)
 }
 
+func enforceProtectedCompactionCutoff(cutoff int64, messages []contextManagerMessage, protectedMinMessageID int64) (int64, bool, error) {
+	resolved, adjusted, err := normalizeCompactionCutoff(cutoff, messages)
+	if err != nil {
+		return 0, false, err
+	}
+	if protectedMinMessageID <= 0 {
+		return resolved, adjusted, nil
+	}
+	maxSafe := protectedMinMessageID - 1
+	if maxSafe <= 0 {
+		return 0, true, nil
+	}
+	if resolved <= maxSafe {
+		return resolved, adjusted, nil
+	}
+	clamped, clampAdjusted, err := normalizeCompactionCutoff(maxSafe, messages)
+	if err != nil {
+		return 0, false, fmt.Errorf("compaction cutoff %d would remove protected turn/plan context", cutoff)
+	}
+	return clamped, adjusted || clampAdjusted, nil
+}
+
 func nonEmptyLabel(value, fallbackValue string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -675,7 +729,7 @@ func nonEmptyLabel(value, fallbackValue string) string {
 	return value
 }
 
-func (r *Runtime) ensureTaskCardForTurn(ctx context.Context, ev bus.Event) {
+func (r *Runtime) ensureTaskCardForTurn(ctx context.Context, ev bus.Event, msgID int64) {
 	if r.DB == nil || r.Builder == nil || r.Builder.DisableTaskCard || strings.TrimSpace(ev.SessionKey) == "" {
 		return
 	}
@@ -690,6 +744,11 @@ func (r *Runtime) ensureTaskCardForTurn(ctx context.Context, ev bus.Event) {
 	card, ok, _ := loadTaskCard(ctx, r.DB, ev.SessionKey)
 	if !ok || strings.TrimSpace(card.Goal) == "" {
 		card.Goal = oneLine(message, 240)
+	}
+	maybeReplaceStaleActivePlan(&card.Metadata, message, msgID)
+	card.Metadata.CurrentRequest = oneLine(message, maxPlanNoteChars)
+	if msgID > 0 {
+		card.Metadata.CurrentRequestMessageID = msgID
 	}
 	card.Status = "active"
 	if err := saveTaskCard(ctx, r.DB, ev.SessionKey, scopeKey, card); err != nil {

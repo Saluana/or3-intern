@@ -349,6 +349,9 @@ func (o JobObserver) OnToolLifecycle(_ context.Context, event ToolLifecycleEvent
 	if event.PublicCode != "" {
 		data["public_code"] = event.PublicCode
 	}
+	if event.Status == "failed" {
+		data["error"] = firstNonEmptyString(event.ResultPreview, event.Result, event.PublicCode, "tool failed")
+	}
 	o.registry.Publish(o.jobID, eventType, data)
 }
 

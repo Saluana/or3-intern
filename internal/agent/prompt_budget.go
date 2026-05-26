@@ -44,13 +44,16 @@ type ContextSection struct {
 }
 
 type ContextPacket struct {
-	StableSections   []ContextSection
-	VolatileSections []ContextSection
-	RecentHistory    []providers.ChatMessage
-	OutputReserve    int
-	MaxInputTokens   int
-	SafetyMargin     int
-	Budget           BudgetReport
+	StaticTierSections  []ContextSection
+	SessionTierSections []ContextSection
+	StableSections      []ContextSection
+	VolatileSections    []ContextSection
+	RecentHistory       []providers.ChatMessage
+	OutputReserve       int
+	MaxInputTokens      int
+	SafetyMargin        int
+	Budget              BudgetReport
+	CacheDiagnostics    PromptCacheDiagnostics
 }
 
 type SectionUsage struct {
@@ -73,6 +76,7 @@ type ContextSectionBudgets struct {
 	SoulIdentity     int
 	ToolPolicy       int
 	ActiveTaskCard   int
+	CurrentTurn      int
 	PinnedMemory     int
 	MemoryDigest     int
 	RecentHistory    int
@@ -82,11 +86,14 @@ type ContextSectionBudgets struct {
 }
 
 type systemPromptSection struct {
-	Title     string
-	Text      string
-	Protected bool
-	TokenCap  int
-	MinTokens int
+	Title       string
+	XMLTag      string
+	Text        string
+	Protected   bool
+	CacheClass  string
+	Attrs       envelopeAttrs
+	TokenCap    int
+	MinTokens   int
 }
 
 const (
@@ -136,7 +143,7 @@ func pressureStateForBudget(used, max int) string {
 	}
 }
 
-func (b *Builder) buildContextPacket(pinnedText, digestText, memText, identityText, staticMemoryText, heartbeatText, structuredContextText, docContextText, workspaceContextText string) ContextPacket {
+func (b *Builder) buildContextPacket(input turnPromptInput) ContextPacket {
 	maxEach := b.BootstrapMaxChars
 	if maxEach <= 0 {
 		maxEach = defaultBootstrapMaxChars
@@ -146,12 +153,16 @@ func (b *Builder) buildContextPacket(pinnedText, digestText, memText, identityTe
 		OutputReserve:  b.contextOutputReserveTokens(),
 		SafetyMargin:   b.contextSafetyMarginTokens(),
 	}
-	for _, section := range b.stablePromptSections(pinnedText, digestText, memText, identityText, staticMemoryText, docContextText, workspaceContextText) {
-		packet.StableSections = append(packet.StableSections, budgetSection(section.Title, section.Text, section.Protected, section.TokenCap, section.MinTokens, maxEach))
+	for _, section := range b.staticPromptSections(input.identityText) {
+		packet.StaticTierSections = append(packet.StaticTierSections, budgetSection(section.Title, section.Text, section.Protected, section.TokenCap, section.MinTokens, maxEach))
 	}
-	for _, section := range b.volatilePromptSections(heartbeatText, structuredContextText) {
+	for _, section := range b.sessionPromptSections(input.pinnedText, input.digestText, input.staticMemoryText) {
+		packet.SessionTierSections = append(packet.SessionTierSections, budgetSection(section.Title, section.Text, section.Protected, section.TokenCap, section.MinTokens, maxEach))
+	}
+	for _, section := range b.turnPromptSections(input) {
 		packet.VolatileSections = append(packet.VolatileSections, budgetSection(section.Title, section.Text, section.Protected, section.TokenCap, section.MinTokens, maxEach))
 	}
+	packet.StableSections = append(append([]ContextSection{}, packet.StaticTierSections...), packet.SessionTierSections...)
 	return packet
 }
 
@@ -219,46 +230,96 @@ func truncateTextToTokens(text string, maxTokens int) string {
 	return strings.TrimSpace(text[:maxChars]) + "\n...[truncated]"
 }
 
-func renderStablePrefix(p ContextPacket) string {
-	var out strings.Builder
-	out.WriteString("# System Prompt\n")
-	for _, s := range p.StableSections {
-		out.WriteString("\n## ")
-		out.WriteString(s.Name)
-		out.WriteString("\n")
-		out.WriteString(strings.TrimSpace(s.Text))
-		out.WriteString("\n")
+func renderStaticTier(p ContextPacket) string {
+	return renderTierSections(staticTierSections(p), 0)
+}
+
+func renderSessionTier(p ContextPacket) string {
+	return renderTierSections(sessionTierSections(p), 0)
+}
+
+func renderTurnTier(p ContextPacket) string {
+	return renderTierSections(turnTierSections(p), 0)
+}
+
+func staticTierSections(p ContextPacket) []systemPromptSection {
+	return contextSectionsToPromptSections(p.StaticTierSections)
+}
+
+func sessionTierSections(p ContextPacket) []systemPromptSection {
+	return contextSectionsToPromptSections(p.SessionTierSections)
+}
+
+func turnTierSections(p ContextPacket) []systemPromptSection {
+	return contextSectionsToPromptSections(p.VolatileSections)
+}
+
+func contextSectionsToPromptSections(sections []ContextSection) []systemPromptSection {
+	out := make([]systemPromptSection, 0, len(sections))
+	for _, section := range sections {
+		out = append(out, systemPromptSection{
+			Title:      section.Name,
+			XMLTag:     xmlTagFromLegacyTitle(section.Name),
+			Text:       section.Text,
+			Protected:  section.Protected,
+			CacheClass: cacheClassForSectionName(section.Name),
+			TokenCap:   section.TokenCap,
+			MinTokens:  section.MinTokens,
+		})
 	}
-	return strings.TrimSpace(out.String())
+	return out
+}
+
+func cacheClassForSectionName(name string) string {
+	switch strings.TrimSpace(name) {
+	case "SOUL.md", "Identity", "AGENTS.md", "TOOLS.md", "Skills Inventory":
+		return CacheClassStatic
+	case "Pinned Memory", "Memory Digest", "Static Memory":
+		return CacheClassSession
+	default:
+		return CacheClassTurn
+	}
+}
+
+func renderStablePrefix(p ContextPacket) string {
+	static := renderStaticTier(p)
+	session := renderSessionTier(p)
+	if static == "" {
+		return session
+	}
+	if session == "" {
+		return static
+	}
+	return strings.TrimSpace(static + "\n\n" + session)
 }
 
 func renderVolatileSuffix(p ContextPacket) string {
-	var out strings.Builder
-	for _, s := range p.VolatileSections {
-		out.WriteString("## ")
-		out.WriteString(s.Name)
-		out.WriteString("\n")
-		out.WriteString(strings.TrimSpace(s.Text))
-		out.WriteString("\n\n")
-	}
-	return strings.TrimSpace(out.String())
+	return renderTurnTier(p)
 }
 
-func renderProviderMessages(p ContextPacket, b *Builder) []providers.ChatMessage {
-	stable := renderStablePrefix(p)
-	volatile := renderVolatileSuffix(p)
+func renderProviderMessages(p *ContextPacket, b *Builder) []providers.ChatMessage {
+	static := renderStaticTier(*p)
+	session := renderSessionTier(*p)
+	turn := renderTurnTier(*p)
+	p.CacheDiagnostics = buildPromptCacheDiagnostics(static, session, turn)
 	var content any
 	if b != nil && b.Provider != nil && b.Provider.SupportsExplicitPromptCache() {
-		content = providers.BuildCacheAwareSystemContent(stable, volatile)
-	} else if strings.TrimSpace(volatile) == "" {
-		content = stable
+		content = providers.BuildCacheAwareTieredContent(static, session, turn)
 	} else {
-		content = strings.TrimSpace(stable + "\n\n" + volatile)
+		combined := renderStablePrefix(*p)
+		if strings.TrimSpace(turn) != "" {
+			if combined == "" {
+				combined = turn
+			} else {
+				combined = strings.TrimSpace(combined + "\n\n" + turn)
+			}
+		}
+		content = combined
 	}
 	return []providers.ChatMessage{{Role: "system", Content: content}}
 }
 
-func estimatePacketBudget(packet ContextPacket, b *Builder) BudgetReport {
+func estimatePacketBudget(packet *ContextPacket, b *Builder) BudgetReport {
 	sys := renderProviderMessages(packet, b)
 	systemTokens := estimateMessagesTokens(sys)
 	historyTokens := estimateMessagesTokens(packet.RecentHistory)

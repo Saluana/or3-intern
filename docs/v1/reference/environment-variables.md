@@ -13,7 +13,7 @@ Complete list of environment variables that OR3 Intern recognizes.
 | `AZURE_API_KEY` | Azure OpenAI API key |
 | `AZURE_ENDPOINT` | Azure endpoint URL |
 | `OR3_PROVIDER` | Provider name (openai, anthropic, google, azure) |
-| `OR3_MODEL` | Model name override |
+| `OR3_MODEL` | Default model for provider and chat/agents/subagents routing when those fields still use factory defaults (settings saved in or3-app are not overwritten) |
 
 ## Service
 

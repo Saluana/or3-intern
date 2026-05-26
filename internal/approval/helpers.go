@@ -1,6 +1,7 @@
 package approval
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -82,4 +83,18 @@ func randomDigits(length int) (string, error) {
 func hashBytes(raw string) []byte {
 	sum := sha256.Sum256([]byte(strings.TrimSpace(raw)))
 	return sum[:]
+}
+
+func (b *Broker) hashPairingCode(code string) []byte {
+	code = strings.TrimSpace(strings.ReplaceAll(code, "-", ""))
+	if code == "" {
+		return nil
+	}
+	if b == nil || len(b.SignKey) == 0 {
+		return hashBytes(code)
+	}
+	mac := hmac.New(sha256.New, b.SignKey)
+	_, _ = mac.Write([]byte("or3.pairing-code.v1\x00"))
+	_, _ = mac.Write([]byte(code))
+	return mac.Sum(nil)
 }

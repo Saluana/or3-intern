@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"log"
 	"mime"
 	"net/http"
 	"net/url"
@@ -174,14 +175,16 @@ func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
 		if len(attachments) > 0 {
 			meta["attachments"] = attachments
 		}
-		eventBus.Publish(bus.Event{
+		if ok := eventBus.Publish(bus.Event{
 			Type:       bus.EventUserMessage,
 			SessionKey: sessionKey,
 			Channel:    "whatsapp",
 			From:       msg.From,
 			Message:    content,
 			Meta:       meta,
-		})
+		}); !ok {
+			log.Printf("whatsapp event dropped: queue unavailable for target=%s from=%s", target, msg.From)
+		}
 	}
 }
 

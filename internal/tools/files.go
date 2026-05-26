@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 )
 
 type FileTool struct {
@@ -453,6 +454,77 @@ func (t *EditFile) Execute(ctx context.Context, params map[string]any) (string, 
 		return "", err
 	}
 	return "ok", nil
+}
+
+type DeleteFile struct{ FileTool }
+
+func (t *DeleteFile) Capability() CapabilityLevel { return CapabilityGuarded }
+func (t *DeleteFile) Name() string                { return "delete_file" }
+func (t *DeleteFile) Metadata() ToolMetadata      { return metadataForTool(t, ToolGroupWrite) }
+func (t *DeleteFile) Description() string {
+	return "Move a file inside the allowed write root into the workspace trash folder. This is guarded. Use it when the user asks to delete a file; it does not permanently remove directories or files outside the write root."
+}
+func (t *DeleteFile) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{
+		"path": map[string]any{"type": "string", "description": "Existing file path inside the allowed write root to move into .or3-trash."},
+	}, "required": []string{"path"}}
+}
+func (t *DeleteFile) Schema() map[string]any {
+	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
+}
+func (t *DeleteFile) Execute(ctx context.Context, params map[string]any) (string, error) {
+	_ = ctx
+	p, err := t.safeWritePath(fmt.Sprint(params["path"]))
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(p)
+	if err != nil {
+		return "", err
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("delete_file only deletes files, not directories: %s", p)
+	}
+	if err := t.validatePathInWriteRoot(p); err != nil {
+		return "", err
+	}
+	writeRoot := strings.TrimSpace(t.effectiveWriteRoot())
+	if writeRoot == "" {
+		writeRoot = filepath.Dir(p)
+	}
+	root, err := filepath.Abs(writeRoot)
+	if err != nil {
+		return "", err
+	}
+	root, err = CanonicalizeRoot(root)
+	if err != nil {
+		return "", err
+	}
+	trashRoot := filepath.Join(root, ".or3-trash")
+	rel, err := filepath.Rel(root, p)
+	if err != nil {
+		return "", err
+	}
+	if rel == ".or3-trash" || strings.HasPrefix(rel, ".or3-trash"+string(filepath.Separator)) {
+		return "", fmt.Errorf("refusing to delete files already inside workspace trash")
+	}
+	dest := filepath.Join(trashRoot, rel+"."+fmt.Sprint(time.Now().UnixNano()))
+	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
+		return "", err
+	}
+	if err := os.Rename(p, dest); err != nil {
+		return "", err
+	}
+	return EncodeToolResult(ToolResult{
+		Kind:    "delete_file",
+		OK:      true,
+		Summary: fmt.Sprintf("Moved %s to workspace trash", p),
+		Stats: map[string]any{
+			"path":       p,
+			"trash_path": dest,
+			"bytes":      info.Size(),
+		},
+	}), nil
 }
 
 type ListDir struct{ FileTool }

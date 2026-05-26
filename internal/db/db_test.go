@@ -391,6 +391,16 @@ func TestAppendMessage_WithPayload(t *testing.T) {
 	}
 }
 
+func TestAppendMessage_RejectsNonSerializablePayload(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	ch := make(chan int)
+	_, err := d.AppendMessage(ctx, "session1", "user", "hello", map[string]any{"bad": ch})
+	if err == nil {
+		t.Fatal("expected marshal error for non-serializable payload")
+	}
+}
+
 func TestAppendMessage_RollsBackWhenSessionUpdateFails(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
@@ -2479,6 +2489,147 @@ func TestRebuildMemoryVecIndexWithProfile_FiltersRowsByFingerprint(t *testing.T)
 	}
 }
 
+func TestSettingsChangePlanStoreRoundTrip(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	planJSON := `{"id":"scp_test_1","title":"Update provider model","summary":"Switch the default model","created_by":"tester","risk_level":"safe","user_facing_explanation":"Use a smaller chat model","changes":[{"config_path":"provider.model","section":"provider","field":"provider_model","operation":"set","old_value":{"value":"gpt-4.1"},"new_value":{"value":"gpt-4.1-mini"}}]}`
+	approvalJSON := `{"plan_id":"scp_test_1","approved":true,"approver":"tester","auth_method":"passkey"}`
+	record := SettingsChangePlanRecord{
+		ID:             "scp_test_1",
+		Status:         "validated",
+		ConversationID: "conv_1",
+		AcceptedCardID: "card_1",
+		CreatedBy:      "tester",
+		PlanJSON:       planJSON,
+		ApprovalJSON:   approvalJSON,
+		LiveReloadJSON: `["model_routing"]`,
+	}
+	if err := d.CreateSettingsChangePlan(ctx, record); err != nil {
+		t.Fatalf("CreateSettingsChangePlan: %v", err)
+	}
+
+	loaded, ok, err := d.GetSettingsChangePlan(ctx, record.ID)
+	if err != nil {
+		t.Fatalf("GetSettingsChangePlan: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected stored settings change plan")
+	}
+	if loaded.PlanJSON != planJSON {
+		t.Fatalf("loaded plan json = %q", loaded.PlanJSON)
+	}
+	if loaded.LiveReloadJSON != `["model_routing"]` {
+		t.Fatalf("loaded live reload json = %q", loaded.LiveReloadJSON)
+	}
+
+	rollback := SettingsChangeRollbackRecord{
+		ID:           "scr_1",
+		PlanID:       record.ID,
+		Status:       "available",
+		RollbackJSON: `{"available":true,"safe":true,"instructions":"Restore the prior provider model"}`,
+		ChangesJSON:  `[{"config_path":"provider.model","section":"provider","field":"provider_model","operation":"set"}]`,
+	}
+	if err := d.CreateSettingsChangeRollback(ctx, rollback); err != nil {
+		t.Fatalf("CreateSettingsChangeRollback: %v", err)
+	}
+	if err := d.UpdateSettingsChangePlanStatus(ctx, record.ID, "applied", rollback.ID, "", false, approvalJSON, `["model_routing"]`, NowMS()); err != nil {
+		t.Fatalf("UpdateSettingsChangePlanStatus: %v", err)
+	}
+
+	rollbacks, err := d.ListRecentSettingsChangeRollbacks(ctx, 5)
+	if err != nil {
+		t.Fatalf("ListRecentSettingsChangeRollbacks: %v", err)
+	}
+	if len(rollbacks) != 1 {
+		t.Fatalf("rollback count = %d", len(rollbacks))
+	}
+	if rollbacks[0].RollbackJSON != rollback.RollbackJSON {
+		t.Fatalf("rollback json = %q", rollbacks[0].RollbackJSON)
+	}
+
+	if err := d.CreateDoctorCheckpoint(ctx, DoctorCheckpointRecord{
+		ID:             "dcp_1",
+		PlanID:         record.ID,
+		ConversationID: "conv_1",
+		AcceptedCardID: "card_1",
+		Status:         "pending",
+		ChecksJSON:     `[{"id":"doctor","description":"Re-run doctor"}]`,
+		ResultsJSON:    `[{"check":"config.validate","status":"pass"}]`,
+	}); err != nil {
+		t.Fatalf("CreateDoctorCheckpoint: %v", err)
+	}
+	if err := d.UpdateDoctorCheckpoint(ctx, "dcp_1", "complete", `[{"check":"doctor.configure_post_save","status":"pass"}]`); err != nil {
+		t.Fatalf("UpdateDoctorCheckpoint: %v", err)
+	}
+}
+
+func TestDiagnosticLogEventPrunesBounded(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	for i := 0; i < 6; i++ {
+		payload := fmt.Sprintf(`{"index":%d,"message":"abcdefghijklmnopqrstuvwxyz"}`, i)
+		if err := d.AppendDiagnosticLogEvent(ctx, DiagnosticLogEvent{
+			Source:        "doctor",
+			Level:         "info",
+			CorrelationID: "corr-1",
+			EventType:     "doctor.log",
+			Payload:       []byte(payload),
+		}); err != nil {
+			t.Fatalf("AppendDiagnosticLogEvent(%d): %v", i, err)
+		}
+	}
+	if err := d.pruneDiagnosticLogEvents(ctx, 3, 0, 140); err != nil {
+		t.Fatalf("pruneDiagnosticLogEvents: %v", err)
+	}
+
+	items, err := d.QueryDiagnosticLogEvents(ctx, DiagnosticLogQuery{Source: "doctor", Limit: 10})
+	if err != nil {
+		t.Fatalf("QueryDiagnosticLogEvents: %v", err)
+	}
+	if len(items) == 0 || len(items) > 3 {
+		t.Fatalf("diagnostic log count = %d", len(items))
+	}
+	for _, item := range items {
+		if item.Source != "doctor" {
+			t.Fatalf("unexpected source = %q", item.Source)
+		}
+	}
+}
+
+func TestDiagnosticLogEventQueryBoundsAndPattern(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	now := NowMS()
+	events := []DiagnosticLogEvent{
+		{Source: "doctor", Level: "info", CorrelationID: "a", EventType: "doctor.start", Payload: []byte(`{"message":"ready"}`), CreatedAt: now - 3000},
+		{Source: "doctor", Level: "warn", CorrelationID: "b", EventType: "doctor.known_failure", Payload: []byte(`{"message":"connection refused"}`), CreatedAt: now - 2000},
+		{Source: "service", Level: "warn", CorrelationID: "c", EventType: "service.other", Payload: []byte(`{"message":"connection refused"}`), CreatedAt: now - 1000},
+	}
+	for _, event := range events {
+		if err := d.AppendDiagnosticLogEvent(ctx, event); err != nil {
+			t.Fatalf("AppendDiagnosticLogEvent: %v", err)
+		}
+	}
+
+	items, err := d.QueryDiagnosticLogEvents(ctx, DiagnosticLogQuery{
+		Source:      "doctor",
+		Level:       "warn",
+		EventType:   "doctor.known_failure",
+		Pattern:     "connection refused",
+		SinceUnixMS: now - 2500,
+		UntilUnixMS: now - 1500,
+		Limit:       10,
+	})
+	if err != nil {
+		t.Fatalf("QueryDiagnosticLogEvents: %v", err)
+	}
+	if len(items) != 1 || items[0].CorrelationID != "b" {
+		t.Fatalf("unexpected filtered diagnostic events: %#v", items)
+	}
+}
+
 func TestOpen_CreatesAgentCLIRunsTable(t *testing.T) {
 	d := openTestDB(t)
 	row := d.SQL.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='agent_cli_runs'`)
@@ -2888,29 +3039,74 @@ func TestSubagentAndAgentCLI_LifecycleTransitionsMatch(t *testing.T) {
 	}
 }
 
-func TestInsertMemoryNoteTyped_SucceedsWhenVecIndexFails(t *testing.T) {
+func TestOpen_SecondOpenDoesNotRebuildMemoryVec(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "vec_reopen.db")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	ctx := context.Background()
+	emb := make([]byte, 8)
+	if _, err := d.InsertMemoryNoteTyped(ctx, "sess", TypedNoteInput{
+		Text:      "vector note",
+		Embedding: emb,
+	}); err != nil {
+		t.Fatalf("InsertMemoryNoteTyped: %v", err)
+	}
+	if err := d.RebuildMemoryVecIndexWithDim(ctx, 2); err != nil {
+		t.Fatalf("RebuildMemoryVecIndexWithDim: %v", err)
+	}
+	var countAfterBuild int
+	if err := d.VecSQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_vec`).Scan(&countAfterBuild); err != nil {
+		t.Fatalf("count memory_vec after build: %v", err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	d, err = Open(path)
+	if err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	defer d.Close()
+	var countAfterReopen int
+	if err := d.VecSQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_vec`).Scan(&countAfterReopen); err != nil {
+		t.Fatalf("count memory_vec after reopen: %v", err)
+	}
+	if countAfterReopen != countAfterBuild {
+		t.Fatalf("expected memory_vec row count to stay %d after reopen, got %d", countAfterBuild, countAfterReopen)
+	}
+}
+
+func TestInsertMemoryNoteTyped_MarksDirtyWhenVectorUpsertFails(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
-	// Insert with a valid embedding that has a dim mismatch against any existing index.
-	// The note row should be created; the vector failure is swallowed.
-	emb := make([]byte, 16) // 4 floats
+	if _, err := d.InsertMemoryNoteTyped(ctx, "sess", TypedNoteInput{
+		Text:      "first",
+		Embedding: make([]byte, 8),
+	}); err != nil {
+		t.Fatalf("InsertMemoryNoteTyped first: %v", err)
+	}
+	if _, err := d.VecSQL.ExecContext(ctx, `DROP TABLE memory_vec`); err != nil {
+		t.Fatalf("drop memory_vec: %v", err)
+	}
 	id, err := d.InsertMemoryNoteTyped(ctx, "sess", TypedNoteInput{
-		Text:      "note with no index",
-		Embedding: emb,
+		Text:      "second",
+		Embedding: make([]byte, 8),
 	})
-	if err != nil {
-		t.Fatalf("InsertMemoryNoteTyped should succeed even if vec index fails: %v", err)
+	if err == nil {
+		t.Fatal("expected vector upsert failure")
 	}
-	if id <= 0 {
-		t.Fatalf("expected positive note id, got %d", id)
+	if id != 0 {
+		t.Fatalf("expected zero id on failure, got %d", id)
 	}
-	// Verify the note row exists.
-	var text string
-	if err := d.SQL.QueryRowContext(ctx, `SELECT text FROM memory_notes WHERE id=?`, id).Scan(&text); err != nil {
-		t.Fatalf("note row missing after insert: %v", err)
+	var count int
+	if err := d.SQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_notes WHERE text='second'`).Scan(&count); err != nil {
+		t.Fatalf("count notes: %v", err)
 	}
-	if text != "note with no index" {
-		t.Fatalf("unexpected note text: %q", text)
+	if count != 0 {
+		t.Fatal("expected failed insert to roll back note row")
 	}
 }
 

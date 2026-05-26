@@ -933,6 +933,35 @@ func TestLoad_InvalidJSON(t *testing.T) {
 	}
 }
 
+func TestLoad_EnvOverrides_RespectsPersistedModel(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	cfg := Default()
+	cfg.Provider.Model = "deepseek/deepseek-v4-pro"
+	cfg.ModelRouting.Chat.Primary = ModelRef{Provider: "openrouter", Model: "deepseek/deepseek-v4-pro"}
+	cfg.ModelRouting.Agents.Primary = ModelRef{Provider: "openrouter", Model: "nvidia/nemotron-3-super-120b-a12b:free"}
+	b, _ := json.MarshalIndent(cfg, "", "  ")
+	mustWriteTestFile(t, path, b)
+
+	t.Setenv("OR3_MODEL", "nvidia/nemotron-3-super-120b-a12b:free")
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.Provider.Model != "deepseek/deepseek-v4-pro" {
+		t.Fatalf("expected persisted provider model to win over OR3_MODEL, got %q", loaded.Provider.Model)
+	}
+	if loaded.ModelRouting.Chat.Primary.Model != "deepseek/deepseek-v4-pro" {
+		t.Fatalf("expected persisted chat model to win over OR3_MODEL, got %q", loaded.ModelRouting.Chat.Primary.Model)
+	}
+	if loaded.ModelRouting.Agents.Primary.Model != "nvidia/nemotron-3-super-120b-a12b:free" {
+		t.Fatalf("expected persisted agents model to remain, got %q", loaded.ModelRouting.Agents.Primary.Model)
+	}
+}
+
 func TestLoad_EnvOverrides(t *testing.T) {
 	clearConfigEnv(t)
 	dir := t.TempDir()

@@ -17,7 +17,9 @@ const (
 	defaultWorkspaceContextMaxResults   = 6
 	defaultWorkspaceContextMaxChars     = 1600
 	defaultWorkspaceContextScanLimit    = 200
+	defaultWorkspaceContextWalkLimit    = 4000
 	workspaceContextCacheTTL            = 5 * time.Second
+	workspaceContextCacheMaxEntries     = 32
 )
 
 type workspaceContextCacheKey struct {
@@ -142,6 +144,7 @@ func BuildWorkspaceContext(cfg WorkspaceContextConfig, query string) string {
 func getWorkspaceContextCache(key workspaceContextCacheKey, now time.Time) (string, bool) {
 	workspaceContextCache.mu.Lock()
 	defer workspaceContextCache.mu.Unlock()
+	sweepWorkspaceContextCacheLocked(now)
 	entry, ok := workspaceContextCache.entries[key]
 	if !ok {
 		return "", false
@@ -156,7 +159,19 @@ func getWorkspaceContextCache(key workspaceContextCacheKey, now time.Time) (stri
 func setWorkspaceContextCache(key workspaceContextCacheKey, text string, now time.Time) {
 	workspaceContextCache.mu.Lock()
 	defer workspaceContextCache.mu.Unlock()
+	sweepWorkspaceContextCacheLocked(now)
+	if len(workspaceContextCache.entries) >= workspaceContextCacheMaxEntries {
+		workspaceContextCache.entries = map[workspaceContextCacheKey]workspaceContextCacheEntry{}
+	}
 	workspaceContextCache.entries[key] = workspaceContextCacheEntry{text: text, expiresAt: now.Add(workspaceContextCacheTTL)}
+}
+
+func sweepWorkspaceContextCacheLocked(now time.Time) {
+	for key, entry := range workspaceContextCache.entries {
+		if !entry.expiresAt.After(now) {
+			delete(workspaceContextCache.entries, key)
+		}
+	}
 }
 
 func recentMemoryCandidates(root string, now time.Time, maxFileBytes int) []workspaceCandidate {
@@ -217,7 +232,8 @@ func recentMemoryCandidates(root string, now time.Time, maxFileBytes int) []work
 
 func relevantWorkspaceCandidates(root string, tokens []string, maxFileBytes, maxResults int, seen map[string]struct{}) []workspaceCandidate {
 	var candidates []workspaceCandidate
-	visited := 0
+	walked := 0
+	candidatesScanned := 0
 	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -236,15 +252,19 @@ func relevantWorkspaceCandidates(root string, tokens []string, maxFileBytes, max
 			}
 			return nil
 		}
-		if visited >= defaultWorkspaceContextScanLimit {
+		walked++
+		if walked >= defaultWorkspaceContextWalkLimit {
 			return fs.SkipAll
 		}
-		visited++
 		if _, exists := seen[path]; exists {
 			return nil
 		}
 		if !isWorkspaceContextFile(path) || isBootstrapWorkspaceFile(path) {
 			return nil
+		}
+		candidatesScanned++
+		if candidatesScanned > defaultWorkspaceContextScanLimit {
+			return fs.SkipAll
 		}
 		candidate, ok := workspaceFileCandidate(root, path, maxFileBytes, tokens)
 		if !ok || candidate.Score <= 0 {

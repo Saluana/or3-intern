@@ -29,7 +29,7 @@ func ApplyEnvOverrides(cfg *Config) {
 		cfg.Provider.APIKey = v
 		updateProviderProfile(cfg, inferProviderKey(cfg.Provider.APIBase), func(profile *ProviderProfileConfig) { profile.APIKey = v })
 	}
-	if v := os.Getenv("OR3_MODEL"); v != "" {
+	if v := os.Getenv("OR3_MODEL"); v != "" && shouldApplyEnvModelOverride(cfg) {
 		cfg.Provider.Model = v
 		cfg.ModelRouting.Chat.Primary.Model = v
 		cfg.ModelRouting.Agents.Primary.Model = v
@@ -112,6 +112,30 @@ func ApplyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("OR3_RUNTIME_PROFILE"); v != "" {
 		cfg.RuntimeProfile = RuntimeProfile(strings.ToLower(strings.TrimSpace(v)))
 	}
+}
+
+// shouldApplyEnvModelOverride reports whether OR3_MODEL may replace persisted
+// model settings. Env is used to seed first-run defaults; once provider or
+// role routing differs from factory defaults (for example via or3-app settings),
+// the on-disk config wins across restarts.
+func shouldApplyEnvModelOverride(cfg *Config) bool {
+	if cfg == nil {
+		return false
+	}
+	defaults := Default()
+	if strings.TrimSpace(cfg.Provider.Model) != strings.TrimSpace(defaults.Provider.Model) {
+		return false
+	}
+	for _, pair := range []struct{ got, want string }{
+		{cfg.ModelRouting.Chat.Primary.Model, defaults.ModelRouting.Chat.Primary.Model},
+		{cfg.ModelRouting.Agents.Primary.Model, defaults.ModelRouting.Agents.Primary.Model},
+		{cfg.ModelRouting.Subagents.Primary.Model, defaults.ModelRouting.Subagents.Primary.Model},
+	} {
+		if strings.TrimSpace(pair.got) != strings.TrimSpace(pair.want) {
+			return false
+		}
+	}
+	return true
 }
 
 func applyEnvString(key string, target *string) {

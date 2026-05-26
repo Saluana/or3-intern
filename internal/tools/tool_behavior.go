@@ -11,6 +11,7 @@ const (
 	ToolNameSearchFile       = "search_file"
 	ToolNameWriteFile        = "write_file"
 	ToolNameEditFile         = "edit_file"
+	ToolNameDeleteFile       = "delete_file"
 	ToolNameListDir          = "list_dir"
 	ToolNameMemorySetPinned  = "memory_set_pinned"
 	ToolNameMemoryAddNote    = "memory_add_note"
@@ -45,6 +46,7 @@ func init() {
 		&SearchFile{},
 		&WriteFile{},
 		&EditFile{},
+		&DeleteFile{},
 		&ListDir{},
 		&MemorySetPinned{},
 		&MemoryAddNote{},
@@ -112,7 +114,7 @@ func IsExecutionToolName(name string) bool {
 
 func IsWriteToolName(name string) bool {
 	switch strings.TrimSpace(name) {
-	case ToolNameWriteFile, ToolNameEditFile:
+	case ToolNameWriteFile, ToolNameEditFile, ToolNameDeleteFile:
 		return true
 	default:
 		return false

@@ -122,28 +122,42 @@ func (c *Client) SupportsExplicitPromptCache() bool {
 // SupportsExplicitPromptCache returns true; otherwise a plain concatenated
 // string should be sent for maximum compatibility.
 func BuildCacheAwareSystemContent(stable, volatile string) any {
-	stable = strings.TrimSpace(stable)
-	volatile = strings.TrimSpace(volatile)
-	parts := make([]map[string]any, 0, 2)
-	if stable != "" {
-		parts = append(parts, map[string]any{
-			"type": "text",
-			"text": stable,
-			"cache_control": map[string]any{
-				"type": "ephemeral",
-			},
-		})
+	return BuildCacheAwareTieredContent(stable, "", volatile)
+}
+
+// BuildCacheAwareTieredContent renders static and session tiers as separate
+// cacheable blocks when supported; the turn tier is always uncached.
+func BuildCacheAwareTieredContent(static, session, turn string) any {
+	static = strings.TrimSpace(static)
+	session = strings.TrimSpace(session)
+	turn = strings.TrimSpace(turn)
+	parts := make([]map[string]any, 0, 3)
+	if static != "" {
+		parts = append(parts, cacheableTextBlock(static))
 	}
-	if volatile != "" {
+	if session != "" {
+		parts = append(parts, cacheableTextBlock(session))
+	}
+	if turn != "" {
 		parts = append(parts, map[string]any{
 			"type": "text",
-			"text": volatile,
+			"text": turn,
 		})
 	}
 	if len(parts) == 0 {
 		return ""
 	}
 	return parts
+}
+
+func cacheableTextBlock(text string) map[string]any {
+	return map[string]any{
+		"type": "text",
+		"text": text,
+		"cache_control": map[string]any{
+			"type": "ephemeral",
+		},
+	}
 }
 
 // ToolDef declares a callable tool in provider request format.

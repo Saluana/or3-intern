@@ -12,9 +12,11 @@ The agent can:
 
 ## How It Works
 
-When given a complex task, the agent creates a plan. The plan has steps. Each step has a goal, the tools needed, and success criteria.
+When given a complex task, the agent can call `create_plan` to store a titled plan with tasks on the session task card, then drive work with `update_plan` and `complete_plan_task`. See [plan tools](../tools/plan-tools.md).
 
-The agent works through the steps one at a time. It can change the plan if needed. If a step fails, it tries a different approach.
+With `context.taskCard.enforcePlan` enabled, write, exec, and web tools stay blocked until that plan exists. With enforcement off (the default), the agent may still use plan tools for long jobs but can write files without a planning step first.
+
+The agent works through steps one at a time, adapts the plan when needed, and clears it with `remove_plan` when finished.
 
 ## Example
 

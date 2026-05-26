@@ -192,6 +192,29 @@ func applyInteractiveDoctorFixes(in io.Reader, out io.Writer, cfgPath string, cf
 
 func applySingleInteractiveDoctorFix(reader *bufio.Reader, out io.Writer, cfg *config.Config, finding intdoctor.Finding) (bool, string, error) {
 	switch finding.ID {
+	case "profiles.empty", "profiles.no_mapping", "profiles.open_ingress_profile_missing", "profiles.webhook_effective_missing", "profiles.public_ingress_without_profiles", "profiles.webhook_without_profiles":
+		choice, err := promptMenuChoice(reader, out, "Set agent access level", []string{
+			"1) Operator (chat, workspace file writes, guarded commands)",
+			"2) Reader (chat and read-only tools)",
+			"3) Admin (full local control)",
+			"4) Skip",
+		}, "1")
+		if err != nil {
+			return false, "", err
+		}
+		level := "operator"
+		switch choice {
+		case "1":
+			level = "operator"
+		case "2":
+			level = "reader"
+		case "3":
+			level = "admin"
+		default:
+			return false, "", nil
+		}
+		changed, err := intdoctor.ApplyInteractiveChoice(cfg, finding, level, nil)
+		return changed, "updated access profiles", err
 	case "channels.invalid_ingress":
 		channel := finding.Metadata["channel"]
 		choice, err := promptMenuChoice(reader, out, fmt.Sprintf("Repair %s inbound access", channel), []string{

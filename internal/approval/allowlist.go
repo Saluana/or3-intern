@@ -15,15 +15,7 @@ func (b *Broker) AddAllowlist(ctx context.Context, domain string, scope Allowlis
 	if err := ValidateAllowlistMatcher(domain, matcher); err != nil {
 		return db.ApprovalAllowlistRecord{}, err
 	}
-	scopeJSON, err := marshalCanonical(scope)
-	if err != nil {
-		return db.ApprovalAllowlistRecord{}, err
-	}
-	matcherJSON, err := marshalCanonical(matcher)
-	if err != nil {
-		return db.ApprovalAllowlistRecord{}, err
-	}
-	rec, err := b.DB.CreateApprovalAllowlist(ctx, db.ApprovalAllowlistRecord{Domain: domain, ScopeJSON: scopeJSON, MatcherJSON: matcherJSON, CreatedBy: actor, CreatedAt: b.now().UnixMilli(), ExpiresAt: expiresAt})
+	rec, err := b.AddAllowlistRecord(ctx, b.allowlistInput(domain, scope, matcher, actor, expiresAt))
 	if err != nil {
 		return db.ApprovalAllowlistRecord{}, err
 	}
@@ -31,9 +23,45 @@ func (b *Broker) AddAllowlist(ctx context.Context, domain string, scope Allowlis
 	return rec, nil
 }
 
+func (b *Broker) AddAllowlistRecord(ctx context.Context, input db.ApprovalAllowlistRecord) (db.ApprovalAllowlistRecord, error) {
+	rec, _, err := b.DB.CreateOrGetApprovalAllowlist(ctx, input)
+	return rec, err
+}
+
+func (b *Broker) allowlistInput(domain string, scope AllowlistScope, matcher any, actor string, expiresAt int64) db.ApprovalAllowlistRecord {
+	scopeJSON, _ := marshalCanonical(scope)
+	matcherJSON, _ := marshalCanonical(matcher)
+	keys := allowlistMatchKeys(domain, scope, matcher)
+	return db.ApprovalAllowlistRecord{
+		Domain:              domain,
+		ScopeJSON:           scopeJSON,
+		MatcherJSON:         matcherJSON,
+		CreatedBy:           actor,
+		CreatedAt:           b.now().UnixMilli(),
+		ExpiresAt:           expiresAt,
+		ScopeHostID:         keys.ScopeHostID,
+		ScopeTool:           keys.ScopeTool,
+		ScopeProfile:        keys.ScopeProfile,
+		ScopeAgent:          keys.ScopeAgent,
+		MatchExecutablePath: keys.MatchExecutablePath,
+		MatchWorkingDir:     keys.MatchWorkingDir,
+		MatchScriptHash:     keys.MatchScriptHash,
+		MatchSkillID:        keys.MatchSkillID,
+		MatchPlanHash:       keys.MatchPlanHash,
+		MatchRunnerID:       keys.MatchRunnerID,
+		MatchTargetPath:     keys.MatchTargetPath,
+		MatchPathPrefix:     keys.MatchPathPrefix,
+		MatchFingerprint:    keys.MatchFingerprint,
+	}
+}
+
 func (b *Broker) RemoveAllowlist(ctx context.Context, id int64, actor string) error {
-	if err := b.DB.DisableApprovalAllowlist(ctx, id, b.now().UnixMilli()); err != nil {
+	disabled, err := b.DB.DisableApprovalAllowlist(ctx, id, b.now().UnixMilli())
+	if err != nil {
 		return err
+	}
+	if !disabled {
+		return fmt.Errorf("allowlist not found")
 	}
 	_ = b.audit(ctx, "approval.allowlist_changed", map[string]any{"allowlist_id": id, "actor": actor, "host_id": b.hostID(), "action": "remove"})
 	return nil
@@ -44,30 +72,51 @@ func (b *Broker) ListAllowlists(ctx context.Context, domain string, limit int) (
 }
 
 func (b *Broker) allowlistMatches(ctx context.Context, subjectType SubjectType, scope AllowlistScope, matcher any) (bool, error) {
-	records, err := b.DB.ListApprovalAllowlists(ctx, string(subjectType), defaultPageSize)
-	if err != nil {
-		return false, err
+	keys := allowlistMatchKeys(string(subjectType), scope, matcher)
+	query := db.ApprovalAllowlistMatchQuery{
+		Domain:              string(subjectType),
+		NowMS:               b.now().UnixMilli(),
+		ScopeHostID:         keys.ScopeHostID,
+		ScopeTool:           keys.ScopeTool,
+		ScopeProfile:        keys.ScopeProfile,
+		ScopeAgent:          keys.ScopeAgent,
+		MatchExecutablePath: keys.MatchExecutablePath,
+		MatchWorkingDir:     keys.MatchWorkingDir,
+		MatchScriptHash:     keys.MatchScriptHash,
+		MatchSkillID:        keys.MatchSkillID,
+		MatchPlanHash:       keys.MatchPlanHash,
+		MatchRunnerID:       keys.MatchRunnerID,
+		MatchTargetPath:     keys.MatchTargetPath,
+		MatchPathPrefix:     keys.MatchPathPrefix,
 	}
-	nowMS := b.now().UnixMilli()
-	for _, record := range records {
-		if record.DisabledAt > 0 {
-			continue
-		}
-		if record.ExpiresAt > 0 && record.ExpiresAt < nowMS {
-			continue
-		}
-		if !allowlistScopeMatches(scope, record.ScopeJSON) {
-			continue
-		}
-		matched, err := allowlistMatcherMatches(subjectType, matcher, record.MatcherJSON)
+	const pageSize = 200
+	for offset := 0; ; offset += pageSize {
+		records, err := b.DB.ListApprovalAllowlistCandidates(ctx, query, pageSize, offset)
 		if err != nil {
 			return false, err
 		}
-		if matched {
-			return true, nil
+		for _, record := range records {
+			if record.DisabledAt > 0 {
+				continue
+			}
+			if record.ExpiresAt > 0 && record.ExpiresAt < query.NowMS {
+				continue
+			}
+			if !allowlistScopeMatches(scope, record.ScopeJSON) {
+				continue
+			}
+			matched, err := allowlistMatcherMatches(subjectType, matcher, record.MatcherJSON)
+			if err != nil {
+				return false, err
+			}
+			if matched {
+				return true, nil
+			}
+		}
+		if len(records) < pageSize {
+			return false, nil
 		}
 	}
-	return false, nil
 }
 
 func allowlistScopeMatches(scope AllowlistScope, raw string) bool {

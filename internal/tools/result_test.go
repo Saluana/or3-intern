@@ -38,6 +38,32 @@ func TestEncodeToolFailureTrimsDuplicateToolPrefix(t *testing.T) {
 	}
 }
 
+func TestEncodeToolFailureUnavailableWriteToolAdviceDoesNotSuggestRetry(t *testing.T) {
+	got := EncodeToolFailure(
+		"write_file",
+		map[string]any{"path": "./prompts/test-prompt-2.md", "content": "test"},
+		"",
+		fmt.Errorf(ErrToolNotAvailableThisTurn),
+	)
+	result, ok := DecodeToolResult(got)
+	if !ok {
+		t.Fatalf("expected structured tool result, got %q", got)
+	}
+	if len(result.Advice) == 0 {
+		t.Fatalf("expected advice, got %#v", result)
+	}
+	advice := strings.Join(result.Advice, "\n")
+	if strings.Contains(advice, "Check the tool arguments") {
+		t.Fatalf("expected no generic argument advice, got %#v", result.Advice)
+	}
+	if strings.Contains(advice, "edit_file instead") {
+		t.Fatalf("expected no alternate write-tool advice, got %#v", result.Advice)
+	}
+	if !strings.Contains(advice, "Ask") || !strings.Contains(advice, "will not succeed") {
+		t.Fatalf("expected read-only mode guidance, got %#v", result.Advice)
+	}
+}
+
 func TestEncodeToolFailurePreservesApprovalRequestID(t *testing.T) {
 	got := EncodeToolFailure("exec", nil, "", &ApprovalRequiredError{ToolName: "exec", RequestID: 42})
 	result, ok := DecodeToolResult(got)

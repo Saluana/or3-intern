@@ -7,12 +7,12 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"or3-intern/internal/db"
-	"or3-intern/internal/providers"
 )
 
 // DocIndexConfig controls what gets indexed.
@@ -45,11 +45,14 @@ type IndexedDoc struct {
 
 // DocIndexer syncs configured roots into the memory_docs table.
 type DocIndexer struct {
-	DB               *db.DB
-	Provider         *providers.Client
-	EmbedModel       string
-	EmbedFingerprint string
-	Config           DocIndexConfig
+	DB     *db.DB
+	Config DocIndexConfig
+}
+
+// DocSyncResult summarizes a root sync pass.
+type DocSyncResult struct {
+	PartialScan bool
+	Warning     string
 }
 
 type indexedDocState struct {
@@ -81,15 +84,22 @@ func (x *DocIndexer) defaults() DocIndexConfig {
 }
 
 // SyncRoots scans all configured roots and updates memory_docs for scopeKey.
-// It enforces caps on file count and file size, skips symlinks, and
-// deactivates docs for files that have disappeared.
+// It enforces caps on file count and file size, skips symlinks, and only
+// deactivates docs when every configured root completed without hitting a cap.
 func (x *DocIndexer) SyncRoots(ctx context.Context, scopeKey string) error {
+	_, err := x.SyncRootsWithResult(ctx, scopeKey)
+	return err
+}
+
+// SyncRootsWithResult is like SyncRoots but reports partial-scan warnings.
+func (x *DocIndexer) SyncRootsWithResult(ctx context.Context, scopeKey string) (DocSyncResult, error) {
+	result := DocSyncResult{}
 	if x == nil || x.DB == nil {
-		return fmt.Errorf("doc indexer not configured")
+		return result, fmt.Errorf("doc indexer not configured")
 	}
 	cfg := x.defaults()
 	if len(cfg.Roots) == 0 {
-		return nil
+		return result, nil
 	}
 
 	seen := map[string]bool{}
@@ -97,24 +107,35 @@ func (x *DocIndexer) SyncRoots(ctx context.Context, scopeKey string) error {
 	chunkCount := 0
 	existing, err := x.loadIndexedDocState(ctx, scopeKey)
 	if err != nil {
-		return err
+		return result, err
 	}
 
+	allRootsComplete := true
+	hitCap := false
+	rootIndex := 0
 	for _, root := range cfg.Roots {
 		if strings.TrimSpace(root) == "" {
 			continue
 		}
+		currentRoot := rootIndex
+		rootIndex++
 		absRoot, err := filepath.Abs(root)
 		if err != nil {
+			allRootsComplete = false
+			log.Printf("doc sync skipped root %q: abs path: %v", root, err)
 			continue
 		}
 		absRoot, err = filepath.EvalSymlinks(absRoot)
 		if err != nil {
+			allRootsComplete = false
+			log.Printf("doc sync skipped root %q: symlink eval: %v", root, err)
 			continue
 		}
 
-		err = filepath.WalkDir(absRoot, func(path string, d fs.DirEntry, err error) error {
+		rootComplete := true
+		walkErr := filepath.WalkDir(absRoot, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
+				rootComplete = false
 				return err
 			}
 			if d.Type()&os.ModeSymlink != 0 {
@@ -135,44 +156,50 @@ func (x *DocIndexer) SyncRoots(ctx context.Context, scopeKey string) error {
 
 			realPath, err := filepath.EvalSymlinks(path)
 			if err != nil {
+				rootComplete = false
 				return err
 			}
 			rel, err := filepath.Rel(absRoot, realPath)
 			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 				return nil
 			}
+			storedPath := docStoredPath(currentRoot, rel)
 
 			if fileCount >= cfg.MaxFiles {
+				hitCap = true
 				return filepath.SkipAll
 			}
 			if chunkCount >= cfg.MaxChunks {
+				hitCap = true
 				return filepath.SkipAll
 			}
 
 			info, err := os.Lstat(realPath)
 			if err != nil {
+				rootComplete = false
 				return err
 			}
 			if info.Size() > int64(cfg.MaxFileBytes) {
 				return nil
 			}
 
-			seen[realPath] = true
+			seen[storedPath] = true
 			fileCount++
 			mtimeMS := info.ModTime().UnixMilli()
 			sizeBytes := info.Size()
-			if state, ok := existing[realPath]; ok && state.active && state.mtimeMS == mtimeMS && state.sizeBytes == sizeBytes && state.fingerprint == strings.TrimSpace(x.EmbedFingerprint) {
+			if state, ok := existing[storedPath]; ok && state.active && state.mtimeMS == mtimeMS && state.sizeBytes == sizeBytes {
 				chunkCount++
 				return nil
 			}
 
 			data, err := readDocFile(realPath, cfg.MaxFileBytes)
 			if err != nil {
+				rootComplete = false
 				return err
 			}
 
 			h := fileHash(data)
-			if state, ok := existing[realPath]; ok && state.active && state.hash == h && state.fingerprint == strings.TrimSpace(x.EmbedFingerprint) {
+			if state, ok := existing[storedPath]; ok && state.active && state.hash == h {
 				chunkCount++
 				return nil
 			}
@@ -182,59 +209,85 @@ func (x *DocIndexer) SyncRoots(ctx context.Context, scopeKey string) error {
 			text := string(data)
 			summary := extractSummary(text)
 
-			var embedding []byte
-			if x.Provider != nil && x.EmbedModel != "" && len(data) <= cfg.EmbedMaxBytes {
-				vec, err := x.Provider.Embed(ctx, x.EmbedModel, truncateForEmbed(text, cfg.EmbedMaxBytes))
-				if err == nil && len(vec) > 0 {
-					embedding = PackFloat32(vec)
-				}
-			}
-
 			now := db.NowMS()
 			_, err = x.DB.SQL.ExecContext(ctx,
 				`INSERT INTO memory_docs(scope_key, path, kind, title, summary, text, embedding, embed_fingerprint, hash, mtime_ms, size_bytes, active, updated_at)
-	                VALUES(?,?,?,?,?,?,?,?,?,?,?,1,?)
+	                VALUES(?,?,?,?,?,?,NULL,'',?,?,?,1,?)
                  ON CONFLICT(scope_key, path) DO UPDATE SET
                    kind=excluded.kind, title=excluded.title, summary=excluded.summary,
-                   text=excluded.text, embedding=excluded.embedding,
-	                  embed_fingerprint=excluded.embed_fingerprint,
+                   text=excluded.text, embedding=NULL, embed_fingerprint='',
 	                  hash=excluded.hash, mtime_ms=excluded.mtime_ms,
                    size_bytes=excluded.size_bytes, active=1, updated_at=excluded.updated_at`,
-				scopeKey, realPath, kind, title, summary, text, nullBytes(embedding), strings.TrimSpace(x.EmbedFingerprint), h, mtimeMS, sizeBytes, now)
+				scopeKey, storedPath, kind, title, summary, text, h, mtimeMS, sizeBytes, now)
 			if err != nil {
-				return fmt.Errorf("upsert indexed doc %s: %w", realPath, err)
+				return fmt.Errorf("upsert indexed doc %s: %w", storedPath, err)
 			}
 			chunkCount++
 			return nil
 		})
-		if err != nil {
-			return err
+		if walkErr != nil {
+			rootComplete = false
+			log.Printf("doc sync root %q incomplete: %v", root, walkErr)
+		}
+		if !rootComplete {
+			allRootsComplete = false
 		}
 	}
 
-	// deactivate docs no longer on disk
-	rows, err := x.DB.SQL.QueryContext(ctx,
-		`SELECT path FROM memory_docs WHERE scope_key=? AND active=1`, scopeKey)
-	if err != nil {
-		return err
+	if hitCap {
+		result.PartialScan = true
+		result.Warning = "doc sync stopped at configured file/chunk cap; existing docs kept active"
+		log.Printf("doc sync partial for scope %q: hit configured cap", scopeKey)
 	}
-	var toDeactivate []string
-	for rows.Next() {
-		var p string
-		if err := rows.Scan(&p); err != nil {
-			continue
+	if !allRootsComplete {
+		result.PartialScan = true
+		if result.Warning == "" {
+			result.Warning = "doc sync did not complete every configured root; existing docs kept active"
 		}
-		if !seen[p] {
-			toDeactivate = append(toDeactivate, p)
+		log.Printf("doc sync partial for scope %q: not all roots completed", scopeKey)
+	}
+
+	if allRootsComplete && !hitCap {
+		rows, err := x.DB.SQL.QueryContext(ctx,
+			`SELECT path FROM memory_docs WHERE scope_key=? AND active=1`, scopeKey)
+		if err != nil {
+			return result, err
+		}
+		var toDeactivate []string
+		for rows.Next() {
+			var p string
+			if err := rows.Scan(&p); err != nil {
+				continue
+			}
+			if !seen[p] {
+				toDeactivate = append(toDeactivate, p)
+			}
+		}
+		rows.Close()
+		for _, p := range toDeactivate {
+			_, _ = x.DB.SQL.ExecContext(ctx,
+				`UPDATE memory_docs SET active=0, updated_at=? WHERE scope_key=? AND path=?`,
+				db.NowMS(), scopeKey, p)
 		}
 	}
-	rows.Close()
-	for _, p := range toDeactivate {
-		_, _ = x.DB.SQL.ExecContext(ctx,
-			`UPDATE memory_docs SET active=0, updated_at=? WHERE scope_key=? AND path=?`,
-			db.NowMS(), scopeKey, p)
+	RecordDocSyncState(result)
+	return result, nil
+}
+
+func docStoredPath(rootIndex int, rel string) string {
+	return fmt.Sprintf("r%d:%s", rootIndex, filepath.ToSlash(rel))
+}
+
+// DocDisplayPath renders a stored doc path for prompts and UI.
+func DocDisplayPath(stored string) string {
+	stored = strings.TrimSpace(stored)
+	if stored == "" {
+		return ""
 	}
-	return nil
+	if idx := strings.Index(stored, ":"); idx > 1 && strings.HasPrefix(stored, "r") {
+		return stored[idx+1:]
+	}
+	return filepath.Base(stored)
 }
 
 func (x *DocIndexer) loadIndexedDocState(ctx context.Context, scopeKey string) (map[string]indexedDocState, error) {
@@ -309,7 +362,7 @@ func (r *DocRetriever) RetrieveDocs(ctx context.Context, scopeKey, query string,
 			return nil, err
 		}
 		out = append(out, RetrievedDoc{
-			Path:    path,
+			Path:    DocDisplayPath(path),
 			Title:   title,
 			Excerpt: excerptText(text, 500),
 			Score:   1.0 / (1.0 + rank),
@@ -368,13 +421,6 @@ func extractSummary(text string) string {
 		return line
 	}
 	return ""
-}
-
-func truncateForEmbed(text string, max int) string {
-	if max <= 0 || len(text) <= max {
-		return text
-	}
-	return text[:max]
 }
 
 func excerptText(text string, maxChars int) string {

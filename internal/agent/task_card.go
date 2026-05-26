@@ -20,6 +20,7 @@ type TaskCard struct {
 	ArtifactRefs  []string `json:"artifact_refs"`
 	ActiveFiles   []string `json:"active_files"`
 	Status        string   `json:"status"`
+	Metadata      ActivePlanMetadata `json:"-"`
 }
 
 func loadTaskCard(ctx context.Context, d *db.DB, sessionKey string) (TaskCard, bool, error) {
@@ -44,6 +45,10 @@ func loadTaskCard(ctx context.Context, d *db.DB, sessionKey string) (TaskCard, b
 	if strings.TrimSpace(row.ScopeKey) == "" {
 		row.ScopeKey = resolveTaskCardScope(ctx, d, sessionKey, "")
 	}
+	card.Metadata = parseActivePlanMetadata(row.MetadataJSON)
+	if len(card.Plan) == 0 && len(card.Metadata.Tasks) > 0 {
+		syncLegacyPlanFromTasks(&card, &card.Metadata)
+	}
 	return card, true, nil
 }
 
@@ -56,6 +61,7 @@ func saveTaskCard(ctx context.Context, d *db.DB, sessionKey, scopeKey string, ca
 		return string(b)
 	}
 	scopeKey = resolveTaskCardScope(ctx, d, sessionKey, scopeKey)
+	syncLegacyPlanFromTasks(&card, &card.Metadata)
 	return d.UpsertActiveTaskState(ctx, db.TaskStateRow{
 		SessionKey:        sessionKey,
 		ScopeKey:          scopeKey,
@@ -69,7 +75,7 @@ func saveTaskCard(ctx context.Context, d *db.DB, sessionKey, scopeKey string, ca
 		MemoryRefsJSON:    toJSON(card.MemoryRefs),
 		ArtifactRefsJSON:  toJSON(card.ArtifactRefs),
 		ActiveFilesJSON:   toJSON(card.ActiveFiles),
-		MetadataJSON:      "{}",
+		MetadataJSON:      marshalActivePlanMetadata(card.Metadata),
 	})
 }
 

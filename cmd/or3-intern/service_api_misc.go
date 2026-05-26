@@ -113,10 +113,12 @@ func (s *serviceServer) handleScope(w http.ResponseWriter, r *http.Request) {
 			writeServiceRequestDecodeError(w, err)
 			return
 		}
-		linked, err := cp.LinkSessionScope(r.Context(), controlplane.ScopeLinkInput{
+		identity := serviceAuthIdentityFromContext(r.Context())
+		linked, err := cp.LinkSessionScope(controlplane.WithScopeActor(r.Context(), identity.Actor), controlplane.ScopeLinkInput{
 			SessionKey: serviceFirstNonEmpty(body.SessionKey, body.SessionKeyCamel),
 			ScopeKey:   serviceFirstNonEmpty(body.ScopeKey, body.ScopeKeyCamel),
 			Meta:       body.Meta,
+			Actor:      identity.Actor,
 		})
 		if err != nil {
 			writeServiceJSON(w, statusCodeForControlplaneError(err, http.StatusBadRequest), map[string]any{"error": controlplane.DescribeUnavailable(err).Error()})
@@ -133,7 +135,7 @@ func (s *serviceServer) handleScope(w http.ResponseWriter, r *http.Request) {
 			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "scope_key is required"})
 			return
 		}
-		sessions, err := cp.ListScopeSessions(r.Context(), scopeKey)
+		sessions, err := cp.ListScopeSessions(controlplane.WithScopeActor(r.Context(), serviceAuthIdentityFromContext(r.Context()).Actor), scopeKey)
 		if err != nil {
 			writeServiceJSON(w, statusCodeForControlplaneError(err, http.StatusBadGateway), map[string]any{"error": controlplane.DescribeUnavailable(err).Error()})
 			return
@@ -149,7 +151,7 @@ func (s *serviceServer) handleScope(w http.ResponseWriter, r *http.Request) {
 			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "session_key is required"})
 			return
 		}
-		scopeKey, err := cp.ResolveScopeKey(r.Context(), sessionKey)
+		scopeKey, err := cp.ResolveScopeKey(controlplane.WithScopeActor(r.Context(), serviceAuthIdentityFromContext(r.Context()).Actor), sessionKey)
 		if err != nil {
 			writeServiceJSON(w, statusCodeForControlplaneError(err, http.StatusBadGateway), map[string]any{"error": controlplane.DescribeUnavailable(err).Error()})
 			return

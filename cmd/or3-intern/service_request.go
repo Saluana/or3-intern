@@ -17,11 +17,13 @@ import (
 )
 
 type serviceTurnRequest struct {
-	SessionKey     string
-	Message        string
-	AllowedTools   []string
-	RestrictTools  bool
-	Meta           map[string]any
+	SessionKey      string
+	Message         string
+	Attachments     []agent.ChatAttachment
+	ToolPolicyMode  string
+	AllowedTools    []string
+	RestrictTools   bool
+	Meta            map[string]any
 	ProfileName    string
 	ApprovalToken  string
 	ReplayToolCall *serviceReplayToolCall
@@ -102,6 +104,7 @@ type serviceTurnRequestPayload struct {
 	InternSessionKeyCamel string                        `json:"internSessionKey"`
 	PlatformSessionRef    map[string]any                `json:"platform_session_ref"`
 	Message               string                        `json:"message"`
+	Attachments           []map[string]any              `json:"attachments"`
 	AllowedTools          []string                      `json:"allowed_tools"`
 	AllowedToolsCamel     []string                      `json:"allowedTools"`
 	ToolPolicy            *serviceToolPolicyPayload     `json:"tool_policy"`
@@ -157,24 +160,44 @@ func decodeServiceTurnRequest(body io.Reader, registry *tools.Registry) (service
 		serviceRequestFieldPair{"approval_token", "approvalToken"},
 		serviceRequestFieldPair{"replay_tool_call", "replayToolCall"},
 	)
+	toolPolicy := firstToolPolicy(payload.ToolPolicy, payload.ToolPolicyCamel)
 	allowedTools, restrictTools, err := app.ResolveToolPolicy(
 		registry,
-		firstToolPolicy(payload.ToolPolicy, payload.ToolPolicyCamel),
+		toolPolicy,
 		compat.FirstStringSlice(payload.AllowedTools, payload.AllowedToolsCamel),
 	)
 	if err != nil {
 		return serviceTurnRequest{}, err
 	}
+	toolPolicyMode := ""
+	if toolPolicy != nil {
+		toolPolicyMode = strings.TrimSpace(toolPolicy.Mode)
+	}
 	replayToolCall, err := firstReplayToolCall(payload.ReplayToolCall, payload.ReplayToolCallCamel)
 	if err != nil {
 		return serviceTurnRequest{}, err
 	}
+	attachments := decodeServiceAttachments(payload.Attachments)
+	if err := agent.ValidateChatAttachments(attachments); err != nil {
+		return serviceTurnRequest{}, err
+	}
+	meta := cloneMapOrEmpty(payload.Meta)
+	if toolPolicyMode != "" {
+		if meta == nil {
+			meta = map[string]any{}
+		}
+		if serviceMetaText(meta, "tool_policy_mode") == "" {
+			meta["tool_policy_mode"] = toolPolicyMode
+		}
+	}
 	return serviceTurnRequest{
 		SessionKey:     compat.FirstString(payload.SessionKey, payload.InternSessionKey, payload.SessionKeyCamel, payload.InternSessionKeyCamel),
 		Message:        strings.TrimSpace(payload.Message),
+		Attachments:    attachments,
+		ToolPolicyMode: toolPolicyMode,
 		AllowedTools:   allowedTools,
 		RestrictTools:  restrictTools,
-		Meta:           cloneMapOrEmpty(payload.Meta),
+		Meta:           meta,
 		ProfileName:    compat.FirstString(payload.ProfileName, payload.ProfileNameCamel),
 		ApprovalToken:  compat.FirstString(payload.ApprovalToken, payload.ApprovalTokenCamel),
 		ReplayToolCall: replayToolCall,
@@ -444,6 +467,17 @@ func firstPositiveInt(values ...json.Number) (int, error) {
 		return int(n), nil
 	}
 	return 0, nil
+}
+
+func decodeServiceAttachments(raw []map[string]any) []agent.ChatAttachment {
+	if len(raw) == 0 {
+		return nil
+	}
+	items := make([]any, 0, len(raw))
+	for _, item := range raw {
+		items = append(items, item)
+	}
+	return agent.DecodeChatAttachments(items)
 }
 
 func cloneMapOrEmpty(in map[string]any) map[string]any {

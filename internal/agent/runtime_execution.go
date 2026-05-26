@@ -18,6 +18,10 @@ import (
 )
 
 func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventType, sessionKey string, messages []providers.ChatMessage, reg *tools.Registry, channel string, replyTo string, replyMeta map[string]any) (string, bool, error) {
+	ctx = tools.ContextWithSession(ctx, sessionKey)
+	ctx = tools.ContextWithDelivery(ctx, channel, replyTo)
+	ctx = tools.ContextWithDeliveryMeta(ctx, replyMeta)
+	ctx = tools.ContextWithApprovalRequesterContextForSession(ctx, sessionKey)
 	messages = append([]providers.ChatMessage(nil), messages...)
 	if reg == nil {
 		reg = tools.NewRegistry()
@@ -34,6 +38,7 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 	if maxLoops <= 0 {
 		maxLoops = 6
 	}
+	maxLoops = ToolBudgetOverridesFromContext(ctx).EffectiveMaxToolLoops(maxLoops)
 	loopLimit := maxLoops
 	validationFailures := map[string]int{}
 	for loop := 0; ; loop++ {
@@ -125,12 +130,31 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 				if sw != nil {
 					_ = sw.Abort(ctx)
 				}
+				toolTurnContent := msg.Content
+				if raw, ok := msg.Content.(string); ok {
+					toolTurnContent = sanitizeToolTurnContent(raw)
+				}
+				messages = append(messages, providers.ChatMessage{Role: "assistant", Content: toolTurnContent, ToolCalls: msg.ToolCalls})
+				if _, err := r.DB.AppendMessage(ctx, sessionKey, "assistant", sanitizeToolTurnContent(contentToString(msg.Content)), map[string]any{"tool_calls": msg.ToolCalls}); err != nil {
+					log.Printf("append assistant(unavailable tool_calls) failed: %v", err)
+				}
+				unavailableErr := fmt.Errorf("tool not available in this turn")
 				for _, tc := range normalizedCalls {
 					var parsedParams map[string]any
 					_ = json.Unmarshal([]byte(tc.ArgumentsJSON), &parsedParams)
-					toolOut := formatToolExecutionError(tc.Name, parsedParams, "", fmt.Errorf("tool not available in this turn"))
+					toolOut := formatToolExecutionError(tc.Name, parsedParams, "", unavailableErr)
 					emitToolCallStarted(ctx, observer, tc)
-					emitToolCallFinished(ctx, observer, tc, toolOut, "", fmt.Errorf("tool not available in this turn"))
+					emitToolCallFinished(ctx, observer, tc, toolOut, "", unavailableErr)
+					payload := map[string]any{
+						"tool":         tc.Name,
+						"tool_call_id": tc.ID,
+						"args":         json.RawMessage([]byte(tc.ArgumentsJSON)),
+						"public_code":  PublicErrorToolExecution,
+					}
+					if _, appendErr := r.DB.AppendMessage(ctx, sessionKey, "tool", toolOut, payload); appendErr != nil {
+						log.Printf("append unavailable tool message failed: %v", appendErr)
+					}
+					messages = append(messages, providers.ChatMessage{Role: "tool", ToolCallID: tc.ID, Content: toolOut})
 				}
 				messages = append(messages, providers.ChatMessage{
 					Role:    "system",
@@ -142,6 +166,14 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 			msg.ToolCalls = normalizedToProviderToolCalls(normalizedCalls)
 		}
 		if len(normalizedCalls) == 0 {
+			if reminder := r.unfinishedPlanReminder(ctx, sessionKey); reminder != "" {
+				messages = append(messages, providers.ChatMessage{Role: "system", Content: reminder})
+				ctx = ContextWithPlanGateReminderSent(ctx)
+				if _, err := r.DB.AppendMessage(ctx, sessionKey, "system", reminder, map[string]any{"source": "plan_gate"}); err != nil {
+					log.Printf("append plan gate reminder failed: %v", err)
+				}
+				continue
+			}
 			finalText := strings.TrimSpace(contentToString(msg.Content))
 			if sw != nil {
 				_ = sw.Close(ctx, finalText)
@@ -172,9 +204,15 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 
 		for _, tc := range normalizedCalls {
 			emitToolCallStarted(ctx, observer, tc)
+			if isExplorationToolName(tc.Name) {
+				ctx = ContextWithExplorationToolCall(ctx)
+			}
 			toolCtx := tools.ContextWithSession(ctx, scopeKey)
+			toolCtx = ContextWithConversationSession(toolCtx, sessionKey)
+			toolCtx = ContextWithTurnState(toolCtx, TurnStateFromContextOrDefault(ctx, sessionKey))
 			toolCtx = tools.ContextWithDelivery(toolCtx, channel, replyTo)
 			toolCtx = tools.ContextWithDeliveryMeta(toolCtx, replyMeta)
+			toolCtx = tools.ContextWithApprovalRequesterContextForSession(toolCtx, sessionKey)
 			toolCtx = r.contextWithTrustedToolAccess(toolCtx, bus.Event{Type: eventType, SessionKey: sessionKey, Channel: channel})
 			toolCtx = context.WithValue(toolCtx, messageQuotaCountersContextKey{}, messageQuotas)
 			toolCtx = tools.ContextWithToolGuard(toolCtx, r.guardToolExecution)
@@ -216,6 +254,12 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 				"tool_call_id": tc.ID,
 				"args":         json.RawMessage([]byte(tc.ArgumentsJSON)),
 			}
+			if strings.HasPrefix(strings.TrimSpace(sessionKey), "doctor-app-") {
+				if toolResult, ok := tools.DecodeToolResult(out); ok {
+					payload["doctor_tool_result"] = toolResult
+					payload["source"] = "doctor_tool"
+				}
+			}
 			sendOut, preview, artifactID := r.boundTextResult(ctx, sessionKey, out)
 			if artifactID != "" {
 				payload["artifact_id"] = artifactID
@@ -231,7 +275,12 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 				if tools.RequestSourceFromContext(ctx) == tools.RequestSourceService {
 					return "", false, err
 				}
-				finalText, streamed := r.narrateApprovalRequired(ctx, messages)
+				fallback := r.approvalRequiredFallback(ctx, approvalErr)
+				narration, streamed := r.narrateApprovalRequired(ctx, messages)
+				finalText := approvalRequiredFinalText(narration, fallback, approvalErr.RequestID)
+				if observer != nil && strings.TrimSpace(finalText) != "" {
+					observer.OnCompletion(ctx, finalText, false)
+				}
 				return finalText, streamed, err
 			}
 			if finalText := terminalToolResultText(tc.Name, out); finalText != "" {
@@ -275,10 +324,57 @@ func (r *Runtime) narrateApprovalRequired(ctx context.Context, messages []provid
 	if finalText == "" {
 		return "", false
 	}
-	if observer := conversationObserverFromContext(ctx); observer != nil {
-		observer.OnCompletion(ctx, finalText, false)
-	}
 	return finalText, false
+}
+
+func (r *Runtime) approvalRequiredFallback(ctx context.Context, approvalErr *tools.ApprovalRequiredError) string {
+	requestID := int64(0)
+	toolName := "tool"
+	if approvalErr != nil {
+		requestID = approvalErr.RequestID
+		if strings.TrimSpace(approvalErr.ToolName) != "" {
+			toolName = strings.TrimSpace(approvalErr.ToolName)
+		}
+	}
+	preview := ""
+	if requestID > 0 && r != nil && r.ApprovalBroker != nil && r.ApprovalBroker.DB != nil {
+		if rec, err := r.ApprovalBroker.DB.GetApprovalRequest(ctx, requestID); err == nil {
+			preview = approval.SafeSubjectPreview(rec.Type, rec.SubjectJSON)
+		}
+	}
+	if preview == "" {
+		preview = toolName
+	}
+	if requestID <= 0 {
+		return "Approval is needed before I can continue. Review the pending approval in the OR3 app."
+	}
+	return strings.Join([]string{
+		"Approval is needed before I can continue.",
+		"",
+		fmt.Sprintf("Request #%d: %s", requestID, preview),
+		"",
+		approvalActionInstructions(requestID),
+	}, "\n")
+}
+
+func approvalRequiredFinalText(narration, fallback string, requestID int64) string {
+	narration = strings.TrimSpace(narration)
+	fallback = strings.TrimSpace(fallback)
+	if narration == "" {
+		return fallback
+	}
+	if requestID <= 0 {
+		return narration
+	}
+	instructions := approvalActionInstructions(requestID)
+	if strings.Contains(strings.ToLower(narration), "/approve") && strings.Contains(strings.ToLower(narration), "/deny") {
+		return narration
+	}
+	return narration + "\n\n" + instructions
+}
+
+func approvalActionInstructions(requestID int64) string {
+	return fmt.Sprintf("Reply `/approve %d` to continue or `/deny %d` to stop. You can also review this request in the OR3 app.", requestID, requestID)
 }
 
 func (r *Runtime) handleToolLoopLimitExceeded(ctx context.Context, sessionKey string, currentLimit int) error {

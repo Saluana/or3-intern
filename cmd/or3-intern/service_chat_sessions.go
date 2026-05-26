@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -163,8 +164,9 @@ func (s *serviceServer) handleChatSessionsList(w http.ResponseWriter, r *http.Re
 		filter.Limit = n
 	}
 	if err := store.BackfillExternalChannelChatSessionMeta(r.Context()); err != nil {
-		writeServiceError(w, r, http.StatusServiceUnavailable, "chat session metadata backfill failed", err)
-		return
+		// Best-effort migration for legacy external-channel sessions; listing
+		// should still succeed when backfill is temporarily unavailable.
+		log.Printf("chat session metadata backfill skipped: %v", err)
 	}
 	rows, err := store.ListChatSessions(r.Context(), filter)
 	if err != nil {

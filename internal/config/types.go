@@ -199,6 +199,7 @@ type ContextArtifactConfig struct {
 
 type ContextTaskCardConfig struct {
 	Enabled      bool `json:"enabled"`
+	EnforcePlan  bool `json:"enforcePlan"`
 	MaxRefs      int  `json:"maxRefs"`
 	MaxPlanItems int  `json:"maxPlanItems"`
 }
@@ -265,7 +266,7 @@ type HardeningQuotaConfig struct {
 // ProviderConfig selects the LLM and embedding provider endpoints and limits.
 type ProviderConfig struct {
 	APIBase         string  `json:"apiBase"`
-	APIKey          string  `json:"apiKey"`
+	APIKey          string  `json:"apiKey" secret:"true"`
 	Model           string  `json:"model"`
 	Temperature     float64 `json:"temperature"`
 	EmbedModel      string  `json:"embedModel"`
@@ -279,7 +280,7 @@ type ProviderProfiles map[string]ProviderProfileConfig
 type ProviderProfileConfig struct {
 	Label             string `json:"label,omitempty"`
 	APIBase           string `json:"apiBase"`
-	APIKey            string `json:"apiKey,omitempty"`
+	APIKey            string `json:"apiKey,omitempty" secret:"true"`
 	TimeoutSeconds    int    `json:"timeoutSeconds,omitempty"`
 	EnableVision      bool   `json:"enableVision,omitempty"`
 	DefaultChatModel  string `json:"defaultChatModel,omitempty"`
@@ -352,7 +353,7 @@ func (cfg Config) ProviderProfile(provider string) (ProviderProfileConfig, bool)
 
 // ToolsConfig configures built-in tools and external MCP server integrations.
 type ToolsConfig struct {
-	BraveAPIKey         string                     `json:"braveApiKey"`
+	BraveAPIKey         string                     `json:"braveApiKey" secret:"true"`
 	WebProxy            string                     `json:"webProxy"`
 	EnableExec          bool                       `json:"enableExec"`
 	ExecTimeoutSeconds  int                        `json:"execTimeoutSeconds"`
@@ -386,10 +387,10 @@ type MCPServerConfig struct {
 	Transport             string            `json:"transport"`
 	Command               string            `json:"command"`
 	Args                  []string          `json:"args"`
-	Env                   map[string]string `json:"env"`
+	Env                   map[string]string `json:"env" secret:"true"`
 	ChildEnvAllowlist     []string          `json:"childEnvAllowlist"`
 	URL                   string            `json:"url"`
-	Headers               map[string]string `json:"headers"`
+	Headers               map[string]string `json:"headers" secret:"true"`
 	ToolTimeoutSeconds    int               `json:"toolTimeoutSeconds"`
 	ConnectTimeoutSeconds int               `json:"connectTimeoutSeconds"`
 	AllowInsecureHTTP     bool              `json:"allowInsecureHttp"`
@@ -408,7 +409,7 @@ type ServiceConfig struct {
 	Enabled                           bool     `json:"enabled"`
 	Listen                            string   `json:"listen"`
 	UnixSocket                        string   `json:"unixSocket,omitempty"`
-	Secret                            string   `json:"secret"`
+	Secret                            string   `json:"secret" secret:"true"`
 	SharedSecretRole                  string   `json:"sharedSecretRole"`
 	MaxCapability                     string   `json:"maxCapability"`
 	AllowUnauthenticatedPairing       bool     `json:"allowUnauthenticatedPairing"`
@@ -463,7 +464,7 @@ type TelegramChannelConfig struct {
 	Enabled        bool          `json:"enabled"`
 	InboundPolicy  InboundPolicy `json:"inboundPolicy"`
 	OpenAccess     bool          `json:"openAccess"`
-	Token          string        `json:"token"`
+	Token          string        `json:"token" secret:"true"`
 	APIBase        string        `json:"apiBase"`
 	PollSeconds    int           `json:"pollSeconds"`
 	DefaultChatID  string        `json:"defaultChatId"`
@@ -475,8 +476,8 @@ type SlackChannelConfig struct {
 	Enabled          bool          `json:"enabled"`
 	InboundPolicy    InboundPolicy `json:"inboundPolicy"`
 	OpenAccess       bool          `json:"openAccess"`
-	AppToken         string        `json:"appToken"`
-	BotToken         string        `json:"botToken"`
+	AppToken         string        `json:"appToken" secret:"true"`
+	BotToken         string        `json:"botToken" secret:"true"`
 	APIBase          string        `json:"apiBase"`
 	SocketModeURL    string        `json:"socketModeUrl"`
 	DefaultChannelID string        `json:"defaultChannelId"`
@@ -489,7 +490,7 @@ type DiscordChannelConfig struct {
 	Enabled          bool          `json:"enabled"`
 	InboundPolicy    InboundPolicy `json:"inboundPolicy"`
 	OpenAccess       bool          `json:"openAccess"`
-	Token            string        `json:"token"`
+	Token            string        `json:"token" secret:"true"`
 	APIBase          string        `json:"apiBase"`
 	GatewayURL       string        `json:"gatewayUrl"`
 	DefaultChannelID string        `json:"defaultChannelId"`
@@ -503,7 +504,7 @@ type WhatsAppBridgeConfig struct {
 	InboundPolicy InboundPolicy `json:"inboundPolicy"`
 	OpenAccess    bool          `json:"openAccess"`
 	BridgeURL     string        `json:"bridgeUrl"`
-	BridgeToken   string        `json:"bridgeToken"`
+	BridgeToken   string        `json:"bridgeToken" secret:"true"`
 	DefaultTo     string        `json:"defaultTo"`
 	AllowedFrom   []string      `json:"allowedFrom"`
 }
@@ -527,13 +528,13 @@ type EmailChannelConfig struct {
 	IMAPPort            int           `json:"imapPort"`
 	IMAPUseSSL          bool          `json:"imapUseSSL"`
 	IMAPUsername        string        `json:"imapUsername"`
-	IMAPPassword        string        `json:"imapPassword"`
+	IMAPPassword        string        `json:"imapPassword" secret:"true"`
 	SMTPHost            string        `json:"smtpHost"`
 	SMTPPort            int           `json:"smtpPort"`
 	SMTPUseTLS          bool          `json:"smtpUseTLS"`
 	SMTPUseSSL          bool          `json:"smtpUseSSL"`
 	SMTPUsername        string        `json:"smtpUsername"`
-	SMTPPassword        string        `json:"smtpPassword"`
+	SMTPPassword        string        `json:"smtpPassword" secret:"true"`
 }
 
 // ChannelsConfig groups per-channel transport settings.
@@ -605,7 +606,7 @@ type ClawHubConfig struct {
 type WebhookConfig struct {
 	Enabled   bool   `json:"enabled"`
 	Addr      string `json:"addr"`
-	Secret    string `json:"secret"`
+	Secret    string `json:"secret" secret:"true"`
 	MaxBodyKB int    `json:"maxBodyKB"`
 }
 

@@ -87,6 +87,10 @@ func ApplyAutomaticFixes(cfgPath string, cfg *config.Config, report Report) ([]A
 				changedConfig = true
 				applied = append(applied, AppliedFix{ID: finding.ID, Summary: fmt.Sprintf("set %s inbound access to deny", channel)})
 			}
+		case "skills.trusted_owners_empty", "skills.trusted_registries_empty":
+			config.EnsureSkillsExecTrustPolicy(cfg)
+			changedConfig = true
+			applied = append(applied, AppliedFix{ID: finding.ID, Summary: "configured default local skill trust policy"})
 		}
 	}
 	if changedConfig {
@@ -113,6 +117,12 @@ func ApplyInteractiveChoice(cfg *config.Config, finding Finding, choice string, 
 		return false, fmt.Errorf("config required")
 	}
 	switch finding.ID {
+	case "profiles.empty", "profiles.no_mapping":
+		return applyDefaultAccessLevelChoice(cfg, choice), nil
+	case "profiles.public_ingress_without_profiles", "profiles.open_ingress_profile_missing":
+		return applyOpenChannelAccessLevelChoice(cfg, choice), nil
+	case "profiles.webhook_without_profiles", "profiles.webhook_effective_missing":
+		return applyWebhookAccessLevelChoice(cfg, choice), nil
 	case "channels.invalid_ingress":
 		return applyChannelIngressChoice(cfg, finding.Metadata["channel"], choice, allowlist), nil
 	case "service.secret_missing", "service.secret_weak":
@@ -198,6 +208,89 @@ func ApplyInteractiveChoice(cfg *config.Config, finding Finding, choice string, 
 		}
 	}
 	return false, nil
+}
+
+func applyDefaultAccessLevelChoice(cfg *config.Config, choice string) bool {
+	level := config.NormalizeAccessLevel(choice)
+	if level == "" {
+		return false
+	}
+	changed := config.SetDefaultAccessLevel(&cfg.Security.Profiles, level)
+	applyAccessLevelRuntimeRequirements(cfg, level)
+	return changed
+}
+
+func applyOpenChannelAccessLevelChoice(cfg *config.Config, choice string) bool {
+	level := config.NormalizeAccessLevel(choice)
+	if level == "" {
+		return false
+	}
+	config.EnsureBuiltinAccessProfiles(&cfg.Security.Profiles)
+	cfg.Security.Profiles.Enabled = true
+	changed := false
+	for _, channel := range openProfileChannels(cfg) {
+		if strings.TrimSpace(cfg.Security.Profiles.Channels[channel]) == "" {
+			cfg.Security.Profiles.Channels[channel] = level
+			changed = true
+		}
+	}
+	if !changed && strings.TrimSpace(cfg.Security.Profiles.Default) == "" {
+		cfg.Security.Profiles.Default = level
+		changed = true
+	}
+	if changed {
+		applyAccessLevelRuntimeRequirements(cfg, level)
+	}
+	return changed
+}
+
+func applyWebhookAccessLevelChoice(cfg *config.Config, choice string) bool {
+	level := config.NormalizeAccessLevel(choice)
+	if level == "" {
+		return false
+	}
+	config.EnsureBuiltinAccessProfiles(&cfg.Security.Profiles)
+	cfg.Security.Profiles.Enabled = true
+	cfg.Security.Profiles.Triggers["webhook"] = level
+	applyAccessLevelRuntimeRequirements(cfg, level)
+	return true
+}
+
+func applyAccessLevelRuntimeRequirements(cfg *config.Config, level string) {
+	switch config.NormalizeAccessLevel(level) {
+	case config.AccessLevelAdmin:
+		cfg.Service.MaxCapability = "privileged"
+		cfg.Hardening.GuardedTools = true
+		cfg.Hardening.PrivilegedTools = true
+		cfg.Tools.EnableExec = true
+	case config.AccessLevelOperator:
+		cfg.Service.MaxCapability = "guarded"
+		cfg.Hardening.GuardedTools = true
+		cfg.Tools.EnableExec = true
+	}
+}
+
+func openProfileChannels(cfg *config.Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	out := []string{}
+	if cfg.Channels.Telegram.Enabled && (cfg.Channels.Telegram.OpenAccess || strings.EqualFold(string(cfg.Channels.Telegram.InboundPolicy), "open")) {
+		out = append(out, "telegram")
+	}
+	if cfg.Channels.Slack.Enabled && (cfg.Channels.Slack.OpenAccess || strings.EqualFold(string(cfg.Channels.Slack.InboundPolicy), "open")) {
+		out = append(out, "slack")
+	}
+	if cfg.Channels.Discord.Enabled && (cfg.Channels.Discord.OpenAccess || strings.EqualFold(string(cfg.Channels.Discord.InboundPolicy), "open")) {
+		out = append(out, "discord")
+	}
+	if cfg.Channels.WhatsApp.Enabled && (cfg.Channels.WhatsApp.OpenAccess || strings.EqualFold(string(cfg.Channels.WhatsApp.InboundPolicy), "open")) {
+		out = append(out, "whatsapp")
+	}
+	if cfg.Channels.Email.Enabled && (cfg.Channels.Email.OpenAccess || strings.EqualFold(string(cfg.Channels.Email.InboundPolicy), "open")) {
+		out = append(out, "email")
+	}
+	return out
 }
 
 func applyChannelIngressChoice(cfg *config.Config, channel, choice string, allowlist []string) bool {

@@ -3,5 +3,15 @@
   "memoryVectorDims": 0,
   "currentEmbedFingerprint": "http://provider.example|text-embedding-3-small",
   "docIndexEnabled": false,
-  "docRootsConfigured": false
+  "docRootsConfigured": false,
+  "noteCount": 0,
+  "embeddedNoteCount": 0,
+  "vectorRowCount": 0,
+  "missingVectorCount": 0,
+  "fingerprintMismatchCount": 0,
+  "dirtyVectorCount": 0,
+  "activeDocCount": 0,
+  "inactiveDocCount": 0,
+  "docSyncPartial": false,
+  "searchMode": "hybrid"
 }

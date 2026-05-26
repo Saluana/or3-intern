@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"or3-intern/internal/agent"
 	"or3-intern/internal/agentcli"
 	"or3-intern/internal/controlplane"
 	"or3-intern/internal/db"
@@ -35,6 +36,7 @@ type runnerChatCreateSessionRequest struct {
 // runnerChatStartTurnRequest is the body for POST /runner-chat/sessions/:id/turns.
 type runnerChatStartTurnRequest struct {
 	UserMessage      string         `json:"user_message"`
+	Attachments      []map[string]any `json:"attachments"`
 	ContinuationMode string         `json:"continuation_mode"`
 	Model            string         `json:"model"`
 	Mode             string         `json:"mode"`
@@ -234,9 +236,15 @@ func (s *serviceServer) handleRunnerChatTurnStart(w http.ResponseWriter, r *http
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "user_message required"})
 		return
 	}
+	attachments := decodeServiceAttachments(req.Attachments)
+	if err := agent.ValidateChatAttachments(attachments); err != nil {
+		writeServiceError(w, r, http.StatusBadRequest, "invalid attachments", err)
+		return
+	}
 	startReq := agentcli.StartTurnRequest{
 		ContinuationMode: agentcli.ContinuationMode(strings.TrimSpace(req.ContinuationMode)),
 		UserMessage:      req.UserMessage,
+		Attachments:      attachments,
 		Model:            req.Model,
 		Mode:             req.Mode,
 		Isolation:        req.Isolation,

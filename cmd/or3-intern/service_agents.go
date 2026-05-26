@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"regexp"
@@ -84,6 +85,7 @@ func (s *serviceServer) runTurnJob(ctx context.Context, jobID string, req servic
 	log.Printf("service_turn: started job=%s session=%s trace=%s replay=%t", jobID, req.SessionKey, serviceMetaText(req.Meta, "trace_id"), req.ReplayToolCall != nil)
 	s.jobs.Publish(jobID, "started", serviceLifecyclePayload(req.SessionKey, req.Meta, map[string]any{"status": "running"}))
 	observer := &serviceObserver{ConversationObserver: s.jobs.Observer(jobID)}
+	profileName := s.effectiveServiceProfileName(req.ProfileName)
 	var err error
 	if req.ReplayToolCall != nil {
 		_, err = s.app().ReplayToolCall(ctx, app.ReplayToolCallRequest{
@@ -92,7 +94,7 @@ func (s *serviceServer) runTurnJob(ctx context.Context, jobID string, req servic
 			ArgumentsJSON: req.ReplayToolCall.ArgumentsJSON,
 			AllowedTools:  req.AllowedTools,
 			RestrictTools: req.RestrictTools,
-			ProfileName:   req.ProfileName,
+			ProfileName:   profileName,
 			Capability:    tools.CapabilityLevel(s.config.Service.MaxCapability),
 			ApprovalToken: req.ApprovalToken,
 			Actor:         identity.Actor,
@@ -103,10 +105,11 @@ func (s *serviceServer) runTurnJob(ctx context.Context, jobID string, req servic
 		err = s.app().RunTurn(ctx, app.TurnRequest{
 			SessionKey:    req.SessionKey,
 			Message:       req.Message,
+			Attachments:   req.Attachments,
 			Meta:          req.Meta,
 			AllowedTools:  req.AllowedTools,
 			RestrictTools: req.RestrictTools,
-			ProfileName:   req.ProfileName,
+			ProfileName:   profileName,
 			Capability:    tools.CapabilityLevel(s.config.Service.MaxCapability),
 			ApprovalToken: req.ApprovalToken,
 			Actor:         identity.Actor,
@@ -131,6 +134,19 @@ func (s *serviceServer) runTurnJob(ctx context.Context, jobID string, req servic
 		payload["empty_final_text_recovered"] = true
 	}
 	s.jobs.Complete(jobID, "completed", serviceLifecyclePayload(req.SessionKey, req.Meta, payload))
+}
+
+func (s *serviceServer) effectiveServiceProfileName(requested string) string {
+	if requested = strings.TrimSpace(requested); requested != "" {
+		return requested
+	}
+	if s == nil || !s.config.Security.Profiles.Enabled {
+		return ""
+	}
+	if profileName := strings.TrimSpace(s.config.Security.Profiles.Channels["service"]); profileName != "" {
+		return profileName
+	}
+	return strings.TrimSpace(s.config.Security.Profiles.Default)
 }
 
 func (s *serviceServer) startApprovedResumeJob(ctx context.Context, issued approval.IssuedApproval, identity serviceAuthIdentity) (string, error) {
@@ -163,6 +179,10 @@ func (s *serviceServer) startApprovedResumeJob(ctx context.Context, issued appro
 func (s *serviceServer) runApprovedResumeJob(ctx context.Context, jobID string, issued approval.IssuedApproval, identity serviceAuthIdentity) {
 	defer s.persistServiceJobSummary(context.Background(), jobID)
 	sessionKey := strings.TrimSpace(issued.Request.RequesterSessionID)
+	if strings.HasPrefix(sessionKey, "doctor-app-") && strings.TrimSpace(issued.Request.Type) == string(approval.SubjectToolQuota) {
+		s.runDoctorApprovedQuotaResumeJob(ctx, jobID, issued, identity)
+		return
+	}
 	meta := map[string]any{
 		"approval_request_id": issued.Request.ID,
 		"approved_resume":     true,
@@ -179,6 +199,12 @@ func (s *serviceServer) runApprovedResumeJob(ctx context.Context, jobID string, 
 	})
 	if err != nil {
 		log.Printf("service_approval: resume_error approval=%d job=%s session=%s public_code=%s", issued.Request.ID, jobID, sessionKey, agent.PublicErrorCode(err))
+		var approvalErr *tools.ApprovalRequiredError
+		if errors.As(err, &approvalErr) && s.deliverApprovedResumeApprovalRequired(ctx, issued.Request, approvalErr) {
+			s.completeTurnJobWithError(ctx, jobID, err, observer, sessionKey, meta)
+			return
+		}
+		s.deliverApprovedResumeCompletion(ctx, issued.Request, approvalResumeFailureMessage(err))
 		s.completeTurnJobWithError(ctx, jobID, err, observer, sessionKey, meta)
 		return
 	}
@@ -195,7 +221,89 @@ func (s *serviceServer) runApprovedResumeJob(ctx context.Context, jobID string, 
 		payload["empty_final_text_recovered"] = true
 	}
 	s.jobs.Complete(jobID, "completed", serviceLifecyclePayload(sessionKey, meta, payload))
+	s.deliverApprovedResumeCompletion(ctx, issued.Request, completionText)
 	log.Printf("service_approval: resume_completed approval=%d job=%s session=%s recovered_empty=%t final_preview=%q", issued.Request.ID, jobID, sessionKey, recoveredEmpty, boundedServiceLogPreview(completionText, 160))
+}
+
+func (s *serviceServer) deliverApprovedResumeApprovalRequired(ctx context.Context, fallbackReq db.ApprovalRequestRecord, approvalErr *tools.ApprovalRequiredError) bool {
+	if s == nil || s.channelDeliverer == nil || approvalErr == nil {
+		return false
+	}
+	req, text := approvalRequiredContinuationPrompt(ctx, s.broker, fallbackReq, approvalErr)
+	requester := approval.RequesterContextFromJSON(req.RequesterContextJSON)
+	if !isApprovalExternalChannel(requester.Channel) {
+		return false
+	}
+	to := strings.TrimSpace(requester.ReplyTarget)
+	if to == "" {
+		to = strings.TrimSpace(requester.From)
+	}
+	if to == "" || strings.TrimSpace(text) == "" {
+		return false
+	}
+	if err := s.channelDeliverer.DeliverWithMeta(ctx, requester.Channel, to, text, approvalDeliveryMeta(requester)); err != nil {
+		log.Printf("service_approval: channel_delivery_failed approval=%d channel=%s err=%v", approvalErr.RequestID, requester.Channel, err)
+		return false
+	}
+	return true
+}
+
+func (s *serviceServer) deliverApprovedResumeCompletion(ctx context.Context, req db.ApprovalRequestRecord, text string) {
+	if s == nil || s.channelDeliverer == nil || strings.TrimSpace(text) == "" {
+		return
+	}
+	requester := approval.RequesterContextFromJSON(req.RequesterContextJSON)
+	if !isApprovalExternalChannel(requester.Channel) {
+		return
+	}
+	to := strings.TrimSpace(requester.ReplyTarget)
+	if to == "" {
+		to = strings.TrimSpace(requester.From)
+	}
+	if to == "" {
+		return
+	}
+	if err := s.channelDeliverer.DeliverWithMeta(ctx, requester.Channel, to, text, approvalDeliveryMeta(requester)); err != nil {
+		log.Printf("service_approval: channel_delivery_failed approval=%d channel=%s err=%v", req.ID, requester.Channel, err)
+	}
+}
+
+func approvalResumeFailureMessage(err error) string {
+	code := agent.PublicErrorCode(err)
+	if code == "" {
+		code = agent.PublicErrorUnknown
+	}
+	return "Approval was accepted, but continuing the request failed (" + code + "). Please retry or review it in the OR3 app."
+}
+
+func isApprovalExternalChannel(channel string) bool {
+	switch strings.ToLower(strings.TrimSpace(channel)) {
+	case "telegram", "discord", "slack", "whatsapp", "email":
+		return true
+	default:
+		return false
+	}
+}
+
+func approvalDeliveryMeta(requester approval.RequesterContext) map[string]any {
+	meta := map[string]any{}
+	for key, value := range requester.ReplyMeta {
+		meta[key] = value
+	}
+	if strings.TrimSpace(requester.ReplyTarget) != "" {
+		switch strings.ToLower(strings.TrimSpace(requester.Channel)) {
+		case "telegram", "whatsapp":
+			meta["chat_id"] = requester.ReplyTarget
+		case "slack", "discord":
+			meta["channel_id"] = requester.ReplyTarget
+		case "email":
+			meta["sender_email"] = requester.ReplyTarget
+		}
+	}
+	if len(meta) == 0 {
+		return nil
+	}
+	return meta
 }
 
 func (s *serviceServer) completeTurnJobWithError(ctx context.Context, jobID string, err error, observer *serviceObserver, sessionKey string, meta map[string]any) {
@@ -358,7 +466,12 @@ func (s *serviceServer) handleArtifacts(w http.ResponseWriter, r *http.Request) 
 	if !requireServiceRole(w, r, approval.RoleOperator) {
 		return
 	}
-	if r.Method != http.MethodGet {
+	switch r.Method {
+	case http.MethodPost:
+		s.handleArtifactUpload(w, r)
+		return
+	case http.MethodGet:
+	default:
 		writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 		return
 	}
@@ -415,6 +528,63 @@ func (s *serviceServer) handleArtifacts(w http.ResponseWriter, r *http.Request) 
 		"read_bytes": result.ReadBytes,
 		"truncated":  result.Truncated,
 		"content":    result.Content,
+	})
+}
+
+func (s *serviceServer) handleArtifactUpload(w http.ResponseWriter, r *http.Request) {
+	if s.runtime == nil || s.runtime.Artifacts == nil {
+		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "artifacts unavailable"})
+		return
+	}
+	const maxUploadBytes = 8 << 20
+	if err := r.ParseMultipartForm(maxUploadBytes); err != nil {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid multipart form"})
+		return
+	}
+	sessionKey := serviceFirstNonEmpty(r.FormValue("session_key"), r.FormValue("sessionKey"))
+	if sessionKey == "" {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "session_key is required"})
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "file is required"})
+		return
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxUploadBytes+1))
+	if err != nil {
+		writeServiceError(w, r, http.StatusInternalServerError, "artifact upload read failed", err)
+		return
+	}
+	if len(data) > maxUploadBytes {
+		writeServiceJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"error": "file too large"})
+		return
+	}
+	filename := "attachment"
+	mimeType := "application/octet-stream"
+	if header != nil {
+		if name := strings.TrimSpace(header.Filename); name != "" {
+			filename = name
+		}
+		if header.Header != nil {
+			if mt := strings.TrimSpace(header.Header.Get("Content-Type")); mt != "" {
+				mimeType = mt
+			}
+		}
+	}
+	att, err := s.runtime.Artifacts.SaveNamed(r.Context(), sessionKey, filename, mimeType, data)
+	if err != nil {
+		writeServiceError(w, r, http.StatusInternalServerError, "artifact upload failed", err)
+		return
+	}
+	writeServiceJSON(w, http.StatusCreated, map[string]any{
+		"id":          att.ArtifactID,
+		"artifact_id": att.ArtifactID,
+		"name":        att.Filename,
+		"mime_type":   att.Mime,
+		"size_bytes":  att.SizeBytes,
+		"kind":        att.Kind,
 	})
 }
 
@@ -700,6 +870,7 @@ type serviceObserver struct {
 	lastToolStatus        string
 	lastToolError         string
 	lastToolResultPreview string
+	lastToolResult        string
 	lastToolCallID        string
 	lastApprovalID        int64
 }
@@ -724,6 +895,7 @@ func (o *serviceObserver) OnToolResult(ctx context.Context, name string, out str
 	o.sawToolResult = true
 	o.lastToolName = strings.TrimSpace(name)
 	o.lastToolStatus = "completed"
+	o.lastToolResult = boundedServiceLogPreview(out, 16384)
 	o.lastToolResultPreview = boundedServiceLogPreview(out, 180)
 	if err != nil {
 		o.lastToolError = err.Error()
@@ -748,8 +920,10 @@ func (o *serviceObserver) OnToolLifecycle(ctx context.Context, event agent.ToolL
 		o.sawToolResult = true
 	}
 	if event.ResultPreview != "" {
+		o.lastToolResult = boundedServiceLogPreview(event.ResultPreview, 16384)
 		o.lastToolResultPreview = boundedServiceLogPreview(event.ResultPreview, 180)
 	} else if event.Result != "" {
+		o.lastToolResult = boundedServiceLogPreview(event.Result, 16384)
 		o.lastToolResultPreview = boundedServiceLogPreview(event.Result, 180)
 	}
 	if event.ApprovalID > 0 {
@@ -800,6 +974,15 @@ func (o *serviceObserver) emptyFinalTextFallback() (string, bool) {
 	}
 	switch strings.TrimSpace(o.lastToolStatus) {
 	case "failed", "error":
+		unavailableDetail := strings.ToLower(firstNonEmptyString(o.lastToolError, o.lastToolResultPreview))
+		if tools.IsToolNotAvailableThisTurn(unavailableDetail) {
+			if strings.EqualFold(toolName, tools.ToolNameExec) {
+				return "I tried to run a shell command, but the Admin Assistant is intentionally limited to dedicated Doctor tools for safety. No command was run. Ask again and I will use Doctor status/config tools instead of exec.", true
+			}
+			if tools.IsWriteToolName(toolName) {
+				return "I can't create or modify files in Ask mode (read-only). Switch to Work mode if you'd like me to write that file for you, or I can paste the content here for you to save manually.", true
+			}
+		}
 		message := fmt.Sprintf("The tool failed, and the model did not return a final message. Last tool: %s.", toolName)
 		if detail := strings.TrimSpace(firstNonEmptyString(o.lastToolError, o.lastToolResultPreview)); detail != "" {
 			message += " " + boundedServiceLogPreview(detail, 220)
@@ -811,6 +994,9 @@ func (o *serviceObserver) emptyFinalTextFallback() (string, bool) {
 		}
 		return fmt.Sprintf("The tool still needs approval before it can continue. Last tool: %s.", toolName), true
 	default:
+		if text, ok := doctorEmptyFinalSummaryFromToolResult(toolName, o.lastToolResult); ok {
+			return text, true
+		}
 		return fmt.Sprintf("The tool finished, but the model did not return a final message. Last tool: %s.", toolName), true
 	}
 }

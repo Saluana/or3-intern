@@ -456,8 +456,12 @@ func TestRuntime_Handle_UnavailableLegacyToolMarkupRetriesWithoutToolError(t *te
 		t.Fatalf("GetLastMessages: %v", err)
 	}
 	for _, msg := range msgs {
-		if msg.Role == "tool" || strings.Contains(msg.Content, "tool 'memory' not found") {
-			t.Fatalf("expected unavailable markup not to produce a tool error, got %#v", msgs)
+		if msg.Role != "tool" {
+			continue
+		}
+		result, ok := tools.DecodeToolResult(msg.Content)
+		if !ok || result.OK || !strings.Contains(strings.Join(result.Advice, " "), "not available") {
+			t.Fatalf("expected structured unavailable tool result, got %#v", msgs)
 		}
 	}
 }
@@ -665,7 +669,7 @@ func TestRuntime_Handle_PruneUsesContextManagerCompactionWithoutDeletingHistory(
 		t.Fatalf("BuildPromptSnapshot: %v", err)
 	}
 	systemText := contentToString(snapshot[0].Content)
-	if !strings.Contains(systemText, "compacted_chat_context") || !strings.Contains(systemText, "continue with the current pruning design") {
+	if !strings.Contains(systemText, "context_compaction") || !strings.Contains(systemText, "continue with the current pruning design") {
 		t.Fatalf("expected compaction summary in prompt, got %s", systemText)
 	}
 	for _, msg := range snapshot {
@@ -786,8 +790,8 @@ func TestRuntime_Handle_UserMessageInjectsTaskCardBeforePrompt(t *testing.T) {
 		t.Fatal("expected captured provider request")
 	}
 	systemText := contentToString(captured.Messages[0].Content)
-	if !strings.Contains(systemText, "active_task_card:") || !strings.Contains(systemText, "Goal: ship the task card audit fix") {
-		t.Fatalf("expected active task card in system prompt, got %s", systemText)
+	if !strings.Contains(systemText, "ship the task card audit fix") {
+		t.Fatalf("expected current user request in system prompt, got %s", systemText)
 	}
 }
 
@@ -1872,8 +1876,9 @@ func TestRuntime_ApprovalRequiredStillPausesWhenNarrationFails(t *testing.T) {
 		t.Fatal("expected persisted history")
 	}
 	last := pp.History[len(pp.History)-1]
-	if last.Role != "tool" {
-		t.Fatalf("expected last persisted message to remain the blocked tool result, got %#v", last)
+	content, ok := last.Content.(string)
+	if last.Role != "assistant" || !ok || !strings.Contains(content, "Reply `/approve 42`") {
+		t.Fatalf("expected persisted deterministic approval prompt, got %#v", last)
 	}
 }
 
@@ -3220,6 +3225,26 @@ func TestDynamicToolExposureRespectsProfileAllowlist(t *testing.T) {
 	}
 	if toolDefsContain(defs, "list_dir") {
 		t.Fatalf("expected profile-disallowed tool to be hidden, got %#v", defs)
+	}
+}
+
+func TestResolveBuiltinAccessProfileExpandsWorkspace(t *testing.T) {
+	workspace := t.TempDir()
+	profiles := config.AccessProfilesConfig{}
+	config.SetChannelAccessLevel(&profiles, "telegram", "operator")
+	rt := &Runtime{AccessProfiles: profiles, WorkspaceDir: workspace}
+	profile, ok := rt.resolveProfile("operator")
+	if !ok {
+		t.Fatal("expected operator profile to resolve")
+	}
+	if profile.MaxCapability != tools.CapabilityGuarded {
+		t.Fatalf("expected guarded capability, got %s", profile.MaxCapability)
+	}
+	if _, ok := profile.AllowedTools[tools.ToolNameDeleteFile]; !ok {
+		t.Fatalf("expected delete_file to be allowed, got %#v", profile.AllowedTools)
+	}
+	if len(profile.WritablePaths) != 1 || profile.WritablePaths[0] != workspace {
+		t.Fatalf("expected workspace writable path, got %#v", profile.WritablePaths)
 	}
 }
 

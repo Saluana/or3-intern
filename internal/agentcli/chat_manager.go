@@ -42,6 +42,8 @@ type StartTurnRequest struct {
 	AppSessionKey    string
 	RunnerID         string
 	UserMessage      string
+	Attachments      []agent.ChatAttachment
+	PromptMessage    string
 	ContinuationMode ContinuationMode
 	Model            string
 	Mode             string
@@ -50,6 +52,8 @@ type StartTurnRequest struct {
 	MaxTurns         int
 	TimeoutSeconds   int
 	Meta             map[string]any
+	AllowedTools     []string
+	RestrictTools    bool
 	ApprovalToken    string
 	RunnerPermission *RunnerPermissionRequest
 }
@@ -148,6 +152,10 @@ func (cm *ChatManager) StartTurn(ctx context.Context, sessionID string, req Star
 	if userMessage == "" {
 		return StartTurnResult{}, errors.New("user_message required")
 	}
+	promptMessage := strings.TrimSpace(req.PromptMessage)
+	if promptMessage == "" {
+		promptMessage = userMessage
+	}
 	approvedPermission, err := cm.approvedRunnerPermission(ctx, sess, req)
 	if err != nil {
 		return StartTurnResult{}, err
@@ -160,7 +168,7 @@ func (cm *ChatManager) StartTurn(ctx context.Context, sessionID string, req Star
 		if err != nil {
 			return StartTurnResult{}, fmt.Errorf("list turns: %w", err)
 		}
-		prompt = BuildReplayPrompt(toAgentcliHistory(history), userMessage)
+		prompt = BuildReplayPrompt(toAgentcliHistory(history), promptMessage)
 	}
 
 	// Insert the new turn row (status=queued). UNIQUE partial index enforces
@@ -187,6 +195,9 @@ func (cm *ChatManager) StartTurn(ctx context.Context, sessionID string, req Star
 		"runner_chat_session_id": sess.ID,
 		"runner_chat_turn_id":    turn.ID,
 		"continuation_mode":      string(req.ContinuationMode),
+	}
+	if len(req.Attachments) > 0 {
+		userPayload["attachments"] = agent.ChatAttachmentsForMeta(req.Attachments)
 	}
 	userMsgID, err := cm.appendMessage(ctx, sess.AppSessionKey, "user", userMessage, userPayload)
 	if err != nil {
@@ -226,10 +237,16 @@ func (cm *ChatManager) StartTurn(ctx context.Context, sessionID string, req Star
 	if approvedPermission != nil {
 		agentMeta["runner_permission"] = runnerPermissionToMap(*approvedPermission)
 	}
+	if len(req.AllowedTools) > 0 {
+		agentMeta["doctor_allowed_tools"] = append([]string{}, req.AllowedTools...)
+	}
+	if req.RestrictTools {
+		agentMeta["doctor_restrict_tools"] = true
+	}
 	agentReq := AgentRunRequest{
 		ParentSessionKey: sess.AppSessionKey,
 		RunnerID:         sess.RunnerID,
-		Task:             firstNonEmptyStr(prompt, userMessage),
+		Task:             firstNonEmptyStr(prompt, promptMessage),
 		Cwd:              turn.Cwd,
 		Model:            turn.Model,
 		Mode:             turn.Mode,
@@ -237,6 +254,16 @@ func (cm *ChatManager) StartTurn(ctx context.Context, sessionID string, req Star
 		MaxTurns:         maxTurns,
 		TimeoutSeconds:   req.TimeoutSeconds,
 		Meta:             agentMeta,
+		AllowedTools:     append([]string{}, req.AllowedTools...),
+		RestrictTools:    req.RestrictTools,
+	}
+	if err := ValidateDoctorAgentRunRequest(agentReq); err != nil {
+		_ = cm.DB.FinalizeRunnerChatTurn(context.Background(), turn.ID, db.RunnerChatTurnFinalize{
+			Status:       db.RunnerChatTurnStatusFailed,
+			ErrorMessage: err.Error(),
+			CompletedAt:  db.NowMS(),
+		})
+		return StartTurnResult{}, err
 	}
 	run, err := cm.Manager.Enqueue(ctx, agentReq)
 	if err != nil {

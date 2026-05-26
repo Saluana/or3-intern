@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"or3-intern/internal/config"
+	"or3-intern/internal/configedit"
 )
 
 type initProviderPreset struct {
@@ -76,23 +77,7 @@ func defaultProviderChoice(apiBase string) string {
 }
 
 func applyProviderPreset(cfg *config.Config, choice string) {
-	preset, ok := initProviderPresets[choice]
-	if !ok || cfg == nil {
-		return
-	}
-	cfg.Provider.APIBase = preset.apiBase
-	cfg.Provider.Model = preset.model
-	cfg.Provider.EmbedModel = preset.embedModel
-	providerKey := configureProviderKeyFromBase(preset.apiBase)
-	if cfg.ModelRouting.Chat.Primary.Provider == "" || choice != "3" {
-		cfg.ModelRouting.Chat.Primary = config.ModelRef{Provider: providerKey, Model: preset.model}
-		cfg.ModelRouting.Agents.Primary = cfg.ModelRouting.Chat.Primary
-		cfg.ModelRouting.Subagents.Primary = cfg.ModelRouting.Chat.Primary
-		cfg.ModelRouting.Summarization.Primary = cfg.ModelRouting.Chat.Primary
-		cfg.ModelRouting.ContextManager.Primary = cfg.ModelRouting.Chat.Primary
-		cfg.ModelRouting.Embeddings.Primary = config.ModelRef{Provider: providerKey, Model: preset.embedModel}
-	}
-	setProviderProfileAPIBase(cfg, providerKey, preset.apiBase)
+	configedit.ApplyProviderPreset(cfg, choice)
 }
 
 func promptChoice(reader *bufio.Reader, out io.Writer, label string, options []string, defaultChoice string) (string, error) {

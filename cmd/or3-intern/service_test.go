@@ -43,6 +43,20 @@ func (m *fakeServiceMCPTestManager) Connect(context.Context) error {
 	return m.connectErr
 }
 
+func TestServiceServerEffectiveServiceProfileNameUsesServiceChannel(t *testing.T) {
+	cfg := config.Default()
+	cfg.Security.Profiles.Enabled = true
+	cfg.Security.Profiles.Default = "reader"
+	cfg.Security.Profiles.Channels = map[string]string{"service": "admin"}
+	server := &serviceServer{config: cfg}
+	if got := server.effectiveServiceProfileName(""); got != "admin" {
+		t.Fatalf("expected service channel profile, got %q", got)
+	}
+	if got := server.effectiveServiceProfileName("operator"); got != "operator" {
+		t.Fatalf("expected explicit profile to win, got %q", got)
+	}
+}
+
 func (m *fakeServiceMCPTestManager) Close() error {
 	return m.closeErr
 }
@@ -141,6 +155,70 @@ func TestServiceObserver_RecoversEmptyFinalTextAfterToolWork(t *testing.T) {
 	}
 	if !strings.Contains(finalText, "tool finished") || !strings.Contains(finalText, "exec") {
 		t.Fatalf("expected visible fallback final text, got %q", finalText)
+	}
+}
+
+func TestServiceObserver_RecoversDoctorConfigSearchWithoutModelFinalText(t *testing.T) {
+	raw := encodeDoctorToolResult("doctor_config_search", true, "Found 1 Doctor-safe config fields.", map[string]any{
+		"count": 1,
+		"fields": []map[string]any{
+			{
+				"label":       "Default Model",
+				"key":         "model",
+				"path":        "provider.model",
+				"description": "The default model to use for chat and agents",
+				"current_value": map[string]any{
+					"value":   "nvidia/nemotron-3-super-120b-a12b:free",
+					"present": true,
+				},
+			},
+		},
+	})
+	observer := &serviceObserver{}
+	observer.OnToolResult(context.Background(), "doctor_config_search", raw, nil)
+
+	finalText, recovered := observer.finalTextForCompletion("")
+	if !recovered {
+		t.Fatal("expected empty final text to be recovered after doctor_config_search")
+	}
+	if !strings.Contains(finalText, "Default Model") || !strings.Contains(finalText, "nvidia/nemotron-3-super-120b-a12b:free") {
+		t.Fatalf("expected synthesized model answer, got %q", finalText)
+	}
+}
+
+func TestServiceObserver_RecoversUnavailableWriteFileWithAskModeGuidance(t *testing.T) {
+	observer := &serviceObserver{}
+	observer.OnToolLifecycle(context.Background(), agent.ToolLifecycleEvent{
+		ToolCallID:    "call_write",
+		Name:          "write_file",
+		Status:        "failed",
+		ResultPreview: "tool not available in this turn",
+	})
+
+	finalText, recovered := observer.finalTextForCompletion("")
+	if !recovered {
+		t.Fatal("expected empty final text to be recovered after unavailable write_file")
+	}
+	if !strings.Contains(finalText, "Ask mode") || !strings.Contains(finalText, "Work mode") {
+		t.Fatalf("expected Ask-mode write guidance, got %q", finalText)
+	}
+}
+
+func TestServiceObserver_RecoversUnavailableExecWithDoctorGuidance(t *testing.T) {
+	observer := &serviceObserver{}
+	observer.OnToolLifecycle(context.Background(), agent.ToolLifecycleEvent{
+		ToolCallID:    "call_exec",
+		Name:          "exec",
+		Status:        "failed",
+		ResultPreview: "tool not available in this turn",
+	})
+
+	finalText, recovered := observer.finalTextForCompletion("")
+	if !recovered {
+		t.Fatal("expected empty final text to be recovered after unavailable exec")
+	}
+	if !strings.Contains(finalText, "No command was run") || !strings.Contains(finalText, "Doctor status/config tools") {
+		t.Fatalf("expected Doctor-safe exec guidance, got %q", finalText)
 	}
 }
 
@@ -587,6 +665,45 @@ func TestServiceBrowserMiddleware_AllowsLoopbackPreflight(t *testing.T) {
 	}
 }
 
+func TestServiceBrowserMiddleware_AllowsPrivateNetworkPreflight(t *testing.T) {
+	cfg := config.Config{Service: config.ServiceConfig{
+		Listen:                "100.64.0.42:9100",
+		TrustedBrowserOrigins: []string{"http://100.64.0.42:3060"},
+		TrustedBrowserCIDRs:   []string{"100.64.0.0/10"},
+	}}
+	called := false
+	handler := serviceBrowserMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true})
+	}))
+
+	req := httptest.NewRequest(http.MethodOptions, "/internal/v1/doctor/run", nil)
+	req.RemoteAddr = "100.64.0.42:54321"
+	req.Header.Set("Origin", "http://100.64.0.42:3060")
+	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	req.Header.Set("Access-Control-Request-Headers", "authorization,content-type,x-trace-id")
+	req.Header.Set("Access-Control-Request-Private-Network", "true")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if called {
+		t.Fatal("expected private-network preflight to short-circuit before downstream handler")
+	}
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 preflight response, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "http://100.64.0.42:3060" {
+		t.Fatalf("expected allow-origin header, got %q", got)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Private-Network"); got != "true" {
+		t.Fatalf("expected private network allow header, got %q", got)
+	}
+	if got := strings.ToLower(rec.Header().Get("Access-Control-Allow-Headers")); !strings.Contains(got, "x-trace-id") {
+		t.Fatalf("expected allow-headers to include x-trace-id, got %q", got)
+	}
+}
+
 func TestServiceBrowserMiddleware_AddsLoopbackCORSHeadersToRequests(t *testing.T) {
 	cfg := config.Config{Service: config.ServiceConfig{Listen: "127.0.0.1:9100"}}
 	handler := serviceBrowserMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -608,6 +725,105 @@ func TestServiceBrowserMiddleware_AddsLoopbackCORSHeadersToRequests(t *testing.T
 	}
 	if got := rec.Header().Get("Access-Control-Expose-Headers"); !strings.Contains(got, "X-Request-Id") {
 		t.Fatalf("expected expose headers to include X-Request-Id, got %q", got)
+	}
+	if got := rec.Header().Get("Access-Control-Expose-Headers"); !strings.Contains(got, "X-Trace-Id") {
+		t.Fatalf("expected expose headers to include X-Trace-Id, got %q", got)
+	}
+}
+
+func TestServiceBrowserMiddleware_AllowsLoopbackBrowserOriginEvenWhenServiceIsPrivateNetwork(t *testing.T) {
+	cfg := config.Config{Service: config.ServiceConfig{Listen: "0.0.0.0:9100"}}
+	handler := serviceBrowserMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeServiceJSON(w, http.StatusAccepted, map[string]any{"ok": true})
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/internal/v1/health", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("Origin", "http://localhost:3060")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected downstream handler response, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:3060" {
+		t.Fatalf("expected allow-origin header, got %q", got)
+	}
+}
+
+func TestServiceBrowserMiddleware_AllowsPrivateNetworkPublicHealthOriginWithoutManualAllowlist(t *testing.T) {
+	cfg := config.Config{Service: config.ServiceConfig{Listen: "0.0.0.0:9100"}}
+	handler := serviceBrowserMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeServiceJSON(w, http.StatusAccepted, map[string]any{"ok": true})
+	}))
+
+	req := httptest.NewRequest(http.MethodOptions, "/internal/v1/health", nil)
+	req.RemoteAddr = "192.168.1.42:54321"
+	req.Header.Set("Origin", "https://app.example.test")
+	req.Header.Set("Access-Control-Request-Method", http.MethodGet)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 preflight response, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://app.example.test" {
+		t.Fatalf("expected allow-origin header, got %q", got)
+	}
+}
+
+func TestServiceBrowserMiddleware_AllowsPrivateNetworkAuthenticatedOriginWithoutManualAllowlist(t *testing.T) {
+	cfg := config.Config{Service: config.ServiceConfig{Listen: "0.0.0.0:9100"}}
+	handler := serviceBrowserMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeServiceJSON(w, http.StatusAccepted, map[string]any{"ok": true})
+	}))
+
+	req := httptest.NewRequest(http.MethodOptions, "/internal/v1/devices", nil)
+	req.RemoteAddr = "192.168.1.42:54321"
+	req.Header.Set("Origin", "https://app.example.test")
+	req.Header.Set("Access-Control-Request-Method", http.MethodGet)
+	req.Header.Set("Access-Control-Request-Headers", "authorization,x-or3-session")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 preflight response, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://app.example.test" {
+		t.Fatalf("expected allow-origin header, got %q", got)
+	}
+	if got := strings.ToLower(rec.Header().Get("Access-Control-Allow-Headers")); !strings.Contains(got, "authorization") {
+		t.Fatalf("expected allow-headers to include authorization, got %q", got)
+	}
+}
+
+func TestAllowsUnauthenticatedPairingRoute_AllowsLoopbackProxyWhenServiceIsPrivateNetwork(t *testing.T) {
+	cfg := config.Config{Service: config.ServiceConfig{
+		Listen:                      "0.0.0.0:9100",
+		AllowUnauthenticatedPairing: true,
+	}}
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/secure-connections/pairing/approve", strings.NewReader(`{}`))
+	req.RemoteAddr = "127.0.0.1:54321"
+
+	if !allowsUnauthenticatedPairingRoute(cfg, req) {
+		t.Fatal("expected loopback proxy request to be allowed for unauthenticated secure pairing")
+	}
+}
+
+func TestAllowsUnauthenticatedPairingRoute_AllowsPrivateNetworkSecurePairing(t *testing.T) {
+	cfg := config.Config{Service: config.ServiceConfig{
+		Listen:                      "0.0.0.0:9100",
+		AllowUnauthenticatedPairing: true,
+	}}
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/secure-connections/pairing/approve", strings.NewReader(`{}`))
+	req.RemoteAddr = "192.168.1.42:54321"
+	req.Header.Set("Origin", "https://app.example.test")
+
+	if !allowsUnauthenticatedPairingRoute(cfg, req) {
+		t.Fatal("expected private-network secure pairing request to be allowed without manual trusted-origin setup")
 	}
 }
 
@@ -693,7 +909,7 @@ func TestServiceBrowserMiddleware_AllowsOpaqueElectronOriginFromLoopback(t *test
 
 func TestServiceBrowserMiddleware_DoesNotAllowOpaquePairingPreflight(t *testing.T) {
 	cfg := config.Config{Service: config.ServiceConfig{
-		Listen:                       "127.0.0.1:9100",
+		Listen:                      "127.0.0.1:9100",
 		AllowUnauthenticatedPairing: true,
 	}}
 	handler := serviceBrowserMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1648,6 +1864,16 @@ metadata:
 `), 0o644); err != nil {
 		t.Fatalf("write skill: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(skillDir, "skill.diagnostic.yaml"), []byte(`version: 1
+checks:
+  - id: env-key
+    kind: env
+    label: API key
+    summary: API key env is configured
+    env_key: DEMO_API_KEY
+`), 0o644); err != nil {
+		t.Fatalf("write skill diagnostic manifest: %v", err)
+	}
 	cfg.Skills.Load.GlobalDir = globalRoot
 	if err := config.Save(cfgPath, cfg); err != nil {
 		t.Fatalf("seed config: %v", err)
@@ -1672,6 +1898,9 @@ metadata:
 	}
 	if len(listBody.Items) != 1 || listBody.Items[0].Name != "demo" || listBody.Items[0].Source != string(skills.SourceGlobal) {
 		t.Fatalf("expected demo global skill, got %#v", listBody.Items)
+	}
+	if !listBody.Items[0].DiagnosticAvailable || listBody.Items[0].DiagnosticStatus != "available" {
+		t.Fatalf("expected diagnostic metadata in list response, got %#v", listBody.Items[0])
 	}
 
 	reqBody := strings.NewReader(`{"enabled":false,"apiKey":"secret-value","config":{"demo.enabled":true}}`)
@@ -3985,7 +4214,14 @@ func TestServiceApprovals_AllowlistsCRUD(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected allowlist item payload, got %#v", added)
 	}
-	id := int64(item["ID"].(float64))
+	idValue, ok := item["id"].(float64)
+	if !ok {
+		idValue, ok = item["ID"].(float64)
+	}
+	if !ok {
+		t.Fatalf("expected allowlist id in payload, got %#v", item)
+	}
+	id := int64(idValue)
 
 	listReq := mustServiceRequest(t, httpServer, secret, http.MethodGet, "/internal/v1/approvals/allowlists?domain=exec", "")
 	listResp, err := httpServer.Client().Do(listReq)

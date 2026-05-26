@@ -81,10 +81,18 @@ func defaultAgentCLIPathAppend() string {
 			filepath.Join(home, ".opencode", "bin"),
 			filepath.Join(home, ".bun", "bin"),
 			filepath.Join(home, ".npm-global", "bin"),
+			filepath.Join(home, ".volta", "bin"),
+			filepath.Join(home, ".asdf", "shims"),
+			filepath.Join(home, ".mise", "shims"),
+			filepath.Join(home, "Library", "pnpm"),
+			filepath.Join(home, ".local", "share", "pnpm"),
 			filepath.Join(home, ".local", "bin"),
 			filepath.Join(home, "go", "bin"),
 			filepath.Join(home, ".cargo", "bin"),
 		)
+		if matches, err := filepath.Glob(filepath.Join(home, ".nvm", "versions", "node", "*", "bin")); err == nil {
+			dirs = append(dirs, matches...)
+		}
 	}
 	dirs = append(dirs,
 		"/opt/homebrew/bin",

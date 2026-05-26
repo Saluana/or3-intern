@@ -1,0 +1,9 @@
+version: 1
+checks:
+  - id: provider_key
+    kind: api_key
+    label: Provider key
+    summary: Model provider key is configured
+    severity: warning
+redactions:
+  config_keys: [api_key]

@@ -70,6 +70,29 @@ func TestMemorySetPinned_EmptyKey(t *testing.T) {
 	}
 }
 
+func TestMemorySetPinned_RejectsSecretLikeContent(t *testing.T) {
+	d := makeMemoryTestDB(t)
+	tool := &MemorySetPinned{DB: d}
+	_, err := tool.Execute(context.Background(), map[string]any{
+		"key":     "api_rule",
+		"content": "api_key=sk-live-abcdef0123456789",
+	})
+	if err == nil {
+		t.Fatal("expected secret rejection")
+	}
+}
+
+func TestMemoryAddNote_RejectsOversizedText(t *testing.T) {
+	d := makeMemoryTestDB(t)
+	tool := &MemoryAddNote{DB: d, Provider: nil}
+	_, err := tool.Execute(context.Background(), map[string]any{
+		"text": strings.Repeat("x", 9000),
+	})
+	if err == nil {
+		t.Fatal("expected size rejection before provider call")
+	}
+}
+
 func TestMemorySetPinned_EmptyContent(t *testing.T) {
 	d := makeMemoryTestDB(t)
 	tool := &MemorySetPinned{DB: d}
@@ -304,10 +327,13 @@ func TestMemorySearch_EmbedFails(t *testing.T) {
 	c := providers.New(srv.URL, "key", 10*time.Second)
 	c.HTTP = srv.Client()
 
-	tool := &MemorySearch{DB: d, Provider: c, EmbedModel: "model", TopK: 5}
-	_, err := tool.Execute(context.Background(), map[string]any{"query": "test"})
-	if err == nil {
-		t.Fatal("expected error when embed fails")
+	tool := &MemorySearch{DB: d, Provider: c, EmbedModel: "model", TopK: 5, FTSK: 5}
+	out, err := tool.Execute(context.Background(), map[string]any{"query": "test"})
+	if err != nil {
+		t.Fatalf("expected FTS fallback when embed fails: %v", err)
+	}
+	if !strings.Contains(out, "semantic search unavailable") {
+		t.Fatalf("expected embed fallback warning, got %q", out)
 	}
 }
 

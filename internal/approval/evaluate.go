@@ -118,8 +118,10 @@ func (b *Broker) evaluateWithMode(ctx context.Context, subjectType SubjectType, 
 	if dec, ok := b.checkPolicyMode(ctx, subjectType, sh, mode); ok {
 		return dec, nil
 	}
-	if dec, ok := b.checkAllowlist(ctx, subjectType, scope, matcher, sh, mode); ok {
-		return dec, nil
+	if mode == config.ApprovalModeAllowlist {
+		if dec, ok := b.checkAllowlist(ctx, subjectType, scope, matcher, sh, mode); ok {
+			return dec, nil
+		}
 	}
 	return b.requireApproval(ctx, subjectType, subject, sh, scope, mode)
 }
@@ -162,7 +164,7 @@ func (b *Broker) checkPolicyMode(ctx context.Context, subjectType SubjectType, s
 }
 
 func (b *Broker) checkAllowlist(ctx context.Context, subjectType SubjectType, scope AllowlistScope, matcher any, sh SubjectHash, mode config.ApprovalMode) (Decision, bool) {
-	if mode != config.ApprovalModeAsk && mode != config.ApprovalModeAllowlist {
+	if mode != config.ApprovalModeAllowlist {
 		return Decision{}, false
 	}
 	matched, err := b.allowlistMatches(ctx, subjectType, scope, matcher)
@@ -178,22 +180,16 @@ func (b *Broker) checkAllowlist(ctx context.Context, subjectType SubjectType, sc
 
 func (b *Broker) requireApproval(ctx context.Context, subjectType SubjectType, subject any, sh SubjectHash, scope AllowlistScope, mode config.ApprovalMode) (Decision, error) {
 	nowMS := b.now().UnixMilli()
-	existing, ok, err := b.DB.FindPendingApprovalRequest(ctx, string(subjectType), sh.Hash, b.hostID(), nowMS)
-	if err != nil {
-		return Decision{}, err
-	}
-	if ok {
-		return Decision{Allowed: false, RequiresApproval: true, RequestID: existing.ID, SubjectHash: sh.Hash, Reason: "approval required"}, nil
-	}
-	req, err := b.DB.CreateApprovalRequest(ctx, db.ApprovalRequestRecord{
+	req, reused, err := b.DB.CreateOrGetPendingApprovalRequest(ctx, db.ApprovalRequestRecord{
 		Type: string(subjectType), SubjectHash: sh.Hash, SubjectJSON: sh.JSON,
-		RequesterAgentID: scope.Agent, RequesterSessionID: extractSessionID(subject),
+		RequesterAgentID: scope.Agent, RequesterSessionID: extractSessionID(subject), RequesterContextJSON: MarshalRequesterContext(RequesterContextFromContext(ctx)),
 		ExecutionHostID: b.hostID(), Status: StatusPending, PolicyMode: string(mode),
 		RequestedAt: nowMS, ExpiresAt: nowMS + int64(b.Config.PendingTTLSeconds*1000),
-	})
+	}, nowMS)
 	if err != nil {
 		return Decision{}, err
 	}
+	_ = reused
 	_ = b.audit(ctx, "approval.requested", map[string]any{
 		"request_id": req.ID, "subject_hash": sh.Hash, "host_id": b.hostID(),
 		"type": string(subjectType), "policy_mode": string(mode), "outcome": "pending",

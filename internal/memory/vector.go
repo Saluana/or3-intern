@@ -75,7 +75,12 @@ func (h *candMinHeap) Pop() any {
 }
 
 func VectorSearch(ctx context.Context, d *db.DB, sessionKey string, queryVec []float32, k int, scanLimit int) ([]VecCandidate, error) {
-	_ = scanLimit
+	if scanLimit > 0 && (k <= 0 || k > scanLimit) {
+		k = scanLimit
+	}
+	if k <= 0 {
+		return nil, nil
+	}
 	queryBlob := PackFloat32(queryVec)
 	rows, err := d.SearchMemoryVectors(ctx, sessionKey, queryBlob, k)
 	if err != nil {

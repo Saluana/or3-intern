@@ -570,6 +570,7 @@ func normalizeAndValidateConfigWithOptions(cfg Config, opts normalizeOptions) (C
 		profile.WritablePaths = compactStrings(profile.WritablePaths)
 		cfg.Security.Profiles.Profiles[name] = profile
 	}
+	MigrateLegacyServiceAccessChannel(&cfg)
 	if opts.QuarantineOptionalIntegrations {
 		QuarantineInvalidOptionalIntegrations(&cfg)
 	} else {
@@ -600,6 +601,7 @@ func normalizeAndValidateConfigWithOptions(cfg Config, opts normalizeOptions) (C
 	if err := validateRuntimeProfile(cfg.RuntimeProfile); err != nil {
 		return cfg, err
 	}
+	clampMemoryAndDocConfig(&cfg)
 	return cfg, nil
 }
 
@@ -608,6 +610,12 @@ func normalizeManagedChannelInboundDefaults(cfg *Config) {
 		return
 	}
 	normalizeDiscordChannelInboundDefaults(&cfg.Channels.Discord)
+}
+
+// NormalizeManagedChannelInboundDefaults normalizes managed channel defaults for
+// an in-memory config snapshot.
+func NormalizeManagedChannelInboundDefaults(cfg *Config) {
+	normalizeManagedChannelInboundDefaults(cfg)
 }
 
 func normalizeDiscordChannelInboundDefaults(channel *DiscordChannelConfig) {
@@ -622,6 +630,12 @@ func normalizeDiscordChannelInboundDefaults(channel *DiscordChannelConfig) {
 		return
 	}
 	channel.InboundPolicy = InboundPolicyDeny
+}
+
+// NormalizeDiscordChannelInboundDefaults normalizes Discord inbound defaults for
+// an in-memory channel snapshot.
+func NormalizeDiscordChannelInboundDefaults(channel *DiscordChannelConfig) {
+	normalizeDiscordChannelInboundDefaults(channel)
 }
 
 // ValidateSnapshot normalizes and validates an in-memory config without

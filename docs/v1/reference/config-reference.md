@@ -194,3 +194,58 @@ MCP server connections.
   }
 }
 ```
+
+## `context`
+
+Token budgets, dynamic tool exposure, task card, and context manager.
+
+```json
+{
+  "context": {
+    "mode": "quality",
+    "maxInputTokens": 16000,
+    "taskCard": {
+      "enabled": true,
+      "enforcePlan": false,
+      "maxRefs": 12,
+      "maxPlanItems": 8
+    },
+    "tools": {
+      "dynamicExpose": true
+    }
+  }
+}
+```
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `mode` | string | `poor`, `balanced`, `quality`, or `custom` packet preset |
+| `maxInputTokens` | int | Approximate input-token budget for prompt packets |
+| `taskCard.enabled` | bool | Track goal, plan, decisions, and refs across turns |
+| `taskCard.enforcePlan` | bool | Require `create_plan` before write/exec/web-style tools (default **false**) |
+| `taskCard.maxRefs` | int | Max references kept on the active task card |
+| `taskCard.maxPlanItems` | int | Max legacy plan lines on the task card |
+| `tools.dynamicExpose` | bool | Expose only likely tool schemas each turn |
+
+Configure field keys: `context_task_card_enabled`, `context_task_card_enforce_plan`, `context_dynamic_tools`, and related `context_*` keys in `or3-intern configure --section context`.
+
+## `skills` (trust policy)
+
+When `skills.enableExec` is true, startup validation requires non-empty trust policy. If `trustedOwners` or `trustedRegistries` are empty, load and doctor `--fix` call `EnsureSkillsExecTrustPolicy` to set:
+
+- `trustedOwners`: `["local"]`
+- `trustedRegistries`: your configured ClawHub registry URL (default public registry)
+
+Configure fields: `skills_enable_exec`, `skills_trusted_owners`, `skills_trusted_registries`.
+
+## `security.profiles` (service channel)
+
+Legacy configs may still have `security.profiles.channels.service` set to `electron_local_service`. On load, `MigrateLegacyServiceAccessChannel` remaps that profile to a builtin access level from `service.maxCapability`:
+
+| `service.maxCapability` | New service channel level |
+| --- | --- |
+| `privileged` | `admin` |
+| `guarded` | `operator` |
+| `safe` | `reader` |
+
+After migration, write tools follow the admin/operator/reader profile instead of the old read-only Electron bootstrap profile.

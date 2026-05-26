@@ -1,0 +1,99 @@
+package adminflow
+
+import (
+	"strings"
+
+	"or3-intern/internal/agentcli"
+	"or3-intern/internal/config"
+)
+
+type AdminBrainKind string
+
+const (
+	AdminBrainRunner         AdminBrainKind = "runner"
+	AdminBrainAPIKeyProvider AdminBrainKind = "apiKeyProvider"
+	AdminBrainUnavailable    AdminBrainKind = "unavailable"
+)
+
+type AdminBrainProvider struct {
+	Kind        AdminBrainKind `json:"kind"`
+	Available   bool           `json:"available"`
+	DisplayName string         `json:"display_name,omitempty"`
+	RunnerID    string         `json:"runner_id,omitempty"`
+	ProviderKey string         `json:"provider_key,omitempty"`
+	Reason      string         `json:"reason,omitempty"`
+}
+
+// DetectAdminBrainProvider chooses how settings health chat runs AI turns.
+// When a service API key is configured, the in-process admin brain is preferred.
+// Otherwise an external CLI runner is used when available; or3-intern native runner
+// is skipped here because doctor admin turns use the service runtime directly when keyed.
+func DetectAdminBrainProvider(cfg config.Config, runners []agentcli.RunnerInfo) AdminBrainProvider {
+	if providerKey := configuredAdminBrainProviderKey(cfg); providerKey != "" {
+		return AdminBrainProvider{
+			Kind:        AdminBrainAPIKeyProvider,
+			Available:   true,
+			DisplayName: "Admin Brain",
+			ProviderKey: providerKey,
+		}
+	}
+	for _, runner := range runners {
+		if strings.EqualFold(strings.TrimSpace(runner.ID), string(agentcli.RunnerOR3)) {
+			continue
+		}
+		if runner.Status != agentcli.RunnerStatusAvailable {
+			continue
+		}
+		if runner.AuthStatus != agentcli.AuthReady {
+			continue
+		}
+		if !runner.Supports.Chat.ChatSelectable {
+			continue
+		}
+		return AdminBrainProvider{
+			Kind:        AdminBrainRunner,
+			Available:   true,
+			DisplayName: "Admin Brain",
+			RunnerID:    strings.TrimSpace(runner.ID),
+		}
+	}
+	return AdminBrainProvider{
+		Kind:        AdminBrainUnavailable,
+		Available:   false,
+		DisplayName: "Admin Brain",
+		Reason:      "Basic Doctor is available. AI repair is not configured yet.",
+	}
+}
+
+func configuredAdminBrainProviderKey(cfg config.Config) string {
+	if strings.TrimSpace(cfg.Provider.APIKey) != "" {
+		key := strings.TrimSpace(cfg.ModelRouting.Chat.Primary.Provider)
+		if key == "" {
+			key = inferProviderKeyFromBase(cfg.Provider.APIBase)
+		}
+		if key == "" {
+			key = "provider"
+		}
+		return key
+	}
+	for key, profile := range cfg.Providers {
+		if strings.TrimSpace(profile.APIKey) != "" {
+			return strings.TrimSpace(key)
+		}
+	}
+	return ""
+}
+
+func inferProviderKeyFromBase(apiBase string) string {
+	base := strings.ToLower(strings.TrimSpace(apiBase))
+	switch {
+	case strings.Contains(base, "openrouter"):
+		return "openrouter"
+	case strings.Contains(base, "openai"):
+		return "openai"
+	case base != "":
+		return "custom"
+	default:
+		return ""
+	}
+}

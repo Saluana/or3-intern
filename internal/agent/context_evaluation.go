@@ -52,12 +52,19 @@ func packetForEvaluationFixture(f ContextEvaluationFixture, budgets ContextSecti
 		ContextSectionBudgets: budgets,
 		BootstrapMaxChars:     20000,
 	}
-	packet := b.buildContextPacket(f.PinnedMemory, f.MemoryDigest, f.RetrievedMemory, f.Identity, "", "", "active_task_card:\n"+f.TaskCard, "", f.WorkspaceContext)
+	packet := b.buildContextPacket(turnPromptInput{
+		pinnedText:           f.PinnedMemory,
+		digestText:           f.MemoryDigest,
+		memText:              f.RetrievedMemory,
+		identityText:         f.Identity,
+		workspaceContextText: f.WorkspaceContext,
+		activePlanText:       strings.TrimSpace(f.TaskCard),
+	})
 	for i := 0; i < f.HistoryTurns; i++ {
 		packet.RecentHistory = append(packet.RecentHistory, structChatMessage("user", fmt.Sprintf("turn %d", i)))
 		packet.RecentHistory = append(packet.RecentHistory, structChatMessage("assistant", fmt.Sprintf("answer %d", i)))
 	}
-	packet.Budget = estimatePacketBudget(packet, b)
+	packet.Budget = estimatePacketBudget(&packet, b)
 	return packet
 }
 

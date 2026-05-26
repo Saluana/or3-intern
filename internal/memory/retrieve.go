@@ -4,9 +4,12 @@ package memory
 import (
 	"context"
 	"fmt"
+	"log"
 	"math"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"or3-intern/internal/db"
 	"or3-intern/internal/scope"
@@ -40,9 +43,13 @@ type Retriever struct {
 	RecencyWeight    float64
 	TaskWeight       float64
 	VectorScanLimit  int
-	TaskContext      string
-	LastRejected     []string
+	TaskContext          string
+	LastRejected         []string
+	LastDocRetrievalErr  error
 }
+
+var docRetrievalWarnMu sync.Mutex
+var lastDocRetrievalWarn time.Time
 
 const (
 	unsupportedDistinctiveVectorPenalty = 0.12
@@ -66,21 +73,23 @@ func (r *Retriever) Retrieve(ctx context.Context, sessionKey, query string, quer
 func (r *Retriever) retrieveCandidates(ctx context.Context, sessionKey, query string, queryVec []float32, vectorK, ftsK int) ([]Retrieved, error) {
 	r.LastRejected = nil
 	var vecs []VecCandidate
-	var err error
-	if strings.TrimSpace(r.EmbedFingerprint) == "" {
-		vecs, err = VectorSearch(ctx, r.DB, sessionKey, queryVec, vectorK, r.VectorScanLimit)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		fingerprint, err := r.DB.MemoryVectorFingerprint(ctx)
-		if err != nil {
-			return nil, err
-		}
-		if fingerprint == strings.TrimSpace(r.EmbedFingerprint) {
+	if len(queryVec) > 0 {
+		var err error
+		if strings.TrimSpace(r.EmbedFingerprint) == "" {
 			vecs, err = VectorSearch(ctx, r.DB, sessionKey, queryVec, vectorK, r.VectorScanLimit)
 			if err != nil {
 				return nil, err
+			}
+		} else {
+			fingerprint, err := r.DB.MemoryVectorFingerprint(ctx)
+			if err != nil {
+				return nil, err
+			}
+			if fingerprint == strings.TrimSpace(r.EmbedFingerprint) {
+				vecs, err = VectorSearch(ctx, r.DB, sessionKey, queryVec, vectorK, r.VectorScanLimit)
+				if err != nil {
+					return nil, err
+				}
 			}
 		}
 	}
@@ -156,21 +165,7 @@ func (r *Retriever) retrieveCandidates(ctx context.Context, sessionKey, query st
 			a.createdAt = f.CreatedAt
 		}
 	}
-	if ftsK > 0 {
-		docs, _ := retrieveDocCandidates(ctx, r.DB, sessionKey, query, ftsK)
-		for i, doc := range docs {
-			id := -int64(i + 1)
-			m[id] = &agg{
-				id:        id,
-				text:      doc.Excerpt,
-				doc:       doc.Score,
-				createdAt: db.NowMS(),
-				kind:      db.MemoryKindFile,
-				status:    db.MemoryStatusActive,
-				ref:       "file:" + doc.Path,
-			}
-		}
-	}
+	// Indexed documents are injected once via prompt DocRetriever, not here.
 
 	raw := make([]Retrieved, 0, len(m))
 	tokens := retrievalTokens(query)
@@ -266,9 +261,13 @@ func retrieveDocCandidates(ctx context.Context, d *db.DB, sessionKey, query stri
 	}
 	seen := map[string]struct{}{}
 	out := make([]RetrievedDoc, 0, topK*len(scopes))
+	var firstErr error
 	for _, docScope := range scopes {
 		docs, err := retriever.RetrieveDocs(ctx, docScope, query, topK)
 		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("scope %q: %w", docScope, err)
+			}
 			continue
 		}
 		for _, doc := range docs {
@@ -280,7 +279,20 @@ func retrieveDocCandidates(ctx context.Context, d *db.DB, sessionKey, query stri
 			out = append(out, doc)
 		}
 	}
-	return out, nil
+	return out, firstErr
+}
+
+func logDocRetrievalWarning(err error) {
+	if err == nil {
+		return
+	}
+	docRetrievalWarnMu.Lock()
+	defer docRetrievalWarnMu.Unlock()
+	if time.Since(lastDocRetrievalWarn) < 30*time.Second {
+		return
+	}
+	lastDocRetrievalWarn = time.Now()
+	log.Printf("doc retrieval degraded: %v", err)
 }
 
 func searchFTSWithFallback(ctx context.Context, d *db.DB, sessionKey, query string, k int) ([]db.FTSCandidate, error) {

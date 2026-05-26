@@ -62,6 +62,32 @@ func TestRetrieve_Empty(t *testing.T) {
 	}
 }
 
+func TestRetrieve_NilVectorUsesFTS(t *testing.T) {
+	d := openRetrieveTestDB(t)
+	ctx := context.Background()
+	if _, err := d.InsertMemoryNote(ctx, "session1", "keyword alpha bravo", make([]byte, 4), sql.NullInt64{}, ""); err != nil {
+		t.Fatalf("InsertMemoryNote: %v", err)
+	}
+	r := NewRetriever(d)
+	results, err := r.Retrieve(ctx, "session1", "alpha bravo", nil, 5, 5, 10)
+	if err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected FTS results with nil query vector")
+	}
+	found := false
+	for _, res := range results {
+		if strings.Contains(res.Text, "alpha bravo") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected FTS match, got %#v", results)
+	}
+}
+
 func TestRetrieve_WithVectorResults(t *testing.T) {
 	d := openRetrieveTestDB(t)
 	ctx := context.Background()
@@ -540,7 +566,7 @@ func TestExistingRetrieveAPIStillWorks(t *testing.T) {
 	}
 }
 
-func TestRetrieve_IncludesIndexedDocCandidates(t *testing.T) {
+func TestRetrieve_SkipsIndexedDocCandidates(t *testing.T) {
 	d := openRetrieveTestDB(t)
 	ctx := context.Background()
 	if err := UpsertDoc(ctx, d, "sess", "/repo/docs/runbook.md", "markdown", "Runbook", "", "deploy packet cache safely", nil, "hash", 1, 32); err != nil {
@@ -551,17 +577,10 @@ func TestRetrieve_IncludesIndexedDocCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
-	found := false
 	for _, result := range results {
-		if result.Source == "doc" && strings.Contains(result.Ref, "runbook.md") {
-			found = true
-			if result.Kind != db.MemoryKindFile || result.Reason == "" {
-				t.Fatalf("expected file kind and reason, got %+v", result)
-			}
+		if result.Source == "doc" || strings.Contains(result.Ref, "runbook.md") {
+			t.Fatalf("expected docs to be excluded from hybrid retrieval, got %+v", result)
 		}
-	}
-	if !found {
-		t.Fatalf("expected doc candidate, got %+v", results)
 	}
 }
 

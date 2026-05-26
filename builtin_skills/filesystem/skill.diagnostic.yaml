@@ -1,0 +1,8 @@
+version: 1
+checks:
+  - id: workspace_scope
+    kind: config
+    label: Workspace scope
+    summary: Filesystem workspace scope is configured
+    severity: notice
+    config_key: workspace_scope

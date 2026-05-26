@@ -60,18 +60,21 @@ func (a *ServiceApp) SetConfig(cfg config.Config) {
 }
 
 type TurnRequest struct {
-	SessionKey    string
-	Message       string
-	Meta          map[string]any
-	AllowedTools  []string
-	RestrictTools bool
-	ProfileName   string
-	Capability    tools.CapabilityLevel
-	ApprovalToken string
-	Actor         string
-	Role          string
-	Observer      agent.ConversationObserver
-	Streamer      channels.StreamingChannel
+	SessionKey          string
+	Message             string
+	Attachments         []agent.ChatAttachment
+	SystemPrompt        string
+	Meta                map[string]any
+	AllowedTools        []string
+	RestrictTools       bool
+	ProfileName         string
+	Capability          tools.CapabilityLevel
+	ApprovalToken       string
+	Actor               string
+	Role                string
+	Observer            agent.ConversationObserver
+	Streamer            channels.StreamingChannel
+	ToolBudgetOverrides *agent.ToolBudgetOverrides
 }
 
 func (a *ServiceApp) serviceRunContext(ctx context.Context, sessionKey, profileName, approvalToken, actor, role string, capability tools.CapabilityLevel, observer agent.ConversationObserver, streamer channels.StreamingChannel) context.Context {
@@ -112,11 +115,20 @@ func (a *ServiceApp) RunTurn(ctx context.Context, req TurnRequest) error {
 		return errors.New("runtime unavailable")
 	}
 	runCtx := a.serviceRunContext(ctx, req.SessionKey, req.ProfileName, req.ApprovalToken, req.Actor, req.Role, req.Capability, req.Observer, req.Streamer)
+	if strings.TrimSpace(req.SystemPrompt) != "" {
+		runCtx = agent.ContextWithTrustedSystemPrompt(runCtx, req.SystemPrompt)
+	}
 	if req.RestrictTools {
 		filtered := a.serviceToolRegistry(req.AllowedTools, req.RestrictTools)
 		runCtx = agent.ContextWithToolRegistry(runCtx, filtered)
 	}
+	if req.ToolBudgetOverrides != nil {
+		runCtx = agent.ContextWithToolBudgetOverrides(runCtx, *req.ToolBudgetOverrides)
+	}
 	meta := cloneMap(req.Meta)
+	if len(req.Attachments) > 0 {
+		meta["attachments"] = agent.ChatAttachmentsForMeta(req.Attachments)
+	}
 	if strings.TrimSpace(req.ProfileName) != "" {
 		meta["profile_name"] = strings.TrimSpace(req.ProfileName)
 	}
@@ -131,18 +143,20 @@ func (a *ServiceApp) RunTurn(ctx context.Context, req TurnRequest) error {
 }
 
 type ReplayToolCallRequest struct {
-	SessionKey        string
-	ToolName          string
-	ArgumentsJSON     string
-	ApprovalRequestID int64
-	AllowedTools      []string
-	RestrictTools     bool
-	ProfileName       string
-	Capability        tools.CapabilityLevel
-	ApprovalToken     string
-	Actor             string
-	Role              string
-	Observer          agent.ConversationObserver
+	SessionKey             string
+	ConversationSessionKey string
+	ToolName               string
+	ArgumentsJSON          string
+	ApprovalRequestID      int64
+	RequesterContextJSON   string
+	AllowedTools           []string
+	RestrictTools          bool
+	ProfileName            string
+	Capability             tools.CapabilityLevel
+	ApprovalToken          string
+	Actor                  string
+	Role                   string
+	Observer               agent.ConversationObserver
 }
 
 type ResumeApprovedRequest struct {
@@ -184,7 +198,9 @@ func (a *ServiceApp) ReplayToolCall(ctx context.Context, req ReplayToolCallReque
 	if argsJSON == "" {
 		argsJSON = "{}"
 	}
-	runCtx := a.serviceRunContext(ctx, req.SessionKey, req.ProfileName, req.ApprovalToken, req.Actor, req.Role, req.Capability, req.Observer, nil)
+	executionSessionKey := strings.TrimSpace(req.SessionKey)
+	conversationSessionKey := firstNonEmptyString(req.ConversationSessionKey, executionSessionKey)
+	runCtx := a.serviceRunContext(ctx, executionSessionKey, req.ProfileName, req.ApprovalToken, req.Actor, req.Role, req.Capability, req.Observer, nil)
 	if req.RestrictTools {
 		runCtx = agent.ContextWithToolRegistry(runCtx, registry)
 	}
@@ -192,7 +208,7 @@ func (a *ServiceApp) ReplayToolCall(ctx context.Context, req ReplayToolCallReque
 	fullReplayHistory := a.runtime.DB != nil && a.runtime.Builder != nil && a.runtime.Provider != nil
 	if fullReplayHistory {
 		if req.ApprovalRequestID > 0 {
-			target, findErr := a.findApprovalReplayTarget(runCtx, req.SessionKey, req.ApprovalRequestID)
+			target, findErr := a.findApprovalReplayTarget(runCtx, conversationSessionKey, req.ApprovalRequestID)
 			if findErr != nil {
 				return "", findErr
 			}
@@ -211,7 +227,7 @@ func (a *ServiceApp) ReplayToolCall(ctx context.Context, req ReplayToolCallReque
 			}
 		} else {
 			var findErr error
-			toolCallID, findErr = a.findReplayToolCallID(runCtx, req.SessionKey, toolName, argsJSON)
+			toolCallID, findErr = a.findReplayToolCallID(runCtx, conversationSessionKey, toolName, argsJSON)
 			if findErr != nil {
 				return "", findErr
 			}
@@ -244,7 +260,7 @@ func (a *ServiceApp) ReplayToolCall(ctx context.Context, req ReplayToolCallReque
 		}
 		return finalText, nil
 	}
-	if a.runtime.DB != nil && strings.TrimSpace(req.SessionKey) != "" {
+	if a.runtime.DB != nil && strings.TrimSpace(conversationSessionKey) != "" {
 		payload := map[string]any{
 			"name":      toolName,
 			"replayed":  true,
@@ -253,24 +269,55 @@ func (a *ServiceApp) ReplayToolCall(ctx context.Context, req ReplayToolCallReque
 		if strings.TrimSpace(toolCallID) != "" {
 			payload["tool_call_id"] = toolCallID
 		}
-		if _, err := a.runtime.DB.AppendMessage(runCtx, req.SessionKey, "tool", out, payload); err != nil {
+		if _, err := a.runtime.DB.AppendMessage(runCtx, conversationSessionKey, "tool", out, payload); err != nil {
 			return "", err
 		}
 	}
-	if err := a.runtime.Handle(runCtx, bus.Event{
-		Type:       bus.EventSystem,
-		SessionKey: strings.TrimSpace(req.SessionKey),
-		Channel:    "service",
-		From:       "or3-net",
-		Message:    replayContinuationPrompt(toolName),
-		Meta: map[string]any{
-			"approved_tool_replay": true,
-			"tool_name":            toolName,
-		},
-	}); err != nil {
+	if err := a.runtime.Handle(runCtx, approvedReplayEvent(db.ApprovalRequestRecord{RequesterSessionID: conversationSessionKey, RequesterContextJSON: req.RequesterContextJSON}, toolName)); err != nil {
 		return "", err
 	}
 	return "", nil
+}
+
+func approvedReplayEvent(req db.ApprovalRequestRecord, toolName string) bus.Event {
+	requester := approval.RequesterContextFromJSON(req.RequesterContextJSON)
+	sessionKey := firstNonEmptyString(requester.SessionKey, strings.TrimSpace(req.RequesterSessionID))
+	channel := firstNonEmptyString(requester.Channel, "service")
+	from := firstNonEmptyString(requester.From, "or3-net")
+	meta := map[string]any{
+		"approved_tool_replay": true,
+		"tool_name":            toolName,
+	}
+	for key, value := range requester.ReplyMeta {
+		meta[key] = value
+	}
+	if strings.TrimSpace(requester.ReplyTarget) != "" {
+		switch strings.ToLower(strings.TrimSpace(channel)) {
+		case "telegram", "whatsapp":
+			meta["chat_id"] = requester.ReplyTarget
+		case "slack", "discord":
+			meta["channel_id"] = requester.ReplyTarget
+		case "email":
+			meta["sender_email"] = requester.ReplyTarget
+		}
+	}
+	return bus.Event{
+		Type:       bus.EventSystem,
+		SessionKey: strings.TrimSpace(sessionKey),
+		Channel:    strings.TrimSpace(channel),
+		From:       strings.TrimSpace(from),
+		Message:    replayContinuationPrompt(toolName),
+		Meta:       meta,
+	}
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func (a *ServiceApp) ResumeApprovedRequest(ctx context.Context, req ResumeApprovedRequest) (string, error) {
@@ -282,10 +329,12 @@ func (a *ServiceApp) ResumeApprovedRequest(ctx context.Context, req ResumeApprov
 	if sessionKey == "" {
 		return "", nil
 	}
+	requester := approval.RequesterContextFromJSON(issued.Request.RequesterContextJSON)
+	conversationSessionKey := firstNonEmptyString(requester.SessionKey, sessionKey)
 	profileName, actor := approvedReplayContext(issued, req.ProfileName, req.Actor)
 	switch strings.TrimSpace(issued.Request.Type) {
 	case string(approval.SubjectExec), string(approval.SubjectSkillExec):
-		target, err := a.findApprovalReplayTarget(ctx, sessionKey, issued.Request.ID)
+		target, err := a.findApprovalReplayTarget(ctx, conversationSessionKey, issued.Request.ID)
 		if err != nil {
 			return "", err
 		}
@@ -304,33 +353,35 @@ func (a *ServiceApp) ResumeApprovedRequest(ctx context.Context, req ResumeApprov
 			return finalText, nil
 		}
 		return a.ReplayToolCall(ctx, ReplayToolCallRequest{
-			SessionKey:        sessionKey,
-			ToolName:          target.ToolName,
-			ArgumentsJSON:     target.ArgumentsJSON,
-			ApprovalRequestID: issued.Request.ID,
-			ProfileName:       profileName,
-			Capability:        req.Capability,
-			ApprovalToken:     issued.Token,
-			Actor:             actor,
-			Role:              req.Role,
-			Observer:          req.Observer,
+			SessionKey:             sessionKey,
+			ConversationSessionKey: conversationSessionKey,
+			ToolName:               target.ToolName,
+			ArgumentsJSON:          target.ArgumentsJSON,
+			ApprovalRequestID:      issued.Request.ID,
+			RequesterContextJSON:   issued.Request.RequesterContextJSON,
+			ProfileName:            profileName,
+			Capability:             req.Capability,
+			ApprovalToken:          issued.Token,
+			Actor:                  actor,
+			Role:                   req.Role,
+			Observer:               req.Observer,
 		})
 	case string(approval.SubjectToolQuota):
 		runCtx := a.serviceRunContext(ctx, sessionKey, profileName, issued.Token, actor, req.Role, req.Capability, req.Observer, nil)
-		return "", a.runtime.Handle(runCtx, bus.Event{
-			Type:       bus.EventSystem,
-			SessionKey: sessionKey,
-			Channel:    "service",
-			From:       "or3-net",
-			Message:    toolQuotaApprovalContinuationPrompt(),
-			Meta: map[string]any{
-				"approved_tool_quota": true,
-				"approval_request_id": issued.Request.ID,
-			},
-		})
+		return "", a.runtime.Handle(runCtx, approvedToolQuotaEvent(issued.Request))
 	default:
 		return "", nil
 	}
+}
+
+func approvedToolQuotaEvent(req db.ApprovalRequestRecord) bus.Event {
+	ev := approvedReplayEvent(req, "tool loop continuation")
+	ev.Message = toolQuotaApprovalContinuationPrompt()
+	delete(ev.Meta, "approved_tool_replay")
+	delete(ev.Meta, "tool_name")
+	ev.Meta["approved_tool_quota"] = true
+	ev.Meta["approval_request_id"] = req.ID
+	return ev
 }
 
 func approvedReplayContext(issued approval.IssuedApproval, fallbackProfile string, fallbackActor string) (string, string) {

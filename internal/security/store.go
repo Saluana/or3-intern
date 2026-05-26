@@ -99,6 +99,43 @@ func (m *SecretManager) ResolveRef(ctx context.Context, raw string) (string, err
 	return secret, nil
 }
 
+const (
+	maxSecretNameLength  = 256
+	maxSecretValueLength = 64 * 1024 // 64 KiB
+
+	// Internal secret prefixes that should not be exposed via CLI
+	InternalSecretPrefix = "secure-connections/"
+)
+
+// validateSecretName checks that the secret name meets security requirements.
+func validateSecretName(name string) error {
+	if len(name) > maxSecretNameLength {
+		return fmt.Errorf("secret name too long (max %d chars)", maxSecretNameLength)
+	}
+
+	// Check for valid characters: letters, numbers, dots, hyphens, underscores, slashes, colons, @ symbols
+	for _, c := range name {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+			c == '.' || c == '_' || c == '-' || c == '/' || c == ':' || c == '@') {
+			return fmt.Errorf("secret name contains invalid character: %c (allowed: a-zA-Z0-9._/@:-)", c)
+		}
+	}
+	return nil
+}
+
+// validateSecretValue checks that the secret value meets size requirements.
+func validateSecretValue(value string) error {
+	if len(value) > maxSecretValueLength {
+		return fmt.Errorf("secret value too long (max %d bytes)", maxSecretValueLength)
+	}
+	return nil
+}
+
+// IsInternalSecret checks if a secret name is an internal reserved name.
+func IsInternalSecret(name string) bool {
+	return strings.HasPrefix(name, InternalSecretPrefix)
+}
+
 // Put encrypts and stores value under name.
 func (m *SecretManager) Put(ctx context.Context, name, value string) error {
 	if m == nil || m.DB == nil || len(m.Key) == 0 {
@@ -108,7 +145,15 @@ func (m *SecretManager) Put(ctx context.Context, name, value string) error {
 	if name == "" {
 		return fmt.Errorf("secret name required")
 	}
-	ciphertext, nonce, err := encryptBlob(m.Key, []byte(value))
+	if err := validateSecretName(name); err != nil {
+		return err
+	}
+	if err := validateSecretValue(value); err != nil {
+		return err
+	}
+	// Bind encryption to secret name and key version
+	aad := []byte("or3-secret-store:v1:" + name + ":v1")
+	ciphertext, nonce, err := encryptBlob(m.Key, []byte(value), aad)
 	if err != nil {
 		return err
 	}
@@ -124,9 +169,23 @@ func (m *SecretManager) Get(ctx context.Context, name string) (string, bool, err
 	if err != nil || !ok {
 		return "", ok, err
 	}
-	plain, err := decryptBlob(m.Key, record.Ciphertext, record.Nonce)
+
+	// Try new AAD format first
+	aad := []byte("or3-secret-store:v1:" + name + ":" + record.KeyVersion)
+	plain, err := decryptBlob(m.Key, record.Ciphertext, record.Nonce, aad)
 	if err != nil {
-		return "", false, fmt.Errorf("decrypt secret %s: %w", name, err)
+		// Fall back to legacy nil AAD for old secrets
+		plain, err = decryptBlob(m.Key, record.Ciphertext, record.Nonce, nil)
+		if err != nil {
+			return "", false, fmt.Errorf("decrypt secret %s: %w", name, err)
+		}
+		// Re-encrypt with new AAD format for future reads
+		newAad := []byte("or3-secret-store:v1:" + name + ":" + record.KeyVersion)
+		newCiphertext, newNonce, encryptErr := encryptBlob(m.Key, plain, newAad)
+		if encryptErr == nil {
+			// Update the stored secret with new AAD-bound encryption
+			_ = m.DB.PutSecret(ctx, name, newCiphertext, newNonce, record.Version, record.KeyVersion)
+		}
 	}
 	return string(plain), true, nil
 }
@@ -145,6 +204,21 @@ func (m *SecretManager) List(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("secret store unavailable")
 	}
 	return m.DB.ListSecretNames(ctx)
+}
+
+// ListUserSecrets returns only user-facing secret names, filtering out internal secrets.
+func (m *SecretManager) ListUserSecrets(ctx context.Context) ([]string, error) {
+	names, err := m.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var userNames []string
+	for _, name := range names {
+		if !IsInternalSecret(name) {
+			userNames = append(userNames, name)
+		}
+	}
+	return userNames, nil
 }
 
 // AuditLogger appends and verifies tamper-evident audit records.
@@ -211,28 +285,37 @@ func resolveValue(ctx context.Context, value reflect.Value, mgr *SecretManager) 
 		return resolveValue(ctx, value.Elem(), mgr)
 	case reflect.Struct:
 		for i := 0; i < value.NumField(); i++ {
-			if !value.Field(i).CanSet() {
+			field := value.Type().Field(i)
+			fieldValue := value.Field(i)
+			if !fieldValue.CanSet() {
 				continue
 			}
-			if err := resolveValue(ctx, value.Field(i), mgr); err != nil {
-				return err
+			if field.Tag.Get("secret") == "true" {
+				if err := resolveSecretValue(ctx, fieldValue, mgr); err != nil {
+					return err
+				}
+				continue
+			}
+			if shouldRecurseForSecretRefs(fieldValue) {
+				if err := resolveValue(ctx, fieldValue, mgr); err != nil {
+					return err
+				}
 			}
 		}
 	case reflect.Map:
 		if value.IsNil() || value.Type().Key().Kind() != reflect.String {
 			return nil
 		}
+		elemType := value.Type().Elem()
+		for elemType.Kind() == reflect.Pointer {
+			elemType = elemType.Elem()
+		}
+		if elemType.Kind() != reflect.Struct {
+			return nil
+		}
 		for _, key := range value.MapKeys() {
 			elem := value.MapIndex(key)
 			if !elem.IsValid() {
-				continue
-			}
-			if value.Type().Elem().Kind() == reflect.String {
-				resolved, err := mgr.ResolveRef(ctx, elem.String())
-				if err != nil {
-					return err
-				}
-				value.SetMapIndex(key, reflect.ValueOf(resolved))
 				continue
 			}
 			clone := reflect.New(elem.Type()).Elem()
@@ -242,14 +325,70 @@ func resolveValue(ctx context.Context, value reflect.Value, mgr *SecretManager) 
 			}
 			value.SetMapIndex(key, clone)
 		}
+	}
+	return nil
+}
+
+func resolveSecretValue(ctx context.Context, value reflect.Value, mgr *SecretManager) error {
+	if !value.IsValid() {
+		return nil
+	}
+	switch value.Kind() {
+	case reflect.Pointer:
+		if value.IsNil() {
+			return nil
+		}
+		return resolveSecretValue(ctx, value.Elem(), mgr)
 	case reflect.String:
 		resolved, err := mgr.ResolveRef(ctx, value.String())
 		if err != nil {
 			return err
 		}
 		value.SetString(resolved)
+	case reflect.Map:
+		if value.IsNil() || value.Type().Key().Kind() != reflect.String || value.Type().Elem().Kind() != reflect.String {
+			return nil
+		}
+		for _, key := range value.MapKeys() {
+			elem := value.MapIndex(key)
+			if !elem.IsValid() {
+				continue
+			}
+			resolved, err := mgr.ResolveRef(ctx, elem.String())
+			if err != nil {
+				return err
+			}
+			value.SetMapIndex(key, reflect.ValueOf(resolved))
+		}
 	}
 	return nil
+}
+
+func shouldRecurseForSecretRefs(value reflect.Value) bool {
+	if !value.IsValid() {
+		return false
+	}
+	for value.Kind() == reflect.Pointer {
+		if value.IsNil() {
+			return false
+		}
+		value = value.Elem()
+	}
+	switch value.Kind() {
+	case reflect.Struct:
+		return true
+	case reflect.Map:
+		if value.IsNil() || value.Type().Key().Kind() != reflect.String {
+			return false
+		}
+		elem := value.Type().Elem()
+		for elem.Kind() == reflect.Pointer {
+			elem = elem.Elem()
+		}
+		return elem.Kind() == reflect.Struct
+	default:
+		return false
+	}
 }
 
 func findSecretRef(value reflect.Value, path string) (string, bool) {
@@ -270,7 +409,8 @@ func findSecretRef(value reflect.Value, path string) (string, bool) {
 			if tag := strings.TrimSpace(strings.Split(field.Tag.Get("json"), ",")[0]); tag != "" && tag != "-" {
 				name = tag
 			}
-			if foundPath, ok := findSecretRef(value.Field(i), path+"."+name); ok {
+			foundPath, ok := findSecretRef(value.Field(i), path+"."+name)
+			if ok {
 				return foundPath, true
 			}
 		}
@@ -295,7 +435,7 @@ func findSecretRef(value reflect.Value, path string) (string, bool) {
 	return "", false
 }
 
-func encryptBlob(master, plaintext []byte) ([]byte, []byte, error) {
+func encryptBlob(master, plaintext, aad []byte) ([]byte, []byte, error) {
 	block, err := aes.NewCipher(deriveKey(master, "secrets"))
 	if err != nil {
 		return nil, nil, err
@@ -308,11 +448,11 @@ func encryptBlob(master, plaintext []byte) ([]byte, []byte, error) {
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, nil, err
 	}
-	sealed := aead.Seal(nil, nonce, plaintext, nil)
+	sealed := aead.Seal(nil, nonce, plaintext, aad)
 	return sealed, nonce, nil
 }
 
-func decryptBlob(master, ciphertext, nonce []byte) ([]byte, error) {
+func decryptBlob(master, ciphertext, nonce, aad []byte) ([]byte, error) {
 	block, err := aes.NewCipher(deriveKey(master, "secrets"))
 	if err != nil {
 		return nil, err
@@ -321,7 +461,7 @@ func decryptBlob(master, ciphertext, nonce []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return aead.Open(nil, nonce, ciphertext, nil)
+	return aead.Open(nil, nonce, ciphertext, aad)
 }
 
 func deriveKey(master []byte, label string) []byte {

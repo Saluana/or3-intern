@@ -113,8 +113,12 @@ func TestBuildAgentCLIEnv_DefaultsWhenEmptyAllowlist(t *testing.T) {
 func TestBuildAgentCLIEnv_AppendsCommonUserCLIDirs(t *testing.T) {
 	home := t.TempDir()
 	bin := filepath.Join(home, ".opencode", "bin")
+	nvmBin := filepath.Join(home, ".nvm", "versions", "node", "v22.0.0", "bin")
 	if err := os.MkdirAll(bin, 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.MkdirAll(nvmBin, 0o755); err != nil {
+		t.Fatalf("MkdirAll nvm: %v", err)
 	}
 	t.Setenv("HOME", home)
 
@@ -122,6 +126,9 @@ func TestBuildAgentCLIEnv_AppendsCommonUserCLIDirs(t *testing.T) {
 	path := envValue(env, "PATH")
 	if !strings.Contains(path, bin) {
 		t.Fatalf("expected PATH %q to include %q", path, bin)
+	}
+	if !strings.Contains(path, nvmBin) {
+		t.Fatalf("expected PATH %q to include %q", path, nvmBin)
 	}
 }
 

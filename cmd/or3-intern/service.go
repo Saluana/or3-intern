@@ -36,6 +36,7 @@ type serviceServer struct {
 	mcpManager            *mcp.Manager
 	mcpTestManagerFactory serviceMCPTestManagerFactory
 	jobs                  *agent.JobRegistry
+	channelDeliverer      agent.MetaDeliverer
 	broker                *approval.Broker
 	unsafeDev             bool
 	controlOnce           sync.Once
@@ -50,6 +51,9 @@ type serviceServer struct {
 	nonceGuard            *serviceNonceReplayGuard
 	modelCatalog          *serviceModelCatalogCache
 	secureRelayHub        *secureConnectionRelayHub
+	doctorTurnMu          sync.Mutex
+	doctorTurnOnce        sync.Once
+	doctorActiveTurns     map[string]doctorSessionTurnLease
 }
 
 type serviceDeviceResponse struct {
@@ -154,6 +158,10 @@ func runServiceCommandWithBrokerOptionsAndCron(ctx context.Context, cfg config.C
 }
 
 func runServiceCommandWithBrokerOptionsCronMCP(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, agentCLIManager *agentcli.Manager, jobs *agent.JobRegistry, broker *approval.Broker, unsafeDev bool, cronSvc *cron.Service, mcpManager *mcp.Manager) error {
+	return runServiceCommandWithBrokerOptionsCronMCPAndChannels(ctx, cfg, rt, subagentManager, agentCLIManager, jobs, broker, unsafeDev, cronSvc, mcpManager, nil)
+}
+
+func runServiceCommandWithBrokerOptionsCronMCPAndChannels(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, agentCLIManager *agentcli.Manager, jobs *agent.JobRegistry, broker *approval.Broker, unsafeDev bool, cronSvc *cron.Service, mcpManager *mcp.Manager, channelDeliverer agent.MetaDeliverer) error {
 	or3log.InstallStdlibSink()
 	if strings.TrimSpace(cfg.Service.Secret) == "" {
 		return fmt.Errorf("service secret is required")
@@ -167,7 +175,8 @@ func runServiceCommandWithBrokerOptionsCronMCP(ctx context.Context, cfg config.C
 	if jobs == nil {
 		jobs = agent.NewJobRegistry(0, 0)
 	}
-	server := &serviceServer{config: cfg, configPath: cfgPathOrDefault(""), runtime: rt, cronSvc: cronSvc, subagentManager: subagentManager, agentCLIManager: agentCLIManager, chatManager: nil, mcpManager: mcpManager, jobs: jobs, broker: broker, unsafeDev: unsafeDev}
+	server := &serviceServer{config: cfg, configPath: cfgPathOrDefault(""), runtime: rt, cronSvc: cronSvc, subagentManager: subagentManager, agentCLIManager: agentCLIManager, chatManager: nil, mcpManager: mcpManager, jobs: jobs, channelDeliverer: channelDeliverer, broker: broker, unsafeDev: unsafeDev}
+	server.registerDoctorAdminBrainTools()
 	if rt.DB != nil {
 		server.chatManager = &agentcli.ChatManager{DB: rt.DB, Manager: agentCLIManager, Jobs: jobs, Broker: broker}
 		if err := server.chatManager.ReconcileOnStartup(ctx); err != nil {

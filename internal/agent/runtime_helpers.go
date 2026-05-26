@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
@@ -10,6 +11,41 @@ import (
 	"or3-intern/internal/db"
 	"or3-intern/internal/tools"
 )
+
+func storableTurnPayload(channel, from string, meta map[string]any) map[string]any {
+	payload := map[string]any{
+		"channel": strings.TrimSpace(channel),
+		"from":    strings.TrimSpace(from),
+	}
+	if safeMeta := jsonSafeMetaMap(meta); len(safeMeta) > 0 {
+		payload["meta"] = safeMeta
+	}
+	return payload
+}
+
+func jsonSafeMetaMap(meta map[string]any) map[string]any {
+	if len(meta) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(meta))
+	for key, value := range meta {
+		if isJSONSafeValue(value) {
+			out[key] = value
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func isJSONSafeValue(value any) bool {
+	if value == nil {
+		return true
+	}
+	_, err := json.Marshal(value)
+	return err == nil
+}
 
 func summarizeToolParams(toolName string, params map[string]any) map[string]any {
 	summary := map[string]any{"tool": toolName}

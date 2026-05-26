@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"or3-intern/internal/approval"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
+	"or3-intern/internal/providers"
 	"or3-intern/internal/security"
 )
 
@@ -141,7 +143,9 @@ func setupApprovalBroker(cfg config.Config, d *db.DB, audit *security.AuditLogge
 		if !cfg.Security.Approvals.Enabled {
 			return nil, nil
 		}
-		return &approval.Broker{DB: d, Audit: audit, Config: cfg.Security.Approvals, HostID: cfg.Security.Approvals.HostID}, nil
+		broker := &approval.Broker{DB: d, Audit: audit, Config: cfg.Security.Approvals, HostID: cfg.Security.Approvals.HostID, Workspace: cfg.WorkspaceDir}
+		attachApprovalModerator(broker, cfg)
+		return broker, nil
 	}
 	key, err := security.LoadOrCreateKey(keyFile)
 	if err != nil {
@@ -149,11 +153,59 @@ func setupApprovalBroker(cfg config.Config, d *db.DB, audit *security.AuditLogge
 			return nil, fmt.Errorf("approval broker unavailable: %w", err)
 		}
 		if cfg.Security.Approvals.Enabled {
-			return &approval.Broker{DB: d, Audit: audit, Config: cfg.Security.Approvals, HostID: cfg.Security.Approvals.HostID}, nil
+			broker := &approval.Broker{DB: d, Audit: audit, Config: cfg.Security.Approvals, HostID: cfg.Security.Approvals.HostID, Workspace: cfg.WorkspaceDir}
+			attachApprovalModerator(broker, cfg)
+			return broker, nil
 		}
 		return nil, nil
 	}
-	return &approval.Broker{DB: d, Audit: audit, Config: cfg.Security.Approvals, HostID: cfg.Security.Approvals.HostID, SignKey: key}, nil
+	broker := &approval.Broker{DB: d, Audit: audit, Config: cfg.Security.Approvals, HostID: cfg.Security.Approvals.HostID, SignKey: key, Workspace: cfg.WorkspaceDir}
+	attachApprovalModerator(broker, cfg)
+	return broker, nil
+}
+
+func attachApprovalModerator(broker *approval.Broker, cfg config.Config) {
+	if broker == nil || !cfg.Security.Approvals.Enabled || !cfg.Security.Approvals.Moderator.Enabled {
+		return
+	}
+	client, model := newApprovalModeratorProviderClient(cfg)
+	if client == nil {
+		return
+	}
+	broker.Moderator = approval.NewProviderModerator(client, model, cfg.Security.Approvals.Moderator)
+}
+
+func newApprovalModeratorProviderClient(cfg config.Config) (*providers.Client, string) {
+	moderatorCfg := cfg.Security.Approvals.Moderator
+	providerKey := strings.TrimSpace(moderatorCfg.Provider)
+	model := strings.TrimSpace(moderatorCfg.Model)
+	if providerKey == "" && model == "" {
+		role := cfg.ModelRole(config.ModelRoleChat)
+		providerKey = strings.TrimSpace(role.Primary.Provider)
+		model = strings.TrimSpace(role.Primary.Model)
+	}
+	if providerKey == "" {
+		providerKey = "openai"
+	}
+	if model == "" {
+		if profile, ok := cfg.ProviderProfile(providerKey); ok && strings.TrimSpace(profile.DefaultChatModel) != "" {
+			model = profile.DefaultChatModel
+		} else {
+			model = cfg.Provider.Model
+		}
+	}
+	timeout := time.Duration(moderatorCfg.TimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 8 * time.Second
+	}
+	profile, ok := cfg.ProviderProfile(providerKey)
+	if !ok || strings.TrimSpace(profile.APIBase) == "" || strings.TrimSpace(profile.APIKey) == "" {
+		return nil, model
+	}
+	client := providers.New(strings.TrimRight(profile.APIBase, "/"), profile.APIKey, timeout)
+	client.ProviderName = providerKey
+	client.HostPolicy = buildHostPolicy(cfg)
+	return client, model
 }
 
 func checkKeyFilePermissions(path, purpose string) error {

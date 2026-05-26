@@ -71,6 +71,33 @@ func SafeSubjectPreview(subjectType, subjectJSON string) string {
 			return target
 		}
 		return "tool quota"
+	case SubjectMessageSend:
+		var subject MessageSendSubject
+		if err := json.Unmarshal([]byte(subjectJSON), &subject); err != nil {
+			return "send message"
+		}
+		parts := make([]string, 0, 3)
+		if channel := strings.TrimSpace(subject.Channel); channel != "" {
+			parts = append(parts, channel)
+		}
+		if subject.MediaCount > 0 {
+			parts = append(parts, fmt.Sprintf("%d attachment(s)", subject.MediaCount))
+		} else if subject.TextLength > 0 {
+			parts = append(parts, fmt.Sprintf("%d chars", subject.TextLength))
+		}
+		if len(parts) > 0 {
+			return "send message: " + strings.Join(parts, ", ")
+		}
+		return "send message"
+	case SubjectFileTransfer:
+		var subject FileTransferSubject
+		if err := json.Unmarshal([]byte(subjectJSON), &subject); err != nil {
+			return "file transfer"
+		}
+		if path := strings.TrimSpace(subject.Path); path != "" {
+			return path
+		}
+		return "file transfer"
 	default:
 		return strings.TrimSpace(subjectType)
 	}

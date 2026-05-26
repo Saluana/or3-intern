@@ -301,6 +301,39 @@ func validateApprovals(cfg ApprovalConfig) error {
 			return errors.New("security.approvals." + name + ": unsupported mode")
 		}
 	}
+	return validateApprovalModerator(cfg.Moderator)
+}
+
+func validateApprovalModerator(cfg ApprovalModeratorConfig) error {
+	if !cfg.Enabled {
+		return nil
+	}
+	if preset := normalizeApprovalModeratorPreset(cfg.Preset); preset == "" && strings.TrimSpace(string(cfg.Preset)) != "" {
+		return errors.New("security.approvals.moderator.preset: unsupported preset")
+	}
+	for name, action := range map[string]ApprovalModeratorAction{
+		"actions.low": cfg.Actions.Low, "actions.medium": cfg.Actions.Medium,
+		"actions.high": cfg.Actions.High, "actions.extreme": cfg.Actions.Extreme,
+	} {
+		if !isValidApprovalModeratorAction(action) {
+			return errors.New("security.approvals.moderator." + name + ": unsupported action")
+		}
+	}
+	if !isValidApprovalModeratorAction(cfg.FailureAction) {
+		return errors.New("security.approvals.moderator.failureAction: unsupported action")
+	}
+	if cfg.FailureAction == ApprovalModeratorActionApprove {
+		return errors.New("security.approvals.moderator.failureAction: approve is not allowed")
+	}
+	if cfg.TimeoutSeconds < 1 || cfg.TimeoutSeconds > 120 {
+		return errors.New("security.approvals.moderator.timeoutSeconds: must be between 1 and 120")
+	}
+	if cfg.MaxPromptChars < 1000 || cfg.MaxPromptChars > 64000 {
+		return errors.New("security.approvals.moderator.maxPromptChars: must be between 1000 and 64000")
+	}
+	if cfg.MaxSubjectChars < 500 || cfg.MaxSubjectChars > 32000 {
+		return errors.New("security.approvals.moderator.maxSubjectChars: must be between 500 and 32000")
+	}
 	return nil
 }
 

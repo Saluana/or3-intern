@@ -225,6 +225,8 @@ func SetToggleFieldValue(cfg *config.Config, section, channel, fieldKey string, 
 		cfg.Security.Audit.VerifyOnStart = value
 	case "security_approvals_enabled":
 		cfg.Security.Approvals.Enabled = value
+	case "security_approval_moderator_enabled":
+		cfg.Security.Approvals.Moderator.Enabled = value
 	case "security_profiles_enabled":
 		cfg.Security.Profiles.Enabled = value
 	case "security_network_enabled":
@@ -361,6 +363,27 @@ func ApplyChoiceSelection(cfg *config.Config, section, channel, fieldKey, choice
 		return true, nil
 	case "security_approval_message_mode":
 		cfg.Security.Approvals.MessageSend.Mode = config.ApprovalMode(choice)
+		return true, nil
+	case "security_approval_moderator_preset":
+		cfg.Security.Approvals.Moderator.Preset = config.ApprovalModeratorPreset(choice)
+		cfg.Security.Approvals.Moderator.Actions = config.ApprovalModeratorActionMap{}
+		config.NormalizeApprovalModerator(&cfg.Security.Approvals.Moderator)
+		return true, nil
+	case "security_approval_moderator_failure_action":
+		cfg.Security.Approvals.Moderator.FailureAction = config.ApprovalModeratorAction(choice)
+		return true, nil
+	case "security_approval_moderator_action_low", "security_approval_moderator_action_medium", "security_approval_moderator_action_high", "security_approval_moderator_action_extreme":
+		action := config.ApprovalModeratorAction(choice)
+		switch fieldKey {
+		case "security_approval_moderator_action_low":
+			cfg.Security.Approvals.Moderator.Actions.Low = action
+		case "security_approval_moderator_action_medium":
+			cfg.Security.Approvals.Moderator.Actions.Medium = action
+		case "security_approval_moderator_action_high":
+			cfg.Security.Approvals.Moderator.Actions.High = action
+		case "security_approval_moderator_action_extreme":
+			cfg.Security.Approvals.Moderator.Actions.Extreme = action
+		}
 		return true, nil
 	default:
 		return false, nil
@@ -992,6 +1015,17 @@ func ApplyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 		return setIntValue(&cfg.Security.Approvals.PendingTTLSeconds, value, fieldKey)
 	case "security_approvals_token_ttl":
 		return setIntValue(&cfg.Security.Approvals.ApprovalTokenTTLSeconds, value, fieldKey)
+	case "security_approval_moderator_provider":
+		cfg.Security.Approvals.Moderator.Provider = value
+		return true, nil
+	case "security_approval_moderator_model":
+		cfg.Security.Approvals.Moderator.Model = value
+		return true, nil
+	case "security_approval_moderator_timeout":
+		return setIntValue(&cfg.Security.Approvals.Moderator.TimeoutSeconds, value, fieldKey)
+	case "security_approval_moderator_user_policy":
+		cfg.Security.Approvals.Moderator.UserPolicy = value
+		return true, nil
 	case "security_profiles_default":
 		cfg.Security.Profiles.Default = value
 		return true, nil

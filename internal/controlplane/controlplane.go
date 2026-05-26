@@ -796,12 +796,7 @@ func CollectCapabilitiesReportWithMCPStatus(cfg config.Config, broker *approval.
 		NetworkPolicy:      cfg.Security.Network,
 		HeartbeatEnabled:   cfg.Heartbeat.Enabled,
 		CronEnabled:        cfg.Cron.Enabled,
-		ApprovalBroker: map[string]any{
-			"enabled":       cfg.Security.Approvals.Enabled,
-			"required":      approvalBrokerRequired(cfg),
-			"available":     broker != nil,
-			"canIssueToken": broker != nil && len(broker.SignKey) > 0,
-		},
+		ApprovalBroker: approvalBrokerCapabilities(cfg, broker),
 	}
 	report.MCPServers = mcpServerCapabilities(cfg, mcpStatus)
 	report.EnabledMCPServers = enabledMCPServers(report.MCPServers, cfg)
@@ -817,6 +812,34 @@ func ApprovalModes(cfg config.Config) map[string]string {
 		"skillExecution": string(cfg.Security.Approvals.SkillExecution.Mode),
 		"secretAccess":   string(cfg.Security.Approvals.SecretAccess.Mode),
 		"messageSend":    string(cfg.Security.Approvals.MessageSend.Mode),
+	}
+}
+
+func approvalBrokerCapabilities(cfg config.Config, broker *approval.Broker) map[string]any {
+	moderator := map[string]any{
+		"enabled":       cfg.Security.Approvals.Moderator.Enabled && cfg.Security.Approvals.Enabled,
+		"preset":        string(cfg.Security.Approvals.Moderator.Preset),
+		"failureAction": string(cfg.Security.Approvals.Moderator.FailureAction),
+		"actions": map[string]string{
+			"low":     string(cfg.Security.Approvals.Moderator.EffectiveActions().Low),
+			"medium":  string(cfg.Security.Approvals.Moderator.EffectiveActions().Medium),
+			"high":    string(cfg.Security.Approvals.Moderator.EffectiveActions().High),
+			"extreme": string(cfg.Security.Approvals.Moderator.EffectiveActions().Extreme),
+		},
+	}
+	if broker != nil && broker.Moderator != nil {
+		moderator["model"] = broker.Moderator.ModelIdentity()
+		moderator["policyHash"] = broker.Moderator.PolicyHash()
+		moderator["available"] = true
+	} else {
+		moderator["available"] = false
+	}
+	return map[string]any{
+		"enabled":       cfg.Security.Approvals.Enabled,
+		"required":      approvalBrokerRequired(cfg),
+		"available":     broker != nil,
+		"canIssueToken": broker != nil && len(broker.SignKey) > 0,
+		"moderator":     moderator,
 	}
 }
 

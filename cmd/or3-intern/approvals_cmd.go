@@ -312,6 +312,12 @@ func printApprovalAdvanced(stdout io.Writer, item db.ApprovalRequestRecord) {
 	fmt.Fprintf(stdout, "   Type: %s\n", item.Type)
 	fmt.Fprintf(stdout, "   Subject hash: %s\n", item.SubjectHash)
 	fmt.Fprintf(stdout, "   Policy mode: %s\n", item.PolicyMode)
+	if strings.TrimSpace(item.ModeratorRisk) != "" {
+		fmt.Fprintf(stdout, "   Moderator: risk=%s action=%s status=%s model=%s\n", item.ModeratorRisk, item.ModeratorAction, item.ModeratorStatus, item.ModeratorModel)
+		if strings.TrimSpace(item.ModeratorReason) != "" {
+			fmt.Fprintf(stdout, "   Moderator reason: %s\n", item.ModeratorReason)
+		}
+	}
 	fmt.Fprintf(stdout, "   Subject JSON: %s\n", item.SubjectJSON)
 }
 

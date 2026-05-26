@@ -229,6 +229,34 @@ The approval and pairing system adds a small `approvals` block inside the `secur
 | `approvalTokenTtlSeconds` | int    | `300`     | How long an issued approval token remains valid after the operator resolves the request.                                                                         |
 | `localAutoPairLoopback`   | bool   | `false`   | When `true`, automatically approves pairing requests from loopback addresses without requiring operator action. Intended for single-node local development only. |
 
+#### `security.approvals.moderator`
+
+AI-assisted review runs after policy/allowlist checks and before surfacing a pending request. It is inert unless `security.approvals.enabled` is true and a provider API key is available.
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | Turn on moderator review for eligible approval requests. |
+| `preset` | string | `balanced` | Built-in mapping: `balanced`, `cautious`, `hands_off`, or `manual`. |
+| `provider` | string | `""` | Provider profile key for review calls. Empty reuses the chat primary provider. |
+| `model` | string | `""` | Chat model for review. Empty reuses the chat primary model. |
+| `timeoutSeconds` | int | `8` | Per-review timeout (1–120). |
+| `maxPromptChars` | int | `12000` | Upper bound on moderator prompt size. |
+| `maxSubjectChars` | int | `4000` | Upper bound on redacted subject facts. |
+| `failureAction` | string | `escalate` | `escalate` or `deny` when review fails; `approve` is rejected at validation. |
+| `userPolicy` | string | `""` | Extra plain-language rules appended to built-in policy. |
+| `actions.low` | string | `approve` | Action for low risk (`approve`, `escalate`, `deny`). |
+| `actions.medium` | string | `approve` | Action for medium risk. |
+| `actions.high` | string | `escalate` | Action for high risk. |
+| `actions.extreme` | string | `deny` | Action for extreme risk. |
+| `requireUserAuthHigh` | bool | `false` | When true, never auto-approve high/extreme even if the model suggests approval. |
+
+Preset summaries:
+
+- `balanced`: low/medium auto-approve, high escalate, extreme deny.
+- `cautious`: low auto-approve, medium+ escalate or deny.
+- `hands_off`: low/medium/high may auto-approve unless hard-deny matches; extreme escalate/deny.
+- `manual`: all levels escalate to the operator.
+
 #### Approval modes
 
 Each domain under `security.approvals` accepts a `mode` field with one of these values:

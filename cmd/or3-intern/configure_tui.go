@@ -1602,6 +1602,17 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 			// Note: Secret access mode is not yet implemented - approval gate not wired to secret store
 			// {Key: "security_approval_secret_mode", Label: "Secret access mode", Description: "Approval rule for reading stored secrets.", Kind: configureFieldChoice, Value: string(cfg.Security.Approvals.SecretAccess.Mode), Choices: approvalChoices, ChoiceIndex: indexOfChoice(approvalChoices, string(cfg.Security.Approvals.SecretAccess.Mode))},
 			{Key: "security_approval_message_mode", Label: "Message-send mode", Description: "Approval rule for outbound send-message actions.", Kind: configureFieldChoice, Value: string(cfg.Security.Approvals.MessageSend.Mode), Choices: approvalChoices, ChoiceIndex: indexOfChoice(approvalChoices, string(cfg.Security.Approvals.MessageSend.Mode))},
+			{Key: "security_approval_moderator_enabled", Label: "AI approval moderator", Description: "Review pending approvals with a fast model before escalating to you.", Kind: configureFieldToggle, Value: onOff(cfg.Security.Approvals.Moderator.Enabled && cfg.Security.Approvals.Enabled)},
+			{Key: "security_approval_moderator_preset", Label: "Moderator preset", Description: "Balanced, cautious, hands-off, or manual review for all risk levels.", Kind: configureFieldChoice, Value: string(cfg.Security.Approvals.Moderator.Preset), Choices: []string{"balanced", "cautious", "hands_off", "manual"}, ChoiceIndex: indexOfChoice([]string{"balanced", "cautious", "hands_off", "manual"}, string(cfg.Security.Approvals.Moderator.Preset))},
+			{Key: "security_approval_moderator_provider", Label: "Moderator provider", Description: "Provider profile key for approval review calls.", Kind: configureFieldText, Value: cfg.Security.Approvals.Moderator.Provider, EmptyHint: "chat primary provider"},
+			{Key: "security_approval_moderator_model", Label: "Moderator model", Description: "Fast model used for approval review.", Kind: configureFieldText, Value: cfg.Security.Approvals.Moderator.Model, EmptyHint: "chat primary model"},
+			{Key: "security_approval_moderator_timeout", Label: "Moderator timeout seconds", Description: "Maximum time for one moderator review.", Kind: configureFieldText, Value: formatInt(cfg.Security.Approvals.Moderator.TimeoutSeconds), EmptyHint: "8"},
+			{Key: "security_approval_moderator_failure_action", Label: "Moderator failure action", Description: "What to do when review fails or times out.", Kind: configureFieldChoice, Value: string(cfg.Security.Approvals.Moderator.FailureAction), Choices: []string{"escalate", "deny"}, ChoiceIndex: indexOfChoice([]string{"escalate", "deny"}, string(cfg.Security.Approvals.Moderator.FailureAction))},
+			{Key: "security_approval_moderator_user_policy", Label: "Moderator user policy", Description: "Extra rules appended to built-in moderator policy.", Kind: configureFieldText, Value: cfg.Security.Approvals.Moderator.UserPolicy, EmptyHint: "never use grep"},
+			{Key: "security_approval_moderator_action_low", Label: "Moderator action (low risk)", Description: "Override for low-risk approvals; empty inherits preset.", Kind: configureFieldChoice, Value: moderatorActionFieldValue(cfg.Security.Approvals.Moderator, "low"), Choices: []string{"", "approve", "escalate", "deny"}, ChoiceIndex: indexOfChoice([]string{"", "approve", "escalate", "deny"}, moderatorActionFieldValue(cfg.Security.Approvals.Moderator, "low"))},
+			{Key: "security_approval_moderator_action_medium", Label: "Moderator action (medium risk)", Description: "Override for medium-risk approvals; empty inherits preset.", Kind: configureFieldChoice, Value: moderatorActionFieldValue(cfg.Security.Approvals.Moderator, "medium"), Choices: []string{"", "approve", "escalate", "deny"}, ChoiceIndex: indexOfChoice([]string{"", "approve", "escalate", "deny"}, moderatorActionFieldValue(cfg.Security.Approvals.Moderator, "medium"))},
+			{Key: "security_approval_moderator_action_high", Label: "Moderator action (high risk)", Description: "Override for high-risk approvals; empty inherits preset.", Kind: configureFieldChoice, Value: moderatorActionFieldValue(cfg.Security.Approvals.Moderator, "high"), Choices: []string{"", "approve", "escalate", "deny"}, ChoiceIndex: indexOfChoice([]string{"", "approve", "escalate", "deny"}, moderatorActionFieldValue(cfg.Security.Approvals.Moderator, "high"))},
+			{Key: "security_approval_moderator_action_extreme", Label: "Moderator action (extreme risk)", Description: "Override for extreme-risk approvals; empty inherits preset.", Kind: configureFieldChoice, Value: moderatorActionFieldValue(cfg.Security.Approvals.Moderator, "extreme"), Choices: []string{"", "approve", "escalate", "deny"}, ChoiceIndex: indexOfChoice([]string{"", "approve", "escalate", "deny"}, moderatorActionFieldValue(cfg.Security.Approvals.Moderator, "extreme"))},
 			{Key: "security_profiles_enabled", Label: "Enable access profiles", Description: "Map channels and triggers to named runtime capability profiles.", Kind: configureFieldToggle, Value: onOff(cfg.Security.Profiles.Enabled)},
 			{Key: "security_profiles_default", Label: "Default profile", Description: "Fallback profile name applied when no channel/trigger mapping matches.", Kind: configureFieldText, Value: cfg.Security.Profiles.Default, EmptyHint: "guarded"},
 			{Key: "security_profiles_channels", Label: "Channel profile mappings", Description: "Comma-separated `channel=profile` mappings, e.g. `telegram=ops,slack=guarded`.", Kind: configureFieldText, Value: formatStringMap(cfg.Security.Profiles.Channels), EmptyHint: "telegram=ops,slack=guarded"},
@@ -1914,6 +1925,17 @@ var helpfulSectionFieldDescriptions = map[string]string{
 	"security_approval_skill_mode":           "Controls approvals for skills that run code or commands. Warning: trusted skills can perform powerful actions without asking.",
 	"security_approval_secret_mode":          "Controls approvals for reading stored secrets. Warning: trusted access can expose sensitive credentials to tools or channels.",
 	"security_approval_message_mode":         "Controls approvals for sending messages through channels. Warning: trusted mode can let OR3 send outbound messages without asking.",
+	"security_approval_moderator_enabled":    "Uses a fast model to review pending approvals before they reach you. Reduces approval fatigue while keeping high-risk actions escalated.",
+	"security_approval_moderator_preset":     "Chooses default risk handling: balanced auto-approves low/medium work, cautious escalates more, hands_off is more autonomous, manual sends everything to you.",
+	"security_approval_moderator_provider":   "Provider profile key used only for approval review calls. Leave empty to reuse the chat provider.",
+	"security_approval_moderator_model":        "Model used for approval review. Pick a fast, inexpensive model; leave empty to reuse the chat model.",
+	"security_approval_moderator_timeout":    "Maximum seconds to wait for one moderator review before applying the failure action.",
+	"security_approval_moderator_failure_action": "What happens when moderator review fails or times out. Escalate is safer; deny blocks the action.",
+	"security_approval_moderator_user_policy":  "Extra plain-language rules appended to built-in moderator policy, such as never use grep. Built-in hard denials still win.",
+	"security_approval_moderator_action_low":     "What the moderator does for low-risk approvals when set; leave empty to inherit the preset.",
+	"security_approval_moderator_action_medium":  "What the moderator does for medium-risk approvals when set; leave empty to inherit the preset.",
+	"security_approval_moderator_action_high":    "What the moderator does for high-risk approvals when set; leave empty to inherit the preset.",
+	"security_approval_moderator_action_extreme": "What the moderator does for extreme-risk approvals when set; leave empty to inherit the preset.",
 	"security_profiles_enabled":              "Applies named safety profiles to different channels or triggers. Useful for giving public channels less power than local chat.",
 	"security_profiles_default":              "Fallback profile used when no channel or trigger-specific profile matches. Warning: a permissive default affects many entry points.",
 	"security_profiles_channels":             "Maps channels to safety profiles, such as telegram=guarded. Warning: mistakes can give a channel more access than intended.",
@@ -2203,6 +2225,21 @@ func normalizeConfigureCapability(value string) string {
 	default:
 		return ""
 	}
+}
+
+func moderatorActionFieldValue(moderator config.ApprovalModeratorConfig, level string) string {
+	var configured string
+	switch level {
+	case "low":
+		configured = string(moderator.Actions.Low)
+	case "medium":
+		configured = string(moderator.Actions.Medium)
+	case "high":
+		configured = string(moderator.Actions.High)
+	case "extreme":
+		configured = string(moderator.Actions.Extreme)
+	}
+	return strings.TrimSpace(configured)
 }
 
 func formatInt(value int) string { return strconv.Itoa(value) }

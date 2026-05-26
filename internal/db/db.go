@@ -769,6 +769,9 @@ func (d *DB) migrate(ctx context.Context) error {
 	if err := d.ensureApprovalRequestContextColumn(ctx); err != nil {
 		return err
 	}
+	if err := d.ensureApprovalModeratorColumns(ctx); err != nil {
+		return err
+	}
 	if err := d.ensureMemoryVecIndexForExisting(ctx); err != nil {
 		return err
 	}
@@ -1244,6 +1247,35 @@ func (d *DB) ensureApprovalRequestContextColumn(ctx context.Context) error {
 	}
 	_, err = d.SQL.ExecContext(ctx, `ALTER TABLE approval_requests ADD COLUMN requester_context_json TEXT NOT NULL DEFAULT '{}'`)
 	return err
+}
+
+func (d *DB) ensureApprovalModeratorColumns(ctx context.Context) error {
+	columns := []struct {
+		name string
+		ddl  string
+	}{
+		{"moderator_status", `ALTER TABLE approval_requests ADD COLUMN moderator_status TEXT NOT NULL DEFAULT ''`},
+		{"moderator_risk", `ALTER TABLE approval_requests ADD COLUMN moderator_risk TEXT NOT NULL DEFAULT ''`},
+		{"moderator_action", `ALTER TABLE approval_requests ADD COLUMN moderator_action TEXT NOT NULL DEFAULT ''`},
+		{"moderator_reason", `ALTER TABLE approval_requests ADD COLUMN moderator_reason TEXT NOT NULL DEFAULT ''`},
+		{"moderator_model", `ALTER TABLE approval_requests ADD COLUMN moderator_model TEXT NOT NULL DEFAULT ''`},
+		{"moderator_policy_hash", `ALTER TABLE approval_requests ADD COLUMN moderator_policy_hash TEXT NOT NULL DEFAULT ''`},
+		{"moderator_reviewed_at", `ALTER TABLE approval_requests ADD COLUMN moderator_reviewed_at INTEGER NOT NULL DEFAULT 0`},
+		{"moderator_latency_ms", `ALTER TABLE approval_requests ADD COLUMN moderator_latency_ms INTEGER NOT NULL DEFAULT 0`},
+	}
+	for _, column := range columns {
+		exists, err := d.tableHasColumn(ctx, "approval_requests", column.name)
+		if err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		if _, err := d.SQL.ExecContext(ctx, column.ddl); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (d *DB) tableHasColumn(ctx context.Context, tableName, columnName string) (bool, error) {

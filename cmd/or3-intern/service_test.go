@@ -2633,6 +2633,19 @@ func TestServiceJobsStream_ReplaysCompletedJob(t *testing.T) {
 	}
 }
 
+func TestWriteSSEComment(t *testing.T) {
+	rec := httptest.NewRecorder()
+	if err := beginSSE(rec); err != nil {
+		t.Fatalf("beginSSE: %v", err)
+	}
+	if err := writeSSEComment(rec, "or3 job heartbeat\nignored"); err != nil {
+		t.Fatalf("writeSSEComment: %v", err)
+	}
+	if got := rec.Body.String(); !strings.Contains(got, ": or3 job heartbeat ignored\n\n") {
+		t.Fatalf("expected SSE comment heartbeat, got %q", got)
+	}
+}
+
 func TestServiceJobs_MethodGuardsAndNotFound(t *testing.T) {
 	server := &serviceServer{jobs: agent.NewJobRegistry(time.Minute, 32)}
 	tests := []struct {

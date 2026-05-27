@@ -425,6 +425,37 @@ func TestChat_ContextCanceled(t *testing.T) {
 	}
 }
 
+func TestChatStream_AllowsLongBodyAfterHeaders(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("expected response writer to support flush")
+		}
+		w.WriteHeader(http.StatusOK)
+		flusher.Flush()
+		time.Sleep(50 * time.Millisecond)
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	c := &Client{APIBase: srv.URL, HTTP: &http.Client{Timeout: 10 * time.Millisecond}}
+	deltas := []string{}
+	resp, err := c.ChatStream(context.Background(), ChatCompletionRequest{Model: "gpt-4.1-mini"}, func(text string) {
+		deltas = append(deltas, text)
+	})
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+	if got := strings.Join(deltas, ""); got != "hello" {
+		t.Fatalf("expected streamed delta hello, got %q", got)
+	}
+	if got := resp.Choices[0].Message.Content; got != "hello" {
+		t.Fatalf("expected final content hello, got %#v", got)
+	}
+}
+
 func TestEmbed_WithAPIKey(t *testing.T) {
 	var gotAuth string
 	var gotDimensions int

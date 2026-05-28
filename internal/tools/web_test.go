@@ -320,12 +320,36 @@ func TestWebFetch_PinsValidatedHostIntoDial(t *testing.T) {
 	}
 }
 
-func TestWebFetch_ActiveProfileWithNoHostsDeniesByDefault(t *testing.T) {
+func TestWebFetch_ActiveProfileWithNoHostsAllowsByDefault(t *testing.T) {
+	ctx := ContextWithActiveProfile(context.Background(), ActiveProfile{Name: "operator"})
+	parsed, err := url.Parse("https://www.fifa.com/en/articles/example")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := validateURLAgainstPolicies(ctx, parsed, security.HostPolicy{}, ActiveProfileFromContext(ctx)); err != nil {
+		t.Fatalf("expected empty profile allowlist to permit public fetch, got %v", err)
+	}
+}
+
+func TestWebFetch_ActiveProfileWithExplicitHostsDeniesUnknownHost(t *testing.T) {
 	tool := &WebFetch{}
-	ctx := ContextWithActiveProfile(context.Background(), ActiveProfile{Name: "no-network"})
+	ctx := ContextWithActiveProfile(context.Background(), ActiveProfile{
+		Name:         "restricted",
+		AllowedHosts: []string{"docs.example.com"},
+	})
 	_, err := tool.Execute(ctx, map[string]any{"url": "http://example.com"})
 	if err == nil || !strings.Contains(err.Error(), "host denied by policy") {
 		t.Fatalf("expected profile host denial, got %v", err)
+	}
+}
+
+func TestAppendBraveSearchHostIfMissing(t *testing.T) {
+	hosts := AppendBraveSearchHostIfMissing([]string{"example.com"})
+	if len(hosts) != 2 || hosts[1] != BraveSearchHost {
+		t.Fatalf("expected brave host appended, got %#v", hosts)
+	}
+	if got := AppendBraveSearchHostIfMissing(hosts); len(got) != 2 {
+		t.Fatalf("expected no duplicate brave host, got %#v", got)
 	}
 }
 

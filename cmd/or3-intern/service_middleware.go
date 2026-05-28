@@ -620,6 +620,22 @@ func writeSSEEvent(w http.ResponseWriter, eventType string, payload map[string]a
 	return nil
 }
 
+func writeSSEComment(w http.ResponseWriter, comment string) error {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		return fmt.Errorf("streaming is not supported")
+	}
+	comment = strings.ReplaceAll(strings.TrimSpace(comment), "\n", " ")
+	if comment == "" {
+		comment = "heartbeat"
+	}
+	if _, err := fmt.Fprintf(w, ": %s\n\n", comment); err != nil {
+		return err
+	}
+	flusher.Flush()
+	return nil
+}
+
 func writeServiceJSON(w http.ResponseWriter, statusCode int, payload map[string]any) {
 	if statusCode >= 400 {
 		requestID := ""

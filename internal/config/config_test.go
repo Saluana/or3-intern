@@ -316,6 +316,124 @@ func TestLoad_RejectsUnknownApprovalMode(t *testing.T) {
 	}
 }
 
+func TestDefault_ApprovalModeratorBalancedActions(t *testing.T) {
+	cfg := Default()
+	actions := cfg.Security.Approvals.Moderator.EffectiveActions()
+	if actions.Low != ApprovalModeratorActionApprove || actions.Medium != ApprovalModeratorActionApprove {
+		t.Fatalf("expected low/medium approve, got %#v", actions)
+	}
+	if actions.High != ApprovalModeratorActionEscalate || actions.Extreme != ApprovalModeratorActionDeny {
+		t.Fatalf("expected high escalate and extreme deny, got %#v", actions)
+	}
+}
+
+func TestLoad_ApprovalModeratorDefaultsWhenMissing(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	cfg := Default()
+	cfg.Security.Approvals.Moderator = ApprovalModeratorConfig{}
+
+	b, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.Security.Approvals.Moderator.Preset != ApprovalModeratorPresetBalanced {
+		t.Fatalf("expected balanced preset, got %q", loaded.Security.Approvals.Moderator.Preset)
+	}
+	if loaded.Security.Approvals.Moderator.TimeoutSeconds != defaultApprovalModeratorTimeoutSeconds {
+		t.Fatalf("expected default timeout, got %d", loaded.Security.Approvals.Moderator.TimeoutSeconds)
+	}
+}
+
+func TestLoad_RejectsInvalidApprovalModeratorConfiguredAction(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	cfg := Default()
+	cfg.Security.Approvals.Moderator.Enabled = true
+	cfg.Security.Approvals.Moderator.Actions.High = ApprovalModeratorAction("approvee")
+
+	b, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected invalid moderator action to fail")
+	}
+}
+
+func TestLoad_RejectsInvalidApprovalModeratorAction(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	cfg := Default()
+	cfg.Security.Approvals.Moderator.Enabled = true
+	cfg.Security.Approvals.Moderator.Preset = ApprovalModeratorPreset("maybe")
+
+	b, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected invalid moderator preset to fail")
+	}
+}
+
+func TestLoad_RejectsApprovalModeratorFailureApprove(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	cfg := Default()
+	cfg.Security.Approvals.Moderator.Enabled = true
+	cfg.Security.Approvals.Moderator.FailureAction = ApprovalModeratorActionApprove
+
+	b, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected failureAction approve to fail")
+	}
+}
+
+func TestApprovalModeratorPartialOverrideUsesPresetFallback(t *testing.T) {
+	cfg := Default()
+	cfg.Security.Approvals.Moderator.Preset = ApprovalModeratorPresetManual
+	cfg.Security.Approvals.Moderator.Actions = ApprovalModeratorActionMap{Low: ApprovalModeratorActionApprove}
+	normalizeApprovalModerator(&cfg.Security.Approvals.Moderator)
+	actions := cfg.Security.Approvals.Moderator.EffectiveActions()
+	if actions.Low != ApprovalModeratorActionApprove {
+		t.Fatalf("expected configured low action, got %q", actions.Low)
+	}
+	for _, level := range []ApprovalModeratorAction{actions.Medium, actions.High, actions.Extreme} {
+		if level != ApprovalModeratorActionEscalate {
+			t.Fatalf("expected manual preset fallback escalate, got %q", level)
+		}
+	}
+}
+
+func TestApprovalModeratorPresetManualEscalatesAll(t *testing.T) {
+	cfg := Default()
+	cfg.Security.Approvals.Moderator.Preset = ApprovalModeratorPresetManual
+	cfg.Security.Approvals.Moderator.Actions = ApprovalModeratorActionMap{}
+	normalizeApprovalModerator(&cfg.Security.Approvals.Moderator)
+	actions := cfg.Security.Approvals.Moderator.EffectiveActions()
+	for _, level := range []ApprovalModeratorAction{actions.Low, actions.Medium, actions.High, actions.Extreme} {
+		if level != ApprovalModeratorActionEscalate {
+			t.Fatalf("expected manual preset to escalate all, got %#v", actions)
+		}
+	}
+}
+
 func TestValidateAuthConfigRejectsUnsafeRPAndOrigins(t *testing.T) {
 	base := AuthConfig{
 		Enabled:                   true,

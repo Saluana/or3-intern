@@ -24,7 +24,8 @@ func serviceContextWithAuthIdentity(ctx context.Context, identity serviceAuthIde
 }
 
 func serviceUnauthenticatedPairingRequest(r *http.Request) *http.Request {
-	ctx := approval.ContextWithAuditAuthKind(r.Context(), "unauthenticated")
-	ctx = approval.ContextWithAuditActor(ctx, "anonymous")
-	return r.WithContext(ctx)
+	return serviceRequestWithAuthIdentity(r, serviceAuthIdentity{
+		Kind:  "unauthenticated",
+		Actor: "anonymous",
+	})
 }

@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"or3-intern/internal/config"
-	"or3-intern/internal/db"
 )
 
 func (b *Broker) EvaluateExec(ctx context.Context, req ExecEvaluation) (Decision, error) {
@@ -102,6 +101,24 @@ func (b *Broker) EvaluateToolQuota(ctx context.Context, req ToolQuotaEvaluation,
 	)
 }
 
+func (b *Broker) EvaluateMessageSend(ctx context.Context, req MessageSendEvaluation) (Decision, error) {
+	subject := MessageSendSubject{
+		Type:            string(SubjectMessageSend),
+		ExecutionHostID: b.hostID(),
+		Channel:         strings.TrimSpace(req.Channel),
+		To:              strings.TrimSpace(req.To),
+		TextLength:      len(strings.TrimSpace(req.Text)),
+		MediaCount:      req.MediaCount,
+		ReplyInThread:   req.ReplyInThread,
+		RequestingAgent: strings.TrimSpace(req.AgentID),
+		SessionID:       strings.TrimSpace(req.SessionID),
+	}
+	return b.evaluate(ctx, SubjectMessageSend, subject, req.ApprovalToken,
+		AllowlistScope{HostID: subject.ExecutionHostID, Tool: "send_message", Agent: subject.RequestingAgent},
+		nil,
+	)
+}
+
 func (b *Broker) evaluate(ctx context.Context, subjectType SubjectType, subject any, approvalToken string, scope AllowlistScope, matcher any) (Decision, error) {
 	return b.evaluateWithMode(ctx, subjectType, subject, approvalToken, b.modeFor(subjectType), scope, matcher)
 }
@@ -123,7 +140,7 @@ func (b *Broker) evaluateWithMode(ctx context.Context, subjectType SubjectType, 
 			return dec, nil
 		}
 	}
-	return b.requireApproval(ctx, subjectType, subject, sh, scope, mode)
+	return b.evaluateModerator(ctx, subjectType, subject, sh, scope, mode)
 }
 
 func (b *Broker) checkExistingToken(ctx context.Context, approvalToken string, subjectHash string) (Decision, bool) {
@@ -152,7 +169,14 @@ func (b *Broker) checkPolicyMode(ctx context.Context, subjectType SubjectType, s
 		})
 		return Decision{Allowed: false, SubjectHash: sh.Hash, Reason: "approval denied by policy"}, true
 	default:
-		if len(b.SignKey) == 0 || b.DB == nil {
+		if b.DB == nil {
+			_ = b.audit(ctx, "approval.blocked", map[string]any{
+				"subject_hash": sh.Hash, "host_id": b.hostID(),
+				"type": string(subjectType), "outcome": "blocked", "reason": "broker_unavailable",
+			})
+			return Decision{Allowed: false, SubjectHash: sh.Hash, Reason: "approval broker unavailable"}, true
+		}
+		if len(b.SignKey) == 0 {
 			_ = b.audit(ctx, "approval.blocked", map[string]any{
 				"subject_hash": sh.Hash, "host_id": b.hostID(),
 				"type": string(subjectType), "outcome": "blocked", "reason": "broker_unavailable",
@@ -179,13 +203,7 @@ func (b *Broker) checkAllowlist(ctx context.Context, subjectType SubjectType, sc
 }
 
 func (b *Broker) requireApproval(ctx context.Context, subjectType SubjectType, subject any, sh SubjectHash, scope AllowlistScope, mode config.ApprovalMode) (Decision, error) {
-	nowMS := b.now().UnixMilli()
-	req, reused, err := b.DB.CreateOrGetPendingApprovalRequest(ctx, db.ApprovalRequestRecord{
-		Type: string(subjectType), SubjectHash: sh.Hash, SubjectJSON: sh.JSON,
-		RequesterAgentID: scope.Agent, RequesterSessionID: extractSessionID(subject), RequesterContextJSON: MarshalRequesterContext(RequesterContextFromContext(ctx)),
-		ExecutionHostID: b.hostID(), Status: StatusPending, PolicyMode: string(mode),
-		RequestedAt: nowMS, ExpiresAt: nowMS + int64(b.Config.PendingTTLSeconds*1000),
-	}, nowMS)
+	req, reused, err := b.createApprovalRequest(ctx, subjectType, subject, sh, scope, mode)
 	if err != nil {
 		return Decision{}, err
 	}

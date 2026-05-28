@@ -2135,29 +2135,58 @@ func TestRuntime_GuardToolExecution_ProfileDeniesSubagents(t *testing.T) {
 	}
 }
 
-func TestRuntime_GuardToolExecution_ProfileWithEmptyHostsDeniesWebFetch(t *testing.T) {
-	rt := &Runtime{}
+func TestRuntime_GuardToolExecution_ProfileWithEmptyHostsAllowsWebFetch(t *testing.T) {
+	rt := &Runtime{Hardening: config.HardeningConfig{GuardedTools: true}}
 	ctx := tools.ContextWithActiveProfile(context.Background(), tools.ActiveProfile{
-		Name:          "no-network",
+		Name:          "operator",
 		MaxCapability: tools.CapabilityGuarded,
 		AllowedTools:  map[string]struct{}{"web_fetch": {}},
 	})
-	err := rt.guardToolExecution(ctx, &tools.WebFetch{}, tools.CapabilityGuarded, map[string]any{"url": "https://example.com"})
-	if err == nil || !strings.Contains(err.Error(), "host denied by policy") {
-		t.Fatalf("expected host denial, got %v", err)
+	err := rt.guardToolExecution(ctx, &tools.WebFetch{}, tools.CapabilityGuarded, map[string]any{"url": "https://www.fifa.com/en/articles/example"})
+	if err != nil {
+		t.Fatalf("expected web_fetch to pass when profile has no host allowlist, got %v", err)
 	}
 }
 
-func TestRuntime_GuardToolExecution_ProfileWithEmptyHostsDeniesWebSearch(t *testing.T) {
+func TestRuntime_GuardToolExecution_ProfileWithExplicitHostsDeniesWebFetch(t *testing.T) {
+	rt := &Runtime{Hardening: config.HardeningConfig{GuardedTools: true}}
+	ctx := tools.ContextWithActiveProfile(context.Background(), tools.ActiveProfile{
+		Name:          "restricted",
+		MaxCapability: tools.CapabilityGuarded,
+		AllowedTools:  map[string]struct{}{"web_fetch": {}},
+		AllowedHosts:  []string{"docs.example.com"},
+	})
+	err := rt.guardToolExecution(ctx, &tools.WebFetch{}, tools.CapabilityGuarded, map[string]any{"url": "https://www.fifa.com/en/articles/example"})
+	if err == nil || !strings.Contains(err.Error(), "host denied by policy") {
+		t.Fatalf("expected host denial when profile allowlist excludes target, got %v", err)
+	}
+}
+
+func TestRuntime_GuardToolExecution_ProfileWithEmptyHostsAllowsWebSearch(t *testing.T) {
 	rt := &Runtime{}
 	ctx := tools.ContextWithActiveProfile(context.Background(), tools.ActiveProfile{
-		Name:          "no-network",
+		Name:          "operator",
 		MaxCapability: tools.CapabilitySafe,
 		AllowedTools:  map[string]struct{}{"web_search": {}},
 	})
 	err := rt.guardToolExecution(ctx, &tools.WebSearch{}, tools.CapabilitySafe, map[string]any{"query": "hello"})
-	if err == nil || !strings.Contains(err.Error(), "host denied by policy") {
-		t.Fatalf("expected host denial, got %v", err)
+	if err != nil {
+		t.Fatalf("expected web_search to pass when profile has no host allowlist, got %v", err)
+	}
+}
+
+func TestRuntime_GuardToolExecution_ProfileWithEmptyHostsAllowsWebSearchWhenBraveConfigured(t *testing.T) {
+	reg := tools.NewRegistry()
+	reg.Register(&tools.WebSearch{APIKey: "brave-key"})
+	rt := &Runtime{Tools: reg}
+	ctx := tools.ContextWithActiveProfile(context.Background(), tools.ActiveProfile{
+		Name:          "operator",
+		MaxCapability: tools.CapabilitySafe,
+		AllowedTools:  map[string]struct{}{"web_search": {}},
+	})
+	err := rt.guardToolExecution(ctx, &tools.WebSearch{APIKey: "brave-key"}, tools.CapabilitySafe, map[string]any{"query": "hello"})
+	if err != nil {
+		t.Fatalf("expected web_search host check to pass when brave is configured, got %v", err)
 	}
 }
 

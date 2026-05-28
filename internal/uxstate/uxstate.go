@@ -234,6 +234,12 @@ func BuildApprovalPrompt(item db.ApprovalRequestRecord) ApprovalPromptView {
 		view.RiskLabel = "Medium"
 		view.RiskExplanation = "This action can change OR3 behavior or share information."
 	}
+	if meta := moderatorRiskView(item); meta != "" {
+		view.RiskLabel = meta
+		if strings.TrimSpace(item.ModeratorReason) != "" {
+			view.RiskExplanation = item.ModeratorReason
+		}
+	}
 	return view
 }
 
@@ -446,6 +452,21 @@ func subjectSummary(subjectJSON, fallback string) string {
 		}
 	}
 	return fallback
+}
+
+func moderatorRiskView(item db.ApprovalRequestRecord) string {
+	switch strings.ToLower(strings.TrimSpace(item.ModeratorRisk)) {
+	case "low":
+		return "Low"
+	case "medium":
+		return "Medium"
+	case "high":
+		return "High"
+	case "extreme":
+		return "Extreme"
+	default:
+		return ""
+	}
 }
 
 func firstNonEmpty(values ...string) string {

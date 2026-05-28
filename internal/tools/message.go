@@ -8,18 +8,20 @@ import (
 	"strings"
 
 	rootchannels "or3-intern/internal/channels"
+	"or3-intern/internal/approval"
 )
 
 type DeliverFunc func(ctx context.Context, channel, to, text string, meta map[string]any) error
 
 type SendMessage struct {
 	Base
-	Deliver        DeliverFunc
-	DefaultChannel string
-	DefaultTo      string
-	AllowedRoot    string
-	ArtifactsDir   string
-	MaxMediaBytes  int
+	Deliver         DeliverFunc
+	DefaultChannel  string
+	DefaultTo       string
+	AllowedRoot     string
+	ArtifactsDir    string
+	MaxMediaBytes   int
+	ApprovalBroker  *approval.Broker
 }
 
 func (t *SendMessage) Capability() CapabilityLevel { return CapabilityGuarded }
@@ -102,6 +104,28 @@ func (t *SendMessage) Execute(ctx context.Context, params map[string]any) (strin
 	}
 	if len(meta) == 0 {
 		meta = nil
+	}
+	if t.ApprovalBroker != nil {
+		identity := RequesterIdentityFromContext(ctx)
+		decision, err := t.ApprovalBroker.EvaluateMessageSend(ctx, approval.MessageSendEvaluation{
+			Channel:       ch,
+			To:            to,
+			Text:          text,
+			MediaCount:    len(mediaPaths),
+			ReplyInThread: replyInThread,
+			AgentID:       firstRequester(identity.Actor),
+			SessionID:     SessionFromContext(ctx),
+			ApprovalToken: ApprovalTokenFromContext(ctx),
+		})
+		if err != nil {
+			return "", err
+		}
+		if !decision.Allowed {
+			if decision.RequiresApproval {
+				return "", &ApprovalRequiredError{ToolName: t.Name(), RequestID: decision.RequestID}
+			}
+			return "", fmt.Errorf("send_message blocked: %s", decision.Reason)
+		}
 	}
 	if err := t.Deliver(ctx, ch, to, text, meta); err != nil {
 		return "", err

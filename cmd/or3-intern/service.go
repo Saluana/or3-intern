@@ -139,6 +139,8 @@ const (
 	serviceTerminalWebSocketHandshakeTimeout       = 5 * time.Second
 	serviceTerminalWebSocketProtocol               = "or3.terminal.v1"
 	serviceTerminalWebSocketTicketPrefix           = "or3.ticket."
+	serviceTerminalReplayMaxBytes                  = 256 << 10
+	serviceJobStreamHeartbeatInterval              = 15 * time.Second
 )
 
 func runServiceCommand(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, agentCLIManager *agentcli.Manager, jobs *agent.JobRegistry) error {

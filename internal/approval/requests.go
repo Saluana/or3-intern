@@ -33,6 +33,9 @@ func (b *Broker) ApproveRequest(ctx context.Context, requestID int64, actor stri
 	if b == nil || b.DB == nil {
 		return IssuedApproval{}, fmt.Errorf("approval broker unavailable")
 	}
+	if len(b.SignKey) == 0 {
+		return IssuedApproval{}, fmt.Errorf("approval signing key unavailable")
+	}
 	now := b.now()
 	nowMS := now.UnixMilli()
 	tokenExpiresAt := now.Add(time.Duration(b.Config.ApprovalTokenTTLSeconds) * time.Second).UnixMilli()

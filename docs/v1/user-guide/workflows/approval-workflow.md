@@ -15,6 +15,16 @@ Typical triggers include:
 
 The request becomes visible through the local CLI, OR3 App, or the service API.
 
+When `security.approvals.moderator.enabled` is on and a provider is configured, a fast model may review the request first:
+
+| Moderator outcome | What happens next |
+| --- | --- |
+| Auto-approve (low/medium risk) | OR3 issues the same one-shot approval token as a human approval and continues |
+| Escalate (high/extreme or failure) | The request stays pending and follows the normal CLI/app/channel flow |
+| Auto-deny (policy or extreme risk) | The request is resolved as denied with a short reason and safe alternative when available |
+
+Built-in hard denials (secret exfiltration, destructive commands, security weakening) always win over user policy text. Review failures fail closed using `security.approvals.moderator.failureAction` (default: escalate).
+
 ## 3. The request is surfaced
 
 Common places it appears:

@@ -545,6 +545,7 @@ func normalizeAndValidateConfigWithOptions(cfg Config, opts normalizeOptions) (C
 	cfg.Security.Approvals.SkillExecution.Mode = normalizeApprovalMode(cfg.Security.Approvals.SkillExecution.Mode, Default().Security.Approvals.SkillExecution.Mode)
 	cfg.Security.Approvals.SecretAccess.Mode = normalizeApprovalMode(cfg.Security.Approvals.SecretAccess.Mode, Default().Security.Approvals.SecretAccess.Mode)
 	cfg.Security.Approvals.MessageSend.Mode = normalizeApprovalMode(cfg.Security.Approvals.MessageSend.Mode, Default().Security.Approvals.MessageSend.Mode)
+	normalizeApprovalModerator(&cfg.Security.Approvals.Moderator)
 	if cfg.Security.Profiles.Channels == nil {
 		cfg.Security.Profiles.Channels = map[string]string{}
 	}

@@ -817,6 +817,10 @@ func decodeServiceJSONMap(raw string) map[string]any {
 }
 
 func (s *serviceServer) streamJob(w http.ResponseWriter, r *http.Request, jobID string) {
+	s.streamJobWithHeartbeat(w, r, jobID, serviceJobStreamHeartbeatInterval)
+}
+
+func (s *serviceServer) streamJobWithHeartbeat(w http.ResponseWriter, r *http.Request, jobID string, heartbeatInterval time.Duration) {
 	snapshot, events, unsubscribe, ok := s.app().SubscribeJob(jobID)
 	if !ok {
 		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "job not found"})
@@ -836,10 +840,21 @@ func (s *serviceServer) streamJob(w http.ResponseWriter, r *http.Request, jobID 
 	if isTerminalStatus(snapshot.Status) {
 		return
 	}
+	var heartbeat <-chan time.Time
+	var heartbeatTicker *time.Ticker
+	if heartbeatInterval > 0 {
+		heartbeatTicker = time.NewTicker(heartbeatInterval)
+		defer heartbeatTicker.Stop()
+		heartbeat = heartbeatTicker.C
+	}
 	for {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-heartbeat:
+			if err := writeSSEComment(w, "or3 job heartbeat"); err != nil {
+				return
+			}
 		case event, ok := <-events:
 			if !ok {
 				return

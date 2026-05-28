@@ -282,7 +282,11 @@ func (r *Runtime) enforceSkillPolicy(ctx context.Context, tool tools.Tool, param
 			return fmt.Errorf("network denied by skill policy: %s", tool.Name())
 		}
 		if len(policy.AllowedHosts) > 0 {
-			if err := (security.HostPolicy{Enabled: true, DefaultDeny: true, AllowedHosts: policy.AllowedHosts}).ValidateHost(ctx, "api.search.brave.com"); err != nil {
+			allowedHosts := policy.AllowedHosts
+			if r.braveSearchConfigured() {
+				allowedHosts = tools.AppendBraveSearchHostIfMissing(allowedHosts)
+			}
+			if err := (security.HostPolicy{Enabled: true, DefaultDeny: true, AllowedHosts: allowedHosts}).ValidateHost(ctx, tools.BraveSearchHost); err != nil {
 				return err
 			}
 		}
@@ -419,6 +423,9 @@ func (r *Runtime) enforceProfile(ctx context.Context, profile tools.ActiveProfil
 	}
 	switch tool.Name() {
 	case tools.ToolNameWebFetch, tools.ToolNameWebFetchMarkdown:
+		if len(profile.AllowedHosts) == 0 {
+			return nil
+		}
 		parsed, err := url.Parse(strings.TrimSpace(fmt.Sprint(params["url"])))
 		if err != nil {
 			return err
@@ -427,11 +434,23 @@ func (r *Runtime) enforceProfile(ctx context.Context, profile tools.ActiveProfil
 			return err
 		}
 	case tools.ToolNameWebSearch:
-		if err := (security.HostPolicy{Enabled: true, DefaultDeny: true, AllowedHosts: profile.AllowedHosts}).ValidateHost(ctx, "api.search.brave.com"); err != nil {
+		if err := tools.ValidateWebSearchHost(ctx, profile, r.braveSearchConfigured()); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (r *Runtime) braveSearchConfigured() bool {
+	if r == nil || r.Tools == nil {
+		return false
+	}
+	tool := r.Tools.Get(tools.ToolNameWebSearch)
+	ws, ok := tool.(*tools.WebSearch)
+	if !ok || ws == nil {
+		return false
+	}
+	return tools.BraveSearchConfigured(ws.APIKey)
 }
 
 func capabilityRank(level tools.CapabilityLevel) int {

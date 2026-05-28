@@ -103,7 +103,7 @@ func serviceAuthMiddlewareWithBroker(cfg config.Config, broker *approval.Broker,
 
 func serviceAuthMiddlewareWithBrokerAndLimiter(cfg config.Config, broker *approval.Broker, authSvc *auth.Service, server *serviceServer, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if allowsUnauthenticatedPairingRoute(cfg, r) {
+		if allowsSecurePairingCompletionRoute(r) || allowsUnauthenticatedPairingRoute(cfg, r) {
 			next.ServeHTTP(w, serviceUnauthenticatedPairingRequest(r))
 			return
 		}
@@ -684,6 +684,13 @@ func allowsUnauthenticatedPairingRoute(cfg config.Config, r *http.Request) bool 
 		return false
 	}
 	return serviceTrustedRemotePairingRequest(cfg, r, origin)
+}
+
+func allowsSecurePairingCompletionRoute(r *http.Request) bool {
+	if r == nil || r.URL == nil {
+		return false
+	}
+	return r.Method == http.MethodPost && serviceIsSecurePairingRoute(r)
 }
 
 func serviceIsPairingRoute(r *http.Request) bool {

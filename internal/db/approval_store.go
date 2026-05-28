@@ -57,6 +57,27 @@ type ApprovalRequestRecord struct {
 	ResolverActorID      string
 	ResolutionKind       string
 	ResolutionNote       string
+	ModeratorStatus      string
+	ModeratorRisk        string
+	ModeratorAction      string
+	ModeratorReason      string
+	ModeratorModel       string
+	ModeratorPolicyHash  string
+	ModeratorReviewedAt  int64
+	ModeratorLatencyMS   int64
+}
+
+const approvalRequestSelectColumns = `id, type, subject_hash, subject_json, requester_agent_id, requester_session_id, requester_context_json, execution_host_id, status, policy_mode, requested_at, expires_at, resolved_at, resolver_actor_id, resolution_kind, resolution_note, moderator_status, moderator_risk, moderator_action, moderator_reason, moderator_model, moderator_policy_hash, moderator_reviewed_at, moderator_latency_ms`
+
+type ApprovalModeratorMetadata struct {
+	Status      string
+	Risk        string
+	Action      string
+	Reason      string
+	Model       string
+	PolicyHash  string
+	ReviewedAt  int64
+	LatencyMS   int64
 }
 
 type ApprovalAllowlistRecord struct {
@@ -378,12 +399,12 @@ func (d *DB) CreateApprovalRequest(ctx context.Context, input ApprovalRequestRec
 }
 
 func (d *DB) GetApprovalRequest(ctx context.Context, id int64) (ApprovalRequestRecord, error) {
-	row := d.SQL.QueryRowContext(ctx, `SELECT id, type, subject_hash, subject_json, requester_agent_id, requester_session_id, requester_context_json, execution_host_id, status, policy_mode, requested_at, expires_at, resolved_at, resolver_actor_id, resolution_kind, resolution_note FROM approval_requests WHERE id=?`, id)
+	row := d.SQL.QueryRowContext(ctx, `SELECT `+approvalRequestSelectColumns+` FROM approval_requests WHERE id=?`, id)
 	return scanApprovalRequest(row)
 }
 
 func (d *DB) FindPendingApprovalRequest(ctx context.Context, approvalType, subjectHash, hostID string, nowMS int64) (ApprovalRequestRecord, bool, error) {
-	row := d.SQL.QueryRowContext(ctx, `SELECT id, type, subject_hash, subject_json, requester_agent_id, requester_session_id, requester_context_json, execution_host_id, status, policy_mode, requested_at, expires_at, resolved_at, resolver_actor_id, resolution_kind, resolution_note
+	row := d.SQL.QueryRowContext(ctx, `SELECT `+approvalRequestSelectColumns+`
 		FROM approval_requests WHERE type=? AND subject_hash=? AND execution_host_id=? AND status='pending' AND expires_at>? ORDER BY id DESC LIMIT 1`, approvalType, subjectHash, hostID, nowMS)
 	rec, err := scanApprovalRequest(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -400,7 +421,7 @@ func (d *DB) ListApprovalRequestsFiltered(ctx context.Context, status, approvalT
 	if limit <= 0 || limit > 200 {
 		limit = 200
 	}
-	query := `SELECT id, type, subject_hash, subject_json, requester_agent_id, requester_session_id, requester_context_json, execution_host_id, status, policy_mode, requested_at, expires_at, resolved_at, resolver_actor_id, resolution_kind, resolution_note FROM approval_requests`
+	query := `SELECT ` + approvalRequestSelectColumns + ` FROM approval_requests`
 	args := []any{}
 	clauses := make([]string, 0, 2)
 	if strings.TrimSpace(status) != "" {
@@ -552,7 +573,7 @@ func (d *DB) CreateOrGetPendingApprovalRequest(ctx context.Context, input Approv
 }
 
 func findPendingApprovalRequestTx(ctx context.Context, tx *sql.Tx, approvalType, subjectHash, hostID string, nowMS int64) (ApprovalRequestRecord, bool, error) {
-	row := tx.QueryRowContext(ctx, `SELECT id, type, subject_hash, subject_json, requester_agent_id, requester_session_id, requester_context_json, execution_host_id, status, policy_mode, requested_at, expires_at, resolved_at, resolver_actor_id, resolution_kind, resolution_note
+	row := tx.QueryRowContext(ctx, `SELECT `+approvalRequestSelectColumns+`
 		FROM approval_requests WHERE type=? AND subject_hash=? AND execution_host_id=? AND status='pending' AND expires_at>? ORDER BY id DESC LIMIT 1`, approvalType, subjectHash, hostID, nowMS)
 	rec, err := scanApprovalRequest(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -588,6 +609,13 @@ func (d *DB) ListExpiredPendingApprovalRequestIDs(ctx context.Context, nowMS int
 
 func (d *DB) UpdateApprovalRequestResolution(ctx context.Context, id int64, status string, resolvedAt int64, actor, kind, note string) error {
 	_, err := d.SQL.ExecContext(ctx, `UPDATE approval_requests SET status=?, resolved_at=?, resolver_actor_id=?, resolution_kind=?, resolution_note=? WHERE id=?`, status, resolvedAt, actor, kind, note, id)
+	return err
+}
+
+func (d *DB) UpdateApprovalRequestModeratorMetadata(ctx context.Context, id int64, meta ApprovalModeratorMetadata) error {
+	_, err := d.SQL.ExecContext(ctx, `UPDATE approval_requests SET moderator_status=?, moderator_risk=?, moderator_action=?, moderator_reason=?, moderator_model=?, moderator_policy_hash=?, moderator_reviewed_at=?, moderator_latency_ms=? WHERE id=?`,
+		strings.TrimSpace(meta.Status), strings.TrimSpace(meta.Risk), strings.TrimSpace(meta.Action), strings.TrimSpace(meta.Reason),
+		strings.TrimSpace(meta.Model), strings.TrimSpace(meta.PolicyHash), meta.ReviewedAt, meta.LatencyMS, id)
 	return err
 }
 
@@ -841,7 +869,7 @@ issueToken:
 }
 
 func getApprovalRequestTx(ctx context.Context, tx *sql.Tx, id int64) (ApprovalRequestRecord, error) {
-	row := tx.QueryRowContext(ctx, `SELECT id, type, subject_hash, subject_json, requester_agent_id, requester_session_id, requester_context_json, execution_host_id, status, policy_mode, requested_at, expires_at, resolved_at, resolver_actor_id, resolution_kind, resolution_note FROM approval_requests WHERE id=?`, id)
+	row := tx.QueryRowContext(ctx, `SELECT `+approvalRequestSelectColumns+` FROM approval_requests WHERE id=?`, id)
 	return scanApprovalRequest(row)
 }
 
@@ -973,7 +1001,11 @@ func scanPairedDevice(scanner interface{ Scan(dest ...any) error }) (PairedDevic
 
 func scanApprovalRequest(scanner interface{ Scan(dest ...any) error }) (ApprovalRequestRecord, error) {
 	var rec ApprovalRequestRecord
-	if err := scanner.Scan(&rec.ID, &rec.Type, &rec.SubjectHash, &rec.SubjectJSON, &rec.RequesterAgentID, &rec.RequesterSessionID, &rec.RequesterContextJSON, &rec.ExecutionHostID, &rec.Status, &rec.PolicyMode, &rec.RequestedAt, &rec.ExpiresAt, &rec.ResolvedAt, &rec.ResolverActorID, &rec.ResolutionKind, &rec.ResolutionNote); err != nil {
+	if err := scanner.Scan(
+		&rec.ID, &rec.Type, &rec.SubjectHash, &rec.SubjectJSON, &rec.RequesterAgentID, &rec.RequesterSessionID, &rec.RequesterContextJSON,
+		&rec.ExecutionHostID, &rec.Status, &rec.PolicyMode, &rec.RequestedAt, &rec.ExpiresAt, &rec.ResolvedAt, &rec.ResolverActorID, &rec.ResolutionKind, &rec.ResolutionNote,
+		&rec.ModeratorStatus, &rec.ModeratorRisk, &rec.ModeratorAction, &rec.ModeratorReason, &rec.ModeratorModel, &rec.ModeratorPolicyHash, &rec.ModeratorReviewedAt, &rec.ModeratorLatencyMS,
+	); err != nil {
 		return ApprovalRequestRecord{}, err
 	}
 	return rec, nil

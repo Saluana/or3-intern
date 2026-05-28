@@ -1020,9 +1020,10 @@ func buildToolRegistryWithOptions(cfg config.Config, d *db.DB, prov *providers.C
 				}
 				return channelManager.DeliverWithMeta(ctx, channel, to, text, meta)
 			},
-			AllowedRoot:   fileWriteRoot,
-			ArtifactsDir:  cfg.ArtifactsDir,
-			MaxMediaBytes: cfg.MaxMediaBytes,
+			AllowedRoot:    fileWriteRoot,
+			ArtifactsDir:   cfg.ArtifactsDir,
+			MaxMediaBytes:  cfg.MaxMediaBytes,
+			ApprovalBroker: approvalBroker,
 		})
 	}
 	if inv != nil {

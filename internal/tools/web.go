@@ -19,6 +19,88 @@ import (
 	"time"
 )
 
+const BraveSearchHost = "api.search.brave.com"
+
+func BraveSearchConfigured(apiKey string) bool {
+	return strings.TrimSpace(apiKey) != ""
+}
+
+func AppendBraveSearchHostIfMissing(hosts []string) []string {
+	for _, host := range hosts {
+		normalized := strings.ToLower(strings.TrimSpace(host))
+		if normalized == BraveSearchHost {
+			return hosts
+		}
+		if strings.HasPrefix(normalized, "*.") {
+			suffix := normalized[1:]
+			if strings.HasSuffix(BraveSearchHost, suffix) {
+				return hosts
+			}
+		}
+	}
+	return append(append([]string{}, hosts...), BraveSearchHost)
+}
+
+func profileRestrictsWebHosts(profile ActiveProfile) bool {
+	return strings.TrimSpace(profile.Name) != "" && len(profile.AllowedHosts) > 0
+}
+
+func profileWebAllowedHosts(profile ActiveProfile, braveConfigured bool) []string {
+	hosts := append([]string{}, profile.AllowedHosts...)
+	if braveConfigured {
+		hosts = AppendBraveSearchHostIfMissing(hosts)
+	}
+	return hosts
+}
+
+func validateWebSearchPolicies(
+	ctx context.Context,
+	target *url.URL,
+	policy security.HostPolicy,
+	profile ActiveProfile,
+	braveConfigured bool,
+) error {
+	if policy.EnabledPolicy() {
+		if err := policy.ValidateURL(ctx, target); err != nil {
+			return err
+		}
+	}
+	if !profileRestrictsWebHosts(profile) {
+		return nil
+	}
+	return (security.HostPolicy{
+		Enabled:      true,
+		DefaultDeny:  true,
+		AllowedHosts: profileWebAllowedHosts(profile, braveConfigured),
+	}).ValidateURL(ctx, target)
+}
+
+func ValidateWebSearchHost(
+	ctx context.Context,
+	profile ActiveProfile,
+	braveConfigured bool,
+) error {
+	if !profileRestrictsWebHosts(profile) {
+		return nil
+	}
+	return (security.HostPolicy{
+		Enabled:      true,
+		DefaultDeny:  true,
+		AllowedHosts: profileWebAllowedHosts(profile, braveConfigured),
+	}).ValidateHost(ctx, BraveSearchHost)
+}
+
+func validateProfileWebURL(ctx context.Context, target *url.URL, profile ActiveProfile) error {
+	if !profileRestrictsWebHosts(profile) {
+		return nil
+	}
+	return (security.HostPolicy{
+		Enabled:      true,
+		DefaultDeny:  true,
+		AllowedHosts: profile.AllowedHosts,
+	}).ValidateURL(ctx, target)
+}
+
 type WebFetch struct {
 	Base
 	HTTP               *http.Client
@@ -408,7 +490,7 @@ func (t *WebSearch) Execute(ctx context.Context, params map[string]any) (string,
 	if err != nil {
 		return "", err
 	}
-	if err := validateURLAgainstPolicies(ctx, parsedEndpoint, t.HostPolicy, profile); err != nil {
+	if err := validateWebSearchPolicies(ctx, parsedEndpoint, t.HostPolicy, profile, BraveSearchConfigured(t.APIKey)); err != nil {
 		return "", err
 	}
 	r, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
@@ -479,10 +561,7 @@ func validateURLAgainstPolicies(ctx context.Context, target *url.URL, policy sec
 			return err
 		}
 	}
-	if strings.TrimSpace(profile.Name) == "" {
-		return nil
-	}
-	return (security.HostPolicy{Enabled: true, DefaultDeny: true, AllowedHosts: profile.AllowedHosts}).ValidateURL(ctx, target)
+	return validateProfileWebURL(ctx, target, profile)
 }
 
 func prepareWebFetchRequestContext(ctx context.Context, target *url.URL, policy security.HostPolicy, profile ActiveProfile) (context.Context, error) {
@@ -490,7 +569,7 @@ func prepareWebFetchRequestContext(ctx context.Context, target *url.URL, policy 
 	if policy.EnabledPolicy() || policy.AllowLoopback || policy.AllowPrivate {
 		policies = append(policies, policy)
 	}
-	if strings.TrimSpace(profile.Name) != "" {
+	if profileRestrictsWebHosts(profile) {
 		policies = append(policies, security.HostPolicy{Enabled: true, DefaultDeny: true, AllowedHosts: profile.AllowedHosts})
 	}
 	return security.PrepareURLRequestContext(ctx, target, policies...)

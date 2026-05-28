@@ -1,6 +1,7 @@
 package approval
 
 import (
+	"context"
 	"time"
 
 	"or3-intern/internal/config"
@@ -41,13 +42,58 @@ const (
 
 const defaultPageSize = 200
 
+type ModeratorRisk string
+
+const (
+	RiskLow     ModeratorRisk = "low"
+	RiskMedium  ModeratorRisk = "medium"
+	RiskHigh    ModeratorRisk = "high"
+	RiskExtreme ModeratorRisk = "extreme"
+)
+
+type ModeratorAction string
+
+const (
+	ModeratorApprove  ModeratorAction = "approve"
+	ModeratorEscalate ModeratorAction = "escalate"
+	ModeratorDeny     ModeratorAction = "deny"
+)
+
+type ModeratorReviewInput struct {
+	RequestID      int64
+	SubjectType    SubjectType
+	SubjectHash    string
+	SubjectPreview string
+	SubjectFacts   map[string]any
+	PolicyMode     config.ApprovalMode
+	AccessProfile  string
+	Requester      RequesterContext
+	Redactions     redactionStats
+}
+
+type ModeratorReviewResult struct {
+	Risk        ModeratorRisk   `json:"risk"`
+	Action      ModeratorAction `json:"action"`
+	Reason      string          `json:"reason"`
+	Alternative string          `json:"alternative,omitempty"`
+	Confidence  float64         `json:"confidence,omitempty"`
+}
+
+type Moderator interface {
+	ReviewApproval(ctx context.Context, input ModeratorReviewInput) (ModeratorReviewResult, error)
+	ModelIdentity() string
+	PolicyHash() string
+}
+
 type Broker struct {
-	DB      *db.DB
-	Audit   *security.AuditLogger
-	Config  config.ApprovalConfig
-	HostID  string
-	SignKey []byte
-	Now     func() time.Time
+	DB        *db.DB
+	Audit     *security.AuditLogger
+	Config    config.ApprovalConfig
+	HostID    string
+	SignKey   []byte
+	Now       func() time.Time
+	Moderator Moderator
+	Workspace string
 }
 
 type Decision struct {
@@ -125,6 +171,42 @@ type ToolQuotaEvaluation struct {
 	SessionID     string
 	ApprovalToken string
 }
+
+type MessageSendEvaluation struct {
+	Channel       string
+	To            string
+	Text          string
+	MediaCount    int
+	ReplyInThread bool
+	AgentID       string
+	SessionID     string
+	ApprovalToken string
+}
+
+type MessageSendSubject struct {
+	Type            string `json:"type"`
+	ExecutionHostID string `json:"execution_host_id"`
+	Channel         string `json:"channel"`
+	To              string `json:"to"`
+	TextLength      int    `json:"text_length"`
+	MediaCount      int    `json:"media_count"`
+	ReplyInThread   bool   `json:"reply_in_thread"`
+	RequestingAgent string `json:"requesting_agent_id,omitempty"`
+	SessionID       string `json:"session_id,omitempty"`
+}
+
+func (s MessageSendSubject) GetSessionID() string { return s.SessionID }
+
+type FileTransferSubject struct {
+	Type            string `json:"type"`
+	ExecutionHostID string `json:"execution_host_id"`
+	Path            string `json:"path"`
+	Destination     string `json:"destination,omitempty"`
+	RequestingAgent string `json:"requesting_agent_id,omitempty"`
+	SessionID       string `json:"session_id,omitempty"`
+}
+
+func (s FileTransferSubject) GetSessionID() string { return s.SessionID }
 
 type ExecSubject struct {
 	Type            string   `json:"type"`

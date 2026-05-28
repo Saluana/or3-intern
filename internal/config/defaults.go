@@ -228,6 +228,7 @@ func defaultSecurityConfig(root string) SecurityConfig {
 			PairingCodeTTLSeconds:   defaultApprovalPairingCodeTTLSeconds,
 			PendingTTLSeconds:       defaultApprovalPendingTTLSeconds,
 			ApprovalTokenTTLSeconds: defaultApprovalTokenTTLSeconds,
+			Moderator:               defaultApprovalModeratorConfig(),
 			Pairing:                 ApprovalDomainConfig{Mode: ApprovalModeAsk},
 			Exec:                    ApprovalDomainConfig{Mode: ApprovalModeTrusted},
 			SkillExecution:          ApprovalDomainConfig{Mode: ApprovalModeTrusted},

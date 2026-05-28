@@ -402,7 +402,7 @@ func (c *Client) chatStreamOnce(ctx context.Context, req ChatCompletionRequest, 
 		r.Header.Set("Authorization", "Bearer "+c.APIKey)
 	}
 
-	resp, err := c.do(r)
+	resp, err := c.doStream(r)
 	if err != nil {
 		return ChatCompletionResponse{}, err
 	}
@@ -583,4 +583,39 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 		client = security.WrapHTTPClient(client, c.HostPolicy)
 	}
 	return client.Do(req)
+}
+
+func (c *Client) doStream(req *http.Request) (*http.Response, error) {
+	client := c.HTTP
+	if client == nil {
+		client = &http.Client{Timeout: 60 * time.Second}
+	}
+	client = cloneHTTPClientForStreaming(client)
+	if c.HostPolicy.EnabledPolicy() {
+		client = security.WrapHTTPClient(client, c.HostPolicy)
+	}
+	return client.Do(req)
+}
+
+func cloneHTTPClientForStreaming(client *http.Client) *http.Client {
+	if client == nil {
+		client = &http.Client{Timeout: 60 * time.Second}
+	}
+	cloned := *client
+	timeout := cloned.Timeout
+	cloned.Timeout = 0
+	if cloned.Transport == nil && timeout > 0 {
+		cloned.Transport = defaultStreamingTransport(timeout)
+	}
+	return &cloned
+}
+
+func defaultStreamingTransport(responseHeaderTimeout time.Duration) http.RoundTripper {
+	transport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return http.DefaultTransport
+	}
+	cloned := transport.Clone()
+	cloned.ResponseHeaderTimeout = responseHeaderTimeout
+	return cloned
 }

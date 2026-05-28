@@ -520,6 +520,66 @@ func TestAppendTerminalEventDropsFullSubscriberWithoutBlocking(t *testing.T) {
 	}
 }
 
+func TestAppendTerminalOutputCoalescesAdjacentChunks(t *testing.T) {
+	session := &serviceTerminalSession{
+		ID:          "term-coalesce",
+		ExpiresAt:   time.Now().Add(time.Minute),
+		subscribers: map[chan serviceTerminalEvent]struct{}{},
+	}
+	live := make(chan serviceTerminalEvent, 4)
+	session.subscribers[live] = struct{}{}
+
+	session.appendEvent("output", map[string]any{"stream": "stdout", "chunk": "hel"})
+	session.appendEvent("output", map[string]any{"stream": "stdout", "chunk": "lo"})
+
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if len(session.events) != 1 {
+		t.Fatalf("expected one buffered output event, got %d", len(session.events))
+	}
+	if got := session.events[0].Data["chunk"]; got != "hello" {
+		t.Fatalf("expected coalesced chunk hello, got %v", got)
+	}
+
+	select {
+	case event := <-live:
+		if event.Data["chunk"] != "hel" {
+			t.Fatalf("expected first live chunk hel, got %v", event.Data["chunk"])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected first live output event")
+	}
+	select {
+	case event := <-live:
+		if event.Data["chunk"] != "lo" {
+			t.Fatalf("expected second live chunk lo, got %v", event.Data["chunk"])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected second live output event")
+	}
+}
+
+func TestAppendTerminalReplayBufferIsBoundedByBytes(t *testing.T) {
+	session := &serviceTerminalSession{
+		ID:          "term-trim",
+		ExpiresAt:   time.Now().Add(time.Minute),
+		subscribers: map[chan serviceTerminalEvent]struct{}{},
+	}
+	chunk := strings.Repeat("a", 32<<10)
+	for range 12 {
+		session.appendEvent("output", map[string]any{"stream": "stdout", "chunk": chunk})
+	}
+
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if got := terminalReplayOutputBytes(session.events); got > serviceTerminalReplayMaxBytes {
+		t.Fatalf("expected replay buffer <= %d bytes, got %d", serviceTerminalReplayMaxBytes, got)
+	}
+	if len(session.events) == 0 {
+		t.Fatal("expected replay buffer to retain a recent output tail")
+	}
+}
+
 func TestListTerminalSessionsReturnsMostRecentFirst(t *testing.T) {
 	now := time.Now().UTC()
 	server := &serviceServer{terminalManager: &serviceTerminalManager{sessions: map[string]*serviceTerminalSession{

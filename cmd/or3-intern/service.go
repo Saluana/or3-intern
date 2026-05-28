@@ -139,6 +139,7 @@ const (
 	serviceTerminalWebSocketHandshakeTimeout       = 5 * time.Second
 	serviceTerminalWebSocketProtocol               = "or3.terminal.v1"
 	serviceTerminalWebSocketTicketPrefix           = "or3.ticket."
+	serviceTerminalReplayMaxBytes                  = 256 << 10
 	serviceJobStreamHeartbeatInterval              = 15 * time.Second
 )
 

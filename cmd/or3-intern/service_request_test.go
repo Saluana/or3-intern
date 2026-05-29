@@ -92,6 +92,20 @@ func TestDecodeServiceAgentRunRequest_AcceptsCamelAliasesWithWarnings(t *testing
 	}
 }
 
+func TestDecodeServiceTurnRequest_AcceptsModelOverride(t *testing.T) {
+	req, err := decodeServiceTurnRequest(strings.NewReader(`{
+		"session_key": "svc:key",
+		"message": "hello",
+		"model": "anthropic/claude-sonnet-4-5"
+	}`), nil)
+	if err != nil {
+		t.Fatalf("decodeServiceTurnRequest: %v", err)
+	}
+	if req.Model != "anthropic/claude-sonnet-4-5" {
+		t.Fatalf("expected model override, got %q", req.Model)
+	}
+}
+
 func TestDecodeServiceTurnRequest_ConflictWarningsKeepSnakeCaseCanonical(t *testing.T) {
 	req, err := decodeServiceTurnRequest(strings.NewReader(`{
 		"session_key": "snake-session",

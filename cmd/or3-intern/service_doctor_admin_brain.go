@@ -38,13 +38,16 @@ func doctorUsesRunnerChat(runnerID string) bool {
 }
 
 func doctorShouldUseInternalAdminBrain(meta db.ChatSessionMeta, provider adminflow.AdminBrainProvider) bool {
+	if provider.Available && provider.Kind == adminflow.AdminBrainAPIKeyProvider {
+		return true
+	}
 	if strings.TrimSpace(meta.RunnerChatSessionID) != "" {
 		return false
 	}
 	if strings.EqualFold(strings.TrimSpace(meta.RunnerID), string(agentcli.RunnerOR3)) {
 		return true
 	}
-	return provider.Available && provider.Kind == adminflow.AdminBrainAPIKeyProvider
+	return false
 }
 
 func doctorAdminBrainAllowedTools(reg *tools.Registry) []string {

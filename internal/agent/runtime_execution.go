@@ -50,6 +50,9 @@ func (r *Runtime) executeConversation(ctx context.Context, eventType bus.EventTy
 		}
 		turnTools := r.exposedToolsForTurn(ctx, reg, messages, channel)
 		modelCfg := r.modelConfigForEvent(eventType)
+		if override := turnModelOverrideFromContext(ctx); override != "" {
+			modelCfg.Model = override
+		}
 		if modelCfg.Provider == nil {
 			return "", false, fmt.Errorf("provider not configured")
 		}

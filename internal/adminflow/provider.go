@@ -25,9 +25,8 @@ type AdminBrainProvider struct {
 }
 
 // DetectAdminBrainProvider chooses how settings health chat runs AI turns.
-// When a service API key is configured, the in-process admin brain is preferred.
-// Otherwise an external CLI runner is used when available; or3-intern native runner
-// is skipped here because doctor admin turns use the service runtime directly when keyed.
+// Admin Assistant turns rely on in-process doctor_* service tools, so only the
+// service runtime can be advertised as tool-capable Admin Brain.
 func DetectAdminBrainProvider(cfg config.Config, runners []agentcli.RunnerInfo) AdminBrainProvider {
 	if providerKey := configuredAdminBrainProviderKey(cfg); providerKey != "" {
 		return AdminBrainProvider{
@@ -37,31 +36,11 @@ func DetectAdminBrainProvider(cfg config.Config, runners []agentcli.RunnerInfo) 
 			ProviderKey: providerKey,
 		}
 	}
-	for _, runner := range runners {
-		if strings.EqualFold(strings.TrimSpace(runner.ID), string(agentcli.RunnerOR3)) {
-			continue
-		}
-		if runner.Status != agentcli.RunnerStatusAvailable {
-			continue
-		}
-		if runner.AuthStatus != agentcli.AuthReady {
-			continue
-		}
-		if !runner.Supports.Chat.ChatSelectable {
-			continue
-		}
-		return AdminBrainProvider{
-			Kind:        AdminBrainRunner,
-			Available:   true,
-			DisplayName: "Admin Brain",
-			RunnerID:    strings.TrimSpace(runner.ID),
-		}
-	}
 	return AdminBrainProvider{
 		Kind:        AdminBrainUnavailable,
 		Available:   false,
 		DisplayName: "Admin Brain",
-		Reason:      "Basic Doctor is available. AI repair is not configured yet.",
+		Reason:      "Basic Doctor is available. Configure an in-process model provider so Admin Assistant can use Doctor tools.",
 	}
 }
 

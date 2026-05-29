@@ -105,6 +105,7 @@ func (s *serviceServer) runTurnJob(ctx context.Context, jobID string, req servic
 		err = s.app().RunTurn(ctx, app.TurnRequest{
 			SessionKey:    req.SessionKey,
 			Message:       req.Message,
+			Model:         req.Model,
 			Attachments:   req.Attachments,
 			Meta:          req.Meta,
 			AllowedTools:  req.AllowedTools,

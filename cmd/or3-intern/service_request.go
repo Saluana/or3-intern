@@ -19,6 +19,7 @@ import (
 type serviceTurnRequest struct {
 	SessionKey      string
 	Message         string
+	Model           string
 	Attachments     []agent.ChatAttachment
 	ToolPolicyMode  string
 	AllowedTools    []string
@@ -104,6 +105,7 @@ type serviceTurnRequestPayload struct {
 	InternSessionKeyCamel string                        `json:"internSessionKey"`
 	PlatformSessionRef    map[string]any                `json:"platform_session_ref"`
 	Message               string                        `json:"message"`
+	Model                 string                        `json:"model"`
 	Attachments           []map[string]any              `json:"attachments"`
 	AllowedTools          []string                      `json:"allowed_tools"`
 	AllowedToolsCamel     []string                      `json:"allowedTools"`
@@ -193,6 +195,7 @@ func decodeServiceTurnRequest(body io.Reader, registry *tools.Registry) (service
 	return serviceTurnRequest{
 		SessionKey:     compat.FirstString(payload.SessionKey, payload.InternSessionKey, payload.SessionKeyCamel, payload.InternSessionKeyCamel),
 		Message:        strings.TrimSpace(payload.Message),
+		Model:          strings.TrimSpace(payload.Model),
 		Attachments:    attachments,
 		ToolPolicyMode: toolPolicyMode,
 		AllowedTools:   allowedTools,

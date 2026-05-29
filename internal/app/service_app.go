@@ -62,6 +62,7 @@ func (a *ServiceApp) SetConfig(cfg config.Config) {
 type TurnRequest struct {
 	SessionKey          string
 	Message             string
+	Model               string
 	Attachments         []agent.ChatAttachment
 	SystemPrompt        string
 	Meta                map[string]any
@@ -131,6 +132,9 @@ func (a *ServiceApp) RunTurn(ctx context.Context, req TurnRequest) error {
 	}
 	if strings.TrimSpace(req.ProfileName) != "" {
 		meta["profile_name"] = strings.TrimSpace(req.ProfileName)
+	}
+	if model := strings.TrimSpace(req.Model); model != "" {
+		runCtx = agent.ContextWithTurnModelOverride(runCtx, model)
 	}
 	return a.runtime.Handle(runCtx, bus.Event{
 		Type:       bus.EventUserMessage,

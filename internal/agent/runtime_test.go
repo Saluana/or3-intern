@@ -3257,6 +3257,20 @@ func TestDynamicToolExposureRespectsProfileAllowlist(t *testing.T) {
 	}
 }
 
+func TestDynamicToolExposureRespectsExplicitTurnRegistry(t *testing.T) {
+	reg := tools.NewRegistry()
+	reg.Register(&namedRuntimeTool{
+		name: "doctor_config_search",
+		meta: tools.ToolMetadata{Groups: []string{tools.ToolGroupService}},
+	})
+	rt := &Runtime{DynamicToolExposure: true}
+	ctx := ContextWithToolRegistry(context.Background(), reg)
+	defs := toToolDefs(rt.exposedToolsForTurn(ctx, reg, []providers.ChatMessage{{Role: "user", Content: "help me fix sandboxing"}}, "service"))
+	if !toolDefsContain(defs, "doctor_config_search") {
+		t.Fatalf("expected explicit turn registry tools to stay exposed, got %#v", defs)
+	}
+}
+
 func TestResolveBuiltinAccessProfileExpandsWorkspace(t *testing.T) {
 	workspace := t.TempDir()
 	profiles := config.AccessProfilesConfig{}

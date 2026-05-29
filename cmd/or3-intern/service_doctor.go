@@ -228,13 +228,13 @@ func (s *serviceServer) handleDoctorLogs(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	_ = s.recordDoctorAudit(r.Context(), serviceAuthIdentityFromContext(r.Context()), "doctor.log.queried", map[string]any{
-		"source":         strings.TrimSpace(r.URL.Query().Get("source")),
-		"level":          strings.TrimSpace(r.URL.Query().Get("level")),
-		"correlation_id": strings.TrimSpace(r.URL.Query().Get("correlation_id")),
-		"event_type":     strings.TrimSpace(r.URL.Query().Get("event_type")),
-		"pattern":        serviceFirstNonEmpty(strings.TrimSpace(r.URL.Query().Get("pattern")), strings.TrimSpace(r.URL.Query().Get("known_failure_pattern"))),
-		"since_ms":       sinceMS,
-		"until_ms":       untilMS,
+		"source":          strings.TrimSpace(r.URL.Query().Get("source")),
+		"level":           strings.TrimSpace(r.URL.Query().Get("level")),
+		"correlation_id":  strings.TrimSpace(r.URL.Query().Get("correlation_id")),
+		"event_type":      strings.TrimSpace(r.URL.Query().Get("event_type")),
+		"pattern":         serviceFirstNonEmpty(strings.TrimSpace(r.URL.Query().Get("pattern")), strings.TrimSpace(r.URL.Query().Get("known_failure_pattern"))),
+		"since_ms":        sinceMS,
+		"until_ms":        untilMS,
 		"limit":           limit,
 		"requested_limit": requestedLimit,
 		"returned":        len(items),
@@ -933,7 +933,8 @@ func (s *serviceServer) handleDoctorSessionMessage(w http.ResponseWriter, r *htt
 			return
 		}
 	}
-	if strings.TrimSpace(meta.RunnerChatSessionID) != "" && s.chatManager != nil && s.chatManager.DB != nil && s.chatManager.Manager != nil {
+	useInternalAdminBrain := doctorShouldUseInternalAdminBrain(meta, adminBrain)
+	if !useInternalAdminBrain && strings.TrimSpace(meta.RunnerChatSessionID) != "" && s.chatManager != nil && s.chatManager.DB != nil && s.chatManager.Manager != nil {
 		releaseTurn, turnErr := s.claimDoctorSessionTurn(sessionKey, "runner_chat", meta.RunnerChatSessionID)
 		if turnErr != nil {
 			writeServiceJSON(w, http.StatusConflict, map[string]any{"error": turnErr.Error(), "code": "doctor_turn_active"})
@@ -978,7 +979,7 @@ func (s *serviceServer) handleDoctorSessionMessage(w http.ResponseWriter, r *htt
 		}))
 		return
 	}
-	if doctorShouldUseInternalAdminBrain(meta, adminBrain) {
+	if useInternalAdminBrain {
 		userSeq := s.nextDoctorMessageSequence(r.Context(), sessionKey)
 		if _, err := store.AppendMessage(r.Context(), sessionKey, "user", content, doctorMessagePayload("doctor", userSeq, nil)); err != nil {
 			writeServiceError(w, r, http.StatusServiceUnavailable, "doctor user message persistence failed", err)

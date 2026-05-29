@@ -422,8 +422,8 @@ func TestDoctorShouldUseInternalAdminBrain(t *testing.T) {
 	if !doctorShouldUseInternalAdminBrain(db.ChatSessionMeta{RunnerID: string(agentcli.RunnerCodex)}, adminflow.AdminBrainProvider{Kind: adminflow.AdminBrainAPIKeyProvider, Available: true}) {
 		t.Fatal("expected provider-backed admin brain to ignore selected external runner without runner-chat session")
 	}
-	if doctorShouldUseInternalAdminBrain(db.ChatSessionMeta{RunnerID: string(agentcli.RunnerCodex), RunnerChatSessionID: "rcs_1"}, adminflow.AdminBrainProvider{Kind: adminflow.AdminBrainAPIKeyProvider, Available: true}) {
-		t.Fatal("expected existing external runner-chat session to keep runner-chat path")
+	if !doctorShouldUseInternalAdminBrain(db.ChatSessionMeta{RunnerID: string(agentcli.RunnerCodex), RunnerChatSessionID: "rcs_1"}, adminflow.AdminBrainProvider{Kind: adminflow.AdminBrainAPIKeyProvider, Available: true}) {
+		t.Fatal("expected provider-backed admin brain to reclaim stale runner-chat sessions")
 	}
 }
 

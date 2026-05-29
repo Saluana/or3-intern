@@ -46,6 +46,12 @@ func (r *Runtime) exposedToolsForTurn(ctx context.Context, reg *tools.Registry, 
 	if r == nil || !r.DynamicToolExposure {
 		return filtered
 	}
+	// Doctor admin brain installs an explicit turn registry via
+	// ContextWithToolRegistry. Dynamic exposure must not hide that allowlist
+	// while the doctor system prompt still instructs the model to call doctor_* tools.
+	if toolRegistryFromContext(ctx) != nil {
+		return filtered
+	}
 	intent := latestUserText(messages) + " " + strings.TrimSpace(channel)
 	groups := selectedToolGroups(intent)
 	allowed := map[string]struct{}{}

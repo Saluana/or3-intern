@@ -53,7 +53,7 @@ func TestDetectAdminBrainProvider_PrefersProviderOverReadyRunner(t *testing.T) {
 	}
 }
 
-func TestDetectAdminBrainProvider_UsesReadyRunnerWhenNoProvider(t *testing.T) {
+func TestDetectAdminBrainProvider_DoesNotUseRunnerWithoutProvider(t *testing.T) {
 	cfg := config.Default()
 	runners := []agentcli.RunnerInfo{{
 		ID:         string(agentcli.RunnerOpenCode),
@@ -64,8 +64,11 @@ func TestDetectAdminBrainProvider_UsesReadyRunnerWhenNoProvider(t *testing.T) {
 		},
 	}}
 	got := DetectAdminBrainProvider(cfg, runners)
-	if got.Kind != AdminBrainRunner || got.RunnerID != string(agentcli.RunnerOpenCode) {
+	if got.Kind != AdminBrainUnavailable || got.Available || got.RunnerID != "" {
 		t.Fatalf("DetectAdminBrainProvider() = %#v", got)
+	}
+	if got.Reason == "" {
+		t.Fatal("expected unavailable admin brain to explain missing provider")
 	}
 }
 

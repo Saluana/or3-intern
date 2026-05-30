@@ -560,7 +560,7 @@ func (s *serviceServer) executeDoctorCreatePlanTool(ctx context.Context, params 
 	if strings.TrimSpace(plan.CreatedBy) == "" {
 		plan.CreatedBy = "doctor-admin-brain"
 	}
-	state, err := (adminflow.PlanValidator{}).Stage(s.config, &plan, adminflow.ValidationOptions{ApprovedAuthority: serviceDoctorApprovedAuthority(ctx)})
+	state, err := adminflow.StagePlan(s.config, &plan, adminflow.ValidationOptions{ApprovedAuthority: serviceDoctorApprovedAuthority(ctx)})
 	if err != nil {
 		return encodeDoctorToolResult("doctor_plan", false, err.Error(), map[string]any{"plan": plan, "validation": state.Validation, "error": err.Error()}), nil
 	}

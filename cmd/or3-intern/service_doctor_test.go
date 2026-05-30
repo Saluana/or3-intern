@@ -1097,7 +1097,7 @@ known_fixes:
 	if err := json.Unmarshal(planJSON, &plan); err != nil {
 		t.Fatalf("decode suggested plan: %v", err)
 	}
-	if _, err := (adminflow.PlanValidator{}).Stage(cfg, &plan, adminflow.ValidationOptions{ApprovedAuthority: "warning"}); err != nil {
+	if _, err := adminflow.StagePlan(cfg, &plan, adminflow.ValidationOptions{ApprovedAuthority: "warning"}); err != nil {
 		t.Fatalf("suggested plan should validate: %v plan=%#v", err, plan)
 	}
 }

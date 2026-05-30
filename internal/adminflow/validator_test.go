@@ -28,7 +28,7 @@ func TestPlanValidatorStage_Success(t *testing.T) {
 		},
 	}
 
-	state, err := (PlanValidator{}).Stage(cfg, plan, ValidationOptions{ApprovedAuthority: configmeta.RiskWarning})
+	state, err := StagePlan(cfg, plan, ValidationOptions{ApprovedAuthority: configmeta.RiskWarning})
 	if err != nil {
 		t.Fatalf("Stage() error = %v", err)
 	}
@@ -61,7 +61,7 @@ func TestPlanValidatorStage_StalePlan(t *testing.T) {
 		},
 	}
 
-	_, err := (PlanValidator{}).Stage(cfg, plan, ValidationOptions{})
+	_, err := StagePlan(cfg, plan, ValidationOptions{})
 	if !errors.Is(err, ErrStalePlan) {
 		t.Fatalf("Stage() error = %v, want stale plan", err)
 	}
@@ -84,7 +84,7 @@ func TestPlanValidatorStage_RejectsProviderModelDisplayName(t *testing.T) {
 		},
 	}
 
-	_, err := (PlanValidator{}).Stage(cfg, plan, ValidationOptions{})
+	_, err := StagePlan(cfg, plan, ValidationOptions{})
 	if !errors.Is(err, ErrPlanValidation) {
 		t.Fatalf("Stage() error = %v, want plan validation error", err)
 	}
@@ -110,7 +110,7 @@ func TestPlanValidatorStage_AppliesGuardedToolsToggle(t *testing.T) {
 		},
 	}
 
-	state, err := (PlanValidator{}).Stage(cfg, plan, ValidationOptions{ApprovedAuthority: configmeta.RiskWarning})
+	state, err := StagePlan(cfg, plan, ValidationOptions{ApprovedAuthority: configmeta.RiskWarning})
 	if err != nil {
 		t.Fatalf("Stage() error = %v", err)
 	}
@@ -139,7 +139,7 @@ func TestPlanValidatorStage_AppliesRestrictToWorkspaceToggle(t *testing.T) {
 		},
 	}
 
-	state, err := (PlanValidator{}).Stage(cfg, plan, ValidationOptions{ApprovedAuthority: configmeta.RiskWarning})
+	state, err := StagePlan(cfg, plan, ValidationOptions{ApprovedAuthority: configmeta.RiskWarning})
 	if err != nil {
 		t.Fatalf("Stage() error = %v", err)
 	}
@@ -169,7 +169,7 @@ func TestPlanValidatorStage_NormalizesProviderModelFieldAlias(t *testing.T) {
 		},
 	}
 
-	state, err := (PlanValidator{}).Stage(cfg, plan, ValidationOptions{ApprovedAuthority: configmeta.RiskWarning})
+	state, err := StagePlan(cfg, plan, ValidationOptions{ApprovedAuthority: configmeta.RiskWarning})
 	if err != nil {
 		t.Fatalf("Stage() error = %v", err)
 	}
@@ -238,7 +238,7 @@ func TestPlanValidatorStage_MutationFailure(t *testing.T) {
 		},
 	}
 
-	_, err := (PlanValidator{}).Stage(cfg, plan, ValidationOptions{})
+	_, err := StagePlan(cfg, plan, ValidationOptions{})
 	if !errors.Is(err, ErrPlanValidation) {
 		t.Fatalf("Stage() error = %v, want plan validation error", err)
 	}
@@ -262,7 +262,7 @@ func TestPlanValidatorStage_ConfigValidationFailure(t *testing.T) {
 		},
 	}
 
-	_, err := (PlanValidator{}).Stage(cfg, plan, ValidationOptions{})
+	_, err := StagePlan(cfg, plan, ValidationOptions{})
 	if !errors.Is(err, ErrPlanValidation) {
 		t.Fatalf("Stage() error = %v, want plan validation error", err)
 	}
@@ -286,7 +286,7 @@ func TestPlanValidatorStage_RiskAuthorityFailure(t *testing.T) {
 		},
 	}
 
-	_, err := (PlanValidator{}).Stage(cfg, plan, ValidationOptions{ApprovedAuthority: configmeta.RiskNotice})
+	_, err := StagePlan(cfg, plan, ValidationOptions{ApprovedAuthority: configmeta.RiskNotice})
 	if !errors.Is(err, ErrPlanRiskExceeded) {
 		t.Fatalf("Stage() error = %v, want risk exceeded", err)
 	}
@@ -312,7 +312,7 @@ func TestPlanValidatorStage_RedactedOldValuePresenceMismatch(t *testing.T) {
 		}},
 	}
 
-	_, err := (PlanValidator{}).Stage(cfg, plan, ValidationOptions{ApprovedAuthority: configmeta.RiskWarning})
+	_, err := StagePlan(cfg, plan, ValidationOptions{ApprovedAuthority: configmeta.RiskWarning})
 	if !errors.Is(err, ErrStalePlan) {
 		t.Fatalf("Stage() error = %v, want stale plan", err)
 	}
@@ -334,7 +334,7 @@ func TestPlanValidatorStage_RestartRequiredChange(t *testing.T) {
 		}},
 	}
 
-	state, err := (PlanValidator{}).Stage(cfg, plan, ValidationOptions{ApprovedAuthority: configmeta.RiskNotice})
+	state, err := StagePlan(cfg, plan, ValidationOptions{ApprovedAuthority: configmeta.RiskNotice})
 	if err != nil {
 		t.Fatalf("Stage() error = %v", err)
 	}
@@ -367,7 +367,7 @@ func TestPlanValidatorStage_SkillEntryConfigChange(t *testing.T) {
 		},
 	}
 
-	state, err := (PlanValidator{}).Stage(cfg, plan, ValidationOptions{ApprovedAuthority: configmeta.RiskWarning})
+	state, err := StagePlan(cfg, plan, ValidationOptions{ApprovedAuthority: configmeta.RiskWarning})
 	if err != nil {
 		t.Fatalf("Stage() error = %v", err)
 	}

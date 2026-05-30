@@ -259,7 +259,7 @@ func (s *serviceServer) handleDoctorPlanPreview(w http.ResponseWriter, r *http.R
 	if strings.TrimSpace(plan.ID) == "" {
 		plan.ID = newDoctorID("scp-preview")
 	}
-	state, err := (adminflow.PlanValidator{}).Stage(s.config, &plan, adminflow.ValidationOptions{ApprovedAuthority: serviceDoctorApprovedAuthority(r.Context())})
+	state, err := adminflow.StagePlan(s.config, &plan, adminflow.ValidationOptions{ApprovedAuthority: serviceDoctorApprovedAuthority(r.Context())})
 	if err != nil {
 		status := http.StatusBadRequest
 		if err == adminflow.ErrStalePlan {
@@ -296,7 +296,7 @@ func (s *serviceServer) handleDoctorPlanCreate(w http.ResponseWriter, r *http.Re
 	if strings.TrimSpace(plan.CreatedBy) == "" {
 		plan.CreatedBy = s.serviceDoctorActor(r)
 	}
-	state, err := (adminflow.PlanValidator{}).Stage(s.config, &plan, adminflow.ValidationOptions{ApprovedAuthority: serviceDoctorApprovedAuthority(r.Context())})
+	state, err := adminflow.StagePlan(s.config, &plan, adminflow.ValidationOptions{ApprovedAuthority: serviceDoctorApprovedAuthority(r.Context())})
 	if err != nil {
 		status := http.StatusBadRequest
 		if err == adminflow.ErrStalePlan {
@@ -418,7 +418,7 @@ func (s *serviceServer) handleDoctorPlanValidate(w http.ResponseWriter, r *http.
 		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "plan not found"})
 		return
 	}
-	state, err := (adminflow.PlanValidator{}).Stage(s.config, &plan, adminflow.ValidationOptions{ApprovedAuthority: serviceDoctorApprovedAuthority(r.Context())})
+	state, err := adminflow.StagePlan(s.config, &plan, adminflow.ValidationOptions{ApprovedAuthority: serviceDoctorApprovedAuthority(r.Context())})
 	if err != nil {
 		status := http.StatusBadRequest
 		if err == adminflow.ErrStalePlan {
@@ -468,7 +468,7 @@ func (s *serviceServer) handleDoctorPlanApply(w http.ResponseWriter, r *http.Req
 		writeServiceRequestDecodeError(w, err)
 		return
 	}
-	state, err := (adminflow.PlanValidator{}).Stage(s.config, &plan, adminflow.ValidationOptions{ApprovedAuthority: serviceDoctorApprovedAuthority(r.Context())})
+	state, err := adminflow.StagePlan(s.config, &plan, adminflow.ValidationOptions{ApprovedAuthority: serviceDoctorApprovedAuthority(r.Context())})
 	if err != nil {
 		status := http.StatusBadRequest
 		if err == adminflow.ErrStalePlan {
@@ -668,7 +668,7 @@ func (s *serviceServer) handleDoctorPlanRollback(w http.ResponseWriter, r *http.
 		return
 	}
 	reverse := reverseDoctorPlan(plan)
-	state, err := (adminflow.PlanValidator{}).Stage(s.config, &reverse, adminflow.ValidationOptions{ApprovedAuthority: serviceDoctorApprovedAuthority(r.Context())})
+	state, err := adminflow.StagePlan(s.config, &reverse, adminflow.ValidationOptions{ApprovedAuthority: serviceDoctorApprovedAuthority(r.Context())})
 	if err != nil {
 		status := http.StatusBadRequest
 		if err == adminflow.ErrStalePlan {

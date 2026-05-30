@@ -4,12 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
-	"strconv"
 	"strings"
 
 	"or3-intern/internal/config"
-	"or3-intern/internal/configedit"
 	"or3-intern/internal/configmeta"
 	"or3-intern/internal/doctor"
 )
@@ -32,68 +29,58 @@ type ValidationState struct {
 	LiveReloadKeys []string
 }
 
-type PlanValidator struct{}
-
-func (PlanValidator) Stage(current config.Config, plan *SettingsChangePlan, opts ValidationOptions) (ValidationState, error) {
+// StagePlan validates and stages a settings change plan against an in-memory config copy.
+func StagePlan(current config.Config, plan *SettingsChangePlan, opts ValidationOptions) (ValidationState, error) {
 	if plan == nil {
 		return ValidationState{}, fmt.Errorf("%w: plan is required", ErrPlanValidation)
 	}
 
 	NormalizePlanChanges(plan.Changes)
 
-	next := cloneConfig(current)
+	next, err := cloneConfig(current)
+	if err != nil {
+		return ValidationState{}, fmt.Errorf("%w: %s", ErrPlanValidation, err)
+	}
 	results := make([]PlanValidationResult, 0, len(plan.Changes)+4)
 
 	for i := range plan.Changes {
 		change := plan.Changes[i]
 		if err := validateExpectedOldValue(current, change); err != nil {
-			results = append(results, PlanValidationResult{Check: staleCheckName(change), Status: "fail", Message: err.Error()})
-			plan.ValidationResults = results
-			return ValidationState{Validation: results}, ErrStalePlan
+			return abortStage(plan, ValidationState{}, results, staleCheckName(change), err.Error(), ErrStalePlan)
 		}
 		results = append(results, PlanValidationResult{Check: staleCheckName(change), Status: "pass"})
 
 		changed, err := applyPlanChange(&next, change)
 		if err != nil {
-			results = append(results, PlanValidationResult{Check: applyCheckName(change), Status: "fail", Message: err.Error()})
-			plan.ValidationResults = results
-			return ValidationState{Validation: results}, fmt.Errorf("%w: %s", ErrPlanValidation, err)
+			return abortStage(plan, ValidationState{}, results, applyCheckName(change), err.Error(), fmt.Errorf("%w: %s", ErrPlanValidation, err))
 		}
 		if !changed {
 			message := fmt.Sprintf("unsupported field update: %s", changeDisplayPath(change))
-			results = append(results, PlanValidationResult{Check: applyCheckName(change), Status: "fail", Message: message})
-			plan.ValidationResults = results
-			return ValidationState{Validation: results}, fmt.Errorf("%w: %s", ErrPlanValidation, message)
+			return abortStage(plan, ValidationState{}, results, applyCheckName(change), message, fmt.Errorf("%w: %s", ErrPlanValidation, message))
 		}
 		if err := validatePlanChangeValue(change); err != nil {
-			results = append(results, PlanValidationResult{Check: applyCheckName(change), Status: "fail", Message: err.Error()})
-			plan.ValidationResults = results
-			return ValidationState{Validation: results}, fmt.Errorf("%w: %s", ErrPlanValidation, err)
+			return abortStage(plan, ValidationState{}, results, applyCheckName(change), err.Error(), fmt.Errorf("%w: %s", ErrPlanValidation, err))
 		}
 		results = append(results, PlanValidationResult{Check: applyCheckName(change), Status: "pass"})
 	}
 
 	if err := config.ValidateSnapshot(next); err != nil {
-		results = append(results, PlanValidationResult{Check: "config.validate", Status: "fail", Message: err.Error()})
-		plan.ValidationResults = results
-		return ValidationState{StagedConfig: next, Validation: results}, fmt.Errorf("%w: %s", ErrPlanValidation, err)
+		return abortStage(plan, ValidationState{StagedConfig: next}, results, "config.validate", err.Error(), fmt.Errorf("%w: %s", ErrPlanValidation, err))
 	}
 	results = append(results, PlanValidationResult{Check: "config.validate", Status: "pass"})
 
 	report := doctor.Evaluate(next, doctor.Options{Mode: doctor.ModeConfigurePostSave})
 	if report.Summary.BlockCount > 0 {
-		results = append(results, PlanValidationResult{Check: "doctor.configure_post_save", Status: "fail", Message: summarizeDoctorBlocks(report)})
-		plan.ValidationResults = results
-		return ValidationState{StagedConfig: next, DoctorReport: report, Validation: results}, fmt.Errorf("%w: doctor reported blocking findings", ErrPlanValidation)
+		message := summarizeDoctorBlocks(report)
+		return abortStage(plan, ValidationState{StagedConfig: next, DoctorReport: report}, results, "doctor.configure_post_save", message, fmt.Errorf("%w: doctor reported blocking findings", ErrPlanValidation))
 	}
 	results = append(results, PlanValidationResult{Check: "doctor.configure_post_save", Status: "pass"})
 
-	decoratePlanFromMetadata(plan)
 	decision := ClassifyRisk(plan)
 	if exceedsApprovedAuthority(decision.Level, opts.ApprovedAuthority) {
-		results = append(results, PlanValidationResult{Check: "risk.authority", Status: "fail", Message: fmt.Sprintf("computed risk %s exceeds approved authority %s", decision.Level, opts.ApprovedAuthority)})
-		plan.ValidationResults = results
-		return ValidationState{StagedConfig: next, DoctorReport: report, RiskDecision: decision, Validation: results}, ErrPlanRiskExceeded
+		message := fmt.Sprintf("computed risk %s exceeds approved authority %s", decision.Level, opts.ApprovedAuthority)
+		state := ValidationState{StagedConfig: next, DoctorReport: report, RiskDecision: decision}
+		return abortStage(plan, state, results, "risk.authority", message, ErrPlanRiskExceeded)
 	}
 	results = append(results, PlanValidationResult{Check: "risk.authority", Status: "pass"})
 
@@ -112,209 +99,23 @@ func (PlanValidator) Stage(current config.Config, plan *SettingsChangePlan, opts
 	}, nil
 }
 
-func applyPlanChange(cfg *config.Config, change SettingsPlanChange) (bool, error) {
-	op := strings.ToLower(strings.TrimSpace(change.Operation))
-	switch op {
-	case "", "set":
-		changed, err := configedit.ApplyFieldValue(cfg, change.Section, change.Channel, change.Field, stringifyPlanValue(change.NewValue.Value))
-		if err != nil {
-			return false, err
-		}
-		if changed {
-			return true, nil
-		}
-		if value, ok := boolPlanValue(change.NewValue.Value); ok {
-			return configedit.SetToggleFieldValue(cfg, change.Section, change.Channel, change.Field, value), nil
-		}
-		return false, nil
-	case "toggle":
-		value, ok := boolPlanValue(change.NewValue.Value)
-		if !ok {
-			return false, fmt.Errorf("toggle operation requires boolean new value")
-		}
-		return configedit.SetToggleFieldValue(cfg, change.Section, change.Channel, change.Field, value), nil
-	case "choose":
-		return configedit.ApplyChoiceSelection(cfg, change.Section, change.Channel, change.Field, stringifyPlanValue(change.NewValue.Value))
-	default:
-		return false, fmt.Errorf("unsupported operation %q", change.Operation)
-	}
+func abortStage(plan *SettingsChangePlan, state ValidationState, results []PlanValidationResult, check, message string, err error) (ValidationState, error) {
+	results = append(results, PlanValidationResult{Check: check, Status: "fail", Message: message})
+	plan.ValidationResults = results
+	state.Validation = results
+	return state, err
 }
 
-func validatePlanChangeValue(change SettingsPlanChange) error {
-	if !isProviderModelChange(change) {
-		return nil
+func cloneConfig(current config.Config) (config.Config, error) {
+	data, err := json.Marshal(current)
+	if err != nil {
+		return config.Config{}, fmt.Errorf("clone config: marshal: %w", err)
 	}
-	model := strings.TrimSpace(stringifyPlanValue(change.NewValue.Value))
-	if model == "" {
-		return fmt.Errorf("provider model must not be empty")
+	var next config.Config
+	if err := json.Unmarshal(data, &next); err != nil {
+		return config.Config{}, fmt.Errorf("clone config: unmarshal: %w", err)
 	}
-	if strings.ContainsAny(model, " \t\n\r") {
-		return fmt.Errorf("provider model %q looks like a display name; use the exact provider model ID, for example openrouter/deepseek/deepseek-chat-v3-0324", model)
-	}
-	return nil
-}
-
-func isProviderModelChange(change SettingsPlanChange) bool {
-	if change.ConfigPath == "provider.model" {
-		return true
-	}
-	if change.Section != "provider" {
-		return false
-	}
-	switch change.Field {
-	case "provider_model", "model":
-		return true
-	default:
-		return false
-	}
-}
-
-func changeDisplayPath(change SettingsPlanChange) string {
-	if strings.TrimSpace(change.ConfigPath) != "" {
-		return strings.TrimSpace(change.ConfigPath)
-	}
-	section := strings.TrimSpace(change.Section)
-	field := strings.TrimSpace(change.Field)
-	if section != "" && field != "" {
-		return section + "." + field
-	}
-	if field != "" {
-		return field
-	}
-	if section != "" {
-		return section
-	}
-	return "unknown setting"
-}
-
-func validateExpectedOldValue(current config.Config, change SettingsPlanChange) error {
-	if strings.TrimSpace(change.ConfigPath) == "" {
-		return nil
-	}
-	if change.OldValue.Value == nil && !change.OldValue.Redacted && !change.OldValue.Present && strings.TrimSpace(change.OldValue.Summary) == "" {
-		return nil
-	}
-	currentValue, ok := resolveConfigPathValue(current, change.ConfigPath)
-	if !ok {
-		return nil
-	}
-	if change.OldValue.Redacted {
-		present := valuePresent(currentValue)
-		if present != change.OldValue.Present {
-			return fmt.Errorf("expected previous secret presence %t for %s", change.OldValue.Present, change.ConfigPath)
-		}
-		return nil
-	}
-	if !planValuesEqual(currentValue, change.OldValue.Value) {
-		return fmt.Errorf("expected previous value %v for %s", change.OldValue.Value, change.ConfigPath)
-	}
-	return nil
-}
-
-func resolveConfigPathValue(current config.Config, path string) (any, bool) {
-	segments := strings.Split(strings.TrimSpace(path), ".")
-	if len(segments) == 0 {
-		return nil, false
-	}
-	value := reflect.ValueOf(current)
-	for _, segment := range segments {
-		for value.Kind() == reflect.Pointer {
-			if value.IsNil() {
-				return nil, false
-			}
-			value = value.Elem()
-		}
-		switch value.Kind() {
-		case reflect.Struct:
-			found := false
-			typ := value.Type()
-			for i := 0; i < value.NumField(); i++ {
-				field := typ.Field(i)
-				tag := strings.Split(field.Tag.Get("json"), ",")[0]
-				if tag == segment {
-					value = value.Field(i)
-					found = true
-					break
-				}
-			}
-			if !found {
-				return nil, false
-			}
-		case reflect.Map:
-			key := reflect.ValueOf(segment)
-			item := value.MapIndex(key)
-			if !item.IsValid() {
-				return nil, false
-			}
-			value = item
-		default:
-			return nil, false
-		}
-	}
-	for value.Kind() == reflect.Pointer {
-		if value.IsNil() {
-			return nil, true
-		}
-		value = value.Elem()
-	}
-	return value.Interface(), true
-}
-
-func planValuesEqual(left, right any) bool {
-	leftJSON, leftErr := json.Marshal(left)
-	rightJSON, rightErr := json.Marshal(right)
-	if leftErr == nil && rightErr == nil {
-		return string(leftJSON) == string(rightJSON)
-	}
-	return fmt.Sprint(left) == fmt.Sprint(right)
-}
-
-func valuePresent(value any) bool {
-	if value == nil {
-		return false
-	}
-	switch typed := value.(type) {
-	case string:
-		return strings.TrimSpace(typed) != ""
-	case []string:
-		return len(typed) > 0
-	case bool:
-		return typed
-	default:
-		zero := reflect.Zero(reflect.TypeOf(value)).Interface()
-		return !reflect.DeepEqual(value, zero)
-	}
-}
-
-func decoratePlanFromMetadata(plan *SettingsChangePlan) {
-	if plan == nil {
-		return
-	}
-	decision := RiskDecision{Level: configmeta.RiskSafe}
-	for i := range plan.Changes {
-		change := &plan.Changes[i]
-		meta, ok := configmeta.GetByPath(change.ConfigPath)
-		if !ok && strings.TrimSpace(change.Section) != "" && strings.TrimSpace(change.Field) != "" {
-			meta, ok = configmeta.Get(change.Section, change.Field)
-		}
-		if !ok {
-			continue
-		}
-		change.MetadataRisk = meta.Risk
-		decision.Level = configmeta.HigherRisk(decision.Level, meta.Risk)
-		if meta.RestartRequired {
-			plan.RestartRequired = true
-		}
-		if meta.RequiresApproval {
-			plan.RequiresApproval = true
-		}
-		if meta.RequiresStepUp {
-			plan.RequiresStepUpAuth = true
-		}
-	}
-	if plan.RiskLevel == "" {
-		plan.RiskLevel = decision.Level
-	}
+	return next, nil
 }
 
 func summarizeDoctorBlocks(report doctor.Report) string {
@@ -337,81 +138,19 @@ func exceedsApprovedAuthority(level, approved configmeta.RiskLevel) bool {
 	return configmeta.RiskRank(level) > configmeta.RiskRank(approved)
 }
 
-func staleCheckName(change SettingsPlanChange) string {
-	if strings.TrimSpace(change.ConfigPath) != "" {
-		return "stale." + change.ConfigPath
-	}
-	if strings.TrimSpace(change.Channel) != "" {
-		return "stale." + change.Section + "." + change.Channel + "." + change.Field
-	}
-	return "stale." + change.Section + "." + change.Field
-}
-
-func applyCheckName(change SettingsPlanChange) string {
-	if strings.TrimSpace(change.ConfigPath) != "" {
-		return "apply." + change.ConfigPath
-	}
-	if strings.TrimSpace(change.Channel) != "" {
-		return "apply." + change.Section + "." + change.Channel + "." + change.Field
-	}
-	return "apply." + change.Section + "." + change.Field
-}
-
-func cloneConfig(current config.Config) config.Config {
-	data, err := json.Marshal(current)
-	if err != nil {
-		return current
-	}
-	var next config.Config
-	if err := json.Unmarshal(data, &next); err != nil {
-		return current
-	}
-	return next
-}
-
-func boolPlanValue(value any) (bool, bool) {
-	switch typed := value.(type) {
-	case bool:
-		return typed, true
-	case string:
-		lower := strings.ToLower(strings.TrimSpace(typed))
-		switch lower {
-		case "1", "true", "yes", "on":
-			return true, true
-		case "0", "false", "no", "off":
-			return false, true
-		}
-	}
-	return false, false
-}
-
-func stringifyPlanValue(value any) string {
-	switch typed := value.(type) {
-	case string:
-		return typed
-	case bool:
-		if typed {
-			return "true"
-		}
-		return "false"
-	case int:
-		return strconv.Itoa(typed)
-	case int64:
-		return strconv.FormatInt(typed, 10)
-	case float64:
-		return strconv.FormatFloat(typed, 'f', -1, 64)
-	default:
-		return fmt.Sprint(value)
-	}
-}
-
 func planLiveReloadKeys(plan SettingsChangePlan) []string {
 	keys := make([]string, 0, 1)
 	for _, change := range plan.Changes {
-		if strings.HasPrefix(change.ConfigPath, "modelRouting.") || strings.HasPrefix(change.Field, "routing_") {
+		if isModelRoutingChange(change) {
 			keys = append(keys, "model_routing")
 			break
 		}
 	}
 	return keys
+}
+
+func isModelRoutingChange(change SettingsPlanChange) bool {
+	path := strings.TrimSpace(change.ConfigPath)
+	field := strings.TrimSpace(change.Field)
+	return strings.HasPrefix(path, "modelRouting.") || strings.HasPrefix(field, "routing_")
 }

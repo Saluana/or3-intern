@@ -6,6 +6,50 @@ import (
 	"or3-intern/internal/configmeta"
 )
 
+type riskEscalationRule struct {
+	reason  string
+	minRisk configmeta.RiskLevel
+	match   func(*SettingsChangePlan) bool
+}
+
+var riskEscalationRules = []riskEscalationRule{
+	{
+		reason:  "restart required",
+		minRisk: configmeta.RiskNotice,
+		match:   func(plan *SettingsChangePlan) bool { return plan != nil && plan.RestartRequired },
+	},
+	{
+		reason:  "skill authentication change",
+		minRisk: configmeta.RiskWarning,
+		match:   func(plan *SettingsChangePlan) bool { return plan != nil && hasSkillAuthChange(plan.Changes) },
+	},
+	{
+		reason:  "tool permission change",
+		minRisk: configmeta.RiskWarning,
+		match:   func(plan *SettingsChangePlan) bool { return plan != nil && hasToolPermissionChange(plan.Changes) },
+	},
+	{
+		reason:  "file scope change",
+		minRisk: configmeta.RiskWarning,
+		match:   func(plan *SettingsChangePlan) bool { return plan != nil && hasFileScopeChange(plan.Changes) },
+	},
+	{
+		reason:  "shell, network, or service exposure",
+		minRisk: configmeta.RiskDanger,
+		match:   func(plan *SettingsChangePlan) bool { return plan != nil && hasShellNetworkServiceExposure(plan.Changes) },
+	},
+	{
+		reason:  "approval posture change",
+		minRisk: configmeta.RiskDanger,
+		match:   func(plan *SettingsChangePlan) bool { return plan != nil && hasApprovalPostureChange(plan.Changes) },
+	},
+	{
+		reason:  "automation change",
+		minRisk: configmeta.RiskWarning,
+		match:   func(plan *SettingsChangePlan) bool { return plan != nil && hasAutomationChange(plan.Changes) },
+	},
+}
+
 // ClassifyRisk computes the final risk level for a plan based on metadata,
 // change content, affected areas, restart need, file scopes, command classes,
 // skill auth changes, and security posture changes.
@@ -17,6 +61,8 @@ func ClassifyRisk(plan *SettingsChangePlan) RiskDecision {
 		}
 	}
 
+	applyPlanMetadata(plan)
+
 	decision := RiskDecision{
 		Level:             configmeta.RiskSafe,
 		RequiresApproval:  false,
@@ -25,72 +71,18 @@ func ClassifyRisk(plan *SettingsChangePlan) RiskDecision {
 		EscalationReasons: []string{},
 	}
 
-	// Start with the highest risk from individual changes
 	for _, change := range plan.Changes {
 		if configmeta.RiskRank(change.MetadataRisk) > configmeta.RiskRank(decision.Level) {
 			decision.Level = change.MetadataRisk
 		}
 	}
 
-	// Escalation rules - add reasons when conditions are met, escalate level if needed
-
-	// Restart requirement escalates to at least notice
-	if plan.RestartRequired {
-		decision.EscalationReasons = append(decision.EscalationReasons, "restart required")
-		if configmeta.RiskRank(decision.Level) < configmeta.RiskRank(configmeta.RiskNotice) {
-			decision.Level = configmeta.RiskNotice
+	for _, rule := range riskEscalationRules {
+		if rule.match(plan) {
+			escalateRisk(&decision, rule.reason, rule.minRisk)
 		}
 	}
 
-	// Skill auth changes escalate to warning
-	if hasSkillAuthChange(plan.Changes) {
-		decision.EscalationReasons = append(decision.EscalationReasons, "skill authentication change")
-		if configmeta.RiskRank(decision.Level) < configmeta.RiskRank(configmeta.RiskWarning) {
-			decision.Level = configmeta.RiskWarning
-		}
-	}
-
-	// Tool permission changes escalate to warning
-	if hasToolPermissionChange(plan.Changes) {
-		decision.EscalationReasons = append(decision.EscalationReasons, "tool permission change")
-		if configmeta.RiskRank(decision.Level) < configmeta.RiskRank(configmeta.RiskWarning) {
-			decision.Level = configmeta.RiskWarning
-		}
-	}
-
-	// File scope changes escalate to warning
-	if hasFileScopeChange(plan.Changes) {
-		decision.EscalationReasons = append(decision.EscalationReasons, "file scope change")
-		if configmeta.RiskRank(decision.Level) < configmeta.RiskRank(configmeta.RiskWarning) {
-			decision.Level = configmeta.RiskWarning
-		}
-	}
-
-	// Shell/network/service exposure escalates to danger
-	if hasShellNetworkServiceExposure(plan.Changes) {
-		decision.EscalationReasons = append(decision.EscalationReasons, "shell, network, or service exposure")
-		if configmeta.RiskRank(decision.Level) < configmeta.RiskRank(configmeta.RiskDanger) {
-			decision.Level = configmeta.RiskDanger
-		}
-	}
-
-	// Approval posture changes escalate to danger
-	if hasApprovalPostureChange(plan.Changes) {
-		decision.EscalationReasons = append(decision.EscalationReasons, "approval posture change")
-		if configmeta.RiskRank(decision.Level) < configmeta.RiskRank(configmeta.RiskDanger) {
-			decision.Level = configmeta.RiskDanger
-		}
-	}
-
-	// Automation changes escalate to warning
-	if hasAutomationChange(plan.Changes) {
-		decision.EscalationReasons = append(decision.EscalationReasons, "automation change")
-		if configmeta.RiskRank(decision.Level) < configmeta.RiskRank(configmeta.RiskWarning) {
-			decision.Level = configmeta.RiskWarning
-		}
-	}
-
-	// Set approval requirements based on final risk level
 	switch decision.Level {
 	case configmeta.RiskWarning:
 		decision.RequiresApproval = true
@@ -107,6 +99,43 @@ func ClassifyRisk(plan *SettingsChangePlan) RiskDecision {
 	}
 
 	return decision
+}
+
+func applyPlanMetadata(plan *SettingsChangePlan) {
+	if plan == nil {
+		return
+	}
+	maxMetaRisk := configmeta.RiskSafe
+	for i := range plan.Changes {
+		change := &plan.Changes[i]
+		meta, ok := lookupChangeMetadata(*change)
+		if !ok {
+			continue
+		}
+		if change.MetadataRisk == "" {
+			change.MetadataRisk = meta.Risk
+		}
+		maxMetaRisk = configmeta.HigherRisk(maxMetaRisk, change.MetadataRisk)
+		if meta.RestartRequired {
+			plan.RestartRequired = true
+		}
+		if meta.RequiresApproval {
+			plan.RequiresApproval = true
+		}
+		if meta.RequiresStepUp {
+			plan.RequiresStepUpAuth = true
+		}
+	}
+	if plan.RiskLevel == "" {
+		plan.RiskLevel = maxMetaRisk
+	}
+}
+
+func escalateRisk(decision *RiskDecision, reason string, minRisk configmeta.RiskLevel) {
+	decision.EscalationReasons = append(decision.EscalationReasons, reason)
+	if configmeta.RiskRank(decision.Level) < configmeta.RiskRank(minRisk) {
+		decision.Level = minRisk
+	}
 }
 
 // hasSkillAuthChange checks if any change affects skill authentication.
@@ -153,19 +182,16 @@ func hasFileScopeChange(changes []SettingsPlanChange) bool {
 // hasShellNetworkServiceExposure checks if any change exposes shell, network, or service.
 func hasShellNetworkServiceExposure(changes []SettingsPlanChange) bool {
 	for _, change := range changes {
-		// Shell exposure
 		if strings.Contains(change.ConfigPath, "tools.enableExec") ||
 			strings.Contains(change.ConfigPath, "hardening.enableExecShell") {
 			if isTruthyValue(change.NewValue.Value) {
 				return true
 			}
 		}
-		// Network exposure
 		if strings.Contains(change.ConfigPath, "service.listen") ||
 			strings.Contains(change.ConfigPath, "sandbox.allowNetwork") {
 			return true
 		}
-		// Service exposure
 		if strings.Contains(change.ConfigPath, "service.enabled") {
 			if isTruthyValue(change.NewValue.Value) {
 				return true
@@ -195,23 +221,6 @@ func hasAutomationChange(changes []SettingsPlanChange) bool {
 			strings.Contains(change.ConfigPath, "triggers.") {
 			return true
 		}
-	}
-	return false
-}
-
-// isTruthyValue checks if a value represents a truthy state.
-func isTruthyValue(v any) bool {
-	if v == nil {
-		return false
-	}
-	switch val := v.(type) {
-	case bool:
-		return val
-	case string:
-		lower := strings.ToLower(strings.TrimSpace(val))
-		return lower == "true" || lower == "on" || lower == "yes" || lower == "1"
-	case int, int32, int64:
-		return val != 0
 	}
 	return false
 }

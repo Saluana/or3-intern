@@ -27,31 +27,11 @@ func NormalizePlanChange(change *SettingsPlanChange) {
 	section := strings.TrimSpace(change.Section)
 	field := strings.TrimSpace(change.Field)
 
-	var meta configmeta.ConfigFieldMetadata
-	var ok bool
-	if path != "" {
-		meta, ok = configmeta.GetByPath(path)
-	}
-	if !ok && section != "" && field != "" {
-		meta, ok = configmeta.Get(section, field)
-	}
+	meta, ok := lookupChangeMetadataFromParts(path, section, field)
 	if ok {
-		originalPath := strings.TrimSpace(change.ConfigPath)
-		metaPath := strings.TrimSpace(meta.Path)
-		if metaPath != "" {
-			if !strings.Contains(metaPath, "*") || originalPath == "" {
-				change.ConfigPath = metaPath
-			}
-		}
-		change.Section = meta.Section
-		change.Field = configedit.ConfigureFieldKeyForMetadata(meta)
-		if strings.TrimSpace(change.Channel) == "" {
-			change.Channel = channelFromConcreteConfigPath(originalPath, meta.Section)
-		}
-	} else if section == "provider" && (field == "model" || field == "provider_model") {
-		change.ConfigPath = "provider.model"
-		change.Section = "provider"
-		change.Field = "provider_model"
+		applyMetadataToPlanChange(change, meta)
+	} else {
+		applyProviderModelFallback(change, section, field)
 	}
 
 	if strings.TrimSpace(change.Operation) == "" {
@@ -61,6 +41,49 @@ func NormalizePlanChange(change *SettingsPlanChange) {
 		(strings.TrimSpace(change.Operation) == "" ||
 			strings.EqualFold(strings.TrimSpace(change.Operation), "set")) {
 		change.Operation = "toggle"
+	}
+}
+
+func lookupChangeMetadata(change SettingsPlanChange) (configmeta.ConfigFieldMetadata, bool) {
+	return lookupChangeMetadataFromParts(
+		strings.TrimSpace(change.ConfigPath),
+		strings.TrimSpace(change.Section),
+		strings.TrimSpace(change.Field),
+	)
+}
+
+func lookupChangeMetadataFromParts(path, section, field string) (configmeta.ConfigFieldMetadata, bool) {
+	if path != "" {
+		if meta, ok := configmeta.GetByPath(path); ok {
+			return meta, true
+		}
+	}
+	if section != "" && field != "" {
+		return configmeta.Get(section, field)
+	}
+	return configmeta.ConfigFieldMetadata{}, false
+}
+
+func applyMetadataToPlanChange(change *SettingsPlanChange, meta configmeta.ConfigFieldMetadata) {
+	originalPath := strings.TrimSpace(change.ConfigPath)
+	metaPath := strings.TrimSpace(meta.Path)
+	if metaPath != "" {
+		if !strings.Contains(metaPath, "*") || originalPath == "" {
+			change.ConfigPath = metaPath
+		}
+	}
+	change.Section = meta.Section
+	change.Field = configedit.ConfigureFieldKeyForMetadata(meta)
+	if strings.TrimSpace(change.Channel) == "" {
+		change.Channel = channelFromConcreteConfigPath(originalPath, meta.Section)
+	}
+}
+
+func applyProviderModelFallback(change *SettingsPlanChange, section, field string) {
+	if section == "provider" && (field == "model" || field == "provider_model") {
+		change.ConfigPath = "provider.model"
+		change.Section = "provider"
+		change.Field = "provider_model"
 	}
 }
 

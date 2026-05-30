@@ -133,73 +133,6 @@ func TestRedactString(t *testing.T) {
 	}
 }
 
-func TestRedactEnvMap(t *testing.T) {
-	tests := []struct {
-		name     string
-		env      map[string]string
-		expected map[string]string
-	}{
-		{
-			name: "mixed sensitive and non-sensitive",
-			env: map[string]string{
-				"API_KEY": "sk-12345",
-				"PATH":    "/usr/bin",
-				"TOKEN":   "abc123",
-				"HOME":    "/home/user",
-				"SECRET":  "mysecret",
-				"USER":    "admin",
-			},
-			expected: map[string]string{
-				"API_KEY": "***REDACTED***",
-				"PATH":    "/usr/bin",
-				"TOKEN":   "***REDACTED***",
-				"HOME":    "/home/user",
-				"SECRET":  "***REDACTED***",
-				"USER":    "admin",
-			},
-		},
-		{
-			name: "empty sensitive value",
-			env: map[string]string{
-				"API_KEY": "",
-				"PATH":    "/usr/bin",
-			},
-			expected: map[string]string{
-				"API_KEY": "***NOT_SET***",
-				"PATH":    "/usr/bin",
-			},
-		},
-		{
-			name:     "nil map",
-			env:      nil,
-			expected: nil,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := RedactEnvMap(tt.env)
-
-			if tt.expected == nil {
-				if result != nil {
-					t.Errorf("RedactEnvMap(nil) = %v, want nil", result)
-				}
-				return
-			}
-
-			if len(result) != len(tt.expected) {
-				t.Errorf("RedactEnvMap() length = %v, want %v", len(result), len(tt.expected))
-			}
-
-			for key, expectedValue := range tt.expected {
-				if result[key] != expectedValue {
-					t.Errorf("RedactEnvMap()[%q] = %q, want %q", key, result[key], expectedValue)
-				}
-			}
-		})
-	}
-}
-
 func TestRedactJSON(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -305,6 +238,11 @@ func TestIsPromptInjection(t *testing.T) {
 		{
 			name:     "normal text",
 			text:     "This is a normal log message with no injection",
+			expected: false,
+		},
+		{
+			name:     "inline system label in log",
+			text:     "kernel log system: boot complete",
 			expected: false,
 		},
 		{

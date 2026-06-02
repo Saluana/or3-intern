@@ -803,7 +803,7 @@ func (r *Runtime) syncExternalChannelChatSessionMeta(ctx context.Context, ev bus
 	if r.DB == nil || strings.TrimSpace(ev.SessionKey) == "" || !isExternalUserChannel(ev.Channel) {
 		return
 	}
-	if err := r.DB.SyncChatSessionMessageSummary(ctx, ev.SessionKey, externalChannelSessionTitle(ev), "or3-intern", "OR3 Intern"); err != nil {
+	if err := r.DB.IncrementalChatSessionMetaUpdate(ctx, ev.SessionKey, externalChannelSessionTitle(ev), "or3-intern", "OR3 Intern", ev.Message, 0); err != nil {
 		log.Printf("sync external chat session metadata failed: session=%s channel=%s err=%v", ev.SessionKey, ev.Channel, err)
 	}
 }

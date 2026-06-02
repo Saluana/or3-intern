@@ -42,7 +42,12 @@ func readConfigFile(path string) (Config, error) {
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			cfg.ContextConfigured = true
-			if err := Save(path, cfg); err != nil {
+			// Save a no-env baseline so env-only secrets are not persisted
+			// on first run. Env overlays are applied in memory only.
+			baseline := cfg
+			baseline.Provider.APIKey = ""
+			baseline.Providers = clearProviderProfileSecrets(baseline.Providers)
+			if err := Save(path, baseline); err != nil {
 				return cfg, err
 			}
 			return cfg, nil
@@ -50,6 +55,15 @@ func readConfigFile(path string) (Config, error) {
 		return cfg, err
 	}
 	return parseConfigFile(b, cfg)
+}
+
+func clearProviderProfileSecrets(profiles ProviderProfiles) ProviderProfiles {
+	cleaned := ProviderProfiles{}
+	for k, p := range profiles {
+		p.APIKey = ""
+		cleaned[k] = p
+	}
+	return cleaned
 }
 
 func parseConfigFile(data []byte, cfg Config) (Config, error) {
@@ -303,10 +317,7 @@ func normalizeAndValidateConfigWithOptions(cfg Config, opts normalizeOptions) (C
 			cfg.Context.MaxInputTokens = 16000
 		}
 	default:
-		cfg.Context.Mode = "quality"
-		if cfg.Context.MaxInputTokens <= 0 {
-			cfg.Context.MaxInputTokens = 16000
-		}
+		return cfg, fmt.Errorf("invalid context.mode %q: must be poor, balanced, quality, or custom", cfg.Context.Mode)
 	}
 	if cfg.Context.OutputReserveTokens <= 0 {
 		cfg.Context.OutputReserveTokens = 1200

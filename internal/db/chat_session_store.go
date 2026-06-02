@@ -303,6 +303,38 @@ func (d *DB) SyncChatSessionMessageSummary(ctx context.Context, sessionKey, titl
 	return tx.Commit()
 }
 
+// IncrementalChatSessionMetaUpdate updates chat_session_meta incrementally
+// using the new message's content and timestamp instead of rescanning all rows.
+// It bumps message_count by 1 and sets last_message_preview/last_message_at.
+// If no row exists yet, it falls back to SyncChatSessionMessageSummary.
+func (d *DB) IncrementalChatSessionMetaUpdate(ctx context.Context, sessionKey, title, runnerID, runnerLabel, messageContent string, messageAt int64) error {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return errors.New("session_key required")
+	}
+	now := NowMS()
+	if messageAt <= 0 {
+		messageAt = now
+	}
+	preview := previewSnippet(messageContent)
+	res, err := d.SQL.ExecContext(ctx,
+		`UPDATE chat_session_meta
+		 SET message_count = message_count + 1,
+		     last_message_preview = ?,
+		     last_message_at = ?,
+		     updated_at = ?
+		 WHERE session_key = ?`,
+		preview, messageAt, now, sessionKey)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return d.SyncChatSessionMessageSummary(ctx, sessionKey, title, runnerID, runnerLabel)
+	}
+	return nil
+}
+
 // RenameChatSession sets the title.
 func (d *DB) RenameChatSession(ctx context.Context, sessionKey, title string) error {
 	now := NowMS()

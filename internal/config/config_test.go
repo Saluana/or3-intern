@@ -1902,12 +1902,25 @@ func TestLoad_ContextDefaultsAndValidation(t *testing.T) {
 	if err := Save(path, cfg); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for invalid context.mode")
+	}
+	if !strings.Contains(err.Error(), "invalid context.mode") {
+		t.Fatalf("expected error about invalid context.mode, got: %v", err)
+	}
+
+	// Now test with a valid mode
+	cfg.Context.Mode = "quality"
+	if err := Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
 	got, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if got.Context.Mode != "quality" {
-		t.Fatalf("expected invalid mode to clamp to quality, got %q", got.Context.Mode)
+		t.Fatalf("expected quality mode, got %q", got.Context.Mode)
 	}
 	if got.Context.MaxInputTokens <= 0 || got.Context.OutputReserveTokens <= 0 {
 		t.Fatalf("expected positive context budgets, got %+v", got.Context)

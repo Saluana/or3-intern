@@ -941,6 +941,7 @@ type MemoryNoteReembedRow struct {
 	ID         int64
 	SessionKey string
 	Text       string
+	Embedding  []byte
 }
 
 // ListMemoryNotesForReembed returns all note IDs and source text for bulk
@@ -1014,7 +1015,7 @@ func (d *DB) ListDirtyMemoryNotes(ctx context.Context, limit int) ([]MemoryNoteR
 		limit = 500
 	}
 	rows, err := d.SQL.QueryContext(ctx,
-		`SELECT id, session_key, text FROM memory_notes
+		`SELECT id, session_key, text, embedding FROM memory_notes
 		 WHERE vector_index_dirty=1 AND typeof(embedding)='blob' AND length(embedding) >= 4
 		 ORDER BY id ASC LIMIT ?`, limit)
 	if err != nil {
@@ -1024,7 +1025,7 @@ func (d *DB) ListDirtyMemoryNotes(ctx context.Context, limit int) ([]MemoryNoteR
 	var out []MemoryNoteReembedRow
 	for rows.Next() {
 		var item MemoryNoteReembedRow
-		if err := rows.Scan(&item.ID, &item.SessionKey, &item.Text); err != nil {
+		if err := rows.Scan(&item.ID, &item.SessionKey, &item.Text, &item.Embedding); err != nil {
 			return nil, err
 		}
 		out = append(out, item)
@@ -1050,11 +1051,7 @@ func (d *DB) RepairDirtyMemoryVectors(ctx context.Context, limit int) (int, erro
 	}
 	repaired := 0
 	for _, row := range rows {
-		var embedding []byte
-		if err := d.SQL.QueryRowContext(ctx, `SELECT embedding FROM memory_notes WHERE id=?`, row.ID).Scan(&embedding); err != nil {
-			return repaired, err
-		}
-		if err := d.upsertMemoryVec(ctx, row.ID, row.SessionKey, row.Text, embedding); err != nil {
+		if err := d.upsertMemoryVec(ctx, row.ID, row.SessionKey, row.Text, row.Embedding); err != nil {
 			return repaired, err
 		}
 		if err := d.setMemoryNoteVectorDirty(ctx, row.ID, false); err != nil {

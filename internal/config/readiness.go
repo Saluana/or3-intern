@@ -111,6 +111,9 @@ func EvaluateReadiness(cfg Config, opts ReadinessOptions) ReadinessReport {
 		})
 	}
 	report.State = readinessStateFromIssues(report.Issues, cfg)
+	if report.State == ReadinessAdvancedCustom {
+		report.Issues = append(report.Issues, AdvancedCustomReadinessIssues(cfg)...)
+	}
 	return report
 }
 
@@ -192,6 +195,50 @@ func isAdvancedCustomReadiness(cfg Config) bool {
 		return true
 	}
 	return false
+}
+
+// AdvancedCustomReadinessIssues returns informational issues explaining why
+// the readiness state is advanced-custom.
+func AdvancedCustomReadinessIssues(cfg Config) []ReadinessIssue {
+	var issues []ReadinessIssue
+	if cfg.RuntimeProfile == ProfileHostedRemoteSandbox {
+		issues = append(issues, ReadinessIssue{
+			Field: "runtimeProfile",
+			Title: "Hosted remote sandbox profile active",
+			Fix:   "This is expected for hosted setups. No action needed.",
+		})
+	}
+	if cfg.Security.Profiles.Enabled {
+		issues = append(issues, ReadinessIssue{
+			Field: "security.profiles.enabled",
+			Title: "Access profiles enabled",
+			Fix:   "Access profiles change per-channel behavior. This is expected if intentional.",
+		})
+	}
+	for name, server := range cfg.Tools.MCPServers {
+		if server.Enabled {
+			issues = append(issues, ReadinessIssue{
+				Field: "tools.mcpServers." + name,
+				Title: "MCP server enabled: " + name,
+				Fix:   "MCP servers add external tool capabilities.",
+			})
+		}
+	}
+	if len(cfg.ModelRouting.Chat.Fallbacks) > 0 {
+		issues = append(issues, ReadinessIssue{
+			Field: "modelRouting.chat.fallbacks",
+			Title: "Chat fallbacks configured",
+			Fix:   "Fallback models provide resilience when the primary is unavailable.",
+		})
+	}
+	if len(cfg.ModelRouting.Embeddings.Fallbacks) > 0 {
+		issues = append(issues, ReadinessIssue{
+			Field: "modelRouting.embeddings.fallbacks",
+			Title: "Embeddings fallbacks configured",
+			Fix:   "Fallback models provide resilience when the primary is unavailable.",
+		})
+	}
+	return issues
 }
 
 func hasCheck(checks map[string]struct{}, check string) bool {

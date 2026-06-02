@@ -150,6 +150,7 @@ func (d *DB) migrate(ctx context.Context) error {
 		);`,
 		`CREATE INDEX IF NOT EXISTS subagent_jobs_status_requested_at ON subagent_jobs(status, requested_at);`,
 		`CREATE INDEX IF NOT EXISTS subagent_jobs_parent_session ON subagent_jobs(parent_session_key, requested_at);`,
+		`CREATE INDEX IF NOT EXISTS subagent_jobs_recent_activity ON subagent_jobs(MAX(requested_at, started_at, finished_at) DESC, id DESC);`,
 		`CREATE TABLE IF NOT EXISTS mcp_tool_catalog(
 			server_name TEXT NOT NULL,
 			remote_name TEXT NOT NULL,

@@ -6,7 +6,7 @@ Runner chat lets the app hold an interactive session with an external AI CLI suc
 
 `GET /internal/v1/chat-runners`
 
-Returns runner cards suitable for a chat transport selector. `or3-intern` is always present; other runners appear when agent CLI support is enabled and detection succeeds.
+Returns runner cards suitable for a chat transport selector. Only external chat-selectable runners are returned; legacy `or3-intern` sessions may appear in existing session metadata but are not selectable for new chat turns.
 
 ## Create Session
 

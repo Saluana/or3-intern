@@ -1,6 +1,8 @@
 # Tool reference
 
-These are the built-in tools the agent can use.
+> **Runner-first:** When `agentCLI.enabled` is true, model-callable built-in tools below are not exposed on new chat turns. External runners bring their own tool surfaces. Platform tools (files, cron, approvals) remain available to the service and doctor flows.
+
+These are the built-in tools the legacy OR3 agent loop can use.
 
 | Tool | What it does |
 |---|---|

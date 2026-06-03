@@ -1156,6 +1156,9 @@ func ApplyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 	case "agentCLI_disabled_runners":
 		cfg.AgentCLI.DisabledRunners = splitAndCompact(value)
 		return true, nil
+	case "agentCLI_default_runner":
+		cfg.AgentCLI.DefaultRunner = strings.ToLower(strings.TrimSpace(value))
+		return true, nil
 	case "agentCLI_enabled":
 		cfg.AgentCLI.Enabled = value == "true" || value == "on" || value == "1"
 		return true, nil

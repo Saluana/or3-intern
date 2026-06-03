@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -19,6 +20,14 @@ func TestRunTurnPrefersOrchestratorWhenConfigured(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "orchestrator") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunTurnFailsClosedWhenRunnerFirstHasNoOrchestrator(t *testing.T) {
+	app := &ServiceApp{cfg: config.Default()}
+	_, err := app.RunTurn(context.Background(), TurnRequest{SessionKey: "s", Message: "hi"})
+	if !errors.Is(err, ErrRunnerTurnsDisabled) {
+		t.Fatalf("expected runner turns disabled error, got %v", err)
 	}
 }
 

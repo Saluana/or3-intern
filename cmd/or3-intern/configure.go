@@ -37,7 +37,7 @@ var configureSections = []struct {
 	{Key: "automation", Label: "Automation", Description: "Cron, heartbeat, webhook, and file-watch triggers"},
 	{Key: "channels", Label: "Channels", Description: "Telegram, Slack, Discord, WhatsApp, and Email delivery"},
 	{Key: "service", Label: "Service", Description: "Internal authenticated HTTP API listener"},
-	{Key: "agentCLI", Label: "External CLI Agents", Description: "External agent CLI delegation, runner discovery, and sandbox controls"},
+	{Key: "agentCLI", Label: "Runners", Description: "External runner selection, OpenCode defaults, queue limits, and sandbox controls"},
 }
 
 type configureArgs struct {

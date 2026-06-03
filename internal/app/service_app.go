@@ -64,6 +64,14 @@ func (a *ServiceApp) SetConfig(cfg config.Config) {
 	}
 }
 
+func (a *ServiceApp) SetRunnerRuntime(agentCLIManager *agentcli.Manager, turnOrchestrator *RunnerTurnOrchestrator) {
+	if a == nil {
+		return
+	}
+	a.agentCLIManager = agentCLIManager
+	a.turnOrchestrator = turnOrchestrator
+}
+
 type TurnRequest struct {
 	SessionKey          string
 	Message             string
@@ -149,6 +157,9 @@ func (a *ServiceApp) RunTurn(ctx context.Context, req TurnRequest) (TurnResult, 
 			return TurnResult{}, err
 		}
 		return TurnResult{RunnerTurn: &result}, nil
+	}
+	if a.cfg.RunnerFirst() && !doctorTurnUsesBuiltInRuntime(req.Meta) {
+		return TurnResult{}, ErrRunnerTurnsDisabled
 	}
 	if a.runtime == nil {
 		return TurnResult{}, errors.New("runtime unavailable")
@@ -254,6 +265,9 @@ type replayHistoryMessage struct {
 func (a *ServiceApp) ReplayToolCall(ctx context.Context, req ReplayToolCallRequest) (string, error) {
 	if a == nil || a.runtime == nil {
 		return "", errors.New("runtime unavailable")
+	}
+	if a.cfg.RunnerFirst() {
+		return "", ErrLegacyToolReplayDisabled
 	}
 	registry := a.serviceToolRegistry(req.AllowedTools, req.RestrictTools)
 	if registry == nil {

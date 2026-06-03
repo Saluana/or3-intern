@@ -85,6 +85,8 @@ type ConfigFieldMetadata struct {
 	UserIntents      []string         `json:"user_intents,omitempty"`
 	Docs             string           `json:"docs,omitempty"`
 	AdvancedOnly     bool             `json:"advanced_only,omitempty"`
+	// Status is active, deprecated, hidden, or compatibility (runner-first UI hint).
+	Status string `json:"status,omitempty"`
 }
 
 // Registry is the interface for looking up config field metadata.

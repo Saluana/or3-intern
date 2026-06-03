@@ -28,11 +28,11 @@ func TestConfigureTUIFormNavigationHighlightsSelectedField(t *testing.T) {
 	if !strings.Contains(view, "Field 3/9") {
 		t.Fatalf("expected field position hint in view, got %q", view)
 	}
-	if !strings.Contains(view, "Selected field") || !strings.Contains(view, "Chat model") {
-		t.Fatalf("expected selected field summary for Chat model, got %q", view)
+	if !strings.Contains(view, "Selected field") || !strings.Contains(view, "Legacy provider default") {
+		t.Fatalf("expected selected field summary for legacy provider default, got %q", view)
 	}
-	if !strings.Contains(view, "Current value:") || !strings.Contains(view, "main AI model") {
-		t.Fatalf("expected selected field panel to show current value and plain-language help, got %q", view)
+	if !strings.Contains(view, "Current value:") || !strings.Contains(view, "not this model ID") {
+		t.Fatalf("expected selected field panel to show current value and runner-first help, got %q", view)
 	}
 	if !strings.Contains(view, "▶ ") {
 		t.Fatalf("expected visible selection indicator, got %q", view)
@@ -128,6 +128,7 @@ func TestConfigureTUIDiscordEnableDefaultsClosedInboundAccess(t *testing.T) {
 
 func TestConfigureTUIFieldDescriptionsAreHelpful(t *testing.T) {
 	cfg := config.Default()
+	cfg.AgentCLI.Enabled = false
 	sections := []string{"provider", "storage", "runtime", "context", "workspace", "tools", "docindex", "skills", "security", "hardening", "session", "automation", "service"}
 	for _, section := range sections {
 		for _, field := range buildSectionFields(cfg, section, "/workspace/project") {
@@ -321,7 +322,9 @@ func TestBuildSectionFields_ServiceIncludesLocalPairingToggle(t *testing.T) {
 }
 
 func TestBuildSectionFields_ToolsExposeExecToggle(t *testing.T) {
-	fields := buildSectionFields(config.Default(), "tools", "/workspace/project")
+	cfg := config.Default()
+	cfg.AgentCLI.Enabled = false
+	fields := buildSectionFields(cfg, "tools", "/workspace/project")
 	for _, field := range fields {
 		if field.Key == "tools_enable_exec" {
 			if field.Kind != configureFieldToggle {

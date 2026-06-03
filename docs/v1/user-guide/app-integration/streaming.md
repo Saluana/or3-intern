@@ -1,10 +1,17 @@
 # Streaming
 
+> **Runner-first:** Foreground chat streaming uses `POST /internal/v1/chat/turns` with `Accept: text/event-stream`. Legacy built-in turns still use `POST /internal/v1/turns`.
+
 v1 streaming is split across several route families. There is not one universal `?stream=true` convention anymore.
 
-## Foreground turn streaming
+## Foreground turn streaming (runner-first)
 
-Use:
+```http
+POST /internal/v1/chat/turns
+Accept: text/event-stream
+```
+
+## Foreground turn streaming (legacy built-in loop)
 
 ```http
 POST /internal/v1/turns

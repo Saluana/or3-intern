@@ -24,6 +24,7 @@ import (
 	"or3-intern/internal/db"
 	"or3-intern/internal/mcp"
 	"or3-intern/internal/providers"
+	"or3-intern/internal/runnerfirst"
 	"or3-intern/internal/security"
 	"or3-intern/internal/skills"
 	"or3-intern/internal/tools"
@@ -31,6 +32,15 @@ import (
 
 type serviceTestTool struct {
 	name string
+}
+
+// disableRunnerFirstForLegacyServiceTests isolates legacy subagent/skill-plan tests
+// from parallel package tests that toggle the process-wide runner-first gate.
+func disableRunnerFirstForLegacyServiceTests(t *testing.T) {
+	t.Helper()
+	previous := runnerfirst.Enabled()
+	runnerfirst.SetEnabled(false)
+	t.Cleanup(func() { runnerfirst.SetEnabled(previous) })
 }
 
 type fakeServiceMCPTestManager struct {
@@ -2324,10 +2334,7 @@ func TestServiceTurns_ReplayToolCallContinuesConversation(t *testing.T) {
 		t.Fatalf("Append approval-required tool result: %v", err)
 	}
 	server := &serviceServer{
-		config: config.Config{
-			Tools:   config.ToolsConfig{EnableExec: true},
-			Service: config.ServiceConfig{Secret: strings.Repeat("r", 32), MaxCapability: string(tools.CapabilityGuarded)},
-		},
+		config: legacyServiceTestConfig(),
 		runtime: rt,
 		jobs:    agent.NewJobRegistry(time.Minute, 32),
 	}
@@ -2430,10 +2437,7 @@ func TestServiceTurns_ReplayToolCallFailureStillContinuesConversation(t *testing
 		t.Fatalf("Append approval-required tool result: %v", err)
 	}
 	server := &serviceServer{
-		config: config.Config{
-			Tools:   config.ToolsConfig{EnableExec: true},
-			Service: config.ServiceConfig{Secret: strings.Repeat("r", 32), MaxCapability: string(tools.CapabilityGuarded)},
-		},
+		config:  legacyServiceTestConfig(),
 		runtime: rt,
 		jobs:    agent.NewJobRegistry(time.Minute, 32),
 	}
@@ -2467,9 +2471,7 @@ func TestServiceTurns_ReplayToolCallRequiresPriorAssistantCall(t *testing.T) {
 	executions := 0
 	rt.Tools.Register(countingReplayTool{count: &executions})
 	server := &serviceServer{
-		config: config.Config{
-			Service: config.ServiceConfig{Secret: strings.Repeat("r", 32), MaxCapability: string(tools.CapabilityGuarded)},
-		},
+		config:  legacyServiceTestConfig(),
 		runtime: rt,
 		jobs:    agent.NewJobRegistry(time.Minute, 32),
 	}
@@ -2518,9 +2520,7 @@ func TestServiceTurns_ReplayToolCallRejectsChangedArguments(t *testing.T) {
 		t.Fatalf("Append assistant tool call: %v", err)
 	}
 	server := &serviceServer{
-		config: config.Config{
-			Service: config.ServiceConfig{Secret: strings.Repeat("r", 32), MaxCapability: string(tools.CapabilityGuarded)},
-		},
+		config:  legacyServiceTestConfig(),
 		runtime: rt,
 		jobs:    agent.NewJobRegistry(time.Minute, 32),
 	}
@@ -2770,6 +2770,7 @@ func TestServiceServer_AbortTurnJob(t *testing.T) {
 }
 
 func TestServiceAbortJob_Matrix(t *testing.T) {
+	disableRunnerFirstForLegacyServiceTests(t)
 	database, cleanup := openServiceTestDB(t)
 	defer cleanup()
 	jobs := agent.NewJobRegistry(time.Minute, 32)
@@ -2856,6 +2857,7 @@ func TestServiceAbortJob_Matrix(t *testing.T) {
 }
 
 func TestServiceSubagents_EnqueueAndAbortQueuedJob(t *testing.T) {
+	disableRunnerFirstForLegacyServiceTests(t)
 	database, cleanup := openServiceTestDB(t)
 	defer cleanup()
 	jobs := agent.NewJobRegistry(time.Minute, 32)
@@ -2958,6 +2960,7 @@ func TestServiceSubagents_EnqueueAndAbortQueuedJob(t *testing.T) {
 }
 
 func TestServiceSubagents_ListReturnsSanitizedHistory(t *testing.T) {
+	disableRunnerFirstForLegacyServiceTests(t)
 	database, cleanup := openServiceTestDB(t)
 	defer cleanup()
 	jobs := agent.NewJobRegistry(time.Minute, 32)
@@ -3088,6 +3091,15 @@ func buildServiceTestRuntime(t *testing.T, handler func(http.ResponseWriter, *ht
 		database.Close()
 	}
 	return rt, cleanup
+}
+
+func legacyServiceTestConfig() config.Config {
+	cfg := config.Default()
+	cfg.AgentCLI.Enabled = false
+	cfg.Tools.EnableExec = true
+	cfg.Service.Secret = strings.Repeat("r", 32)
+	cfg.Service.MaxCapability = string(tools.CapabilityGuarded)
+	return cfg
 }
 
 func TestServiceTurns_MaxToolLoopsReturnsFallbackResponse(t *testing.T) {
@@ -3764,6 +3776,7 @@ func TestServiceApprovals_PairedOperatorCanApprovePendingRequest(t *testing.T) {
 }
 
 func TestServiceApprovals_Approve_ReturnsPlanIDsWhenPresent(t *testing.T) {
+	disableRunnerFirstForLegacyServiceTests(t)
 	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
 		cfg.SkillExecution.Mode = config.ApprovalModeAsk
 	})

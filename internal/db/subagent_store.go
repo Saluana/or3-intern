@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"or3-intern/internal/runnerfirst"
 )
 
 const (
@@ -64,6 +66,9 @@ func (d *DB) EnqueueSubagentJob(ctx context.Context, job SubagentJob) error {
 }
 
 func (d *DB) EnqueueSubagentJobLimited(ctx context.Context, job SubagentJob, maxQueued int) error {
+	if runnerfirst.Enabled() {
+		return fmt.Errorf("subagent jobs are disabled in runner-first mode; use external runner jobs instead")
+	}
 	if job.RequestedAt == 0 {
 		job.RequestedAt = NowMS()
 	}

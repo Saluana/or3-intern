@@ -1,6 +1,8 @@
 # Turns Endpoint
 
-`POST /internal/v1/turns` submits a foreground agent turn. Internally every turn is registered as a job, so clients can wait for JSON, stream immediately, or reconnect through the job endpoints.
+> **Runner-first:** Use [Runner chat endpoints](runner-chat-endpoints.md) (`POST /internal/v1/chat/turns`) for foreground chat. This page documents the legacy built-in `POST /internal/v1/turns` path.
+
+`POST /internal/v1/turns` submits a legacy foreground agent turn through the built-in tool loop. Internally every turn is registered as a job, so clients can wait for JSON, stream immediately, or reconnect through the job endpoints.
 
 ## Request
 

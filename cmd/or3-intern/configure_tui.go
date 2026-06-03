@@ -60,6 +60,7 @@ type configureField struct {
 	Key         string
 	Label       string
 	Description string
+	Status      string
 	Kind        configureFieldKind
 	Value       string
 	Choices     []string
@@ -1361,7 +1362,7 @@ func sectionStatus(cfg config.Config, section string) string {
 	case "service":
 		return serviceSummary(cfg)
 	case "agentcli":
-		return fmt.Sprintf("enabled=%t · concurrent=%d · queued=%d · timeout=%ds · sandboxAuto=%t", cfg.AgentCLI.Enabled, cfg.AgentCLI.MaxConcurrent, cfg.AgentCLI.MaxQueued, cfg.AgentCLI.DefaultTimeoutSeconds, cfg.AgentCLI.AllowSandboxAuto)
+		return fmt.Sprintf("enabled=%t · default=%s · concurrent=%d · queued=%d · timeout=%ds · sandboxAuto=%t", cfg.AgentCLI.Enabled, emptyAsNone(cfg.AgentCLI.DefaultRunner), cfg.AgentCLI.MaxConcurrent, cfg.AgentCLI.MaxQueued, cfg.AgentCLI.DefaultTimeoutSeconds, cfg.AgentCLI.AllowSandboxAuto)
 	default:
 		return ""
 	}
@@ -1385,7 +1386,7 @@ func (m configureTUIModel) activeFields() []configureField {
 }
 
 func buildSectionFields(cfg config.Config, section, cwd string) []configureField {
-	return withHelpfulFieldDescriptions(section, "", buildSectionFieldsRaw(cfg, section, cwd))
+	return filterConfigureFields(cfg, withHelpfulFieldDescriptions(section, "", buildSectionFieldsRaw(cfg, section, cwd)))
 }
 
 func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureField {
@@ -1682,9 +1683,15 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 	case "agentcli":
 		modeChoices := []string{"review", "safe_edit", "sandbox_auto"}
 		isolationChoices := []string{"host_readonly", "host_workspace_write", "sandbox_workspace_write", "sandbox_dangerous"}
+		runnerChoices := []string{"opencode", "codex", "claude", "gemini"}
+		defaultRunner := strings.TrimSpace(cfg.AgentCLI.DefaultRunner)
+		if defaultRunner == "" {
+			defaultRunner = "opencode"
+		}
 		disabledRunners := strings.Join(cfg.AgentCLI.DisabledRunners, ",")
 		return []configureField{
-			{Key: "agentCLI_enabled", Label: "Enable external CLI agents", Description: "Allow the service to discover and run external CLIs like OpenCode, Codex, Claude, and Gemini.", Kind: configureFieldToggle, Value: onOff(cfg.AgentCLI.Enabled)},
+			{Key: "agentCLI_enabled", Label: "Enable runners", Description: "Delegate chat, cron, and service turns to external runners (OpenCode, Codex, Claude, Gemini).", Kind: configureFieldToggle, Value: onOff(cfg.AgentCLI.Enabled)},
+			{Key: "agentCLI_default_runner", Label: "Default runner", Description: "Runner used for new chat sessions and automation when none is selected.", Kind: configureFieldChoice, Value: defaultRunner, Choices: runnerChoices, ChoiceIndex: indexOfChoice(runnerChoices, defaultRunner)},
 			{Key: "agentCLI_max_concurrent", Label: "Max concurrent external runs", Description: "How many external CLI agents may run at once.", Kind: configureFieldText, Value: formatInt(cfg.AgentCLI.MaxConcurrent), EmptyHint: "1"},
 			{Key: "agentCLI_max_queued", Label: "Max queued external runs", Description: "How many external CLI jobs may wait in line.", Kind: configureFieldText, Value: formatInt(cfg.AgentCLI.MaxQueued), EmptyHint: "16"},
 			{Key: "agentCLI_default_timeout", Label: "Default timeout (seconds)", Description: "How long each external CLI run may take before timing out.", Kind: configureFieldText, Value: formatInt(cfg.AgentCLI.DefaultTimeoutSeconds), EmptyHint: "900"},
@@ -1714,7 +1721,7 @@ func buildChannelFields(cfg config.Config, channel string) []configureField {
 		Choices:     agentChoices,
 		ChoiceIndex: indexOfChoice(agentChoices, agentChoice),
 	})
-	return withHelpfulFieldDescriptions("channels", channel, fields)
+	return filterConfigureFields(cfg, withHelpfulFieldDescriptions("channels", channel, fields))
 }
 
 func buildChannelFieldsRaw(cfg config.Config, channel string) []configureField {

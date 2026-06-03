@@ -1,6 +1,8 @@
 # Turns
 
-A turn is submitted through `POST /internal/v1/turns`.
+> **Runner-first:** Submit foreground chat through `POST /internal/v1/chat/turns` with a runner from `GET /internal/v1/chat-runners`. This page documents the legacy built-in path `POST /internal/v1/turns`. See [Runner chat endpoints](../../architecture/service-api/runner-chat-endpoints.md).
+
+A legacy built-in turn is submitted through `POST /internal/v1/turns`.
 
 ## Canonical request shape
 

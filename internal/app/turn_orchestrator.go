@@ -227,6 +227,9 @@ func busEventTriggerKind(ev bus.Event) string {
 // ErrRunnerTurnsDisabled is returned when agent CLI is disabled.
 var ErrRunnerTurnsDisabled = errors.New("runner turns require agentCLI.enabled and a configured default runner")
 
+// ErrLegacyToolReplayDisabled is returned when built-in tool replay is requested in runner-first mode.
+var ErrLegacyToolReplayDisabled = errors.New("built-in tool replay is disabled in runner-first mode; approve runner permissions or retry the turn")
+
 func runnerTurnMeta(in map[string]any, migrated bool, legacyRunner, triggerKind string) map[string]any {
 	meta := cloneServiceMeta(in)
 	if meta == nil {

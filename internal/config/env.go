@@ -34,6 +34,10 @@ func ApplyEnvOverrides(cfg *Config) {
 		cfg.ModelRouting.Chat.Primary.Model = v
 		cfg.ModelRouting.Agents.Primary.Model = v
 		cfg.ModelRouting.Subagents.Primary.Model = v
+		if cfg.AgentCLI.Enabled {
+			appendCompatEnvWarning(cfg,
+				"OR3_MODEL only affects legacy built-in agent paths; configure chat turns via agentCLI.defaultRunner and external runner models instead.")
+		}
 	}
 	if v := os.Getenv("OR3_CONSOLIDATION_MODEL"); v != "" {
 		cfg.ConsolidationModel = v
@@ -71,9 +75,22 @@ func ApplyEnvOverrides(cfg *Config) {
 	applyEnvString("OR3_EMAIL_SMTP_PASSWORD", &cfg.Channels.Email.SMTPPassword)
 	applyEnvString("OR3_EMAIL_FROM_ADDRESS", &cfg.Channels.Email.FromAddress)
 	applyEnvBool("OR3_SUBAGENTS_ENABLED", &cfg.Subagents.Enabled)
+	if cfg.AgentCLI.Enabled && strings.TrimSpace(os.Getenv("OR3_SUBAGENTS_ENABLED")) != "" {
+		appendCompatEnvWarning(cfg,
+			"OR3_SUBAGENTS_ENABLED is deprecated in runner-first mode; use agentCLI and external runners for background work.")
+	}
 	applyEnvInt("OR3_SUBAGENTS_MAX_CONCURRENT", &cfg.Subagents.MaxConcurrent)
+	if cfg.AgentCLI.Enabled && strings.TrimSpace(os.Getenv("OR3_SUBAGENTS_MAX_CONCURRENT")) != "" {
+		appendCompatEnvWarning(cfg, "OR3_SUBAGENTS_MAX_CONCURRENT is ignored while runner-first mode is active.")
+	}
 	applyEnvInt("OR3_SUBAGENTS_MAX_QUEUED", &cfg.Subagents.MaxQueued)
+	if cfg.AgentCLI.Enabled && strings.TrimSpace(os.Getenv("OR3_SUBAGENTS_MAX_QUEUED")) != "" {
+		appendCompatEnvWarning(cfg, "OR3_SUBAGENTS_MAX_QUEUED is ignored while runner-first mode is active.")
+	}
 	applyEnvInt("OR3_SUBAGENTS_TASK_TIMEOUT_SECONDS", &cfg.Subagents.TaskTimeoutSeconds)
+	if cfg.AgentCLI.Enabled && strings.TrimSpace(os.Getenv("OR3_SUBAGENTS_TASK_TIMEOUT_SECONDS")) != "" {
+		appendCompatEnvWarning(cfg, "OR3_SUBAGENTS_TASK_TIMEOUT_SECONDS is ignored while runner-first mode is active.")
+	}
 	applyEnvBool("OR3_AGENT_CLI_ENABLED", &cfg.AgentCLI.Enabled)
 	applyEnvString("OR3_AGENT_CLI_DEFAULT_RUNNER", &cfg.AgentCLI.DefaultRunner)
 	if v := os.Getenv("OR3_AGENT_CLI_DISABLED_RUNNERS"); v != "" {
@@ -233,6 +250,22 @@ func normalizeProviderKey(key string) string {
 	key = strings.ReplaceAll(key, " ", "-")
 	key = strings.Trim(key, "_-/")
 	return key
+}
+
+func appendCompatEnvWarning(cfg *Config, message string) {
+	if cfg == nil {
+		return
+	}
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return
+	}
+	for _, existing := range cfg.CompatEnvWarnings {
+		if existing == message {
+			return
+		}
+	}
+	cfg.CompatEnvWarnings = append(cfg.CompatEnvWarnings, message)
 }
 
 func inferProviderKey(apiBase string) string {

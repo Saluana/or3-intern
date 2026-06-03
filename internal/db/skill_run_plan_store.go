@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	sqlite3 "github.com/mattn/go-sqlite3"
+
+	"or3-intern/internal/runnerfirst"
 )
 
 type SkillRunStatus = string
@@ -104,6 +106,9 @@ type SkillRunPlanRecord struct {
 }
 
 func (d *DB) CreateSkillRunPlan(ctx context.Context, input SkillRunPlanRecord) (SkillRunPlanRecord, error) {
+	if runnerfirst.Enabled() {
+		return SkillRunPlanRecord{}, fmt.Errorf("skill run plans are disabled in runner-first mode")
+	}
 	input.ID = strings.TrimSpace(input.ID)
 	if input.ID == "" {
 		input.ID = newSkillRunPlanID()

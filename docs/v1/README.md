@@ -1,5 +1,7 @@
 # OR3 Intern v1 Docs
 
+> **Runner-first migration:** Pages that describe the built-in OR3 tool loop, subagents, provider chat turns, and model-callable MCP tools may be outdated. See [Agent runtime (runner-first)](../../agent-runtime.md) and [Migration: runner-first](../../migration-runner-first.md) for current behavior.
+
 Welcome to the OR3 Intern v1 documentation. These docs cover everything you need to know about running and using OR3 Intern — a personal AI agent that works on the command line, as a web service, or through messaging apps.
 
 ## What's in here

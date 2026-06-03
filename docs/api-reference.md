@@ -1,5 +1,7 @@
 # Internal service REST / HTTP API reference
 
+> **Runner-first:** When `agentCLI.enabled` is true (default for new installs), foreground chat, channels, and most automation use **external runners** (OpenCode, Codex, Claude Code, Gemini CLI). Legacy built-in tool-loop endpoints (`POST /internal/v1/turns`, `POST /internal/v1/subagents`) remain for compatibility but are not the primary execution path. See [Migration: runner-first](migration-runner-first.md) and [Runner chat endpoints](v1/architecture/service-api/runner-chat-endpoints.md).
+
 This page documents the authenticated machine-facing REST / HTTP API exposed by:
 
 ```bash
@@ -8,7 +10,7 @@ go run ./cmd/or3-intern service
 
 ## Intended use
 
-`or3-intern service` is a loopback/private-network API intended for integrations such as OR3 Net. It uses the same runtime, tool registry, memory system, quotas, and subagent manager as the CLI and channel entrypoints.
+`or3-intern service` is a loopback/private-network API intended for integrations such as OR3 Net and the OR3 App. In runner-first mode it exposes runner discovery, runner chat turns, agent CLI jobs, cron, configure, files, and approvals. The legacy built-in tool loop and subagent manager remain available only when `agentCLI.enabled` is false.
 
 Command boundary:
 
@@ -110,8 +112,10 @@ Auth policy challenges keep their uppercase challenge codes (`SESSION_REQUIRED`,
 
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
-| `POST` | `/internal/v1/turns` | Admin or Operator | Run a foreground turn and wait for JSON or attach via SSE-on-submit. |
-| `POST` | `/internal/v1/subagents` | Admin or Operator | Queue a background subagent job. |
+| `GET` | `/internal/v1/chat-runners` | Admin or Operator | List chat-selectable external runners and service default runner. |
+| `POST` | `/internal/v1/chat/turns` | Admin or Operator | Submit a foreground turn through an external runner (primary chat path). |
+| `POST` | `/internal/v1/turns` | Admin or Operator | **Legacy:** built-in tool-loop turn (compatibility; prefer runner chat). |
+| `POST` | `/internal/v1/subagents` | Admin or Operator | **Legacy:** queue built-in subagent job (disabled when runner-first gates apply). |
 | `GET` | `/internal/v1/jobs/{jobId}` | Admin or Operator | Fetch current job snapshot. |
 | `GET` | `/internal/v1/jobs/{jobId}/stream` | Admin or Operator | Attach to live SSE lifecycle stream. |
 | `POST` | `/internal/v1/jobs/{jobId}/abort` | Admin or Operator | Request cancellation. |
@@ -181,9 +185,23 @@ Auth policy challenges keep their uppercase challenge codes (`SESSION_REQUIRED`,
 
 ## Endpoints
 
-### `POST /internal/v1/turns`
+### `GET /internal/v1/chat-runners`
 
-Submits a foreground turn.
+Returns installed external runners that are selectable for chat, plus `default_runner` from `agentCLI.defaultRunner`.
+
+The legacy built-in `or3-intern` runner is not listed as selectable when runner-first mode is active.
+
+### `POST /internal/v1/chat/turns`
+
+Submits a foreground chat turn through an external runner (OpenCode native session, or replay mode for other CLIs). This is the primary chat path for OR3 App and runner-first integrations.
+
+See [Runner chat endpoints](v1/architecture/service-api/runner-chat-endpoints.md) for request fields, SSE behavior, and session metadata.
+
+### `POST /internal/v1/turns` (legacy)
+
+> **Runner-first:** Prefer `POST /internal/v1/chat/turns` with a selectable runner. This endpoint runs the deprecated built-in provider tool loop.
+
+Submits a legacy foreground turn through the built-in runtime.
 
 Behavior:
 
@@ -275,9 +293,11 @@ MCP management routes require operator access and write the primary config file.
 
 `POST /internal/v1/mcp/servers/{name}/test` creates a temporary MCP manager for the saved server config, connects once, reports discovered tools, and closes the manager. It does not hot-reload the runtime manager.
 
-### `POST /internal/v1/subagents`
+### `POST /internal/v1/subagents` (legacy)
 
-Queues a background subagent job through the shared subagent manager.
+> **Runner-first:** New background work should use `POST /internal/v1/agent-runs` (agent CLI) instead. This endpoint is rejected for new subagent jobs when runner-first store gates are active.
+
+Queues a legacy background subagent job through the built-in subagent manager.
 
 Request fields:
 
@@ -331,17 +351,11 @@ Each external CLI has four possible states:
 
 ### `GET /internal/v1/agent-runners`
 
-Returns the detection status for every registered runner, including `or3-intern` as an always-available default:
+Returns the detection status for registered external runners. The legacy built-in `or3-intern` runner is not selectable for new runner-first chat turns:
 
 ```json
 {
   "runners": [
-    {
-      "id": "or3-intern",
-      "display_name": "OR3 Intern",
-      "status": "available",
-      "auth_status": "ready"
-    },
     {
       "id": "opencode",
       "display_name": "OpenCode",

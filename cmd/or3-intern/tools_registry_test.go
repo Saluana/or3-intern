@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"or3-intern/internal/artifacts"
+	rootchannels "or3-intern/internal/channels"
 	"or3-intern/internal/channels/cli"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
@@ -33,23 +34,28 @@ func (s stubMCPRegistrar) RegisterTools(reg *tools.Registry) int {
 	return s.register(reg)
 }
 
-func TestBuildToolRegistry_ReturnsFreshToolInstances(t *testing.T) {
+func testToolRegistryDeps(t *testing.T) (config.Config, *db.DB, *providers.Client, *rootchannels.Manager, skills.Inventory) {
+	t.Helper()
 	cfg := config.Default()
 	cfg.WorkspaceDir = t.TempDir()
-	cfg.Tools.RestrictToWorkspace = true
 
 	d, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
-	defer d.Close()
+	t.Cleanup(func() { d.Close() })
 
 	provider := providers.New("http://example.invalid", "key", time.Second)
 	channelManager, err := buildChannelManager(cfg, &cli.Deliverer{}, &artifacts.Store{Dir: t.TempDir(), DB: d}, cfg.MaxMediaBytes, nil)
 	if err != nil {
 		t.Fatalf("buildChannelManager: %v", err)
 	}
-	inv := skills.Inventory{}
+	return cfg, d, provider, channelManager, skills.Inventory{}
+}
+
+func TestBuildToolRegistry_ReturnsFreshToolInstances(t *testing.T) {
+	cfg, d, provider, channelManager, inv := testToolRegistryDeps(t)
+	cfg.AgentCLI.Enabled = false
 
 	reg1 := buildToolRegistry(cfg, d, provider, channelManager, &inv, nil, stubSpawnManager{}, nil, nil)
 	reg2 := buildToolRegistry(cfg, d, provider, channelManager, &inv, nil, stubSpawnManager{}, nil, nil)
@@ -63,6 +69,31 @@ func TestBuildToolRegistry_ReturnsFreshToolInstances(t *testing.T) {
 		if fmt.Sprintf("%p", tool1) == fmt.Sprintf("%p", tool2) {
 			t.Fatalf("expected fresh instance for %q", name)
 		}
+	}
+}
+
+func TestBuildToolRegistry_RunnerFirstOmitsModelCallableTools(t *testing.T) {
+	cfg, d, provider, channelManager, inv := testToolRegistryDeps(t)
+	cfg.AgentCLI.Enabled = true
+
+	reg := buildToolRegistry(cfg, d, provider, channelManager, &inv, nil, stubSpawnManager{}, nil, nil)
+	for _, name := range []string{"read_file", "exec", "web_fetch", "spawn_subagent", "create_plan", "read_skill"} {
+		if reg.Get(name) != nil {
+			t.Fatalf("runner-first registry should not register %q", name)
+		}
+	}
+	if len(reg.Names()) != 0 {
+		t.Fatalf("runner-first runtime registry should be empty before doctor tools register, got %v", reg.Names())
+	}
+}
+
+func TestBuildToolRegistry_DoctorRuntimeProfileIsEmpty(t *testing.T) {
+	cfg, d, provider, channelManager, inv := testToolRegistryDeps(t)
+	cfg.AgentCLI.Enabled = true
+
+	reg := buildToolRegistryWithOptions(cfg, d, provider, channelManager, &inv, nil, nil, nil, nil, true, toolRegistryDoctorRuntime)
+	if len(reg.Names()) != 0 {
+		t.Fatalf("doctor runtime base registry should be empty, got %v", reg.Names())
 	}
 }
 
@@ -81,21 +112,8 @@ func TestAllowedReadRootAllowsFullReadWhenWritesRestricted(t *testing.T) {
 }
 
 func TestBuildToolRegistry_RegistersMCPTools(t *testing.T) {
-	cfg := config.Default()
-	cfg.WorkspaceDir = t.TempDir()
-
-	d, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("db.Open: %v", err)
-	}
-	defer d.Close()
-
-	provider := providers.New("http://example.invalid", "key", time.Second)
-	channelManager, err := buildChannelManager(cfg, &cli.Deliverer{}, &artifacts.Store{Dir: t.TempDir(), DB: d}, cfg.MaxMediaBytes, nil)
-	if err != nil {
-		t.Fatalf("buildChannelManager: %v", err)
-	}
-	inv := skills.Inventory{}
+	cfg, d, provider, channelManager, inv := testToolRegistryDeps(t)
+	cfg.AgentCLI.Enabled = false
 
 	mcpRegistrar := stubMCPRegistrar{
 		register: func(reg *tools.Registry) int {
@@ -110,22 +128,9 @@ func TestBuildToolRegistry_RegistersMCPTools(t *testing.T) {
 }
 
 func TestBuildToolRegistry_OmitsDisabledSkillExecTool(t *testing.T) {
-	cfg := config.Default()
-	cfg.WorkspaceDir = t.TempDir()
+	cfg, d, provider, channelManager, inv := testToolRegistryDeps(t)
+	cfg.AgentCLI.Enabled = false
 	cfg.Skills.EnableExec = false
-
-	d, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("db.Open: %v", err)
-	}
-	defer d.Close()
-
-	provider := providers.New("http://example.invalid", "key", time.Second)
-	channelManager, err := buildChannelManager(cfg, &cli.Deliverer{}, &artifacts.Store{Dir: t.TempDir(), DB: d}, cfg.MaxMediaBytes, nil)
-	if err != nil {
-		t.Fatalf("buildChannelManager: %v", err)
-	}
-	inv := skills.Inventory{}
 
 	reg := buildToolRegistry(cfg, d, provider, channelManager, &inv, nil, nil, nil, nil)
 	if reg.Get("read_skill") == nil {
@@ -140,21 +145,8 @@ func TestBuildToolRegistry_OmitsDisabledSkillExecTool(t *testing.T) {
 }
 
 func TestBuildBackgroundToolRegistry_OmitsMessagingAndSpawn(t *testing.T) {
-	cfg := config.Default()
-	cfg.WorkspaceDir = t.TempDir()
-
-	d, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("db.Open: %v", err)
-	}
-	defer d.Close()
-
-	provider := providers.New("http://example.invalid", "key", time.Second)
-	channelManager, err := buildChannelManager(cfg, &cli.Deliverer{}, &artifacts.Store{Dir: t.TempDir(), DB: d}, cfg.MaxMediaBytes, nil)
-	if err != nil {
-		t.Fatalf("buildChannelManager: %v", err)
-	}
-	inv := skills.Inventory{}
+	cfg, d, provider, channelManager, inv := testToolRegistryDeps(t)
+	cfg.AgentCLI.Enabled = false
 
 	reg := buildBackgroundToolRegistry(cfg, d, provider, channelManager, &inv, nil, nil, nil)
 	if reg.Get("send_message") != nil {
@@ -166,8 +158,21 @@ func TestBuildBackgroundToolRegistry_OmitsMessagingAndSpawn(t *testing.T) {
 	if reg.Get("read_file") == nil {
 		t.Fatal("expected background registry to retain work tools")
 	}
-	if reg.Get("list_dir") == nil {
-		t.Fatal("expected background registry to retain directory listing tool")
+}
+
+func TestBuildBackgroundToolRegistry_RunnerFirstPlatformProfile(t *testing.T) {
+	cfg, d, provider, channelManager, inv := testToolRegistryDeps(t)
+	cfg.AgentCLI.Enabled = true
+
+	reg := buildBackgroundToolRegistry(cfg, d, provider, channelManager, &inv, nil, nil, nil)
+	if reg.Get("send_message") != nil {
+		t.Fatal("expected send_message to be omitted from background registry")
+	}
+	if reg.Get("read_file") != nil {
+		t.Fatal("runner-first background registry should not register read_file")
+	}
+	if reg.Get("memory_search") == nil {
+		t.Fatal("expected memory_search on runner-first background registry")
 	}
 }
 

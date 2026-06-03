@@ -33,6 +33,7 @@ import (
 	"or3-intern/internal/heartbeat"
 	"or3-intern/internal/memory"
 	"or3-intern/internal/providers"
+	"or3-intern/internal/runnerfirst"
 	"or3-intern/internal/scope"
 	"or3-intern/internal/security"
 	"or3-intern/internal/skills"
@@ -364,6 +365,7 @@ func main() {
 		os.Exit(1)
 	}
 	cfg := loadedRuntimeConfig.Config
+	runnerfirst.SetEnabled(cfg.RunnerFirst())
 	if err := prepareRuntimeStorage(cfg); err != nil {
 		fmt.Fprintln(os.Stderr, "runtime storage error:", err)
 		os.Exit(1)
@@ -956,7 +958,7 @@ func configErrorHint(err error) string {
 }
 
 func subagentsEnabledForCommand(cmd string, cfg config.Config) bool {
-	if !cfg.Subagents.Enabled {
+	if cfg.RunnerFirst() || !cfg.Subagents.Enabled {
 		return false
 	}
 	switch strings.ToLower(strings.TrimSpace(cmd)) {
@@ -993,77 +995,6 @@ func (f delivererFunc) Deliver(ctx context.Context, channel, to, text string) er
 
 type mcpToolRegistrar interface {
 	RegisterTools(reg *tools.Registry) int
-}
-
-func buildToolRegistry(cfg config.Config, d *db.DB, prov *providers.Client, channelManager *rootchannels.Manager, inv *skills.Inventory, cronSvc *cron.Service, spawnManager tools.SpawnEnqueuer, mcpRegistrar mcpToolRegistrar, approvalBroker *approval.Broker) *tools.Registry {
-	return buildToolRegistryWithOptions(cfg, d, prov, channelManager, inv, cronSvc, spawnManager, mcpRegistrar, approvalBroker, true)
-}
-
-func buildBackgroundToolRegistry(cfg config.Config, d *db.DB, prov *providers.Client, channelManager *rootchannels.Manager, inv *skills.Inventory, cronSvc *cron.Service, mcpRegistrar mcpToolRegistrar, approvalBroker *approval.Broker) *tools.Registry {
-	return buildToolRegistryWithOptions(cfg, d, prov, channelManager, inv, cronSvc, nil, mcpRegistrar, approvalBroker, false)
-}
-
-func buildToolRegistryWithOptions(cfg config.Config, d *db.DB, prov *providers.Client, channelManager *rootchannels.Manager, inv *skills.Inventory, cronSvc *cron.Service, spawnManager tools.SpawnEnqueuer, mcpRegistrar mcpToolRegistrar, approvalBroker *approval.Broker, includeSendMessage bool) *tools.Registry {
-	reg := tools.NewRegistry()
-	fileWriteRoot := allowedRoot(cfg)
-	fileReadRoot := allowedReadRoot(cfg)
-	sandboxCfg := tools.BubblewrapConfig{Enabled: cfg.Hardening.Sandbox.Enabled, BubblewrapPath: cfg.Hardening.Sandbox.BubblewrapPath, AllowNetwork: cfg.Hardening.Sandbox.AllowNetwork, WritablePaths: append([]string{}, cfg.Hardening.Sandbox.WritablePaths...)}
-	hostPolicy := buildHostPolicy(cfg)
-	if shouldRegisterExecTool(cfg) {
-		reg.Register(&tools.ExecTool{Timeout: time.Duration(cfg.Tools.ExecTimeoutSeconds) * time.Second, RestrictDir: fileWriteRoot, PathAppend: cfg.Tools.PathAppend, AllowedPrograms: append([]string{}, cfg.Hardening.ExecAllowedPrograms...), ChildEnvAllowlist: append([]string{}, cfg.Hardening.ChildEnvAllowlist...), Sandbox: sandboxCfg, EnableLegacyShell: cfg.Hardening.EnableExecShell, ApprovalBroker: approvalBroker})
-	}
-	reg.Register(&tools.ReadFile{FileTool: tools.FileTool{Root: fileReadRoot, WriteRoot: fileWriteRoot}})
-	reg.Register(&tools.SearchFile{FileTool: tools.FileTool{Root: fileReadRoot, WriteRoot: fileWriteRoot}})
-	reg.Register(&tools.ReadArtifact{Store: &artifacts.Store{Dir: cfg.ArtifactsDir, DB: d}, MaxReadBytes: int64(cfg.MaxToolBytes)})
-	reg.Register(&tools.WriteFile{FileTool: tools.FileTool{Root: fileReadRoot, WriteRoot: fileWriteRoot}})
-	reg.Register(&tools.EditFile{FileTool: tools.FileTool{Root: fileReadRoot, WriteRoot: fileWriteRoot}})
-	reg.Register(&tools.DeleteFile{FileTool: tools.FileTool{Root: fileReadRoot, WriteRoot: fileWriteRoot}})
-	reg.Register(&tools.ListDir{FileTool: tools.FileTool{Root: fileReadRoot, WriteRoot: fileWriteRoot}})
-	reg.Register(&tools.WebFetch{HostPolicy: hostPolicy, Store: &artifacts.Store{Dir: cfg.ArtifactsDir, DB: d}})
-	reg.Register(&tools.WebFetchMarkdown{HostPolicy: hostPolicy, Store: &artifacts.Store{Dir: cfg.ArtifactsDir, DB: d}})
-	reg.Register(&tools.WebSearch{APIKey: cfg.Tools.BraveAPIKey, HostPolicy: hostPolicy})
-	reg.Register(&tools.MemorySetPinned{DB: d})
-	embedRole := cfg.ModelRole(config.ModelRoleEmbeddings)
-	reg.Register(&tools.MemoryAddNote{DB: d, Provider: prov, EmbedModel: embedRole.Primary.Model, EmbedFingerprint: currentEmbedFingerprint(cfg)})
-	reg.Register(&tools.MemorySearch{DB: d, Provider: prov, EmbedModel: embedRole.Primary.Model, EmbedFingerprint: currentEmbedFingerprint(cfg), VectorK: cfg.VectorK, FTSK: cfg.FTSK, TopK: cfg.MemoryRetrieve, VectorScanLimit: cfg.VectorScanLimit})
-	reg.Register(&tools.MemoryRecent{DB: d, DefaultLimit: 10, MaxLimit: cfg.HistoryMax, MaxChars: 240})
-	reg.Register(&tools.MemoryGetPinned{DB: d, MaxChars: 400})
-	planBase := agent.NewPlanToolBase(d)
-	reg.Register(&agent.CreatePlanTool{PlanToolBase: planBase})
-	reg.Register(&agent.UpdatePlanTool{PlanToolBase: planBase})
-	reg.Register(&agent.CompletePlanTaskTool{PlanToolBase: planBase})
-	reg.Register(&agent.RemovePlanTool{PlanToolBase: planBase})
-	if includeSendMessage {
-		reg.Register(&tools.SendMessage{
-			Deliver: func(ctx context.Context, channel, to, text string, meta map[string]any) error {
-				if channelManager == nil {
-					return fmt.Errorf("channel manager not configured")
-				}
-				return channelManager.DeliverWithMeta(ctx, channel, to, text, meta)
-			},
-			AllowedRoot:    fileWriteRoot,
-			ArtifactsDir:   cfg.ArtifactsDir,
-			MaxMediaBytes:  cfg.MaxMediaBytes,
-			ApprovalBroker: approvalBroker,
-		})
-	}
-	if inv != nil {
-		reg.Register(&tools.ReadSkill{Inventory: inv})
-		if cfg.Skills.EnableExec {
-			reg.Register(&tools.RunSkill{RunSkillScript: tools.RunSkillScript{Inventory: inv, Enabled: true, Timeout: time.Duration(cfg.Skills.MaxRunSeconds) * time.Second, ChildEnvAllowlist: append([]string{}, cfg.Hardening.ChildEnvAllowlist...), Sandbox: sandboxCfg, ApprovalBroker: approvalBroker, DB: d}})
-			reg.Register(&tools.RunSkillScript{Inventory: inv, Enabled: true, Timeout: time.Duration(cfg.Skills.MaxRunSeconds) * time.Second, ChildEnvAllowlist: append([]string{}, cfg.Hardening.ChildEnvAllowlist...), Sandbox: sandboxCfg, ApprovalBroker: approvalBroker, DB: d})
-		}
-	}
-	if cronSvc != nil {
-		reg.Register(&tools.CronTool{Svc: cronSvc})
-	}
-	if spawnManager != nil {
-		reg.Register(&tools.SpawnSubagent{Manager: spawnManager})
-	}
-	if mcpRegistrar != nil {
-		mcpRegistrar.RegisterTools(reg)
-	}
-	return reg
 }
 
 func shouldRegisterExecTool(cfg config.Config) bool {

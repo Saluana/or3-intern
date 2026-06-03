@@ -1,15 +1,24 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"slices"
 	"strings"
+	"time"
 
+	"or3-intern/internal/agentcli"
+	"or3-intern/internal/app"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/config"
+	"or3-intern/internal/db"
+	"or3-intern/internal/memory"
+	"or3-intern/internal/providers"
+	"or3-intern/internal/runnerfirst"
 )
 
 type serviceConfigureChange struct {
@@ -59,6 +68,7 @@ type serviceConfigureField struct {
 	Key         string   `json:"key"`
 	Label       string   `json:"label"`
 	Description string   `json:"description,omitempty"`
+	Status      string   `json:"status,omitempty"`
 	Kind        string   `json:"kind"`
 	Value       any      `json:"value,omitempty"`
 	Choices     []string `json:"choices,omitempty"`
@@ -136,6 +146,7 @@ func toServiceConfigureFields(fields []configureField) []serviceConfigureField {
 			Key:         field.Key,
 			Label:       field.Label,
 			Description: field.Description,
+			Status:      field.Status,
 			Kind:        serviceConfigureFieldKind(field.Kind),
 			Value:       serviceConfigureFieldValue(field),
 			Choices:     append([]string{}, field.Choices...),
@@ -320,6 +331,8 @@ func (s *serviceServer) applyLiveConfig(next config.Config) {
 		return
 	}
 	s.config = next
+	runnerfirst.SetEnabled(next.RunnerFirst())
+	s.applyLiveRunnerConfig(next)
 	if s.runtime != nil {
 		s.runtime.ApplyLiveModelConfig(runtimeModelConfigFromConfig(next))
 	}
@@ -333,6 +346,75 @@ func (s *serviceServer) applyLiveConfig(next config.Config) {
 	if s.modelCatalog != nil {
 		s.modelCatalog.Clear()
 	}
+}
+
+func (s *serviceServer) applyLiveRunnerConfig(next config.Config) {
+	if s == nil {
+		return
+	}
+	if !next.AgentCLI.Enabled {
+		s.turnOrchestrator = nil
+		s.chatManager = nil
+		if s.agentCLIManager != nil {
+			stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := s.agentCLIManager.Stop(stopCtx); err != nil {
+				log.Printf("agent CLI manager: stop after live disable failed: %v", err)
+			}
+			cancel()
+		}
+		s.agentCLIManager = nil
+		if s.appSvc != nil {
+			s.appSvc.SetRunnerRuntime(nil, nil)
+		}
+		return
+	}
+	if s.agentCLIManager == nil {
+		database := s.runtimeDB()
+		s.agentCLIManager = buildRuntimeAgentCLIManager(next, database, s.jobs)
+		if err := startRuntimeAgentCLIManager(context.Background(), s.agentCLIManager); err != nil {
+			log.Printf("agent CLI manager: live start failed: %v", err)
+			s.agentCLIManager = nil
+		}
+	} else {
+		s.agentCLIManager.ApplyConfig(
+			next.AgentCLI,
+			next.AgentCLI.MaxConcurrent,
+			next.AgentCLI.MaxQueued,
+			time.Duration(next.AgentCLI.DefaultTimeoutSeconds)*time.Second,
+			agentcli.OpenCodeExternalDirectoriesFromConfig(next),
+			allowedRoot(next),
+		)
+	}
+	database := s.runtimeDB()
+	s.chatManager = buildRuntimeChatManager(next, database, s.agentCLIManager, s.jobs, s.broker)
+	s.turnOrchestrator = s.rebuildRunnerTurnOrchestrator(next, database)
+	if s.appSvc != nil {
+		s.appSvc.SetRunnerRuntime(s.agentCLIManager, s.turnOrchestrator)
+	}
+}
+
+func (s *serviceServer) runtimeDB() *db.DB {
+	if s == nil || s.runtime == nil {
+		return nil
+	}
+	return s.runtime.DB
+}
+
+func (s *serviceServer) rebuildRunnerTurnOrchestrator(next config.Config, database *db.DB) *app.RunnerTurnOrchestrator {
+	if s == nil || s.chatManager == nil {
+		return nil
+	}
+	var mem *memory.Retriever
+	var docs *memory.DocRetriever
+	if s.runtime != nil && s.runtime.Builder != nil {
+		mem = s.runtime.Builder.Mem
+		docs = s.runtime.Builder.DocRetriever
+	}
+	var provider *providers.Client
+	if s.runtime != nil {
+		provider = s.runtime.Provider
+	}
+	return buildRunnerTurnOrchestrator(next, s.chatManager, database, mem, docs, provider)
 }
 
 func serviceNormalizeProviderKey(value string) string {

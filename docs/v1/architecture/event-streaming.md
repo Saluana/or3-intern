@@ -1,5 +1,7 @@
 # Event Streaming
 
+> **Runner-first:** Runner chat SSE uses `POST /internal/v1/chat/turns` with `Accept: text/event-stream`. Legacy built-in turns use `POST /internal/v1/turns`.
+
 The service API uses Server-Sent Events (SSE) for progressive output and reconnectable job/runner streams. Each event is emitted as:
 
 ```text
@@ -25,12 +27,14 @@ data: <json>
 
 ## How Streaming Works
 
-Foreground turns stream when the request includes `Accept: text/event-stream`:
+Runner-first foreground chat streams when the request includes `Accept: text/event-stream`:
 
 ```http
-POST /internal/v1/turns
+POST /internal/v1/chat/turns
 Accept: text/event-stream
 ```
+
+Legacy built-in foreground turns use the same header on `POST /internal/v1/turns`.
 
 Long-running jobs expose a reconnect-friendly stream:
 

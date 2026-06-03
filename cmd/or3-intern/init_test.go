@@ -203,11 +203,15 @@ func TestHeartbeatServiceForCommand_OnlyServeAndEnabled(t *testing.T) {
 func TestSubagentsEnabledForCommand(t *testing.T) {
 	cfg := config.Default()
 	cfg.Subagents.Enabled = true
+	if subagentsEnabledForCommand("chat", cfg) {
+		t.Fatal("runner-first default config should not start subagents")
+	}
+	cfg.AgentCLI.Enabled = false
 	if !subagentsEnabledForCommand("chat", cfg) {
-		t.Fatal("expected chat to enable subagents")
+		t.Fatal("expected chat to enable subagents when runner-first is off")
 	}
 	if !subagentsEnabledForCommand("serve", cfg) {
-		t.Fatal("expected serve to enable subagents")
+		t.Fatal("expected serve to enable subagents when runner-first is off")
 	}
 	if subagentsEnabledForCommand("agent", cfg) {
 		t.Fatal("expected one-shot agent mode to disable subagents")

@@ -121,6 +121,8 @@ type Config struct {
 	Subagents                        SubagentsConfig `json:"subagents"`
 	AgentCLI                         AgentCLIConfig  `json:"agentCLI"`
 	RuntimeProfile                   RuntimeProfile  `json:"runtimeProfile"`
+	// CompatEnvWarnings collects non-fatal migration hints from env overrides (not persisted).
+	CompatEnvWarnings []string `json:"-"`
 
 	IdentityFile string         `json:"identityFile"`
 	MemoryFile   string         `json:"memoryFile"`

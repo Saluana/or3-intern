@@ -1,6 +1,8 @@
 # Event Bus
 
-The event bus is a single-process fan-out bus used by channels and automation to hand work to the agent runtime.
+> **Runner-first:** Channels, cron, heartbeat, and triggers still publish events on the bus. Serve-mode workers route most user-facing work to **external runners** via the runner turn orchestrator when `agentCLI.enabled` is true. The legacy `Runtime.Handle` path remains as a fallback when no orchestrator is configured.
+
+The event bus is a single-process fan-out bus used by channels and automation to hand work to the runtime.
 
 ## Package
 
@@ -39,9 +41,9 @@ The deprecated `Channel()` method is retained for worker-pool queue semantics wh
 ## Where It Is Used
 
 - Channels publish inbound platform messages.
-- Cron runner dispatches scheduled turns or agent-run payloads.
+- Cron runner dispatches `agent_cli_run` payloads (or legacy `agent_turn` events that migrate to runner chat when agent CLI is enabled).
 - Webhook and filewatch triggers publish automation events.
 - Heartbeat publishes periodic task prompts.
-- Serve-mode workers consume bus events and call `Runtime.Handle`.
+- Serve-mode workers consume bus events and call `RunnerTurnOrchestrator.HandleBusEvent` when configured, otherwise `Runtime.Handle` (legacy).
 
-Service API turns do not normally enter through the bus; they call ServiceApp and runtime directly so HTTP job observation and cancellation stay tied to the request's job ID.
+Service API runner chat and agent CLI runs do not enter through the bus; they call the chat manager and agent CLI manager directly so HTTP job observation and cancellation stay tied to the request's job ID.

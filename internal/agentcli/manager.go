@@ -330,6 +330,9 @@ func (m *Manager) workerLoop() {
 	for {
 		ran, err := m.runOnce()
 		if err != nil {
+			if agentCLIDatabaseClosed(err) {
+				return
+			}
 			if !errors.Is(err, context.Canceled) {
 				log.Printf("agent CLI worker error: %v", err)
 			}
@@ -344,6 +347,13 @@ func (m *Manager) workerLoop() {
 		case <-time.After(agentCLIClaimRetryDelay):
 		}
 	}
+}
+
+func agentCLIDatabaseClosed(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "database is closed")
 }
 
 func (m *Manager) runOnce() (bool, error) {
@@ -855,6 +865,30 @@ func (m *Manager) configSnapshot() config.AgentCLIConfig {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.Cfg
+}
+
+// ApplyConfig refreshes live policy/config values used by newly enqueued runs.
+func (m *Manager) ApplyConfig(cfg config.AgentCLIConfig, maxConcurrent, maxQueued int, timeout time.Duration, openCodeDirs []string, restrictDir string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.Cfg = cfg
+	if maxConcurrent > 0 {
+		m.MaxConcurrent = maxConcurrent
+	}
+	if maxQueued > 0 {
+		m.MaxQueued = maxQueued
+	}
+	if timeout > 0 {
+		m.TaskTimeout = timeout
+	}
+	m.OpenCodeExternalDirectories = append([]string{}, openCodeDirs...)
+	m.RestrictDir = restrictDir
+	m.mu.Unlock()
+	if m.Registry != nil {
+		m.Registry.RefreshAllAsync(m.detectOptions(cfg))
+	}
 }
 
 // DetectOptions returns the environment-aware runner detection options used by this manager.

@@ -1,6 +1,6 @@
 # Documentation Audit
 
-Last audited: 2026-05-13
+Last audited: 2026-06-02
 
 ## Scope
 
@@ -61,6 +61,10 @@ Strong coverage already exists for:
 7. **Monitoring docs referenced old root endpoints**
 
    Updated monitoring docs to use `/internal/v1/health`, `/internal/v1/readiness`, and `/internal/v1/capabilities`.
+
+8. **Runner-first doc drift (2026-06-02)**
+
+   Updated `docs/api-reference.md` and `docs/v1/architecture/event-bus.md` with runner-first banners, primary runner chat routes, and legacy endpoint callouts. Configure TUI field labels/descriptions now annotate compatibility and deprecated keys when `agentCLI.enabled` is true.
 
 ## Remaining Follow-ups
 

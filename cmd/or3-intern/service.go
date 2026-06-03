@@ -186,7 +186,7 @@ func runServiceCommandWithBrokerOptionsCronMCPAndChannels(ctx context.Context, c
 	} else if rt.DB != nil {
 		server.chatManager = buildRuntimeChatManager(cfg, rt.DB, agentCLIManager, jobs, broker)
 	}
-	if turnOrchestrator == nil && server.chatManager != nil && rt != nil {
+	if turnOrchestrator == nil && server.chatManager != nil {
 		var mem *memory.Retriever
 		if rt.Builder != nil && rt.Builder.Mem != nil {
 			mem = rt.Builder.Mem

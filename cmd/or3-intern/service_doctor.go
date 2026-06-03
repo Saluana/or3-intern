@@ -101,7 +101,7 @@ func (s *serviceServer) handleDoctor(w http.ResponseWriter, r *http.Request) {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 			return
 		}
-		writeServiceValue(w, http.StatusOK, map[string]any{"fields": configmeta.List()})
+		writeServiceValue(w, http.StatusOK, map[string]any{"fields": configmeta.ListForConfig(s.config)})
 	case path == "logs":
 		if r.Method != http.MethodGet {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})

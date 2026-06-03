@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"or3-intern/internal/adminflow"
-	"or3-intern/internal/agent"
 	"or3-intern/internal/agentcli"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/config"
@@ -22,6 +21,7 @@ import (
 	"or3-intern/internal/db"
 	"or3-intern/internal/diagnosticlog"
 	"or3-intern/internal/doctor"
+	"or3-intern/internal/serviceerrors"
 	"or3-intern/internal/skilldiag"
 	"or3-intern/internal/tools"
 	"or3-intern/internal/uxcopy"
@@ -1082,7 +1082,7 @@ func writeDoctorAdminBrainTurnError(w http.ResponseWriter, r *http.Request, err 
 		if command := strings.TrimSpace(copy.Command); command != "" {
 			payload["command"] = command
 		}
-		if code := agent.PublicErrorCode(err); code != "" {
+		if code := serviceerrors.PublicErrorCode(err); code != "" {
 			payload["code"] = code
 		}
 		writeServiceJSON(w, http.StatusBadGateway, payload)

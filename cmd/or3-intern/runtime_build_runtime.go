@@ -4,7 +4,6 @@ import (
 	"context"
 	"time"
 
-	"or3-intern/internal/agent"
 	"or3-intern/internal/agentcli"
 	"or3-intern/internal/app"
 	"or3-intern/internal/approval"
@@ -13,18 +12,19 @@ import (
 	"or3-intern/internal/cron"
 	"or3-intern/internal/cronrunner"
 	"or3-intern/internal/db"
+	"or3-intern/internal/jobs"
 	"or3-intern/internal/memory"
 	"or3-intern/internal/providers"
 )
 
-func buildServiceJobRegistry(cmd string) *agent.JobRegistry {
+func buildServiceJobRegistry(cmd string) *jobs.Registry {
 	if cmd != "service" {
 		return nil
 	}
-	return agent.NewJobRegistry(0, 0)
+	return jobs.NewRegistry(0, 0)
 }
 
-func buildRuntimeAgentCLIManager(cfg config.Config, database *db.DB, jobs *agent.JobRegistry) *agentcli.Manager {
+func buildRuntimeAgentCLIManager(cfg config.Config, database *db.DB, jobs *jobs.Registry) *agentcli.Manager {
 	if !cfg.AgentCLI.Enabled {
 		return nil
 	}
@@ -56,7 +56,7 @@ func buildRuntimeCronService(cfg config.Config, events *bus.Bus, agentCLIManager
 	return cron.New(cfg.Cron.StorePath, cronrunner.New(events, cfg.DefaultSessionKey, agentCLIManager, cfg.AgentCLI.Enabled))
 }
 
-func buildRuntimeChatManager(cfg config.Config, database *db.DB, manager *agentcli.Manager, jobs *agent.JobRegistry, broker *approval.Broker) *agentcli.ChatManager {
+func buildRuntimeChatManager(cfg config.Config, database *db.DB, manager *agentcli.Manager, jobs *jobs.Registry, broker *approval.Broker) *agentcli.ChatManager {
 	if manager == nil || database == nil {
 		return nil
 	}

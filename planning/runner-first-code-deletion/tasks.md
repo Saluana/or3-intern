@@ -2,20 +2,27 @@
 
 ## 1. Establish deletion guardrails
 
-- [ ] Add a temporary migration checklist in this file or PR description that treats `internal/agent` and `internal/tools` production imports as blockers once extraction starts. (Requirements: 1, 3, 5, 10)
-- [ ] Add focused grep/script checks for forbidden production symbols after deletion: `agent.Runtime`, `agent.SubagentManager`, `tools.Registry`, `tools.Tool`, `ReplayToolCall`, `/internal/v1/turns`, and `/internal/v1/subagents`. (Requirements: 1, 4, 5, 7, 10)
-- [ ] Run a baseline `go test` subset for runner chat, agent CLI, app service, cronrunner, config, approvals, artifacts, and service auth before deletion. (Requirements: 2, 10)
-- [ ] Run OR3 App focused tests for chat runners, Assistant send routing, Agents, Scheduled Tasks, Activity, and settings before deletion. (Requirements: 7, 8, 10)
+- [x] Add a temporary migration checklist in this file or PR description that treats `internal/agent` and `internal/tools` production imports as blockers once extraction starts. (Requirements: 1, 3, 5, 10)
+- [x] Add focused grep/script checks for forbidden production symbols after deletion: `agent.Runtime`, `agent.SubagentManager`, `tools.Registry`, `tools.Tool`, `ReplayToolCall`, `/internal/v1/turns`, and `/internal/v1/subagents`. (Requirements: 1, 4, 5, 7, 10)
+- [x] Run a baseline `go test` subset for runner chat, agent CLI, app service, cronrunner, config, approvals, artifacts, and service auth before deletion. (Requirements: 2, 10)
+- [x] Run OR3 App focused tests for chat runners, Assistant send routing, Agents, Scheduled Tasks, Activity, and settings before deletion. (Requirements: 7, 8, 10)
+
+Temporary migration checklist:
+
+- Treat new production imports of `internal/agent` as blockers unless they are in the active extraction slice.
+- Treat new production imports of `internal/tools` as blockers unless they are retained safety/service primitives being moved in the same slice.
+- Run `scripts/check-runner-first-forbidden.sh` after deletion slices; it is expected to fail until the listed legacy symbols are removed from production Go code.
+- Keep focused tests green after each extraction/deletion phase before moving to the next phase.
 
 ## 2. Extract shared turn and job primitives
 
-- [ ] Move `internal/agent/chat_attachment.go` into a smaller package such as `internal/turns`, renaming `ChatAttachment` to `turns.Attachment` only if the diff stays manageable. (Requirements: 2, 3)
-- [ ] Update `internal/app`, `internal/agentcli`, `cmd/or3-intern/service_request.go`, `service_runner_chat.go`, and tests to use the moved attachment package. (Requirements: 2, 3)
-- [ ] Move `internal/agent/job_registry.go` into a package such as `internal/jobs`, preserving bounded retention/event behavior. (Requirements: 2, 3)
-- [ ] Update service job registry usage in `cmd/or3-intern`, `internal/agentcli.ChatManager`, `internal/controlplane`, and service job persistence code to use `internal/jobs`. (Requirements: 2, 3)
+- [x] Move `internal/agent/chat_attachment.go` into a smaller package such as `internal/turns`, renaming `ChatAttachment` to `turns.Attachment` only if the diff stays manageable. (Requirements: 2, 3)
+- [x] Update `internal/app`, `internal/agentcli`, `cmd/or3-intern/service_request.go`, `service_runner_chat.go`, and tests to use the moved attachment package. (Requirements: 2, 3)
+- [x] Move `internal/agent/job_registry.go` into a package such as `internal/jobs`, preserving bounded retention/event behavior. (Requirements: 2, 3)
+- [x] Update service job registry usage in `cmd/or3-intern`, `internal/agentcli.ChatManager`, `internal/controlplane`, and service job persistence code to use `internal/jobs`. (Requirements: 2, 3)
 - [ ] Move `internal/agent/noop_streamer.go` and `internal/agent/service_runtime_context.go` observer/streaming interfaces into a package such as `internal/turns` or `internal/streaming`. (Requirements: 2, 3)
-- [ ] Move `internal/agent/error_codes.go` into a package such as `internal/serviceerrors`, replacing `agent.PublicErrorCode` imports. (Requirements: 2, 3)
-- [ ] Add or move tests for attachments, job registry retention/SSE behavior, and error code mapping. (Requirements: 3, 10)
+- [x] Move `internal/agent/error_codes.go` into a package such as `internal/serviceerrors`, replacing `agent.PublicErrorCode` imports. (Requirements: 2, 3)
+- [x] Add or move tests for attachments, job registry retention/SSE behavior, and error code mapping. (Requirements: 3, 10)
 
 ## 3. Extract or rewrite runner bootstrap/context code
 

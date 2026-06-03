@@ -36,6 +36,7 @@ import (
 	"or3-intern/internal/runnerfirst"
 	"or3-intern/internal/scope"
 	"or3-intern/internal/security"
+	"or3-intern/internal/serviceerrors"
 	"or3-intern/internal/skills"
 	"or3-intern/internal/tools"
 	"or3-intern/internal/triggers"
@@ -1149,9 +1150,9 @@ func deliverChannelRuntimeError(ctx context.Context, channelManager *rootchannel
 	if errors.As(err, &approvalErr) {
 		return
 	}
-	code := agent.PublicErrorCode(err)
+	code := serviceerrors.PublicErrorCode(err)
 	if code == "" {
-		code = agent.PublicErrorUnknown
+		code = serviceerrors.PublicErrorUnknown
 	}
 	text := "I hit a problem while handling that request (" + code + "). Please retry, or review the details in the OR3 app."
 	if derr := channelManager.DeliverWithMeta(ctx, ev.Channel, channelEventTarget(ev), text, rootchannels.ReplyMeta(ev.Meta)); derr != nil {

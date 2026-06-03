@@ -101,21 +101,19 @@ func TestJobRegistry_DoesNotEvictLiveJobsWhenBounded(t *testing.T) {
 	doneB := registry.RegisterWithID("job-done-b", "turn")
 	registry.Complete(doneB.ID, "completed", map[string]any{"final_text": "b"})
 
-	registry.mu.Lock()
-	registry.cleanupLocked(time.Now())
-	registry.mu.Unlock()
+	registry.CleanupForTest(time.Now())
 
 	if _, ok := registry.Snapshot(live.ID); !ok {
 		t.Fatal("expected live job to remain tracked")
 	}
-	if len(registry.jobs) != 2 {
-		t.Fatalf("expected registry to trim only terminal jobs down to limit, got %d entries", len(registry.jobs))
+	if got := registry.TrackedCountForTest(); got != 2 {
+		t.Fatalf("expected registry to trim only terminal jobs down to limit, got %d entries", got)
 	}
 }
 
 func TestJobRegistry_BoundsPerJobEventHistory(t *testing.T) {
 	registry := NewJobRegistry(time.Minute, 16)
-	registry.maxEvents = 3
+	registry.SetMaxEventsForTest(3)
 	job := registry.RegisterWithID("job-events", "turn")
 	for i := 0; i < 5; i++ {
 		registry.Publish(job.ID, "text_delta", map[string]any{"content": i})
@@ -161,7 +159,7 @@ func TestJobRegistry_PublishIgnoresTerminalJobs(t *testing.T) {
 func TestJobObserverToolResultIncludesApprovalRequestID(t *testing.T) {
 	registry := NewJobRegistry(0, 0)
 	job := registry.Register("turn")
-	observer := registry.Observer(job.ID)
+	observer := JobObserverForRegistry(registry, job.ID)
 
 	observer.OnToolResult(context.Background(), "exec", "", &tools.ApprovalRequiredError{
 		ToolName:  "exec",
@@ -190,7 +188,7 @@ func TestJobObserverToolResultIncludesApprovalRequestID(t *testing.T) {
 func TestJobObserverToolLifecyclePublishesEnrichedPayloads(t *testing.T) {
 	registry := NewJobRegistry(0, 0)
 	job := registry.Register("turn")
-	observer := registry.Observer(job.ID)
+	observer := JobObserverForRegistry(registry, job.ID)
 	lifecycle, ok := observer.(ToolLifecycleObserver)
 	if !ok {
 		t.Fatal("expected lifecycle observer")
@@ -391,10 +389,8 @@ func TestJobRegistry_DoesNotEvictWhenOnlyLiveJobsRemain(t *testing.T) {
 	jobB := registry.RegisterWithID("job-live-b", "turn")
 	jobC := registry.RegisterWithID("job-live-c", "turn")
 
-	registry.mu.Lock()
-	registry.cleanupLocked(time.Now())
-	size := len(registry.jobs)
-	registry.mu.Unlock()
+	registry.CleanupForTest(time.Now())
+	size := registry.TrackedCountForTest()
 
 	if size != 3 {
 		t.Fatalf("expected all live jobs to remain tracked, got %d", size)

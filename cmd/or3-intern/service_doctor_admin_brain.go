@@ -12,6 +12,7 @@ import (
 	"or3-intern/internal/app"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/db"
+	"or3-intern/internal/serviceerrors"
 	"or3-intern/internal/tools"
 )
 
@@ -118,7 +119,7 @@ func (s *serviceServer) runDoctorInternalAdminBrainJob(ctx context.Context, jobI
 	defer s.persistServiceJobSummary(context.Background(), jobID)
 	meta := doctorInternalAdminBrainTurnMeta(req.content)
 	s.jobs.Publish(jobID, "started", serviceLifecyclePayload(req.sessionKey, meta, map[string]any{"status": "running"}))
-	observer := &serviceObserver{ConversationObserver: s.jobs.Observer(jobID)}
+	observer := &serviceObserver{ConversationObserver: agent.JobObserverForRegistry(s.jobs, jobID)}
 	if err := s.runDoctorInternalAdminBrainTurnWithObserver(ctx, req, observer); err != nil {
 		s.completeTurnJobWithError(ctx, jobID, err, observer, req.sessionKey, meta)
 		return
@@ -156,7 +157,7 @@ func (s *serviceServer) runDoctorApprovedQuotaResumeJob(ctx context.Context, job
 	}
 	log.Printf("service_approval: doctor_quota_resume_started approval=%d job=%s session=%s", issued.Request.ID, jobID, sessionKey)
 	s.jobs.Publish(jobID, "started", serviceLifecyclePayload(sessionKey, meta, map[string]any{"status": "running"}))
-	observer := &serviceObserver{ConversationObserver: s.jobs.Observer(jobID)}
+	observer := &serviceObserver{ConversationObserver: agent.JobObserverForRegistry(s.jobs, jobID)}
 	err := s.runDoctorInternalAdminBrainTurnWithObserver(ctx, doctorInternalAdminBrainTurnRequest{
 		sessionKey:    sessionKey,
 		content:       doctorApprovedQuotaContinuationPrompt(),
@@ -164,7 +165,7 @@ func (s *serviceServer) runDoctorApprovedQuotaResumeJob(ctx context.Context, job
 		identity:      identity,
 	}, observer)
 	if err != nil {
-		log.Printf("service_approval: doctor_quota_resume_error approval=%d job=%s session=%s public_code=%s", issued.Request.ID, jobID, sessionKey, agent.PublicErrorCode(err))
+		log.Printf("service_approval: doctor_quota_resume_error approval=%d job=%s session=%s public_code=%s", issued.Request.ID, jobID, sessionKey, serviceerrors.PublicErrorCode(err))
 		s.completeTurnJobWithError(ctx, jobID, err, observer, sessionKey, meta)
 		return
 	}

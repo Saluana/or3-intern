@@ -8,11 +8,11 @@ import (
 	"strings"
 	"time"
 
-	"or3-intern/internal/agent"
 	"or3-intern/internal/agentcli"
 	"or3-intern/internal/controlplane"
 	"or3-intern/internal/db"
 	"or3-intern/internal/tools"
+	"or3-intern/internal/turns"
 )
 
 const serviceRunnerChatBodyLimit = 64 * 1024
@@ -237,7 +237,7 @@ func (s *serviceServer) handleRunnerChatTurnStart(w http.ResponseWriter, r *http
 		return
 	}
 	attachments := decodeServiceAttachments(req.Attachments)
-	if err := agent.ValidateChatAttachments(attachments); err != nil {
+	if err := turns.ValidateAttachments(attachments); err != nil {
 		writeServiceError(w, r, http.StatusBadRequest, "invalid attachments", err)
 		return
 	}

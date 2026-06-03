@@ -12,10 +12,11 @@ import (
 	"sync"
 	"time"
 
-	"or3-intern/internal/agent"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/db"
+	"or3-intern/internal/jobs"
 	"or3-intern/internal/tools"
+	"or3-intern/internal/turns"
 )
 
 // ChatManager owns runner-backed chat turn lifecycle on top of the existing
@@ -25,7 +26,7 @@ import (
 type ChatManager struct {
 	DB      *db.DB
 	Manager *Manager
-	Jobs    *agent.JobRegistry
+	Jobs    *jobs.Registry
 	Broker  *approval.Broker
 
 	mu          sync.Mutex
@@ -42,7 +43,7 @@ type StartTurnRequest struct {
 	AppSessionKey    string
 	RunnerID         string
 	UserMessage      string
-	Attachments      []agent.ChatAttachment
+	Attachments      []turns.Attachment
 	PromptMessage    string
 	ContinuationMode ContinuationMode
 	Model            string
@@ -197,7 +198,7 @@ func (cm *ChatManager) StartTurn(ctx context.Context, sessionID string, req Star
 		"continuation_mode":      string(req.ContinuationMode),
 	}
 	if len(req.Attachments) > 0 {
-		userPayload["attachments"] = agent.ChatAttachmentsForMeta(req.Attachments)
+		userPayload["attachments"] = turns.AttachmentsForMeta(req.Attachments)
 	}
 	userMsgID, err := cm.appendMessage(ctx, sess.AppSessionKey, "user", userMessage, userPayload)
 	if err != nil {
@@ -375,7 +376,7 @@ func (cm *ChatManager) mirrorJobEvents(sess db.RunnerChatSession, turn db.Runner
 	cm.finalizeFromSnapshot(sess, turn, finalSnapshot, state)
 }
 
-func (cm *ChatManager) persistJobEvent(turn db.RunnerChatTurn, sess db.RunnerChatSession, jobID string, state *turnMirrorState, ev agent.JobEvent) {
+func (cm *ChatManager) persistJobEvent(turn db.RunnerChatTurn, sess db.RunnerChatSession, jobID string, state *turnMirrorState, ev jobs.Event) {
 	rawEvent := jobEventToAgentRunEvent(ev, jobID, sess.RunnerID)
 	cm.maybeCaptureRunnerPermission(turn, sess, jobID, state, rawEvent)
 	if state != nil && state.permission != nil && shouldSuppressRunnerFailureEvent(rawEvent) {
@@ -422,7 +423,7 @@ func (cm *ChatManager) persistJobEvent(turn db.RunnerChatTurn, sess db.RunnerCha
 	cm.maybePersistNativeSessionRef(sess, jobID, ev)
 }
 
-func (cm *ChatManager) finalizeFromSnapshot(sess db.RunnerChatSession, turn db.RunnerChatTurn, snap agent.JobSnapshot, state *turnMirrorState) {
+func (cm *ChatManager) finalizeFromSnapshot(sess db.RunnerChatSession, turn db.RunnerChatTurn, snap jobs.Snapshot, state *turnMirrorState) {
 	if latest, err := cm.DB.GetRunnerChatSession(context.Background(), sess.ID); err == nil {
 		sess = latest
 	}
@@ -751,7 +752,7 @@ func (cm *ChatManager) chatRunner(runnerID string) (RunnerSpec, RunnerChatAdapte
 	return spec, chatAdapter, nil
 }
 
-func (cm *ChatManager) maybePersistNativeSessionRef(sess db.RunnerChatSession, jobID string, ev agent.JobEvent) {
+func (cm *ChatManager) maybePersistNativeSessionRef(sess db.RunnerChatSession, jobID string, ev jobs.Event) {
 	if sess.NativeSessionRef != "" {
 		return
 	}
@@ -775,7 +776,7 @@ func (cm *ChatManager) maybePersistNativeSessionRef(sess db.RunnerChatSession, j
 	log.Printf("chat manager: persisted native session ref runner=%s session=%s native_ref=%s", sess.RunnerID, sess.ID, ref)
 }
 
-func jobEventToAgentRunEvent(ev agent.JobEvent, jobID, runnerID string) AgentRunEvent {
+func jobEventToAgentRunEvent(ev jobs.Event, jobID, runnerID string) AgentRunEvent {
 	raw := AgentRunEvent{
 		Type:     ev.Type,
 		Seq:      ev.Sequence,
@@ -844,7 +845,7 @@ func isTerminalEventType(t string) bool {
 	return false
 }
 
-func extractFinalTextFromSnapshot(snap agent.JobSnapshot) string {
+func extractFinalTextFromSnapshot(snap jobs.Snapshot) string {
 	// Walk events in reverse and return the first completion/final_text we find.
 	for i := len(snap.Events) - 1; i >= 0; i-- {
 		ev := snap.Events[i]
@@ -861,7 +862,7 @@ func extractFinalTextFromSnapshot(snap agent.JobSnapshot) string {
 	return ""
 }
 
-func extractErrorFromSnapshot(snap agent.JobSnapshot) string {
+func extractErrorFromSnapshot(snap jobs.Snapshot) string {
 	if snap.Status != "failed" && snap.Status != "timed_out" {
 		return ""
 	}

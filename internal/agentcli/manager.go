@@ -15,9 +15,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"or3-intern/internal/agent"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
+	"or3-intern/internal/jobs"
 )
 
 const (
@@ -29,7 +29,7 @@ const (
 // Manager queues and runs external agent CLI jobs.
 type Manager struct {
 	DB       *db.DB
-	Jobs     *agent.JobRegistry
+	Jobs     *jobs.Registry
 	Cfg      config.AgentCLIConfig
 	Registry *RunnerRegistry
 	Runtimes *RunnerRuntimeRegistry

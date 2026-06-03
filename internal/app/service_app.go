@@ -19,14 +19,17 @@ import (
 	"or3-intern/internal/config"
 	"or3-intern/internal/controlplane"
 	"or3-intern/internal/db"
+	"or3-intern/internal/jobs"
 	"or3-intern/internal/providers"
+	"or3-intern/internal/serviceerrors"
 	"or3-intern/internal/tools"
+	"or3-intern/internal/turns"
 )
 
 type ServiceApp struct {
 	cfg              config.Config
 	runtime          *agent.Runtime
-	jobs             *agent.JobRegistry
+	jobs             *jobs.Registry
 	subagentManager  *agent.SubagentManager
 	agentCLIManager  *agentcli.Manager
 	turnOrchestrator *RunnerTurnOrchestrator
@@ -34,15 +37,15 @@ type ServiceApp struct {
 	auth             *auth.Service
 }
 
-func NewServiceApp(cfg config.Config, runtime *agent.Runtime, jobs *agent.JobRegistry, subagentManager *agent.SubagentManager, control *controlplane.Service) *ServiceApp {
+func NewServiceApp(cfg config.Config, runtime *agent.Runtime, jobs *jobs.Registry, subagentManager *agent.SubagentManager, control *controlplane.Service) *ServiceApp {
 	return NewServiceAppWithAgentCLI(cfg, runtime, jobs, subagentManager, nil, control)
 }
 
-func NewServiceAppWithAgentCLI(cfg config.Config, runtime *agent.Runtime, jobs *agent.JobRegistry, subagentManager *agent.SubagentManager, agentCLIManager *agentcli.Manager, control *controlplane.Service) *ServiceApp {
+func NewServiceAppWithAgentCLI(cfg config.Config, runtime *agent.Runtime, jobs *jobs.Registry, subagentManager *agent.SubagentManager, agentCLIManager *agentcli.Manager, control *controlplane.Service) *ServiceApp {
 	return NewServiceAppWithRunnerTurns(cfg, runtime, jobs, subagentManager, agentCLIManager, nil, control)
 }
 
-func NewServiceAppWithRunnerTurns(cfg config.Config, runtime *agent.Runtime, jobs *agent.JobRegistry, subagentManager *agent.SubagentManager, agentCLIManager *agentcli.Manager, turnOrchestrator *RunnerTurnOrchestrator, control *controlplane.Service) *ServiceApp {
+func NewServiceAppWithRunnerTurns(cfg config.Config, runtime *agent.Runtime, jobs *jobs.Registry, subagentManager *agent.SubagentManager, agentCLIManager *agentcli.Manager, turnOrchestrator *RunnerTurnOrchestrator, control *controlplane.Service) *ServiceApp {
 	app := &ServiceApp{cfg: cfg, runtime: runtime, jobs: jobs, subagentManager: subagentManager, agentCLIManager: agentCLIManager, turnOrchestrator: turnOrchestrator, control: control}
 	if control != nil {
 		if authSvc, err := auth.NewService(cfg, control.DB, control.Audit); err == nil {
@@ -76,7 +79,7 @@ type TurnRequest struct {
 	SessionKey          string
 	Message             string
 	Model               string
-	Attachments         []agent.ChatAttachment
+	Attachments         []turns.Attachment
 	SystemPrompt        string
 	Meta                map[string]any
 	AllowedTools        []string
@@ -177,7 +180,7 @@ func (a *ServiceApp) RunTurn(ctx context.Context, req TurnRequest) (TurnResult, 
 	}
 	meta := cloneMap(req.Meta)
 	if len(req.Attachments) > 0 {
-		meta["attachments"] = agent.ChatAttachmentsForMeta(req.Attachments)
+		meta["attachments"] = turns.AttachmentsForMeta(req.Attachments)
 	}
 	if strings.TrimSpace(req.ProfileName) != "" {
 		meta["profile_name"] = strings.TrimSpace(req.ProfileName)
@@ -555,7 +558,7 @@ func emitReplayToolCallFinished(ctx context.Context, observer agent.Conversation
 			ArgumentsPreview: serviceAppEventPreview(argsJSON, 500),
 			Result:           out,
 			ResultPreview:    serviceAppEventPreview(out, 700),
-			PublicCode:       agent.PublicErrorCode(err),
+			PublicCode:       serviceerrors.PublicErrorCode(err),
 		}
 		var approvalErr *tools.ApprovalRequiredError
 		if errors.As(err, &approvalErr) {
@@ -837,9 +840,9 @@ func (a *ServiceApp) StartSubagent(ctx context.Context, req SubagentRequest) (to
 	})
 }
 
-func (a *ServiceApp) GetJob(jobID string) (agent.JobSnapshot, error) {
+func (a *ServiceApp) GetJob(jobID string) (jobs.Snapshot, error) {
 	if a == nil || a.control == nil {
-		return agent.JobSnapshot{}, controlplane.ErrJobRegistryUnavailable
+		return jobs.Snapshot{}, controlplane.ErrJobRegistryUnavailable
 	}
 	return a.control.GetJob(jobID)
 }
@@ -954,16 +957,16 @@ func (a *ServiceApp) AbortAgentCLIRun(ctx context.Context, jobID string) error {
 	return a.agentCLIManager.Abort(ctx, jobID)
 }
 
-func (a *ServiceApp) WaitForJob(ctx context.Context, jobID string) (agent.JobSnapshot, bool) {
+func (a *ServiceApp) WaitForJob(ctx context.Context, jobID string) (jobs.Snapshot, bool) {
 	if a == nil || a.jobs == nil {
-		return agent.JobSnapshot{}, false
+		return jobs.Snapshot{}, false
 	}
 	return a.jobs.Wait(ctx, jobID)
 }
 
-func (a *ServiceApp) SubscribeJob(jobID string) (agent.JobSnapshot, <-chan agent.JobEvent, func(), bool) {
+func (a *ServiceApp) SubscribeJob(jobID string) (jobs.Snapshot, <-chan jobs.Event, func(), bool) {
 	if a == nil || a.jobs == nil {
-		return agent.JobSnapshot{}, nil, nil, false
+		return jobs.Snapshot{}, nil, nil, false
 	}
 	return a.jobs.Subscribe(jobID)
 }

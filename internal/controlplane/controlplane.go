@@ -15,6 +15,7 @@ import (
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
 	intdoctor "or3-intern/internal/doctor"
+	"or3-intern/internal/jobs"
 	"or3-intern/internal/mcp"
 	"or3-intern/internal/memory"
 	"or3-intern/internal/providers"
@@ -42,7 +43,7 @@ type Service struct {
 	Config          config.Config
 	Runtime         *agent.Runtime
 	Broker          *approval.Broker
-	Jobs            *agent.JobRegistry
+	Jobs            *jobs.Registry
 	SubagentManager *agent.SubagentManager
 	DB              *db.DB
 	Provider        *providers.Client
@@ -184,7 +185,7 @@ type ScopeLinkResult struct {
 	ScopeKey   string `json:"scopeKey"`
 }
 
-func New(cfg config.Config, rt *agent.Runtime, broker *approval.Broker, jobs *agent.JobRegistry, subagentManager *agent.SubagentManager) *Service {
+func New(cfg config.Config, rt *agent.Runtime, broker *approval.Broker, jobs *jobs.Registry, subagentManager *agent.SubagentManager) *Service {
 	svc := &Service{
 		Config:          cfg,
 		Runtime:         rt,
@@ -398,13 +399,13 @@ func (s *Service) ExchangePairingCode(ctx context.Context, input approval.Pairin
 	return broker.ExchangePairingCode(ctx, input)
 }
 
-func (s *Service) GetJob(jobID string) (agent.JobSnapshot, error) {
+func (s *Service) GetJob(jobID string) (jobs.Snapshot, error) {
 	if s == nil || s.Jobs == nil {
-		return agent.JobSnapshot{}, ErrJobRegistryUnavailable
+		return jobs.Snapshot{}, ErrJobRegistryUnavailable
 	}
 	snapshot, ok := s.Jobs.Snapshot(strings.TrimSpace(jobID))
 	if !ok {
-		return agent.JobSnapshot{}, ErrJobNotFound
+		return jobs.Snapshot{}, ErrJobNotFound
 	}
 	return snapshot, nil
 }
@@ -1022,7 +1023,7 @@ func approvalBrokerRequired(cfg config.Config) bool {
 	return false
 }
 
-func BuildJobResponse(snapshot agent.JobSnapshot) map[string]any {
+func BuildJobResponse(snapshot jobs.Snapshot) map[string]any {
 	response := map[string]any{
 		"job_id": snapshot.ID,
 		"kind":   snapshot.Kind,
@@ -1044,7 +1045,7 @@ func BuildJobResponse(snapshot agent.JobSnapshot) map[string]any {
 	return response
 }
 
-func BuildJobSnapshotResponse(snapshot agent.JobSnapshot) map[string]any {
+func BuildJobSnapshotResponse(snapshot jobs.Snapshot) map[string]any {
 	response := BuildJobResponse(snapshot)
 	response["created_at"] = snapshot.CreatedAt
 	response["updated_at"] = snapshot.UpdatedAt

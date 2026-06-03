@@ -14,13 +14,14 @@ import (
 	rootchannels "or3-intern/internal/channels"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
+	"or3-intern/internal/jobs"
 	"or3-intern/internal/tools"
 )
 
 type channelApprovalHandler struct {
 	Config   config.Config
 	Runtime  *agent.Runtime
-	Jobs     *agent.JobRegistry
+	Jobs     *jobs.Registry
 	Broker   *approval.Broker
 	Channels *rootchannels.Manager
 }

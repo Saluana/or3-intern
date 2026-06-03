@@ -319,7 +319,7 @@ func (m *SubagentManager) runJob(ctx context.Context, job db.SubagentJob) (Backg
 		}
 	}
 	if m.Jobs != nil {
-		ctx = ContextWithConversationObserver(ctx, m.Jobs.Observer(job.ID))
+		ctx = ContextWithConversationObserver(ctx, JobObserverForRegistry(m.Jobs, job.ID))
 		ctx = ContextWithStreamingChannel(ctx, NullStreamer{})
 	}
 	return m.Runtime.RunBackground(ctx, BackgroundRunInput{

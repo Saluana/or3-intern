@@ -14,13 +14,14 @@ import (
 	"or3-intern/internal/compat"
 	"or3-intern/internal/providers"
 	"or3-intern/internal/tools"
+	"or3-intern/internal/turns"
 )
 
 type serviceTurnRequest struct {
 	SessionKey      string
 	Message         string
 	Model           string
-	Attachments     []agent.ChatAttachment
+	Attachments     []turns.Attachment
 	ToolPolicyMode  string
 	AllowedTools    []string
 	RestrictTools   bool
@@ -180,7 +181,7 @@ func decodeServiceTurnRequest(body io.Reader, registry *tools.Registry) (service
 		return serviceTurnRequest{}, err
 	}
 	attachments := decodeServiceAttachments(payload.Attachments)
-	if err := agent.ValidateChatAttachments(attachments); err != nil {
+	if err := turns.ValidateAttachments(attachments); err != nil {
 		return serviceTurnRequest{}, err
 	}
 	meta := cloneMapOrEmpty(payload.Meta)
@@ -472,7 +473,7 @@ func firstPositiveInt(values ...json.Number) (int, error) {
 	return 0, nil
 }
 
-func decodeServiceAttachments(raw []map[string]any) []agent.ChatAttachment {
+func decodeServiceAttachments(raw []map[string]any) []turns.Attachment {
 	if len(raw) == 0 {
 		return nil
 	}
@@ -480,7 +481,7 @@ func decodeServiceAttachments(raw []map[string]any) []agent.ChatAttachment {
 	for _, item := range raw {
 		items = append(items, item)
 	}
-	return agent.DecodeChatAttachments(items)
+	return turns.DecodeAttachments(items)
 }
 
 func cloneMapOrEmpty(in map[string]any) map[string]any {

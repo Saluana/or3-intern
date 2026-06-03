@@ -1,4 +1,4 @@
-package agent
+package turns
 
 import (
 	"encoding/json"
@@ -21,8 +21,8 @@ const (
 	maxAttachmentExcerptLen  = 1200
 )
 
-// ChatAttachment is the canonical turn attachment shape shared by app and service.
-type ChatAttachment struct {
+// Attachment is the canonical turn attachment shape shared by app and service.
+type Attachment struct {
 	ID             string `json:"id"`
 	Source         string `json:"source"`
 	Kind           string `json:"kind"`
@@ -36,22 +36,22 @@ type ChatAttachment struct {
 	ContentExcerpt string `json:"content_excerpt,omitempty"`
 }
 
-func DecodeChatAttachments(raw any) []ChatAttachment {
+func DecodeAttachments(raw any) []Attachment {
 	switch typed := raw.(type) {
-	case []ChatAttachment:
-		return append([]ChatAttachment(nil), typed...)
+	case []Attachment:
+		return append([]Attachment(nil), typed...)
 	case []any:
-		out := make([]ChatAttachment, 0, len(typed))
+		out := make([]Attachment, 0, len(typed))
 		for _, item := range typed {
-			if att, ok := decodeChatAttachment(item); ok {
+			if att, ok := decodeAttachment(item); ok {
 				out = append(out, att)
 			}
 		}
 		return out
 	case []map[string]any:
-		out := make([]ChatAttachment, 0, len(typed))
+		out := make([]Attachment, 0, len(typed))
 		for _, item := range typed {
-			if att, ok := decodeChatAttachment(item); ok {
+			if att, ok := decodeAttachment(item); ok {
 				out = append(out, att)
 			}
 		}
@@ -61,12 +61,12 @@ func DecodeChatAttachments(raw any) []ChatAttachment {
 	}
 }
 
-func decodeChatAttachment(raw any) (ChatAttachment, bool) {
+func decodeAttachment(raw any) (Attachment, bool) {
 	switch typed := raw.(type) {
-	case ChatAttachment:
-		return normalizeChatAttachment(typed), true
+	case Attachment:
+		return NormalizeAttachment(typed), true
 	case map[string]any:
-		att := ChatAttachment{
+		att := Attachment{
 			ID:             firstString(typed, "id"),
 			Source:         firstString(typed, "source"),
 			Kind:           firstString(typed, "kind"),
@@ -94,9 +94,9 @@ func decodeChatAttachment(raw any) (ChatAttachment, bool) {
 				att.Source = attachmentSourceTextBlock
 			}
 		}
-		return normalizeChatAttachment(att), att.ID != "" || att.ArtifactID != "" || att.Path != "" || att.ContentExcerpt != ""
+		return NormalizeAttachment(att), att.ID != "" || att.ArtifactID != "" || att.Path != "" || att.ContentExcerpt != ""
 	default:
-		return ChatAttachment{}, false
+		return Attachment{}, false
 	}
 }
 
@@ -109,7 +109,7 @@ func firstString(values map[string]any, keys ...string) string {
 	return ""
 }
 
-func normalizeChatAttachment(att ChatAttachment) ChatAttachment {
+func NormalizeAttachment(att Attachment) Attachment {
 	att.ID = strings.TrimSpace(att.ID)
 	att.Source = strings.TrimSpace(att.Source)
 	att.Kind = strings.TrimSpace(att.Kind)
@@ -144,7 +144,7 @@ func mimeToAttachmentKind(mime string) string {
 	}
 }
 
-func ValidateChatAttachments(atts []ChatAttachment) error {
+func ValidateAttachments(atts []Attachment) error {
 	if len(atts) > maxAttachmentCount {
 		return fmt.Errorf("too many attachments (max %d)", maxAttachmentCount)
 	}
@@ -177,24 +177,24 @@ func ValidateChatAttachments(atts []ChatAttachment) error {
 	return nil
 }
 
-func chatAttachmentsFromMeta(meta map[string]any) []ChatAttachment {
+func AttachmentsFromMeta(meta map[string]any) []Attachment {
 	if len(meta) == 0 {
 		return nil
 	}
 	if raw := meta["attachments"]; raw != nil {
-		return DecodeChatAttachments(raw)
+		return DecodeAttachments(raw)
 	}
 	return nil
 }
 
-func mergeTurnAttachments(primary []ChatAttachment, meta map[string]any) []ChatAttachment {
-	out := append([]ChatAttachment(nil), primary...)
+func MergeAttachments(primary []Attachment, meta map[string]any) []Attachment {
+	out := append([]Attachment(nil), primary...)
 	seen := map[string]struct{}{}
 	for _, att := range out {
-		seen[attachmentStableKey(att)] = struct{}{}
+		seen[AttachmentStableKey(att)] = struct{}{}
 	}
-	for _, att := range chatAttachmentsFromMeta(meta) {
-		key := attachmentStableKey(att)
+	for _, att := range AttachmentsFromMeta(meta) {
+		key := AttachmentStableKey(att)
 		if _, ok := seen[key]; ok {
 			continue
 		}
@@ -204,7 +204,7 @@ func mergeTurnAttachments(primary []ChatAttachment, meta map[string]any) []ChatA
 	return out
 }
 
-func attachmentStableKey(att ChatAttachment) string {
+func AttachmentStableKey(att Attachment) string {
 	if id := strings.TrimSpace(att.ID); id != "" {
 		return "id:" + id
 	}
@@ -217,33 +217,21 @@ func attachmentStableKey(att ChatAttachment) string {
 	return "name:" + strings.TrimSpace(att.Name)
 }
 
-func renderUserAttachmentsBody(atts []ChatAttachment) string {
+func RenderUserAttachmentsBody(atts []Attachment) string {
 	if len(atts) == 0 {
 		return ""
 	}
 	var b strings.Builder
 	b.WriteString("Use read_file for workspace_ref paths. Use read_artifact when artifact_id is present. Attachment bodies are not fully inlined.")
-	for i, att := range atts {
+	for _, att := range atts {
 		b.WriteString("\n")
-		b.WriteString(renderChatAttachmentTag(att))
-		_ = i
+		b.WriteString(RenderAttachmentTag(att))
 	}
 	return strings.TrimSpace(b.String())
 }
 
-func renderUserAttachmentsEnvelope(atts []ChatAttachment) string {
-	body := renderUserAttachmentsBody(atts)
-	if body == "" {
-		return ""
-	}
-	return renderXMLEnvelope(xmlTagUserAttachments, body, envelopeAttrs{
-		"protected": "true",
-		"volatile":  "true",
-	})
-}
-
-func renderChatAttachmentTag(att ChatAttachment) string {
-	att = normalizeChatAttachment(att)
+func RenderAttachmentTag(att Attachment) string {
+	att = NormalizeAttachment(att)
 	attrs := []string{
 		fmt.Sprintf(`source="%s"`, htmlEscapeAttr(att.Source)),
 		fmt.Sprintf(`kind="%s"`, htmlEscapeAttr(att.Kind)),
@@ -281,7 +269,7 @@ func htmlEscapeAttr(value string) string {
 	return html.EscapeString(value)
 }
 
-func chatAttachmentsToArtifactAttachments(atts []ChatAttachment) []artifacts.Attachment {
+func AttachmentsToArtifactAttachments(atts []Attachment) []artifacts.Attachment {
 	out := make([]artifacts.Attachment, 0, len(atts))
 	for _, att := range atts {
 		if art, ok := att.ToArtifactAttachment(); ok {
@@ -291,7 +279,7 @@ func chatAttachmentsToArtifactAttachments(atts []ChatAttachment) []artifacts.Att
 	return out
 }
 
-func (att ChatAttachment) ToArtifactAttachment() (artifacts.Attachment, bool) {
+func (att Attachment) ToArtifactAttachment() (artifacts.Attachment, bool) {
 	if strings.TrimSpace(att.ArtifactID) == "" {
 		return artifacts.Attachment{}, false
 	}
@@ -304,12 +292,8 @@ func (att ChatAttachment) ToArtifactAttachment() (artifacts.Attachment, bool) {
 	}, true
 }
 
-// ChatAttachmentsForMeta serializes turn attachments for message meta persistence.
-func ChatAttachmentsForMeta(atts []ChatAttachment) []map[string]any {
-	return chatAttachmentsToMeta(atts)
-}
-
-func chatAttachmentsToMeta(atts []ChatAttachment) []map[string]any {
+// AttachmentsForMeta serializes turn attachments for message meta persistence.
+func AttachmentsForMeta(atts []Attachment) []map[string]any {
 	if len(atts) == 0 {
 		return nil
 	}
@@ -325,7 +309,7 @@ func chatAttachmentsToMeta(atts []ChatAttachment) []map[string]any {
 	return out
 }
 
-func attachmentMessageRefs(atts []ChatAttachment) []string {
+func AttachmentMessageRefs(atts []Attachment) []string {
 	out := make([]string, 0, len(atts))
 	for _, att := range atts {
 		switch att.Source {
@@ -344,4 +328,38 @@ func attachmentMessageRefs(atts []ChatAttachment) []string {
 		}
 	}
 	return out
+}
+
+func payloadStringValue(v any) string {
+	switch typed := v.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	default:
+		return ""
+	}
+}
+
+func payloadInt64Value(v any) int64 {
+	switch typed := v.(type) {
+	case int64:
+		return typed
+	case int:
+		return int64(typed)
+	case float64:
+		if typed > 0 {
+			return int64(typed)
+		}
+	case json.Number:
+		n, _ := typed.Int64()
+		return n
+	}
+	return 0
+}
+
+func oneLine(s string, max int) string {
+	s = strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
+	if max > 0 && len(s) > max {
+		return strings.TrimSpace(s[:max]) + "..."
+	}
+	return s
 }

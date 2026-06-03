@@ -8,9 +8,9 @@ import (
 	"net/http"
 	"time"
 
-	"or3-intern/internal/agent"
 	"or3-intern/internal/controlplane"
 	"or3-intern/internal/db"
+	"or3-intern/internal/jobs"
 )
 
 func (s *serviceServer) persistServiceJobSummary(ctx context.Context, jobID string) {
@@ -50,12 +50,12 @@ func (s *serviceServer) writePersistedServiceJobSnapshot(w http.ResponseWriter, 
 		}
 		return false
 	}
-	var events []agent.JobEvent
+	var events []jobs.Event
 	if err := json.Unmarshal([]byte(summary.EventsJSON), &events); err != nil {
 		log.Printf("service_jobs: decode failed for job %s: %v", jobID, err)
 		return false
 	}
-	writeServiceValue(w, http.StatusOK, controlplane.BuildJobSnapshotResponse(agent.JobSnapshot{
+	writeServiceValue(w, http.StatusOK, controlplane.BuildJobSnapshotResponse(jobs.Snapshot{
 		ID:        summary.ID,
 		Kind:      summary.Kind,
 		Status:    summary.Status,

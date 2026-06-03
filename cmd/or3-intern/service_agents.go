@@ -20,6 +20,8 @@ import (
 	"or3-intern/internal/artifacts"
 	"or3-intern/internal/controlplane"
 	"or3-intern/internal/db"
+	"or3-intern/internal/jobs"
+	"or3-intern/internal/serviceerrors"
 	"or3-intern/internal/tools"
 )
 
@@ -84,7 +86,7 @@ func (s *serviceServer) runTurnJob(ctx context.Context, jobID string, req servic
 	defer s.persistServiceJobSummary(context.Background(), jobID)
 	log.Printf("service_turn: started job=%s session=%s trace=%s replay=%t", jobID, req.SessionKey, serviceMetaText(req.Meta, "trace_id"), req.ReplayToolCall != nil)
 	s.jobs.Publish(jobID, "started", serviceLifecyclePayload(req.SessionKey, req.Meta, map[string]any{"status": "running"}))
-	observer := &serviceObserver{ConversationObserver: s.jobs.Observer(jobID)}
+	observer := &serviceObserver{ConversationObserver: agent.JobObserverForRegistry(s.jobs, jobID)}
 	profileName := s.effectiveServiceProfileName(req.ProfileName)
 	var turnResult app.TurnResult
 	var err error
@@ -121,7 +123,7 @@ func (s *serviceServer) runTurnJob(ctx context.Context, jobID string, req servic
 		})
 	}
 	if err != nil {
-		log.Printf("service_turn: error job=%s session=%s trace=%s public_code=%s", jobID, req.SessionKey, serviceMetaText(req.Meta, "trace_id"), agent.PublicErrorCode(err))
+		log.Printf("service_turn: error job=%s session=%s trace=%s public_code=%s", jobID, req.SessionKey, serviceMetaText(req.Meta, "trace_id"), serviceerrors.PublicErrorCode(err))
 		s.completeTurnJobWithError(ctx, jobID, err, observer, req.SessionKey, req.Meta)
 		return
 	}
@@ -185,7 +187,7 @@ func (s *serviceServer) completeTurnJobFromRunner(ctx context.Context, jobID str
 	s.jobs.Complete(jobID, status, serviceLifecyclePayload(req.SessionKey, req.Meta, completePayload))
 }
 
-func finalTextFromJobSnapshot(snapshot agent.JobSnapshot) string {
+func finalTextFromJobSnapshot(snapshot jobs.Snapshot) string {
 	for i := len(snapshot.Events) - 1; i >= 0; i-- {
 		data := snapshot.Events[i].Data
 		if data == nil {
@@ -200,7 +202,7 @@ func finalTextFromJobSnapshot(snapshot agent.JobSnapshot) string {
 	return ""
 }
 
-func errorTextFromJobSnapshot(snapshot agent.JobSnapshot) string {
+func errorTextFromJobSnapshot(snapshot jobs.Snapshot) string {
 	for i := len(snapshot.Events) - 1; i >= 0; i-- {
 		data := snapshot.Events[i].Data
 		if data == nil {
@@ -268,7 +270,7 @@ func (s *serviceServer) runApprovedResumeJob(ctx context.Context, jobID string, 
 	}
 	log.Printf("service_approval: resume_started approval=%d job=%s session=%s", issued.Request.ID, jobID, sessionKey)
 	s.jobs.Publish(jobID, "started", serviceLifecyclePayload(sessionKey, meta, map[string]any{"status": "running"}))
-	observer := &serviceObserver{ConversationObserver: s.jobs.Observer(jobID)}
+	observer := &serviceObserver{ConversationObserver: agent.JobObserverForRegistry(s.jobs, jobID)}
 	finalText, err := s.app().ResumeApprovedRequest(ctx, app.ResumeApprovedRequest{
 		IssuedApproval: issued,
 		Capability:     tools.CapabilityLevel(s.config.Service.MaxCapability),
@@ -277,7 +279,7 @@ func (s *serviceServer) runApprovedResumeJob(ctx context.Context, jobID string, 
 		Observer:       observer,
 	})
 	if err != nil {
-		log.Printf("service_approval: resume_error approval=%d job=%s session=%s public_code=%s", issued.Request.ID, jobID, sessionKey, agent.PublicErrorCode(err))
+		log.Printf("service_approval: resume_error approval=%d job=%s session=%s public_code=%s", issued.Request.ID, jobID, sessionKey, serviceerrors.PublicErrorCode(err))
 		var approvalErr *tools.ApprovalRequiredError
 		if errors.As(err, &approvalErr) && s.deliverApprovedResumeApprovalRequired(ctx, issued.Request, approvalErr) {
 			s.completeTurnJobWithError(ctx, jobID, err, observer, sessionKey, meta)
@@ -348,9 +350,9 @@ func (s *serviceServer) deliverApprovedResumeCompletion(ctx context.Context, req
 }
 
 func approvalResumeFailureMessage(err error) string {
-	code := agent.PublicErrorCode(err)
+	code := serviceerrors.PublicErrorCode(err)
 	if code == "" {
-		code = agent.PublicErrorUnknown
+		code = serviceerrors.PublicErrorUnknown
 	}
 	return "Approval was accepted, but continuing the request failed (" + code + "). Please retry or review it in the OR3 app."
 }
@@ -723,8 +725,8 @@ func (s *serviceServer) writePersistedAgentCLIRunSnapshot(w http.ResponseWriter,
 	return true
 }
 
-func (s *serviceServer) agentCLIEventsToJobEvents(events []db.AgentCLIEvent) []agent.JobEvent {
-	out := make([]agent.JobEvent, 0, len(events))
+func (s *serviceServer) agentCLIEventsToJobEvents(events []db.AgentCLIEvent) []jobs.Event {
+	out := make([]jobs.Event, 0, len(events))
 	for _, e := range events {
 		payload := map[string]any{
 			"type":   e.Type,
@@ -740,7 +742,7 @@ func (s *serviceServer) agentCLIEventsToJobEvents(events []db.AgentCLIEvent) []a
 				}
 			}
 		}
-		out = append(out, agent.JobEvent{
+		out = append(out, jobs.Event{
 			Sequence: e.Seq,
 			Type:     e.Type,
 			Data:     payload,
@@ -767,20 +769,20 @@ func (s *serviceServer) persistedSubagentFinalText(ctx context.Context, store *d
 	return ""
 }
 
-func (s *serviceServer) persistedSubagentEvents(ctx context.Context, store *db.DB, job db.SubagentJob) []agent.JobEvent {
+func (s *serviceServer) persistedSubagentEvents(ctx context.Context, store *db.DB, job db.SubagentJob) []jobs.Event {
 	if store == nil || strings.TrimSpace(job.ChildSessionKey) == "" {
-		return []agent.JobEvent{}
+		return []jobs.Event{}
 	}
 	messages, err := store.GetLastMessages(ctx, job.ChildSessionKey, 100)
 	if err != nil {
 		log.Printf("load persisted subagent events failed: job=%s err=%v", job.ID, err)
-		return []agent.JobEvent{}
+		return []jobs.Event{}
 	}
-	events := make([]agent.JobEvent, 0)
+	events := make([]jobs.Event, 0)
 	var sequence int64
 	emit := func(eventType string, data map[string]any) {
 		sequence++
-		events = append(events, agent.JobEvent{Sequence: sequence, Type: eventType, Data: data})
+		events = append(events, jobs.Event{Sequence: sequence, Type: eventType, Data: data})
 	}
 	for _, msg := range messages {
 		payload := decodeServiceJSONMap(msg.PayloadJSON)
@@ -945,7 +947,7 @@ func (s *serviceServer) streamJobWithHeartbeat(w http.ResponseWriter, r *http.Re
 	}
 }
 
-func serviceStreamEventPayload(event agent.JobEvent) map[string]any {
+func serviceStreamEventPayload(event jobs.Event) map[string]any {
 	payload := map[string]any{}
 	for key, value := range event.Data {
 		payload[key] = value
@@ -1025,7 +1027,7 @@ func (o *serviceObserver) OnToolLifecycle(ctx context.Context, event agent.ToolL
 		o.lastToolStatus = "approval_required"
 	}
 	if event.PublicCode == "" && event.Status == "failed" {
-		event.PublicCode = agent.PublicErrorToolExecution
+		event.PublicCode = serviceerrors.PublicErrorToolExecution
 	}
 	if event.Status == "failed" && o.lastToolError == "" {
 		o.lastToolError = firstNonEmptyString(event.ResultPreview, event.Result, event.PublicCode)

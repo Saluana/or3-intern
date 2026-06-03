@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"strings"
 
-	"or3-intern/internal/agent"
 	"or3-intern/internal/agentcli"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/bus"
 	"or3-intern/internal/config"
 	"or3-intern/internal/tools"
+	"or3-intern/internal/turns"
 )
 
 // RunnerTurnRequest is the normalized input for a runner-backed chat turn.
@@ -26,7 +26,7 @@ type RunnerTurnRequest struct {
 	Mode          string
 	Isolation     string
 	Cwd           string
-	Attachments   []agent.ChatAttachment
+	Attachments   []turns.Attachment
 	Meta          map[string]any
 	ApprovalToken string
 	Actor         string
@@ -193,7 +193,7 @@ func RunnerTurnRequestFromBusEvent(cfg config.Config, ev bus.Event) RunnerTurnRe
 		if raw, ok := ev.Meta["approval_token"].(string); ok {
 			req.ApprovalToken = strings.TrimSpace(raw)
 		}
-		req.Attachments = agent.DecodeChatAttachments(ev.Meta["attachments"])
+		req.Attachments = turns.DecodeAttachments(ev.Meta["attachments"])
 	}
 	if req.RunnerID == "" {
 		req.RunnerID = string(agentcli.ResolveDefaultRunner(cfg))

@@ -15,11 +15,11 @@ import (
 	"sync"
 	"time"
 
-	"or3-intern/internal/agent"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/auth"
 	"or3-intern/internal/db"
 	or3log "or3-intern/internal/log"
+	"or3-intern/internal/serviceerrors"
 	"or3-intern/internal/tools"
 )
 
@@ -211,7 +211,7 @@ func writeServiceError(w http.ResponseWriter, r *http.Request, statusCode int, p
 		log.Printf("service %s %s: %v", r.Method, r.URL.Path, err)
 	}
 	payload := serviceErrorPayload(r, public)
-	if code := agent.PublicErrorCode(err); code != "" {
+	if code := serviceerrors.PublicErrorCode(err); code != "" {
 		payload["code"] = code
 	}
 	writeServiceJSON(w, statusCode, payload)

@@ -110,6 +110,19 @@ func TestOpenCodeNormalizeStructuredText(t *testing.T) {
 	}
 }
 
+func TestOpenCodeNormalizeStructuredReasoningText(t *testing.T) {
+	adapter := &OpenCodeAdapter{spec: RunnerSpec{Binary: "opencode"}}
+	payload := json.RawMessage(`{"type":"text","part":{"type":"text","kind":"reasoning","text":"I should keep this concise."}}`)
+	events := adapter.NormalizeChatEvent(AgentRunEvent{Type: "structured", Payload: payload, Seq: 9})
+	if len(events) != 1 {
+		t.Fatalf("expected one event, got %d", len(events))
+	}
+	if events[0].Type != "reasoning_delta" || events[0].Text != "I should keep this concise." || events[0].Seq != 9 {
+		t.Fatalf("unexpected normalized event: %#v", events[0])
+	}
+	assertPayloadField(t, events[0].Payload, "stream_kind", runtimeStreamReasoningText)
+}
+
 func TestOpenCodeNormalizeSuppressesStructuredStepEvents(t *testing.T) {
 	adapter := &OpenCodeAdapter{spec: RunnerSpec{Binary: "opencode"}}
 	payload := json.RawMessage(`{"type":"step_start","messageID":"msg_123"}`)

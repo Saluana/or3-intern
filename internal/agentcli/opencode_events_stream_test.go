@@ -109,6 +109,79 @@ func TestOpenCodeExecuteStreamsBusEvents(t *testing.T) {
 	}
 }
 
+func TestOpenCodeBusSuppressesUserTextParts(t *testing.T) {
+	state := newOpenCodeStreamState()
+	payload, ok := openCodeBusEventToStructuredPayload(map[string]any{
+		"type": "message.updated",
+		"properties": map[string]any{
+			"message": map[string]any{
+				"id":   "msg_user",
+				"role": "user",
+			},
+		},
+	}, state)
+	if ok || payload != nil {
+		t.Fatalf("message.updated should only update stream state, got ok=%v payload=%#v", ok, payload)
+	}
+
+	payload, ok = openCodeBusEventToStructuredPayload(map[string]any{
+		"type": "message.part.updated",
+		"properties": map[string]any{
+			"part": map[string]any{
+				"type":      "text",
+				"messageID": "msg_user",
+				"id":        "part_user",
+				"text":      "Bro we need to talk",
+			},
+		},
+	}, state)
+	if ok || payload != nil {
+		t.Fatalf("expected user text part to be suppressed, got ok=%v payload=%#v", ok, payload)
+	}
+	if state.streamedText.Load() {
+		t.Fatal("suppressed user text must not count as streamed assistant text")
+	}
+
+	payload, ok = openCodeBusEventToStructuredPayload(map[string]any{
+		"type": "message.part.updated",
+		"properties": map[string]any{
+			"part": map[string]any{
+				"type":      "text",
+				"messageID": "msg_assistant",
+				"role":      "assistant",
+				"id":        "part_assistant",
+				"text":      "What's up?",
+			},
+		},
+	}, state)
+	if !ok || extractString(mapField(payload, "part")["text"]) != "What's up?" {
+		t.Fatalf("expected assistant text payload, got ok=%v payload=%#v", ok, payload)
+	}
+}
+
+func TestOpenCodeBusPreservesReasoningTextPartMetadata(t *testing.T) {
+	state := newOpenCodeStreamState()
+	payload, ok := openCodeBusEventToStructuredPayload(map[string]any{
+		"type": "message.part.updated",
+		"properties": map[string]any{
+			"part": map[string]any{
+				"type": "text",
+				"role": "assistant",
+				"id":   "part_reasoning",
+				"kind": "thinking",
+				"text": "I should answer casually.",
+			},
+		},
+	}, state)
+	if !ok {
+		t.Fatal("expected reasoning text part payload")
+	}
+	part := mapField(payload, "part")
+	if extractString(part["text"]) != "I should answer casually." || stringField(part, "kind") != "thinking" {
+		t.Fatalf("expected delta text and reasoning metadata, got %#v", part)
+	}
+}
+
 func mustJSON(v any) string {
 	raw, err := json.Marshal(v)
 	if err != nil {

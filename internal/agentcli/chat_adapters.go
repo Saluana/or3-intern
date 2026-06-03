@@ -359,6 +359,14 @@ func normalizeOpenCodeStructuredChatEvent(raw AgentRunEvent) []RunnerChatEvent {
 		if !ok || text == "" {
 			return nil
 		}
+		if openCodePartIsReasoning(mapField(obj, "part")) {
+			return []RunnerChatEvent{{
+				Type:    "reasoning_delta",
+				Seq:     raw.Seq,
+				Text:    text,
+				Payload: runtimeContentDeltaPayload(runtimeStreamReasoningText, text, raw.Payload),
+			}}
+		}
 		return []RunnerChatEvent{{
 			Type:    "text_delta",
 			Seq:     raw.Seq,
@@ -700,6 +708,27 @@ func openCodeTextPart(value any) (string, bool) {
 	return text, ok
 }
 
+func openCodePartIsReasoning(part map[string]any) bool {
+	for _, value := range []string{
+		stringField(part, "kind"),
+		stringField(part, "name"),
+		stringField(part, "title"),
+		stringField(part, "stream"),
+		stringField(part, "stream_kind"),
+		stringField(part, "streamKind"),
+		stringField(mapField(part, "metadata"), "kind"),
+		stringField(mapField(part, "metadata"), "type"),
+		stringField(mapField(part, "state"), "kind"),
+		stringField(mapField(part, "state"), "type"),
+	} {
+		normalized := strings.ToLower(strings.TrimSpace(value))
+		if strings.Contains(normalized, "reasoning") || strings.Contains(normalized, "thinking") || strings.Contains(normalized, "thought") {
+			return true
+		}
+	}
+	return false
+}
+
 func extractOpenCodeAssistantText(obj map[string]any) string {
 	for _, key := range []string{"message", "content", "text"} {
 		if text, ok := obj[key].(string); ok && text != "" {
@@ -984,6 +1013,9 @@ func normalizeOpenCodePartUpdated(raw AgentRunEvent, obj map[string]any) []Runne
 		text := extractString(part["text"])
 		if text == "" {
 			return nil
+		}
+		if openCodePartIsReasoning(part) {
+			return []RunnerChatEvent{{Type: "reasoning_delta", Seq: raw.Seq, Text: text, Payload: runtimeContentDeltaPayload(runtimeStreamReasoningText, text, raw.Payload)}}
 		}
 		return []RunnerChatEvent{{Type: "text_delta", Seq: raw.Seq, Text: text, Payload: runtimeContentDeltaPayload(runtimeStreamAssistantText, text, raw.Payload)}}
 	}

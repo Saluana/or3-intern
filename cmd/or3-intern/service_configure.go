@@ -16,8 +16,6 @@ import (
 	"or3-intern/internal/approval"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
-	"or3-intern/internal/memory"
-	"or3-intern/internal/providers"
 	"or3-intern/internal/runnerfirst"
 )
 
@@ -333,9 +331,6 @@ func (s *serviceServer) applyLiveConfig(next config.Config) {
 	s.config = next
 	runnerfirst.SetEnabled(next.RunnerFirst())
 	s.applyLiveRunnerConfig(next)
-	if s.runtime != nil {
-		s.runtime.ApplyLiveModelConfig(runtimeModelConfigFromConfig(next))
-	}
 	if s.controlSvc != nil {
 		s.controlSvc.Config = next
 		s.controlSvc.Provider = newProviderClient(next)
@@ -394,27 +389,14 @@ func (s *serviceServer) applyLiveRunnerConfig(next config.Config) {
 }
 
 func (s *serviceServer) runtimeDB() *db.DB {
-	if s == nil || s.runtime == nil {
-		return nil
-	}
-	return s.runtime.DB
+	return s.serviceDB()
 }
 
 func (s *serviceServer) rebuildRunnerTurnOrchestrator(next config.Config, database *db.DB) *app.RunnerTurnOrchestrator {
 	if s == nil || s.chatManager == nil {
 		return nil
 	}
-	var mem *memory.Retriever
-	var docs *memory.DocRetriever
-	if s.runtime != nil && s.runtime.Builder != nil {
-		mem = s.runtime.Builder.Mem
-		docs = s.runtime.Builder.DocRetriever
-	}
-	var provider *providers.Client
-	if s.runtime != nil {
-		provider = s.runtime.Provider
-	}
-	return buildRunnerTurnOrchestrator(next, s.chatManager, database, mem, docs, provider)
+	return buildRunnerTurnOrchestrator(next, s.chatManager, database, s.serviceMemRetriever(), s.serviceDocRetriever(), s.serviceEmbedProvider())
 }
 
 func serviceNormalizeProviderKey(value string) string {

@@ -1,4 +1,4 @@
-// Package tools defines the shared interfaces and capability model for runtime tools.
+// Package tools defines the MCP tool interface and shared result aliases.
 package tools
 
 import (
@@ -7,21 +7,19 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"or3-intern/internal/capability"
 )
 
-// CapabilityLevel classifies the trust required to invoke a tool.
-type CapabilityLevel string
+type CapabilityLevel = capability.Level
 
 const (
-	// CapabilitySafe covers tools that do not require elevated approval.
-	CapabilitySafe CapabilityLevel = "safe"
-	// CapabilityGuarded covers tools that may need policy checks.
-	CapabilityGuarded CapabilityLevel = "guarded"
-	// CapabilityPrivileged covers tools reserved for elevated execution.
-	CapabilityPrivileged CapabilityLevel = "privileged"
+	CapabilitySafe       = capability.CapabilitySafe
+	CapabilityGuarded    = capability.CapabilityGuarded
+	CapabilityPrivileged = capability.CapabilityPrivileged
 )
 
-// Tool is the runtime interface implemented by all callable tools.
+// Tool is implemented by MCP remote tools.
 type Tool interface {
 	Name() string
 	Description() string
@@ -30,28 +28,22 @@ type Tool interface {
 	Schema() map[string]any
 }
 
-// CapabilityReporter reports a static capability level for a tool.
 type CapabilityReporter interface {
 	Capability() CapabilityLevel
 }
 
-// CapabilityForParamsReporter reports a capability level for specific params.
 type CapabilityForParamsReporter interface {
 	CapabilityForParams(params map[string]any) CapabilityLevel
 }
 
-// CapabilityForContextParamsReporter reports a context-aware capability level.
 type CapabilityForContextParamsReporter interface {
 	CapabilityForContextParams(ctx context.Context, params map[string]any) CapabilityLevel
 }
 
-// ToolCapability returns the effective capability level for t and params.
 func ToolCapability(t Tool, params map[string]any) CapabilityLevel {
 	return ToolCapabilityForContext(context.Background(), t, params)
 }
 
-// ToolCapabilityForContext returns the effective capability level for t and params
-// using request context when a tool has source-specific capability behavior.
 func ToolCapabilityForContext(ctx context.Context, t Tool, params map[string]any) CapabilityLevel {
 	if t == nil {
 		return CapabilityPrivileged
@@ -74,10 +66,8 @@ func ToolCapabilityForContext(ctx context.Context, t Tool, params map[string]any
 	return CapabilitySafe
 }
 
-// Base provides common schema helpers for tool implementations.
 type Base struct{}
 
-// SchemaFor builds a function-style tool schema.
 func (Base) SchemaFor(name, desc string, params map[string]any) map[string]any {
 	return map[string]any{
 		"type": "function",

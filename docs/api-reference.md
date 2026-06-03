@@ -1,6 +1,6 @@
 # Internal service REST / HTTP API reference
 
-> **Runner-first:** When `agentCLI.enabled` is true (default for new installs), foreground chat, channels, and most automation use **external runners** (OpenCode, Codex, Claude Code, Gemini CLI). Legacy built-in tool-loop endpoints (`POST /internal/v1/turns`, `POST /internal/v1/subagents`) remain for compatibility but are not the primary execution path. See [Migration: runner-first](migration-runner-first.md) and [Runner chat endpoints](v1/architecture/service-api/runner-chat-endpoints.md).
+> **Runner-first:** When `agentCLI.enabled` is true (default for new installs), foreground chat, channels, and automation use **external runners** (OpenCode, Codex, Claude Code, Gemini CLI). Legacy built-in endpoints `POST /internal/v1/turns` and `POST /internal/v1/subagents` return **410 Gone** with migration guidance. See [Migration: runner-first](migration-runner-first.md) and [Runner chat endpoints](v1/architecture/service-api/runner-chat-endpoints.md).
 
 This page documents the authenticated machine-facing REST / HTTP API exposed by:
 
@@ -10,7 +10,7 @@ go run ./cmd/or3-intern service
 
 ## Intended use
 
-`or3-intern service` is a loopback/private-network API intended for integrations such as OR3 Net and the OR3 App. In runner-first mode it exposes runner discovery, runner chat turns, agent CLI jobs, cron, configure, files, and approvals. The legacy built-in tool loop and subagent manager remain available only when `agentCLI.enabled` is false.
+`or3-intern service` is a loopback/private-network API intended for integrations such as OR3 Net and the OR3 App. In runner-first mode it exposes runner discovery, runner chat turns, agent CLI jobs, runner memory bridge, cron, configure, files, and approvals.
 
 Command boundary:
 
@@ -114,8 +114,12 @@ Auth policy challenges keep their uppercase challenge codes (`SESSION_REQUIRED`,
 | --- | --- | --- | --- |
 | `GET` | `/internal/v1/chat-runners` | Admin or Operator | List chat-selectable external runners and service default runner. |
 | `POST` | `/internal/v1/chat/turns` | Admin or Operator | Submit a foreground turn through an external runner (primary chat path). |
-| `POST` | `/internal/v1/turns` | Admin or Operator | **Legacy:** built-in tool-loop turn (compatibility; prefer runner chat). |
-| `POST` | `/internal/v1/subagents` | Admin or Operator | **Legacy:** queue built-in subagent job (disabled when runner-first gates apply). |
+| `POST` | `/internal/v1/turns` | Admin or Operator | **Removed:** returns `410 Gone`; use runner chat. |
+| `POST` | `/internal/v1/subagents` | Admin or Operator | **Removed:** returns `410 Gone` for creation; `GET` lists historical rows. |
+| `POST` | `/internal/v1/runner-memory/search` | Operator | Search scoped memory for a session. |
+| `POST` | `/internal/v1/runner-memory/notes` | Operator | Add a durable memory note. |
+| `GET` | `/internal/v1/runner-memory/pinned` | Operator | Read pinned memory for a session. |
+| `POST` | `/internal/v1/runner-memory/pinned` | Operator | Set pinned memory for a session. |
 | `GET` | `/internal/v1/jobs/{jobId}` | Admin or Operator | Fetch current job snapshot. |
 | `GET` | `/internal/v1/jobs/{jobId}/stream` | Admin or Operator | Attach to live SSE lifecycle stream. |
 | `POST` | `/internal/v1/jobs/{jobId}/abort` | Admin or Operator | Request cancellation. |
@@ -197,54 +201,17 @@ Submits a foreground chat turn through an external runner (OpenCode native sessi
 
 See [Runner chat endpoints](v1/architecture/service-api/runner-chat-endpoints.md) for request fields, SSE behavior, and session metadata.
 
-### `POST /internal/v1/turns` (legacy)
+### `POST /internal/v1/turns` (removed)
 
-> **Runner-first:** Prefer `POST /internal/v1/chat/turns` with a selectable runner. This endpoint runs the deprecated built-in provider tool loop.
+Returns **410 Gone**. Use runner chat (`POST /internal/v1/runner-chat/sessions/{id}/turns` or `POST /internal/v1/chat/turns`).
 
-Submits a legacy foreground turn through the built-in runtime.
+### Runner memory bridge
 
-Behavior:
-
-- returns Server-Sent Events when the request sends `Accept: text/event-stream`
-- otherwise waits for completion and returns JSON
-- includes `X-Or3-Job-Id` on both JSON and SSE responses so clients can persist the turn job ID immediately
-- `X-Request-Id`, `X-Workspace-Id`, and `X-Network-Session-Id` headers are propagated into request/job lifecycle metadata
-- `X-Approval-Token` and `X-Or3-Approval-Token` are accepted as approval-token header aliases
-
-Request fields:
-
-- canonical: `session_key`, `message`, optional `tool_policy`, `meta`, `profile_name`
-- compatibility aliases also accepted: `intern_session_key`, `allowed_tools`, and the SDK camelCase forms (`sessionKey`, `internSessionKey`, `allowedTools`, `profileName`)
-
-Session identity contract:
-
-- `session_key` is the canonical `or3-intern` execution identity for turns, memory, and persisted messages.
-- `or3-net` may bind its own durable `network_session_id` to a `session_key`, but that binding remains external to `or3-intern`; the service accepts it only as metadata/header context and does not replace `session_key` with it.
-- if `or3-intern` needs a logical grouping across multiple physical session keys, it uses `session_links.scope_key`; it does not rename the execution-session field.
-- aliases are accepted only at the HTTP ingress layer and are normalized immediately to `session_key` before runtime execution.
-
-`tool_policy` uses the OR3 Net shape:
-
-```json
-{
-  "mode": "allow_all | deny_all | allow_list | deny_list",
-  "allowed_tools": ["read_file"],
-  "blocked_tools": ["exec"]
-}
-```
-
-Synchronous JSON response shape:
-
-```json
-{
-  "job_id": "job_123",
-  "kind": "turn",
-  "status": "completed",
-  "final_text": "hello"
-}
-```
-
-If the turn fails, the same response includes `error` and typically returns `502`.
+| Method | Path | Notes |
+| --- | --- | --- |
+| `POST` | `/internal/v1/runner-memory/search` | `session_key`, `query`, optional `topK` |
+| `POST` | `/internal/v1/runner-memory/notes` | durable note; audited |
+| `GET` / `POST` | `/internal/v1/runner-memory/pinned` | read or set pinned memory |
 
 ### MCP server management
 
@@ -293,34 +260,9 @@ MCP management routes require operator access and write the primary config file.
 
 `POST /internal/v1/mcp/servers/{name}/test` creates a temporary MCP manager for the saved server config, connects once, reports discovered tools, and closes the manager. It does not hot-reload the runtime manager.
 
-### `POST /internal/v1/subagents` (legacy)
+### `POST /internal/v1/subagents` (removed)
 
-> **Runner-first:** New background work should use `POST /internal/v1/agent-runs` (agent CLI) instead. This endpoint is rejected for new subagent jobs when runner-first store gates are active.
-
-Queues a legacy background subagent job through the built-in subagent manager.
-
-Request fields:
-
-- canonical: `parent_session_key`, `task`, optional `prompt_snapshot`, `tool_policy`, `timeout_seconds`, `meta`, `profile_name`, `channel`, `reply_to`
-- compatibility aliases also accepted: `session_key`, `intern_session_key`, `allowed_tools`, `timeout`, and the SDK camelCase forms (`parentSessionKey`, `sessionKey`, `internSessionKey`, `promptSnapshot`, `allowedTools`, `timeoutSeconds`, `profileName`, `replyTo`)
-
-Parent session contract:
-
-- `parent_session_key` is the canonical parent execution identity for subagent work.
-- ingress aliases (`session_key`, `intern_session_key`, `parentSessionKey`, `sessionKey`, `internSessionKey`) are compatibility shims only; they normalize to `parent_session_key` and are not used internally after decoding.
-- provider-owned metadata such as `request_id`, `workspace_id`, and `network_session_id` may accompany the request, but they do not supersede `parent_session_key`.
-
-Accepted response shape:
-
-```json
-{
-  "job_id": "job_123",
-  "child_session_key": "subagent:abc",
-  "status": "queued"
-}
-```
-
-When the subagent queue is full, the route returns `429`.
+Returns **410 Gone** for new jobs. Use `POST /internal/v1/agent-runs` for background runner work. `GET /internal/v1/subagents` still returns historical rows for Activity views.
 
 ### External Agent CLI Delegation
 
@@ -1028,17 +970,7 @@ Fixture-pinned request and response shapes live in `cmd/or3-intern/testdata/serv
   - subagent requests normalize `parent_session_key`, `session_key`, `intern_session_key`, `parentSessionKey`, `sessionKey`, `internSessionKey` → `parent_session_key`
   - no internal package should introduce new aliases such as `session_id` for these service contracts without an explicit compatibility test update.
 
-**`POST /internal/v1/turns` — session key aliases** (all resolve to `session_key`):
-`session_key`, `intern_session_key`, `sessionKey`, `internSessionKey`
-
-**`POST /internal/v1/turns` — tool policy aliases**:
-`tool_policy` / `toolPolicy`; `allowed_tools` / `allowedTools`; `blocked_tools` / `blockedTools`
-
-**`POST /internal/v1/subagents` — parent session key aliases** (all resolve to `parent_session_key`):
-`parent_session_key`, `session_key`, `intern_session_key`, `parentSessionKey`, `sessionKey`, `internSessionKey`
-
-**`POST /internal/v1/subagents` — timeout aliases** (all resolve to `timeout_seconds`):
-`timeout_seconds`, `timeoutSeconds`, `timeout`
+**Removed routes:** `POST /internal/v1/turns` and `POST /internal/v1/subagents` return **410 Gone** (no alias normalization). Use runner chat and `POST /internal/v1/agent-runs` instead.
 
 **Stable job routes:**
 - `GET /internal/v1/jobs/{jobId}/stream` — returns 404 for unknown jobs

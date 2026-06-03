@@ -588,10 +588,11 @@ func (s *serviceServer) handleSecureConnectionSessionAction(w http.ResponseWrite
 }
 
 func (s *serviceServer) auditSecureConnection(ctx context.Context, eventType, sessionID, actor string, payload map[string]any) {
-	if s == nil || s.runtime == nil || s.runtime.Audit == nil {
+	audit := s.serviceAudit()
+	if s == nil || audit == nil {
 		return
 	}
-	_ = s.runtime.Audit.Record(ctx, eventType, sessionID, actor, payload)
+	_ = audit.Record(ctx, eventType, sessionID, actor, payload)
 }
 
 func validatePairingIntentTTL(ttlSeconds int) time.Duration {

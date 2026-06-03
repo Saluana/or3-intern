@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"or3-intern/internal/agent"
+	"or3-intern/internal/streaming"
 )
 
 func TestDeliver_Basic(t *testing.T) {
@@ -176,7 +176,7 @@ func TestDeliver_BridgeEmitsSessionResetMsg(t *testing.T) {
 	bridge := newBubbleChatBridge()
 	d := Deliverer{}
 	d.SetBridge(bridge)
-	ctx := agent.ContextWithConversationAction(agent.ContextWithConversationSession(context.Background(), "ops:review"), agent.ConversationActionSessionReset)
+	ctx := streaming.ContextWithConversationAction(streaming.ContextWithConversationSession(context.Background(), "ops:review"), streaming.ConversationActionSessionReset)
 
 	if err := d.Deliver(ctx, "cli", "user", "New session started."); err != nil {
 		t.Fatalf("Deliver: %v", err)

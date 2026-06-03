@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"or3-intern/internal/agent"
+	"or3-intern/internal/jobs"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
 )
@@ -357,7 +357,7 @@ func TestManagerAbortDispatchesNativeRuntimes(t *testing.T) {
 	runtime := &fakeRuntime{id: RunnerOpenCode}
 	registry := &RunnerRuntimeRegistry{}
 	registry.Register(runtime)
-	manager := &Manager{DB: database, Jobs: agent.NewJobRegistry(time.Minute, 1024), Runtimes: registry}
+	manager := &Manager{DB: database, Jobs: jobs.NewRegistry(time.Minute, 1024), Runtimes: registry}
 	_ = manager.Abort(context.Background(), "job_123")
 	if len(runtime.aborted) != 1 || runtime.aborted[0] != "job_123" {
 		t.Fatalf("runtime aborts = %+v, want job_123", runtime.aborted)

@@ -19,6 +19,7 @@ import (
 	"or3-intern/internal/configmeta"
 	"or3-intern/internal/db"
 	"or3-intern/internal/doctor"
+	"or3-intern/internal/doctoradmin"
 	"or3-intern/internal/skilldiag"
 	"or3-intern/internal/tools"
 )
@@ -63,20 +64,26 @@ func (t doctorServiceTool) Execute(ctx context.Context, params map[string]any) (
 	return t.run(ctx, params)
 }
 
-func (s *serviceServer) registerDoctorAdminBrainTools() {
-	if s == nil || s.runtime == nil {
+func (s *serviceServer) ensureDoctorAdminRegistry() {
+	if s == nil || s.doctorAdmin != nil {
 		return
 	}
-	if s.runtime.Tools == nil {
-		s.runtime.Tools = tools.NewRegistry()
-	}
+	s.doctorAdmin = doctoradmin.NewRegistry()
 	for _, tool := range s.doctorAdminBrainTools() {
-		s.runtime.Tools.Register(tool)
+		s.doctorAdmin.Register(doctoradmin.Action{
+			Name:        tool.name,
+			Description: tool.desc,
+			Run:         tool.run,
+		})
 	}
 }
 
-func (s *serviceServer) doctorAdminBrainTools() []tools.Tool {
-	return []tools.Tool{
+func (s *serviceServer) registerDoctorAdminBrainTools() {
+	s.ensureDoctorAdminRegistry()
+}
+
+func (s *serviceServer) doctorAdminBrainTools() []doctorServiceTool {
+	return []doctorServiceTool{
 		doctorServiceTool{
 			server: s,
 			name:   doctorToolNameStatus,
@@ -711,7 +718,12 @@ func doctorDocsV1Dir(extraRoots ...string) (string, error) {
 				break
 			}
 			seen[dir] = struct{}{}
-			for _, rel := range []string{filepath.Join("docs", "v1"), filepath.Join("or3-intern", "docs", "v1")} {
+			for _, rel := range []string{
+				filepath.Join("docs", "v1"),
+				filepath.Join("docs", "archive", "v1"),
+				filepath.Join("or3-intern", "docs", "v1"),
+				filepath.Join("or3-intern", "docs", "archive", "v1"),
+			} {
 				candidate := filepath.Join(dir, rel)
 				if info, statErr := os.Stat(candidate); statErr == nil && info.IsDir() {
 					return candidate, nil
@@ -723,7 +735,7 @@ func doctorDocsV1Dir(extraRoots ...string) (string, error) {
 			}
 		}
 	}
-	return "", fmt.Errorf("docs/v1 not found from %s", strings.Join(seedDirs, ", "))
+	return "", fmt.Errorf("docs archive/v1 not found from %s", strings.Join(seedDirs, ", "))
 }
 
 func doctorSearchTerms(query string) []string {

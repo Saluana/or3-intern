@@ -10,7 +10,6 @@ import (
 	"or3-intern/internal/approval"
 	"or3-intern/internal/config"
 	"or3-intern/internal/skills"
-	"or3-intern/internal/tools"
 )
 
 type serviceSkillItem struct {
@@ -147,13 +146,7 @@ func (s *serviceServer) serviceSkillsInventory(ctx context.Context, cfg config.C
 }
 
 func (s *serviceServer) serviceAvailableToolNames(ctx context.Context, cfg config.Config) map[string]struct{} {
-	toolNames := filterAdvertisedToolNames(cfg, availableToolNames(cfg.Cron.Enabled, cfg.Subagents.Enabled))
-	if s.runtime != nil && s.runtime.Tools != nil {
-		for _, name := range s.runtime.Tools.Names() {
-			toolNames[name] = struct{}{}
-		}
-	}
-	return toolNames
+	return filterAdvertisedToolNames(cfg, availableToolNames(cfg.Cron.Enabled, false))
 }
 
 func (s *serviceServer) serviceBundledSkillsDir() string {
@@ -164,24 +157,7 @@ func (s *serviceServer) serviceBundledSkillsDir() string {
 	return filepath.Join(filepath.Dir(cfgPath), "builtin_skills")
 }
 
-func (s *serviceServer) applyServiceSkillsInventory(inv skills.Inventory) {
-	if s.runtime == nil || s.runtime.Builder == nil {
-		return
-	}
-	s.runtime.Builder.Skills = inv
-	if s.runtime.Tools == nil {
-		return
-	}
-	if tool, ok := s.runtime.Tools.Get("read_skill").(*tools.ReadSkill); ok {
-		tool.Inventory = &s.runtime.Builder.Skills
-	}
-	if tool, ok := s.runtime.Tools.Get("run_skill").(*tools.RunSkill); ok {
-		tool.Inventory = &s.runtime.Builder.Skills
-	}
-	if tool, ok := s.runtime.Tools.Get("run_skill_script").(*tools.RunSkillScript); ok {
-		tool.Inventory = &s.runtime.Builder.Skills
-	}
-}
+func (s *serviceServer) applyServiceSkillsInventory(_ skills.Inventory) {}
 
 func serviceSkillRoots(cfg config.Config) []serviceSkillRoot {
 	roots := buildSkillRoots(cfg, "")

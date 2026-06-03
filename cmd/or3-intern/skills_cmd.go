@@ -9,7 +9,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"or3-intern/internal/clawhub"
@@ -516,39 +515,9 @@ func resolveInstallRoot(cfg config.Config) string {
 }
 
 func availableToolNames(includeCron, includeSubagents bool) map[string]struct{} {
-	names := []string{
-		"exec",
-		"read_file",
-		"search_file",
-		"read_artifact",
-		"write_file",
-		"edit_file",
-		"list_dir",
-		"web_fetch",
-		"web_fetch_markdown",
-		"web_search",
-		"memory_set_pinned",
-		"memory_add_note",
-		"memory_search",
-		"memory_recent",
-		"memory_get_pinned",
-		"send_message",
-		"read_skill",
-		"run_skill",
-		"run_skill_script",
-	}
-	if includeCron {
-		names = append(names, "cron")
-	}
-	if includeSubagents {
-		names = append(names, "spawn_subagent")
-	}
-	sort.Strings(names)
-	out := make(map[string]struct{}, len(names))
-	for _, name := range names {
-		out[name] = struct{}{}
-	}
-	return out
+	_ = includeCron
+	_ = includeSubagents
+	return map[string]struct{}{}
 }
 
 func newClawHubClient(cfg config.Config) *clawhub.Client {

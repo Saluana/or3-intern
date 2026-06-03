@@ -1,18 +1,22 @@
 package main
 
 import (
+	"or3-intern/internal/requestctx"
 	"context"
 	"fmt"
 	"log"
 	"strings"
 
 	"or3-intern/internal/adminflow"
-	"or3-intern/internal/agent"
 	"or3-intern/internal/agentcli"
-	"or3-intern/internal/app"
 	"or3-intern/internal/approval"
+	"or3-intern/internal/config"
 	"or3-intern/internal/db"
+	"or3-intern/internal/doctoradmin"
+	"or3-intern/internal/doctorbrain"
+	"or3-intern/internal/jobs"
 	"or3-intern/internal/serviceerrors"
+	"or3-intern/internal/streaming"
 	"or3-intern/internal/tools"
 )
 
@@ -51,13 +55,13 @@ func doctorShouldUseInternalAdminBrain(meta db.ChatSessionMeta, provider adminfl
 	return false
 }
 
-func doctorAdminBrainAllowedTools(reg *tools.Registry) []string {
-	if reg == nil {
+func doctorAdminBrainAllowedTools(admin *doctoradmin.Registry) []string {
+	if admin == nil {
 		return nil
 	}
 	allowed := make([]string, 0, len(doctorAdminBrainAllowedToolNames))
 	for _, name := range doctorAdminBrainAllowedToolNames {
-		if reg.Get(name) == nil {
+		if !admin.Has(name) {
 			continue
 		}
 		allowed = append(allowed, name)
@@ -84,8 +88,8 @@ func doctorInternalAdminBrainTurnMeta(content string) map[string]any {
 }
 
 func (s *serviceServer) startDoctorInternalAdminBrainTurn(ctx context.Context, sessionKey, content, model, approvalToken string, identity serviceAuthIdentity) (string, error) {
-	if s == nil || s.runtime == nil || s.jobs == nil {
-		return "", fmt.Errorf("runtime unavailable")
+	if s == nil || s.jobs == nil || s.doctorAdmin == nil {
+		return "", fmt.Errorf("doctor admin brain unavailable")
 	}
 	req := doctorInternalAdminBrainTurnRequest{
 		sessionKey:    strings.TrimSpace(sessionKey),
@@ -119,7 +123,7 @@ func (s *serviceServer) runDoctorInternalAdminBrainJob(ctx context.Context, jobI
 	defer s.persistServiceJobSummary(context.Background(), jobID)
 	meta := doctorInternalAdminBrainTurnMeta(req.content)
 	s.jobs.Publish(jobID, "started", serviceLifecyclePayload(req.sessionKey, meta, map[string]any{"status": "running"}))
-	observer := &serviceObserver{ConversationObserver: agent.JobObserverForRegistry(s.jobs, jobID)}
+	observer := &serviceObserver{ConversationObserver: jobs.ObserverForRegistry(s.jobs, jobID)}
 	if err := s.runDoctorInternalAdminBrainTurnWithObserver(ctx, req, observer); err != nil {
 		s.completeTurnJobWithError(ctx, jobID, err, observer, req.sessionKey, meta)
 		return
@@ -157,7 +161,7 @@ func (s *serviceServer) runDoctorApprovedQuotaResumeJob(ctx context.Context, job
 	}
 	log.Printf("service_approval: doctor_quota_resume_started approval=%d job=%s session=%s", issued.Request.ID, jobID, sessionKey)
 	s.jobs.Publish(jobID, "started", serviceLifecyclePayload(sessionKey, meta, map[string]any{"status": "running"}))
-	observer := &serviceObserver{ConversationObserver: agent.JobObserverForRegistry(s.jobs, jobID)}
+	observer := &serviceObserver{ConversationObserver: jobs.ObserverForRegistry(s.jobs, jobID)}
 	err := s.runDoctorInternalAdminBrainTurnWithObserver(ctx, doctorInternalAdminBrainTurnRequest{
 		sessionKey:    sessionKey,
 		content:       doctorApprovedQuotaContinuationPrompt(),
@@ -179,27 +183,46 @@ func (s *serviceServer) runDoctorApprovedQuotaResumeJob(ctx context.Context, job
 	log.Printf("service_approval: doctor_quota_resume_completed approval=%d job=%s session=%s recovered_empty=%t", issued.Request.ID, jobID, sessionKey, recoveredEmpty)
 }
 
-func (s *serviceServer) runDoctorInternalAdminBrainTurnWithObserver(ctx context.Context, req doctorInternalAdminBrainTurnRequest, observer *serviceObserver) error {
-	if s == nil || s.runtime == nil {
-		return fmt.Errorf("runtime unavailable")
+func (s *serviceServer) doctorBrainModel(model string) string {
+	if trimmed := strings.TrimSpace(model); trimmed != "" {
+		return trimmed
 	}
-	allowedTools := doctorAdminBrainAllowedTools(s.runtime.Tools)
-	toolBudget := agent.DoctorAdminBrainToolBudget()
-	_, err := s.app().RunTurn(ctx, app.TurnRequest{
-		SessionKey:          req.sessionKey,
-		Message:             req.content,
-		SystemPrompt:        s.buildDoctorAdminBrainContext(ctx),
-		Meta:                doctorInternalAdminBrainTurnMeta(req.content),
-		AllowedTools:        allowedTools,
-		RestrictTools:       true,
-		Capability:          tools.CapabilityLevel(s.config.Service.MaxCapability),
-		ApprovalToken:       req.approvalToken,
-		Actor:               strings.TrimSpace(req.identity.Actor),
-		Role:                strings.TrimSpace(req.identity.Role),
-		Observer:            observer,
-		Streamer:            agent.NullStreamer{},
-		ProfileName:         "",
-		ToolBudgetOverrides: &toolBudget,
-	})
-	return err
+	chatRole := s.config.ModelRole(config.ModelRoleChat)
+	if trimmed := strings.TrimSpace(chatRole.Primary.Model); trimmed != "" {
+		return trimmed
+	}
+	return strings.TrimSpace(s.config.Provider.Model)
+}
+
+func (s *serviceServer) runDoctorInternalAdminBrainTurnWithObserver(ctx context.Context, req doctorInternalAdminBrainTurnRequest, observer *serviceObserver) error {
+	if s == nil || s.doctorAdmin == nil {
+		return fmt.Errorf("doctor admin brain unavailable")
+	}
+	prov := newProviderClient(s.config)
+	if prov == nil {
+		return fmt.Errorf("provider not configured")
+	}
+	runCtx := requestctx.ContextWithRequestSource(ctx, requestctx.RequestSourceService)
+	runCtx = requestctx.ContextWithSession(runCtx, req.sessionKey)
+	runCtx = requestctx.ContextWithApprovalToken(runCtx, req.approvalToken)
+	runCtx = requestctx.ContextWithRequesterIdentity(runCtx, strings.TrimSpace(req.identity.Actor), strings.TrimSpace(req.identity.Role))
+	runCtx = requestctx.ContextWithCapabilityCeiling(runCtx, tools.CapabilityLevel(s.config.Service.MaxCapability))
+	var streamObserver streaming.ConversationObserver
+	if observer != nil {
+		streamObserver = observer
+	}
+	chatRole := s.config.ModelRole(config.ModelRoleChat)
+	return doctorbrain.ExecuteTurn(runCtx, doctorbrain.Config{
+		DB:           s.serviceDB(),
+		Provider:     prov,
+		Model:        s.doctorBrainModel(req.model),
+		Temperature:  roleTemperatureOrDefault(chatRole, s.config.Provider.Temperature),
+		Admin:        s.doctorAdmin,
+		Allowed:      doctorAdminBrainAllowedTools(s.doctorAdmin),
+		MaxToolBytes: s.config.MaxToolBytes,
+	}, doctorbrain.TurnInput{
+		SessionKey:   req.sessionKey,
+		SystemPrompt: s.buildDoctorAdminBrainContext(ctx),
+		UserMessage:  req.content,
+	}, streamObserver)
 }

@@ -13,11 +13,10 @@ import (
 	"testing"
 	"time"
 
-	"or3-intern/internal/agent"
 	"or3-intern/internal/agentcli"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
-	"or3-intern/internal/tools"
+	"or3-intern/internal/jobs"
 )
 
 type runnerChatServiceFixture struct {
@@ -31,15 +30,10 @@ type runnerChatServiceFixture struct {
 func newRunnerChatServiceFixture(t *testing.T, cfg config.Config, database *db.DB, agentManager *agentcli.Manager, chatManager *agentcli.ChatManager) *runnerChatServiceFixture {
 	t.Helper()
 	secret := strings.Repeat("r", 32)
-	runtime := &agent.Runtime{
-		DB:      database,
-		Tools:   tools.NewRegistry(),
-		Builder: &agent.Builder{DB: database, HistoryMax: 10},
-	}
 	server := &serviceServer{
 		config:          cfg,
-		runtime:         runtime,
-		jobs:            agent.NewJobRegistry(time.Minute, 32),
+		database:        database,
+		jobs:            jobs.NewRegistry(time.Minute, 32),
 		agentCLIManager: agentManager,
 		chatManager:     chatManager,
 	}
@@ -378,7 +372,7 @@ func TestServiceRunnerChat_DisabledWriteAndUnsupportedNative(t *testing.T) {
 			}
 		}
 		registry := agentcli.NewRunnerRegistry(specs, []agentcli.RunnerAdapter{agentcli.NewCodexAdapter()})
-		jobs := agent.NewJobRegistry(time.Minute, 32)
+		jobs := jobs.NewRegistry(time.Minute, 32)
 		manager := &agentcli.Manager{DB: database, Jobs: jobs, Cfg: cfg.AgentCLI, Registry: registry}
 		chatManager := &agentcli.ChatManager{DB: database, Manager: manager, Jobs: jobs}
 		fixture := newRunnerChatServiceFixture(t, cfg, database, manager, chatManager)
@@ -409,7 +403,7 @@ func TestServiceRunnerChat_ActiveTurnConflictAndAbort(t *testing.T) {
 	cfg := config.Default()
 	cfg.AgentCLI.Enabled = true
 	registry := newDiscoveryRegistry()
-	jobs := agent.NewJobRegistry(time.Minute, 32)
+	jobs := jobs.NewRegistry(time.Minute, 32)
 	manager := &agentcli.Manager{DB: database, Jobs: jobs, Cfg: cfg.AgentCLI, Registry: registry}
 	chatManager := &agentcli.ChatManager{DB: database, Manager: manager, Jobs: jobs}
 	fixture := newRunnerChatServiceFixture(t, cfg, database, manager, chatManager)

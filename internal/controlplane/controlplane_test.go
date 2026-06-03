@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"or3-intern/internal/agent"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
@@ -79,7 +78,7 @@ func TestCollectCapabilitiesReportWithMCPDetails(t *testing.T) {
 func TestServiceCancelApproval(t *testing.T) {
 	now := time.Unix(1_700_000_100, 0)
 	broker := testBroker(t, nil, now)
-	cp := New(config.Config{}, nil, broker, nil, nil)
+	cp := New(config.Config{}, nil, nil, nil, broker, nil)
 	decision, err := broker.EvaluateExec(context.Background(), approval.ExecEvaluation{
 		ExecutablePath: "/bin/echo",
 		Argv:           []string{"hello"},
@@ -106,7 +105,7 @@ func TestServiceExpireApprovals(t *testing.T) {
 	broker := testBroker(t, func(cfg *config.ApprovalConfig) {
 		cfg.PendingTTLSeconds = 1
 	}, now)
-	cp := New(config.Config{}, nil, broker, nil, nil)
+	cp := New(config.Config{}, nil, nil, nil, broker, nil)
 	decision, err := broker.EvaluateExec(context.Background(), approval.ExecEvaluation{
 		ExecutablePath: "/bin/echo",
 		Argv:           []string{"hello"},
@@ -136,7 +135,7 @@ func TestServiceExpireApprovals(t *testing.T) {
 func TestServiceListApprovalRequestsFilteredByType(t *testing.T) {
 	now := time.Unix(1_700_000_100, 0)
 	broker := testBroker(t, nil, now)
-	cp := New(config.Config{}, nil, broker, nil, nil)
+	cp := New(config.Config{}, nil, nil, nil, broker, nil)
 	if _, err := broker.EvaluateExec(context.Background(), approval.ExecEvaluation{
 		ExecutablePath: "/bin/echo",
 		Argv:           []string{"hello"},
@@ -160,14 +159,14 @@ func TestServiceListApprovalRequestsFilteredByType(t *testing.T) {
 func TestServiceHealthAndReadiness(t *testing.T) {
 	cfg := config.Default()
 	cfg.Service.Secret = "secret"
-	report := New(cfg, nil, nil, nil, nil).GetHealth()
+	report := New(cfg, nil, nil, nil, nil, nil).GetHealth()
 	if report.Status != "degraded" || report.RuntimeAvailable {
 		t.Fatalf("unexpected health report: %#v", report)
 	}
 	if report.ProcessID != os.Getpid() || strings.TrimSpace(report.StartedAt) == "" {
 		t.Fatalf("expected process identity in health report, got %#v", report)
 	}
-	readiness := New(cfg, nil, nil, nil, nil).GetReadiness()
+	readiness := New(cfg, nil, nil, nil, nil, nil).GetReadiness()
 	if readiness.Status == "" || len(readiness.Findings) == 0 {
 		t.Fatalf("expected readiness findings, got %#v", readiness)
 	}
@@ -288,10 +287,9 @@ func TestServiceAuditStatusAndVerify(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = database.Close() })
 	audit := &security.AuditLogger{DB: database, Key: []byte(strings.Repeat("k", 32)), Strict: true}
-	rt := &agent.Runtime{DB: database, Audit: audit}
 	cfg := config.Default()
 	cfg.Security.Audit.Enabled = true
-	cp := New(cfg, rt, nil, nil, nil)
+	cp := New(cfg, database, nil, audit, nil, nil)
 	if err := audit.Record(context.Background(), "tool.execute", "sess-1", "cli", map[string]any{"tool": "exec"}); err != nil {
 		t.Fatalf("Record: %v", err)
 	}

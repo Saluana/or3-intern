@@ -1,6 +1,7 @@
 package app
 
 import (
+	"or3-intern/internal/requestctx"
 	"context"
 	"errors"
 	"fmt"
@@ -166,9 +167,9 @@ func (o *RunnerTurnOrchestrator) HandleBusEvent(ctx context.Context, ev bus.Even
 		return nil
 	}
 	req := RunnerTurnRequestFromBusEvent(o.cfg, ev)
-	runCtx := tools.ContextWithApprovalToken(ctx, req.ApprovalToken)
-	runCtx = tools.ContextWithRequesterIdentity(runCtx, req.Actor, req.Role)
-	runCtx = tools.ContextWithCapabilityCeiling(runCtx, req.Capability)
+	runCtx := requestctx.ContextWithApprovalToken(ctx, req.ApprovalToken)
+	runCtx = requestctx.ContextWithRequesterIdentity(runCtx, req.Actor, req.Role)
+	runCtx = requestctx.ContextWithCapabilityCeiling(runCtx, req.Capability)
 	_, err := o.StartTurn(runCtx, req)
 	return err
 }
@@ -229,6 +230,12 @@ var ErrRunnerTurnsDisabled = errors.New("runner turns require agentCLI.enabled a
 
 // ErrLegacyToolReplayDisabled is returned when built-in tool replay is requested in runner-first mode.
 var ErrLegacyToolReplayDisabled = errors.New("built-in tool replay is disabled in runner-first mode; approve runner permissions or retry the turn")
+
+// ErrLegacyTurnEndpointRemoved is returned when clients call removed direct-turn APIs.
+var ErrLegacyTurnEndpointRemoved = errors.New("POST /internal/v1/turns was removed; use runner-chat endpoints (/internal/v1/runner-chat/turns)")
+
+// ErrLegacySubagentsRemoved is returned when clients try to create built-in subagent jobs.
+var ErrLegacySubagentsRemoved = errors.New("POST /internal/v1/subagents was removed; use POST /internal/v1/agent-runs for background runner work")
 
 func runnerTurnMeta(in map[string]any, migrated bool, legacyRunner, triggerKind string) map[string]any {
 	meta := cloneServiceMeta(in)

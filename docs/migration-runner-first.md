@@ -2,9 +2,11 @@
 
 ## Summary
 
-The built-in OR3 provider/tool-loop agent is deprecated for chat, channels,
-service turns, and automation. Install and authenticate an external runner
-(OpenCode recommended) before starting new work.
+The built-in OR3 provider/tool-loop agent has been removed from the primary
+execution path. Chat, channels, service turns, and automation use external
+runners (OpenCode recommended). `POST /internal/v1/turns` and `POST
+/internal/v1/subagents` return **410 Gone**. Install and authenticate a runner
+before starting new work.
 
 ## Config changes
 
@@ -44,5 +46,18 @@ doctor settings to use runner chat instead.
 
 ## OR3 App
 
-Update OR3 App to a runner-first build (phase 11+) so the UI does not synthesize
-a built-in `or3-intern` runner when discovery returns no external runners.
+OR3 App sends through runner chat only. Subagent creation and direct
+`/internal/v1/turns` recovery are removed. Choose an external runner before
+sending.
+
+## Runner memory bridge
+
+Runners and integrations can call authenticated service endpoints:
+
+- `POST /internal/v1/runner-memory/search`
+- `POST /internal/v1/runner-memory/notes`
+- `GET` / `POST /internal/v1/runner-memory/pinned`
+
+Writes are audited (`runner_memory.search`, `runner_memory.add_note`,
+`runner_memory.set_pinned`). Store durable preferences and facts only—not
+scratch work or secrets.

@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"or3-intern/internal/agent"
 	"or3-intern/internal/agentcli"
 	"or3-intern/internal/app"
 	"or3-intern/internal/approval"
@@ -22,6 +21,7 @@ import (
 	"or3-intern/internal/db"
 	"or3-intern/internal/jobs"
 	"or3-intern/internal/serviceerrors"
+	"or3-intern/internal/streaming"
 	"or3-intern/internal/tools"
 )
 
@@ -30,118 +30,11 @@ func (s *serviceServer) handleTurns(w http.ResponseWriter, r *http.Request) {
 		writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 		return
 	}
-	limitServiceRequestBody(w, r, serviceTurnsBodyLimit)
-	req, err := decodeServiceTurnRequest(r.Body, s.runtime.Tools)
-	if err != nil {
-		writeServiceRequestDecodeError(w, err)
-		return
-	}
-	writeServiceRequestWarnings(w, req.Warnings)
-	if err := validateServiceToolCapabilities(s.runtime.Tools, req.AllowedTools, s.config.Service.MaxCapability); err != nil {
-		writeServiceError(w, r, http.StatusBadRequest, "requested tools exceed service capability ceiling", err)
-		return
-	}
-	audit := serviceAuditHeadersFromRequest(r)
-	req.Meta = mergeServiceAuditMeta(req.Meta, audit)
-	if traceID := serviceTraceIDFromContext(r.Context()); traceID != "" {
-		if req.Meta == nil {
-			req.Meta = map[string]any{}
-		}
-		if serviceMetaText(req.Meta, "trace_id") == "" {
-			req.Meta["trace_id"] = traceID
-		}
-	}
-	req.ApprovalToken = serviceFirstNonEmpty(req.ApprovalToken, serviceApprovalTokenFromRequest(r))
-	if req.SessionKey == "" || req.Message == "" {
-		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "session_key and message are required"})
-		return
-	}
-	job := s.jobs.Register("turn")
-	log.Printf("service_turn: registered job=%s session=%s trace=%s", job.ID, req.SessionKey, serviceMetaText(req.Meta, "trace_id"))
-	w.Header().Set("X-Or3-Job-Id", job.ID)
-	s.jobs.Publish(job.ID, "queued", serviceLifecyclePayload(req.SessionKey, req.Meta, map[string]any{"status": "queued"}))
-	s.persistServiceJobSummary(context.Background(), job.ID)
-
-	ctx, cancel := context.WithCancel(withDetachedContext(r.Context()))
-	s.jobs.AttachCancel(job.ID, cancel)
-	go s.runTurnJob(ctx, job.ID, req, serviceAuthIdentityFromContext(r.Context()))
-
-	if acceptsSSE(r) {
-		s.streamJob(w, r, job.ID)
-		return
-	}
-	snapshot, ok := s.jobs.Wait(r.Context(), job.ID)
-	if !ok {
-		writeServiceJSON(w, http.StatusGatewayTimeout, map[string]any{"error": "job timed out", "job_id": job.ID})
-		return
-	}
-	statusCode := http.StatusOK
-	if snapshot.Status == "failed" {
-		statusCode = http.StatusBadGateway
-	}
-	writeServiceValue(w, statusCode, controlplane.BuildJobResponse(snapshot))
-}
-
-func (s *serviceServer) runTurnJob(ctx context.Context, jobID string, req serviceTurnRequest, identity serviceAuthIdentity) {
-	defer s.persistServiceJobSummary(context.Background(), jobID)
-	log.Printf("service_turn: started job=%s session=%s trace=%s replay=%t", jobID, req.SessionKey, serviceMetaText(req.Meta, "trace_id"), req.ReplayToolCall != nil)
-	s.jobs.Publish(jobID, "started", serviceLifecyclePayload(req.SessionKey, req.Meta, map[string]any{"status": "running"}))
-	observer := &serviceObserver{ConversationObserver: agent.JobObserverForRegistry(s.jobs, jobID)}
-	profileName := s.effectiveServiceProfileName(req.ProfileName)
-	var turnResult app.TurnResult
-	var err error
-	if req.ReplayToolCall != nil {
-		_, err = s.app().ReplayToolCall(ctx, app.ReplayToolCallRequest{
-			SessionKey:    req.SessionKey,
-			ToolName:      req.ReplayToolCall.Name,
-			ArgumentsJSON: req.ReplayToolCall.ArgumentsJSON,
-			AllowedTools:  req.AllowedTools,
-			RestrictTools: req.RestrictTools,
-			ProfileName:   profileName,
-			Capability:    tools.CapabilityLevel(s.config.Service.MaxCapability),
-			ApprovalToken: req.ApprovalToken,
-			Actor:         identity.Actor,
-			Role:          identity.Role,
-			Observer:      observer,
-		})
-	} else {
-		turnResult, err = s.app().RunTurn(ctx, app.TurnRequest{
-			SessionKey:    req.SessionKey,
-			Message:       req.Message,
-			Model:         req.Model,
-			Attachments:   req.Attachments,
-			Meta:          req.Meta,
-			AllowedTools:  req.AllowedTools,
-			RestrictTools: req.RestrictTools,
-			ProfileName:   profileName,
-			Capability:    tools.CapabilityLevel(s.config.Service.MaxCapability),
-			ApprovalToken: req.ApprovalToken,
-			Actor:         identity.Actor,
-			Role:          identity.Role,
-			Observer:      observer,
-			Streamer:      agent.NullStreamer{},
-		})
-	}
-	if err != nil {
-		log.Printf("service_turn: error job=%s session=%s trace=%s public_code=%s", jobID, req.SessionKey, serviceMetaText(req.Meta, "trace_id"), serviceerrors.PublicErrorCode(err))
-		s.completeTurnJobWithError(ctx, jobID, err, observer, req.SessionKey, req.Meta)
-		return
-	}
-	if turnResult.RunnerTurn != nil {
-		s.completeTurnJobFromRunner(ctx, jobID, req, *turnResult.RunnerTurn)
-		return
-	}
-	finalText, recoveredEmpty := observer.finalTextForCompletion("or3-intern completed without a final response.")
-	if recoveredEmpty {
-		log.Printf("service_turn: completed_empty_final job=%s session=%s trace=%s saw_tool=%t last_tool=%s last_tool_status=%s", jobID, req.SessionKey, serviceMetaText(req.Meta, "trace_id"), observer.sawToolActivity(), observer.lastToolName, observer.lastToolStatus)
-	}
-	log.Printf("service_turn: completed job=%s session=%s trace=%s recovered_empty=%t final_preview=%q", jobID, req.SessionKey, serviceMetaText(req.Meta, "trace_id"), recoveredEmpty, boundedServiceLogPreview(finalText, 160))
-	payload := map[string]any{"final_text": finalText}
-	if recoveredEmpty {
-		payload["degraded"] = true
-		payload["empty_final_text_recovered"] = true
-	}
-	s.jobs.Complete(jobID, "completed", serviceLifecyclePayload(req.SessionKey, req.Meta, payload))
+	writeServiceJSON(w, http.StatusGone, map[string]any{
+		"error":   app.ErrLegacyTurnEndpointRemoved.Error(),
+		"code":    "legacy_turn_endpoint_removed",
+		"replace": "/internal/v1/runner-chat/turns",
+	})
 }
 
 func (s *serviceServer) completeTurnJobFromRunner(ctx context.Context, jobID string, req serviceTurnRequest, runner app.RunnerTurnResult) {
@@ -270,7 +163,7 @@ func (s *serviceServer) runApprovedResumeJob(ctx context.Context, jobID string, 
 	}
 	log.Printf("service_approval: resume_started approval=%d job=%s session=%s", issued.Request.ID, jobID, sessionKey)
 	s.jobs.Publish(jobID, "started", serviceLifecyclePayload(sessionKey, meta, map[string]any{"status": "running"}))
-	observer := &serviceObserver{ConversationObserver: agent.JobObserverForRegistry(s.jobs, jobID)}
+	observer := &serviceObserver{ConversationObserver: jobs.ObserverForRegistry(s.jobs, jobID)}
 	finalText, err := s.app().ResumeApprovedRequest(ctx, app.ResumeApprovedRequest{
 		IssuedApproval: issued,
 		Capability:     tools.CapabilityLevel(s.config.Service.MaxCapability),
@@ -438,63 +331,16 @@ func (s *serviceServer) handleSubagents(w http.ResponseWriter, r *http.Request) 
 		s.handleSubagentsList(w, r)
 		return
 	case http.MethodPost:
-		// fall through
+		writeServiceJSON(w, http.StatusGone, map[string]any{
+			"error":   app.ErrLegacySubagentsRemoved.Error(),
+			"code":    "legacy_subagent_endpoint_removed",
+			"replace": "/internal/v1/agent-runs",
+		})
+		return
 	default:
 		writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 		return
 	}
-	if s.subagentManager == nil {
-		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "subagent manager is not enabled"})
-		return
-	}
-	limitServiceRequestBody(w, r, serviceSubagentsBodyLimit)
-	req, err := decodeServiceSubagentRequest(r.Body, backgroundToolsRegistry(s.subagentManager))
-	if err != nil {
-		writeServiceRequestDecodeError(w, err)
-		return
-	}
-	writeServiceRequestWarnings(w, req.Warnings)
-	if err := validateServiceToolCapabilities(backgroundToolsRegistry(s.subagentManager), req.AllowedTools, s.config.Service.MaxCapability); err != nil {
-		writeServiceError(w, r, http.StatusBadRequest, "requested tools exceed service capability ceiling", err)
-		return
-	}
-	audit := serviceAuditHeadersFromRequest(r)
-	req.Meta = mergeServiceAuditMeta(req.Meta, audit)
-	req.ApprovalToken = serviceFirstNonEmpty(req.ApprovalToken, serviceApprovalTokenFromRequest(r))
-	if req.ParentSessionKey == "" || req.Task == "" {
-		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "parent_session_key and task are required"})
-		return
-	}
-	identity := serviceAuthIdentityFromContext(r.Context())
-	job, err := s.app().StartSubagent(r.Context(), app.SubagentRequest{
-		ParentSessionKey: req.ParentSessionKey,
-		Task:             req.Task,
-		PromptSnapshot:   req.PromptSnapshot,
-		AllowedTools:     req.AllowedTools,
-		RestrictTools:    req.RestrictTools,
-		ProfileName:      req.ProfileName,
-		Capability:       tools.CapabilityLevel(s.config.Service.MaxCapability),
-		Channel:          req.Channel,
-		ReplyTo:          req.ReplyTo,
-		Meta:             req.Meta,
-		Timeout:          time.Duration(req.TimeoutSeconds) * time.Second,
-		ApprovalToken:    req.ApprovalToken,
-		Actor:            identity.Actor,
-		Role:             identity.Role,
-	})
-	if err != nil {
-		statusCode := http.StatusBadGateway
-		if errors.Is(err, db.ErrSubagentQueueFull) {
-			statusCode = http.StatusTooManyRequests
-		}
-		writeServiceError(w, r, statusCode, "subagent request failed", err)
-		return
-	}
-	writeServiceJSON(w, http.StatusAccepted, map[string]any{
-		"job_id":            job.ID,
-		"child_session_key": job.ChildSessionKey,
-		"status":            db.SubagentStatusQueued,
-	})
 }
 
 func (s *serviceServer) handleSubagentsList(w http.ResponseWriter, r *http.Request) {
@@ -562,7 +408,7 @@ func (s *serviceServer) handleArtifacts(w http.ResponseWriter, r *http.Request) 
 		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "artifact not found"})
 		return
 	}
-	if s.runtime == nil || s.runtime.Artifacts == nil {
+	if s.serviceArtifacts() == nil {
 		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "artifacts unavailable"})
 		return
 	}
@@ -589,7 +435,7 @@ func (s *serviceServer) handleArtifacts(w http.ResponseWriter, r *http.Request) 
 			offset = parsed
 		}
 	}
-	result, err := s.runtime.Artifacts.ReadCappedFrom(r.Context(), sessionKey, artifactID, offset, maxBytes)
+	result, err := s.serviceArtifacts().ReadCappedFrom(r.Context(), sessionKey, artifactID, offset, maxBytes)
 	if err != nil {
 		switch {
 		case errors.Is(err, artifacts.ErrNotFound):
@@ -613,7 +459,7 @@ func (s *serviceServer) handleArtifacts(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *serviceServer) handleArtifactUpload(w http.ResponseWriter, r *http.Request) {
-	if s.runtime == nil || s.runtime.Artifacts == nil {
+	if s.serviceArtifacts() == nil {
 		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "artifacts unavailable"})
 		return
 	}
@@ -654,7 +500,7 @@ func (s *serviceServer) handleArtifactUpload(w http.ResponseWriter, r *http.Requ
 			}
 		}
 	}
-	att, err := s.runtime.Artifacts.SaveNamed(r.Context(), sessionKey, filename, mimeType, data)
+		att, err := s.serviceArtifacts().SaveNamed(r.Context(), sessionKey, filename, mimeType, data)
 	if err != nil {
 		writeServiceError(w, r, http.StatusInternalServerError, "artifact upload failed", err)
 		return
@@ -958,7 +804,7 @@ func serviceStreamEventPayload(event jobs.Event) map[string]any {
 }
 
 type serviceObserver struct {
-	agent.ConversationObserver
+	streaming.ConversationObserver
 	finalText             string
 	sawToolCall           bool
 	sawToolResult         bool
@@ -975,6 +821,12 @@ func (o *serviceObserver) OnCompletion(ctx context.Context, finalText string, st
 	o.finalText = finalText
 	if o.ConversationObserver != nil {
 		o.ConversationObserver.OnCompletion(ctx, finalText, streamed)
+	}
+}
+
+func (o *serviceObserver) OnError(ctx context.Context, err error) {
+	if o.ConversationObserver != nil {
+		o.ConversationObserver.OnError(ctx, err)
 	}
 }
 
@@ -1007,7 +859,7 @@ func (o *serviceObserver) OnToolResult(ctx context.Context, name string, out str
 	}
 }
 
-func (o *serviceObserver) OnToolLifecycle(ctx context.Context, event agent.ToolLifecycleEvent) {
+func (o *serviceObserver) OnToolLifecycle(ctx context.Context, event streaming.ToolLifecycleEvent) {
 	o.sawToolCall = true
 	o.lastToolName = strings.TrimSpace(event.Name)
 	o.lastToolStatus = strings.TrimSpace(event.Status)
@@ -1032,7 +884,7 @@ func (o *serviceObserver) OnToolLifecycle(ctx context.Context, event agent.ToolL
 	if event.Status == "failed" && o.lastToolError == "" {
 		o.lastToolError = firstNonEmptyString(event.ResultPreview, event.Result, event.PublicCode)
 	}
-	if lifecycle, ok := o.ConversationObserver.(agent.ToolLifecycleObserver); ok {
+	if lifecycle, ok := o.ConversationObserver.(streaming.ToolLifecycleObserver); ok {
 		lifecycle.OnToolLifecycle(ctx, event)
 	}
 }

@@ -40,6 +40,18 @@ Acceptance criteria:
 - The implementation does not keep the old generic `tools.Registry` solely to support memory; it exposes memory through a runner-appropriate interface such as a local MCP server, a runner bridge command, or typed service endpoints that runners can call.
 - OR3 App can show memory activity/audit records for runner-created memories.
 
+### Requirement 2b: Preserve channels with runner-first command routing
+
+Channels must keep working after the built-in runtime is deleted, and channel users must be able to select runner/provider/model preferences without those commands being forwarded to the runner as normal prompts.
+
+Acceptance criteria:
+- Normal CLI, Telegram, Slack, Discord, WhatsApp, email, webhook, cron, and heartbeat turns route only through `RunnerTurnOrchestrator`; no channel path can fall back to `agent.Runtime`.
+- Channel slash commands such as `/help`, `/settings`, `/runners`, `/runner`, `/models`, `/model`, and `/reset` are intercepted before runner turn creation.
+- Per-channel or per-session runner/model preferences persist durably and are injected into runner turn metadata as `runner_id` and `model`.
+- Invalid or deleted runner/model preferences fail closed with setup guidance and do not silently fall back to the old runtime.
+- Telegram registers bot commands so Telegram clients suggest command names; model/runner option selection uses explicit command arguments, inline keyboards, reply keyboards, or follow-up prompts rather than relying on unsupported dynamic argument autocomplete.
+- Existing approval commands such as `/approve` and `/deny` continue to work and are ordered before generic runner/model commands.
+
 ### Requirement 3: Replace `internal/agent` with small platform packages
 
 Reusable non-runtime types currently inside `internal/agent` must move into smaller packages before deleting the old runtime files.

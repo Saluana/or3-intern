@@ -24,17 +24,12 @@ func TestRunTurnPrefersOrchestratorWhenConfigured(t *testing.T) {
 }
 
 func TestRunTurnFailsClosedWhenRunnerFirstHasNoOrchestrator(t *testing.T) {
-	app := &ServiceApp{cfg: config.Default()}
+	cfg := config.Default()
+	cfg.AgentCLI.Enabled = true
+	app := &ServiceApp{cfg: cfg}
 	_, err := app.RunTurn(context.Background(), TurnRequest{SessionKey: "s", Message: "hi"})
 	if !errors.Is(err, ErrRunnerTurnsDisabled) {
 		t.Fatalf("expected runner turns disabled error, got %v", err)
-	}
-}
-
-func TestDoctorTurnUsesBuiltInRuntime(t *testing.T) {
-	meta := map[string]any{"doctor_admin_brain": "internal", "doctor_session": true}
-	if !doctorTurnUsesBuiltInRuntime(meta) {
-		t.Fatal("expected doctor internal brain to use built-in runtime path")
 	}
 }
 

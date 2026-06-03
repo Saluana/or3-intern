@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"or3-intern/internal/agent"
+	"or3-intern/internal/jobs"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
 )
@@ -15,7 +15,7 @@ func openChatManagerTestDB(t *testing.T) *db.DB {
 }
 
 func testChatManager(database *db.DB) *ChatManager {
-	jobs := agent.NewJobRegistry(0, 0)
+	jobs := jobs.NewRegistry(0, 0)
 	return &ChatManager{
 		DB: database,
 		Manager: &Manager{
@@ -117,7 +117,7 @@ func TestChatManagerPersistsNormalizedRunnerEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateRunnerChatTurn: %v", err)
 	}
-	cm.persistJobEvent(turn, sess, "job-events", &turnMirrorState{}, agent.JobEvent{
+	cm.persistJobEvent(turn, sess, "job-events", &turnMirrorState{}, jobs.Event{
 		Sequence: 3,
 		Type:     "output",
 		Data: map[string]any{

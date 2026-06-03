@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"or3-intern/internal/agent"
 	"or3-intern/internal/config"
+	"or3-intern/internal/runnercontext"
 )
 
 func TestLoadRunnerBootstrapContextUsesConfiguredPaths(t *testing.T) {
@@ -23,7 +23,7 @@ func TestLoadRunnerBootstrapContextUsesConfiguredPaths(t *testing.T) {
 	if bootstrap.Soul != "custom soul" {
 		t.Fatalf("expected configured soul file, got %q", bootstrap.Soul)
 	}
-	if bootstrap.Soul == agent.DefaultSoul {
+	if bootstrap.Soul == runnercontext.DefaultSoul {
 		t.Fatal("expected custom soul instead of default soul")
 	}
 }

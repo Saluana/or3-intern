@@ -15,11 +15,12 @@ import (
 	"time"
 
 	"or3-intern/internal/adminflow"
-	"or3-intern/internal/agent"
 	"or3-intern/internal/agentcli"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
+	"or3-intern/internal/doctoradmin"
+	"or3-intern/internal/jobs"
 	"or3-intern/internal/providers"
 	"or3-intern/internal/security"
 	"or3-intern/internal/tools"
@@ -242,6 +243,11 @@ func TestDoctorAdminBrainUsesElevatedToolBudget(t *testing.T) {
 	cfg.Provider.APIBase = providerServer.URL
 	cfg.Provider.APIKey = "test-key"
 	cfg.Provider.Model = "test-model"
+	if profile, ok := cfg.ProviderProfile("openai"); ok {
+		profile.APIBase = providerServer.URL
+		profile.APIKey = "test-key"
+		cfg.Providers["openai"] = profile
+	}
 	cfg.MaxToolLoops = 1
 	cfg.Hardening.Quotas.Enabled = true
 	cfg.Hardening.Quotas.MaxToolCalls = 1
@@ -250,12 +256,6 @@ func TestDoctorAdminBrainUsesElevatedToolBudget(t *testing.T) {
 	server := newDoctorTestServer(t, database, cfg)
 	provider := providers.New(providerServer.URL, "test-key", 5*time.Second)
 	provider.HTTP = providerServer.Client()
-	server.runtime.Provider = provider
-	server.runtime.Model = "test-model"
-	server.runtime.Builder = &agent.Builder{DB: database, HistoryMax: 10}
-	server.runtime.MaxToolLoops = cfg.MaxToolLoops
-	server.runtime.MaxToolLoopsExceededAction = cfg.MaxToolLoopsExceededAction
-	server.runtime.Hardening = cfg.Hardening
 	server.registerDoctorAdminBrainTools()
 
 	err := server.runDoctorInternalAdminBrainTurn(
@@ -428,13 +428,12 @@ func TestDoctorShouldUseInternalAdminBrain(t *testing.T) {
 }
 
 func TestDoctorAdminBrainAllowedToolsFiltersUnavailableTools(t *testing.T) {
-	registry := tools.NewRegistry()
+	admin := doctoradmin.NewRegistry()
 	server := &serviceServer{}
 	for _, tool := range server.doctorAdminBrainTools() {
-		registry.Register(tool)
+		admin.Register(doctoradmin.Action{Name: tool.name, Description: tool.desc, Run: tool.run})
 	}
-	registry.Register(&tools.CronTool{})
-	got := doctorAdminBrainAllowedTools(registry)
+	got := doctorAdminBrainAllowedTools(admin)
 	want := []string{
 		doctorToolNameStatus,
 		doctorToolNameLogs,
@@ -469,7 +468,7 @@ func TestServiceDoctorRegistersAdminBrainTools(t *testing.T) {
 	defer cleanup()
 	server := newDoctorTestServer(t, database, config.Default())
 	server.registerDoctorAdminBrainTools()
-	got := doctorAdminBrainAllowedTools(server.runtime.Tools)
+	got := doctorAdminBrainAllowedTools(server.doctorAdmin)
 	if len(got) != len(doctorAdminBrainAllowedToolNames) {
 		t.Fatalf("doctorAdminBrainAllowedTools() = %v", got)
 	}
@@ -488,7 +487,7 @@ func TestServiceDoctorToolsExecuteStatusAndPlanRead(t *testing.T) {
 	server := newDoctorTestServer(t, database, cfg)
 	server.registerDoctorAdminBrainTools()
 
-	statusOut, err := server.runtime.Tools.ExecuteParams(context.Background(), doctorToolNameStatus, nil)
+	statusOut, err := server.doctorAdmin.Execute(context.Background(), doctorToolNameStatus, nil)
 	if err != nil {
 		t.Fatalf("doctor_status ExecuteParams: %v", err)
 	}
@@ -503,7 +502,7 @@ func TestServiceDoctorToolsExecuteStatusAndPlanRead(t *testing.T) {
 		t.Fatalf("expected finding_cards in status stats: %#v", statusResult.Stats)
 	}
 
-	docsOut, err := server.runtime.Tools.ExecuteParams(context.Background(), doctorToolNameDocsSearch, map[string]any{"query": "agent runtime tools"})
+	docsOut, err := server.doctorAdmin.Execute(context.Background(), doctorToolNameDocsSearch, map[string]any{"query": "agent runtime tools"})
 	if err != nil {
 		t.Fatalf("doctor_docs_search ExecuteParams: %v", err)
 	}
@@ -518,7 +517,7 @@ func TestServiceDoctorToolsExecuteStatusAndPlanRead(t *testing.T) {
 		t.Fatalf("expected docs matches, got %s", docsOut)
 	}
 
-	configOut, err := server.runtime.Tools.ExecuteParams(context.Background(), doctorToolNameConfigSearch, map[string]any{"query": "api key"})
+	configOut, err := server.doctorAdmin.Execute(context.Background(), doctorToolNameConfigSearch, map[string]any{"query": "api key"})
 	if err != nil {
 		t.Fatalf("doctor_config_search ExecuteParams: %v", err)
 	}
@@ -541,7 +540,7 @@ func TestServiceDoctorToolsExecuteStatusAndPlanRead(t *testing.T) {
 		OldValue:   adminflow.RedactedValue{Value: false},
 		NewValue:   adminflow.RedactedValue{Value: true},
 	}
-	createOut, err := server.runtime.Tools.ExecuteParams(context.Background(), doctorToolNameCreatePlan, map[string]any{
+	createOut, err := server.doctorAdmin.Execute(context.Background(), doctorToolNameCreatePlan, map[string]any{
 		"conversation_id": "conv-tool",
 		"plan": adminflow.SettingsChangePlan{
 			Title:   "Disable global skills",
@@ -563,7 +562,7 @@ func TestServiceDoctorToolsExecuteStatusAndPlanRead(t *testing.T) {
 		t.Fatalf("expected settings_change_preview card type, got %#v", createResult.Stats)
 	}
 
-	shorthandOut, err := server.runtime.Tools.ExecuteParams(context.Background(), doctorToolNameCreatePlan, map[string]any{
+	shorthandOut, err := server.doctorAdmin.Execute(context.Background(), doctorToolNameCreatePlan, map[string]any{
 		"conversation_id": "conv-tool",
 		"plan": map[string]any{
 			"title":   "Change default model",
@@ -584,7 +583,7 @@ func TestServiceDoctorToolsExecuteStatusAndPlanRead(t *testing.T) {
 		t.Fatalf("unexpected shorthand validation result: %s", shorthandOut)
 	}
 
-	aliasOut, err := server.runtime.Tools.ExecuteParams(context.Background(), doctorToolNameCreatePlan, map[string]any{
+	aliasOut, err := server.doctorAdmin.Execute(context.Background(), doctorToolNameCreatePlan, map[string]any{
 		"conversation_id": "conv-tool",
 		"plan": map[string]any{
 			"title":   "Change Default Model to DeepSeek V4 Flash",
@@ -611,7 +610,7 @@ func TestServiceDoctorToolsExecuteStatusAndPlanRead(t *testing.T) {
 		t.Fatalf("expected alias field plan to validate, got: %s", aliasOut)
 	}
 
-	readOut, err := server.runtime.Tools.ExecuteParams(context.Background(), doctorToolNameReadPlan, map[string]any{"plan_id": createResult.PlanID})
+	readOut, err := server.doctorAdmin.Execute(context.Background(), doctorToolNameReadPlan, map[string]any{"plan_id": createResult.PlanID})
 	if err != nil {
 		t.Fatalf("doctor_read_plan ExecuteParams: %v", err)
 	}
@@ -1156,12 +1155,15 @@ func newDoctorTestServer(t *testing.T, database *db.DB, cfg config.Config) *serv
 	if err := config.Save(cfgPath, cfg); err != nil {
 		t.Fatalf("seed config: %v", err)
 	}
-	return &serviceServer{
+	server := &serviceServer{
 		config:     cfg,
 		configPath: cfgPath,
-		jobs:       agent.NewJobRegistry(time.Minute, 32),
-		runtime:    &agent.Runtime{DB: database, Tools: tools.NewRegistry(), Audit: &security.AuditLogger{DB: database, Key: []byte(strings.Repeat("a", 32))}},
+		database:   database,
+		audit:      &security.AuditLogger{DB: database, Key: []byte(strings.Repeat("a", 32))},
+		jobs:       jobs.NewRegistry(time.Minute, 32),
 	}
+	server.registerDoctorAdminBrainTools()
+	return server
 }
 
 func doctorAuthedRequest(method, path, body string) *http.Request {

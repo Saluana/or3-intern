@@ -9,26 +9,20 @@ import (
 	"reflect"
 	"strings"
 
-	"or3-intern/internal/agent"
-	"or3-intern/internal/app"
 	"or3-intern/internal/compat"
 	"or3-intern/internal/providers"
-	"or3-intern/internal/tools"
 	"or3-intern/internal/turns"
 )
 
 type serviceTurnRequest struct {
-	SessionKey      string
-	Message         string
-	Model           string
-	Attachments     []turns.Attachment
-	ToolPolicyMode  string
-	AllowedTools    []string
-	RestrictTools   bool
-	Meta            map[string]any
+	SessionKey     string
+	Message        string
+	Model          string
+	Attachments    []turns.Attachment
+	ToolPolicyMode string
+	Meta           map[string]any
 	ProfileName    string
 	ApprovalToken  string
-	ReplayToolCall *serviceReplayToolCall
 	Warnings       []string
 }
 
@@ -36,8 +30,6 @@ type serviceSubagentRequest struct {
 	ParentSessionKey string
 	Task             string
 	PromptSnapshot   []providers.ChatMessage
-	AllowedTools     []string
-	RestrictTools    bool
 	TimeoutSeconds   int
 	Meta             map[string]any
 	ProfileName      string
@@ -84,19 +76,6 @@ type serviceToolPolicyPayload struct {
 	AllowedToolsCamel []string `json:"allowedTools"`
 	BlockedTools      []string `json:"blocked_tools"`
 	BlockedToolsCamel []string `json:"blockedTools"`
-}
-
-type serviceReplayToolCall struct {
-	Name          string
-	ArgumentsJSON string
-}
-
-type serviceReplayToolCallPayload struct {
-	Name               string          `json:"name"`
-	Arguments          json.RawMessage `json:"arguments"`
-	ArgumentsCamel     json.RawMessage `json:"argumentsCamel"`
-	ArgumentsJSON      string          `json:"arguments_json"`
-	ArgumentsJSONCamel string          `json:"argumentsJson"`
 }
 
 type serviceTurnRequestPayload struct {
@@ -148,7 +127,7 @@ type serviceSubagentRequestPayload struct {
 	ApprovalTokenCamel    string                    `json:"approvalToken"`
 }
 
-func decodeServiceTurnRequest(body io.Reader, registry *tools.Registry) (serviceTurnRequest, error) {
+func decodeServiceTurnRequest(body io.Reader) (serviceTurnRequest, error) {
 	var payload serviceTurnRequestPayload
 	fields, err := decodeServiceRequestPayload(body, &payload)
 	if err != nil {
@@ -163,22 +142,19 @@ func decodeServiceTurnRequest(body io.Reader, registry *tools.Registry) (service
 		serviceRequestFieldPair{"approval_token", "approvalToken"},
 		serviceRequestFieldPair{"replay_tool_call", "replayToolCall"},
 	)
-	toolPolicy := firstToolPolicy(payload.ToolPolicy, payload.ToolPolicyCamel)
-	allowedTools, restrictTools, err := app.ResolveToolPolicy(
-		registry,
-		toolPolicy,
-		compat.FirstStringSlice(payload.AllowedTools, payload.AllowedToolsCamel),
-	)
-	if err != nil {
-		return serviceTurnRequest{}, err
+	toolPolicy := payload.ToolPolicy
+	if toolPolicy == nil {
+		toolPolicy = payload.ToolPolicyCamel
 	}
 	toolPolicyMode := ""
 	if toolPolicy != nil {
 		toolPolicyMode = strings.TrimSpace(toolPolicy.Mode)
 	}
-	replayToolCall, err := firstReplayToolCall(payload.ReplayToolCall, payload.ReplayToolCallCamel)
-	if err != nil {
-		return serviceTurnRequest{}, err
+	if toolPolicy != nil || len(compat.FirstStringSlice(payload.AllowedTools, payload.AllowedToolsCamel)) > 0 {
+		warnings = append(warnings, "direct turn tool policy is ignored; use runner chat")
+	}
+	if payload.ReplayToolCall != nil || payload.ReplayToolCallCamel != nil {
+		warnings = append(warnings, "replay_tool_call is ignored; use runner permission retry")
 	}
 	attachments := decodeServiceAttachments(payload.Attachments)
 	if err := turns.ValidateAttachments(attachments); err != nil {
@@ -199,17 +175,14 @@ func decodeServiceTurnRequest(body io.Reader, registry *tools.Registry) (service
 		Model:          strings.TrimSpace(payload.Model),
 		Attachments:    attachments,
 		ToolPolicyMode: toolPolicyMode,
-		AllowedTools:   allowedTools,
-		RestrictTools:  restrictTools,
-		Meta:           meta,
-		ProfileName:    compat.FirstString(payload.ProfileName, payload.ProfileNameCamel),
-		ApprovalToken:  compat.FirstString(payload.ApprovalToken, payload.ApprovalTokenCamel),
-		ReplayToolCall: replayToolCall,
-		Warnings:       warnings,
+		Meta:          meta,
+		ProfileName:   compat.FirstString(payload.ProfileName, payload.ProfileNameCamel),
+		ApprovalToken: compat.FirstString(payload.ApprovalToken, payload.ApprovalTokenCamel),
+		Warnings:      warnings,
 	}, nil
 }
 
-func decodeServiceSubagentRequest(body io.Reader, registry *tools.Registry) (serviceSubagentRequest, error) {
+func decodeServiceSubagentRequest(body io.Reader) (serviceSubagentRequest, error) {
 	var payload serviceSubagentRequestPayload
 	fields, err := decodeServiceRequestPayload(body, &payload)
 	if err != nil {
@@ -227,13 +200,8 @@ func decodeServiceSubagentRequest(body io.Reader, registry *tools.Registry) (ser
 		serviceRequestFieldPair{"reply_to", "replyTo"},
 		serviceRequestFieldPair{"approval_token", "approvalToken"},
 	)
-	allowedTools, restrictTools, err := app.ResolveToolPolicy(
-		registry,
-		firstToolPolicy(payload.ToolPolicy, payload.ToolPolicyCamel),
-		compat.FirstStringSlice(payload.AllowedTools, payload.AllowedToolsCamel),
-	)
-	if err != nil {
-		return serviceSubagentRequest{}, err
+	if payload.ToolPolicy != nil || payload.ToolPolicyCamel != nil || len(compat.FirstStringSlice(payload.AllowedTools, payload.AllowedToolsCamel)) > 0 {
+		warnings = append(warnings, "subagent tool policy is ignored; subagent creation was removed")
 	}
 	timeoutSeconds, err := firstPositiveInt(payload.TimeoutSeconds, payload.TimeoutSecondsCamel, payload.Timeout)
 	if err != nil {
@@ -250,8 +218,6 @@ func decodeServiceSubagentRequest(body io.Reader, registry *tools.Registry) (ser
 		),
 		Task:           strings.TrimSpace(payload.Task),
 		PromptSnapshot: firstPromptSnapshot(payload.PromptSnapshot, payload.PromptSnapshotCamel),
-		AllowedTools:   allowedTools,
-		RestrictTools:  restrictTools,
 		TimeoutSeconds: timeoutSeconds,
 		Meta:           cloneMapOrEmpty(payload.Meta),
 		ProfileName:    compat.FirstString(payload.ProfileName, payload.ProfileNameCamel),
@@ -387,47 +353,12 @@ func rawJSONEqual(left, right json.RawMessage) bool {
 	return reflect.DeepEqual(leftValue, rightValue)
 }
 
-func firstToolPolicy(values ...*serviceToolPolicyPayload) *agent.ServiceToolPolicy {
-	for _, value := range values {
-		if value == nil {
-			continue
-		}
-		return &agent.ServiceToolPolicy{
-			Mode:         strings.TrimSpace(value.Mode),
-			AllowedTools: compat.FirstStringSlice(value.AllowedTools, value.AllowedToolsCamel),
-			BlockedTools: compat.FirstStringSlice(value.BlockedTools, value.BlockedToolsCamel),
-		}
-	}
-	return nil
-}
-
-func firstReplayToolCall(values ...*serviceReplayToolCallPayload) (*serviceReplayToolCall, error) {
-	for _, value := range values {
-		if value == nil {
-			continue
-		}
-		name := strings.TrimSpace(value.Name)
-		if name == "" {
-			return nil, errors.New("replay_tool_call.name is required")
-		}
-		argsJSON := strings.TrimSpace(compat.FirstString(value.ArgumentsJSON, value.ArgumentsJSONCamel))
-		if argsJSON == "" {
-			raw := value.Arguments
-			if len(raw) == 0 {
-				raw = value.ArgumentsCamel
-			}
-			argsJSON = strings.TrimSpace(string(raw))
-		}
-		if argsJSON == "" {
-			argsJSON = "{}"
-		}
-		var params map[string]any
-		if err := json.Unmarshal([]byte(argsJSON), &params); err != nil {
-			return nil, fmt.Errorf("invalid replay_tool_call arguments: %w", err)
-		}
-		return &serviceReplayToolCall{Name: name, ArgumentsJSON: argsJSON}, nil
-	}
-	return nil, nil
+type serviceReplayToolCallPayload struct {
+	Name               string          `json:"name"`
+	Arguments          json.RawMessage `json:"arguments"`
+	ArgumentsCamel     json.RawMessage `json:"argumentsCamel"`
+	ArgumentsJSON      string          `json:"arguments_json"`
+	ArgumentsJSONCamel string          `json:"argumentsJson"`
 }
 
 func firstPromptSnapshot(values ...[]providers.ChatMessage) []providers.ChatMessage {
@@ -493,14 +424,4 @@ func cloneMapOrEmpty(in map[string]any) map[string]any {
 		out[key] = value
 	}
 	return out
-}
-
-func backgroundToolsRegistry(manager *agent.SubagentManager) *tools.Registry {
-	if manager == nil {
-		return tools.NewRegistry()
-	}
-	if manager.BackgroundTools != nil {
-		return manager.BackgroundTools()
-	}
-	return tools.NewRegistry()
 }

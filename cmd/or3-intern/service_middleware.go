@@ -168,7 +168,7 @@ func (l *serviceRateLimiter) Allow(r *http.Request, limit int) bool {
 }
 
 func (s *serviceServer) recordServiceAudit(r *http.Request, statusCode int) {
-	if s == nil || s.runtime == nil || s.runtime.Audit == nil || r == nil {
+	if s == nil || s.serviceAudit() == nil || r == nil {
 		return
 	}
 	identity := serviceAuthIdentityFromContext(r.Context())
@@ -184,7 +184,7 @@ func (s *serviceServer) recordServiceAudit(r *http.Request, statusCode int) {
 	if remote := remoteIPKey(r.RemoteAddr); remote != "" {
 		payload["remote_addr"] = remote
 	}
-	_ = s.runtime.Audit.Record(r.Context(), "service.request", "", identity.Actor, payload)
+	_ = s.serviceAudit().Record(r.Context(), "service.request", "", identity.Actor, payload)
 }
 
 func serviceRequestIDFromContext(ctx context.Context) string {
@@ -556,40 +556,6 @@ func remoteIPKey(raw string) string {
 
 func newServiceRequestID() string {
 	return strconv.FormatInt(time.Now().UnixNano(), 36)
-}
-
-func validateServiceToolCapabilities(registry *tools.Registry, names []string, maxCapability string) error {
-	ceiling := tools.CapabilityLevel(strings.ToLower(strings.TrimSpace(maxCapability)))
-	if ceiling == "" || registry == nil || len(names) == 0 {
-		return nil
-	}
-	for _, name := range names {
-		toolName := strings.TrimSpace(name)
-		if toolName == "" {
-			continue
-		}
-		tool := registry.Get(toolName)
-		if tool == nil {
-			continue
-		}
-		if capabilityRank(tools.ToolCapability(tool, nil)) > capabilityRank(ceiling) {
-			return fmt.Errorf("tool exceeds service capability ceiling: %s", toolName)
-		}
-	}
-	return nil
-}
-
-func capabilityRank(level tools.CapabilityLevel) int {
-	switch level {
-	case tools.CapabilityPrivileged:
-		return 3
-	case tools.CapabilityGuarded:
-		return 2
-	case tools.CapabilitySafe:
-		return 1
-	default:
-		return 0
-	}
 }
 
 func beginSSE(w http.ResponseWriter) error {

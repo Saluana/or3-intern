@@ -7,5 +7,5 @@ import (
 )
 
 func newCLIControlplane(broker *approval.Broker) *controlplane.Service {
-	return controlplane.New(config.Config{}, nil, broker, nil, nil)
+	return controlplane.New(config.Config{}, nil, nil, nil, broker, nil)
 }

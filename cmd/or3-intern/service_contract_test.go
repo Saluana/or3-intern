@@ -14,17 +14,14 @@ import (
 	"testing"
 	"time"
 
-	"or3-intern/internal/agent"
 	"or3-intern/internal/config"
+	"or3-intern/internal/jobs"
 	"or3-intern/internal/security"
-	"or3-intern/internal/tools"
 )
 
 type serviceTurnRequestFixture struct {
 	SessionKey    string         `json:"session_key"`
 	Message       string         `json:"message"`
-	AllowedTools  []string       `json:"allowed_tools"`
-	RestrictTools bool           `json:"restrict_tools"`
 	Meta          map[string]any `json:"meta"`
 	ProfileName   string         `json:"profile_name"`
 	ApprovalToken string         `json:"approval_token"`
@@ -33,8 +30,6 @@ type serviceTurnRequestFixture struct {
 type serviceSubagentRequestFixture struct {
 	ParentSessionKey string         `json:"parent_session_key"`
 	Task             string         `json:"task"`
-	AllowedTools     []string       `json:"allowed_tools"`
-	RestrictTools    bool           `json:"restrict_tools"`
 	TimeoutSeconds   int            `json:"timeout_seconds"`
 	Meta             map[string]any `json:"meta"`
 	ProfileName      string         `json:"profile_name"`
@@ -50,23 +45,17 @@ type serviceAppUsageRouteFixture struct {
 }
 
 func TestOr3NetCompatibilityFixtures_RequestDecoding(t *testing.T) {
-	registry := tools.NewRegistry()
-	registry.Register(serviceTestTool{name: "read_file"})
-	registry.Register(serviceTestTool{name: "write_file"})
-
 	t.Run("turn request", func(t *testing.T) {
 		var expected serviceTurnRequestFixture
 		loadFixtureJSON(t, "service_contract/turn-request.decoded.json", &expected)
 		body := loadFixtureString(t, "service_contract/turn-request.json")
-		actual, err := decodeServiceTurnRequest(strings.NewReader(body), registry)
+		actual, err := decodeServiceTurnRequest(strings.NewReader(body))
 		if err != nil {
 			t.Fatalf("decodeServiceTurnRequest: %v", err)
 		}
 		got := serviceTurnRequestFixture{
 			SessionKey:    actual.SessionKey,
 			Message:       actual.Message,
-			AllowedTools:  actual.AllowedTools,
-			RestrictTools: actual.RestrictTools,
 			Meta:          actual.Meta,
 			ProfileName:   actual.ProfileName,
 			ApprovalToken: actual.ApprovalToken,
@@ -95,15 +84,13 @@ func TestOr3NetCompatibilityFixtures_RequestDecoding(t *testing.T) {
 		var expected serviceSubagentRequestFixture
 		loadFixtureJSON(t, "service_contract/subagent-request.decoded.json", &expected)
 		body := loadFixtureString(t, "service_contract/subagent-request.json")
-		actual, err := decodeServiceSubagentRequest(strings.NewReader(body), registry)
+		actual, err := decodeServiceSubagentRequest(strings.NewReader(body))
 		if err != nil {
 			t.Fatalf("decodeServiceSubagentRequest: %v", err)
 		}
 		got := serviceSubagentRequestFixture{
 			ParentSessionKey: actual.ParentSessionKey,
 			Task:             actual.Task,
-			AllowedTools:     actual.AllowedTools,
-			RestrictTools:    actual.RestrictTools,
 			TimeoutSeconds:   actual.TimeoutSeconds,
 			Meta:             actual.Meta,
 			ProfileName:      actual.ProfileName,
@@ -119,13 +106,7 @@ func TestOr3NetCompatibilityFixtures_RequestDecoding(t *testing.T) {
 
 func TestOr3NetCompatibilityFixtures_Responses(t *testing.T) {
 	t.Run("turn response", func(t *testing.T) {
-		rt, cleanup := buildServiceTestRuntime(t, func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = w.Write([]byte("data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"Hello fixture\"},\"finish_reason\":\"stop\"}]}\n"))
-			_, _ = w.Write([]byte("data: [DONE]\n"))
-		})
-		defer cleanup()
-		server := &serviceServer{runtime: rt, jobs: agent.NewJobRegistry(time.Minute, 32)}
+		server := &serviceServer{jobs: jobs.NewRegistry(time.Minute, 32)}
 		httpServer := newServiceTestHTTPServer(t, strings.Repeat("t", 32), server)
 		defer httpServer.Close()
 
@@ -136,53 +117,11 @@ func TestOr3NetCompatibilityFixtures_Responses(t *testing.T) {
 			t.Fatalf("Do: %v", err)
 		}
 		defer resp.Body.Close()
-		var actual map[string]any
-		if err := json.NewDecoder(resp.Body).Decode(&actual); err != nil {
-			t.Fatalf("Decode: %v", err)
-		}
-		jobID, _ := actual["job_id"].(string)
-		if jobID == "" {
-			t.Fatalf("expected job_id in turn response, got %#v", actual)
-		}
-		actual["job_id"] = "__JOB_ID__"
-
-		var expected map[string]any
-		loadFixtureJSON(t, "service_contract/turn-response.json", &expected)
-		if !reflect.DeepEqual(actual, expected) {
-			t.Fatalf("turn response mismatch\nexpected: %#v\ngot: %#v", expected, actual)
-		}
-
-		var frozenExpected map[string]any
-		loadFixtureJSON(t, "service_contract/intern-turn-response.json", &frozenExpected)
-		if !reflect.DeepEqual(actual, frozenExpected) {
-			t.Fatalf("frozen turn response mismatch\nexpected: %#v\ngot: %#v", frozenExpected, actual)
-		}
-
-		snapshot, ok := server.jobs.Snapshot(jobID)
-		if !ok {
-			t.Fatalf("expected stored snapshot for %s", jobID)
-		}
-		for _, event := range snapshot.Events {
-			if event.Type != "queued" && event.Type != "started" && event.Type != "completion" && event.Type != "error" {
-				continue
-			}
-			if event.Data["request_id"] != "req_fixture" || event.Data["workspace_id"] != "ws_fixture" || event.Data["network_session_id"] != "sess_fixture" {
-				t.Fatalf("expected frozen turn fixture correlation metadata in lifecycle events, got %#v", event.Data)
-			}
-		}
+		assertHTTPLegacyTurnsGone(t, resp.StatusCode, mustReadBody(t, resp.Body))
 	})
 
 	t.Run("subagent response", func(t *testing.T) {
-		database, cleanup := openServiceTestDB(t)
-		defer cleanup()
-		jobs := agent.NewJobRegistry(time.Minute, 32)
-		manager := &agent.SubagentManager{DB: database, Jobs: jobs, MaxQueued: 4}
-		manager.BackgroundTools = func() *tools.Registry {
-			registry := tools.NewRegistry()
-			registry.Register(serviceTestTool{name: "read_file"})
-			return registry
-		}
-		server := &serviceServer{subagentManager: manager, jobs: jobs}
+		server := &serviceServer{jobs: jobs.NewRegistry(time.Minute, 32)}
 		httpServer := newServiceTestHTTPServer(t, strings.Repeat("u", 32), server)
 		defer httpServer.Close()
 
@@ -193,22 +132,11 @@ func TestOr3NetCompatibilityFixtures_Responses(t *testing.T) {
 			t.Fatalf("Do: %v", err)
 		}
 		defer resp.Body.Close()
-		var actual map[string]any
-		if err := json.NewDecoder(resp.Body).Decode(&actual); err != nil {
-			t.Fatalf("Decode: %v", err)
-		}
-		actual["job_id"] = "__JOB_ID__"
-		actual["child_session_key"] = "__CHILD_SESSION_KEY__"
-
-		var expected map[string]any
-		loadFixtureJSON(t, "service_contract/subagent-response.json", &expected)
-		if !reflect.DeepEqual(actual, expected) {
-			t.Fatalf("subagent response mismatch\nexpected: %#v\ngot: %#v", expected, actual)
-		}
+		assertHTTPLegacySubagentsPostGone(t, resp.StatusCode, mustReadBody(t, resp.Body))
 	})
 
 	t.Run("job stream attach", func(t *testing.T) {
-		jobs := agent.NewJobRegistry(time.Minute, 32)
+		jobs := jobs.NewRegistry(time.Minute, 32)
 		job := jobs.RegisterWithID("job_fixture", "turn")
 		jobs.Publish(job.ID, "queued", map[string]any{"status": "queued"})
 		jobs.Publish(job.ID, "started", map[string]any{"status": "running"})
@@ -233,7 +161,7 @@ func TestOr3NetCompatibilityFixtures_Responses(t *testing.T) {
 	})
 
 	t.Run("job abort", func(t *testing.T) {
-		jobs := agent.NewJobRegistry(time.Minute, 32)
+		jobs := jobs.NewRegistry(time.Minute, 32)
 		snapshot := jobs.RegisterWithID("job_fixture", "turn")
 		jobs.Complete(snapshot.ID, "completed", map[string]any{"final_text": "done"})
 		server := &serviceServer{jobs: jobs}
@@ -256,7 +184,7 @@ func TestOr3NetCompatibilityFixtures_Responses(t *testing.T) {
 	})
 
 	t.Run("health status", func(t *testing.T) {
-		server := &serviceServer{runtime: &agent.Runtime{Tools: tools.NewRegistry()}, jobs: agent.NewJobRegistry(time.Minute, 32)}
+		server := &serviceServer{jobs: jobs.NewRegistry(time.Minute, 32)}
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/internal/v1/health", nil)
 		server.handleHealth(rec, req)
@@ -285,7 +213,7 @@ func TestOr3NetCompatibilityFixtures_Responses(t *testing.T) {
 		cfg := config.Default()
 		cfg.Provider.APIBase = "http://provider.example"
 		cfg.Provider.EmbedModel = "text-embedding-3-small"
-		server := &serviceServer{config: cfg, runtime: &agent.Runtime{DB: database}, jobs: agent.NewJobRegistry(time.Minute, 32)}
+		server := &serviceServer{config: cfg, database: database, jobs: jobs.NewRegistry(time.Minute, 32)}
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/internal/v1/embeddings/status", nil)
 		req = req.WithContext(context.WithValue(req.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Kind: "shared-secret", Actor: "service:shared-secret", Role: "admin"}))
@@ -310,7 +238,7 @@ func TestOr3NetCompatibilityFixtures_Responses(t *testing.T) {
 		}
 		cfg := config.Default()
 		cfg.Security.Audit.Enabled = true
-		server := &serviceServer{config: cfg, runtime: &agent.Runtime{DB: database, Audit: audit}, jobs: agent.NewJobRegistry(time.Minute, 32)}
+		server := &serviceServer{config: cfg, database: database, audit: audit, jobs: jobs.NewRegistry(time.Minute, 32)}
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/internal/v1/audit", nil)
 		req = req.WithContext(context.WithValue(req.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Kind: "shared-secret", Actor: "service:shared-secret", Role: "admin"}))
@@ -349,7 +277,7 @@ func TestServiceRouteContracts_CurrentAppUsageRoutesStayRegistered(t *testing.T)
 
 func TestServiceRouteContracts_UnknownInternalRouteReturnsStructuredJSON(t *testing.T) {
 	secret := strings.Repeat("r", 32)
-	server := &serviceServer{config: config.Default(), runtime: &agent.Runtime{Tools: tools.NewRegistry()}, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	server := &serviceServer{config: config.Default(), jobs: jobs.NewRegistry(time.Minute, 32)}
 	server.config.Service.SharedSecretRole = "operator"
 	httpServer := newServiceTestHTTPServer(t, secret, server)
 	defer httpServer.Close()
@@ -378,9 +306,8 @@ func TestServiceRouteContracts_UnknownInternalRouteReturnsStructuredJSON(t *test
 func TestServiceRouteContracts_Non2xxJSONResponsesIncludeErrorCodeAndRequestID(t *testing.T) {
 	secret := strings.Repeat("c", 32)
 	server := &serviceServer{
-		config:  config.Default(),
-		runtime: &agent.Runtime{Tools: tools.NewRegistry()},
-		jobs:    agent.NewJobRegistry(time.Minute, 32),
+		config: config.Default(),
+		jobs:   jobs.NewRegistry(time.Minute, 32),
 	}
 	server.config.Service.SharedSecretRole = "operator"
 	httpServer := newServiceTestHTTPServer(t, secret, server)
@@ -393,8 +320,8 @@ func TestServiceRouteContracts_Non2xxJSONResponsesIncludeErrorCodeAndRequestID(t
 		body       string
 		wantStatus int
 	}{
-		{name: "turns validation", method: http.MethodPost, path: "/internal/v1/turns", body: `{}`, wantStatus: http.StatusBadRequest},
-		{name: "subagents unavailable", method: http.MethodPost, path: "/internal/v1/subagents", body: `{}`, wantStatus: http.StatusServiceUnavailable},
+		{name: "turns removed", method: http.MethodPost, path: "/internal/v1/turns", body: `{}`, wantStatus: http.StatusGone},
+		{name: "subagents create removed", method: http.MethodPost, path: "/internal/v1/subagents", body: `{}`, wantStatus: http.StatusGone},
 		{name: "jobs route missing", method: http.MethodGet, path: "/internal/v1/jobs", wantStatus: http.StatusNotFound},
 		{name: "cron method", method: http.MethodPost, path: "/internal/v1/cron", wantStatus: http.StatusMethodNotAllowed},
 		{name: "approvals unavailable", method: http.MethodGet, path: "/internal/v1/approvals", wantStatus: http.StatusServiceUnavailable},

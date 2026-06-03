@@ -51,6 +51,7 @@ func serviceRouteSpecs(server *serviceServer) []serviceRouteSpec {
 		{Path: "/internal/v1/chat-runners", Handler: server.handleChatRunners},
 		{Path: "/internal/v1/chat-sessions", Subtree: true, Handler: server.handleChatSessions},
 		{Path: "/internal/v1/runner-chat/sessions", Subtree: true, Handler: server.handleRunnerChatSessions},
+		{Path: "/internal/v1/runner-memory", Subtree: true, Handler: server.handleRunnerMemory},
 	}
 }
 

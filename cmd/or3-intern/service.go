@@ -13,10 +13,11 @@ import (
 	"sync"
 	"time"
 
-	"or3-intern/internal/agent"
 	"or3-intern/internal/agentcli"
 	"or3-intern/internal/app"
 	"or3-intern/internal/approval"
+	"or3-intern/internal/artifacts"
+	"or3-intern/internal/channels"
 	"or3-intern/internal/config"
 	"or3-intern/internal/controlplane"
 	"or3-intern/internal/cron"
@@ -24,22 +25,30 @@ import (
 	"or3-intern/internal/jobs"
 	or3log "or3-intern/internal/log"
 	"or3-intern/internal/mcp"
+	"or3-intern/internal/doctoradmin"
 	"or3-intern/internal/memory"
+	"or3-intern/internal/memorysvc"
+	"or3-intern/internal/providers"
+	"or3-intern/internal/security"
 )
 
 type serviceServer struct {
 	config                config.Config
 	configPath            string
-	runtime               *agent.Runtime
+	database              *db.DB
+	audit                 *security.AuditLogger
+	artifacts             *artifacts.Store
+	memRetriever          *memory.Retriever
+	docRetriever          *memory.DocRetriever
+	embedProvider         *providers.Client
 	cronSvc               *cron.Service
-	subagentManager       *agent.SubagentManager
 	agentCLIManager       *agentcli.Manager
 	chatManager           *agentcli.ChatManager
 	turnOrchestrator      *app.RunnerTurnOrchestrator
 	mcpManager            *mcp.Manager
 	mcpTestManagerFactory serviceMCPTestManagerFactory
 	jobs                  *jobs.Registry
-	channelDeliverer      agent.MetaDeliverer
+	channelDeliverer      channels.MetaDeliverer
 	broker                *approval.Broker
 	unsafeDev             bool
 	controlOnce           sync.Once
@@ -57,6 +66,8 @@ type serviceServer struct {
 	doctorTurnMu          sync.Mutex
 	doctorTurnOnce        sync.Once
 	doctorActiveTurns     map[string]doctorSessionTurnLease
+	doctorAdmin           *doctoradmin.Registry
+	memorySvc             *memorysvc.Service
 }
 
 type serviceDeviceResponse struct {
@@ -146,27 +157,27 @@ const (
 	serviceJobStreamHeartbeatInterval              = 15 * time.Second
 )
 
-func runServiceCommand(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, agentCLIManager *agentcli.Manager, jobRegistry *jobs.Registry) error {
-	return runServiceCommandWithBroker(ctx, cfg, rt, subagentManager, agentCLIManager, jobRegistry, nil)
+func runServiceCommand(ctx context.Context, cfg config.Config, agentCLIManager *agentcli.Manager, jobRegistry *jobs.Registry) error {
+	return runServiceCommandWithBroker(ctx, cfg, agentCLIManager, jobRegistry, nil)
 }
 
-func runServiceCommandWithBroker(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, agentCLIManager *agentcli.Manager, jobRegistry *jobs.Registry, broker *approval.Broker) error {
-	return runServiceCommandWithBrokerOptions(ctx, cfg, rt, subagentManager, agentCLIManager, jobRegistry, broker, false)
+func runServiceCommandWithBroker(ctx context.Context, cfg config.Config, agentCLIManager *agentcli.Manager, jobRegistry *jobs.Registry, broker *approval.Broker) error {
+	return runServiceCommandWithBrokerOptions(ctx, cfg, agentCLIManager, jobRegistry, broker, false)
 }
 
-func runServiceCommandWithBrokerOptions(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, agentCLIManager *agentcli.Manager, jobRegistry *jobs.Registry, broker *approval.Broker, unsafeDev bool) error {
-	return runServiceCommandWithBrokerOptionsAndCron(ctx, cfg, rt, subagentManager, agentCLIManager, jobRegistry, broker, unsafeDev, nil)
+func runServiceCommandWithBrokerOptions(ctx context.Context, cfg config.Config, agentCLIManager *agentcli.Manager, jobRegistry *jobs.Registry, broker *approval.Broker, unsafeDev bool) error {
+	return runServiceCommandWithBrokerOptionsAndCron(ctx, cfg, agentCLIManager, jobRegistry, broker, unsafeDev, nil)
 }
 
-func runServiceCommandWithBrokerOptionsAndCron(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, agentCLIManager *agentcli.Manager, jobRegistry *jobs.Registry, broker *approval.Broker, unsafeDev bool, cronSvc *cron.Service) error {
-	return runServiceCommandWithBrokerOptionsCronMCP(ctx, cfg, rt, subagentManager, agentCLIManager, nil, jobRegistry, broker, unsafeDev, cronSvc, nil)
+func runServiceCommandWithBrokerOptionsAndCron(ctx context.Context, cfg config.Config, agentCLIManager *agentcli.Manager, jobRegistry *jobs.Registry, broker *approval.Broker, unsafeDev bool, cronSvc *cron.Service) error {
+	return runServiceCommandWithBrokerOptionsCronMCP(ctx, cfg, agentCLIManager, nil, jobRegistry, broker, unsafeDev, cronSvc, nil)
 }
 
-func runServiceCommandWithBrokerOptionsCronMCP(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, agentCLIManager *agentcli.Manager, turnOrchestrator *app.RunnerTurnOrchestrator, jobRegistry *jobs.Registry, broker *approval.Broker, unsafeDev bool, cronSvc *cron.Service, mcpManager *mcp.Manager) error {
-	return runServiceCommandWithBrokerOptionsCronMCPAndChannels(ctx, cfg, rt, subagentManager, agentCLIManager, nil, turnOrchestrator, jobRegistry, broker, unsafeDev, cronSvc, mcpManager, nil)
+func runServiceCommandWithBrokerOptionsCronMCP(ctx context.Context, cfg config.Config, agentCLIManager *agentcli.Manager, turnOrchestrator *app.RunnerTurnOrchestrator, jobRegistry *jobs.Registry, broker *approval.Broker, unsafeDev bool, cronSvc *cron.Service, mcpManager *mcp.Manager) error {
+	return runServiceCommandWithBrokerOptionsCronMCPAndChannels(ctx, cfg, serviceHostDeps{}, agentCLIManager, nil, turnOrchestrator, jobRegistry, broker, unsafeDev, cronSvc, mcpManager, nil)
 }
 
-func runServiceCommandWithBrokerOptionsCronMCPAndChannels(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, agentCLIManager *agentcli.Manager, chatManager *agentcli.ChatManager, turnOrchestrator *app.RunnerTurnOrchestrator, jobRegistry *jobs.Registry, broker *approval.Broker, unsafeDev bool, cronSvc *cron.Service, mcpManager *mcp.Manager, channelDeliverer agent.MetaDeliverer) error {
+func runServiceCommandWithBrokerOptionsCronMCPAndChannels(ctx context.Context, cfg config.Config, host serviceHostDeps, agentCLIManager *agentcli.Manager, chatManager *agentcli.ChatManager, turnOrchestrator *app.RunnerTurnOrchestrator, jobRegistry *jobs.Registry, broker *approval.Broker, unsafeDev bool, cronSvc *cron.Service, mcpManager *mcp.Manager, channelDeliverer channels.MetaDeliverer) error {
 	or3log.InstallStdlibSink()
 	if strings.TrimSpace(cfg.Service.Secret) == "" {
 		return fmt.Errorf("service secret is required")
@@ -174,29 +185,25 @@ func runServiceCommandWithBrokerOptionsCronMCPAndChannels(ctx context.Context, c
 	if err := validateStartupCommandWithOptions("service", cfg, unsafeDev, false); err != nil {
 		return err
 	}
-	if rt == nil {
-		return fmt.Errorf("runtime not configured")
+	if host.DB == nil {
+		return fmt.Errorf("database not configured")
 	}
 	if jobRegistry == nil {
 		jobRegistry = jobs.NewRegistry(0, 0)
 	}
-	server := &serviceServer{config: cfg, configPath: cfgPathOrDefault(""), runtime: rt, cronSvc: cronSvc, subagentManager: subagentManager, agentCLIManager: agentCLIManager, chatManager: nil, turnOrchestrator: turnOrchestrator, mcpManager: mcpManager, jobs: jobRegistry, channelDeliverer: channelDeliverer, broker: broker, unsafeDev: unsafeDev}
-	server.registerDoctorAdminBrainTools()
+	server := &serviceServer{config: cfg, configPath: cfgPathOrDefault(""), cronSvc: cronSvc, agentCLIManager: agentCLIManager, chatManager: nil, turnOrchestrator: turnOrchestrator, mcpManager: mcpManager, jobs: jobRegistry, channelDeliverer: channelDeliverer, broker: broker, unsafeDev: unsafeDev}
+	server.applyHostDeps(host)
+	if db := server.serviceDB(); db != nil {
+		server.memorySvc = memorysvc.New(cfg, db, server.serviceEmbedProvider(), currentEmbedFingerprint(cfg))
+	}
+	server.ensureDoctorAdminRegistry()
 	if chatManager != nil {
 		server.chatManager = chatManager
-	} else if rt.DB != nil {
-		server.chatManager = buildRuntimeChatManager(cfg, rt.DB, agentCLIManager, jobRegistry, broker)
+	} else if db := server.serviceDB(); db != nil {
+		server.chatManager = buildRuntimeChatManager(cfg, db, agentCLIManager, jobRegistry, broker)
 	}
 	if turnOrchestrator == nil && server.chatManager != nil {
-		var mem *memory.Retriever
-		if rt.Builder != nil && rt.Builder.Mem != nil {
-			mem = rt.Builder.Mem
-		}
-		var docs *memory.DocRetriever
-		if rt.Builder != nil {
-			docs = rt.Builder.DocRetriever
-		}
-		turnOrchestrator = buildRunnerTurnOrchestrator(cfg, server.chatManager, rt.DB, mem, docs, rt.Provider)
+		turnOrchestrator = buildRunnerTurnOrchestrator(cfg, server.chatManager, server.serviceDB(), server.serviceMemRetriever(), server.serviceDocRetriever(), server.serviceEmbedProvider())
 	}
 	server.turnOrchestrator = turnOrchestrator
 	if server.chatManager != nil {
@@ -303,7 +310,7 @@ func newServiceMux(server *serviceServer) *http.ServeMux {
 
 func (s *serviceServer) control() *controlplane.Service {
 	s.controlOnce.Do(func() {
-		s.controlSvc = controlplane.New(s.config, s.runtime, s.broker, s.jobs, s.subagentManager)
+		s.controlSvc = controlplane.New(s.config, s.serviceDB(), s.serviceEmbedProvider(), s.serviceAudit(), s.broker, s.jobs)
 		s.controlSvc.MCPStatus = s.mcpManager
 	})
 	return s.controlSvc
@@ -311,7 +318,7 @@ func (s *serviceServer) control() *controlplane.Service {
 
 func (s *serviceServer) app() *app.ServiceApp {
 	s.appOnce.Do(func() {
-		s.appSvc = app.NewServiceAppWithRunnerTurns(s.config, s.runtime, s.jobs, s.subagentManager, s.agentCLIManager, s.turnOrchestrator, s.control())
+		s.appSvc = app.NewServiceAppWithRunnerTurns(s.config, s.jobs, s.agentCLIManager, s.turnOrchestrator, s.control())
 	})
 	return s.appSvc
 }

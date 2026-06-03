@@ -5,12 +5,12 @@ import (
 	"testing"
 	"time"
 
-	"or3-intern/internal/agent"
 	"or3-intern/internal/app"
+	"or3-intern/internal/jobs"
 )
 
 func TestCompleteTurnJobFromRunnerWaitsForRunnerJob(t *testing.T) {
-	jobs := agent.NewJobRegistry(time.Minute, 16)
+	jobs := jobs.NewRegistry(time.Minute, 16)
 	server := &serviceServer{jobs: jobs}
 	parent := jobs.RegisterWithID("svc-parent", "turn")
 	child := jobs.RegisterWithID("runner-child", "agent_cli")

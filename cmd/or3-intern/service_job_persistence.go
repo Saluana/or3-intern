@@ -14,7 +14,7 @@ import (
 )
 
 func (s *serviceServer) persistServiceJobSummary(ctx context.Context, jobID string) {
-	if s == nil || s.runtime == nil || s.runtime.DB == nil {
+	if s == nil || s.serviceDB() == nil {
 		return
 	}
 	snapshot, ok := s.jobs.Snapshot(jobID)
@@ -34,16 +34,16 @@ func (s *serviceServer) persistServiceJobSummary(ctx context.Context, jobID stri
 		CreatedAt:  snapshot.CreatedAt.Unix(),
 		UpdatedAt:  snapshot.UpdatedAt.Unix(),
 	}
-	if err := s.runtime.DB.UpsertServiceJobSummary(ctx, summary); err != nil {
+	if err := s.serviceDB().UpsertServiceJobSummary(ctx, summary); err != nil {
 		log.Printf("service_jobs: persist failed for job %s: %v", jobID, err)
 	}
 }
 
 func (s *serviceServer) writePersistedServiceJobSnapshot(w http.ResponseWriter, r *http.Request, jobID string) bool {
-	if s == nil || s.runtime == nil || s.runtime.DB == nil {
+	if s == nil || s.serviceDB() == nil {
 		return false
 	}
-	summary, err := s.runtime.DB.GetServiceJobSummary(r.Context(), jobID)
+	summary, err := s.serviceDB().GetServiceJobSummary(r.Context(), jobID)
 	if err != nil {
 		if !sqlIsNotFound(err) {
 			log.Printf("service_jobs: lookup failed for job %s: %v", jobID, err)

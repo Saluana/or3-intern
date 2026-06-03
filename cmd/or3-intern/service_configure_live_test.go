@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"or3-intern/internal/agent"
 	"or3-intern/internal/app"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
+	"or3-intern/internal/jobs"
 	"or3-intern/internal/runnerfirst"
 )
 
@@ -43,12 +43,12 @@ func TestApplyLiveConfigRefreshesRunnerRuntime(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.AgentCLI.DefaultRunner = "opencode"
-	jobs := agent.NewJobRegistry(time.Minute, 16)
+	jobs := jobs.NewRegistry(time.Minute, 16)
 	srv := &serviceServer{
-		config:  cfg,
-		runtime: &agent.Runtime{DB: database},
-		jobs:    jobs,
-		appSvc:  app.NewServiceAppWithRunnerTurns(cfg, &agent.Runtime{DB: database}, jobs, nil, nil, nil, nil),
+		config:   cfg,
+		database: database,
+		jobs:     jobs,
+		appSvc:   app.NewServiceAppWithRunnerTurns(cfg, jobs, nil, nil, nil),
 	}
 	srv.applyLiveConfig(cfg)
 	if srv.agentCLIManager == nil || srv.chatManager == nil || srv.turnOrchestrator == nil {

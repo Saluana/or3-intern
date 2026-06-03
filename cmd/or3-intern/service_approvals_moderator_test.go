@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"or3-intern/internal/agent"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/config"
+	"or3-intern/internal/jobs"
 )
 
 func TestServiceApprovalsListIncludesModeratorMetadata(t *testing.T) {
@@ -29,7 +29,7 @@ func TestServiceApprovalsListIncludesModeratorMetadata(t *testing.T) {
 		t.Fatalf("EvaluateExec: err=%v decision=%#v", err, decision)
 	}
 
-	server := &serviceServer{broker: broker, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	server := &serviceServer{broker: broker, jobs: jobs.NewRegistry(time.Minute, 32)}
 	httpServer := newServiceTestHTTPServer(t, strings.Repeat("m", 32), server)
 	defer httpServer.Close()
 

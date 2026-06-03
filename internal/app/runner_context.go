@@ -30,7 +30,7 @@ type RunnerContextDeps struct {
 	Cache            *agentcli.RunnerContextCache
 }
 
-// RunnerContextBuilder assembles bounded OR3 context blocks without agent.Runtime.
+// RunnerContextBuilder assembles bounded OR3 context blocks without the legacy built-in runtime.
 type RunnerContextBuilder struct {
 	cfg  config.Config
 	deps RunnerContextDeps

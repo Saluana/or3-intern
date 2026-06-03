@@ -252,75 +252,18 @@ func TestResolveInstallRoot_PrefersManagedDirOverWorkspace(t *testing.T) {
 	}
 }
 
-func TestAvailableToolNames_IncludesCuratedMemoryReadTools(t *testing.T) {
+func TestAvailableToolNames_ReturnsEmptyInRunnerFirst(t *testing.T) {
 	got := availableToolNames(false, false)
-	for _, name := range []string{"list_dir", "search_file", "read_artifact", "web_fetch_markdown", "memory_recent", "memory_get_pinned"} {
-		if _, ok := got[name]; !ok {
-			t.Fatalf("expected tool name %q to be available", name)
-		}
+	if len(got) != 0 {
+		t.Fatalf("expected no built-in model-callable tools, got %#v", got)
 	}
 }
 
-func TestFilterAdvertisedToolNames_DisabledExecHidesExecTool(t *testing.T) {
+func TestFilterAdvertisedToolNames_ReturnsEmptyWithoutBuiltInTools(t *testing.T) {
 	cfg := config.Default()
-	cfg.Tools.EnableExec = false
-	cfg.Hardening.GuardedTools = true
-	cfg.Hardening.PrivilegedTools = true
-
 	got := filterAdvertisedToolNames(cfg, availableToolNames(false, false))
-	if _, ok := got["exec"]; ok {
-		t.Fatalf("expected exec to be hidden when exec tool is disabled, got %#v", got)
-	}
-}
-
-func TestFilterAdvertisedToolNames_HostedNoExecHidesExecTools(t *testing.T) {
-	cfg := config.Default()
-	cfg.RuntimeProfile = config.ProfileHostedNoExec
-	cfg.Tools.EnableExec = true
-	cfg.Hardening.GuardedTools = true
-	cfg.Hardening.PrivilegedTools = true
-	cfg.Skills.EnableExec = true
-
-	got := filterAdvertisedToolNames(cfg, availableToolNames(false, false))
-	if _, ok := got["exec"]; ok {
-		t.Fatalf("expected exec to be hidden in hosted-no-exec, got %#v", got)
-	}
-	if _, ok := got["run_skill"]; ok {
-		t.Fatalf("expected run_skill to be hidden in hosted-no-exec, got %#v", got)
-	}
-	if _, ok := got["run_skill_script"]; ok {
-		t.Fatalf("expected run_skill_script to be hidden in hosted-no-exec, got %#v", got)
-	}
-}
-
-func TestFilterAdvertisedToolNames_RemoteSandboxRequiresSandboxForExecTools(t *testing.T) {
-	cfg := config.Default()
-	cfg.RuntimeProfile = config.ProfileHostedRemoteSandbox
-	cfg.Tools.EnableExec = true
-	cfg.Hardening.GuardedTools = true
-	cfg.Skills.EnableExec = true
-
-	got := filterAdvertisedToolNames(cfg, availableToolNames(false, false))
-	if _, ok := got["exec"]; ok {
-		t.Fatalf("expected exec to be hidden without sandbox, got %#v", got)
-	}
-	if _, ok := got["run_skill"]; ok {
-		t.Fatalf("expected run_skill to be hidden without sandbox, got %#v", got)
-	}
-	if _, ok := got["run_skill_script"]; ok {
-		t.Fatalf("expected run_skill_script to be hidden without sandbox, got %#v", got)
-	}
-
-	cfg.Hardening.Sandbox.Enabled = true
-	got = filterAdvertisedToolNames(cfg, availableToolNames(false, false))
-	if _, ok := got["exec"]; !ok {
-		t.Fatalf("expected exec to return when sandbox is enabled, got %#v", got)
-	}
-	if _, ok := got["run_skill"]; !ok {
-		t.Fatalf("expected run_skill to return when sandbox is enabled, got %#v", got)
-	}
-	if _, ok := got["run_skill_script"]; !ok {
-		t.Fatalf("expected run_skill_script to return when sandbox is enabled, got %#v", got)
+	if len(got) != 0 {
+		t.Fatalf("expected no advertised built-in tools, got %#v", got)
 	}
 }
 

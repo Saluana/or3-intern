@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"or3-intern/internal/agent"
+	"or3-intern/internal/jobs"
 	"or3-intern/internal/db"
 )
 
@@ -46,8 +46,8 @@ func TestChatManagerPersistsDistinctNativeRefsPerSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateOrGetRunnerChatSession second: %v", err)
 	}
-	cm.maybePersistNativeSessionRef(first, "job-a", agent.JobEvent{Type: "structured", Sequence: 1, Data: map[string]any{"payload": map[string]any{"type": "thread.started", "thread_id": "thread-a"}}})
-	cm.maybePersistNativeSessionRef(second, "job-b", agent.JobEvent{Type: "structured", Sequence: 1, Data: map[string]any{"payload": map[string]any{"type": "thread.started", "thread_id": "thread-b"}}})
+	cm.maybePersistNativeSessionRef(first, "job-a", jobs.Event{Type: "structured", Sequence: 1, Data: map[string]any{"payload": map[string]any{"type": "thread.started", "thread_id": "thread-a"}}})
+	cm.maybePersistNativeSessionRef(second, "job-b", jobs.Event{Type: "structured", Sequence: 1, Data: map[string]any{"payload": map[string]any{"type": "thread.started", "thread_id": "thread-b"}}})
 
 	gotFirst, err := d.GetRunnerChatSession(ctx, first.ID)
 	if err != nil {

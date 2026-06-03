@@ -97,7 +97,7 @@ func TestDecodeServiceTurnRequest_AcceptsModelOverride(t *testing.T) {
 		"session_key": "svc:key",
 		"message": "hello",
 		"model": "anthropic/claude-sonnet-4-5"
-	}`), nil)
+	}`))
 	if err != nil {
 		t.Fatalf("decodeServiceTurnRequest: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestDecodeServiceTurnRequest_ConflictWarningsKeepSnakeCaseCanonical(t *test
 		"session_key": "snake-session",
 		"sessionKey": "camel-session",
 		"message": "hello"
-	}`), nil)
+	}`))
 	if err != nil {
 		t.Fatalf("decodeServiceTurnRequest: %v", err)
 	}

@@ -2,8 +2,8 @@
     "approvalBrokerAvailable": false,
     "jobRegistryAvailable": true,
     "processId": "__PROCESS_ID__",
-    "runtimeAvailable": true,
+    "runtimeAvailable": false,
     "startedAt": "__STARTED_AT__",
-    "status": "ok",
+    "status": "degraded",
     "subagentManagerEnabled": false
 }

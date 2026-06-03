@@ -376,6 +376,8 @@ func TestChannel_FetchUpdatesPublishesPhotoAttachment(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
+		case "/bottoken/setMyCommands":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": true})
 		case "/bottoken/getUpdates":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"ok": true,
@@ -430,6 +432,51 @@ func TestChannel_FetchUpdatesPublishesPhotoAttachment(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for telegram media event")
+	}
+}
+
+func TestChannel_StartRegistersBotCommands(t *testing.T) {
+	commandsSeen := make(chan []map[string]any, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/bottoken/setMyCommands":
+			var body struct {
+				Commands []map[string]any `json:"commands"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode commands: %v", err)
+			}
+			commandsSeen <- body.Commands
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": true})
+		case "/bottoken/getUpdates":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": []map[string]any{}})
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	ch := &Channel{Config: config.TelegramChannelConfig{Token: "token", APIBase: server.URL, PollSeconds: 1, OpenAccess: true}}
+	b := bus.New(1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := ch.Start(ctx, b); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ch.Stop(context.Background()) }()
+	select {
+	case commands := <-commandsSeen:
+		var sawRunner, sawModel bool
+		for _, command := range commands {
+			sawRunner = sawRunner || command["command"] == "runner"
+			sawModel = sawModel || command["command"] == "model"
+		}
+		if !sawRunner || !sawModel {
+			t.Fatalf("expected runner/model commands, got %#v", commands)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for command registration")
 	}
 }
 

@@ -120,15 +120,17 @@ func doctorDocsAliasBoost(relPath, query string) int {
 }
 
 func doctorDocsCategory(relPath string) string {
-	trimmed := strings.TrimPrefix(filepath.ToSlash(relPath), "docs/v1/")
-	parts := strings.Split(trimmed, "/")
-	if len(parts) == 0 || parts[0] == "" {
-		return "root"
+	slashPath := filepath.ToSlash(relPath)
+	for _, prefix := range []string{"docs/archive/v1/", "docs/v1/"} {
+		if trimmed, ok := strings.CutPrefix(slashPath, prefix); ok {
+			parts := strings.Split(trimmed, "/")
+			if len(parts) == 0 || parts[0] == "" {
+				return "root"
+			}
+			return parts[0]
+		}
 	}
-	if parts[0] == trimmed {
-		return "root"
-	}
-	return parts[0]
+	return "root"
 }
 
 func parseDoctorDocsSections(content string) []doctorDocsSection {

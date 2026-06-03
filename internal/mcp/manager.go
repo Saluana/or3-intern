@@ -302,17 +302,6 @@ func (m *Manager) ToolCatalog() []ToolCatalogEntry {
 	return out
 }
 
-// RegisterTools registers all discovered remote tools into reg.
-func (m *Manager) RegisterTools(reg *tools.Registry) int {
-	if m == nil || reg == nil {
-		return 0
-	}
-	for _, spec := range m.tools {
-		reg.Register(spec.Tool())
-	}
-	return len(m.tools)
-}
-
 // Close closes all active sessions and clears discovered tools.
 func (m *Manager) Close() error {
 	if m == nil {

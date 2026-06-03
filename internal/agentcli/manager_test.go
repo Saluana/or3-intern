@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"or3-intern/internal/agent"
+	"or3-intern/internal/jobs"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
 )
@@ -38,10 +38,10 @@ func (a *stubRunnerAdapter) BuildCommand(AgentRunRequest) (CommandSpec, error) {
 	return cmd, nil
 }
 
-func newTestManager(t *testing.T) (*Manager, *db.DB, *agent.JobRegistry) {
+func newTestManager(t *testing.T) (*Manager, *db.DB, *jobs.Registry) {
 	t.Helper()
 	database := openAgentCLITestDB(t)
-	jobs := agent.NewJobRegistry(0, 0)
+	jobs := jobs.NewRegistry(0, 0)
 	manager := &Manager{
 		DB:       database,
 		Jobs:     jobs,
@@ -114,7 +114,7 @@ func TestManagerStartStopAndReconcile(t *testing.T) {
 	}
 
 	database := openAgentCLITestDB(t)
-	jobs := agent.NewJobRegistry(0, 0)
+	jobs := jobs.NewRegistry(0, 0)
 	run := mustInsertAgentRun(t, database, db.AgentCLIRun{
 		ID:             "acr-reconcile",
 		JobID:          "job-reconcile",
@@ -354,7 +354,7 @@ func TestManagerEnqueueQueueFullAndAbortLifecycle(t *testing.T) {
 
 func TestManagerExecuteRunBuildFailureFinalizesRun(t *testing.T) {
 	database := openAgentCLITestDB(t)
-	jobs := agent.NewJobRegistry(0, 0)
+	jobs := jobs.NewRegistry(0, 0)
 	run := mustInsertAgentRun(t, database, db.AgentCLIRun{
 		ID:        "acr-build-failure",
 		JobID:     "job-build-failure",
@@ -391,7 +391,7 @@ func TestManagerExecuteRunHonorsDeadlineAndCancellation(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			database := openAgentCLITestDB(t)
-			jobs := agent.NewJobRegistry(0, 0)
+			jobs := jobs.NewRegistry(0, 0)
 			binary := writeFakeBinary(t, t.TempDir(), "sleepy-runner", `sleep 2`)
 			adapter := &stubRunnerAdapter{
 				id:   RunnerID("sleepy"),

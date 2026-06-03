@@ -2,12 +2,10 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 
-	"or3-intern/internal/agent"
 	"or3-intern/internal/app"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/bus"
@@ -20,7 +18,6 @@ import (
 
 type channelApprovalHandler struct {
 	Config   config.Config
-	Runtime  *agent.Runtime
 	Jobs     *jobs.Registry
 	Broker   *approval.Broker
 	Channels *rootchannels.Manager
@@ -103,30 +100,13 @@ func (h *channelApprovalHandler) resolveApprovalCommandRequest(ctx context.Conte
 }
 
 func (h *channelApprovalHandler) resumeApprovedRequest(ctx context.Context, issued approval.IssuedApproval, actor string) {
-	if h == nil || h.Runtime == nil {
+	if h == nil {
 		return
 	}
-	serviceApp := app.NewServiceApp(h.Config, h.Runtime, h.Jobs, nil, nil)
-	finalText, err := serviceApp.ResumeApprovedRequest(ctx, app.ResumeApprovedRequest{
-		IssuedApproval: issued,
-		Capability:     tools.CapabilityGuarded,
-		Actor:          actor,
-		Role:           approval.RoleOperator,
-	})
 	requester := approval.RequesterContextFromJSON(issued.Request.RequesterContextJSON)
-	if err != nil {
-		var approvalErr *tools.ApprovalRequiredError
-		if errors.As(err, &approvalErr) && h.deliverResumeApprovalRequired(ctx, issued.Request, approvalErr) {
-			return
-		}
-		text := approvalResumeFailureMessage(err)
-		if h.Channels != nil && isApprovalExternalChannel(requester.Channel) && strings.TrimSpace(requester.ReplyTarget) != "" {
-			_ = h.Channels.DeliverWithMeta(ctx, requester.Channel, requester.ReplyTarget, text, approvalDeliveryMeta(requester))
-		}
-		return
-	}
-	if strings.TrimSpace(finalText) != "" && h.Channels != nil && isApprovalExternalChannel(requester.Channel) && strings.TrimSpace(requester.ReplyTarget) != "" {
-		_ = h.Channels.DeliverWithMeta(ctx, requester.Channel, requester.ReplyTarget, finalText, approvalDeliveryMeta(requester))
+	text := app.ErrLegacyToolReplayDisabled.Error()
+	if h.Channels != nil && isApprovalExternalChannel(requester.Channel) && strings.TrimSpace(requester.ReplyTarget) != "" {
+		_ = h.Channels.DeliverWithMeta(ctx, requester.Channel, requester.ReplyTarget, text, approvalDeliveryMeta(requester))
 	}
 }
 

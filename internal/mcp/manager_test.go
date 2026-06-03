@@ -12,7 +12,6 @@ import (
 
 	"or3-intern/internal/config"
 	"or3-intern/internal/security"
-	"or3-intern/internal/tools"
 )
 
 type fakeSession struct {
@@ -276,17 +275,10 @@ func TestManagerConnect_PartialFailureAndRegistration(t *testing.T) {
 		t.Fatalf("expected success and failure startup logs, got %#v", logs)
 	}
 
-	reg := tools.NewRegistry()
-	if got := manager.RegisterTools(reg); got != 1 {
-		t.Fatalf("expected one registered tool, got %d", got)
-	}
-	defs := reg.Definitions()
-	if len(defs) != 1 {
-		t.Fatalf("expected one tool definition, got %#v", defs)
-	}
-	out, err := reg.ExecuteParams(context.Background(), "mcp_alpha_echo", map[string]any{})
+	spec := manager.tools[0]
+	out, err := spec.Tool().Execute(context.Background(), map[string]any{})
 	if err != nil {
-		t.Fatalf("ExecuteParams: %v", err)
+		t.Fatalf("Execute: %v", err)
 	}
 	if out != "ok" {
 		t.Fatalf("unexpected MCP tool output: %q", out)

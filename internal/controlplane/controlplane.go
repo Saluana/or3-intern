@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"or3-intern/internal/agent"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
@@ -40,15 +39,13 @@ const (
 var processStartedAt = time.Now().UTC()
 
 type Service struct {
-	Config          config.Config
-	Runtime         *agent.Runtime
-	Broker          *approval.Broker
-	Jobs            *jobs.Registry
-	SubagentManager *agent.SubagentManager
-	DB              *db.DB
-	Provider        *providers.Client
-	Audit           *security.AuditLogger
-	MCPStatus       MCPStatusProvider
+	Config    config.Config
+	Broker    *approval.Broker
+	Jobs      *jobs.Registry
+	DB        *db.DB
+	Provider  *providers.Client
+	Audit     *security.AuditLogger
+	MCPStatus MCPStatusProvider
 }
 
 // MCPStatusProvider exposes runtime MCP connection state to control-plane reports.
@@ -185,20 +182,16 @@ type ScopeLinkResult struct {
 	ScopeKey   string `json:"scopeKey"`
 }
 
-func New(cfg config.Config, rt *agent.Runtime, broker *approval.Broker, jobs *jobs.Registry, subagentManager *agent.SubagentManager) *Service {
-	svc := &Service{
-		Config:          cfg,
-		Runtime:         rt,
-		Broker:          broker,
-		Jobs:            jobs,
-		SubagentManager: subagentManager,
+// New builds a control-plane service from explicit runtime dependencies.
+func New(cfg config.Config, database *db.DB, provider *providers.Client, audit *security.AuditLogger, broker *approval.Broker, jobRegistry *jobs.Registry) *Service {
+	return &Service{
+		Config:   cfg,
+		DB:       database,
+		Provider: provider,
+		Audit:    audit,
+		Broker:   broker,
+		Jobs:     jobRegistry,
 	}
-	if rt != nil {
-		svc.DB = rt.DB
-		svc.Provider = rt.Provider
-		svc.Audit = rt.Audit
-	}
-	return svc
 }
 
 func NewLocal(cfg config.Config, database *db.DB, provider *providers.Client, audit *security.AuditLogger, broker *approval.Broker) *Service {
@@ -214,9 +207,9 @@ func NewLocal(cfg config.Config, database *db.DB, provider *providers.Client, au
 func (s *Service) GetHealth() HealthReport {
 	report := HealthReport{
 		Status:                  "ok",
-		RuntimeAvailable:        s != nil && s.Runtime != nil,
+		RuntimeAvailable:        s != nil && s.DB != nil,
 		JobRegistryAvailable:    s != nil && s.Jobs != nil,
-		SubagentManagerEnabled:  s != nil && s.SubagentManager != nil,
+		SubagentManagerEnabled:  false,
 		ApprovalBrokerAvailable: s != nil && s.Broker != nil,
 		ProcessID:               os.Getpid(),
 		StartedAt:               processStartedAt.Format(time.RFC3339Nano),
@@ -684,9 +677,6 @@ func (s *Service) requireDB() (*db.DB, error) {
 	if s.DB != nil {
 		return s.DB, nil
 	}
-	if s.Runtime != nil && s.Runtime.DB != nil {
-		return s.Runtime.DB, nil
-	}
 	return nil, ErrDatabaseUnavailable
 }
 
@@ -697,9 +687,6 @@ func (s *Service) requireProvider() (*providers.Client, error) {
 	if s.Provider != nil {
 		return s.Provider, nil
 	}
-	if s.Runtime != nil && s.Runtime.Provider != nil {
-		return s.Runtime.Provider, nil
-	}
 	return nil, ErrProviderUnavailable
 }
 
@@ -709,9 +696,6 @@ func (s *Service) auditLogger() (*security.AuditLogger, bool) {
 	}
 	if s.Audit != nil && s.Audit.DB != nil && len(s.Audit.Key) > 0 {
 		return s.Audit, true
-	}
-	if s.Runtime != nil && s.Runtime.Audit != nil && s.Runtime.Audit.DB != nil && len(s.Runtime.Audit.Key) > 0 {
-		return s.Runtime.Audit, true
 	}
 	return nil, false
 }
@@ -788,10 +772,10 @@ func CollectCapabilitiesReportWithMCPStatus(cfg config.Config, broker *approval.
 		Hosted:             spec.Hosted,
 		HostID:             cfg.Security.Approvals.HostID,
 		Approvals:          ApprovalModes(cfg),
-		SubagentsEnabled:   cfg.Subagents.Enabled,
-		SkillExecEnabled:   cfg.Skills.EnableExec && cfg.Hardening.PrivilegedTools && !spec.ForbidPrivilegedTools,
-		ExecAvailable:      cfg.Hardening.GuardedTools && (!spec.RequireSandboxForExec || cfg.Hardening.Sandbox.Enabled),
-		ShellModeAvailable: cfg.Hardening.GuardedTools && cfg.Hardening.PrivilegedTools && cfg.Hardening.EnableExecShell && !spec.ForbidExecShell && !spec.ForbidPrivilegedTools && (!spec.RequireSandboxForExec || cfg.Hardening.Sandbox.Enabled),
+		SubagentsEnabled:   false,
+		SkillExecEnabled:   false,
+		ExecAvailable:      false,
+		ShellModeAvailable: false,
 		SandboxEnabled:     cfg.Hardening.Sandbox.Enabled,
 		SandboxRequired:    spec.RequireSandboxForExec,
 		NetworkPolicy:      cfg.Security.Network,

@@ -54,7 +54,7 @@ func TestDoctorDocsIndexAndSectionTools(t *testing.T) {
 	server := newDoctorTestServer(t, database, config.Default())
 	server.registerDoctorAdminBrainTools()
 
-	indexOut, err := server.runtime.Tools.ExecuteParams(context.Background(), doctorToolNameDocsIndex, nil)
+	indexOut, err := server.doctorAdmin.Execute(context.Background(), doctorToolNameDocsIndex, nil)
 	if err != nil {
 		t.Fatalf("doctor_docs_index: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestDoctorDocsIndexAndSectionTools(t *testing.T) {
 		t.Fatalf("expected indexed pages, got %#v", indexResult.Stats)
 	}
 
-	searchOut, err := server.runtime.Tools.ExecuteParams(context.Background(), doctorToolNameDocsSearch, map[string]any{
+	searchOut, err := server.doctorAdmin.Execute(context.Background(), doctorToolNameDocsSearch, map[string]any{
 		"query": "runner chat",
 		"limit": 3,
 	})
@@ -88,7 +88,7 @@ func TestDoctorDocsIndexAndSectionTools(t *testing.T) {
 	first, _ := results[0].(map[string]any)
 	path := fmt.Sprint(first["path"])
 
-	sectionOut, err := server.runtime.Tools.ExecuteParams(context.Background(), doctorToolNameDocsSection, map[string]any{
+	sectionOut, err := server.doctorAdmin.Execute(context.Background(), doctorToolNameDocsSection, map[string]any{
 		"path": path,
 	})
 	if err != nil {

@@ -21,7 +21,7 @@ func runDevicesCommand(ctx context.Context, broker *approval.Broker, args []stri
 	if broker == nil {
 		return fmt.Errorf("approval broker is not configured")
 	}
-	appSvc := app.NewServiceApp(config.Config{}, nil, nil, nil, newCLIControlplane(broker))
+	appSvc := app.NewServiceApp(config.Config{}, nil, newCLIControlplane(broker))
 	if len(args) == 0 {
 		return fmt.Errorf("usage: devices <list|requests|approve|deny|revoke|rotate>")
 	}

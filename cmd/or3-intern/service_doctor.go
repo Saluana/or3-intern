@@ -943,12 +943,12 @@ func (s *serviceServer) handleDoctorSessionMessage(w http.ResponseWriter, r *htt
 			"doctor_user_message":  content,
 			"doctor_untrusted":     true,
 			"doctor_tool_policy":   doctorAdminBrainToolPolicyName,
-			"doctor_allowed_tools": doctorAdminBrainAllowedTools(s.runtime.Tools),
+			"doctor_allowed_tools": doctorAdminBrainAllowedTools(s.doctorAdmin),
 		}
 		if thinking := strings.ToLower(strings.TrimSpace(req.ThinkingLevel)); thinking != "" {
 			turnMeta["runner_thinking_level"] = thinking
 		}
-		allowedTools := doctorAdminBrainAllowedTools(s.runtime.Tools)
+		allowedTools := doctorAdminBrainAllowedTools(s.doctorAdmin)
 		result, err := s.chatManager.StartTurn(r.Context(), meta.RunnerChatSessionID, agentcli.StartTurnRequest{
 			UserMessage:    content,
 			PromptMessage:  s.buildDoctorAdminBrainEnvelope(r.Context(), content),
@@ -1197,10 +1197,10 @@ func (s *serviceServer) buildDoctorAssistantReply(ctx context.Context, message s
 }
 
 func (s *serviceServer) doctorDB() *db.DB {
-	if s != nil && s.runtime != nil && s.runtime.DB != nil {
-		return s.runtime.DB
-	}
 	if s != nil {
+		if db := s.serviceDB(); db != nil {
+			return db
+		}
 		if ctrl := s.control(); ctrl != nil {
 			return ctrl.DB
 		}
@@ -1295,14 +1295,15 @@ func (s *serviceServer) buildDoctorPendingRecovery(ctx context.Context) map[stri
 }
 
 func (s *serviceServer) recordDoctorAudit(ctx context.Context, identity serviceAuthIdentity, eventType string, payload any) error {
-	if s == nil || s.runtime == nil || s.runtime.Audit == nil {
+	audit := s.serviceAudit()
+	if s == nil || audit == nil {
 		return nil
 	}
 	actor := strings.TrimSpace(identity.Actor)
 	if actor == "" {
 		actor = "doctor"
 	}
-	return s.runtime.Audit.Record(ctx, eventType, strings.TrimSpace(identity.Session), actor, payload)
+	return audit.Record(ctx, eventType, strings.TrimSpace(identity.Session), actor, payload)
 }
 
 func (s *serviceServer) executeDoctorPostChecks(ctx context.Context, checks []adminflow.PostApplyCheck) ([]adminflow.PlanValidationResult, string, *doctor.Report) {

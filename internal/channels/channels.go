@@ -70,6 +70,11 @@ const (
 	MetaMessageReference = "message_reference"
 )
 
+// MetaDeliverer sends a completed response with channel-specific metadata.
+type MetaDeliverer interface {
+	DeliverWithMeta(ctx context.Context, channel, to, text string, meta map[string]any) error
+}
+
 // Channel is the transport contract implemented by each messaging integration.
 type Channel interface {
 	Name() string

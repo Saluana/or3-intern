@@ -152,6 +152,7 @@ Important control-flow changes:
 - No fallback from runner-first to built-in provider runtime.
 - No generic `tools.Registry` on normal turns.
 - Memory remains runner-callable through a narrow OR3 platform bridge/API, not through the old generic tool registry.
+- Channel commands are handled before runner turn creation so `/runner`, `/model`, `/settings`, `/approve`, and `/deny` are never accidentally sent to the runner as user prompts.
 - No service API for replaying model tool calls.
 - No app send path without a selectable runner.
 - Doctor/admin work either uses external runner chat with typed service endpoints or typed direct service actions.
@@ -180,6 +181,26 @@ Memory bridge safeguards:
 - Reject secret-looking memory notes using existing memory safety checks.
 - Audit write operations with runner id, session key, actor/source, and turn id where available.
 - Make writes explicit in runner instructions: remember only user-stated durable preferences, decisions, facts, or project lessons.
+
+### Channel command routing and Telegram UX
+
+Normal channel messages already fit the runner-first architecture: adapters publish `bus.EventUserMessage`, workers pass those events to `RunnerTurnOrchestrator`, and `RunnerTurnRequestFromBusEvent` can consume `runner_id` and `model` metadata. The remaining work is a small command/preference layer, not a new channel execution runtime.
+
+Add a shared channel command router before `RunnerTurnOrchestrator.HandleBusEvent` runs. It should:
+
+- Let approval handling keep first priority for `/approve` and `/deny`.
+- Intercept channel management commands such as `/help`, `/settings`, `/runners`, `/runner <id>`, `/models`, `/model <name>`, and `/reset`.
+- Persist runner/model preferences against the channel session key using existing runner chat session metadata where possible, especially `RunnerID` and `RunnerModel`.
+- Resolve persisted preferences into event metadata (`runner_id`, `model`) before creating a runner turn.
+- Validate the selected runner/model against the live runner catalog on every command and before each turn; stale selections should produce channel guidance or clear the preference.
+- Return structured channel replies for command results instead of creating runner turns.
+
+Telegram-specific behavior:
+
+- Register bot commands with `setMyCommands` for discoverability: `help`, `settings`, `runners`, `runner`, `models`, `model`, `reset`, `approve`, and `deny`.
+- Treat Telegram's slash-command UI as command-name autocomplete only. Telegram does not provide dynamic argument autocomplete for model names, so runner/model choices should be shown with inline keyboards, reply keyboards, or a follow-up prompt.
+- Keep callback data short and opaque, because Telegram inline keyboard callback data is limited. Store any longer pending selection state server-side or encode only compact runner/model ids.
+- Preserve peer isolation: preferences should key off the same Telegram session key rules as normal messages, including per-user isolation in group chats when enabled.
 
 ## 4. Data and persistence
 
@@ -336,6 +357,9 @@ Remove or hard-disable:
 - **Doctor/admin needs safe actions:** Use typed service actions with explicit auth/approval bounds, not generic model-callable tools.
 - **Runner writes bad memories:** Reject secret-like content, bound write size, scope writes to the correct session/global target, and make memory writes visible in audit/activity.
 - **Runner overuses memory search:** Enforce per-call result limits and optionally per-turn memory-call budgets in the bridge, independent of old tool-loop budgets.
+- **Channel command reaches runner:** Command router must consume known channel commands and return a channel response without starting a turn.
+- **Telegram autocomplete expectation mismatch:** Register command names through Telegram commands, but use buttons/keyboards/follow-up prompts for runner/model values because dynamic command argument autocomplete is not available.
+- **Channel runner preference goes stale:** Validate stored runner/model preferences before turn creation and return setup guidance instead of silently changing execution behavior.
 - **Historical rows reference deleted tools/subagents:** Render as historical/legacy activity without recreating execution paths.
 - **Config contains deleted fields:** Loader ignores them safely; configure/settings do not write them back.
 - **Accidental import resurrection:** Add tests or CI grep checks for forbidden production imports/symbols.
@@ -350,6 +374,7 @@ Remove or hard-disable:
 - Add service tests that old `/internal/v1/turns` and `/internal/v1/subagents` do not create legacy jobs.
 - Add config tests that old deleted fields/env vars are ignored or reported as obsolete.
 - Keep focused tests for cron runner, channels, memory retrieval, approvals, artifacts, service auth, and runner detection.
+- Add channel command tests covering command interception, preference persistence, metadata injection, stale runner/model guidance, approval command priority, and Telegram command registration/callback handling.
 - Delete tests whose only assertion is old runtime/tool behavior.
 
 ### OR3 App tests

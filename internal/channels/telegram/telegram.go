@@ -62,8 +62,31 @@ func (c *Channel) Start(ctx context.Context, eventBus *bus.Bus) error {
 	childCtx, cancel := context.WithCancel(ctx)
 	c.cancel = cancel
 	c.running = true
+	if err := c.registerCommands(childCtx); err != nil {
+		log.Printf("telegram: command registration failed: %v", err)
+	}
 	go c.poll(childCtx, eventBus)
 	return nil
+}
+
+type botCommand struct {
+	Command     string `json:"command"`
+	Description string `json:"description"`
+}
+
+func (c *Channel) registerCommands(ctx context.Context) error {
+	commands := []botCommand{
+		{Command: "help", Description: "Show OR3 channel commands"},
+		{Command: "settings", Description: "Show current runner and model"},
+		{Command: "runners", Description: "List selectable runners"},
+		{Command: "runner", Description: "Choose a runner: /runner <id>"},
+		{Command: "models", Description: "List models: /models [runner]"},
+		{Command: "model", Description: "Choose a model: /model <name>"},
+		{Command: "reset", Description: "Reset runner/model preferences"},
+		{Command: "approve", Description: "Approve an OR3 request"},
+		{Command: "deny", Description: "Deny an OR3 request"},
+	}
+	return c.postJSON(ctx, "/setMyCommands", map[string]any{"commands": commands}, nil)
 }
 
 // Stop cancels polling and releases the current session state.

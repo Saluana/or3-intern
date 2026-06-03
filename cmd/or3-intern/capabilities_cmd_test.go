@@ -43,8 +43,8 @@ func TestRunCapabilitiesCommand_TextOutputIncludesIngressAndApprovals(t *testing
 	for _, needle := range []string{
 		"runtime_profile: hosted-remote-sandbox-only",
 		"approval_broker: enabled=true",
-		"exec_available: true",
-		"shell_mode_available: true",
+		"exec_available: false",
+		"shell_mode_available: false",
 		"pairing: allowlist",
 		"- slack enabled=true inbound=pairing profile=ops max=guarded subagents=true tools=read_file,web_fetch hosts=api.example.com",
 	} {

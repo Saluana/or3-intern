@@ -63,17 +63,26 @@
 - [ ] Move `ToolResult`/preview helpers into an admin/action result package if Doctor still needs a result envelope. (Requirements: 6)
 - [ ] Delete `internal/tools/registry.go`, `tools.go` schema helpers, metadata scanners, dynamic availability/behavior helpers, and registry tests once no production code depends on them. (Requirements: 5, 6, 9)
 
-## 8. Delete model-callable tool implementations
+## 8. Build retained runner memory bridge
+
+- [ ] Extract validation and DB logic from `internal/tools/memory.go` into a non-tool memory service package used by OR3 App/service code and runner bridges. (Requirements: 2, 2a, 5)
+- [ ] Add bounded typed operations for memory search, add note, get pinned, and set pinned, preserving scope resolution and secret-like content rejection. (Requirements: 2a, 6)
+- [ ] Choose and implement the runner-facing bridge shape: local MCP server, JSON stdin/stdout bridge command, or authenticated typed service endpoints. Prefer the smallest path runners can actually call. (Requirements: 2a)
+- [ ] Add audit/activity records for runner-created memory writes, including runner id, session key, and runner turn id when available. (Requirements: 2a)
+- [ ] Update runner bootstrap/instructions so runners know when to call memory search and when to save durable memories. (Requirements: 2a, 9)
+- [ ] Add tests for bounded search results, memory note creation, pinned memory updates, scope isolation, rejected secret-like content, and audit metadata. (Requirements: 2a, 10)
+
+## 9. Delete model-callable tool implementations
 
 - [ ] Delete file tools: `files.go`, file tool tests, and model-callable read/write/edit/list/search constants. Keep service file APIs using direct safe filesystem helpers. (Requirements: 5, 6)
 - [ ] Delete exec tools: `exec.go`, sandbox/tool exec tests, and approval subjects that only apply to model tool execution. Keep terminal/service command execution as explicit service code if still supported. (Requirements: 5, 6)
 - [ ] Delete web tools: `web.go`, `web_markdown.go`, `html_converter.go`, and tests unless a non-agent docs/indexer path uses the converter. (Requirements: 5)
-- [ ] Delete memory tools: `memory.go` and tests after memory add/search/pinned behavior is exposed only through direct service/internal APIs. (Requirements: 2, 5)
+- [ ] Delete `internal/tools/memory.go` as a model-callable tool file only after the runner memory bridge and memory service tests are in place. (Requirements: 2, 2a, 5)
 - [ ] Delete artifact read tool: `artifact.go` and tests after artifact access is direct service/internal API only. (Requirements: 2, 5)
 - [ ] Delete cron and message tools: `cron.go`, `message.go`, and tests after cron/channel management is direct service/admin API only. (Requirements: 2, 5)
 - [ ] Delete skill read/run tools if catalog-only skill display is moved elsewhere. (Requirements: 4, 5)
 
-## 9. Remove old agent runtime files
+## 10. Remove old agent runtime files
 
 - [ ] Delete `internal/agent/runtime.go` and runtime helper files after production imports are gone. (Requirements: 1, 9)
 - [ ] Delete runtime tests tied to provider tool loop, streaming tool calls, quotas, sessions, context manager runtime pruning, structured autonomy, model overrides, and task-card enforcement. (Requirements: 1, 9)
@@ -82,16 +91,16 @@
 - [ ] Delete `internal/agent/QUARANTINE.md` or move any still-relevant warning into runner-first docs. (Requirements: 9)
 - [ ] Confirm `internal/agent` directory is either gone or contains no production code after extractions. (Requirements: 1, 3, 9)
 
-## 10. Simplify service/controlplane API surface
+## 11. Simplify service/controlplane API surface
 
 - [ ] Remove `tools.Registry` and `agent.Runtime` dependencies from `internal/controlplane`. (Requirements: 1, 5, 6)
 - [ ] Remove service request validation based on allowed tool names/capability ceilings for direct turns. (Requirements: 5, 7)
-- [ ] Keep service auth/role/capability checks for retained direct APIs such as files, terminal, approvals, cron, memory, artifacts, runner jobs, and configure. (Requirements: 2, 6)
+- [ ] Keep service auth/role/capability checks for retained direct APIs such as files, terminal, approvals, cron, runner memory bridge, artifacts, runner jobs, and configure. (Requirements: 2, 2a, 6)
 - [ ] Remove tool catalog/capabilities endpoints that advertised OR3 model-callable tools. (Requirements: 5, 9)
 - [ ] Ensure `/internal/v1/jobs/{job_id}` still returns runner job snapshots and any retained historical rows without requiring `agent.JobSnapshot`. (Requirements: 2, 3)
 - [ ] Add regression tests for removed endpoints returning removal guidance instead of creating work. (Requirements: 7, 10)
 
-## 11. Update OR3 App for runner-only execution
+## 12. Update OR3 App for runner-only execution
 
 - [ ] Delete `streamDirectTurn` and direct `/internal/v1/turns` recovery fallback from `app/utils/assistant-stream/execution.ts`. (Requirements: 7)
 - [ ] Simplify `app/composables/assistant-stream/useExecutionRouter.ts` so normal send always uses runner chat and returns a setup error when no runner is selected. (Requirements: 7)
@@ -100,33 +109,35 @@
 - [ ] Remove `ToolPolicy`, `allowed_tools`, direct `TurnRequest`, direct `TurnResponse`, and subagent creation types from `app/types/or3-api.ts`. (Requirements: 7, 8)
 - [ ] Remove `queueJob` and `/internal/v1/subagents` calls from `app/composables/useJobs.ts`; keep only runner job APIs and optional historical activity reads if retained. (Requirements: 4, 7)
 - [ ] Update Activity/Agents/Scheduled pages to label old rows as historical only and never expose actions that recreate legacy jobs. (Requirements: 4, 7)
+- [ ] Add OR3 App visibility for runner-created memory writes/searches if activity/audit surfaces already show memory events. (Requirements: 2a, 7)
 - [ ] Add/update Vitest coverage for no-runner blocked send, runner-chat-only send, no subagent creation, no replay-tool retry, and settings search cleanup. (Requirements: 7, 8, 10)
 
-## 12. Simplify config, configure, and settings
+## 13. Simplify config, configure, and settings
 
 - [ ] Remove active config fields for built-in runtime/tool loop: `maxToolLoops`, tool call/session quotas, dynamic tool exposure, tool schema budgets, old chat/subagent model routes, subagents, skill execution, Brave/web tool config, and OR3 model-callable MCP registration. (Requirements: 8)
-- [ ] Keep or rename config fields for retained service features: runner settings, service auth, memory/indexing, embeddings/consolidation, channels, cron, heartbeat, triggers, artifacts, files/terminal service APIs, approvals, audit, and security profiles. (Requirements: 2, 8)
+- [ ] Keep or rename config fields for retained service features: runner settings, runner memory bridge, service auth, memory/indexing, embeddings/consolidation, channels, cron, heartbeat, triggers, artifacts, files/terminal service APIs, approvals, audit, and security profiles. (Requirements: 2, 2a, 8)
 - [ ] Update env override handling to ignore or warn on deleted env vars such as `OR3_MODEL`, `OR3_SUBAGENTS_*`, tool-loop/tool-specific vars, and skill execution vars. (Requirements: 8)
 - [ ] Update `cmd/or3-intern/configure_tui.go`, `service_configure.go`, `internal/configmeta`, and OR3 App settings to remove deleted controls entirely rather than marking them deprecated. (Requirements: 8)
 - [ ] Update setup/init defaults so new configs do not seed deleted runtime/tool fields. (Requirements: 8)
 - [ ] Add config load tests proving old JSON with deleted fields does not break startup and does not re-save removed active fields. (Requirements: 8, 10)
 
-## 13. Update docs, help, and naming
+## 14. Update docs, help, and naming
 
 - [ ] Rewrite `docs/api-reference.md` to remove `/internal/v1/turns`, `/internal/v1/subagents`, built-in tools, and always-available `or3-intern` runner language. (Requirements: 7, 9)
 - [ ] Delete or archive stale `docs/v1` pages about built-in tool reference, provider request lifecycle, subagent store, tool schema sanitizer, and old roadmap items. (Requirements: 9)
 - [ ] Update `docs/agent-runtime.md`, `docs/migration-runner-first.md`, and manual verification docs to say the built-in runtime has been removed, not deprecated. (Requirements: 9)
 - [ ] Update CLI help/status copy that describes OR3 as a local-first agent runtime with tools; use runner control-plane terminology. (Requirements: 9)
 - [ ] Update any AGENTS/SOUL/TOOLS bootstrap defaults and docs to remove built-in tool instructions. (Requirements: 3, 5, 9)
+- [ ] Document runner memory bridge setup and usage, including what should and should not be remembered. (Requirements: 2a, 9)
 
-## 14. Final validation
+## 15. Final validation
 
-- [ ] Run focused Go tests after extraction: moved attachment package, moved jobs package, runner chat, agent CLI manager, app service, cronrunner, config, approvals, artifacts, and service auth. (Requirements: 10)
+- [ ] Run focused Go tests after extraction: moved attachment package, moved jobs package, runner memory bridge, runner chat, agent CLI manager, app service, cronrunner, config, approvals, artifacts, and service auth. (Requirements: 10)
 - [ ] Run focused Go tests after deletion: `cmd/or3-intern`, `internal/app`, `internal/agentcli`, `internal/cronrunner`, `internal/config`, `internal/controlplane`, retained `internal/tools` replacement packages if any. (Requirements: 10)
 - [ ] Run `go test ./...` and fix only failures caused by this deletion. (Requirements: 10)
 - [ ] Run OR3 App typecheck and test suite after removing direct-turn/subagent/replay-tool UI. (Requirements: 10)
 - [ ] Run final forbidden-symbol/import searches and confirm no production use of deleted runtime/tool symbols remains. (Requirements: 1, 3, 5, 7, 10)
-- [ ] Manually verify chat, Agents, Scheduled Tasks, Activity, Doctor/settings, one channel or webhook turn, cron runner enqueue, heartbeat runner turn recording, approvals, memory retrieval, and artifact display. (Requirements: 2, 7, 10)
+- [ ] Manually verify chat, Agents, Scheduled Tasks, Activity, Doctor/settings, one channel or webhook turn, cron runner enqueue, heartbeat runner turn recording, approvals, passive memory retrieval, active runner memory search/write, and artifact display. (Requirements: 2, 2a, 7, 10)
 
 ## Out of scope
 

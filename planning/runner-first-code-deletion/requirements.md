@@ -24,9 +24,21 @@ The cleanup must keep OR3-owned systems that feed or supervise external runners.
 
 Acceptance criteria:
 - Runner chat sessions, runner turns, and agent CLI jobs still persist durable events/messages in SQLite.
-- Memory retrieval, pinned memory, document retrieval, bootstrap files, heartbeat, cron, webhooks, file-watch triggers, channel delivery, approvals, audit logging, artifacts, service auth, and Clawhub/catalog metadata still work without the old runtime.
+- Memory retrieval, pinned memory, runner-initiated memory writes/searches, document retrieval, bootstrap files, heartbeat, cron, webhooks, file-watch triggers, channel delivery, approvals, audit logging, artifacts, service auth, and Clawhub/catalog metadata still work without the old runtime.
 - Runner context assembly remains bounded and deterministic.
 - Existing SQLite data remains readable for current runner/chat/activity views.
+
+### Requirement 2a: Provide runner-callable OR3 memory capabilities
+
+External runners should be able to intentionally use OR3 memory, not only receive passive retrieved-memory context. Memory is a retained OR3 platform capability, not disposable legacy tool-loop code.
+
+Acceptance criteria:
+- Runners can search OR3 memory for the current session/global scope through a safe, bounded interface.
+- Runners can create durable memory notes when the user asks them to remember something or when a durable project decision should be saved.
+- Runners can read and update pinned memory through an explicit, audited path with appropriate write guards.
+- Memory calls preserve session isolation and scope resolution, and never expose secrets beyond existing memory safety rules.
+- The implementation does not keep the old generic `tools.Registry` solely to support memory; it exposes memory through a runner-appropriate interface such as a local MCP server, a runner bridge command, or typed service endpoints that runners can call.
+- OR3 App can show memory activity/audit records for runner-created memories.
 
 ### Requirement 3: Replace `internal/agent` with small platform packages
 
@@ -49,13 +61,14 @@ Acceptance criteria:
 - `tools.RunSkill`, `tools.RunSkillScript`, `skill_run_plans` creation/resume code, and related approval subjects are removed unless a non-agent catalog-only use remains.
 - `or3-app` no longer lists, creates, retries, or follows `/internal/v1/subagents` except optional read-only historical labels if retained.
 
-### Requirement 5: Delete model-callable OR3 tool implementations
+### Requirement 5: Delete legacy model-callable OR3 tool implementations
 
-Model-callable OR3 tools should be deleted when no retained service/admin path needs them.
+Legacy OR3 tool-loop tools should be deleted when they are only needed by the old built-in runtime. Retained platform capabilities, especially memory, should be re-exposed through runner-safe interfaces rather than preserved as generic built-in model tools.
 
 Acceptance criteria:
 - Delete file/web/exec/skill/spawn/cron/message tool implementations from `internal/tools` when they only exist for the built-in tool loop.
-- Delete memory/artifact tools as model-callable tools; keep equivalent memory/artifact behavior through direct service/internal APIs where still needed.
+- Replace memory tools as old `tools.Registry` entries with runner-callable memory APIs or a runner-visible local MCP/bridge; do not delete runner memory capability.
+- Delete artifact read tools as model-callable tools; keep equivalent artifact behavior through direct service/internal APIs where still needed.
 - Delete tool schema exposure, dynamic tool filtering, tool-loop budget/quota code, plan-gate tool enforcement, tool-call replay, and model-callable MCP registration.
 - Any retained Doctor/admin operations use typed Go service functions or a dedicated admin action interface, not the old generic model-callable `tools.Registry` surface.
 
@@ -115,5 +128,6 @@ Acceptance criteria:
 - Preserve SQLite schema compatibility for retained data; deleting creation paths must not require deleting old rows immediately.
 - Avoid broad new abstractions unless they replace large legacy packages with smaller direct service packages.
 - Keep file, terminal, channel, approval, and audit safety checks explicit after removing `tools.Registry`.
+- Keep memory as an intentional runner-accessible platform skill/API, with bounded reads and explicit write semantics.
 - Do not preserve deprecation paths solely for external compatibility; nobody uses the project yet.
 - Prefer deletion over compatibility shims once a replacement runner-first path is in place.

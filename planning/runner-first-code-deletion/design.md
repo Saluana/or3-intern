@@ -7,7 +7,7 @@ The current implementation made external runners primary, but the repository sti
 The cleanup should not start by deleting `internal/agent` and `internal/tools` wholesale. Those packages now contain two different kinds of code:
 
 1. Legacy code to delete: provider/tool-loop runtime, model-callable tools, subagents, tool budgets, tool schemas, plan gates, direct tool replay.
-2. Reusable platform code to keep temporarily and move: attachments, job events, stream observers, runner context bootstrap text, public error mapping, approval/capability/result primitives, path/env helpers used by retained service APIs.
+2. Reusable platform code to keep temporarily and move: attachments, job events, stream observers, runner context bootstrap text, public error mapping, approval/capability/result primitives, memory access primitives, path/env helpers used by retained service APIs.
 
 The design is therefore a collapse-and-delete sequence:
 
@@ -61,7 +61,8 @@ Delete after replacements:
 | Current file group | Why removable |
 | --- | --- |
 | `exec.go`, `web.go`, `web_markdown.go`, `files.go` tool structs | Runners provide shell/file/web capabilities; service APIs should not be model tools |
-| `memory.go`, `artifact.go` tool structs | Memory/artifacts stay internal/service APIs, not model-callable tools |
+| `memory.go` tool structs | Replace with runner-callable memory bridge/API; keep OR3 memory capability |
+| `artifact.go` tool structs | Artifacts stay internal/service APIs, not model-callable tools |
 | `skill.go`, `skill_exec.go`, `skill_run.go` | Runners own skill/tool execution |
 | `spawn.go` | Old subagent spawning removed |
 | `cron.go`, `message.go` tool structs | Cron/channel management should be direct service/admin APIs |
@@ -87,6 +88,7 @@ Delete after replacements:
 - `ReplayToolCall` should be deleted.
 - `RunnerTurnRequest` should use moved attachment and capability/requester types.
 - `RunnerContextBuilder` remains and becomes the main place for memory/doc/bootstrap context.
+- Add a runner memory bridge/API surface so external runners can search, add notes, and manage pinned memory without depending on the old generic `tools.Registry`.
 
 ### `internal/agentcli`
 
@@ -103,7 +105,8 @@ Delete after replacements:
 ### `internal/mcp`
 
 - Remove model-callable tool registration into OR3 turns.
-- Keep MCP settings/catalog only if used by OR3 App for visibility or runner-native setup guidance.
+- Keep or add a local MCP-style runner bridge if that is the simplest way to give external runners OR3 memory capabilities. This MCP surface is for runner-to-OR3 platform APIs, not for the removed built-in OR3 tool loop.
+- Keep MCP settings/catalog only if used by OR3 App for visibility, runner-native setup guidance, or the runner memory bridge.
 
 ### `or3-app`
 
@@ -139,6 +142,8 @@ flowchart TD
     Orchestrator --> RunnerChat
     RunnerChat --> AgentCLI[agentcli Manager]
     Orchestrator --> Context[bounded runner context: bootstrap + memory + docs]
+    AgentCLI --> MemoryBridge[runner-safe OR3 memory bridge]
+    MemoryBridge --> Memory[(SQLite memory tables)]
     AgentCLI --> DB[(SQLite messages/runs/events)]
 ```
 
@@ -146,9 +151,35 @@ Important control-flow changes:
 
 - No fallback from runner-first to built-in provider runtime.
 - No generic `tools.Registry` on normal turns.
+- Memory remains runner-callable through a narrow OR3 platform bridge/API, not through the old generic tool registry.
 - No service API for replaying model tool calls.
 - No app send path without a selectable runner.
 - Doctor/admin work either uses external runner chat with typed service endpoints or typed direct service actions.
+
+### Runner-callable memory bridge
+
+Runners should have two memory channels:
+
+1. **Passive context:** `RunnerContextBuilder` injects bounded retrieved memory, pinned memory, and indexed docs into the runner prompt at turn start.
+2. **Active memory calls:** the runner can explicitly call OR3 to search memory, add a note, and read/update pinned memory.
+
+The active bridge should be narrow and audited. Good implementation options are:
+
+| Option | Shape | Notes |
+| --- | --- | --- |
+| Local MCP server | Expose `or3_memory_search`, `or3_memory_add_note`, `or3_memory_get_pinned`, `or3_memory_set_pinned` to runners that support MCP | Best fit for runner-native tool use if OpenCode/Codex/Gemini can consume local MCP config |
+| Runner bridge command | Provide a small `or3-intern memory bridge` command with JSON stdin/stdout and document it for runner prompts | Simple and low dependency; works even without runner MCP support |
+| Typed service endpoints | Add authenticated local endpoints for runner memory calls | Useful for OR3 App and service clients; runners need a way to call them safely |
+
+Recommended direction: implement typed memory service functions first, then expose them through whichever runner bridge is easiest. Do not keep `internal/tools.Memory*` solely for this; move their validation and DB logic into an internal memory service that both OR3 App and runner bridge can use.
+
+Memory bridge safeguards:
+
+- Resolve session/global scope from the current runner chat session or explicit safe metadata.
+- Bound search query length, result count, preview size, and total response bytes.
+- Reject secret-looking memory notes using existing memory safety checks.
+- Audit write operations with runner id, session key, actor/source, and turn id where available.
+- Make writes explicit in runner instructions: remember only user-stated durable preferences, decisions, facts, or project lessons.
 
 ## 4. Data and persistence
 
@@ -199,7 +230,8 @@ Remove or stop surfacing:
 
 - Session keys and scope resolution remain unchanged.
 - Runner turns continue to write normal messages/history.
-- Memory retrieval moves through `RunnerContextBuilder`, not `agent.Builder`.
+- Passive memory retrieval moves through `RunnerContextBuilder`, not `agent.Builder`.
+- Active runner memory calls go through the new runner memory bridge/API, not the old `tools.Registry` memory tools.
 - Attachment metadata uses the moved attachment package.
 
 ## 5. Interfaces and types
@@ -302,6 +334,8 @@ Remove or hard-disable:
 - **Old direct-turn client calls service:** Return `410 Gone` or `400` with clear runner-chat replacement, not a legacy turn.
 - **Old subagent client calls service:** Return `410 Gone` or `400` with `agent-runs` replacement.
 - **Doctor/admin needs safe actions:** Use typed service actions with explicit auth/approval bounds, not generic model-callable tools.
+- **Runner writes bad memories:** Reject secret-like content, bound write size, scope writes to the correct session/global target, and make memory writes visible in audit/activity.
+- **Runner overuses memory search:** Enforce per-call result limits and optionally per-turn memory-call budgets in the bridge, independent of old tool-loop budgets.
 - **Historical rows reference deleted tools/subagents:** Render as historical/legacy activity without recreating execution paths.
 - **Config contains deleted fields:** Loader ignores them safely; configure/settings do not write them back.
 - **Accidental import resurrection:** Add tests or CI grep checks for forbidden production imports/symbols.

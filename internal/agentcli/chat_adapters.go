@@ -355,7 +355,7 @@ func normalizeOpenCodeStructuredChatEvent(raw AgentRunEvent) []RunnerChatEvent {
 	}
 	switch stringField(obj, "type") {
 	case "text":
-		text, ok := openCodeTextPart(obj["part"])
+		text, ok := openCodeStreamTextPart(obj["part"])
 		if !ok || text == "" {
 			return nil
 		}
@@ -708,7 +708,22 @@ func openCodeTextPart(value any) (string, bool) {
 	return text, ok
 }
 
+func openCodeStreamTextPart(value any) (string, bool) {
+	part, ok := value.(map[string]any)
+	if !ok {
+		return "", false
+	}
+	if !openCodeStreamTextPartType(stringField(part, "type")) {
+		return "", false
+	}
+	text, ok := part["text"].(string)
+	return text, ok
+}
+
 func openCodePartIsReasoning(part map[string]any) bool {
+	if strings.EqualFold(strings.TrimSpace(stringField(part, "type")), "reasoning") {
+		return true
+	}
 	for _, value := range []string{
 		stringField(part, "kind"),
 		stringField(part, "name"),
@@ -1009,7 +1024,7 @@ func normalizeOpenCodePartUpdated(raw AgentRunEvent, obj map[string]any) []Runne
 		return nil
 	}
 	partType := strings.ToLower(stringField(part, "type"))
-	if partType == "text" {
+	if partType == "text" || partType == "reasoning" {
 		text := extractString(part["text"])
 		if text == "" {
 			return nil

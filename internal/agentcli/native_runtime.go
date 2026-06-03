@@ -438,7 +438,7 @@ func (r *OpenCodeNativeRuntime) Execute(ctx context.Context, req NativeRuntimeEx
 	if errMsg := extractOpenCodeErrorMessage(response); errMsg != "" {
 		return ProcessOutput{ExitCode: 1, StderrPreview: errMsg, FinalTextPreview: errMsg, DurationMS: time.Since(started).Milliseconds()}, fmt.Errorf("%s", errMsg)
 	}
-	finalText := extractText(response)
+	finalText := extractOpenCodeVisibleText(response)
 	if finalText != "" && !streamState.streamedText.Load() {
 		onEvent(textChunkEvent(&seq, finalText))
 	}
@@ -1130,6 +1130,51 @@ func extractText(value any) string {
 		var out strings.Builder
 		for _, item := range v {
 			out.WriteString(extractText(item))
+		}
+		return out.String()
+	}
+	return ""
+}
+
+func extractOpenCodeVisibleText(value any) string {
+	switch v := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return v
+	case map[string]any:
+		if openCodePartIsReasoning(v) {
+			return ""
+		}
+		if parts, ok := v["parts"].([]any); ok {
+			var out strings.Builder
+			for _, part := range parts {
+				out.WriteString(extractOpenCodeVisibleText(part))
+			}
+			if text := out.String(); text != "" {
+				return text
+			}
+		}
+		if part := mapField(v, "part"); len(part) > 0 {
+			if text := extractOpenCodeVisibleText(part); text != "" {
+				return text
+			}
+		}
+		for _, key := range []string{"text", "delta", "content", "message", "final_text", "finalText"} {
+			if text, ok := v[key].(string); ok && text != "" {
+				return text
+			}
+		}
+		if item, ok := v["item"].(map[string]any); ok {
+			return extractOpenCodeVisibleText(item)
+		}
+		if raw, ok := v["raw"].(map[string]any); ok {
+			return extractOpenCodeVisibleText(raw)
+		}
+	case []any:
+		var out strings.Builder
+		for _, item := range v {
+			out.WriteString(extractOpenCodeVisibleText(item))
 		}
 		return out.String()
 	}

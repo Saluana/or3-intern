@@ -40,6 +40,7 @@ func TestExtractFinalTextCandidateRunnerSpecificAndGeneric(t *testing.T) {
 		{name: "claude success result", runner: RunnerClaude, value: map[string]any{"type": "result", "subtype": "success", "result": "final answer"}, score: 100, text: "final answer"},
 		{name: "codex content fallback", runner: RunnerCodex, value: map[string]any{"type": "item.completed", "item": map[string]any{"type": "agent_message", "content": "codex content"}}, score: 95, text: "codex content"},
 		{name: "opencode text part", runner: RunnerOpenCode, value: map[string]any{"type": "text", "part": map[string]any{"type": "text", "text": "delta"}}, score: 100, text: "delta"},
+		{name: "opencode reasoning part suppressed", runner: RunnerOpenCode, value: map[string]any{"type": "text", "part": map[string]any{"type": "text", "kind": "thinking", "text": "private thought"}}, score: 0, text: ""},
 		{name: "generic assistant", runner: "", value: map[string]any{"type": "assistant", "message": "assistant text"}, score: 90, text: "assistant text"},
 		{name: "generic assistant message role", runner: "", value: map[string]any{"type": "message", "role": "assistant", "text": "assistant role text"}, score: 75, text: "assistant role text"},
 		{name: "machine oriented suppressed", runner: "", value: map[string]any{"message": "{\"json\":true}"}, score: 0, text: ""},
@@ -82,6 +83,32 @@ func TestResultExtractHelpers(t *testing.T) {
 	}
 	if looksMachineOriented("human readable") {
 		t.Fatal("expected plain text to be human-oriented")
+	}
+}
+
+func TestExtractOpenCodeVisibleTextSuppressesReasoningParts(t *testing.T) {
+	value := map[string]any{
+		"type": "message",
+		"parts": []any{
+			map[string]any{"type": "text", "kind": "thinking", "text": "I should answer casually."},
+			map[string]any{"type": "text", "text": "What's up?"},
+		},
+	}
+	if got := extractOpenCodeVisibleText(value); got != "What's up?" {
+		t.Fatalf("expected only visible assistant text, got %q", got)
+	}
+}
+
+func TestExtractOpenCodeVisibleTextSuppressesReasoningTypeParts(t *testing.T) {
+	value := map[string]any{
+		"type": "message",
+		"parts": []any{
+			map[string]any{"type": "reasoning", "text": "The user is asking what I can help with."},
+			map[string]any{"type": "text", "text": "I can help with code."},
+		},
+	}
+	if got := extractOpenCodeVisibleText(value); got != "I can help with code." {
+		t.Fatalf("expected only visible assistant text, got %q", got)
 	}
 }
 

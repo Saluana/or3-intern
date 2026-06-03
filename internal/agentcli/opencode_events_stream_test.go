@@ -182,6 +182,28 @@ func TestOpenCodeBusPreservesReasoningTextPartMetadata(t *testing.T) {
 	}
 }
 
+func TestOpenCodeBusStreamsReasoningTypePart(t *testing.T) {
+	state := newOpenCodeStreamState()
+	payload, ok := openCodeBusEventToStructuredPayload(map[string]any{
+		"type": "message.part.updated",
+		"properties": map[string]any{
+			"part": map[string]any{
+				"type": "reasoning",
+				"role": "assistant",
+				"id":   "part_reasoning_type",
+				"text": "The user is asking what I can help with.",
+			},
+		},
+	}, state)
+	if !ok {
+		t.Fatal("expected reasoning type part payload")
+	}
+	part := mapField(payload, "part")
+	if stringField(part, "type") != "reasoning" || extractString(part["text"]) != "The user is asking what I can help with." {
+		t.Fatalf("expected reasoning part delta, got %#v", part)
+	}
+}
+
 func mustJSON(v any) string {
 	raw, err := json.Marshal(v)
 	if err != nil {
